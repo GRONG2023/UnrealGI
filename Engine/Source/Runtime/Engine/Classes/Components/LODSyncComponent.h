@@ -59,8 +59,8 @@ struct FComponentSync
  *
  * This allows to find the highest LOD of all the parts, and sync to that LOD
  */
-UCLASS(Blueprintable, ClassGroup = Component, BlueprintType, meta = (BlueprintSpawnableComponent))
-class ENGINE_API ULODSyncComponent : public UActorComponent
+UCLASS(Blueprintable, ClassGroup = Component, BlueprintType, meta = (BlueprintSpawnableComponent), MinimalAPI)
+class ULODSyncComponent : public UActorComponent
 {
 	GENERATED_UCLASS_BODY()
 
@@ -70,8 +70,12 @@ class ENGINE_API ULODSyncComponent : public UActorComponent
 	int32 NumLODs = -1;
 
 	// if -1, it's automatically switching
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = LOD)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, interp, Category = LOD)
 	int32 ForcedLOD = -1;
+
+	// Minimum LOD to use when syncing components
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = LOD)
+	int32 MinLOD = 0;
 
 	/** 
 	 *	Array of components whose LOD may drive or be driven by this component.
@@ -82,13 +86,13 @@ class ENGINE_API ULODSyncComponent : public UActorComponent
 	TArray<FComponentSync> ComponentsToSync;
 
 	// by default, the mapping will be one to one
-// but if you want custom, add here. 
+	// but if you want custom, add here. 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = LOD)
 	TMap<FName, FLODMappingData> CustomLODMapping;
 
 	/** Returns a string detailing  */
 	UFUNCTION(BlueprintCallable, Category = "Components|SkeletalMesh")
-	FString GetLODSyncDebugText() const;
+	ENGINE_API FString GetLODSyncDebugText() const;
 
 private:
 	UPROPERTY(transient)
@@ -100,20 +104,28 @@ private:
 
 	// component that drives the LOD
 	UPROPERTY(transient)
-	TArray<UPrimitiveComponent*> DriveComponents;
+	TArray<TObjectPtr<UPrimitiveComponent>> DriveComponents;
 
 	// all the components that ticks
 	UPROPERTY(transient)
-	TArray<UPrimitiveComponent*> SubComponents;
+	TArray<TObjectPtr<UPrimitiveComponent>> SubComponents;
 
 	// BEGIN AActorComponent interface
-	virtual void OnRegister() override;
-	virtual void OnUnregister() override;
-	virtual void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+	ENGINE_API virtual void OnRegister() override;
+	ENGINE_API virtual void OnUnregister() override;
+	ENGINE_API virtual void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 	// END AActorComponent interface
 
 public: 
-	void RefreshSyncComponents();
+	ENGINE_API void RefreshSyncComponents();
+	
+	/**
+	 * Set the LOD of each synced component.
+	 *
+	 * This is called from TickComponent, so there's no need to call it manually. It's exposed here
+	 * for testing purposes.
+	 */
+	ENGINE_API void UpdateLOD();
 
 private:
 	int32 GetCustomMappingLOD(const FName& ComponentName, int32 CurrentWorkingLOD) const;
@@ -121,6 +133,5 @@ private:
 	void InitializeSyncComponents();
 	void UninitializeSyncComponents();
 	const FComponentSync* GetComponentSync(const FName& InName) const;
-	void UpdateLOD();
 };
 

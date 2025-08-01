@@ -7,20 +7,11 @@ public class Landscape : ModuleRules
 {
 	public Landscape(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				"Runtime/Engine/Private", // for Engine/Private/Collision/PhysXCollision.h
-				"Runtime/Landscape/Private",
-                "../Shaders/Shared"
-            }
-		);
-
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
 				"TargetPlatform",
 				"DerivedDataCache",
-				"Foliage",
-				"Renderer",
+				"Shaders"
 			}
 		);
 
@@ -30,19 +21,17 @@ public class Landscape : ModuleRules
 				"CoreUObject",
 				"ApplicationCore",
 				"Engine",
-				"RenderCore", 
+				"RenderCore",
+				"ImageCore",
 				"RHI",
 				"Renderer",
 				"Foliage",
+				"GeometryCore",
 				"DeveloperSettings"
 			}
 		);
 
 		SetupModulePhysicsSupport(Target);
-		if (Target.bCompilePhysX && Target.bBuildEditor)
-		{
-			DynamicallyLoadedModuleNames.Add("PhysXCooking");
-		}
 
 		if (Target.Type == TargetType.Editor || Target.Type == TargetType.Program)
 		{
@@ -62,12 +51,22 @@ public class Landscape : ModuleRules
 
 			PrivateDependencyModuleNames.AddRange(
 				new string[] {
+					"EditorFramework",
 					"UnrealEd",
-					"MaterialUtilities", 
+					"MaterialUtilities",
 					"SlateCore",
 					"Slate",
+					"GeometryCore",
+					"MeshUtilities",
+					"MeshUtilitiesCommon",
+					"MeshBuilderCommon",
+					"MeshBuilder",
+					"ActionableMessage"
 				}
 			);
+
+			DynamicallyLoadedModuleNames.Add("NaniteBuilder");
+			PrivateIncludePathModuleNames.Add("NaniteBuilder");
 
 			CircularlyReferencedDependentModules.AddRange(
 				new string[] {

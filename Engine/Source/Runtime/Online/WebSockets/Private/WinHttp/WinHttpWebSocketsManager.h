@@ -6,7 +6,9 @@
 
 #include "CoreMinimal.h"
 #include "IWebSocketsManager.h"
+#include "Containers/Ticker.h"
 
+class FWinHttpHttpManager;
 class FWinHttpWebSocket;
 
 class FWinHttpWebSocketsManager
@@ -24,8 +26,12 @@ public:
 protected:
 	bool GameThreadTick(float DeltaTime);
 
+	void InitHttpManager();
+
 protected:
-	FDelegateHandle TickHandle;
+	FTSTicker::FDelegateHandle TickHandle;
+
+	FWinHttpHttpManager* WinHttpHttpManager = nullptr;
 
 	TArray<TWeakPtr<FWinHttpWebSocket>> ActiveWebSockets;
 };

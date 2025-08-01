@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include "AnimTimelineTrack_Curve.h"
+#include "AnimTimeline/AnimTimelineTrack_Curve.h"
 
 struct FTransformCurve;
 class SBorder;
@@ -13,23 +13,32 @@ class FAnimTimelineTrack_TransformCurve : public FAnimTimelineTrack_Curve
 	ANIMTIMELINE_DECLARE_TRACK(FAnimTimelineTrack_TransformCurve, FAnimTimelineTrack_Curve);
 
 public:
-	FAnimTimelineTrack_TransformCurve(FTransformCurve& InCurve, const TSharedRef<FAnimModel>& InModel);
+	FAnimTimelineTrack_TransformCurve(const FTransformCurve* InCurve, const TSharedRef<FAnimModel>& InModel);
 
 	/** FAnimTimelineTrack_Curve interface */
 	virtual FLinearColor GetCurveColor(int32 InCurveIndex) const override;
 	virtual FText GetFullCurveName(int32 InCurveIndex) const override;
 	virtual TSharedRef<SWidget> BuildCurveTrackMenu() override;
 	virtual bool CanEditCurve(int32 InCurveIndex) const override { return true; }
-	virtual void GetCurveEditInfo(int32 InCurveIndex, FSmartName& OutName, ERawCurveTrackTypes& OutType, int32& OutCurveIndex) const override;
-
+	virtual void GetCurveEditInfo(int32 InCurveIndex, FName& OutName, ERawCurveTrackTypes& OutType, int32& OutCurveIndex) const override;
+	virtual bool SupportsCopy() const override { return true; }
+	virtual void Copy(UAnimTimelineClipboardContent* InOutClipboard) const override;
+	
 	/** Access the curve we are editing */
-	FTransformCurve& GetTransformCurve() { return TransformCurve; }
+	const FTransformCurve& GetTransformCurve() { return *TransformCurve; }
 
-	/** Helper function used to get a smart name for a curve */
-	static FText GetTransformCurveName(const TSharedRef<FAnimModel>& InModel, const FSmartName& InSmartName);
+	UE_DEPRECATED(5.3, "This function is no longer used")
+	static FText GetTransformCurveName(const TSharedRef<FAnimModel>& InModel, const FSmartName& InSmartName) { return FText::GetEmpty(); }
 
-	/** Get this curves name */
-	FSmartName GetName() const { return CurveName; }
+	UE_DEPRECATED(5.3, "Please use GetFName instead.")
+	FSmartName GetName() const
+	{
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		return FSmartName(CurveName, 0);
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	}
+	
+	FName GetFName() const { return CurveName; }
 
 private:
 	/** Delete this track via the track menu */
@@ -43,8 +52,9 @@ private:
 
 private:
 	/** The curve we are editing */
-	FTransformCurve& TransformCurve;
+	const FTransformCurve* TransformCurve;
 
-	/** The curve name */
-	FSmartName CurveName;
+	/** The curve name and identifier */
+	FName CurveName;
+	FAnimationCurveIdentifier CurveId;
 };

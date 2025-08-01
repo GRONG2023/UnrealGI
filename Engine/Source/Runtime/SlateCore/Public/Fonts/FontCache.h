@@ -3,9 +3,11 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "SlateGlobals.h"
 #include "Fonts/ShapedTextFwd.h"
 #include "UObject/ObjectMacros.h"
 #include "Fonts/SlateFontInfo.h"
+#include "Fonts/FontSdfSettings.h"
 #include "Textures/TextureAtlas.h"
 #include "Fonts/FontTypes.h"
 #include "FontCache.generated.h"
@@ -22,6 +24,10 @@ class FSlateFontCache;
 class FSlateFontRenderer;
 class FSlateShaderResource;
 class FSlateTextShaper;
+class FSlateSdfGenerator;
+
+/** Controls whether the signed distance field rendering mode feature for text is enabled. */
+SLATECORE_API bool IsSlateSdfTextFeatureEnabled();
 
 enum class EFontCacheAtlasDataType : uint8
 {
@@ -89,6 +95,48 @@ struct FShapedGlyphFontAtlasData
 	bool Valid = false;
 };
 
+/** The font atlas data for a single distance field-based glyph */
+struct FSdfGlyphFontAtlasData
+{
+	/** The vertical distance from the baseline to the topmost border of the glyph sdf raster */
+	int16 VerticalOffset = 0;
+	/** The horizontal distance from the origin to the leftmost border of the glyph sdf raster */
+	int16 HorizontalOffset = 0;
+	/** Start X location of the sdf raster in the texture */
+	uint16 StartU = 0;
+	/** Start Y location of the sdf raster in the texture */
+	uint16 StartV = 0;
+	/** Width of the sdf raster in the texture */
+	uint16 USize = 0;
+	/** Height of the sdf raster in the texture */
+	uint16 VSize = 0;
+	/** Outer portion of the spread of representable distances, in em */
+	float EmOuterSpread = 0.f;
+	/** Inner portion of the spread of representable distances, in em */
+	float EmInnerSpread = 0.f;
+
+	struct FMetrics
+	{
+		/** Horizontal distance from the current cursor to the leftmost border of the glyph image bounding box */
+		float BearingX = 0.f;
+		/** Horizontal distance from the current cursor y position (baseline) to the topmost border of the glyph image bounding box */
+		float BearingY = 0.f;
+		/** Width of the glyph image bounding box */
+		float Width = 0.f;
+		/** Height of the glyph image bounding box */
+		float Height = 0.f;
+	};
+	FMetrics Metrics;
+	/** Index to a specific texture in the font cache. */
+	uint8 TextureIndex = 0;
+	/** True if the glyph is available in the face but sdf generation was not possible/successfull */
+	bool bSupportsSdf = false;
+	/** True if the SDF is a placeholder and the task for its final version hasn't been spawned yet (due to too many running tasks) */
+	bool bPendingRespawn = false;
+	/** True if this entry is valid, false otherwise. */
+	bool Valid = false;
+};
+
 /** Information for rendering one glyph in a shaped text sequence */
 struct FShapedGlyphEntry
 {
@@ -148,22 +196,28 @@ private:
 	 * Second index is the index of the thread dependent font cache. Index 0 is the cached value for the game thread font cache. Index 1 is the cached value for the render thread font cache.
 	 */
 	mutable TWeakPtr<FShapedGlyphFontAtlasData> CachedAtlasData[(uint8)EFontCacheAtlasDataType::Num][2];
+	mutable TWeakPtr<FSdfGlyphFontAtlasData> CachedSdfFontAtlasData[2];
+	mutable FSdfGlyphFontAtlasData::FMetrics CachedSdfMetrics[2];
 };
 
 /** Minimal FShapedGlyphEntry key information used for map lookups */
 struct FShapedGlyphEntryKey
 {
+	friend struct FFontCacheStatsKey;
+	friend class FSlateFontCache;
+
 public:
 	FShapedGlyphEntryKey(const FShapedGlyphFaceData& InFontFaceData, uint32 InGlyphIndex, const FFontOutlineSettings& InOutlineSettings);
 
 	FORCEINLINE bool operator==(const FShapedGlyphEntryKey& Other) const
 	{
 		return FontFace == Other.FontFace 
-			&& FontSize == Other.FontSize
-			&& OutlineSize == Other.OutlineSize
+			&& FontRenderSize == Other.FontRenderSize
+			&& OutlineRenderSize == Other.OutlineRenderSize
+			&& OutlineMiteredCorners == Other.OutlineMiteredCorners
 			&& OutlineSeparateFillAlpha == Other.OutlineSeparateFillAlpha
-			&& FontScale == Other.FontScale
-			&& GlyphIndex == Other.GlyphIndex;
+			&& GlyphIndex == Other.GlyphIndex
+			&& FontSkew == Other.FontSkew;
 	}
 
 	FORCEINLINE bool operator!=(const FShapedGlyphEntryKey& Other) const
@@ -179,22 +233,100 @@ public:
 private:
 	/** Weak pointer to the FreeType face to render with */
 	TWeakPtr<FFreeTypeFace> FontFace;
-	/** Provides the point size used to render the font */
-	int32 FontSize;
-	/** The size in pixels of the outline to render for the font */
-	float OutlineSize;
+	/** The size in pixel that Freetype will actually use to render the font, scale included */
+	uint32 FontRenderSize;
+	/** The size in pixels of the outline to render, scale included */
+	int32 OutlineRenderSize;
+	/** If checked, the outline will have mitered corners, otherwise they will be rounded. @see FFontOutlineSettings */
+	bool OutlineMiteredCorners;
 	/** If checked, the outline will be completely translucent where the filled area will be. @see FFontOutlineSettings */
 	bool OutlineSeparateFillAlpha;
-	/** Provides the final scale used to render to the font */
-	float FontScale;
 	/** The index of this glyph in the FreeType face */
 	uint32 GlyphIndex;
+	/** Cached hash value used for map lookups */
+	uint32 KeyHash;
+	/** The skew transform amount for the rendered font */
+	float FontSkew;
+};
+
+/** Minimal FSdfGlyphEntryKey key information used for map lookups */
+struct FSdfGlyphEntryKey
+{
+public:
+	FSdfGlyphEntryKey(const TWeakPtr<FFreeTypeFace> InFontFace, uint32 InGlyphIndex, int32 InPpem, float InEmOuterSpread, float InEmInnerSpread);
+
+	FORCEINLINE bool operator==(const FSdfGlyphEntryKey& Other) const
+	{
+		return FontFace == Other.FontFace
+			&& GlyphIndex == Other.GlyphIndex
+			&& Ppem == Other.Ppem
+			&& SpreadCategory == Other.SpreadCategory;
+	}
+
+	FORCEINLINE bool operator!=(const FSdfGlyphEntryKey& Other) const
+	{
+		return !(*this == Other);
+	}
+
+	friend inline uint32 GetTypeHash(const FSdfGlyphEntryKey& Key)
+	{
+		return Key.KeyHash;
+	}
+
+	/** Weak pointer to the FreeType face to render with */
+	const TWeakPtr<FFreeTypeFace> FontFace;
+	/** The index of this glyph in the FreeType face */
+	const uint32 GlyphIndex;
+	/** The pixel size at which the sdf glyph is generated */
+	const int32 Ppem;
+	/** The spread category. The spreads of a glyph entry can be arbitrary but similar values will share the same category and therefore glyph entry */
+	const int32 SpreadCategory;
+
+private:
+	/** Cached hash value used for map lookups */
+	uint32 KeyHash;
+
+	/** Computes the discrete spread category from real spread values specified in em */
+	static int32 GetSpreadCategory(float InEmOuterSpread, float InEmInnerSpread);
+};
+
+/** Used to lookup information about specific SDF generation tasks - unlike FSdfGlyphEntryKey is also identified by em spread */
+struct FSdfGlyphTaskKey
+{
+public:
+	FORCEINLINE FSdfGlyphTaskKey(const FSdfGlyphEntryKey& InSdfGlyphEntryKey, float InEmOuterSpread, float InEmInnerSpread);
+
+	FORCEINLINE bool operator==(const FSdfGlyphTaskKey& Other) const
+	{
+		return SdfGlyphEntryKey == Other.SdfGlyphEntryKey
+			&& EmOuterSpread == Other.EmOuterSpread
+			&& EmInnerSpread == Other.EmInnerSpread;
+	}
+
+	FORCEINLINE bool operator!=(const FSdfGlyphTaskKey& Other) const
+	{
+		return !(*this == Other);
+	}
+
+	friend inline uint32 GetTypeHash(const FSdfGlyphTaskKey& Key)
+	{
+		return Key.KeyHash;
+	}
+
+	/** Glyph entry key */
+	const FSdfGlyphEntryKey SdfGlyphEntryKey;
+	/** Outer portion of distance field spread in em */
+	float EmOuterSpread;
+	/** Inner portion of distance field spread in em */
+	float EmInnerSpread;
+
+private:
 	/** Cached hash value used for map lookups */
 	uint32 KeyHash;
 };
 
 /** Information for rendering a shaped text sequence */
-class SLATECORE_API FShapedGlyphSequence
+class FShapedGlyphSequence
 {
 public:
 	struct FSourceTextRange
@@ -218,13 +350,22 @@ public:
 		, SequenceWidth(0)
 		, GlyphFontFaces()
 		, SourceIndicesToGlyphData(FSourceTextRange(0, 0))
+		, SdfSettings()
+		, CachedFontSkew(0.f)
 	{ }
 
-	FShapedGlyphSequence(TArray<FShapedGlyphEntry> InGlyphsToRender, const int16 InTextBaseline, const uint16 InMaxTextHeight, const UObject* InFontMaterial, const FFontOutlineSettings& InOutlineSettings, const FSourceTextRange& InSourceTextRange);
-	~FShapedGlyphSequence();
+	SLATECORE_API FShapedGlyphSequence(TArray<FShapedGlyphEntry> InGlyphsToRender,
+						 const int16 InTextBaseline,
+						 const uint16 InMaxTextHeight,
+						 const UObject* InFontMaterial,
+						 const FFontOutlineSettings& InOutlineSettings,
+						 const EFontRasterizationMode InRasterizationMode,
+						 const FFontSdfSettings& InSdfSettings,
+						 const FSourceTextRange& InSourceTextRange);
+	SLATECORE_API ~FShapedGlyphSequence();
 
 	/** Get the amount of memory allocated to this sequence */
-	uint32 GetAllocatedSize() const;
+	SLATECORE_API SIZE_T GetAllocatedSize() const;
 
 	/** Get the array of glyphs in this sequence. This data will be ordered so that you can iterate and draw left-to-right, which means it will be backwards for right-to-left languages */
 	const TArray<FShapedGlyphEntry>& GetGlyphsToRender() const
@@ -256,21 +397,36 @@ public:
 		return OutlineSettings;
 	}
 
+	/** Returns true if the rasterization mode is signed distance field-based (and the feature is enabled) */
+	bool IsSdfFont() const;
+
+	/** Get the font rasterization mode to be used when rendering these glyphs */
+	EFontRasterizationMode GetRasterizationMode() const;
+
+	/** Get the signed distance field settings to be used when rendering these glyphs in distance field mode */
+	const FFontSdfSettings& GetFontSdfSettings() const
+	{
+		return SdfSettings;
+	}
+
 	/** Check to see whether this glyph sequence is dirty (ie, contains glyphs with invalid font pointers) */
-	bool IsDirty() const;
+	SLATECORE_API bool IsDirty() const;
+
+	/** Get the font skew applied when this glyph sequence was shaped */
+	float GetFontSkew() const;
 
 	/**
 	 * Get the measured width of the entire shaped text
 	 * @return The measured width
 	 */
-	int32 GetMeasuredWidth() const;
+	SLATECORE_API int32 GetMeasuredWidth() const;
 
 	/**
 	 * Get the measured width of the specified range of this shaped text
 	 * @note The indices used here are relative to the start of the text we were shaped from, even if we were only shaped from a sub-section of that text
 	 * @return The measured width, or an unset value if the text couldn't be measured (eg, because you started or ended on a merged ligature, or because the range is out-of-bounds)
 	 */
-	TOptional<int32> GetMeasuredWidth(const int32 InStartIndex, const int32 InEndIndex, const bool InIncludeKerningWithPrecedingGlyph = true) const;
+	SLATECORE_API TOptional<int32> GetMeasuredWidth(const int32 InStartIndex, const int32 InEndIndex, const bool InIncludeKerningWithPrecedingGlyph = true) const;
 
 	/** Return data used by GetGlyphAtOffset */
 	struct FGlyphOffsetResult
@@ -308,38 +464,38 @@ public:
 	 * Get the information for the glyph at the specified position in pixels along the string horizontally
 	 * @return The result data (see FGlyphOffsetResult)
 	 */
-	FGlyphOffsetResult GetGlyphAtOffset(FSlateFontCache& InFontCache, const int32 InHorizontalOffset, const int32 InStartOffset = 0) const;
+	SLATECORE_API FGlyphOffsetResult GetGlyphAtOffset(FSlateFontCache& InFontCache, const int32 InHorizontalOffset, const int32 InStartOffset = 0) const;
 
 	/**
 	 * Get the information for the glyph at the specified position in pixels along the string horizontally
 	 * @note The indices used here are relative to the start of the text we were shaped from, even if we were only shaped from a sub-section of that text
 	 * @return The result data (see FGlyphOffsetResult), or an unset value if we couldn't find the character (eg, because you started or ended on a merged ligature, or because the range is out-of-bounds)
 	 */
-	TOptional<FGlyphOffsetResult> GetGlyphAtOffset(FSlateFontCache& InFontCache, const int32 InStartIndex, const int32 InEndIndex, const int32 InHorizontalOffset, const int32 InStartOffset = 0, const bool InIncludeKerningWithPrecedingGlyph = true) const;
+	SLATECORE_API TOptional<FGlyphOffsetResult> GetGlyphAtOffset(FSlateFontCache& InFontCache, const int32 InStartIndex, const int32 InEndIndex, const int32 InHorizontalOffset, const int32 InStartOffset = 0, const bool InIncludeKerningWithPrecedingGlyph = true) const;
 
 	/**
 	 * Get the kerning value between the given entry and the next entry in the sequence
 	 * @note The index used here is relative to the start of the text we were shaped from, even if we were only shaped from a sub-section of that text
 	 * @return The kerning, or an unset value if we couldn't get the kerning (eg, because you specified a merged ligature, or because the index is out-of-bounds)
 	 */
-	TOptional<int8> GetKerning(const int32 InIndex) const;
+	SLATECORE_API TOptional<int8> GetKerning(const int32 InIndex) const;
 
 	/**
 	 * Get a sub-sequence of the specified range
 	 * @note The indices used here are relative to the start of the text we were shaped from, even if we were only shaped from a sub-section of that text
 	 * @return The sub-sequence, or an null if the sub-sequence couldn't be created (eg, because you started or ended on a merged ligature, or because the range is out-of-bounds)
 	 */
-	FShapedGlyphSequencePtr GetSubSequence(const int32 InStartIndex, const int32 InEndIndex) const;
+	SLATECORE_API FShapedGlyphSequencePtr GetSubSequence(const int32 InStartIndex, const int32 InEndIndex) const;
 
-	void AddReferencedObjects(FReferenceCollector& Collector);
+	SLATECORE_API void AddReferencedObjects(FReferenceCollector& Collector);
 
 private:
 	/** Non-copyable */
-	FShapedGlyphSequence(const FShapedGlyphSequence&);
-	FShapedGlyphSequence& operator=(const FShapedGlyphSequence&);
+	SLATECORE_API FShapedGlyphSequence(const FShapedGlyphSequence&);
+	SLATECORE_API FShapedGlyphSequence& operator=(const FShapedGlyphSequence&);
 
 	/** Helper function to share some common logic between the bound and unbound GetGlyphAtOffset functions */
-	bool HasFoundGlyphAtOffset(FSlateFontCache& InFontCache, const int32 InHorizontalOffset, const FShapedGlyphEntry& InCurrentGlyph, const int32 InCurrentGlyphIndex, int32& InOutCurrentOffset, const FShapedGlyphEntry*& OutMatchedGlyph) const;
+	SLATECORE_API bool HasFoundGlyphAtOffset(FSlateFontCache& InFontCache, const int32 InHorizontalOffset, const FShapedGlyphEntry& InCurrentGlyph, const int32 InCurrentGlyphIndex, int32& InOutCurrentOffset, const FShapedGlyphEntry*& OutMatchedGlyph) const;
 
 	/**
 	 * Enumerate all of the glyphs within the given source index range (enumerates either visually or logically)
@@ -348,8 +504,8 @@ private:
 	 */
 	enum class EEnumerateGlyphsResult : uint8 { EnumerationFailed, EnumerationAborted, EnumerationComplete };
 	typedef TFunctionRef<bool(const FShapedGlyphEntry&, int32)> FForEachShapedGlyphEntryCallback;
-	EEnumerateGlyphsResult EnumerateLogicalGlyphsInSourceRange(const int32 InStartIndex, const int32 InEndIndex, const FForEachShapedGlyphEntryCallback& InGlyphCallback) const;
-	EEnumerateGlyphsResult EnumerateVisualGlyphsInSourceRange(const int32 InStartIndex, const int32 InEndIndex, const FForEachShapedGlyphEntryCallback& InGlyphCallback) const;
+	SLATECORE_API EEnumerateGlyphsResult EnumerateLogicalGlyphsInSourceRange(const int32 InStartIndex, const int32 InEndIndex, const FForEachShapedGlyphEntryCallback& InGlyphCallback) const;
+	SLATECORE_API EEnumerateGlyphsResult EnumerateVisualGlyphsInSourceRange(const int32 InStartIndex, const int32 InEndIndex, const FForEachShapedGlyphEntryCallback& InGlyphCallback) const;
 
 	/** Contains the information needed when performing a reverse look-up from a source index to the corresponding shaped glyph */
 	struct FSourceIndexToGlyphData
@@ -418,7 +574,7 @@ private:
 			return (GlyphDataArray.IsValidIndex(InternalIndex)) ? &GlyphDataArray[InternalIndex] : nullptr;
 		}
 
-		FORCEINLINE uint32 GetAllocatedSize() const
+		FORCEINLINE SIZE_T GetAllocatedSize() const
 		{
 			return GlyphDataArray.GetAllocatedSize();
 		}
@@ -435,7 +591,7 @@ private:
 	/** The maximum height of any glyph in the font we're using */
 	uint16 MaxTextHeight;
 	/** The material to use when rendering these glyphs */
-	const UObject* FontMaterial;
+	TObjectPtr<const UObject> FontMaterial;
 	/** Outline settings to use when rendering these glyphs */
 	FFontOutlineSettings OutlineSettings;
 	/** The cached width of the entire sequence */
@@ -444,6 +600,22 @@ private:
 	TArray<TWeakPtr<FFreeTypeFace>> GlyphFontFaces;
 	/** A map of source indices to their shaped glyph data indices - used to perform efficient reverse look-up */
 	FSourceIndicesToGlyphData SourceIndicesToGlyphData;
+	/** Rasterization mode to use when rendering these glyphs */
+	EFontRasterizationMode RasterizationMode;
+	/** Sdf settings to use when rendering these glyphs */
+	FFontSdfSettings SdfSettings;
+	/** The Font Skew parameter of the FontInfo applied to the this Shaped glype sequence */
+	float CachedFontSkew;
+
+#if SLATE_CHECK_UOBJECT_SHAPED_GLYPH_SEQUENCE
+	// Used to guard against crashes when the material object is deleted. This is expensive so we do not do it in shipping
+	TWeakObjectPtr<const UObject> FontMaterialWeakPtr;
+	TWeakObjectPtr<const UObject> SdfFontMaterialOverrideWeakPtr;
+	TWeakObjectPtr<const UObject> OutlineMaterialWeakPtr;
+	FName DebugFontMaterialName;
+	FName DebugSdfFontMaterialOverrideName;
+	FName DebugOutlineMaterialName;
+#endif
 };
 
 /** Information for rendering one non-shaped character */
@@ -471,7 +643,7 @@ struct SLATECORE_API FCharacterEntry
 	uint16 VSize = 0;
 	/** The vertical distance from the baseline to the topmost border of the character */
 	int16 VerticalOffset = 0;
-	/** The vertical distance from the origin to the left most border of the character */
+	/** The horizontal distance from the origin to the left most border of the character */
 	int16 HorizontalOffset = 0;
 	/** The largest vertical distance below the baseline for any character in the font */
 	int16 GlobalDescender = 0;
@@ -495,30 +667,25 @@ struct SLATECORE_API FCharacterEntry
  * Every character indexed by TCHAR could potentially cost a lot of memory of a lot of empty entries are created
  * because characters being used are far apart
  */
-class SLATECORE_API FCharacterList
+class FCharacterList
 {
 public:
-	FCharacterList( const FSlateFontKey& InFontKey, FSlateFontCache& InFontCache );
-
-	/* @return Is the character in this list */
-	bool IsValidIndex( TCHAR Character ) const
-	{
-		return DirectIndexEntries.IsValidIndex( Character ) || ( Character >= MaxDirectIndexedEntries && MappedEntries.Contains( Character ) );
-	}
+	SLATECORE_API FCharacterList( const FSlateFontKey& InFontKey, FSlateFontCache& InFontCache );
 
 	/**
-	 * Gets data about how to render and measure a character 
-	 * Caching and atlasing it if needed
+	 * Gets data about how to render and measure a character.
+	 * Caching and atlasing it if needed.
+	 * Subsequent calls may invalidate previous pointers.
 	 *
 	 * @param Character			The character to get
 	 * @param MaxFontFallback	The maximum fallback level that can be used when resolving glyphs
 	 * @return				Data about the character
 	 */
-	FCharacterEntry GetCharacter(TCHAR Character, const EFontFallback MaxFontFallback);
+	SLATECORE_API const FCharacterEntry& GetCharacter(TCHAR Character, const EFontFallback MaxFontFallback);
 
 #if WITH_EDITORONLY_DATA
 	/** Check to see if our cached data is potentially stale for our font */
-	bool IsStale() const;
+	SLATECORE_API bool IsStale() const;
 #endif	// WITH_EDITORONLY_DATA
 
 	/**
@@ -529,7 +696,7 @@ public:
 	 * @param MaxFontFallback	The maximum fallback level that can be used when resolving glyphs
 	 * @return The kerning value
 	 */
-	int8 GetKerning(TCHAR FirstChar, TCHAR SecondChar, const EFontFallback MaxFontFallback);
+	SLATECORE_API int8 GetKerning(TCHAR FirstChar, TCHAR SecondChar, const EFontFallback MaxFontFallback);
 
 	/**
 	 * Gets a kerning value for a pair of character entries
@@ -538,38 +705,21 @@ public:
 	 * @param SecondCharacterEntry	The second character entry in the pair
 	 * @return The kerning value
 	 */
-	int8 GetKerning( const FCharacterEntry& FirstCharacterEntry, const FCharacterEntry& SecondCharacterEntry );
+	SLATECORE_API int8 GetKerning( const FCharacterEntry& FirstCharacterEntry, const FCharacterEntry& SecondCharacterEntry );
 
 	/**
 	 * @return The global max height for any character in this font
 	 */
-	uint16 GetMaxHeight() const;
+	SLATECORE_API uint16 GetMaxHeight() const;
 
 	/** 
 	 * Returns the baseline for the font used by this character 
 	 *
 	 * @return The offset from the bottom of the max character height to the baseline. Be aware that the value will be negative.
 	 */
-	int16 GetBaseline() const;
+	SLATECORE_API int16 GetBaseline() const;
 
 private:
-	/** Maintains a fake shaped glyph for each character in the character list */
-	struct FCharacterListEntry
-	{
-		/** The shaped glyph data for this character */
-		FShapedGlyphEntry ShapedGlyphEntry;
-		/** Font data this character was rendered with */
-		const FFontData* FontData = nullptr;
-		/** Kerning cache that this character uses */
-		TSharedPtr<FFreeTypeKerningCache> KerningCache;
-		/** The fallback level this character represents */
-		EFontFallback FallbackLevel = EFontFallback::FF_Max;
-		/** Does this character have kerning? */
-		bool HasKerning = false;
-		/** Has this entry been initialized? */
-		bool Valid = false;
-	};
-
 	/**
 	 * Returns whether the specified character is valid for caching (i.e. whether it matches the FontFallback level)
 	 *
@@ -583,18 +733,12 @@ private:
 	 * 
 	 * @param Character	The character to cache
 	 */
-	FCharacterListEntry CacheCharacter(TCHAR Character);
-
-	/**
-	 * Convert the cached internal entry to the external data for the old non-shaped API
-	 */
-	FCharacterEntry MakeCharacterEntry(TCHAR Character, const FCharacterListEntry& InternalEntry) const;
+	const FCharacterEntry* CacheCharacter(TCHAR Character);
 
 private:
 	/** Entries for larger character sets to conserve memory */
-	TMap<TCHAR, FCharacterListEntry> MappedEntries; 
-	/** Directly indexed entries for fast lookup */
-	TArray<FCharacterListEntry> DirectIndexEntries;
+	TMap<TCHAR, FCharacterEntry> MappedEntries;
+
 	/** Font for this character list */
 	FSlateFontKey FontKey;
 	/** Reference to the font cache for accessing new unseen characters */
@@ -603,8 +747,6 @@ private:
 	/** The history revision of the cached composite font */
 	int32 CompositeFontHistoryRevision;
 #endif	// WITH_EDITORONLY_DATA
-	/** Number of directly indexed entries */
-	int32 MaxDirectIndexedEntries;
 	/** The global max height for any character in this font */
 	mutable uint16 MaxHeight;
 	/** The offset from the bottom of the max character height to the baseline. */
@@ -615,7 +757,7 @@ private:
  * Font caching implementation
  * Caches characters into textures as needed
  */
-class SLATECORE_API FSlateFontCache : public ISlateAtlasProvider
+class FSlateFontCache : public ISlateAtlasProvider, public FSlateFlushableAtlasCache
 {
 	friend FCharacterList;
 
@@ -626,13 +768,13 @@ public:
 	 * @param InTextureSize The size of the atlas texture
 	 * @param InFontAlas	Platform specific font atlas resource
 	 */
-	FSlateFontCache( TSharedRef<ISlateFontAtlasFactory> InFontAtlasFactory, ESlateTextureAtlasThreadId InOwningThread);
-	virtual ~FSlateFontCache();
+	SLATECORE_API FSlateFontCache( TSharedRef<ISlateFontAtlasFactory> InFontAtlasFactory, ESlateTextureAtlasThreadId InOwningThread);
+	SLATECORE_API virtual ~FSlateFontCache();
 
 	/** ISlateAtlasProvider */
-	virtual int32 GetNumAtlasPages() const override;
-	virtual FSlateShaderResource* GetAtlasPageResource(const int32 InIndex) const override;
-	virtual bool IsAtlasPageResourceAlphaOnly(const int32 InIndex) const override;
+	SLATECORE_API virtual int32 GetNumAtlasPages() const override;
+	SLATECORE_API virtual FSlateShaderResource* GetAtlasPageResource(const int32 InIndex) const override;
+	SLATECORE_API virtual bool IsAtlasPageResourceAlphaOnly(const int32 InIndex) const override;
 #if WITH_ATLAS_DEBUGGING
 	virtual FAtlasSlotInfo GetAtlasSlotInfoAtPosition(FIntPoint InPosition, int32 AtlasIndex) const override { return FAtlasSlotInfo(); }
 #endif
@@ -649,8 +791,8 @@ public:
 	 * @param InBaseDirection		The overall reading direction of the text (see TextBiDi::ComputeBaseDirection). This will affect where some characters (such as brackets and quotes) are placed within the resultant shaped text
 	 * @param InTextShapingMethod	The text shaping method to use
 	 */
-	FShapedGlyphSequenceRef ShapeBidirectionalText( const FString& InText, const FSlateFontInfo &InFontInfo, const float InFontScale, const TextBiDi::ETextDirection InBaseDirection, const ETextShapingMethod InTextShapingMethod ) const;
-	FShapedGlyphSequenceRef ShapeBidirectionalText( const TCHAR* InText, const int32 InTextStart, const int32 InTextLen, const FSlateFontInfo &InFontInfo, const float InFontScale, const TextBiDi::ETextDirection InBaseDirection, const ETextShapingMethod InTextShapingMethod ) const;
+	SLATECORE_API FShapedGlyphSequenceRef ShapeBidirectionalText( const FString& InText, const FSlateFontInfo &InFontInfo, const float InFontScale, const TextBiDi::ETextDirection InBaseDirection, const ETextShapingMethod InTextShapingMethod ) const;
+	SLATECORE_API FShapedGlyphSequenceRef ShapeBidirectionalText( const TCHAR* InText, const int32 InTextStart, const int32 InTextLen, const FSlateFontInfo &InFontInfo, const float InFontScale, const TextBiDi::ETextDirection InBaseDirection, const ETextShapingMethod InTextShapingMethod ) const;
 
 	/** 
 	 * Performs text shaping on the given range of the string using the given font info. Returns you the shaped text sequence to use for text rendering via FSlateDrawElement::MakeShapedText.
@@ -665,8 +807,13 @@ public:
 	 * @param InTextDirection		The reading direction of the text to shape (valid values are LeftToRight or RightToLeft)
 	 * @param InTextShapingMethod	The text shaping method to use
 	 */
-	FShapedGlyphSequenceRef ShapeUnidirectionalText( const FString& InText, const FSlateFontInfo &InFontInfo, const float InFontScale, const TextBiDi::ETextDirection InTextDirection, const ETextShapingMethod InTextShapingMethod ) const;
-	FShapedGlyphSequenceRef ShapeUnidirectionalText( const TCHAR* InText, const int32 InTextStart, const int32 InTextLen, const FSlateFontInfo &InFontInfo, const float InFontScale, const TextBiDi::ETextDirection InTextDirection, const ETextShapingMethod InTextShapingMethod ) const;
+	SLATECORE_API FShapedGlyphSequenceRef ShapeUnidirectionalText( const FString& InText, const FSlateFontInfo &InFontInfo, const float InFontScale, const TextBiDi::ETextDirection InTextDirection, const ETextShapingMethod InTextShapingMethod ) const;
+	SLATECORE_API FShapedGlyphSequenceRef ShapeUnidirectionalText( const TCHAR* InText, const int32 InTextStart, const int32 InTextLen, const FSlateFontInfo &InFontInfo, const float InFontScale, const TextBiDi::ETextDirection InTextDirection, const ETextShapingMethod InTextShapingMethod ) const;
+
+	/**
+	 * Performs text shaping on the overflow glyph sequence for a given font. The overflow sequence is used to replace characters that are clipped
+	 */
+	SLATECORE_API FShapedGlyphSequenceRef ShapeOverflowEllipsisText(const FSlateFontInfo& InFontInfo, const float InFontScale);
 
 	/** 
 	 * Gets information for how to draw all non-shaped characters in the specified string. Caches characters as they are found
@@ -675,49 +822,49 @@ public:
 	 * @param FontScale			The scale to apply to the font
 	 * @param OutCharacterEntries	Populated array of character entries. Indices of characters in Text match indices in this array
 	 */
-	class FCharacterList& GetCharacterList( const FSlateFontInfo &InFontInfo, float FontScale, const FFontOutlineSettings& InOutlineSettings = FFontOutlineSettings::NoOutline);
+	SLATECORE_API class FCharacterList& GetCharacterList( const FSlateFontInfo &InFontInfo, float FontScale, const FFontOutlineSettings& InOutlineSettings = FFontOutlineSettings::NoOutline);
 
 	/**
 	 * Get the atlas information for the given shaped glyph. This information will be cached if required 
 	 */
-	FShapedGlyphFontAtlasData GetShapedGlyphFontAtlasData( const FShapedGlyphEntry& InShapedGlyph, const FFontOutlineSettings& InOutlineSettings);
-
-	/** 
-	 * Add a new entries into a cache atlas
-	 *
-	 * @param InFontInfo	Information about the font being used for the characters
-	 * @param Characters	The characters to cache
-	 * @param FontScale		The font scale to use
-	 * @return true if the characters could be cached. false if the cache is full
+	SLATECORE_API FShapedGlyphFontAtlasData GetShapedGlyphFontAtlasData(const FShapedGlyphEntry& InShapedGlyph, const FFontOutlineSettings& InOutlineSettings);
+	
+	/**
+	 * Get the atlas information and the scaled metrics of a given shaped sdf glyph. This information will be cached if required.
 	 */
-	bool AddNewEntry( const FShapedGlyphEntry& InShapedGlyph, const FFontOutlineSettings& InOutlineSettings, FShapedGlyphFontAtlasData& OutAtlasData );
+	SLATECORE_API FSdfGlyphFontAtlasData GetSdfGlyphFontAtlasData(const FShapedGlyphEntry& InShapedGlyph, const FFontOutlineSettings& InOutlineSettings, const FFontSdfSettings& InSdfSettings);
 
-	bool AddNewEntry( const FCharacterRenderData InRenderData, uint8& OutTextureIndex, uint16& OutGlyphX, uint16& OutGlyphY, uint16& OutGlyphWidth, uint16& OutGlyphHeight );
+	/**
+	 * Gets the overflow glyph sequence for a given font. The overflow sequence is used to replace characters that are clipped
+	 */
+	UE_DEPRECATED(5.1, "GetOverflowEllipsisText is known to create dangling pointer. Use FShapedTextCache::FindOrAddOverflowEllipsisText.")
+	SLATECORE_API FShapedGlyphSequenceRef GetOverflowEllipsisText(const FSlateFontInfo& InFontInfo, const float InFontScale);
 
+public:
 	/**
 	 * Flush the given object out of the cache
 	 */
-	void FlushObject( const UObject* const InObject );
+	SLATECORE_API void FlushObject( const UObject* const InObject );
 
 	/**
 	 * Flush the given composite font out of the cache
 	 */
-	void FlushCompositeFont(const FCompositeFont& InCompositeFont);
+	SLATECORE_API void FlushCompositeFont(const FCompositeFont& InCompositeFont);
 
 	/** 
 	 * Flush the cache if needed
 	 */
-	bool ConditionalFlushCache();
+	SLATECORE_API bool ConditionalFlushCache();
 
 	/**
 	 * Updates the texture used for rendering
 	 */
-	void UpdateCache();
+	SLATECORE_API void UpdateCache();
 
 	/**
 	 * Releases rendering resources
 	 */
-	void ReleaseResources();
+	SLATECORE_API void ReleaseResources();
 
 	/**
 	 * Event called after releasing the rendering resources in ReleaseResources
@@ -739,7 +886,7 @@ public:
 	 * 
 	 * @return The raw font data
 	 */
-	const FFontData& GetDefaultFontData( const FSlateFontInfo& InFontInfo ) const;
+	SLATECORE_API const FFontData& GetDefaultFontData( const FSlateFontInfo& InFontInfo ) const;
 
 	/**
 	 * Returns the font to use from the typeface associated with the given codepoint
@@ -750,7 +897,7 @@ public:
 	 * 
 	 * @return The raw font data
 	 */
-	const FFontData& GetFontDataForCodepoint( const FSlateFontInfo& InFontInfo, const UTF32CHAR InCodepoint, float& OutScalingFactor ) const;
+	SLATECORE_API const FFontData& GetFontDataForCodepoint( const FSlateFontInfo& InFontInfo, const UTF32CHAR InCodepoint, float& OutScalingFactor ) const;
 
 	/**
 	 * Returns the height of the largest character in the font. 
@@ -760,7 +907,7 @@ public:
 	 * 
 	 * @return The largest character height
 	 */
-	uint16 GetMaxCharacterHeight( const FSlateFontInfo& InFontInfo, float FontScale ) const;
+	SLATECORE_API uint16 GetMaxCharacterHeight( const FSlateFontInfo& InFontInfo, float FontScale ) const;
 
 	/**
 	 * Returns the baseline for the specified font.
@@ -770,7 +917,7 @@ public:
 	 * 
 	 * @return The offset from the bottom of the max character height to the baseline.
 	 */
-	int16 GetBaseline( const FSlateFontInfo& InFontInfo, float FontScale ) const;
+	SLATECORE_API int16 GetBaseline( const FSlateFontInfo& InFontInfo, float FontScale ) const;
 
 	/**
 	 * Get the underline metrics for the specified font.
@@ -780,7 +927,7 @@ public:
 	 * @param OutUnderlinePos		The offset from the baseline to the center of the underline bar
 	 * @param OutUnderlineThickness	The thickness of the underline bar
 	 */
-	void GetUnderlineMetrics( const FSlateFontInfo& InFontInfo, const float FontScale, int16& OutUnderlinePos, int16& OutUnderlineThickness ) const;
+	SLATECORE_API void GetUnderlineMetrics( const FSlateFontInfo& InFontInfo, const float FontScale, int16& OutUnderlinePos, int16& OutUnderlineThickness ) const;
 
 	/**
 	 * Get the strike metrics for the specified font.
@@ -790,7 +937,7 @@ public:
 	 * @param OutStrikeLinePos		The offset from the baseline to the center of the strike bar
 	 * @param OutStrikeLineThickness The thickness of the strike bar
 	 */
-	void GetStrikeMetrics( const FSlateFontInfo& InFontInfo, const float FontScale, int16& OutStrikeLinePos, int16& OutStrikeLineThickness ) const;
+	SLATECORE_API void GetStrikeMetrics( const FSlateFontInfo& InFontInfo, const float FontScale, int16& OutStrikeLinePos, int16& OutStrikeLineThickness ) const;
 
 	/**
 	 * Calculates the kerning amount for a pair of characters
@@ -801,12 +948,12 @@ public:
 	 * @param Second		The second character in the pair
 	 * @return The kerning amount, 0 if no kerning
 	 */
-	int8 GetKerning( const FFontData& InFontData, const int32 InSize, TCHAR First, TCHAR Second, float Scale ) const;
+	SLATECORE_API int8 GetKerning( const FFontData& InFontData, const float InSize, TCHAR First, TCHAR Second, float Scale ) const;
 
 	/**
 	 * @return Whether or not the font used has kerning information
 	 */
-	bool HasKerning( const FFontData& InFontData ) const;
+	SLATECORE_API bool HasKerning( const FFontData& InFontData ) const;
 
 	/**
 	 * Whether or not the specified character, within the specified font, can be loaded with the specified maximum font fallback level
@@ -816,7 +963,7 @@ public:
 	 * @param MaxFallbackLevel	The maximum fallback level to try for the font
 	 * @return					Whether or not the character can be loaded
 	 */
-	bool CanLoadCodepoint(const FFontData& InFontData, const UTF32CHAR InCodepoint, EFontFallback MaxFallbackLevel = EFontFallback::FF_NoFallback) const;
+	SLATECORE_API bool CanLoadCodepoint(const FFontData& InFontData, const UTF32CHAR InCodepoint, EFontFallback MaxFallbackLevel = EFontFallback::FF_NoFallback) const;
 
 	/**
 	 * Returns the font attributes for the specified font.
@@ -825,47 +972,71 @@ public:
 	 * 
 	 * @return The font attributes for the specified font.
 	 */
-	const TSet<FName>& GetFontAttributes( const FFontData& InFontData ) const;
+	SLATECORE_API const TSet<FName>& GetFontAttributes( const FFontData& InFontData ) const;
 
 	/**
 	 * Get the available sub-face data from the given font.
 	 * Typically there will only be one face unless this is a TTC/OTC font.
 	 * The index of the returned entry can be passed as InFaceIndex to the FFreeTypeFace constructor.
 	 */
-	TArray<FString> GetAvailableFontSubFaces(FFontFaceDataConstRef InMemory) const;
-	TArray<FString> GetAvailableFontSubFaces(const FString& InFilename) const;
+	SLATECORE_API TArray<FString> GetAvailableFontSubFaces(FFontFaceDataConstRef InMemory) const;
+	SLATECORE_API TArray<FString> GetAvailableFontSubFaces(const FString& InFilename) const;
 
 	/**
 	 * Issues a request to clear all cached data from the cache
 	 */
-	void RequestFlushCache(const FString& FlushReason);
+	SLATECORE_API void RequestFlushCache(const FString& FlushReason);
 
 	/**
 	 * Clears just the cached font data, but leaves the atlases alone
 	 */
-	void FlushData();
+	SLATECORE_API void FlushData();
 
 	/**
 	 * Gets the allocated font face data for a font data asset
 	 */
-	uint32 GetFontDataAssetResidentMemory(const UObject* FontDataAsset) const;
+	SLATECORE_API SIZE_T GetFontDataAssetResidentMemory(const UObject* FontDataAsset) const;
+
 private:
 	// Non-copyable
-	FSlateFontCache(const FSlateFontCache&);
-	FSlateFontCache& operator=(const FSlateFontCache&);
+	SLATECORE_API FSlateFontCache(const FSlateFontCache&);
+	SLATECORE_API FSlateFontCache& operator=(const FSlateFontCache&);
+
+	/**
+	 * Returns the index for AllFontTextures array based on index in the concatenation of
+	 * GrayscaleFontAtlasIndices, ColorFontAtlasIndices, and MsdfFontAtlasIndices
+	 */
+	SLATECORE_API int32 GetAllFontTexturesIndex(const int32 InIndex) const;
 
 	/**
 	 * Clears all cached data from the cache
 	 */
-	bool FlushCache();
+	SLATECORE_API bool FlushCache();
 
 	/**
 	 * Clears out any pending UFont objects that were requested to be flushed
 	 */
-	void FlushFontObjects();
+	SLATECORE_API void FlushFontObjects();
 
 	/** Called after the active culture has changed */
-	void HandleCultureChanged();
+	SLATECORE_API void HandleCultureChanged();
+
+	/**
+	 * Add a new entries into a cache atlas
+	 *
+	 * @param InFontInfo	Information about the font being used for the characters
+	 * @param Characters	The characters to cache
+	 * @param FontScale		The font scale to use
+	 * @return true if the characters could be cached. false if the cache is full
+	 */
+	SLATECORE_API bool AddNewEntry(const FShapedGlyphEntry& InShapedGlyph, const FFontOutlineSettings& InOutlineSettings, FShapedGlyphFontAtlasData& OutAtlasData);
+
+	SLATECORE_API bool AddNewEntry(const FCharacterRenderData InRenderData, uint8& OutTextureIndex, uint16& OutGlyphX, uint16& OutGlyphY, uint16& OutGlyphWidth, uint16& OutGlyphHeight, uint8& OutPaddingOffset);
+
+#if !UE_BUILD_SHIPPING
+	/** Dump statistics about Font cache usage if needed */
+	SLATECORE_API void ConditionalDumpFontCacheStats() const;
+#endif
 
 private:
 
@@ -884,20 +1055,32 @@ private:
 	/** HarfBuzz text shaper (owned by this font cache) */
 	TUniquePtr<FSlateTextShaper> TextShaper;
 
+	/** Sdf Rasterizer for Freetype fonts */
+	TUniquePtr<FSlateSdfGenerator> SdfGenerator;
+
 	/** Mapping Font keys to cached data */
-	TMap<FSlateFontKey, TSharedRef<class FCharacterList>, FDefaultSetAllocator, FSlateFontKeyFuncs<TSharedRef<class FCharacterList>>> FontToCharacterListCache;
+	TMap<FSlateFontKey, TUniquePtr<FCharacterList>, FDefaultSetAllocator, FSlateFontKeyFuncs<TUniquePtr<FCharacterList>>> FontToCharacterListCache;
 
 	/** Mapping shaped glyphs to their cached atlas data */
 	TMap<FShapedGlyphEntryKey, TSharedRef<FShapedGlyphFontAtlasData>> ShapedGlyphToAtlasData;
 
+	/** Mapping signed distance field glyphs to their cached atlas data */
+	TMap<FSdfGlyphEntryKey, TSharedRef<FSdfGlyphFontAtlasData>> SdfGlyphToAtlasData;
+
+	/** Mapping unfinished signed distance field tasks to their cached atlas data */
+	TMap<FSdfGlyphTaskKey, TSharedRef<FSdfGlyphFontAtlasData>> SdfTaskToAtlasData;
+
 	/** Array of grayscale font atlas indices for use with AllFontTextures (cast the element to FSlateFontAtlas) */
-	TArray<int32> GrayscaleFontAtlasIndices;
+	TArray<uint8> GrayscaleFontAtlasIndices;
 
 	/** Array of color font atlas indices for use with AllFontTextures (cast the element to FSlateFontAtlas) */
-	TArray<int32> ColorFontAtlasIndices;
+	TArray<uint8> ColorFontAtlasIndices;
+
+	/** Array of multi-channel distance field font atlas indices for use with AllFontTextures (cast the element to FSlateFontAtlas) */
+	TArray<uint8> MsdfFontAtlasIndices;
 
 	/** Array of any non-atlased font texture indices for use with AllFontTextures */
-	TArray<int32> NonAtlasedTextureIndices;
+	TArray<uint8> NonAtlasedTextureIndices;
 
 	/** Array of all font textures - both atlased and non-atlased */
 	TArray<TSharedRef<ISlateFontTexture>> AllFontTextures;
@@ -907,18 +1090,6 @@ private:
 
 	/** Whether or not we have a pending request to flush the cache when it is safe to do so */
 	volatile bool bFlushRequested;
-
-	/** Number of grayscale atlas pages we can have before we request that the cache be flushed */
-	int32 CurrentMaxGrayscaleAtlasPagesBeforeFlushRequest;
-
-	/** Number of color atlas pages we can have before we request that the cache be flushed */
-	int32 CurrentMaxColorAtlasPagesBeforeFlushRequest;
-
-	/** Number of non-atlased textures we can have before we request that the cache be flushed */
-	int32 CurrentMaxNonAtlasedTexturesBeforeFlushRequest;
-
-	/** The frame counter the last time the font cache was asked to be flushed */
-	uint64 FrameCounterLastFlushRequest;
 
 	/** Critical section preventing concurrent access to FontObjectsToFlush */
 	mutable FCriticalSection FontObjectsToFlushCS;
@@ -930,4 +1101,8 @@ private:
 	FOnReleaseFontResources OnReleaseResourcesDelegate;
 
 	ESlateTextureAtlasThreadId OwningThread;
+
+	/** Overflow text string to use to replace clipped characters */
+	FText EllipsisText;
+
 };

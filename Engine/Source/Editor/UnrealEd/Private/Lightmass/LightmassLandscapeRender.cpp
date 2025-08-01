@@ -13,8 +13,9 @@
 #include "SceneView.h"
 #include "PrimitiveUniformShaderParameters.h"
 #include "LocalVertexFactory.h"
-#include "CanvasTypes.h"
+#include "CanvasRender.h"
 #include "MeshBatch.h"
+#include "MeshBuilderOneFrameResources.h"
 
 #include "LandscapeProxy.h"
 #include "LandscapeInfo.h"
@@ -24,6 +25,7 @@
 #include "LandscapeEdit.h"
 #include "DynamicMeshBuilder.h"
 #include "MeshPassProcessor.h"
+#include "UnrealClient.h"
 
 void RenderLandscapeMaterialForLightmass(const FLandscapeStaticLightingMesh* LandscapeMesh, FMaterialRenderProxy* MaterialProxy, const FRenderTarget* RenderTarget)
 {
@@ -51,7 +53,7 @@ void RenderLandscapeMaterialForLightmass(const FLandscapeStaticLightingMesh* Lan
 
 	const float fraction = 1.0f / NumSubsections;
 	const FVector2D PositionScale = FVector2D(RenderTarget->GetSizeXY()) * fraction * PatchExpandScale;
-	const float LayerScale = SubsectionSizeQuads;
+	const FVector::FReal LayerScale = SubsectionSizeQuads;
 	const float WeightmapSubsection = LandscapeComponent->WeightmapSubsectionOffset;
 	const FVector2D WeightmapBias = FVector2D(LandscapeComponent->WeightmapScaleBias.Z, LandscapeComponent->WeightmapScaleBias.W);
 	const FVector2D WeightmapScale = FVector2D(LandscapeComponent->WeightmapScaleBias.X, LandscapeComponent->WeightmapScaleBias.Y) * SubsectionSizeQuads;
@@ -71,12 +73,13 @@ void RenderLandscapeMaterialForLightmass(const FLandscapeStaticLightingMesh* Lan
 
 			const FVector2D BasePosition = PatchExpandOffset + FVector2D(SubsectionX, SubsectionY) * PositionScale;
 			const FVector2D BaseLayerCoords = FVector2D(LandscapeComponent->SectionBaseX, LandscapeComponent->SectionBaseY) + FVector2D(UVSubsection) * LayerScale;
-			const FVector2D BaseWeightmapCoords = WeightmapBias + FVector2D(UVSubsection) * WeightmapSubsection;
+			const FVector2f BaseWeightmapCoords = FVector2f(WeightmapBias) + FVector2f(UVSubsection) * WeightmapSubsection;	// LWC_TODO: Precision loss
 
-			int32 Index = Vertices.Add(FDynamicMeshVertex(FVector(BasePosition /*FVector2D(0, 0) * PositionScale*/, 0), FVector(BaseLayerCoords /*FVector2D(0, 0) * UVScale * LayerScale*/, 0), BaseWeightmapCoords /*FVector2D(0, 0) * UVScale * WeightmapScale*/));
-			verifySlow(   Vertices.Add(FDynamicMeshVertex(FVector(BasePosition + FVector2D(1, 0) * PositionScale,   0), FVector(BaseLayerCoords + FVector2D(1, 0) * UVScale * LayerScale,   0), BaseWeightmapCoords + FVector2D(1, 0) * UVScale * WeightmapScale  )) == Index + 1);
-			verifySlow(   Vertices.Add(FDynamicMeshVertex(FVector(BasePosition + FVector2D(0, 1) * PositionScale,   0), FVector(BaseLayerCoords + FVector2D(0, 1) * UVScale * LayerScale,   0), BaseWeightmapCoords + FVector2D(0, 1) * UVScale * WeightmapScale  )) == Index + 2);
-			verifySlow(   Vertices.Add(FDynamicMeshVertex(FVector(BasePosition + FVector2D(1, 1) * PositionScale,   0), FVector(BaseLayerCoords + FVector2D(1, 1) * UVScale * LayerScale,   0), BaseWeightmapCoords + FVector2D(1, 1) * UVScale * WeightmapScale  )) == Index + 3);
+			int32 Index = Vertices.Add(FDynamicMeshVertex(FVector3f(FVector2f(BasePosition) /*FVector2D(0, 0) * PositionScale*/, 0), FVector3f(FVector2f(BaseLayerCoords) /*FVector2D(0, 0) * UVScale * LayerScale*/, 0), BaseWeightmapCoords /*FVector2D(0, 0) * UVScale * WeightmapScale*/));
+			verifySlow(   Vertices.Add(FDynamicMeshVertex(FVector3f(FVector2f(BasePosition + FVector2D(1, 0) * PositionScale),   0), FVector3f(FVector2f(BaseLayerCoords + FVector2D(1, 0) * UVScale * LayerScale),   0), BaseWeightmapCoords + FVector2f(1, 0) * FVector2f(UVScale * WeightmapScale))) == Index + 1);	// LWC_TODO: Precision loss
+			verifySlow(   Vertices.Add(FDynamicMeshVertex(FVector3f(FVector2f(BasePosition + FVector2D(0, 1) * PositionScale),   0), FVector3f(FVector2f(BaseLayerCoords + FVector2D(0, 1) * UVScale * LayerScale),   0), BaseWeightmapCoords + FVector2f(0, 1) * FVector2f(UVScale * WeightmapScale))) == Index + 2);	// LWC_TODO: Precision loss
+			verifySlow(   Vertices.Add(FDynamicMeshVertex(FVector3f(FVector2f(BasePosition + FVector2D(1, 1) * PositionScale),   0), FVector3f(FVector2f(BaseLayerCoords + FVector2D(1, 1) * UVScale * LayerScale),   0), BaseWeightmapCoords + FVector2f(1, 1) * FVector2f(UVScale * WeightmapScale))) == Index + 3);	// LWC_TODO: Precision loss
+
 			checkSlow(Index + 3 <= MAX_uint16);
 			Indices.Add(Index);
 			Indices.Add(Index + 3);
@@ -91,8 +94,7 @@ void RenderLandscapeMaterialForLightmass(const FLandscapeStaticLightingMesh* Lan
 		RenderTarget,
 		NULL,
 		FEngineShowFlags(ESFIM_Game))
-		.SetWorldTimes(0, 0, 0)
-		.SetGammaCorrection(RenderTarget->GetDisplayGamma()));
+		.SetTime(FGameTime()));
 
 	FDynamicMeshBuilder DynamicMeshBuilder(ViewFamily.GetFeatureLevel(), 4, 0, true);
 	DynamicMeshBuilder.AddVertices(Vertices);
@@ -121,28 +123,21 @@ void RenderLandscapeMaterialForLightmass(const FLandscapeStaticLightingMesh* Lan
 			
 			if (OneFrameResource.IsValidForRendering())
 			{
-				// Set the RHI render target.
-				RHICmdList.Transition(FRHITransitionInfo(RenderTarget->GetRenderTargetTexture(), ERHIAccess::Unknown, ERHIAccess::RTV));
+				const FIntRect RTViewRect = FIntRect(0, 0, RenderTarget->GetRenderTargetTexture()->GetSizeX(), RenderTarget->GetRenderTargetTexture()->GetSizeY());
 
-				FRHIRenderPassInfo RPInfo(RenderTarget->GetRenderTargetTexture(), ERenderTargetActions::Load_Store);
-				RHICmdList.BeginRenderPass(RPInfo, TEXT("CanvasFlushSetup"));
-				{
-					const FIntRect RTViewRect = FIntRect(0, 0, RenderTarget->GetRenderTargetTexture()->GetSizeX(), RenderTarget->GetRenderTargetTexture()->GetSizeY());
+				FRDGBuilder GraphBuilder(RHICmdList, RDG_EVENT_NAME("LightmassLandscapeMaterial"));
+				FSceneView View(ViewInitOptions);
 
-					// set viewport to RT size
-					RHICmdList.SetViewport(RTViewRect.Min.X, RTViewRect.Min.Y, 0.0f, RTViewRect.Max.X, RTViewRect.Max.Y, 1.0f);
+				FMeshPassProcessorRenderState DrawRenderState;
 
-					FSceneView View(ViewInitOptions);
+				// disable depth test & writes
+				DrawRenderState.SetDepthStencilState(TStaticDepthStencilState<false, CF_Always>::GetRHI());
 
-					FMeshPassProcessorRenderState DrawRenderState(View);
+				//SCOPED_DRAW_EVENT(RHICmdList, RenderLandscapeMaterialToTexture);
+				FCanvasRenderContext RenderContext(GraphBuilder, RenderTarget, RTViewRect, FIntRect(0, 0, 0, 0), false);
+				GetRendererModule().DrawTileMesh(RenderContext, DrawRenderState, View, Mesh, false, FHitProxyId());
 
-					// disable depth test & writes
-					DrawRenderState.SetDepthStencilState(TStaticDepthStencilState<false, CF_Always>::GetRHI());
-
-					//SCOPED_DRAW_EVENT(RHICmdList, RenderLandscapeMaterialToTexture);
-					GetRendererModule().DrawTileMesh(RHICmdList, DrawRenderState, View, Mesh, false, FHitProxyId());
-				}
-				RHICmdList.EndRenderPass();
+				GraphBuilder.Execute();
 			}
 		});
 	FlushRenderingCommands();
@@ -195,7 +190,7 @@ void GetLandscapeOpacityData(const FLandscapeStaticLightingMesh* LandscapeMesh, 
 			ULandscapeComponent* Component = LandscapeInfo->XYtoComponentMap.FindRef(FIntPoint(ComponentX, ComponentY));
 			if (Component)
 			{
-				TArray<FWeightmapLayerAllocationInfo>& ComponentWeightmapLayerAllocations = Component->GetWeightmapLayerAllocations();
+				const TArray<FWeightmapLayerAllocationInfo>& ComponentWeightmapLayerAllocations = Component->GetWeightmapLayerAllocations();
 
 				if (ComponentWeightmapLayerAllocations.ContainsByPredicate([](const FWeightmapLayerAllocationInfo& Allocation) { return Allocation.LayerInfo == ALandscapeProxy::VisibilityLayer; }))
 				{
@@ -226,7 +221,7 @@ void GetLandscapeOpacityData(const FLandscapeStaticLightingMesh* LandscapeMesh, 
 	}
 
 	// Scale up the hole map to compensate for lightmass using point-sampling
-	static const float ScaleFactor = 3;
+	static const int32 ScaleFactor = 3;
 	InOutSizeX = (XSize - 1) * ScaleFactor;
 	InOutSizeY = (YSize - 1) * ScaleFactor;
 

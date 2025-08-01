@@ -2,6 +2,7 @@
 
 #include "Evaluation/PreAnimatedState/MovieScenePreAnimatedObjectGroupManager.h"
 #include "Evaluation/PreAnimatedState/MovieScenePreAnimatedStorageID.inl"
+#include "EntitySystem/BuiltInComponentTypes.h"
 
 namespace UE
 {
@@ -10,74 +11,53 @@ namespace MovieScene
 
 TAutoRegisterPreAnimatedStorageID<FPreAnimatedObjectGroupManager> FPreAnimatedObjectGroupManager::GroupManagerID;
 
-void FPreAnimatedObjectGroupManager::InitializeGroupManager(FPreAnimatedStateExtension* InExtension)
-{
-	Extension = InExtension;
-}
-
-void FPreAnimatedObjectGroupManager::OnGroupDestroyed(FPreAnimatedStorageGroupHandle Group)
-{
-	FObjectKey Temp = StorageGroupsToObject.FindChecked(Group);
-
-	StorageGroupsByObject.Remove(Temp);
-	StorageGroupsToObject.Remove(Group);
-}
-
-FPreAnimatedStorageGroupHandle FPreAnimatedObjectGroupManager::FindGroupForObject(const FObjectKey& Object) const
-{
-	return StorageGroupsByObject.FindRef(Object);
-}
-
-FPreAnimatedStorageGroupHandle FPreAnimatedObjectGroupManager::MakeGroupForObject(const FObjectKey& Object)
-{
-	FPreAnimatedStorageGroupHandle GroupHandle = StorageGroupsByObject.FindRef(Object);
-	if (GroupHandle)
-	{
-		return GroupHandle;
-	}
-
-	GroupHandle = Extension->AllocateGroup(AsShared());
-	StorageGroupsByObject.Add(Object, GroupHandle);
-	StorageGroupsToObject.Add(GroupHandle, Object);
-	return GroupHandle;
-}
-
 void FPreAnimatedObjectGroupManager::OnObjectsReplaced(const TMap<UObject*, UObject*>& ReplacementMap)
 {
-	TMap<FObjectKey, FPreAnimatedStorageGroupHandle> OldStorageGroupsByObject = MoveTemp(StorageGroupsByObject);
-	StorageGroupsByObject.Reset();
-	StorageGroupsByObject.Reserve(OldStorageGroupsByObject.Num());
+	TMap<FObjectKey, FPreAnimatedStorageGroupHandle> OldStorageGroupsByKey = MoveTemp(StorageGroupsByKey);
+	StorageGroupsByKey.Reset();
+	StorageGroupsByKey.Reserve(OldStorageGroupsByKey.Num());
 
-	for (auto It = OldStorageGroupsByObject.CreateIterator(); It; ++It)
+	for (auto It = OldStorageGroupsByKey.CreateIterator(); It; ++It)
 	{
 		FPreAnimatedStorageGroupHandle GroupHandle = It.Value();
 
-		UObject* Object = It.Key().ResolveObjectPtrEvenIfPendingKill();
+		UObject* Object = It.Key().ResolveObjectPtrEvenIfGarbage();
 		if (UObject* ReplacedObject = ReplacementMap.FindRef(Object))
 		{
 			FObjectKey NewKey(ReplacedObject);
 
-			StorageGroupsByObject.Add(NewKey, GroupHandle);
+			StorageGroupsByKey.Add(NewKey, GroupHandle);
 			// This will overwrite the existing entry
-			StorageGroupsToObject.Add(GroupHandle, NewKey);
+			StorageGroupsToKey.Add(GroupHandle, NewKey);
 
 			Extension->ReplaceObjectForGroup(GroupHandle, It.Key(), NewKey);
 		}
 		else
 		{
-			StorageGroupsByObject.Add(It.Key(), It.Value());
+			StorageGroupsByKey.Add(It.Key(), It.Value());
 		}
 	}
 }
 
 void FPreAnimatedObjectGroupManager::GetGroupsByClass(UClass* GeneratedClass, TArray<FPreAnimatedStorageGroupHandle>& OutGroupHandles)
 {
-	for (auto It = StorageGroupsByObject.CreateConstIterator(); It; ++It)
+	for (auto It = StorageGroupsByKey.CreateConstIterator(); It; ++It)
 	{
-		UObject* Object = It.Key().ResolveObjectPtrEvenIfPendingKill();
+		UObject* Object = It.Key().ResolveObjectPtrEvenIfGarbage();
 		if (Object && Object->IsA(GeneratedClass))
 		{
 			OutGroupHandles.Add(It.Value());
+		}
+	}
+}
+
+void FPreAnimatedObjectGroupManager::GatherStaleStorageGroups(TArray<FPreAnimatedStorageGroupHandle>& StaleGroupStorage) const
+{
+	for (auto It = StorageGroupsByKey.CreateConstIterator(); It; ++It)
+	{
+		if (FBuiltInComponentTypes::IsBoundObjectGarbage(It.Key().ResolveObjectPtr()))
+		{
+			StaleGroupStorage.Add(It.Value());
 		}
 	}
 }

@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SequenceRecorder.h"
+#include "GameFramework/Pawn.h"
+#include "GameFramework/WorldSettings.h"
 #include "ISequenceAudioRecorder.h"
 #include "Misc/ScopedSlowTask.h"
 #include "Modules/ModuleManager.h"
@@ -9,7 +11,7 @@
 #include "Engine/Texture2D.h"
 #include "CanvasItem.h"
 #include "Engine/Canvas.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Editor.h"
 #include "EngineGlobals.h"
@@ -18,7 +20,7 @@
 #include "AnimationRecorder.h"
 #include "ActorRecording.h"
 #include "SequenceRecordingBase.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "SequenceRecorderUtils.h"
 #include "SequenceRecorderSettings.h"
 #include "ObjectTools.h"
@@ -42,6 +44,7 @@
 #include "ScopedTransaction.h"
 #include "Features/IModularFeatures.h"
 #include "ScopedTransaction.h"
+#include "LevelSequencePlayer.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 
 #define LOCTEXT_NAMESPACE "SequenceRecorder"
@@ -487,12 +490,12 @@ void FSequenceRecorder::DrawDebug(UCanvas* InCanvas, APlayerController* InPlayer
 	if(bCountingDown)
 	{
 		const FVector2D IconSize(128.0f, 128.0f);
-		const FVector2D HalfIconSize(64.0f, 64.0f);
+		const FVector2f HalfIconSize(64.0f, 64.0f);
 		const float LineThickness = 2.0f;
 
-		FVector2D Center;
+		FVector2f Center;
 		InCanvas->GetCenter(Center.X, Center.Y);
-		FVector2D IconPosition = Center - HalfIconSize;
+		FVector2f IconPosition = Center - HalfIconSize;
 
 		InCanvas->SetDrawColor(FColor::White);
 
@@ -503,8 +506,8 @@ void FSequenceRecorder::DrawDebug(UCanvas* InCanvas, APlayerController* InPlayer
 		const float Angle = 2.0f * PI * FMath::Fmod(CurrentDelay, 1.0f);
 		const FVector2D AxisX(0.f, -1.f);
 		const FVector2D AxisY(-1.f, 0.f);
-		const FVector2D EndPos = Center + (AxisX * FMath::Cos(Angle) + AxisY * FMath::Sin(Angle)) * (InCanvas->SizeX + InCanvas->SizeY);
-		FCanvasLineItem LineItem(Center, EndPos);
+		const FVector2D EndPos = FVector2D(Center) + (AxisX * FMath::Cos(Angle) + AxisY * FMath::Sin(Angle)) * (InCanvas->SizeX + InCanvas->SizeY);
+		FCanvasLineItem LineItem(FVector2D(Center), EndPos);
 		LineItem.LineThickness = LineThickness;
 		LineItem.SetColor(FLinearColor::Black);
 		InCanvas->DrawItem(LineItem);
@@ -544,7 +547,7 @@ void FSequenceRecorder::DrawDebug(UCanvas* InCanvas, APlayerController* InPlayer
 		TimeAccumulator -= Minutes * 60.0f;
 		float Seconds = FMath::FloorToFloat(TimeAccumulator);
 		TimeAccumulator -= Seconds;
-		float Frames = FMath::FloorToFloat(TimeAccumulator * GetDefault<USequenceRecorderSettings>()->DefaultAnimationSettings.SampleRate);
+		float Frames = FMath::FloorToFloat(GetDefault<USequenceRecorderSettings>()->DefaultAnimationSettings.SampleFrameRate.AsFrameTime(TimeAccumulator).AsDecimal());
 
 		FNumberFormattingOptions Options;
 		Options.MinimumIntegralDigits = 2;
@@ -706,11 +709,12 @@ bool FSequenceRecorder::StartRecordingInternal(UWorld* World)
 				// Always initialize the player so that the playback settings/range can be initialized from editor.
 				DupActorToTrigger->InitializePlayer();
 				
-				if (DupActorToTrigger->SequencePlayer)
+				ULevelSequencePlayer* SequencePlayer = DupActorToTrigger->GetSequencePlayer();
+				if (SequencePlayer)
 				{
-					DupActorToTrigger->SequencePlayer->SetDisableCameraCuts(true);
-					DupActorToTrigger->SequencePlayer->SetPlaybackPosition(FMovieSceneSequencePlaybackParams(0, EUpdatePositionMethod::Jump));
-					DupActorToTrigger->SequencePlayer->Play();
+					SequencePlayer->SetDisableCameraCuts(true);
+					SequencePlayer->SetPlaybackPosition(FMovieSceneSequencePlaybackParams(0, EUpdatePositionMethod::Jump));
+					SequencePlayer->Play();
 				}
 				else
 				{
@@ -762,8 +766,6 @@ bool FSequenceRecorder::StartRecordingInternal(UWorld* World)
 			if(LevelSequence)
 			{
 				CurrentSequence = LevelSequence;
-
-				LevelSequence->GetMovieScene()->TimecodeSource = SequenceRecorderUtils::GetTimecodeSource();
 
 				FAssetRegistryModule::AssetCreated(LevelSequence);
 
@@ -935,47 +937,47 @@ bool FSequenceRecorder::StopRecording(bool bAllowLooping)
 
 		if (RecordedSoundWaves.Num())
 		{
-			// Add a new master audio track to the level sequence		
+			// Add a new audio track to the level sequence		
 			UMovieScene* MovieScene = LevelSequence->GetMovieScene();
-			UMovieSceneAudioTrack* RecordedAudioMasterTrack = nullptr;
+			UMovieSceneAudioTrack* RecordedAudioTrack = nullptr;
 
 			FText RecordedAudioTrackName = Settings->AudioTrackName;
-			for (auto MasterTrack : MovieScene->GetMasterTracks())
+			for (auto Track : MovieScene->GetTracks())
 			{
-				if (MasterTrack->IsA(UMovieSceneAudioTrack::StaticClass()) && MasterTrack->GetDisplayName().EqualTo(RecordedAudioTrackName))
+				if (Track->IsA(UMovieSceneAudioTrack::StaticClass()) && Track->GetDisplayName().EqualTo(RecordedAudioTrackName))
 				{
-					RecordedAudioMasterTrack = Cast<UMovieSceneAudioTrack>(MasterTrack);
+					RecordedAudioTrack = Cast<UMovieSceneAudioTrack>(Track);
 				}
 			}
 
-			if (!RecordedAudioMasterTrack)
+			if (!RecordedAudioTrack)
 			{
-				RecordedAudioMasterTrack = MovieScene->AddMasterTrack<UMovieSceneAudioTrack>();
-				RecordedAudioMasterTrack->SetDisplayName(RecordedAudioTrackName);
+				RecordedAudioTrack = MovieScene->AddTrack<UMovieSceneAudioTrack>();
+				RecordedAudioTrack->SetDisplayName(RecordedAudioTrackName);
 			}
 
 			if (Settings->bReplaceRecordedAudio)
 			{
-				RecordedAudioMasterTrack->RemoveAllAnimationData();
+				RecordedAudioTrack->RemoveAllAnimationData();
 			}
 
 			for (USoundWave* RecordedAudio : RecordedSoundWaves)
 			{
 				int32 RowIndex = -1;
-				for (UMovieSceneSection* Section : RecordedAudioMasterTrack->GetAllSections())
+				for (UMovieSceneSection* Section : RecordedAudioTrack->GetAllSections())
 				{
 					RowIndex = FMath::Max(RowIndex, Section->GetRowIndex());
 				}
 
-				UMovieSceneAudioSection* NewAudioSection = NewObject<UMovieSceneAudioSection>(RecordedAudioMasterTrack, UMovieSceneAudioSection::StaticClass());
+				UMovieSceneAudioSection* NewAudioSection = NewObject<UMovieSceneAudioSection>(RecordedAudioTrack, UMovieSceneAudioSection::StaticClass());
 
-				FFrameRate TickResolution = RecordedAudioMasterTrack->GetTypedOuter<UMovieScene>()->GetTickResolution();
+				FFrameRate TickResolution = RecordedAudioTrack->GetTypedOuter<UMovieScene>()->GetTickResolution();
 
 				NewAudioSection->SetRowIndex(RowIndex + 1);
 				NewAudioSection->SetSound(RecordedAudio);
 				NewAudioSection->SetRange(TRange<FFrameNumber>(FFrameNumber(0), (RecordedAudio->GetDuration() * TickResolution).CeilToFrame()));
 
-				RecordedAudioMasterTrack->AddSection(*NewAudioSection);
+				RecordedAudioTrack->AddSection(*NewAudioSection);
 
 				if(Settings->bAutoSaveAsset || GEditor == nullptr)
 				{
@@ -1038,7 +1040,7 @@ bool FSequenceRecorder::StopRecording(bool bAllowLooping)
 		if (DupActorsToTrigger[DupActorToTriggerIndex].IsValid())
 		{
 			ALevelSequenceActor* DupActorToTrigger = DupActorsToTrigger[DupActorToTriggerIndex].Get();
-			ULevelSequencePlayer* SequencePlayer = DupActorToTrigger->SequencePlayer;
+			ULevelSequencePlayer* SequencePlayer = DupActorToTrigger->GetSequencePlayer();
 			if (SequencePlayer)
 			{
 				SequencePlayer->SetDisableCameraCuts(false);

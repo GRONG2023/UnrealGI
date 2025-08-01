@@ -22,6 +22,7 @@
 #include "Engine/GameViewportClient.h"
 #include "Engine/UserInterfaceSettings.h"
 #include "PIEPreviewSettings.h"
+#include "PIEPreviewWindowCoreStyle.h"
 #include "Misc/CommandLine.h"
 
 DECLARE_LOG_CATEGORY_EXTERN(LogPIEPreviewDevice, Log, All); 
@@ -31,17 +32,10 @@ IMPLEMENT_MODULE(FPIEPreviewDeviceModule, PIEPreviewDeviceProfileSelector);
 void FPIEPreviewDeviceModule::StartupModule()
 {
 	// Parse the json file specified on the command line
-
-	if (FParse::Value(FCommandLine::Get(), GetPreviewDeviceCommandSwitch(), PreviewDevice))
+	FString PreviewDeviceCmdLine;
+	if (FParse::Value(FCommandLine::Get(), GetPreviewDeviceCommandSwitch(), PreviewDeviceCmdLine))
 	{
-		const FString Filename = FindDeviceSpecificationFilePath(PreviewDevice);
-
-		FString Json;
-		if (FFileHelper::LoadFileToString(Json, *Filename))
-		{
-			TSharedRef<TJsonReader<> > JsonReader = TJsonReaderFactory<>::Create(Json);
-			FJsonSerializer::Deserialize(JsonReader, JsonRootObject);
-		}
+		SetPreviewDevice(PreviewDeviceCmdLine);
 	}
 }
 
@@ -70,7 +64,22 @@ void FPIEPreviewDeviceModule::ShutdownModule()
 	}
 }
 
-void FPIEPreviewDeviceModule::ApplyCommandLineOverrides()
+void FPIEPreviewDeviceModule::SetPreviewDevice(const FString& DeviceName)
+{
+	PreviewDevice = DeviceName;
+	const FString Filename = FindDeviceSpecificationFilePath(PreviewDevice);
+
+	FString Json;
+	if (FFileHelper::LoadFileToString(Json, *Filename))
+	{
+		TSharedRef<TJsonReader<> > JsonReader = TJsonReaderFactory<>::Create(Json);
+		FJsonSerializer::Deserialize(JsonReader, JsonRootObject);
+	}
+
+	InitPreviewDevice();
+}
+
+FName FPIEPreviewDeviceModule::GetPreviewPlatformName()
 {
 	// Here we need to parse the json directly as we have not yet initialized the UObject system
 	if (JsonRootObject.IsValid())
@@ -78,9 +87,10 @@ void FPIEPreviewDeviceModule::ApplyCommandLineOverrides()
 		FString DevicePlatform;
 		if (JsonRootObject->TryGetStringField(TEXT("DevicePlatform"), DevicePlatform))
 		{
-			FCommandLine::Append(*FString::Printf(TEXT(" -ScalabilityIniPlatformOverride=%s"), *DevicePlatform));
+			return FName(*DevicePlatform);
 		}
 	}
+	return NAME_None;
 }
 
 FString const FPIEPreviewDeviceModule::GetRuntimeDeviceProfileName()
@@ -91,6 +101,11 @@ FString const FPIEPreviewDeviceModule::GetRuntimeDeviceProfileName()
 	}
 
 	return DeviceProfile;
+}
+
+bool FPIEPreviewDeviceModule::GetSelectorPropertyValue(const FName& PropertyType, FString& PropertyValueOUT)
+{ 
+	return Device->GetSelectorPropertyValue(PropertyType, PropertyValueOUT);
 }
 
 void FPIEPreviewDeviceModule::InitPreviewDevice()
@@ -106,7 +121,11 @@ void FPIEPreviewDeviceModule::InitPreviewDevice()
 	bool bReadSuccess = ReadDeviceSpecification();
 	checkf(bReadSuccess, TEXT("Unable to read PIE Preview Device specification"));
 
-	Device->ApplyRHIPrerequisitesOverrides();
+	// Do not apply RHI overrides when using the editor
+	if(!GIsEditor)
+	{
+		Device->ApplyRHIPrerequisitesOverrides();
+	}
 	DeviceProfile = Device->GetProfile();
 }
 
@@ -188,7 +207,7 @@ void FPIEPreviewDeviceModule::UpdateDisplayResolution()
 	}
 
 	const int32 ClientWidth = Device->GetWindowWidth();
-	const int32 ClientHeight = Device->GetWindowHeight() - WindowPtr->GetTitleBarSize().Get();
+	const int32 ClientHeight = Device->GetWindowHeight() - FMath::TruncToInt32(WindowPtr->GetTitleBarSize().Get());
 
 	FSystemResolution::RequestResolutionChange(ClientWidth, ClientHeight, EWindowMode::Windowed);
 	IConsoleManager::Get().CallAllConsoleVariableSinks();

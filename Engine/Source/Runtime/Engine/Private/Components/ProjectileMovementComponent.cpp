@@ -1,15 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "GameFramework/ProjectileMovementComponent.h"
-#include "EngineDefines.h"
 #include "GameFramework/DamageType.h"
 #include "Engine/World.h"
 #include "Components/PrimitiveComponent.h"
 #include "GameFramework/WorldSettings.h"
 #include "ProfilingDebugging/CsvProfiler.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ProjectileMovementComponent)
+
 CSV_DECLARE_CATEGORY_MODULE_EXTERN(CORE_API, Basic);
 DEFINE_LOG_CATEGORY_STATIC(LogProjectileMovement, Log, All);
+DEFINE_LOG_CATEGORY_STATIC(LogProjectileMovementInterpolation, Log, All);
 
 const float UProjectileMovementComponent::MIN_TICK_TIME = 1e-6f;
 
@@ -24,10 +26,18 @@ UProjectileMovementComponent::UProjectileMovementComponent(const FObjectInitiali
 	bInterpMovement = false;
 	bInterpRotation = false;
 	bInterpolationComplete = true;
+	bSimulationUseScopedMovement = false;
+	bInterpolationUseScopedMovement = true;
 	InterpLocationTime = 0.100f;
 	InterpRotationTime = 0.050f;
 	InterpLocationMaxLagDistance = 300.0f;
 	InterpLocationSnapToTargetDistance = 500.0f;
+	bThrottleInterpolation = false;
+	ThrottleInterpolationThresholdNotRenderedShortTime = 0.20f;
+	ThrottleInterpolationThresholdNotRenderedLongTime = 1.0f;
+	ThrottleInterpolationFramesSinceInterp = 0;
+	ThrottleInterpolationSkipFramesRecent = 1;
+	ThrottleInterpolationSkipFramesNotRecent = 2;
 
 	Velocity = FVector(1.f,0.f,0.f);
 
@@ -57,9 +67,9 @@ void UProjectileMovementComponent::PostLoad()
 {
 	Super::PostLoad();
 
-	const int32 LinkerUE4Ver = GetLinkerUE4Version();
+	const FPackageFileVersion LinkerUEVer = GetLinkerUEVersion();
 
-	if (LinkerUE4Ver < VER_UE4_REFACTOR_PROJECTILE_MOVEMENT)
+	if (LinkerUEVer < VER_UE4_REFACTOR_PROJECTILE_MOVEMENT)
 	{
 		// Old code used to treat Bounciness as Friction as well.
 		Friction = FMath::Clamp(1.f - Bounciness, 0.f, 1.f);
@@ -133,8 +143,13 @@ void UProjectileMovementComponent::TickComponent(float DeltaTime, enum ELevelTic
 	QUICK_SCOPE_CYCLE_COUNTER( STAT_ProjectileMovementComponent_TickComponent );
 	CSV_SCOPED_TIMING_STAT_EXCLUSIVE(ProjectileMovement);
 
+	// Can avoid moving the interpolated object's children until the end of the entire simulation frame.
+	// This only makes sense if simulation is also enabled, which would move the UpdatedComponent and move the attached InterpolatedComponent (and children) again.
+	const bool bUseScopedInterpolatedMove = bInterpolationUseScopedMovement && bSimulationEnabled;
+	const FScopedMovementUpdate ScopedInterpolatedMove(GetInterpolatedComponent(), bUseScopedInterpolatedMove ? EScopedUpdate::DeferredUpdates : EScopedUpdate::ImmediateUpdates);
+
 	// Still need to finish interpolating after we've stopped simulating, so do that first.
-	if (bInterpMovement && !bInterpolationComplete)
+	if (!bInterpolationComplete)
 	{
 		QUICK_SCOPE_CYCLE_COUNTER(STAT_ProjectileMovementComponent_TickInterpolation);
 		TickInterpolation(DeltaTime);
@@ -176,7 +191,10 @@ void UProjectileMovementComponent::TickComponent(float DeltaTime, enum ELevelTic
 	int32 Iterations = 0;
 	FHitResult Hit(1.f);
 	
-	while (bSimulationEnabled && RemainingTime >= MIN_TICK_TIME && (Iterations < MaxSimulationIterations) && !ActorOwner->IsPendingKill() && !HasStoppedSimulation())
+	QUICK_SCOPE_CYCLE_COUNTER( STAT_ProjectileMovementComponent_PerformMovement );
+	const FScopedMovementUpdate ScopedProjectileUpdate(bSimulationUseScopedMovement ? UpdatedComponent : nullptr, EScopedUpdate::DeferredUpdates);
+
+	while (bSimulationEnabled && RemainingTime >= MIN_TICK_TIME && (Iterations < MaxSimulationIterations) && IsValid(ActorOwner) && !HasStoppedSimulation())
 	{
 		LoopCount++;
 		Iterations++;
@@ -220,7 +238,7 @@ void UProjectileMovementComponent::TickComponent(float DeltaTime, enum ELevelTic
 		}
 		
 		// If we hit a trigger that destroyed us, abort.
-		if( ActorOwner->IsPendingKill() || HasStoppedSimulation() )
+		if( !IsValid(ActorOwner) || HasStoppedSimulation() )
 		{
 			return;
 		}
@@ -247,7 +265,7 @@ void UProjectileMovementComponent::TickComponent(float DeltaTime, enum ELevelTic
 			if (Velocity == OldVelocity)
 			{
 				// re-calculate end velocity for partial time
-				Velocity = (Hit.Time > KINDA_SMALL_NUMBER) ? ComputeVelocity(OldVelocity, TimeTick * Hit.Time) : OldVelocity;
+				Velocity = (Hit.Time > UE_KINDA_SMALL_NUMBER) ? ComputeVelocity(OldVelocity, TimeTick * Hit.Time) : OldVelocity;
 			}
 
 			// Logging
@@ -311,7 +329,7 @@ bool UProjectileMovementComponent::HandleDeflection(FHitResult& Hit, const FVect
 	const FVector Normal = ConstrainNormalToPlane(Hit.Normal);
 
 	// Multiple hits within very short time period?
-	const bool bMultiHit = (PreviousHitTime < 1.f && Hit.Time <= KINDA_SMALL_NUMBER);
+	const bool bMultiHit = (PreviousHitTime < 1.f && Hit.Time <= UE_KINDA_SMALL_NUMBER);
 
 	// if velocity still into wall (after HandleBlockingHit() had a chance to adjust), slide along wall
 	const float DotTolerance = 0.01f;
@@ -346,7 +364,7 @@ bool UProjectileMovementComponent::HandleDeflection(FHitResult& Hit, const FVect
 		}
 
 		// Velocity is now parallel to the impact surface.
-		if (SubTickTimeRemaining > KINDA_SMALL_NUMBER)
+		if (SubTickTimeRemaining > UE_KINDA_SMALL_NUMBER)
 		{
 			if (!HandleSliding(Hit, SubTickTimeRemaining))
 			{
@@ -524,21 +542,21 @@ void UProjectileMovementComponent::StopSimulating(const FHitResult& HitResult)
 UProjectileMovementComponent::EHandleBlockingHitResult UProjectileMovementComponent::HandleBlockingHit(const FHitResult& Hit, float TimeTick, const FVector& MoveDelta, float& SubTickTimeRemaining)
 {
 	AActor* ActorOwner = UpdatedComponent ? UpdatedComponent->GetOwner() : NULL;
-	if (!CheckStillInWorld() || !ActorOwner || ActorOwner->IsPendingKill())
+	if (!CheckStillInWorld() || !IsValid(ActorOwner))
 	{
 		return EHandleBlockingHitResult::Abort;
 	}
 	
 	HandleImpact(Hit, TimeTick, MoveDelta);
 	
-	if (ActorOwner->IsPendingKill() || HasStoppedSimulation())
+	if (!IsValid(ActorOwner) || HasStoppedSimulation())
 	{
 		return EHandleBlockingHitResult::Abort;
 	}
 
 	if (Hit.bStartPenetrating)
 	{
-		UE_LOG(LogProjectileMovement, Verbose, TEXT("Projectile %s is stuck inside %s.%s with velocity %s!"), *GetNameSafe(ActorOwner), *GetNameSafe(Hit.GetActor()), *GetNameSafe(Hit.GetComponent()), *Velocity.ToString());
+		UE_LOG(LogProjectileMovement, Verbose, TEXT("Projectile %s is stuck inside %s.%s with velocity %s!"), *GetNameSafe(ActorOwner), *Hit.HitObjectHandle.GetName(), *GetNameSafe(Hit.GetComponent()), *Velocity.ToString());
 		return EHandleBlockingHitResult::Abort;
 	}
 
@@ -621,7 +639,7 @@ bool UProjectileMovementComponent::CheckStillInWorld()
 
 	// check the variations of KillZ
 	AWorldSettings* WorldSettings = MyWorld->GetWorldSettings( true );
-	if (!WorldSettings->bEnableWorldBoundsChecks)
+	if (!WorldSettings->AreWorldBoundsChecksEnabled())
 	{
 		return true;
 	}
@@ -706,11 +724,20 @@ void UProjectileMovementComponent::SetInterpolatedComponent(USceneComponent* Com
 
 	if (Component)
 	{
+		if (!ensureMsgf(Component != UpdatedComponent, TEXT("ProjectileMovement interpolated component should not be the same as the simulated component.")))
+		{
+			return;
+		}
+
 		ResetInterpolation();
 		InterpolatedComponentPtr = Component;
 		InterpInitialLocationOffset = Component->GetRelativeLocation();
 		InterpInitialRotationOffset = Component->GetRelativeRotation().Quaternion();
-		bInterpolationComplete = false;
+		// We start at the "completed" location, wait for MoveInterpolationTarget() to actually mark it dirty.
+		bInterpolationComplete = true;
+
+		// Space out interpolation skipping to avoid objects spawned on single frame from always updating in sync
+		ThrottleInterpolationFramesSinceInterp = ThrottleInterpolationSkipFramesRecent > 0 ? FMath::RandRange(0, ThrottleInterpolationSkipFramesRecent) : 0;
 	}
 	else
 	{
@@ -719,6 +746,11 @@ void UProjectileMovementComponent::SetInterpolatedComponent(USceneComponent* Com
 		InterpInitialLocationOffset = FVector::ZeroVector;
 		InterpInitialRotationOffset = FQuat::Identity;
 		bInterpolationComplete = true;
+		// Disabling interpolation should stop our ticking if we are done simulating and just trying to finish interpolation.
+		if (bAutoUpdateTickRegistration && (UpdatedComponent == nullptr))
+		{
+			UpdateTickRegistration();
+		}
 	}
 }
 
@@ -795,19 +827,22 @@ void UProjectileMovementComponent::ResetInterpolation()
 {
 	if (USceneComponent* InterpComponent = GetInterpolatedComponent())
 	{
+		// Snap to original (non-interpolated) offset, we may be forcibly stopping interpolation and need to have it stay at the correct location.
 		InterpComponent->SetRelativeLocationAndRotation(InterpInitialLocationOffset, InterpInitialRotationOffset);
 	}
 
 	InterpLocationOffset = FVector::ZeroVector;
 	InterpRotationOffset = FQuat::Identity;
 	bInterpolationComplete = true;
+	
+	ThrottleInterpolationFramesSinceInterp = 0;
 }
 
 void UProjectileMovementComponent::TickInterpolation(float DeltaTime)
 {
 	if (!bInterpolationComplete)
 	{
-		if (USceneComponent* InterpComponent = GetInterpolatedComponent())
+		if (bInterpMovement)
 		{
 			// Smooth location. Interp faster when stopping.
 			const float ActualInterpLocationTime = Velocity.IsZero() ? 0.5f * InterpLocationTime : InterpLocationTime;
@@ -840,18 +875,35 @@ void UProjectileMovementComponent::TickInterpolation(float DeltaTime)
 				bInterpolationComplete = true;
 			}
 
-			// Apply result
-			if (UpdatedComponent)
+			if (USceneComponent* InterpComponent = GetInterpolatedComponent())
 			{
-				const FVector NewRelTranslation = UpdatedComponent->GetComponentToWorld().InverseTransformVectorNoScale(InterpLocationOffset) + InterpInitialLocationOffset;
-				if (bInterpRotation)
+				const bool bShouldThrottleNow = UpdateThrottleInterpolation(DeltaTime, InterpComponent);
+				if (bShouldThrottleNow)
 				{
-					const FQuat NewRelRotation = InterpRotationOffset * InterpInitialRotationOffset;
-					InterpComponent->SetRelativeLocationAndRotation(NewRelTranslation, NewRelRotation);
+					UE_LOG(LogProjectileMovementInterpolation, Verbose, TEXT("--- Skip  Interpolation (%d frames : %s)"), ThrottleInterpolationFramesSinceInterp, *GetPathNameSafe(InterpComponent));
+					// Skip applying transform to InterpolatedComponent.
+					// Don't say we're done interpolating if we haven't applied the result yet, we need it to update next frame.
+					bInterpolationComplete = false;
 				}
 				else
 				{
-					InterpComponent->SetRelativeLocation(NewRelTranslation);
+					ThrottleInterpolationFramesSinceInterp = 0;
+					UE_LOG(LogProjectileMovementInterpolation, Verbose, TEXT("+++ Apply Interpolation (%d frames : %s)"), ThrottleInterpolationFramesSinceInterp, *GetPathNameSafe(InterpComponent));
+
+					// Apply interpolation result
+					if (UpdatedComponent)
+					{
+						const FVector NewRelTranslation = UpdatedComponent->GetComponentToWorld().InverseTransformVectorNoScale(InterpLocationOffset) + InterpInitialLocationOffset;
+						if (bInterpRotation)
+						{
+							const FQuat NewRelRotation = InterpRotationOffset * InterpInitialRotationOffset;
+							InterpComponent->SetRelativeLocationAndRotation(NewRelTranslation, NewRelRotation);
+						}
+						else
+						{
+							InterpComponent->SetRelativeLocation(NewRelTranslation);
+						}
+					}
 				}
 			}
 		}
@@ -860,11 +912,71 @@ void UProjectileMovementComponent::TickInterpolation(float DeltaTime)
 			ResetInterpolation();
 			bInterpolationComplete = true;
 		}
-	}
 
-	// Might be done interpolating and want to disable tick
-	if (bInterpolationComplete && bAutoUpdateTickRegistration && (UpdatedComponent == nullptr))
-	{
-		UpdateTickRegistration();
+		// Might be done interpolating and want to disable tick
+		if (bInterpolationComplete && bAutoUpdateTickRegistration && (UpdatedComponent == nullptr))
+		{
+			UpdateTickRegistration();
+		}
 	}
 }
+
+
+bool UProjectileMovementComponent::UpdateThrottleInterpolation(float DeltaTime, USceneComponent* InterpComponent)
+{
+	bool bIsThrottlingThisFrame = false;
+
+	if (bThrottleInterpolation && bInterpMovement && InterpComponent)
+	{
+		const int32 ThrottleFrames = ComputeThrottleInterpolationMaxFrames(DeltaTime, InterpComponent);
+		if (ThrottleFrames > 0)
+		{
+			ThrottleInterpolationFramesSinceInterp += 1;
+			if (ThrottleInterpolationFramesSinceInterp <= ThrottleFrames)
+			{
+				bIsThrottlingThisFrame = true;
+			}
+		}
+	}
+
+	// Detect transition from throttled to not throttled.
+	if (!bIsThrottlingThisFrame && ThrottleInterpolationFramesSinceInterp > 0)
+	{
+		// Reset counter, not throttling this frame.
+		ThrottleInterpolationFramesSinceInterp = 0;
+
+		// Hook for custom reset logic
+		ResetThrottleInterpolation(DeltaTime);
+	}
+
+	return bIsThrottlingThisFrame;
+}
+
+int32 UProjectileMovementComponent::ComputeThrottleInterpolationMaxFrames(float DeltaTime, USceneComponent* InterpComponent)
+{
+	int32 ThrottleFrames = 0;
+	if (AActor* ActorOwner = InterpComponent->GetOwner())
+	{
+		// Not recently rendered?
+		if (!ActorOwner->WasRecentlyRendered(ThrottleInterpolationThresholdNotRenderedShortTime))
+		{
+			// Not rendered even a long time ago?
+			if (!ActorOwner->WasRecentlyRendered(ThrottleInterpolationThresholdNotRenderedLongTime))
+			{
+				ThrottleFrames = ThrottleInterpolationSkipFramesNotRecent;
+			}
+			else
+			{
+				ThrottleFrames = ThrottleInterpolationSkipFramesRecent;
+			}
+		}
+	}
+
+	return ThrottleFrames;
+}
+
+void UProjectileMovementComponent::ResetThrottleInterpolation(float DeltaTime)
+{
+	ThrottleInterpolationFramesSinceInterp = 0;
+}
+

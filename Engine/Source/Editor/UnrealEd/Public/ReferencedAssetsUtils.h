@@ -6,7 +6,7 @@
 #include "Serialization/ArchiveUObject.h"
 #include "UObject/GCObject.h"
 
-typedef TMap< UObject*, TSet<UObject*> >	ObjectReferenceGraph;
+typedef TMap< TObjectPtr<UObject>, TSet<TObjectPtr<UObject>> >	ObjectReferenceGraph;
 typedef TMap< UObject*, FString >			ObjectNameMap;
 
 /**
@@ -105,7 +105,7 @@ class FFindAssetsArchive : public FArchiveUObject
 	/**
 	 * Retrieves the referenced assets list for the specified object.
 	 */
-	TSet<UObject*>* GetAssetList( UObject* Referencer );
+	TSet<TObjectPtr<UObject>>* GetAssetList( UObject* Referencer );
 
 public:
 	/**
@@ -139,6 +139,10 @@ public:
 
 	/* === FGCObject interface === */
 	UNREALED_API virtual void AddReferencedObjects( FReferenceCollector& Collector );
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FFindReferencedAssets");
+	}
 
 	/**
 	 * Checks an object to see if it should be included for asset searching
@@ -167,13 +171,13 @@ protected:
 	 * This is a list of classes that should be ignored when building the
 	 * asset list as they are always loaded and therefore not pertinent
 	 */
-	TArray<UClass*> IgnoreClasses;
+	TArray<TObjectPtr<UClass>> IgnoreClasses;
 
 	/**
 	 * This is a list of packages that should be ignored when building the
 	 * asset list as they are always loaded and therefore not pertinent
 	 */
-	TArray<UPackage*> IgnorePackages;
+	TArray<TObjectPtr<UPackage>> IgnorePackages;
 
 	/**
 	 * Holds the list of assets that are being referenced by the current 

@@ -4,21 +4,12 @@
 
 #include "PhysTestSerializer.h"
 
-
-#if PHYSICS_INTERFACE_PHYSX
-#include "PhysXIncludes.h"
-#include "PhysXSupportCore.h"
-#include "PhysXToChaosUtil.h"
-#endif
-
 #include "PhysicsCore.h"
 #include "Chaos/PBDRigidsEvolution.h"
 #include "Chaos/PBDRigidParticles.h"
 #include "Chaos/Box.h"
 #include "Chaos/Sphere.h"
 #include "Chaos/Capsule.h"
-
-using namespace Chaos;
 
 #include "PhysicsPublicCore.h"
 #include "PhysicsCore.h"
@@ -29,6 +20,7 @@ using namespace Chaos;
 FPhysTestSerializer::FPhysTestSerializer()
 	: bDiskDataIsChaos(false)
 	, bChaosDataReady(false)
+	, Particles(UniqueIndices)
 {
 }
 
@@ -47,7 +39,7 @@ void FPhysTestSerializer::Serialize(const TCHAR* FilePrefix)
 	TUniquePtr<FArchive> File(IFileManager::Get().CreateFileWriter(*UseFileName));
 	if (File)
 	{
-		FChaosArchive Ar(*File);
+		Chaos::FChaosArchive Ar(*File);
 		UE_LOG(LogPhysicsCore, Log, TEXT("PhysTestSerialize File: %s"), *UseFileName);
 		Serialize(Ar);
 	}
@@ -68,7 +60,7 @@ void FPhysTestSerializer::Serialize(Chaos::FChaosArchive& Ar)
 	static const FName TestSerializerName = TEXT("PhysTestSerializer");
 
 	{
-		FChaosArchiveScopedMemory ScopedMemory(Ar, TestSerializerName, false);
+		Chaos::FChaosArchiveScopedMemory ScopedMemory(Ar, TestSerializerName, false);
 		int Version = 1;
 		Ar << Version;
 		Ar << bDiskDataIsChaos;
@@ -92,10 +84,6 @@ void FPhysTestSerializer::Serialize(Chaos::FChaosArchive& Ar)
 
 	if (Ar.IsLoading())
 	{
-#if PHYSICS_INTERFACE_PHYSX
-		CreatePhysXData();
-#endif
-
 #if 0
 		CreateChaosData();
 #endif
@@ -105,7 +93,7 @@ void FPhysTestSerializer::Serialize(Chaos::FChaosArchive& Ar)
 
 	bool bHasSQCapture = !!SQCapture;
 	{
-		FChaosArchiveScopedMemory ScopedMemory(Ar, TestSerializerName, false);
+		Chaos::FChaosArchiveScopedMemory ScopedMemory(Ar, TestSerializerName, false);
 		Ar << bHasSQCapture;
 	}
 	if(bHasSQCapture)
@@ -124,103 +112,11 @@ void FPhysTestSerializer::SetPhysicsData(Chaos::FPBDRigidsEvolution& Evolution)
 	bDiskDataIsChaos = true;
 	Data.Empty();
 	FMemoryWriter Ar(Data);
-	FChaosArchive ChaosAr(Ar);
+	Chaos::FChaosArchive ChaosAr(Ar);
 	Evolution.Serialize(ChaosAr);
 	ChaosContext = ChaosAr.StealContext();
 	ArchiveVersion = Ar.GetCustomVersions();
 }
-
-
-
-#if PHYSICS_INTERFACE_PHYSX
-void FPhysTestSerializer::SetPhysicsData(physx::PxScene& Scene)
-{
-	check(AlignedDataHelper == nullptr || &Scene != AlignedDataHelper->PhysXScene);
-
-	PxSerializationRegistry* Registry = PxSerialization::createSerializationRegistry(*GPhysXSDK);
-	PxCollection* Collection = PxCollectionExt::createCollection(Scene);
-
-	PxSerialization::complete(*Collection, *Registry);
-
-	//give an ID for every object so we can find it later. This only holds for direct objects like actors and shapes
-	const uint32 NumObjects = Collection->getNbObjects();
-	TArray<PxBase*> Objects;
-	Objects.AddUninitialized(NumObjects);
-	Collection->getObjects(Objects.GetData(), NumObjects);
-	for (PxBase* Obj : Objects)
-	{
-		Collection->add(*Obj, (PxSerialObjectId)Obj);
-	}
-
-	Data.Empty();
-	FPhysXOutputStream Stream(&Data);
-	PxSerialization::serializeCollectionToBinary(Stream, *Collection, *Registry);
-	Collection->release();
-	Registry->release();
-
-	bDiskDataIsChaos = false;
-}
-
-void FPhysTestSerializer::CreatePhysXData()
-{
-	if (bDiskDataIsChaos == false)	//For the moment we don't support chaos to physx direction
-	{
-		{
-			check(Data.Num());	//no data, was the physx scene set?
-			AlignedDataHelper = MakeUnique<FPhysXSerializerData>(Data.Num());
-			FMemory::Memcpy(AlignedDataHelper->Data, Data.GetData(), Data.Num());
-		}
-
-		PxSceneDesc Desc = CreateDummyPhysXSceneDescriptor();	//question: does it matter that this is default and not the one set by user settings?
-		AlignedDataHelper->PhysXScene = GPhysXSDK->createScene(Desc);
-
-		AlignedDataHelper->Registry = PxSerialization::createSerializationRegistry(*GPhysXSDK);
-		AlignedDataHelper->Collection = PxSerialization::createCollectionFromBinary(AlignedDataHelper->Data, *AlignedDataHelper->Registry);
-		AlignedDataHelper->PhysXScene->addCollection(*AlignedDataHelper->Collection);
-	}
-}
-
-physx::PxBase* FPhysTestSerializer::FindObject(uint64 Id)
-{
-	if (!AlignedDataHelper)
-	{
-		CreatePhysXData();
-	}
-
-	physx::PxBase* Ret = AlignedDataHelper->Collection->find(Id);
-	ensure(Ret);
-#if 0
-		CreateChaosData();
-#endif
-	return Ret;
-}
-
-FPhysTestSerializer::FPhysXSerializerData::~FPhysXSerializerData()
-{
-	if (PhysXScene)
-	{
-		//release all resources the collection created (calling release on the collection is not enough)
-		const uint32 NumObjects = Collection->getNbObjects();
-		TArray<PxBase*> Objects;
-		Objects.AddUninitialized(NumObjects);
-		Collection->getObjects(Objects.GetData(), NumObjects);
-		for (PxBase* Obj : Objects)
-		{
-			if (Obj->isReleasable())
-			{
-				Obj->release();
-			}
-		}
-
-		Collection->release();
-		Registry->release();
-		PhysXScene->release();
-	}
-	FMemory::Free(Data);
-}
-
-
-#endif
 
 #if 0
 
@@ -288,7 +184,7 @@ void FPhysTestSerializer::CreateChaosData()
 			PxActorToChaosHandle.Add(Act, Particle.Get());
 
 			//geometry
-			TArray<TUniquePtr<FImplicitObject>> Geoms;
+			TArray<Chaos::FImplicitObjectPtr> Geoms;
 			const int32 NumShapes = Actor->getNbShapes();
 			TArray<PxShape*> Shapes;
 			Shapes.AddUninitialized(NumShapes);
@@ -305,7 +201,7 @@ void FPhysTestSerializer::CreateChaosData()
 			{
 				if (Geoms.Num() == 1)
 				{
-					auto SharedGeom = TSharedPtr<FImplicitObject, ESPMode::ThreadSafe>(Geoms[0].Release());
+					auto SharedGeom = FImplicitObjectPtr(Geoms[0]);
 					GTParticle->SetGeometry(SharedGeom);
 					Particle->SetSharedGeometry(SharedGeom);
 				}
@@ -336,14 +232,14 @@ void FPhysTestSerializer::CreateChaosData()
 			++Idx;
 		}
 
-		ChaosEvolution = MakeUnique<FPBDRigidsEvolution>(Particles, PhysicalMaterials);
+		ChaosEvolution = MakeUnique<Chaos::FPBDRigidsEvolution>(Particles, PhysicalMaterials);
 	}
 	else
 	{
-		ChaosEvolution = MakeUnique<FPBDRigidsEvolution>(Particles, PhysicalMaterials);
+		ChaosEvolution = MakeUnique<Chaos::FPBDRigidsEvolution>(Particles, PhysicalMaterials);
 
 		FMemoryReader Ar(Data);
-		FChaosArchive ChaosAr(Ar);
+		Chaos::FChaosArchive ChaosAr(Ar);
 
 		Ar.SetCustomVersions(ArchiveVersion);
 

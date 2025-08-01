@@ -1,7 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ConnectionDrawingPolicy.h"
+#include "SGraphPanel.h"
 #include "Rendering/DrawElements.h"
+#include "Widgets/SToolTip.h"
 #include "Framework/Application/SlateApplication.h"
 
 DEFINE_LOG_CATEGORY(LogConnectionDrawingPolicy);
@@ -28,13 +30,13 @@ FVector2D FGeometryHelper::VerticalMiddleRightOf(const FGeometry& SomeGeometry)
 FVector2D FGeometryHelper::CenterOf(const FGeometry& SomeGeometry)
 {
 	const FVector2D GeometryDrawSize = SomeGeometry.GetDrawSize();
-	return SomeGeometry.AbsolutePosition + (GeometryDrawSize * 0.5f);
+	return FVector2D(SomeGeometry.AbsolutePosition) + (GeometryDrawSize * 0.5f);
 }
 
 void FGeometryHelper::ConvertToPoints(const FGeometry& Geom, TArray<FVector2D>& Points)
 {
 	const FVector2D Size = Geom.GetDrawSize();
-	const FVector2D Location = Geom.AbsolutePosition;
+	const FVector2D Location = FVector2D(Geom.AbsolutePosition);
 
 	int32 Index = Points.AddUninitialized(4);
 	Points[Index++] = Location;
@@ -89,13 +91,13 @@ FConnectionDrawingPolicy::FConnectionDrawingPolicy(int32 InBackLayerID, int32 In
 	, DrawElementsList(InDrawElements)
 	, LocalMousePosition(0.0f, 0.0f)
 {
-	ArrowImage = FEditorStyle::GetBrush( TEXT("Graph.Arrow") );
+	ArrowImage = FAppStyle::GetBrush( TEXT("Graph.Arrow") );
 	ArrowRadius = ArrowImage->ImageSize * ZoomFactor * 0.5f;
 	MidpointImage = nullptr;
 	MidpointRadius = FVector2D::ZeroVector;
 	HoverDeemphasisDarkFraction = 0.8f;
 
-	BubbleImage = FEditorStyle::GetBrush( TEXT("Graph.ExecutionBubble") );
+	BubbleImage = FAppStyle::GetBrush( TEXT("Graph.ExecutionBubble") );
 }
 
 void FConnectionDrawingPolicy::DrawSplineWithArrow(const FVector2D& StartPoint, const FVector2D& EndPoint, const FConnectionParams& Params)
@@ -150,6 +152,9 @@ void FConnectionDrawingPolicy::SetHoveredPins(const TSet< FEdGraphPinReference >
 		}
 	}
 
+	// When we have only a single pin selected, we'll extend selection to apply the hover effect on the links
+	const bool bMakeConnectedPinsHovered = (InHoveredPins.Num() == 1);
+
 	// Convert the widget pointer for hovered pins to be EdGraphPin pointers for their connected nets (both ends of any connection)
 	for (auto PinIt = InHoveredPins.CreateConstIterator(); PinIt; ++PinIt)
 	{
@@ -159,9 +164,12 @@ void FConnectionDrawingPolicy::SetHoveredPins(const TSet< FEdGraphPinReference >
 			{
 				HoveredPins.Add(Pin);
 
-				for (auto LinkIt = Pin->LinkedTo.CreateConstIterator(); LinkIt; ++LinkIt)
+				if (bMakeConnectedPinsHovered)
 				{
-					HoveredPins.Add(*LinkIt);
+					for (auto LinkIt = Pin->LinkedTo.CreateConstIterator(); LinkIt; ++LinkIt)
+					{
+						HoveredPins.Add(*LinkIt);
+					}
 				}
 			}
 		}
@@ -237,16 +245,18 @@ void FConnectionDrawingPolicy::DrawConnection(int32 LayerId, const FVector2D& St
 	const FVector2D& P1 = End;
 
 	const FVector2D SplineTangent = ComputeSplineTangent(P0, P1);
-	const FVector2D P0Tangent = (Params.StartDirection == EGPD_Output) ? SplineTangent : -SplineTangent;
-	const FVector2D P1Tangent = (Params.EndDirection == EGPD_Input) ? SplineTangent : -SplineTangent;
+
+	const FVector2D P0Tangent = (Params.StartTangent.IsNearlyZero()) ? ((Params.StartDirection == EGPD_Output) ? SplineTangent : -SplineTangent) : Params.StartTangent;
+	const FVector2D P1Tangent = (Params.EndTangent.IsNearlyZero()) ? ((Params.EndDirection == EGPD_Input) ? SplineTangent : -SplineTangent) : Params.EndTangent;
 
 	if (Settings->bTreatSplinesLikePins)
 	{
 		// Distance to consider as an overlap
 		const float QueryDistanceTriggerThresholdSquared = FMath::Square(Settings->SplineHoverTolerance + Params.WireThickness * 0.5f);
 
-		// Distance to pass the bounding box cull test (may want to expand this later on if we want to do 'closest pin' actions that don't require an exact hit)
-		const float QueryDistanceToBoundingBoxSquared = QueryDistanceTriggerThresholdSquared;
+		// Distance to pass the bounding box cull test. This is used for the bCloseToSpline output that can be used as a
+		// dead zone to avoid mistakes caused by missing a double-click on a connection.
+		const float QueryDistanceForCloseSquared = FMath::Square(FMath::Sqrt(QueryDistanceTriggerThresholdSquared) + Settings->SplineCloseTolerance);
 
 		bool bCloseToSpline = false;
 		{
@@ -260,7 +270,7 @@ void FConnectionDrawingPolicy::DrawConnection(int32 LayerId, const FVector2D& St
 			Bounds += FVector2D(P1);
 			Bounds += FVector2D(P1 - MaximumTangentContribution * P1Tangent);
 
-			bCloseToSpline = Bounds.ComputeSquaredDistanceToPoint(LocalMousePosition) < QueryDistanceToBoundingBoxSquared;
+			bCloseToSpline = Bounds.ComputeSquaredDistanceToPoint(LocalMousePosition) < QueryDistanceForCloseSquared;
 
 			// Draw the bounding box for debugging
 #if 0
@@ -316,8 +326,12 @@ void FConnectionDrawingPolicy::DrawConnection(int32 LayerId, const FVector2D& St
 					const float SquaredDistToPin1 = (Params.AssociatedPin1 != nullptr) ? (P0 - ClosestPoint).SizeSquared() : FLT_MAX;
 					const float SquaredDistToPin2 = (Params.AssociatedPin2 != nullptr) ? (P1 - ClosestPoint).SizeSquared() : FLT_MAX;
 
-					SplineOverlapResult = FGraphSplineOverlapResult(Params.AssociatedPin1, Params.AssociatedPin2, ClosestDistanceSquared, SquaredDistToPin1, SquaredDistToPin2);
+					SplineOverlapResult = FGraphSplineOverlapResult(Params.AssociatedPin1, Params.AssociatedPin2, ClosestDistanceSquared, SquaredDistToPin1, SquaredDistToPin2, true);
 				}
+			}
+			else if (ClosestDistanceSquared < QueryDistanceForCloseSquared)
+			{
+				SplineOverlapResult.SetCloseToSpline(true);
 			}
 		}
 	}
@@ -478,6 +492,14 @@ void FConnectionDrawingPolicy::DrawPinGeometries(TMap<TSharedRef<SWidget>, FArra
 				{
 					FConnectionParams Params;
 					DetermineWiringStyle(ThePin, TargetPin, /*inout*/ Params);
+					const TSharedPtr<SGraphPin>* ConnectedPinWidget = PinToPinWidgetMap.Find(TargetPin);
+					if (ConnectedPinWidget && ConnectedPinWidget->IsValid())
+					{
+						if ( PinWidget.AreConnectionsFaded() && (*ConnectedPinWidget)->AreConnectionsFaded() )
+						{
+							Params.WireColor.A = 0.2f;
+						}
+					}
 					DrawSplineWithArrow(LinkStartWidgetGeometry->Geometry, LinkEndWidgetGeometry->Geometry, Params);
 				}
 			}
@@ -594,3 +616,23 @@ bool FGraphSplineOverlapResult::GetPins(const class SGraphPanel& InGraphPanel, U
 	return (OutPin1 != nullptr) && (OutPin2 != nullptr);
 }
 
+void FGraphSplineOverlapResult::GetPinWidgets(const class SGraphPanel& InGraphPanel, TSharedPtr<class SGraphPin>& OutPin1, TSharedPtr<class SGraphPin>& OutPin2) const
+{
+	OutPin1 = nullptr;
+	OutPin2 = nullptr;
+
+	if (IsValid())
+	{
+		OutPin1 = Pin1Handle.FindInGraphPanel(InGraphPanel);
+		OutPin2 = Pin2Handle.FindInGraphPanel(InGraphPanel);
+	}
+}
+
+TSharedPtr<IToolTip> FConnectionDrawingPolicy::GetConnectionToolTip(const SGraphPanel& GraphPanel, const FGraphSplineOverlapResult& OverlapData) const
+{
+	if (SGraphPin* BestPinFromHoveredSpline = OverlapData.GetBestPinWidget(GraphPanel).Get())
+	{
+		return BestPinFromHoveredSpline->GetToolTip();
+	}
+	return const_cast<SGraphPanel&>(GraphPanel).GetToolTip();
+}

@@ -54,9 +54,9 @@ class UPhysicsConstraintTemplate : public UObject
 #if WITH_EDITOR
 	void AddConstraintProfile(FName ProfileName)
 	{
-		FPhysicsConstraintProfileHandle* NewHandle = new(ProfileHandles) FPhysicsConstraintProfileHandle;
-		NewHandle->ProfileName = ProfileName;
-		NewHandle->ProfileProperties = DefaultInstance.ProfileInstance;	//Copy current settings into new profile
+		FPhysicsConstraintProfileHandle& NewHandle = ProfileHandles.AddDefaulted_GetRef();
+		NewHandle.ProfileName = ProfileName;
+		NewHandle.ProfileProperties = DefaultInstance.ProfileInstance;	//Copy current settings into new profile
 	}
 
 	void RemoveConstraintProfile(FName ProfileName)
@@ -72,7 +72,7 @@ class UPhysicsConstraintTemplate : public UObject
 #endif
 
 	/** Find profile with given name and apply it to constraint instance. Note we cannot return a pointer to the constraint profile as it's in a TArray by value and could be resized leading to an unsafe API */
-	ENGINE_API void ApplyConstraintProfile(FName ProfileName, FConstraintInstance& CI, bool bDefaultIfNotFound) const
+	void ApplyConstraintProfile(FName ProfileName, FConstraintInstance& CI, bool bDefaultIfNotFound) const
 	{
 		bool bFound = false;
 		if (ProfileName == NAME_None)
@@ -99,9 +99,28 @@ class UPhysicsConstraintTemplate : public UObject
 		}
 	}
 
+	/** 
+	 * Returns the properties associated with the named constraint profile. If the profile isn't found 
+	 * it returns the default profile properties.
+	 */
+	const FConstraintProfileProperties& GetConstraintProfilePropertiesOrDefault(FName ProfileName) const
+	{
+		if (ProfileName != NAME_None)
+		{
+			for (const FPhysicsConstraintProfileHandle& Handle : ProfileHandles)
+			{
+				if (Handle.ProfileName == ProfileName)
+				{
+					return Handle.ProfileProperties;
+				}
+			}
+		}
+		return DefaultProfile;
+	}
+
 #if WITH_EDITOR
 	/** Copy constraint instance into default profile.*/
-	ENGINE_API void SetDefaultProfile(FConstraintInstance& CI)
+	void SetDefaultProfile(FConstraintInstance& CI)
 	{
 		DefaultProfile = CI.ProfileInstance;
 	}

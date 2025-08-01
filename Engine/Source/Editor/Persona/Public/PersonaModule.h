@@ -10,6 +10,7 @@
 #include "Editor.h"
 #include "PersonaDelegates.h"
 #include "Factories/FbxImportUI.h"
+#include "SPersonaToolBox.h"
 
 class FBlueprintEditor;
 class IDetailsView;
@@ -23,9 +24,12 @@ class IPinnedCommandList;
 class FWorkflowAllowedTabSet;
 class IAssetFamily;
 class FWorkflowTabFactory;
-class UBlendSpaceBase;
+class UBlendSpace;
 class IAnimSequenceCurveEditor;
 class IAnimationEditor;
+class IDetailLayoutBuilder;
+class FPreviewSceneDescriptionCustomization;
+struct FAnimAssetFindReplaceConfig;
 
 extern const FName PersonaAppName;
 
@@ -47,16 +51,19 @@ DECLARE_DELEGATE_TwoParams(FTickRecording, USkeletalMeshComponent* /*Component*/
 DECLARE_DELEGATE_OneParam(FOnViewportCreated, const TSharedRef<class IPersonaViewport>&);
 
 /** Called back when a details panel is created */
-DECLARE_DELEGATE_OneParam(FOnDetailsCreated, const TSharedRef<class IDetailsView>&);
+DECLARE_DELEGATE_OneParam(FOnDetailsCreated, const TSharedRef<IDetailsView>&);
 
 /** Called back when an anim sequence browser is created */
-DECLARE_DELEGATE_OneParam(FOnAnimationSequenceBrowserCreated, const TSharedRef<class IAnimationSequenceBrowser>&);
+DECLARE_DELEGATE_OneParam(FOnAnimationSequenceBrowserCreated, const TSharedRef<IAnimationSequenceBrowser>&);
 
 /** Called back when a Persona preview scene is created */
-DECLARE_MULTICAST_DELEGATE_OneParam(FOnPreviewSceneCreated, const TSharedRef<class IPersonaPreviewScene>&);
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnPreviewSceneCreated, const TSharedRef<IPersonaPreviewScene>&);
+
+/** Called back when a Persona preview scene settings are customized */
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnPreviewSceneSettingsCustomized, IDetailLayoutBuilder& DetailBuilder);
 
 /** Called back to register tabs */
-DECLARE_MULTICAST_DELEGATE_TwoParams(FOnRegisterTabs, FWorkflowAllowedTabSet&, TSharedPtr<class FAssetEditorToolkit>);
+DECLARE_MULTICAST_DELEGATE_TwoParams(FOnRegisterTabs, FWorkflowAllowedTabSet&, TSharedPtr<FAssetEditorToolkit>);
 
 /** Called back to register common layout extensions */
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnRegisterLayoutExtensions, FLayoutExtender&);
@@ -71,21 +78,28 @@ struct FPersonaToolkitArgs
 	FOnPreviewSceneCreated::FDelegate OnPreviewSceneCreated;
 
 	/** Whether to create a preview scene */
-	bool bCreatePreviewScene;
+	bool bCreatePreviewScene = true;
 
-	FPersonaToolkitArgs()
-		: bCreatePreviewScene(true)
-	{
-	}
+	/** 
+	 * Delegate called when the preview scene settings are being customized, supplies the IDetailLayoutBuilder
+	 * for the user to customize the layout however they wish. */
+	FOnPreviewSceneSettingsCustomized::FDelegate OnPreviewSceneSettingsCustomized;
+
+	/**
+	 * Set to true if the preview mesh can be associated with a skeleton different from the one being inspected
+	 * by Persona. Used for editors that are mostly skeleton agnostic.
+	 */
+	bool bPreviewMeshCanUseDifferentSkeleton = false;
+
+	FPersonaToolkitArgs() = default;
 };
 
 struct FAnimDocumentArgs
 {
-	FAnimDocumentArgs(const TSharedRef<class IPersonaPreviewScene>& InPreviewScene, const TSharedRef<class IPersonaToolkit>& InPersonaToolkit, const TSharedRef<class IEditableSkeleton>& InEditableSkeleton, FSimpleMulticastDelegate& InOnPostUndo, FSimpleMulticastDelegate& InOnSectionsChanged)
+	FAnimDocumentArgs(const TSharedRef<class IPersonaPreviewScene>& InPreviewScene, const TSharedRef<class IPersonaToolkit>& InPersonaToolkit, const TSharedRef<class IEditableSkeleton>& InEditableSkeleton, FSimpleMulticastDelegate& InOnSectionsChanged)
 		: PreviewScene(InPreviewScene)
 		, PersonaToolkit(InPersonaToolkit)
 		, EditableSkeleton(InEditableSkeleton)
-		, OnPostUndo(InOnPostUndo)
 		, OnSectionsChanged(InOnSectionsChanged)
 	{}
 
@@ -93,13 +107,68 @@ struct FAnimDocumentArgs
 	TWeakPtr<class IPersonaPreviewScene> PreviewScene;
 	TWeakPtr<class IPersonaToolkit> PersonaToolkit;
 	TWeakPtr<class IEditableSkeleton> EditableSkeleton;
-	FSimpleMulticastDelegate& OnPostUndo;
 	FSimpleMulticastDelegate& OnSectionsChanged;
 
 	/** Optional args */
 	FOnObjectsSelected OnDespatchObjectsSelected;
 	FOnInvokeTab OnDespatchInvokeTab;
 	FSimpleDelegate OnDespatchSectionsChanged;
+};
+
+struct FBlendSpaceEditorArgs
+{
+	// Called when a blendspace sample point is removed
+	FOnBlendSpaceSampleRemoved OnBlendSpaceSampleRemoved;
+
+	// Called when a blendspace sample point is added
+	FOnBlendSpaceSampleAdded OnBlendSpaceSampleAdded;
+	
+	// Called when a blendspace sample point is replaced
+	FOnBlendSpaceSampleReplaced OnBlendSpaceSampleReplaced;
+
+	// Called when the blendspace canvas is double clicked
+	FOnBlendSpaceNavigateUp OnBlendSpaceNavigateUp;
+
+	// Called when the blendspace canvas is double clicked
+	FOnBlendSpaceNavigateDown OnBlendSpaceNavigateDown;
+
+	// Called when the blendspace canvas is double clicked
+	FOnBlendSpaceCanvasDoubleClicked OnBlendSpaceCanvasDoubleClicked;
+
+	// Called when a blendspace sample point is double clicked
+	FOnBlendSpaceSampleDoubleClicked OnBlendSpaceSampleDoubleClicked;
+
+	// Called to get the overridden name of a blend sample
+	FOnGetBlendSpaceSampleName OnGetBlendSpaceSampleName;
+
+	// Allows the target preview position to be programmatically driven
+	TAttribute<FVector> PreviewPosition;
+
+	// Allows the current position to be programmatically driven
+	TAttribute<FVector> PreviewFilteredPosition;
+
+	// Allows an external widget to be inserted into a sample's tooltip
+	FOnExtendBlendSpaceSampleTooltip OnExtendSampleTooltip;
+
+	// Allows preview position to drive external node
+	FOnSetBlendSpacePreviewPosition OnSetPreviewPosition;
+
+	// Status bar to display hint messages in
+	FName StatusBarName = TEXT("AssetEditor.AnimationEditor.MainMenu");
+};
+
+struct FBlendSpacePreviewArgs
+{
+	TAttribute<const UBlendSpace*> PreviewBlendSpace;
+
+	// Allows the target preview position to be programatically driven
+	TAttribute<FVector> PreviewPosition;
+
+	// Allows the current preview position to be programatically driven
+	TAttribute<FVector> PreviewFilteredPosition;
+
+	// Called to get the overridden name of a blend sample
+	FOnGetBlendSpaceSampleName OnGetBlendSpaceSampleName;
 };
 
 /** Places that viewport text can be placed */
@@ -195,16 +264,22 @@ public:
 	virtual void ShutdownModule();
 
 	/** Create a re-usable toolkit that multiple asset editors that are concerned with USkeleton-related data can use */
-	virtual TSharedRef<IPersonaToolkit> CreatePersonaToolkit(UObject* InAsset, const FPersonaToolkitArgs& PersonaToolkitArgs = FPersonaToolkitArgs()) const;
-	virtual TSharedRef<IPersonaToolkit> CreatePersonaToolkit(USkeleton* InSkeleton, const FPersonaToolkitArgs& PersonaToolkitArgs = FPersonaToolkitArgs()) const;
-	virtual TSharedRef<IPersonaToolkit> CreatePersonaToolkit(UAnimationAsset* InAnimationAsset, const FPersonaToolkitArgs& PersonaToolkitArgs = FPersonaToolkitArgs()) const;
-	virtual TSharedRef<IPersonaToolkit> CreatePersonaToolkit(USkeletalMesh* InSkeletalMesh, const FPersonaToolkitArgs& PersonaToolkitArgs = FPersonaToolkitArgs()) const;
-	virtual TSharedRef<IPersonaToolkit> CreatePersonaToolkit(UAnimBlueprint* InAnimBlueprint, const FPersonaToolkitArgs& PersonaToolkitArgs = FPersonaToolkitArgs()) const;
-	virtual TSharedRef<IPersonaToolkit> CreatePersonaToolkit(UPhysicsAsset* InPhysicsAsset, const FPersonaToolkitArgs& PersonaToolkitArgs = FPersonaToolkitArgs()) const;
+	virtual TSharedRef<IPersonaToolkit> CreatePersonaToolkit(UObject* InAsset, const FPersonaToolkitArgs& PersonaToolkitArgs, USkeleton* InSkeleton = nullptr) const;
+	virtual TSharedRef<IPersonaToolkit> CreatePersonaToolkit(USkeleton* InSkeleton, const FPersonaToolkitArgs& PersonaToolkitArgs) const;
+	virtual TSharedRef<IPersonaToolkit> CreatePersonaToolkit(UAnimationAsset* InAnimationAsset, const FPersonaToolkitArgs& PersonaToolkitArgs) const;
+	virtual TSharedRef<IPersonaToolkit> CreatePersonaToolkit(USkeletalMesh* InSkeletalMesh, const FPersonaToolkitArgs& PersonaToolkitArgs) const;
+	virtual TSharedRef<IPersonaToolkit> CreatePersonaToolkit(UAnimBlueprint* InAnimBlueprint, const FPersonaToolkitArgs& PersonaToolkitArgs) const;
+	virtual TSharedRef<IPersonaToolkit> CreatePersonaToolkit(UPhysicsAsset* InPhysicsAsset, const FPersonaToolkitArgs& PersonaToolkitArgs) const;
 
 	/** Create an asset family for the supplied persona asset */
 	virtual TSharedRef<IAssetFamily> CreatePersonaAssetFamily(const UObject* InAsset) const;
 
+	/** Broadcast event that all asset families need to change */
+	virtual void BroadcastAssetFamilyChange() const;
+
+	/** Record that an asset was opened (forward to relevant asset families) */
+	virtual void RecordAssetOpened(const FAssetData& InAssetData) const;
+	
 	/** Create a shortcut widget for an asset family */
 	virtual TSharedRef<SWidget> CreateAssetFamilyShortcutWidget(const TSharedRef<class FWorkflowCentricApplication>& InHostingApp, const TSharedRef<class IAssetFamily>& InAssetFamily) const;
 
@@ -220,11 +295,17 @@ public:
 	/** Create an anim notifies tab factory */
 	virtual TSharedRef<FWorkflowTabFactory> CreateAnimNotifiesTabFactory(const TSharedRef<class FWorkflowCentricApplication>& InHostingApp, const TSharedRef<class IEditableSkeleton>& InEditableSkeleton, FOnObjectsSelected InOnObjectsSelected) const;
 
-	/** Create a skeleton cuve viewer tab factory */
-	virtual TSharedRef<FWorkflowTabFactory> CreateCurveViewerTabFactory(const TSharedRef<class FWorkflowCentricApplication>& InHostingApp, const TSharedRef<class IEditableSkeleton>& InEditableSkeleton, const TSharedRef<class IPersonaPreviewScene>& InPreviewScene, FSimpleMulticastDelegate& InOnPostUndo, FOnObjectsSelected InOnObjectsSelected) const;
+	UE_DEPRECATED(5.0, "Please use the overload that does not take a post-undo delegate")
+	virtual TSharedRef<FWorkflowTabFactory> CreateCurveViewerTabFactory(const TSharedRef<class FWorkflowCentricApplication>& InHostingApp, const TSharedPtr<class IEditableSkeleton>& InEditableSkeleton, const TSharedRef<class IPersonaPreviewScene>& InPreviewScene, FSimpleMulticastDelegate& InOnPostUndo, FOnObjectsSelected InOnObjectsSelected) const;
 
-	/** Create a retarget manager tab factory */
-	virtual TSharedRef<FWorkflowTabFactory> CreateRetargetManagerTabFactory(const TSharedRef<class FWorkflowCentricApplication>& InHostingApp, const TSharedRef<class IEditableSkeleton>& InEditableSkeleton, const TSharedRef<IPersonaPreviewScene>& InPreviewScene, FSimpleMulticastDelegate& InOnPostUndo) const;
+	/** Create a skeleton curve viewer tab factory */
+	virtual TSharedRef<FWorkflowTabFactory> CreateCurveViewerTabFactory(const TSharedRef<class FWorkflowCentricApplication>& InHostingApp, const TSharedPtr<class IEditableSkeleton>& InEditableSkeleton, const TSharedRef<class IPersonaPreviewScene>& InPreviewScene, FOnObjectsSelected InOnObjectsSelected) const;
+
+	/** Create a skeleton curve metadata editor tab factory */
+	virtual TSharedRef<FWorkflowTabFactory> CreateCurveMetadataEditorTabFactory(const TSharedRef<class FWorkflowCentricApplication>& InHostingApp, UObject* InMetadataHost, const TSharedRef<class IPersonaPreviewScene>& InPreviewScene, FOnObjectsSelected InOnObjectsSelected) const;
+
+	/** Create a retarget sources tab factory */
+	virtual TSharedRef<FWorkflowTabFactory> CreateRetargetSourcesTabFactory(const TSharedRef<class FWorkflowCentricApplication>& InHostingApp, const TSharedRef<class IEditableSkeleton>& InEditableSkeleton, const TSharedRef<IPersonaPreviewScene>& InPreviewScene, FSimpleMulticastDelegate& InOnPostUndo) const;
 
 	/** Create a tab factory used to configure preview scene settings */
 	virtual TSharedRef<FWorkflowTabFactory> CreateAdvancedPreviewSceneTabFactory(const TSharedRef<class FWorkflowCentricApplication>& InHostingApp, const TSharedRef<IPersonaPreviewScene>& InPreviewScene) const;
@@ -241,18 +322,40 @@ public:
 	/** Create a tab factory for editing anim blueprint preview & defaults */
 	virtual TSharedRef<FWorkflowTabFactory> CreateAnimBlueprintPreviewTabFactory(const TSharedRef<class FBlueprintEditor>& InBlueprintEditor, const TSharedRef<IPersonaPreviewScene>& InPreviewScene) const;
 
+	/** Create a tab factory for the pose watch manager */
+	virtual TSharedRef<FWorkflowTabFactory> CreatePoseWatchTabFactory(const TSharedRef<class FBlueprintEditor>& InBlueprintEditor) const;
+
 	/** Create a tab factory for editing anim blueprint parent overrides */
 	virtual TSharedRef<FWorkflowTabFactory> CreateAnimBlueprintAssetOverridesTabFactory(const TSharedRef<class FBlueprintEditor>& InBlueprintEditor, UAnimBlueprint* InAnimBlueprint, FSimpleMulticastDelegate& InOnPostUndo) const;
 
-	/** Create a tab factory for editing slot names and groups */
+	UE_DEPRECATED(5.0, "Please use the overload that does not take a post-undo delegate")
 	virtual TSharedRef<FWorkflowTabFactory> CreateSkeletonSlotNamesTabFactory(const TSharedRef<class FWorkflowCentricApplication>& InHostingApp, const TSharedRef<class IEditableSkeleton>& InEditableSkeleton, FSimpleMulticastDelegate& InOnPostUndo, FOnObjectSelected InOnObjectSelected) const;
 
+	/** Create a tab factory for editing slot names and groups */
+	virtual TSharedRef<FWorkflowTabFactory> CreateSkeletonSlotNamesTabFactory(const TSharedRef<class FWorkflowCentricApplication>& InHostingApp, const TSharedRef<class IEditableSkeleton>& InEditableSkeleton, FOnObjectSelected InOnObjectSelected) const;
+
+	/** Create a toolbox tab factory */
+	virtual TSharedRef<FWorkflowTabFactory> CreatePersonaToolboxTabFactory(const TSharedRef<class FPersonaAssetEditorToolkit>& InHostingApp) const;
+
+	/** Deprecated */
+	UE_DEPRECATED(5.0, "Please use the overload that takes a FBlendSpacePreviewArgs struct")
+	virtual TSharedRef<SWidget> CreateBlendSpacePreviewWidget(TAttribute<const UBlendSpace*> InBlendSpace, TAttribute<FVector> InBlendPosition, TAttribute<FVector> InFilteredBlendPosition) const;
+
 	/** Create a widget to preview a blendspace */
-	virtual TSharedRef<SWidget> CreateBlendSpacePreviewWidget(TAttribute<const UBlendSpaceBase*> InBlendSpace, TAttribute<FVector> InPosition) const;
+	virtual TSharedRef<SWidget> CreateBlendSpacePreviewWidget(const FBlendSpacePreviewArgs& InArgs) const;
+
+	/** Create a widget to edit a blendspace */
+	virtual TSharedRef<SWidget> CreateBlendSpaceEditWidget(UBlendSpace* InBlendSpace, const FBlendSpaceEditorArgs& InArgs) const;
 
 	/** Create a tab factory for editing montage sections */
 	virtual TSharedRef<FWorkflowTabFactory> CreateAnimMontageSectionsTabFactory(const TSharedRef<class FWorkflowCentricApplication>& InHostingApp, const TSharedRef<IPersonaToolkit>& InPersonaToolkit, FSimpleMulticastDelegate& InOnSectionsChanged) const;
 
+	/** Create a tab factory for finding and replacing in anim data */
+	virtual TSharedRef<FWorkflowTabFactory> CreateAnimAssetFindReplaceTabFactory(const TSharedRef<FWorkflowCentricApplication>& InHostingApp, const FAnimAssetFindReplaceConfig& InConfig) const;
+	
+	/** Create a widget for finding and replacing in anim data */
+	virtual TSharedRef<SWidget> CreateFindReplaceWidget(const FAnimAssetFindReplaceConfig& InConfig) const;
+	
 	/** Create a widget that acts as a document for an animation asset */
 	virtual TSharedRef<SWidget> CreateEditorWidgetForAnimDocument(const TSharedRef<IAnimationEditor>& InHostingApp, UObject* InAnimAsset, const FAnimDocumentArgs& InArgs, FString& OutDocumentLink);
 
@@ -269,8 +372,11 @@ public:
 	/** Import a new asset using the supplied skeleton */
 	virtual void ImportNewAsset(USkeleton* InSkeleton, EFBXImportType DefaultImportType);
 
-	/** Check all animations & skeletal meshes for curve usage */
-	virtual void TestSkeletonCurveNamesForUse(const TSharedRef<IEditableSkeleton>& InEditableSkeleton) const;
+	UE_DEPRECATED(5.3, "Please use TestSkeletonCurveMetaDataForUse")
+	virtual void TestSkeletonCurveNamesForUse(const TSharedRef<IEditableSkeleton>& InEditableSkeleton) const { TestSkeletonCurveMetaDataForUse(InEditableSkeleton); }
+
+	/** Check all animations & skeletal meshes for curve metadata usage */
+	virtual void TestSkeletonCurveMetaDataForUse(const TSharedRef<IEditableSkeleton>& InEditableSkeleton) const;
 
 	/** Apply Compression to list of animations and optionally asks to pick an overrides to the bone compression settings */
 	virtual void ApplyCompression(TArray<TWeakObjectPtr<class UAnimSequence>>& AnimSequences, bool bPickBoneSettingsOverride);
@@ -309,9 +415,9 @@ public:
 	virtual FOnPreviewSceneCreated& OnPreviewSceneCreated() { return OnPreviewSceneCreatedDelegate; }
 
 	/** Settings for AddCommonToolbarExtensions */
-	struct FCommonToolbarExtensionArgs
+	struct FCommonToolMenuExtensionArgs
 	{
-		FCommonToolbarExtensionArgs()
+		FCommonToolMenuExtensionArgs()
 			: bPreviewMesh(true)
 			, bPreviewAnimation(true)
 			, bReferencePose(false)
@@ -331,7 +437,15 @@ public:
 		bool bCreateAsset;
 	};
 
-	/** Add common toobar extensions */
+	typedef FCommonToolMenuExtensionArgs FCommonToolbarExtensionArgs;
+
+	/** Add common menu extensions */
+	virtual void AddCommonMenuExtensions(UToolMenu* InToolMenu, const FCommonToolMenuExtensionArgs& InArgs = FCommonToolMenuExtensionArgs());
+
+	/** Add common toolbar extensions */
+	virtual void AddCommonToolbarExtensions(UToolMenu* InToolMenu, const FCommonToolMenuExtensionArgs& InArgs = FCommonToolMenuExtensionArgs());
+
+	/** Add common toobar extensions (legacy support) - DEPRECATED */
 	virtual void AddCommonToolbarExtensions(FToolBarBuilder& InToolbarBuilder, TSharedRef<IPersonaToolkit> PersonaToolkit, const FCommonToolbarExtensionArgs& InArgs = FCommonToolbarExtensionArgs());
 
 	/** Register common layout extensions */
@@ -340,6 +454,12 @@ public:
 	/** Register common tabs */
 	virtual FOnRegisterTabs& OnRegisterTabs() { return OnRegisterTabsDelegate; }
 
+	/** Create a widget that can choose a curve name. Derives available names from the asset registry list of assets that use the specified skeleton. */
+	virtual TSharedRef<SWidget> CreateCurvePicker(const USkeleton* InSkeleton, FOnCurvePicked InOnCurvePicked, FIsCurveNameMarkedForExclusion InIsCurveNameMarkedForExclusion = FIsCurveNameMarkedForExclusion());
+
+	UE_DEPRECATED(5.3, "Please use CreateCurvePicker that takes a const USkeleton*")
+	virtual TSharedRef<SWidget> CreateCurvePicker(TSharedRef<IEditableSkeleton> InEditableSkeleton, FOnCurvePicked InOnCurvePicked, FIsCurveNameMarkedForExclusion InIsCurveNameMarkedForExclusion = FIsCurveNameMarkedForExclusion());
+	
 private:
 	/** When a new anim notify blueprint is created, this will handle post creation work such as adding non-event default nodes */
 	void HandleNewAnimNotifyBlueprintCreated(UBlueprint* InBlueprint);
@@ -357,24 +477,25 @@ private:
 		Max
 	};
 
-	TSharedRef< SWidget > GenerateCreateAssetMenu(TWeakPtr<IPersonaToolkit> InWeakPersonaToolkit) const;
+	static TSharedRef< SWidget > GenerateCreateAssetMenu(TWeakPtr<IPersonaToolkit> InWeakPersonaToolkit);
 
-	void FillCreateAnimationMenu(FMenuBuilder& MenuBuilder, TWeakPtr<IPersonaToolkit> InWeakPersonaToolkit) const;
+	static void FillCreateAnimationMenu(FMenuBuilder& MenuBuilder, TWeakPtr<IPersonaToolkit> InWeakPersonaToolkit);
 
-	void FillCreateAnimationFromCurrentAnimationMenu(FMenuBuilder& MenuBuilder, TWeakPtr<IPersonaToolkit> InWeakPersonaToolkit) const;
+	static void FillCreateAnimationFromCurrentAnimationMenu(FMenuBuilder& MenuBuilder, TWeakPtr<IPersonaToolkit> InWeakPersonaToolkit);
 
-	void FillCreatePoseAssetMenu(FMenuBuilder& MenuBuilder, TWeakPtr<IPersonaToolkit> InWeakPersonaToolkit) const;
+	static void FillCreatePoseAssetMenu(FMenuBuilder& MenuBuilder, TWeakPtr<IPersonaToolkit> InWeakPersonaToolkit);
 
-	void FillInsertPoseMenu(FMenuBuilder& MenuBuilder, TWeakPtr<IPersonaToolkit> InWeakPersonaToolkit) const;
+	static void FillInsertPoseMenu(FMenuBuilder& MenuBuilder, TWeakPtr<IPersonaToolkit> InWeakPersonaToolkit);
 
-	void InsertCurrentPoseToAsset(const FAssetData& NewPoseAssetData, TWeakPtr<IPersonaToolkit> InWeakPersonaToolkit);
+	static void InsertCurrentPoseToAsset(const FAssetData& NewPoseAssetData, TWeakPtr<IPersonaToolkit> InWeakPersonaToolkit);
 
-	bool CreateAnimation(const TArray<UObject*> NewAssets, const EPoseSourceOption Option, TWeakPtr<IPersonaToolkit> InWeakPersonaToolkit);
+	static bool CreateAnimation(const TArray<UObject*> NewAssets, const EPoseSourceOption Option, TWeakPtr<IPersonaToolkit> InWeakPersonaToolkit);
 
-	bool CreatePoseAsset(const TArray<UObject*> NewAssets, const EPoseSourceOption Option, TWeakPtr<IPersonaToolkit> InWeakPersonaToolkit);
+	static bool CreatePoseAsset(const TArray<UObject*> NewAssets, const EPoseSourceOption Option, TWeakPtr<IPersonaToolkit> InWeakPersonaToolkit);
 	
-	bool HandleAssetCreated(const TArray<UObject*> NewAssets);
+	static bool HandleAssetCreated(const TArray<UObject*> NewAssets);
 
+	void RegisterToolMenuExtensions();
 private:
 	TSharedPtr<FExtensibilityManager> MenuExtensibilityManager;
 	TSharedPtr<FExtensibilityManager> ToolBarExtensibilityManager;

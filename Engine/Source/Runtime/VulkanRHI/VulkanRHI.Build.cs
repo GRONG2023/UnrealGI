@@ -1,34 +1,31 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 using UnrealBuildTool;
-using System;
-using System.IO;
 
+[SupportedPlatformGroups("Desktop", "Android")]
 public class VulkanRHI : ModuleRules
 {
-	protected virtual bool bShouldIncludePlatformPrivate { get { return true; } }
-
 	public VulkanRHI(ReadOnlyTargetRules Target) : base(Target)
 	{
+		IWYUSupport = IWYUSupport.None;
 		bLegalToDistributeObjectCode = true;
+		bBuildLocallyWithSNDBS = false; // VulkanPlatform.h
 
-		PrivateIncludePaths.Add("Runtime/VulkanRHI/Private");
-		if (Target.Platform == UnrealTargetPlatform.Win32 || Target.Platform == UnrealTargetPlatform.Win64)
+		if (Target.Platform.IsInGroup(UnrealPlatformGroup.Windows))
 		{
-			PrivateIncludePaths.Add("Runtime/VulkanRHI/Private/Windows");
 			AddEngineThirdPartyPrivateStaticDependencies(Target, "AMD_AGS");
 		}
-		else if (Target.IsInPlatformGroup(UnrealPlatformGroup.Unix))
+
+		if (Target.Platform.IsInGroup(UnrealPlatformGroup.Windows))
 		{
-			if (Target.IsInPlatformGroup(UnrealPlatformGroup.Linux))
-			{
-				PrivateIncludePaths.Add("Runtime/VulkanRHI/Private/Linux");
-			}
+			PublicDefinitions.Add("VK_USE_PLATFORM_WIN32_KHR=1");
+			PublicDefinitions.Add("VK_USE_PLATFORM_WIN32_KHX=1");
 		}
-		else if (bShouldIncludePlatformPrivate)
+		else if (Target.Platform.IsInGroup(UnrealPlatformGroup.Android))
 		{
-			PrivateIncludePaths.Add("Runtime/VulkanRHI/Private/" + Target.Platform);
+			PublicDefinitions.Add("VK_USE_PLATFORM_ANDROID_KHR=1");
 		}
+
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
@@ -37,7 +34,8 @@ public class VulkanRHI : ModuleRules
 				"CoreUObject",
 				"ApplicationCore",
 				"Engine", 
-				"RHI", 
+				"RHI",
+				"RHICore",
 				"RenderCore", 
 				"HeadMountedDisplay",
                 "PreLoadScreen",
@@ -45,68 +43,41 @@ public class VulkanRHI : ModuleRules
             }
         );
 
-		if (Target.Platform == UnrealTargetPlatform.Win64 || Target.IsInPlatformGroup(UnrealPlatformGroup.Linux))
+		if (Target.Platform == UnrealTargetPlatform.Android)
+		{
+			PrivateIncludePathModuleNames.AddRange(
+				new string[]
+				{
+					"Launch"
+				}
+			);
+
+			// for Swappy
+			PublicDefinitions.Add("USE_ANDROID_SWAPPY=1");
+			PrivateDependencyModuleNames.AddRange(
+				new string[]
+				{
+				"Launch",
+				"GoogleGameSDK"
+				}
+			);
+		}
+
+		if (Target.Platform.IsInGroup(UnrealPlatformGroup.Windows) || Target.IsInPlatformGroup(UnrealPlatformGroup.Linux))
 		{
 			AddEngineThirdPartyPrivateStaticDependencies(Target, "NVAftermath");
 		}
 
-		if (Target.Platform == UnrealTargetPlatform.Win32 || Target.Platform == UnrealTargetPlatform.Win64
-			|| Target.Platform == UnrealTargetPlatform.Android || Target.Platform == UnrealTargetPlatform.Lumin)
+		if (Target.Platform.IsInGroup(UnrealPlatformGroup.Windows) || Target.Platform == UnrealTargetPlatform.Android
+			|| Target.IsInPlatformGroup(UnrealPlatformGroup.Unix) || Target.Platform == UnrealTargetPlatform.Mac)
 		{
             AddEngineThirdPartyPrivateStaticDependencies(Target, "Vulkan");
         }
-        else if (Target.IsInPlatformGroup(UnrealPlatformGroup.Unix))
+
+		if (Target.IsInPlatformGroup(UnrealPlatformGroup.Linux))
 		{
-			if (Target.IsInPlatformGroup(UnrealPlatformGroup.Linux))
-			{
-				PrivateDependencyModuleNames.Add("ApplicationCore");
-				AddEngineThirdPartyPrivateStaticDependencies(Target, "SDL2");
-
-				string VulkanSDKPath = Environment.GetEnvironmentVariable("VULKAN_SDK");
-				bool bSDKInstalled = !String.IsNullOrEmpty(VulkanSDKPath);
-				if (BuildHostPlatform.Current.Platform != UnrealTargetPlatform.Linux || !bSDKInstalled)
-				{
-					AddEngineThirdPartyPrivateStaticDependencies(Target, "Vulkan");
-				}
-				else
-				{
-					PrivateIncludePaths.Add(VulkanSDKPath + "/include");
-					PrivateIncludePaths.Add(VulkanSDKPath + "/include/vulkan");
-					PublicAdditionalLibraries.Add(Path.Combine(VulkanSDKPath, "lib", "libvulkan.so"));
-				}
-			}
-			else
-			{
-				AddEngineThirdPartyPrivateStaticDependencies(Target, "VkHeadersExternal");
-			}
-		}
-        else if (Target.Platform == UnrealTargetPlatform.Mac)
-        {
-			string VulkanSDKPath = Environment.GetEnvironmentVariable("VULKAN_SDK");
-
-			bool bHaveVulkan = false;
-			if (!String.IsNullOrEmpty(VulkanSDKPath))
-			{
-				bHaveVulkan = true;
-				PrivateIncludePaths.Add(VulkanSDKPath + "/Include");
-			}
-
-			if (bHaveVulkan)
-			{
-				if (Target.Configuration != UnrealTargetConfiguration.Shipping)
-				{
-					PrivateIncludePathModuleNames.AddRange(
-						new string[]
-						{
-							"TaskGraph",
-						}
-					);
-				}
-			}
-			else
-			{
-				PrecompileForTargets = PrecompileTargetsType.None;
-			}
+			PrivateDependencyModuleNames.Add("ApplicationCore");
+			AddEngineThirdPartyPrivateStaticDependencies(Target, "SDL2");
 		}
 		else
 		{

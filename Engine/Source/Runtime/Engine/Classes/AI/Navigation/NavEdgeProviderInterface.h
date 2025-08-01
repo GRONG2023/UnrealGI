@@ -2,12 +2,14 @@
 
 #pragma once
 
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "CoreMinimal.h"
+#endif
 #include "UObject/ObjectMacros.h"
 #include "UObject/Interface.h"
 #include "NavEdgeProviderInterface.generated.h"
 
-struct ENGINE_API FNavEdgeSegment
+struct FNavEdgeSegment
 {
 	FVector P0, P1;
 };

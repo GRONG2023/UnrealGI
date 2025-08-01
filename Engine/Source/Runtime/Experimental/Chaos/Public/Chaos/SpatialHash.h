@@ -7,7 +7,7 @@
 namespace Chaos
 {
 template<class T>
-class CHAOS_API TSpatialHash
+class TSpatialHash
 {
  public:
 	TSpatialHash(const TArray<TVec3<T>>& Particles, const T Radius)
@@ -38,7 +38,7 @@ private:
 	void Init(const T Radius);
 	void Init();
 	
-	T SmallestAxis() const
+	int32 SmallestAxis() const
 	{
 		TVec3<T> Extents = MBoundingBox.Extents();
 

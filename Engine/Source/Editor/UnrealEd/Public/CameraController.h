@@ -221,7 +221,7 @@ public:
 	/** Constructor */
 	UNREALED_API FEditorCameraController();
 
-	UNREALED_API virtual ~FEditorCameraController() {}
+	virtual ~FEditorCameraController() {}
 
 	/** Sets the configuration for this camera controller */
 	void SetConfig( const FCameraControllerConfig& InConfig )
@@ -265,8 +265,12 @@ public:
 		FVector& InOutCameraEuler,
 		float& InOutCameraFOV );
 
-	/**true if this camera currently has rotational velocity*/
+	/** @return True if this camera currently has rotational velocity. */
 	bool IsRotating (void) const;
+
+	/** Reset the different camera velocity. */
+	UNREALED_API void ResetVelocity();
+
 private:
 
 	/**

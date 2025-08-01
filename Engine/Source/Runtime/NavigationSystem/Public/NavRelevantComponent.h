@@ -2,39 +2,41 @@
 
 #pragma once
 
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "CoreMinimal.h"
+#endif
 #include "UObject/ObjectMacros.h"
 #include "Components/ActorComponent.h"
 #include "AI/Navigation/NavRelevantInterface.h"
 #include "NavRelevantComponent.generated.h"
 
-UCLASS()
-class NAVIGATIONSYSTEM_API UNavRelevantComponent : public UActorComponent, public INavRelevantInterface
+UCLASS(MinimalAPI)
+class UNavRelevantComponent : public UActorComponent, public INavRelevantInterface
 {
 	GENERATED_UCLASS_BODY()
 
 	//~ Begin UActorComponent Interface
-	virtual void OnRegister() override;
-	virtual void OnUnregister() override;
+	NAVIGATIONSYSTEM_API virtual void OnRegister() override;
+	NAVIGATIONSYSTEM_API virtual void OnUnregister() override;
 	//~ End UActorComponent Interface
 
 	//~ Begin INavRelevantInterface Interface
-	virtual FBox GetNavigationBounds() const override;
-	virtual bool IsNavigationRelevant() const override;
-	virtual void UpdateNavigationBounds() override;
-	virtual UObject* GetNavigationParent() const override;
+	NAVIGATIONSYSTEM_API virtual FBox GetNavigationBounds() const override;
+	NAVIGATIONSYSTEM_API virtual bool IsNavigationRelevant() const override;
+	NAVIGATIONSYSTEM_API virtual void UpdateNavigationBounds() override;
+	NAVIGATIONSYSTEM_API virtual UObject* GetNavigationParent() const override;
 	//~ End INavRelevantInterface Interface
 	
-	virtual void CalcAndCacheBounds() const;
+	NAVIGATIONSYSTEM_API virtual void CalcAndCacheBounds() const;
 
 	UFUNCTION(BlueprintCallable, Category="AI|Navigation")
-	void SetNavigationRelevancy(bool bRelevant);
+	NAVIGATIONSYSTEM_API void SetNavigationRelevancy(bool bRelevant);
 
 	/** force relevancy and skip attaching navigation data to owner's root entry */
-	void ForceNavigationRelevancy(bool bForce);
+	NAVIGATIONSYSTEM_API void ForceNavigationRelevancy(bool bForce);
 
 	/** force refresh in navigation octree */
-	void RefreshNavigationModifiers();
+	NAVIGATIONSYSTEM_API void RefreshNavigationModifiers();
 	
 protected:
 
@@ -49,5 +51,5 @@ protected:
 	uint32 bNavParentCacheInitialized : 1;
 
 	UPROPERTY(transient)
-	UObject* CachedNavParent;
+	TObjectPtr<UObject> CachedNavParent;
 };

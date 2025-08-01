@@ -2,7 +2,11 @@
 
 #pragma once
 
+#include "CodecPacket.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "HAL/Platform.h"
 
 //
 // Windows only include
@@ -13,8 +17,7 @@
 #pragma warning(disable: 4005)
 
 THIRD_PARTY_INCLUDES_START
-#include "Windows/AllowWindowsPlatformTypes.h"
-#include "Windows/PreWindowsApi.h"
+#include "Microsoft/AllowMicrosoftPlatformTypes.h"
 #include <d3d11.h>
 #include <mfobjects.h>
 #include <mftransform.h>
@@ -27,40 +30,14 @@ THIRD_PARTY_INCLUDES_START
 #include <d3d11_1.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
-#include "Windows/PostWindowsApi.h"
-#include "Windows/HideWindowsPlatformTypes.h"
+#include "Microsoft/HideMicrosoftPlatformTypes.h"
 THIRD_PARTY_INCLUDES_END
 
 #endif // PLATFORM_WINDOWS
 
-//
-// XboxOne only includes
-//
-#if (PLATFORM_XBOXONE && WITH_LEGACY_XDK)
-
-#pragma warning(push)
-#pragma warning(disable: 4005)
-
-THIRD_PARTY_INCLUDES_START
-#include "XboxCommonAllowPlatformTypes.h"
-#include "XboxCommonPreApi.h"
-#include <d3d11_x.h>
-#include <d3d12_x.h>
-#include <d3dx12_x.h>
-#include <mfobjects.h>
-#include <mftransform.h>
-#include <mfapi.h>
-#include <mferror.h>
-#include <mfidl.h>
-#include <codecapi.h>
-#include <mfreadwrite.h>
-#include "XboxCommonPostApi.h"
-#include "XboxCommonHidePlatformTypes.h"
-THIRD_PARTY_INCLUDES_END
-
-#endif  // (PLATFORM_XBOXONE && WITH_LEGACY_XDK)
-
-#define WMFMEDIA_SUPPORTED_PLATFORM (PLATFORM_WINDOWS && (WINVER >= 0x0600 /*Vista*/) && !UE_SERVER)
+#ifndef WMFMEDIA_SUPPORTED_PLATFORM
+	#define WMFMEDIA_SUPPORTED_PLATFORM (PLATFORM_WINDOWS && (WINVER >= 0x0600 /*Vista*/) && !UE_SERVER)
+#endif
 
 #if PLATFORM_WINDOWS
 struct ID3D11DeviceChild;
@@ -70,7 +47,7 @@ namespace AVEncoder
 {
 	const int64 TimeStampNone = 0x7fffffffll;
 
-	enum class EVideoFrameFormat
+	enum class UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") EVideoFrameFormat
 	{
 		Undefined,				// (not-yet) defined format
 		YUV420P,				// Planar YUV420 format in CPU memory
@@ -80,7 +57,7 @@ namespace AVEncoder
 		VULKAN_R8G8B8A8_UNORM,
 	};
 
-	enum class EH264Profile
+	enum class UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") EH264Profile
 	{
 		UNKNOWN,
 		CONSTRAINED_BASELINE,
@@ -90,6 +67,7 @@ namespace AVEncoder
 		HIGH,
 	};
 
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	inline FString ToString(EVideoFrameFormat Format)
 	{
 		switch (Format)
@@ -109,8 +87,9 @@ namespace AVEncoder
 			return FString("EVideoFrameFormat::Undefined");
 		}
 	}
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
-	enum class ECodecType
+	enum class UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") ECodecType
 	{
 		Undefined,
 		H264,
@@ -125,44 +104,16 @@ namespace AVEncoder
 	const uint32 H264Profile_ConstrainedHigh = 1 << 3;
 	const uint32 H264Profile_High = 1 << 4;
 
-	class FCodecPacket
-	{
-	public:
-		// clone packet if a longer term copy is needed
-		virtual const FCodecPacket* Clone() const = 0;
-		// release a cloned copy
-		virtual void ReleaseClone() const = 0;
-
-		const uint8*	Data = nullptr;			// pointer to encoded data
-		uint32			DataSize = 0;			// number of bytes of encoded data
-		bool			IsKeyFrame = false;		// whether or not packet represents a key frame
-		uint32			VideoQP = 0;
-
-		/**
-		 * Encoding/Decoding latency
-		 */
-		struct
-		{
-			FTimespan StartTs;
-			FTimespan FinishTs;
-		} Timings;
-
-		uint32 Framerate;
-
-	protected:
-		FCodecPacket() = default;
-		virtual ~FCodecPacket() = default;
-		FCodecPacket(const FCodecPacket&) = delete;
-		FCodecPacket& operator=(const FCodecPacket&) = delete;
-	};
-
-	struct FVideoEncoderInfo
+	struct UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") FVideoEncoderInfo
 	{
 		uint32						ID = 0;
-		ECodecType					CodecType = ECodecType::Undefined;
 		uint32						MaxWidth = 0;
 		uint32						MaxHeight = 0;
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		ECodecType					CodecType = ECodecType::Undefined;
 		TArray<EVideoFrameFormat>	SupportedInputFormats;
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
 		struct
 		{
 			uint32					SupportedProfiles = 0;
@@ -172,12 +123,15 @@ namespace AVEncoder
 	};
 
 
-	struct FVideoDecoderInfo
+	struct UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") FVideoDecoderInfo
 	{
 		uint32						ID = 0;
-		ECodecType					CodecType = ECodecType::Undefined;
 		uint32						MaxWidth = 0;
 		uint32						MaxHeight = 0;
+
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		ECodecType					CodecType = ECodecType::Undefined;
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	};
 
 #if PLATFORM_WINDOWS

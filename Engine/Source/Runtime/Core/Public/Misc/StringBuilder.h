@@ -2,16 +2,26 @@
 
 #pragma once
 
-#include "CoreTypes.h"
 #include "Containers/StringFwd.h"
 #include "Containers/StringView.h"
+#include "CoreTypes.h"
+#include "HAL/PlatformString.h"
+#include "HAL/UnrealMemory.h"
+#include "Misc/AssertionMacros.h"
 #include "Misc/CString.h"
-#include "Templates/AndOrNot.h"
 #include "Templates/EnableIf.h"
-#include "Templates/IsArrayOrRefOfType.h"
+#include "Templates/IsArrayOrRefOfTypeByPredicate.h"
 #include "Templates/IsValidVariadicFunctionArg.h"
 #include "Templates/UnrealTemplate.h"
+#include "Templates/UnrealTypeTraits.h"
+#include "Traits/IsCharEncodingCompatibleWith.h"
+#include "Traits/IsCharEncodingSimplyConvertibleTo.h"
+#include "Traits/IsCharType.h"
 #include "Traits/IsContiguousContainer.h"
+
+#include <type_traits>
+
+template <typename T> struct TIsContiguousContainer;
 
 /**
  * String Builder
@@ -57,11 +67,11 @@ public:
 
 	/** Whether the given type can be appended to this builder using the append operator. */
 	template <typename AppendType>
-	using TCanAppend = TIsSame<BuilderType&, decltype(DeclVal<BuilderType&>() << DeclVal<AppendType>())>;
+	inline constexpr static bool TCanAppend_V = std::is_same_v<BuilderType&, decltype(DeclVal<BuilderType&>() << DeclVal<AppendType>())>;
 
 	/** Whether the given range type can have its elements appended to the builder using the append operator. */
 	template <typename RangeType>
-	using TCanAppendRange = TAnd<TIsContiguousContainer<RangeType>, TCanAppend<decltype(*::GetData(DeclVal<RangeType>()))>>;
+	inline constexpr static bool TCanAppendRange_V = TIsContiguousContainer<RangeType>::Value && TCanAppend_V<decltype(*::GetData(DeclVal<RangeType>()))>;
 
 				TStringBuilderBase() = default;
 	CORE_API	~TStringBuilderBase();
@@ -72,18 +82,64 @@ public:
 	TStringBuilderBase& operator=(const TStringBuilderBase&) = delete;
 	TStringBuilderBase& operator=(TStringBuilderBase&&) = delete;
 
+	TStringBuilderBase& operator=(ViewType Str)
+	{
+		Reset();
+		return Append(Str);
+	}
+	
+	TStringBuilderBase& operator=(const CharType* Str)
+	{
+		return *this = ViewType(Str);
+	}
+
 	inline TStringBuilderBase(CharType* BufferPointer, int32 BufferCapacity)
 	{
 		Initialize(BufferPointer, BufferCapacity);
 	}
 
-	inline int32 Len() const					{ return int32(CurPos - Base); }
-	inline CharType* GetData()					{ return Base; }
-	inline const CharType* GetData() const		{ return Base; }
-	inline const CharType* ToString() const		{ EnsureNulTerminated(); return Base; }
-	inline const CharType* operator*() const	{ EnsureNulTerminated(); return Base; }
+	inline int32 Len() const { return int32(CurPos - Base); }
 
-	inline const CharType	LastChar() const	{ return *(CurPos - 1); }
+	/** Returns a pointer to Len() code units that are not necessarily null-terminated. */
+	inline CharType* GetData() UE_LIFETIMEBOUND { return Base; }
+	inline const CharType* GetData() const UE_LIFETIMEBOUND { return Base; }
+
+	/** Returns a pointer to a null-terminated string that is valid until the builder is mutated. */
+	inline const CharType* ToString() const UE_LIFETIMEBOUND
+	{
+		EnsureNulTerminated();
+		return Base;
+	}
+
+	/** Returns a pointer to a null-terminated string that is valid until the builder is mutated. */
+	inline const CharType* operator*() const UE_LIFETIMEBOUND
+	{
+		EnsureNulTerminated();
+		return Base;
+	}
+
+	/** Returns a view of the string that is valid until the builder is mutated. */
+	inline ViewType ToView() const UE_LIFETIMEBOUND
+	{
+		return ViewType(Base, Len());
+	}
+
+	/** Returns the last character, technically the last code unit. */
+	inline const CharType LastChar() const
+	{
+		return *(CurPos - 1);
+	}
+
+	/**
+	 * Helper function to return the amount of memory allocated by this container.
+	 * Does not include the sizeof of the inline buffer, only includes the size of the overflow buffer.
+	 *
+	 * @returns Number of bytes allocated by this container.
+	 */
+	SIZE_T GetAllocatedSize() const
+	{
+		return bIsDynamic ? (End - Base) * sizeof(CharType) : 0;
+	}
 
 	/**
 	 * Empties the string builder, but doesn't change memory allocation.
@@ -102,7 +158,7 @@ public:
 	 */
 	inline int32 AddUninitialized(int32 InCount)
 	{
-		EnsureCapacity(InCount);
+		EnsureAdditionalCapacity(InCount);
 		const int32 OldCount = Len();
 		CurPos += InCount;
 		return OldCount;
@@ -117,69 +173,100 @@ public:
 		CurPos -= InCount;
 	}
 
-	inline BuilderType& Append(CharType Char)
+	template <typename OtherCharType,
+		std::enable_if_t<TIsCharType<OtherCharType>::Value>* = nullptr>
+	inline BuilderType& Append(const OtherCharType* const String, const int32 Length)
 	{
-		EnsureCapacity(1);
+		int32 ConvertedLength = FPlatformString::ConvertedLength<CharType>(String, Length);
+		EnsureAdditionalCapacity(ConvertedLength);
+		if (Length)
+		{
+			CurPos = FPlatformString::Convert(CurPos, ConvertedLength, String, Length);
+		}
+		return *this;
+	}
 
-		*CurPos++ = Char;
+	template <typename CharRangeType>
+	inline auto Append(CharRangeType&& Range) -> decltype(Append(MakeStringView(Forward<CharRangeType>(Range)).GetData(), int32(0)))
+	{
+		const TStringView View = MakeStringView(Forward<CharRangeType>(Range));
+		return Append(View.GetData(), View.Len());
+	}
+
+	template <
+		typename AppendedCharType,
+		std::enable_if_t<TIsCharType<AppendedCharType>::Value>* = nullptr
+	>
+	inline BuilderType& AppendChar(AppendedCharType Char)
+	{
+		if constexpr (TIsCharEncodingSimplyConvertibleTo_V<AppendedCharType, CharType>)
+	{
+		EnsureAdditionalCapacity(1);
+			*CurPos++ = (CharType)Char;
+		}
+		else
+		{
+			int32 ConvertedLength = FPlatformString::ConvertedLength<CharType>(&Char, 1);
+			EnsureAdditionalCapacity(ConvertedLength);
+			CurPos = FPlatformString::Convert(CurPos, ConvertedLength, &Char, 1);
+		}
 
 		return *this;
 	}
 
-	inline BuilderType& AppendAnsi(const ANSICHAR* NulTerminatedString)
+	UE_DEPRECATED(5.3, "Use Append instead of AppendAnsi.")
+	inline BuilderType& AppendAnsi(const FAnsiStringView String) { return Append(String); }
+
+	/** Replace characters at given position and length with substring */
+	void ReplaceAt(int32 Pos, int32 RemoveLen, ViewType Str)
 	{
-		if (!NulTerminatedString)
+		check(Pos >= 0);
+		check(RemoveLen >= 0);
+		check(Pos + RemoveLen <= Len());
+
+		const int DeltaLen = Str.Len() - RemoveLen;		
+		if (DeltaLen < 0)
 		{
-			return *this;
+			CurPos += DeltaLen;
+
+			for (CharType* It = Base + Pos, *NewEnd = CurPos; It != NewEnd; ++It)
+			{
+				*It = *(It - DeltaLen);
+			}
 		}
-
-		return AppendAnsi(NulTerminatedString, TCString<ANSICHAR>::Strlen(NulTerminatedString));
-	}
-
-	inline BuilderType& AppendAnsi(const FAnsiStringView& AnsiString)
-	{
-		return AppendAnsi(AnsiString.GetData(), AnsiString.Len());
-	}
-
-	inline BuilderType& AppendAnsi(const ANSICHAR* String, const int32 Length)
-	{
-		EnsureCapacity(Length);
-
-		CharType* RESTRICT Dest = CurPos;
-		CurPos += Length;
-
-		for (int32 i = 0; i < Length; ++i)
+		else if (DeltaLen > 0)
 		{
-			Dest[i] = String[i];
+			EnsureAdditionalCapacity(DeltaLen);
+			CurPos += DeltaLen;
+
+			for (CharType* It = CurPos - 1, *StopIt = Base + Pos + Str.Len() - 1; It != StopIt; --It)
+			{
+				*It = *(It - DeltaLen);
+			}
 		}
-
-		return *this;
-	}
-
-	inline BuilderType& Append(const CharType* NulTerminatedString)
-	{
-		if (!NulTerminatedString)
+		
+		if (Str.Len())
 		{
-			return *this;
+			FMemory::Memcpy(Base + Pos, Str.GetData(), Str.Len() * sizeof(CharType));
 		}
-
-		return Append(NulTerminatedString, TCString<CharType>::Strlen(NulTerminatedString));
 	}
 
-	inline BuilderType& Append(const ViewType& StringView)
+	/** Insert substring at given position */
+	void InsertAt(int32 Pos, ViewType Str)
 	{
-		return Append(StringView.GetData(), StringView.Len());
+		ReplaceAt(Pos, 0, Str);
 	}
 
-	inline BuilderType& Append(const CharType* String, int32 Length)
+	/** Remove characters at given position */
+	void RemoveAt(int32 Pos, int32 RemoveLen)
 	{
-		EnsureCapacity(Length);
-		CharType* RESTRICT Dest = CurPos;
-		CurPos += Length;
+		ReplaceAt(Pos, RemoveLen, ViewType());
+	}
 
-		FMemory::Memcpy(Dest, String, Length * sizeof(CharType));
-
-		return *this;
+	/** Insert prefix */
+	void Prepend(ViewType Str)
+	{
+		ReplaceAt(0, 0, Str);
 	}
 
 	/**
@@ -194,7 +281,7 @@ public:
 	 * @return The builder, to allow additional operations to be composed with this one.
 	 */
 	template <typename RangeType, typename DelimiterType,
-		typename = typename TEnableIf<TAnd<TCanAppendRange<RangeType&&>, TCanAppend<DelimiterType&&>>::Value>::Type>
+		std::enable_if_t<TCanAppendRange_V<RangeType&&> && TCanAppend_V<DelimiterType&&>>* = nullptr>
 	inline BuilderType& Join(RangeType&& InRange, DelimiterType&& InDelimiter)
 	{
 		bool bFirst = true;
@@ -227,7 +314,7 @@ public:
 	 * @return The builder, to allow additional operations to be composed with this one.
 	 */
 	template <typename RangeType, typename DelimiterType, typename QuoteType,
-		typename = typename TEnableIf<TAnd<TCanAppendRange<RangeType>, TCanAppend<DelimiterType&&>, TCanAppend<QuoteType&&>>::Value>::Type>
+		std::enable_if_t<TCanAppendRange_V<RangeType> && TCanAppend_V<DelimiterType&&> && TCanAppend_V<QuoteType&&>>* = nullptr>
 	inline BuilderType& JoinQuoted(RangeType&& InRange, DelimiterType&& InDelimiter, QuoteType&& InQuote)
 	{
 		bool bFirst = true;
@@ -246,18 +333,30 @@ public:
 		return *this;
 	}
 
+private:
+	template <typename SrcEncoding>
+	using TIsCharEncodingCompatibleWithCharType = TIsCharEncodingCompatibleWith<SrcEncoding, CharType>;
+
+public:
 	/**
 	 * Appends to the string builder similarly to how classic sprintf works.
 	 *
-	 * @param Format A format string that specifies how to format the additional arguments. Refer to standard printf format.
+	 * @param Fmt A format string that specifies how to format the additional arguments. Refer to standard printf format.
 	 */
-	template <typename FmtType, typename... Types>
-	typename TEnableIf<TIsArrayOrRefOfType<FmtType, CharType>::Value, BuilderType&>::Type Appendf(const FmtType& Fmt, Types... Args)
+	template <typename FmtType, typename... Types
+		UE_REQUIRES(TIsArrayOrRefOfTypeByPredicate<FmtType, TIsCharEncodingCompatibleWithCharType>::Value)>
+	BuilderType& Appendf(const FmtType& Fmt, Types... Args)
 	{
-		static_assert(TIsArrayOrRefOfType<FmtType, CharType>::Value, "Formatting string must be a character array.");
-		static_assert(TAnd<TIsValidVariadicFunctionArg<Types>...>::Value, "Invalid argument(s) passed to Appendf.");
-		return AppendfImpl(*this, Fmt, Forward<Types>(Args)...);
+		static_assert((TIsValidVariadicFunctionArg<Types>::Value && ...), "Invalid argument(s) passed to Appendf.");
+		return AppendfImpl(*this, (const CharType*)Fmt, Forward<Types>(Args)...);
 	}
+
+	/**
+	 * Appends to the string builder similarly to how classic vsprintf works.
+	 *
+	 * @param Fmt A format string that specifies how to format the additional arguments. Refer to standard printf format.
+	 */
+	CORE_API BuilderType& AppendV(const CharType* Fmt, va_list Args);
 
 private:
 	CORE_API static BuilderType& VARARGS AppendfImpl(BuilderType& Self, const CharType* Fmt, ...);
@@ -272,13 +371,10 @@ protected:
 
 	inline void EnsureNulTerminated() const
 	{
-		if (*CurPos)
-		{
-			*CurPos = 0;
-		}
+		*CurPos = CharType(0);
 	}
 
-	inline void EnsureCapacity(int32 RequiredAdditionalCapacity)
+	inline void EnsureAdditionalCapacity(int32 RequiredAdditionalCapacity)
 	{
 		// precondition: we know the current buffer has enough capacity
 		// for the existing string including NUL terminator
@@ -295,14 +391,16 @@ protected:
 	CORE_API void*	AllocBuffer(SIZE_T CharCount);
 	CORE_API void	FreeBuffer(void* Buffer, SIZE_T CharCount);
 
-	CharType*	Base;
-	CharType*	CurPos;
-	CharType*	End;
+	static inline CharType EmptyBuffer[1]{};
+
+	CharType*	Base = EmptyBuffer;
+	CharType*	CurPos = Base;
+	CharType*	End = Base + 1;
 	bool		bIsDynamic = false;
 };
 
 template <typename CharType>
-constexpr inline SIZE_T GetNum(const TStringBuilderBase<CharType>& Builder)
+constexpr inline int32 GetNum(const TStringBuilderBase<CharType>& Builder)
 {
 	return Builder.Len();
 }
@@ -323,6 +421,18 @@ public:
 	{
 	}
 
+	/**
+	 * Construct a string builder by appending the arguments using operator<<.
+	 */
+	template <typename... ArgTypes>
+	explicit TStringBuilderWithBuffer(EInPlace, ArgTypes&&... Args)
+		: TStringBuilderBase<CharType>(StringBuffer, BufferSize)
+	{
+		(*this << ... << (ArgTypes&&)Args);
+	}
+
+	using TStringBuilderBase<CharType>::operator=;
+
 private:
 	CharType StringBuffer[BufferSize];
 };
@@ -331,52 +441,148 @@ private:
 
 // String Append Operators
 
-inline FAnsiStringBuilderBase&		operator<<(FAnsiStringBuilderBase& Builder, ANSICHAR Char)							{ return Builder.Append(Char); }
-inline FWideStringBuilderBase&		operator<<(FWideStringBuilderBase& Builder, ANSICHAR Char)							{ return Builder.Append(Char); }
-inline FWideStringBuilderBase&		operator<<(FWideStringBuilderBase& Builder, WIDECHAR Char)							{ return Builder.Append(Char); }
-
-template <typename T>
-inline auto operator<<(FAnsiStringBuilderBase& Builder, T&& Str) -> decltype(Builder.Append(ImplicitConv<FAnsiStringView>(Forward<T>(Str))))
+template <typename CharType, typename CharRangeType>
+inline auto operator<<(TStringBuilderBase<CharType>& Builder, CharRangeType&& Str) -> decltype(Builder.Append(MakeStringView(Forward<CharRangeType>(Str))))
 {
-	return Builder.Append(ImplicitConv<FAnsiStringView>(Forward<T>(Str)));
+	// Anything convertible to an FAnsiStringView is also convertible to a FUtf8StringView, but FAnsiStringView is more efficient to convert
+	if constexpr (std::is_convertible_v<CharRangeType, FAnsiStringView>)
+	{
+		return Builder.Append(ImplicitConv<FAnsiStringView>(Forward<CharRangeType>(Str)));
+	}
+	else
+	{
+		return Builder.Append(MakeStringView(Forward<CharRangeType>(Str)));
+	}
 }
 
-template <typename T>
-inline auto operator<<(FWideStringBuilderBase& Builder, T&& Str) -> decltype(Builder.AppendAnsi(ImplicitConv<FAnsiStringView>(Forward<T>(Str))))
-{
-	return Builder.AppendAnsi(ImplicitConv<FAnsiStringView>(Forward<T>(Str)));
-}
-
-template <typename T>
-inline auto operator<<(FWideStringBuilderBase& Builder, T&& Str) -> decltype(Builder.Append(ImplicitConv<FWideStringView>(Forward<T>(Str))))
-{
-	return Builder.Append(ImplicitConv<FWideStringView>(Forward<T>(Str)));
-}
+inline FAnsiStringBuilderBase&		operator<<(FAnsiStringBuilderBase& Builder, ANSICHAR Char)							{ return Builder.AppendChar(Char); }
+inline FAnsiStringBuilderBase&		operator<<(FAnsiStringBuilderBase& Builder, UTF8CHAR Char) = delete;
+inline FAnsiStringBuilderBase&		operator<<(FAnsiStringBuilderBase& Builder, WIDECHAR Char) = delete;
+inline FWideStringBuilderBase&		operator<<(FWideStringBuilderBase& Builder, ANSICHAR Char)							{ return Builder.AppendChar(Char); }
+inline FWideStringBuilderBase&		operator<<(FWideStringBuilderBase& Builder, UTF8CHAR Char) = delete;
+inline FWideStringBuilderBase&		operator<<(FWideStringBuilderBase& Builder, WIDECHAR Char)							{ return Builder.AppendChar(Char); }
+inline FUtf8StringBuilderBase&		operator<<(FUtf8StringBuilderBase& Builder, ANSICHAR Char)							{ return Builder.AppendChar(UTF8CHAR(Char)); }
+inline FUtf8StringBuilderBase&		operator<<(FUtf8StringBuilderBase& Builder, UTF8CHAR Char)							{ return Builder.AppendChar(Char); }
+inline FUtf8StringBuilderBase&		operator<<(FUtf8StringBuilderBase& Builder, WIDECHAR Char) = delete;
 
 // Prefer using << instead of += as operator+= is only intended for mechanical FString -> FStringView replacement.
-inline FStringBuilderBase&			operator+=(FStringBuilderBase& Builder, ANSICHAR Char)								{ return Builder.Append(Char); }
-inline FStringBuilderBase&			operator+=(FStringBuilderBase& Builder, WIDECHAR Char)								{ return Builder.Append(Char); }
-inline FStringBuilderBase&			operator+=(FStringBuilderBase& Builder, FAnsiStringView Str)						{ return Builder.AppendAnsi(Str); }
+inline FStringBuilderBase&			operator+=(FStringBuilderBase& Builder, ANSICHAR Char)								{ return Builder.AppendChar(Char); }
+inline FStringBuilderBase&			operator+=(FStringBuilderBase& Builder, WIDECHAR Char)								{ return Builder.AppendChar(Char); }
+inline FStringBuilderBase&			operator+=(FStringBuilderBase& Builder, UTF8CHAR Char)								{ return Builder.AppendChar(Char); }
 inline FStringBuilderBase&			operator+=(FStringBuilderBase& Builder, FWideStringView Str)						{ return Builder.Append(Str); }
+inline FStringBuilderBase&			operator+=(FStringBuilderBase& Builder, FUtf8StringView Str)						{ return Builder.Append(Str); }
 
-// Integer Append Operators
+// Bool Append Operators
 
-inline FAnsiStringBuilderBase&		operator<<(FAnsiStringBuilderBase& Builder, int32 Value)							{ return Builder.Appendf("%d", Value); }
-inline FAnsiStringBuilderBase&		operator<<(FAnsiStringBuilderBase& Builder, uint32 Value)							{ return Builder.Appendf("%u", Value); }
-inline FWideStringBuilderBase&		operator<<(FWideStringBuilderBase& Builder, int32 Value)							{ return Builder.Appendf(TEXT("%d"), Value); }
-inline FWideStringBuilderBase&		operator<<(FWideStringBuilderBase& Builder, uint32 Value)							{ return Builder.Appendf(TEXT("%u"), Value); }
+template <typename T UE_REQUIRES(std::is_same_v<bool, T>)>
+inline FAnsiStringBuilderBase&		operator<<(FAnsiStringBuilderBase& Builder, T Value)								{ return Builder.Append(Value ? "true" : "false"); }
+template <typename T UE_REQUIRES(std::is_same_v<bool, T>)>
+inline FWideStringBuilderBase&		operator<<(FWideStringBuilderBase& Builder, T Value)								{ return Builder.Append(Value ? WIDETEXT("true") : WIDETEXT("false")); }
+template <typename T UE_REQUIRES(std::is_same_v<bool, T>)>
+inline FUtf8StringBuilderBase&		operator<<(FUtf8StringBuilderBase& Builder, T Value)								{ return Builder.Append(Value ? UTF8TEXT("true") : UTF8TEXT("false")); }
 
-inline FAnsiStringBuilderBase&		operator<<(FAnsiStringBuilderBase& Builder, int64 Value)							{ return Builder.Appendf("%" INT64_FMT, Value); }
-inline FAnsiStringBuilderBase&		operator<<(FAnsiStringBuilderBase& Builder, uint64 Value)							{ return Builder.Appendf("%" UINT64_FMT, Value); }
-inline FWideStringBuilderBase&		operator<<(FWideStringBuilderBase& Builder, int64 Value)							{ return Builder.Appendf(TEXT("%" INT64_FMT), Value); }
-inline FWideStringBuilderBase&		operator<<(FWideStringBuilderBase& Builder, uint64 Value)							{ return Builder.Appendf(TEXT("%" UINT64_FMT), Value); }
+/**
+ * Trait which determines whether or not a type can be appended to TStringBuilderBase via TFormatSpecifier.
+ */
 
-inline FAnsiStringBuilderBase&		operator<<(FAnsiStringBuilderBase& Builder, int8 Value)								{ return Builder << int32(Value); }
-inline FAnsiStringBuilderBase&		operator<<(FAnsiStringBuilderBase& Builder, uint8 Value)							{ return Builder << uint32(Value); }
-inline FWideStringBuilderBase&		operator<<(FWideStringBuilderBase& Builder, int8 Value)								{ return Builder << int32(Value); }
-inline FWideStringBuilderBase&		operator<<(FWideStringBuilderBase& Builder, uint8 Value)							{ return Builder << uint32(Value); }
+template <typename T>        constexpr bool TIsFormattedStringBuilderType_V                   = false;
+template <>           inline constexpr bool TIsFormattedStringBuilderType_V<uint8>            = true;
+template <>           inline constexpr bool TIsFormattedStringBuilderType_V<uint16>           = true;
+template <>           inline constexpr bool TIsFormattedStringBuilderType_V<uint32>           = true;
+template <>           inline constexpr bool TIsFormattedStringBuilderType_V<uint64>           = true;
+template <>           inline constexpr bool TIsFormattedStringBuilderType_V<int8>             = true;
+template <>           inline constexpr bool TIsFormattedStringBuilderType_V<int16>            = true;
+template <>           inline constexpr bool TIsFormattedStringBuilderType_V<int32>            = true;
+template <>           inline constexpr bool TIsFormattedStringBuilderType_V<int64>            = true;
+template <>           inline constexpr bool TIsFormattedStringBuilderType_V<float>            = true;
+template <>           inline constexpr bool TIsFormattedStringBuilderType_V<double>           = true;
+template <>           inline constexpr bool TIsFormattedStringBuilderType_V<long double>      = true;
+template <>           inline constexpr bool TIsFormattedStringBuilderType_V<long>             = true;
+template <>           inline constexpr bool TIsFormattedStringBuilderType_V<unsigned long>    = true;
 
-inline FAnsiStringBuilderBase&		operator<<(FAnsiStringBuilderBase& Builder, int16 Value)							{ return Builder << int32(Value); }
-inline FAnsiStringBuilderBase&		operator<<(FAnsiStringBuilderBase& Builder, uint16 Value)							{ return Builder << uint32(Value); }
-inline FWideStringBuilderBase&		operator<<(FWideStringBuilderBase& Builder, int16 Value)							{ return Builder << int32(Value); }
-inline FWideStringBuilderBase&		operator<<(FWideStringBuilderBase& Builder, uint16 Value)							{ return Builder << uint32(Value); }
+template <typename T>        constexpr bool TIsFormattedStringBuilderType_V<const          T> = TIsFormattedStringBuilderType_V<T>;
+template <typename T>        constexpr bool TIsFormattedStringBuilderType_V<      volatile T> = TIsFormattedStringBuilderType_V<T>;
+template <typename T>        constexpr bool TIsFormattedStringBuilderType_V<const volatile T> = TIsFormattedStringBuilderType_V<T>;
+
+// Formatted Append Operators
+
+template <
+	typename CharType,
+	typename T
+	UE_REQUIRES(TIsFormattedStringBuilderType_V<T>)
+>
+inline TStringBuilderBase<CharType>& operator<<(TStringBuilderBase<CharType>& Builder, const T& Value)
+{
+	// std::remove_cv_t to remove potential volatile decorations. Removing const is pointless, but harmless because it's specified in the param declaration.
+	return Builder.Appendf(TFormatSpecifier<std::remove_cv_t<T>>::template GetFormatSpecifier<CharType>(), Value);
+}
+
+template <typename CharType, int32 BufferSize>
+class UE_DEPRECATED(5.3, "Use WriteToString<N>(...) or TStringBuilder<N>(InPlace, ...).") TWriteToString : public TStringBuilderWithBuffer<CharType, BufferSize>
+{
+public:
+	template <typename... ArgTypes>
+	explicit TWriteToString(ArgTypes&&... Args)
+	{
+		(*this << ... << (ArgTypes&&)Args);
+	}
+};
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+template <typename CharType, int32 BufferSize>
+struct TIsContiguousContainer<TWriteToString<CharType, BufferSize>>
+{
+	static constexpr inline bool Value = true;
+};
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+/**
+ * A function to create and append to a temporary string builder.
+ *
+ * Example Use Cases:
+ *
+ * For void Action(FStringView) -> Action(WriteToString<64>(Arg1, Arg2));
+ * For UE_LOG or checkf -> checkf(Condition, TEXT("%s"), *WriteToString<32>(Arg));
+ */
+template <int32 BufferSize, typename... ArgTypes>
+TStringBuilderWithBuffer<TCHAR, BufferSize> WriteToString(ArgTypes&&... Args)
+{
+	return TStringBuilderWithBuffer<TCHAR, BufferSize>(InPlace, (ArgTypes&&)Args...);
+}
+
+/** A function to create and append to a temporary string builder. See WriteToString. */
+template <int32 BufferSize, typename... ArgTypes>
+TStringBuilderWithBuffer<ANSICHAR, BufferSize> WriteToAnsiString(ArgTypes&&... Args)
+{
+	return TStringBuilderWithBuffer<ANSICHAR, BufferSize>(InPlace, (ArgTypes&&)Args...);
+}
+
+/** A function to create and append to a temporary string builder. See WriteToString. */
+template <int32 BufferSize, typename... ArgTypes>
+TStringBuilderWithBuffer<WIDECHAR, BufferSize> WriteToWideString(ArgTypes&&... Args)
+{
+	return TStringBuilderWithBuffer<WIDECHAR, BufferSize>(InPlace, (ArgTypes&&)Args...);
+}
+
+/** A function to create and append to a temporary string builder. See WriteToString. */
+template <int32 BufferSize, typename... ArgTypes>
+TStringBuilderWithBuffer<UTF8CHAR, BufferSize> WriteToUtf8String(ArgTypes&&... Args)
+{
+	return TStringBuilderWithBuffer<UTF8CHAR, BufferSize>(InPlace, (ArgTypes&&)Args...);
+}
+
+/**
+ * Returns an object that can be used as the output container for algorithms by appending to the builder.
+ *
+ * Example: Algo::Transform(StringView, AppendChars(Builder), FChar::ToLower)
+ */
+template <typename CharType>
+auto AppendChars(TStringBuilderBase<CharType>& Builder)
+{
+	struct FAppendChar
+	{
+		TStringBuilderBase<CharType>& Builder;
+		inline void Add(CharType Char) { Builder.AppendChar(Char); }
+	};
+	return FAppendChar{Builder};
+}

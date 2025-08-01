@@ -10,6 +10,7 @@ using AutomationTool;
 using UnrealBuildTool;
 using System.Text;
 using System.Text.RegularExpressions;
+using EpicGames.Core;
 
 /*
 
@@ -69,7 +70,7 @@ namespace Gauntlet
 
 			if (DownloadCmd.ExitCode != 0)
 			{
-				Log.Warning("Failed to retrieve artifacts. {0}", DownloadCmd.Output);
+				Log.Warning(KnownLogEvents.Gauntlet_DeviceEvent, "Failed to retrieve artifacts. {Output}", DownloadCmd.Output);
 			}
 			
 		}
@@ -121,7 +122,7 @@ namespace Gauntlet
 			if (!HasExited)
 			{
 				WasKilled = true;
-				ProcessResult.ProcessObject.Kill();
+				ProcessResult.ProcessObject.Kill(true);
 			}
 		}
 
@@ -238,7 +239,7 @@ namespace Gauntlet
 				}
 				catch (Exception Ex)
 				{
-					Log.Warning("TargetDeviceIOS.Dispose() threw: {0}", Ex.Message);
+					Log.Warning(KnownLogEvents.Gauntlet_DeviceEvent, "TargetDeviceIOS.Dispose() threw: {Exception}", Ex.Message);
 				}
 				finally
 				{
@@ -268,7 +269,7 @@ namespace Gauntlet
 				throw new DeviceException("AppInstance is of incorrect type!");
 			}
 
-			string CommandLine = IOSApp.CommandLine.Replace("\"", "\\\"");
+			string CommandLine = IOSApp.CommandLine.Replace("\"", "\\\\\"");
 			
 			Log.Info("Launching {0} on {1}", App.Name, ToString());
 			Log.Verbose("\t{0}", CommandLine);
@@ -295,7 +296,7 @@ namespace Gauntlet
 			// Give ios-deploy a chance to throw out any errors...
 			if (Result.HasExited)
 			{
-				Log.Warning("ios-deploy exited early: " + Result.Output);
+				Log.Warning(KnownLogEvents.Gauntlet_DeviceEvent, "ios-deploy exited early: " + Result.Output);
 				throw new DeviceException("Failed to launch on {0}. {1}", Name, Result.Output);
 			}
 
@@ -325,7 +326,7 @@ namespace Gauntlet
 
 				if (Result.ExitCode != 0)
 				{
-					Log.Warning("Failed to clean artifacts from device");
+					Log.Warning(KnownLogEvents.Gauntlet_DeviceEvent, "Failed to clean artifacts from device");
 					return false;
 				}
 
@@ -449,7 +450,7 @@ namespace Gauntlet
 			}
 			else
 			{
-				Log.Warning("No symbols found for local build at {0}, removing cached app symbols", LocalSymbolsDir);
+				Log.Warning(KnownLogEvents.Gauntlet_DeviceEvent, "No symbols found for local build at {Directory}, removing cached app symbols", LocalSymbolsDir);
 			}
 
 			// resign application
@@ -461,21 +462,19 @@ namespace Gauntlet
 			{
 				throw new AutomationException("Failed to resign application");
 			}
-
 		}
 
 		// We need to lock around setting up the IPA
 		static object IPALock = new object();
-
 		public IAppInstall InstallApplication(UnrealAppConfig AppConfig)
-		{            
+		{
             IOSBuild Build = AppConfig.Build as IOSBuild;
 
 			// Ensure Build exists
 			if (Build == null)
 			{
 				throw new AutomationException("Invalid build for IOS!");
-			}	
+			}
 
 			bool CacheResigned = false;
 			bool UseLocalExecutable = Globals.Params.ParseParam("dev");
@@ -487,7 +486,7 @@ namespace Gauntlet
 				// device artifact path
 				DeviceArtifactPath = string.Format("/Documents/{0}/Saved", AppConfig.ProjectName);
 
-				CacheResigned = File.Exists(CacheResignedFilename);				
+				CacheResigned = File.Exists(CacheResignedFilename);
 
 				if (CacheResigned && !UseLocalExecutable)
 				{
@@ -495,15 +494,15 @@ namespace Gauntlet
 					{
 						Log.Verbose("App was resigned, invalidating app cache");
 						File.Delete(IPAHashFilename);
-					}								
+					}
 				}
 
 				PrepareIPA(Build);
 
-				// local executable support			
+				// local executable support
 				if (UseLocalExecutable)
-				{					
-					ResignApplication(AppConfig);				
+				{
+					ResignApplication(AppConfig);
 				}
 			}
 
@@ -517,10 +516,10 @@ namespace Gauntlet
 				// remove device artifacts
 				CleanDeviceArtifacts(Build);
 			}
-			
+
 			// parallel iOS tests use same app install folder, so lock it as setup is quick
 			lock (Globals.MainLock)
-			{				
+			{
 				// local app install with additional files, this directory will be mirrored to device in a single operation
 				string AppInstallPath;
 
@@ -566,7 +565,7 @@ namespace Gauntlet
 						}
 						else
 						{
-							Log.Warning("File to copy {0} not found", FileToCopy);
+							Log.Warning(KnownLogEvents.Gauntlet_DeviceEvent, "File to copy {File} not found", FileToCopy);
 						}
 					}
 				}
@@ -577,11 +576,36 @@ namespace Gauntlet
 
 				// store the IPA hash to avoid redundant deployments
 				CopyCommand = String.Format("--bundle_id {0} --upload={1} --to {2}", Build.PackageName, IPAHashFilename, "/Documents/IPAHash.txt");
-				ExecuteIOSDeployCommand(CopyCommand, 120);				
+				ExecuteIOSDeployCommand(CopyCommand, 120);
 			}
 
-			IOSAppInstall IOSApp = new IOSAppInstall(AppConfig.Name, this, Build.PackageName, AppConfig.CommandLine);	
+			IOSAppInstall IOSApp = new IOSAppInstall(AppConfig.Name, this, Build.PackageName, AppConfig.CommandLine);
 			return IOSApp;
+		}
+
+		public void FullClean()
+		{
+
+		}
+
+		public void CleanArtifacts()
+		{
+
+		}
+
+		public void InstallBuild(UnrealAppConfig AppConfiguration)
+		{
+
+		}
+
+		public IAppInstall CreateAppInstall(UnrealAppConfig AppConfig)
+		{
+			return null;
+		}
+
+		public void CopyAdditionalFiles(IEnumerable<UnrealFileToCopy> FilesToCopy)
+		{
+
 		}
 
 		public void PopulateDirectoryMappings(string ProjectDir)
@@ -591,7 +615,8 @@ namespace Gauntlet
 			LocalDirectoryMappings.Add(EIntendedBaseCopyDirectory.Config, Path.Combine(ProjectDir, "Config"));
             LocalDirectoryMappings.Add(EIntendedBaseCopyDirectory.Content, Path.Combine(ProjectDir, "Content"));
             LocalDirectoryMappings.Add(EIntendedBaseCopyDirectory.Demos, Path.Combine(ProjectDir, "Demos"));
-            LocalDirectoryMappings.Add(EIntendedBaseCopyDirectory.Profiling, Path.Combine(ProjectDir, "Profiling"));
+			LocalDirectoryMappings.Add(EIntendedBaseCopyDirectory.PersistentDownloadDir, Path.Combine(ProjectDir, "Saved", "PersistentDownloadDir"));
+			LocalDirectoryMappings.Add(EIntendedBaseCopyDirectory.Profiling, Path.Combine(ProjectDir, "Profiling"));
             LocalDirectoryMappings.Add(EIntendedBaseCopyDirectory.Saved, ProjectDir);
         }
 
@@ -605,11 +630,11 @@ namespace Gauntlet
 
 
 		/// <summary>
-		/// Artifact (e.g. Saved) path on the device		
+		/// Artifact (e.g. Saved) path on the device
 		/// </summary>
 		public string DeviceArtifactPath { get; protected set;  }
 
-		
+
 		#region Device State Management
 
 		// NOTE: We check that a default device UUID or the one specifed is connected with 'ios-deploy --detect' at device creation time
@@ -659,7 +684,7 @@ namespace Gauntlet
 
 			if (!rebooted) 
 			{
-				Log.Warning("Failed to reboot iOS device {0}, device didn't come back after restart", DeviceName);
+				Log.Warning(KnownLogEvents.Gauntlet_DeviceEvent, "Failed to reboot iOS device {Name}, device didn't come back after restart", DeviceName);
 			}
 
 			return true; 
@@ -747,7 +772,7 @@ namespace Gauntlet
 		void KillZombies()
 		{
 
-			if (Globals.IsWorker || ZombiesKilled)
+			if (ZombiesKilled)
 			{
 				return;
 			}
@@ -765,7 +790,7 @@ namespace Gauntlet
 		{
 			get
 			{	
-				return Path.Combine(Globals.TempDir, string.Format("IOSAppCache{0}", Globals.WorkerID == -1 ? "" : Globals.WorkerID.ToString()));
+				return Path.Combine(Globals.TempDir, "IOSAppCache");
 			}
 		}
 
@@ -894,7 +919,7 @@ namespace Gauntlet
 				CommandLine = String.Format("--id {0} {1}", DeviceName, CommandLine);
 			}
 
-			String IOSDeployPath = Path.Combine(Globals.UE4RootDir, "Engine/Extras/ThirdPartyNotUE/ios-deploy/bin/ios-deploy");
+			String IOSDeployPath = Path.Combine(Globals.UnrealRootDir, "Engine/Extras/ThirdPartyNotUE/ios-deploy/bin/ios-deploy");
 
 			if (!File.Exists(IOSDeployPath))
 			{
@@ -945,18 +970,6 @@ namespace Gauntlet
 			}
 
 			return Result;
-		}
-
-		public bool IsOSOutOfDate()
-		{
-			//TODO: not yet implemented
-			return false;
-		}
-
-		public bool UpdateOS()
-		{
-			//TODO: not yet implemented
-			return true;
 		}
 	}
 
@@ -1028,7 +1041,7 @@ namespace Gauntlet
 			} 
 			catch (Exception Ex)
 			{
-				Log.Warning("Exception parsing LLDB callstack {0}", Ex.Message);
+				Log.Warning(KnownLogEvents.Gauntlet_DeviceEvent, "Exception parsing LLDB callstack {Exception}", Ex.Message);
 			}
 
 			return null;
@@ -1166,14 +1179,14 @@ namespace Gauntlet
 
 			if (Threads.Count(T => T.Current == true) > 1)
 			{
-				Log.Warning("LLDB debug parsed more than one current thread");
+				Log.Warning(KnownLogEvents.Gauntlet_DeviceEvent, "LLDB debug parsed more than one current thread");
 			}
 
 			Thread = Threads.FirstOrDefault(T => T.Current == true);
 
 			if (Threads.Count > 0 && Thread == null)
 			{
-				Log.Warning("Unable to parse full crash callstack");
+				Log.Warning(KnownLogEvents.Gauntlet_DeviceEvent, "Unable to parse full crash callstack");
 			}
 
 
@@ -1187,5 +1200,11 @@ namespace Gauntlet
 
 		}
 
+	}
+
+	public class IOSBuildSupport : BaseBuildSupport
+	{
+		protected override BuildFlags SupportedBuildTypes => BuildFlags.Packaged | BuildFlags.CanReplaceCommandLine | BuildFlags.CanReplaceExecutable | BuildFlags.Bulk | BuildFlags.NotBulk;
+		protected override UnrealTargetPlatform? Platform => UnrealTargetPlatform.IOS;
 	}
 }

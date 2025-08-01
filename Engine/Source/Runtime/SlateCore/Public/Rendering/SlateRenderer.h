@@ -4,13 +4,15 @@
 
 #include "CoreMinimal.h"
 #include "Textures/SlateShaderResource.h"
+#include "Textures/SlateTextureData.h"
 #include "Brushes/SlateDynamicImageBrush.h"
 #include "Rendering/DrawElements.h"
 #include "Templates/RefCounting.h"
 #include "Fonts/FontTypes.h"
+#include "Types/SlateVector2.h"
 #include "PixelFormat.h"
 
-class FRHITexture2D;
+class FRHITexture;
 class FRenderTarget;
 class FSlateDrawBuffer;
 class FSlateUpdatableTexture;
@@ -22,7 +24,7 @@ struct Rect;
 class FSceneInterface;
 struct FSlateBrush;
 
-typedef TRefCountPtr<FRHITexture2D> FTexture2DRHIRef;
+typedef TRefCountPtr<FRHITexture> FTexture2DRHIRef;
 
 /**
  * Update context for deferred drawing of widgets to render targets
@@ -30,9 +32,10 @@ typedef TRefCountPtr<FRHITexture2D> FTexture2DRHIRef;
 struct FRenderThreadUpdateContext
 {
 	class FSlateDrawBuffer* WindowDrawBuffer;
-	float WorldTimeSeconds;
+	double WorldTimeSeconds;
 	float DeltaTimeSeconds;
-	float RealTimeSeconds;
+	double RealTimeSeconds;
+	float DeltaRealTimeSeconds;
 	FRenderTarget* RenderTarget;
 	ISlate3DRenderer* Renderer;
 	bool bClearTarget;
@@ -41,24 +44,24 @@ struct FRenderThreadUpdateContext
 /**
  * Provides access to the game and render thread font caches that Slate should use
  */
-class SLATECORE_API FSlateFontServices
+class FSlateFontServices
 {
 public:
 	/**
 	 * Construct the font services from the font caches (we'll create corresponding measure services ourselves)
 	 * These pointers may be the same if your renderer doesn't need a separate render thread font cache
 	 */
-	FSlateFontServices(TSharedRef<class FSlateFontCache> InGameThreadFontCache, TSharedRef<class FSlateFontCache> InRenderThreadFontCache);
+	SLATECORE_API FSlateFontServices(TSharedRef<class FSlateFontCache> InGameThreadFontCache, TSharedRef<class FSlateFontCache> InRenderThreadFontCache);
 
 	/**
 	 * Destruct the font services
 	 */
-	~FSlateFontServices();
+	SLATECORE_API ~FSlateFontServices();
 
 	/**
 	 * Get the font cache to use for the current thread
 	 */
-	TSharedRef<class FSlateFontCache> GetFontCache() const;
+	SLATECORE_API TSharedRef<class FSlateFontCache> GetFontCache() const;
 
 	/**
 	 * Get the font cache to use for the game thread
@@ -79,7 +82,7 @@ public:
 	/**
 	 * Get access to the font measure service for the current thread
 	 */
-	TSharedRef<class FSlateFontMeasure> GetFontMeasureService() const;
+	SLATECORE_API TSharedRef<class FSlateFontMeasure> GetFontMeasureService() const;
 
 	/**
 	 * Get access to the font measure service for the current thread
@@ -100,30 +103,30 @@ public:
 	/**
 	 * Flushes all cached data from the font cache for the current thread
 	 */
-	void FlushFontCache(const FString& FlushReason);
+	SLATECORE_API void FlushFontCache(const FString& FlushReason);
 
 	/**
 	 * Flushes all cached data from the font cache for the game thread
 	 */
-	void FlushGameThreadFontCache(const FString& FlushReason);
+	SLATECORE_API void FlushGameThreadFontCache(const FString& FlushReason);
 
 	/**
 	 * Flushes all cached data from the font cache for the render thread
 	 */
-	void FlushRenderThreadFontCache(const FString& FlushReason);
+	SLATECORE_API void FlushRenderThreadFontCache(const FString& FlushReason);
 
 	/**
 	 * Release any rendering resources owned by this font service
 	 */
-	void ReleaseResources();
+	SLATECORE_API void ReleaseResources();
 
 	/**
 	 * Delegate called after releasing the rendering resources used by this font service
 	 */
-	FOnReleaseFontResources& OnReleaseResources();
+	SLATECORE_API FOnReleaseFontResources& OnReleaseResources();
 
 private:
-	void HandleFontCacheReleaseResources(const class FSlateFontCache& InFontCache);
+	SLATECORE_API void HandleFontCacheReleaseResources(const class FSlateFontCache& InFontCache);
 
 	TSharedRef<class FSlateFontCache> GameThreadFontCache;
 	TSharedRef<class FSlateFontCache> RenderThreadFontCache;
@@ -164,20 +167,55 @@ struct FMappedTextureBuffer
 /**
  * Abstract base class for Slate renderers.
  */
-class SLATECORE_API FSlateRenderer
+class FSlateRenderer
 {
 public:
 
 	/** Constructor. */
-	explicit FSlateRenderer(const TSharedRef<FSlateFontServices>& InSlateFontServices);
+	SLATECORE_API explicit FSlateRenderer(const TSharedRef<FSlateFontServices>& InSlateFontServices);
 
 	/** Virtual destructor. */
-	virtual ~FSlateRenderer();
+	SLATECORE_API virtual ~FSlateRenderer();
 
 public:
+	/** Acquire the draw buffer and release it at the end of the scope. */
+	struct FScopedAcquireDrawBuffer
+	{
+		FScopedAcquireDrawBuffer(FSlateRenderer& InSlateRenderer)
+			: SlateRenderer(InSlateRenderer)
+			, DrawBuffer(InSlateRenderer.AcquireDrawBuffer())
+		{
+		}
+		~FScopedAcquireDrawBuffer()
+		{
+			SlateRenderer.ReleaseDrawBuffer(DrawBuffer);
+		}
+		FScopedAcquireDrawBuffer(const FScopedAcquireDrawBuffer&) = delete;
+		FScopedAcquireDrawBuffer& operator=(const FScopedAcquireDrawBuffer&) = delete;
+
+		FSlateDrawBuffer& GetDrawBuffer()
+		{
+			return DrawBuffer;
+		}
+
+	private:
+		FSlateRenderer& SlateRenderer;
+		FSlateDrawBuffer& DrawBuffer;
+	};
+
+public:
+	/** Returns a draw buffer that can be used by Slate windows to draw window elements */
+	UE_DEPRECATED(5.1, "Use FSlateRenderer::AcquireDrawBuffer instead and release the draw buffer.")
+	virtual FSlateDrawBuffer& GetDrawBuffer()
+	{
+		return AcquireDrawBuffer();
+	}
 
 	/** Returns a draw buffer that can be used by Slate windows to draw window elements */
-	virtual FSlateDrawBuffer& GetDrawBuffer() = 0;
+	virtual FSlateDrawBuffer& AcquireDrawBuffer() = 0;
+
+	/** Return the previously acquired buffer. */
+	virtual void ReleaseDrawBuffer( FSlateDrawBuffer& InWindowDrawBuffer ) = 0;
 
 	virtual bool Initialize() = 0;
 
@@ -259,7 +297,7 @@ public:
 	FOnPostResizeWindowBackbuffer& OnPostResizeWindowBackBuffer() { return PostResizeBackBufferDelegate; }
 
 	/** Callback on the render thread after slate rendering finishes and right before present is called */
-	DECLARE_MULTICAST_DELEGATE_TwoParams(FOnBackBufferReadyToPresent, SWindow&, const FTexture2DRHIRef&);
+	DECLARE_TS_MULTICAST_DELEGATE_TwoParams(FOnBackBufferReadyToPresent, SWindow&, const FTexture2DRHIRef&);
 	FOnBackBufferReadyToPresent& OnBackBufferReadyToPresent() { return OnBackBufferReadyToPresentDelegate; }
 
 	/** 
@@ -288,6 +326,8 @@ public:
 
 	virtual bool GenerateDynamicImageResource(FName ResourceName, FSlateTextureDataRef TextureData) { return false; }
 
+	virtual FSlateResourceHandle GetResourceHandle(const FSlateBrush& Brush, FVector2f LocalSize, float DrawScale) = 0;
+
 	/**
 	 * Creates a handle to a Slate resource
 	 * A handle is used as fast path for looking up a rendering resource for a given brush when adding Slate draw elements
@@ -297,7 +337,11 @@ public:
 	 * @param	Brush		The brush to get a rendering resource handle 
 	 * @return	The created resource handle.  
 	 */
-	virtual FSlateResourceHandle GetResourceHandle( const FSlateBrush& Brush ) = 0;
+	virtual FSlateResourceHandle GetResourceHandle(const FSlateBrush& Brush)
+	{
+		return GetResourceHandle(Brush, FVector2f::ZeroVector, 1.0f);
+	}
+
 
 	/** The default implementation assumes all things are renderable. */
 	virtual bool CanRenderResource(UObject& InResourceObject) const { return true; }
@@ -400,7 +444,7 @@ public:
 	 * @Window	The window to check for fullscreen
 	 * @return true if the window's viewport should be fullscreen
 	 */
-	bool IsViewportFullscreen( const SWindow& Window ) const;
+	SLATECORE_API bool IsViewportFullscreen( const SWindow& Window ) const;
 
 	/** Returns whether shaders that Slate depends on have been compiled. */
 	virtual bool AreShadersInitialized() const { return true; }
@@ -425,6 +469,12 @@ public:
 	 */
 	virtual void PrepareToTakeScreenshot(const FIntRect& Rect, TArray<FColor>* OutColorData, SWindow* InScreenshotWindow) {}
 
+	/** 
+	 * Prepares the renderer to take a screenshot of the UI.  The Rect is portion of the rendered output
+	 * that will be stored into the TArray of FColors.
+	 */
+	virtual void PrepareToTakeHDRScreenshot(const FIntRect& Rect, TArray<FLinearColor>* OutColorData, SWindow* InScreenshotWindow) {}
+
 	/**
 	 * Pushes the rendering of the specified window to the specified render target
 	 */
@@ -441,6 +491,15 @@ public:
 	virtual FSlateUpdatableTexture* CreateUpdatableTexture(uint32 Width, uint32 Height) = 0;
 
 	/**
+	 * Create an updatable texture that can receive new data via a shared handle
+	 *
+	 * @param	SharedHandle	The OS dependant handle that backs the texture data
+	 *
+	 * @return	Newly created updatable texture
+	 */
+	virtual FSlateUpdatableTexture* CreateSharedHandleTexture(void *SharedHandle) = 0;
+
+	/**
 	 * Return an updatable texture to the renderer for release
 	 *
 	 * @param	Texture	The texture we are releasing (should not use this pointer after calling)
@@ -450,12 +509,12 @@ public:
 	/**
 	 * Returns the way to access the texture atlas information for this renderer
 	 */
-	virtual ISlateAtlasProvider* GetTextureAtlasProvider();
+	SLATECORE_API virtual ISlateAtlasProvider* GetTextureAtlasProvider();
 
 	/**
 	 * Returns the way to access the font atlas information for this renderer
 	 */
-	virtual ISlateAtlasProvider* GetFontAtlasProvider();
+	SLATECORE_API virtual ISlateAtlasProvider* GetFontAtlasProvider();
 
 	/**
 	 * Copies all slate windows out to a buffer at half resolution with debug information
@@ -482,8 +541,8 @@ public:
 	/** Reset the internal Scene tracking.*/
 	virtual void ClearScenes() = 0;
 
-	virtual void DestroyCachedFastPathRenderingData(struct FSlateCachedFastPathRenderingData* VertexData);
-	virtual void DestroyCachedFastPathElementData(struct FSlateCachedElementData* ElementData);
+	SLATECORE_API virtual void DestroyCachedFastPathRenderingData(struct FSlateCachedFastPathRenderingData* VertexData);
+	SLATECORE_API virtual void DestroyCachedFastPathElementData(struct FSlateCachedElementData* ElementData);
 
 	virtual bool HasLostDevice() const { return false; }
 
@@ -498,13 +557,15 @@ public:
 	virtual void AddWidgetRendererUpdate(const struct FRenderThreadUpdateContext& Context, bool bDeferredRenderTargetUpdate) {}
 
 	virtual EPixelFormat GetSlateRecommendedColorFormat() { return PF_B8G8R8A8; }
+
+	virtual void OnVirtualDesktopSizeChanged(const FDisplayMetrics& NewDisplayMetric) {}
 private:
 
 	// Non-copyable
-	FSlateRenderer(const FSlateRenderer&);
-	FSlateRenderer& operator=(const FSlateRenderer&);
+	SLATECORE_API FSlateRenderer(const FSlateRenderer&);
+	SLATECORE_API FSlateRenderer& operator=(const FSlateRenderer&);
 
-	void HandleFontCacheReleaseResources(const class FSlateFontCache& InFontCache);
+	SLATECORE_API void HandleFontCacheReleaseResources(const class FSlateFontCache& InFontCache);
 
 protected:
 

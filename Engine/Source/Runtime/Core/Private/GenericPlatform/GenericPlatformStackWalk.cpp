@@ -139,8 +139,8 @@ bool FGenericPlatformStackWalk::SymbolInfoToHumanReadableStringEx( const FProgra
 	// Strip module path.
 	int32 Pos0;
 	int32 Pos1;
-	SymbolInfo.ModuleName.FindLastChar('\\', Pos0);
-	SymbolInfo.ModuleName.FindLastChar('/', Pos1);
+	SymbolInfo.ModuleName.FindLastChar(TEXT('\\'), Pos0);
+	SymbolInfo.ModuleName.FindLastChar(TEXT('/'), Pos1);
 	const int32 RealPos = FMath::Max( Pos0, Pos1 );
 	const FString StrippedModuleName = RealPos > 0 ? SymbolInfo.ModuleName.RightChop(RealPos + 1) : SymbolInfo.ModuleName;
 
@@ -169,7 +169,7 @@ uint32 FGenericPlatformStackWalk::CaptureStackBackTrace( uint64* BackTrace, uint
 	return 0;
 }
 
-uint32 FGenericPlatformStackWalk::CaptureThreadStackBackTrace(uint64 ThreadId, uint64* BackTrace, uint32 MaxDepth)
+uint32 FGenericPlatformStackWalk::CaptureThreadStackBackTrace(uint64 ThreadId, uint64* BackTrace, uint32 MaxDepth, void* Context)
 {
 	return 0;
 }
@@ -200,10 +200,42 @@ void FGenericPlatformStackWalk::StackWalkAndDump( ANSICHAR* HumanReadableString,
 	}
 }
 
+void FGenericPlatformStackWalk::StackWalkAndDump( ANSICHAR* HumanReadableString, SIZE_T HumanReadableStringSize, void* ProgramCounter, void* Context )
+{
+	uint64 StackTrace[100];
+	int32 Depth = FPlatformStackWalk::CaptureStackBackTrace(StackTrace, UE_ARRAY_COUNT(StackTrace), Context);
+
+	int32 CurrentDepth = 0;
+	if (ProgramCounter != nullptr)
+	{
+		for (int32 i = 0; i < Depth; ++i)
+		{
+			if (StackTrace[i] != uint64(ProgramCounter))
+			{
+				continue;
+			}
+
+			CurrentDepth = i;
+			break;
+		}
+	}
+
+	for (; CurrentDepth < Depth; CurrentDepth++)
+	{
+		FPlatformStackWalk::ProgramCounterToHumanReadableString( CurrentDepth, StackTrace[CurrentDepth], HumanReadableString, HumanReadableStringSize, reinterpret_cast< FGenericCrashContext* >( Context ) );
+		FCStringAnsi::Strncat(HumanReadableString, LINE_TERMINATOR_ANSI, (int32)HumanReadableStringSize);
+	}
+}
+
 void FGenericPlatformStackWalk::StackWalkAndDumpEx(ANSICHAR* HumanReadableString, SIZE_T HumanReadableStringSize, int32 IgnoreCount, uint32 Flags, void* Context)
 {
 	// generic implementation ignores extra flags
 	return FPlatformStackWalk::StackWalkAndDump(HumanReadableString, HumanReadableStringSize, IgnoreCount, Context);
+}
+
+void FGenericPlatformStackWalk::StackWalkAndDumpEx(ANSICHAR* HumanReadableString, SIZE_T HumanReadableStringSize, void* ProgramCounter, uint32 Flags, void* Context)
+{
+	return FPlatformStackWalk::StackWalkAndDump(HumanReadableString, HumanReadableStringSize, ProgramCounter, Context);
 }
 
 TArray<FProgramCounterSymbolInfo> FGenericPlatformStackWalk::GetStack(int32 IgnoreCount, int32 MaxDepth, void* Context)

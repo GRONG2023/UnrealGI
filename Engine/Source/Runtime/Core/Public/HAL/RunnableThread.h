@@ -16,7 +16,7 @@ class FTlsAutoCleanup;
  *
  * This interface specifies the methods used to manage a thread's life cycle.
  */
-class CORE_API FRunnableThread
+class FRunnableThread
 {
 	friend class FThreadSingletonInitializer;
 	friend class FTlsAutoCleanup;
@@ -25,12 +25,12 @@ class CORE_API FRunnableThread
 	friend class FForkProcessHelper;
 
 	/** Index of TLS slot for FRunnableThread pointer. */
-	static uint32 RunnableTlsSlot;
+	static CORE_API uint32 RunnableTlsSlot;
 
 public:
 
 	/** Gets a new Tls slot for storing the runnable thread pointer. */
-	static uint32 GetTlsSlot();
+	static CORE_API uint32 GetTlsSlot();
 
 	/**
 	 * Factory method to create a thread with the specified stack size and thread priority.
@@ -41,7 +41,7 @@ public:
 	 * @param InThreadPri Tells the thread whether it needs to adjust its priority or not. Defaults to normal priority
 	 * @return The newly created thread or nullptr if it failed
 	 */
-	static FRunnableThread* Create(
+	static CORE_API FRunnableThread* Create(
 		class FRunnable* InRunnable,
 		const TCHAR* ThreadName,
 		uint32 InStackSize = 0,
@@ -55,6 +55,15 @@ public:
 	 * @param NewPriority The thread priority to change to
 	 */
 	virtual void SetThreadPriority( EThreadPriority NewPriority ) = 0;
+
+	/**
+	* Changes the thread affinity of the currently running thread
+	*
+	* @param ThreadAffinityMask The thread affinity to change to (can be 0 to keep previously set affinity mask)
+	* @param ProcessorGroup The thread group to change to
+	* @return returns true if the affinity changed, false if affinity did not change
+	*/
+	virtual bool SetThreadAffinity( const FThreadAffinity& Affinity ) { return false; };
 
 	/**
 	 * Tells the thread to either pause execution or resume depending on the
@@ -78,6 +87,23 @@ public:
 
 	/** Halts the caller until this thread is has completed its work. */
 	virtual void WaitForCompletion() = 0;
+
+	/** List of unique thread types we can create */
+	enum class ThreadType
+	{
+		// Regular thread that executes the runnable object in it's own context
+		Real,
+		// Fake threads are created for a single threaded environment and are always executed from the main tick
+		Fake,
+		// Forkable threads will behave like fake threads for the master process, but will become real threads on forked processes
+		Forkable,
+	};
+
+	/** Returns the type of thread this is */
+	virtual FRunnableThread::ThreadType GetThreadType() const
+	{
+		return ThreadType::Real;
+	}
 
 	/**
 	 * Thread ID for this thread 
@@ -108,10 +134,19 @@ public:
 	}
 
 	/** Default constructor. */
-	FRunnableThread();
+	CORE_API FRunnableThread();
 
 	/** Virtual destructor */
-	virtual ~FRunnableThread();
+	CORE_API virtual ~FRunnableThread();
+
+	/**
+	 * @return a runnable thread that is executing this runnable, if return value is nullptr, it means the running thread can be game thread or a thread created outside the runnable interface
+	 */
+	static FRunnableThread* GetRunnableThread()
+	{
+		FRunnableThread* RunnableThread = (FRunnableThread*)FPlatformTLS::GetTlsValue(RunnableTlsSlot);
+		return RunnableThread;
+	}
 
 protected:
 
@@ -130,19 +165,10 @@ protected:
 		EThreadCreateFlags InCreateFlags = EThreadCreateFlags::None) = 0;
 
 	/** Stores this instance in the runnable thread TLS slot. */
-	void SetTls();
+	CORE_API void SetTls();
 
 	/** Deletes all FTlsAutoCleanup objects created for this thread. */
-	void FreeTls();
-
-	/**
-	 * @return a runnable thread that is executing this runnable, if return value is nullptr, it means the running thread can be game thread or a thread created outside the runnable interface
-	 */
-	static FRunnableThread* GetRunnableThread()
-	{
-		FRunnableThread* RunnableThread = (FRunnableThread*)FPlatformTLS::GetTlsValue( RunnableTlsSlot );
-		return RunnableThread;
-	}
+	CORE_API void FreeTls();
 
 	/** Holds the name of the thread. */
 	FString ThreadName;
@@ -156,41 +182,19 @@ protected:
 	/** The Affinity to run the thread with. */
 	uint64 ThreadAffinityMask;
 
-	/** An array of FTlsAutoCleanup based instances that needs to be deleted before the thread will die. */
-	TArray<FTlsAutoCleanup*> TlsInstances;
-
 	/** The priority to run the thread at. */
 	EThreadPriority ThreadPriority;
 
 	/** ID set during thread creation. */
 	uint32 ThreadID;
 
-protected:
-
-	/** List of unique thread types we can create */
-	enum class ThreadType
-	{
-		// Regular thread that executes the runnable object in it's own context
-		Real,
-		// Fake threads are created for a single threaded environment and are always executed from the main tick
-		Fake,
-		// Forkable threads will behave like fake threads for the master process, but will become real threads on forked processes
-		Forkable,
-	};
-
 private:
 
 	/** Called to setup a newly created RunnableThread */
-	static void SetupCreatedThread(FRunnableThread*& NewThread, class FRunnable* InRunnable, const TCHAR* ThreadName, uint32 InStackSize, EThreadPriority InThreadPri, uint64 InThreadAffinityMask, EThreadCreateFlags InCreateFlags);
+	static CORE_API void SetupCreatedThread(FRunnableThread*& NewThread, class FRunnable* InRunnable, const TCHAR* ThreadName, uint32 InStackSize, EThreadPriority InThreadPri, uint64 InThreadAffinityMask, EThreadCreateFlags InCreateFlags);
 
 	/** Used by the thread manager to tick threads in single-threaded mode */
 	virtual void Tick() {}
-
-	/** Returns the type of thread this is */
-	virtual FRunnableThread::ThreadType GetThreadType() const
-	{
-		return ThreadType::Real;
-	}
 
 	/**
 	 * Called on the forked process when the forkable thread can create a real thread
@@ -203,5 +207,5 @@ private:
 	/**
 	 * Called after the internal thread is created so it can register debug information
 	 */
-	void PostCreate(EThreadPriority ThreadPriority);
+	CORE_API void PostCreate(EThreadPriority ThreadPriority);
 };

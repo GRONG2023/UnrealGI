@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AnimNotifyDetails.h"
+#include "Animation/Skeleton.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Animation/AnimTypes.h"
 #include "Animation/AnimationAsset.h"
@@ -181,7 +182,7 @@ void FAnimNotifyDetails::AddBoneNameProperty(IDetailCategoryBuilder& CategoryBui
 						[
 							SNew(STextBlock)
 							.Text(Property->GetPropertyDisplayName())
-							.Font(FEditorStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont")))
+							.Font(FAppStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont")))
 						]
 					]
 				.ValueContent()
@@ -219,7 +220,7 @@ void FAnimNotifyDetails::AddCurveNameProperty(IDetailCategoryBuilder& CategoryBu
 						[
 							SNew(STextBlock)
 							.Text(Property->GetPropertyDisplayName())
-							.Font(FEditorStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont")))
+							.Font(FAppStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont")))
 						]
 					]
 				.ValueContent()
@@ -249,7 +250,7 @@ void FAnimNotifyDetails::ClearInstancedSelectionDropDown(IDetailCategoryBuilder&
 	.CustomWidget(bShowChildren)
 	.NameContent()
 	[
-		PropHandle->CreatePropertyNameWidget(FText::GetEmpty(), FText::GetEmpty(), false)
+		PropHandle->CreatePropertyNameWidget()
 	]
 	.ValueContent()
 	[
@@ -326,6 +327,43 @@ void FAnimNotifyDetails::HideLinkProperties(IDetailLayoutBuilder& Builder, TShar
 
 bool FAnimNotifyDetails::CustomizeProperty(IDetailCategoryBuilder& CategoryBuilder, UObject* Notify, TSharedPtr<IPropertyHandle> Property)
 {
+	TFunction<void(const TSharedPtr<IPropertyHandle>)> FixBoneNamePropertyRecurse;
+	FixBoneNamePropertyRecurse = [this, &FixBoneNamePropertyRecurse, &CategoryBuilder, &Notify](const TSharedPtr<IPropertyHandle>& InPropertyHandle)
+	{
+		const bool bHasExpandMeta = InPropertyHandle->GetBoolMetaData(TEXT("AnimNotifyExpand"));
+		bool bParentIsObjectPtr = false;
+
+		TSharedPtr<IPropertyHandle> ParentProp = InPropertyHandle->GetParentHandle();
+		if (ParentProp.IsValid() && ParentProp->IsValidHandle())
+		{
+			bParentIsObjectPtr = (CastField<FObjectPropertyBase>(ParentProp->GetProperty()) != nullptr);
+		}
+
+		// Recurse into Object Ptrs or properties with AnimNotifyExpand
+		if (bParentIsObjectPtr || bHasExpandMeta)
+		{
+			IDetailLayoutBuilder& LayoutBuilder = CategoryBuilder.GetParentLayout();
+			LayoutBuilder.HideProperty(InPropertyHandle);
+
+			uint32 NumChildren = 0;
+			InPropertyHandle->GetNumChildren(NumChildren);
+			for (uint32 i = 0; i < NumChildren; ++i)
+			{
+				TSharedPtr<IPropertyHandle> ChildHandle = InPropertyHandle->GetChildHandle(i);
+				FixBoneNamePropertyRecurse(ChildHandle);
+			}
+		}
+		else if (InPropertyHandle->GetBoolMetaData(TEXT("AnimNotifyBoneName")))
+		{
+			// Convert this property to a bone name property
+			AddBoneNameProperty(CategoryBuilder, Notify, InPropertyHandle);
+		}
+		else
+		{
+			CategoryBuilder.AddProperty(InPropertyHandle);
+		}
+	};
+
 	if(Notify && Notify->GetClass() && Property->IsValidHandle())
 	{
 		FString ClassName = Notify->GetClass()->GetName();
@@ -345,6 +383,12 @@ bool FAnimNotifyDetails::CustomizeProperty(IDetailCategoryBuilder& CategoryBuild
 		else if(ClassName.Find(TEXT("AnimNotify_PlaySound")) != INDEX_NONE && PropertyName == TEXT("AttachName"))
 		{
 			AddBoneNameProperty(CategoryBuilder, Notify, Property);
+			return true;
+		}
+		else if (ClassName.Find(TEXT("_SoundLibrary")) != INDEX_NONE && PropertyName == TEXT("SoundContext"))
+		{
+			CategoryBuilder.AddProperty(Property);
+			FixBoneNamePropertyRecurse(Property);
 			return true;
 		}
 		else if (ClassName.Find(TEXT("AnimNotifyState_Trail")) != INDEX_NONE)

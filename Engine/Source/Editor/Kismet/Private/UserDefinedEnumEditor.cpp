@@ -3,10 +3,11 @@
 #include "UserDefinedEnumEditor.h"
 #include "Editor.h"
 #include "Widgets/Text/STextBlock.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "PropertyEditorModule.h"
 #include "PropertyHandle.h"
 #include "IDetailChildrenBuilder.h"
+#include "IDetailDragDropHandler.h"
 #include "Modules/ModuleManager.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Layout/SBox.h"
@@ -15,6 +16,10 @@
 #include "Widgets/Input/SCheckBox.h"
 #include "DetailLayoutBuilder.h"
 #include "DetailCategoryBuilder.h"
+#include "DragAndDrop/DecoratedDragDropOp.h"
+#include "SPositiveActionButton.h"
+#include "Styling/ToolBarStyle.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
 
 #include "PropertyCustomizationHelpers.h"
 #include "Widgets/SToolTip.h"
@@ -109,10 +114,6 @@ public:
 	}
 #endif // USE_STABLE_LOCALIZATION_KEYS
 
-	virtual void RequestRefresh() override
-	{
-	}
-
 	bool CausedChange() const
 	{
 		return bCausedChange;
@@ -201,10 +202,6 @@ public:
 	}
 #endif // USE_STABLE_LOCALIZATION_KEYS
 
-	virtual void RequestRefresh() override
-	{
-	}
-
 	bool CausedChange() const
 	{
 		return bCausedChange;
@@ -222,8 +219,143 @@ private:
 };
 
 
+/** Drag-and-drop operation that stores data about the source enumerator being dragged */
+class FUserDefinedEnumIndexDragDropOp : public FDecoratedDragDropOp
+{
+public:
+	DRAG_DROP_OPERATOR_TYPE(FUserDefinedEnumIndexDragDropOp, FDecoratedDragDropOp);
+
+	FUserDefinedEnumIndexDragDropOp(UUserDefinedEnum* InTargetEnum, int32 InEnumeratorIndex)
+		: TargetEnum(InTargetEnum)
+		, EnumeratorIndex(InEnumeratorIndex)
+	{
+		check(InTargetEnum);
+		check(InEnumeratorIndex >= 0 && InEnumeratorIndex < InTargetEnum->NumEnums());
+
+		EnumDisplayText = InTargetEnum->GetDisplayNameTextByIndex(InEnumeratorIndex);
+		MouseCursor = EMouseCursor::GrabHandClosed;
+	}
+
+	void Init()
+	{
+		SetValidTarget(false);
+		SetupDefaults();
+		Construct();
+	}
+
+	void SetValidTarget(bool IsValidTarget)
+	{
+		FFormatNamedArguments Args;
+		Args.Add(TEXT("EnumeratorName"), EnumDisplayText);
+
+		if (IsValidTarget)
+		{
+			CurrentHoverText = FText::Format(LOCTEXT("MoveEnumeratorHere", "Move '{EnumeratorName}' Here"), Args);
+			CurrentIconBrush = FAppStyle::GetBrush("Graph.ConnectorFeedback.OK");
+		}
+		else
+		{
+			CurrentHoverText = FText::Format(LOCTEXT("CannotMoveEnumeratorHere", "Cannot Move '{EnumeratorName}' Here"), Args);
+			CurrentIconBrush = FAppStyle::GetBrush("Graph.ConnectorFeedback.Error");
+		}
+	}
+
+	UUserDefinedEnum* GetTargetEnum() const
+	{
+		return TargetEnum;
+	}
+
+	int32 GetEnumeratorIndex() const
+	{
+		return EnumeratorIndex;
+	}
+
+private:
+	UUserDefinedEnum* TargetEnum;
+	int32 EnumeratorIndex;
+	FText EnumDisplayText;
+};
 
 
+/** Handler for customizing the drag-and-drop behavior for enum index rows, allowing enumerators to be reordered */
+class FUserDefinedEnumIndexDragDropHandler : public IDetailDragDropHandler
+{
+public:
+	FUserDefinedEnumIndexDragDropHandler(UUserDefinedEnum* InTargetEnum, int32 InEnumeratorIndex)
+		: TargetEnum(InTargetEnum)
+		, EnumeratorIndex(InEnumeratorIndex)
+	{
+		check(InTargetEnum);
+		check(InEnumeratorIndex >= 0 && InEnumeratorIndex < InTargetEnum->NumEnums());
+	}
+
+	virtual TSharedPtr<FDragDropOperation> CreateDragDropOperation() const override
+	{
+		TSharedPtr<FUserDefinedEnumIndexDragDropOp> DragOp = MakeShared<FUserDefinedEnumIndexDragDropOp>(TargetEnum, EnumeratorIndex);
+		DragOp->Init();
+		return DragOp;
+	}
+
+	/** Compute new target index for use with FEnumEditorUtils::MoveEnumeratorInUserDefinedEnum based on drop zone (above vs below) */
+	static int32 ComputeNewIndex(int32 OriginalIndex, int32 DropOntoIndex, EItemDropZone DropZone)
+	{
+		check(DropZone != EItemDropZone::OntoItem);
+
+		int32 NewIndex = DropOntoIndex;
+		if (DropZone == EItemDropZone::BelowItem)
+		{
+			// If the drop zone is below, then we actually move it to the next item's index
+			NewIndex++;
+		}
+		if (OriginalIndex < NewIndex)
+		{
+			// If the item is moved down the list, then all the other elements below it are shifted up one
+			NewIndex--;
+		}
+
+		return ensure(NewIndex >= 0) ? NewIndex : 0;
+	}
+
+	virtual bool AcceptDrop(const FDragDropEvent& DragDropEvent, EItemDropZone DropZone) const override
+	{
+		const TSharedPtr<FUserDefinedEnumIndexDragDropOp> DragOp = DragDropEvent.GetOperationAs<FUserDefinedEnumIndexDragDropOp>();
+		if (!DragOp.IsValid() || DragOp->GetTargetEnum() != TargetEnum || DropZone == EItemDropZone::OntoItem)
+		{
+			return false;
+		}
+
+		const int32 NewIndex = ComputeNewIndex(DragOp->GetEnumeratorIndex(), EnumeratorIndex, DropZone);
+		FEnumEditorUtils::MoveEnumeratorInUserDefinedEnum(TargetEnum, DragOp->GetEnumeratorIndex(), NewIndex);
+		return true;
+	}
+
+	virtual TOptional<EItemDropZone> CanAcceptDrop(const FDragDropEvent& DragDropEvent, EItemDropZone DropZone) const override
+	{
+		const TSharedPtr<FUserDefinedEnumIndexDragDropOp> DragOp = DragDropEvent.GetOperationAs<FUserDefinedEnumIndexDragDropOp>();
+		if (!DragOp.IsValid() || DragOp->GetTargetEnum() != TargetEnum)
+		{
+			return TOptional<EItemDropZone>();
+		}
+
+		// We're reordering, so there's no logical interpretation for dropping directly onto another enum.
+		// Just change it to a drop-above in this case.
+		const EItemDropZone OverrideZone = (DropZone == EItemDropZone::BelowItem) ? EItemDropZone::BelowItem : EItemDropZone::AboveItem;
+		const int32 NewIndex = ComputeNewIndex(DragOp->GetEnumeratorIndex(), EnumeratorIndex, OverrideZone);
+
+		// Make sure that the new index is valid *and* that it represents an actual move from the current position.
+		if (NewIndex < 0 || NewIndex >= TargetEnum->NumEnums() || NewIndex == DragOp->GetEnumeratorIndex())
+		{
+			return TOptional<EItemDropZone>();
+		}
+
+		DragOp->SetValidTarget(true);
+		return OverrideZone;
+	}
+
+private:
+	UUserDefinedEnum* TargetEnum;
+	int32 EnumeratorIndex;
+};
 
 
 void FUserDefinedEnumEditor::RegisterTabSpawners(const TSharedRef<class FTabManager>& InTabManager)
@@ -235,7 +367,7 @@ void FUserDefinedEnumEditor::RegisterTabSpawners(const TSharedRef<class FTabMana
 	InTabManager->RegisterTabSpawner( EnumeratorsTabId, FOnSpawnTab::CreateSP(this, &FUserDefinedEnumEditor::SpawnEnumeratorsTab) )
 		.SetDisplayName( LOCTEXT("EnumeratorEditor", "Enumerators") )
 		.SetGroup(WorkspaceMenuCategory.ToSharedRef())
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "GraphEditor.Enum_16x"));
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "GraphEditor.Enum_16x"));
 }
 
 void FUserDefinedEnumEditor::UnregisterTabSpawners(const TSharedRef<class FTabManager>& InTabManager)
@@ -247,17 +379,12 @@ void FUserDefinedEnumEditor::UnregisterTabSpawners(const TSharedRef<class FTabMa
 
 void FUserDefinedEnumEditor::InitEditor(const EToolkitMode::Type Mode, const TSharedPtr< class IToolkitHost >& InitToolkitHost, UUserDefinedEnum* EnumToEdit)
 {
-	const TSharedRef<FTabManager::FLayout> StandaloneDefaultLayout = FTabManager::NewLayout( "Standalone_UserDefinedEnumEditor_Layout_v1" )
+	TargetEnum = EnumToEdit;
+
+	const TSharedRef<FTabManager::FLayout> StandaloneDefaultLayout = FTabManager::NewLayout( "Standalone_UserDefinedEnumEditor_Layout_v3" )
 	->AddArea
 	(
 		FTabManager::NewPrimaryArea() ->SetOrientation(Orient_Vertical)
-		->Split
-		(
-			FTabManager::NewStack()
-			->SetSizeCoefficient(0.1f)
-			->SetHideTabWell( true )
-			->AddTab(GetToolbarTabId(), ETabState::OpenedTab)
-		)
 		->Split
 		(
 			FTabManager::NewSplitter()
@@ -265,6 +392,7 @@ void FUserDefinedEnumEditor::InitEditor(const EToolkitMode::Type Mode, const TSh
 			(
 				FTabManager::NewStack()
 				->AddTab( EnumeratorsTabId, ETabState::OpenedTab )
+				->SetHideTabWell(true)
 			)
 		)
 	);
@@ -272,6 +400,12 @@ void FUserDefinedEnumEditor::InitEditor(const EToolkitMode::Type Mode, const TSh
 	const bool bCreateDefaultStandaloneMenu = true;
 	const bool bCreateDefaultToolbar = true;
 	FAssetEditorToolkit::InitAssetEditor( Mode, InitToolkitHost, UserDefinedEnumEditorAppIdentifier, StandaloneDefaultLayout, bCreateDefaultStandaloneMenu, bCreateDefaultToolbar, EnumToEdit );
+
+	TSharedPtr<FExtender> Extender = MakeShared<FExtender>();
+	Extender->AddToolBarExtension("Asset", EExtensionHook::After, GetToolkitCommands(),
+		FToolBarExtensionDelegate::CreateSP(this, &FUserDefinedEnumEditor::FillToolbar));
+	AddToolbarExtender(Extender);
+	RegenerateMenusAndToolbars();
 
 	// @todo toolkit world centric editing
 	/*if (IsWorldCentricAssetEditor())
@@ -289,7 +423,7 @@ TSharedRef<SDockTab> FUserDefinedEnumEditor::SpawnEnumeratorsTab(const FSpawnTab
 	check( Args.GetTabId() == EnumeratorsTabId );
 
 	UUserDefinedEnum* EditedEnum = NULL;
-	const TArray<UObject*>& EditingObjs = GetEditingObjects();
+	const auto& EditingObjs = GetEditingObjects();
 	if (EditingObjs.Num())
 	{
 		EditedEnum = Cast<UUserDefinedEnum>(EditingObjs[ 0 ]);
@@ -298,8 +432,12 @@ TSharedRef<SDockTab> FUserDefinedEnumEditor::SpawnEnumeratorsTab(const FSpawnTab
 	// Create a property view
 	FPropertyEditorModule& EditModule = FModuleManager::Get().GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
 
-	FDetailsViewArgs DetailsViewArgs( /*bUpdateFromSelection=*/ false, /*bLockable=*/ false, /*bAllowSearch=*/ false, FDetailsViewArgs::HideNameArea, /*bHideSelectionTip=*/ true );
+	FDetailsViewArgs DetailsViewArgs;
+	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+	DetailsViewArgs.bAllowSearch = false;
+	DetailsViewArgs.bHideSelectionTip = true;
 	DetailsViewArgs.bShowOptions = false;
+	DetailsViewArgs.ColumnWidth = 0.85f;
 
 	PropertyView = EditModule.CreateDetailView( DetailsViewArgs );
 
@@ -309,12 +447,40 @@ TSharedRef<SDockTab> FUserDefinedEnumEditor::SpawnEnumeratorsTab(const FSpawnTab
 	PropertyView->SetObject(EditedEnum);
 
 	return SNew(SDockTab)
-		.Icon( FEditorStyle::GetBrush("GenericEditor.Tabs.Properties") )
 		.Label( LOCTEXT("EnumeratorEditor", "Enumerators") )
 		.TabColorScale( GetTabColorScale() )
 		[
 			PropertyView.ToSharedRef()
 		];
+}
+
+void FUserDefinedEnumEditor::FillToolbar(FToolBarBuilder& ToolbarBuilder)
+{
+	const FToolBarStyle& ToolBarStyle = ToolbarBuilder.GetStyleSet()->GetWidgetStyle<FToolBarStyle>(ToolbarBuilder.GetStyleName());
+
+	ToolbarBuilder.BeginSection("Enumerators");
+	ToolbarBuilder.AddWidget(
+		SNew(SBox)
+		.HAlign(HAlign_Center)
+		.VAlign(VAlign_Fill)
+		.Padding(ToolBarStyle.ButtonPadding)
+		[
+			SNew(SPositiveActionButton)
+			.Text(LOCTEXT("AddEnumeratorButtonText", "Add Enumerator"))
+			.OnClicked(this, &FUserDefinedEnumEditor::OnAddNewEnumerator)
+		]);
+	ToolbarBuilder.EndSection();
+}
+
+FReply FUserDefinedEnumEditor::OnAddNewEnumerator()
+{
+	if (!ensure(TargetEnum.IsValid()))
+	{
+		return FReply::Handled();
+	}
+
+	FEnumEditorUtils::AddNewEnumeratorForUserDefinedEnum(TargetEnum.Get());
+	return FReply::Handled();
 }
 
 FUserDefinedEnumEditor::~FUserDefinedEnumEditor()
@@ -371,18 +537,9 @@ void FEnumDetails::CustomizeDetails( IDetailLayoutBuilder& DetailLayout )
 
 		const FString DocLink = TEXT("Shared/Editors/BlueprintEditor/EnumDetails");
 
-		IDetailCategoryBuilder& InputsCategory = DetailLayout.EditCategory("Enumerators", LOCTEXT("EnumDetailsEnumerators", "Enumerators"));
+		DetailLayout.EditCategory("Description"); // make Description category appear before Enumerators
 
-		InputsCategory.AddCustomRow( LOCTEXT("FunctionNewInputArg", "New") )
-			[
-				SNew(SBox)
-				.HAlign(HAlign_Right)
-				[
-					SNew(SButton)
-					.Text(LOCTEXT("FunctionNewInputArg", "New"))
-					.OnClicked(this, &FEnumDetails::OnAddNewEnumerator)
-				]
-			];
+		IDetailCategoryBuilder& InputsCategory = DetailLayout.EditCategory("Enumerators", LOCTEXT("EnumDetailsEnumerators", "Enumerators"));
 
 		Layout = MakeShareable( new FUserDefinedEnumLayout(TargetEnum.Get()) );
 		InputsCategory.AddCustomBuilder( Layout.ToSharedRef() );
@@ -394,7 +551,9 @@ void FEnumDetails::CustomizeDetails( IDetailLayoutBuilder& DetailLayout )
 		[
 			SNew(STextBlock)
 			.Text(LOCTEXT("BitmaskFlagsAttributeLabel", "Bitmask Flags"))
+			.Font(IDetailLayoutBuilder::GetDetailFont())
 			.ToolTip(BitmaskFlagsTooltip)
+			.OverflowPolicy(ETextOverflowPolicy::Ellipsis)
 		]
 		.ValueContent()
 		[
@@ -440,12 +599,6 @@ void FEnumDetails::PostChange(const class UUserDefinedEnum* Enum, FEnumEditorUti
 	{
 		OnForceRefresh();
 	}
-}
-
-FReply FEnumDetails::OnAddNewEnumerator()
-{
-	FEnumEditorUtils::AddNewEnumeratorForUserDefinedEnum(TargetEnum.Get());
-	return FReply::Handled();
 }
 
 ECheckBoxState FEnumDetails::OnGetBitmaskFlagsAttributeState() const
@@ -495,40 +648,41 @@ void FUserDefinedEnumIndexLayout::GenerateHeaderRowContent( FDetailWidgetRow& No
 	TooltipEditor = MakeShared<FEditableTextUserDefinedEnumTooltip>(TargetEnum, EnumeratorIndex);
 
 	const bool bIsEditable = !DisplayNameEditor->IsReadOnly();
-	const bool bIsMoveUpEnabled = (TargetEnum->NumEnums() != 1) && (EnumeratorIndex != 0) && bIsEditable;
-	const bool bIsMoveDownEnabled = (TargetEnum->NumEnums() != 1) && (EnumeratorIndex < TargetEnum->NumEnums() - 2) && bIsEditable;
 
-	TSharedRef< SWidget > ClearButton = PropertyCustomizationHelpers::MakeClearButton(FSimpleDelegate::CreateSP(this, &FUserDefinedEnumIndexLayout::OnEnumeratorRemove));
+	TSharedRef< SWidget > ClearButton = PropertyCustomizationHelpers::MakeEmptyButton(
+		FSimpleDelegate::CreateSP(this, &FUserDefinedEnumIndexLayout::OnEnumeratorRemove),
+		LOCTEXT("RemoveEnumToolTip", "Remove enumerator"));
 	ClearButton->SetEnabled(bIsEditable);
 
 	NodeRow
-		.WholeRowWidget
+		.NameContent()
+		[
+			SNew(STextBlock)
+			.Text(LOCTEXT("EnumDisplayNameLabel", "Display Name"))
+			.Font(IDetailLayoutBuilder::GetDetailFont())
+			.OverflowPolicy(ETextOverflowPolicy::Ellipsis)
+		]
+		.ValueContent()
+		.HAlign(HAlign_Fill)
 		[
 			SNew(SHorizontalBox)
-
-			+SHorizontalBox::Slot()
-			.VAlign(VAlign_Center)
-			.AutoWidth()
-			.Padding(0, 0, 4, 0)
-			[
-				SNew(STextBlock)
-				.Text(LOCTEXT("EnumDisplayNameLabel", "Display Name"))
-			]
 
 			+SHorizontalBox::Slot()
 			.VAlign(VAlign_Center)
 			.FillWidth(1.0f)
 			[
 				SNew(STextPropertyEditableTextBox, DisplayNameEditor.ToSharedRef())
+				.Font(IDetailLayoutBuilder::GetDetailFont())
 			]
 
 			+SHorizontalBox::Slot()
 			.VAlign(VAlign_Center)
 			.AutoWidth()
-			.Padding(4, 0, 4, 0)
+			.Padding(36, 0, 12, 0)
 			[
 				SNew(STextBlock)
 				.Text(LOCTEXT("EnumTooltipLabel", "Description"))
+				.Font(IDetailLayoutBuilder::GetDetailFont())
 			]
 
 			+SHorizontalBox::Slot()
@@ -536,35 +690,7 @@ void FUserDefinedEnumIndexLayout::GenerateHeaderRowContent( FDetailWidgetRow& No
 			.FillWidth(1.0f)
 			[
 				SNew(STextPropertyEditableTextBox, TooltipEditor.ToSharedRef())
-			]
-
-			+SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(2, 0)
-			.VAlign(VAlign_Center)
-			[
-				SNew(SButton)
-				.ContentPadding(0)
-				.OnClicked(this, &FUserDefinedEnumIndexLayout::OnMoveEnumeratorUp)
-				.IsEnabled( bIsMoveUpEnabled )
-				[
-					SNew(SImage)
-					.Image(FEditorStyle::GetBrush("BlueprintEditor.Details.ArgUpButton"))
-				]
-			]
-			+SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(2, 0)
-			.VAlign(VAlign_Center)
-			[
-				SNew(SButton)
-				.ContentPadding(0)
-				.OnClicked(this, &FUserDefinedEnumIndexLayout::OnMoveEnumeratorDown)
-				.IsEnabled( bIsMoveDownEnabled )
-				[
-					SNew(SImage)
-					.Image(FEditorStyle::GetBrush("BlueprintEditor.Details.ArgDownButton"))
-				]
+				.Font(IDetailLayoutBuilder::GetDetailFont())
 			]
 
 			+SHorizontalBox::Slot()
@@ -574,24 +700,13 @@ void FUserDefinedEnumIndexLayout::GenerateHeaderRowContent( FDetailWidgetRow& No
 			[
 				ClearButton
 			]
-		];
+		]
+		.DragDropHandler(MakeShared<FUserDefinedEnumIndexDragDropHandler>(TargetEnum, EnumeratorIndex));
 }
 
 void FUserDefinedEnumIndexLayout::OnEnumeratorRemove()
 {
 	FEnumEditorUtils::RemoveEnumeratorFromUserDefinedEnum(TargetEnum, EnumeratorIndex);
-}
-
-FReply FUserDefinedEnumIndexLayout::OnMoveEnumeratorUp()
-{
-	FEnumEditorUtils::MoveEnumeratorInUserDefinedEnum(TargetEnum, EnumeratorIndex, true);
-	return FReply::Handled();
-}
-
-FReply FUserDefinedEnumIndexLayout::OnMoveEnumeratorDown()
-{
-	FEnumEditorUtils::MoveEnumeratorInUserDefinedEnum(TargetEnum, EnumeratorIndex, false);
-	return FReply::Handled();
 }
 
 #undef LOCTEXT_NAMESPACE

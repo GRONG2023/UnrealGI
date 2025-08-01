@@ -24,7 +24,8 @@
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <objc/runtime.h>
-#if PLATFORM_IOS && defined(__IPHONE_13_0)
+#if PLATFORM_IOS
+#include "IOS/IOSPlatformMisc.h"
 #include <os/proc.h>
 #endif
 #include <CoreFoundation/CFBase.h>
@@ -265,6 +266,14 @@ void FApplePlatformMemory::NanoMallocInit()
 
 void FApplePlatformMemory::Init()
 {
+	// Only allow this method to be called once
+	{
+		static bool bInitDone = false;
+		if (bInitDone)
+			return;
+		bInitDone = true;
+	}
+
 	FGenericPlatformMemory::Init();
     
 	LLM(AppleLLM::Initialise());
@@ -278,115 +287,143 @@ void FApplePlatformMemory::Init()
 	
 }
 
-// Set rather to use BinnedMalloc2 for binned malloc, can be overridden below
-#define USE_MALLOC_BINNED2 (PLATFORM_MAC)
+// Use MallocBinned2 as default, can be overriden below.
+#define USE_MALLOC_BINNED2 1
+
+void FApplePlatformMemory::SetAllocatorToUse()
+{
+    // force Ansi allocator in particular cases
+    if(getenv("UE4_FORCE_MALLOC_ANSI") != nullptr)
+    {
+        UE_LOG(LogTemp, Display, TEXT("Using Ansi allocator."));
+        AllocatorToUse = EMemoryAllocatorToUse::Ansi;
+        return;
+    }
+    if (FORCE_ANSI_ALLOCATOR)
+    {
+        UE_LOG(LogTemp, Display, TEXT("Using Ansi allocator."));
+        AllocatorToUse = EMemoryAllocatorToUse::Ansi;
+        return;
+    }
+    if (USE_MALLOC_BINNED2)
+    {
+ #if PLATFORM_IOS || PLATFORM_TVOS
+        if(!FIOSPlatformMisc::IsEntitlementEnabled("com.apple.developer.kernel.extended-virtual-addressing"))
+        {
+            UE_LOG(LogTemp, Warning, TEXT("MallocBinned2 requested but Virtual Address Space entitlement not found. Check your entitlements. Falling back to Ansi."));
+            AllocatorToUse = EMemoryAllocatorToUse::Ansi;
+            return;
+        }
+        else
+        {
+            UE_LOG(LogTemp, Warning, TEXT("Virtual Address Space entitlement found. Using MallocBinned2 allocator"));
+        }
+#endif
+        UE_LOG(LogTemp, Display, TEXT("Using MallocBinned2 allocator."));
+        AllocatorToUse = EMemoryAllocatorToUse::Binned2;
+        return;
+    }
+    else
+    {
+        UE_LOG(LogTemp, Display, TEXT("Defaulting to Ansi allocator."));
+        AllocatorToUse = EMemoryAllocatorToUse::Ansi;
+        return;
+    }
+}
 
 FMalloc* FApplePlatformMemory::BaseAllocator()
 {
+	static FMalloc* Instance = nullptr;
+	if (Instance != nullptr)
+	{
+		return Instance;
+	}
+
 #if ENABLE_LOW_LEVEL_MEM_TRACKER
 	FPlatformMemoryStats MemStats = FApplePlatformMemory::GetStats();
 	FLowLevelMemTracker::Get().SetProgramSize(MemStats.UsedPhysical);
 #endif
+    
+    SetAllocatorToUse();
+    
+    switch (AllocatorToUse)
+    {
+        case EMemoryAllocatorToUse::Ansi:
+        {
+            Instance = new FMallocAnsi();
+            break;
+        }
 
-	if (FORCE_ANSI_ALLOCATOR)
-	{
-		AllocatorToUse = EMemoryAllocatorToUse::Ansi;
-	}
-	else if (USE_MALLOC_BINNED2)
-	{
-		AllocatorToUse = EMemoryAllocatorToUse::Binned2;
-	}
-	else
-	{
-		AllocatorToUse = EMemoryAllocatorToUse::Binned;
-	}
-	
-	// Force ansi malloc in some cases
-	if(getenv("UE4_FORCE_MALLOC_ANSI") != nullptr)
-	{
-		AllocatorToUse = EMemoryAllocatorToUse::Ansi;
-	}
-	
-	switch (AllocatorToUse)
-	{
-		case EMemoryAllocatorToUse::Ansi:
-			return new FMallocAnsi();
+        case EMemoryAllocatorToUse::Binned2:
+        {
+            Instance = new FMallocBinned2();
+            break;
+        }
 
-		case EMemoryAllocatorToUse::Binned2:
-			return new FMallocBinned2();
-			
-		default:	// intentional fall-through
-		case EMemoryAllocatorToUse::Binned:
-		{
-			// get free memory
-			vm_statistics Stats;
-			mach_msg_type_number_t StatsSize = sizeof(Stats);
-			host_statistics(mach_host_self(), HOST_VM_INFO, (host_info_t)&Stats, &StatsSize);
-			// 1 << FMath::CeilLogTwo(MemoryConstants.TotalPhysical) should really be FMath::RoundUpToPowerOfTwo,
-			// but that overflows to 0 when MemoryConstants.TotalPhysical is close to 4GB, since CeilLogTwo returns 32
-			// this then causes the MemoryLimit to be 0 and crashing the app
-			uint64 MemoryLimit = FMath::Min<uint64>( uint64(1) << FMath::CeilLogTwo((Stats.free_count + Stats.inactive_count) * GetConstants().PageSize), 0x100000000);
-			
-			// [RCL] 2017-03-06 FIXME: perhaps BinnedPageSize should be used here, but leaving this change to the Mac platform owner.
-			return new FMallocBinned((uint32)(GetConstants().PageSize&MAX_uint32), MemoryLimit);
-		}
-	}
-	
+        default:    // intentional fall-through
+        case EMemoryAllocatorToUse::Binned:
+        {
+            // get free memory
+            vm_statistics Stats;
+            mach_msg_type_number_t StatsSize = sizeof(Stats);
+            host_statistics(mach_host_self(), HOST_VM_INFO, (host_info_t)&Stats, &StatsSize);
+            // 1 << FMath::CeilLogTwo(MemoryConstants.TotalPhysical) should really be FMath::RoundUpToPowerOfTwo,
+            // but that overflows to 0 when MemoryConstants.TotalPhysical is close to 4GB, since CeilLogTwo returns 32
+            // this then causes the MemoryLimit to be 0 and crashing the app
+            uint64 MemoryLimit = FMath::Min<uint64>( uint64(1) << FMath::CeilLogTwo((Stats.free_count + Stats.inactive_count) * GetConstants().PageSize), 0x100000000);
+
+            // [RCL] 2017-03-06 FIXME: perhaps BinnedPageSize should be used here, but leaving this change to the Mac platform owner.
+            Instance = new FMallocBinned((uint32)(GetConstants().PageSize&MAX_uint32), MemoryLimit);
+        }
+    }
+	return Instance;
 }
 
 FPlatformMemoryStats FApplePlatformMemory::GetStats()
 {
 	const FPlatformMemoryConstants& MemoryConstants = FPlatformMemory::GetConstants();
-#if PLATFORM_IOS
-	const uint64 MaxVirtualMemory = 1ull << 34; // set to 16GB for now since IOS can see a maximum of 8GB
-#endif
 	static FPlatformMemoryStats MemoryStats;
 	
 	// Gather platform memory stats.
+	vm_statistics Stats;
+	mach_msg_type_number_t StatsSize = sizeof(Stats);
+	FMemory::Memset(&Stats, 0, StatsSize);
+	if (host_statistics(mach_host_self(), HOST_VM_INFO, (host_info_t)&Stats, &StatsSize))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Failed to fetch vm statistics"));
+	}
+
 	uint64_t FreeMem = 0;
 #if PLATFORM_IOS
-#if defined(__IPHONE_13_0)
-	if (@available(iOS 13.0,*))
-	{
-		FreeMem = os_proc_available_memory();
-	}
-	else
+	FreeMem = os_proc_available_memory();
+#else
+    FreeMem = (Stats.free_count + Stats.inactive_count) * MemoryConstants.PageSize;
 #endif
-#endif
-	{
-		vm_statistics Stats;
-		mach_msg_type_number_t StatsSize = sizeof(Stats);
-		host_statistics(mach_host_self(), HOST_VM_INFO, (host_info_t)&Stats, &StatsSize);
-		FreeMem = (Stats.free_count + Stats.inactive_count) * MemoryConstants.PageSize;
-	}
+
 	MemoryStats.AvailablePhysical = FreeMem;
+
+	// Calculate the number of available free pages on iOS/macOS. Apple considers "inactive_count" pages
+	// as pages that the app says it doesn't need anymore and can be recycled/freed, but could be reactivated 
+	// if the app does request those resources again.  Apple tries to maximize use of memory and 
+	// considers "free" pages a waste of resources.
+	MemoryStats.AvailableVirtual = (Stats.free_count + Stats.inactive_count) * MemoryConstants.PageSize;
 	
 	// Just get memory information for the process and report the working set instead
 	mach_task_basic_info_data_t TaskInfo;
 	mach_msg_type_number_t TaskInfoCount = MACH_TASK_BASIC_INFO_COUNT;
 	task_info( mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&TaskInfo, &TaskInfoCount );
-#if PLATFORM_IOS
-#if defined(__IPHONE_13_0)
-	if (@available(iOS 13.0,*))
-	{
-		MemoryStats.UsedPhysical = MemoryConstants.TotalPhysical - FreeMem;
-	}
-	else
-#endif
-#endif
-	{
-		MemoryStats.UsedPhysical = TaskInfo.resident_size;
-	}
+
+    MemoryStats.UsedPhysical = TaskInfo.resident_size;
 	if(MemoryStats.UsedPhysical > MemoryStats.PeakUsedPhysical)
 	{
 		MemoryStats.PeakUsedPhysical = MemoryStats.UsedPhysical;
 	}
-	MemoryStats.UsedVirtual = TaskInfo.virtual_size;
-#if PLATFORM_IOS
-	if(MemoryStats.UsedVirtual > MemoryStats.PeakUsedVirtual || MemoryStats.PeakUsedVirtual > MaxVirtualMemory)
-#else
+
+	uint64 VMemUsed = (Stats.active_count +
+					   Stats.wire_count) *
+					  MemoryConstants.PageSize;
+	MemoryStats.UsedVirtual = VMemUsed;
 	if(MemoryStats.UsedVirtual > MemoryStats.PeakUsedVirtual)
-#endif
 	{
 		MemoryStats.PeakUsedVirtual = MemoryStats.UsedVirtual;
 	}
@@ -401,53 +438,50 @@ const FPlatformMemoryConstants& FApplePlatformMemory::GetConstants()
 	if( MemoryConstants.TotalPhysical == 0 )
 	{
 		// Gather platform memory constants.
-		
-		// Get memory.
 		int64 AvailablePhysical = 0;
 #if PLATFORM_IOS
-#if defined(__IPHONE_13_0)
-		if (@available(iOS 13.0,*))
-		{
-			AvailablePhysical = os_proc_available_memory();
-			
-			// quantize to the known jetsam limits, we should be within 50MB of the correct one
-			uint64 JetsamLimits[] = { 1520435200, 1939865600, 2201170740, 2252710350, 3006477100 }; // { 2GB, gimped 3GB, gimped 4GB, 3GB, 4GB
-			if (AvailablePhysical < JetsamLimits[0])
-			{
-				AvailablePhysical = JetsamLimits[0];
-			}
-			else if (AvailablePhysical < JetsamLimits[1])
-			{
-				AvailablePhysical = JetsamLimits[1];
-			}
-			else if (AvailablePhysical < JetsamLimits[2])
-			{
-				AvailablePhysical = JetsamLimits[2];
-			}
-			else if (AvailablePhysical < JetsamLimits[3])
-			{
-				AvailablePhysical = JetsamLimits[3];
-			}
-			else if (AvailablePhysical < JetsamLimits[4])
-			{
-				AvailablePhysical = JetsamLimits[4];
-			}
-		}
-		else
+		AvailablePhysical = os_proc_available_memory();
+#else
+		int Mib[] = {CTL_HW, HW_MEMSIZE};
+		size_t Length = sizeof(int64);
+		sysctl(Mib, 2, &AvailablePhysical, &Length, NULL, 0);
 #endif
-#endif
-		{
-			int Mib[] = {CTL_HW, HW_MEMSIZE};
-			size_t Length = sizeof(int64);
-			sysctl(Mib, 2, &AvailablePhysical, &Length, NULL, 0);
-		}
 		
 		MemoryConstants.TotalPhysical = AvailablePhysical;
-		MemoryConstants.TotalVirtual = AvailablePhysical;
+		MemoryConstants.TotalVirtual = AvailablePhysical;	// Calculate true value below, but default to physical if vmstats call fails 
 		MemoryConstants.PageSize = (uint32)vm_page_size;
 		MemoryConstants.OsAllocationGranularity = (uint32)vm_page_size;
 		MemoryConstants.BinnedPageSize = FMath::Max((SIZE_T)65536, (SIZE_T)vm_page_size);
-		MemoryConstants.TotalPhysicalGB = (MemoryConstants.TotalPhysical + 1024 * 1024 * 1024 - 1) / 1024 / 1024 / 1024;
+		
+		// macOS reports the correct amount of physical memory, however iOS reports a lower amount of 
+		// actual physical memory. To work around this, we add 1Gb - 1b so it will be truncated 
+		// correctly and will not affect macOS
+		MemoryConstants.TotalPhysicalGB = ([NSProcessInfo processInfo].physicalMemory + (1024*1024*1024 - 1)) / 1024 / 1024 / 1024;
+
+		// Calculate total and available Virtual Memory
+		mach_port_t HostPort = mach_host_self();
+		mach_msg_type_number_t HostSize = sizeof(vm_statistics_data_t) / sizeof(integer_t);
+
+		// verify that actual device pagesize matches defined size in vm_page_size.h
+		vm_size_t PageSize = 0;
+		host_page_size(HostPort, &PageSize);
+		ensure(vm_page_size == PageSize);
+
+		vm_statistics_data_t vm_stat;
+		if (host_statistics(HostPort, HOST_VM_INFO, (host_info_t)&vm_stat, &HostSize) != KERN_SUCCESS)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Failed to fetch vm statistics"));
+			return MemoryConstants;
+		}
+
+		uint64 VMemUsed = (vm_stat.active_count +
+						  vm_stat.inactive_count +
+						  vm_stat.wire_count) *
+						 PageSize;
+		uint64 VMemFree = vm_stat.free_count * PageSize;
+		uint64 VMemTotal = VMemUsed + VMemFree;
+
+		MemoryConstants.TotalVirtual = VMemTotal;
 	}
 	
 	return MemoryConstants;
@@ -609,7 +643,7 @@ void* _Nullable FApplePlatformMemory::BinnedAllocFromOS(SIZE_T Size)
 		AllocDescriptor->OriginalSizeAsPassed = Size;
 	}
 
-	LLM(FLowLevelMemTracker::Get().OnLowLevelAlloc(ELLMTracker::Platform, Pointer, Size));
+	LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelAlloc(ELLMTracker::Platform, Pointer, Size));
 	return Pointer;
 #else
 	void* Ptr = mmap(nullptr, Size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -618,7 +652,7 @@ void* _Nullable FApplePlatformMemory::BinnedAllocFromOS(SIZE_T Size)
 		UE_LOG(LogTemp, Warning, TEXT("mmap failure allocating %d, error code: %d"), Size, errno);
 		Ptr = nullptr;
 	}
-	LLM(FLowLevelMemTracker::Get().OnLowLevelAlloc(ELLMTracker::Platform, Ptr, Size));
+	LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelAlloc(ELLMTracker::Platform, Ptr, Size));
 	return Ptr;
 #endif // USE_MALLOC_BINNED2
 }
@@ -627,7 +661,7 @@ void FApplePlatformMemory::BinnedFreeToOS(void* Ptr, SIZE_T Size)
 {
 	// Binned2 requires allocations to be BinnedPageSize-aligned. Simple mmap() does not guarantee this for recommended BinnedPageSize (64KB).
 #if USE_MALLOC_BINNED2
-	LLM(FLowLevelMemTracker::Get().OnLowLevelFree(ELLMTracker::Platform, Ptr));
+	LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelFree(ELLMTracker::Platform, Ptr));
 	// guard against someone not passing size in whole pages
 	static SIZE_T OSPageSize = FPlatformMemory::GetConstants().PageSize;
 	SIZE_T SizeInWholePages = (Size % OSPageSize) ? (Size + OSPageSize - (Size % OSPageSize)) : Size;
@@ -683,7 +717,7 @@ void FApplePlatformMemory::BinnedFreeToOS(void* Ptr, SIZE_T Size)
 		}
 	}
 #else
-	LLM(FLowLevelMemTracker::Get().OnLowLevelFree(ELLMTracker::Platform, Ptr));
+	LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelFree(ELLMTracker::Platform, Ptr));
 	if (munmap(Ptr, Size) != 0)
 	{
 		const int ErrNo = errno;
@@ -765,7 +799,11 @@ void FApplePlatformMemory::FPlatformVirtualMemoryBlock::Decommit(size_t InOffset
 {
 	check(IsAligned(InOffset, GetCommitAlignment()) && IsAligned(InSize, GetCommitAlignment()));
 	check(InOffset >= 0 && InSize >= 0 && InOffset + InSize <= GetActualSize() && Ptr);
-	madvise(((uint8*)Ptr) + InOffset, InSize, MADV_DONTNEED);
+	if (madvise(((uint8*)Ptr) + InOffset, InSize, MADV_DONTNEED) != 0)
+	{
+		// we can ran out of VMAs here too!
+		FPlatformMemory::OnOutOfMemory(InSize, 0);
+	}
 }
 
 

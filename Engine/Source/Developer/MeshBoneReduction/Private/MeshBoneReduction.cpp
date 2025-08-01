@@ -5,13 +5,19 @@
 #include "GPUSkinPublicDefs.h"
 #include "ReferenceSkeleton.h"
 #include "Engine/SkeletalMesh.h"
+#include "Engine/SkinnedAssetCommon.h"
 #include "Components/SkinnedMeshComponent.h"
 #include "UObject/UObjectHash.h"
 #include "ComponentReregisterContext.h"
 #include "Templates/UniquePtr.h"
 #include "Rendering/SkeletalMeshModel.h"
+#include "Rendering/SkeletalMeshRenderData.h"
 #include "AnimationBlueprintLibrary.h"
+#include "BoneWeights.h"
 #include "Async/ParallelFor.h"
+#include "Animation/AnimSequence.h"
+#include "Animation/AnimSequenceHelpers.h"
+#include "Templates/UnrealTemplate.h"
 
 class FMeshBoneReductionModule : public IMeshBoneReductionModule
 {
@@ -35,10 +41,10 @@ public:
 	{
 	}
 
-	void EnsureChildrenPresents(FBoneIndexType BoneIndex, const TArray<FMeshBoneInfo>& RefBoneInfo, TArray<FBoneIndexType>& OutBoneIndicesToRemove)
+	void EnsureChildrenPresents(int32 BoneIndex, const TArray<FMeshBoneInfo>& RefBoneInfo, TArray<int32>& OutBoneIndicesToRemove)
 	{
 		// just look for direct parent, we could look for RefBoneInfo->Ischild, but more expensive, and no reason to do that all the work
-		for (int32 ChildBoneIndex = 0; ChildBoneIndex < RefBoneInfo.Num(); ++ChildBoneIndex)
+		for (int32 ChildBoneIndex = 0; ChildBoneIndex < static_cast<int32>( RefBoneInfo.Num()); ++ChildBoneIndex)
 		{
 			if (RefBoneInfo[ChildBoneIndex].ParentIndex == BoneIndex)
 			{
@@ -48,7 +54,7 @@ public:
 		}
 	}
 
-	bool GetBoneReductionData(const USkeletalMesh* SkeletalMesh, int32 DesiredLOD, TMap<FBoneIndexType, FBoneIndexType>& OutBonesToReplace, const TArray<FName>* BoneNamesToRemove = NULL) override
+	bool GetBoneReductionData(const USkeletalMesh* SkeletalMesh, int32 DesiredLOD, TMap<FBoneIndexType, FBoneIndexType>& OutBonesToReplace, const TArray<FName>* BoneNamesToRemove = nullptr) override
 	{
 		if (!SkeletalMesh)
 		{
@@ -61,7 +67,7 @@ public:
 		}
 
 		const TArray<FMeshBoneInfo> & RefBoneInfo = SkeletalMesh->GetRefSkeleton().GetRawRefBoneInfo();
-		TArray<FBoneIndexType> BoneIndicesToRemove;
+		TArray<int32> BoneIndicesToRemove;
 
 		// originally this code was accumulating from LOD 0->DesiredLOd, but that should be done outside of tool if they want to
 		// removing it, and just include DesiredLOD
@@ -122,7 +128,7 @@ public:
 				ParentIndex = RefBoneInfo[ParentIndex].ParentIndex;
 			}
 
-			OutBonesToReplace.Add(BoneIndex, ParentIndex);
+			OutBonesToReplace.Add(IntCastChecked<FBoneIndexType>(BoneIndex), IntCastChecked<FBoneIndexType>(ParentIndex));
 		}
 
 		return ( OutBonesToReplace.Num() > 0 );
@@ -165,7 +171,7 @@ public:
 					}
 					else
 					{
-						// if parent doens't exists, we have to add one
+						// if parent doesn't exist, we have to add one
 						// this doesn't change bone map size 
 						Section.BoneMap.RemoveAt(BoneMapIndex);
 						ParentBoneMapIndex = Section.BoneMap.Add(*ParentBoneIndex);
@@ -220,7 +226,7 @@ public:
 				{
 					FSoftSkinVertex & Vert = Section.SoftVertices[VertIndex];
 
-					auto RemapBoneInfluenceVertexIndex = [&BoneMapRemapTable](FBoneIndexType InfluenceBones[MAX_TOTAL_INFLUENCES], uint8 InfluenceWeights[MAX_TOTAL_INFLUENCES])
+					auto RemapBoneInfluenceVertexIndex = [&BoneMapRemapTable](FBoneIndexType InfluenceBones[MAX_TOTAL_INFLUENCES], uint16 InfluenceWeights[MAX_TOTAL_INFLUENCES])
 					{
 						bool ShouldRenormalize = false;
 
@@ -261,15 +267,18 @@ public:
 					for (auto Kvp : SkinWeightProfiles)
 					{
 						FImportedSkinWeightProfileData& SkinWeightProfile = SkinWeightProfiles.FindChecked(Kvp.Key);
-						check(SkinWeightProfile.SkinWeights.IsValidIndex(RealVertexIndex));
-						RemapBoneInfluenceVertexIndex(SkinWeightProfile.SkinWeights[RealVertexIndex].InfluenceBones, SkinWeightProfile.SkinWeights[RealVertexIndex].InfluenceWeights);
+						//If the vertex index is not handle by the runtime skin weight profile, the next skeletal mesh build will fix the runtime skin weight profile amount of vertices.
+						if (SkinWeightProfile.SkinWeights.IsValidIndex(RealVertexIndex))
+						{
+							RemapBoneInfluenceVertexIndex(SkinWeightProfile.SkinWeights[RealVertexIndex].InfluenceBones, SkinWeightProfile.SkinWeights[RealVertexIndex].InfluenceWeights);
+						}
 					}
 				}
 			}
 		}
 	}
 
-	void RetrieveBoneMatrices(USkeletalMesh* SkeletalMesh, const int32 LODIndex, TArray<FBoneIndexType>& BonesToRemove, TArray<FMatrix>& InOutMatrices)
+	void RetrieveBoneMatrices(USkeletalMesh* SkeletalMesh, const int32 LODIndex, const TArray<int32>& BonesToRemove, TArray<FMatrix>& InOutMatrices) const
 	{
 		if (!SkeletalMesh->IsValidLODIndex(LODIndex))
 		{
@@ -278,92 +287,126 @@ public:
 
 		// Retrieve all bone names in skeleton
 		TArray<FName> BoneNames;
-		const int32 NumBones = SkeletalMesh->GetRefSkeleton().GetRawBoneNum();
+		const int32 NumBones = SkeletalMesh->GetRefSkeleton().GetNum();
 		for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
 		{
 			BoneNames.Add(SkeletalMesh->GetRefSkeleton().GetBoneName(BoneIndex));
 		}
-				
-		TArray<FMatrix> MultipliedBonePoses;
-		const UAnimSequence* BakePose = SkeletalMesh->GetBakePose(LODIndex);
-		if (BakePose)
+
+		// get the relative to ref pose matrices
+		TArray<FMatrix> RelativeToRefPoseMatrices;
+		RelativeToRefPoseMatrices.AddDefaulted(NumBones);
+
+		// Set initial matrices to identity
+		for (int32 Index = 0; Index < NumBones; ++Index)
 		{
-			// Retrieve posed bone transforms
-			TArray<FTransform> BonePoses;
-			UAnimationBlueprintLibrary::GetBonePosesForFrame(BakePose, BoneNames, 0, true, BonePoses);
-			MultipliedBonePoses.AddDefaulted(BonePoses.Num());
+			RelativeToRefPoseMatrices[Index] = FMatrix::Identity;
+		}
 
-			// Retrieve ref pose bone transforms
-			TArray<FTransform> RefBonePoses = SkeletalMesh->GetRefSkeleton().GetRawRefBonePose();
-			TArray<FMatrix> MultipliedRefBonePoses;
-			MultipliedRefBonePoses.AddDefaulted(RefBonePoses.Num());
+		// if it has bake pose, gets ref to local matrices using bake pose
+		if (const UAnimSequence* BakePoseAnim = SkeletalMesh->GetBakePose(LODIndex))
+		{
+			FMemMark Mark(FMemStack::Get());
 
-			const bool bDebugBonePoses = false;
+			const FReferenceSkeleton& RefSkeleton = SkeletalMesh->GetRefSkeleton();
 
-			TArray<int32> Processed;
-			Processed.SetNumZeroed(RefBonePoses.Num());
-			// Multiply out parent to child transforms for ref-pose
-			for (int32 BonePoseIndex = 0; BonePoseIndex < RefBonePoses.Num(); BonePoseIndex++)
+
+			// Setup BoneContainer and CompactPose
+			TArray<FBoneIndexType> RequiredBoneIndexArray;
+			RequiredBoneIndexArray.AddUninitialized(RefSkeleton.GetNum());
 			{
-				const int32 BoneIndex = SkeletalMesh->GetRefSkeleton().FindRawBoneIndex(BoneNames[BonePoseIndex]);
-				const int32 ParentIndex = SkeletalMesh->GetRefSkeleton().GetParentIndex(BoneIndex);
-				MultipliedRefBonePoses[BoneIndex] = RefBonePoses[BoneIndex].ToMatrixWithScale();
-
-				if (ParentIndex != INDEX_NONE)
+				FBoneIndexType RequiredBoneIndexNum = IntCastChecked<FBoneIndexType>(RequiredBoneIndexArray.Num());
+				for (FBoneIndexType BoneIndex = 0; BoneIndex < RequiredBoneIndexNum; ++BoneIndex)
 				{
-					checkf(ParentIndex == 0 || Processed[ParentIndex] == 1, TEXT("Parent bone was not yet processed"));
-					UE_CLOG(bDebugBonePoses, LogMeshBoneReduction, Log, TEXT("Original: [%i]\n%s"), BonePoseIndex, *RefBonePoses[BoneIndex].ToHumanReadableString());
-					MultipliedRefBonePoses[BoneIndex] = MultipliedRefBonePoses[BoneIndex] * MultipliedRefBonePoses[ParentIndex];
-					UE_CLOG(bDebugBonePoses, LogMeshBoneReduction, Log, TEXT("Relative: [%i]\n%s"), BonePoseIndex, *(FTransform(MultipliedRefBonePoses[BoneIndex]).ToHumanReadableString()));		
-				}		
-
-				Processed[BoneIndex] = 1;
-			}
-
-			Processed.Empty();
-			Processed.SetNumZeroed(BonePoses.Num());
-			// Multiply out parent to child transforms for bake-pose
-			for (int32 BonePoseIndex = 0; BonePoseIndex < BonePoses.Num(); BonePoseIndex++)
-			{
-				const int32 BoneIndex = SkeletalMesh->GetRefSkeleton().FindRawBoneIndex(BoneNames[BonePoseIndex]);
-				const int32 ParentIndex = SkeletalMesh->GetRefSkeleton().GetParentIndex(BoneIndex);
-				MultipliedBonePoses[BoneIndex] = BonePoses[BoneIndex].ToMatrixWithScale();
-				if (ParentIndex != INDEX_NONE)
-				{
-					checkf(ParentIndex == 0 || Processed[ParentIndex] == 1, TEXT("Parent bone was not yet processed"));
-					UE_CLOG(bDebugBonePoses, LogMeshBoneReduction, Log, TEXT("Original: [%i]\n%s"), BonePoseIndex, *BonePoses[BoneIndex].ToHumanReadableString());					
-					MultipliedBonePoses[BoneIndex] = MultipliedBonePoses[BoneIndex] * MultipliedBonePoses[ParentIndex];
-					UE_CLOG(bDebugBonePoses, LogMeshBoneReduction, Log, TEXT("Relative: [%i]\n%s"), BonePoseIndex, *(FTransform(MultipliedBonePoses[BoneIndex]).ToHumanReadableString()));			
+					RequiredBoneIndexArray[BoneIndex] = BoneIndex;
 				}
-
-				Processed[BoneIndex] = 1;
 			}
+			FBoneContainer RequiredBones(RequiredBoneIndexArray, UE::Anim::ECurveFilterMode::DisallowAll, *SkeletalMesh);
+			RequiredBones.SetUseRAWData(true);
 
-			// Calculate final bone pose transforms from ref-pose to bake-pose 
+			FCompactPose Pose;
+			Pose.SetBoneContainer(&RequiredBones);
+			Pose.ResetToRefPose();
+
+			FBlendedCurve TempCurve;
+			TempCurve.InitFrom(RequiredBones);
+			UE::Anim::FStackAttributeContainer TempAttributes;
+
+			FAnimationPoseData AnimPoseData(Pose, TempCurve, TempAttributes);
+
+			// Get component space retarget base pose, will be equivalent of ref-pose if not edited
+			TArray<FTransform> ComponentSpaceRefPose;
+			FAnimationRuntime::FillUpComponentSpaceTransforms(SkeletalMesh->GetRefSkeleton(), SkeletalMesh->GetRefSkeleton().GetRefBonePose(), ComponentSpaceRefPose);
+			
+			// Retrieve animated pose from anim sequence (including retargeting)
+			const USkeleton* Skeleton = SkeletalMesh->GetSkeleton();
+			const FName RetargetSource = Skeleton->GetRetargetSourceForMesh(SkeletalMesh);
+			UE::Anim::BuildPoseFromModel(BakePoseAnim->GetDataModel(), AnimPoseData, 0.0, EAnimInterpolationType::Step, RetargetSource, Skeleton->GetRefLocalPoses(RetargetSource));
+			
+			// Calculate component space animated pose matrices
+			TArray<FMatrix> ComponentSpaceAnimatedPose;
+			ComponentSpaceAnimatedPose.AddDefaulted(NumBones);
+
 			for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
 			{
-				MultipliedBonePoses[BoneIndex] = MultipliedRefBonePoses[BoneIndex].Inverse() * MultipliedBonePoses[BoneIndex];
-				UE_CLOG(bDebugBonePoses, LogMeshBoneReduction, Log, TEXT("Final: [%i]\n%s"), BoneIndex, *(FTransform(MultipliedBonePoses[BoneIndex]).ToHumanReadableString()));
+				const FCompactPoseBoneIndex PoseBoneIndex(BoneIndex);
+				const int32 ParentIndex = RefSkeleton.GetParentIndex(BoneIndex);
+				if (ParentIndex != INDEX_NONE)
+				{
+					// If the bone will be removed, get the local-space retarget-ed animation bone transform
+					if (BonesToRemove.Contains(BoneIndex))
+					{
+						ComponentSpaceAnimatedPose[BoneIndex] = Pose[PoseBoneIndex].ToMatrixWithScale() * ComponentSpaceAnimatedPose[ParentIndex];
+					}
+					// Otherwise use the component-space retarget base pose transform
+					else
+					{
+						ComponentSpaceAnimatedPose[BoneIndex] = ComponentSpaceRefPose[BoneIndex].ToMatrixWithScale();
+					}
+				}
+				else
+				{
+					// If the bone will be removed, get the retarget-ed animation bone transform
+					if (BonesToRemove.Contains(BoneIndex))
+					{
+						ComponentSpaceAnimatedPose[BoneIndex] = Pose[PoseBoneIndex].ToMatrixWithScale();
+					}
+					// Otherwise use the retarget base pose transform
+					else
+					{
+						ComponentSpaceAnimatedPose[BoneIndex] = ComponentSpaceRefPose[BoneIndex].ToMatrixWithScale();
+					}
+				}
+			}
+
+			// Calculate relative to retarget base (ref) pose matrix
+			for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
+			{
+				RelativeToRefPoseMatrices[BoneIndex] = ComponentSpaceRefPose[BoneIndex].ToMatrixWithScale().Inverse() * ComponentSpaceAnimatedPose[BoneIndex];
 			}
 		}
-		else
-		{
-			MultipliedBonePoses.AddDefaulted(BoneNames.Num());
-		}
-
+		
 		// Add bone transforms we're interested in
 		InOutMatrices.Reset(BonesToRemove.Num());
-		for (const FBoneIndexType& Index : BonesToRemove)
+		for (const int32 Index : BonesToRemove)
 		{
-			InOutMatrices.Add(MultipliedBonePoses[Index]);
+			InOutMatrices.Add(RelativeToRefPoseMatrices[Index]);
 		}
 	}
 
 	bool ReduceBoneCounts(USkeletalMesh* SkeletalMesh, int32 DesiredLOD, const TArray<FName>* BoneNamesToRemove, bool bCallPostEditChange /*= true*/) override
 	{
-		check (SkeletalMesh);
-		USkeleton* Skeleton = SkeletalMesh->GetSkeleton();
-		check (Skeleton);
+		if (!SkeletalMesh)
+		{
+			UE_LOG(LogMeshBoneReduction, Error, TEXT("Failed to remove Skeletal Mesh LOD %i bones, as the Skeletal Mesh is invalid."), DesiredLOD);
+			return false;
+		}
+
+		if(!SkeletalMesh->GetSkeleton())
+		{
+			UE_LOG(LogMeshBoneReduction, Error, TEXT("Failed to remove bones from LOD %i in %s, as its Skeleton is invalid."), DesiredLOD, *SkeletalMesh->GetPathName());
+			return false;
+		}
 
 		// find all the bones to remove from Skeleton settings
 		TMap<FBoneIndexType, FBoneIndexType> BonesToRemove;
@@ -372,8 +415,17 @@ public:
 		// Always restore all previously removed bones if not contained by BonesToRemove
 		SkeletalMesh->CalculateRequiredBones(SkeletalMesh->GetImportedModel()->LODModels[DesiredLOD], SkeletalMesh->GetRefSkeleton(), &BonesToRemove);
 		
-		SkeletalMesh->ReleaseResources();
-		SkeletalMesh->ReleaseResourcesFence.Wait();
+		if (IsInGameThread())
+		{
+			SkeletalMesh->ReleaseResources();
+			SkeletalMesh->ReleaseResourcesFence.Wait();
+		}
+		else
+		{
+			// When building async, make sure the release resource has been made before starting the async task
+			FSkeletalMeshRenderData* RenderData = SkeletalMesh->GetResourceForRendering();
+			ensureMsgf(!RenderData || !RenderData->IsInitialized(), TEXT("Release Resource of async SkeletalMesh build must be done before going async!"));
+		}
 
 		FSkeletalMeshModel* SkeletalMeshResource = SkeletalMesh->GetImportedModel();
 		check(SkeletalMeshResource);
@@ -389,14 +441,14 @@ public:
 
 			FSkeletalMeshLODModel::CopyStructure(NewModel, SrcModel);
 
-			TArray<FBoneIndexType> BoneIndices;
+			TArray<int32> BoneIndices;
 			TArray<FMatrix> RemovedBoneMatrices;
 			const bool bBakePoseToRemovedInfluences = (SkeletalMesh->GetBakePose(DesiredLOD) != nullptr);
 			if (bBakePoseToRemovedInfluences)
 			{
 				for (const FBoneReference& BoneReference : SkeletalMesh->GetLODInfo(DesiredLOD)->BonesToRemove)
 				{
-					int32 BoneIndex = SkeletalMesh->GetRefSkeleton().FindRawBoneIndex(BoneReference.BoneName);
+					const int32 BoneIndex = SkeletalMesh->GetRefSkeleton().FindRawBoneIndex(BoneReference.BoneName);
 					if (BoneIndex != INDEX_NONE)
 					{
 						BoneIndices.AddUnique(BoneIndex);
@@ -420,31 +472,35 @@ public:
 				FSkelMeshSection& Section = NewModel->Sections[SectionIndex];
 				if (bBakePoseToRemovedInfluences)
 				{
-					const float InfluenceMultiplier = 1.0f / 255.0f;
+					using UE::AnimationCore::InvMaxRawBoneWeightFloat;
+					
 					for (FSoftSkinVertex& Vertex : Section.SoftVertices)
 					{
-						FVector TangentX = Vertex.TangentX;
-						FVector TangentY = Vertex.TangentY;
-						FVector TangentZ = Vertex.TangentZ;
-						FVector Position = Vertex.Position;
+						FVector TangentX = (FVector)Vertex.TangentX;
+						FVector TangentY = (FVector)Vertex.TangentY;
+						FVector TangentZ = (FVector)Vertex.TangentZ;
+						FVector Position = (FVector)Vertex.Position;
 						for (uint8 InfluenceIndex = 0; InfluenceIndex < MAX_TOTAL_INFLUENCES; ++InfluenceIndex)
-						{
-							const int32 ArrayIndex = BoneIndices.IndexOfByKey(Section.BoneMap[Vertex.InfluenceBones[InfluenceIndex]]);
-							if (ArrayIndex != INDEX_NONE)
+				        {
+							if (Vertex.InfluenceWeights[InfluenceIndex] > 0)
 							{
-								Position += ((RemovedBoneMatrices[ArrayIndex].TransformPosition(Vertex.Position) - Vertex.Position) * ((float)Vertex.InfluenceWeights[InfluenceIndex] * InfluenceMultiplier));
+								const int32 ArrayIndex = BoneIndices.IndexOfByKey(Section.BoneMap[Vertex.InfluenceBones[InfluenceIndex]]);
+								if (ArrayIndex != INDEX_NONE)
+								{
+									Position += (FVector(RemovedBoneMatrices[ArrayIndex].TransformPosition((FVector)Vertex.Position)) - FVector(Vertex.Position)) * ((float)Vertex.InfluenceWeights[InfluenceIndex] * InvMaxRawBoneWeightFloat);
 
-								TangentX += ((RemovedBoneMatrices[ArrayIndex].TransformVector(Vertex.TangentX) - Vertex.TangentX) * ((float)Vertex.InfluenceWeights[InfluenceIndex] * InfluenceMultiplier));
-								TangentY += ((RemovedBoneMatrices[ArrayIndex].TransformVector(Vertex.TangentY) - Vertex.TangentY) * ((float)Vertex.InfluenceWeights[InfluenceIndex] * InfluenceMultiplier));
-								TangentZ += ((RemovedBoneMatrices[ArrayIndex].TransformVector(Vertex.TangentZ) - Vertex.TangentZ) * ((float)Vertex.InfluenceWeights[InfluenceIndex] * InfluenceMultiplier));
+									TangentX += (FVector(RemovedBoneMatrices[ArrayIndex].TransformVector((FVector)Vertex.TangentX)) - FVector(Vertex.TangentX)) * ((float)Vertex.InfluenceWeights[InfluenceIndex] * InvMaxRawBoneWeightFloat);
+									TangentY += (FVector(RemovedBoneMatrices[ArrayIndex].TransformVector((FVector)Vertex.TangentY)) - FVector(Vertex.TangentY)) * ((float)Vertex.InfluenceWeights[InfluenceIndex] * InvMaxRawBoneWeightFloat);
+									TangentZ += (FVector(RemovedBoneMatrices[ArrayIndex].TransformVector((FVector)Vertex.TangentZ)) - FVector(Vertex.TangentZ)) * ((float)Vertex.InfluenceWeights[InfluenceIndex] * InvMaxRawBoneWeightFloat);
+								}
 							}
-						}
+				        }
 
-						Vertex.Position = Position;
-						Vertex.TangentX = TangentX.GetSafeNormal();
-						Vertex.TangentY = TangentY.GetSafeNormal();
-						uint8 WComponent = Vertex.TangentZ.W;
-						Vertex.TangentZ = TangentZ.GetSafeNormal();
+						Vertex.Position = (FVector3f)Position;
+						Vertex.TangentX = (FVector3f)TangentX.GetSafeNormal();
+						Vertex.TangentY = (FVector3f)TangentY.GetSafeNormal();
+						const uint8 WComponent = static_cast<uint8>(Vertex.TangentZ.W);
+						Vertex.TangentZ = (FVector3f)TangentZ.GetSafeNormal();
 						Vertex.TangentZ.W = WComponent;
 					}
 				}
@@ -478,7 +534,11 @@ public:
 		{
 			FScopedSkeletalMeshPostEditChange ScopedSkeletalMeshPostEditChange(SkeletalMesh);
 		}
-		SkeletalMesh->MarkPackageDirty();
+
+		if (IsInGameThread())
+		{
+			SkeletalMesh->MarkPackageDirty();
+		}
 
 		return true;
 	}

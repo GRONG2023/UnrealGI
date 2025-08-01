@@ -1,12 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
+
+#include "GeometryCollection/ManagedArrayCollection.h"
 #include "UObject/ObjectMacros.h"
+
+#include "FieldSystemTypes.generated.h"
 
 /**
 *
 */
 UENUM(BlueprintType)
-enum ESetMaskConditionType
+enum ESetMaskConditionType : int
 {
 	Field_Set_Always	        UMETA(DisplayName = "Set Always", ToolTip = "The particle output value will be equal to Interior-value if the particle position is inside a sphere / Exterior-value otherwise."),
 	Field_Set_IFF_NOT_Interior  UMETA(DisplayName = "Merge Interior", ToolTip = "The particle output value will be equal to Interior-value if the particle position is inside the sphere or if the particle input value is already Interior-Value / Exterior-value otherwise."),
@@ -20,7 +24,7 @@ enum ESetMaskConditionType
 *
 */
 UENUM(BlueprintType)
-enum EWaveFunctionType
+enum EWaveFunctionType : int
 {
 	Field_Wave_Cosine	 UMETA(DisplayName = "Cosine", ToolTip = "Cosine wave that will move in time."),
 	Field_Wave_Gaussian  UMETA(DisplayName = "Gaussian", ToolTip = "Gaussian wave that will move in time."),
@@ -35,12 +39,12 @@ enum EWaveFunctionType
 *
 */
 UENUM(BlueprintType)
-enum EFieldOperationType
+enum EFieldOperationType : int
 {
-	Field_Multiply  UMETA(DisplayName = "Multiply", ToolTip = "Multiply the fields output values C = B * A"),
-	Field_Divide    UMETA(DisplayName = "Divide", ToolTip = "Divide the fields output values C = B / A"),
-	Field_Add       UMETA(DisplayName = "Add", ToolTip = "Add the fields output values : C = B + A"),
-	Field_Substract UMETA(DisplayName = "Subtract", ToolTip = "Subtract the fields output values : C = B - A"),
+	Field_Multiply  UMETA(DisplayName = "Multiply", ToolTip = "Multiply the fields output values : Output = Left * Right"),
+	Field_Divide    UMETA(DisplayName = "Divide", ToolTip = "Divide the fields output values : Output = Left / Right"),
+	Field_Add       UMETA(DisplayName = "Add", ToolTip = "Add the fields output values : Output = Left + Right"),
+	Field_Substract UMETA(DisplayName = "Subtract", ToolTip = "Subtract the fields output : Output = Left - Right"),
 	//~~~
 	//256th entry
 	Field_Operation_Max                 UMETA(Hidden)
@@ -50,7 +54,7 @@ enum EFieldOperationType
 *
 */
 UENUM(BlueprintType)
-enum EFieldCullingOperationType
+enum EFieldCullingOperationType : int
 {
 	Field_Culling_Inside  UMETA(DisplayName = "Inside", ToolTip = "Evaluate the input field if the result of the culling field is equal to 0"),
 	Field_Culling_Outside UMETA(DisplayName = "Outside", ToolTip = "Evaluate the input field if the result of the culling field is different from 0"),
@@ -64,7 +68,7 @@ enum EFieldCullingOperationType
 *
 */
 UENUM(BlueprintType)
-enum EFieldResolutionType
+enum EFieldResolutionType : int
 {
 	Field_Resolution_Minimal  UMETA(DisplayName = "Minimum", ToolTip = "Apply the field to all the active particles"),
 	Field_Resolution_DisabledParents  UMETA(DisplayName = "Parents", ToolTip = "Apply the field to all the parent particles"),
@@ -78,12 +82,14 @@ enum EFieldResolutionType
 *
 */
 UENUM(BlueprintType)
-enum EFieldFilterType
+enum EFieldFilterType : int
 {
 	Field_Filter_Dynamic  UMETA(DisplayName = "Dynamic", ToolTip = "Apply the field to all the dynamic particles"),
 	Field_Filter_Kinematic  UMETA(DisplayName = "Kinematic", ToolTip = "Apply the field to all the kinematic particles"),
 	Field_Filter_Static  UMETA(DisplayName = "Static", ToolTip = "Apply the field to all the static particles"),
-	Field_Filter_All  UMETA(DisplayName = "Maximum", ToolTip = "Apply the field to all the solver particles"),
+	Field_Filter_All  UMETA(DisplayName = "All", ToolTip = "Apply the field to all the solver particles"),
+	Field_Filter_Sleeping  UMETA(DisplayName = "Sleeping", ToolTip = "Apply the field to all the sleeping particles"),
+	Field_Filter_Disabled  UMETA(DisplayName = "Disabled", ToolTip = "Apply the field to all the disabled particles"),
 	//~~~
 	//256th entry
 	Field_Filter_Max      UMETA(Hidden)
@@ -93,7 +99,36 @@ enum EFieldFilterType
 *
 */
 UENUM(BlueprintType)
-enum EFieldFalloffType
+enum EFieldObjectType : int
+{
+	Field_Object_Rigid  UMETA(DisplayName = "Rigid", ToolTip = "Apply the field to all the rigid particles"),
+	Field_Object_Cloth  UMETA(DisplayName = "Cloth", ToolTip = "Apply the field to all the cloth particles"),
+	Field_Object_Destruction  UMETA(DisplayName = "Destruction", ToolTip = "Apply the field to all the destruction particles"),
+	Field_Object_Character UMETA(DisplayName = "Character", ToolTip = "Apply the field to all the character particles"),
+	Field_Object_All  UMETA(DisplayName = "All", ToolTip = "Apply the field to all the objects particles"),
+	//~~~
+	//256th entry
+	Field_Object_Max      UMETA(Hidden)
+};
+
+/**
+*
+*/
+UENUM(BlueprintType)
+enum EFieldPositionType : int
+{
+	Field_Position_CenterOfMass  UMETA(DisplayName = "CenterOfMass", ToolTip = "Apply the field to the particles center of mass position"),
+	Field_Position_PivotPoint  UMETA(DisplayName = "PivotPoint", ToolTip = "Apply the field to the particles pivot point position"),
+	//~~~
+	//256th entry
+	Field_Position_Max      UMETA(Hidden)
+};
+
+/**
+*
+*/
+UENUM(BlueprintType)
+enum EFieldFalloffType : int
 {
 	Field_FallOff_None			UMETA(DisplayName = "None", ToolTip = "No falloff function is used"),
 	Field_Falloff_Linear		UMETA(DisplayName = "Linear", ToolTip = "The falloff function will be proportional to x"),
@@ -109,7 +144,7 @@ enum EFieldFalloffType
 *
 */
 UENUM(BlueprintType)
-enum EFieldPhysicsType
+enum EFieldPhysicsType : int
 {
 	Field_None						UMETA(Hidden),
 	Field_DynamicState				UMETA(DisplayName = "Dynamic State", ToolTip = "Set the dynamic state of a particle (static, dynamic, kinematic...)"),
@@ -120,7 +155,7 @@ enum EFieldPhysicsType
 	Field_AngularVelociy			UMETA(DisplayName = "Angular Velocity", ToolTip = "Add a vector field to the particles angular velocity."),
 	Field_AngularTorque				UMETA(DisplayName = "Angular Torque", ToolTip = "Add a vector field to the particles angular torque."),
 	Field_InternalClusterStrain		UMETA(DisplayName = "Internal Strain", ToolTip = "Add a strain field to the particles internal one."),
-	Field_DisableThreshold			UMETA(DisplayName = "Disable Threshold", ToolTip = "Disable the particles if their linear and angular velocity are less than the threshold."),
+	Field_DisableThreshold			UMETA(DisplayName = "Disabled Threshold", ToolTip = "Disable the particles if their linear and angular velocity are less than the threshold."),
 	Field_SleepingThreshold			UMETA(DisplayName = "Sleeping Threshold", ToolTip = "Set particles in sleeping mode if their linear and angular velocity are less than the threshold."),
 	Field_PositionStatic			UMETA(DisplayName = "Position Static", ToolTip = "Add a position constraint to the particles to remain static", Hidden),
 	Field_PositionAnimated			UMETA(DisplayName = "Position Animated", ToolTip = "Add a position constraint to the particles to follow its kinematic position", Hidden),
@@ -128,6 +163,9 @@ enum EFieldPhysicsType
 	Field_DynamicConstraint			UMETA(DisplayName = "Dynamic Constraint", ToolTip = "Add the particles to a spring constraint holding them together", Hidden),
 	Field_CollisionGroup			UMETA(DisplayName = "Collision Group", ToolTip = "Set the particles collision group."),
 	Field_ActivateDisabled			UMETA(DisplayName = "Activate Disabled", ToolTip = "Activate all the disabled particles for which the field value will be 0"),
+	Field_InitialLinearVelocity		UMETA(DisplayName = "Initial Linear Velocity", ToolTip = "Set the geometry collection initial linear velocity", Hidden),
+	Field_InitialAngularVelocity	UMETA(DisplayName = "Initial Angular Velocity", ToolTip = "Set the geometry collection initial angular velocity", Hidden),
+	Field_LinearImpulse				UMETA(DisplayName = "Linear Impulse", ToolTip = "Add a vector field affecting the particles linear impulse.", Hidden),
 	//~~~
 	//256th entry
 	Field_PhysicsType_Max           UMETA(Hidden)
@@ -135,24 +173,28 @@ enum EFieldPhysicsType
 
 // TODO : Refactor these 3 enums to be in sync with the GetFieldTargetTypes
 UENUM(BlueprintType)
-enum EFieldVectorType
+enum EFieldVectorType : int
 {
 	Vector_LinearForce				UMETA(DisplayName = "Linear Force", ToolTip = "Add a vector field to the particles linear force."),
 	Vector_LinearVelocity			UMETA(DisplayName = "Linear Velocity", ToolTip = "Add a vector field to the particles linear velocity."),
 	Vector_AngularVelocity			UMETA(DisplayName = "Angular Velocity", ToolTip = "Add a vector field to the particles angular velocity."),
 	Vector_AngularTorque			UMETA(DisplayName = "Angular Torque", ToolTip = "Add a vector field to the particles angular torque."),
 	Vector_PositionTarget			UMETA(DisplayName = "Position Target", ToolTip = "Add a position constraint to the particles to follow a target position", Hidden),
+	Vector_InitialLinearVelocity	UMETA(DisplayName = "Initial Linear Velocity", ToolTip = "Set the geometry collection initial linear velocity", Hidden),
+	Vector_InitialAngularVelocity	UMETA(DisplayName = "Initial Angular Velocity", ToolTip = "Set the geometry collection initial angular velocity", Hidden),
+	Vector_LinearImpulse			UMETA(DisplayName = "Linear Impulse", ToolTip = "Add a vector field affecting the particles linear impulse.", Hidden),
+
 	//~~~
 	//256th entry
 	Vector_TargetMax           UMETA(Hidden)
 };
 
 UENUM(BlueprintType)
-enum EFieldScalarType
+enum EFieldScalarType : int
 {
 	Scalar_ExternalClusterStrain		UMETA(DisplayName = "External Strain", ToolTip = "Apply an external strain over the particles. If this strain is over the internal one, the cluster will break."),
 	Scalar_Kill   						UMETA(DisplayName = "Kill Particle", ToolTip = "Disable the particles for which the field will be higher than 0."),
-	Scalar_DisableThreshold				UMETA(DisplayName = "Disable Threshold", ToolTip = "Disable the particles if their linear and angular velocity are less than the threshold."),
+	Scalar_DisableThreshold				UMETA(DisplayName = "Disabled Threshold", ToolTip = "Disable the particles if their linear and angular velocity are less than the threshold."),
 	Scalar_SleepingThreshold			UMETA(DisplayName = "Sleeping Threshold", ToolTip = "Set particles in sleeping mode if their linear and angular velocity are less than the threshold."),
 	Scalar_InternalClusterStrain		UMETA(DisplayName = "Internal Strain", ToolTip = "Add a strain field to the particles internal one."),
 	Scalar_DynamicConstraint			UMETA(DisplayName = "Dynamic Constraint", ToolTip = "Add the particles to a spring constraint holding them together", Hidden),
@@ -162,7 +204,7 @@ enum EFieldScalarType
 };
 
 UENUM(BlueprintType)
-enum EFieldIntegerType
+enum EFieldIntegerType : int
 {
 	Integer_DynamicState				UMETA(DisplayName = "Dynamic State", ToolTip = "Set the dynamic state of a particle (static, dynamic, kinematic...)"),
 	Integer_ActivateDisabled			UMETA(DisplayName = "Activate Disabled", ToolTip = "Activate all the disabled particles for which the field value will be 0"),
@@ -176,7 +218,7 @@ enum EFieldIntegerType
 
 /** Defines the type of the output*/
 UENUM()
-enum EFieldOutputType
+enum EFieldOutputType : int
 {
 	/* Vector Field Type */
 	Field_Output_Vector UMETA(DisplayName = "Vector Field"),
@@ -202,7 +244,10 @@ TArray<EFieldPhysicsType> CHAOS_API GetFieldTargetTypes(EFieldOutputType OutputT
 						 EFieldPhysicsType::Field_LinearVelocity,
 						 EFieldPhysicsType::Field_AngularVelociy,
 						 EFieldPhysicsType::Field_AngularTorque,
-						 EFieldPhysicsType::Field_PositionTarget };
+						 EFieldPhysicsType::Field_PositionTarget,
+						 EFieldPhysicsType::Field_InitialLinearVelocity,
+						 EFieldPhysicsType::Field_InitialAngularVelocity,
+						 EFieldPhysicsType::Field_LinearImpulse };
 		break;
 	}
 	case Field_Output_Scalar:
@@ -290,132 +335,64 @@ FName CHAOS_API GetFieldOutputName(const EFieldOutputType Type)
 	return "None";
 }
 
-inline 
-FName CHAOS_API GetFieldPhysicsName(EFieldPhysicsType Type)
+inline CHAOS_API const TArray<FName>& GetFieldPhysicsNames()
 {
-	switch(Type)
-	{
-	case Field_DynamicState:
-		return "DynamicState";
-	case Field_LinearForce:
-		return "LinearForce";
-	case Field_ExternalClusterStrain:
-		return "ExternalClusterStrain";
-	case Field_Kill:
-		return "Kill";
-	case Field_LinearVelocity:
-		return "LinearVelocity";
-	case Field_AngularVelociy:
-		return "AngularVelocity";
-	case Field_AngularTorque:
-		return "AngularTorque";
-	case Field_InternalClusterStrain:
-		return "InternalClusterStrain";
-	case Field_DisableThreshold:
-		return "DisableThreshold";
-	case Field_SleepingThreshold:
-		return "SleepingThreshold";
-	case Field_PositionStatic:
-		return "PositionStatic";
-	case Field_PositionAnimated:
-		return "PositionAnimated";
-	case Field_PositionTarget:
-		return "PositionTarget";
-	case Field_DynamicConstraint:
-		return "DynamicConstraint";
-	case Field_CollisionGroup:
-		return "CollisionGroup";
-	case Field_ActivateDisabled:
-		return "ActivateDisabled";
-	}
-	return "None";
+	static const TArray<FName> FieldPhysicsNames =
+	{ "Node", "DynamicState", "LinearForce", "ExternalClusterStrain", "Kill", "LinearVelocity", "AngularVelocity",
+	 "AngularTorque", "InternalClusterStrain", "DisableThreshold", "SleepingThreshold", "PositionStatic",
+	 "PositionAnimated", "PositionTarget", "DynamicConstraint", "CollisionGroup", "ActivateDisabled", "InitialLinearVelocity", "InitialAngularVelocity", "LinearImpulse"};
+
+	return FieldPhysicsNames;
 }
 
-inline
-EFieldPhysicsType CHAOS_API GetFieldPhysicsType(const FName& Name)
+inline CHAOS_API const TArray<EFieldPhysicsType>& GetFieldPhysicsTypes()
 {
-	if(Name == "DynamicState")
-	{
-		return Field_DynamicState;
-	}
-	else if(Name == "LinearForce")
-	{
-		return Field_LinearForce;
-	}
-	else if(Name == "ExternalClusterStrain")
-	{
-		return Field_ExternalClusterStrain;
-	}
-	else if(Name == "Kill")
-	{
-		return Field_Kill;
-	}
-	else if(Name == "LinearVelocity")
-	{
-		return Field_LinearVelocity;
-	}
-	else if (Name == "AngularVelocity")
-	{
-		return Field_AngularVelociy;
-	}
-	else if(Name == "AngularTorque")
-	{
-		return Field_AngularTorque;
-	}
-	else if(Name == "InternalClusterStrain")
-	{
-		return Field_InternalClusterStrain;
-	}
-	else if(Name == "DisableThreshold")
-	{
-		return Field_DisableThreshold;
-	}
-	else if(Name == "SleepingThreshold")
-	{
-		return Field_SleepingThreshold;
-	}
-	else if(Name == "PositionStatic")
-	{
-		return Field_PositionStatic;
-	}
-	else if(Name == "PositionAnimated")
-	{
-		return Field_PositionAnimated;
-	}
-	else if(Name == "PositionTarget")
-	{
-		return Field_PositionTarget;
-	}
-	else if(Name == "DynamicConstraint")
-	{
-		return Field_DynamicConstraint;
-	}
-	else if(Name == "CollisionGroup")
-	{
-		return Field_CollisionGroup;
-	}
-	else if(Name == "ActivateDisabled")
-	{
-		return Field_ActivateDisabled;
-	}
-	else if(Name == "None")
-	{
-		return Field_None;
-	}
-	else
-	{
-		check(false);
-	}
+	static const TArray<EFieldPhysicsType> FieldPhysicsTypes ={ EFieldPhysicsType::Field_None, 
+																EFieldPhysicsType::Field_DynamicState, 
+																EFieldPhysicsType::Field_LinearForce, 
+																EFieldPhysicsType::Field_ExternalClusterStrain, 
+																EFieldPhysicsType::Field_Kill, 
+																EFieldPhysicsType::Field_LinearVelocity, 
+																EFieldPhysicsType::Field_AngularVelociy,
+																EFieldPhysicsType::Field_AngularTorque, 
+																EFieldPhysicsType::Field_InternalClusterStrain, 
+																EFieldPhysicsType::Field_DisableThreshold, 
+																EFieldPhysicsType::Field_SleepingThreshold, 
+																EFieldPhysicsType::Field_PositionStatic,
+																EFieldPhysicsType::Field_PositionAnimated, 
+																EFieldPhysicsType::Field_PositionTarget, 
+																EFieldPhysicsType::Field_DynamicConstraint, 
+																EFieldPhysicsType::Field_CollisionGroup,
+																EFieldPhysicsType::Field_ActivateDisabled, 
+																EFieldPhysicsType::Field_InitialLinearVelocity, 
+																EFieldPhysicsType::Field_InitialAngularVelocity,
+																EFieldPhysicsType::Field_LinearImpulse };
 
-	return Field_None;
+	return FieldPhysicsTypes;
 }
 
+inline CHAOS_API const FName& GetFieldPhysicsName(EFieldPhysicsType PhysicsType)
+{
+	const TArray<FName>& FieldPhysicsNames = GetFieldPhysicsNames();
+	static const FName NoneField("");
+
+	return (PhysicsType < FieldPhysicsNames.Num()) ? FieldPhysicsNames[PhysicsType] : NoneField;
+}
+
+inline CHAOS_API EFieldPhysicsType GetFieldPhysicsType(const FName& PhysicsName)
+{
+	const TArray<FName>& FieldPhysicsNames = GetFieldPhysicsNames();
+	const int32 PhysicsIndex = FieldPhysicsNames.Find(PhysicsName);
+
+	return ((PhysicsIndex != INDEX_NONE) && (PhysicsIndex < EFieldPhysicsType::Field_PhysicsType_Max)) ? 
+		(EFieldPhysicsType)PhysicsIndex : EFieldPhysicsType::Field_None;
+}
 
 /**
 *
 */
 UENUM(BlueprintType)
-enum EFieldPhysicsDefaultFields
+enum EFieldPhysicsDefaultFields : int
 {
 	Field_RadialIntMask				UMETA(DisplayName = "RadialIntMask"),
 	Field_RadialFalloff				UMETA(DisplayName = "RadialFalloff"),
@@ -427,6 +404,38 @@ enum EFieldPhysicsDefaultFields
 	Field_EFieldPhysicsDefaultFields_Max                 UMETA(Hidden)
 };
 
+USTRUCT()
+struct CHAOS_API FFieldCollection : public FManagedArrayCollection
+{
+	GENERATED_USTRUCT_BODY()
+public:
+	static FName StaticType() { return FName("FFieldCollection"); }
+	FFieldCollection() 
+	{ 
+		AddGroup("VectorField"); 
+		AddAttribute<FVector3f>("Start", "VectorField");
+		AddAttribute<FVector3f>("End", "VectorField");
+	}
+	
+	void AddVectorToField(FVector3f Start, FVector3f End)
+	{
+		int32 Size = AddElements(1, "VectorField");
+		ModifyAttribute<FVector3f>("Start", "VectorField")[Size] = Start;
+		ModifyAttribute<FVector3f>("End", "VectorField")[Size] = End;
+	}
+	
+	TArray<TPair<FVector3f, FVector3f>> GetVectorField() const
+	{
+		TArray<TPair<FVector3f, FVector3f>> VectorField;
+		const TManagedArray<FVector3f>& VectorFieldStart = GetAttribute<FVector3f>("Start", "VectorField");
+		const TManagedArray<FVector3f>& VectorFieldEnd = GetAttribute<FVector3f>("End", "VectorField");
+		for (int32 i = 0; i < NumElements("VectorField"); i++)
+		{
+			VectorField.Add(TPair<FVector3f, FVector3f>(VectorFieldStart[i], VectorFieldEnd[i]));
+		}
+		return VectorField;
+	}
 
+};
 
 

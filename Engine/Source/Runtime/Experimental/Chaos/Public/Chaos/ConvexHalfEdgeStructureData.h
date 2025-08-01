@@ -88,6 +88,21 @@ namespace Chaos
 			}
 		};
 
+		// We cache 3 planes per vertex since this is the most common request and a major bottleneck in GJK 
+		// (SupportCoreScaled -> GetMarginAdjustedVertexScaled -> FindVertexPlanes
+		struct FVertexPlanes
+		{
+			FIndex PlaneIndices[3];
+			FIndex NumPlaneIndices = 0;
+		};
+
+		// List of 3 halfedges per vertex for regular convexes  
+		struct FVertexHalfEdges
+		{
+			FIndex HalfEdgeIndices[3];
+			FIndex NumHalfEdgeIndices = 0;
+		};
+
 		// Initialize the structure data from the array of vertex indices per plane (in CW or CCW order - it is retained in structure)
 		// If this fails for some reason, the structure data will be invalid (check IsValid())
 		static FConvexHalfEdgeStructureData MakePlaneVertices(const TArray<TArray<int32>>& InPlaneVertices, int32 InNumVertices)
@@ -244,7 +259,9 @@ namespace Chaos
 
 		// Iterate over the edges associated with a plane. These edges form the boundary of the plane.
 		// Visitor should return false to halt iteration.
-		void VisitPlaneEdges(int32 PlaneIndex, const TFunction<bool(int32 HalfEdgeIndex, int32 NextHalfEdgeIndex)>& Visitor) const
+		// FVisitorType should be a function with signature: bool(int32 HalfEdgeIndex, int32 NextHalfEdgeIndex) that return false to stop the visit loop
+		template<typename FVisitorType>
+		inline void VisitPlaneEdges(int32 PlaneIndex, const FVisitorType& Visitor) const
 		{
 			const int32 FirstHalfEdgeIndex = GetPlane(PlaneIndex).FirstHalfEdgeIndex;
 			int32 HalfEdgeIndex0 = FirstHalfEdgeIndex;
@@ -265,7 +282,9 @@ namespace Chaos
 
 		// Iterate over the half-edges associated with a vertex (leading out from the vertex, so all half edges have the vertex as the root).
 		// Visitor should return false to halt iteration.
-		void VisitVertexHalfEdges(int32 VertexIndex, const TFunction<bool(int32 HalfEdgeIndex)>& Visitor) const
+		// FVisitorType should be a function with signature: bool(int32 HalfEdgeIndex) that returns false to stop the visit loop.
+		template<typename FVisitorType>
+		inline void VisitVertexHalfEdges(int32 VertexIndex, const FVisitorType& Visitor) const
 		{
 			const int32 FirstHalfEdgeIndex = GetVertex(VertexIndex).FirstHalfEdgeIndex;
 			int32 HalfEdgeIndex = FirstHalfEdgeIndex;
@@ -303,6 +322,120 @@ namespace Chaos
 			return NumPlanesFound;
 		}
 
+		int32 GetVertexPlanes3(int32 VertexIndex, int32& PlaneIndex0, int32& PlaneIndex1, int32& PlaneIndex2) const
+		{
+			const FVertexPlanes& VertexPlane = VertexPlanes[VertexIndex];
+			PlaneIndex0 = (int32)VertexPlane.PlaneIndices[0];
+			PlaneIndex1 = (int32)VertexPlane.PlaneIndices[1];
+			PlaneIndex2 = (int32)VertexPlane.PlaneIndices[2];
+			return (int32)VertexPlane.NumPlaneIndices;
+		}
+
+		// Build half edge structure datas for regular convexes with exactly 3 faces per vertex
+		bool BuildRegularDatas(const TArray<TArray<int32>>& InPlaneVertices, int32 InNumVertices)
+		{
+			// Count the edges
+			int32 HalfEdgeCount = 0;
+			for (int32 PlaneIndex = 0; PlaneIndex < InPlaneVertices.Num(); ++PlaneIndex)
+			{
+				HalfEdgeCount += InPlaneVertices[PlaneIndex].Num();
+			}
+
+			if ((InPlaneVertices.Num() > MaxIndex) || (HalfEdgeCount > MaxIndex) || (InNumVertices > MaxIndex))
+			{
+				// We should never get here. See GetRequiredIndexType::GetRequiredIndexType which calls CanMake() on eachn index type until it fits
+				UE_LOG(LogChaos, Error, TEXT("Unable to create structure data for convex. MaxIndex too small (%d bytes) for Planes: %d HalfEdges: %d Verts: %d"), sizeof(FIndex), InPlaneVertices.Num(), HalfEdgeCount, InNumVertices);
+				return false;
+			}
+
+			Planes.SetNum(InPlaneVertices.Num());
+			HalfEdges.SetNum(HalfEdgeCount);
+			Vertices.SetNum(InNumVertices);
+			VertexPlanes.SetNum(InNumVertices);
+
+			TArray<FVertexHalfEdges> VertexHalfEdges;
+			TArray<FIndex> HalfEdgeVertices;
+			
+			VertexHalfEdges.SetNum(InNumVertices);
+			HalfEdgeVertices.SetNum(HalfEdgeCount);
+
+			// Initialize the vertex list - it will be filled in as we build the edge list
+			for (int32 VertexIndex = 0; VertexIndex < Vertices.Num(); ++VertexIndex)
+			{
+				GetVertex(VertexIndex).FirstHalfEdgeIndex = InvalidIndex;
+			}
+
+			// Build the planes and edges. The edges for a plane are stored sequentially in the half-edge array.
+			// On the first pass, the edges contain 2 vertex indices, rather than a vertex index and a twin edge index.
+			// We fix this up on a second pass.
+			int32 NextHalfEdgeIndex = 0;
+			for (int32 PlaneIndex = 0; PlaneIndex < InPlaneVertices.Num(); ++PlaneIndex)
+			{
+				const TArray<int32>& PlaneVertices = InPlaneVertices[PlaneIndex];
+
+				GetPlane(PlaneIndex) =
+				{
+					(FIndex)NextHalfEdgeIndex,
+					(FIndex)PlaneVertices.Num()
+				};
+
+				for (int32 PlaneVertexIndex = 0; PlaneVertexIndex < PlaneVertices.Num(); ++PlaneVertexIndex)
+				{
+					// Add a new edge
+					const int32 VertexIndex0 = PlaneVertices[PlaneVertexIndex];
+					const int32 VertexIndex1 = PlaneVertices[(PlaneVertexIndex + 1) % PlaneVertices.Num()];
+					GetHalfEdge(NextHalfEdgeIndex) =
+					{
+						(FIndex)PlaneIndex,
+						(FIndex)VertexIndex0,
+						(FIndex)VertexIndex1,	// Will get converted to a half-edge index later
+					};
+					HalfEdgeVertices[NextHalfEdgeIndex] = (FIndex)VertexIndex1;
+
+					// If this is the first time Vertex0 has showed up, set its edge index
+					// For valid and regular convexes each vertices have 2 halfedges starting from itself
+					if (Vertices[VertexIndex0].FirstHalfEdgeIndex == InvalidIndex)
+					{
+						Vertices[VertexIndex0].FirstHalfEdgeIndex = (FIndex)NextHalfEdgeIndex;
+					}
+					
+					// For regular convexes each vertices have exactly 3 halfedges
+                    VertexHalfEdges[VertexIndex0].HalfEdgeIndices[VertexHalfEdges[VertexIndex0].NumHalfEdgeIndices++] = (FIndex)NextHalfEdgeIndex;
+
+					// For regular convexes each vertices have exactly 3 planes
+					VertexPlanes[VertexIndex0].PlaneIndices[VertexPlanes[VertexIndex0].NumPlaneIndices++] = (FIndex)PlaneIndex;
+
+					++NextHalfEdgeIndex;
+				}
+			}
+			Edges.Empty();
+			Edges.Reserve(NumHalfEdges() / 2);
+			
+			for (int32 HalfEdgeIndex = 0; HalfEdgeIndex < HalfEdges.Num(); ++HalfEdgeIndex)
+			{
+				const int32 VertexIndex0 = HalfEdges[HalfEdgeIndex].VertexIndex;
+				const int32 VertexIndex1 = HalfEdges[HalfEdgeIndex].TwinHalfEdgeIndex;
+
+				for(int32 VertexHalfEdgeIndex = 0, NumHalfEdgeIndices = VertexHalfEdges[VertexIndex1].NumHalfEdgeIndices; 
+				                     VertexHalfEdgeIndex < NumHalfEdgeIndices; ++VertexHalfEdgeIndex)
+				{
+				    const FIndex TwinHalfEdgeIndex = VertexHalfEdges[VertexIndex1].HalfEdgeIndices[VertexHalfEdgeIndex];
+					if(HalfEdgeVertices[TwinHalfEdgeIndex] == VertexIndex0)
+					{
+						HalfEdges[HalfEdgeIndex].TwinHalfEdgeIndex = TwinHalfEdgeIndex;
+						break;
+					}
+				}
+
+				if(VertexIndex0 < HalfEdges[HalfEdges[HalfEdgeIndex].TwinHalfEdgeIndex].VertexIndex)
+				{
+					Edges.Add((FIndex)HalfEdgeIndex);
+				}
+			}
+			return true;
+		}
+		
+
 		// Initialize the structure data from the set of vertices associated with each plane.
 		// The vertex indices are assumed to be in CCW order (or CW order - doesn't matter here
 		// as long as it is sequential).
@@ -317,6 +450,8 @@ namespace Chaos
 
 			if ((InPlaneVertices.Num() > MaxIndex) || (HalfEdgeCount > MaxIndex) || (InNumVertices > MaxIndex))
 			{
+				// We should never get here. See GetRequiredIndexType::GetRequiredIndexType which calls CanMake() on eachn index type until it fits
+				UE_LOG(LogChaos, Error, TEXT("Unable to create structure data for convex. MaxIndex too small (%d bytes) for Planes: %d HalfEdges: %d Verts: %d"), sizeof(FIndex), InPlaneVertices.Num(), HalfEdgeCount, InNumVertices);
 				return false;
 			}
 
@@ -367,12 +502,18 @@ namespace Chaos
 			}
 
 			// Find the twin half edge for each edge
+			// NOTE: we have to deal with mal-formed convexes which claim to have edges that use the
+			// same vertex pair in the same order.
+			// @todo(chaos): track down to source of the mal-formed convexes
 			// @todo(chaos): could use a map of vertex-index-pair to half edge to eliminate O(N^2) algorithm
+			TArray<bool> HalfEdgeTwinned;
 			TArray<FIndex> TwinHalfEdgeIndices;
 			TwinHalfEdgeIndices.SetNum(HalfEdges.Num());
+			HalfEdgeTwinned.SetNum(HalfEdges.Num());
 			for (int32 HalfEdgeIndex = 0; HalfEdgeIndex < TwinHalfEdgeIndices.Num(); ++HalfEdgeIndex)
 			{
 				TwinHalfEdgeIndices[HalfEdgeIndex] = InvalidIndex;
+				HalfEdgeTwinned[HalfEdgeIndex] = false;
 			}
 			for (int32 HalfEdgeIndex0 = 0; HalfEdgeIndex0 < HalfEdges.Num(); ++HalfEdgeIndex0)
 			{
@@ -384,7 +525,16 @@ namespace Chaos
 				{
 					if ((HalfEdges[HalfEdgeIndex1].VertexIndex == VertexIndex1) && (HalfEdges[HalfEdgeIndex1].TwinHalfEdgeIndex == VertexIndex0))
 					{
-						TwinHalfEdgeIndices[HalfEdgeIndex0] = (FIndex)HalfEdgeIndex1;
+						// We deal with edge duplication by leaving a half edge without a twin
+						if (!HalfEdgeTwinned[HalfEdgeIndex1])
+						{
+							TwinHalfEdgeIndices[HalfEdgeIndex0] = (FIndex)HalfEdgeIndex1;
+							HalfEdgeTwinned[HalfEdgeIndex1] = true;
+						}
+						else
+						{
+							TwinHalfEdgeIndices[HalfEdgeIndex0] = InvalidIndex;
+						}
 						break;
 					}
 				}
@@ -395,6 +545,10 @@ namespace Chaos
 			{
 				GetHalfEdge(HalfEdgeIndex).TwinHalfEdgeIndex = (FIndex)TwinHalfEdgeIndices[HalfEdgeIndex];
 			}
+
+			BuildVertexPlanes();
+
+			BuildUniqueEdgeList();
 
 			return true;
 		}
@@ -408,13 +562,22 @@ namespace Chaos
 			Ar << Vertices;
 
 			const bool bHasUniqueEdgeList = Ar.CustomVer(FPhysicsObjectVersion::GUID) >= FPhysicsObjectVersion::ChaosConvexHasUniqueEdgeSet;
-			if (Ar.IsLoading() && !bHasUniqueEdgeList)
-			{
-				BuildUniqueEdgeList();
-			}
-			else
+			if (bHasUniqueEdgeList)
 			{
 				Ar << Edges;
+			}
+
+			// Handle older data without the edge list and also an issue where some assets were saved without having their EdgeList generated (now fixed)
+			// Avoid adding a new custom version for that fix because we want to integrate this into other streams
+			if (Ar.IsLoading() && (Edges.Num() == 0) && (HalfEdges.Num() > 0))
+			{
+				BuildUniqueEdgeList();
+				ensureMsgf(Edges.Num() > 0, TEXT("Invalid edge data on convex in Load"));
+			}
+
+			if (Ar.IsLoading())
+			{
+				BuildVertexPlanes();
 			}
 		}
 
@@ -423,6 +586,26 @@ namespace Chaos
 			Value.Serialize(Ar);
 			return Ar;
 		}
+
+#if INTEL_ISPC
+		// See PerParticlePBDCollisionConstraint.cpp
+		// ISPC code has matching structs for interpreting FImplicitObjects.
+		// This is used to verify that the structs stay the same.
+		struct FISPCDataVerifier
+		{
+			static constexpr int32 OffsetOfPlanes() { return offsetof(TConvexHalfEdgeStructureData, Planes); }
+			static constexpr int32 SizeOfPlanes() { return sizeof(TConvexHalfEdgeStructureData::Planes); }
+			static constexpr int32 OffsetOfHalfEdges() { return offsetof(TConvexHalfEdgeStructureData, HalfEdges); }
+			static constexpr int32 SizeOfHalfEdges() { return sizeof(TConvexHalfEdgeStructureData::HalfEdges); }
+			static constexpr int32 OffsetOfVertices() { return offsetof(TConvexHalfEdgeStructureData, Vertices); }
+			static constexpr int32 SizeOfVertices() { return sizeof(TConvexHalfEdgeStructureData::Vertices); }
+			static constexpr int32 OffsetOfEdges() { return offsetof(TConvexHalfEdgeStructureData, Edges); }
+			static constexpr int32 SizeOfEdges() { return sizeof(TConvexHalfEdgeStructureData::Edges); }
+			static constexpr int32 OffsetOfVertexPlanes() { return offsetof(TConvexHalfEdgeStructureData, VertexPlanes); }
+			static constexpr int32 SizeOfVertexPlanes() { return sizeof(TConvexHalfEdgeStructureData::VertexPlanes); }
+		};
+		friend FISPCDataVerifier;
+#endif // #if INTEL_ISPC
 
 	private:
 
@@ -478,10 +661,58 @@ namespace Chaos
 			}
 		}
 
+		void BuildVertexPlanes()
+		{
+			VertexPlanes.SetNum(Vertices.Num());
+
+			for (int32 VertexIndex = 0; VertexIndex < NumVertices(); ++VertexIndex)
+			{
+				FVertexPlanes& VertexPlane = VertexPlanes[VertexIndex];
+				VertexPlane.NumPlaneIndices = 0;
+				VertexPlane.PlaneIndices[0] = INDEX_NONE;
+				VertexPlane.PlaneIndices[1] = INDEX_NONE;
+				VertexPlane.PlaneIndices[2] = INDEX_NONE;
+
+				const int32 FirstHalfEdgeIndex = GetVertex(VertexIndex).FirstHalfEdgeIndex;
+				int32 HalfEdgeIndex = FirstHalfEdgeIndex;
+				if (HalfEdgeIndex != InvalidIndex)
+				{
+					do
+					{
+						if(VertexPlane.NumPlaneIndices < (FIndex)UE_ARRAY_COUNT(VertexPlane.PlaneIndices))
+						{
+							VertexPlane.PlaneIndices[VertexPlane.NumPlaneIndices] = (FIndex)GetHalfEdgePlane(HalfEdgeIndex);
+						}
+
+						// Caching of the Max number of plane indices on this vertex (could be higher than 3)
+						// This can be used to determine if a call to GetVertexPlanes3 will actually return all the planes
+						// that use a particular vertex. This is useful in collision detection for box-like objects
+						// to avoid calling FindVertexPlanes
+						++VertexPlane.NumPlaneIndices;
+
+						// If we hit this there's a mal-formed convex case that we did not detect (we should be dealing with all cases - see SetPlaneVertices)
+						if (!ensure(VertexPlane.NumPlaneIndices <= Planes.Num()))
+						{
+							VertexPlane.NumPlaneIndices = 0;
+							break;
+						}
+
+						const int32 TwinHalfEdgeIndex = GetTwinHalfEdge(HalfEdgeIndex);
+						if (TwinHalfEdgeIndex == InvalidIndex)
+						{
+							break;
+						}
+						HalfEdgeIndex = GetNextHalfEdge(TwinHalfEdgeIndex);
+					} while ((HalfEdgeIndex != FirstHalfEdgeIndex) && (HalfEdgeIndex != InvalidIndex));
+				}
+			}
+		}
+
 		TArray<FPlaneData> Planes;
 		TArray<FHalfEdgeData> HalfEdges;
 		TArray<FVertexData> Vertices;
 		TArray<FIndex> Edges;
+		TArray<FVertexPlanes> VertexPlanes;
 	};
 
 

@@ -5,7 +5,7 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "LogVisualizerSettings.h"
-#include "LogVisualizerPrivate.h"
+#include "LogVisualizerPublic.h"
 #include "VisualLoggerRenderingActor.h"
 
 TSharedPtr< struct FVisualLoggerDatabase > FVisualLoggerDatabase::StaticInstance = nullptr;
@@ -47,10 +47,10 @@ void FVisualLoggerDBRow::SetItemVisibility(int32 ItemIndex, bool IsVisible)
 	}
 }
 
-int32 FVisualLoggerDBRow::GetClosestItem(float Time) const
+int32 FVisualLoggerDBRow::GetClosestItem(double Time) const
 {
 	int32 BestItemIndex = INDEX_NONE;
-	float BestDistance = MAX_FLT;
+	double BestDistance = MAX_dbl;
 	for (int32 Index = 0; Index < Items.Num(); Index++)
 	{
 		auto& CurrentEntryItem = Items[Index];
@@ -60,7 +60,7 @@ int32 FVisualLoggerDBRow::GetClosestItem(float Time) const
 			continue;
 		}
 		TArray<FVisualLoggerCategoryVerbosityPair> OutCategories;
-		const float CurrentDist = FMath::Abs(Time - CurrentEntryItem.Entry.TimeStamp);
+		const double CurrentDist = FMath::Abs(Time - CurrentEntryItem.Entry.TimeStamp);
 		if (CurrentDist < BestDistance)
 		{
 			BestDistance = CurrentDist;
@@ -68,7 +68,7 @@ int32 FVisualLoggerDBRow::GetClosestItem(float Time) const
 		}
 	}
 
-	const float CurrentDist = Items.IsValidIndex(CurrentItemIndex) && IsItemVisible(CurrentItemIndex) ? FMath::Abs(Time - Items[CurrentItemIndex].Entry.TimeStamp) : MAX_FLT;
+	const double CurrentDist = Items.IsValidIndex(CurrentItemIndex) && IsItemVisible(CurrentItemIndex) ? FMath::Abs(Time - Items[CurrentItemIndex].Entry.TimeStamp) : MAX_dbl;
 	if (BestItemIndex != INDEX_NONE && CurrentDist > BestDistance)
 	{
 		return BestItemIndex;
@@ -77,10 +77,10 @@ int32 FVisualLoggerDBRow::GetClosestItem(float Time) const
 	return CurrentItemIndex;
 }
 
-int32 FVisualLoggerDBRow::GetClosestItem(float Time, float ScrubTime) const
+int32 FVisualLoggerDBRow::GetClosestItem(double Time, double ScrubTime) const
 {
 	int32 BestItemIndex = INDEX_NONE;
-	float BestDistance = MAX_FLT;
+	double BestDistance = MAX_dbl;
 	for (int32 Index = 0; Index < Items.Num(); Index++)
 	{
 		auto& CurrentEntryItem = Items[Index];
@@ -95,16 +95,13 @@ int32 FVisualLoggerDBRow::GetClosestItem(float Time, float ScrubTime) const
 			continue;
 		}
 		TArray<FVisualLoggerCategoryVerbosityPair> OutCategories;
-		const float CurrentDist = FMath::Abs(CurrentEntryItem.Entry.TimeStamp - Time);
+		const double CurrentDist = FMath::Abs(CurrentEntryItem.Entry.TimeStamp - Time);
 		if (CurrentDist < BestDistance && CurrentEntryItem.Entry.TimeStamp <= Time)
 		{
 			BestDistance = CurrentDist;
 			BestItemIndex = Index;
 		}
 	}
-
-
-	const float CurrentDist = Items.IsValidIndex(CurrentItemIndex) ? FMath::Abs(Items[CurrentItemIndex].Entry.TimeStamp - Time) : MAX_FLT;
 
 	if (BestItemIndex != INDEX_NONE)
 	{
@@ -176,10 +173,10 @@ bool FVisualLoggerDatabase::ContainsRowByName(FName InName)
 
 FVisualLoggerDBRow& FVisualLoggerDatabase::GetRowByName(FName InName)
 {
-	const bool bContainsRow = RowNameToIndex.Contains(InName);
-	check(bContainsRow);
+	const int32* Idx = RowNameToIndex.Find(InName);
+	check(Idx);
 
-	return Rows[RowNameToIndex[InName]];
+	return Rows[*Idx];
 }
 
 void FVisualLoggerDatabase::SelectRow(FName InName, bool bDeselectOtherNodes)
@@ -224,7 +221,7 @@ void FVisualLoggerDatabase::DeselectRow(FName InName)
 		FVisualLoggerDBRow& DBRow = GetRowByName(InName);
 		DBRow.MoveTo(INDEX_NONE);
 
-		SelectedRows.RemoveSingleSwap(InName, false);
+		SelectedRows.RemoveSingleSwap(InName, EAllowShrinking::No);
 		DBEvents.OnRowSelectionChanged.Broadcast(SelectedRows);
 	}
 }
@@ -265,7 +262,7 @@ void FVisualLoggerDatabase::RemoveRow(FName RowName)
 	if (RowNameToIndex.Contains(RowName))
 	{
 		const int32 RemovedIndex = RowNameToIndex.FindAndRemoveChecked(RowName);
-		Rows.RemoveAtSwap(RemovedIndex, 1, false);
+		Rows.RemoveAtSwap(RemovedIndex, 1, EAllowShrinking::No);
 		if (Rows.IsValidIndex(RemovedIndex))
 		{
 			RowNameToIndex[Rows[RemovedIndex].GetOwnerName()] = RemovedIndex;

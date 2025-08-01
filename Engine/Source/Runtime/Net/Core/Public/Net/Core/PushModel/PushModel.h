@@ -7,6 +7,7 @@
 #if WITH_PUSH_MODEL
 
 #include "CoreMinimal.h"
+#include "Delegates/Delegate.h"
 #include "UObject/ObjectKey.h"
 
 /**
@@ -20,10 +21,10 @@
  * Rationale
  ****************************************************************
  *
- * The intention of Push Model is to provide a fundamental trade off in the way UE4 property replication works, without changing
+ * The intention of Push Model is to provide a fundamental trade off in the way UE property replication works, without changing
  * the underlying replication machinery.
  *
- * Traditionally, UE4 Networking works by having coders and designers mark properties as replicated, and then having the network
+ * Traditionally, UE Networking works by having coders and designers mark properties as replicated, and then having the network
  * system periodically compare the values of those properties to their last sent state. When we detect a change in the state,
  * then we will send that data to clients.
  *
@@ -36,7 +37,7 @@
  * on every object. This sort of overhead isn't a big deal while games are relatively small, but as they start to scale up, this
  * can become a bottleneck.
  *
- * To abate this, there's a bunch of machinery UE4 provides, things like:
+ * To abate this, there's a bunch of machinery UE provides, things like:
  *
  *	Net Frequency
  *		Gives devs the ability to tune how often actors are considered for replication.
@@ -274,18 +275,37 @@ private:
 // DO NOT USE METHODS IN THIS NAMESPACE DIRECTLY
 // Use the Macros instead, as they respect conditional compilation.
 // See PushModelMarcos.h
-namespace UE4PushModelPrivate
+namespace UEPushModelPrivate
 {
 	//~ Using int32 isn't very forward looking, but for now GUObjectArray also uses int32
 	//~ so we're probably safe.
 
-	using FNetPushObjectId = int32;
 	using FNetPushPerNetDriverId = int32;
+	using FNetLegacyPushObjectId = int32;
+	using FNetIrisPushObjectId = uint64;
+
+	// The ID need to be able to handle both Iris and non-Iris replication.
+	struct FNetPushObjectId
+	{
+		FNetPushObjectId() : Value(0xFFFFFFFFFFFFFFFFULL) {}
+		explicit FNetPushObjectId(FNetLegacyPushObjectId Id) { Value = 0xFFFFFFFF00000000ULL | uint32(Id); }
+		explicit FNetPushObjectId(FNetIrisPushObjectId Id) { Value = Id; }
+
+		bool IsValid() const { return Value != 0xFFFFFFFFFFFFFFFFULL; }
+		bool IsIrisId() const { return uint32(Value >> 32U) != 0xFFFFFFFFU; }
+		uint64 GetValue() const { return Value; }
+
+		FNetLegacyPushObjectId GetLegacyPushObjectId() const { return FNetLegacyPushObjectId(Value & 0xFFFFFFFFU);}
+		FNetIrisPushObjectId GetIrisPushObjectId() const { return Value;}
+
+	private:
+		uint64 Value;
+	};
 
 	/** A handle that can be used to refer to a Push Model Object State owned by a specific Net Driver. */
 	struct FPushModelPerNetDriverHandle
 	{
-		FPushModelPerNetDriverHandle(const FNetPushPerNetDriverId InNetDriverId, const FNetPushObjectId InObjectId)
+		FPushModelPerNetDriverHandle(const FNetPushPerNetDriverId InNetDriverId, const FNetLegacyPushObjectId InObjectId)
 			: NetDriverId(InNetDriverId)
 			, ObjectId(InObjectId)
 		{
@@ -300,7 +320,7 @@ namespace UE4PushModelPrivate
 		const FNetPushPerNetDriverId NetDriverId;
 		
 		//! The "globally unique" ID that is used to refer to the Push Model Object.
-		const FNetPushObjectId ObjectId;
+		const FNetLegacyPushObjectId ObjectId;
 
 		const bool IsValid() const
 		{
@@ -328,9 +348,15 @@ namespace UE4PushModelPrivate
 		return bMakeBpPropertiesPushModel;
 	}
 
+	/** Are we allowed to create new push model handles */
+	NETCORE_API bool IsHandleCreationAllowed();
+
+	/** Control if we are allowed to create pushmodel handles */
+	NETCORE_API void SetHandleCreationAllowed(bool bAllow);
+	
 	static FString ToString(const FNetPushObjectId Id)
 	{
-		return FString::Printf(TEXT("%d"), Id);
+		return FString::Printf(TEXT("0x%" UINT64_X_FMT), Id.GetValue());
 	}
 
 	/**
@@ -346,9 +372,10 @@ namespace UE4PushModelPrivate
 	 * constants instead of relying on UProperty::RepIndex.
 	 *
 	 * @param Object	The object we're marking dirty.
+	 * @param ObjectId	The push ID for the object we're marking dirty.
 	 * @param RepIndex	The index of the property we're marking dirty. UProperty::RepIndex.
 	 */
-	NETCORE_API void MarkPropertyDirty(const FNetPushObjectId ObjectId, const int32 RepIndex);
+	NETCORE_API void MarkPropertyDirty(const UObject* Object, const FNetPushObjectId ObjectId, const int32 RepIndex);
 
 	/**
 	 * Marks a range of properties as dirty, causing it to be compared the next time the owner is considered
@@ -362,9 +389,10 @@ namespace UE4PushModelPrivate
 	 * constants instead of relying on UProperty::RepIndex.
 	 *
 	 * @param Object	The object we're marking dirty.
+	 * @param ObjectId	The push ID for the object we're marking dirty.
 	 * @param RepIndex	The index of the property we're marking dirty. UProperty::RepIndex.
 	 */
-	NETCORE_API void MarkPropertyDirty(const FNetPushObjectId ObjectId, const int32 StartRepIndex, const int32 EndRepIndex);
+	NETCORE_API void MarkPropertyDirty(const UObject* Object, const FNetPushObjectId ObjectId, const int32 StartRepIndex, const int32 EndRepIndex);
 
 	//~ As the comments above state, none of the methods in this namespace should be invoked directly.
 	//~ Particularly, the methods below are **only** needed by internal systems.
@@ -376,13 +404,26 @@ namespace UE4PushModelPrivate
 
 	NETCORE_API class FPushModelPerNetDriverState* GetPerNetDriverState(const FPushModelPerNetDriverHandle Handle);
 
-	NETCORE_API bool ValidateObjectIdReassignment(FNetPushObjectId CurrentId, FNetPushObjectId NewId);
+	NETCORE_API bool DoesHaveDirtyPropertiesOrRecentlyCollectedGarbage(const FPushModelPerNetDriverHandle Handle);
+
+	NETCORE_API bool ValidateObjectIdReassignment(FNetLegacyPushObjectId CurrentId, FNetLegacyPushObjectId NewId);
+
+	NETCORE_API void LogMemory(FOutputDevice& Ar);
+
+#if UE_WITH_IRIS
+	// For internal use only.
+	DECLARE_DELEGATE_ThreeParams(FIrisMarkPropertyDirty, const UObject*, UEPushModelPrivate::FNetIrisPushObjectId, const int32);
+	DECLARE_DELEGATE_FourParams(FIrisMarkPropertiesDirty, const UObject*, UEPushModelPrivate::FNetIrisPushObjectId, const int32, const int32);
+
+	NETCORE_API void SetIrisMarkPropertyDirtyDelegate(const FIrisMarkPropertyDirty& Delegate);
+	NETCORE_API void SetIrisMarkPropertiesDirtyDelegate(const FIrisMarkPropertiesDirty& Delegate);
+#endif // UE_WITH_IRIS
 }
 
 
-#define CONDITIONAL_ON_PUSH_MODEL(Work) if (UE4PushModelPrivate::IsPushModelEnabled()) { Work; }
-#define IS_PUSH_MODEL_ENABLED() UE4PushModelPrivate::IsPushModelEnabled()
-#define PUSH_MAKE_BP_PROPERTIES_PUSH_MODEL() (UE4PushModelPrivate::IsPushModelEnabled() && UE4PushModelPrivate::MakeBpPropertiesPushModel())
+#define CONDITIONAL_ON_PUSH_MODEL(Work) if (UEPushModelPrivate::IsPushModelEnabled()) { Work; }
+#define IS_PUSH_MODEL_ENABLED() UEPushModelPrivate::IsPushModelEnabled()
+#define PUSH_MAKE_BP_PROPERTIES_PUSH_MODEL() (UEPushModelPrivate::IsPushModelEnabled() && UEPushModelPrivate::MakeBpPropertiesPushModel())
 
 #define GET_PROPERTY_REP_INDEX(ClassName, PropertyName) (int32)ClassName::ENetFields_Private::PropertyName
 #define GET_PROPERTY_REP_INDEX_STATIC_ARRAY_START(ClassName, PropertyName) ((int32)ClassName::ENetFields_Private::PropertyName ## _STATIC_ARRAY)
@@ -391,38 +432,50 @@ namespace UE4PushModelPrivate
 
 #define IS_PROPERTY_REPLICATED(Property) (0 != (EPropertyFlags::CPF_Net & Property->PropertyFlags))
 
-#define CONDITIONAL_ON_OBJECT_NET_ID(Object, Work) { const UE4PushModelPrivate::FNetPushObjectId PrivatePushId = Object->GetNetPushId(); Work; }
-#define CONDITIONAL_ON_OBJECT_NET_ID_DYNAMIC(Object, Work) { const UE4PushModelPrivate::FNetPushObjectId PrivatePushId = Object->GetNetPushIdDynamic(); Work; }
-#define CONDITIONAL_ON_REP_INDEX_AND_OBJECT_NET_ID(Object, Property, Work) if (IS_PROPERTY_REPLICATED(Property)) { const UE4PushModelPrivate::FNetPushObjectId PrivatePushId = Object->GetNetPushIdDynamic();  Work; }
+#define CONDITIONAL_ON_OBJECT_NET_ID(Object, Work) { const UEPushModelPrivate::FNetPushObjectId PrivatePushId(Object->GetNetPushId()); Work; }
+#define CONDITIONAL_ON_OBJECT_NET_ID_DYNAMIC(Object, Work) { const UEPushModelPrivate::FNetPushObjectId PrivatePushId(Object->GetNetPushIdDynamic()); Work; }
+#define CONDITIONAL_ON_REP_INDEX_AND_OBJECT_NET_ID(Object, Property, Work) if (IS_PROPERTY_REPLICATED(Property)) { const UEPushModelPrivate::FNetPushObjectId PrivatePushId(Object->GetNetPushIdDynamic()); Work; }
 
 //~ For these macros, we won't bother checking if Push Model is enabled. Instead, we'll just check to see whether or not the Custom ID is valid.
 
 // Marks a property dirty by RepIndex without doing additional rep index validation.
-#define MARK_PROPERTY_DIRTY_UNSAFE(Object, RepIndex) CONDITIONAL_ON_OBJECT_NET_ID_DYNAMIC(Object, UE4PushModelPrivate::MarkPropertyDirty(PrivatePushId, RepIndex))
+#define MARK_PROPERTY_DIRTY_UNSAFE(Object, RepIndex) CONDITIONAL_ON_OBJECT_NET_ID_DYNAMIC(Object, UEPushModelPrivate::MarkPropertyDirty(Object, PrivatePushId, RepIndex))
 
 // Marks a property dirty by UProperty*, validating that it's actually a replicated property.
-#define MARK_PROPERTY_DIRTY(Object, Property) CONDITIONAL_ON_REP_INDEX_AND_OBJECT_NET_ID(Object, Property, UE4PushModelPrivate::MarkPropertyDirty(PrivatePushId, Property->RepIndex))
+#define MARK_PROPERTY_DIRTY(Object, Property) CONDITIONAL_ON_REP_INDEX_AND_OBJECT_NET_ID(Object, Property, UEPushModelPrivate::MarkPropertyDirty(Object, PrivatePushId, Property->RepIndex))
 
 
 // Marks a static array property dirty given, the Object, UProperty*, and Index.
-#define MARK_PROPERTY_DIRTY_STATIC_ARRAY_INDEX(Object, Property, ArrayIndex) CONDITIONAL_ON_REP_INDEX_AND_OBJECT_NET_ID(Object, Property, UE4PushModelPrivate::MarkPropertyDirty(PrivatePushId, Property->RepIndex + ArrayIndex))
+#define MARK_PROPERTY_DIRTY_STATIC_ARRAY_INDEX(Object, Property, ArrayIndex) CONDITIONAL_ON_REP_INDEX_AND_OBJECT_NET_ID(Object, Property, UEPushModelPrivate::MarkPropertyDirty(Object, PrivatePushId, Property->RepIndex + ArrayIndex))
 
 // Marks all elements of a static array property dirty, given the Object and UProperty*
-#define MARK_PROPERTY_DIRTY_STATIC_ARRAY(Object, Property) CONDITIONAL_ON_REP_INDEX_AND_OBJECT_NET_ID(Object, Property, UE4PushModelPrivate::MarkPropertyDirty(PrivatePushId, Property->RepIndex, Property->RepIndex + Property->ArrayDim - 1))
+#define MARK_PROPERTY_DIRTY_STATIC_ARRAY(Object, Property) CONDITIONAL_ON_REP_INDEX_AND_OBJECT_NET_ID(Object, Property, UEPushModelPrivate::MarkPropertyDirty(Object, PrivatePushId, Property->RepIndex, Property->RepIndex + Property->ArrayDim - 1))
 
 
 // Marks a property dirty, given the Class Name, Property Name, and Object. This will fail to compile if the Property or Class aren't valid.
-#define MARK_PROPERTY_DIRTY_FROM_NAME(ClassName, PropertyName, Object) CONDITIONAL_ON_OBJECT_NET_ID(Object, UE4PushModelPrivate::MarkPropertyDirty(PrivatePushId, GET_PROPERTY_REP_INDEX(ClassName, PropertyName)))
+#define MARK_PROPERTY_DIRTY_FROM_NAME(ClassName, PropertyName, Object) CONDITIONAL_ON_OBJECT_NET_ID(Object, UEPushModelPrivate::MarkPropertyDirty(Object, PrivatePushId, GET_PROPERTY_REP_INDEX(ClassName, PropertyName)))
 
 // Marks a static array property dirty, given the Class Name, Property Name, Index, and Object. This will fail to compile if the Property and Class aren't valid. Callers are responsible for validating the index.
-#define MARK_PROPERTY_DIRTY_FROM_NAME_STATIC_ARRAY_INDEX(ClassName, PropertyName, ArrayIndex, Object) CONDITIONAL_ON_OBJECT_NET_ID(Object, UE4PushModelPrivate::MarkPropertyDirty(PrivatePushId, GET_PROPERTY_REP_INDEX_STATIC_ARRAY_INDEX(ClassName, PropertyName, ArrayIndex)))
+#define MARK_PROPERTY_DIRTY_FROM_NAME_STATIC_ARRAY_INDEX(ClassName, PropertyName, ArrayIndex, Object) CONDITIONAL_ON_OBJECT_NET_ID(Object, UEPushModelPrivate::MarkPropertyDirty(Object, PrivatePushId, GET_PROPERTY_REP_INDEX_STATIC_ARRAY_INDEX(ClassName, PropertyName, ArrayIndex)))
 
 // Marks an entire static array property dirty, given the Class Name, Property Name, and Object. This will fail to compile if the Property or Class aren't valid.
-#define MARK_PROPERTY_DIRTY_FROM_NAME_STATIC_ARRAY(ClassName, PropertyName, Object) CONDITIONAL_ON_OBJECT_NET_ID(Object, UE4PushModelPrivate::MarkPropertyDirty(PrivatePushId, GET_PROPERTY_REP_INDEX_STATIC_ARRAY_START(ClassName, PropertyName), GET_PROPERTY_REP_INDEX_STATIC_ARRAY_END(ClassName, PropertyName))
+#define MARK_PROPERTY_DIRTY_FROM_NAME_STATIC_ARRAY(ClassName, PropertyName, Object) CONDITIONAL_ON_OBJECT_NET_ID(Object, UEPushModelPrivate::MarkPropertyDirty(Object, PrivatePushId, GET_PROPERTY_REP_INDEX_STATIC_ARRAY_START(ClassName, PropertyName), GET_PROPERTY_REP_INDEX_STATIC_ARRAY_END(ClassName, PropertyName)))
 
+/**
+ * This is used to reduce lines of code (mostly in setters) by doing the comparison check before changing the value and marking dirty only if we have changed the value. 
+ * This is best if used for things like ints, floats, pointers, but not something like a struct because of the memcmp cost. 
+ */
+#define COMPARE_ASSIGN_AND_MARK_PROPERTY_DIRTY(ClassName, PropertyName, NewValue, Object) \
+	if (NewValue != PropertyName) { PropertyName = NewValue; MARK_PROPERTY_DIRTY_FROM_NAME(ClassName, PropertyName, Object); }
+
+#if UE_WITH_IRIS
+#define UE_NET_SET_IRIS_MARK_PROPERTY_DIRTY_DELEGATE(Delegate) UEPushModelPrivate::SetIrisMarkPropertyDirtyDelegate(Delegate)
+#define UE_NET_SET_IRIS_MARK_PROPERTIES_DIRTY_DELEGATE(Delegate) UEPushModelPrivate::SetIrisMarkPropertiesDirtyDelegate(Delegate)
+#endif // UE_WITH_IRIS
 
 #else // WITH_PUSH_MODEL
 
+#define MARK_PROPERTY_DIRTY_UNSAFE(Object, RepIndex)
 #define MARK_PROPERTY_DIRTY(Object, Property) 
 #define MARK_PROPERTY_DIRTY_STATIC_ARRAY_INDEX(Object, RepIndex, ArrayIndex) 
 #define MARK_PROPERTY_DIRTY_STATIC_ARRAY(Object, RepIndex, ArrayIndex) 
@@ -437,5 +490,13 @@ namespace UE4PushModelPrivate
 
 #define IS_PUSH_MODEL_ENABLED() false
 #define PUSH_MAKE_BP_PROPERTIES_PUSH_MODEL() false
+
+#define COMPARE_ASSIGN_AND_MARK_PROPERTY_DIRTY(ClassName, PropertyName, NewValue, Object) \
+	if (NewValue != PropertyName) { PropertyName = NewValue; }
+
+#if UE_WITH_IRIS
+#define UE_NET_SET_IRIS_MARK_PROPERTY_DIRTY_DELEGATE(...)
+#define UE_NET_SET_IRIS_MARK_PROPERTIES_DIRTY_DELEGATE(...)
+#endif // UE_WITH_IRIS
 
 #endif

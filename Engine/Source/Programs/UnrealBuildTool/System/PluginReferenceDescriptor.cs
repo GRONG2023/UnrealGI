@@ -1,12 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using JsonExtensions;
 
 namespace UnrealBuildTool
 {
@@ -34,47 +32,57 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// Description of the plugin for users that do not have it installed.
 		/// </summary>
-		public string Description;
+		public string? Description;
 
 		/// <summary>
 		/// URL for this plugin on the marketplace, if the user doesn't have it installed.
 		/// </summary>
-		public string MarketplaceURL;
+		public string? MarketplaceURL;
 
 		/// <summary>
 		/// If enabled, list of platforms for which the plugin should be enabled (or all platforms if blank).
 		/// </summary>
-		public List<UnrealTargetPlatform> WhitelistPlatforms;
+		public string[]? PlatformAllowList;
 
 		/// <summary>
 		/// If enabled, list of platforms for which the plugin should be disabled.
 		/// </summary>
-		public List<UnrealTargetPlatform> BlacklistPlatforms;
+		public string[]? PlatformDenyList;
 
 		/// <summary>
 		/// If enabled, list of target configurations for which the plugin should be enabled (or all target configurations if blank).
 		/// </summary>
-		public UnrealTargetConfiguration[] WhitelistTargetConfigurations;
+		public UnrealTargetConfiguration[]? TargetConfigurationAllowList;
 
 		/// <summary>
 		/// If enabled, list of target configurations for which the plugin should be disabled.
 		/// </summary>
-		public UnrealTargetConfiguration[] BlacklistTargetConfigurations;
+		public UnrealTargetConfiguration[]? TargetConfigurationDenyList;
 
 		/// <summary>
 		/// If enabled, list of targets for which the plugin should be enabled (or all targets if blank).
 		/// </summary>
-		public TargetType[] WhitelistTargets;
+		public TargetType[]? TargetAllowList;
 
 		/// <summary>
 		/// If enabled, list of targets for which the plugin should be disabled.
 		/// </summary>
-		public TargetType[] BlacklistTargets;
+		public TargetType[]? TargetDenyList;
 
 		/// <summary>
-		/// The list of supported platforms for this plugin. This field is copied from the plugin descriptor, and supplements the user's whitelisted and blacklisted platforms.
+		/// The list of supported platforms for this plugin. This field is copied from the plugin descriptor, and supplements the user's allowed/denied platforms.
 		/// </summary>
-		public List<UnrealTargetPlatform> SupportedTargetPlatforms;
+		public string[]? SupportedTargetPlatforms;
+
+		/// <summary>
+		/// When true, empty SupportedTargetPlatforms and PlatformAllowList are interpreted as 'no platforms' with the expectation that explicit platforms will be added in plugin platform extensions
+		/// </summary>
+		public bool bHasExplicitPlatforms;
+
+		/// <summary>
+		/// When set, specifies a specific version of the plugin that this references.
+		/// </summary>
+		public int? RequestedVersion;
 
 		/// <summary>
 		/// Constructor
@@ -82,7 +90,7 @@ namespace UnrealBuildTool
 		/// <param name="InName">Name of the plugin</param>
 		/// <param name="InMarketplaceURL">The marketplace URL for plugins which are not installed</param>
 		/// <param name="bInEnabled">Whether the plugin is enabled</param>
-		public PluginReferenceDescriptor(string InName, string InMarketplaceURL, bool bInEnabled)
+		public PluginReferenceDescriptor(string InName, string? InMarketplaceURL, bool bInEnabled)
 		{
 			Name = InName;
 			MarketplaceURL = InMarketplaceURL;
@@ -98,47 +106,111 @@ namespace UnrealBuildTool
 			Writer.WriteObjectStart();
 			Writer.WriteValue("Name", Name);
 			Writer.WriteValue("Enabled", bEnabled);
-			if(bEnabled && bOptional)
+			if (bEnabled && bOptional)
 			{
 				Writer.WriteValue("Optional", bOptional);
 			}
-			if(!String.IsNullOrEmpty(Description))
+			if (!String.IsNullOrEmpty(Description))
 			{
 				Writer.WriteValue("Description", Description);
 			}
-			if(!String.IsNullOrEmpty(MarketplaceURL))
+			if (!String.IsNullOrEmpty(MarketplaceURL))
 			{
 				Writer.WriteValue("MarketplaceURL", MarketplaceURL);
 			}
-			if(WhitelistPlatforms != null && WhitelistPlatforms.Count > 0)
+			if (PlatformAllowList != null && PlatformAllowList.Length > 0)
 			{
-				Writer.WriteStringArrayField("WhitelistPlatforms", WhitelistPlatforms.Select(x => x.ToString()).ToArray());
+				Writer.WriteStringArrayField("PlatformAllowList", PlatformAllowList.Select(x => x.ToString()).ToArray());
 			}
-			if(BlacklistPlatforms != null && BlacklistPlatforms.Count > 0)
+			if (PlatformDenyList != null && PlatformDenyList.Length > 0)
 			{
-				Writer.WriteStringArrayField("BlacklistPlatforms", BlacklistPlatforms.Select(x => x.ToString()).ToArray());
+				Writer.WriteStringArrayField("PlatformDenyList", PlatformDenyList.Select(x => x.ToString()).ToArray());
 			}
-			if (WhitelistTargetConfigurations != null && WhitelistTargetConfigurations.Length > 0)
+			if (TargetConfigurationAllowList != null && TargetConfigurationAllowList.Length > 0)
 			{
-				Writer.WriteEnumArrayField("WhitelistTargetConfigurations", WhitelistTargetConfigurations);
+				Writer.WriteEnumArrayField("TargetConfigurationAllowList", TargetConfigurationAllowList);
 			}
-			if (BlacklistTargetConfigurations != null && BlacklistTargetConfigurations.Length > 0)
+			if (TargetConfigurationDenyList != null && TargetConfigurationDenyList.Length > 0)
 			{
-				Writer.WriteEnumArrayField("BlacklistTargetConfigurations", BlacklistTargetConfigurations);
+				Writer.WriteEnumArrayField("TargetConfigurationDenyList", TargetConfigurationDenyList);
 			}
-			if (WhitelistTargets != null && WhitelistTargets.Length > 0)
+			if (TargetAllowList != null && TargetAllowList.Length > 0)
 			{
-				Writer.WriteEnumArrayField("WhitelistTargets", WhitelistTargets);
+				Writer.WriteEnumArrayField("TargetAllowList", TargetAllowList);
 			}
-			if(BlacklistTargets != null && BlacklistTargets.Length > 0)
+			if (TargetDenyList != null && TargetDenyList.Length > 0)
 			{
-				Writer.WriteEnumArrayField("BlacklistTargets", BlacklistTargets);
+				Writer.WriteEnumArrayField("TargetDenyList", TargetDenyList);
 			}
-			if(SupportedTargetPlatforms != null && SupportedTargetPlatforms.Count > 0)
+			if (SupportedTargetPlatforms != null && SupportedTargetPlatforms.Length > 0)
 			{
 				Writer.WriteStringArrayField("SupportedTargetPlatforms", SupportedTargetPlatforms.Select(x => x.ToString()).ToArray());
 			}
+			if (bHasExplicitPlatforms)
+			{
+				Writer.WriteValue("HasExplicitPlatforms", bHasExplicitPlatforms);
+			}
+			if (bEnabled && RequestedVersion != null)
+			{
+				Writer.WriteValue("Version", RequestedVersion.Value);
+			}
 			Writer.WriteObjectEnd();
+		}
+
+		private JsonObject ToJsonObject()
+		{
+			JsonObject PluginReferenceObject = new JsonObject();
+			PluginReferenceObject.AddOrSetFieldValue("Name", Name);
+			PluginReferenceObject.AddOrSetFieldValue("Enabled", bEnabled);
+			if (bEnabled && bOptional)
+			{
+				PluginReferenceObject.AddOrSetFieldValue("Optional", bOptional);
+			}
+			if (!String.IsNullOrEmpty(Description))
+			{
+				PluginReferenceObject.AddOrSetFieldValue("Description", Description);
+			}
+			if (!String.IsNullOrEmpty(MarketplaceURL))
+			{
+				PluginReferenceObject.AddOrSetFieldValue("MarketplaceURL", MarketplaceURL);
+			}
+			if (PlatformAllowList != null && PlatformAllowList.Length > 0)
+			{
+				PluginReferenceObject.AddOrSetFieldValue("PlatformAllowList", PlatformAllowList.Select(x => x.ToString()).ToArray());
+			}
+			if (PlatformDenyList != null && PlatformDenyList.Length > 0)
+			{
+				PluginReferenceObject.AddOrSetFieldValue("PlatformDenyList", PlatformDenyList.Select(x => x.ToString()).ToArray());
+			}
+			if (TargetConfigurationAllowList != null && TargetConfigurationAllowList.Length > 0)
+			{
+				PluginReferenceObject.AddOrSetFieldValue("TargetConfigurationAllowList", TargetConfigurationAllowList);
+			}
+			if (TargetConfigurationDenyList != null && TargetConfigurationDenyList.Length > 0)
+			{
+				PluginReferenceObject.AddOrSetFieldValue("TargetConfigurationDenyList", TargetConfigurationDenyList);
+			}
+			if (TargetAllowList != null && TargetAllowList.Length > 0)
+			{
+				PluginReferenceObject.AddOrSetFieldValue("TargetAllowList", TargetAllowList);
+			}
+			if (TargetDenyList != null && TargetDenyList.Length > 0)
+			{
+				PluginReferenceObject.AddOrSetFieldValue("TargetDenyList", TargetDenyList);
+			}
+			if (SupportedTargetPlatforms != null && SupportedTargetPlatforms.Length > 0)
+			{
+				PluginReferenceObject.AddOrSetFieldValue("SupportedTargetPlatforms", SupportedTargetPlatforms.Select(x => x.ToString()).ToArray());
+			}
+			if (bHasExplicitPlatforms)
+			{
+				PluginReferenceObject.AddOrSetFieldValue("HasExplicitPlatforms", bHasExplicitPlatforms);
+			}
+			if (bEnabled && RequestedVersion != null)
+			{
+				PluginReferenceObject.AddOrSetFieldValue("Version", RequestedVersion.Value);
+			}
+			return PluginReferenceObject;
 		}
 
 		/// <summary>
@@ -147,7 +219,7 @@ namespace UnrealBuildTool
 		/// <param name="Writer">The Json writer to output to</param>
 		/// <param name="Name">Name of the array</param>
 		/// <param name="Plugins">Array of plugins</param>
-		public static void WriteArray(JsonWriter Writer, string Name, PluginReferenceDescriptor[] Plugins)
+		public static void WriteArray(JsonWriter Writer, string Name, PluginReferenceDescriptor[]? Plugins)
 		{
 			if (Plugins != null && Plugins.Length > 0)
 			{
@@ -161,16 +233,46 @@ namespace UnrealBuildTool
 		}
 
 		/// <summary>
+		/// Updates the json object with an array of plugin descriptors.
+		/// </summary>
+		/// <param name="InObject">The Json object to update.</param>
+		/// <param name="Name">Name of the array</param>
+		/// <param name="Plugins">Array of plugins</param>
+		public static void UpdateJson(JsonObject InObject, string Name, PluginReferenceDescriptor[]? Plugins)
+		{
+			if (Plugins != null && Plugins.Length > 0)
+			{
+				JsonObject[] JsonObjects = Plugins.Select(X => X.ToJsonObject()).ToArray();
+				InObject.AddOrSetFieldValue(Name, JsonObjects);
+			}
+		}
+
+		/// <summary>
+		/// Checks the given platform names array and logs a message about any that are not known. This may simply be due to not having the platform synced in Engine/Platforms/[PlatformName].
+		/// </summary>
+		/// <param name="PlatformNames"></param>
+		private void VerifyPlatformNames(string[]? PlatformNames)
+		{
+			if (PlatformNames != null)
+			{
+				foreach (string PlatformName in PlatformNames)
+				{
+					UnrealTargetPlatform Platform;
+					if (!UnrealTargetPlatform.TryParse(PlatformName, out Platform))
+					{
+						Log.TraceLogOnce("Ignoring unknown platform '{0}' (referenced via a project's plugin descriptor for '{1}')", PlatformName, Name);
+					}
+				}
+			}
+		}
+
+		/// <summary>
 		/// Construct a PluginReferenceDescriptor from a Json object
 		/// </summary>
 		/// <param name="RawObject">The Json object containing a plugin reference descriptor</param>
 		/// <returns>New PluginReferenceDescriptor object</returns>
 		public static PluginReferenceDescriptor FromJsonObject(JsonObject RawObject)
 		{
-			string[] WhitelistPlatformNames = null;
-			string[] BlacklistPlatformNames = null;
-			string[] SupportedTargetPlatformNames = null;
-
 			PluginReferenceDescriptor Descriptor = new PluginReferenceDescriptor(RawObject.GetStringField("Name"), null, RawObject.GetBoolField("Enabled"));
 			RawObject.TryGetBoolField("Optional", out Descriptor.bOptional);
 			RawObject.TryGetStringField("Description", out Descriptor.Description);
@@ -179,37 +281,25 @@ namespace UnrealBuildTool
 			// Only parse platform information if enabled
 			if (Descriptor.bEnabled)
 			{
-				RawObject.TryGetStringArrayField("WhitelistPlatforms", out WhitelistPlatformNames);
-				RawObject.TryGetStringArrayField("BlacklistPlatforms", out BlacklistPlatformNames);
-				RawObject.TryGetEnumArrayField<UnrealTargetConfiguration>("WhitelistTargetConfigurations", out Descriptor.WhitelistTargetConfigurations);
-				RawObject.TryGetEnumArrayField<UnrealTargetConfiguration>("BlacklistTargetConfigurations", out Descriptor.BlacklistTargetConfigurations);
-				RawObject.TryGetEnumArrayField<TargetType>("WhitelistTargets", out Descriptor.WhitelistTargets);
-				RawObject.TryGetEnumArrayField<TargetType>("BlacklistTargets", out Descriptor.BlacklistTargets);
-				RawObject.TryGetStringArrayField("SupportedTargetPlatforms", out SupportedTargetPlatformNames);
-			}
+				RawObject.TryGetStringArrayFieldWithDeprecatedFallback("PlatformAllowList", "WhitelistPlatforms", out Descriptor.PlatformAllowList);
+				RawObject.TryGetStringArrayFieldWithDeprecatedFallback("PlatformDenyList", "BlacklistPlatforms", out Descriptor.PlatformDenyList);
+				RawObject.TryGetEnumArrayFieldWithDeprecatedFallback<UnrealTargetConfiguration>("TargetConfigurationAllowList", "WhitelistTargetConfigurations", out Descriptor.TargetConfigurationAllowList);
+				RawObject.TryGetEnumArrayFieldWithDeprecatedFallback<UnrealTargetConfiguration>("TargetConfigurationDenyList", "BlacklistTargetConfigurations", out Descriptor.TargetConfigurationDenyList);
+				RawObject.TryGetEnumArrayFieldWithDeprecatedFallback<TargetType>("TargetAllowList", "WhitelistTargets", out Descriptor.TargetAllowList);
+				RawObject.TryGetEnumArrayFieldWithDeprecatedFallback<TargetType>("TargetDenyList", "BlacklistTargets", out Descriptor.TargetDenyList);
+				RawObject.TryGetStringArrayField("SupportedTargetPlatforms", out Descriptor.SupportedTargetPlatforms);
+				RawObject.TryGetBoolField("HasExplicitPlatforms", out Descriptor.bHasExplicitPlatforms);
 
-			try
-			{
-				// convert string array to UnrealTargetPlatform arrays
-				if (WhitelistPlatformNames != null)
+				int RequestedVersion = -1;
+				if (RawObject.TryGetIntegerField("Version", out RequestedVersion))
 				{
-					Descriptor.WhitelistPlatforms = WhitelistPlatformNames.Select(x => UnrealTargetPlatform.Parse(x)).ToList();
+					Descriptor.RequestedVersion = RequestedVersion;
 				}
-				if (BlacklistPlatformNames != null)
-				{
-					Descriptor.BlacklistPlatforms = BlacklistPlatformNames.Select(x => UnrealTargetPlatform.Parse(x)).ToList();
-				}
-				if (SupportedTargetPlatformNames != null)
-				{
-					Descriptor.SupportedTargetPlatforms = SupportedTargetPlatformNames.Select(x => UnrealTargetPlatform.Parse(x)).ToList();
-				}
-			}
-			catch (BuildException Ex)
-			{
-				ExceptionUtils.AddContext(Ex, "while parsing PluginReferenceDescriptor {0}", Descriptor.Name);
-				throw;
-			}
 
+				Descriptor.VerifyPlatformNames(Descriptor.PlatformAllowList);
+				Descriptor.VerifyPlatformNames(Descriptor.PlatformDenyList);
+				Descriptor.VerifyPlatformNames(Descriptor.SupportedTargetPlatforms);
+			}
 
 			return Descriptor;
 		}
@@ -225,11 +315,18 @@ namespace UnrealBuildTool
 			{
 				return false;
 			}
-			if (WhitelistPlatforms != null && WhitelistPlatforms.Count > 0 && !WhitelistPlatforms.Contains(Platform))
+			if (bHasExplicitPlatforms)
+			{
+				if (PlatformAllowList == null || !PlatformAllowList.Contains(Platform.ToString()))
+				{
+					return false;
+				}
+			}
+			else if (PlatformAllowList != null && PlatformAllowList.Length > 0 && !PlatformAllowList.Contains(Platform.ToString()))
 			{
 				return false;
 			}
-			if (BlacklistPlatforms != null && BlacklistPlatforms.Contains(Platform))
+			if (PlatformDenyList != null && PlatformDenyList.Contains(Platform.ToString()))
 			{
 				return false;
 			}
@@ -247,11 +344,11 @@ namespace UnrealBuildTool
 			{
 				return false;
 			}
-			if (WhitelistTargetConfigurations != null && WhitelistTargetConfigurations.Length > 0 && !WhitelistTargetConfigurations.Contains(TargetConfiguration))
+			if (TargetConfigurationAllowList != null && TargetConfigurationAllowList.Length > 0 && !TargetConfigurationAllowList.Contains(TargetConfiguration))
 			{
 				return false;
 			}
-			if (BlacklistTargetConfigurations != null && BlacklistTargetConfigurations.Contains(TargetConfiguration))
+			if (TargetConfigurationDenyList != null && TargetConfigurationDenyList.Contains(TargetConfiguration))
 			{
 				return false;
 			}
@@ -269,11 +366,11 @@ namespace UnrealBuildTool
 			{
 				return false;
 			}
-			if (WhitelistTargets != null && WhitelistTargets.Length > 0 && !WhitelistTargets.Contains(Target))
+			if (TargetAllowList != null && TargetAllowList.Length > 0 && !TargetAllowList.Contains(Target))
 			{
 				return false;
 			}
-			if (BlacklistTargets != null && BlacklistTargets.Contains(Target))
+			if (TargetDenyList != null && TargetDenyList.Contains(Target))
 			{
 				return false;
 			}
@@ -287,7 +384,14 @@ namespace UnrealBuildTool
 		/// <returns>True if the plugin for this target platform</returns>
 		public bool IsSupportedTargetPlatform(UnrealTargetPlatform Platform)
 		{
-			return SupportedTargetPlatforms == null || SupportedTargetPlatforms.Count == 0 || SupportedTargetPlatforms.Contains(Platform);
+			if (bHasExplicitPlatforms)
+			{
+				return SupportedTargetPlatforms != null && SupportedTargetPlatforms.Contains(Platform.ToString());
+			}
+			else
+			{
+				return SupportedTargetPlatforms == null || SupportedTargetPlatforms.Length == 0 || SupportedTargetPlatforms.Contains(Platform.ToString());
+			}
 		}
 	}
 }

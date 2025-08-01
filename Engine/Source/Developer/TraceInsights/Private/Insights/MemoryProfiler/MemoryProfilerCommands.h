@@ -15,10 +15,8 @@ class FMenuBuilder;
 class FMemoryProfilerCommands : public TCommands<FMemoryProfilerCommands>
 {
 public:
-	/** Default constructor. */
 	FMemoryProfilerCommands();
-
-	/** Initialize commands. */
+	virtual ~FMemoryProfilerCommands();
 	virtual void RegisterCommands() override;
 
 public:
@@ -32,17 +30,14 @@ public:
 	/** Toggles visibility for the Timing view. Global and custom command. */
 	TSharedPtr<FUICommandInfo> ToggleTimingViewVisibility;
 
-	/** Toggles visibility for the Event Aggregation tree view. Global and custom command. */
-	TSharedPtr<FUICommandInfo> ToggleEventAggregationTreeViewVisibility;
+	/** Toggles visibility for the Memory Investigation view. Global and custom command. */
+	TSharedPtr<FUICommandInfo> ToggleMemInvestigationViewVisibility;
 
-	/** Toggles visibility for the Object Type Aggregation tree view. Global and custom command. */
-	TSharedPtr<FUICommandInfo> ToggleObjectTypeAggregationTreeViewVisibility;
-
-	/** Toggles visibility for the Package Details tree view. Global and custom command. */
-	TSharedPtr<FUICommandInfo> TogglePackageDetailsTreeViewVisibility;
-
-	/** Toggles visibility for the Export Details tree view. Global and custom command. */
+	/** Toggles visibility for the LLM Tags tree view. Global and custom command. */
 	TSharedPtr<FUICommandInfo> ToggleMemTagTreeViewVisibility;
+
+	/** Toggles visibility for the Modules view. Global and custom command. */
+	TSharedPtr<FUICommandInfo> ToggleModulesViewVisibility;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -95,7 +90,9 @@ protected:\
 	ECheckBoxState CmdName##_GetCheckState() const; /**< Handles FGetActionCheckState for CmdName. */
 
 	DECLARE_TOGGLE_COMMAND(ToggleTimingViewVisibility)
+	DECLARE_TOGGLE_COMMAND(ToggleMemInvestigationViewVisibility)
 	DECLARE_TOGGLE_COMMAND(ToggleMemTagTreeViewVisibility)
+	DECLARE_TOGGLE_COMMAND(ToggleModulesViewVisibility)
 #undef DECLARE_TOGGLE_COMMAND
 
 	//////////////////////////////////////////////////

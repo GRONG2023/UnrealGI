@@ -2,54 +2,106 @@
 
 #pragma once
 
+#include "BlueprintEditorModule.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "Stats/Stats.h"
+#include "CoreTypes.h"
+#include "Delegates/Delegate.h"
+#include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
-#include "UObject/GCObject.h"
-#include "Layout/Visibility.h"
-#include "Input/Reply.h"
-#include "Widgets/SWidget.h"
-#include "Styling/SlateBrush.h"
-#include "Widgets/SWindow.h"
-#include "PreviewScene.h"
-#include "Framework/Commands/InputChord.h"
-#include "Framework/Application/IMenu.h"
-#include "Misc/NotifyHook.h"
-#include "TickableEditorObject.h"
+#include "EdGraph/EdGraphSchema.h"
 #include "EditorUndoClient.h"
-#include "Toolkits/IToolkitHost.h"
+#include "Engine/Blueprint.h"
+#include "FindInBlueprints.h"
+#include "Framework/Application/IMenu.h"
+#include "Framework/Commands/InputChord.h"
+#include "GraphEditor.h"
+#include "Input/Reply.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Layout/Visibility.h"
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
+#include "Merge.h"
+#include "Misc/Guid.h"
+#include "Misc/NotifyHook.h"
+#include "Misc/Optional.h"
+#include "PreviewScene.h"
+#include "SKismetInspector.h"
+#include "SourceControlOperations.h"
+#include "Stats/Stats.h"
+#include "Stats/Stats2.h"
+#include "Styling/SlateBrush.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/SubclassOf.h"
+#include "Templates/UnrealTemplate.h"
+#include "Tickable.h"
+#include "TickableEditorObject.h"
 #include "Toolkits/AssetEditorToolkit.h"
+#include "Toolkits/IToolkit.h"
+#include "Toolkits/IToolkitHost.h"
+#include "Types/SlateEnums.h"
+#include "UObject/GCObject.h"
+#include "UObject/NameTypes.h"
+#include "UObject/SoftObjectPath.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/SWidget.h"
+#include "Widgets/SWindow.h"
 #include "WorkflowOrientedApp/WorkflowTabFactory.h"
 #include "WorkflowOrientedApp/WorkflowTabManager.h"
-#include "BlueprintEditorModule.h"
-#include "GraphEditor.h"
-#include "Developer/Merge/Public/Merge.h"
 
+class AActor;
 class FBlueprintEditorToolbar;
+class FBlueprintNamespaceHelper;
+class FProperty;
+class FReferenceCollector;
 class FSCSEditorTreeNode;
+class FSubobjectEditorTreeNode;
+class FUICommandList;
 class IMessageLogListing;
 class INameValidatorInterface;
 class ISCSEditorCustomization;
-class SBlueprintPalette;
 class SBlueprintBookmarks;
+class SBlueprintPalette;
+class SDockTab;
 class SFindInBlueprints;
-class SKismetDebuggingView;
 class SKismetInspector;
 class SMyBlueprint;
 class SReplaceNodeReferences;
 class SSCSEditor;
 class SSCSEditorViewport;
+class SSubobjectEditor;
+class SWidget;
+class UActorComponent;
+class UBlueprintEditorOptions;
+class UBlueprintEditorProjectSettings;
+class UBlueprintEditorSettings;
+class UClass;
 class UEdGraph;
 class UEdGraphNode;
+class UEdGraphSchema;
+class UK2Node_Event;
+class UK2Node_FunctionEntry;
+class ULevelStreaming;
+class UObject;
+class USceneComponent;
+class UStruct;
+class UToolMenu;
+class UToolMenu;
 class UUserDefinedEnum;
 class UUserDefinedStruct;
-class UBlueprintEditorOptions;
-struct Rect;
-class UToolMenu;
+struct FEdGraphSchemaAction;
+struct FPropertyChangedEvent;
+struct FSlateBrush;
+struct FSlateColor;
+struct FSubobjectData;
 struct FToolMenuContext;
-class UK2Node_FunctionEntry;
-class UK2Node_Event;
-class UToolMenu;
+struct Rect;
 
 /* Enums to use when grouping the blueprint members in the list panel. The order here will determine the order in the list */
 namespace NodeSectionID
@@ -88,7 +140,7 @@ public:
 
 public:
 	FCustomDebugObject()
-		: Object(NULL)
+		: Object(nullptr)
 	{
 	}
 
@@ -153,7 +205,8 @@ namespace ENodeCreateAction
 // FBlueprintEditor
 
 /** Main Kismet asset editor */
-class KISMET_API FBlueprintEditor : public IBlueprintEditor, public FGCObject, public FNotifyHook, public FTickableEditorObject, public FEditorUndoClient
+class KISMET_API FBlueprintEditor : public IBlueprintEditor, public FGCObject, public FNotifyHook, public 
+FTickableEditorObject, public FEditorUndoClient, public FNoncopyable
 {
 	DECLARE_MULTICAST_DELEGATE_OneParam(FOnSetPinVisibility, SGraphEditor::EPinVisibility);
 
@@ -194,7 +247,7 @@ public:
 
 public:
 	//~ Begin FAssetEditorToolkit Interface
-	virtual bool OnRequestClose() override;
+	virtual bool OnRequestClose(EAssetEditorCloseReason InCloseReason) override;
 	virtual void OnClose() override;
 	// End of FAssetEditorToolkit 
 
@@ -223,12 +276,26 @@ public:
 	virtual void JumpToPin(const class UEdGraphPin* Pin) override;
 	virtual void SummonSearchUI(bool bSetFindWithinBlueprint, FString NewSearchTerms = FString(), bool bSelectFirstResult = false) override;
 	virtual void SummonFindAndReplaceUI() override;
+	virtual UEdGraph* GetFocusedGraph() const override;
 	virtual TSharedPtr<SGraphEditor> OpenGraphAndBringToFront(UEdGraph* Graph, bool bSetFocus = true) override;
-	virtual TArray<TSharedPtr<class FSCSEditorTreeNode> > GetSelectedSCSEditorTreeNodes() const override;
-	virtual TSharedPtr<class FSCSEditorTreeNode> FindAndSelectSCSEditorTreeNode(const UActorComponent* InComponent, bool IsCntrlDown) override;
+
+	UE_DEPRECATED(5.0, "GetSelectedSCSEditorTreeNodes has been deprecated. Use GetSelectedSubobjectEditorTreeNodes instead.")
+	virtual TArray<TSharedPtr<class FSCSEditorTreeNode>> GetSelectedSCSEditorTreeNodes() const override;
+	
+	UE_DEPRECATED(5.0, "FindAndSelectSCSEditorTreeNode has been deprecated. Use FindAndSelectSubobjectEditorTreeNode instead.")
+	virtual TSharedPtr<class FSCSEditorTreeNode> FindAndSelectSCSEditorTreeNode(const UActorComponent* InComponent, bool IsCntrlDown) override { return nullptr; }
+
+	virtual TArray<TSharedPtr<FSubobjectEditorTreeNode>> GetSelectedSubobjectEditorTreeNodes() const override;
+	virtual TSharedPtr<FSubobjectEditorTreeNode> FindAndSelectSubobjectEditorTreeNode(const UActorComponent* InComponent, bool IsCntrlDown) override;
 	virtual int32 GetNumberOfSelectedNodes() const override;
 	virtual void AnalyticsTrackNodeEvent(UBlueprint* Blueprint, UEdGraphNode *GraphNode, bool bNodeDelete = false) const override;
 	void AnalyticsTrackCompileEvent(UBlueprint* Blueprint, int32 NumErrors, int32 NumWarnings) const;
+	virtual TSharedPtr<class IClassViewerFilter> GetImportedClassViewerFilter() const override { return ImportedClassViewerFilter; }
+	UE_DEPRECATED(5.1, "Please use GetPinTypeSelectorFilters")
+	virtual TSharedPtr<class IPinTypeSelectorFilter> GetImportedPinTypeSelectorFilter() const override { return ImportedPinTypeSelectorFilter; }
+	virtual void GetPinTypeSelectorFilters(TArray<TSharedPtr<class IPinTypeSelectorFilter>>& OutFilters) const override;
+	virtual bool IsNonImportedObject(const UObject* InObject) const;
+	virtual bool IsNonImportedObject(const FSoftObjectPath& InObject) const;
 	//~ End IBlueprintEditor Interface
 
 	//~ Begin FTickableEditorObject Interface
@@ -257,20 +324,25 @@ public:
 	/**	Returns whether the editor is currently editing a single blueprint object */
 	bool IsEditingSingleBlueprint() const;
 
+	/** Ensures the blueprint has keyboard focus. */
+	void SetKeyboardFocus();
+
 	/** Getters for the various Kismet2 widgets */
-	TSharedRef<class SKismetInspector> GetInspector() const { return Inspector.ToSharedRef(); }
-	TSharedRef<class SKismetInspector> GetDefaultEditor() const { return DefaultEditor.ToSharedRef(); }
-	TSharedRef<class SKismetDebuggingView> GetDebuggingView() const { return DebuggingView.ToSharedRef(); }
-	TSharedRef<class SBlueprintPalette> GetPalette() const { return Palette.ToSharedRef(); }
-	TSharedRef<class SBlueprintBookmarks> GetBookmarksWidget() const { return BookmarksWidget.ToSharedRef(); }
-	TSharedRef<class SWidget> GetCompilerResults() const { return CompilerResults.ToSharedRef(); }
-	TSharedRef<class SFindInBlueprints> GetFindResults() const { return FindResults.ToSharedRef(); }
+	TSharedRef<SKismetInspector> GetInspector() const { return Inspector.ToSharedRef(); }
+	TSharedRef<SKismetInspector> GetDefaultEditor() const { return DefaultEditor.ToSharedRef(); }
+	TSharedRef<SBlueprintPalette> GetPalette();
+	TSharedRef<SBlueprintBookmarks> GetBookmarksWidget() const { return BookmarksWidget.ToSharedRef(); }
+	TSharedRef<SWidget> GetCompilerResults() const { return CompilerResults.ToSharedRef(); }
+	TSharedRef<SFindInBlueprints> GetFindResults() const { return FindResults.ToSharedRef(); }
 
 	/** Getters for the various optional Kismet2 widgets */
-	TSharedPtr<class SSCSEditor> GetSCSEditor() const { return SCSEditor; }
-	TSharedPtr<class SSCSEditorViewport> GetSCSViewport() const { return SCSViewport; }
-	TSharedPtr<class SMyBlueprint> GetMyBlueprintWidget() const { return MyBlueprintWidget; }
-	TSharedPtr<class SReplaceNodeReferences> GetReplaceReferencesWidget() const { return ReplaceReferencesWidget; }
+	UE_DEPRECATED(5.0, "GetSCSEditor has been deprecated. Use GetSubobjectEditor instead.")
+	TSharedPtr<SSCSEditor> GetSCSEditor() const { return nullptr; }
+	
+	TSharedPtr<SSubobjectEditor> GetSubobjectEditor() const { return SubobjectEditor; }
+	TSharedPtr<SSCSEditorViewport> GetSubobjectViewport() const { return SubobjectViewport; }
+	TSharedPtr<SMyBlueprint> GetMyBlueprintWidget() const { return MyBlueprintWidget; }
+	TSharedPtr<SReplaceNodeReferences> GetReplaceReferencesWidget() const { return ReplaceReferencesWidget; }
 
 	/**
 	 * Provides access to the preview actor.
@@ -306,6 +378,9 @@ public:
 	/**	Returns whether the edited blueprint has components */
 	bool CanAccessComponentsMode() const;
 
+	/** Returns if we are currently closing the editor */
+	bool IsEditorClosing() const;
+
 	// @todo This is a hack for now until we reconcile the default toolbar with application modes
 	void RegisterToolbarTab(const TSharedRef<class FTabManager>& TabManager);
 	/** Throw a simple message into the log */
@@ -314,8 +389,8 @@ public:
 	/** Dumps messages to the compiler log, with an option to force it to display/come to front */
 	void DumpMessagesToCompilerLog(const TArray<TSharedRef<class FTokenizedMessage>>& Messages, bool bForceMessageDisplay);
 
-	/** Returns true if in debugging mode */
-	bool InDebuggingMode() const;
+	/** Returns true if PIE is active */
+	bool IsPlayInEditorActive() const;
 
 	/** Get the currently selected set of nodes */
 	FGraphPanelSelectionSet GetSelectedNodes() const;
@@ -354,14 +429,10 @@ public:
 	float GetInstructionTextOpacity(UEdGraph* InGraph) const;
 
 	/** Returns true if in editing mode */
-	bool InEditingMode() const;
+	virtual bool InEditingMode() const;
 
 	/** Returns true if able to compile */
 	virtual bool IsCompilingEnabled() const;
-
-	/** Returns true if the parent class is also a Blueprint */
-	UE_DEPRECATED(4.27, "Please use FBlueprintEditorUtils::IsParentClassABlueprint instead")
-	bool IsParentClassOfObjectABlueprint(const UBlueprint* Blueprint) const;
 
 	/** Returns true if the parent class of the Blueprint being edited is also a Blueprint */
 	bool IsParentClassABlueprint() const;
@@ -373,7 +444,7 @@ public:
 	bool IsParentClassNative() const;
 
 	/** Returns true if the parent class is native and the link to it's header can be shown*/
-	bool IsNativeParentClassCodeLinkEnabled() const;
+	virtual bool IsNativeParentClassCodeLinkEnabled() const;
 
 	/** Handles opening the header file of native parent class */
 	void OnEditParentClassNativeCodeClicked();
@@ -422,6 +493,17 @@ public:
 	 */
 	static FSlateBrush const* GetVarIconAndColorFromProperty(const FProperty* Property, FSlateColor& IconColorOut, FSlateBrush const*& SecondaryBrushOut, FSlateColor& SecondaryColorOut);
 
+	/**
+	* Util for finding a glyph and color for a variable.
+	*
+	* @param PinType       The variable's pin type
+	* @param IconColorOut      The resulting color for the glyph
+	* @param SecondaryBrushOut The resulting secondary glyph brush (used for Map types)
+	* @param SecondaryColorOut The resulting secondary color for the glyph (used for Map types)
+	* @return					The resulting glyph brush
+	*/
+	static FSlateBrush const* GetVarIconAndColorFromPinType(const FEdGraphPinType& PinType, FSlateColor& IconColorOut, FSlateBrush const*& SecondaryBrushOut, FSlateColor& SecondaryColorOut);
+
 	/** Overridable function for determining if the current mode can script */
 	virtual bool IsInAScriptingMode() const;
 
@@ -444,7 +526,7 @@ public:
 	/** Called when a token in a log message is clicked */
 	void LogToken_OnClicked(const class IMessageToken& Token);
 
-	void FocusInspectorOnGraphSelection(const TSet<class UObject*>& NewSelection, bool bForceRefresh = false);
+	virtual void FocusInspectorOnGraphSelection(const TSet<class UObject*>& NewSelection, bool bForceRefresh = false);
 
 	/** Variable list window calls this after it is updated */
 	void VariableListWasUpdated();
@@ -461,6 +543,9 @@ public:
 	// Should be called when initializing any editor built off this foundation
 	void CommonInitialization(const TArray<UBlueprint*>& InitBlueprints, bool bShouldOpenInDefaultsMode);
 
+	// Other types of BP editors that don't use BP VM/function libs can choose to not load BP function libraries, for example: Control Rig Blueprints
+	virtual bool ShouldLoadBPLibrariesFromAssetRegistry() { return true; }
+
 	// Should be called when initializing an editor that has a blueprint, after layout (tab spawning) is done
 	void PostLayoutBlueprintEditorInitialization();
 
@@ -470,20 +555,33 @@ public:
 	/** Called when the graph editor tab is backgrounded */
 	virtual void OnGraphEditorBackgrounded(const TSharedRef<SGraphEditor>& InGraphEditor);
 
-	/** Enable/disable the SCS editor preview viewport */
-	void EnableSCSPreview(bool bEnable);
+	/** Enable/disable the subobject editor preview viewport */
+	void EnableSubobjectPreview(bool bEnable);
 
-	/** Refresh the preview viewport to reflect changes in the SCS */
-	void UpdateSCSPreview(bool bUpdateNow = false);
+	/** Refresh the preview viewport to reflect changes in the subobject */
+	void UpdateSubobjectPreview(bool bUpdateNow = false);
 
-	/** Delegate invoked when the SCS editor needs to obtain the Actor context for editing */
-	AActor* GetSCSEditorActorContext() const;
+	///////////////////////////////////////////////////////
+	// Subobject Editor Callbacks
+	/** Delegate invoked when the Subobject editor needs to obtain the object context for editing */
+	UObject* GetSubobjectEditorObjectContext() const;
 
-	/** Delegate invoked when the selection is changed in the SCS editor widget */
-	virtual void OnSelectionUpdated(const TArray<TSharedPtr<class FSCSEditorTreeNode>>& SelectedNodes);
+	/** Delegate invoked when the selection is changed in the subobject editor widget */
+	virtual void OnSelectionUpdated(const TArray<TSharedPtr<class FSubobjectEditorTreeNode>>& SelectedNodes);
 
-	/** Delegate invoked when an item is double clicked in the SCS editor widget */
-	virtual void OnComponentDoubleClicked(TSharedPtr<class FSCSEditorTreeNode> Node);
+	/** Delegate invoked when an item is double clicked in the subobject editor widget */
+	virtual void OnComponentDoubleClicked(TSharedPtr<class FSubobjectEditorTreeNode> Node);
+
+	/** Delegate invoked when a new subobject is added in the subobject editor widget */
+	virtual void OnComponentAddedToBlueprint(const FSubobjectData& NewSubobjectData);
+	
+	/** Delegate invoked when the selection is changed in the subobject editor widget */
+	UE_DEPRECATED(5.0, "OnSelectionUpdated(const TArray<TSharedPtr<class FSCSEditorTreeNode>>&) has been deprecated. Use OnSelectionUpdated(const TArray<TSharedPtr<class FSubobjectEditorTreeNode>>&) instead.")
+	virtual void OnSelectionUpdated(const TArray<TSharedPtr<class FSCSEditorTreeNode>>& SelectedNodes) {}
+
+	/** Delegate invoked when an item is double clicked in the subobject editor widget */
+	UE_DEPRECATED(5.0, "OnComponentDoubleClicked(TSharedPtr<class FSCSEditorTreeNode>) has been deprecated. Use OnComponentDoubleClicked(TSharedPtr<class FSubobjectEditorTreeNode>) instead.")
+	virtual void OnComponentDoubleClicked(TSharedPtr<class FSCSEditorTreeNode> Node) {}
 
 	/** Pin visibility accessors */
 	void SetPinVisibility(SGraphEditor::EPinVisibility Visibility);
@@ -491,7 +589,7 @@ public:
 
 	/** Reparent the current blueprint */
 	void ReparentBlueprint_Clicked();
-	bool ReparentBlueprint_IsVisible() const;
+	virtual bool ReparentBlueprint_IsVisible() const;
 	void ReparentBlueprint_NewParentChosen(UClass* ChosenClass);
 
 	/** Utility function to handle all steps required to rename a newly added action */
@@ -505,7 +603,10 @@ public:
 	virtual bool CanAddNewLocalVariable() const;
 
 	/** Adds a new local variable to the focused function graph */
-	void OnAddNewLocalVariable();
+	virtual void OnAddNewLocalVariable();
+
+	/** Pastes a new local variable to the focused function graph */
+	virtual void OnPasteNewLocalVariable(const FBPVariableDescription& VariableDescription);
 
 	// Type of new document/graph being created by a menu item
 	enum ECreatedDocumentType
@@ -519,7 +620,7 @@ public:
 	};
 
 	/** Called when New Function button is clicked */
-	void NewDocument_OnClicked(ECreatedDocumentType GraphType);
+	virtual void NewDocument_OnClicked(ECreatedDocumentType GraphType);
 	FReply NewDocument_OnClick(ECreatedDocumentType GraphType) { NewDocument_OnClicked(GraphType); return FReply::Handled(); }
 
 	/** Called when New Delegate button is clicked */
@@ -550,7 +651,7 @@ public:
 	virtual void ClearSelectionStateFor(FName SelectionOwner);
 
 	/** Handles spawning a graph node in the current graph using the passed in chord */
-	FReply OnSpawnGraphNodeByShortcut(FInputChord InChord, const FVector2D& InPosition, UEdGraph* InGraph);
+	virtual FReply OnSpawnGraphNodeByShortcut(FInputChord InChord, const FVector2D& InPosition, UEdGraph* InGraph);
 
 	/**
 	 * Perform the actual promote to variable action on the given pin in the given blueprint.
@@ -558,8 +659,9 @@ public:
 	 * @param	InBlueprint				The blueprint in which to create the variable.
 	 * @param	InTargetPin				The pin on which to base the variable.
 	 * @param	bInToMemberVariable		TRUE if attempting to create a member variable, FALSE if the variable should be local
+	 * @param   InOptionalLocation		Where the new node should be placed. If null, a fixed offset from the parent node will be used.
 	 */
-	void DoPromoteToVariable(UBlueprint* InBlueprint, UEdGraphPin* InTargetPin, bool bInToMemberVariable);
+	void DoPromoteToVariable(UBlueprint* InBlueprint, UEdGraphPin* InTargetPin, bool bInToMemberVariable, const FVector2D* InOptionalLocation = nullptr);
 
 	/** Called when node is spawned by keymap */
 	void OnNodeSpawnedByKeymap();
@@ -570,18 +672,24 @@ public:
 	/** Sets customizations for the BP editor details panel. */
 	void SetDetailsCustomization(TSharedPtr<class FDetailsViewObjectFilter> DetailsObjectFilter, TSharedPtr<class IDetailRootObjectCustomization> DetailsRootCustomization);
 
-	/** Sets SCS editor UI customization */
-	void SetSCSEditorUICustomization(TSharedPtr<class ISCSEditorUICustomization> SCSEditorUICustomization);
+	/** Sets subobject editor UI customization */
+	void SetSubobjectEditorUICustomization(TSharedPtr<class ISCSEditorUICustomization> SCSEditorUICustomization);
+
+	UE_DEPRECATED(5.0, "SetSCSEditorUICustomization has been deprecated. Use SetSubobjectEditorUICustomization instead.")
+	void SetSCSEditorUICustomization(TSharedPtr<class ISCSEditorUICustomization> SCSEditorUICustomization)
+	{
+		return SetSubobjectEditorUICustomization(SCSEditorUICustomization);
+	}
 
 	/**
-	 * Register a customization for interacting with the SCS editor
+	 * Register a customization for interacting with the subobject editor
 	 * @param	InComponentName			The name of the component to customize behavior for
 	 * @param	InCustomization			The customization instance to use
 	 */
 	void RegisterSCSEditorCustomization(const FName& InComponentName, TSharedPtr<class ISCSEditorCustomization> InCustomization);
 
 	/**
-	 * Unregister a previously registered customization for interacting with the SCS editor
+	 * Unregister a previously registered customization for interacting with the subobject editor
 	 * @param	InComponentName			The name of the component to customize behavior for
 	 */
 	void UnregisterSCSEditorCustomization(const FName& InComponentName);
@@ -593,12 +701,6 @@ public:
 	/** Closes the merge tool, rather than simply hiding it */
 	void CloseMergeTool();
 
-	/** Opens a native code generation modal window */
-	void OpenNativeCodeGenerationTool();
-
-	/** Can generate native code for current blueprint */
-	bool CanGenerateNativeCode() const;
-
 	/** Dumps the current blueprint search index to a JSON file for debugging purposes */
 	void OnGenerateSearchIndexForDebugging();
 
@@ -606,16 +708,17 @@ public:
 	void OnDumpCachedIndexDataForBlueprint();
 
 	/**
-	 * Check to see if we can customize the SCS editor for the passed-in scene component
+	 * Check to see if we can customize the subobject editor for the passed-in scene component
 	 * @param	InComponentToCustomize	The component to check to see if a customization exists
-	 * @return an SCS editor customization instance, if one exists.
+	 * @return an subobject editor customization instance, if one exists.
 	 */
-	TSharedPtr<class ISCSEditorCustomization> CustomizeSCSEditor(USceneComponent* InComponentToCustomize) const;
+	TSharedPtr<class ISCSEditorCustomization> CustomizeSubobjectEditor(const USceneComponent* InComponentToCustomize) const;
 
-	/**
-	 * Returns the currently focused graph in the Blueprint editor
-	 */
-	UEdGraph* GetFocusedGraph() const;
+	UE_DEPRECATED(5.0, "CustomizeSCSEditor has been deprecated. Use CustomizeSubobjectEditor instead.")
+	TSharedPtr<class ISCSEditorCustomization> CustomizeSCSEditor(USceneComponent* InComponentToCustomize) const
+	{
+		return CustomizeSubobjectEditor(InComponentToCustomize);
+	}
 
 	/** Adds to a list of custom objects for debugging beyond what will automatically be found/used */
 	virtual void GetCustomDebugObjects(TArray<FCustomDebugObject>& DebugList) const { }
@@ -632,8 +735,11 @@ public:
 	/** Called by a graph title bar to get any extra information the editor would like to display */
 	virtual FText GetGraphDecorationString(UEdGraph* InGraph) const;
 
+	/** Gets the display name of a graph */
+	static FText GetGraphDisplayName(const UEdGraph* Graph);
+
 	/** Checks to see if the provided graph is contained within the current blueprint */
-	bool IsGraphInCurrentBlueprint(UEdGraph* InGraph) const;
+	bool IsGraphInCurrentBlueprint(const UEdGraph* InGraph) const;
 
 	/** Get the context to use from the Blueprint type */
 	static FName GetContextFromBlueprintType(EBlueprintType InType);
@@ -655,10 +761,43 @@ public:
 
 	/** Gets the default schema for this editor */
 	TSubclassOf<UEdGraphSchema> GetDefaultSchema() const { return GetDefaultSchemaClass(); }
+	
+	/** Imports the given namespace into the editor. This may trigger a load event for additional macro and/or function library assets if not already loaded. */
+	void ImportNamespace(const FString& InNamespace);
+
+	/** Parameters for the extended ImportNamespaceEx() method */
+	struct FImportNamespaceExParameters
+	{
+		/** Whether this is an automatic or explicit (i.e. user-initiated) action. */
+		bool bIsAutoImport;
+
+		/** Callback to use for any post-import actions. Will not be invoked if nothing is imported. */
+		FSimpleDelegate OnPostImportCallback;
+
+		/** One or more unique namespace identifiers to be imported as part of the single transaction. */
+		TSet<FString> NamespacesToImport;
+
+		/** Default ctor (for initialization). */
+		FImportNamespaceExParameters()
+		{
+			// Treat as auto-import by default (implies that the editor will auto-refresh the details view).
+			bIsAutoImport = true;
+		}
+	};
+
+	/** Imports a set of namespace(s) into the editor. This may trigger a load event for additional macro and/or function library assets if not already loaded. */
+	void ImportNamespaceEx(const FImportNamespaceExParameters& InParams);
+
+	/** Removes the given namespace from the editor's current import context. However, this will NOT unload any associated macro and/or function library assets. */
+	void RemoveNamespace(const FString& InNamespace);
+
+	/** Selects a local variable to load in the details panel. */
+	virtual bool SelectLocalVariable(const UEdGraph* Graph, const FName& VariableName) { return false; }
+
+	/** Duplicates an EdGraphNode using selection and copy / paste functionality */
+	void SelectAndDuplicateNode(UEdGraphNode* InNode);
 
 protected:
-	UE_DEPRECATED(4.26, "Please do any validation inside the UBlueprint class during compilation, extra errors during compiling only supplied by the designer can lead to design time only errors being reported and being missed during cooks/content validation.")
-	virtual void AppendExtraCompilerResults(TSharedPtr<class IMessageLogListing> ResultsListing) {}
 
 	/** Called during initialization of the blueprint editor to register commands and extenders. */
 	virtual void InitalizeExtenders();
@@ -678,9 +817,10 @@ protected:
 	bool CanZoomToSelection() const;
 
 	// Navigating into/out of graphs
-	void NavigateToParentGraph_Clicked();
+	void NavigateToParentGraph();
+	void NavigateToParentGraphByDoubleClick();
 	bool CanNavigateToParentGraph() const;
-	void NavigateToChildGraph_Clicked();
+	void NavigateToChildGraph();
 	bool CanNavigateToChildGraph() const;
 
 	/** Determines visibility of the find parent class in content browser button on the menu bar overlay */
@@ -757,6 +897,12 @@ protected:
 	/** Handles the unloading of Blueprints (by closing the editor, if it operating on the Blueprint being unloaded)*/
 	void OnBlueprintUnloaded(UBlueprint* InBlueprint);
 
+	/** Called when a property change is about to be propagated to instances of the Blueprint */
+	void OnPreObjectPropertyChanged(UObject* InObject, const FEditPropertyChain& EditPropertyChain);
+
+	/** Called after a property change has been propagated to instances of the Blueprint */
+	void OnPostObjectPropertyChanged(UObject* InObject, FPropertyChangedEvent& PropertyChangedEvent);
+
 	//@TODO: Should the breakpoint/watch modification operations be whole-blueprint, or current-graph?
 
 	/** Deletes all breakpoints for the blueprint being edited */
@@ -776,7 +922,11 @@ protected:
 	bool HasAnyDisabledBreakpoints() const;
 	bool HasAnyWatches() const;
 
-	// Utility helper to get the currently hovered pin in the currently visible graph, or NULL if there isn't one
+	/** Spawns a new blueprint debugger tab */
+	void OpenBlueprintDebugger();
+	bool CanOpenBlueprintDebugger() const;
+
+	// Utility helper to get the currently hovered pin in the currently visible graph, or nullptr if there isn't one
 	UEdGraphPin* GetCurrentlySelectedPin() const;
 
 	// UI Action functionality
@@ -967,33 +1117,6 @@ protected:
 	virtual void OnStopWatchingPin();
 	virtual bool CanStopWatchingPin() const;
 
-	/**  BEGIN PERSONA related callback functions */
-	virtual void OnSelectBone() {};
-	virtual bool CanSelectBone() const { return false; }
-
-	virtual void OnAddPosePin() {};
-	virtual bool CanAddPosePin() const { return false; }
-
-	virtual void OnMergeAnimStateTransitions() {};
-	virtual bool CanMergeAnimStateTransitions() const { return false; }
-
-	virtual void OnRemovePosePin() {};
-	virtual bool CanRemovePosePin() const { return false; }
-
-	// convert functions between evaluator and player
-	virtual void OnConvertToSequenceEvaluator() {};
-	virtual void OnConvertToSequencePlayer() {};
-	virtual void OnConvertToBlendSpaceEvaluator() {};
-	virtual void OnConvertToBlendSpacePlayer() {};
-	virtual void OnConvertToAimOffsetLookAt() {};
-	virtual void OnConvertToAimOffsetSimple() {};
-	virtual void OnConvertToPoseBlender() {};
-	virtual void OnConvertToPoseByName() {};
-
-	// Opens the associated asset of the selected nodes
-	virtual void OnOpenRelatedAsset() {};
-	/** END PERSONA related callback functions */
-
 	void ToggleSaveIntermediateBuildProducts();
 	bool GetSaveIntermediateBuildProducts() const;
 
@@ -1094,6 +1217,9 @@ protected:
 	virtual void NotifyPostChange( const FPropertyChangedEvent& PropertyChangedEvent, FProperty* PropertyThatChanged) override;
 	//~ End FNotifyHook Interface
 
+	/** Callback to determine visibility of the public view checkbox in the Defaults editor */
+	bool ShouldShowPublicViewControl() const;
+
 	/** Callback when properties have finished being handled */
 	virtual void OnFinishedChangingProperties(const FPropertyChangedEvent& PropertyChangedEvent);
 
@@ -1139,6 +1265,9 @@ protected:
 	/** Unbinds all graph editor "quick jump" commands */
 	void ClearAllGraphEditorQuickJumps();
 
+	/** Create a graph title bar widget */
+	TSharedRef<SWidget> CreateGraphTitleBarWidget(TSharedRef<FTabInfo> InTabInfo, UEdGraph* InGraph);
+
 private:
 
 	/** Returns true if modules can be recompiled */
@@ -1147,11 +1276,18 @@ private:
 	/* User wants to edit tunnel via function editor */
 	void OnEditTunnel();
 
+protected:
+	
 	/* Create comment node on graph */
 	virtual void OnCreateComment();
+	
+	/** Create custom event node on graph */
+	virtual void OnCreateCustomEvent();
 
 	// Create new graph editor widget for the supplied document container
-	TSharedRef<SGraphEditor> CreateGraphEditorWidget(TSharedRef<class FTabInfo> InTabInfo, class UEdGraph* InGraph);
+	virtual TSharedRef<SGraphEditor> CreateGraphEditorWidget(TSharedRef<class FTabInfo> InTabInfo, class UEdGraph* InGraph);
+
+private:
 
 	/** Helper to move focused graph when clicking on graph breadcrumb */
 	void OnChangeBreadCrumbGraph( class UEdGraph* InGraph);
@@ -1159,8 +1295,8 @@ private:
 	/** Function to check whether the give graph is a subgraph */
 	static bool IsASubGraph( const class UEdGraph* GraphPtr );
 
-	/** Creates the SCSEditor tree component view and the SCS Viewport. */
-	void CreateSCSEditors();
+	/** Creates the Subobject Editor tree component view and the Subobject Viewport. */
+	void CreateSubobjectEditors();
 
 	/** Callback when a token is clicked on in the compiler results log */
 	void OnLogTokenClicked(const TSharedRef<class IMessageToken>& Token);
@@ -1169,7 +1305,7 @@ private:
 	void NavigateTab(FDocumentTracker::EOpenDocumentCause InCause);
 
 	/** Find all references of the selected node. */
-	void OnFindReferences();
+	void OnFindReferences(bool bSearchAllBlueprints, const EGetFindReferenceSearchStringFlags Flags);
 
 	/** Checks if we can currently find all references of the node selection. */
 	bool CanFindReferences();
@@ -1202,6 +1338,9 @@ private:
 	/** Util to try and get doc link for the currently selected node */
 	FString GetDocLinkForSelectedNode();
 
+	/** Util to try and get the base URL for the doc link for the currently selected node */
+	FString GetDocLinkBaseUrlForSelectedNode();
+
 	/** Set the enabled state for currently-selected nodes */
 	void OnSetEnabledStateForSelectedNodes(ENodeEnabledState NewState);
 
@@ -1233,6 +1372,15 @@ public://@TODO
 	/** Update all nodes' unrelated states when the graph has changed */
 	void UpdateNodesUnrelatedStatesAfterGraphChange();
 
+	/** Whether event graphs are allowed to be displayed/created in a blueprint */
+	virtual bool AreEventGraphsAllowed() const;
+
+	/** Whether macros are allowed  to be displayed/created in a blueprint */
+	virtual bool AreMacrosAllowed() const;
+
+	/** Whether delegates are allowed  to be displayed/created in a blueprint */
+	virtual bool AreDelegatesAllowed() const;
+
 protected:
 
 	/** Should intermediate build products be saved when recompiling? */
@@ -1257,22 +1405,19 @@ protected:
 	TSet<TWeakObjectPtr<UUserDefinedStruct>> UserDefinedStructures;
 	
 	/** Macro/function libraries to keep loaded */
-	TArray<UBlueprint*> StandardLibraries;
+	TArray<TObjectPtr<UBlueprint>> StandardLibraries;
 
-	/** SCS editor */
-	TSharedPtr<class SSCSEditor> SCSEditor;
+	/** Subobject Editor */
+	TSharedPtr<SSubobjectEditor> SubobjectEditor;
 
 	/** Viewport widget */
-	TSharedPtr<class SSCSEditorViewport> SCSViewport;
+	TSharedPtr<SSCSEditorViewport> SubobjectViewport;
 
 	/** Node inspector widget */
 	TSharedPtr<class SKismetInspector> Inspector;
 
 	/** defaults inspector widget */
 	TSharedPtr<class SKismetInspector> DefaultEditor;
-
-	/** Debugging window (watches, breakpoints, etc...) */
-	TSharedPtr<class SKismetDebuggingView> DebuggingView;
 
 	/** Palette of all classes with funcs/vars */
 	TSharedPtr<class SBlueprintPalette> Palette;
@@ -1289,6 +1434,10 @@ protected:
 	/** Compiler results log, with the log listing that it reflects */
 	TSharedPtr<class SWidget> CompilerResults;
 	TSharedPtr<class IMessageLogListing> CompilerResultsListing;
+	
+	/** Limited cache of last compile results */
+	int32 CachedNumWarnings;
+	int32 CachedNumErrors;
 	
 	/** Find results log as well as the search filter */
 	TSharedPtr<class SFindInBlueprints> FindResults;
@@ -1310,6 +1459,24 @@ protected:
 	/** The toolbar builder class */
 	TSharedPtr<class FBlueprintEditorToolbar> Toolbar;
 
+	/** Imported namespace helper utility object */
+	TSharedPtr<FBlueprintNamespaceHelper> ImportedNamespaceHelper;
+
+	/** Filter used to restrict class viewer widgets in the editor context to imported namespaces only */
+	TSharedPtr<class IClassViewerFilter> ImportedClassViewerFilter;
+
+	/** Filter used to restrict pin type selector widgets in the editor context to imported namespaces only */
+	TSharedPtr<class IPinTypeSelectorFilter> ImportedPinTypeSelectorFilter;
+
+	/** Filter used to restrict pin type selector widgets to those which permissions allow */
+	TSharedPtr<class IPinTypeSelectorFilter> PermissionsPinTypeSelectorFilter;
+
+	/** Filter used to compose multiple pin type filters together */
+	TSharedPtr<class IPinTypeSelectorFilter> CompositePinTypeSelectorFilter;
+
+	/** Pending set of namespaces to be auto-imported on the next tick */
+	TSet<FString> DeferredNamespaceImports;
+	
 	FOnSetPinVisibility OnSetPinVisibility;
 
 	/** Has someone requested a deferred update of the saved document state? */
@@ -1345,6 +1512,9 @@ protected:
 	/** If a regular node (not a comment node) has been selected */
 	bool bSelectRegularNode;
 
+	/** True if the editor was opened in defaults mode */
+	bool bWasOpenedInDefaultsMode;
+
 	/** Focus nodes which are related to the selected nodes */
 	void ResetAllNodesUnrelatedStates();
 	void CollectExecUpstreamNodes(UEdGraphNode* CurrentNode, TArray<UEdGraphNode*>& CollectedNodes);
@@ -1360,6 +1530,8 @@ public:
 	/** Make nodes which are unrelated to the selected nodes fade out */
 	void ToggleHideUnrelatedNodes();
 	bool IsToggleHideUnrelatedNodesChecked() const;
+	
+	UE_DEPRECATED(5.0, "The Toggle Hide Unrelated Nodes button is always shown now")
 	bool ShouldShowToggleHideUnrelatedNodes(bool bIsToolbar) const;
 
 	/** Make a drop down menu to control the opacity of unrelated nodes */
@@ -1383,6 +1555,11 @@ public:
 	/** Broadcasts a notification whenever the editor needs associated controls to refresh */
 	DECLARE_EVENT ( FBlueprintEditor, FOnRefreshEvent );
 	FOnRefreshEvent& OnRefresh() { return RefreshEvent; }
+
+	/** function used by the SMyBlueprint to determine if an action matches a name.
+	  * This happens during selection of a custom action ( a graph, a variable etc )
+	  */
+	virtual bool OnActionMatchesName(FEdGraphSchemaAction* InAction, const FName& InName) const { return false; }
 
 private:
 	/** Notification used whenever the editor wants associated controls to refresh. */
@@ -1424,8 +1601,8 @@ private:
 	/** analytics statistics for the Editor */ 
 	FAnalyticsStatistics AnalyticsStats;
 
-	/** Customizations for the SCS editor */
-	TMap< FName, TSharedPtr<ISCSEditorCustomization> > SCSEditorCustomizations;
+	/** Customizations for the Subobject editor */
+	TMap<FName, TSharedPtr<ISCSEditorCustomization>> SubobjectEditorCustomizations;
 
 	/** Whether the current project is C++ or blueprint based */
 	bool bCodeBasedProject;
@@ -1441,8 +1618,24 @@ private:
 	/** Handle to the registered OnActiveTabChanged delegate */
 	FDelegateHandle OnActiveTabChangedDelegateHandle;
 
+	/** Delegate handle registered for when settings change */
+	FDelegateHandle BlueprintEditorSettingsChangedHandle;
+	FDelegateHandle BlueprintProjectSettingsChangedHandle;
+
+	enum class ESafeToModifyDuringPIEStatus
+	{
+		Unknown,
+		Safe,
+		NotSafe
+	};
+
+	mutable ESafeToModifyDuringPIEStatus ModifyDuringPIEStatus = ESafeToModifyDuringPIEStatus::Unknown;
+
 	// Allow derived editors to add command mappings 
 	virtual void OnCreateGraphEditorCommands(TSharedPtr<FUICommandList> GraphEditorCommandsList) {}
+
+	virtual void OnBlueprintProjectSettingsChanged(UObject*, struct FPropertyChangedEvent&);
+	virtual void OnBlueprintEditorPreferencesChanged(UObject*, struct FPropertyChangedEvent&);
 };
 
 #undef LOCTEXT_NAMESPACE

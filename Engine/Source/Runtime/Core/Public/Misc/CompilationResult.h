@@ -8,7 +8,7 @@
  * Enumerates possible results of a compilation operation.
  *
  * This enum has to be compatible with the one defined in the
- * UE4\Engine\Source\Programs\UnrealBuildTool\System\ExternalExecution.cs file
+ * Engine\Source\Programs\UnrealBuildTool\System\ExternalExecution.cs file
  * to keep communication between UHT, UBT and Editor compiling processes valid.
  */
 namespace ECompilationResult
@@ -29,10 +29,16 @@ namespace ECompilationResult
 		FailedDueToEngineChange = 5,
 		/** Compilation failed due to compilation errors */
 		OtherCompilationError = 6,
+		/** Compilation failed due to live coding limit reached */
+		LiveCodingLimitError = 7,
+		/** Compilation failed due to TargetRules or ModuleRules errors */
+		RulesError = 8,
+		/** Compilation failed due to invalid action graph */
+		ActionGraphInvalid = 9,
 		/** Compilation is not supported in the current build */
 		Unsupported,
 		/** Unknown error */
-		Unknown
+		Unknown 
 	};
 
 	/**
@@ -54,6 +60,12 @@ namespace ECompilationResult
 			return TEXT("OtherCompilationError");
 		case ECompilationResult::CrashOrAssert:
 			return TEXT("CrashOrAssert");
+		case ECompilationResult::LiveCodingLimitError:
+			return TEXT("LiveCodingLimitError");
+		case ECompilationResult::RulesError:
+			return TEXT("RulesError");
+		case ECompilationResult::ActionGraphInvalid:
+			return TEXT("ActionGraphInvalid");
 		case ECompilationResult::Unsupported:
 			return TEXT("Unsupported");
 		};

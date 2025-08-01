@@ -1,11 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
+
 #include "TraceServices/Model/Diagnostics.h"
 #include "Model/DiagnosticsPrivate.h"
+#include "UObject/NameTypes.h"
 
-namespace Trace
+namespace TraceServices
 {
-
-FName FDiagnosticsProvider::ProviderName(TEXT("DiagnosticsProvider"));
 
 FDiagnosticsProvider::FDiagnosticsProvider(IAnalysisSession& InSession)
 	: Session(InSession)
@@ -31,9 +31,15 @@ const FSessionInfo& FDiagnosticsProvider::GetSessionInfo() const
 	return SessionInfo;
 }
 
-const IDiagnosticsProvider& ReadDiagnosticsProvider(const IAnalysisSession& Session)
+FName GetDiagnosticsProviderName()
 {
-	return *Session.ReadProvider<IDiagnosticsProvider>(FDiagnosticsProvider::ProviderName);
+	static const FName Name("DiagnosticsProvider");
+	return Name;
 }
 
-} // namespace Trace
+const IDiagnosticsProvider* ReadDiagnosticsProvider(const IAnalysisSession& Session)
+{
+	return Session.ReadProvider<IDiagnosticsProvider>(GetDiagnosticsProviderName());
+}
+
+} // namespace TraceServices

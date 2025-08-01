@@ -1,7 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/BlockingVolume.h"
+#include "Async/TaskGraphInterfaces.h"
 #include "Components/BrushComponent.h"
+#include "UObject/UnrealType.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BlockingVolume)
 
 static FName InvisibleWall_NAME(TEXT("InvisibleWall"));
 
@@ -20,7 +24,7 @@ void ABlockingVolume::LoadedFromAnotherClass(const FName& OldClassName)
 {
 	Super::LoadedFromAnotherClass(OldClassName);
 
-	if(GetLinkerUE4Version() < VER_UE4_REMOVE_DYNAMIC_VOLUME_CLASSES)
+	if(GetLinkerUEVersion() < VER_UE4_REMOVE_DYNAMIC_VOLUME_CLASSES)
 	{
 		static FName DynamicBlockingVolume_NAME(TEXT("DynamicBlockingVolume"));
 
@@ -64,3 +68,4 @@ void ABlockingVolume::PostEditChangeChainProperty(FPropertyChangedChainEvent& Pr
 }
 
 #endif
+

@@ -19,8 +19,21 @@
 #include "Channels/MovieSceneChannelProxy.h"
 #include "Evaluation/MovieSceneEvalTemplate.h"
 #include "Evaluation/MovieSceneEvaluation.h"
+#include "Channels/MovieSceneDoubleChannel.h"
 #include "Channels/MovieSceneFloatChannel.h"
 #include "Channels/MovieSceneIntegerChannel.h"
+#include "Channels/MovieSceneBoolChannel.h"
+
+
+enum class EKeyFrameTrackEditorSetDefault
+{
+	/** Do not set default */
+	DoNotSetDefault,
+	/** Set default just on keys that have bAddKey set */
+	SetDefaultOnAddKeys,
+	/** Set default */
+	SetDefault,
+};
 
 struct IImpl
 {
@@ -29,7 +42,7 @@ struct IImpl
 	/* Returns whether a key was created */
 	virtual bool Apply(UMovieSceneSection* Section, FMovieSceneChannelProxy& Proxy, FFrameNumber InTime, EMovieSceneKeyInterpolation InterpolationMode, bool bKeyEvenIfUnchanged, bool bKeyEvenIfEmpty) const { return false; }
 
-	virtual void ApplyDefault(UMovieSceneSection* Section, FMovieSceneChannelProxy& Proxy) const { }
+	virtual void ApplyDefault(UMovieSceneSection* Section, FMovieSceneChannelProxy& Proxy, EKeyFrameTrackEditorSetDefault SetDefault) const { }
 
 	virtual bool ModifyByCurrentAndWeight(FMovieSceneChannelProxy& Proxy, FFrameNumber InTime, void* VCurrentValue, float Weight) { return false; }
 
@@ -67,6 +80,7 @@ struct TAddKeyImpl : IImpl
 				{
 					if (Section->TryModify())
 					{
+						InterpolationMode = GetInterpolationMode(Channel, InTime, InterpolationMode);
 						AddKeyToChannel(Channel, InTime, ValueToSet, InterpolationMode);
 						bKeyCreated = true;
 					}
@@ -77,7 +91,7 @@ struct TAddKeyImpl : IImpl
 		return bKeyCreated;
 	}
 
-	virtual void ApplyDefault(UMovieSceneSection* Section, FMovieSceneChannelProxy& Proxy) const override
+	virtual void ApplyDefault(UMovieSceneSection* Section, FMovieSceneChannelProxy& Proxy, EKeyFrameTrackEditorSetDefault SetDefault) const override
 	{
 		using namespace UE::MovieScene;
 
@@ -95,7 +109,147 @@ struct TAddKeyImpl : IImpl
 
 };
 
+//bool specialization
+template<>
+struct TAddKeyImpl<FMovieSceneBoolChannel, bool> : IImpl
+{
+	int32 ChannelIndex;
+	bool bAddKey;
+	bool ValueToSet;
+
+	TAddKeyImpl(int32 InChannelIndex, bool bInAddKey, const bool& InValue)
+		: ChannelIndex(InChannelIndex), bAddKey(bInAddKey), ValueToSet(InValue)
+	{}
+
+	virtual bool Apply(UMovieSceneSection* Section, FMovieSceneChannelProxy& Proxy, FFrameNumber InTime, EMovieSceneKeyInterpolation InterpolationMode, bool bKeyEvenIfUnchanged, bool bKeyEvenIfEmpty) const override
+	{
+		bool bKeyCreated = false;
+		using namespace UE::MovieScene;
+
+		FMovieSceneBoolChannel* Channel = Proxy.GetChannel<FMovieSceneBoolChannel>(ChannelIndex);
+		if (bAddKey && Channel)
+		{
+			bool bShouldKeyChannel = bKeyEvenIfUnchanged;
+			if (!bShouldKeyChannel)
+			{
+				bShouldKeyChannel = !ValueExistsAtTime(Channel, InTime, ValueToSet);
+			}
+
+			if (bShouldKeyChannel)
+			{
+				if (Channel->GetNumKeys() != 0 || bKeyEvenIfEmpty)
+				{
+					if (Section->TryModify())
+					{
+						InterpolationMode = GetInterpolationMode(Channel, InTime, InterpolationMode);
+						AddKeyToChannel(Channel, InTime, ValueToSet, InterpolationMode);
+						bKeyCreated = true;
+					}
+				}
+			}
+		}
+
+		return bKeyCreated;
+	}
+
+	virtual void ApplyDefault(UMovieSceneSection* Section, FMovieSceneChannelProxy& Proxy, EKeyFrameTrackEditorSetDefault SetDefault) const override
+	{
+		using namespace UE::MovieScene;
+
+		FMovieSceneBoolChannel* Channel = Proxy.GetChannel<FMovieSceneBoolChannel>(ChannelIndex);
+		if (Channel && Channel->GetData().GetTimes().Num() == 0 && Channel->GetDefault() != ValueToSet
+			&& (SetDefault == EKeyFrameTrackEditorSetDefault::SetDefault || (SetDefault == EKeyFrameTrackEditorSetDefault::SetDefaultOnAddKeys && bAddKey)))
+		{
+			if (Section->TryModify())
+			{
+				using namespace UE::MovieScene;
+				SetChannelDefault(Channel, ValueToSet);
+			}
+		}
+	}
+	virtual bool ModifyByCurrentAndWeight(FMovieSceneChannelProxy& Proxy, FFrameNumber InTime, void* VCurrentValue, float Weight) { return false; }
+
+};
 //Specializations for channels that SUPPORT Blending
+template<>
+struct TAddKeyImpl<FMovieSceneDoubleChannel, double> : IImpl
+{
+	int32 ChannelIndex;
+	bool bAddKey;
+	double ValueToSet;
+
+	TAddKeyImpl(int32 InChannelIndex, bool bInAddKey,  const double& InValue)
+		: ChannelIndex(InChannelIndex), bAddKey(bInAddKey), ValueToSet(InValue)
+	{}
+
+	virtual bool Apply(UMovieSceneSection* Section, FMovieSceneChannelProxy& Proxy, FFrameNumber InTime, EMovieSceneKeyInterpolation InterpolationMode, bool bKeyEvenIfUnchanged, bool bKeyEvenIfEmpty) const override
+	{
+		bool bKeyCreated = false;
+		using namespace UE::MovieScene;
+
+		FMovieSceneDoubleChannel* Channel = Proxy.GetChannel<FMovieSceneDoubleChannel>(ChannelIndex);
+		if (bAddKey && Channel)
+		{
+			bool bShouldKeyChannel = bKeyEvenIfUnchanged;
+			if (!bShouldKeyChannel)
+			{
+				bShouldKeyChannel = !ValueExistsAtTime(Channel, InTime, ValueToSet);
+			}
+
+			if (bShouldKeyChannel)
+			{
+				if (Channel->GetNumKeys() != 0 || bKeyEvenIfEmpty)
+				{
+					if (Section->TryModify())
+					{
+						InterpolationMode = GetInterpolationMode(Channel, InTime, InterpolationMode);
+						AddKeyToChannel(Channel, InTime, ValueToSet, InterpolationMode);
+						bKeyCreated = true;
+					}
+				}
+			}
+		}
+
+		return bKeyCreated;
+	}
+
+	virtual void ApplyDefault(UMovieSceneSection* Section, FMovieSceneChannelProxy& Proxy, EKeyFrameTrackEditorSetDefault SetDefault) const override
+	{
+		using namespace UE::MovieScene;
+
+		FMovieSceneDoubleChannel* Channel = Proxy.GetChannel<FMovieSceneDoubleChannel>(ChannelIndex);
+		if (Channel && Channel->GetData().GetTimes().Num() == 0  && Channel->GetDefault() != ValueToSet
+			&& (SetDefault == EKeyFrameTrackEditorSetDefault::SetDefault || (SetDefault == EKeyFrameTrackEditorSetDefault::SetDefaultOnAddKeys && bAddKey)))
+		{
+			if (Section->TryModify())
+			{
+				using namespace UE::MovieScene;
+				SetChannelDefault(Channel, ValueToSet);
+			}
+		}
+	}
+
+	virtual bool ModifyByCurrentAndWeight(FMovieSceneChannelProxy& Proxy, FFrameNumber InTime, void* VCurrentValue, float Weight) override
+	{
+		using namespace UE::MovieScene;
+		double CurrentValue = *(double*)(VCurrentValue);
+		FMovieSceneDoubleChannel* Channel = Proxy.GetChannel<FMovieSceneDoubleChannel>(ChannelIndex);
+		if (Channel)
+		{
+			double LocalValue;
+			using namespace UE::MovieScene;
+			if (!EvaluateChannel(Channel, InTime, LocalValue))
+			{
+				TOptional<double> OptDouble = Channel->GetDefault();
+				LocalValue = OptDouble.IsSet() ? OptDouble.GetValue() : 0.0f;
+			}
+			ValueToSet = (ValueToSet - CurrentValue) * Weight + LocalValue;
+			return true;
+		}
+
+		return false;
+	}
+};
 template<>
 struct TAddKeyImpl<FMovieSceneFloatChannel, float> : IImpl
 {
@@ -127,6 +281,7 @@ struct TAddKeyImpl<FMovieSceneFloatChannel, float> : IImpl
 				{
 					if (Section->TryModify())
 					{
+						InterpolationMode = GetInterpolationMode(Channel, InTime, InterpolationMode);
 						AddKeyToChannel(Channel, InTime, ValueToSet, InterpolationMode);
 						bKeyCreated = true;
 					}
@@ -137,12 +292,13 @@ struct TAddKeyImpl<FMovieSceneFloatChannel, float> : IImpl
 		return bKeyCreated;
 	}
 
-	virtual void ApplyDefault(UMovieSceneSection* Section, FMovieSceneChannelProxy& Proxy) const override
+	virtual void ApplyDefault(UMovieSceneSection* Section, FMovieSceneChannelProxy& Proxy, EKeyFrameTrackEditorSetDefault SetDefault) const override
 	{
 		using namespace UE::MovieScene;
 
 		FMovieSceneFloatChannel* Channel = Proxy.GetChannel<FMovieSceneFloatChannel>(ChannelIndex);
-		if (Channel && Channel->GetData().GetTimes().Num() == 0  && Channel->GetDefault() != ValueToSet)
+		if (Channel && Channel->GetData().GetTimes().Num() == 0  && Channel->GetDefault() != ValueToSet
+			&& (SetDefault == EKeyFrameTrackEditorSetDefault::SetDefault || (SetDefault == EKeyFrameTrackEditorSetDefault::SetDefaultOnAddKeys && bAddKey)))
 		{
 			if (Section->TryModify())
 			{
@@ -172,7 +328,6 @@ struct TAddKeyImpl<FMovieSceneFloatChannel, float> : IImpl
 
 		return false;
 	}
-
 };
 template<>
 struct TAddKeyImpl<FMovieSceneIntegerChannel, int32> : IImpl
@@ -205,6 +360,7 @@ struct TAddKeyImpl<FMovieSceneIntegerChannel, int32> : IImpl
 				{
 					if (Section->TryModify())
 					{
+						InterpolationMode = GetInterpolationMode(Channel, InTime, InterpolationMode);
 						AddKeyToChannel(Channel, InTime, ValueToSet, InterpolationMode);
 						bKeyCreated = true;
 					}
@@ -215,12 +371,13 @@ struct TAddKeyImpl<FMovieSceneIntegerChannel, int32> : IImpl
 		return bKeyCreated;
 	}
 
-	virtual void ApplyDefault(UMovieSceneSection* Section, FMovieSceneChannelProxy& Proxy) const override
+	virtual void ApplyDefault(UMovieSceneSection* Section, FMovieSceneChannelProxy& Proxy, EKeyFrameTrackEditorSetDefault SetDefault) const override
 	{
 		using namespace UE::MovieScene;
 
 		FMovieSceneIntegerChannel* Channel = Proxy.GetChannel<FMovieSceneIntegerChannel>(ChannelIndex);
-		if (Channel && Channel->GetData().GetTimes().Num() == 0)
+		if (Channel && Channel->GetData().GetTimes().Num() == 0 && Channel->GetDefault() != ValueToSet
+			&& (SetDefault == EKeyFrameTrackEditorSetDefault::SetDefault || (SetDefault == EKeyFrameTrackEditorSetDefault::SetDefaultOnAddKeys && bAddKey)))
 		{
 			if (Section->TryModify())
 			{
@@ -250,7 +407,6 @@ struct TAddKeyImpl<FMovieSceneIntegerChannel, int32> : IImpl
 
 		return false;
 	}
-
 };
 struct FMovieSceneChannelValueSetter
 {
@@ -478,6 +634,7 @@ private:
 				if (bSectionCreated && GetSequencer()->GetInfiniteKeyAreas())
 				{
 					SectionToKey->SetRange(TRange<FFrameNumber>::All());
+					KeyPropertyResult.SectionsCreated.Add(SectionToKey);
 				}
 			}
 
@@ -501,7 +658,7 @@ private:
 
 protected:
 	/* Returns whether a section was added */
-	FKeyPropertyResult AddKeysToSection(UMovieSceneSection* Section, FFrameNumber KeyTime, const FGeneratedTrackKeys& Keys, ESequencerKeyMode KeyMode)
+	FKeyPropertyResult AddKeysToSection(UMovieSceneSection* Section, FFrameNumber KeyTime, const FGeneratedTrackKeys& Keys, ESequencerKeyMode KeyMode, EKeyFrameTrackEditorSetDefault SetDefault = EKeyFrameTrackEditorSetDefault::SetDefault)
 	{
 		FKeyPropertyResult KeyPropertyResult;
 
@@ -509,8 +666,20 @@ protected:
 
 		FMovieSceneChannelProxy& Proxy = Section->GetChannelProxy();
 			
-		const bool bSetDefaults = GetSequencer()->GetAutoSetTrackDefaults();
-		
+		const bool bSetDefaults = GetSequencer()->GetAutoSetTrackDefaults() && (SetDefault != EKeyFrameTrackEditorSetDefault::DoNotSetDefault);
+
+		// The default value is a value for the channel when there are no keyframes. For example, if you add keys and 
+		// then delete them all, the default value is the value of the channel. In the implementation of ApplyDefault, 
+		// all the setters check that the default value is only set when there are NO keyframes. So, ApplyDefault needs 
+		// to be called here in AddKeysToSection BEFORE any keys are added.
+		if (bSetDefaults)
+		{
+			for (const FMovieSceneChannelValueSetter& GeneratedKey : Keys)
+			{
+				GeneratedKey->ApplyDefault(Section, Proxy, SetDefault);
+			}
+		}
+
 		if ( KeyMode != ESequencerKeyMode::AutoKey || AutoChangeMode == EAutoChangeMode::AutoKey || AutoChangeMode == EAutoChangeMode::All)
 		{
 			EMovieSceneKeyInterpolation InterpolationMode = GetSequencer()->GetKeyInterpolation();
@@ -527,17 +696,13 @@ protected:
 			for (const FMovieSceneChannelValueSetter& GeneratedKey : Keys)
 			{
 				KeyPropertyResult.bKeyCreated |= GeneratedKey->Apply(Section, Proxy, KeyTime, InterpolationMode, bKeyEvenIfUnchanged, bKeyEvenIfEmpty);
+				if (KeyPropertyResult.bKeyCreated)
+				{
+					KeyPropertyResult.SectionsKeyed.Add(Section);
+				}
 			}
 		}
 			
-		if (bSetDefaults)
-		{
-			for (const FMovieSceneChannelValueSetter& GeneratedKey : Keys)
-			{
-				GeneratedKey->ApplyDefault(Section, Proxy);
-			}
-		}
-
 		return KeyPropertyResult;
 	}
 

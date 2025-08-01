@@ -5,11 +5,13 @@
 =============================================================================*/
 
 #include "SkeletalRenderStatic.h"
-#include "EngineStats.h"
-#include "Components/SkeletalMeshComponent.h"
-#include "SceneManagement.h"
-#include "SkeletalRender.h"
+#include "RenderUtils.h"
 #include "Rendering/SkeletalMeshRenderData.h"
+#include "Rendering/RenderCommandPipes.h"
+
+#if RHI_RAYTRACING
+#include "Engine/SkinnedAssetCommon.h"
+#endif
 
 FSkeletalMeshObjectStatic::FSkeletalMeshObjectStatic(USkinnedMeshComponent* InMeshComponent, FSkeletalMeshRenderData* InSkelMeshRenderData, ERHIFeatureLevel::Type InFeatureLevel)
 	: FSkeletalMeshObject(InMeshComponent, InSkelMeshRenderData, InFeatureLevel)
@@ -45,7 +47,7 @@ void FSkeletalMeshObjectStatic::InitResources(USkinnedMeshComponent* InMeshCompo
 			SkelLOD.InitResources(CompLODInfo);
 
 #if RHI_RAYTRACING
-			if (IsRayTracingEnabled() && SkelLOD.SkelMeshRenderData->bSupportRayTracing)
+			if (IsRayTracingAllowed() && SkelLOD.SkelMeshRenderData->bSupportRayTracing)
 			{
 				if (SkelLOD.SkelMeshRenderData->LODRenderData[LODIndex].NumReferencingStaticSkeletalMeshObjects == 0)
 				{
@@ -53,8 +55,8 @@ void FSkeletalMeshObjectStatic::InitResources(USkinnedMeshComponent* InMeshCompo
 					check(SkelLOD.SkelMeshRenderData->LODRenderData.IsValidIndex(LODIndex));
 
 					FSkeletalMeshLODRenderData& LODModel = SkelLOD.SkelMeshRenderData->LODRenderData[LODIndex];
-					FVertexBufferRHIRef VertexBufferRHI = LODModel.StaticVertexBuffers.PositionVertexBuffer.VertexBufferRHI;
-					FIndexBufferRHIRef IndexBufferRHI = LODModel.MultiSizeIndexContainer.GetIndexBuffer()->IndexBufferRHI;
+					FBufferRHIRef VertexBufferRHI = LODModel.StaticVertexBuffers.PositionVertexBuffer.VertexBufferRHI;
+					FBufferRHIRef IndexBufferRHI = LODModel.MultiSizeIndexContainer.GetIndexBuffer()->IndexBufferRHI;
 					uint32 VertexBufferStride = LODModel.StaticVertexBuffers.PositionVertexBuffer.GetStride();
 
 					uint32 TrianglesCount = 0;
@@ -65,17 +67,17 @@ void FSkeletalMeshObjectStatic::InitResources(USkinnedMeshComponent* InMeshCompo
 					}
 
 					TArray<FSkelMeshRenderSection>* RenderSections = &LODModel.RenderSections;
-					ENQUEUE_RENDER_COMMAND(InitSkeletalRenderStaticRayTracingGeometry)(
+					ENQUEUE_RENDER_COMMAND(InitSkeletalRenderStaticRayTracingGeometry)(UE::RenderCommandPipe::SkeletalMesh,
 						[this, VertexBufferRHI, IndexBufferRHI, VertexBufferStride, TrianglesCount, RenderSections, 
 						LODIndex = LODIndex, 
 						SkelMeshRenderData = SkelLOD.SkelMeshRenderData, 
 						&RayTracingGeometry = SkelLOD.SkelMeshRenderData->LODRenderData[LODIndex].StaticRayTracingGeometry,
-						&bReferencedByStaticSkeletalMeshObjects_RenderThread = SkelLOD.SkelMeshRenderData->LODRenderData[LODIndex].bReferencedByStaticSkeletalMeshObjects_RenderThread](FRHICommandListImmediate& RHICmdList)
+						&bReferencedByStaticSkeletalMeshObjects_RenderThread = SkelLOD.SkelMeshRenderData->LODRenderData[LODIndex].bReferencedByStaticSkeletalMeshObjects_RenderThread](FRHICommandList& RHICmdList)
 						{
 							FRayTracingGeometryInitializer Initializer;
 							static const FName DebugName("FSkeletalMeshObjectLOD");
 							static int32 DebugNumber = 0;
-							Initializer.DebugName = FName(DebugName, DebugNumber++);
+							Initializer.DebugName = FDebugName(DebugName, DebugNumber++);
 							Initializer.IndexBuffer = IndexBufferRHI;
 							Initializer.TotalPrimitiveCount = TrianglesCount;
 							Initializer.GeometryType = RTGT_Triangles;
@@ -83,6 +85,13 @@ void FSkeletalMeshObjectStatic::InitResources(USkinnedMeshComponent* InMeshCompo
 
 							TArray<FRayTracingGeometrySegment> GeometrySections;
 							GeometrySections.Reserve(RenderSections->Num());
+
+							uint32 TotalNumVertices = 0;
+							for (const FSkelMeshRenderSection& Section : *RenderSections)
+							{
+								TotalNumVertices += Section.GetNumVertices();
+							}
+
 							for (const FSkelMeshRenderSection& Section : *RenderSections)
 							{
 								FRayTracingGeometrySegment Segment;
@@ -90,9 +99,10 @@ void FSkeletalMeshObjectStatic::InitResources(USkinnedMeshComponent* InMeshCompo
 								Segment.VertexBufferElementType = VET_Float3;
 								Segment.VertexBufferOffset = 0;
 								Segment.VertexBufferStride = VertexBufferStride;
+								Segment.MaxVertices = TotalNumVertices;
 								Segment.FirstPrimitive = Section.BaseIndex / 3;
 								Segment.NumPrimitives = Section.NumTriangles;
-								Segment.bEnabled = !Section.bDisabled;
+								Segment.bEnabled = !Section.bDisabled && Section.bVisibleInRayTracing;
 								GeometrySections.Add(Segment);
 							}
 							Initializer.Segments = GeometrySections;
@@ -101,7 +111,7 @@ void FSkeletalMeshObjectStatic::InitResources(USkinnedMeshComponent* InMeshCompo
 
 							if (LODIndex >= SkelMeshRenderData->CurrentFirstLODIdx) // According to GetMeshElementsConditionallySelectable(), non-resident LODs should just be skipped
 							{
-								RayTracingGeometry.InitResource();
+								RayTracingGeometry.InitResource(RHICmdList);
 							}
 
 							bReferencedByStaticSkeletalMeshObjects_RenderThread = true;
@@ -126,7 +136,7 @@ void FSkeletalMeshObjectStatic::ReleaseResources()
 		if (SkelLOD.SkelMeshRenderData->LODRenderData[LODIndex].GetNumVertices() > 0)
 		{
 #if RHI_RAYTRACING
-			if (IsRayTracingEnabled())
+			if (IsRayTracingAllowed())
 			{
 				if (SkelLOD.SkelMeshRenderData->LODRenderData[LODIndex].NumReferencingStaticSkeletalMeshObjects > 0)
 				{
@@ -134,14 +144,13 @@ void FSkeletalMeshObjectStatic::ReleaseResources()
 
 					if (SkelLOD.SkelMeshRenderData->LODRenderData[LODIndex].NumReferencingStaticSkeletalMeshObjects == 0)
 					{
-						ENQUEUE_RENDER_COMMAND(ResetStaticRayTracingGeometryFlag)(
-							[&bReferencedByStaticSkeletalMeshObjects_RenderThread = SkelLOD.SkelMeshRenderData->LODRenderData[LODIndex].bReferencedByStaticSkeletalMeshObjects_RenderThread](FRHICommandListImmediate& RHICmdList)
+						ENQUEUE_RENDER_COMMAND(ResetStaticRayTracingGeometryFlag)(UE::RenderCommandPipe::SkeletalMesh,
+							[&bReferencedByStaticSkeletalMeshObjects_RenderThread = SkelLOD.SkelMeshRenderData->LODRenderData[LODIndex].bReferencedByStaticSkeletalMeshObjects_RenderThread]
 						{
 							bReferencedByStaticSkeletalMeshObjects_RenderThread = false;
-						}
-						);
+						});
 
-						BeginReleaseResource(&SkelLOD.SkelMeshRenderData->LODRenderData[LODIndex].StaticRayTracingGeometry);
+						BeginReleaseResource(&SkelLOD.SkelMeshRenderData->LODRenderData[LODIndex].StaticRayTracingGeometry, &UE::RenderCommandPipe::SkeletalMesh);
 					}
 				}
 			}
@@ -152,7 +161,7 @@ void FSkeletalMeshObjectStatic::ReleaseResources()
 	}
 }
 
-const FVertexFactory* FSkeletalMeshObjectStatic::GetSkinVertexFactory(const FSceneView* View, int32 LODIndex, int32 ChunkIdx) const
+const FVertexFactory* FSkeletalMeshObjectStatic::GetSkinVertexFactory(const FSceneView* View, int32 LODIndex, int32 ChunkIdx, ESkinVertexFactoryMode VFMode) const
 {
 	check(LODs.IsValidIndex(LODIndex));
 	return &LODs[LODIndex].VertexFactory; 
@@ -163,10 +172,16 @@ TArray<FTransform>* FSkeletalMeshObjectStatic::GetComponentSpaceTransforms() con
 	return nullptr;
 }
 
-const TArray<FMatrix>& FSkeletalMeshObjectStatic::GetReferenceToLocalMatrices() const
+const TArray<FMatrix44f>& FSkeletalMeshObjectStatic::GetReferenceToLocalMatrices() const
 {
-	static TArray<FMatrix> ReferenceToLocalMatrices;
+	static TArray<FMatrix44f> ReferenceToLocalMatrices;
 	return ReferenceToLocalMatrices;
+}
+
+int32 FSkeletalMeshObjectStatic::GetLOD() const
+{
+	// WorkingMinDesiredLODLevel can be a LOD that's not loaded, so need to clamp it to the first loaded LOD
+	return FMath::Max<int32>(WorkingMinDesiredLODLevel, SkeletalMeshRenderData->CurrentFirstLODIdx);
 }
 
 void FSkeletalMeshObjectStatic::FSkeletalMeshObjectLOD::InitResources(FSkelMeshComponentLODInfo* CompLODInfo)
@@ -194,21 +209,22 @@ void FSkeletalMeshObjectStatic::FSkeletalMeshObjectLOD::InitResources(FSkelMeshC
 	FLocalVertexFactory* VertexFactoryPtr = &VertexFactory;
 	FColorVertexBuffer* ColorVertexBufferPtr = ColorVertexBuffer;
 
-	ENQUEUE_RENDER_COMMAND(InitSkeletalMeshStaticSkinVertexFactory)(
-		[VertexFactoryPtr, PositionVertexBufferPtr, StaticMeshVertexBufferPtr, ColorVertexBufferPtr](FRHICommandListImmediate& RHICmdList)
+	ENQUEUE_RENDER_COMMAND(InitSkeletalMeshStaticSkinVertexFactory)(UE::RenderCommandPipe::SkeletalMesh,
+		[VertexFactoryPtr, PositionVertexBufferPtr, StaticMeshVertexBufferPtr, ColorVertexBufferPtr](FRHICommandList& RHICmdList)
 		{
 			FLocalVertexFactory::FDataType Data;
-			PositionVertexBufferPtr->InitResource();
-			StaticMeshVertexBufferPtr->InitResource();
-			ColorVertexBufferPtr->InitResource();
+			PositionVertexBufferPtr->InitResource(RHICmdList);
+			StaticMeshVertexBufferPtr->InitResource(RHICmdList);
+			ColorVertexBufferPtr->InitResource(RHICmdList);
 
 			PositionVertexBufferPtr->BindPositionVertexBuffer(VertexFactoryPtr, Data);
 			StaticMeshVertexBufferPtr->BindTangentVertexBuffer(VertexFactoryPtr, Data);
 			StaticMeshVertexBufferPtr->BindPackedTexCoordVertexBuffer(VertexFactoryPtr, Data);
+			StaticMeshVertexBufferPtr->BindLightMapVertexBuffer(VertexFactoryPtr, Data, 0);
 			ColorVertexBufferPtr->BindColorVertexBuffer(VertexFactoryPtr, Data);
 
-			VertexFactoryPtr->SetData(Data);
-			VertexFactoryPtr->InitResource();
+			VertexFactoryPtr->SetData(RHICmdList, Data);
+			VertexFactoryPtr->InitResource(RHICmdList);
 		});
 
 	bResourcesInitialized = true;
@@ -219,19 +235,10 @@ void FSkeletalMeshObjectStatic::FSkeletalMeshObjectLOD::InitResources(FSkelMeshC
  */
 void FSkeletalMeshObjectStatic::FSkeletalMeshObjectLOD::ReleaseResources()
 {	
-	BeginReleaseResource(&VertexFactory);
+	BeginReleaseResource(&VertexFactory, &UE::RenderCommandPipe::SkeletalMesh);
 
 #if RHI_RAYTRACING
-	// BeginReleaseResource(&RayTracingGeometry);
-	// Workaround for UE-106993:
-	// Destroy ray tracing geometry on the render thread, as it may hold references to render resources.
-	// These references should be cleared in FRayTracingGeometry::ReleaseResource(), however FRayTracingGeometry does
-	// not implement this method and it can't be added due to 4.26 hotfix rules.
-	ENQUEUE_RENDER_COMMAND(ReleaseRayTracingGeometry)([Ptr = &RayTracingGeometry](FRHICommandListImmediate&)
-	{
-		Ptr->ReleaseResource();
-		*Ptr = FRayTracingGeometry(); // Explicitly reset all contents, including any resource references.
-	});
+	BeginReleaseResource(&RayTracingGeometry, &UE::RenderCommandPipe::SkeletalMesh);
 #endif // RHI_RAYTRACING
 
 	bResourcesInitialized = false;

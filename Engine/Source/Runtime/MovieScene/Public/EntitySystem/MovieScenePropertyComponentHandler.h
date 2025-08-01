@@ -24,9 +24,6 @@ namespace UE
 namespace MovieScene
 {
 
-DECLARE_CYCLE_STAT(TEXT("Apply properties"), MovieSceneEval_ApplyProperties,  STATGROUP_MovieSceneECS);
-
-
 
 template<typename PropertyTraits, typename MetaDatatype, typename MetaDataIndices, typename CompositeIndices, typename ...CompositeTypes>
 struct TPropertyComponentHandlerImpl;
@@ -306,21 +303,30 @@ template<typename PropertyTraits>
 struct TInitialValueProcessor : TInitialValueProcessorImpl<PropertyTraits, typename PropertyTraits::MetaDataType, TMakeIntegerSequence<int, PropertyTraits::MetaDataType::Num>>
 {};
 
+template<typename T, typename U = decltype(T::bIsComposite)>
+constexpr bool IsCompositePropertyTraits(T*)
+{
+	return T::bIsComposite;
+}
+constexpr bool IsCompositePropertyTraits(...)
+{
+	return true;
+}
 
 template<typename PropertyTraits, typename ...MetaDataTypes, int ...MetaDataIndices, typename ...CompositeTypes, int ...CompositeIndices>
 struct TPropertyComponentHandlerImpl<PropertyTraits, TPropertyMetaData<MetaDataTypes...>, TIntegerSequence<int, MetaDataIndices...>, TIntegerSequence<int, CompositeIndices...>, CompositeTypes...> : IPropertyComponentHandler
 {
+	static constexpr bool bIsComposite = IsCompositePropertyTraits((PropertyTraits*)nullptr);
+
 	using StorageType        = typename PropertyTraits::StorageType;
-	using CompleteSetterTask = TSetCompositePropertyValues<PropertyTraits, CompositeTypes...>;
-	using PartialSetterTask  = TSetPartialPropertyValues<PropertyTraits, CompositeTypes...>;
+	using CompleteSetterTask = std::conditional_t<bIsComposite, TSetCompositePropertyValues<PropertyTraits, CompositeTypes...>, TSetPropertyValues<PropertyTraits>>;
 
 	using PreAnimatedStorageType = TPreAnimatedPropertyStorage<PropertyTraits>;
 
-	TPreAnimatedStorageID<PreAnimatedStorageType> StorageID;
+	TAutoRegisterPreAnimatedStorageID<PreAnimatedStorageType> StorageID;
 
 	TPropertyComponentHandlerImpl()
 	{
-		StorageID = FPreAnimatedStateExtension::RegisterStorage<PreAnimatedStorageType>();
 	}
 
 	virtual TSharedPtr<IPreAnimatedStorage> GetPreAnimatedStateStorage(const FPropertyDefinition& Definition, FPreAnimatedStateExtension* Container) override
@@ -336,6 +342,47 @@ struct TPropertyComponentHandlerImpl<PropertyTraits, TPropertyMetaData<MetaDataT
 		return Existing;
 	}
 
+	virtual void ScheduleSetterTasks(const FPropertyDefinition& Definition, TArrayView<const FPropertyCompositeDefinition> Composites, const FPropertyStats& Stats, IEntitySystemScheduler* TaskScheduler, UMovieSceneEntitySystemLinker* Linker)
+	{
+		FBuiltInComponentTypes* BuiltInComponents = FBuiltInComponentTypes::Get();
+
+		FEntityTaskBuilder()
+		.Read(BuiltInComponents->BoundObject)
+		.ReadOneOf(BuiltInComponents->CustomPropertyIndex, BuiltInComponents->FastPropertyOffset, BuiltInComponents->SlowProperty)
+		.ReadAllOf(Definition.GetMetaDataComponent<MetaDataTypes>(MetaDataIndices)...)
+		.ReadAllOf(Composites[CompositeIndices].ComponentTypeID.ReinterpretCast<CompositeTypes>()...)
+		.FilterAll({ Definition.PropertyType })
+		.SetStat(Definition.StatID)
+		.SetDesiredThread(Linker->EntityManager.GetGatherThread())
+		.template Fork_PerAllocation<CompleteSetterTask>(&Linker->EntityManager, TaskScheduler, Definition.CustomPropertyRegistration);
+
+		if constexpr (bIsComposite)
+		{
+			if (Stats.NumPartialProperties > 0)
+			{
+				using PartialSetterTask  = TSetPartialPropertyValues<PropertyTraits, CompositeTypes...>;
+
+				FComponentMask CompletePropertyMask;
+				for (const FPropertyCompositeDefinition& Composite : Composites)
+				{
+					CompletePropertyMask.Set(Composite.ComponentTypeID);
+				}
+
+				FEntityTaskBuilder()
+				.Read(BuiltInComponents->BoundObject)
+				.ReadOneOf(BuiltInComponents->CustomPropertyIndex, BuiltInComponents->FastPropertyOffset, BuiltInComponents->SlowProperty)
+				.ReadAllOf(Definition.GetMetaDataComponent<MetaDataTypes>(MetaDataIndices)...)
+				.ReadAnyOf(Composites[CompositeIndices].ComponentTypeID.ReinterpretCast<CompositeTypes>()...)
+				.FilterAny({ CompletePropertyMask })
+				.FilterAll({ Definition.PropertyType })
+				.FilterOut(CompletePropertyMask)
+				.SetStat(Definition.StatID)
+				.SetDesiredThread(Linker->EntityManager.GetGatherThread())
+				.template Fork_PerAllocation<PartialSetterTask>(&Linker->EntityManager, TaskScheduler, Definition.CustomPropertyRegistration, Composites);
+			}
+		}
+	}
+
 	virtual void DispatchSetterTasks(const FPropertyDefinition& Definition, TArrayView<const FPropertyCompositeDefinition> Composites, const FPropertyStats& Stats, FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents, UMovieSceneEntitySystemLinker* Linker)
 	{
 		FBuiltInComponentTypes* BuiltInComponents = FBuiltInComponentTypes::Get();
@@ -346,29 +393,34 @@ struct TPropertyComponentHandlerImpl<PropertyTraits, TPropertyMetaData<MetaDataT
 		.ReadAllOf(Definition.GetMetaDataComponent<MetaDataTypes>(MetaDataIndices)...)
 		.ReadAllOf(Composites[CompositeIndices].ComponentTypeID.ReinterpretCast<CompositeTypes>()...)
 		.FilterAll({ Definition.PropertyType })
-		.SetStat(GET_STATID(MovieSceneEval_ApplyProperties))
+		.SetStat(Definition.StatID)
 		.SetDesiredThread(Linker->EntityManager.GetGatherThread())
 		.template Dispatch_PerAllocation<CompleteSetterTask>(&Linker->EntityManager, InPrerequisites, &Subsequents, Definition.CustomPropertyRegistration);
 
-		if (Stats.NumPartialProperties > 0)
+		if constexpr (bIsComposite)
 		{
-			FComponentMask CompletePropertyMask;
-			for (const FPropertyCompositeDefinition& Composite : Composites)
+			if (Stats.NumPartialProperties > 0)
 			{
-				CompletePropertyMask.Set(Composite.ComponentTypeID);
-			}
+				using PartialSetterTask  = TSetPartialPropertyValues<PropertyTraits, CompositeTypes...>;
 
-			FEntityTaskBuilder()
-			.Read(BuiltInComponents->BoundObject)
-			.ReadOneOf(BuiltInComponents->CustomPropertyIndex, BuiltInComponents->FastPropertyOffset, BuiltInComponents->SlowProperty)
-			.ReadAllOf(Definition.GetMetaDataComponent<MetaDataTypes>(MetaDataIndices)...)
-			.ReadAnyOf(Composites[CompositeIndices].ComponentTypeID.ReinterpretCast<CompositeTypes>()...)
-			.FilterAny({ CompletePropertyMask })
-			.FilterAll({ Definition.PropertyType })
-			.FilterOut(CompletePropertyMask)
-			.SetStat(GET_STATID(MovieSceneEval_ApplyProperties))
-			.SetDesiredThread(Linker->EntityManager.GetGatherThread())
-			.template Dispatch_PerAllocation<PartialSetterTask>(&Linker->EntityManager, InPrerequisites, &Subsequents, Definition.CustomPropertyRegistration, Composites);
+				FComponentMask CompletePropertyMask;
+				for (const FPropertyCompositeDefinition& Composite : Composites)
+				{
+					CompletePropertyMask.Set(Composite.ComponentTypeID);
+				}
+
+				FEntityTaskBuilder()
+				.Read(BuiltInComponents->BoundObject)
+				.ReadOneOf(BuiltInComponents->CustomPropertyIndex, BuiltInComponents->FastPropertyOffset, BuiltInComponents->SlowProperty)
+				.ReadAllOf(Definition.GetMetaDataComponent<MetaDataTypes>(MetaDataIndices)...)
+				.ReadAnyOf(Composites[CompositeIndices].ComponentTypeID.ReinterpretCast<CompositeTypes>()...)
+				.FilterAny({ CompletePropertyMask })
+				.FilterAll({ Definition.PropertyType })
+				.FilterOut(CompletePropertyMask)
+				.SetStat(Definition.StatID)
+				.SetDesiredThread(Linker->EntityManager.GetGatherThread())
+				.template Dispatch_PerAllocation<PartialSetterTask>(&Linker->EntityManager, InPrerequisites, &Subsequents, Definition.CustomPropertyRegistration, Composites);
+			}
 		}
 	}
 
@@ -378,38 +430,41 @@ struct TPropertyComponentHandlerImpl<PropertyTraits, TPropertyMetaData<MetaDataT
 		return &Processor;
 	}
 
-	virtual void RecomposeBlendOperational(const FPropertyDefinition& PropertyDefinition, TArrayView<const FPropertyCompositeDefinition> Composites, const FFloatDecompositionParams& InParams, UMovieSceneBlenderSystem* Blender, FConstPropertyComponentView InCurrentValue, FPropertyComponentArrayView OutResult) override
+	virtual void RecomposeBlendOperational(const FPropertyDefinition& PropertyDefinition, TArrayView<const FPropertyCompositeDefinition> Composites, const FValueDecompositionParams& InParams, UMovieSceneBlenderSystem* Blender, FConstPropertyComponentView InCurrentValue, FPropertyComponentArrayView OutResult) override
 	{
 		RecomposeBlendImpl(PropertyDefinition, Composites, InParams, Blender, InCurrentValue.ReinterpretCast<StorageType>(), OutResult.ReinterpretCast<StorageType>());
 	}
 
-	void RecomposeBlendImpl(const FPropertyDefinition& PropertyDefinition, TArrayView<const FPropertyCompositeDefinition> Composites, const FFloatDecompositionParams& InParams, UMovieSceneBlenderSystem* Blender, const StorageType& InCurrentValue, TArrayView<StorageType> OutResults)
+	void RecomposeBlendImpl(const FPropertyDefinition& PropertyDefinition, TArrayView<const FPropertyCompositeDefinition> Composites, const FValueDecompositionParams& InParams, UMovieSceneBlenderSystem* Blender, const StorageType& InCurrentValue, TArrayView<StorageType> OutResults)
 	{
 		check(OutResults.Num() == InParams.Query.Entities.Num());
 
-		IMovieSceneFloatDecomposer* FloatDecomposer = Cast<IMovieSceneFloatDecomposer>(Blender);
-		if (!FloatDecomposer)
+		IMovieSceneValueDecomposer* ValueDecomposer = Cast<IMovieSceneValueDecomposer>(Blender);
+		if (!ValueDecomposer)
 		{
 			return;
 		}
 
+		FEntityManager& EntityManager = Blender->GetLinker()->EntityManager;
+		EntityManager.LockDown();
+
 		constexpr int32 NumComposites = sizeof...(CompositeTypes);
 		check(Composites.Num() == NumComposites);
 
-		FAlignedDecomposedFloat AlignedOutputs[NumComposites];
+		FAlignedDecomposedValue AlignedOutputs[NumComposites];
 
-		FFloatDecompositionParams LocalParams = InParams;
+		FValueDecompositionParams LocalParams = InParams;
 
 		FGraphEventArray Tasks;
 		for (int32 Index = 0; Index < NumComposites; ++Index)
 		{
-			if ((PropertyDefinition.FloatCompositeMask & (1 << Index)) == 0)
+			if ((PropertyDefinition.DoubleCompositeMask & (1 << Index)) == 0)
 			{
 				continue;
 			}
 
-			LocalParams.ResultComponentType = Composites[Index].ComponentTypeID.ReinterpretCast<float>();
-			FGraphEventRef Task = FloatDecomposer->DispatchDecomposeTask(LocalParams, &AlignedOutputs[Index]);
+			LocalParams.ResultComponentType = Composites[Index].ComponentTypeID;
+			FGraphEventRef Task = ValueDecomposer->DispatchDecomposeTask(LocalParams, &AlignedOutputs[Index]);
 			if (Task)
 			{
 				Tasks.Add(Task);
@@ -425,7 +480,6 @@ struct TPropertyComponentHandlerImpl<PropertyTraits, TPropertyMetaData<MetaDataT
 		TOptionalComponentReader<StorageType> InitialValueComponent;
 		if (InParams.PropertyEntityID)
 		{
-			const FEntityManager& EntityManager = Blender->GetLinker()->EntityManager;
 			TComponentTypeID<StorageType> InitialValueType = PropertyDefinition.InitialValueType.ReinterpretCast<StorageType>();
 			InitialValueComponent = EntityManager.ReadComponent(InParams.PropertyEntityID, InitialValueType);
 		}
@@ -438,43 +492,50 @@ struct TPropertyComponentHandlerImpl<PropertyTraits, TPropertyMetaData<MetaDataT
 
 			for (int32 CompositeIndex = 0; CompositeIndex < NumComposites; ++CompositeIndex)
 			{
-				if ((PropertyDefinition.FloatCompositeMask & (1 << CompositeIndex)) == 0)
+				if ((PropertyDefinition.DoubleCompositeMask & ( 1 << CompositeIndex)) != 0)
 				{
-					continue;
+					const double* InitialValueComposite = nullptr;
+					FAlignedDecomposedValue& AlignedOutput = AlignedOutputs[CompositeIndex];
+					if (InitialValueComponent)
+					{
+						const StorageType* InitialValuePtr = InitialValueComponent.AsPtr();
+						InitialValueComposite = reinterpret_cast<const double*>(reinterpret_cast<const uint8*>(InitialValuePtr) + Composites[CompositeIndex].CompositeOffset);
+					}
+
+					const double NewComposite = *reinterpret_cast<const double*>(reinterpret_cast<const uint8*>(&InCurrentValue) + Composites[CompositeIndex].CompositeOffset);
+
+					double* RecomposedComposite = reinterpret_cast<double*>(Result + Composites[CompositeIndex].CompositeOffset);
+					*RecomposedComposite = AlignedOutput.Value.Recompose(EntityID, NewComposite, InitialValueComposite);
 				}
-
-				const float* InitialValueComposite = nullptr;
-				FAlignedDecomposedFloat& AlignedOutput = AlignedOutputs[CompositeIndex];
-				if (InitialValueComponent)
-				{
-					const StorageType& InitialValue = (*InitialValueComponent);
-					InitialValueComposite = reinterpret_cast<const float*>(reinterpret_cast<const uint8*>(&InitialValue) + Composites[CompositeIndex].CompositeOffset);
-				}
-
-				const float NewComposite = *reinterpret_cast<const float*>(reinterpret_cast<const uint8*>(&InCurrentValue) + Composites[CompositeIndex].CompositeOffset);
-
-				float* RecomposedComposite = reinterpret_cast<float*>(Result + Composites[CompositeIndex].CompositeOffset);
-				*RecomposedComposite = AlignedOutput.Value.Recompose(EntityID, NewComposite, InitialValueComposite);
 			}
 		}
+
+		EntityManager.ReleaseLockDown();
 	}
 
-	virtual void RecomposeBlendChannel(const FPropertyDefinition& PropertyDefinition, const FPropertyCompositeDefinition& Composite, const FFloatDecompositionParams& InParams, UMovieSceneBlenderSystem* Blender, float InCurrentValue, TArrayView<float> OutResults) override
+	virtual void RecomposeBlendChannel(const FPropertyDefinition& PropertyDefinition, TArrayView<const FPropertyCompositeDefinition> Composites, int32 CompositeIndex, const FValueDecompositionParams& InParams, UMovieSceneBlenderSystem* Blender, double InCurrentValue, TArrayView<double> OutResults) override
 	{
 		check(OutResults.Num() == InParams.Query.Entities.Num());
 
-		IMovieSceneFloatDecomposer* FloatDecomposer = Cast<IMovieSceneFloatDecomposer>(Blender);
-		if (!FloatDecomposer)
+		constexpr int32 NumComposites = sizeof...(CompositeTypes);
+		check(Composites.Num() == NumComposites);
+		const FPropertyCompositeDefinition& Composite = Composites[CompositeIndex];
+
+		IMovieSceneValueDecomposer* ValueDecomposer = Cast<IMovieSceneValueDecomposer>(Blender);
+		if (!ValueDecomposer)
 		{
 			return;
 		}
 
-		FAlignedDecomposedFloat AlignedOutput;
+		FEntityManager& EntityManager = Blender->GetLinker()->EntityManager;
+		EntityManager.LockDown();
 
-		FFloatDecompositionParams LocalParams = InParams;
+		FAlignedDecomposedValue AlignedOutput;
 
-		LocalParams.ResultComponentType = Composite.ComponentTypeID.ReinterpretCast<float>();
-		FGraphEventRef Task = FloatDecomposer->DispatchDecomposeTask(LocalParams, &AlignedOutput);
+		FValueDecompositionParams LocalParams = InParams;
+
+		LocalParams.ResultComponentType = Composite.ComponentTypeID;
+		FGraphEventRef Task = ValueDecomposer->DispatchDecomposeTask(LocalParams, &AlignedOutput);
 		if (Task)
 		{
 			FTaskGraphInterface::Get().WaitUntilTaskCompletes(Task, ENamedThreads::GameThread);
@@ -484,7 +545,6 @@ struct TPropertyComponentHandlerImpl<PropertyTraits, TPropertyMetaData<MetaDataT
 		TOptionalComponentReader<StorageType> InitialValueComponent;
 		if (InParams.PropertyEntityID)
 		{
-			const FEntityManager& EntityManager = Blender->GetLinker()->EntityManager;
 			TComponentTypeID<StorageType> InitialValueType = PropertyDefinition.InitialValueType.ReinterpretCast<StorageType>();
 			InitialValueComponent = EntityManager.ReadComponent(InParams.PropertyEntityID, InitialValueType);
 		}
@@ -493,16 +553,21 @@ struct TPropertyComponentHandlerImpl<PropertyTraits, TPropertyMetaData<MetaDataT
 		{
 			FMovieSceneEntityID EntityID = LocalParams.Query.Entities[Index];
 
-			const float* InitialValueComposite = nullptr;
-			if (InitialValueComponent)
+			if ((PropertyDefinition.DoubleCompositeMask & (1 << CompositeIndex)) != 0)
 			{
-				const StorageType& InitialValue = (*InitialValueComponent);
-				InitialValueComposite = reinterpret_cast<const float*>(reinterpret_cast<const uint8*>(&InitialValue) + Composite.CompositeOffset);
-			}
+				const double* InitialValueComposite = nullptr;
+				if (InitialValueComponent)
+				{
+					const StorageType* InitialValuePtr = InitialValueComponent.AsPtr();
+					InitialValueComposite = reinterpret_cast<const double*>(reinterpret_cast<const uint8*>(InitialValuePtr) + Composite.CompositeOffset);
+				}
 
-			float* RecomposedComposite = &OutResults[Index];
-			*RecomposedComposite = AlignedOutput.Value.Recompose(EntityID, InCurrentValue, InitialValueComposite);
+				const double RecomposedComposite = AlignedOutput.Value.Recompose(EntityID, InCurrentValue, InitialValueComposite);
+				OutResults[Index] = RecomposedComposite;
+			}
 		}
+
+		EntityManager.ReleaseLockDown();
 	}
 
 	virtual void RebuildOperational(const FPropertyDefinition& PropertyDefinition, TArrayView<const FPropertyCompositeDefinition> Composites, const TArrayView<FMovieSceneEntityID>& EntityIDs, UMovieSceneEntitySystemLinker* Linker, FPropertyComponentArrayView OutResult) override
@@ -548,9 +613,12 @@ struct TPropertyDefinitionBuilder
 		Registry->CompositeDefinitions.Add(NewChannel);
 
 		Definition->CompositeSize = 1;
-		if (TIsSame<typename PropertyTraits::StorageType, float>::Value)
+
+		static_assert(!std::is_same_v<typename PropertyTraits::StorageType, float>, "Please use double-precision composites");
+
+		if constexpr (std::is_same_v<typename PropertyTraits::StorageType, double>)
 		{
-			Definition->FloatCompositeMask = 1;
+			Definition->DoubleCompositeMask = 1;
 		}
 
 		return *this;
@@ -560,6 +628,25 @@ struct TPropertyDefinitionBuilder
 	TPropertyDefinitionBuilder<PropertyTraits>& SetCustomAccessors(TCustomPropertyRegistration<PropertyTraits, InlineSize>* InCustomAccessors)
 	{
 		Definition->CustomPropertyRegistration = InCustomAccessors;
+		return *this;
+	}
+
+	TPropertyDefinitionBuilder<PropertyTraits>& SetStat(TStatId InStatID)
+	{
+		Definition->StatID = InStatID;
+		return *this;
+	}
+
+	template<typename BlenderSystemType>
+	TPropertyDefinitionBuilder<PropertyTraits>& SetBlenderSystem()
+	{
+		Definition->BlenderSystemClass = BlenderSystemType::StaticClass();
+		return *this;
+	}
+
+	TPropertyDefinitionBuilder<PropertyTraits>& SetBlenderSystem(UClass* BlenderSystemClass)
+	{
+		Definition->BlenderSystemClass = BlenderSystemClass;
 		return *this;
 	}
 
@@ -608,16 +695,18 @@ struct TCompositePropertyDefinitionBuilder
 		FPropertyCompositeDefinition NewChannel = { InComponent, static_cast<uint16>(CompositeOffset) };
 		Registry->CompositeDefinitions.Add(NewChannel);
 
-		if (TIsSame<T, float>::Value)
+		static_assert(!std::is_same_v<T, float>, "Please use double-precision composites");
+
+		if constexpr (std::is_same_v<T, double>)
 		{
-			Definition->FloatCompositeMask |= 1 << Definition->CompositeSize;
+			Definition->DoubleCompositeMask |= 1 << Definition->CompositeSize;
 		}
 
 		++Definition->CompositeSize;
 		return TCompositePropertyDefinitionBuilder<PropertyTraits, Composites..., T>(Definition, Registry);
 	}
 
-	TCompositePropertyDefinitionBuilder<PropertyTraits, Composites..., float> AddComposite(TComponentTypeID<float> InComponent, float StorageType::*DataPtr)
+	TCompositePropertyDefinitionBuilder<PropertyTraits, Composites..., double> AddComposite(TComponentTypeID<double> InComponent, double StorageType::*DataPtr)
 	{
 		checkf(Definition == &Registry->GetProperties().Last(), TEXT("Cannot re-define a property type after another has been added."));
 
@@ -626,16 +715,29 @@ struct TCompositePropertyDefinitionBuilder
 		FPropertyCompositeDefinition NewChannel = { InComponent, static_cast<uint16>(CompositeOffset) };
 		Registry->CompositeDefinitions.Add(NewChannel);
 
-		Definition->FloatCompositeMask |= 1 << Definition->CompositeSize;
+		Definition->DoubleCompositeMask |= 1 << Definition->CompositeSize;
 
 		++Definition->CompositeSize;
-		return TCompositePropertyDefinitionBuilder<PropertyTraits, Composites..., float>(Definition, Registry);
+		return TCompositePropertyDefinitionBuilder<PropertyTraits, Composites..., double>(Definition, Registry);
 	}
 
 	template<int InlineSize>
 	TCompositePropertyDefinitionBuilder<PropertyTraits, Composites...>& SetCustomAccessors(TCustomPropertyRegistration<PropertyTraits, InlineSize>* InCustomAccessors)
 	{
 		Definition->CustomPropertyRegistration = InCustomAccessors;
+		return *this;
+	}
+
+	template<typename BlenderSystemType>
+	TCompositePropertyDefinitionBuilder<PropertyTraits, Composites...>& SetBlenderSystem()
+	{
+		Definition->BlenderSystemClass = BlenderSystemType::StaticClass();
+		return *this;
+	}
+
+	TCompositePropertyDefinitionBuilder<PropertyTraits, Composites...>& SetBlenderSystem(UClass* BlenderSystemClass)
+	{
+		Definition->BlenderSystemClass = BlenderSystemClass;
 		return *this;
 	}
 
@@ -709,7 +811,7 @@ TRecompositionResult<typename PropertyTraits::StorageType> FPropertyRecomposerIm
 		return Result;
 	}
 
-	FFloatDecompositionParams Params;
+	FValueDecompositionParams Params;
 	Params.Query = InQuery;
 	Params.PropertyEntityID = Property.PropertyEntityID;
 	Params.DecomposeBlendChannel = Property.BlendChannel;

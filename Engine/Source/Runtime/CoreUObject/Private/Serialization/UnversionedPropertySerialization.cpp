@@ -2,9 +2,17 @@
 
 #include "Serialization/UnversionedPropertySerialization.h"
 #include "Serialization/UnversionedPropertySerializationTest.h"
+#include "Hash/Blake3.h"
 #include "Interfaces/ITargetPlatform.h"
 #include "Misc/ScopeRWLock.h"
+#include "UObject/OverridableManager.h"
+#include "UObject/PropertyOptional.h"
 #include "UObject/UnrealType.h"
+
+#if WITH_EDITORONLY_DATA
+#include "Misc/FileHelper.h"
+#include "UObject/UObjectIterator.h"
+#endif
 
 // Caches a property array per UStruct to avoid link-walking and touching FProperty data.
 //
@@ -43,12 +51,17 @@ public:
 #if CACHE_UNVERSIONED_PROPERTY_SCHEMA
 		, Offset(Property->GetOffset_ForInternal() + Property->ElementSize * InArrayIndex)
 		, bSerializeAsInteger(CanSerializeAsInteger(Property))
+		, bIsOptional(IsOptional(Property->GetClass()->GetCastFlags()))
 		, IntType(GetIntType(Property->GetMinAlignment()))
-		, FastZeroIntNum(CanSerializeAsZero(InProperty, IntType) ? GetIntNum(InProperty, IntType) : uint8(0))
 #else
 		, ArrayIndex(InArrayIndex)
 #endif
-	{}
+	{
+#if CACHE_UNVERSIONED_PROPERTY_SCHEMA
+		uint32 IntNum = GetIntNum(InProperty, IntType);
+		FastZeroIntNum = (CanSerializeAsZero(InProperty, IntType) & (IntNum < 256)) ? static_cast<uint8>(IntNum) : uint8(0);
+#endif
+	}
 
 	FProperty* GetProperty() const
 	{
@@ -104,16 +117,27 @@ public:
 
 	FORCEINLINE void LoadZero(uint8* Data) const
 	{
-#if !CACHE_UNVERSIONED_PROPERTY_SCHEMA
+		void* ValueData = GetValue(Data);
+
+#if CACHE_UNVERSIONED_PROPERTY_SCHEMA
+		// Cached FastZeroIntNum is only uint8 and not sufficient for large unset optionals
+		if (FastZeroIntNum == 0)
+		{
+			checkf(bIsOptional && Property->ElementSize >= 256, TEXT("Only large unset optionals should hit this loading path"));
+			FMemory::Memzero(ValueData, Property->ElementSize);
+			return;
+		}
+#else
 		EIntegerType IntType = GetIntType(Property->GetMinAlignment());
 		uint32 FastZeroIntNum = GetIntNum(Property, IntType);
 #endif
+
 		switch (IntType)
 		{
-			case EIntegerType::Uint8 : MemZeroRange<uint8 >(GetValue(Data), FastZeroIntNum); break;
-			case EIntegerType::Uint16: MemZeroRange<uint16>(GetValue(Data), FastZeroIntNum); break;
-			case EIntegerType::Uint32: MemZeroRange<uint32>(GetValue(Data), FastZeroIntNum); break;
-			case EIntegerType::Uint64: MemZeroRange<uint64>(GetValue(Data), FastZeroIntNum); break;
+			case EIntegerType::Uint8 : MemZeroRange<uint8 >(ValueData, FastZeroIntNum); break;
+			case EIntegerType::Uint16: MemZeroRange<uint16>(ValueData, FastZeroIntNum); break;
+			case EIntegerType::Uint32: MemZeroRange<uint32>(ValueData, FastZeroIntNum); break;
+			case EIntegerType::Uint64: MemZeroRange<uint64>(ValueData, FastZeroIntNum); break;
 			default: UE_ASSUME(0);
 		}
 	}
@@ -122,11 +146,15 @@ public:
 	{
 #if !CACHE_UNVERSIONED_PROPERTY_SCHEMA
 		EIntegerType IntType = GetIntType(Property->GetMinAlignment());
-		uint32 FastZeroIntNum = CanSerializeAsZero(Property, IntType) ? GetIntNum(Property, IntType) : uint8(0);
+		bool bIsOptional = IsOptional(Property->GetClass()->GetCastFlags());
+		uint32 FastZeroIntNum = CanSerializeAsZero(Property, IntType) ? GetIntNum(Property, IntType) : uint32(0);
 #endif
 
-		// Can simplified and faster using a switch() statement like LoadZero()
-		if (FastZeroIntNum == 1)
+		if (bIsOptional)
+		{
+			return FastZeroIntNum > 0 && !static_cast<const FOptionalProperty*>(Property)->IsSet(GetValue(Data));
+		}
+		else if (FastZeroIntNum == 1) // Can likely be simplified and faster using a switch() statement like LoadZero()
 		{
 			return IsIntZero(GetValue(Data), IntType);
 		}
@@ -144,6 +172,11 @@ public:
 private:
 	enum class EIntegerType : uint8 { Uint8, Uint16, Uint32, Uint64 };
 
+	static bool IsOptional(uint64 CastFlags)
+	{
+		return !!(CastFlags & CASTCLASS_FOptionalProperty);
+	}
+
 	static uint32 GetIntNum(const FProperty* Property, EIntegerType IntType)
 	{
 		return Property->ElementSize / GetSizeOf(IntType);
@@ -157,9 +190,13 @@ private:
 
 		if ((CastFlags & (CASTCLASS_FStructProperty | CASTCLASS_FBoolProperty)) == 0)
 		{
-			checkf(GetIntNum(Property, IntType) < MaxZeroComparisons, TEXT("Unexpectedly large property type encountered %s"), *Property->GetName());
+			checkf(GetIntNum(Property, IntType) < MaxZeroComparisons || IsOptional(CastFlags),  TEXT("Unexpectedly large property type encountered %s"), *Property->GetName());
 
-			return true;
+			// We can only zero-serialize properties that:
+			// - Don't need a destructor
+			// - And can be zero-initialized
+			// This is because if the property is zero-serialized, loading it will simply memzero the previous value.
+			return Property->HasAllPropertyFlags(CPF_ZeroConstructor | CPF_NoDestructor);
 		}
 		else if ((CastFlags & CASTCLASS_FBoolProperty) != 0)
 		{
@@ -266,6 +303,7 @@ private:
 #if CACHE_UNVERSIONED_PROPERTY_SCHEMA
 	uint32 Offset;
 	bool bSerializeAsInteger;
+	bool bIsOptional;
 	EIntegerType IntType;
 	uint8 FastZeroIntNum;
 #else
@@ -278,16 +316,27 @@ private:
 // Serialization is based on indices into this property array
 struct FUnversionedStructSchema
 {
+#if WITH_EDITORONLY_DATA
+	FBlake3Hash SchemaHash;
+#endif
 	uint32 Num;
 	FUnversionedPropertySerializer Serializers[0];
 
-	static FUnversionedStructSchema* Create(const UStruct* Struct)
+	FORCEINLINE static FUnversionedStructSchema* Create(const UStruct* Struct, bool bSkipEditorOnly)
 	{
+#if WITH_EDITORONLY_DATA
+		FBlake3 HashBuilder;
+#endif
 		TArray<FUnversionedPropertySerializer, TInlineAllocator<256>> Serializers;
 		for (FProperty* Property = Struct->PropertyLink; Property; Property = Property->PropertyLinkNext)
 		{
-			if (!Property->IsEditorOnlyProperty())
+#if WITH_EDITORONLY_DATA
+			if (!bSkipEditorOnly || !Property->IsEditorOnlyProperty())
+#endif
 			{
+#if WITH_EDITORONLY_DATA
+				Property->AppendSchemaHash(HashBuilder, bSkipEditorOnly);
+#endif
 				for (int32 ArrayIdx = 0, ArrayDim = Property->ArrayDim; ArrayIdx < ArrayDim; ++ArrayIdx)
 				{
 					Serializers.Add(FUnversionedPropertySerializer(Property, ArrayIdx));
@@ -297,26 +346,69 @@ struct FUnversionedStructSchema
 
 		uint32 Bytes = sizeof(FUnversionedStructSchema) + Serializers.Num() * sizeof(FUnversionedPropertySerializer);
 		FUnversionedStructSchema* Schema = reinterpret_cast<FUnversionedStructSchema*>(FMemory::Malloc(Bytes, alignof(FUnversionedPropertySerializer)));
+		
+#if WITH_EDITORONLY_DATA
+		const UClass* StructAsClass = Cast<const UClass>(Struct);
+		if (StructAsClass)
+		{
+			FAppendToClassSchemaContext Context(&HashBuilder);
+			StructAsClass->CallAppendToClassSchema(Context);
+		}
+		Schema->SchemaHash = HashBuilder.Finalize();
+#endif
 		Schema->Num = Serializers.Num();
 		FMemory::Memcpy(Schema->Serializers, Serializers.GetData(), Serializers.Num() * sizeof(FUnversionedPropertySerializer));
 
 		return Schema;
 	}
+
+	FORCEINLINE static void Delete(FUnversionedStructSchema* Schema)
+	{
+		if (Schema)
+		{
+			Schema->~FUnversionedStructSchema();
+			FMemory::Free(Schema);
+		}
+	}
+
+#if WITH_EDITORONLY_DATA
+	static FBlake3Hash CalculateSchemaHash(UStruct* Struct, bool bSkipEditorOnly)
+	{
+		FBlake3 HashBuilder;
+		for (FProperty* Property = Struct->PropertyLink; Property; Property = Property->PropertyLinkNext)
+		{
+			if (!bSkipEditorOnly || !Property->IsEditorOnlyProperty())
+			{
+				Property->AppendSchemaHash(HashBuilder, bSkipEditorOnly);
+			}
+		}
+		return HashBuilder.Finalize();
+	}
+#endif
 };
 
-const FUnversionedStructSchema& GetOrCreateUnversionedSchema(const UStruct* Struct)
+static const FUnversionedStructSchema*& GetUnversionedSchema(const UStruct* Struct, bool bSkipEditorOnly)
 {
-	if (const FUnversionedStructSchema* ExistingSchema = Struct->UnversionedSchema)
+#if WITH_EDITORONLY_DATA
+	return bSkipEditorOnly ? Struct->UnversionedGameSchema : Struct->UnversionedEditorSchema;
+#else
+	return Struct->UnversionedGameSchema;
+#endif
+}
+
+const FUnversionedStructSchema& GetOrCreateUnversionedSchema(const UStruct* Struct, bool bSkipEditorOnly)
+{
+	if (const FUnversionedStructSchema* ExistingSchema = GetUnversionedSchema(Struct, bSkipEditorOnly))
 	{
 		return *ExistingSchema;
 	}
-	
-	FUnversionedStructSchema* CreatedSchema = FUnversionedStructSchema::Create(Struct);
 
-	void** CachedSchemaPtr = reinterpret_cast<void**>(const_cast<FUnversionedStructSchema**>(&Struct->UnversionedSchema));
+	FUnversionedStructSchema* CreatedSchema = FUnversionedStructSchema::Create(Struct, bSkipEditorOnly);
+
+	void** CachedSchemaPtr = reinterpret_cast<void**>(const_cast<FUnversionedStructSchema**>(&GetUnversionedSchema(Struct, bSkipEditorOnly)));
 	if (const FUnversionedStructSchema* ExistingSchema = reinterpret_cast<const FUnversionedStructSchema*>(FPlatformAtomics::InterlockedCompareExchangePointer(CachedSchemaPtr, CreatedSchema, nullptr)))
 	{
-		delete CreatedSchema;
+		FUnversionedStructSchema::Delete(CreatedSchema);
 		return *ExistingSchema;
 	}
 
@@ -331,20 +423,23 @@ struct FLinkWalkingSchemaIterator
 {
 	FProperty* Property = nullptr;
 	uint32 ArrayIndex = 0;
+	bool bSkipEditorOnly = true;
 
 	FLinkWalkingSchemaIterator() {}
 
-	explicit FLinkWalkingSchemaIterator(FProperty* FirstProperty)
-		: Property(SkipEditorOnlyProperties(FirstProperty))
-	{}
+	FORCEINLINE explicit FLinkWalkingSchemaIterator(FProperty* FirstProperty, bool bInSkipEditorOnly)
+		: Property(SkipEditorOnlyProperties(FirstProperty, bInSkipEditorOnly))
+		, bSkipEditorOnly(bInSkipEditorOnly)
+	{
+	}
 
-	void operator++()
+	FORCEINLINE void operator++()
 	{
 		check(Property);
 
 		if (ArrayIndex + 1 == Property->ArrayDim)
 		{
-			Property = SkipEditorOnlyProperties(Property->PropertyLinkNext);
+			Property = SkipEditorOnlyProperties(Property->PropertyLinkNext, bSkipEditorOnly);
 			ArrayIndex = 0;
 		}
 		else
@@ -353,7 +448,7 @@ struct FLinkWalkingSchemaIterator
 		}
 	}
 
-	void operator+=(uint32 Num)
+	FORCEINLINE void operator+=(uint32 Num)
 	{
 		while (Num--)
 		{
@@ -371,12 +466,15 @@ struct FLinkWalkingSchemaIterator
 		return (Property != Rhs.Property) | (ArrayIndex != Rhs.ArrayIndex);
 	}
 
-	static FProperty* SkipEditorOnlyProperties(FProperty* Property)
+	FORCEINLINE static FProperty* SkipEditorOnlyProperties(FProperty* Property, bool bSkipEditorOnly)
 	{
 #if WITH_EDITORONLY_DATA
-		while (Property && Property->IsEditorOnlyProperty())
+		if (bSkipEditorOnly)
 		{
-			Property = Property->PropertyLinkNext;
+			while (Property && Property->IsEditorOnlyProperty())
+			{
+				Property = Property->PropertyLinkNext;
+			}
 		}
 #endif
 		return Property;
@@ -389,14 +487,14 @@ using FUnversionedSchemaIterator = FLinkWalkingSchemaIterator;
 
 struct FUnversionedSchemaRange
 {
-	explicit FUnversionedSchemaRange(const UStruct* Struct)
+	FORCEINLINE explicit FUnversionedSchemaRange(const UStruct* Struct, bool bSkipEditorOnly)
 	{
 #if CACHE_UNVERSIONED_PROPERTY_SCHEMA
-		const FUnversionedStructSchema& Schema = GetOrCreateUnversionedSchema(Struct);
+		const FUnversionedStructSchema& Schema = GetOrCreateUnversionedSchema(Struct, bSkipEditorOnly);
 		Begin = Schema.Serializers;
 		End = Schema.Serializers + Schema.Num;	
 #else
-		Begin = FUnversionedSchemaIterator(Struct->PropertyLink);
+		Begin = FUnversionedSchemaIterator(Struct->PropertyLink, bSkipEditorOnly);
 		// End is default-initialized
 #endif
 	}
@@ -485,7 +583,7 @@ protected:
 
 		uint16 Pack() const
 		{
-			return SkipNum | (bHasAnyZeroes ? HasZeroMask : 0) | (uint16)ValueNum << ValueNumShift | (bIsLast ? IsLastMask : 0);
+			return SkipNum | (uint16)(bHasAnyZeroes ? HasZeroMask : 0) | (uint16)(ValueNum << ValueNumShift) | (uint16)(bIsLast ? IsLastMask : 0);
 		}
 
 		static FFragment Unpack(uint16 Int)
@@ -569,7 +667,7 @@ public:
 			, ZeroMask(Header.ZeroMask)
 			, FragmentIt(Header.Fragments.GetData())
 			, bDone(!Header.HasValues())
-#if DO_CHECK
+#if DO_CHECK || USING_CODE_ANALYSIS
 			, SchemaEnd(Schema.End)
 #endif
 		{
@@ -622,7 +720,7 @@ public:
 		bool bDone = false;
 		uint32 ZeroMaskIndex = 0;
 		uint32 RemainingFragmentValues = 0;
-#if DO_CHECK
+#if DO_CHECK || USING_CODE_ANALYSIS
 		FUnversionedSchemaIterator SchemaEnd;
 #endif
 
@@ -683,7 +781,7 @@ public:
 		while (Fragments.Num() > 1 && Fragments.Last().ValueNum == 0)
 		{
 			checkf(!Fragments.Last().bHasAnyZeroes, TEXT("No values implies no zero-values"));			
-			Fragments.Pop(/* allow shrink */ false);
+			Fragments.Pop(EAllowShrinking::No);
 		}
 
 		Fragments.Last().bIsLast = true;
@@ -761,10 +859,20 @@ bool CanUseUnversionedPropertySerialization(const ITargetPlatform* Target)
 void DestroyUnversionedSchema(const UStruct* Struct)
 {
 #if CACHE_UNVERSIONED_PROPERTY_SCHEMA
-	delete Struct->UnversionedSchema;
-	Struct->UnversionedSchema = nullptr;
+	FUnversionedStructSchema::Delete(const_cast<FUnversionedStructSchema*>(Struct->UnversionedGameSchema));
+	Struct->UnversionedGameSchema = nullptr;
+#if WITH_EDITORONLY_DATA
+	FUnversionedStructSchema::Delete(const_cast<FUnversionedStructSchema*>(Struct->UnversionedEditorSchema));
+	Struct->UnversionedEditorSchema = nullptr;
+#endif
 #endif
 }
+
+#if WITH_EDITORONLY_DATA
+static bool SkipEditorOnlyFields(FArchive& Ar) { return Ar.IsFilterEditorOnly(); }
+#else
+static constexpr bool SkipEditorOnlyFields(FArchive& Ar) { return true; }
+#endif
 
 void SerializeUnversionedProperties(const UStruct* Struct, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct, uint8* DefaultsData)
 {
@@ -776,21 +884,24 @@ void SerializeUnversionedProperties(const UStruct* Struct, FStructuredArchive::F
 		check(CanUseUnversionedPropertySerialization());
 
 		FUnversionedHeader Header;
-		Header.Load(StructRecord.EnterStream(SA_FIELD_NAME(TEXT("Header"))));
+		Header.Load(StructRecord.EnterStream(TEXT("Header")));
 
 		if (Header.HasValues())
 		{
-			FUnversionedSchemaRange Schema(Struct);
+			FUnversionedSchemaRange Schema(Struct, SkipEditorOnlyFields(UnderlyingArchive));
 
 			if (Header.HasNonZeroValues())
 			{
 				FDefaultStruct Defaults(DefaultsData, DefaultsStruct);
 
-				FStructuredArchive::FStream ValueStream = StructRecord.EnterStream(SA_FIELD_NAME(TEXT("Values")));
+				FStructuredArchive::FStream ValueStream = StructRecord.EnterStream(TEXT("Values"));
 				for (FUnversionedHeader::FIterator It(Header, Schema); It; It.Next())
 				{
 					if (It.IsNonZero())
 					{
+#if WITH_EDITOR // Skip this scope to save time in the runtime; it is only needed for reference collection in editor
+						FSerializedPropertyScope SerializedProperty(UnderlyingArchive, It.GetSerializer().GetProperty());
+#endif
 						It.GetSerializer().Serialize(ValueStream.EnterElement(), Data, Defaults);
 					}
 					else
@@ -819,7 +930,7 @@ void SerializeUnversionedProperties(const UStruct* Struct, FStructuredArchive::F
 		const bool bDense = !UnderlyingArchive.DoDelta() || UnderlyingArchive.IsTransacting() || (!DefaultsData && !dynamic_cast<const UClass*>(Struct));
 		FDefaultStruct Defaults(DefaultsData, DefaultsStruct);
 
-		FUnversionedSchemaRange Schema(Struct);
+		FUnversionedSchemaRange Schema(Struct, SkipEditorOnlyFields(UnderlyingArchive));
 		FUnversionedHeaderBuilder Header;
 		for (FUnversionedPropertySerializer Serializer : Schema)
 		{
@@ -837,17 +948,73 @@ void SerializeUnversionedProperties(const UStruct* Struct, FStructuredArchive::F
 		Header.Finalize();
 
 		// Save header and non-zero values 
-		Header.Save(StructRecord.EnterStream(SA_FIELD_NAME(TEXT("Header"))));
+		Header.Save(StructRecord.EnterStream(TEXT("Header")));
 		if (Header.HasNonZeroValues())
 		{
-			FStructuredArchive::FStream ValueStream = StructRecord.EnterStream(SA_FIELD_NAME(TEXT("Values")));
+			FStructuredArchive::FStream ValueStream = StructRecord.EnterStream(TEXT("Values"));
 			for (FUnversionedHeader::FIterator It(Header, Schema); It; It.Next())
 			{
 				if (It.IsNonZero())
 				{
+					FSerializedPropertyScope SerializedProperty(UnderlyingArchive, It.GetSerializer().GetProperty());
 					It.GetSerializer().Serialize(ValueStream.EnterElement(), Data, Defaults);
 				}
 			}
 		}
 	}
 }
+
+#if WITH_EDITORONLY_DATA
+const FBlake3Hash& GetSchemaHash(const UStruct* Struct, bool bSkipEditorOnly)
+{
+#if CACHE_UNVERSIONED_PROPERTY_SCHEMA
+	return GetOrCreateUnversionedSchema(Struct, bSkipEditorOnly).SchemaHash;
+#else
+	static FBlake3Hash Placeholder;
+	return Placeholder;
+#endif
+}
+
+COREUOBJECT_API void DumpClassSchemas(const TCHAR* Str, FOutputDevice& Ar)
+{
+#if CACHE_UNVERSIONED_PROPERTY_SCHEMA
+	TArray<FString> Lines;
+	TArray<UStruct*> Structs;
+	for (TObjectIterator<UStruct> It; It; ++It)
+	{
+		Structs.Add(*It);
+	}
+	Algo::Sort(Structs, [](UStruct* A, UStruct* B)
+		{
+			FNameBuilder AName;
+			FNameBuilder BName;
+			A->GetPathName(nullptr, AName);
+			B->GetPathName(nullptr, BName);
+			return FStringView(AName).Compare(FStringView(BName), ESearchCase::IgnoreCase) < 0;
+		});
+	bool bSkipEditorOnly = false;
+	FParse::Bool(Str, TEXT("-SkipEditorOnly="), bSkipEditorOnly);
+	for (UStruct* Struct : Structs)
+	{
+		const FBlake3Hash& ExistingHash = Struct->GetSchemaHash(bSkipEditorOnly);
+		FBlake3Hash NewHash = FUnversionedStructSchema::CalculateSchemaHash(Struct, bSkipEditorOnly);
+		ensureMsgf(ExistingHash == NewHash, TEXT("Hash mismatch for %s. Stored hash=%s, Current hash=%s"),
+			*Struct->GetFullName(nullptr), *LexToString(ExistingHash), *LexToString(NewHash));
+		Lines.Add(FString::Printf(TEXT("%-80s, %s"), *Struct->GetPathName(nullptr), *LexToString(ExistingHash)));
+	}
+	FString DumpFilename;
+	FParse::Value(Str, TEXT("-FILE="), DumpFilename);
+	if (!DumpFilename.IsEmpty())
+	{
+		FFileHelper::SaveStringArrayToFile(Lines, *DumpFilename);
+	}
+#endif
+}
+
+void FAppendToClassSchemaContext::Update(const void* Data, uint64 Size)
+{
+	FBlake3& Blake3Hasher = *(reinterpret_cast<FBlake3*>(Hasher));
+	Blake3Hasher.Update(Data, Size);
+}
+
+#endif

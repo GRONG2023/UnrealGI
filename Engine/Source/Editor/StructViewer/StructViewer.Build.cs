@@ -9,8 +9,8 @@ public class StructViewer : ModuleRules
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
 				"AssetRegistry",
-                "AssetTools",
 				"EditorWidgets",
+				"WorkspaceMenuStructure",
 			}
 		);
 
@@ -22,7 +22,7 @@ public class StructViewer : ModuleRules
                 "InputCore",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
+				"EditorFramework",
 				"UnrealEd",
 				"ContentBrowserData",
                 "Settings",

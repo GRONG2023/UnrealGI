@@ -1,15 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Animation/SkeletalMeshActor.h"
+#include "Animation/AnimationAsset.h"
 #include "Net/UnrealNetwork.h"
-#include "Animation/AnimInstance.h"
-#include "Animation/AnimSequence.h"
-#include "Animation/AnimMontage.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Engine/SkeletalMesh.h"
 #include "Misc/UObjectToken.h"
 #include "Misc/MapErrors.h"
-#include "Animation/AnimBlueprintGeneratedClass.h"
 #include "Engine/CollisionProfile.h"
 #include "Logging/MessageLog.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SkeletalMeshActor)
 
 #define LOCTEXT_NAMESPACE "SkeletalMeshActor"
 
@@ -35,61 +36,6 @@ void ASkeletalMeshActor::GetLifetimeReplicatedProps(TArray< FLifetimeProperty > 
 	DOREPLIFETIME(ASkeletalMeshActor, ReplicatedPhysAsset);
 	DOREPLIFETIME(ASkeletalMeshActor, ReplicatedMaterial0);
 	DOREPLIFETIME(ASkeletalMeshActor, ReplicatedMaterial1);
-}
-
-void ASkeletalMeshActor::PreviewBeginAnimControl(UInterpGroup* InInterpGroup)
-{
-	if (CanPlayAnimation())
-	{
-		UAnimInstance* AnimInst = SkeletalMeshComponent->GetAnimInstance();
-		if (!AnimInst)
-		{
-			SkeletalMeshComponent->SetAnimationMode(EAnimationMode::Type::AnimationSingleNode);
-		}
-	}
-}
-
-
-void ASkeletalMeshActor::PreviewFinishAnimControl(UInterpGroup* InInterpGroup)
-{
-	if (CanPlayAnimation())
-	{
-		// if in editor, reset the Animations, makes easier for artist to see them visually and align them
-		// in game, we keep the last pose that matinee kept. If you'd like it to have animation, you'll need to have AnimTree or AnimGraph to handle correctly
-		if (SkeletalMeshComponent->GetAnimationMode() == EAnimationMode::Type::AnimationBlueprint)
-		{
-			UAnimInstance* AnimInst = SkeletalMeshComponent->GetAnimInstance();
-			if (AnimInst)
-			{
-				AnimInst->Montage_Stop(0.f);
-				AnimInst->UpdateAnimation(0.f, false);
-			}
-		}
-		// Update space bases to reset it back to ref pose
-		SkeletalMeshComponent->RefreshBoneTransforms();
-		SkeletalMeshComponent->RefreshSlaveComponents();
-		SkeletalMeshComponent->UpdateComponentToWorld();
-	}
-}
-
-
-void ASkeletalMeshActor::PreviewSetAnimPosition(FName SlotName, int32 ChannelIndex, UAnimSequence* InAnimSequence, float InPosition, bool bLooping, bool bFireNotifies, float DeltaTime)
-{
-	if (CanPlayAnimation(InAnimSequence))
-	{
-		TWeakObjectPtr<class UAnimMontage>& CurrentlyPlayingMontage = CurrentlyPlayingMontages.FindOrAdd(SlotName);
-		CurrentlyPlayingMontage = FAnimMontageInstance::PreviewMatineeSetAnimPositionInner(SlotName, SkeletalMeshComponent, SkeletalMeshComponent->GetAnimInstance(),  InAnimSequence, InPosition, bLooping, bFireNotifies, DeltaTime);
-	}
-}
-
-void ASkeletalMeshActor::PreviewSetAnimWeights(TArray<FAnimSlotInfo>& SlotInfos)
-{
-	//no support yet
-}
-
-void ASkeletalMeshActor::SetAnimWeights(const TArray<struct FAnimSlotInfo>& SlotInfos)
-{
-	//no support yet
 }
 
 /** Check SkeletalMeshActor for errors. */
@@ -129,7 +75,7 @@ void ASkeletalMeshActor::CheckForErrors()
 				->AddToken(FMapErrorToken::Create(FMapErrors::ActorLargeShadowCaster));
 		}
 
-		if (SkeletalMeshComponent->SkeletalMesh == NULL)
+		if (SkeletalMeshComponent->GetSkeletalMeshAsset() == NULL)
 		{
 			FMessageLog("MapCheck").Warning()
 				->AddToken(FUObjectToken::Create(this))
@@ -171,7 +117,7 @@ void ASkeletalMeshActor::PostInitializeComponents()
 	// grab the current mesh for replication
 	if (GetLocalRole() == ROLE_Authority && SkeletalMeshComponent)
 	{
-		ReplicatedMesh = SkeletalMeshComponent->SkeletalMesh;
+		ReplicatedMesh = SkeletalMeshComponent->GetSkeletalMeshAsset();
 	}
 
 	// Unfix bodies flagged as 'full anim weight'
@@ -201,62 +147,23 @@ void ASkeletalMeshActor::OnRep_ReplicatedMaterial1()
 	SkeletalMeshComponent->SetMaterial(1, ReplicatedMaterial1);
 }
 
-void ASkeletalMeshActor::BeginAnimControl(UInterpGroup* InInterpGroup)
-{
-	if (CanPlayAnimation())
-	{
-		UAnimInstance* AnimInst = SkeletalMeshComponent->GetAnimInstance();
-		if (!AnimInst)
-		{
-			SkeletalMeshComponent->SetAnimationMode(EAnimationMode::Type::AnimationSingleNode);
-		}
-	}
-}
-
-bool ASkeletalMeshActor::CanPlayAnimation(class UAnimSequenceBase* AnimAssetBase/*=NULL*/) const
-{
-	return (SkeletalMeshComponent->SkeletalMesh && SkeletalMeshComponent->SkeletalMesh->GetSkeleton() &&
-		(!AnimAssetBase || SkeletalMeshComponent->SkeletalMesh->GetSkeleton()->IsCompatible(AnimAssetBase->GetSkeleton())));
-}
-
-void ASkeletalMeshActor::SetAnimPosition(FName SlotName, int32 ChannelIndex, UAnimSequence* InAnimSequence, float InPosition, bool bFireNotifies, bool bLooping)
-{
-	if (CanPlayAnimation(InAnimSequence))
-	{
-		TWeakObjectPtr<class UAnimMontage>& CurrentlyPlayingMontage = CurrentlyPlayingMontages.FindOrAdd(SlotName);
-		CurrentlyPlayingMontage = FAnimMontageInstance::SetMatineeAnimPositionInner(SlotName, SkeletalMeshComponent->GetAnimInstance(), InAnimSequence, InPosition, bLooping);
-	}
-}
-
-void ASkeletalMeshActor::FinishAnimControl(UInterpGroup* InInterpGroup)
-{
-	if (SkeletalMeshComponent->GetAnimationMode() == EAnimationMode::Type::AnimationBlueprint)
-	{
-		UAnimInstance* AnimInst = SkeletalMeshComponent->GetAnimInstance();
-		if (AnimInst)
-		{
-			AnimInst->Montage_Stop(0.f);
-			AnimInst->UpdateAnimation(0.f, false);
-		}
-
-		// Update space bases to reset it back to ref pose
-		SkeletalMeshComponent->RefreshBoneTransforms();
-		SkeletalMeshComponent->RefreshSlaveComponents();
-		SkeletalMeshComponent->UpdateComponentToWorld();
-	}
-}
-
-
 #if WITH_EDITOR
 
 bool ASkeletalMeshActor::GetReferencedContentObjects(TArray<UObject*>& Objects) const
 {
 	Super::GetReferencedContentObjects(Objects);
 
-	if (SkeletalMeshComponent->SkeletalMesh)
+	if (SkeletalMeshComponent->GetSkeletalMeshAsset())
 	{
-		Objects.Add(SkeletalMeshComponent->SkeletalMesh);
+		Objects.Add(SkeletalMeshComponent->GetSkeletalMeshAsset());
 	}
+
+	if (SkeletalMeshComponent->GetAnimationMode() == EAnimationMode::Type::AnimationSingleNode &&
+		SkeletalMeshComponent->AnimationData.AnimToPlay)
+	{
+		Objects.Add(SkeletalMeshComponent->AnimationData.AnimToPlay);
+	}
+
 	return true;
 }
 
@@ -268,9 +175,9 @@ void ASkeletalMeshActor::EditorReplacedActor(AActor* OldActor)
 	{
 		// if no skeletal mesh set, take one from previous actor
 		if (SkeletalMeshComponent && OldSkelMeshActor->SkeletalMeshComponent &&
-			SkeletalMeshComponent->SkeletalMesh == NULL)
+			SkeletalMeshComponent->GetSkeletalMeshAsset() == NULL)
 		{
-			SkeletalMeshComponent->SetSkeletalMesh(OldSkelMeshActor->SkeletalMeshComponent->SkeletalMesh);
+			SkeletalMeshComponent->SetSkeletalMesh(OldSkelMeshActor->SkeletalMeshComponent->GetSkeletalMeshAsset());
 		}
 	}
 }
@@ -279,7 +186,7 @@ void ASkeletalMeshActor::LoadedFromAnotherClass(const FName& OldClassName)
 {
 	Super::LoadedFromAnotherClass(OldClassName);
 
-	if (GetLinkerUE4Version() < VER_UE4_REMOVE_SKELETALPHYSICSACTOR)
+	if (GetLinkerUEVersion() < VER_UE4_REMOVE_SKELETALPHYSICSACTOR)
 	{
 		static FName SkeletalPhysicsActor_NAME(TEXT("SkeletalPhysicsActor"));
 		static FName KAsset_NAME(TEXT("KAsset"));
@@ -300,3 +207,4 @@ void ASkeletalMeshActor::LoadedFromAnotherClass(const FName& OldClassName)
 #endif
 
 #undef LOCTEXT_NAMESPACE
+

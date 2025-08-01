@@ -5,8 +5,6 @@ public class HierarchicalLODUtilities : ModuleRules
 {
     public HierarchicalLODUtilities(ReadOnlyTargetRules Target) : base(Target)
 	{
-        PublicIncludePaths.Add("Developer/HierarchicalLODUtilities/Public");
-
         PublicDependencyModuleNames.AddRange(
             new string[]
 			{
@@ -18,7 +16,10 @@ public class HierarchicalLODUtilities : ModuleRules
         PrivateDependencyModuleNames.AddRange(
             new string[]
 			{
+				"BSPUtils",
+				"EditorFramework",
 				"Engine",
+				"MaterialUtilities",
 				"MeshDescription",
 				"StaticMeshDescription",
 				"UnrealEd",
@@ -26,10 +27,11 @@ public class HierarchicalLODUtilities : ModuleRules
 			}
         );
 
-        PrivateIncludePaths.AddRange(
+		PrivateIncludePathModuleNames.AddRange(
             new string[]
             {
-            }
+				"GeometryProcessingInterfaces"
+			}
         );
 
         DynamicallyLoadedModuleNames.AddRange(
@@ -38,7 +40,8 @@ public class HierarchicalLODUtilities : ModuleRules
                 "MeshUtilities",
                 "MeshMergeUtilities",
                 "MeshReductionInterface",
-            }
+				"GeometryProcessingInterfaces"
+			}
         );
 	}
 }

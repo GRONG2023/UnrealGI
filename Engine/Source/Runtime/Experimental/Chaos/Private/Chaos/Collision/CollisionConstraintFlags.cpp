@@ -4,47 +4,173 @@
 #include "Chaos/GeometryParticles.h"
 #include "Chaos/ParticleHandle.h"
 
+// @todo(chaos): remove after IgnoreCollisionManager refactor
+#include "PBDRigidsSolver.h"
+#include "PhysicsProxy/SingleParticlePhysicsProxy.h"
+#include "Chaos/PBDRigidsEvolutionGBF.h"
+
 namespace Chaos
 {
 
-	bool FIgnoreCollisionManager::ContainsHandle(FHandleID Body0)
+	bool FIgnoreCollisionManager::ContainsHandle(FHandleID Body0) const
 	{
 		return IgnoreCollisionsList.Contains(Body0);
 	}
 
-	bool FIgnoreCollisionManager::IgnoresCollision(FHandleID Body0, FHandleID Body1)
+	bool FIgnoreCollisionManager::IgnoresCollision(FHandleID Body0, FHandleID Body1) const
 	{
-		if (IgnoreCollisionsList.Contains(Body0))
+		const TArray<FIgnoreEntry>* Entries = IgnoreCollisionsList.Find(Body0);
+
+		if(Entries)
 		{
-			return IgnoreCollisionsList[Body0].Contains(Body1);
+			return Entries->ContainsByPredicate([&Body1](const FIgnoreEntry& Entry)
+			{
+				return Entry.Id == Body1;
+			});
 		}
+
 		return false;
 	}
 
-	int32 FIgnoreCollisionManager::NumIgnoredCollision(FHandleID Body0)
+	int32 FIgnoreCollisionManager::NumIgnoredCollision(FHandleID Body0) const
 	{
-		if (IgnoreCollisionsList.Contains(Body0))
+		const TArray<FIgnoreEntry>* Entries = IgnoreCollisionsList.Find(Body0);
+
+		return Entries ? Entries->Num() : 0;
+	}
+
+	void FIgnoreCollisionManager::AddIgnoreCollisionsImpl(FHandleID Body0, FHandleID Body1)
+	{
+		TArray<FIgnoreEntry>& Entries = IgnoreCollisionsList.FindOrAdd(Body0);
+		FIgnoreEntry* Entry = Entries.FindByPredicate([&Body1](const FIgnoreEntry& Entry)
 		{
-			return IgnoreCollisionsList[Body0].Num();
+			return Entry.Id == Body1;
+		});
+
+		if(Entry)
+		{
+			Entry->Count++;
 		}
+		else
+		{
+			Entries.Add(FIgnoreEntry(Body1));
+		}
+	}
+
+	int32 FIgnoreCollisionManager::RemoveIgnoreCollisionsImpl(FHandleID Body0, FHandleID Body1)
+	{
+		TArray<FIgnoreEntry>* Entries = IgnoreCollisionsList.Find(Body0);
+
+		if(Entries)
+		{
+			int32 EntryIndex = Entries->IndexOfByPredicate([&Body1](const FIgnoreEntry& FindEntry)
+			{
+				return FindEntry.Id == Body1;
+			});
+
+			if(EntryIndex != INDEX_NONE)
+			{
+				(*Entries)[EntryIndex].Count--;
+
+				if((*Entries)[EntryIndex].Count <= 0)
+				{
+					Entries->RemoveAtSwap(EntryIndex);
+				}
+			}
+
+			if(Entries->Num() == 0)
+			{
+				IgnoreCollisionsList.Remove(Body0);
+			}
+			else
+			{
+				return Entries->Num();
+			}
+		}
+
 		return 0;
 	}
 
-	void FIgnoreCollisionManager::AddIgnoreCollisionsFor(FHandleID Body0, FHandleID Body1)
+	bool FIgnoreCollisionManager::IgnoresCollision(const FGeometryParticleHandle* Particle0, const FGeometryParticleHandle* Particle1) const
 	{
-		if (!IgnoreCollisionsList.Contains(Body0))
-		{
-			IgnoreCollisionsList.Add(Body0, TArray<FHandleID>());
-		}
-		IgnoreCollisionsList[Body0].Add(Body1);
-
+		return IgnoresCollision(Particle0->UniqueIdx(), Particle1->UniqueIdx());
 	}
-	void FIgnoreCollisionManager::RemoveIgnoreCollisionsFor(FHandleID Body0, FHandleID Body1)
+
+	void FIgnoreCollisionManager::SetIgnoreCollisionFlag(FPBDRigidParticleHandle* Rigid, const bool bUsesIgnoreCollisionManager)
 	{
-		if (IgnoreCollisionsList.Contains(Body0))
+		if (bUsesIgnoreCollisionManager)
 		{
-			IgnoreCollisionsList[Body0].Remove(Body1);
+			Rigid->SetUseIgnoreCollisionManager();
 		}
+		else
+		{
+			Rigid->ClearUseIgnoreCollisionManager();
+		}
+	}
+
+	void FIgnoreCollisionManager::AddIgnoreCollisions(FGeometryParticleHandle* Particle0, FGeometryParticleHandle* Particle1)
+	{
+		if (Particle0 && Particle1)
+		{
+			FPBDRigidParticleHandle* Rigid0 = Particle0->CastToRigidParticle();
+			FPBDRigidParticleHandle* Rigid1 = Particle1->CastToRigidParticle();
+			if (Rigid0 || Rigid1)
+			{
+				const FUniqueIdx ID0 = Particle0->UniqueIdx();
+				const FUniqueIdx ID1 = Particle1->UniqueIdx();
+
+				if (Rigid0)
+				{
+					AddIgnoreCollisionsImpl(ID0, ID1);
+					SetIgnoreCollisionFlag(Rigid0, true);
+				}
+
+				if (Rigid1)
+				{
+					AddIgnoreCollisionsImpl(ID1, ID0);
+					SetIgnoreCollisionFlag(Rigid1, true);
+				}
+			}
+		}
+	}
+
+	void FIgnoreCollisionManager::RemoveIgnoreCollisions(FGeometryParticleHandle* Particle0, FGeometryParticleHandle* Particle1)
+	{
+		if (Particle0 && Particle1)
+		{
+			FPBDRigidParticleHandle* Rigid0 = Particle0->CastToRigidParticle();
+			FPBDRigidParticleHandle* Rigid1 = Particle1->CastToRigidParticle();
+			if (Rigid0 || Rigid1)
+			{
+				const FUniqueIdx ID0 = Particle0->UniqueIdx();
+				const FUniqueIdx ID1 = Particle1->UniqueIdx();
+
+				if (Rigid0)
+				{
+					if (RemoveIgnoreCollisionsImpl(ID0, ID1) == 0)
+					{
+						SetIgnoreCollisionFlag(Rigid0, false);
+					}
+				}
+
+				if (Rigid1)
+				{
+					if (RemoveIgnoreCollisionsImpl(ID1, ID0) == 0)
+					{
+						SetIgnoreCollisionFlag(Rigid1, false);
+					}
+				}
+			}
+		}
+	}
+
+	FGeometryParticleHandle* FIgnoreCollisionManager::GetParticleHandle(FHandleID Body, FPBDRigidsSolver& Solver)
+	{
+		if (FSingleParticlePhysicsProxy* Proxy = Solver.GetParticleProxy_PT(Body))
+		{
+			return Proxy->GetHandle_LowLevel();
+		}
+		return nullptr;
 	}
 
 	void FIgnoreCollisionManager::PopStorageData_Internal(int32 ExternalTimestamp)
@@ -74,10 +200,7 @@ namespace Chaos
 
 			for (auto& Item : StorageData->PendingDeactivations)
 			{
-				if (!PendingDeactivations.Contains(Item))
-				{
-					PendingDeactivations.Add(Item);
-				}
+				PendingDeactivations.Add(Item);
 			}
 
 			StorageDataQueue.Pop();
@@ -85,7 +208,7 @@ namespace Chaos
 		}
 	}
 
-	void FIgnoreCollisionManager::ProcessPendingQueues()
+	void FIgnoreCollisionManager::ProcessPendingQueues(FPBDRigidsSolver& Solver)
 	{
 
 		// remove particles that have been created and destroyed
@@ -94,18 +217,20 @@ namespace Chaos
 		if (PendingActivations.Num() && PendingDeactivations.Num())
 		{
 			TArray<FHandleID> DeletionList;
-			for (auto& Elem : PendingActivations)
+			
+			for (const TPair<FHandleID, TArray<FHandleID>>& Elem : PendingActivations)
 			{
-				int32 DeactiveIndex = PendingDeactivations.Find(Elem.Key);
-				if (DeactiveIndex != INDEX_NONE)
+				if (PendingDeactivations.Remove(Elem.Key))
 				{
 					DeletionList.Add(Elem.Key);
 					PreculledParticles.Add(Elem.Key);
-					PendingDeactivations.RemoveAtSwap(DeactiveIndex, 1);
 				}
 			}
-			for (FHandleID Del : DeletionList)
+
+			for(FHandleID Del : DeletionList)
+			{
 				PendingActivations.Remove(Del);
+			}
 		}
 
 		// add collision relationships for particles that have valid
@@ -114,7 +239,7 @@ namespace Chaos
 		if (PendingActivations.Num())
 		{
 			TArray<FHandleID> DeletionList;
-			for (auto& Elem : PendingActivations)
+			for (TPair<FHandleID, TArray<FHandleID>>& Elem : PendingActivations)
 			{
 				for (int Index = Elem.Value.Num() - 1; Index >= 0; Index--)
 				{
@@ -126,28 +251,41 @@ namespace Chaos
 					{
 						FUniqueIdx ID0 = Elem.Key;
 						FUniqueIdx ID1 = Elem.Value[Index];
-						if (!IgnoresCollision(ID0, ID1))
-						{
-							AddIgnoreCollisionsFor(ID0, ID1);
-							AddIgnoreCollisionsFor(ID1, ID0);
-						}
+
+						FGeometryParticleHandle* Particle0 = GetParticleHandle(ID0, Solver);
+						FGeometryParticleHandle* Particle1 = GetParticleHandle(ID1, Solver);
+						AddIgnoreCollisions(Particle0, Particle1);
 
 						Elem.Value.RemoveAtSwap(Index, 1);
 					}
 				}
-				if (!Elem.Value.Num())
+
+				if(!Elem.Value.Num())
+				{
 					DeletionList.Add(Elem.Key);
+				}
 			}
-			for (FHandleID Del : DeletionList)
+
+			for(FHandleID Del : DeletionList)
+			{
 				PendingActivations.Remove(Del);
+			}
 		}
 
 		// remove relationships that exist and have been initialized. 
 		if (PendingDeactivations.Num())
 		{
-			for (auto Index = PendingDeactivations.Num() - 1; Index >= 0; Index--)
+			for (auto& Idx : PendingDeactivations)
 			{
-				IgnoreCollisionsList.Remove(PendingDeactivations[Index]);
+				IgnoreCollisionsList.Remove(Idx);
+
+				if (FGeometryParticleHandle* Particle = GetParticleHandle(Idx, Solver))
+				{
+					if (FPBDRigidParticleHandle* Rigid = Particle->CastToRigidParticle())
+					{
+						SetIgnoreCollisionFlag(Rigid, false);
+					}
+				}
 			}
 			PendingDeactivations.Empty();
 		}

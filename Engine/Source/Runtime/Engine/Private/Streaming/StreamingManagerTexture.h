@@ -58,8 +58,9 @@ struct FRenderAssetStreamingManager final : public IRenderAssetStreamingManager
 	 * Either bForceMiplevelsToBeResident or ForceMipLevelsToBeResidentTimestamp need to be set on the asset.
 	 *
 	 * @param RenderAsset The asset to register
+	 * @return bool True if the streaming request is successful
 	 */
-	virtual void FastForceFullyResident(UStreamableRenderAsset* RenderAsset) override;
+	virtual bool FastForceFullyResident(UStreamableRenderAsset* RenderAsset) override;
 
 	/**
 	 * Blocks till all pending requests are fulfilled.
@@ -93,11 +94,13 @@ struct FRenderAssetStreamingManager final : public IRenderAssetStreamingManager
 	virtual int64 GetMemoryOverBudget() const override { return MemoryOverBudget; }
 
 	/** Pool size for streaming. */
-	virtual int64 GetPoolSize() const override { return GTexturePoolSize;  }
+	virtual int64 GetPoolSize() const override;
 
 	virtual int64 GetRequiredPoolSize() const override { return DisplayedStats.RequiredPool; }
 
 	virtual int64 GetMaxEverRequired() const override { return MaxEverRequired; }
+
+	virtual float GetCachedMips() const override { return DisplayedStats.CachedMips; }
 
 	virtual void ResetMaxEverRequired() override { MaxEverRequired = 0; }
 
@@ -139,6 +142,9 @@ struct FRenderAssetStreamingManager final : public IRenderAssetStreamingManager
 	/** Removes a texture/mesh from the streaming manager. */
 	virtual void RemoveStreamingRenderAsset( UStreamableRenderAsset* RenderAsset ) override;
 
+	/** Only call on the game thread. */
+	virtual bool IsFullyStreamedIn(UStreamableRenderAsset* RenderAsset) override;
+
 	/** Adds a ULevel to the streaming manager. */
 	virtual void AddLevel( class ULevel* Level ) override;
 
@@ -177,6 +183,14 @@ struct FRenderAssetStreamingManager final : public IRenderAssetStreamingManager
 	void PropagateLightingScenarioChange() override;
 
 	void AddRenderedTextureStats(TMap<FString, FRenderedTextureStats>& InOutRenderedTextureStats) override;
+
+	/**
+	 * Mark the textures/meshes with a timestamp. They're about to lose their location-based heuristic and we don't want them to
+	 * start using LastRenderTime heuristic for a few seconds until they are garbage collected!
+	 *
+	 * @param RemovedRenderAssets	List of removed textures or meshes.
+	 */
+	void SetRenderAssetsRemovedTimestamp(const FRemovedRenderAssetArray& RemovedRenderAssets);
 
 private:
 //BEGIN: Thread-safe functions and data
@@ -241,9 +255,6 @@ private:
 			case EStreamableRenderAssetType::SkeletalMesh:
 				OutArray = NumStreamedMips_SkeletalMesh.GetData();
 				return NumStreamedMips_SkeletalMesh.Num();
-			case EStreamableRenderAssetType::LandscapeMeshMobile:
-				OutArray = NumStreamedMips_LandscapeMeshMobile.GetData();
-				return NumStreamedMips_LandscapeMeshMobile.Num();
 			default:
 				check(false);
 				OutArray = nullptr;
@@ -251,8 +262,11 @@ private:
 			}
 		}
 
-		/** All streaming texture or mesh objects. */
-		TArray<FStreamingRenderAsset> StreamingRenderAssets;
+		/** All streaming texture or mesh objects. 
+		* Use directly only if it's safe to overlap with UpdateStreamingRenderAssets.
+		* For an async safe version, use GetStreamingRenderAssetsAsyncSafe
+		*/
+		TArray<FStreamingRenderAsset> AsyncUnsafeStreamingRenderAssets;
 
 		/** All the textures/meshes referenced in StreamingRenderAssets. Used to handled deleted textures/meshes.  */
 		TSet<const UStreamableRenderAsset*> ReferencedRenderAssets;
@@ -263,16 +277,6 @@ private:
 		/** Index of the StreamingTexture that will be updated next by UpdateStreamingRenderAssets(). */
 		int32 CurrentUpdateStreamingRenderAssetIndex;
 //END: Thread-safe functions and data
-
-	/**
-	 * Mark the textures/meshes with a timestamp. They're about to lose their location-based heuristic and we don't want them to
-	 * start using LastRenderTime heuristic for a few seconds until they are garbage collected!
-	 *
-	 * @param RemovedRenderAssets	List of removed textures or meshes.
-	 */
-	void	SetRenderAssetsRemovedTimestamp(const FRemovedRenderAssetArray& RemovedRenderAssets);
-
-	void	DumpTextureGroupStats( bool bDetailedStats );
 
 	void	SetLastUpdateTime();
 	void	UpdateStats();
@@ -308,17 +312,12 @@ private:
 	 */
 	void TickDeferredMipLevelChangeCallbacks();
 
-	/** Next sync, dump texture group stats. */
-	bool	bTriggerDumpTextureGroupStats;
-
-	/** Whether to the dumped texture group stats should contain extra information. */
-	bool	bDetailedDumpTextureGroupStats;
+	void ProcessPendingLevelManagers();
 
 	/** Cached from the system settings. */
 	int32 NumStreamedMips_Texture[TEXTUREGROUP_MAX];
 	TArray<int32> NumStreamedMips_StaticMesh;
 	TArray<int32> NumStreamedMips_SkeletalMesh;
-	TArray<int32> NumStreamedMips_LandscapeMeshMobile;
 
 	FRenderAssetStreamingSettings Settings;
 
@@ -368,6 +367,22 @@ private:
 	/** Level data */
 	TArray<FLevelRenderAssetManager*> LevelRenderAssetManagers;
 
+	// Used to prevent hazard when LevelRenderAssetManagers array is modified through recursion
+	struct FScopedLevelRenderAssetManagersLock
+	{
+		FRenderAssetStreamingManager* StreamingManager;
+		TArray<FLevelRenderAssetManager*> PendingAddLevelManagers;
+		TArray<FLevelRenderAssetManager*> PendingRemoveLevelManagers;
+
+		FScopedLevelRenderAssetManagersLock(FRenderAssetStreamingManager* InStreamingManager);
+
+		~FScopedLevelRenderAssetManagersLock();
+	};
+
+	friend struct FScopedLevelRenderAssetManagersLock;
+
+	FScopedLevelRenderAssetManagersLock* LevelRenderAssetManagersLock;
+
 	/** Stages [0,N-2] is non-threaded data collection, Stage N-1 is wait-for-AsyncWork-and-finalize. */
 	int32					ProcessingStage;
 
@@ -416,6 +431,10 @@ private:
 
 	// A critical section use around code that could be called in parallel with NotifyPrimitiveUpdated() or NotifyPrimitiveUpdated_Concurrent().
 	FCriticalSection CriticalSection;
+
+	// An event used to prevent FUpdateStreamingRenderAssetsTask from overlapping with related work
+	FGraphEventRef StreamingRenderAssetsSyncEvent;
+	TArray<FStreamingRenderAsset>& GetStreamingRenderAssetsAsyncSafe();
 
 	friend bool TrackRenderAssetEvent( FStreamingRenderAsset* StreamingRenderAsset, UStreamableRenderAsset* RenderAsset, bool bForceMipLevelsToBeResident, const FRenderAssetStreamingManager* Manager);
 };

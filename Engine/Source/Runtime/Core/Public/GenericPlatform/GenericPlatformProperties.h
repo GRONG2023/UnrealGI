@@ -22,7 +22,7 @@ struct FGenericPlatformProperties
 	 */
 	static FORCEINLINE const char* GetPhysicsFormat()
 	{
-		return "PhysXGeneric";
+		return "Chaos";
 	}
 
 	/**
@@ -179,16 +179,6 @@ struct FGenericPlatformProperties
 	}
 
 	/**
-	 * Gets whether this platform supports tessellation.
-	 *
-	 * @return true if tessellation is supported, false otherwise.
-	 */
-	static FORCEINLINE bool SupportsTessellation()
-	{
-		return false;
-	}
-
-	/**
 	 * Gets whether this platform supports windowed mode rendering.
 	 *
 	 * @return true if windowed mode is supported.
@@ -266,6 +256,21 @@ struct FGenericPlatformProperties
 		return false; // Currently VT is opt-in
 	}
 
+	static FORCEINLINE bool SupportsRayTracing()
+	{
+		return false;
+	}
+
+	static FORCEINLINE bool SupportsLumenGI()
+	{
+		return true;
+	}
+
+	static FORCEINLINE bool SupportsHardwareLZDecompression()
+	{
+		return false;
+	}
+
 	/**
 	 * Gets whether user settings should override the resolution or not
 	 */
@@ -297,4 +302,11 @@ struct FGenericPlatformProperties
 	{
 		return nullptr;
 	}
+	 
+	// Whether the platform requires an original release version to make a patch
+	static FORCEINLINE bool RequiresOriginalReleaseVersionForPatch()
+	{
+		return false;
+	}
+
 };

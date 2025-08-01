@@ -3,7 +3,12 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "HAL/Platform.h"
+#include "Misc/AssertionMacros.h"
 #include "Stats/Stats.h"
+#include "UObject/Class.h"
+#include "UObject/ObjectMacros.h"
+
 #include "MovieSceneBlendType.generated.h"
 
 /** Movie scene blend type enumeration */
@@ -170,7 +175,7 @@ private:
 
 	MOVIESCENE_API void IterateToNext();
 
-	FORCEINLINE static int8 MaxValidOffset() { return StaticEnum<EMovieSceneBlendType>()->NumEnums() - 2; }
+	FORCEINLINE static int8 MaxValidOffset() { return (int8)(StaticEnum<EMovieSceneBlendType>()->NumEnums() - 2); }
 
 	FMovieSceneBlendTypeField Field;
 	int8 Offset;

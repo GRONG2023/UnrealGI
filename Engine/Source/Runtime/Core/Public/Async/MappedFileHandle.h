@@ -13,7 +13,7 @@ DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(TEXT("Num Mapped File Regions"), STAT_Mapp
 
 // Note on threading. Like the rest of the filesystem platform abstraction, these methods are threadsafe, but it is expected you are not concurrently _using_ these data structures. 
 
-class CORE_API IMappedFileRegion
+class IMappedFileRegion
 {
 	const uint8* MappedPtr;
 	size_t MappedSize;
@@ -81,7 +81,7 @@ public:
 	IMappedFileRegion& operator=(const IMappedFileRegion&) = delete;
 };
 
-class CORE_API IMappedFileHandle
+class IMappedFileHandle
 {
 	size_t MappedFileSize;
 
@@ -100,7 +100,7 @@ public:
 	/**
 	* Return the size of the mapped file.
 	**/
-	FORCEINLINE int64 GetFileSize()
+	FORCEINLINE int64 GetFileSize() const
 	{
 		return MappedFileSize;
 	}
@@ -110,7 +110,7 @@ public:
 	* @param Offset				Offset into the file to start mapping.
 	* @param BytesToMap			Number of bytes to map. Clamped to the size of the file.
 	* @param bPreloadHint		If true, preload the data. This is only a hint and might be ignored, see IMappedFileRegion::PreloadHint
-	* @return the mapped region interface. This method cannot fail.
+	* @return the mapped region interface. Returns nullptr on failure.
 	**/
 	virtual IMappedFileRegion* MapRegion(int64 Offset = 0, int64 BytesToMap = MAX_int64, bool bPreloadHint = false) = 0;
 

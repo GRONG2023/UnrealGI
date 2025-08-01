@@ -26,26 +26,24 @@ class UCanvas;
 class FVisualLoggerExtension : public FVisualLogExtensionInterface
 {
 public:
-	FVisualLoggerExtension();
-
 	virtual void ResetData(IVisualLoggerEditorInterface* EdInterface) override;
 	virtual void DrawData(IVisualLoggerEditorInterface* EdInterface, UCanvas* Canvas) override;
 	virtual void OnItemsSelectionChanged(IVisualLoggerEditorInterface* EdInterface) override;
 	virtual void OnLogLineSelectionChanged(IVisualLoggerEditorInterface* EdInterface, TSharedPtr<struct FLogEntryItem> SelectedItem, int64 UserData) override;
 
 private:
-	void DrawData(UWorld* InWorld, class UEQSRenderingComponent* EQSRenderingComponent, UCanvas* Canvas, AActor* HelperActor, const FName& TagName, const FVisualLogDataBlock& DataBlock, float Timestamp);
+	void DrawData(UWorld* InWorld, class UEQSRenderingComponent* EQSRenderingComponent, UCanvas* Canvas, AActor* HelperActor, const FName& TagName, const FVisualLogDataBlock& DataBlock, double Timestamp);
 	void DisableEQSRendering(AActor* HelperActor);
 
 protected:
-	uint32 SelectedEQSId;
-	float CurrentTimestamp;
+	int32 SelectedEQSId = INDEX_NONE;
+	float CurrentTimestamp = FLT_MIN;
 	TArray<TWeakObjectPtr<class UEQSRenderingComponent> >	EQSRenderingComponents;
 };
 #endif //ENABLE_VISUAL_LOG
 
-UCLASS(Abstract)
-class AIMODULE_API UVisualLoggerExtension : public UObject
+UCLASS(Abstract, MinimalAPI)
+class UVisualLoggerExtension : public UObject
 {
 	GENERATED_BODY()
 };

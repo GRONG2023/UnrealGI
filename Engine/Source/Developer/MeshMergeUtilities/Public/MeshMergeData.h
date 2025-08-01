@@ -6,6 +6,7 @@
 #include "Engine/StaticMesh.h"
 #include "MeshDescription.h"
 #include "PhysicsEngine/AggregateGeom.h"
+#include "StaticMeshResources.h"
 
 #include "LightMap.h"
 #include "ShadowMap.h"
@@ -41,6 +42,11 @@ struct FMeshMergeData
 	/** If set, the raw mesh should be used as clipping geometry */
 	bool bIsClippingMesh;
 	FString DebugJobName;
+};
+
+struct FInstancedMeshMergeData : public FMeshMergeData
+{
+	TArray<FTransform> InstanceTransforms;
 };
 
 /** Structure for encapsulating per LOD mesh merging data */

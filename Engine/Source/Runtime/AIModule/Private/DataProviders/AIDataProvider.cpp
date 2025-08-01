@@ -3,6 +3,8 @@
 #include "DataProviders/AIDataProvider.h"
 #include "UObject/CoreObjectVersion.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AIDataProvider)
+
 //////////////////////////////////////////////////////////////////////////
 // FAIDataProviderValue
 
@@ -185,10 +187,11 @@ FString UAIDataProvider::ToString(FName PropName) const
 	const bool bFound = ProviderName.FindChar(TEXT('_'), SplitIdx);
 	if (bFound)
 	{
-		ProviderName.MidInline(SplitIdx + 1, MAX_int32, false);
+		ProviderName.MidInline(SplitIdx + 1, MAX_int32, EAllowShrinking::No);
 	}
 
 	ProviderName += TEXT('.');
 	ProviderName += PropName.ToString();
 	return ProviderName;
 }
+

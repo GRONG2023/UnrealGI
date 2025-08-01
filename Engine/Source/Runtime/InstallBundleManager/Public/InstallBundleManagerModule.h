@@ -1,10 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
+#include "Containers/UnrealString.h"
+#include "CoreGlobals.h"
+#include "HAL/Platform.h"
+#include "InstallBundleManagerInterface.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/ConfigCacheIni.h"
 #include "Modules/ModuleInterface.h"
 #include "Modules/ModuleManager.h"
-#include "Misc/ConfigCacheIni.h"
-#include "InstallBundleManagerInterface.h"
+#include "Templates/SharedPointer.h"
+
+class IInstallBundleManager;
 
 /**
  * Currently empty implementation for InstallBundleModule until things are moved in here.
@@ -31,6 +38,8 @@ public:
 	virtual void PreUnloadCallback() override
 	{
 		InstallBundleManager = nullptr;
+		// make sure the bundle manager was cleaned up
+		check(LastInstallBundleManager.IsValid() == false);
 	}
 
 	TSharedPtr<IInstallBundleManager> GetInstallBundleManager()
@@ -65,6 +74,8 @@ public:
 			check(LastInstallBundleManager == nullptr);
 			InstallBundleManager = MakeShared<InstallBundleManagerModuleImpl>();
 			LastInstallBundleManager = InstallBundleManager;
+
+			InstallBundleManager->Initialize();
 		}
 	}
 };

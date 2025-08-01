@@ -25,19 +25,25 @@ public class AndroidDeviceDetection : ModuleRules
 			}
 		);
 
-		PublicIncludePaths.AddRange(
-			new string[]
-			{
-				"Runtime/Core/Public/Android"
-			}
-		);
-
         if (Target.bCompileAgainstEngine)
 		{
 			PrivateDependencyModuleNames.Add("Engine");
 		}
+		
+		if (Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.AddRange(
+				new string[]
+				{
+					"PIEPreviewDeviceProfileSelector",
+					"DesktopPlatform",
+					"SlateCore",
+					"Slate",
+				}
+			);
+		}
 
-        DynamicallyLoadedModuleNames.AddRange(
+		DynamicallyLoadedModuleNames.AddRange(
             new string[]
             {
                 "TcpMessaging"

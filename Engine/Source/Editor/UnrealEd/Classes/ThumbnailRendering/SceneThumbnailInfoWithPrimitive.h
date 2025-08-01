@@ -23,13 +23,16 @@ class USceneThumbnailInfoWithPrimitive : public USceneThumbnailInfo
 	/** The type of primitive used in this thumbnail */
 	UPROPERTY(EditAnywhere, Category=Thumbnail)
 	TEnumAsByte<EThumbnailPrimType> PrimitiveType;
+	
+	TOptional<TEnumAsByte<EThumbnailPrimType>> DefaultPrimitiveType;
 
 	/** The custom mesh used when the primitive type is TPT_None */
-	UPROPERTY(EditAnywhere, Category=Thumbnail, meta = (AllowedClasses = "StaticMesh,SkeletalMesh", ExactClass = "true"))
+	UPROPERTY(EditAnywhere, Category=Thumbnail, meta = (AllowedClasses = "/Script/Engine.StaticMesh,/Script/Engine.SkeletalMesh", ExactClass = "true"))
 	FSoftObjectPath PreviewMesh;
 
 	UPROPERTY()
 	bool bUserModifiedShape;
+	
 public:
 	virtual void Serialize(FArchive& Ar) override;
 	virtual void PostLoad() override;

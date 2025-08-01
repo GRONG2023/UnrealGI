@@ -6,7 +6,7 @@
 
 #include "Templates/RefCounting.h"
 #include "Templates/SharedPointer.h"
-
+#include "Misc/QueuedThreadPoolWrapper.h"
 #include "RequiredProgramMainCPPInclude.h"
 #include <locale.h>
 #include <iterator>
@@ -108,6 +108,7 @@ public:
 	{
 		UE_LOG(LogBenchmarkTool, Log, TEXT("Running '%s'..."), *this->Name);
 
+		TRACE_CPUPROFILER_EVENT_SCOPE_TEXT(*this->Name);
 		const uint64 StartTime = FPlatformTime::Cycles64();
 
 		Run(State);
@@ -201,11 +202,19 @@ public:
 
 	void RunBenchmarks()
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(RunBenchmarks);
 		TArray<BenchmarkReporter::Run> RunResults;
 		RunResults.Reserve(Benchmarks.Num());
 
+		FString BenchName;
+		FParse::Value(FCommandLine::Get(), TEXT("-Benchmark="), BenchName);
 		for (auto& Bench : Benchmarks)
 		{
+			if (BenchName.Len() > 0 && Bench->Name.Find(BenchName) == INDEX_NONE)
+			{
+				continue;
+			}
+
 			BenchmarkState State;
 			State.SetIterationCount(Bench->IterationCount);
 
@@ -220,7 +229,7 @@ public:
 
 		for (BenchmarkReporter::Run& Line : RunResults)
 		{
-			UE_LOG(LogBenchmarkTool, Log, 
+			UE_LOG(LogBenchmarkTool, Display, 
 				TEXT("%-30s %10ld iterations took %5ld ms (%f us/iteration)"),
 				*Line.Name,
 				Line.IterationCount,
@@ -602,12 +611,142 @@ void BM_TRefCountAssign(BenchmarkState& State)
 	}
 }
 
+void BM_Scheduling_TaskGraphOverhead(BenchmarkState& State)
+{
+	FEvent* LastEvent = FPlatformProcess::GetSynchEventFromPool(true);
+	FEvent* WaitEvent = FPlatformProcess::GetSynchEventFromPool(true);
+
+	TAtomic<uint32> Count(0);
+	for (auto _ : State)
+	{
+		Count++;
+		FFunctionGraphTask::CreateAndDispatchWhenReady(
+			[WaitEvent, LastEvent, &Count](ENamedThreads::Type CurrentThread, const FGraphEventRef&CompletionGraphEvent)
+			{
+				TRACE_CPUPROFILER_EVENT_SCOPE(Task);
+
+				// Stall the tasks so we can benchmark the queuing code in AddQueuedWork.
+				// Otherwise, most threads will be able to execute as fast as the queuing
+				// happens and the dispatching will occur directly on each thread, 
+				// exercising a different code path.
+				WaitEvent->Wait();
+
+				if (--Count == 0)
+				{
+					LastEvent->Trigger();
+				}
+			},
+			QUICK_USE_CYCLE_STAT(BM_Scheduling_TaskGraphOverhead, STATGROUP_ThreadPoolAsyncTasks),
+			nullptr,
+			ENamedThreads::AnyThread
+			);
+	}
+
+	// Unstall the task processing so we can properly exercise the code
+	// path where all the threads need to pick another job to process.
+	WaitEvent->Trigger();
+
+	// Wait until the last task has executed
+	LastEvent->Wait();
+	
+	FPlatformProcess::ReturnSynchEventToPool(WaitEvent);
+	FPlatformProcess::ReturnSynchEventToPool(LastEvent);
+}
+
+void BM_Scheduling_ThreadPoolOverhead_Impl(BenchmarkState& State, FQueuedThreadPool* ThreadPool)
+{
+	FEvent* LastEvent = FPlatformProcess::GetSynchEventFromPool(true);
+	FEvent* WaitEvent = FPlatformProcess::GetSynchEventFromPool(true);
+
+	TAtomic<uint32> Count(0);
+	for (auto _ : State)
+	{
+		Count++;
+		AsyncPool(
+			*ThreadPool,
+			[WaitEvent, LastEvent, &Count]()
+			{
+				TRACE_CPUPROFILER_EVENT_SCOPE(Task);
+
+				// Stall the tasks so we can benchmark the queuing code in AddQueuedWork.
+				// Otherwise, most threads will be able to execute as fast as the queuing
+				// happens and the dispatching will occur directly on each thread, 
+				// exercising a different code path.
+				WaitEvent->Wait();
+
+				if (--Count == 0)
+				{
+					LastEvent->Trigger();
+				}
+			}
+		);
+	}
+
+	// Unstall the task processing so we can properly exercise the code
+	// path where all the threads need to pick another job to process.
+	WaitEvent->Trigger();
+
+	// Wait until the last task has executed
+	LastEvent->Wait();
+	
+	FPlatformProcess::ReturnSynchEventToPool(WaitEvent);
+	FPlatformProcess::ReturnSynchEventToPool(LastEvent);
+}
+
+// This test is probably only meaningful when comparing relative speed
+// of threadpool implementations and to profile the current one.
+void BM_Scheduling_ThreadPoolOverhead(BenchmarkState& State)
+{
+	TUniquePtr<FQueuedThreadPool> ThreadPool(FQueuedThreadPool::Allocate());
+	check(ThreadPool && ThreadPool->Create(FPlatformMisc::NumberOfCores()));
+
+	BM_Scheduling_ThreadPoolOverhead_Impl(State, ThreadPool.Get());
+}
+
+// This test is probably only meaningful when comparing relative speed
+// of threadpool implementations and to profile the current one.
+void BM_Scheduling_ThreadPoolWrapperOverhead(BenchmarkState& State)
+{
+	TUniquePtr<FQueuedThreadPool> ThreadPool(FQueuedThreadPool::Allocate());
+	check(ThreadPool && ThreadPool->Create(FPlatformMisc::NumberOfCores()));
+
+	FQueuedThreadPoolWrapper ThreadPoolWrapper(ThreadPool.Get());
+
+	BM_Scheduling_ThreadPoolOverhead_Impl(State, &ThreadPoolWrapper);
+}
+
+// This test is probably only meaningful when comparing relative speed
+// of threadpool implementations and to profile the current one.
+void BM_Scheduling_ThreadPoolTaskGraphWrapperOverhead(BenchmarkState& State)
+{
+	FQueuedThreadPoolTaskGraphWrapper ThreadPoolWrapper(ENamedThreads::AnyThread);
+
+	BM_Scheduling_ThreadPoolOverhead_Impl(State, &ThreadPoolWrapper);
+}
+
+// This test is probably only meaningful when comparing relative speed
+// of threadpool implementations and to profile the current one.
+void BM_Scheduling_ThreadPoolLowLevelWrapperOverhead(BenchmarkState& State)
+{
+	TUniquePtr<FQueuedThreadPool> ThreadPool = MakeUnique<FQueuedLowLevelThreadPool>();
+	ThreadPool->Create(0);
+	BM_Scheduling_ThreadPoolOverhead_Impl(State, ThreadPool.Get());
+}
+
 UE_BENCHMARK(BM_TSharedPtr)->Iterations(100000000);
 UE_BENCHMARK(BM_TRefCountPtr)->Iterations(100000000);
 UE_BENCHMARK(BM_TSharedPtr_NoTS)->Iterations(100000000);
 UE_BENCHMARK(BM_TSharedPtrAssign)->Iterations(100000000);
 UE_BENCHMARK(BM_TRefCountAssign)->Iterations(100000000);
 UE_BENCHMARK(BM_TSharedPtrAssign_NoTS)->Iterations(100000000);
+
+// You can compare all scheduling tasks by using this command line -Benchmark=BM_Scheduling
+// You can also test scalability of the different schedulers by adding -corelimit= to the command line
+UE_BENCHMARK(BM_Scheduling_ThreadPoolOverhead)->Iterations(100000);
+UE_BENCHMARK(BM_Scheduling_ThreadPoolWrapperOverhead)->Iterations(100000);
+UE_BENCHMARK(BM_Scheduling_TaskGraphOverhead)->Iterations(100000);
+UE_BENCHMARK(BM_Scheduling_ThreadPoolTaskGraphWrapperOverhead)->Iterations(100000);
+UE_BENCHMARK(BM_Scheduling_ThreadPoolLowLevelWrapperOverhead)->Iterations(100000);
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -616,5 +755,7 @@ INT32_MAIN_INT32_ARGC_TCHAR_ARGV()
 	GEngineLoop.PreInit(ArgC, ArgV);
 	BenchmarkRegistry::Get().RunBenchmarks();
 
+	FEngineLoop::AppPreExit();
+	FEngineLoop::AppExit();
 	return 0;
 }

@@ -17,11 +17,12 @@
 #include "DetailLayoutBuilderImpl.h"
 #include "IDetailCustomNodeBuilder.h"
 #include "DetailCategoryBuilder.h"
+#include "PropertyCustomizationHelpers.h"
 
-class FDetailGroup;
-class FDetailPropertyRow;
 class IDetailGroup;
+class FDetailGroup;
 class IDetailPropertyRow;
+class FDetailPropertyRow;
 
 /**
  * Defines a customization for a specific detail
@@ -30,13 +31,13 @@ struct FDetailLayoutCustomization
 {
 	FDetailLayoutCustomization();
 	/** The property node for the property detail */
-	TSharedPtr<class FDetailPropertyRow> PropertyRow;
+	TSharedPtr<FDetailPropertyRow> PropertyRow;
 	/** A group of customizations */
-	TSharedPtr<class FDetailGroup> DetailGroup;
+	TSharedPtr<FDetailGroup> DetailGroup;
 	/** Custom Widget for displaying the detail */
-	TSharedPtr<class FDetailWidgetRow> WidgetDecl;
+	TSharedPtr<FDetailWidgetRow> WidgetDecl;
 	/** Custom builder for more complicated widgets */
-	TSharedPtr<class FDetailCustomBuilderRow> CustomBuilderRow;
+	TSharedPtr<FDetailCustomBuilderRow> CustomBuilderRow;
 	/** @return true if this customization has a property node */
 	bool HasPropertyNode() const { return GetPropertyNode().IsValid(); }
 	/** @return true if this customization has a custom widget */
@@ -55,9 +56,19 @@ struct FDetailLayoutCustomization
 	TSharedPtr<FPropertyNode> GetPropertyNode() const;
 	/** @return The row to display from this customization */
 	FDetailWidgetRow GetWidgetRow() const;
+	/** @return properties being customized */
+	TArrayView<TSharedPtr<IPropertyHandle>> GetPropertyHandles() const;
+	/** Whether or not this customization is considered an advanced property. */
+	bool bAdvanced { false };
+	/** Whether or not this customization is custom or a default one. */
+	bool bCustom { false };
+	/** @return The current layout row that this customization represents. May be null if IsValidCustomization() is false. */
+	const IDetailLayoutRow* GetDetailLayoutRow() const;
+	/** @return The name of the row depending on which type of customization this is, then the name of the property node, then NAME_None. */
+	FName GetName() const;
+	/** @return The custom reset to default if one is available. */
+	TOptional<FResetToDefaultOverride> GetCustomResetToDefault() const;
 };
-
-typedef TArray<FDetailLayoutCustomization> FCustomizationList;
 
 class FDetailLayout
 {
@@ -66,31 +77,26 @@ public:
 		: InstanceName(InInstanceName)
 	{}
 
-	void AddCustomLayout(const FDetailLayoutCustomization& Layout, bool bAdvanced);
-	void AddDefaultLayout(const FDetailLayoutCustomization& Layout, bool bAdvanced);
+	void AddLayout(const FDetailLayoutCustomization& Layout);
 
-	const FCustomizationList& GetCustomSimpleLayouts() const { return CustomSimpleLayouts; }
-	const FCustomizationList& GetCustomAdvancedLayouts() const { return CustomAdvancedLayouts; }
-	const FCustomizationList& GetDefaultSimpleLayouts() const { return DefaultSimpleLayouts; }
-	const FCustomizationList& GetDefaultAdvancedLayouts() const { return DefaultAdvancedLayouts; }
+	const TArray<FDetailLayoutCustomization>& GetSimpleLayouts() const { return SimpleLayouts; }
+	const TArray<FDetailLayoutCustomization>& GetAdvancedLayouts() const { return AdvancedLayouts; }
 
 	FDetailLayoutCustomization* GetDefaultLayout(const TSharedRef<FPropertyNode>& PropertyNode);
 
-	bool HasAdvancedLayouts() const { return CustomAdvancedLayouts.Num() > 0 || DefaultAdvancedLayouts.Num() > 0; }
+	bool HasAdvancedLayouts() const { return AdvancedLayouts.Num() > 0; }
 
+	/**
+	 * Get the instance name - this is usually the UObject's name when in a multi-selection.
+	 * Used to display a group beneath the category if multiple objects share some of the same-named properties.
+	 */
 	FName GetInstanceName() const { return InstanceName; }
 
 private:
-	void AddLayoutInternal(const FDetailLayoutCustomization& Layout, FCustomizationList& ListToUse);
-private:
-	/** Customized layouts that appear in the simple (visible by default) area of a category */
-	FCustomizationList CustomSimpleLayouts;
-	/** Customized layouts that appear in the advanced (hidden by default) details area of a category */
-	FCustomizationList CustomAdvancedLayouts;
-	/** Default layouts that appear in the simple (visible by default) details area of a category */
-	FCustomizationList DefaultSimpleLayouts;
-	/** Default layouts that appear in the advanced (visible by default) details area of a category */
-	FCustomizationList DefaultAdvancedLayouts;
+	/** Layouts that appear in the simple (visible by default) area of a category */
+	TArray<FDetailLayoutCustomization> SimpleLayouts;
+	/** Layouts that appear in the advanced (hidden by default) details area of a category */
+	TArray<FDetailLayoutCustomization> AdvancedLayouts;
 	/** The sort order in which this layout is displayed (lower numbers are displayed first) */
 	FName InstanceName;
 };
@@ -121,16 +127,18 @@ public:
 		return Layouts[Index];
 	}
 
-	/**
-	 * @return The number of layouts
-	 */
-	int32 Num() const { return Layouts.Num(); }
+	using RangedForIteratorType = TArray<FDetailLayout>::RangedForIteratorType;
+	using RangedForConstIteratorType = TArray<FDetailLayout>::RangedForConstIteratorType;
 
-	/**
-	 * @return Gets a layout at a specific instance
-	 */
-	const FDetailLayout& operator[](int32 Index) const { return Layouts[Index]; }
+	FORCEINLINE RangedForIteratorType      begin()       { return Layouts.begin(); }
+	FORCEINLINE RangedForConstIteratorType begin() const { return Layouts.begin(); }
+	FORCEINLINE RangedForIteratorType      end()         { return Layouts.end(); }
+	FORCEINLINE RangedForConstIteratorType end()   const { return Layouts.end(); }
+
 	FDetailLayout& operator[](int32 Index) { return Layouts[Index]; }
+	const FDetailLayout& operator[](int32 Index) const { return Layouts[Index]; }
+
+	int32 Num() const { return Layouts.Num(); }
 
 	/**
 	 * @return Whether or not we need to display a group border around a list of details.
@@ -159,42 +167,57 @@ public:
 	virtual IDetailCategoryBuilder& InitiallyCollapsed(bool bShouldBeInitiallyCollapsed) override;
 	virtual IDetailCategoryBuilder& OnExpansionChanged(FOnBooleanValueChanged InOnExpansionChanged) override;
 	virtual IDetailCategoryBuilder& RestoreExpansionState(bool bRestore) override;
-	virtual IDetailCategoryBuilder& HeaderContent(TSharedRef<SWidget> InHeaderContent) override;
+	virtual IDetailCategoryBuilder& HeaderContent(TSharedRef<SWidget> InHeaderContent, bool bWholeRowContent = false) override;
 	virtual IDetailPropertyRow& AddProperty(FName PropertyPath, UClass* ClassOuter = nullptr, FName InstanceName = NAME_None, EPropertyLocation::Type Location = EPropertyLocation::Default) override;
 	virtual IDetailPropertyRow& AddProperty(TSharedPtr<IPropertyHandle> PropertyHandle, EPropertyLocation::Type Location = EPropertyLocation::Default) override;
 	virtual IDetailPropertyRow* AddExternalObjects(const TArray<UObject*>& Objects, EPropertyLocation::Type Location = EPropertyLocation::Default, const FAddPropertyParams& Params = FAddPropertyParams()) override;
 	virtual IDetailPropertyRow* AddExternalObjectProperty(const TArray<UObject*>& Objects, FName PropertyName, EPropertyLocation::Type Location = EPropertyLocation::Default, const FAddPropertyParams& Params = FAddPropertyParams()) override;
 	virtual IDetailPropertyRow* AddExternalStructure(TSharedPtr<FStructOnScope> StructData, EPropertyLocation::Type Location = EPropertyLocation::Default) override;
 	virtual IDetailPropertyRow* AddExternalStructureProperty(TSharedPtr<FStructOnScope> StructData, FName PropertyName, EPropertyLocation::Type Location = EPropertyLocation::Default, const FAddPropertyParams& Params = FAddPropertyParams()) override;
-	virtual TArray<TSharedPtr<IPropertyHandle>> AddAllExternalStructureProperties(TSharedRef<FStructOnScope> StructData, EPropertyLocation::Type Location = EPropertyLocation::Default) override;
+	virtual IDetailPropertyRow* AddExternalStructureProperty(TSharedPtr<IStructureDataProvider> StructData, FName PropertyName, EPropertyLocation::Type Location = EPropertyLocation::Default, const FAddPropertyParams& Params = FAddPropertyParams()) override;
+	virtual TArray<TSharedPtr<IPropertyHandle>> AddAllExternalStructureProperties(TSharedRef<FStructOnScope> StructData, EPropertyLocation::Type Location = EPropertyLocation::Default, TArray<IDetailPropertyRow*>* OutPropertiesRow = nullptr) override;
+	virtual TArray<TSharedPtr<IPropertyHandle>> AddAllExternalStructureProperties(TSharedPtr<IStructureDataProvider> StructProvider, EPropertyLocation::Type Location, TArray<IDetailPropertyRow*>* OutPropertiesRow = nullptr) override;
+	virtual bool IsParentLayoutValid() const override { return DetailLayoutBuilder.IsValid(); }
 	virtual IDetailLayoutBuilder& GetParentLayout() const override { return *DetailLayoutBuilder.Pin(); }
 	virtual FDetailWidgetRow& AddCustomRow(const FText& FilterString, bool bForAdvanced = false) override;
 	virtual void AddCustomBuilder(TSharedRef<IDetailCustomNodeBuilder> InCustomBuilder, bool bForAdvanced = false) override;
 	virtual IDetailGroup& AddGroup(FName GroupName, const FText& LocalizedDisplayName, bool bForAdvanced = false, bool bStartExpanded = false) override;
 	virtual void GetDefaultProperties(TArray<TSharedRef<IPropertyHandle> >& OutAllProperties, bool bSimpleProperties = true, bool bAdvancedProperties = true) override;
 	virtual const FText& GetDisplayName() const override { return DisplayName; }
+	virtual void SetDisplayName(const FText& InDisplayName) override;
 	virtual void SetCategoryVisibility(bool bIsVisible) override;
 	virtual void SetShowAdvanced(bool bShowAdvanced) override;
 	virtual int32 GetSortOrder() const override;
 	virtual void SetSortOrder(int32 InSortOrder) override;
+	virtual void AddPropertyDisableInstancedReference(TSharedPtr<IPropertyHandle> PropertyHandle) override;
+	
+	/** Delegate handling pasting an optionally tagged text snippet */
+	virtual TSharedPtr<FOnPasteFromText> OnPasteFromText() const override { return PasteFromTextDelegate; }
 
 	/** FDetailTreeNode interface */
-	virtual IDetailsViewPrivate* GetDetailsView() const override { return DetailLayoutBuilder.Pin()->GetDetailsView(); }
-	virtual TSharedRef< ITableRow > GenerateWidgetForTableView(const TSharedRef<STableViewBase>& OwnerTable, const FDetailColumnSizeData& ColumnSizeData, bool bAllowFavoriteSystem) override;
+	virtual IDetailsView* GetNodeDetailsView() const override { return GetDetailsView(); }
+	virtual IDetailsViewPrivate* GetDetailsView() const override;
+	virtual TSharedRef< ITableRow > GenerateWidgetForTableView(const TSharedRef<STableViewBase>& OwnerTable, bool bAllowFavoriteSystem) override;
 	virtual bool GenerateStandaloneWidget(FDetailWidgetRow& OutRow) const override;
 
 	/** IDetailTreeNode interface */
 	virtual EDetailNodeType GetNodeType() const override { return EDetailNodeType::Category; }
 	virtual TSharedPtr<IPropertyHandle> CreatePropertyHandle() const override { return nullptr; }
 	virtual void GetFilterStrings(TArray<FString>& OutFilterStrings) const override;
+	virtual bool GetInitiallyCollapsed() const override;
 
-	virtual void GetChildren(FDetailNodeList& OutChildren) override;
+	virtual void GetChildren(FDetailNodeList& OutChildren, const bool& bInIgnoreVisibility = false) override;
 	virtual bool ShouldBeExpanded() const override;
 	virtual ENodeVisibility GetVisibility() const override;
 	virtual void FilterNode(const FDetailFilter& DetailFilter) override;
-	virtual void Tick(float DeltaTime) override {}
+	virtual void Tick(float DeltaTime) override;
 	virtual bool ShouldShowOnlyChildren() const override { return bShowOnlyChildren; }
 	virtual FName GetNodeName() const override { return GetCategoryName(); }
+
+	/**
+	 * Returns the name of the object which populates this Category
+	 */
+	FName GetObjectName() const;
 
 	/**
 	 * Gets all generated children with options for ignoring current child visibility or advanced dropdowns
@@ -204,11 +227,6 @@ public:
 	FCustomPropertyTypeLayoutMap GetCustomPropertyTypeLayoutMap() const;
 
 	/**
-	 * @return true if the parent layout is valid or has been destroyed by a refresh.
-	 */
-	bool IsParentLayoutValid() const { return DetailLayoutBuilder.IsValid(); }
-
-	/**
 	 * @return The name of the category
 	 */
 	FName GetCategoryName() const { return CategoryName; }
@@ -216,7 +234,7 @@ public:
 	/**
 	 * @return The parent detail layout builder for this category
 	 */
-	FDetailLayoutBuilderImpl& GetParentLayoutImpl() const { return *DetailLayoutBuilder.Pin(); }
+	TSharedPtr<FDetailLayoutBuilderImpl> GetParentLayoutImpl() const { return DetailLayoutBuilder.Pin(); }
 
 	/**
 	 * Generates the children for this category
@@ -289,8 +307,10 @@ public:
 	/** @return true if this category only contains advanced properties */
 	bool ContainsOnlyAdvanced() const;
 
-	/** @return true if this category only contains advanced properties */
-	void GetCategoryInformation(int32 &SimpleChildNum, int32 &AdvanceChildNum) const;
+	/**
+	 * Get the number of customizations in this category.
+	 */
+	int32 GetNumCustomizations() const;
 
 	/**
 	 * Called when the advanced dropdown button is clicked
@@ -302,39 +322,46 @@ public:
 	 */
 	void SetCategoryAsSpecialFavorite() { bFavoriteCategory = true; bForceAdvanced = true; }
 
+	/** Is this the Favorites category? */
+	bool IsFavoriteCategory() const { return bFavoriteCategory; }
+
+	/** Is this category initially collapsed? */
+	bool GetShouldBeInitiallyCollapsed() const { return bShouldBeInitiallyCollapsed; }
+
 	FDetailLayoutCustomization* GetDefaultCustomization(TSharedRef<FPropertyNode> PropertyNode);
+	
+	/**
+    * If true, this Category should have no UProperty data associated with it, and will be shown as an empty stub
+    * with no expansion arrow
+    */
+	virtual bool IsEmpty() const override;
+	
+	/**
+	 * Sets whether this Category is "Empty" ~ that is, should have no UProperty data associated with it, and will be shown
+	 * as an empty stub with no expansion arrow
+	 */
+	virtual void SetIsEmpty(bool bInIsEmpty) override;
+
 private:
 	virtual void OnItemExpansionChanged(bool bIsExpanded, bool bShouldSaveState) override;
 
 	/**
-	 * Adds a new filter widget to this category (for checking if anything is visible in the category when filtered)
-	 */
-	void AddFilterWidget(TSharedRef<SWidget> InWidget);
-
-	/**
-	 * Generates children for each layout
+	 * Generates children for all layouts.
 	 */
 	void GenerateChildrenForLayouts();
+
+	/**
+	 * Generate children for the single given layout and append them to OutChildren.
+	 */
+	void GenerateChildrenForSingleLayout(const FDetailLayout& Layout, const TArray<FDetailLayoutCustomization>& Customizations, FDetailNodeList& OutChildren);
 
 	/**
 	 * Generates nodes from a list of customization in a single layout
 	 *
 	 * @param InCustomizationList	The list of customizations to generate nodes from
 	 * @param OutNodeList			The generated nodes
-	 * @param bDefaultLayouts		True if we are generating a default layout
 	 */
-	void GenerateNodesFromCustomizations(const FCustomizationList& InCustomizationList, bool bDefaultLayouts, FDetailNodeList& OutNodeList, bool &bOutHasMultipleColumns);
-
-	/**
-	 * Generates nodes from a list of customization in a single layout
-	 *
-	 * @param RequiredGroupName 	If valid the children will be surrounded by a group
-	 * @param bDefaultLayout	True if we are generating a default layout
-	 * @param bNeedsGroup		True if the children need to be grouped
-	 * @param LayoutList		The list of customizations to generate nodes from
-		 * @param OutChildren		The generated nodes
-	 */
-	bool GenerateChildrenForSingleLayout(const FName RequiredGroupName, bool bDefaultLayout, bool bNeedsGroup, const FCustomizationList& LayoutList, FDetailNodeList& OutChildren, bool& bOutHasMultipleColumns);
+	void GenerateNodesFromCustomizations(const TArray<FDetailLayoutCustomization>& InCustomizationList, FDetailNodeList& OutNodeList);
 
 	/**
 	 * @return Whether or not a customization should appear in the advanced section of the category by default
@@ -347,7 +374,7 @@ private:
 	 * @param LayoutInfo	The custom layout information
 	 * @param bForAdvanced	Whether or not the custom layout should appear in the advanced section of the category
 	 */
-	void AddCustomLayout(const FDetailLayoutCustomization& LayoutInfo, bool bForAdvanced);
+	void AddCustomLayout(const FDetailLayoutCustomization& LayoutInfo);
 
 	/**
 	 * Adds a default layout to this category
@@ -355,7 +382,7 @@ private:
 	 * @param DefaultLayoutInfo		The layout information
 	 * @param bForAdvanced			Whether or not the layout should appear in the advanced section of the category
 	 */
-	void AddDefaultLayout(const FDetailLayoutCustomization& DefaultLayoutInfo, bool bForAdvanced, FName InstanceName);
+	void AddDefaultLayout(const FDetailLayoutCustomization& DefaultLayoutInfo, FName InstanceName);
 
 	/**
 	 * Returns the layout for a given object instance name
@@ -367,7 +394,7 @@ private:
 	/**
 	 * @return True of we should show the advanced button
 	 */
-	bool ShouldShowAdvanced() const;
+	bool ShouldAdvancedBeExpanded() const;
 
 	/**
 	 * @return true if the advaned dropdown button is enabled
@@ -377,24 +404,32 @@ private:
 	/**
 	 * @return the visibility of the advanced help text drop down (it is visible in a category if there are no simple properties)
 	 */
-	EVisibility GetAdvancedHelpTextVisibility() const;
+	bool ShouldAdvancedBeVisible() const;
 
 	/**
 	 * @return true if the parent that hosts us is enabled
 	 */
 	bool IsParentEnabled() const;
 
+	/**
+	 * Does the work of refreshing the tree (this is triggered from RefreshTree)
+	 *
+	 * @param bRefilterCategory True if the category should be refiltered
+	 */
+	void RefreshTreeInternal(bool bRefilterCategory);
+
+	/** Initialize the name of the Category  */
+	void InitializeObjectName();
+
 private:
 	/** Layouts that appear in this category category */
 	FDetailLayoutMap LayoutMap;
 	/** All Simple child nodes */
-	TArray< TSharedRef<FDetailTreeNode> > SimpleChildNodes;
+	FDetailNodeList SimpleChildNodes;
 	/** All Advanced child nodes */
-	TArray< TSharedRef<FDetailTreeNode> > AdvancedChildNodes;
-	/** Advanced dropdown node (always shown) */
-	TSharedPtr<FDetailTreeNode> AdvancedDropdownNodeBottom;
-	/** Advanced dropdown node that is shown if the advanced dropdown is expanded */
-	TSharedPtr<FDetailTreeNode> AdvancedDropdownNodeTop;
+	FDetailNodeList AdvancedChildNodes;
+	/** Advanced dropdown node. */
+	TSharedPtr<FDetailTreeNode> AdvancedDropdownNode;
 	/** Delegate called when expansion of the category changes */
 	FOnBooleanValueChanged OnExpansionChangedDelegate;
 	/** The display name of the category */
@@ -403,10 +438,17 @@ private:
 	FString CategoryPathName;
 	/** Custom header content displayed to the right of the category name */
 	TSharedPtr<SWidget> HeaderContentWidget;
-
+	/** True if the HeaderContentWidget should span the whole row (hides the category label)  */
+	bool bHeaderContentWholeRowContent = false;
+	/** A property node that is displayed in the header row to the right of the category name. */
 	TSharedPtr<FDetailTreeNode> InlinePropertyNode;
 	/** The parent detail builder */
 	TWeakPtr<FDetailLayoutBuilderImpl> DetailLayoutBuilder;
+	/** Delegate handling pasting an optionally tagged text snippet */
+	TSharedPtr<FOnPasteFromText> PasteFromTextDelegate;
+
+	/** The name of the object that this category is being defined by */
+	FName ObjectName;
 	/** The category identifier */
 	FName CategoryName;
 	/** The sort order of this category (amongst all categories) */
@@ -425,7 +467,16 @@ private:
 	bool bHasVisibleDetails : 1;
 	/** true if the category is visible at all */
 	bool bIsCategoryVisible : 1;
-	/*true if the category is the special favorite category, all property in the layout will be display when we generate the roottree */
+	/*true if this category is the special favorite category, all property in the layout will be display when we generate the root tree */
 	bool bFavoriteCategory : 1;
 	bool bShowOnlyChildren : 1;
+	bool bHasVisibleAdvanced : 1;
+	bool bPendingRefresh : 1;
+	bool bPendingRefreshNeedsRefilter : 1;
+
+	/**
+	* If true, this Category should have no UProperty data associated with it, and will be shown as an empty stub
+	* with no expansion arrow
+	*/
+	bool bIsEmpty 	: 1;
 };

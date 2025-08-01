@@ -5,7 +5,6 @@
 #include "CoreTypes.h"
 #include "Templates/PointerIsConvertibleFromTo.h"
 #include "Misc/AssertionMacros.h"
-#include "Templates/AreTypesEqual.h"
 #include "Templates/UnrealTypeTraits.h"
 #include "Containers/UnrealString.h"
 #include "Templates/Function.h"
@@ -38,7 +37,7 @@ enum class ETypeContainerScope
  * being locked to a particular type of class. When passed into class constructors or
  * methods, type containers can facilitate the Inversion of Control (IoC) pattern.
  *
- * Since UE4 neither uses run-time type information nor pre-processes plain old C++ classes,
+ * Since UE neither uses run-time type information nor pre-processes plain old C++ classes,
  * type names need to be exposed using the Expose_TNameOf macro in order to make them
  * registrable with type containers, i.e. Expose_TNameOf(FMyClass).
  *
@@ -63,7 +62,7 @@ enum class ETypeContainerScope
  * Note: Type containers depend on variadic templates and are therefore not available
  * on XboxOne at this time, which means they should only be used for desktop applications.
  */
-template<ESPMode Mode = ESPMode::Fast>
+template<ESPMode Mode = ESPMode::ThreadSafe>
 class TTypeContainer
 {
 	/** Interface for object instance providers. */
@@ -282,11 +281,11 @@ public:
 	template<class R, class D, typename... P>
 	void RegisterDelegate(D Delegate)
 	{
-		static_assert(TAreTypesEqual<TSharedRef<R, Mode>, typename D::RetValType>::Value, "Delegate return type must be TSharedPtr<R>");
+		static_assert(std::is_same_v<TSharedRef<R, Mode>, typename D::RetValType>, "Delegate return type must be TSharedPtr<R>");
 
 		TSharedPtr<IInstanceProvider> Provider = MakeShareable(
 			new TFunctionInstanceProvider<R>(
-				[=]() -> TSharedPtr<void, Mode> {
+				[this, Delegate]() -> TSharedPtr<void, Mode> {
 					return Delegate.Execute(GetInstance<P>()...);
 				}
 			)
@@ -331,7 +330,7 @@ public:
 	{
 		TSharedPtr<IInstanceProvider> Provider = MakeShareable(
 			new TFunctionInstanceProvider<R>(
-				[=]() -> TSharedPtr<void, Mode> {
+				[=, this]() -> TSharedPtr<void, Mode> {
 					return CreateFunc(GetInstance<P0>(), GetInstance<P>()...);
 				}
 			)
@@ -356,7 +355,7 @@ public:
 	{
 		TSharedPtr<IInstanceProvider> Provider = MakeShareable(
 			new TFunctionInstanceProvider<R>(
-				[=]() -> TSharedPtr<void, Mode> {
+				[this, CreateFunc]() -> TSharedPtr<void, Mode> {
 					return CreateFunc(GetInstance<P>()...);
 				}
 			)
@@ -423,5 +422,5 @@ private:
 };
 
 
-/** Thread-unsafe type container (for backwards compatibility). */
-class FTypeContainer : public TTypeContainer<ESPMode::Fast> { };
+/** For backwards compatibility. */
+class FTypeContainer : public TTypeContainer<ESPMode::ThreadSafe> { };

@@ -4,31 +4,45 @@
 
 #include "Containers/Array.h"
 #include "Containers/ArrayView.h"
-
-#include "EntitySystem/MovieSceneEntityIDs.h"
-#include "EntitySystem/MovieSceneSystemTaskDependencies.h"
-#include "EntitySystem/MovieScenePropertySystemTypes.h"
+#include "CoreTypes.h"
 #include "EntitySystem/IMovieScenePropertyComponentHandler.h"
-
+#include "EntitySystem/MovieSceneEntityIDs.h"
+#include "EntitySystem/MovieSceneEntitySystemTypes.h"
+#include "EntitySystem/MovieScenePropertySystemTypes.h"
+#include "EntitySystem/MovieSceneSystemTaskDependencies.h"
+#include "Math/NumericLimits.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/GeneratedTypeName.h"
 #include "Misc/InlineValue.h"
+#include "Misc/Optional.h"
 #include "Misc/TVariant.h"
+#include "Stats/Stats.h"
+#include "Stats/Stats2.h"
+#include "Templates/IsTriviallyDestructible.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UnrealTemplate.h"
+#include "Templates/UnrealTypeTraits.h"
+#include "UObject/NameTypes.h"
+
 #include <initializer_list>
 
-struct FMovieScenePropertyBinding;
-
+class FTrackInstancePropertyBindings;
+class UClass;
 class UMovieSceneBlenderSystem;
 class UMovieSceneEntitySystemLinker;
-class FTrackInstancePropertyBindings;
+class UObject;
+struct FMovieScenePropertyBinding;
 
 namespace UE
 {
 namespace MovieScene
 {
 
-struct FPropertyDefinition;
 struct FFloatDecompositionParams;
 struct FPropertyCompositeDefinition;
+struct FPropertyDefinition;
 
+DECLARE_CYCLE_STAT(TEXT("Apply properties"), MovieSceneEval_ApplyProperties,  STATGROUP_MovieSceneECS);
 
 /**
  * Stats pertaining to a given type of property including how many properties exist in the linker,
@@ -52,15 +66,15 @@ struct FPropertyDefinition
 	FPropertyDefinition() = default;
 
 	FPropertyDefinition(
-			uint16 InVariableSizeCompositeOffset, uint16 InSizeofStorageType, uint16 InAlignofStorageType,
+			uint16 InVariableSizeCompositeOffset,
 			FComponentTypeID InPropertyType, FComponentTypeID InInitialValueType)
 		: CustomPropertyRegistration(nullptr)
-		, FloatCompositeMask(0)
+		, DoubleCompositeMask(0)
 		, VariableSizeCompositeOffset(InVariableSizeCompositeOffset)
 		, CompositeSize(0)
-		, StorageType{ InSizeofStorageType, InAlignofStorageType }
 		, PropertyType(InPropertyType)
 		, InitialValueType(InInitialValueType)
+		, BlenderSystemClass(nullptr)
 	{
 	}
 
@@ -81,21 +95,17 @@ struct FPropertyDefinition
 	/** Pointer to a custom getter/setter registry for short circuiting the UObject VM. Must outlive this definitions lifetime (usually these are static or singletons) */
 	ICustomPropertyRegistration* CustomPropertyRegistration = nullptr;
 
-	/** A mask of which composite indices pertain to floats */
-	uint32 FloatCompositeMask = 0;
+	/** Stat ID for this property type */
+	TStatId StatID;
+
+	/** A mask of which composite indices pertain to doubles */
+	uint32 DoubleCompositeMask = 0;
 
 	/** The number of channels that this property comprises */
 	uint16 VariableSizeCompositeOffset = INDEX_NONE;
 
 	/** The number of channels that this property comprises */
 	uint16 CompositeSize = 0;
-
-	/** Operational type meta-data */
-	struct
-	{
-		uint16 Sizeof = 0;
-		uint16 Alignof = 0;
-	} StorageType;
 
 	/** The component type or tag of the property itself */
 	FComponentTypeID PropertyType;
@@ -105,6 +115,9 @@ struct FPropertyDefinition
 
 	/** MetaData types */
 	TArrayView<const FComponentTypeID> MetaDataTypes;
+
+	/** The blender system to use by default (if specified here) to blend composites of this property (it can be overriden per-entity with a blender system component) */
+	UClass* BlenderSystemClass;
 
 	/** Implementation of type specific property actions such as applying properties from entities or recomposing values */
 	TInlineValue<IPropertyComponentHandler, 32> Handler;
@@ -128,14 +141,14 @@ using FResolvedFastProperty = TVariant<uint16, UE::MovieScene::FCustomPropertyIn
 /** Type aliases for a property that resolved to either a fast pointer offset (type index 0), or a custom property index (specific to the path of the property - type index 1) with a fallback to a slow property binding (type index 2) */
 using FResolvedProperty = TVariant<uint16, UE::MovieScene::FCustomPropertyIndex, TSharedPtr<FTrackInstancePropertyBindings>>;
 
-template<typename PropertyTraits> struct TPropertyDefinitionBuilder;
 template<typename PropertyTraits, typename... Composites> struct TCompositePropertyDefinitionBuilder;
+template<typename PropertyTraits> struct TPropertyDefinitionBuilder;
 
 /**
  * Central registry of all property types animatable by sequencer.
  * Once registered, properties cannot be de-registered. This vastly simplifies the lifetime and ID management of the class
  */
-class MOVIESCENE_API FPropertyRegistry
+class FPropertyRegistry
 {
 public:
 
@@ -152,7 +165,7 @@ public:
 	 * @param CustomAccessors A view to an array of custom accessors (as retrieved from ICustomPropertyRegistration::GetAccessors)
 	 * @return An optional variant specifying the resolved property if it resolved successfully
 	 */
-	static TOptional< FResolvedFastProperty > ResolveFastProperty(UObject* Object, const FMovieScenePropertyBinding& PropertyBinding, FCustomAccessorView CustomAccessors);
+	static MOVIESCENE_API TOptional< FResolvedFastProperty > ResolveFastProperty(UObject* Object, const FMovieScenePropertyBinding& PropertyBinding, FCustomAccessorView CustomAccessors);
 
 	/**
 	 * Resolve a property to either a fast ptr offset, or a custom property accessor based on the specified array falling back to a slow instance binding if possible
@@ -162,7 +175,7 @@ public:
 	 * @param CustomAccessors A view to an array of custom accessors (as retrieved from ICustomPropertyRegistration::GetAccessors)
 	 * @return An optional variant specifying the resolved property if it resolved successfully
 	 */
-	static TOptional< FResolvedProperty > ResolveProperty(UObject* Object, const FMovieScenePropertyBinding& PropertyBinding, FCustomAccessorView CustomAccessors);
+	static MOVIESCENE_API TOptional< FResolvedProperty > ResolveProperty(UObject* Object, const FMovieScenePropertyBinding& PropertyBinding, FCustomAccessorView CustomAccessors);
 
 	/**
 	 * Define a new animatable composite property type from its components.
@@ -171,9 +184,9 @@ public:
 	 * @return A builder class that should be used to define the composites that contribute to this property
 	 */
 	template<typename PropertyTraits>
-	TCompositePropertyDefinitionBuilder<PropertyTraits> DefineCompositeProperty(TPropertyComponents<PropertyTraits>& InOutPropertyComponents)
+	TCompositePropertyDefinitionBuilder<PropertyTraits> DefineCompositeProperty(TPropertyComponents<PropertyTraits>& InOutPropertyComponents, const TCHAR* InStatName)
 	{
-		DefinePropertyImpl(InOutPropertyComponents);
+		DefinePropertyImpl(InOutPropertyComponents, InStatName);
 		FPropertyDefinition* Property = &Properties[InOutPropertyComponents.CompositeID.AsIndex()];
 		return TCompositePropertyDefinitionBuilder<PropertyTraits>(Property, this);
 	}
@@ -185,9 +198,9 @@ public:
 	 * @return A builder class that should be used to define the composites that contribute to this property
 	 */
 	template<typename PropertyTraits>
-	TPropertyDefinitionBuilder<PropertyTraits> DefineProperty(TPropertyComponents<PropertyTraits>& InOutPropertyComponents)
+	TPropertyDefinitionBuilder<PropertyTraits> DefineProperty(TPropertyComponents<PropertyTraits>& InOutPropertyComponents, const TCHAR* InStatName)
 	{
-		DefinePropertyImpl(InOutPropertyComponents);
+		DefinePropertyImpl(InOutPropertyComponents, InStatName);
 		FPropertyDefinition* Property = &Properties[InOutPropertyComponents.CompositeID.AsIndex()];
 		return TPropertyDefinitionBuilder<PropertyTraits>(Property, this);
 	}
@@ -241,19 +254,39 @@ private:
 	 * @return A builder class that should be used to define the composites that contribute to this property
 	 */
 	template<typename PropertyTraits>
-	void DefinePropertyImpl(TPropertyComponents<PropertyTraits>& InOutPropertyComponents)
+	void DefinePropertyImpl(TPropertyComponents<PropertyTraits>& InOutPropertyComponents, const TCHAR* InStatName)
 	{
 		using StorageType = typename PropertyTraits::StorageType;
-		static_assert( TIsBitwiseConstructible<StorageType, StorageType>::Value && TIsTriviallyDestructible<StorageType>::Value, "StorageType must be trivially TIsTriviallyCopyConstructible" );
 
 		const int32 CompositeOffset = CompositeDefinitions.Num();
 		checkf(CompositeOffset <= MAX_uint16, TEXT("Maximum number of composite definitions reached"));
 
+		TStatId StatID;
+
+#if STATS || ENABLE_STATNAMEDEVENTS
+
+	#if STATS
+		// Use FDynamicStats to create the stat in the right stat group if possible
+		StatID = FDynamicStats::CreateStatId<STAT_GROUP_TO_FStatGroup(STATGROUP_MovieSceneECS)>( FName(InStatName) );
+	#else
+		// Otherwise just make a named stat
+		const auto& ConversionData = StringCast<PROFILER_CHAR>(InStatName);
+		const int32 NumStorageChars = (ConversionData.Length() + 1);	//length doesn't include null terminator
+
+		// We leak this string
+		PROFILER_CHAR* StoragePtr = new PROFILER_CHAR[NumStorageChars];
+		FMemory::Memcpy(StoragePtr, ConversionData.Get(), NumStorageChars * sizeof(PROFILER_CHAR));
+
+		StatID = TStatId(StoragePtr);
+	#endif
+#endif
+
 		FPropertyDefinition NewDefinition(
 			CompositeOffset, 
-			sizeof(StorageType), alignof(StorageType),
 			InOutPropertyComponents.PropertyTag,
 			InOutPropertyComponents.InitialValue);
+
+		NewDefinition.StatID = StatID;
 
 		NewDefinition.MetaDataTypes = InOutPropertyComponents.MetaDataComponents.GetTypes();
 		checkf(!NewDefinition.MetaDataTypes.Contains(FComponentTypeID()), TEXT("Property meta-data component is not defined"));

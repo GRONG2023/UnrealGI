@@ -5,7 +5,10 @@
 #include "Fonts/FontMeasure.h"
 #include "Fonts/SlateFontInfo.h"
 #include "Styling/SlateBrush.h"
-#include "TraceServices/AnalysisService.h"
+
+// TraceServices
+#include "Common/ProviderLock.h"
+#include "TraceServices/Model/AllocationsProvider.h"
 #include "TraceServices/Model/TimingProfiler.h"
 #include "TraceServices/Model/Counters.h"
 #include "TraceServices/Model/Memory.h"
@@ -29,20 +32,36 @@
 // FMemoryGraphSeries
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+constexpr int32 DefaultDecimalDigitCount = 2;
+
 FString FMemoryGraphSeries::FormatValue(double Value) const
 {
-	const int64 MemValue = static_cast<int64>(Value);
-	if (MemValue == 0)
+	const int64 ValueInt64 = static_cast<int64>(Value);
+	if (ValueInt64 == 0)
 	{
 		return TEXT("0");
 	}
-	else if (MemValue < 0)
+
+	if (TimelineType <= ETimelineType::MaxTotalMem)
 	{
-		return FString::Printf(TEXT("-%s (%s bytes)"), *FText::AsMemory(-MemValue).ToString(), *FText::AsNumber(MemValue).ToString());
+		double UnitValue;
+		const TCHAR* UnitText;
+		FMemoryGraphTrack::GetUnit(EGraphTrackLabelUnit::Auto, FMath::Abs(Value), UnitValue, UnitText);
+
+		if (ValueInt64 < 0)
+		{
+			FString Auto = FMemoryGraphTrack::FormatValue(-Value, UnitValue, UnitText, DefaultDecimalDigitCount);
+			return FString::Printf(TEXT("-%s (%s bytes)"), *Auto, *FText::AsNumber(ValueInt64).ToString());
+		}
+		else
+		{
+			FString Auto = FMemoryGraphTrack::FormatValue(Value, UnitValue, UnitText, DefaultDecimalDigitCount);
+			return FString::Printf(TEXT("%s (%s bytes)"), *Auto, *FText::AsNumber(ValueInt64).ToString());
+		}
 	}
 	else
 	{
-		return FString::Printf(TEXT("%s (%s bytes)"), *FText::AsMemory(MemValue).ToString(), *FText::AsNumber(MemValue).ToString());
+		return FText::AsNumber(ValueInt64).ToString();
 	}
 }
 
@@ -58,7 +77,7 @@ FMemoryGraphTrack::FMemoryGraphTrack(FMemorySharedState& InSharedState)
 	: FGraphTrack()
 	, SharedState(InSharedState)
 	, LabelUnit(EGraphTrackLabelUnit::Auto)
-	, LabelDecimalDigitCount(-1)
+	, LabelDecimalDigitCount(DefaultDecimalDigitCount)
 	, DefaultMinValue(+std::numeric_limits<double>::infinity())
 	, DefaultMaxValue(-std::numeric_limits<double>::infinity())
 	, AllSeriesMinValue(0.0)
@@ -80,7 +99,7 @@ FMemoryGraphTrack::FMemoryGraphTrack(FMemorySharedState& InSharedState)
 
 	for (uint32 Mode = 0; Mode < static_cast<uint32>(EMemoryTrackHeightMode::Count); ++Mode)
 	{
-		SetAvailableTrackHeight(static_cast<EMemoryTrackHeightMode>(Mode), 100.0f * (Mode + 1));
+		SetAvailableTrackHeight(static_cast<EMemoryTrackHeightMode>(Mode), 100.0f * static_cast<float>(Mode + 1));
 	}
 	SetHeight(200.0f);
 }
@@ -141,7 +160,14 @@ void FMemoryGraphTrack::Update(const ITimingTrackUpdateContext& Context)
 
 				if (bIsEntireGraphTrackDirty || Series->IsDirty())
 				{
-					PreUpdateMemTagSeries(*MemorySeries, Viewport);
+					if (MemorySeries->GetTimelineType() == FMemoryGraphSeries::ETimelineType::MemTag)
+					{
+						PreUpdateMemTagSeries(*MemorySeries, Viewport);
+					}
+					else
+					{
+						PreUpdateAllocationsTimelineSeries(*MemorySeries, Viewport);
+					}
 				}
 
 				const double CurrentSeriesMinValue = MemorySeries->GetMinValue();
@@ -185,7 +211,15 @@ void FMemoryGraphTrack::Update(const ITimingTrackUpdateContext& Context)
 
 				//TODO: if (Series->Is<FMemoryGraphSeries>())
 				TSharedPtr<FMemoryGraphSeries> MemorySeries = StaticCastSharedPtr<FMemoryGraphSeries>(Series);
-				UpdateMemTagSeries(*MemorySeries, Viewport);
+
+				if (MemorySeries->GetTimelineType() == FMemoryGraphSeries::ETimelineType::MemTag)
+				{
+					UpdateMemTagSeries(*MemorySeries, Viewport);
+				}
+				else
+				{
+					UpdateAllocationsTimelineSeries(*MemorySeries, Viewport);
+				}
 
 				if (Series->IsAutoZoomDirty())
 				{
@@ -202,22 +236,24 @@ void FMemoryGraphTrack::Update(const ITimingTrackUpdateContext& Context)
 // LLM Tag Series
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-TSharedPtr<FMemoryGraphSeries> FMemoryGraphTrack::GetMemTagSeries(Insights::FMemoryTagId MemTagId)
+TSharedPtr<FMemoryGraphSeries> FMemoryGraphTrack::GetMemTagSeries(Insights::FMemoryTrackerId InMemTrackerId, Insights::FMemoryTagId InMemTagId)
 {
-	TSharedPtr<FGraphSeries>* Ptr = AllSeries.FindByPredicate([MemTagId](const TSharedPtr<FGraphSeries>& Series)
+	TSharedPtr<FGraphSeries>* Ptr = AllSeries.FindByPredicate([InMemTrackerId, InMemTagId](const TSharedPtr<FGraphSeries>& Series)
 	{
 		//TODO: if (Series->Is<FMemoryGraphSeries>())
 		const TSharedPtr<FMemoryGraphSeries> MemorySeries = StaticCastSharedPtr<FMemoryGraphSeries>(Series);
-		return MemorySeries->GetTagId() == MemTagId;
+		return MemorySeries->GetTimelineType() == FMemoryGraphSeries::ETimelineType::MemTag &&
+			   MemorySeries->GetTrackerId() == InMemTrackerId &&
+			   MemorySeries->GetTagId() == InMemTagId;
 	});
 	return (Ptr != nullptr) ? StaticCastSharedPtr<FMemoryGraphSeries>(*Ptr) : nullptr;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-TSharedPtr<FMemoryGraphSeries> FMemoryGraphTrack::AddMemTagSeries(Insights::FMemoryTrackerId MemTrackerId, Insights::FMemoryTagId MemTagId)
+TSharedPtr<FMemoryGraphSeries> FMemoryGraphTrack::AddMemTagSeries(Insights::FMemoryTrackerId InMemTrackerId, Insights::FMemoryTagId InMemTagId)
 {
-	TSharedPtr<FMemoryGraphSeries> Series = GetMemTagSeries(MemTagId);
+	TSharedPtr<FMemoryGraphSeries> Series = GetMemTagSeries(InMemTrackerId, InMemTagId);
 
 	if (!Series.IsValid())
 	{
@@ -226,8 +262,8 @@ TSharedPtr<FMemoryGraphSeries> FMemoryGraphTrack::AddMemTagSeries(Insights::FMem
 		Series->SetName(TEXT("LLM Tag"));
 		Series->SetDescription(TEXT("Low Level Memory Tag"));
 
-		Series->SetTrackerId(MemTrackerId);
-		Series->SetTagId(MemTagId);
+		Series->SetTrackerId(InMemTrackerId);
+		Series->SetTagId(InMemTagId);
 		Series->SetValueRange(0.0f, 0.0f);
 
 		Series->SetBaselineY(GetHeight() - 1.0f);
@@ -242,14 +278,16 @@ TSharedPtr<FMemoryGraphSeries> FMemoryGraphTrack::AddMemTagSeries(Insights::FMem
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-int32 FMemoryGraphTrack::RemoveMemTagSeries(Insights::FMemoryTagId MemTagId)
+int32 FMemoryGraphTrack::RemoveMemTagSeries(Insights::FMemoryTrackerId InMemTrackerId, Insights::FMemoryTagId InMemTagId)
 {
 	SetDirtyFlag();
-	return AllSeries.RemoveAll([MemTagId](const TSharedPtr<FGraphSeries>& GraphSeries)
+	return AllSeries.RemoveAll([InMemTrackerId, InMemTagId](const TSharedPtr<FGraphSeries>& GraphSeries)
 	{
-		//TODO: if (Series->Is<FMemoryGraphSeries>())
+		//TODO: if (GraphSeries->Is<FMemoryGraphSeries>())
 		const TSharedPtr<FMemoryGraphSeries> Series = StaticCastSharedPtr<FMemoryGraphSeries>(GraphSeries);
-		return Series->GetTagId() == MemTagId;
+		return Series->GetTimelineType() == FMemoryGraphSeries::ETimelineType::MemTag &&
+			   Series->GetTrackerId() == InMemTrackerId &&
+			   Series->GetTagId() == InMemTagId;
 	});
 }
 
@@ -258,43 +296,48 @@ int32 FMemoryGraphTrack::RemoveMemTagSeries(Insights::FMemoryTagId MemTagId)
 int32 FMemoryGraphTrack::RemoveAllMemTagSeries()
 {
 	SetDirtyFlag();
-	int32 Count = AllSeries.Num();
-	AllSeries.Reset();
-	return Count;
+	return AllSeries.RemoveAll([](const TSharedPtr<FGraphSeries>& GraphSeries)
+	{
+		//TODO: if (GraphSeries->Is<FMemoryGraphSeries>())
+		const TSharedPtr<FMemoryGraphSeries> Series = StaticCastSharedPtr<FMemoryGraphSeries>(GraphSeries);
+		return Series->GetTimelineType() == FMemoryGraphSeries::ETimelineType::MemTag;
+	});
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void FMemoryGraphTrack::PreUpdateMemTagSeries(FMemoryGraphSeries& Series, const FTimingTrackViewport& Viewport)
 {
-	TSharedPtr<const Trace::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
+	TSharedPtr<const TraceServices::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
 	if (Session.IsValid())
 	{
-		Trace::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
-
-		// Compute Min/Max values.
-		const Trace::IMemoryProvider& MemoryProvider = Trace::ReadMemoryProvider(*Session.Get());
-		const uint64 TotalSampleCount = MemoryProvider.GetTagSampleCount(Series.GetTrackerId(), Series.GetTagId());
-		if (TotalSampleCount > 0)
+		TraceServices::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
+		const TraceServices::IMemoryProvider* MemoryProvider = TraceServices::ReadMemoryProvider(*Session.Get());
+		if (MemoryProvider)
 		{
-			double MinValue = +std::numeric_limits<double>::infinity();
-			double MaxValue = -std::numeric_limits<double>::infinity();
-
-			MemoryProvider.EnumerateTagSamples(Series.GetTrackerId(), Series.GetTagId(), Viewport.GetStartTime(), Viewport.GetEndTime(), true,
-				[&MinValue, &MaxValue](double Time, double Duration, const Trace::FMemoryTagSample& Sample)
+			const uint64 TotalSampleCount = MemoryProvider->GetTagSampleCount(Series.GetTrackerId(), Series.GetTagId());
+			if (TotalSampleCount > 0)
 			{
-				const double Value = static_cast<double>(Sample.Value);
-				if (Value < MinValue)
-				{
-					MinValue = Value;
-				}
-				if (Value > MaxValue)
-				{
-					MaxValue = Value;
-				}
-			});
+				double MinValue = +std::numeric_limits<double>::infinity();
+				double MaxValue = -std::numeric_limits<double>::infinity();
 
-			Series.SetValueRange(MinValue, MaxValue);
+				// Compute Min/Max values.
+				MemoryProvider->EnumerateTagSamples(Series.GetTrackerId(), Series.GetTagId(), Viewport.GetStartTime(), Viewport.GetEndTime(), true,
+					[&MinValue, &MaxValue](double Time, double Duration, const TraceServices::FMemoryTagSample& Sample)
+				{
+					const double Value = static_cast<double>(Sample.Value);
+					if (Value < MinValue)
+					{
+						MinValue = Value;
+					}
+					if (Value > MaxValue)
+					{
+						MaxValue = Value;
+					}
+				});
+
+				Series.SetValueRange(MinValue, MaxValue);
+			}
 		}
 	}
 }
@@ -305,108 +348,303 @@ void FMemoryGraphTrack::UpdateMemTagSeries(FMemoryGraphSeries& Series, const FTi
 {
 	FGraphTrackBuilder Builder(*this, Series, Viewport);
 
-	TSharedPtr<const Trace::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
+	TSharedPtr<const TraceServices::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
 	if (Session.IsValid())
 	{
-		Trace::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
+		TraceServices::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
 
-		const Trace::IMemoryProvider& MemoryProvider = Trace::ReadMemoryProvider(*Session.Get());
-
-		const uint64 TotalSampleCount = MemoryProvider.GetTagSampleCount(Series.GetTrackerId(), Series.GetTagId());
-
-		if (TotalSampleCount > 0)
+		const TraceServices::IMemoryProvider* MemoryProvider = TraceServices::ReadMemoryProvider(*Session.Get());
+		if (MemoryProvider)
 		{
-			const float TopY = 4.0f;
-			const float BottomY = GetHeight() - 4.0f;
+			const uint64 TotalSampleCount = MemoryProvider->GetTagSampleCount(Series.GetTrackerId(), Series.GetTagId());
 
-			if (Series.IsAutoZoomEnabled() && TopY < BottomY)
+			if (TotalSampleCount > 0)
 			{
-				Series.UpdateAutoZoom(TopY, BottomY, Series.GetMinValue(), Series.GetMaxValue());
+				const float TopY = 4.0f;
+				const float BottomY = GetHeight() - 4.0f;
+
+				if (Series.IsAutoZoomEnabled() && TopY < BottomY)
+				{
+					Series.UpdateAutoZoom(TopY, BottomY, Series.GetMinValue(), Series.GetMaxValue());
+				}
+
+				MemoryProvider->EnumerateTagSamples(Series.GetTrackerId(), Series.GetTagId(), Viewport.GetStartTime(), Viewport.GetEndTime(), true,
+					[this, &Builder](double Time, double Duration, const TraceServices::FMemoryTagSample& Sample)
+				{
+					Builder.AddEvent(Time, Duration, static_cast<double>(Sample.Value));
+				});
 			}
-
-			MemoryProvider.EnumerateTagSamples(Series.GetTrackerId(), Series.GetTagId(), Viewport.GetStartTime(), Viewport.GetEndTime(), true,
-				[this, &Builder](double Time, double Duration, const Trace::FMemoryTagSample& Sample)
-			{
-				Builder.AddEvent(Time, Duration, static_cast<double>(Sample.Value));
-			});
 		}
 	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void FMemoryGraphTrack::Draw(const ITimingTrackDrawContext& Context) const
+TSharedPtr<FMemoryGraphSeries> FMemoryGraphTrack::GetTimelineSeries(FMemoryGraphSeries::ETimelineType InTimelineType)
 {
-	FGraphTrack::Draw(Context);
+	return nullptr; //TODO
+}
 
-	// Show warnings for series using llm tag id with incompatible tracker.
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+TSharedPtr<FMemoryGraphSeries> FMemoryGraphTrack::AddTimelineSeries(FMemoryGraphSeries::ETimelineType InTimelineType)
+{
+	TSharedPtr<FMemoryGraphSeries> Series = GetTimelineSeries(InTimelineType);
+
+	if (!Series.IsValid())
 	{
-		int WarningCount = 0;
-		float X = 12.0f;
-		float Y = GetPosY() + 12.0f;
-		const float MaxY = GetPosY() + GetHeight() - 8.0f;
-		for (const TSharedPtr<FGraphSeries>& Series : AllSeries)
+		Series = MakeShared<FMemoryGraphSeries>();
+
+		switch (InTimelineType)
 		{
-			if (Series->IsVisible())
+			case FMemoryGraphSeries::ETimelineType::MinTotalMem:
 			{
-				if (Y > MaxY)
-				{
-					break;
-				}
+				Series->SetName(TEXT("Total Allocated Memory (Min)"));
+				Series->SetDescription(TEXT("Minimum value per sample for the Total Allocated Memory"));
+				const FLinearColor Color = FLinearColor(0.0f, 0.5f, 1.0f, 1.0f);
+				const FLinearColor BorderColor(FMath::Min(Color.R + 0.4f, 1.0f), FMath::Min(Color.G + 0.4f, 1.0f), FMath::Min(Color.B + 0.4f, 1.0f), 1.0f);
+				Series->SetColor(Color, BorderColor, Color.CopyWithNewOpacity(0.1f));
+				break;
+			}
 
-				//TODO: if (Series->Is<FMemoryGraphSeries>())
-				TSharedPtr<FMemoryGraphSeries> MemorySeries = StaticCastSharedPtr<FMemoryGraphSeries>(Series);
+			case FMemoryGraphSeries::ETimelineType::MaxTotalMem:
+			{
+				Series->SetName(TEXT("Total Allocated Memory (Max)"));
+				Series->SetDescription(TEXT("Maximum value per sample for the Total Allocated Memory"));
+				const FLinearColor Color = FLinearColor(1.0f, 0.25f, 1.0f, 1.0f);
+				const FLinearColor BorderColor(FMath::Min(Color.R + 0.4f, 1.0f), FMath::Min(Color.G + 0.4f, 1.0f), FMath::Min(Color.B + 0.4f, 1.0f), 1.0f);
+				Series->SetColor(Color, BorderColor, Color.CopyWithNewOpacity(0.1f));
+				break;
+			}
 
-				const Insights::FMemoryTag* Tag = SharedState.GetTagList().GetTagById(MemorySeries->GetTagId());
-				const uint64 TrackerFlag = 1ULL << MemorySeries->GetTrackerId();
+			case FMemoryGraphSeries::ETimelineType::MinLiveAllocs:
+			{
+				Series->SetName(TEXT("Live Allocation Count (Min)"));
+				Series->SetDescription(TEXT("Minimum value per sample for the Live Allocation Count"));
+				const FLinearColor Color = FLinearColor(1.0f, 1.0f, 0.25f, 1.0f);
+				const FLinearColor BorderColor(FMath::Min(Color.R + 0.4f, 1.0f), FMath::Min(Color.G + 0.4f, 1.0f), FMath::Min(Color.B + 0.4f, 1.0f), 1.0f);
+				Series->SetColor(Color, BorderColor, Color.CopyWithNewOpacity(0.1f));
+				break;
+			}
 
-				if ((Tag->GetTrackers() & TrackerFlag) != TrackerFlag)
-				{
-					FDrawContext& DrawContext = Context.GetDrawContext();
-					const FSlateBrush* Brush = Context.GetHelper().GetWhiteBrush();
+			case FMemoryGraphSeries::ETimelineType::MaxLiveAllocs:
+			{
+				Series->SetName(TEXT("Live Allocation Count (Max)"));
+				Series->SetDescription(TEXT("Maximum value per sample for the Live Allocation Count"));
+				const FLinearColor Color = FLinearColor(1.0f, 0.25f, 1.0f, 1.0f);
+				const FLinearColor BorderColor(FMath::Min(Color.R + 0.4f, 1.0f), FMath::Min(Color.G + 0.4f, 1.0f), FMath::Min(Color.B + 0.4f, 1.0f), 1.0f);
+				Series->SetColor(Color, BorderColor, Color.CopyWithNewOpacity(0.1f));
+				break;
+			}
 
-					if (WarningCount == 0)
-					{
-						const FText WarningText1 = FText::Format(LOCTEXT("WarningFmt1", "Warning: One or more LLM tags in this graph are not used by the current tracker ({0})!"),
-							SharedState.GetCurrentTracker() ? FText::FromString(SharedState.GetCurrentTracker()->GetName()) : FText::GetEmpty());
-						const FLinearColor WarningTextColor1(1.0f, 0.2f, 0.2f, 1.0f);
-						DrawContext.DrawText(DrawContext.LayerId, X, Y, WarningText1.ToString(), Font, WarningTextColor1);
-						Y += 12.0f;
+			case FMemoryGraphSeries::ETimelineType::AllocEvents:
+			{
+				Series->SetName(TEXT("Alloc Event Count"));
+				Series->SetDescription(TEXT("Number of alloc events per sample"));
+				const FLinearColor Color = FLinearColor(0.0f, 1.0f, 0.5f, 1.0f);
+				const FLinearColor BorderColor(FMath::Min(Color.R + 0.4f, 1.0f), FMath::Min(Color.G + 0.4f, 1.0f), FMath::Min(Color.B + 0.4f, 1.0f), 1.0f);
+				Series->SetColor(Color, BorderColor, Color.CopyWithNewOpacity(0.1f));
+				break;
+			}
 
-						const FText WarningText2 = FText::Format(LOCTEXT("WarningLine2", "In order to see graph series for these LLM tags, change the current tracker to one that uses the LLM tag."),
-							SharedState.GetCurrentTracker() ? FText::FromString(SharedState.GetCurrentTracker()->GetName()) : FText::GetEmpty());
-						const FLinearColor WarningTextColor2(0.75f, 0.5f, 0.25f, 1.0f);
-						DrawContext.DrawText(DrawContext.LayerId, X, Y, WarningText2.ToString(), Font, WarningTextColor2);
-						Y += 12.0f;
-					}
-
-					if (Tag->GetTrackers() != 0)
-					{
-						const FText Conjunction = LOCTEXT("WarningTrackersConjunction", " and the ");
-						const FText Text = FText::Format(LOCTEXT("WarningFmt2", "The {0} LLM tag is only used by the {1} tracker(s)."),
-							FText::FromString(Tag->GetStatName()),
-							FText::FromString(SharedState.TrackersToString(Tag->GetTrackers(), *Conjunction.ToString())));
-						const FLinearColor TextColor(1.0f, 0.75f, 0.5f, 1.0f);
-						DrawContext.DrawText(DrawContext.LayerId, X, Y, Text.ToString(), Font, TextColor);
-						Y += 12.0f;
-					}
-					else
-					{
-						const FText Text = FText::Format(LOCTEXT("WarningFmt3", "The {0} LLM tag is not used by any tracker."),
-							FText::FromString(Tag->GetStatName()));
-						const FLinearColor TextColor(1.0f, 0.75f, 0.5f, 1.0f);
-						DrawContext.DrawText(DrawContext.LayerId, X, Y, Text.ToString(), Font, TextColor);
-						Y += 12.0f;
-					}
-
-					++WarningCount;
-				}
+			case FMemoryGraphSeries::ETimelineType::FreeEvents:
+			{
+				Series->SetName(TEXT("Free Event Count"));
+				Series->SetDescription(TEXT("Number of free events per sample"));
+				const FLinearColor Color = FLinearColor(1.0f, 0.5f, 0.25f, 1.0f);
+				const FLinearColor BorderColor(FMath::Min(Color.R + 0.4f, 1.0f), FMath::Min(Color.G + 0.4f, 1.0f), FMath::Min(Color.B + 0.4f, 1.0f), 1.0f);
+				Series->SetColor(Color, BorderColor, Color.CopyWithNewOpacity(0.1f));
+				break;
 			}
 		}
-		if (WarningCount > 0)
+
+		Series->SetTimelineType(InTimelineType);
+		Series->SetValueRange(0.0f, 0.0f);
+
+		Series->SetBaselineY(GetHeight() - 1.0f);
+		Series->SetScaleY(1.0);
+
+		AllSeries.Add(Series);
+		SetDirtyFlag();
+	}
+
+	return Series;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void FMemoryGraphTrack::PreUpdateAllocationsTimelineSeries(FMemoryGraphSeries& Series, const FTimingTrackViewport& Viewport)
+{
+	TSharedPtr<const TraceServices::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
+	if (Session.IsValid())
+	{
+		const TraceServices::IAllocationsProvider* AllocationsProvider = TraceServices::ReadAllocationsProvider(*Session.Get());
+		if (AllocationsProvider)
 		{
-			FDrawContext& DrawContext = Context.GetDrawContext();
-			DrawContext.LayerId++;
+			TraceServices::FProviderReadScopeLock ProviderReadScope(*AllocationsProvider);
+
+			int32 StartIndex = -1;
+			int32 EndIndex = -1;
+			AllocationsProvider->GetTimelineIndexRange(Viewport.GetStartTime(), Viewport.GetEndTime(), StartIndex, EndIndex);
+			if (EndIndex >= 0)
+			{
+				--StartIndex; // include one more point on the left side
+				++EndIndex; // include one more point on the right side
+			}
+
+			uint64 MinValue = std::numeric_limits<uint64>::max();
+			uint64 MaxValue = 0;
+
+			// Compute Min/Max values.
+			auto Callback64 = [&MinValue, &MaxValue](double Time, double Duration, uint64 Value)
+			{
+				if (Value < MinValue)
+				{
+					MinValue = Value;
+				}
+				if (Value > MaxValue)
+				{
+					MaxValue = Value;
+				}
+			};
+			auto Callback32 = [&MinValue, &MaxValue](double Time, double Duration, uint32 Value)
+			{
+				if (Value < MinValue)
+				{
+					MinValue = Value;
+				}
+				if (Value > MaxValue)
+				{
+					MaxValue = Value;
+				}
+			};
+
+			switch (Series.GetTimelineType())
+			{
+			case FMemoryGraphSeries::ETimelineType::MinTotalMem:
+				AllocationsProvider->EnumerateMinTotalAllocatedMemoryTimeline(StartIndex, EndIndex, Callback64);
+				break;
+			case FMemoryGraphSeries::ETimelineType::MaxTotalMem:
+				AllocationsProvider->EnumerateMaxTotalAllocatedMemoryTimeline(StartIndex, EndIndex, Callback64);
+				break;
+			case FMemoryGraphSeries::ETimelineType::MinLiveAllocs:
+				AllocationsProvider->EnumerateMinLiveAllocationsTimeline(StartIndex, EndIndex, Callback32);
+				break;
+			case FMemoryGraphSeries::ETimelineType::MaxLiveAllocs:
+				AllocationsProvider->EnumerateMaxLiveAllocationsTimeline(StartIndex, EndIndex, Callback32);
+				break;
+			case FMemoryGraphSeries::ETimelineType::AllocEvents:
+				AllocationsProvider->EnumerateAllocEventsTimeline(StartIndex, EndIndex, Callback32);
+				break;
+			case FMemoryGraphSeries::ETimelineType::FreeEvents:
+				AllocationsProvider->EnumerateFreeEventsTimeline(StartIndex, EndIndex, Callback32);
+				break;
+			}
+
+			if (Series.GetTimelineType() == FMemoryGraphSeries::ETimelineType::FreeEvents)
+			{
+				// Shows FreeEvents as negative values in order to be displayed on same graph as AllocEvents.
+				Series.SetValueRange(-static_cast<double>(MaxValue), -static_cast<double>(MinValue));
+			}
+			else
+			{
+				Series.SetValueRange(static_cast<double>(MinValue), static_cast<double>(MaxValue));
+			}
+		}
+	}
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void FMemoryGraphTrack::UpdateAllocationsTimelineSeries(FMemoryGraphSeries& Series, const FTimingTrackViewport& Viewport)
+{
+	FGraphTrackBuilder Builder(*this, Series, Viewport);
+
+	TSharedPtr<const TraceServices::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
+	if (Session.IsValid())
+	{
+		const TraceServices::IAllocationsProvider* AllocationsProvider = TraceServices::ReadAllocationsProvider(*Session.Get());
+		if (AllocationsProvider)
+		{
+			struct FTimelineEvent
+			{
+				FTimelineEvent(double InTime, double InDuration, double InValue) :
+					Time(InTime),
+					Duration(InDuration),
+					Value(InValue)
+				{
+
+				}
+				double Time;
+				double Duration;
+				double Value;
+			};
+
+			int32 StartIndex = -1;
+			int32 EndIndex = -1;
+
+			TArray<FTimelineEvent> TimelineEvents;
+			{
+				TraceServices::FProviderReadScopeLock ProviderReadScope(*AllocationsProvider);
+				AllocationsProvider->GetTimelineIndexRange(Viewport.GetStartTime(), Viewport.GetEndTime(), StartIndex, EndIndex);
+
+				if (EndIndex >= 0)
+				{
+					--StartIndex; // include one more point on the left side
+					++EndIndex; // include one more point on the right side
+				}
+
+				TimelineEvents.Reserve((EndIndex - StartIndex) + 1);
+
+				const float TopY = 4.0f;
+				const float BottomY = GetHeight() - 4.0f;
+
+				if (Series.IsAutoZoomEnabled() && TopY < BottomY)
+				{
+					Series.UpdateAutoZoom(TopY, BottomY, Series.GetMinValue(), Series.GetMaxValue());
+				}
+
+				auto Callback64 = [&TimelineEvents](double Time, double Duration, uint64 Value)
+				{
+					TimelineEvents.Emplace(Time, Duration, static_cast<double>(Value));
+				};
+				auto Callback32 = [&TimelineEvents](double Time, double Duration, uint32 Value)
+				{
+					TimelineEvents.Emplace(Time, Duration, static_cast<double>(Value));
+				};
+				auto Callback32Negative = [&TimelineEvents](double Time, double Duration, uint32 Value)
+				{
+					// Shows FreeEvents as negative values in order to be displayed on same graph as AllocEvents.
+					TimelineEvents.Emplace(Time, Duration, -static_cast<double>(Value));
+				};
+
+				switch (Series.GetTimelineType())
+				{
+				case FMemoryGraphSeries::ETimelineType::MinTotalMem:
+					AllocationsProvider->EnumerateMinTotalAllocatedMemoryTimeline(StartIndex, EndIndex, Callback64);
+					break;
+				case FMemoryGraphSeries::ETimelineType::MaxTotalMem:
+					AllocationsProvider->EnumerateMaxTotalAllocatedMemoryTimeline(StartIndex, EndIndex, Callback64);
+					break;
+				case FMemoryGraphSeries::ETimelineType::MinLiveAllocs:
+					AllocationsProvider->EnumerateMinLiveAllocationsTimeline(StartIndex, EndIndex, Callback32);
+					break;
+				case FMemoryGraphSeries::ETimelineType::MaxLiveAllocs:
+					AllocationsProvider->EnumerateMaxLiveAllocationsTimeline(StartIndex, EndIndex, Callback32);
+					break;
+				case FMemoryGraphSeries::ETimelineType::AllocEvents:
+					AllocationsProvider->EnumerateAllocEventsTimeline(StartIndex, EndIndex, Callback32);
+					break;
+				case FMemoryGraphSeries::ETimelineType::FreeEvents:
+					AllocationsProvider->EnumerateFreeEventsTimeline(StartIndex, EndIndex, Callback32Negative);
+					break;
+				}
+			}
+
+			for (const FTimelineEvent& TimelineEvent : TimelineEvents)
+			{
+				Builder.AddEvent(TimelineEvent.Time, TimelineEvent.Duration, TimelineEvent.Value);
+			}
 		}
 	}
 }
@@ -417,10 +655,18 @@ void FMemoryGraphTrack::DrawVerticalAxisGrid(const ITimingTrackDrawContext& Cont
 {
 	TSharedPtr<FMemoryGraphSeries> Series = MainSeries;
 
-	if (!Series.IsValid() && AllSeries.Num() > 0)
+	if (!Series.IsValid())
 	{
-		//TODO: if (Series->Is<FMemoryGraphSeries>())
-		Series = StaticCastSharedPtr<FMemoryGraphSeries>(AllSeries[0]);
+		// Use the first visible series.
+		for (const TSharedPtr<FGraphSeries>& GraphSeries : AllSeries)
+		{
+			if (GraphSeries->IsVisible())
+			{
+				//TODO: if (GraphSeries->Is<FMemoryGraphSeries>())
+				Series = StaticCastSharedPtr<FMemoryGraphSeries>(GraphSeries);
+				break;
+			}
+		}
 	}
 
 	if (!Series.IsValid())
@@ -432,7 +678,7 @@ void FMemoryGraphTrack::DrawVerticalAxisGrid(const ITimingTrackDrawContext& Cont
 	ViewportY.SetSize(GetHeight());
 	ViewportY.SetScaleLimits(std::numeric_limits<double>::min(), std::numeric_limits<double>::max());
 	ViewportY.SetScale(Series->GetScaleY());
-	ViewportY.ScrollAtPos(Series->GetBaselineY() - GetHeight());
+	ViewportY.ScrollAtPos(static_cast<float>(Series->GetBaselineY()) - GetHeight());
 
 	const float ViewWidth = Context.GetViewport().GetWidth();
 	const float RoundedViewHeight = FMath::RoundToFloat(GetHeight());
@@ -483,33 +729,44 @@ void FMemoryGraphTrack::DrawVerticalAxisGrid(const ITimingTrackDrawContext& Cont
 
 	if (Delta > 0.0)
 	{
-		int64 DeltaBytes = static_cast<int64>(Delta);
-		if (DeltaBytes <= 0)
+		double Grid;
+
+		if (Series->GetTimelineType() <= FMemoryGraphSeries::ETimelineType::MaxTotalMem)
 		{
-			DeltaBytes = 1;
+			const uint64 DeltaBytes = FMath::Max(1ULL, static_cast<uint64>(Delta));
+			Grid = static_cast<double>(FMath::RoundUpToPowerOfTwo64(DeltaBytes));
+		}
+		else
+		{
+			const uint64 DeltaCount = FMath::Max(1ULL, static_cast<uint64>(Delta));
+
+			// Compute rounding based on magnitude of visible range of values (Delta).
+			uint64 Delta10 = DeltaCount;
+			uint64 Power10 = 1;
+			while (Delta10 > 0)
+			{
+				Delta10 /= 10;
+				Power10 *= 10;
+			}
+			if (Power10 >= 100)
+			{
+				Power10 /= 100;
+			}
+			else
+			{
+				Power10 = 1;
+			}
+
+			// Compute Grid as the next value divisible with a multiple of 10.
+			Grid = static_cast<double>(((DeltaCount + Power10 - 1) / Power10) * Power10);
 		}
 
-		// Compute rounding based on magnitude of visible range of values (Delta).
-		int64 Delta2 = DeltaBytes;
-		int64 Power2 = 1;
-		while (Delta2 > 0)
-		{
-			Delta2 >>= 1;
-			Power2 <<= 1;
-		}
-		if (Power2 >> 1 == DeltaBytes)
-		{
-			Power2 >>= 1;
-		}
-		const double Grid = static_cast<double>(Power2);
 		const double StartValue = FMath::GridSnap(BottomValue, Grid);
 
 		TDrawHorizontalAxisLabelParams Params(DrawContext, Brush, FontMeasureService);
 		Params.TextBgColor = FLinearColor(0.05f, 0.05f, 0.05f, 1.0f);
 		Params.TextColor = FLinearColor(1.0f, 1.0f, 1.0f, 1.0f);
 		Params.X = X0;
-		//Params.Y;
-		//Params.Value;
 		Params.Precision = Precision;
 
 		const FLinearColor GridColor(0.0f, 0.0f, 0.0f, 0.1f);
@@ -552,8 +809,6 @@ void FMemoryGraphTrack::DrawVerticalAxisGrid(const ITimingTrackDrawContext& Cont
 		}
 
 		Params.X = X0;
-		//Params.Y;
-		//Params.Value;
 		Params.Precision = -Precision; // format with detailed text
 
 		int32 MinMaxAxis = 0;
@@ -561,8 +816,8 @@ void FMemoryGraphTrack::DrawVerticalAxisGrid(const ITimingTrackDrawContext& Cont
 		// Draw horizontal axis at the max value.
 		if (MaxValueY >= Y0 && MaxValueY <= Y0 + RoundedViewHeight)
 		{
-			Params.Value = AllSeriesMaxValue;
 			Params.Y = MaxValueY;
+			Params.Value = AllSeriesMaxValue;
 			DrawHorizontalAxisLabel(Params);
 			++MinMaxAxis;
 		}
@@ -578,18 +833,14 @@ void FMemoryGraphTrack::DrawVerticalAxisGrid(const ITimingTrackDrawContext& Cont
 
 		if (MinMaxAxis == 2)
 		{
-			const float MX = Context.GetMousePosition().X;
-			const float MY = Context.GetMousePosition().Y;
+			const float MX = static_cast<float>(Context.GetMousePosition().X);
+			const float MY = static_cast<float>(Context.GetMousePosition().Y);
 
 			//constexpr float MX1 = 80.0f; // start fading out
 			constexpr float MX2 = 120.0f; // completly faded out
 
 			if (MX > ViewWidth - MX2 && MY >= MaxValueY && MY < MinValueY + TextH)
 			{
-				//const float Alpha = FMath::Min(1.0f, (MX - ViewWidth + MX2) / (MX2 - MX1));
-				//Params.TextBgColor.A = Alpha;
-				//Params.TextColor.A = Alpha;
-
 				const float LineX = MX - 16.0f;
 				DrawContext.DrawBox(DrawContext.LayerId + 1, LineX, ActualMaxValueY, X0 - LineX, 1.0f, Params.Brush, Params.TextBgColor);
 				DrawContext.DrawBox(DrawContext.LayerId + 1, LineX, ActualMaxValueY, 1.0f, ActualMinValueY - ActualMaxValueY, Params.Brush, Params.TextBgColor);
@@ -643,14 +894,16 @@ void FMemoryGraphTrack::DrawHorizontalAxisLabel(const TDrawHorizontalAxisLabelPa
 		}
 	}
 
-	const FVector2D TextSize = Params.FontMeasureService->Measure(LabelText, Font);
+	const float FontScale = Params.DrawContext.Geometry.Scale;
+	const FVector2D TextSize = Params.FontMeasureService->Measure(LabelText, Font, FontScale) / FontScale;
+	const float TextW = static_cast<float>(TextSize.X);
 	constexpr float TextH = 14.0f;
 
 	// Draw background for value text.
-	Params.DrawContext.DrawBox(Params.DrawContext.LayerId + 1, Params.X - TextSize.X - 4.0f, Params.Y, TextSize.X + 4.0f, TextH, Params.Brush, Params.TextBgColor);
+	Params.DrawContext.DrawBox(Params.DrawContext.LayerId + 1, Params.X - TextW - 4.0f, Params.Y, TextW + 5.0f, TextH, Params.Brush, Params.TextBgColor);
 
 	// Draw value text.
-	Params.DrawContext.DrawText(Params.DrawContext.LayerId + 2, Params.X - TextSize.X - 2.0f, Params.Y + 1.0f, LabelText, Font, Params.TextColor);
+	Params.DrawContext.DrawText(Params.DrawContext.LayerId + 2, Params.X - TextW - 2.0f, Params.Y + 1.0f, LabelText, Font, Params.TextColor);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -663,6 +916,13 @@ void FMemoryGraphTrack::GetUnit(const EGraphTrackLabelUnit InLabelUnit, const do
 	constexpr double TiB = (double)(1LL << 40); // 2^40 bytes
 	constexpr double PiB = (double)(1LL << 50); // 2^50 bytes
 	constexpr double EiB = (double)(1LL << 60); // 2^60 bytes
+
+	constexpr double K10 = 1000.0;    // 10^3
+	constexpr double M10 = K10 * K10; // 10^6
+	constexpr double G10 = M10 * K10; // 10^9
+	constexpr double T10 = G10 * K10; // 10^12
+	constexpr double P10 = T10 * K10; // 10^15
+	constexpr double E10 = P10 * K10; // 10^18
 
 	switch (InLabelUnit)
 	{
@@ -737,9 +997,54 @@ void FMemoryGraphTrack::GetUnit(const EGraphTrackLabelUnit InLabelUnit, const do
 			break;
 
 		case EGraphTrackLabelUnit::Byte:
-		default:
 			OutUnitValue = 1.0;
 			OutUnitText = TEXT("B");
+			break;
+
+		case EGraphTrackLabelUnit::AutoCount:
+		{
+			if (InPrecision >= E10)
+			{
+				OutUnitValue = E10;
+				OutUnitText = TEXT("E");
+			}
+			else if (InPrecision >= P10)
+			{
+				OutUnitValue = P10;
+				OutUnitText = TEXT("P");
+			}
+			else if (InPrecision >= T10)
+			{
+				OutUnitValue = T10;
+				OutUnitText = TEXT("T");
+			}
+			else if (InPrecision >= G10)
+			{
+				OutUnitValue = G10;
+				OutUnitText = TEXT("G");
+			}
+			else if (InPrecision >= M10)
+			{
+				OutUnitValue = M10;
+				OutUnitText = TEXT("M");
+			}
+			else if (InPrecision >= K10)
+			{
+				OutUnitValue = K10;
+				OutUnitText = TEXT("K");
+			}
+			else
+			{
+				OutUnitValue = 1.0;
+				OutUnitText = TEXT("");
+			}
+		}
+		break;
+
+		case EGraphTrackLabelUnit::Count:
+		default:
+			OutUnitValue = 1.0;
+			OutUnitText = TEXT("");
 			break;
 	}
 }
@@ -748,6 +1053,11 @@ void FMemoryGraphTrack::GetUnit(const EGraphTrackLabelUnit InLabelUnit, const do
 
 FString FMemoryGraphTrack::FormatValue(const double InValue, const double InUnitValue, const TCHAR* InUnitText, const int32 InDecimalDigitCount)
 {
+	if (InUnitText[0] == TEXT('\0') && InDecimalDigitCount == 0)
+	{
+		return FText::AsNumber(static_cast<int64>(InValue)).ToString();
+	}
+
 	FString OutText;
 
 	TCHAR FormatString[32];
@@ -768,8 +1078,11 @@ FString FMemoryGraphTrack::FormatValue(const double InValue, const double InUnit
 		}
 	}
 
-	OutText += TEXT(' ');
-	OutText += InUnitText;
+	if (InUnitText[0] != TEXT('\0'))
+	{
+		OutText += TEXT(' ');
+		OutText += InUnitText;
+	}
 
 	return OutText;
 }
@@ -810,10 +1123,15 @@ void FMemoryGraphTrack::InitTooltip(FTooltipDrawState& InOutTooltip, const ITimi
 
 		InOutTooltip.ResetContent();
 		InOutTooltip.AddTitle(Series->GetName().ToString(), Series->GetColor());
-		FString SubTitle = FString::Printf(TEXT("(tag id %lli, tracker id %lli)"), (int64)Series->GetTagId(), (int64)Series->GetTrackerId());
-		InOutTooltip.AddTitle(SubTitle, Series->GetColor());
 
-		InOutTooltip.AddNameValueTextLine(TEXT("Time:"), TimeUtils::FormatTimeAuto(TooltipEvent.GetStartTime()));
+		if (Series->GetTimelineType() == FMemoryGraphSeries::ETimelineType::MemTag)
+		{
+			FString SubTitle = FString::Printf(TEXT("(tag id 0x%llX, tracker id %i)"), (uint64)Series->GetTagId(), (int32)Series->GetTrackerId());
+			InOutTooltip.AddTitle(SubTitle, Series->GetColor());
+		}
+
+		const double Precision = FMath::Max(1.0 / TimeScaleX, TimeUtils::Nanosecond);
+		InOutTooltip.AddNameValueTextLine(TEXT("Time:"), TimeUtils::FormatTime(TooltipEvent.GetStartTime(), Precision));
 		if (Series->HasEventDuration())
 		{
 			InOutTooltip.AddNameValueTextLine(TEXT("Duration:"), TimeUtils::FormatTimeAuto(TooltipEvent.GetDuration()));

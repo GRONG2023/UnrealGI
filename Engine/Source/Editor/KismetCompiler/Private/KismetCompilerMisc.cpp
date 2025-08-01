@@ -18,29 +18,40 @@
 #include "Engine/MemberReference.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Engine/UserDefinedStruct.h"
+#include "FieldNotification/FieldNotificationLibrary.h"
+#include "INotifyFieldValueChanged.h"
 #include "Kismet2/CompilerResultsLog.h"
 #include "EdGraphUtilities.h"
 #include "EdGraphSchema_K2.h"
+#include "FieldNotificationId.h"
 #include "K2Node.h"
 #include "K2Node_BaseAsyncTask.h"
 #include "K2Node_Event.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_CallArrayFunction.h"
 #include "K2Node_CallParentFunction.h"
+#include "K2Node_DynamicCast.h"
 #include "K2Node_ExecutionSequence.h"
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_FunctionResult.h"
+#include "K2Node_MakeArray.h"
+#include "K2Node_MakeStruct.h"
+#include "K2Node_Self.h"
+#include "K2Node_TemporaryVariable.h"
 #include "K2Node_Timeline.h"
 #include "K2Node_Variable.h"
+#include "K2Node_VariableGet.h"
+#include "KismetCastingUtils.h"
 #include "KismetCompiledFunctionContext.h"
 #include "KismetCompiler.h"
-
 #include "K2Node_EnumLiteral.h"
+#include "Kismet/KismetArrayLibrary.h"
 #include "Kismet2/KismetReinstanceUtilities.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/StructureEditorUtils.h"
 #include "ObjectTools.h"
 #include "BlueprintEditorSettings.h"
+#include "Components/ActorComponent.h"
 
 #define LOCTEXT_NAMESPACE "KismetCompiler"
 
@@ -107,7 +118,7 @@ static bool DoesTypeNotMatchProperty(UEdGraphPin* SourcePin, const FEdGraphPinTy
 				InputClass = InputClass->GetAuthoritativeClass();
 
 				// It matches if it's an exact match or if the output class is more derived than the input class
-				bTypeMismatch = bSubtypeMismatch = !((OutputClass == InputClass) || (OutputClass->IsChildOf(InputClass)));
+				bTypeMismatch = bSubtypeMismatch = !((OutputClass == InputClass) || (OutputClass && OutputClass->IsChildOf(InputClass)));
 
 				if ((PinCategory == UEdGraphSchema_K2::PC_SoftClass) && (!TestProperty->IsA<FSoftClassProperty>()))
 				{
@@ -120,10 +131,23 @@ static bool DoesTypeNotMatchProperty(UEdGraphPin* SourcePin, const FEdGraphPinTy
 			}
 		}
 	}
-	else if (PinCategory == UEdGraphSchema_K2::PC_Float)
+	else if (PinCategory == UEdGraphSchema_K2::PC_Real)
 	{
-		FFloatProperty* SpecificProperty = CastField<FFloatProperty>(TestProperty);
-		bTypeMismatch = (SpecificProperty == nullptr);
+		if (PinSubCategory == UEdGraphSchema_K2::PC_Float)
+		{
+			FFloatProperty* SpecificProperty = CastField<FFloatProperty>(TestProperty);
+			bTypeMismatch = (SpecificProperty == nullptr);
+		}
+		else if (PinSubCategory == UEdGraphSchema_K2::PC_Double)
+		{
+			FDoubleProperty* SpecificProperty = CastField<FDoubleProperty>(TestProperty);
+			bTypeMismatch = (SpecificProperty == nullptr);
+		}
+		else
+		{
+			checkf(false, TEXT("Erroneous pin subcategory for PC_Real: %s"), *PinSubCategory.ToString());
+			bTypeMismatch = true;
+		}
 	}
 	else if (PinCategory == UEdGraphSchema_K2::PC_Int)
 	{
@@ -159,7 +183,7 @@ static bool DoesTypeNotMatchProperty(UEdGraphPin* SourcePin, const FEdGraphPinTy
 			MessageLog.Error(*LOCTEXT("FindClassForPin_Error", "Failed to find class for pin @@").ToString(), SourcePin);
 		}
 		// If the object type has been marked as transient and is no longer rooted in the GUObjectArray,
-		// then then it has been "consigned to oblivion". This can be the case if a BP asset has been force 
+		// then then it has been "consigned to oblvion". This can be the case if a BP asset has been force 
 		// deleted and references to it are still laying around
 		else if(
 			ObjectType->HasAnyFlags(RF_Transient) &&
@@ -208,7 +232,7 @@ static bool DoesTypeNotMatchProperty(UEdGraphPin* SourcePin, const FEdGraphPinTy
 				OutputClass = OutputClass->GetAuthoritativeClass();
 
 				// It matches if it's an exact match or if the output class is more derived than the input class
-				bTypeMismatch = bSubtypeMismatch = !((OutputClass == InputClass) || (OutputClass->IsChildOf(InputClass)));
+				bTypeMismatch = bSubtypeMismatch = !((OutputClass == InputClass) || (OutputClass && OutputClass->IsChildOf(InputClass)));
 
 				if ((PinCategory == UEdGraphSchema_K2::PC_SoftObject) && (!TestProperty->IsA<FSoftObjectProperty>()))
 				{
@@ -522,98 +546,90 @@ void FKismetCompilerUtilities::RemoveObjectRedirectorIfPresent(UObject* Package,
 }
 
 /** Finds a property by name, starting in the specified scope; Validates property type and returns NULL along with emitting an error if there is a mismatch. */
-FProperty* FKismetCompilerUtilities::FindPropertyInScope(UStruct* Scope, UEdGraphPin* Pin, FCompilerResultsLog& MessageLog, const UEdGraphSchema_K2* Schema, UClass* SelfClass, bool& bIsSparseProperty, bool bSuppressMissingMemberErrors)
+FProperty* FKismetCompilerUtilities::FindPropertyInScope(UStruct* Scope, UEdGraphPin* Pin, FCompilerResultsLog& MessageLog, const UEdGraphSchema_K2* Schema, UClass* SelfClass, bool& bIsSparseProperty)
 {
-	bIsSparseProperty = false;
-	UStruct* InitialScope = Scope;
-	while (Scope != nullptr)
+	if (FProperty* Property = FKismetCompilerUtilities::FindNamedPropertyInScope(Scope, Pin->PinName, bIsSparseProperty, /*bAllowDeprecated*/true))
 	{
-		// If this is a class, check the sparse data for the property
-		UClass* Class = Cast<UClass>(Scope);
-		if (Class)
+		if (FKismetCompilerUtilities::IsTypeCompatibleWithProperty(Pin, Property, MessageLog, Schema, SelfClass))
 		{
-			UStruct* SparseData = Class->GetSparseClassDataStruct();
-			if (SparseData)
-			{
-				FProperty* Prop = FindPropertyInScope(SparseData, Pin, MessageLog, Schema, SelfClass, bIsSparseProperty, true);
-				if (Prop)
+			return Property;
+		}
+	}
+	else if (!FKismetCompilerUtilities::IsMissingMemberPotentiallyLoading(Cast<UBlueprint>(SelfClass->ClassGeneratedBy), Scope))
 	{
-					bIsSparseProperty = true;
-					return Prop;
-				}
-			}
-		}
-
-		for (TFieldIterator<FProperty> It(Scope, EFieldIteratorFlags::IncludeSuper); It; ++It)
-		{
-			FProperty* Property = *It;
-
-			if (Property->GetFName() == Pin->PinName)
-			{
-				if (FKismetCompilerUtilities::IsTypeCompatibleWithProperty(Pin, Property, MessageLog, Schema, SelfClass))
-				{
-					return Property;
-				}
-				else
-				{
-					// Exit now, we found one with the right name but the type mismatched (and there was a type mismatch error)
-					return nullptr;
-				}
-			}
-		}
-
-		// Functions don't automatically check their class when using a field iterator
-		UFunction* Function = Cast<UFunction>(Scope);
-		Scope = (Function != nullptr) ? Cast<UStruct>(Function->GetOuter()) : nullptr;
+		UObject* MessageScope = Scope ? Scope : SelfClass;
+		MessageLog.Error(*FText::Format(LOCTEXT("PropertyNotFound_Error", "The property associated with @@ could not be found in '{0}'"), FText::FromString(MessageScope->GetPathName())).ToString(), Pin);
 	}
 
-	// Couldn't find the name
-	if (!FKismetCompilerUtilities::IsMissingMemberPotentiallyLoading(Cast<UBlueprint>(SelfClass->ClassGeneratedBy), InitialScope) && !bSuppressMissingMemberErrors)
-	{
-		MessageLog.Error(*FText::Format(LOCTEXT("PropertyNotFound_Error", "The property associated with @@ could not be found in '{0}'"), FText::FromString(SelfClass->GetPathName())).ToString(), Pin);
-	}
 	return nullptr;
 }
 
 // Finds a property by name, starting in the specified scope, returning NULL if it's not found
-FProperty* FKismetCompilerUtilities::FindNamedPropertyInScope(UStruct* Scope, FName PropertyName, bool& bIsSparseProperty)
+FProperty* FKismetCompilerUtilities::FindNamedPropertyInScope(UStruct* Scope, FName PropertyName, bool& bIsSparseProperty, const bool bAllowDeprecated)
 {
-	bIsSparseProperty = false;
-	while (Scope != NULL)
+	auto FindProperty = [PropertyName, bAllowDeprecated](UStruct* CurrentScope) -> FProperty*
 	{
-		for (TFieldIterator<FProperty> It(Scope, EFieldIteratorFlags::IncludeSuper); It; ++It)
+		for (TFieldIterator<FProperty> It(CurrentScope); It; ++It)
 		{
 			FProperty* Property = *It;
 
-			// If we match by name, and var is not deprecated...
-			if (Property->GetFName() == PropertyName && !Property->HasAllPropertyFlags(CPF_Deprecated))
+			if (Property->GetFName() == PropertyName)
 			{
-				return Property;
+				if (bAllowDeprecated || !Property->HasAllPropertyFlags(CPF_Deprecated))
+				{
+					return Property;
+				}
+				break;
 			}
 		}
 
-		// If this is a class, check the sparse data for the property
-		UClass* Class = Cast<UClass>(Scope);
-		if (Class)
+		return nullptr;
+	};
+
+	auto FindSparseClassDataProperty = [&FindProperty](UStruct* CurrentScope) -> FProperty*
+	{
+		if (UClass* Class = Cast<UClass>(CurrentScope))
 		{
-			UStruct* SparseData = Class->GetSparseClassDataStruct();
-			if (SparseData)
+			if (UStruct* SparseData = Class->GetSparseClassDataStruct())
 			{
-				FProperty* Prop = FindNamedPropertyInScope(SparseData, PropertyName, bIsSparseProperty);
-				if (Prop)
+				return FindProperty(SparseData);
+			}
+		}
+		return nullptr;
+	};
+
+	bIsSparseProperty = false;
+	while (Scope)
+	{
+		// Check the given scope first
+		if (FProperty* Property = FindProperty(Scope))
+		{
+			if (Property->HasAllPropertyFlags(CPF_Deprecated))
+			{
+				// If this property is deprecated, check to see if the sparse data has a property that 
+				// we should use instead (eg, when migrating data from an object into the sparse data)
+				if (FProperty* SparseProperty = FindSparseClassDataProperty(Scope))
 				{
 					bIsSparseProperty = true;
-					return Prop;
+					return SparseProperty;
 				}
 			}
+			return Property;
+		}
+
+		// Check the sparse data for the property
+		if (FProperty* SparseProperty = FindSparseClassDataProperty(Scope))
+		{
+			bIsSparseProperty = true;
+			return SparseProperty;
 		}
 
 		// Functions don't automatically check their class when using a field iterator
 		UFunction* Function = Cast<UFunction>(Scope);
-		Scope = (Function != NULL) ? Cast<UStruct>(Function->GetOuter()) : NULL;
+		Scope = Function ? Cast<UStruct>(Function->GetOuter()) : nullptr;
 	}
 
-	return NULL;
+	return nullptr;
 }
 
 void FKismetCompilerUtilities::CompileDefaultProperties(UClass* Class)
@@ -643,7 +659,7 @@ const UFunction* FKismetCompilerUtilities::FindOverriddenImplementableEvent(cons
 	return bFlagsMatch ? FoundEvent : NULL;
 }
 
-void FKismetCompilerUtilities::ValidateEnumProperties(UObject* DefaultObject, FCompilerResultsLog& MessageLog)
+void FKismetCompilerUtilities::ValidateEnumProperties(const UObject* DefaultObject, FCompilerResultsLog& MessageLog)
 {
 	check(DefaultObject);
 	for (TFieldIterator<FProperty> It(DefaultObject->GetClass()); It; ++It)
@@ -765,16 +781,16 @@ UEdGraphPin* FKismetCompilerUtilities::GenerateAssignmentNodes(class FKismetComp
 		if (NULL == CallBeginSpawnNode->FindPin(OrgPin->PinName) &&
 			(OrgPin->LinkedTo.Num() > 0 || bHasDefaultValue))
 		{
+			FProperty* Property = FindFProperty<FProperty>(ForClass, OrgPin->PinName);
+			// NULL property indicates that this pin was part of the original node, not the 
+			// class we're assigning to:
+			if (!Property)
+			{
+				continue;
+			}
+
 			if( OrgPin->LinkedTo.Num() == 0 )
 			{
-				FProperty* Property = FindFProperty<FProperty>(ForClass, OrgPin->PinName);
-				// NULL property indicates that this pin was part of the original node, not the 
-				// class we're assigning to:
-				if( !Property )
-				{
-					continue;
-				}
-
 				// We don't want to generate an assignment node unless the default value 
 				// differs from the value in the CDO:
 				FString DefaultValueAsString;
@@ -788,7 +804,7 @@ UEdGraphPin* FKismetCompilerUtilities::GenerateAssignmentNodes(class FKismetComp
 				}
 				else if(ForClass->ClassDefaultObject)
 				{
-					FBlueprintEditorUtils::PropertyValueToString(Property, (uint8*)ForClass->ClassDefaultObject, DefaultValueAsString);
+					FBlueprintEditorUtils::PropertyValueToString(Property, (uint8*)ForClass->ClassDefaultObject.Get(), DefaultValueAsString);
 
 					if (DefaultValueAsString == OrgPin->GetDefaultAsString())
 					{
@@ -797,8 +813,66 @@ UEdGraphPin* FKismetCompilerUtilities::GenerateAssignmentNodes(class FKismetComp
 				}
 			}
 
-			UFunction* SetByNameFunction = Schema->FindSetVariableByNameFunction(OrgPin->PinType);
-			if (SetByNameFunction)
+			const FString& SetFunctionName = Property->GetMetaData(FBlueprintMetadata::MD_PropertySetFunction);
+			if (!SetFunctionName.IsEmpty())
+			{
+				UFunction* SetFunction = ForClass->FindFunctionByName(*SetFunctionName);
+				check(SetFunction);
+
+				// Add a cast node so we can call the Setter function with a pin of the right class
+				UK2Node_DynamicCast* CastNode = CompilerContext.SpawnIntermediateNode<UK2Node_DynamicCast>(SpawnNode, SourceGraph);
+				CastNode->TargetType = const_cast<UClass*>(ForClass);
+				CastNode->SetPurity(true);
+				CastNode->AllocateDefaultPins();
+				CastNode->GetCastSourcePin()->MakeLinkTo(CallBeginResult);
+				CastNode->NotifyPinConnectionListChanged(CastNode->GetCastSourcePin());
+
+				UK2Node_CallFunction* CallFuncNode = CompilerContext.SpawnIntermediateNode<UK2Node_CallFunction>(SpawnNode, SourceGraph);
+				CallFuncNode->SetFromFunction(SetFunction);
+				CallFuncNode->AllocateDefaultPins();
+
+				// Connect this node into the exec chain
+				Schema->TryCreateConnection(LastThen, CallFuncNode->GetExecPin());
+				LastThen = CallFuncNode->GetThenPin();
+
+				// Connect the new object to the 'object' pin
+				UEdGraphPin* ObjectPin = Schema->FindSelfPin(*CallFuncNode, EGPD_Input);
+				CastNode->GetCastResultPin()->MakeLinkTo(ObjectPin);
+
+				// Move Value pin connections
+				UEdGraphPin* SetFunctionValuePin = nullptr;
+				for (UEdGraphPin* CallFuncPin : CallFuncNode->Pins)
+				{
+					if (!Schema->IsMetaPin(*CallFuncPin))
+					{
+						check(CallFuncPin->Direction == EGPD_Input);
+						SetFunctionValuePin = CallFuncPin;
+						break;
+					}
+				}
+				check(SetFunctionValuePin);
+
+				CompilerContext.MovePinLinksToIntermediate(*OrgPin, *SetFunctionValuePin);
+			}
+			else if (FKismetCompilerUtilities::IsPropertyUsesFieldNotificationSetValueAndBroadcast(Property))
+			{
+				// Add a cast node so we can call the Setter function with a pin of the right class
+				//UK2Node_DynamicCast* CastNode = CompilerContext.SpawnIntermediateNode<UK2Node_DynamicCast>(SpawnNode, SourceGraph);
+				//CastNode->TargetType = const_cast<UClass*>(ForClass);
+				//CastNode->SetPurity(true);
+				//CastNode->AllocateDefaultPins();
+				//CastNode->GetCastSourcePin()->MakeLinkTo(CallBeginResult);
+				//CastNode->NotifyPinConnectionListChanged(CastNode->GetCastSourcePin());
+
+				FMemberReference MemberReference;
+				MemberReference.SetFromField<FProperty>(Property, false);
+				TTuple<UEdGraphPin*, UEdGraphPin*> ExecThenPins = GenerateFieldNotificationSetNode(CompilerContext, SourceGraph, SpawnNode, CallBeginResult, Property, MemberReference, false, false, Property->HasAllPropertyFlags(CPF_Net));
+
+				// Connect this node into the exec chain
+				Schema->TryCreateConnection(LastThen, ExecThenPins.Get<0>());
+				LastThen = ExecThenPins.Get<1>();
+			}
+			else if (UFunction* SetByNameFunction = Schema->FindSetVariableByNameFunction(OrgPin->PinType))
 			{
 				UK2Node_CallFunction* SetVarNode = nullptr;
 				if (OrgPin->PinType.IsArray())
@@ -816,7 +890,7 @@ UEdGraphPin* FKismetCompilerUtilities::GenerateAssignmentNodes(class FKismetComp
 				Schema->TryCreateConnection(LastThen, SetVarNode->GetExecPin());
 				LastThen = SetVarNode->GetThenPin();
 
-				// Connect the new actor to the 'object' pin
+				// Connect the new object to the 'object' pin
 				UEdGraphPin* ObjectPin = SetVarNode->FindPinChecked(ObjectParamName);
 				CallBeginResult->MakeLinkTo(ObjectPin);
 
@@ -853,10 +927,15 @@ UEdGraphPin* FKismetCompilerUtilities::GenerateAssignmentNodes(class FKismetComp
 					}
 					else
 					{
+						// For interface pins we need to copy over the subcategory
+						if (OrgPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Interface)
+						{
+							ValuePin->PinType.PinSubCategoryObject = OrgPin->PinType.PinSubCategoryObject;
+						}
+
 						CompilerContext.MovePinLinksToIntermediate(*OrgPin, *ValuePin);
 						SetVarNode->PinConnectionListChanged(ValuePin);
 					}
-
 				}
 			}
 		}
@@ -865,7 +944,221 @@ UEdGraphPin* FKismetCompilerUtilities::GenerateAssignmentNodes(class FKismetComp
 	return LastThen;
 }
 
-void FKismetCompilerUtilities::CreateObjectAssignmentStatement(FKismetFunctionContext& Context, UEdGraphNode* Node, FBPTerminal* SrcTerm, FBPTerminal* DstTerm)
+namespace UE::KismetCompiler::Private
+{
+	UK2Node_MakeArray* MakeArrayNodeForFieldNotificationId(FKismetCompilerContext& CompilerContext, UEdGraph* SourceGraph, UEdGraphNode* SourceNode, UEdGraphPin* LinkTo)
+	{
+		UK2Node_MakeArray* MakeArrayNode = CompilerContext.SpawnIntermediateNode<UK2Node_MakeArray>(SourceNode, SourceGraph);
+		MakeArrayNode->AllocateDefaultPins();
+		CompilerContext.MessageLog.NotifyIntermediateObjectCreation(MakeArrayNode, SourceNode);
+
+		// Link the array to the other input pin
+		{
+			UEdGraphPin* ArrayOut = MakeArrayNode->GetOutputPin();
+			ArrayOut->MakeLinkTo(LinkTo);
+			MakeArrayNode->PinConnectionListChanged(ArrayOut);
+		}
+
+		return MakeArrayNode;
+	}
+
+	UK2Node_MakeStruct* MakeFieldNotificationIdStruct(FKismetCompilerContext& CompilerContext, UEdGraph* SourceGraph, UEdGraphNode* SourceNode, const FString& FieldId)
+	{
+		UK2Node_MakeStruct* MakeStruct = CompilerContext.SpawnIntermediateNode<UK2Node_MakeStruct>(SourceNode, SourceGraph);
+		MakeStruct->StructType = FFieldNotificationId::StaticStruct();;
+		MakeStruct->AllocateDefaultPins();
+		MakeStruct->bMadeAfterOverridePinRemoval = true;
+		CompilerContext.MessageLog.NotifyIntermediateObjectCreation(MakeStruct, SourceNode);
+
+		CompilerContext.GetSchema()->TrySetDefaultValue(*MakeStruct->FindPinChecked(GET_MEMBER_NAME_STRING_CHECKED(FFieldNotificationId, FieldName)), FieldId);
+
+		return MakeStruct;
+	}
+
+	void MakeLinkFromMakeStructTo(UK2Node_MakeStruct* MakeStructNode, UEdGraphPin* InputPin)
+	{
+		UEdGraphPin** MakeStructOutPin = MakeStructNode->Pins.FindByPredicate([](UEdGraphPin* OtherPin) { return OtherPin->Direction == EGPD_Output; });
+		check(MakeStructOutPin);
+		(*MakeStructOutPin)->MakeLinkTo(InputPin);
+	}
+
+	void AddMakeStructToMakeArrayNode(UK2Node_MakeArray* MakeArrayNode, UK2Node_MakeStruct* MakeStructNode, int32 Index)
+	{
+		// Find the input pin on the "Make Array" node by index.
+		if (Index > 0)
+		{
+			MakeArrayNode->AddInputPin();
+		}
+
+		const FString PinName = FString::Printf(TEXT("[%d]"), Index);
+		MakeLinkFromMakeStructTo(MakeStructNode, MakeArrayNode->FindPinChecked(PinName));
+	}
+}
+
+TTuple<UEdGraphPin*, UEdGraphPin*> FKismetCompilerUtilities::GenerateFieldNotificationSetNode(FKismetCompilerContext& CompilerContext, UEdGraph* SourceGraph, UEdGraphNode* SourceNode, UEdGraphPin* SelfPin, FProperty* VariableProperty, const FMemberReference& VariableReference, bool bHasLocalRepNotify, bool bShouldFlushDormancyOnSet, bool bIsNetProperty)
+{
+	UClass* OwnerClass = VariableProperty->GetOwnerClass();
+	const FString& FieldNotifyMetaData = VariableProperty->GetMetaData(FBlueprintMetadata::MD_FieldNotify);
+	TArray<FString> OtherFieldNotifyToTrigger;
+	FieldNotifyMetaData.ParseIntoArray(OtherFieldNotifyToTrigger, TEXT("|"), true);
+
+	// Set With Broadcast K2 function
+	UK2Node_CallFunction* CallFuncNode = CompilerContext.SpawnIntermediateNode<UK2Node_CallFunction>(SourceNode, SourceGraph);
+	if (OtherFieldNotifyToTrigger.Num() == 0)
+	{
+		CallFuncNode->SetFromFunction(UFieldNotificationLibrary::StaticClass()->FindFunctionByName(GET_MEMBER_NAME_CHECKED(UFieldNotificationLibrary, SetPropertyValueAndBroadcast)));
+	}
+	else
+	{
+		CallFuncNode->SetFromFunction(UFieldNotificationLibrary::StaticClass()->FindFunctionByName(GET_MEMBER_NAME_CHECKED(UFieldNotificationLibrary, SetPropertyValueAndBroadcastFields)));
+	}
+	CallFuncNode->AllocateDefaultPins();
+
+	const UEdGraphSchema_K2* K2Schema = CompilerContext.GetSchema();
+
+	// Set Self pin connections
+	{
+		if (ensure(SelfPin) && SelfPin->LinkedTo.Num() > 0 && SelfPin->Direction == EEdGraphPinDirection::EGPD_Input)
+		{
+			CompilerContext.CopyPinLinksToIntermediate(*SelfPin, *CallFuncNode->FindPinChecked(FName("Object")));
+			CompilerContext.CopyPinLinksToIntermediate(*SelfPin, *CallFuncNode->FindPinChecked(FName("NetOwner")));
+		}
+		else if (SelfPin && SelfPin->Direction == EEdGraphPinDirection::EGPD_Output)
+		{
+			K2Schema->TryCreateConnection(SelfPin, CallFuncNode->FindPinChecked(FName("Object"), EGPD_Input));
+			K2Schema->TryCreateConnection(SelfPin, CallFuncNode->FindPinChecked(FName("NetOwner"), EGPD_Input));
+		}
+		else
+		{
+			UK2Node_Self* SelfNode = CompilerContext.SpawnIntermediateNode<UK2Node_Self>(SourceNode, SourceGraph);
+			SelfNode->AllocateDefaultPins();
+
+			SelfPin = SelfNode->FindPinChecked(UEdGraphSchema_K2::PN_Self);
+			K2Schema->TryCreateConnection(SelfPin, CallFuncNode->FindPinChecked(FName("Object"), EGPD_Input));
+			K2Schema->TryCreateConnection(SelfPin, CallFuncNode->FindPinChecked(FName("NetOwner"), EGPD_Input));
+		}
+	}
+
+	// OldValue and NewValue pin connections
+	{
+		UK2Node_VariableGet* VariableGetNode = CompilerContext.SpawnIntermediateNode<UK2Node_VariableGet>(SourceNode, SourceGraph);
+		VariableGetNode->VariableReference = VariableReference;
+		VariableGetNode->AllocateDefaultPins();
+		CompilerContext.MessageLog.NotifyIntermediateObjectCreation(VariableGetNode, SourceNode);
+
+		{
+			UEdGraphPin* GetSelfPin = K2Schema->FindSelfPin(*VariableGetNode, EGPD_Input);
+			check(SelfPin && GetSelfPin);
+			if (SelfPin->Direction == EEdGraphPinDirection::EGPD_Output)
+			{
+				K2Schema->TryCreateConnection(SelfPin, GetSelfPin);
+			}
+			else
+			{
+				CompilerContext.CopyPinLinksToIntermediate(*SelfPin, *GetSelfPin);
+			}
+		}
+
+		UEdGraphPin* VariableGetPin = VariableGetNode->FindPinChecked(VariableGetNode->GetVarName(), EGPD_Output);
+		UEdGraphPin* OldValuePin = CallFuncNode->FindPinChecked(FName("OldValue"), EGPD_Input);
+		K2Schema->TryCreateConnection(VariableGetPin, OldValuePin);
+		CallFuncNode->NotifyPinConnectionListChanged(OldValuePin);
+
+		// Force the pin to be the same type (see CustomStructureParam) 
+		UEdGraphPin* NewValuePin = CallFuncNode->FindPinChecked(FName("NewValue"), EGPD_Input);
+		NewValuePin->PinType = OldValuePin->PinType;
+		CompilerContext.CopyPinLinksToIntermediate(*SourceNode->FindPinChecked(VariableReference.GetMemberName(), EGPD_Input), *NewValuePin);
+
+		bool bUseReferenceByRef = NewValuePin->LinkedTo.Num() != 0;
+		K2Schema->TrySetDefaultValue(*CallFuncNode->FindPinChecked(FName("NewValueByRef")), bUseReferenceByRef ? TEXT("True") : TEXT("False"));
+	}
+
+	// Set Net args pin
+	{
+		K2Schema->TrySetDefaultValue(*CallFuncNode->FindPinChecked(FName("bHasLocalRepNotify")), bHasLocalRepNotify ? TEXT("True") : TEXT("False"));
+		K2Schema->TrySetDefaultValue(*CallFuncNode->FindPinChecked(FName("bShouldFlushDormancyOnSet")), bHasLocalRepNotify ? TEXT("True") : TEXT("False"));
+		K2Schema->TrySetDefaultValue(*CallFuncNode->FindPinChecked(FName("bIsNetProperty")), bHasLocalRepNotify ? TEXT("True") : TEXT("False"));
+	}
+
+	TTuple<UEdGraphPin*, UEdGraphPin*> Result = {CallFuncNode->GetExecPin(), CallFuncNode->GetThenPin()};
+
+	// Assign the other broadcast to generate
+	if (OtherFieldNotifyToTrigger.Num() > 0)
+	{
+		UK2Node_MakeArray*MakeArrayNode = UE::KismetCompiler::Private::MakeArrayNodeForFieldNotificationId(CompilerContext, SourceGraph, SourceNode, CallFuncNode->FindPinChecked(TEXT("ExtraFieldIds")));
+		for (int32 ArgIndex = 0; ArgIndex < OtherFieldNotifyToTrigger.Num(); ++ArgIndex)
+		{
+			const FString& OtherFieldId = OtherFieldNotifyToTrigger[ArgIndex];
+			if (!OtherFieldId.IsEmpty())
+			{
+				// Spawn a "Make Struct" node to create the struct FFieldNotificationId
+				UK2Node_MakeStruct* MakeStuctNode = UE::KismetCompiler::Private::MakeFieldNotificationIdStruct(CompilerContext, SourceGraph, SourceNode, OtherFieldId);
+				UE::KismetCompiler::Private::AddMakeStructToMakeArrayNode(MakeArrayNode, MakeStuctNode, ArgIndex);
+			}
+		}
+	}
+
+	return Result;
+}
+
+TTuple<UEdGraphPin*, UEdGraphPin*> FKismetCompilerUtilities::GenerateBroadcastFieldNotificationNode(FKismetCompilerContext& CompilerContext, UEdGraph* SourceGraph, UEdGraphNode* SourceNode, FProperty* Property)
+{
+	UClass* OwnerClass = Property->GetOwnerClass();
+	const FString& FieldNotifyMetaData = Property->GetMetaData(FBlueprintMetadata::MD_FieldNotify);
+	TArray<FString> OtherFieldNotifyToTrigger;
+	FieldNotifyMetaData.ParseIntoArray(OtherFieldNotifyToTrigger, TEXT("|"), true);
+
+	// Broadcast function
+	UK2Node_CallFunction* CallFuncNode = CompilerContext.SpawnIntermediateNode<UK2Node_CallFunction>(SourceNode, SourceGraph);
+	if (OtherFieldNotifyToTrigger.Num() == 0)
+	{
+		CallFuncNode->SetFromFunction(UFieldNotificationLibrary::StaticClass()->FindFunctionByName(GET_MEMBER_NAME_CHECKED(UFieldNotificationLibrary, BroadcastFieldValueChanged)));
+	}
+	else
+	{
+		CallFuncNode->SetFromFunction(UFieldNotificationLibrary::StaticClass()->FindFunctionByName(GET_MEMBER_NAME_CHECKED(UFieldNotificationLibrary, BroadcastFieldsValueChanged)));
+	}
+	CallFuncNode->AllocateDefaultPins();
+
+	const UEdGraphSchema_K2* K2Schema = CompilerContext.GetSchema();
+
+	// Set Self pin connections
+	{
+		UK2Node_Self* SelfNode = CompilerContext.SpawnIntermediateNode<UK2Node_Self>(SourceNode, SourceGraph);
+		SelfNode->AllocateDefaultPins();
+
+		UEdGraphPin* SelfNodePin = SelfNode->FindPinChecked(UEdGraphSchema_K2::PN_Self);
+		K2Schema->TryCreateConnection(SelfNodePin, CallFuncNode->FindPinChecked(FName("Object"), EGPD_Input));
+	}
+
+	TTuple<UEdGraphPin*, UEdGraphPin*> Result = { CallFuncNode->GetExecPin(), CallFuncNode->GetThenPin() };
+
+	// Assign the FieldId
+	if (OtherFieldNotifyToTrigger.Num() == 0)
+	{
+		UK2Node_MakeStruct* MakeStruct = UE::KismetCompiler::Private::MakeFieldNotificationIdStruct(CompilerContext, SourceGraph, SourceNode, Property->GetName());
+		UE::KismetCompiler::Private::MakeLinkFromMakeStructTo(MakeStruct, CallFuncNode->FindPinChecked(TEXT("FieldId")));
+	}
+	else
+	{
+		OtherFieldNotifyToTrigger.Add(Property->GetName());
+		UK2Node_MakeArray* MakeArrayNode = UE::KismetCompiler::Private::MakeArrayNodeForFieldNotificationId(CompilerContext, SourceGraph, SourceNode, CallFuncNode->FindPinChecked(TEXT("FieldIds")));
+		for (int32 ArgIndex = 0; ArgIndex < OtherFieldNotifyToTrigger.Num(); ++ArgIndex)
+		{
+			const FString& OtherFieldId = OtherFieldNotifyToTrigger[ArgIndex];
+			if (!OtherFieldId.IsEmpty())
+			{
+				// Spawn a "Make Struct" node to create the struct FFieldNotificationId
+				UK2Node_MakeStruct* MakeStuctNode = UE::KismetCompiler::Private::MakeFieldNotificationIdStruct(CompilerContext, SourceGraph, SourceNode, OtherFieldId);
+				UE::KismetCompiler::Private::AddMakeStructToMakeArrayNode(MakeArrayNode, MakeStuctNode, ArgIndex);
+			}
+		}
+	}
+
+	return Result;
+}
+
+void FKismetCompilerUtilities::CreateObjectAssignmentStatement(FKismetFunctionContext& Context, UEdGraphNode* Node, FBPTerminal* SrcTerm, FBPTerminal* DstTerm, UEdGraphPin* DstPin)
 {
 	UClass* InputObjClass = Cast<UClass>(SrcTerm->Type.PinSubCategoryObject.Get());
 	UClass* OutputObjClass = Cast<UClass>(DstTerm->Type.PinSubCategoryObject.Get());
@@ -892,10 +1185,31 @@ void FKismetCompilerUtilities::CreateObjectAssignmentStatement(FKismetFunctionCo
 	}
 	else
 	{
+		FBPTerminal* RHSTerm = SrcTerm;
+
+		using namespace UE::KismetCompiler;
+
+		FBPTerminal* ImplicitCastTerm = nullptr;
+
+		// Some pins can share a single terminal (eg: those in UK2Node_FunctionResult)
+		// In those cases, it's preferable to use a specific pin instead of relying on what DstTerm points to.
+		UEdGraphPin* DstPinSearchKey = DstPin ? DstPin : DstTerm->SourcePin;
+
+		// Some terms don't necessarily have a valid SourcePin (eg: FKCHandler_FunctionEntry)
+		if (DstPinSearchKey)
+		{
+			ImplicitCastTerm = CastingUtils::InsertImplicitCastStatement(Context, DstPinSearchKey, RHSTerm);
+		}
+
+		if (ImplicitCastTerm != nullptr)
+		{
+			RHSTerm = ImplicitCastTerm;
+		}
+
 		FBlueprintCompiledStatement& Statement = Context.AppendStatementForNode(Node);
 		Statement.Type = KCST_Assignment;
 		Statement.LHS = DstTerm;
-		Statement.RHS.Add(SrcTerm);
+		Statement.RHS.Add(RHSTerm);
 	}
 }
 
@@ -943,12 +1257,28 @@ FProperty* FKismetCompilerUtilities::CreatePrimitiveProperty(FFieldVariant Prope
 				else
 				{
 					NewPropertyObj = new FObjectProperty(PropertyScope, ValidatedPropertyName, ObjectFlags);
+					// If lazy load is enabled make the object property a TObjectPtr property
+					// to allow for unresolved UObjects
+					if (FLinkerLoad::IsImportLazyLoadEnabled())
+					{
+						NewPropertyObj->SetPropertyFlags(CPF_TObjectPtrWrapper);
+					}
 				}
 
 				// Is the property a reference to something that should default to instanced?
 				if (SubType->HasAnyClassFlags(CLASS_DefaultToInstanced))
 				{
 					NewPropertyObj->SetPropertyFlags(CPF_InstancedReference);
+
+					// Actor components should only be instanced by the SCS editor.
+					// 
+					// Default actor components are outered to the generated BP class instead of the CDO.
+					// If we set "EditInline" on actor components, we would actually outer them to the CDO.
+					// This would lead to various serialization and instancing issues.
+					if (!SubType->IsChildOf<UActorComponent>())
+					{
+						NewPropertyObj->SetMetaData(TEXT("EditInline"), TEXT("true"));
+					}
 				}
 
 				// we want to use this setter function instead of setting the 
@@ -1048,10 +1378,22 @@ FProperty* FKismetCompilerUtilities::CreatePrimitiveProperty(FFieldVariant Prope
 		NewProperty = new FInt64Property(PropertyScope, ValidatedPropertyName, ObjectFlags);
 		NewProperty->SetPropertyFlags(CPF_HasGetValueTypeHash);
 	}
-	else if (PinCategory == UEdGraphSchema_K2::PC_Float)
+	else if (PinCategory == UEdGraphSchema_K2::PC_Real)
 	{
-		NewProperty = new FFloatProperty(PropertyScope, ValidatedPropertyName, ObjectFlags);
-		NewProperty->SetPropertyFlags(CPF_HasGetValueTypeHash);
+		if (PinSubCategory == UEdGraphSchema_K2::PC_Float)
+		{
+			NewProperty = new FFloatProperty(PropertyScope, ValidatedPropertyName, ObjectFlags);
+			NewProperty->SetPropertyFlags(CPF_HasGetValueTypeHash);
+		}
+		else if (PinSubCategory == UEdGraphSchema_K2::PC_Double)
+		{
+			NewProperty = new FDoubleProperty(PropertyScope, ValidatedPropertyName, ObjectFlags);
+			NewProperty->SetPropertyFlags(CPF_HasGetValueTypeHash);
+		}
+		else
+		{
+			checkf(false, TEXT("Erroneous pin subcategory for PC_Real: %s"), *PinSubCategory.ToString());
+		}
 	}
 	else if (PinCategory == UEdGraphSchema_K2::PC_Boolean)
 	{
@@ -1127,9 +1469,6 @@ FProperty* FKismetCompilerUtilities::CreatePropertyOnScope(UStruct* Scope, const
 	// Check to see if there's already a object on this scope with the same name, and throw an internal compiler error if so
 	// If this happens, it breaks the property link, which causes stack corruption and hard-to-track errors, so better to fail at this point
 	{
-#if !USE_UBER_GRAPH_PERSISTENT_FRAME
-	#error "Without the uber graph frame we will intentionally create properties with conflicting names on the same scope - disable this error at your own risk"
-#else
 		FFieldVariant ExistingObject = CheckPropertyNameOnScope(Scope, PropertyName);
 		if (ExistingObject.IsValid())
 		{
@@ -1149,7 +1488,6 @@ FProperty* FKismetCompilerUtilities::CreatePropertyOnScope(UStruct* Scope, const
 
 			ValidatedPropertyName = TestName;
 		}
-#endif
 	}
 
 	FProperty* NewProperty = nullptr;
@@ -1344,204 +1682,9 @@ FFieldVariant FKismetCompilerUtilities::CheckPropertyNameOnScope(UStruct* Scope,
 	return FFieldVariant();
 }
 
-/** Checks if the execution path ends with a Return node */
 void FKismetCompilerUtilities::ValidateProperEndExecutionPath(FKismetFunctionContext& Context)
 {
-	struct FRecrursiveHelper
-	{
-		static bool IsExecutionSequence(const UEdGraphNode* Node)
-		{
-			return Node && (UK2Node_ExecutionSequence::StaticClass() == Node->GetClass()); // no "SourceNode->IsA<UK2Node_ExecutionSequence>()" because MultiGate is based on ExecutionSequence
-		}
-
-		static void CheckPathEnding(const UK2Node* StartingNode, TSet<const UK2Node*>& VisitedNodes, FKismetFunctionContext& InContext, bool bPathShouldEndWithReturn, TSet<const UK2Node*>& BreakableNodesSeeds)
-		{
-			const UK2Node* CurrentNode = StartingNode;
-			while (CurrentNode)
-			{
-				const UK2Node* SourceNode = CurrentNode;
-				CurrentNode = nullptr;
-
-				bool bAlreadyVisited = false;
-				VisitedNodes.Add(SourceNode, &bAlreadyVisited);
-				if (!bAlreadyVisited && !SourceNode->IsA<UK2Node_FunctionResult>())
-				{
-					const bool bIsExecutionSequence = IsExecutionSequence(SourceNode); 
-					for (UEdGraphPin* CurrentPin : SourceNode->Pins)
-					{
-						if (CurrentPin
-							&& (CurrentPin->Direction == EEdGraphPinDirection::EGPD_Output)
-							&& (CurrentPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec))
-						{
-							if (!CurrentPin->LinkedTo.Num())
-							{
-								if (!bIsExecutionSequence)
-								{
-									BreakableNodesSeeds.Add(SourceNode);
-								}
-								if (bPathShouldEndWithReturn && !bIsExecutionSequence)
-								{
-									InContext.MessageLog.Note(*LOCTEXT("ExecutionEnd_Note", "The execution path doesn't end with a return node. @@").ToString(), CurrentPin);
-								}
-								continue;
-							}
-							UEdGraphPin* LinkedPin = CurrentPin->LinkedTo[0];
-							const UK2Node* NextNode = ensure(LinkedPin) ? Cast<const UK2Node>(LinkedPin->GetOwningNodeUnchecked()) : nullptr;
-							ensure(NextNode);
-							if (CurrentNode)
-							{
-								FRecrursiveHelper::CheckPathEnding(CurrentNode, VisitedNodes, InContext, bPathShouldEndWithReturn && !bIsExecutionSequence, BreakableNodesSeeds);
-							}
-							CurrentNode = NextNode;
-						}
-					}
-				}
-			}
-		}
-
-		static void GatherBreakableNodes(const UK2Node* StartingNode, TSet<const UK2Node*>& BreakableNodes, FKismetFunctionContext& InContext)
-		{
-			const UK2Node* CurrentNode = StartingNode;
-			while (CurrentNode)
-			{
-				const UK2Node* SourceNode = CurrentNode;
-				CurrentNode = nullptr;
-
-				bool bAlreadyVisited = false;
-				BreakableNodes.Add(SourceNode, &bAlreadyVisited);
-				if (!bAlreadyVisited)
-				{
-					for (UEdGraphPin* CurrentPin : SourceNode->Pins)
-					{
-						if (CurrentPin
-							&& (CurrentPin->Direction == EEdGraphPinDirection::EGPD_Input)
-							&& (CurrentPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
-							&& CurrentPin->LinkedTo.Num())
-						{
-							for (UEdGraphPin* LinkedPin : CurrentPin->LinkedTo)
-							{
-								const UK2Node* NextNode = ensure(LinkedPin) ? Cast<const UK2Node>(LinkedPin->GetOwningNodeUnchecked()) : nullptr;
-								ensure(NextNode);
-								if (!FRecrursiveHelper::IsExecutionSequence(NextNode))
-								{
-									if (CurrentNode)
-									{
-										GatherBreakableNodes(CurrentNode, BreakableNodes, InContext);
-									}
-									CurrentNode = NextNode;
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-
-		static void GatherBreakableNodesSeedsFromSequences(TSet<const UK2Node_ExecutionSequence*>& UnBreakableExecutionSequenceNodes
-			, TSet<const UK2Node*>& BreakableNodesSeeds
-			, TSet<const UK2Node*>& BreakableNodes
-			, FKismetFunctionContext& InContext)
-		{
-			for (const UK2Node_ExecutionSequence* SequenceNode : UnBreakableExecutionSequenceNodes)
-			{
-				bool bIsBreakable = true;
-				// Sequence is breakable when all it's outputs are breakable
-				for (UEdGraphPin* CurrentPin : SequenceNode->Pins)
-				{
-					if (CurrentPin
-						&& (CurrentPin->Direction == EEdGraphPinDirection::EGPD_Output)
-						&& (CurrentPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
-						&& CurrentPin->LinkedTo.Num())
-					{
-						UEdGraphPin* LinkedPin = CurrentPin->LinkedTo[0];
-						const UK2Node* NextNode = ensure(LinkedPin) ? Cast<const UK2Node>(LinkedPin->GetOwningNodeUnchecked()) : nullptr;
-						ensure(NextNode);
-						if (!BreakableNodes.Contains(NextNode))
-						{
-							bIsBreakable = false;
-							break;
-						}
-					}
-				}
-
-				if (bIsBreakable)
-				{
-					bool bWasAlreadyBreakable = false;
-					BreakableNodesSeeds.Add(SequenceNode, &bWasAlreadyBreakable);
-					ensure(!bWasAlreadyBreakable);
-					int32 WasRemoved = UnBreakableExecutionSequenceNodes.Remove(SequenceNode);
-					ensure(WasRemoved);
-				}
-			}
-		}
-
-		static void CheckDeadExecutionPath(TSet<const UK2Node*>& BreakableNodesSeeds, FKismetFunctionContext& InContext)
-		{
-			TSet<const UK2Node_ExecutionSequence*> UnBreakableExecutionSequenceNodes;
-			for (UEdGraphNode* Node : InContext.SourceGraph->Nodes)
-			{
-				if (FRecrursiveHelper::IsExecutionSequence(Node))
-				{
-					UnBreakableExecutionSequenceNodes.Add(Cast<UK2Node_ExecutionSequence>(Node));
-				}
-			}
-
-			TSet<const UK2Node*> BreakableNodes;
-			while (BreakableNodesSeeds.Num())
-			{
-				for (const UK2Node* StartingNode : BreakableNodesSeeds)
-				{
-					GatherBreakableNodes(StartingNode, BreakableNodes, InContext);
-				}
-				BreakableNodesSeeds.Empty();
-				FRecrursiveHelper::GatherBreakableNodesSeedsFromSequences(UnBreakableExecutionSequenceNodes, BreakableNodesSeeds, BreakableNodes, InContext);
-			}
-
-			for (const UK2Node_ExecutionSequence* UnBreakableExecutionSequenceNode : UnBreakableExecutionSequenceNodes)
-			{
-				bool bUnBreakableOutputWasFound = false;
-				for (UEdGraphPin* CurrentPin : UnBreakableExecutionSequenceNode->Pins)
-				{
-					if (CurrentPin
-						&& (CurrentPin->Direction == EEdGraphPinDirection::EGPD_Output)
-						&& (CurrentPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
-						&& CurrentPin->LinkedTo.Num())
-					{
-						if (bUnBreakableOutputWasFound)
-						{
-							InContext.MessageLog.Note(*LOCTEXT("DeadExecution_Note", "The path is never executed. @@").ToString(), CurrentPin);
-							break;
-						}
-
-						UEdGraphPin* LinkedPin = CurrentPin->LinkedTo[0];
-						const UK2Node* NextNode = ensure(LinkedPin) ? Cast<const UK2Node>(LinkedPin->GetOwningNodeUnchecked()) : nullptr;
-						ensure(NextNode);
-						if (!BreakableNodes.Contains(NextNode))
-						{
-							bUnBreakableOutputWasFound = true;
-						}
-					}
-				}
-			}
-		}
-	};
-
-	// Function is designed for multiple return nodes.
-	if (!Context.IsEventGraph() && Context.SourceGraph && Context.Schema)
-	{
-		TArray<UK2Node_FunctionResult*> ReturnNodes;
-		Context.SourceGraph->GetNodesOfClass(ReturnNodes);
-		if (ReturnNodes.Num() && ensure(Context.EntryPoint))
-		{
-			TSet<const UK2Node*> VisitedNodes, BreakableNodesSeeds;
-			FRecrursiveHelper::CheckPathEnding(Context.EntryPoint, VisitedNodes, Context, true, BreakableNodesSeeds);
-
-			// A non-pure node, that lies on a execution path, that may result with "EndThread" state, is called Breakable.
-			// The execution path between the node and Return node can be broken.
-
-			FRecrursiveHelper::CheckDeadExecutionPath(BreakableNodesSeeds, Context);
-		}
-	}
+	ensureMsgf(false, TEXT("ValidateProperEndExecutionPath has been deprecated"));
 }
 
 void FKismetCompilerUtilities::DetectValuesReturnedByRef(const UFunction* Func, const UK2Node * Node, FCompilerResultsLog& MessageLog)
@@ -1565,6 +1708,15 @@ void FKismetCompilerUtilities::DetectValuesReturnedByRef(const UFunction* Func, 
 			}
 		}
 	}
+}
+
+bool FKismetCompilerUtilities::IsPropertyUsesFieldNotificationSetValueAndBroadcast(const FProperty* Property)
+{
+	return Property->HasMetaData(FBlueprintMetadata::MD_FieldNotify)
+		&& !Property->HasMetaData(FBlueprintMetadata::MD_PropertySetFunction)
+		&& !Property->HasSetter()
+		&& Cast<UBlueprintGeneratedClass>(Property->GetOwnerClass()) != nullptr
+		&& Property->GetOwnerClass()->ImplementsInterface(UNotifyFieldValueChanged::StaticClass());
 }
 
 bool FKismetCompilerUtilities::IsStatementReducible(EKismetCompiledStatementType StatementType)
@@ -1678,6 +1830,404 @@ void FKismetCompilerUtilities::UpdateDependentBlueprints(UBlueprint* ForBP)
 			}
 		}
 	}
+
+	// Clear out any stale references to invalid/deleted objects.
+	TSet<TWeakObjectPtr<UBlueprint>> InvalidReferences;
+	for (const TWeakObjectPtr<UBlueprint>& Reference : ForBP->CachedDependents)
+	{
+		if (!Reference.IsValid() || Reference.IsStale())
+		{
+			InvalidReferences.Add(Reference);
+		}
+	}
+
+	for (const TWeakObjectPtr<UBlueprint>& InvalidReference : InvalidReferences)
+	{
+		ForBP->CachedDependents.Remove(InvalidReference);
+	}
+}
+
+bool FKismetCompilerUtilities::CheckFunctionThreadSafety(const FKismetFunctionContext& InContext, FCompilerResultsLog& InMessageLog, bool InbEmitErrors)
+{
+	bool bIsThreadSafe = true;
+
+	// 1st pass: Build set of 'thread safe' object terms
+	TSet<const FBPTerminal*> ThreadSafeObjectTerms;
+	
+	// Input params to functions (is is assumed that this function is marked thread-safe)
+	if(FBlueprintEditorUtils::HasFunctionBlueprintThreadSafeMetaData(InContext.Function))
+	{
+		for(const FBPTerminal& Parameter : InContext.Parameters)
+		{
+			if(Parameter.IsObjectContextType() && Parameter.IsLocalVarTerm() && Parameter.AssociatedVarProperty && Parameter.AssociatedVarProperty->IsA<FObjectProperty>())
+			{
+				ThreadSafeObjectTerms.Add(&Parameter);
+			}
+		}
+	}
+
+	for(const TPair<UEdGraphNode*, TArray<FBlueprintCompiledStatement*>>& StatementPair : InContext.StatementsPerNode)
+	{
+		for(const FBlueprintCompiledStatement* Statement : StatementPair.Value)
+		{
+			// Return values from thread-safe functions
+			if(Statement->Type == KCST_CallFunction && Statement->FunctionToCall != nullptr)
+			{
+				if(FBlueprintEditorUtils::HasFunctionBlueprintThreadSafeMetaData(Statement->FunctionToCall))
+				{
+					if(Statement->LHS)
+					{
+						ThreadSafeObjectTerms.Add(Statement->LHS);
+					}
+				}
+			}
+
+
+		}
+	}
+
+	// 2nd pass, multiple times: Propagate thread safe terms down the statement lists via supported links
+	// @TODO: we can probably reduce the order of this algorithm by keeping a working set of unchecked terms and only checking them each loop
+	bool bPropagated = false;
+	do
+	{
+		bPropagated = false;
+		
+		for(const TPair<UEdGraphNode*, TArray<FBlueprintCompiledStatement*>>& StatementPair : InContext.StatementsPerNode)
+		{
+			for(const FBlueprintCompiledStatement* Statement : StatementPair.Value)
+			{
+				switch(Statement->Type)
+				{
+				case KCST_CastObjToInterface:
+				case KCST_DynamicCast:
+				case KCST_MetaCast:
+				case KCST_CastInterfaceToObj:
+					if(Statement->LHS)
+					{
+						for(const FBPTerminal* RHSTerm : Statement->RHS)
+						{
+							if(ThreadSafeObjectTerms.Contains(RHSTerm) && !ThreadSafeObjectTerms.Contains(Statement->LHS))
+							{
+								check(Statement->LHS->AssociatedVarProperty && (Statement->LHS->AssociatedVarProperty->IsA<FObjectProperty>() || Statement->LHS->AssociatedVarProperty->IsA<FInterfaceProperty>()));
+								ThreadSafeObjectTerms.Add(Statement->LHS); 
+								bPropagated = true;
+							}
+						}
+					}
+					break;
+				default:
+					break;
+				}
+			}
+		}	
+	}
+	while (bPropagated);
+
+	// 3rd pass: Check statement lists
+	for(const TPair<UEdGraphNode*, TArray<FBlueprintCompiledStatement*>>& StatementPair : InContext.StatementsPerNode)
+	{
+		bIsThreadSafe &= CheckFunctionCompiledStatementsThreadSafety(StatementPair.Key, InContext.SourceGraph, StatementPair.Value, InMessageLog, InbEmitErrors, &ThreadSafeObjectTerms);
+	}
+
+	return bIsThreadSafe;
+}
+
+// Helper used to emit to log as errors/warnings 
+struct FLogThreadSafetyHelper
+{
+	FLogThreadSafetyHelper(FCompilerResultsLog& InLog, bool bInEmitErrors)
+		: Log(InLog)
+		, bEmitErrors(bInEmitErrors)
+	{}
+		
+	FCompilerResultsLog& Log;
+	bool bEmitErrors;
+		
+	template<typename... Args>
+	void Message(const TCHAR* Format, Args... args)
+	{
+		if(bEmitErrors)
+		{
+			Log.Error(Format, args...);
+		}
+		else
+		{
+			Log.Warning(Format, args...);
+		}
+	}
+};
+
+#define LOG_THREADSAFETY_HELPER(EmitErrors, CategoryName, Format, ...) \
+	if(EmitErrors) \
+	{ \
+		UE_LOG(CategoryName, Error, Format, ##__VA_ARGS__); \
+	} \
+	else \
+	{ \
+		UE_LOG(CategoryName, Warning, Format, ##__VA_ARGS__); \
+	}
+
+bool FKismetCompilerUtilities::CheckFunctionCompiledStatementsThreadSafety(const UEdGraphNode* InNode, const UEdGraph* InSourceGraph, const TArray<FBlueprintCompiledStatement*>& InStatements, FCompilerResultsLog& InMessageLog, bool InbEmitErrors, TSet<const FBPTerminal*>* InThreadSafeObjectTerms)
+{
+	bool bIsThreadSafe = true;
+
+	const FText GenericThreadSafetyErrorOneParam = LOCTEXT("ThreadSafety_Error_Generic", "This is not thread safe when compiled. See the output log for more details.");
+
+	FLogThreadSafetyHelper LogHelper(InMessageLog, InbEmitErrors);
+	
+	for(const FBlueprintCompiledStatement* Statement : InStatements)
+	{
+		auto LogDelegateUsage = [&bIsThreadSafe, &LogHelper, InNode, InbEmitErrors]()
+		{
+			LogHelper.Message(*LOCTEXT("ThreadSafety_Error_Delegate", "@@ Delegate usage is not thread-safe").ToString(), InNode);
+			bIsThreadSafe = false;
+		};
+
+		auto CheckForInvalidInstancedObjectContext = [&bIsThreadSafe, &LogHelper, InNode, &GenericThreadSafetyErrorOneParam, InbEmitErrors, InThreadSafeObjectTerms](const FBPTerminal* InTerm)
+		{
+			const FBPTerminal* Context = InTerm;
+			while(Context)
+			{
+				if(Context != nullptr)
+				{
+					if(InThreadSafeObjectTerms == nullptr || !InThreadSafeObjectTerms->Contains(Context))
+					{
+						if(Context->IsObjectContextType() && Context->Type.PinSubCategoryObject.IsValid() && (Context->IsInstancedVarTerm() || Context->IsLocalVarTerm()))
+						{
+							if(Context->SourcePin && Context->SourcePin->GetOwningNode())
+							{
+								// @TODO: we could possibly make exceptions for 'assets' here
+								LogHelper.Message(*LOCTEXT("ThreadSafety_Error_InstancedObjectWithPin", "@@ Accessing an object reference is not thread-safe").ToString(), Context->SourcePin->GetOwningNode());
+							}
+							else
+							{
+								LogHelper.Message(*GenericThreadSafetyErrorOneParam.ToString(), InNode);
+								LOG_THREADSAFETY_HELPER(InbEmitErrors, LogBlueprint, TEXT("Expression that accesses an instanced object context is not thread-safe"));
+							}
+							bIsThreadSafe = false;
+						}
+					}
+
+					Context = Context->Context;
+				}
+			}
+		};
+
+		auto CheckForPrivateMemberUsage = [&bIsThreadSafe, &LogHelper, InNode, &GenericThreadSafetyErrorOneParam, InbEmitErrors](FBPTerminal* InTerm)
+		{
+			static const FBoolConfigValueHelper ThreadSafetyStrictPrivateMemberChecks(TEXT("Kismet"), TEXT("bThreadSafetyStrictPrivateMemberChecks"), GEngineIni);
+			if (ThreadSafetyStrictPrivateMemberChecks)
+			{
+				const FBPTerminal* Context = InTerm;
+				while(Context)
+				{
+					// Check for assignment only to private object variables
+					if(Context->AssociatedVarProperty && !FBlueprintEditorUtils::IsPropertyPrivate(InTerm->AssociatedVarProperty))
+					{
+						if(Context->Context == nullptr && Context->IsInstancedVarTerm() && Context->IsObjectContextType())
+						{
+							UEdGraphNode* OwningNode = Context->SourcePin ? Context->SourcePin->GetOwningNode() : nullptr;
+							if(OwningNode)
+							{
+								LogHelper.Message(*LOCTEXT("ThreadSafety_Error_NonPrivateMemberAccess", "@@ Accessing non-private member variables is not thread-safe. Make the variable private or use a local variable.").ToString(), OwningNode);
+								UE_LOG(LogBlueprint, Display, TEXT("Expression that accesses non-private property '%s' is not thread-safe. This message can be disabled using bThreadSafetyStrictPrivateMemberChecks in Engine.ini"), *Context->AssociatedVarProperty->GetName())
+							}
+							else 
+							{
+								LogHelper.Message(*GenericThreadSafetyErrorOneParam.ToString(), InNode);
+								LOG_THREADSAFETY_HELPER(InbEmitErrors, LogBlueprint, TEXT("Expression that accesses non-private property '%s' is not thread-safe. This message can be disabled using bThreadSafetyStrictPrivateMemberChecks in Engine.ini"), *Context->AssociatedVarProperty->GetName());
+							}
+						}
+
+						bIsThreadSafe = false;
+					}
+
+					Context = Context->Context;
+				}
+			}
+		};
+		
+		switch (Statement->Type)
+		{
+			case KCST_Nop:
+				break;
+			case KCST_CallFunction:
+			{
+				check(Statement->FunctionToCall);
+
+				if(Statement->FunctionContext)
+				{
+					CheckForInvalidInstancedObjectContext(Statement->FunctionContext);
+				}
+
+				// Check RHS (function inputs) for invalid object access 
+				for(FBPTerminal* RHSTerm : Statement->RHS)
+				{
+					if(RHSTerm->Context)
+					{
+						CheckForInvalidInstancedObjectContext(RHSTerm->Context);
+					}
+
+					CheckForPrivateMemberUsage(RHSTerm);
+				}
+
+				UFunction* SkeletonClassFunction = FBlueprintEditorUtils::GetMostUpToDateFunction(Statement->FunctionToCall);
+				if(SkeletonClassFunction && !FBlueprintEditorUtils::HasFunctionBlueprintThreadSafeMetaData(SkeletonClassFunction))
+				{
+					// Check LHS (function return value) for invalid object access.
+					// Note we only do this for BP functions and those that are not declared thread safe. This is to
+					// allow already-useful cases where native code is able to make assumptions about multi-threaded
+					// object access.
+					// A good example of this is returning a 'hosting' anim instance in the context of a linked anim
+					// instance.
+					if(Statement->LHS)
+					{
+						CheckForInvalidInstancedObjectContext(Statement->LHS);
+					}
+					
+					LogHelper.Message(*LOCTEXT("ThreadSafety_Error_NonThreadSafeFunction", "@@ Non-thread safe function @@ called from thread-safe graph @@").ToString(), InNode, Statement->FunctionToCall, InSourceGraph);
+					bIsThreadSafe = false;
+				}
+				break;
+			}
+			case KCST_Assignment:
+			{
+				// Check LHS/RHS for invalid object access.
+				if(Statement->LHS)
+				{
+					if(Statement->LHS->Context)
+					{
+						CheckForInvalidInstancedObjectContext(Statement->LHS->Context);
+					}
+					
+					CheckForPrivateMemberUsage(Statement->LHS);
+				}
+					
+				for(FBPTerminal* RHSTerm : Statement->RHS)
+				{
+					if(RHSTerm->Context)
+					{
+						CheckForInvalidInstancedObjectContext(RHSTerm->Context);
+					}
+
+					CheckForPrivateMemberUsage(RHSTerm);
+				}
+				break;
+			}
+			case KCST_CompileError:
+		    case KCST_UnconditionalGoto:
+			case KCST_PushState:
+			case KCST_GotoIfNot:
+			case KCST_Return:
+			case KCST_EndOfThread:
+			case KCST_Comment:
+			case KCST_ComputedGoto:
+			case KCST_EndOfThreadIfNot:
+			case KCST_DebugSite:
+			case KCST_CastObjToInterface:
+			case KCST_DynamicCast:
+			case KCST_DoubleToFloatCast:
+			case KCST_FloatToDoubleCast:
+			case KCST_ObjectToBool:
+				break;
+			case KCST_AddMulticastDelegate:
+			case KCST_ClearMulticastDelegate:
+				LogDelegateUsage();
+				break;
+			case KCST_WireTraceSite:
+				break;
+			case KCST_BindDelegate:
+			case KCST_RemoveMulticastDelegate:
+			case KCST_CallDelegate:
+				LogDelegateUsage();
+				break;
+			case KCST_CreateArray:
+			case KCST_CrossInterfaceCast:
+			case KCST_MetaCast:
+				break;
+			case KCST_AssignmentOnPersistentFrame:
+				LogHelper.Message(*GenericThreadSafetyErrorOneParam.ToString(), InSourceGraph);
+				LOG_THREADSAFETY_HELPER(InbEmitErrors, LogBlueprint, TEXT("Persistent frame assignment is not supported in thread-safe function"));
+				bIsThreadSafe = false;
+				break;
+			case KCST_CastInterfaceToObj:
+			case KCST_GotoReturn:
+			case KCST_GotoReturnIfNot:
+			case KCST_SwitchValue:
+				break;
+			case KCST_InstrumentedEvent:
+			case KCST_InstrumentedEventStop:
+			case KCST_InstrumentedPureNodeEntry:
+			case KCST_InstrumentedWireEntry:
+			case KCST_InstrumentedWireExit:
+			case KCST_InstrumentedStatePush:
+			case KCST_InstrumentedStateRestore:
+			case KCST_InstrumentedStateReset:
+			case KCST_InstrumentedStateSuspend:
+			case KCST_InstrumentedStatePop:
+			case KCST_InstrumentedTunnelEndOfThread:
+				// No way to test instrumentation right now, so this can potentially be removed
+				LogHelper.Message(*GenericThreadSafetyErrorOneParam.ToString(), InSourceGraph);
+				LOG_THREADSAFETY_HELPER(InbEmitErrors, LogBlueprint, TEXT("Instrumentation not supported in thread-safe function"));
+				bIsThreadSafe = false;
+				break;
+			case KCST_ArrayGetByRef:
+			case KCST_CreateSet:
+			case KCST_CreateMap:
+				break;
+			default:
+				LogHelper.Message(*GenericThreadSafetyErrorOneParam.ToString(), InSourceGraph);
+				LOG_THREADSAFETY_HELPER(InbEmitErrors, LogBlueprint, TEXT("Non-thread safe unknown statement type %d (from %s) used in thread-safe context %s"), (int32)Statement->Type, *InNode->GetName(), *InSourceGraph->GetName());
+				bIsThreadSafe = false;
+				break;
+		}
+	}
+
+	return bIsThreadSafe;
+}
+
+ConvertibleSignatureMatchResult FKismetCompilerUtilities::DoSignaturesHaveConvertibleFloatTypes(const UFunction* A, const UFunction* B)
+{
+	check(A);
+	check(B);
+
+	if (!A->IsSignatureCompatibleWith(B))
+	{
+		TFieldIterator<FProperty> PropAIt(A);
+		TFieldIterator<FProperty> PropBIt(B);
+
+		while (PropAIt)
+		{
+			if (PropBIt)
+			{
+				if (!FStructUtils::ArePropertiesTheSame(*PropAIt, *PropBIt, false))
+				{
+					bool bHasConvertibleProperties =
+						(PropAIt->IsA<FFloatProperty>() && PropBIt->IsA<FDoubleProperty>()) ||
+						(PropAIt->IsA<FDoubleProperty>() && PropBIt->IsA<FFloatProperty>());
+
+					if (!bHasConvertibleProperties)
+					{
+						return ConvertibleSignatureMatchResult::Different;
+					}
+				}
+			}
+			else
+			{
+				// Mismatched parameter count
+				return ConvertibleSignatureMatchResult::Different;
+			}
+
+			++PropAIt;
+			++PropBIt;
+		}
+
+		// If PropBIt still has parameters, then there was a mismatch
+		return PropBIt ? ConvertibleSignatureMatchResult::Different : ConvertibleSignatureMatchResult::HasConvertibleFloatParams;
+	}
+
+	return ConvertibleSignatureMatchResult::ExactMatch;
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -1699,7 +2249,6 @@ void FNodeHandlingFunctor::ResolveAndRegisterScopedTerm(FKismetFunctionContext& 
 	FProperty* BoundProperty = FKismetCompilerUtilities::FindPropertyInScope(SearchScope, Net, CompilerContext.MessageLog, CompilerContext.GetSchema(), Context.NewClass, bIsSparseProperty);
 	if (BoundProperty != NULL)
 	{
-		UBlueprintEditorSettings* Settings = GetMutableDefault<UBlueprintEditorSettings>();
 		// Create the term in the list
 		FBPTerminal* Term = new FBPTerminal();
 		NetArray.Add(Term);
@@ -1713,7 +2262,7 @@ void FNodeHandlingFunctor::ResolveAndRegisterScopedTerm(FKismetFunctionContext& 
 		{
 			Term->SetVarTypeLocal(true);
 		}
-		else if (BoundProperty->HasAnyPropertyFlags(CPF_BlueprintReadOnly) || (Context.IsConstFunction() && Context.NewClass->IsChildOf(SearchScope)))
+		else if (BoundProperty->HasAnyPropertyFlags(CPF_BlueprintReadOnly) || (Context.IsConstFunction() && Context.NewClass && Context.NewClass->IsChildOf(SearchScope)))
 		{
 			// Read-only variables and variables in const classes are both const
 			Term->bIsConst = true;
@@ -1893,7 +2442,7 @@ FString FNetNameMapping::MakeBaseName(const UObject* Net)
 //////////////////////////////////////////////////////////////////////////
 // FKismetFunctionContext
 
-FKismetFunctionContext::FKismetFunctionContext(FCompilerResultsLog& InMessageLog, const UEdGraphSchema_K2* InSchema, UBlueprintGeneratedClass* InNewClass, UBlueprint* InBlueprint, bool bInGeneratingCpp)
+FKismetFunctionContext::FKismetFunctionContext(FCompilerResultsLog& InMessageLog, const UEdGraphSchema_K2* InSchema, UBlueprintGeneratedClass* InNewClass, UBlueprint* InBlueprint)
 	: Blueprint(InBlueprint)
 	, SourceGraph(nullptr)
 	, EntryPoint(nullptr)
@@ -1912,7 +2461,6 @@ FKismetFunctionContext::FKismetFunctionContext(FCompilerResultsLog& InMessageLog
 	, bIsSimpleStubGraphWithNoParams(false)
 	, NetFlags(0)
 	, SourceEventFromStubGraph(nullptr)
-	, bGeneratingCpp(bInGeneratingCpp)
 	, bUseFlowStack(true)
 {
 	NetNameMap = new FNetNameMapping();
@@ -1953,38 +2501,6 @@ void FKismetFunctionContext::SetExternalNetNameMap(FNetNameMapping* NewMap)
 	NetNameMap = NewMap;
 }
 
-bool FKismetFunctionContext::DoesStatementRequiresSwitch(const FBlueprintCompiledStatement* Statement)
-{
-	return Statement && (
-		Statement->Type == KCST_UnconditionalGoto ||
-		Statement->Type == KCST_PushState ||
-		Statement->Type == KCST_GotoIfNot ||
-		Statement->Type == KCST_ComputedGoto ||
-		Statement->Type == KCST_EndOfThread ||
-		Statement->Type == KCST_EndOfThreadIfNot ||
-		Statement->Type == KCST_GotoReturn ||
-		Statement->Type == KCST_GotoReturnIfNot);
-}
-
-bool FKismetFunctionContext::MustUseSwitchState(const FBlueprintCompiledStatement* ExcludeThisOne) const
-{
-	for (UEdGraphNode* Node : LinearExecutionList)
-	{
-		const TArray<FBlueprintCompiledStatement*>* StatementList = StatementsPerNode.Find(Node);
-		if (StatementList)
-		{
-			for (FBlueprintCompiledStatement* Statement : (*StatementList))
-			{
-				if (Statement && (Statement != ExcludeThisOne) && DoesStatementRequiresSwitch(Statement))
-				{
-					return true;
-				}
-			}
-		}
-	}
-	return false;
-}
-
 void FKismetFunctionContext::MergeAdjacentStates()
 {
 	for (int32 ExecIndex = 0; ExecIndex < LinearExecutionList.Num(); ++ExecIndex)
@@ -2017,8 +2533,7 @@ void FKismetFunctionContext::MergeAdjacentStates()
 	const UEdGraphNode* LastExecutedNode = LinearExecutionList.Num() ? LinearExecutionList.Last() : nullptr;
 	TArray<FBlueprintCompiledStatement*>* StatementList = StatementsPerNode.Find(LastExecutedNode);
 	FBlueprintCompiledStatement* LastStatementInLastNode = (StatementList && StatementList->Num()) ? StatementList->Last() : nullptr;
-	const bool SafeForNativeCode = !bGeneratingCpp || !MustUseSwitchState(LastStatementInLastNode);
-	if (LastStatementInLastNode && SafeForNativeCode && (KCST_GotoReturn == LastStatementInLastNode->Type) && !LastStatementInLastNode->bIsJumpTarget)
+	if (LastStatementInLastNode && (KCST_GotoReturn == LastStatementInLastNode->Type) && !LastStatementInLastNode->bIsJumpTarget)
 	{
 		StatementList->RemoveAt(StatementList->Num() - 1);
 	}
@@ -2028,9 +2543,11 @@ struct FGotoMapUtils
 {
 	static bool IsUberGraphEventStatement(const FBlueprintCompiledStatement* GotoStatement)
 	{
+		// Note: Latent function call sites also utilize the UbergraphCallIndex field, so we need to separate them from ubergraph event targets when the latent term is at index 0.
 		return GotoStatement
 			&& (GotoStatement->Type == KCST_CallFunction) 
-			&& (GotoStatement->UbergraphCallIndex == 0);
+			&& (GotoStatement->UbergraphCallIndex == 0)
+			&& (GotoStatement->FunctionToCall && !GotoStatement->FunctionToCall->HasMetaData(FBlueprintMetadata::MD_Latent));
 	}
 
 	static UEdGraphNode* TargetNodeFromPin(const FBlueprintCompiledStatement* GotoStatement, const UEdGraphPin* ExecNet)
@@ -2401,9 +2918,8 @@ FBPTerminal* FKismetFunctionContext::CreateLocalTerminalFromPinAutoChooseScope(U
 	check(Net);
 	bool bSharedTerm = IsEventGraph();
 	static FBoolConfigValueHelper UseLocalGraphVariables(TEXT("Kismet"), TEXT("bUseLocalGraphVariables"), GEngineIni);
-	static FBoolConfigValueHelper UseLocalGraphVariablesInCpp(TEXT("BlueprintNativizationSettings"), TEXT("bUseLocalEventGraphVariables"));
 
-	const bool bUseLocalGraphVariables = UseLocalGraphVariables || (bGeneratingCpp && UseLocalGraphVariablesInCpp);
+	const bool bUseLocalGraphVariables = UseLocalGraphVariables;
 
 	const bool OutputPin = EEdGraphPinDirection::EGPD_Output == Net->Direction;
 	if (bSharedTerm && bUseLocalGraphVariables && OutputPin)

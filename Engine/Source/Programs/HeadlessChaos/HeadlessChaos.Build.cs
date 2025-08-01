@@ -2,14 +2,15 @@
 
 using UnrealBuildTool;
 
-public class HeadlessChaos : ModuleRules
+[SupportedPlatforms("Win64")]
+public class HeadlessChaos : TestModuleRules
 {
-	public HeadlessChaos(ReadOnlyTargetRules Target) : base(Target)
+	public HeadlessChaos(ReadOnlyTargetRules Target) : base(Target, false)
 	{
-		PublicIncludePaths.Add("Runtime/Launch/Public");
+		PublicIncludePathModuleNames.Add("Launch");
 
-		// For LaunchEngineLoop.cpp include
-		PrivateIncludePaths.Add("Runtime/Launch/Private");
+		// For testing access to private Chaos classes
+		PrivateIncludePaths.Add("Runtime/Experimental/Chaos/Private");
 
 		SetupModulePhysicsSupport(Target);
 
@@ -20,13 +21,13 @@ public class HeadlessChaos : ModuleRules
 				"CoreUObject",
 				"Projects",
                 "GoogleTest",
-				"GeometricObjects",
+				"GeometryCore",
 				"ChaosVehiclesCore"
             }
         );
 
 
-		if (Target.Platform == UnrealTargetPlatform.Win32 || Target.Platform == UnrealTargetPlatform.Win64 || Target.Platform == UnrealTargetPlatform.XboxOne)
+		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
 			PublicDefinitions.Add("GTEST_OS_WINDOWS=1");
 		}
@@ -34,19 +35,21 @@ public class HeadlessChaos : ModuleRules
 		{
 			PublicDefinitions.Add("GTEST_OS_MAC=1");
 		}
-		else if (Target.Platform == UnrealTargetPlatform.IOS || Target.Platform == UnrealTargetPlatform.TVOS)
+		else if (Target.IsInPlatformGroup(UnrealPlatformGroup.IOS))
 		{
 			PublicDefinitions.Add("GTEST_OS_IOS=1");
 		}
-		else if (Target.Platform == UnrealTargetPlatform.Android || Target.Platform == UnrealTargetPlatform.Lumin)
+		else if (Target.Platform == UnrealTargetPlatform.Android)
 		{
 			PublicDefinitions.Add("GTEST_OS_LINUX_ANDROID=1");
 		}
-		else if (Target.IsInPlatformGroup(UnrealPlatformGroup.Unix) || Target.Platform == UnrealTargetPlatform.PS4)
+		else if (Target.IsInPlatformGroup(UnrealPlatformGroup.Unix))
 		{
 			PublicDefinitions.Add("GTEST_OS_LINUX=1");
 		}
 
 		PrivateDefinitions.Add("CHAOS_INCLUDE_LEVEL_1=1");
+
+		UpdateBuildGraphPropertiesFile(new Metadata() { TestName = "HeadlessChaos", TestShortName = "Headless Chaos", UsesCatch2 = false });
 	}
 }

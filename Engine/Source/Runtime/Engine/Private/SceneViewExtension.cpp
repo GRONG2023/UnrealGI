@@ -13,14 +13,6 @@ FSceneViewExtensionBase::~FSceneViewExtensionBase()
 	// so they will be automatically unregistered when removed.
 }
 
-// Temporary override so that old behaviour still functions. Will be removed along with IsActiveThisFrame(FViewport*).
-bool FSceneViewExtensionBase::IsActiveThisFrame_Internal(const FSceneViewExtensionContext & Context) const
-{
-	PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	return ISceneViewExtension::IsActiveThisFrame(Context.Viewport);
-	PRAGMA_ENABLE_DEPRECATION_WARNINGS
-}
-
 bool FSceneViewExtensionBase::IsActiveThisFrame(const FSceneViewExtensionContext& Context) const
 {
 	// Go over any existing activation lambdas
@@ -39,7 +31,6 @@ bool FSceneViewExtensionBase::IsActiveThisFrame(const FSceneViewExtensionContext
 	return IsActiveThisFrame_Internal(Context);
 }
 
-
 //
 // FWorldSceneViewExtension
 //
@@ -56,6 +47,14 @@ bool FWorldSceneViewExtension::IsActiveThisFrame_Internal(const FSceneViewExtens
 	return World == Context.GetWorld();
 }
 
+//
+// FHMDSceneViewExtension
+//
+
+bool FHMDSceneViewExtension::IsActiveThisFrame_Internal(const FSceneViewExtensionContext& Context) const
+{
+	return Context.IsHMDSupported() && Context.IsStereoSupported();
+}
 
 //
 // FSceneViewExtensions
@@ -115,15 +114,7 @@ const TArray<FSceneViewExtensionRef> FSceneViewExtensions::GatherActiveExtension
 			ActiveExtensions.Add(ActiveExtension);
 		});
 
-	struct SortPriority
-	{
-		bool operator () (const FSceneViewExtensionRef& A, const FSceneViewExtensionRef& B) const
-		{
-			return A->GetPriority() > B->GetPriority();
-		}
-	};
-
-	Sort(ActiveExtensions.GetData(), ActiveExtensions.Num(), SortPriority());
+	Algo::SortBy(ActiveExtensions, &ISceneViewExtension::GetPriority, TGreater<>());
 
 	return ActiveExtensions;
 }

@@ -2,9 +2,11 @@
 
 #pragma once
 
-#include "AnimTimelineTrack.h"
+#include "AnimTimeline/AnimTimelineTrack.h"
 #include "Animation/Skeleton.h"
 #include "EditorUndoClient.h"
+#include "AnimTimeline/AnimModel.h"
+#include "Animation/AnimData/CurveIdentifier.h"
 
 class SBorder;
 class FCurveEditor;
@@ -18,21 +20,25 @@ class FAnimTimelineTrack_Curve : public FAnimTimelineTrack, public FSelfRegister
 
 public:
 	FAnimTimelineTrack_Curve(const FText& InCurveName, const FText& InFullCurveName, const FLinearColor& InColor, const FLinearColor& InBackgroundColor, const TSharedRef<FAnimModel>& InModel);
-	FAnimTimelineTrack_Curve(FRichCurve& InCurve, const FSmartName& InName, int32 InCurveIndex, ERawCurveTrackTypes InType, const FText& InCurveName, const FText& InFullCurveName, const FLinearColor& InColor, const FLinearColor& InBackgroundColor, const TSharedRef<FAnimModel>& InModel);
-	FAnimTimelineTrack_Curve(const TArray<FRichCurve*>& InCurves, const FText& InCurveName, const FText& InFullCurveName, const FLinearColor& InColor, const FLinearColor& InBackgroundColor, const TSharedRef<FAnimModel>& InModel);
+	UE_DEPRECATED(5.3, "Please use the constructor that takes a FName.")
+	FAnimTimelineTrack_Curve(const FRichCurve* InCurve, const FSmartName& InName, int32 InCurveIndex, ERawCurveTrackTypes InType, const FText& InCurveName, const FText& InFullCurveName, const FLinearColor& InColor, const FLinearColor& InBackgroundColor, const TSharedRef<FAnimModel>& InModel);
+	FAnimTimelineTrack_Curve(const FRichCurve* InCurve, const FName& InName, int32 InCurveIndex, ERawCurveTrackTypes InType, const FText& InCurveName, const FText& InFullCurveName, const FLinearColor& InColor, const FLinearColor& InBackgroundColor, const TSharedRef<FAnimModel>& InModel);
+	FAnimTimelineTrack_Curve(const TArray<const FRichCurve*>& InCurves, const FText& InCurveName, const FText& InFullCurveName, const FLinearColor& InColor, const FLinearColor& InBackgroundColor, const TSharedRef<FAnimModel>& InModel);
 
 	/** FAnimTimelineTrack interface */
 	virtual TSharedRef<SWidget> GenerateContainerWidgetForTimeline() override;
 	virtual TSharedRef<SWidget> GenerateContainerWidgetForOutliner(const TSharedRef<SAnimOutlinerItem>& InRow) override;
 	virtual bool SupportsSelection() const override { return true; }
 	virtual void AddToContextMenu(FMenuBuilder& InMenuBuilder, TSet<FName>& InOutExistingMenuTypes) const override;
+	virtual bool SupportsCopy() const override { return true; }
+	virtual void Copy(UAnimTimelineClipboardContent* InOutClipboard) const override;
 	
 	/** FEditorUndoClient interface */
 	virtual void PostUndo(bool bSuccess) override { PostUndoRedo(); }
 	virtual void PostRedo(bool bSuccess) override { PostUndoRedo(); }
 
 	/** Access the curve we are editing */
-	const TArray<FRichCurve*>& GetCurves() { return Curves; }
+	const TArray<const FRichCurve*>& GetCurves() const { return Curves; }
 
 	/** Get a color for the curve widget (and edited curves) */
 	virtual FLinearColor GetCurveColor(int32 InCurveIndex) const;
@@ -44,7 +50,10 @@ public:
 	virtual FText GetFullCurveName(int32 InCurveIndex) const { return FullCurveName; }
 
 	/** Get the information needed to reference this curve for editing */
-	virtual void GetCurveEditInfo(int32 InCurveIndex, FSmartName& OutName, ERawCurveTrackTypes& OutType, int32& OutCurveIndex) const;
+	virtual void GetCurveEditInfo(int32 InCurveIndex, FName& OutName, ERawCurveTrackTypes& OutType, int32& OutCurveIndex) const;
+
+	UE_DEPRECATED(5.3, "Please use GetCurveEditInfo that takes a FName.")
+	virtual void GetCurveEditInfo(int32 InCurveIndex, FSmartName& OutName, ERawCurveTrackTypes& OutType, int32& OutCurveIndex) const {}
 
 	/** Delegate handing curve changing externally */
 	void HandleCurveChanged();
@@ -61,6 +70,9 @@ protected:
 
 	/** Helper function for building outliner widget */
 	virtual void AddCurveTrackButton(TSharedPtr<SHorizontalBox> InnerHorizontalBox);
+
+	/** Should this track draw its curves, by default, hide curves in parent tracks when children are expanded. */
+	virtual bool ShowCurves() const;
 
 	/** Edit this curve when double clicked */
 	FReply HandleDoubleClicked(const FGeometry& InGeometry, const FPointerEvent& InPointerEvent);
@@ -79,7 +91,7 @@ protected:
 
 protected:
 	/** The curve we are editing */
-	TArray<FRichCurve*> Curves;
+	TArray<const FRichCurve*> Curves;
 
 	/** The color of the curve */
 	FLinearColor Color;
@@ -91,7 +103,7 @@ protected:
 	FText FullCurveName;
 
 	/** The name of the outer curve */
-	FSmartName OuterCurveName;
+	FName OuterCurveName;
 
 	/** The index into the outer curve */
 	int32 OuterCurveIndex;

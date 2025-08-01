@@ -36,12 +36,12 @@ namespace GeometryCollectionTest
 	Chaos::FParticles
 	BuildParticlesFeomGeomCollection(FGeometryCollection *TestCollection)
 	{
-		TManagedArray<FVector> &Vertex = TestCollection->Vertex;
+		TManagedArray<FVector3f> &Vertex = TestCollection->Vertex;
 		const int numParticles = Vertex.Num();
 		Chaos::FParticles particles;
 		particles.AddParticles(numParticles);
 		for (int i = 0; i < numParticles; i++)
-			particles.X(i).Set(Vertex[i][0], Vertex[i][1], Vertex[i][2]);
+			particles.SetX(i, FVec3(Vertex[i][0], Vertex[i][1], Vertex[i][2]));
 		return particles;
 	}
 
@@ -159,7 +159,17 @@ namespace GeometryCollectionTest
 		WriteImportanceOrderObjs(
 			TestCollection, Importance, CoincidentVertices, BaseName, OutputDir);
 
-		const uint32 hash = GetTypeHash(Importance);
+		auto CalcImportanceHash = [](const TArray<int32>& InImportance)
+		{
+			uint32 Hash = 0;
+			for(const int32 Value : InImportance)
+			{
+				Hash = HashCombine(Hash, GetTypeHash(Value));
+			}
+			return Hash;
+		};
+
+		const uint32 hash = CalcImportanceHash(Importance);
 #ifdef VERBOSE
 		std::cout << BaseName << " importance ordering hash: " << hash << std::endl;
 #endif

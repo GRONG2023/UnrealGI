@@ -9,10 +9,19 @@
 #include "PropertyHandle.h"
 #include "IDetailCustomNodeBuilder.h"
 #include "DetailBuilderTypes.h"
+#include "PropertyEditorCopyPaste.h"
 
 class FDetailWidgetRow;
 class IDetailGroup;
 class IDetailPropertyRow;
+
+/** Interface for the various types of rows that can be created through a detail layout customization */
+class IDetailLayoutRow
+{
+public:
+	virtual FName GetRowName() const = 0;
+	virtual TOptional<FResetToDefaultOverride> GetCustomResetToDefault() const = 0;
+};
 
 /** The location of a property within a category */
 namespace EPropertyLocation
@@ -54,8 +63,9 @@ public:
 	 * Adds header content to the category
 	 *
 	 * @param InHeaderContent	The header content widget
+	 * @param bWholeRowContent	The header content should span the whole row (hides category name)
 	 */
-	virtual IDetailCategoryBuilder& HeaderContent(TSharedRef<SWidget> InHeaderContent) = 0;
+	virtual IDetailCategoryBuilder& HeaderContent(TSharedRef<SWidget> InHeaderContent, bool bWholeRowContent = false) = 0;
 
 	/**
 	 * Gets the current sort order of the category
@@ -123,15 +133,18 @@ public:
 	 * @return A property row for customizing the property or NULL if the property could not be found
 	 */
 	virtual IDetailPropertyRow* AddExternalStructureProperty(TSharedPtr<FStructOnScope> StructData, FName PropertyName, EPropertyLocation::Type Location = EPropertyLocation::Default, const FAddPropertyParams& Params = FAddPropertyParams()) = 0;
+	virtual IDetailPropertyRow* AddExternalStructureProperty(TSharedPtr<IStructureDataProvider> StructData, FName PropertyName, EPropertyLocation::Type Location = EPropertyLocation::Default, const FAddPropertyParams& Params = FAddPropertyParams()) = 0;
 
 	/**
 	 * Adds all properties for the specified external structure to this category
 	 *
 	 * @param StructData		External struct data to add to the root
 	 * @param Location			The location within the category where the properties are to be shown
+	 * @param PropertiesRow		Optional pointer to an array that will contains the IDetailPropertyRow of the properties added
 	 * @return Array of all properties added to this category
 	 */
-	virtual TArray<TSharedPtr<IPropertyHandle>> AddAllExternalStructureProperties(TSharedRef<FStructOnScope> StructData, EPropertyLocation::Type Location = EPropertyLocation::Default) = 0;
+	virtual TArray<TSharedPtr<IPropertyHandle>> AddAllExternalStructureProperties(TSharedRef<FStructOnScope> StructData, EPropertyLocation::Type Location = EPropertyLocation::Default, TArray<IDetailPropertyRow*>* OutPropertiesRow = nullptr) = 0;
+	virtual TArray<TSharedPtr<IPropertyHandle>> AddAllExternalStructureProperties(TSharedPtr<IStructureDataProvider> StructProvider, EPropertyLocation::Type Location = EPropertyLocation::Default, TArray<IDetailPropertyRow*>* OutPropertiesRow = nullptr) = 0;
 
 	/**
 	 * Adds a custom widget row to the category
@@ -178,11 +191,15 @@ public:
 	 */
 	virtual bool IsParentLayoutValid() const = 0;
 
-
 	/**
 	 * @return The localized display name of the category
 	 */
 	virtual const FText& GetDisplayName() const = 0;
+
+	/**
+	 * Set a new display name for this category.
+	 */
+	virtual void SetDisplayName(const FText& DisplayName) = 0;
 
 	/**
 	 * Sets whether or not this category is hidden or shown
@@ -196,21 +213,21 @@ public:
 	*/
 	virtual void SetShowAdvanced(bool bShowAdvanced) = 0;
 
-	UE_DEPRECATED(4.17, "AddExternalProperty is deprecated.  Use AddExternalObjectProperty instead")
-	IDetailPropertyRow* AddExternalProperty(const TArray<UObject*>& Objects, FName PropertyName, EPropertyLocation::Type Location = EPropertyLocation::Default)
-	{
-		return AddExternalObjectProperty(Objects, PropertyName, Location);
-	}
+	/** Add a property, but force it to behave as a normal, peer reference regardless of CPF_InstancedReference */
+	virtual void AddPropertyDisableInstancedReference(TSharedPtr<IPropertyHandle> PropertyHandle) = 0;
 
-	UE_DEPRECATED(4.17, "AddExternalProperty is deprecated.  Use AddExternalStructureProperty instead")
-	IDetailPropertyRow* AddExternalProperty(TSharedPtr<FStructOnScope> StructData, FName PropertyName, EPropertyLocation::Type Location = EPropertyLocation::Default)
-	{
-		return AddExternalStructureProperty(StructData, PropertyName, Location);
-	}
+	/** Optional PasteFromText delegate for this category */
+	virtual TSharedPtr<FOnPasteFromText> OnPasteFromText() const { return nullptr; }
 
-	UE_DEPRECATED(4.17, "AddExternalProperty is deprecated.  Use AddAllExternalStructureProperties instead")
-	TArray<TSharedPtr<IPropertyHandle>> AddExternalProperties(TSharedRef<FStructOnScope> StructData, EPropertyLocation::Type Location = EPropertyLocation::Default)
-	{
-		return AddAllExternalStructureProperties(StructData, Location);
-	}
+	/**
+	 * If true, this Category should have no UProperty data associated with it, and will be shown as an empty stub
+	 * with no expansion arrow
+	 */
+	virtual bool IsEmpty() const { return false; }
+
+	/**
+	 * Sets whether this Category is "Empty" ~ that is, should have no UProperty data associated with it, and will be shown
+	 * as an empty stub with no expansion arrow
+	 */
+	virtual void SetIsEmpty(bool bInIsEmpty) { }
 };

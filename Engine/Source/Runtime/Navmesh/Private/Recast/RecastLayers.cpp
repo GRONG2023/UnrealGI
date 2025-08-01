@@ -20,6 +20,7 @@
 //
 
 #include "CoreMinimal.h"
+#include "Stats/Stats.h"
 #define _USE_MATH_DEFINES
 #include "Recast/Recast.h"
 #include "Recast/RecastAlloc.h"
@@ -30,7 +31,7 @@ struct rcLayerRegionMonotone
 	int chunkId;
 	rcIntArray neis;
 	rcIntArray layers;
-	unsigned short ymin, ymax;
+	rcSpanUInt ymin, ymax;
 	unsigned short layerId;		// Layer ID
 	unsigned char base : 1;		// Flag indicating if the region is the base of merged regions.
 	unsigned char remap : 1;
@@ -55,15 +56,15 @@ static void addUnique(rcIntArray& a, int v)
 	}
 }
 
-inline bool overlapRange(const unsigned short amin, const unsigned short amax,
-						 const unsigned short bmin, const unsigned short bmax)
+inline bool overlapRange(const rcSpanUInt amin, const rcSpanUInt amax,
+						 const rcSpanUInt bmin, const rcSpanUInt bmax)
 {
 	return (amin > bmax || amax < bmin) ? false : true;
 }
 
 static void fixLayerConnections(rcHeightfieldLayer* layer)
 {
-	// [UE4: break one directional connections, contour tracing gets stuck in infinite loop]
+	// [UE: break one directional connections, contour tracing gets stuck in infinite loop]
 	const int lw = layer->width;
 	const int lh = layer->height;
 
@@ -227,7 +228,7 @@ static bool CollectLayerRegionsMonotone(rcContext* ctx, rcCompactHeightfield& ch
 	// Allocate and init layer regions.
 	nregs = (int)regId;
 
-// @UE4 BEGIN: special handling of "no regions"
+// @UE BEGIN: special handling of "no regions"
 	if (nregs == 0)
 	{
 		regs = 0;
@@ -235,7 +236,7 @@ static bool CollectLayerRegionsMonotone(rcContext* ctx, rcCompactHeightfield& ch
 		// no issues occurred, everything was good. Just no regions. 
 		return true;
 	}
-// @UE4 END
+// @UE END
 
 	regs = (rcLayerRegionMonotone*)rcAlloc(sizeof(rcLayerRegionMonotone)*nregs, RC_ALLOC_TEMP);
 	if (!regs)
@@ -247,7 +248,7 @@ static bool CollectLayerRegionsMonotone(rcContext* ctx, rcCompactHeightfield& ch
 	for (int i = 0; i < nregs; ++i)
 	{
 		regs[i].layerId = 0xffff;
-		regs[i].ymin = 0xffff;
+		regs[i].ymin = RC_SPAN_MAX_HEIGHT;
 		regs[i].ymax = 0;
 	}
 
@@ -366,7 +367,7 @@ static bool CollectLayerRegionsChunky(rcContext* ctx, rcCompactHeightfield& chf,
 						if (sid == 0xffff)
 						{
 							sid = sweepId++;
-							// UE4: multiple spans per single X row may result in more sweeps than originally allocated
+							// UE: multiple spans per single X row may result in more sweeps than originally allocated
 							if (sweeps.resizeGrow(sid + 1))
 							{
 								sweeps[sid].nei = 0xffff;
@@ -443,7 +444,7 @@ static bool CollectLayerRegionsChunky(rcContext* ctx, rcCompactHeightfield& chf,
 	// Allocate and init layer regions.
 	nregs = (int)regId;
 
-// @UE4 BEGIN: special handling of "no regions"
+// @UE BEGIN: special handling of "no regions"
 	if (nregs == 0)
 	{
 		regs = 0;
@@ -451,7 +452,7 @@ static bool CollectLayerRegionsChunky(rcContext* ctx, rcCompactHeightfield& chf,
 		// no issues occurred, everything was good. Just no regions. 
 		return true;
 	}
-// @UE4 END
+// @UE END
 
 	regs = (rcLayerRegionMonotone*)rcAlloc(sizeof(rcLayerRegionMonotone)*nregs, RC_ALLOC_TEMP);
 	if (!regs)
@@ -463,7 +464,7 @@ static bool CollectLayerRegionsChunky(rcContext* ctx, rcCompactHeightfield& chf,
 	for (int i = 0; i < nregs; ++i)
 	{
 		regs[i].layerId = 0xffff;
-		regs[i].ymin = 0xffff;
+		regs[i].ymin = RC_SPAN_MAX_HEIGHT;
 		regs[i].ymax = 0;
 	}
 
@@ -570,9 +571,9 @@ static bool SplitAndStoreLayerRegions(rcContext* ctx, rcCompactHeightfield& chf,
 				if (root.layers.contains(nei))
 					continue;
 				// Skip if the height range would become too large.
-				const int ymin = rcMin(root.ymin, regn.ymin);
-				const int ymax = rcMax(root.ymax, regn.ymax);
-				if ((ymax - ymin) >= 255)
+				const rcSpanUInt ymin = rcMin(root.ymin, regn.ymin);
+				const rcSpanUInt ymax = rcMax(root.ymax, regn.ymax);
+				if (((int)ymax - (int)ymin) >= 255)
 					continue;
 
 				// Deepen
@@ -615,9 +616,9 @@ static bool SplitAndStoreLayerRegions(rcContext* ctx, rcCompactHeightfield& chf,
 				if (!overlapRange(ri.ymin,ri.ymax+mergeHeight, rj.ymin,rj.ymax+mergeHeight))
 					continue;
 				// Skip if the height range would become too large.
-				const int ymin = rcMin(ri.ymin, rj.ymin);
-				const int ymax = rcMax(ri.ymax, rj.ymax);
-				if ((ymax - ymin) >= 255)
+				const rcSpanUInt ymin = rcMin(ri.ymin, rj.ymin);
+				const rcSpanUInt ymax = rcMax(ri.ymax, rj.ymax);
+				if (((int)ymax - (int)ymin) >= 255)
 					continue;
 
 				// Make sure that there is no overlap when mergin 'ri' and 'rj'.
@@ -723,7 +724,7 @@ static bool SplitAndStoreLayerRegions(rcContext* ctx, rcCompactHeightfield& chf,
 	const int lh = h - borderSize*2;
 
 	// Build contracted bbox for layers.
-	float bmin[3], bmax[3];
+	rcReal bmin[3], bmax[3];
 	rcVcopy(bmin, chf.bmin);
 	rcVcopy(bmax, chf.bmax);
 	bmin[0] += borderSize*chf.cs;
@@ -779,13 +780,13 @@ static bool SplitAndStoreLayerRegions(rcContext* ctx, rcCompactHeightfield& chf,
 		memset(layer->cons, 0, gridSize);
 
 		// Find layer height bounds.
-		int hmin = 0, hmax = 0;
+		rcSpanUInt hmin = 0, hmax = 0;
 		for (int j = 0; j < nregs; ++j)
 		{
 			if (regs[j].base && regs[j].layerId == curId)
 			{
-				hmin = (int)regs[j].ymin;
-				hmax = (int)regs[j].ymax;
+				hmin = regs[j].ymin;
+				hmax = regs[j].ymax;
 			}
 		}
 
@@ -799,8 +800,6 @@ static bool SplitAndStoreLayerRegions(rcContext* ctx, rcCompactHeightfield& chf,
 		rcVcopy(layer->bmax, bmax);
 		layer->bmin[1] = bmin[1] + hmin*chf.ch;
 		layer->bmax[1] = bmin[1] + hmax*chf.ch;
-		layer->hmin = hmin;
-		layer->hmax = hmax;
 
 		// Update usable data region.
 		layer->minx = layer->width;
@@ -897,6 +896,8 @@ bool rcBuildHeightfieldLayersMonotone(rcContext* ctx, rcCompactHeightfield& chf,
 							  const int borderSize, const int walkableHeight,
 							  rcHeightfieldLayerSet& lset)
 {
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_Navigation_BuildHeightfieldLayersMonotone);
+	
 	rcAssert(ctx);
 	
 	ctx->startTimer(RC_TIMER_BUILD_LAYERS);
@@ -938,6 +939,8 @@ bool rcBuildHeightfieldLayersChunky(rcContext* ctx, rcCompactHeightfield& chf,
 									const int chunkSize,
 									rcHeightfieldLayerSet& lset)
 {
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_Navigation_BuildHeightfieldLayersChunky);
+	
 	rcAssert(ctx);
 
 	ctx->startTimer(RC_TIMER_BUILD_LAYERS);
@@ -982,7 +985,7 @@ struct rcLayerRegion
 	rcIntArray layers;
 	rcIntArray connections;
 	unsigned short layerId;
-	unsigned short ymin, ymax;
+	rcSpanUInt ymin, ymax;
 	unsigned char remap : 1;
 	unsigned char visited : 1;
 	unsigned char base : 1;
@@ -1107,6 +1110,8 @@ bool rcBuildHeightfieldLayers(rcContext* ctx, rcCompactHeightfield& chf,
 	const int borderSize, const int walkableHeight,
 	rcHeightfieldLayerSet& lset)
 {
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_Navigation_BuildHeightfieldLayers);
+	
 	rcAssert(ctx);
 
 	ctx->startTimer(RC_TIMER_BUILD_LAYERS);
@@ -1143,7 +1148,7 @@ bool rcBuildHeightfieldLayers(rcContext* ctx, rcCompactHeightfield& chf,
 	{
 		regions[i].layerId = (unsigned short)i;
 		regions[i].ymax = 0;
-		regions[i].ymin = 0xffff;
+		regions[i].ymin = RC_SPAN_MAX_HEIGHT;
 	}
 
 	// Find region neighbours and overlapping regions.
@@ -1236,9 +1241,9 @@ bool rcBuildHeightfieldLayers(rcContext* ctx, rcCompactHeightfield& chf,
 				if (reg.layers.contains(nei))
 					continue;
 				// Skip if the height range would become too large.
-				const int ymin = rcMin(reg.ymin, regn.ymin);
-				const int ymax = rcMax(reg.ymax, regn.ymax);
-				if ((ymax - ymin) >= 255)
+				const rcSpanUInt ymin = rcMin(reg.ymin, regn.ymin);
+				const rcSpanUInt ymax = rcMax(reg.ymax, regn.ymax);
+				if (((int)ymax - (int)ymin) >= 255)
 					continue;
 
 				// visit
@@ -1277,9 +1282,9 @@ bool rcBuildHeightfieldLayers(rcContext* ctx, rcCompactHeightfield& chf,
 				if (!overlapRange(ri.ymin,ri.ymax+mergeHeight, rj.ymin,rj.ymax+mergeHeight))
 					continue;
 				// Skip if the height range would become too large.
-				const int ymin = rcMin(ri.ymin, rj.ymin);
-				const int ymax = rcMax(ri.ymax, rj.ymax);
-				if ((ymax - ymin) >= 255)
+				const rcSpanUInt ymin = rcMin(ri.ymin, rj.ymin);
+				const rcSpanUInt ymax = rcMax(ri.ymax, rj.ymax);
+				if (((int)ymax - (int)ymin) >= 255)
 					continue;
 
 				// Make sure that there is no overlap when mergin 'ri' and 'rj'.
@@ -1373,7 +1378,7 @@ bool rcBuildHeightfieldLayers(rcContext* ctx, rcCompactHeightfield& chf,
 	const int lh = h - borderSize*2;
 
 	// Build contracted bbox for layers.
-	float bmin[3], bmax[3];
+	rcReal bmin[3], bmax[3];
 	rcVcopy(bmin, chf.bmin);
 	rcVcopy(bmax, chf.bmax);
 	bmin[0] += borderSize*chf.cs;
@@ -1429,13 +1434,13 @@ bool rcBuildHeightfieldLayers(rcContext* ctx, rcCompactHeightfield& chf,
 		memset(layer->cons, 0, gridSize);
 
 		// Find layer height bounds.
-		int hmin = 0, hmax = 0;
+		rcSpanUInt hmin = 0, hmax = 0;
 		for (int j = 0; j < nreg; ++j)
 		{
 			if (regions[j].base && regions[j].layerId == curId)
 			{
-				hmin = (int)regions[j].ymin;
-				hmax = (int)regions[j].ymax;
+				hmin = regions[j].ymin;
+				hmax = regions[j].ymax;
 			}
 		}
 
@@ -1449,8 +1454,6 @@ bool rcBuildHeightfieldLayers(rcContext* ctx, rcCompactHeightfield& chf,
 		rcVcopy(layer->bmax, bmax);
 		layer->bmin[1] = bmin[1] + hmin*chf.ch;
 		layer->bmax[1] = bmin[1] + hmax*chf.ch;
-		layer->hmin = hmin;
-		layer->hmax = hmax;
 
 		// Update usable data region.
 		layer->minx = layer->width;

@@ -1,12 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Misc/DefaultValueHelper.h"
-#include "Math/Color.h"
-#include "Math/Vector2D.h"
-#include "Math/Vector.h"
-#include "Math/Vector4.h"
-#include "Math/Rotator.h"
 
+#include "Containers/Array.h"
+#include "Math/Color.h"
+#include "Math/Rotator.h"
+#include "Math/Vector.h"
+#include "Math/Vector2D.h"
+#include "Math/Vector4.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/CString.h"
+#include "Misc/Char.h"
+#include "Misc/Parse.h"
 
 bool FDefaultValueHelper::Is(const FString& Source, const TCHAR* CompareStr)
 {
@@ -153,11 +158,15 @@ bool FDefaultValueHelper::GetParameters(const FString& Source, const FString& Ty
 
 	int32 EndPos = -1, PendingParentheses = 1;
 	// find the end of the actual string before " ) "
-	for(Pos = Source.Len() - 1; Pos > StartPos; --Pos )
+	for(Pos = Source.Len() - 1; Pos >= StartPos; --Pos )
 	{
 		if( TS(TEXT(")")) == Source[Pos]) 
 		{
-			PendingParentheses--;
+			if (--PendingParentheses == 0 && Pos == StartPos)
+			{
+				// Empty param list
+				EndPos = StartPos;
+			}
 		}
 		else if(!IsWhitespace(Source[Pos]))
 		{
@@ -420,7 +429,19 @@ bool FDefaultValueHelper::StringFromCppString(const FString& Source, const FStri
 
 ////////////////////////////////////////////////////////
 
-bool FDefaultValueHelper::ParseVector(const FString& Source, FVector& OutVal)
+bool FDefaultValueHelper::ParseVector(const FString& Source, FVector3f& OutVal)
+{
+	// LWC_TODO: Perf pessimization, especially if LWC is disabled!
+	FVector3d TempVec;
+	if (ParseVector(Source, TempVec))
+	{
+		OutVal = FVector3f(TempVec);
+		return true;
+	}
+	return false;
+}
+
+bool FDefaultValueHelper::ParseVector(const FString& Source, FVector3d& OutVal)
 {
 	const bool bHasWhitespace = HasWhitespaces(Source);
 	const FString NoWhitespace = bHasWhitespace ? RemoveWhitespaces(Source) : FString();
@@ -458,15 +479,28 @@ bool FDefaultValueHelper::ParseVector(const FString& Source, FVector& OutVal)
 		return OutVal.InitFromString(Source);
 	}
 	
-	OutVal = FVector( 
-		FCString::Atof(Start),
-		FCString::Atof(FirstComma + 1),
-		FCString::Atof(SecondComma + 1) );
+	OutVal = FVector3d( 
+		FCString::Atod(Start),
+		FCString::Atod(FirstComma + 1),
+		FCString::Atod(SecondComma + 1) );
 	return true;
 }
 
 
-bool FDefaultValueHelper::ParseVector2D(const FString& Source, FVector2D& OutVal)
+
+bool FDefaultValueHelper::ParseVector2D(const FString& Source, FVector2f& OutVal)
+{
+	// LWC_TODO: Perf pessimization, especially if LWC is disabled!
+	FVector2d TempVec;
+	if (ParseVector2D(Source, TempVec))
+	{
+		OutVal = FVector2f(TempVec);
+		return true;
+	}
+	return false;
+}
+
+bool FDefaultValueHelper::ParseVector2D(const FString& Source, FVector2d& OutVal)
 {
 	const bool bHasWhitespace = HasWhitespaces(Source);
 	const FString NoWhitespace = bHasWhitespace ? RemoveWhitespaces(Source) : FString();
@@ -491,25 +525,37 @@ bool FDefaultValueHelper::ParseVector2D(const FString& Source, FVector2D& OutVal
 		return OutVal.InitFromString(Source);
 	}
 
-	OutVal = FVector2D( 
-		FCString::Atof(Start),
-		FCString::Atof(FirstComma + 1) );
+	OutVal = FVector2d( 
+		FCString::Atod(Start),
+		FCString::Atod(FirstComma + 1) );
 	return true;
 }
 
 
-bool FDefaultValueHelper::ParseVector4(const FString& Source, FVector4& OutVal)
+bool FDefaultValueHelper::ParseVector4(const FString& Source, FVector4f& OutVal)
 {
-	float X, Y, Z, W;
+	// LWC_TODO: Perf pessimization, especially if LWC is disabled!
+	FVector4d TempVec;
+	if (ParseVector4(Source, TempVec))
+	{
+		OutVal = FVector4f(TempVec);
+		return true;
+	}
+	return false;
+}
+
+bool FDefaultValueHelper::ParseVector4(const FString& Source, FVector4d& OutVal)
+{
+	double X, Y, Z, W;
 	TArray<FString> SourceParts;
 
 	if (Source.ParseIntoArray(SourceParts, TEXT(",")) == 4 &&
-		ParseFloat(SourceParts[0], X) &&
-		ParseFloat(SourceParts[1], Y) && 
-		ParseFloat(SourceParts[2], Z) &&
-		ParseFloat(SourceParts[3], W))
+		ParseDouble(SourceParts[0], X) &&
+		ParseDouble(SourceParts[1], Y) && 
+		ParseDouble(SourceParts[2], Z) &&
+		ParseDouble(SourceParts[3], W))
 	{
-		OutVal = FVector4(X, Y, Z, W);
+		OutVal = FVector4d(X, Y, Z, W);
 		return true;
 	}
 
@@ -518,17 +564,45 @@ bool FDefaultValueHelper::ParseVector4(const FString& Source, FVector4& OutVal)
 }
 
 
-bool FDefaultValueHelper::ParseRotator(const FString& Source, FRotator& OutVal)
+bool FDefaultValueHelper::ParseRotator(const FString& Source, FRotator3f& OutVal)
 {
-	FVector Vector;
-	if( ParseVector( Source, Vector ) )
+	// LWC_TODO: Perf pessimization, especially if LWC is disabled!
+	FRotator3d TempRotator;
+	if (ParseRotator(Source, TempRotator))
 	{
-		OutVal = FRotator(Vector.X, Vector.Y, Vector.Z);
+		OutVal = FRotator3f(TempRotator);
+		return true;
+	}
+	return false;
+}
+
+bool FDefaultValueHelper::ParseRotator(const FString& Source, FRotator3d& OutVal)
+{
+	FVector3d Vector;
+	if (ParseVector(Source, Vector))
+	{
+		using FReal = decltype(FRotator3d::Pitch);
+		OutVal = FRotator3d((FReal)Vector.X, (FReal)Vector.Y, (FReal)Vector.Z);
 		return true;
 	}
 
-	// Fallback to x= format
-	return OutVal.InitFromString(Source);
+	// Fallback to p= format
+	if (OutVal.InitFromString(Source))
+	{
+		return true;
+	}
+
+	// try Pitch= format
+	FRotator3d Rotator = FRotator3d::ZeroRotator;
+	if (FParse::Value(*Source, TEXT("Pitch="), Rotator.Pitch) &&
+		FParse::Value(*Source, TEXT("Yaw="), Rotator.Yaw) &&
+		FParse::Value(*Source, TEXT("Roll="), Rotator.Roll))
+	{
+		OutVal = Rotator;
+		return true;
+	}
+
+	return false;
 }
 
 

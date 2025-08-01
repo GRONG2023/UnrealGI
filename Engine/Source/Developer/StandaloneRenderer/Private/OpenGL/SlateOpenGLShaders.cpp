@@ -243,7 +243,8 @@ void FSlateOpenGLShaderProgram::LinkShaders( const FSlateOpenGLVS& VertexShader,
 	// Set up attribute locations for per vertex data
 	glBindAttribLocation(ProgramID, 0, "InTexCoords");
 	glBindAttribLocation(ProgramID, 1, "InPosition");
-	glBindAttribLocation(ProgramID, 4, "InColor");
+	glBindAttribLocation(ProgramID, 2, "InColor");
+	glBindAttribLocation(ProgramID, 3, "InSecondaryColor");
 
 	// Link the shaders
 	glLinkProgram( ProgramID );
@@ -274,37 +275,66 @@ void FSlateOpenGLElementProgram::CreateProgram( const FSlateOpenGLVS& VertexShad
 	TextureParam = glGetUniformLocation( ProgramID, "ElementTexture" );
 	EffectsDisabledParam = glGetUniformLocation( ProgramID, "EffectsDisabled" );
 	IgnoreTextureAlphaParam = glGetUniformLocation( ProgramID, "IgnoreTextureAlpha" );
+#if PLATFORM_MAC
+	TextureRectParam = glGetUniformLocation( ProgramID, "ElementRectTexture" );
+	UseTextureRectangle = glGetUniformLocation( ProgramID, "UseTextureRectangle" );
+	SizeParam = glGetUniformLocation( ProgramID, "Size" );
+#endif
 	ShaderTypeParam = glGetUniformLocation( ProgramID, "ShaderType" );
-	MarginUVsParam = glGetUniformLocation( ProgramID, "MarginUVs" );
+	ShaderParamsParam = glGetUniformLocation( ProgramID, "ShaderParams" );
+	ShaderParams2Param = glGetUniformLocation(ProgramID, "ShaderParams2");
 	GammaValuesParam = glGetUniformLocation(ProgramID, "GammaValues");
 
 	CHECK_GL_ERRORS;
 }
 
 
-void FSlateOpenGLElementProgram::SetTexture( GLuint Texture, uint32 AddressU, uint32 AddressV )
+void FSlateOpenGLElementProgram::SetTexture( FSlateOpenGLTexture *Texture, uint32 AddressU, uint32 AddressV )
 {
-	// Set the texture parameter to use 
-	glUniform1i( TextureParam, 0 );
-	// Set the first texture as active
-	glActiveTexture( GL_TEXTURE0 );
-	// bind the texture
-	glBindTexture( GL_TEXTURE_2D, Texture );
+	GLint TargetTextureType = Texture->GetTextureTargetType();
+#if PLATFORM_MAC
+	// Set the texture parameter to use
+	if (TargetTextureType == GL_TEXTURE_RECTANGLE_ARB)
+	{
+		glUniform1i( UseTextureRectangle, 1 );
+		glUniform2f( SizeParam, (GLfloat)Texture->GetWidth(), (GLfloat)Texture->GetHeight() );
+		// Use the 2nd texture unit for ARB type textures
+		glActiveTexture( GL_TEXTURE1 );
+	}
+	else
+	{
+		glUniform1i( UseTextureRectangle, 0 );
+		// Set the first texture as active
+		glActiveTexture( GL_TEXTURE0 );
+	}
 
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, AddressU);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, AddressV);
+	glUniform1i(TextureRectParam, 1);
+#else
+	// Set the first texture as active
+	glActiveTexture(GL_TEXTURE0);
+#endif
+	glUniform1i( TextureParam, 0 );
+	CHECK_GL_ERRORS;
+
+	glEnable(TargetTextureType);
+	// bind the texture
+	glBindTexture(TargetTextureType, Texture->GetTypedResource() );
+
+	glTexParameteri(TargetTextureType, GL_TEXTURE_WRAP_S, AddressU);
+	glTexParameteri(TargetTextureType, GL_TEXTURE_WRAP_T, AddressV);
 
 	CHECK_GL_ERRORS;
 }
 
 void FSlateOpenGLElementProgram::SetViewProjectionMatrix( const FMatrix& InVP )
 {
-	const GLfloat* Param = &InVP.M[0][0];
+	FMatrix44f InVPFlt(InVP);	// LWC_TODO: Precision loss?
+	const GLfloat* Param = &InVPFlt.M[0][0];
 	glUniformMatrix4fv( ViewProjectionMatrixParam, 1, GL_FALSE, Param );
 	CHECK_GL_ERRORS;
 }
 
-void FSlateOpenGLElementProgram::SetVertexShaderParams( const FVector4& ShaderParams )
+void FSlateOpenGLElementProgram::SetVertexShaderParams( const FVector4f& ShaderParams )
 {
 	glUniform4f( VertexShaderParam, ShaderParams.X, ShaderParams.Y, ShaderParams.Z, ShaderParams.W );
 	CHECK_GL_ERRORS;
@@ -324,14 +354,18 @@ void FSlateOpenGLElementProgram::SetShaderType( uint32 InShaderType )
 	CHECK_GL_ERRORS;
 }
 
-void FSlateOpenGLElementProgram::SetMarginUVs( const FVector4& InMarginUVs )
+void FSlateOpenGLElementProgram::SetShaderParams(const FShaderParams& InShaderParams)
 {
-	const GLfloat* Params = (GLfloat*)&InMarginUVs;
-	glUniform4fv( MarginUVsParam, 1, Params );
+	const GLfloat* Params = (GLfloat*)&InShaderParams.PixelParams;
+	glUniform4fv(ShaderParamsParam, 1, Params);
+
+	const GLfloat* Params2 = (GLfloat*)&InShaderParams.PixelParams2;
+	glUniform4fv(ShaderParams2Param, 1, Params2);
+
 	CHECK_GL_ERRORS;
 }
 
-void FSlateOpenGLElementProgram::SetGammaValues(const FVector2D& InGammaValues)
+void FSlateOpenGLElementProgram::SetGammaValues(const FVector2f& InGammaValues)
 {
 	glUniform2f(GammaValuesParam, InGammaValues.X, InGammaValues.Y);
 	CHECK_GL_ERRORS;

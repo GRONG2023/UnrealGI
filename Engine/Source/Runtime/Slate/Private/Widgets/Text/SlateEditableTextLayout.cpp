@@ -130,10 +130,11 @@ FSlateEditableTextLayout::FSlateEditableTextLayout(ISlateEditableTextWidget& InO
 	TextSelectionHighlighter = SlateEditableTextTypes::FTextSelectionHighlighter::Create();
 	SearchSelectionHighlighter = SlateEditableTextTypes::FTextSearchHighlighter::Create();
 
-	ScrollOffset = FVector2D::ZeroVector;
+	ScrollOffset = FVector2f::ZeroVector;
 	PreferredCursorScreenOffsetInLine = 0.0f;
 	SelectionStart = TOptional<FTextLocation>();
 	CurrentUndoLevel = INDEX_NONE;
+	NumTransactionsOpened = 0;
 
 	bIsDragSelecting = false;
 	bWasFocusedByLastMouseDown = false;
@@ -143,7 +144,7 @@ FSlateEditableTextLayout::FSlateEditableTextLayout(ISlateEditableTextWidget& InO
 	bSelectionChangedExternally = false;
 	VirtualKeyboardTextCommitType = ETextCommit::Default;
 
-	CachedSize = FVector2D::ZeroVector;
+	CachedSize = FVector2f::ZeroVector;
 
 	auto ExecuteDeleteAction = [this]()
 	{
@@ -255,6 +256,11 @@ void FSlateEditableTextLayout::SetText(const TAttribute<FText>& InText)
 	}
 }
 
+int32 FSlateEditableTextLayout::GetTextLineCount()
+{
+	return TextLayout->GetLineCount();
+}
+
 FText FSlateEditableTextLayout::GetText() const
 {
 	SLATE_CROSS_THREAD_CHECK();
@@ -300,6 +306,16 @@ void FSlateEditableTextLayout::SetSearchText(const TAttribute<FText>& InSearchTe
 FText FSlateEditableTextLayout::GetSearchText() const
 {
 	return SearchText;
+}
+
+int32 FSlateEditableTextLayout::GetSearchResultIndex() const
+{
+	return CurrentSearchResultIndex;
+}
+
+int32 FSlateEditableTextLayout::GetNumSearchResults() const
+{
+	return SearchResultToIndexMap.Num();
 }
 
 void FSlateEditableTextLayout::SetTextStyle(const FTextBlockStyle& InTextStyle)
@@ -429,6 +445,15 @@ FText FSlateEditableTextLayout::GetSelectedText() const
 	return FText::GetEmpty();
 }
 
+FTextSelection FSlateEditableTextLayout::GetSelection() const
+{
+	const FTextLocation CursorInteractionPosition = CursorInfo.GetCursorInteractionLocation();
+	const FTextLocation SelectionLocation = SelectionStart.Get(CursorInteractionPosition);
+	const FTextSelection Selection(SelectionLocation, CursorInteractionPosition);
+	
+	return Selection;
+}
+
 void FSlateEditableTextLayout::SetTextShapingMethod(const TOptional<ETextShapingMethod>& InTextShapingMethod)
 {
 	TextLayout->SetTextShapingMethod((InTextShapingMethod.IsSet()) ? InTextShapingMethod.GetValue() : GetDefaultTextShapingMethod());
@@ -493,6 +518,28 @@ void FSlateEditableTextLayout::SetLineHeightPercentage(const TAttribute<float>& 
 	OwnerWidget->GetSlateWidget()->Invalidate(EInvalidateWidget::LayoutAndVolatility);
 }
 
+void FSlateEditableTextLayout::SetApplyLineHeightToBottomLine(const TAttribute<bool>& InApplyLineHeightToBottomLine)
+{
+	ApplyLineHeightToBottomLine = InApplyLineHeightToBottomLine;
+
+	OwnerWidget->GetSlateWidget()->Invalidate(EInvalidateWidget::LayoutAndVolatility);
+}
+
+void FSlateEditableTextLayout::SetOverflowPolicy(TOptional<ETextOverflowPolicy> InOverflowPolicy)
+{
+	if(OverflowPolicyOverride != InOverflowPolicy)
+	{
+		OverflowPolicyOverride = InOverflowPolicy;
+		TextLayout->SetTextOverflowPolicy(OverflowPolicyOverride);
+		if (HintTextLayout.IsValid())
+		{
+			HintTextLayout->SetTextOverflowPolicy(OverflowPolicyOverride);
+		}
+
+		OwnerWidget->GetSlateWidget()->Invalidate(EInvalidateWidget::LayoutAndVolatility);
+	}
+}
+
 void FSlateEditableTextLayout::SetDebugSourceInfo(const TAttribute<FString>& InDebugSourceInfo)
 {
 	DebugSourceInfo = InDebugSourceInfo;
@@ -513,6 +560,34 @@ TSharedRef<IVirtualKeyboardEntry> FSlateEditableTextLayout::GetVirtualKeyboardEn
 TSharedRef<ITextInputMethodContext> FSlateEditableTextLayout::GetTextInputMethodContext() const
 {
 	return TextInputMethodContext.ToSharedRef();
+}
+
+void FSlateEditableTextLayout::EnableTextInputMethodContext()
+{
+	ITextInputMethodSystem* const TextInputMethodSystem = FSlateApplication::Get().GetTextInputMethodSystem();
+	if (TextInputMethodSystem)
+	{
+		if (!bHasRegisteredTextInputMethodContext)
+		{
+			bHasRegisteredTextInputMethodContext = true;
+
+			TextInputMethodChangeNotifier = TextInputMethodSystem->RegisterContext(TextInputMethodContext.ToSharedRef());
+			if (TextInputMethodChangeNotifier.IsValid())
+			{
+				TextInputMethodChangeNotifier->NotifyLayoutChanged(ITextInputMethodChangeNotifier::ELayoutChangeType::Created);
+			}
+		}
+
+		TextInputMethodContext->CacheWindow();
+
+		// Make sure to set Native OS window focus as well to ensure IME support
+		if (TSharedPtr<FGenericWindow> NativeWindow = TextInputMethodContext->GetWindow())
+		{
+			NativeWindow->SetWindowFocus();
+		}
+
+		TextInputMethodSystem->ActivateContext(TextInputMethodContext.ToSharedRef());
+	}
 }
 
 bool FSlateEditableTextLayout::Refresh()
@@ -584,9 +659,12 @@ void FSlateEditableTextLayout::BeginSearch(const FText& InSearchText, const ESea
 
 void FSlateEditableTextLayout::AdvanceSearch(const bool InReverse)
 {
+	//FirstMatchedLocation used as a key to find the index of the first matched string among all matches
+	FTextLocation FirstMatchedLocation(INDEX_NONE, INDEX_NONE);
+	const FTextLocation CursorInteractionPosition = CursorInfo.GetCursorInteractionLocation();
+	
 	if (!SearchText.IsEmpty())
 	{
-		const FTextLocation CursorInteractionPosition = CursorInfo.GetCursorInteractionLocation();
 		const FTextLocation SelectionLocation = SelectionStart.Get(CursorInteractionPosition);
 		const FTextSelection Selection(SelectionLocation, CursorInteractionPosition);
 
@@ -598,17 +676,43 @@ void FSlateEditableTextLayout::AdvanceSearch(const bool InReverse)
 
 		int32 CurrentLineIndex = SearchStartLocation.GetLineIndex();
 		int32 CurrentLineOffset = SearchStartLocation.GetOffset();
+
+		int32 NumLinesSearched = 0;
+		
 		do
 		{
 			const FTextLayout::FLineModel& Line = Lines[CurrentLineIndex];
 
-			// Do we have a match on this line?
-			const int32 CurrentSearchBegin = Line.Text->Find(SearchTextString, SearchCase, InReverse ? ESearchDir::FromEnd : ESearchDir::FromStart, CurrentLineOffset);
-			if (CurrentSearchBegin != INDEX_NONE)
+			bool bShouldSearchLine = true;
+			
+			if (!InReverse && CurrentLineOffset >= Line.Text->Len() )
 			{
-				SelectionStart = FTextLocation(CurrentLineIndex, CurrentSearchBegin);
-				CursorInfo.SetCursorLocationAndCalculateAlignment(*TextLayout, FTextLocation(CurrentLineIndex, CurrentSearchBegin + SearchTextLength));
-				break;
+				// CurrentLineOffset needs to be less than len(),
+				// otherwise, Find() clamps it to len() - 1 (see FString::Find()),
+				// and if there is a match at len() - 1, the search gets stuck
+				// 
+				// for example, for text "[cursor]abcd", len() = 4, len() - 1 = 3
+				// if you search for 'd', after the first advance,
+				// we get "abcd[cursor]", where CurrentLineOffset = 4
+				// if we advance one more time with Find('d', offset = 4)
+				// internally it becomes a search starting from len() - 1 = 3,
+				// since at index 3 there is a 'd' match, the CurrentSearchBegin is 3
+				// as a result, cursor position is set to 3 + len('d') = 4, again
+				bShouldSearchLine = false;
+			}
+
+			if (bShouldSearchLine)
+			{
+				// Do we have a match on this line?
+				const int32 CurrentSearchBegin = Line.Text->Find(SearchTextString, SearchCase, InReverse ? ESearchDir::FromEnd : ESearchDir::FromStart, CurrentLineOffset);
+				if (CurrentSearchBegin != INDEX_NONE)
+				{
+					SelectionStart = FTextLocation(CurrentLineIndex, CurrentSearchBegin);
+					CursorInfo.SetCursorLocationAndCalculateAlignment(*TextLayout, FTextLocation(CurrentLineIndex, CurrentSearchBegin + SearchTextLength));
+
+					FirstMatchedLocation = SelectionStart.GetValue();
+					break;
+				}
 			}
 
 			if (InReverse)
@@ -631,34 +735,78 @@ void FSlateEditableTextLayout::AdvanceSearch(const bool InReverse)
 				}
 				CurrentLineOffset = 0;
 			}
-		}
-		while (CurrentLineIndex != SearchStartLocation.GetLineIndex());
+
+			NumLinesSearched++;
+
+		}while(NumLinesSearched <= Lines.Num());
+		// use "<=" because if we start a search from the middle of a line
+		// the search should wrap around and search from the beginning of the line
+		// so loop twice even if there is only a single line
 	}
 
 	UpdateCursorHighlight();
+
+	// UpdateCursorHighlight() ensures SearchResultToIndexMap is up to date
+	CurrentSearchResultIndex = 0;
+	if (FirstMatchedLocation.IsValid())
+	{
+		int32* Index = SearchResultToIndexMap.Find(FirstMatchedLocation);
+		if (ensure(Index))
+		{
+			CurrentSearchResultIndex = *Index;
+		}
+		
+		// PositionToScrollIntoView is set to cursor position in UpdateCursorHighlight();
+		// Scrolling to cursor position directly does not always produce a good result
+		// because you can have only the last letter of the matched text in the view
+		// and most of the text out of view. The following code addresses this problem
+		const FTextLocation LineStart(GetSelection().GetBeginning().GetLineIndex(), 0);
+		const FVector2D LocalLineStartLocation = TextLayout->GetLocationAt(LineStart, false) / TextLayout->GetScale();
+
+		const FVector2D LocalSelectionBeginLocation = TextLayout->GetLocationAt(GetSelection().GetBeginning(), false) / TextLayout->GetScale();
+
+		const FVector2D LocalSelectionEndLocation = TextLayout->GetLocationAt(GetSelection().GetEnd(), false) / TextLayout->GetScale();
+		
+		// Only apply extra scrolling if we are going from right to left 
+		if (LocalSelectionBeginLocation.X < 0.0f)
+		{
+			const float DistanceFromSelectionEndToLineStart = LocalSelectionEndLocation.X - LocalLineStartLocation.X;
+
+			if (DistanceFromSelectionEndToLineStart < TextLayout->GetViewSize().X)
+			{
+				// Scroll to line start if both the matched text and line start can fit into the view
+				PositionToScrollIntoView = SlateEditableTextTypes::FScrollInfo(LineStart, SlateEditableTextTypes::ECursorAlignment::Left);
+			}
+			else
+			{
+				// Otherwise, just apply minimal scrolling such that the entirety of the matched text is in the view
+				PositionToScrollIntoView = SlateEditableTextTypes::FScrollInfo(GetSelection().GetBeginning(), SlateEditableTextTypes::ECursorAlignment::Left);
+			}
+		}
+	}
 }
 
-FVector2D FSlateEditableTextLayout::SetHorizontalScrollFraction(const float InScrollOffsetFraction)
+UE::Slate::FDeprecateVector2DResult FSlateEditableTextLayout::SetHorizontalScrollFraction(const float InScrollOffsetFraction)
 {
 	ScrollOffset.X = FMath::Clamp<float>(InScrollOffsetFraction, 0.0, 1.0) * TextLayout->GetSize().X;
 	return ScrollOffset;
 }
 
-FVector2D FSlateEditableTextLayout::SetVerticalScrollFraction(const float InScrollOffsetFraction)
+UE::Slate::FDeprecateVector2DResult FSlateEditableTextLayout::SetVerticalScrollFraction(const float InScrollOffsetFraction)
 {
 	ScrollOffset.Y = FMath::Clamp<float>(InScrollOffsetFraction, 0.0, 1.0) * TextLayout->GetSize().Y;
 	return ScrollOffset;
 }
 
-FVector2D FSlateEditableTextLayout::SetScrollOffset(const FVector2D& InScrollOffset, const FGeometry& InGeometry)
+UE::Slate::FDeprecateVector2DResult FSlateEditableTextLayout::SetScrollOffset(const UE::Slate::FDeprecateVector2DParameter& InScrollOffset, const FGeometry& InGeometry)
 {
-	const FVector2D ContentSize = TextLayout->GetSize();
+	const FVector2f ContentSize = UE::Slate::CastToVector2f(TextLayout->GetSize());
 	ScrollOffset.X = FMath::Clamp(InScrollOffset.X, 0.0f, ContentSize.X - InGeometry.GetLocalSize().X);
 	ScrollOffset.Y = FMath::Clamp(InScrollOffset.Y, 0.0f, ContentSize.Y - InGeometry.GetLocalSize().Y);
 	return ScrollOffset;
 }
 
-FVector2D FSlateEditableTextLayout::GetScrollOffset() const
+UE::Slate::FDeprecateVector2DResult FSlateEditableTextLayout::GetScrollOffset() const
 {
 	return ScrollOffset;
 }
@@ -698,23 +846,7 @@ bool FSlateEditableTextLayout::HandleFocusReceived(const FFocusEvent& InFocusEve
 	}
 	else
 	{
-		ITextInputMethodSystem* const TextInputMethodSystem = FSlateApplication::Get().GetTextInputMethodSystem();
-		if (TextInputMethodSystem)
-		{
-			if (!bHasRegisteredTextInputMethodContext)
-			{
-				bHasRegisteredTextInputMethodContext = true;
-
-				TextInputMethodChangeNotifier = TextInputMethodSystem->RegisterContext(TextInputMethodContext.ToSharedRef());
-				if (TextInputMethodChangeNotifier.IsValid())
-				{
-					TextInputMethodChangeNotifier->NotifyLayoutChanged(ITextInputMethodChangeNotifier::ELayoutChangeType::Created);
-				}
-			}
-
-			TextInputMethodContext->CacheWindow();
-			TextInputMethodSystem->ActivateContext(TextInputMethodContext.ToSharedRef());
-		}
+		EnableTextInputMethodContext();
 	}
 
 	// Make sure we have the correct text (we might have been collapsed and have missed updates due to not being ticked)
@@ -778,31 +910,34 @@ bool FSlateEditableTextLayout::HandleFocusLost(const FFocusEvent& InFocusEvent)
 		ClearSelection();
 	}
 
-	// When focus is lost let anyone who is interested that text was committed
-	// See if user explicitly tabbed away or moved focus
-	ETextCommit::Type TextAction;
-	switch (InFocusEvent.GetCause())
+	if (!OwnerWidget->IsTextReadOnly())
 	{
-	case EFocusCause::Navigation:
-	case EFocusCause::Mouse:
-		TextAction = ETextCommit::OnUserMovedFocus;
-		break;
+		// When focus is lost let anyone who is interested that text was committed
+		// See if user explicitly tabbed away or moved focus
+		ETextCommit::Type TextAction;
+		switch (InFocusEvent.GetCause())
+		{
+		case EFocusCause::Navigation:
+		case EFocusCause::Mouse:
+			TextAction = ETextCommit::OnUserMovedFocus;
+			break;
 
-	case EFocusCause::Cleared:
-		TextAction = ETextCommit::OnCleared;
-		break;
+		case EFocusCause::Cleared:
+			TextAction = ETextCommit::OnCleared;
+			break;
 
-	default:
-		TextAction = ETextCommit::Default;
-		break;
+		default:
+			TextAction = ETextCommit::Default;
+			break;
+		}
+
+		// Always clear the local undo chain on commit
+		ClearUndoStates();
+
+		const FText EditedText = GetEditableText();
+
+		OwnerWidget->OnTextCommitted(EditedText, TextAction);
 	}
-
-	// Always clear the local undo chain on commit
-	ClearUndoStates();
-
-	const FText EditedText = GetEditableText();
-
-	OwnerWidget->OnTextCommitted(EditedText, TextAction);
 
 	// Reload underlying value now it is committed  (commit may alter the value) 
 	// so it can be re-displayed in the edit box
@@ -1143,21 +1278,6 @@ FReply FSlateEditableTextLayout::HandleMouseButtonDown(const FGeometry& MyGeomet
 				// should reset the selection range to the caret's position.
 				bWasFocusedByLastMouseDown = true;
 			}
-			else
-			{
-				// On platforms using a virtual keyboard open the virtual keyboard again 
-				if (FPlatformApplicationMisc::RequiresVirtualKeyboard())
-				{
-					if (!OwnerWidget->IsTextReadOnly())
-					{
-						if (OwnerWidget->GetVirtualKeyboardTrigger() == EVirtualKeyboardTrigger::OnAllFocusEvents ||
-							OwnerWidget->GetVirtualKeyboardTrigger() == EVirtualKeyboardTrigger::OnFocusByPointer)
-						{
-							FSlateApplication::Get().ShowVirtualKeyboard(true, InMouseEvent.GetUserIndex(), VirtualKeyboardEntry.ToSharedRef());
-						}
-					}
-				}
-			}
 
 			if (InMouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
 			{
@@ -1183,6 +1303,7 @@ FReply FSlateEditableTextLayout::HandleMouseButtonDown(const FGeometry& MyGeomet
 				{
 					// Deselect any text that was selected
 					ClearSelection();
+					MoveCursor(FMoveCursor::ViaScreenPointer(MyGeometry.AbsoluteToLocal(InMouseEvent.GetScreenSpacePosition()), MyGeometry.Scale, ECursorAction::MoveCursor));
 				}
 			}
 
@@ -1203,6 +1324,26 @@ FReply FSlateEditableTextLayout::HandleMouseButtonUp(const FGeometry& MyGeometry
 	// The mouse must have been captured by either left or right button down before we'll process mouse ups
 	if (OwnerWidget->GetSlateWidget()->HasMouseCapture())
 	{
+		if (InMouseEvent.GetEffectingButton() == EKeys::LeftMouseButton ||
+			InMouseEvent.GetEffectingButton() == EKeys::RightMouseButton)
+		{
+			if (!bWasFocusedByLastMouseDown)
+			{
+				// On platforms using a virtual keyboard open the virtual keyboard again 
+				if (FPlatformApplicationMisc::RequiresVirtualKeyboard())
+				{
+					if (!OwnerWidget->IsTextReadOnly())
+					{
+						if (OwnerWidget->GetVirtualKeyboardTrigger() == EVirtualKeyboardTrigger::OnAllFocusEvents ||
+							OwnerWidget->GetVirtualKeyboardTrigger() == EVirtualKeyboardTrigger::OnFocusByPointer)
+						{
+								FSlateApplication::Get().ShowVirtualKeyboard(true, InMouseEvent.GetUserIndex(), VirtualKeyboardEntry.ToSharedRef());
+						}
+					}
+				}
+			}
+		}
+
 		if (InMouseEvent.GetEffectingButton() == EKeys::LeftMouseButton && bIsDragSelecting)
 		{
 			// No longer drag-selecting
@@ -1282,7 +1423,7 @@ FReply FSlateEditableTextLayout::HandleMouseButtonUp(const FGeometry& MyGeometry
 
 FReply FSlateEditableTextLayout::HandleMouseMove(const FGeometry& InMyGeometry, const FPointerEvent& InMouseEvent)
 {
-	if (bIsDragSelecting && OwnerWidget->GetSlateWidget()->HasMouseCapture() && InMouseEvent.GetCursorDelta() != FVector2D::ZeroVector)
+	if (bIsDragSelecting && OwnerWidget->GetSlateWidget()->HasMouseCapture() && InMouseEvent.GetCursorDelta() != FVector2f::ZeroVector)
 	{
 		MoveCursor(FMoveCursor::ViaScreenPointer(InMyGeometry.AbsoluteToLocal(InMouseEvent.GetScreenSpacePosition()), InMyGeometry.Scale, ECursorAction::SelectText));
 		bHasDragSelectedSinceFocused = true;
@@ -1458,16 +1599,16 @@ bool FSlateEditableTextLayout::HandleTypeChar(const TCHAR InChar)
 		return false;
 	}
 
-	if (AnyTextSelected())
-	{
-		// Delete selected text
-		DeleteSelectedText();
-	}
-
 	// Certain characters are not allowed
 	const bool bIsCharAllowed = IsCharAllowed(InChar);
 	if (bIsCharAllowed)
 	{
+		if (AnyTextSelected())
+		{
+			// Delete selected text only if an allowed char is received
+			DeleteSelectedText();
+		}
+		
 		const FTextLocation CursorInteractionPosition = CursorInfo.GetCursorInteractionLocation();
 		const TArray< FTextLayout::FLineModel >& Lines = TextLayout->GetLineModels();
 		const FTextLayout::FLineModel& Line = Lines[CursorInteractionPosition.GetLineIndex()];
@@ -1626,13 +1767,13 @@ bool FSlateEditableTextLayout::AnyTextSelected() const
 	return SelectionPosition != CursorInteractionPosition;
 }
 
-bool FSlateEditableTextLayout::IsTextSelectedAt(const FGeometry& MyGeometry, const FVector2D& ScreenSpacePosition) const
+bool FSlateEditableTextLayout::IsTextSelectedAt(const FGeometry& MyGeometry, const UE::Slate::FDeprecateVector2DParameter& ScreenSpacePosition) const
 {
-	const FVector2D LocalPosition = MyGeometry.AbsoluteToLocal(ScreenSpacePosition);
+	const FVector2f LocalPosition = MyGeometry.AbsoluteToLocal(ScreenSpacePosition);
 	return IsTextSelectedAt(LocalPosition * MyGeometry.Scale);
 }
 
-bool FSlateEditableTextLayout::IsTextSelectedAt(const FVector2D& InLocalPosition) const
+bool FSlateEditableTextLayout::IsTextSelectedAt(const UE::Slate::FDeprecateVector2DParameter& InLocalPosition) const
 {
 	const FTextLocation CursorInteractionPosition = CursorInfo.GetCursorInteractionLocation();
 	const FTextLocation SelectionPosition = SelectionStart.Get(CursorInteractionPosition);
@@ -1642,7 +1783,7 @@ bool FSlateEditableTextLayout::IsTextSelectedAt(const FVector2D& InLocalPosition
 		return false;
 	}
 
-	const FTextLocation ClickedPosition = TextLayout->GetTextLocationAt(InLocalPosition);
+	const FTextLocation ClickedPosition = TextLayout->GetTextLocationAt(FVector2D(InLocalPosition));
 
 	FTextLocation SelectionLocation = SelectionStart.Get(CursorInteractionPosition);
 	FTextSelection Selection(SelectionLocation, CursorInteractionPosition);
@@ -1693,17 +1834,18 @@ void FSlateEditableTextLayout::SelectAllText()
 	const FTextLocation NewCursorPosition = FTextLocation(NumberOfLines - 1, Lines[NumberOfLines - 1].Text->Len());
 	CursorInfo.SetCursorLocationAndCalculateAlignment(*TextLayout, NewCursorPosition);
 	UpdateCursorHighlight();
+	OwnerWidget->GetSlateWidget()->Invalidate(EInvalidateWidget::LayoutAndVolatility);
 }
 
-void FSlateEditableTextLayout::SelectWordAt(const FGeometry& MyGeometry, const FVector2D& ScreenSpacePosition)
+void FSlateEditableTextLayout::SelectWordAt(const FGeometry& MyGeometry, const UE::Slate::FDeprecateVector2DParameter& ScreenSpacePosition)
 {
-	const FVector2D LocalPosition = MyGeometry.AbsoluteToLocal(ScreenSpacePosition);
+	const FVector2f LocalPosition = MyGeometry.AbsoluteToLocal(ScreenSpacePosition);
 	SelectWordAt(LocalPosition * MyGeometry.Scale);
 }
 
-void FSlateEditableTextLayout::SelectWordAt(const FVector2D& InLocalPosition)
+void FSlateEditableTextLayout::SelectWordAt(const UE::Slate::FDeprecateVector2DParameter& InLocalPosition)
 {
-	FTextLocation InitialLocation = TextLayout->GetTextLocationAt(InLocalPosition);
+	FTextLocation InitialLocation = TextLayout->GetTextLocationAt(FVector2d(InLocalPosition));
 	FTextSelection WordSelection = TextLayout->GetWordAt(InitialLocation);
 
 	FTextLocation WordStart = WordSelection.GetBeginning();
@@ -1723,6 +1865,28 @@ void FSlateEditableTextLayout::SelectWordAt(const FVector2D& InLocalPosition)
 		CursorInfo.SetCursorLocationAndCalculateAlignment(*TextLayout, NewCursorPosition);
 		UpdateCursorHighlight();
 	}
+}
+
+void FSlateEditableTextLayout::SelectText(const FTextLocation& InSelectionStart, const FTextLocation& InCursorLocation)
+{
+	if (TextLayout->IsEmpty())
+	{
+		return;
+	}
+
+	const FTextLocation NewCursorPosition = InCursorLocation;
+	CursorInfo.SetCursorLocationAndCalculateAlignment(*TextLayout, NewCursorPosition);
+
+	if (InSelectionStart != InCursorLocation)
+	{
+		SelectionStart = InSelectionStart;
+	}
+	else
+	{
+		SelectionStart.Reset();
+	}
+	
+	UpdateCursorHighlight();	
 }
 
 void FSlateEditableTextLayout::ClearSelection()
@@ -1898,8 +2062,12 @@ void FSlateEditableTextLayout::InsertTextAtCursorImpl(const FString& InString)
 		const bool bIsMultiLine = OwnerWidget->IsMultiLineTextEdit();
 		SanitizedString.GetCharArray().RemoveAll([&](const TCHAR InChar) -> bool
 		{
-			const bool bIsCharAllowed = IsCharAllowed(InChar) || (bIsMultiLine || !FChar::IsLinebreak(InChar));
-			return !bIsCharAllowed;
+			if (InChar != 0)
+			{
+				const bool bIsCharAllowed = IsCharAllowed(InChar) || (bIsMultiLine && FChar::IsLinebreak(InChar));
+				return !bIsCharAllowed;
+			}
+			return false;
 		});
 	}
 
@@ -1940,6 +2108,7 @@ void FSlateEditableTextLayout::InsertTextAtCursorImpl(const FString& InString)
 			TextLayout->InsertAt(CursorInteractionPosition, NewLineText);
 
 			// Advance caret position
+			ClearSelection();
 			const FTextLocation NewCursorPosition = FTextLocation(CursorInteractionPosition.GetLineIndex(), FMath::Min(CursorInteractionPosition.GetOffset() + NewLineText.Len(), Line.Text->Len()));
 			CursorInfo.SetCursorLocationAndCalculateAlignment(*TextLayout, NewCursorPosition);
 		}
@@ -2518,6 +2687,7 @@ void FSlateEditableTextLayout::UpdateCursorHighlight()
 		const FString& SearchTextString = SearchText.ToString();
 		const int32 SearchTextLength = SearchTextString.Len();
 
+		int32 SearchResultIndex = 0;
 		const TArray< FTextLayout::FLineModel >& Lines = TextLayout->GetLineModels();
 		for (int32 LineIndex = 0; LineIndex < Lines.Num(); ++LineIndex)
 		{
@@ -2530,6 +2700,12 @@ void FSlateEditableTextLayout::UpdateCursorHighlight()
 			{
 				FindBegin = CurrentSearchBegin + SearchTextLength;
 				ActiveLineHighlights.Add(FTextLineHighlight(LineIndex, FTextRange(CurrentSearchBegin, FindBegin), SearchHighlightZOrder, SearchSelectionHighlighter.ToSharedRef()));
+
+				// SearchResultIndex starts from 1
+				// for example, if it is used to display stats about search results
+				// it would appear as "1 of 5" for the first match among five matches.
+				SearchResultIndex++;
+				SearchResultToIndexMap.Add(FTextLocation(LineIndex, CurrentSearchBegin), SearchResultIndex);
 			}
 		}
 
@@ -2637,6 +2813,7 @@ void FSlateEditableTextLayout::RemoveCursorHighlight()
 	}
 
 	ActiveLineHighlights.Empty();
+	SearchResultToIndexMap.Reset();
 }
 
 void FSlateEditableTextLayout::UpdatePreferredCursorScreenOffsetInLine()
@@ -2825,6 +3002,11 @@ TArray<TSharedRef<const IRun>> FSlateEditableTextLayout::GetSelectedRuns() const
 	return Runs;
 }
 
+FTextLocation FSlateEditableTextLayout::GetCursorLocation() const
+{
+	return CursorInfo.GetCursorInteractionLocation();
+}
+
 FTextLocation FSlateEditableTextLayout::TranslatedLocation(const FTextLocation& Location, int8 Direction) const
 {
 	check(Direction != 0);
@@ -2968,12 +3150,13 @@ bool FSlateEditableTextLayout::HasTextChangedFromOriginal() const
 
 void FSlateEditableTextLayout::BeginEditTransation()
 {
-	// Never change text on read only controls! 
-	check(!OwnerWidget->IsTextReadOnly());
-
-	if (StateBeforeChangingText.IsSet())
+	NumTransactionsOpened += 1;
+	
+	if (NumTransactionsOpened > 1 || OwnerWidget->IsTextReadOnly())
 	{
 		// Already within a translation - don't open another
+		// Or never change text on read only controls.
+		// The TextReadOnly is an attribute, the return value may have changed since the last time it was checked.
 		return;
 	}
 
@@ -2985,9 +3168,15 @@ void FSlateEditableTextLayout::BeginEditTransation()
 
 void FSlateEditableTextLayout::EndEditTransaction()
 {
-	if (!StateBeforeChangingText.IsSet())
+	NumTransactionsOpened -= 1;
+
+	check(NumTransactionsOpened >= 0);
+
+	if (NumTransactionsOpened > 0)
 	{
-		// No transaction to close
+		// Don't close transaction if there are more opened
+		// Caller of the first opened transaction should be
+		// responsible for actually closing the transaction
 		return;
 	}
 
@@ -3238,11 +3427,15 @@ void FSlateEditableTextLayout::Tick(const FGeometry& AllottedGeometry, const dou
 		(OwnerWidget->GetSlateWidget()->HasAnyUserFocus().IsSet() || HasActiveContextMenu());
 	if (bShouldAppearFocused)
 	{
+		// When focused the user is editing or selecting text. Never allow ellipsis to replace text
+		TextLayout->SetTextOverflowPolicy(ETextOverflowPolicy::Clip);
 		// If we have focus then we don't allow the editable text itself to update, but we do still need to refresh the password and marshaller state
 		RefreshImpl(nullptr);
 	}
 	else
 	{
+		TextLayout->SetTextOverflowPolicy(OverflowPolicyOverride);
+
 		// We don't have focus, so we can perform a full refresh
 		Refresh();
 	}
@@ -3300,7 +3493,7 @@ void FSlateEditableTextLayout::Tick(const FGeometry& AllottedGeometry, const dou
 			const FSlateRect LocalLineViewRect(LineView.Offset / TextLayout->GetScale(), (LineView.Offset + LineView.Size) / TextLayout->GetScale());
 
 			const FVector2D LocalCursorLocation = TextLayout->GetLocationAt(ScrollInfo.Position, ScrollInfo.Alignment == SlateEditableTextTypes::ECursorAlignment::Right) / TextLayout->GetScale();
-			const FSlateRect LocalCursorRect(LocalCursorLocation, FVector2D(LocalCursorLocation.X + CaretWidth, LocalCursorLocation.Y + FontMaxCharHeight));
+			const FSlateRect LocalCursorRect(LocalCursorLocation, FVector2f(LocalCursorLocation.X + CaretWidth, LocalCursorLocation.Y + FontMaxCharHeight));
 
 			if (LocalCursorRect.Left < 0.0f)
 			{
@@ -3351,14 +3544,14 @@ void FSlateEditableTextLayout::Tick(const FGeometry& AllottedGeometry, const dou
 		ScrollOffset.Y = OwnerWidget->UpdateAndClampVerticalScrollBar(ViewOffset, ViewFraction, ScrollBarVisiblityOverride);
 	}
 
-	TextLayout->SetVisibleRegion(AllottedGeometry.Size, ScrollOffset * TextLayout->GetScale());
+	TextLayout->SetVisibleRegion(AllottedGeometry.Size, FVector2D(ScrollOffset) * TextLayout->GetScale());
 }
 
 int32 FSlateEditableTextLayout::OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled)
 {
 	// Update the auto-wrap size now that we have computed paint geometry; won't take affect until text frame
 	// Note: This is done here rather than in Tick(), because Tick() doesn't get called while resizing windows, but OnPaint() does
-	CachedSize = AllottedGeometry.GetLocalSize();
+	CachedSize = FVector2f(AllottedGeometry.GetLocalSize());
 
 	// Only paint the hint text layout if we don't have any text set
 	if (TextLayout->IsEmpty() && HintTextLayout.IsValid())
@@ -3403,8 +3596,9 @@ void FSlateEditableTextLayout::CacheDesiredSize(float LayoutScaleMultiplier)
 	TextLayout->SetWrappingPolicy(WrappingPolicy.Get());
 	TextLayout->SetMargin(MarginValue);
 	TextLayout->SetLineHeightPercentage(LineHeightPercentage.Get());
+	TextLayout->SetApplyLineHeightToBottomLine(ApplyLineHeightToBottomLine.Get());
 	TextLayout->SetJustification(Justification.Get());
-	TextLayout->SetVisibleRegion(CachedSize, ScrollOffset * TextLayout->GetScale());
+	TextLayout->SetVisibleRegion(FVector2D(CachedSize), FVector2D(ScrollOffset) * TextLayout->GetScale());
 	TextLayout->UpdateIfNeeded();
 }
 
@@ -3428,7 +3622,7 @@ FVector2D FSlateEditableTextLayout::ComputeDesiredSize(float LayoutScaleMultipli
 		MarginValue.Right += CaretWidth;
 
 		const FVector2D HintTextSize = HintTextLayout->ComputeDesiredSize(
-			FSlateTextBlockLayout::FWidgetArgs(HintText, FText::GetEmpty(), WrapTextAt, AutoWrapText, WrappingPolicy, ETextTransformPolicy::None, MarginValue, LineHeightPercentage, Justification),
+			FSlateTextBlockLayout::FWidgetDesiredSizeArgs(HintText.Get(), FText::GetEmpty(), WrapTextAt.Get(), AutoWrapText.Get(), WrappingPolicy.Get(), ETextTransformPolicy::None, MarginValue, LineHeightPercentage.Get(), ApplyLineHeightToBottomLine.Get(), Justification.Get()),
 			LayoutScaleMultiplier, HintTextStyle
 			);
 
@@ -3480,9 +3674,9 @@ void FSlateEditableTextLayout::OnArrangeChildren(const FGeometry& AllottedGeomet
 	}
 }
 
-FVector2D FSlateEditableTextLayout::GetSize() const
+UE::Slate::FDeprecateVector2DResult FSlateEditableTextLayout::GetSize() const
 {
-	return TextLayout->GetSize();
+	return UE::Slate::CastToVector2f(TextLayout->GetSize());
 }
 
 TSharedRef<SWidget> FSlateEditableTextLayout::BuildDefaultContextMenu(const TSharedPtr<FExtender>& InMenuExtender) const
@@ -3544,6 +3738,15 @@ void FSlateEditableTextLayout::GetCurrentTextLine(FString& OutTextLine) const
 	if (Lines.IsValidIndex(LineIdx))
 	{
 		OutTextLine = *Lines[LineIdx].Text;
+	}
+}
+
+void FSlateEditableTextLayout::GetTextLine(const int32 InLineIndex, FString& OutTextLine) const
+{
+	const TArray< FTextLayout::FLineModel >& Lines = TextLayout->GetLineModels();
+	if (Lines.IsValidIndex(InLineIndex))
+	{
+		OutTextLine = *Lines[InLineIndex].Text;
 	}
 }
 
@@ -3865,7 +4068,7 @@ bool FSlateEditableTextLayout::FTextInputMethodContext::GetTextBounds(const uint
 
 	// Translate the position (which is in local space) into screen (absolute) space
 	// Note: The local positions are pre-scaled, so we don't scale them again here
-	Position += CachedGeometry.AbsolutePosition;
+	Position += FVector2D(CachedGeometry.AbsolutePosition);
 	
 	return false; // false means "not clipped"
 }
@@ -3879,7 +4082,7 @@ void FSlateEditableTextLayout::FTextInputMethodContext::GetScreenBounds(FVector2
 		return;
 	}
 
-	Position = CachedGeometry.AbsolutePosition;
+	Position = FVector2D(CachedGeometry.AbsolutePosition);
 	Size = CachedGeometry.GetDrawSize();
 }
 

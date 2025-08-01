@@ -4,6 +4,7 @@
 #include "SlateOptMacros.h"
 #include "LogVisualizerStyle.h"
 #include "Widgets/Input/SSearchBox.h"
+#include "Styling/AppStyle.h"
 
 #define LOCTEXT_NAMESPACE "SVisualLoggerReport"
 
@@ -48,9 +49,9 @@ void SVisualLoggerReport::Construct(const FArguments& InArgs, TArray< TSharedPtr
 				[
 					SNew(SBorder)
 					.Padding(5.0f)
-					.BorderImage(FCoreStyle::Get().GetBrush("BoxShadow"))
+					.BorderImage(FAppStyle::Get().GetBrush("BoxShadow"))
 					[
-						SNew(SBorder).Padding(2).HAlign(HAlign_Left)
+						SNew(SBorder).Padding(2.f).HAlign(HAlign_Left)
 						.BorderImage(FLogVisualizerStyle::Get().GetBrush("RichText.Background"))
 						[
 							SAssignNew(InteractiveRichText, SRichTextBlock)

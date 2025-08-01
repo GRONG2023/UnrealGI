@@ -192,8 +192,10 @@ void BuildExpressionMap()
 		* bit pattern casting operations
 		*/
 		// 		Info = &VMExpressionMap.Add(ir_unop_fasu);//TODO?
-		// 		Info = &VMExpressionMap.Add(ir_unop_fasi);
-		// 		Info = &VMExpressionMap.Add(ir_unop_iasf);
+		Info = &VMExpressionMap.Add(ir_unop_fasi);
+		Info->Add(FVMExpresssionInfo(EVectorVMOp::fasi, glsl_type::int_type, glsl_type::float_type));
+		Info = &VMExpressionMap.Add(ir_unop_iasf);
+		Info->Add(FVMExpresssionInfo(EVectorVMOp::iasf, glsl_type::float_type, glsl_type::int_type));
 		// 		Info = &VMExpressionMap.Add(ir_unop_uasf);
 
 		/**
@@ -1686,14 +1688,11 @@ class ir_gen_vvm_visitor : public ir_hierarchical_visitor
 				{			
 					float val = constant->value.f[0];
 					float otherval = other->value.f[0];
-					if (!FMath::IsNaN(val) && FMath::IsFinite(val))
+					if ( FMath::IsFinite(val) && FMath::IsFinite(otherval) )
 					{
 						return val == otherval;
 					}
-					else
-					{
-						return FMath::IsNaN(val) == FMath::IsNaN(otherval) && FMath::IsFinite(val) == FMath::IsFinite(otherval);
-					}
+					return FMath::IsFinite(val) == FMath::IsFinite(otherval) && FMath::IsNaN(val) == FMath::IsNaN(otherval);
 				}
 				case GLSL_TYPE_INT: return constant->value.i[0] == other->value.i[0];
 				case GLSL_TYPE_BOOL: return constant->value.b[0] == other->value.b[0];
@@ -1944,7 +1943,7 @@ class ir_gen_vvm_visitor : public ir_hierarchical_visitor
 			}
 		}
 
-		FString ExprString = FString::Printf(TEXT("%s %s"), ANSI_TO_TCHAR(expression->type->name), ir_expression::operator_string(expression->operation));
+		FString ExprString = FString::Printf(TEXT("%s %s"), ANSI_TO_TCHAR(expression->type->name), ANSI_TO_TCHAR(ir_expression::operator_string(expression->operation)));
 		ExprString += TEXT("(");
 		for (unsigned i = 0; i < expression->get_num_operands(); ++i)
 		{

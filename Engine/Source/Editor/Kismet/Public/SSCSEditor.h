@@ -2,35 +2,86 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Misc/Attribute.h"
-#include "Templates/SubclassOf.h"
+#include "BlueprintEditor.h"
 #include "Components/ActorComponent.h"
 #include "Components/SceneComponent.h"
-#include "Styling/SlateColor.h"
-#include "Layout/Visibility.h"
-#include "Input/Reply.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SCompoundWidget.h"
-#include "Widgets/SBoxPanel.h"
-#include "Styling/SlateBrush.h"
-#include "Widgets/Views/STableViewBase.h"
-#include "Widgets/Views/STableRow.h"
-#include "Widgets/Views/STreeView.h"
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "Containers/UnrealString.h"
+#include "CoreMinimal.h"
+#include "Delegates/Delegate.h"
 #include "Engine/SCS_Node.h"
-#include "BlueprintEditor.h"
-#include "Widgets/SToolTip.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/SlateDelegates.h"
+#include "Framework/Views/ITypedTableView.h"
+#include "GameFramework/Actor.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMath.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Layout/Clipping.h"
+#include "Layout/Visibility.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/Optional.h"
 #include "SComponentClassCombo.h"
 #include "ScopedTransaction.h"
+#include "Styling/SlateBrush.h"
+#include "Styling/SlateColor.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/Casts.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/SubclassOf.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UniquePtr.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/SToolTip.h"
+#include "Widgets/SWidget.h"
+#include "Widgets/Views/STableRow.h"
+#include "Widgets/Views/STableViewBase.h"
+#include "Widgets/Views/STreeView.h"
 
+class FDragDropEvent;
+class FExtender;
 class FMenuBuilder;
-class UToolMenu;
 class FSCSEditorTreeNode;
-class SSCSEditor;
-class UPrimitiveComponent;
-struct EventData;
+class FUICommandList;
 class ISCSEditorUICustomization;
+class ITableRow;
+class SHeaderRow;
+class SHorizontalBox;
+class SInlineEditableTextBlock;
+class SSCSEditor;
+class SScrollBar;
+class SSearchBox;
+class SToolTip;
+class SVerticalBox;
+class SWidget;
+class UBlueprint;
+class UChildActorComponent;
+class UClass;
+class UObject;
+class UPrimitiveComponent;
+class USCS_Node;
+class USimpleConstructionScript;
+class UToolMenu;
+struct EventData;
+struct FGeometry;
+struct FKeyEvent;
+struct FPointerEvent;
+struct FSlateBrush;
+template <typename FuncType> class TFunctionRef;
 
 // SCS editor tree node pointer types
 using FSCSEditorTreeNodePtrType = TSharedPtr<class FSCSEditorTreeNode>;
@@ -445,28 +496,6 @@ private:
 		Unknown = 0xFC // ~FilteredInMask
 	};
 	uint8 FilterFlags;
-
-public:
-	UE_DEPRECATED(4.26, "Use IsNativeComponent() instead.")
-	bool IsNative() const { return IsNativeComponent(); }
-
-	UE_DEPRECATED(4.26, "Use IsInheritedSCSNode() instead.")
-	bool IsInheritedSCS() const { return IsInheritedSCSNode(); }
-
-	UE_DEPRECATED(4.26, "Use IsInheritedComponent() instead.")
-	bool IsInherited() const { return IsInheritedComponent(); }
-
-	UE_DEPRECATED(4.26, "Use IsUserInstancedComponent() instead.")
-	bool IsUserInstanced() const { return IsUserInstancedComponent(); }
-
-	UE_DEPRECATED(4.26, "Use CanEdit() instead.")
-	bool CanEditDefaults() const { return CanEdit(); }
-
-	UE_DEPRECATED(4.26, "Use SetObject() instead.")
-	void SetComponentTemplate(UActorComponent* Component) { SetObject(Component); }
-
-	UE_DEPRECATED(4.26, "Use RefreshFilteredState() instead. This API has been changed to an internal-only helper method.")
-	void UpdateCachedFilterState(bool bMatchesFilter, bool bUpdateParent) { SetCachedFilterState(bMatchesFilter, bUpdateParent); }
 };
 
 //////////////////////////////////////////////////////////////////////////
@@ -672,8 +701,8 @@ private:
 	bool bAllowRename;
 	const UClass* CachedFilterType;
 	TArray<FString> CachedFilterTerms;
-	TSharedPtr<class FSCSEditorTreeNodeSeparator> SceneComponentSeparatorNodePtr;
-	TSharedPtr<class FSCSEditorTreeNodeSeparator> NonSceneComponentSeparatorNodePtr;
+	TWeakPtr<class FSCSEditorTreeNodeSeparator> SceneComponentSeparatorNodePtr;
+	TWeakPtr<class FSCSEditorTreeNodeSeparator> NonSceneComponentSeparatorNodePtr;
 };
 
 class KISMET_API FSCSEditorTreeNodeChildActor : public FSCSEditorTreeNodeActorBase
@@ -825,12 +854,19 @@ private:
 	 */
 	FText GetComponentAddSourceToolTipText() const;
 
-	/**
+/**
 	 * Retrieves tooltip text for the specified Native Component's underlying Name
 	 *
 	 * @returns An FText object containing the Component's Name
 	 */
 	FText GetNativeComponentNameToolTipText() const;
+
+	/**
+	 * Retrieves a tooltip text describing if the component is marked Editor only or not
+	 *
+	 * @returns An FText object containing a description of if the component is marked Editor only or not
+	 */
+	FText GetComponentEditorOnlyTooltipText() const;
 
 public:
 	/** Pointer back to owning SCSEditor 2 tool */
@@ -970,6 +1006,8 @@ namespace EComponentEditorMode
 	};
 };
 
+class UE_DEPRECATED(5.0, "SSCSEditor has been deprecated, use a child class of SSubobjectEditor instead.") SSCSEditor;
+
 class KISMET_API SSCSEditor : public SCompoundWidget
 {
 public:
@@ -1001,6 +1039,7 @@ public:
 		SLATE_EVENT(FOnSelectionUpdated, OnSelectionUpdated)
 		SLATE_EVENT(FOnItemDoubleClicked, OnItemDoubleClicked)
 		SLATE_EVENT(FOnHighlightPropertyInDetailsView, OnHighlightPropertyInDetailsView)
+		SLATE_EVENT(FSimpleDelegate, OnObjectReplaced)
 
 	SLATE_END_ARGS()
 
@@ -1052,16 +1091,6 @@ public:
 	   @param Params       					(In) Parameter block of optional behavior flags
 	 */
 	UActorComponent* AddNewComponent(UClass* NewComponentClass, UObject* Asset, const FAddNewComponentParams Params = FAddNewComponentParams());
-
-	/** Adds a component to the SCS tree */
-	UE_DEPRECATED(4.26, "Use version that takes parameter block")
-	UActorComponent* AddNewComponent(UClass* NewComponentClass, UObject* Asset, const bool bSkipMarkBlueprintModified, bool bSetFocusToNewItem = true)
-	{
-		FAddNewComponentParams Params;
-		Params.bSkipMarkBlueprintModified = bSkipMarkBlueprintModified;
-		Params.bSetFocusToNewItem = bSetFocusToNewItem;
-		return AddNewComponent(NewComponentClass, Asset, Params);
-	}
 
 	struct FAddedNodeDetails
 	{
@@ -1122,7 +1151,7 @@ public:
 	bool CanDeleteNodes() const;
 
 	/** Callbacks to find references of the selected component */
-	void OnFindReferences();
+	void OnFindReferences(bool bSearchAllBlueprints, const EGetFindReferenceSearchStringFlags Flags);
 
 	/** Removes an existing component node from the tree */
 	void RemoveComponentNode(FSCSEditorTreeNodePtrType InNodePtr);
@@ -1250,6 +1279,9 @@ public:
 	/** Called at the end of each frame. */
 	void OnPostTick(float);
 
+	/** Return the button widgets that can add components or create/edit blueprints */
+	TSharedPtr<SWidget> GetToolButtonsBox();
+
 	/** Sets UI customizations of this SCSEditor. */
 	void SetUICustomization(TSharedPtr<ISCSEditorUICustomization> InUICustomization);
 
@@ -1292,10 +1324,10 @@ protected:
 	void OnObjectsReplaced(const TMap<UObject*, UObject*>& OldToNewInstanceMap);
 
 	/** Helper method to update component pointers held by the given actor node's subtree */
-	void ReplaceComponentReferencesInTree(FSCSEditorActorNodePtrType InActorNode, const TMap<UObject*, UObject*>& OldToNewInstanceMap);
+	void ReplaceComponentReferencesInTree(FSCSEditorActorNodePtrType InActorNode, const TMap<UObject*, UObject*>& OldToNewInstanceMap, bool& OutHasChanges);
 
 	/** Update component pointers held by tree nodes if components have been replaced following construction script execution */
-	void ReplaceComponentReferencesInTree(const TArray<FSCSEditorTreeNodePtrType>& Nodes, const TMap<UObject*, UObject*>& OldToNewInstanceMap);
+	void ReplaceComponentReferencesInTree(const TArray<FSCSEditorTreeNodePtrType>& Nodes, const TMap<UObject*, UObject*>& OldToNewInstanceMap, bool& OutHasChanges);
 
 	/**
 	 * Function to create events for the current selection
@@ -1463,6 +1495,9 @@ public:
 	/** Delegate to invoke when the given property should be highlighted in the details view (e.g. diff). */
 	FOnHighlightPropertyInDetailsView OnHighlightPropertyInDetailsView;
 
+	/** Delegate to invoke when objects within the SCS tree are replaced (eg, via re-instancing from a BP compile) */
+	FSimpleDelegate OnObjectReplaced;
+
 	/** Returns the Actor context for which we are viewing/editing the SCS.  Can return null.  Should not be cached as it may change from frame to frame. */
 	class AActor* GetActorContext() const;
 
@@ -1491,9 +1526,11 @@ private:
 	/** The filter box that handles filtering for the tree. */
 	TSharedPtr< SSearchBox > FilterBox;
 
+	/** The tools buttons box **/
+	TSharedPtr<SHorizontalBox> ButtonBox;
+
 	/** SCSEditor UI customizations */
 	TSharedPtr<ISCSEditorUICustomization> UICustomization;
 
 	/** SCSEditor UI extension */
-	TSharedPtr<class SExtensionPanel> ExtensionPanel;
-};
+	TSharedPtr<class SExtensionPanel> ExtensionPanel; };

@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "MovieSceneSection.h"
+#include "MovieScene.h"
 #include "MovieSceneTrack.h"
 #include "MovieSceneSequence.h"
 #include "MovieSceneCommonHelpers.h"
@@ -13,10 +14,14 @@
 #include "EntitySystem/BuiltInComponentTypes.h"
 #include "EntitySystem/MovieSceneEntitySystemTask.h"
 #include "EntitySystem/MovieSceneEntitySystemLinker.h"
+#include "EntitySystem/MovieSceneBlenderSystem.h"
+#include "EntitySystem/IMovieSceneBlenderSystemSupport.h"
 #include "Containers/ArrayView.h"
 #include "Channels/MovieSceneChannel.h"
 #include "UObject/SequencerObjectVersion.h"
 #include "Misc/FeedbackContext.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneSection)
 
 UMovieSceneSection::UMovieSceneSection(const FObjectInitializer& ObjectInitializer)
 	: Super( ObjectInitializer )
@@ -46,6 +51,10 @@ UMovieSceneSection::UMovieSceneSection(const FObjectInitializer& ObjectInitializ
 	Easing.EaseOut = DefaultEaseOut;
 
 	ChannelProxyType = EMovieSceneChannelProxyType::Static;
+
+#if WITH_EDITORONLY_DATA
+	ColorTint = FColor(0, 0, 0, 0);
+#endif
 }
 
 
@@ -117,6 +126,15 @@ void UMovieSceneSection::Serialize(FArchive& Ar)
 #endif
 	}
 }
+
+#if WITH_EDITORONLY_DATA
+void UMovieSceneSection::DeclareConstructClasses(TArray<FTopLevelAssetPath>& OutConstructClasses, const UClass* SpecificSubclass)
+{
+	Super::DeclareConstructClasses(OutConstructClasses, SpecificSubclass);
+	OutConstructClasses.Add(FTopLevelAssetPath(UMovieSceneBuiltInEasingFunction::StaticClass()));
+}
+#endif
+
 
 void UMovieSceneSection::PostDuplicate(bool bDuplicateForPIE)
 {
@@ -197,7 +215,7 @@ TSharedPtr<FStructOnScope> UMovieSceneSection::GetKeyStruct(TArrayView<const FKe
 	return nullptr;
 }
 
-void UMovieSceneSection::MoveSection(FFrameNumber DeltaFrame)
+void UMovieSceneSection::MoveSectionImpl(FFrameNumber DeltaFrame)
 {
 	if (TryModify())
 	{
@@ -219,12 +237,12 @@ void UMovieSceneSection::MoveSection(FFrameNumber DeltaFrame)
 			}
 		}
 	}
-
-#if WITH_EDITORONLY_DATA
-	TimecodeSource.DeltaFrame += DeltaFrame;
-#endif
 }
 
+void UMovieSceneSection::MoveSection(FFrameNumber DeltaFrame)
+{
+	MoveSectionImpl(DeltaFrame);
+}
 
 TRange<FFrameNumber> UMovieSceneSection::ComputeEffectiveRange() const
 {
@@ -302,8 +320,17 @@ void UMovieSceneSection::BuildDefaultComponents(UMovieSceneEntitySystemLinker* E
 
 	const bool bHasEasing = (Easing.GetEaseInDuration() > 0 || Easing.GetEaseOutDuration() > 0);
 
-	const bool bShouldRestoreState = (EvalOptions.CompletionMode == EMovieSceneCompletionMode::RestoreState) ||
-		( EvalOptions.CompletionMode == EMovieSceneCompletionMode::ProjectDefault && Params.Sequence.DefaultCompletionMode == EMovieSceneCompletionMode::RestoreState);
+	// Should restore state if we're not forcing keep state and any one of the following:
+	// - We're forcing restore state
+	// - This section is set to restore state
+	// - This section is set to the default, and the default is restore state
+	const bool bForceKeepState     = EnumHasAnyFlags(Params.Sequence.SubSectionFlags, EMovieSceneSubSectionFlags::OverrideKeepState);
+	const bool bShouldRestoreState = bForceKeepState == false &&
+		(
+			EnumHasAnyFlags(Params.Sequence.SubSectionFlags, EMovieSceneSubSectionFlags::OverrideRestoreState) ||
+			(EvalOptions.CompletionMode == EMovieSceneCompletionMode::RestoreState) ||
+			(EvalOptions.CompletionMode == EMovieSceneCompletionMode::ProjectDefault && Params.Sequence.DefaultCompletionMode == EMovieSceneCompletionMode::RestoreState)
+		);
 
 	TComponentTypeID<FEasingComponentData> EasingComponentID = Components->Easing;
 	FComponentTypeID RestoreStateTag = Components->Tags.RestoreState;
@@ -312,18 +339,36 @@ void UMovieSceneSection::BuildDefaultComponents(UMovieSceneEntitySystemLinker* E
 	const bool bHasSectionPreRoll  = Params.EntityMetaData && EnumHasAnyFlags(Params.EntityMetaData->Flags, ESectionEvaluationFlags::PreRoll | ESectionEvaluationFlags::PostRoll);
 	const bool bHasSequencePreRoll = Params.Sequence.bPreRoll || Params.Sequence.bPostRoll;
 
+	TSubclassOf<UMovieSceneBlenderSystem> BlenderSystemClass = nullptr;
+
+	// Try and find a blender system to use
+	{
+		IMovieSceneBlenderSystemSupport* BlenderSystemSupport = Cast<IMovieSceneBlenderSystemSupport>(this);
+		if (!BlenderSystemSupport)
+		{
+			BlenderSystemSupport = GetImplementingOuter<IMovieSceneBlenderSystemSupport>();
+		}
+		if (BlenderSystemSupport)
+		{
+			BlenderSystemClass = BlenderSystemSupport->GetBlenderSystem();
+		}
+	}
+
 	OutImportedEntity->AddBuilder(
 		FEntityBuilder()
-		.AddConditional(Components->Easing,                     FEasingComponentData{ this }, bHasEasing)
-		.AddConditional(Components->HierarchicalEasingChannel, uint16(-1), Params.Sequence.bHasHierarchicalEasing)
-		.AddConditional(Components->HierarchicalBias,           Params.Sequence.HierarchicalBias, Params.Sequence.HierarchicalBias != 0)
-		.AddConditional(Components->Interrogation.InputKey,     Params.InterrogationKey, Params.InterrogationKey.IsValid())
-		.AddConditional(Components->EvalTime,                   Params.EntityMetaData ? Params.EntityMetaData->ForcedTime : 0, bHasForcedTime)
-		.AddTagConditional(Components->Tags.RestoreState,       bShouldRestoreState)
-		.AddTagConditional(Components->Tags.FixedTime,          bHasForcedTime)
-		.AddTagConditional(Components->Tags.SectionPreRoll,     bHasSectionPreRoll)
-		.AddTagConditional(Components->Tags.PreRoll,            bHasSequencePreRoll)
-		.AddTagConditional(BlendTag,                            BlendTag != FComponentTypeID::Invalid())
+		.AddConditional(Components->BlenderType,                    BlenderSystemClass, BlenderSystemClass.Get() != nullptr)
+		.AddConditional(Components->Easing,                         FEasingComponentData{ decltype(FEasingComponentData::Section)(this) }, bHasEasing)
+		.AddConditional(Components->HierarchicalBias,               Params.Sequence.HierarchicalBias, Params.Sequence.HierarchicalBias != 0)
+		.AddConditional(Components->Interrogation.InputKey,         Params.InterrogationKey, Params.InterrogationKey.IsValid())
+		.AddConditional(Components->Interrogation.Instance,         Params.InterrogationInstance, Params.InterrogationInstance.IsValid())
+		.AddConditional(Components->EvalTime,                       Params.EntityMetaData ? Params.EntityMetaData->ForcedTime : 0, bHasForcedTime)
+		.AddTagConditional(Components->Tags.RestoreState,           bShouldRestoreState)
+		.AddTagConditional(Components->Tags.IgnoreHierarchicalBias, EnumHasAnyFlags(Params.Sequence.SubSectionFlags, EMovieSceneSubSectionFlags::IgnoreHierarchicalBias))
+		.AddTagConditional(Components->Tags.BlendHierarchicalBias,  EnumHasAnyFlags(Params.Sequence.SubSectionFlags, EMovieSceneSubSectionFlags::BlendHierarchicalBias))
+		.AddTagConditional(Components->Tags.FixedTime,              bHasForcedTime)
+		.AddTagConditional(Components->Tags.SectionPreRoll,         bHasSectionPreRoll)
+		.AddTagConditional(Components->Tags.PreRoll,                bHasSequencePreRoll || bHasSectionPreRoll)
+		.AddTagConditional(BlendTag,                                BlendTag != FComponentTypeID::Invalid())
 	);
 
 	if (BlendTag == Components->Tags.AdditiveFromBaseBlend)
@@ -372,6 +417,17 @@ bool UMovieSceneSection::IsReadOnly() const
 	return false;
 }
 
+void UMovieSceneSection::SetRowIndex(int32 NewRowIndex)
+{
+	const int32 OldRowIndex = RowIndex;
+	RowIndex = NewRowIndex;
+
+	if (OldRowIndex != RowIndex)
+	{
+		EventHandlers.Trigger(&UE::MovieScene::ISectionEventHandler::OnRowChanged, this);
+	}
+}
+
 void UMovieSceneSection::GetOverlappingSections(TArray<UMovieSceneSection*>& OutSections, bool bSameRow, bool bIncludeThis)
 {
 	UMovieSceneTrack* Track = GetTypedOuter<UMovieSceneTrack>();
@@ -398,6 +454,84 @@ void UMovieSceneSection::GetOverlappingSections(TArray<UMovieSceneSection*>& Out
 			OutSections.Add(Section);
 		}
 	}
+}
+
+/* Returns whether this section can have an open lower bound. This will generally be false if sections of this type cannot be blended and there is another section on the same row before this one.*/
+bool UMovieSceneSection::CanHaveOpenLowerBound() const
+{
+	if (!GetBlendType().IsValid())
+	{
+		UMovieSceneTrack* Track = GetTypedOuter<UMovieSceneTrack>();
+		if (!Track)
+		{
+			return true;
+		}
+
+		TRange<FFrameNumber> ThisRange = GetRange();
+
+		if (!ThisRange.HasLowerBound())
+		{
+			return true;
+		}
+
+		for (UMovieSceneSection* Section : Track->GetAllSections())
+		{
+			if (!Section || (Section == this))
+			{
+				continue;
+			}
+
+			if (Section->GetRowIndex() != GetRowIndex())
+			{
+				continue;
+			}
+
+			if (Section->GetRange().Overlaps(ThisRange) || (Section->GetRange().HasUpperBound() && Section->GetRange().GetUpperBoundValue() <= ThisRange.GetLowerBoundValue()))
+			{
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+/* Returns whether this section can have an open upper bound. This will generally be false if sections of this type cannot be blended and there is another section on the same row after this one.*/
+bool UMovieSceneSection::CanHaveOpenUpperBound() const
+{
+	if (!GetBlendType().IsValid())
+	{
+		UMovieSceneTrack* Track = GetTypedOuter<UMovieSceneTrack>();
+		if (!Track)
+		{
+			return true;
+		}
+
+		TRange<FFrameNumber> ThisRange = GetRange();
+
+		if (!ThisRange.HasUpperBound())
+		{
+			return true;
+		}
+
+		for (UMovieSceneSection* Section : Track->GetAllSections())
+		{
+			if (!Section || (Section == this))
+			{
+				continue;
+			}
+
+			if (Section->GetRowIndex() != GetRowIndex())
+			{
+				continue;
+			}
+
+			if (Section->GetRange().Overlaps(ThisRange) || (Section->GetRange().HasLowerBound() && Section->GetRange().GetLowerBoundValue() >= ThisRange.GetUpperBoundValue()))
+			{
+				return false;
+			}
+		}
+	}
+	return true;
 }
 
 
@@ -476,7 +610,7 @@ void UMovieSceneSection::InitialPlacement(const TArray<UMovieSceneSection*>& Sec
 			TRange<FFrameNumber> OtherRange = OverlappedSection->GetRange();
 			if (OtherRange.GetUpperBound().IsClosed())
 			{
-				MoveSection(OtherRange.GetUpperBoundValue() - InStartTime);
+				MoveSectionImpl(OtherRange.GetUpperBoundValue() - InStartTime);
 			}
 			else
 			{
@@ -535,6 +669,25 @@ void UMovieSceneSection::InitialPlacementOnRow(const TArray<UMovieSceneSection*>
 	}
 }
 
+void UMovieSceneSection::SetColorTint(const FColor& InColorTint)
+{
+#if WITH_EDITORONLY_DATA
+	if (TryModify())
+	{
+		ColorTint = InColorTint;
+	}
+#endif
+}
+
+FColor UMovieSceneSection::GetColorTint() const
+{
+#if WITH_EDITORONLY_DATA
+	return ColorTint;
+#else
+	return FColor(0, 0, 0, 0);
+#endif
+}
+
 UMovieSceneSection* UMovieSceneSection::SplitSection(FQualifiedFrameTime SplitTime, bool bDeleteKeys)
 {
 	if (!SectionRange.Value.Contains(SplitTime.Time.GetFrame()))
@@ -568,6 +721,34 @@ UMovieSceneSection* UMovieSceneSection::SplitSection(FQualifiedFrameTime SplitTi
 		return NewSection;
 	}
 
+	return nullptr;
+}
+
+UObject* UMovieSceneSection::GetImplicitObjectOwner()
+{
+	if (UMovieSceneTrack* Track = GetTypedOuter<UMovieSceneTrack>())
+	{
+		if (UMovieScene* MovieScene = Track->GetTypedOuter<UMovieScene>())
+		{
+			FGuid Guid;
+			if (MovieScene->FindTrackBinding(*Track, Guid))
+			{
+				if (FMovieSceneSpawnable* MovieSceneSpanwable = MovieScene->FindSpawnable(Guid))
+				{
+					return MovieSceneSpanwable->GetObjectTemplate();
+				}
+				else if (FMovieScenePossessable* MovieScenePossessable = MovieScene->FindPossessable(Guid))
+				{
+#if WITH_EDITORONLY_DATA
+					if (MovieScenePossessable->GetPossessedObjectClass() && MovieScenePossessable->GetPossessedObjectClass()->GetDefaultObject())
+					{
+						return MovieScenePossessable->GetPossessedObjectClass()->GetDefaultObject();
+					}
+#endif
+				}
+			}
+		}
+	}
 	return nullptr;
 }
 
@@ -613,11 +794,11 @@ float UMovieSceneSection::EvaluateEasing(FFrameTime InTime) const
 		const int32  EaseFrame    = (InTime.FrameNumber - GetInclusiveStartFrame()).Value;
 		const double EaseInInterp = (double(EaseFrame) + InTime.GetSubFrame()) / Easing.GetEaseInDuration();
 
-		if (EaseInInterp <= 0.0)
+		if (EaseInInterp < 0.0)
 		{
 			EaseInValue = 0.0;
 		}
-		else if (EaseInInterp >= 1.0)
+		else if (EaseInInterp > 1.0)
 		{
 			EaseInValue = 1.0;
 		}
@@ -633,11 +814,11 @@ float UMovieSceneSection::EvaluateEasing(FFrameTime InTime) const
 		const int32  EaseFrame     = (InTime.FrameNumber - GetExclusiveEndFrame() + Easing.GetEaseOutDuration()).Value;
 		const double EaseOutInterp = (double(EaseFrame) + InTime.GetSubFrame()) / Easing.GetEaseOutDuration();
 
-		if (EaseOutInterp <= 0.0)
+		if (EaseOutInterp < 0.0)
 		{
 			EaseOutValue = 1.0;
 		}
-		else if (EaseOutInterp >= 1.0)
+		else if (EaseOutInterp > 1.0)
 		{
 			EaseOutValue = 0.0;
 		}
@@ -686,7 +867,7 @@ TRange<FFrameNumber> UMovieSceneSection::GetEaseInRange() const
 	if (HasStartFrame() && Easing.GetEaseInDuration() > 0)
 	{
 		TRangeBound<FFrameNumber> LowerBound = TRangeBound<FFrameNumber>::Inclusive(GetInclusiveStartFrame());
-		TRangeBound<FFrameNumber> UpperBound = TRangeBound<FFrameNumber>::Exclusive(GetInclusiveStartFrame() + Easing.GetEaseInDuration());
+		TRangeBound<FFrameNumber> UpperBound = TRangeBound<FFrameNumber>::Inclusive(GetInclusiveStartFrame() + Easing.GetEaseInDuration());
 
 		UpperBound = TRangeBound<FFrameNumber>::MinUpper(UpperBound, SectionRange.Value.GetUpperBound());
 		return TRange<FFrameNumber>(LowerBound, UpperBound);
@@ -700,7 +881,7 @@ TRange<FFrameNumber> UMovieSceneSection::GetEaseOutRange() const
 {
 	if (HasEndFrame() && Easing.GetEaseOutDuration() > 0)
 	{
-		TRangeBound<FFrameNumber> UpperBound = TRangeBound<FFrameNumber>::Exclusive(GetExclusiveEndFrame());
+		TRangeBound<FFrameNumber> UpperBound = TRangeBound<FFrameNumber>::Inclusive(GetExclusiveEndFrame());
 		TRangeBound<FFrameNumber> LowerBound = TRangeBound<FFrameNumber>::Inclusive(GetExclusiveEndFrame() - Easing.GetEaseOutDuration());
 
 		LowerBound = TRangeBound<FFrameNumber>::MaxLower(LowerBound, SectionRange.Value.GetLowerBound());
@@ -733,5 +914,44 @@ void UMovieSceneSection::PostEditChangeProperty(FPropertyChangedEvent& PropertyC
 	}
 }
 
-#endif
 
+void UMovieSceneSection::PostPaste()
+{
+	if (UObject* DefaultEaseIn = Easing.EaseIn.GetObject())
+	{
+		DefaultEaseIn->ClearFlags(RF_Transient);
+	}
+	if (UObject* DefaultEaseOut = Easing.EaseOut.GetObject())
+	{
+		DefaultEaseOut->ClearFlags(RF_Transient);
+	}
+}
+
+ECookOptimizationFlags UMovieSceneSection::GetCookOptimizationFlags() const
+{
+	UMovieSceneTrack* Track = GetTypedOuter<UMovieSceneTrack>();
+
+	if (UMovieSceneTrack::RemoveMutedTracksOnCook() && Track && Track->IsRowEvalDisabled(GetRowIndex()))
+	{
+		return ECookOptimizationFlags::RemoveSection;
+	}
+	return ECookOptimizationFlags::None; 
+}
+
+void UMovieSceneSection::RemoveForCook()
+{
+	Modify();
+
+	for (const FMovieSceneChannelEntry& Entry : GetChannelProxy().GetAllEntries())
+	{
+		for (FMovieSceneChannel* Channel : Entry.GetChannels())
+		{
+			if (Channel)
+			{
+				Channel->Reset();
+			}
+		}
+	}
+}
+
+#endif

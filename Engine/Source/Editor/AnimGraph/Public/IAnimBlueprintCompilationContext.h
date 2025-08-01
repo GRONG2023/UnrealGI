@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "KismetCompiler.h"
+#include "Containers/ArrayView.h"
 
 class UEdGraphNode;
 class UEdGraph;
@@ -15,7 +16,6 @@ class UBlueprint;
 class UAnimBlueprint;
 class FProperty;
 struct FKismetCompilerOptions;
-class IAnimBlueprintCompilerHandler;
 
 #define ANIM_FUNC_DECORATOR	TEXT("__AnimFunc")
 
@@ -23,18 +23,47 @@ class IAnimBlueprintCompilerHandler;
 class ANIMGRAPH_API IAnimBlueprintCompilationContext
 {
 public:
+	// Record of a property that can be folded into the class members/constant blocks
+	struct FFoldedPropertyRecord
+	{
+		FFoldedPropertyRecord(UAnimGraphNode_Base* InAnimGraphNode, FStructProperty* InAnimNodeProperty, FProperty* InProperty, bool bInIsOnClass)
+			: AnimGraphNode(InAnimGraphNode)
+			, AnimNodeProperty(InAnimNodeProperty)
+			, Property(InProperty)
+			, GeneratedProperty(nullptr)
+			, FoldIndex(INDEX_NONE)
+			, PropertyIndex(INDEX_NONE)
+			, bIsOnClass(bInIsOnClass)
+		{
+		}
+
+		// The anim graph node that this property record came from
+		UAnimGraphNode_Base* AnimGraphNode = nullptr;
+
+		// The property of the FAnimNode_Base-derived structure within the anim graph node
+		FStructProperty* AnimNodeProperty = nullptr;
+
+		// The original property within the FAnimNode_Base
+		FProperty* Property = nullptr;
+
+		// The generated property within the respective data area (either constants or mutables)
+		FProperty* GeneratedProperty = nullptr;
+
+		// The index that this property was folded to. INDEX_NONE if it was not folded.
+		int32 FoldIndex = INDEX_NONE;
+
+		// The index of the property in its respective data area (either constant or mutable)
+		// This will be INDEX_NONE if the property was folded.
+		int32 PropertyIndex = INDEX_NONE;
+
+		// Whether this property will be held on the class (constants on sparse class data), or on the instance (mutables struct)
+		bool bIsOnClass = false;
+	};
+
 	virtual ~IAnimBlueprintCompilationContext() {}
 
 	// Get a compilation context from a kismet compiler context assuming that it is an FAnimBlueprintCompilerContext
 	static TUniquePtr<IAnimBlueprintCompilationContext> Get(FKismetCompilerContext& InKismetCompiler);
-
-	// Get a handler of the specified type and name (i.e. via simple name-based RTTI)
-	// Handlers are registered via IAnimBlueprintCompilerHandlerCollection::RegisterHandler
-	template <typename THandlerClass>
-	THandlerClass* GetHandler(FName InName) const
-	{
-		return static_cast<THandlerClass*>(GetHandlerInternal(InName));
-	}
 
 	// Spawns an intermediate node associated with the source node (for error purposes)
 	template <typename NodeType>
@@ -45,9 +74,10 @@ public:
 
 	// Spawns an intermediate event node associated with the source node (for error purposes)
 	template <typename NodeType>
+	UE_DEPRECATED(5.4, "SpawnIntermediateEventNode is equivalent to SpawnIntermediateNode, this redundant function has been deprecated.")
 	NodeType* SpawnIntermediateEventNode(UEdGraphNode* SourceNode, UEdGraphPin* SourcePin = nullptr, UEdGraph* ParentGraph = nullptr)
 	{
-		return GetKismetCompiler()->SpawnIntermediateEventNode<NodeType>(SourceNode, SourcePin, ParentGraph);
+		return GetKismetCompiler()->SpawnIntermediateNode<NodeType>(SourceNode, ParentGraph);
 	}
 
 	// Find a property in the currently-compiled class
@@ -102,6 +132,24 @@ public:
 	// Map of anim node indices to node properties
 	const TMap<UAnimGraphNode_Base*, FProperty*>& GetAllocatedPropertiesByNode() const { return GetAllocatedPropertiesByNodeImpl(); }
 
+	// Map of anim node indices to node handler properties in sparse class data struct
+	const TMap<UAnimGraphNode_Base*, FProperty*>& GetAllocatedHandlerPropertiesByNode() const { return GetAllocatedHandlerPropertiesByNodeImpl(); }
+
+	// Add the specified compiled-in attribute uniquely to the specified node
+	void AddAttributesToNode(UAnimGraphNode_Base* InNode, TArrayView<const FName> InAttributes) const { AddAttributesToNodeImpl(InNode, InAttributes); }
+
+	// Get the current compiled-in attributes uniquely assigned to the specified node
+	TArrayView<const FName> GetAttributesFromNode(UAnimGraphNode_Base* InNode) const { return GetAttributesFromNodeImpl(InNode); }
+
+	// Check whether an anim node participates in constant folding
+	bool IsAnimGraphNodeFolded(UAnimGraphNode_Base* InNode) const { return IsAnimGraphNodeFoldedImpl(InNode); }
+
+	// Get the folded property record, if any, for the supplied node & named property
+	const FFoldedPropertyRecord* GetFoldedPropertyRecord(UAnimGraphNode_Base* InNode, FName InPropertyName) const { return GetFoldedPropertyRecordImpl(InNode, InPropertyName); }
+
+	// Get the generated property of the class that mutable data is added to
+	virtual const FStructProperty* GetMutableDataProperty() const { return GetMutableDataPropertyImpl(); }
+	
 protected:
 	// Adds a pose link mapping record
 	virtual void AddPoseLinkMappingRecordImpl(const FPoseLinkMappingRecord& InRecord) = 0;
@@ -148,8 +196,23 @@ protected:
 	// Map of anim node indices to node properties
 	virtual const TMap<UAnimGraphNode_Base*, FProperty*>& GetAllocatedPropertiesByNodeImpl() const = 0;
 
-	// GetHandler helper function
-	virtual IAnimBlueprintCompilerHandler* GetHandlerInternal(FName InName) const = 0;
+	// Map of anim node indices to node handler properties in sparse class data struct
+	virtual const TMap<UAnimGraphNode_Base*, FProperty*>& GetAllocatedHandlerPropertiesByNodeImpl() const = 0;
+
+	// Add the specified compiled-in attribute uniquely to the specified node
+	virtual void AddAttributesToNodeImpl(UAnimGraphNode_Base* InNode, TArrayView<const FName> InAttributes) const = 0;
+
+	// Get the current compiled-in attributes uniquely assigned to the specified node
+	virtual TArrayView<const FName> GetAttributesFromNodeImpl(UAnimGraphNode_Base* InNode) const = 0;
+
+	// Check whether an anim node participates in constant folding
+	virtual bool IsAnimGraphNodeFoldedImpl(UAnimGraphNode_Base* InNode) const = 0;
+
+	// Get the folded property record, if any, for the supplied node & named property
+	virtual const FFoldedPropertyRecord* GetFoldedPropertyRecordImpl(UAnimGraphNode_Base* InNode, FName InPropertyName) const = 0;
+
+	// Get the generated property of the class that mutable data is added to
+	virtual const FStructProperty* GetMutableDataPropertyImpl() const = 0;
 
 	// Get the compiler as a base class to avoid circular include issues with templated functions/classes
 	virtual FKismetCompilerContext* GetKismetCompiler() const = 0;

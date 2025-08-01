@@ -7,12 +7,12 @@
 #include "UObject/ObjectMacros.h"
 #include "UObject/Object.h"
 #include "UObject/ScriptMacros.h"
+#include "Animation/AnimNotifyQueue.h"
 #include "AnimNotify.generated.h"
 
 class UAnimSequenceBase;
 class USkeletalMeshComponent;
 struct FAnimNotifyEvent;
-
 USTRUCT()
 struct FBranchingPointNotifyPayload
 {
@@ -23,6 +23,7 @@ public:
 	UAnimSequenceBase* SequenceAsset;
 	FAnimNotifyEvent* NotifyEvent;
 	int32 MontageInstanceID;
+	bool bReachedEnd = false;
 
 	FBranchingPointNotifyPayload()
 		: SkelMeshComponent(nullptr)
@@ -31,16 +32,17 @@ public:
 		, MontageInstanceID(INDEX_NONE)
 	{}
 
-	FBranchingPointNotifyPayload(USkeletalMeshComponent* InSkelMeshComponent, UAnimSequenceBase* InSequenceAsset, FAnimNotifyEvent* InNotifyEvent, int32 InMontageInstanceID)
+	FBranchingPointNotifyPayload(USkeletalMeshComponent* InSkelMeshComponent, UAnimSequenceBase* InSequenceAsset, FAnimNotifyEvent* InNotifyEvent, int32 InMontageInstanceID, bool bInReachedEnd = false)
 		: SkelMeshComponent(InSkelMeshComponent)
 		, SequenceAsset(InSequenceAsset)
 		, NotifyEvent(InNotifyEvent)
 		, MontageInstanceID(InMontageInstanceID)
+		, bReachedEnd(bInReachedEnd)
 	{}
 };
 
-UCLASS(abstract, Blueprintable, const, hidecategories=Object, collapsecategories)
-class ENGINE_API UAnimNotify : public UObject
+UCLASS(abstract, Blueprintable, const, hidecategories=Object, collapsecategories, MinimalAPI)
+class UAnimNotify : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
@@ -48,31 +50,44 @@ class ENGINE_API UAnimNotify : public UObject
 	 * Implementable event to get a custom name for the notify
 	 */
 	UFUNCTION(BlueprintNativeEvent)
-	FString GetNotifyName() const;
+	ENGINE_API FString GetNotifyName() const;
 
-	UFUNCTION(BlueprintImplementableEvent)
-	bool Received_Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation) const;
+	UFUNCTION(BlueprintImplementableEvent, meta=(AutoCreateRefTerm="EventReference"))
+	ENGINE_API bool Received_Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation, const FAnimNotifyEventReference& EventReference) const;
 
 #if WITH_EDITORONLY_DATA
 	/** Color of Notify in editor */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=AnimNotify)
 	FColor NotifyColor;
+
+	/** Whether this notify instance should fire in animation editors */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category=AnimNotify)
+	bool bShouldFireInEditor;
 #endif // WITH_EDITORONLY_DATA
 
 #if WITH_EDITOR
 	virtual void OnAnimNotifyCreatedInEditor(FAnimNotifyEvent& ContainingAnimNotifyEvent) {};
 	virtual bool CanBePlaced(UAnimSequenceBase* Animation) const { return true; }
 	virtual void ValidateAssociatedAssets() {}
+
+	/** Override this to prevent firing this notify type in animation editors */
+	virtual bool ShouldFireInEditor() { return bShouldFireInEditor; }
 #endif
 
-	virtual void Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation);
-	virtual void BranchingPointNotify(FBranchingPointNotifyPayload& BranchingPointPayload);
+	UE_DEPRECATED(5.0, "Please use the other Notify function instead")
+	ENGINE_API virtual void Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation);
+	ENGINE_API virtual void Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation, const FAnimNotifyEventReference& EventReference);
+	ENGINE_API virtual void BranchingPointNotify(FBranchingPointNotifyPayload& BranchingPointPayload);
 
 	// @todo document 
 	virtual FString GetEditorComment() 
 	{ 
 		return TEXT(""); 
 	}
+
+	/** TriggerWeightThreshold to use when creating notifies of this type */
+	UFUNCTION(BlueprintNativeEvent)
+	ENGINE_API float GetDefaultTriggerWeightThreshold() const;
 
 	// @todo document 
 	virtual FLinearColor GetEditorColor() 
@@ -91,18 +106,22 @@ class ENGINE_API UAnimNotify : public UObject
 	 * 
 	 * @return NULL if this isn't in the middle of a Received_Notify(), otherwise it's the world belonging to the Mesh passed to Received_Notify()
 	 */
-	virtual class UWorld* GetWorld() const override;
+	ENGINE_API virtual class UWorld* GetWorld() const override;
 
 	/** UObject Interface */
-	virtual void PostLoad() override;
-	virtual void PreSave(const class ITargetPlatform* TargetPlatform) override;
+	ENGINE_API virtual void PostLoad() override;
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS // Suppress compiler warning on override of deprecated function
+	UE_DEPRECATED(5.0, "Use version that takes FObjectPreSaveContext instead.")
+	ENGINE_API virtual void PreSave(const class ITargetPlatform* TargetPlatform) override;
+	ENGINE_API PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	virtual void PreSave(FObjectPreSaveContext ObjectSaveContext) override;
 	/** End UObject Interface */
 
 	/** This notify is always a branching point when used on Montages. */
 	bool bIsNativeBranchingPoint;
 
 protected:
-	UObject* GetContainingAsset() const;
+	ENGINE_API UObject* GetContainingAsset() const;
 
 private:
 	/* The mesh we're currently triggering a UAnimNotify for (so we can retrieve per instance information) */

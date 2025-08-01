@@ -4,13 +4,13 @@
 #include "AudioMixerPlatformAudioUnitUtils.h"
 #include "Modules/ModuleManager.h"
 #include "AudioMixer.h"
+#include "AudioDevice.h"
 #include "AudioMixerDevice.h"
 #include "CoreGlobals.h"
 #include "CoreMinimal.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/CoreDelegates.h"
-#include "ADPCMAudioInfo.h"
-
+#include "Misc/CommandLine.h"
 
 /*
  This implementation only depends on the audio units API which allows it to run on MacOS, iOS and tvOS.
@@ -24,6 +24,7 @@
 #include <AudioToolbox/AudioToolbox.h>
 #include <AudioUnit/AudioUnit.h>
 #include <AVFoundation/AVAudioSession.h>
+
 
 static int32 SuspendCounter = 0;
 
@@ -79,6 +80,9 @@ namespace Audio
 			return false;
 		}
 		
+		bSupportsBackgroundAudio = false;
+		GConfig->GetBool(TEXT("/Script/IOSRuntimeSettings.IOSRuntimeSettings"), TEXT("bSupportsBackgroundAudio"), bSupportsBackgroundAudio, GEngineIni);
+
 		OSStatus Status;
 		GraphSampleRate = (double) InternalPlatformSettings.SampleRate;
 		UInt32 BufferSize = (UInt32) GetNumFrames(InternalPlatformSettings.CallbackBufferFrameSize);
@@ -387,23 +391,7 @@ namespace Audio
 		int32 PushResult = CircularOutputBuffer.Push((const int8*)Buffer, BytesToSubmitToAudioMixer);
 		check(PushResult == BytesToSubmitToAudioMixer);
 	}
-	
-	FName FMixerPlatformAudioUnit::GetRuntimeFormat(USoundWave* InSoundWave)
-	{
-		static FName NAME_ADPCM(TEXT("ADPCM"));
-		return NAME_ADPCM;
-	}
-	
-	bool FMixerPlatformAudioUnit::HasCompressedAudioInfoClass(USoundWave* InSoundWave)
-	{
-		return true;
-	}
-	
-	ICompressedAudioInfo* FMixerPlatformAudioUnit::CreateCompressedAudioInfo(USoundWave* InSoundWave)
-	{
-		return new FADPCMAudioInfo();
-	}
-	
+
 	FString FMixerPlatformAudioUnit::GetDefaultDeviceName()
 	{
 		return FString();
@@ -493,6 +481,12 @@ namespace Audio
 	
 	void FMixerPlatformAudioUnit::SuspendContext()
 	{
+#if PLATFORM_IOS
+        if (bSupportsBackgroundAudio)
+        {
+            return;
+        }
+#endif
 		if (SuspendCounter == 0)
 		{
 			FPlatformAtomics::InterlockedIncrement(&SuspendCounter);

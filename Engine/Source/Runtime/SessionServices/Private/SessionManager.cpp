@@ -30,7 +30,7 @@ FSessionManager::FSessionManager(const TSharedRef<IMessageBus, ESPMode::ThreadSa
 		{
 			FString Owner = Filter.Left(PlusIdx);
 			FilteredOwners.Add(Owner);
-			Filter.RightInline(Filter.Len() - (PlusIdx + 1), false);
+			Filter.RightInline(Filter.Len() - (PlusIdx + 1), EAllowShrinking::No);
 			PlusIdx = Filter.Find(TEXT("+"), ESearchCase::CaseSensitive);
 		}
 
@@ -43,7 +43,7 @@ FSessionManager::FSessionManager(const TSharedRef<IMessageBus, ESPMode::ThreadSa
 		.Handling<FSessionServicePong>(this, &FSessionManager::HandleSessionPongMessage);
 
 	// initialize ticker
-	TickDelegateHandle = FTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FSessionManager::HandleTicker), SESSION_MANAGER_PING_INTERVAL);
+	TickDelegateHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FSessionManager::HandleTicker), SESSION_MANAGER_PING_INTERVAL);
 
 	SendPing();
 }
@@ -51,7 +51,7 @@ FSessionManager::FSessionManager(const TSharedRef<IMessageBus, ESPMode::ThreadSa
 
 FSessionManager::~FSessionManager()
 {
-	FTicker::GetCoreTicker().RemoveTicker(TickDelegateHandle);
+	FTSTicker::GetCoreTicker().RemoveTicker(TickDelegateHandle);
 }
 
 
@@ -239,8 +239,8 @@ void FSessionManager::SendPing()
 
 	if (MessageEndpoint.IsValid())
 	{
-		MessageEndpoint->Publish(new FEngineServicePing(), EMessageScope::Network);
-		MessageEndpoint->Publish(new FSessionServicePing(FPlatformProcess::UserName(false)), EMessageScope::Network);
+		MessageEndpoint->Publish(FMessageEndpoint::MakeMessage<FEngineServicePing>(), EMessageScope::Network);
+		MessageEndpoint->Publish(FMessageEndpoint::MakeMessage<FSessionServicePing>(FPlatformProcess::UserName(false)), EMessageScope::Network);
 	}
 
 	LastPingTime = FDateTime::UtcNow();

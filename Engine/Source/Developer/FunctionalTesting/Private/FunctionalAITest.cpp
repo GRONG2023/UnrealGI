@@ -6,10 +6,13 @@
 #include "FunctionalTestingModule.h"
 #include "FunctionalTestingManager.h"
 #include "NavigationSystem.h"
+#include "AI/Navigation/NavAreaBase.h"
 #include "AIController.h"
 #include "Blueprint/AIBlueprintHelperLibrary.h"
 #include "NavMesh/RecastNavMesh.h"
 #include "NavigationOctree.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(FunctionalAITest)
 
 AFunctionalAITestBase::AFunctionalAITestBase( const FObjectInitializer& ObjectInitializer )
 	: Super(ObjectInitializer)
@@ -86,7 +89,7 @@ void AFunctionalAITestBase::StartTest()
 
 bool AFunctionalAITestBase::IsReady_Implementation()
 {
-	return Super::IsReady_Implementation() && IsNavMeshReady();
+	return Super::IsReady_Implementation() && (bWaitForNavMesh == false || IsNavMeshReady());
 }
 
 void AFunctionalAITestBase::OnTimeout()
@@ -103,7 +106,7 @@ void AFunctionalAITestBase::OnTimeout()
 		UE_LOG(LogFunctionalTest, Log, TEXT("Test timed out, log details for: %s"), *GetNameSafe(Navmesh));
 		UE_LOG(LogFunctionalTest, Log, TEXT("> dirty areas? %s"), NavSys->HasDirtyAreasQueued() ? TEXT("YES") : TEXT("no"));
 
-		FNavigationOctree* NavigationOctree = NavSys->GetMutableNavOctree();
+		const FNavigationOctree* NavigationOctree = NavSys->GetNavOctree();
 		
 		FNavigationOctreeFilter AreaFilter;
 		AreaFilter.bIncludeAreas = true;
@@ -498,7 +501,7 @@ void AFunctionalAITest::RemoveSpawnSetIfPredicate(TFunctionRef<bool(FAITestSpawn
 	{
 		if (Predicate(SpawnSets[Index]))
 		{
-			SpawnSets.RemoveAt(Index, 1, false);
+			SpawnSets.RemoveAt(Index, 1, EAllowShrinking::No);
 			bRemovedEntry = true;
 		}
 	}
@@ -531,3 +534,4 @@ bool AFunctionalAITest::IsValidSpawnSetIndex(const int32 Index) const
 {
 	return SpawnSets.IsValidIndex(Index);
 }
+

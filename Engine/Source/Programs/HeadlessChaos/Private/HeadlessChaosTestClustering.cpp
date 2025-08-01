@@ -23,7 +23,8 @@ namespace ChaosTest {
 
 	void ImplicitCluster()
 	{
-		FPBDRigidsSOAs Particles;
+		FParticleUniqueIndicesMultithreaded UniqueIndices;
+		FPBDRigidsSOAs Particles(UniqueIndices);
 		THandleArray<FChaosPhysicsMaterial> PhysicalMaterials;
 		FPBDRigidsEvolution Evolution(Particles, PhysicalMaterials);
 		FPBDRigidClusteredParticles& ClusteredParticles = Particles.GetClusteredParticles();
@@ -33,33 +34,35 @@ namespace ChaosTest {
 		uint32 BoxId = FirstId++;
 		FPBDRigidParticleHandle* Box2 = AppendClusteredParticleBox(Particles, FVec3((FReal)100, (FReal)100, (FReal)100));
 		uint32 Box2Id = FirstId++;
-		
-		Box2->X() = FVec3((FReal)100, (FReal)0, (FReal)0);
-		Box2->P() = Box2->X();
+
+		Box2->SetX(FVec3((FReal)100, (FReal)0, (FReal)0));
+		Box2->SetP(Box2->GetX());
+
+		Evolution.EnableParticle(Box1);
+		Evolution.EnableParticle(Box2);
 
 		Evolution.AdvanceOneTimeStep(0);	//hack to initialize islands
-		//Evolution.InitializeAccelerationStructures();	//make sure islands are created
 		FClusterCreationParameters ClusterParams;
 		
 		TArray<Chaos::FPBDRigidParticleHandle*> ClusterChildren;
 		ClusterChildren.Add(Box1);
 		ClusterChildren.Add(Box2);
 
-		Evolution.GetRigidClustering().CreateClusterParticle(0, MoveTemp(ClusterChildren), ClusterParams);
+		Evolution.GetRigidClustering().CreateClusterParticle(0, MoveTemp(ClusterChildren), ClusterParams, FImplicitObjectPtr(nullptr));
 		EXPECT_EQ(ClusteredParticles.Size(), 3);
 
-		FVec3 ClusterX = ClusteredParticles.X(2);
-		FRotation3 ClusterRot = ClusteredParticles.R(2);
+		FVec3 ClusterX = ClusteredParticles.GetX(2);
+		FRotation3 ClusterRot = ClusteredParticles.GetR(2);
 
 		EXPECT_TRUE(ClusterX.Equals(FVec3 {(FReal)50, 0, 0}));
 		EXPECT_TRUE(ClusterRot.Equals(FRotation3::Identity));
-		EXPECT_TRUE(ClusterX.Equals(ClusteredParticles.P(2)));
-		EXPECT_TRUE(ClusterRot.Equals(ClusteredParticles.Q(2)));
+		EXPECT_TRUE(ClusterX.Equals(ClusteredParticles.GetP(2)));
+		EXPECT_TRUE(ClusterRot.Equals(ClusteredParticles.GetQ(2)));
 
 		FRigidTransform3 ClusterTM(ClusterX, ClusterRot);
 		FVec3 LocalPos = ClusterTM.InverseTransformPositionNoScale(FVec3 {(FReal)200, (FReal)0, (FReal)0});
 		FVec3 Normal;
-		FReal Phi = ClusteredParticles.Geometry(2)->PhiWithNormal(LocalPos, Normal);
+		FReal Phi = ClusteredParticles.GetGeometry(2)->PhiWithNormal(LocalPos, Normal);
 		EXPECT_TRUE(FMath::IsNearlyEqual(Phi, (FReal)50));
 		EXPECT_TRUE(Normal.Equals(FVec3{(FReal)1, (FReal)0, (FReal)0}));
 
@@ -68,7 +71,8 @@ namespace ChaosTest {
 
 	void FractureCluster()
 	{
-		FPBDRigidsSOAs Particles;
+		FParticleUniqueIndicesMultithreaded UniqueIndices;
+		FPBDRigidsSOAs Particles(UniqueIndices);
 		THandleArray<FChaosPhysicsMaterial> PhysicalMaterials;
 		FPBDRigidsEvolution Evolution(Particles, PhysicalMaterials);
 		auto& ClusteredParticles = Particles.GetClusteredParticles();
@@ -82,9 +86,11 @@ namespace ChaosTest {
 		{
 			BoxIDs.Add(ClusteredParticles.Size());
 			FPBDRigidParticleHandle* Box = AppendClusteredParticleBox(Particles, FVec3((FReal)100, (FReal)100, (FReal)100));
-			Box->X() = FVec3((FReal)i * (FReal)100, (FReal)0, (FReal)0);
-			Box->P() = Box->X();
+			Box->SetX(FVec3((FReal)i * (FReal)100, (FReal)0, (FReal)0));
+			Box->SetP(Box->GetX());
 			Boxes.Add(Box);
+
+			Evolution.EnableParticle(Box);
 		}
 
 		Evolution.AdvanceOneTimeStep(0);	//hack to generate islands
@@ -100,14 +106,15 @@ namespace ChaosTest {
 			ClusterChildren.Add(Boxes[i * 4+1]);
 			ClusterChildren.Add(Boxes[i * 4+2]);
 			ClusterChildren.Add(Boxes[i * 4+3]);
-			ClusterHandles.Add(Evolution.GetRigidClustering().CreateClusterParticle(0, MoveTemp(ClusterChildren), ClusterParams));
+			ClusterHandles.Add(Evolution.GetRigidClustering().CreateClusterParticle(0, MoveTemp(ClusterChildren), ClusterParams, FImplicitObjectPtr(nullptr)));
 		}
 
 		FClusterCreationParameters ClusterParams;
-		Chaos::FPBDRigidParticleHandle* RootClusterHandle = Evolution.GetRigidClustering().CreateClusterParticle(0, MoveTemp(ClusterHandles), ClusterParams);
+		TArray<Chaos::FPBDRigidParticleHandle* > ClusterHandlesCopy = ClusterHandles;
+		Chaos::FPBDRigidParticleHandle* RootClusterHandle = Evolution.GetRigidClustering().CreateClusterParticle(0, MoveTemp(ClusterHandlesCopy), ClusterParams, FImplicitObjectPtr(nullptr));
 		FVec3 InitialVelocity((FReal)50, (FReal)20, (FReal)100);
 
-		RootClusterHandle->V() = InitialVelocity;		
+		RootClusterHandle->SetV(InitialVelocity);
 		
 		constexpr int NumParticles = NumBoxes + NumBoxes / 4 + 1;
 		EXPECT_EQ(ClusteredParticles.Size(), NumParticles);
@@ -139,11 +146,8 @@ namespace ChaosTest {
 			{
 				EXPECT_NE(Particle.Handle(), ClusteredParticles.Handle(BoxID));	//make sure boxes are not in non disabled array
 			}
-			
-			for (int32 Island = 0; Island < Evolution.NumIslands(); ++Island)
-			{
-				EXPECT_TRUE(Evolution.GetIslandParticles(Island).Contains(ClusteredParticles.Handle(BoxID)) == false);
-			}
+
+			EXPECT_FALSE(ClusteredParticles.Handle(BoxID)->IsInConstraintGraph());
 		}
 
 		for (Chaos::FPBDRigidParticleHandle* ClusterHandle : ClusterHandles)
@@ -156,7 +160,7 @@ namespace ChaosTest {
 			}
 
 			EXPECT_TRUE(bFoundInNonDisabled);	//clusters are enabled and in non disabled array
-			EXPECT_TRUE(ClusterHandle->V().Equals(InitialVelocity));
+			EXPECT_TRUE(ClusterHandle->GetV().Equals(InitialVelocity));
 		}
 
 		Evolution.AdvanceOneTimeStep(Dt);
@@ -169,10 +173,7 @@ namespace ChaosTest {
 				EXPECT_NE(Particle.Handle(), ClusterHandle);	//make sure boxes are not in non disabled array
 			}
 
-			for (int32 Island = 0; Island < Evolution.NumIslands(); ++Island)
-			{
-				EXPECT_TRUE(Evolution.GetIslandParticles(Island).Contains(ClusterHandle) == false);
-			}
+			EXPECT_FALSE(ClusterHandle->IsInConstraintGraph());
 		}
 
 		EXPECT_EQ(Particles.GetNonDisabledView().Num(), NumBoxes);
@@ -186,13 +187,14 @@ namespace ChaosTest {
 				bFoundInNonDisabled |= Particle.Handle() == BoxHandle;
 			}
 			EXPECT_TRUE(bFoundInNonDisabled);
-			EXPECT_TRUE(BoxHandle->V().Equals(InitialVelocity));
+			EXPECT_TRUE(BoxHandle->GetV().Equals(InitialVelocity));
 		}
 	}
 
 	void PartialFractureCluster()
 	{
-		FPBDRigidsSOAs Particles;
+		FParticleUniqueIndicesMultithreaded UniqueIndices;
+		FPBDRigidsSOAs Particles(UniqueIndices);
 		THandleArray<FChaosPhysicsMaterial> PhysicalMaterials;
 		FPBDRigidsEvolution Evolution(Particles, PhysicalMaterials);
 		auto& ClusteredParticles = Particles.GetClusteredParticles();
@@ -206,9 +208,11 @@ namespace ChaosTest {
 		{
 			BoxIDs.Add(ClusteredParticles.Size());
 			FPBDRigidParticleHandle* Box = AppendClusteredParticleBox(Particles, FVec3((FReal)100, (FReal)100, (FReal)100));
-			Box->X() = FVec3((FReal)i * (FReal)100, (FReal)0, (FReal)0);
-			Box->P() = Box->X();
+			Box->SetX(FVec3((FReal)i * (FReal)100, (FReal)0, (FReal)0));
+			Box->SetP(Box->GetX());
 			Boxes.Add(Box);
+
+			Evolution.EnableParticle(Box);
 		}
 
 		Evolution.AdvanceOneTimeStep(0);	//hack to generate islands
@@ -224,16 +228,16 @@ namespace ChaosTest {
 			ClusterChildren.Add(Boxes[i * 4 + 1]);
 			ClusterChildren.Add(Boxes[i * 4 + 2]);
 			ClusterChildren.Add(Boxes[i * 4 + 3]);
-			ClusterHandles.Add(Evolution.GetRigidClustering().CreateClusterParticle(0, MoveTemp(ClusterChildren), ClusterParams));
+			ClusterHandles.Add(Evolution.GetRigidClustering().CreateClusterParticle(0, MoveTemp(ClusterChildren), ClusterParams, FImplicitObjectPtr(nullptr)));
 		}
 
 		TArray<Chaos::FPBDRigidParticleHandle* > ClusterHandlesDup = ClusterHandles;
 
 		FClusterCreationParameters ClusterParams;
-		Chaos::FPBDRigidParticleHandle* RootClusterHandle = Evolution.GetRigidClustering().CreateClusterParticle(0, MoveTemp(ClusterHandles), ClusterParams);
+		Chaos::FPBDRigidParticleHandle* RootClusterHandle = Evolution.GetRigidClustering().CreateClusterParticle(0, MoveTemp(ClusterHandles), ClusterParams, FImplicitObjectPtr(nullptr));
 		FVec3 InitialVelocity((FReal)50, (FReal)20, (FReal)100);
 
-		RootClusterHandle->V() = InitialVelocity;
+		RootClusterHandle->SetV(InitialVelocity);
 
 		TUniquePtr<FChaosPhysicsMaterial> PhysicalMaterial = MakeUnique<FChaosPhysicsMaterial>();
 		PhysicalMaterial->Friction = 0;
@@ -243,7 +247,7 @@ namespace ChaosTest {
 		PhysicalMaterial->DisabledLinearThreshold = 0;
 		PhysicalMaterial->DisabledAngularThreshold = 0;
 
-		Chaos::TArrayCollectionArray<FReal>& SolverStrainArray = Evolution.GetRigidClustering().GetStrainArray();
+		Chaos::TArrayCollectionArray<FRealSingle>& SolverStrainArray = Evolution.GetRigidClustering().GetStrainArray();
 
 		for (int i = 0; i < NumBoxes + NumBoxes / 4 + 1; ++i)
 		{
@@ -255,21 +259,20 @@ namespace ChaosTest {
 		EXPECT_TRUE(RootClusterHandle->Disabled() == false);	//strain > 0 so no fracture yet
 
 		// todo: is this the correct replacement for strain?
-		static_cast<Chaos::FPBDRigidClusteredParticleHandle*>(ClusterHandlesDup[2])->SetStrain((FReal)0);	//fracture the third cluster, this should leave us with three pieces (0, 1), (2), (3,4,5,6,7)
+		//fracture the third cluster, this should leave us with three pieces (0, 1), (2), (3,4,5,6,7)
+		Evolution.GetRigidClustering().SetInternalStrain(static_cast<Chaos::FPBDRigidClusteredParticleHandle*>(ClusterHandlesDup[2]), 0.0);
 
 		Evolution.AdvanceOneTimeStep((FReal)1 / (FReal)60);
 		//EXPECT_TRUE(Evolution.GetParticles().Disabled(RootClusterHandle) == false);	//one of the connected pieces should re-use this
 		EXPECT_TRUE(ClusterHandlesDup[2]->Disabled() == false);	//this cluster is on its own and should be enabled 
 		
-		EXPECT_EQ(Evolution.GetActiveClusteredArray().Num(), 3);	//there should only be 3 pieces
+		
+		EXPECT_EQ(Evolution.GetRigidClustering().GetTopLevelClusterParents().Num(), 3);	//there should only be 3 pieces
 		for (uint32 BoxID : BoxIDs)
 		{
 			EXPECT_TRUE(ClusteredParticles.Disabled(BoxID));	//no boxes should be active yet
-			EXPECT_TRUE(Evolution.GetActiveClusteredArray().Contains(ClusteredParticles.Handle(BoxID)) == false);
-			for (int32 Island = 0; Island < Evolution.NumIslands(); ++Island)
-			{
-				EXPECT_TRUE(Evolution.GetIslandParticles(Island).Contains(ClusteredParticles.Handle(BoxID)) == false);
-			}
+			EXPECT_TRUE(Evolution.GetRigidClustering().GetTopLevelClusterParents().Contains(ClusteredParticles.Handle(BoxID)) == false);
+			EXPECT_FALSE(ClusteredParticles.Handle(BoxID)->IsInConstraintGraph());
 		}
 
 		SolverStrainArray[NumBoxes + NumBoxes / 4 + 1] = (FReal)1;
@@ -281,16 +284,14 @@ namespace ChaosTest {
 		//EXPECT_TRUE(Evolution.GetParticles().Disabled(RootClusterHandle) == false);	//one of the connected pieces should re-use this
 		EXPECT_TRUE(ClusterHandlesDup[2]->Disabled() == false);	//this cluster is on its own and should be enabled 
 
-		EXPECT_EQ(Evolution.GetActiveClusteredArray().Num(), 3);	//there should only be 3 pieces
+		EXPECT_EQ(Evolution.GetRigidClustering().GetTopLevelClusterParents().Num(), 3);	//there should only be 3 pieces
 		for (uint32 BoxID : BoxIDs)
 		{
 			EXPECT_TRUE(ClusteredParticles.Disabled(BoxID));	//no boxes should be active yet
-			EXPECT_TRUE(Evolution.GetActiveClusteredArray().Contains(ClusteredParticles.Handle(BoxID)) == false);
-			for (int32 Island = 0; Island < Evolution.NumIslands(); ++Island)
-			{
-				EXPECT_TRUE(Evolution.GetIslandParticles(Island).Contains(ClusteredParticles.Handle(BoxID)) == false);
-			}
+			EXPECT_TRUE(Evolution.GetRigidClustering().GetTopLevelClusterParents().Contains(ClusteredParticles.Handle(BoxID)) == false);
+			EXPECT_FALSE(ClusteredParticles.Handle(BoxID)->IsInConstraintGraph());
 		}
+		
 	}
 }
 

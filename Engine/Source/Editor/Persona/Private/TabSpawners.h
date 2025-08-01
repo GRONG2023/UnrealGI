@@ -144,7 +144,7 @@ private:
 struct FAnimCurveViewerTabSummoner : public FWorkflowTabFactory
 {
 public:
-	FAnimCurveViewerTabSummoner(TSharedPtr<class FAssetEditorToolkit> InHostingApp, const TSharedRef<IEditableSkeleton>& InEditableSkeleton, const TSharedRef<IPersonaPreviewScene>& InPreviewScene, FSimpleMulticastDelegate& InOnPostUndo, FOnObjectsSelected InOnObjectsSelected);
+	FAnimCurveViewerTabSummoner(TSharedPtr<class FAssetEditorToolkit> InHostingApp, const TSharedPtr<IEditableSkeleton>& InEditableSkeleton, const TSharedRef<IPersonaPreviewScene>& InPreviewScene, FOnObjectsSelected InOnObjectsSelected);
 
 	virtual TSharedRef<SWidget> CreateTabBody(const FWorkflowTabSpawnInfo& Info) const override;
 
@@ -157,10 +157,34 @@ public:
 private:
 	TWeakPtr<class IEditableSkeleton> EditableSkeleton;
 	TWeakPtr<class IPersonaPreviewScene> PreviewScene;
-	FSimpleMulticastDelegate& OnPostUndo;
 	FOnObjectsSelected OnObjectsSelected;
 };
 
+/////////////////////////////////////////////////////
+// FAnimCurveViewerTabSummoner
+
+struct FAnimCurveMetadataEditorTabSummoner : public FWorkflowTabFactory
+{
+public:
+	FAnimCurveMetadataEditorTabSummoner(TSharedPtr<class FAssetEditorToolkit> InHostingApp, UObject* InMetadataHost, const TSharedRef<IPersonaPreviewScene>& InPreviewScene, FOnObjectsSelected InOnObjectsSelected);
+
+	virtual TSharedRef<SWidget> CreateTabBody(const FWorkflowTabSpawnInfo& Info) const override;
+
+	virtual TSharedPtr<SToolTip> CreateTabToolTipWidget(const FWorkflowTabSpawnInfo& Info) const override
+	{
+		return  IDocumentation::Get()->CreateToolTip(LOCTEXT("AnimCurveMetadataEditorTooltip", "The Anim Curve Metadata Editor tab lets you add, remove, rename and edit curve metadata."), NULL, TEXT("Shared/Editors/Persona"), TEXT("AnimCurveMetadataEditor_Window"));
+	}
+
+	virtual FText GetTabToolTipText(const FWorkflowTabSpawnInfo& Info) const
+	{
+		return LOCTEXT("AnimCurveTabView_ToolTip", "Shows the animation curve debugger. This shows the state of animation curves.");
+	}
+
+private:
+	TWeakObjectPtr<UObject> MetadataHost;
+	TWeakPtr<class IPersonaPreviewScene> PreviewScene;
+	FOnObjectsSelected OnObjectsSelected;
+};
 
 /////////////////////////////////////////////////////
 // FAnimationAssetBrowserSummoner
@@ -216,17 +240,17 @@ struct FPreviewViewportSummoner : public FWorkflowTabFactory
 /////////////////////////////////////////////////////
 // FRetargetManagerTabSummoner
 
-struct FRetargetManagerTabSummoner : public FWorkflowTabFactory
+struct FRetargetSourcesTabSummoner : public FWorkflowTabFactory
 {
 public:
-	FRetargetManagerTabSummoner(TSharedPtr<class FAssetEditorToolkit> InHostingApp, const TSharedRef<IEditableSkeleton>& InEditableSkeleton, const TSharedRef<IPersonaPreviewScene>& InPreviewScene, FSimpleMulticastDelegate& InOnPostUndo);
+	FRetargetSourcesTabSummoner(TSharedPtr<class FAssetEditorToolkit> InHostingApp, const TSharedRef<IEditableSkeleton>& InEditableSkeleton, const TSharedRef<IPersonaPreviewScene>& InPreviewScene, FSimpleMulticastDelegate& InOnPostUndo);
 
 	virtual TSharedRef<SWidget> CreateTabBody(const FWorkflowTabSpawnInfo& Info) const override;
 
 	// Create a tooltip widget for the tab
 	virtual TSharedPtr<SToolTip> CreateTabToolTipWidget(const FWorkflowTabSpawnInfo& Info) const override
 	{
-		return  IDocumentation::Get()->CreateToolTip(LOCTEXT("RetargetSourceTooltip", "In this panel, you can manage retarget sources for different body types"), NULL, TEXT("Shared/Editors/Persona"), TEXT("RetargetManager"));
+		return  IDocumentation::Get()->CreateToolTip(LOCTEXT("RetargetSourceTooltip", "In this panel, you can manage retarget sources for animations authored with varying proportions."), NULL, TEXT("Shared/Editors/Persona"), TEXT("RetargetSources"));
 	}
 
 private:
@@ -247,9 +271,11 @@ public:
 private:
 	// Pointer to preview scene
 	TWeakPtr<IPersonaPreviewScene> PreviewScene;
+	TWeakPtr<FBlueprintEditor> BPEditor;
 
 public:
-	void Construct(const FArguments& InArgs, TSharedRef<IPersonaPreviewScene> InPreviewScene);
+
+	void Construct(const FArguments& InArgs, TSharedRef<IPersonaPreviewScene> InPreviewScene, TSharedRef<FBlueprintEditor> InBPEditor);
 
 	// SSingleObjectDetailsPanel interface
 	virtual UObject* GetObjectToObserve() const override;
@@ -289,7 +315,6 @@ private:
 	/** Delegates to customize tab look based on selected mode */
 	EVisibility IsEditorVisible(EAnimBlueprintEditorMode::Type Mode) const;
 	ECheckBoxState IsChecked(EAnimBlueprintEditorMode::Type Mode) const;
-	const FSlateBrush* GetBorderBrushByMode(EAnimBlueprintEditorMode::Type Mode) const;
 
 	/** Handle changing of editor mode */
 	void OnCheckedChanged(ECheckBoxState NewType, EAnimBlueprintEditorMode::Type Mode);
@@ -313,6 +338,21 @@ private:
 	TWeakPtr<class FBlueprintEditor> BlueprintEditor;
 	FSimpleMulticastDelegate& OnPostUndo;
 };
+
+/////////////////////////////////////////////////////
+// FPoseWatchManagerSummoner
+class FPoseWatchManagerSummoner : public FWorkflowTabFactory
+{
+public:
+	FPoseWatchManagerSummoner(TSharedPtr<class FBlueprintEditor> InBlueprintEditor);
+
+	virtual TSharedRef<SWidget> CreateTabBody(const FWorkflowTabSpawnInfo& Info) const override;
+	virtual FText GetTabToolTipText(const FWorkflowTabSpawnInfo& Info) const override;
+
+private:
+	TWeakPtr<class FBlueprintEditor> BlueprintEditor;
+};
+
 
 /////////////////////////////////////////////////////
 // FAdvancedPreviewSceneTabSummoner

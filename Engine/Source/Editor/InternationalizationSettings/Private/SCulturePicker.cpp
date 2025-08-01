@@ -1,9 +1,27 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SCulturePicker.h"
+
+#include "Containers/Map.h"
+#include "Framework/Views/ITypedTableView.h"
+#include "HAL/Platform.h"
 #include "Internationalization/Culture.h"
-#include "Widgets/SToolTip.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Layout/Children.h"
+#include "Misc/Attribute.h"
+#include "Misc/CString.h"
+#include "SlotBase.h"
+#include "Styling/SlateColor.h"
+#include "Templates/Function.h"
+#include "Templates/Tuple.h"
 #include "Widgets/Input/SSearchBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SToolTip.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Widgets/Views/STableRow.h"
+
+class ITableRow;
 
 #define LOCTEXT_NAMESPACE "CulturePicker"
 
@@ -12,6 +30,7 @@ void SCulturePicker::Construct( const FArguments& InArgs )
 	OnCultureSelectionChanged = InArgs._OnSelectionChanged;
 	IsCulturePickable = InArgs._IsCulturePickable;
 	DisplayNameFormat = InArgs._DisplayNameFormat;
+	ViewMode = InArgs._ViewMode;
 	CanSelectNone = InArgs._CanSelectNone;
 
 	BuildStockEntries();
@@ -41,17 +60,13 @@ void SCulturePicker::Construct( const FArguments& InArgs )
 		];
 
 
-	const auto& IsInitialSelection = [&](const TSharedPtr<FCultureEntry>& Entry) -> bool
-	{
-		return Entry->Culture == InArgs._InitialSelection;
-	};
-
-	const TSharedPtr<FCultureEntry>* InitialSelection = RootEntries.FindByPredicate(IsInitialSelection);
-	if (InitialSelection)
+	if (TSharedPtr<FCultureEntry> InitialSelection = FindEntryForCulture(InArgs._InitialSelection))
 	{
 		TGuardValue<bool> SuppressSelectionGuard(SuppressSelectionCallback, true);
-		TreeView->SetSelection(*InitialSelection);
+		TreeView->SetSelection(InitialSelection);
 	}
+
+	AutoExpandEntries();
 }
 
 void SCulturePicker::RequestTreeRefresh()
@@ -60,6 +75,53 @@ void SCulturePicker::RequestTreeRefresh()
 	if (TreeView.IsValid())
 	{
 		TreeView->RequestTreeRefresh();
+	}
+	AutoExpandEntries();
+}
+
+TSharedPtr<FCultureEntry> SCulturePicker::FindEntryForCulture(FCulturePtr Culture) const
+{
+	return FindEntryForCultureImpl(Culture, RootEntries);
+}
+
+TSharedPtr<FCultureEntry> SCulturePicker::FindEntryForCultureImpl(FCulturePtr Culture, const TArray<TSharedPtr<FCultureEntry>>& Entries) const
+{
+	for (const TSharedPtr<FCultureEntry>& Entry : Entries)
+	{
+		if (Entry->Culture == Culture)
+		{
+			return Entry;
+		}
+		if (TSharedPtr<FCultureEntry> ChildEntry = FindEntryForCultureImpl(Culture, Entry->Children))
+		{
+			return ChildEntry;
+		}
+	}
+	return nullptr;
+}
+
+void SCulturePicker::AutoExpandEntries()
+{
+	return AutoExpandEntriesImpl(RootEntries);
+}
+
+void SCulturePicker::AutoExpandEntriesImpl(const TArray<TSharedPtr<FCultureEntry>>& Entries)
+{
+	if (ViewMode == ECulturesViewMode::Hierarchical && TreeView)
+	{
+		for (const TSharedPtr<FCultureEntry>& Entry : Entries)
+		{
+			if (Entry->AutoExpand)
+			{
+				TreeView->SetItemExpansion(Entry, true);
+				
+				// Only recurse when actually filtering
+				if (!FilterString.IsEmpty())
+				{
+					AutoExpandEntriesImpl(Entry->Children);
+				}
+			}
+		}
 	}
 }
 
@@ -139,7 +201,7 @@ void SCulturePicker::BuildStockEntries()
 	{
 		const FString LHSDisplayName = GetCultureDisplayName(LHS->Culture.ToSharedRef(), false);
 		const FString RHSDisplayName = GetCultureDisplayName(RHS->Culture.ToSharedRef(), false);
-		return LHSDisplayName < RHSDisplayName;
+		return FTextComparison::CompareTo(LHSDisplayName, RHSDisplayName) < 0;
 	});
 }
 
@@ -178,10 +240,30 @@ void SCulturePicker::RebuildEntries()
 				IsFilteredOut = !Name.Contains(FilterString) && !DisplayName.Contains(FilterString) && !NativeName.Contains(FilterString);
 			}
 
-			// If has children, must be added. If it is not filtered and it is pickable, should be added.
-			if ( OutEntry->Children.Num() != 0 || (!IsFilteredOut && IsPickable) )
+			switch (ViewMode)
 			{
-				OutEntries.Add(OutEntry);
+			case ECulturesViewMode::Hierarchical:
+				// If has children, must be added. If it is not filtered and it is pickable, should be added.
+				if (OutEntry->Children.Num() != 0 || (!IsFilteredOut && IsPickable))
+				{
+					OutEntry->AutoExpand = (!IsPickable || IsFilteredOut) && OutEntry->Children.Num() > 0;
+					OutEntries.Add(OutEntry);
+				}
+				break;
+
+			case ECulturesViewMode::Flat:
+				// Add this entry only if it's valid, but always append its children (as they have already been validated)
+				if (IsPickable && !IsFilteredOut)
+				{
+					OutEntries.Add(OutEntry);
+				}
+				OutEntries.Append(OutEntry->Children);
+				OutEntry->Children.Reset();
+				break;
+
+			default:
+				checkf(false, TEXT("Unknown ECulturesViewMode!"));
+				break;
 			}
 		}	
 	};
@@ -224,7 +306,7 @@ void SCulturePicker::OnGetChildren(TSharedPtr<FCultureEntry> Entry, TArray< TSha
 	{
 		const FString LHSDisplayName = GetCultureDisplayName(LHS->Culture.ToSharedRef(), false);
 		const FString RHSDisplayName = GetCultureDisplayName(RHS->Culture.ToSharedRef(), false);
-		return LHSDisplayName < RHSDisplayName;
+		return FTextComparison::CompareTo(LHSDisplayName, RHSDisplayName) < 0;
 	});
 }
 
@@ -260,7 +342,7 @@ FString SCulturePicker::GetCultureDisplayName(const FCultureRef& Culture, const 
 	{
 		// Only show both names if they're different (to avoid repetition), and we're a root item (to avoid noise)
 		return (bIsRootItem && !NativeName.Equals(DisplayName, ESearchCase::CaseSensitive))
-			? FString::Printf(TEXT("%s (%s)"), *DisplayName, *NativeName)
+			? FString::Printf(TEXT("%s [%s]"), *DisplayName, *NativeName)
 			: DisplayName;
 	}
 
@@ -268,7 +350,7 @@ FString SCulturePicker::GetCultureDisplayName(const FCultureRef& Culture, const 
 	{
 		// Only show both names if they're different (to avoid repetition), and we're a root item (to avoid noise)
 		return (bIsRootItem && !NativeName.Equals(DisplayName, ESearchCase::CaseSensitive))
-			? FString::Printf(TEXT("%s (%s)"), *NativeName, *DisplayName)
+			? FString::Printf(TEXT("%s [%s]"), *NativeName, *DisplayName)
 			: NativeName;
 	}
 

@@ -7,6 +7,7 @@
 #include "Containers/ArrayView.h"
 #include "Types/SlateEnums.h"
 #include "Animation/AnimBlueprint.h"
+#include "PersonaSelectionProxies.h"
 
 class UAnimationAsset;
 class UDebugSkelMeshComponent;
@@ -16,6 +17,7 @@ struct HActor;
 struct FViewportClick;
 class FEditorCameraController;
 class ISkeletonTreeItem;
+class IEditableSkeleton;
 
 // called when animation asset has been changed
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnAnimChangedMulticaster, UAnimationAsset*);
@@ -69,6 +71,9 @@ public:
 		: FAdvancedPreviewScene(CVS)
 	{}
 
+	/** Unregister this scene from the Undo chain. Necessary for certain editor windows. */
+	virtual void UnregisterForUndo() = 0;
+
 	/** Get the persona toolkit we are associated with */
 	virtual TSharedRef<class IPersonaToolkit> GetPersonaToolkit() const = 0;
 
@@ -80,6 +85,12 @@ public:
 
 	/** Get the skeletal mesh component we are using for preview, if any. */
 	virtual UDebugSkelMeshComponent* GetPreviewMeshComponent() const = 0;
+
+	/** Get array of all skeletal mesh components in the preview scene. */
+	virtual TArray<UDebugSkelMeshComponent*> GetAllPreviewMeshComponents() const = 0;
+
+	/** Run a lambda function on each preview mesh in the scene */
+	virtual void ForEachPreviewMesh(TFunction<void (UDebugSkelMeshComponent*)> PerMeshFunction) = 0;
 
 	/** Set the skeletal mesh component we are going to preview. */
 	virtual void SetPreviewMeshComponent(UDebugSkelMeshComponent* InSkeletalMeshComponent) = 0;
@@ -299,9 +310,9 @@ public:
 	/** Handle syncing selection with the skeleton tree */
 	virtual void HandleSkeletonTreeSelectionChanged(const TArrayView<TSharedPtr<ISkeletonTreeItem>>& InSelectedItems, ESelectInfo::Type InSelectInfo) = 0;
 
-	/** Get whether bones can be selected by their physics bodies */
-	virtual bool UsePhysicsBodiesForBoneSelection() const = 0;
-
-	/** Set whether bones can be selected by their physics bodies */
-	virtual void SetUsePhysicsBodiesForBoneSelection(bool bUsePhysicsBodies) = 0;
+	/** Replaces the current editable skeleton. This is not a safe operation unless you're working
+	 * detached from other Persona components (eg. skeleton list).
+	 */
+	virtual void SetEditableSkeleton(TSharedPtr<IEditableSkeleton> InEditableSkeleton) = 0;
 };
+

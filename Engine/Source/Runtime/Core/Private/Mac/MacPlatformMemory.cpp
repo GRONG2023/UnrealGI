@@ -8,6 +8,7 @@
 #include "HAL/PlatformMemory.h"
 #include "HAL/MallocTBB.h"
 #include "HAL/MallocAnsi.h"
+#include "HAL/MallocMimalloc.h"
 #include "HAL/MallocBinned.h"
 #include "HAL/MallocBinned2.h"
 #include "HAL/MallocStomp.h"
@@ -20,16 +21,10 @@
 
 #include <mach/vm_page_size.h>
 
-#if WITH_MALLOC_STOMP
 extern "C"
 {
 	#include <crt_externs.h> // Needed for _NSGetArgc & _NSGetArgv
 }
-#endif
-
-#if PLATFORM_MAC_X86
-#include "rd_route.h"
-#endif // PLATFORM_MAC_X86
 
 // Set rather to use BinnedMalloc2 for binned malloc, can be overridden below
 #define USE_MALLOC_BINNED2 (1)
@@ -48,45 +43,38 @@ void* CFNetwork_CFAllocatorOperatorNew_Replacement(unsigned long Size, CFAllocat
 }
 #endif // PLATFORM_MAC_X86
 
+static bool HasArg(const char *Arg)
+{
+	if (_NSGetArgc() && _NSGetArgv())
+	{
+		int Argc = *_NSGetArgc();
+		char** Argv = *_NSGetArgv();
+
+		for (int i = 1; i < Argc; ++i)
+		{
+			if (FCStringAnsi::Stricmp(Argv[i], Arg) == 0)
+			{
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
 FMalloc* FMacPlatformMemory::BaseAllocator()
 {
-#if PLATFORM_MAC_X86
-	// CFNetwork objects appear to have an underlying problem with mismatched allocate/release
-	// mechanisms, exposed by Vivox SDK and Unreal's global operator new override. To avoid a
-	// crash, we route CFNetwork operator new through a custom allocator (above) to use the
-	// correct underlying technique.
-
-	//c++filt __ZnwmPK13__CFAllocator => "operator new(unsigned long, __CFAllocator const*)"
-#if UE_BUILD_DEBUG || UE_BUILD_DEVELOPMENT
-	int err =
-#endif // UE_BUILD_DEBUG || UE_BUILD_DEVELOPMENT
-	rd_route_byname("_ZnwmPK13__CFAllocator", "/System/Library/Frameworks/CFNetwork.framework/Versions/A/CFNetwork", (void*)&CFNetwork_CFAllocatorOperatorNew_Replacement, nullptr);
-
-#if UE_BUILD_DEBUG || UE_BUILD_DEVELOPMENT
-	// This check may wind up attempting to allocate memory, which will drop into an infinite
-	// loop of failure.
-	check(err == 0);
-#endif // UE_BUILD_DEBUG || UE_BUILD_DEVELOPMENT
-#endif // PLATFORM_MAC_X86
-
-	bool bIsMavericks = false;
-
-	char OSRelease[PATH_MAX] = {};
-	size_t OSReleaseBufferSize = PATH_MAX;
-	if (sysctlbyname("kern.osrelease", OSRelease, &OSReleaseBufferSize, NULL, 0) == 0)
+	static FMalloc* Instance = nullptr;
+	if (Instance != nullptr)
 	{
-		int32 OSVersionMajor = 0;
-		if (sscanf(OSRelease, "%d", &OSVersionMajor) == 1)
-		{
-			bIsMavericks = OSVersionMajor <= 13;
-		}
+		return Instance;
 	}
 
 	if (FORCE_ANSI_ALLOCATOR || IS_PROGRAM)
 	{
 		AllocatorToUse = EMemoryAllocatorToUse::Ansi;
 	}
-	else if ((WITH_EDITORONLY_DATA || IS_PROGRAM) && TBB_ALLOCATOR_ALLOWED)
+	else if ((WITH_EDITORONLY_DATA || IS_PROGRAM) && TBBMALLOC_ENABLED)
 	{
 		AllocatorToUse = EMemoryAllocatorToUse::TBB;
 	}
@@ -99,56 +87,63 @@ FMalloc* FMacPlatformMemory::BaseAllocator()
 		AllocatorToUse = EMemoryAllocatorToUse::Binned;
 	}
 
-	// Force ansi malloc in some cases
-	if(getenv("UE4_FORCE_MALLOC_ANSI") != nullptr || bIsMavericks)
+	// Force ANSI malloc per user preference.
+	if((getenv("UE4_FORCE_MALLOC_ANSI") != nullptr) || HasArg("-ansimalloc"))
 	{
 		AllocatorToUse = EMemoryAllocatorToUse::Ansi;
 	}
+#if WITH_MALLOC_STOMP
+	else if (HasArg("-stompmalloc"))
+	{
+		AllocatorToUse = EMemoryAllocatorToUse::Stomp;
+	}
+#endif // WITH_MALLOC_STOMP
+#if MIMALLOC_ENABLED
+	else if (HasArg("-mimalloc"))
+	{
+		AllocatorToUse = EMemoryAllocatorToUse::Mimalloc;
+	}
+#endif // MIMALLOC_ENABLED
 
+	// Force ANSI malloc with TSAN
 #if defined(__has_feature)
 	#if __has_feature(thread_sanitizer)
 		AllocatorToUse = EMemoryAllocatorToUse::Ansi;
 	#endif
 #endif
 
-#if WITH_MALLOC_STOMP
-	if (_NSGetArgc() && _NSGetArgv())
-	{
-		int Argc = *_NSGetArgc();
-		char** Argv = *_NSGetArgv();
-		for (int i = 1; i < Argc; ++i)
-		{
-			const char* Arg = Argv[i];
-			if (FCStringAnsi::Stricmp(Arg, "-stompmalloc") == 0)
-			{
-				AllocatorToUse = EMemoryAllocatorToUse::Stomp;
-				break;
-			}
-		}
-	}
-#endif
-
 	switch (AllocatorToUse)
 	{
 	case EMemoryAllocatorToUse::Ansi:
-		return new FMallocAnsi();
+		Instance = new FMallocAnsi();
+		break;
 #if WITH_MALLOC_STOMP
 	case EMemoryAllocatorToUse::Stomp:
-		return new FMallocStomp();
+		Instance = new FMallocStomp();
+		break;
 #endif
-#if TBB_ALLOCATOR_ALLOWED
+#if TBBMALLOC_ENABLED
 	case EMemoryAllocatorToUse::TBB:
-		return new FMallocTBB();
+		Instance = new FMallocTBB();
+		break;
+#endif
+#if MIMALLOC_ENABLED
+	case EMemoryAllocatorToUse::Mimalloc:
+		Instance = new FMallocMimalloc();
+		break;
 #endif
 	case EMemoryAllocatorToUse::Binned2:
-		return new FMallocBinned2();
+		Instance = new FMallocBinned2();
+		break;
 
 	default:	// intentional fall-through
 	case EMemoryAllocatorToUse::Binned:
 		// [RCL] 2017-03-06 FIXME: perhaps BinnedPageSize should be used here, but leaving this change to the Mac platform owner.
-		return new FMallocBinned((uint32)(GetConstants().PageSize&MAX_uint32), 0x100000000);
+		Instance = new FMallocBinned((uint32)(GetConstants().PageSize&MAX_uint32), 0x100000000);
+		break;
 	}
 
+	return Instance;
 }
 
 FPlatformMemoryStats FMacPlatformMemory::GetStats()

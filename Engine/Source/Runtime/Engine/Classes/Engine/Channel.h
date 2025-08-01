@@ -6,14 +6,17 @@
 #include "UObject/ObjectMacros.h"
 #include "UObject/Object.h"
 #include "UObject/CoreNet.h"
+#include "HAL/LowLevelMemTracker.h"
 #include "Channel.generated.h"
+
+LLM_DECLARE_TAG_API(NetChannel, ENGINE_API);
 
 class FInBunch;
 class FOutBunch;
 class UNetConnection;
 
 // Constant for all buffers that are reading from the network
-const int MAX_STRING_SERIALIZE_SIZE	= NAME_SIZE;
+inline const int MAX_STRING_SERIALIZE_SIZE	= NAME_SIZE;
 
 /**
  * Enumerates channel types.
@@ -49,19 +52,20 @@ ENUM_CLASS_FLAGS(EChannelCreateFlags);
 /**
  * Base class of communication channels.
  */
-UCLASS(abstract, transient)
-class ENGINE_API UChannel
-	: public UObject
+UCLASS(abstract, transient, MinimalAPI)
+class UChannel : public UObject
 {
-	GENERATED_UCLASS_BODY()
+	GENERATED_BODY()
 	
+public:
 	UPROPERTY()
-	class UNetConnection*	Connection;		// Owner connection.
+	TObjectPtr<class UNetConnection>	Connection;		// Owner connection.
 
 	// Variables.
 	uint32				OpenAcked:1;		// If OpenedLocally is true, this means we have acknowledged the packet we sent the bOpen bunch on. Otherwise, it means we have received the bOpen bunch from the server.
 	uint32				Closing:1;			// State of the channel.
 	uint32				Dormant:1;			// Channel is going dormant (it will close but the client will not destroy
+	UE_DEPRECATED(5.3, "Replication pausing is deprecated and will be removed")
 	uint32				bIsReplicationPaused:1;	// Replication is being paused, but channel will not be closed
 	uint32				OpenTemporary:1;	// Opened temporarily.
 	uint32				Broken:1;			// Has encountered errors and is ignoring subsequent packets.
@@ -82,76 +86,72 @@ class ENGINE_API UChannel
 	class FOutBunch*	OutRec;				// Outgoing reliable unacked data.
 	class FInBunch*		InPartialBunch;		// Partial bunch we are receiving (incoming partial bunches are appended to this)
 
-public:
-
 	// UObject overrides
 
-	virtual void BeginDestroy() override;
-	virtual void Serialize(FArchive& Ar) override;
-
-public:	
+	ENGINE_API virtual void BeginDestroy() override;
+	ENGINE_API virtual void Serialize(FArchive& Ar) override;
 
 	/** UChannel interface. */
 	/** Initialize this channel for the given connection and index. */
-	virtual void Init(UNetConnection* InConnection, int32 InChIndex, EChannelCreateFlags CreateFlags);
+	ENGINE_API virtual void Init(UNetConnection* InConnection, int32 InChIndex, EChannelCreateFlags CreateFlags);
 
 	/** Set the closing flag. */
-	virtual void SetClosingFlag();
+	ENGINE_API virtual void SetClosingFlag();
 
 	/** Close the base channel. Returns how many bits were written to the send buffer */
-	virtual int64 Close(EChannelCloseReason Reason);
+	ENGINE_API virtual int64 Close(EChannelCloseReason Reason);
 
 	/** Describe the channel. */
-	virtual FString Describe();
+	ENGINE_API virtual FString Describe();
 
 	/** Handle an incoming bunch. */
-	virtual void ReceivedBunch( FInBunch& Bunch ) PURE_VIRTUAL(UChannel::ReceivedBunch,);
+	ENGINE_API virtual void ReceivedBunch( FInBunch& Bunch ) PURE_VIRTUAL(UChannel::ReceivedBunch,);
 	
 	/** Positive acknowledgment processing. */
-	virtual void ReceivedAck( int32 AckPacketId );
+	ENGINE_API virtual void ReceivedAck( int32 AckPacketId );
 
 	/** Negative acknowledgment processing. */
-	virtual void ReceivedNak( int32 NakPacketId );
+	ENGINE_API virtual void ReceivedNak( int32 NakPacketId );
 	
 	/** Handle time passing on this channel. */
-	virtual void Tick();
+	ENGINE_API virtual void Tick();
 
 	/** Return true to indicate that this channel no longer needs to Tick() every frame. */
 	virtual bool CanStopTicking() const { return !bPendingDormancy; }
 
 	// General channel functions.
 	/** Handle an acknowledgment on this channel, returns true if the channel should be closed and fills in the OutCloseReason leaving it to the caller to cleanup the channel. Note: Temporary channels might be closed/cleaned-up by this call. */
-	bool ReceivedAcks(EChannelCloseReason& OutCloseReason);
+	ENGINE_API bool ReceivedAcks(EChannelCloseReason& OutCloseReason);
 
 	/** Handle an acknowledgment on this channel. Note: Channel might be closed/cleaned-up by this call. */
-	void ReceivedAcks();
+	ENGINE_API void ReceivedAcks();
 	
 	/** Process a properly-sequenced bunch. */
-	bool ReceivedSequencedBunch( FInBunch& Bunch );
+	ENGINE_API bool ReceivedSequencedBunch( FInBunch& Bunch );
 	
 	/** 
 	 * Process a raw, possibly out-of-sequence bunch: either queue it or dispatch it.
 	 * The bunch is sure not to be discarded.
 	 */
-	void ReceivedRawBunch( FInBunch & Bunch, bool & bOutSkipAck );
+	ENGINE_API void ReceivedRawBunch( FInBunch & Bunch, bool & bOutSkipAck );
 	
 	/** Append any export bunches */
-	virtual void AppendExportBunches( TArray< FOutBunch* >& OutExportBunches );
+	ENGINE_API virtual void AppendExportBunches( TArray< FOutBunch* >& OutExportBunches );
 
 	/** Append any "must be mapped" guids to front of bunch. These are guids that the client will wait on before processing this bunch. */
-	virtual void AppendMustBeMappedGuids( FOutBunch* Bunch );
+	ENGINE_API virtual void AppendMustBeMappedGuids( FOutBunch* Bunch );
 
 	/** Send a bunch if it's not overflowed, and queue it if it's reliable. */
-	virtual FPacketIdRange SendBunch(FOutBunch* Bunch, bool Merge);
+	ENGINE_API virtual FPacketIdRange SendBunch(FOutBunch* Bunch, bool Merge);
 	
 	/** Return whether this channel is ready for sending. */
-	int32 IsNetReady( bool Saturate );
+	ENGINE_API int32 IsNetReady( bool Saturate );
 
 	/** Make sure the incoming buffer is in sequence and there are no duplicates. */
-	void AssertInSequenced();
+	ENGINE_API void AssertInSequenced();
 
 	/** cleans up channel if it hasn't already been */
-	void ConditionalCleanUp(const bool bForDestroy, EChannelCloseReason CloseReason);
+	ENGINE_API void ConditionalCleanUp(const bool bForDestroy, EChannelCloseReason CloseReason);
 
 	/** Returns true if channel is ready to go dormant (e.g., all outstanding property updates have been ACK'd) */
 	virtual bool ReadyForDormancy(bool suppressLogs=false) { return false; }
@@ -159,10 +159,11 @@ public:
 	/** Puts the channel in a state to start becoming dormant. It will not become dormant until ReadyForDormancy returns true in Tick */
 	virtual void StartBecomingDormant() { }
 
-	void PrintReliableBunchBuffer();
+	UE_DEPRECATED(5.3, "Will be removed from test/shipping in the future.")
+	ENGINE_API void PrintReliableBunchBuffer();
 
 	/* Notification that this channel has been placed in a channel pool and needs to reset to its original state so it can be used again like a new channel */
-	virtual void AddedToChannelPool();
+	ENGINE_API virtual void AddedToChannelPool();
 
 protected:
 
@@ -170,22 +171,34 @@ protected:
 	virtual void BecomeDormant() { }
 
 	/** cleans up channel structures and nulls references to the channel */
-	virtual bool CleanUp( const bool bForDestroy, EChannelCloseReason CloseReason );
+	ENGINE_API virtual bool CleanUp( const bool bForDestroy, EChannelCloseReason CloseReason );
 
 	/** Sets whether replication is currently paused on this channel or not */
-	virtual void SetReplicationPaused(bool InbIsReplicationPaused) { bIsReplicationPaused = InbIsReplicationPaused; }
+	UE_DEPRECATED(5.3, "Replication pausing is deprecated and will be removed")
+	virtual void SetReplicationPaused(bool InbIsReplicationPaused) 
+	{ 
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		bIsReplicationPaused = InbIsReplicationPaused;
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	}
 
 	/** Returns whether replication is currently paused on this channel */
-	virtual bool IsReplicationPaused() { return bIsReplicationPaused; }
+	UE_DEPRECATED(5.3, "Replication pausing is deprecated and will be removed")
+	virtual bool IsReplicationPaused() 
+	{
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		return bIsReplicationPaused; 
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	}
 
 private:
 
 	/** Just sends the bunch out on the connection */
-	int32 SendRawBunch(FOutBunch* Bunch, bool Merge, const FNetTraceCollector* Collector = nullptr);
+	ENGINE_API int32 SendRawBunch(FOutBunch* Bunch, bool Merge, const FNetTraceCollector* Collector = nullptr);
 
 	/** Final step to prepare bunch to be sent. If reliable, adds to acknowldege list. */
-	FOutBunch* PrepBunch(FOutBunch* Bunch, FOutBunch* OutBunch, bool Merge);
+	ENGINE_API FOutBunch* PrepBunch(FOutBunch* Bunch, FOutBunch* OutBunch, bool Merge);
 
 	/** Received next bunch to process. This handles partial bunches */
-	bool ReceivedNextBunch( FInBunch & Bunch, bool & bOutSkipAck );
+	ENGINE_API bool ReceivedNextBunch( FInBunch & Bunch, bool & bOutSkipAck );
 };

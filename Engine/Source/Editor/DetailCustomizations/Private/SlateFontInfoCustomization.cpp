@@ -1,12 +1,40 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Customizations/SlateFontInfoCustomization.h"
-#include "Engine/Font.h"
-#include "PropertyHandle.h"
-#include "IDetailChildrenBuilder.h"
-#include "AssetData.h"
-#include "PropertyCustomizationHelpers.h"
+
+#include "AssetRegistry/AssetData.h"
+#include "Containers/UnrealString.h"
 #include "DetailLayoutBuilder.h"
+#include "DetailWidgetRow.h"
+#include "Editor.h"
+#include "Engine/Font.h"
+#include "Engine/UserInterfaceSettings.h"
+#include "Fonts/CompositeFont.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/Platform.h"
+#include "IDetailChildrenBuilder.h"
+#include "IDetailPropertyRow.h"
+#include "IDocumentation.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "PropertyCustomizationHelpers.h"
+#include "PropertyHandle.h"
+#include "SlateGlobals.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "Trace/Detail/Channel.h"
+#include "UObject/Object.h"
+#include "UObject/UnrealNames.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SNumericEntryBox.h"
+#include "Widgets/SToolTip.h"
+#include "Widgets/Text/STextBlock.h"
+
+#include "Internationalization/FastDecimalFormat.h"
+
+class SWidget;
 
 #define LOCTEXT_NAMESPACE "SlateFontInfo"
 
@@ -89,13 +117,199 @@ void FSlateFontInfoStructCustomization::CustomizeChildren(TSharedRef<IPropertyHa
 		]
 	];
 
-	InStructBuilder.AddProperty(FontSizeProperty.ToSharedRef());
+	AddFontSizeProperty(InStructBuilder);
 
 	InStructBuilder.AddProperty(InStructPropertyHandle->GetChildHandle(GET_MEMBER_NAME_CHECKED(FSlateFontInfo, LetterSpacing)).ToSharedRef());
+	
+	InStructBuilder.AddProperty(InStructPropertyHandle->GetChildHandle(GET_MEMBER_NAME_CHECKED(FSlateFontInfo, SkewAmount)).ToSharedRef());
+
+	const TSharedRef<IPropertyHandle> MonospacingHandle = InStructPropertyHandle->GetChildHandle(GET_MEMBER_NAME_CHECKED(FSlateFontInfo, bForceMonospaced)).ToSharedRef();
+	InStructBuilder.AddProperty(MonospacingHandle);
+
+	const TSharedRef<IPropertyHandle> MonospacingWidthHandle = InStructPropertyHandle->GetChildHandle(GET_MEMBER_NAME_CHECKED(FSlateFontInfo, MonospacedWidth)).ToSharedRef();
+	InStructBuilder.AddProperty(MonospacingWidthHandle);
+	
+	// Set an initial "sensible" value based on the current font size. Won't run if value is already non-default/zero 
+	MonospacingHandle->SetOnPropertyValueChanged(FSimpleDelegate::CreateLambda([this, MonospacingWidthHandle]()
+	{
+		if (!MonospacingWidthHandle->DiffersFromDefault())
+		{
+			float FontSizeValue;
+			FontSizeProperty->GetValue(FontSizeValue);
+			
+			MonospacingWidthHandle->SetValue(static_cast<int32>(FontSizeValue));
+		}
+	}));
 
 	InStructBuilder.AddProperty(InStructPropertyHandle->GetChildHandle(GET_MEMBER_NAME_CHECKED(FSlateFontInfo, FontMaterial)).ToSharedRef());
 
 	InStructBuilder.AddProperty(InStructPropertyHandle->GetChildHandle(GET_MEMBER_NAME_CHECKED(FSlateFontInfo, OutlineSettings)).ToSharedRef());
+}
+
+void FSlateFontInfoStructCustomization::AddFontSizeProperty(IDetailChildrenBuilder& InStructBuilder)
+{
+	TSharedRef<IPropertyHandle> FontSizePropertyRef = FontSizeProperty.ToSharedRef();
+
+	auto GetFloatMetaDataFromKey = [FontSizePropertyRef](const FName& Key) -> const TOptional<float>
+	{
+		const FString* InstanceValue = FontSizePropertyRef->GetInstanceMetaData(Key);
+		const FString MetaDataValueString = (InstanceValue != nullptr) ? *InstanceValue : FontSizePropertyRef->GetMetaData(Key);
+		if (MetaDataValueString.Len())
+		{
+			float FloatValue;
+			LexFromString(FloatValue, *MetaDataValueString);
+			return FloatValue;
+		}
+
+		return TOptional<float>();
+	};
+
+	TOptional<float> MinValue = GetFloatMetaDataFromKey("ClampMin");
+	TOptional<float> MaxValue = GetFloatMetaDataFromKey("ClampMax");
+
+	IDetailPropertyRow& FontSizeRow = InStructBuilder.AddProperty(FontSizePropertyRef);
+	FontSizeRow.CustomWidget()
+	.NameContent()
+	[
+		FontSizePropertyRef->CreatePropertyNameWidget()
+	]
+	.ValueContent()
+	[
+		SNew(SNumericEntryBox<float>)
+		.Value(this, &FSlateFontInfoStructCustomization::OnFontSizeGetValue)
+		.OnValueChanged(this, &FSlateFontInfoStructCustomization::OnFontSizeValueChanged)
+		.OnValueCommitted(this, &FSlateFontInfoStructCustomization::OnFontSizeValueCommitted)
+		.UndeterminedString(LOCTEXT("MultipleValues", "Multiple Values"))
+		.OnBeginSliderMovement(this, &FSlateFontInfoStructCustomization::OnFontSizeBeginSliderMovement)
+		.OnEndSliderMovement(this, &FSlateFontInfoStructCustomization::OnFontSizeEndSliderMovement)
+		.Font(FAppStyle::GetFontStyle("PropertyWindow.NormalFont"))
+		.MinFractionalDigits(0)
+		.MaxFractionalDigits(2)
+		.MinValue(MinValue)
+		.MaxValue(MaxValue)
+		.MinSliderValue(MinValue)
+		.MaxSliderValue(MaxValue)
+		.Delta(1.0f)
+		.AllowWheel(true)
+		.WheelStep(1.0f)
+		.AllowSpin(FontSizePropertyRef->GetNumPerObjectValues() == 1) //Don't allow spin for multiple value select. Allowing it would result in the widget background not being displayed.
+		.IsEnabled(this, &FSlateFontInfoStructCustomization::IsFontSizeEnabled)
+		.ToolTip(IDocumentation::Get()->CreateToolTip(TAttribute<FText>(this, &FSlateFontInfoStructCustomization::GetFontSizeTooltipText),
+													  nullptr,
+													  TEXT("Shared/Types/FSlateFontInfo"),
+													  TEXT("Size")))
+	];
+}
+
+bool FSlateFontInfoStructCustomization::IsFontSizeEnabled() const
+{
+	return FontSizeProperty && !FontSizeProperty->IsEditConst();
+}
+
+FText FSlateFontInfoStructCustomization::GetFontSizeTooltipText() const
+{
+	const UUserInterfaceSettings* UISettings = GetDefault<UUserInterfaceSettings>();
+
+	FFormatNamedArguments Args;
+	Args.Add(TEXT("DPI"), UISettings->GetFontDPIDisplayString());
+	return FText::Format(LOCTEXT("FontSizeToolTip", "Size of the font in points.\nCurrent font resolution : {DPI}"), Args);
+}
+
+float FSlateFontInfoStructCustomization::ConvertFontSizeFromNativeToDisplay(float NativeFontSize)
+{
+	const UUserInterfaceSettings* UISettings = GetDefault<UUserInterfaceSettings>();
+	const float FontDisplayDPI = UISettings->GetFontDisplayDPI();
+	const float DisplayedSize = NativeFontSize * static_cast<float>(FontConstants::RenderDPI) / FontDisplayDPI;
+	return DisplayedSize;
+}
+
+float FSlateFontInfoStructCustomization::ConvertFontSizeFromDisplayToNative(float DisplayFontSize)
+{
+	const UUserInterfaceSettings* UISettings = GetDefault<UUserInterfaceSettings>();
+	const float FontDisplayDPI = UISettings->GetFontDisplayDPI();
+	const float NativeSize = DisplayFontSize * FontDisplayDPI / static_cast<float>(FontConstants::RenderDPI);
+	const float RoundedSize = FMath::GridSnap(NativeSize, 0.01f);
+	return RoundedSize;
+}
+
+TOptional<float> FSlateFontInfoStructCustomization::OnFontSizeGetValue() const
+{
+	float value(0.0f);
+	const TSharedRef< IPropertyHandle > PropertyHandle = FontSizeProperty.ToSharedRef();
+
+	if (PropertyHandle->GetValue(value) == FPropertyAccess::Success)
+	{
+		return ConvertFontSizeFromNativeToDisplay(value);
+	}
+
+	// Return an unset value so it displays the "multiple values" indicator instead
+	return TOptional<float>();
+}
+
+void FSlateFontInfoStructCustomization::OnFontSizeValueChanged(float NewDisplayValue)
+{
+	if (!bIsUsingSlider)
+		return;
+
+	const TSharedRef< IPropertyHandle > PropertyHandle = FontSizeProperty.ToSharedRef();
+
+	float OrgValue(0.0f);
+	const float NativeFontSize = ConvertFontSizeFromDisplayToNative(NewDisplayValue);
+
+	if (PropertyHandle->GetValue(OrgValue) != FPropertyAccess::Fail)
+	{
+		// Value hasn't changed, so lets return now
+		if (OrgValue == NativeFontSize)
+		{
+			return;
+		}
+	}
+
+	// We don't create a transaction for each property change when using the slider. Only once when the slider first is moved
+	EPropertyValueSetFlags::Type Flags = (EPropertyValueSetFlags::InteractiveChange | EPropertyValueSetFlags::NotTransactable);
+	PropertyHandle->SetValue(NativeFontSize, Flags);
+}
+
+void FSlateFontInfoStructCustomization::OnFontSizeValueCommitted(float NewDisplayValue, ETextCommit::Type CommitInfo)
+{
+	const TSharedRef< IPropertyHandle > PropertyHandle = FontSizeProperty.ToSharedRef();
+	const float NativeFontSize = ConvertFontSizeFromDisplayToNative(NewDisplayValue);
+
+	float OrgValue(0.0f);
+	if (bIsUsingSlider || (PropertyHandle->GetValue(OrgValue) == FPropertyAccess::Fail || OrgValue != NativeFontSize))
+	{
+
+		PropertyHandle->SetValue(NativeFontSize);
+		LastSliderFontSizeCommittedValue = NativeFontSize;
+	}
+}
+
+void FSlateFontInfoStructCustomization::OnFontSizeBeginSliderMovement()
+{
+	bIsUsingSlider = true;
+
+	const TSharedRef< IPropertyHandle > PropertyHandle = FontSizeProperty.ToSharedRef();
+	PropertyHandle->GetValue(LastSliderFontSizeCommittedValue);
+
+	GEditor->BeginTransaction(LOCTEXT("UpdateFontSizeTransaction", "Edit font size"));
+}
+
+void FSlateFontInfoStructCustomization::OnFontSizeEndSliderMovement(float NewDisplayValue)
+{
+	const float NativeFontSize = ConvertFontSizeFromDisplayToNative(NewDisplayValue);
+	bIsUsingSlider = false;
+
+	// When the slider end, we may have not called SetValue(NewValue) without the InteractiveChange|NotTransactable flags.
+	//That prevents some transaction and callback to be triggered like the NotifyHook.
+	if (LastSliderFontSizeCommittedValue != NativeFontSize)
+	{
+		const TSharedRef< IPropertyHandle > PropertyHandle = FontSizeProperty.ToSharedRef();
+		PropertyHandle->SetValue(NativeFontSize);
+	}
+	else
+	{
+		GEditor->EndTransaction();
+	}
 }
 
 bool FSlateFontInfoStructCustomization::OnFilterFontAsset(const FAssetData& InAssetData)
@@ -133,6 +347,11 @@ void FSlateFontInfoStructCustomization::OnFontChanged(const FAssetData& InAssetD
 
 bool FSlateFontInfoStructCustomization::IsFontEntryComboEnabled() const
 {
+	if (TypefaceFontNameProperty->IsEditConst())
+	{
+		return false;
+	}
+	
 	TArray<const FSlateFontInfo*> SlateFontInfoStructs = GetFontInfoBeingEdited();
 	if(SlateFontInfoStructs.Num() == 0)
 	{
@@ -223,7 +442,7 @@ TSharedRef<SWidget> FSlateFontInfoStructCustomization::MakeFontEntryWidget(TShar
 	return
 		SNew(STextBlock)
 		.Text(FText::FromName(*InFontEntry))
-		.Font(FEditorStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont")));
+		.Font(FAppStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont")));
 }
 
 FText FSlateFontInfoStructCustomization::GetFontEntryComboText() const

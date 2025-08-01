@@ -1,18 +1,19 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "TargetDeviceProxyManager.h"
+#include "Proxies/TargetDeviceProxyManager.h"
 
 #include "HAL/PlatformProcess.h"
 #include "MessageEndpoint.h"
 #include "MessageEndpointBuilder.h"
 
-#include "TargetDeviceProxy.h"
+#include "Proxies/TargetDeviceProxy.h"
 #include "TargetDeviceServiceMessages.h"
 
 
 /** Defines the interval in seconds in which devices are being pinged by the proxy manager. */
 #define TARGET_DEVICE_SERVICES_PING_INTERVAL 2.5f
 
+LLM_DEFINE_TAG(TargetDeviceProxyManager);
 
 /* FTargetDeviceProxyManager structors
  *****************************************************************************/
@@ -25,7 +26,7 @@ FTargetDeviceProxyManager::FTargetDeviceProxyManager()
 	if (MessageEndpoint.IsValid())
 	{
 		TickDelegate = FTickerDelegate::CreateRaw(this, &FTargetDeviceProxyManager::HandleTicker);
-		TickDelegateHandle = FTicker::GetCoreTicker().AddTicker(TickDelegate, TARGET_DEVICE_SERVICES_PING_INTERVAL);
+		TickDelegateHandle = FTSTicker::GetCoreTicker().AddTicker(TickDelegate, TARGET_DEVICE_SERVICES_PING_INTERVAL);
 
 		SendPing();
 	}
@@ -34,7 +35,7 @@ FTargetDeviceProxyManager::FTargetDeviceProxyManager()
 
 FTargetDeviceProxyManager::~FTargetDeviceProxyManager()
 {
-	FTicker::GetCoreTicker().RemoveTicker(TickDelegateHandle);
+	FTSTicker::GetCoreTicker().RemoveTicker(TickDelegateHandle);
 	FMessageEndpoint::SafeRelease(MessageEndpoint);
 }
 
@@ -148,9 +149,8 @@ void FTargetDeviceProxyManager::SendPing()
 			Proxy.Value->AddTimeout(Timeout);
 		}
 
-		// message is going to be deleted by FMemory::Free() (see FMessageContext destructor), so allocate it with Malloc
-		void* Memory = FMemory::Malloc(sizeof(FTargetDeviceServicePing), alignof(FTargetDeviceServicePing));
-		MessageEndpoint->Publish(new (Memory) FTargetDeviceServicePing(FPlatformProcess::UserName(false)), EMessageScope::Network);
+		// send to only this process, as we no longer want to send out pings to the local network and get another machine's list of devices
+		MessageEndpoint->Publish(FMessageEndpoint::MakeMessage<FTargetDeviceServicePing>(FPlatformProcess::UserName(false)), EMessageScope::Process);
 	}
 }
 
@@ -165,6 +165,8 @@ void FTargetDeviceProxyManager::HandlePongMessage(const FTargetDeviceServicePong
  	{
  		return;
  	}
+
+	LLM_SCOPE_BYTAG(TargetDeviceProxyManager);
 
 	AddProxyFromPongMessage(Message, Context, false);
 
@@ -196,6 +198,8 @@ void FTargetDeviceProxyManager::AddProxyFromPongMessage(const FTargetDeviceServi
 
 bool FTargetDeviceProxyManager::HandleTicker(float DeltaTime)
 {
+	LLM_SCOPE_BYTAG(TargetDeviceProxyManager);
+
 	RemoveDeadProxies();
 	SendPing();
 

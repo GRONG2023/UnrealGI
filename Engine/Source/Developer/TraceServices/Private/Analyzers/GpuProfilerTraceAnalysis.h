@@ -5,16 +5,16 @@
 #include "Trace/Analyzer.h"
 #include "Model/TimingProfilerPrivate.h"
 
-namespace Trace
+namespace TraceServices
 {
+
 	class FAnalysisSession;
-}
 
 class FGpuProfilerAnalyzer
-	: public Trace::IAnalyzer
+	: public UE::Trace::IAnalyzer
 {
 public:
-	FGpuProfilerAnalyzer(Trace::FAnalysisSession& Session, Trace::FTimingProfilerProvider& TimingProfilerProvider);
+	FGpuProfilerAnalyzer(FAnalysisSession& Session, FTimingProfilerProvider& TimingProfilerProvider);
 	virtual void OnAnalysisBegin(const FOnAnalysisContext& Context) override;
 	virtual bool OnEvent(uint16 RouteId, EStyle Style, const FOnEventContext& Context) override;
 
@@ -26,11 +26,15 @@ private:
 		RouteId_Frame2, // GPU Index 1
 	};
 
-	Trace::FAnalysisSession& Session;
-	Trace::FTimingProfilerProvider& TimingProfilerProvider;
-	Trace::FTimingProfilerProvider::TimelineInternal& Timeline;
-	Trace::FTimingProfilerProvider::TimelineInternal& Timeline2;
+	double GpuTimestampToSessionTime(uint64 GpuMicroseconds);
+
+	FAnalysisSession& Session;
+	FTimingProfilerProvider& TimingProfilerProvider;
+	FTimingProfilerProvider::TimelineInternal& Timeline;
+	FTimingProfilerProvider::TimelineInternal& Timeline2;
 	TMap<uint64, uint32> EventTypeMap;
 	double MinTime = 0.0f;
 	double MinTime2 = 0.0f;
 };
+
+} // namespace TraceServices

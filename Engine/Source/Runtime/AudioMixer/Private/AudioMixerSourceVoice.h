@@ -59,8 +59,13 @@ namespace Audio
 		// Sets the source voice's HPF filter modulation base frequency.
 		void SetModHPFFrequency(const float InFrequency);
 
+		void SetModulationRouting(FSoundModulationDefaultRoutingSettings& RoutingSettings);
+
+		// Set the source voice's SourceBufferListener and associated boolean.
+		void SetSourceBufferListener(FSharedISourceBufferListenerPtr& InSourceBufferListener, bool InShouldSourceBufferListenerZeroBuffer);
+
 		// Sets the source voice's channel map (2d or 3d).
-		void SetChannelMap(const uint32 NumInputChannels, const Audio::AlignedFloatBuffer& InChannelMap, const bool bInIs3D, const bool bInIsCenterChannelOnly);
+		void SetChannelMap(const uint32 NumInputChannels, const Audio::FAlignedFloatBuffer& InChannelMap, const bool bInIs3D, const bool bInIsCenterChannelOnly);
 
 		// Sets params used by HRTF spatializer
 		void SetSpatializationParams(const FSpatializationParams& InParams);
@@ -77,8 +82,14 @@ namespace Audio
 		// Does a faded stop (to avoid discontinuity)
 		void StopFade(int32 NumFrames);
 
-		// Get the source's Id
-		int32 GetSourceId() const { return SourceId; }
+		// Returns the source's Id
+		int32 GetSourceId() const;
+
+		// Returns the source's distance attenuation
+		float GetDistanceAttenuation() const;
+
+		// Returns the source's distance from the closest listener
+		float GetDistance() const;
 
 		// Queries if the voice is playing
 		bool IsPlaying() const;
@@ -106,8 +117,12 @@ namespace Audio
 		// Retrieves the envelope value of the source.
 		float GetEnvelopeValue() const;
 
+#if ENABLE_AUDIO_DEBUG
+		double GetCPUCoreUtilization() const;
+#endif // ENABLE_AUDIO_DEBUG
+
 		// Mixes the dry and wet buffer audio into the given buffers.
-		void MixOutputBuffers(int32 InNumChannels, const float SendLevel, EMixerSourceSubmixSendStage InSubmixSendStage, AlignedFloatBuffer& OutWetBuffer) const;
+		void MixOutputBuffers(int32 InNumChannels, const float SendLevel, EMixerSourceSubmixSendStage InSubmixSendStage, FAlignedFloatBuffer& OutWetBuffer) const;
 
 		// For soundfield conversions, get the encoded audio.
 		const ISoundfieldAudioPacket* GetEncodedOutput(const FSoundfieldEncodingKey& InKey) const;
@@ -116,7 +131,7 @@ namespace Audio
 		const FQuat GetListenerRotationForVoice() const;
 
 		// Sets the submix send levels
-		void SetSubmixSendInfo(FMixerSubmixWeakPtr Submix, const float SendLevel);
+		void SetSubmixSendInfo(FMixerSubmixWeakPtr Submix, const float SendLevel, const EMixerSourceSubmixSendStage SendStage = EMixerSourceSubmixSendStage::PostDistanceAttenuation);
 
 		// Clears the submix send to the given submix
 		void ClearSubmixSendInfo(FMixerSubmixWeakPtr Submix);

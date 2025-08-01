@@ -6,6 +6,7 @@
 #include "Stats/Stats.h"
 #include "Textures/TextureAtlas.h"
 #include "UObject/GCObject.h"
+#include "UObject/ObjectKey.h"
 #include "Containers/Queue.h"
 #include "Rendering/ShaderResourceManager.h"
 #include "Rendering/RenderingCommon.h"
@@ -22,6 +23,7 @@ class FSlateUTextureResource;
 class ISlateStyle;
 class UTexture;
 class FSceneInterface;
+class FSlateVectorGraphicsCache;
 
 /** 
  * Lookup key for materials.  Sometimes the same material is used with different masks so there must be
@@ -29,11 +31,11 @@ class FSceneInterface;
  */
 struct FMaterialKey
 {
-	TWeakObjectPtr<const UMaterialInterface> Material;
-	const FVector2D ImageSize;
+	FObjectKey Material;
+	const FVector2f ImageSize;
 	int32 MaskKey;
 
-	FMaterialKey(const UMaterialInterface* InMaterial, const FVector2D& InImageSize, int32 InMaskKey)
+	FMaterialKey(const UMaterialInterface* InMaterial, const FVector2f InImageSize, int32 InMaskKey)
 		: Material(InMaterial)
 		, ImageSize(InImageSize)
 		, MaskKey(InMaskKey)
@@ -153,9 +155,10 @@ public:
 	 * Updates texture atlases if needed
 	 */
 	void UpdateTextureAtlases();
+	void ConditionalFlushAtlases();
 
 	/** FSlateShaderResourceManager interface */
-	virtual FSlateShaderResourceProxy* GetShaderResource( const FSlateBrush& InBrush ) override;
+	virtual FSlateShaderResourceProxy* GetShaderResource(const FSlateBrush& InBrush, FVector2f LocalSize, float DrawScale) override;
 	virtual FSlateShaderResource* GetFontShaderResource( int32 InTextureAtlasIndex, FSlateShaderResource* FontTextureAtlas, const class UObject* FontMaterial ) override;
 	virtual ISlateAtlasProvider* GetTextureAtlasProvider() override;
 
@@ -222,6 +225,8 @@ public:
 	FCriticalSection* GetResourceCriticalSection() { return &ResourceCriticalSection; }
 
 private:
+	void CreateVectorGraphicsCache();
+
 	void OnPreGarbageCollect();
 	void OnPostGarbageCollect();
 
@@ -272,6 +277,15 @@ private:
 	 */
 	FSlateMaterialResource* GetMaterialResource( const UObject* InMaterial, const FSlateBrush* InBrush, FSlateShaderResource* TextureMask, int32 InMaskKey );
 
+	/** 
+	 * Returns a rendering resource for a brush that generates ector graphics (may generate it internally)
+	 * 
+	 * @param InBrush	The brush to with texture to get
+	 * @param LocalSize	The unscaled local size of the final image
+	 * @param DrawScale	Any scaling applied to the final image
+	 */
+	FSlateShaderResourceProxy* GetVectorResource(const FSlateBrush& Brush, FVector2f LocalSize, float DrawScale);
+
 	/**
 	 * Called when the application exists before the UObject system shuts down so we can free object resources
 	 */
@@ -304,7 +318,7 @@ private:
 	/** List of old material resources that are free to use as new resources */
 	TArray< TSharedPtr<FSlateMaterialResource> > MaterialResourceFreeList;
 	/** Static Texture atlases which have been created */
-	TArray<class FSlateTextureAtlasRHI*> TextureAtlases;
+	TArray<class FSlateTextureAtlasRHI*> PrecachedTextureAtlases;
 	/** Static Textures created that are not atlased */	
 	TArray<class FSlateTexture2DRHIRef*> NonAtlasedTextures;
 	/** The size of each texture atlas (square) */
@@ -319,5 +333,8 @@ private:
 
 	/** Debugging Commands */
 	FAutoConsoleCommand DeleteResourcesCommand;
+
+	/** Cache for atlases generated from vector graphics */
+	TUniquePtr<FSlateVectorGraphicsCache> VectorGraphicsCache;
 };
 

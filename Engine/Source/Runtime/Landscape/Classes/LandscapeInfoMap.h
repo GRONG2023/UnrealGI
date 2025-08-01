@@ -24,7 +24,7 @@ public:
 
 	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
 
-	TMap<FGuid, ULandscapeInfo*> Map;
+	TMap<FGuid, TObjectPtr<ULandscapeInfo>> Map;
 	TWeakObjectPtr<UWorld> World;
 
 	/**
@@ -35,4 +35,5 @@ public:
 	* @returns Landscape-specific data associated with given world.
 	*/
 	LANDSCAPE_API static ULandscapeInfoMap& GetLandscapeInfoMap(const UWorld* World);
+	LANDSCAPE_API static ULandscapeInfoMap* FindLandscapeInfoMap(const UWorld* World);
 };

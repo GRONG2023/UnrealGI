@@ -55,6 +55,7 @@ FElement2StaticMesh::FElement2StaticMesh(const FSyncContext& InSyncContext)
 	: SyncContext(InSyncContext)
 	, bSomeHasTextures(false)
 	, BugsCount(0)
+	, GeometryShift(0, 0, 0)
 {
 }
 
@@ -83,7 +84,7 @@ utf8_string FElement2StaticMesh::MeshAsString(const FDatasmithMesh& Mesh)
 	Dump += Utf8StringFormat("\tVertices Count = %d\n", VerticesCount);
 	for (int32 IdxVertice = 0; IdxVertice < VerticesCount; ++IdxVertice)
 	{
-		FVector Vertex = Mesh.GetVertex(IdxVertice);
+		FVector3f Vertex = Mesh.GetVertex(IdxVertice);
 		Dump += Utf8StringFormat("\t\tVertice[%d] = {%f, %f, %f}\n", IdxVertice, Vertex.X, Vertex.Y, Vertex.Z);
 	}
 
@@ -111,15 +112,15 @@ utf8_string FElement2StaticMesh::MeshAsString(const FDatasmithMesh& Mesh)
 		Mesh.GetFace(IdxFace, Vertex1, Vertex2, Vertex3, MaterialId);
 		Dump += Utf8StringFormat("\t\tVertex[%d] = {%d, %d, %d} Mat = %d\n", IdxFace, Vertex1, Vertex2, Vertex3,
 								 MaterialId);
-		FVector Point1 = Mesh.GetVertex(Vertex1);
-		FVector Point2 = Mesh.GetVertex(Vertex2);
-		FVector Point3 = Mesh.GetVertex(Vertex3);
+		FVector3f Point1 = Mesh.GetVertex(Vertex1);
+		FVector3f Point2 = Mesh.GetVertex(Vertex2);
+		FVector3f Point3 = Mesh.GetVertex(Vertex3);
 		Dump += Utf8StringFormat("\t\t\t\t{{%f, %f, %f}, {%f, %f, %f}, {%f, %f, %f}}\n", Point1.X, Point1.Y, Point1.Z,
 								 Point2.X, Point2.Y, Point2.Z, Point3.X, Point3.Y, Point3.Z);
 
 		for (int32 IdxComponent = 0; IdxComponent < 3; IdxComponent++)
 		{
-			FVector Normal = Mesh.GetNormal(IdxFace * 3 + IdxComponent);
+			FVector3f Normal = Mesh.GetNormal(IdxFace * 3 + IdxComponent);
 			Dump += Utf8StringFormat("\t\t\tNormal[%d][%d] = {%f, %f, %f}\n", IdxFace, IdxComponent, Normal.X, Normal.Y,
 									 Normal.Z);
 		}
@@ -156,7 +157,7 @@ utf8_string FElement2StaticMesh::MeshElementAsString(const IDatasmithMeshElement
 	Dump += Utf8StringFormat("Mesh \"%s\"\n", TCHAR_TO_UTF8(Mesh.GetName()));
 	Dump += Utf8StringFormat("\tLabel = \"%s\"\n", TCHAR_TO_UTF8(Mesh.GetLabel()));
 	Dump += Utf8StringFormat("\tFile = \"%s\"\n", TCHAR_TO_UTF8(Mesh.GetFile()));
-	const FVector Dim = Mesh.GetDimensions();
+	const FVector3f Dim = Mesh.GetDimensions();
 	Dump += Utf8StringFormat("\tDimensions = {%f, %f, %f}\n", Dim.X, Dim.Y, Dim.Z);
 	Dump += Utf8StringFormat("\tArea = %f\n", Mesh.GetArea());
 	Dump +=
@@ -190,14 +191,11 @@ void FElement2StaticMesh::AddVertex(GS::Int32 InBodyVertex, const Geometry::Vect
 	{
 		// Not already used, get value from body
 		CurrentBody.GetVertex(InBodyVertex, &vertex.LocalVertex, ModelerAPI::CoordinateSystem::ElemLocal);
-		if (!bIsIdentity)
-		{
-			Geometry::Point3D WorldPt = Vertex2Point3D(vertex.LocalVertex);
-			Geometry::Point3D LocalPt = World2Local.Apply(WorldPt);
-			vertex.LocalVertex.x = LocalPt.x;
-			vertex.LocalVertex.y = LocalPt.y;
-			vertex.LocalVertex.z = LocalPt.z;
-		}
+
+		vertex.LocalVertex.x = vertex.LocalVertex.x + GeometryShift.x;
+		vertex.LocalVertex.y = vertex.LocalVertex.y + GeometryShift.y;
+		vertex.LocalVertex.z = vertex.LocalVertex.z + GeometryShift.z;
+
 		vertex.LocalVertex.x *= SyncContext.ScaleLength;
 		vertex.LocalVertex.y *= SyncContext.ScaleLength;
 		vertex.LocalVertex.z *= SyncContext.ScaleLength;
@@ -252,8 +250,7 @@ void FElement2StaticMesh::AddVertex(GS::Int32 InBodyVertex, const Geometry::Vect
 		}
 	}
 
-	Geometry::Vector3D VertexWorldNormal = bIsIdentity ? VertexNormal : Matrix * VertexNormal;
-	FVector CurrentNormal(float(VertexWorldNormal.x), -float(VertexWorldNormal.y), float(VertexWorldNormal.z));
+	FVector3f CurrentNormal(float(VertexNormal.x), -float(VertexNormal.y), float(VertexNormal.z));
 
 	// Create triangles
 	if (VertexCount == 0)
@@ -339,7 +336,7 @@ void FElement2StaticMesh::InitPolygonMaterial()
 }
 
 void FElement2StaticMesh::AddElementGeometry(const ModelerAPI::Element&		   InModelElement,
-											 const Geometry::Transformation3D& InWorld2Local)
+											 const Geometry::Vector3D&          InGeometryShift)
 {
 #if 0
 	UE_AC_TraceF("Element\n%s\n", F3DElement2String::Element2String(InModelElement).c_str());
@@ -351,9 +348,7 @@ void FElement2StaticMesh::AddElementGeometry(const ModelerAPI::Element&		   InMo
 		UE_AC_DebugF("FElement2StaticMesh::AddElementGeometry - Break element found\n");
 	}
 #endif
-	World2Local = InWorld2Local;
-	Matrix = InWorld2Local.GetMatrix();
-	bIsIdentity = InWorld2Local.IsIdentity();
+	GeometryShift = InGeometryShift;
 
 	// Collect geometry from element's bodies
 	GS::Int32 NbBodies = InModelElement.GetTessellatedBodyCount();
@@ -502,7 +497,7 @@ void FElement2StaticMesh::FillMesh(FDatasmithMesh* OutMesh)
 
 			for (int32 IndexComponent = 0; IndexComponent < 3; IndexComponent++)
 			{
-				const FVector& Normal = triangle.Normals[IndexComponent];
+				const FVector3f& Normal = triangle.Normals[IndexComponent];
 				OutMesh->SetNormal(IndexFace * 3 + IndexComponent, Normal.X, Normal.Y, Normal.Z);
 			}
 

@@ -1,4 +1,4 @@
-﻿namespace iPhonePackager
+namespace iPhonePackager
 {
     partial class ToolsHub
     {
@@ -33,8 +33,7 @@
 			this.CancelThisFormButton = new System.Windows.Forms.Button();
 			this.tabControl1 = new System.Windows.Forms.TabControl();
 			this.tabPage1 = new System.Windows.Forms.TabPage();
-			this.linkLabel2 = new System.Windows.Forms.LinkLabel();
-			this.linkLabel1 = new System.Windows.Forms.LinkLabel();
+			this.label21 = new System.Windows.Forms.Label();
 			this.label14 = new System.Windows.Forms.Label();
 			this.label5 = new System.Windows.Forms.Label();
 			this.label6 = new System.Windows.Forms.Label();
@@ -46,7 +45,6 @@
 			this.CreateCSRButton = new System.Windows.Forms.Button();
 			this.label10 = new System.Windows.Forms.Label();
 			this.tabPage2 = new System.Windows.Forms.TabPage();
-			this.linkLabel3 = new System.Windows.Forms.LinkLabel();
 			this.label13 = new System.Windows.Forms.Label();
 			this.label2 = new System.Windows.Forms.Label();
 			this.label12 = new System.Windows.Forms.Label();
@@ -63,7 +61,6 @@
 			this.label17 = new System.Windows.Forms.Label();
 			this.OtherDeployToolsButton = new System.Windows.Forms.Button();
 			this.ResignIPAButton = new System.Windows.Forms.Button();
-			this.linkLabel4 = new System.Windows.Forms.LinkLabel();
 			this.label20 = new System.Windows.Forms.Label();
 			this.InstallIPAButton = new System.Windows.Forms.Button();
 			this.tabControl1.SuspendLayout();
@@ -118,8 +115,7 @@
 			// 
 			// tabPage1
 			// 
-			this.tabPage1.Controls.Add(this.linkLabel2);
-			this.tabPage1.Controls.Add(this.linkLabel1);
+			this.tabPage1.Controls.Add(this.label21);
 			this.tabPage1.Controls.Add(this.label14);
 			this.tabPage1.Controls.Add(this.label5);
 			this.tabPage1.Controls.Add(this.label6);
@@ -138,32 +134,28 @@
 			this.tabPage1.Text = "New User";
 			this.tabPage1.UseVisualStyleBackColor = true;
 			// 
-			// linkLabel2
+			// label13
 			// 
-			this.linkLabel2.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left) 
-            | System.Windows.Forms.AnchorStyles.Right)));
-			this.linkLabel2.LinkArea = new System.Windows.Forms.LinkArea(87, 40);
-			this.linkLabel2.Location = new System.Drawing.Point(16, 16);
-			this.linkLabel2.Name = "linkLabel2";
-			this.linkLabel2.Size = new System.Drawing.Size(494, 63);
-			this.linkLabel2.TabIndex = 48;
-			this.linkLabel2.TabStop = true;
-			this.linkLabel2.Tag = "http://developer.apple.com/programs/ios";
-			this.linkLabel2.Text = resources.GetString("linkLabel2.Text");
-			this.linkLabel2.UseCompatibleTextRendering = true;
-			this.linkLabel2.LinkClicked += new System.Windows.Forms.LinkLabelLinkClickedEventHandler(this.HyperlinkClicked);
+			this.label13.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left)
+			| System.Windows.Forms.AnchorStyles.Right)));
+			this.label13.Location = new System.Drawing.Point(16, 195);
+			this.label13.Name = "label13";
+			this.label13.Size = new System.Drawing.Size(404, 86);
+			this.label13.TabIndex = 44;
+			this.label13.Text = resources.GetString("label13.Text");
 			// 
-			// linkLabel1
+			// label21
 			// 
-			this.linkLabel1.AutoSize = true;
-			this.linkLabel1.Location = new System.Drawing.Point(16, 398);
-			this.linkLabel1.Name = "linkLabel1";
-			this.linkLabel1.Size = new System.Drawing.Size(256, 13);
-			this.linkLabel1.TabIndex = 47;
-			this.linkLabel1.TabStop = true;
-			this.linkLabel1.Tag = "https://docs.unrealengine.com/latest/INT/Platforms/iOS/QuickStart/index.html";
-			this.linkLabel1.Text = "More information for this process is available on UDN";
-			this.linkLabel1.LinkClicked += new System.Windows.Forms.LinkLabelLinkClickedEventHandler(this.HyperlinkClicked);
+			this.label21.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left)
+			| System.Windows.Forms.AnchorStyles.Right)));
+			this.label21.Location = new System.Drawing.Point(16, 16);
+			this.label21.Name = "label21";
+			this.label21.Size = new System.Drawing.Size(494, 63);
+			this.label21.TabIndex = 48;
+			this.label21.TabStop = true;
+			this.label21.Text = resources.GetString("label21.Text");
+			this.label21.UseCompatibleTextRendering = true;
+			// 
 			// 
 			// label14
 			// 
@@ -274,7 +266,6 @@
 			// 
 			// tabPage2
 			// 
-			this.tabPage2.Controls.Add(this.linkLabel3);
 			this.tabPage2.Controls.Add(this.label13);
 			this.tabPage2.Controls.Add(this.label2);
 			this.tabPage2.Controls.Add(this.label12);
@@ -293,38 +284,15 @@
 			this.tabPage2.Text = "Already a registered iOS developer";
 			this.tabPage2.UseVisualStyleBackColor = true;
 			// 
-			// linkLabel3
-			// 
-			this.linkLabel3.AutoSize = true;
-			this.linkLabel3.Location = new System.Drawing.Point(16, 398);
-			this.linkLabel3.Name = "linkLabel3";
-			this.linkLabel3.Size = new System.Drawing.Size(256, 13);
-			this.linkLabel3.TabIndex = 48;
-			this.linkLabel3.TabStop = true;
-			this.linkLabel3.Tag = "https://docs.unrealengine.com/latest/INT/Platforms/iOS/QuickStart/index.html";
-			this.linkLabel3.Text = "More information for this process is available on UDN";
-			this.linkLabel3.LinkClicked += new System.Windows.Forms.LinkLabelLinkClickedEventHandler(this.HyperlinkClicked);
-			// 
-			// label13
-			// 
-			this.label13.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left) 
-            | System.Windows.Forms.AnchorStyles.Right)));
-			this.label13.Location = new System.Drawing.Point(16, 195);
-			this.label13.Name = "label13";
-			this.label13.Size = new System.Drawing.Size(404, 86);
-			this.label13.TabIndex = 44;
-			this.label13.Text = resources.GetString("label13.Text");
-			// 
 			// label2
 			// 
 			this.label2.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left) 
             | System.Windows.Forms.AnchorStyles.Right)));
-			this.label2.Location = new System.Drawing.Point(16, 13);
+			this.label2.Location = new System.Drawing.Point(16, 30);
 			this.label2.Name = "label2";
 			this.label2.Size = new System.Drawing.Size(494, 23);
 			this.label2.TabIndex = 42;
-			this.label2.Text = "An existing signing certificate and mobile provision can be imported for use with" +
-    " UDK for iOS hardware.";
+			this.label2.Text = "An existing signing certificate and provision can be imported for use with Unreal for iOS hardware.";
 			// 
 			// label12
 			// 
@@ -413,7 +381,6 @@
 			// tabPage3
 			// 
 			this.tabPage3.Controls.Add(this.groupBox1);
-			this.tabPage3.Controls.Add(this.linkLabel4);
 			this.tabPage3.Controls.Add(this.label20);
 			this.tabPage3.Controls.Add(this.InstallIPAButton);
 			this.tabPage3.Location = new System.Drawing.Point(4, 28);
@@ -477,18 +444,6 @@
 			this.ResignIPAButton.Text = "Re-sign an IPA...";
 			this.ResignIPAButton.UseVisualStyleBackColor = true;
 			this.ResignIPAButton.Click += new System.EventHandler(this.ResignIPAButton_Click);
-			// 
-			// linkLabel4
-			// 
-			this.linkLabel4.AutoSize = true;
-			this.linkLabel4.Location = new System.Drawing.Point(18, 398);
-			this.linkLabel4.Name = "linkLabel4";
-			this.linkLabel4.Size = new System.Drawing.Size(215, 13);
-			this.linkLabel4.TabIndex = 53;
-			this.linkLabel4.TabStop = true;
-			this.linkLabel4.Tag = "http://udn.epicgames.com/Three/UnrealiPhonePackager.html";
-			this.linkLabel4.Text = "UE3 documentation for tools (still applicable)";
-			this.linkLabel4.LinkClicked += new System.Windows.Forms.LinkLabelLinkClickedEventHandler(this.HyperlinkClicked);
 			// 
 			// label20
 			// 
@@ -573,10 +528,7 @@
 		private System.Windows.Forms.Label label14;
 		private System.Windows.Forms.Button InstallIPAButton;
 		private System.Windows.Forms.Label label20;
-        private System.Windows.Forms.LinkLabel linkLabel2;
-        private System.Windows.Forms.LinkLabel linkLabel1;
-        private System.Windows.Forms.LinkLabel linkLabel3;
-        private System.Windows.Forms.LinkLabel linkLabel4;
+		private System.Windows.Forms.Label label21;
 		private System.Windows.Forms.GroupBox groupBox1;
 		private System.Windows.Forms.Label label19;
 		private System.Windows.Forms.Label label17;

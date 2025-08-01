@@ -18,7 +18,7 @@
 
 /** An enum for the types of data used in a PlatformInterfaceData struct. */
 UENUM()
-enum EPlatformInterfaceDataType
+enum EPlatformInterfaceDataType : int
 {
 	/** No data type specified. */
 	PIDT_None,
@@ -60,7 +60,7 @@ struct FPlatformInterfaceData
 	FString StringValue;
 
 	UPROPERTY()
-	class UObject* ObjectValue;
+	TObjectPtr<class UObject> ObjectValue;
 
 
 	FPlatformInterfaceData()

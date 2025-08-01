@@ -1,5 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using EpicGames.Core;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -24,5 +25,17 @@ namespace IncludeTool.Support
 		{
 			WriteLine(String.Format(Format, Args));
 		}
+
+		public void WriteWarning(FileReference File, string Message)
+			=> WriteLine($"{File}: warning: {Message}");
+
+		public void WriteWarning(FileReference File, int LineNumber, string Message)
+			=> WriteLine($"{File}({LineNumber + 1}): warning: {Message}");
+
+		public void WriteWarning(FileReference File, string Message, params object[] Args)
+			=> WriteWarning(File, String.Format(Message, Args));
+
+		public void WriteWarning(FileReference File, int LineNumber, string Message, params object[] Args)
+			=> WriteWarning(File, LineNumber, String.Format(Message, Args));
 	}
 }

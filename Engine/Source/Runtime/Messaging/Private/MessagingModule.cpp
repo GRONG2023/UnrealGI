@@ -26,11 +26,11 @@ class FMessagingModule
 	: public FSelfRegisteringExec
 	, public IMessagingModule
 {
-public:
+protected:
 
 	//~ FSelfRegisteringExec interface
 
-	virtual bool Exec(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar) override
+	virtual bool Exec_Runtime(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar) override
 	{
 		if (!FParse::Command(&Cmd, TEXT("MESSAGING")))
 		{
@@ -132,6 +132,10 @@ public:
 	virtual void ShutdownModule() override
 	{
 		ShutdownDefaultBus();
+
+#if PLATFORM_SUPPORTS_MESSAGEBUS
+		FCoreDelegates::OnPreExit.RemoveAll(this);
+#endif	//PLATFORM_SUPPORTS_MESSAGEBUS
 	}
 
 	virtual bool SupportsDynamicReloading() override

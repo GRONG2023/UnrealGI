@@ -6,7 +6,7 @@
 
 #include "CoreMinimal.h"
 #include "Widgets/SWidget.h"
-#include "Editor/LevelEditor/Private/SLevelEditor.h"
+#include "SLevelEditor.h"
 
 /**
  * Level editor menu
@@ -24,6 +24,7 @@ public:
 	 * @return	New widget
 	 */
 	static TSharedRef< SWidget > MakeLevelEditorMenu( const TSharedPtr<FUICommandList>& CommandList, TSharedPtr<class SLevelEditor> LevelEditor );
-
-	static TSharedRef< SWidget > MakeNotificationBar( const TSharedPtr<FUICommandList>& CommandList, TSharedPtr<class SLevelEditor> LevelEditor );
+private:
+	static void RegisterBuildMenu();
+	static void RegisterSelectMenu();
 };

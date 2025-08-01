@@ -1,14 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Systems/MovieSceneQuaternionInterpolationRotationSystem.h"
-#include "Channels/MovieSceneFloatChannel.h"
+#include "Channels/MovieSceneDoubleChannel.h"
 #include "EntitySystem/BuiltInComponentTypes.h"
 #include "EntitySystem/MovieSceneEvalTimeSystem.h"
 #include "EntitySystem/MovieSceneEntitySystemLinker.h"
 #include "EntitySystem/MovieSceneEntitySystemTask.h"
 #include "MovieSceneTracksComponentTypes.h"
 
-DECLARE_CYCLE_STAT(TEXT("MovieScene: Quat-interp-rot channel system"), MovieSceneEval_QuatInterpRotChannelSystem, STATGROUP_MovieSceneECS);
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneQuaternionInterpolationRotationSystem)
+
 DECLARE_CYCLE_STAT(TEXT("MovieScene: Evaluate quat-interp-rot channels"), MovieSceneEval_EvaluateQuatInterpRotChannelTask, STATGROUP_MovieSceneECS);
 
 namespace UE
@@ -29,11 +30,11 @@ struct FEvaluateQuaternionInterpolationRotationChannels
 		Index2 = Index2 < Times.Num() ? Index2 : INDEX_NONE;
 		if (Index1 != INDEX_NONE && Index2 != INDEX_NONE)
 		{
-			if (Times[Index1] != FrameTime.FrameNumber && Times[Index1] > FrameRange.GetLowerBoundValue()) 
+			if (Times[Index1] > FrameRange.GetLowerBoundValue()) 
 			{
 				FrameRange.SetLowerBoundValue(Times[Index1]);
 			}
-			if (Times[Index2] != FrameTime.FrameNumber && Times[Index1] < FrameRange.GetUpperBoundValue())
+			if (Times[Index2] != FrameTime.FrameNumber && Times[Index2] < FrameRange.GetUpperBoundValue())
 			{
 				FrameRange.SetUpperBoundValue(Times[Index2]);
 			}
@@ -43,12 +44,12 @@ struct FEvaluateQuaternionInterpolationRotationChannels
 	void ForEachAllocation(
 			const FEntityAllocation* Allocation,
 			TRead<FFrameTime> FrameTimes, 
-			TMultiReadOptional<FSourceFloatChannel, FSourceFloatChannel, FSourceFloatChannel> RotChannelAccessors,
-			float* OutResultXs, float* OutResultYs, float* OutResultZs)
+			TMultiReadOptional<FSourceDoubleChannel, FSourceDoubleChannel, FSourceDoubleChannel> RotChannelAccessors,
+			double* OutResultXs, double* OutResultYs, double* OutResultZs) const
 	{
-		const FSourceFloatChannel* RotationXs = RotChannelAccessors.Get<0>();
-		const FSourceFloatChannel* RotationYs = RotChannelAccessors.Get<1>();
-		const FSourceFloatChannel* RotationZs = RotChannelAccessors.Get<2>();
+		const FSourceDoubleChannel* RotationXs = RotChannelAccessors.Get<0>();
+		const FSourceDoubleChannel* RotationYs = RotChannelAccessors.Get<1>();
+		const FSourceDoubleChannel* RotationZs = RotChannelAccessors.Get<2>();
 
 		check(
 			(OutResultXs != nullptr) == (RotationXs != nullptr) &&
@@ -60,9 +61,9 @@ struct FEvaluateQuaternionInterpolationRotationChannels
 		{
 			const FFrameTime FrameTime = FrameTimes[Index];
 
-			const FSourceFloatChannel* RotationX = RotationXs ? &RotationXs[Index] : nullptr;
-			const FSourceFloatChannel* RotationY = RotationYs ? &RotationYs[Index] : nullptr;
-			const FSourceFloatChannel* RotationZ = RotationZs ? &RotationZs[Index] : nullptr;
+			const FSourceDoubleChannel* RotationX = RotationXs ? &RotationXs[Index] : nullptr;
+			const FSourceDoubleChannel* RotationY = RotationYs ? &RotationYs[Index] : nullptr;
+			const FSourceDoubleChannel* RotationZ = RotationZs ? &RotationZs[Index] : nullptr;
 
 			// Find the closest keyframes before/after the current time on the 3 rotation channels.
 			TRange<FFrameNumber> FrameRange(TNumericLimits<FFrameNumber>::Min(), TNumericLimits<FFrameNumber>::Max());
@@ -83,7 +84,7 @@ struct FEvaluateQuaternionInterpolationRotationChannels
 			const FFrameNumber UpperBound = FrameRange.GetUpperBoundValue();
 			if (LowerBound != TNumericLimits<FFrameNumber>::Min() && UpperBound != TNumericLimits<FFrameNumber>::Max())
 			{
-				float Value;
+				double Value;
 				FVector FirstRot(0.0f, 0.0f, 0.0f);
 				FVector SecondRot(0.0f, 0.0f, 0.0f);
 				double U = (FrameTime.AsDecimal() - (double) FrameRange.GetLowerBoundValue().Value) /
@@ -144,7 +145,7 @@ struct FEvaluateQuaternionInterpolationRotationChannels
 			}
 			else  // no range found: default to regular, but still do RotToQuat
 			{
-				float Value;
+				double Value;
 				FVector CurrentRot(0.0f, 0.0f, 0.0f);
 				if (RotationX && RotationX->Source->Evaluate(FrameTime, Value))
 				{
@@ -185,14 +186,17 @@ UMovieSceneQuaternionInterpolationRotationSystem::UMovieSceneQuaternionInterpola
 {
 	using namespace UE::MovieScene;
 
+	SystemCategories = EEntitySystemCategory::ChannelEvaluators;
+	Phase = ESystemPhase::Scheduling;
+
 	if (HasAnyFlags(RF_ClassDefaultObject))
 	{
 		DefineImplicitPrerequisite(UMovieSceneEvalTimeSystem::StaticClass(), GetClass());
 
 		FBuiltInComponentTypes* BuiltInComponents = FBuiltInComponentTypes::Get();
-		DefineComponentProducer(GetClass(), BuiltInComponents->FloatResult[3]);
-		DefineComponentProducer(GetClass(), BuiltInComponents->FloatResult[4]);
-		DefineComponentProducer(GetClass(), BuiltInComponents->FloatResult[5]);
+		DefineComponentProducer(GetClass(), BuiltInComponents->DoubleResult[3]);
+		DefineComponentProducer(GetClass(), BuiltInComponents->DoubleResult[4]);
+		DefineComponentProducer(GetClass(), BuiltInComponents->DoubleResult[5]);
 	}
 }
 
@@ -209,11 +213,29 @@ bool UMovieSceneQuaternionInterpolationRotationSystem::IsRelevantImpl(UMovieScen
 		});
 }
 
-void UMovieSceneQuaternionInterpolationRotationSystem::OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents)
+void UMovieSceneQuaternionInterpolationRotationSystem::OnSchedulePersistentTasks(UE::MovieScene::IEntitySystemScheduler* TaskScheduler)
 {
 	using namespace UE::MovieScene;
 
-	SCOPE_CYCLE_COUNTER(MovieSceneEval_QuatInterpRotChannelSystem);
+	FBuiltInComponentTypes* BuiltInComponents = FBuiltInComponentTypes::Get();
+	FMovieSceneTracksComponentTypes* TrackComponents = FMovieSceneTracksComponentTypes::Get();
+
+	FEntityTaskBuilder()
+	.Read(BuiltInComponents->EvalTime)
+	.ReadOneOrMoreOf(
+			TrackComponents->QuaternionRotationChannel[0],
+			TrackComponents->QuaternionRotationChannel[1],
+			TrackComponents->QuaternionRotationChannel[2])
+	.WriteOptional(BuiltInComponents->DoubleResult[3])
+	.WriteOptional(BuiltInComponents->DoubleResult[4])
+	.WriteOptional(BuiltInComponents->DoubleResult[5])
+	.SetStat(GET_STATID(MovieSceneEval_EvaluateQuatInterpRotChannelTask))
+	.Fork_PerAllocation<FEvaluateQuaternionInterpolationRotationChannels>(&Linker->EntityManager, TaskScheduler);
+}
+
+void UMovieSceneQuaternionInterpolationRotationSystem::OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents)
+{
+	using namespace UE::MovieScene;
 
 	FBuiltInComponentTypes* BuiltInComponents = FBuiltInComponentTypes::Get();
 	FMovieSceneTracksComponentTypes* TrackComponents = FMovieSceneTracksComponentTypes::Get();
@@ -224,9 +246,10 @@ void UMovieSceneQuaternionInterpolationRotationSystem::OnRun(FSystemTaskPrerequi
 				TrackComponents->QuaternionRotationChannel[0],
 				TrackComponents->QuaternionRotationChannel[1],
 				TrackComponents->QuaternionRotationChannel[2])
-		.WriteOptional(BuiltInComponents->FloatResult[3])
-		.WriteOptional(BuiltInComponents->FloatResult[4])
-		.WriteOptional(BuiltInComponents->FloatResult[5])
+		.WriteOptional(BuiltInComponents->DoubleResult[3])
+		.WriteOptional(BuiltInComponents->DoubleResult[4])
+		.WriteOptional(BuiltInComponents->DoubleResult[5])
 		.SetStat(GET_STATID(MovieSceneEval_EvaluateQuatInterpRotChannelTask))
 		.Dispatch_PerAllocation<FEvaluateQuaternionInterpolationRotationChannels>(&Linker->EntityManager, InPrerequisites, &Subsequents);
 }
+

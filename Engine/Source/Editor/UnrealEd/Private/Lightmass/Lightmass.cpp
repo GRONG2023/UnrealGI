@@ -18,8 +18,10 @@
 #include "PrecomputedLightVolume.h"
 #include "PrecomputedVolumetricLightmap.h"
 #include "Engine/MapBuildDataRegistry.h"
+#include "Engine/TextureLightProfile.h"
 #include "ModelLight.h"
 #include "LandscapeLight.h"
+#include "MaterialDomain.h"
 #include "Materials/Material.h"
 #include "Camera/CameraActor.h"
 #include "Components/PointLightComponent.h"
@@ -27,7 +29,6 @@
 #include "Components/RectLightComponent.h"
 #include "Engine/GeneratedMeshAreaLight.h"
 #include "Components/DirectionalLightComponent.h"
-#include "Renderer/Private/AtmosphereRendering.h"
 #include "Components/SkyLightComponent.h"
 #include "Rendering/SkyAtmosphereCommonData.h"
 #include "Components/ModelComponent.h"
@@ -40,11 +41,6 @@
 #include "ShadowMap.h"
 #include "LandscapeProxy.h"
 #include "LandscapeComponent.h"
-#include "Matinee/MatineeActor.h"
-#include "Matinee/InterpGroup.h"
-#include "Matinee/InterpGroupInst.h"
-#include "Matinee/InterpTrackMove.h"
-#include "Matinee/InterpTrackInstMove.h"
 #include "Components/SplineMeshComponent.h"
 #include "Lightmass/PrecomputedVisibilityVolume.h"
 #include "Lightmass/PrecomputedVisibilityOverrideVolume.h"
@@ -56,8 +52,12 @@
 #include "EditorLevelUtils.h"
 #include "Misc/MessageDialog.h"
 #include "Modules/ModuleManager.h"
+#include "ImageCoreUtils.h"
+#include "Misc/FileHelper.h"
 
 extern FSwarmDebugOptions GSwarmDebugOptions;
+
+bool Lightmass_IsSubstrateEnabled();
 
 DEFINE_LOG_CATEGORY_STATIC(LogLightmassSolver, Warning, All);
 /**
@@ -76,7 +76,7 @@ UNREALED_API bool GLightmassStatsMode = false;
 #if !UE_BUILD_DOCS
 void FSwarmDebugOptions::Touch()
 {
-	//@todo UE4. For some reason, the global instance is not initializing to the default settings...
+	//@todo For some reason, the global instance is not initializing to the default settings...
 	if (bInitialized == false)
 	{
 		bDistributionEnabled = true;
@@ -211,12 +211,12 @@ void Copy( const ULightComponent* In, Lightmass::FLightData& Out )
 	}
 
 	Out.Brightness = In->ComputeLightBrightness();
-	Out.Position = In->GetLightPosition();
-	Out.Direction = In->GetDirection();
+	Out.Position = (FVector4f)In->GetLightPosition();
+	Out.Direction = (FVector3f)In->GetDirection();
 
 	if( In->bUseTemperature )
 	{
-		Out.Color *= FLinearColor::MakeFromColorTemperature(In->Temperature);
+		Out.Color *= In->GetColorTemperature();
 	}
 }
 
@@ -245,9 +245,9 @@ void CopyLightProfile( const ULightComponent* In, Lightmass::FLightData& Out, TA
 
 			TArray64<uint8> MipData;
 
-			Source.GetMipData(MipData, 0);
+			verify( Source.GetMipData(MipData, 0) );
 
-			const uint32 Width = FMath::Sqrt( Lightmass::FLightData::LightProfileTextureDataSize );
+			const uint32 Width = FMath::Sqrt( static_cast<float>(Lightmass::FLightData::LightProfileTextureDataSize) );
 			const uint32 Height = Lightmass::FLightData::LightProfileTextureDataSize / Width;
 
 			for(uint32 y = 0; y < Height; ++y)
@@ -260,7 +260,7 @@ void CopyLightProfile( const ULightComponent* In, Lightmass::FLightData& Out, TA
 
 					FFloat16 HalfValue = *(FFloat16*)&MipData[ (SourceY * (uint32)Source.GetSizeX() * 8) + (SourceX * 8) ];
 					float Value = HalfValue;
-					OutLightProfileTextureData[y * Width + x] = (uint8)(Value * 255.9999f);
+					OutLightProfileTextureData[y * Width + x] = (uint8)(Value * 255.f + 0.5f);
 				}
 			}
 		}
@@ -269,15 +269,15 @@ void CopyLightProfile( const ULightComponent* In, Lightmass::FLightData& Out, TA
 
 FORCEINLINE void Copy( const FSplineMeshParams& In, Lightmass::FSplineMeshParams& Out )
 {
-	Out.StartPos = In.StartPos;
-	Out.StartTangent = In.StartTangent;
-	Out.StartScale = In.StartScale;
+	Out.StartPos = FVector3f(In.StartPos);	//LWC_TODO: Precision loss
+	Out.StartTangent = FVector3f(In.StartTangent);
+	Out.StartScale = FVector2f(In.StartScale);	// LWC_TODO: Precision loss
 	Out.StartRoll = In.StartRoll;
-	Out.StartOffset = In.StartOffset;
-	Out.EndPos = In.EndPos;
-	Out.EndTangent = In.EndTangent;
-	Out.EndScale = In.EndScale;
-	Out.EndOffset = In.EndOffset;
+	Out.StartOffset = FVector2f(In.StartOffset);	// LWC_TODO: Precision loss
+	Out.EndPos = FVector3f(In.EndPos);	//LWC_TODO: Precision loss
+	Out.EndTangent = FVector3f(In.EndTangent);
+	Out.EndScale = FVector2f(In.EndScale);	// LWC_TODO: Precision loss
+	Out.EndOffset = FVector2f(In.EndOffset);	// LWC_TODO: Precision loss
 	Out.EndRoll = In.EndRoll;
 }
 
@@ -454,7 +454,6 @@ void FLightmassProcessor::SwarmCallback( NSwarm::FMessage* CallbackMessage, void
 			case NSwarm::ALERT_LEVEL_INFO:	break;
 			case NSwarm::ALERT_LEVEL_WARNING:			CheckType = EMessageSeverity::Warning;			break;
 			case NSwarm::ALERT_LEVEL_ERROR:				CheckType = EMessageSeverity::Error;			break;
-			case NSwarm::ALERT_LEVEL_CRITICAL_ERROR:	CheckType = EMessageSeverity::CriticalError;	break;
 			}
 
 			FGuid ObjectGuid = FGuid(	AlertMessage->ObjectGuid.A, 
@@ -490,7 +489,6 @@ void FLightmassProcessor::SwarmCallback( NSwarm::FMessage* CallbackMessage, void
 -----------------------------------------------------------------------------*/
 FLightmassExporter::FLightmassExporter( UWorld* InWorld )
 	: Swarm( NSwarm::FSwarmInterface::Get() ) 
-	, AtmosphericFogComponent(nullptr)
 	, SkyAtmosphereComponent(nullptr)
 	, ExportStage(NotRunning)
 	, CurrentAmortizationIndex(0)
@@ -508,6 +506,13 @@ FLightmassExporter::FLightmassExporter( UWorld* InWorld )
 	{
 		SceneGuid = FGuid::NewGuid();
 	}
+
+	// Compute the hash of UnrealLightmass executable and store it into LightmassExecutableHash
+	// Guaranteed success as the executable has been checked by CheckLightmassExecutableVersion()
+	TArray<uint8> Bytes;
+	FFileHelper::LoadFileToArray(Bytes, *FPlatformProcess::GenerateApplicationPath(TEXT("UnrealLightmass"), EBuildConfiguration::Development));
+	FSHA1::HashBuffer(&Bytes[0], Bytes.Num(), LightmassExecutableHash.Hash);
+	
 	ChannelName = Lightmass::CreateChannelName(SceneGuid, Lightmass::LM_SCENE_VERSION, Lightmass::LM_SCENE_EXTENSION);
 }
 
@@ -663,19 +668,19 @@ void FLightmassExporter::WriteToChannel( FLightmassStatistics& Stats, FGuid& Deb
 
 			for (int32 VolumeIndex = 0; VolumeIndex < ImportanceVolumes.Num(); VolumeIndex++)
 			{
-				FBox LMBox = ImportanceVolumes[VolumeIndex];
+				FBox3f LMBox(ImportanceVolumes[VolumeIndex]);
 				Swarm.WriteChannel(Channel, &LMBox, sizeof(LMBox));
 			}
 
 			for (int32 VolumeIndex = 0; VolumeIndex < CharacterIndirectDetailVolumes.Num(); VolumeIndex++)
 			{
-				FBox LMBox = CharacterIndirectDetailVolumes[VolumeIndex];
+				FBox3f LMBox(CharacterIndirectDetailVolumes[VolumeIndex]);
 				Swarm.WriteChannel(Channel, &LMBox, sizeof(LMBox));
 			}
 
 			for (int32 PortalIndex = 0; PortalIndex < Portals.Num(); PortalIndex++)
 			{
-				FMatrix Matrix = Portals[PortalIndex];
+				FMatrix44f Matrix(Portals[PortalIndex]);
 				Swarm.WriteChannel(Channel, &Matrix, sizeof(Matrix));
 			}
 
@@ -815,7 +820,7 @@ void FLightmassExporter::WriteVisibilityData( int32 Channel )
 	int32 NumVisVolumes = 0;
 	for( TObjectIterator<APrecomputedVisibilityVolume> It; It; ++It )
 	{
-		if (World->ContainsActor(*It) && !It->IsPendingKill())
+		if (World->ContainsActor(*It) && IsValid(*It))
 		{
 			NumVisVolumes++;
 		}
@@ -833,13 +838,18 @@ void FLightmassExporter::WriteVisibilityData( int32 Channel )
 	for( TObjectIterator<APrecomputedVisibilityVolume> It; It; ++It )
 	{
 		APrecomputedVisibilityVolume* Volume = *It;
-		if (World->ContainsActor(Volume) && !Volume->IsPendingKill())
+		if (World->ContainsActor(Volume) && IsValid(Volume))
 		{
-			FBox LMBox = Volume->GetComponentsBoundingBox(true);
+			FBox3f LMBox(Volume->GetComponentsBoundingBox(true));
 			Swarm.WriteChannel(Channel, &LMBox, sizeof(LMBox));
 
-			TArray<FPlane> Planes;
-			Volume->Brush->GetSurfacePlanes(Volume, Planes);
+			TArray<FPlane> Planes4d;
+			Volume->Brush->GetSurfacePlanes(Volume, Planes4d);			
+			TArray<FPlane4f> Planes;
+			for (FPlane Plane4d : Planes4d)
+			{
+				Planes.Add(FPlane4f(Plane4d));
+			}
 			const int32 NumPlanes = Planes.Num();
 			Swarm.WriteChannel( Channel, &NumPlanes, sizeof(NumPlanes) );
 			Swarm.WriteChannel( Channel, Planes.GetData(), Planes.Num() * Planes.GetTypeSize() );
@@ -849,7 +859,7 @@ void FLightmassExporter::WriteVisibilityData( int32 Channel )
 	int32 NumOverrideVisVolumes = 0;
 	for( TObjectIterator<APrecomputedVisibilityOverrideVolume> It; It; ++It )
 	{
-		if (World->ContainsActor(*It) && !It->IsPendingKill())
+		if (World->ContainsActor(*It) && IsValid(*It))
 		{
 			NumOverrideVisVolumes++;
 		}
@@ -859,9 +869,9 @@ void FLightmassExporter::WriteVisibilityData( int32 Channel )
 	for( TObjectIterator<APrecomputedVisibilityOverrideVolume> It; It; ++It )
 	{
 		APrecomputedVisibilityOverrideVolume* Volume = *It;
-		if (World->ContainsActor(Volume) && !Volume->IsPendingKill())
+		if (World->ContainsActor(Volume) && IsValid(Volume))
 		{
-			FBox LMBox = Volume->GetComponentsBoundingBox(true);
+			FBox3f LMBox(Volume->GetComponentsBoundingBox(true));
 			Swarm.WriteChannel(Channel, &LMBox, sizeof(LMBox));
 
 			TArray<int32> VisibilityIds;
@@ -931,71 +941,9 @@ void FLightmassExporter::WriteVisibilityData( int32 Channel )
 
 	const float CellSize = World->GetWorldSettings()->VisibilityCellSize;
 
-	TArray<FVector4> CameraTrackPositions;
-	if (World->GetWorldSettings()->bPrecomputeVisibility)
-	{
-		// Export positions along matinee camera tracks
-		// Lightmass needs to know these positions in order to place visibility cells containing them, since they may be outside any visibility volumes
-		for( TObjectIterator<ACameraActor> CameraIt; CameraIt; ++CameraIt )
-		{
-			ACameraActor* Camera = *CameraIt;
-			if (World->ContainsActor(Camera) && !Camera->IsPendingKill())
-			{
-				for( TActorIterator<AMatineeActor> It(World); It; ++It )
-				{
-					AMatineeActor* MatineeActor = *It;
-
-					bool bNeedsTermInterp = false;
-					if (MatineeActor->GroupInst.Num() == 0)
-					{
-						// If matinee is closed, GroupInst will be empty, so we need to populate it
-						bNeedsTermInterp = true;
-						MatineeActor->InitInterp();
-					}
-					UInterpGroupInst* GroupInstance = MatineeActor->FindGroupInst(Camera);
-					if (GroupInstance && GroupInstance->Group)
-					{
-						for (int32 TrackIndex = 0; TrackIndex < GroupInstance->Group->InterpTracks.Num(); TrackIndex++)
-						{
-							UInterpTrackMove* MoveTrack = Cast<UInterpTrackMove>(GroupInstance->Group->InterpTracks[TrackIndex]);
-							if (MoveTrack)
-							{
-								float StartTime;
-								float EndTime;
-								//@todo - look at the camera cuts to only process time ranges where the camera is actually active
-								MoveTrack->GetTimeRange(StartTime, EndTime);
-								for (int32 TrackInstanceIndex = 0; TrackInstanceIndex < GroupInstance->TrackInst.Num(); TrackInstanceIndex++)
-								{
-									UInterpTrackInst* TrackInstance = GroupInstance->TrackInst[TrackInstanceIndex];
-									UInterpTrackInstMove* MoveTrackInstance = Cast<UInterpTrackInstMove>(TrackInstance);
-									if (MoveTrackInstance)
-									{
-										//@todo - handle long camera paths
-										for (float Time = StartTime; Time < EndTime; Time += FMath::Max((EndTime - StartTime) * .001f, .001f))
-										{
-											const FVector RelativePosition = MoveTrack->EvalPositionAtTime(TrackInstance, Time);
-											FVector CurrentPosition;
-											FRotator CurrentRotation;
-											MoveTrack->ComputeWorldSpaceKeyTransform(MoveTrackInstance, RelativePosition, FRotator::ZeroRotator, CurrentPosition, CurrentRotation);
-											if (CameraTrackPositions.Num() == 0 || !CurrentPosition.Equals(CameraTrackPositions.Last(), CellSize * .1f))
-											{
-												CameraTrackPositions.Add(CurrentPosition);
-											}
-										}
-									}
-								}
-							}
-						}
-					}
-					if (bNeedsTermInterp)
-					{
-						MatineeActor->TermInterp();
-					}
-				}
-			}
-		}
-	}
-	
+	// This used to walk along Matinee sequences and write the positions for pre-computed visibility.
+	// Leaving the swarm channel code here for fear of breaking swarm.
+	TArray<FVector4f> CameraTrackPositions;
 	int32 NumCameraPositions = CameraTrackPositions.Num();
 	Swarm.WriteChannel( Channel, &NumCameraPositions, sizeof(NumCameraPositions) );
 	Swarm.WriteChannel( Channel, CameraTrackPositions.GetData(), CameraTrackPositions.Num() * CameraTrackPositions.GetTypeSize() );
@@ -1008,13 +956,18 @@ void FLightmassExporter::WriteVolumetricLightmapData( int32 Channel )
 		AVolumetricLightmapDensityVolume* DetailVolume = VolumetricLightmapDensityVolumes[VolumeIndex];
 
 		Lightmass::FVolumetricLightmapDensityVolumeData VolumeData;
-		VolumeData.Bounds = DetailVolume->GetComponentsBoundingBox(true);
+		VolumeData.Bounds = FBox3f(DetailVolume->GetComponentsBoundingBox(true));
 		VolumeData.AllowedMipLevelRange = FIntPoint(DetailVolume->AllowedMipLevelRange.Min, DetailVolume->AllowedMipLevelRange.Max);
 
-		TArray<FPlane> Planes;
-		DetailVolume->Brush->GetSurfacePlanes(DetailVolume, Planes);
-		const int32 NumPlanes = Planes.Num();
-		VolumeData.NumPlanes = NumPlanes;
+		TArray<FPlane> Planes4d;
+		DetailVolume->Brush->GetSurfacePlanes(DetailVolume, Planes4d);
+		TArray<FPlane4f> Planes;
+		for (FPlane Plane4d : Planes4d)
+		{
+			Planes.Add(FPlane4f(Plane4d));
+		}
+
+		VolumeData.NumPlanes = Planes.Num();
 
 		Swarm.WriteChannel( Channel, &VolumeData, sizeof(VolumeData) );
 		Swarm.WriteChannel( Channel, Planes.GetData(), Planes.Num() * Planes.GetTypeSize() );
@@ -1041,15 +994,15 @@ void FLightmassExporter::WriteLights( int32 Channel )
 
 	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	// Compute a mapping between directional light and trnasmittance to apply. For each AtmosphereSunLightIndex, the brightest lights is kept.
-	if ((AtmosphericFogComponent && AtmosphericFogComponent->bAtmosphereAffectsSunIlluminance) || SkyAtmosphereComponent)
+	if (SkyAtmosphereComponent)
 	{
 		for (int32 LightIndex = 0; LightIndex < DirectionalLights.Num(); ++LightIndex)
 		{
 			const UDirectionalLightComponent* Light = DirectionalLights[LightIndex];
-			if (Light->IsUsedAsAtmosphereSunLight() && Light->GetColoredLightBrightness().ComputeLuminance() > AtmosphereLightsBrightness[Light->GetAtmosphereSunLightIndex()])
+			if (Light->IsUsedAsAtmosphereSunLight() && Light->GetColoredLightBrightness().GetLuminance() > AtmosphereLightsBrightness[Light->GetAtmosphereSunLightIndex()])
 			{
 				AtmosphereLights[Light->GetAtmosphereSunLightIndex()] = Light;
-				AtmosphereLightsBrightness[Light->GetAtmosphereSunLightIndex()] = Light->GetColoredLightBrightness().ComputeLuminance();
+				AtmosphereLightsBrightness[Light->GetAtmosphereSunLightIndex()] = Light->GetColoredLightBrightness().GetLuminance();
 			}
 		}
 
@@ -1062,10 +1015,6 @@ void FLightmassExporter::WriteLights( int32 Channel )
 				{
 					FAtmosphereSetup AtmosphereSetup(*SkyAtmosphereComponent);
 					SunLightAtmosphereTransmittance[Index] = AtmosphereSetup.GetTransmittanceAtGroundLevel(SunDirection);
-				}
-				else if (AtmosphericFogComponent && Index==0)	// Legacy AtmosphericFogComponent only takes into account Index 0
-				{
-					SunLightAtmosphereTransmittance[Index] = AtmosphericFogComponent->GetTransmittance(SunDirection);
 				}
 				break;
 			}
@@ -1124,7 +1073,7 @@ void FLightmassExporter::WriteLights( int32 Channel )
 
 		PointData.Radius = Light->AttenuationRadius;
 		PointData.FalloffExponent = Light->LightFalloffExponent;
-		PointData.LightTangent = Light->GetComponentTransform().GetUnitAxis(EAxis::Z);
+		PointData.LightTangent = FVector3f(Light->GetComponentTransform().GetUnitAxis(EAxis::Z));
 		Swarm.WriteChannel( Channel, &LightData, sizeof(LightData) );
 		Swarm.WriteChannel( Channel, LightProfileTextureData.GetData(), LightProfileTextureData.Num() * LightProfileTextureData.GetTypeSize() );
 		Swarm.WriteChannel( Channel, &PointData, sizeof(PointData) );
@@ -1150,7 +1099,7 @@ void FLightmassExporter::WriteLights( int32 Channel )
 
 		PointData.Radius = Light->AttenuationRadius;
 		PointData.FalloffExponent = Light->LightFalloffExponent;
-		PointData.LightTangent = Light->GetComponentTransform().GetUnitAxis(EAxis::Z);
+		PointData.LightTangent = FVector3f(Light->GetComponentTransform().GetUnitAxis(EAxis::Z));
 		SpotData.InnerConeAngle = Light->InnerConeAngle; 
 		SpotData.OuterConeAngle = Light->OuterConeAngle;
 		Swarm.WriteChannel( Channel, &LightData, sizeof(LightData) );
@@ -1178,7 +1127,7 @@ void FLightmassExporter::WriteLights( int32 Channel )
 		Lightmass::FPointLightData PointData;
 		PointData.Radius = Light->AttenuationRadius;
 		PointData.FalloffExponent = 0.0f;
-		PointData.LightTangent = Light->GetComponentTransform().GetUnitAxis(EAxis::Z);
+		PointData.LightTangent = FVector3f(Light->GetComponentTransform().GetUnitAxis(EAxis::Z));
 
 		Lightmass::FRectLightData RectData = { 0, 0, FLinearColor::White };
 		// TODO export texture data. Below code is written for that in mind but source data doesn't contain mips.
@@ -1202,56 +1151,24 @@ void FLightmassExporter::WriteLights( int32 Channel )
 				RectData.SourceTextureSizeX = SizeX;
 				RectData.SourceTextureSizeY = SizeY;
 
-				while( SizeX > 1 || SizeY > 1 )
+				ERawImageFormat::Type RawFormat = FImageCoreUtils::ConvertToRawImageFormat(Format);
+
+				if ( SizeX > 1 || SizeY > 1 )
 				{
-					//int32 i = SourceTexture.AddUninitialized( SizeX * SizeY );
-					
 					TArray64< uint8 > MipData;
-					Source.GetMipData( MipData, MipLevel );
+					verify( Source.GetMipData( MipData, MipLevel ) );
 
 					uint8* Pixel = MipData.GetData();
 					uint8* PixelEnd = Pixel + MipData.Num();
 					while( Pixel < PixelEnd )
 					{
-						if( Format == TSF_RGBA16 || Format == TSF_RGBA16F )
-						{
-							//SourceTexture[ i++ ] = *(FFloat16Color*)Pixel;
-							RectData.SourceTextureAvgColor += FLinearColor( *(FFloat16Color*)Pixel );
-						}
-						else
-						{
-							FColor Color = FColor( Pixel[0], Pixel[0], Pixel[0] );
-							if( Format == TSF_BGRA8 || Format == TSF_BGRE8 )
-							{
-								Color = *(FColor*)Pixel;
-							}
-
-							FLinearColor LinearColor;
-							if( SRGB )
-							{
-								LinearColor = FLinearColor( Color );
-							}
-							else
-							{
-								LinearColor.R = float( Color.R ) / 255.0f;
-								LinearColor.G = float( Color.G ) / 255.0f;
-								LinearColor.B = float( Color.B ) / 255.0f;
-							}
-							
-							//SourceTexture[ i++ ] = FFloat16Color( LinearColor );
-							RectData.SourceTextureAvgColor += LinearColor;
-						}
+						FLinearColor Color = ERawImageFormat::GetOnePixelLinear(Pixel,RawFormat,SRGB);
+						RectData.SourceTextureAvgColor += Color;
 
 						Pixel += BytesPerPixel;
 					}
 
-					// Source doesn't often have mips just average color for now.
 					RectData.SourceTextureAvgColor *= 1.0f / ( SizeX * SizeY );
-					break;
-					
-					SizeX = SizeX > 1 ? SizeX >> 1 : 1;
-					SizeY = SizeY > 1 ? SizeY >> 1 : 1;
-					MipLevel++;
 				}
 			}
 		}
@@ -1317,7 +1234,7 @@ void FLightmassExporter::WriteStaticMeshes()
 		BaseMeshData.Guid = StaticMesh->GetLightingGuid();
 
 		// create a channel name to write the mesh out to
-		FString NewChannelName = Lightmass::CreateChannelName(BaseMeshData.Guid, Lightmass::LM_STATICMESH_VERSION, Lightmass::LM_STATICMESH_EXTENSION);
+		FString NewChannelName = Lightmass::CreateChannelNameWithLMExecutableHash(BaseMeshData.Guid, Lightmass::LM_STATICMESH_VERSION, LightmassExecutableHash, Lightmass::LM_STATICMESH_EXTENSION);
 
 		// Warn the user if there is an invalid lightmap UV channel specified.
 		if( StaticMesh->GetLightMapCoordinateIndex() > 0
@@ -1390,20 +1307,20 @@ void FLightmassExporter::WriteStaticMeshes()
 						for (int32 VertexIndex = 0; VertexIndex < VertexCount; VertexIndex++)
 						{
 							Lightmass::FStaticMeshVertex& Vertex = LMVertices[VertexIndex];
-							Vertex.Position = FVector4(RenderData.VertexBuffers.PositionVertexBuffer.VertexPosition(VertexIndex), 1.0f);
-							Vertex.TangentX = FVector(RenderData.VertexBuffers.StaticMeshVertexBuffer.VertexTangentX(VertexIndex));
-							Vertex.TangentY = RenderData.VertexBuffers.StaticMeshVertexBuffer.VertexTangentY(VertexIndex);
-							Vertex.TangentZ = RenderData.VertexBuffers.StaticMeshVertexBuffer.VertexTangentZ(VertexIndex);
+							Vertex.Position = FVector4f(RenderData.VertexBuffers.PositionVertexBuffer.VertexPosition(VertexIndex), 1.0f);
+							Vertex.TangentX = FVector4f(RenderData.VertexBuffers.StaticMeshVertexBuffer.VertexTangentX(VertexIndex));
+							Vertex.TangentY = FVector4f(RenderData.VertexBuffers.StaticMeshVertexBuffer.VertexTangentY(VertexIndex));
+							Vertex.TangentZ = FVector4f(RenderData.VertexBuffers.StaticMeshVertexBuffer.VertexTangentZ(VertexIndex));
 							int32 UVCount = FMath::Clamp<int32>(RenderData.VertexBuffers.StaticMeshVertexBuffer.GetNumTexCoords(), 0, MAX_TEXCOORDS);
 							int32 UVIndex;
 							for (UVIndex = 0; UVIndex < UVCount; UVIndex++)
 							{
 								Vertex.UVs[UVIndex] = RenderData.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(VertexIndex, UVIndex);
 							}
-							FVector2D ZeroUV(0.0f, 0.0f);
+
 							for (; UVIndex < MAX_TEXCOORDS; UVIndex++)
 							{
-								Vertex.UVs[UVIndex] = ZeroUV;
+								Vertex.UVs[UVIndex] = FVector2f::ZeroVector;
 							}
 						}
 						Swarm.WriteChannel( Channel, (void*)(LMVertices.GetData()), LMVertices.Num() * sizeof(Lightmass::FStaticMeshVertex));
@@ -1439,6 +1356,13 @@ void FLightmassExporter::GetMaterialHash(const UMaterialInterface* Material, FSH
 			LastGuid = MaterialGuid;
 		}
 	}
+
+	if (Lightmass_IsSubstrateEnabled())
+	{
+		uint32 LightmassSubstrateVersion = 0XB6A0D99F; // This can be change when the code/logic for converting material to Substrate for lightmap has changed.
+		HashState.Update((const uint8*)&LightmassSubstrateVersion, sizeof(LightmassSubstrateVersion));
+	}
+
 	HashState.Final();
 	HashState.GetHash(&OutHash.Hash[0]);
 }
@@ -1451,7 +1375,7 @@ void FLightmassExporter::BuildMaterialMap(UMaterialInterface* Material)
 		GetMaterialHash(Material, MaterialHash);
 
 		// create a channel name to write the material out to
-		FString NewChannelName = Lightmass::CreateChannelName(MaterialHash, Lightmass::LM_MATERIAL_VERSION, Lightmass::LM_MATERIAL_EXTENSION);
+		FString NewChannelName = Lightmass::CreateChannelNameWithLMExecutableHash(MaterialHash, Lightmass::LM_MATERIAL_VERSION, LightmassExecutableHash, Lightmass::LM_MATERIAL_EXTENSION);
 
 		// only export the material if it's not currently in the cache
 		int32 ErrorCode;
@@ -1506,6 +1430,7 @@ void FLightmassExporter::ExportMaterial(UMaterialInterface* Material, const FLig
 		FMemory::Memzero(&MaterialData,sizeof(MaterialData));
 		UMaterial* BaseMaterial = Material->GetMaterial();
 		MaterialData.bTwoSided = (uint32)Material->IsTwoSided();
+		MaterialData.bIsThinSurface = (uint32)Material->IsThinSurface();
 		MaterialData.EmissiveBoost = Material->GetEmissiveBoost();
 		MaterialData.DiffuseBoost = Material->GetDiffuseBoost();
 
@@ -1628,7 +1553,7 @@ void FLightmassExporter::WriteBaseMeshInstanceData( int32 Channel, int32 MeshInd
 	MeshInstanceData.bCastShadowAsTwoSided = Mesh->Component->bCastShadowAsTwoSided;
 	MeshInstanceData.bMovable = (Mesh->Component->Mobility != EComponentMobility::Static);
 	MeshInstanceData.NumRelevantLights = Mesh->RelevantLights.Num();
-	MeshInstanceData.BoundingBox = Mesh->BoundingBox;
+	MeshInstanceData.BoundingBox = FBox3f(Mesh->BoundingBox);
 	Swarm.WriteChannel( Channel, &MeshInstanceData, sizeof(MeshInstanceData) );
 	const uint32 LightGuidsSize = Mesh->RelevantLights.Num() * sizeof(FGuid);
 	if( LightGuidsSize > 0 )
@@ -1827,7 +1752,7 @@ void FLightmassExporter::WriteMeshInstances( int32 Channel )
 		SMInstanceMeshData.EncodedHLODRange = SMLightingMesh->HLODChildStartIndex & 0xFFFF;
 		SMInstanceMeshData.EncodedHLODRange |= (SMLightingMesh->HLODChildEndIndex & 0xFFFF) << 16;
 
-		SMInstanceMeshData.LocalToWorld = SMLightingMesh->LocalToWorld;
+		SMInstanceMeshData.LocalToWorld = FMatrix44f(SMLightingMesh->LocalToWorld);	// LWC_TODO: Precision loss relevant here?
 		SMInstanceMeshData.bReverseWinding = SMLightingMesh->bReverseWinding;
 		SMInstanceMeshData.bShouldSelfShadow = true;
 		SMInstanceMeshData.StaticMeshGuid = SMLightingMesh->StaticMesh->GetLightingGuid();
@@ -1838,7 +1763,7 @@ void FLightmassExporter::WriteMeshInstances( int32 Channel )
 			const USplineMeshComponent* SplineComponent = CastChecked<USplineMeshComponent>(SMLightingMesh->Component);
 			SMInstanceMeshData.bIsSplineMesh = true;
 			Copy(*SplineParams, SMInstanceMeshData.SplineParameters);
-			SMInstanceMeshData.SplineParameters.SplineUpDir = SplineComponent->SplineUpDir;
+			SMInstanceMeshData.SplineParameters.SplineUpDir = FVector3f(SplineComponent->SplineUpDir);
 			SMInstanceMeshData.SplineParameters.bSmoothInterpRollScale = SplineComponent->bSmoothInterpRollScale;
 
 			if (FMath::IsNearlyEqual(SplineComponent->SplineBoundaryMin, SplineComponent->SplineBoundaryMax))
@@ -1906,7 +1831,7 @@ void FLightmassExporter::WriteLandscapeInstances( int32 Channel )
 		Lightmass::FLandscapeStaticLightingMeshData LandscapeInstanceMeshData;
 		FMemory::Memzero(&LandscapeInstanceMeshData,sizeof(LandscapeInstanceMeshData));
 
-		LandscapeInstanceMeshData.LocalToWorld = LandscapeLightingMesh->LocalToWorld.ToMatrixWithScale();
+		LandscapeInstanceMeshData.LocalToWorld = FMatrix44f(LandscapeLightingMesh->LocalToWorld.ToMatrixWithScale());	// LWC_TODO: Precision loss relevant here?
 		LandscapeInstanceMeshData.ComponentSizeQuads = LandscapeLightingMesh->ComponentSizeQuads;
 		LandscapeInstanceMeshData.LightMapRatio = LandscapeLightingMesh->LightMapRatio;
 		LandscapeInstanceMeshData.ExpandQuadsX = LandscapeLightingMesh->ExpandQuadsX;
@@ -2012,8 +1937,8 @@ void FLightmassExporter::WriteMappings( int32 Channel )
 		BSPSurfaceMappingData.TangentX = BSPMapping->NodeGroup->TangentX;
 		BSPSurfaceMappingData.TangentY = BSPMapping->NodeGroup->TangentY;
 		BSPSurfaceMappingData.TangentZ = BSPMapping->NodeGroup->TangentZ;
-		BSPSurfaceMappingData.MapToWorld = BSPMapping->NodeGroup->MapToWorld;
-		BSPSurfaceMappingData.WorldToMap = BSPMapping->NodeGroup->WorldToMap;
+		BSPSurfaceMappingData.MapToWorld = FMatrix44f(BSPMapping->NodeGroup->MapToWorld);	// LWC_TODO: Precision loss?
+		BSPSurfaceMappingData.WorldToMap = FMatrix44f(BSPMapping->NodeGroup->WorldToMap);	// LWC_TODO: Precision loss?
 		
 		Swarm.WriteChannel( Channel, &BSPSurfaceMappingData, sizeof(BSPSurfaceMappingData) );
 	
@@ -2026,13 +1951,14 @@ void FLightmassExporter::WriteMappings( int32 Channel )
 				const FStaticLightingVertex& SrcVertex = BSPMapping->NodeGroup->Vertices[VertIdx];
 				Lightmass::FStaticLightingVertexData& DstVertex = VertexData[VertIdx];
 
-				DstVertex.WorldPosition = SrcVertex.WorldPosition;
-				DstVertex.WorldTangentX = SrcVertex.WorldTangentX;
-				DstVertex.WorldTangentY = SrcVertex.WorldTangentY;
-				DstVertex.WorldTangentZ = SrcVertex.WorldTangentZ;			
+				// LWC_TODO: precision loss
+				DstVertex.WorldPosition = (FVector3f)SrcVertex.WorldPosition;
+				DstVertex.WorldTangentX = (FVector3f)SrcVertex.WorldTangentX;
+				DstVertex.WorldTangentY = (FVector3f)SrcVertex.WorldTangentY;
+				DstVertex.WorldTangentZ = (FVector3f)SrcVertex.WorldTangentZ;
 				for( int32 CoordIdx=0; CoordIdx < Lightmass::MAX_TEXCOORDS; CoordIdx++ )
 				{	
-					DstVertex.TextureCoordinates[CoordIdx] = SrcVertex.TextureCoordinates[CoordIdx];
+					DstVertex.TextureCoordinates[CoordIdx] = FVector2f(SrcVertex.TextureCoordinates[CoordIdx]);	// LWC_TODO: Precision loss
 				}
 			}
 			Swarm.WriteChannel( Channel, VertexData, VertexDataSize );
@@ -2124,7 +2050,7 @@ void FLightmassExporter::SetVolumetricLightmapSettings(Lightmass::FVolumetricLig
 	// We prevent refinement outside of importance volumes in FStaticLightingSystem::ShouldRefineVoxel
 	const float MaxExtent = FMath::Max(ImportanceExtent.X, FMath::Max(ImportanceExtent.Y, ImportanceExtent.Z));
 
-	OutSettings.VolumeMin = CombinedImportanceVolume.Min;
+	OutSettings.VolumeMin = FVector3f(CombinedImportanceVolume.Min);	//LWC_TODO: Precision loss
 	const FVector RequiredVolumeSize = FVector(MaxExtent * 2);
 
 	VERIFYLIGHTMASSINI(GConfig->GetInt(TEXT("DevOptions.VolumetricLightmaps"), TEXT("BrickSize"), OutSettings.BrickSize, GLightmassIni));
@@ -2178,7 +2104,7 @@ void FLightmassExporter::SetVolumetricLightmapSettings(Lightmass::FVolumetricLig
 
 	OutSettings.TopLevelGridSize = FIntVector::DivideAndRoundUp(FullGridSize, DetailCellsPerTopLevelBrick);
 
-	OutSettings.VolumeSize = FVector(OutSettings.TopLevelGridSize) * DetailCellsPerTopLevelBrick * TargetDetailCellSize;
+	OutSettings.VolumeSize = FVector3f(OutSettings.TopLevelGridSize) * DetailCellsPerTopLevelBrick * TargetDetailCellSize;
 }
 
 /** Fills out the Scene's settings, read from the engine ini. */
@@ -2584,7 +2510,7 @@ void FLightmassExporter::WriteDebugInput( Lightmass::FDebugLightingInputData& In
 	
 	InputData.MappingGuid = DebugMappingGuid;
 	InputData.NodeIndex = GCurrentSelectedLightmapSample.NodeIndex;
-	InputData.Position = FVector4(GCurrentSelectedLightmapSample.Position, 0);
+	InputData.Position = FVector4f(FVector3f(GCurrentSelectedLightmapSample.Position), 0);
 	InputData.LocalX = GCurrentSelectedLightmapSample.LocalX;
 	InputData.LocalY = GCurrentSelectedLightmapSample.LocalY;
 	InputData.MappingSizeX = GCurrentSelectedLightmapSample.MappingSizeX;
@@ -2597,7 +2523,7 @@ void FLightmassExporter::WriteDebugInput( Lightmass::FDebugLightingInputData& In
 			ViewPosition = LevelVC->GetViewLocation();
 		}
 	}
-	InputData.CameraPosition = ViewPosition;
+	InputData.CameraPosition = (FVector4f)ViewPosition;
 	int32 DebugVisibilityId = INDEX_NONE;
 	bool bVisualizePrecomputedVisibility = false;
 	VERIFYLIGHTMASSINI(GConfig->GetBool(TEXT("DevOptions.PrecomputedVisibility"), TEXT("bVisualizePrecomputedVisibility"), bVisualizePrecomputedVisibility, GLightmassIni));
@@ -2998,8 +2924,12 @@ bool FLightmassProcessor::BeginRun()
 		TEXT("Binaries/Win32/UnrealLightmass-ApplicationCore.dll"),
 		TEXT("Binaries/Win32/UnrealLightmass-Core.dll"),
 		TEXT("Binaries/Win32/UnrealLightmass-CoreUObject.dll"),
+		TEXT("Binaries/Win32/UnrealLightmass-DerivedDataCache.dll"),
+		TEXT("Binaries/Win32/UnrealLightmass-Sockets.dll"),
+		TEXT("Binaries/Win32/UnrealLightmass-Zen.dll"),
 		TEXT("Binaries/Win32/UnrealLightmass-Projects.dll"),
 		TEXT("Binaries/Win32/UnrealLightmass-Json.dll"),
+		TEXT("Binaries/Win32/UnrealLightmass-SSL.dll")
 		TEXT("Binaries/Win32/UnrealLightmass-BuildSettings.dll")
 	};
 
@@ -3014,8 +2944,12 @@ bool FLightmassProcessor::BeginRun()
 		TEXT("Binaries/Win64/UnrealLightmass-ApplicationCore.dll"),
 		TEXT("Binaries/Win64/UnrealLightmass-Core.dll"),
 		TEXT("Binaries/Win64/UnrealLightmass-CoreUObject.dll"),
+		TEXT("Binaries/Win64/UnrealLightmass-DerivedDataCache.dll"),
+		TEXT("Binaries/Win64/UnrealLightmass-Sockets.dll"),
+		TEXT("Binaries/Win64/UnrealLightmass-Zen.dll"),
 		TEXT("Binaries/Win64/UnrealLightmass-Projects.dll"),
 		TEXT("Binaries/Win64/UnrealLightmass-Json.dll"),
+		TEXT("Binaries/Win64/UnrealLightmass-SSL.dll"),
 		TEXT("Binaries/Win64/UnrealLightmass-BuildSettings.dll"),
 		TEXT("Binaries/Win64/embree.dll"),
 		TEXT("Binaries/Win64/tbb.dll"),
@@ -3029,8 +2963,12 @@ bool FLightmassProcessor::BeginRun()
 		TEXT("Binaries/Mac/UnrealLightmass-ApplicationCore.dylib"),
 		TEXT("Binaries/Mac/UnrealLightmass-Core.dylib"),
 		TEXT("Binaries/Mac/UnrealLightmass-CoreUObject.dylib"),
+		TEXT("Binaries/Mac/UnrealLightmass-DerivedDataCache.dylib"),
+		TEXT("Binaries/Mac/UnrealLightmass-Sockets.dylib"),
+		TEXT("Binaries/Mac/UnrealLightmass-Zen.dylib"),
 		TEXT("Binaries/Mac/UnrealLightmass-Json.dylib"),
 		TEXT("Binaries/Mac/UnrealLightmass-Projects.dylib"),
+		TEXT("Binaries/Mac/UnrealLightmass-SSL.dylib"),
 		TEXT("Binaries/Mac/UnrealLightmass-SwarmInterface.dylib"),
 		TEXT("Binaries/Mac/UnrealLightmass-BuildSettings.dylib"),
 		TEXT("Binaries/Mac/libembree.2.dylib"),
@@ -3045,8 +2983,12 @@ bool FLightmassProcessor::BeginRun()
 		TEXT("Binaries/Linux/libUnrealLightmass-ApplicationCore.so"),
 		TEXT("Binaries/Linux/libUnrealLightmass-Core.so"),
 		TEXT("Binaries/Linux/libUnrealLightmass-CoreUObject.so"),
+		TEXT("Binaries/Linux/libUnrealLightmass-DerivedDataCache.so"),
+		TEXT("Binaries/Linux/libUnrealLightmass-Sockets.so"),
+		TEXT("Binaries/Linux/libUnrealLightmass-Zen.so"),
 		TEXT("Binaries/Linux/libUnrealLightmass-Json.so"),
 		TEXT("Binaries/Linux/libUnrealLightmass-Projects.so"),
+		TEXT("Binaries/Linux/libUnrealLightmass-SSL.so"),
 		TEXT("Binaries/Linux/libUnrealLightmass-SwarmInterface.so"),
 		TEXT("Binaries/Linux/libUnrealLightmass-Networking.so"),
 		TEXT("Binaries/Linux/libUnrealLightmass-Messaging.so"),
@@ -3535,9 +3477,9 @@ void FLightmassProcessor::ImportVolumeSamples()
 		const int32 Channel = Swarm.OpenChannel( *ChannelName, LM_VOLUMESAMPLES_CHANNEL_FLAGS );
 		if (Channel >= 0)
 		{
-			FVector4 UnusedVolumeCenter;
+			FVector4f UnusedVolumeCenter;
 			Swarm.ReadChannel(Channel, &UnusedVolumeCenter, sizeof(UnusedVolumeCenter));
-			FVector4 UnusedVolumeExtent;
+			FVector4f UnusedVolumeExtent;
 			Swarm.ReadChannel(Channel, &UnusedVolumeExtent, sizeof(UnusedVolumeExtent));
 
 			int32 NumStreamLevels = System.GetWorld()->GetStreamingLevels().Num();
@@ -3558,25 +3500,25 @@ void FLightmassProcessor::ImportVolumeSamples()
 					UMapBuildDataRegistry* CurrentRegistry = CurrentStorageLevel->GetOrCreateMapBuildData();
 					FPrecomputedLightVolumeData& CurrentLevelData = CurrentRegistry->AllocateLevelPrecomputedLightVolumeBuildData(CurrentLevel->LevelBuildDataId);
 
-					FBox LevelVolumeBounds(ForceInit);
+					FBox3f LevelVolumeBounds(ForceInit);
 
 					for (int32 SampleIndex = 0; SampleIndex < VolumeSamples.Num(); SampleIndex++)
 					{
 						const Lightmass::FVolumeLightingSampleData& CurrentSample = VolumeSamples[SampleIndex];
-						FVector SampleMin = CurrentSample.PositionAndRadius - FVector(CurrentSample.PositionAndRadius.W);
-						FVector SampleMax = CurrentSample.PositionAndRadius + FVector(CurrentSample.PositionAndRadius.W);
-						LevelVolumeBounds += FBox(SampleMin, SampleMax);
+						FVector4f SampleMin = CurrentSample.PositionAndRadius - FVector3f(CurrentSample.PositionAndRadius.W);
+						FVector4f SampleMax = CurrentSample.PositionAndRadius + FVector3f(CurrentSample.PositionAndRadius.W);
+						LevelVolumeBounds += FBox3f(SampleMin, SampleMax);
 					}
 
-					CurrentLevelData.Initialize(LevelVolumeBounds);
+					CurrentLevelData.Initialize(FBox(LevelVolumeBounds));
 
 					for (int32 SampleIndex = 0; SampleIndex < VolumeSamples.Num(); SampleIndex++)
 					{
 						const Lightmass::FVolumeLightingSampleData& CurrentSample = VolumeSamples[SampleIndex];
 						FVolumeLightingSample NewHighQualitySample;
-						NewHighQualitySample.Position = CurrentSample.PositionAndRadius;
+						NewHighQualitySample.Position = FVector4f(CurrentSample.PositionAndRadius);
 						NewHighQualitySample.Radius = CurrentSample.PositionAndRadius.W;
-						NewHighQualitySample.SetPackedSkyBentNormal(CurrentSample.SkyBentNormal); 
+						NewHighQualitySample.SetPackedSkyBentNormal(FVector3d(CurrentSample.SkyBentNormal)); 
 						NewHighQualitySample.DirectionalLightShadowing = CurrentSample.DirectionalLightShadowing;
 
 						for (int32 CoefficientIndex = 0; CoefficientIndex < NUM_INDIRECT_LIGHTING_SH_COEFFICIENTS; CoefficientIndex++)
@@ -3587,10 +3529,10 @@ void FLightmassProcessor::ImportVolumeSamples()
 						}							
 
 						FVolumeLightingSample NewLowQualitySample;
-						NewLowQualitySample.Position = CurrentSample.PositionAndRadius;
+						NewLowQualitySample.Position = FVector4f(CurrentSample.PositionAndRadius);
 						NewLowQualitySample.Radius = CurrentSample.PositionAndRadius.W;
 						NewLowQualitySample.DirectionalLightShadowing = CurrentSample.DirectionalLightShadowing;
-						NewLowQualitySample.SetPackedSkyBentNormal(CurrentSample.SkyBentNormal); 
+						NewLowQualitySample.SetPackedSkyBentNormal(FVector3d(CurrentSample.SkyBentNormal)); 
 
 						for (int32 CoefficientIndex = 0; CoefficientIndex < NUM_INDIRECT_LIGHTING_SH_COEFFICIENTS; CoefficientIndex++)
 						{
@@ -3660,13 +3602,13 @@ void FLightmassProcessor::ImportPrecomputedVisibility()
 
 			for (int32 CellIndex = 0; CellIndex < NumCells; CellIndex++)
 			{
-				FBox Bounds;
+				FBox3f Bounds;
 				Swarm.ReadChannel(Channel, &Bounds, sizeof(Bounds));
 
 				// Use the same index for this task guid as it has in VisibilityBucketGuids, so that visibility cells are processed in a deterministic order
 				CompletedPrecomputedVisibilityCells[ArrayIndex].AddZeroed();
 				FUncompressedPrecomputedVisibilityCell& CurrentCell = CompletedPrecomputedVisibilityCells[ArrayIndex].Last();
-				CurrentCell.Bounds = Bounds;
+				CurrentCell.Bounds = FBox(Bounds);
 				ReadArray(Channel, CurrentCell.VisibilityData);
 			}
 
@@ -3997,9 +3939,9 @@ void FLightmassProcessor::ImportMeshAreaLightData()
 				{
 					// Find the level that the mesh area light was in
 					FVector4 Position;
-					Position = LMCurrentLightData.Position;
+					Position = (FVector4)LMCurrentLightData.Position;
 					FVector4 Direction;
-					Direction = LMCurrentLightData.Direction;
+					Direction = (FVector4)LMCurrentLightData.Direction;
 					// Spawn a AGeneratedMeshAreaLight to handle the light's influence on dynamic objects
 					FActorSpawnParameters SpawnInfo;
 					SpawnInfo.Owner = CurrentLevel->GetWorldSettings();
@@ -4248,7 +4190,7 @@ void FLightmassProcessor::ImportStaticShadowDepthMap(ULightComponent* Light)
 		BeginReleaseResource(&Light->StaticShadowDepthMap);
 		CurrentLightData.DepthMap.Empty();
 
-		CurrentLightData.DepthMap.WorldToLight = ShadowMapData.WorldToLight;
+		CurrentLightData.DepthMap.WorldToLight = FMatrix(ShadowMapData.WorldToLight);
 		CurrentLightData.DepthMap.ShadowMapSizeX = ShadowMapData.ShadowMapSizeX;
 		CurrentLightData.DepthMap.ShadowMapSizeY = ShadowMapData.ShadowMapSizeY;
 

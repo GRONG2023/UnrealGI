@@ -12,13 +12,13 @@
  * All child generators must produce exactly the same item type!
  */
 
-UCLASS(meta = (DisplayName = "Composite"))
-class AIMODULE_API UEnvQueryGenerator_Composite : public UEnvQueryGenerator
+UCLASS(meta = (DisplayName = "Composite"), MinimalAPI)
+class UEnvQueryGenerator_Composite : public UEnvQueryGenerator
 {
 	GENERATED_UCLASS_BODY()
 
 	UPROPERTY(EditDefaultsOnly, Instanced, Category = Generator)
-	TArray<UEnvQueryGenerator*> Generators;
+	TArray<TObjectPtr<UEnvQueryGenerator>> Generators;
 
 	/** allow generators with different item types, use at own risk!
 	 *
@@ -37,10 +37,10 @@ class AIMODULE_API UEnvQueryGenerator_Composite : public UEnvQueryGenerator
 	UPROPERTY(EditDefaultsOnly, Category = Generator, AdvancedDisplay)
 	TSubclassOf<UEnvQueryItemType> ForcedItemType;
 
-	void VerifyItemTypes();
+	AIMODULE_API void VerifyItemTypes();
 
 protected:
-	virtual void GenerateItems(FEnvQueryInstance& QueryInstance) const override;
-	virtual FText GetDescriptionTitle() const override;
-	virtual bool IsValidGenerator() const override;
+	AIMODULE_API virtual void GenerateItems(FEnvQueryInstance& QueryInstance) const override;
+	AIMODULE_API virtual FText GetDescriptionTitle() const override;
+	AIMODULE_API virtual bool IsValidGenerator() const override;
 };

@@ -17,7 +17,7 @@ class UDialogueWave;
 UENUM()
 namespace EGrammaticalGender
 {
-	enum Type
+	enum Type : int
 	{
 		Neuter		UMETA( DisplayName = "Neuter" ),
 		Masculine	UMETA( DisplayName = "Masculine" ),
@@ -29,7 +29,7 @@ namespace EGrammaticalGender
 UENUM()
 namespace EGrammaticalNumber
 {
-	enum Type
+	enum Type : int
 	{
 		Singular	UMETA( DisplayName = "Singular" ),
 		Plural		UMETA( DisplayName = "Plural" ),
@@ -40,37 +40,37 @@ class UDialogueVoice;
 class UDialogueWave;
 
 USTRUCT(BlueprintType)
-struct ENGINE_API FDialogueContext
+struct FDialogueContext
 {
 	GENERATED_USTRUCT_BODY()
 
-	FDialogueContext();
+	ENGINE_API FDialogueContext();
 
 	/** The person speaking the dialogue. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=DialogueContext )
-	UDialogueVoice* Speaker;
+	TObjectPtr<UDialogueVoice> Speaker;
 
 	/** The people being spoken to. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=DialogueContext )
-	TArray<UDialogueVoice*> Targets;
+	TArray<TObjectPtr<UDialogueVoice>> Targets;
 
 	/** Gets a generated hash created from the source and targets. */
-	FString GetContextHash() const;
+	ENGINE_API FString GetContextHash() const;
+
+	friend ENGINE_API bool operator==(const FDialogueContext& LHS, const FDialogueContext& RHS);
+	friend ENGINE_API bool operator!=(const FDialogueContext& LHS, const FDialogueContext& RHS);
 };
 
-ENGINE_API bool operator==(const FDialogueContext& LHS, const FDialogueContext& RHS);
-ENGINE_API bool operator!=(const FDialogueContext& LHS, const FDialogueContext& RHS);
-
 USTRUCT()
-struct ENGINE_API FDialogueWaveParameter
+struct FDialogueWaveParameter
 {
 	GENERATED_USTRUCT_BODY()
 
-	FDialogueWaveParameter();
+	ENGINE_API FDialogueWaveParameter();
 
 	/** The dialogue wave to play. */
 	UPROPERTY(EditAnywhere, Category=DialogueWaveParameter )
-	UDialogueWave* DialogueWave;
+	TObjectPtr<UDialogueWave> DialogueWave;
 
 	/** The context to use for the dialogue wave. */
 	UPROPERTY(EditAnywhere, Category=DialogueWaveParameter )

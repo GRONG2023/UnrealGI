@@ -20,9 +20,11 @@ public:
 	FTable();
 	virtual ~FTable();
 
-	const FName& GetName() const { return Name; }
-	FText GetDisplayName() const { return FText::FromName(Name); }
+	const FText& GetDisplayName() const { return DisplayName; }
+	void SetDisplayName(const FText& InDisplayName) { DisplayName = InDisplayName; }
+
 	const FText& GetDescription() const { return Description; }
+	void SetDescription(const FText& InDescription) { Description = InDescription; }
 
 	virtual void Reset();
 
@@ -30,7 +32,7 @@ public:
 	bool IsValid() const { return Columns.Num() > 0; }
 
 	const TArray<TSharedRef<FTableColumn>>& GetColumns() const { return Columns; }
-	void SetColumns(const TArray<TSharedRef<Insights::FTableColumn>>& InColumns);
+	void SetColumns(const TArray<TSharedRef<FTableColumn>>& InColumns);
 
 	void GetVisibleColumns(TArray<TSharedRef<FTableColumn>>& InArray) const;
 
@@ -51,7 +53,9 @@ public:
 
 	int32 GetColumnPositionIndex(const FName& ColumnId) const;
 
-	void GetVisibleColumnsData(const TArray<TSharedPtr<class FBaseTreeNode>>& InNodes, FString& OutData) const;
+	void GetVisibleColumnsData(const TArray<TSharedPtr<class FBaseTreeNode>>& InNodes, const FName& LogListingName, TCHAR Separator, bool bIncludeHeaders, FString& OutData) const;
+
+	static const FName GetHierarchyColumnId();
 
 protected:
 	void ResetColumns() { Columns.Reset(); }
@@ -59,7 +63,7 @@ protected:
 	void AddHierarchyColumn(int32 ColumnIndex, const TCHAR* ColumnName);
 
 private:
-	FName Name;
+	FText DisplayName;
 	FText Description;
 
 	/** All available columns. */

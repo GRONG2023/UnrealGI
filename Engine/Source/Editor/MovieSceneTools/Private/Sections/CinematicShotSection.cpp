@@ -11,14 +11,13 @@
 #include "MovieScene.h"
 #include "TrackEditors/CinematicShotTrackEditor.h"
 #include "SequencerSectionPainter.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "MovieSceneToolHelpers.h"
 #include "MovieSceneTimeHelpers.h"
 #include "Compilation/MovieSceneCompiledDataManager.h"
 #include "Tracks/MovieSceneCameraCutTrack.h"
 #include "Sections/MovieSceneCameraCutSection.h"
 #include "Evaluation/MovieSceneEvaluationTemplateInstance.h"
-#include "CommonMovieSceneTools.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "Editor.h"
 
@@ -37,7 +36,7 @@ FCinematicShotSection::FCinematicSectionCache::FCinematicSectionCache(UMovieScen
 	if (Section)
 	{
 		UMovieSceneSequence* InnerSequence = Section->GetSequence();
-		if (InnerSequence)
+		if (InnerSequence&& InnerSequence->GetMovieScene())
 		{
 			InnerFrameRate = InnerSequence->GetMovieScene()->GetTickResolution();
 		}
@@ -67,50 +66,15 @@ FText FCinematicShotSection::GetSectionTitle() const
 	return GetRenameVisibility() == EVisibility::Visible ? FText::GetEmpty() : HandleThumbnailTextBlockText();
 }
 
-FText FCinematicShotSection::GetSectionToolTip() const
+float FCinematicShotSection::GetSectionHeight(const UE::Sequencer::FViewDensityInfo& ViewDensity) const
 {
-	const UMovieSceneCinematicShotSection& SectionObject = GetSectionObjectAs<UMovieSceneCinematicShotSection>();
-	const UMovieScene* MovieScene = SectionObject.GetTypedOuter<UMovieScene>();
-	const UMovieSceneSequence* InnerSequence = SectionObject.GetSequence();
-	const UMovieScene* InnerMovieScene = InnerSequence ? InnerSequence->GetMovieScene() : nullptr;
-
-	if (!MovieScene || !InnerMovieScene || !SectionObject.HasStartFrame() || !SectionObject.HasEndFrame())
-	{
-		return FText::GetEmpty();
-	}
-
-	FFrameRate InnerTickResolution = InnerMovieScene->GetTickResolution();
-
-	// Calculate the length of this section and convert it to the timescale of the sequence's internal sequence
-	FFrameTime SectionLength = ConvertFrameTime(SectionObject.GetExclusiveEndFrame() - SectionObject.GetInclusiveStartFrame(), MovieScene->GetTickResolution(), InnerTickResolution);
-
-	// Calculate the inner start time of the sequence in both full tick resolution and frame number
-	FFrameTime StartOffset = SectionObject.GetOffsetTime().Get(0);
-	FFrameTime InnerStartTime = InnerMovieScene->GetPlaybackRange().GetLowerBoundValue() + StartOffset;
-	int32 InnerStartFrame = ConvertFrameTime(InnerStartTime, InnerTickResolution, InnerMovieScene->GetDisplayRate()).RoundToFrame().Value;
-
-	// Calculate the length, which is limited by both the outer section length and internal sequence length, in terms of internal frames
-	int32 InnerFrameLength = ConvertFrameTime(FMath::Min(SectionLength, InnerMovieScene->GetPlaybackRange().GetUpperBoundValue() - InnerStartTime), InnerTickResolution, InnerMovieScene->GetDisplayRate()).RoundToFrame().Value;
-	
-	// Calculate the inner frame number of the end frame
-	int32 InnerEndFrame = InnerStartFrame + InnerFrameLength;
-
-	return FText::Format(LOCTEXT("ToolTipContentFormat", "{0} - {1} ({2} frames @ {3})"),
-		InnerStartFrame,
-		InnerEndFrame,
-		InnerFrameLength,
-		InnerMovieScene->GetDisplayRate().ToPrettyText()
-		);
-}
-
-float FCinematicShotSection::GetSectionHeight() const
-{
-	return FViewportThumbnailSection::GetSectionHeight() + 2*9.f;
+	return FViewportThumbnailSection::GetSectionHeight(ViewDensity) + 2*13.f;
 }
 
 FMargin FCinematicShotSection::GetContentPadding() const
 {
-	return FMargin(8.f, 15.f);
+	// When the rename widget is visible, use less padding so that the widget is visible over the film border (when thumbnails are not shown)
+	return FMargin(8.f, GetRenameVisibility() == EVisibility::Visible ? 10.f : 15.f);
 }
 
 void FCinematicShotSection::SetSingleTime(double GlobalTime)
@@ -262,7 +226,7 @@ void FCinematicShotSection::Tick(const FGeometry& AllottedGeometry, const FGeome
 
 int32 FCinematicShotSection::OnPaintSection(FSequencerSectionPainter& InPainter) const
 {
-	static const FSlateBrush* FilmBorder = FEditorStyle::GetBrush("Sequencer.Section.FilmBorder");
+	static const FSlateBrush* FilmBorder = FAppStyle::GetBrush("Sequencer.Section.FilmBorder");
 
 	InPainter.LayerId = InPainter.PaintSectionBackground();
 
@@ -311,34 +275,41 @@ void FCinematicShotSection::BuildSectionContextMenu(FMenuBuilder& MenuBuilder, c
 		MenuBuilder.AddSubMenu(
 			LOCTEXT("TakesMenu", "Takes"),
 			LOCTEXT("TakesMenuTooltip", "Shot takes"),
-			FNewMenuDelegate::CreateLambda([=](FMenuBuilder& InMenuBuilder){ AddTakesMenu(InMenuBuilder); }));
+			FNewMenuDelegate::CreateLambda([this, &SectionObject](FMenuBuilder& InMenuBuilder) { CinematicShotTrackEditor.Pin()->AddTakesMenu(&SectionObject, InMenuBuilder); }));
 
 		MenuBuilder.AddMenuEntry(
 			LOCTEXT("NewTake", "New Take"),
 			FText::Format(LOCTEXT("NewTakeTooltip", "Create a new take for {0}"), FText::FromString(SectionObject.GetShotDisplayName())),
 			FSlateIcon(),
-			FUIAction(FExecuteAction::CreateSP(CinematicShotTrackEditor.Pin().ToSharedRef(), &FCinematicShotTrackEditor::NewTake, &SectionObject))
+			FUIAction(FExecuteAction::CreateSP(CinematicShotTrackEditor.Pin().ToSharedRef(), &FCinematicShotTrackEditor::CreateNewTake, Cast<UMovieSceneSubSection>(&SectionObject)))
 		);
 
 		MenuBuilder.AddMenuEntry(
 			LOCTEXT("InsertNewShot", "Insert Shot"),
 			LOCTEXT("InsertNewShotTooltip", "Insert a new shot at the current time"),
 			FSlateIcon(),
-			FUIAction(FExecuteAction::CreateSP(CinematicShotTrackEditor.Pin().ToSharedRef(), &FCinematicShotTrackEditor::InsertShot))
+			FUIAction(FExecuteAction::CreateSP(CinematicShotTrackEditor.Pin().ToSharedRef(), &FCinematicShotTrackEditor::InsertSection, Cast<UMovieSceneTrack>(SectionObject.GetOuter())))
 		);
 
 		MenuBuilder.AddMenuEntry(
 			LOCTEXT("DuplicateShot", "Duplicate Shot"),
 			FText::Format(LOCTEXT("DuplicateShotTooltip", "Duplicate {0} to create a new shot"), FText::FromString(SectionObject.GetShotDisplayName())),
 			FSlateIcon(),
-			FUIAction(FExecuteAction::CreateSP(CinematicShotTrackEditor.Pin().ToSharedRef(), &FCinematicShotTrackEditor::DuplicateShot, &SectionObject))
+			FUIAction(FExecuteAction::CreateSP(CinematicShotTrackEditor.Pin().ToSharedRef(), &FCinematicShotTrackEditor::DuplicateSection, Cast<UMovieSceneSubSection>(&SectionObject)))
+		);
+
+		MenuBuilder.AddMenuEntry(
+			LOCTEXT("EditMetaData", "Edit Meta Data"),
+			LOCTEXT("EditMetaDataTooltip", "Edit meta data"),
+			FSlateIcon(),
+			FUIAction(FExecuteAction::CreateSP(CinematicShotTrackEditor.Pin().ToSharedRef(), &FCinematicShotTrackEditor::EditMetaData, Cast<UMovieSceneSubSection>(&SectionObject)))
 		);
 
 		MenuBuilder.AddMenuEntry(
 			LOCTEXT("RenderShot", "Render Shot"),
 			FText::Format(LOCTEXT("RenderShotTooltip", "Render shot movie"), FText::FromString(SectionObject.GetShotDisplayName())),
 			FSlateIcon(),
-			FUIAction(FExecuteAction::CreateLambda([this, &SectionObject]() 
+			FUIAction(FExecuteAction::CreateLambda([this, &SectionObject]()
 				{
 					TArray<UMovieSceneCinematicShotSection*> ShotSections;
 					TArray<UMovieSceneSection*> Sections;
@@ -368,43 +339,6 @@ void FCinematicShotSection::BuildSectionContextMenu(FMenuBuilder& MenuBuilder, c
 		);
 	}
 	MenuBuilder.EndSection();
-}
-
-void FCinematicShotSection::AddTakesMenu(FMenuBuilder& MenuBuilder)
-{
-	TArray<FAssetData> AssetData;
-	uint32 CurrentTakeNumber = INDEX_NONE;
-	const UMovieSceneCinematicShotSection& SectionObject = GetSectionObjectAs<UMovieSceneCinematicShotSection>();
-	MovieSceneToolHelpers::GatherTakes(&SectionObject, AssetData, CurrentTakeNumber);
-
-	AssetData.Sort([&SectionObject](const FAssetData &A, const FAssetData &B) {
-		uint32 TakeNumberA = INDEX_NONE;
-		uint32 TakeNumberB = INDEX_NONE;
-		if (MovieSceneToolHelpers::GetTakeNumber(&SectionObject, A, TakeNumberA) && MovieSceneToolHelpers::GetTakeNumber(&SectionObject, B, TakeNumberB))
-		{
-			return TakeNumberA < TakeNumberB;
-		}
-		return true;
-	});
-
-	for (auto ThisAssetData : AssetData)
-	{
-		uint32 TakeNumber = INDEX_NONE;
-		if (MovieSceneToolHelpers::GetTakeNumber(&SectionObject, ThisAssetData, TakeNumber))
-		{
-			UObject* TakeObject = ThisAssetData.GetAsset();
-			
-			if (TakeObject)
-			{
-				MenuBuilder.AddMenuEntry(
-					FText::Format(LOCTEXT("TakeNumber", "Take {0}"), FText::AsNumber(TakeNumber)),
-					FText::Format(LOCTEXT("TakeNumberTooltip", "Switch to {0}"), FText::FromString(TakeObject->GetPathName())),
-					TakeNumber == CurrentTakeNumber ? FSlateIcon(FEditorStyle::GetStyleSetName(), "Sequencer.Star") : FSlateIcon(FEditorStyle::GetStyleSetName(), "Sequencer.Empty"),
-					FUIAction(FExecuteAction::CreateSP(CinematicShotTrackEditor.Pin().ToSharedRef(), &FCinematicShotTrackEditor::SwitchTake, TakeObject))
-				);
-			}
-		}
-	}
 }
 
 /* FCinematicShotSection callbacks

@@ -3,14 +3,19 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Diagnostics.CodeAnalysis;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
+using EpicGames.Core;
+using EpicGames.Perforce;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace UnrealGameSync
 {
@@ -18,295 +23,318 @@ namespace UnrealGameSync
 	{
 		class BuildGroup
 		{
-			public string JobName;
-			public string JobUrl;
-			public int Change;
-			public IssueBuildOutcome Outcome;
-			public List<IssueBuildData> Builds;
+			public string JobName { get; }
+			public string JobUrl { get; }
+			public int Change { get; }
+			public IssueBuildOutcome Outcome { get; }
+			public IReadOnlyList<IssueBuildData> Builds { get; }
+
+			public BuildGroup(string jobName, string jobUrl, int change, IssueBuildOutcome outcome, IReadOnlyList<IssueBuildData> builds)
+			{
+				JobName = jobName;
+				JobUrl = jobUrl;
+				Change = change;
+				Outcome = outcome;
+				Builds = builds;
+			}
 		}
 
 		class PerforceChangeRange
 		{
-			public bool bExpanded;
-			public int MinChange;
-			public int MaxChange;
-			public List<PerforceChangeSummary> Changes;
-			public string ErrorMessage;
-			public BuildGroup BuildGroup;
+			public bool Expanded { get; set; }
+			public int MinChange { get; }
+			public int MaxChange { get; }
+			public List<ChangesRecord>? Changes { get; set; }
+			public string? ErrorMessage { get; set; }
+			public BuildGroup BuildGroup { get; }
+
+			public PerforceChangeRange(int minChange, int maxChange, BuildGroup buildGroup)
+			{
+				MinChange = minChange;
+				MaxChange = maxChange;
+				BuildGroup = buildGroup;
+			}
 		}
 
 		class PerforceChangeDetailsWithDescribeRecord : PerforceChangeDetails
 		{
-			public PerforceDescribeRecord DescribeRecord;
+			public DescribeRecord DescribeRecord;
 
-			public PerforceChangeDetailsWithDescribeRecord(PerforceDescribeRecord DescribeRecord)
-				: base(DescribeRecord)
+			public PerforceChangeDetailsWithDescribeRecord(DescribeRecord describeRecord)
+				: base(describeRecord)
 			{
-				this.DescribeRecord = DescribeRecord;
+				DescribeRecord = describeRecord;
 			}
 		}
 
-		class PerforceWorkerThread : IDisposable
+		class PerforceWorkerTask : IDisposable
 		{
-			readonly PerforceConnection Perforce;
-			readonly string Filter;
-			readonly Action<PerforceChangeRange> OnUpdateChanges;
-			readonly Action<PerforceChangeSummary> OnUpdateChangeMetadata;
-			readonly TextWriter Log;
-			readonly object LockObject = new object();
-			Thread WorkerThread;
-			bool bTerminate;
-			AutoResetEvent RefreshEvent;
-			List<PerforceChangeRange> Requests = new List<PerforceChangeRange>();
-			Dictionary<int, PerforceChangeDetailsWithDescribeRecord> ChangeNumberToDetails = new Dictionary<int, PerforceChangeDetailsWithDescribeRecord>();
+			readonly IPerforceSettings _perforceSettings;
+			readonly string _filter;
+			Action<PerforceChangeRange>? _onUpdateChanges;
+			Action<ChangesRecord>? _onUpdateChangeMetadata;
+			readonly ILogger _logger;
+			readonly object _lockObject = new object();
+			readonly SynchronizationContext _synchronizationContext;
+			Task? _workerTask;
+#pragma warning disable CA2213 // warning CA2213: 'PerforceWorkerTask' contains field '_cancellationSource' that is of IDisposable type 'CancellationTokenSource', but it is never disposed. Change the Dispose method on 'PerforceWorkerTask' to call Close or Dispose on this field.
+			readonly CancellationTokenSource _cancellationSource;
+#pragma warning restore CA2213
+			readonly AsyncEvent _refreshEvent;
+			readonly List<PerforceChangeRange> _requests = new List<PerforceChangeRange>();
+			readonly Dictionary<int, PerforceChangeDetailsWithDescribeRecord> _changeNumberToDetails = new Dictionary<int, PerforceChangeDetailsWithDescribeRecord>();
 
-			public PerforceWorkerThread(PerforceConnection Perforce, string Filter, Action<PerforceChangeRange> OnUpdateChanges, Action<PerforceChangeSummary> OnUpdateChangeMetadata, TextWriter Log)
+			public PerforceWorkerTask(IPerforceSettings perforceSettings, string filter, Action<PerforceChangeRange>? onUpdateChanges, Action<ChangesRecord>? onUpdateChangeMetadata, ILogger logger)
 			{
-				this.Perforce = Perforce;
-				this.Filter = Filter;
-				this.OnUpdateChanges = OnUpdateChanges;
-				this.OnUpdateChangeMetadata = OnUpdateChangeMetadata;
-				this.Log = Log;
+				_perforceSettings = perforceSettings;
+				_filter = filter;
+				_onUpdateChanges = onUpdateChanges;
+				_onUpdateChangeMetadata = onUpdateChangeMetadata;
+				_logger = logger;
+				_synchronizationContext = SynchronizationContext.Current!;
 
-				RefreshEvent = new AutoResetEvent(true);
-				WorkerThread = new Thread(() => Run());
-				WorkerThread.Start();
+				_refreshEvent = new AsyncEvent();
+				_cancellationSource = new CancellationTokenSource();
+				_workerTask = Task.Run(() => RunAsync(_cancellationSource.Token));
 			}
 
-			public void AddRequest(PerforceChangeRange Range)
+			public void AddRequest(PerforceChangeRange range)
 			{
-				lock(LockObject)
+				lock (_lockObject)
 				{
-					Requests.Add(Range);
+					_requests.Add(range);
 				}
-				RefreshEvent.Set();
+				_refreshEvent.Set();
 			}
 
 			public void Dispose()
 			{
-				if(WorkerThread != null)
+				if (_workerTask != null)
 				{
-					bTerminate = true;
-					RefreshEvent.Set();
-					if(!WorkerThread.Join(100))
-					{
-						WorkerThread.Abort();
-						WorkerThread.Join();
-					}
-					WorkerThread = null;
-				}
-				if(RefreshEvent != null)
-				{
-					RefreshEvent.Dispose();
-					RefreshEvent = null;
+					_onUpdateChanges = null;
+					_onUpdateChangeMetadata = null;
+
+					_cancellationSource.Cancel();
+
+					_workerTask.ContinueWith(x => _cancellationSource.Dispose(), TaskScheduler.Default);
+					_workerTask = null;
 				}
 			}
 
-			void Run()
+			async Task RunAsync(CancellationToken cancellationToken)
 			{
-				List<PerforceChangeRange> CompletedRequests = new List<PerforceChangeRange>(); 
-				while(!bTerminate)
+				using IPerforceConnection perforce = await PerforceConnection.CreateAsync(_perforceSettings, _logger);
+
+				List<PerforceChangeRange> completedRequests = new List<PerforceChangeRange>();
+				while (!cancellationToken.IsCancellationRequested)
 				{
+					Task refreshTask = _refreshEvent.Task;
+
 					// Check if there's a request in the queue
-					PerforceChangeRange NextRequest = null;
-					lock(LockObject)
+					PerforceChangeRange? nextRequest = null;
+					lock (_lockObject)
 					{
-						if(Requests.Count > 0)
+						if (_requests.Count > 0)
 						{
-							NextRequest = Requests[0];
-							Requests.RemoveAt(0);
+							nextRequest = _requests[0];
+							_requests.RemoveAt(0);
 						}
 					}
 
 					// Process the request
-					if(NextRequest != null)
+					if (nextRequest != null)
 					{
-						string RangeFilter = String.Format("{0}@{1},{2}", Filter, NextRequest.MinChange, (NextRequest.MaxChange == -1)? "now" : NextRequest.MaxChange.ToString());
+						string rangeFilter = String.Format("{0}@{1},{2}", _filter, nextRequest.MinChange, (nextRequest.MaxChange == -1) ? "now" : nextRequest.MaxChange.ToString());
 
-						List<PerforceChangeSummary> NewChanges;
-						if(Perforce.FindChanges(RangeFilter, -1, out NewChanges, Log))
+						PerforceResponseList<ChangesRecord> newChanges = await perforce.TryGetChangesAsync(ChangesOptions.None, -1, ChangeStatus.Submitted, rangeFilter, cancellationToken);
+						if (newChanges.Succeeded)
 						{
-							NextRequest.Changes = NewChanges;
-							CompletedRequests.Add(NextRequest);
+							nextRequest.Changes = newChanges.Data;
+							completedRequests.Add(nextRequest);
 						}
 						else
 						{
-							NextRequest.ErrorMessage = "Unable to fetch changes. Check your connection settings and try again.";
+							nextRequest.ErrorMessage = "Unable to fetch changes. Check your connection settings and try again.";
 						}
 
-						OnUpdateChanges(NextRequest);
+						_synchronizationContext.Post(x => _onUpdateChanges?.Invoke(nextRequest), null);
 						continue;
 					}
 
 					// Figure out which changes to fetch
-					List<PerforceChangeSummary> DescribeChanges;
-					lock(LockObject)
+					List<ChangesRecord> describeChanges;
+					lock (_lockObject)
 					{
-						DescribeChanges = CompletedRequests.SelectMany(x => x.Changes).Where(x => !ChangeNumberToDetails.ContainsKey(x.Number)).ToList();
+						describeChanges = completedRequests.SelectMany(x => x.Changes ?? new List<ChangesRecord>()).Where(x => !_changeNumberToDetails.ContainsKey(x.Number)).ToList();
 					}
 
 					// Fetch info on each individual change
-					foreach(PerforceChangeSummary DescribeChange in DescribeChanges)
+					foreach (ChangesRecord describeChange in describeChanges)
 					{
-						lock(LockObject)
+						lock (_lockObject)
 						{
-							if(bTerminate || Requests.Count > 0)
+							if (cancellationToken.IsCancellationRequested || _requests.Count > 0)
 							{
 								break;
 							}
 						}
 
-						PerforceDescribeRecord Record;
-						if(Perforce.Describe(DescribeChange.Number, out Record, Log))
+						PerforceResponse<DescribeRecord> response = await perforce.TryDescribeAsync(describeChange.Number, cancellationToken);
+						if (response.Succeeded)
 						{
-							lock(LockObject)
+							DescribeRecord record = response.Data;
+							lock (_lockObject)
 							{
-								ChangeNumberToDetails[Record.ChangeNumber] = new PerforceChangeDetailsWithDescribeRecord(Record);
-								if((Record.ChangeNumber & 3) == 0)
-								{
-									ChangeNumberToDetails[Record.ChangeNumber].bContainsCode = true;
-									ChangeNumberToDetails[Record.ChangeNumber].bContainsContent = true;
-								}
+								_changeNumberToDetails[record.Number] = new PerforceChangeDetailsWithDescribeRecord(record);
 							}
 						}
 
-						OnUpdateChangeMetadata(DescribeChange);
+						_synchronizationContext.Post(x => _onUpdateChangeMetadata?.Invoke(describeChange), null);
 					}
 
 					// Wait for something to change
-					RefreshEvent.WaitOne();
+					using (IDisposable _ = cancellationToken.Register(() => _refreshEvent.Set()))
+					{
+						await refreshTask;
+					}
 				}
 			}
 
-			public bool TryGetChangeDetails(int ChangeNumber, out PerforceChangeDetailsWithDescribeRecord Details)
+			public bool TryGetChangeDetails(int changeNumber, [NotNullWhen(true)] out PerforceChangeDetailsWithDescribeRecord? details)
 			{
-				lock(LockObject)
+				lock (_lockObject)
 				{
-					return ChangeNumberToDetails.TryGetValue(ChangeNumber, out Details);
+					return _changeNumberToDetails.TryGetValue(changeNumber, out details);
 				}
 			}
 		}
 
 		class BadgeInfo
 		{
-			public string Label;
-			public Color Color;
+			public string _label;
+			public Color _color;
 
-			public BadgeInfo(string Label, Color Color)
+			public BadgeInfo(string label, Color color)
 			{
-				this.Label = Label;
-				this.Color = Color;
+				_label = label;
+				_color = color;
 			}
 		}
 
 		class ExpandRangeStatusElement : StatusElement
 		{
-			string Text;
-			Action LinkAction;
+			readonly string _text;
+			readonly Action _linkAction;
 
-			public ExpandRangeStatusElement(string Text, Action InLinkAction)
+			public ExpandRangeStatusElement(string text, Action inLinkAction)
 			{
-				this.Text = Text;
-				this.LinkAction = InLinkAction;
+				_text = text;
+				_linkAction = inLinkAction;
 				Cursor = NativeCursors.Hand;
 			}
 
-			public override void OnClick(Point Location)
+			public override void OnClick(Point location)
 			{
-				LinkAction();
+				_linkAction();
 			}
 
-			public override Size Measure(Graphics Graphics, StatusElementResources Resources)
+			public override Size Measure(Graphics graphics, StatusElementResources resources)
 			{
-				return TextRenderer.MeasureText(Graphics, Text, Resources.FindOrAddFont(FontStyle.Regular), new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding);
+				return TextRenderer.MeasureText(graphics, _text, resources.FindOrAddFont(FontStyle.Regular), new Size(Int32.MaxValue, Int32.MaxValue), TextFormatFlags.NoPadding);
 			}
 
-			public override void Draw(Graphics Graphics, StatusElementResources Resources)
+			public override void Draw(Graphics graphics, StatusElementResources resources)
 			{
-				Color TextColor = Color.Gray;
-				FontStyle Style = FontStyle.Italic;
-				if(bMouseDown)
+				Color textColor = Color.Gray;
+				FontStyle style = FontStyle.Italic;
+				if (MouseDown)
 				{
-					TextColor = Color.FromArgb(TextColor.B / 2, TextColor.G / 2, TextColor.R);
-					Style |= FontStyle.Underline;
+					textColor = Color.FromArgb(textColor.B / 2, textColor.G / 2, textColor.R);
+					style |= FontStyle.Underline;
 				}
-				else if(bMouseOver)
+				else if (MouseOver)
 				{
-					TextColor = Color.FromArgb(TextColor.B, TextColor.G, TextColor.R);
-					Style |= FontStyle.Underline;
+					textColor = Color.FromArgb(textColor.B, textColor.G, textColor.R);
+					style |= FontStyle.Underline;
 				}
-				TextRenderer.DrawText(Graphics, Text, Resources.FindOrAddFont(Style), Bounds.Location, TextColor, TextFormatFlags.NoPadding);
+				TextRenderer.DrawText(graphics, _text, resources.FindOrAddFont(style), Bounds.Location, textColor, TextFormatFlags.NoPadding);
 			}
 		}
 
-		IssueMonitor IssueMonitor;
-		IssueData Issue;
-		List<IssueBuildData> IssueBuilds;
-		List<IssueDiagnosticData> Diagnostics;
-		PerforceConnection Perforce;
-		TimeSpan? ServerTimeOffset;
-		PerforceWorkerThread PerforceWorker;
-		TextWriter Log;
-		SynchronizationContext MainThreadSynchronizationContext;
-		string SelectedStream;
-		List<PerforceChangeRange> SelectedStreamRanges = new List<PerforceChangeRange>();
-		bool bIsDisposing;
-		Font BoldFont;
-		PerforceChangeSummary ContextMenuChange;
-		string LastOwner;
-		string LastDetailsText;
-		System.Windows.Forms.Timer UpdateTimer;
-		StatusElementResources StatusElementResources;
+		IssueMonitor _issueMonitor;
+		IssueData _issue;
+		readonly List<IssueBuildData> _issueBuilds;
+		readonly List<IssueDiagnosticData> _diagnostics;
+		readonly IPerforceSettings _perforceSettings;
+		readonly TimeSpan? _serverTimeOffset;
+		PerforceWorkerTask? _perforceWorker;
+		readonly IServiceProvider _serviceProvider;
+		readonly SynchronizationContext _mainThreadSynchronizationContext;
+		string? _selectedStream;
+		List<PerforceChangeRange> _selectedStreamRanges = new List<PerforceChangeRange>();
+		bool _isDisposing;
+		Font? _boldFont;
+		ChangesRecord? _contextMenuChange;
+		string? _lastOwner;
+		string? _lastDetailsText;
+#pragma warning disable CA2213 // warning CA2213: 'IssueDetailsWindow' contains field '_updateTimer' that is of IDisposable type 'Timer?', but it is never disposed. Change the Dispose method on 'IssueDetailsWindow' to call Close or Dispose on this field.
+		System.Windows.Forms.Timer? _updateTimer;
+#pragma warning restore CA2213
+		StatusElementResources _statusElementResources;
 
-		IssueDetailsWindow(IssueMonitor IssueMonitor, IssueData Issue, List<IssueBuildData> IssueBuilds, List<IssueDiagnosticData> Diagnostics, string ServerAndPort, string UserName, TimeSpan? ServerTimeOffset, TextWriter Log, string CurrentStream)
+		IssueDetailsWindow(IssueMonitor issueMonitor, IssueData issue, List<IssueBuildData> issueBuilds, List<IssueDiagnosticData> diagnostics, IPerforceSettings perforceSettings, TimeSpan? serverTimeOffset, IServiceProvider serviceProvider, string? currentStream)
 		{
-			this.IssueMonitor = IssueMonitor;
-			this.Issue = Issue;
-			this.IssueBuilds = IssueBuilds;
-			this.Diagnostics = Diagnostics;
-			this.Perforce = new PerforceConnection(UserName, null, ServerAndPort);
-			this.ServerTimeOffset = ServerTimeOffset;
-			this.Log = Log;
+			_issueMonitor = issueMonitor;
+			_issue = issue;
+			_issueBuilds = issueBuilds;
+			_diagnostics = diagnostics;
+			_perforceSettings = perforceSettings;
+			_serverTimeOffset = serverTimeOffset;
+			_serviceProvider = serviceProvider;
 
-			IssueMonitor.AddRef();
+			issueMonitor.AddRef();
 
-			MainThreadSynchronizationContext = SynchronizationContext.Current;
+			_mainThreadSynchronizationContext = SynchronizationContext.Current!;
 
 			InitializeComponent();
+			Font = new System.Drawing.Font("Segoe UI", 8.25F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
 
-			this.Text = String.Format("Issue {0}", Issue.Id);
-			this.StatusElementResources = new StatusElementResources(BuildListView.Font);
-			base.Disposed += IssueDetailsWindow_Disposed;
+			Text = String.Format("Issue {0}", issue.Id);
+			_statusElementResources = new StatusElementResources(BuildListView.Font);
+			Disposed += IssueDetailsWindow_Disposed;
 
-			IssueMonitor.OnIssuesChanged += OnUpdateIssuesAsync;
-			IssueMonitor.StartTracking(Issue.Id);
+			issueMonitor.OnIssuesChanged += OnUpdateIssuesAsync;
+			issueMonitor.StartTracking(issue.Id);
 
-			BuildListView.SmallImageList = new ImageList(){ ImageSize = new Size(1, 20) };
+			BuildListView.SmallImageList = new ImageList() { ImageSize = new Size(1, 20) };
 
-			System.Reflection.PropertyInfo DoubleBufferedProperty = typeof(Control).GetProperty("DoubleBuffered", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-			DoubleBufferedProperty.SetValue(BuildListView, true, null); 
+			System.Reflection.PropertyInfo doubleBufferedProperty = typeof(Control).GetProperty("DoubleBuffered", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+			doubleBufferedProperty.SetValue(BuildListView, true, null);
 
-			using(Graphics Graphics = Graphics.FromHwnd(IntPtr.Zero))
+			using (Graphics graphics = Graphics.FromHwnd(IntPtr.Zero))
 			{
-				float DpiScaleX = Graphics.DpiX / 96.0f;
-				foreach(ColumnHeader Column in BuildListView.Columns)
+				float dpiScaleX = graphics.DpiX / 96.0f;
+				foreach (ColumnHeader? column in BuildListView.Columns)
 				{
-					Column.Width = (int)(Column.Width * DpiScaleX);
+					if (column != null)
+					{
+						column.Width = (int)(column.Width * dpiScaleX);
+					}
 				}
 			}
 
-			int SelectIdx = 0;
-			foreach(string Stream in IssueBuilds.Select(x => x.Stream).Distinct().OrderBy(x => x))
+			int selectIdx = 0;
+			foreach (string stream in issueBuilds.Select(x => x.Stream).Distinct().OrderBy(x => x))
 			{
-				StreamComboBox.Items.Add(Stream);
-				if(Stream == CurrentStream)
+				StreamComboBox.Items.Add(stream);
+				if (stream == currentStream)
 				{
-					SelectIdx = StreamComboBox.Items.Count - 1;
+					selectIdx = StreamComboBox.Items.Count - 1;
 				}
 			}
-			if(StreamComboBox.Items.Count > 0)
+			if (StreamComboBox.Items.Count > 0)
 			{
-				StreamComboBox.SelectedIndex = SelectIdx;
+				StreamComboBox.SelectedIndex = selectIdx;
 			}
 
 			FilterTypeComboBox.SelectedIndex = 0;
@@ -323,274 +351,270 @@ namespace UnrealGameSync
 				components.Dispose();
 			}
 
-			if (IssueMonitor != null)
+			if (_issueMonitor != null)
 			{
-				IssueMonitor.StopTracking(Issue.Id);
-				IssueMonitor.OnIssuesChanged -= OnUpdateIssuesAsync;
-				IssueMonitor.Release();
-				IssueMonitor = null;
+				_issueMonitor.StopTracking(_issue.Id);
+				_issueMonitor.OnIssuesChanged -= OnUpdateIssuesAsync;
+				_issueMonitor.Release();
+				_issueMonitor = null!;
 			}
+
+			_statusElementResources.Dispose();
+			_boldFont?.Dispose();
+			_boldFont = null;
+			_perforceWorker?.Dispose();
+			_perforceWorker = null;
 
 			base.Dispose(disposing);
 		}
 
 		private void StartUpdateTimer()
 		{
-			if(UpdateTimer == null)
+			if (_updateTimer == null)
 			{
-				UpdateTimer = new System.Windows.Forms.Timer();
-				UpdateTimer.Interval = 100;
-				UpdateTimer.Tick += UpdateTimer_Tick;
-				UpdateTimer.Start();
+				_updateTimer = new System.Windows.Forms.Timer();
+				_updateTimer.Interval = 100;
+				_updateTimer.Tick += UpdateTimer_Tick;
+				_updateTimer.Start();
 
-				components.Add(UpdateTimer);
+				components.Add(_updateTimer);
 			}
 		}
 
 		private void StopUpdateTimer()
 		{
-			if(UpdateTimer != null)
+			if (_updateTimer != null)
 			{
-				components.Remove(UpdateTimer);
+				components.Remove(_updateTimer);
 
-				UpdateTimer.Dispose();
-				UpdateTimer = null;
+				_updateTimer.Dispose();
+				_updateTimer = null;
 			}
 		}
 
-		private void UpdateTimer_Tick(object sender, EventArgs e)
+		private void UpdateTimer_Tick(object? sender, EventArgs e)
 		{
 			UpdateBuildList();
 			StopUpdateTimer();
 		}
 
-		void UpdateSummaryTextIfChanged(Label Label, string NewText)
+		static void UpdateSummaryTextIfChanged(Label label, string newText)
 		{
-			if (Label.Text != NewText)
+			if (label.Text != newText)
 			{
-				Label.Text = NewText;
+				label.Text = newText;
 			}
 		}
 
-		void UpdateSummaryTextIfChanged(TextBox TextBox, string NewText)
+		static void AppendEscapedRtf(StringBuilder result, string text)
 		{
-			if(TextBox.Text != NewText)
+			for (int idx = 0; idx < text.Length; idx++)
 			{
-				TextBox.Text = NewText;
-				TextBox.SelectionLength = 0;
-				TextBox.SelectionStart = NewText.Length;
-			}
-		}
-
-		static void AppendEscapedRtf(StringBuilder Result, string Text)
-		{
-			for (int Idx = 0; Idx < Text.Length; Idx++)
-			{
-				char Character = Text[Idx];
-				if(Character == '\n')
+				char character = text[idx];
+				if (character == '\n')
 				{
-					Result.Append(@"\line");
+					result.Append(@"\line");
 				}
-				else if(Character >= 0x20 && Character <= 0x7f)
+				else if (character >= 0x20 && character <= 0x7f)
 				{
-					if(Character == '\\' || Character == '{' || Character == '}')
+					if (character == '\\' || character == '{' || character == '}')
 					{
-						Result.Append('\\');
+						result.Append('\\');
 					}
-					Result.Append(Character);
+					result.Append(character);
 				}
 				else
 				{
-					Result.AppendFormat("\\u{0}?", (int)Character);
+					result.AppendFormat("\\u{0}?", (int)character);
 				}
 			}
 		}
 
-		static void AppendHyperlink(StringBuilder RichText, string Label, string Url)
+		static void AppendHyperlink(StringBuilder richText, string label, string url)
 		{
-			RichText.Append(@"{\field");
-			RichText.Append(@"{\*\fldinst");
-			RichText.AppendFormat("{{ HYPERLINK \"{0}\" }}", Url);
-			RichText.Append(@"}");
-			RichText.Append(@"{\fldrslt ");
-			AppendEscapedRtf(RichText, Label);
-			RichText.Append(@"}");
-			RichText.Append(@"}");
+			richText.Append(@"{\field");
+			richText.Append(@"{\*\fldinst");
+			richText.AppendFormat("{{ HYPERLINK \"{0}\" }}", url);
+			richText.Append('}');
+			richText.Append(@"{\fldrslt ");
+			AppendEscapedRtf(richText, label);
+			richText.Append('}');
+			richText.Append('}');
 		}
 
-		static string CreateRichTextErrors(IssueData Issue, List<IssueBuildData> IssueBuilds, List<IssueDiagnosticData> Diagnostics)
+		static string CreateRichTextErrors(List<IssueBuildData> issueBuilds, List<IssueDiagnosticData> diagnostics)
 		{
-			StringBuilder RichText = new StringBuilder();
+			StringBuilder richText = new StringBuilder();
 
-			RichText.AppendLine(@"{\rtf1\ansi");
-			RichText.AppendLine(@"{\fonttbl{\f0\fnil\fcharset0 Arial;}{\f1\fnil\fcharset0 Courier New;}{\f2\fnil\fcharset0 Calibri;}}");
-			RichText.AppendLine(@"{\colortbl;\red192\green80\blue77;\red0\green0\blue0;}");
+			richText.AppendLine(@"{\rtf1\ansi");
+			richText.AppendLine(@"{\fonttbl{\f0\fnil\fcharset0 Arial;}{\f1\fnil\fcharset0 Courier New;}{\f2\fnil\fcharset0 Calibri;}}");
+			richText.AppendLine(@"{\colortbl;\red192\green80\blue77;\red0\green0\blue0;}");
 
-			bool bFirst = true;
-			foreach (IGrouping<long, IssueDiagnosticData> Group in Diagnostics.GroupBy(x => x.BuildId ?? -1))
+			bool first = true;
+			foreach (IGrouping<long, IssueDiagnosticData> group in diagnostics.GroupBy(x => x.BuildId ?? -1))
 			{
 				// Step 'Foo'
-				IssueBuildData Build = IssueBuilds.FirstOrDefault(x => x.Id == Group.Key);
-				if (Build != null)
+				IssueBuildData? build = issueBuilds.FirstOrDefault(x => x.Id == group.Key);
+				if (build != null)
 				{
-					RichText.Append(@"\pard");   // Paragraph default
-					RichText.Append(@"\cf2");    // Foreground color
-					RichText.Append(@"\b1");     // Bold
-					RichText.Append(@"\f0");     // Font
-					RichText.Append(@"\fs16");   // Font size
-					if (bFirst)
+					richText.Append(@"\pard");   // Paragraph default
+					richText.Append(@"\cf2");    // Foreground color
+					richText.Append(@"\b1");     // Bold
+					richText.Append(@"\f0");     // Font
+					richText.Append(@"\fs16");   // Font size
+					if (first)
 					{
-						RichText.Append(@"\sb100"); // Space before
+						richText.Append(@"\sb100"); // Space before
 					}
 					else
 					{
-						RichText.Append(@"\sb300"); // Space before
+						richText.Append(@"\sb300"); // Space before
 					}
-					RichText.Append(@" In step '\ul1");
-					AppendHyperlink(RichText, Build.JobStepName, Build.JobStepUrl);
-					RichText.Append(@"\ul0':");
+					richText.Append(@" In step '\ul1");
+					AppendHyperlink(richText, build.JobStepName, build.JobStepUrl);
+					richText.Append(@"\ul0':");
 
-					RichText.AppendLine(@"\par");
+					richText.AppendLine(@"\par");
 				}
 
-				IssueDiagnosticData[] DiagnosticsArray = Group.ToArray();
-				for(int Idx = 0; Idx < DiagnosticsArray.Length; Idx++)
+				IssueDiagnosticData[] diagnosticsArray = group.ToArray();
+				for (int idx = 0; idx < diagnosticsArray.Length; idx++)
 				{
-					IssueDiagnosticData Diagnostic = DiagnosticsArray[Idx];
+					IssueDiagnosticData diagnostic = diagnosticsArray[idx];
 
 					// Error X/Y:
-					RichText.Append(@"\pard");   // Paragraph default
-					RichText.Append(@"\cf1");    // Foreground color
-					RichText.Append(@"\b1");     // Bold
-					RichText.Append(@"\f0");     // Font
-					RichText.Append(@"\fs16");   // Font size
-					RichText.Append(@"\fi50");   // First line indent
-					RichText.Append(@"\li50");   // Other line indent
-					RichText.Append(@"\sb100");  // Space before
-					RichText.Append(@"\sa50");   // Space after
-					RichText.Append(@" ");
+					richText.Append(@"\pard");   // Paragraph default
+					richText.Append(@"\cf1");    // Foreground color
+					richText.Append(@"\b1");     // Bold
+					richText.Append(@"\f0");     // Font
+					richText.Append(@"\fs16");   // Font size
+					richText.Append(@"\fi50");   // First line indent
+					richText.Append(@"\li50");   // Other line indent
+					richText.Append(@"\sb100");  // Space before
+					richText.Append(@"\sa50");   // Space after
+					richText.Append(' ');
 
-					RichText.Append(@"\ul1");
-					AppendHyperlink(RichText, String.Format("Error {0}/{1}", Idx + 1, DiagnosticsArray.Length), Diagnostic.Url);
-					RichText.Append(@"\ul0");
+					richText.Append(@"\ul1");
+					AppendHyperlink(richText, String.Format("Error {0}/{1}", idx + 1, diagnosticsArray.Length), diagnostic.Url);
+					richText.Append(@"\ul0");
 
-					RichText.AppendLine(@"\par");
+					richText.AppendLine(@"\par");
 
 					// Error text
-					foreach(string Line in Diagnostic.Message.TrimEnd().Split('\n'))
+					foreach (string line in diagnostic.Message.TrimEnd().Split('\n'))
 					{
-						RichText.Append(@"\pard");   // Paragraph default
-						RichText.Append(@"\cf0");    // Foreground color
-						RichText.Append(@"\b0");     // Bold
-						RichText.Append(@"\f1");     // Font
-						RichText.Append(@"\fs16");   // Font size 16
-						RichText.Append(@"\fi150");  // First line indent
-						RichText.Append(@"\li150");  // Other line indent
-						AppendEscapedRtf(RichText, Line);
-						RichText.Append(@"\par");
+						richText.Append(@"\pard");   // Paragraph default
+						richText.Append(@"\cf0");    // Foreground color
+						richText.Append(@"\b0");     // Bold
+						richText.Append(@"\f1");     // Font
+						richText.Append(@"\fs16");   // Font size 16
+						richText.Append(@"\fi150");  // First line indent
+						richText.Append(@"\li150");  // Other line indent
+						AppendEscapedRtf(richText, line);
+						richText.Append(@"\par");
 					}
 				}
 
-				bFirst = false;
+				first = false;
 			}
 
-			RichText.AppendLine("}");
-			return RichText.ToString();
+			richText.AppendLine("}");
+			return richText.ToString();
 		}
 
 		void UpdateCurrentIssue()
 		{
-			UpdateSummaryTextIfChanged(SummaryTextBox, Issue.Summary.ToString());
+			UpdateSummaryTextIfChanged(SummaryTextBox, _issue.Summary.ToString());
 
-			IssueBuildData FirstFailingBuild = IssueBuilds.FirstOrDefault(x => x.ErrorUrl != null);
-			BuildLinkLabel.Text = (FirstFailingBuild != null)? FirstFailingBuild.JobName : "Unknown";
+			IssueBuildData? firstFailingBuild = _issueBuilds.FirstOrDefault(x => x.ErrorUrl != null);
+			BuildLinkLabel.Text = (firstFailingBuild != null) ? firstFailingBuild.JobName : "Unknown";
 
-			StringBuilder Status = new StringBuilder();
-			if(IssueMonitor.HasPendingUpdate())
+			StringBuilder status = new StringBuilder();
+			if (_issueMonitor.HasPendingUpdate())
 			{
-				Status.Append("Updating...");
+				status.Append("Updating...");
 			}
-			else if(Issue.FixChange != 0)
+			else if (_issue.FixChange != 0)
 			{
-				if(Issue.FixChange < 0)
+				if (_issue.FixChange < 0)
 				{
-					if(Issue.ResolvedAt.HasValue)
+					if (_issue.ResolvedAt.HasValue)
 					{
-						Status.AppendFormat("Closed as systemic issue.", Issue.FixChange);
+						status.AppendFormat("Closed as systemic issue.", _issue.FixChange);
 					}
 					else
 					{
-						Status.AppendFormat("Fixed as systemic issue (pending verification).", Issue.FixChange);
+						status.AppendFormat("Fixed as systemic issue (pending verification).", _issue.FixChange);
 					}
 				}
 				else
 				{
-					if(Issue.ResolvedAt.HasValue)
+					if (_issue.ResolvedAt.HasValue)
 					{
-						Status.AppendFormat("Closed. Fixed in CL {0}.", Issue.FixChange);
+						status.AppendFormat("Closed. Fixed in CL {0}.", _issue.FixChange);
 					}
 					else
 					{
-						Status.AppendFormat("Fixed in CL {0} (pending verification)", Issue.FixChange);
+						status.AppendFormat("Fixed in CL {0} (pending verification)", _issue.FixChange);
 					}
 				}
 			}
-			else if(Issue.ResolvedAt.HasValue)
+			else if (_issue.ResolvedAt.HasValue)
 			{
-				Status.Append("Resolved");
+				status.Append("Resolved");
 			}
-			else if(Issue.Owner == null)
+			else if (_issue.Owner == null)
 			{
-				Status.Append("Currently unassigned");
+				status.Append("Currently unassigned");
 			}
 			else
 			{
-				Status.Append(Utility.FormatUserName(Issue.Owner));
-				if(Issue.NominatedBy != null)
+				status.Append(Utility.FormatUserName(_issue.Owner));
+				if (_issue.NominatedBy != null)
 				{
-					Status.AppendFormat(" nominated by {0}", Utility.FormatUserName(Issue.NominatedBy));
+					status.AppendFormat(" nominated by {0}", Utility.FormatUserName(_issue.NominatedBy));
 				}
-				if(Issue.AcknowledgedAt.HasValue)
+				if (_issue.AcknowledgedAt.HasValue)
 				{
-					Status.AppendFormat(" (acknowledged {0})", Utility.FormatRecentDateTime(Issue.AcknowledgedAt.Value.ToLocalTime()));
+					status.AppendFormat(" (acknowledged {0})", Utility.FormatRecentDateTime(_issue.AcknowledgedAt.Value.ToLocalTime()));
 				}
 				else
 				{
-					Status.Append(" (not acknowledged)");
+					status.Append(" (not acknowledged)");
 				}
 			}
-			UpdateSummaryTextIfChanged(StatusTextBox, Status.ToString());
+			UpdateSummaryTextIfChanged(StatusTextBox, status.ToString());
 
-			StringBuilder OpenSince = new StringBuilder();
-			OpenSince.Append(Utility.FormatRecentDateTime(Issue.CreatedAt.ToLocalTime()));
-			if(OpenSince.Length > 0)
+			StringBuilder openSince = new StringBuilder();
+			openSince.Append(Utility.FormatRecentDateTime(_issue.CreatedAt.ToLocalTime()));
+			if (openSince.Length > 0)
 			{
-				OpenSince[0] = Char.ToUpper(OpenSince[0]);
+				openSince[0] = Char.ToUpper(openSince[0]);
 			}
-			OpenSince.AppendFormat(" ({0})", Utility.FormatDurationMinutes(Issue.RetrievedAt - Issue.CreatedAt));
-			UpdateSummaryTextIfChanged(OpenSinceTextBox, OpenSince.ToString());
+			openSince.AppendFormat(" ({0})", Utility.FormatDurationMinutes(_issue.RetrievedAt - _issue.CreatedAt));
+			UpdateSummaryTextIfChanged(OpenSinceTextBox, openSince.ToString());
 
-			if(LastOwner != Issue.Owner)
+			if (_lastOwner != _issue.Owner)
 			{
-				LastOwner = Issue.Owner;
+				_lastOwner = _issue.Owner;
 				BuildListView.Invalidate();
 			}
 
-			UpdateSummaryTextIfChanged(StepNamesTextBox, String.Join(", ", IssueBuilds.Select(x => x.JobStepName).Distinct().OrderBy(x => x)));
-			UpdateSummaryTextIfChanged(StreamNamesTextBox, String.Join(", ", IssueBuilds.Select(x => x.Stream).Distinct().OrderBy(x => x)));
+			UpdateSummaryTextIfChanged(StepNamesTextBox, String.Join(", ", _issueBuilds.Select(x => x.JobStepName).Distinct().OrderBy(x => x)));
+			UpdateSummaryTextIfChanged(StreamNamesTextBox, String.Join(", ", _issueBuilds.Select(x => x.Stream).Distinct().OrderBy(x => x)));
 
-			string RtfText = CreateRichTextErrors(Issue, IssueBuilds, Diagnostics);
-			if (LastDetailsText != RtfText)
+			string rtfText = CreateRichTextErrors(_issueBuilds, _diagnostics);
+			if (_lastDetailsText != rtfText)
 			{
-				using (MemoryStream Stream = new MemoryStream(Encoding.UTF8.GetBytes(RtfText), false))
+				using (MemoryStream stream = new MemoryStream(Encoding.UTF8.GetBytes(rtfText), false))
 				{
-					DetailsTextBox.LoadFile(Stream, RichTextBoxStreamType.RichText);
+					DetailsTextBox.LoadFile(stream, RichTextBoxStreamType.RichText);
 					DetailsTextBox.Select(0, 0);
 				}
-				LastDetailsText = RtfText;
+				_lastDetailsText = rtfText;
 			}
 
-			if(Issue.FixChange == 0)
+			if (_issue.FixChange == 0)
 			{
 				MarkFixedBtn.Text = "Mark Fixed...";
 			}
@@ -600,54 +624,46 @@ namespace UnrealGameSync
 			}
 		}
 
-		private void IssueDetailsWindow_Disposed(object sender, EventArgs e)
+		private void IssueDetailsWindow_Disposed(object? sender, EventArgs e)
 		{
-			bIsDisposing = true;
+			_isDisposing = true;
 			DestroyWorker();
 		}
 
-		void FetchAllBuildChanges()
+		void FetchBuildChanges(PerforceChangeRange range)
 		{
-			foreach(PerforceChangeRange Range in SelectedStreamRanges)
+			if (!range.Expanded)
 			{
-				FetchBuildChanges(Range);
-			}
-		}
-
-		void FetchBuildChanges(PerforceChangeRange Range)
-		{
-			if(!Range.bExpanded)
-			{
-				Range.bExpanded = true;
-				PerforceWorker.AddRequest(Range);
+				range.Expanded = true;
+				_perforceWorker!.AddRequest(range);
 				UpdateBuildList();
 			}
 		}
 
-		bool FilterMatch(Regex FilterRegex, PerforceChangeSummary Summary)
+		static bool FilterMatch(Regex filterRegex, ChangesRecord summary)
 		{
-			if(FilterRegex.IsMatch(Summary.User))
+			if (filterRegex.IsMatch(summary.User))
 			{
 				return true;
 			}
-			if(FilterRegex.IsMatch(Summary.Description))
+			if (filterRegex.IsMatch(summary.Description))
 			{
 				return true;
 			}
 			return false;
 		}
 
-		bool FilterMatch(Regex FilterRegex, PerforceDescribeRecord DescribeRecord)
+		static bool FilterMatch(Regex filterRegex, DescribeRecord describeRecord)
 		{
-			if(FilterRegex.IsMatch(DescribeRecord.User))
+			if (filterRegex.IsMatch(describeRecord.User))
 			{
 				return true;
 			}
-			if(FilterRegex.IsMatch(DescribeRecord.Description))
+			if (filterRegex.IsMatch(describeRecord.Description))
 			{
 				return true;
 			}
-			if(DescribeRecord.Files.Any(x => FilterRegex.IsMatch(x.DepotFile)))
+			if (describeRecord.Files.Any(x => filterRegex.IsMatch(x.DepotFile)))
 			{
 				return true;
 			}
@@ -656,119 +672,124 @@ namespace UnrealGameSync
 
 		void UpdateBuildList()
 		{
-			int NumNewItems = 0;
+			int numNewItems = 0;
 			BuildListView.BeginUpdate();
 
 			// Capture the initial selection
-			object PrevSelection = null;
-			if(BuildListView.SelectedItems.Count > 0)
+			object? prevSelection = null;
+			if (BuildListView.SelectedItems.Count > 0)
 			{
-				PrevSelection = BuildListView.SelectedItems[0].Tag;
+				prevSelection = BuildListView.SelectedItems[0].Tag;
 			}
 
 			// Get all the search terms
-			string[] FilterTerms = FilterTextBox.Text.Split(new char[]{ ' ' }, StringSplitOptions.RemoveEmptyEntries);
+			string[] filterTerms = FilterTextBox.Text.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
 
 			// Build a regex from each filter term
-			List<Regex> FilterRegexes = new List<Regex>();
-			foreach(string FilterTerm in FilterTerms)
+			List<Regex> filterRegexes = new List<Regex>();
+			foreach (string filterTerm in filterTerms)
 			{
-				string RegexText = Regex.Escape(FilterTerm);
-				RegexText = RegexText.Replace("\\?", ".");
-				RegexText = RegexText.Replace("\\*", "[^\\\\/]*");
-				RegexText = RegexText.Replace("\\.\\.\\.", ".*");
-				FilterRegexes.Add(new Regex(RegexText, RegexOptions.IgnoreCase));
+				string regexText = Regex.Escape(filterTerm);
+				regexText = regexText.Replace("\\?", ".", StringComparison.Ordinal);
+				regexText = regexText.Replace("\\*", "[^\\\\/]*", StringComparison.Ordinal);
+				regexText = regexText.Replace("\\.\\.\\.", ".*", StringComparison.Ordinal);
+				filterRegexes.Add(new Regex(regexText, RegexOptions.IgnoreCase));
 			}
 
 			// Get the filter type
-			bool bOnlyShowCodeChanges = (FilterTypeComboBox.SelectedIndex == 1);
-			bool bOnlyShowContentChanges = (FilterTypeComboBox.SelectedIndex == 2);
+			bool onlyShowCodeChanges = (FilterTypeComboBox.SelectedIndex == 1);
+			bool onlyShowContentChanges = (FilterTypeComboBox.SelectedIndex == 2);
 
 			// Create rows for all the ranges
-			foreach(PerforceChangeRange Range in SelectedStreamRanges)
+			foreach (PerforceChangeRange range in _selectedStreamRanges)
 			{
-				if(Range.bExpanded)
+				if (range.Expanded)
 				{
-					if(Range.Changes == null)
+					if (range.Changes == null)
 					{
-						ListViewItem FetchingItem = new ListViewItem("");
-						FetchingItem.Tag = Range;
-						FetchingItem.SubItems.Add("");
-						FetchingItem.SubItems.Add("");
+						ListViewItem fetchingItem = new ListViewItem("");
+						fetchingItem.Tag = range;
+						fetchingItem.SubItems.Add("");
+						fetchingItem.SubItems.Add("");
 
-						StatusLineListViewWidget FetchingWidget = new StatusLineListViewWidget(FetchingItem, StatusElementResources);
-						FetchingWidget.HorizontalAlignment = HorizontalAlignment.Left;
-						if(Range.ErrorMessage != null)
+						StatusLineListViewWidget fetchingWidget = new StatusLineListViewWidget(fetchingItem, _statusElementResources);
+						fetchingWidget.HorizontalAlignment = HorizontalAlignment.Left;
+						if (range.ErrorMessage != null)
 						{
-							FetchingWidget.Line.AddText(Range.ErrorMessage, Color.Gray, FontStyle.Italic);
+							fetchingWidget.Line.AddText(range.ErrorMessage, Color.Gray, FontStyle.Italic);
 						}
 						else
 						{
-							FetchingWidget.Line.AddText("Fetching changes, please wait...", Color.Gray, FontStyle.Italic);
+							fetchingWidget.Line.AddText("Fetching changes, please wait...", Color.Gray, FontStyle.Italic);
 						}
-			
-						FetchingItem.SubItems.Add(new ListViewItem.ListViewSubItem(FetchingItem, ""){ Tag = FetchingWidget });
-						FetchingItem.SubItems.Add(new ListViewItem.ListViewSubItem(FetchingItem, ""){ Tag = FetchingWidget });
 
-						BuildListView.Items.Insert(NumNewItems++, FetchingItem);
+						fetchingItem.SubItems.Add(new ListViewItem.ListViewSubItem(fetchingItem, "") { Tag = fetchingWidget });
+						fetchingItem.SubItems.Add(new ListViewItem.ListViewSubItem(fetchingItem, "") { Tag = fetchingWidget });
+
+						BuildListView.Items.Insert(numNewItems++, fetchingItem);
 					}
 					else
 					{
-						foreach(PerforceChangeSummary Change in Range.Changes)
+						foreach (ChangesRecord change in range.Changes)
 						{
-							PerforceChangeDetailsWithDescribeRecord Details;
-							PerforceWorker.TryGetChangeDetails(Change.Number, out Details);
+							PerforceChangeDetailsWithDescribeRecord? details;
+							_perforceWorker!.TryGetChangeDetails(change.Number, out details);
 
-							if(FilterRegexes.Count > 0 || bOnlyShowCodeChanges || bOnlyShowContentChanges)
+							if (filterRegexes.Count > 0 || onlyShowCodeChanges || onlyShowContentChanges)
 							{
-								if(Details == null)
+								if (details == null)
 								{
-									if(bOnlyShowCodeChanges || bOnlyShowCodeChanges)
+									if (onlyShowCodeChanges || onlyShowCodeChanges)
 									{
 										continue;
 									}
-									if(FilterRegexes.Any(x => !FilterMatch(x, Change)))
+									if (filterRegexes.Any(x => !FilterMatch(x, change)))
 									{
 										continue;
 									}
 								}
 								else
 								{
-									if(bOnlyShowCodeChanges && !Details.bContainsCode)
+									if (onlyShowCodeChanges && !details.ContainsCode)
 									{
 										continue;
 									}
-									if(bOnlyShowContentChanges && !Details.bContainsContent)
+									if (onlyShowContentChanges && !details.ContainsContent)
 									{
 										continue;
 									}
-									if(FilterRegexes.Any(x => !FilterMatch(x, Details.DescribeRecord)))
+									if (filterRegexes.Any(x => !FilterMatch(x, details.DescribeRecord)))
 									{
 										continue;
 									}
 								}
 							}
 
-							ListViewItem Item = new ListViewItem("");
-							Item.Tag = Change;
+							ListViewItem item = new ListViewItem("");
+							item.Tag = change;
 
-							StatusLineListViewWidget TypeWidget = new StatusLineListViewWidget(Item, StatusElementResources);
-							UpdateChangeTypeWidget(TypeWidget, Details);
-							Item.SubItems.Add(new ListViewItem.ListViewSubItem(Item, "") { Tag = TypeWidget });
+							StatusLineListViewWidget typeWidget = new StatusLineListViewWidget(item, _statusElementResources);
+							UpdateChangeTypeWidget(typeWidget, details);
+							item.SubItems.Add(new ListViewItem.ListViewSubItem(item, "") { Tag = typeWidget });
 
-							Item.SubItems.Add(Change.Number.ToString());
+							item.SubItems.Add(change.Number.ToString());
 
-							DateTime DisplayTime = Change.Date;
-							if (ServerTimeOffset.HasValue)
+							DateTime displayTime;
+							if (!_serverTimeOffset.HasValue)
 							{
-								DisplayTime = (DisplayTime - ServerTimeOffset.Value).ToLocalTime();
+								displayTime = change.Time.ToLocalTime();
 							}
-							Item.SubItems.Add(DisplayTime.ToString("h\\.mmtt"));
+							else
+							{
+								displayTime = new DateTime(change.Time.Ticks + _serverTimeOffset.Value.Ticks, DateTimeKind.Local);
+							}
 
-							Item.SubItems.Add(WorkspaceControl.FormatUserName(Change.User));
+							item.SubItems.Add(displayTime.ToString("h\\.mmtt"));
 
-							Item.SubItems.Add(Change.Description);
-							BuildListView.Items.Insert(NumNewItems++, Item);
+							item.SubItems.Add(WorkspaceControl.FormatUserName(change.User));
+
+							item.SubItems.Add(change.Description);
+							BuildListView.Items.Insert(numNewItems++, item);
 						}
 					}
 				}
@@ -796,33 +817,33 @@ namespace UnrealGameSync
 					BuildListView.Items.Insert(NumNewItems++, RangeItem);
 				}
 				*/
-				ListViewItem BuildItem = new ListViewItem("");
-				BuildItem.Tag = Range.BuildGroup;
-				BuildItem.SubItems.Add("");
-				BuildItem.SubItems.Add(Range.BuildGroup.Change.ToString());
-				BuildItem.SubItems.Add("");
+				ListViewItem buildItem = new ListViewItem("");
+				buildItem.Tag = range.BuildGroup;
+				buildItem.SubItems.Add("");
+				buildItem.SubItems.Add(range.BuildGroup.Change.ToString());
+				buildItem.SubItems.Add("");
 
-				StatusLineListViewWidget BuildWidget = new StatusLineListViewWidget(BuildItem, StatusElementResources);
-				BuildWidget.HorizontalAlignment = HorizontalAlignment.Left;
+				StatusLineListViewWidget buildWidget = new StatusLineListViewWidget(buildItem, _statusElementResources);
+				buildWidget.HorizontalAlignment = HorizontalAlignment.Left;
 
-				BuildWidget.Line.AddLink(Range.BuildGroup.JobName, FontStyle.Underline, () => System.Diagnostics.Process.Start(Range.BuildGroup.JobUrl));
-				BuildItem.SubItems.Add(new ListViewItem.ListViewSubItem(BuildItem, ""){ Tag = BuildWidget });
-				BuildItem.SubItems.Add(new ListViewItem.ListViewSubItem(BuildItem, ""){ Tag = BuildWidget });
+				buildWidget.Line.AddLink(range.BuildGroup.JobName, FontStyle.Underline, () => Utility.OpenUrl(range.BuildGroup.JobUrl));
+				buildItem.SubItems.Add(new ListViewItem.ListViewSubItem(buildItem, "") { Tag = buildWidget });
+				buildItem.SubItems.Add(new ListViewItem.ListViewSubItem(buildItem, "") { Tag = buildWidget });
 
-				BuildListView.Items.Insert(NumNewItems++, BuildItem);
+				BuildListView.Items.Insert(numNewItems++, buildItem);
 			}
-			
+
 			// Re-select the original item
-			for(int Idx = 0; Idx < BuildListView.Items.Count; Idx++)
+			for (int idx = 0; idx < BuildListView.Items.Count; idx++)
 			{
-				if(BuildListView.Items[Idx].Tag == PrevSelection)
+				if (BuildListView.Items[idx].Tag == prevSelection)
 				{
-					BuildListView.Items[Idx].Selected = true;
+					BuildListView.Items[idx].Selected = true;
 				}
 			}
 
 			// Remove all the items we no longer need
-			while(BuildListView.Items.Count > NumNewItems)
+			while (BuildListView.Items.Count > numNewItems)
 			{
 				BuildListView.Items.RemoveAt(BuildListView.Items.Count - 1);
 			}
@@ -832,97 +853,92 @@ namespace UnrealGameSync
 			BuildListView.Invalidate();
 		}
 
-		BuildGroup SelectedBuildGroup;
+		BuildGroup? _selectedBuildGroup;
 
-		void ShowJobContextMenu(Point Point, BuildGroup BuildGroup)
+		void ShowJobContextMenu(Point point, BuildGroup buildGroup)
 		{
-			SelectedBuildGroup = BuildGroup;
+			_selectedBuildGroup = buildGroup;
 
-			int MinIndex = JobContextMenu.Items.IndexOf(JobContextMenu_StepSeparatorMin) + 1;
-			while(JobContextMenu.Items.Count > MinIndex)
+			int minIndex = JobContextMenu.Items.IndexOf(JobContextMenu_StepSeparatorMin) + 1;
+			while (JobContextMenu.Items.Count > minIndex)
 			{
-				JobContextMenu.Items.RemoveAt(MinIndex);
+				JobContextMenu.Items.RemoveAt(minIndex);
 			}
 
-			JobContextMenu_ViewJob.Text = String.Format("View Job: {0}", BuildGroup.JobName);
+			JobContextMenu_ViewJob.Text = String.Format("View Job: {0}", buildGroup.JobName);
 
-			foreach (IssueBuildData Build in BuildGroup.Builds.OrderBy(x => x.JobStepName))
+			foreach (IssueBuildData build in buildGroup.Builds.OrderBy(x => x.JobStepName))
 			{
-				ToolStripMenuItem MenuItem = new ToolStripMenuItem(String.Format("View Step: {0}", Build.JobStepName));
-				MenuItem.Click += (S, E) => System.Diagnostics.Process.Start(Build.JobStepUrl);
-				JobContextMenu.Items.Insert(MinIndex++, MenuItem);
+#pragma warning disable CA2000 // warning CA2000: Call System.IDisposable.Dispose on object created by 'new ToolStripMenuItem(String.Format("View Step: {0}", build.JobStepName))' before all references to it are out of scope
+				ToolStripMenuItem menuItem = new ToolStripMenuItem(String.Format("View Step: {0}", build.JobStepName));
+				menuItem.Click += (s, e) => Utility.OpenUrl(build.JobStepUrl);
+				JobContextMenu.Items.Insert(minIndex++, menuItem);
+#pragma warning restore CA2000
 			}
 
-			JobContextMenu.Show(BuildListView, Point, ToolStripDropDownDirection.BelowRight);
+			JobContextMenu.Show(BuildListView, point, ToolStripDropDownDirection.BelowRight);
 		}
 
-		void UpdateChangeTypeWidget(StatusLineListViewWidget TypeWidget, PerforceChangeDetails Details)
+		static void UpdateChangeTypeWidget(StatusLineListViewWidget typeWidget, PerforceChangeDetails? details)
 		{
-			TypeWidget.Line.Clear();
-			if(Details == null)
+			typeWidget.Line.Clear();
+			if (details == null)
 			{
-				TypeWidget.Line.AddBadge("Unknown", Color.FromArgb(192, 192, 192), null);
+				typeWidget.Line.AddBadge("Unknown", Color.FromArgb(192, 192, 192), null);
 			}
 			else
 			{
-				if(Details.bContainsCode)
+				if (details.ContainsCode)
 				{
-					TypeWidget.Line.AddBadge("Code", Color.FromArgb(116, 185, 255), null);
+					typeWidget.Line.AddBadge("Code", Color.FromArgb(116, 185, 255), null);
 				}
-				if(Details.bContainsContent)
+				if (details.ContainsContent)
 				{
-					TypeWidget.Line.AddBadge("Content", Color.FromArgb(162, 155, 255), null);
+					typeWidget.Line.AddBadge("Content", Color.FromArgb(162, 155, 255), null);
 				}
 			}
 		}
 
 		void CreateWorker()
 		{
-			string NewSelectedStream = StreamComboBox.SelectedItem as string;
-			if(SelectedStream != NewSelectedStream)
+			string? newSelectedStream = StreamComboBox.SelectedItem as string;
+			if (_selectedStream != newSelectedStream)
 			{
 				DestroyWorker();
-			
-				SelectedStream = NewSelectedStream;
+
+				_selectedStream = newSelectedStream;
 
 				BuildListView.BeginUpdate();
 				BuildListView.Items.Clear();
 
-				if(SelectedStream != null)
+				if (_selectedStream != null)
 				{
-					SelectedStreamRanges = new List<PerforceChangeRange>();
+					_selectedStreamRanges = new List<PerforceChangeRange>();
 
-					int MaxChange = -1;
-					foreach(IGrouping<string, IssueBuildData> Group in IssueBuilds.Where(x => x.Stream == SelectedStream).OrderByDescending(x => x.Change).ThenByDescending(x => x.JobUrl).GroupBy(x => x.JobUrl))
+					int maxChange = -1;
+					foreach (IGrouping<string, IssueBuildData> group in _issueBuilds.Where(x => x.Stream == _selectedStream).OrderByDescending(x => x.Change).ThenByDescending(x => x.JobUrl).GroupBy(x => x.JobUrl))
 					{
-						BuildGroup BuildGroup = new BuildGroup();
-						BuildGroup.JobName = Group.First().JobName;
-						BuildGroup.JobUrl = Group.Key;
-						BuildGroup.Change = Group.First().Change;
-						BuildGroup.Builds = Group.ToList();
-						BuildGroup.Outcome = Group.Any(x => x.Outcome == IssueBuildOutcome.Error)? IssueBuildOutcome.Error : Group.Any(x => x.Outcome == IssueBuildOutcome.Warning)? IssueBuildOutcome.Warning : IssueBuildOutcome.Success;
+						IssueBuildOutcome outcome = group.Any(x => x.Outcome == IssueBuildOutcome.Error) ? IssueBuildOutcome.Error : group.Any(x => x.Outcome == IssueBuildOutcome.Warning) ? IssueBuildOutcome.Warning : IssueBuildOutcome.Success;
+						BuildGroup buildGroup = new BuildGroup(group.First().JobName, group.Key, group.First().Change, outcome, group.ToList());
 
-						PerforceChangeRange Range = new PerforceChangeRange();
-						Range.MinChange = BuildGroup.Change + 1;
-						Range.MaxChange = MaxChange;
-						Range.BuildGroup = BuildGroup;
-						SelectedStreamRanges.Add(Range);
+						PerforceChangeRange range = new PerforceChangeRange(buildGroup.Change + 1, maxChange, buildGroup);
+						_selectedStreamRanges.Add(range);
 
-						MaxChange = BuildGroup.Change;
+						maxChange = buildGroup.Change;
 					}
 
-					PerforceWorker = new PerforceWorkerThread(Perforce, String.Format("{0}/...", SelectedStream), OnRequestCompleteAsync, UpdateChangeMetadataAsync, Log);
+					_perforceWorker = new PerforceWorkerTask(_perforceSettings, String.Format("{0}/...", _selectedStream), OnRequestComplete, UpdateChangeMetadata, _serviceProvider.GetRequiredService<ILogger<PerforceWorkerTask>>());
 
 					UpdateBuildList();
 
-					for(int Idx = 0; Idx + 2 < SelectedStreamRanges.Count; Idx++)
+					for (int idx = 0; idx + 2 < _selectedStreamRanges.Count; idx++)
 					{
-						if(SelectedStreamRanges[Idx].BuildGroup.Outcome != SelectedStreamRanges[Idx + 1].BuildGroup.Outcome)
+						if (_selectedStreamRanges[idx].BuildGroup.Outcome != _selectedStreamRanges[idx + 1].BuildGroup.Outcome)
 						{
-							FetchBuildChanges(SelectedStreamRanges[Idx + 1]);
+							FetchBuildChanges(_selectedStreamRanges[idx + 1]);
 						}
 					}
-					FetchBuildChanges(SelectedStreamRanges[SelectedStreamRanges.Count - 1]);
+					FetchBuildChanges(_selectedStreamRanges[^1]);
 				}
 
 				BuildListView.EndUpdate();
@@ -932,12 +948,12 @@ namespace UnrealGameSync
 
 		void OnUpdateIssues()
 		{
-			List<IssueData> NewIssues = IssueMonitor.GetIssues();
-			foreach(IssueData NewIssue in NewIssues)
+			List<IssueData> newIssues = _issueMonitor.GetIssues();
+			foreach (IssueData newIssue in newIssues)
 			{
-				if(NewIssue.Id == Issue.Id)
+				if (newIssue.Id == _issue.Id)
 				{
-					Issue = NewIssue;
+					_issue = newIssue;
 					UpdateCurrentIssue();
 					break;
 				}
@@ -946,139 +962,120 @@ namespace UnrealGameSync
 
 		private void OnUpdateIssuesAsync()
 		{
-			MainThreadSynchronizationContext.Post((o) => { if(!bIsDisposing){ OnUpdateIssues(); } }, null);
-		}
-
-		void OnUpdateError(Exception Ex)
-		{
-			MessageBox.Show(String.Format("Unable to update database.\n\n{0}", Ex));
-		}
-
-		void OnUpdateErrorAsync(Exception Ex)
-		{
-			MainThreadSynchronizationContext.Post((o) => { if(!bIsDisposing){ OnUpdateError(Ex); } }, null);
+			_mainThreadSynchronizationContext.Post((o) =>
+			{
+				if (!_isDisposing)
+				{
+					OnUpdateIssues();
+				}
+			}, null);
 		}
 
 		void DestroyWorker()
 		{
-			if(PerforceWorker != null)
+			if (_perforceWorker != null)
 			{
-				PerforceWorker.Dispose();
-				PerforceWorker = null;
+				_perforceWorker.Dispose();
+				_perforceWorker = null!;
 			}
 		}
 
-		void OnRequestComplete(PerforceChangeRange Range)
+		void OnRequestComplete(PerforceChangeRange range)
 		{
 			UpdateBuildList();
 		}
 
-		void OnRequestCompleteAsync(PerforceChangeRange Range)
+		void UpdateChangeMetadata(ChangesRecord change)
 		{
-			MainThreadSynchronizationContext.Post((o) => { if(!bIsDisposing) { OnRequestComplete(Range); } }, null);
-		}
-
-		void UpdateChangeMetadata(PerforceChangeSummary Change)
-		{
-			if(FilterTextBox.Text.Length > 0 || FilterTypeComboBox.SelectedIndex != 0)
+			if (FilterTextBox.Text.Length > 0 || FilterTypeComboBox.SelectedIndex != 0)
 			{
 				StartUpdateTimer();
 			}
 			else
 			{
-				foreach(ListViewItem Item in BuildListView.Items)
+				foreach (ListViewItem? item in BuildListView.Items)
 				{
-					if(Item.Tag == Change)
+					if (item != null && item.Tag == change)
 					{
-						PerforceChangeDetailsWithDescribeRecord Details;
-						PerforceWorker.TryGetChangeDetails(Change.Number, out Details);
+						PerforceChangeDetailsWithDescribeRecord? details;
+						_perforceWorker!.TryGetChangeDetails(change.Number, out details);
 
-						StatusLineListViewWidget TypeWidget = (StatusLineListViewWidget)Item.SubItems[TypeHeader.Index].Tag;
-						UpdateChangeTypeWidget(TypeWidget, Details);
+						StatusLineListViewWidget typeWidget = (StatusLineListViewWidget)item.SubItems[TypeHeader.Index].Tag;
+						UpdateChangeTypeWidget(typeWidget, details);
 
-						BuildListView.RedrawItems(Item.Index, Item.Index, true);
+						BuildListView.RedrawItems(item.Index, item.Index, true);
 						break;
 					}
 				}
 			}
 		}
 
-		void UpdateChangeMetadataAsync(PerforceChangeSummary Change)
+		static readonly List<IssueDetailsWindow> s_existingWindows = new List<IssueDetailsWindow>();
+
+		class UpdateIssueDetailsTask
 		{
-			MainThreadSynchronizationContext.Post((o) => { if(!bIsDisposing) { UpdateChangeMetadata(Change); } }, null);
-		}
+			readonly string _apiUrl;
+			readonly long _issueId;
+			readonly List<IssueDiagnosticData> _diagnostics;
 
-		static List<IssueDetailsWindow> ExistingWindows = new List<IssueDetailsWindow>();
-
-		class UpdateIssueDetailsTask : IModalTask
-		{
-			string ApiUrl;
-			long IssueId;
-			List<IssueDiagnosticData> Diagnostics;
-
-			public UpdateIssueDetailsTask(string ApiUrl, long IssueId, List<IssueDiagnosticData> Diagnostics)
+			public UpdateIssueDetailsTask(string apiUrl, long issueId, List<IssueDiagnosticData> diagnostics)
 			{
-				this.ApiUrl = ApiUrl;
-				this.IssueId = IssueId;
-				this.Diagnostics = Diagnostics;
+				_apiUrl = apiUrl;
+				_issueId = issueId;
+				_diagnostics = diagnostics;
 			}
 
-			public bool Run(out string ErrorMessage)
+			public async Task RunAsync(CancellationToken cancellationToken)
 			{
-				Diagnostics.AddRange(RESTApi.GET<List<IssueDiagnosticData>>(ApiUrl, String.Format("issues/{0}/diagnostics", IssueId)));
-
-				ErrorMessage = null;
-				return true;
+				_diagnostics.AddRange(await RestApi.GetAsync<List<IssueDiagnosticData>>($"{_apiUrl}/api/issues/{_issueId}/diagnostics", cancellationToken));
 			}
 		}
 
-		public static void Show(Form Owner, IssueMonitor IssueMonitor, string ServerAndPort, string UserName, TimeSpan? ServerTimeOffset, IssueData Issue, TextWriter Log, string CurrentStream)
+		public static void Show(Form owner, IssueMonitor issueMonitor, IPerforceSettings perforceSettings, TimeSpan? serverTimeOffset, IssueData issue, IServiceProvider serviceProvider, string? currentStream)
 		{
-			List<IssueBuildData> IssueBuilds = new List<IssueBuildData>();
-			try
+			Task<List<IssueBuildData>> Func(CancellationToken cancellationToken) => RestApi.GetAsync<List<IssueBuildData>>($"{issueMonitor.ApiUrl}/api/issues/{issue.Id}/builds", cancellationToken);
+
+			ModalTask<List<IssueBuildData>>? issueBuilds = ModalTask.Execute(owner, "Querying issue", "Querying issue, please wait...", Func);
+			if (issueBuilds != null && issueBuilds.Succeeded)
 			{
-				IssueBuilds = RESTApi.GET<List<IssueBuildData>>(IssueMonitor.ApiUrl, String.Format("issues/{0}/builds", Issue.Id));
+				Show(owner, issueMonitor, perforceSettings, serverTimeOffset, issue, issueBuilds.Result, serviceProvider, currentStream);
 			}
-			catch (Exception Ex)
-			{
-				MessageBox.Show(Owner, Ex.ToString(), String.Format("Error querying builds for issue {0}", Issue.Id), MessageBoxButtons.OK);
-			}
-			Show(Owner, IssueMonitor, ServerAndPort, UserName, ServerTimeOffset, Issue, IssueBuilds, Log, CurrentStream);
 		}
 
-		public static void Show(Form Owner, IssueMonitor IssueMonitor, string ServerAndPort, string UserName, TimeSpan? ServerTimeOffset, IssueData Issue, List<IssueBuildData> IssueBuilds, TextWriter Log, string CurrentStream)
+		public static void Show(Form owner, IssueMonitor issueMonitor, IPerforceSettings perforceSettings, TimeSpan? serverTimeOffset, IssueData issue, List<IssueBuildData> issueBuilds, IServiceProvider serviceProvider, string? currentStream)
 		{
-			IssueDetailsWindow Window = ExistingWindows.FirstOrDefault(x => x.IssueMonitor == IssueMonitor && x.Issue.Id == Issue.Id);
-			if(Window == null)
+			IssueDetailsWindow? window = s_existingWindows.FirstOrDefault(x => x._issueMonitor == issueMonitor && x._issue.Id == issue.Id);
+			if (window == null)
 			{
-				List<IssueDiagnosticData> Diagnostics = new List<IssueDiagnosticData>();
+				List<IssueDiagnosticData> diagnostics = new List<IssueDiagnosticData>();
 
-				UpdateIssueDetailsTask Task = new UpdateIssueDetailsTask(IssueMonitor.ApiUrl, Issue.Id, Diagnostics);
-				if(!ModalTask.ExecuteAndShowError(Owner, Task, "Fetching data", "Fetching data, please wait..."))
+				UpdateIssueDetailsTask task = new UpdateIssueDetailsTask(issueMonitor.ApiUrl!, issue.Id, diagnostics);
+				ModalTask? taskResult = ModalTask.Execute(owner, "Fetching data", "Fetching data, please wait...", task.RunAsync);
+				if (taskResult == null || !taskResult.Succeeded)
 				{
 					return;
 				}
 
-				Window = new IssueDetailsWindow(IssueMonitor, Issue, IssueBuilds, Diagnostics, ServerAndPort, UserName, ServerTimeOffset, Log, CurrentStream);
-				Window.Owner = Owner;
-				if (Owner.Visible && Owner.WindowState != FormWindowState.Minimized)
+				window = new IssueDetailsWindow(issueMonitor, issue, issueBuilds, diagnostics, perforceSettings, serverTimeOffset, serviceProvider, currentStream);
+				window.Owner = owner;
+				if (owner.Visible && owner.WindowState != FormWindowState.Minimized)
 				{
-					Window.StartPosition = FormStartPosition.Manual;
-					Window.Location = new Point(Owner.Location.X + (Owner.Width - Window.Width) / 2, Owner.Location.Y + (Owner.Height - Window.Height) / 2);
+					window.StartPosition = FormStartPosition.Manual;
+					window.Location = new Point(owner.Location.X + (owner.Width - window.Width) / 2, owner.Location.Y + (owner.Height - window.Height) / 2);
 				}
 				else
 				{
-					Window.StartPosition = FormStartPosition.CenterScreen;
+					window.StartPosition = FormStartPosition.CenterScreen;
 				}
-				Window.Show();
+				window.Show();
 
-				ExistingWindows.Add(Window);
-				Window.FormClosed += (S, E) => ExistingWindows.Remove(Window);
+				s_existingWindows.Add(window);
+				window.FormClosed += (s, e) => s_existingWindows.Remove(window);
 			}
 			else
 			{
-				Window.Location = new Point(Owner.Location.X + (Owner.Width - Window.Width) / 2, Owner.Location.Y + (Owner.Height - Window.Height) / 2);
-				Window.Activate();
+				window.Location = new Point(owner.Location.X + (owner.Width - window.Width) / 2, owner.Location.Y + (owner.Height - window.Height) / 2);
+				window.Activate();
 			}
 		}
 
@@ -1101,39 +1098,37 @@ namespace UnrealGameSync
 
 		private void BuildListView_DrawItem(object sender, DrawListViewItemEventArgs e)
 		{
-			if(e.Item.Selected)
+			if (e.Item.Selected)
 			{
 				BuildListView.DrawSelectedBackground(e.Graphics, e.Bounds);
 			}
-			else if(e.ItemIndex == BuildListView.HoverItem)
+			else if (e.ItemIndex == BuildListView.HoverItem)
 			{
 				BuildListView.DrawTrackedBackground(e.Graphics, e.Bounds);
 			}
-			else if(e.Item.Tag is BuildGroup)
+			else if (e.Item.Tag is BuildGroup buildGroup)
 			{
-				BuildGroup BuildGroup = (BuildGroup)e.Item.Tag;
-
-				Color BackgroundColor;
-				if(BuildGroup.Outcome == IssueBuildOutcome.Error)
+				Color backgroundColor;
+				if (buildGroup.Outcome == IssueBuildOutcome.Error)
 				{
-					BackgroundColor = Color.FromArgb(254, 248, 246);
+					backgroundColor = Color.FromArgb(254, 248, 246);
 				}
-				else if(BuildGroup.Outcome == IssueBuildOutcome.Warning)
+				else if (buildGroup.Outcome == IssueBuildOutcome.Warning)
 				{
-					BackgroundColor = Color.FromArgb(254, 254, 246);
+					backgroundColor = Color.FromArgb(254, 254, 246);
 				}
-				else if(BuildGroup.Outcome == IssueBuildOutcome.Success)
+				else if (buildGroup.Outcome == IssueBuildOutcome.Success)
 				{
-					BackgroundColor = Color.FromArgb(248, 254, 246);
+					backgroundColor = Color.FromArgb(248, 254, 246);
 				}
 				else
 				{
-					BackgroundColor = Color.FromArgb(245, 245, 245);
+					backgroundColor = Color.FromArgb(245, 245, 245);
 				}
 
-				using(SolidBrush Brush = new SolidBrush(BackgroundColor))
+				using (SolidBrush brush = new SolidBrush(backgroundColor))
 				{
-					e.Graphics.FillRectangle(Brush, e.Bounds);
+					e.Graphics.FillRectangle(brush, e.Bounds);
 				}
 			}
 			else
@@ -1144,58 +1139,60 @@ namespace UnrealGameSync
 
 		private void BuildListView_DrawSubItem(object sender, DrawListViewSubItemEventArgs e)
 		{
-			Font CurrentFont = this.Font;//BuildFont;(Change.Number == Workspace.PendingChangeNumber || Change.Number == Workspace.CurrentChangeNumber)? SelectedBuildFont : BuildFont;
+			if (e.Item == null || e.SubItem == null)
+			{
+				return;
+			}
 
-			Color TextColor = SystemColors.WindowText;
+			Font currentFont = Font;//BuildFont;(Change.Number == Workspace.PendingChangeNumber || Change.Number == Workspace.CurrentChangeNumber)? SelectedBuildFont : BuildFont;
 
-			if(e.SubItem.Tag is CustomListViewWidget)
+			Color textColor = SystemColors.WindowText;
+
+			if (e.SubItem.Tag is CustomListViewWidget)
 			{
 				BuildListView.DrawCustomSubItem(e.Graphics, e.SubItem);
 			}
-			else if(e.Item.Tag is PerforceChangeSummary)
+			else if (e.Item.Tag is ChangesRecord change)
 			{
-				PerforceChangeSummary Change = (PerforceChangeSummary)e.Item.Tag;
-
-				Font ChangeFont = BuildListView.Font;
-				if(Issue.Owner != null && String.Compare(Change.User, Issue.Owner, StringComparison.OrdinalIgnoreCase) == 0)
+				Font changeFont = BuildListView.Font;
+				if (_issue.Owner != null && String.Equals(change.User, _issue.Owner, StringComparison.OrdinalIgnoreCase))
 				{
-					ChangeFont = BoldFont;
+					changeFont = _boldFont!;
 				}
 
-				if(e.ColumnIndex == ChangeHeader.Index)
+				if (e.ColumnIndex == ChangeHeader.Index)
 				{
-					TextRenderer.DrawText(e.Graphics, e.SubItem.Text, ChangeFont, e.Bounds, TextColor, TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+					TextRenderer.DrawText(e.Graphics, e.SubItem.Text, changeFont, e.Bounds, textColor, TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 				}
-				else if(e.ColumnIndex == AuthorHeader.Index)
+				else if (e.ColumnIndex == AuthorHeader.Index)
 				{
-					TextRenderer.DrawText(e.Graphics, e.SubItem.Text, ChangeFont, e.Bounds, TextColor, TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+					TextRenderer.DrawText(e.Graphics, e.SubItem.Text, changeFont, e.Bounds, textColor, TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 				}
-				else if(e.ColumnIndex == DescriptionHeader.Index)
+				else if (e.ColumnIndex == DescriptionHeader.Index)
 				{
-					TextRenderer.DrawText(e.Graphics, e.SubItem.Text, ChangeFont, e.Bounds, TextColor, TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+					TextRenderer.DrawText(e.Graphics, e.SubItem.Text, changeFont, e.Bounds, textColor, TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 				}
-				else if(e.ColumnIndex == TimeHeader.Index)
+				else if (e.ColumnIndex == TimeHeader.Index)
 				{
-					TextRenderer.DrawText(e.Graphics, e.SubItem.Text, ChangeFont, e.Bounds, TextColor, TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+					TextRenderer.DrawText(e.Graphics, e.SubItem.Text, changeFont, e.Bounds, textColor, TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 				}
 			}
-			else if(e.Item.Tag is IssueBuildData)
+			else if (e.Item.Tag is IssueBuildData buildData)
 			{
-				Font BoldFont = BuildListView.Font;
+				Font boldFont = BuildListView.Font;
 
-//				TextColor = SystemColors.Window;
-				IssueBuildData BuildData = (IssueBuildData)e.Item.Tag;
-				if(e.ColumnIndex == IconHeader.Index)
+				//				TextColor = SystemColors.Window;
+				if (e.ColumnIndex == IconHeader.Index)
 				{
-					if(BuildData.Outcome == IssueBuildOutcome.Success)
+					if (buildData.Outcome == IssueBuildOutcome.Success)
 					{
 						BuildListView.DrawIcon(e.Graphics, e.Bounds, WorkspaceControl.GoodBuildIcon);
 					}
-					else if(BuildData.Outcome == IssueBuildOutcome.Warning)
+					else if (buildData.Outcome == IssueBuildOutcome.Warning)
 					{
 						BuildListView.DrawIcon(e.Graphics, e.Bounds, WorkspaceControl.MixedBuildIcon);
 					}
-					else if(BuildData.Outcome == IssueBuildOutcome.Error)
+					else if (buildData.Outcome == IssueBuildOutcome.Error)
 					{
 						BuildListView.DrawIcon(e.Graphics, e.Bounds, WorkspaceControl.BadBuildIcon);
 					}
@@ -1204,83 +1201,77 @@ namespace UnrealGameSync
 						BuildListView.DrawIcon(e.Graphics, e.Bounds, WorkspaceControl.DefaultBuildIcon);
 					}
 				}
-				else if(e.ColumnIndex == ChangeHeader.Index)
+				else if (e.ColumnIndex == ChangeHeader.Index)
 				{
-					TextRenderer.DrawText(e.Graphics, BuildData.Change.ToString(), BoldFont, e.Bounds, TextColor, TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+					TextRenderer.DrawText(e.Graphics, buildData.Change.ToString(), boldFont, e.Bounds, textColor, TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 				}
-				else if(e.ColumnIndex == TypeHeader.Index)
+				else if (e.ColumnIndex == TypeHeader.Index)
 				{
-					string Status;
-					if(BuildData.Outcome == IssueBuildOutcome.Success)
+					string status;
+					if (buildData.Outcome == IssueBuildOutcome.Success)
 					{
-						Status = "Succeeded";
+						status = "Succeeded";
 					}
-					else if(BuildData.Outcome == IssueBuildOutcome.Warning)
+					else if (buildData.Outcome == IssueBuildOutcome.Warning)
 					{
-						Status = "Warning";
+						status = "Warning";
 					}
-					else if(BuildData.Outcome == IssueBuildOutcome.Error)
+					else if (buildData.Outcome == IssueBuildOutcome.Error)
 					{
-						Status = "Failed";
+						status = "Failed";
 					}
 					else
 					{
-						Status = "Pending";
+						status = "Pending";
 					}
-					TextRenderer.DrawText(e.Graphics, Status, BoldFont, e.Bounds, TextColor, TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+					TextRenderer.DrawText(e.Graphics, status, boldFont, e.Bounds, textColor, TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 				}
-				else if(e.ColumnIndex == AuthorHeader.Index)
+				else if (e.ColumnIndex == AuthorHeader.Index)
 				{
-					Rectangle Bounds = new Rectangle(e.Bounds.X, e.Bounds.Y, e.Bounds.Width + e.Item.SubItems[e.ColumnIndex].Bounds.Width, e.Bounds.Height);
-					TextRenderer.DrawText(e.Graphics, BuildData.JobName, Font, Bounds, TextColor, TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+					Rectangle bounds = new Rectangle(e.Bounds.X, e.Bounds.Y, e.Bounds.Width + e.Item.SubItems[e.ColumnIndex].Bounds.Width, e.Bounds.Height);
+					TextRenderer.DrawText(e.Graphics, buildData.JobName, Font, bounds, textColor, TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 				}
 			}
 			else
 			{
-				TextFormatFlags Flags = TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix;
-				if(BuildListView.Columns[e.ColumnIndex].TextAlign == HorizontalAlignment.Left)
+				TextFormatFlags flags = TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix;
+				if (BuildListView.Columns[e.ColumnIndex].TextAlign == HorizontalAlignment.Left)
 				{
-					Flags |= TextFormatFlags.Left;
+					flags |= TextFormatFlags.Left;
 				}
-				else if(BuildListView.Columns[e.ColumnIndex].TextAlign == HorizontalAlignment.Center)
+				else if (BuildListView.Columns[e.ColumnIndex].TextAlign == HorizontalAlignment.Center)
 				{
-					Flags |= TextFormatFlags.HorizontalCenter;
+					flags |= TextFormatFlags.HorizontalCenter;
 				}
 				else
 				{
-					Flags |= TextFormatFlags.Right;
+					flags |= TextFormatFlags.Right;
 				}
-				TextRenderer.DrawText(e.Graphics, e.SubItem.Text, CurrentFont, e.Bounds, TextColor, Flags);
+				TextRenderer.DrawText(e.Graphics, e.SubItem.Text, currentFont, e.Bounds, textColor, flags);
 			}
 		}
 
 		private void BuildListView_FontChanged(object sender, EventArgs e)
 		{
-			if(BoldFont != null)
-			{
-				BoldFont.Dispose();
-			}
-			BoldFont = new Font(BuildListView.Font.FontFamily, BuildListView.Font.SizeInPoints, FontStyle.Bold);
+			_boldFont?.Dispose();
+			_boldFont = new Font(BuildListView.Font.FontFamily, BuildListView.Font.SizeInPoints, FontStyle.Bold);
 
-			if(StatusElementResources != null)
-			{
-				StatusElementResources.Dispose();
-			}
-			StatusElementResources = new StatusElementResources(BuildListView.Font);
+			_statusElementResources?.Dispose();
+			_statusElementResources = new StatusElementResources(BuildListView.Font);
 		}
 
-		private void BuildListView_MouseClick(object Sender, MouseEventArgs Args)
+		private void BuildListView_MouseClick(object sender, MouseEventArgs args)
 		{
-			if(Args.Button == MouseButtons.Right)
+			if (args.Button == MouseButtons.Right)
 			{
-				ListViewHitTestInfo HitTest = BuildListView.HitTest(Args.Location);
-				if(HitTest.Item != null && HitTest.Item.Tag != null)
+				ListViewHitTestInfo hitTest = BuildListView.HitTest(args.Location);
+				if (hitTest.Item != null && hitTest.Item.Tag != null)
 				{
-					ContextMenuChange = HitTest.Item.Tag as PerforceChangeSummary; 
-					if(ContextMenuChange != null)
+					_contextMenuChange = hitTest.Item.Tag as ChangesRecord;
+					if (_contextMenuChange != null)
 					{
-						BuildListContextMenu_Assign.Text = String.Format("Assign to {0}", ContextMenuChange.User);
-						BuildListContextMenu.Show(BuildListView, Args.Location);
+						BuildListContextMenu_Assign.Text = String.Format("Assign to {0}", _contextMenuChange.User);
+						BuildListContextMenu.Show(BuildListView, args.Location);
 					}
 				}
 			}
@@ -1288,49 +1279,52 @@ namespace UnrealGameSync
 
 		private void BuildListContextMenu_MoreInfo_Click(object sender, EventArgs e)
 		{
-			Utility.SpawnP4VC(String.Format("{0} change {1}", Perforce.GetConnectionOptions(), ContextMenuChange.Number));
+			if (_contextMenuChange != null)
+			{
+				Program.SpawnP4Vc(String.Format("{0} change {1}", _perforceSettings.GetArgumentsForExternalProgram(true), _contextMenuChange.Number));
+			}
 		}
 
 		private void BuildListContextMenu_Blame_Click(object sender, EventArgs e)
 		{
-			if(ContextMenuChange != null)
+			if (_contextMenuChange != null && _contextMenuChange.User != null)
 			{
-				AssignToUser(ContextMenuChange.User);
+				AssignToUser(_contextMenuChange.User);
 			}
 		}
 
-		private void AssignToUser(string User)
+		private void AssignToUser(string user)
 		{
-			IssueUpdateData Update = new IssueUpdateData();
-			Update.Id = Issue.Id;
-			Update.Owner = User;
-			Update.FixChange = 0;
-			if(String.Compare(User, Perforce.UserName, StringComparison.OrdinalIgnoreCase) == 0)
+			IssueUpdateData update = new IssueUpdateData();
+			update.Id = _issue.Id;
+			update.Owner = user;
+			update.FixChange = 0;
+			if (String.Equals(user, _perforceSettings.UserName, StringComparison.OrdinalIgnoreCase))
 			{
-				Update.NominatedBy = "";
-				Update.Acknowledged = true;
+				update.NominatedBy = "";
+				update.Acknowledged = true;
 			}
 			else
 			{
-				Update.NominatedBy = Perforce.UserName;
-				Update.Acknowledged = false;
+				update.NominatedBy = _perforceSettings.UserName;
+				update.Acknowledged = false;
 			}
-			IssueMonitor.PostUpdate(Update);
+			_issueMonitor.PostUpdate(update);
 
 			UpdateCurrentIssue();
 		}
 
 		private void AssignToMeBtn_Click(object sender, EventArgs e)
 		{
-			AssignToUser(IssueMonitor.UserName);
+			AssignToUser(_issueMonitor.UserName);
 		}
 
 		private void AssignToOtherBtn_Click(object sender, EventArgs e)
 		{
-			string SelectedUserName;
-			if(SelectUserWindow.ShowModal(this, Perforce, Log, out SelectedUserName))
+			string? selectedUserName;
+			if (SelectUserWindow.ShowModal(this, _perforceSettings, _serviceProvider, out selectedUserName))
 			{
-				AssignToUser(SelectedUserName);
+				AssignToUser(selectedUserName);
 			}
 		}
 
@@ -1347,63 +1341,69 @@ namespace UnrealGameSync
 
 		private void MarkFixedBtn_Click(object sender, EventArgs e)
 		{
-			int FixChangeNumber = Issue.FixChange;
-			if(FixChangeNumber == 0)
+			int fixChangeNumber = _issue.FixChange;
+			if (fixChangeNumber == 0)
 			{
-				if(IssueFixedWindow.ShowModal(this, Perforce, ref FixChangeNumber))
+				if (IssueFixedWindow.ShowModal(this, _perforceSettings, _serviceProvider, ref fixChangeNumber))
 				{
-					IssueUpdateData Update = new IssueUpdateData();
-					Update.Id = Issue.Id;
-					Update.FixChange = FixChangeNumber;
-					IssueMonitor.PostUpdate(Update);
+					IssueUpdateData update = new IssueUpdateData();
+					update.Id = _issue.Id;
+					update.FixChange = fixChangeNumber;
+					_issueMonitor.PostUpdate(update);
 				}
 			}
 			else
 			{
-				IssueUpdateData Update = new IssueUpdateData();
-				Update.Id = Issue.Id;
-				Update.FixChange = 0;
-				IssueMonitor.PostUpdate(Update);
+				IssueUpdateData update = new IssueUpdateData();
+				update.Id = _issue.Id;
+				update.FixChange = 0;
+				_issueMonitor.PostUpdate(update);
 			}
 		}
 
 		private void DescriptionLabel_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
 		{
-			IssueBuildData LastBuild = IssueBuilds.Where(x => x.Stream == SelectedStream).OrderByDescending(x => x.Change).ThenByDescending(x => x.ErrorUrl).FirstOrDefault();
-			if(LastBuild != null)
+			IssueBuildData? lastBuild = _issueBuilds.Where(x => x.Stream == _selectedStream).OrderByDescending(x => x.Change).ThenByDescending(x => x.ErrorUrl).FirstOrDefault();
+			if (lastBuild != null)
 			{
-				System.Diagnostics.Process.Start(LastBuild.ErrorUrl);
+				Utility.OpenUrl(lastBuild.ErrorUrl);
 			}
 		}
 
 		private void JobContextMenu_ShowError_Click(object sender, EventArgs e)
 		{
-			foreach(IssueBuildData Build in SelectedBuildGroup.Builds)
+			if (_selectedBuildGroup != null)
 			{
-				if(Build.ErrorUrl != null)
+				foreach (IssueBuildData build in _selectedBuildGroup.Builds)
 				{
-					System.Diagnostics.Process.Start(Build.ErrorUrl);
-					break;
+					if (build.ErrorUrl != null)
+					{
+						Utility.OpenUrl(build.ErrorUrl);
+						break;
+					}
 				}
 			}
 		}
 
 		private void JobContextMenu_ViewJob_Click(object sender, EventArgs e)
 		{
-			System.Diagnostics.Process.Start(SelectedBuildGroup.JobUrl);
+			if (_selectedBuildGroup != null)
+			{
+				Utility.OpenUrl(_selectedBuildGroup.JobUrl);
+			}
 		}
 
 		private void BuildListView_MouseUp(object sender, MouseEventArgs e)
 		{
-			if((e.Button & MouseButtons.Right) != 0)
+			if ((e.Button & MouseButtons.Right) != 0)
 			{
-				ListViewHitTestInfo HitTest = BuildListView.HitTest(e.Location);
-				if(HitTest.Item != null)
+				ListViewHitTestInfo hitTest = BuildListView.HitTest(e.Location);
+				if (hitTest.Item != null)
 				{
-					BuildGroup Group = HitTest.Item.Tag as BuildGroup;
-					if(Group != null)
+					BuildGroup? group = hitTest.Item.Tag as BuildGroup;
+					if (group != null)
 					{
-						ShowJobContextMenu(e.Location, Group);
+						ShowJobContextMenu(e.Location, group);
 					}
 				}
 			}
@@ -1411,16 +1411,19 @@ namespace UnrealGameSync
 
 		private void BuildLinkLabel_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
 		{
-			IssueBuildData Build = IssueBuilds.FirstOrDefault(x => x.ErrorUrl != null);
-			if (Build != null)
+			IssueBuildData? build = _issueBuilds.FirstOrDefault(x => x.ErrorUrl != null);
+			if (build != null)
 			{
-				System.Diagnostics.Process.Start(Build.ErrorUrl);
+				Utility.OpenUrl(build.ErrorUrl);
 			}
 		}
 
 		private void DetailsTextBox_LinkClicked(object sender, LinkClickedEventArgs e)
 		{
-			System.Diagnostics.Process.Start(e.LinkText);
+			if (e.LinkText != null)
+			{
+				Utility.OpenUrl(e.LinkText);
+			}
 		}
 	}
 }

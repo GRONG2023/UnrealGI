@@ -12,7 +12,7 @@
 #include "Shaders/MetalShaderLibrary.h"
 
 #include "HAL/FileManager.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "Misc/Paths.h"
 #include "MetalShaderResources.h"
 #include "MetalResources.h"
@@ -29,9 +29,9 @@
 #undef SHADERCOMPILERCOMMON_API
 
 
-NSString* DecodeMetalSourceCode(uint32 CodeSize, TArray<uint8> const& CompressedSource)
+NS::String* DecodeMetalSourceCode(uint32 CodeSize, TArray<uint8> const& CompressedSource)
 {
-	NSString* GlslCodeNSString = nil;
+	NS::String* GlslCodeNSString = nullptr;
 	if (CodeSize && CompressedSource.Num())
 	{
 		TArray<ANSICHAR> UncompressedCode;
@@ -39,78 +39,66 @@ NSString* DecodeMetalSourceCode(uint32 CodeSize, TArray<uint8> const& Compressed
 		bool bSucceed = FCompression::UncompressMemory(NAME_Zlib, UncompressedCode.GetData(), CodeSize, CompressedSource.GetData(), CompressedSource.Num());
 		if (bSucceed)
 		{
-			GlslCodeNSString = [[NSString stringWithUTF8String:UncompressedCode.GetData()] retain];
+			GlslCodeNSString = NS::String::string(UncompressedCode.GetData(), NS::UTF8StringEncoding);
+            GlslCodeNSString->retain();
 		}
 	}
 	return GlslCodeNSString;
 }
 
-mtlpp::LanguageVersion ValidateVersion(uint8 Version)
+MTL::LanguageVersion ValidateVersion(uint32 Version)
 {
-	static uint32 MetalMacOSVersions[][3] = {
-		{10,11,6},
-		{10,11,6},
-		{10,12,6},
-		{10,13,0},
-		{10,14,0},
-	};
-	static uint32 MetaliOSVersions[][3] = {
-		{8,0,0},
-		{9,0,0},
-		{10,0,0},
-		{11,0,0},
-		{12,0,0},
-	};
-	static TCHAR const* StandardNames[] =
-	{
-		TEXT("Metal 1.0"),
-		TEXT("Metal 1.1"),
-		TEXT("Metal 1.2"),
-		TEXT("Metal 2.0"),
-		TEXT("Metal 2.1"),
-	};
-	
-	mtlpp::LanguageVersion Result = mtlpp::LanguageVersion::Version1_1;
-	switch(Version)
-	{
-		case 4:
-			Result = mtlpp::LanguageVersion::Version2_1;
-			break;
-		case 3:
-			Result = mtlpp::LanguageVersion::Version2_0;
-			break;
-		case 2:
-			Result = mtlpp::LanguageVersion::Version1_2;
-			break;
-		case 1:
-			Result = mtlpp::LanguageVersion::Version1_1;
-			break;
-		case 0:
-		default:
+    MTL::LanguageVersion Result = MTL::LanguageVersion2_4;
 #if PLATFORM_MAC
-			Result = mtlpp::LanguageVersion::Version1_1;
+    Result = MTL::LanguageVersion2_4;
+    switch(Version)
+    {
+        case 8:
+            Result = MTL::LanguageVersion3_0;
+            break;
+        case 7:
+            Result = MTL::LanguageVersion2_4;
+            break;
+		 case 6:
+            Result = MTL::LanguageVersion2_3;
+            break;
+		case 5:
+			// Fall through
+        case 0:
+            Version = 7;
+            Result = MTL::LanguageVersion2_2; // minimum version as of UE5.1
+            break;
+        default:
+            //EMacMetalShaderStandard::MacMetalSLStandard_Minimum is currently 2.2
+            UE_LOG(LogTemp, Warning, TEXT("The Metal version currently set is not supported anymore. Set it in the Project Settings. Defaulting to the minimum version."));
+            Version = 5;
+            Result = MTL::LanguageVersion2_2;
+            break;
+    }
 #else
-			Result = mtlpp::LanguageVersion::Version1_0;
+    Result = MTL::LanguageVersion2_4;
+    switch(Version)
+    {
+        case 7:
+            Result = MTL::LanguageVersion2_4;
+            break;
+        case 8:
+            Result = MTL::LanguageVersion3_0;
+            break;
+        case 9:
+            Result = MTL::LanguageVersion3_1;
+            break;
+        case 0:
+            Version = 8;
+            Result = MTL::LanguageVersion2_4; // minimum version as of UE5.3
+            break;
+        default:
+            //EIOSMetalShaderStandard::IOSMetalSLStandard_Minimum is currently 2.4
+            UE_LOG(LogTemp, Warning, TEXT("The Metal version currently set is not supported anymore. Set it in the Project Settings. Defaulting to the minimum version."));
+            Version = 7;
+            Result = MTL::LanguageVersion2_4;
+            break;
+    }
 #endif
-			break;
-	}
-	
-	if (!FApplePlatformMisc::IsOSAtLeastVersion(MetalMacOSVersions[Version], MetaliOSVersions[Version], MetaliOSVersions[Version]))
-	{
-		FFormatNamedArguments Args;
-		Args.Add(TEXT("ShaderVersion"), FText::FromString(FString(StandardNames[Version])));
-#if PLATFORM_MAC
-		Args.Add(TEXT("RequiredOS"), FText::FromString(FString::Printf(TEXT("macOS %d.%d.%d"), MetalMacOSVersions[Version][0], MetalMacOSVersions[Version][1], MetalMacOSVersions[Version][2])));
-#else
-		Args.Add(TEXT("RequiredOS"), FText::FromString(FString::Printf(TEXT("%d.%d.%d"), MetaliOSVersions[Version][0], MetaliOSVersions[Version][1], MetaliOSVersions[Version][2])));
-#endif
-		FText LocalizedMsg = FText::Format(NSLOCTEXT("MetalRHI", "ShaderVersionUnsupported", "The current OS version does not support {ShaderVersion} required by the project. You must upgrade to {RequiredOS} to run this project."),Args);
-		
-		FText Title = NSLOCTEXT("MetalRHI", "ShaderVersionUnsupportedTitle", "Shader Version Unsupported");
-		FMessageDialog::Open(EAppMsgType::Ok, LocalizedMsg, &Title);
-		
-		FPlatformMisc::RequestExit(true);
-	}
-	
 	return Result;
 }

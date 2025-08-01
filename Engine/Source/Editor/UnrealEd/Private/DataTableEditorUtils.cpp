@@ -7,7 +7,7 @@
 #include "Fonts/FontMeasure.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Application/SlateUser.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Engine/UserDefinedStruct.h"
 #include "Misc/StringUtility.h"
 #include "ScopedTransaction.h"
@@ -17,7 +17,7 @@
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Views/SListView.h"
 #include "Widgets/Input/SComboBox.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "DetailWidgetRow.h"
 #include "Editor.h"
 
@@ -38,9 +38,9 @@ public:
 		: _Content()
 		, _ComboBoxStyle(&FCoreStyle::Get().GetWidgetStyle< FComboBoxStyle >("ComboBox"))
 		, _ButtonStyle(nullptr)
-		, _ItemStyle(&FCoreStyle::Get().GetWidgetStyle< FTableRowStyle >("TableView.Row"))
-		, _ContentPadding(FMargin(4.0, 2.0))
-		, _ForegroundColor(FCoreStyle::Get().GetSlateColor("InvertedForeground"))
+		, _ItemStyle(&FAppStyle::Get().GetWidgetStyle<FTableRowStyle>("ComboBox.Row"))
+		, _ContentPadding(_ComboBoxStyle->ContentPadding)
+		, _ForegroundColor(FSlateColor::UseStyle())
 		, _OnStructSelected()
 		, _InitiallySelectedItem(nullptr)
 		, _Method()
@@ -138,7 +138,8 @@ private:
 private:
 	/** Delegate that is invoked when the selected item in the combo box changes */
 	FDataTableEditorUtils::FOnDataTableStructSelected OnStructSelected;
-
+	/** The padding around each menu row */
+	FMargin MenuRowPadding;
 	/** The item currently selected in the combo box */
 	TSharedPtr<FString> SelectedItem;
 	/** The search field used for the combox box's contents */
@@ -159,6 +160,8 @@ void SDataTableStructComboBox::Construct(const FArguments& InArgs)
 	check(InArgs._ComboBoxStyle);
 
 	ItemStyle = InArgs._ItemStyle;
+
+	MenuRowPadding = InArgs._ComboBoxStyle->MenuRowPadding;
 
 	// Work out which values we should use based on whether we were given an override, or should use the style's version
 	const FComboButtonStyle& OurComboButtonStyle = InArgs._ComboBoxStyle->ComboButtonStyle;
@@ -218,6 +221,7 @@ void SDataTableStructComboBox::Construct(const FArguments& InArgs)
 		.OnMenuOpenChanged(this, &SDataTableStructComboBox::OnMenuOpenChanged)
 		.IsFocusable(true)
 		);
+
 
 	// Better to select search field so you can type right away
 	SetMenuContentWidgetToFocus(SearchField);
@@ -336,6 +340,7 @@ TSharedRef<ITableRow> SDataTableStructComboBox::GenerateMenuItemRow(TSharedPtr<F
 	return SNew(SComboRow<TSharedPtr<FString>>, OwnerTable)
 		.Style(ItemStyle)
 		.Visibility(WidgetVisibility)
+		.Padding(MenuRowPadding)
 		[
 			SNew(STextBlock)
 			.Text(FText::FromString(*InItem))
@@ -439,8 +444,7 @@ const FString FDataTableEditorUtils::VariableTypesTooltipDocLink = TEXT("Shared/
 TSharedRef<SWidget> FDataTableEditorUtils::MakeRowStructureComboBox(FOnDataTableStructSelected OnSelected)
 {
 	TSharedRef<SDataTableStructComboBox> ComboBox = SNew(SDataTableStructComboBox)
-		.OnStructSelected(OnSelected)
-		.ContentPadding(3);
+		.OnStructSelected(OnSelected);
 
 	return ComboBox;
 }
@@ -654,7 +658,7 @@ bool FDataTableEditorUtils::MoveRow(UDataTable* DataTable, FName RowName, ERowMo
 	}
 
 	// Swap the order around as requested
-	OrderedRowNames.RemoveAt(CurrentRowIndex, 1, false);
+	OrderedRowNames.RemoveAt(CurrentRowIndex, 1, EAllowShrinking::No);
 	OrderedRowNames.Insert(RowName, NewRowIndex);
 
 	// Build a name -> index map as the KeySort will hit this a lot
@@ -742,12 +746,13 @@ void FDataTableEditorUtils::BroadcastPostChange(UDataTable* DataTable, EDataTabl
 {
 	if (DataTable && (EDataTableChangeInfo::RowList == Info))
 	{
-		for (TObjectIterator<UK2Node_GetDataTableRow> It(RF_Transient | RF_ClassDefaultObject, /** bIncludeDerivedClasses */ true, /** InternalExcludeFlags */ EInternalObjectFlags::PendingKill); It; ++It)
+		for (TObjectIterator<UK2Node_GetDataTableRow> It(RF_Transient | RF_ClassDefaultObject, /** bIncludeDerivedClasses */ true, /** InternalExcludeFlags */ EInternalObjectFlags::Garbage); It; ++It)
 		{
 			It->OnDataTableRowListChanged(DataTable);
 		}
 	}
 	FDataTableEditorManager::Get().PostChange(DataTable, Info);
+	DataTable->OnDataTableChanged().Broadcast();
 }
 
 void FDataTableEditorUtils::CacheDataTableForEditing(const UDataTable* DataTable, TArray<FDataTableEditorColumnHeaderDataPtr>& OutAvailableColumns, TArray<FDataTableEditorRowListViewDataPtr>& OutAvailableRows)
@@ -780,7 +785,7 @@ void FDataTableEditorUtils::CacheDataForEditing(const UScriptStruct* RowStruct, 
 	}
 
 	TSharedRef<FSlateFontMeasure> FontMeasure = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
-	const FTextBlockStyle& CellTextStyle = FEditorStyle::GetWidgetStyle<FTextBlockStyle>("DataTableEditor.CellText");
+	const FTextBlockStyle& CellTextStyle = FAppStyle::GetWidgetStyle<FTextBlockStyle>("DataTableEditor.CellText");
 	static const float CellPadding = 10.0f;
 
 	// Populate the column data
@@ -808,7 +813,7 @@ void FDataTableEditorUtils::CacheDataForEditing(const UScriptStruct* RowStruct, 
 			CachedColumnData->Property = Prop;
 		}
 
-		CachedColumnData->DesiredColumnWidth = FontMeasure->Measure(CachedColumnData->DisplayName, CellTextStyle.Font).X + CellPadding;
+		CachedColumnData->DesiredColumnWidth = static_cast<float>(FontMeasure->Measure(CachedColumnData->DisplayName, CellTextStyle.Font).X + CellPadding);
 
 		OutAvailableColumns.Add(CachedColumnData);
 	}
@@ -851,9 +856,9 @@ void FDataTableEditorUtils::CacheDataForEditing(const UScriptStruct* RowStruct, 
 
 				const FVector2D CellTextSize = FontMeasure->Measure(CellText, CellTextStyle.Font);
 
-				CachedRowData->DesiredRowHeight = FMath::Max(CachedRowData->DesiredRowHeight, CellTextSize.Y);
+				CachedRowData->DesiredRowHeight = static_cast<float>(FMath::Max(CachedRowData->DesiredRowHeight, CellTextSize.Y));
 
-				const float CellWidth = CellTextSize.X + CellPadding;
+				const float CellWidth = static_cast<float>(CellTextSize.X + CellPadding);
 				CachedColumnData->DesiredColumnWidth = FMath::Max(CachedColumnData->DesiredColumnWidth, CellWidth);
 			}
 		}
@@ -898,7 +903,7 @@ void FDataTableEditorUtils::GetPossibleStructAssetData(TArray<FAssetData>& Struc
 	// Now get unloaded ones
 	const FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 	TArray<FAssetData> AssetData;
-	AssetRegistryModule.Get().GetAssetsByClass(UUserDefinedStruct::StaticClass()->GetFName(), AssetData);
+	AssetRegistryModule.Get().GetAssetsByClass(UUserDefinedStruct::StaticClass()->GetClassPathName(), AssetData);
 
 	for (int32 AssetIndex = 0; AssetIndex < AssetData.Num(); ++AssetIndex)
 	{

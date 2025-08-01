@@ -9,7 +9,6 @@
 #include "IWebBrowserPopupFeatures.h"
 
 #if PLATFORM_WINDOWS
-#include "Windows/WindowsHWrapper.h"
 #include "Windows/AllowWindowsPlatformTypes.h"
 #include "Windows/AllowWindowsPlatformAtomics.h"
 #endif
@@ -45,6 +44,7 @@ public:
 	FCEFBrowserPopupFeatures();
 	FCEFBrowserPopupFeatures(const CefPopupFeatures& PopupFeatures);
 	virtual ~FCEFBrowserPopupFeatures();
+	void SetResizable(const bool bResize);
 
 	// IWebBrowserPopupFeatures Interface
 

@@ -12,7 +12,7 @@
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Input/SButton.h"
 #include "Styling/CoreStyle.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Editor.h"
 #include "Widgets/Images/SThrobber.h"
 
@@ -43,7 +43,7 @@ void SAuthorizingPlugin::Construct(const FArguments& InArgs, const TSharedRef<SW
 		.MinDesiredWidth(500)
 		[
 			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 			[
 				SNew(SVerticalBox)
 
@@ -123,7 +123,7 @@ EActiveTimerReturnType SAuthorizingPlugin::RefreshStatus(double InCurrentTime, f
 	// Engine tick isn't running when the modal window is open, so we need to tick any core tickers
 	// to as that's what the RPC system uses to update the current state of RPC calls.
 	FTaskGraphInterface::Get().ProcessThreadUntilIdle(ENamedThreads::GameThread);
-	FTicker::GetCoreTicker().Tick(InDeltaTime);
+	FTSTicker::GetCoreTicker().Tick(InDeltaTime);
 
 	PreviousAuthorizationState = AuthorizationState;
 	AuthorizationState = Authorizer->UpdateAuthorizationState(InDeltaTime);

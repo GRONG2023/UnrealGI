@@ -1,13 +1,19 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Particles/SubUVAnimation.h"
-#include "Misc/Guid.h"
+#include "Containers/ClosableMpscQueue.h"
+#include "Engine/Texture2D.h"
+#include "Experimental/Containers/HazardPointer.h"
 #include "Math/RandomStream.h"
-#include "UObject/UObjectHash.h"
+#include "Math/ConvexHull2d.h"
 #include "ParticleHelper.h"
 #include "Particles/ParticleSystemComponent.h"
 #include "DerivedDataCacheInterface.h"
+#include "DerivedDataCacheKey.h"
 #include "ComponentReregisterContext.h"
+#include "RHI.h"
+
+#define LOCTEXT_NAMESPACE "FSubUVDerivedData"
 
 #if ENABLE_COOK_STATS
 FCookStats::FDDCResourceUsageStats SubUVAnimationCookStats::UsageStats;
@@ -26,7 +32,14 @@ FString FSubUVDerivedData::GetDDCKeyString(const FGuid& StateId, int32 SizeX, in
 		KeyString += FString::Printf(TEXT("_%u"), OpacitySourceMode);
 	}
 	// adding v2 to the key after fixing color channel offsets
-	KeyString += TEXT("_V2");
+	// adding v3 to the key after allowing other formats
+	// adding v4 to the key after adding G8 support
+	KeyString += TEXT("_V4");
+
+#if WITH_EDITOR
+	static UE::DerivedData::FCacheBucket LegacyBucket(TEXTVIEW("LegacySUBUV"), TEXTVIEW("SubUV"));
+#endif
+
 	return FDerivedDataCacheInterface::BuildCacheKey(TEXT("SUBUV_"), SUBUV_DERIVEDDATA_VER, *KeyString);
 }
 
@@ -35,17 +48,32 @@ void FSubUVDerivedData::Serialize(FStructuredArchive::FSlot Slot)
 	Slot << BoundingGeometry;
 }
 
-void FSubUVBoundingGeometryBuffer::InitRHI()
+FSubUVBoundingGeometryBuffer::FSubUVBoundingGeometryBuffer() = default;
+
+FSubUVBoundingGeometryBuffer::FSubUVBoundingGeometryBuffer(TArray<FVector2f>* InVertices)
+{
+	Vertices = InVertices;
+}
+
+FSubUVBoundingGeometryBuffer::~FSubUVBoundingGeometryBuffer() = default;
+
+void FSubUVBoundingGeometryBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	const uint32 SizeInBytes = Vertices->Num() * Vertices->GetTypeSize();
 
 	if (SizeInBytes > 0)
 	{
 		FSubUVVertexResourceArray ResourceArray(Vertices->GetData(), SizeInBytes);
-		FRHIResourceCreateInfo CreateInfo(&ResourceArray);
-		VertexBufferRHI = RHICreateVertexBuffer(SizeInBytes, BUF_ShaderResource | BUF_Static, CreateInfo);
-		ShaderResourceView = RHICreateShaderResourceView(VertexBufferRHI, sizeof(FVector2D), PF_G32R32F);
+		FRHIResourceCreateInfo CreateInfo(TEXT("FSubUVBoundingGeometryBuffer"), &ResourceArray);
+		VertexBufferRHI = RHICmdList.CreateVertexBuffer(SizeInBytes, BUF_ShaderResource | BUF_Static, CreateInfo);
+		ShaderResourceView = RHICmdList.CreateShaderResourceView(VertexBufferRHI, sizeof(FVector2f), PF_G32R32F);
 	}
+}
+
+void FSubUVBoundingGeometryBuffer::ReleaseRHI()
+{
+	FVertexBuffer::ReleaseRHI();
+	ShaderResourceView.SafeRelease();
 }
 
 USubUVAnimation::USubUVAnimation(const FObjectInitializer& ObjectInitializer)
@@ -85,7 +113,7 @@ void USubUVAnimation::Serialize(FStructuredArchive::FRecord Record)
 
 	if (bCooked)
 	{
-		DerivedData.Serialize(Record.EnterField(SA_FIELD_NAME(TEXT("DerivedData"))));
+		DerivedData.Serialize(Record.EnterField(TEXT("DerivedData")));
 	}
 }
 
@@ -106,16 +134,16 @@ void USubUVAnimation::CacheDerivedData()
 	if (GetDerivedDataCacheRef().GetSynchronous(*KeyString, Data, GetPathName()))
 	{
 		COOK_STAT(Timer.AddHit(Data.Num()));
-		DerivedData.BoundingGeometry.Empty(Data.Num() / sizeof(FVector2D));
-		DerivedData.BoundingGeometry.AddUninitialized(Data.Num() / sizeof(FVector2D));
+		DerivedData.BoundingGeometry.Empty(Data.Num() / sizeof(FVector2f));
+		DerivedData.BoundingGeometry.AddUninitialized(Data.Num() / sizeof(FVector2f));
 		FPlatformMemory::Memcpy(DerivedData.BoundingGeometry.GetData(), Data.GetData(), Data.Num() * Data.GetTypeSize());
 	}
 	else
 	{
 		DerivedData.Build(SubUVTexture, SubImages_Horizontal, SubImages_Vertical, BoundingMode, AlphaThreshold, OpacitySourceMode);
 
-		Data.Empty(DerivedData.BoundingGeometry.Num() * sizeof(FVector2D));
-		Data.AddUninitialized(DerivedData.BoundingGeometry.Num() * sizeof(FVector2D));
+		Data.Empty(DerivedData.BoundingGeometry.Num() * sizeof(FVector2f));
+		Data.AddUninitialized(DerivedData.BoundingGeometry.Num() * sizeof(FVector2f));
 		FPlatformMemory::Memcpy(Data.GetData(), DerivedData.BoundingGeometry.GetData(), DerivedData.BoundingGeometry.Num() * DerivedData.BoundingGeometry.GetTypeSize());
 		GetDerivedDataCacheRef().Put(*KeyString, Data, GetPathName());
 		COOK_STAT(Timer.AddMiss(Data.Num()));
@@ -215,7 +243,7 @@ bool ComputePointIntersectionBetweenLines2D(const FLine2D& Line0, const FLine2D&
 	float d = CrossProduct2D(Line0.Direction, Line1.Direction);
 
 	// Parallel case
-	if (FMath::Abs(d) < SMALL_NUMBER)
+	if (FMath::Abs(d) < UE_SMALL_NUMBER)
 	{
 		return false;
 	}
@@ -444,36 +472,174 @@ FIntPoint GNeighbors[] =
 	FIntPoint(-1, 0)
 };
 
-uint8 ComputeOpacityValue(const uint8* BGRA, EOpacitySourceMode OpacitySourceMode)
-{
-	if (OpacitySourceMode == OSM_Alpha)
-	{
-		return *(BGRA + 3);
-	}
-	else if (OpacitySourceMode == OSM_RedChannel)
-	{
-		return *(BGRA + 2);
-	}
-	else if (OpacitySourceMode == OSM_GreenChannel)
-	{
-		return *(BGRA + 1);
-	}
-	else if (OpacitySourceMode == OSM_BlueChannel)
-	{
-		return *(BGRA + 0);
-	}
-	else
-	{
-		uint32 R = *BGRA;
-		uint32 G = *(BGRA + 1);
-		uint32 B = *(BGRA + 2);
 
-		return (uint8)((R + G + B) / 3);
+bool IsSupportedFormat(ETextureSourceFormat SrcFormat)
+{
+	return SrcFormat == TSF_G8 || SrcFormat == TSF_BGRA8 || SrcFormat == TSF_RGBA16 || SrcFormat == TSF_RGBA16F;
+}
+
+uint32 GetByteSizePerPixel(ETextureSourceFormat SrcFormat)
+{
+	switch (SrcFormat)
+	{
+		case TSF_G8:		return 1;
+		case TSF_BGRA8:		return 4;
+		case TSF_RGBA16:	return 8;
+		case TSF_RGBA16F:	return sizeof(FFloat16) * 4;
+		default:			return 0;
 	}
 }
 
+bool ComputeOpacityValue(const uint8* BGRA, int32 x, int32 y, int32 TextureSizeX,  EOpacitySourceMode OpacitySourceMode, ETextureSourceFormat SrcFormat, float AlphaThresholdF, uint8 AlphaThreshold8, uint16 AlphaThreshold16)
+{
+	const int32 Offset = (y * TextureSizeX + x) * GetByteSizePerPixel(SrcFormat);
+
+	if (SrcFormat == TSF_G8)
+	{
+		const uint32 Opacity = BGRA[Offset];
+		return Opacity > AlphaThreshold8;
+	}
+	else if (SrcFormat == TSF_BGRA8)
+	{
+		const uint8* BGRA8 = (const uint8*)(BGRA + Offset);
+		uint32 Opacity = 255;
+		if (OpacitySourceMode == OSM_Alpha)
+		{
+			Opacity = *(BGRA8 + 3);
+		}
+		else if (OpacitySourceMode == OSM_RedChannel)
+		{
+			Opacity = *(BGRA8 + 2);
+		}
+		else if (OpacitySourceMode == OSM_GreenChannel)
+		{
+			Opacity = *(BGRA8 + 1);
+		}
+		else if (OpacitySourceMode == OSM_BlueChannel)
+		{
+			Opacity = *(BGRA8 + 0);
+		}
+		else
+		{
+			uint32 R = *(BGRA8 + 0);
+			uint32 G = *(BGRA8 + 1);
+			uint32 B = *(BGRA8 + 2);
+
+			Opacity = ((R + G + B) / 3);
+		}
+		return Opacity > AlphaThreshold8;
+	}
+	else if (SrcFormat == TSF_RGBA16)
+	{
+		const uint16* RGBA16 = (const uint16*)(BGRA + Offset);
+
+		uint32 Opacity = 65535;
+
+		if (OpacitySourceMode == OSM_Alpha)
+		{
+			Opacity = *(RGBA16 + 3) ;
+		}
+		else if (OpacitySourceMode == OSM_RedChannel)
+		{
+			Opacity = *(RGBA16 + 0) ;
+		}
+		else if (OpacitySourceMode == OSM_GreenChannel)
+		{
+			Opacity = *(RGBA16 + 1) ;
+		}
+		else if (OpacitySourceMode == OSM_BlueChannel)
+		{
+			Opacity = *(RGBA16 + 2);
+		}
+		else
+		{
+			uint32 R = *(RGBA16 + 0);
+			uint32 G = *(RGBA16 + 1);
+			uint32 B = *(RGBA16 + 2);
+
+			Opacity = ((R + G + B) / 3) ;
+		}
+
+		return Opacity > AlphaThreshold16;
+	}
+	else if (SrcFormat == TSF_RGBA16F)
+	{
+		const FFloat16* RGBAf = (const FFloat16 *)( BGRA + Offset);
+
+		float Opacity = 1.0f;
+		if (OpacitySourceMode == OSM_Alpha)
+		{
+			Opacity = (*(RGBAf + 3)).GetFloat();
+		}
+		else if (OpacitySourceMode == OSM_RedChannel)
+		{
+			Opacity = (*(RGBAf + 0)).GetFloat();
+		}
+		else if (OpacitySourceMode == OSM_GreenChannel)
+		{
+			Opacity = (*(RGBAf + 1)).GetFloat();
+		}
+		else if (OpacitySourceMode == OSM_BlueChannel)
+		{
+			Opacity = (*(RGBAf + 2)).GetFloat();
+		}
+		else
+		{
+			float R = (*RGBAf).GetFloat();
+			float G = (*(RGBAf + 1)).GetFloat();
+			float B = (*(RGBAf + 2)).GetFloat();
+
+			Opacity = (R + G + B) / 3.0f;
+		}
+
+		return Opacity > AlphaThresholdF;
+	}
+
+	return true;
+}
+
+
+void FSubUVDerivedData::GetFeedback(UTexture2D* SubUVTexture, int32 SubImages_Horizontal, int32 SubImages_Vertical, ESubUVBoundingVertexCount BoundingMode, float AlphaThreshold, EOpacitySourceMode OpacitySourceMode,
+	TArray<FText>& OutErrors, TArray<FText>& OutWarnings, TArray<FText>& OutInfo)
+{
+
+#if WITH_EDITORONLY_DATA
+	if (SubUVTexture)
+	{
+		const ETextureSourceFormat SourceFormat = SubUVTexture->Source.GetFormat();
+		if (!IsSupportedFormat(SourceFormat))
+		{
+			FString SupportedFormatsString;
+			UEnum* SourceFormatEnum = StaticEnum<ETextureSourceFormat>();
+			for (int32 Format=0; Format < TSF_MAX; ++Format)
+			{
+				if (IsSupportedFormat(ETextureSourceFormat(Format)))
+				{
+					if (SupportedFormatsString.IsEmpty() == false)
+					{
+						SupportedFormatsString.Append(TEXT(", "));
+					}
+					SupportedFormatsString.Append(SourceFormatEnum->GetNameStringByValue(Format));
+				}
+			}
+
+			OutErrors.Add(
+				FText::Format(LOCTEXT("CutoutNotSupported", "Image source format ({0}) is not in a supported format for cutouts ({1}). It will be ignored."),
+					FText::FromString(SourceFormatEnum->GetNameStringByValue(SourceFormat)),
+					FText::FromString(SupportedFormatsString)
+				)
+			);
+		} 
+		if (SubUVTexture->Source.GetNumMips() == 0)
+		{
+			OutErrors.Add(LOCTEXT("CutoutNoMipNotSupported", "Image does not have a 0th Mip Level."));
+		}
+	}
+#endif
+}
+
 /** Counts how many neighbors have non-zero alpha. */
-int32 ComputeNeighborCount(int32 X, int32 Y, int32 GlobalX, int32 GlobalY, int32 SubImageSizeX, int32 SubImageSizeY, int32 TextureSizeX, const TArray64<uint8>& MipData, uint8 AlphaThresholdByte, EOpacitySourceMode OpacitySourceMode)
+int32 ComputeNeighborCount(int32 X, int32 Y, int32 GlobalX, int32 GlobalY, int32 SubImageSizeX, int32 SubImageSizeY, int32 TextureSizeX, const TArray64<uint8>& MipData,  EOpacitySourceMode OpacitySourceMode, ETextureSourceFormat SourceFormat, float AlphaThresholdF, uint8 AlphaThreshold8, uint16 AlphaThreshold16)
 {
 	int32 NeighborCount = 0;
 
@@ -485,9 +651,9 @@ int32 ComputeNeighborCount(int32 X, int32 Y, int32 GlobalX, int32 GlobalY, int32
 		if (NeighborX >= 0 && NeighborX < SubImageSizeX 
 			&& NeighborY >= 0 && NeighborY < SubImageSizeY)
 		{
-			uint8 NeighborAlphaValue = ComputeOpacityValue(&MipData[((GlobalY + GNeighbors[NeighborIndex].Y) * TextureSizeX + GlobalX + GNeighbors[NeighborIndex].X) * 4], OpacitySourceMode);
+			bool bNeighborPasses = ComputeOpacityValue(MipData.GetData(), GlobalX + GNeighbors[NeighborIndex].X, GlobalY + GNeighbors[NeighborIndex].Y, TextureSizeX, OpacitySourceMode, SourceFormat, AlphaThresholdF, AlphaThreshold8, AlphaThreshold16);
 
-			if (NeighborAlphaValue > AlphaThresholdByte)
+			if (bNeighborPasses)
 			{
 				NeighborCount++;
 			}
@@ -527,10 +693,11 @@ void FSubUVDerivedData::Build(UTexture2D* SubUVTexture, int32 SubImages_Horizont
 		DefaultFrame.BoundingVertices.Add(FVector2D(1, 0));
 	}
 
-	if (SubUVTexture)
+	if (SubUVTexture && SubUVTexture->Source.IsValid())
 	{
 		TArray64<uint8> MipData;
-		bool bSuccess = SubUVTexture->Source.GetFormat() == TSF_BGRA8 && SubUVTexture->Source.GetMipData(MipData, 0);
+		ETextureSourceFormat SourceFormat = SubUVTexture->Source.GetFormat();
+		bool bSuccess = IsSupportedFormat(SourceFormat) && SubUVTexture->Source.GetMipData(MipData, 0);
 
 		const int32 TextureSizeX = SubUVTexture->Source.GetSizeX();
 		const int32 TextureSizeY = SubUVTexture->Source.GetSizeY();
@@ -540,9 +707,10 @@ void FSubUVDerivedData::Build(UTexture2D* SubUVTexture, int32 SubImages_Horizont
 		const int32 SubImageSizeYFloat = TextureSizeY / (float)SubImages_Vertical;
 
 		const int32 NumSubImages = SubImages_Horizontal * SubImages_Vertical;
-		const uint8 AlphaThresholdByte = FMath::Clamp(FMath::TruncToInt(AlphaThreshold * 255.0f), 0, 255);
+		const uint8 AlphaThreshold8 = FMath::Clamp(FMath::TruncToInt(AlphaThreshold * 255.0f), 0, 255);
+		const uint16 AlphaThreshold16 = FMath::Clamp(FMath::TruncToInt(AlphaThreshold * 65535.0f), 0, 65535.0f);
 
-		check(!bSuccess || MipData.Num() == TextureSizeX * TextureSizeY * 4);
+		check(!bSuccess || MipData.Num() == TextureSizeX * TextureSizeY * GetByteSizePerPixel(SourceFormat));
 
 		const int32 TargetNumBoundingVertices = BoundingMode == BVC_FourVertices ? 4 : 8;
 
@@ -566,20 +734,20 @@ void FSubUVDerivedData::Build(UTexture2D* SubUVTexture, int32 SubImages_Horizont
 
 					for (int32 Y = 0; Y < SubImageSizeY; Y++)
 					{
-						int32 GlobalY = FMath::RoundToInt(SubImageY * SubImageSizeYFloat) + Y;
-						int32 NextGlobalY = FMath::RoundToInt(NextSubImageY * SubImageSizeYFloat) + Y;
+						int32 GlobalY = FMath::RoundToInt((float)SubImageY * SubImageSizeYFloat) + Y;
+						int32 NextGlobalY = FMath::RoundToInt((float)NextSubImageY * SubImageSizeYFloat) + Y;
 
 						for (int32 X = 0; X < SubImageSizeX; X++)
 						{
 							int32 GlobalX = FMath::RoundToInt(SubImageX * SubImageSizeXFloat) + X;
 							int32 NextGlobalX = FMath::RoundToInt(NextSubImageX * SubImageSizeXFloat) + X;
-							uint8 AlphaValue = ComputeOpacityValue(&MipData[(GlobalY * TextureSizeX + GlobalX) * 4], OpacitySourceMode);
-							uint8 NextAlphaValue = ComputeOpacityValue(&MipData[(NextGlobalY * TextureSizeX + NextGlobalX) * 4], OpacitySourceMode);
+							bool AlphaValuePasses = ComputeOpacityValue(MipData.GetData(), GlobalX, GlobalY, TextureSizeX, OpacitySourceMode, SourceFormat, AlphaThreshold, AlphaThreshold8, AlphaThreshold16);
+							bool NextAlphaValuePasses = ComputeOpacityValue(MipData.GetData(), NextGlobalX, NextGlobalY, TextureSizeX, OpacitySourceMode, SourceFormat, AlphaThreshold, AlphaThreshold8, AlphaThreshold16);
 
-							if (AlphaValue > AlphaThresholdByte || NextAlphaValue > AlphaThresholdByte)
+							if (AlphaValuePasses || NextAlphaValuePasses)
 							{
-								int32 NeighborCount = AlphaValue > AlphaThresholdByte ? ComputeNeighborCount(X, Y, GlobalX, GlobalY, SubImageSizeX, SubImageSizeY, TextureSizeX, MipData, AlphaThresholdByte, OpacitySourceMode) : 8;
-								int32 NextNeighborCount = NextAlphaValue > AlphaThresholdByte ? ComputeNeighborCount(X, Y, NextGlobalX, NextGlobalY, SubImageSizeX, SubImageSizeY, TextureSizeX, MipData, AlphaThresholdByte, OpacitySourceMode) : 8;
+								int32 NeighborCount = AlphaValuePasses ? ComputeNeighborCount(X, Y, GlobalX, GlobalY, SubImageSizeX, SubImageSizeY, TextureSizeX, MipData, OpacitySourceMode, SourceFormat, AlphaThreshold, AlphaThreshold8, AlphaThreshold16) : 8;
+								int32 NextNeighborCount = NextAlphaValuePasses ? ComputeNeighborCount(X, Y, NextGlobalX, NextGlobalY, SubImageSizeX, SubImageSizeY, TextureSizeX, MipData, OpacitySourceMode, SourceFormat, AlphaThreshold, AlphaThreshold8, AlphaThreshold16) : 8;
 
 								// Points with non-zero alpha that have 5 or more filled in neighbors must be in the solid interior
 								if (NeighborCount < 5 || NextNeighborCount < 5)
@@ -663,3 +831,4 @@ void FSubUVDerivedData::Build(UTexture2D* SubUVTexture, int32 SubImages_Horizont
 	}
 #endif
 }
+#undef LOCTEXT_NAMESPACE

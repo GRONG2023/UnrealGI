@@ -1,6 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "PlayMontageCallbackProxy.h"
+#include "Animation/AnimMontage.h"
+#include "Components/SkeletalMeshComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PlayMontageCallbackProxy)
 
 //////////////////////////////////////////////////////////////////////////
 // UPlayMontageCallbackProxy
@@ -26,7 +30,7 @@ UPlayMontageCallbackProxy* UPlayMontageCallbackProxy::CreateProxyObjectForPlayMo
 }
 
 
-void UPlayMontageCallbackProxy::PlayMontage(class USkeletalMeshComponent* InSkeletalMeshComponent, 
+bool UPlayMontageCallbackProxy::PlayMontage(class USkeletalMeshComponent* InSkeletalMeshComponent, 
 	class UAnimMontage* MontageToPlay, 
 	float PlayRate, 
 	float StartingPosition, 
@@ -69,6 +73,8 @@ void UPlayMontageCallbackProxy::PlayMontage(class USkeletalMeshComponent* InSkel
 	{
 		OnInterrupted.Broadcast(NAME_None);
 	}
+
+	return bPlayedSuccessfully;
 }
 
 bool UPlayMontageCallbackProxy::IsNotifyValid(FName NotifyName, const FBranchingPointNotifyPayload& BranchingPointNotifyPayload) const

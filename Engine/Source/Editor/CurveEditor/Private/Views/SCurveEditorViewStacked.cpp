@@ -1,13 +1,40 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Views/SCurveEditorViewStacked.h"
-#include "CurveEditor.h"
-#include "CurveModel.h"
-#include "SCurveEditorPanel.h"
 
-#include "Widgets/Text/STextBlock.h"
-#include "Algo/Copy.h"
-#include "EditorStyleSet.h"
+#include "Containers/SortedMap.h"
+#include "CurveEditor.h"
+#include "CurveEditorHelpers.h"
+#include "CurveEditorScreenSpace.h"
+#include "CurveEditorSettings.h"
+#include "CurveEditorTypes.h"
+#include "CurveModel.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/PlatformCrt.h"
+#include "IBufferedCurveModel.h"
+#include "Internationalization/Text.h"
+#include "Layout/Geometry.h"
+#include "Layout/PaintGeometry.h"
+#include "Layout/SlateRect.h"
+#include "Math/Color.h"
+#include "Math/TransformCalculus.h"
+#include "Math/TransformCalculus2D.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/Optional.h"
+#include "Rendering/DrawElements.h"
+#include "Rendering/SlateLayoutTransform.h"
+#include "SCurveEditorPanel.h"
+#include "SCurveEditorView.h"
+#include "Styling/AppStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Templates/Tuple.h"
+#include "Templates/UniquePtr.h"
+
+class FPaintArgs;
+class FWidgetStyle;
+struct FSlateBrush;
 
 
 void SCurveEditorViewStacked::Construct(const FArguments& InArgs, TWeakPtr<FCurveEditor> InCurveEditor)
@@ -107,7 +134,7 @@ void SCurveEditorViewStacked::DrawViewGrids(const FGeometry& AllottedGeometry, c
 	const FLinearColor   MajorGridColor = CurveEditor->GetPanel()->GetGridLineTint();
 	const FLinearColor   MinorGridColor = MajorGridColor.CopyWithNewOpacity(MajorGridColor.A * .5f);
 	const FPaintGeometry PaintGeometry = AllottedGeometry.ToPaintGeometry();
-	const FSlateBrush*   WhiteBrush = FEditorStyle::GetBrush("WhiteBrush");
+	const FSlateBrush*   WhiteBrush = FAppStyle::GetBrush("WhiteBrush");
 
 	TArray<float> MajorGridLines, MinorGridLines;
 	TArray<FText> MajorGridLabels;
@@ -222,7 +249,7 @@ void SCurveEditorViewStacked::DrawLabels(const FGeometry& AllottedGeometry, cons
 	const double ValuePerPixel = 1.0 / StackedHeight;
 	const double ValueSpacePadding = StackedPadding * ValuePerPixel;
 
-	const FSlateFontInfo FontInfo = FCoreStyle::Get().GetFontStyle("FontAwesome.11");
+	const FSlateFontInfo FontInfo = FAppStyle::Get().GetFontStyle("NormalFont");
 	const FVector2D LocalSize = AllottedGeometry.GetLocalSize();
 	const FCurveEditorScreenSpaceV ViewSpace = GetViewSpace();
 
@@ -238,8 +265,8 @@ void SCurveEditorViewStacked::DrawLabels(const FGeometry& AllottedGeometry, cons
 		const int32  CurveIndexFromBottom = CurveInfoByID.Num() - It->Value.CurveIndex - 1;
 		const double PaddingToBottomOfView = (CurveIndexFromBottom + 1)*ValueSpacePadding;
 		
-		const float PixelBottom = ViewSpace.ValueToScreen(CurveIndexFromBottom + PaddingToBottomOfView);
-		const float PixelTop = ViewSpace.ValueToScreen(CurveIndexFromBottom + PaddingToBottomOfView + 1.0);
+		const double PixelBottom = ViewSpace.ValueToScreen(CurveIndexFromBottom + PaddingToBottomOfView);
+		const double PixelTop = ViewSpace.ValueToScreen(CurveIndexFromBottom + PaddingToBottomOfView + 1.0);
 
 		if (!FSlateRect::DoRectanglesIntersect(MyCullingRect, TransformRect(AllottedGeometry.GetAccumulatedLayoutTransform(), FSlateRect(0, PixelTop, LocalSize.X, PixelBottom))))
 		{
@@ -279,6 +306,11 @@ void SCurveEditorViewStacked::DrawBufferedCurves(const FGeometry& AllottedGeomet
 		return;
 	}
 
+	if (!CurveEditor->GetSettings()->GetShowBufferedCurves())
+	{
+		return;
+	}
+
 	const TArray<TUniquePtr<IBufferedCurveModel>>& BufferedCurves = CurveEditor->GetBufferedCurves();
 
 	const float BufferedCurveThickness = 1.f;
@@ -308,6 +340,11 @@ void SCurveEditorViewStacked::DrawBufferedCurves(const FGeometry& AllottedGeomet
 		// Calculate the view to curve transform for each buffered curve, then draw
 		for (const TUniquePtr<IBufferedCurveModel>& BufferedCurve : BufferedCurves)
 		{
+			if (!CurveEditor->IsActiveBufferedCurve(BufferedCurve))
+			{
+				continue;
+			}
+
 			double CurveOutputMin = BufferedCurve->GetValueMin(), CurveOutputMax = BufferedCurve->GetValueMax();
 
 			ViewToBufferedCurveTransform = CalculateViewToCurveTransform(CurveOutputMin, CurveOutputMax, ValueOffset);
@@ -341,6 +378,38 @@ void SCurveEditorViewStacked::DrawBufferedCurves(const FGeometry& AllottedGeomet
 	}
 }
 
+void SCurveEditorViewStacked::UpdateViewToTransformCurves(double InputMin, double InputMax)
+{
+	TSharedPtr<FCurveEditor> CurveEditor = WeakCurveEditor.Pin();
+	if (!CurveEditor)
+	{
+		return;
+	}
+	double ValuePerPixel = 1.0 / StackedHeight;
+	double ValueSpacePadding = StackedPadding * ValuePerPixel;
+
+	for (auto It = CurveInfoByID.CreateIterator(); It; ++It)
+	{
+		FCurveModel* Curve = CurveEditor->FindCurve(It.Key());
+		if (!ensureAlways(Curve))
+		{
+			continue;
+		}
+
+		const int32  CurveIndexFromBottom = CurveInfoByID.Num() - It->Value.CurveIndex - 1;
+		const double PaddingToBottomOfView = (CurveIndexFromBottom + 1) * ValueSpacePadding;
+		const double ValueOffset = -CurveIndexFromBottom - PaddingToBottomOfView;
+
+		double CurveOutputMin = 0, CurveOutputMax = 1;
+		Curve->GetValueRange(InputMin, InputMax, CurveOutputMin, CurveOutputMax);
+
+		It->Value.ViewToCurveTransform = CalculateViewToCurveTransform(CurveOutputMin, CurveOutputMax, ValueOffset);
+	}
+
+	OutputMax = FMath::Max(OutputMin + CurveInfoByID.Num() + ValueSpacePadding * (CurveInfoByID.Num() + 1), 1.0);
+}
+
+
 void SCurveEditorViewStacked::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
 {
 	TSharedPtr<FCurveEditor> CurveEditor = WeakCurveEditor.Pin();
@@ -351,28 +420,10 @@ void SCurveEditorViewStacked::Tick(const FGeometry& AllottedGeometry, const doub
 
 	if (!CurveEditor->AreBoundTransformUpdatesSuppressed())
 	{
-		double ValuePerPixel = 1.0 / StackedHeight;
-		double ValueSpacePadding = StackedPadding * ValuePerPixel;
-
-		for (auto It = CurveInfoByID.CreateIterator(); It; ++It)
-		{
-			FCurveModel* Curve = CurveEditor->FindCurve(It.Key());
-			if (!ensureAlways(Curve))
-			{
-				continue;
-			}
-
-			const int32  CurveIndexFromBottom = CurveInfoByID.Num() - It->Value.CurveIndex - 1;
-			const double PaddingToBottomOfView = (CurveIndexFromBottom + 1)*ValueSpacePadding;
-			const double ValueOffset = -CurveIndexFromBottom - PaddingToBottomOfView;
-
-			double CurveOutputMin = 0, CurveOutputMax = 1;
-			Curve->GetValueRange(CurveOutputMin, CurveOutputMax);
-
-			It->Value.ViewToCurveTransform = CalculateViewToCurveTransform(CurveOutputMin, CurveOutputMax, ValueOffset);
-		}
-
-		OutputMax = FMath::Max(OutputMin + CurveInfoByID.Num() + ValueSpacePadding*(CurveInfoByID.Num()+1), 1.0);
+		// Get the Min/Max values on the X axis, for Time
+		double InputMin = 0, InputMax = 1;
+		GetInputBounds(InputMin, InputMax);
+		UpdateViewToTransformCurves(InputMin, InputMax);
 	}
 
 	SInteractiveCurveEditorView::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);

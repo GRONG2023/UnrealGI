@@ -6,6 +6,7 @@ FCborReader::FCborReader(FArchive* InStream, ECborEndianness InReaderEndianness)
 	: Stream(InStream)
 	, Endianness(InReaderEndianness)
 {
+	check(InStream != nullptr);
 	ContextStack.Emplace();
 }
 
@@ -38,8 +39,6 @@ const FCborContext& FCborReader::GetContext() const
 
 bool FCborReader::ReadNext(FCborContext& OutContext)
 {
-	ScopedCborArchiveEndianness ScopedArchiveEndianness(*Stream, Endianness);
-
 	OutContext.Reset();
 
 	// if an error happened, successive read are also errors 
@@ -56,6 +55,9 @@ bool FCborReader::ReadNext(FCborContext& OutContext)
 		return false;
 	}
 
+	// Set accurate endianness handling
+	ScopedCborArchiveEndianness ScopedArchiveEndianness(*Stream, Endianness);
+
 	// Current parent
 	FCborContext& ParentContext = ContextStack.Top();
 
@@ -68,6 +70,7 @@ bool FCborReader::ReadNext(FCborContext& OutContext)
 		// Report parent context container type
 		OutContext.RawTextValue.Add((char)ParentContext.MajorType());
 		// Done with parent context
+		check(ContextStack.Num() > 1);
 		ContextStack.Pop();
 		return true;
 	}
@@ -103,6 +106,7 @@ bool FCborReader::ReadNext(FCborContext& OutContext)
 		// Report parent context container type
 		OutContext.RawTextValue.Add((char)ParentContext.MajorType());
 		// Done with parent context
+		check(ContextStack.Num() > 1);
 		ContextStack.Pop();
 		return true;
 	}
@@ -147,9 +151,15 @@ bool FCborReader::ReadNext(FCborContext& OutContext)
 			else
 			{
 				OutContext.Length = ReadUIntValue(OutContext, *Stream);
-				OutContext.RawTextValue.SetNumUninitialized(OutContext.Length + 1); // Length doesn't count the null terminating character
+				if (OutContext.Length > (uint64)(MAX_int32 - 1))
+				{
+					OutContext.Header = SetError(ECborCode::ErrorStringLength);
+					return false;
+				}
+				int32 StringLength = (int32)OutContext.Length;
+				OutContext.RawTextValue.SetNumUninitialized(StringLength + 1); // Length doesn't count the null terminating character
 				Stream->Serialize(OutContext.RawTextValue.GetData(), OutContext.Length);
-				OutContext.RawTextValue[OutContext.Length] = '\0';
+				OutContext.RawTextValue[StringLength] = '\0';
 			}
 			break;
 		case ECborCode::Array:
@@ -178,7 +188,11 @@ bool FCborReader::ReadNext(FCborContext& OutContext)
 
 bool FCborReader::SkipContainer(ECborCode ContainerType)
 {
-	ScopedCborArchiveEndianness ScopedArchiveEndianness(*Stream, Endianness);
+	// Invalid stream error
+	if (Stream == nullptr)
+	{
+		return false;
+	}
 
 	if (GetContext().MajorType() != ContainerType)
 	{

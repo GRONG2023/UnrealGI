@@ -23,10 +23,10 @@
 
 
 dtPathQueue::dtPathQueue() :
+	m_navquery(0),
 	m_nextHandle(1),
 	m_maxPathSize(0),
-	m_queueHead(0),
-	m_navquery(0)
+	m_queueHead(0)
 {
 	for (int i = 0; i < MAX_QUEUE; ++i)
 		m_queue[i].path = 0;
@@ -43,7 +43,7 @@ void dtPathQueue::purge()
 	m_navquery = 0;
 	for (int i = 0; i < MAX_QUEUE; ++i)
 	{
-		dtFree(m_queue[i].path);
+		dtFree(m_queue[i].path, DT_ALLOC_PERM_PATH_QUEUE);
 		m_queue[i].path = 0;
 	}
 }
@@ -62,7 +62,7 @@ bool dtPathQueue::init(const int maxPathSize, const int maxSearchNodeCount, dtNa
 	for (int i = 0; i < MAX_QUEUE; ++i)
 	{
 		m_queue[i].ref = DT_PATHQ_INVALID;
-		m_queue[i].path = (dtPolyRef*)dtAlloc(sizeof(dtPolyRef)*m_maxPathSize, DT_ALLOC_PERM);
+		m_queue[i].path = (dtPolyRef*)dtAlloc(sizeof(dtPolyRef)*m_maxPathSize, DT_ALLOC_PERM_PATH_QUEUE);
 		if (!m_queue[i].path)
 			return false;
 	}
@@ -111,7 +111,7 @@ void dtPathQueue::update(const int maxIters)
 		// Handle query start.
 		if (q.status == 0)
 		{
-			q.status = m_navquery->initSlicedFindPath(q.startRef, q.endRef, q.startPos, q.endPos, q.costLimit, q.filter); //@UE4
+			q.status = m_navquery->initSlicedFindPath(q.startRef, q.endRef, q.startPos, q.endPos, q.costLimit, q.requireNavigableEndLocation, q.filter); //@UE
 		}		
 		// Handle query in progress.
 		if (dtStatusInProgress(q.status))
@@ -133,7 +133,7 @@ void dtPathQueue::update(const int maxIters)
 }
 
 dtPathQueueRef dtPathQueue::request(dtPolyRef startRef, dtPolyRef endRef,
-									const float* startPos, const float* endPos, const float costLimit, //@UE4
+									const dtReal* startPos, const dtReal* endPos, const dtReal costLimit, const bool requireNavigableEndLocation, //@UE
 									const dtQueryFilter* filter, TSharedPtr<dtQuerySpecialLinkFilter> linkFilter)
 {
 	// Find empty slot
@@ -159,7 +159,8 @@ dtPathQueueRef dtPathQueue::request(dtPolyRef startRef, dtPolyRef endRef,
 	q.startRef = startRef;
 	dtVcopy(q.endPos, endPos);
 	q.endRef = endRef;
-	q.costLimit = costLimit; //@UE4
+	q.costLimit = costLimit; //@UE
+	q.requireNavigableEndLocation = requireNavigableEndLocation; //@UE
 	
 	q.status = 0;
 	q.npath = 0;

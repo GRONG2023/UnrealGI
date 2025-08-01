@@ -11,18 +11,13 @@ public class MacTargetPlatform : ModuleRules
 				"Core",
 				"CoreUObject",
 				"TargetPlatform",
-				"DesktopPlatform",
+				"DesktopPlatform"
 			}
 		);
 
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
-				"Settings",
-			}
-		);
-
-		PrivateIncludePaths.AddRange(
-			new string[] {
+				"Settings"
 			}
 		);
 

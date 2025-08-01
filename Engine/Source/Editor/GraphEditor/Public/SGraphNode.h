@@ -2,30 +2,58 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "SlateFwd.h"
-#include "Misc/Attribute.h"
-#include "Layout/Visibility.h"
-#include "Layout/SlateRect.h"
-#include "Input/Reply.h"
-#include "Styling/SlateColor.h"
-#include "Widgets/SWidget.h"
 #include "Animation/CurveHandle.h"
 #include "Animation/CurveSequence.h"
+#include "BlueprintUtilities.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "CoreMinimal.h"
+#include "EdGraph/EdGraphNodeUtils.h"
+#include "GraphEditor.h"
+#include "HAL/PlatformMath.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Layout/SlateRect.h"
+#include "Layout/Visibility.h"
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
+#include "Misc/Attribute.h"
+#include "SNodePanel.h"
+#include "SlateFwd.h"
+#include "Styling/AppStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/SlateColor.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Notifications/SErrorText.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/SOverlay.h"
-#include "GraphEditor.h"
-#include "EdGraph/EdGraphNodeUtils.h"
-#include "SNodePanel.h"
-#include "Widgets/Notifications/SErrorText.h"
+#include "Widgets/SWidget.h"
 
 class FActorDragDropOp;
+class FDragDropEvent;
+class ISlateStyle;
 class IToolTip;
 class SGraphPanel;
 class SGraphPin;
+class SInlineEditableTextBlock;
+class SLevelOfDetailBranchNode;
 class SToolTip;
 class SVerticalBox;
+class SWidget;
+class UEdGraphNode;
+class UEdGraphPin;
+class UObject;
+struct FGeometry;
+struct FPointerEvent;
+struct FSlateBrush;
 
 /////////////////////////////////////////////////////
 // SNodeTitle
@@ -34,9 +62,12 @@ class GRAPHEDITOR_API SNodeTitle : public SCompoundWidget
 {
 public:
 	SLATE_BEGIN_ARGS(SNodeTitle)
-		: _Style(TEXT("Graph.Node.NodeTitle"))
+		: _StyleSet(&FAppStyle::Get())
+		, _Style(TEXT("Graph.Node.NodeTitle"))
 		, _ExtraLineStyle(TEXT("Graph.Node.NodeTitleExtraLines"))
 		{}
+
+		SLATE_ARGUMENT(const ISlateStyle*, StyleSet)
 
 		// The style of the text block, which dictates the font, color, and shadow options. Style overrides all other properties!
 		SLATE_ARGUMENT(FName, Style)
@@ -67,6 +98,7 @@ protected:
 	TWeakObjectPtr<UEdGraphNode> GraphNode;
 	FNodeTextCache NodeTitleCache;
 	FName ExtraLineStyle;
+	const ISlateStyle* StyleSet;
 
 	/** The cached head title to return */
 	FText CachedHeadTitle;
@@ -243,6 +275,10 @@ public:
 	
 	/** Called when ed graph data is cleared, indicating this widget can no longer safely access GraphNode - forwards call to owned pins: */
 	void InvalidateGraphData();
+
+	/** Returns true if the node is hiding its pins */
+	virtual bool IsHidingPinWidgets() const { return false; }
+	
 protected:
 	SGraphNode();
 
@@ -283,6 +319,9 @@ protected:
 	// Override this to add widgets below the pins but above advanced view arrow
 	virtual void CreateBelowPinControls(TSharedPtr<SVerticalBox> MainBox) {}
 
+	/** Determines how the node title overflow is handled */
+	virtual TOptional<ETextOverflowPolicy> GetNameOverflowPolicy() const { return {}; }
+
 	/* Helper function to check if node can be renamed */
 	virtual bool IsNameReadOnly () const;
 
@@ -294,6 +333,15 @@ protected:
 
 	/* Helper function to set the error color for the node */
 	FSlateColor GetErrorColor() const	{return ErrorColor;}
+
+	/** Controls wether to show or not the visual warning message */
+	EVisibility VisualWarningVisibility() const;
+
+	/** Function to get a visual warning description string(visual warnings does not break the build) */
+	FText GetVisualWarningMsgToolTip() const;
+
+	/* Helper function to set the error color for the node */
+	FSlateColor GetVisualWarningColor() const;
 
 	/** Helper function to get any error text for the node */
 	FString GetErrorMessage() const {return ErrorMsg;}
@@ -307,25 +355,32 @@ protected:
 	// Should we use low-detail node titles?
 	virtual bool UseLowDetailNodeTitles() const;
 
+public:
+	
+	// Should we use low-detail pin names?
+	virtual bool UseLowDetailPinNames() const { return false; }
+
+protected:
+	
 	/** Return the desired comment bubble color */
 	virtual FSlateColor GetCommentColor() const { return FLinearColor::White; }
 
 	///// ADVANCED VIEW FUNCTIONS /////
 
 	/** Create button to show/hide advanced pins */
-	void CreateAdvancedViewArrow(TSharedPtr<SVerticalBox> MainBox);
+	virtual void CreateAdvancedViewArrow(TSharedPtr<SVerticalBox> MainBox);
 
 	/** Returns visibility of AdvancedViewButton */
-	EVisibility AdvancedViewArrowVisibility() const;
+	virtual EVisibility AdvancedViewArrowVisibility() const;
 
 	/** Show/hide advanced view */
-	void OnAdvancedViewChanged( const ECheckBoxState NewCheckedState );
+	virtual void OnAdvancedViewChanged( const ECheckBoxState NewCheckedState );
 
 	/** hidden == unchecked, shown == checked */
-	ECheckBoxState IsAdvancedViewChecked() const;
+	virtual ECheckBoxState IsAdvancedViewChecked() const;
 
 	/** Up when shown, down when hidden */
-	const FSlateBrush* GetAdvancedViewArrow() const;
+	virtual const FSlateBrush* GetAdvancedViewArrow() const;
 
 	/** Checks if the node is the only node selected */
 	bool IsSelectedExclusively() const;
@@ -382,10 +437,16 @@ protected:
 	TSharedPtr<SInlineEditableTextBlock> InlineEditableText;
 	/** Error handling widget */
 	TSharedPtr<class IErrorReportingWidget> ErrorReporting;
+	/** Visual Warning handling widget */
+	TSharedPtr<class IErrorReportingWidget> VisualWarningReporting;
 
 	FCurveSequence SpawnAnim;
 	FCurveHandle ZoomCurve;
 	FCurveHandle FadeCurve;
+
+	/* The margin used by the border containing the title. Can be changed by child classes if necessary.
+	*  The extra padding on the right is for making the color spill stretch well past the node title */
+	FMargin TitleBorderMargin = FMargin(10.f, 5.f, 30.f, 3.f);
 
 	/** Is this node editable */
 	TAttribute<bool> IsEditable;
@@ -407,6 +468,11 @@ protected:
 	FString ErrorMsg;
 	/** Used to set the error color */
 	FSlateColor ErrorColor;
+	/** Used to report visual warnings on the node (does not break build) */
+	FString VisualWarningMsg;
+	/** Used to set the soft error color */
+	FSlateColor VisualWarningColor;
+
 
 	/** Caches true position of node */
 	FVector2D CachedUnscaledPosition;
@@ -416,4 +482,7 @@ protected:
 
 	/** Cached pointer to graph editor settings */
 	const class UGraphEditorSettings* Settings;
+
+private:
+	TSharedPtr<SLevelOfDetailBranchNode> TitleLODBranchNode;
 };

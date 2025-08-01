@@ -1,6 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Components/TreeView.h"
+#include "Styling/DefaultStyleCache.h"
+#include "Styling/UMGCoreStyle.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(TreeView)
 
 /////////////////////////////////////////////////////
 // UTreeView
@@ -8,6 +12,17 @@
 UTreeView::UTreeView(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
+	WidgetStyle = UE::Slate::Private::FDefaultStyleCache::GetRuntime().GetTreeViewStyle();
+	
+#if WITH_EDITOR 
+	if (IsEditorWidget())
+	{
+		WidgetStyle = UE::Slate::Private::FDefaultStyleCache::GetEditor().GetTreeViewStyle();
+
+		// The CDO isn't an editor widget and thus won't use the editor style, call post edit change to mark difference from CDO
+		PostEditChange();
+	}
+#endif // WITH_EDITOR
 }
 
 TSharedRef<STableViewBase> UTreeView::RebuildListWidget()

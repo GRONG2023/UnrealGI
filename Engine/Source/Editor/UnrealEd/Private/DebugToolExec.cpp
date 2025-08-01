@@ -2,17 +2,22 @@
 
 
 #include "DebugToolExec.h"
+#include "CollisionQueryParams.h"
+#include "Engine/GameInstance.h"
+#include "Engine/HitResult.h"
+#include "GameFramework/Pawn.h"
 #include "Modules/ModuleManager.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/Object.h"
 #include "UObject/Class.h"
+#include "UObject/Package.h"
 #include "UObject/UObjectIterator.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SWindow.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Widgets/Layout/SBorder.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Engine/EngineTypes.h"
 #include "GameFramework/Actor.h"
 #include "CollisionQueryParams.h"
@@ -62,7 +67,7 @@ void FDebugToolExec::EditObject(UObject* Object, bool bShouldShowNonEditable)
 		.Title( FText::FromString( Object->GetName() ) )
 		[
 			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 			[
 				SNew(SVerticalBox)
 				+SVerticalBox::Slot()
@@ -82,7 +87,7 @@ void FDebugToolExec::EditObject(UObject* Object, bool bShouldShowNonEditable)
  * @param Cmd	Command to parse
  * @param Ar	output device used for logging
  */
-bool FDebugToolExec::Exec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar )
+bool FDebugToolExec::Exec_Editor( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar )
 {
 	// these commands are only allowed in standalone games
 #if UE_BUILD_SHIPPING || UE_BUILD_TEST
@@ -98,15 +103,16 @@ bool FDebugToolExec::Exec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar 
 		// not allowed in the editor as this command can have far reaching effects such as impacting serialization
 		if (!GIsEditor)
 		{
-			UClass* Class = NULL;
-			if( ParseObject<UClass>( Cmd, TEXT("CLASS="), Class, ANY_PACKAGE ) == false )
+			UClass* Class = nullptr;
+			FString ClassName;
+			if (FParse::Value(Cmd, TEXT("CLASS="), ClassName))
 			{
-				TCHAR ClassName[256];
-				if ( FParse::Token(Cmd,ClassName,UE_ARRAY_COUNT(ClassName), 1) )
-				{
-					Class = FindObject<UClass>( ANY_PACKAGE, ClassName);
-				}
+				Class = FindFirstObject<UClass>(*ClassName, EFindFirstObjectOptions::None, ELogVerbosity::Warning, TEXT("parsing FDebugToolExec class"));
 			}
+			else if (FParse::Token(Cmd, ClassName, true))
+			{
+				Class = FindFirstObject<UClass>(*ClassName, EFindFirstObjectOptions::None, ELogVerbosity::Warning, TEXT("parsing FDebugToolExec class"));
+			}			
 
 			if (Class)
 			{
@@ -121,15 +127,20 @@ bool FDebugToolExec::Exec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar 
 	}
 	else if (FParse::Command(&Cmd,TEXT("EDITOBJECT")))
 	{
-		UClass* SearchClass = NULL;
-		UObject* FoundObj = NULL;
+		UClass* SearchClass = nullptr;
+		UObject* FoundObj = nullptr;
+		FString ClassName;
 		// Search by class.
-		if (ParseObject<UClass>(Cmd, TEXT("CLASS="), SearchClass, ANY_PACKAGE))
+		if (FParse::Value(Cmd, TEXT("CLASS="), ClassName))
+		{
+			SearchClass = FindFirstObject<UClass>(*ClassName, EFindFirstObjectOptions::None, ELogVerbosity::Warning, TEXT("parsing FDebugToolExec class"));
+		}
+		if (SearchClass)
 		{
 			// pick the first valid object
 			for (FThreadSafeObjectIterator It(SearchClass); It && FoundObj == NULL; ++It)
 			{
-				if (!It->IsPendingKill() && !It->IsTemplate())
+				if (IsValid(*It) && !It->IsTemplate())
 				{
 					FoundObj = *It;
 				}
@@ -153,7 +164,7 @@ bool FDebugToolExec::Exec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar 
 			}
 			else if ( FParse::Token(Cmd,SearchPathName, true) )
 			{
-				FoundObj = FindObject<UObject>(ANY_PACKAGE,*SearchPathName);
+				FoundObj = FindFirstObject<UObject>(*SearchPathName, EFindFirstObjectOptions::None, ELogVerbosity::Warning, TEXT("parsing FDebugToolExec object"));
 			}
 		}
 
@@ -179,7 +190,7 @@ bool FDebugToolExec::Exec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar 
 		FString SearchPathName;
 		if (FParse::Token(Cmd, SearchPathName, true))
 		{
-			foundObj = FindObject<UObject>(ANY_PACKAGE,*SearchPathName);
+			foundObj = FindFirstObject<UObject>(*SearchPathName, EFindFirstObjectOptions::None, ELogVerbosity::Warning, TEXT("EDITARCHETYPE"));
 		}
 
 		// Bring up an property editing window for the found object.
@@ -200,13 +211,14 @@ bool FDebugToolExec::Exec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar 
 	// Edits an objects properties or copies them to the clipboard.
 	else if( FParse::Command(&Cmd,TEXT("EDITACTOR")) )
 	{
-		UClass*		Class = NULL;
-		AActor*		Found = NULL;
+		UClass*	Class = nullptr;
+		AActor*	Found = nullptr;
+		FString ClassName;
 
 		if (FParse::Command(&Cmd, TEXT("TRACE")))
 		{
 			APlayerController* PlayerController = InWorld->GetGameInstance() ? InWorld->GetGameInstance()->GetFirstLocalPlayerController() : nullptr;
-			if (PlayerController != NULL)
+			if (PlayerController != nullptr)
 			{
 				// Do a trace in the player's facing direction and edit anything that's hit.
 				FVector PlayerLocation;
@@ -214,33 +226,37 @@ bool FDebugToolExec::Exec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar 
 				PlayerController->GetPlayerViewPoint(PlayerLocation, PlayerRotation);
 				FHitResult Hit(1.0f);
 				PlayerController->GetWorld()->LineTraceSingleByChannel(Hit, PlayerLocation, PlayerLocation + PlayerRotation.Vector() * 10000.f, ECC_Pawn, FCollisionQueryParams(NAME_None, FCollisionQueryParams::GetUnknownStatId(), true, PlayerController->GetPawn()));
-				Found = Hit.GetActor();
+				Found = Hit.GetHitObjectHandle().FetchActor();
 			}
 		}
 		// Search by class.
-		else if( ParseObject<UClass>( Cmd, TEXT("CLASS="), Class, ANY_PACKAGE ) && Class->IsChildOf(AActor::StaticClass()) )
+		else if (FParse::Value(Cmd, TEXT("CLASS="), ClassName))
 		{
-			UGameEngine* GameEngine = Cast<UGameEngine>(GEngine);
-			
-			// Look for the closest actor of this class to the player.
-			FVector PlayerLocation(0.0f);
-			APlayerController* PlayerController = InWorld->GetGameInstance() ? InWorld->GetGameInstance()->GetFirstLocalPlayerController() : nullptr;
-			if (PlayerController != NULL)
+			Class = FindFirstObject<UClass>(*ClassName, EFindFirstObjectOptions::None, ELogVerbosity::Warning, TEXT("parsing FDebugToolExec class"));
+			if (Class)
 			{
-				FRotator DummyRotation;
-				PlayerController->GetPlayerViewPoint(PlayerLocation, DummyRotation);
-			}
+				UGameEngine* GameEngine = Cast<UGameEngine>(GEngine);
 
-			float   MinDist = FLT_MAX;
-			for( TActorIterator<AActor> It(InWorld, Class); It; ++It )
-			{
-				if ( !It->IsPendingKill() )
+				// Look for the closest actor of this class to the player.
+				FVector PlayerLocation(0.0f);
+				APlayerController* PlayerController = InWorld->GetGameInstance() ? InWorld->GetGameInstance()->GetFirstLocalPlayerController() : nullptr;
+				if (PlayerController != NULL)
 				{
-					float const Dist = (PlayerController && It->GetRootComponent()) ? FVector::Dist(It->GetActorLocation(), PlayerLocation) : 0.f;
-					if (Dist < MinDist)
+					FRotator DummyRotation;
+					PlayerController->GetPlayerViewPoint(PlayerLocation, DummyRotation);
+				}
+
+				float   MinDist = FLT_MAX;
+				for (TActorIterator<AActor> It(InWorld, Class); It; ++It)
+				{
+					if (IsValid(*It))
 					{
-						MinDist = Dist;
-						Found   = *It;
+						const double Dist = (PlayerController && It->GetRootComponent()) ? FVector::Dist(It->GetActorLocation(), PlayerLocation) : 0.f;
+						if (Dist < MinDist)
+						{
+							MinDist = Dist;
+							Found = *It;
+						}
 					}
 				}
 			}

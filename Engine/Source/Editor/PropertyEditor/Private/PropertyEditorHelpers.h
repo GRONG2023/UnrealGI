@@ -14,6 +14,7 @@
 
 class FNotifyHook;
 class FObjectPropertyNode;
+class FDetailWidgetRow;
 
 /** Property button enums. */
 namespace EPropertyButton
@@ -36,6 +37,8 @@ namespace EPropertyButton
 		NewBlueprint,
 		EditConfigHierarchy,
 		Documentation,
+		OptionalSet,
+		OptionalClear,
 	};
 }
 
@@ -43,10 +46,8 @@ class SPropertyNameWidget : public SCompoundWidget
 {
 public:
 	SLATE_BEGIN_ARGS( SPropertyNameWidget )
-		:_DisplayResetToDefault(true)
 	{}
 		SLATE_EVENT( FOnClicked, OnDoubleClicked )
-		SLATE_ARGUMENT( bool, DisplayResetToDefault )
 	SLATE_END_ARGS()
 
 	void Construct( const FArguments& InArgs, TSharedPtr<FPropertyEditor> PropertyEditor );
@@ -59,11 +60,10 @@ class SPropertyValueWidget : public SCompoundWidget
 {
 public:
 	SLATE_BEGIN_ARGS( SPropertyValueWidget )
-		: _ShowPropertyButtons( true ),
-		_OptionalResetWidget(SNullWidget::NullWidget)
+		: _ShowPropertyButtons( true )
 	{}
 		SLATE_ARGUMENT( bool, ShowPropertyButtons )
-		SLATE_ARGUMENT( TSharedRef<SWidget>, OptionalResetWidget)
+		SLATE_ARGUMENT(TOptional<FDetailWidgetRow*>, InWidgetRow)
 	SLATE_END_ARGS()
 
 	void Construct( const FArguments& InArgs, TSharedPtr<FPropertyEditor> InPropertyEditor, TSharedPtr<IPropertyUtilities> InPropertyUtilities );
@@ -74,45 +74,38 @@ public:
 	/** @return The maximum desired with if this property value */
 	float GetMaxDesiredWidth() const { return MaxDesiredWidth; }
 
-	/** @return Whether this widget handles its own reset button */
-	bool CreatedResetButton() const { return bCreatedResetButton; }
-
 private:
-	TSharedRef<SWidget> ConstructPropertyEditorWidget( TSharedPtr<FPropertyEditor>& PropertyEditor, TSharedPtr<IPropertyUtilities> InPropertyUtilities, TSharedRef<SWidget> InOptionalResetDefaultWidget = SNullWidget::NullWidget);
+	TSharedRef<SWidget> ConstructPropertyEditorWidget( TSharedPtr<FPropertyEditor>& PropertyEditor, TSharedPtr<IPropertyUtilities> InPropertyUtilities );
 private:
 	TSharedPtr< SWidget > ValueEditorWidget;
 	/** The minimum desired with if this property value */
 	float MinDesiredWidth;
 	/** The maximum desired with if this property value */
 	float MaxDesiredWidth;
-	/** Whether or not this value widget handled its own reset button */
-	bool bCreatedResetButton;
-};
+	/** The widget row this value widget is part of */
+	TOptional<FDetailWidgetRow*> WidgetRow;
 
-
-struct FCustomEditCondition
-{
-	TAttribute<bool> EditConditionValue;
-	FOnBooleanValueChanged OnEditConditionValueChanged;
 };
 
 class SEditConditionWidget : public SCompoundWidget
 {
 	SLATE_BEGIN_ARGS( SEditConditionWidget )
 	{}
-		SLATE_ARGUMENT( FCustomEditCondition, CustomEditCondition )
+		SLATE_ATTRIBUTE( bool, EditConditionValue )
+		SLATE_EVENT( FOnBooleanValueChanged, OnEditConditionValueChanged )
 	SLATE_END_ARGS()
 
-	void Construct( const FArguments& Args, TSharedPtr<FPropertyEditor> InPropertyEditor );
+	void Construct( const FArguments& Args );
 
 private:
 	void OnEditConditionCheckChanged( ECheckBoxState CheckState );
 	bool HasEditConditionToggle() const;
 	ECheckBoxState OnGetEditConditionCheckState() const;
+	EVisibility GetVisibility() const;
 
 private:
-	TSharedPtr<FPropertyEditor> PropertyEditor;
-	FCustomEditCondition CustomEditCondition;
+	TAttribute<bool> EditConditionValue;
+	FOnBooleanValueChanged OnEditConditionValueChanged;
 };
 
 namespace PropertyEditorHelpers
@@ -160,6 +153,13 @@ namespace PropertyEditorHelpers
 	 * @param InPropertyNode	The property node containing the property to check
 	 */
 	bool IsDynamicArray( const FPropertyNode& InPropertyNode );
+
+	/**
+	 * Returns whether or not a property is an optional wrapper
+	 *
+	 * @param InPropertyNode	The property node containing the property to check
+	 */
+	bool IsOptionalProperty(const FPropertyNode& InPropertyNode);
 
 	/**
 	 * Returns true if this is an FSoftObjectPath and should be treated like a TSoftObjectPtr
@@ -244,7 +244,7 @@ namespace PropertyEditorHelpers
 	void MakeRequiredPropertyButtons( const TSharedRef< FPropertyEditor >& PropertyEditor, TArray< TSharedRef<SWidget> >& OutButtons, const TArray<EPropertyButton::Type>& ButtonsToIgnore = TArray<EPropertyButton::Type>(), bool bUsingAssetPicker = true );
 
 	TSharedRef<SWidget> MakePropertyButton( const EPropertyButton::Type ButtonType, const TSharedRef< FPropertyEditor >& PropertyEditor );
-	TSharedRef<SWidget> MakePropertyReorderHandle(const TSharedRef<FPropertyNode>& PropertyNode, TSharedPtr<SDetailSingleItemRow> InParentRow);
+	TSharedRef<SWidget> MakePropertyReorderHandle(TSharedPtr<SDetailSingleItemRow> InParentRow, TAttribute<bool> InEnabledAttr);
 	/**
 	 * Recursively finds all object property nodes in a property tree
 	 *
@@ -254,13 +254,42 @@ namespace PropertyEditorHelpers
 	void CollectObjectNodes( TSharedPtr<FPropertyNode> StartNode, TArray<FObjectPropertyNode*>& OutObjectNodes );
 
 	/**
-	 * Returns any enums that are explicitly allowed by the "AllowedEnumValues" metadata on FProperty using the specified enum.
+	 * Returns any enums that are explicitly allowed by the "ValidEnumValues" metadata on FProperty using the specified enum.
 	 *
-	 * @param Property	The property which may contain the "AllowedEnumValues" metadata
+	 * @param Property	The property which may contain the "ValidEnumValues" metadata
 	 * @param InEnum	The enum to search
-	 * @return The array of allowed enums.  NOTE: If an empty array is returned all enum values are allowed.  It is an error for a property to hide all enum values so that state is undefined here.
+	 * @return The array of allowed enums.  NOTE: If an empty array is returned all enum values are allowed. It is an error for a property to hide all enum values so that state is undefined here.
 	 */
 	TArray<FName> GetValidEnumsFromPropertyOverride(const FProperty* Property, const UEnum* InEnum);
+
+	/**
+	 * Returns any enums that are explicitly Disallowed by the "InvalidEnumValues" metadata on FProperty using the specified enum.
+	 *
+	 * @param Property	The property which may contain the "InvalidEnumValues" metadata
+	 * @param InEnum	The enum to search
+	 * @return The array of disallowed enums.
+	 */
+	TArray<FName> GetInvalidEnumsFromPropertyOverride(const FProperty* Property, const UEnum* InEnum);
+
+	/**
+	 * Returns any enums that are explicitly restricted by the "GetRestrictedEnumValues" metadata on FProperty using the specified enum.
+	 *
+	 * @param ObjectList The list of objects currently edited
+	 * @param Property	The property which may contain the "GetRestrictedEnumValues" metadata
+	 * @param InEnum	The enum to search
+	 * @return The array of restricted enums.  
+	 */
+	TArray<FName> GetRestrictedEnumsFromPropertyOverride(TArrayView<UObject*> ObjectList, const FProperty* Property, const UEnum* InEnum);
+
+	/**
+	 * Returns any enums that are have an overridden display name from the "EnumValueDisplayNameOverrides" metadata on FProperty using the specified enum.
+	 *
+	 * @param Property	The property which may contain the "EnumValueDisplayNameOverrides" metadata
+	 * @param InEnum	The enum to search
+	 * @return The map of display name overrides.
+	 */
+	TMap<FName, FText> GetEnumValueDisplayNamesFromPropertyOverride(const FProperty* Property, const UEnum* InEnum);
+	
 	/**
 	 * Whether or not a category is hidden by a given root object
 	 * @param InRootNode	The root node that for the objects we are customizing
@@ -282,8 +311,8 @@ namespace PropertyEditorHelpers
 
 	/**
 	* For properties that support options lists, returns the metadata key which holds the name of the UFunction to call.
-	* Returns nullptr if the property doesn't support, or doesn't have, options.
+	* Returns NAME_None if the property doesn't support, or doesn't have, options.
 	*/
-	const TCHAR* GetPropertyOptionsMetaDataKey(const FProperty* Property);
+	FName GetPropertyOptionsMetaDataKey(const FProperty* Property);
 }
 

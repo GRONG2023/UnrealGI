@@ -55,13 +55,6 @@ static const bool GD3D11SkipStateCaching = false;
 class FD3D11StateCacheBase
 {
 public:
-	enum ESRV_Type
-	{
-		SRV_Unknown,
-		SRV_Dynamic,
-		SRV_Static,
-	};
-
 	bool bDepthBoundsEnabled = false;
 	float DepthBoundsMin = 0.0f;
 	float DepthBoundsMax = 1.0f;
@@ -82,8 +75,6 @@ protected:
 
 	// Shader Cache
 	ID3D11VertexShader* CurrentVertexShader;
-	ID3D11HullShader* CurrentHullShader;
-	ID3D11DomainShader* CurrentDomainShader;
 	ID3D11GeometryShader* CurrentGeometryShader;
 	ID3D11PixelShader* CurrentPixelShader;
 	ID3D11ComputeShader* CurrentComputeShader;
@@ -142,8 +133,6 @@ protected:
 		switch (ShaderFrequency)
 		{
 		case SF_Vertex:		Direct3DDeviceIMContext->VSSetShaderResources(ResourceIndex, 1, &SRV); break;
-		case SF_Hull:		Direct3DDeviceIMContext->HSSetShaderResources(ResourceIndex, 1, &SRV); break;
-		case SF_Domain:		Direct3DDeviceIMContext->DSSetShaderResources(ResourceIndex, 1, &SRV); break;
 		case SF_Geometry:	Direct3DDeviceIMContext->GSSetShaderResources(ResourceIndex, 1, &SRV); break;
 		case SF_Pixel:		Direct3DDeviceIMContext->PSSetShaderResources(ResourceIndex, 1, &SRV); break;
 		case SF_Compute:	Direct3DDeviceIMContext->CSSetShaderResources(ResourceIndex, 1, &SRV); break;
@@ -157,8 +146,6 @@ protected:
 		switch (ShaderFrequency)
 		{
 		case SF_Vertex:		Direct3DDeviceIMContext->VSSetSamplers(SamplerIndex, 1, &SamplerState); break;
-		case SF_Hull:		Direct3DDeviceIMContext->HSSetSamplers(SamplerIndex, 1, &SamplerState); break;
-		case SF_Domain:		Direct3DDeviceIMContext->DSSetSamplers(SamplerIndex, 1, &SamplerState); break;
 		case SF_Geometry:	Direct3DDeviceIMContext->GSSetSamplers(SamplerIndex, 1, &SamplerState); break;
 		case SF_Pixel:		Direct3DDeviceIMContext->PSSetSamplers(SamplerIndex, 1, &SamplerState); break;
 		case SF_Compute:	Direct3DDeviceIMContext->CSSetSamplers(SamplerIndex, 1, &SamplerState); break;
@@ -172,16 +159,13 @@ protected:
 		switch (ShaderFrequency)
 		{
 		case SF_Vertex:		Direct3DDeviceIMContext->VSSetConstantBuffers(SlotIndex, 1, &ConstantBuffer); break;
-		case SF_Hull:		Direct3DDeviceIMContext->HSSetConstantBuffers(SlotIndex, 1, &ConstantBuffer); break;
-		case SF_Domain:		Direct3DDeviceIMContext->DSSetConstantBuffers(SlotIndex, 1, &ConstantBuffer); break;
 		case SF_Geometry:	Direct3DDeviceIMContext->GSSetConstantBuffers(SlotIndex, 1, &ConstantBuffer); break;
 		case SF_Pixel:		Direct3DDeviceIMContext->PSSetConstantBuffers(SlotIndex, 1, &ConstantBuffer); break;
 		case SF_Compute:	Direct3DDeviceIMContext->CSSetConstantBuffers(SlotIndex, 1, &ConstantBuffer); break;
 		}
 	}
 
-	typedef void (*TSetIndexBufferAlternate)(FD3D11StateCacheBase* StateCache, ID3D11Buffer* IndexBuffer, DXGI_FORMAT Format, uint32 Offset);
-	D3D11_STATE_CACHE_INLINE void InternalSetIndexBuffer(ID3D11Buffer* IndexBuffer, DXGI_FORMAT Format, uint32 Offset, TSetIndexBufferAlternate AlternatePathFunction)
+	D3D11_STATE_CACHE_INLINE void InternalSetIndexBuffer(ID3D11Buffer* IndexBuffer, DXGI_FORMAT Format, uint32 Offset)
 	{
 #if D3D11_ALLOW_STATE_CACHE
 		D3D11_STATE_CACHE_VERIFY_PRE();
@@ -191,14 +175,7 @@ protected:
 			CurrentIndexBuffer = IndexBuffer;
 			CurrentIndexFormat = Format;
 			CurrentIndexOffset = Offset;
-			if (AlternatePathFunction != nullptr)
-			{
-				(*AlternatePathFunction)(this, IndexBuffer, Format, Offset);
-			}
-			else
-			{
-				Direct3DDeviceIMContext->IASetIndexBuffer(IndexBuffer, Format, Offset);
-			}
+			Direct3DDeviceIMContext->IASetIndexBuffer(IndexBuffer, Format, Offset);
 		}
 		D3D11_STATE_CACHE_VERIFY_POST();
 #else
@@ -206,9 +183,8 @@ protected:
 #endif
 	}
 
-	typedef void (*TSetSRVAlternate)(FD3D11StateCacheBase* StateCache, ID3D11ShaderResourceView* SRV, uint32 ResourceIndex, ESRV_Type SrvType);
 	template <EShaderFrequency ShaderFrequency>
-	D3D11_STATE_CACHE_INLINE void InternalSetShaderResourceView(ID3D11ShaderResourceView*& SRV, uint32 ResourceIndex, ESRV_Type SrvType, TSetSRVAlternate AlternatePathFunction)
+	D3D11_STATE_CACHE_INLINE void InternalSetShaderResourceView(ID3D11ShaderResourceView*& SRV, uint32 ResourceIndex)
 	{
 #if D3D11_ALLOW_STATE_CACHE
 		D3D11_STATE_CACHE_VERIFY_PRE();
@@ -224,14 +200,7 @@ protected:
 				CurrentShaderResourceViews[ShaderFrequency][ResourceIndex]->Release();
 			}
 			CurrentShaderResourceViews[ShaderFrequency][ResourceIndex] = SRV;
-			if (AlternatePathFunction != nullptr)
-			{
-				(*AlternatePathFunction)(this, SRV, ResourceIndex, SrvType);
-			}
-			else
-			{
-				InternalSetShaderResourceView<ShaderFrequency>(ResourceIndex, SRV);
-			}
+			InternalSetShaderResourceView<ShaderFrequency>(ResourceIndex, SRV);
 		}
 		D3D11_STATE_CACHE_VERIFY_POST();
 #else	// !D3D11_ALLOW_STATE_CACHE
@@ -239,8 +208,7 @@ protected:
 #endif
 	}
 
-	typedef void (*TSetStreamSourceAlternate)(FD3D11StateCacheBase* StateCache, ID3D11Buffer* VertexBuffer, uint32 StreamIndex, uint32 Stride, uint32 Offset);
-	D3D11_STATE_CACHE_INLINE void InternalSetStreamSource(ID3D11Buffer* VertexBuffer, uint32 StreamIndex, uint32 Stride, uint32 Offset, TSetStreamSourceAlternate AlternatePathFunction)
+	D3D11_STATE_CACHE_INLINE void InternalSetStreamSource(ID3D11Buffer* VertexBuffer, uint32 StreamIndex, uint32 Stride, uint32 Offset)
 	{
 #if D3D11_ALLOW_STATE_CACHE
 		D3D11_STATE_CACHE_VERIFY_PRE();
@@ -251,14 +219,7 @@ protected:
 			Slot.VertexBuffer = VertexBuffer;
 			Slot.Offset = Offset;
 			Slot.Stride = Stride;
-			if (AlternatePathFunction != nullptr)
-			{
-				(*AlternatePathFunction)(this, VertexBuffer, StreamIndex, Stride, Offset);
-			}
-			else
-			{
-				Direct3DDeviceIMContext->IASetVertexBuffers(StreamIndex, 1, &VertexBuffer, &Stride, &Offset);
-			}
+			Direct3DDeviceIMContext->IASetVertexBuffers(StreamIndex, 1, &VertexBuffer, &Stride, &Offset);
 		}
 		D3D11_STATE_CACHE_VERIFY_POST();
 #else
@@ -266,24 +227,16 @@ protected:
 #endif
 	}
 
-	typedef void (*TSetSamplerStateAlternate)(FD3D11StateCacheBase* StateCache, ID3D11SamplerState* SamplerState, uint32 SamplerIndex);
 	template <EShaderFrequency ShaderFrequency>
-	D3D11_STATE_CACHE_INLINE void InternalSetSamplerState(ID3D11SamplerState* SamplerState, uint32 SamplerIndex, TSetSamplerStateAlternate AlternatePathFunction)
+	D3D11_STATE_CACHE_INLINE void InternalSetSamplerState(ID3D11SamplerState* SamplerState, uint32 SamplerIndex)
 	{
 #if D3D11_ALLOW_STATE_CACHE
 		D3D11_STATE_CACHE_VERIFY_PRE();
-		check(SamplerIndex < ARRAYSIZE(CurrentSamplerStates[ShaderFrequency]));;
+		check(SamplerIndex < ARRAYSIZE(CurrentSamplerStates[ShaderFrequency]));
 		if ((CurrentSamplerStates[ShaderFrequency][SamplerIndex] != SamplerState) || GD3D11SkipStateCaching)
 		{
 			CurrentSamplerStates[ShaderFrequency][SamplerIndex] = SamplerState;
-			if (AlternatePathFunction != nullptr)
-			{
-				(*AlternatePathFunction)(this, SamplerState, SamplerIndex);
-			}
-			else
-			{
-				InternalSetSamplerState<ShaderFrequency>(SamplerIndex, SamplerState);
-			}
+			InternalSetSamplerState<ShaderFrequency>(SamplerIndex, SamplerState);
 		}
 		D3D11_STATE_CACHE_VERIFY_POST();
 #else
@@ -303,8 +256,6 @@ public:
 		switch (ShaderFrequency)
 		{
 		case SF_Vertex:		Direct3DDeviceIMContext->VSSetConstantBuffers(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT, Empty); break;
-		case SF_Hull:		Direct3DDeviceIMContext->HSSetConstantBuffers(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT, Empty); break;
-		case SF_Domain:		Direct3DDeviceIMContext->DSSetConstantBuffers(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT, Empty); break;
 		case SF_Geometry:	Direct3DDeviceIMContext->GSSetConstantBuffers(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT, Empty); break;
 		case SF_Pixel:		Direct3DDeviceIMContext->PSSetConstantBuffers(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT, Empty); break;
 		case SF_Compute:	Direct3DDeviceIMContext->CSSetConstantBuffers(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT, Empty); break;
@@ -312,9 +263,9 @@ public:
 	}
 
 	template <EShaderFrequency ShaderFrequency>
-	D3D11_STATE_CACHE_INLINE void SetShaderResourceView(ID3D11ShaderResourceView* SRV, uint32 ResourceIndex, ESRV_Type SrvType = SRV_Unknown)
+	D3D11_STATE_CACHE_INLINE void SetShaderResourceView(ID3D11ShaderResourceView* SRV, uint32 ResourceIndex)
 	{
-		InternalSetShaderResourceView<ShaderFrequency>(SRV, ResourceIndex, SrvType, nullptr);
+		InternalSetShaderResourceView<ShaderFrequency>(SRV, ResourceIndex);
 	}
 
 	template <EShaderFrequency ShaderFrequency>
@@ -338,12 +289,6 @@ public:
 			{
 			case SF_Vertex:		
 				Direct3DDeviceIMContext->VSGetShaderResources(StartResourceIndex, NumResources, SRV); 
-				break;
-			case SF_Hull:		
-				Direct3DDeviceIMContext->HSGetShaderResources(StartResourceIndex, NumResources, SRV); 
-				break;
-			case SF_Domain:		
-				Direct3DDeviceIMContext->DSGetShaderResources(StartResourceIndex, NumResources, SRV); 
 				break;
 			case SF_Geometry:	
 				Direct3DDeviceIMContext->GSGetShaderResources(StartResourceIndex, NumResources, SRV); 
@@ -432,51 +377,9 @@ public:
 	template <EShaderFrequency ShaderFrequency>
 	D3D11_STATE_CACHE_INLINE void SetSamplerState(ID3D11SamplerState* SamplerState, uint32 SamplerIndex)
 	{
-		InternalSetSamplerState<ShaderFrequency>(SamplerState, SamplerIndex, nullptr);
+		InternalSetSamplerState<ShaderFrequency>(SamplerState, SamplerIndex);
 	}
 
-	template <EShaderFrequency ShaderFrequency>
-	D3D11_STATE_CACHE_INLINE void GetSamplerState(uint32 StartSamplerIndex, uint32 NumSamplerIndexes, ID3D11SamplerState** SamplerStates)
-	{
-#if D3D11_ALLOW_STATE_CACHE
-		{
-			check(StartSamplerIndex + NumSamplerIndexes <= D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT);
-			for (uint32 StateLoop = 0; StateLoop < NumSamplerIndexes; StateLoop++)
-			{
-				SamplerStates[StateLoop] = CurrentShaderResourceViews[ShaderFrequency][StateLoop + StartSamplerIndex];
-				if (SamplerStates[StateLoop])
-				{
-					SamplerStates[StateLoop]->AddRef();
-				}
-			}
-		}
-#else
-		{
-			switch (ShaderFrequency)
-			{
-				case SF_Vertex:		
-					Direct3DDeviceIMContext->VSGetSamplers(StartSamplerIndex, NumSamplerIndexes, SamplerStates); 
-					break;
-				case SF_Hull:		
-					Direct3DDeviceIMContext->HSGetSamplers(StartSamplerIndex, NumSamplerIndexes, SamplerStates); 
-					break;
-				case SF_Domain:		
-					Direct3DDeviceIMContext->DSGetSamplers(StartSamplerIndex, NumSamplerIndexes, SamplerStates); 
-					break;
-				case SF_Geometry:	
-					Direct3DDeviceIMContext->GSGetSamplers(StartSamplerIndex, NumSamplerIndexes, SamplerStates); 
-					break;
-				case SF_Pixel:		
-					Direct3DDeviceIMContext->PSGetSamplers(StartSamplerIndex, NumSamplerIndexes, SamplerStates); 
-					break;
-				case SF_Compute:	
-					Direct3DDeviceIMContext->CSGetSamplers(StartSamplerIndex, NumSamplerIndexes, SamplerStates); 
-					break;
-
-			}
-		}
-#endif
-	}
 	template <EShaderFrequency ShaderFrequency>
 	D3D11_STATE_CACHE_INLINE void SetConstantBuffer(ID3D11Buffer* ConstantBuffer, uint32 SlotIndex)
 	{
@@ -515,8 +418,6 @@ template <EShaderFrequency ShaderFrequency>
 			switch (ShaderFrequency)
 			{
 			case SF_Vertex:		Direct3DDeviceIMContext1->VSGetConstantBuffers(StartSlot, NumBuffers, ConstantBuffers); break;
-			case SF_Hull:		Direct3DDeviceIMContext1->HSGetConstantBuffers(StartSlot, NumBuffers, ConstantBuffers); break;
-			case SF_Domain:		Direct3DDeviceIMContext1->DSGetConstantBuffers(StartSlot, NumBuffers, ConstantBuffers); break;
 			case SF_Geometry:	Direct3DDeviceIMContext1->GSGetConstantBuffers(StartSlot, NumBuffers, ConstantBuffers); break;
 			case SF_Pixel:		Direct3DDeviceIMContext1->PSGetConstantBuffers(StartSlot, NumBuffers, ConstantBuffers); break;
 			case SF_Compute:	Direct3DDeviceIMContext1->CSGetConstantBuffers(StartSlot, NumBuffers, ConstantBuffers); break;
@@ -675,62 +576,6 @@ template <EShaderFrequency ShaderFrequency>
 #endif
 	}
 
-	D3D11_STATE_CACHE_INLINE void SetHullShader(ID3D11HullShader* Shader)
-	{
-#if D3D11_ALLOW_STATE_CACHE
-		D3D11_STATE_CACHE_VERIFY_PRE();
-		if ((CurrentHullShader != Shader) || GD3D11SkipStateCaching)
-		{
-			CurrentHullShader = Shader;
-			Direct3DDeviceIMContext->HSSetShader(Shader, nullptr, 0);
-		}
-		D3D11_STATE_CACHE_VERIFY_POST();
-#else
-		Direct3DDeviceIMContext->HSSetShader(Shader, nullptr, 0);
-#endif
-	}
-
-	D3D11_STATE_CACHE_INLINE void GetHullShader(ID3D11HullShader** HullShader)
-	{
-#if D3D11_ALLOW_STATE_CACHE
-		*HullShader = CurrentHullShader;
-		if (CurrentHullShader)
-		{
-			CurrentHullShader->AddRef();
-		}
-#else
-		Direct3DDeviceIMContext->HSGetShader(HullShader, nullptr, nullptr);
-#endif
-	}
-
-	D3D11_STATE_CACHE_INLINE void SetDomainShader(ID3D11DomainShader* Shader)
-	{
-#if D3D11_ALLOW_STATE_CACHE
-		D3D11_STATE_CACHE_VERIFY_PRE();
-		if ((CurrentDomainShader != Shader) || GD3D11SkipStateCaching)
-		{
-			CurrentDomainShader = Shader;
-			Direct3DDeviceIMContext->DSSetShader(Shader, nullptr, 0);
-		}
-		D3D11_STATE_CACHE_VERIFY_POST();
-#else
-		Direct3DDeviceIMContext->DSSetShader(Shader, nullptr, 0);
-#endif
-	}
-
-	D3D11_STATE_CACHE_INLINE void GetDomainShader(ID3D11DomainShader** DomainShader)
-	{
-#if D3D11_ALLOW_STATE_CACHE
-		*DomainShader = CurrentDomainShader;
-		if (CurrentDomainShader)
-		{
-			CurrentDomainShader->AddRef();
-		}
-#else
-		Direct3DDeviceIMContext->DSGetShader(DomainShader, nullptr, nullptr);
-#endif
-	}
-
 	D3D11_STATE_CACHE_INLINE void SetGeometryShader(ID3D11GeometryShader* Shader)
 	{
 #if D3D11_ALLOW_STATE_CACHE
@@ -851,12 +696,12 @@ template <EShaderFrequency ShaderFrequency>
 	D3D11_STATE_CACHE_INLINE void SetStreamSource(ID3D11Buffer* VertexBuffer, uint32 StreamIndex, uint32 Stride, uint32 Offset)
 	{
 		ensure(Stride == StreamStrides[StreamIndex]);
-		InternalSetStreamSource(VertexBuffer, StreamIndex, Stride, Offset, nullptr);
+		InternalSetStreamSource(VertexBuffer, StreamIndex, Stride, Offset);
 	}
 
 	D3D11_STATE_CACHE_INLINE void SetStreamSource(ID3D11Buffer* VertexBuffer, uint32 StreamIndex, uint32 Offset)
 	{
-		InternalSetStreamSource(VertexBuffer, StreamIndex, StreamStrides[StreamIndex], Offset, nullptr);
+		InternalSetStreamSource(VertexBuffer, StreamIndex, StreamStrides[StreamIndex], Offset);
 	}
 
 	D3D11_STATE_CACHE_INLINE void GetStreamSources(uint32 StartStreamIndex, uint32 NumStreams, ID3D11Buffer** VertexBuffers, uint32* Strides, uint32* Offsets)
@@ -883,7 +728,7 @@ public:
 
 	D3D11_STATE_CACHE_INLINE void SetIndexBuffer(ID3D11Buffer* IndexBuffer, DXGI_FORMAT Format, uint32 Offset)
 	{
-		InternalSetIndexBuffer(IndexBuffer, Format, Offset, nullptr);
+		InternalSetIndexBuffer(IndexBuffer, Format, Offset);
 	}
 
 	D3D11_STATE_CACHE_INLINE void GetIndexBuffer(ID3D11Buffer** IndexBuffer, DXGI_FORMAT* Format, uint32* Offset)

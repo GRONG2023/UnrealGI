@@ -13,7 +13,7 @@ class UTexture;
 
 /** Selects the texture property to output */
 UENUM()
-enum EMaterialExposedTextureProperty
+enum EMaterialExposedTextureProperty : int
 {
 	/* The texture's size. */
 	TMTM_TextureSize UMETA(DisplayName="Texture Size"),
@@ -24,8 +24,8 @@ enum EMaterialExposedTextureProperty
 	TMTM_MAX,
 };
 
-UCLASS(collapsecategories, hidecategories=Object)
-class ENGINE_API UMaterialExpressionTextureProperty : public UMaterialExpression
+UCLASS(collapsecategories, hidecategories=Object, MinimalAPI)
+class UMaterialExpressionTextureProperty : public UMaterialExpression
 {
 	GENERATED_UCLASS_BODY()
 
@@ -33,16 +33,18 @@ class ENGINE_API UMaterialExpressionTextureProperty : public UMaterialExpression
 	FExpressionInput TextureObject;
 	
 	/** Texture property to be accessed */
-	UPROPERTY(EditAnywhere, Category=UMaterialExpressionTextureProperty, meta=(DisplayName = "Texture Property"))
+	UPROPERTY(EditAnywhere, Category=UMaterialExpressionTextureProperty, meta=(DisplayName = "Texture Property", ShowAsInputPin = "Advanced"))
 	TEnumAsByte<EMaterialExposedTextureProperty> Property;
 	
 	//~ Begin UMaterialExpression Interface
 #if WITH_EDITOR
-	virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
-	virtual void GetTexturesForceMaterialRecompile(TArray<UTexture *> &Textures) const override;
-	virtual void GetCaption(TArray<FString>& OutCaptions) const override;
-	virtual uint32 GetInputType(int32 InputIndex) override;
-	virtual bool MatchesSearchQuery(const TCHAR* SearchQuery) override;
+	ENGINE_API virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
+	ENGINE_API virtual void GetTexturesForceMaterialRecompile(TArray<UTexture *> &Textures) const override;
+	ENGINE_API virtual void GetCaption(TArray<FString>& OutCaptions) const override;
+	ENGINE_API virtual uint32 GetInputType(int32 InputIndex) override;
+	ENGINE_API virtual bool MatchesSearchQuery(const TCHAR* SearchQuery) override;
+
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
 #endif //WITH_EDITOR
 	//~ End UMaterialExpression Interface
 };

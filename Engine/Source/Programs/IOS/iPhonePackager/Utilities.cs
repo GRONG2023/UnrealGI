@@ -396,7 +396,7 @@ namespace iPhonePackager
 			/// Merge two plists together.  Whenever both have the same key, the value in the dominant source list wins.
 			/// This is special purpose code, and only handles things inside of the <dict> tag
 			/// </summary>
-			public void MergePlistIn(string DominantPlist)
+			public void MergePlistIn(string DominantPlist, HashSet<string> WeakKeysToKeep=null)
 			{
 				if (bReadOnly)
 				{
@@ -422,7 +422,8 @@ namespace iPhonePackager
 						DictionaryNode.AppendChild(Doc.ImportNode(StrongKeyNode, true));
 						DictionaryNode.AppendChild(Doc.ImportNode(StrongKeyNode.NextSibling, true));
 					}
-					else
+					// don't overwrite values we want to keep
+					else if (WeakKeysToKeep == null || !WeakKeysToKeep.Contains(StrongKey))
 					{
 						// Remove the existing value node from the weak file
 						WeakNode.ParentNode.RemoveChild(WeakNode.NextSibling);
@@ -611,7 +612,7 @@ namespace iPhonePackager
 				if (!File.Exists(SourceName))
 				{
 					// fallback to the shared one
-					SourceName = FileOperations.FindPrefixedFile(Config.EngineBuildDirectory, "UE4Game-Info.plist");
+					SourceName = FileOperations.FindPrefixedFile(Config.EngineBuildDirectory, "UnrealGame-Info.plist");
 
 					if (!File.Exists(SourceName))
 					{
@@ -922,7 +923,6 @@ namespace iPhonePackager
 		{
 			if (Environment.OSVersion.Platform == PlatformID.Unix || Environment.OSVersion.Platform == PlatformID.MacOSX)
 			{
-				// From Mono 6, the FriendlyName field cannot be set on Unix so we always parse it out of the Subject.
 				return GetCommonNameFromCert(Cert);
 			}
 			else
@@ -958,6 +958,10 @@ namespace iPhonePackager
 			CertChain[0] = new X509CertificateEntry(BouncyCert);
 
 			AsymmetricCipherKeyPair KeyPair = LoadKeyPairFromDiskBouncy(KeyFilename);
+			if (KeyPair == null || KeyPair.Private == null)
+			{
+				throw new InvalidDataException("The key pair provided does contain a private key.  Make sure you provide the same key pair that was used to generate the original certificate signing request");
+			}
 
 			Store.SetKeyEntry(FriendlyName, new AsymmetricKeyEntry(KeyPair.Private), CertChain);
 

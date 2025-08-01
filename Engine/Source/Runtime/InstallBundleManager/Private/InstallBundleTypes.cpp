@@ -1,8 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "InstallBundleTypes.h"
-#include "InstallBundleManagerPrivatePCH.h"
 
+#include "InstallBundleManagerPrivate.h"
 #include "InstallBundleUtils.h"
 #include "Misc/CString.h"
 
@@ -17,10 +17,10 @@ const TCHAR* LexToString(EInstallBundleSourceType Type)
 		TEXT("Platform"),
 #endif // WITH_PLATFORM_INSTALL_BUNDLE_SOURCE
 		TEXT("GameCustom"),
+		TEXT("Streaming"),
 	};
 
-	static_assert(InstallBundleUtil::CastToUnderlying(EInstallBundleSourceType::Count) == UE_ARRAY_COUNT(Strings), "");
-	return Strings[InstallBundleUtil::CastToUnderlying(Type)];
+	return InstallBundleUtil::TLexToString(Type, Strings);
 }
 
 void LexFromString(EInstallBundleSourceType& OutType, const TCHAR* String)
@@ -58,8 +58,7 @@ const TCHAR* LexToString(EInstallBundleManagerInitResult Result)
 		TEXT("ClientPatchRequiredError"),
 	};
 
-	static_assert(InstallBundleUtil::CastToUnderlying(EInstallBundleManagerInitResult::Count) == UE_ARRAY_COUNT(Strings), "");
-	return Strings[InstallBundleUtil::CastToUnderlying(Result)];
+	return InstallBundleUtil::TLexToString(Result, Strings);
 }
 
 const TCHAR* LexToString(EInstallBundleInstallState State)
@@ -71,8 +70,7 @@ const TCHAR* LexToString(EInstallBundleInstallState State)
 		TEXT("UpToDate"),
 	};
 
-	static_assert(InstallBundleUtil::CastToUnderlying(EInstallBundleInstallState::Count) == UE_ARRAY_COUNT(Strings), "");
-	return Strings[InstallBundleUtil::CastToUnderlying(State)];
+	return InstallBundleUtil::TLexToString(State, Strings);
 }
 
 const TCHAR* LexToString(EInstallBundleResult Result)
@@ -86,13 +84,13 @@ const TCHAR* LexToString(EInstallBundleResult Result)
 		TEXT("InstallError"),
 		TEXT("InstallerOutOfDiskSpaceError"),
 		TEXT("ManifestArchiveError"),
+		TEXT("ConnectivityError"),
 		TEXT("UserCancelledError"),
 		TEXT("InitializationError"),
 		TEXT("InitializationPending"),
 	};
 
-	static_assert(InstallBundleUtil::CastToUnderlying(EInstallBundleResult::Count) == UE_ARRAY_COUNT(Strings), "");
-	return Strings[InstallBundleUtil::CastToUnderlying(Result)];
+	return InstallBundleUtil::TLexToString(Result, Strings);
 }
 
 const TCHAR* LexToString(EInstallBundleReleaseResult Result)
@@ -104,8 +102,7 @@ const TCHAR* LexToString(EInstallBundleReleaseResult Result)
 		TEXT("UserCancelledError"),
 	};
 
-	static_assert(InstallBundleUtil::CastToUnderlying(EInstallBundleReleaseResult::Count) == UE_ARRAY_COUNT(Strings), "");
-	return Strings[InstallBundleUtil::CastToUnderlying(Result)];
+	return InstallBundleUtil::TLexToString(Result, Strings);
 }
 
 const TCHAR* LexToString(EInstallBundleStatus Status)
@@ -118,8 +115,7 @@ const TCHAR* LexToString(EInstallBundleStatus Status)
 		TEXT("Ready"),
 	};
 
-	static_assert(InstallBundleUtil::CastToUnderlying(EInstallBundleStatus::Count) == UE_ARRAY_COUNT(Strings), "");
-	return Strings[InstallBundleUtil::CastToUnderlying(Status)];
+	return InstallBundleUtil::TLexToString(Status, Strings);
 }
 
 const TCHAR* LexToString(EInstallBundleManagerPatchCheckResult EnumVal)
@@ -134,8 +130,7 @@ const TCHAR* LexToString(EInstallBundleManagerPatchCheckResult EnumVal)
 		TEXT("EInstallBundleManagerPatchCheckResult::PatchCheckFailure"),
 	};
 
-	static_assert(InstallBundleUtil::CastToUnderlying(EInstallBundleManagerPatchCheckResult::Count) == UE_ARRAY_COUNT(Strings), "");
-	return Strings[InstallBundleUtil::CastToUnderlying(EnumVal)];
+	return InstallBundleUtil::TLexToString(EnumVal, Strings);
 }
 
 const TCHAR* LexToString(EInstallBundlePriority Priority)
@@ -147,8 +142,21 @@ const TCHAR* LexToString(EInstallBundlePriority Priority)
 		TEXT("Low"),
 	};
 
-	static_assert(InstallBundleUtil::CastToUnderlying(EInstallBundlePriority::Count) == UE_ARRAY_COUNT(Strings), "");
-	return Strings[InstallBundleUtil::CastToUnderlying(Priority)];
+	return InstallBundleUtil::TLexToString(Priority, Strings);
+}
+
+const TCHAR* LexToString(EInstallBundleSourceUpdateBundleInfoResult Result)
+{
+	static const TCHAR* Strings[] =
+	{
+		TEXT("OK"),
+		TEXT("NotInitailized"),
+		TEXT("AlreadyMounted"),
+		TEXT("AlreadyRequested"),
+		TEXT("IllegalCacheStatus"),
+	};
+
+	return InstallBundleUtil::TLexToString(Result, Strings);
 }
 
 bool LexTryParseString(EInstallBundlePriority& OutMode, const TCHAR* InBuffer)

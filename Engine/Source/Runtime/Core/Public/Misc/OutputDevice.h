@@ -2,14 +2,26 @@
 
 #pragma once
 
-#include "CoreTypes.h"
 #include "CoreFwd.h"
+#include "CoreTypes.h"
 #include "Logging/LogVerbosity.h"
-#include "Misc/CoreMiscDefines.h"
 #include "Misc/VarArgs.h"
+#include "Templates/IsArrayOrRefOfTypeByPredicate.h"
 #include "Templates/IsValidVariadicFunctionArg.h"
-#include "Templates/AndOrNot.h"
-#include "Templates/IsArrayOrRefOfType.h"
+#include "Traits/IsCharEncodingCompatibleWith.h"
+
+class FString;
+class FText;
+
+namespace UE { class FLogRecord; }
+
+#ifndef USE_DEBUG_LOGGING
+#define USE_DEBUG_LOGGING 1
+#endif
+
+#ifndef USE_EVENT_LOGGING
+#define USE_EVENT_LOGGING 1
+#endif
 
 #if !PLATFORM_SUPPORTS_COLORIZED_OUTPUT_DEVICE
 	// don't support colorized text on consoles
@@ -45,26 +57,26 @@ An empty string reverts to the normal gray on black.
 // putting them in a namespace to protect against future name conflicts
 namespace OutputDeviceColor
 {
-	const TCHAR* const COLOR_BLACK = TEXT("0000");
+	inline const TCHAR* const COLOR_BLACK = TEXT("0000");
 
-	const TCHAR* const COLOR_DARK_RED = TEXT("1000");
-	const TCHAR* const COLOR_DARK_GREEN = TEXT("0100");
-	const TCHAR* const COLOR_DARK_BLUE = TEXT("0010");
-	const TCHAR* const COLOR_DARK_YELLOW = TEXT("1100");
-	const TCHAR* const COLOR_DARK_CYAN = TEXT("0110");
-	const TCHAR* const COLOR_DARK_PURPLE = TEXT("1010");
-	const TCHAR* const COLOR_DARK_WHITE = TEXT("1110");
-	const TCHAR* const COLOR_GRAY = COLOR_DARK_WHITE;
+	inline const TCHAR* const COLOR_DARK_RED = TEXT("1000");
+	inline const TCHAR* const COLOR_DARK_GREEN = TEXT("0100");
+	inline const TCHAR* const COLOR_DARK_BLUE = TEXT("0010");
+	inline const TCHAR* const COLOR_DARK_YELLOW = TEXT("1100");
+	inline const TCHAR* const COLOR_DARK_CYAN = TEXT("0110");
+	inline const TCHAR* const COLOR_DARK_PURPLE = TEXT("1010");
+	inline const TCHAR* const COLOR_DARK_WHITE = TEXT("1110");
+	inline const TCHAR* const COLOR_GRAY = COLOR_DARK_WHITE;
 
-	const TCHAR* const COLOR_RED = TEXT("1001");
-	const TCHAR* const COLOR_GREEN = TEXT("0101");
-	const TCHAR* const COLOR_BLUE = TEXT("0011");
-	const TCHAR* const COLOR_YELLOW = TEXT("1101");
-	const TCHAR* const COLOR_CYAN = TEXT("0111");
-	const TCHAR* const COLOR_PURPLE = TEXT("1011");
-	const TCHAR* const COLOR_WHITE = TEXT("1111");
+	inline const TCHAR* const COLOR_RED = TEXT("1001");
+	inline const TCHAR* const COLOR_GREEN = TEXT("0101");
+	inline const TCHAR* const COLOR_BLUE = TEXT("0011");
+	inline const TCHAR* const COLOR_YELLOW = TEXT("1101");
+	inline const TCHAR* const COLOR_CYAN = TEXT("0111");
+	inline const TCHAR* const COLOR_PURPLE = TEXT("1011");
+	inline const TCHAR* const COLOR_WHITE = TEXT("1111");
 
-	const TCHAR* const COLOR_NONE = TEXT("");
+	inline const TCHAR* const COLOR_NONE = TEXT("");
 }
 
 using namespace OutputDeviceColor;
@@ -117,7 +129,7 @@ namespace ELogTimes
 class FName;
 
 // An output device.
-class CORE_API FOutputDevice
+class FOutputDevice
 {
 public:
 	FOutputDevice()
@@ -138,6 +150,8 @@ public:
 	{
 		Serialize( V, Verbosity, Category );
 	}
+
+	CORE_API virtual void SerializeRecord(const UE::FLogRecord& Record);
 
 	virtual void Flush()
 	{
@@ -188,60 +202,69 @@ public:
 	}
 
 	/**
-	* @return whether this output device can be used from multiple threads simultaneously without any locking
-	*/
+	 * @return whether this output device can be used from multiple threads simultaneously without any locking
+	 */
 	virtual bool CanBeUsedOnMultipleThreads() const
 	{
 		return false;
 	}
 
+	/**
+	 * @return whether this output device can be used after a panic (crash or fatal error) has been flagged.
+	 * @note The return value is cached by AddOutputDevice because calling this during a panic may fail.
+	 */
+	virtual bool CanBeUsedOnPanicThread() const
+	{
+		return false;
+	}
+
 	// Simple text printing.
-	void Log( const TCHAR* S );
-	void Log( ELogVerbosity::Type Verbosity, const TCHAR* S );
-	void Log( const FName& Category, ELogVerbosity::Type Verbosity, const TCHAR* Str );
-	void Log( const FString& S );
-	void Log( const FText& S );
-	void Log( ELogVerbosity::Type Verbosity, const FString& S );
-	void Log( const FName& Category, ELogVerbosity::Type Verbosity, const FString& S );
+	CORE_API void Log( const TCHAR* S );
+	CORE_API void Log( ELogVerbosity::Type Verbosity, const TCHAR* S );
+	CORE_API void Log( const FName& Category, ELogVerbosity::Type Verbosity, const TCHAR* Str );
+	CORE_API void Log( const FString& S );
+	CORE_API void Log( const FText& S );
+	CORE_API void Log( ELogVerbosity::Type Verbosity, const FString& S );
+	CORE_API void Log( const FName& Category, ELogVerbosity::Type Verbosity, const FString& S );
 
 private:
-	void VARARGS LogfImpl(const TCHAR* Fmt, ...);
-	void VARARGS LogfImpl(ELogVerbosity::Type Verbosity, const TCHAR* Fmt, ...);
-	void VARARGS CategorizedLogfImpl(const FName& Category, ELogVerbosity::Type Verbosity, const TCHAR* Fmt, ...);
+	CORE_API void VARARGS LogfImpl(const TCHAR* Fmt, ...);
+	CORE_API void VARARGS LogfImpl(ELogVerbosity::Type Verbosity, const TCHAR* Fmt, ...);
+	CORE_API void VARARGS CategorizedLogfImpl(const FName& Category, ELogVerbosity::Type Verbosity, const TCHAR* Fmt, ...);
 
 public:
 	template <typename FmtType>
 	void Logf(const FmtType& Fmt)
 	{
-		static_assert(TIsArrayOrRefOfType<FmtType, TCHAR>::Value, "Formatting string must be a TCHAR array.");
-		return Log(Fmt);
+		static_assert(TIsArrayOrRefOfTypeByPredicate<FmtType, TIsCharEncodingCompatibleWithTCHAR>::Value, "Formatting string must be a TCHAR array.");
+		return Log((const TCHAR*)Fmt);
 	}
 
 	template <typename FmtType, typename... Types>
 	FORCEINLINE void Logf(const FmtType& Fmt, Types... Args)
 	{
-		static_assert(TIsArrayOrRefOfType<FmtType, TCHAR>::Value, "Formatting string must be a TCHAR array.");
-		static_assert(TAnd<TIsValidVariadicFunctionArg<Types>...>::Value, "Invalid argument(s) passed to FOutputDevice::Logf");
+		static_assert(TIsArrayOrRefOfTypeByPredicate<FmtType, TIsCharEncodingCompatibleWithTCHAR>::Value, "Formatting string must be a TCHAR array.");
+		static_assert((TIsValidVariadicFunctionArg<Types>::Value && ...), "Invalid argument(s) passed to FOutputDevice::Logf");
 
-		LogfImpl(Fmt, Args...);
+		LogfImpl((const TCHAR*)Fmt, Args...);
 	}
 
 	template <typename FmtType, typename... Types>
 	FORCEINLINE void Logf(ELogVerbosity::Type Verbosity, const FmtType& Fmt, Types... Args)
 	{
-		static_assert(TIsArrayOrRefOfType<FmtType, TCHAR>::Value, "Formatting string must be a TCHAR array.");
-		static_assert(TAnd<TIsValidVariadicFunctionArg<Types>...>::Value, "Invalid argument(s) passed to FOutputDevice::Logf");
+		static_assert(TIsArrayOrRefOfTypeByPredicate<FmtType, TIsCharEncodingCompatibleWithTCHAR>::Value, "Formatting string must be a TCHAR array.");
+		static_assert((TIsValidVariadicFunctionArg<Types>::Value && ...), "Invalid argument(s) passed to FOutputDevice::Logf");
 
-		LogfImpl(Verbosity, Fmt, Args...);
+		LogfImpl(Verbosity, (const TCHAR*)Fmt, Args...);
 	}
 
 	template <typename FmtType, typename... Types>
 	FORCEINLINE void CategorizedLogf(const FName& Category, ELogVerbosity::Type Verbosity, const FmtType& Fmt, Types... Args)
 	{
-		static_assert(TIsArrayOrRefOfType<FmtType, TCHAR>::Value, "Formatting string must be a TCHAR array.");
-		static_assert(TAnd<TIsValidVariadicFunctionArg<Types>...>::Value, "Invalid argument(s) passed to FOutputDevice::CategorizedLogf");
+		static_assert(TIsArrayOrRefOfTypeByPredicate<FmtType, TIsCharEncodingCompatibleWithTCHAR>::Value, "Formatting string must be a TCHAR array.");
+		static_assert((TIsValidVariadicFunctionArg<Types>::Value && ...), "Invalid argument(s) passed to FOutputDevice::CategorizedLogf");
 
-		CategorizedLogfImpl(Category, Verbosity, Fmt, Args...);
+		CategorizedLogfImpl(Category, Verbosity, (const TCHAR*)Fmt, Args...);
 	}
 
 protected:

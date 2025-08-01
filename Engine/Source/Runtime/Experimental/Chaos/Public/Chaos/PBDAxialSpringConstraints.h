@@ -1,47 +1,168 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
-#include "Chaos/Array.h"
-#include "Chaos/PBDAxialSpringConstraintsBase.h"
-#include "Chaos/PBDParticles.h"
-#include "Chaos/PerParticleRule.h"
-#include "Chaos/GraphColoring.h"
-#include "Chaos/Core.h"
-#include "ChaosStats.h"
+// HEADER_UNIT_SKIP - Internal
 
-namespace Chaos
+#include "Chaos/PBDAxialSpringConstraintsBase.h"
+#include "Chaos/CollectionPropertyFacade.h"
+
+namespace Chaos::Softs
 {
 
-class CHAOS_API FPBDAxialSpringConstraints : public FParticleRule, public FPBDAxialSpringConstraintsBase
+class FPBDAxialSpringConstraints : public FPBDAxialSpringConstraintsBase
 {
 	typedef FPBDAxialSpringConstraintsBase Base;
-	using Base::MBarys;
-	using Base::MConstraints;
+	using Base::Barys;
 
-  public:
-	FPBDAxialSpringConstraints(const FDynamicParticles& InParticles, TArray<TVector<int32, 3>>&& Constraints, const FReal Stiffness = (FReal)1.)
-		: FPBDAxialSpringConstraintsBase(InParticles, MoveTemp(Constraints), Stiffness)
+public:
+	FPBDAxialSpringConstraints(
+		const FSolverParticlesRange& Particles,
+		const TArray<TVec3<int32>>& InConstraints,
+		const TConstArrayView<FRealSingle>& StiffnessMultipliers,
+		const FSolverVec2& InStiffness,
+		bool bTrimKinematicConstraints)
+		: Base(
+			Particles,
+			InConstraints,
+			StiffnessMultipliers,
+			InStiffness,
+			bTrimKinematicConstraints)
 	{
-		InitColor(InParticles);
+		InitColor(Particles);
 	}
-	virtual ~FPBDAxialSpringConstraints() {}
 
-  private:
-	void InitColor(const FDynamicParticles& InParticles);
-	void ApplyImp(FPBDParticles& InParticles, const FReal Dt, const int32 i) const;
-  public:
-	void Apply(FPBDParticles& InParticles, const FReal Dt) const override; //-V762
+	FPBDAxialSpringConstraints(
+		const FSolverParticles& Particles,
+		int32 InParticleOffset,
+		int32 InParticleCount,
+		const TArray<TVec3<int32>>& InConstraints,
+		const TConstArrayView<FRealSingle>& StiffnessMultipliers,
+		const FSolverVec2& InStiffness,
+		bool bTrimKinematicConstraints)
+		: Base(
+			Particles,
+			InParticleOffset,
+			InParticleCount,
+			InConstraints,
+			StiffnessMultipliers,
+			InStiffness,
+			bTrimKinematicConstraints)
+	{
+		InitColor(Particles);
+	}
 
-	TArray<TArray<int32>> MConstraintsPerColor;
+	virtual ~FPBDAxialSpringConstraints() override {}
+
+	template<typename SolverParticlesOrRange>
+	CHAOS_API void Apply(SolverParticlesOrRange& InParticles, const FSolverReal Dt) const;
+
+protected:
+	using Base::Constraints;
+	using Base::Stiffness;
+	using Base::ParticleOffset;
+	using Base::ParticleCount;
+
+private:
+	template<typename SolverParticlesOrRange>
+	CHAOS_API void InitColor(const SolverParticlesOrRange& InParticles);
+	template<typename SolverParticlesOrRange>
+	void ApplyHelper(SolverParticlesOrRange& InParticles, const FSolverReal Dt, const int32 ConstraintIndex, const FSolverReal ExpStiffnessValue) const;
+
+	TArray<int32> ConstraintsPerColorStartIndex; // Constraints are ordered so each batch is contiguous. This is ColorNum + 1 length so it can be used as start and end.
 };
 
-}
+class FPBDAreaSpringConstraints final : public FPBDAxialSpringConstraints
+{
+public:
+	static bool IsEnabled(const FCollectionPropertyConstFacade& PropertyCollection)
+	{
+		return IsAreaSpringStiffnessEnabled(PropertyCollection, false);
+	}
 
-// Support ISPC enable/disable in non-shipping builds
-#if !INTEL_ISPC
-const bool bChaos_AxialSpring_ISPC_Enabled = false;
-#elif UE_BUILD_SHIPPING
-const bool bChaos_AxialSpring_ISPC_Enabled = true;
+	FPBDAreaSpringConstraints(
+		const FSolverParticlesRange& Particles,
+		const TArray<TVec3<int32>>& InConstraints,
+		const TMap<FString, TConstArrayView<FRealSingle>>& WeightMaps,
+		const FCollectionPropertyConstFacade& PropertyCollection,
+		bool bTrimKinematicConstraints)
+		: FPBDAxialSpringConstraints(
+			Particles,
+			InConstraints,
+			WeightMaps.FindRef(GetAreaSpringStiffnessString(PropertyCollection, AreaSpringStiffnessName.ToString())),
+			FSolverVec2(GetWeightedFloatAreaSpringStiffness(PropertyCollection, 1.f)),
+			bTrimKinematicConstraints)
+		, AreaSpringStiffnessIndex(PropertyCollection)
+	{}
+
+	FPBDAreaSpringConstraints(
+		const FSolverParticles& Particles,
+		int32 InParticleOffset,
+		int32 InParticleCount,
+		const TArray<TVec3<int32>>& InConstraints,
+		const TMap<FString, TConstArrayView<FRealSingle>>& WeightMaps,
+		const FCollectionPropertyConstFacade& PropertyCollection,
+		bool bTrimKinematicConstraints)
+		: FPBDAxialSpringConstraints(
+			Particles,
+			InParticleOffset,
+			InParticleCount,
+			InConstraints,
+			WeightMaps.FindRef(GetAreaSpringStiffnessString(PropertyCollection, AreaSpringStiffnessName.ToString())),
+			FSolverVec2(GetWeightedFloatAreaSpringStiffness(PropertyCollection, 1.f)),
+			bTrimKinematicConstraints)
+		, AreaSpringStiffnessIndex(PropertyCollection)
+	{}
+
+	UE_DEPRECATED(5.3, "Use weight map constructor instead.")
+	FPBDAreaSpringConstraints(
+		const FSolverParticles& Particles,
+		int32 InParticleOffset,
+		int32 InParticleCount,
+		const TArray<TVec3<int32>>& InConstraints,
+		const TConstArrayView<FRealSingle>& StiffnessMultipliers,
+		const FCollectionPropertyConstFacade& PropertyCollection,
+		bool bTrimKinematicConstraints)
+		: FPBDAxialSpringConstraints(
+			Particles,
+			InParticleOffset,
+			InParticleCount,
+			InConstraints,
+			StiffnessMultipliers,
+			FSolverVec2(GetWeightedFloatAreaSpringStiffness(PropertyCollection, 1.f)),
+			bTrimKinematicConstraints)
+		, AreaSpringStiffnessIndex(PropertyCollection)
+	{}
+
+	virtual ~FPBDAreaSpringConstraints() override = default;
+
+	CHAOS_API void SetProperties(
+		const FCollectionPropertyConstFacade& PropertyCollection,
+		const TMap<FString, TConstArrayView<FRealSingle>>& WeightMaps);
+
+	UE_DEPRECATED(5.3, "Use SetProperties(const FCollectionPropertyConstFacade&, const TMap<FString, TConstArrayView<FRealSingle>>&, FSolverReal) instead.")
+	void SetProperties(const FCollectionPropertyConstFacade& PropertyCollection)
+	{
+		SetProperties(PropertyCollection, TMap<FString, TConstArrayView<FRealSingle>>());
+	}
+
+private:
+	using FPBDAxialSpringConstraints::Constraints;
+	using FPBDAxialSpringConstraints::Stiffness;
+	using FPBDAxialSpringConstraints::ParticleOffset;
+	using FPBDAxialSpringConstraints::ParticleCount;
+
+	UE_CHAOS_DECLARE_PROPERTYCOLLECTION_NAME(AreaSpringStiffness, float);
+};
+
+}  // End namespace Chaos::Softs
+
+#if !defined(CHAOS_AXIAL_SPRING_ISPC_ENABLED_DEFAULT)
+#define CHAOS_AXIAL_SPRING_ISPC_ENABLED_DEFAULT 1
+#endif
+
+// Support run-time toggling on supported platforms in non-shipping configurations
+#if !INTEL_ISPC || UE_BUILD_SHIPPING
+static constexpr bool bChaos_AxialSpring_ISPC_Enabled = INTEL_ISPC && CHAOS_AXIAL_SPRING_ISPC_ENABLED_DEFAULT;
 #else
 extern CHAOS_API bool bChaos_AxialSpring_ISPC_Enabled;
 #endif

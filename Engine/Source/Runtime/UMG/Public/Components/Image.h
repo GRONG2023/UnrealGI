@@ -26,37 +26,34 @@ struct FStreamableHandle;
  *
  * * No Children
  */
-UCLASS()
-class UMG_API UImage : public UWidget
+UCLASS(MinimalAPI)
+class UImage : public UWidget
 {
 	GENERATED_UCLASS_BODY()
 
 public:
 
-#if WITH_EDITORONLY_DATA
+	UE_DEPRECATED(5.2, "Direct access to Brush is deprecated. Please use the getter or setter.")
 	/** Image to draw */
-	UPROPERTY()
-	USlateBrushAsset* Image_DEPRECATED;
-#endif
-
-	/** Image to draw */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Appearance)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, BlueprintSetter = "SetBrush", FieldNotify, Category=Appearance)
 	FSlateBrush Brush;
 
 	/** A bindable delegate for the Image. */
 	UPROPERTY()
 	FGetSlateBrush BrushDelegate;
 
+	UE_DEPRECATED(5.2, "Direct access to ColorAndOpacity is deprecated. Please use the getter or setter.")
 	/** Color and opacity */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Appearance, meta=( sRGB="true") )
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, BlueprintSetter = "SetColorAndOpacity", Category=Appearance, meta=( sRGB="true") )
 	FLinearColor ColorAndOpacity;
 
 	/** A bindable delegate for the ColorAndOpacity. */
 	UPROPERTY()
 	FGetLinearColor ColorAndOpacityDelegate;
 
+	UE_DEPRECATED(5.2, "Direct access to bFlipForRightToLeftFlowDirection is deprecated. Please use the getter or setter.")
 	/** Flips the image if the localization's flow direction is RightToLeft */
-	UPROPERTY(EditAnywhere, Category = "Localization")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter = "ShouldFlipForRightToLeftFlowDirection", Setter = "SetFlipForRightToLeftFlowDirection", Category = "Localization")
 	bool bFlipForRightToLeftFlowDirection;
 
 public:
@@ -68,31 +65,38 @@ public:
 
 	/**  */
 	UFUNCTION(BlueprintCallable, Category="Appearance")
-	void SetColorAndOpacity(FLinearColor InColorAndOpacity);
+	UMG_API void SetColorAndOpacity(FLinearColor InColorAndOpacity);
+
+	UMG_API const FLinearColor& GetColorAndOpacity() const;
 
 	/**  */
 	UFUNCTION(BlueprintCallable, Category="Appearance")
-	void SetOpacity(float InOpacity);
+	UMG_API void SetOpacity(float InOpacity);
+
+	/**  */
+	UE_DEPRECATED(5.0, "Deprecated. Use SetDesiredSizeOverride instead.")
+	UMG_API void SetBrushSize(FVector2D DesiredSize);
+
+	UFUNCTION(BlueprintCallable, Category = "Appearance")
+	UMG_API void SetDesiredSizeOverride(FVector2D DesiredSize);
 
 	/**  */
 	UFUNCTION(BlueprintCallable, Category = "Appearance")
-	void SetBrushSize(FVector2D DesiredSize);
+	UMG_API void SetBrushTintColor(FSlateColor TintColor);
 
 	/**  */
 	UFUNCTION(BlueprintCallable, Category = "Appearance")
-	void SetBrushTintColor(FSlateColor TintColor);
-
-	/**  */
-	UFUNCTION(BlueprintCallable, Category = "Appearance")
-	void SetBrushResourceObject(UObject* ResourceObject);
+	UMG_API void SetBrushResourceObject(UObject* ResourceObject);
 	
 	/**  */
 	UFUNCTION(BlueprintCallable, Category="Appearance")
-	virtual void SetBrush(const FSlateBrush& InBrush);
+	UMG_API virtual void SetBrush(const FSlateBrush& InBrush);
+
+	UMG_API const FSlateBrush& GetBrush() const;
 
 	/**  */
 	UFUNCTION(BlueprintCallable, Category="Appearance")
-	virtual void SetBrushFromAsset(USlateBrushAsset* Asset);
+	UMG_API virtual void SetBrushFromAsset(USlateBrushAsset* Asset);
 
 	/**
 	* Sets the Brush to the specified Texture.
@@ -101,7 +105,7 @@ public:
 	*	@param bMatchSize If true, image will change its size to texture size. If false, texture will be stretched to image size.
 	*/
 	UFUNCTION(BlueprintCallable, Category="Appearance")
-	virtual void SetBrushFromTexture(UTexture2D* Texture, bool bMatchSize = false);
+	UMG_API virtual void SetBrushFromTexture(UTexture2D* Texture, bool bMatchSize = false);
 
 	/**
 	* Sets the Brush to the specified Atlas Region.
@@ -110,7 +114,7 @@ public:
 	*	@param bMatchSize If true, image will change its size to atlas region size. If false, atlas region will be stretched to image size.
 	*/
 	UFUNCTION(BlueprintCallable, Category="Appearance")
-	virtual void SetBrushFromAtlasInterface(TScriptInterface<ISlateTextureAtlasInterface> AtlasRegion, bool bMatchSize = false);
+	UMG_API virtual void SetBrushFromAtlasInterface(TScriptInterface<ISlateTextureAtlasInterface> AtlasRegion, bool bMatchSize = false);
 
 	/**
 	* Sets the Brush to the specified Dynamic Texture.
@@ -119,11 +123,11 @@ public:
 	*	@param bMatchSize If true, image will change its size to texture size. If false, texture will be stretched to image size.
 	*/
 	UFUNCTION(BlueprintCallable, Category = "Appearance")
-	virtual void SetBrushFromTextureDynamic(UTexture2DDynamic* Texture, bool bMatchSize = false);
+	UMG_API virtual void SetBrushFromTextureDynamic(UTexture2DDynamic* Texture, bool bMatchSize = false);
 
 	/**  */
 	UFUNCTION(BlueprintCallable, Category="Appearance")
-	virtual void SetBrushFromMaterial(UMaterialInterface* Material);
+	UMG_API virtual void SetBrushFromMaterial(UMaterialInterface* Material);
 
 	/**
 	* Sets the Brush to the specified Soft Texture.
@@ -132,62 +136,60 @@ public:
 	*	@param bMatchSize If true, image will change its size to texture size. If false, texture will be stretched to image size.
 	*/
 	UFUNCTION(BlueprintCallable, Category="Appearance")
-	virtual void SetBrushFromSoftTexture(TSoftObjectPtr<UTexture2D> SoftTexture, bool bMatchSize = false);
+	UMG_API virtual void SetBrushFromSoftTexture(TSoftObjectPtr<UTexture2D> SoftTexture, bool bMatchSize = false);
 
 	/**  */
 	UFUNCTION(BlueprintCallable, Category="Appearance")
-	virtual void SetBrushFromSoftMaterial(TSoftObjectPtr<UMaterialInterface> SoftMaterial);
+	UMG_API virtual void SetBrushFromSoftMaterial(TSoftObjectPtr<UMaterialInterface> SoftMaterial);
 
 	/**  */
 	UFUNCTION(BlueprintCallable, Category="Appearance")
-	UMaterialInstanceDynamic* GetDynamicMaterial();
+	UMG_API UMaterialInstanceDynamic* GetDynamicMaterial();
+
+	UMG_API void SetFlipForRightToLeftFlowDirection(bool InbFlipForRightToLeftFlowDirection);
+
+	UMG_API bool ShouldFlipForRightToLeftFlowDirection() const;
 
 	//~ Begin UWidget Interface
-	virtual void SynchronizeProperties() override;
+	UMG_API virtual void SynchronizeProperties() override;
 	//~ End UWidget Interface
 
 	//~ Begin UVisual Interface
-	virtual void ReleaseSlateResources(bool bReleaseChildren) override;
+	UMG_API virtual void ReleaseSlateResources(bool bReleaseChildren) override;
 	//~ End UVisual Interface
-
-#if WITH_EDITORONLY_DATA
-	//~ Begin UObject Interface
-	virtual void PostLoad() override;
-	//~ End UObject Interface
-#endif
 
 #if WITH_EDITOR
 	//~ Begin UWidget Interface
-	virtual const FText GetPaletteCategory() override;
+	UMG_API virtual const FText GetPaletteCategory() override;
 	//~ End UWidget Interface
 #endif
 
 protected:
 	//~ Begin UWidget Interface
-	virtual TSharedRef<SWidget> RebuildWidget() override;
+	UMG_API virtual TSharedRef<SWidget> RebuildWidget() override;
 	//~ End UWidget Interface
 
 	/** Translates the bound brush data and assigns it to the cached brush used by this widget. */
-	const FSlateBrush* ConvertImage(TAttribute<FSlateBrush> InImageAsset) const;
+	UMG_API const FSlateBrush* ConvertImage(TAttribute<FSlateBrush> InImageAsset) const;
 
 	// Called when we need to stream in content.
-	void RequestAsyncLoad(TSoftObjectPtr<UObject> SoftObject, TFunction<void()>&& Callback);
-	virtual void RequestAsyncLoad(TSoftObjectPtr<UObject> SoftObject, FStreamableDelegate DelegateToCall);
+	UMG_API void RequestAsyncLoad(TSoftObjectPtr<UObject> SoftObject, TFunction<void()>&& Callback);
+	UMG_API virtual void RequestAsyncLoad(TSoftObjectPtr<UObject> SoftObject, FStreamableDelegate DelegateToCall);
 
 	// Called when we need to abort the texture being streamed in.
-	virtual void CancelImageStreaming();
+	UMG_API virtual void CancelImageStreaming();
 
 	// Called when the image streaming starts, after the other one was cancelled.
-	virtual void OnImageStreamingStarted(TSoftObjectPtr<UObject> SoftObject);
+	UMG_API virtual void OnImageStreamingStarted(TSoftObjectPtr<UObject> SoftObject);
 
 	// Called when the image streaming completes.
-	virtual void OnImageStreamingComplete(TSoftObjectPtr<UObject> LoadedSoftObject);
+	UMG_API virtual void OnImageStreamingComplete(TSoftObjectPtr<UObject> LoadedSoftObject);
 
 	//
-	FReply HandleMouseButtonDown(const FGeometry& Geometry, const FPointerEvent& MouseEvent);
+	UMG_API FReply HandleMouseButtonDown(const FGeometry& Geometry, const FPointerEvent& MouseEvent);
 
 #if WITH_ACCESSIBILITY
-	virtual TSharedPtr<SWidget> GetAccessibleWidget() const override;
+	UMG_API virtual TSharedPtr<SWidget> GetAccessibleWidget() const override;
 #endif
 
 protected:
@@ -198,5 +200,7 @@ protected:
 
 protected:
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	PROPERTY_BINDING_IMPLEMENTATION(FSlateColor, ColorAndOpacity);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 };

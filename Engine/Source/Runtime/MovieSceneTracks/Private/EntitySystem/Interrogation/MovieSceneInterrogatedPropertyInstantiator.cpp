@@ -1,14 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "EntitySystem/Interrogation/MovieSceneInterrogatedPropertyInstantiator.h"
+#include "EntitySystem/Interrogation/MovieSceneInterrogationLinker.h"
+#include "EntitySystem/MovieSceneBlenderSystem.h"
 #include "EntitySystem/MovieSceneEntityBuilder.h"
 #include "EntitySystem/MovieSceneEntitySystemLinker.h"
-#include "EntitySystem/MovieSceneBlenderSystem.h"
 #include "EntitySystem/MovieScenePropertyRegistry.h"
-#include "Systems/MovieScenePiecewiseFloatBlenderSystem.h"
+#include "Systems/MovieScenePiecewiseDoubleBlenderSystem.h"
 
 #include "Algo/IndexOf.h"
 #include "Algo/Find.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneInterrogatedPropertyInstantiator)
 
 
 UMovieSceneInterrogatedPropertyInstantiatorSystem::UMovieSceneInterrogatedPropertyInstantiatorSystem(const FObjectInitializer& ObjInit)
@@ -16,15 +19,14 @@ UMovieSceneInterrogatedPropertyInstantiatorSystem::UMovieSceneInterrogatedProper
 {
 	using namespace UE::MovieScene;
 
-	// This system should never run at runtime
-	SystemExclusionContext |= EEntitySystemContext::Runtime;
-
 	BuiltInComponents = FBuiltInComponentTypes::Get();
 
 	RecomposerImpl.OnGetPropertyInfo = FOnGetPropertyRecomposerPropertyInfo::CreateUObject(
 				this, &UMovieSceneInterrogatedPropertyInstantiatorSystem::FindPropertyFromSource);
 
 	RelevantComponent = BuiltInComponents->Interrogation.InputKey;
+	SystemCategories |= FSystemInterrogator::GetInterrogationCategory();
+
 	if (HasAnyFlags(RF_ClassDefaultObject))
 	{
 		DefineComponentProducer(GetClass(), BuiltInComponents->BlendChannelInput);
@@ -36,7 +38,9 @@ UMovieSceneInterrogatedPropertyInstantiatorSystem::UMovieSceneInterrogatedProper
 
 bool UMovieSceneInterrogatedPropertyInstantiatorSystem::IsRelevantImpl(UMovieSceneEntitySystemLinker* InLinker) const
 {
-	return true;
+	using namespace UE::MovieScene;
+
+	return InLinker->EntityManager.Contains(FEntityComponentFilter().All({ BuiltInComponents->PropertyBinding, BuiltInComponents->Interrogation.InputKey }));
 }
 
 UE::MovieScene::FPropertyRecomposerPropertyInfo UMovieSceneInterrogatedPropertyInstantiatorSystem::FindPropertyFromSource(FMovieSceneEntityID EntityID, UObject* Object) const
@@ -50,11 +54,11 @@ UE::MovieScene::FPropertyRecomposerPropertyInfo UMovieSceneInterrogatedPropertyI
 	return FPropertyRecomposerPropertyInfo::Invalid();
 }
 
-UMovieSceneInterrogatedPropertyInstantiatorSystem::FFloatRecompositionResult UMovieSceneInterrogatedPropertyInstantiatorSystem::RecomposeBlendFloatChannel(const UE::MovieScene::FPropertyDefinition& PropertyDefinition, int32 ChannelCompositeIndex, const UE::MovieScene::FDecompositionQuery& InQuery, float InCurrentValue)
+UMovieSceneInterrogatedPropertyInstantiatorSystem::FValueRecompositionResult UMovieSceneInterrogatedPropertyInstantiatorSystem::RecomposeBlendChannel(const UE::MovieScene::FPropertyDefinition& PropertyDefinition, int32 ChannelCompositeIndex, const UE::MovieScene::FDecompositionQuery& InQuery, double InCurrentValue)
 {
 	using namespace UE::MovieScene;
 
-	FFloatRecompositionResult Result(InCurrentValue, InQuery.Entities.Num());
+	FValueRecompositionResult Result(InCurrentValue, InQuery.Entities.Num());
 
 	if (InQuery.Entities.Num() == 0)
 	{
@@ -73,7 +77,7 @@ UMovieSceneInterrogatedPropertyInstantiatorSystem::FFloatRecompositionResult UMo
 		return Result;
 	}
 
-	FFloatDecompositionParams Params;
+	FValueDecompositionParams Params;
 	Params.Query = InQuery;
 	Params.PropertyEntityID = Property->PropertyEntityID;
 	Params.DecomposeBlendChannel = Property->BlendChannel;
@@ -82,7 +86,7 @@ UMovieSceneInterrogatedPropertyInstantiatorSystem::FFloatRecompositionResult UMo
 	TArrayView<const FPropertyCompositeDefinition> Composites = BuiltInComponents->PropertyRegistry.GetComposites(PropertyDefinition);
 	check(Composites.IsValidIndex(ChannelCompositeIndex));
 
-	PropertyDefinition.Handler->RecomposeBlendChannel(PropertyDefinition, Composites[ChannelCompositeIndex], Params, Blender, InCurrentValue, Result.Values);
+	PropertyDefinition.Handler->RecomposeBlendChannel(PropertyDefinition, Composites, ChannelCompositeIndex, Params, Blender, InCurrentValue, Result.Values);
 
 	return Result;
 }
@@ -116,11 +120,11 @@ bool UMovieSceneInterrogatedPropertyInstantiatorSystem::PropertySupportsFastPath
 	return true;
 }
 
-UClass* UMovieSceneInterrogatedPropertyInstantiatorSystem::ResolveBlenderClass(TArrayView<const FMovieSceneEntityID> Inputs) const
+UClass* UMovieSceneInterrogatedPropertyInstantiatorSystem::ResolveBlenderClass(const UE::MovieScene::FPropertyDefinition& PropertyDefinition, TArrayView<const FMovieSceneEntityID> Inputs) const
 {
 	using namespace UE::MovieScene;
 
-	UClass* BlenderClass = UMovieScenePiecewiseFloatBlenderSystem::StaticClass();
+	UClass* BlenderClass = PropertyDefinition.BlenderSystemClass;
 
 	for (FMovieSceneEntityID Input : Inputs)
 	{
@@ -131,8 +135,12 @@ UClass* UMovieSceneInterrogatedPropertyInstantiatorSystem::ResolveBlenderClass(T
 			break;
 		}
 	}
-
-	check(BlenderClass);
+	
+	if (!ensureMsgf(BlenderClass, TEXT("No default blender class specified on property, and no custom blender specified on entities. Falling back to double blender.")))
+	{
+		BlenderClass = UMovieScenePiecewiseDoubleBlenderSystem::StaticClass();
+	}
+	
 	return BlenderClass;
 }
 
@@ -177,7 +185,7 @@ void UMovieSceneInterrogatedPropertyInstantiatorSystem::UpdateOutput(UE::MovieSc
 	TArrayView<const FPropertyCompositeDefinition> Composites = BuiltInComponents->PropertyRegistry.GetComposites(*PropertyDefinition);
 
 	// Find the blender class to use
-	UClass* BlenderClass = ResolveBlenderClass(Inputs);
+	UClass* BlenderClass = ResolveBlenderClass(*PropertyDefinition, Inputs);
 
 	UMovieSceneBlenderSystem* ExistingBlender = Output->Blender.Get();
 	if (ExistingBlender && BlenderClass != ExistingBlender->GetClass())
@@ -187,7 +195,8 @@ void UMovieSceneInterrogatedPropertyInstantiatorSystem::UpdateOutput(UE::MovieSc
 		Output->BlendChannel = INVALID_BLEND_CHANNEL;
 	}
 
-	Output->Blender = CastChecked<UMovieSceneBlenderSystem>(Linker->LinkSystem(BlenderClass));
+	UMovieSceneBlenderSystem* BlenderSystem = CastChecked<UMovieSceneBlenderSystem>(Linker->LinkSystem(BlenderClass));
+	Output->Blender = BlenderSystem;
 
 	const bool bWasAlreadyBlended = Output->BlendChannel != INVALID_BLEND_CHANNEL;
 	if (!bWasAlreadyBlended)
@@ -229,8 +238,8 @@ void UMovieSceneInterrogatedPropertyInstantiatorSystem::UpdateOutput(UE::MovieSc
 		FMovieSceneEntityID NewEntityID = FEntityBuilder()
 		.Add(BuiltInComponents->Interrogation.OutputKey, Key)
 		.Add(BuiltInComponents->BlendChannelOutput, BlendChannel)
-		.AddTagConditional(BuiltInComponents->Tags.MigratedFromFastPath, Output->PropertyEntityID.IsValid())
 		.AddTag(BuiltInComponents->Tags.NeedsLink)
+		.AddTag(BlenderSystem->GetBlenderTypeTag())
 		.AddMutualComponents()
 		.CreateEntity(&Linker->EntityManager, NewMask);
 
@@ -269,6 +278,7 @@ void UMovieSceneInterrogatedPropertyInstantiatorSystem::UpdateOutput(UE::MovieSc
 	{
 		const FMovieSceneBlendChannelID BlendChannel(Output->Blender->GetBlenderSystemID(), Output->BlendChannel);
 		Linker->EntityManager.AddComponent(Input, BuiltInComponents->BlendChannelInput, BlendChannel);
+		Linker->EntityManager.AddComponent(Input, BlenderSystem->GetBlenderTypeTag());
 		Linker->EntityManager.RemoveComponents(Input, CleanFastPathMask);
 	}
 }
@@ -288,6 +298,8 @@ void UMovieSceneInterrogatedPropertyInstantiatorSystem::DestroyOutput(UE::MovieS
 
 void UMovieSceneInterrogatedPropertyInstantiatorSystem::OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents)
 {
+	PropertyTracker.Initialize(this);
+
 	using namespace UE::MovieScene;
 
 	{
@@ -323,3 +335,4 @@ void UMovieSceneInterrogatedPropertyInstantiatorSystem::OnRun(FSystemTaskPrerequ
 
 	PropertyTracker.ProcessInvalidatedOutputs(Linker, *this);
 }
+

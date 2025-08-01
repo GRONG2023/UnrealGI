@@ -29,7 +29,7 @@ struct FUNCTIONALTESTING_API FAITestSpawnInfoBase
 
 	/** Where should AI be spawned */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=AISpawn)
-	AActor* SpawnLocation;
+	TObjectPtr<AActor> SpawnLocation;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=AISpawn, meta=(UIMin=1, ClampMin=1))
 	int32 NumberToSpawn;
@@ -91,7 +91,7 @@ struct FUNCTIONALTESTING_API FAITestSpawnInfo : public FAITestSpawnInfoBase
 
 	/** if set will be applied to spawned AI */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=AISpawn)
-	class UBehaviorTree* BehaviorTree;
+	TObjectPtr<class UBehaviorTree> BehaviorTree;
 
 	FAITestSpawnInfo()
 		: BehaviorTree(nullptr)
@@ -162,7 +162,7 @@ struct FAITestSpawnSetBase
 
 	/** location used for spawning if spawn info doesn't define one */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AISpawn)
-	AActor* FallbackSpawnLocation;
+	TObjectPtr<AActor> FallbackSpawnLocation;
 
 	FAITestSpawnSetBase()
 		: bEnabled(true)
@@ -280,7 +280,7 @@ protected:
 	float SpawnLocationRandomizationRange;
 
 	UPROPERTY(BlueprintReadOnly, Category=AITest)
-	TArray<APawn*> SpawnedPawns;
+	TArray<TObjectPtr<APawn>> SpawnedPawns;
 
 	UPROPERTY(BlueprintReadOnly, Category = AITest)
 	TArray<FPendingDelayedSpawn> PendingDelayedSpawns;
@@ -370,7 +370,7 @@ public:
 
 	/** Iterate through the list of spawn sets and execute Predicate on each. */
 	virtual void ForEachSpawnSet(TFunctionRef<void(FAITestSpawnSetBase&)> Predicate) override;
-	
+
 	/** Iterate through the list of spawn sets and remove the spawn set if Predicate returns true. */
 	virtual void RemoveSpawnSetIfPredicate(TFunctionRef<bool(FAITestSpawnSetBase&)> Predicate) override;
 
@@ -379,7 +379,7 @@ public:
 
 	/** Return the SpawnSet at this index of the SpawnSets array. */
 	virtual FAITestSpawnSetBase* GetSpawnSet(const int32 SpawnSetIndex) override;
-	
+
 	/** Return whether the index is valid in the SpawnSets array. */
 	virtual bool IsValidSpawnSetIndex(const int32 Index) const override;
 

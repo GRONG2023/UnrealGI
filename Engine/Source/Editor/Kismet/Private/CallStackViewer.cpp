@@ -2,28 +2,77 @@
 
 #include "CallStackViewer.h"
 
-#include "Blueprint/WidgetBlueprintGeneratedClass.h"
-#include "EditorStyleSet.h"
-#include "Framework/Commands/GenericCommands.h"
-#include "Framework/Docking/TabManager.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "HAL/PlatformApplicationMisc.h"
-#include "K2Node_Event.h"
-#include "Kismet2/KismetEditorUtilities.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "Kismet2/KismetDebugUtilities.h"
-
-#include "Widgets/Docking/SDockTab.h"
-#include "Widgets/Images/SImage.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Layout/SSpacer.h"
-#include "Widgets/Views/STreeView.h"
-
-#include "WorkspaceMenuStructure.h"
-#include "WorkspaceMenuStructureModule.h"
-
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "EdGraph/EdGraphNode.h"
 // So that we can poll the running state:
 #include "Editor/UnrealEdEngine.h"
+#include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/World.h"
+#include "Framework/Commands/GenericCommands.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandList.h"
+#include "Framework/Docking/TabManager.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Framework/SlateDelegates.h"
+#include "Framework/Text/TextLayout.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformApplicationMisc.h"
+#include "HAL/PlatformCrt.h"
+#include "Input/Reply.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/DebuggerCommands.h"
+#include "Kismet2/KismetDebugUtilities.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Layout/Visibility.h"
+#include "Math/Color.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/Optional.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateColor.h"
+#include "Templates/Casts.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UnrealTemplate.h"
+#include "Textures/SlateIcon.h"
+#include "ToolMenuContext.h"
+#include "ToolMenus.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/Stack.h"
+#include "UObject/UObjectGlobals.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Docking/SDockTab.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/SOverlay.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Widgets/Views/SHeaderRow.h"
+#include "Widgets/Views/STableRow.h"
+#include "Widgets/Views/STableViewBase.h"
+#include "Widgets/Views/STreeView.h"
+
+class ITableRow;
+class SWidget;
+struct FGeometry;
+struct FKeyEvent;
+struct FPointerEvent;
+
 extern UNREALED_API UUnrealEdEngine* GUnrealEd;
 
 #define LOCTEXT_NAMESPACE "CallStackViewer"
@@ -153,8 +202,8 @@ public:
 				if(OwnerPinned->CallStackSource->Num() > 0 && (*OwnerPinned->CallStackSource)[0] == CallStackEntryPinned)
 				{
 					Icon =  SNew(SImage)
-						.Image(FEditorStyle::GetBrush("Kismet.CallStackViewer.CurrentStackFrame"))
-						.ColorAndOpacity( FEditorStyle::GetColor("Kismet.CallStackViewer.CurrentStackFrameColor") );
+						.Image(FAppStyle::GetBrush("Kismet.CallStackViewer.CurrentStackFrame"))
+						.ColorAndOpacity( FAppStyle::GetColor("Kismet.CallStackViewer.CurrentStackFrameColor") );
 				}
 				else
 				{
@@ -171,8 +220,8 @@ public:
 					};
 
 					Icon = SNew(SImage)
-						.Image(FEditorStyle::GetBrush("Kismet.CallStackViewer.CurrentStackFrame"))
-						.ColorAndOpacity( FEditorStyle::GetColor("Kismet.CallStackViewer.LastStackFrameNavigatedToColor") )
+						.Image(FAppStyle::GetBrush("Kismet.CallStackViewer.CurrentStackFrame"))
+						.ColorAndOpacity( FAppStyle::GetColor("Kismet.CallStackViewer.LastStackFrameNavigatedToColor") )
 						.Visibility(
 							TAttribute<EVisibility>::Create(TAttribute<EVisibility>::FGetter::CreateStatic(NavigationTrackerVisibility, Owner, CallStackEntry))
 						);
@@ -349,8 +398,8 @@ void SCallStackViewer::Construct(const FArguments& InArgs, TArray<TSharedRef<FCa
 	ChildSlot
 	[
 		SNew(SBorder)
-		.Padding(4)
-		.BorderImage( FEditorStyle::GetBrush("ToolPanel.GroupBorder") )
+		.Padding(4.0f)
+		.BorderImage( FAppStyle::GetBrush("ToolPanel.GroupBorder") )
 		[
 			SNew(SOverlay)
 			+SOverlay::Slot()
@@ -450,9 +499,7 @@ void SCallStackViewer::JumpToEntry(TSharedRef< FCallStackRow > Entry)
 	LastFrameNavigatedTo = Entry;
 
 	// Try to find a UClass* source:
-	bool bExactClass = false;
-	bool bAnyPackage = true;
-	UBlueprintGeneratedClass* BPGC = FindObjectFast<UBlueprintGeneratedClass>(nullptr, Entry->ScopeName, bExactClass, bAnyPackage, RF_NoFlags);
+	UBlueprintGeneratedClass* BPGC = FindFirstObject<UBlueprintGeneratedClass>(*Entry->ScopeName.ToString(), EFindFirstObjectOptions::EnsureIfAmbiguous);
 
 	if(BPGC)
 	{
@@ -507,7 +554,7 @@ FReply SCallStackViewer::OnKeyDown( const FGeometry& MyGeometry, const FKeyEvent
 // Proxy array of the call stack. This allows us to manually refresh UI state when changes are made:
 TArray<TSharedRef<FCallStackRow>> Private_CallStackSource;
 
-void CallStackViewer::UpdateDisplayedCallstack(const TArray<const FFrame*>& ScriptStack)
+void CallStackViewer::UpdateDisplayedCallstack(TArrayView<const FFrame* const> ScriptStack)
 {
 	Private_CallStackSource.Empty();
 	if (ScriptStack.Num() > 0)
@@ -542,12 +589,13 @@ void CallStackViewer::UpdateDisplayedCallstack(const TArray<const FFrame*>& Scri
 				}
 			}
 
+			int32 ScriptOffset = UE_PTRDIFF_TO_INT32(StackNode->Code - StackNode->Node->Script.GetData() - 1);
 			Private_CallStackSource.Add(
 				MakeShared<FCallStackRow>(
 					StackNode->Object,
 					StackNode->Node->GetOuter()->GetFName(),
 					StackNode->Node->GetFName(),
-					StackNode->Code - StackNode->Node->Script.GetData() - 1,
+					ScriptOffset,
 					ECallstackLanguages::Blueprints,
 					ScopeDisplayName,
 					FunctionDisplayName
@@ -587,14 +635,31 @@ void CallStackViewer::RegisterTabSpawner(FTabManager& TabManager)
 {
 	const auto SpawnCallStackViewTab = []( const FSpawnTabArgs& Args )
 	{
+		static const FName ToolbarName = TEXT("Kismet.DebuggingViewToolBar");
+		FToolMenuContext MenuContext(FPlayWorldCommands::GlobalPlayWorldActions);
+		TSharedRef<SWidget> ToolbarWidget = UToolMenus::Get()->GenerateWidget(ToolbarName, MenuContext);
 		return SNew(SDockTab)
 			.TabRole( ETabRole::PanelTab )
 			.Label( LOCTEXT("TabTitle", "Call Stack") )
 			[
-				SNew(SBorder)
-				.BorderImage( FEditorStyle::GetBrush("Docking.Tab.ContentAreaBrush") )
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot()
+				.AutoHeight()
 				[
-					SNew(SCallStackViewer, &Private_CallStackSource)
+					SNew(SBorder)
+					.BorderImage( FAppStyle::GetBrush( TEXT("NoBorder") ) )
+					[
+						ToolbarWidget
+					]
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				[
+					SNew(SBorder)
+					.BorderImage( FAppStyle::GetBrush("Docking.Tab.ContentAreaBrush") )
+					[
+						SNew(SCallStackViewer, &Private_CallStackSource)
+					]
 				]
 			];
 	};

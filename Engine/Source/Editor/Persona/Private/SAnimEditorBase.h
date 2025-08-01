@@ -12,7 +12,6 @@
 #include "PersonaDelegates.h"
 #include "SAnimationScrubPanel.h"
 #include "EditorObjectsTracker.h"
-#include "SAnimCurvePanel.h"
 
 class FAnimModel;
 class SAnimTimeline;
@@ -46,11 +45,13 @@ public:
 
 	SLATE_ARGUMENT( bool, DisplayAnimScrubBar )
 
+	SLATE_ARGUMENT( bool, DisplayAnimScrubBarEditing )
+
 	SLATE_ARGUMENT( TSharedPtr<FAnimModel>, AnimModel )
 
 	SLATE_END_ARGS()
 
-	void Construct(const FArguments& InArgs, const TSharedRef<class IPersonaPreviewScene>& InPreviewScene);
+	void Construct(const FArguments& InArgs, const TSharedPtr<class IPersonaPreviewScene>& InPreviewScene);
 
 	/** Accessors to the current viewed Min/Max input range of the editor */
 	float GetViewMinInput() const { return ViewMinInput; }
@@ -79,6 +80,10 @@ public:
 
 	// FGCObject interface start
 	virtual void AddReferencedObjects( FReferenceCollector& Collector ) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("SAnimEditorBase");
+	}
 	// FGCObject interface end
 
 	/** Creates a anchor widget for each animation editor type */
@@ -91,7 +96,7 @@ protected:
 	TSharedRef<IPersonaPreviewScene> GetPreviewScene() const { return PreviewScenePtr.Pin().ToSharedRef(); }
 
 	/** Allows derived classes to create different animation scrub panel */
-	virtual TSharedRef<class SAnimationScrubPanel> ConstructAnimScrubPanel();
+	virtual TSharedRef<SWidget> ConstructAnimScrubPanel(bool bDisplayAnimScrubBarEditing);
 
 	/** Allows derived classes to init newly created editor objects */
 	virtual void InitDetailsViewEditorObject(class UEditorAnimBaseObj* EdObj) {};
@@ -111,26 +116,6 @@ protected:
 
 	/** To get scrub value, get preview instance **/
 	class UAnimSingleNodeInstance* GetPreviewInstance() const;
-
-	/** For the information section **/
-	FText GetCurrentSequenceTime() const;
-	FText GetCurrentPercentage() const;
-	FText GetCurrentFrame() const;
-
-	/** Recalculate sequence length after modifying */
-	void RecalculateSequenceLength();
-
-	/** Clamps the sequence to the specified length 
-	 *
-	 *  @return		Whether clamping was/is necessary
-	 */
-	virtual bool ClampToEndTime(float NewEndTime);
-
-	/** Calculates the sequence length of the object 
-	 *
-	 *  @return		New sequence length
-	 */
-	virtual float CalculateSequenceLengthOfEditorObject() const {return GetSequenceLength();}
 
 	/** The slate container that the editor panels are placed in */
 	TSharedPtr<SVerticalBox>	 EditorPanels;

@@ -16,7 +16,7 @@ void STextEntryPopup::Construct( const FArguments& InArgs )
 	[
 		SNew(SBorder)
 		. BorderImage(FCoreStyle::Get().GetBrush("PopupText.Background"))
-		. Padding(10)
+		. Padding(10.f)
 		[
 			SNew(SHorizontalBox)
 			+SHorizontalBox::Slot()
@@ -38,8 +38,9 @@ void STextEntryPopup::Construct( const FArguments& InArgs )
 					.Text( InArgs._DefaultText )
 					.OnTextCommitted( InArgs._OnTextCommitted )
 					.OnTextChanged( InArgs._OnTextChanged )
+					.OnVerifyTextChanged( InArgs._OnVerifyTextChanged )
 					.HintText( InArgs._HintText )
-					.SelectAllTextWhenFocused( InArgs._SelectAllTextWhenFocused.Get() )
+					.SelectAllTextWhenFocused( InArgs._SelectAllTextWhenFocused )
 					.ClearKeyboardFocusOnCommit( InArgs._ClearKeyboardFocusOnCommit )
 				]
 			]

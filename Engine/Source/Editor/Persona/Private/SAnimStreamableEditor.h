@@ -6,7 +6,6 @@
 #include "CoreMinimal.h"
 #include "Widgets/SWidget.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
-#include "SAnimCurvePanel.h"
 #include "SAnimEditorBase.h"
 #include "Animation/AnimStreamable.h"
 
@@ -28,7 +27,6 @@ public:
 	SLATE_EVENT(FOnObjectsSelected, OnObjectsSelected)
 	SLATE_EVENT(FOnInvokeTab, OnInvokeTab)
 	SLATE_EVENT(FOnEditCurves, OnEditCurves)
-	SLATE_EVENT(FOnStopEditingCurves, OnStopEditingCurves)
 
 	SLATE_END_ARGS()
 

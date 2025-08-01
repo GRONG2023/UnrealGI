@@ -12,10 +12,10 @@ ActorFactory.cpp:
 #include "Engine/Blueprint.h"
 #include "GameFramework/Pawn.h"
 #include "Engine/World.h"
+#include "MaterialDomain.h"
 #include "Materials/MaterialInterface.h"
 #include "Model.h"
 #include "ActorFactories/ActorFactoryAmbientSound.h"
-#include "ActorFactories/ActorFactoryAtmosphericFog.h"
 #include "ActorFactories/ActorFactorySkyAtmosphere.h"
 #include "ActorFactories/ActorFactoryVolumetricCloud.h"
 #include "ActorFactories/ActorFactoryBlueprint.h"
@@ -31,7 +31,7 @@ ActorFactory.cpp:
 #include "ActorFactories/ActorFactoryEmptyActor.h"
 #include "ActorFactories/ActorFactoryPawn.h"
 #include "ActorFactories/ActorFactoryExponentialHeightFog.h"
-#include "ActorFactories/ActorFactoryMatineeActor.h"
+#include "ActorFactories/ActorFactoryLocalFogVolume.h"
 #include "ActorFactories/ActorFactoryNote.h"
 #include "ActorFactories/ActorFactoryPhysicsAsset.h"
 #include "ActorFactories/ActorFactoryPlaneReflectionCapture.h"
@@ -63,7 +63,7 @@ ActorFactory.cpp:
 #include "Builders/CubeBuilder.h"
 #include "Builders/CylinderBuilder.h"
 #include "Builders/TetrahedronBuilder.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Editor/EditorEngine.h"
 #include "Animation/AnimBlueprint.h"
 #include "Particles/ParticleSystem.h"
@@ -80,6 +80,7 @@ ActorFactory.cpp:
 #include "Engine/DecalActor.h"
 #include "Atmosphere/AtmosphericFog.h"
 #include "Engine/ExponentialHeightFog.h"
+#include "Engine/LocalFogVolume.h"
 #include "Engine/SkyLight.h"
 #include "Engine/DirectionalLight.h"
 #include "Engine/PointLight.h"
@@ -103,12 +104,10 @@ ActorFactory.cpp:
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "BSPOps.h"
-#include "Matinee/MatineeActor.h"
-#include "Matinee/InterpData.h"
 #include "InteractiveFoliageActor.h"
 #include "VT/RuntimeVirtualTextureVolume.h"
 
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 
 
 
@@ -131,12 +130,20 @@ ActorFactory.cpp:
 #include "LevelSequence.h"
 #include "LevelSequenceActor.h"
 #include "Factories/ActorFactoryLevelSequence.h"
+#include "Elements/Framework/EngineElementsLibrary.h"
+#include "Elements/Framework/TypedElementRegistry.h"
+#include "Elements/Interfaces/TypedElementAssetDataInterface.h"
+#include "Elements/Interfaces/TypedElementObjectInterface.h"
+#include "Subsystems/PlacementSubsystem.h"
 
-#if WITH_EDITOR
 #include "LevelEditorViewport.h"
-#include "Editor/EditorEngine.h"
 #include "Editor.h"
-#endif
+
+#include "ClassViewerFilter.h"
+#include "ClassViewerModule.h"
+#include "Misc/NamePermissionList.h"
+#include "AssetToolsModule.h"
+#include "IAssetTools.h"
 
 DEFINE_LOG_CATEGORY(LogActorFactory);
 
@@ -147,7 +154,7 @@ DEFINE_LOG_CATEGORY(LogActorFactory);
  * This function attempts to find a 'natural' looking rotation by rotating around a local pitch axis, and a world Z. Rotating in this way
  * should retain the roll around the model space axis, removing rotation artifacts introduced by a simpler quaternion rotation.
  */
-FQuat FindActorAlignmentRotation(const FQuat& InActorRotation, const FVector& InModelAxis, const FVector& InWorldNormal)
+FQuat FindActorAlignmentRotation(const FQuat& InActorRotation, const FVector& InModelAxis, const FVector& InWorldNormal, FQuat* OutDeltaRotation)
 {
 	FVector TransformedModelAxis = InActorRotation.RotateVector(InModelAxis);
 
@@ -155,8 +162,12 @@ FQuat FindActorAlignmentRotation(const FQuat& InActorRotation, const FVector& In
 	const auto DestNormalModelSpace = InverseActorRotation.RotateVector(InWorldNormal);
 
 	FQuat DeltaRotation = FQuat::Identity;
+	if (OutDeltaRotation)
+	{
+		*OutDeltaRotation = FQuat::Identity;
+	}
 
-	const float VectorDot = InWorldNormal | TransformedModelAxis;
+	const double VectorDot = InWorldNormal | TransformedModelAxis;
 	if (1.f - FMath::Abs(VectorDot) <= KINDA_SMALL_NUMBER)
 	{
 		if (VectorDot < 0.f)
@@ -178,7 +189,7 @@ FQuat FindActorAlignmentRotation(const FQuat& InActorRotation, const FVector& In
 		
 		// Find a local 'pitch' axis to rotate around
 		const FVector OrthoPitchAxis = FVector::CrossProduct(PitchReferenceAxis, InModelAxis);
-		const float Pitch = FMath::Acos(PitchReferenceAxis | DestNormalModelSpace) - FMath::Acos(PitchReferenceAxis | InModelAxis);//FMath::Asin(OrthoPitchAxis.Size());
+		const double Pitch = FMath::Acos(PitchReferenceAxis | DestNormalModelSpace) - FMath::Acos(PitchReferenceAxis | InModelAxis);//FMath::Asin(OrthoPitchAxis.Size());
 
 		DeltaRotation = FQuat(OrthoPitchAxis.GetSafeNormal(), Pitch);
 		DeltaRotation.Normalize();
@@ -189,11 +200,16 @@ FQuat FindActorAlignmentRotation(const FQuat& InActorRotation, const FVector& In
 		const float ParallelDotThreshold = 0.98f; // roughly 11.4 degrees (!)
 		if (!FVector::Coincident(InWorldNormal, TransformedModelAxis, ParallelDotThreshold))
 		{
-			const float Yaw = FMath::Atan2(InWorldNormal.X, InWorldNormal.Y) - FMath::Atan2(TransformedModelAxis.X, TransformedModelAxis.Y);
+			const double Yaw = FMath::Atan2(InWorldNormal.X, InWorldNormal.Y) - FMath::Atan2(TransformedModelAxis.X, TransformedModelAxis.Y);
 
 			// Rotation axis for yaw is the Z axis in world space
 			const FVector WorldYawAxis = (InActorRotation * DeltaRotation).Inverse().RotateVector(Z);
 			DeltaRotation *= FQuat(WorldYawAxis, -Yaw);
+		}
+
+		if (OutDeltaRotation)
+		{
+			*OutDeltaRotation = DeltaRotation;
 		}
 	}
 
@@ -208,14 +224,25 @@ UActorFactory::UActorFactory(const FObjectInitializer& ObjectInitializer)
 {
 	DisplayName = LOCTEXT("DefaultName","Actor");
 	bShowInEditorQuickMenu = false;
+	bUsePlacementExtent = true;
 }
 
 bool UActorFactory::CanCreateActorFrom( const FAssetData& AssetData, FText& OutErrorMsg )
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UActorFactory::CanCreateActorFrom);
+
+	if (!AssetData.IsValid())
+	{
+		return true;
+	}
+
+	UObject* DefaultActor = GetDefaultActor(AssetData);
+	FSoftObjectPath DefaultActorPath(DefaultActor);
+	FSoftObjectPath DefaultActorClassPath(DefaultActor->GetClass());
+
 	// By Default we assume the factory can't work with existing asset data
-	return !AssetData.IsValid() || 
-		AssetData.ObjectPath == FName(*GetDefaultActor( AssetData )->GetPathName()) || 
-		AssetData.ObjectPath == FName(*GetDefaultActor( AssetData )->GetClass()->GetPathName());
+	return AssetData.GetSoftObjectPath() == DefaultActorPath || 
+		AssetData.GetSoftObjectPath() == DefaultActorClassPath;
 }
 
 AActor* UActorFactory::GetDefaultActor( const FAssetData& AssetData )
@@ -249,7 +276,7 @@ UClass* UActorFactory::GetDefaultActorClass( const FAssetData& AssetData )
 
 UObject* UActorFactory::GetAssetFromActorInstance(AActor* ActorInstance)
 {
-	return NULL;
+	return nullptr;
 }
 
 FQuat UActorFactory::AlignObjectToSurfaceNormal(const FVector& InSurfaceNormal, const FQuat& ActorRotation) const
@@ -265,48 +292,148 @@ FQuat UActorFactory::AlignObjectToSurfaceNormal(const FVector& InSurfaceNormal, 
 	}
 }
 
-AActor* UActorFactory::CreateActor( UObject* Asset, ULevel* InLevel, const FTransform& SpawnTransform, EObjectFlags InObjectFlags, const FName Name)
+bool UActorFactory::CanPlaceElementsFromAssetData(const FAssetData& InAssetData)
 {
+	if (!InAssetData.IsValid())
+	{
+		return false;
+	}
+
+	UClass* Class = InAssetData.GetClass();
+	if (Class && (Class == GetDefaultActorClass(InAssetData)))
+	{
+		return true;
+	}
+
+	FText TmpMsg;
+	return CanCreateActorFrom(InAssetData, TmpMsg);
+}
+
+bool UActorFactory::PrePlaceAsset(FAssetPlacementInfo& InPlacementInfo, const FPlacementOptions& InPlacementOptions)
+{
+	return PreSpawnActor(InPlacementInfo.AssetToPlace.GetAsset(), InPlacementInfo.FinalizedTransform);
+}
+
+TArray<FTypedElementHandle> UActorFactory::PlaceAsset(const FAssetPlacementInfo& InPlacementInfo, const FPlacementOptions& InPlacementOptions)
+{
+	TArray<FTypedElementHandle> PlacedActorHandles;
 	FActorSpawnParameters SpawnParams;
-	SpawnParams.ObjectFlags = InObjectFlags;
-	SpawnParams.Name = Name;
-	return CreateActor(Asset, InLevel, SpawnTransform, SpawnParams);
+	SpawnParams.Name = InPlacementInfo.NameOverride;
+	SpawnParams.ObjectFlags = InPlacementOptions.bIsCreatingPreviewElements ? EObjectFlags::RF_Transient : EObjectFlags::RF_Transactional;
+	SpawnParams.bTemporaryEditorActor = InPlacementOptions.bIsCreatingPreviewElements;
+
+	AActor* NewActor = CreateActor(InPlacementInfo.AssetToPlace.GetAsset(), InPlacementInfo.PreferredLevel.Get(), InPlacementInfo.FinalizedTransform, SpawnParams);
+	if (NewActor)
+	{
+		PlacedActorHandles.Add(UEngineElementsLibrary::AcquireEditorActorElementHandle(NewActor));
+
+		// Disable collision for preview actors
+		if (InPlacementOptions.bIsCreatingPreviewElements)
+		{
+			NewActor->SetActorEnableCollision(false);
+		}
+	}
+
+	return PlacedActorHandles;
+}
+
+void UActorFactory::PostPlaceAsset(TArrayView<const FTypedElementHandle> InElementHandles, const FAssetPlacementInfo& InPlacementInfo, const FPlacementOptions& InPlacementOptions)
+{
+	for (const FTypedElementHandle& PlacedElement : InElementHandles)
+	{
+		if (TTypedElement<ITypedElementObjectInterface> ObjectInterface = UTypedElementRegistry::GetInstance()->GetElement<ITypedElementObjectInterface>(PlacedElement))
+		{
+			if (AActor* CreatedActor = ObjectInterface.GetObjectAs<AActor>())
+			{
+				UObject* Asset = InPlacementInfo.AssetToPlace.GetAsset();
+
+				// Only do this if the actor wasn't already given a name
+				if (InPlacementInfo.NameOverride.IsNone())
+				{
+					FActorLabelUtilities::SetActorLabelUnique(CreatedActor, GetDefaultActorLabel(Asset));
+				}
+
+				PostSpawnActor(Asset, CreatedActor);
+
+				CreatedActor->PostEditChange();
+				CreatedActor->PostEditMove(true);
+			}
+		}
+	}
+}
+
+FAssetData UActorFactory::GetAssetDataFromElementHandle(const FTypedElementHandle& InHandle)
+{
+	if (!InHandle.IsSet())
+	{
+		return FAssetData();
+	}
+
+	// Check if the handle is the type of actor created by this factory, and use the factory to find the wrapped asset data if possible.
+	if (TTypedElement<ITypedElementObjectInterface> ElementObjectInterface = UTypedElementRegistry::GetInstance()->GetElement<ITypedElementObjectInterface>(InHandle))
+	{
+		if (AActor* RawElementActorPtr = ElementObjectInterface.GetObjectAs<AActor>(GetDefaultActorClass(FAssetData())))
+		{
+			if (UObject* WrappedAssetObject = GetAssetFromActorInstance(RawElementActorPtr))
+			{
+				return FAssetData(WrappedAssetObject);
+			}
+		}
+	}
+
+	// Check if any of the referenced content is created by this factory.
+	if (TTypedElement<ITypedElementAssetDataInterface> AssetDataInterface = UTypedElementRegistry::GetInstance()->GetElement<ITypedElementAssetDataInterface>(InHandle))
+	{
+		TArray<FAssetData> ContentAssetDatas = AssetDataInterface.GetAllReferencedAssetDatas();
+		for (FAssetData& AssetData : ContentAssetDatas)
+		{
+			if (CanPlaceElementsFromAssetData(AssetData))
+			{
+				return MoveTemp(AssetData);
+			}
+		}
+	}
+
+	return FAssetData();
+}
+
+void UActorFactory::BeginPlacement(const FPlacementOptions& InPlacementOptions)
+{
+}
+
+void UActorFactory::EndPlacement(TArrayView<const FTypedElementHandle> InPlacedElements, const FPlacementOptions& InPlacementOptions)
+{
+}
+
+UInstancedPlacemenClientSettings* UActorFactory::FactorySettingsObjectForPlacement(const FAssetData& InAssetData, const FPlacementOptions& InPlacementOptions)
+{
+	return nullptr;
 }
 
 AActor* UActorFactory::CreateActor(UObject* InAsset, ULevel* InLevel, const FTransform& InTransform, const FActorSpawnParameters& InSpawnParams)
 {
 	AActor* NewActor = nullptr;
 
-
 	FTransform Transform(InTransform);
 	if (PreSpawnActor(InAsset, Transform))
 	{
 		NewActor = SpawnActor(InAsset, InLevel, Transform, InSpawnParams);
 
-		if ( NewActor )
+		if (NewActor)
 		{
-			PostSpawnActor(InAsset, NewActor);
-
 			// Only do this if the actor wasn't already given a name
 			if ((InAsset != nullptr) && (InSpawnParams.Name == NAME_None))
 			{
-				FActorLabelUtilities::SetActorLabelUnique(NewActor, InAsset->GetName());
+				FActorLabelUtilities::SetActorLabelUnique(NewActor, GetDefaultActorLabel(InAsset));
 			}
+
+			PostSpawnActor(InAsset, NewActor);
+			NewActor->PostEditChange();
+			NewActor->PostEditMove(true);
 		}
 	}
 
 	return NewActor;
-}
-
-UBlueprint* UActorFactory::CreateBlueprint( UObject* Asset, UObject* Outer, const FName Name, const FName CallingContext )
-{
-	// @todo sequencer major: Needs to be overridden on any class that needs any custom setup for the new blueprint
-	//	(e.g. static mesh reference assignment.)  Basically, anywhere that PostSpawnActor() or CreateActor() is overridden,
-	//	we should consider overriding CreateBlueprint(), too.
-	UBlueprint* NewBlueprint = FKismetEditorUtilities::CreateBlueprint(NewActorClass, Outer, Name, EBlueprintType::BPTYPE_Normal, UBlueprint::StaticClass(), UBlueprintGeneratedClass::StaticClass(), CallingContext);
-	AActor* CDO = CastChecked<AActor>( NewBlueprint->GeneratedClass->ClassDefaultObject );
-	PostCreateBlueprint( Asset, CDO );
-	return NewBlueprint;
 }
 
 ULevel* UActorFactory::ValidateSpawnActorLevel(ULevel* InLevel, const FActorSpawnParameters& InSpawnParams) const
@@ -329,16 +456,10 @@ ULevel* UActorFactory::ValidateSpawnActorLevel(ULevel* InLevel, const FActorSpaw
 
 bool UActorFactory::PreSpawnActor( UObject* Asset, FTransform& InOutLocation)
 {
+	UE_LOG(LogActorFactory, Log, TEXT("Actor Factory attempting to spawn %s"), *Asset->GetFullName());
+
 	// Subclasses may implement this to set up a spawn or to adjust the spawn location or rotation.
 	return true;
-}
-
-AActor* UActorFactory::SpawnActor( UObject* InAsset, ULevel* InLevel, const FTransform& Transform, EObjectFlags InObjectFlags, const FName Name )
-{
-	FActorSpawnParameters SpawnParams;
-	SpawnParams.ObjectFlags = InObjectFlags;
-	SpawnParams.Name = Name;
-	return SpawnActor(InAsset, InLevel, Transform, SpawnParams);
 }
 
 AActor* UActorFactory::SpawnActor(UObject* InAsset, ULevel* InLevel, const FTransform& InTransform, const FActorSpawnParameters& InSpawnParams)
@@ -350,23 +471,45 @@ AActor* UActorFactory::SpawnActor(UObject* InAsset, ULevel* InLevel, const FTran
 	{
 		FActorSpawnParameters SpawnParamsCopy(InSpawnParams);
 		SpawnParamsCopy.OverrideLevel = LocalLevel;
-		SpawnParamsCopy.bCreateActorPackage = true;
-#if WITH_EDITOR
-		SpawnParamsCopy.bTemporaryEditorActor = FLevelEditorViewportClient::IsDroppingPreviewActor();
-#endif
+
+		const bool bIsCreatingPreviewElements = FLevelEditorViewportClient::IsDroppingPreviewActor();
+		bool bIsPlacementSystemCreatingPreviewElements = false;
+		if (UPlacementSubsystem* PlacementSubsystem = GEditor->GetEditorSubsystem<UPlacementSubsystem>())
+		{
+			bIsPlacementSystemCreatingPreviewElements = PlacementSubsystem->IsCreatingPreviewElements();
+		}
+		SpawnParamsCopy.bTemporaryEditorActor = bIsCreatingPreviewElements || bIsPlacementSystemCreatingPreviewElements;
+		SpawnParamsCopy.bHideFromSceneOutliner = bIsPlacementSystemCreatingPreviewElements;
+
 		return LocalLevel->OwningWorld->SpawnActor(DefaultActor->GetClass(), &InTransform, SpawnParamsCopy);
 	}
 
-	return NULL;
+	return nullptr;
 }
 
 void UActorFactory::PostSpawnActor( UObject* Asset, AActor* NewActor)
 {
+	UE_LOG(LogActorFactory, Log, TEXT("Actor Factory spawned %s as actor: %s"), *Asset->GetFullName(), *NewActor->GetFullName());
 }
 
-void UActorFactory::PostCreateBlueprint( UObject* Asset, AActor* CDO )
+FString UActorFactory::GetDefaultActorLabel(UObject* Asset) const
 {
-	// Override this in derived actor factories to initialize the blueprint's CDO based on the asset assigned to the factory!
+	UClass* PotentialActorClass = nullptr;
+	if (UBlueprint* Blueprint = Cast<UBlueprint>(Asset))
+	{
+		PotentialActorClass = Blueprint->GeneratedClass;
+	}
+	else
+	{
+		PotentialActorClass = Cast<UClass>(Asset);
+	}
+
+	if (PotentialActorClass && PotentialActorClass->IsChildOf<AActor>())
+	{
+		return GetDefault<AActor>(PotentialActorClass)->GetDefaultActorLabel();
+	}
+
+	return Asset->GetName();
 }
 
 
@@ -383,7 +526,7 @@ UActorFactoryStaticMesh::UActorFactoryStaticMesh(const FObjectInitializer& Objec
 
 bool UActorFactoryStaticMesh::CanCreateActorFrom( const FAssetData& AssetData, FText& OutErrorMsg )
 {
-	if ( !AssetData.IsValid() || !AssetData.GetClass()->IsChildOf( UStaticMesh::StaticClass() ) )
+	if ( !AssetData.IsValid() || !AssetData.IsInstanceOf( UStaticMesh::StaticClass() ) )
 	{
 		OutErrorMsg = NSLOCTEXT("CanCreateActor", "NoStaticMesh", "A valid static mesh must be specified.");
 		return false;
@@ -397,8 +540,6 @@ void UActorFactoryStaticMesh::PostSpawnActor( UObject* Asset, AActor* NewActor)
 	Super::PostSpawnActor(Asset, NewActor);
 
 	UStaticMesh* StaticMesh = CastChecked<UStaticMesh>(Asset);
-
-	UE_LOG(LogActorFactory, Log, TEXT("Actor Factory created %s"), *StaticMesh->GetName());
 
 	// Change properties
 	AStaticMeshActor* StaticMeshActor = CastChecked<AStaticMeshActor>( NewActor );
@@ -426,19 +567,6 @@ UObject* UActorFactoryStaticMesh::GetAssetFromActorInstance(AActor* Instance)
 	return SMA->GetStaticMeshComponent()->GetStaticMesh();
 }
 
-void UActorFactoryStaticMesh::PostCreateBlueprint( UObject* Asset, AActor* CDO )
-{
-	if (Asset != NULL && CDO != NULL)
-	{
-		UStaticMesh* StaticMesh = CastChecked<UStaticMesh>(Asset);
-		AStaticMeshActor* StaticMeshActor = CastChecked<AStaticMeshActor>(CDO);
-		UStaticMeshComponent* StaticMeshComponent = StaticMeshActor->GetStaticMeshComponent();
-
-		StaticMeshComponent->SetStaticMesh(StaticMesh);
-		StaticMeshComponent->StaticMeshDerivedDataKey = StaticMesh->GetRenderData()->DerivedDataKey;
-	}
-}
-
 FQuat UActorFactoryStaticMesh::AlignObjectToSurfaceNormal(const FVector& InSurfaceNormal, const FQuat& ActorRotation) const
 {
 	// Meshes align the Z (up) axis with the surface normal
@@ -449,11 +577,11 @@ FQuat UActorFactoryStaticMesh::AlignObjectToSurfaceNormal(const FVector& InSurfa
 UActorFactoryBasicShape
 -----------------------------------------------------------------------------*/
 
-const FName UActorFactoryBasicShape::BasicCube("/Engine/BasicShapes/Cube.Cube");
-const FName UActorFactoryBasicShape::BasicSphere("/Engine/BasicShapes/Sphere.Sphere");
-const FName UActorFactoryBasicShape::BasicCylinder("/Engine/BasicShapes/Cylinder.Cylinder");
-const FName UActorFactoryBasicShape::BasicCone("/Engine/BasicShapes/Cone.Cone");
-const FName UActorFactoryBasicShape::BasicPlane("/Engine/BasicShapes/Plane.Plane");
+const FSoftObjectPath UActorFactoryBasicShape::BasicCube("/Engine/BasicShapes/Cube", "Cube", {});
+const FSoftObjectPath UActorFactoryBasicShape::BasicSphere("/Engine/BasicShapes/Sphere", "Sphere", {});
+const FSoftObjectPath UActorFactoryBasicShape::BasicCylinder("/Engine/BasicShapes/Cylinder", "Cylinder", {});
+const FSoftObjectPath UActorFactoryBasicShape::BasicCone("/Engine/BasicShapes/Cone", "Cone", {});
+const FSoftObjectPath UActorFactoryBasicShape::BasicPlane("/Engine/BasicShapes/Plane", "Plane", {});
 
 UActorFactoryBasicShape::UActorFactoryBasicShape(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -465,7 +593,8 @@ UActorFactoryBasicShape::UActorFactoryBasicShape(const FObjectInitializer& Objec
 
 bool UActorFactoryBasicShape::CanCreateActorFrom( const FAssetData& AssetData, FText& OutErrorMsg )
 {
-	if(AssetData.IsValid() && (AssetData.ObjectPath == BasicCube || AssetData.ObjectPath == BasicSphere || AssetData.ObjectPath == BasicCone || AssetData.ObjectPath == BasicCylinder || AssetData.ObjectPath == BasicPlane) )
+	FSoftObjectPath AssetPath = AssetData.GetSoftObjectPath();
+	if(AssetData.IsValid() && (AssetPath == BasicCube || AssetPath == BasicSphere || AssetPath == BasicCone || AssetPath == BasicCylinder || AssetPath == BasicPlane) )
 	{
 		return true;
 	}
@@ -521,7 +650,7 @@ bool UActorFactoryDeferredDecal::CanCreateActorFrom( const FAssetData& AssetData
 	}
 
 	//But if an asset is specified it must be based-on a deferred decal umaterial
-	if ( !AssetData.GetClass()->IsChildOf( UMaterialInterface::StaticClass() ) )
+	if ( !AssetData.IsInstanceOf( UMaterialInterface::StaticClass() ) )
 	{
 		OutErrorMsg = NSLOCTEXT("CanCreateActor", "NoMaterial", "A valid material must be specified.");
 		return false;
@@ -532,7 +661,7 @@ bool UActorFactoryDeferredDecal::CanCreateActorFrom( const FAssetData& AssetData
 
 	uint32 SanityCheck = 0;
 	FAssetData CurrentAssetData = AssetData;
-	while( SanityCheck < 1000 && !CurrentAssetData.GetClass()->IsChildOf( UMaterial::StaticClass() ) )
+	while( SanityCheck < 1000 && !CurrentAssetData.IsInstanceOf( UMaterial::StaticClass() ) )
 	{
 		const FString ObjectPath = CurrentAssetData.GetTagValueRef<FString>( "Parent" );
 		if ( ObjectPath.IsEmpty() )
@@ -541,7 +670,7 @@ bool UActorFactoryDeferredDecal::CanCreateActorFrom( const FAssetData& AssetData
 			return false;
 		}
 
-		CurrentAssetData = AssetRegistry.GetAssetByObjectPath( *ObjectPath );
+		CurrentAssetData = AssetRegistry.GetAssetByObjectPath( FSoftObjectPath(ObjectPath) );
 		if ( !CurrentAssetData.IsValid() )
 		{
 			OutErrorMsg = NSLOCTEXT("CanCreateActor", "NoMaterial", "A valid material must be specified.");
@@ -557,7 +686,7 @@ bool UActorFactoryDeferredDecal::CanCreateActorFrom( const FAssetData& AssetData
 		return false;
 	}
 
-	if ( !CurrentAssetData.GetClass()->IsChildOf( UMaterial::StaticClass() ) )
+	if ( !CurrentAssetData.IsInstanceOf( UMaterial::StaticClass() ) )
 	{
 		return false;
 	}
@@ -578,7 +707,7 @@ void UActorFactoryDeferredDecal::PostSpawnActor(UObject* Asset, AActor* NewActor
 
 	UMaterialInterface* Material = GetMaterial( Asset );
 
-	if (Material != NULL )
+	if (Material != nullptr )
 	{
 		// Change properties
 		UDecalComponent* DecalComponent = nullptr;
@@ -602,30 +731,6 @@ void UActorFactoryDeferredDecal::PostSpawnActor(UObject* Asset, AActor* NewActor
 	}
 }
 
-void UActorFactoryDeferredDecal::PostCreateBlueprint( UObject* Asset, AActor* CDO )
-{
-	if (Asset != NULL && CDO != NULL)
-	{
-		UMaterialInterface* Material = GetMaterial(Asset);
-
-		if (Material != NULL)
-		{
-			UDecalComponent* DecalComponent = nullptr;
-			for (UActorComponent* Component : CDO->GetComponents())
-			{
-				if (UDecalComponent* DecalComp = Cast<UDecalComponent>(Component))
-				{
-					DecalComponent = DecalComp;
-					break;
-				}
-			}
-
-			check(DecalComponent);
-			DecalComponent->SetDecalMaterial(Material);
-		}
-	}
-}
-
 UMaterialInterface* UActorFactoryDeferredDecal::GetMaterial( UObject* Asset ) const
 {
 	UMaterialInterface* TargetMaterial = Cast<UMaterialInterface>( Asset );
@@ -634,7 +739,7 @@ UMaterialInterface* UActorFactoryDeferredDecal::GetMaterial( UObject* Asset ) co
 		&& TargetMaterial->GetMaterial() 
 		&& TargetMaterial->GetMaterial()->MaterialDomain == MD_DeferredDecal ? 
 TargetMaterial : 
-	NULL;
+	nullptr;
 }
 
 /*-----------------------------------------------------------------------------
@@ -661,7 +766,7 @@ UActorFactoryEmitter::UActorFactoryEmitter(const FObjectInitializer& ObjectIniti
 
 bool UActorFactoryEmitter::CanCreateActorFrom( const FAssetData& AssetData, FText& OutErrorMsg )
 {
-	if ( !AssetData.IsValid() || !AssetData.GetClass()->IsChildOf( UParticleSystem::StaticClass() ) )
+	if ( !AssetData.IsValid() || !AssetData.IsInstanceOf( UParticleSystem::StaticClass() ) )
 	{
 		OutErrorMsg = NSLOCTEXT("CanCreateActor", "NoParticleSystem", "A valid particle system must be specified.");
 		return false;
@@ -707,17 +812,7 @@ UObject* UActorFactoryEmitter::GetAssetFromActorInstance(AActor* Instance)
 	}
 	else
 	{
-		return NULL;
-	}
-}
-
-void UActorFactoryEmitter::PostCreateBlueprint( UObject* Asset, AActor* CDO )
-{
-	if (Asset != NULL && CDO != NULL)
-	{
-		UParticleSystem* ParticleSystem = CastChecked<UParticleSystem>(Asset);
-		AEmitter* Emitter = CastChecked<AEmitter>(CDO);
-		Emitter->SetTemplate(ParticleSystem);
+		return nullptr;
 	}
 }
 
@@ -764,7 +859,7 @@ UActorFactoryPhysicsAsset::UActorFactoryPhysicsAsset(const FObjectInitializer& O
 
 bool UActorFactoryPhysicsAsset::CanCreateActorFrom( const FAssetData& AssetData, FText& OutErrorMsg )
 {
-	if ( !AssetData.IsValid() || !AssetData.GetClass()->IsChildOf( UPhysicsAsset::StaticClass() ) )
+	if ( !AssetData.IsValid() || !AssetData.IsInstanceOf( UPhysicsAsset::StaticClass() ) )
 	{
 		OutErrorMsg = NSLOCTEXT("CanCreateActor", "NoPhysicsAsset", "A valid physics asset must be specified.");
 		return false;
@@ -799,7 +894,7 @@ void UActorFactoryPhysicsAsset::PostSpawnActor(UObject* Asset, AActor* NewActor)
 	NewSkelActor->GetSkeletalMeshComponent()->UnregisterComponent();
 
 	// Change properties
-	NewSkelActor->GetSkeletalMeshComponent()->SkeletalMesh = UseSkelMesh;
+	NewSkelActor->GetSkeletalMeshComponent()->SetSkeletalMeshAsset(UseSkelMesh);
 	if (NewSkelActor->GetWorld()->IsPlayInEditor())
 	{
 		NewSkelActor->ReplicatedMesh = UseSkelMesh;
@@ -818,33 +913,6 @@ void UActorFactoryPhysicsAsset::PostSpawnActor(UObject* Asset, AActor* NewActor)
 
 	// Init Component
 	NewSkelActor->GetSkeletalMeshComponent()->RegisterComponent();
-}
-
-void UActorFactoryPhysicsAsset::PostCreateBlueprint( UObject* Asset, AActor* CDO )
-{
-	if (CDO != NULL)
-	{
-		ASkeletalMeshActor* SkeletalPhysicsActor = CastChecked<ASkeletalMeshActor>(CDO);
-
-		if (Asset != NULL)
-		{
-			UPhysicsAsset* PhysicsAsset = CastChecked<UPhysicsAsset>(Asset);
-
-			USkeletalMesh* UseSkelMesh = PhysicsAsset->PreviewSkeletalMesh.Get();
-
-			SkeletalPhysicsActor->GetSkeletalMeshComponent()->SkeletalMesh = UseSkelMesh;
-			SkeletalPhysicsActor->GetSkeletalMeshComponent()->PhysicsAssetOverride = PhysicsAsset;
-		}
-
-		// set physics setup
-		SkeletalPhysicsActor->GetSkeletalMeshComponent()->KinematicBonesUpdateType = EKinematicBonesUpdateToPhysics::SkipSimulatingBones;
-		SkeletalPhysicsActor->GetSkeletalMeshComponent()->BodyInstance.bSimulatePhysics = true;
-		SkeletalPhysicsActor->GetSkeletalMeshComponent()->bBlendPhysics = true;
-
-		SkeletalPhysicsActor->bAlwaysRelevant = true;
-		SkeletalPhysicsActor->SetReplicatingMovement(true);
-		SkeletalPhysicsActor->SetReplicates(true);
-	}
 }
 
 
@@ -870,7 +938,7 @@ bool UActorFactoryAnimationAsset::CanCreateActorFrom( const FAssetData& AssetDat
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 
-	if ( AssetData.GetClass()->IsChildOf( UAnimSequenceBase::StaticClass() ) )
+	if ( AssetData.IsInstanceOf( UAnimSequenceBase::StaticClass() ) )
 	{
 		const FString SkeletonPath = AssetData.GetTagValueRef<FString>("Skeleton");
 		if ( SkeletonPath.IsEmpty() ) 
@@ -879,7 +947,7 @@ bool UActorFactoryAnimationAsset::CanCreateActorFrom( const FAssetData& AssetDat
 			return false;
 		}
 
-		FAssetData SkeletonData = AssetRegistry.GetAssetByObjectPath( *SkeletonPath );
+		FAssetData SkeletonData = AssetRegistry.GetAssetByObjectPath( FSoftObjectPath(SkeletonPath) );
 
 		if ( !SkeletonData.IsValid() )
 		{
@@ -915,7 +983,7 @@ bool UActorFactoryAnimationAsset::CanCreateActorFrom( const FAssetData& AssetDat
 
 USkeletalMesh* UActorFactoryAnimationAsset::GetSkeletalMeshFromAsset( UObject* Asset )
 {
-	USkeletalMesh* SkeletalMesh = NULL;
+	USkeletalMesh* SkeletalMesh = nullptr;
 	
 	if(UAnimSequenceBase* AnimationAsset = Cast<UAnimSequenceBase>(Asset))
 	{
@@ -930,10 +998,10 @@ USkeletalMesh* UActorFactoryAnimationAsset::GetSkeletalMeshFromAsset( UObject* A
 	// Check to see if we are using a custom factory in which case this should probably be ignored. This seems kind of wrong...
 	if( SkeletalMesh && SkeletalMesh->HasCustomActorFactory())
 	{
-		SkeletalMesh = NULL;
+		SkeletalMesh = nullptr;
 	}
 
-	check( SkeletalMesh != NULL );
+	check( SkeletalMesh != nullptr );
 	return SkeletalMesh;
 }
 
@@ -960,8 +1028,8 @@ void UActorFactoryAnimationAsset::PostSpawnActor( UObject* Asset, AActor* NewAct
 				//If we have a negative play rate, default initial position to sequence end
 				if (AnimSeq->RateScale < 0.f)
 				{
-					NewSASComponent->AnimationData.SavedPosition = AnimSeq->SequenceLength;
-					NewSASComponent->SetPosition(AnimSeq->SequenceLength, false);
+					NewSASComponent->AnimationData.SavedPosition = AnimSeq->GetPlayLength();
+					NewSASComponent->SetPosition(AnimSeq->GetPlayLength(), false);
 				}
 			}
 			
@@ -969,22 +1037,19 @@ void UActorFactoryAnimationAsset::PostSpawnActor( UObject* Asset, AActor* NewAct
 	}
 }
 
-void UActorFactoryAnimationAsset::PostCreateBlueprint( UObject* Asset,  AActor* CDO )
+UObject* UActorFactoryAnimationAsset::GetAssetFromActorInstance(AActor* ActorInstance)
 {
-	Super::PostCreateBlueprint( Asset, CDO );
-	
-	if (Asset != NULL && CDO != NULL)
+	if (ASkeletalMeshActor* SkeletalMeshActor = Cast<ASkeletalMeshActor>(ActorInstance))
 	{
-		UAnimationAsset* AnimationAsset = Cast<UAnimationAsset>(Asset);
-
-		ASkeletalMeshActor* SkeletalMeshActor = CastChecked<ASkeletalMeshActor>(CDO);
-		USkeletalMeshComponent* SkeletalComponent = (SkeletalMeshActor->GetSkeletalMeshComponent());
-		if (AnimationAsset)
+		if (USkeletalMeshComponent* NewSASComponent = (SkeletalMeshActor->GetSkeletalMeshComponent()))
 		{
-			SkeletalComponent->SetAnimationMode(EAnimationMode::Type::AnimationSingleNode);
-			SkeletalComponent->SetAnimation(AnimationAsset);
+			if (NewSASComponent->GetAnimationMode() == EAnimationMode::Type::AnimationSingleNode)
+			{
+				return NewSASComponent->AnimationData.AnimToPlay;
+			}
 		}
 	}
+	return nullptr;
 }
 
 
@@ -1011,12 +1076,13 @@ bool UActorFactorySkeletalMesh::CanCreateActorFrom( const FAssetData& AssetData,
 	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 	FAssetData SkeletalMeshData;
 
-	if ( AssetData.GetClass()->IsChildOf( USkeletalMesh::StaticClass() ) )
+	UClass* AssetClass = AssetData.GetClass();
+	if ( AssetClass && AssetClass->IsChildOf( USkeletalMesh::StaticClass() ) )
 	{
 		SkeletalMeshData = AssetData;
 	}
 
-	if ( !SkeletalMeshData.IsValid() && AssetData.GetClass()->IsChildOf( UAnimBlueprint::StaticClass() ) )
+	if ( !SkeletalMeshData.IsValid() && AssetClass && (AssetClass->IsChildOf(UAnimBlueprint::StaticClass()) || AssetClass->IsChildOf(UAnimBlueprintGeneratedClass::StaticClass())))
 	{
 		const FString TargetSkeletonPath = AssetData.GetTagValueRef<FString>( "TargetSkeleton" );
 		if ( TargetSkeletonPath.IsEmpty() )
@@ -1025,7 +1091,7 @@ bool UActorFactorySkeletalMesh::CanCreateActorFrom( const FAssetData& AssetData,
 			return false;
 		}
 
-		FAssetData TargetSkeleton = AssetRegistry.GetAssetByObjectPath( *TargetSkeletonPath );
+		FAssetData TargetSkeleton = AssetRegistry.GetAssetByObjectPath( FSoftObjectPath(TargetSkeletonPath) );
 		if ( !TargetSkeleton.IsValid() )
 		{
 			OutErrorMsg = NSLOCTEXT("CanCreateActor", "NoAnimBPTargetSkeleton", "UAnimBlueprints must have a valid Target Skeleton.");
@@ -1054,7 +1120,7 @@ bool UActorFactorySkeletalMesh::CanCreateActorFrom( const FAssetData& AssetData,
 		}
 	}
 
-	if ( !SkeletalMeshData.IsValid() && AssetData.GetClass()->IsChildOf( USkeleton::StaticClass() ) )
+	if ( !SkeletalMeshData.IsValid() && AssetClass && AssetClass->IsChildOf( USkeleton::StaticClass() ) )
 	{
 		// so I'm changing this to load directly not using tags and values
 		USkeleton* Skeleton = Cast<USkeleton>(AssetData.GetAsset());
@@ -1077,7 +1143,7 @@ bool UActorFactorySkeletalMesh::CanCreateActorFrom( const FAssetData& AssetData,
 	{
 		for (const auto& Pair : UActorFactorySkeletalMesh::GetSkeletalMeshDelegates)
 		{
-			if (Pair.Value.Execute(AssetData.GetAsset()) != nullptr)
+			if (Pair.Value.Execute(AssetData) != nullptr)
 			{
 				return true;
 			}
@@ -1090,9 +1156,10 @@ bool UActorFactorySkeletalMesh::CanCreateActorFrom( const FAssetData& AssetData,
 		return false;
 	}
 
-	if(USkeletalMesh* SkeletalMeshCDO = Cast<USkeletalMesh>(AssetData.GetClass()->GetDefaultObject()))
+	check(AssetClass);
+	if (USkeletalMesh* SkeletalMeshCDO = Cast<USkeletalMesh>(AssetClass->GetDefaultObject()))
 	{
-		if(SkeletalMeshCDO->HasCustomActorFactory())
+		if (SkeletalMeshCDO->HasCustomActorFactory())
 		{
 			return false;
 		}
@@ -1103,22 +1170,34 @@ bool UActorFactorySkeletalMesh::CanCreateActorFrom( const FAssetData& AssetData,
 
 USkeletalMesh* UActorFactorySkeletalMesh::GetSkeletalMeshFromAsset( UObject* Asset )
 {
-	USkeletalMesh*SkeletalMesh = Cast<USkeletalMesh>( Asset );
-	UAnimBlueprint* AnimBlueprint = Cast<UAnimBlueprint>( Asset );
+	USkeletalMesh* SkeletalMesh = Cast<USkeletalMesh>( Asset );
 	USkeleton* Skeleton = Cast<USkeleton>( Asset );
 
-	if( SkeletalMesh == NULL && AnimBlueprint != NULL && AnimBlueprint->TargetSkeleton )
+	if(SkeletalMesh == nullptr)
 	{
 		// base it on preview skeletal mesh, just to have something
-		SkeletalMesh = AnimBlueprint->TargetSkeleton->GetPreviewMesh(true);
+		if(UAnimBlueprint* AnimBlueprint = Cast<UAnimBlueprint>(Asset))
+		{
+			if(AnimBlueprint->TargetSkeleton)
+			{
+				SkeletalMesh = AnimBlueprint->TargetSkeleton->GetPreviewMesh(true);
+			}
+		}
+		if(UAnimBlueprintGeneratedClass* AnimBlueprintGeneratedClass = Cast<UAnimBlueprintGeneratedClass>(Asset))
+		{
+			if(AnimBlueprintGeneratedClass->TargetSkeleton)
+			{
+				SkeletalMesh = AnimBlueprintGeneratedClass->TargetSkeleton->GetPreviewMesh(true);
+			}
+		}
 	}
 
-	if( SkeletalMesh == NULL && Skeleton != NULL )
+	if( SkeletalMesh == nullptr && Skeleton != nullptr )
 	{
 		SkeletalMesh = Skeleton->GetPreviewMesh(true);
 	}
 
-	if (SkeletalMesh == NULL)
+	if (SkeletalMesh == nullptr)
 	{
 		for (const auto& Pair : UActorFactorySkeletalMesh::GetSkeletalMeshDelegates)
 		{
@@ -1131,14 +1210,13 @@ USkeletalMesh* UActorFactorySkeletalMesh::GetSkeletalMeshFromAsset( UObject* Ass
 		}
 	}
 
-	check( SkeletalMesh != NULL );
+	check( SkeletalMesh != nullptr );
 	return SkeletalMesh;
 }
 
 void UActorFactorySkeletalMesh::PostSpawnActor( UObject* Asset, AActor* NewActor )
 {
 	USkeletalMesh* SkeletalMesh = GetSkeletalMeshFromAsset(Asset);
-	UAnimBlueprint* AnimBlueprint = Cast<UAnimBlueprint>( Asset );
 	ASkeletalMeshActor* NewSMActor = CastChecked<ASkeletalMeshActor>(NewActor);
 
 	Super::PostSpawnActor(SkeletalMesh, NewActor);
@@ -1147,7 +1225,7 @@ void UActorFactorySkeletalMesh::PostSpawnActor( UObject* Asset, AActor* NewActor
 	NewSMActor->GetSkeletalMeshComponent()->UnregisterComponent();
 
 	// Change properties
-	NewSMActor->GetSkeletalMeshComponent()->SkeletalMesh = SkeletalMesh;
+	NewSMActor->GetSkeletalMeshComponent()->SetSkeletalMeshAsset(SkeletalMesh);
 	if (NewSMActor->GetWorld()->IsGameWorld())
 	{
 		NewSMActor->ReplicatedMesh = SkeletalMesh;
@@ -1155,29 +1233,20 @@ void UActorFactorySkeletalMesh::PostSpawnActor( UObject* Asset, AActor* NewActor
 
 	// Init Component
 	NewSMActor->GetSkeletalMeshComponent()->RegisterComponent();
-	if( AnimBlueprint )
+	if( UAnimBlueprint* AnimBlueprint = Cast<UAnimBlueprint>( Asset ) )
 	{
 		NewSMActor->GetSkeletalMeshComponent()->SetAnimInstanceClass(AnimBlueprint->GeneratedClass);
 	}
+	else if( UAnimBlueprintGeneratedClass* AnimBlueprintGeneratedClass = Cast<UAnimBlueprintGeneratedClass>(Asset) )
+	{
+		NewSMActor->GetSkeletalMeshComponent()->SetAnimInstanceClass(AnimBlueprintGeneratedClass);
+	}
 
-	if (ClassUsedForDelegate != NULL)
+	if (ClassUsedForDelegate != nullptr)
 	{
 		UActorFactorySkeletalMesh::PostSkeletalMeshActorSpawnedDelegates.FindChecked(ClassUsedForDelegate).Execute(NewSMActor, Asset);
 	}
 
-}
-
-void UActorFactorySkeletalMesh::PostCreateBlueprint( UObject* Asset, AActor* CDO )
-{
-	if (Asset != NULL && CDO != NULL)
-	{
-		USkeletalMesh* SkeletalMesh = GetSkeletalMeshFromAsset(Asset);
-		UAnimBlueprint* AnimBlueprint = Cast<UAnimBlueprint>(Asset);
-
-		ASkeletalMeshActor* SkeletalMeshActor = CastChecked<ASkeletalMeshActor>(CDO);
-		SkeletalMeshActor->GetSkeletalMeshComponent()->SkeletalMesh = SkeletalMesh;
-		SkeletalMeshActor->GetSkeletalMeshComponent()->AnimClass = AnimBlueprint ? Cast<UAnimBlueprintGeneratedClass>(AnimBlueprint->GeneratedClass) : NULL;
-	}
 }
 
 FQuat UActorFactorySkeletalMesh::AlignObjectToSurfaceNormal(const FVector& InSurfaceNormal, const FQuat& ActorRotation) const
@@ -1226,7 +1295,7 @@ UActorFactoryEmptyActor::UActorFactoryEmptyActor(const FObjectInitializer& Objec
 
 bool UActorFactoryEmptyActor::CanCreateActorFrom( const FAssetData& AssetData, FText& OutErrorMsg )
 {
-	return AssetData.ObjectPath == FName(*AActor::StaticClass()->GetPathName());
+	return AssetData.ToSoftObjectPath() == FSoftObjectPath(AActor::StaticClass());
 }
 
 AActor* UActorFactoryEmptyActor::SpawnActor(UObject* InAsset, ULevel* InLevel, const FTransform& InTransform, const FActorSpawnParameters& InSpawnParams)
@@ -1264,7 +1333,7 @@ UActorFactoryCharacter::UActorFactoryCharacter(const FObjectInitializer& ObjectI
 
 bool UActorFactoryCharacter::CanCreateActorFrom(const FAssetData& AssetData, FText& OutErrorMsg)
 {
-	return AssetData.ObjectPath == FName(*ACharacter::StaticClass()->GetPathName());
+	return AssetData.ToSoftObjectPath() == FSoftObjectPath(ACharacter::StaticClass());
 }
 
 /*-----------------------------------------------------------------------------
@@ -1279,7 +1348,7 @@ UActorFactoryPawn::UActorFactoryPawn(const FObjectInitializer& ObjectInitializer
 
 bool UActorFactoryPawn::CanCreateActorFrom(const FAssetData& AssetData, FText& OutErrorMsg)
 {
-	return AssetData.ObjectPath == FName(*APawn::StaticClass()->GetPathName());
+	return AssetData.GetSoftObjectPath() == FSoftObjectPath(APawn::StaticClass());
 }
 
 /*-----------------------------------------------------------------------------
@@ -1294,13 +1363,20 @@ UActorFactoryAmbientSound::UActorFactoryAmbientSound(const FObjectInitializer& O
 
 bool UActorFactoryAmbientSound::CanCreateActorFrom( const FAssetData& AssetData, FText& OutErrorMsg )
 {
+
+	if(!CanImportAmbientSounds())
+	{
+		OutErrorMsg = NSLOCTEXT("CanCreateActor", "AssetNotAllowed", "Ambient Sound Actors are disabled in this environment.");
+		return false;
+	}
+
 	//We allow creating AAmbientSounds without an existing sound asset
 	if ( UActorFactory::CanCreateActorFrom( AssetData, OutErrorMsg ) )
 	{
 		return true;
 	}
 
-	if ( AssetData.IsValid() && !AssetData.GetClass()->IsChildOf( USoundBase::StaticClass() ) )
+	if ( AssetData.IsValid() && !AssetData.IsInstanceOf( USoundBase::StaticClass() ) )
 	{
 		OutErrorMsg = NSLOCTEXT("CanCreateActor", "NoSoundAsset", "A valid sound asset must be specified.");
 		return false;
@@ -1315,7 +1391,7 @@ void UActorFactoryAmbientSound::PostSpawnActor( UObject* Asset, AActor* NewActor
 
 	USoundBase* AmbientSound = Cast<USoundBase>(Asset);
 
-	if ( AmbientSound != NULL )
+	if ( AmbientSound != nullptr )
 	{
 		AAmbientSound* NewSound = CastChecked<AAmbientSound>( NewActor );
 		NewSound->GetAudioComponent()->SetSound(AmbientSound);
@@ -1331,18 +1407,19 @@ UObject* UActorFactoryAmbientSound::GetAssetFromActorInstance(AActor* Instance)
 	return SoundActor->GetAudioComponent()->Sound;
 }
 
-void UActorFactoryAmbientSound::PostCreateBlueprint( UObject* Asset, AActor* CDO )
+bool UActorFactoryAmbientSound::CanImportAmbientSounds()
 {
-	if (Asset != NULL && CDO != NULL)
+	IAssetTools& AssetTools = FAssetToolsModule::GetModule().Get();
+	TSharedPtr<FPathPermissionList> AssetClassPermissionList = AssetTools.GetAssetClassPathPermissionList(EAssetClassAction::ImportAsset);
+	if (AssetClassPermissionList && AssetClassPermissionList->HasFiltering())
 	{
-		USoundBase* AmbientSound = Cast<USoundBase>(Asset);
-
-		if (AmbientSound != NULL)
+		if (!AssetClassPermissionList->PassesFilter(AAmbientSound::StaticClass()->GetPathName()))
 		{
-			AAmbientSound* NewSound = CastChecked<AAmbientSound>(CDO);
-			NewSound->GetAudioComponent()->SetSound(AmbientSound);
+			return false;
 		}
 	}
+
+	return true;
 }
 
 /*-----------------------------------------------------------------------------
@@ -1356,10 +1433,10 @@ UActorFactoryClass::UActorFactoryClass(const FObjectInitializer& ObjectInitializ
 
 bool UActorFactoryClass::CanCreateActorFrom( const FAssetData& AssetData, FText& OutErrorMsg )
 {
-	if ( AssetData.IsValid() && AssetData.GetClass()->IsChildOf( UClass::StaticClass() ) )
+	if ( AssetData.IsValid() && AssetData.IsInstanceOf( UClass::StaticClass() ) )
 	{
 		UClass* ActualClass = Cast<UClass>(AssetData.GetAsset());
-		if ( (NULL != ActualClass) && ActualClass->IsChildOf(AActor::StaticClass()) )
+		if ( (nullptr != ActualClass) && ActualClass->IsChildOf(AActor::StaticClass()) )
 		{
 			return true;
 		}
@@ -1371,27 +1448,27 @@ bool UActorFactoryClass::CanCreateActorFrom( const FAssetData& AssetData, FText&
 
 AActor* UActorFactoryClass::GetDefaultActor( const FAssetData& AssetData )
 {
-	if ( AssetData.IsValid() && AssetData.GetClass()->IsChildOf( UClass::StaticClass() ) )
+	if ( AssetData.IsValid() && AssetData.IsInstanceOf( UClass::StaticClass() ) )
 	{
-		UClass* ActualClass = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, *AssetData.ObjectPath.ToString(), NULL, LOAD_NoWarn, NULL));
+		UClass* ActualClass = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), nullptr, *AssetData.GetObjectPathString(), nullptr, LOAD_NoWarn, nullptr));
 			
 		//Cast<UClass>(AssetData.GetAsset());
-		if ( (NULL != ActualClass) && ActualClass->IsChildOf(AActor::StaticClass()) )
+		if ( (nullptr != ActualClass) && ActualClass->IsChildOf(AActor::StaticClass()) )
 		{
 			return ActualClass->GetDefaultObject<AActor>();
 		}
 	}
 
-	return NULL;
+	return nullptr;
 }
 
 bool UActorFactoryClass::PreSpawnActor( UObject* Asset, FTransform& InOutLocation)
 {
 	UClass* ActualClass = Cast<UClass>(Asset);
 
-	if ( (NULL != ActualClass) && ActualClass->IsChildOf(AActor::StaticClass()) )
+	if ( (nullptr != ActualClass) && ActualClass->IsChildOf(AActor::StaticClass()) )
 	{
-		return true;
+		return Super::PreSpawnActor(Asset, InOutLocation);
 	}
 
 	return false;
@@ -1401,14 +1478,14 @@ AActor* UActorFactoryClass::SpawnActor( UObject* Asset, ULevel* InLevel, const F
 {
 	UClass* ActualClass = Cast<UClass>(Asset);
 
-	if ( (NULL != ActualClass) && ActualClass->IsChildOf(AActor::StaticClass()) )
+	if ( (nullptr != ActualClass) && ActualClass->IsChildOf(AActor::StaticClass()) )
 	{
 		FActorSpawnParameters SpawnInfo(InSpawnParams);
 		SpawnInfo.OverrideLevel = InLevel;
-		return InLevel->OwningWorld->SpawnActor( ActualClass, &Transform, SpawnInfo );
+		return InLevel->OwningWorld->SpawnActor(ActualClass, &Transform, SpawnInfo);
 	}
 
-	return NULL;
+	return nullptr;
 }
 
 
@@ -1423,7 +1500,7 @@ UActorFactoryBlueprint::UActorFactoryBlueprint(const FObjectInitializer& ObjectI
 
 bool UActorFactoryBlueprint::CanCreateActorFrom( const FAssetData& AssetData, FText& OutErrorMsg )
 {
-	if ( !AssetData.IsValid() || !AssetData.GetClass()->IsChildOf( UBlueprint::StaticClass() ) )
+	if ( !AssetData.IsValid() || !AssetData.IsInstanceOf( UBlueprint::StaticClass() ) )
 	{
 		OutErrorMsg = NSLOCTEXT("CanCreateActor", "NoBlueprint", "No Blueprint was specified, or the specified Blueprint needs to be compiled.");
 		return false;
@@ -1436,10 +1513,10 @@ bool UActorFactoryBlueprint::CanCreateActorFrom( const FAssetData& AssetData, FT
 		return false;
 	}
 
-	UClass* ParentClass = FindObject<UClass>(NULL, *ParentClassPath);
+	UClass* ParentClass = FindObject<UClass>(nullptr, *ParentClassPath);
 
 	bool bIsActorBased = false;
-	if ( ParentClass != NULL )
+	if ( ParentClass != nullptr )
 	{
 		// The parent class is loaded. Make sure it is derived from AActor
 		bIsActorBased = ParentClass->IsChildOf(AActor::StaticClass());
@@ -1451,12 +1528,12 @@ bool UActorFactoryBlueprint::CanCreateActorFrom( const FAssetData& AssetData, FT
 		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
 		IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 
-		const FStringView ObjectPath = FPackageName::ExportTextPathToObjectPath(FStringView(ParentClassPath));
-		const FName ParentClassPathFName = FName( FPackageName::ObjectPathToObjectName(ObjectPath) );
-		TArray<FName> AncestorClassNames;
-		AssetRegistry.GetAncestorClassNames(ParentClassPathFName, AncestorClassNames);
+		const FTopLevelAssetPath ObjectPath(FPackageName::ExportTextPathToObjectPath(ParentClassPath));
+		const FName ParentClassPathFName = ObjectPath.GetAssetName();
+		TArray<FTopLevelAssetPath> AncestorClassNames;
+		AssetRegistry.GetAncestorClassNames(ObjectPath, AncestorClassNames);
 
-		bIsActorBased = AncestorClassNames.Contains(AActor::StaticClass()->GetFName());
+		bIsActorBased = AncestorClassNames.Contains(AActor::StaticClass()->GetClassPathName());
 	}
 
 	if ( !bIsActorBased )
@@ -1470,25 +1547,31 @@ bool UActorFactoryBlueprint::CanCreateActorFrom( const FAssetData& AssetData, FT
 
 AActor* UActorFactoryBlueprint::GetDefaultActor( const FAssetData& AssetData )
 {
-	if (!AssetData.IsValid() || !AssetData.GetClass()->IsChildOf(UBlueprint::StaticClass()))
+	UClass* GeneratedClass = GetDefaultActorClass(AssetData);
+	return GeneratedClass ? GeneratedClass->GetDefaultObject<AActor>() : nullptr;
+}
+
+UClass* UActorFactoryBlueprint::GetDefaultActorClass(const FAssetData& AssetData)
+{
+	if (!AssetData.IsValid() || !AssetData.IsInstanceOf(UBlueprint::StaticClass()))
 	{
-		return NULL;
+		return nullptr;
 	}
 
 	const FString GeneratedClassPath = AssetData.GetTagValueRef<FString>(FBlueprintTags::GeneratedClassPath);
 	if (GeneratedClassPath.IsEmpty())
 	{
-		return NULL;
+		return nullptr;
 	}
 
-	UClass* GeneratedClass = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), NULL, *GeneratedClassPath, NULL, LOAD_NoWarn, NULL));
+	UClass* GeneratedClass = Cast<UClass>(StaticLoadObject(UClass::StaticClass(), nullptr, *GeneratedClassPath, nullptr, LOAD_NoWarn, nullptr));
 
-	if ( GeneratedClass == NULL )
+	if (GeneratedClass == nullptr)
 	{
-		return NULL;
+		return nullptr;
 	}
 
-	return GeneratedClass->GetDefaultObject<AActor>();
+	return GeneratedClass;
 }
 
 bool UActorFactoryBlueprint::PreSpawnActor( UObject* Asset, FTransform& InOutLocation)
@@ -1496,76 +1579,15 @@ bool UActorFactoryBlueprint::PreSpawnActor( UObject* Asset, FTransform& InOutLoc
 	UBlueprint* Blueprint = CastChecked<UBlueprint>(Asset);
 
 	// Invalid if there is no generated class, or this is not actor based
-	if (Blueprint == NULL || Blueprint->GeneratedClass == NULL || !FBlueprintEditorUtils::IsActorBased(Blueprint))
+	if (Blueprint == nullptr || Blueprint->GeneratedClass == nullptr || !FBlueprintEditorUtils::IsActorBased(Blueprint))
 	{
 		return false;
 	}
 
-	return true;
-}
-
-
-
-/*-----------------------------------------------------------------------------
-UActorFactoryMatineeActor
------------------------------------------------------------------------------*/
-UActorFactoryMatineeActor::UActorFactoryMatineeActor(const FObjectInitializer& ObjectInitializer)
-	: Super(ObjectInitializer)
-{
-	DisplayName = LOCTEXT("MatineeDisplayName", "Matinee");
-	NewActorClass = AMatineeActor::StaticClass();
-}
-
-bool UActorFactoryMatineeActor::CanCreateActorFrom( const FAssetData& AssetData, FText& OutErrorMsg )
-{
-	//We allow creating AMatineeActors without an existing asset
-	if ( UActorFactory::CanCreateActorFrom( AssetData, OutErrorMsg ) )
-	{
-		return true;
-	}
-
-	if ( AssetData.IsValid() && !AssetData.GetClass()->IsChildOf( UInterpData::StaticClass() ) )
-	{
-		OutErrorMsg = NSLOCTEXT("CanCreateActor", "NoInterpData", "A valid InterpData must be specified.");
-		return false;
-	}
+	UE_LOG(LogActorFactory, Log, TEXT("Actor Factory attempting to spawn %s"), *Blueprint->GeneratedClass->GetFullName());
 
 	return true;
 }
-
-void UActorFactoryMatineeActor::PostSpawnActor( UObject* Asset, AActor* NewActor )
-{
-	Super::PostSpawnActor(Asset, NewActor);
-
-	UInterpData* MatineeData = Cast<UInterpData>( Asset );
-	AMatineeActor* MatineeActor = CastChecked<AMatineeActor>( NewActor );
-
-	if( MatineeData )
-	{
-		MatineeActor->MatineeData = MatineeData;
-	}
-	else
-	{
-		// if MatineeData isn't set yet, create default one
-		UInterpData* NewMatineeData = NewObject<UInterpData>(NewActor);
-		MatineeActor->MatineeData = NewMatineeData;
-	}
-}
-
-void UActorFactoryMatineeActor::PostCreateBlueprint( UObject* Asset, AActor* CDO )
-{
-	if (Asset != NULL && CDO != NULL)
-	{
-		UInterpData* MatineeData = Cast<UInterpData>(Asset);
-		AMatineeActor* MatineeActor = CastChecked<AMatineeActor>(CDO);
-
-		// @todo sequencer: Don't ever need or want InterpData for Sequencer.  We will probably get rid of this after old Matinee goes away.
-		// also note the PostSpawnActor() code above creates an UInterpData and puts it in the actor's outermost package.  Definitely do not
-		// want that for Sequencer.
-		MatineeActor->MatineeData = MatineeData;
-	}
-}
-
 
 /*-----------------------------------------------------------------------------
 UActorFactoryDirectionalLight
@@ -1674,18 +1696,6 @@ UActorFactoryPlaneReflectionCapture::UActorFactoryPlaneReflectionCapture(const F
 }
 
 /*-----------------------------------------------------------------------------
-UActorFactoryAtmosphericFog
------------------------------------------------------------------------------*/
-UActorFactoryAtmosphericFog::UActorFactoryAtmosphericFog(const FObjectInitializer& ObjectInitializer)
-	: Super(ObjectInitializer)
-{
-	PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	DisplayName = LOCTEXT("AtmosphericFogDisplayName", "Atmospheric Fog");
-	NewActorClass = AAtmosphericFog::StaticClass();
-	PRAGMA_ENABLE_DEPRECATION_WARNINGS
-}
-
-/*-----------------------------------------------------------------------------
 UActorFactorySkyAtmosphere
 -----------------------------------------------------------------------------*/
 UActorFactorySkyAtmosphere::UActorFactorySkyAtmosphere(const FObjectInitializer& ObjectInitializer)
@@ -1713,6 +1723,16 @@ UActorFactoryExponentialHeightFog::UActorFactoryExponentialHeightFog(const FObje
 {
 	DisplayName = LOCTEXT("ExponentialHeightFogDisplayName", "Exponential Height Fog");
 	NewActorClass = AExponentialHeightFog::StaticClass();
+}
+
+/*-----------------------------------------------------------------------------
+UActorFactoryLocalFogVolume
+-----------------------------------------------------------------------------*/
+UActorFactoryLocalFogVolume::UActorFactoryLocalFogVolume(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer)
+{
+	DisplayName = LOCTEXT("LocalFogVolumeDisplayName", "Local Height Fog");
+	NewActorClass = ALocalFogVolume::StaticClass();
 }
 
 /*-----------------------------------------------------------------------------
@@ -1768,7 +1788,7 @@ UActorFactoryVectorFieldVolume::UActorFactoryVectorFieldVolume(const FObjectInit
 
 bool UActorFactoryVectorFieldVolume::CanCreateActorFrom( const FAssetData& AssetData, FText& OutErrorMsg )
 {
-	if ( !AssetData.IsValid() || !AssetData.GetClass()->IsChildOf( UVectorField::StaticClass() ) )
+	if ( !AssetData.IsValid() || !AssetData.IsInstanceOf( UVectorField::StaticClass() ) )
 	{
 		OutErrorMsg = NSLOCTEXT("CanCreateActor", "NoVectorField", "No vector field was specified.");
 		return false;
@@ -1794,13 +1814,13 @@ void UActorFactoryVectorFieldVolume::PostSpawnActor( UObject* Asset, AActor* New
 /*-----------------------------------------------------------------------------
 CreateBrushForVolumeActor
 -----------------------------------------------------------------------------*/
-// Helper function for the volume actor factories, not sure where it should live
-void CreateBrushForVolumeActor( AVolume* NewActor, UBrushBuilder* BrushBuilder )
+// Helper function for the volume actor factories
+void UActorFactory::CreateBrushForVolumeActor( AVolume* NewActor, UBrushBuilder* BrushBuilder )
 {
-	if ( NewActor != NULL )
+	if ( NewActor != nullptr )
 	{
 		// this code builds a brush for the new actor
-		NewActor->PreEditChange(NULL);
+		NewActor->PreEditChange(nullptr);
 
 		// Use the same object flags as the owner volume
 		EObjectFlags ObjectFlags = NewActor->GetFlags() & (RF_Transient | RF_Transactional);
@@ -1819,14 +1839,14 @@ void CreateBrushForVolumeActor( AVolume* NewActor, UBrushBuilder* BrushBuilder )
 
 		FBSPOps::csgPrepMovingBrush( NewActor );
 
-		// Set the texture on all polys to NULL.  This stops invisible textures
+		// Set the texture on all polys to nullptr.  This stops invisible textures
 		// dependencies from being formed on volumes.
 		if ( NewActor->Brush )
 		{
 			for ( int32 poly = 0 ; poly < NewActor->Brush->Polys->Element.Num() ; ++poly )
 			{
 				FPoly* Poly = &(NewActor->Brush->Polys->Element[poly]);
-				Poly->Material = NULL;
+				Poly->Material = nullptr;
 			}
 		}
 
@@ -1851,7 +1871,7 @@ bool UActorFactoryBoxVolume::CanCreateActorFrom( const FAssetData& AssetData, FT
 		return true;
 	}
 
-	if ( AssetData.IsValid() && !AssetData.GetClass()->IsChildOf( AVolume::StaticClass() ) )
+	if ( AssetData.IsValid() && !AssetData.IsInstanceOf( AVolume::StaticClass() ) )
 	{
 		return false;
 	}
@@ -1864,7 +1884,7 @@ void UActorFactoryBoxVolume::PostSpawnActor( UObject* Asset, AActor* NewActor )
 	Super::PostSpawnActor(Asset, NewActor);
 
 	AVolume* VolumeActor = CastChecked<AVolume>(NewActor);
-	if ( VolumeActor != NULL )
+	if ( VolumeActor != nullptr )
 	{
 		UCubeBuilder* Builder = NewObject<UCubeBuilder>();
 		CreateBrushForVolumeActor( VolumeActor, Builder );
@@ -1888,7 +1908,7 @@ bool UActorFactorySphereVolume::CanCreateActorFrom( const FAssetData& AssetData,
 		return true;
 	}
 
-	if ( AssetData.IsValid() && !AssetData.GetClass()->IsChildOf( AVolume::StaticClass() ) )
+	if ( AssetData.IsValid() && !AssetData.IsInstanceOf( AVolume::StaticClass() ) )
 	{
 		return false;
 	}
@@ -1901,7 +1921,7 @@ void UActorFactorySphereVolume::PostSpawnActor( UObject* Asset, AActor* NewActor
 	Super::PostSpawnActor(Asset, NewActor);
 
 	AVolume* VolumeActor = CastChecked<AVolume>(NewActor);
-	if ( VolumeActor != NULL )
+	if ( VolumeActor != nullptr )
 	{
 		UTetrahedronBuilder* Builder = NewObject<UTetrahedronBuilder>();
 		Builder->SphereExtrapolation = 2;
@@ -1919,27 +1939,12 @@ UActorFactoryCylinderVolume::UActorFactoryCylinderVolume( const FObjectInitializ
 	DisplayName = LOCTEXT( "CylinderVolumeDisplayName", "Cylinder Volume" );
 	NewActorClass = AVolume::StaticClass();
 }
-bool UActorFactoryCylinderVolume::CanCreateActorFrom( const FAssetData& AssetData, FText& OutErrorMsg )
-{
-	if ( UActorFactory::CanCreateActorFrom( AssetData, OutErrorMsg ) )
-	{
-		return true;
-	}
-
-	if ( AssetData.IsValid() && !AssetData.GetClass()->IsChildOf( AVolume::StaticClass() ) )
-	{
-		return false;
-	}
-
-	return true;
-
-}
 void UActorFactoryCylinderVolume::PostSpawnActor( UObject* Asset, AActor* NewActor )
 {
 	Super::PostSpawnActor(Asset, NewActor);
 
 	AVolume* VolumeActor = CastChecked<AVolume>(NewActor);
-	if ( VolumeActor != NULL )
+	if ( VolumeActor != nullptr )
 	{
 		UCylinderBuilder* Builder = NewObject<UCylinderBuilder>();
 		Builder->OuterRadius = 128.0f;
@@ -1959,12 +1964,25 @@ UActorFactoryLevelSequence::UActorFactoryLevelSequence(const FObjectInitializer&
 
 bool UActorFactoryLevelSequence::CanCreateActorFrom( const FAssetData& AssetData, FText& OutErrorMsg )
 {
+	FClassViewerModule& ClassViewerModule = FModuleManager::LoadModuleChecked<FClassViewerModule>("ClassViewer");
+	const TSharedPtr<IClassViewerFilter>& GlobalClassFilter = ClassViewerModule.GetGlobalClassViewerFilter();
+	TSharedRef<FClassViewerFilterFuncs> ClassFilterFuncs = ClassViewerModule.CreateFilterFuncs();
+	FClassViewerInitializationOptions ClassViewerOptions = {};
+
+	if (GlobalClassFilter.IsValid())
+	{
+		if (!GlobalClassFilter->IsClassAllowed(ClassViewerOptions, ALevelSequenceActor::StaticClass(), ClassFilterFuncs))
+		{
+			return false;
+		}
+	}
+
 	if ( UActorFactory::CanCreateActorFrom( AssetData, OutErrorMsg ) )
 	{
 		return true;
 	}
 
-	if ( AssetData.IsValid() && !AssetData.GetClass()->IsChildOf( ULevelSequence::StaticClass() ) )
+	if ( AssetData.IsValid() && !AssetData.IsInstanceOf( ULevelSequence::StaticClass() ) )
 	{
 		OutErrorMsg = NSLOCTEXT("CanCreateActor", "NoLevelSequenceAsset", "A valid sequencer asset must be specified.");
 		return false;
@@ -1992,7 +2010,7 @@ UObject* UActorFactoryLevelSequence::GetAssetFromActorInstance(AActor* Instance)
 {
 	if (ALevelSequenceActor* LevelSequenceActor = Cast<ALevelSequenceActor>(Instance))
 	{
-		return LevelSequenceActor->LevelSequence.TryLoad();
+		return LevelSequenceActor->GetSequence();
 	}
 
 	return nullptr;

@@ -2,51 +2,65 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "UObject/Class.h"
-#include "UObject/UnrealType.h"
+#include "CoreTypes.h"
+#include "HAL/PlatformCrt.h"
+#include "Misc/AssertionMacros.h"
 #include "PropertyTypeCompatibility.h"
+#include "UObject/Class.h"
+#include "UObject/Field.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UnrealType.h"
+
 #include "PropertyPathHelpers.generated.h"
+
+class FArchive;
+template <typename FuncType> class TFunctionRef;
 
 /** Base class for cached property path segments */
 USTRUCT()
-struct PROPERTYPATH_API FPropertyPathSegment
+struct FPropertyPathSegment
 {
 	GENERATED_BODY()
 
 	friend struct FCachedPropertyPath;
 
 	/** UStruct boilerplate constructor - do not use */
-	FPropertyPathSegment();
+	PROPERTYPATH_API FPropertyPathSegment();
 
 	/** Construct from char count and storage */
-	FPropertyPathSegment(int32 InCount, const TCHAR* InString);
+	PROPERTYPATH_API FPropertyPathSegment(int32 InCount, const TCHAR* InString);
 
 	/**
 	 * Called after this event has been serialized in order to cache the field pointer if necessary
 	 */
-	void PostSerialize(const FArchive& Ar);
+	PROPERTYPATH_API void PostSerialize(const FArchive& Ar);
 
 	/** Make a copy which is unresolved */
-	static FPropertyPathSegment MakeUnresolvedCopy(const FPropertyPathSegment& ToCopy);
+	static PROPERTYPATH_API FPropertyPathSegment MakeUnresolvedCopy(const FPropertyPathSegment& ToCopy);
 
 	/**
 	 * Resolves the name on the given Struct.  Can be used to cache the resulting property so that future calls can be processed quickly.
 	 * @param InStruct the ScriptStruct or Class to look for the property on.
 	 */
-	FFieldVariant Resolve(UStruct* InStruct) const;
+	PROPERTYPATH_API FFieldVariant Resolve(UStruct* InStruct) const;
 
 	/** @return the name of this segment */
-	FName GetName() const;
+	PROPERTYPATH_API FName GetName() const;
 
 	/** @return the array index of this segment */
-	int32 GetArrayIndex() const;
+	PROPERTYPATH_API int32 GetArrayIndex() const;
 
 	/** @return the resolved field */
-	FFieldVariant GetField() const;
+	PROPERTYPATH_API FFieldVariant GetField() const;
 
 	/** @return the resolved struct */
-	UStruct* GetStruct() const;
+	PROPERTYPATH_API UStruct* GetStruct() const;
 
 public:
 
@@ -62,7 +76,7 @@ private:
 
 	/** The cached Class or ScriptStruct that was used last to resolve Name to a property. */
 	UPROPERTY(Transient)
-	mutable UStruct* Struct;
+	mutable TObjectPtr<UStruct> Struct;
 
 	/**
 	 * The cached property on the Struct that this Name resolved to on it last time Resolve was called, if 
@@ -79,113 +93,123 @@ struct TStructOpsTypeTraits<FPropertyPathSegment> : TStructOpsTypeTraitsBase2<FP
 
 /** Base class for cached property paths */
 USTRUCT()
-struct PROPERTYPATH_API FCachedPropertyPath
+struct FCachedPropertyPath
 {
 	GENERATED_BODY()
 
 	/** UStruct boilerplate constructor - do not use */
-	FCachedPropertyPath();
+	PROPERTYPATH_API FCachedPropertyPath();
 
 	/** */
-	FCachedPropertyPath(const FString& Path);
+	PROPERTYPATH_API FCachedPropertyPath(const FString& Path);
 
 	/** */
-	FCachedPropertyPath(const FPropertyPathSegment& Segment);
+	PROPERTYPATH_API FCachedPropertyPath(const FPropertyPathSegment& Segment);
 
 	/** */
-	FCachedPropertyPath(const TArray<FString>& PathSegments);
+	PROPERTYPATH_API FCachedPropertyPath(const TArray<FString>& PathSegments);
+
+	/** */
+	PROPERTYPATH_API ~FCachedPropertyPath();
 
 	/** Check whether this property path is non-empty */
 	bool IsValid() const { return Segments.Num() > 0; }
 
 	/** Make a new property path from a string */
-	void MakeFromString(const FString& InPropertyPath);
+	PROPERTYPATH_API void MakeFromString(const FString& InPropertyPath);
 
 	/** Make a copy which is unresolved */
-	static FCachedPropertyPath MakeUnresolvedCopy(const FCachedPropertyPath& ToCopy);
+	static PROPERTYPATH_API FCachedPropertyPath MakeUnresolvedCopy(const FCachedPropertyPath& ToCopy);
 
 	/** @return Get the number of segments in this path */
-	int32 GetNumSegments() const;
+	PROPERTYPATH_API int32 GetNumSegments() const;
 
 	/** 
 	 * Get the path segment at the specified index
 	 * @param	InSegmentIndex	The index of the segment
 	 * @return the segment at the specified index 
 	 */
-	const FPropertyPathSegment& GetSegment(int32 InSegmentIndex) const;
+	PROPERTYPATH_API const FPropertyPathSegment& GetSegment(int32 InSegmentIndex) const;
 
 	/** 
 	 * Get the path segment at the end of the path
 	 * @return the segment at the specified index 
 	 */
-	const FPropertyPathSegment& GetLastSegment() const;
+	PROPERTYPATH_API const FPropertyPathSegment& GetLastSegment() const;
 
 	/** 
 	 * Resolve this property path against the specified object.
 	 * @return true if the path could be resolved
 	 */
-	bool Resolve(UObject* InContainer) const;
+	PROPERTYPATH_API bool Resolve(UObject* InContainer) const;
 
 	/** Set whether this path resolves over object or dynamic array boundaries, making it unsafe for general direct cached access */
-	void SetCanSafelyUsedCachedAddress(bool bInCanSafelyUsedCachedAddress) const;
+	PROPERTYPATH_API void SetCanSafelyUsedCachedAddress(bool bInCanSafelyUsedCachedAddress) const;
+
+	/** Update cached last container property in path & correspondng index, invalidates 'bCanSafelyUsedCachedAddress' */
+	PROPERTYPATH_API void SetCachedLastContainer(void* InContainer, int32 InIndex) const;
+
+	/** Get cached last container property in path */
+	PROPERTYPATH_API void* GetCachedLastContainerInPath() const;
+
+	/** Get cached index of last container property in path, INDEX_NONE if last container is not in path */
+	PROPERTYPATH_API int32 GetCachedLastContainerInPathIndex() const;
 
 	/** Cache a resolved address for faster subsequent access */
-	void ResolveLeaf(void* InAddress) const;
+	PROPERTYPATH_API void ResolveLeaf(void* InAddress) const;
 
 	/** Cache a resolved function for faster subsequent access */
-	void ResolveLeaf(UFunction* InFunction) const;
+	PROPERTYPATH_API void ResolveLeaf(UFunction* InFunction) const;
 
 	/** 
 	 * Check whether a path is resolved. This means that it has a cached address, but may
 	 * resolve over an object boundary or a dynamic array.
 	 * @return true if the path is resolved
 	 */
-	bool IsResolved() const;
+	PROPERTYPATH_API bool IsResolved() const;
 
 	/** 
 	 * Check whether a path is fully resolved. This means that it has a cached address and
 	 * does not resolve over an object boundary or a dynamic array.
 	 * @return true if the path is fully resolved
 	 */
-	bool IsFullyResolved() const;
+	PROPERTYPATH_API bool IsFullyResolved() const;
 
 	/** Get the cached address for this property path, if any */
-	void* GetCachedAddress() const;
+	PROPERTYPATH_API void* GetCachedAddress() const;
 
 	/** Get the cached function for this property path, if any */
-	UFunction* GetCachedFunction() const;
+	PROPERTYPATH_API UFunction* GetCachedFunction() const;
 
 	/** Convert this property path to a FPropertyChangedEvent. Note that the path must be resolved. */
-	FPropertyChangedEvent ToPropertyChangedEvent(EPropertyChangeType::Type InChangeType) const;
+	PROPERTYPATH_API FPropertyChangedEvent ToPropertyChangedEvent(EPropertyChangeType::Type InChangeType) const;
 
 	/** Convert this property path to a FEditPropertyChain. Note that the path must be resolved. */
-	void ToEditPropertyChain(FEditPropertyChain& OutPropertyChain) const;
+	PROPERTYPATH_API void ToEditPropertyChain(FEditPropertyChain& OutPropertyChain) const;
 
 	/** Make a string representation of this property path */
-	FString ToString() const;
+	PROPERTYPATH_API FString ToString() const;
 
 	/** Compares this property path to a string */
-	bool operator==(const FString& Other) const;
+	PROPERTYPATH_API bool operator==(const FString& Other) const;
 
 	/** Compares this property path to a string */
-	bool Equals(const FString& Other) const;
+	PROPERTYPATH_API bool Equals(const FString& Other) const;
 
-#if DO_CHECK
 	/** Get the cached container for this property path, for checking purposes */
-	void* GetCachedContainer() const;
+	PROPERTYPATH_API void* GetCachedContainer() const;
 
 	/** Set the cached container for this property path, for checking purposes */
-	void SetCachedContainer(void* InContainer) const;
-#endif
+	PROPERTYPATH_API void SetCachedContainer(void* InContainer) const;
 
 	/** Trims this property path at the end */
-	void RemoveFromEnd(int32 InNumSegments = 1);
+	PROPERTYPATH_API void RemoveFromEnd(int32 InNumSegments = 1);
 
 	/** Trims this property path at the start */
-	void RemoveFromStart(int32 InNumSegments = 1);
+	PROPERTYPATH_API void RemoveFromStart(int32 InNumSegments = 1);
 
 	/** Returns FProperty if valid. This can be UFunction */
-	FProperty* GetFProperty() const;
+	PROPERTYPATH_API FProperty* GetFProperty() const;
 private:
 	/** Path segments for this path */
 	UPROPERTY()
@@ -196,12 +220,16 @@ private:
 
 	/** Cached function for function-terminated paths */
 	UPROPERTY()
-	mutable UFunction* CachedFunction;
+	mutable TObjectPtr<UFunction> CachedFunction;
 
-#if DO_CHECK
-	/** Cached container, used for checking purposes only */
+	/** Cached container */
 	mutable void* CachedContainer;
-#endif
+
+	/** Cached last container */
+	mutable void* CachedLastContainerInPath;
+
+	/** Index of last container property in path, INDEX_NONE if last container is not in path */
+	mutable int32 CachedLastContainerInPathIndex;
 
 	/** Whether this path resolves over object or dynamic array boundaries, making it unsafe for general direct cached access */
 	mutable bool bCanSafelyUsedCachedAddress;
@@ -211,8 +239,10 @@ private:
 namespace PropertyPathHelpersInternal
 {
 	struct FPropertyPathResolver;
+	struct FPropertyStructView;
 	template<typename T> struct FInternalGetterResolver;
 	template<typename T> struct FInternalSetterResolver;
+
 	PROPERTYPATH_API bool ResolvePropertyPath(UObject* InContainer, const FString& InPropertyPath, FPropertyPathResolver& InResolver);
 	PROPERTYPATH_API bool ResolvePropertyPath(UObject* InContainer, const FCachedPropertyPath& InPropertyPath, FPropertyPathResolver& InResolver);
 	PROPERTYPATH_API bool ResolvePropertyPath(void* InContainer, UStruct* InStruct, const FString& InPropertyPath, FPropertyPathResolver& InResolver);
@@ -505,6 +535,34 @@ namespace PropertyPathHelpers
 	}
 
 	/** 
+	 * Set the value and the leaf property represented by this property path 
+	 * If the cached property path has a cached address it will use that as a 'fast path' instead 
+	 * of iterating the path. This has safety implications depending on the form of the path, so 
+	 * paths that are resolved over object boundaries or dynamic arrays will always use the slow 
+	 * path for safety.
+	 * @param	InContainer		The container object to resolve the property path against
+	 * @param	InPropertyPath	The property path
+	 * @param	InScriptStruct	The struct type to set
+	 * @param	InValue			A pointer to the desired value for the given struct type
+	 * @return true if the property value was successfully copied
+	 */
+	PROPERTYPATH_API bool SetPropertyValue(UObject* InContainer, const FCachedPropertyPath& InPropertyPath, const UScriptStruct* InScriptStruct, const uint8* InValue);
+
+	/** 
+	 * Set the value and the leaf property represented by this property path 
+	 * If the cached property path has a cached address it will use that as a 'fast path' instead 
+	 * of iterating the path. This has safety implications depending on the form of the path, so 
+	 * paths that are resolved over object boundaries or dynamic arrays will always use the slow 
+	 * path for safety.
+	 * @param	InContainer		The container object to resolve the property path against
+	 * @param	InPropertyPath	The property path string
+	 * @param	InScriptStruct	The struct type to set
+	 * @param	InValue			A pointer to the desired value for the given struct type
+	 * @return true if the property value was successfully copied
+	 */
+	PROPERTYPATH_API bool SetPropertyValue(UObject* InContainer, const FString& InPropertyPath, const UScriptStruct* InScriptStruct, const uint8* InValue);
+
+	/** 
 	 * Copy values between two property paths in the same container.
 	 * @param	InContainer			The container object to resolve the property path against
 	 * @param	InDestPropertyPath	The property path to copy to
@@ -573,6 +631,19 @@ namespace PropertyPathHelpersInternal
 		virtual bool Resolve(UObject* InContainer, const FCachedPropertyPath& InPropertyPath) =  0;
 	};
 
+	/** Helper struct to represent a view of a struct, used to specialize behavior against */
+	struct FPropertyStructView
+	{
+		explicit FPropertyStructView(const UScriptStruct* InScriptStruct, const uint8* InMemory)
+			: ScriptStruct(InScriptStruct)
+			, Memory(InMemory)
+		{
+		}
+
+		const UScriptStruct* ScriptStruct;
+		const uint8* Memory;
+	};
+
 	/** Recurring template allowing derived types to only implement templated Resolve_Impl */
 	template<typename DerivedType>
 	struct TPropertyPathResolver : public FPropertyPathResolver
@@ -590,6 +661,16 @@ namespace PropertyPathHelpersInternal
 
 	/** Find the first param that isnt a return property for the specified function */
 	PROPERTYPATH_API FProperty* GetFirstParamProperty(UFunction* InFunction);
+
+	/** Helper function used to call parent setters, used when modifying elements without setters in a struct that has one */
+	PROPERTYPATH_API void CallParentSetters(const FCachedPropertyPath& InPropertyPath);
+
+	/** 
+	 * Helper function used to call parent getters, used when modifying elements without getters in a struct that has one 
+	 * 
+	 * @return True if a parent getter was called.
+	 */
+	PROPERTYPATH_API void CallParentGetters(void* OutValue, const FCachedPropertyPath& InPropertyPath, const void* InPropertyAddress);
 
 	/** Non-UObject helper struct for GetValue function calls */
 	template<typename T, typename ContainerType>
@@ -645,15 +726,19 @@ namespace PropertyPathHelpersInternal
 			if ( IsConcreteTypeCompatibleWithReflectedType<T>(Property) )
 			{
 				ArrayIndex = ArrayIndex == INDEX_NONE ? 0 : ArrayIndex;
-				if ( PropertySizesMatch<T>(Property) && ArrayIndex < Property->ArrayDim )
+				if (PropertySizesMatch<T>(Property) && ArrayIndex < Property->ArrayDim)
 				{
-					if(void* Address = Property->ContainerPtrToValuePtr<T>(InContainer, ArrayIndex))
+					if (Property->HasGetter())
+					{
+						Property->CallGetter(InContainer, &OutValue);
+					}
+					else if (void* Address = Property->ContainerPtrToValuePtr<T>(InContainer, ArrayIndex))
 					{
 						InPropertyPath.ResolveLeaf(Address);
-						Property->CopySingleValue(&OutValue, Address);
-						OutProperty = Property;
-						return true;
+						CallParentGetters(&OutValue, InPropertyPath, Address);
 					}
+					OutProperty = Property;
+					return true;
 				}
 			}
 
@@ -836,8 +921,19 @@ namespace PropertyPathHelpersInternal
 				// Verify there's a return property.
 				if ( FProperty* ParamProperty = GetFirstParamProperty(InFunction) )
 				{
+					if constexpr (std::is_same<FPropertyStructView, T>::value)
+					{
+						const FPropertyStructView& InStuctView = static_cast<const FPropertyStructView&>(InValue);
+
+						// Ensure that the element sizes are the same, prevents the user from doing something terribly wrong.
+						if (ParamProperty->ElementSize == InStuctView.ScriptStruct->GetStructureSize() && !InContainer->IsUnreachable())
+						{
+							InContainer->ProcessEvent(InFunction, const_cast<uint8*>(InStuctView.Memory));
+							return true;
+						}
+					}
 					// Verify that the cpp type matches a known property type.
-					if ( IsConcreteTypeCompatibleWithReflectedType<T>(ParamProperty) )
+					else if ( IsConcreteTypeCompatibleWithReflectedType<T>(ParamProperty) )
 					{
 						// Ensure that the element sizes are the same, prevents the user from doing something terribly wrong.
 						if ( PropertySizesMatch<T>(ParamProperty) && !InContainer->IsUnreachable() )
@@ -867,19 +963,45 @@ namespace PropertyPathHelpersInternal
 			int32 ArrayIndex = LastSegment.GetArrayIndex();
 			FProperty* Property = CastFieldChecked<FProperty>(LastSegment.GetField().ToField());
 
+			if constexpr (std::is_same<FPropertyStructView, T>::value)
+			{
+				const FPropertyStructView& InStuctView = static_cast<const FPropertyStructView&>(InValue);
+
+				// Ensure that the element sizes are the same, prevents the user from doing something terribly wrong.
+				ArrayIndex = ArrayIndex == INDEX_NONE ? 0 : ArrayIndex;
+				if ( Property->ElementSize == InStuctView.ScriptStruct->GetStructureSize() && ArrayIndex < Property->ArrayDim)
+				{
+					if (Property->HasSetter())
+					{
+						Property->CallSetter(InContainer, InStuctView.Memory);
+					}
+					else if (void* Address = Property->ContainerPtrToValuePtr<void>(InContainer, ArrayIndex))
+					{
+						InPropertyPath.ResolveLeaf(Address);
+						Property->CopySingleValue(Address, InStuctView.Memory);
+						CallParentSetters(InPropertyPath);
+					}
+					return true;
+				}
+			}
 			// Verify that the cpp type matches a known property type.
-			if ( IsConcreteTypeCompatibleWithReflectedType<T>(Property) )
+			else if ( IsConcreteTypeCompatibleWithReflectedType<T>(Property) )
 			{
 				// Ensure that the element sizes are the same, prevents the user from doing something terribly wrong.
 				ArrayIndex = ArrayIndex == INDEX_NONE ? 0 : ArrayIndex;
 				if ( PropertySizesMatch<T>(Property) && ArrayIndex < Property->ArrayDim )
 				{
-					if(void* Address = Property->ContainerPtrToValuePtr<T>(InContainer, ArrayIndex))
+					if (Property->HasSetter())
+					{
+						Property->CallSetter(InContainer, &InValue);
+					}
+					else if (void* Address = Property->ContainerPtrToValuePtr<T>(InContainer, ArrayIndex))
 					{
 						InPropertyPath.ResolveLeaf(Address);
 						Property->CopySingleValue(Address, &InValue);
-						return true;
+						CallParentSetters(InPropertyPath);
 					}
+					return true;
 				}
 			}
 
@@ -935,8 +1057,18 @@ namespace PropertyPathHelpersInternal
 					if(void* Address = Property->ContainerPtrToValuePtr<bool>(InContainer, ArrayIndex))
 					{
 						InPropertyPath.ResolveLeaf(Address);
-						FBoolProperty* BoolProperty = CastFieldChecked<FBoolProperty>(LastSegment.GetField().ToField());
-						BoolProperty->SetPropertyValue(Address, InValue);
+
+						if (Property->HasSetter())
+						{
+							// Setter should be specialized to handle masking
+							Property->CallSetter(InContainer, &InValue);
+						}
+						else
+						{
+							FBoolProperty* BoolProperty = CastFieldChecked<FBoolProperty>(Property);
+							BoolProperty->SetPropertyValue(InPropertyPath.GetCachedAddress(), InValue);
+							CallParentSetters(InPropertyPath);
+						}
 						return true;
 					}
 				}
@@ -952,6 +1084,7 @@ namespace PropertyPathHelpersInternal
 	 * @param InPropertyPath		The property path to set from
 	 * @param InValue				The value to set
 	 * @return true if the value was resolved
+	 * @note This method is specialized internally to work with FPropertyStructView
 	 */
 	template<typename T, typename ContainerType>
 	bool SetValue(ContainerType* InContainer, const FCachedPropertyPath& InPropertyPath, const T& InValue)
@@ -971,17 +1104,35 @@ namespace PropertyPathHelpersInternal
 				FScriptArrayHelper_InContainer ArrayHelper(ArrayProp, InContainer);
 				if ( ArrayHelper.IsValidIndex(ArrayIndex) )
 				{
-					// Verify that the cpp type matches a known property type.
-					if ( IsConcreteTypeCompatibleWithReflectedType<T>(ArrayProp->Inner) )
+					if constexpr (std::is_same<FPropertyStructView, T>::value)
 					{
+						const FPropertyStructView& InStuctView = static_cast<const FPropertyStructView&>(InValue);
+
 						// Ensure that the element sizes are the same, prevents the user from doing something terribly wrong.
-						if ( PropertySizesMatch<T>(ArrayProp->Inner) )
+						if (ArrayProp->Inner->ElementSize == InStuctView.ScriptStruct->GetStructureSize())
 						{
-							if(void* Address = static_cast<void*>(ArrayHelper.GetRawPtr(ArrayIndex)))
+							if (void* Address = static_cast<void*>(ArrayHelper.GetRawPtr(ArrayIndex)))
 							{
 								InPropertyPath.ResolveLeaf(Address);
-								ArrayProp->Inner->CopySingleValue(Address, &InValue);
+								ArrayProp->Inner->CopySingleValue(Address, InStuctView.Memory);
 								return true;
+							}
+						}
+					}
+					else
+					{
+						// Verify that the cpp type matches a known property type.
+						if (IsConcreteTypeCompatibleWithReflectedType<T>(ArrayProp->Inner))
+						{
+							// Ensure that the element sizes are the same, prevents the user from doing something terribly wrong.
+							if (PropertySizesMatch<T>(ArrayProp->Inner))
+							{
+								if (void* Address = static_cast<void*>(ArrayHelper.GetRawPtr(ArrayIndex)))
+								{
+									InPropertyPath.ResolveLeaf(Address);
+									ArrayProp->Inner->CopySingleValue(Address, &InValue);
+									return true;
+								}
 							}
 						}
 					}
@@ -991,16 +1142,19 @@ namespace PropertyPathHelpersInternal
 			{
 				// No index, so assume we want the array property itself
 				// Verify that the cpp type matches a known property type.
-				if ( IsConcreteTypeCompatibleWithReflectedType<T>(ArrayProp) )
+				if constexpr (!std::is_same<FPropertyStructView, T>::value)
 				{
-					// Ensure that the element sizes are the same, prevents the user from doing something terribly wrong.
-					if ( PropertySizesMatch<T>(ArrayProp) )
+					if (IsConcreteTypeCompatibleWithReflectedType<T>(ArrayProp))
 					{
-						if(void* Address = ArrayProp->ContainerPtrToValuePtr<T>(InContainer))
+						// Ensure that the element sizes are the same, prevents the user from doing something terribly wrong.
+						if (PropertySizesMatch<T>(ArrayProp))
 						{
-							InPropertyPath.ResolveLeaf(Address);
-							ArrayProp->CopySingleValue(Address, &InValue);
-							return true;
+							if (void* Address = ArrayProp->ContainerPtrToValuePtr<T>(InContainer))
+							{
+								InPropertyPath.ResolveLeaf(Address);
+								ArrayProp->CopySingleValue(Address, &InValue);
+								return true;
+							}
 						}
 					}
 				}
@@ -1085,13 +1239,25 @@ namespace PropertyPathHelpersInternal
 			FArrayProperty* ArrayProp = CastField<FArrayProperty>(OutProperty);
 			if ( ArrayProp && LastSegment.GetArrayIndex() != INDEX_NONE )
 			{
-				ArrayProp->Inner->CopySingleValue(&OutValue, InPropertyPath.GetCachedAddress());
+				if (IsConcreteTypeCompatibleWithReflectedType<T>(ArrayProp->Inner))
+				{
+					ArrayProp->Inner->CopySingleValue(&OutValue, InPropertyPath.GetCachedAddress());
+					return true;
+				}
 			}
-			else
+			else if (IsConcreteTypeCompatibleWithReflectedType<T>(OutProperty))
 			{
-				OutProperty->CopySingleValue(&OutValue, InPropertyPath.GetCachedAddress());
+				if (OutProperty->HasGetter())
+				{
+					OutProperty->CallGetter(InPropertyPath.GetCachedContainer(), &OutValue);
+				}
+				else
+				{
+					CallParentGetters(&OutValue, InPropertyPath, InPropertyPath.GetCachedAddress());
+				}	
+				return true;
 			}
-			return true;
+			return false;
 		}
 	};
 
@@ -1103,30 +1269,12 @@ namespace PropertyPathHelpersInternal
 		{
 			const FPropertyPathSegment& LastSegment = InPropertyPath.GetLastSegment();
 			OutProperty = CastFieldChecked<FProperty>(LastSegment.GetField().ToField());
-			OutProperty->CopyCompleteValue(&OutValue, InPropertyPath.GetCachedAddress());
-			return true;
-		}
-	};
-
-	/** Explicit specialization for bools/bitfields */
-	template<>
-	struct FGetValueFastHelper<bool>
-	{
-		static bool GetValue(const FCachedPropertyPath& InPropertyPath, bool& OutValue, FProperty*& OutProperty)
-		{
-			const FPropertyPathSegment& LastSegment = InPropertyPath.GetLastSegment();
-			OutProperty = CastFieldChecked<FProperty>(LastSegment.GetField().ToField());
-			FArrayProperty* ArrayProp = CastField<FArrayProperty>(OutProperty);
-			if ( ArrayProp && LastSegment.GetArrayIndex() != INDEX_NONE )
+			if (IsConcreteTypeCompatibleWithReflectedType<T>(OutProperty))
 			{
-				ArrayProp->Inner->CopySingleValue(&OutValue, InPropertyPath.GetCachedAddress());
+				OutProperty->CopyCompleteValue(&OutValue, InPropertyPath.GetCachedAddress());
+				return true;
 			}
-			else
-			{
-				FBoolProperty* BoolProperty = CastFieldChecked<FBoolProperty>(OutProperty);
-				OutValue = BoolProperty->GetPropertyValue(InPropertyPath.GetCachedAddress());
-			}
-			return true;
+			return false;
 		}
 	};
 
@@ -1162,15 +1310,59 @@ namespace PropertyPathHelpersInternal
 			const FPropertyPathSegment& LastSegment = InPropertyPath.GetLastSegment();
 			FProperty* Property = CastFieldChecked<FProperty>(LastSegment.GetField().ToField());
 			FArrayProperty* ArrayProp = CastField<FArrayProperty>(Property);
-			if ( ArrayProp && LastSegment.GetArrayIndex() != INDEX_NONE )
+
+			const void* Value = nullptr;
+			if constexpr (std::is_same<FPropertyStructView, T>::value)
 			{
-				ArrayProp->Inner->CopySingleValue(InPropertyPath.GetCachedAddress(), &InValue);
+				const FPropertyStructView& InStuctView = static_cast<const FPropertyStructView&>(InValue);
+				Value = static_cast<const void*>(InStuctView.Memory);
 			}
 			else
 			{
-				Property->CopySingleValue(InPropertyPath.GetCachedAddress(), &InValue);
+				Value = &InValue;
 			}
-			return true;
+
+			auto IsPropertyCompatible = [](FProperty* InProperty)
+			{
+				if constexpr (!std::is_same<FPropertyStructView, T>::value)
+				{
+					if (!IsConcreteTypeCompatibleWithReflectedType<T>(InProperty))
+					{
+						return false;
+					}
+				}
+
+				return true;
+			};
+
+			if ( ArrayProp && LastSegment.GetArrayIndex() != INDEX_NONE )
+			{
+				if (!IsPropertyCompatible(ArrayProp->Inner))
+				{
+					return false;
+				}
+
+				ArrayProp->Inner->CopySingleValue(InPropertyPath.GetCachedAddress(), Value);
+				return true;
+			}
+			else 
+			{
+				if (!IsPropertyCompatible(Property))
+				{
+					return false;
+				}
+
+				if (Property->HasSetter())
+				{
+					Property->CallSetter(InPropertyPath.GetCachedContainer(), Value);
+				}
+				else
+				{
+					Property->CopySingleValue(InPropertyPath.GetCachedAddress(), Value);
+					CallParentSetters(InPropertyPath);
+				}
+				return true;
+			}
 		}
 	};
 
@@ -1182,8 +1374,12 @@ namespace PropertyPathHelpersInternal
 		{
 			const FPropertyPathSegment& LastSegment = InPropertyPath.GetLastSegment();
 			FProperty* Property = CastFieldChecked<FProperty>(LastSegment.GetField().ToField());
-			Property->CopyCompleteValue(InPropertyPath.GetCachedAddress(), &InValue);
-			return true;
+			if (IsConcreteTypeCompatibleWithReflectedType<T>(Property))
+			{
+				Property->CopyCompleteValue(InPropertyPath.GetCachedAddress(), &InValue);
+				return true;
+			}
+			return false;
 		}
 	};
 
@@ -1198,15 +1394,28 @@ namespace PropertyPathHelpersInternal
 			FArrayProperty* ArrayProp = CastField<FArrayProperty>(Property);
 			if ( ArrayProp && LastSegment.GetArrayIndex() != INDEX_NONE )
 			{
-				ArrayProp->Inner->CopySingleValue(InPropertyPath.GetCachedAddress(), &InValue);
+				if (IsConcreteTypeCompatibleWithReflectedType<bool>(ArrayProp->Inner))
+				{
+					ArrayProp->Inner->CopySingleValue(InPropertyPath.GetCachedAddress(), &InValue);
+					return true;
+				}
 			}
-			else
+			else if (IsConcreteTypeCompatibleWithReflectedType<bool>(Property))
 			{
-				FBoolProperty* BoolProperty = CastFieldChecked<FBoolProperty>(Property);
-				BoolProperty->SetPropertyValue(InPropertyPath.GetCachedAddress(), InValue);
+				if (Property->HasSetter())
+				{
+					// Setter should be specialized to handle masking
+					Property->CallSetter(InPropertyPath.GetCachedContainer(), &InValue);
+				}
+				else
+				{
+					FBoolProperty* BoolProperty = CastFieldChecked<FBoolProperty>(Property);
+					BoolProperty->SetPropertyValue(InPropertyPath.GetCachedAddress(), InValue);
+					CallParentSetters(InPropertyPath);
+				}
+				return true;
 			}
-			
-			return true;
+			return false;
 		}
 	};
 

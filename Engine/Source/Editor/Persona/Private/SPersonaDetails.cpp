@@ -1,12 +1,20 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SPersonaDetails.h"
+
+#include "DetailsViewArgs.h"
+#include "IDetailsView.h"
+#include "Layout/Children.h"
 #include "Modules/ModuleManager.h"
 #include "PropertyEditorModule.h"
+#include "SlotBase.h"
+#include "Widgets/SBoxPanel.h"
 
 void SPersonaDetails::Construct(const FArguments& InArgs)
 {
-	FDetailsViewArgs DetailsViewArgs(false, false, true, FDetailsViewArgs::HideNameArea, true);
+	FDetailsViewArgs DetailsViewArgs;
+	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+	DetailsViewArgs.bHideSelectionTip = true;
 
 	FPropertyEditorModule& PropertyEditorModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
 	DetailsView = PropertyEditorModule.CreateDetailView(DetailsViewArgs);

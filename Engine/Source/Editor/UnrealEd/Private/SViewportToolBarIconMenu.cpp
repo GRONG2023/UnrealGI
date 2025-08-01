@@ -1,19 +1,34 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SViewportToolBarIconMenu.h"
-#include "Widgets/SBoxPanel.h"
+
+#include "Internationalization/Text.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "SViewportToolBar.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/ToolBarStyle.h"
+#include "Textures/SlateIcon.h"
+#include "Types/SlateEnums.h"
+#include "Types/SlateStructs.h"
+#include "UObject/NameTypes.h"
 #include "Widgets/Images/SImage.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Input/SMenuAnchor.h"
 #include "Widgets/Input/SButton.h"
-#include "EditorStyleSet.h"
+#include "Widgets/Input/SMenuAnchor.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
+
+struct FGeometry;
+struct FPointerEvent;
 
 void SViewportToolBarIconMenu::Construct( const FArguments& InArgs )
 {
 	ParentToolBar = InArgs._ParentToolBar;
 
-	const FName ButtonStyle = FEditorStyle::Join(InArgs._Style.Get(), ".Button");
+	const FToolBarStyle& ViewportToolbarStyle = FAppStyle::Get().GetWidgetStyle<FToolBarStyle>(InArgs._Style.Get());
 
 	const FSlateIcon& Icon = InArgs._Icon.Get();
 
@@ -22,7 +37,7 @@ void SViewportToolBarIconMenu::Construct( const FArguments& InArgs )
 	.OnGetMenuContent( InArgs._OnGetMenuContent )
 	[
 		SNew(SButton)
-		.ButtonStyle( FEditorStyle::Get(), ButtonStyle )
+		.ButtonStyle(&ViewportToolbarStyle.ButtonStyle)
 		.ContentPadding( FMargin( 5.0f, 0.0f ) )
 		.OnClicked(this, &SViewportToolBarIconMenu::OnMenuClicked)
 		[
@@ -33,8 +48,8 @@ void SViewportToolBarIconMenu::Construct( const FArguments& InArgs )
 			.AutoWidth()
 			[
 				SNew(SBox)
-				.WidthOverride( 16 )
-				.HeightOverride( 16 )
+				.WidthOverride(16.0f)
+				.HeightOverride(16.0f)
 				.HAlign(HAlign_Center)
 				.VAlign(VAlign_Center)
 				[
@@ -59,32 +74,8 @@ void SViewportToolBarIconMenu::Construct( const FArguments& InArgs )
 				.VAlign(VAlign_Top)
 				[
 					SNew(STextBlock)
-					.TextStyle( FEditorStyle::Get(), FEditorStyle::Join( InArgs._Style.Get(), ".Label" ) )
+					.TextStyle(&ViewportToolbarStyle.LabelStyle)
 					.Text(InArgs._Label)
-				]
-				+SVerticalBox::Slot()
-				.AutoHeight()
-				.VAlign(VAlign_Bottom)
-				[
-					SNew(SHorizontalBox)
-					+SHorizontalBox::Slot()
-					.FillWidth(1.0f)
-
-					+SHorizontalBox::Slot()
-					.AutoWidth()
-					[
-						SNew( SBox )
-						.WidthOverride( 4 )
-						.HeightOverride( 4 )
-						[
-							SNew(SImage)
-							.Image(FEditorStyle::GetBrush("ComboButton.Arrow"))
-							.ColorAndOpacity(FLinearColor::Black)
-						]
-					]
-
-					+SHorizontalBox::Slot()
-					.FillWidth(1.0f)
 				]
 			]
 		]

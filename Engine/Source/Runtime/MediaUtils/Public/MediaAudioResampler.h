@@ -2,12 +2,13 @@
 
 #pragma once
 
-#include "CoreTypes.h"
 #include "Containers/Array.h"
+#include "CoreTypes.h"
 #include "Delegates/Delegate.h"
-#include "MediaSampleSource.h"
-#include "Templates/SharedPointer.h"
 #include "IMediaTimeSource.h"
+#include "MediaSampleSource.h"
+#include "Misc/Timespan.h"
+#include "Templates/SharedPointer.h"
 
 class IMediaAudioSample;
 
@@ -15,17 +16,17 @@ class IMediaAudioSample;
 /**
  *
  */
-class MEDIAUTILS_API FMediaAudioResampler
+class FMediaAudioResampler
 {
 public:
 
 	/** Default constructor. */
-	FMediaAudioResampler();
+	MEDIAUTILS_API FMediaAudioResampler();
 
 public:
 
 	/** Flush the resampler. */
-	void Flush();
+	MEDIAUTILS_API void Flush();
 
 	/**
 	 * Generate the next frame of audio.
@@ -39,7 +40,7 @@ public:
 	 * @param JumpFrame Frame that a jump in time occured on.
 	 * @return The actual number of frames returned.
 	 */
-	uint32 Generate(float* Output, FMediaTimeStamp& OutTime, const uint32 FramesRequested, float Rate, FTimespan Time, FMediaAudioSampleSource& SampleSource, uint32& JumpFrame);
+	MEDIAUTILS_API uint32 Generate(float* Output, FMediaTimeStamp& OutTime, const uint32 FramesRequested, float Rate, FTimespan Time, FMediaAudioSampleSource& SampleSource, uint32& JumpFrame);
 
 	/**
 	 * Initialize the resampler.
@@ -47,7 +48,7 @@ public:
 	 * @param InOutputSampleRate Desired output sample rate.
 	 * @see SetAudioSamples
 	 */
-	void Initialize(const uint32 InOutputChannels, const uint32 InOutputSampleRate);
+	MEDIAUTILS_API void Initialize(const uint32 InOutputChannels, const uint32 InOutputSampleRate);
 
 protected:
 
@@ -56,7 +57,7 @@ protected:
 	 *
 	 * @see SetInput
 	 */
-	void ClearInput();
+	MEDIAUTILS_API void ClearInput();
 
 	/**
 	 * Set the audio sample to be resampled.
@@ -65,7 +66,7 @@ protected:
 	 * @return true on success, false otherwise.
 	 * @see ClearInput
 	 */
-	bool SetInput(const TSharedPtr<IMediaAudioSample, ESPMode::ThreadSafe>& Sample);
+	MEDIAUTILS_API bool SetInput(const TSharedPtr<IMediaAudioSample, ESPMode::ThreadSafe>& Sample);
 
 private:
 

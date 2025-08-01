@@ -10,11 +10,12 @@
 #include "Framework/Commands/Commands.h"
 #include "Framework/Commands/UICommandList.h"
 
+class IAssetViewport;
 class FToolBarBuilder;
 struct FToolMenuSection;
 
 /** This class acts as a generic widget that listens to and process global play world actions */
-class UNREALED_API SGlobalPlayWorldActions : public SCompoundWidget
+class SGlobalPlayWorldActions : public SCompoundWidget
 {
 public:
 
@@ -23,17 +24,17 @@ public:
 
 	SLATE_END_ARGS()
 
-	void Construct(const FArguments& InArgs);
+	UNREALED_API void Construct(const FArguments& InArgs);
 
-	virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
+	UNREALED_API virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
 
-	virtual bool SupportsKeyboardFocus() const override;
+	UNREALED_API virtual bool SupportsKeyboardFocus() const override;
 };
 
 //////////////////////////////////////////////////////////////////////////
 // FPlayWorldCommands
 
-class FPlayWorldCommands : public TCommands<FPlayWorldCommands>
+class UNREALED_API FPlayWorldCommands : public TCommands<FPlayWorldCommands>
 {
 private:
 
@@ -53,7 +54,7 @@ public:
 	static void BindGlobalPlayWorldCommands();
 
 	/** Populates a toolbar with the menu commands for play-world control (pause/resume/stop/possess/eject/step/show current loc) */
-	UNREALED_API static void BuildToolbar( FToolMenuSection& InSection, bool bIncludeLaunchButtonAndOptions = false );
+	static void BuildToolbar( FToolMenuSection& InSection, bool bIncludeLaunchButtonAndOptions = false );
 
 	/**
 	* Return the active widget that processes play world actions for PIE
@@ -72,7 +73,7 @@ public:
 	/** 
 	 * A command list that can be passed around and isn't bound to an instance of any tool or editor. 
 	 */
-	UNREALED_API static TSharedPtr<FUICommandList> GlobalPlayWorldActions;
+	static TSharedPtr<FUICommandList> GlobalPlayWorldActions;
 
 public:
 
@@ -103,15 +104,14 @@ public:
 	TSharedPtr<FUICommandInfo> LateJoinSession;
 	TSharedPtr<FUICommandInfo> PossessEjectPlayer;
 	TSharedPtr<FUICommandInfo> ShowCurrentStatement;
+	TSharedPtr<FUICommandInfo> GetMouseControl;
+
+	/** BP Debugging controls */
+	TSharedPtr<FUICommandInfo> AbortExecution;
+	TSharedPtr<FUICommandInfo> ContinueExecution;
 	TSharedPtr<FUICommandInfo> StepInto;
 	TSharedPtr<FUICommandInfo> StepOver;
 	TSharedPtr<FUICommandInfo> StepOut;
-	TSharedPtr<FUICommandInfo> GetMouseControl;
-
-	/** Launch on device */
-	TSharedPtr<FUICommandInfo> RepeatLastLaunch;
-	TSharedPtr<FUICommandInfo> OpenProjectLauncher;
-	TSharedPtr<FUICommandInfo> OpenDeviceManager;
 
 protected:
 
@@ -125,13 +125,6 @@ protected:
 	 */
 	static TSharedRef< SWidget > GeneratePlayMenuContent( TSharedRef<FUICommandList> InCommandList );
 
-	/**
-	 * Generates menu content for the Play On combo button drop down menu
-	 *
-	 * @return	Menu content widget
-	 */
-	static TSharedRef< SWidget > GenerateLaunchMenuContent( TSharedRef<FUICommandList> InCommandList );
-
 	// Add mobile PIE preview device commands
 	void AddPIEPreviewDeviceCommands();
 
@@ -143,25 +136,26 @@ protected:
 //////////////////////////////////////////////////////////////////////////
 // FPlayWorldCommandCallbacks
 
-class UNREALED_API FPlayWorldCommandCallbacks
+class FPlayWorldCommandCallbacks
 {
 public:
 	/**
 	 * Called from the context menu to start previewing the game at the clicked location                   
 	 */
-	static void StartPlayFromHere();
+	static UNREALED_API void StartPlayFromHere();
+	static UNREALED_API void StartPlayFromHere(const TOptional<FVector>& Location, const TOptional<FRotator>& Rotation, const TSharedPtr<IAssetViewport>& ActiveLevelViewport);
 
-	static void ResumePlaySession_Clicked();
-	static void PausePlaySession_Clicked();
-	static void SingleFrameAdvance_Clicked();
+	static UNREALED_API void ResumePlaySession_Clicked();
+	static UNREALED_API void PausePlaySession_Clicked();
+	static UNREALED_API void SingleFrameAdvance_Clicked();
 
-	static bool IsInSIE();
-	static bool IsInPIE();
+	static UNREALED_API bool IsInSIE();
+	static UNREALED_API bool IsInPIE();
 
-	static bool IsInSIE_AndRunning();
-	static bool IsInPIE_AndRunning();
+	static UNREALED_API bool IsInSIE_AndRunning();
+	static UNREALED_API bool IsInPIE_AndRunning();
 
-	static bool HasPlayWorld();
-	static bool HasPlayWorldAndPaused();
-	static bool HasPlayWorldAndRunning();
+	static UNREALED_API bool HasPlayWorld();
+	static UNREALED_API bool HasPlayWorldAndPaused();
+	static UNREALED_API bool HasPlayWorldAndRunning();
 };

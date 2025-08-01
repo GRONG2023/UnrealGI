@@ -53,7 +53,7 @@ public:
 	 * @param InTab     TheTab to add
 	 * @param AtIndex   Add at this index or at the end if INDEX_NONE(default)
 	 */
-	void AddTab( const TSharedRef<SDockTab>& InTab, int32 AtIndex = INDEX_NONE );
+	void AddTab(const TSharedRef<SDockTab>& InTab, int32 AtIndex = INDEX_NONE, bool bKeepInactive = false);
 	
 	/** Activate the tab specified by TabToActivate index. */
 	void BringTabToFront( int32 TabIndexToActivate );
@@ -130,6 +130,8 @@ private:
 	 */
 	int32 ComputeChildDropIndex(const FGeometry& MyGeometry, const TSharedRef<SDockTab>& TabBeingDragged);
 
+private:
+
 	/** The tabs in this TabWell */
 	TSlotlessChildren< SDockTab > Tabs;
 
@@ -138,6 +140,9 @@ private:
 
 	/** The Tab being dragged through the TabWell, if there is one */
 	TSharedPtr<SDockTab> TabBeingDraggedPtr;
+
+	/** The brush displayed between tabs */
+	const FSlateBrush* SeparatorBrush;
 
 	/** The offset of the Tab being dragged through this panel */
 	float ChildBeingDraggedOffset;

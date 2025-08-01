@@ -1,7 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Animation/PreviewCollectionInterface.h"
-#include "Animation/AnimInstance.h"
+#include "Templates/SubclassOf.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PreviewCollectionInterface)
 
 UPreviewCollectionInterface::UPreviewCollectionInterface(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -13,3 +15,4 @@ void IPreviewCollectionInterface::GetPreviewSkeletalMeshes(TArray<USkeletalMesh*
 	TArray<TSubclassOf<UAnimInstance>> AnimBP;
 	GetPreviewSkeletalMeshes(OutList, AnimBP);
 }
+

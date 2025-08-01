@@ -1,14 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/UObjectGlobals.h"
 #include "UObject/UnrealType.h"
-#include "UObject/UnrealTypePrivate.h"
-#include "UObject/PropertyHelper.h"
 
-// WARNING: This should always be the last include in any file that needs it (except .generated.h)
-#include "UObject/UndefineUPropertyMacros.h"
+#include "Hash/Blake3.h"
+#include "UObject/PropertyHelper.h"
+#include "UObject/UnrealTypePrivate.h"
 
 /*-----------------------------------------------------------------------------
 	FBoolProperty.
@@ -27,13 +23,55 @@ FBoolProperty::FBoolProperty(FFieldVariant InOwner, const FName& InName, EObject
 }
 
 FBoolProperty::FBoolProperty(FFieldVariant InOwner, const FName& InName, EObjectFlags InObjectFlags, int32 InOffset, EPropertyFlags InFlags, uint32 InBitMask, uint32 InElementSize, bool bIsNativeBool)
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	: FProperty(InOwner, InName, InObjectFlags, InOffset, InFlags | CPF_HasGetValueTypeHash)
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	, FieldSize(0)
 	, ByteOffset(0)
 	, ByteMask(1)
 	, FieldMask(1)
 {
 	SetBoolSize(InElementSize, bIsNativeBool, InBitMask);
+}
+
+FBoolProperty::FBoolProperty(FFieldVariant InOwner, const UECodeGen_Private::FBoolPropertyParams& Prop)
+	: FProperty(InOwner, (const UECodeGen_Private::FPropertyParamsBaseWithoutOffset&)Prop, CPF_HasGetValueTypeHash)
+	, FieldSize(0)
+	, ByteOffset(0)
+	, ByteMask(1)
+	, FieldMask(1)
+{
+	auto DoDetermineBitfieldOffsetAndMask = [](uint32& Offset, uint32& BitMask, void (*SetBit)(void* Obj), const SIZE_T SizeOf)
+	{
+		TUniquePtr<uint8[]> Buffer = MakeUnique<uint8[]>(SizeOf);
+
+		SetBit(Buffer.Get());
+
+		// Here we are making the assumption that bitfields are aligned in the struct. Probably true.
+		// If not, it may be ok unless we are on a page boundary or something, but the check will fire in that case.
+		// Have faith.
+		for (uint32 TestOffset = 0; TestOffset < SizeOf; TestOffset++)
+		{
+			if (uint8 Mask = Buffer[TestOffset])
+			{
+				Offset = TestOffset;
+				BitMask = (uint32)Mask;
+				check(FMath::RoundUpToPowerOfTwo(BitMask) == BitMask); // better be only one bit on
+				break;
+			}
+		}
+	};
+
+	uint32 Offset = 0;
+	uint32 BitMask = 0;
+	if (Prop.SetBitFunc)
+	{
+		DoDetermineBitfieldOffsetAndMask(Offset, BitMask, Prop.SetBitFunc, Prop.SizeOfOuter);
+		check(BitMask);
+	}
+
+	SetOffset_Internal(Offset);
+	SetBoolSize(Prop.ElementSize, !!(Prop.Flags & UECodeGen_Private::EPropertyGenFlags::NativeBool), BitMask);
 }
 
 #if WITH_EDITORONLY_DATA
@@ -121,6 +159,7 @@ void FBoolProperty::LinkInternal(FArchive& Ar)
 		PropertyFlags &= ~(CPF_IsPlainOldData | CPF_ZeroConstructor);
 		PropertyFlags |= CPF_NoDestructor;
 	}
+	PropertyFlags |= CPF_HasGetValueTypeHash;
 }
 void FBoolProperty::Serialize( FArchive& Ar )
 {
@@ -138,10 +177,7 @@ void FBoolProperty::Serialize( FArchive& Ar )
 	if( Ar.IsLoading())
 	{
 		Ar << NativeBool;
-		//if (!IsPendingKill())
-		{
-			SetBoolSize( BoolSize, !!NativeBool );
-		}
+		SetBoolSize( BoolSize, !!NativeBool );
 	}
 	else
 	{
@@ -235,7 +271,7 @@ void LoadFromType(FBoolProperty* Property, const FPropertyTag& Tag, FStructuredA
 	}
 }
 
-EConvertFromTypeResult FBoolProperty::ConvertFromType(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct)
+EConvertFromTypeResult FBoolProperty::ConvertFromType(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct, const uint8* Defaults)
 {
 	if (Tag.Type == NAME_IntProperty)
 	{
@@ -255,21 +291,19 @@ EConvertFromTypeResult FBoolProperty::ConvertFromType(const FPropertyTag& Tag, F
 	}
 	else if (Tag.Type == NAME_ByteProperty)
 	{
-		// if the byte property was an enum we won't allow a conversion to bool
-		if (Tag.EnumName == NAME_None)
-		{
-			// If we're a nested property the EnumName tag got lost, don't allow this
-			if (GetOwner<FProperty>())
-			{
-				return EConvertFromTypeResult::UseSerializeItem;
-			}
-
-			LoadFromType<uint8>(this, Tag, Slot, Data);
-		}
-		else
+		// Disallow conversion of enum to bool.
+		if (Tag.GetType().GetParameterCount() > 0)
 		{
 			return EConvertFromTypeResult::UseSerializeItem;
 		}
+
+		// Disallow a nested byte property prior to complete type names because it was impossible to distinguish from a nested enum.
+		if (GetOwner<FProperty>() && Slot.GetArchiveState().UEVer() < EUnrealEngineObjectUE5Version::PROPERTY_TAG_COMPLETE_TYPE_NAME)
+		{
+			return EConvertFromTypeResult::UseSerializeItem;
+		}
+
+		LoadFromType<uint8>(this, Tag, Slot, Data);
 	}
 	else if (Tag.Type == NAME_UInt16Property)
 	{
@@ -291,23 +325,35 @@ EConvertFromTypeResult FBoolProperty::ConvertFromType(const FPropertyTag& Tag, F
 	return EConvertFromTypeResult::Converted;
 }
 
-void FBoolProperty::ExportTextItem( FString& ValueStr, const void* PropertyValue, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
+#if WITH_EDITORONLY_DATA
+void FBoolProperty::AppendSchemaHash(FBlake3& Builder, bool bSkipEditorOnly) const
+{
+	Super::AppendSchemaHash(Builder, bSkipEditorOnly);
+	Builder.Update(&ByteOffset, sizeof(ByteOffset));
+	Builder.Update(&ByteMask, sizeof(ByteMask));
+	Builder.Update(&FieldMask, sizeof(FieldMask));
+}
+#endif
+
+
+void FBoolProperty::ExportText_Internal( FString& ValueStr, const void* ContainerOrPropertyPtr, EPropertyPointerType PropertyPointerType, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
 {
 	check(FieldSize != 0);
-	const uint8* ByteValue = (uint8*)PropertyValue + ByteOffset;
-	const bool bValue = 0 != ((*ByteValue) & FieldMask);
-	const TCHAR* Temp = nullptr;
-	if (0 != (PortFlags & PPF_ExportCpp))
+	uint8 LocalByteValue = 0;
+	bool bValue = false;
+	if (PropertyPointerType == EPropertyPointerType::Container && HasGetter())
 	{
-		Temp = (bValue ? TEXT("true") : TEXT("false"));
+		GetValue_InContainer(ContainerOrPropertyPtr, &bValue);
 	}
 	else
 	{
-		Temp = (bValue ? TEXT("True") : TEXT("False"));
+		LocalByteValue = *((uint8*)PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType) + ByteOffset);
+		bValue = 0 != (LocalByteValue & FieldMask);
 	}
+	const TCHAR* Temp = (bValue ? TEXT("True") : TEXT("False"));
 	ValueStr += FString::Printf( TEXT("%s"), Temp );
 }
-const TCHAR* FBoolProperty::ImportText_Internal( const TCHAR* Buffer, void* Data, int32 PortFlags, UObject* Parent, FOutputDevice* ErrorText ) const
+const TCHAR* FBoolProperty::ImportText_Internal( const TCHAR* Buffer, void* ContainerOrPropertyPtr, EPropertyPointerType PropertyPointerType, UObject* Parent, int32 PortFlags, FOutputDevice* ErrorText ) const
 {
 	FString Temp; 
 	Buffer = FPropertyHelpers::ReadToken( Buffer, Temp );
@@ -317,23 +363,44 @@ const TCHAR* FBoolProperty::ImportText_Internal( const TCHAR* Buffer, void* Data
 	}
 
 	check(FieldSize != 0);
-	uint8* ByteValue = (uint8*)Data + ByteOffset;
+	uint8 LocalByteValue = 0;
+	if (PropertyPointerType == EPropertyPointerType::Container && HasGetter())
+	{
+		bool bValue = false;
+		GetValue_InContainer(ContainerOrPropertyPtr, &bValue);
+		LocalByteValue = bValue ? FieldMask : 0;
+	}
+	else
+	{
+		LocalByteValue = *((uint8*)PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType) + ByteOffset);
+	}
 
 	const FCoreTexts& CoreTexts = FCoreTexts::Get();
 	if( Temp==TEXT("1") || Temp==TEXT("True") || Temp==*CoreTexts.True.ToString() || Temp == TEXT("Yes") || Temp == *CoreTexts.Yes.ToString() )
 	{
-		*ByteValue |= ByteMask;
+		LocalByteValue |= ByteMask;
 	}
 	else 
 	if( Temp==TEXT("0") || Temp==TEXT("False") || Temp==*CoreTexts.False.ToString() || Temp == TEXT("No") || Temp == *CoreTexts.No.ToString() )
 	{
-		*ByteValue &= ~FieldMask;
+		LocalByteValue &= ~FieldMask;
 	}
 	else
 	{
 		//UE_LOG(LogProperty, Log,  "Import: Failed to get bool" );
 		return NULL;
 	}
+
+	if (PropertyPointerType == EPropertyPointerType::Container && HasSetter())
+	{
+		bool bValue = 0 != (LocalByteValue & FieldMask);
+		SetValue_InContainer(ContainerOrPropertyPtr, &bValue);
+	}
+	else
+	{
+		*((uint8*)PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType) + ByteOffset) = LocalByteValue;
+	}
+
 	return Buffer;
 }
 bool FBoolProperty::Identical( const void* A, const void* B, uint32 PortFlags ) const
@@ -388,7 +455,6 @@ void FBoolProperty::InitializeValueInternal( void* Data ) const
 
 uint32 FBoolProperty::GetValueTypeHashInternal(const void* Src) const
 {
-	return GetTypeHash(*(const bool*)Src);
+	uint8* SrcByteValue = (uint8*)Src + ByteOffset;
+	return GetTypeHash(*SrcByteValue & FieldMask);
 }
-
-#include "UObject/DefineUPropertyMacros.h"

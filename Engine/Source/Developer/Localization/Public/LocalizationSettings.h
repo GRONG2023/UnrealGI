@@ -2,14 +2,19 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Object.h"
 #include "LocalizationTargetTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "LocalizationSettings.generated.h"
 
-struct FPropertyChangedEvent;
+class FString;
 class ULocalizationTargetSet;
+struct FPropertyChangedEvent;
 
 // Class for loading/saving configuration settings and the details view objects needed for localization dashboard functionality.
 UCLASS(Config=Editor, defaultconfig)
@@ -22,13 +27,13 @@ public:
 
 private:
 	UPROPERTY()
-	ULocalizationTargetSet* EngineTargetSet;
+	TObjectPtr<ULocalizationTargetSet> EngineTargetSet;
 
 	UPROPERTY(config)
 	TArray<FLocalizationTargetSettings> EngineTargetsSettings;
 
 	UPROPERTY()
-	ULocalizationTargetSet* GameTargetSet;
+	TObjectPtr<ULocalizationTargetSet> GameTargetSet;
 
 	UPROPERTY(config)
 	TArray<FLocalizationTargetSettings> GameTargetsSettings;

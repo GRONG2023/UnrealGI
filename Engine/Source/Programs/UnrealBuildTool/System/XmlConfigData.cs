@@ -2,13 +2,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Text;
-using System.Threading.Tasks;
-using Tools.DotNETCommon;
-using UnrealBuildTool;
+using EpicGames.Core;
 
 namespace UnrealBuildTool
 {
@@ -20,127 +18,260 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// The current cache serialization version
 		/// </summary>
-		const int SerializationVersion = 1;
+		const int SerializationVersion = 2;
 
 		/// <summary>
 		/// List of input files. Stored to allow checking cache validity.
 		/// </summary>
-		public FileReference[] InputFiles;
+		public FileReference[] InputFiles { get; set; }
 
 		/// <summary>
-		/// Stores a mapping from type -> field -> value, with all the config values for configurable fields.
+		/// Abstract description of a target data member.
 		/// </summary>
-		public Dictionary<Type, KeyValuePair<FieldInfo, object>[]> TypeToValues;
+		public abstract class TargetMember
+		{
+			/// <summary>
+			/// Returns Reflection.MemberInfo describing the target class member.
+			/// </summary>
+			public abstract MemberInfo MemberInfo { get; }
+
+			/// <summary>
+			/// Returns Reflection.Type of the target class member.
+			/// </summary>
+			public abstract Type Type { get; }
+
+			/// <summary>
+			/// Indicates whether the target class member is static or not.
+			/// </summary>
+			public abstract bool IsStatic { get; }
+
+			/// <summary>
+			/// Returns the value setter of the target class member.
+			/// </summary>
+			public abstract Action<object?, object?> SetValue { get; }
+
+			/// <summary>
+			/// Returns the value getter of the target class member.
+			/// </summary>
+			public abstract Func<object?, object?> GetValue { get; }
+		}
+
+		/// <summary>
+		/// Description of a field member.
+		/// </summary>
+		public class TargetField : TargetMember
+		{
+			public override MemberInfo MemberInfo => _fieldInfo;
+			public override Type Type => _fieldInfo.FieldType;
+			public override bool IsStatic => _fieldInfo.IsStatic;
+			public override Action<object?, object?> SetValue => _fieldInfo.SetValue;
+			public override Func<object?, object?> GetValue => _fieldInfo.GetValue;
+
+			private readonly FieldInfo _fieldInfo;
+
+			public TargetField(FieldInfo fieldInfo)
+			{
+				_fieldInfo = fieldInfo;
+			}
+		}
+
+		/// <summary>
+		/// Description of a property member.
+		/// </summary>
+		public class TargetProperty : TargetMember
+		{
+			public override MemberInfo MemberInfo => _propertyInfo;
+			public override Type Type => _propertyInfo.PropertyType;
+			public override bool IsStatic => _propertyInfo.GetGetMethod()!.IsStatic;
+			public override Action<object?, object?> SetValue => _propertyInfo.SetValue;
+			public override Func<object?, object?> GetValue => _propertyInfo.GetValue;
+
+			private readonly PropertyInfo _propertyInfo;
+
+			public TargetProperty(PropertyInfo propertyInfo)
+			{
+				_propertyInfo = propertyInfo;
+			}
+		}
+
+		public class ValueInfo
+		{
+			public TargetMember Target {  get; init; }
+			public object Value { get; init; }
+			public FileReference SourceFile { get; init; }
+			public XmlConfigFileAttribute XmlConfigAttribute { get; init; }
+
+			public ValueInfo(FieldInfo fieldInfo, object value, FileReference sourceFile, XmlConfigFileAttribute xmlConfigAttribute)
+				: this(new TargetField(fieldInfo), value, sourceFile, xmlConfigAttribute)
+			{
+			}
+
+			public ValueInfo(PropertyInfo propertyInfo, object value, FileReference sourceFile, XmlConfigFileAttribute xmlConfigAttribute)
+				: this(new TargetProperty(propertyInfo), value, sourceFile, xmlConfigAttribute)
+			{
+			}
+
+			public ValueInfo(TargetMember target, object value, FileReference sourceFile, XmlConfigFileAttribute xmlConfigAttribute)
+			{
+				Target = target;
+				Value = value;
+				SourceFile = sourceFile;
+				XmlConfigAttribute = xmlConfigAttribute;
+			}
+		}
+
+		/// <summary>
+		/// Stores a mapping from type -> member -> value, with all the config values for configurable fields.
+		/// </summary>
+		public Dictionary<Type, ValueInfo[]> TypeToValues { get; init; }
 
 		/// <summary>
 		/// Constructor
 		/// </summary>
-		/// <param name="InputFiles"></param>
-		/// <param name="TypeToValues"></param>
-		public XmlConfigData(FileReference[] InputFiles, Dictionary<Type, KeyValuePair<FieldInfo, object>[]> TypeToValues)
+		/// <param name="inputFiles"></param>
+		/// <param name="typeToValues"></param>
+		public XmlConfigData(FileReference[] inputFiles, Dictionary<Type, ValueInfo[]> typeToValues)
 		{
-			this.InputFiles = InputFiles;
-			this.TypeToValues = TypeToValues;
+			InputFiles = inputFiles;
+			TypeToValues = typeToValues;
 		}
 
 		/// <summary>
 		/// Attempts to read a previous block of config values from disk
 		/// </summary>
-		/// <param name="Location">The file to read from</param>
-		/// <param name="Types">Array of valid types. Used to resolve serialized type names to concrete types.</param>
-		/// <param name="Data">On success, receives the parsed data</param>
+		/// <param name="location">The file to read from</param>
+		/// <param name="types">Array of valid types. Used to resolve serialized type names to concrete types.</param>
+		/// <param name="data">On success, receives the parsed data</param>
 		/// <returns>True if the data was read and is valid</returns>
-		public static bool TryRead(FileReference Location, IEnumerable<Type> Types, out XmlConfigData Data)
+		public static bool TryRead(FileReference location, IEnumerable<Type> types, [NotNullWhen(true)] out XmlConfigData? data)
 		{
 			// Check the file exists first
-			if(!FileReference.Exists(Location))
+			if (!FileReference.Exists(location))
 			{
-				Data = null;
+				data = null;
 				return false;
 			}
 
 			// Read the cache from disk
-			using (BinaryReader Reader = new BinaryReader(File.Open(Location.FullName, FileMode.Open, FileAccess.Read, FileShare.Read)))
+			using (BinaryReader reader = new BinaryReader(File.Open(location.FullName, FileMode.Open, FileAccess.Read, FileShare.Read)))
 			{
 				// Check the serialization version matches
-				if(Reader.ReadInt32() != SerializationVersion)
+				if (reader.ReadInt32() != SerializationVersion)
 				{
-					Data = null;
+					data = null;
 					return false;
 				}
 
 				// Read the input files
-				FileReference[] InputFiles = Reader.ReadArray(() => Reader.ReadFileReference());
+				FileReference[] inputFiles = reader.ReadArray(() => reader.ReadFileReference())!;
 
 				// Read the types
-				int NumTypes = Reader.ReadInt32();
-				Dictionary<Type, KeyValuePair<FieldInfo, object>[]> TypeToValues = new Dictionary<Type, KeyValuePair<FieldInfo, object>[]>(NumTypes);
-				for(int TypeIdx = 0; TypeIdx < NumTypes; TypeIdx++)
+				int numTypes = reader.ReadInt32();
+				Dictionary<Type, ValueInfo[]> typeToValues = new Dictionary<Type, ValueInfo[]>(numTypes);
+				for (int typeIdx = 0; typeIdx < numTypes; typeIdx++)
 				{
 					// Read the type name
-					string TypeName = Reader.ReadString();
+					string typeName = reader.ReadString();
 
 					// Try to find it in the list of configurable types
-					Type Type = Types.FirstOrDefault(x => x.Name == TypeName);
-					if(Type == null)
+					Type? type = types.FirstOrDefault(x => x.Name == typeName);
+					if (type == null)
 					{
-						Data = null;
+						data = null;
 						return false;
 					}
 
 					// Read all the values
-					KeyValuePair<FieldInfo, object>[] Values = new KeyValuePair<FieldInfo, object>[Reader.ReadInt32()];
-					for(int ValueIdx = 0; ValueIdx < Values.Length; ValueIdx++)
+					ValueInfo[] values = new ValueInfo[reader.ReadInt32()];
+					for (int valueIdx = 0; valueIdx < values.Length; valueIdx++)
 					{
-						string FieldName = Reader.ReadString();
+						string memberName = reader.ReadString();
 
-						// Find the matching field on the output type
-						FieldInfo Field = Type.GetField(FieldName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
-						if(Field == null || Field.GetCustomAttribute<XmlConfigFileAttribute>() == null)
+						TargetMember? targetMember = GetTargetMemberWithAttribute<XmlConfigFileAttribute>(type, memberName);
+
+						if (targetMember != null)
 						{
-							Data = null;
+							// If TargetMember is not null, we know it has our attribute.
+							XmlConfigFileAttribute xmlConfigAttribute = targetMember!.MemberInfo.GetCustomAttribute<XmlConfigFileAttribute>()!;
+
+							// Try to parse the value and add it to the output array
+							object value = reader.ReadObject(targetMember.Type)!;
+
+							// Read the path of the config file that provided this setting
+							FileReference sourceFile = reader.ReadFileReference();
+
+							values[valueIdx] = new ValueInfo(targetMember, value, sourceFile, xmlConfigAttribute);
+						}
+						else
+						{
+							data = null;
 							return false;
 						}
-
-						// Try to parse the value and add it to the output array
-						object Value = Reader.ReadObject(Field.FieldType);
-						Values[ValueIdx] = new KeyValuePair<FieldInfo, object>(Field, Value);
 					}
 
 					// Add it to the type map
-					TypeToValues.Add(Type, Values);
+					typeToValues.Add(type, values);
 				}
 
 				// Return the parsed data
-				Data = new XmlConfigData(InputFiles.ToArray(), TypeToValues);
+				data = new XmlConfigData(inputFiles.ToArray(), typeToValues);
 				return true;
 			}
 		}
 
 		/// <summary>
+		/// Find a data member (field or property) with the given name and attribute and returns TargetMember wrapper created for it.
+		/// </summary>
+		/// <typeparam name="T">Attribute a member has to have to be considered.</typeparam>
+		/// <param name="type">Type which members are to be searched</param>
+		/// <param name="memberName">Name of a member (field or property) to find.</param>
+		/// <returns>TargetMember wrapper or null if no member has been found.</returns>
+		private static TargetMember? GetTargetMemberWithAttribute<T>(Type type, string memberName)
+			where T : Attribute
+		{
+			FieldInfo? field = type.GetField(memberName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
+			T? xmlConfigAttribute = field?.GetCustomAttribute<T>();
+			if (field != null && xmlConfigAttribute != null)
+			{
+				return new TargetField(field);
+			}
+
+			PropertyInfo? property = type.GetProperty(memberName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
+			xmlConfigAttribute = property?.GetCustomAttribute<T>();
+
+			if (property != null && xmlConfigAttribute != null)
+			{
+				return new TargetProperty(property);
+			}
+
+			return null;
+		}
+
+		/// <summary>
 		/// Writes the coalesced config hierarchy to disk
 		/// </summary>
-		/// <param name="Location">File to write to</param>
-		public void Write(FileReference Location)
+		/// <param name="location">File to write to</param>
+		public void Write(FileReference location)
 		{
-			DirectoryReference.CreateDirectory(Location.Directory);
-			using (BinaryWriter Writer = new BinaryWriter(File.Open(Location.FullName, FileMode.Create, FileAccess.Write, FileShare.Read)))
+			DirectoryReference.CreateDirectory(location.Directory);
+			using (BinaryWriter writer = new BinaryWriter(File.Open(location.FullName, FileMode.Create, FileAccess.Write, FileShare.Read)))
 			{
-				Writer.Write(SerializationVersion);
+				writer.Write(SerializationVersion);
 
 				// Save all the input files. The cache will not be valid if these change.
-				Writer.Write(InputFiles, Item => Writer.Write(Item));
+				writer.Write(InputFiles, item => writer.Write(item));
 
 				// Write all the categories
-				Writer.Write(TypeToValues.Count);
-				foreach(KeyValuePair<Type, KeyValuePair<FieldInfo, object>[]> TypePair in TypeToValues)
+				writer.Write(TypeToValues.Count);
+				foreach (KeyValuePair<Type, ValueInfo[]> typePair in TypeToValues)
 				{
-					Writer.Write(TypePair.Key.Name);
-					Writer.Write(TypePair.Value.Length);
-					foreach(KeyValuePair<FieldInfo, object> FieldPair in TypePair.Value)
+					writer.Write(typePair.Key.Name);
+					writer.Write(typePair.Value.Length);
+					foreach (ValueInfo memberPair in typePair.Value)
 					{
-						Writer.Write(FieldPair.Key.Name);
-						Writer.Write(FieldPair.Key.FieldType, FieldPair.Value);
+						writer.Write(memberPair.Target.MemberInfo.Name);
+						writer.Write(memberPair.Target.Type, memberPair.Value);
+						writer.Write(memberPair.SourceFile);
 					}
 				}
 			}

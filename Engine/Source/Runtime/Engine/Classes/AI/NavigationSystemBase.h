@@ -22,8 +22,10 @@ class UNavAreaBase;
 
 ENGINE_API DECLARE_LOG_CATEGORY_EXTERN(LogNavigation, Warning, All);
 ENGINE_API DECLARE_LOG_CATEGORY_EXTERN(LogNavigationDataBuild, Log, All);
+ENGINE_API DECLARE_LOG_CATEGORY_EXTERN(LogNavigationHistory, Warning, All);
+ENGINE_API DECLARE_LOG_CATEGORY_EXTERN(LogNavInvokers, Warning, All);
 ENGINE_API DECLARE_LOG_CATEGORY_EXTERN(LogNavLink, Warning, All);
-ENGINE_API DECLARE_LOG_CATEGORY_EXTERN(LogAStar, Warning, All);
+ENGINE_API DECLARE_LOG_CATEGORY_EXTERN(LogAStar, Display, All);
 
 UENUM()
 enum class FNavigationSystemRunMode : uint8
@@ -31,9 +33,10 @@ enum class FNavigationSystemRunMode : uint8
 	InvalidMode,
 	GameMode,
 	EditorMode,
-	SimulationMode,
+	SimulationMode UE_DEPRECATED(5.3, "No longer used.") UMETA(Hidden, DisplayName = "DEPRECATED No longer used, to be removed soon"),
 	PIEMode,
 	InferFromWorldMode,
+	EditorWorldPartitionBuildMode
 };
 
 namespace ENavigationLockReason
@@ -50,11 +53,11 @@ namespace ENavigationLockReason
 	};
 }
 
-class ENGINE_API FNavigationLockContext
+class FNavigationLockContext
 {
 public:
 	FNavigationLockContext(ENavigationLockReason::Type Reason = ENavigationLockReason::Unknown, bool bApplyLock = true)
-		: MyWorld(NULL), LockReason(Reason), bSingleWorld(false), bIsLocked(false)
+		: MyWorld(NULL), LockReason((uint8)Reason), bSingleWorld(false), bIsLocked(false)
 	{
 		if (bApplyLock)
 		{
@@ -63,7 +66,7 @@ public:
 	}
 
 	FNavigationLockContext(UWorld* InWorld, ENavigationLockReason::Type Reason = ENavigationLockReason::Unknown, bool bApplyLock = true)
-		: MyWorld(InWorld), LockReason(Reason), bSingleWorld(true), bIsLocked(false)
+		: MyWorld(InWorld), LockReason((uint8)Reason), bSingleWorld(true), bIsLocked(false)
 	{
 		if (bApplyLock)
 		{
@@ -82,8 +85,8 @@ private:
 	uint8 bSingleWorld : 1;
 	uint8 bIsLocked : 1;
 
-	void LockUpdates();
-	void UnlockUpdates();
+	ENGINE_API void LockUpdates();
+	ENGINE_API void UnlockUpdates();
 };
 
 namespace FNavigationSystem
@@ -104,6 +107,8 @@ namespace FNavigationSystem
 	/** Discards all navigation data chunks in all sub-levels */
 	ENGINE_API void DiscardNavigationDataChunks(UWorld& InWorld);
 
+	ENGINE_API bool IsEditorRunMode(const FNavigationSystemRunMode Mode);
+	
 	template<typename TNavSys>
 	FORCEINLINE TNavSys* GetCurrent(UWorld* World)
 	{
@@ -132,6 +137,8 @@ namespace FNavigationSystem
 	//ENGINE_API bool HasComponentData(UActorComponent& Comp);
 	ENGINE_API void OnActorBoundsChanged(AActor& Actor);
 	ENGINE_API void OnPostEditActorMove(AActor& Actor);
+
+	UE_DEPRECATED(5.4, "Use OnObjectBoundsChanged taking UObject and list of dirty areas as parameters instead.")
 	ENGINE_API void OnComponentBoundsChanged(UActorComponent& Comp, const FBox& NewBounds, const FBox& DirtyArea);
 	ENGINE_API void OnComponentTransformChanged(USceneComponent& Comp);
 
@@ -140,12 +147,22 @@ namespace FNavigationSystem
 
 	ENGINE_API void OnComponentRegistered(UActorComponent& Comp);
 	ENGINE_API void OnComponentUnregistered(UActorComponent& Comp);
+	
+	ENGINE_API void RegisterComponent(UActorComponent& Comp);
+	ENGINE_API void UnregisterComponent(UActorComponent& Comp);
+
+	ENGINE_API void RegisterNavRelevantObject(UObject& Object);
+	ENGINE_API void UpdateNavRelevantObject(UObject& Object);
+	ENGINE_API void UnregisterNavRelevantObject(UObject& Object);
+	ENGINE_API void OnObjectBoundsChanged(UObject& Object, const FBox& NewBounds, TConstArrayView<FBox> DirtyAreas);
 
 	ENGINE_API void RemoveActorData(AActor& Actor);
 
 	ENGINE_API bool HasComponentData(UActorComponent& Comp);
 	
 	ENGINE_API const FNavDataConfig& GetDefaultSupportedAgent();
+	ENGINE_API const FNavDataConfig& GetBiggestSupportedAgent(const UWorld* World);
+	ENGINE_API double GetWorldPartitionNavigationDataBuilderOverlap(const UWorld& World);
 
 	ENGINE_API TSubclassOf<UNavAreaBase> GetDefaultWalkableArea();
 	ENGINE_API TSubclassOf<UNavAreaBase> GetDefaultObstacleArea();
@@ -153,10 +170,6 @@ namespace FNavigationSystem
 	/**	Retrieves the transform the Navigation System is using to convert coords
 	 *	from FromCoordType to ToCoordType */
 	ENGINE_API const FTransform& GetCoordTransform(const ENavigationCoordSystem::Type FromCoordType, const ENavigationCoordSystem::Type ToCoordType);
-	UE_DEPRECATED(4.22, "FNavigationSystem::GetCoordTransformTo is deprecated. Use FNavigationSystem::GetCoordTransform instead")
-	ENGINE_API const FTransform& GetCoordTransformTo(const ENavigationCoordSystem::Type CoordType);
-	UE_DEPRECATED(4.22, "FNavigationSystem::GetCoordTransformFrom is deprecated. Use FNavigationSystem::GetCoordTransform instead")
-	ENGINE_API const FTransform& GetCoordTransformFrom(const ENavigationCoordSystem::Type CoordType);
 
 	ENGINE_API bool WantsComponentChangeNotifies();
 
@@ -184,6 +197,8 @@ namespace FNavigationSystem
 	ENGINE_API void StopMovement(const AController& Controller);
 	ENGINE_API IPathFollowingAgentInterface* FindPathFollowingAgentForActor(const AActor& Actor);
 
+	DECLARE_DELEGATE_OneParam(FObjectBasedSignature, UObject& /*Object*/);
+	DECLARE_DELEGATE_ThreeParams(FObjectBoundsChangedSignature, UObject& /*Object*/, const FBox& /*NewBounds*/, TConstArrayView<FBox> /*DirtyAreas*/)
 	DECLARE_DELEGATE_OneParam(FActorBasedSignature, AActor& /*Actor*/);
 	DECLARE_DELEGATE_OneParam(FActorComponentBasedSignature, UActorComponent& /*Comp*/);
 	DECLARE_DELEGATE_OneParam(FSceneComponentBasedSignature, USceneComponent& /*Comp*/);
@@ -194,30 +209,36 @@ namespace FNavigationSystem
 	DECLARE_DELEGATE_RetVal_OneParam(bool, FBoolControllerBasedSignature, const AController& /*Controller*/);
 	DECLARE_DELEGATE_RetVal_OneParam(bool, FBoolActorComponentBasedSignature, UActorComponent& /*Comp*/);
 	DECLARE_DELEGATE_RetVal(TSubclassOf<UNavAreaBase>, FNavAreaBasedSignature);
-	DECLARE_DELEGATE_RetVal(const FNavDataConfig&, FNavDatConfigBasedSignature);
+	DECLARE_DELEGATE_RetVal(const FNavDataConfig&, FNavDataConfigBasedSignature);
+	DECLARE_DELEGATE_RetVal_OneParam(const FNavDataConfig&, FNavDataConfigAndWorldSignature, const UWorld* /*World*/);
+	DECLARE_DELEGATE_RetVal_OneParam(double, FDoubleWorldBasedSignature, const UWorld& /*World*/);
 	DECLARE_DELEGATE_TwoParams(FWorldByteBasedSignature, UWorld& /*World*/, uint8 /*Flags*/);
 	DECLARE_DELEGATE_TwoParams(FActorBooleBasedSignature, AActor& /*Actor*/, bool /*bUpdateAttachedActors*/);
-	DECLARE_DELEGATE_ThreeParams(FComponentBoundsChangeSignature, UActorComponent& /*Comp*/, const FBox& /*NewBounds*/, const FBox& /*DirtyArea*/)
 	DECLARE_DELEGATE_RetVal_OneParam(INavigationDataInterface*, FNavDataForPropsSignature, const FNavAgentProperties& /*AgentProperties*/);
 	DECLARE_DELEGATE_RetVal_OneParam(INavigationDataInterface*, FNavDataForActorSignature, const AActor& /*Actor*/);
 	DECLARE_DELEGATE_RetVal(TSubclassOf<AActor>, FNavDataClassFetchSignature);
 	DECLARE_DELEGATE_TwoParams(FWorldBoolBasedSignature, UWorld& /*World*/, const bool /*bShow*/);
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnNavigationInitSignature, const UNavigationSystemBase&);
+	DECLARE_MULTICAST_DELEGATE_TwoParams(FOnNavAreaGenericEvent, const UWorld&, const UClass*);
+
+	UE_DEPRECATED(5.4, "Use FObjectBoundsChangedSignature delegate taking UObject and list of dirty areas as parameters instead.")
+	DECLARE_DELEGATE_ThreeParams(FComponentBoundsChangeSignature, UActorComponent& /*Comp*/, const FBox& /*NewBounds*/, const FBox& /*DirtyArea*/)
 }
 
 
-UCLASS(Abstract, config = Engine, defaultconfig, Transient)
-class ENGINE_API UNavigationSystemBase : public UObject
+UCLASS(Abstract, config = Engine, defaultconfig, Transient, MinimalAPI)
+class UNavigationSystemBase : public UObject
 {
 	GENERATED_BODY()
 
 public:
 	virtual ~UNavigationSystemBase(){}
 
-	virtual void Tick(float DeltaSeconds) PURE_VIRTUAL(UNavigationSystemBase::Tick, );
-	virtual void CleanUp(const FNavigationSystem::ECleanupMode Mode) PURE_VIRTUAL(UNavigationSystemBase::CleanUp, );
-	virtual void Configure(const UNavigationSystemConfig& Config) PURE_VIRTUAL(UNavigationSystemBase::Configure, );
+	ENGINE_API virtual void Tick(float DeltaSeconds) PURE_VIRTUAL(UNavigationSystemBase::Tick, );
+	ENGINE_API virtual void CleanUp(const FNavigationSystem::ECleanupMode Mode) PURE_VIRTUAL(UNavigationSystemBase::CleanUp, );
+	ENGINE_API virtual void Configure(const UNavigationSystemConfig& Config) PURE_VIRTUAL(UNavigationSystemBase::Configure, );
 	/** Called when there's a need to extend current navigation system's config with information in NewConfig */
-	virtual void AppendConfig(const UNavigationSystemConfig& NewConfig) PURE_VIRTUAL(UNavigationSystemBase::AppendConfig, );
+	ENGINE_API virtual void AppendConfig(const UNavigationSystemConfig& NewConfig) PURE_VIRTUAL(UNavigationSystemBase::AppendConfig, );
 
 	/**
 	*	Called when owner-UWorld initializes actors
@@ -226,9 +247,9 @@ public:
 
 	virtual bool IsNavigationBuilt(const AWorldSettings* Settings) const { return false; }
 
-	virtual void ApplyWorldOffset(const FVector& InOffset, bool bWorldShift) PURE_VIRTUAL(UNavigationSystemBase::ApplyWorldOffset, );
+	ENGINE_API virtual void ApplyWorldOffset(const FVector& InOffset, bool bWorldShift) PURE_VIRTUAL(UNavigationSystemBase::ApplyWorldOffset, );
 
-	virtual void InitializeForWorld(UWorld& World, FNavigationSystemRunMode Mode) PURE_VIRTUAL(UNavigationSystemBase::InitializeForWorld, );
+	ENGINE_API virtual void InitializeForWorld(UWorld& World, FNavigationSystemRunMode Mode) PURE_VIRTUAL(UNavigationSystemBase::InitializeForWorld, );
 
 	/** 
 	 *	If you're using NavigationSysstem module consider calling 
@@ -237,57 +258,81 @@ public:
 	 */
 	virtual INavigationDataInterface* GetMainNavData() const { return nullptr; }
 
-	UE_DEPRECATED(4.20, "GetMainNavData is deprecated. Use FNavigationSystem::GetCurrent<UNavigationSystemV1>()->GetDefaultNavDataInstance instead")
-	INavigationDataInterface* GetMainNavData(int) { return nullptr; }
+	ENGINE_API virtual void SetBuildBounds(const FBox& Bounds) PURE_VIRTUAL(UNavigationSystemBase::SetBuildBounds, );
+
+	ENGINE_API virtual FBox GetNavigableWorldBounds() const PURE_VIRTUAL(UNavigationSystemBase::GetNavigableWorldBounds, return FBox(ForceInit););
+	
+	ENGINE_API virtual bool ContainsNavData(const FBox& Bounds) const PURE_VIRTUAL(UNavigationSystemBase::ContainsNavData, return false;);
+	ENGINE_API virtual FBox ComputeNavDataBounds() const PURE_VIRTUAL(UNavigationSystemBase::GetNavigableWorldBounds, return FBox(ForceInit););
+	
+	virtual void AddNavigationDataChunk(class ANavigationDataChunkActor& DataChunkActor) {}
+	virtual void RemoveNavigationDataChunk(class ANavigationDataChunkActor& DataChunkActor) {}
+	virtual void FillNavigationDataChunkActor(const FBox& QueryBounds, class ANavigationDataChunkActor& DataChunkActor, FBox& OutTilesBounds) {}
+
+	ENGINE_API virtual bool IsWorldInitDone() const PURE_VIRTUAL(UNavigationSystemBase::IsWorldInitDone, return false;);
+
+	static ENGINE_API FNavigationSystem::FOnNavigationInitSignature& OnNavigationInitStartStaticDelegate();
+	static ENGINE_API FNavigationSystem::FOnNavigationInitSignature& OnNavigationInitDoneStaticDelegate();
+	static ENGINE_API FNavigationSystem::FOnNavAreaGenericEvent& OnNavAreaRegisteredDelegate();
+	static ENGINE_API FNavigationSystem::FOnNavAreaGenericEvent& OnNavAreaUnregisteredDelegate();
 
 protected:
 	/**	Sets the Transform the Navigation System will use when converting from FromCoordType
 	 *	to ToCoordType
 	 *	@param bAddInverse if true (default) will also set coord transform in 
 	 *		the reverse order using Transform.Inverse() */
-	static void SetCoordTransform(const ENavigationCoordSystem::Type FromCoordType, const ENavigationCoordSystem::Type ToCoordType, const FTransform& Transform, bool bAddInverse = true);
-	UE_DEPRECATED(4.22, "FNavigationSystem::SetCoordTransformTo is deprecated. Use FNavigationSystem::SetCoordTransform instead")
-	static void SetCoordTransformTo(const ENavigationCoordSystem::Type CoordType, const FTransform& Transform);
-	UE_DEPRECATED(4.22, "FNavigationSystem::SetCoordTransformFrom is deprecated. Use FNavigationSystem::SetCoordTransform instead")
-	static void SetCoordTransformFrom(const ENavigationCoordSystem::Type CoordType, const FTransform& Transform);
-	static void SetWantsComponentChangeNotifies(const bool bEnable);
-	static void SetDefaultWalkableArea(TSubclassOf<UNavAreaBase> InAreaClass);
-	static void SetDefaultObstacleArea(TSubclassOf<UNavAreaBase> InAreaClass);
+	static ENGINE_API void SetCoordTransform(const ENavigationCoordSystem::Type FromCoordType, const ENavigationCoordSystem::Type ToCoordType, const FTransform& Transform, bool bAddInverse = true);
+	static ENGINE_API void SetWantsComponentChangeNotifies(const bool bEnable);
+	static ENGINE_API void SetDefaultWalkableArea(TSubclassOf<UNavAreaBase> InAreaClass);
+	static ENGINE_API void SetDefaultObstacleArea(TSubclassOf<UNavAreaBase> InAreaClass);
 
-	static void ResetEventDelegates();
-	static FNavigationSystem::FActorBasedSignature& UpdateActorDataDelegate();
-	static FNavigationSystem::FActorComponentBasedSignature& UpdateComponentDataDelegate();
-	static FNavigationSystem::FSceneComponentBasedSignature& UpdateComponentDataAfterMoveDelegate();
-	static FNavigationSystem::FActorBasedSignature& OnActorBoundsChangedDelegate();
-	static FNavigationSystem::FActorBasedSignature& OnPostEditActorMoveDelegate();
-	static FNavigationSystem::FSceneComponentBasedSignature& OnComponentTransformChangedDelegate();
-	static FNavigationSystem::FActorBasedSignature& OnActorRegisteredDelegate();
-	static FNavigationSystem::FActorBasedSignature& OnActorUnregisteredDelegate();
-	static FNavigationSystem::FActorComponentBasedSignature& OnComponentRegisteredDelegate();
-	static FNavigationSystem::FActorComponentBasedSignature& OnComponentUnregisteredDelegate();
-	static FNavigationSystem::FActorBasedSignature& RemoveActorDataDelegate();
-	static FNavigationSystem::FBoolActorComponentBasedSignature& HasComponentDataDelegate();
-	static FNavigationSystem::FNavDatConfigBasedSignature& GetDefaultSupportedAgentDelegate();
-	static FNavigationSystem::FActorBooleBasedSignature& UpdateActorAndComponentDataDelegate();
-	static FNavigationSystem::FComponentBoundsChangeSignature& OnComponentBoundsChangedDelegate();
-	static FNavigationSystem::FNavDataForActorSignature& GetNavDataForActorDelegate();
-	static FNavigationSystem::FNavDataClassFetchSignature& GetDefaultNavDataClassDelegate();
-	static FNavigationSystem::FWorldBoolBasedSignature& VerifyNavigationRenderingComponentsDelegate();
-	static FNavigationSystem::FWorldBasedSignature& BuildDelegate();
+	static ENGINE_API void ResetEventDelegates();
+
+	static ENGINE_API FNavigationSystem::FObjectBasedSignature& RegisterNavRelevantObjectDelegate();
+	static ENGINE_API FNavigationSystem::FObjectBasedSignature& UpdateNavRelevantObjectDelegate();
+	static ENGINE_API FNavigationSystem::FObjectBasedSignature& UnregisterNavRelevantObjectDelegate();
+	static ENGINE_API FNavigationSystem::FObjectBoundsChangedSignature& OnObjectBoundsChangedDelegate();
+
+	static ENGINE_API FNavigationSystem::FActorBasedSignature& UpdateActorDataDelegate();
+	static ENGINE_API FNavigationSystem::FActorComponentBasedSignature& UpdateComponentDataDelegate();
+	static ENGINE_API FNavigationSystem::FSceneComponentBasedSignature& UpdateComponentDataAfterMoveDelegate();
+	static ENGINE_API FNavigationSystem::FActorBasedSignature& OnActorBoundsChangedDelegate();
+	static ENGINE_API FNavigationSystem::FActorBasedSignature& OnPostEditActorMoveDelegate();
+	static ENGINE_API FNavigationSystem::FSceneComponentBasedSignature& OnComponentTransformChangedDelegate();
+	static ENGINE_API FNavigationSystem::FActorBasedSignature& OnActorRegisteredDelegate();
+	static ENGINE_API FNavigationSystem::FActorBasedSignature& OnActorUnregisteredDelegate();
+	static ENGINE_API FNavigationSystem::FActorComponentBasedSignature& OnComponentRegisteredDelegate();
+	static ENGINE_API FNavigationSystem::FActorComponentBasedSignature& OnComponentUnregisteredDelegate();
+	static ENGINE_API FNavigationSystem::FActorComponentBasedSignature& RegisterComponentDelegate();
+	static ENGINE_API FNavigationSystem::FActorComponentBasedSignature& UnregisterComponentDelegate();
+	static ENGINE_API FNavigationSystem::FActorBasedSignature& RemoveActorDataDelegate();
+	static ENGINE_API FNavigationSystem::FBoolActorComponentBasedSignature& HasComponentDataDelegate();
+	static ENGINE_API FNavigationSystem::FNavDataConfigBasedSignature& GetDefaultSupportedAgentDelegate();
+	static ENGINE_API FNavigationSystem::FNavDataConfigAndWorldSignature& GetBiggestSupportedAgentDelegate();
+	static ENGINE_API FNavigationSystem::FActorBooleBasedSignature& UpdateActorAndComponentDataDelegate();
+	static ENGINE_API FNavigationSystem::FNavDataForActorSignature& GetNavDataForActorDelegate();
+	static ENGINE_API FNavigationSystem::FNavDataClassFetchSignature& GetDefaultNavDataClassDelegate();
+	static ENGINE_API FNavigationSystem::FWorldBoolBasedSignature& VerifyNavigationRenderingComponentsDelegate();
+	static ENGINE_API FNavigationSystem::FWorldBasedSignature& BuildDelegate();
+
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	static ENGINE_API FNavigationSystem::FComponentBoundsChangeSignature& OnComponentBoundsChangedDelegate();
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #if WITH_EDITOR
-	static FNavigationSystem::FWorldBasedSignature& OnPIEStartDelegate();
-	static FNavigationSystem::FWorldBasedSignature& OnPIEEndDelegate();
-	static FNavigationSystem::FLevelBasedSignature& UpdateLevelCollisionDelegate();
-	static FNavigationSystem::FNavigationAutoUpdateEnableSignature& SetNavigationAutoUpdateEnableDelegate();
-	static FNavigationSystem::FWorldByteBasedSignature& AddNavigationUpdateLockDelegate();
-	static FNavigationSystem::FWorldByteBasedSignature& RemoveNavigationUpdateLockDelegate();
+	static ENGINE_API FNavigationSystem::FWorldBasedSignature& OnPIEStartDelegate();
+	static ENGINE_API FNavigationSystem::FWorldBasedSignature& OnPIEEndDelegate();
+	static ENGINE_API FNavigationSystem::FLevelBasedSignature& UpdateLevelCollisionDelegate();
+	static ENGINE_API FNavigationSystem::FNavigationAutoUpdateEnableSignature& SetNavigationAutoUpdateEnableDelegate();
+	static ENGINE_API FNavigationSystem::FWorldByteBasedSignature& AddNavigationUpdateLockDelegate();
+	static ENGINE_API FNavigationSystem::FWorldByteBasedSignature& RemoveNavigationUpdateLockDelegate();
+	static ENGINE_API FNavigationSystem::FDoubleWorldBasedSignature& GetWorldPartitionNavigationDataBuilderOverlapDelegate();
 #endif // WITH_EDITOR
 };
 
 
-class ENGINE_API IPathFollowingManagerInterface
+class IPathFollowingManagerInterface
 {
 protected:
-	static FNavigationSystem::FControllerBasedSignature& StopMovementDelegate();
-	static FNavigationSystem::FBoolControllerBasedSignature& IsFollowingAPathDelegate();
+	static ENGINE_API FNavigationSystem::FControllerBasedSignature& StopMovementDelegate();
+	static ENGINE_API FNavigationSystem::FBoolControllerBasedSignature& IsFollowingAPathDelegate();
 };

@@ -6,6 +6,16 @@ BurleyNormalizedSSS.cpp: Compute the transmition profile for Burley normalized S
 
 
 #include "Rendering/BurleyNormalizedSSS.h"
+#include "Math/Vector.h"
+#include "HAL/IConsoleManager.h"
+
+static TAutoConsoleVariable<int32> CVarSSProfilesTransmissionUseLegacy(
+	TEXT("r.SSProfiles.Transmission.UseLegacy"),
+	1,
+	TEXT("0. Use more physically correct transmission profile.\n")
+	TEXT("1. Use legacy transmission profile (default)."),
+	ECVF_RenderThreadSafe
+);
 
 // estimated from the sampling interval, 1/TargetBufferSize(1/32) and MaxTransmissionProfileDistance. If any is changed, this parameter should be re-estimated.
 const float ProfileRadiusOffset = 0.06;
@@ -14,7 +24,7 @@ inline float Burley_ScatteringProfile(float r, float A,float S, float L)
 {   //2PIR(r)r
 	float D = 1 / S;
 	float R = r / L;
-	const float Inv8Pi = 1.0 / (8 * PI);
+	const float Inv8Pi = 1.0 / (8 * UE_PI);
 	float NegRbyD = -R / D;
 	float RrDotR = A*FMath::Max((exp(NegRbyD) + exp(NegRbyD / 3.0)) / (D*L)*Inv8Pi, 0.0);
 	return RrDotR;
@@ -27,18 +37,18 @@ inline float Burley_TransmissionProfile(float r, float A, float S, float L)
 }
 
 
-inline FVector Burley_ScatteringProfile(float r, FLinearColor SurfaceAlbedo, FVector ScalingFactor, FLinearColor DiffuseMeanFreePath)
+inline FVector Burley_ScatteringProfile(float RadiusInMm, FLinearColor SurfaceAlbedo, FVector ScalingFactor, FLinearColor DiffuseMeanFreePathInMm)
 {  
-	return FVector(Burley_ScatteringProfile(r, SurfaceAlbedo.R, ScalingFactor.X, DiffuseMeanFreePath.R) ,
-						Burley_ScatteringProfile(r, SurfaceAlbedo.G, ScalingFactor.Y, DiffuseMeanFreePath.G) ,
-						Burley_ScatteringProfile(r, SurfaceAlbedo.B, ScalingFactor.Z, DiffuseMeanFreePath.B));
+	return FVector(	Burley_ScatteringProfile(RadiusInMm, SurfaceAlbedo.R, ScalingFactor.X, DiffuseMeanFreePathInMm.R) ,
+					Burley_ScatteringProfile(RadiusInMm, SurfaceAlbedo.G, ScalingFactor.Y, DiffuseMeanFreePathInMm.G) ,
+					Burley_ScatteringProfile(RadiusInMm, SurfaceAlbedo.B, ScalingFactor.Z, DiffuseMeanFreePathInMm.B));
 }
 
-inline FLinearColor Burley_TransmissionProfile(float r, FLinearColor SurfaceAlbedo, FVector ScalingFactor, FLinearColor DiffuseMeanFreePath)
+inline FLinearColor Burley_TransmissionProfile(float RadiusInMm, FLinearColor SurfaceAlbedo, FVector ScalingFactor, FLinearColor DiffuseMeanFreePathInMm)
 {
-	return FLinearColor(Burley_TransmissionProfile(r, SurfaceAlbedo.R, ScalingFactor.X, DiffuseMeanFreePath.R),
-						Burley_TransmissionProfile(r, SurfaceAlbedo.G, ScalingFactor.Y, DiffuseMeanFreePath.G),
-						Burley_TransmissionProfile(r, SurfaceAlbedo.B, ScalingFactor.Z, DiffuseMeanFreePath.B));
+	return FLinearColor(Burley_TransmissionProfile(RadiusInMm, SurfaceAlbedo.R, ScalingFactor.X, DiffuseMeanFreePathInMm.R),
+						Burley_TransmissionProfile(RadiusInMm, SurfaceAlbedo.G, ScalingFactor.Y, DiffuseMeanFreePathInMm.G),
+						Burley_TransmissionProfile(RadiusInMm, SurfaceAlbedo.B, ScalingFactor.Z, DiffuseMeanFreePathInMm.B));
 }
 
 //--------------------------------------------------------------------------
@@ -69,7 +79,8 @@ void MapFallOffColor2SurfaceAlbedoAndDiffuseMeanFreePath(float FalloffColor, flo
 // Average relative error: 5.5% (reference to MC)
 float GetPerpendicularScalingFactor(float SurfaceAlbedo)
 {
-	return 1.85 - SurfaceAlbedo + 7 * FMath::Pow(SurfaceAlbedo - 0.8, 3);
+	// add abs() to match the formula in the original paper. 
+	return 1.85 - SurfaceAlbedo + 7 * FMath::Pow(FMath::Abs(SurfaceAlbedo - 0.8), 3);
 }
 
 FVector GetPerpendicularScalingFactor(FLinearColor SurfaceAlbedo)
@@ -110,6 +121,16 @@ FVector GetSearchLightDiffuseScalingFactor(FLinearColor SurfaceAlbedo)
 	);
 }
 
+FLinearColor GetMeanFreePathFromDiffuseMeanFreePath(FLinearColor SurfaceAlbedo, FLinearColor DiffuseMeanFreePath)
+{
+	return DiffuseMeanFreePath * FLinearColor(GetPerpendicularScalingFactor(SurfaceAlbedo) / GetSearchLightDiffuseScalingFactor(SurfaceAlbedo));
+}
+
+FLinearColor GetDiffuseMeanFreePathFromMeanFreePath(FLinearColor SurfaceAlbedo, FLinearColor MeanFreePath)
+{
+	return MeanFreePath * FLinearColor(GetSearchLightDiffuseScalingFactor(SurfaceAlbedo) / GetPerpendicularScalingFactor(SurfaceAlbedo));
+}
+
 void ComputeMirroredBSSSKernel(FLinearColor* TargetBuffer, uint32 TargetBufferSize,
 	FLinearColor SurfaceAlbedo, FLinearColor DiffuseMeanFreePath, float ScatterRadius)
 {
@@ -138,6 +159,8 @@ void ComputeMirroredBSSSKernel(FLinearColor* TargetBuffer, uint32 TargetBufferSi
 			float sign = o < 0.0f ? -1.0f : 1.0f;
 			kernel[i].A = Range * sign * FMath::Abs(FMath::Pow(o, Exponent)) / FMath::Pow(Range, Exponent);
 		}
+		// Center sample should always be zero, but might not be due to potential roundoff error.
+		kernel[nTotalSamples / 2].A = 0.0f;
 
 		//Scale the profile sampling radius. This scale enables the sampling between [-3*SpaceScale,+3*SpaceScale] instead of 
 		//the default [-3,3] range when fetching kernel parameters.
@@ -155,8 +178,9 @@ void ComputeMirroredBSSSKernel(FLinearColor* TargetBuffer, uint32 TargetBufferSi
 			kernel[i].B = t.Z;
 		}
 
-		// We still need to do a small tweak to get the radius to visually match. Multiplying by 4.0 seems to fix it.
-		const float StepScale = 4.0f;
+		// We still need to do a small tweak to get the radius to visually match. Multiplying by 2.0 seems to fix it.
+		// Match that in GetSubsurfaceProfileKernel in PostProcessSubsurface.usf
+		const float StepScale = 2.0f;
 		for (int32 i = 0; i < nTotalSamples; i++)
 		{
 			kernel[i].A *= StepScale;
@@ -208,8 +232,6 @@ void ComputeMirroredBSSSKernel(FLinearColor* TargetBuffer, uint32 TargetBufferSi
 
 	// generate output (remove negative samples)
 	{
-		//check(kernel[0].A == 0.0f);
-
 		// center sample
 		TargetBuffer[0] = kernel[0];
 
@@ -223,16 +245,34 @@ void ComputeMirroredBSSSKernel(FLinearColor* TargetBuffer, uint32 TargetBufferSi
 
 
 
-void ComputeTransmissionProfileBurley(FLinearColor* TargetBuffer, uint32 TargetBufferSize, FLinearColor SubsurfaceColor, 
-																		FLinearColor FalloffColor, float ExtinctionScale, 
-																		FLinearColor SurfaceAlbedo, FLinearColor DiffuseMeanFreePath,
-																		float WorldUnitScale, FLinearColor TransmissionTintColor)
+void ComputeTransmissionProfileBurley(FLinearColor* TargetBuffer, uint32 TargetBufferSize, 
+									FLinearColor FalloffColor, float ExtinctionScale,
+									FLinearColor SurfaceAlbedo, FLinearColor DiffuseMeanFreePathInMm,
+									float WorldUnitScale, FLinearColor TransmissionTintColor)
 {
 	check(TargetBuffer);
 	check(TargetBufferSize > 0);
 
-	static float MaxTransmissionProfileDistance = 5.0f; // See MAX_TRANSMISSION_PROFILE_DISTANCE in TransmissionCommon.ush
+	// Unit scale should be independent to the base unit.
+	// Example of scaling
+	// ----------------------------------------
+	// DistanceCm * UnitScale * CmToMm = Value (mm)
+	// ----------------------------------------
+	//   1          0.1         10     =   1mm
+	//   1          1.0         10     =  10mm
+	//   1         10.0         10     = 100mm
 
+	const float SubsurfaceScatteringUnitInCm = 0.1f;
+	const float UnitScale = WorldUnitScale / SubsurfaceScatteringUnitInCm;
+	float InvUnitScale = 1.0 / UnitScale; // Scaling the unit is equivalent to inverse scaling of the profile.
+
+	if (CVarSSProfilesTransmissionUseLegacy.GetValueOnAnyThread() == 1)
+	{
+		InvUnitScale *= 0.1f; // Backward compatibility
+	}
+
+	static float MaxTransmissionProfileDistance = 5.0f; // See SSSS_MAX_TRANSMISSION_PROFILE_DISTANCE in TransmissionCommon.ush
+	static float CmToMm = 10.0f;
 	//assuming that the volume albedo is the same to the surface albedo for transmission.
 	FVector ScalingFactor = GetSearchLightDiffuseScalingFactor(SurfaceAlbedo);
 
@@ -240,13 +280,14 @@ void ComputeTransmissionProfileBurley(FLinearColor* TargetBuffer, uint32 TargetB
 
 	for (uint32 i = 0; i < TargetBufferSize; ++i)
 	{
+		const float DistanceInMm = i * InvSize * (MaxTransmissionProfileDistance * CmToMm) * InvUnitScale;
+		const float OffsetInMm = (ProfileRadiusOffset * CmToMm) * InvUnitScale;
 
-		float Distance = i * InvSize * MaxTransmissionProfileDistance/WorldUnitScale;
 
-		FLinearColor TransmissionProfile = Burley_TransmissionProfile(Distance + ProfileRadiusOffset / WorldUnitScale, SurfaceAlbedo,ScalingFactor, DiffuseMeanFreePath);
+		FLinearColor TransmissionProfile = Burley_TransmissionProfile(DistanceInMm + OffsetInMm, SurfaceAlbedo, ScalingFactor, DiffuseMeanFreePathInMm);
 		TargetBuffer[i] = TransmissionProfile * TransmissionTintColor; // Apply tint to the profile
 		//Use Luminance of scattering as SSSS shadow.
-		TargetBuffer[i].A = exp(-Distance * ExtinctionScale);
+		TargetBuffer[i].A = exp(-DistanceInMm * ExtinctionScale);
 	}
 
 	// Do this is because 5mm is not enough cool down the scattering to zero, although which is small number but after tone mapping still noticeable

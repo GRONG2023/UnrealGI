@@ -2,9 +2,10 @@
 
 #include "Tracks/MovieSceneSlomoTrack.h"
 #include "Sections/MovieSceneSlomoSection.h"
-#include "Evaluation/MovieSceneSlomoTemplate.h"
 #include "Evaluation/MovieSceneEvaluationTrack.h"
 #include "Templates/Casts.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneSlomoTrack)
 
 #define LOCTEXT_NAMESPACE "MovieSceneSlomoTrack"
 
@@ -27,12 +28,6 @@ UMovieSceneSection* UMovieSceneSlomoTrack::CreateNewSection()
 	return NewObject<UMovieSceneSlomoSection>(this, NAME_None, RF_Transactional);
 }
 
-FMovieSceneEvalTemplatePtr UMovieSceneSlomoTrack::CreateTemplateForSection(const UMovieSceneSection& InSection) const
-{
-	return FMovieSceneSlomoSectionTemplate(*CastChecked<UMovieSceneSlomoSection>(&InSection));
-}
-
-
 #if WITH_EDITORONLY_DATA
 
 FText UMovieSceneSlomoTrack::GetDefaultDisplayName() const
@@ -42,5 +37,5 @@ FText UMovieSceneSlomoTrack::GetDefaultDisplayName() const
 
 #endif
 
-
 #undef LOCTEXT_NAMESPACE
+

@@ -2,8 +2,11 @@
 
 #include "AnimNodes/AnimNode_ApplyAdditive.h"
 #include "AnimationRuntime.h"
+#include "Animation/AnimStats.h"
 #include "Animation/AnimInstanceProxy.h"
 #include "Animation/AnimTrace.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNode_ApplyAdditive)
 
 /////////////////////////////////////////////////////
 // FAnimNode_ApplyAdditive
@@ -67,6 +70,8 @@ void FAnimNode_ApplyAdditive::Update_AnyThread(const FAnimationUpdateContext& Co
 void FAnimNode_ApplyAdditive::Evaluate_AnyThread(FPoseContext& Output)
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_ANIMNODE(Evaluate_AnyThread)
+	ANIM_MT_SCOPE_CYCLE_COUNTER_VERBOSE(ApplyAdditive, !IsInGameThread());
+
 	//@TODO: Could evaluate Base into Output and save a copy
 	if (FAnimWeight::IsRelevant(ActualAlpha))
 	{
@@ -108,3 +113,4 @@ void FAnimNode_ApplyAdditive::GatherDebugData(FNodeDebugData& DebugData)
 	Base.GatherDebugData(DebugData.BranchFlow(1.f));
 	Additive.GatherDebugData(DebugData.BranchFlow(ActualAlpha));
 }
+

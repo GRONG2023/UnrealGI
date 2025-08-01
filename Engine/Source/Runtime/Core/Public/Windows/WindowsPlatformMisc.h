@@ -10,11 +10,26 @@
 
 class GenericApplication;
 struct FGuid;
-struct FVector2D;
 class IPlatformChunkInstall;
 
+#if PLATFORM_CPU_X86_FAMILY
+namespace ECPUFeatureBits_X86
+{
+	constexpr uint32 SSE2 = 1U << 2;
+	constexpr uint32 SSSE3 = 1U << 3;
+	constexpr uint32 SSE42 = 1U << 4;
+	constexpr uint32 AVX = 1U << 5;
+	constexpr uint32 BMI1 = 1U << 6; // Bit Manipulation Instructions - 1
+	constexpr uint32 BMI2 = 1U << 7; // Bit Manipulation Instructions - 2
+	constexpr uint32 AVX2 = 1U << 8;
+	constexpr uint32 F16C = 1U << 9; // Float16 conversion instructions
+	constexpr uint32 AVX512 = 1U << 10; // Skylake feature set : AVXF512{ F,VL,BW,DQ}.
+	constexpr uint32 AVX512_NOCAVEATS = 1U << 11; // Set when we have AVX512 without caveats like throttling.
+}
+#endif
+
 /** Helper struct used to get the string version of the Windows version. */
-struct CORE_API FWindowsOSVersionHelper
+struct FWindowsOSVersionHelper
 {
 	enum ErrorCodes
 	{
@@ -25,76 +40,144 @@ struct CORE_API FWindowsOSVersionHelper
 		ERROR_GETWINDOWSGT62VERSIONS_FAILED = 8,
 	};
 
-	static int32 GetOSVersions( FString& OutOSVersion, FString& OutOSSubVersion );
+	static CORE_API int32 GetOSVersions( FString& OutOSVersion, FString& OutOSSubVersion );
 };
 
+/**
+  * Determines the concurrency model to be set for a thread.
+  * 
+  * @see FWindowsPlatformMisc::CoInitialize
+  */
+enum class ECOMModel : uint8
+{
+	Singlethreaded = 0,		///< Single-Threaded Apartment (STA)
+	Multithreaded,			///< Multi-Threaded Apartment (MTA)
+};
+
+/**
+ * Type of storage device
+ */
+enum class EStorageDeviceType : uint8
+{
+	/** Drive type cannot be determined */
+	Unknown = 0,
+	/** Drive is a hard disk, may or may not have a cache. */
+	HDD = 1,
+	/** Drive is a Solid State disk, typically with faster IO and constant latency. */
+	SSD = 2,
+	/** Drive is an NVMe . */
+	NVMe = 3,
+	/** Drive is a hybrid SSD/HDD */
+	Hybrid = 4,
+
+	Other = 0xff
+};
+
+CORE_API const TCHAR* LexToString(EStorageDeviceType StorageType);
+
+/**
+ * Storage drive information
+ */
+struct FPlatformDriveStats
+{
+	/** Drive name, usually C or D */
+	TCHAR DriveName;
+	/** Total number of used bytes on the drive, determined during PlatformInit. This information can be refreshed using FWindowsPlatformMisc::UpdateDriveFreeSpace(); */
+	uint64 UsedBytes;
+	/** Total number of free bytes on the drive, determined during PlatformInit. This information can be refreshed using FWindowsPlatformMisc::UpdateDriveFreeSpace(); */
+	uint64 FreeBytes;
+	/** Type of underlying hardware. */
+	EStorageDeviceType DriveType;
+};
 
 /**
 * Windows implementation of the misc OS functions
 **/
-struct CORE_API FWindowsPlatformMisc
+struct FWindowsPlatformMisc
 	: public FGenericPlatformMisc
 {
-	static void PlatformPreInit();
-	static void PlatformInit();
-	static void SetGracefulTerminationHandler();
-	static int32 GetMaxPathLength();
+	static CORE_API void PlatformPreInit();
+	static CORE_API void PlatformInit();
+	static CORE_API void PlatformTearDown();
+	static CORE_API void SetGracefulTerminationHandler();
+	static CORE_API void CallGracefulTerminationHandler();
+	static CORE_API ECrashHandlingType GetCrashHandlingType();
+	static CORE_API ECrashHandlingType SetCrashHandlingType(ECrashHandlingType);
+	static CORE_API int32 GetMaxPathLength();
 
 	UE_DEPRECATED(4.21, "void FPlatformMisc::GetEnvironmentVariable(Name, Result, Length) is deprecated. Use FString FPlatformMisc::GetEnvironmentVariable(Name) instead.")
-	static void GetEnvironmentVariable(const TCHAR* VariableName, TCHAR* Result, int32 ResultLength);
+	static CORE_API void GetEnvironmentVariable(const TCHAR* VariableName, TCHAR* Result, int32 ResultLength);
 
-	static FString GetEnvironmentVariable(const TCHAR* VariableName);
-	static void SetEnvironmentVar(const TCHAR* VariableName, const TCHAR* Value);
+	static CORE_API FString GetEnvironmentVariable(const TCHAR* VariableName);
+	static CORE_API void SetEnvironmentVar(const TCHAR* VariableName, const TCHAR* Value);
 
-	static TArray<uint8> GetMacAddress();
-	static void SubmitErrorReport( const TCHAR* InErrorHist, EErrorReportMode::Type InMode );
+	static CORE_API TArray<uint8> GetMacAddress();
+	static CORE_API void SubmitErrorReport( const TCHAR* InErrorHist, EErrorReportMode::Type InMode );
 
 #if !UE_BUILD_SHIPPING
-	static bool IsDebuggerPresent();
+	static CORE_API bool IsDebuggerPresent();
+	static CORE_API EProcessDiagnosticFlags GetProcessDiagnostics();
 #endif
 
 #if STATS || ENABLE_STATNAMEDEVENTS
-	static void BeginNamedEventFrame();
-	static void BeginNamedEvent(const struct FColor& Color, const TCHAR* Text);
-	static void BeginNamedEvent(const struct FColor& Color, const ANSICHAR* Text);
-	static void EndNamedEvent();
-	static void CustomNamedStat(const TCHAR* Text, float Value, const TCHAR* Graph, const TCHAR* Unit);
-	static void CustomNamedStat(const ANSICHAR* Text, float Value, const ANSICHAR* Graph, const ANSICHAR* Unit);
+	static CORE_API void BeginNamedEventFrame();
+	static CORE_API void BeginNamedEvent(const struct FColor& Color, const TCHAR* Text);
+	static CORE_API void BeginNamedEvent(const struct FColor& Color, const ANSICHAR* Text);
+	static CORE_API void EndNamedEvent();
+	static CORE_API void CustomNamedStat(const TCHAR* Text, float Value, const TCHAR* Graph, const TCHAR* Unit);
+	static CORE_API void CustomNamedStat(const ANSICHAR* Text, float Value, const ANSICHAR* Graph, const ANSICHAR* Unit);
 #endif
 
-	FORCEINLINE static void MemoryBarrier() { _mm_sfence(); }
+	FORCEINLINE static void MemoryBarrier() 
+	{
+#if PLATFORM_CPU_X86_FAMILY
+		_mm_sfence();
+#elif PLATFORM_CPU_ARM_FAMILY
+		__dmb(_ARM64_BARRIER_SY);
+#endif
+	}
 
-	static bool IsRemoteSession();
+	static CORE_API bool IsRemoteSession();
 
-	static void SetUTF8Output();
-	static void LocalPrint(const TCHAR *Message);
-	static void RequestExitWithStatus(bool Force, uint8 ReturnCode);
-	static void RequestExit(bool Force);
-	static const TCHAR* GetSystemErrorMessage(TCHAR* OutBuffer, int32 BufferCount, int32 Error);
-	static void CreateGuid(struct FGuid& Result);
-	static EAppReturnType::Type MessageBoxExt( EAppMsgType::Type MsgType, const TCHAR* Text, const TCHAR* Caption );
-	static bool CommandLineCommands();
-	static bool Is64bitOperatingSystem();
-	static bool IsValidAbsolutePathFormat(const FString& Path);
-	static int32 NumberOfCores();
-	static int32 NumberOfCoresIncludingHyperthreads();
-	static int32 NumberOfWorkerThreadsToSpawn();
+	static CORE_API void SetUTF8Output();
+	static CORE_API void LocalPrint(const TCHAR *Message);
 
-	static const TCHAR* GetPlatformFeaturesModuleName();
+	static bool IsLocalPrintThreadSafe()
+	{ 
+		//returning true when the debugger is attached is to allow
+		//printing of log lines immediately to the output window.
+		//return false in not attached because OutputDebuString is slow.
+		return IsDebuggerPresent();
+	}
+	
+	static CORE_API void RequestExitWithStatus(bool Force, uint8 ReturnCode, const TCHAR* CallSite = nullptr);
+	static CORE_API void RequestExit(bool Force, const TCHAR* CallSite = nullptr);
+	static CORE_API const TCHAR* GetSystemErrorMessage(TCHAR* OutBuffer, int32 BufferCount, int32 Error);
+	static CORE_API void CreateGuid(struct FGuid& Result);
+	static CORE_API EAppReturnType::Type MessageBoxExt( EAppMsgType::Type MsgType, const TCHAR* Text, const TCHAR* Caption );
+	static CORE_API bool CommandLineCommands();
+	static CORE_API bool Is64bitOperatingSystem();
+	static CORE_API bool IsValidAbsolutePathFormat(const FString& Path);
+	static CORE_API int32 NumberOfCores();
+	static CORE_API const FProcessorGroupDesc& GetProcessorGroupDesc();
+	static CORE_API int32 NumberOfCoresIncludingHyperthreads();
+	static CORE_API int32 NumberOfWorkerThreadsToSpawn();
 
-	static FString GetDefaultLanguage();
-	static FString GetDefaultLocale();
+	static CORE_API const TCHAR* GetPlatformFeaturesModuleName();
 
-	static uint32 GetLastError();
-	static void SetLastError(uint32 ErrorCode);
-	static void RaiseException( uint32 ExceptionCode );
-	static bool SetStoredValue(const FString& InStoreId, const FString& InSectionName, const FString& InKeyName, const FString& InValue);
-	static bool GetStoredValue(const FString& InStoreId, const FString& InSectionName, const FString& InKeyName, FString& OutValue);
-	static bool DeleteStoredValue(const FString& InStoreId, const FString& InSectionName, const FString& InKeyName);
-	static bool DeleteStoredSection(const FString& InStoreId, const FString& InSectionName);
+	static CORE_API FString GetDefaultLanguage();
+	static CORE_API FString GetDefaultLocale();
 
-	static bool CoInitialize();
-	static void CoUninitialize();
+	static CORE_API uint32 GetLastError();
+	static CORE_API void SetLastError(uint32 ErrorCode);
+	static CORE_API void RaiseException( uint32 ExceptionCode );
+	static CORE_API bool SetStoredValue(const FString& InStoreId, const FString& InSectionName, const FString& InKeyName, const FString& InValue);
+	static CORE_API bool GetStoredValue(const FString& InStoreId, const FString& InSectionName, const FString& InKeyName, FString& OutValue);
+	static CORE_API bool DeleteStoredValue(const FString& InStoreId, const FString& InSectionName, const FString& InKeyName);
+	static CORE_API bool DeleteStoredSection(const FString& InStoreId, const FString& InSectionName);
+
+	static CORE_API bool CoInitialize(ECOMModel Model = ECOMModel::Singlethreaded);
+	static CORE_API void CoUninitialize();
 
 	/**
 	 * Has the OS execute a command and path pair (such as launch a browser)
@@ -105,7 +188,7 @@ struct CORE_API FWindowsPlatformMisc
 	 *
 	 * @return whether the command was successful or not
 	 */
-	static bool OsExecute(const TCHAR* CommandType, const TCHAR* Command, const TCHAR* CommandLine = NULL);
+	static CORE_API bool OsExecute(const TCHAR* CommandType, const TCHAR* Command, const TCHAR* CommandLine = NULL);
 
 	/**
 	 * Attempts to get the handle to a top-level window of the specified process.
@@ -116,7 +199,7 @@ struct CORE_API FWindowsPlatformMisc
 	 * @param ProcessId The identifier of the process to get the window for.
 	 * @return Window handle, or 0 if not found.
 	 */
-	static Windows::HWND GetTopLevelWindowHandle(uint32 ProcessId);
+	static CORE_API Windows::HWND GetTopLevelWindowHandle(uint32 ProcessId);
 
 	/** 
 	 * Determines if we are running on the Windows version or newer
@@ -126,42 +209,51 @@ struct CORE_API FWindowsPlatformMisc
 	 *
 	 * @return	Returns true if the current Windows version if equal or newer than MajorVersion
 	 */
-	static bool VerifyWindowsVersion(uint32 MajorVersion, uint32 MinorVersion, uint32 BuildNumber = 0);
+	static CORE_API bool VerifyWindowsVersion(uint32 MajorVersion, uint32 MinorVersion, uint32 BuildNumber = 0);
+
+	/** 
+	 * Determines if we are running under Wine rather than a real version of Windows
+	 *
+	 * @return	Returns true if the current runtime environment is Wine
+	 */
+	static bool IsWine();
 
 #if !UE_BUILD_SHIPPING
-	static void PromptForRemoteDebugging(bool bIsEnsure);
+	static CORE_API void PromptForRemoteDebugging(bool bIsEnsure);
 #endif	//#if !UE_BUILD_SHIPPING
 
-	FORCEINLINE static void PrefetchBlock(const void* InPtr, int32 NumBytes = 1)
-	{
-		const char* Ptr           = (const char*)InPtr;
-		const int32 CacheLineSize = GetCacheLineSize();
-		for (int32 LinesToPrefetch = (NumBytes + CacheLineSize - 1) / CacheLineSize; LinesToPrefetch; --LinesToPrefetch)
-		{
-			_mm_prefetch( Ptr, _MM_HINT_T0 );
-			Ptr += CacheLineSize;
-		}
-	}
-
-	FORCEINLINE static void Prefetch(void const* x, int32 offset = 0)
-	{
-		 _mm_prefetch( (char const*)(x) + offset, _MM_HINT_T0 );
-	}
 
 	/** 
 	 * Determines if the cpuid instruction is supported on this processor
 	 *
 	 * @return	Returns true if cpuid is supported
 	 */
-	static bool HasCPUIDInstruction();
+	static CORE_API bool HasCPUIDInstruction();
 
-	static FString GetCPUVendor();
-	static FString GetCPUBrand();
-	static FString GetPrimaryGPUBrand();
-	static struct FGPUDriverInfo GetGPUDriverInfo(const FString& DeviceDescription);
-	static void GetOSVersions( FString& out_OSVersionLabel, FString& out_OSSubVersionLabel );
-	static FString GetOSVersion();
-	static bool GetDiskTotalAndFreeSpace( const FString& InPath, uint64& TotalNumberOfBytes, uint64& NumberOfFreeBytes );
+#if PLATFORM_CPU_X86_FAMILY
+	// Query the CPUID and parse out various feature bits. This is safe to call multiple times and caches the result internally for rapid access.
+	// Bits are all from the ECPUFeatureBits_X86 namespace.
+	static CORE_API uint32 GetFeatureBits_X86();
+	static CORE_API bool CheckFeatureBit_X86(uint32 FeatureBit_X86) { return (GetFeatureBits_X86() & FeatureBit_X86) != 0; }
+	static CORE_API bool CheckAllFeatureBits_X86(uint32 FeatureBits_X86) { return (GetFeatureBits_X86() & FeatureBits_X86) == FeatureBits_X86; }
+#endif
+
+	/**
+	 * Determines if AVX2 instruction set is supported on this platform
+	 *
+	 * @return	Returns true if instruction-set is supported
+	 */
+	static CORE_API bool HasAVX2InstructionSupport();
+
+	static CORE_API FString GetCPUVendor();
+	static CORE_API FString GetCPUBrand();
+	static CORE_API FString GetPrimaryGPUBrand();
+	static CORE_API struct FGPUDriverInfo GetGPUDriverInfo(const FString& DeviceDescription, bool bVerbose = true);
+	static CORE_API void GetOSVersions( FString& out_OSVersionLabel, FString& out_OSSubVersionLabel );
+	static CORE_API FString GetOSVersion();
+	static CORE_API bool GetDiskTotalAndFreeSpace( const FString& InPath, uint64& TotalNumberOfBytes, uint64& NumberOfFreeBytes );
+	static CORE_API bool GetPageFaultStats(FPageFaultStats& OutStats, EPageFaultFlags Flags=EPageFaultFlags::All);
+	static CORE_API bool GetBlockingIOStats(FProcessIOStats& OutStats, EInputOutputFlags Flags=EInputOutputFlags::All);
 
 	/**
 	 * Uses cpuid instruction to get the vendor string
@@ -177,12 +269,14 @@ struct CORE_API FWindowsPlatformMisc
 	 *			Bits 20-27	Extended family
 	 *			Bits 28-31	Reserved
 	 */
-	static uint32 GetCPUInfo();
+	static CORE_API uint32 GetCPUInfo();
 
 	/** @return whether this cpu supports certain required instructions or not */
-	static bool HasNonoptionalCPUFeatures();
+	static CORE_API bool HasNonoptionalCPUFeatures();
 	/** @return whether to check for specific CPU compatibility or not */
-	static bool NeedsNonoptionalCPUFeaturesCheck();
+	static CORE_API bool NeedsNonoptionalCPUFeaturesCheck();
+	/** @return whether this cpu has timed pause instruction support or not */
+	static CORE_API bool HasTimedPauseCPUFeature();
 
 	/** 
 	 * Provides a simpler interface for fetching and cleanup of registry value queries
@@ -194,7 +288,7 @@ struct CORE_API FWindowsPlatformMisc
 	 *
 	 * @return	true, if it successfully found the Value
 	 */
-	static bool QueryRegKey( const Windows::HKEY InKey, const TCHAR* InSubKey, const TCHAR* InValueName, FString& OutData );
+	static CORE_API bool QueryRegKey( const Windows::HKEY InKey, const TCHAR* InSubKey, const TCHAR* InValueName, FString& OutData );
 
 	/**
 	 * Gets Visual Studio common tools path.
@@ -204,22 +298,17 @@ struct CORE_API FWindowsPlatformMisc
 	 *
 	 * @return Returns if succeeded.
 	 */
-	static bool GetVSComnTools(int32 Version, FString& OutData);
+	static CORE_API bool GetVSComnTools(int32 Version, FString& OutData);
 
-	/**
-	 * Returns the size of the cache line in bytes.
-	 *
-	 * @return The cache line size.
-	 */
-	static int32 GetCacheLineSize();
-
+	UE_DEPRECATED(5.2, "Please use PLATFORM_CACHE_LINE_SIZE instead, runtime query of cache line size not supported")
+	static CORE_API int32 GetCacheLineSize();
 	/**
 	* @return Windows path separator.
 	*/
-	static const TCHAR* GetDefaultPathSeparator();
+	static CORE_API const TCHAR* GetDefaultPathSeparator();
 
 	/** @return Get the name of the platform specific file manager (Explorer) */
-	static FText GetFileManagerName();
+	static CORE_API FText GetFileManagerName();
 
 	/**
 	* Returns whether WiFi connection is currently active
@@ -233,31 +322,44 @@ struct CORE_API FWindowsPlatformMisc
 	/**
 	 * Returns whether the platform is running on battery power or not.
 	 */
-	static bool IsRunningOnBattery();
+	static CORE_API bool IsRunningOnBattery();
 
-	FORCEINLINE static void ChooseHDRDeviceAndColorGamut(uint32 DeviceId, uint32 DisplayNitLevel, int32& OutputDevice, int32& ColorGamut)
+	FORCEINLINE static void ChooseHDRDeviceAndColorGamut(uint32 DeviceId, uint32 DisplayNitLevel, EDisplayOutputFormat& OutputDevice, EDisplayColorGamut& ColorGamut)
 	{
-		if (DeviceId == 0x1002 /*AMD*/ || DeviceId == 0x10DE /*NVIDIA*/)
-		{
-			// ScRGB, 1000 or 2000 nits, Rec2020
-			OutputDevice = (DisplayNitLevel == 1000) ? 5 : 6;
-			ColorGamut = 2;
-		}
+		// needs to match GRHIHDRDisplayOutputFormat chosen in FD3D12DynamicRHI::Init
+#if WITH_EDITOR
+		// ScRGB, 1000 or 2000 nits
+		OutputDevice = (DisplayNitLevel == 1000) ? EDisplayOutputFormat::HDR_ACES_1000nit_ScRGB : EDisplayOutputFormat::HDR_ACES_2000nit_ScRGB;
+		// Rec709
+		ColorGamut = EDisplayColorGamut::sRGB_D65;
+#else
+		// ST-2084, 1000 or 2000 nits
+		OutputDevice = (DisplayNitLevel == 1000) ? EDisplayOutputFormat::HDR_ACES_1000nit_ST2084 : EDisplayOutputFormat::HDR_ACES_2000nit_ST2084;
+		// Rec2020
+		ColorGamut = EDisplayColorGamut::Rec2020_D65;
+#endif
 	}
 
 	/**
 	 * Gets a globally unique ID the represents a particular operating system install.
 	 */
-	static FString GetOperatingSystemId();
+	static CORE_API FString GetOperatingSystemId();
 
-	static EConvertibleLaptopMode GetConvertibleLaptopMode();
+	static CORE_API EConvertibleLaptopMode GetConvertibleLaptopMode();
 
-	static IPlatformChunkInstall* GetPlatformChunkInstall();
+	static CORE_API IPlatformChunkInstall* GetPlatformChunkInstall();
 
-	static void PumpMessagesOutsideMainLoop();
+	static CORE_API void PumpMessagesOutsideMainLoop();
 
-	static uint64 GetFileVersion(const FString &FileName);
+	static CORE_API uint64 GetFileVersion(const FString &FileName);
 
+	static CORE_API int32 GetMaxRefreshRate();
+
+	/** Update statistics of free/used bytes on all drives. */
+	static CORE_API void UpdateDriveFreeSpace();
+
+	/** Retrieve information about a drive, or nullptr if no information is available. */
+	static CORE_API const FPlatformDriveStats* GetDriveStats(WIDECHAR DriveLetter);
 };
 
 

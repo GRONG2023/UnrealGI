@@ -2,29 +2,71 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Object.h"
-#include "UObject/Class.h"
-#include "UObject/WeakObjectPtr.h"
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "HAL/PlatformMath.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/NetworkGuid.h"
 #include "Serialization/BitReader.h"
 #include "Serialization/BitWriter.h"
-#include "Misc/NetworkGuid.h"
-#include "UObject/CoreNetTypes.h"
-#include "UObject/SoftObjectPath.h"
-#include "UObject/Field.h"
+#include "Templates/PimplPtr.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UnrealTypeTraits.h"
 #include "Trace/Config.h"
+#include "UObject/Class.h"
+#include "UObject/CoreNetTypes.h"
+#include "UObject/Field.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/SoftObjectPath.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
-class FOutBunch;
-class INetDeltaBaseState;
+class FArchive;
+class FName;
 class FNetTraceCollector;
+// Forward declarations
+class FOutBunch;
+class FOutputDevice;
+class FProperty;
+class INetDeltaBaseState;
+class UClass;
+class UField;
+class UFunction;
+class UPackageMap;
+class UStruct;
+struct FObjectPtr;
+struct FSoftObjectPath;
+struct FSoftObjectPtr;
+
+namespace UE::Net
+{
+	struct FNetResult;
+
+#if UE_WITH_IRIS
+	class FReplicationFragment;
+	struct FReplicationStateDescriptor;
+	typedef FReplicationFragment* (*CreateAndRegisterReplicationFragmentFunc)(UObject* Owner, const FReplicationStateDescriptor* Descriptor, FFragmentRegistrationContext& Context);
+#endif
+
+	namespace Private
+	{
+		class FNetPropertyConditionManager;
+	};
+}
+
 
 DECLARE_DELEGATE_RetVal_OneParam( bool, FNetObjectIsDynamic, const UObject*);
 
 //
 // Information about a field.
 //
-class COREUOBJECT_API FFieldNetCache
+class FFieldNetCache
 {
 public:
 	FFieldVariant			Field;
@@ -42,12 +84,12 @@ public:
 //
 // Information about a class, cached for network coordination.
 //
-class COREUOBJECT_API FClassNetCache
+class FClassNetCache
 {
 	friend class FClassNetCacheMgr;
 public:
-	FClassNetCache();
-	FClassNetCache( const UClass* Class );
+	COREUOBJECT_API FClassNetCache();
+	COREUOBJECT_API FClassNetCache( const UClass* Class );
 
 	int32 GetMaxIndex() const
 	{
@@ -99,7 +141,7 @@ public:
 	const FClassNetCache* GetSuper() const { return Super; }
 	const TArray< FFieldNetCache >& GetFields() const { return Fields; }
 
-	void CountBytes(FArchive& Ar) const;
+	COREUOBJECT_API void CountBytes(FArchive& Ar) const;
 
 private:
 	int32								FieldsBase;
@@ -112,26 +154,26 @@ private:
 };
 
 
-class COREUOBJECT_API FClassNetCacheMgr
+class FClassNetCacheMgr
 {
 public:
 	FClassNetCacheMgr() : bDebugChecksum( false ), DebugChecksumIndent( 0 ) { }
 	~FClassNetCacheMgr() { ClearClassNetCache(); }
 
 	/** get the cached field to index mappings for the given class */
-	const FClassNetCache*	GetClassNetCache( UClass* Class );
-	void					ClearClassNetCache();
+	COREUOBJECT_API const FClassNetCache*	GetClassNetCache( UClass* Class );
+	COREUOBJECT_API void					ClearClassNetCache();
 
-	void				SortProperties( TArray< FProperty* >& Properties ) const;
-	uint32				SortedStructFieldsChecksum( const UStruct* Struct, uint32 Checksum ) const;
-	uint32				GetPropertyChecksum( const FProperty* Property, uint32 Checksum, const bool bIncludeChildren ) const;
-	uint32				GetFunctionChecksum( const UFunction* Function, uint32 Checksum ) const;
-	uint32				GetFieldChecksum( const UField* Field, uint32 Checksum ) const;
+	COREUOBJECT_API void				SortProperties( TArray< FProperty* >& Properties ) const;
+	COREUOBJECT_API uint32				SortedStructFieldsChecksum( const UStruct* Struct, uint32 Checksum ) const;
+	COREUOBJECT_API uint32				GetPropertyChecksum( const FProperty* Property, uint32 Checksum, const bool bIncludeChildren ) const;
+	COREUOBJECT_API uint32				GetFunctionChecksum( const UFunction* Function, uint32 Checksum ) const;
+	COREUOBJECT_API uint32				GetFieldChecksum( const UField* Field, uint32 Checksum ) const;
 
 	bool				bDebugChecksum;
 	int					DebugChecksumIndent;
 
-	void CountBytes(FArchive& Ar) const;
+	COREUOBJECT_API void CountBytes(FArchive& Ar) const;
 
 private:
 	TMap< TWeakObjectPtr< const UClass >, FClassNetCache* > ClassFieldIndices;
@@ -141,9 +183,9 @@ private:
 //
 // Maps objects and names to and from indices for network communication.
 //
-class COREUOBJECT_API UPackageMap : public UObject
+class UPackageMap : public UObject
 {
-	DECLARE_CLASS_INTRINSIC(UPackageMap, UObject, CLASS_Transient | CLASS_Abstract | 0, TEXT("/Script/CoreUObject"));
+	DECLARE_CASTED_CLASS_INTRINSIC_WITH_API(UPackageMap, UObject, CLASS_Transient | CLASS_Abstract | 0, TEXT("/Script/CoreUObject"), CASTCLASS_None, COREUOBJECT_API);
 
 	virtual bool		WriteObject( FArchive & Ar, UObject* InOuter, FNetworkGUID NetGUID, FString ObjName ) { return false; }
 
@@ -151,9 +193,9 @@ class COREUOBJECT_API UPackageMap : public UObject
 	virtual bool		SerializeObject( FArchive& Ar, UClass* InClass, UObject*& Obj, FNetworkGUID *OutNetGUID = NULL ) { return false; }
 
 	// @todo document
-	virtual bool		SerializeName( FArchive& Ar, FName& InName );
+	COREUOBJECT_API virtual bool		SerializeName( FArchive& Ar, FName& InName );
 
-	static bool			StaticSerializeName( FArchive& Ar, FName& InName );
+	static COREUOBJECT_API bool			StaticSerializeName( FArchive& Ar, FName& InName );
 
 	virtual UObject*	ResolvePathAndAssignNetGUID( const FNetworkGUID& NetGUID, const FString& PathName ) { return NULL; }
 
@@ -176,6 +218,9 @@ class COREUOBJECT_API UPackageMap : public UObject
 	const TSet< FNetworkGUID > &	GetTrackedUnmappedGuids() const { return TrackedUnmappedNetGuids; }
 	const TSet< FNetworkGUID > &	GetTrackedDynamicMappedGuids() const { return TrackedMappedDynamicNetGuids; }
 
+	virtual void AddUnmappedNetGUIDReference(FNetworkGUID UnmappedGUID) {}
+	virtual void RemoveUnmappedNetGUIDReference(FNetworkGUID UnmappedGUID) {}
+
 	// For sync load debugging with LogNetSyncLoads
 	virtual void			ResetTrackedSyncLoadedGuids() {}
 	virtual void			ReportSyncLoadsForProperty(const FProperty* Property, const UObject* Object) {}
@@ -185,13 +230,9 @@ class COREUOBJECT_API UPackageMap : public UObject
 	virtual FNetworkGUID	GetNetGUIDFromObject( const UObject* InObject) const { return FNetworkGUID(); }
 	virtual bool			IsGUIDBroken( const FNetworkGUID& NetGUID, const bool bMustBeRegistered ) const { return false; }
 
-	virtual void Serialize(FArchive& Ar) override;
+	COREUOBJECT_API virtual void Serialize(FArchive& Ar) override;
 
 protected:
-
-	UE_DEPRECATED(4.25, "bSuppressLogs will be removed in a future release.")
-	bool					bSuppressLogs;
-
 	bool					bShouldTrackUnmappedGuids;
 	TSet< FNetworkGUID >	TrackedUnmappedNetGuids;
 	TSet< FNetworkGUID >	TrackedMappedDynamicNetGuids;
@@ -219,12 +260,6 @@ struct FPacketIdRange
 /** Information for tracking retirement and retransmission of a property. */
 struct FPropertyRetirement
 {
-#if !UE_BUILD_SHIPPING
-	static const uint32 ExpectedSanityTag = 0xDF41C9A3;
-
-	uint32 SanityTag;
-#endif
-
 	FPropertyRetirement* Next;
 
 	TSharedPtr<class INetDeltaBaseState> DynamicState;
@@ -233,9 +268,6 @@ struct FPropertyRetirement
 	uint32 FastArrayChangelistHistory;
 
 	FPropertyRetirement() :
-#if !UE_BUILD_SHIPPING
-		SanityTag( ExpectedSanityTag ),
-#endif
 		 Next(nullptr)
 		, DynamicState(nullptr)
 		, FastArrayChangelistHistory(0)
@@ -259,6 +291,9 @@ public:
 	ELifetimeCondition Condition;
 	ELifetimeRepNotifyCondition RepNotifyCondition;
 	bool bIsPushBased;
+#if UE_WITH_IRIS
+	UE::Net::CreateAndRegisterReplicationFragmentFunc CreateAndRegisterReplicationFragmentFunction = nullptr;
+#endif
 
 	FLifetimeProperty()
 		: RepIndex(0)
@@ -269,7 +304,7 @@ public:
 	}
 
 	FLifetimeProperty(int32 InRepIndex)
-		: RepIndex(InRepIndex)
+		: RepIndex((uint16)InRepIndex)
 		, Condition(COND_None)
 		, RepNotifyCondition(REPNOTIFY_OnChanged)
 		, bIsPushBased(false)
@@ -278,7 +313,7 @@ public:
 	}
 
 	FLifetimeProperty(int32 InRepIndex, ELifetimeCondition InCondition, ELifetimeRepNotifyCondition InRepNotifyCondition=REPNOTIFY_OnChanged, bool bInIsPushBased=false)
-		: RepIndex(InRepIndex)
+		: RepIndex((uint16)InRepIndex)
 		, Condition(InCondition)
 		, RepNotifyCondition(InRepNotifyCondition)
 		, bIsPushBased(bInIsPushBased)
@@ -294,6 +329,9 @@ public:
 			check(Condition == Other.Condition);
 			check(RepNotifyCondition == Other.RepNotifyCondition);
 			check(bIsPushBased == Other.bIsPushBased);
+#if UE_WITH_IRIS
+			check(CreateAndRegisterReplicationFragmentFunction == Other.CreateAndRegisterReplicationFragmentFunction);
+#endif
 			return true;
 		}
 
@@ -305,7 +343,6 @@ template <> struct TIsZeroConstructType<FLifetimeProperty> { enum { Value = true
 
 GENERATE_MEMBER_FUNCTION_CHECK(GetLifetimeReplicatedProps, void, const, TArray<FLifetimeProperty>&)
 
-// Consider adding UE_NET_TRACE_ENABLE to build config, for now we use the UE_TRACE_ENABLED as NetTrace is not support unless tracing is enabled
 #if UE_TRACE_ENABLED
 /**
  * We pass a NetTraceCollector along with the NetBitWriter in order avoid modifying all API`s where we want to be able to collect Network stats
@@ -333,12 +370,12 @@ private:
  *	A bit writer that serializes FNames and UObject* through
  *	a network packagemap.
  */
-class COREUOBJECT_API FNetBitWriter : public FBitWriter
+class FNetBitWriter : public FBitWriter
 {
 public:
-	FNetBitWriter( UPackageMap * InPackageMap, int64 InMaxBits );
-	FNetBitWriter( int64 InMaxBits );
-	FNetBitWriter();
+	COREUOBJECT_API FNetBitWriter( UPackageMap * InPackageMap, int64 InMaxBits );
+	COREUOBJECT_API FNetBitWriter( int64 InMaxBits );
+	COREUOBJECT_API FNetBitWriter();
 
 	class UPackageMap * PackageMap;
 
@@ -346,13 +383,14 @@ public:
 	FNetTraceCollectorDoNotCopyWrapper TraceCollector;
 #endif
 
-	virtual FArchive& operator<<(FName& Name) override;
-	virtual FArchive& operator<<(UObject*& Object) override;
-	virtual FArchive& operator<<(FSoftObjectPath& Value) override;
-	virtual FArchive& operator<<(FSoftObjectPtr& Value) override;
-	virtual FArchive& operator<<(struct FWeakObjectPtr& Value) override;
+	COREUOBJECT_API virtual FArchive& operator<<(FName& Name) override;
+	COREUOBJECT_API virtual FArchive& operator<<(UObject*& Object) override;
+	COREUOBJECT_API virtual FArchive& operator<<(FSoftObjectPath& Value) override;
+	COREUOBJECT_API virtual FArchive& operator<<(FSoftObjectPtr& Value) override;
+	COREUOBJECT_API virtual FArchive& operator<<(FObjectPtr& Value) override;
+	COREUOBJECT_API virtual FArchive& operator<<(struct FWeakObjectPtr& Value) override;
 
-	virtual void CountMemory(FArchive& Ar) const override;
+	COREUOBJECT_API virtual void CountMemory(FArchive& Ar) const override;
 };
 
 
@@ -361,20 +399,26 @@ public:
  *	A bit reader that serializes FNames and UObject* through
  *	a network packagemap.
  */
-class COREUOBJECT_API FNetBitReader : public FBitReader
+class FNetBitReader : public FBitReader
 {
 public:
-	FNetBitReader( UPackageMap* InPackageMap=NULL, uint8* Src=NULL, int64 CountBits=0 );
+	UPackageMap*													PackageMap		= nullptr;
 
-	class UPackageMap * PackageMap;
+	/** Stores additional error information. Avoid using to modify control flow, where bunches with errors may be copied/cached/queued. */
+	TPimplPtr<UE::Net::FNetResult, EPimplPtrMode::DeepCopy>	ExtendedError;
 
-	virtual FArchive& operator<<(FName& Name) override;
-	virtual FArchive& operator<<(UObject*& Object) override;
-	virtual FArchive& operator<<(FSoftObjectPath& Value) override;
-	virtual FArchive& operator<<(FSoftObjectPtr& Value) override;
-	virtual FArchive& operator<<(struct FWeakObjectPtr& Value) override;
 
-	virtual void CountMemory(FArchive& Ar) const override;
+public:
+	COREUOBJECT_API FNetBitReader(UPackageMap* InPackageMap=nullptr, const uint8* Src=nullptr, int64 CountBits=0);
+
+	COREUOBJECT_API virtual FArchive& operator<<(FName& Name) override;
+	COREUOBJECT_API virtual FArchive& operator<<(UObject*& Object) override;
+	COREUOBJECT_API virtual FArchive& operator<<(FSoftObjectPath& Value) override;
+	COREUOBJECT_API virtual FArchive& operator<<(FSoftObjectPtr& Value) override;
+	COREUOBJECT_API virtual FArchive& operator<<(FObjectPtr& Value) override;
+	COREUOBJECT_API virtual FArchive& operator<<(struct FWeakObjectPtr& Value) override;
+
+	COREUOBJECT_API virtual void CountMemory(FArchive& Ar) const override;
 };
 
 bool FORCEINLINE NetworkGuidSetsAreSame( const TSet< FNetworkGUID >& A, const TSet< FNetworkGUID >& B )
@@ -437,7 +481,7 @@ struct FNetDeltaSerializeInfo;
  *
  * See notes in NetSerialization.h
  */
-class COREUOBJECT_API INetSerializeCB
+class INetSerializeCB
 {
 protected:
 
@@ -464,14 +508,6 @@ public:
 	 *						Only used when reading.
 	 */
 	virtual void NetSerializeStruct(FNetDeltaSerializeInfo& Params) = 0;
-
-	UE_DEPRECATED(4.23, "Please use the version of NetSerializeStruct that accepts an FNetDeltaSerializeInfo reference")
-	virtual void NetSerializeStruct(
-		class UScriptStruct* Struct,
-		class FBitArchive& Ar,
-		class UPackageMap* Map,
-		void* Data,
-		bool& bHasUnmapped);
 
 	/**
 	 * Gathers any guid references for a FastArraySerializer.
@@ -507,23 +543,83 @@ public:
 	IRepChangedPropertyTracker() { }
 	virtual ~IRepChangedPropertyTracker() { }
 
-	virtual void SetCustomIsActiveOverride(
-		UObject* OwningObject,
-		const uint16 RepIndex,
-		const bool bIsActive) = 0;
-
-	virtual void SetExternalData(const uint8* Src, const int32 NumBits) = 0;
-
-	UE_DEPRECATED(4.26, "Will be removed in a future release.")
-	virtual bool IsReplay() const = 0;
+	UE_DEPRECATED(5.3, "Please use FPropertyConditions::SetActiveOverride instead.")
+	virtual void SetCustomIsActiveOverride(UObject* OwningObject, const uint16 RepIndex, const bool bIsActive) = 0;
 
 	/**
 	* Used when tracking memory to gather the total size of a given instance.
 	* This should include the dynamically allocated data, as well as the classes size.
 	*/
 	virtual void CountBytes(FArchive& Ar) const {};
+
+private:
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	void CallSetCustomIsActiveOverride(UObject* OwningObject, const uint16 RepIndex, const bool bIsActive) { SetCustomIsActiveOverride(OwningObject, RepIndex, bIsActive); }
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	
+	friend UE::Net::Private::FNetPropertyConditionManager;
 };
 
+class FCustomPropertyConditionState
+{
+public:
+	FCustomPropertyConditionState() = delete;
+	FCustomPropertyConditionState(int32 NumProperties)
+	: CurrentState(true /* initial value of all bits */, NumProperties)
+	, DynamicConditionChangeCounter(0)
+	{
+	}
+
+	void SetActiveState(const uint16 RepIndex, const bool bIsActive)
+	{
+		CurrentState[RepIndex] = bIsActive;
+	}
+
+	bool GetActiveState(const uint16 RepIndex) const
+	{
+		return CurrentState[RepIndex];
+	}
+
+	void SetDynamicCondition(const uint16 RepIndex, const ELifetimeCondition Condition)
+	{
+		static_assert(static_cast<__underlying_type(ELifetimeCondition)>(ELifetimeCondition::COND_Max - 1) <= int16(32767), "Unable to use int16 for ELifetimeCondition values");
+
+		++DynamicConditionChangeCounter;
+		DynamicConditions.Emplace(RepIndex, static_cast<int16>(Condition));
+	}
+
+	ELifetimeCondition GetDynamicCondition(const uint16 RepIndex) const
+	{
+		if (const int16* Condition = DynamicConditions.Find(RepIndex))
+		{
+			return static_cast<const ELifetimeCondition>(*Condition);
+		}
+
+		return COND_Dynamic;
+	}
+
+
+	int32 GetNumProperties() const
+	{
+		return CurrentState.Num();
+	}
+
+	uint32 GetDynamicConditionChangeCounter() const
+	{
+		return DynamicConditionChangeCounter;
+	}
+
+	void CountBytes(FArchive& Ar) const
+	{
+		CurrentState.CountBytes(Ar);
+	}
+
+private:
+	TBitArray<> CurrentState;
+	// Storing int16 instead of int-sized ELifetimeCondition to save some memory.
+	TMap<uint16, int16> DynamicConditions;
+	uint32 DynamicConditionChangeCounter;
+};
 
 /**
  * FNetDeltaSerializeInfo
@@ -579,6 +675,9 @@ struct FNetDeltaSerializeInfo
 	//~ TODO: This feels hacky, and a better alternative might be something like connection specific
 	//~ capabilities.
 
+	/** Whether we are currently initializing base from defaults in which case we should not modify the source **/
+	bool bIsInitializingBaseFromDefault = false;
+
 	/** Whether or not we support FFastArraySerializer::FastArrayDeltaSerialize_DeltaSerializeStructs */
 	bool bSupportsFastArrayDeltaStructSerialization = false;
 
@@ -588,8 +687,11 @@ struct FNetDeltaSerializeInfo
 	 */
 	bool bInternalAck = false;
 
-	/** The object that owns the struct we're serializing. */
+	/** The object that owns the struct we're serializing, may be an archetype. */
 	UObject* Object = nullptr;
+
+	/** Used by SendCustomDeltaProperty to distinguish between the source object (archetype) and the replicating object. */
+	UObject* CustomDeltaObject = nullptr;
 
 	/**
 	 * When non-null, this indicates that we're gathering Guid References.
@@ -679,3 +781,7 @@ enum { LAN_BEACON_MAX_PACKET_SIZE = 1024 }; // MTU for the connection
 COREUOBJECT_API void			RPC_ResetLastFailedReason();
 COREUOBJECT_API void			RPC_ValidateFailed( const TCHAR* Reason );
 COREUOBJECT_API const TCHAR *	RPC_GetLastFailedReason();
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
+#endif

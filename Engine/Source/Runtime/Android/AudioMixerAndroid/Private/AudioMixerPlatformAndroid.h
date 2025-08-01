@@ -20,7 +20,7 @@ namespace Audio
 		~FMixerPlatformAndroid();
 
 		//~ Begin IAudioMixerPlatformInterface
-		virtual EAudioMixerPlatformApi::Type GetPlatformApi() const override { return EAudioMixerPlatformApi::OpenSLES; }
+		virtual FString GetPlatformApi() const override { return TEXT("OpenSLES"); }
 		virtual bool InitializeHardware() override;
 		virtual bool TeardownHardware() override;
 		virtual bool IsInitialized() const override;
@@ -33,14 +33,10 @@ namespace Audio
 		virtual bool StopAudioStream() override;
 		virtual FAudioPlatformDeviceInfo GetPlatformDeviceInfo() const override;
 		virtual void SubmitBuffer(const uint8* Buffer) override;
-		virtual FName GetRuntimeFormat(USoundWave* InSoundWave) override;
-		virtual bool HasCompressedAudioInfoClass(USoundWave* InSoundWave) override;
-		virtual ICompressedAudioInfo* CreateCompressedAudioInfo(USoundWave* InSoundWave) override;
 		virtual FString GetDefaultDeviceName() override;
 		virtual FAudioPlatformSettings GetPlatformSettings() const override;
 		virtual void SuspendContext() override;
 		virtual void ResumeContext() override;
-		virtual bool SupportsRealtimeDecompression() const override;
 
 		//~ End IAudioMixerPlatformInterface
 		

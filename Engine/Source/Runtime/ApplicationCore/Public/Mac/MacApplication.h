@@ -119,10 +119,14 @@ struct FMacScreen
 	NSRect VisibleFrame;
 	NSRect FramePixels;
 	NSRect VisibleFramePixels;
+	NSEdgeInsets SafeAreaInsets;
 
-	FMacScreen(NSScreen* InScreen) : Screen([InScreen retain]), Frame(InScreen.frame), VisibleFrame(InScreen.visibleFrame), FramePixels(InScreen.frame), VisibleFramePixels(InScreen.visibleFrame) {}
+	FMacScreen(NSScreen* InScreen) : Screen([InScreen retain]), Frame(InScreen.frame), VisibleFrame(InScreen.visibleFrame),
+									 FramePixels(InScreen.frame), VisibleFramePixels(InScreen.visibleFrame),
+									 SafeAreaInsets(InScreen.safeAreaInsets) {}
 	~FMacScreen() { [Screen release]; }
 };
+typedef TSharedRef<FMacScreen, ESPMode::ThreadSafe> FMacScreenRef;
 
 /**
  * Mac-specific application implementation.
@@ -248,17 +252,15 @@ public:
 
 	static void UpdateScreensArray();
 
-	static const TArray<TSharedRef<FMacScreen>>& GetAllScreens() { return AllScreens; }
+	static FMacScreenRef FindScreenBySlatePosition(double X, double Y);
 
-	static TSharedRef<FMacScreen> FindScreenBySlatePosition(float X, float Y);
+	static FMacScreenRef FindScreenByCocoaPosition(double X, double Y);
 
-	static TSharedRef<FMacScreen> FindScreenByCocoaPosition(float X, float Y);
+	static FVector2D ConvertSlatePositionToCocoa(double X, double Y);
 
-	static FVector2D ConvertSlatePositionToCocoa(float X, float Y);
+	static FVector2D ConvertCocoaPositionToSlate(double X, double Y);
 
-	static FVector2D ConvertCocoaPositionToSlate(float X, float Y);
-
-	static CGPoint ConvertSlatePositionToCGPoint(float X, float Y);
+	static CGPoint ConvertSlatePositionToCGPoint(double X, double Y);
 
 	static FVector2D CalculateScreenOrigin(NSScreen* Screen);
 
@@ -301,7 +303,7 @@ private:
 	void CacheKeyboardInputSource();
 
 	void ConditionallyUpdateModifierKeys(const FDeferredMacEvent& Event);
-	void HandleModifierChange(NSUInteger NewModifierFlags, NSUInteger FlagsShift, NSUInteger UE4Shift, EMacModifierKeys TranslatedCode);
+	void HandleModifierChange(NSUInteger NewModifierFlags, NSUInteger FlagsShift, NSUInteger UEShift, EMacModifierKeys TranslatedCode);
 
 	FCocoaWindow* FindEventWindow(NSEvent* CocoaEvent) const;
 	FCocoaWindow* FindSlateWindowUnderCursor() const;
@@ -323,7 +325,7 @@ private:
 #endif
 
 #if WITH_ACCESSIBILITY
-	void OnAccessibleEventRaised(TSharedRef<IAccessibleWidget> Widget, EAccessibleEvent Event, FVariant OldValue, FVariant NewValue);
+	void OnAccessibleEventRaised(const FAccessibleEventArgs& Args);
 	#endif
 
 private:
@@ -379,8 +381,6 @@ private:
 	TArray<TSharedRef<FMacWindow>> SlateWindowsToClose;
 
 	TArray<FCocoaWindow*> WindowsRequiringTextInvalidation;
-
-	static TArray<TSharedRef<FMacScreen>> AllScreens;
 
 	TSharedPtr<FMacTextInputMethodSystem> TextInputMethodSystem;
 

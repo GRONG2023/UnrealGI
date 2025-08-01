@@ -13,10 +13,10 @@
 -----------------------------------------------------------------------------*/
 
 bool FCommandLine::bIsInitialized = false;
-TCHAR FCommandLine::CmdLine[FCommandLine::MaxCommandLineSize] = TEXT("");
-TCHAR FCommandLine::OriginalCmdLine[FCommandLine::MaxCommandLineSize] = TEXT("");
-TCHAR FCommandLine::LoggingCmdLine[FCommandLine::MaxCommandLineSize] = TEXT("");
-TCHAR FCommandLine::LoggingOriginalCmdLine[FCommandLine::MaxCommandLineSize] = TEXT("");
+TCHAR FCommandLine::CmdLine[FCommandLine::MaxCommandLineSize] = {};
+TCHAR FCommandLine::OriginalCmdLine[FCommandLine::MaxCommandLineSize] = {};
+TCHAR FCommandLine::LoggingCmdLine[FCommandLine::MaxCommandLineSize] = {};
+TCHAR FCommandLine::LoggingOriginalCmdLine[FCommandLine::MaxCommandLineSize] = {};
 
 FString& FCommandLine::GetSubprocessCommandLine_Internal()
 {
@@ -27,6 +27,15 @@ FString& FCommandLine::GetSubprocessCommandLine_Internal()
 bool FCommandLine::IsInitialized()
 {
 	return bIsInitialized;
+}
+
+void FCommandLine::Reset()
+{
+	CmdLine[0] = TEXT('\0');
+	OriginalCmdLine[0] = TEXT('\0');
+	LoggingCmdLine[0] = TEXT('\0');
+	LoggingOriginalCmdLine[0] = TEXT('\0');
+	bIsInitialized = false;
 }
 
 const TCHAR* FCommandLine::Get()
@@ -64,7 +73,7 @@ bool FCommandLine::Set(const TCHAR* NewCommandLine)
 	FCString::Strncpy( CmdLine, NewCommandLine, UE_ARRAY_COUNT(CmdLine) );
 	FCString::Strncpy(LoggingCmdLine, NewCommandLine, UE_ARRAY_COUNT(LoggingCmdLine));
 	// If configured as part of the build, strip out any unapproved args
-	WhitelistCommandLines();
+	ApplyCommandLineAllowList();
 
 	bIsInitialized = true;
 
@@ -87,7 +96,7 @@ void FCommandLine::Append(const TCHAR* AppendString)
 {
 	FCString::Strncat( CmdLine, AppendString, UE_ARRAY_COUNT(CmdLine) );
 	// If configured as part of the build, strip out any unapproved args
-	WhitelistCommandLines();
+	ApplyCommandLineAllowList();
 }
 
 bool FCommandLine::IsCommandLineLoggingFiltered()
@@ -99,19 +108,92 @@ bool FCommandLine::IsCommandLineLoggingFiltered()
 #endif
 }
 
-#if WANTS_COMMANDLINE_WHITELIST
+bool FCommandLine::FilterCLIUsingGrammarBasedParser(TCHAR* OutLine, int32 MaxLen, const TCHAR* InLine, const TArrayView<FString>& AllowedList)
+{
+	if (MaxLen == 0)
+	{
+		return false;
+	}
+	check(OutLine && MaxLen > 0);
+
+	// If nothing is allowed, then the output is an empty string
+	if (AllowedList.Num() == 0)
+	{
+		*OutLine = TCHAR(0);
+		return true;
+	}
+
+	TCHAR* Write = OutLine;
+	bool bOutOfSpace = false;
+
+	auto OnCmd = [OutLine, MaxLen, &bOutOfSpace , &Write, &AllowedList] (FStringView Key, FStringView Value) mutable
+	{
+		// Filter
+		// Trim the first leading '-'
+		// This brings the behaviour inline with FCommandLine::Parse
+		FStringView ToTest = Key.StartsWith(TEXT("-")) ? Key.RightChop(1) : Key;
+
+		if (!AllowedList.Contains(ToTest))
+		{
+			return;
+		}
+
+		// Destination Accounting
+		int32 WriteLength = Key.Len() + Value.Len() + (Write != OutLine);
+		bOutOfSpace |= (WriteLength >= MaxLen);
+		if (bOutOfSpace)
+		{
+			return;
+		}
+		MaxLen -= WriteLength;
+
+		// Append
+		if (Write != OutLine)
+		{
+			*Write++ = TCHAR(' ');
+		}
+
+		FMemory::Memmove(Write, Key.GetData(), sizeof(TCHAR) * Key.Len());
+		Write += Key.Len();
+		if (!Value.IsEmpty())
+		{
+			*Write++ = TCHAR('=');
+			FMemory::Memmove(Write, Value.GetData(), sizeof(TCHAR) * Value.Len());
+			Write += Value.Len();
+		}
+	};
+	
+	FParse::GrammarBasedCLIParse(InLine, OnCmd, FParse::EGrammarBasedParseFlags::AllowQuotedCommands);
+
+	if (bOutOfSpace)
+	{
+		return false;
+	}
+
+	*Write = TCHAR(0);
+	return true;
+}
+
+#if UE_COMMAND_LINE_USES_ALLOW_LIST
 TArray<FString> FCommandLine::ApprovedArgs;
 TArray<FString> FCommandLine::FilterArgsForLogging;
 
-#ifdef OVERRIDE_COMMANDLINE_WHITELIST
+#ifndef UE_OVERRIDE_COMMAND_LINE_ALLOW_LIST
+	#ifdef OVERRIDE_COMMANDLINE_WHITELIST
+		#pragma message("Use UE_OVERRIDE_COMMAND_LINE_ALLOW_LIST instead")
+		#define UE_OVERRIDE_COMMAND_LINE_ALLOW_LIST OVERRIDE_COMMANDLINE_WHITELIST
+	#endif
+#endif
+
+#ifdef UE_OVERRIDE_COMMAND_LINE_ALLOW_LIST
 /**
  * When overriding this setting make sure that your define looks like the following in your .cs file:
  *
- *		GlobalDefinitions.Add("OVERRIDE_COMMANDLINE_WHITELIST=\"-arg1 -arg2 -arg3 -arg4\"");
+ *		GlobalDefinitions.Add("UE_OVERRIDE_COMMAND_LINE_ALLOW_LIST=\"-arg1 -arg2 -arg3 -arg4\"");
  *
  * The important part is the \" as they quotes get stripped off by the compiler without them
  */
-const TCHAR* OverrideList = TEXT(OVERRIDE_COMMANDLINE_WHITELIST);
+const TCHAR* OverrideList = TEXT(UE_OVERRIDE_COMMAND_LINE_ALLOW_LIST);
 #else
 // Default list most conservative restrictions
 const TCHAR* OverrideList = TEXT("-fullscreen /windowed");
@@ -130,7 +212,7 @@ const TCHAR* FilterForLoggingList = TEXT(FILTER_COMMANDLINE_LOGGING);
 const TCHAR* FilterForLoggingList = TEXT("");
 #endif
 
-void FCommandLine::WhitelistCommandLines()
+void FCommandLine::ApplyCommandLineAllowList()
 {
 	if (ApprovedArgs.Num() == 0)
 	{
@@ -143,17 +225,13 @@ void FCommandLine::WhitelistCommandLines()
 		FCommandLine::Parse(FilterForLoggingList, FilterArgsForLogging, Ignored);
 	}
 	// Process the original command line
-	TArray<FString> OriginalList = FilterCommandLine(OriginalCmdLine);
-	BuildWhitelistCommandLine(OriginalCmdLine, UE_ARRAY_COUNT(OriginalCmdLine), OriginalList);
+	FilterCLIUsingGrammarBasedParser(OriginalCmdLine, UE_ARRAY_COUNT(OriginalCmdLine), OriginalCmdLine, ApprovedArgs);
 	// Process the current command line
-	TArray<FString> CmdList = FilterCommandLine(CmdLine);
-	BuildWhitelistCommandLine(CmdLine, UE_ARRAY_COUNT(CmdLine), CmdList);
+	FilterCLIUsingGrammarBasedParser(CmdLine, UE_ARRAY_COUNT(CmdLine), CmdLine, ApprovedArgs);
 	// Process the command line for logging purposes
-	TArray<FString> LoggingCmdList = FilterCommandLineForLogging(LoggingCmdLine);
-	BuildWhitelistCommandLine(LoggingCmdLine, UE_ARRAY_COUNT(LoggingCmdLine), LoggingCmdList);
+	FilterCLIUsingGrammarBasedParser(LoggingCmdLine, UE_ARRAY_COUNT(LoggingCmdLine), LoggingCmdLine, FilterArgsForLogging);
 	// Process the original command line for logging purposes
-	TArray<FString> LoggingOriginalCmdList = FilterCommandLineForLogging(LoggingOriginalCmdLine);
-	BuildWhitelistCommandLine(LoggingOriginalCmdLine, UE_ARRAY_COUNT(LoggingOriginalCmdLine), LoggingOriginalCmdList);
+	FilterCLIUsingGrammarBasedParser(LoggingOriginalCmdLine, UE_ARRAY_COUNT(LoggingOriginalCmdLine), LoggingOriginalCmdLine, FilterArgsForLogging);
 }
 
 TArray<FString> FCommandLine::FilterCommandLine(TCHAR* CommandLine)
@@ -205,7 +283,7 @@ TArray<FString> FCommandLine::FilterCommandLineForLogging(TCHAR* CommandLine)
 	return ParsedList;
 }
 
-void FCommandLine::BuildWhitelistCommandLine(TCHAR* CommandLine, uint32 ArrayCount, const TArray<FString>& FilteredArgs)
+void FCommandLine::BuildCommandLineAllowList(TCHAR* CommandLine, uint32 ArrayCount, const TArray<FString>& FilteredArgs)
 {
 	check(ArrayCount > 0);
 	// Zero the whole string
@@ -267,7 +345,7 @@ const TCHAR* FCommandLine::RemoveExeName(const TCHAR* InCmdLine)
 	{
 		InCmdLine++;
 	}
-	// skip over any spaces at the start, which Vista likes to toss in multiple
+	// skip over any spaces at the start
 	while (*InCmdLine == ' ')
 	{
 		InCmdLine++;
@@ -291,18 +369,18 @@ void FCommandLine::Parse(const TCHAR* InCmdLine, TArray<FString>& Tokens, TArray
 	{
 		if ((**NextToken == TCHAR('-')))
 		{
-			new(Switches) FString(NextToken.Mid(1));
-			new(Tokens) FString(NextToken.Right(NextToken.Len() - 1));
+			Switches.Add(NextToken.Mid(1));
+			Tokens.Add(NextToken.Right(NextToken.Len() - 1));
 		}
 		else
 		{
-			new(Tokens) FString(NextToken);
+			Tokens.Add(MoveTemp(NextToken));
 		}
 	}
 }
 
-
-FString FCommandLine::BuildFromArgV(const TCHAR* Prefix, int32 ArgC, TCHAR* ArgV[], const TCHAR* Suffix)
+template<typename CharType>
+FString BuildFromArgVImpl(const CharType* Prefix, int32 ArgC, CharType* ArgV[], const CharType* Suffix)
 {
 	FString Result;
 
@@ -335,13 +413,23 @@ FString FCommandLine::BuildFromArgV(const TCHAR* Prefix, int32 ArgC, TCHAR* ArgV
 	// add the prefix and suffix if provided
 	if (Prefix)
 	{
-		Result = FString::Printf(TEXT("%s %s"), Prefix, *Result);
+		Result = FString::Printf(TEXT("%s %s"), StringCast<TCHAR>(Prefix).Get(), *Result);
 	}
 
 	if (Suffix)
 	{
-		Result = FString::Printf(TEXT("%s %s"), *Result, Suffix);
+		Result = FString::Printf(TEXT("%s %s"), *Result, StringCast<TCHAR>(Suffix).Get());
 	}
 
 	return Result;
+}
+
+FString FCommandLine::BuildFromArgV(const WIDECHAR* Prefix, int32 ArgC, WIDECHAR* ArgV[], const WIDECHAR* Suffix)
+{
+	return BuildFromArgVImpl(Prefix, ArgC, ArgV, Suffix);
+}
+
+FString FCommandLine::BuildFromArgV(const ANSICHAR* Prefix, int32 ArgC, ANSICHAR* ArgV[], const ANSICHAR* Suffix)
+{
+	return BuildFromArgVImpl(Prefix, ArgC, ArgV, Suffix);
 }

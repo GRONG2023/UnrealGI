@@ -6,12 +6,13 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "ScreenPass.h"
 #include "UniformBuffer.h"
 #include "RendererInterface.h"
-#include "PostProcess/RenderingCompositionGraph.h"
 
 class FViewInfo;
+
+struct FRDGSystemTextures;
 
 enum class ESSAOType
 {
@@ -50,6 +51,12 @@ enum EGTAOPass
 	EGTAOPass_TemporalFilter			= 0x10,
 	EGTAOPass_Upsample					= 0x20,
 };
+
+FRDGTextureDesc GetScreenSpaceAOTextureDesc(FIntPoint Extent);
+
+FRDGTextureRef CreateScreenSpaceAOTexture(FRDGBuilder& GraphBuilder, FIntPoint Extent);
+
+FRDGTextureRef GetScreenSpaceAOFallback(const FRDGSystemTextures& SystemTextures);
 
 class FGTAOContext
 {
@@ -100,16 +107,8 @@ public:
 
 // SSAO
 
-/** TODO: The RHI version of the uniform buffer is used on all compute shaders because RDG does not yet support reads
- *  from multiple pipes (e.g. reading depth from both async compute and graphics). Using the RDG version of the uniform
- *  buffer ends up joining the async work back to graphics on the depth read. This temporary solution just uses the RHI
- *  uniform buffer to avoid registering the textures with RDG. This only works because depth is required to be
- *  read-only by previous passes. This can be removed once RDG supports multi-pipe transitions.
- */
-
 struct FSSAOCommonParameters
 {
-	TUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBufferRHI;
 	TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBuffer = nullptr;
 	FScreenPassTextureViewport SceneTexturesViewport;
 
@@ -153,7 +152,6 @@ FScreenPassTexture AddAmbientOcclusionFinalPass(
 
 struct FGTAOCommonParameters
 {
-	TUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBufferRHI;
 	TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBuffer = nullptr;
 	FScreenPassTextureViewport SceneTexturesViewport;
 	
@@ -235,13 +233,13 @@ FScreenPassTexture AddGTAOUpsamplePass(
 BEGIN_SHADER_PARAMETER_STRUCT(FHZBParameters, )
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, HZBTexture)
 	SHADER_PARAMETER_SAMPLER(SamplerState, HZBSampler)
-	SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportTransform, HZBRemapping)
+	SHADER_PARAMETER(FScreenTransform, HZBRemapping)
 END_SHADER_PARAMETER_STRUCT();
 
 BEGIN_SHADER_PARAMETER_STRUCT(FTextureBinding, )
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, Texture)
 	SHADER_PARAMETER(FIntPoint, TextureSize)
-	SHADER_PARAMETER(FVector2D, InverseTextureSize)
+	SHADER_PARAMETER(FVector2f, InverseTextureSize)
 END_SHADER_PARAMETER_STRUCT();
 
 enum class EAOTechnique

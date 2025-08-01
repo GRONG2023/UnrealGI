@@ -8,7 +8,7 @@ using System.Threading.Tasks;
 using System.IO;
 using AutomationTool;
 using UnrealBuildTool;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 
 public class ReplaceAssetsUsingManifest : BuildCommand
 {
@@ -17,7 +17,7 @@ public class ReplaceAssetsUsingManifest : BuildCommand
 		// Command parameters - not all required if using existing manifest
 		string ProjectPath = ParseParamValue("ProjectPath");
 		string ManifestFile = ParseParamValue("ManifestFile");
-		string UE4Exe = ParseParamValue("UE4Exe", "UE4Editor-Cmd.exe");
+		string UnrealExe = ParseParamValue("UnrealExe", "UnrealEditor-Cmd.exe", ObsoleteParam: "UE4Exe");
 		string ReplacedPaths = ParseParamValue("ReplacedPaths", "");
 		string ReplacedClasses = ParseParamValue("ReplacedClasses", "");
 		string ExcludedPaths = ParseParamValue("ExcludedPaths", "");
@@ -42,7 +42,7 @@ public class ReplaceAssetsUsingManifest : BuildCommand
 				DeleteFile(ManifestFile);
 			}
 
-			RunCommandlet(Project, UE4Exe, "GenerateAssetManifest", String.Format("-ManifestFile={0} -IncludedPaths={1} -IncludedClasses={2} -ExcludedPaths={3} -ExcludedClasses={4}", CommandUtils.MakePathSafeToUseWithCommandLine(ManifestFile), ReplacedPaths, ReplacedClasses, ExcludedPaths, ExcludedClasses));
+			RunCommandlet(Project, UnrealExe, "GenerateAssetManifest", String.Format("-ManifestFile={0} -IncludedPaths={1} -IncludedClasses={2} -ExcludedPaths={3} -ExcludedClasses={4}", CommandUtils.MakePathSafeToUseWithCommandLine(ManifestFile), ReplacedPaths, ReplacedClasses, ExcludedPaths, ExcludedClasses));
 
 			if (!FileExists_NoExceptions(ManifestFile))
 			{

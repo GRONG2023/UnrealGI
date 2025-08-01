@@ -10,6 +10,7 @@
 #include "Toolkits/IToolkitHost.h"
 #include "AssetThumbnail.h"
 #include "Toolkits/BaseToolkit.h"
+#include "Framework/SlateDelegates.h"
 
 class Error;
 class IDetailsView;
@@ -25,17 +26,20 @@ class SLandscapeAssetThumbnail : public SCompoundWidget
 public:
 	SLATE_BEGIN_ARGS( SLandscapeAssetThumbnail )
 		: _ThumbnailSize( 64,64 ) {}
-		SLATE_ARGUMENT( FIntPoint, ThumbnailSize )
+		SLATE_ARGUMENT(FIntPoint, ThumbnailSize)
+		SLATE_EVENT(FAccessAsset, OnAccessAsset)
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs, UObject* Asset, TSharedRef<FAssetThumbnailPool> ThumbnailPool);
 	~SLandscapeAssetThumbnail();
 
 	void SetAsset(UObject* Asset);
+	virtual FReply OnMouseButtonDoubleClick(const FGeometry& InMyGeometry, const FPointerEvent& InMouseEvent) override;
 
 private:
 	void OnMaterialCompilationFinished(UMaterialInterface* MaterialInterface);
 
+	FAccessAsset OnAccessAsset;
 	TSharedPtr<FAssetThumbnail> AssetThumbnail;
 };
 
@@ -52,9 +56,6 @@ namespace LandscapeEditorNames
 class FLandscapeToolKit : public FModeToolkit
 {
 public:
-	virtual void RegisterTabSpawners(const TSharedRef<class FTabManager>& TabManager) override;
-	virtual void UnregisterTabSpawners(const TSharedRef<class FTabManager>& TabManager) override;
-
 	/** Initializes the geometry mode toolkit */
 	virtual void Init(const TSharedPtr< class IToolkitHost >& InitToolkitHost) override;
 

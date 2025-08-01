@@ -3,6 +3,9 @@
 #include "Kismet/BlueprintAsyncActionBase.h"
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
+#include "Engine/World.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BlueprintAsyncActionBase)
 
 //////////////////////////////////////////////////////////////////////////
 // UBlueprintAsyncActionBase
@@ -20,7 +23,7 @@ void UBlueprintAsyncActionBase::Activate()
 {
 }
 
-void UBlueprintAsyncActionBase::RegisterWithGameInstance(UObject* WorldContextObject)
+void UBlueprintAsyncActionBase::RegisterWithGameInstance(const UObject* WorldContextObject)
 {
 	UWorld* FoundWorld = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
 
@@ -55,3 +58,4 @@ void UBlueprintAsyncActionBase::SetReadyToDestroy()
 		OldGameInstance->UnregisterReferencedObject(this);
 	}
 }
+

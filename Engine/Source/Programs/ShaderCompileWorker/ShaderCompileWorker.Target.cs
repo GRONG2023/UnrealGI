@@ -11,14 +11,15 @@ public class ShaderCompileWorkerTarget : TargetRules
 	{
 		Type = TargetType.Program;
 		LinkType = TargetLinkType.Modular;
+		IncludeOrderVersion = EngineIncludeOrderVersion.Latest;
 
 		LaunchModuleName = "ShaderCompileWorker";
 
-        if (bUseXGEController && (Target.Platform == UnrealTargetPlatform.Win32 || Target.Platform == UnrealTargetPlatform.Win64) && Configuration == UnrealTargetConfiguration.Development)
+        if (bUseXGEController && (Target.Platform == UnrealTargetPlatform.Win64) && Configuration == UnrealTargetConfiguration.Development)
         {
             // The interception interface in XGE requires that the parent and child processes have different filenames on disk.
             // To avoid building an entire separate worker just for this, we duplicate the ShaderCompileWorker in a post build step.
-            const string SrcPath  = "$(EngineDir)\\Binaries\\$(TargetPlatform)\\ShaderCompileWorker.exe";
+            const string SrcPath  = "$(EngineDir)\\Binaries\\$(TargetPlatform)\\$(TargetName).exe";
             const string DestPath = "$(EngineDir)\\Binaries\\$(TargetPlatform)\\XGEControlWorker.exe";
 
             PostBuildSteps.Add(string.Format("echo Copying {0} to {1}", SrcPath, DestPath));
@@ -41,9 +42,6 @@ public class ShaderCompileWorkerTarget : TargetRules
 		bBuildWithEditorOnlyData = true;
 		bCompileCEF3 = false;
 
-		// Never use malloc profiling in ShaderCompileWorker.
-		bUseMallocProfiler = false;
-
 		// Force all shader formats to be built and included.
 		bForceBuildShaderFormats = true;
 
@@ -58,5 +56,15 @@ public class ShaderCompileWorkerTarget : TargetRules
 
 		// Disable external profiling in ShaderCompiler to improve startup time
 		GlobalDefinitions.Add("UE_EXTERNAL_PROFILING_ENABLED=0");
+
+		// This removes another thread being created even when -nocrashreports is specified
+		GlobalDefinitions.Add("NOINITCRASHREPORTER=1");
+
+		if (bShaderCompilerWorkerTrace)
+        {
+			GlobalDefinitions.Add("LLM_ENABLED_IN_CONFIG=1");
+			GlobalDefinitions.Add("UE_MEMORY_TAGS_TRACE_ENABLED=1");
+			bEnableTrace = true;
+		}
 	}
 }

@@ -3,21 +3,25 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Object.h"
+#include "DetailColumnSizeData.h"
 #include "Engine/EngineTypes.h"
+#include "IDetailPropertyRow.h"
+#include "IDetailTreeNode.h"
+#include "MaterialEditor/MaterialEditorInstanceConstant.h"
+#include "MaterialPropertyHelpers.h"
+#include "Materials/Material.h"
+#include "PropertyCustomizationHelpers.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/Views/STreeView.h"
-#include "Materials/Material.h"
-#include "MaterialEditor/MaterialEditorInstanceConstant.h"
-#include "IDetailTreeNode.h"
-#include "IDetailPropertyRow.h"
-#include "MaterialPropertyHelpers.h"
 
 class IPropertyHandle;
-class UMaterialEditorInstanceConstant;
 class SMaterialLayersFunctionsInstanceTree;
+class UDEditorParameterValue;
+class UMaterialEditorInstanceConstant;
 
 class SMaterialLayersFunctionsInstanceTreeItem : public STableRow< TSharedPtr<FSortedParamData> >
 {
@@ -34,7 +38,6 @@ public:
 	SLATE_ARGUMENT(SMaterialLayersFunctionsInstanceTree*, InTree)
 	SLATE_END_ARGS()
 
-	FMaterialTreeColumnSizeData ColumnSizeData;
 	bool bIsBeingDragged;
 
 private:
@@ -44,6 +47,7 @@ private:
 	FString GetCurvePath(class UDEditorScalarParameterValue* Parameter) const;
 	const FSlateBrush* GetBorderImage() const;
 
+	FSlateColor GetOuterBackgroundColor(TSharedPtr<FSortedParamData> InParamData) const;
 public:
 
 	void RefreshOnRowChange(const FAssetData& AssetData, SMaterialLayersFunctionsInstanceTree* InTree);
@@ -74,6 +78,7 @@ public:
 
 	FReply OnLayerDrop(const FDragDropEvent& DragDropEvent);
 	void OnOverrideParameter(bool NewValue, class UDEditorParameterValue* Parameter);
+	void OnOverrideParameter(bool NewValue, TObjectPtr<UDEditorParameterValue> Parameter);
 	/**
 	* Construct the widget
 	*
@@ -108,7 +113,7 @@ public:
 	void SetEditorInstance(UMaterialEditorInstanceConstant* InMaterialEditorInstance);
 
 	TAttribute<ECheckBoxState> IsParamChecked;
-	class UDEditorParameterValue* LayerParameter;
+	TWeakObjectPtr<class UDEditorParameterValue> LayerParameter;
 	class UMaterialEditorInstanceConstant* MaterialEditorInstance;
 	TSharedPtr<class SMaterialLayersFunctionsInstanceTree> NestedTree;
 	FSimpleDelegate OnLayerPropertyChanged;
@@ -134,16 +139,12 @@ public:
 	void OnExpansionChanged(TSharedPtr<FSortedParamData> Item, bool bIsExpanded);
 	void SetParentsExpansionState();
 
-	float OnGetLeftColumnWidth() const { return 1.0f - ColumnWidth; }
-	float OnGetRightColumnWidth() const { return ColumnWidth; }
-	void OnSetColumnWidth(float InWidth) { ColumnWidth = InWidth; }
 	void ShowHiddenValues(bool& bShowHiddenParameters) { bShowHiddenParameters = true; }
-	FName LayersFunctionsParameterName;
-	class UDEditorParameterValue* FunctionParameter;
+	TWeakObjectPtr<class UDEditorParameterValue> FunctionParameter;
 	struct FMaterialLayersFunctions* FunctionInstance;
 	TSharedPtr<IPropertyHandle> FunctionInstanceHandle;
 	void RefreshOnAssetChange(const struct FAssetData& InAssetData, int32 Index, EMaterialParameterAssociation MaterialType);
-	void ResetAssetToDefault(TSharedPtr<IPropertyHandle> InHandle, TSharedPtr<FSortedParamData> InData);
+	void ResetAssetToDefault(TSharedPtr<FSortedParamData> InData);
 	void AddLayer();
 	void RemoveLayer(int32 Index);
 	FReply UnlinkLayer(int32 Index);
@@ -169,6 +170,7 @@ public:
 	void UpdateThumbnailMaterial(TEnumAsByte<EMaterialParameterAssociation> InAssociation, int32 InIndex, bool bAlterBlendIndex = false);
 	FReply OnThumbnailDoubleClick(const FGeometry& Geometry, const FPointerEvent& MouseEvent, EMaterialParameterAssociation InAssociation, int32 InIndex);
 	bool IsOverriddenExpression(class UDEditorParameterValue* Parameter, int32 InIndex);
+	bool IsOverriddenExpression(TObjectPtr<UDEditorParameterValue> Parameter, int32 InIndex);
 
 	FGetShowHiddenParameters GetShowHiddenDelegate() const;
 protected:
@@ -180,8 +182,7 @@ private:
 
 	TArray<FUnsortedParamData> NonLayerProperties;
 
-	/** The actual width of the right column.  The left column is 1-ColumnWidth */
-	float ColumnWidth;
+	FDetailColumnSizeData ColumnSizeData;
 
 	SMaterialLayersFunctionsInstanceWrapper* Wrapper;
 
@@ -213,7 +214,7 @@ public:
 	SLATE_ARGUMENT(SMaterialLayersFunctionsMaterialTree*, InTree)
 	SLATE_END_ARGS()
 
-	FMaterialTreeColumnSizeData ColumnSizeData;
+	FDetailColumnSizeData ColumnSizeData;
 	bool bIsBeingDragged;
 
 private:
@@ -221,6 +222,7 @@ private:
 	FString GetCurvePath(class UDEditorScalarParameterValue* Parameter) const;
 	const FSlateBrush* GetBorderImage() const;
 
+	FSlateColor GetOuterBackgroundColor(TSharedPtr<FSortedParamData> InParamData) const;
 public:
 
 	void RefreshOnRowChange(const FAssetData& AssetData, SMaterialLayersFunctionsMaterialTree* InTree);
@@ -258,7 +260,7 @@ public:
 	void Construct(const FArguments& InArgs);
 	void SetEditorInstance(UMaterialEditorPreviewParameters* InMaterialEditorInstance);
 	TSharedPtr<class IPropertyRowGenerator> GetGenerator();
-	class UDEditorParameterValue* LayerParameter;
+	TWeakObjectPtr<class UDEditorParameterValue> LayerParameter;
 	class UMaterialEditorPreviewParameters* MaterialEditorInstance;
 	TSharedPtr<class SMaterialLayersFunctionsMaterialTree> NestedTree;
 
@@ -284,12 +286,8 @@ public:
 		void OnGetChildrenMaterialLayersFunctionsTreeView(TSharedPtr<FSortedParamData> InParent, TArray< TSharedPtr<FSortedParamData> >& OutChildren);
 		void OnExpansionChanged(TSharedPtr<FSortedParamData> Item, bool bIsExpanded);
 		void SetParentsExpansionState();
-		float OnGetLeftColumnWidth() const { return 1.0f - ColumnWidth; }
-		float OnGetRightColumnWidth() const { return ColumnWidth; }
-		void OnSetColumnWidth(float InWidth) { ColumnWidth = InWidth; }
 		void ShowHiddenValues(bool& bShowHiddenParameters) { bShowHiddenParameters = true; }
-		FName LayersFunctionsParameterName;
-		class UDEditorParameterValue* FunctionParameter;
+		TWeakObjectPtr<class UDEditorParameterValue> FunctionParameter;
 		struct FMaterialLayersFunctions* FunctionInstance;
 		TSharedPtr<IPropertyHandle> FunctionInstanceHandle;
 		TSharedPtr<class FAssetThumbnailPool> GetTreeThumbnailPool();
@@ -313,8 +311,7 @@ private:
 
 	TArray<FUnsortedParamData> NonLayerProperties;
 
-	/** The actual width of the right column.  The left column is 1-ColumnWidth */
-	float ColumnWidth;
+	FDetailColumnSizeData ColumnSizeData;
 
 	SMaterialLayersFunctionsMaterialWrapper* Wrapper;
 };

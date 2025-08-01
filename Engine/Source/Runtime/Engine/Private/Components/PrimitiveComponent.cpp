@@ -5,39 +5,61 @@
 =============================================================================*/
 
 #include "Components/PrimitiveComponent.h"
-#include "EngineStats.h"
+
+#include "Chaos/ChaosEngineInterface.h"
+#include "Chaos/PhysicsObjectCollisionInterface.h"
+#include "ChaosInterfaceWrapperCore.h"
+#include "Collision/CollisionConversions.h"
+#include "Engine/HitResult.h"
+#include "Engine/Level.h"
+#include "Engine/OverlapResult.h"
+#include "Engine/Texture.h"
 #include "GameFramework/DamageType.h"
+#include "EngineStats.h"
 #include "GameFramework/Pawn.h"
-#include "WorldCollision.h"
+#include "HLOD/HLODBatchingPolicy.h"
+#include "PSOPrecache.h"
 #include "AI/NavigationSystemBase.h"
+#include "AI/Navigation/NavigationRelevantData.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/PhysicsVolume.h"
 #include "GameFramework/WorldSettings.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/CollisionProfile.h"
+#include "Engine/SkeletalMesh.h"
+#include "HitProxies.h"
 #include "Materials/MaterialInstanceDynamic.h"
-#include "Engine/Texture2D.h"
 #include "ContentStreaming.h"
-#include "DrawDebugHelpers.h"
+#include "PropertyPairsMap.h"
 #include "UnrealEngine.h"
-#include "PhysicsPublic.h"
 #include "PhysicsEngine/BodySetup.h"
-#include "Logging/TokenizedMessage.h"
 #include "Logging/MessageLog.h"
 #include "Misc/UObjectToken.h"
 #include "Misc/MapErrors.h"
 #include "CollisionDebugDrawingPublic.h"
 #include "GameFramework/CheatManager.h"
+#include "PhysicsEngine/PhysicsObjectExternalInterface.h"
+#include "RenderingThread.h"
 #include "Streaming/TextureStreamingHelpers.h"
 #include "PrimitiveSceneProxy.h"
-#include "Algo/Copy.h"
-#include "UObject/RenderingObjectVersion.h"
+#include "SceneInterface.h"
 #include "UObject/FortniteMainBranchObjectVersion.h"
-#include "EngineModule.h"
+#include "UObject/UE5PrivateFrostyStreamObjectVersion.h"
+#include "UObject/ObjectSaveContext.h"
+#include "Engine/DamageEvents.h"
+#include "MeshUVChannelInfo.h"
+#include "PrimitiveSceneDesc.h"
+#include "PSOPrecacheMaterial.h"
+#include "MaterialCachedData.h"
+#include "MaterialShared.h"
+#include "MarkActorRenderStateDirtyTask.h"
 
 #if WITH_EDITOR
 #include "Engine/LODActor.h"
+#include "Interfaces/ITargetPlatform.h"
 #include "Rendering/StaticLightingSystemInterface.h"
+#else
+#include "Components/InstancedStaticMeshComponent.h"
 #endif // WITH_EDITOR
 
 #if DO_CHECK
@@ -60,37 +82,52 @@ typedef TArray<const FOverlapInfo*, TInlineAllocator<8>> TInlineOverlapPointerAr
 
 DEFINE_LOG_CATEGORY_STATIC(LogPrimitiveComponent, Log, All);
 
-static int32 bAllowCachedOverlapsCVar = 1;
-static FAutoConsoleVariableRef CVarAllowCachedOverlaps(
-	TEXT("p.AllowCachedOverlaps"), 
-	bAllowCachedOverlapsCVar,
-	TEXT("Primitive Component physics\n")
-	TEXT("0: disable cached overlaps, 1: enable (default)"),
-	ECVF_Default);
-
-static float InitialOverlapToleranceCVar = 0.0f;
-static FAutoConsoleVariableRef CVarInitialOverlapTolerance(
-	TEXT("p.InitialOverlapTolerance"),
-	InitialOverlapToleranceCVar,
-	TEXT("Tolerance for initial overlapping test in PrimitiveComponent movement.\n")
-	TEXT("Normals within this tolerance are ignored if moving out of the object.\n")
-	TEXT("Dot product of movement direction and surface normal."),
-	ECVF_Default);
-
-static float HitDistanceToleranceCVar = 0.0f;
-static FAutoConsoleVariableRef CVarHitDistanceTolerance(
-	TEXT("p.HitDistanceTolerance"),
-	HitDistanceToleranceCVar,
-	TEXT("Tolerance for hit distance for overlap test in PrimitiveComponent movement.\n")
-	TEXT("Hits that are less than this distance are ignored."),
-	ECVF_Default);
-
 static int32 AlwaysCreatePhysicsStateConversionHackCVar = 0;
 static FAutoConsoleVariableRef CVarAlwaysCreatePhysicsStateConversionHack(
 	TEXT("p.AlwaysCreatePhysicsStateConversionHack"),
 	AlwaysCreatePhysicsStateConversionHackCVar,
 	TEXT("Hack to convert actors with query and ignore all to always create physics."),
 	ECVF_Default);
+
+namespace PrimitiveComponentCVars
+{
+	int32 bAllowCachedOverlapsCVar = 1;
+	static FAutoConsoleVariableRef CVarAllowCachedOverlaps(
+		TEXT("p.AllowCachedOverlaps"),
+		bAllowCachedOverlapsCVar,
+		TEXT("Primitive Component physics\n")
+		TEXT("0: disable cached overlaps, 1: enable (default)"),
+		ECVF_Default);
+
+	float InitialOverlapToleranceCVar = 0.0f;
+	static FAutoConsoleVariableRef CVarInitialOverlapTolerance(
+		TEXT("p.InitialOverlapTolerance"),
+		InitialOverlapToleranceCVar,
+		TEXT("Tolerance for initial overlapping test in PrimitiveComponent movement.\n")
+		TEXT("Normals within this tolerance are ignored if moving out of the object.\n")
+		TEXT("Dot product of movement direction and surface normal."),
+		ECVF_Default);
+
+	float HitDistanceToleranceCVar = 0.0f;
+	static FAutoConsoleVariableRef CVarHitDistanceTolerance(
+		TEXT("p.HitDistanceTolerance"),
+		HitDistanceToleranceCVar,
+		TEXT("Tolerance for hit distance for overlap test in PrimitiveComponent movement.\n")
+		TEXT("Hits that are less than this distance are ignored."),
+		ECVF_Default);
+
+	int32 bEnableFastOverlapCheck = 1;
+	static FAutoConsoleVariableRef CVarEnableFastOverlapCheck(TEXT("p.EnableFastOverlapCheck"), bEnableFastOverlapCheck, TEXT("Enable fast overlap check against sweep hits, avoiding UpdateOverlaps (for the swept component)."));
+}
+
+namespace PhysicsReplicationCVars
+{
+	namespace PredictiveInterpolationCVars
+	{
+		static bool bFakeTargetOnClientWakeUp = false;
+		static FAutoConsoleVariableRef CVarFakeTargetOnClientWakeUp(TEXT("np2.PredictiveInterpolation.FakeTargetOnClientWakeUp"), bFakeTargetOnClientWakeUp, TEXT("When true, predictive interpolation will fake a replication target at the current transform marked as asleep, this target only apply if the client doesn't receive targets from the server. This stops the client from desyncing from the server if being woken up by mistake"));
+	}
+}
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 int32 CVarShowInitialOverlaps = 0;
@@ -102,79 +139,22 @@ FAutoConsoleVariableRef CVarRefShowInitialOverlaps(
 	ECVF_Cheat);
 #endif // !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 
-static int32 bEnableFastOverlapCheck = 1;
-static FAutoConsoleVariableRef CVarEnableFastOverlapCheck(TEXT("p.EnableFastOverlapCheck"), bEnableFastOverlapCheck, TEXT("Enable fast overlap check against sweep hits, avoiding UpdateOverlaps (for the swept component)."));
-DECLARE_CYCLE_STAT(TEXT("MoveComponent FastOverlap"), STAT_MoveComponent_FastOverlap, STATGROUP_Game);
-DECLARE_CYCLE_STAT(TEXT("BeginComponentOverlap"), STAT_BeginComponentOverlap, STATGROUP_Game);
+DEFINE_STAT(STAT_BeginComponentOverlap);
+DEFINE_STAT(STAT_MoveComponent_FastOverlap);
+
 DECLARE_CYCLE_STAT(TEXT("EndComponentOverlap"), STAT_EndComponentOverlap, STATGROUP_Game);
 DECLARE_CYCLE_STAT(TEXT("PrimComp DispatchBlockingHit"), STAT_DispatchBlockingHit, STATGROUP_Game);
 
-
-// Predicate to determine if an overlap is with a certain AActor.
-struct FPredicateOverlapHasSameActor
+FOverlapInfo::FOverlapInfo(UPrimitiveComponent* InComponent, int32 InBodyIndex)
+	: bFromSweep(false)
 {
-	FPredicateOverlapHasSameActor(const AActor& Owner)
-	: MyOwnerPtr(&Owner)
+	if (InComponent)
 	{
+		OverlapInfo.HitObjectHandle = FActorInstanceHandle(InComponent->GetOwner(), InComponent, InBodyIndex);
 	}
-
-	bool operator() (const FOverlapInfo& Info)
-	{
-		// MyOwnerPtr is always valid, so we don't need the IsValid() checks in the WeakObjectPtr comparison operator.
-		return MyOwnerPtr.HasSameIndexAndSerialNumber(Info.OverlapInfo.Actor);
-	}
-
-private:
-	const TWeakObjectPtr<const AActor> MyOwnerPtr;
-};
-
-// Predicate to determine if an overlap is *NOT* with a certain AActor.
-struct FPredicateOverlapHasDifferentActor
-{
-	FPredicateOverlapHasDifferentActor(const AActor& Owner)
-	: MyOwnerPtr(&Owner)
-	{
-	}
-
-	bool operator() (const FOverlapInfo& Info)
-	{
-		// MyOwnerPtr is always valid, so we don't need the IsValid() checks in the WeakObjectPtr comparison operator.
-		return !MyOwnerPtr.HasSameIndexAndSerialNumber(Info.OverlapInfo.Actor);
-	}
-
-private:
-	const TWeakObjectPtr<const AActor> MyOwnerPtr;
-};
-
-
-/*
- * Predicate for comparing FOverlapInfos when exact weak object pointer index/serial numbers should match, assuming one is not null and not invalid.
- * Compare to operator== for WeakObjectPtr which does both HasSameIndexAndSerialNumber *and* IsValid() checks on both pointers.
- */
-struct FFastOverlapInfoCompare
-{
-	FFastOverlapInfoCompare(const FOverlapInfo& BaseInfo)
-	: MyBaseInfo(BaseInfo)
-	{
-	}
-
-	bool operator() (const FOverlapInfo& Info)
-	{
-		return MyBaseInfo.OverlapInfo.Component.HasSameIndexAndSerialNumber(Info.OverlapInfo.Component)
-			&& MyBaseInfo.GetBodyIndex() == Info.GetBodyIndex();
-	}
-
-	bool operator() (const FOverlapInfo* Info)
-	{
-		return MyBaseInfo.OverlapInfo.Component.HasSameIndexAndSerialNumber(Info->OverlapInfo.Component)
-			&& MyBaseInfo.GetBodyIndex() == Info->GetBodyIndex();
-	}
-
-private:
-	const FOverlapInfo& MyBaseInfo;
-
-};
-
+	OverlapInfo.Component = InComponent;
+	OverlapInfo.Item = InBodyIndex;
+}
 
 // Helper for finding the index of an FOverlapInfo in an Array using the FFastOverlapInfoCompare predicate, knowing that at least one overlap is valid (non-null).
 template<class AllocatorType>
@@ -309,14 +289,18 @@ FORCEINLINE_DEBUGGABLE static void GetPointersToArrayDataByPredicate(TArray<cons
 
 uint32 UPrimitiveComponent::GlobalOverlapEventsCounter = 0;
 
-// 0 is reserved to mean invalid
-FThreadSafeCounter UPrimitiveComponent::NextComponentId;
+FName UPrimitiveComponent::RVTActorDescProperty(TEXT("RVT"));
+
+UPrimitiveComponent::UPrimitiveComponent(FVTableHelper& Helper) : Super(Helper) { }
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+UPrimitiveComponent::~UPrimitiveComponent() = default;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS;
 
 UPrimitiveComponent::UPrimitiveComponent(const FObjectInitializer& ObjectInitializer /*= FObjectInitializer::Get()*/)
 	: Super(ObjectInitializer)
 {
-	LastRenderTime = -1000.0f;
-	LastRenderTimeOnScreen = -1000.0f;
+	OcclusionBoundsSlack = 0.f;
 	BoundsScale = 1.0f;
 	MinDrawDistance = 0.0f;
 	DepthPriorityGroup = SDPG_World;
@@ -324,15 +308,20 @@ UPrimitiveComponent::UPrimitiveComponent(const FObjectInitializer& ObjectInitial
 	bUseAsOccluder = false;
 	bReceivesDecals = true;
 	CastShadow = false;
+	bEmissiveLightSource = false;
 	bCastDynamicShadow = true;
 	bAffectDynamicIndirectLighting = true;
 	bAffectDistanceFieldLighting = true;
-	LpvBiasMultiplier = 1.0f;
 	bCastStaticShadow = true;
+	ShadowCacheInvalidationBehavior = EShadowCacheInvalidationBehavior::Auto;
 	bCastVolumetricTranslucentShadow = false;
 	bCastContactShadow = true;
 	IndirectLightingCacheQuality = ILCQ_Point;
+	bStaticWhenNotMoveable = true;
 	bSelectable = true;
+#if WITH_EDITORONLY_DATA
+	bConsiderForActorPlacementWhenHidden = false;
+#endif // WITH_EDITORONLY_DATA
 	bFillCollisionUnderneathForNavmesh = false;
 	AlwaysLoadOnClient = true;
 	AlwaysLoadOnServer = true;
@@ -348,17 +337,28 @@ UPrimitiveComponent::UPrimitiveComponent(const FObjectInitializer& ObjectInitial
 	CanBeCharacterBase_DEPRECATED = ECB_Yes;
 #endif
 	CanCharacterStepUpOn = ECB_Yes;
-	ComponentId.PrimIDValue = NextComponentId.Increment();
 	CustomDepthStencilValue = 0;
 	CustomDepthStencilWriteMask = ERendererStencilMask::ERSM_Default;
+	RayTracingGroupId = FPrimitiveSceneProxy::InvalidRayTracingGroupId;
+	RayTracingGroupCullingPriority = ERayTracingGroupCullingPriority::CP_4_DEFAULT;
+	bRayTracingFarField = false;
 
 	LDMaxDrawDistance = 0.f;
 	CachedMaxDrawDistance = 0.f;
-	bUseMaxLODAsImposter = false;
-	bBatchImpostersAsInstances = false;
+
+	bEnableAutoLODGeneration = true;
+	HLODBatchingPolicy = EHLODBatchingPolicy::None;
+	ExcludeFromHLODLevels = 0;
+
+#if WITH_EDITORONLY_DATA
+	bUseMaxLODAsImposter_DEPRECATED = false;
+	bBatchImpostersAsInstances_DEPRECATED = false;
+#endif
+	bIsValidTextureStreamingBuiltData = false;
 	bNeverDistanceCull = false;
 
 	bUseEditorCompositing = false;
+	bIsBeingMovedByEditor = false;
 
 	SetGenerateOverlapEvents(true);
 	bMultiBodyOverlap = false;
@@ -373,17 +373,31 @@ UPrimitiveComponent::UPrimitiveComponent(const FObjectInitializer& ObjectInitial
 	bAttachedToStreamingManagerAsDynamic = false;
 	bHandledByStreamingManagerAsDynamic = false;
 	bIgnoreStreamingManagerUpdate = false;
+	bAttachedToCoarseMeshStreamingManager = false;
+	bBulkReregister = false;
 	LastCheckedAllCollideableDescendantsTime = 0.f;
+
+#if UE_WITH_PSO_PRECACHING
+	bPSOPrecacheCalled = false;
+	bPSOPrecacheRequestBoosted = false;
+#endif // UE_WITH_PSO_PRECACHING
 	
 	bApplyImpulseOnDamage = true;
 	bReplicatePhysicsToAutonomousProxy = true;
 
 	bReceiveMobileCSMShadows = true;
+
+#if WITH_EDITOR
+	bAlwaysAllowTranslucentSelect = false;
+
+	SelectionOutlineColorIndex = 0;
+#endif
+
 #if WITH_EDITORONLY_DATA
-	bEnableAutoLODGeneration = true;
 	HitProxyPriority = HPP_World;
 #endif // WITH_EDITORONLY_DATA
 
+	bIgnoreBoundsForEditorFocus = false;
 	bVisibleInSceneCaptureOnly = false;
 	bHiddenInSceneCapture = false;
 }
@@ -432,6 +446,11 @@ bool UPrimitiveComponent::HasStaticLighting() const
 
 void UPrimitiveComponent::GetStreamingRenderAssetInfo(FStreamingTextureLevelContext& LevelContext, TArray<FStreamingRenderAssetPrimitiveInfo>& OutStreamingRenderAssets) const
 {
+	if (CanSkipGetTextureStreamingRenderAssetInfo())
+	{
+		return;
+	}
+
 	if (CVarStreamingUseNewMetrics.GetValueOnGameThread() != 0)
 	{
 		LevelContext.BindBuildData(nullptr);
@@ -457,7 +476,7 @@ void UPrimitiveComponent::GetStreamingRenderAssetInfo(FStreamingTextureLevelCont
 				if (MaterialInterface)
 				{
 					MaterialData.Material = MaterialInterface;
-					LevelContext.ProcessMaterial(Bounds, MaterialData, Bounds.SphereRadius, OutStreamingRenderAssets);
+					LevelContext.ProcessMaterial(Bounds, MaterialData, Bounds.SphereRadius, OutStreamingRenderAssets, bIsValidTextureStreamingBuiltData, this);
 				}
 				// Remove all instances of this material in case there were duplicates.
 				UsedMaterials.RemoveSwap(MaterialInterface);
@@ -466,12 +485,45 @@ void UPrimitiveComponent::GetStreamingRenderAssetInfo(FStreamingTextureLevelCont
 	}
 }
 
+bool UPrimitiveComponent::BuildTextureStreamingDataImpl(ETextureStreamingBuildType BuildType, EMaterialQualityLevel::Type QualityLevel, ERHIFeatureLevel::Type FeatureLevel, TSet<FGuid>& DependentResources, bool& bOutSupportsBuildTextureStreamingData)
+{
+	// Default implementation marks component as having invalid texture streaming built data
+	bOutSupportsBuildTextureStreamingData = false;
+	return true;
+}
+
+bool UPrimitiveComponent::BuildTextureStreamingData(ETextureStreamingBuildType BuildType, EMaterialQualityLevel::Type QualityLevel, ERHIFeatureLevel::Type FeatureLevel, TSet<FGuid>& DependentResources)
+{
+	bool bSupportsBuildTextureStreamingData = false;
+	bIsValidTextureStreamingBuiltData = false;
+#if WITH_EDITOR
+	bIsActorTextureStreamingBuiltData = false;
+#endif
+	
+	bool Result = BuildTextureStreamingDataImpl(BuildType, QualityLevel, FeatureLevel, DependentResources, bSupportsBuildTextureStreamingData);
+	if (Result && bSupportsBuildTextureStreamingData)
+	{
+		if (BuildType == TSB_MapBuild)
+		{
+			bIsValidTextureStreamingBuiltData = true;
+		}
+#if WITH_EDITOR
+		else if (BuildType == TSB_ActorBuild)
+		{
+			bIsActorTextureStreamingBuiltData = true;
+		}
+#endif
+	}
+	return Result;
+}
 
 void UPrimitiveComponent::GetStreamingRenderAssetInfoWithNULLRemoval(FStreamingTextureLevelContext& LevelContext, TArray<struct FStreamingRenderAssetPrimitiveInfo>& OutStreamingRenderAssets) const
 {
 	// Ignore components that are fully initialized but have no scene proxy (hidden primitive or non game primitive)
 	if (!IsRegistered() || !IsRenderStateCreated() || SceneProxy)
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(UPrimitiveComponent::GetStreamingRenderAssetInfoWithNULLRemoval);
+
 		GetStreamingRenderAssetInfo(LevelContext, OutStreamingRenderAssets);
 		for (int32 Index = 0; Index < OutStreamingRenderAssets.Num(); Index++)
 		{
@@ -516,7 +568,7 @@ void UPrimitiveComponent::GetUsedTextures(TArray<UTexture*>& OutTextures, EMater
 			auto World = GetWorld();
 
 			UsedTextures.Reset();
-			UsedMaterials[MatIndex]->GetUsedTextures(UsedTextures, QualityLevel, false, World ? World->FeatureLevel.GetValue() : GMaxRHIFeatureLevel, false);
+			UsedMaterials[MatIndex]->GetUsedTextures(UsedTextures, QualityLevel, false, World ? World->GetFeatureLevel() : GMaxRHIFeatureLevel, false);
 
 			for( int32 TextureIndex=0; TextureIndex<UsedTextures.Num(); TextureIndex++ )
 			{
@@ -529,20 +581,6 @@ void UPrimitiveComponent::GetUsedTextures(TArray<UTexture*>& OutTextures, EMater
 //////////////////////////////////////////////////////////////////////////
 // Render
 
-// Helper to access the level bStaticComponentsRegisteredInStreamingManager flag.
-FORCEINLINE_DEBUGGABLE bool OwnerLevelHasRegisteredStaticComponentsInStreamingManager(const AActor* Owner)
-{
-	if (Owner)
-	{
-		const ULevel* Level = Owner->GetLevel();
-		if (Level)
-		{
-			return Level->bStaticComponentsRegisteredInStreamingManager;
-		}
-	}
-	return false;
-}
-
 void UPrimitiveComponent::CreateRenderState_Concurrent(FRegisterComponentContext* Context)
 {
 	// Make sure cached cull distance is up-to-date if its zero and we have an LD cull distance
@@ -552,12 +590,22 @@ void UPrimitiveComponent::CreateRenderState_Concurrent(FRegisterComponentContext
 		CachedMaxDrawDistance = bNeverCull ? 0.f : LDMaxDrawDistance;
 	}
 
+	// Always setup our ptr to the OwnerLastRenderTimer for rendering time feedback from the renderer
+	// The owner can change after calls to OnRegister so we must resynchronize this value
+	SceneData.OwnerLastRenderTimePtr = FActorLastRenderTime::GetPtr(GetOwner());
+
 	Super::CreateRenderState_Concurrent(Context);
 
 	UpdateBounds();
 
 	// If the primitive isn't hidden and the detail mode setting allows it, add it to the scene.
-	if (ShouldComponentAddToScene())
+	if (ShouldComponentAddToScene()
+#if WITH_EDITOR
+		// [HOTFIX] When force deleting an asset, a SceneProxy is set to null from a different thread unsafely, causing the old stale value of SceneProxy being read here from the cache.
+		// We need to better investigate why this happens, but for now this prevents a crash from occurring.
+		&& SceneProxy == nullptr
+#endif
+	)
 	{
 		if (Context != nullptr)
 		{
@@ -569,22 +617,7 @@ void UPrimitiveComponent::CreateRenderState_Concurrent(FRegisterComponentContext
 		}
 	}
 
-	// Components are either registered as static or dynamic in the streaming manager.
-	// Static components are registered in batches the first frame the level becomes visible (or incrementally each frame when loaded but not yet visible). 
-	// The level static streaming data is never updated after this, and gets reused whenever the level becomes visible again (after being hidden).
-	// Dynamic components, on the other hand, are updated whenever their render states change.
-	// The following logic handles all cases where static components should fallback on the dynamic path.
-	// It is based on a design where each component must either have bHandledByStreamingManagerAsDynamic or bAttachedToStreamingManagerAsStatic set.
-	// If this is not the case, then the component has never been handled before.
-	// The bIgnoreStreamingManagerUpdate flag is used to prevent handling component that are already in the update list or that don't have streaming data.
-	if (!bIgnoreStreamingManagerUpdate && (Mobility != EComponentMobility::Static || bHandledByStreamingManagerAsDynamic || (!bAttachedToStreamingManagerAsStatic && OwnerLevelHasRegisteredStaticComponentsInStreamingManager(GetOwner()))))
-	{
-		FStreamingManagerCollection* Collection = IStreamingManager::Get_Concurrent();
-		if (Collection)
-		{
-			Collection->NotifyPrimitiveUpdated_Concurrent(this);
-		}
-	}
+	ConditionalNotifyStreamingPrimitiveUpdated_Concurrent();
 }
 
 void UPrimitiveComponent::SendRenderTransform_Concurrent()
@@ -593,7 +626,7 @@ void UPrimitiveComponent::SendRenderTransform_Concurrent()
 
 	// If the primitive isn't hidden update its transform.
 	const bool bDetailModeAllowsRendering	= DetailMode <= GetCachedScalabilityCVars().DetailMode;
-	if( bDetailModeAllowsRendering && (ShouldRender() || bCastHiddenShadow))
+	if( bDetailModeAllowsRendering && (ShouldRender() || bCastHiddenShadow || bAffectIndirectLightingWhileHidden || bRayTracingFarField))
 	{
 		// Update the scene info's transform for this primitive.
 		GetWorld()->Scene->UpdatePrimitiveTransform(this);
@@ -604,8 +637,17 @@ void UPrimitiveComponent::SendRenderTransform_Concurrent()
 
 void UPrimitiveComponent::OnRegister()
 {
-	Super::OnRegister();
+	// Both those are initalized before call Super::OnRegister since the primitive can be added to the scene
+	// before this method completes, for example through FNiagaraSystem::PollForCompilationComplete()
+	 
+	// Setup our ptr to the OwnerLastRenderTimer for rendering time feedback from the renderer
+	SceneData.OwnerLastRenderTimePtr = FActorLastRenderTime::GetPtr(GetOwner());
+	
+	// Deterministically track primitives via registration sequence numbers.
+ 	SceneData.RegistrationSerialNumber = FPrimitiveSceneInfoData::GetNextRegistrationSerialNumber(); 
 
+	Super::OnRegister();
+	
 	if (bCanEverAffectNavigation)
 	{
 		const bool bNavRelevant = bNavigationRelevant = IsNavigationRelevant();
@@ -620,19 +662,22 @@ void UPrimitiveComponent::OnRegister()
 	}
 
 #if WITH_EDITOR
-	if (HasValidSettingsForStaticLighting(false))
+	// If still compiling, this will be called when compilation has finished.
+	if (!IsCompiling() && HasValidSettingsForStaticLighting(false))
 	{
 		FStaticLightingSystemInterface::OnPrimitiveComponentRegistered.Broadcast(this);
 	}
 #endif
 
 	// Update our Owner's LastRenderTime
-	SetLastRenderTime(LastRenderTime);
+	SetLastRenderTime(SceneData.LastRenderTime);
 }
 
 
 void UPrimitiveComponent::OnUnregister()
 {
+	SceneData.OwnerLastRenderTimePtr = nullptr;
+
 	// If this is being garbage collected we don't really need to worry about clearing this
 	if (!HasAnyFlags(RF_BeginDestroyed) && !IsUnreachable())
 	{
@@ -646,7 +691,7 @@ void UPrimitiveComponent::OnUnregister()
 	Super::OnUnregister();
 
 	// Unregister only has effect on dynamic primitives (as static ones are handled when the level visibility changes).
-	if (bAttachedToStreamingManagerAsDynamic)
+	if (bAttachedToStreamingManagerAsDynamic || bAttachedToCoarseMeshStreamingManager)
 	{
 		IStreamingManager::Get().NotifyPrimitiveDetached(this);
 	}
@@ -689,6 +734,8 @@ void FPrimitiveComponentInstanceData::ApplyToComponent(UActorComponent* Componen
 
 	if (Component->IsRegistered() && ((VisibilityId != INDEX_NONE) || SavedProperties.Num() > 0))
 	{
+		// This is needed to restore transient primitive data from serialized defaults
+		PrimitiveComponent->ResetCustomPrimitiveData();
 		Component->MarkRenderStateDirty();
 	}
 }
@@ -783,18 +830,25 @@ void UPrimitiveComponent::OnCreatePhysicsState()
 			const FVector BodyScale = BodyTransform.GetScale3D();
 			if(BodyScale.IsNearlyZero())
 			{
-				BodyTransform.SetScale3D(FVector(KINDA_SMALL_NUMBER));
+				BodyTransform.SetScale3D(FVector(UE_KINDA_SMALL_NUMBER));
 			}
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 			if ((BodyInstance.GetCollisionEnabled() != ECollisionEnabled::NoCollision) && (FMath::IsNearlyZero(BodyScale.X) || FMath::IsNearlyZero(BodyScale.Y) || FMath::IsNearlyZero(BodyScale.Z)))
 			{
 				UE_LOG(LogPhysics, Warning, TEXT("Scale for %s has a component set to zero, which will result in a bad body instance. Scale:%s"), *GetPathNameSafe(this), *BodyScale.ToString());
+				
+				// User warning has been output - fix up the scale to be valid for physics
+				BodyTransform.SetScale3D(FVector(
+					FMath::IsNearlyZero(BodyScale.X) ? UE_KINDA_SMALL_NUMBER : BodyScale.X,
+					FMath::IsNearlyZero(BodyScale.Y) ? UE_KINDA_SMALL_NUMBER : BodyScale.Y,
+					FMath::IsNearlyZero(BodyScale.Z) ? UE_KINDA_SMALL_NUMBER : BodyScale.Z
+				));
 			}
 #endif
 
 			// Create the body.
 			BodyInstance.InitBody(BodySetup, BodyTransform, this, GetWorld()->GetPhysicsScene());		
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#if UE_ENABLE_DEBUG_DRAWING
 			SendRenderDebugPhysics();
 #endif // !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 
@@ -816,6 +870,8 @@ void UPrimitiveComponent::OnCreatePhysicsState()
 #endif // WITH_EDITOR
 		}
 	}
+
+	OnComponentPhysicsStateChanged.Broadcast(this, EComponentPhysicsStateChange::Created);
 }	
 
 void UPrimitiveComponent::EnsurePhysicsStateCreated()
@@ -839,7 +895,7 @@ void UPrimitiveComponent::MarkChildPrimitiveComponentRenderStateDirty()
 	// Walk down the tree updating
 	while (ProcessStack.Num() > 0)
 	{
-		if (USceneComponent* Current = ProcessStack.Pop(/*bAllowShrinking=*/ false))
+		if (USceneComponent* Current = ProcessStack.Pop(EAllowShrinking::No))
 		{
 			if (UPrimitiveComponent* CurrentPrimitive = Cast<UPrimitiveComponent>(Current))
 			{
@@ -851,6 +907,26 @@ void UPrimitiveComponent::MarkChildPrimitiveComponentRenderStateDirty()
 	}
 }
 
+
+void UPrimitiveComponent::ConditionalNotifyStreamingPrimitiveUpdated_Concurrent() const
+{
+	// Components are either registered as static or dynamic in the streaming manager.
+	// Static components are registered in batches the first frame the level becomes visible (or incrementally each frame when loaded but not yet visible). 
+	// The level static streaming data is never updated after this, and gets reused whenever the level becomes visible again (after being hidden).
+	// Dynamic components, on the other hand, are updated whenever their render states change.
+	// The following logic handles all cases where static components should fallback on the dynamic path.
+	// It is based on a design where each component must either have bHandledByStreamingManagerAsDynamic or bAttachedToStreamingManagerAsStatic set.
+	// If this is not the case, then the component has never been handled before.
+	// The bIgnoreStreamingManagerUpdate flag is used to prevent handling component that are already in the update list or that don't have streaming data.
+	if (!bIgnoreStreamingManagerUpdate && (Mobility != EComponentMobility::Static || bHandledByStreamingManagerAsDynamic || (!bAttachedToStreamingManagerAsStatic && OwnerLevelHasRegisteredStaticComponentsInStreamingManager(GetOwner()))))
+	{
+		FStreamingManagerCollection* Collection = IStreamingManager::Get_Concurrent();
+		if (Collection)
+		{
+			Collection->NotifyPrimitiveUpdated_Concurrent(this);
+		}
+	}
+}
 
 bool UPrimitiveComponent::IsWelded() const
 {
@@ -887,6 +963,10 @@ void UPrimitiveComponent::OnDestroyPhysicsState()
 	UnWeldFromParent();
 	UnWeldChildren();
 
+	// Remove all user defined entities here
+	TArray<Chaos::FPhysicsObject*> PhysicsObjects = GetAllPhysicsObjects();
+	FPhysicsObjectExternalInterface::LockWrite(PhysicsObjects)->SetUserDefinedEntity(PhysicsObjects, nullptr);
+
 	// clean up physics engine representation
 	if(BodyInstance.IsValidBodyInstance())
 	{
@@ -894,37 +974,50 @@ void UPrimitiveComponent::OnDestroyPhysicsState()
 		BodyInstance.TermBody();
 	}
 
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#if UE_ENABLE_DEBUG_DRAWING
 	SendRenderDebugPhysics();
 #endif
 
 	Super::OnDestroyPhysicsState();
+
+	OnComponentPhysicsStateChanged.Broadcast(this, EComponentPhysicsStateChange::Destroyed);
 }
 
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#if UE_ENABLE_DEBUG_DRAWING
+static void AppendDebugMassData(UPrimitiveComponent* Component, TArray<FPrimitiveSceneProxy::FDebugMassData>& DebugMassData)
+{
+	if (!Component->IsWelded() && Component->Mobility != EComponentMobility::Static)
+	{
+		if (FBodyInstance* BI = Component->GetBodyInstance())
+		{
+			if (BI->IsValidBodyInstance())
+			{
+				DebugMassData.AddDefaulted();
+				FPrimitiveSceneProxy::FDebugMassData& RootMassData = DebugMassData.Last();
+				const FTransform MassToWorld = BI->GetMassSpaceToWorldSpace();
+
+				RootMassData.LocalCenterOfMass = Component->GetComponentTransform().InverseTransformPosition(MassToWorld.GetLocation());
+				RootMassData.LocalTensorOrientation = MassToWorld.GetRotation() * Component->GetComponentTransform().GetRotation().Inverse();
+				RootMassData.MassSpaceInertiaTensor = BI->GetBodyInertiaTensor();
+				RootMassData.BoneIndex = INDEX_NONE;
+			}
+		}
+	}
+}
+
 void UPrimitiveComponent::SendRenderDebugPhysics(FPrimitiveSceneProxy* OverrideSceneProxy)
 {
+	// For bulk reregistering, this is handled in the FStaticMeshComponentBulkReregisterContext constructor / destructor
+	if (bBulkReregister)
+	{
+		return;
+	}
+
 	FPrimitiveSceneProxy* UseSceneProxy = OverrideSceneProxy ? OverrideSceneProxy : SceneProxy;
 	if (UseSceneProxy)
 	{
 		TArray<FPrimitiveSceneProxy::FDebugMassData> DebugMassData;
-		if (!IsWelded() && Mobility != EComponentMobility::Static)
-		{
-			if (FBodyInstance* BI = GetBodyInstance())
-			{
-				if (BI->IsValidBodyInstance())
-				{
-					DebugMassData.AddDefaulted();
-					FPrimitiveSceneProxy::FDebugMassData& RootMassData = DebugMassData[0];
-					const FTransform MassToWorld = BI->GetMassSpaceToWorldSpace();
-
-					RootMassData.LocalCenterOfMass = GetComponentTransform().InverseTransformPosition(MassToWorld.GetLocation());
-					RootMassData.LocalTensorOrientation = MassToWorld.GetRotation() * GetComponentTransform().GetRotation().Inverse();
-					RootMassData.MassSpaceInertiaTensor = BI->GetBodyInertiaTensor();
-					RootMassData.BoneIndex = INDEX_NONE;
-				}
-			}
-		}
+		AppendDebugMassData(this, DebugMassData);
 
 		FPrimitiveSceneProxy* PassedSceneProxy = UseSceneProxy;
 		TArray<FPrimitiveSceneProxy::FDebugMassData> UseDebugMassData = DebugMassData;
@@ -935,7 +1028,54 @@ void UPrimitiveComponent::SendRenderDebugPhysics(FPrimitiveSceneProxy* OverrideS
 			});
 	}
 }
-#endif
+
+void UPrimitiveComponent::BatchSendRenderDebugPhysics(TArrayView<UPrimitiveComponent*> InPrimitives)
+{
+	TArray<FPrimitiveSceneProxy*> SceneProxies;
+	TArray<uint32> DebugMassCounts;
+	TArray<FPrimitiveSceneProxy::FDebugMassData> DebugMassData;
+
+	SceneProxies.Reserve(InPrimitives.Num());
+	DebugMassCounts.Reserve(InPrimitives.Num());
+	DebugMassData.Reserve(InPrimitives.Num());
+
+	for (int32 PrimitiveIndex = 0; PrimitiveIndex < InPrimitives.Num(); PrimitiveIndex++)
+	{
+		if (InPrimitives[PrimitiveIndex]->SceneProxy)
+		{
+			SceneProxies.Add(InPrimitives[PrimitiveIndex]->SceneProxy);
+
+			uint32 NumDebugMassDataBefore = DebugMassData.Num();
+			AppendDebugMassData(InPrimitives[PrimitiveIndex], DebugMassData);
+			DebugMassCounts.Add(DebugMassData.Num() - NumDebugMassDataBefore);
+		}
+	}
+
+	if (SceneProxies.Num())
+	{
+		ENQUEUE_RENDER_COMMAND(PrimitiveComponent_BatchSendRenderDebugPhysics)(
+			[SceneProxies = MoveTemp(SceneProxies), DebugMassCounts = MoveTemp(DebugMassCounts), DebugMassData = MoveTemp(DebugMassData)](FRHICommandList& RHICmdList)
+		{
+			TArray<FPrimitiveSceneProxy::FDebugMassData> SingleDebugMassData;
+			uint32 DebugMassOffset = 0;
+
+			for (int32 ProxyIndex = 0; ProxyIndex < SceneProxies.Num(); ProxyIndex++)
+			{
+				uint32 DebugMassCount = DebugMassCounts[ProxyIndex];
+				SingleDebugMassData.SetNumUninitialized(DebugMassCount);
+				for (uint32 DebugMassIndex = 0; DebugMassIndex < DebugMassCount; DebugMassIndex++)
+				{
+					SingleDebugMassData[DebugMassIndex] = DebugMassData[DebugMassOffset + DebugMassIndex];
+				}
+
+				SceneProxies[ProxyIndex]->SetDebugMassData(SingleDebugMassData);
+
+				DebugMassOffset += DebugMassCount;
+			}
+		});
+	}
+}
+#endif  // UE_ENABLE_DEBUG_DRAWING
 
 FMatrix UPrimitiveComponent::GetRenderMatrix() const
 {
@@ -947,7 +1087,12 @@ void UPrimitiveComponent::Serialize(FArchive& Ar)
 	Super::Serialize(Ar);
 	Ar.UsingCustomVersion(FRenderingObjectVersion::GUID);
 	Ar.UsingCustomVersion(FFortniteMainBranchObjectVersion::GUID);
+	Ar.UsingCustomVersion(FUE5PrivateFrostyStreamObjectVersion::GUID);
 
+	// This causes other issues with blueprint components (FORT-506503)
+	// See UStaticMeshComponent::Serialize for a workaround.
+	// CollisionProfile serialization needs some cleanup (UE-163199)
+	// 
 	// as temporary fix for the bug TTP 299926
 	// permanent fix is coming
 	if (Ar.IsLoading() && IsTemplate())
@@ -962,6 +1107,29 @@ void UPrimitiveComponent::Serialize(FArchive& Ar)
 			LightmapType = ELightmapType::ForceSurface;
 		}
 	}
+
+#if WITH_EDITORONLY_DATA
+	if (Ar.CustomVer(FUE5PrivateFrostyStreamObjectVersion::GUID) < FUE5PrivateFrostyStreamObjectVersion::HLODBatchingPolicy)
+	{
+		if (bUseMaxLODAsImposter_DEPRECATED)
+		{
+			HLODBatchingPolicy = EHLODBatchingPolicy::MeshSection;
+		}
+
+		if (bBatchImpostersAsInstances_DEPRECATED)
+		{
+			HLODBatchingPolicy = EHLODBatchingPolicy::Instancing;
+		}
+	}
+
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+	if (Ar.IsLoading() && !ExcludeForSpecificHLODLevels_DEPRECATED.IsEmpty())
+	{
+		SetExcludeForSpecificHLODLevels(ExcludeForSpecificHLODLevels_DEPRECATED);
+		ExcludeForSpecificHLODLevels_DEPRECATED.Empty();
+	}
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+#endif
 }
 
 #if WITH_EDITOR
@@ -1019,8 +1187,6 @@ void UPrimitiveComponent::PostEditChangeProperty(FPropertyChangedEvent& Property
 		LightmapType = ELightmapType::Default;
 	}
 
-	Super::PostEditChangeProperty(PropertyChangedEvent);
-
 	if (bCullDistanceInvalidated)
 	{
 		// Directly use LD cull distance if cull distance volumes are disabled or if the primitive isn't static
@@ -1051,6 +1217,8 @@ void UPrimitiveComponent::PostEditChangeProperty(FPropertyChangedEvent& Property
 		// Reattach to propagate cull distance change.
 		SetCachedMaxDrawDistance(NewCachedMaxDrawDistance);
 	}
+
+	Super::PostEditChangeProperty(PropertyChangedEvent);
 
 	// update component, ActorComponent's property update locks navigation system 
 	// so it needs to be called directly here
@@ -1103,8 +1271,7 @@ bool UPrimitiveComponent::CanEditChange(const FProperty* InProperty) const
 
 		if (PropertyName == GET_MEMBER_NAME_CHECKED(UPrimitiveComponent, LightmapType))
 		{
-			static const auto AllowStaticLightingVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.AllowStaticLighting"));
-			return AllowStaticLightingVar->GetValueOnAnyThread() != 0;
+			return IsStaticLightingAllowed();
 		}
 
 		if (PropertyName == CastInsetShadowName)
@@ -1156,6 +1323,29 @@ void UPrimitiveComponent::CheckForErrors()
 			->AddToken(FTextToken::Create(LOCTEXT( "MapCheck_Message_InvalidLightmapSettings", "Component is a static type but has invalid lightmap settings!  Indirect lighting will be black.  Common causes are lightmap resolution of 0, LightmapCoordinateIndex out of bounds." )))
 			->AddToken(FMapErrorToken::Create(FMapErrors::StaticComponentHasInvalidLightmapSettings));
 	}
+
+	static const auto CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Shadow.TranslucentPerObject.ProjectEnabled"));
+	if (bCastVolumetricTranslucentShadow && CastShadow && bCastDynamicShadow && CVar && CVar->GetInt() == 0)
+	{
+		FMessageLog("MapCheck").Warning()
+			->AddToken(FUObjectToken::Create(Owner))
+			->AddToken(FTextToken::Create(LOCTEXT( "MapCheck_Message_NoTranslucentShadowSupport", "Component is a using CastVolumetricTranslucentShadow but this feature is disabled for the project! Turn on r.Shadow.TranslucentPerObject.ProjectEnabled in a project ini if required." )))
+			->AddToken(FMapErrorToken::Create(FMapErrors::PrimitiveComponentHasInvalidTranslucentShadowSetting));
+	}
+}
+
+void UPrimitiveComponent::GetActorDescProperties(FPropertyPairsMap& PropertyPairsMap) const
+{
+	Super::GetActorDescProperties(PropertyPairsMap);
+
+	for (URuntimeVirtualTexture* RuntimeVirtualTexture : RuntimeVirtualTextures)
+	{
+		if (RuntimeVirtualTexture)
+		{
+			PropertyPairsMap.AddProperty(UPrimitiveComponent::RVTActorDescProperty);
+			return;
+		}
+	}
 }
 
 void UPrimitiveComponent::UpdateCollisionProfile()
@@ -1204,7 +1394,7 @@ void UPrimitiveComponent::PostLoad()
 {
 	Super::PostLoad();
 	
-	int32 const UE4Version = GetLinkerUE4Version();
+	FPackageFileVersion const UEVersion = GetLinkerUEVersion();
 
 	// as temporary fix for the bug TTP 299926
 	// permanent fix is coming
@@ -1214,7 +1404,7 @@ void UPrimitiveComponent::PostLoad()
 	}
 
 #if WITH_EDITORONLY_DATA
-	if (UE4Version < VER_UE4_RENAME_CANBECHARACTERBASE)
+	if (UEVersion < VER_UE4_RENAME_CANBECHARACTERBASE)
 	{
 		CanCharacterStepUpOn = CanBeCharacterBase_DEPRECATED;
 	}
@@ -1257,6 +1447,23 @@ void UPrimitiveComponent::PostDuplicate(bool bDuplicateForPIE)
 	Super::PostDuplicate(bDuplicateForPIE);
 }
 
+static int32 GEnableAutoDetectNoStreamableTextures = 1;
+static FAutoConsoleVariableRef CVarEnableAutoDetectNoStreamableTextures(
+	TEXT("r.Streaming.EnableAutoDetectNoStreamableTextures"),
+	GEnableAutoDetectNoStreamableTextures,
+	TEXT("Enables auto-detection at cook time of primitive components with no streamable textures. Can also be turned-off at runtime to skip optimisation."),
+	ECVF_Default
+);
+
+bool UPrimitiveComponent::CanSkipGetTextureStreamingRenderAssetInfo() const
+{
+#if WITH_EDITOR
+	return false;
+#else
+	return GEnableAutoDetectNoStreamableTextures && bHasNoStreamableTextures;
+#endif
+}
+
 #if WITH_EDITOR
 /**
  * Called after importing property values for this object (paste, duplicate or .t3d import)
@@ -1279,12 +1486,63 @@ void UPrimitiveComponent::PostEditImport()
 	// Setup the transient internal primitive data array here after import (to support duplicate/paste)
 	ResetCustomPrimitiveData();
 }
+
+void UPrimitiveComponent::PreSave(const class ITargetPlatform* TargetPlatform)
+{
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+	Super::PreSave(TargetPlatform);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void UPrimitiveComponent::PreSave(FObjectPreSaveContext ObjectSaveContext)
+{
+	Super::PreSave(ObjectSaveContext);
+
+	if (!IsTemplate() && ObjectSaveContext.IsCooking())
+	{
+		// Reset flag
+		bHasNoStreamableTextures = false;
+
+		if (!GEnableAutoDetectNoStreamableTextures || (Mobility != EComponentMobility::Static))
+		{
+			return;
+		}
+
+		TArray<UMaterialInterface*> Materials;
+		GetUsedMaterials(Materials);
+		if (Materials.IsEmpty())
+		{
+			return;
+		}
+
+		TSet<const UTexture*> Textures;
+		for (UMaterialInterface* Material : Materials)
+		{
+			if (Material)
+			{
+				Material->GetReferencedTexturesAndOverrides(Textures);
+			}
+		}
+
+		bool bHasStreamableTextures = false;
+		for (const UTexture* Texture : Textures)
+		{
+			if (Texture && Texture->IsCandidateForTextureStreamingOnPlatformDuringCook(ObjectSaveContext.GetTargetPlatform()))
+			{
+				bHasStreamableTextures = true;
+				break;
+			}
+		}
+
+		bHasNoStreamableTextures = !bHasStreamableTextures;
+	}
+}
 #endif
 
 void UPrimitiveComponent::BeginDestroy()
 {
 	// Whether static or dynamic, all references need to be freed
-	if (IsAttachedToStreamingManager())
+	if (IsAttachedToStreamingManager() || bAttachedToCoarseMeshStreamingManager)
 	{
 		IStreamingManager::Get().NotifyPrimitiveDetached(this);
 	}
@@ -1293,11 +1551,16 @@ void UPrimitiveComponent::BeginDestroy()
 
 	// Use a fence to keep track of when the rendering thread executes this scene detachment.
 	DetachFence.BeginFence();
+	
+#if !UE_STRIP_DEPRECATED_PROPERTIES
 	AActor* Owner = GetOwner();
 	if(Owner)
 	{
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		Owner->DetachFence.BeginFence();
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
+#endif
 }
 
 void UPrimitiveComponent::OnComponentDestroyed(bool bDestroyingHierarchy)
@@ -1325,7 +1588,7 @@ bool UPrimitiveComponent::IsReadyForFinishDestroy()
 void UPrimitiveComponent::FinishDestroy()
 {
 	// The detach fence has cleared so we better not be attached to the scene.
-	check(AttachmentCounter.GetValue() == 0);
+	check(SceneData.AttachmentCounter.GetValue() == 0);
 	Super::FinishDestroy();
 }
 
@@ -1375,7 +1638,15 @@ void UPrimitiveComponent::SetOnlyOwnerSee(bool bNewOnlyOwnerSee)
 bool UPrimitiveComponent::ShouldComponentAddToScene() const
 {
 	bool bSceneAdd = USceneComponent::ShouldComponentAddToScene();
-	return bSceneAdd && (ShouldRender() || bCastHiddenShadow);
+
+#if WITH_EDITOR
+	AActor* Owner = GetOwner();
+	const bool bIsHiddenInEditor = GIsEditor && Owner && Owner->IsHiddenEd();
+#else
+	const bool bIsHiddenInEditor = false;
+#endif
+
+	return bSceneAdd && (ShouldRender() || (bCastHiddenShadow && !bIsHiddenInEditor) || bAffectIndirectLightingWhileHidden || bRayTracingFarField);
 }
 
 bool UPrimitiveComponent::ShouldCreatePhysicsState() const
@@ -1440,22 +1711,31 @@ bool UPrimitiveComponent::ShouldRenderSelected() const
 	{
 		if (const AActor* Owner = GetOwner())
 		{
-			if (Owner->IsSelected())
-			{
-				return true;
-			}
-			else if (Owner->IsChildActor())
-			{
-				AActor* ParentActor = Owner->GetParentActor();
-				while (ParentActor->IsChildActor())
-				{
-					ParentActor = ParentActor->GetParentActor();
-				}
-				return ParentActor->IsSelected();
-			}
+			return Owner->IsActorOrSelectionParentSelected();
 		}
 	}
 	return false;
+}
+
+bool UPrimitiveComponent::GetLevelInstanceEditingState() const
+{
+#if WITH_EDITOR
+	if (const AActor* Owner = GetOwner())
+	{
+		return Owner->IsInEditLevelInstanceHierarchy();
+	}
+#endif
+
+	return false;
+}
+
+void UPrimitiveComponent::SetVisibleInRayTracing(bool bNewVisibleInRayTracing)
+{
+	if (bNewVisibleInRayTracing != bVisibleInRayTracing)
+	{
+		bVisibleInRayTracing = bNewVisibleInRayTracing;
+		MarkRenderStateDirty();
+	}
 }
 
 void UPrimitiveComponent::SetCastShadow(bool NewCastShadow)
@@ -1463,6 +1743,15 @@ void UPrimitiveComponent::SetCastShadow(bool NewCastShadow)
 	if(NewCastShadow != CastShadow)
 	{
 		CastShadow = NewCastShadow;
+		MarkRenderStateDirty();
+	}
+}
+
+void UPrimitiveComponent::SetEmissiveLightSource(bool NewEmissiveLightSource)
+{
+	if(NewEmissiveLightSource != bEmissiveLightSource)
+	{
+		bEmissiveLightSource = NewEmissiveLightSource;
 		MarkRenderStateDirty();
 	}
 }
@@ -1481,6 +1770,15 @@ void UPrimitiveComponent::SetCastInsetShadow(bool bInCastInsetShadow)
 	if(bInCastInsetShadow != bCastInsetShadow)
 	{
 		bCastInsetShadow = bInCastInsetShadow;
+		MarkRenderStateDirty();
+	}
+}
+
+void UPrimitiveComponent::SetCastContactShadow(bool bInCastContactShadow)
+{
+	if (bInCastContactShadow != bCastContactShadow)
+	{
+		bCastContactShadow = bInCastContactShadow;
 		MarkRenderStateDirty();
 	}
 }
@@ -1522,6 +1820,15 @@ void UPrimitiveComponent::SetTranslucentSortPriority(int32 NewTranslucentSortPri
 	}
 }
 
+void UPrimitiveComponent::SetAffectDistanceFieldLighting(bool NewAffectDistanceFieldLighting)
+{
+	if(NewAffectDistanceFieldLighting != bAffectDistanceFieldLighting)
+	{
+		bAffectDistanceFieldLighting = NewAffectDistanceFieldLighting;
+		MarkRenderStateDirty();
+	}
+}
+
 void UPrimitiveComponent::SetTranslucencySortDistanceOffset(float NewTranslucencySortDistanceOffset)
 {
 	if ( !FMath::IsNearlyEqual(NewTranslucencySortDistanceOffset, TranslucencySortDistanceOffset) )
@@ -1540,16 +1847,52 @@ void UPrimitiveComponent::SetReceivesDecals(bool bNewReceivesDecals)
 	}
 }
 
+void UPrimitiveComponent::SetHoldout(bool bNewHoldout)
+{
+	if (bHoldout != bNewHoldout)
+	{
+		bHoldout = bNewHoldout;
+		MarkRenderStateDirty();
+	}
+}
+
+void UPrimitiveComponent::SetAffectDynamicIndirectLighting(bool bNewAffectDynamicIndirectLighting)
+{
+	if (bAffectDynamicIndirectLighting != bNewAffectDynamicIndirectLighting)
+	{
+		bAffectDynamicIndirectLighting = bNewAffectDynamicIndirectLighting;
+		MarkRenderStateDirty();
+	}
+}
+
+
+void UPrimitiveComponent::SetAffectIndirectLightingWhileHidden(bool bNewAffectIndirectLightingWhileHidden)
+{
+	if (bAffectIndirectLightingWhileHidden != bNewAffectIndirectLightingWhileHidden)
+	{
+		bAffectIndirectLightingWhileHidden = bNewAffectIndirectLightingWhileHidden;
+		MarkRenderStateDirty();
+	}
+}
+
 
 void UPrimitiveComponent::PushSelectionToProxy()
 {
 	//although this should only be called for attached components, some billboard components can get in without valid proxies
 	if (SceneProxy)
 	{
-		SceneProxy->SetSelection_GameThread(ShouldRenderSelected(),IsComponentIndividuallySelected());
+		SceneProxy->SetSelection_GameThread(ShouldRenderSelected(), IsComponentIndividuallySelected());
 	}
 }
 
+void UPrimitiveComponent::PushLevelInstanceEditingStateToProxy(bool bInEditingState)
+{
+	//although this should only be called for attached components, some billboard components can get in without valid proxies
+	if (SceneProxy)
+	{
+		SceneProxy->SetLevelInstanceEditingState_GameThread(bInEditingState);
+	}
+}
 
 void UPrimitiveComponent::PushEditorVisibilityToProxy( uint64 InVisibility )
 {
@@ -1560,13 +1903,53 @@ void UPrimitiveComponent::PushEditorVisibilityToProxy( uint64 InVisibility )
 	}
 }
 
+#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+void UPrimitiveComponent::PushPrimitiveColorToProxy(const FLinearColor& InPrimitiveColor)
+{
+	//although this should only be called for attached components, some billboard components can get in without valid proxies
+	if (SceneProxy)
+	{
+		SceneProxy->SetPrimitiveColor_GameThread(InPrimitiveColor);
+	}
+}
+#endif
+
 #if WITH_EDITOR
 uint64 UPrimitiveComponent::GetHiddenEditorViews() const
 {
 	const AActor* OwnerActor = GetOwner();
 	return OwnerActor ? OwnerActor->HiddenEditorViews : 0;
 }
+
+void UPrimitiveComponent::SetIsBeingMovedByEditor(bool bIsBeingMoved)
+{
+	bIsBeingMovedByEditor = bIsBeingMoved;
+
+	if (SceneProxy)
+	{
+		SceneProxy->SetIsBeingMovedByEditor_GameThread(bIsBeingMoved);
+	}
+}
+
+void UPrimitiveComponent::SetSelectionOutlineColorIndex(uint8 InSelectionOutlineColorIndex)
+{
+	SelectionOutlineColorIndex = InSelectionOutlineColorIndex;
+	
+	if (SceneProxy)
+	{
+		SceneProxy->SetSelectionOutlineColorIndex_GameThread(InSelectionOutlineColorIndex);
+	}
+}
+
 #endif// WITH_EDITOR
+
+void UPrimitiveComponent::ResetSceneVelocity()
+{
+	if (SceneProxy)
+	{
+		SceneProxy->ResetSceneVelocity_GameThread();
+	}
+}
 
 void UPrimitiveComponent::PushHoveredToProxy(const bool bInHovered)
 {
@@ -1609,7 +1992,11 @@ void UPrimitiveComponent::SetCachedMaxDrawDistance(const float NewCachedMaxDrawD
 	if( !FMath::IsNearlyEqual(CachedMaxDrawDistance, NewMaxDrawDistance) )
 	{
 		CachedMaxDrawDistance = NewMaxDrawDistance;
-		MarkRenderStateDirty();
+		
+		if (GetScene() && SceneProxy)
+		{
+			GetScene()->UpdatePrimitiveDrawDistance(this, MinDrawDistance, NewMaxDrawDistance, GetVirtualTextureMainPassMaxDrawDistance());
+		}
 	}
 }
 
@@ -1659,19 +2046,46 @@ void UPrimitiveComponent::SetBoundsScale(float NewBoundsScale)
 
 UMaterialInterface* UPrimitiveComponent::GetMaterial(int32 Index) const
 {
-	return NULL;
+	// This function should be overridden
+	return nullptr;
+}
+
+int32 UPrimitiveComponent::GetMaterialIndex(FName MaterialSlotName) const
+{
+	// This function should be overridden
+	return INDEX_NONE;
+}
+
+TArray<FName> UPrimitiveComponent::GetMaterialSlotNames() const
+{
+	// This function should be overridden
+	return TArray<FName>();
+}
+
+bool UPrimitiveComponent::IsMaterialSlotNameValid(FName MaterialSlotName) const
+{
+	// This function should be overridden
+	return false;
+}
+
+UMaterialInterface* UPrimitiveComponent::GetMaterialByName(FName MaterialSlotName) const
+{
+	return nullptr;
 }
 
 void UPrimitiveComponent::SetMaterial(int32 Index, UMaterialInterface* InMaterial)
 {
+	// This function should be overridden
 }
 
 void UPrimitiveComponent::SetMaterialByName(FName MaterialSlotName, class UMaterialInterface* Material)
 {
+	// This function should be overridden
 }
 
 int32 UPrimitiveComponent::GetNumMaterials() const
 {
+	// This function should be overridden
 	return 0;
 }
 
@@ -1787,6 +2201,65 @@ void UPrimitiveComponent::SetDefaultCustomPrimitiveData(int32 DataIndex, const T
 	}
 }
 
+int32 UPrimitiveComponent::GetCustomPrimitiveDataIndexForScalarParameter(FName ParameterName) const
+{
+	const int32 NumMaterials = GetNumMaterials();
+
+	for (int32 i = 0; i < NumMaterials; ++i)
+	{
+		if (UMaterialInterface* Material = GetMaterial(i))
+		{
+			FMaterialParameterMetadata ParameterMetadata;
+			if (Material->GetParameterValue(EMaterialParameterType::Scalar, FMemoryImageMaterialParameterInfo(ParameterName), ParameterMetadata, EMaterialGetParameterValueFlags::CheckAll))
+			{
+				return ParameterMetadata.PrimitiveDataIndex;
+			}
+		}
+	}
+
+	return INDEX_NONE;
+}
+
+int32 UPrimitiveComponent::GetCustomPrimitiveDataIndexForVectorParameter(FName ParameterName) const
+{
+	const int32 NumMaterials = GetNumMaterials();
+
+	for (int32 i = 0; i < NumMaterials; ++i)
+	{
+		if (UMaterialInterface* Material = GetMaterial(i))
+		{
+			FMaterialParameterMetadata ParameterMetadata;
+			if (Material->GetParameterValue(EMaterialParameterType::Vector, FMemoryImageMaterialParameterInfo(ParameterName), ParameterMetadata, EMaterialGetParameterValueFlags::CheckAll))
+			{
+				return ParameterMetadata.PrimitiveDataIndex;
+			}
+		}
+	}
+
+	return INDEX_NONE;
+}
+
+void UPrimitiveComponent::SetScalarParameterForCustomPrimitiveData(FName ParameterName, float Value)
+{
+	int32 PrimitiveDataIndex = GetCustomPrimitiveDataIndexForScalarParameter(ParameterName);
+
+	if (PrimitiveDataIndex > INDEX_NONE)
+	{
+		SetCustomPrimitiveDataInternal(PrimitiveDataIndex, {Value});
+	}
+}
+
+void UPrimitiveComponent::SetVectorParameterForCustomPrimitiveData(FName ParameterName, FVector4 Value)
+{
+	const int32 PrimitiveDataIndex = GetCustomPrimitiveDataIndexForVectorParameter(ParameterName);
+
+	if (PrimitiveDataIndex > INDEX_NONE)
+	{	// LWC_TODO: precision loss
+		FVector4f ValueFlt(Value);
+		SetCustomPrimitiveDataInternal(PrimitiveDataIndex, { ValueFlt.X, ValueFlt.Y, ValueFlt.Z, ValueFlt.W });
+	}
+}
+
 void UPrimitiveComponent::SetCustomPrimitiveDataFloat(int32 DataIndex, float Value)
 {
 	SetCustomPrimitiveDataInternal(DataIndex, {Value});
@@ -1794,17 +2267,45 @@ void UPrimitiveComponent::SetCustomPrimitiveDataFloat(int32 DataIndex, float Val
 
 void UPrimitiveComponent::SetCustomPrimitiveDataVector2(int32 DataIndex, FVector2D Value)
 {
-	SetCustomPrimitiveDataInternal(DataIndex, {Value.X, Value.Y});
+	// LWC_TODO: precision loss
+	FVector2f ValueFlt(Value);
+	SetCustomPrimitiveDataInternal(DataIndex, {ValueFlt.X, ValueFlt.Y});
 }
 
 void UPrimitiveComponent::SetCustomPrimitiveDataVector3(int32 DataIndex, FVector Value)
 {
-	SetCustomPrimitiveDataInternal(DataIndex, {Value.X, Value.Y, Value.Z});
+	// LWC_TODO: precision loss
+	FVector3f ValueFlt(Value);
+	SetCustomPrimitiveDataInternal(DataIndex, {ValueFlt.X, ValueFlt.Y, ValueFlt.Z});
 }
 
 void UPrimitiveComponent::SetCustomPrimitiveDataVector4(int32 DataIndex, FVector4 Value)
 {
-	SetCustomPrimitiveDataInternal(DataIndex, {Value.X, Value.Y, Value.Z, Value.W});
+	// LWC_TODO: precision loss
+	FVector4f ValueFlt(Value);
+	SetCustomPrimitiveDataInternal(DataIndex, {ValueFlt.X, ValueFlt.Y, ValueFlt.Z, ValueFlt.W});
+}
+
+void UPrimitiveComponent::SetScalarParameterForDefaultCustomPrimitiveData(FName ParameterName, float Value)
+{
+	int32 PrimitiveDataIndex = GetCustomPrimitiveDataIndexForScalarParameter(ParameterName);
+
+	if (PrimitiveDataIndex > INDEX_NONE)
+	{
+		SetDefaultCustomPrimitiveData(PrimitiveDataIndex, { Value });
+	}
+}
+
+void UPrimitiveComponent::SetVectorParameterForDefaultCustomPrimitiveData(FName ParameterName, FVector4 Value)
+{
+	const int32 PrimitiveDataIndex = GetCustomPrimitiveDataIndexForVectorParameter(ParameterName);
+
+	if (PrimitiveDataIndex > INDEX_NONE)
+	{
+		// LWC_TODO: precision loss
+		FVector4f ValueFlt(Value);
+		SetDefaultCustomPrimitiveData(PrimitiveDataIndex, { ValueFlt.X, ValueFlt.Y, ValueFlt.Z, ValueFlt.W });
+	}
 }
 
 void UPrimitiveComponent::SetDefaultCustomPrimitiveDataFloat(int32 DataIndex, float Value)
@@ -1814,17 +2315,20 @@ void UPrimitiveComponent::SetDefaultCustomPrimitiveDataFloat(int32 DataIndex, fl
 
 void UPrimitiveComponent::SetDefaultCustomPrimitiveDataVector2(int32 DataIndex, FVector2D Value)
 {
-	SetDefaultCustomPrimitiveData(DataIndex, { Value.X, Value.Y });
+	FVector2f ValueFlt(Value);
+	SetDefaultCustomPrimitiveData(DataIndex, { ValueFlt.X, ValueFlt.Y });
 }
 
 void UPrimitiveComponent::SetDefaultCustomPrimitiveDataVector3(int32 DataIndex, FVector Value)
 {
-	SetDefaultCustomPrimitiveData(DataIndex, { Value.X, Value.Y, Value.Z });
+	FVector3f ValueFlt(Value);
+	SetDefaultCustomPrimitiveData(DataIndex, { ValueFlt.X, ValueFlt.Y, ValueFlt.Z });
 }
 
 void UPrimitiveComponent::SetDefaultCustomPrimitiveDataVector4(int32 DataIndex, FVector4 Value)
 {
-	SetDefaultCustomPrimitiveData(DataIndex, { Value.X, Value.Y, Value.Z, Value.W });
+	FVector4f ValueFlt(Value);
+	SetDefaultCustomPrimitiveData(DataIndex, { ValueFlt.X, ValueFlt.Y, ValueFlt.Z, ValueFlt.W });
 }
 
 UMaterialInterface* UPrimitiveComponent::GetMaterialFromCollisionFaceIndex(int32 FaceIndex, int32& SectionIndex) const
@@ -1973,7 +2477,7 @@ static bool ShouldIgnoreHitResult(const UWorld* InWorld, FHitResult const& TestH
 		if ( (MoveFlags & MOVECOMP_IgnoreBases) && MovingActor )	//we let overlap components go through because their overlap is still needed and will cause beginOverlap/endOverlap events
 		{
 			// ignore if there's a base relationship between moving actor and hit actor
-			AActor const* const HitActor = TestHit.GetActor();
+			AActor const* const HitActor = TestHit.HitObjectHandle.FetchActor();
 			if (HitActor)
 			{
 				if (MovingActor->IsBasedOnActor(HitActor) || HitActor->IsBasedOnActor(MovingActor))
@@ -1985,9 +2489,9 @@ static bool ShouldIgnoreHitResult(const UWorld* InWorld, FHitResult const& TestH
 	
 		// If we started penetrating, we may want to ignore it if we are moving out of penetration.
 		// This helps prevent getting stuck in walls.
-		if ( (TestHit.Distance < HitDistanceToleranceCVar || TestHit.bStartPenetrating) && !(MoveFlags & MOVECOMP_NeverIgnoreBlockingOverlaps) )
+		if ( (TestHit.Distance < PrimitiveComponentCVars::HitDistanceToleranceCVar || TestHit.bStartPenetrating) && !(MoveFlags & MOVECOMP_NeverIgnoreBlockingOverlaps) )
 		{
- 			const float DotTolerance = InitialOverlapToleranceCVar;
+ 			const float DotTolerance = PrimitiveComponentCVars::InitialOverlapToleranceCVar;
 
 			// Dot product of movement direction against 'exit' direction
 			const FVector MovementDir = MovementDirDenormalized.GetSafeNormal();
@@ -2001,7 +2505,7 @@ static bool ShouldIgnoreHitResult(const UWorld* InWorld, FHitResult const& TestH
 				{
 					UE_LOG(LogTemp, Log, TEXT("Overlapping %s Dir %s Dot %f Normal %s Depth %f"), *GetNameSafe(TestHit.Component.Get()), *MovementDir.ToString(), MoveDot, *TestHit.ImpactNormal.ToString(), TestHit.PenetrationDepth);
 					DrawDebugDirectionalArrow(InWorld, TestHit.TraceStart, TestHit.TraceStart + 30.f * TestHit.ImpactNormal, 5.f, bMovingOut ? FColor(64,128,255) : FColor(255,64,64), false, 4.f);
-					if (TestHit.PenetrationDepth > KINDA_SMALL_NUMBER)
+					if (TestHit.PenetrationDepth > UE_KINDA_SMALL_NUMBER)
 					{
 						DrawDebugDirectionalArrow(InWorld, TestHit.TraceStart, TestHit.TraceStart + TestHit.PenetrationDepth * TestHit.Normal, 5.f, FColor(64,255,64), false, 4.f);
 					}
@@ -2020,21 +2524,7 @@ static bool ShouldIgnoreHitResult(const UWorld* InWorld, FHitResult const& TestH
 	return false;
 }
 
-
-// Returns true if we should check the GetGenerateOverlapEvents() flag when gathering overlaps, otherwise we'll always just do it.
-static FORCEINLINE_DEBUGGABLE bool ShouldCheckOverlapFlagToQueueOverlaps(const UPrimitiveComponent& ThisComponent)
-{
-	const FScopedMovementUpdate* CurrentUpdate = ThisComponent.GetCurrentScopedMovement();
-	if (CurrentUpdate)
-	{
-		return CurrentUpdate->RequiresOverlapsEventFlag();
-	}
-	// By default we require the GetGenerateOverlapEvents() to queue up overlaps, since we require it to trigger events.
-	return true;
-}
-
-
-static FORCEINLINE_DEBUGGABLE bool ShouldIgnoreOverlapResult(const UWorld* World, const AActor* ThisActor, const UPrimitiveComponent& ThisComponent, const AActor* OtherActor, const UPrimitiveComponent& OtherComponent, bool bCheckOverlapFlags)
+static FORCEINLINE_DEBUGGABLE bool ShouldIgnoreOverlapResult(const UWorld* World, const AActor* ThisActor, const UPrimitiveComponent& ThisComponent, const FActorInstanceHandle& OtherActor, const UPrimitiveComponent& OtherComponent, bool bCheckOverlapFlags)
 {
 	// Don't overlap with self
 	if (&ThisComponent == &OtherComponent)
@@ -2056,7 +2546,7 @@ static FORCEINLINE_DEBUGGABLE bool ShouldIgnoreOverlapResult(const UWorld* World
 		return true;
 	}
 
-	if (!World || OtherActor == World->GetWorldSettings() || !OtherActor->IsActorInitialized())
+	if (!World || OtherActor == World->GetWorldSettings() || (OtherActor.GetCachedActor() && !OtherActor.GetCachedActor()->IsActorInitialized()))
 	{
 		return true;
 	}
@@ -2081,6 +2571,27 @@ void UPrimitiveComponent::SetMoveIgnoreMask(FMaskFilter InMoveIgnoreMask)
 	{
 		MoveIgnoreMask = InMoveIgnoreMask;
 	}
+}
+
+bool UPrimitiveComponent::ShouldComponentIgnoreHitResult(FHitResult const& TestHit, EMoveComponentFlags MoveFlags)
+{
+	// Check if the hit actors root actor is in the ignore array
+	if (MoveFlags & MOVECOMP_CheckBlockingRootActorInIgnoreList)
+	{
+		AActor const* const HitActor = TestHit.HitObjectHandle.FetchActor();
+		if (HitActor)
+		{
+			if (USceneComponent* RootSceneComp = HitActor->GetRootComponent())
+			{
+				if (AActor* RootActor = RootSceneComp->GetAttachmentRootActor())
+				{
+					return MoveIgnoreActors.Contains(RootActor);
+				}
+			}
+		}
+	}
+
+	return false;
 }
 
 FCollisionShape UPrimitiveComponent::GetCollisionShape(float Inflation) const
@@ -2112,7 +2623,7 @@ bool UPrimitiveComponent::MoveComponentImpl( const FVector& Delta, const FQuat& 
 #endif
 
 	// static things can move before they are registered (e.g. immediately after streaming), but not after.
-	if (IsPendingKill() || CheckStaticMobilityAndWarn(PrimitiveComponentStatics::MobilityWarnText))
+	if (!IsValid(this) || CheckStaticMobilityAndWarn(PrimitiveComponentStatics::MobilityWarnText))
 	{
 		if (OutHit)
 		{
@@ -2130,7 +2641,7 @@ bool UPrimitiveComponent::MoveComponentImpl( const FVector& Delta, const FQuat& 
 	const FQuat InitialRotationQuat = GetComponentTransform().GetRotation();
 
 	// ComponentSweepMulti does nothing if moving < KINDA_SMALL_NUMBER in distance, so it's important to not try to sweep distances smaller than that. 
-	const float MinMovementDistSq = (bSweep ? FMath::Square(4.f*KINDA_SMALL_NUMBER) : 0.f);
+	const float MinMovementDistSq = (bSweep ? FMath::Square(4.f* UE_KINDA_SMALL_NUMBER) : 0.f);
 	if (DeltaSizeSq <= MinMovementDistSq)
 	{
 		// Skip if no vector or rotation.
@@ -2173,18 +2684,19 @@ bool UPrimitiveComponent::MoveComponentImpl( const FVector& Delta, const FQuat& 
 
 		// Perform movement collision checking if needed for this actor.
 		const bool bCollisionEnabled = IsQueryCollisionEnabled();
-		if( bCollisionEnabled && (DeltaSizeSq > 0.f))
+		UWorld* const MyWorld = GetWorld();
+		if (MyWorld && bCollisionEnabled && (DeltaSizeSq > 0.f))
 		{
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
-			if( !IsRegistered() )
+			if(!IsRegistered() && !MyWorld->bIsTearingDown)
 			{
 				if (Actor)
 				{
-					ensureMsgf(IsRegistered(), TEXT("%s MovedComponent %s not initialized deleteme %d"),*Actor->GetName(), *GetName(), Actor->IsPendingKill());
+					ensureMsgf(IsRegistered(), TEXT("%s MovedComponent %s not registered during sweep (IsValid %d)"), *Actor->GetName(), *GetName(), IsValid(Actor));
 				}
 				else
 				{ //-V523
-					ensureMsgf(IsRegistered(), TEXT("MovedComponent %s not initialized"), *GetFullName());
+					ensureMsgf(IsRegistered(), TEXT("Non-actor MovedComponent %s not registered during sweep"), *GetFullName());
 				}
 			}
 #endif
@@ -2192,8 +2704,6 @@ bool UPrimitiveComponent::MoveComponentImpl( const FVector& Delta, const FQuat& 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST) && PERF_MOVECOMPONENT_STATS
 			MoveTimer.bDidLineCheck = true;
 #endif 
-			UWorld* const MyWorld = GetWorld();
-
 			static const FName TraceTagName = TEXT("MoveComponent");
 			const bool bForceGatherOverlaps = !ShouldCheckOverlapFlagToQueueOverlaps(*this);
 			FComponentQueryParams Params(SCENE_QUERY_STAT(MoveComponent), Actor);
@@ -2201,6 +2711,7 @@ bool UPrimitiveComponent::MoveComponentImpl( const FVector& Delta, const FQuat& 
 			InitSweepCollisionParams(Params, ResponseParam);
 			Params.bIgnoreTouches |= !(GetGenerateOverlapEvents() || bForceGatherOverlaps);
 			Params.TraceTag = TraceTagName;
+
 			bool const bHadBlockingHit = MyWorld->ComponentSweepMulti(Hits, this, TraceStart, TraceEnd, InitialRotationQuat, Params);
 
 			if (Hits.Num() > 0)
@@ -2218,14 +2729,14 @@ bool UPrimitiveComponent::MoveComponentImpl( const FVector& Delta, const FQuat& 
 			if (bHadBlockingHit || (GetGenerateOverlapEvents() || bForceGatherOverlaps))
 			{
 				int32 BlockingHitIndex = INDEX_NONE;
-				float BlockingHitNormalDotDelta = BIG_NUMBER;
+				float BlockingHitNormalDotDelta = UE_BIG_NUMBER;
 				for( int32 HitIdx = 0; HitIdx < Hits.Num(); HitIdx++ )
 				{
 					const FHitResult& TestHit = Hits[HitIdx];
 
 					if (TestHit.bBlockingHit)
 					{
-						if (!ShouldIgnoreHitResult(MyWorld, TestHit, Delta, Actor, MoveFlags))
+						if (!ShouldIgnoreHitResult(MyWorld, TestHit, Delta, Actor, MoveFlags) && !ShouldComponentIgnoreHitResult(TestHit, MoveFlags))
 						{
 							if (TestHit.bStartPenetrating)
 							{
@@ -2251,7 +2762,7 @@ bool UPrimitiveComponent::MoveComponentImpl( const FVector& Delta, const FQuat& 
 						UPrimitiveComponent* OverlapComponent = TestHit.Component.Get();
 						if (OverlapComponent && (OverlapComponent->GetGenerateOverlapEvents() || bForceGatherOverlaps))
 						{
-							if (!ShouldIgnoreOverlapResult(MyWorld, Actor, *this, TestHit.GetActor(), *OverlapComponent, /*bCheckOverlapFlags=*/ !bForceGatherOverlaps))
+							if (!ShouldIgnoreOverlapResult(MyWorld, Actor, *this, TestHit.HitObjectHandle, *OverlapComponent, /*bCheckOverlapFlags=*/ !bForceGatherOverlaps))
 							{
 								// don't process touch events after initial blocking hits
 								if (BlockingHitIndex >= 0 && TestHit.Time > Hits[BlockingHitIndex].Time)
@@ -2301,8 +2812,7 @@ bool UPrimitiveComponent::MoveComponentImpl( const FVector& Delta, const FQuat& 
 					// Remove any pending overlaps after this point, we are not going as far as we swept.
 					if (FirstNonInitialOverlapIdx != INDEX_NONE)
 					{
-						const bool bAllowShrinking = false;
-						PendingOverlaps.SetNum(FirstNonInitialOverlapIdx, bAllowShrinking);
+						PendingOverlaps.SetNum(FirstNonInitialOverlapIdx, EAllowShrinking::No);
 					}
 				}
 			}
@@ -2388,7 +2898,7 @@ bool UPrimitiveComponent::MoveComponentImpl( const FVector& Delta, const FQuat& 
 
 	// Handle blocking hit notifications. Avoid if pending kill (which could happen after overlaps).
 	const bool bAllowHitDispatch = !BlockingHit.bStartPenetrating || !(MoveFlags & MOVECOMP_DisableBlockingOverlapDispatch);
-	if (BlockingHit.bBlockingHit && bAllowHitDispatch && !IsPendingKill())
+	if (BlockingHit.bBlockingHit && bAllowHitDispatch && IsValid(this))
 	{
 		check(bFilledHitResult);
 		if (IsDeferringMovementUpdates())
@@ -2446,10 +2956,10 @@ void UPrimitiveComponent::DispatchBlockingHit(AActor& Owner, FHitResult const& B
 		Owner.DispatchBlockingHit(this, BlockingHitComponent, true, BlockingHit);
 
 		// Dispatch above could kill the component, so we need to check that.
-		if (!BlockingHitComponent->IsPendingKill())
+		if (IsValid(BlockingHitComponent))
 		{
 			// BlockingHit.GetActor() could be marked for deletion in DispatchBlockingHit(), which would make the weak pointer return NULL.
-			if (AActor* const BlockingHitActor = BlockingHit.GetActor())
+			if (AActor* const BlockingHitActor = BlockingHit.HitObjectHandle.GetManagingActor())
 			{
 				BlockingHitActor->DispatchBlockingHit(BlockingHitComponent, this, false, BlockingHit);
 			}
@@ -2459,22 +2969,20 @@ void UPrimitiveComponent::DispatchBlockingHit(AActor& Owner, FHitResult const& B
 
 void UPrimitiveComponent::DispatchWakeEvents(ESleepEvent WakeEvent, FName BoneName)
 {
-	FBodyInstance* RootBI = GetBodyInstance(BoneName, false);
-	if(RootBI)
+	if (ShouldDispatchWakeEvents(BoneName))
 	{
-		if(RootBI->bGenerateWakeEvents)
+		if (WakeEvent == ESleepEvent::SET_Wakeup)
 		{
-			if (WakeEvent == ESleepEvent::SET_Wakeup)
-			{
-				OnComponentWake.Broadcast(this, BoneName);
-			}else
-			{
-				OnComponentSleep.Broadcast(this, BoneName);
-			}
+			OnComponentWake.Broadcast(this, BoneName);
+		}
+		else
+		{
+			OnComponentSleep.Broadcast(this, BoneName);
 		}
 	}
 	
 	//now update children that are welded
+	FBodyInstance* RootBI = GetBodyInstance(BoneName, false);
 	for(USceneComponent* SceneComp : GetAttachChildren())
 	{
 		if(UPrimitiveComponent* PrimComp = Cast<UPrimitiveComponent>(SceneComp))
@@ -2488,6 +2996,28 @@ void UPrimitiveComponent::DispatchWakeEvents(ESleepEvent WakeEvent, FName BoneNa
 			}
 		}
 	}
+
+	if (PhysicsReplicationCVars::PredictiveInterpolationCVars::bFakeTargetOnClientWakeUp)
+	{
+		if (WakeEvent == ESleepEvent::SET_Wakeup && IsSimulatingPhysics())
+		{
+			AActor* Owner = GetOwner();
+			if (Owner && Owner->GetRootComponent() == this)
+			{
+				Owner->SetFakeNetPhysicsState(/*bShouldSleep*/ true);
+			}
+		}
+	}
+}
+
+bool UPrimitiveComponent::ShouldDispatchWakeEvents(FName BoneName) const
+{
+	FBodyInstance* RootBI = GetBodyInstance(BoneName, false);
+	if (RootBI)
+	{
+		return RootBI->bGenerateWakeEvents;
+	}
+	return false;
 }
 
 void UPrimitiveComponent::GetNavigationData(FNavigationRelevantData& OutData) const
@@ -2517,6 +3047,26 @@ bool UPrimitiveComponent::IsNavigationRelevant() const
 		(ResponseToChannels.GetResponse(ECC_Pawn) == ECR_Block || ResponseToChannels.GetResponse(ECC_Vehicle) == ECR_Block);
 }
 
+UBodySetup* UPrimitiveComponent::GetNavigableGeometryBodySetup()
+{
+	return GetBodySetup();
+}
+
+FTransform UPrimitiveComponent::GetNavigableGeometryTransform() const
+{
+	return GetComponentTransform();
+}
+
+EHasCustomNavigableGeometry::Type UPrimitiveComponent::HasCustomNavigableGeometry() const
+{
+	return bHasCustomNavigableGeometry;
+}
+
+bool UPrimitiveComponent::DoCustomNavigableGeometryExport(FNavigableGeometryExport& GeomExport) const
+{
+	return true;
+}
+
 FBox UPrimitiveComponent::GetNavigationBounds() const
 {
 	// Return invalid box when retrieving NavigationBounds before they are being computed at component registration
@@ -2531,7 +3081,41 @@ extern float DebugLineLifetime;
 
 bool UPrimitiveComponent::LineTraceComponent(struct FHitResult& OutHit, const FVector Start, const FVector End, const struct FCollisionQueryParams& Params)
 {
-	bool bHaveHit = BodyInstance.LineTrace(OutHit, Start, End, Params.bTraceComplex, Params.bReturnPhysicalMaterial); 
+	return LineTraceComponent(OutHit, Start, End, DefaultCollisionChannel, Params, FCollisionResponseParams::DefaultResponseParam, FCollisionObjectQueryParams::DefaultObjectQueryParam);
+}
+
+bool UPrimitiveComponent::LineTraceComponent(FHitResult& OutHit, const FVector Start, const FVector End, ECollisionChannel TraceChannel, const struct FCollisionQueryParams& Params, const struct FCollisionResponseParams& ResponseParams, const struct FCollisionObjectQueryParams& ObjectParams)
+{
+	bool bHaveHit = false;
+
+	if (FBodyInstance* ThisBodyInstance = GetBodyInstance())
+	{
+		bHaveHit = ThisBodyInstance->LineTrace(OutHit, Start, End, Params.bTraceComplex, Params.bReturnPhysicalMaterial);
+	}
+	else
+	{
+		TArray<Chaos::FPhysicsObjectHandle> Objects = GetAllPhysicsObjects();
+		FLockedReadPhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockRead(Objects);
+		Objects = Objects.FilterByPredicate(
+			[&Interface](Chaos::FPhysicsObjectHandle Handle)
+			{
+				return !Interface->AreAllDisabled({ &Handle, 1 });
+			}
+		);
+
+		Chaos::FPhysicsObjectCollisionInterface_External CollisionInterface{ Interface.GetInterface() };
+		ChaosInterface::FRaycastHit BestHit;
+		if (CollisionInterface.LineTrace(Objects, Start, End, Params.bTraceComplex, BestHit))
+		{
+			bHaveHit = true;
+
+			FCollisionFilterData QueryFilter;
+			QueryFilter.Word1 = 0xFFFFF;
+			ChaosInterface::SetFlags(BestHit, EHitFlags::Distance | EHitFlags::Normal | EHitFlags::Position);
+
+			ConvertQueryImpactHit(GetWorld(), BestHit, OutHit, (End - Start).Size(), QueryFilter, Start, End, nullptr, FTransform{ Start }, true, Params.bReturnPhysicalMaterial);
+		}
+	}
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 	if (GetWorld()->DebugDrawSceneQueries(Params.TraceTag))
@@ -2550,7 +3134,56 @@ bool UPrimitiveComponent::LineTraceComponent(struct FHitResult& OutHit, const FV
 
 bool UPrimitiveComponent::SweepComponent(struct FHitResult& OutHit, const FVector Start, const FVector End, const FQuat& ShapeWorldRotation, const FCollisionShape &CollisionShape, bool bTraceComplex)
 {
-	return BodyInstance.Sweep(OutHit, Start, End, ShapeWorldRotation, CollisionShape, bTraceComplex);
+	if (FBodyInstance* ThisBodyInstance = GetBodyInstance())
+	{
+		return ThisBodyInstance->Sweep(OutHit, Start, End, ShapeWorldRotation, CollisionShape, bTraceComplex);
+	}
+
+	FCollisionQueryParams Params = FCollisionQueryParams::DefaultQueryParam;
+	Params.bTraceComplex = bTraceComplex;
+
+	if (CollisionShape.IsNearlyZero())
+	{
+		return LineTraceComponent(OutHit, Start, End, Params);
+	}
+
+	FPhysicsShapeAdapter_Chaos ShapeAdapter(ShapeWorldRotation, CollisionShape);
+	return SweepComponent(OutHit, Start, End, ShapeWorldRotation, ShapeAdapter.GetGeometry(), DefaultCollisionChannel, Params, FCollisionResponseParams::DefaultResponseParam, FCollisionObjectQueryParams::DefaultObjectQueryParam);
+}
+
+bool UPrimitiveComponent::SweepComponent(FHitResult& OutHit, const FVector Start, const FVector End, const FQuat& ShapeWorldRotation, const FPhysicsGeometry& Geometry, ECollisionChannel TraceChannel, const struct FCollisionQueryParams& Params, const struct FCollisionResponseParams& ResponseParams, const struct FCollisionObjectQueryParams& ObjectParams)
+{
+	TArray<Chaos::FPhysicsObjectHandle> Objects = GetAllPhysicsObjects();
+	FLockedReadPhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockRead(Objects);
+	Objects = Objects.FilterByPredicate(
+		[&Interface](Chaos::FPhysicsObjectHandle Handle)
+		{
+			return !Interface->AreAllDisabled({ &Handle, 1 });
+		}
+	);
+
+	Chaos::FPhysicsObjectCollisionInterface_External CollisionInterface{ Interface.GetInterface() };
+	ChaosInterface::FSweepHit BestHit;
+
+	Chaos::FSweepParameters SweepParams;
+	SweepParams.bSweepComplex = Params.bTraceComplex;
+
+	// TODO: Expose this even further via parameters in the primitive component.
+	// For now, having this be always true guarantees us identical behavior to tracing via the Chaos SQ
+	// since TSQTraits::GetHitFlags() will always have the MTD flag on.
+	SweepParams.bComputeMTD = true;
+	if (CollisionInterface.ShapeSweep(Objects, Geometry, FTransform{ ShapeWorldRotation, Start }, End, SweepParams, BestHit))
+	{
+		FCollisionFilterData QueryFilter;
+		QueryFilter.Word1 = 0xFFFFF;
+		ChaosInterface::SetFlags(BestHit, EHitFlags::Distance | EHitFlags::Normal | EHitFlags::Position | EHitFlags::FaceIndex);
+
+		bool bHasHit = false;
+		ConvertTraceResults<ChaosInterface::FSweepHit>(bHasHit, GetWorld(), 1, &BestHit, (End - Start).Size(), QueryFilter, OutHit, Start, End, &Geometry, FTransform{ ShapeWorldRotation, Start }, 0.f, Params.bReturnFaceIndex, Params.bReturnPhysicalMaterial);
+		return bHasHit;
+	}
+
+	return false;
 }
 
 bool UPrimitiveComponent::ComponentOverlapComponentImpl(class UPrimitiveComponent* PrimComp, const FVector Pos, const FQuat& Quat, const struct FCollisionQueryParams& Params)
@@ -2563,18 +3196,151 @@ bool UPrimitiveComponent::ComponentOverlapComponentImpl(class UPrimitiveComponen
 		return false;
 	}
 
-	if(FBodyInstance* BI = PrimComp->GetBodyInstance())
+	// if target is Instanced Static Meshes
+	UInstancedStaticMeshComponent* InstancedStaticMesh = Cast<UInstancedStaticMeshComponent>(PrimComp);
+	if (InstancedStaticMesh)
 	{
-		return BI->OverlapTestForBody(Pos, Quat, GetBodyInstance());
+		if (FBodyInstance* ThisBodyInstance = GetBodyInstance())
+		{
+			return ThisBodyInstance->OverlapTestForBodies(Pos, Quat, InstancedStaticMesh->InstanceBodies);
+		}
+		else
+		{
+			return false;
+		}
 	}
 
+	FBodyInstance* BI = PrimComp->GetBodyInstance();
+	FBodyInstance* ThisBodyInstance = GetBodyInstance();
+	if(BI && ThisBodyInstance)
+	{
+		return BI->OverlapTestForBody(Pos, Quat, ThisBodyInstance);
+	}
+
+	TArray<Chaos::FPhysicsObjectHandle> InObjects = PrimComp->GetAllPhysicsObjects();
+	TArray<Chaos::FPhysicsObjectHandle> ThisObjects = GetAllPhysicsObjects();
+
+	FLockedReadPhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockRead(InObjects);
+	InObjects = InObjects.FilterByPredicate(
+		[&Interface](Chaos::FPhysicsObjectHandle Handle)
+		{
+			return !Interface->AreAllDisabled({ &Handle, 1 });
+		}
+	);
+
+	ThisObjects = ThisObjects.FilterByPredicate(
+		[&Interface](Chaos::FPhysicsObjectHandle Handle)
+		{
+			return !Interface->AreAllDisabled({ &Handle, 1 });
+		}
+	);
+
+	Chaos::FPhysicsObjectCollisionInterface_External CollisionInterface{ Interface.GetInterface() };
+	for (Chaos::FPhysicsObjectHandle InObject : InObjects)
+	{
+		for (Chaos::FPhysicsObjectHandle ThisObject : ThisObjects)
+		{
+			if (CollisionInterface.PhysicsObjectOverlap(InObject, FTransform::Identity, ThisObject, FTransform::Identity, Params.bTraceComplex))
+			{
+				return true;
+			}
+		}
+	}
 	return false;
 }
 
-
-bool UPrimitiveComponent::OverlapComponent(const FVector& Pos, const FQuat& Rot, const struct FCollisionShape& CollisionShape)
+bool UPrimitiveComponent::ComponentOverlapComponentWithResultImpl(const class UPrimitiveComponent* const PrimComp, const FVector& Pos, const FQuat& Rot, const FCollisionQueryParams& Params, TArray<FOverlapResult>& OutOverlap) const
 {
-	return BodyInstance.OverlapTest(Pos, Rot, CollisionShape);
+	const FTransform InTransform{ Rot, Pos };
+	TArray<Chaos::FPhysicsObjectHandle> InObjects = PrimComp->GetAllPhysicsObjects();
+	TArray<Chaos::FPhysicsObjectHandle> ThisObjects = GetAllPhysicsObjects();
+
+	FLockedReadPhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockRead(InObjects);
+	InObjects = InObjects.FilterByPredicate(
+		[&Interface](Chaos::FPhysicsObjectHandle Handle)
+		{
+			return !Interface->AreAllDisabled({ &Handle, 1 });
+		}
+	);
+
+	ThisObjects = ThisObjects.FilterByPredicate(
+		[&Interface](Chaos::FPhysicsObjectHandle Handle)
+		{
+			return !Interface->AreAllDisabled({ &Handle, 1 });
+		}
+	);
+
+	Chaos::FPhysicsObjectCollisionInterface_External CollisionInterface{ Interface.GetInterface() };
+	for (Chaos::FPhysicsObjectHandle InObject : InObjects)
+	{
+		for (Chaos::FPhysicsObjectHandle ThisObject : ThisObjects)
+		{
+			TArray<ChaosInterface::FOverlapHit> OverlapHits;
+			if (CollisionInterface.PhysicsObjectOverlap(ThisObject, FTransform::Identity, InObject, InTransform, Params.bTraceComplex, OverlapHits))
+			{
+				TArray<FOverlapResult> Overlaps;
+
+				FCollisionFilterData QueryFilter;
+				QueryFilter.Word1 = 0xFFFFF;
+				ConvertOverlapResults(OverlapHits.Num(), OverlapHits.GetData(), QueryFilter, Overlaps);
+
+				if (!Overlaps.IsEmpty())
+				{
+					OutOverlap = Overlaps;
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
+bool UPrimitiveComponent::OverlapComponent(const FVector& Pos, const FQuat& Rot, const struct FCollisionShape& CollisionShape) const
+{
+	if (FBodyInstance* ThisBodyInstance = GetBodyInstance())
+	{
+		return ThisBodyInstance->OverlapTest(Pos, Rot, CollisionShape);
+	}
+
+	TArray<FOverlapResult> NopResult;
+	return OverlapComponentWithResult(Pos, Rot, CollisionShape, NopResult);
+}
+
+bool UPrimitiveComponent::OverlapComponentWithResult(const FVector& Pos, const FQuat& Rot, const FCollisionShape& CollisionShape, TArray<FOverlapResult>& OutOverlap) const
+{
+	FPhysicsShapeAdapter_Chaos ShapeAdapter(Rot, CollisionShape);
+	return OverlapComponentWithResult(Pos, Rot, ShapeAdapter.GetGeometry(), DefaultCollisionChannel, FCollisionQueryParams::DefaultQueryParam, FCollisionResponseParams::DefaultResponseParam, FCollisionObjectQueryParams::DefaultObjectQueryParam, OutOverlap);
+}
+
+bool UPrimitiveComponent::OverlapComponentWithResult(const FVector& Pos, const FQuat& Rot, const FPhysicsGeometry& Geometry, ECollisionChannel TraceChannel, const struct FCollisionQueryParams& Params, const struct FCollisionResponseParams& ResponseParams, const struct FCollisionObjectQueryParams& ObjectParams, TArray<FOverlapResult>& OutOverlap) const
+{
+	TArray<Chaos::FPhysicsObjectHandle> Objects = GetAllPhysicsObjects();
+	FLockedReadPhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockRead(Objects);
+	Objects = Objects.FilterByPredicate(
+		[&Interface](Chaos::FPhysicsObjectHandle Handle)
+		{
+			return !Interface->AreAllDisabled({ &Handle, 1 });
+		}
+	);
+
+	Chaos::FPhysicsObjectCollisionInterface_External CollisionInterface{ Interface.GetInterface() };
+	TArray<ChaosInterface::FOverlapHit> OverlapHits;
+	if (CollisionInterface.ShapeOverlap(Objects, Geometry, FTransform{ Rot, Pos }, OverlapHits))
+	{
+		TArray<FOverlapResult> Overlaps;
+
+		FCollisionFilterData QueryFilter;
+		QueryFilter.Word1 = 0xFFFFF;
+		ConvertOverlapResults(OverlapHits.Num(), OverlapHits.GetData(), QueryFilter, Overlaps);
+
+		if (!Overlaps.IsEmpty())
+		{
+			OutOverlap = Overlaps;
+			return true;
+		}
+	}
+
+	return false;
 }
 
 bool UPrimitiveComponent::ComputePenetration(FMTDResult& OutMTD, const FCollisionShape & CollisionShape, const FVector& Pos, const FQuat& Rot)
@@ -2621,32 +3387,23 @@ bool UPrimitiveComponent::IsOverlappingActor(const AActor* Other) const
 	return false;
 }
 
-template<typename AllocatorType>
-bool UPrimitiveComponent::GetOverlapsWithActor_Template(const AActor* Actor, TArray<FOverlapInfo, AllocatorType>& OutOverlaps) const
-{
-	const int32 InitialCount = OutOverlaps.Num();
-	if (Actor)
-	{
-		for (int32 OverlapIdx=0; OverlapIdx<OverlappingComponents.Num(); ++OverlapIdx)
-		{
-			UPrimitiveComponent const* const PrimComp = OverlappingComponents[OverlapIdx].OverlapInfo.Component.Get();
-			if ( PrimComp && (PrimComp->GetOwner() == Actor) )
-			{
-				OutOverlaps.Add(OverlappingComponents[OverlapIdx]);
-			}
-		}
-	}
-
-	return InitialCount != OutOverlaps.Num();
-}
-
 bool UPrimitiveComponent::GetOverlapsWithActor(const AActor* Actor, TArray<FOverlapInfo>& OutOverlaps) const
 {
 	return GetOverlapsWithActor_Template(Actor, OutOverlaps);
 }
 
+bool UPrimitiveComponent::IsShown(const FEngineShowFlags& ShowFlags) const
+{
+	return true;
+}
+
 #if WITH_EDITOR
 bool UPrimitiveComponent::ComponentIsTouchingSelectionBox(const FBox& InSelBBox, const FEngineShowFlags& ShowFlags, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const
+{
+	return IsShown(ShowFlags) && ComponentIsTouchingSelectionBox(InSelBBox, bConsiderOnlyBSP, bMustEncompassEntireComponent);
+}
+
+bool UPrimitiveComponent::ComponentIsTouchingSelectionBox(const FBox& InSelBBox, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const
 {
 	if (!bConsiderOnlyBSP)
 	{
@@ -2666,6 +3423,11 @@ bool UPrimitiveComponent::ComponentIsTouchingSelectionBox(const FBox& InSelBBox,
 }
 
 bool UPrimitiveComponent::ComponentIsTouchingSelectionFrustum(const FConvexVolume& InFrustum, const FEngineShowFlags& ShowFlags, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const
+{
+	return IsShown(ShowFlags) && ComponentIsTouchingSelectionFrustum(InFrustum, bConsiderOnlyBSP, bMustEncompassEntireComponent);
+}
+
+bool UPrimitiveComponent::ComponentIsTouchingSelectionFrustum(const FConvexVolume& InFrustum, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const
 {
 	if (!bConsiderOnlyBSP)
 	{
@@ -2688,7 +3450,7 @@ extern bool IsActorValidToNotify(AActor* Actor);
 // @fixme, duplicated, make an inline member?
 bool IsPrimCompValidAndAlive(UPrimitiveComponent* PrimComp)
 {
-	return (PrimComp != NULL) && !PrimComp->IsPendingKill();
+	return IsValid(PrimComp);
 }
 
 bool AreActorsOverlapping(const AActor& A, const AActor& B)
@@ -2711,7 +3473,7 @@ void UPrimitiveComponent::BeginComponentOverlap(const FOverlapInfo& OtherOverlap
 	SCOPE_CYCLE_COUNTER(STAT_BeginComponentOverlap);
 
 	// If pending kill, we should not generate any new overlaps
-	if (IsPendingKill())
+	if (!IsValid(this))
 	{
 		return;
 	}
@@ -2739,12 +3501,12 @@ void UPrimitiveComponent::BeginComponentOverlap(const FOverlapInfo& OtherOverlap
 			if (bDoNotifies && ((World && World->HasBegunPlay()) || bLevelStreamingOverlap))
 			{
 				// first execute component delegates
-				if (!IsPendingKill())
+				if (IsValid(this))
 				{
 					OnComponentBeginOverlap.Broadcast(this, OtherActor, OtherComp, OtherOverlap.GetBodyIndex(), OtherOverlap.bFromSweep, OtherOverlap.OverlapInfo);
 				}
 
-				if (!OtherComp->IsPendingKill())
+				if (IsValid(OtherComp))
 				{
 					// Reverse normals for other component. When it's a sweep, we are the one that moved.
 					OtherComp->OnComponentBeginOverlap.Broadcast(OtherComp, MyActor, this, INDEX_NONE, OtherOverlap.bFromSweep, OtherOverlap.bFromSweep ? FHitResult::GetReversedHit(OtherOverlap.OverlapInfo) : OtherOverlap.OverlapInfo);
@@ -2794,7 +3556,7 @@ void UPrimitiveComponent::EndComponentOverlap(const FOverlapInfo& OtherOverlap, 
 	const int32 OtherOverlapIdx = IndexOfOverlapFast(OtherComp->OverlappingComponents, FOverlapInfo(this, INDEX_NONE));
 	if (OtherOverlapIdx != INDEX_NONE)
 	{
-		OtherComp->OverlappingComponents.RemoveAtSwap(OtherOverlapIdx, 1, false);
+		OtherComp->OverlappingComponents.RemoveAtSwap(OtherOverlapIdx, 1, EAllowShrinking::No);
 	}
 
 	const int32 OverlapIdx = IndexOfOverlapFast(OverlappingComponents, OtherOverlap);
@@ -2802,13 +3564,14 @@ void UPrimitiveComponent::EndComponentOverlap(const FOverlapInfo& OtherOverlap, 
 	{
 		//UE_LOG(LogActor, Log, TEXT("END OVERLAP! Self=%s SelfComp=%s, Other=%s, OtherComp=%s"), *GetNameSafe(this), *GetNameSafe(MyComp), *GetNameSafe(OtherActor), *GetNameSafe(OtherComp));
 		GlobalOverlapEventsCounter++;
-		OverlappingComponents.RemoveAtSwap(OverlapIdx, 1, false);
+		OverlappingComponents.RemoveAtSwap(OverlapIdx, 1, EAllowShrinking::No);
 
+		AActor* const MyActor = GetOwner();
 		const UWorld* World = GetWorld();
-		if (bDoNotifies && World && World->HasBegunPlay())
+		const bool bLevelStreamingOverlap = (bDoNotifies && MyActor && MyActor->bGenerateOverlapEventsDuringLevelStreaming && MyActor->IsActorBeginningPlayFromLevelStreaming());
+		if (bDoNotifies && ((World && World->HasBegunPlay()) || bLevelStreamingOverlap))
 		{
 			AActor* const OtherActor = OtherComp->GetOwner();
-			AActor* const MyActor = GetOwner();
 			if (OtherActor)
 			{
 				if (!bSkipNotifySelf && IsPrimCompValidAndAlive(this))
@@ -2938,98 +3701,6 @@ void UPrimitiveComponent::GetOverlappingComponents(TSet<UPrimitiveComponent*>& O
 	}
 }
 
-template<typename AllocatorType>
-bool UPrimitiveComponent::ConvertSweptOverlapsToCurrentOverlaps(
-	TArray<FOverlapInfo, AllocatorType>& OverlapsAtEndLocation, const TOverlapArrayView& SweptOverlaps, int32 SweptOverlapsIndex,
-	const FVector& EndLocation, const FQuat& EndRotationQuat)
-{
-	checkSlow(SweptOverlapsIndex >= 0);
-
-	bool bResult = false;
-	const bool bForceGatherOverlaps = !ShouldCheckOverlapFlagToQueueOverlaps(*this);
-	if ((GetGenerateOverlapEvents() || bForceGatherOverlaps) && bAllowCachedOverlapsCVar)
-	{
-		const AActor* Actor = GetOwner();
-		if (Actor && Actor->GetRootComponent() == this)
-		{
-			// We know we are not overlapping any new components at the end location. Children are ignored here (see note below).
-			if (bEnableFastOverlapCheck)
-			{
-				SCOPE_CYCLE_COUNTER(STAT_MoveComponent_FastOverlap);
-
-				// Check components we hit during the sweep, keep only those still overlapping
-				const FCollisionQueryParams UnusedQueryParams(NAME_None, FCollisionQueryParams::GetUnknownStatId());
-				const int32 NumSweptOverlaps = SweptOverlaps.Num();
-				OverlapsAtEndLocation.Reserve(OverlapsAtEndLocation.Num() + NumSweptOverlaps);
-				for (int32 Index = SweptOverlapsIndex; Index < NumSweptOverlaps; ++Index)
-				{
-					const FOverlapInfo& OtherOverlap = SweptOverlaps[Index];
-					UPrimitiveComponent* OtherPrimitive = OtherOverlap.OverlapInfo.GetComponent();
-					if (OtherPrimitive && (OtherPrimitive->GetGenerateOverlapEvents() || bForceGatherOverlaps))
-					{
-						if (OtherPrimitive->bMultiBodyOverlap)
-						{
-							// Not handled yet. We could do it by checking every body explicitly and track each body index in the overlap test, but this seems like a rare need.
-							return false;
-						}
-						else if (Cast<USkeletalMeshComponent>(OtherPrimitive) || Cast<USkeletalMeshComponent>(this))
-						{
-							// SkeletalMeshComponent does not support this operation, and would return false in the test when an actual query could return true.
-							return false;
-						}
-						else if (OtherPrimitive->ComponentOverlapComponent(this, EndLocation, EndRotationQuat, UnusedQueryParams))
-						{
-							OverlapsAtEndLocation.Add(OtherOverlap);
-						}
-					}
-				}
-
-				// Note: we don't worry about adding any child components here, because they are not included in the sweep results.
-				// Children test for their own overlaps after we update our own, and we ignore children in our own update.
-				checkfSlow(OverlapsAtEndLocation.FindByPredicate(FPredicateOverlapHasSameActor(*Actor)) == nullptr,
-					TEXT("Child overlaps should not be included in the SweptOverlaps() array in UPrimitiveComponent::ConvertSweptOverlapsToCurrentOverlaps()."));
-
-				bResult = true;
-			}
-			else
-			{
-				if (SweptOverlaps.Num() == 0 && AreAllCollideableDescendantsRelative())
-				{
-					// Add overlaps with components in this actor.
-					GetOverlapsWithActor_Template(Actor, OverlapsAtEndLocation);
-					bResult = true;
-				}
-			}
-		}
-	}
-
-	return bResult;
-}
-
-template<typename AllocatorType>
-bool UPrimitiveComponent::ConvertRotationOverlapsToCurrentOverlaps(TArray<FOverlapInfo, AllocatorType>& OutOverlapsAtEndLocation, const TOverlapArrayView& CurrentOverlaps)
-{
-	bool bResult = false;
-	const bool bForceGatherOverlaps = !ShouldCheckOverlapFlagToQueueOverlaps(*this);
-	if ((GetGenerateOverlapEvents() || bForceGatherOverlaps) && bAllowCachedOverlapsCVar)
-	{
-		const AActor* Actor = GetOwner();
-		if (Actor && Actor->GetRootComponent() == this)
-		{
-			if (bEnableFastOverlapCheck)
-			{
-				// Add all current overlaps that are not children. Children test for their own overlaps after we update our own, and we ignore children in our own update.
-				OutOverlapsAtEndLocation.Reserve(OutOverlapsAtEndLocation.Num() + CurrentOverlaps.Num());
-				Algo::CopyIf(CurrentOverlaps, OutOverlapsAtEndLocation, FPredicateOverlapHasDifferentActor(*Actor));
-				bResult = true;
-			}
-		}
-	}
-
-	return bResult;
-}
-
-
 bool UPrimitiveComponent::AreAllCollideableDescendantsRelative(bool bAllowCachedValue) const
 {
 	UPrimitiveComponent* MutableThis = const_cast<UPrimitiveComponent*>(this);
@@ -3051,7 +3722,7 @@ bool UPrimitiveComponent::AreAllCollideableDescendantsRelative(bool bAllowCached
 		ComponentStack.Append(GetAttachChildren());
 		while (ComponentStack.Num() > 0)
 		{
-			USceneComponent* const CurrentComp = ComponentStack.Pop(false);
+			USceneComponent* const CurrentComp = ComponentStack.Pop(EAllowShrinking::No);
 			if (CurrentComp)
 			{
 				// Is the component not using relative position?
@@ -3117,9 +3788,9 @@ TArray<AActor*> UPrimitiveComponent::CopyArrayOfMoveIgnoreActors()
 	for (int32 Index = MoveIgnoreActors.Num() - 1; Index >=0; --Index)
 	{
 		const AActor* const MoveIgnoreActor = MoveIgnoreActors[Index];
-		if (MoveIgnoreActor == nullptr || MoveIgnoreActor->IsPendingKill())
+		if (!IsValid(MoveIgnoreActor))
 		{
-			MoveIgnoreActors.RemoveAtSwap(Index,1,false);
+			MoveIgnoreActors.RemoveAtSwap(Index,1,EAllowShrinking::No);
 		}
 	}
 	return MoveIgnoreActors;
@@ -3154,9 +3825,9 @@ TArray<UPrimitiveComponent*> UPrimitiveComponent::CopyArrayOfMoveIgnoreComponent
 	for (int32 Index = MoveIgnoreComponents.Num() - 1; Index >= 0; --Index)
 	{
 		const UPrimitiveComponent* const MoveIgnoreComponent = MoveIgnoreComponents[Index];
-		if (MoveIgnoreComponent == nullptr || MoveIgnoreComponent->IsPendingKill())
+		if (!IsValid(MoveIgnoreComponent))
 		{
-			MoveIgnoreComponents.RemoveAtSwap(Index, 1, false);
+			MoveIgnoreComponents.RemoveAtSwap(Index, 1, EAllowShrinking::No);
 		}
 	}
 	return MoveIgnoreComponents;
@@ -3203,10 +3874,10 @@ bool UPrimitiveComponent::UpdateOverlapsImpl(const TOverlapArrayView* NewPending
 			TInlineOverlapPointerArray NewOverlappingComponentPtrs;
 
 			// If pending kill, we should not generate any new overlaps. Also not if overlaps were just disabled during BeginComponentOverlap.
-			if (!IsPendingKill() && GetGenerateOverlapEvents())
+			if (IsValid(this) && GetGenerateOverlapEvents())
 			{
 				// Might be able to avoid testing for new overlaps at the end location.
-				if (OverlapsAtEndLocation != nullptr && bAllowCachedOverlapsCVar && PrevTransform.Equals(GetComponentTransform()))
+				if (OverlapsAtEndLocation != nullptr && PrimitiveComponentCVars::bAllowCachedOverlapsCVar && PrevTransform.Equals(GetComponentTransform()))
 				{
 					UE_LOG(LogPrimitiveComponent, VeryVerbose, TEXT("%s->%s Skipping overlap test!"), *GetNameSafe(GetOwner()), *GetName());
 					const bool bCheckForInvalid = (NewPendingOverlaps && NewPendingOverlaps->Num() > 0);
@@ -3241,7 +3912,7 @@ bool UPrimitiveComponent::UpdateOverlapsImpl(const TOverlapArrayView* NewPending
 						if (HitComp && (HitComp != this) && HitComp->GetGenerateOverlapEvents())
 						{
 							const bool bCheckOverlapFlags = false; // Already checked above
-							if (!ShouldIgnoreOverlapResult(MyWorld, MyActor, *this, Result.GetActor(), *HitComp, bCheckOverlapFlags))
+							if (!ShouldIgnoreOverlapResult(MyWorld, MyActor, *this, Result.OverlapObjectHandle, *HitComp, bCheckOverlapFlags))
 							{
 								OverlapMultiResult.Emplace(HitComp, Result.ItemIndex);		// don't need to add unique unless the overlap check can return dupes
 							}
@@ -3274,14 +3945,13 @@ bool UPrimitiveComponent::UpdateOverlapsImpl(const TOverlapArrayView* NewPending
 				for (int32 CompIdx=0; CompIdx < OldOverlappingComponentPtrs.Num() && NewOverlappingComponentPtrs.Num() > 0; ++CompIdx)
 				{
 					// RemoveAtSwap is ok, since it is not necessary to maintain order
-					const bool bAllowShrinking = false;
 
 					const FOverlapInfo* SearchItem = OldOverlappingComponentPtrs[CompIdx];
 					const int32 NewElementIdx = IndexOfOverlapFast(NewOverlappingComponentPtrs, SearchItem);
 					if (NewElementIdx != INDEX_NONE)
 					{
-						NewOverlappingComponentPtrs.RemoveAtSwap(NewElementIdx, 1, bAllowShrinking);
-						OldOverlappingComponentPtrs.RemoveAtSwap(CompIdx, 1, bAllowShrinking);
+						NewOverlappingComponentPtrs.RemoveAtSwap(NewElementIdx, 1, EAllowShrinking::No);
+						OldOverlappingComponentPtrs.RemoveAtSwap(CompIdx, 1, EAllowShrinking::No);
 						--CompIdx;
 					}
 				}
@@ -3311,7 +3981,7 @@ bool UPrimitiveComponent::UpdateOverlapsImpl(const TOverlapArrayView* NewPending
 							const int32 StaleElementIndex = IndexOfOverlapFast(OverlappingComponents, OtherOverlap);
 							if (StaleElementIndex != INDEX_NONE)
 							{
-								OverlappingComponents.RemoveAtSwap(StaleElementIndex, 1, bAllowShrinking);
+								OverlappingComponents.RemoveAtSwap(StaleElementIndex, 1, bAllowShrinking ? EAllowShrinking::Yes : EAllowShrinking::No);
 							}
 						}
 					}
@@ -3320,7 +3990,7 @@ bool UPrimitiveComponent::UpdateOverlapsImpl(const TOverlapArrayView* NewPending
 
 			// Ensure these arrays are still in scope, because we kept pointers to them in NewOverlappingComponentPtrs.
 			static_assert(sizeof(OverlapMultiResult) != 0, "Variable must be in this scope");
-			static_assert(sizeof(OverlapsAtEndLocation) != 0, "Variable must be in this scope");
+			static_assert(sizeof(*OverlapsAtEndLocation) != 0, "Variable must be in this scope");
 
 			// NewOverlappingComponents now contains only new overlaps that didn't exist previously.
 			for (const FOverlapInfo* NewOverlap : NewOverlappingComponentPtrs)
@@ -3365,18 +4035,19 @@ bool UPrimitiveComponent::UpdateOverlapsImpl(const TOverlapArrayView* NewPending
 	return bCanSkipUpdateOverlaps;
 }
 
-bool RequiresUpdateOverlaps(bool bGenerateOverlapEvents)
-{
-	return bGenerateOverlapEvents;
-}
-
 void UPrimitiveComponent::SetGenerateOverlapEvents(bool bInGenerateOverlapEvents)
 {
 	if (bGenerateOverlapEvents != bInGenerateOverlapEvents)
 	{
 		bGenerateOverlapEvents = bInGenerateOverlapEvents;
-		ClearSkipUpdateOverlaps();
+
+		OnGenerateOverlapEventsChanged();
 	}
+}
+
+void UPrimitiveComponent::OnGenerateOverlapEventsChanged()
+{
+	ClearSkipUpdateOverlaps();
 }
 
 void UPrimitiveComponent::SetLightingChannels(bool bChannel0, bool bChannel1, bool bChannel2)
@@ -3394,6 +4065,11 @@ void UPrimitiveComponent::SetLightingChannels(bool bChannel0, bool bChannel1, bo
 		}
 		MarkRenderStateDirty();
 	}
+}
+
+void UPrimitiveComponent::InvalidateLumenSurfaceCache()
+{
+	GetScene()->InvalidateLumenSurfaceCache_GameThread(this);
 }
 
 void UPrimitiveComponent::ClearComponentOverlaps(bool bDoNotifies, bool bSkipNotifySelf)
@@ -3466,9 +4142,18 @@ void UPrimitiveComponent::UpdateBounds()
 }
 #endif
 
+void UPrimitiveComponent::UpdateOcclusionBoundsSlack(float NewSlack)
+{
+	if (SceneProxy && GetWorld() && GetWorld()->Scene && NewSlack != OcclusionBoundsSlack)
+	{
+		GetWorld()->Scene->UpdatePrimitiveOcclusionBoundsSlack(this, NewSlack);
+		OcclusionBoundsSlack = NewSlack;
+	}
+}
+
 void UPrimitiveComponent::UpdatePhysicsVolume( bool bTriggerNotifiers )
 {
-	if (GetShouldUpdatePhysicsVolume() && !IsPendingKill())
+	if (GetShouldUpdatePhysicsVolume() && IsValid(this))
 	{
 		SCOPE_CYCLE_COUNTER(STAT_UpdatePhysicsVolume);
 		if (UWorld* MyWorld = GetWorld())
@@ -3531,7 +4216,7 @@ void UPrimitiveComponent::DispatchMouseOverEvents(UPrimitiveComponent* CurrentCo
 			{
 				bBroadcastActorBegin = (NewOwner != CurrentOwner);
 
-				if (!CurrentComponent->IsPendingKill())
+				if (IsValid(CurrentComponent))
 				{
 					CurrentComponent->OnEndCursorOver.Broadcast(CurrentComponent);
 				}
@@ -3556,7 +4241,7 @@ void UPrimitiveComponent::DispatchMouseOverEvents(UPrimitiveComponent* CurrentCo
 					NewOwner->OnBeginCursorOver.Broadcast(NewOwner);
 				}
 			}
-			if (!NewComponent->IsPendingKill())
+			if (IsValid(NewComponent))
 			{
 				NewComponent->OnBeginCursorOver.Broadcast(NewComponent);
 			}
@@ -3566,7 +4251,7 @@ void UPrimitiveComponent::DispatchMouseOverEvents(UPrimitiveComponent* CurrentCo
 	{
 		AActor* CurrentOwner = CurrentComponent->GetOwner();
 
-		if (!CurrentComponent->IsPendingKill())
+		if (IsValid(CurrentComponent))
 		{
 			CurrentComponent->OnEndCursorOver.Broadcast(CurrentComponent);
 		}
@@ -3602,7 +4287,7 @@ void UPrimitiveComponent::DispatchTouchOverEvents(ETouchIndex::Type FingerIndex,
 			{
 				bBroadcastActorBegin = (NewOwner != CurrentOwner);
 
-				if (!CurrentComponent->IsPendingKill())
+				if (IsValid(CurrentComponent))
 				{
 					CurrentComponent->OnInputTouchLeave.Broadcast(FingerIndex, CurrentComponent);
 				}
@@ -3627,7 +4312,7 @@ void UPrimitiveComponent::DispatchTouchOverEvents(ETouchIndex::Type FingerIndex,
 					NewOwner->OnInputTouchEnter.Broadcast(FingerIndex, NewOwner);
 				}
 			}
-			if (!NewComponent->IsPendingKill())
+			if (IsValid(NewComponent))
 			{
 				NewComponent->OnInputTouchEnter.Broadcast(FingerIndex, NewComponent);
 			}
@@ -3637,7 +4322,7 @@ void UPrimitiveComponent::DispatchTouchOverEvents(ETouchIndex::Type FingerIndex,
 	{
 		AActor* CurrentOwner = CurrentComponent->GetOwner();
 
-		if (!CurrentComponent->IsPendingKill())
+		if (IsValid(CurrentComponent))
 		{
 			CurrentComponent->OnInputTouchLeave.Broadcast(FingerIndex, CurrentComponent);
 		}
@@ -3664,7 +4349,7 @@ void UPrimitiveComponent::DispatchOnClicked(FKey ButtonPressed)
 		}
 	}
 
-	if (!IsPendingKill())
+	if (IsValid(this))
 	{
 		OnClicked.Broadcast(this, ButtonPressed);
 	}
@@ -3681,7 +4366,7 @@ void UPrimitiveComponent::DispatchOnReleased(FKey ButtonReleased)
 		}
 	}
 
-	if (!IsPendingKill())
+	if (IsValid(this))
 	{
 		OnReleased.Broadcast(this, ButtonReleased);
 	}
@@ -3698,7 +4383,7 @@ void UPrimitiveComponent::DispatchOnInputTouchBegin(const ETouchIndex::Type Fing
 		}
 	}
 
-	if (!IsPendingKill())
+	if (IsValid(this))
 	{
 		OnInputTouchBegin.Broadcast(FingerIndex, this);
 	}
@@ -3715,7 +4400,7 @@ void UPrimitiveComponent::DispatchOnInputTouchEnd(const ETouchIndex::Type Finger
 		}
 	}
 
-	if (!IsPendingKill())
+	if (IsValid(this))
 	{
 		OnInputTouchEnd.Broadcast(FingerIndex, this);
 	}
@@ -3778,6 +4463,15 @@ void UPrimitiveComponent::SetRenderInMainPass(bool bValue)
 	}
 }
 
+void UPrimitiveComponent::SetRenderInDepthPass(bool bValue)
+{
+	if (bRenderInDepthPass != bValue)
+	{
+		bRenderInDepthPass = bValue;
+		MarkRenderStateDirty();
+	}
+}
+
 void UPrimitiveComponent::SetVisibleInSceneCaptureOnly(bool bValue)
 {
 	if (bVisibleInSceneCaptureOnly != bValue)
@@ -3798,6 +4492,12 @@ void UPrimitiveComponent::SetHiddenInSceneCapture(bool bValue)
 
 void UPrimitiveComponent::SetLODParentPrimitive(UPrimitiveComponent * InLODParentPrimitive)
 {
+	if (LODParentPrimitive == InLODParentPrimitive)
+	{
+		return;
+	}
+
+
 #if WITH_EDITOR	
 	const ALODActor* ParentLODActor = [&]() -> const ALODActor*
 	{
@@ -3812,10 +4512,9 @@ void UPrimitiveComponent::SetLODParentPrimitive(UPrimitiveComponent * InLODParen
 		return nullptr;
 	}();
 
-	if (!GIsEditor || ShouldGenerateAutoLOD(ParentLODActor ? ParentLODActor->LODLevel - 1 : INDEX_NONE))
+	if (!GIsEditor || !InLODParentPrimitive || ShouldGenerateAutoLOD(ParentLODActor ? ParentLODActor->LODLevel - 1 : INDEX_NONE))
 #endif
 	{
-		// @todo, what do we do with old parent. We can't just reset undo parent because the parent might be used by other primitive
 		LODParentPrimitive = InLODParentPrimitive;
 		MarkRenderStateDirty();
 	}
@@ -3825,6 +4524,7 @@ UPrimitiveComponent* UPrimitiveComponent::GetLODParentPrimitive() const
 {
 	return LODParentPrimitive;
 }
+
 #if WITH_EDITOR
 const int32 UPrimitiveComponent::GetNumUncachedStaticLightingInteractions() const
 {
@@ -3865,12 +4565,22 @@ void UPrimitiveComponent::SetCustomNavigableGeometry(const EHasCustomNavigableGe
 	bHasCustomNavigableGeometry = InType;
 }
  
+int32 UPrimitiveComponent::GetRayTracingGroupId() const
+{
+	if (RayTracingGroupId == FPrimitiveSceneProxy::InvalidRayTracingGroupId && GetOwner() != nullptr)
+	{
+		return GetOwner()->GetRayTracingGroupId();
+	}
+			
+	return RayTracingGroupId;
+}
+
 bool UPrimitiveComponent::WasRecentlyRendered(float Tolerance /*= 0.2*/) const
 {
 	if (const UWorld* const World = GetWorld())
 	{
 		// Adjust tolerance, so visibility is not affected by bad frame rate / hitches.
-		const float RenderTimeThreshold = FMath::Max(Tolerance, World->DeltaTimeSeconds + KINDA_SMALL_NUMBER);
+		const float RenderTimeThreshold = FMath::Max(Tolerance, World->DeltaTimeSeconds + UE_KINDA_SMALL_NUMBER);
 
 		// If the current cached value is less than the tolerance then we don't need to go look at the components
 		return World->TimeSince(GetLastRenderTime()) <= RenderTimeThreshold;
@@ -3880,22 +4590,212 @@ bool UPrimitiveComponent::WasRecentlyRendered(float Tolerance /*= 0.2*/) const
 
 void UPrimitiveComponent::SetLastRenderTime(float InLastRenderTime)
 {
-	LastRenderTime = InLastRenderTime;
+	SceneData.LastRenderTime = InLastRenderTime;
 	if (AActor* Owner = GetOwner())
 	{
-		if (LastRenderTime > Owner->GetLastRenderTime())
+		if (InLastRenderTime > Owner->GetLastRenderTime())
 		{
-			FActorLastRenderTime::Set(Owner, LastRenderTime);
+			FActorLastRenderTime::Set(Owner, InLastRenderTime);
 		}
 	}
+}
+
+#if MESH_DRAW_COMMAND_STATS
+void UPrimitiveComponent::SetMeshDrawCommandStatsCategory(FName StatsCategory)
+{
+	if (MeshDrawCommandStatsCategory != StatsCategory)
+	{
+		MeshDrawCommandStatsCategory = StatsCategory;
+		MarkRenderStateDirty();
+	}
+}
+
+FName UPrimitiveComponent::GetMeshDrawCommandStatsCategory() const
+{
+	// If a stats category isn't set on the component then use the component type.
+	return MeshDrawCommandStatsCategory.IsNone() ? GetClass()->GetFName() : MeshDrawCommandStatsCategory;
+}
+#endif
+
+void UPrimitiveComponent::SetupPrecachePSOParams(FPSOPrecacheParams& Params)
+{
+	Params.bRenderInMainPass = bRenderInMainPass;
+	Params.bRenderInDepthPass = bRenderInDepthPass;
+	Params.bStaticLighting = HasStaticLighting();
+	Params.bAffectDynamicIndirectLighting = bAffectDynamicIndirectLighting;
+	Params.bCastShadow = CastShadow;
+	// Custom depth can be toggled at runtime with PSO precache call so assume it might be needed when depth pass is needed
+	// Ideally precache those with lower priority and don't wait on these (UE-174426)
+	Params.bRenderCustomDepth = bRenderCustomDepth;
+	Params.bCastShadowAsTwoSided = bCastShadowAsTwoSided;
+	Params.SetMobility(Mobility);	
+	Params.SetStencilWriteMask(FRendererStencilMaskEvaluation::ToStencilMask(CustomDepthStencilWriteMask));
+
+	TArray<UMaterialInterface*> UsedMaterials;
+	GetUsedMaterials(UsedMaterials);
+	for (const UMaterialInterface* MaterialInterface : UsedMaterials)
+	{
+		if (MaterialInterface)
+		{
+			if (MaterialInterface->GetRelevance_Concurrent(GMaxRHIFeatureLevel).bUsesWorldPositionOffset)
+			{
+				Params.bAnyMaterialHasWorldPositionOffset = true;
+				break;
+			}
+		}
+	}
+}
+
+void UPrimitiveComponent::PrecachePSOs()
+{
+#if UE_WITH_PSO_PRECACHING
+	// Only request PSO precaching if app is rendering and per component PSO precaching is enabled
+	// Also only request PSOs from game thread because TStrongObjectPtr is used on the material to make
+	// it's not deleted via garbage collection when PSO precaching is still busy. TStrongObjectPtr can only
+	// be constructed on the GameThread
+	if (!FApp::CanEverRender() || !IsComponentPSOPrecachingEnabled() || !IsInGameThread())
+	{
+		return;
+	}
+
+	// clear the current request data
+	MaterialPSOPrecacheRequestIDs.Empty();
+	PSOPrecacheCompileEvent = nullptr;
+	bPSOPrecacheRequestBoosted = false;
+
+	// Collect the data from the derived classes
+	FPSOPrecacheParams PSOPrecacheParams;
+	SetupPrecachePSOParams(PSOPrecacheParams);
+	FMaterialInterfacePSOPrecacheParamsList PSOPrecacheDataArray;
+	CollectPSOPrecacheData(PSOPrecacheParams, PSOPrecacheDataArray);
+
+	FGraphEventArray GraphEvents;
+	PrecacheMaterialPSOs(PSOPrecacheDataArray, MaterialPSOPrecacheRequestIDs, GraphEvents);
+
+	RequestRecreateRenderStateWhenPSOPrecacheFinished(GraphEvents);
+#endif
+}
+
+void UPrimitiveComponent::RequestRecreateRenderStateWhenPSOPrecacheFinished(const FGraphEventArray& PSOPrecacheCompileEvents)
+{
+#if UE_WITH_PSO_PRECACHING
+	// If the proxy creation strategy relies on knowing when the precached PSO has been compiled,
+	// schedule a task to mark the render state dirty when all PSOs are compiled so the proxy gets recreated.
+	if (UsePSOPrecacheRenderProxyDelay() && GetPSOPrecacheProxyCreationStrategy() != EPSOPrecacheProxyCreationStrategy::AlwaysCreate && !PSOPrecacheCompileEvents.IsEmpty())
+	{
+		PSOPrecacheCompileEvent = TGraphTask<FMarkActorRenderStateDirtyTask>::CreateTask(&PSOPrecacheCompileEvents).ConstructAndDispatchWhenReady(this);
+	}
+
+	bPSOPrecacheCalled = true;
+#endif // UE_WITH_PSO_PRECACHING
+}
+
+bool UPrimitiveComponent::UsePSOPrecacheRenderProxyDelay() const
+{
+#if UE_WITH_PSO_PRECACHING
+	return true;
+#else
+	return false;
+#endif
+}
+
+bool UPrimitiveComponent::IsPSOPrecaching() const
+{
+#if UE_WITH_PSO_PRECACHING
+	return PSOPrecacheCompileEvent && !PSOPrecacheCompileEvent->IsComplete();
+#else
+	return false;
+#endif // UE_WITH_PSO_PRECACHING
+}
+
+bool UPrimitiveComponent::ShouldRenderProxyFallbackToDefaultMaterial() const
+{
+#if UE_WITH_PSO_PRECACHING
+	return IsPSOPrecaching() && GetPSOPrecacheProxyCreationStrategy() == EPSOPrecacheProxyCreationStrategy::UseDefaultMaterialUntilPSOPrecached;
+#else
+	return false;
+#endif // UE_WITH_PSO_PRECACHING
+}
+
+bool UPrimitiveComponent::CheckPSOPrecachingAndBoostPriority()
+{
+#if UE_WITH_PSO_PRECACHING
+	ensure(!IsComponentPSOPrecachingEnabled() || bPSOPrecacheCalled);
+
+	if (PSOPrecacheCompileEvent && !PSOPrecacheCompileEvent->IsComplete())
+	{
+		if (!bPSOPrecacheRequestBoosted)
+		{
+			BoostPSOPriority(MaterialPSOPrecacheRequestIDs);
+			bPSOPrecacheRequestBoosted = true;
+		}
+	}
+	else
+	{
+		PSOPrecacheCompileEvent = nullptr;
+	}
+
+	return IsPSOPrecaching();
+#else
+	return false;
+#endif
+}
+
+FPrimitiveMaterialPropertyDescriptor UPrimitiveComponent::GetUsedMaterialPropertyDesc(ERHIFeatureLevel::Type FeatureLevel) const
+{
+	FPrimitiveMaterialPropertyDescriptor Result;
+	TArray<UMaterialInterface*> UsedMaterials;
+	GetUsedMaterials(UsedMaterials);
+
+	const bool bUseTessellation = UseNaniteTessellation();
+
+	for (const UMaterialInterface* MaterialInterface : UsedMaterials)
+	{
+		if (MaterialInterface)
+		{
+			FMaterialRelevance MaterialRelevance = MaterialInterface->GetRelevance_Concurrent(FeatureLevel);
+
+			Result.bAnyMaterialHasWorldPositionOffset = Result.bAnyMaterialHasWorldPositionOffset || MaterialRelevance.bUsesWorldPositionOffset;
+
+			if (MaterialInterface->HasPixelAnimation() && IsOpaqueOrMaskedBlendMode(MaterialInterface->GetBlendMode()))
+			{
+				Result.bAnyMaterialHasPixelAnimation = true;
+			}
+
+			if (bUseTessellation && MaterialRelevance.bUsesDisplacement)
+			{
+				FDisplacementScaling DisplacementScaling = MaterialInterface->GetDisplacementScaling();
+			
+				const float MinDisplacement = (0.0f - DisplacementScaling.Center) * DisplacementScaling.Magnitude;
+				const float MaxDisplacement = (1.0f - DisplacementScaling.Center) * DisplacementScaling.Magnitude;
+
+				Result.MinMaxMaterialDisplacement.X = FMath::Min(Result.MinMaxMaterialDisplacement.X, MinDisplacement);
+				Result.MinMaxMaterialDisplacement.Y = FMath::Max(Result.MinMaxMaterialDisplacement.Y, MaxDisplacement);
+			}
+
+			Result.MaxWorldPositionOffsetDisplacement = FMath::Max(Result.MaxWorldPositionOffsetDisplacement, MaterialInterface->GetMaxWorldPositionOffsetDisplacement());
+
+			const FMaterialCachedExpressionData& CachedMaterialData = MaterialInterface->GetCachedExpressionData();
+
+			Result.bAnyMaterialHasPerInstanceRandom = Result.bAnyMaterialHasPerInstanceRandom || CachedMaterialData.bHasPerInstanceRandom;
+			Result.bAnyMaterialHasPerInstanceCustomData = Result.bAnyMaterialHasPerInstanceCustomData || CachedMaterialData.bHasPerInstanceCustomData;
+		}
+	}
+
+	return Result;
 }
 
 #if WITH_EDITOR
 const bool UPrimitiveComponent::ShouldGenerateAutoLOD(const int32 HierarchicalLevelIndex) const
 {	
+	if (!IsHLODRelevant())
+	{
+		return false;
+	}
+
 	// bAllowSpecificExclusion
 	bool bExcluded = false;
-	if (ExcludeForSpecificHLODLevels.Contains(HierarchicalLevelIndex))
+	if (HierarchicalLevelIndex < CHAR_BIT && IsExcludedFromHLODLevel(EHLODLevelExclusion(1 << HierarchicalLevelIndex)))
 	{
 		const TArray<struct FHierarchicalSimplification>& HLODSetup = GetOwner()->GetLevel()->GetWorldSettings()->GetHierarchicalLODSetup();
 		if (HLODSetup.IsValidIndex(HierarchicalLevelIndex))
@@ -3905,10 +4805,195 @@ const bool UPrimitiveComponent::ShouldGenerateAutoLOD(const int32 HierarchicalLe
 				bExcluded = true;
 			}
 		}
-	} 
-		
-	return (Mobility != EComponentMobility::Movable) && bEnableAutoLODGeneration && !bExcluded;
+	}
+
+	return !bExcluded;
 }
-#endif 
+
+#endif
+
+void UPrimitiveComponent::SetExcludeForSpecificHLODLevels(const TArray<int32>& InExcludeForSpecificHLODLevels)
+{
+	ExcludeFromHLODLevels = 0;
+	for (int32 ExcludeFromLevel : InExcludeForSpecificHLODLevels)
+	{
+		if (ExcludeFromLevel < CHAR_BIT)
+		{
+			SetExcludedFromHLODLevel(EHLODLevelExclusion(1 << ExcludeFromLevel), true);
+		}
+	}
+}
+
+TArray<int32> UPrimitiveComponent::GetExcludeForSpecificHLODLevels() const
+{
+	TArray<int32> ExcludeFromLevels;
+
+	for (int32 ExcludeFromLevel = 0; ExcludeFromLevel < CHAR_BIT; ExcludeFromLevel++)
+	{
+		if (IsExcludedFromHLODLevel(EHLODLevelExclusion(1 << ExcludeFromLevel)))
+		{
+			ExcludeFromLevels.Add(ExcludeFromLevel);
+		}
+	}
+
+	return ExcludeFromLevels;
+}
+
+bool UPrimitiveComponent::IsExcludedFromHLODLevel(EHLODLevelExclusion HLODLevel) const
+{
+	return EnumHasAllFlags((EHLODLevelExclusion)ExcludeFromHLODLevels, HLODLevel);
+}
+
+void UPrimitiveComponent::SetExcludedFromHLODLevel(EHLODLevelExclusion HLODLevel, bool bExcluded)
+{
+	if (bExcluded)
+	{
+		EnumAddFlags((EHLODLevelExclusion&)ExcludeFromHLODLevels, HLODLevel);
+	}
+	else
+	{
+		EnumRemoveFlags((EHLODLevelExclusion&)ExcludeFromHLODLevels, HLODLevel);
+	}
+}
+
+void UPrimitiveComponent::GetPrimitiveStats(FPrimitiveStats& PrimitiveStats) const
+{
+	// no default values returned
+}
+
+bool FActorPrimitiveComponentInterface::IsRenderStateCreated() const 
+{
+	return UPrimitiveComponent::GetPrimitiveComponent(this)->IsRenderStateCreated();
+}
+
+bool FActorPrimitiveComponentInterface::IsRenderStateDirty() const 
+{
+	return UPrimitiveComponent::GetPrimitiveComponent(this)->IsRenderStateDirty();
+}
+
+bool FActorPrimitiveComponentInterface::ShouldCreateRenderState() const 
+{
+	return UPrimitiveComponent::GetPrimitiveComponent(this)->ShouldCreateRenderState();
+}
+
+bool FActorPrimitiveComponentInterface::IsRegistered() const 
+{
+	return UPrimitiveComponent::GetPrimitiveComponent(this)->IsRegistered();
+}
+
+bool FActorPrimitiveComponentInterface::IsUnreachable() const 
+{
+	return UPrimitiveComponent::GetPrimitiveComponent(this)->IsUnreachable();
+}
+
+UWorld* FActorPrimitiveComponentInterface::GetWorld() const 
+{
+	return UPrimitiveComponent::GetPrimitiveComponent(this)->GetWorld();
+}
+
+FSceneInterface* FActorPrimitiveComponentInterface::GetScene() const 
+{
+	return UPrimitiveComponent::GetPrimitiveComponent(this)->GetScene();
+}
+
+FPrimitiveSceneProxy* FActorPrimitiveComponentInterface::GetSceneProxy() const 
+{
+	return UPrimitiveComponent::GetPrimitiveComponent(this)->SceneProxy;
+}
+
+void FActorPrimitiveComponentInterface::GetUsedMaterials(TArray<UMaterialInterface*>& OutMaterials, bool bGetDebugMaterials) const
+{
+	UPrimitiveComponent::GetPrimitiveComponent(this)->GetUsedMaterials(OutMaterials, bGetDebugMaterials);
+}
+
+void FActorPrimitiveComponentInterface::MarkRenderStateDirty()
+{
+	UPrimitiveComponent::GetPrimitiveComponent(this)->MarkRenderStateDirty();
+}
+
+void FActorPrimitiveComponentInterface::DestroyRenderState() 
+{
+	UPrimitiveComponent::GetPrimitiveComponent(this)->DestroyRenderState_Concurrent();
+}
+
+void FActorPrimitiveComponentInterface::CreateRenderState(FRegisterComponentContext* Context) 
+{
+	UPrimitiveComponent::GetPrimitiveComponent(this)->CreateRenderState_Concurrent(Context);
+}
+
+FString FActorPrimitiveComponentInterface::GetName() const 
+{
+	return UPrimitiveComponent::GetPrimitiveComponent(this)->GetName();
+}
+
+FString FActorPrimitiveComponentInterface::GetFullName() const 
+{
+	return UPrimitiveComponent::GetPrimitiveComponent(this)->GetFullName();
+}
+
+FTransform FActorPrimitiveComponentInterface::GetTransform() const 
+{
+	return UPrimitiveComponent::GetPrimitiveComponent(this)->GetComponentTransform();
+}
+
+FBoxSphereBounds FActorPrimitiveComponentInterface::GetBounds() const 
+{
+	return UPrimitiveComponent::GetPrimitiveComponent(this)->Bounds;
+}
+
+float FActorPrimitiveComponentInterface::GetLastRenderTimeOnScreen() const 
+{
+	return UPrimitiveComponent::GetPrimitiveComponent(this)->GetLastRenderTimeOnScreen();
+}
+
+void FActorPrimitiveComponentInterface::GetPrimitiveStats(FPrimitiveStats& PrimitiveStats) const
+{
+return UPrimitiveComponent::GetPrimitiveComponent(this)->GetPrimitiveStats(PrimitiveStats);
+}
+
+
+UObject* FActorPrimitiveComponentInterface::GetUObject() 
+{
+	return UPrimitiveComponent::GetPrimitiveComponent(this);
+}
+
+const UObject* FActorPrimitiveComponentInterface::GetUObject() const 
+{
+	return UPrimitiveComponent::GetPrimitiveComponent(this);
+}
+
+UObject* FActorPrimitiveComponentInterface::GetOwner() const 
+{
+	return UPrimitiveComponent::GetPrimitiveComponent(this)->GetOwner();
+}
+
+FString FActorPrimitiveComponentInterface::GetOwnerName() const 
+{
+	const UPrimitiveComponent* Component = UPrimitiveComponent::GetPrimitiveComponent(this);
+
+#if ACTOR_HAS_LABELS
+	return Component->GetOwner() ? Component->GetOwner()->GetActorNameOrLabel() : Component->GetName();
+#else
+	return Component->GetName();
+#endif
+}
+
+FPrimitiveSceneProxy* FActorPrimitiveComponentInterface::CreateSceneProxy() 
+{
+	UPrimitiveComponent* Component = UPrimitiveComponent::GetPrimitiveComponent(this);
+	check(Component->SceneProxy == nullptr && Component->SceneData.SceneProxy == nullptr);
+	FPrimitiveSceneProxy* Proxy = Component->CreateSceneProxy();
+	Component->SceneData.SceneProxy = Proxy;
+	Component->SceneProxy = Proxy;
+	return Proxy;
+}
+
+#if WITH_EDITOR
+HHitProxy* FActorPrimitiveComponentInterface::CreateMeshHitProxy(int32 SectionIndex, int32 MaterialIndex) 
+{
+	UPrimitiveComponent* Component = UPrimitiveComponent::GetPrimitiveComponent(this);	
+	return Component->CreateMeshHitProxy(SectionIndex, MaterialIndex);	
+}
+#endif
 
 #undef LOCTEXT_NAMESPACE

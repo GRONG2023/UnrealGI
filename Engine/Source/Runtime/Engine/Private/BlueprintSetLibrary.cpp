@@ -3,12 +3,21 @@
 #include "Kismet/BlueprintSetLibrary.h"
 #include "Kismet/KismetArrayLibrary.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BlueprintSetLibrary)
+
 void UBlueprintSetLibrary::GenericSet_Add(const void* TargetSet, const FSetProperty* SetProperty, const void* ItemPtr)
 {
 	if (TargetSet)
 	{
 		FScriptSetHelper SetHelper(SetProperty, TargetSet);
-		SetHelper.AddElement(ItemPtr);
+		if (SetHelper.Num() < MaxSupportedSetSize)
+		{
+			SetHelper.AddElement(ItemPtr);
+		}
+		else if (SetHelper.FindElementIndexFromHash(ItemPtr) == INDEX_NONE)
+		{
+			FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Attempted add to set '%s' beyond the maximum supported capacity!"), *SetProperty->GetName()), ELogVerbosity::Warning, UKismetArrayLibrary::ReachedMaximumContainerSizeWarning);
+		}
 	}
 }
 
@@ -55,15 +64,9 @@ void UBlueprintSetLibrary::GenericSet_ToArray(const void* TargetSet, const FSetP
 	if (TargetSet && TargetArray)
 	{
 		FScriptSetHelper SetHelper(SetProperty, TargetSet);
-
-		int32 Size = SetHelper.Num();
-		for (int32 I = 0; Size; ++I)
+		for (FScriptSetHelper::FIterator It(SetHelper); It; ++It)
 		{
-			if(SetHelper.IsValidIndex(I))
-			{
-				UKismetArrayLibrary::GenericArray_Add(TargetArray, ArrayProperty, SetHelper.GetElementPtr(I));
-				--Size;
-			}
+			UKismetArrayLibrary::GenericArray_Add(TargetArray, ArrayProperty, SetHelper.GetElementPtr(It));
 		}
 	}
 }
@@ -101,6 +104,29 @@ bool UBlueprintSetLibrary::GenericSet_Contains(const void* TargetSet, const FSet
 	return false;
 }
 
+bool UBlueprintSetLibrary::GenericSet_IsEmpty(const void* TargetSet, const FSetProperty* SetProperty)
+{
+	if (TargetSet)
+	{
+		FScriptSetHelper SetHelper(SetProperty, TargetSet);
+
+		return SetHelper.Num() == 0;
+	}
+
+	return true;
+}
+
+bool UBlueprintSetLibrary::GenericSet_IsNotEmpty(const void* TargetSet, const FSetProperty* SetProperty)
+{
+	if (TargetSet)
+	{
+		FScriptSetHelper SetHelper(SetProperty, TargetSet);
+
+		return SetHelper.Num() > 0;
+	}
+	return false;
+}
+
 void UBlueprintSetLibrary::GenericSet_Intersect(const void* SetA, const FSetProperty* SetPropertyA, const void* SetB, const FSetProperty* SetPropertyB, const void* SetResult, const FSetProperty* SetPropertyResult)
 {
 	if (SetA && SetB && SetResult)
@@ -110,18 +136,12 @@ void UBlueprintSetLibrary::GenericSet_Intersect(const void* SetA, const FSetProp
 		FScriptSetHelper SetHelperResult(SetPropertyResult, SetResult);
 		
 		SetHelperResult.EmptyElements();
-
-		int32 Size = SetHelperA.Num();
-		for (int32 I = 0; Size; ++I)
+		for (FScriptSetHelper::FIterator It(SetHelperA); It; ++It)
 		{
-			if(SetHelperA.IsValidIndex(I))
+			const void* EntryInA = SetHelperA.GetElementPtr(It);
+			if (SetHelperB.FindElementIndexFromHash(EntryInA) != INDEX_NONE)
 			{
-				const void* EntryInA = SetHelperA.GetElementPtr(I);
-				if (SetHelperB.FindElementIndexFromHash(EntryInA) != INDEX_NONE)
-				{
-					SetHelperResult.AddElement(EntryInA);
-				}
-				--Size;
+				SetHelperResult.AddElement(EntryInA);
 			}
 		}
 	}
@@ -137,24 +157,14 @@ void UBlueprintSetLibrary::GenericSet_Union(const void* SetA, const FSetProperty
 		
 		SetHelperResult.EmptyElements();
 
-		int32 SizeA = SetHelperA.Num();
-		for (int32 I = 0; SizeA; ++I)
+		for (FScriptSetHelper::FIterator It(SetHelperA); It; ++It)
 		{
-			if(SetHelperA.IsValidIndex(I))
-			{
-				SetHelperResult.AddElement(SetHelperA.GetElementPtr(I));
-				--SizeA;
-			}
+			SetHelperResult.AddElement(SetHelperA.GetElementPtr(It));
 		}
 
-		int32 SizeB = SetHelperB.Num();
-		for (int32 I = 0; SizeB; ++I)
+		for (FScriptSetHelper::FIterator It(SetHelperB); It; ++It)
 		{
-			if(SetHelperB.IsValidIndex(I))
-			{
-				SetHelperResult.AddElement(SetHelperB.GetElementPtr(I));
-				--SizeB;
-			}
+			SetHelperResult.AddElement(SetHelperB.GetElementPtr(It));
 		}
 	}
 }
@@ -169,17 +179,12 @@ void UBlueprintSetLibrary::GenericSet_Difference(const void* SetA, const FSetPro
 
 		SetHelperResult.EmptyElements();
 
-		int32 Size = SetHelperA.Num();
-		for (int32 I = 0; Size; ++I)
+		for (FScriptSetHelper::FIterator It(SetHelperA); It; ++It)
 		{
-			if(SetHelperA.IsValidIndex(I))
+			const void* EntryInA = SetHelperA.GetElementPtr(It);
+			if (SetHelperB.FindElementIndexFromHash(EntryInA) == INDEX_NONE)
 			{
-				const void* EntryInA = SetHelperA.GetElementPtr(I);
-				if (SetHelperB.FindElementIndexFromHash(EntryInA) == INDEX_NONE)
-				{
-					SetHelperResult.AddElement(EntryInA);
-				}
-				--Size;
+				SetHelperResult.AddElement(EntryInA);
 			}
 		}
 	}

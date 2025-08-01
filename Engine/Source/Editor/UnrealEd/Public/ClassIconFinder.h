@@ -2,14 +2,19 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "Textures/SlateIcon.h"
+#include "HAL/Platform.h"
 #include "Styling/SlateIconFinder.h"
+#include "Textures/SlateIcon.h"
+#include "UObject/NameTypes.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
 class AActor;
-struct FAssetData;
 class ISlateStyle;
 class UBlueprint;
+class UClass;
+struct FAssetData;
 struct FSlateBrush;
 
 class FClassIconFinder
@@ -32,7 +37,7 @@ public:
 	UNREALED_API static const UClass* GetIconClassForAssetData(const FAssetData& InAssetData, bool* bOutIsClassType = nullptr);
 
 	/** Find the large thumbnail name to use for the supplied class */
-	UNREALED_API static const FSlateBrush* FindThumbnailForClass(const UClass* InClass, const FName& InDefaultName = FName() )
+	static const FSlateBrush* FindThumbnailForClass(const UClass* InClass, const FName& InDefaultName = FName() )
 	{
 		return FSlateIconFinder::FindCustomIconBrushForClass(InClass, TEXT("ClassThumbnail"), InDefaultName);
 	}

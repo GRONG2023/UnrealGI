@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Engine/EngineTypes.h"
 #include "UObject/ObjectMacros.h"
 #include "Sound/SoundBase.h"
 #include "DialogueSoundWaveProxy.generated.h"
@@ -10,6 +11,7 @@
 class USoundWave;
 struct FActiveSound;
 struct FSoundParseParameters;
+struct FSubtitleCue;
 
 UCLASS()
 class UDialogueSoundWaveProxy : public USoundBase
@@ -36,7 +38,7 @@ public:
 	/** 
 	 * Returns the length of the sound
 	 */
-	virtual float GetDuration() override;
+	virtual float GetDuration() const override;
 
 	virtual float GetVolumeMultiplier() override;
 	virtual float GetPitchMultiplier() override;

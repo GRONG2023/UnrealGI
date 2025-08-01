@@ -73,7 +73,7 @@
 #define UE_NET_TRACE_POP_SEND_BUNCH(Collector) UE_NET_TRACE_INTERNAL_POP_SEND_BUNCH(Collector)
 
 /** Append events from SrcCollector to Collector */
-#define UE_NET_TRACE_EVENTS(DstCollector, SrcCollector) UE_NET_TRACE_INTERNAL_EVENTS(DstCollector, SrcCollector)
+#define UE_NET_TRACE_EVENTS(DstCollector, SrcCollector, Stream) UE_NET_TRACE_INTERNAL_EVENTS(DstCollector, SrcCollector, Stream)
 
 /** Mark the end of a bunch */
 #define UE_NET_TRACE_END_BUNCH(Collector, Bunch, ...) UE_NET_TRACE_INTERNAL_END_BUNCH(Collector, Bunch, __VA_ARGS__)				
@@ -93,6 +93,18 @@
 /** Trace that a new connection has been created */
 #define UE_NET_TRACE_CONNECTION_CREATED(...) UE_NET_TRACE_INTERNAL_CONNECTION_CREATED(__VA_ARGS__)
 
+/** Trace that the state of this connection has been set */
+#define UE_NET_TRACE_CONNECTION_STATE_UPDATED(...) UE_NET_TRACE_INTERNAL_CONNECTION_STATE_UPDATED(__VA_ARGS__)
+
+/** Trace additional information about the given connection */
+#define UE_NET_TRACE_CONNECTION_UPDATED(...) UE_NET_TRACE_INTERNAL_CONNECTION_UPDATED(__VA_ARGS__)
+
+/** Trace StatsCounter associated with next reported packet */
+#define UE_NET_TRACE_PACKET_STATSCOUNTER(GameInstanceId, ConnectionId, Name, StatValue, Verbosity) UE_NET_TRACE_INTERNAL_PACKET_STATSCOUNTER(GameInstanceId, ConnectionId, Name, StatValue, Verbosity)
+
+/** Trace StatsCounter associated with current frame */
+#define UE_NET_TRACE_FRAME_STATSCOUNTER(GameInstanceId, Name, StatValue, Verbosity) UE_NET_TRACE_INTERNAL_FRAME_STATSCOUNTER(GameInstanceId, Name, StatValue, Verbosity)
+
 /** That that a connection has been closed */
 #define UE_NET_TRACE_CONNECTION_CLOSED(...) UE_NET_TRACE_INTERNAL_CONNECTION_CLOSED(__VA_ARGS__)
 
@@ -107,6 +119,9 @@
 
 /** Trace that the session has ended */
 #define UE_NET_TRACE_END_SESSION(GameInstanceId) UE_NET_TRACE_INTERNAL_END_SESSION(GameInstanceId)
+
+/** Trace additional information about the given game instance */
+#define UE_NET_TRACE_UPDATE_INSTANCE(...) UE_NET_TRACE_INTERNAL_UPDATE_INSTANCE(__VA_ARGS__)
 
 #else
 
@@ -135,15 +150,22 @@
 #define UE_NET_TRACE_NETHANDLE_CREATED(...)
 #define UE_NET_TRACE_NETHANDLE_DESTROYED(...)
 #define UE_NET_TRACE_CONNECTION_CREATED(...)
+#define UE_NET_TRACE_CONNECTION_STATE_UPDATED(...)
+#define UE_NET_TRACE_CONNECTION_UPDATED(...)
 #define UE_NET_TRACE_CONNECTION_CLOSED(...)
 #define UE_NET_TRACE_PACKET_DROPPED(...)
 #define UE_NET_TRACE_NAMED_OBJECT_SCOPE(...)
 #define UE_NET_TRACE_NAMED_DYNAMIC_NAME_SCOPE(...)
+
+#define UE_NET_TRACE_PACKET_STATSCOUNTER(...)
+#define UE_NET_TRACE_FRAME_STATSCOUNTER(...)
 
 #define UE_NET_TRACE_PACKET_DROPPED(...)
 #define UE_NET_TRACE_PACKET_SEND(...)
 #define UE_NET_TRACE_PACKET_RECV(...)
 
 #define UE_NET_TRACE_END_SESSION(...)
+
+#define UE_NET_TRACE_UPDATE_INSTANCE(...)
 
 #endif // UE_NET_TRACE_ENABLED

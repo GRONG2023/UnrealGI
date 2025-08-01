@@ -13,7 +13,7 @@
 #include "Animation/AnimSequenceBase.h"
 #include "Animation/AnimSequence.h"
 
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Animation/DebugSkelMeshComponent.h"
 #include "IPersonaPreviewScene.h"
 #include "PersonaModule.h"
@@ -25,7 +25,7 @@
 
 #include "IContentBrowserSingleton.h"
 #include "ContentBrowserModule.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "SSkeletonWidget.h"
 #include "Toolkits/GlobalEditorCommonCommands.h"
 #include "FrontendFilterBase.h"
@@ -45,6 +45,11 @@
 #include "SAnimCurveViewer.h"
 #include "IEditableSkeleton.h"
 #include "SAnimCurvePicker.h"
+#include "ToolMenus.h"
+#include "AnimationSequenceBrowserMenuContexts.h"
+#include "Viewports.h"
+#include "SceneInterface.h"
+#include "UObject/AssetRegistryTagsContext.h"
 
 #define LOCTEXT_NAMESPACE "SequenceBrowser"
 
@@ -134,8 +139,13 @@ public:
 			.HeightOverride(300.0f)
 			.WidthOverride(200.0f)
 			[
-				SNew(SSkeletonAnimNotifies, EditableSkeleton.ToSharedRef())
+				SNew(SSkeletonAnimNotifies)
 				.IsPicker(true)
+				.ShowNotifies(true)
+				.ShowSyncMarkers(false)
+				.ShowCompatibleSkeletonAssets(true)
+				.ShowOtherAssets(true)
+				.EditableSkeleton(EditableSkeleton.Pin())
 				.OnItemSelected_Lambda([this](const FName& InNotifyName)
 				{
 					FSlateApplication::Get().DismissAllMenus();
@@ -197,8 +207,140 @@ public:
 	/** Notify string to use when filtering */
 	FString NotifyString;
 
-	/** Editable skeleton used to access available notifies */
-	TSharedPtr<IEditableSkeleton> EditableSkeleton;
+	/** Editable skeleton used to filter available notifies */
+	TWeakPtr<IEditableSkeleton> EditableSkeleton;
+};
+
+/** A filter that displays animations that use a skeleton sync marker */
+class FFrontendFilter_SkeletonSyncMarker : public FFrontendFilter
+{
+public:
+	FFrontendFilter_SkeletonSyncMarker(TSharedPtr<FFrontendFilterCategory> InCategory, TSharedPtr<IEditableSkeleton> InEditableSkeleton)
+		: FFrontendFilter(InCategory) 
+		, EditableSkeleton(InEditableSkeleton)
+	{}
+
+	// FFrontendFilter implementation
+	virtual FString GetName() const override 
+	{
+		return TEXT("SkeletonSyncMarkerAssets"); 
+	}
+
+	virtual FText GetDisplayName() const override 
+	{ 
+		return SyncMarkerString.IsEmpty() ? LOCTEXT("FFrontendFilter_SkeletonSyncMarkerAssetsEmpty", "Uses Sync Marker...") : FText::Format(LOCTEXT("FFrontendFilter_SkeletonSyncMarkerAssets", "Uses Sync Marker: {0}"), FText::FromString(SyncMarkerString));
+	}
+
+	virtual FText GetToolTipText() const override
+	{
+		return SyncMarkerString.IsEmpty() ? LOCTEXT("FFrontendFilter_SkeletonSyncMarkerAssetsEmptyTooltip", "Show assets that contains a (specified) sync marker") : FText::Format(LOCTEXT("FFrontendFilter_SkeletonSyncMarkerAssetsTooltip", "Show assets that use sync marker '{0}'"), FText::FromString(SyncMarkerString));
+	}
+
+	virtual void ModifyContextMenu(FMenuBuilder& MenuBuilder) override
+	{
+		MenuBuilder.BeginSection(TEXT("SyncMarkerSection"), LOCTEXT("SyncMarkerSectionHeading", "Choose Sync Marker"));
+
+		MenuBuilder.AddMenuEntry(LOCTEXT("AllSyncMarkerFilterName", "Any Animation Sync Marker"),
+			LOCTEXT("AllSyncMarkerFilterName_ToolTip", "Consider all Sync Markers, rather than a specific one, for filtering."),
+			FSlateIcon(),
+			FUIAction(
+				FExecuteAction::CreateLambda([this]()
+				{
+					if (!SyncMarkerString.IsEmpty())
+					{
+						SyncMarkerString.Empty();
+					}
+
+					OnChanged().Broadcast();
+				}), 
+				FCanExecuteAction::CreateLambda([this]()
+				{
+					return !SyncMarkerString.IsEmpty();
+				}),
+				FGetActionCheckState::CreateLambda([this]()
+				{
+					return SyncMarkerString.IsEmpty() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+				})
+			), 
+			NAME_None,
+			EUserInterfaceActionType::ToggleButton
+		);
+		
+		TSharedRef<SWidget> Widget =
+			SNew(SBox)
+			.HeightOverride(300.0f)
+			.WidthOverride(200.0f)
+			[
+				SNew(SSkeletonAnimNotifies)
+				.IsPicker(true)
+				.ShowNotifies(false)
+				.ShowSyncMarkers(true)
+				.ShowCompatibleSkeletonAssets(true)
+				.ShowOtherAssets(true)
+				.EditableSkeleton(EditableSkeleton.Pin())
+				.OnItemSelected_Lambda([this](const FName& InNotifyName)
+				{
+					FSlateApplication::Get().DismissAllMenus();
+					SyncMarkerString = InNotifyName.ToString();
+					OnChanged().Broadcast();
+				})
+			];
+
+		MenuBuilder.AddWidget(Widget, FText(), true);
+
+		MenuBuilder.EndSection();
+	}
+
+	virtual FLinearColor GetColor() const override
+	{
+		return FLinearColor(0.62f, 0.43f, 0.0f, 1);
+	}
+
+	// IFilter implementation
+	virtual bool PassesFilter(FAssetFilterType InItem) const override
+	{
+		FAssetData ItemAssetData;
+		if (InItem.Legacy_TryGetAssetData(ItemAssetData))
+		{
+			const FString TagValue = ItemAssetData.GetTagValueRef<FString>(USkeleton::AnimSyncMarkerTag);
+			if (!TagValue.IsEmpty())
+			{
+				if (!SyncMarkerString.IsEmpty())
+				{
+					// Parse sync markers
+					TArray<FString> SyncMarkerValues;
+					if (TagValue.ParseIntoArray(SyncMarkerValues, *USkeleton::AnimSyncMarkerTagDelimiter, true) > 0)
+					{
+						for (const FString& SyncMarkerValue : SyncMarkerValues)
+						{
+							if (SyncMarkerValue == SyncMarkerString)
+							{
+								return true;
+							}
+						}
+					}
+				}
+
+				return SyncMarkerString.IsEmpty();
+			}
+		}
+
+		return false;
+	}
+
+	void SetSyncMarkerFilter(const FName& InNotifyFilter)
+	{
+		SyncMarkerString = InNotifyFilter.ToString();
+		OnChanged().Broadcast();
+		SetActive(true);
+	}
+
+public:
+	/** Sync marker string to use when filtering */
+	FString SyncMarkerString;
+
+	/** Editable skeleton used to filter available sync markers */
+	TWeakPtr<IEditableSkeleton> EditableSkeleton;
 };
 
 /** A filter that displays animations that use a curve */
@@ -261,8 +403,8 @@ public:
 			.HeightOverride(300.0f)
 			.WidthOverride(200.0f)
 			[
-				SNew(SAnimCurvePicker, EditableSkeleton.ToSharedRef())
-				.OnCurveNamePicked_Lambda([this](const FName& InCurveName)
+				SNew(SAnimCurvePicker, &EditableSkeleton->GetSkeleton())
+				.OnCurvePicked_Lambda([this](const FName& InCurveName)
 				{
 					FSlateApplication::Get().DismissAllMenus();
 					CurveString = InCurveName.ToString();
@@ -345,7 +487,7 @@ public:
 		FAssetData ItemAssetData;
 		if (InItem.Legacy_TryGetAssetData(ItemAssetData))
 		{
-			return !ItemAssetData.GetClass()->IsChildOf(USoundWave::StaticClass());
+			return !ItemAssetData.IsInstanceOf(USoundWave::StaticClass());
 		}
 		return false;
 	}
@@ -467,22 +609,37 @@ SAnimationSequenceBrowser::~SAnimationSequenceBrowser()
 
 	if(ViewportClient.IsValid())
 	{
-		ViewportClient->Viewport = NULL;
+		ViewportClient->Viewport = nullptr;
+	}
+}
+
+void SAnimationSequenceBrowser::OnRequestOpenAssets(const TArray<FAssetData>& SelectedAssets, bool bFromHistory)
+{
+	if (SelectedAssets.Num() == 1)
+	{
+		OnRequestOpenAsset(SelectedAssets[0], bFromHistory);
 	}
 }
 
 void SAnimationSequenceBrowser::OnRequestOpenAsset(const FAssetData& AssetData, bool bFromHistory)
 {
-		if (UObject* RawAsset = AssetData.GetAsset())
-		{
+	if (UObject* RawAsset = AssetData.GetAsset())
+	{
 		if (UAnimationAsset* AnimationAsset = Cast<UAnimationAsset>(RawAsset))
+		{
+			if (FSlateApplication::Get().GetModifierKeys().IsShiftDown())
 			{
-			if (!bFromHistory)
-			{
-				AddAssetToHistory(AssetData);
+				IAnimationEditorModule& AnimationEditorModule = FModuleManager::LoadModuleChecked<IAnimationEditorModule>("AnimationEditor");
+				AnimationEditorModule.CreateAnimationEditor(EToolkitMode::Standalone, nullptr, AnimationAsset);
 			}
-
-			OnOpenNewAsset.ExecuteIfBound(AnimationAsset);
+			else
+			{
+				if (!bFromHistory)
+				{
+					AddAssetToHistory(AssetData);
+				}
+				OnOpenNewAsset.ExecuteIfBound(AnimationAsset);
+			}
 		}
 		else if (USoundWave* SoundWave = Cast<USoundWave>(RawAsset))
 		{
@@ -493,88 +650,84 @@ void SAnimationSequenceBrowser::OnRequestOpenAsset(const FAssetData& AssetData, 
 
 TSharedPtr<SWidget> SAnimationSequenceBrowser::OnGetAssetContextMenu(const TArray<FAssetData>& SelectedAssets)
 {
-	bool bHasSelectedAnimSequence = false;
-	bool bHasSelectedAnimAsset = false;
-	if ( SelectedAssets.Num() )
+	UToolMenus* ToolMenus = UToolMenus::Get();
+	const FName SequenceBrowserContextMenuName = "AnimationSequenceBrowser.SequenceContextMenu";
+	if (!ToolMenus->IsMenuRegistered(SequenceBrowserContextMenuName))
 	{
-		for(auto Iter = SelectedAssets.CreateConstIterator(); Iter; ++Iter)
+		ToolMenus->RegisterMenu(SequenceBrowserContextMenuName);
+	}
+	UToolMenu* Menu = ToolMenus->FindMenu(SequenceBrowserContextMenuName);
+
+	Menu->AddDynamicSection("SequenceContextMenuDynamic", FNewToolMenuDelegate::CreateLambda([this, SelectedAssets](UToolMenu* InMenu)
+	{
+		bool bHasSelectedAnimSequence = false;
+		bool bHasSelectedAnimAsset = false;
+		if (SelectedAssets.Num())
 		{
-			UObject* Asset =  Iter->GetAsset();
-			if(Cast<UAnimSequence>(Asset))
+			for (auto Iter = SelectedAssets.CreateConstIterator(); Iter; ++Iter)
 			{
-				bHasSelectedAnimSequence = true;
-			}
-			if (Cast<UAnimationAsset>(Asset))
-			{
-				bHasSelectedAnimAsset = true;
+				UObject* Asset = Iter->GetAsset();
+				if (Cast<UAnimSequence>(Asset))
+				{
+					bHasSelectedAnimSequence = true;
+				}
+				if (Cast<UAnimationAsset>(Asset))
+				{
+					bHasSelectedAnimAsset = true;
+				}
 			}
 		}
-	}
 
-	FMenuBuilder MenuBuilder(/*bInShouldCloseWindowAfterMenuSelection=*/ true, Commands);
-
-	if(bHasSelectedAnimSequence)
-	{
-		MenuBuilder.BeginSection("AnimationSequenceOptions", LOCTEXT("AnimationHeading", "Animation"));
+		if (bHasSelectedAnimSequence)
 		{
-			MenuBuilder.AddMenuEntry(
-				LOCTEXT("RunCompressionOnAnimations", "Apply Compression"),
-				LOCTEXT("RunCompressionOnAnimations_ToolTip", "Apply a compression scheme from the options given to the selected animations"),
+			FToolMenuSection& Section = InMenu->AddSection("SequenceOptions", LOCTEXT("AssetHeading", "Asset"));
+
+			Section.AddMenuEntry("ApplyCompression",
+				LOCTEXT("ApplyCompression", "Apply Compression"),
+				LOCTEXT("ApplyCompression_ToolTip", "Apply a compression scheme from the options given to the selected animations"),
 				FSlateIcon(),
 				FUIAction(
-				FExecuteAction::CreateSP(this, &SAnimationSequenceBrowser::OnApplyCompression, SelectedAssets),
-				FCanExecuteAction()
+					FExecuteAction::CreateSP(this, &SAnimationSequenceBrowser::OnApplyCompression, SelectedAssets),
+					FCanExecuteAction()
 				)
-				);
+			);
 
-			MenuBuilder.AddMenuEntry(
+			Section.AddMenuEntry("ExportAnimationsToFBX",
 				LOCTEXT("ExportAnimationsToFBX", "Export to FBX"),
 				LOCTEXT("ExportAnimationsToFBX_ToolTip", "Export Animation(s) To FBX"),
 				FSlateIcon(),
 				FUIAction(
-				FExecuteAction::CreateSP(this, &SAnimationSequenceBrowser::OnExportToFBX, SelectedAssets),
-				FCanExecuteAction()
+					FExecuteAction::CreateSP(this, &SAnimationSequenceBrowser::OnExportToFBX, SelectedAssets),
+					FCanExecuteAction()
 				)
-				);
+			);
 
-			MenuBuilder.AddMenuEntry(
+			Section.AddMenuEntry("AddLoopingInterpolation",
 				LOCTEXT("AddLoopingInterpolation", "Add Looping Interpolation"),
 				LOCTEXT("AddLoopingInterpolation_ToolTip", "Add an extra frame at the end of the animation to create better looping"),
 				FSlateIcon(),
 				FUIAction(
-				FExecuteAction::CreateSP(this, &SAnimationSequenceBrowser::OnAddLoopingInterpolation, SelectedAssets),
-				FCanExecuteAction()
+					FExecuteAction::CreateSP(this, &SAnimationSequenceBrowser::OnAddLoopingInterpolation, SelectedAssets),
+					FCanExecuteAction()
 				)
-				);
+			);
 
-			MenuBuilder.AddMenuEntry(
+			Section.AddMenuEntry("ReimportAnimation",
 				LOCTEXT("ReimportAnimation", "Reimport Animation"),
-				LOCTEXT("ReimportAnimation_ToolTip", "Reimport current animaion."),
+				LOCTEXT("ReimportAnimation_ToolTip", "Reimport current animation."),
 				FSlateIcon(),
 				FUIAction(
-				FExecuteAction::CreateSP(this, &SAnimationSequenceBrowser::OnReimportAnimation, SelectedAssets),
-				FCanExecuteAction()
+					FExecuteAction::CreateSP(this, &SAnimationSequenceBrowser::OnReimportAnimation, SelectedAssets),
+					FCanExecuteAction()
 				)
-				);
-
-			MenuBuilder.AddMenuEntry(
-				LOCTEXT("SetCurrentPreviewMesh", "Set Current Preview Mesh"),
-				LOCTEXT("SetCurrentPreviewMesh_ToolTip", "Set current preview mesh to be used when previewed by this asset. This only applies when you open Persona using this asset."),
-				FSlateIcon(),
-				FUIAction(
-				FExecuteAction::CreateSP(this, &SAnimationSequenceBrowser::OnSetCurrentPreviewMesh, SelectedAssets),
-				FCanExecuteAction()
-				)
-				);
+			);
 		}
-		MenuBuilder.EndSection();
-	}
 
-	if (SelectedAssets.Num() == 1 && SelectedAssets[0].GetClass()->IsChildOf(USoundWave::StaticClass()))
-	{
-		MenuBuilder.BeginSection("AnimationSequenceAudioOptions", LOCTEXT("AudioOptionsHeading", "Audio"));
+		if (SelectedAssets.Num() == 1 && SelectedAssets[0].IsInstanceOf(USoundWave::StaticClass()))
 		{
-			MenuBuilder.AddMenuEntry(
+			FToolMenuSection& Section = InMenu->AddSection("SequenceAudioOptions", LOCTEXT("AssetHeading", "Asset"));
+
+			Section.AddMenuEntry("PlayAudio",
 				LOCTEXT("PlayAudio", "Play Audio"),
 				LOCTEXT("PlayAudio_ToolTip", "Play this audio asset as a preview"),
 				FSlateIcon(),
@@ -589,7 +742,7 @@ TSharedPtr<SWidget> SAnimationSequenceBrowser::OnGetAssetContextMenu(const TArra
 			{
 				if (AudioComponent->IsPlaying())
 				{
-					MenuBuilder.AddMenuEntry(
+					Section.AddMenuEntry("StopAudio",
 						LOCTEXT("StopAudio", "Stop Audio"),
 						LOCTEXT("StopAudio_ToolTip", "Stop the currently playing preview audio"),
 						FSlateIcon(),
@@ -601,43 +754,74 @@ TSharedPtr<SWidget> SAnimationSequenceBrowser::OnGetAssetContextMenu(const TArra
 				}
 			}
 		}
-		MenuBuilder.EndSection();
-	}
 
-	MenuBuilder.BeginSection("AnimationSequenceOptions", LOCTEXT("OptionsHeading", "Options") );
-	{
-		MenuBuilder.AddMenuEntry(
-			LOCTEXT("SaveSelectedAssets", "Save"),
-			LOCTEXT("SaveSelectedAssets_ToolTip", "Save the selected assets"),
-			FSlateIcon(FEditorStyle::GetStyleSetName(), "Level.SaveIcon16x"),
-			FUIAction(
-				FExecuteAction::CreateSP( this, &SAnimationSequenceBrowser::SaveSelectedAssets, SelectedAssets),
-				FCanExecuteAction::CreateSP( this, &SAnimationSequenceBrowser::CanSaveSelectedAssets, SelectedAssets)
+		{
+			FToolMenuSection& Section = InMenu->FindOrAddSection("SequenceOptions", LOCTEXT("AssetHeading", "Asset"));
+
+			Section.AddMenuEntry("SetCurrentPreviewMesh",
+				LOCTEXT("SetCurrentPreviewMesh", "Set Current Preview Mesh"),
+				LOCTEXT("SetCurrentPreviewMesh_ToolTip", "Set current preview mesh to be used when previewed by this asset. This only applies when you open Persona using this asset."),
+				FSlateIcon(),
+				FUIAction(
+					FExecuteAction::CreateSP(this, &SAnimationSequenceBrowser::OnSetCurrentPreviewMesh, SelectedAssets),
+					FCanExecuteAction()
 				)
 			);
+		}
+		
+		{
+			FToolMenuSection& Section = InMenu->AddSection("SequenceGeneralOptions", LOCTEXT("AnimationSequenceGeneralOptions", "Options"));
 
-		MenuBuilder.AddMenuEntry(FGlobalEditorCommonCommands::Get().FindInContentBrowser);
-	}
-	MenuBuilder.EndSection();
+			Section.AddMenuEntry("SaveSelectedAssets",
+				LOCTEXT("SaveSelectedAssets", "Save"),
+				LOCTEXT("SaveSelectedAssets_ToolTip", "Save the selected assets"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "Level.SaveIcon16x"),
+				FUIAction(
+					FExecuteAction::CreateSP(this, &SAnimationSequenceBrowser::SaveSelectedAssets, SelectedAssets),
+					FCanExecuteAction::CreateSP(this, &SAnimationSequenceBrowser::CanSaveSelectedAssets, SelectedAssets)
+				));
 
-	if (bHasSelectedAnimAsset)
+			Section.AddMenuEntry("OpenSequenceInNewWindow",
+				LOCTEXT("AnimSequenceBase_OpenInNewWindow", "Open In New Window"),
+				LOCTEXT("AnimSequenceBase_OpenInNewWindowTooltip", "Will always open asset in a new window, and not re-use existing window. (Shift+Double-Click)"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "ContentBrowser.AssetActions.OpenInExternalEditor"),
+				FUIAction(
+					FExecuteAction::CreateSP(this, &SAnimationSequenceBrowser::OpenInNewWindow, SelectedAssets),
+					FCanExecuteAction()
+				));
+
+			Section.AddMenuEntry(FGlobalEditorCommonCommands::Get().FindInContentBrowser);
+		}
+	}));
+
+	UAnimationSequenceBrowserContextMenuContext* ContextObject = NewObject<UAnimationSequenceBrowserContextMenuContext>();
+	ContextObject->OwningAnimSequenceBrowser = SharedThis(this);
+	ContextObject->SelectedObjects.Reset();
+	for (auto Iter = SelectedAssets.CreateConstIterator(); Iter; ++Iter)
 	{
-		MenuBuilder.BeginSection("AnimationSequenceAdvancedOptions", LOCTEXT("AdvancedOptionsHeading", "Advanced") );
-	{
-		MenuBuilder.AddMenuEntry(
-			LOCTEXT("ChangeSkeleton", "Create a copy for another Skeleton..."),
-			LOCTEXT("ChangeSkeleton_ToolTip", "Create a copy for different skeleton"),
-			FSlateIcon(),
-			FUIAction(
-			FExecuteAction::CreateSP( this, &SAnimationSequenceBrowser::OnCreateCopy, SelectedAssets ),
-			FCanExecuteAction()
-			)
-			);
-	}
-		MenuBuilder.EndSection();
+		UObject* Asset = Iter->GetAsset();
+		if (Asset != nullptr)
+		{
+			ContextObject->SelectedObjects.Add(Asset);
+		}	
 	}
 
-	return MenuBuilder.MakeWidget();
+	FToolMenuContext MenuContext(Commands, nullptr, ContextObject);
+	return ToolMenus->GenerateWidget(SequenceBrowserContextMenuName, MenuContext);
+}
+
+void SAnimationSequenceBrowser::OpenInNewWindow(TArray<FAssetData> AnimationAssets)
+{
+	for (auto Iter = AnimationAssets.CreateConstIterator(); Iter; ++Iter)
+	{
+		UObject* Asset = Iter->GetAsset();
+		UAnimationAsset* AnimationAsset = Cast<UAnimationAsset>(Asset);
+		if (AnimationAsset)
+		{
+			IAnimationEditorModule& AnimationEditorModule = FModuleManager::LoadModuleChecked<IAnimationEditorModule>("AnimationEditor");
+			AnimationEditorModule.CreateAnimationEditor(EToolkitMode::Standalone, nullptr, AnimationAsset);
+		}
+	}
 }
 
 void SAnimationSequenceBrowser::FindInContentBrowser()
@@ -660,7 +844,7 @@ void SAnimationSequenceBrowser::GetSelectedPackages(const TArray<FAssetData>& As
 {
 	for (int32 AssetIdx = 0; AssetIdx < Assets.Num(); ++AssetIdx)
 	{
-		UPackage* Package = FindPackage(NULL, *Assets[AssetIdx].PackageName.ToString());
+		UPackage* Package = FindPackage(nullptr, *Assets[AssetIdx].PackageName.ToString());
 
 		if ( Package )
 		{
@@ -720,7 +904,7 @@ void SAnimationSequenceBrowser::OnExportToFBX(TArray<FAssetData> SelectedAssets)
 		}
 
 		FPersonaModule& PersonaModule = FModuleManager::GetModuleChecked<FPersonaModule>("Persona");
-		PersonaModule.ExportToFBX(AnimSequences, PersonaToolkitPtr.Pin()->GetPreviewScene()->GetPreviewMeshComponent()->SkeletalMesh);
+		PersonaModule.ExportToFBX(AnimSequences, PersonaToolkitPtr.Pin()->GetPreviewScene()->GetPreviewMeshComponent()->GetSkeletalMeshAsset());
 	}
 }
 
@@ -728,10 +912,9 @@ void SAnimationSequenceBrowser::OnSetCurrentPreviewMesh(TArray<FAssetData> Selec
 {
 	if(SelectedAssets.Num() > 0)
 	{
-		USkeletalMesh* PreviewMesh = PersonaToolkitPtr.Pin()->GetPreviewScene()->GetPreviewMeshComponent()->SkeletalMesh;
+		USkeletalMesh* PreviewMesh = PersonaToolkitPtr.Pin()->GetPreviewScene()->GetPreviewMeshComponent()->GetSkeletalMeshAsset();
 		if (PreviewMesh)
 		{
-			TArray<TWeakObjectPtr<UAnimSequence>> AnimSequences;
 			for(auto Iter = SelectedAssets.CreateIterator(); Iter; ++Iter)
 			{
 				UAnimationAsset * AnimAsset = Cast<UAnimationAsset>(Iter->GetAsset());
@@ -779,49 +962,6 @@ void SAnimationSequenceBrowser::OnReimportAnimation(TArray<FAssetData> SelectedA
 	}
 }
 
-void SAnimationSequenceBrowser::RetargetAnimationHandler(USkeleton* OldSkeleton, USkeleton* NewSkeleton, bool bRemapReferencedAssets, bool bAllowRemapToExisting, bool bConvertSpaces, const EditorAnimUtils::FNameDuplicationRule* NameRule, TArray<TWeakObjectPtr<UObject>> InAnimAssets)
-{
-	UObject* AssetToOpen = EditorAnimUtils::RetargetAnimations(OldSkeleton, NewSkeleton, InAnimAssets, bRemapReferencedAssets, NameRule, bConvertSpaces);
-
-	if(UAnimationAsset* AnimAsset = Cast<UAnimationAsset>(AssetToOpen))
-	{
-		FAssetRegistryModule::AssetCreated(AssetToOpen);
-
-		// once all success, attempt to open new editor with new skeleton
-		GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->OpenEditorForAsset(AssetToOpen);
-	}
-}
-
-void SAnimationSequenceBrowser::OnCreateCopy(TArray<FAssetData> Selected)
-{
-	if ( Selected.Num() > 0 )
-	{
-		// ask which skeleton users would like to choose
-		USkeleton* OldSkeleton = PersonaToolkitPtr.Pin()->GetSkeleton();
-		USkeleton* NewSkeleton = NULL;
-		bool		bDuplicateAssets = true;
-
-		const FText Message = LOCTEXT("RemapSkeleton_Warning", "This will duplicate the asset and convert to new skeleton.");
-
-		TArray<UObject *> AnimAssets;
-		for ( auto SelectedAsset : Selected )
-		{
-			UAnimationAsset* Asset = Cast<UAnimationAsset>(SelectedAsset.GetAsset());
-			if (Asset)
-			{
-				AnimAssets.Add(Asset);
-			}
-		}
-
-		if (AnimAssets.Num() > 0)
-		{
-			auto AnimAssetsToConvert = FObjectEditorUtils::GetTypedWeakObjectPtrs<UObject>(AnimAssets);
-			// ask user what they'd like to change to 
-			SAnimationRemapSkeleton::ShowWindow(OldSkeleton, Message, true, FOnRetargetAnimation::CreateSP(this, &SAnimationSequenceBrowser::RetargetAnimationHandler, AnimAssetsToConvert));
-		}
-	}
-}
-
 bool SAnimationSequenceBrowser::CanShowColumnForAssetRegistryTag(FName AssetType, FName TagName) const
 {
 	return !AssetRegistryTagsToIgnore.Contains(TagName);
@@ -850,8 +990,8 @@ void SAnimationSequenceBrowser::Construct(const FArguments& InArgs, const TShare
 
 	// Configure filter for asset picker
 	Filter.bRecursiveClasses = true;
-	Filter.ClassNames.Add(UAnimationAsset::StaticClass()->GetFName());
-	Filter.ClassNames.Add(USoundWave::StaticClass()->GetFName());
+	Filter.ClassPaths.Add(UAnimationAsset::StaticClass()->GetClassPathName());
+	Filter.ClassPaths.Add(USoundWave::StaticClass()->GetClassPathName());
 
 	FAssetPickerConfig Config;
 	Config.Filter = Filter;
@@ -864,6 +1004,7 @@ void SAnimationSequenceBrowser::Construct(const FArguments& InArgs, const TShare
 	Config.OnAssetDoubleClicked = FOnAssetDoubleClicked::CreateSP(this, &SAnimationSequenceBrowser::OnRequestOpenAsset, false);
 	Config.OnGetAssetContextMenu = FOnGetAssetContextMenu::CreateSP(this, &SAnimationSequenceBrowser::OnGetAssetContextMenu);
 	Config.OnAssetTagWantsToBeDisplayed = FOnShouldDisplayAssetTag::CreateSP(this, &SAnimationSequenceBrowser::CanShowColumnForAssetRegistryTag);
+	Config.OnAssetEnterPressed = FOnAssetEnterPressed::CreateSP(this, &SAnimationSequenceBrowser::OnRequestOpenAssets, false);
 	Config.SyncToAssetsDelegates.Add(&SyncToAssetsDelegate);
 	Config.OnShouldFilterAsset = FOnShouldFilterAsset::CreateSP(this, &SAnimationSequenceBrowser::HandleFilterAsset);
 	Config.GetCurrentSelectionDelegates.Add(&GetCurrentSelectionDelegate);
@@ -903,6 +1044,7 @@ void SAnimationSequenceBrowser::Construct(const FArguments& InArgs, const TShare
 	SkeletonNotifyFilter = MakeShareable(new FFrontendFilter_SkeletonNotify(AnimCategory, InPersonaToolkit->GetEditableSkeleton()));
 	Config.ExtraFrontendFilters.Add(SkeletonNotifyFilter.ToSharedRef());
 	Config.ExtraFrontendFilters.Add(MakeShareable(new FFrontendFilter_Curves(AnimCategory, InPersonaToolkit->GetEditableSkeleton())));
+	Config.ExtraFrontendFilters.Add(MakeShareable(new FFrontendFilter_SkeletonSyncMarker(AnimCategory, InPersonaToolkit->GetEditableSkeleton())));
 
 	Config.OnIsAssetValidForCustomToolTip = FOnIsAssetValidForCustomToolTip::CreateLambda([](const FAssetData& AssetData) {return AssetData.IsAssetLoaded(); });
 	Config.OnGetCustomAssetToolTip = FOnGetCustomAssetToolTip::CreateSP(this, &SAnimationSequenceBrowser::CreateCustomAssetToolTip);
@@ -910,11 +1052,12 @@ void SAnimationSequenceBrowser::Construct(const FArguments& InArgs, const TShare
 	Config.OnAssetToolTipClosing = FOnAssetToolTipClosing::CreateSP( this, &SAnimationSequenceBrowser::OnAssetToolTipClosing );
 
 	// hide all asset registry columns by default (we only really want the name and path)
-	TArray<UObject::FAssetRegistryTag> AssetRegistryTags;
-	UAnimSequence::StaticClass()->GetDefaultObject()->GetAssetRegistryTags(AssetRegistryTags);
-	for(UObject::FAssetRegistryTag& AssetRegistryTag : AssetRegistryTags)
+	UObject* AnimSequenceDefaultObject = UAnimSequence::StaticClass()->GetDefaultObject();
+	FAssetRegistryTagsContextData TagsContext(AnimSequenceDefaultObject, EAssetRegistryTagsCaller::Uncategorized);
+	AnimSequenceDefaultObject->GetAssetRegistryTags(TagsContext);
+	for (const TPair<FName,UObject::FAssetRegistryTag>& TagPair : TagsContext.Tags)
 	{
-		Config.HiddenColumnNames.Add(AssetRegistryTag.Name.ToString());
+		Config.HiddenColumnNames.Add(TagPair.Key.ToString());
 	}
 
 	// Also hide the type column by default (but allow users to enable it, so don't use bShowTypeInColumnView)
@@ -928,15 +1071,15 @@ void SAnimationSequenceBrowser::Construct(const FArguments& InArgs, const TShare
 		[
 			SNew(SButton)
 			.OnClicked(this, &SAnimationSequenceBrowser::OnGoBackInHistory)
-			.ForegroundColor(FEditorStyle::GetSlateColor(DefaultForegroundName))
-			.ButtonStyle(FEditorStyle::Get(), "FlatButton")
+			.ForegroundColor(FAppStyle::GetSlateColor(DefaultForegroundName))
+			.ButtonStyle(FAppStyle::Get(), "FlatButton")
 			.ContentPadding(FMargin(1, 0))
 			.IsEnabled(this, &SAnimationSequenceBrowser::CanStepBackwardInHistory)
 			.ToolTipText(LOCTEXT("Backward_Tooltip", "Step backward in the asset history. Right click to see full history."))
 			[
 				SNew(STextBlock)
-				.TextStyle(FEditorStyle::Get(), "ContentBrowser.TopBar.Font")
-				.Font(FEditorStyle::Get().GetFontStyle("FontAwesome.11"))
+				.TextStyle(FAppStyle::Get(), "ContentBrowser.TopBar.Font")
+				.Font(FAppStyle::Get().GetFontStyle("FontAwesome.11"))
 				.Text(FText::FromString(FString(TEXT("\xf060"))) /*fa-arrow-left*/)
 			]
 		];
@@ -947,15 +1090,15 @@ void SAnimationSequenceBrowser::Construct(const FArguments& InArgs, const TShare
 		[
 			SNew(SButton)
 			.OnClicked(this, &SAnimationSequenceBrowser::OnGoForwardInHistory)
-			.ForegroundColor(FEditorStyle::GetSlateColor(DefaultForegroundName))
-			.ButtonStyle(FEditorStyle::Get(), "FlatButton")
+			.ForegroundColor(FAppStyle::GetSlateColor(DefaultForegroundName))
+			.ButtonStyle(FAppStyle::Get(), "FlatButton")
 			.ContentPadding(FMargin(1, 0))
 			.IsEnabled(this, &SAnimationSequenceBrowser::CanStepForwardInHistory)
 			.ToolTipText(LOCTEXT("Forward_Tooltip", "Step forward in the asset history. Right click to see full history."))
 			[
 				SNew(STextBlock)
-				.TextStyle(FEditorStyle::Get(), "ContentBrowser.TopBar.Font")
-				.Font(FEditorStyle::Get().GetFontStyle("FontAwesome.11"))
+				.TextStyle(FAppStyle::Get(), "ContentBrowser.TopBar.Font")
+				.Font(FAppStyle::Get().GetFontStyle("FontAwesome.11"))
 				.Text(FText::FromString(FString(TEXT("\xf061"))) /*fa-arrow-right*/)
 			]
 		];
@@ -969,7 +1112,7 @@ void SAnimationSequenceBrowser::Construct(const FArguments& InArgs, const TShare
 			SNew(SBorder)
 			.Visibility(this, &SAnimationSequenceBrowser::GetHistoryVisibility)
 			.Padding(FMargin(3))
-			.BorderImage( FEditorStyle::GetBrush("ToolPanel.GroupBorder") )
+			.BorderImage( FAppStyle::GetBrush("ToolPanel.GroupBorder") )
 		[
 				SNew(SHorizontalBox)
 				+SHorizontalBox::Slot()
@@ -981,7 +1124,7 @@ void SAnimationSequenceBrowser::Construct(const FArguments& InArgs, const TShare
 			[
 				SNew(SBorder)
 						.OnMouseButtonDown(this, &SAnimationSequenceBrowser::OnMouseDownHistory, TWeakPtr<SMenuAnchor>(BackMenuAnchorPtr))
-				.BorderImage( FEditorStyle::GetBrush("NoBorder") )
+				.BorderImage( FAppStyle::GetBrush("NoBorder") )
 				[
 					BackMenuAnchorPtr
 				]
@@ -992,7 +1135,7 @@ void SAnimationSequenceBrowser::Construct(const FArguments& InArgs, const TShare
 			[
 				SNew(SBorder)
 						.OnMouseButtonDown(this, &SAnimationSequenceBrowser::OnMouseDownHistory, TWeakPtr<SMenuAnchor>(FwdMenuAnchorPtr))
-				.BorderImage( FEditorStyle::GetBrush("NoBorder") )
+				.BorderImage( FAppStyle::GetBrush("NoBorder") )
 				[
 					FwdMenuAnchorPtr
 				]
@@ -1005,7 +1148,7 @@ void SAnimationSequenceBrowser::Construct(const FArguments& InArgs, const TShare
 		[
 			SNew(SBorder)
 			.Padding(FMargin(3))
-			.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 			[
 				ContentBrowserModule.Get().CreateAssetPicker(Config)
 			]
@@ -1015,7 +1158,9 @@ void SAnimationSequenceBrowser::Construct(const FArguments& InArgs, const TShare
 	// Create the ignore set for asset registry tags
 	// Making Skeleton to be private, and now GET_MEMBER_NAME_CHECKED doesn't work
 	AssetRegistryTagsToIgnore.Add(TEXT("Skeleton"));
-	AssetRegistryTagsToIgnore.Add(GET_MEMBER_NAME_CHECKED(UAnimSequenceBase, SequenceLength));
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	AssetRegistryTagsToIgnore.Add(TEXT("SequenceLength"));
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	AssetRegistryTagsToIgnore.Add(GET_MEMBER_NAME_CHECKED(UAnimSequenceBase, RateScale));
 }
 
@@ -1046,7 +1191,7 @@ void SAnimationSequenceBrowser::AddAssetToHistory(const FAssetData& AssetData)
 	else
 	{
 		// Clear out any history that is in front of the current location in the history list
-		AssetHistory.RemoveAt(CurrentAssetHistoryIndex + 1, AssetHistory.Num() - (CurrentAssetHistoryIndex + 1), true);
+		AssetHistory.RemoveAt(CurrentAssetHistoryIndex + 1, AssetHistory.Num() - (CurrentAssetHistoryIndex + 1), EAllowShrinking::Yes);
 	}
 
 	AssetHistory.Add(AssetData);
@@ -1066,7 +1211,7 @@ FReply SAnimationSequenceBrowser::OnMouseDownHistory( const FGeometry& MyGeometr
 
 TSharedRef<SWidget> SAnimationSequenceBrowser::CreateHistoryMenu(bool bInBackHistory) const
 {
-	FMenuBuilder MenuBuilder(true, NULL);
+	FMenuBuilder MenuBuilder(true, nullptr);
 	if(bInBackHistory)
 	{
 		int32 HistoryIdx = CurrentAssetHistoryIndex - 1;
@@ -1077,7 +1222,7 @@ TSharedRef<SWidget> SAnimationSequenceBrowser::CreateHistoryMenu(bool bInBackHis
 			if(AssetData.IsValid())
 			{
 				const FText DisplayName = FText::FromName(AssetData.AssetName);
-				const FText Tooltip = FText::FromString( AssetData.ObjectPath.ToString() );
+				const FText Tooltip = FText::FromString( AssetData.GetObjectPathString() );
 
 				MenuBuilder.AddMenuEntry(DisplayName, Tooltip, FSlateIcon(), 
 					FUIAction(
@@ -1099,7 +1244,7 @@ TSharedRef<SWidget> SAnimationSequenceBrowser::CreateHistoryMenu(bool bInBackHis
 			if(AssetData.IsValid())
 			{
 				const FText DisplayName = FText::FromName(AssetData.AssetName);
-				const FText Tooltip = FText::FromString( AssetData.ObjectPath.ToString() );
+				const FText Tooltip = FText::FromString(AssetData.GetObjectPathString());
 
 				MenuBuilder.AddMenuEntry(DisplayName, Tooltip, FSlateIcon(), 
 					FUIAction(
@@ -1199,7 +1344,7 @@ void SAnimationSequenceBrowser::CacheOriginalAnimAssetHistory()
 			if(UObject* PreviewAsset = PersonaToolkitPtr.Pin()->GetPreviewScene()->GetPreviewAnimationAsset())
 			{
 				FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-				FAssetData AssetData = AssetRegistryModule.Get().GetAssetByObjectPath(FName(*PreviewAsset->GetPathName()));
+				FAssetData AssetData = AssetRegistryModule.Get().GetAssetByObjectPath(FSoftObjectPath(PreviewAsset));
 				AssetHistory.Add(AssetData);
 				CurrentAssetHistoryIndex = AssetHistory.Num() - 1;
 			}
@@ -1245,16 +1390,19 @@ TSharedRef<SToolTip> SAnimationSequenceBrowser::CreateCustomAssetToolTip(FAssetD
 {
 	// Make a list of tags to show
 	TArray<UObject::FAssetRegistryTag> Tags;
-	UClass* AssetClass = FindObject<UClass>(ANY_PACKAGE, *AssetData.AssetClass.ToString());
+	UClass* AssetClass = FindObject<UClass>(AssetData.AssetClassPath);
 	check(AssetClass);
-	AssetClass->GetDefaultObject()->GetAssetRegistryTags(Tags);
+	UObject* DefaultObject = AssetClass->GetDefaultObject();
+	FAssetRegistryTagsContextData TagsContext(DefaultObject, EAssetRegistryTagsCaller::Uncategorized);
+	DefaultObject->GetAssetRegistryTags(TagsContext);
 
 	TArray<FName> TagsToShow;
-	for(UObject::FAssetRegistryTag& TagEntry : Tags)
+	FName NameSkeleton(TEXT("Skeleton"));
+	for (const TPair<FName, UObject::FAssetRegistryTag>& TagPair : TagsContext.Tags)
 	{
-		if(TagEntry.Name != FName(TEXT("Skeleton")) && TagEntry.Type != UObject::FAssetRegistryTag::TT_Hidden)
+		if(TagPair.Key != NameSkeleton && TagPair.Value.Type != UObject::FAssetRegistryTag::TT_Hidden)
 		{
-			TagsToShow.Add(TagEntry.Name);
+			TagsToShow.Add(TagPair.Key);
 		}
 	}
 
@@ -1324,12 +1472,12 @@ TSharedRef<SToolTip> SAnimationSequenceBrowser::CreateCustomAssetToolTip(FAssetD
 
 	TSharedPtr<SHorizontalBox> ContentBox = nullptr;
 	TSharedRef<SToolTip> ToolTipWidget = SNew(SToolTip)
-	.TextMargin(1)
-	.BorderImage(FEditorStyle::GetBrush("ContentBrowser.TileViewTooltip.ToolTipBorder"))
+	.TextMargin(1.f)
+	.BorderImage(FAppStyle::GetBrush("ContentBrowser.TileViewTooltip.ToolTipBorder"))
 	[
 		SNew(SBorder)
-		.Padding(6)
-		.BorderImage(FEditorStyle::GetBrush("ContentBrowser.TileViewTooltip.NonContentBorder"))
+		.Padding(6.f)
+		.BorderImage(FAppStyle::GetBrush("ContentBrowser.TileViewTooltip.NonContentBorder"))
 		[
 			SNew(SVerticalBox)
 			+SVerticalBox::Slot()
@@ -1337,15 +1485,15 @@ TSharedRef<SToolTip> SAnimationSequenceBrowser::CreateCustomAssetToolTip(FAssetD
 			.Padding(0,0,0,4)
 			[
 				SNew(SBorder)
-				.Padding(6)
-				.BorderImage(FEditorStyle::GetBrush("ContentBrowser.TileViewTooltip.ContentBorder"))
+				.Padding(6.f)
+				.BorderImage(FAppStyle::GetBrush("ContentBrowser.TileViewTooltip.ContentBorder"))
 				[
 					SNew(SBox)
 					.HAlign(HAlign_Left)
 					[
 						SNew(STextBlock)
 						.Text(FText::FromName(AssetData.AssetName))
-						.Font(FEditorStyle::GetFontStyle("ContentBrowser.TileViewTooltip.NameFont"))
+						.Font(FAppStyle::GetFontStyle("ContentBrowser.TileViewTooltip.NameFont"))
 					]
 				]
 			]
@@ -1357,9 +1505,9 @@ TSharedRef<SToolTip> SAnimationSequenceBrowser::CreateCustomAssetToolTip(FAssetD
 				.AutoWidth()
 				[
 					SNew(SBorder)
-					.Padding(6)
+					.Padding(6.f)
 					.Visibility(AssetClass->IsChildOf<UAnimationAsset>() ? EVisibility::Visible : EVisibility::Collapsed)
-					.BorderImage(FEditorStyle::GetBrush("ContentBrowser.TileViewTooltip.ContentBorder"))
+					.BorderImage(FAppStyle::GetBrush("ContentBrowser.TileViewTooltip.ContentBorder"))
 					[
 						SNew(SOverlay)
 						+SOverlay::Slot()
@@ -1384,11 +1532,11 @@ TSharedRef<SToolTip> SAnimationSequenceBrowser::CreateCustomAssetToolTip(FAssetD
 
 	// add an extra section to the tooltip for it.
 	ContentBox->AddSlot()
-	.Padding(AssetClass->IsChildOf<UAnimationAsset>() ? 4 : 0, 0, 0, 0)
+	.Padding(AssetClass->IsChildOf<UAnimationAsset>() ? 4.f : 0, 0, 0, 0)
 	[
 		SNew(SBorder)
-		.Padding(6)
-		.BorderImage(FEditorStyle::GetBrush("ContentBrowser.TileViewTooltip.ContentBorder"))
+		.Padding(6.f)
+		.BorderImage(FAppStyle::GetBrush("ContentBrowser.TileViewTooltip.ContentBorder"))
 		[
 			DescriptionBox
 		]
@@ -1438,7 +1586,7 @@ bool SAnimationSequenceBrowser::OnVisualizeAssetToolTip(const TSharedPtr<SWidget
 {
 	// Resolve the asset
 	USkeletalMesh* MeshToUse = nullptr;
-	UClass* AssetClass = FindObject<UClass>(ANY_PACKAGE, *AssetData.AssetClass.ToString());
+	UClass* AssetClass = FindObject<UClass>(AssetData.AssetClassPath);
 	if(AssetClass->IsChildOf(UAnimationAsset::StaticClass()) && AssetData.IsAssetLoaded() && AssetData.GetAsset())
 	{
 		// Set up the viewport to show the asset. Catching the visualize allows us to use
@@ -1452,7 +1600,7 @@ bool SAnimationSequenceBrowser::OnVisualizeAssetToolTip(const TSharedPtr<SWidget
 		
 		if(MeshToUse)
 		{
-			if(PreviewComponent->SkeletalMesh != MeshToUse)
+			if(PreviewComponent->GetSkeletalMeshAsset() != MeshToUse)
 			{
 				PreviewComponent->SetSkeletalMesh(MeshToUse);
 			}
@@ -1460,9 +1608,9 @@ bool SAnimationSequenceBrowser::OnVisualizeAssetToolTip(const TSharedPtr<SWidget
 			PreviewComponent->EnablePreview(true, Asset);
 			PreviewComponent->PreviewInstance->PlayAnim(true);
 
-			FBoxSphereBounds MeshImportedBounds = MeshToUse->GetImportedBounds();
-			float HalfFov = FMath::DegreesToRadians(ViewportClient->ViewFOV) / 2.0f;
-			float TargetDist = MeshImportedBounds.SphereRadius / FMath::Tan(HalfFov);
+			const FBoxSphereBounds MeshImportedBounds = MeshToUse->GetImportedBounds();
+			const float HalfFov = FMath::DegreesToRadians(ViewportClient->ViewFOV) / 2.0f;
+			const float TargetDist = static_cast<float>(MeshImportedBounds.SphereRadius / FMath::Tan(HalfFov));
 
 			ViewportClient->SetViewRotation(FRotator(0.0f, -45.0f, 0.0f));
 			ViewportClient->SetViewLocationForOrbiting(FVector(0.0f, 0.0f, MeshImportedBounds.BoxExtent.Z / 2.0f), TargetDist);
@@ -1539,14 +1687,12 @@ EVisibility SAnimationSequenceBrowser::GetHistoryVisibility() const
 
 bool SAnimationSequenceBrowser::HandleFilterAsset(const FAssetData& InAssetData) const
 {
-	if (InAssetData.GetClass()->IsChildOf(UAnimationAsset::StaticClass()))
+	if (InAssetData.IsInstanceOf(UAnimationAsset::StaticClass()))
 	{
-		USkeleton* DesiredSkeleton = PersonaToolkitPtr.Pin()->GetSkeleton();
+		const USkeleton* DesiredSkeleton = PersonaToolkitPtr.Pin()->GetSkeleton();
 		if (DesiredSkeleton)
 		{
-			FString SkeletonString = FAssetData(DesiredSkeleton).GetExportTextName();
-
-			return (InAssetData.TagsAndValues.FindTag(TEXT("Skeleton")) != SkeletonString);
+			return !DesiredSkeleton->IsCompatibleForEditor(InAssetData);
 		}
 	}
 
@@ -1606,7 +1752,7 @@ FAnimationAssetViewportClient::FAnimationAssetViewportClient(FPreviewScene& InPr
 	DrawHelper.GridColorAxis = FColor(70, 70, 70);
 	DrawHelper.GridColorMajor = FColor(40, 40, 40);
 	DrawHelper.GridColorMinor = FColor(20, 20, 20);
-	DrawHelper.PerspectiveGridSize = HALF_WORLD_MAX1;
+	DrawHelper.PerspectiveGridSize = UE_OLD_HALF_WORLD_MAX1;
 	bDrawAxes = false;
 }
 

@@ -1,41 +1,29 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Animation/AnimNode_LinkedAnimGraph.h"
-#include "Animation/AnimClassInterface.h"
 #include "Animation/AnimInstanceProxy.h"
 #include "Animation/AnimNode_Inertialization.h"
 #include "Animation/AnimNode_LinkedInputPose.h"
 #include "Animation/AnimNode_Root.h"
-#include "Animation/AnimTrace.h"
+#include "Animation/BlendProfile.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Animation/ExposedValueHandler.h"
+#include "ObjectTrace.h"
 
-static float GetBlendDuration(const IAnimClassInterface* PriorAnimBPClass, const IAnimClassInterface* NewAnimBPClass, FName Layer)
-{
-	const FAnimGraphBlendOptions* PriorBlendOptions = PriorAnimBPClass ? PriorAnimBPClass->GetGraphBlendOptions().Find(Layer) : nullptr;
-	const FAnimGraphBlendOptions* NewBlendOptions = NewAnimBPClass ? NewAnimBPClass->GetGraphBlendOptions().Find(Layer) : nullptr;
-
-	float BlendOutTime = PriorBlendOptions ? PriorBlendOptions->BlendOutTime : -1.0f;
-	float BlendInTime = NewBlendOptions ? NewBlendOptions->BlendInTime : -1.0f;
-
-	if (BlendInTime < 0.0f)
-	{
-		return BlendOutTime;
-	}
-
-	if (BlendOutTime < 0.0f)
-	{
-		return BlendInTime;
-	}
-
-	return FMath::Min(BlendInTime, BlendOutTime);
-}
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNode_LinkedAnimGraph)
 
 FAnimNode_LinkedAnimGraph::FAnimNode_LinkedAnimGraph()
 	: InstanceClass(nullptr)
-	, Tag(NAME_None)
+#if WITH_EDITORONLY_DATA
+	, Tag_DEPRECATED(NAME_None)
+#endif
 	, LinkedRoot(nullptr)
 	, NodeIndex(INDEX_NONE)
 	, CachedLinkedNodeIndex(INDEX_NONE)
-	, PendingBlendDuration(-1.0f)
+	, PendingBlendOutDuration(-1.0f)
+	, PendingBlendOutProfile(nullptr)
+	, PendingBlendInDuration(-1.0f)
+	, PendingBlendInProfile(nullptr)
 	, bReceiveNotifiesFromLinkedInstances(false)
 	, bPropagateNotifiesToLinkedInstances(false)
 {
@@ -80,6 +68,7 @@ void FAnimNode_LinkedAnimGraph::CacheBonesSubGraph_AnyThread(const FAnimationCac
 		// Note not calling Proxy.CacheBones_WithRoot here as it is guarded by
 		// bBoneCachesInvalidated, which is handled at a higher level
 		FAnimationCacheBonesContext LinkedContext(&Proxy);
+		LinkedContext.SetNodeId(CachedLinkedNodeIndex);
 		LinkedRoot->CacheBones_AnyThread(LinkedContext);
 	}
 }
@@ -111,9 +100,8 @@ void FAnimNode_LinkedAnimGraph::Update_AnyThread(const FAnimationUpdateContext& 
 		// in USkeletalMeshComponent::TickAnimation. It used to be the case that we could do non-parallel work in 
 		// USkeletalMeshComponent::TickAnimation, which would mean we would have to skip doing that work here.
 		FAnimationUpdateContext NewContext = InContext.WithOtherProxy(&Proxy);
- #if ANIM_NODE_IDS_AVAILABLE
-		NewContext = NewContext.WithNodeId(CachedLinkedNodeIndex);
- #endif
+		NewContext.SetNodeId(INDEX_NONE);
+		NewContext.SetNodeId(CachedLinkedNodeIndex);
 		Proxy.UpdateAnimation_WithRoot(NewContext, LinkedRoot, GetDynamicLinkFunctionName());
 	}
 	else if(InputPoses.Num() > 0)
@@ -123,21 +111,52 @@ void FAnimNode_LinkedAnimGraph::Update_AnyThread(const FAnimationUpdateContext& 
 		InputPoses[0].Update(InContext);
 	}
 
-	// Consume pending inertial blend request
-	if(PendingBlendDuration >= 0.0f)
+	// Consume pending inertial blend requests
+	if(PendingBlendOutDuration >= 0.0f || PendingBlendInDuration >= 0.0f)
 	{
-		FAnimNode_Inertialization* InertializationNode = InContext.GetAncestor<FAnimNode_Inertialization>();
-		if(InertializationNode)
+		UE::Anim::IInertializationRequester* InertializationRequester = InContext.GetMessage<UE::Anim::IInertializationRequester>();
+		if(InertializationRequester)
 		{
-			InertializationNode->RequestInertialization(PendingBlendDuration);
+			// Issue the pending inertialization requests (which will get merged together by the inertialization node itself)
+			if (PendingBlendOutDuration >= 0.0f)
+			{
+				FInertializationRequest Request;
+				Request.Duration = PendingBlendOutDuration;
+				Request.BlendProfile = PendingBlendOutProfile;
+#if ANIM_TRACE_ENABLED
+				Request.DescriptionString = NSLOCTEXT("AnimNode_LinkedAnimGraph", "InertializationRequestDescriptionOut", "Out").ToString();
+				Request.NodeId = InContext.GetCurrentNodeId();
+				Request.AnimInstance = InContext.AnimInstanceProxy->GetAnimInstanceObject();
+#endif
+
+				InertializationRequester->RequestInertialization(Request);
+			}
+
+			if (PendingBlendInDuration >= 0.0f)
+			{
+				FInertializationRequest Request;
+				Request.Duration = PendingBlendInDuration;
+				Request.BlendProfile = PendingBlendInProfile;
+#if ANIM_TRACE_ENABLED
+				Request.DescriptionString = NSLOCTEXT("AnimNode_LinkedAnimGraph", "InertializationRequestDescriptionIn", "In").ToString();
+				Request.NodeId = InContext.GetCurrentNodeId();
+				Request.AnimInstance = InContext.AnimInstanceProxy->GetAnimInstanceObject();
+#endif
+
+				InertializationRequester->RequestInertialization(Request);
+			}
+
+			InertializationRequester->AddDebugRecord(*InContext.AnimInstanceProxy, InContext.GetCurrentNodeId());
 		}
-		else if ((PendingBlendDuration != 0.0f) && (InputPoses.Num() > 0))
+		else if ((PendingBlendOutDuration != 0.0f) && (PendingBlendInDuration != 0.0f) && (InputPoses.Num() > 0))
 		{
 			FAnimNode_Inertialization::LogRequestError(InContext, InputPoses[0]);
 		}
-
-		PendingBlendDuration = -1.0f;
 	}
+	PendingBlendOutDuration = -1.0f;
+	PendingBlendOutProfile = nullptr;
+	PendingBlendInDuration = -1.0f;
+	PendingBlendInProfile = nullptr;
 
 	TRACE_ANIM_NODE_VALUE(InContext, TEXT("Name"), GetDynamicLinkFunctionName());
 	TRACE_ANIM_NODE_VALUE(InContext, TEXT("Target Class"), InstanceClass.Get());
@@ -145,24 +164,30 @@ void FAnimNode_LinkedAnimGraph::Update_AnyThread(const FAnimationUpdateContext& 
 
 void FAnimNode_LinkedAnimGraph::Evaluate_AnyThread(FPoseContext& Output)
 {
+#if	ANIMNODE_STATS_VERBOSE
+	// Record name of linked graph we are updating
+	FScopeCycleCounter LinkedAnimGraphNameCycleCounter(StatID);
+#endif // ANIMNODE_STATS_VERBOSE
+
 	UAnimInstance* InstanceToRun = GetTargetInstance<UAnimInstance>();
 	if(InstanceToRun && LinkedRoot)
 	{
+		// Stash current proxy for restoration after recursion
+		FAnimInstanceProxy& OldProxy = *Output.AnimInstanceProxy;
+
 		FAnimInstanceProxy& Proxy = InstanceToRun->GetProxyOnAnyThread<FAnimInstanceProxy>();
 		Proxy.EvaluationCounter.SynchronizeWith(Output.AnimInstanceProxy->EvaluationCounter);
 		Output.Pose.SetBoneContainer(&Proxy.GetRequiredBones());
+		Output.AnimInstanceProxy = &Proxy;
+		Output.SetNodeId(INDEX_NONE);
+		Output.SetNodeId(CachedLinkedNodeIndex);
 
-		// Create an evaluation context
-		FPoseContext EvaluationContext(&Proxy, Output.ExpectsAdditivePose());
-		EvaluationContext.ResetToRefPose();
-			
 		// Run the anim blueprint
-		Proxy.EvaluateAnimation_WithRoot(EvaluationContext, LinkedRoot);
+		Proxy.EvaluateAnimation_WithRoot(Output, LinkedRoot);
 
-		// Move the curves
-		Output.Curve.MoveFrom(EvaluationContext.Curve);
-		Output.Pose.MoveBonesFrom(EvaluationContext.Pose);
-		Output.CustomAttributes.MoveFrom(EvaluationContext.CustomAttributes);
+		// Restore proxy & required bones after evaluation
+		Output.AnimInstanceProxy = &OldProxy;
+		Output.Pose.SetBoneContainer(&OldProxy.GetRequiredBones());
 	}
 	else if(InputPoses.Num() > 0)
 	{
@@ -201,6 +226,10 @@ void FAnimNode_LinkedAnimGraph::GatherDebugData(FNodeDebugData& DebugData)
 
 void FAnimNode_LinkedAnimGraph::OnInitializeAnimInstance(const FAnimInstanceProxy* InProxy, const UAnimInstance* InAnimInstance)
 {
+#if WITH_EDITORONLY_DATA
+	SourceInstance = const_cast<UAnimInstance*>(InAnimInstance);
+#endif
+	
 	UAnimInstance* InstanceToRun = GetTargetInstance<UAnimInstance>();
 
 	if(*InstanceClass)
@@ -210,7 +239,7 @@ void FAnimNode_LinkedAnimGraph::OnInitializeAnimInstance(const FAnimInstanceProx
 	else if(InstanceToRun)
 	{
 		// We have an instance but no instance class
-		TeardownInstance();
+		TeardownInstance(InAnimInstance);
 	}
 
 	if(InstanceToRun)
@@ -219,12 +248,28 @@ void FAnimNode_LinkedAnimGraph::OnInitializeAnimInstance(const FAnimInstanceProx
 	}
 }
 
-void FAnimNode_LinkedAnimGraph::TeardownInstance()
+void FAnimNode_LinkedAnimGraph::TeardownInstance(const UAnimInstance* InOwningAnimInstance)
 {
 	UAnimInstance* InstanceToRun = GetTargetInstance<UAnimInstance>();
 	if (InstanceToRun)
 	{
-		InstanceToRun->UninitializeAnimation();
+		// trace lifetime end early, because by the time we get UninitializeAnimation below, the Owner has changed, and so the ObjectId has changed.
+		TRACE_OBJECT_LIFETIME_END(InstanceToRun);
+		DynamicUnlink(const_cast<UAnimInstance*>(InOwningAnimInstance));
+		// Never delete the owning animation instance
+		if (InstanceToRun != InOwningAnimInstance)
+		{
+			if (CanTeardownLinkedInstance(InstanceToRun))
+			{
+				USkeletalMeshComponent* MeshComp = InOwningAnimInstance->GetSkelMeshComponent();
+				check(MeshComp);
+				MeshComp->GetLinkedAnimInstances().Remove(InstanceToRun);
+				// Only call UninitializeAnimation if we are not the owning anim instance
+				InstanceToRun->UninitializeAnimation();
+				InstanceToRun->MarkAsGarbage();
+			}
+		}
+
 		InstanceToRun = nullptr;
 	}
 
@@ -237,25 +282,13 @@ void FAnimNode_LinkedAnimGraph::ReinitializeLinkedAnimInstance(const UAnimInstan
 
 	IAnimClassInterface* PriorAnimBPClass = InstanceToRun ? IAnimClassInterface::GetFromClass(InstanceToRun->GetClass()) : nullptr;
 
+	// Full reinit, kill old instances
+	TeardownInstance(InOwningAnimInstance);
+
 	if(*InstanceClass || InNewAnimInstance)
 	{
 		USkeletalMeshComponent* MeshComp = InOwningAnimInstance->GetSkelMeshComponent();
 		check(MeshComp);
-		// Full reinit, kill old instances
-		if(InstanceToRun)
-		{
-			DynamicUnlink(const_cast<UAnimInstance*>(InOwningAnimInstance));
-
-			MeshComp->GetLinkedAnimInstances().Remove(InstanceToRun);
-			// Never delete the owning animation instance
-			if (InstanceToRun != InOwningAnimInstance)
-			{
-				// Only call UninitializeAnimation if we are not the owning anim instance
-				InstanceToRun->UninitializeAnimation();
-				InstanceToRun->MarkPendingKill();
-			}
-			InstanceToRun = nullptr;
-		}
 
 		// Need an instance to run, so create it now
 		InstanceToRun = InNewAnimInstance ? InNewAnimInstance : NewObject<UAnimInstance>(MeshComp, InstanceClass);
@@ -279,6 +312,12 @@ void FAnimNode_LinkedAnimGraph::ReinitializeLinkedAnimInstance(const UAnimInstan
 			// Initialize the new instance
 			InstanceToRun->InitializeAnimation();
 
+			if(MeshComp->HasBegunPlay())
+			{
+				InstanceToRun->NativeBeginPlay();
+				InstanceToRun->BlueprintBeginPlay();
+			}
+
 			MeshComp->GetLinkedAnimInstances().Add(InstanceToRun);
 		}
 
@@ -288,29 +327,15 @@ void FAnimNode_LinkedAnimGraph::ReinitializeLinkedAnimInstance(const UAnimInstan
 
 		RequestBlend(PriorAnimBPClass, NewAnimBPClass);
 	}
-	else if(InstanceToRun)
+	else
 	{
-		// We have an instance but no instance class
-		TeardownInstance();
+		RequestBlend(PriorAnimBPClass, nullptr);
 	}
 }
 
 void FAnimNode_LinkedAnimGraph::SetAnimClass(TSubclassOf<UAnimInstance> InClass, const UAnimInstance* InOwningAnimInstance)
 {
 	UClass* NewClass = InClass.Get();
-	if(NewClass)
-	{
-		// Verify target skeleton match at runtime
-		IAnimClassInterface* LinkedAnimBlueprintClass = IAnimClassInterface::GetFromClass(NewClass);
-		IAnimClassInterface* OuterAnimBlueprintClass = IAnimClassInterface::GetFromClass(InOwningAnimInstance->GetClass());
-		USkeleton* LinkedSkeleton = LinkedAnimBlueprintClass->GetTargetSkeleton();
-		USkeleton* OuterSkeleton = OuterAnimBlueprintClass->GetTargetSkeleton();
-		if(LinkedSkeleton != OuterSkeleton)
-		{
-			UE_LOG(LogAnimation, Warning, TEXT("Setting linked anim instance class: Class has a mismatched target skeleton. Expected %s, found %s."), OuterSkeleton ? *OuterSkeleton->GetName() : TEXT("null"), LinkedSkeleton ? *LinkedSkeleton->GetName() : TEXT("null"));
-			return;
-		}
-	}
 
 	// Verified OK, so set it now
 	TSubclassOf<UAnimInstance> OldClass = InstanceClass;
@@ -449,5 +474,77 @@ int32 FAnimNode_LinkedAnimGraph::FindFunctionInputIndex(const FAnimBlueprintFunc
 
 void FAnimNode_LinkedAnimGraph::RequestBlend(const IAnimClassInterface* PriorAnimBPClass, const IAnimClassInterface* NewAnimBPClass)
 {
-	PendingBlendDuration = GetBlendDuration(PriorAnimBPClass, NewAnimBPClass, GetDynamicLinkFunctionName());
+	const FName Layer = GetDynamicLinkFunctionName();
+
+	const FAnimGraphBlendOptions* PriorBlendOptions = PriorAnimBPClass ? PriorAnimBPClass->GetGraphBlendOptions().Find(Layer) : nullptr;
+	const FAnimGraphBlendOptions* NewBlendOptions = NewAnimBPClass ? NewAnimBPClass->GetGraphBlendOptions().Find(Layer) : nullptr;
+
+	if (PriorBlendOptions && PriorBlendOptions->BlendOutTime >= 0.0f)
+	{
+		PendingBlendOutDuration = PriorBlendOptions->BlendOutTime;
+		PendingBlendOutProfile = PriorBlendOptions->BlendOutProfile;
+	}
+	else
+	{
+		PendingBlendOutDuration = -1.0f;
+		PendingBlendOutProfile = nullptr;
+	}
+
+	if (NewBlendOptions && NewBlendOptions->BlendInTime >= 0.0f)
+	{
+		PendingBlendInDuration = NewBlendOptions->BlendInTime;
+		PendingBlendInProfile = NewBlendOptions->BlendInProfile;
+	}
+	else
+	{
+		PendingBlendInDuration = -1.0f;
+		PendingBlendInProfile = nullptr;
+	}
 }
+
+#if WITH_EDITOR
+void FAnimNode_LinkedAnimGraph::HandleObjectsReinstanced_Impl(UObject* InSourceObject, UObject* InTargetObject, const TMap<UObject*, UObject*>& OldToNewInstanceMap)
+{
+	static IConsoleVariable* UseLegacyAnimInstanceReinstancingBehavior = IConsoleManager::Get().FindConsoleVariable(TEXT("bp.UseLegacyAnimInstanceReinstancingBehavior"));
+	if(UseLegacyAnimInstanceReinstancingBehavior == nullptr || !UseLegacyAnimInstanceReinstancingBehavior->GetBool())
+	{
+		UAnimInstance* SourceAnimInstance = CastChecked<UAnimInstance>(InSourceObject);
+		FAnimInstanceProxy& SourceProxy = SourceAnimInstance->GetProxyOnAnyThread<FAnimInstanceProxy>();
+
+		// Call Initialize here to ensure any custom proxies are initialized (as they may have been re-created during
+		// re-instancing, and they dont call the constructor that takes a UAnimInstance*)
+		SourceProxy.Initialize(SourceAnimInstance);
+
+		InitializeProperties(SourceAnimInstance, GetTargetClass());
+		DynamicUnlink(SourceAnimInstance);
+		DynamicLink(SourceAnimInstance);
+
+		SourceProxy.InitializeCachedClassData();
+
+		// Ensure we have a valid mesh at this point, as calling into the graph without one can result in crashes
+		// as we assume a valid bone container/reference skeleton is present
+		USkeletalMeshComponent* MeshComponent = SourceAnimInstance->GetSkelMeshComponent();
+		if(MeshComponent && MeshComponent->GetSkeletalMeshAsset())
+		{
+			SourceAnimInstance->RecalcRequiredBones();
+
+			FAnimationInitializeContext Context(&SourceProxy);
+			InitializeSubGraph_AnyThread(Context);
+		}
+	}
+}
+#endif
+
+#if ANIMNODE_STATS_VERBOSE
+void FAnimNode_LinkedAnimGraph::InitializeStatID()
+{
+	if (GetTargetInstance<UAnimInstance>())
+	{
+		StatID = FDynamicStats::CreateStatId<FStatGroup_STATGROUP_Anim>(GetTargetInstance<UAnimInstance>()->GetClass()->GetName());
+	}
+	else
+	{
+		Super::InitializeStatID();
+	}
+}
+#endif // ANIMNODE_STATS_VERBOSE

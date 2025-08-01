@@ -6,6 +6,7 @@
 #include "Misc/MessageDialog.h"
 #include "Misc/ScopedSlowTask.h"
 #include "GameFramework/Actor.h"
+#include "MaterialDomain.h"
 #include "Materials/Material.h"
 #include "Engine/Brush.h"
 #include "Editor/EditorEngine.h"
@@ -15,6 +16,7 @@
 #include "EditorModeManager.h"
 #include "SurfaceIterators.h"
 #include "BSPOps.h"
+#include "BSPUtils.h"
 #include "ActorEditorUtils.h"
 #include "Misc/FeedbackContext.h"
 #include "EngineUtils.h"
@@ -115,11 +117,7 @@ protected:
 
 void UEditorEngine::bspRepartition( UWorld* InWorld, int32 iNode )
 {
-	bspBuildFPolys( InWorld->GetModel(), 1, iNode );
-	bspMergeCoplanars( InWorld->GetModel(), 0, 0 );
-	FBSPOps::bspBuild( InWorld->GetModel(), FBSPOps::BSP_Good, 12, 70, 2, iNode );
-	FBSPOps::bspRefresh( InWorld->GetModel(), 1 );
-
+	FBSPUtils::bspRepartition(InWorld, iNode);
 }
 
 //
@@ -146,7 +144,7 @@ void UEditorEngine::csgRebuild( UWorld* InWorld )
 	FinishAllSnaps();
 
 	// Empty the model out.
-	InWorld->GetModel()->Modify();
+	InWorld->GetModel()->Modify(false);
 	InWorld->GetModel()->EmptyModel(1, 1);
 
 	// Count brushes.
@@ -203,7 +201,7 @@ void UEditorEngine::csgRebuild( UWorld* InWorld )
 				Args.Add( TEXT("BrushTotal"), BrushTotal );
 				GWarn->StatusUpdate( BrushCount, BrushTotal, FText::Format( NSLOCTEXT("UnrealEd", "ApplyingStructuralBrushF", "Applying structural brush {BrushCount} of {BrushTotal}"), Args ) );
 
-				Brush->Modify();
+				Brush->Modify(false);
 				bspBrushCSG( Brush, InWorld->GetModel(), Brush->PolyFlags, (EBrushType)Brush->BrushType, CSG_None, false, true, false );
 			}
 		}
@@ -247,7 +245,7 @@ void UEditorEngine::csgRebuild( UWorld* InWorld )
 			Args.Add( TEXT("BrushTotal"), BrushTotal );
 			GWarn->StatusUpdate( BrushCount, BrushTotal, FText::Format( NSLOCTEXT("UnrealEd", "ApplyingDetailBrushF", "Applying detail brush {BrushCount} of {BrushTotal}"), Args ) );
 
-			Brush->Modify();
+			Brush->Modify(false);
 			bspBrushCSG( Brush, InWorld->GetModel(), Brush->PolyFlags, (EBrushType)Brush->BrushType, CSG_None, false, true, false );
 		}
 	}
@@ -292,7 +290,7 @@ void UEditorEngine::csgRebuild( UWorld* InWorld )
 	}
 
 	{
-		FScopedSlowTask SlowTask(DynamicBrushes.Num(), NSLOCTEXT("UnrealEd", "RebuildCSGRebuildingDynamicBrushBSPs", "Rebuild CSG: Rebuilding Dynamic Brush BSPs") );
+		FScopedSlowTask SlowTask(static_cast<float>(DynamicBrushes.Num()), NSLOCTEXT("UnrealEd", "RebuildCSGRebuildingDynamicBrushBSPs", "Rebuild CSG: Rebuilding Dynamic Brush BSPs") );
 		for ( int32 BrushIndex = 0; BrushIndex < DynamicBrushes.Num(); BrushIndex++ )
 		{
 			SlowTask.EnterProgressFrame();
@@ -323,46 +321,17 @@ void UEditorEngine::csgRebuild( UWorld* InWorld )
 }
 
 
-void UEditorEngine::polySetAndClearPolyFlags(UModel *Model, uint32 SetBits, uint32 ClearBits,bool SelectedOnly, bool UpdateMaster)
+void UEditorEngine::polySetAndClearPolyFlags(UModel *Model, uint32 SetBits, uint32 ClearBits,bool SelectedOnly, bool UpdateBrush)
 {
-	for( int32 i=0; i<Model->Surfs.Num(); i++ )
-	{
-		FBspSurf& Poly = Model->Surfs[i];
-		if( !SelectedOnly || (Poly.PolyFlags & PF_Selected) )
-		{
-			uint32 NewFlags = (Poly.PolyFlags & ~ClearBits) | SetBits;
-			if( NewFlags != Poly.PolyFlags )
-			{
-				Model->ModifySurf( i, UpdateMaster );
-				Poly.PolyFlags = NewFlags;
-				if (UpdateMaster)
-				{
-					const bool bUpdateTexCoords = false;
-					const bool bOnlyRefreshSurfaceMaterials = false;
-					polyUpdateMaster(Model, i, bUpdateTexCoords, bOnlyRefreshSurfaceMaterials);
-				}
-			}
-		}
-	}
+	FBSPUtils::polySetAndClearPolyFlags(Model, SetBits, ClearBits, SelectedOnly, UpdateBrush);
 }
 
-
-bool UEditorEngine::polyFindMaster(UModel* InModel, int32 iSurf, FPoly &Poly)
+bool UEditorEngine::polyFindBrush(UModel* InModel, int32 iSurf, FPoly& Poly)
 {
-	FBspSurf &Surf = InModel->Surfs[iSurf];
-	if( !Surf.Actor || !Surf.Actor->Brush->Polys->Element.IsValidIndex(Surf.iBrushPoly) )
-	{
-		return false;
-	}
-	else
-	{
-		Poly = Surf.Actor->Brush->Polys->Element[Surf.iBrushPoly];
-		return true;
-	}
+	return FBSPUtils::polyFindBrush(InModel, iSurf, Poly);
 }
 
-
-void UEditorEngine::polyUpdateMaster
+void UEditorEngine::polyUpdateBrush
 (
 	UModel*	Model,
 	int32  	iSurf,
@@ -370,60 +339,7 @@ void UEditorEngine::polyUpdateMaster
 	bool	bOnlyRefreshSurfaceMaterials
 )
 {
-	FBspSurf &Surf = Model->Surfs[iSurf];
-	ABrush* Actor = Surf.Actor;
-	if( !Actor )
-		return;
-
-	UModel* Brush = Actor->Brush;
-	check(Brush);
-
-	FVector ActorLocation;
-	FVector ActorPrePivot;
-	FVector ActorScale;
-	FRotator ActorRotation;
-
-	if (Brush->bCachedOwnerTransformValid)
-	{
-		// Use transform cached when the geometry was last built, in case the current Actor transform has changed since then
-		// (e.g. because Auto Update BSP is disabled)
-		ActorLocation = Brush->OwnerLocationWhenLastBuilt;
-		ActorScale = Brush->OwnerScaleWhenLastBuilt;
-		ActorRotation = Brush->OwnerRotationWhenLastBuilt;
-	}
-	else
-	{
-		// No cached owner transform, so use the current one
-		ActorLocation = Actor->GetActorLocation();
-		ActorScale = Actor->GetActorScale();
-		ActorRotation = Actor->GetActorRotation();
-	}
-
-	const FRotationMatrix RotationMatrix(ActorRotation);
-
-	for (int32 iEdPoly = Surf.iBrushPoly; iEdPoly < Brush->Polys->Element.Num(); iEdPoly++)
-	{
-		FPoly& MasterEdPoly = Brush->Polys->Element[iEdPoly];
-		if (iEdPoly == Surf.iBrushPoly || MasterEdPoly.iLink == Surf.iBrushPoly)
-		{
-			MasterEdPoly.Material = Surf.Material;
-			MasterEdPoly.PolyFlags = Surf.PolyFlags & ~(PF_NoEdit);
-
-			if (bUpdateTexCoords)
-			{
-				MasterEdPoly.Base = RotationMatrix.InverseTransformVector(Model->Points[Surf.pBase] - ActorLocation) / ActorScale;
-				MasterEdPoly.TextureU = RotationMatrix.InverseTransformVector(Model->Vectors[Surf.vTextureU]) * ActorScale;
-				MasterEdPoly.TextureV = RotationMatrix.InverseTransformVector(Model->Vectors[Surf.vTextureV]) * ActorScale;
-			}
-		}
-	}
-
-	Model->InvalidSurfaces = true;
-
-	if (bOnlyRefreshSurfaceMaterials)
-	{
-		Model->bOnlyRebuildMaterialIndexBuffers = true;
-	}
+	FBSPUtils::polyUpdateBrush(Model, iSurf, bUpdateTexCoords, bOnlyRefreshSurfaceMaterials);
 }
 
 
@@ -434,77 +350,13 @@ void UEditorEngine::polyGetLinkedPolys
 	TArray<FPoly>* InPolyList
 )
 {
-	InPolyList->Empty();
-
-	if( InPoly->iLink == INDEX_NONE )
-	{
-		// If this poly has no links, just stick the one poly in the final list.
-		new(*InPolyList)FPoly( *InPoly );
-	}
-	else
-	{
-		// Find all polys that match the source polys link value.
-		for( int32 poly = 0 ; poly < InBrush->Brush->Polys->Element.Num() ; poly++ )
-			if( InBrush->Brush->Polys->Element[poly].iLink == InPoly->iLink )
-				new(*InPolyList)FPoly( InBrush->Brush->Polys->Element[poly] );
-	}
-
+	FBSPUtils::polyGetLinkedPolys(InBrush, InPoly, InPolyList);
 }
 
 
 void UEditorEngine::polySplitOverlappingEdges( TArray<FPoly>* InPolyList, TArray<FPoly>* InResult )
 {
-	InResult->Empty();
-
-	for( int32 poly = 0 ; poly < InPolyList->Num() ; poly++ )
-	{
-		FPoly* SrcPoly = &(*InPolyList)[poly];
-		FPoly NewPoly = *SrcPoly;
-
-		for( int32 edge = 0 ; edge < SrcPoly->Vertices.Num() ; edge++ )
-		{
-			FEdge SrcEdge = FEdge( SrcPoly->Vertices[edge], SrcPoly->Vertices[ edge+1 < SrcPoly->Vertices.Num() ? edge+1 : 0 ] );
-			FPlane SrcEdgePlane( SrcEdge.Vertex[0], SrcEdge.Vertex[1], SrcEdge.Vertex[0] + (SrcPoly->Normal * 16) );
-
-			for( int32 poly2 = 0 ; poly2 < InPolyList->Num() ; poly2++ )
-			{
-				FPoly* CmpPoly = &(*InPolyList)[poly2];
-
-				// We can't compare to ourselves.
-				if( CmpPoly == SrcPoly )
-					continue;
-
-				for( int32 edge2 = 0 ; edge2 < CmpPoly->Vertices.Num() ; edge2++ )
-				{
-					FEdge CmpEdge = FEdge( CmpPoly->Vertices[edge2], CmpPoly->Vertices[ edge2+1 < CmpPoly->Vertices.Num() ? edge2+1 : 0 ] );
-
-					// If both vertices on this edge lie on the same plane as the original edge, create
-					// a sphere around the original 2 vertices.  If either of this edges vertices are inside of
-					// that sphere, we need to split the original edge by adding a vertex to it's poly.
-					if( FMath::Abs( FVector::PointPlaneDist( CmpEdge.Vertex[0], SrcEdge.Vertex[0], SrcEdgePlane ) ) < THRESH_POINT_ON_PLANE
-							&& FMath::Abs( FVector::PointPlaneDist( CmpEdge.Vertex[1], SrcEdge.Vertex[0], SrcEdgePlane ) ) < THRESH_POINT_ON_PLANE )
-					{
-						//
-						// Check THIS edge against the SOURCE edge
-						//
-
-						FVector Dir = SrcEdge.Vertex[1] - SrcEdge.Vertex[0];
-						Dir.Normalize();
-						float Dist = FVector::Dist( SrcEdge.Vertex[1], SrcEdge.Vertex[0] );
-						FVector Origin = SrcEdge.Vertex[0] + (Dir * (Dist / 2.0f));
-						float Radius = Dist / 2.0f;
-
-						for( int32 vtx = 0 ; vtx < 2 ; vtx++ )
-							if( FVector::Dist( Origin, CmpEdge.Vertex[vtx] ) && FVector::Dist( Origin, CmpEdge.Vertex[vtx] ) < Radius )
-								NewPoly.InsertVertex( edge2+1, CmpEdge.Vertex[vtx] );
-					}
-				}
-			}
-		}
-
-		new(*InResult)FPoly( NewPoly );
-	}
-
+	FBSPUtils::polySplitOverlappingEdges(InPolyList, InResult);
 }
 
 
@@ -514,63 +366,7 @@ void UEditorEngine::polyGetOuterEdgeList
 	TArray<FEdge>* InEdgeList
 )
 {
-	TArray<FPoly> NewPolyList;
-	polySplitOverlappingEdges( InPolyList, &NewPolyList );
-
-	TArray<FEdge> TempEdges;
-
-	// Create a master list of edges.
-	for( int32 poly = 0 ; poly < NewPolyList.Num() ; poly++ )
-	{
-		FPoly* Poly = &NewPolyList[poly];
-		for( int32 vtx = 0 ; vtx < Poly->Vertices.Num() ; vtx++ )
-			new( TempEdges )FEdge( Poly->Vertices[vtx], Poly->Vertices[ vtx+1 < Poly->Vertices.Num() ? vtx+1 : 0] );
-	}
-
-	// Add all the unique edges into the final edge list.
-	TArray<FEdge> FinalEdges;
-
-	for( int32 tedge = 0 ; tedge < TempEdges.Num() ; tedge++ )
-	{
-		FEdge* TestEdge = &TempEdges[tedge];
-
-		int32 EdgeCount = 0;
-		for( int32 edge = 0 ; edge < TempEdges.Num() ; edge++ )
-		{
-			if( TempEdges[edge] == *TestEdge )
-				EdgeCount++;
-		}
-
-		if( EdgeCount == 1 )
-			new( FinalEdges )FEdge( *TestEdge );
-	}
-
-	// Reorder all the edges so that they line up, end to end.
-	InEdgeList->Empty();
-	if( !FinalEdges.Num() ) return;
-
-	new( *InEdgeList )FEdge( FinalEdges[0] );
-	FVector Comp = FinalEdges[0].Vertex[1];
-	FinalEdges.RemoveAt(0);
-
-	FEdge DebuG;
-	for( int32 x = 0 ; x < FinalEdges.Num() ; x++ )
-	{
-		DebuG = FinalEdges[x];
-
-		// If the edge is backwards, flip it
-		if( FinalEdges[x].Vertex[1] == Comp )
-			Exchange( FinalEdges[x].Vertex[0], FinalEdges[x].Vertex[1] );
-
-		if( FinalEdges[x].Vertex[0] == Comp )
-		{
-			new( *InEdgeList )FEdge( FinalEdges[x] );
-			Comp = FinalEdges[x].Vertex[1];
-			FinalEdges.RemoveAt(x);
-			x = -1;
-		}
-	}
-
+	FBSPUtils::polyGetOuterEdgeList(InPolyList, InEdgeList);
 }
 
 /*-----------------------------------------------------------------------------
@@ -627,7 +423,7 @@ void UEditorEngine::polySelectMatchingGroups( UModel* Model )
 		FBspSurf *Surf = &Model->Surfs(i);
 		if( Surf->PolyFlags&PF_Selected )
 		{
-			FPoly Poly; polyFindMaster(Model,i,Poly);
+			FPoly Poly; polyFindBrush(Model,i,Poly);
 			GFlags1[Poly.Actor->Layer.GetIndex()]=1;
 		}
 	}
@@ -635,7 +431,7 @@ void UEditorEngine::polySelectMatchingGroups( UModel* Model )
 	{
 		FBspSurf *Surf = &Model->Surfs(i);
 		FPoly Poly;
-		polyFindMaster(Model,i,Poly);
+		polyFindBrush(Model,i,Poly);
 		if
 		(	(GFlags1[Poly.Actor->Layer.GetIndex()]) 
 			&&	(!(Surf->PolyFlags & PF_Selected)) )
@@ -664,7 +460,7 @@ void UEditorEngine::polySelectMatchingItems(UModel *InModel)
 		}
 		if( Surf->PolyFlags&PF_Selected )
 		{
-			FPoly Poly; polyFindMaster(InModel,i,Poly);
+			FPoly Poly; polyFindBrush(InModel,i,Poly);
 			GFlags1[Poly.ItemName.GetIndex()]=1;
 		}
 	}
@@ -673,7 +469,7 @@ void UEditorEngine::polySelectMatchingItems(UModel *InModel)
 		FBspSurf *Surf = &InModel->Surfs(i);
 		if( Surf->Actor )
 		{
-			FPoly Poly; polyFindMaster(InModel,i,Poly);
+			FPoly Poly; polyFindBrush(InModel,i,Poly);
 			if ((GFlags1[Poly.ItemName.GetIndex()]) &&
 				( GFlags2[Surf->Actor->Brush->GetIndex()]) &&
 				(!(Surf->PolyFlags & PF_Selected)))
@@ -713,7 +509,7 @@ static int32 TagAdjacentsType(UWorld* InWorld, EAdjacentsType AdjacentType)
 	}
 
 	FVert		*VertPool;
-	FVector		*Base,*Normal;
+	FVector3f		*Base,*Normal;
 	uint8		b;
 	int32		    i;
 	int			Selected,Found;
@@ -835,15 +631,15 @@ void UEditorEngine::polySelectCoplanars(UWorld* InWorld, UModel* InModel)
 
 			if(SelectedSurf.PolyFlags & PF_Selected)
 			{
-				const FVector	SelectedBase = Model->Points[Model->Verts[SelectedNode.iVertPool].pVertex];
-				const FVector SelectedNormal = Model->Vectors[SelectedSurf.vNormal];
+				const FVector	SelectedBase = (FVector)Model->Points[Model->Verts[SelectedNode.iVertPool].pVertex];
+				const FVector SelectedNormal = (FVector)Model->Vectors[SelectedSurf.vNormal];
 
 				for(int32 NodeIndex = 0;NodeIndex < Model->Nodes.Num();NodeIndex++)
 				{
 					FBspNode&	Node = Model->Nodes[NodeIndex];
 					FBspSurf&	Surf = Model->Surfs[Node.iSurf];
-					const FVector Base = Model->Points[Model->Verts[Node.iVertPool].pVertex];
-					const FVector Normal = Model->Vectors[Surf.vNormal];
+					const FVector Base = (FVector)Model->Points[Model->Verts[Node.iVertPool].pVertex];
+					const FVector Normal = (FVector)Model->Vectors[Surf.vNormal];
 
 					const float ParallelDotThreshold = 0.98f; // roughly 11.4 degrees (!), but this is the long-standing behavior.
 					if (FVector::Coincident(SelectedNormal, Normal, ParallelDotThreshold) &&
@@ -1304,7 +1100,7 @@ void UEditorEngine::MapBrushGet(UWorld* InWorld)
 			check( BrushActor->GetWorld() );			
 			ABrush* WorldBrush = BrushActor->GetWorld()->GetDefaultBrush();
 			check( WorldBrush );
-			WorldBrush->Modify();
+			WorldBrush->Modify(false);
 			WorldBrush->Brush->Polys->Element = BrushActor->Brush->Polys->Element;
 			WorldBrush->CopyPosRotScaleFrom( BrushActor );
 
@@ -1332,7 +1128,7 @@ void UEditorEngine::mapBrushPut()
 			ABrush* WorldBrush = BrushActor->GetWorld()->GetDefaultBrush();
 			check( WorldBrush );
 
-			BrushActor->Modify();
+			BrushActor->Modify(false);
 			BrushActor->Brush->Polys->Element = WorldBrush->Brush->Polys->Element;
 			BrushActor->CopyPosRotScaleFrom( WorldBrush );
 			BrushActor->SetNeedRebuild(BrushActor->GetLevel());
@@ -1403,7 +1199,7 @@ void UEditorEngine::mapSendToSwap(UWorld* InWorld)
 {
 	int32			Count	= 0;
 	ULevel*		Level	= InWorld->GetCurrentLevel();
-	AActor**	Actors[2];
+	TObjectPtr<AActor>*	Actors[2];
 
 	// Fire ULevel::LevelDirtiedEvent when falling out of scope.
 	FScopedLevelDirtied		LevelDirtyCallback;
@@ -1411,7 +1207,7 @@ void UEditorEngine::mapSendToSwap(UWorld* InWorld)
 	//@todo locked levels - skip for locked levels?
 	for( int32 i=2; i<Level->Actors.Num() && Count < 2; i++ )
 	{
-		AActor*& Actor = Level->Actors[i];
+		auto& Actor = Level->Actors[i];
 		if( Actor && Actor->IsSelected() )
 		{
 			Actors[Count] = &Actor;
@@ -1443,7 +1239,7 @@ void UEditorEngine::MapSetBrush( UWorld* InWorld, EMapSetBrushFlags	PropertiesMa
 		{
 			if( PropertiesMask & MSB_PolyFlags )
 			{
-				Brush->Modify();
+				Brush->Modify(false);
 				Brush->PolyFlags = (Brush->PolyFlags & ~ClearPolyFlags) | SetPolyFlags;
 				Brush->UpdateComponentTransforms();
 				Brush->MarkPackageDirty();
@@ -1451,7 +1247,7 @@ void UEditorEngine::MapSetBrush( UWorld* InWorld, EMapSetBrushFlags	PropertiesMa
 			}
 			if( PropertiesMask & MSB_BrushType )
 			{
-				Brush->Modify();
+				Brush->Modify(false);
 				Brush->BrushType = EBrushType(BrushType);
 				Brush->UpdateComponentTransforms();
 				Brush->MarkPackageDirty();
@@ -1472,18 +1268,18 @@ void UEditorEngine::polyTexPan(UModel *Model,int32 PanU,int32 PanV,int32 Absolut
 		{
 			if(Absolute)
 			{
-				Model->Points[Surf.pBase] = FVector::ZeroVector;
+				Model->Points[Surf.pBase] = FVector3f::ZeroVector;
 			}
 
-			const FVector TextureU = Model->Vectors[Surf.vTextureU];
-			const FVector TextureV = Model->Vectors[Surf.vTextureV];
+			const FVector TextureU = (FVector)Model->Vectors[Surf.vTextureU];
+			const FVector TextureV = (FVector)Model->Vectors[Surf.vTextureV];
 
-			Model->Points[Surf.pBase] += PanU * (TextureU / TextureU.SizeSquared());
-			Model->Points[Surf.pBase] += PanV * (TextureV / TextureV.SizeSquared());
+			Model->Points[Surf.pBase] += FVector3f(PanU * (TextureU / TextureU.SizeSquared()));
+			Model->Points[Surf.pBase] += FVector3f(PanV * (TextureV / TextureV.SizeSquared()));
 
 			const bool bUpdateTexCoords = true;
 			const bool bOnlyRefreshSurfaceMaterials = true;
-			polyUpdateMaster(Model, SurfaceIndex, bUpdateTexCoords, bOnlyRefreshSurfaceMaterials);
+			polyUpdateBrush(Model, SurfaceIndex, bUpdateTexCoords, bOnlyRefreshSurfaceMaterials);
 		}
 	}
 }
@@ -1496,8 +1292,8 @@ void UEditorEngine::polyTexScale( UModel* Model, float UU, float UV, float VU, f
 		FBspSurf *Poly = &Model->Surfs[i];
 		if (Poly->PolyFlags & PF_Selected)
 		{
-			FVector OriginalU = Model->Vectors[Poly->vTextureU];
-			FVector OriginalV = Model->Vectors[Poly->vTextureV];
+			FVector OriginalU = (FVector)Model->Vectors[Poly->vTextureU];
+			FVector OriginalV = (FVector)Model->Vectors[Poly->vTextureV];
 
 			if( Absolute )
 			{
@@ -1506,13 +1302,13 @@ void UEditorEngine::polyTexScale( UModel* Model, float UU, float UV, float VU, f
 			}
 
 			// Calc new vectors.
-			Model->Vectors[Poly->vTextureU] = OriginalU * UU + OriginalV * UV;
-			Model->Vectors[Poly->vTextureV] = OriginalU * VU + OriginalV * VV;
+			Model->Vectors[Poly->vTextureU] = FVector3f(OriginalU * UU + OriginalV * UV);
+			Model->Vectors[Poly->vTextureV] = FVector3f(OriginalU * VU + OriginalV * VV);
 
 			// Update generating brush poly.
 			const bool bUpdateTexCoords = true;
 			const bool bOnlyRefreshSurfaceMaterials = true;
-			polyUpdateMaster(Model, i, bUpdateTexCoords, bOnlyRefreshSurfaceMaterials);
+			polyUpdateBrush(Model, i, bUpdateTexCoords, bOnlyRefreshSurfaceMaterials);
 		}
 	}
 }

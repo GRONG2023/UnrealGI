@@ -15,24 +15,15 @@ public class HierarchicalLODOutliner : ModuleRules
 				"RHI",
 				"RenderCore",
 				"Slate",
-                "EditorStyle",
                 "Engine",
                 "UnrealEd",
                 "PropertyEditor",
                 "HierarchicalLODUtilities",
 			}
         );
-        
-        PrivateDependencyModuleNames.AddRange(
-             new string[] {
-					"Engine",
-                    "UnrealEd"
-				}
-         );
 
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
-				"LevelEditor"
 				}
 		);
 
@@ -42,9 +33,8 @@ public class HierarchicalLODOutliner : ModuleRules
         {
             PrivateDependencyModuleNames.AddRange(
                 new string[] {
-                    "UnrealEd",
+					"EditorFramework",
     				"SlateCore",
-    				"Slate",
 					"ToolMenus",
                 }
             );

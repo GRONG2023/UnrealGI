@@ -10,7 +10,7 @@
 #include "Containers/BitArray.h"
 #include "PushModelUtils.h"
 
-namespace UE4PushModelPrivate
+namespace UEPushModelPrivate
 {
 	class FPushModelPerNetDriverState
 	{
@@ -19,6 +19,7 @@ namespace UE4PushModelPrivate
 		FPushModelPerNetDriverState(const uint16 InNumberOfProperties)
 			: PropertyDirtyStates(true, InNumberOfProperties)
 			, bRecentlyCollectedGarbage(false)
+			, bHasDirtyProperties(true)
 		{
 		}
 		
@@ -40,6 +41,7 @@ namespace UE4PushModelPrivate
 		{
 			ResetBitArray(PropertyDirtyStates);
 			bRecentlyCollectedGarbage = false;
+			bHasDirtyProperties = false;
 		}
 
 		void CountBytes(FArchive& Ar) const
@@ -65,11 +67,18 @@ namespace UE4PushModelPrivate
 		void MarkPropertiesDirty(const TBitArray<>& OtherBitArray)
 		{
 			BitwiseOrBitArrays(OtherBitArray, PropertyDirtyStates);
+			bHasDirtyProperties = true;
 		}
 
 		void MarkPropertyDirty(const uint16 RepIndex)
 		{
 			PropertyDirtyStates[RepIndex] = true;
+			bHasDirtyProperties = true;
+		}
+
+		bool HasDirtyProperties() const
+		{
+			return bHasDirtyProperties;
 		}
 
 	private:
@@ -80,6 +89,7 @@ namespace UE4PushModelPrivate
 		 */
 		TBitArray<> PropertyDirtyStates;
 		uint8 bRecentlyCollectedGarbage : 1;
+		uint8 bHasDirtyProperties : 1;
 	};
 }
 

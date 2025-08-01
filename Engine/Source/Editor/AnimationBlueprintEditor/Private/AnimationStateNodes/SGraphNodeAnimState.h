@@ -2,23 +2,24 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Styling/SlateColor.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "SNodePanel.h"
+#include "Containers/Array.h"
+#include "Internationalization/Text.h"
+#include "Math/Color.h"
 #include "SGraphNode.h"
-#include "SGraphPin.h"
+#include "Styling/SlateColor.h"
+#include "Templates/SharedPointer.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 
+class SGraphPin;
 class SToolTip;
 class UAnimStateConduitNode;
 class UAnimStateNodeBase;
-
-//
-// Forward declarations.
-//
-class UAnimStateNodeBase;
-class UAnimStateConduitNode;
-class UAnimStateEntryNode;
+class UEdGraphNode;
+struct FGeometry;
+struct FGraphInformationPopupInfo;
+struct FNodeInfoContext;
+struct FPointerEvent;
+struct FSlateBrush;
 
 class SGraphNodeAnimState : public SGraphNode
 {
@@ -39,9 +40,15 @@ public:
 	virtual TSharedPtr<SToolTip> GetComplexTooltip() override;
 	// End of SGraphNode interface
 
+	// SWidget interface
+	void OnMouseEnter(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
+	void OnMouseLeave(const FPointerEvent& MouseEvent) override;
+	// End of SWidget interface
+
 	static void GetStateInfoPopup(UEdGraphNode* GraphNode, TArray<FGraphInformationPopupInfo>& Popups);
 protected:
 	FSlateColor GetBorderBackgroundColor() const;
+	virtual FSlateColor GetBorderBackgroundColor_Internal(FLinearColor InactiveStateColor, FLinearColor ActiveStateColorDim, FLinearColor ActiveStateColorBright) const;
 
 	virtual FText GetPreviewCornerText() const;
 	virtual const FSlateBrush* GetNameIcon() const;
@@ -60,6 +67,8 @@ public:
 	virtual void GetNodeInfoPopups(FNodeInfoContext* Context, TArray<FGraphInformationPopupInfo>& Popups) const override;
 	// End of SNodePanel::SNode interface
 protected:
+	virtual FSlateColor GetBorderBackgroundColor_Internal(FLinearColor InactiveStateColor, FLinearColor ActiveStateColorDim, FLinearColor ActiveStateColorBright) const override;
+
 	virtual FText GetPreviewCornerText() const override;
 	virtual const FSlateBrush* GetNameIcon() const override;
 };

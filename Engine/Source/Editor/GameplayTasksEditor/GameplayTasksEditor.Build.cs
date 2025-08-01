@@ -8,15 +8,6 @@ namespace UnrealBuildTool.Rules
 		{
 			OverridePackageType = PackageOverrideType.EngineDeveloper;
 
-			PrivateIncludePaths.AddRange(
-                new string[] {
-                    "Editor/GraphEditor/Private",
-				    "Editor/Kismet/Private",
-					"Editor/GameplayTasksEditor/Private",
-                    "Developer/AssetTools/Private",
-				}
-			);
-
             PrivateDependencyModuleNames.AddRange(
                 new string[]
 				{
@@ -24,22 +15,10 @@ namespace UnrealBuildTool.Rules
 					"Core",
 					"CoreUObject",
 					"Engine",
-					"AssetTools",
-					"ClassViewer",
-                    "GameplayTags",
 					"GameplayTasks",
-                    "InputCore",
-                    "PropertyEditor",
-					"Slate",
-					"SlateCore",
-                    "EditorStyle",
 					"BlueprintGraph",
-                    "Kismet",
 					"KismetCompiler",
-					"GraphEditor",
-					"MainFrame",
 					"UnrealEd",
-                    "EditorWidgets",
 				}
 			);
 		}

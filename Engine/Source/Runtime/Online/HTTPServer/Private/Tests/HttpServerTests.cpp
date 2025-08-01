@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
+#include "Math/NumericLimits.h"
 #include "HttpServerModule.h"
 #include "IHttpRouter.h"
 #include "HttpRouteHandle.h"
@@ -17,6 +18,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHttpServerIntegrationTest, "System.Online.Http
 bool FHttpServerIntegrationTest::RunTest(const FString& Parameters)
 {
 	const uint32 HttpRouterPort = 8888;
+	const uint32 InvalidHttpRouterPort = TNumericLimits<uint16>::Max() + 1; // 65536
 	const FHttpPath HttpPath(TEXT("/TestHttpServer"));
 
 	// Ensure router creation
@@ -27,12 +29,15 @@ bool FHttpServerIntegrationTest::RunTest(const FString& Parameters)
 	TSharedPtr<IHttpRouter> DuplicateHttpRouter = FHttpServerModule::Get().GetHttpRouter(HttpRouterPort);
 	TestEqual(TEXT("HttpRouter Duplicates"), HttpRouter, DuplicateHttpRouter);
 
+	// Ensure failed port binds still return a valid router if not explicitly requested to fail (and by default)
+	TSharedPtr<IHttpRouter> ValidHttpRouterOnFail = FHttpServerModule::Get().GetHttpRouter(InvalidHttpRouterPort /*, bFailOnBindFailure = false */);
+	TestTrue(TEXT("HttpRouter is NOT null on bind failure by default"), ValidHttpRouterOnFail.IsValid());
+
 	// Ensure we can create route bindings
-	const FHttpRequestHandler RequestHandler = [this]
-	(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
+	const FHttpRequestHandler RequestHandler = FHttpRequestHandler::CreateLambda([](const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 	{
 		return true;
-	};
+	});
 	FHttpRouteHandle HttpRouteHandle = HttpRouter->BindRoute(HttpPath, EHttpServerRequestVerbs::VERB_GET, RequestHandler);
 	TestTrue(TEXT("HttpRouteHandle.IsValid()"), HttpRouteHandle.IsValid());
 
@@ -40,7 +45,16 @@ bool FHttpServerIntegrationTest::RunTest(const FString& Parameters)
 	FHttpRouteHandle DuplicateHandle = HttpRouter->BindRoute(HttpPath, EHttpServerRequestVerbs::VERB_GET, RequestHandler);
 	TestFalse(TEXT("HttpRouteHandle Duplicated"), DuplicateHandle.IsValid());
 
+	// Because of the ValidHttpRouterOnFail was created by FHttpServerModule::Get().GetHttpRouter(InvalidHttpRouterPort...), it will fail to listen in StartAllListeners
+	// Also after bHttpListenersEnabled got set to true by StartAllListeners, when call GetHttpRouter(InvalidHttpRouterPort...) again, it will call StartListening again in there and fail
+	AddExpectedError(TEXT("HttpListener detected invalid port"), EAutomationExpectedErrorFlags::Contains, 2);
 	FHttpServerModule::Get().StartAllListeners();
+
+	// Because of the ValidHttpRouterOnFail was created by FHttpServerModule::Get().GetHttpRouter(InvalidHttpRouterPort...)
+	AddExpectedError(TEXT("is not listening/bound and listeners are still enabled"), EAutomationExpectedErrorFlags::Contains, 1);
+	// Ensure failed port binds result in a null router instance if requested (and listeners are enabled)
+	TSharedPtr<IHttpRouter> InvalidHttpRouterOnFail = FHttpServerModule::Get().GetHttpRouter(InvalidHttpRouterPort, /* bFailOnBindFailure = */ true);
+	TestFalse(TEXT("HttpRouter is null on bind failure if requested"), InvalidHttpRouterOnFail.IsValid());
 
 	// Make a request
 	/*
@@ -78,11 +92,11 @@ bool FHttpServerPathParametersTest::RunTest(const FString& Parameters)
 
 		void SetHandler()
 		{
-			Handler = [this](const FHttpServerRequest&, const FHttpResultCallback&)
+			Handler = FHttpRequestHandler::CreateLambda([this](const FHttpServerRequest&, const FHttpResultCallback&)
 			{
 				bRouteQueried = true;
 				return true;
-			};
+			});
 		}
 
 		EVerb QueryVerb;
@@ -142,7 +156,7 @@ bool FHttpServerPathParametersTest::RunTest(const FString& Parameters)
 		FHttpRequestHandlerIterator Iterator(Request, Registrar);
 		if (const FHttpRequestHandler* RequestHandlerPtr = Iterator.Next())
 		{
-			(*RequestHandlerPtr)(*Request, Callback);
+			[[maybe_unused]] bool bHandled = RequestHandlerPtr->Execute(*Request, Callback);
 		}
 
 		if ((Test.bExpectedResult == ShouldMatch && !Test.bRouteQueried) || (Test.bExpectedResult == ShouldNotMatch && Test.bRouteQueried))

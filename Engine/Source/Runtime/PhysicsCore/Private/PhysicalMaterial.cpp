@@ -7,14 +7,34 @@
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "PhysicalMaterials/PhysicalMaterialPropertyBase.h"
 #include "UObject/UObjectIterator.h"
+#include "Chaos/PhysicalMaterials.h"
+#include "HAL/IConsoleManager.h"
 
-#if WITH_CHAOS
-	#include "Chaos/PhysicalMaterials.h"
-#endif
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PhysicalMaterial)
+
+namespace PhysicalMaterialCVars
+{
+	bool bShowExperimentalProperties = false;
+
+	FAutoConsoleVariableRef CVarShowExperimentalProperties(TEXT("p.PhysicalMaterial.ShowExperimentalProperties"), bShowExperimentalProperties, TEXT(""));
+}
 
 UDEPRECATED_PhysicalMaterialPropertyBase::UDEPRECATED_PhysicalMaterialPropertyBase(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
+}
+
+FPhysicalMaterialStrength::FPhysicalMaterialStrength()
+{
+	// using concrete as default ( lowest values of it )
+	TensileStrength = 2;
+	CompressionStrength = 20;
+	ShearStrength = 6;
+}
+
+FPhysicalMaterialDamageModifier::FPhysicalMaterialDamageModifier()
+{
+	DamageThresholdMultiplier = 1.0;
 }
 
 UPhysicalMaterial::UPhysicalMaterial(const FObjectInitializer& ObjectInitializer)
@@ -28,9 +48,13 @@ UPhysicalMaterial::UPhysicalMaterial(const FObjectInitializer& ObjectInitializer
 	SleepLinearVelocityThreshold = 1.f;
 	SleepAngularVelocityThreshold = 0.05f;
 	SleepCounterThreshold = 4;
-	DestructibleDamageThresholdScale = 1.0f;
 	bOverrideFrictionCombineMode = false;
 	UserData = FChaosUserData(this);
+
+	SoftCollisionMode = EPhysicalMaterialSoftCollisionMode::None;
+	SoftCollisionThickness = 0;
+
+	BaseFrictionImpulse = 0;
 }
 
 UPhysicalMaterial::UPhysicalMaterial(FVTableHelper& Helper)
@@ -43,12 +67,20 @@ UPhysicalMaterial::~UPhysicalMaterial() = default;
 #if WITH_EDITOR
 void UPhysicalMaterial::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
+	bool bSkipUpdate = false;
 	if(!MaterialHandle)
 	{
-		MaterialHandle = MakeUnique<FPhysicsMaterialHandle>();
+		// If we don't currently have a material calling GetPhysicsMaterial will already call update as a side effect
+		// to set the initial state - so we can skip it in that case.
+		bSkipUpdate = true;
 	}
-	// Update PhysX material last so we have a valid Parent
-	FChaosEngineInterface::UpdateMaterial(*MaterialHandle, this);
+
+	FPhysicsMaterialHandle& PhysMaterial = GetPhysicsMaterial();
+
+	if(!bSkipUpdate)
+	{
+		FChaosEngineInterface::UpdateMaterial(*MaterialHandle, this);
+	}
 
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 }
@@ -76,7 +108,7 @@ void UPhysicalMaterial::PostLoad()
 	Super::PostLoad();
 
 	// we're removing physical material property, so convert to Material type
-	if (GetLinkerUE4Version() < VER_UE4_REMOVE_PHYSICALMATERIALPROPERTY)
+	if (GetLinkerUEVersion() < VER_UE4_REMOVE_PHYSICALMATERIALPROPERTY)
 	{
 		if (PhysicalMaterialProperty_DEPRECATED)
 		{
@@ -120,6 +152,13 @@ void UPhysicalMaterial::SetEngineDefaultPhysMaterial(UPhysicalMaterial* Material
 	GEngineDefaultPhysMaterial = Material;
 }
 
+static UPhysicalMaterial* GEngineDefaultDestructiblePhysMaterial = nullptr;
+
+void UPhysicalMaterial::SetEngineDefaultDestructiblePhysMaterial(UPhysicalMaterial* Material)
+{
+	GEngineDefaultDestructiblePhysMaterial = Material;
+}
+
 EPhysicalSurface UPhysicalMaterial::DetermineSurfaceType(UPhysicalMaterial const* PhysicalMaterial)
 {
 	if (PhysicalMaterial == NULL)
@@ -128,3 +167,4 @@ EPhysicalSurface UPhysicalMaterial::DetermineSurfaceType(UPhysicalMaterial const
 	}
 	return PhysicalMaterial->SurfaceType;
 }
+

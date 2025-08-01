@@ -1,14 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "FoliageEdModeToolkit.h"
+
+#include "Editor.h"
 #include "EditorModeManager.h"
 #include "EditorModes.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Internationalization.h"
 #include "SFoliageEdit.h"
-#include "Classes/EditorStyleSettings.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 
-#include "FoliageEditActions.h"
-#include "FoliagePaletteCommands.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
+class SWidget;
 
 #define LOCTEXT_NAMESPACE "FoliageEditMode"
 
@@ -16,16 +18,6 @@ namespace
 {
 	static const FName FoliageName(TEXT("Foliage")); 
 	const TArray<FName> FoliagePaletteNames = { FoliageName };
-}
-
-void FFoliageEdModeToolkit::RegisterTabSpawners(const TSharedRef<class FTabManager>& TabManager)
-{
-
-}
-
-void FFoliageEdModeToolkit::UnregisterTabSpawners(const TSharedRef<class FTabManager>& TabManager)
-{
-
 }
 
 void FFoliageEdModeToolkit::Init(const TSharedPtr< class IToolkitHost >& InitToolkitHost)
@@ -65,12 +57,14 @@ void FFoliageEdModeToolkit::NotifyFoliageTypeMeshChanged(class UFoliageType* Fol
 	FoliageEdWidget->NotifyFoliageTypeMeshChanged(FoliageType);
 }
 
+void FFoliageEdModeToolkit::ReflectSelectionInPalette()
+{
+	FoliageEdWidget->ReflectSelectionInPalette();
+}
+
 void FFoliageEdModeToolkit::GetToolPaletteNames(TArray<FName>& InPaletteName) const
 {
-	if (!GetDefault<UEditorStyleSettings>()->bEnableLegacyEditorModeUI)
-	{
-		InPaletteName = FoliagePaletteNames;
-	}
+	InPaletteName = FoliagePaletteNames;
 }
 
 FText FFoliageEdModeToolkit::GetToolPaletteDisplayName(FName PaletteName) const

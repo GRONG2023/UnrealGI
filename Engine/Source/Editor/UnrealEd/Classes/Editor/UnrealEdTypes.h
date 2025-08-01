@@ -2,7 +2,7 @@
 
 /**
  *	This will hold all of our enums and types and such that we need to
- *	use in multiple files where the enum can'y be mapped to a specific file.
+ *	use in multiple files where the enum can't be mapped to a specific file.
  */
 
 #pragma once
@@ -108,7 +108,7 @@ struct FLightmassParameterizedMaterialSettings
 //	ELevelViewportType
 //
 UENUM()
-enum ELevelViewportType
+enum ELevelViewportType : int
 {
 	/** Top */
 	LVT_OrthoXY = 0,
@@ -129,6 +129,21 @@ enum ELevelViewportType
 	LVT_None = 255,
 };
 
+UENUM()
+enum EDestructiveAssetActions : int
+{
+	AssetDelete = 0,
+	AssetRename = 1 << 0,
+	AssetMove = 1 << 1,
+	AssetPrivatize = 1 << 2
+};
+
+/** Simple Return struct for supplying success or failure with an optional error message */
+struct FResultMessage
+{
+	bool bSuccess = false;
+	FString ErrorMessage;
+};
 
 UCLASS(abstract, config=UnrealEd)
 class UUnrealEdTypes : public UObject

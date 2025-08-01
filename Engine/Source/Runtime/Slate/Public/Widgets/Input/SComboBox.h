@@ -13,7 +13,7 @@
 #include "Widgets/SWidget.h"
 #include "Sound/SlateSound.h"
 #include "Styling/SlateTypes.h"
-#include "Styling/CoreStyle.h"
+#include "Styling/AppStyle.h"
 #include "Framework/SlateDelegates.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Application/SlateUser.h"
@@ -39,11 +39,13 @@ class SComboRow : public STableRow< OptionType >
 public:
 
 	SLATE_BEGIN_ARGS( SComboRow )
-		: _Style(&FCoreStyle::Get().GetWidgetStyle<FTableRowStyle>("TableView.Row"))
+		: _Style(&FAppStyle::Get().GetWidgetStyle<FTableRowStyle>("ComboBox.Row"))
 		, _Content()
+		, _Padding(FMargin(0))
 		{}
 		SLATE_STYLE_ARGUMENT(FTableRowStyle, Style)
 		SLATE_DEFAULT_SLOT( FArguments, Content )
+		SLATE_ATTRIBUTE(FMargin, Padding)
 	SLATE_END_ARGS()
 
 public:
@@ -56,6 +58,7 @@ public:
 		STableRow< OptionType >::Construct(
 			typename STableRow<OptionType>::FArguments()
 			.Style(InArgs._Style)
+			.Padding(InArgs._Padding)
 			.Content()
 			[
 				InArgs._Content.Widget
@@ -71,7 +74,7 @@ public:
 		{
 			TSharedPtr< ITypedTableView<OptionType> > OwnerWidget = this->OwnerTablePtr.Pin();
 
-			const OptionType* MyItem = OwnerWidget->Private_ItemFromWidget( this );
+			const TObjectPtrWrapTypeOf<OptionType>* MyItem = OwnerWidget->Private_ItemFromWidget( this );
 			const bool bIsSelected = OwnerWidget->Private_IsItemSelected( *MyItem );
 				
 			if (bIsSelected)
@@ -94,6 +97,7 @@ class SComboBox : public SComboButton
 {
 public:
 
+	typedef TListTypeTraits< OptionType > ListTypeTraits;
 	typedef typename TListTypeTraits< OptionType >::NullableType NullableOptionType;
 
 	/** Type of list used for showing menu options. */
@@ -104,15 +108,15 @@ public:
 
 	SLATE_BEGIN_ARGS( SComboBox )
 		: _Content()
-		, _ComboBoxStyle( &FCoreStyle::Get().GetWidgetStyle< FComboBoxStyle >( "ComboBox" ) )
+		, _ComboBoxStyle(&FAppStyle::Get().GetWidgetStyle< FComboBoxStyle >("ComboBox"))
 		, _ButtonStyle(nullptr)
-		, _ItemStyle( &FCoreStyle::Get().GetWidgetStyle< FTableRowStyle >( "TableView.Row" ) )
-		, _ContentPadding(FMargin(4.0, 2.0))
-		, _ForegroundColor(FCoreStyle::Get().GetSlateColor("InvertedForeground"))
-		, _OptionsSource()
+		, _ItemStyle(&FAppStyle::Get().GetWidgetStyle< FTableRowStyle >("ComboBox.Row"))
+		, _ScrollBarStyle(&FAppStyle::Get().GetWidgetStyle<FScrollBarStyle>("ScrollBar"))
+		, _ContentPadding(_ComboBoxStyle->ContentPadding)
+		, _ForegroundColor(FSlateColor::UseStyle())
 		, _OnSelectionChanged()
 		, _OnGenerateWidget()
-		, _InitiallySelectedItem( nullptr)
+		, _InitiallySelectedItem(ListTypeTraits::MakeNullPtr())
 		, _Method()
 		, _MaxListHeight(450.0f)
 		, _HasDownArrow( true )
@@ -129,11 +133,13 @@ public:
 		SLATE_STYLE_ARGUMENT( FButtonStyle, ButtonStyle )
 
 		SLATE_STYLE_ARGUMENT(FTableRowStyle, ItemStyle)
+		
+		SLATE_STYLE_ARGUMENT( FScrollBarStyle, ScrollBarStyle )
 
 		SLATE_ATTRIBUTE( FMargin, ContentPadding )
 		SLATE_ATTRIBUTE( FSlateColor, ForegroundColor )
 
-		SLATE_ARGUMENT( const TArray< OptionType >*, OptionsSource )
+		SLATE_ITEMS_SOURCE_ARGUMENT( OptionType, OptionsSource )
 		SLATE_EVENT( FOnSelectionChanged, OnSelectionChanged )
 		SLATE_EVENT( FOnGenerateWidget, OnGenerateWidget )
 
@@ -187,12 +193,15 @@ public:
 		check(InArgs._ComboBoxStyle);
 
 		ItemStyle = InArgs._ItemStyle;
+		ComboBoxStyle = InArgs._ComboBoxStyle;
+		MenuRowPadding = ComboBoxStyle->MenuRowPadding;
+		bShowMenuBackground = false;
 
 		// Work out which values we should use based on whether we were given an override, or should use the style's version
-		const FComboButtonStyle& OurComboButtonStyle = InArgs._ComboBoxStyle->ComboButtonStyle;
+		const FComboButtonStyle& OurComboButtonStyle = ComboBoxStyle->ComboButtonStyle;
 		const FButtonStyle* const OurButtonStyle = InArgs._ButtonStyle ? InArgs._ButtonStyle : &OurComboButtonStyle.ButtonStyle;
-		PressedSound = InArgs._PressedSoundOverride.Get(InArgs._ComboBoxStyle->PressedSlateSound);
-		SelectionChangeSound = InArgs._SelectionChangeSoundOverride.Get(InArgs._ComboBoxStyle->SelectionChangeSlateSound);
+		PressedSound = InArgs._PressedSoundOverride.Get(ComboBoxStyle->PressedSlateSound);
+		SelectionChangeSound = InArgs._SelectionChangeSoundOverride.Get(ComboBoxStyle->SelectionChangeSlateSound);
 
 		this->OnComboBoxOpening = InArgs._OnComboBoxOpening;
 		this->OnSelectionChanged = InArgs._OnSelectionChanged;
@@ -200,19 +209,21 @@ public:
 		this->EnableGamepadNavigationMode = InArgs._EnableGamepadNavigationMode;
 		this->bControllerInputCaptured = false;
 
-		OptionsSource = InArgs._OptionsSource;
 		CustomScrollbar = InArgs._CustomScrollbar;
 
-		TSharedRef<SWidget> ComboBoxMenuContent =
+		ComboBoxMenuContent =
 			SNew(SBox)
 			.MaxDesiredHeight(InArgs._MaxListHeight)
 			[
 				SAssignNew(this->ComboListView, SComboListType)
-				.ListItemsSource(InArgs._OptionsSource)
+				.ListItemsSource(InArgs.GetOptionsSource())
 				.OnGenerateRow(this, &SComboBox< OptionType >::GenerateMenuItemRow)
 				.OnSelectionChanged(this, &SComboBox< OptionType >::OnSelectionChanged_Internal)
+				.OnKeyDownHandler(this, &SComboBox< OptionType >::OnKeyDownHandler)
 				.SelectionMode(ESelectionMode::Single)
+				.ScrollBarStyle(InArgs._ScrollBarStyle)
 				.ExternalScrollbar(InArgs._CustomScrollbar)
+				
 			];
 
 		// Set up content
@@ -235,7 +246,7 @@ public:
 			]
 			.MenuContent()
 			[
-				ComboBoxMenuContent
+				ComboBoxMenuContent.ToSharedRef()
 			]
 			.HasDownArrow( InArgs._HasDownArrow )
 			.ContentPadding( InArgs._ContentPadding )
@@ -256,6 +267,7 @@ public:
 			ComboListView->RequestScrollIntoView(ValidatedItem, 0);
 		}
 
+		ComboListView->SetBackgroundBrush(FStyleDefaults::GetNoBrush());
 	}
 
 		SComboBox()
@@ -352,12 +364,67 @@ public:
 		}
 	}
 
+	void SetEnableGamepadNavigationMode(bool InEnableGamepadNavigationMode)
+	{
+		this->EnableGamepadNavigationMode = InEnableGamepadNavigationMode;
+	}
+
+	void SetMaxHeight(float InMaxHeight)
+	{
+		ComboBoxMenuContent->SetMaxDesiredHeight(InMaxHeight);
+	}
+
+	void SetStyle(const FComboBoxStyle* InStyle) 
+	{ 
+		if (ComboBoxStyle != InStyle)
+		{
+			ComboBoxStyle = InStyle;
+			InvalidateStyle();
+		}
+	}
+
+	void InvalidateStyle() 
+	{ 
+		Invalidate(EInvalidateWidgetReason::Layout); 
+	}
+
+	void SetItemStyle(const FTableRowStyle* InItemStyle) 
+	{ 
+		if (ItemStyle != InItemStyle)
+		{
+			ItemStyle = InItemStyle;
+			InvalidateItemStyle();
+		}
+	}
+
+	void InvalidateItemStyle() 
+	{ 
+		Invalidate(EInvalidateWidgetReason::Layout); 
+	}
+
 	/** @return the item currently selected by the combo box. */
 	NullableOptionType GetSelectedItem()
 	{
 		return SelectedItem;
 	}
 
+	/** Sets new item source */
+	void SetItemsSource(const TArray<OptionType>* InListItemsSource)
+	{
+		ComboListView->SetItemsSource(InListItemsSource);
+	}
+
+	/** Sets new item source */
+	void SetItemsSource(TSharedRef<::UE::Slate::Containers::TObservableArray<OptionType>> InListItemsSource)
+	{
+		ComboListView->SetItemsSource(InListItemsSource);
+	}
+
+	/** Clears current item source */
+	void ClearItemsSource()
+	{
+		ComboListView->ClearItemsSource();
+	}
 
 	/** 
 	 * Requests a list refresh after updating options 
@@ -436,11 +503,12 @@ protected:
 					if (TListTypeTraits<OptionType>::IsPtrValid(NullableSelected))
 					{
 						OptionType ActuallySelected = TListTypeTraits<OptionType>::NullableItemTypeConvertToItemType(NullableSelected);
-						const int32 SelectionIndex = OptionsSource->Find(ActuallySelected);
+						const TArrayView<const OptionType> OptionsSource = ComboListView->GetItems();
+						const int32 SelectionIndex = OptionsSource.Find(ActuallySelected);
 						if (SelectionIndex >= 1)
 						{
 							// Select an item on the prev row
-							SetSelectedItem((*OptionsSource)[SelectionIndex - 1]);
+							SetSelectedItem(OptionsSource[SelectionIndex - 1]);
 						}
 					}
 
@@ -452,11 +520,12 @@ protected:
 					if (TListTypeTraits<OptionType>::IsPtrValid(NullableSelected))
 					{
 						OptionType ActuallySelected = TListTypeTraits<OptionType>::NullableItemTypeConvertToItemType(NullableSelected);
-						const int32 SelectionIndex = OptionsSource->Find(ActuallySelected);
-						if (SelectionIndex < OptionsSource->Num() - 1)
+						const TArrayView<const OptionType> OptionsSource = ComboListView->GetItems();
+						const int32 SelectionIndex = OptionsSource.Find(ActuallySelected);
+						if (SelectionIndex < OptionsSource.Num() - 1)
 						{
 							// Select an item on the next row
-							SetSelectedItem((*OptionsSource)[SelectionIndex + 1]);
+							SetSelectedItem(OptionsSource[SelectionIndex + 1]);
 						}
 					}
 					return FReply::Handled();
@@ -487,6 +556,7 @@ private:
 		{
 			return SNew(SComboRow<OptionType>, OwnerTable)
 				.Style(ItemStyle)
+				.Padding(MenuRowPadding)
 				[
 					OnGenerateWidget.Execute(InItem)
 				];
@@ -518,11 +588,12 @@ private:
 			}
 
 			// Set focus back to ComboBox for users focusing the ListView that just closed
-			TSharedRef<SWidget> ThisRef = AsShared();
-			FSlateApplication::Get().ForEachUser([&ThisRef](FSlateUser& User) {
-				if (User.HasFocusedDescendants(ThisRef))
+			FSlateApplication::Get().ForEachUser([this](FSlateUser& User) 
+			{
+				TSharedRef<SWidget> ThisRef = this->AsShared();
+				if (User.IsWidgetInFocusPath(this->ComboListView))
 				{
-					User.SetFocus(ThisRef, EFocusCause::SetDirectly);
+					User.SetFocus(ThisRef);
 				}
 			});
 
@@ -569,6 +640,23 @@ private:
 		return SComboButton::OnButtonClicked();
 	}
 
+	FReply OnKeyDownHandler(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)
+	{
+		if (InKeyEvent.GetKey() == EKeys::Enter)
+		{
+			// Select the first selected item on hitting enter
+			TArray<OptionType> SelectedItems = ComboListView->GetSelectedItems();
+			if (SelectedItems.Num() > 0)
+			{
+				OnSelectionChanged_Internal(SelectedItems[0], ESelectInfo::OnKeyPress);
+				return FReply::Handled();
+			}
+		}
+
+		return FReply::Unhandled();
+	}
+
+
 	/** Play the pressed sound */
 	void PlayPressedSound() const
 	{
@@ -590,6 +678,12 @@ private:
 	/** The item style to use. */
 	const FTableRowStyle* ItemStyle;
 
+	/** The combo box style to use. */
+	const FComboBoxStyle* ComboBoxStyle;
+	
+	/** The padding around each menu row */
+	FMargin MenuRowPadding;
+
 private:
 	/** Delegate that is invoked when the selected item in the combo box changes */
 	FOnSelectionChanged OnSelectionChanged;
@@ -609,8 +703,6 @@ private:
 	// When true, navigation away from the widget is prevented until a new value has been accepted or canceled. 
 	bool bControllerInputCaptured;
 
-		
-
-	const TArray< OptionType >* OptionsSource;
+	TSharedPtr<SBox> ComboBoxMenuContent;
 };
 

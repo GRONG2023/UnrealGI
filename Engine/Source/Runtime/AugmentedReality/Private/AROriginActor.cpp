@@ -4,6 +4,8 @@
 #include "EngineUtils.h"
 #include "Engine/Engine.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AROriginActor)
+
 AAROriginActor::AAROriginActor(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
@@ -31,7 +33,7 @@ AAROriginActor* AAROriginActor::GetOriginActor()
 		AAROriginActor* FoundActor = nullptr;
 		for (TActorIterator<AAROriginActor> Iter(GameWorld); Iter; ++Iter)
 		{
-			if (!(*Iter)->IsPendingKill())
+			if (IsValid(*Iter))
 			{
 				FoundActor = *Iter;
 				break;
@@ -46,3 +48,4 @@ AAROriginActor* AAROriginActor::GetOriginActor()
 	}
 	return nullptr;
 }
+

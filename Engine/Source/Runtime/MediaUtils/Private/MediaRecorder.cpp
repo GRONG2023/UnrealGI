@@ -115,27 +115,6 @@ namespace MediaRecorderHelpers
 
 		return MoveTemp(PixelData);
 	};
-
-	TUniquePtr<TImagePixelData<FColor>> ConvertSampleInterpretedAsFloat16ColorToFColor(TSharedPtr<IMediaTextureSample, ESPMode::ThreadSafe> InSample, const FIntPoint InSize, int32 InNumChannels)
-	{
-		const int64 NumberOfTexel = InSize.Y * InSize.X;
-		TUniquePtr<TImagePixelData<FColor>> PixelData = MakeUnique<TImagePixelData<FColor>>(InSize);
-		PixelData->Pixels.Reset(NumberOfTexel);
-
-		const FFloat16Color* Buffer = reinterpret_cast<const FFloat16Color*>(InSample->GetBuffer());
-		for (int64 i = 0 ; i < NumberOfTexel; i++)
-		{
-			FColor Output;
-			Output.R = (uint8)(FMath::Clamp<float>(Buffer[0].R, 0.0f, 1.0f) * 255);
-			Output.G = (uint8)(FMath::Clamp<float>(Buffer[0].G, 0.0f, 1.0f) * 255);
-			Output.B = (uint8)(FMath::Clamp<float>(Buffer[0].B, 0.0f, 1.0f) * 255);
-			Output.A = (uint8)(FMath::Clamp<float>(Buffer[0].A, 0.0f, 1.0f) * 255);
-			PixelData->Pixels.Add(Output);
-			Buffer++;
-		}
-
-		return MoveTemp(PixelData);
-	}
 }
 
 /* FMediaRecorder implementation
@@ -252,9 +231,6 @@ void FMediaRecorder::TickRecording()
 				continue;
 			}
 
-			bool bIsGammaCorrectionPreProcessingEnabled = (TargetImageFormat == EImageFormat::EXR && Sample->IsOutputSrgb());
-			bool IsFloatFormatConversionNeeded = ((Sample->GetFormat() == EMediaTextureSampleFormat::FloatRGBA) && (TargetImageFormat != EImageFormat::EXR));
-
 			TUniquePtr<FImageWriteTask> ImageTask = MakeUnique<FImageWriteTask>();
 
 			// Set PixelData
@@ -262,32 +238,25 @@ void FMediaRecorder::TickRecording()
 				const FIntPoint Size = Sample->GetDim();
 				EImagePixelType PixelType = EImagePixelType::Color;
 				ERGBFormat PixelLayout = ERGBFormat::BGRA;
-				int32 BitDepth = 8;
-				int32 NumChannels = 4;
+				uint8 BitDepth = 8;
+				uint8 NumChannels = 4;
 
 				if (Sample->GetFormat() == EMediaTextureSampleFormat::FloatRGBA)
 				{
 					PixelType = EImagePixelType::Float16;
-					PixelLayout = ERGBFormat::RGBA;
+					PixelLayout = ERGBFormat::RGBAF;
 					BitDepth = 16;
 				}
 
 				// Should we move the color buffer into a raw image data container.
-				bool bUseFMediaImagePixelData = bSetAlpha || (Sample->GetStride() != Size.X * NumChannels) || bIsGammaCorrectionPreProcessingEnabled || IsFloatFormatConversionNeeded;
+				bool bUseFMediaImagePixelData = bSetAlpha || (Sample->GetStride() != Size.X * NumChannels * (BitDepth/8));
 
 				if (bUseFMediaImagePixelData)
 				{
 					const int32 NumberOfTexel = Size.Y * Size.X;
 					if (Sample->GetFormat() == EMediaTextureSampleFormat::FloatRGBA)
 					{
-						if (IsFloatFormatConversionNeeded)
-						{
-							ImageTask->PixelData = MediaRecorderHelpers::ConvertSampleInterpretedAsFloat16ColorToFColor(Sample, Size, NumChannels);
-						}
-						else
-						{
-							ImageTask->PixelData = MediaRecorderHelpers::CreatePixelData<FFloat16Color>(Sample, Size, NumChannels);
-						}
+						ImageTask->PixelData = MediaRecorderHelpers::CreatePixelData<FFloat16Color>(Sample, Size, NumChannels);
 					}
 					else
 					{
@@ -305,25 +274,14 @@ void FMediaRecorder::TickRecording()
 				{
 					check(bUseFMediaImagePixelData);
 
-					if (Sample->GetFormat() == EMediaTextureSampleFormat::FloatRGBA)
-					{
-						ImageTask->PixelPreProcessors.Add(TAsyncAlphaWrite<FFloat16Color>(1.f));
-					}
-					else if (Sample->GetFormat() == EMediaTextureSampleFormat::CharBGRA)
-					{
-						ImageTask->PixelPreProcessors.Add(TAsyncAlphaWrite<FColor>(255));
-					}
-					else
-					{
-						check(false);
-					}
+					ImageTask->AddPreProcessorToSetAlphaOpaque();
 				}
 			}
-
-			if (bIsGammaCorrectionPreProcessingEnabled)
+			
+			if (Sample->GetFormat() == EMediaTextureSampleFormat::CharBGRA)
 			{
-				const float DefaultGammaValue = 2.2f;
-				ImageTask->PixelPreProcessors.Add(TAsyncGammaCorrect<FColor>(DefaultGammaValue));
+				// IsOutputSrgb almost always true
+				ImageTask->PixelData->SetSRGB( Sample->IsOutputSrgb() );
 			}
 
 			ImageTask->Format = TargetImageFormat;

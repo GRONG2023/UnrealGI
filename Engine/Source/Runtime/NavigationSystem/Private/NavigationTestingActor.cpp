@@ -12,6 +12,9 @@
 #include "NavMesh/RecastNavMesh.h"
 #include "Components/CapsuleComponent.h"
 #include "NavigationData.h"
+#include "NavFilters/NavigationQueryFilter.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(NavigationTestingActor)
 
 void FNavTestTickHelper::Tick(float DeltaTime)
 {
@@ -52,9 +55,11 @@ ANavigationTestingActor::ANavigationTestingActor(const FObjectInitializer& Objec
 	bGatherDetailedInfo = true;
 	bDrawDistanceToWall = false;
 	ClosestWallLocation = FNavigationSystem::InvalidLocation;
+	bNavDataIsReadyInRadius = false;
 	OffsetFromCornersDistance = 0.f;
 
 	QueryingExtent = FVector(DEFAULT_NAV_QUERY_EXTENT_HORIZONTAL, DEFAULT_NAV_QUERY_EXTENT_HORIZONTAL, DEFAULT_NAV_QUERY_EXTENT_VERTICAL);
+	bRequireNavigableEndLocation = true;
 
 	CapsuleComponent = CreateDefaultSubobject<UCapsuleComponent>(TEXT("CollisionCylinder"));
 	CapsuleComponent->InitCapsuleSize(NavAgentProps.AgentRadius, NavAgentProps.AgentHeight / 2);
@@ -158,6 +163,10 @@ void ANavigationTestingActor::PostEditChangeProperty(FPropertyChangedEvent& Prop
 			{
 				ClosestWallLocation = FindClosestWallLocation();
 			}
+			else if (bDrawIfNavDataIsReadyInRadius)
+			{
+				bNavDataIsReadyInRadius = CheckIfNavDataIsReadyInRadius();
+			}
 #if WITH_EDITORONLY_DATA
 			else
 			{
@@ -246,6 +255,11 @@ void ANavigationTestingActor::PostEditMove(bool bFinished)
 		{
 			ClosestWallLocation = FindClosestWallLocation();
 		}
+
+		if (bDrawIfNavDataIsReadyInRadius)
+		{
+			bNavDataIsReadyInRadius = CheckIfNavDataIsReadyInRadius();
+		}
 	}
 }
 
@@ -302,14 +316,13 @@ void ANavigationTestingActor::UpdateNavData()
 void ANavigationTestingActor::UpdatePathfinding()
 {
 	PathfindingTime = 0.0f;
-	PathCost = 0.0f;
+	PathCost = 0.;
 	bPathSearchOutOfNodes = false;
 	bPathIsPartial = false;
 	bPathExist = false;
 	LastPath.Reset();
-	ShowStepIndex = -1;
 	PathfindingSteps = 0;
-#if WITH_EDITORONLY_DATA
+#if WITH_RECAST && WITH_EDITORONLY_DATA
 	DebugSteps.Reset();
 #endif
 	UpdateNavData();
@@ -377,15 +390,38 @@ FVector ANavigationTestingActor::FindClosestWallLocation() const
 	}
 #endif // WITH_EDITORONLY_DATA
 
+#if WITH_RECAST
 	ARecastNavMesh* AsRecastNavMesh = Cast<ARecastNavMesh>(MyNavData);
 	if (AsRecastNavMesh)
 	{
 		FVector TmpOutLocation = FNavigationSystem::InvalidLocation;
-		const float Distance = AsRecastNavMesh->FindDistanceToWall(GetActorLocation(), UNavigationQueryFilter::GetQueryFilter(*MyNavData, this, FilterClass), FLT_MAX, &TmpOutLocation);
+		AsRecastNavMesh->FindDistanceToWall(GetActorLocation(), UNavigationQueryFilter::GetQueryFilter(*MyNavData, this, FilterClass), FLT_MAX, &TmpOutLocation);
 		return TmpOutLocation;
 	}
+#endif // WITH_RECAST
 	
 	return FNavigationSystem::InvalidLocation;
+}
+
+bool ANavigationTestingActor::CheckIfNavDataIsReadyInRadius()
+{
+#if WITH_EDITORONLY_DATA
+	if (EdRenderComp)
+	{
+		EdRenderComp->MarkRenderStateDirty();
+	}
+#endif // WITH_EDITORONLY_DATA
+	
+#if WITH_RECAST
+	UpdateNavData();
+	const ARecastNavMesh* RecastNavMesh = Cast<ARecastNavMesh>(MyNavData);
+	if (RecastNavMesh)
+	{
+		return RecastNavMesh->HasCompleteDataInRadius(GetActorLocation(), RadiusUsedToValidateNavData);
+	}
+#endif // WITH_RECAST
+	
+	return false;
 }
 
 void ANavigationTestingActor::SearchPathTo(ANavigationTestingActor* Goal)
@@ -428,19 +464,19 @@ void ANavigationTestingActor::SearchPathTo(ANavigationTestingActor* Goal)
 	//Apply cost limit factor
 	FSharedConstNavQueryFilter NavQueryFilter = Query.QueryFilter ? Query.QueryFilter : NavData->GetDefaultQueryFilter();
 	const float HeuristicScale = NavQueryFilter->GetHeuristicScale();
-	Query.CostLimit = Query.ComputeCostLimitFromHeuristic(Query.StartLocation, Query.EndLocation, HeuristicScale, CostLimitFactor, MinimumCostLimit);
+	Query.CostLimit = FPathFindingQuery::ComputeCostLimitFromHeuristic(Query.StartLocation, Query.EndLocation, HeuristicScale, CostLimitFactor, MinimumCostLimit);
 
 	EPathFindingMode::Type Mode = bUseHierarchicalPathfinding ? EPathFindingMode::Hierarchical : EPathFindingMode::Regular;
 	FPathFindingResult Result = NavSys->FindPathSync(NavAgentProps, Query, Mode);
 
 	const double EndTime = FPlatformTime::Seconds();
-	const float Duration = (EndTime - StartTime);
-	PathfindingTime = Duration * 1000000.0f;			// in micro seconds [us]
+	const double Duration = (EndTime - StartTime);
+	PathfindingTime = static_cast<float>(Duration * 1000000.);			// in micro seconds [us]
 	bPathIsPartial = Result.IsPartial();
 	bPathExist = Result.IsSuccessful();
 	bPathSearchOutOfNodes = bPathExist ? Result.Path->DidSearchReachedLimit() : false;
 	LastPath = Result.Path;
-	PathCost = bPathExist ? Result.Path->GetCost() : 0.0f;
+	PathCost = bPathExist ? Result.Path->GetCost() : 0.;
 
 	if (bPathExist)
 	{
@@ -493,9 +529,12 @@ FPathFindingQuery ANavigationTestingActor::BuildPathFindingQuery(const ANavigati
 	check(Goal);
 	if (MyNavData)
 	{
-		return FPathFindingQuery(this, *MyNavData, GetNavAgentLocation(), Goal->GetNavAgentLocation(), UNavigationQueryFilter::GetQueryFilter(*MyNavData, this, FilterClass));
+		constexpr float DefaultCostLimit = FLT_MAX;
+		const FNavPathSharedPtr NoSharedPath = nullptr;
+		return FPathFindingQuery(this, *MyNavData, GetNavAgentLocation(), Goal->GetNavAgentLocation(), UNavigationQueryFilter::GetQueryFilter(*MyNavData, this, FilterClass), NoSharedPath, DefaultCostLimit, bRequireNavigableEndLocation);
 	}
 	
 	return FPathFindingQuery();
 }
+
 

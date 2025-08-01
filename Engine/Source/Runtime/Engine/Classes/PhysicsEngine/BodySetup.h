@@ -15,6 +15,9 @@
 #include "HAL/ThreadSafeBool.h"
 #include "Async/TaskGraphInterfaces.h"
 #include "BodySetupCore.h"
+#if WITH_EDITOR
+#include "Factories.h"
+#endif
 #include "BodySetup.generated.h"
 
 class ITargetPlatform;
@@ -26,23 +29,6 @@ enum class EPhysXMeshCookFlags : uint8;
 
 DECLARE_DELEGATE_OneParam(FOnAsyncPhysicsCookFinished, bool);
 
-#if PHYSICS_INTERFACE_PHYSX
-namespace physx
-{
-	class PxTriangleMesh;
-	class PxRigidActor;
-	class PxTransform;
-	class PxSphereGeometry;
-	class PxBoxGeometry;
-	class PxCapsuleGeometry;
-	class PxConvexMeshGeometry;
-	class PxConvexMesh;
-	class PxTriangleMesh;
-	class PxTriangleMeshGeometry;
-}
-#endif
-
-#if WITH_CHAOS
 namespace Chaos
 {
 	class FImplicitObject;
@@ -53,9 +39,7 @@ namespace Chaos
 template<typename T, int d>
 class FChaosDerivedDataReader;
 
-#endif
-
-DECLARE_CYCLE_STAT_EXTERN(TEXT("PhysX Cooking"), STAT_PhysXCooking, STATGROUP_Physics, );
+DECLARE_CYCLE_STAT_EXTERN(TEXT("BodySetup Cooking"), STAT_PhysXCooking, STATGROUP_Physics, );
 
 
 /** UV information for BodySetup, only created if UPhysicsSettings::bSupportUVFromHitResults */
@@ -84,20 +68,18 @@ struct FBodySetupUVInfo
 };
 
 /** Helper struct to indicate which geometry needs to be cooked */
-struct ENGINE_API FCookBodySetupInfo
+struct FCookBodySetupInfo
 {
-	FCookBodySetupInfo();
+	ENGINE_API FCookBodySetupInfo();
 
 	/** Trimesh data for cooking */
 	FTriMeshCollisionData TriangleMeshDesc;
 
-#if WITH_PHYSX
 	/** Trimesh cook flags */
 	EPhysXMeshCookFlags TriMeshCookFlags;
 
 	/** Convex cook flags */
 	EPhysXMeshCookFlags ConvexCookFlags;
-#endif // WITH_PHYSX
 
 	/** Vertices of NonMirroredConvex hulls */
 	TArray<TArray<FVector>> NonMirroredConvexVertices;
@@ -148,6 +130,7 @@ class UBodySetup : public UBodySetupCore
 
 	/** Needs implementation in BodySetup.cpp to compile UniquePtr for forward declared class */
 	UBodySetup(FVTableHelper& Helper);
+
 	virtual ~UBodySetup();
 
 	/** Simplified collision representation of this  */
@@ -214,11 +197,16 @@ class UBodySetup : public UBodySetupCore
 	uint8 bHasCookedCollisionData:1;
 
 	/** Indicates that we will never use convex or trimesh shapes. This is an optimization to skip checking for binary data. */
+	/** 
+	 * TODO Chaos this is to opt out of CreatePhysicsMeshes for certain meshes
+	 * Better long term mesh is to not call CreatePhysicsMeshes until it is known there is a mesh instance that needs it.
+	 */
+	UPROPERTY(EditAnywhere, Category = Collision)
 	uint8 bNeverNeedsCookedCollisionData:1;
 	
 	/** Physical material to use for simple collision on this body. Encodes information about density, friction etc. */
 	UPROPERTY(EditAnywhere, Category=Physics, meta=(DisplayName="Simple Collision Physical Material"))
-	class UPhysicalMaterial* PhysMaterial;
+	TObjectPtr<class UPhysicalMaterial> PhysMaterial;
 
 	/** Custom walkable slope setting for this body. */
 	UPROPERTY(EditAnywhere, AdvancedDisplay, Category=Physics)
@@ -234,24 +222,9 @@ class UBodySetup : public UBodySetupCore
 
 	/** GUID used to uniquely identify this setup so it can be found in the DDC */
 	FGuid BodySetupGuid;
-
-private:
-#if WITH_EDITOR
-	/** Cooked physics data with runtime only optimizations. This allows us to remove editor only data (like face index remap) assuming the project doesn't use it at runtime. At runtime we load this into CookedFormatData */
-	FFormatContainer CookedFormatDataRuntimeOnlyOptimization;
-#endif
-
-#if WITH_PHYSX
-	/** Get cook flags for 'runtime only' cooked physics data */
-	EPhysXMeshCookFlags GetRuntimeOnlyCookOptimizationFlags() const;
-#endif 
-
-public:
-
-#if WITH_CHAOS
-	//FBodySetupTriMeshes* TriMeshWrapper;
-	TArray<TSharedPtr<Chaos::FTriangleMeshImplicitObject, ESPMode::ThreadSafe>> ChaosTriMeshes;
-#endif
+	
+	/** list of chaos trimesh objects */
+	TArray<Chaos::FTriangleMeshImplicitObjectPtr> TriMeshGeometries;
 
 	/** Additional UV info, if available. Used for determining UV for a line trace impact. */
 	FBodySetupUVInfo UVInfo;
@@ -270,13 +243,15 @@ public:
 	UPROPERTY()
 	FVector BuildScale3D;
 
-#if PHYSICS_INTERFACE_PHYSX
 	/** References the current async cook helper. Used to be able to abort a cook task */
-	using FAsyncCookHelper = FPhysXCookHelper;
-#elif WITH_CHAOS
 	using FAsyncCookHelper = Chaos::FCookHelper;
-#endif
 	FAsyncCookHelper* CurrentCookHelper;
+
+	// Will contain deserialized data from the serialization function that can be used at PostLoad time.
+	TUniquePtr<FChaosDerivedDataReader<float, 3>> ChaosDerivedDataReader;
+	
+	UE_DEPRECATED(5.4, "Please use TriMeshGeometries instead")
+    TArray<TSharedPtr<Chaos::FTriangleMeshImplicitObject, ESPMode::ThreadSafe>> ChaosTriMeshes;
 
 public:
 	//~ Begin UObject Interface.
@@ -288,7 +263,7 @@ public:
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
 	virtual void PostEditUndo() override;
-	virtual EDataValidationResult IsDataValid(TArray<FText>& ValidationErrors) override;
+	virtual EDataValidationResult IsDataValid(class FDataValidationContext& Context) const override;
 #endif // WITH_EDITOR
 	virtual void GetResourceSizeEx(FResourceSizeEx& CumulativeResourceSize) override;
 	//~ End UObject Interface.
@@ -301,6 +276,7 @@ public:
 	/** Add collision shapes from another body setup to this one */
 	ENGINE_API void AddCollisionFrom(class UBodySetup* FromSetup);
 	ENGINE_API void AddCollisionFrom(const FKAggregateGeom& FromAggGeom);
+	ENGINE_API bool AddCollisionElemFrom(const FKAggregateGeom& FromAggGeom, const EAggCollisionShape::Type ShapeType, const int32 ElemIndex);
 	
 	/** Create Physics meshes (ConvexMeshes, TriMesh & TriMeshNegX) from cooked data */
 	/** Release Physics meshes (ConvexMeshes, TriMesh & TriMeshNegX). Must be called before the BodySetup is destroyed */
@@ -315,26 +291,19 @@ public:
 	ENGINE_API void AbortPhysicsMeshAsyncCreation();
 
 private:
-#if WITH_PHYSX && PHYSICS_INTERFACE_PHYSX
-	bool ProcessFormatData_PhysX(FByteBulkData* FormatData);
-	bool RuntimeCookPhysics_PhysX();
+	FByteBulkData* GetCookedFormatData();
 
 	// #TODO MRMesh for some reason needs to be able to call this - that case needs fixed to correctly use the create meshes flow
 	friend class UMRMeshComponent;
-	/** Finish creating the physics meshes and update the body setup data with cooked data */
-	ENGINE_API void FinishCreatingPhysicsMeshes_PhysX(const TArray<physx::PxConvexMesh*>& ConvexMeshes, const TArray<physx::PxConvexMesh*>& ConvexMeshesNegX, const TArray<physx::PxTriangleMesh*>& TriMeshes);
-#elif WITH_CHAOS
-	// TODO: ProcessFormatData_Chaos is calling ProcessFormatData_Chaos directly - it's better if CreatePhysicsMeshes can be used but that code path requires WITH_EDITOR
-	friend class UMRMeshComponent;
 	bool ProcessFormatData_Chaos(FByteBulkData* FormatData);
+	bool ProcessFormatData_Chaos(FChaosDerivedDataReader<float, 3>& Reader);
 	bool RuntimeCookPhysics_Chaos();
 	void FinishCreatingPhysicsMeshes_Chaos(FChaosDerivedDataReader<float, 3>& InReader);
 	void FinishCreatingPhysicsMeshes_Chaos(Chaos::FCookHelper& InHelper);
-	void FinishCreatingPhysicsMeshes_Chaos(TArray<TSharedPtr<Chaos::FConvex, ESPMode::ThreadSafe>>& InConvexImplicits, 
-										   TArray<TSharedPtr<Chaos::FTriangleMeshImplicitObject, ESPMode::ThreadSafe>>& InTrimeshImplicits,
+	void FinishCreatingPhysicsMeshes_Chaos(TArray<Chaos::FConvexPtr>& InConvexImplicits, 
+										   TArray<Chaos::FTriangleMeshImplicitObjectPtr>& InTrimeshImplicits,
 										   FBodySetupUVInfo& InUvInfo,
 										   TArray<int32>& InFaceRemap);
-#endif
 
 	/** 
 	 * Finalize game thread data before calling back user's delegate 
@@ -347,10 +316,9 @@ private:
 	* Given a format name returns its cooked data.
 	*
 	* @param Format Physics format name.
-	* @param bRuntimeOnlyOptimizedVersion whether we want the data that has runtime only optimizations. At runtime this flag is ignored and we use the runtime only optimized data regardless.
 	* @return Cooked data or NULL of the data was not found.
 	*/
-	FByteBulkData* GetCookedData(FName Format, bool bRuntimeOnlyOptimizedVersion = false);
+	FByteBulkData* GetCookedData(FName Format);
 
 public:
 
@@ -362,7 +330,11 @@ public:
 	void GetGeometryDDCKey(FString& OutString) const;
 
 	/** Returns the volume of this element */
+	UE_DEPRECATED(5.1, "Use GetScaledVolume which uses the same scaling technique as the generated collision geometry")
 	ENGINE_API virtual float GetVolume(const FVector& Scale) const;
+
+	/** Returns the volume of this element givent the scale */
+	ENGINE_API virtual FVector::FReal GetScaledVolume(const FVector& Scale) const;
 
 	/** Release Physics meshes (ConvexMeshes, TriMesh & TriMeshNegX) */
 	ENGINE_API void ClearPhysicsMeshes();
@@ -408,11 +380,12 @@ public:
 	 * Finds the shortest distance between the body setup and a world position. Input and output are given in world space
 	 * @param	WorldPosition	The point we are trying to get close to
 	 * @param	BodyToWorldTM	The transform to convert BodySetup into world space
+	 * @param	bUseConvexShapes When true also check the convex shapes if any (false by default)
 	 * @return					The distance between WorldPosition and the body setup. 0 indicates WorldPosition is inside one of the shapes.
 	 *
-	 * NOTE: This function ignores convex and trimesh data
+	 * NOTE: This function ignores trimesh data
 	 */
-	ENGINE_API float GetShortestDistanceToPoint(const FVector& WorldPosition, const FTransform& BodyToWorldTM) const;
+	ENGINE_API float GetShortestDistanceToPoint(const FVector& WorldPosition, const FTransform& BodyToWorldTM, bool bUseConvexShapes = false) const;
 
 	/** 
 	 * Finds the closest point in the body setup. Input and outputs are given in world space.
@@ -420,11 +393,12 @@ public:
 	 * @param	BodyToWorldTM			The transform to convert BodySetup into world space
 	 * @param	ClosestWorldPosition	The closest point on the body setup to WorldPosition
 	 * @param	FeatureNormal			The normal of the feature associated with ClosestWorldPosition
+	 * @param	bUseConvexShapes When true also check the convex shapes if any (false by default)
 	 * @return							The distance between WorldPosition and the body setup. 0 indicates WorldPosition is inside one of the shapes.
 	 *
-	 * NOTE: This function ignores convex and trimesh data
+	 * NOTE: This function ignores trimesh data
 	 */
-	ENGINE_API float GetClosestPointAndNormal(const FVector& WorldPosition, const FTransform& BodyToWorldTM, FVector& ClosestWorldPosition, FVector& FeatureNormal) const;
+	ENGINE_API float GetClosestPointAndNormal(const FVector& WorldPosition, const FTransform& BodyToWorldTM, FVector& ClosestWorldPosition, FVector& FeatureNormal, bool bUseConvexShapes = false) const;
 
 	/**
 	* Generates the information needed for cooking geometry.
@@ -442,6 +416,7 @@ public:
 
 #if WITH_EDITOR
 	ENGINE_API virtual void BeginCacheForCookedPlatformData(  const ITargetPlatform* TargetPlatform ) override;
+	ENGINE_API virtual bool IsCachedCookedPlatformDataLoaded(  const ITargetPlatform* TargetPlatform ) override;
 	ENGINE_API virtual void ClearCachedCookedPlatformData(  const ITargetPlatform* TargetPlatform ) override;
 
 	/*
@@ -469,4 +444,17 @@ public:
 
 };
 
+#if WITH_EDITOR
 
+class FBodySetupObjectTextFactory : public FCustomizableTextObjectFactory
+{
+public:
+	FBodySetupObjectTextFactory() : FCustomizableTextObjectFactory(GWarn) { }
+	ENGINE_API virtual bool CanCreateClass(UClass* InObjectClass, bool& bOmitSubObjs) const override;
+	ENGINE_API virtual void ProcessConstructedObject(UObject* NewObject) override;
+
+public:
+	TArray<UBodySetup*> NewBodySetups;
+};
+
+#endif // WITH_EDITOR

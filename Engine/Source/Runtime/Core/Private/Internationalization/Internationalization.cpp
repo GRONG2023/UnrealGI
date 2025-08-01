@@ -4,6 +4,7 @@
 #include "Internationalization/TextLocalizationResource.h"
 #include "GenericPlatform/GenericPlatformFile.h"
 #include "HAL/FileManager.h"
+#include "HAL/LowLevelMemTracker.h"
 #include "Misc/LazySingleton.h"
 #include "Misc/Paths.h"
 #include "Internationalization/Culture.h"
@@ -13,16 +14,14 @@
 #if UE_ENABLE_ICU
 #include "Internationalization/ICUInternationalization.h"
 #else
-#include "LegacyInternationalization.h"
+#include "Internationalization/LegacyInternationalization.h"
 #endif
 
 #define LOCTEXT_NAMESPACE "Internationalization"
 
 FInternationalization& FInternationalization::Get()
 {
-	FInternationalization& Singleton = TLazySingleton<FInternationalization>::Get();
-	Singleton.Initialize();
-	return Singleton;
+	return TLazySingleton<FInternationalization>::Get();
 }
 
 bool FInternationalization::IsAvailable()
@@ -34,7 +33,6 @@ bool FInternationalization::IsAvailable()
 void FInternationalization::TearDown()
 {
 	TLazySingleton<FInternationalization>::TearDown();
-	FTextCache::TearDown();
 }
 
 FText FInternationalization::ForUseOnlyByLocMacroAndGraphNodeTextLiterals_CreateText(const TCHAR* InTextLiteral, const TCHAR* InNamespace, const TCHAR* InKey)
@@ -417,6 +415,7 @@ FString& FInternationalization::Leetify(FString& SourceString)
 
 void FInternationalization::LoadAllCultureData()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FInternationalization::LoadAllCultureData);
 	Implementation->LoadAllCultureData();
 }
 
@@ -515,6 +514,7 @@ TArray<FCultureRef> FInternationalization::GetAvailableCultures(const TArray<FSt
 FInternationalization::FInternationalization()
 	:	Implementation(this)
 {
+	Initialize();
 }
 
 FInternationalization::~FInternationalization()

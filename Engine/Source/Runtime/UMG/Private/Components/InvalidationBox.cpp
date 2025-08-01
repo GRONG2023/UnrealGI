@@ -5,6 +5,8 @@
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SInvalidationPanel.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(InvalidationBox)
+
 #define LOCTEXT_NAMESPACE "UMG"
 
 /////////////////////////////////////////////////////
@@ -13,8 +15,10 @@
 UInvalidationBox::UInvalidationBox(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	bCanCache = true;
-	Visibility = ESlateVisibility::SelfHitTestInvisible;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	SetVisibilityInternal(ESlateVisibility::SelfHitTestInvisible);
 }
 
 void UInvalidationBox::ReleaseSlateResources(bool bReleaseChildren)
@@ -32,9 +36,9 @@ TSharedRef<SWidget> UInvalidationBox::RebuildWidget()
 		.DebugName(GetPathName())
 #endif
 		;
-
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	MyInvalidationPanel->SetCanCache(IsDesignTime() ? false : bCanCache);
-
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	if ( GetChildrenCount() > 0 )
 	{
 		MyInvalidationPanel->SetContent(GetContentSlot()->Content ? GetContentSlot()->Content->TakeWidget() : SNullWidget::NullWidget);
@@ -65,6 +69,7 @@ void UInvalidationBox::InvalidateCache()
 {
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 bool UInvalidationBox::GetCanCache() const
 {
 	if ( MyInvalidationPanel.IsValid() )
@@ -83,6 +88,7 @@ void UInvalidationBox::SetCanCache(bool CanCache)
 		return MyInvalidationPanel->SetCanCache(bCanCache);
 	}
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 #if WITH_EDITOR
 
@@ -96,3 +102,4 @@ const FText UInvalidationBox::GetPaletteCategory()
 /////////////////////////////////////////////////////
 
 #undef LOCTEXT_NAMESPACE
+

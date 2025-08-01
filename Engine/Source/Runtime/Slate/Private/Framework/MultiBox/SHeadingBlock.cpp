@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Framework/MultiBox/SHeadingBlock.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Layout/SSeparator.h"
 
 
 /**
@@ -8,7 +10,7 @@
  *
  * @param	InHeadingText	Heading text
  */
-FHeadingBlock::FHeadingBlock( const FName& InExtensionHook, const TAttribute< FText >& InHeadingText )
+FHeadingBlock::FHeadingBlock( const FName& InExtensionHook, const FText& InHeadingText )
 	: FMultiBlock( NULL, NULL, InExtensionHook, EMultiBlockType::Heading, /* bInIsPartOfHeading=*/ true )
 	, HeadingText( InHeadingText )
 {
@@ -49,10 +51,27 @@ void SHeadingBlock::BuildMultiBlockWidget(const ISlateStyle* StyleSet, const FNa
 	OwnerMultiBoxWidget.Pin()->AddElement(this->AsWidget(), FText::GetEmpty(), MultiBlock->GetSearchable());
 
 	ChildSlot
-		.Padding( 2.0f )
+	.Padding(StyleSet->GetMargin(StyleName, ".Heading.Padding"))
+	[
+		SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot()
+		.VAlign(VAlign_Center)
+		.AutoWidth()
 		[
 			SNew( STextBlock )
-				.Text( HeadingBlock->HeadingText )
-				.TextStyle( StyleSet, ISlateStyle::Join( StyleName, ".Heading" ) )
-		];
+			.Text( HeadingBlock->HeadingText.ToUpper() )
+			.TextStyle( StyleSet, ISlateStyle::Join( StyleName, ".Heading" ) )
+		]
+
+		+ SHorizontalBox::Slot()
+		.Padding(FMargin(14.f, 0.f, 0.f, 0.f))
+		.VAlign(VAlign_Center)
+		.HAlign(HAlign_Fill)
+		[
+			SNew(SSeparator)
+			.Orientation(Orient_Horizontal)
+			.Thickness(1.0f)
+			.SeparatorImage(StyleSet->GetBrush(StyleName, ".Separator") )
+		]
+	];
 }

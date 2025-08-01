@@ -6,8 +6,6 @@ public class Kismet : ModuleRules
 {
 	public Kismet(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateIncludePaths.Add("Editor/Kismet/Private");
-
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] { 
 				"AssetRegistry", 
@@ -15,7 +13,6 @@ public class Kismet : ModuleRules
                 "BlueprintRuntime",
                 "ClassViewer",
 				"Analytics",
-                "DerivedDataCache",
                 "LevelEditor",
 				"GameProjectGeneration",
 				"SourceCodeAccess",
@@ -24,40 +21,45 @@ public class Kismet : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
-                "AppFramework",
+				"AppFramework",
 				"Core",
 				"CoreUObject",
+				"FieldNotification",
 				"ApplicationCore",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
+				"EditorStyle",
 				"EditorWidgets",
 				"Engine",
 				"Json",
 				"Merge",
 				"MessageLog",
+				"EditorFramework",
 				"UnrealEd",
 				"GraphEditor",
 				"KismetWidgets",
 				"KismetCompiler",
 				"BlueprintGraph",
+				"BlueprintEditorLibrary",
 				"AnimGraph",
 				"PropertyEditor",
 				"SourceControl",
-                "SharedSettingsWidgets",
-                "InputCore",
+				"SharedSettingsWidgets",
+				"InputCore",
 				"EngineSettings",
-                "Projects",
-                "JsonUtilities",
-                "DerivedDataCache",
+				"Projects",
+				"JsonUtilities",
 				"DesktopPlatform",
 				"HotReload",
-                "BlueprintNativeCodeGen",
-                "UMGEditor",
-                "UMG", // for SBlueprintDiff
-                "WorkspaceMenuStructure",
+				"UMGEditor",
+				"UMG", // for SBlueprintDiff
+				"WorkspaceMenuStructure",
+				"DeveloperSettings",
 				"ToolMenus",
-            }
+				"SubobjectEditor",
+				"SubobjectDataInterface",
+				"ToolWidgets",
+			}
 			);
 
         DynamicallyLoadedModuleNames.AddRange(
@@ -66,7 +68,6 @@ public class Kismet : ModuleRules
                 "ClassViewer",
 				"Documentation",
 				"GameProjectGeneration",
-                "BlueprintCompilerCppBackend",
 			}
             );
 
@@ -74,7 +75,6 @@ public class Kismet : ModuleRules
 		CircularlyReferencedDependentModules.AddRange(
 			new string[] {
 				"BlueprintGraph",
-				"BlueprintNativeCodeGen",
 				"UMGEditor",
 				"Merge"
             }

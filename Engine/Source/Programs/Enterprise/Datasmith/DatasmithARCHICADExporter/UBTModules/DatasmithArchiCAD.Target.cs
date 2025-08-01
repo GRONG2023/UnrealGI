@@ -10,6 +10,7 @@ public class DatasmithArchiCADTarget : TargetRules
 		: base(Target)
 	{
 		Type = TargetType.Program;
+		IncludeOrderVersion = EngineIncludeOrderVersion.Latest;
 		SolutionDirectory = "Programs/Datasmith";
 		bBuildInSolutionByDefault = false;
 
@@ -20,7 +21,6 @@ public class DatasmithArchiCADTarget : TargetRules
 		LinkType = TargetLinkType.Monolithic;
 
 		bBuildDeveloperTools = false;
-		bUseMallocProfiler = false;
 		bBuildWithEditorOnlyData = true;
 		bCompileAgainstEngine = false;
 		bCompileAgainstCoreUObject = true;

@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Fonts/SlateFontInfo.h"
+#include "Framework/Commands/Commands.h"
 #include "TraceServices/Model/TimingProfiler.h"
 
 // Insights
@@ -16,7 +16,28 @@ class FTimingEventSearchParameters;
 class FGpuTimingTrack;
 class FCpuTimingTrack;
 class STimingView;
-struct FSlateBrush;
+
+namespace Insights
+{
+	class FFilterConfigurator;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+class FThreadTimingViewCommands : public TCommands<FThreadTimingViewCommands>
+{
+public:
+	FThreadTimingViewCommands();
+	virtual ~FThreadTimingViewCommands();
+	virtual void RegisterCommands() override;
+
+public:
+	/** Toggles visibility for GPU thread track. */
+	TSharedPtr<FUICommandInfo> ShowHideAllGpuTracks;
+
+	/** Toggles visibility for all CPU thread tracks at once. */
+	TSharedPtr<FUICommandInfo> ShowHideAllCpuTracks;
+};
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -34,27 +55,32 @@ private:
 	};
 
 public:
-	explicit FThreadTimingSharedState(STimingView* InTimingView) : TimingView(InTimingView) {}
+	explicit FThreadTimingSharedState(STimingView* InTimingView);
 	virtual ~FThreadTimingSharedState() = default;
 
 	TSharedPtr<FGpuTimingTrack> GetGpuTrack() { return GpuTrack; }
 	TSharedPtr<FGpuTimingTrack> GetGpu2Track() { return Gpu2Track; }
 	TSharedPtr<FCpuTimingTrack> GetCpuTrack(uint32 InThreadId);
+	const TMap<uint32, TSharedPtr<FCpuTimingTrack>> GetAllCpuTracks() { return CpuTracks; }
 
 	bool IsGpuTrackVisible() const;
 	bool IsCpuTrackVisible(uint32 InThreadId) const;
 
 	void GetVisibleCpuThreads(TSet<uint32>& OutSet) const;
+	void GetVisibleTimelineIndexes(TSet<uint32>& OutSet) const;
 
 	//////////////////////////////////////////////////
 	// ITimingViewExtender interface
 
 	virtual void OnBeginSession(Insights::ITimingViewSession& InSession) override;
 	virtual void OnEndSession(Insights::ITimingViewSession& InSession) override;
-	virtual void Tick(Insights::ITimingViewSession& InSession, const Trace::IAnalysisSession& InAnalysisSession) override;
-	virtual void ExtendFilterMenu(Insights::ITimingViewSession& InSession, FMenuBuilder& InMenuBuilder) override;
+	virtual void Tick(Insights::ITimingViewSession& InSession, const TraceServices::IAnalysisSession& InAnalysisSession) override;
+	virtual void ExtendGpuTracksFilterMenu(Insights::ITimingViewSession& InSession, FMenuBuilder& InMenuBuilder) override;
+	virtual void ExtendCpuTracksFilterMenu(Insights::ITimingViewSession& InSession, FMenuBuilder& InMenuBuilder) override;
 
 	//////////////////////////////////////////////////
+
+	void BindCommands();
 
 	bool IsAllGpuTracksToggleOn() const { return bShowHideAllGpuTracks; }
 	void SetAllGpuTracksToggle(bool bOnOff);
@@ -67,6 +93,9 @@ public:
 	void ShowAllCpuTracks() { SetAllCpuTracksToggle(true); }
 	void HideAllCpuTracks() { SetAllCpuTracksToggle(false); }
 	void ShowHideAllCpuTracks() { SetAllCpuTracksToggle(!IsAllCpuTracksToggleOn()); }
+
+	TSharedPtr<const ITimingEvent> FindMaxEventInstance(uint32 TimerId, double StartTime, double EndTime);
+	TSharedPtr<const ITimingEvent> FindMinEventInstance(uint32 TimerId, double StartTime, double EndTime);
 
 private:
 	void CreateThreadGroupsMenu(FMenuBuilder& MenuBuilder);
@@ -87,7 +116,7 @@ private:
 	TMap<uint32, TSharedPtr<FCpuTimingTrack>> CpuTracks;
 
 	/** Maps thread group name to thread group info. */
-	TMap<const TCHAR*, FThreadGroup> ThreadGroups;
+	TMap<const TCHAR*, FThreadGroup, FDefaultSetAllocator, TStringPointerMapKeyFuncs_DEPRECATED<const TCHAR*, FThreadGroup>> ThreadGroups;
 
 	uint64 TimingProfilerTimelineCount;
 	uint64 LoadTimeProfilerTimelineCount;
@@ -100,7 +129,7 @@ class FThreadTimingTrack : public FTimingEventsTrack
 	INSIGHTS_DECLARE_RTTI(FThreadTimingTrack, FTimingEventsTrack)
 
 public:
-	typedef typename Trace::ITimeline<Trace::FTimingProfilerEvent>::FTimelineEventInfo TimelineEventInfo;
+	typedef typename TraceServices::ITimeline<TraceServices::FTimingProfilerEvent>::FTimelineEventInfo TimelineEventInfo;
 
 	struct FPendingEventInfo
 	{
@@ -112,14 +141,14 @@ public:
 
 	explicit FThreadTimingTrack(FThreadTimingSharedState& InSharedState, const FString& InName, const TCHAR* InGroupName, uint32 InTimelineIndex, uint32 InThreadId)
 		: FTimingEventsTrack(InName)
-		, SharedState(InSharedState)
 		, GroupName(InGroupName)
 		, TimelineIndex(InTimelineIndex)
 		, ThreadId(InThreadId)
+		, SharedState(InSharedState)
 	{
 	}
 
-	virtual ~FThreadTimingTrack() {}
+	virtual ~FThreadTimingTrack();
 
 	const TCHAR* GetGroupName() const { return GroupName; };
 
@@ -144,11 +173,19 @@ public:
 	virtual void OnClipboardCopyEvent(const ITimingEvent& InSelectedEvent) const override;
 	virtual void BuildContextMenu(FMenuBuilder& MenuBuilder) override;
 
-private:
-	void DrawSelectedEventInfo(const FThreadTrackEvent& SelectedEvent, const FTimingTrackViewport& Viewport, const FDrawContext& DrawContext, const FSlateBrush* WhiteBrush, const FSlateFontInfo& Font) const;
+	int32 GetDepthAt(double Time) const;
 
-	bool FindTimingProfilerEvent(const FThreadTrackEvent& InTimingEvent, TFunctionRef<void(double, double, uint32, const Trace::FTimingProfilerEvent&)> InFoundPredicate) const;
-	bool FindTimingProfilerEvent(const FTimingEventSearchParameters& InParameters, TFunctionRef<void(double, double, uint32, const Trace::FTimingProfilerEvent&)> InFoundPredicate) const;
+	virtual void SetFilterConfigurator(TSharedPtr<Insights::FFilterConfigurator> InFilterConfigurator) override;
+
+	TSharedPtr<const ITimingEvent> FindMaxEventInstance(uint32 TimerId, double StartTime, double EndTime) const;
+	TSharedPtr<const ITimingEvent> FindMinEventInstance(uint32 TimerId, double StartTime, double EndTime) const;
+
+protected:
+	virtual bool HasCustomFilter() const override;
+
+private:
+	bool FindTimingProfilerEvent(const FThreadTrackEvent& InTimingEvent, TFunctionRef<void(double, double, uint32, const TraceServices::FTimingProfilerEvent&)> InFoundPredicate) const;
+	bool FindTimingProfilerEvent(const FTimingEventSearchParameters& InParameters, TFunctionRef<void(double, double, uint32, const TraceServices::FTimingProfilerEvent&)> InFoundPredicate) const;
 
 	void GetParentAndRoot(const FThreadTrackEvent& TimingEvent,
 						  TSharedPtr<FThreadTrackEvent>& OutParentTimingEvent,
@@ -158,14 +195,16 @@ private:
 	static bool TimerIndexToTimerId(uint32 InTimerIndex, uint32 & OutTimerId);
 
 private:
-	FThreadTimingSharedState& SharedState;
-
 	const TCHAR* GroupName;
 	uint32 TimelineIndex;
 	uint32 ThreadId;
 
+	FThreadTimingSharedState& SharedState;
+
+	TSharedPtr<Insights::FFilterConfigurator> FilterConfigurator;
+
 	// Search cache
-	mutable TTimingEventSearchCache<Trace::FTimingProfilerEvent> SearchCache;
+	mutable TTimingEventSearchCache<TraceServices::FTimingProfilerEvent> SearchCache;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -183,6 +222,10 @@ public:
 
 class FGpuTimingTrack : public FThreadTimingTrack
 {
+public:
+	static constexpr uint32 Gpu1ThreadId = uint32('GPU1');
+	static constexpr uint32 Gpu2ThreadId = uint32('GPU2');
+
 public:
 	explicit FGpuTimingTrack(FThreadTimingSharedState& InSharedState, const FString& InName, const TCHAR* InGroupName, uint32 InTimelineIndex, uint32 InThreadId)
 		: FThreadTimingTrack(InSharedState, InName, InGroupName, InTimelineIndex, InThreadId)

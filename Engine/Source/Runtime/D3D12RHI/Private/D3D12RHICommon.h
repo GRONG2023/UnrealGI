@@ -1,29 +1,58 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 /*=============================================================================
-D3D12RHICommon.h: Common D3D12 RHI definitions for Windows.
-=============================================================================*/
+  D3D12RHICommon.h: Common D3D12 RHI definitions
+  =============================================================================*/
 
 #pragma once
 
-DECLARE_STATS_GROUP(TEXT("D3D12RHI"), STATGROUP_D3D12RHI, STATCAT_Advanced);
-DECLARE_STATS_GROUP(TEXT("D3D12RHI: Memory"), STATGROUP_D3D12Memory, STATCAT_Advanced);
-DECLARE_STATS_GROUP(TEXT("D3D12RHI: Pipeline State (PSO)"), STATGROUP_D3D12PipelineState, STATCAT_Advanced);
-DECLARE_STATS_GROUP(TEXT("D3D12RHI: Descriptor Heap (GPU visible)"), STATGROUP_D3D12DescriptorHeap, STATCAT_Advanced);
+#include "HAL/Platform.h"
 
-#include "Windows/WindowsHWrapper.h"
+#include "D3D12ThirdParty.h"
 #include "D3D12RHI.h"
+#include "D3D12RHIDefinitions.h"
+
+#include "Containers/StaticArray.h"
+#include "MultiGPU.h"
+#include "Stats/Stats.h"
 
 class FD3D12Adapter;
 class FD3D12Device;
 
-// Defines a unique command queue type within a FD3D12Device (owner by the command list managers).
-enum class ED3D12CommandQueueType
-{
-	Default,
-	Copy,
-	Async
-};
+template <typename ObjectType0, typename ObjectType1>
+class TD3D12DualLinkedObjectIterator;
+
+typedef uint16 CBVSlotMask;
+
+static_assert(MAX_ROOT_CBVS <= MAX_CBS, "MAX_ROOT_CBVS must be <= MAX_CBS.");
+static_assert((8 * sizeof(CBVSlotMask)) >= MAX_CBS, "CBVSlotMask isn't large enough to cover all CBs. Please increase the size.");
+static_assert((8 * sizeof(CBVSlotMask)) >= MAX_ROOT_CBVS, "CBVSlotMask isn't large enough to cover all CBs. Please increase the size.");
+static const CBVSlotMask GRootCBVSlotMask = (1 << MAX_ROOT_CBVS) - 1; // Mask for all slots that are used by root descriptors.
+static const CBVSlotMask GDescriptorTableCBVSlotMask = static_cast<CBVSlotMask>((1<<MAX_CBS) - 1) & ~(GRootCBVSlotMask); // Mask for all slots that are used by a root descriptor table.
+
+#if MAX_SRVS > 32
+	typedef uint64 SRVSlotMask;
+#else
+	typedef uint32 SRVSlotMask;
+#endif
+static_assert((8 * sizeof(SRVSlotMask)) >= MAX_SRVS, "SRVSlotMask isn't large enough to cover all SRVs. Please increase the size.");
+
+typedef uint32 SamplerSlotMask;
+static_assert((8 * sizeof(SamplerSlotMask)) >= MAX_SAMPLERS, "SamplerSlotMask isn't large enough to cover all Samplers. Please increase the size.");
+
+typedef uint16 UAVSlotMask;
+static_assert((8 * sizeof(UAVSlotMask)) >= MAX_UAVS, "UAVSlotMask isn't large enough to cover all UAVs. Please increase the size.");
+
+DECLARE_LOG_CATEGORY_EXTERN(LogD3D12RHI, Log, All);
+DECLARE_LOG_CATEGORY_EXTERN(LogD3D12GapRecorder, Log, All);
+
+DECLARE_STATS_GROUP(TEXT("D3D12RHI"), STATGROUP_D3D12RHI, STATCAT_Advanced);
+DECLARE_STATS_GROUP(TEXT("D3D12RHI: Memory"), STATGROUP_D3D12Memory, STATCAT_Advanced);
+DECLARE_STATS_GROUP(TEXT("D3D12RHI: Memory Details"), STATGROUP_D3D12MemoryDetails, STATCAT_Advanced);
+DECLARE_STATS_GROUP(TEXT("D3D12RHI: Resources"), STATGROUP_D3D12Resources, STATCAT_Advanced);
+DECLARE_STATS_GROUP(TEXT("D3D12RHI: Buffer Details"), STATGROUP_D3D12BufferDetails, STATCAT_Advanced);
+DECLARE_STATS_GROUP(TEXT("D3D12RHI: Pipeline State (PSO)"), STATGROUP_D3D12PipelineState, STATCAT_Advanced);
+DECLARE_STATS_GROUP(TEXT("D3D12RHI: Descriptor Heap (GPU Visible)"), STATGROUP_D3D12DescriptorHeap, STATCAT_Advanced);
 
 class FD3D12AdapterChild
 {
@@ -68,13 +97,6 @@ public:
 	FD3D12Device* GetParentDevice_Unsafe() const
 	{
 		return Parent;
-	}
-
-	// To be used with delayed setup
-	inline void SetParentDevice(FD3D12Device* InParent)
-	{
-		check(Parent == nullptr);
-		Parent = InParent;
 	}
 };
 
@@ -123,10 +145,6 @@ public:
 		check(NodeMask.Intersects(VisibiltyMask));// A GPU objects must be visible on the device it belongs to
 	}
 };
-
-
-template <typename ObjectType0, typename ObjectType1>
-class TD3D12DualLinkedObjectIterator;
 
 template <typename ObjectType>
 class FD3D12LinkedAdapterObject
@@ -229,27 +247,6 @@ public:
 #endif
 	}
 
-	void Swap(FD3D12LinkedAdapterObject& Other)
-	{
-#if WITH_MGPU
-		check(IsHeadLink() && Other.IsHeadLink());
-		check(LinkedObjects.GPUMask == Other.LinkedObjects.GPUMask);
-
-		// Swap array entries for every index other than the first since that's this.
-		for (auto GPUIterator = ++FRHIGPUMask::FIterator(LinkedObjects.GPUMask); GPUIterator; ++GPUIterator)
-		{
-			Exchange(LinkedObjects.Objects[*GPUIterator], Other.LinkedObjects.Objects[*GPUIterator]);
-		}
-
-		// Propagate the exchanged arrays to the rest of the links in the chain.
-		for (auto GPUIterator = ++FRHIGPUMask::FIterator(LinkedObjects.GPUMask); GPUIterator; ++GPUIterator)
-		{
-			LinkedObjects.Objects[*GPUIterator]->LinkedObjects.Objects = LinkedObjects.Objects;
-			Other.LinkedObjects.Objects[*GPUIterator]->LinkedObjects.Objects = Other.LinkedObjects.Objects;
-		}
-#endif
-	}
-
 	class FLinkedObjectIterator
 	{
 	public:
@@ -296,7 +293,7 @@ private:
 	struct FLinkedObjects
 	{
 		FLinkedObjects() 
-			: Objects(nullptr)
+			: Objects(InPlace, nullptr)
 		{}
 
 		FRHIGPUMask GPUMask;
@@ -353,11 +350,22 @@ private:
 	ObjectType1* Object1;
 };
 
-namespace D3D12RHI
+// Template helper class for converting RHI resource types to D3D12RHI resource types
+template<class T>
+struct TD3D12ResourceTraits
 {
-	template <typename ObjectType0, typename ObjectType1>
-	TD3D12DualLinkedObjectIterator<ObjectType0, ObjectType1> MakeDualLinkedObjectIterator(ObjectType0* InObject0, ObjectType1* InObject1)
+};
+
+// Lock free pointer list that auto-destructs items remaining in the list.
+template <typename TObjectType>
+struct TD3D12ObjectPool : public TLockFreePointerListUnordered<TObjectType, PLATFORM_CACHE_LINE_SIZE>
+{
+	~TD3D12ObjectPool()
 	{
-		return TD3D12DualLinkedObjectIterator<ObjectType0, ObjectType1>(InObject0, InObject1);
+		while (TObjectType* Object = TLockFreePointerListUnordered<TObjectType, PLATFORM_CACHE_LINE_SIZE>::Pop())
+		{
+			delete Object;
+		}
 	}
-}
+};
+

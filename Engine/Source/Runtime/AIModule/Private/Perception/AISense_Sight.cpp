@@ -1,17 +1,27 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Perception/AISense_Sight.h"
-#include "EngineDefines.h"
-#include "EngineGlobals.h"
+
+#include "AIHelpers.h"
+#include "AISystem.h"
 #include "CollisionQueryParams.h"
 #include "Engine/Engine.h"
-#include "AISystem.h"
-#include "AIHelpers.h"
+#include "Engine/HitResult.h"
+#include "EngineDefines.h"
+#include "EngineGlobals.h"
 #include "Perception/AIPerceptionComponent.h"
-#include "VisualLogger/VisualLogger.h"
-#include "Perception/AISightTargetInterface.h"
 #include "Perception/AISenseConfig_Sight.h"
+#include "Perception/AISightTargetInterface.h"
+#include "VisualLogger/VisualLogger.h"
 
+#if WITH_GAMEPLAY_DEBUGGER_MENU
+#include "GameplayDebuggerTypes.h"
+#include "GameplayDebuggerCategory.h"
+#endif // WITH_GAMEPLAY_DEBUGGER_MENU
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AISense_Sight)
+
+#define AISENSE_SIGHT_TIMESLICING_DEBUG 0
 #define DO_SIGHT_VLOGGING (0 && ENABLE_VISUAL_LOG)
 
 #if DO_SIGHT_VLOGGING
@@ -24,14 +34,21 @@
 
 DECLARE_CYCLE_STAT(TEXT("Perception Sense: Sight"),STAT_AI_Sense_Sight,STATGROUP_AI);
 DECLARE_CYCLE_STAT(TEXT("Perception Sense: Sight, Update Sort"),STAT_AI_Sense_Sight_UpdateSort,STATGROUP_AI);
+DECLARE_CYCLE_STAT(TEXT("Perception Sense: Sight, Compute visibility"),STAT_AI_Sense_Sight_ComputeVisibility,STATGROUP_AI);
+DECLARE_CYCLE_STAT(TEXT("Perception Sense: Sight, Query operations"),STAT_AI_Sense_Sight_QueryOperations,STATGROUP_AI);
 DECLARE_CYCLE_STAT(TEXT("Perception Sense: Sight, Listener Update"), STAT_AI_Sense_Sight_ListenerUpdate, STATGROUP_AI);
 DECLARE_CYCLE_STAT(TEXT("Perception Sense: Sight, Register Target"), STAT_AI_Sense_Sight_RegisterTarget, STATGROUP_AI);
 DECLARE_CYCLE_STAT(TEXT("Perception Sense: Sight, Remove By Listener"), STAT_AI_Sense_Sight_RemoveByListener, STATGROUP_AI);
 DECLARE_CYCLE_STAT(TEXT("Perception Sense: Sight, Remove To Target"), STAT_AI_Sense_Sight_RemoveToTarget, STATGROUP_AI);
+DECLARE_CYCLE_STAT(TEXT("Perception Sense: Sight, Process pending result"), STAT_AI_Sense_Sight_ProcessPendingQuery, STATGROUP_AI);
 
 
-static const int32 DefaultMaxTracesPerTick = 6;
-static const int32 DefaultMinQueriesPerTimeSliceCheck = 40;
+constexpr int32 DefaultMaxTracesPerTick = 6;
+constexpr int32 DefaultMaxAsyncTracesPerTick = 10;
+constexpr int32 DefaultMinQueriesPerTimeSliceCheck = 40;
+constexpr float DefaultPendingQueriesBudgetReductionRatio = 0.5f;
+constexpr bool bDefaultUseAsynchronousTraceForDefaultSightQueries = false;
+constexpr float DefaultStimulusStrength = 1.f;
 
 enum class EForEachResult : uint8
 {
@@ -78,7 +95,7 @@ EReverseForEachResult ReverseForEach(T& Array, const PREDICATE_CLASS& Predicate)
 const FAISightTarget::FTargetId FAISightTarget::InvalidTargetId = FAISystem::InvalidUnsignedID;
 
 FAISightTarget::FAISightTarget(AActor* InTarget, FGenericTeamId InTeamId)
-	: Target(InTarget), SightTargetInterface(NULL), TeamId(InTeamId)
+	: Target(InTarget), SightTargetInterface(nullptr), TeamId(InTeamId)
 {
 	if (InTarget)
 	{
@@ -106,8 +123,10 @@ UAISense_Sight::FDigestedSightProperties::FDigestedSightProperties(const UAISens
 }
 
 UAISense_Sight::FDigestedSightProperties::FDigestedSightProperties()
-	: PeripheralVisionAngleCos(0.f), SightRadiusSq(-1.f), AutoSuccessRangeSqFromLastSeenLocation(FAISystem::InvalidRange), LoseSightRadiusSq(-1.f), PointOfViewBackwardOffset(0.0f), NearClippingRadiusSq(0.0f), AffiliationFlags(-1)
-{}
+	: PeripheralVisionAngleCos(0.f), SightRadiusSq(-1.f), AutoSuccessRangeSqFromLastSeenLocation(FAISystem::InvalidRange), LoseSightRadiusSq(-1.f), PointOfViewBackwardOffset(0.0f), NearClippingRadiusSq(0.0f)
+{
+	AffiliationFlags = FAISenseAffiliationFilter::DetectAllFlags();
+}
 
 //----------------------------------------------------------------------//
 // UAISense_Sight
@@ -115,11 +134,14 @@ UAISense_Sight::FDigestedSightProperties::FDigestedSightProperties()
 UAISense_Sight::UAISense_Sight(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 	, MaxTracesPerTick(DefaultMaxTracesPerTick)
+	, MaxAsyncTracesPerTick(DefaultMaxAsyncTracesPerTick)
 	, MinQueriesPerTimeSliceCheck(DefaultMinQueriesPerTimeSliceCheck)
 	, MaxTimeSlicePerTick(0.005) // 5ms
 	, HighImportanceQueryDistanceThreshold(300.f)
 	, MaxQueryImportance(60.f)
 	, SightLimitQueryImportance(10.f)
+	, PendingQueriesBudgetReductionRatio(DefaultPendingQueriesBudgetReductionRatio)
+	, bUseAsynchronousTraceForDefaultSightQueries(bDefaultUseAsynchronousTraceForDefaultSightQueries)
 {
 	if (HasAnyFlags(RF_ClassDefaultObject) == false)
 	{
@@ -129,6 +151,9 @@ UAISense_Sight::UAISense_Sight(const FObjectInitializer& ObjectInitializer)
 		OnNewListenerDelegate.BindUObject(this, &UAISense_Sight::OnNewListenerImpl);
 		OnListenerUpdateDelegate.BindUObject(this, &UAISense_Sight::OnListenerUpdateImpl);
 		OnListenerRemovedDelegate.BindUObject(this, &UAISense_Sight::OnListenerRemovedImpl);
+
+		OnPendingCanBeSeenQueryProcessedDelegate.BindUObject(this, &UAISense_Sight::OnPendingCanBeSeenQueryProcessed);
+		OnPendingTraceQueryProcessedDelegate.BindUObject(this, &UAISense_Sight::OnPendingTraceQueryProcessed);
 	}
 
 	NotifyType = EAISenseNotifyType::OnPerceptionChange;
@@ -139,11 +164,11 @@ UAISense_Sight::UAISense_Sight(const FObjectInitializer& ObjectInitializer)
 	DefaultSightCollisionChannel = GET_AI_CONFIG_VAR(DefaultSightCollisionChannel);
 }
 
-FORCEINLINE_DEBUGGABLE float UAISense_Sight::CalcQueryImportance(const FPerceptionListener& Listener, const FVector& TargetLocation, const float SightRadiusSq) const
+float UAISense_Sight::CalcQueryImportance(const FPerceptionListener& Listener, const FVector& TargetLocation, const float SightRadiusSq) const
 {
-	const float DistanceSq = FVector::DistSquared(Listener.CachedLocation, TargetLocation);
+	const FVector::FReal DistanceSq = FVector::DistSquared(Listener.CachedLocation, TargetLocation);
 	return DistanceSq <= HighImportanceDistanceSquare ? MaxQueryImportance
-		: FMath::Clamp((SightLimitQueryImportance - MaxQueryImportance) / SightRadiusSq * DistanceSq + MaxQueryImportance, 0.f, MaxQueryImportance);
+		: static_cast<float>(FMath::Clamp((SightLimitQueryImportance - MaxQueryImportance) / SightRadiusSq * DistanceSq + MaxQueryImportance, 0.f, MaxQueryImportance));
 }
 
 void UAISense_Sight::PostInitProperties()
@@ -158,23 +183,89 @@ bool UAISense_Sight::ShouldAutomaticallySeeTarget(const FDigestedSightProperties
 
 	if ((PropDigest.AutoSuccessRangeSqFromLastSeenLocation != FAISystem::InvalidRange) && (SightQuery->LastSeenLocation != FAISystem::InvalidLocation))
 	{
-		const float DistanceToLastSeenLocationSq = FVector::DistSquared(TargetActor->GetActorLocation(), SightQuery->LastSeenLocation);
+		const FVector::FReal DistanceToLastSeenLocationSq = FVector::DistSquared(TargetActor->GetActorLocation(), SightQuery->LastSeenLocation);
 		return (DistanceToLastSeenLocationSq <= PropDigest.AutoSuccessRangeSqFromLastSeenLocation);
 	}
 
 	return false;
 }
 
+namespace UE::AISense_Sight
+{
+#if AISENSE_SIGHT_TIMESLICING_DEBUG
+	struct FTimingSlicingInfo
+	{
+		FTimingSlicingInfo() 
+		{
+			Start(); 
+		}
+
+		double StartTime = 0.;
+		double EndTime = 0.;
+
+		int32 InRangeCount = 0;
+		int32 OutOfRangeCount = 0;
+
+		float InRangeAgeSum = 0.f;
+		float OutOfRangeAgeSum = 0.f;
+
+		void Start() { StartTime = FPlatformTime::Seconds();}
+		void Stop() { EndTime = FPlatformTime::Seconds();}
+
+		void PushQueryInfo(const bool bIsInRange, const float Age)
+		{
+			if (bIsInRange)
+			{
+				++InRangeCount;
+				InRangeAgeSum += Age;
+			}
+			else
+			{
+				++OutOfRangeCount;
+				OutOfRangeAgeSum += Age;
+			}
+		}
+
+		FString ToString() const
+		{
+			FString Info = FString::Format(TEXT("in {0} seconds"), {EndTime - StartTime});
+			if (InRangeCount > 0)
+			{
+				Info.Append(FString::Format(TEXT("[{0} InRange Age:{1}]"), {InRangeCount, InRangeAgeSum/InRangeCount}));
+			}
+			if (OutOfRangeCount > 0)
+			{
+				Info.Append(FString::Format(TEXT("[{0} OutOfRange Age:{1}]"), {OutOfRangeCount, OutOfRangeAgeSum/OutOfRangeCount}));
+			}
+			return Info;
+		}
+	};
+#endif // AISENSE_SIGHT_TIMESLICING_DEBUG
+
+	bool IsTraceConsideredVisible(const FHitResult* HitResult, const AActor* TargetActor)
+	{
+		if (HitResult == nullptr)
+		{
+			return true;
+		}
+
+		const AActor* HitResultActor = HitResult->HitObjectHandle.FetchActor();
+		return (HitResultActor ? HitResultActor->IsOwnedBy(TargetActor) : false);
+	}
+}
+
 float UAISense_Sight::Update()
 {
 	SCOPE_CYCLE_COUNTER(STAT_AI_Sense_Sight);
 
-	const UWorld* World = GEngine->GetWorldFromContextObject(GetPerceptionSystem()->GetOuter(), EGetWorldErrorMode::LogAndReturnNull);
+	UWorld* World = GEngine->GetWorldFromContextObject(GetPerceptionSystem()->GetOuter(), EGetWorldErrorMode::LogAndReturnNull);
 
-	if (World == NULL)
+	if (World == nullptr)
 	{
 		return SuspendNextUpdate;
 	}
+
+	UE_MT_SCOPED_WRITE_ACCESS(QueriesListAccessDetector);
 
 	// sort Sight Queries
 	{
@@ -200,19 +291,19 @@ float UAISense_Sight::Update()
 	}
 
 	int32 TracesCount = 0;
+	int32 AsyncTracesCount = FMath::Max(0, static_cast<int32>(PendingQueriesBudgetReductionRatio * SightQueriesPending.Num()));	// pending queries should be requesting async collisions traces at this frame, so we might want to restrain ourself in this update
 	int32 NumQueriesProcessed = 0;
-	double TimeSliceEnd = FPlatformTime::Seconds() + MaxTimeSlicePerTick;
+	const double TimeSliceEnd = FPlatformTime::Seconds() + MaxTimeSlicePerTick;
 	bool bHitTimeSliceLimit = false;
-//#define AISENSE_SIGHT_TIMESLICING_DEBUG
-#ifdef AISENSE_SIGHT_TIMESLICING_DEBUG
-	double TimeSpent = 0.0;
-	double LastTime = FPlatformTime::Seconds();
+#if AISENSE_SIGHT_TIMESLICING_DEBUG
+	UE::AISense_Sight::FTimingSlicingInfo SlicingInfo;
 #endif // AISENSE_SIGHT_TIMESLICING_DEBUG
-	static const int32 InitialInvalidItemsSize = 16;
+	constexpr int32 InitialInvalidItemsSize = 16;
 	enum class EOperationType : uint8
 	{
 		Remove,
-		SwapList
+		SwapList,
+		MoveToPending
 	};
 	struct FQueryOperation
 	{
@@ -232,6 +323,18 @@ float UAISense_Sight::Update()
 	int32 OutOfRangeItr = 0;
 	for (int32 QueryIndex = 0; QueryIndex < SightQueriesInRange.Num() + SightQueriesOutOfRange.Num(); ++QueryIndex)
 	{
+		// Time slice limit check - spread out checks to every N queries so we don't spend more time checking timer than doing work
+		NumQueriesProcessed++;
+		if ((NumQueriesProcessed % MinQueriesPerTimeSliceCheck) == 0 && FPlatformTime::Seconds() > TimeSliceEnd)
+		{
+			bHitTimeSliceLimit = true;
+		}
+
+		if (bHitTimeSliceLimit || TracesCount >= MaxTracesPerTick || AsyncTracesCount >= MaxAsyncTracesPerTick)
+		{
+			break;
+		}
+
 		// Calculate next in range query
 		int32 InRangeIndex = SightQueriesInRange.IsValidIndex(InRangeItr) ? InRangeItr : INDEX_NONE;
 		FAISightQuery* InRangeQuery = InRangeIndex != INDEX_NONE ? &SightQueriesInRange[InRangeIndex] : nullptr;
@@ -247,123 +350,50 @@ float UAISense_Sight::Update()
 		// Compare to real find next query
 		const bool bIsInRangeQuery = (InRangeQuery && OutOfRangeQuery) ? FAISightQuery::FSortPredicate()(*InRangeQuery,*OutOfRangeQuery) : !OutOfRangeQuery;
 		FAISightQuery* SightQuery = bIsInRangeQuery ? InRangeQuery : OutOfRangeQuery;
+		ensure(SightQuery);
 
-		// Time slice limit check - spread out checks to every N queries so we don't spend more time checking timer than doing work
-		NumQueriesProcessed++;
-#ifdef AISENSE_SIGHT_TIMESLICING_DEBUG
-		TimeSpent += (FPlatformTime::Seconds() - LastTime);
-		LastTime = FPlatformTime::Seconds();
-#endif // AISENSE_SIGHT_TIMESLICING_DEBUG
-		if (bHitTimeSliceLimit == false && (NumQueriesProcessed % MinQueriesPerTimeSliceCheck) == 0 && FPlatformTime::Seconds() > TimeSliceEnd)
+#if AISENSE_SIGHT_TIMESLICING_DEBUG
+		SlicingInfo.PushQueryInfo(bIsInRangeQuery, SightQuery->GetAge());
+#endif //AISENSE_SIGHT_TIMESLICING_DEBUG
+
+		bIsInRangeQuery ? ++InRangeItr : ++OutOfRangeItr;
+
+		FPerceptionListener& Listener = ListenersMap[SightQuery->ObserverId];
+		FAISightTarget& Target = ObservedTargets[SightQuery->TargetId];
+
+		AActor* TargetActor = Target.Target.Get();
+		UAIPerceptionComponent* ListenerPtr = Listener.Listener.Get();
+		ensure(ListenerPtr);
+
+		// @todo figure out what should we do if not valid
+		if (TargetActor && ListenerPtr)
 		{
-			bHitTimeSliceLimit = true;
-			// do not break here since that would bypass queue aging
-		}
+			const FDigestedSightProperties& PropDigest = DigestedProperties[SightQuery->ObserverId];
+			const AActor* ListenerBodyActor = ListenerPtr->GetBodyActor();
+			float StimulusStrength = DefaultStimulusStrength;
+			FVector SeenLocation(0.f);
+			int32 NumberOfLoSChecksPerformed = 0;
+			int32 NumberOfAsyncLosCheckRequested = 0;
 
-		if (TracesCount < MaxTracesPerTick && bHitTimeSliceLimit == false)
-		{
-			bIsInRangeQuery ? ++InRangeItr : ++OutOfRangeItr;
+			const EVisibilityResult VisibilityResult = ComputeVisibility(World, *SightQuery, Listener, ListenerBodyActor, Target, TargetActor, PropDigest, StimulusStrength, SeenLocation, NumberOfLoSChecksPerformed, NumberOfAsyncLosCheckRequested);
 
-			FPerceptionListener& Listener = ListenersMap[SightQuery->ObserverId];
-			FAISightTarget& Target = ObservedTargets[SightQuery->TargetId];
+			TracesCount += NumberOfLoSChecksPerformed;
+			AsyncTracesCount += NumberOfAsyncLosCheckRequested;
 
-			AActor* TargetActor = Target.Target.Get();
-			UAIPerceptionComponent* ListenerPtr = Listener.Listener.Get();
-			ensure(ListenerPtr);
-
-			// @todo figure out what should we do if not valid
-			if (TargetActor && ListenerPtr)
+			if (VisibilityResult == EVisibilityResult::Pending)
 			{
+				QueryOperations.Add(FQueryOperation(bIsInRangeQuery, EOperationType::MoveToPending, bIsInRangeQuery ? InRangeIndex : OutOfRangeIndex));
+			}
+			else
+			{
+				UE_CLOG(VisibilityResult != EVisibilityResult::Visible && VisibilityResult != EVisibilityResult::NotVisible, LogAIPerception, Error, TEXT("UAISense_Sight::Update received invalid Visibility result [%d] for query between Listener %s and Target %s. We'll consider it as NotVisible"), int(VisibilityResult), *GetNameSafe(ListenerBodyActor), *GetNameSafe(TargetActor));
+
+				const bool bIsVisible = VisibilityResult == EVisibilityResult::Visible;
+				const bool bWasVisible = SightQuery->GetLastResult();
 				const FVector TargetLocation = TargetActor->GetActorLocation();
-				const FDigestedSightProperties& PropDigest = DigestedProperties[SightQuery->ObserverId];
-				const float SightRadiusSq = SightQuery->bLastResult ? PropDigest.LoseSightRadiusSq : PropDigest.SightRadiusSq;
-				
-				float StimulusStrength = 1.f;
-				
-				// @Note that automagical "seeing" does not care about sight range nor vision cone
-				const bool bShouldAutomatically = ShouldAutomaticallySeeTarget(PropDigest, SightQuery, Listener, TargetActor, StimulusStrength);
-				if (bShouldAutomatically)
-				{
-					// Pretend like we've seen this target where we last saw them
-					Listener.RegisterStimulus(TargetActor, FAIStimulus(*this, StimulusStrength, SightQuery->LastSeenLocation, Listener.CachedLocation));
-					SightQuery->bLastResult = true;
-				}
-				else if (FAISystem::CheckIsTargetInSightCone(Listener.CachedLocation, Listener.CachedDirection, PropDigest.PeripheralVisionAngleCos, PropDigest.PointOfViewBackwardOffset, PropDigest.NearClippingRadiusSq, SightRadiusSq, TargetLocation))
-				{
-					SIGHT_LOG_SEGMENT(ListenerPtr->GetOwner(), Listener.CachedLocation, TargetLocation, FColor::Green, TEXT("TargetID %d"), Target.TargetId);
+				UpdateQueryVisibilityStatus(*SightQuery, Listener, bIsVisible, SeenLocation, StimulusStrength, *TargetActor, TargetLocation);
 
-					FVector OutSeenLocation(0.f);
-					// do line checks
-					if (Target.SightTargetInterface != NULL)
-					{
-						int32 NumberOfLoSChecksPerformed = 0;
-						// defaulting to 1 to have "full strength" by default instead of "no strength"
-						const bool bWasVisible = SightQuery->bLastResult;
-						if (Target.SightTargetInterface->CanBeSeenFrom(Listener.CachedLocation, OutSeenLocation, NumberOfLoSChecksPerformed, StimulusStrength, ListenerPtr->GetBodyActor(), &bWasVisible, &SightQuery->UserData) == true)
-						{
-							Listener.RegisterStimulus(TargetActor, FAIStimulus(*this, StimulusStrength, OutSeenLocation, Listener.CachedLocation));
-							SightQuery->bLastResult = true;
-							SightQuery->LastSeenLocation = OutSeenLocation;
-						}
-						// communicate failure only if we've seen give actor before
-						else if (SightQuery->bLastResult == true)
-						{
-							Listener.RegisterStimulus(TargetActor, FAIStimulus(*this, 0.f, TargetLocation, Listener.CachedLocation, FAIStimulus::SensingFailed));
-							SightQuery->bLastResult = false;
-							SightQuery->LastSeenLocation = FAISystem::InvalidLocation;
-						}
-
-						if (SightQuery->bLastResult == false)
-						{
-							SIGHT_LOG_LOCATION(ListenerPtr->GetOwner(), TargetLocation, 25.f, FColor::Red, TEXT(""));
-						}
-
-						TracesCount += NumberOfLoSChecksPerformed;
-					}
-					else
-					{
-						// we need to do tests ourselves
-						FHitResult HitResult;
-						const bool bHit = World->LineTraceSingleByChannel(HitResult, Listener.CachedLocation, TargetLocation
-							, DefaultSightCollisionChannel
-							, FCollisionQueryParams(SCENE_QUERY_STAT(AILineOfSight), true, ListenerPtr->GetBodyActor()));
-
-						++TracesCount;
-
-						auto HitResultActorIsOwnedByTargetActor = [&HitResult, TargetActor]()
-						{
-							AActor* HitResultActor = HitResult.Actor.Get();
-							return (HitResultActor ? HitResultActor->IsOwnedBy(TargetActor) : false);
-						};
-
-						if (bHit == false || HitResultActorIsOwnedByTargetActor())
-						{
-							Listener.RegisterStimulus(TargetActor, FAIStimulus(*this, 1.f, TargetLocation, Listener.CachedLocation));
-							SightQuery->bLastResult = true;
-							SightQuery->LastSeenLocation = TargetLocation;
-						}
-						// communicate failure only if we've seen give actor before
-						else if (SightQuery->bLastResult == true)
-						{
-							Listener.RegisterStimulus(TargetActor, FAIStimulus(*this, 0.f, TargetLocation, Listener.CachedLocation, FAIStimulus::SensingFailed));
-							SightQuery->bLastResult = false;
-							SightQuery->LastSeenLocation = FAISystem::InvalidLocation;
-						}
-
-						if (SightQuery->bLastResult == false)
-						{
-							SIGHT_LOG_LOCATION(ListenerPtr->GetOwner(), TargetLocation, 25.f, FColor::Red, TEXT(""));
-						}
-					}
-				}
-				// communicate failure only if we've seen give actor before
-				else if (SightQuery->bLastResult)
-				{
-					SIGHT_LOG_SEGMENT(ListenerPtr->GetOwner(), Listener.CachedLocation, TargetLocation, FColor::Red, TEXT("TargetID %d"), Target.TargetId);
-					Listener.RegisterStimulus(TargetActor, FAIStimulus(*this, 0.f, TargetLocation, Listener.CachedLocation, FAIStimulus::SensingFailed));
-					SightQuery->bLastResult = false;
-				}
-
+				const float SightRadiusSq = bWasVisible ? PropDigest.LoseSightRadiusSq : PropDigest.SightRadiusSq;
 				SightQuery->Importance = CalcQueryImportance(Listener, TargetLocation, SightRadiusSq);
 				const bool bShouldBeInRange = SightQuery->Importance > 0.0f;
 				if (bIsInRangeQuery != bShouldBeInRange)
@@ -374,31 +404,30 @@ float UAISense_Sight::Update()
 				// restart query
 				SightQuery->OnProcessed();
 			}
-			else
-			{
-				// put this index to "to be removed" array
-				QueryOperations.Add( FQueryOperation(bIsInRangeQuery, EOperationType::Remove, bIsInRangeQuery ? InRangeIndex : OutOfRangeIndex) );
-				if (TargetActor == nullptr)
-				{
-					InvalidTargets.AddUnique(SightQuery->TargetId);
-				}
-			}
 		}
 		else
 		{
-			break;
+			// put this index to "to be removed" array
+			QueryOperations.Add( FQueryOperation(bIsInRangeQuery, EOperationType::Remove, bIsInRangeQuery ? InRangeIndex : OutOfRangeIndex) );
+			if (TargetActor == nullptr)
+			{
+				InvalidTargets.AddUnique(SightQuery->TargetId);
+			}
 		}
 	}
 	NextOutOfRangeIndex = SightQueriesOutOfRange.Num() > 0 ? (NextOutOfRangeIndex + OutOfRangeItr) % SightQueriesOutOfRange.Num() : 0;
 
-#ifdef AISENSE_SIGHT_TIMESLICING_DEBUG
-	UE_LOG(LogAIPerception, VeryVerbose, TEXT("UAISense_Sight::Update processed %d sources in %f seconds [time slice limited? %d]"), NumQueriesProcessed, TimeSpent, bHitTimeSliceLimit ? 1 : 0);
+#if AISENSE_SIGHT_TIMESLICING_DEBUG
+	SlicingInfo.Stop();
+	UE_LOG(LogAIPerception, VeryVerbose, TEXT("UAISense_Sight::Update processed %d sources %s [time slice limited? %d]"), NumQueriesProcessed, *SlicingInfo.ToString(), bHitTimeSliceLimit ? 1 : 0);
 #else
 	UE_LOG(LogAIPerception, VeryVerbose, TEXT("UAISense_Sight::Update processed %d sources [time slice limited? %d]"), NumQueriesProcessed, bHitTimeSliceLimit ? 1 : 0);
 #endif // AISENSE_SIGHT_TIMESLICING_DEBUG
 
 	if (QueryOperations.Num() > 0)
 	{
+		SCOPE_CYCLE_COUNTER(STAT_AI_Sense_Sight_QueryOperations);
+
 		// Sort by InRange and by descending Index 
 		QueryOperations.Sort([](const FQueryOperation& LHS, const FQueryOperation& RHS)->bool
 		{
@@ -408,29 +437,46 @@ float UAISense_Sight::Update()
 		});
         // Do all the removes first and save the out of range swaps because we will insert them at the right location to prevent sorting
 		TArray<FAISightQuery> SightQueriesOutOfRangeToInsert;
-		for (FQueryOperation& Operation : QueryOperations)
+		for (const FQueryOperation& Operation : QueryOperations)
 		{
-			if (Operation.OpType == EOperationType::SwapList)
+			switch (Operation.OpType)
 			{
-				if (Operation.bInRange)
+			case EOperationType::SwapList:
 				{
-					SightQueriesOutOfRangeToInsert.Push(SightQueriesInRange[Operation.Index]);
+					if (Operation.bInRange)
+					{
+						SightQueriesOutOfRangeToInsert.Push(SightQueriesInRange[Operation.Index]);
+					}
+					else
+					{
+						SightQueriesInRange.Add(SightQueriesOutOfRange[Operation.Index]);
+					}
 				}
-				else
+				break;
+
+			case EOperationType::MoveToPending:
 				{
-					SightQueriesInRange.Add(SightQueriesOutOfRange[Operation.Index]);
+					SightQueriesPending.Add(Operation.bInRange ? SightQueriesInRange[Operation.Index] : SightQueriesOutOfRange[Operation.Index]);
 				}
+				break;
+
+			case EOperationType::Remove:
+				break;
+
+			default:
+				check(false);
+				break;
 			}
 
 			if (Operation.bInRange)
 			{
 				// In range queries are always sorted at the beginning of the update
-				SightQueriesInRange.RemoveAtSwap(Operation.Index, 1, /*bAllowShrinking*/false);
+				SightQueriesInRange.RemoveAtSwap(Operation.Index, 1, EAllowShrinking::No);
 			}
 			else
 			{
 				// Preserve the list ordered
-				SightQueriesOutOfRange.RemoveAt(Operation.Index, 1, /*bAllowShrinking*/false);
+				SightQueriesOutOfRange.RemoveAt(Operation.Index, 1, EAllowShrinking::No);
 				if (Operation.Index < NextOutOfRangeIndex)
 				{
 					NextOutOfRangeIndex--;
@@ -452,7 +498,7 @@ float UAISense_Sight::Update()
 			for (const auto& TargetId : InvalidTargets)
 			{
 				// remove affected queries
-				RemoveAllQueriesToTarget(TargetId);
+				RemoveAllQueriesToTarget_Internal(TargetId);
 				// remove target itself
 				ObservedTargets.Remove(TargetId);
 			}
@@ -464,6 +510,220 @@ float UAISense_Sight::Update()
 
 	//return SightQueries.Num() > 0 ? 1.f/6 : FLT_MAX;
 	return 0.f;
+}
+
+UAISense_Sight::EVisibilityResult UAISense_Sight::ComputeVisibility(UWorld* World, FAISightQuery& SightQuery, FPerceptionListener& Listener, const AActor* ListenerActor, FAISightTarget& Target, AActor* TargetActor, const FDigestedSightProperties& PropDigest, float& OutStimulusStrength, FVector& OutSeenLocation, int32& OutNumberOfLoSChecksPerformed, int32& OutNumberOfAsyncLosCheckRequested) const
+{
+	SCOPE_CYCLE_COUNTER(STAT_AI_Sense_Sight_ComputeVisibility);
+
+	// @Note that automagical "seeing" does not care about sight range nor vision cone
+	if (ShouldAutomaticallySeeTarget(PropDigest, &SightQuery, Listener, TargetActor, OutStimulusStrength))
+	{
+		OutSeenLocation = FAISystem::InvalidLocation;
+		return EVisibilityResult::Visible;
+	}
+
+	const FVector TargetLocation = TargetActor->GetActorLocation();
+	const float SightRadiusSq = SightQuery.GetLastResult() ? PropDigest.LoseSightRadiusSq : PropDigest.SightRadiusSq;
+	if (!FAISystem::CheckIsTargetInSightCone(Listener.CachedLocation, Listener.CachedDirection, PropDigest.PeripheralVisionAngleCos, PropDigest.PointOfViewBackwardOffset, PropDigest.NearClippingRadiusSq, SightRadiusSq, TargetLocation))
+	{
+		return EVisibilityResult::NotVisible;
+	}
+
+	if (Target.SightTargetInterface != nullptr)
+	{
+		const bool bWasVisible = SightQuery.GetLastResult();
+		FCanBeSeenFromContext Context;
+		Context.SightQueryID = FAISightQueryID(SightQuery);
+		Context.ObserverLocation = Listener.CachedLocation;
+		Context.IgnoreActor = ListenerActor;
+		Context.bWasVisible = &bWasVisible;
+
+		const EVisibilityResult Result = Target.SightTargetInterface->CanBeSeenFrom(Context, OutSeenLocation, OutNumberOfLoSChecksPerformed, OutNumberOfAsyncLosCheckRequested, OutStimulusStrength, &SightQuery.UserData, &OnPendingCanBeSeenQueryProcessedDelegate);
+		if (Result == EVisibilityResult::Pending)
+		{
+			// we need to clear the trace info value in order to avoid interfering with the engine processed asynchronous queries
+			SightQuery.SetTraceInfo(FTraceHandle());
+		}
+		return Result;
+	}
+	else
+	{
+		// we need to do tests ourselves
+		const FCollisionQueryParams QueryParams = FCollisionQueryParams(SCENE_QUERY_STAT(AILineOfSight), true, ListenerActor);
+		if (bUseAsynchronousTraceForDefaultSightQueries)
+		{
+			const FTraceHandle TraceHandle = World->AsyncLineTraceByChannel(EAsyncTraceType::Single, Listener.CachedLocation, TargetLocation, DefaultSightCollisionChannel, QueryParams, FCollisionResponseParams::DefaultResponseParam, &OnPendingTraceQueryProcessedDelegate);
+			if (!TraceHandle.IsValid())
+			{
+				return EVisibilityResult::NotVisible;
+			}
+
+			++OutNumberOfAsyncLosCheckRequested;
+
+			// store the trace handle information here so that we can identify the associated query when we'll receive the delegate callback
+			SightQuery.SetTraceInfo(TraceHandle);
+			return EVisibilityResult::Pending;
+		}
+		else
+		{
+			FHitResult HitResult;
+			const bool bHit = World->LineTraceSingleByChannel(HitResult, Listener.CachedLocation, TargetLocation, DefaultSightCollisionChannel, QueryParams, FCollisionResponseParams::DefaultResponseParam);
+
+			++OutNumberOfLoSChecksPerformed;
+
+			if (UE::AISense_Sight::IsTraceConsideredVisible(bHit ? &HitResult : nullptr, TargetActor))
+			{
+				OutSeenLocation = TargetLocation;
+				return EVisibilityResult::Visible;
+			}
+			else
+			{
+				return EVisibilityResult::NotVisible;
+			}
+		}
+	}
+}
+
+void UAISense_Sight::UpdateQueryVisibilityStatus(FAISightQuery& SightQuery, FPerceptionListener& Listener, const bool bIsVisible, const FVector& SeenLocation, const float StimulusStrength, AActor* TargetActor, const FVector& TargetLocation) const
+{
+	if (TargetActor)
+	{
+		UpdateQueryVisibilityStatus(SightQuery, Listener, bIsVisible, SeenLocation, StimulusStrength, *TargetActor, TargetLocation);
+	}
+}
+
+void UAISense_Sight::UpdateQueryVisibilityStatus(FAISightQuery& SightQuery, FPerceptionListener& Listener, const bool bIsVisible, const FVector& SeenLocation, const float StimulusStrength, AActor& TargetActor, const FVector& TargetLocation) const
+{
+	if (bIsVisible)
+	{
+		const bool bHasValidSeenLocation = SeenLocation != FAISystem::InvalidLocation;
+		Listener.RegisterStimulus(&TargetActor, FAIStimulus(*this, StimulusStrength, bHasValidSeenLocation ? SeenLocation : SightQuery.LastSeenLocation, Listener.CachedLocation));
+		SightQuery.SetLastResult(true);
+		if (bHasValidSeenLocation)
+		{
+			SightQuery.LastSeenLocation = SeenLocation;
+		}
+	}
+	// communicate failure only if we've seen given actor before
+	else if (SightQuery.GetLastResult())
+	{
+		Listener.RegisterStimulus(&TargetActor, FAIStimulus(*this, 0.f, TargetLocation, Listener.CachedLocation, FAIStimulus::SensingFailed));
+		SightQuery.SetLastResult(false);
+		SightQuery.LastSeenLocation = FAISystem::InvalidLocation;
+	}
+
+	SIGHT_LOG_SEGMENT(Listener.GetBodyActor(), Listener.CachedLocation, TargetLocation, bIsVisible ? FColor::Green : FColor::Red, TEXT("Target: %s"), *TargetActor.GetName());
+}
+
+void UAISense_Sight::OnPendingCanBeSeenQueryProcessed(const FAISightQueryID& QueryID, const bool bIsVisible, const float StimulusStrength, const FVector& SeenLocation, const TOptional<int32>& UserData)
+{
+	SCOPE_CYCLE_COUNTER(STAT_AI_Sense_Sight_ProcessPendingQuery);
+
+	UE_MT_SCOPED_WRITE_ACCESS(QueriesListAccessDetector);
+
+	const int32 QueryIdx = SightQueriesPending.IndexOfByPredicate([&QueryID](const FAISightQuery& Element)
+		{
+			return Element.ObserverId == QueryID.ObserverId
+				&& Element.TargetId == QueryID.TargetId;
+		});
+
+	if (QueryIdx == INDEX_NONE)
+	{
+		// the query is not pending. It must have been removed because the source or the target have been removed
+		return;
+	}
+
+	OnPendingQueryProcessed(QueryIdx, bIsVisible, StimulusStrength, SeenLocation, UserData);
+}
+
+void UAISense_Sight::OnPendingTraceQueryProcessed(const FTraceHandle& TraceHandle, FTraceDatum& TraceDatum)
+{
+	SCOPE_CYCLE_COUNTER(STAT_AI_Sense_Sight_ProcessPendingQuery);
+	UE_MT_SCOPED_WRITE_ACCESS(QueriesListAccessDetector);
+
+	const int32 QueryIdx = SightQueriesPending.IndexOfByPredicate([&TraceHandle](const FAISightQuery& Element)
+	{
+		return Element.TraceInfo.FrameNumber == TraceHandle._Data.FrameNumber
+			&& Element.TraceInfo.Index == TraceHandle._Data.Index;
+	});
+
+	if (QueryIdx == INDEX_NONE)
+	{
+		// the query is not pending. It must have been removed because the source or the target have been removed
+		return;
+	}
+
+	AActor* TargetActor = nullptr;
+	if (const FAISightTarget* Target = ObservedTargets.Find(SightQueriesPending[QueryIdx].TargetId))
+	{
+		TargetActor = Target->Target.Get();
+	}
+	const bool bIsVisible = UE::AISense_Sight::IsTraceConsideredVisible(TraceDatum.OutHits.Num() > 0 ? &TraceDatum.OutHits[0] : nullptr, TargetActor);
+
+	OnPendingQueryProcessed(QueryIdx, bIsVisible, DefaultStimulusStrength, TraceDatum.End, NullOpt, TargetActor);
+}
+
+void UAISense_Sight::OnPendingQueryProcessed(const int32 SightQueryIndex, const bool bIsVisible, const float StimulusStrength, const FVector& SeenLocation, const TOptional<int32>& UserData, const TOptional<AActor*> InTargetActor)
+{
+	FAISightQuery SightQuery = SightQueriesPending[SightQueryIndex];
+	SightQueriesPending.RemoveAtSwap(SightQueryIndex, 1, EAllowShrinking::No);
+
+	AIPerception::FListenerMap& ListenersMap = *GetListeners();
+	FPerceptionListener* Listener = ListenersMap.Find(SightQuery.ObserverId);
+	if (Listener == nullptr)
+	{
+		return;
+	}
+
+	AActor* TargetActor = nullptr;
+	if (InTargetActor.IsSet())
+	{
+		TargetActor = InTargetActor.GetValue();
+	}
+	else
+	{
+		const FAISightTarget* Target = ObservedTargets.Find(SightQuery.TargetId);
+		TargetActor = Target ? Target->Target.Get() : nullptr;
+	}
+
+	if (TargetActor == nullptr)
+	{
+		return;
+	}
+
+	const bool bWasVisible = SightQuery.GetLastResult();
+	const FVector TargetLocation = TargetActor->GetActorLocation();
+	UpdateQueryVisibilityStatus(SightQuery, *Listener, bIsVisible, SeenLocation, StimulusStrength, *TargetActor, TargetLocation);
+
+	if (UserData.IsSet())
+	{
+		SightQuery.UserData = UserData.GetValue();
+	}
+
+	// Call this to be able to have an accurate tick time
+	SightQuery.OnProcessed();
+
+	const FDigestedSightProperties& PropDigest = DigestedProperties[SightQuery.ObserverId];
+	const float SightRadiusSq = bWasVisible ? PropDigest.LoseSightRadiusSq : PropDigest.SightRadiusSq;
+	SightQuery.Importance = CalcQueryImportance(*Listener, TargetLocation, SightRadiusSq);
+	const bool bShouldBeInRange = SightQuery.Importance > 0.0f;
+	if (bShouldBeInRange)
+	{
+		SightQueriesInRange.Add(SightQuery);
+	}
+	else
+	{
+		if (bSightQueriesOutOfRangeDirty)
+		{
+			SightQueriesOutOfRange.Add(SightQuery); 
+		}
+		else
+		{
+			SightQueriesOutOfRange.Insert(SightQuery, NextOutOfRangeIndex);
+			++NextOutOfRangeIndex;
+		}
+	}
 }
 
 void UAISense_Sight::RegisterEvent(const FAISightEvent& Event)
@@ -478,11 +738,13 @@ void UAISense_Sight::RegisterSource(AActor& SourceActor)
 
 void UAISense_Sight::UnregisterSource(AActor& SourceActor)
 {
+	UE_MT_SCOPED_WRITE_ACCESS(QueriesListAccessDetector);
+
 	const FAISightTarget::FTargetId AsTargetId = SourceActor.GetUniqueID();
 	FAISightTarget AsTarget;
-	
+
 	if (ObservedTargets.RemoveAndCopyValue(AsTargetId, AsTarget) 
-		&& (SightQueriesInRange.Num() + SightQueriesOutOfRange.Num()) > 0)
+		&& (SightQueriesInRange.Num() + SightQueriesOutOfRange.Num() + SightQueriesPending.Num()) > 0)
 	{
 		AActor* TargetActor = AsTarget.Target.Get();
 
@@ -496,7 +758,7 @@ void UAISense_Sight::UnregisterSource(AActor& SourceActor)
 				FAISightQuery* SightQuery = &SightQueries[QueryIndex];
 				if (SightQuery->TargetId == AsTargetId)
 				{
-					if (SightQuery->bLastResult == true)
+					if (SightQuery->GetLastResult())
 					{
 						FPerceptionListener& Listener = ListenersMap[SightQuery->ObserverId];
 						ensure(Listener.Listener.IsValid());
@@ -504,7 +766,7 @@ void UAISense_Sight::UnregisterSource(AActor& SourceActor)
 						Listener.RegisterStimulus(TargetActor, FAIStimulus(*this, 0.f, SightQuery->LastSeenLocation, Listener.CachedLocation, FAIStimulus::SensingFailed));
 					}
 
-					SightQueries.RemoveAtSwap(QueryIndex, 1, /*bAllowShrinking=*/false);
+					SightQueries.RemoveAtSwap(QueryIndex, 1, EAllowShrinking::No);
 					return EReverseForEachResult::Modified;
 				}
 				return EReverseForEachResult::UnTouched;
@@ -514,6 +776,7 @@ void UAISense_Sight::UnregisterSource(AActor& SourceActor)
 			{
 				bSightQueriesOutOfRangeDirty = true;
 			}
+			ReverseForEach(SightQueriesPending, RemoveQuery);
 		}
 	}
 }
@@ -542,7 +805,7 @@ bool UAISense_Sight::RegisterTarget(AActor& TargetActor, const TFunction<void(FA
 
 	// set/update data
 	SightTarget->TeamId = FGenericTeamId::GetTeamIdentifier(&TargetActor);
-	
+
 	// generate all pairs and add them to current Sight Queries
 	bool bNewQueriesAdded = false;
 	AIPerception::FListenerMap& ListenersMap = *GetListeners();
@@ -551,31 +814,16 @@ bool UAISense_Sight::RegisterTarget(AActor& TargetActor, const TFunction<void(FA
 	for (AIPerception::FListenerMap::TConstIterator ItListener(ListenersMap); ItListener; ++ItListener)
 	{
 		const FPerceptionListener& Listener = ItListener->Value;
-		const IGenericTeamAgentInterface* ListenersTeamAgent = Listener.GetTeamAgent();
-
-		if (Listener.HasSense(GetSenseID()) && Listener.GetBodyActor() != &TargetActor)
+		if (!Listener.HasSense(GetSenseID()) || Listener.GetBodyActor() == &TargetActor)
 		{
-			const FDigestedSightProperties& PropDigest = DigestedProperties[Listener.GetListenerID()];
-			if (FAISenseAffiliationFilter::ShouldSenseTeam(ListenersTeamAgent, TargetActor, PropDigest.AffiliationFlags))
-			{
-				// create a sight query		
-				const float Importance = CalcQueryImportance(ItListener->Value, TargetLocation, PropDigest.SightRadiusSq);
-				const bool bInRange = Importance > 0.0f;
-				if (!bInRange)
-				{
-					bSightQueriesOutOfRangeDirty = true;
-				}
-				FAISightQuery& AddedQuery = bInRange ? SightQueriesInRange.AddDefaulted_GetRef() : SightQueriesOutOfRange.AddDefaulted_GetRef();
-				AddedQuery.ObserverId = ItListener->Key;
-				AddedQuery.TargetId = SightTarget->TargetId;
-				AddedQuery.Importance = Importance;
-				
-				if (OnAddedFunc)
-				{
-					OnAddedFunc(AddedQuery);
-				}
-				bNewQueriesAdded = true;
-			}
+			continue;
+		}
+
+		const FDigestedSightProperties& PropDigest = DigestedProperties[Listener.GetListenerID()];
+		const IGenericTeamAgentInterface* ListenersTeamAgent = Listener.GetTeamAgent();
+		if (RegisterNewQuery(Listener, ListenersTeamAgent, TargetActor, SightTarget->TargetId, TargetLocation, PropDigest, OnAddedFunc))
+		{
+			bNewQueriesAdded = true;
 		}
 	}
 
@@ -610,29 +858,14 @@ void UAISense_Sight::GenerateQueriesForListener(const FPerceptionListener& Liste
 	for (FTargetsContainer::TConstIterator ItTarget(ObservedTargets); ItTarget; ++ItTarget)
 	{
 		const AActor* TargetActor = ItTarget->Value.GetTargetActor();
-		if (TargetActor == NULL || TargetActor == Avatar)
+		if (TargetActor == nullptr || TargetActor == Avatar)
 		{
 			continue;
 		}
 
-		if (FAISenseAffiliationFilter::ShouldSenseTeam(ListenersTeamAgent, *TargetActor, PropertyDigest.AffiliationFlags))
+		const FVector TargetLocation = TargetActor->GetActorLocation();
+		if (RegisterNewQuery(Listener, ListenersTeamAgent, *TargetActor, ItTarget->Key, TargetLocation, PropertyDigest, OnAddedFunc))
 		{
-			// create a sight query		
-			const float Importance = CalcQueryImportance(Listener, ItTarget->Value.GetLocationSimple(), PropertyDigest.SightRadiusSq);
-			const bool bInRange = Importance > 0.0f;
-			if (!bInRange)
-			{
-				bSightQueriesOutOfRangeDirty = true;
-			}
-			FAISightQuery& AddedQuery = bInRange ? SightQueriesInRange.AddDefaulted_GetRef() : SightQueriesOutOfRange.AddDefaulted_GetRef();
-			AddedQuery.ObserverId = Listener.GetListenerID();
-			AddedQuery.TargetId = ItTarget->Key;
-			AddedQuery.Importance = Importance;
-
-			if (OnAddedFunc)
-			{
-				OnAddedFunc(AddedQuery);
-			}
 			bNewQueriesAdded = true;
 		}
 	}
@@ -642,6 +875,34 @@ void UAISense_Sight::GenerateQueriesForListener(const FPerceptionListener& Liste
 	{
 		RequestImmediateUpdate();
 	}
+}
+
+bool UAISense_Sight::RegisterNewQuery(const FPerceptionListener& Listener, const IGenericTeamAgentInterface* ListenersTeamAgent, const AActor& TargetActor, const FAISightTarget::FTargetId& TargetId, const FVector& TargetLocation, const FDigestedSightProperties& PropDigest, const TFunction<void(FAISightQuery&)>& OnAddedFunc)
+{
+	if (!FAISenseAffiliationFilter::ShouldSenseTeam(ListenersTeamAgent, TargetActor, PropDigest.AffiliationFlags))
+	{
+		return false;
+	}
+
+	// create a sight query
+	const float Importance = CalcQueryImportance(Listener, TargetLocation, PropDigest.SightRadiusSq);
+	const bool bInRange = Importance > 0.0f;
+	if (!bInRange)
+	{
+		bSightQueriesOutOfRangeDirty = true;
+	}
+
+	FAISightQuery& AddedQuery = bInRange ? SightQueriesInRange.AddDefaulted_GetRef() : SightQueriesOutOfRange.AddDefaulted_GetRef();
+	AddedQuery.ObserverId = Listener.GetListenerID();
+	AddedQuery.TargetId = TargetId;
+	AddedQuery.Importance = Importance;
+
+	if (OnAddedFunc)
+	{
+		OnAddedFunc(AddedQuery);
+	}
+
+	return true;
 }
 
 void UAISense_Sight::OnListenerUpdateImpl(const FPerceptionListener& UpdatedListener)
@@ -655,7 +916,7 @@ void UAISense_Sight::OnListenerUpdateImpl(const FPerceptionListener& UpdatedList
 	// see if this listener is a Target as well
 	const FAISightTarget::FTargetId AsTargetId = UpdatedListener.GetBodyActorUniqueID();
 	FAISightTarget* AsTarget = ObservedTargets.Find(AsTargetId);
-	if (AsTarget != NULL)
+	if (AsTarget != nullptr)
 	{
 		if (AsTarget->Target.IsValid())
 		{
@@ -663,7 +924,7 @@ void UAISense_Sight::OnListenerUpdateImpl(const FPerceptionListener& UpdatedList
 			TSet<FPerceptionListenerID> LastVisibleObservers;
 			RemoveAllQueriesToTarget(AsTargetId, [&LastVisibleObservers](const FAISightQuery& Query)
 			{
-				if (Query.bLastResult)
+				if (Query.GetLastResult())
 				{
 					LastVisibleObservers.Add(Query.ObserverId);
 				}
@@ -671,7 +932,7 @@ void UAISense_Sight::OnListenerUpdateImpl(const FPerceptionListener& UpdatedList
 
 			RegisterTarget(*(AsTarget->Target.Get()), [&LastVisibleObservers](FAISightQuery& Query)
 			{
-				Query.bLastResult = LastVisibleObservers.Contains(Query.ObserverId);
+				Query.SetLastResult(LastVisibleObservers.Contains(Query.ObserverId));
 			});
 		}
 		else
@@ -688,10 +949,10 @@ void UAISense_Sight::OnListenerUpdateImpl(const FPerceptionListener& UpdatedList
 		TSet<FAISightTarget::FTargetId> LastVisibleTargets;
 		RemoveAllQueriesByListener(UpdatedListener, [&LastVisibleTargets](const FAISightQuery& Query)
 		{
-			if (Query.bLastResult)
+			if (Query.GetLastResult())
 			{
 				LastVisibleTargets.Add(Query.TargetId);
-			}			
+			}
 		});
 
 		const UAISenseConfig_Sight* SenseConfig = Cast<const UAISenseConfig_Sight>(UpdatedListener.Listener->GetSenseConfig(GetSenseID()));
@@ -701,7 +962,7 @@ void UAISense_Sight::OnListenerUpdateImpl(const FPerceptionListener& UpdatedList
 
 		GenerateQueriesForListener(UpdatedListener, PropertiesDigest, [&LastVisibleTargets](FAISightQuery& Query)
 		{
-			Query.bLastResult = LastVisibleTargets.Contains(Query.TargetId);
+			Query.SetLastResult(LastVisibleTargets.Contains(Query.TargetId));
 		});
 	}
 	else
@@ -749,14 +1010,10 @@ void UAISense_Sight::OnListenerRemovedImpl(const FPerceptionListener& RemovedLis
 void UAISense_Sight::RemoveAllQueriesByListener(const FPerceptionListener& Listener, const TFunction<void(const FAISightQuery&)>& OnRemoveFunc/*= nullptr */)
 {
 	SCOPE_CYCLE_COUNTER(STAT_AI_Sense_Sight_RemoveByListener);
-
-	if ((SightQueriesInRange.Num() + SightQueriesOutOfRange.Num()) == 0)
-	{
-		return;
-	}
+	UE_MT_SCOPED_WRITE_ACCESS(QueriesListAccessDetector);
 
 	const uint32 ListenerId = Listener.GetListenerID();
-	
+
 	auto RemoveQuery = [&ListenerId, &OnRemoveFunc](TArray<FAISightQuery>& SightQueries, const int32 QueryIndex)->EReverseForEachResult
 	{
 		const FAISightQuery& SightQuery = SightQueries[QueryIndex];
@@ -767,7 +1024,7 @@ void UAISense_Sight::RemoveAllQueriesByListener(const FPerceptionListener& Liste
 			{
 				OnRemoveFunc(SightQuery);
 			}
-			SightQueries.RemoveAtSwap(QueryIndex, 1, /*bAllowShrinking=*/false);
+			SightQueries.RemoveAtSwap(QueryIndex, 1, EAllowShrinking::No);
 			return EReverseForEachResult::Modified;
 		}
 		return EReverseForEachResult::UnTouched;
@@ -777,9 +1034,16 @@ void UAISense_Sight::RemoveAllQueriesByListener(const FPerceptionListener& Liste
 	{
 		bSightQueriesOutOfRangeDirty = true;
 	}
+	ReverseForEach(SightQueriesPending, RemoveQuery);
 }
 
 void UAISense_Sight::RemoveAllQueriesToTarget(const FAISightTarget::FTargetId& TargetId, const TFunction<void(const FAISightQuery&)>& OnRemoveFunc/*= nullptr */)
+{
+	UE_MT_SCOPED_WRITE_ACCESS(QueriesListAccessDetector);
+	RemoveAllQueriesToTarget_Internal(TargetId, OnRemoveFunc);
+}
+
+void UAISense_Sight::RemoveAllQueriesToTarget_Internal(const FAISightTarget::FTargetId& TargetId, const TFunction<void(const FAISightQuery&)>& OnRemoveFunc/*= nullptr */)
 {
 	SCOPE_CYCLE_COUNTER(STAT_AI_Sense_Sight_RemoveToTarget);
 
@@ -793,7 +1057,7 @@ void UAISense_Sight::RemoveAllQueriesToTarget(const FAISightTarget::FTargetId& T
 			{
 				OnRemoveFunc(SightQuery);
 			}
-			SightQueries.RemoveAtSwap(QueryIndex, 1, /*bAllowShrinking=*/false);
+			SightQueries.RemoveAtSwap(QueryIndex, 1, EAllowShrinking::No);
 			return EReverseForEachResult::Modified;
 		}
 		return EReverseForEachResult::UnTouched;
@@ -803,6 +1067,7 @@ void UAISense_Sight::RemoveAllQueriesToTarget(const FAISightTarget::FTargetId& T
 	{
 		bSightQueriesOutOfRangeDirty = true;
 	}
+	ReverseForEach(SightQueriesPending, RemoveQuery);
 }
 
 void UAISense_Sight::OnListenerForgetsActor(const FPerceptionListener& Listener, AActor& ActorToForget)
@@ -823,12 +1088,17 @@ void UAISense_Sight::OnListenerForgetsActor(const FPerceptionListener& Listener,
 
 	if (ForEach(SightQueriesInRange, ForgetPreviousResult) == EForEachResult::Continue)
 	{
-		ForEach(SightQueriesOutOfRange, ForgetPreviousResult);
+		if (ForEach(SightQueriesOutOfRange, ForgetPreviousResult) == EForEachResult::Continue)
+		{
+			ForEach(SightQueriesPending, ForgetPreviousResult);
+		}
 	}
 }
 
 void UAISense_Sight::OnListenerForgetsAll(const FPerceptionListener& Listener)
 {
+	UE_MT_SCOPED_WRITE_ACCESS(QueriesListAccessDetector);
+
 	const uint32 ListenerId = Listener.GetListenerID();
 
 	auto ForgetPreviousResult = [&ListenerId](FAISightQuery& SightQuery)->EForEachResult
@@ -842,4 +1112,21 @@ void UAISense_Sight::OnListenerForgetsAll(const FPerceptionListener& Listener)
 
 	ForEach(SightQueriesInRange, ForgetPreviousResult);
 	ForEach(SightQueriesOutOfRange, ForgetPreviousResult);
+	ForEach(SightQueriesPending, ForgetPreviousResult);
 }
+
+#if WITH_GAMEPLAY_DEBUGGER_MENU
+void UAISense_Sight::DescribeSelfToGameplayDebugger(const UAIPerceptionSystem& PerceptionSystem, FGameplayDebuggerCategory& DebuggerCategory) const
+{
+	const int32 TotalQueriesCount = SightQueriesInRange.Num() + SightQueriesOutOfRange.Num() + SightQueriesPending.Num();
+	DebuggerCategory.AddTextLine(
+		FString::Printf(TEXT("%s: %d Targets, %d Queries (InRange:%d, OutOfRange:%d, Pending:%d)"),
+			*GetSenseID().Name.ToString(),
+			ObservedTargets.Num(),
+			TotalQueriesCount,
+			SightQueriesInRange.Num(),
+			SightQueriesOutOfRange.Num(),
+			SightQueriesPending.Num())
+		);
+}
+#endif // WITH_GAMEPLAY_DEBUGGER_MENU

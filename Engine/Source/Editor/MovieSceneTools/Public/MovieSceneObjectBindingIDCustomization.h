@@ -3,14 +3,19 @@
 #pragma once
 
 #include "IPropertyTypeCustomization.h"
+#include "MovieSceneObjectBindingID.h"
 #include "MovieSceneObjectBindingIDPicker.h"
 #include "MovieSceneSequenceID.h"
+#include "Templates/SharedPointer.h"
 
+class FDetailWidgetRow;
+class FDragDropEvent;
+class FDragDropOperation;
 class FReply;
 class IPropertyHandle;
-class UMovieSceneSequence;
-class FDragDropOperation;
 class ISequencer;
+class UMovieSceneSequence;
+struct FGeometry;
 
 namespace UE
 {
@@ -50,7 +55,7 @@ private:
 
 	virtual bool HasMultipleValues() const override;
 
-	FReply OnDrop(TSharedPtr<FDragDropOperation> InOperation);
+	FReply OnDrop(const FGeometry& InGeometry, const FDragDropEvent& InDragDropEvent);
 
 	TSharedPtr<IPropertyHandle> StructProperty;
 };

@@ -1,5 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using EpicGames.Core;
 using IncludeTool.Support;
 using System;
 using System.Collections.Generic;
@@ -165,8 +166,9 @@ namespace IncludeTool
 		/// <summary>
 		/// Prints all the symbols with conflicting definitions
 		/// </summary>
+		/// <param name="InputDir"></param>
 		/// <param name="Log">Writer for log messagsThe source fragment to parse</param>
-		public void PrintConflicts(LineBasedTextWriter Log)
+		public void PrintConflicts(DirectoryReference InputDir, LineBasedTextWriter Log)
 		{
 			foreach(string SymbolName in Lookup.Keys)
 			{
@@ -176,10 +178,17 @@ namespace IncludeTool
 					int NumTypes = Symbols.Select(x => x.Type).Where(x => x != SymbolType.Macro).Distinct().Count();
 					if(NumTypes > 1)
 					{
-						Log.WriteLine("warning: conflicting declarations of '{0}':", SymbolName);
-						foreach(Symbol Symbol in Symbols)
+						// UE-150382 workaround
+						// It appears that symbols are being added to Lookup whether or not branches have been taken
+						string FileName = Symbols.First().Fragment.File.Location.GetFileName();
+						if (Rules.ReportConflictingSymbolsForFile(Symbols.First().Fragment.File.Location))
 						{
-							Log.WriteLine("  {0} in {1}", Symbol.Type, Symbol.Fragment);
+						Log.WriteLine("warning: conflicting declarations of '{0}':", SymbolName);
+							foreach (Symbol Symbol in Symbols)
+						{
+							string RelativePath = Symbol.Fragment.File.Location.MakeRelativeTo(InputDir);
+								Log.WriteLine($"  {Symbol.Type} at {RelativePath}:{Symbol.Location.LineIdx + 1}");
+							}
 						}
 					}
 				}
@@ -282,7 +291,7 @@ namespace IncludeTool
 		/// <param name="Scope">The scope depth; the number of unmatched opening brace tokens</param>
 		void ParseDeclarations(SourceFile File, SourceFragment Fragment, PreprocessorMarkup Markup, ref int Scope)
 		{
-			TokenReader Reader = new TokenReader(File.Text, Markup.Location, Markup.EndLocation);
+			TokenReader Reader = new TokenReader(File.Location.FullName, File.Text, Markup.Location, Markup.EndLocation);
 			if(Reader.MoveNext())
 			{
 				for(;;)
@@ -711,7 +720,7 @@ namespace IncludeTool
 		{
 			foreach (PreprocessorMarkup Markup in HeaderFile.Markup.Where(x => x.Type == PreprocessorMarkupType.Text))
 			{
-				TokenReader Reader = new TokenReader(HeaderFile.Text, Markup.Location, Markup.EndLocation);
+				TokenReader Reader = new TokenReader(HeaderFile.Location.FullName, HeaderFile.Text, Markup.Location, Markup.EndLocation);
 				while(Reader.MoveNext(TokenReaderContext.IgnoreNewlines))
 				{
 					if(!ReadClassOrStructForwardDeclaration(Reader, HeaderFile, SymbolToHeader, Log) 
@@ -980,9 +989,24 @@ namespace IncludeTool
 			Dictionary<Symbol, SymbolReferenceType> References = new Dictionary<Symbol, SymbolReferenceType>();
 
 			TextBuffer Text = Fragment.File.Text;
-			if(Text != null && Fragment.MarkupMax > Fragment.MarkupMin)
+			if (Text != null && Fragment.MarkupMax > Fragment.MarkupMin)
 			{
-				TokenReader Reader = new TokenReader(Fragment.File.Text, Fragment.MinLocation, Fragment.MaxLocation);
+				for (int MarkupIdx = Fragment.MarkupMin; MarkupIdx < Fragment.MarkupMax; MarkupIdx++)
+				{
+					PreprocessorMarkup Markup = Fragment.File.Markup[MarkupIdx];
+					if (Markup.Type == PreprocessorMarkupType.Text)
+					{
+						TokenReader Reader = new TokenReader(Fragment.File.Location.FullName, Fragment.File.Text, Markup.Location, Markup.EndLocation);
+						FindReferences(Reader, Fragment, References);
+					}
+				}
+			}
+
+			return References;
+		}
+
+		public void FindReferences(TokenReader Reader, SourceFragment Fragment, Dictionary<Symbol, SymbolReferenceType> References)
+			{
 				for(bool bMoveNext = Reader.MoveNext(TokenReaderContext.IgnoreNewlines); bMoveNext; )
 				{
 					// Read the current token, and immediately move to the next so that we can lookahead if we need to
@@ -1080,9 +1104,6 @@ namespace IncludeTool
 					}
 				}
 			}
-
-			return References;
-		}
 
 		/// <summary>
 		/// Determines whether a symbol reference should be ignored, because it's to an item defined above in the same file

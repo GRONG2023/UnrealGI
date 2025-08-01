@@ -101,7 +101,7 @@ void FCategoryPropertyNode::InitChildNodes()
 		InitParams.bAllowChildren = true;
 		InitParams.bForceHiddenPropertyVisibility = bShowHiddenProperties;
 		InitParams.bCreateDisableEditOnInstanceNodes = bShouldShowDisableEditOnInstance;
-		InitParams.bIsSparseProperty = SparseProperties.Contains(Properties[PropertyIndex]);
+		InitParams.IsSparseProperty = SparseProperties.Contains(Properties[PropertyIndex]) ? FPropertyNodeInitParams::EIsSparseDataProperty::True : FPropertyNodeInitParams::EIsSparseDataProperty::Inherit;
 
 		NewItemNode->InitNode( InitParams );
 
@@ -117,24 +117,25 @@ bool FCategoryPropertyNode::GetQualifiedName( FString& PathPlusIndex, const bool
 {
 	bool bAddedAnything = false;
 
-	if( ParentNode && StopParent != ParentNode )
+	const TSharedPtr<FPropertyNode> ParentNode = ParentNodeWeakPtr.Pin();
+	if (ParentNode && StopParent != ParentNode.Get())
 	{
 		bAddedAnything = ParentNode->GetQualifiedName(PathPlusIndex, bWithArrayIndex, StopParent, bIgnoreCategories );
-		if( bAddedAnything )
+	}
+	
+	if (!bIgnoreCategories)
+	{
+		if (bAddedAnything)
 		{
 			PathPlusIndex += TEXT(".");
 		}
-	}
-	
-	if( !bIgnoreCategories )
-	{
-		bAddedAnything = true;
+
 		GetCategoryName().AppendString(PathPlusIndex);
+		bAddedAnything = true;
 	}
 
 	return bAddedAnything;
 }
-
 
 FString FCategoryPropertyNode::GetSubcategoryName() const 
 {

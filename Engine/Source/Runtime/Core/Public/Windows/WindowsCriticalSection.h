@@ -14,12 +14,9 @@ class FString;
  */
 class FWindowsCriticalSection
 {
-	/**
-	 * The windows specific critical section
-	 */
-	Windows::CRITICAL_SECTION CriticalSection;
-
 public:
+	FWindowsCriticalSection(const FWindowsCriticalSection&) = delete;
+	FWindowsCriticalSection& operator=(const FWindowsCriticalSection&) = delete;
 
 	/**
 	 * Constructor that initializes the aggregated critical section
@@ -63,6 +60,9 @@ public:
 
 	/**
 	 * Releases the lock on the critical section
+	 * 
+	 * Calling this when not locked is undefined behavior & may cause indefinite waiting on next lock.
+	 * See: https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-leavecriticalsection#remarks
 	 */
 	FORCEINLINE void Unlock()
 	{
@@ -70,29 +70,31 @@ public:
 	}
 
 private:
-	FWindowsCriticalSection(const FWindowsCriticalSection&);
-	FWindowsCriticalSection& operator=(const FWindowsCriticalSection&);
+	/**
+	 * The windows specific critical section
+	 */
+	Windows::CRITICAL_SECTION CriticalSection;
 };
 
 /** System-Wide Critical Section for windows using mutex */
-class CORE_API FWindowsSystemWideCriticalSection
+class FWindowsSystemWideCriticalSection
 {
 public:
 	/** Construct a named, system-wide critical section and attempt to get access/ownership of it */
-	explicit FWindowsSystemWideCriticalSection(const class FString& InName, FTimespan InTimeout = FTimespan::Zero());
+	CORE_API explicit FWindowsSystemWideCriticalSection(const class FString& InName, FTimespan InTimeout = FTimespan::Zero());
 
 	/** Destructor releases system-wide critical section if it is currently owned */
-	~FWindowsSystemWideCriticalSection();
+	CORE_API ~FWindowsSystemWideCriticalSection();
 
 	/**
 	 * Does the calling thread have ownership of the system-wide critical section?
 	 *
 	 * @return True if obtained. WARNING: Returns true for an owned but previously abandoned locks so shared resources can be in undetermined states. You must handle shared data robustly.
 	 */
-	bool IsValid() const;
+	CORE_API bool IsValid() const;
 
 	/** Releases system-wide critical section if it is currently owned */
-	void Release();
+	CORE_API void Release();
 
 private:
 	FWindowsSystemWideCriticalSection(const FWindowsSystemWideCriticalSection&);
@@ -110,36 +112,64 @@ private:
 class FWindowsRWLock
 {
 public:
+	FWindowsRWLock(const FWindowsRWLock&) = delete;
+	FWindowsRWLock& operator=(const FWindowsRWLock&) = delete;
+
 	FORCEINLINE FWindowsRWLock(uint32 Level = 0)
 	{
 		Windows::InitializeSRWLock(&Mutex);
 	}
-	
-	FORCEINLINE ~FWindowsRWLock()
+
+	~FWindowsRWLock()
 	{
+		checkf(!IsLocked(), TEXT("Destroying a lock that is still held!"));
 	}
-	
+
 	FORCEINLINE void ReadLock()
 	{
 		Windows::AcquireSRWLockShared(&Mutex);
 	}
-	
+
 	FORCEINLINE void WriteLock()
 	{
 		Windows::AcquireSRWLockExclusive(&Mutex);
 	}
-	
+
+	FORCEINLINE bool TryReadLock()
+	{
+		return !!Windows::TryAcquireSRWLockShared(&Mutex);
+	}
+
+	FORCEINLINE bool TryWriteLock()
+	{
+		return !!Windows::TryAcquireSRWLockExclusive(&Mutex);
+	}
+
 	FORCEINLINE void ReadUnlock()
 	{
 		Windows::ReleaseSRWLockShared(&Mutex);
 	}
-	
+
 	FORCEINLINE void WriteUnlock()
 	{
 		Windows::ReleaseSRWLockExclusive(&Mutex);
 	}
-	
+
 private:
+
+	bool IsLocked()
+	{
+		if (Windows::TryAcquireSRWLockExclusive(&Mutex))
+		{
+			Windows::ReleaseSRWLockExclusive(&Mutex);
+			return false;
+		}
+		else
+		{
+			return true;
+		}
+	}
+
 	Windows::SRWLOCK Mutex;
 };
 

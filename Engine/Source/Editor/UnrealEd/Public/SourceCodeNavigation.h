@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Textures/SlateIcon.h"
 #include "UObject/WeakObjectPtr.h"
 
 class AActor;
@@ -51,7 +52,7 @@ private:
 * Should be registered with FSourceCodeNavigation::AddNavigationHandler and unregistered
 * using FSourceCodeNavigation::Remove.NavigationHandler
 */
-class ISourceCodeNavigationHandler : public TSharedFromThis<ISourceCodeNavigationHandler, ESPMode::Fast>
+class ISourceCodeNavigationHandler : public TSharedFromThis<ISourceCodeNavigationHandler>
 {
 public:
 	virtual ~ISourceCodeNavigationHandler() {};
@@ -317,6 +318,12 @@ public:
 	/** Returns the name of the selected IDE */
 	UNREALED_API static FText GetSelectedSourceCodeIDE();
 
+	/** Returns the IDE specific representative icon to open source code*/
+	UNREALED_API static FSlateIcon GetOpenSourceCodeIDEIcon();
+
+	/** Returns the IDE specific representative icon to refresh source code*/
+	UNREALED_API static FSlateIcon GetRefreshSourceCodeIDEIcon();
+
 	/** Returns the url to the location where the suggested IDE can be downloaded */
 	UNREALED_API static FString GetSuggestedSourceCodeIDEDownloadURL();
 
@@ -330,7 +337,7 @@ public:
 	UNREALED_API static void RefreshCompilerAvailability();
 
 	/** Returns true if the compiler for the current platform is available for use */
-	UNREALED_API static bool IsCompilerAvailable() { return bCachedIsCompilerAvailable; }
+	static bool IsCompilerAvailable() { return bCachedIsCompilerAvailable; }
 
 	/** Finds the base directory for a given module name. Does not rely on symbols; finds matching .build.cs files. */
 	UNREALED_API static bool FindModulePath( const FString& InModuleName, FString& OutModulePath );
@@ -382,6 +389,9 @@ public:
 
 	/** Remove a navigation handler */
 	UNREALED_API static void RemoveNavigationHandler(ISourceCodeNavigationHandler* Handler);
+
+	/** Set a new preferred accessor and refresh compiler status */
+	UNREALED_API static void SetPreferredAccessor(const TCHAR* Name);
 
 private:
 

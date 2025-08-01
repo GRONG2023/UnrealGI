@@ -18,20 +18,10 @@
 class UPhysicalMaterial;
 struct FNavigableGeometryExport;
 
-#if WITH_PHYSX
-namespace physx
-{
-	class PxMaterial;
-	class PxTriangleMesh;
-}
-#elif WITH_CHAOS
 namespace Chaos
 {
 	class FTriangleMeshImplicitObject;
 }
-#endif
-
-
 
 UCLASS()
 class ULandscapeMeshCollisionComponent : public ULandscapeHeightfieldCollisionComponent
@@ -53,35 +43,35 @@ public:
 	{
 		FGuid Guid;
 
-#if WITH_PHYSX
-		/** List of PxMaterials used on this landscape */
-		TArray<physx::PxMaterial*>	UsedPhysicalMaterialArray;
-		physx::PxTriangleMesh*		RBTriangleMesh;
-#if WITH_EDITOR
-		physx::PxTriangleMesh*		RBTriangleMeshEd; // Used only by landscape editor, does not have holes in it
-#endif	//WITH_EDITOR
-#endif	//WITH_PHYSX
-
-#if WITH_CHAOS
 		TArray<Chaos::FMaterialHandle> UsedChaosMaterials;
+		Chaos::FTriangleMeshImplicitObjectPtr TrimeshGeometry;
+
+		// When deleted, remove PRAGMA_DISABLE_DEPRECATION_WARNINGS / PRAGMA_ENABLE_DEPRECATION_WARNINGS from ~FTriMeshGeometryRef()
+		UE_DEPRECATED(5.4, "Please use TrimeshGeometry instead")
 		TUniquePtr<Chaos::FTriangleMeshImplicitObject> Trimesh;
-#if WITH_EDITOR
+		
+#if WITH_EDITORONLY_DATA
+		Chaos::FTriangleMeshImplicitObjectPtr EditorTrimeshGeometry;
+		
+		// When deleted, remove PRAGMA_DISABLE_DEPRECATION_WARNINGS / PRAGMA_ENABLE_DEPRECATION_WARNINGS from ~FTriMeshGeometryRef()
+		UE_DEPRECATED(5.4, "Please use EditorTrimeshGeometry instead")
 		TUniquePtr<Chaos::FTriangleMeshImplicitObject> EditorTrimesh;
-#endif // WITH_EDITOR
-#endif // WITH_CHAOS
+#endif // WITH_EDITORONLY_DATA
 
 		FTriMeshGeometryRef();
 		FTriMeshGeometryRef(FGuid& InGuid);
 		virtual ~FTriMeshGeometryRef();
+
+		void GetResourceSizeEx(FResourceSizeEx& CumulativeResourceSize);
 	};
 
 #if WITH_EDITORONLY_DATA
 	/** The collision mesh values. */
-	FWordBulkData								CollisionXYOffsetData; //  X, Y Offset in raw format...
+	FWordBulkData CollisionXYOffsetData; //  X, Y Offset in raw format...
 #endif //WITH_EDITORONLY_DATA
 
 	/** Physics engine version of heightfield data. */
-	TRefCountPtr<FTriMeshGeometryRef>			MeshRef;
+	TRefCountPtr<FTriMeshGeometryRef> MeshRef;
 
 	//~ Begin UActorComponent Interface.
 protected:
@@ -98,14 +88,19 @@ public:
 	virtual bool DoCustomNavigableGeometryExport(FNavigableGeometryExport& GeomExport) const override;
 	//End UPrimitiveComponent interface
 
+	//~ Begin INavRelevantInterface Interface
+	virtual bool SupportsGatheringGeometrySlices() const override { return false; }
+	//~ End INavRelevantInterface Interface
+
 	//~ Begin UObject Interface.
 	virtual void Serialize(FArchive& Ar) override;
 	virtual void BeginDestroy() override;
+	virtual void GetResourceSizeEx(FResourceSizeEx& CumulativeResourceSize) override;
 #if WITH_EDITOR
 	virtual void ExportCustomProperties(FOutputDevice& Out, uint32 Indent) override;
 	virtual void ImportCustomProperties(const TCHAR* SourceText, FFeedbackContext* Warn) override;
 
-	virtual bool CookCollisionData(const FName& Format, bool bUseOnlyDefMaterial, bool bCheckDDC, TArray<uint8>& OutCookedData, TArray<UPhysicalMaterial*>& InOutMaterials) const override;
+	virtual bool CookCollisionData(const FName& Format, bool bUseDefaultMaterialOnly, bool bCheckDDC, TArray<uint8>& OutCookedData, TArray<UPhysicalMaterial*>& InOutMaterials) const override;
 	virtual uint32 ComputeCollisionHash() const override { return 0; }
 #endif
 	//~ End UObject Interface.

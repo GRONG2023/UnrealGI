@@ -18,6 +18,7 @@ class ULevel;
 class UMaterialInterface;
 class UPrimitiveComponent;
 class UTextureLightProfile;
+enum class ELightUnits : uint8;
 
 /** 
  * A texture containing depth values of static objects that was computed during the lighting build.
@@ -33,11 +34,11 @@ public:
 
 	const FStaticShadowDepthMapData* Data;
 
-	virtual void InitRHI();
+	virtual void InitRHI(FRHICommandListBase& RHICmdList);
 };
 
-UCLASS(abstract, HideCategories=(Trigger,Activation,"Components|Activation",Physics), ShowCategories=(Mobility))
-class ENGINE_API ULightComponent : public ULightComponentBase
+UCLASS(abstract, HideCategories=(Trigger,Activation,"Components|Activation",Physics), ShowCategories=(Mobility), MinimalAPI)
+class ULightComponent : public ULightComponentBase
 {
 	GENERATED_UCLASS_BODY()
 
@@ -45,7 +46,7 @@ class ENGINE_API ULightComponent : public ULightComponentBase
 	* Color temperature in Kelvin of the blackbody illuminant.
 	* White (D65) is 6500K.
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, interp, Category = Light, meta = (UIMin = "1700.0", UIMax = "12000.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, interp, Category = Light, meta = (UIMin = "1700.0", UIMax = "12000.0", ShouldShowInViewport = true, DisplayAfter ="bUseTemperature"))
 	float Temperature;
 	
 	UPROPERTY(EditAnywhere, Category = Performance)
@@ -55,7 +56,7 @@ class ENGINE_API ULightComponent : public ULightComponentBase
 	float MaxDistanceFadeRange;
 
 	/** false: use white (D65) as illuminant. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Light, meta=(DisplayName = "Use Temperature"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Light, meta=(DisplayName = "Use Temperature", ShouldShowInViewport = true))
 	uint32 bUseTemperature : 1;
 
 	/** 
@@ -80,6 +81,7 @@ class ENGINE_API ULightComponent : public ULightComponentBase
 
 	/** 
 	 * Scales the resolution of shadowmaps used to shadow this light.  By default shadowmap resolution is chosen based on screen size of the caster. 
+	 * Setting the scale to zero disables shadow maps, but does not disable, e.g., contact shadows.
 	 * Note: shadowmap resolution is still clamped by 'r.Shadow.MaxResolution'
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Light, AdvancedDisplay, meta=(UIMin = ".125", UIMax = "8"))
@@ -116,6 +118,14 @@ class ENGINE_API ULightComponent : public ULightComponentBase
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Light, AdvancedDisplay, meta = (DisplayName = "Contact Shadow Length In World Space Units"))
 	uint32 ContactShadowLengthInWS : 1;
 
+	/** Intensity of the shadows cast by primitives with "cast contact shadow" enabled. 0 = no shadow, 1 (default) = fully shadowed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Light, AdvancedDisplay, meta = (ClampMin = 0.0, ClampMax = 1.0, UIMin = "0.0", UIMax = "1.0"))
+	float ContactShadowCastingIntensity;
+
+	/** Intensity of the shadows cast by primitives with "cast contact shadow" disabled. 0 (default) = no shadow, 1 = fully shadowed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Light, AdvancedDisplay, meta = (ClampMin = 0.0, ClampMax = 1.0))
+	float ContactShadowNonCastingIntensity;
+
 	UPROPERTY()
 	uint32 InverseSquaredFalloff_DEPRECATED:1;
 
@@ -130,12 +140,6 @@ class ENGINE_API ULightComponent : public ULightComponentBase
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Light, AdvancedDisplay)
 	uint32 bCastShadowsFromCinematicObjectsOnly:1;
-
-	/**
-	 * Whether the light should be injected into the Light Propagation Volume
-	 **/
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Light, AdvancedDisplay, meta=(DisplayName = "Dynamic Indirect Lighting"))
-	uint32 bAffectDynamicIndirectLighting : 1;
 
 	/**
 	* Enables cached shadows for movable primitives for this light even if r.shadow.cachedshadowscastfrommovableprimitives is 0
@@ -156,7 +160,13 @@ class ENGINE_API ULightComponent : public ULightComponentBase
 	 * Light functions are supported within VolumetricFog, but only for Directional, Point and Spot lights. Rect lights are not supported.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=LightFunction)
-	class UMaterialInterface* LightFunctionMaterial;
+	TObjectPtr<class UMaterialInterface> LightFunctionMaterial;
+
+#if WITH_EDITORONLY_DATA
+	/** When clearing the light func, e.g. because the light is made static, this field remembers the last value */
+	UPROPERTY(Transient)
+	TObjectPtr<class UMaterialInterface> StashedLightFunctionMaterial;
+#endif
 
 	/** Scales the light function projection.  X and Y scale in the directions perpendicular to the light's direction, Z scales along the light direction. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=LightFunction, meta=(AllowPreserveRatio = "true"))
@@ -164,10 +174,10 @@ class ENGINE_API ULightComponent : public ULightComponentBase
 
 	/** IES texture (light profiles from real world measured data) */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=LightProfiles, meta=(DisplayName = "IES Texture"))
-	class UTextureLightProfile* IESTexture;
+	TObjectPtr<class UTextureLightProfile> IESTexture;
 
 	/** true: take light brightness from IES profile, false: use the light brightness - the maximum light in one direction is used to define no masking. Use with InverseSquareFalloff. Will be disabled if a valid IES profile texture is not supplied. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=LightProfiles, meta=(DisplayName = "Use IES Intensity"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=LightProfiles, meta=(DisplayName = "Use IES Intensity", EditCondition="IESTexture!=nullptr"))
 	uint32 bUseIESBrightness : 1;
 
 	/** Global scale for IES brightness contribution. Only available when "Use IES Brightness" is selected, and a valid IES profile texture is set */
@@ -231,87 +241,93 @@ class ENGINE_API ULightComponent : public ULightComponentBase
 public:
 	/** Set intensity of the light */
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light")
-	void SetIntensity(float NewIntensity);
+	ENGINE_API void SetIntensity(float NewIntensity);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light")
-	void SetIndirectLightingIntensity(float NewIntensity);
+	ENGINE_API void SetIndirectLightingIntensity(float NewIntensity);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light")
-	void SetVolumetricScatteringIntensity(float NewIntensity);
+	ENGINE_API void SetVolumetricScatteringIntensity(float NewIntensity);
 
 	/** Set color of the light */
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light")
-	void SetLightColor(FLinearColor NewLightColor, bool bSRGB = true);
+	ENGINE_API void SetLightColor(FLinearColor NewLightColor, bool bSRGB = true);
+
+	/** Set color of the light */
+	UFUNCTION(Category="Rendering|Components|Light")
+	ENGINE_API void SetLightFColor(FColor NewLightColor);
 
 	UFUNCTION(BlueprintCallable, Category = "Rendering|Components|Light")
-	void SetTemperature(float NewTemperature);
+	ENGINE_API void SetTemperature(float NewTemperature);
 
 	UFUNCTION(BlueprintCallable, Category = "Rendering|Components|Light")
-	void SetUseTemperature(bool bNewValue);
+	ENGINE_API void SetUseTemperature(bool bNewValue);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light")
-	void SetLightFunctionMaterial(UMaterialInterface* NewLightFunctionMaterial);
+	ENGINE_API void SetLightFunctionMaterial(UMaterialInterface* NewLightFunctionMaterial);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light")
-	void SetLightFunctionScale(FVector NewLightFunctionScale);
+	ENGINE_API void SetLightFunctionScale(FVector NewLightFunctionScale);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light")
-	void SetLightFunctionFadeDistance(float NewLightFunctionFadeDistance);
+	ENGINE_API void SetLightFunctionFadeDistance(float NewLightFunctionFadeDistance);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light")
-	void SetLightFunctionDisabledBrightness(float NewValue);
+	ENGINE_API void SetLightFunctionDisabledBrightness(float NewValue);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light")
-	void SetAffectDynamicIndirectLighting(bool bNewValue);
-
-	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light")
-	void SetAffectTranslucentLighting(bool bNewValue);
+	ENGINE_API void SetAffectTranslucentLighting(bool bNewValue);
 
 	UFUNCTION(BlueprintCallable, Category = "Rendering|Components|Light")
-	void SetTransmission(bool bNewValue);
+	ENGINE_API void SetTransmission(bool bNewValue);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light")
-	void SetEnableLightShaftBloom(bool bNewValue);
+	ENGINE_API void SetEnableLightShaftBloom(bool bNewValue);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light")
-	void SetBloomScale(float NewValue);
+	ENGINE_API void SetBloomScale(float NewValue);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light")
-	void SetBloomThreshold(float NewValue);
+	ENGINE_API void SetBloomThreshold(float NewValue);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light")
-	void SetBloomMaxBrightness(float NewValue);
+	ENGINE_API void SetBloomMaxBrightness(float NewValue);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light")
-	void SetBloomTint(FColor NewValue);
+	ENGINE_API void SetBloomTint(FColor NewValue);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light", meta=(DisplayName = "Set IES Texture"))
-	void SetIESTexture(UTextureLightProfile* NewValue);
+	ENGINE_API void SetIESTexture(UTextureLightProfile* NewValue);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light", meta=(DisplayName = "Set Use IES Intensity"))
-	void SetUseIESBrightness(bool bNewValue);
+	ENGINE_API void SetUseIESBrightness(bool bNewValue);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light", meta=(DisplayName = "Set IES Intensity Scale"))
-	void SetIESBrightnessScale(float NewValue);
+	ENGINE_API void SetIESBrightnessScale(float NewValue);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light")
-	void SetShadowBias(float NewValue);
+	ENGINE_API void SetShadowBias(float NewValue);
 	
 	UFUNCTION(BlueprintCallable, Category = "Rendering|Components|Light")
-	void SetShadowSlopeBias(float NewValue);
+	ENGINE_API void SetShadowSlopeBias(float NewValue);
 
 	UFUNCTION(BlueprintCallable, Category = "Rendering|Components|Light")
-	void SetSpecularScale(float NewValue);
+	ENGINE_API void SetSpecularScale(float NewValue);
 
 	UFUNCTION(BlueprintCallable, Category = "Rendering|Components|Light")
-	void SetForceCachedShadowsForMovablePrimitives(bool bNewValue);
+	ENGINE_API void SetForceCachedShadowsForMovablePrimitives(bool bNewValue);
 
 	UFUNCTION(BlueprintCallable, Category = "Rendering|Components|Light")
-	void SetLightingChannels(bool bChannel0, bool bChannel1, bool bChannel2);
+	ENGINE_API void SetLightingChannels(bool bChannel0, bool bChannel1, bool bChannel2);
 
 public:
 	/** The light's scene info. */
 	class FLightSceneProxy* SceneProxy;
+
+	/**
+	 * Pushes new selection state to the render thread light proxy
+	 */
+	ENGINE_API void PushSelectionToProxy();
 
 	FStaticShadowDepthMap StaticShadowDepthMap;
 
@@ -327,14 +343,14 @@ public:
 	 * @param PrimitiveSceneInfo - The primitive to test.
 	 * @return True if the light affects the primitive.
 	 */
-	bool AffectsPrimitive(const UPrimitiveComponent* Primitive) const;
+	ENGINE_API bool AffectsPrimitive(const UPrimitiveComponent* Primitive) const;
 
 	/**
 	 * Test whether the light affects the given bounding volume.
 	 * @param Bounds - The bounding volume to test.
 	 * @return True if the light affects the bounding volume
 	 */
-	virtual bool AffectsBounds(const FBoxSphereBounds& InBounds) const;
+	ENGINE_API virtual bool AffectsBounds(const FBoxSphereBounds& InBounds) const;
 
 	/**
 	 * Return the world-space bounding box of the light's influence.
@@ -347,27 +363,35 @@ public:
 		return FSphere(FVector::ZeroVector, WORLD_MAX);
 	}
 
+#if WITH_EDITOR
+	virtual FBox GetStreamingBounds() const override
+	{
+		return GetBoundingBox();
+	}
+#endif // WITH_EDITOR
+
 	/**
 	 * Return the homogenous position of the light.
 	 */
-	virtual FVector4 GetLightPosition() const PURE_VIRTUAL(ULightComponent::GetPosition,return FVector4(););
+	ENGINE_API virtual FVector4 GetLightPosition() const PURE_VIRTUAL(ULightComponent::GetPosition,return FVector4(););
 
 	/**
 	* @return ELightComponentType for the light component class
 	*/
-	virtual ELightComponentType GetLightType() const PURE_VIRTUAL(ULightComponent::GetLightType,return LightType_MAX;);
+	ENGINE_API virtual ELightComponentType GetLightType() const PURE_VIRTUAL(ULightComponent::GetLightType,return LightType_MAX;);
 
-	virtual FLightmassLightSettings GetLightmassSettings() const PURE_VIRTUAL(ULightComponent::GetLightmassSettings,return FLightmassLightSettings(););
+	ENGINE_API virtual FLightmassLightSettings GetLightmassSettings() const PURE_VIRTUAL(ULightComponent::GetLightmassSettings,return FLightmassLightSettings(););
 
-	virtual float GetUniformPenumbraSize() const PURE_VIRTUAL(ULightComponent::GetUniformPenumbraSize,return 0;);
+	ENGINE_API virtual float GetUniformPenumbraSize() const PURE_VIRTUAL(ULightComponent::GetUniformPenumbraSize,return 0;);
 
+	ENGINE_API virtual ELightUnits GetLightUnits() const;
 
 	/**
 	 * Check whether a given primitive will cast shadows from this light.
 	 * @param Primitive - The potential shadow caster.
 	 * @return Returns True if a primitive blocks this light.
 	 */
-	bool IsShadowCast(UPrimitiveComponent* Primitive) const;
+	ENGINE_API bool IsShadowCast(UPrimitiveComponent* Primitive) const;
 
 	/* Whether to consider light as a sunlight for atmospheric scattering. */  
 	virtual bool IsUsedAsAtmosphereSunLight() const
@@ -384,38 +408,45 @@ public:
 	}
 
 	/** Compute current light brightness based on whether there is a valid IES profile texture attached, and whether IES brightness is enabled */
-	virtual float ComputeLightBrightness() const;
+	ENGINE_API virtual float ComputeLightBrightness() const;
 #if WITH_EDITOR
 	/** Set the Intensity using the brightness. The unit of brightness depends on the light type. */
-	virtual void SetLightBrightness(float InBrightness);
+	ENGINE_API virtual void SetLightBrightness(float InBrightness);
 #endif
 
 	//~ Begin UObject Interface.
-	virtual void Serialize(FArchive& Ar) override;
-	virtual void PostLoad() override;
+	ENGINE_API virtual void Serialize(FArchive& Ar) override;
+	ENGINE_API virtual void PostLoad() override;
 #if WITH_EDITOR
-	virtual void PreSave(const class ITargetPlatform* TargetPlatform) override;
-	virtual bool CanEditChange(const FProperty* InProperty) const override;
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
-	virtual void UpdateLightSpriteTexture() override;
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS // Suppress compiler warning on override of deprecated function
+	UE_DEPRECATED(5.0, "Use version that takes FObjectPreSaveContext instead.")
+	ENGINE_API virtual void PreSave(const class ITargetPlatform* TargetPlatform) override;
+	ENGINE_API PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	virtual void PreSave(FObjectPreSaveContext ObjectSaveContext) override;
+	ENGINE_API virtual bool CanEditChange(const FProperty* InProperty) const override;
+	ENGINE_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	ENGINE_API virtual void UpdateLightSpriteTexture() override;
 #endif // WITH_EDITOR
-	virtual void BeginDestroy() override;
-	virtual bool IsReadyForFinishDestroy() override;
+	ENGINE_API virtual void BeginDestroy() override;
+	ENGINE_API virtual bool IsReadyForFinishDestroy() override;
 	//~ End UObject Interface.
 
-	virtual TStructOnScope<FActorComponentInstanceData> GetComponentInstanceData() const override;
-	void ApplyComponentInstanceData(struct FPrecomputedLightInstanceData* ComponentInstanceData);
-	virtual void PropagateLightingScenarioChange() override;
-	virtual bool IsPrecomputedLightingValid() const override;
+	ENGINE_API virtual TStructOnScope<FActorComponentInstanceData> GetComponentInstanceData() const override;
+	ENGINE_API void ApplyComponentInstanceData(struct FPrecomputedLightInstanceData* ComponentInstanceData);
+	ENGINE_API virtual void PropagateLightingScenarioChange() override;
+	ENGINE_API virtual bool IsPrecomputedLightingValid() const override;
 
 	/** @return number of material elements in this primitive */
-	virtual int32 GetNumMaterials() const;
+	ENGINE_API virtual int32 GetNumMaterials() const;
 
 	/** @return MaterialInterface assigned to the given material index (if any) */
-	virtual UMaterialInterface* GetMaterial(int32 ElementIndex) const;
+	ENGINE_API virtual UMaterialInterface* GetMaterial(int32 ElementIndex) const;
 
 	/** Set the MaterialInterface to use for the given element index (if valid) */
-	virtual void SetMaterial(int32 ElementIndex, UMaterialInterface* InMaterial);
+	ENGINE_API virtual void SetMaterial(int32 ElementIndex, UMaterialInterface* InMaterial);
+
+	/** Set the light func to null, but remember the current value so it can be restored later */
+	ENGINE_API void ClearLightFunctionMaterial();
 
 	virtual class FLightSceneProxy* CreateSceneProxy() const
 	{
@@ -424,44 +455,46 @@ public:
 
 protected:
 	//~ Begin UActorComponent Interface
-	virtual void OnRegister() override;
-	virtual void CreateRenderState_Concurrent(FRegisterComponentContext* Context) override;
-	virtual void SendRenderTransform_Concurrent() override;
-	virtual void DestroyRenderState_Concurrent() override;
+	ENGINE_API virtual void OnRegister() override;
+	ENGINE_API virtual void CreateRenderState_Concurrent(FRegisterComponentContext* Context) override;
+	ENGINE_API virtual void SendRenderTransform_Concurrent() override;
+	ENGINE_API virtual void DestroyRenderState_Concurrent() override;
 	//~ Begin UActorComponent Interface
 
+	//~ Begin USceneComponent Interface
+#if WITH_EDITOR
+	ENGINE_API virtual bool GetMaterialPropertyPath(int32 ElementIndex, UObject*& OutOwner, FString& OutPropertyPath, FProperty*& OutProperty) override;
+#endif // WITH_EDITOR
+	//~ End USceneComponent Interface
+
 public:
-	virtual void InvalidateLightingCacheDetailed(bool bInvalidateBuildEnqueuedLighting, bool bTranslationOnly) override;
+	ENGINE_API virtual void InvalidateLightingCacheDetailed(bool bInvalidateBuildEnqueuedLighting, bool bTranslationOnly) override;
 
 	/** Script interface to retrieve light direction. */
-	FVector GetDirection() const;
+	ENGINE_API FVector GetDirection() const;
 
 	/** Script interface to update the color and brightness on the render thread. */
-	void UpdateColorAndBrightness();
+	ENGINE_API void UpdateColorAndBrightness();
 
-	const FLightComponentMapBuildData* GetLightComponentMapBuildData() const;
+	ENGINE_API const FLightComponentMapBuildData* GetLightComponentMapBuildData() const;
 
-	void InitializeStaticShadowDepthMap();
+	ENGINE_API void InitializeStaticShadowDepthMap();
 
-	FLinearColor GetColoredLightBrightness() const;
+	ENGINE_API FLinearColor GetColoredLightBrightness() const;
 
-	/** 
-	 * Called when property is modified by InterpPropertyTracks
-	 *
-	 * @param PropertyThatChanged	Property that changed
-	 */
-	virtual void PostInterpChange(FProperty* PropertyThatChanged) override;
+	/** Get the color temperature in the working color space. */
+	ENGINE_API FLinearColor GetColorTemperature() const;
 
 	/** 
 	 * Iterates over ALL stationary light components in the target world and assigns their preview shadowmap channel, and updates light icons accordingly.
 	 * Also handles assignment after a lighting build, so that the same algorithm is used for previewing and static lighting.
 	 */
-	static void ReassignStationaryLightChannels(UWorld* TargetWorld, bool bAssignForLightingBuild, ULevel* LightingScenario);
+	static ENGINE_API void ReassignStationaryLightChannels(UWorld* TargetWorld, bool bAssignForLightingBuild, ULevel* LightingScenario);
 
 	DECLARE_MULTICAST_DELEGATE_OneParam(FOnUpdateColorAndBrightness, ULightComponent&);
 
 	/** Called When light color or brightness needs update */
-	static FOnUpdateColorAndBrightness UpdateColorAndBrightnessEvent;
+	static ENGINE_API FOnUpdateColorAndBrightness UpdateColorAndBrightnessEvent;
 };
 
 

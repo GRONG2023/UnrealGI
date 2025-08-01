@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AndroidTargetSettingsCustomization.h"
+#include "Misc/App.h"
 #include "Misc/Paths.h"
 #include "Layout/Margin.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
@@ -13,7 +14,7 @@
 #include "Widgets/Text/SRichTextBlock.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Input/SButton.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "AndroidRuntimeSettings.h"
 #include "PropertyHandle.h"
 #include "DetailLayoutBuilder.h"
@@ -62,19 +63,16 @@ FAndroidTargetSettingsCustomization::FAndroidTargetSettingsCustomization()
 	, EngineProjectPropertiesPath(EngineAndroidPath / TEXT("project.properties"))
 	, GameProjectPropertiesPath(GameAndroidPath / TEXT("project.properties"))
 {
-	new (IconNames) FPlatformIconInfo(TEXT("res/drawable/icon.png"), LOCTEXT("SettingsIcon", "Icon"), FText::GetEmpty(), 48, 48, FPlatformIconInfo::Required);
-	new (IconNames) FPlatformIconInfo(TEXT("res/drawable-ldpi/icon.png"), LOCTEXT("SettingsIcon_LDPI", "LDPI Icon"), FText::GetEmpty(), 36, 36, FPlatformIconInfo::Required);
-	new (IconNames) FPlatformIconInfo(TEXT("res/drawable-mdpi/icon.png"), LOCTEXT("SettingsIcon_MDPI", "MDPI Icon"), FText::GetEmpty(), 48, 48, FPlatformIconInfo::Required);
-	new (IconNames) FPlatformIconInfo(TEXT("res/drawable-hdpi/icon.png"), LOCTEXT("SettingsIcon_HDPI", "HDPI Icon"), FText::GetEmpty(), 72, 72, FPlatformIconInfo::Required);
-	new (IconNames) FPlatformIconInfo(TEXT("res/drawable-xhdpi/icon.png"), LOCTEXT("SettingsIcon_XHDPI", "XHDPI Icon"), FText::GetEmpty(), 96, 96, FPlatformIconInfo::Required);
+	IconNames.Emplace(TEXT("res/drawable/icon.png"), LOCTEXT("SettingsIcon", "Icon"), FText::GetEmpty(), 48, 48, FPlatformIconInfo::Required);
+	IconNames.Emplace(TEXT("res/drawable-ldpi/icon.png"), LOCTEXT("SettingsIcon_LDPI", "LDPI Icon"), FText::GetEmpty(), 36, 36, FPlatformIconInfo::Required);
+	IconNames.Emplace(TEXT("res/drawable-mdpi/icon.png"), LOCTEXT("SettingsIcon_MDPI", "MDPI Icon"), FText::GetEmpty(), 48, 48, FPlatformIconInfo::Required);
+	IconNames.Emplace(TEXT("res/drawable-hdpi/icon.png"), LOCTEXT("SettingsIcon_HDPI", "HDPI Icon"), FText::GetEmpty(), 72, 72, FPlatformIconInfo::Required);
+	IconNames.Emplace(TEXT("res/drawable-xhdpi/icon.png"), LOCTEXT("SettingsIcon_XHDPI", "XHDPI Icon"), FText::GetEmpty(), 96, 96, FPlatformIconInfo::Required);
 
-	new (LaunchImageNames)FPlatformIconInfo(TEXT("res/drawable/downloadimagev.png"), LOCTEXT("SettingsIcon_DownloadImageV", "Download Background Vertical Image"), FText::GetEmpty(), 720, 1280, FPlatformIconInfo::Required);
-	new (LaunchImageNames)FPlatformIconInfo(TEXT("res/drawable/downloadimageh.png"), LOCTEXT("SettingsIcon_DownloadImageH", "Download Background Horizontal Image"), FText::GetEmpty(), 1280, 720, FPlatformIconInfo::Required);
-	new (LaunchImageNames)FPlatformIconInfo(TEXT("res/drawable/splashscreen_portrait.png"), LOCTEXT("LaunchImage_Portrait", "Launch Portrait"), FText::GetEmpty(), 360, 640, FPlatformIconInfo::Required);
-	new (LaunchImageNames)FPlatformIconInfo(TEXT("res/drawable/splashscreen_landscape.png"), LOCTEXT("LaunchImage_Landscape", "Launch Landscape"), FText::GetEmpty(), 640, 360, FPlatformIconInfo::Required);
-
-	new (DaydreamAppTileImageNames) FPlatformIconInfo(TEXT("res/drawable-nodpi/vr_icon.png"), LOCTEXT("AppTile_Icon", "App Tile Icon"), FText::GetEmpty(), 512, 512, FPlatformIconInfo::Optional);
-	new (DaydreamAppTileImageNames) FPlatformIconInfo(TEXT("res/drawable-nodpi/vr_icon_background.png"), LOCTEXT("AppTile_Icon_Background", "App Tile Icon Background"), FText::GetEmpty(), 512, 512, FPlatformIconInfo::Optional);
+	LaunchImageNames.Emplace(TEXT("res/drawable/downloadimagev.png"), LOCTEXT("SettingsIcon_DownloadImageV", "Download Background Vertical Image"), FText::GetEmpty(), 720, 1280, FPlatformIconInfo::Required);
+	LaunchImageNames.Emplace(TEXT("res/drawable/downloadimageh.png"), LOCTEXT("SettingsIcon_DownloadImageH", "Download Background Horizontal Image"), FText::GetEmpty(), 1280, 720, FPlatformIconInfo::Required);
+	LaunchImageNames.Emplace(TEXT("res/drawable/splashscreen_portrait.png"), LOCTEXT("LaunchImage_Portrait", "Launch Portrait"), FText::GetEmpty(), 360, 640, FPlatformIconInfo::Required);
+	LaunchImageNames.Emplace(TEXT("res/drawable/splashscreen_landscape.png"), LOCTEXT("LaunchImage_Landscape", "Launch Landscape"), FText::GetEmpty(), 640, 360, FPlatformIconInfo::Required);
 }
 
 void FAndroidTargetSettingsCustomization::CustomizeDetails(IDetailLayoutBuilder& DetailLayout)
@@ -84,7 +82,6 @@ void FAndroidTargetSettingsCustomization::CustomizeDetails(IDetailLayoutBuilder&
 	BuildAppManifestSection(DetailLayout);
 	BuildIconSection(DetailLayout);
 	BuildLaunchImageSection(DetailLayout);
-	BuildDaydreamAppTileImageSection(DetailLayout);
 	BuildGraphicsDebuggerSection(DetailLayout);
 	AudioPluginWidgetManager.BuildAudioCategory(DetailLayout, FString(TEXT("Android")));
 }
@@ -137,8 +134,8 @@ void FAndroidTargetSettingsCustomization::BuildAppManifestSection(IDetailLayoutB
 				[
 					SNew(SRichTextBlock)
 					.Text(LOCTEXT("UpgradeInfoMessage", "<RichTextBlock.TextHighlight>Note to users from 4.6 or earlier</>: We now <RichTextBlock.TextHighlight>GENERATE</> an AndroidManifest.xml when building, so if you have customized your .xml file, you will need to put all of your changes into the below settings. Note that we don't touch your AndroidManifest.xml that is in your project directory.\nAdditionally, we no longer use SigningConfig.xml, the settings are now set in the Distribution Signing section.\n\n<RichTextBlock.TextHighlight>NOTE</>: You must accept the SDK license agreement (click on button below) to use Gradle if it isn't grayed out."))
-					.TextStyle(FEditorStyle::Get(), "MessageLog")
-					.DecoratorStyleSet(&FEditorStyle::Get())
+					.TextStyle(FAppStyle::Get(), "MessageLog")
+					.DecoratorStyleSet(&FAppStyle::Get())
 					.AutoWrapText(true)
 					+ SRichTextBlock::HyperlinkDecorator(TEXT("browser"), FSlateHyperlinkRun::FOnClick::CreateStatic(&OnBrowserLinkClicked))
 				]
@@ -187,7 +184,7 @@ void FAndroidTargetSettingsCustomization::BuildAppManifestSection(IDetailLayoutB
 			[
 				SNew(SButton)
 				.Text(LOCTEXT("OpenBuildFolderButton", "Open Build Folder"))
-				.ToolTipText(LOCTEXT("OpenManifestFolderButton_Tooltip", "Opens the folder containing the build files in Explorer or Finder (it's recommended you check these in to source control to share with your team)"))
+				.ToolTipText(LOCTEXT("OpenManifestFolderButton_Tooltip", "Opens the folder containing the build files in Explorer or Finder (it's recommended you check these in to revision control to share with your team)"))
 				.OnClicked(this, &FAndroidTargetSettingsCustomization::OpenBuildFolder)
 			]
 		];
@@ -205,8 +202,8 @@ void FAndroidTargetSettingsCustomization::BuildAppManifestSection(IDetailLayoutB
 				[
 					SNew(SRichTextBlock)
 					.Text(LOCTEXT("SDKConfigMessage", "Leave these fields blank to use global Android SDK project settings. Changing these settings will only affect this project."))
-					.TextStyle(FEditorStyle::Get(), "MessageLog")
-					.DecoratorStyleSet(&FEditorStyle::Get())
+					.TextStyle(FAppStyle::Get(), "MessageLog")
+					.DecoratorStyleSet(&FAppStyle::Get())
 					.AutoWrapText(true)
 				]
 			]
@@ -271,6 +268,18 @@ void FAndroidTargetSettingsCustomization::BuildAppManifestSection(IDetailLayoutB
 	GooglePlayCategory.AddProperty(SupportAdMobProperty)
 		.EditCondition(SetupForGooglePlayAttribute, NULL);
 
+	TSharedRef<IPropertyHandle> AdMobAppIDProperty = DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UAndroidRuntimeSettings, AdMobAppID));
+	GooglePlayCategory.AddProperty(AdMobAppIDProperty);
+
+	TSharedRef<IPropertyHandle> TagForChildDirectedTreatmentProperty = DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UAndroidRuntimeSettings, TagForChildDirectedTreatment));
+	GooglePlayCategory.AddProperty(TagForChildDirectedTreatmentProperty);
+
+	TSharedRef<IPropertyHandle> TagForUnderAgeOfConsentProperty = DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UAndroidRuntimeSettings, TagForUnderAgeOfConsent));
+	GooglePlayCategory.AddProperty(TagForUnderAgeOfConsentProperty);
+
+	TSharedRef<IPropertyHandle> MaxAdContentRatingProperty = DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UAndroidRuntimeSettings, MaxAdContentRating));
+	GooglePlayCategory.AddProperty(MaxAdContentRatingProperty);
+
 	TSharedRef<IPropertyHandle> AdMobAdUnitIDProperty = DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UAndroidRuntimeSettings, AdMobAdUnitID));
 	AdMobAdUnitIDProperty->MarkHiddenByCustomization();
 
@@ -297,24 +306,11 @@ void FAndroidTargetSettingsCustomization::BuildAppManifestSection(IDetailLayoutB
 			.IsEnabled(FEngineBuildSettings::IsSourceDistribution()) \
 			.ToolTip(FEngineBuildSettings::IsSourceDistribution() ? Tip : FAndroidTargetSettingsCustomizationConstants::DisabledTip); \
 	}
-	SETUP_ANDROIDARCH_PROP(TEXT("-armv7"), bBuildForArmV7, BuildCategory, LOCTEXT("BuildForArmV7ToolTip", "Enable ArmV7 CPU architecture support? (this will be used if all CPU architecture types are unchecked)"));
-	SETUP_ANDROIDARCH_PROP(TEXT("-arm64"), bBuildForArm64, BuildCategory, LOCTEXT("BuildForArm64ToolTip", "Enable Arm64 CPU architecture support? (use at least NDK r11c, requires Lollipop (android-21) minimum)"));
-//	SETUP_ANDROIDARCH_PROP(TEXT("-x86"), bBuildForX86, BuildCategory, LOCTEXT("BuildForX86ToolTip", "Enable X86 CPU architecture support?"));
-	SETUP_ANDROIDARCH_PROP(TEXT("-x64"), bBuildForX8664, BuildCategory, LOCTEXT("BuildForX8664ToolTip", "Enable X86-64 CPU architecture support?"));
+	SETUP_ANDROIDARCH_PROP(TEXT("arm64"), bBuildForArm64, BuildCategory, LOCTEXT("BuildForArm64ToolTip", "Enable Arm64 CPU architecture support? (use at least NDK r11c, requires Lollipop (android-21) minimum)"));
+	SETUP_ANDROIDARCH_PROP(TEXT("x64"), bBuildForX8664, BuildCategory, LOCTEXT("BuildForX8664ToolTip", "Enable X86-64 CPU architecture support?"));
 
 	// @todo android fat binary: Put back in when we expose those
 //	SETUP_SOURCEONLY_PROP(bSplitIntoSeparateApks, BuildCategory, LOCTEXT("SplitIntoSeparateAPKsToolTip", "If checked, CPU architectures and rendering types will be split into separate .apk files"));
-
-	// check for Gradle change
-	TSharedRef<IPropertyHandle> EnableGradleProperty = DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UAndroidRuntimeSettings, bEnableGradle));
-	EnableGradleProperty->MarkHiddenByCustomization();
-	//FSimpleDelegate EnableGradleChange = FSimpleDelegate::CreateSP(this, &FAndroidTargetSettingsCustomization::OnEnableGradleChange);
-	//EnableGradleProperty->SetOnPropertyValueChanged(EnableGradleChange);
-
-	// check for GoogleVR change
-	TSharedRef<IPropertyHandle> GoogleVRCapsProperty = DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UAndroidRuntimeSettings, GoogleVRCaps));
-	FSimpleDelegate GoogleVRCapsChange = FSimpleDelegate::CreateSP(this, &FAndroidTargetSettingsCustomization::OnGoogleVRCapsChange);
-	GoogleVRCapsProperty->SetOnPropertyValueChanged(GoogleVRCapsChange);
 }
 
 bool FAndroidTargetSettingsCustomization::IsLicenseInvalid() const
@@ -377,65 +373,6 @@ FReply FAndroidTargetSettingsCustomization::OnAcceptSDKLicenseClicked()
 	LastLicenseChecktime = -1.0;
 
 	return FReply::Handled();
-}
-
-void FAndroidTargetSettingsCustomization::OnGoogleVRCapsChange()
-{
-/*	Doing this isn't really useful since has no effect if plugin isn't also enabled
-	Better to just have a warning in the log during packaging (and it isn't as expensive now)
-
-	const TArray<TEnumAsByte<EGoogleVRCaps::Type>> &GoogleCaps = GetDefault<UAndroidRuntimeSettings>()->GoogleVRCaps;
-
-	bool bIsDaydream = GoogleCaps.Contains(EGoogleVRCaps::Daydream33) || GoogleCaps.Contains(EGoogleVRCaps::Daydream63) || GoogleCaps.Contains(EGoogleVRCaps::Daydream66);
-	if (bIsDaydream && GetDefault<UAndroidRuntimeSettings>()->bAllowIMU)
-	{
-		// turn off IMU for Daydream (but user can turn it back on
-		GetMutableDefault<UAndroidRuntimeSettings>()->bAllowIMU = false;
-	}
-*/
-}
-
-void FAndroidTargetSettingsCustomization::OnEnableGradleChange()
-{
-	// only need to do this if enabling
-	if (!GetDefault<UAndroidRuntimeSettings>()->bEnableGradle)
-	{
-		return;
-	}
-
-	// only show if don't have a valid license
-	TSharedPtr<SAndroidLicenseDialog> LicenseDialog = SNew(SAndroidLicenseDialog);
-	if (!LicenseDialog->HasLicense())
-	{
-		FSimpleDelegate LicenseAcceptedCallback = FSimpleDelegate::CreateSP(this, &FAndroidTargetSettingsCustomization::OnLicenseAccepted);
-		LicenseDialog->SetLicenseAcceptedCallback(LicenseAcceptedCallback);
-
-		const FText AndroidLicenseWindowTitle = LOCTEXT("AndroidLicenseUnrealEditor", "Android SDK License");
-
-		TSharedPtr<SWindow> AndroidLicenseWindow =
-			SNew(SWindow)
-			.Title(AndroidLicenseWindowTitle)
-			.ClientSize(FVector2D(600.f, 700.f))
-			.HasCloseButton(false)
-			.SupportsMaximize(false)
-			.SupportsMinimize(false)
-			.SizingRule(ESizingRule::FixedSize)
-			[
-				LicenseDialog.ToSharedRef()
-			];
-
-		IMainFrameModule& MainFrame = FModuleManager::LoadModuleChecked<IMainFrameModule>("MainFrame");
-		TSharedPtr<SWindow> ParentWindow = MainFrame.GetParentWindow();
-
-		if (ParentWindow.IsValid())
-		{
-			FSlateApplication::Get().AddModalWindow(AndroidLicenseWindow.ToSharedRef(), ParentWindow.ToSharedRef());
-		}
-		else
-		{
-			FSlateApplication::Get().AddWindow(AndroidLicenseWindow.ToSharedRef());
-		}
-	}
 }
 
 void FAndroidTargetSettingsCustomization::BuildIconSection(IDetailLayoutBuilder& DetailLayout)
@@ -508,8 +445,8 @@ void FAndroidTargetSettingsCustomization::BuildLaunchImageSection(IDetailLayoutB
 				[
 					SNew(SRichTextBlock)
 					.Text(LOCTEXT("LaunchImageInfoMessage", "The <RichTextBlock.TextHighlight>Download Background</> image is used as the background for OBB downloading.  The <RichTextBlock.TextHighlight>Launch Portrait</> image is used as a splash screen for applications with Portrait, Reverse Portrait, Sensor Portrait, Sensor, or Full Sensor orientation.  The <RichTextBlock.TextHighlight>Launch Landscape</> image is used as a splash screen for applications with Landscape, Sensor Landscape, Reverse Landscape, Sensor, or Full Sensor orientation.\n\nThe launch images will be scaled to fit the device in the active orientation. Additional optional launch images may be provided as overrides for LDPI, MDPI, HDPI, and XHDPI by placing them in the project's corresponding Build/Android/res/drawable-* directory."))
-					.TextStyle(FEditorStyle::Get(), "MessageLog")
-					.DecoratorStyleSet(&FEditorStyle::Get())
+					.TextStyle(FAppStyle::Get(), "MessageLog")
+					.DecoratorStyleSet(&FAppStyle::Get())
 					.AutoWrapText(true)
 					+ SRichTextBlock::HyperlinkDecorator(TEXT("browser"), FSlateHyperlinkRun::FOnClick::CreateStatic(&OnBrowserLinkClicked))
 				]
@@ -554,47 +491,6 @@ void FAndroidTargetSettingsCustomization::BuildLaunchImageSection(IDetailLayoutB
 	}
 }
 
-void FAndroidTargetSettingsCustomization::BuildDaydreamAppTileImageSection(IDetailLayoutBuilder& DetailLayout)
-{
-	// Daydream App Tile Category
-	IDetailCategoryBuilder& DaydreamAppTileCategory = DetailLayout.EditCategory(TEXT("DaydreamAppTile"));
-
-	for (const FPlatformIconInfo& Info : DaydreamAppTileImageNames)
-	{
-		const FString AutomaticImagePath = EngineAndroidPath / Info.IconPath;
-		const FString TargetImagePath = GameAndroidPath / Info.IconPath;
-
-		DaydreamAppTileCategory.AddCustomRow(Info.IconName)
-		.NameContent()
-		[
-			SNew(SHorizontalBox)
-			+SHorizontalBox::Slot()
-			.Padding( FMargin( 0, 1, 0, 1 ) )
-			.FillWidth(1.0f)
-			[
-				SNew(STextBlock)
-				.Text(Info.IconName)
-				.Font(DetailLayout.GetDetailFont())
-			 ]
-		 ]
-		.ValueContent()
-		.MaxDesiredWidth(400.0f)
-		.MinDesiredWidth(100.0f)
-		[
-			SNew(SHorizontalBox)
-			+SHorizontalBox::Slot()
-			.FillWidth(1.0f)
-			.VAlign(VAlign_Center)
-			[
-				SNew(SExternalImageReference, AutomaticImagePath, TargetImagePath)
-				.FileDescription(Info.IconDescription)
-				.RequiredSize(Info.IconRequiredSize)
-				.MaxDisplaySize(FVector2D(FMath::Min(96, Info.IconRequiredSize.X), FMath::Min(96, Info.IconRequiredSize.Y)))
-			 ]
-		 ];
-	}
-}
-
 FReply FAndroidTargetSettingsCustomization::OpenBuildFolder()
 {
 	const FString BuildFolder = FPaths::ConvertRelativePathToFull(FPaths::GetPath(GameProjectPropertiesPath));
@@ -629,18 +525,6 @@ void FAndroidTargetSettingsCustomization::CopySetupFilesIntoProject()
 
 		// Now try to copy all of the launch images... (these can be ignored if the file already exists)
 		for (const FPlatformIconInfo& Info : LaunchImageNames)
-		{
-			const FString EngineImagePath = EngineAndroidPath / Info.IconPath;
-			const FString ProjectImagePath = GameAndroidPath / Info.IconPath;
-
-			if (!FPaths::FileExists(ProjectImagePath))
-			{
-				SourceControlHelpers::CopyFileUnderSourceControl(ProjectImagePath, EngineImagePath, Info.IconName, /*out*/ ErrorMessage);
-			}
-		}
-
-        // Now try to copy all of the launch images... (these can be ignored if the file already exists)
-		for (const FPlatformIconInfo& Info : DaydreamAppTileImageNames)
 		{
 			const FString EngineImagePath = EngineAndroidPath / Info.IconPath;
 			const FString ProjectImagePath = GameAndroidPath / Info.IconPath;
@@ -772,8 +656,8 @@ void FAndroidTargetSettingsCustomization::BuildGraphicsDebuggerSection(IDetailLa
 				[
 					SNew(SRichTextBlock)
 					.Text(MGDHelpText)
-					.TextStyle(FEditorStyle::Get(), "MessageLog")
-					.DecoratorStyleSet(&FEditorStyle::Get())
+					.TextStyle(FAppStyle::Get(), "MessageLog")
+					.DecoratorStyleSet(&FAppStyle::Get())
 					.AutoWrapText(true)
 				]
 				+ SVerticalBox::Slot()
@@ -813,8 +697,8 @@ void FAndroidTargetSettingsCustomization::BuildGraphicsDebuggerSection(IDetailLa
 				[
 					SNew(SRichTextBlock)
 					.Text(AdrenoHelpText)
-					.TextStyle(FEditorStyle::Get(), "MessageLog")
-					.DecoratorStyleSet(&FEditorStyle::Get())
+					.TextStyle(FAppStyle::Get(), "MessageLog")
+					.DecoratorStyleSet(&FAppStyle::Get())
 					.AutoWrapText(true)
 				]
 				+ SVerticalBox::Slot()

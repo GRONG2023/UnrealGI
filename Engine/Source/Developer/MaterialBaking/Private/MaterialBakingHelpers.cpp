@@ -6,18 +6,16 @@
 
 namespace FMaterialBakingHelpersImpl
 {
-	static FColor BoxBlurSample(FColor* InBMP, int32 X, int32 Y, int32 InImageWidth, int32 InImageHeight)
+	static FColor BoxBlurSample(FColor* InBMP, int32 X, int32 Y, int32 InImageWidth, int32 InImageHeight, uint32 BackgroundDWColor)
 	{
 		int32 PixelsSampled = 0;
 		int32 CombinedColorR = 0;
 		int32 CombinedColorG = 0;
 		int32 CombinedColorB = 0;
 		int32 CombinedColorA = 0;
-	
-		const uint32 MagentaMask = FColor(255, 0, 255).DWColor();
 
 		const int32 BaseIndex = (Y * InImageWidth) + X;
-	
+
 		int32 SampleIndex = BaseIndex - (InImageWidth + 1);
 		for (int32 YI = 0; YI < 3; ++YI)
 		{
@@ -25,7 +23,7 @@ namespace FMaterialBakingHelpersImpl
 			{
 				const FColor SampledColor = InBMP[SampleIndex++];
 				// Check if the pixel is a rendered one (not clear color)
-				if (SampledColor.DWColor() != MagentaMask)
+				if (SampledColor.DWColor() != BackgroundDWColor)
 				{
 					CombinedColorR += SampledColor.R;
 					CombinedColorG += SampledColor.G;
@@ -39,17 +37,14 @@ namespace FMaterialBakingHelpersImpl
 
 		if (PixelsSampled == 0)
 		{
-			const FColor Magenta = FColor(255, 0, 255);
-			return Magenta;
+			return FColor(BackgroundDWColor);
 		}
 
 		return FColor(CombinedColorR / PixelsSampled, CombinedColorG / PixelsSampled, CombinedColorB / PixelsSampled, CombinedColorA / PixelsSampled);
 	}
 
-	static bool HasBorderingPixel(FColor* InBMP, int32 X, int32 Y, int32 InImageWidth, int32 InImageHeight)
+	static bool HasBorderingPixel(FColor* InBMP, int32 X, int32 Y, int32 InImageWidth, int32 InImageHeight, uint32 BackgroundDWColor)
 	{
-		const uint32 MagentaMask = FColor(255, 0, 255).DWColor();
-
 		const int32 BaseIndex = Y*InImageWidth + X;
 
 		int32 SampleIndex = BaseIndex - (InImageWidth + 1);
@@ -57,7 +52,7 @@ namespace FMaterialBakingHelpersImpl
 		{
 			for (int32 XI = 0; XI < 3; ++XI)
 			{
-				if (InBMP[SampleIndex++].DWColor() != MagentaMask)
+				if (InBMP[SampleIndex++].DWColor() != BackgroundDWColor)
 				{
 					return true;
 				}
@@ -67,13 +62,57 @@ namespace FMaterialBakingHelpersImpl
 		return false;
 	}
 
-	void PerformUVBorderSmear(TArray<FColor>& InOutPixels, int32& ImageWidth, int32& ImageHeight, int32 MaxIterations, bool bCanShrink)
+	static void PerformShrinking(TArray<FColor>& InOutPixels, int32& ImageWidth, int32& ImageHeight, uint32 BackgroundDWColor)
+	{
+		FColor* Current = InOutPixels.GetData();
+
+		// We can hopefully skip the entire smearing process if there is a single
+		// non-background color in the entire array since smearing that completely
+		// would lead to a monochome output.
+		uint32 SingleColor = BackgroundDWColor;
+		bool   bHasSingleColor = true;
+		for (int32 Index = 0, Num = InOutPixels.Num(); Index < Num; ++Index)
+		{
+			const uint32 Color = Current[Index].DWColor();
+			if (Color != BackgroundDWColor)
+			{
+				if (SingleColor == BackgroundDWColor)
+				{
+					// This is the first time we stumble on a color other than background color, keep it.
+					SingleColor = Color;
+				}
+				// Compare with the known non-background color
+				else if (SingleColor != Color)
+				{
+					bHasSingleColor = false;
+					break;
+				}
+			}
+		}
+
+		// Shrink to a single texel
+		if (bHasSingleColor)
+		{
+			InOutPixels.SetNum(1);
+			ImageWidth = ImageHeight = 1;
+			Current = InOutPixels.GetData();
+
+			InOutPixels[0] = FColor(SingleColor);
+		}
+	}
+
+	static void PerformUVBorderSmear(TArray<FColor>& InOutPixels, int32& ImageWidth, int32& ImageHeight, int32 MaxIterations, uint32 BackgroundDWColor)
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(FMaterialBakingHelpers::PerformUVBorderSmear)
 
 		check(InOutPixels.Num() == ImageWidth*ImageHeight);
 
-		const uint32 MagentaMask = FColor(255, 0, 255).DWColor();
+		// No smearing needed for a single pixel
+		if (ImageWidth * ImageHeight == 1)
+		{
+			return;
+		}
+
 		const int32 PaddedImageWidth = ImageWidth + 2;
 		const int32 PaddedImageHeight = ImageHeight + 2;
 
@@ -83,81 +122,35 @@ namespace FMaterialBakingHelpersImpl
 		TArray<uint32>* NextRowsLeft = &RowsSwap2;
 
 		//
-		// Create a copy of the image with a 1 pixel magenta border around the edge.
+		// Create a copy of the image with a 1 pixel background color border around the edge.
 		// This avoids needing to bounds check in inner loops.
 		//
-
-		FColor* Current = InOutPixels.GetData();
-
-		// We can hopefully skip the entire smearing process if there is a single
-		// non-magenta color in the entire array since smearing that completely
-		// would lead to a monochome output.
-		if (MaxIterations == -1)
-		{
-			uint32 SingleColor     = MagentaMask;
-			bool   bHasSingleColor = true;
-			for (int32 Index = 0, Num = InOutPixels.Num(); Index < Num; ++Index)
-			{
-				const uint32 Color = Current[Index].DWColor();
-				if (Color != MagentaMask)
-				{
-					if (SingleColor == MagentaMask)
-					{
-						// This is the first time we stumble on a color other than magenta, keep it.
-						SingleColor = Color;
-					}
-					// Compare with the known non-magenta color
-					else if (SingleColor != Color)
-					{
-						bHasSingleColor = false;
-						break;
-					}
-				}
-			}
-
-			if (bHasSingleColor)
-			{
-				// Shrink to single texel when allowed
-				if (bCanShrink)
-				{
-					InOutPixels.SetNum(1);
-					ImageWidth = ImageHeight = 1;
-					Current = InOutPixels.GetData();
-				}
-
-				FColor Color(SingleColor);
-				for (int32 Index = 0, Num = InOutPixels.Num(); Index < Num; ++Index)
-				{
-					Current[Index] = Color;
-				}
-
-				return;
-			}
-		}
 
 		TArray<FColor> ScratchBuffer;
 		ScratchBuffer.SetNumUninitialized(PaddedImageWidth*PaddedImageHeight);
 		FColor* Scratch = ScratchBuffer.GetData();
 
-		// Set top and bottom bordering pixels to magenta
+		// Set top and bottom bordering pixels to background color
 		for (int32 X = 0; X < PaddedImageWidth; ++X)
 		{
-			Scratch[X] = FColor(MagentaMask);
-			Scratch[(PaddedImageHeight - 1)*PaddedImageWidth + X] = FColor(MagentaMask);
+			Scratch[X] = FColor(BackgroundDWColor);
+			Scratch[(PaddedImageHeight - 1)*PaddedImageWidth + X] = FColor(BackgroundDWColor);
 		}
 
-		// Set leftg and right border pixels to magenta and copy image data into rows
+		FColor* Current = InOutPixels.GetData();
+
+		// Set left and right border pixels to background color and copy image data into rows
 		for (int32 Y = 1; Y <= ImageHeight; ++Y)
 		{
 			const int32 YOffset = Y * PaddedImageWidth;
-			Scratch[YOffset] = FColor(MagentaMask);
+			Scratch[YOffset] = FColor(BackgroundDWColor);
 			FMemory::Memcpy(&Scratch[YOffset + 1], &Current[(Y - 1)*ImageWidth], ImageWidth * sizeof(FColor));
-			Scratch[YOffset + ImageWidth + 1] = FColor(MagentaMask);
+			Scratch[YOffset + ImageWidth + 1] = FColor(BackgroundDWColor);
 		}
 
 		//
-		// Find our initial workset of all rows that have magenta pixels bordering non-magenta pixels.
-		// Also find all rows that have zero magenta pixels - these will never be added to the workset.
+		// Find our initial workset of all rows that have background colored pixels bordering non-background pixels.
+		// Also find all rows that have zero background colored pixels - these will never be added to the workset.
 		//
 
 		TArray<bool> RowCompleted;
@@ -170,28 +163,28 @@ namespace FMaterialBakingHelpersImpl
 		bool bHasAnyData = false;
 		for (int32 Y = 1; Y <= ImageHeight; ++Y)
 		{
-			bool bHasMagenta = false;
-			bool bBordersNonMagenta = false;
+			bool bHasBackground = false;
+			bool bBordersNonBackground = false;
 			const int32 YOffset = Y * PaddedImageWidth;
 			for (int32 X = 1; X <= ImageWidth; ++X)
 			{
-				if (Scratch[YOffset + X].DWColor() == MagentaMask)
+				if (Scratch[YOffset + X].DWColor() == BackgroundDWColor)
 				{
-					bHasMagenta = true;
-					if (HasBorderingPixel(Scratch, X, Y, PaddedImageWidth, PaddedImageHeight))
+					bHasBackground = true;
+					if (HasBorderingPixel(Scratch, X, Y, PaddedImageWidth, PaddedImageHeight, BackgroundDWColor))
 					{
-						bBordersNonMagenta = true;
+						bBordersNonBackground = true;
 						break;
 					}
 				}
 			}
 
-			if (!bHasMagenta)
+			if (!bHasBackground)
 			{
 				bHasAnyData = true;
 				RowCompleted[Y] = true;
 			}
-			else if (bBordersNonMagenta)
+			else if (bBordersNonBackground)
 			{
 				bHasAnyData = true;
 				CurrentRowsLeft->Add(Y);
@@ -226,8 +219,8 @@ namespace FMaterialBakingHelpersImpl
 			const int32 NumThreads = FMath::Min(CurrentRowsLeft->Num(), MaxThreads);
 			const int32 LinesPerThread = FMath::CeilToInt((float)CurrentRowsLeft->Num() / (float)NumThreads);
 
-			// split up rows that still have magenta pixels amongst threads
-			ParallelFor(NumThreads, [ImageWidth, PaddedImageWidth, PaddedImageHeight, Current, Scratch, CurrentRowsLeft, LinesPerThread, &RowRemainingPixels, MagentaMask](int32 ThreadIndex)
+			// split up rows that still have background colored pixels amongst threads
+			ParallelFor(NumThreads, [ImageWidth, PaddedImageWidth, PaddedImageHeight, Current, Scratch, CurrentRowsLeft, LinesPerThread, &RowRemainingPixels, BackgroundDWColor](int32 ThreadIndex)
 			{
 				const int32 StartY = ThreadIndex*LinesPerThread;
 				const int32 EndY = FMath::Min((ThreadIndex + 1) * LinesPerThread, CurrentRowsLeft->Num());
@@ -241,11 +234,11 @@ namespace FMaterialBakingHelpersImpl
 					for (int32 X = 1; X <= ImageWidth; X++)
 					{
 						FColor& Color = Current[PixelIndex++];
-						if (Color.DWColor() == MagentaMask)
+						if (Color.DWColor() == BackgroundDWColor)
 						{
-							const FColor SampledColor = BoxBlurSample(Scratch, X, Y, PaddedImageWidth, PaddedImageHeight);
+							const FColor SampledColor = BoxBlurSample(Scratch, X, Y, PaddedImageWidth, PaddedImageHeight, BackgroundDWColor);
 							// If it's a valid pixel
-							if (SampledColor.DWColor() != MagentaMask)
+							if (SampledColor.DWColor() != BackgroundDWColor)
 							{
 								Color = SampledColor;
 							}
@@ -272,7 +265,7 @@ namespace FMaterialBakingHelpersImpl
 
 			// Find the next set of rows to process.
 			// This will be our current rows that haven't completed, plus any bordering rows that haven't been marked completed.
-			NextRowsLeft->SetNum(0, false);
+			NextRowsLeft->SetNum(0, EAllowShrinking::No);
 			{
 				int32 PreviousY = -1;
 				for (int32 RowIndex = 0; RowIndex < CurrentRowsLeft->Num(); ++RowIndex)
@@ -283,7 +276,7 @@ namespace FMaterialBakingHelpersImpl
 						PreviousY = Y - 1;
 						NextRowsLeft->Add(Y - 1);
 					}
-					if (!RowCompleted[Y] && RowRemainingPixels[RowIndex] && PreviousY < Y)
+					if (PreviousY < Y && !RowCompleted[Y] && RowRemainingPixels[RowIndex])
 					{
 						PreviousY = Y;
 						NextRowsLeft->Add(Y);
@@ -297,7 +290,7 @@ namespace FMaterialBakingHelpersImpl
 			}
 
 			// Swap rows left buffers
-			{			
+			{
 				TArray<uint32>* Temp = NextRowsLeft;
 				NextRowsLeft = CurrentRowsLeft;
 				CurrentRowsLeft = Temp;
@@ -307,25 +300,38 @@ namespace FMaterialBakingHelpersImpl
 		}
 
 		// If we finished before replacing all pixels, replace the remaining pixels with black.
-		if (CurrentRowsLeft->Num() > 0)
+		for (int32 Index = 0; Index < CurrentRowsLeft->Num(); Index++)
 		{
-			for (int32 i = 0; i < InOutPixels.Num(); ++i)
+			const int32 Y = (*CurrentRowsLeft)[Index];
+
+			int32 PixelIndex = (Y - 1) * ImageWidth;
+			for (int32 X = 1; X <= ImageWidth; X++)
 			{
-				if (InOutPixels[i].DWColor() == MagentaMask)
+				FColor& Color = Current[PixelIndex++];
+				if (Color.DWColor() == BackgroundDWColor)
 				{
-					InOutPixels[i] = FColor::Black;
+					Color = FColor::Black;
 				}
 			}
 		}
 	}
 }
 
-void FMaterialBakingHelpers::PerformUVBorderSmear(TArray<FColor>& InOutPixels, int32 ImageWidth, int32 ImageHeight, int32 MaxIterations)
+void FMaterialBakingHelpers::PerformUVBorderSmear(TArray<FColor>& InOutPixels, int32 ImageWidth, int32 ImageHeight, int32 MaxIterations, FColor BackgroundColor)
 {
-	FMaterialBakingHelpersImpl::PerformUVBorderSmear(InOutPixels, ImageWidth, ImageHeight, MaxIterations, false);
+	FMaterialBakingHelpersImpl::PerformUVBorderSmear(InOutPixels, ImageWidth, ImageHeight, MaxIterations, BackgroundColor.DWColor());
 }
 
-void FMaterialBakingHelpers::PerformUVBorderSmearAndShrink(TArray<FColor>& InOutPixels, int32& InOutImageWidth, int32& InOutImageHeight)
+void FMaterialBakingHelpers::PerformShrinking(TArray<FColor>& InOutPixels, int32& InOutImageWidth, int32& InOutImageHeight, FColor BackgroundColor)
 {
-	FMaterialBakingHelpersImpl::PerformUVBorderSmear(InOutPixels, InOutImageWidth, InOutImageHeight, -1, true);
+	FMaterialBakingHelpersImpl::PerformShrinking(InOutPixels, InOutImageWidth, InOutImageHeight, BackgroundColor.DWColor());
+}
+
+void FMaterialBakingHelpers::PerformUVBorderSmearAndShrink(TArray<FColor>& InOutPixels, int32& InOutImageWidth, int32& InOutImageHeight, FColor BackgroundColor)
+{
+	const uint32 BackgroundDWColor = BackgroundColor.DWColor();
+	FMaterialBakingHelpersImpl::PerformShrinking(InOutPixels, InOutImageWidth, InOutImageHeight, BackgroundDWColor);
+
+	const int32 DefaultMaxIteration = -1; // Perform smearing over the whole image
+	FMaterialBakingHelpersImpl::PerformUVBorderSmear(InOutPixels, InOutImageWidth, InOutImageHeight, DefaultMaxIteration, BackgroundDWColor);
 }

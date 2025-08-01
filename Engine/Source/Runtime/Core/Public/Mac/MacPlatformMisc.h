@@ -19,7 +19,7 @@ struct CORE_API FMacPlatformMisc : public FApplePlatformMisc
 	static void PlatformTearDown();
 	static void SetEnvironmentVar(const TCHAR* VariableName, const TCHAR* Value);
 
-	FORCEINLINE static int32 GetMaxPathLength()
+	FORCEINLINE static constexpr int32 GetMaxPathLength()
 	{
 		return MAC_MAX_PATH;
 	}
@@ -31,16 +31,18 @@ struct CORE_API FMacPlatformMisc : public FApplePlatformMisc
 
 	static TArray<uint8> GetMacAddress();
 
-	static void RequestExit(bool Force);
+	static void RequestExit(bool Force, const TCHAR* CallSite = nullptr);
 	static EAppReturnType::Type MessageBoxExt( EAppMsgType::Type MsgType, const TCHAR* Text, const TCHAR* Caption );
 	static bool CommandLineCommands();
 	static int32 NumberOfCores();
 	static int32 NumberOfCoresIncludingHyperthreads();
 	static void NormalizePath(FString& InPath);
+	static void NormalizePath(FStringBuilderBase& InPath);
 	static FString GetPrimaryGPUBrand();
 	static struct FGPUDriverInfo GetGPUDriverInfo(const FString& DeviceDescription);
 	static void GetOSVersions( FString& out_OSVersionLabel, FString& out_OSSubVersionLabel );
 	static FString GetOSVersion();
+	static NSOperatingSystemVersion GetNSOperatingSystemVersion();
 	static bool HasPlatformFeature(const TCHAR* FeatureName);
 	static bool GetDiskTotalAndFreeSpace(const FString& InPath, uint64& TotalNumberOfBytes, uint64& NumberOfFreeBytes);
 	static bool HasSeparateChannelForDebugOutput();
@@ -52,7 +54,7 @@ struct CORE_API FMacPlatformMisc : public FApplePlatformMisc
 	 */
 	FORCEINLINE static const TCHAR* GetNullRHIShaderFormat() 
 	{ 
-		return TEXT("SF_METAL"); 
+		return TEXT("SF_METAL_SM5"); 
 	}
 
 	/**
@@ -101,11 +103,6 @@ struct CORE_API FMacPlatformMisc : public FApplePlatformMisc
 	static bool IsRunningOnBattery();
 
 	static IPlatformChunkInstall* GetPlatformChunkInstall();
-
-	/**
-	 * Returns whether the Mac OS X version is 10.9.x or not.
-	 */
-	static bool IsRunningOnMavericks();
 
 	/**
 	 * Returns if current < target returns 1, if current > target returns 1, else current == target and returns 0.
@@ -230,11 +227,11 @@ struct CORE_API FMacPlatformMisc : public FApplePlatformMisc
 
 	static CGDisplayModeRef GetSupportedDisplayMode(CGDirectDisplayID DisplayID, uint32 Width, uint32 Height);
 
-	FORCEINLINE static void ChooseHDRDeviceAndColorGamut(uint32 DeviceId, uint32 DisplayNitLevel, int32& OutputDevice, int32& ColorGamut)
+	FORCEINLINE static void ChooseHDRDeviceAndColorGamut(uint32 DeviceId, uint32 DisplayNitLevel, EDisplayOutputFormat& OutputDevice, EDisplayColorGamut& ColorGamut)
 	{
 		// ScRGB, 1000 or 2000 nits, DCI-P3
-		OutputDevice = DisplayNitLevel == 1000 ? 5 : 6;
-		ColorGamut = 1;
+		OutputDevice = DisplayNitLevel == 1000 ? EDisplayOutputFormat::HDR_ACES_1000nit_ScRGB : EDisplayOutputFormat::HDR_ACES_2000nit_ScRGB;
+		ColorGamut = EDisplayColorGamut::DCIP3_D65;
 	}
 };
 

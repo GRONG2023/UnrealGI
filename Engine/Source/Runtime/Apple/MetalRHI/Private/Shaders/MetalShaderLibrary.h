@@ -18,7 +18,7 @@ public:
 						const FMetalShaderLibraryHeader& InHeader,
 						const FSerializedShaderArchive& InSerializedShaders,
 						const TArray<uint8>& InShaderCode,
-						const TArray<mtlpp::Library>& InLibrary);
+						const TArray<MTLLibraryPtr>& InLibrary);
 
 	virtual ~FMetalShaderLibrary();
 
@@ -31,6 +31,10 @@ public:
 
 	virtual int32 FindShaderMapIndex(const FSHAHash& Hash) override;
 	virtual int32 FindShaderIndex(const FSHAHash& Hash) override;
+	virtual FSHAHash GetShaderHash(int32 ShaderMapIndex, int32 ShaderIndex) override
+	{ 
+		return SerializedShaders.ShaderHashes[GetShaderIndex(ShaderMapIndex, ShaderIndex)];
+	};
 
 	virtual bool PreloadShader(int32 ShaderIndex, FGraphEventArray& OutCompletionEvents) override { return false; }
 	virtual bool PreloadShaderMap(int32 ShaderMapIndex, FGraphEventArray& OutCompletionEvents) override { return false; }
@@ -39,7 +43,7 @@ public:
 
 private:
 	FString ShaderLibraryFilename;
-	TArray<mtlpp::Library> Library;
+	TArray<MTLLibraryPtr> Library;
 	FMetalShaderLibraryHeader Header;
 	FSerializedShaderArchive SerializedShaders;
 	TArray<uint8> ShaderCode;

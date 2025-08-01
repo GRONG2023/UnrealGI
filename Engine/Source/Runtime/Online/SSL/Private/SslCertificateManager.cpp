@@ -16,7 +16,6 @@ FSslCertificateDelegates::FVerifySslCertificates FSslCertificateDelegates::Verif
 #if WITH_SSL
 
 #if PLATFORM_WINDOWS
-#include "Windows/WindowsHWrapper.h"
 #include "Windows/AllowWindowsPlatformTypes.h"
 #endif
 
@@ -87,8 +86,8 @@ static bool DomainLessThan(const FString& DomainA, const FString& DomainB)
 		if (bDomainAIncludesSubdomains)
 		{
 			// both start with '.', sort by number of '.'s
-			const int32 DomainAPeriods = Algo::Count(DomainA, TEXT('.'));
-			const int32 DomainBPeriods = Algo::Count(DomainB, TEXT('.'));
+			const SIZE_T DomainAPeriods = Algo::Count(DomainA, TEXT('.'));
+			const SIZE_T DomainBPeriods = Algo::Count(DomainB, TEXT('.'));
 			if (DomainAPeriods == DomainBPeriods)
 			{
 				// sort alphabetically
@@ -195,7 +194,7 @@ void FSslCertificateManager::SetPinnedPublicKeys(const FString& Domain, const FS
 
 bool FSslCertificateManager::VerifySslCertificates(X509_STORE_CTX* Context, const FString& Domain) const
 {
-#if !UE_BUILD_SHIPPING
+#if !UE_BUILD_SHIPPING || WITH_SERVER_CODE
 	static const bool bPinningDisabled = FParse::Param(FCommandLine::Get(), TEXT("DisableSSLCertificatePinning"));
 	if (bPinningDisabled)
 	{
@@ -274,7 +273,7 @@ bool FSslCertificateManager::VerifySslCertificates(X509_STORE_CTX* Context, cons
 
 bool FSslCertificateManager::VerifySslCertificates(TArray<TArray<uint8, TFixedAllocator<PUBLIC_KEY_DIGEST_SIZE>>>& Digests, const FString& Domain) const
 {
-#if !UE_BUILD_SHIPPING
+#if !UE_BUILD_SHIPPING || WITH_SERVER_CODE
 	static const bool bPinningDisabled = FParse::Param(FCommandLine::Get(), TEXT("DisableSSLCertificatePinning"));
 	if (bPinningDisabled)
 	{
@@ -299,9 +298,11 @@ bool FSslCertificateManager::VerifySslCertificates(TArray<TArray<uint8, TFixedAl
 		return true;
 	}
 	bool bFoundMatch = false;
-	for (int32 CertIndex = 0; CertIndex < Digests.Num(); ++CertIndex)
+	for (const TArray<uint8, TFixedAllocator<PUBLIC_KEY_DIGEST_SIZE>>& CurrentDigest: Digests)
 	{
-		if (PinnedKeys->Contains(Digests[CertIndex]))
+		UE_LOG(LogSsl, VeryVerbose, TEXT("checking digest. Base64: '%s'"), *FBase64::Encode(CurrentDigest.GetData(), CurrentDigest.Num()));
+		
+		if (PinnedKeys->Contains(CurrentDigest))
 		{
 			UE_LOG(LogSsl, Verbose, TEXT("found public key digest in request that matches a pinned key for '%s'"), *Domain);
 			bFoundMatch = true;
@@ -318,7 +319,7 @@ void FSslCertificateManager::BuildRootCertificateArray()
 	FString OverrideCertificateBundlePath;
 	if (GConfig->GetString(TEXT("SSL"), TEXT("OverrideCertificateBundlePath"), OverrideCertificateBundlePath, GEngineIni) && OverrideCertificateBundlePath.Len() > 0)
 	{
-		if (FPaths::FileExists(*(OverrideCertificateBundlePath)))
+		if (FPaths::FileExists(OverrideCertificateBundlePath))
 		{
 			CertificateBundlePath = OverrideCertificateBundlePath;
 		}
@@ -328,17 +329,21 @@ void FSslCertificateManager::BuildRootCertificateArray()
 	if (CertificateBundlePath.IsEmpty())
 	{
 		const FString PerPlatformBundlePath = FString::Printf(TEXT("Certificates/%s/cacert.pem"), ANSI_TO_TCHAR(FPlatformProperties::IniPlatformName()));
-		if (FPaths::FileExists(*(FPaths::ProjectContentDir() + PerPlatformBundlePath)))
+
+		const FString SearchPaths[]
 		{
-			CertificateBundlePath = FPaths::ProjectContentDir() + PerPlatformBundlePath;
-		}
-		else if (FPaths::FileExists(*(FPaths::ProjectContentDir() + TEXT("Certificates/cacert.pem"))))
+			FPaths::ProjectContentDir() + PerPlatformBundlePath,
+			FPaths::ProjectContentDir() + TEXT("Certificates/cacert.pem"),
+			FPaths::EngineContentDir() + TEXT("Certificates/ThirdParty/cacert.pem")
+		};
+
+		for (const FString& SearchPath : SearchPaths)
 		{
-			CertificateBundlePath = FPaths::ProjectContentDir() + TEXT("Certificates/cacert.pem");
-		}
-		else if (FPaths::FileExists(*(FPaths::EngineContentDir() + TEXT("Certificates/ThirdParty/cacert.pem"))))
-		{
-			CertificateBundlePath = FPaths::EngineContentDir() + TEXT("Certificates/ThirdParty/cacert.pem");
+			if (FPaths::FileExists(SearchPath))
+			{
+				CertificateBundlePath = SearchPath;
+				break;
+			}
 		}
 	}
 

@@ -12,10 +12,12 @@
 // for compression
 #include "HAL/FileManagerGeneric.h"
 #include "Logging/LogMacros.h"
+#include "Misc/AccessDetection.h"
 #include "Misc/Parse.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Paths.h"
 #include "Misc/SecureHash.h"
+#include "Misc/ScopeRWLock.h"
 #include "Templates/UniquePtr.h"
 #include <time.h>
 
@@ -53,14 +55,14 @@ FArchive* FFileManagerGeneric::CreateFileReaderInternal( const TCHAR* InFilename
 		}
 		return NULL;
 	}
-	return new FArchiveFileReaderGeneric( Handle, InFilename, Handle->Size(), BufferSize );
+	return new FArchiveFileReaderGeneric( Handle, InFilename, Handle->Size(), BufferSize, Flags );
 }
 
 /**
 * Dummy archive that doesn't actually write anything
 * it just updates the file pos when seeking
 */
-class FArchiveFileWriterDummy : public FArchive
+class FArchiveFileWriterDummy final : public FArchive
 {
 public:
 	FArchiveFileWriterDummy()
@@ -405,40 +407,57 @@ FFileStatData FFileManagerGeneric::GetStatData(const TCHAR* FilenameOrDirectory)
 	return GetLowLevel().GetStatData(FilenameOrDirectory);
 }
 
-void FFileManagerGeneric::FindFiles( TArray<FString>& Result, const TCHAR* InFilename, bool Files, bool Directories )
+namespace FileManagerGenericImpl
 {
 	class FFileMatch : public IPlatformFile::FDirectoryVisitor
 	{
 	public:
 		TArray<FString>& Result;
+		FRWLock ResultLock;
 		FString WildCard;
 		bool bFiles;
 		bool bDirectories;
-		FFileMatch( TArray<FString>& InResult, const FString& InWildCard, bool bInFiles, bool bInDirectories )
-			: Result( InResult )
-			, WildCard( InWildCard )
-			, bFiles( bInFiles )
-			, bDirectories( bInDirectories )
+		bool bStoreFullPath;
+		FFileMatch(TArray<FString>& InResult, const FString& InWildCard, bool bInFiles, bool bInDirectories, bool bInStoreFullPath = false)
+			: IPlatformFile::FDirectoryVisitor(EDirectoryVisitorFlags::ThreadSafe)
+			, Result(InResult)
+			, WildCard(InWildCard)
+			, bFiles(bInFiles)
+			, bDirectories(bInDirectories)
+			, bStoreFullPath(bInStoreFullPath)
 		{
 		}
-		virtual bool Visit( const TCHAR* FilenameOrDirectory, bool bIsDirectory )
+
+		virtual bool ShouldVisitLeafPathname(FStringView LeafFilename) override
+		{
+			return FString(LeafFilename).MatchesWildcard(WildCard);
+		}
+
+		virtual bool Visit(const TCHAR* FilenameOrDirectory, bool bIsDirectory)
 		{
 			if ((bIsDirectory && bDirectories) || (!bIsDirectory && bFiles))
 			{
-				const FString Filename = FPaths::GetCleanFilename(FilenameOrDirectory);
-				if (Filename.MatchesWildcard(WildCard))
+				FString Filename = FPaths::GetCleanFilename(FilenameOrDirectory);
+				if (ensureMsgf(ShouldVisitLeafPathname(Filename),
+					TEXT("PlatformFile.IterateDirectory needs to call ShouldVisitLeafFilename before calling Visit.")))
 				{
-					new( Result ) FString(Filename);
+					FString FullPath = bStoreFullPath ? FString(FilenameOrDirectory) : MoveTemp(Filename);
+					FWriteScopeLock ScopeLock(ResultLock);
+					Result.Add(MoveTemp(FullPath));
 				}
 			}
 			return true;
 		}
 	};
+}
+
+void FFileManagerGeneric::FindFiles( TArray<FString>& Result, const TCHAR* InFilename, bool Files, bool Directories )
+{
 	FString Filename( InFilename );
 	FPaths::NormalizeFilename( Filename );
 	const FString CleanFilename = FPaths::GetCleanFilename(Filename);
 	const bool bFindAllFiles = CleanFilename == TEXT("*") || CleanFilename == TEXT("*.*");
-	FFileMatch FileMatch( Result, bFindAllFiles ? TEXT("*") : CleanFilename, Files, Directories );
+	FileManagerGenericImpl::FFileMatch FileMatch( Result, bFindAllFiles ? TEXT("*") : CleanFilename, Files, Directories );
 	GetLowLevel().IterateDirectory( *FPaths::GetPath(Filename), FileMatch );
 }
 
@@ -597,7 +616,7 @@ FString FFileManagerGeneric::DefaultConvertToRelativePath( const TCHAR* Filename
 			//move up a directory and on an extra .. TEXT("/")
 			// the +1 from "InStr" moves to include the "\" at the end of the directory name
 			NumberOfDirectoriesToGoUp++;
-			RootDirectory.LeftInline( PositionOfNextSlash + 1, false );
+			RootDirectory.LeftInline( PositionOfNextSlash + 1, EAllowShrinking::No);
 		}
 		else
 		{
@@ -631,38 +650,27 @@ void FFileManagerGeneric::FindFilesRecursive( TArray<FString>& FileNames, const 
 	FindFilesRecursiveInternal(FileNames, StartDirectory, Filename, Files, Directories);
 }
 
-void FFileManagerGeneric::FindFilesRecursiveInternal( TArray<FString>& FileNames, const TCHAR* StartDirectory, const TCHAR* Filename, bool Files, bool Directories)
+void FFileManagerGeneric::FindFilesRecursiveInternal( TArray<FString>& FileNames, const TCHAR* StartDirectory, const TCHAR* InFilename, bool Files, bool Directories)
 {
-	FString CurrentSearch = FString(StartDirectory) / Filename;
-	TArray<FString> Result;
-	FindFiles(Result, *CurrentSearch, Files, Directories);
-
-	for (int32 i=0; i<Result.Num(); i++)
-	{
-		FileNames.Add(FString(StartDirectory) / Result[i]);
-	}
-
-	TArray<FString> SubDirs;
-	FString RecursiveDirSearch = FString(StartDirectory) / TEXT("*");
-	FindFiles(SubDirs, *RecursiveDirSearch, false, true);
-
-	for (int32 SubDirIdx=0; SubDirIdx<SubDirs.Num(); SubDirIdx++)
-	{
-		FString SubDir = FString(StartDirectory) / SubDirs[SubDirIdx];
-		FindFilesRecursiveInternal(FileNames, *SubDir, Filename, Files, Directories);
-	}
+	FString Filename(InFilename);
+	FPaths::NormalizeFilename(Filename);
+	const FString CleanFilename = FPaths::GetCleanFilename(Filename);
+	const bool bFindAllFiles = CleanFilename == TEXT("*") || CleanFilename == TEXT("*.*");
+	const bool bStoreFullPath = true;
+	FileManagerGenericImpl::FFileMatch FileMatch(FileNames, bFindAllFiles ? TEXT("*") : CleanFilename, Files, Directories, bStoreFullPath);
+	GetLowLevel().IterateDirectoryRecursively(StartDirectory, FileMatch);
 }
 
-FArchiveFileReaderGeneric::FArchiveFileReaderGeneric( IFileHandle* InHandle, const TCHAR* InFilename, int64 InSize, uint32 InBufferSize )
+FArchiveFileReaderGeneric::FArchiveFileReaderGeneric( IFileHandle* InHandle, const TCHAR* InFilename, int64 InSize, uint32 InBufferSize, uint32 InFlags )
 	: Filename( InFilename )
 	, Size( InSize )
 	, Pos( 0 )
 	, BufferBase( 0 )
 	, Handle( InHandle )
+	, Flags( InFlags )
 	, bFirstReadAfterSeek(false)
 {
 	BufferSize = FMath::Min(FMath::RoundUpToPowerOfTwo64((int64)InBufferSize), (uint64)Size);
-	BufferArray.Reserve(BufferSize);
 	this->SetIsLoading(true);
 	this->SetIsPersistent(true);
 }
@@ -690,7 +698,7 @@ void FArchiveFileReaderGeneric::Seek( int64 InPos )
 	{
 		TCHAR ErrorBuffer[1024];
 		SetError();
-		UE_LOG(LogFileManager, Error, TEXT("SetFilePointer on %s Failed %lld/%lld: %lld %s"), *Filename, InPos, Size, Pos, FPlatformMisc::GetSystemErrorMessage(ErrorBuffer, 1024, 0));
+		UE_CLOG( !IsSilent(), LogFileManager, Error, TEXT("SetFilePointer on %s Failed %lld/%lld: %lld %s"), *Filename, InPos, Size, Pos, FPlatformMisc::GetSystemErrorMessage(ErrorBuffer, 1024, 0));
 	}
 
 	Pos = InPos;
@@ -744,6 +752,14 @@ bool FArchiveFileReaderGeneric::Precache(int64 PrecacheOffset, int64 PrecacheSiz
 
 bool FArchiveFileReaderGeneric::InternalPrecache( int64 PrecacheOffset, int64 PrecacheSize )
 {
+	// We defer allocation of BufferArray until we actually need it.  If the client doesn't do sequential reads
+	// or explicitly request precaching via "FArchiveFileReaderGeneric::Precache", InternalPrecache might never
+	// be called, and the buffer never actually used, a waste of 1 MB per archive file.
+	if (BufferArray.Max() == 0)
+	{
+		BufferArray.Reserve(BufferSize);
+	}
+
 	// Only precache at current position and avoid work if precaching same offset twice.
 	if (Pos != PrecacheOffset)
 	{
@@ -776,16 +792,16 @@ bool FArchiveFileReaderGeneric::InternalPrecache( int64 PrecacheOffset, int64 Pr
 			// We need to read more to satisfy the precache request.
 			// Since Pos is within the buffer, the low-level read position is at the end of the buffer. 
 			// Copy the existing bytes after Pos out of the old buffer into the new buffer, and then read only the remaining bytes from the low-level handle into the rest of the new buffer.
-			if (BufferCount <= BufferArray.Max())
+			if (BufferCount <= BufferSize)
 			{
 				// We don't need to reallocate the buffer, so we can just move the RemainingBufferCount bytes from the end of the buffer to the beginning.
 				FMemory::Memmove(BufferArray.GetData(), BufferArray.GetData() + Pos - BufferBase, RemainingBufferCount);
-				BufferArray.SetNumUninitialized(BufferCount, false /* AllowShrink */);
+				BufferArray.SetNumUninitialized(BufferCount, EAllowShrinking::No);
 			}
 			else
 			{
 				TArray64<uint8> OldArray(MoveTemp(BufferArray));
-				BufferArray.SetNumUninitialized(BufferCount, false /* AllowShrink */);
+				BufferArray.SetNumUninitialized(BufferCount, EAllowShrinking::No);
 				FMemory::Memcpy(BufferArray.GetData(), OldArray.GetData() + Pos - BufferBase, RemainingBufferCount);
 			}
 
@@ -802,7 +818,7 @@ bool FArchiveFileReaderGeneric::InternalPrecache( int64 PrecacheOffset, int64 Pr
 	{
 		// If we do not have an existing buffer, or Pos is outside it, the low-level read position is equal to Pos.
 		// Read the next BufferCount bytes out of the low-level handle.
-		BufferArray.SetNumUninitialized(BufferCount, false /* AllowShrink */);
+		BufferArray.SetNumUninitialized(BufferCount, EAllowShrinking::No);
 	}
 	BufferBase = Pos;
 
@@ -813,7 +829,7 @@ bool FArchiveFileReaderGeneric::InternalPrecache( int64 PrecacheOffset, int64 Pr
 	if (Count!=ReadCount)
 	{
 		TCHAR ErrorBuffer[1024];
-		UE_LOG( LogFileManager, Warning, TEXT( "ReadFile failed: Count=%lld ReadCount=%lld Error=%s" ), Count, ReadCount, FPlatformMisc::GetSystemErrorMessage( ErrorBuffer, 1024, 0 ) );
+		UE_CLOG( !IsSilent(), LogFileManager, Warning, TEXT( "ReadFile failed: Count=%lld ReadCount=%lld Error=%s" ), Count, ReadCount, FPlatformMisc::GetSystemErrorMessage( ErrorBuffer, 1024, 0 ) );
 		BufferCount = WriteOffset + Count;
 		BufferArray.SetNumUninitialized(BufferCount);
 		// The read failed, but we do not SetError or return false just because a precache read fails.
@@ -828,7 +844,7 @@ void FArchiveFileReaderGeneric::Serialize( void* V, int64 Length )
 	if (Pos + Length > Size)
 	{
 		SetError();
-		UE_LOG(LogFileManager, Error, TEXT("Requested read of %d bytes when %d bytes remain (file=%s, size=%d)"), Length, Size-Pos, *Filename, Size);
+		UE_CLOG( !IsSilent(), LogFileManager, Error, TEXT("Requested read of %d bytes when %d bytes remain (file=%s, size=%d)"), Length, Size-Pos, *Filename, Size);
 		return;
 	}
 
@@ -861,7 +877,7 @@ void FArchiveFileReaderGeneric::Serialize( void* V, int64 Length )
 				{
 					TCHAR ErrorBuffer[1024];
 					SetError();
-					UE_LOG( LogFileManager, Warning, TEXT( "ReadFile failed: Count=%lld Length=%lld Error=%s for file %s" ), 
+					UE_CLOG( !IsSilent(), LogFileManager, Warning, TEXT( "ReadFile failed: Count=%lld Length=%lld Error=%s for file %s" ), 
 						Count, Length, FPlatformMisc::GetSystemErrorMessage( ErrorBuffer, 1024, 0 ), *Filename );
 				}
 				Pos += Length;
@@ -870,14 +886,14 @@ void FArchiveFileReaderGeneric::Serialize( void* V, int64 Length )
 			if (!InternalPrecache(Pos, MAX_int32))
 			{
 				SetError();
-				UE_LOG( LogFileManager, Warning, TEXT( "ReadFile failed during precaching for file %s" ),*Filename );
+				UE_CLOG( !IsSilent(), LogFileManager, Warning, TEXT( "ReadFile failed during precaching for file %s" ),*Filename );
 				return;
 			}
 			Copy = FMath::Min( Length, BufferBase+BufferArray.Num()-Pos );
 			if( Copy<=0 )
 			{
 				SetError();
-				UE_LOG( LogFileManager, Error, TEXT( "ReadFile beyond EOF %lld+%lld/%lld for file %s" ), 
+				UE_CLOG( !IsSilent(), LogFileManager, Error, TEXT( "ReadFile beyond EOF %lld+%lld/%lld for file %s" ), 
 					Pos, Length, Size, *Filename );
 			}
 			if( IsError() )
@@ -894,9 +910,15 @@ void FArchiveFileReaderGeneric::Serialize( void* V, int64 Length )
 
 void FArchiveFileReaderGeneric::FlushCache()
 {
+	BufferArray.Empty();
+	// After clearing BufferArray, we need to set BufferBase and LowLevel to Pos. They may have been up to BufferSize away.
+	BufferBase = Pos;
+
 	if (Handle.IsValid())
 	{
 		Handle->ShrinkBuffers();
+		// After clearing BufferArray, we need to set BufferBase and LowLevel to Pos. They may have been up to BufferSize away.
+		SeekLowLevel(Pos);
 	}
 }
 
@@ -1032,6 +1054,7 @@ void FArchiveFileWriterGeneric::LogWriteError(const TCHAR* Message)
 
 IFileManager& IFileManager::Get()
 {
+	UE::AccessDetection::ReportAccess(UE::AccessDetection::EType::File);
 	static FFileManagerGeneric Singleton;
 	return Singleton;
 }

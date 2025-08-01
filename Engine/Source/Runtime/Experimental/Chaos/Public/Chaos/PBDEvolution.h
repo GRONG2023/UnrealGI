@@ -1,32 +1,50 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
-#include "Chaos/KinematicGeometryParticles.h"
-#include "Chaos/PerParticleGravity.h"
-#include "Chaos/VelocityField.h"
-#include "Chaos/PBDParticles.h"
+#include "Chaos/Core.h"
+#include "Chaos/ArrayCollection.h"
 #include "Chaos/PBDActiveView.h"
-#include "Chaos/Vector.h"
+#include "Chaos/PBDSoftsEvolutionFwd.h"
+#include "Chaos/PBDSoftsSolverParticles.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
+#include "Chaos/KinematicGeometryParticles.h"
+#endif
+#include "Chaos/SoftsSolverCollisionParticles.h"
+#include "Chaos/VelocityField.h"
 
-namespace Chaos
+namespace Chaos::Softs
 {
 
-class CHAOS_API FPBDEvolution : public TArrayCollection
+class FPBDEvolution : public TArrayCollection
 {
  public:
-	using FGravityForces = FPerParticleGravity;
-
-	// TODO(mlentine): Init particles from some type of input
-	FPBDEvolution(FPBDParticles&& InParticles, FKinematicGeometryClothParticles&& InGeometryParticles, TArray<TVec3<int32>>&& CollisionTriangles, int32 NumIterations = 1, FReal CollisionThickness = 0, FReal SelfCollisionsThickness = 0, FReal CoefficientOfFriction = 0, FReal Damping = 0.04);
+	// TODO: Tidy up this constructor (and update Headless Chaos)
+	CHAOS_API FPBDEvolution(
+		FSolverParticles&& InParticles,
+		FSolverCollisionParticles&& InGeometryParticles,
+		TArray<TVec3<int32>>&& CollisionTriangles,
+		int32 NumIterations = 1,
+		FSolverReal CollisionThickness = (FSolverReal)0.,
+		FSolverReal SelfCollisionsThickness = (FSolverReal)0.,
+		FSolverReal CoefficientOfFriction = (FSolverReal)0.,
+		FSolverReal Damping = (FSolverReal)0.04,
+		FSolverReal LocalDamping = (FSolverReal)0.,
+		bool bDoQuasistatics = false, 
+		bool InbUsePerParticleDamping = false);
 	~FPBDEvolution() {}
 
-	void AdvanceOneTimeStep(const FReal dt);
+	// Advance one time step. Filter the input time step if specified.
+	UE_DEPRECATED(5.1, "Use AdvanceOneTimeStep(const FSolverReal Dt) instead.")
+	void AdvanceOneTimeStep(const FSolverReal Dt, const bool bSmoothDt) { AdvanceOneTimeStep(Dt); }
+
+	// Advance one time step. Filter the input time step if specified.
+	CHAOS_API void AdvanceOneTimeStep(const FSolverReal Dt);
 
 	// Remove all particles, will also reset all rules
-	void ResetParticles();
+	CHAOS_API void ResetParticles();
 
 	// Add particles and initialize group ids. Return the index of the first added particle.
-	int32 AddParticleRange(int32 NumParticles, uint32 GroupId, bool bActivate);
+	CHAOS_API int32 AddParticleRange(int32 NumParticles, uint32 GroupId, bool bActivate);
 
 	// Return the number of particles of the block starting at Offset
 	int32 GetParticleRangeSize(int32 Offset) const { return MParticlesActiveView.GetRangeSize(Offset); }
@@ -34,19 +52,36 @@ class CHAOS_API FPBDEvolution : public TArrayCollection
 	// Set a block of particles active or inactive, using the index of the first added particle to identify the block.
 	void ActivateParticleRange(int32 Offset, bool bActivate)  { MParticlesActiveView.ActivateRange(Offset, bActivate); }
 
+	// Clear all ranges.
+	void DeactivateParticleRanges() { MParticlesActiveView.Reset(0); }
+
+	// Set a block of particles active or inactive, using the index of the first added particle to identify the block.
+	int32 AddParticleRange(int32 NumItems, bool bActivate = true) { return MParticlesActiveView.AddRange(NumItems, bActivate); }
+
+
 	// Particles accessors
-	const FPBDParticles& Particles() const { return MParticles; }
-	FPBDParticles& Particles() { return MParticles; }
-	const TPBDActiveView<FPBDParticles>& ParticlesActiveView() { return MParticlesActiveView; }
+	const FSolverParticles& Particles() const { return MParticles; }
+	FSolverParticles& Particles() { return MParticles; }
+	const TPBDActiveView<FSolverParticles>& ParticlesActiveView() { return MParticlesActiveView; }
+	// These versions just help share code with Softs::FEvolution which follows UE naming standards.
+	const FSolverParticles& GetParticles() const { return MParticles; }
+	FSolverParticles& GetParticles() { return MParticles; }
+
 
 	const TArray<uint32>& ParticleGroupIds() const { return MParticleGroupIds; }
 
 	// Remove all collision particles
-	void ResetCollisionParticles(int32 NumParticles = 0);
+	CHAOS_API void ResetCollisionParticles(int32 NumParticles = 0);
 
 	// Add collision particles and initialize group ids. Return the index of the first added particle.
 	// Use INDEX_NONE as GroupId for collision particles that affect all particle groups.
-	int32 AddCollisionParticleRange(int32 NumParticles, uint32 GroupId, bool bActivate);
+	CHAOS_API int32 AddCollisionParticleRange(int32 NumParticles, uint32 GroupId, bool bActivate);
+
+	// Add a single collision body particle to the solver. 
+	CHAOS_API int32 AddCollisionParticle(uint32 GroupId, bool bActivate);
+
+	// Remove a collision body from the active view list, and save its particle in the remvoed collision particle list
+	CHAOS_API void RemoveCollisionParticle(int32 CollisionParticleIndex, int32 CollisionParticleViewIndex);
 
 	// Set a block of collision particles active or inactive, using the index of the first added particle to identify the block.
 	void ActivateCollisionParticleRange(int32 Offset, bool bActivate) { MCollisionParticlesActiveView.ActivateRange(Offset, bActivate); }
@@ -55,123 +90,180 @@ class CHAOS_API FPBDEvolution : public TArrayCollection
 	int32 GetCollisionParticleRangeSize(int32 Offset) const { return MCollisionParticlesActiveView.GetRangeSize(Offset); }
 
 	// Collision particles accessors
-	const FKinematicGeometryClothParticles& CollisionParticles() const { return MCollisionParticles; }
-	FKinematicGeometryClothParticles& CollisionParticles() { return MCollisionParticles; }
+	const FSolverCollisionParticles& CollisionParticles() const { return MCollisionParticles; }
+	FSolverCollisionParticles& CollisionParticles() { return MCollisionParticles; }
+	TArray<uint32>& CollisionParticleGroupIds() { return MCollisionParticleGroupIds; }
 	const TArray<uint32>& CollisionParticleGroupIds() const { return MCollisionParticleGroupIds; }
-	const TPBDActiveView<FKinematicGeometryClothParticles>& CollisionParticlesActiveView() { return MCollisionParticlesActiveView; }
+	TPBDActiveView<FSolverCollisionParticles>& CollisionParticlesActiveView() { return MCollisionParticlesActiveView; }
+	const TPBDActiveView<FSolverCollisionParticles>& CollisionParticlesActiveView() const { return MCollisionParticlesActiveView; }
 
 	// Reset all constraint init and rule functions.
-	void ResetConstraintRules() { MConstraintInits.Reset(); MConstraintRules.Reset(); MConstraintInitsActiveView.Reset(); MConstraintRulesActiveView.Reset();  };
+	void ResetConstraintRules() 
+	{ 
+		MConstraintInits.Reset(); 
+		MConstraintRules.Reset(); 
+		MPostCollisionConstraintRules.Reset();
+		MConstraintPostprocessings.Reset();
+		MConstraintInitsActiveView.Reset(); 
+		MConstraintRulesActiveView.Reset();  
+		MPostCollisionConstraintRulesActiveView.Reset();
+		MConstraintPostprocessingsActiveView.Reset();
+	}
 
 	// Add constraints. Return the index of the first added constraint.
-	int32 AddConstraintInitRange(int32 NumConstraints, bool bActivate);
-	int32 AddConstraintRuleRange(int32 NumConstraints, bool bActivate);
+	CHAOS_API int32 AddConstraintInitRange(int32 NumConstraints, bool bActivate);
+	CHAOS_API int32 AddConstraintRuleRange(int32 NumConstraints, bool bActivate);
+	CHAOS_API int32 AddPostCollisionConstraintRuleRange(int32 NumConstraints, bool bActivate);
+	CHAOS_API int32 AddConstraintPostprocessingsRange(int32 NumConstraints, bool bActivate);
 	
 	// Return the number of particles of the block starting at Offset
 	int32 GetConstraintInitRangeSize(int32 Offset) const { return MConstraintInitsActiveView.GetRangeSize(Offset); }
 	int32 GetConstraintRuleRangeSize(int32 Offset) const { return MConstraintRulesActiveView.GetRangeSize(Offset); }
+	int32 GetPostCollisionConstraintRuleRangeSize(int32 Offset) const { return MPostCollisionConstraintRulesActiveView.GetRangeSize(Offset); }
+	int32 GetConstraintPostprocessingsRangeSize(int32 Offset) const { return MConstraintPostprocessingsActiveView.GetRangeSize(Offset); }
 
 	// Set a block of constraints active or inactive, using the index of the first added particle to identify the block.
 	void ActivateConstraintInitRange(int32 Offset, bool bActivate) { MConstraintInitsActiveView.ActivateRange(Offset, bActivate); }
 	void ActivateConstraintRuleRange(int32 Offset, bool bActivate) { MConstraintRulesActiveView.ActivateRange(Offset, bActivate); }
+	void ActivatePostCollisionConstraintRuleRange(int32 Offset, bool bActivate) { MPostCollisionConstraintRulesActiveView.ActivateRange(Offset, bActivate); }
+	void ActivateConstraintPostprocessingsRange(int32 Offset, bool bActivate) { MConstraintPostprocessingsActiveView.ActivateRange(Offset, bActivate); }
 
 	// Constraint accessors
-	const TArray<TFunction<void(const FPBDParticles&, const FReal)>>& ConstraintInits() const { return MConstraintInits; }
-	TArray<TFunction<void(const FPBDParticles&, const FReal)>>& ConstraintInits() { return MConstraintInits; }
-	const TArray<TFunction<void(FPBDParticles&, const FReal)>>& ConstraintRules() const { return MConstraintRules; }
-	TArray<TFunction<void(FPBDParticles&, const FReal)>>& ConstraintRules() { return MConstraintRules; }
+	const TArray<TFunction<void(FSolverParticles&, const FSolverReal)>>& ConstraintInits() const { return MConstraintInits; }
+	TArray<TFunction<void(FSolverParticles&, const FSolverReal)>>& ConstraintInits() { return MConstraintInits; }
+	const TArray<TFunction<void(FSolverParticles&, const FSolverReal)>>& ConstraintRules() const { return MConstraintRules; }
+	TArray<TFunction<void(FSolverParticles&, const FSolverReal)>>& ConstraintRules() { return MConstraintRules; }
+	const TArray<TFunction<void(FSolverParticles&, const FSolverReal)>>& PostCollisionConstraintRules() const { return MPostCollisionConstraintRules; }
+	TArray<TFunction<void(FSolverParticles&, const FSolverReal)>>& PostCollisionConstraintRules() { return MPostCollisionConstraintRules; }
+	const TArray<TFunction<void(FSolverParticles&, const FSolverReal)>>& ConstraintPostprocessings() const { return MConstraintPostprocessings; }
+	TArray<TFunction<void(FSolverParticles&, const FSolverReal)>>& ConstraintPostprocessings() { return MConstraintPostprocessings; }
 	
-	void SetKinematicUpdateFunction(TFunction<void(FPBDParticles&, const FReal, const FReal, const int32)> KinematicUpdate) { MKinematicUpdate = KinematicUpdate; }
-	void SetCollisionKinematicUpdateFunction(TFunction<void(FKinematicGeometryClothParticles&, const FReal, const FReal, const int32)> KinematicUpdate) { MCollisionKinematicUpdate = KinematicUpdate; }
+	void SetKinematicUpdateFunction(TFunction<void(FSolverParticles&, const FSolverReal, const FSolverReal, const int32)> KinematicUpdate) { MKinematicUpdate = KinematicUpdate; }
+	void SetCollisionKinematicUpdateFunction(TFunction<void(FSolverCollisionParticles&, const FSolverReal, const FSolverReal, const int32)> KinematicUpdate) { MCollisionKinematicUpdate = KinematicUpdate; }
 
-	TFunction<void(FPBDParticles&, const FReal, const int32)>& GetForceFunction(const uint32 GroupId = 0) { return MGroupForceRules[GroupId]; }
-	const TFunction<void(FPBDParticles&, const FReal, const int32)>& GetForceFunction(const uint32 GroupId = 0) const { return MGroupForceRules[GroupId]; }
+	TFunction<void(FSolverParticles&, const FSolverReal, const int32)>& GetForceFunction(const uint32 GroupId = 0) { return MGroupForceRules[GroupId]; }
+	const TFunction<void(FSolverParticles&, const FSolverReal, const int32)>& GetForceFunction(const uint32 GroupId = 0) const { return MGroupForceRules[GroupId]; }
 
-	FGravityForces& GetGravityForces(const uint32 GroupId = 0) { check(GroupId < TArrayCollection::Size()); return MGroupGravityForces[GroupId]; }
-	const FGravityForces& GetGravityForces(const uint32 GroupId = 0) const { check(GroupId < TArrayCollection::Size()); return MGroupGravityForces[GroupId]; }
+	const FSolverVec3& GetGravity(const uint32 GroupId = 0) const { check(GroupId < TArrayCollection::Size()); return MGroupGravityAccelerations[GroupId]; }
+	void SetGravity(const FSolverVec3& Acceleration, const uint32 GroupId = 0) { check(GroupId < TArrayCollection::Size()); MGroupGravityAccelerations[GroupId] = Acceleration; }
 
-	FVelocityField& GetVelocityField(const uint32 GroupId = 0) { check(GroupId < TArrayCollection::Size()); return MGroupVelocityFields[GroupId]; }
-	const FVelocityField& GetVelocityField(const uint32 GroupId = 0) const { check(GroupId < TArrayCollection::Size()); return MGroupVelocityFields[GroupId]; }
+	void SetQuasistatics(const bool bDoQuasistaticsIn) { bDoQuasistatics = bDoQuasistaticsIn; }
 
-	void ResetSelfCollision() { MCollisionTriangles.Reset(); MDisabledCollisionElements.Reset(); };
-	TArray<TVector<int32, 3>>& CollisionTriangles() { return MCollisionTriangles; }
-	TSet<TVector<int32, 2>>& DisabledCollisionElements() { return MDisabledCollisionElements; }
+	FVelocityAndPressureField& GetVelocityAndPressureField(const uint32 GroupId = 0) { check(GroupId < TArrayCollection::Size()); return MGroupVelocityAndPressureFields[GroupId]; }
+	const FVelocityAndPressureField& GetVelocityAndPressureField(const uint32 GroupId = 0) const { check(GroupId < TArrayCollection::Size()); return MGroupVelocityAndPressureFields[GroupId]; }
+
+	UE_DEPRECATED(5.1, "Chaos::Softs::FVelocityField has been renamed FVelocityAndPressureField to match its new behavior.")
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	FVelocityField& GetVelocityField(const uint32 GroupId = 0) { return GetVelocityAndPressureField(GroupId); }
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	UE_DEPRECATED(5.1, "Chaos::Softs::FVelocityField has been renamed FVelocityAndPressureField to match its new behavior.")
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	const FVelocityField& GetVelocityField(const uint32 GroupId = 0) const { return GetVelocityAndPressureField(GroupId); }
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
 
 	int32 GetIterations() const { return MNumIterations; }
 	void SetIterations(const int32 Iterations) { MNumIterations = Iterations; }
 
-	FReal GetSelfCollisionThickness(const uint32 GroupId = 0) const { check(GroupId < TArrayCollection::Size()); return MGroupSelfCollisionThicknesses[GroupId]; }
-	void SetSelfCollisionThickness(const FReal SelfCollisionThickness, const uint32 GroupId = 0) { check(GroupId < TArrayCollection::Size()); MGroupSelfCollisionThicknesses[GroupId] = SelfCollisionThickness; }
+	FSolverReal GetCollisionThickness(const uint32 GroupId = 0) const { check(GroupId < TArrayCollection::Size()); return MGroupCollisionThicknesses[GroupId]; }
+	void SetCollisionThickness(const FSolverReal CollisionThickness, const uint32 GroupId = 0) { check(GroupId < TArrayCollection::Size()); MGroupCollisionThicknesses[GroupId] = CollisionThickness; }
 
-	FReal GetCollisionThickness(const uint32 GroupId = 0) const { check(GroupId < TArrayCollection::Size()); return MGroupCollisionThicknesses[GroupId]; }
-	void SetCollisionThickness(const FReal CollisionThickness, const uint32 GroupId = 0) { check(GroupId < TArrayCollection::Size()); MGroupCollisionThicknesses[GroupId] = CollisionThickness; }
+	FSolverReal GetCoefficientOfFriction(const uint32 GroupId = 0) const { check(GroupId < TArrayCollection::Size()); return MGroupCoefficientOfFrictions[GroupId]; }
+	void SetCoefficientOfFriction(const FSolverReal CoefficientOfFriction, const uint32 GroupId = 0) { check(GroupId < TArrayCollection::Size()); MGroupCoefficientOfFrictions[GroupId] = CoefficientOfFriction; }
 
-	FReal GetCoefficientOfFriction(const uint32 GroupId = 0) const { check(GroupId < TArrayCollection::Size()); return MGroupCoefficientOfFrictions[GroupId]; }
-	void SetCoefficientOfFriction(const FReal CoefficientOfFriction, const uint32 GroupId = 0) { check(GroupId < TArrayCollection::Size()); MGroupCoefficientOfFrictions[GroupId] = CoefficientOfFriction; }
+	FSolverReal GetDamping(const uint32 GroupId = 0) const { check(GroupId < TArrayCollection::Size()); return MGroupDampings[GroupId]; }
+	void SetDamping(const FSolverReal Damping, const uint32 GroupId = 0) { check(GroupId < TArrayCollection::Size()); MGroupDampings[GroupId] = Damping; }
 
-	FReal GetDamping(const uint32 GroupId = 0) const { check(GroupId < TArrayCollection::Size()); return MGroupDampings[GroupId]; }
-	void SetDamping(const FReal Damping, const uint32 GroupId = 0) { check(GroupId < TArrayCollection::Size()); MGroupDampings[GroupId] = Damping; }
+	FSolverReal GetLocalDamping(const uint32 GroupId = 0) const { check(GroupId < TArrayCollection::Size()); return MGroupLocalDampings[GroupId]; }
+	void SetLocalDamping(const FSolverReal LocalDamping, const uint32 GroupId = 0) { check(GroupId < TArrayCollection::Size()); MGroupLocalDampings[GroupId] = LocalDamping; }
 
 	bool GetUseCCD(const uint32 GroupId = 0) const { check(GroupId < TArrayCollection::Size()); return MGroupUseCCDs[GroupId]; }
 	void SetUseCCD(const bool bUseCCD, const uint32 GroupId = 0) { check(GroupId < TArrayCollection::Size()); MGroupUseCCDs[GroupId] = bUseCCD; }
+
+	FSolverReal GetParticleDamping(const uint32 ParticleIndex = 0) const { check(ParticleIndex < this->Particles().Size() && bUsePerParticleDamping); return MParticleDampings[ParticleIndex]; }
+	void SetParticleDamping(const FSolverReal Damping, const uint32 ParticleIndex = 0) { check(ParticleIndex < this->Particles().Size()); if (bUsePerParticleDamping) { MParticleDampings[ParticleIndex] = Damping; } }
+
 
 	UE_DEPRECATED(4.27, "Use GetCollisionStatus() instead")
 	const bool Collided(int32 index) { return MCollided[index]; }
 
 	const TArray<bool>& GetCollisionStatus() { return MCollided; }
-	const TArray<FVec3>& GetCollisionContacts() const { return MCollisionContacts; }
-	const TArray<FVec3>& GetCollisionNormals() const { return MCollisionNormals; }
+	const TArray<FSolverVec3>& GetCollisionContacts() const { return MCollisionContacts; }
+	const TArray<FSolverVec3>& GetCollisionNormals() const { return MCollisionNormals; }
+	const TArray<FSolverReal>& GetCollisionPhis() const { return MCollisionPhis; }
 
-	FReal GetTime() const { return MTime; }
+	FSolverReal GetTime() const { return MTime; }
 
  private:
 	// Add simulation groups and set default values
-	void AddGroups(int32 NumGroups);
+	CHAOS_API void AddGroups(int32 NumGroups);
 	// Reset simulation groups
-	void ResetGroups();
+	CHAOS_API void ResetGroups();
 	// Selected versions of the pre-iteration updates (euler step, force, velocity field. damping updates)..
 	template<bool bForceRule, bool bVelocityField, bool bDampVelocityRule>
-	void PreIterationUpdate(const FReal Dt, const int32 Offset, const int32 Range, const int32 MinParallelBatchSize);
+	void PreIterationUpdate(const FSolverReal Dt, const int32 Offset, const int32 Range, const int32 MinParallelBatchSize);
+
+	struct FParticleVievToken { int32 ParticleIndex = INDEX_NONE; int32 ViewIndex = INDEX_NONE; };
 
 private:
-	FPBDParticles MParticles;
-	TPBDActiveView<FPBDParticles> MParticlesActiveView;
-	FKinematicGeometryClothParticles MCollisionParticles;
-	TPBDActiveView<FKinematicGeometryClothParticles> MCollisionParticlesActiveView;
+	FSolverParticles MParticles;
+	TPBDActiveView<FSolverParticles> MParticlesActiveView;
+	FSolverCollisionParticles MCollisionParticles;
+	TPBDActiveView<FSolverCollisionParticles> MCollisionParticlesActiveView;
+	TArray<FParticleVievToken> RemovedCollisionIndices;
 
-	TArray<TVector<int32, 3>> MCollisionTriangles;       // Used for self-collisions
-	TSet<TVector<int32, 2>> MDisabledCollisionElements;  // 
-
-	TArrayCollectionArray<FRigidTransform3> MCollisionTransforms;  // Used for CCD to store the initial state before the kinematic update
+	TArrayCollectionArray<FSolverRigidTransform3> MCollisionTransforms;  // Used for CCD to store the initial state before the kinematic update
 	TArrayCollectionArray<bool> MCollided;
 	TArrayCollectionArray<uint32> MCollisionParticleGroupIds;  // Used for per group parameters for collision particles
 	TArrayCollectionArray<uint32> MParticleGroupIds;  // Used for per group parameters for particles
-	TArray<FVec3> MCollisionContacts;
-	TArray<FVec3> MCollisionNormals;
+	TArray<FSolverVec3> MCollisionContacts;
+	TArray<FSolverVec3> MCollisionNormals;
+	TArray<FSolverReal> MCollisionPhis;
 
-	TArrayCollectionArray<FGravityForces> MGroupGravityForces;
-	TArrayCollectionArray<FVelocityField> MGroupVelocityFields;
-	TArrayCollectionArray<TFunction<void(FPBDParticles&, const FReal, const int32)>> MGroupForceRules;
-	TArrayCollectionArray<FReal> MGroupCollisionThicknesses;
-	TArrayCollectionArray<FReal> MGroupSelfCollisionThicknesses;
-	TArrayCollectionArray<FReal> MGroupCoefficientOfFrictions;
-	TArrayCollectionArray<FReal> MGroupDampings;
+	TArrayCollectionArray<FSolverVec3> MGroupGravityAccelerations;
+	TArrayCollectionArray<FVelocityAndPressureField> MGroupVelocityAndPressureFields;
+	TArrayCollectionArray<TFunction<void(FSolverParticles&, const FSolverReal, const int32)>> MGroupForceRules;
+	TArrayCollectionArray<FSolverReal> MGroupCollisionThicknesses;
+	TArrayCollectionArray<FSolverReal> MGroupCoefficientOfFrictions;
+	TArrayCollectionArray<FSolverReal> MGroupDampings;
+	TArrayCollectionArray<FSolverReal> MGroupLocalDampings;
 	TArrayCollectionArray<bool> MGroupUseCCDs;
-	
-	TArray<TFunction<void(const FPBDParticles&, const FReal)>> MConstraintInits;
-	TPBDActiveView<TArray<TFunction<void(const FPBDParticles&, const FReal)>>> MConstraintInitsActiveView;
-	TArray<TFunction<void(FPBDParticles&, const FReal)>> MConstraintRules;
-	TPBDActiveView<TArray<TFunction<void(FPBDParticles&, const FReal)>>> MConstraintRulesActiveView;
 
-	TFunction<void(FPBDParticles&, const FReal, const FReal, const int32)> MKinematicUpdate;
-	TFunction<void(FKinematicGeometryClothParticles&, const FReal, const FReal, const int32)> MCollisionKinematicUpdate;
+	//per particle data:
+	TArrayCollectionArray<FSolverReal> MParticleDampings;
+	
+	TArray<TFunction<void(FSolverParticles&, const FSolverReal)>> MConstraintInits;
+	TPBDActiveView<TArray<TFunction<void(FSolverParticles&, const FSolverReal)>>> MConstraintInitsActiveView;
+	TArray<TFunction<void(FSolverParticles&, const FSolverReal)>> MConstraintRules;
+	TPBDActiveView<TArray<TFunction<void(FSolverParticles&, const FSolverReal)>>> MConstraintRulesActiveView;
+	TArray<TFunction<void(FSolverParticles&, const FSolverReal)>> MPostCollisionConstraintRules;
+	TPBDActiveView<TArray<TFunction<void(FSolverParticles&, const FSolverReal)>>> MPostCollisionConstraintRulesActiveView;
+	TArray<TFunction<void(FSolverParticles&, const FSolverReal)>> MConstraintPostprocessings;
+	TPBDActiveView<TArray<TFunction<void(FSolverParticles&, const FSolverReal)>>> MConstraintPostprocessingsActiveView;
+
+	TFunction<void(FSolverParticles&, const FSolverReal, const FSolverReal, const int32)> MKinematicUpdate;
+	TFunction<void(FSolverCollisionParticles&, const FSolverReal, const FSolverReal, const int32)> MCollisionKinematicUpdate;
 
 	int32 MNumIterations;
-	FVec3 MGravity;
-	FReal MCollisionThickness;
-	FReal MSelfCollisionThickness;
-	FReal MCoefficientOfFriction;
-	FReal MDamping;
-	FReal MTime;
+	FSolverVec3 MGravity;
+	FSolverReal MCollisionThickness;
+	FSolverReal MCoefficientOfFriction;
+	FSolverReal MDamping;
+	FSolverReal MLocalDamping;
+	FSolverReal MTime;
+	bool bDoQuasistatics = false;
+	bool bUsePerParticleDamping = false;
 };
-}
+
+}  // End namespace Chaos::Softs
+
+#if !defined(CHAOS_POST_ITERATION_UPDATES_ISPC_ENABLED)
+#define CHAOS_POST_ITERATION_UPDATES_ISPC_ENABLED 1
+#endif
+
+// Support ISPC enable/disable in non-shipping builds
+#if !INTEL_ISPC || UE_BUILD_SHIPPING
+static constexpr bool bChaos_PostIterationUpdates_ISPC_Enabled = INTEL_ISPC && CHAOS_POST_ITERATION_UPDATES_ISPC_ENABLED;
+#else
+extern CHAOS_API bool bChaos_PostIterationUpdates_ISPC_Enabled;
+#endif

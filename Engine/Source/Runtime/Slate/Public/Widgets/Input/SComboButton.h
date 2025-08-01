@@ -9,29 +9,31 @@
 #include "Input/Reply.h"
 #include "Widgets/SWidget.h"
 #include "Styling/SlateTypes.h"
-#include "Styling/CoreStyle.h"
+#include "Styling/AppStyle.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Input/SMenuAnchor.h"
 
-DECLARE_DELEGATE( FOnComboBoxOpened )
+DECLARE_DELEGATE(FOnComboBoxOpened)
+
+class SButton;
+class SImage;
 
 /**
  * A button that, when clicked, brings up a popup.
  */
-class SLATE_API SComboButton : public SMenuAnchor
+class SComboButton : public SMenuAnchor
 {
 public:
 
 	SLATE_BEGIN_ARGS( SComboButton )
-		: _ComboButtonStyle( &FCoreStyle::Get().GetWidgetStyle< FComboButtonStyle >( "ComboButton" ) )
+		: _ComboButtonStyle(&FAppStyle::Get().GetWidgetStyle< FComboButtonStyle >( "ComboButton" ))
 		, _ButtonStyle(nullptr)
 		, _ButtonContent()
 		, _MenuContent()
 		, _IsFocusable(true)
 		, _HasDownArrow(true)
-		, _ForegroundColor(FCoreStyle::Get().GetSlateColor("InvertedForeground"))
+		, _ForegroundColor(FSlateColor::UseStyle())
 		, _ButtonColorAndOpacity(FLinearColor::White)
-		, _ContentPadding(FMargin(5))
 		, _MenuPlacement(MenuPlacement_ComboBox)
 		, _HAlign(HAlign_Fill)
 		, _VAlign(VAlign_Center)
@@ -73,30 +75,45 @@ public:
 	SLATE_END_ARGS()
 
 	// SMenuAnchor interface
-	virtual void SetMenuContent(TSharedRef<SWidget> InContent) override;
+	SLATE_API virtual void SetMenuContent(TSharedRef<SWidget> InContent) override;
 	// End of SMenuAnchor interface
 
 	/** See the OnGetMenuContent event */
-	void SetOnGetMenuContent( FOnGetContent InOnGetMenuContent );
+	SLATE_API void SetOnGetMenuContent( FOnGetContent InOnGetMenuContent );
 
 	/**
 	 * Construct the widget from a declaration
 	 *
 	 * @param InArgs  The declaration from which to construct
 	 */
-	void Construct(const FArguments& InArgs);
+	SLATE_API void Construct(const FArguments& InArgs);
 
 	void SetMenuContentWidgetToFocus( TWeakPtr<SWidget> InWidgetToFocusPtr )
 	{
 		WidgetToFocusPtr = InWidgetToFocusPtr;
 	}
 
+	/** See the padding for button content. */
+	SLATE_API void SetButtonContentPadding(FMargin InPadding);
+
+	/** add/remove the expanding arrow. */
+	SLATE_API void SetHasDownArrow(bool InHasArrowDown);
+
 protected:
 	/**
 	 * Handle the button being clicked by summoning the ComboButton.
 	 */
-	virtual FReply OnButtonClicked();
-	virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
+	SLATE_API virtual FReply OnButtonClicked();
+	SLATE_API virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
+
+	/**
+	 * Called to query the tool tip text for this widget, but will return an empty text when the menu is already open
+	 *
+	 * @param	ToolTipText	Tool tip text to display, if possible
+	 *
+	 * @return	Tool tip text, or an empty text if filtered out
+	 */
+	SLATE_API FText GetFilteredToolTipText(TAttribute<FText> ToolTipText) const;
 
 protected:
 	/** Area where the button's content resides */
@@ -118,4 +135,20 @@ protected:
 
 	/** Can this button be focused? */
 	bool bIsFocusable;
+
+private:
+	/** The button widget within the ComboButton */
+	TSharedPtr<SButton> ButtonPtr;
+
+	/** The box containing the arrow */
+	TSharedPtr<SHorizontalBox> HBox;
+
+	/** The arrow image shadow */
+	TSharedPtr<SImage> ShadowImage;
+
+	/** The arrow image */
+	TSharedPtr<SImage> ForegroundArrowImage;
+
+	/** The ComboButton style */
+	const FComboButtonStyle* Style;
 };

@@ -2,17 +2,38 @@
 
 #pragma once
 
+#include "Channels/MovieSceneBoolChannel.h"
+#include "Channels/MovieSceneChannelHandle.h"
+#include "Channels/MovieSceneDoubleChannel.h"
+#include "Channels/MovieSceneFloatChannel.h"
+#include "Channels/MovieSceneIntegerChannel.h"
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
 #include "CoreTypes.h"
+#include "CurveEditorTypes.h"
+#include "CurveModel.h"
+#include "Curves/KeyHandle.h"
+#include "Delegates/IDelegateInstance.h"
+#include "IBufferedCurveModel.h"
+#include "Misc/OptionalFwd.h"
+#include "MovieSceneSection.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/Tuple.h"
+#include "UObject/UnrealType.h"
 #include "UObject/WeakObjectPtr.h"
 #include "UObject/WeakObjectPtrTemplates.h"
-#include "CurveModel.h"
-#include "IBufferedCurveModel.h"
-#include "MovieSceneSection.h"
-#include "Channels/MovieSceneChannelHandle.h"
+#include "Misc/Guid.h"
 
-class UMovieSceneSection;
 class FCurveEditor;
+class FString;
 class ISequencer;
+class UMovieSceneSection;
+class UObject;
+struct FCurveAttributes;
+struct FCurveEditorScreenSpace;
+struct FKeyAttributes;
+struct FKeyDrawInfo;
+struct FKeyPosition;
 
 template <class ChannelType, class ChannelValue, class KeyType>
 class FChannelCurveModel : public FCurveModel
@@ -46,6 +67,21 @@ public:
 	{
 		return WeakSection.Get();
 	}
+	virtual bool HasChangedAndResetTest() override
+	{
+		if (UMovieSceneSection* Section = WeakSection.Get())
+		{
+			if (Section->GetSignature() != LastSignature)
+			{
+				LastSignature = Section->GetSignature();
+				return true;
+			}
+			return false;
+		}
+		return true;
+	}
+
+	virtual void GetCurveColorObjectAndName(UObject** OutObject, FString& OutName) const override;
 
 protected:
 
@@ -66,4 +102,5 @@ private:
 	TWeakObjectPtr<UMovieSceneSection> WeakSection;
 	TWeakPtr<ISequencer> WeakSequencer;
 	FDelegateHandle OnDestroyHandle;
+	FGuid LastSignature;
 };

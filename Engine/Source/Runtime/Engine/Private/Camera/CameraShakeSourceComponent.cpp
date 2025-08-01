@@ -1,22 +1,23 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Camera/CameraShakeSourceComponent.h"
-#include "Camera/CameraModifier_CameraShake.h"
 #include "Camera/CameraShakeBase.h"
-#include "CinematicCameraModule.h"
+#include "Camera/CameraModifier_CameraShake.h"
 #include "Components/BillboardComponent.h"
-#include "Engine/Engine.h"
 #include "Engine/Texture2D.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
-#include "Modules/ModuleManager.h"
 #include "UObject/ConstructorHelpers.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(CameraShakeSourceComponent)
 
 #if WITH_EDITOR
 #include "Framework/Notifications/NotificationManager.h"
+#include "UObject/UnrealType.h"
 #include "Widgets/Notifications/SNotificationList.h"
 #endif
 
+DEFINE_LOG_CATEGORY_STATIC(LogCameraShakeSourceComponent, Log, All);
 
 UCameraShakeSourceComponent::UCameraShakeSourceComponent(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -74,44 +75,74 @@ void UCameraShakeSourceComponent::EndPlay(const EEndPlayReason::Type EndPlayReas
 
 void UCameraShakeSourceComponent::Start()
 {
-	if (ensureMsgf(CameraShake.Get() != nullptr, TEXT("No camera shake was specified on this source!")))
+	if (CameraShake.Get() != nullptr)
 	{
 		StartCameraShake(CameraShake);
+	}
+	else
+	{
+		UE_LOG(LogCameraShakeSourceComponent, Error, TEXT("%s: No camera shake was specified on this source. Me = %s, Owner = %s"), ANSI_TO_TCHAR(__FUNCTION__), *this->GetFullName(), *GetOwner()->GetFullName());
 	}
 }
 
 void UCameraShakeSourceComponent::StartCameraShake(TSubclassOf<UCameraShakeBase> InCameraShake, float Scale, ECameraShakePlaySpace PlaySpace, FRotator UserPlaySpaceRot)
 {
-	for (FConstPlayerControllerIterator Iterator = GetWorld()->GetPlayerControllerIterator(); Iterator; ++Iterator)
+	FCameraShakeSourceComponentStartParams Params;
+	Params.ShakeClass = InCameraShake;
+	Params.Scale = Scale;
+	Params.PlaySpace = PlaySpace;
+	Params.UserPlaySpaceRot = UserPlaySpaceRot;
+	StartCameraShake(Params);
+}
+
+void UCameraShakeSourceComponent::StartCameraShake(const FCameraShakeSourceComponentStartParams& Params)
+{
+	if (UWorld* World = GetWorld())
 	{
-		APlayerController* PlayerController = Iterator->Get();
-		if (PlayerController != nullptr && PlayerController->PlayerCameraManager != nullptr)
+		FAddCameraShakeParams ModParams;
+		ModParams.SourceComponent = this;
+		ModParams.Scale = Params.Scale;
+		ModParams.PlaySpace = Params.PlaySpace;
+		ModParams.UserPlaySpaceRot = Params.UserPlaySpaceRot;
+		ModParams.DurationOverride = Params.DurationOverride;
+
+		for (FConstPlayerControllerIterator Iterator = World->GetPlayerControllerIterator(); Iterator; ++Iterator)
 		{
-			PlayerController->PlayerCameraManager->StartCameraShakeFromSource(InCameraShake, this, Scale, PlaySpace, UserPlaySpaceRot);
+			APlayerController* PlayerController = Iterator->Get();
+			if (PlayerController != nullptr && PlayerController->PlayerCameraManager != nullptr)
+			{
+				PlayerController->PlayerCameraManager->StartCameraShake(Params.ShakeClass, ModParams);
+			}
 		}
 	}
 }
 
 void UCameraShakeSourceComponent::StopAllCameraShakesOfType(TSubclassOf<UCameraShakeBase> InCameraShake, bool bImmediately)
 {
-	for (FConstPlayerControllerIterator Iterator = GetWorld()->GetPlayerControllerIterator(); Iterator; ++Iterator)
+	if (UWorld* World = GetWorld())
 	{
-		APlayerController* PlayerController = Iterator->Get();
-		if (PlayerController != nullptr && PlayerController->PlayerCameraManager != nullptr)
+		for (FConstPlayerControllerIterator Iterator = World->GetPlayerControllerIterator(); Iterator; ++Iterator)
 		{
-			PlayerController->PlayerCameraManager->StopAllInstancesOfCameraShakeFromSource(InCameraShake, this, bImmediately);
+			APlayerController* PlayerController = Iterator->Get();
+			if (PlayerController != nullptr && PlayerController->PlayerCameraManager != nullptr)
+			{
+				PlayerController->PlayerCameraManager->StopAllInstancesOfCameraShakeFromSource(InCameraShake, this, bImmediately);
+			}
 		}
 	}
 }
 
 void UCameraShakeSourceComponent::StopAllCameraShakes(bool bImmediately)
 {
-	for (FConstPlayerControllerIterator Iterator = GetWorld()->GetPlayerControllerIterator(); Iterator; ++Iterator)
+	if (UWorld* World = GetWorld())
 	{
-		APlayerController* PlayerController = Iterator->Get();
-		if (PlayerController != nullptr && PlayerController->PlayerCameraManager != nullptr)
+		for (FConstPlayerControllerIterator Iterator = World->GetPlayerControllerIterator(); Iterator; ++Iterator)
 		{
-			PlayerController->PlayerCameraManager->StopAllCameraShakesFromSource(this, bImmediately);
+			APlayerController* PlayerController = Iterator->Get();
+			if (PlayerController != nullptr && PlayerController->PlayerCameraManager != nullptr)
+			{
+				PlayerController->PlayerCameraManager->StopAllCameraShakesFromSource(this, bImmediately);
+			}
 		}
 	}
 }
@@ -184,3 +215,4 @@ void UCameraShakeSourceComponent::PostEditChangeProperty( struct FPropertyChange
 }
 
 #endif
+

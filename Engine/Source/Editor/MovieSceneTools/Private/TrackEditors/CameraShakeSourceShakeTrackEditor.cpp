@@ -1,31 +1,86 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "TrackEditors/CameraShakeSourceShakeTrackEditor.h"
-#include "AssetRegistryModule.h"
+
+#include "AssetRegistry/ARFilter.h"
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
+#include "Blueprint/BlueprintSupport.h"
 #include "Camera/CameraShakeBase.h"
 #include "Camera/CameraShakeSourceComponent.h"
-#include "CameraShakeTrackEditorBase.h"
-#include "CommonMovieSceneTools.h"
+#include "TrackEditors/CameraShakeTrackEditorBase.h"
+#include "Channels/MovieSceneCameraShakeSourceTriggerChannel.h"
+#include "Channels/MovieSceneChannelData.h"
+#include "Containers/ArrayView.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "Containers/UnrealString.h"
+#include "ContentBrowserDelegates.h"
 #include "ContentBrowserModule.h"
-#include "EditorStyleSet.h"
+#include "Delegates/Delegate.h"
 #include "Engine/Blueprint.h"
 #include "Fonts/FontMeasure.h"
+#include "Fonts/SlateFontInfo.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/UIAction.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Framework/SlateDelegates.h"
 #include "GameFramework/Actor.h"
+#include "HAL/PlatformCrt.h"
 #include "IContentBrowserSingleton.h"
-#include "MovieSceneTimeHelpers.h"
+#include "ISequencer.h"
+#include "ISequencerSection.h"
+#include "ISequencerTrackEditor.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Layout/Geometry.h"
+#include "Layout/Margin.h"
+#include "Math/Color.h"
+#include "Math/Range.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/FrameNumber.h"
+#include "Misc/Guid.h"
+#include "Misc/PackageName.h"
+#include "Modules/ModuleManager.h"
+#include "MovieSceneSection.h"
+#include "MovieSceneSequence.h"
+#include "MovieSceneTrack.h"
 #include "Rendering/DrawElements.h"
+#include "Rendering/RenderingCommon.h"
+#include "Rendering/SlateRenderer.h"
+#include "ScopedTransaction.h"
+#include "Sections/MovieSceneCameraShakeSection.h"
 #include "Sections/MovieSceneCameraShakeSourceShakeSection.h"
 #include "Sections/MovieSceneCameraShakeSourceTriggerSection.h"
 #include "SequencerSectionPainter.h"
-#include "SequencerUtilities.h"
+#include "MVVM/Views/ViewUtilities.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/CoreStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/SlateColor.h"
+#include "Styling/WidgetStyle.h"
+#include "Templates/Casts.h"
+#include "Textures/SlateIcon.h"
+#include "TimeToPixel.h"
 #include "Tracks/MovieSceneCameraShakeSourceShakeTrack.h"
 #include "Tracks/MovieSceneCameraShakeSourceTriggerTrack.h"
-#include "Widgets/Input/SButton.h"
+#include "Types/SlateEnums.h"
+#include "Types/SlateStructs.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/TopLevelAssetPath.h"
+#include "UObject/WeakObjectPtr.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/SBoxPanel.h"
-#include "Misc/PackageName.h"
+
+class SWidget;
+class UMovieScene;
 
 #define LOCTEXT_NAMESPACE "FCameraShakeSourceShakeTrackEditor"
 
@@ -103,16 +158,16 @@ void FCameraShakeSourceTriggerSection::PaintShakeName(FSequencerSectionPainter& 
 	static const float   BoxOffsetPx   = 10.f;
 	static const FString AutoShakeText = LOCTEXT("AutoShake", "(Automatic)").ToString();
 
-	const FSlateFontInfo FontAwesomeFont = FEditorStyle::Get().GetFontStyle("FontAwesome.10");
+	const FSlateFontInfo FontAwesomeFont = FAppStyle::Get().GetFontStyle("FontAwesome.10");
 	const FSlateFontInfo SmallLayoutFont = FCoreStyle::GetDefaultFontStyle("Bold", 10);
-	const FLinearColor   DrawColor       = FEditorStyle::GetSlateColor("SelectionColor").GetColor(FWidgetStyle());
+	const FLinearColor   DrawColor       = FAppStyle::GetSlateColor("SelectionColor").GetColor(FWidgetStyle());
 
 	const FString ShakeText = (ShakeClass.Get() != nullptr) ? ShakeClass.Get()->GetName() : AutoShakeText;
 
 	TSharedRef<FSlateFontMeasure> FontMeasureService = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
 
 	const  FMargin   BoxPadding     = FMargin(4.0f, 2.0f);
-	const FVector2D  TextSize       = FontMeasureService->Measure(ShakeText, SmallLayoutFont);
+	const FVector2f  TextSize       = UE::Slate::CastToVector2f(FontMeasureService->Measure(ShakeText, SmallLayoutFont));
 
 	// Flip the text position if getting near the end of the view range
 	const bool bDrawLeft = (Painter.SectionGeometry.Size.X - PixelPos) < (TextSize.X + 22.f) - BoxOffsetPx;
@@ -120,15 +175,15 @@ void FCameraShakeSourceTriggerSection::PaintShakeName(FSequencerSectionPainter& 
 			bDrawLeft ? PixelPos - TextSize.X - BoxOffsetPx : PixelPos + BoxOffsetPx,
 			0.f);
 
-	const FVector2D BoxOffset  = FVector2D(BoxPositionX, Painter.SectionGeometry.Size.Y*.5f - TextSize.Y*.5f);
-	const FVector2D TextOffset = FVector2D(BoxPadding.Left, 0);
+	const FVector2f BoxOffset  = FVector2f(BoxPositionX, Painter.SectionGeometry.Size.Y*.5f - TextSize.Y*.5f);
+	const FVector2f TextOffset = FVector2f(BoxPadding.Left, 0);
 
 	// Draw the background box.
 	FSlateDrawElement::MakeBox(
 		Painter.DrawElements,
 		LayerId + 1,
-		Painter.SectionGeometry.ToPaintGeometry(BoxOffset, TextSize),
-		FEditorStyle::GetBrush("WhiteBrush"),
+		Painter.SectionGeometry.ToPaintGeometry(TextSize, FSlateLayoutTransform(BoxOffset)),
+		FAppStyle::GetBrush("WhiteBrush"),
 		ESlateDrawEffect::None,
 		FLinearColor::Black.CopyWithNewOpacity(0.5f)
 	);
@@ -137,7 +192,7 @@ void FCameraShakeSourceTriggerSection::PaintShakeName(FSequencerSectionPainter& 
 	FSlateDrawElement::MakeText(
 		Painter.DrawElements,
 		LayerId + 2,
-		Painter.SectionGeometry.ToPaintGeometry(BoxOffset + TextOffset, TextSize),
+		Painter.SectionGeometry.ToPaintGeometry(TextSize, FSlateLayoutTransform(BoxOffset + TextOffset)),
 		ShakeText,
 		SmallLayoutFont,
 		Painter.bParentEnabled ? ESlateDrawEffect::None : ESlateDrawEffect::DisabledEffect,
@@ -272,7 +327,7 @@ void FCameraShakeSourceShakeTrackEditor::AddCameraShakeSection(TArray<FGuid> Obj
 		}
 	}
 
-	auto OnAddShakeSourceShakeSection = [=](FFrameNumber Time) -> FKeyPropertyResult
+	auto OnAddShakeSourceShakeSection = [this, Objects](FFrameNumber Time) -> FKeyPropertyResult
 	{
 		return this->AddCameraShakeSectionKeyInternal(Time, Objects, true);
 	};
@@ -286,30 +341,17 @@ TSharedPtr<SWidget> FCameraShakeSourceShakeTrackEditor::BuildOutlinerEditWidget(
 {
 	if (UMovieSceneCameraShakeSourceShakeTrack* ShakeTrack = Cast<UMovieSceneCameraShakeSourceShakeTrack>(Track))
 	{
-		return SNew(SHorizontalBox)
-			+SHorizontalBox::Slot()
-			.AutoWidth()
-			.VAlign(VAlign_Center)
-			[
-				FSequencerUtilities::MakeAddButton(
+		return UE::Sequencer::MakeAddButton(
 						LOCTEXT("AddShakeSourceShakeSection", "Camera Shake"),
 						FOnGetContent::CreateSP(this, &FCameraShakeSourceShakeTrackEditor::BuildCameraShakeSubMenu, ObjectBinding),
-						Params.NodeIsHovered, GetSequencer())
-			];
+						Params.ViewModel);
 	}
 	else
 	{
-		return SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.VAlign(VAlign_Center)
-			[
-				FSequencerUtilities::MakeAddButton(
+		return UE::Sequencer::MakeAddButton(
 						LOCTEXT("AddSection", "Section"),
 						FOnGetContent::CreateSP(this, &FCameraShakeSourceShakeTrackEditor::BuildCameraShakeTracksMenu, ObjectBinding),
-						Params.NodeIsHovered, 
-						GetSequencer())
-			];
+						Params.ViewModel);
 	}
 }
 
@@ -422,30 +464,34 @@ TSharedRef<SWidget> FCameraShakeSourceShakeTrackEditor::BuildCameraShakeTracksMe
 
 void FCameraShakeSourceShakeTrackEditor::AddOtherCameraShakeBrowserSubMenu(FMenuBuilder& MenuBuilder, TArray<FGuid> ObjectBindings)
 {
+	UMovieSceneSequence* Sequence = GetSequencer() ? GetSequencer()->GetFocusedMovieSceneSequence() : nullptr;
+
 	FAssetPickerConfig AssetPickerConfig;
 	{
 		AssetPickerConfig.OnAssetSelected = FOnAssetSelected::CreateSP(this, &FCameraShakeSourceShakeTrackEditor::OnCameraShakeAssetSelected, ObjectBindings);
 		AssetPickerConfig.OnAssetEnterPressed = FOnAssetEnterPressed::CreateSP(this, &FCameraShakeSourceShakeTrackEditor::OnCameraShakeAssetEnterPressed, ObjectBindings);
 		AssetPickerConfig.OnShouldFilterAsset = FOnShouldFilterAsset::CreateSP(this, &FCameraShakeSourceShakeTrackEditor::OnShouldFilterCameraShake);
 		AssetPickerConfig.bAllowNullSelection = false;
+		AssetPickerConfig.bAddFilterUI = true;
 		AssetPickerConfig.InitialAssetViewType = EAssetViewType::List;
-		AssetPickerConfig.Filter.ClassNames.Add(UBlueprint::StaticClass()->GetFName());
+		AssetPickerConfig.Filter.ClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
+		AssetPickerConfig.SaveSettingsName = TEXT("SequencerAssetPicker");
+		AssetPickerConfig.AdditionalReferencingAssets.Add(FAssetData(Sequence));
 
 		IAssetRegistry & AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
-		TArray<FName> ClassNames;
-		TSet<FName> DerivedClassNames;
-		ClassNames.Add(UCameraShakeBase::StaticClass()->GetFName());
-		AssetRegistry.GetDerivedClassNames(ClassNames, TSet<FName>(), DerivedClassNames);
+		TArray<FTopLevelAssetPath> ClassNames;
+		TSet<FTopLevelAssetPath> DerivedClassNames;
+		ClassNames.Add(UCameraShakeBase::StaticClass()->GetClassPathName());
+		AssetRegistry.GetDerivedClassNames(ClassNames, TSet<FTopLevelAssetPath>(), DerivedClassNames);
 						
 		AssetPickerConfig.OnShouldFilterAsset = FOnShouldFilterAsset::CreateLambda([DerivedClassNames](const FAssetData& AssetData)
 		{
 			const FString ParentClassFromData = AssetData.GetTagValueRef<FString>(FBlueprintTags::ParentClassPath);
 			if (!ParentClassFromData.IsEmpty())
 			{
-				const FString ClassObjectPath = FPackageName::ExportTextPathToObjectPath(ParentClassFromData);
-				const FName ClassName = FName(*FPackageName::ObjectPathToObjectName(ClassObjectPath));
+				const FTopLevelAssetPath ClassObjectPath(FPackageName::ExportTextPathToObjectPath(ParentClassFromData));
 
-				if (DerivedClassNames.Contains(ClassName))
+				if (DerivedClassNames.Contains(ClassObjectPath))
 				{
 					return false;
 				}
@@ -603,7 +649,7 @@ void FCameraShakeSourceShakeTrackEditor::AddCameraShakeTriggerTrack(const TArray
 		}
 	}
 
-	auto OnAddShakeSourceShakeSection = [=](FFrameNumber Time) -> FKeyPropertyResult
+	auto OnAddShakeSourceShakeSection = [this, Objects](FFrameNumber Time) -> FKeyPropertyResult
 	{
 		return this->AddCameraShakeTriggerTrackInternal(Time, Objects, nullptr);
 	};
@@ -624,7 +670,7 @@ UCameraShakeSourceComponent* FCameraShakeSourceShakeTrackEditor::AcquireCameraSh
 			if (AActor* Actor = Cast<AActor>(Obj))
 			{
 				TArray<UCameraShakeSourceComponent*> CurShakeSourceComponents;
-				Actor->GetComponents<UCameraShakeSourceComponent>(CurShakeSourceComponents);
+				Actor->GetComponents(CurShakeSourceComponents);
 				ShakeSourceComponents.Append(CurShakeSourceComponents);
 			}
 			else if (UCameraShakeSourceComponent* ShakeSourceComponent = Cast<UCameraShakeSourceComponent>(Obj))

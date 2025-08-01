@@ -1,9 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #include "Chaos/PBDConstraintContainer.h"
+#include "Chaos/Evolution/SolverConstraintContainer.h"
 
 namespace Chaos
 {
-	FPBDConstraintContainer::FPBDConstraintContainer()
+	FPBDConstraintContainer::FPBDConstraintContainer(FConstraintHandleTypeID InConstraintHandleType)
+		: ConstraintHandleType(InConstraintHandleType)
+		, ContainerId(INDEX_NONE)
 	{
 	}
 
@@ -11,13 +14,26 @@ namespace Chaos
 	{
 	}
 
-	int32 FPBDConstraintContainer::GetConstraintIndex(const FConstraintHandle* ConstraintHandle) const
+	void FPBDConstraintContainer::OnDisableParticle(FGeometryParticleHandle* DisabledParticle)
 	{
-		return ConstraintHandle->GetConstraintIndex();
+		for (FConstraintHandle* ConstraintHandle : DisabledParticle->ParticleConstraints())
+		{
+			if ((ConstraintHandle->GetContainerId() == ContainerId) && ConstraintHandle->IsEnabled())
+			{
+				ConstraintHandle->SetEnabled(false);
+			}
+		}
 	}
 
-	void FPBDConstraintContainer::SetConstraintIndex(FConstraintHandle* ConstraintHandle, int32 ConstraintIndex) const
+	void FPBDConstraintContainer::OnEnableParticle(FGeometryParticleHandle* EnabledParticle)
 	{
-		ConstraintHandle->ConstraintIndex = ConstraintIndex;
+		for (FConstraintHandle* ConstraintHandle : EnabledParticle->ParticleConstraints())
+		{
+			if ((ConstraintHandle->GetContainerId() == ContainerId) && !ConstraintHandle->IsEnabled())
+			{
+				ConstraintHandle->SetEnabled(true);
+			}
+		}
 	}
+
 }

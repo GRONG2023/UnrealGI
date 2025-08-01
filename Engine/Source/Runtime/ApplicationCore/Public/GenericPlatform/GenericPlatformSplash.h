@@ -2,8 +2,8 @@
 
 #pragma once
 
-#include "CoreTypes.h"
 #include "Containers/ContainersFwd.h"
+#include "CoreTypes.h"
 
 /**
  * SplashTextType defines the types of text on the splash screen
@@ -36,7 +36,7 @@ class FString;
 /**
  * Generic implementation for most platforms
  */
-struct APPLICATIONCORE_API FGenericPlatformSplash
+struct FGenericPlatformSplash
 {
 	/** Show the splash screen. */
 	FORCEINLINE static void Show() { }
@@ -49,8 +49,18 @@ struct APPLICATIONCORE_API FGenericPlatformSplash
 	 * 
 	 * @param SplashFilename Full path to the splash image to display
 	 */
-	static void SetCustomSplashImage(const TCHAR* SplashFilename);
+	static APPLICATIONCORE_API void SetCustomSplashImage(const TCHAR* SplashFilename);
 
+
+	/**
+	 * Sets the progress displayed on the application icon (for startup/loading progress).
+	 *
+	 * @param InType Progress value in percent.
+	 */
+	FORCEINLINE static void SetProgress(int ProgressPercent)
+	{
+	
+	}
 
 	/**
 	 * Sets the text displayed on the splash screen (for startup/loading progress)
@@ -82,6 +92,6 @@ protected:
 	*
 	* @return true if a splash screen was found
 	*/
-	static bool GetSplashPath(const TCHAR* SplashFilename, FString& OutPath, bool& OutIsCustom);
-	static bool GetSplashPath(const TCHAR* SplashFilename, const TCHAR* IconFilename, FString& OutPath, FString& OutIconPath, bool& OutIsCustom);
+	static APPLICATIONCORE_API bool GetSplashPath(const TCHAR* SplashFilename, FString& OutPath, bool& OutIsCustom);
+	static APPLICATIONCORE_API bool GetSplashPath(const TCHAR* SplashFilename, const TCHAR* IconFilename, FString& OutPath, FString& OutIconPath, bool& OutIsCustom);
 };

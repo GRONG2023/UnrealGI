@@ -2,17 +2,22 @@
 
 #include "Debugging/SlateDebugging.h"
 
-#include "SlateGlobals.h"
-#include "FastUpdate/WidgetProxy.h"
 #include "Animation/CurveSequence.h"
+#include "Application/SlateApplicationBase.h"
+#include "Debugging/WidgetList.h"
+#include "FastUpdate/WidgetProxy.h"
 #include "Layout/WidgetPath.h"
+#include "Misc/StringBuilder.h"
+#include "ProfilingDebugging/CsvProfiler.h"
 #include "Rendering/DrawElements.h"
+#include "Rendering/DrawElementPayloads.h"
+#include "SlateGlobals.h"
 #include "Styling/CoreStyle.h"
 #include "Types/ReflectionMetadata.h"
-#include "Widgets/SWidget.h"
 #include "Widgets/SNullWidget.h"
-#include "Application/SlateApplicationBase.h"
-#include "ProfilingDebugging/CsvProfiler.h"
+#include "Widgets/SWidget.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SlateDebugging)
 
 #if UE_BUILD_SHIPPING
 CSV_DEFINE_CATEGORY_MODULE(SLATECORE_API, Slate, false);
@@ -24,8 +29,9 @@ CSV_DEFINE_CATEGORY_MODULE(SLATECORE_API, Slate, true);
 
 #define LOCTEXT_NAMESPACE "SlateDebugger"
 
-FSlateDebuggingInputEventArgs::FSlateDebuggingInputEventArgs(ESlateDebuggingInputEvent InInputEventType, const FReply& InReply, const TSharedPtr<SWidget>& InHandlerWidget, const FString& InAdditionalContent)
+FSlateDebuggingInputEventArgs::FSlateDebuggingInputEventArgs(ESlateDebuggingInputEvent InInputEventType, const FInputEvent* InInputEvent, const FReply& InReply, const TSharedPtr<SWidget>& InHandlerWidget, const FString& InAdditionalContent)
 	: InputEventType(InInputEventType)
+	, InputEvent(InInputEvent)
 	, Reply(InReply)
 	, HandlerWidget(InHandlerWidget)
 	, AdditionalContent(InAdditionalContent)
@@ -34,10 +40,11 @@ FSlateDebuggingInputEventArgs::FSlateDebuggingInputEventArgs(ESlateDebuggingInpu
 
 FText FSlateDebuggingInputEventArgs::ToText() const
 {
-	static const FText InputEventFormat = LOCTEXT("InputEventFormat", "{0} - ({1}) - [{2}]");
+	static const FText InputEventFormat = LOCTEXT("InputEventFormat", "{0} - ({1}) - ({2}) - [{3}]");
 
 	const UEnum* SlateDebuggingInputEventEnum = StaticEnum<ESlateDebuggingInputEvent>();
 	const FText InputEventTypeText = SlateDebuggingInputEventEnum->GetDisplayNameTextByValue((int64)InputEventType);
+	const FText InputEventText = InputEvent ? InputEvent->ToText() : LOCTEXT("NullEvent", "<null event>");
 	const FText AdditionalContentText = FText::FromString(AdditionalContent);
 	const FText HandlerWidgetText = FText::FromString(FReflectionMetaData::GetWidgetDebugInfo(HandlerWidget.Get()));
 
@@ -45,6 +52,7 @@ FText FSlateDebuggingInputEventArgs::ToText() const
 		InputEventFormat,
 		InputEventTypeText,
 		HandlerWidgetText,
+		InputEventText,
 		AdditionalContentText
 	);
 }
@@ -63,7 +71,7 @@ FSlateDebuggingFocusEventArgs::FSlateDebuggingFocusEventArgs(
 	, NewFocusedWidgetPath(InNewFocusedWidgetPath)
 	, NewFocusedWidget(InNewFocusedWidget)
 {
-}
+} 
 
 FText FSlateDebuggingFocusEventArgs::ToText() const
 {
@@ -241,6 +249,76 @@ FText FSlateDebuggingCursorQueryEventArgs::ToText() const
 	return EventText;
 }
 
+FString LexToString(ESlateDebuggingInvalidateRootReason InValue)
+{
+	if (InValue == ESlateDebuggingInvalidateRootReason::None)
+	{
+		return TEXT("None");
+	}
+	if (InValue == (ESlateDebuggingInvalidateRootReason)0xFF)
+	{
+		return TEXT("All");
+	}
+
+	TStringBuilder<512> Result;
+#define ENUM_CASE_TO_STRING(Enum) if (EnumHasAnyFlags(InValue, ESlateDebuggingInvalidateRootReason::Enum)) { if (Result.Len() != 0) { Result.AppendChar(TEXT('|')); } Result.Append(TEXT(#Enum)); }
+	ENUM_CASE_TO_STRING(ChildOrder);
+	ENUM_CASE_TO_STRING(Root);
+	ENUM_CASE_TO_STRING(ScreenPosition);
+#undef ENUM_CASE_TO_STRING
+
+	return Result.ToString();
+}
+
+bool LexTryParseString(ESlateDebuggingInvalidateRootReason& OutValue, const TCHAR* Buffer)
+{
+	bool bResult = false;
+	ESlateDebuggingInvalidateRootReason Value = ESlateDebuggingInvalidateRootReason::None;
+	auto ParseResult = [&bResult, &Value](FStringView& SubString)
+	{
+		SubString.TrimStartAndEndInline();
+
+		if (SubString.Equals(TEXT("All"), ESearchCase::IgnoreCase)) { Value = (ESlateDebuggingInvalidateRootReason)0xFF; return; }
+		if (SubString.Equals(TEXT("Any"), ESearchCase::IgnoreCase)) { Value = (ESlateDebuggingInvalidateRootReason)0xFF; return; }
+
+#define ENUM_CASE_FROM_STRING(Enum) if (SubString.Equals(TEXT(#Enum), ESearchCase::IgnoreCase)) { Value |= ESlateDebuggingInvalidateRootReason::Enum; return; }
+		ENUM_CASE_FROM_STRING(None)
+		ENUM_CASE_FROM_STRING(ChildOrder)
+		ENUM_CASE_FROM_STRING(Root)
+		ENUM_CASE_FROM_STRING(ScreenPosition)
+		bResult = false;
+#undef ENUM_CASE_FROM_STRING
+	};
+
+	if (Buffer && *Buffer)
+	{
+		bResult = true;
+		while (const TCHAR* At = FCString::Strchr(Buffer, TEXT('|')))
+		{
+			FStringView SubString{ Buffer, UE_PTRDIFF_TO_INT32(At - Buffer) };
+			ParseResult(SubString);
+			Buffer = At + 1;
+		}
+		if (*Buffer)
+		{
+			FStringView SubString{ Buffer };
+			ParseResult(SubString);
+		}
+	}
+
+	if (bResult)
+	{
+		OutValue = Value;
+	}
+	return bResult;
+}
+
+void LexFromString(ESlateDebuggingInvalidateRootReason& OutValue, const TCHAR* Buffer)
+{
+	OutValue = ESlateDebuggingInvalidateRootReason::None;
+	LexTryParseString(OutValue, Buffer);
+}
+
 FSlateDebuggingInvalidateArgs::FSlateDebuggingInvalidateArgs(
 	const SWidget* InWidgetInvalidated,
 	const SWidget* InWidgetInvalidateInvestigator,
@@ -270,6 +348,16 @@ FSlateDebuggingWidgetUpdatedEventArgs::FSlateDebuggingWidgetUpdatedEventArgs(
 	: Widget(InWidget)
 	, UpdateFlags(InUpdateFlags)
 	, bFromPaint(bInFromPaint)
+{
+}
+
+FSlateDebuggingElementTypeAddedEventArgs::FSlateDebuggingElementTypeAddedEventArgs(
+	const FSlateWindowElementList& InElementList,
+	int32 InElementIndex,
+	EElementType InElementType)
+	: ElementList(InElementList)
+	, ElementIndex(InElementIndex)
+	, ElementType(InElementType)
 {
 }
 
@@ -313,7 +401,11 @@ FSlateDebugging::FEndWidgetPaint FSlateDebugging::EndWidgetPaint;
 
 FSlateDebugging::FPaintDebugElements FSlateDebugging::PaintDebugElements;
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 FSlateDebugging::FDrawElement FSlateDebugging::ElementAdded;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+FSlateDebugging::FDrawElementType FSlateDebugging::ElementTypeAdded;
 
 FSlateDebugging::FWidgetWarningEvent FSlateDebugging::Warning;
 
@@ -349,11 +441,11 @@ void FSlateDebugging::BroadcastWarning(const FText& WarningText, const TSharedPt
 	}
 }
 
-void FSlateDebugging::BroadcastInputEvent(ESlateDebuggingInputEvent InputEventType, const FReply& InReply)
+void FSlateDebugging::BroadcastInputEvent(ESlateDebuggingInputEvent InputEventType, const FInputEvent* InInputEvent, const FReply& InReply)
 {
 	if (InReply.IsEventHandled() && InputEvent.IsBound())
 	{
-		InputEvent.Broadcast(FSlateDebuggingInputEventArgs(InputEventType, InReply, TSharedPtr<SWidget>(), FString()));
+		InputEvent.Broadcast(FSlateDebuggingInputEventArgs(InputEventType, InInputEvent, InReply, TSharedPtr<SWidget>(), FString()));
 	}
 	for (IWidgetInputRoutingEvent* Event : RoutingEvents)
 	{
@@ -361,11 +453,11 @@ void FSlateDebugging::BroadcastInputEvent(ESlateDebuggingInputEvent InputEventTy
 	}
 }
 
-void FSlateDebugging::BroadcastInputEvent(ESlateDebuggingInputEvent InputEventType, const TSharedPtr<SWidget>& HandlerWidget)
+void FSlateDebugging::BroadcastInputEvent(ESlateDebuggingInputEvent InputEventType, const FInputEvent* InInputEvent, const TSharedPtr<SWidget>& HandlerWidget)
 {
 	if (InputEvent.IsBound())
 	{
-		InputEvent.Broadcast(FSlateDebuggingInputEventArgs(InputEventType, FReply::Handled(), HandlerWidget, FString()));
+		InputEvent.Broadcast(FSlateDebuggingInputEventArgs(InputEventType, InInputEvent, FReply::Handled(), HandlerWidget, FString()));
 	}
 	for (IWidgetInputRoutingEvent* Event : RoutingEvents)
 	{
@@ -373,11 +465,11 @@ void FSlateDebugging::BroadcastInputEvent(ESlateDebuggingInputEvent InputEventTy
 	}
 }
 
-void FSlateDebugging::BroadcastInputEvent(ESlateDebuggingInputEvent InputEventType, const FReply& InReply, const TSharedPtr<SWidget>& HandlerWidget)
+void FSlateDebugging::BroadcastInputEvent(ESlateDebuggingInputEvent InputEventType, const FInputEvent* InInputEvent, const FReply& InReply, const TSharedPtr<SWidget>& HandlerWidget)
 {
 	if (InReply.IsEventHandled() && InputEvent.IsBound())
 	{
-		InputEvent.Broadcast(FSlateDebuggingInputEventArgs(InputEventType, InReply, HandlerWidget, FString()));
+		InputEvent.Broadcast(FSlateDebuggingInputEventArgs(InputEventType, InInputEvent, InReply, HandlerWidget, FString()));
 	}
 	for (IWidgetInputRoutingEvent* Event : RoutingEvents)
 	{
@@ -385,11 +477,11 @@ void FSlateDebugging::BroadcastInputEvent(ESlateDebuggingInputEvent InputEventTy
 	}
 }
 
-void FSlateDebugging::BroadcastInputEvent(ESlateDebuggingInputEvent InputEventType, const FReply& InReply, const TSharedPtr<SWidget>& HandlerWidget, const FString& AdditionalContent)
+void FSlateDebugging::BroadcastInputEvent(ESlateDebuggingInputEvent InputEventType, const FInputEvent* InInputEvent, const FReply& InReply, const TSharedPtr<SWidget>& HandlerWidget, const FString& AdditionalContent)
 {
 	if (InReply.IsEventHandled() && InputEvent.IsBound())
 	{
-		InputEvent.Broadcast(FSlateDebuggingInputEventArgs(InputEventType, InReply, HandlerWidget, AdditionalContent));
+		InputEvent.Broadcast(FSlateDebuggingInputEventArgs(InputEventType, InInputEvent, InReply, HandlerWidget, AdditionalContent));
 	}
 	for (IWidgetInputRoutingEvent* Event : RoutingEvents)
 	{
@@ -397,11 +489,11 @@ void FSlateDebugging::BroadcastInputEvent(ESlateDebuggingInputEvent InputEventTy
 	}
 }
 
-void FSlateDebugging::BroadcastInputEvent(ESlateDebuggingInputEvent InputEventType, const FReply& InReply, const TSharedPtr<SWidget>& HandlerWidget, const FName& AdditionalContent)
+void FSlateDebugging::BroadcastInputEvent(ESlateDebuggingInputEvent InputEventType, const FInputEvent* InInputEvent, const FReply& InReply, const TSharedPtr<SWidget>& HandlerWidget, const FName& AdditionalContent)
 {
 	if (InReply.IsEventHandled() && InputEvent.IsBound())
 	{
-		InputEvent.Broadcast(FSlateDebuggingInputEventArgs(InputEventType, InReply, HandlerWidget, AdditionalContent.ToString()));
+		InputEvent.Broadcast(FSlateDebuggingInputEventArgs(InputEventType, InInputEvent, InReply, HandlerWidget, AdditionalContent.ToString()));
 	}
 	for (IWidgetInputRoutingEvent* Event : RoutingEvents)
 	{
@@ -409,11 +501,11 @@ void FSlateDebugging::BroadcastInputEvent(ESlateDebuggingInputEvent InputEventTy
 	}
 }
 
-void FSlateDebugging::BroadcastInputEvent(ESlateDebuggingInputEvent InputEventType, const FReply& InReply, const TSharedPtr<SWidget>& HandlerWidget, const TCHAR AdditionalContent)
+void FSlateDebugging::BroadcastInputEvent(ESlateDebuggingInputEvent InputEventType, const FInputEvent* InInputEvent, const FReply& InReply, const TSharedPtr<SWidget>& HandlerWidget, const TCHAR AdditionalContent)
 {
 	if (InReply.IsEventHandled() && InputEvent.IsBound())
 	{
-		InputEvent.Broadcast(FSlateDebuggingInputEventArgs(InputEventType, InReply, HandlerWidget, FString(1, &AdditionalContent)));
+		InputEvent.Broadcast(FSlateDebuggingInputEventArgs(InputEventType, InInputEvent, InReply, HandlerWidget, FString(1, &AdditionalContent)));
 	}
 	for (IWidgetInputRoutingEvent* Event : RoutingEvents)
 	{
@@ -421,11 +513,11 @@ void FSlateDebugging::BroadcastInputEvent(ESlateDebuggingInputEvent InputEventTy
 	}
 }
 
-void FSlateDebugging::BroadcastNoReplyInputEvent(ESlateDebuggingInputEvent InputEventType, const TSharedPtr<SWidget>& HandlerWidget)
+void FSlateDebugging::BroadcastNoReplyInputEvent(ESlateDebuggingInputEvent InputEventType, const FInputEvent* InInputEvent, const TSharedPtr<SWidget>& HandlerWidget)
 {
 	if (InputEvent.IsBound())
 	{
-		InputEvent.Broadcast(FSlateDebuggingInputEventArgs(InputEventType, FReply::Unhandled(), HandlerWidget, FString()));
+		InputEvent.Broadcast(FSlateDebuggingInputEventArgs(InputEventType, InInputEvent, FReply::Unhandled(), HandlerWidget, TEXT("")));
 	}
 	for (IWidgetInputRoutingEvent* Event : RoutingEvents)
 	{
@@ -587,6 +679,23 @@ void FSlateDebugging::BroadcastWidgetUpdatedByPaint(const SWidget* Invalidated, 
 	{
 		WidgetUpdatedEvent.Broadcast(FSlateDebuggingWidgetUpdatedEventArgs(Invalidated, UpdateFlags, true));
 	}
+}
+
+const TArray<const SWidget*>& FSlateDebugging::GetAllWidgets()
+{
+#if UE_WITH_SLATE_DEBUG_WIDGETLIST
+	return UE::Slate::FWidgetList::GetAllWidgets();
+#else
+	static const TArray<const SWidget*> EmptyArray;
+	return EmptyArray;
+#endif
+}
+
+void FSlateDebugging::ExportWidgetList(FStringView Filename)
+{
+#if UE_WITH_SLATE_DEBUG_WIDGETLIST
+	UE::Slate::FWidgetList::ExportToCSV(*WriteToString<256>(Filename));
+#endif
 }
 
 #undef LOCTEXT_NAMESPACE

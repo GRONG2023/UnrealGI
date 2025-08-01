@@ -172,7 +172,7 @@ void FLandscapeEditorDetailCustomization_CopyPaste::CustomizeDetails(IDetailLayo
 			.HAlign(HAlign_Left)
 			[
 				SNew(SComboButton)
-				.ButtonStyle(FEditorStyle::Get(), "NoBorder")
+				.ButtonStyle(FAppStyle::Get(), "NoBorder")
 				.ForegroundColor(FSlateColor::UseForeground())
 				.CollapseMenuOnParentFocus(true)
 				.IsEnabled(this, &FLandscapeEditorDetailCustomization_CopyPaste::GetGizmoGuessSizeButtonIsEnabled)
@@ -413,7 +413,7 @@ void FLandscapeEditorDetailCustomization_CopyPaste::GenerateGuessDimensionList()
 				TArray<uint32> CurrentValues;
 				for (int32 i = 0; i <= It.Value(); ++i)
 				{
-					CurrentValues.Add(FMath::Pow(It.Key(), i));
+					CurrentValues.Add(static_cast<uint32>(FMath::Pow(static_cast<float>(It.Key()), i)));
 				}				
 
 				for (int32 i = 0; i < PreviousIterValues.Num(); ++i)
@@ -438,7 +438,7 @@ void FLandscapeEditorDetailCustomization_CopyPaste::GenerateGuessDimensionList()
 
 			for (int32 i = 0; i < FinalValuesLeft.Num(); ++i)
 			{
-				FinalValuesRight.Add(InitialGizmoDimension / FinalValuesLeft[i]);
+				FinalValuesRight.Add(static_cast<uint32>(InitialGizmoDimension / FinalValuesLeft[i]));
 			}
 
 			GuessedDimensionComboList.Empty(FinalValuesLeft.Num());
@@ -663,7 +663,10 @@ void FLandscapeEditorStructCustomization_FGizmoImportLayer::CustomizeChildren(TS
 FReply FLandscapeEditorStructCustomization_FGizmoImportLayer::OnGizmoImportLayerFilenameButtonClicked(TSharedRef<IPropertyHandle> PropertyHandle_LayerFilename)
 {
 	FEdModeLandscape* LandscapeEdMode = GetEditorMode();
-	check(LandscapeEdMode != NULL);
+	if (!LandscapeEdMode)
+	{
+		return FReply::Handled();
+	}
 
 	// Prompt the user for the Filenames
 	IDesktopPlatform* DesktopPlatform = FDesktopPlatformModule::Get();

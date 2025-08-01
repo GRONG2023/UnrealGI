@@ -1,6 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "CoreTypes.h"
+#include "Math/UnrealMathSSE.h"
+#include "Templates/Tuple.h"
+#include "UObject/ObjectMacros.h"
+
 #include "AudioCompressionSettings.generated.h"
 
 UENUM()
@@ -11,8 +18,7 @@ enum class ESoundwaveSampleRateSettings : uint8
 	Medium,
 	Low,
 	Min,
-	// Use this setting to resample soundwaves to the device's sample rate to avoid having to perform sample rate conversion at runtime.
-	MatchDevice
+	MatchDevice_DEPRECATED
 };
 
 /************************************************************************/
@@ -22,7 +28,7 @@ enum class ESoundwaveSampleRateSettings : uint8
 /************************************************************************/
 struct FAudioStreamCachingSettings
 {
-	static constexpr int32 DefaultCacheSize = 32 * 1024;
+	static constexpr int32 DefaultCacheSize = 64 * 1024;
 
 	// Target memory usage, in kilobytes.
 	// In the future settings for the cache can be more complex, but for now
@@ -74,11 +80,13 @@ struct FPlatformAudioCookOverrides
 	// If StreamCaching is set to true, this will be used 
 	float AutoStreamingThreshold;
 
-	// Whether to use the experimental Load on Demand feature, which uses as little memory at runtime as possible.
-	bool bUseStreamCaching;
+	// Wether to inline the first "Audio" chunk, which is typically chunk 1. (Only on assets marked retain-on-load with a size of audio in secs set) 
+	bool bInlineFirstAudioChunk = false;
 
-	// Whether to put streamed audio chunks inline in the Pak file or not (only matters if bUseStreamCaching is true)
-	bool bInlineStreamedAudioChunks;
+	// This will decide how much data to put in the first audio chunk. Anything <= 0 will be ignored.
+	// Must be combined with bInlineFirstAudioChunk, this will decide how much data to put in the first chunk.
+	// NOTE: This is platform default and can be overriden by each asset or soundclass.
+	float LengthOfFirstAudioChunkInSecs = 0.f;
 
 	// If Load On Demand is enabled, these settings are used to determine chunks and cache sizes.
 	FAudioStreamCachingSettings StreamCachingSettings;
@@ -87,8 +95,8 @@ struct FPlatformAudioCookOverrides
 		: bResampleForDevice(false)
 		, CompressionQualityModifier(1.0f)
 		, AutoStreamingThreshold(0.0f)
-		, bUseStreamCaching(false)
-		, bInlineStreamedAudioChunks(false)
+		, bInlineFirstAudioChunk(false)
+		, LengthOfFirstAudioChunkInSecs(0.f)
 	{
 		PlatformSampleRates.Add(ESoundwaveSampleRateSettings::Max, 48000);
 		PlatformSampleRates.Add(ESoundwaveSampleRateSettings::High, 32000);
@@ -98,76 +106,34 @@ struct FPlatformAudioCookOverrides
 	}
 
 	// This is used to invalidate compressed audio for a specific platform.
-	static void GetHashSuffix(const FPlatformAudioCookOverrides* InOverrides, FString& OutSuffix)
-	{
-		if (InOverrides == nullptr)
-		{
-			return;
-		}
-
-		int32 CompressionQualityHash = FMath::FloorToInt(InOverrides->CompressionQualityModifier * 100.0f);
-		OutSuffix.AppendInt(CompressionQualityHash);
-
-		int32 AutoStreamingThresholdHash = FMath::FloorToInt(InOverrides->AutoStreamingThreshold * 100.0f);
-		OutSuffix.AppendInt(AutoStreamingThresholdHash);
-
-		if (InOverrides->bUseStreamCaching)
-		{
-			OutSuffix.Append(TEXT("_StreamCache_Ver"));
-			OutSuffix.AppendInt(GetStreamCachingVersion());
-			OutSuffix.AppendChar('_');
-
-			// cache info:
-			OutSuffix.Append(TEXT("MEM_"));
-			OutSuffix.AppendInt(InOverrides->StreamCachingSettings.CacheSizeKB);
-			OutSuffix.Append(TEXT("MaxChnkSize_"));
-			OutSuffix.AppendInt(InOverrides->StreamCachingSettings.MaxChunkSizeOverrideKB);
-
-			if (InOverrides->StreamCachingSettings.bForceLegacyStreamChunking)
-			{
-				OutSuffix.Append(TEXT("_LegacyChunking_"));
-				OutSuffix.AppendInt(InOverrides->StreamCachingSettings.ZerothChunkSizeForLegacyStreamChunkingKB);
-			}
-		}
-		
-
-		int32 ResampleBoolHash = (int32)InOverrides->bResampleForDevice;
-		OutSuffix.AppendInt(ResampleBoolHash);
-
-		TMap<ESoundwaveSampleRateSettings, float> SampleRateMap = InOverrides->PlatformSampleRates;
-
-		for (auto& SampleRateQuality : SampleRateMap)
-		{
-			int32 SampleRateHash = FMath::FloorToInt(SampleRateQuality.Value / 1000.0f);
-			OutSuffix.AppendInt(SampleRateHash);
-		}
-	}
+	static AUDIOPLATFORMCONFIGURATION_API void GetHashSuffix(const FPlatformAudioCookOverrides* InOverrides, FString& OutSuffix);
 };
 
 USTRUCT()
-struct AUDIOPLATFORMCONFIGURATION_API FPlatformRuntimeAudioCompressionOverrides
+struct FPlatformRuntimeAudioCompressionOverrides
 {
 	GENERATED_USTRUCT_BODY()
 
-	// Set this to true to override Sound Groups and use the Duration Threshold value to determine whether a sound should be fully decompressed during initial loading.
+	// When true, overrides the Sound Group on each Sound Wave, and instead uses the Duration Threshold value to determine whether a sound should be fully decompressed during initial loading.
 	UPROPERTY(EditAnywhere, Category = "DecompressOnLoad")
 	bool bOverrideCompressionTimes;
 	
 	// When Override Compression Times is set to true, any sound under this threshold (in seconds) will be fully decompressed on load.
 	// Otherwise the first chunk of this sound is cached at load and the rest is decompressed in real time.
+	// If set to zero, will default to the Sound Group on the relevant Sound Wave
 	UPROPERTY(EditAnywhere, Category = "DecompressOnLoad")
 	float DurationThreshold;
 
 	// On this platform, any random nodes on Sound Cues will automatically only preload this number of branches and dispose of any others
-	// on load. This can drastically cut down on memory usage.
-	UPROPERTY(EditAnywhere, Category = "SoundCueLoading", meta = (DisplayName = "Maximum Branches on Random SoundCue nodes", ClampMin = "1"))
+	// on load. This can drastically cut down on memory usage. If set to 0, no branches are culled.
+	UPROPERTY(EditAnywhere, Category = "SoundCueLoading", meta = (DisplayName = "Maximum Branches on Random SoundCue nodes", ClampMin = "0"))
 	int32 MaxNumRandomBranches;
 
 	// On this platform, use the specified quality at this index to override the quality used for SoundCues on this platform
-	UPROPERTY(EditAnywhere, Category = "SoundCueLoading", meta = (DisplayName = "Quality Index for Sound Cues", ClampMin = "-1", ClampMax = "50"))
-	int32 SoundCueQualityIndex;
+	UPROPERTY(EditAnywhere, Category = "SoundCueLoading", meta = (DisplayName = "Quality Index for Sound Cues", ClampMin = "0", ClampMax = "50"))
+	int32 SoundCueQualityIndex = 1;
 
-	FPlatformRuntimeAudioCompressionOverrides();
+	AUDIOPLATFORMCONFIGURATION_API FPlatformRuntimeAudioCompressionOverrides();
 
 	// Get singleton containing default settings for compression.
 	static FPlatformRuntimeAudioCompressionOverrides* GetDefaultCompressionOverrides()
@@ -181,5 +147,5 @@ struct AUDIOPLATFORMCONFIGURATION_API FPlatformRuntimeAudioCompressionOverrides
 	}
 
 private:
-	static FPlatformRuntimeAudioCompressionOverrides* DefaultCompressionOverrides;
+	static AUDIOPLATFORMCONFIGURATION_API FPlatformRuntimeAudioCompressionOverrides* DefaultCompressionOverrides;
 };

@@ -10,13 +10,13 @@ public class InputBindingEditor : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
-				"EditorStyle",
 				"Core",
 				"CoreUObject",
 				"Slate",
 				"SlateCore",
 				"InputCore",
 				"Engine",
+				"EditorFramework",
 				"UnrealEd",
 				"PropertyEditor",
 				"Settings",
@@ -28,14 +28,6 @@ public class InputBindingEditor : ModuleRules
 			new string[]
 			{
 				"SettingsEditor",
-			}
-		);
-
-		PrivateIncludePaths.AddRange(
-			new string[]
-			{
-				"Editor/InputBindingEditor/Private",
-				"Editor/InputBindingEditor/Private/Widgets",
 			}
 		);
 	}

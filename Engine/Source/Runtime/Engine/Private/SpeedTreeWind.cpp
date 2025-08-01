@@ -14,13 +14,14 @@
 //      IDV, Inc.
 //      http://www.idvinc.com
 
-//  SpeedTree v6.2.2 wind class rewritten for use inside UE4 with no other dependencies
+//  SpeedTree v6.2.2 wind class rewritten for use inside UE with no other dependencies
 
 
 ///////////////////////////////////////////////////////////////////////  
 // Preprocessor / Includes
 
 #include "SpeedTreeWind.h"
+#include "RHIResources.h"
 
 IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FSpeedTreeUniformParameters, "SpeedTreeData");
 
@@ -213,7 +214,7 @@ void FSpeedTreeWind::Advance(bool bEnabled, double fTime)
 		m_afRollingOffset[1] += m_afDirection[1] * m_fCombinedStrength * m_sParams.m_fRollingNoiseSpeed * m_fElapsedTime;
 
 		// compute oscillation indices
-		float fIndex = m_fCombinedStrength * (FSpeedTreeWind::NUM_WIND_POINTS_IN_CURVE - 1.0f);
+		float fIndex = m_fCombinedStrength * ((float)FSpeedTreeWind::NUM_WIND_POINTS_IN_CURVE - 1.0f);
 		int32 nBefore = static_cast<int>(fIndex);
 		int32 nAfter = nBefore + 1;
 		float fInterpolate;
@@ -777,7 +778,7 @@ FArchive& operator<<(FArchive& Ar, FSpeedTreeWind& Wind)
 		Ar << Params.m_asBranch[BranchIndex].m_fTwitchFreqScale;
 	}
 
-	if (Ar.UE4Ver() < VER_UE4_SPEEDTREE_WIND_V7)
+	if (Ar.UEVer() < VER_UE4_SPEEDTREE_WIND_V7)
 	{
 		float fDiscardOldRolling = 0.0f;
 		Ar << fDiscardOldRolling;
@@ -805,7 +806,7 @@ FArchive& operator<<(FArchive& Ar, FSpeedTreeWind& Wind)
 	Ar << Params.m_fFrondRippleTile;
 	Ar << Params.m_fFrondRippleLightingScalar;
 	
-	if (Ar.UE4Ver() >= VER_UE4_SPEEDTREE_WIND_V7)
+	if (Ar.UEVer() >= VER_UE4_SPEEDTREE_WIND_V7)
 	{
 		Ar << Params.m_fRollingNoiseSize;
 		Ar << Params.m_fRollingNoiseTwist;
@@ -830,7 +831,7 @@ FArchive& operator<<(FArchive& Ar, FSpeedTreeWind& Wind)
 	bool Options[FSpeedTreeWind::NUM_WIND_OPTIONS];
 
 	#define SERIALIZE_OPTION(name) { Options[FSpeedTreeWind::name] = Wind.IsOptionEnabled(FSpeedTreeWind::name); Ar << Options[FSpeedTreeWind::name]; }
-	#define SKIP_OLD_OPTION() if (Ar.UE4Ver() < VER_UE4_SPEEDTREE_WIND_V7) { bool bDiscard = false; Ar << bDiscard; }
+	#define SKIP_OLD_OPTION() if (Ar.UEVer() < VER_UE4_SPEEDTREE_WIND_V7) { bool bDiscard = false; Ar << bDiscard; }
 	
 	SERIALIZE_OPTION(GLOBAL_WIND);
 	SERIALIZE_OPTION(GLOBAL_PRESERVE_SHAPE);
@@ -869,7 +870,7 @@ FArchive& operator<<(FArchive& Ar, FSpeedTreeWind& Wind)
 	SERIALIZE_OPTION(FROND_RIPPLE_TWO_SIDED);
 	SERIALIZE_OPTION(FROND_RIPPLE_ADJUST_LIGHTING);
 
-	if (Ar.UE4Ver() >= VER_UE4_SPEEDTREE_WIND_V7)
+	if (Ar.UEVer() >= VER_UE4_SPEEDTREE_WIND_V7)
 	{
 		SERIALIZE_OPTION(ROLLING);
 	}

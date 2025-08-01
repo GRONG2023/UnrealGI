@@ -2,25 +2,33 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "MeshUtilitiesCommon.h"
 #include "Allocator2D.h"
+#include "Containers/Array.h"
+#include "CoreMinimal.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector2D.h"
+#include "MeshUtilitiesCommon.h"
+
+template <typename T> class TAtomic;
 
 struct FMeshChart
 {
 	uint32		FirstTri;
 	uint32		LastTri;
 	
-	FVector2D	MinUV;
-	FVector2D	MaxUV;
+	FVector2f	MinUV;
+	FVector2f	MaxUV;
 	
 	float		UVArea;
-	FVector2D	UVScale;
-	FVector2D	WorldScale;
+	FVector2f	UVScale;
+	FVector2f	WorldScale;
 	
-	FVector2D	PackingScaleU;
-	FVector2D	PackingScaleV;
-	FVector2D	PackingBias;
+	float		UVLengthSum;
+	float		WorldLengthSum;
+
+	FVector2f	PackingScaleU;
+	FVector2f	PackingScaleV;
+	FVector2f	PackingBias;
 
 	int32		Join[4];
 
@@ -29,7 +37,7 @@ struct FMeshChart
 
 struct FOverlappingCorners;
 
-class MESHUTILITIESCOMMON_API FLayoutUV
+class FLayoutUV
 {
 public:
 
@@ -45,27 +53,27 @@ public:
 		virtual ~IMeshView() {}
 
 		virtual uint32      GetNumIndices() const = 0;
-		virtual FVector     GetPosition(uint32 Index) const = 0;
-		virtual FVector     GetNormal(uint32 Index) const = 0;
-		virtual FVector2D   GetInputTexcoord(uint32 Index) const = 0;
+		virtual FVector3f   GetPosition(uint32 Index) const = 0;
+		virtual FVector3f   GetNormal(uint32 Index) const = 0;
+		virtual FVector2f   GetInputTexcoord(uint32 Index) const = 0;
 
 		virtual void        InitOutputTexcoords(uint32 Num) = 0;
-		virtual void        SetOutputTexcoord(uint32 Index, const FVector2D& Value) = 0;
+		virtual void        SetOutputTexcoord(uint32 Index, const FVector2f& Value) = 0;
 	};
 
-	FLayoutUV( IMeshView& InMeshView );
+	MESHUTILITIESCOMMON_API FLayoutUV( IMeshView& InMeshView );
 	void SetVersion( ELightmapUVVersion Version ) { LayoutVersion = Version; }
-	int32 FindCharts( const FOverlappingCorners& OverlappingCorners );
-	bool FindBestPacking( uint32 InTextureResolution );
-	void CommitPackedUVs();
+	MESHUTILITIESCOMMON_API int32 FindCharts( const FOverlappingCorners& OverlappingCorners );
+	MESHUTILITIESCOMMON_API bool FindBestPacking( uint32 InTextureResolution );
+	MESHUTILITIESCOMMON_API void CommitPackedUVs();
 
-	static void LogStats();
-	static void ResetStats();
+	static MESHUTILITIESCOMMON_API void LogStats();
+	static MESHUTILITIESCOMMON_API void ResetStats();
 private:
 	IMeshView& MeshView;
 	ELightmapUVVersion LayoutVersion;
 
-	TArray< FVector2D > MeshTexCoords;
+	TArray< FVector2f > MeshTexCoords;
 	TArray< uint32 > MeshSortedTris;
 	TArray< FMeshChart > MeshCharts;
 	uint32 PackedTextureResolution;
@@ -73,7 +81,7 @@ private:
 	struct FChartFinder;
 	struct FChartPacker;
 
-	static TAtomic<uint64> FindBestPackingCount;
-	static TAtomic<uint64> FindBestPackingCycles;
-	static TAtomic<uint64> FindBestPackingEfficiency;
+	static MESHUTILITIESCOMMON_API TAtomic<uint64> FindBestPackingCount;
+	static MESHUTILITIESCOMMON_API TAtomic<uint64> FindBestPackingCycles;
+	static MESHUTILITIESCOMMON_API TAtomic<uint64> FindBestPackingEfficiency;
 };

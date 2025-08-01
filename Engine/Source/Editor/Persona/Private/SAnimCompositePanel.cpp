@@ -8,9 +8,10 @@
 #include "SAnimSegmentsPanel.h"
 #include "SAnimCompositeEditor.h"
 #include "Widgets/Layout/SExpandableArea.h"
-#include "AnimModel.h"
+#include "AnimTimeline/AnimModel.h"
 #include "AssetToolsModule.h"
 #include "IAssetTypeActions.h"
+#include "Animation/AnimationSettings.h"
 #include "Animation/AnimSequence.h"
 #include "Animation/AnimMontage.h"
 
@@ -44,7 +45,7 @@ void SAnimCompositePanel::Construct(const FArguments& InArgs, const TSharedRef<F
 	this->ChildSlot
 	[
 		SAssignNew( PanelArea, SBorder )
-		.BorderImage( FEditorStyle::GetBrush("NoBorder") )
+		.BorderImage( FAppStyle::GetBrush("NoBorder") )
 		.Padding(0.0f)
 		.ColorAndOpacity( FLinearColor::White )
 	];
@@ -72,8 +73,6 @@ void SAnimCompositePanel::Update()
 			SAssignNew( CompositeSlots, SVerticalBox )
 			);
 
-		UAnimMontage* AnimMontage = Cast<UAnimMontage>(Composite);
-
 		CompositeSlots->AddSlot()
 			.AutoHeight()
 			.VAlign(VAlign_Center)
@@ -84,12 +83,13 @@ void SAnimCompositePanel::Update()
 				.ViewInputMin(ViewInputMin)
 				.ViewInputMax(ViewInputMax)
 				.OnGetNodeColor(this,  &SAnimCompositePanel::HandleGetNodeColor)
-				.TrackMaxValue(Composite->SequenceLength)
-				.TrackNumDiscreteValues(Composite->GetNumberOfFrames())
-				.bChildAnimMontage(AnimMontage && AnimMontage->HasParentAsset())
+				.TrackMaxValue(Composite->GetPlayLength())
+				.TrackNumDiscreteValues(Composite->GetNumberOfSampledKeys())
+				.bChildAnimMontage(false)
 				.OnAnimSegmentNodeClicked( this, &SAnimCompositePanel::ShowSegmentInDetailsView )
 				.OnPreAnimUpdate( this, &SAnimCompositePanel::PreAnimUpdate )
 				.OnPostAnimUpdate( this, &SAnimCompositePanel::PostAnimUpdate )
+				.OnIsAnimAssetValid(this, &SAnimCompositePanel::OnIsAnimAssetValid)
 			];
 	}
 }
@@ -170,6 +170,8 @@ void SAnimCompositePanel::SortAndUpdateComposite()
 
 	Composite->AnimationTrack.SortAnimSegments();
 
+	Composite->UpdateCommonTargetFrameRate();
+
 	WeakModel.Pin()->RecalculateSequenceLength();
 
 	// Update view (this will recreate everything)
@@ -208,22 +210,24 @@ void SAnimCompositePanel::PostUndoRedo()
 		bIsActiveTimerRegistered = true;
 		RegisterActiveTimer(0.f, FWidgetActiveTimerDelegate::CreateSP(this, &SAnimCompositePanel::TriggerRebuildPanel));
 	}
-
-	// when undo or redo happens, we still have to recalculate length, so we can't rely on sequence length changes or not
-	if (Composite->SequenceLength)
-	{
-		Composite->SequenceLength = 0.f;
-	}
 }
 
 FLinearColor SAnimCompositePanel::HandleGetNodeColor(const FAnimSegment& InSegment) const
 {
 	static const FLinearColor DisabledColor(64, 64, 64);
 
-	if(InSegment.AnimReference != nullptr)
+	const FSlateColor OrangeAccent = FAppStyle::Get().GetSlateColor("Colors.AccentOrange");
+	FLinearColor OutOfDateNodeColor = OrangeAccent.GetSpecifiedColor();
+
+    if (InSegment.IsPlayLengthOutOfDate())
+    {
+	    return OutOfDateNodeColor;
+    }
+
+	if(const TObjectPtr<UAnimSequenceBase> AnimReference = InSegment.GetAnimReference())
 	{
 		FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-		TWeakPtr<IAssetTypeActions> AssetTypeActions = AssetToolsModule.Get().GetAssetTypeActionsForClass(InSegment.AnimReference->GetClass());
+		TWeakPtr<IAssetTypeActions> AssetTypeActions = AssetToolsModule.Get().GetAssetTypeActionsForClass(AnimReference->GetClass());
 		check(AssetTypeActions.IsValid());
 		return AssetTypeActions.Pin()->GetTypeColor().ReinterpretAsLinear();
 	}
@@ -237,6 +241,32 @@ void SAnimCompositePanel::HandleObjectsSelected(const TArray<UObject*>& InObject
 	{
 		ClearSelected();
 	}
+}
+
+bool SAnimCompositePanel::OnIsAnimAssetValid(const UAnimSequenceBase* AnimSequenceBase, FText* OutReason)
+{
+	if (AnimSequenceBase)
+	{
+		if (UAnimationSettings::Get()->bEnforceSupportedFrameRates)
+		{
+			const FFrameRate AssetFrameRate = AnimSequenceBase->GetSamplingFrameRate();
+			const UAnimComposite* AnimComposite = WeakModel.Pin()->GetAsset<UAnimComposite>();
+			const FFrameRate CompositeFrameRate = AnimComposite->GetCommonTargetFrameRate();
+			const bool bContainsSegments = AnimComposite->AnimationTrack.AnimSegments.Num() != 0;
+			if (CompositeFrameRate.IsValid() && bContainsSegments && !AssetFrameRate.IsMultipleOf(CompositeFrameRate) && !AssetFrameRate.IsFactorOf(CompositeFrameRate))
+			{
+				if (OutReason)
+				{
+					*OutReason = FText::Format(LOCTEXT("InvalidFrameRate", "Animation Asset {0} its framerate {1} is incompatible with the Anim Composite's {2}"), FText::FromString(AnimSequenceBase->GetName()), AssetFrameRate.ToPrettyText(), CompositeFrameRate.ToPrettyText());
+				}
+			
+				return false;
+			}
+		}
+		
+		return true;	
+	}
+	return false;
 }
 
 #undef LOCTEXT_NAMESPACE

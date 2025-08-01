@@ -1,8 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Widgets/SProfilerThreadView.h"
+
+#if STATS
+
 #include "Brushes/SlateColorBrush.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 
 
 SProfilerThreadView::SProfilerThreadView()
@@ -83,8 +86,8 @@ int32 SProfilerThreadView::OnPaint( const FPaintArgs& Args, const FGeometry& All
 	// Rendering info.
 	const bool bEnabled = ShouldBeEnabled( bParentEnabled );
 	const ESlateDrawEffect DrawEffects = bEnabled ? ESlateDrawEffect::None : ESlateDrawEffect::DisabledEffect;
-	const FSlateBrush* BackgroundBrush = FEditorStyle::GetBrush( "Profiler.LineGraphArea" );
-	const FSlateBrush* WhiteBrush = FEditorStyle::GetBrush( "WhiteTexture" );
+	const FSlateBrush* BackgroundBrush = FAppStyle::GetBrush( "Brushes.White25" );
+	const FSlateBrush* WhiteBrush = FAppStyle::GetBrush( "Brushes.White" );
 
 	// Paint state for this call to OnPaint, valid only in this scope.
 	PaintState = new((void*)PaintStateMemory) FSlateOnPaintState( AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, DrawEffects );
@@ -94,7 +97,7 @@ int32 SProfilerThreadView::OnPaint( const FPaintArgs& Args, const FGeometry& All
 	(
 		PaintState->OutDrawElements,
 		PaintState->LayerId,
-		PaintState->AllottedGeometry.ToPaintGeometry( FVector2D( 0, 0 ), PaintState->Size2D() ),
+		PaintState->AllottedGeometry.ToPaintGeometry( PaintState->Size2D(), FSlateLayoutTransform() ),
 		BackgroundBrush,
 		PaintState->DrawEffects,
 		BackgroundBrush->GetTint( InWidgetStyle ) * InWidgetStyle.GetColorAndOpacityTint()
@@ -187,14 +190,14 @@ void SProfilerThreadView::DrawFramesBackgroundAndTimelines() const
 			(
 				PaintState->OutDrawElements,
 				PaintState->LayerId,
-				PaintState->AllottedGeometry.ToPaintGeometry( ClippedFrameBackgroundRect.GetTopLeft(), ClippedFrameBackgroundRect.GetSize() ),
+				PaintState->AllottedGeometry.ToPaintGeometry( ClippedFrameBackgroundRect.GetSize(), FSlateLayoutTransform(ClippedFrameBackgroundRect.GetTopLeft()) ),
 				&SolidWhiteBrush,
 				PaintState->DrawEffects,
 				(ThreadNode.FrameIndex % 2) ? FColorList::White.WithAlpha( 64 ) : FColorList::White.WithAlpha( 128 )
 			);
 
 			// Check if this frame time marker is inside the visible area.
-			const float LocalPositionXPx = PositionPx.X + SizePx.X;
+			const float LocalPositionXPx = static_cast<float>(PositionPx.X + SizePx.X);
 			if( LocalPositionXPx < 0.0f || LocalPositionXPx > PaintState->Size2D().X )
 			{
 				continue;
@@ -251,7 +254,7 @@ void SProfilerThreadView::DrawUIStackNodes() const
 	const double ThreadViewOffsetPx = PositionXMS*NumPixelsPerMillisecond;
 	PaintState->LayerId++;
 
-	static const FSlateBrush* BorderBrush = FEditorStyle::GetBrush( "Profiler.ThreadView.SampleBorder" );
+	static const FSlateBrush* BorderBrush = FAppStyle::GetBrush( "Profiler.ThreadView.SampleBorder" );
 	const FColor GameThreadColor = FColorList::Red;
 	const FColor RenderThreadColor = FColorList::Blue;
 	const FColor ThreadColors[2] = {GameThreadColor, RenderThreadColor};
@@ -284,7 +287,7 @@ void SProfilerThreadView::DrawUIStackNodes() const
 				(
 					PaintState->OutDrawElements,
 					PaintState->LayerId,
-					PaintState->AllottedGeometry.ToPaintGeometry( ClippedNodeRect.GetTopLeft(), ClippedNodeRect.GetSize() ),
+					PaintState->AllottedGeometry.ToPaintGeometry( ClippedNodeRect.GetSize(), FSlateLayoutTransform(ClippedNodeRect.GetTopLeft()) ),
 					BorderBrush,
 					PaintState->DrawEffects,
 					NodeColor
@@ -322,8 +325,8 @@ void SProfilerThreadView::DrawUIStackNodes() const
 			}
 
 			// Update position of the text to be always visible and try to center it.
-			const float StatNameWidthPx = PaintState->FontMeasureService->Measure( StringStatName, PaintState->SummaryFont8 ).X;
-			const float StatNameWithTimeWidthPx = PaintState->FontMeasureService->Measure( StringStatNameWithTime, PaintState->SummaryFont8 ).X;
+			const float StatNameWidthPx = static_cast<float>(PaintState->FontMeasureService->Measure( StringStatName, PaintState->SummaryFont8 ).X);
+			const float StatNameWithTimeWidthPx = static_cast<float>(PaintState->FontMeasureService->Measure( StringStatNameWithTime, PaintState->SummaryFont8 ).X);
 			const float TextAreaWidthPx = ClippedNodeRect.GetSize().X;
 
 			bool bUseShortVersion = true;
@@ -364,10 +367,10 @@ void SProfilerThreadView::DrawFrameMarkers() const
 	{
 		if( ThreadNode.StatName == NAME_GameThread )
 		{
-			const float MarkerPosXPx = ThreadNode.GetLocalPosition( ThreadViewOffsetPx, 0.0f ).X + ThreadNode.WidthPx;
+			const double MarkerPosXPx = ThreadNode.GetLocalPosition( ThreadViewOffsetPx, 0.0f ).X + ThreadNode.WidthPx;
 
 			// Check if this frame time marker is inside the visible area.
-			if( MarkerPosXPx < 0.0f || MarkerPosXPx > PaintState->Size2D().X )
+			if( MarkerPosXPx < 0.0 || MarkerPosXPx > PaintState->Size2D().X )
 			{
 				continue;
 			}
@@ -376,7 +379,7 @@ void SProfilerThreadView::DrawFrameMarkers() const
 			const FString FrameIndexStr = FString::Printf( TEXT( "%i" ), ThreadNode.FrameIndex );
 			const FString FrameTimesStr = FString::Printf( TEXT( "%.4f [%.4f] MS" ), ThreadNode.CycleCountersEndTimeMS, ThreadNode.GetDurationMS() );
 
-			float MarkerPosYPx = PaintState->Size2D().Y - 2 * PaintState->SummaryFont8Height;
+			double MarkerPosYPx = PaintState->Size2D().Y - 2 * PaintState->SummaryFont8Height;
 			DrawText( FrameIndexStr, PaintState->SummaryFont8, FVector2D( MarkerPosXPx, MarkerPosYPx ), FColorList::SkyBlue, FColorList::Black, FVector2D( 1.0f, 1.0f ) );
 
 			MarkerPosYPx += PaintState->SummaryFont8Height;
@@ -394,7 +397,7 @@ void SProfilerThreadView::DrawFrameMarkers() const
 		const FString TimelineStr = FString::Printf( TEXT( "%.4f MS" ), TimelinePosXPx / NumPixelsPerMillisecond );
 
 		// Draw time line text.
-		float MarkerPosYPx = PaintState->Size2D().Y - 3 * PaintState->SummaryFont8Height;
+		double MarkerPosYPx = PaintState->Size2D().Y - 3 * PaintState->SummaryFont8Height;
 		DrawText( TimelineStr, PaintState->SummaryFont8, FVector2D( TimelinePosXPx - ThreadViewOffsetPx, MarkerPosYPx ), FColorList::LimeGreen, FColorList::Black, FVector2D( 1.0f, 1.0f ) );
 	}
 
@@ -427,7 +430,7 @@ void SProfilerThreadView::DrawUIStackNodes_Recursively( const FProfilerUIStackNo
 		static const FSlateColorBrush SolidWhiteBrush = FSlateColorBrush( FColorList::White );
 		const FColor GameThreadColor = FColorList::Red;
 	
-		const FVector2D Position = FVector2D( UIStackNode.PositionXPx /*- PositionXMS*/, UIStackNode.PositionY*NUM_PIXELS_PER_ROW );
+		const FVector2D Position = FVector2D( UIStackNode.PositionXPx /*- PositionXMS*/, UIStackNode.PositionY*(double)NUM_PIXELS_PER_ROW );
 		const FVector2D Size = FVector2D( UIStackNode.WidthPx, NUM_PIXELS_PER_ROW );
 
 		// Draw a cycle counter for this profiler UI stack node.
@@ -435,7 +438,7 @@ void SProfilerThreadView::DrawUIStackNodes_Recursively( const FProfilerUIStackNo
 		(
 			PaintState->OutDrawElements,
 			PaintState->LayerId,
-			PaintState->AllottedGeometry.ToPaintGeometry( Position, Size ),
+			PaintState->AllottedGeometry.ToPaintGeometry( Size, FSlateLayoutTransform(Position) ),
 			&SolidWhiteBrush,
 			PaintState->DrawEffects,
 			GameThreadColor
@@ -557,8 +560,8 @@ FReply SProfilerThreadView::OnMouseMove( const FGeometry& MyGeometry, const FPoi
 		HoveredPositionX = 0.0;//PositionToFrameIndex( LocalMousePosition.X );
 		HoveredPositionY = 0.0;
 
-		const float CursorPosXDelta = -MouseEvent.GetCursorDelta().X;
-		const float ScrollSpeed = 1.0f / ZoomFactorX;
+		const double CursorPosXDelta = -MouseEvent.GetCursorDelta().X;
+		const double ScrollSpeed = 1.0 / ZoomFactorX;
 
 		if( MouseEvent.IsMouseButtonDown( EKeys::LeftMouseButton ) )
 		{
@@ -604,7 +607,7 @@ FReply SProfilerThreadView::OnMouseWheel( const FGeometry& MyGeometry, const FPo
 	const bool bZoomIn = MouseEvent.GetWheelDelta() < 0.0f;
 	const double Center = PositionXMS + RangeXMS*0.5f;
 
-	const double MinVisibleRangeMS = 1.0f / INV_MIN_VISIBLE_RANGE_X;
+	const double MinVisibleRangeMS = 1.0f / (double)INV_MIN_VISIBLE_RANGE_X;
 	const double NewUnclampedRange = bZoomIn ? RangeXMS*1.25f : RangeXMS / 1.25f;
 	const double NewRange = FMath::Clamp( NewUnclampedRange, MinVisibleRangeMS, FMath::Min( TotalRangeXMS, (double)MAX_VISIBLE_RANGE_X ) );
 
@@ -735,8 +738,10 @@ void SProfilerThreadView::UpdateInternalConstants()
 	ZoomFactorX = (double)NUM_MILLISECONDS_PER_WINDOW / RangeXMS;
 	RangeY = FMath::RoundToFloat(ThisGeometry.GetLocalSize().Y / (double)NUM_PIXELS_PER_ROW);
 
-	const double Aspect = ThisGeometry.GetLocalSize().X / NUM_MILLISECONDS_PER_WINDOW * ZoomFactorX;
+	const double Aspect = ThisGeometry.GetLocalSize().X / (double)NUM_MILLISECONDS_PER_WINDOW * ZoomFactorX;
 	NumMillisecondsPerWindow = (double)ThisGeometry.GetLocalSize().X / Aspect;
 	NumPixelsPerMillisecond = (double)ThisGeometry.GetLocalSize().X / NumMillisecondsPerWindow;
 	NumMillisecondsPerSample = NumMillisecondsPerWindow / (double)ThisGeometry.GetLocalSize().X * (double)MIN_NUM_PIXELS_PER_SAMPLE;
 }
+
+#endif // STATS

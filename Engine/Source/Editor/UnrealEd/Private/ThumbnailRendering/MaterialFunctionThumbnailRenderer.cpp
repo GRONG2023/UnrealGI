@@ -51,18 +51,13 @@ void UMaterialFunctionThumbnailRenderer::Draw(UObject* Object, int32 X, int32 Y,
 				ThumbnailScene->SetMaterialInterface(PreviewMaterial);
 	
 			FSceneViewFamilyContext ViewFamily( FSceneViewFamily::ConstructionValues( RenderTarget, ThumbnailScene->GetScene(), FEngineShowFlags(ESFIM_Game) )
-				.SetWorldTimes(FApp::GetCurrentTime() - GStartTime, FApp::GetDeltaTime(), FApp::GetCurrentTime() - GStartTime)
+				.SetTime(UThumbnailRenderer::GetTime())
 				.SetAdditionalViewFamily(bAdditionalViewFamily));
 
 			ViewFamily.EngineShowFlags.DisableAdvancedFeatures();
 			ViewFamily.EngineShowFlags.MotionBlur = 0;
 
-			ThumbnailScene->GetView(&ViewFamily, X, Y, Width, Height);
-
-			if (ViewFamily.Views.Num() > 0)
-			{
-				RenderViewFamily(Canvas,&ViewFamily);
-			}
+			RenderViewFamily(Canvas, &ViewFamily, ThumbnailScene->CreateView(&ViewFamily, X, Y, Width, Height));
 
 			ThumbnailScene->SetMaterialInterface(nullptr);
 		}

@@ -2,67 +2,101 @@
 
 #pragma once
 
-#include "CoreTypes.h"
 #include "Containers/Array.h"
 #include "Containers/UnrealString.h"
+#include "CoreTypes.h"
 #include "Delegates/Delegate.h"
-#include "Misc/Optional.h"
 #include "Internationalization/Text.h"
+#include "Misc/Optional.h"
 #include "Templates/ValueOrError.h"
 
+class FText;
 template<typename NumericType> struct FNumericUnit;
 
 /** Enum *must* be zero-indexed and sequential. Must be grouped by relevance and ordered by magnitude. */
-/** Enum *must* match the mirrored enum that exists in CoreUObject/Classes/Object.h for the purposes of UObject reflection */
+/** Enum *must* match the mirrored enum that exists in CoreUObject/NoExportTypes.h for the purposes of UObject reflection */
 enum class EUnit : uint8
 {
-	/** Scalar distance/length units */
+	/** Scalar distance/length unit. */
 	Micrometers, Millimeters, Centimeters, Meters, Kilometers,
 	Inches, Feet, Yards, Miles,
 	Lightyears,
 
-	/** Angular units */
+	/** Angular unit. */
 	Degrees, Radians,
 
-	/** Speed units */
-	MetersPerSecond, KilometersPerHour, MilesPerHour,
+	/** Speed unit. */
+	CentimetersPerSecond, MetersPerSecond, KilometersPerHour, MilesPerHour,
 
-	/** Temperature units */
+	/** Angular speed unit. */
+	DegreesPerSecond, RadiansPerSecond,
+
+	/** Acceleration unit. */
+	CentimetersPerSecondSquared, MetersPerSecondSquared,
+
+	/** Temperature unit. */
 	Celsius, Farenheit, Kelvin,
 
-	/** Mass units */
+	/** Mass unit. */
 	Micrograms, Milligrams, Grams, Kilograms, MetricTons,
 	Ounces, Pounds, Stones,
 
-	/** Force units */
-	Newtons, PoundsForce, KilogramsForce,
+	/** Density unit. */
+	GramsPerCubicCentimeter, GramsPerCubicMeter, KilogramsPerCubicCentimeter, KilogramsPerCubicMeter,
 
-	/** Frequency units */
+	/** Force unit. */
+	Newtons, PoundsForce, KilogramsForce, KilogramCentimetersPerSecondSquared,
+
+	/** Torque unit. */
+	NewtonMeters, KilogramCentimetersSquaredPerSecondSquared,
+
+	/** Impulse unit. */
+	NewtonSeconds, KilogramCentimeters, KilogramMeters,
+
+	/** Frequency unit. */
 	Hertz, Kilohertz, Megahertz, Gigahertz, RevolutionsPerMinute,
 
-	/** Data Size units */
+	/** Data Size unit. */
 	Bytes, Kilobytes, Megabytes, Gigabytes, Terabytes,
 
-	/** Luminous flux units, luminous intensity, illuminance, luminance */
-	Lumens, Candela, Lux, CandelaPerMeter2,
+	/** Luminous flux unit. */
+	Lumens,
+	
+	/** Luminous intensity unit. */
+	Candela,
+	
+	/** Illuminance unit. */
+	Lux,
+	
+	/** Luminance unit. */
+	CandelaPerMeter2,
+	
+	/** Exposure value unit. */
+	ExposureValue,
 
-	/** Time units */
-	Milliseconds, Seconds, Minutes, Hours, Days, Months, Years,
+	/** Time unit. */
+	Nanoseconds, Microseconds, Milliseconds, Seconds, Minutes, Hours, Days, Months, Years,
 
-	/** Pixel density units */
+	/** Pixel density unit. */
 	PixelsPerInch,
 
-	/** Arbitrary multipliers */
-	Percentage,	Multiplier,
+	/** Percentage. */
+	Percentage,
 
-	/** Symbolic entry, not specifiable on meta data */
+	/** Arbitrary multiplier. */
+	Multiplier,
+
+	/** Stress unit. */
+	Pascals, KiloPascals, MegaPascals, GigaPascals,
+
+	/** Symbolic entry, not specifiable on meta data. */
 	Unspecified
 };
 
 /** Enumeration that specifies particular classes of unit */
 enum class EUnitType
 {
-	Distance, Angle, Speed, Temperature, Mass, Force, Frequency, DataSize, LuminousFlux, LuminousIntensity, Illuminance, Luminance, Time, PixelDensity, Multipliers,
+	Distance, Angle, Speed, AngularSpeed, Acceleration, Temperature, Mass, Density, Force, Torque, Impulse, PositionalImpulse, Frequency, DataSize, LuminousFlux, LuminousIntensity, Illuminance, Luminance, Time, PixelDensity, Multipliers, ExposureValue, Stress,
 
 	// Symbolic entry - do not use directly
 	NumberOf,
@@ -71,20 +105,20 @@ enum class EUnitType
 template<typename NumericType> struct FNumericUnit;
 
 /** Unit settings accessed globally through FUnitConversion::Settings() */
-class CORE_API FUnitSettings
+class FUnitSettings
 {
 public:
 
-	FUnitSettings();
+	CORE_API FUnitSettings();
 
 	/** Check whether unit display is globally enabled or disabled */
-	bool ShouldDisplayUnits() const;
-	void SetShouldDisplayUnits(bool bInGlobalUnitDisplay);
+	CORE_API bool ShouldDisplayUnits() const;
+	CORE_API void SetShouldDisplayUnits(bool bInGlobalUnitDisplay);
 	
 	/** Get/Set the specific valid units to display the specified type of unit in */
-	const TArray<EUnit>& GetDisplayUnits(EUnitType InType) const;
-	void SetDisplayUnits(EUnitType InType, const TArray<EUnit>& Units);
-	void SetDisplayUnits(EUnitType InType, EUnit Units);
+	CORE_API const TArray<EUnit>& GetDisplayUnits(EUnitType InType) const;
+	CORE_API void SetDisplayUnits(EUnitType InType, const TArray<EUnit>& Units);
+	CORE_API void SetDisplayUnits(EUnitType InType, EUnit Units);
 
 	/** Returns an event delegate that is executed when a display setting has changed. (GlobalUnitDisplay or DefaultInputUnits) */
 	DECLARE_EVENT(FUnitSettings, FDisplaySettingChanged);
@@ -102,25 +136,28 @@ private:
 	FDisplaySettingChanged SettingChangedEvent;
 };
 
-struct CORE_API FUnitConversion
+struct FUnitConversion
 {
 	/** Get the global settings for unit conversion/display */
-	static FUnitSettings& Settings();
+	static CORE_API FUnitSettings& Settings();
 
 	/** Check whether it is possible to convert a number between the two specified units */
-	static bool AreUnitsCompatible(EUnit From, EUnit To);
+	static CORE_API bool AreUnitsCompatible(EUnit From, EUnit To);
 
 	/** Check whether a unit is of the specified type */
-	static bool IsUnitOfType(EUnit Unit, EUnitType Type);
+	static CORE_API bool IsUnitOfType(EUnit Unit, EUnitType Type);
 
 	/** Get the type of the specified unit */
-	static EUnitType GetUnitType(EUnit);
+	static CORE_API EUnitType GetUnitType(EUnit);
 
 	/** Get the display string for the the specified unit type */
-	static const TCHAR* GetUnitDisplayString(EUnit Unit);
+	static CORE_API const TCHAR* GetUnitDisplayString(EUnit Unit);
 
 	/** Helper function to find a unit from a string (name or display string) */
-	static TOptional<EUnit> UnitFromString(const TCHAR* UnitString);
+	static CORE_API TOptional<EUnit> UnitFromString(const TCHAR* UnitString);
+
+	/** Helper function to get all supported units */
+	static CORE_API TConstArrayView<const TCHAR*> GetSupportedUnits();
 
 public:
 
@@ -187,14 +224,42 @@ private:
 
 	/** Given a string, skip past whitespace, then any numeric characters. Set End pointer to the end of the last numeric character. */
 	static bool ExtractNumberBoundary(const TCHAR* Start, const TCHAR*& End);
+
+	/** Global arithmetic operators for number types. Deals with conversion from related units correctly. Note must be inlined for hidden friend optimization to work */
+	template<typename OtherType>
+	friend inline bool operator==(const FNumericUnit<NumericType>& LHS, const FNumericUnit<OtherType>& RHS)
+	{
+		if (LHS.Units != EUnit::Unspecified && RHS.Units != EUnit::Unspecified)
+		{
+			if (LHS.Units == RHS.Units)
+			{
+				return LHS.Value == RHS.Value;
+			}
+			else if (FUnitConversion::AreUnitsCompatible(LHS.Units, RHS.Units))
+			{
+				return LHS.Value == FUnitConversion::Convert(RHS.Value, RHS.Units, LHS.Units);
+			}
+			else
+			{
+				// Invalid conversion
+				return false;
+			}
+		}
+		else
+		{
+			return LHS.Value == RHS.Value;
+		}
+	}
+
+	template<typename OtherType>
+	friend inline bool operator!=(const FNumericUnit<NumericType>& LHS, const FNumericUnit<OtherType>& RHS)
+	{
+		return !(LHS == RHS);
+	}
 };
 
-/** Global arithmetic operators for number types. Deals with conversion from related units correctly. */
-template<typename NumericType, typename OtherType>
-bool operator==(const FNumericUnit<NumericType>& LHS, const FNumericUnit<OtherType>& RHS);
-
-template<typename NumericType, typename OtherType>
-bool operator!=(const FNumericUnit<NumericType>& LHS, const FNumericUnit<OtherType>& RHS);
+template <typename CharType, typename T>
+TStringBuilderBase<CharType>& operator<<(TStringBuilderBase<CharType>& Builder, const FNumericUnit<T>& NumericUnit);
 
 template<typename T>
 FString LexToString(const FNumericUnit<T>& NumericUnit);
@@ -208,6 +273,5 @@ void LexFromString(FNumericUnit<T>& OutValue, const TCHAR* String);
 template<typename T>
 bool LexTryParseString(FNumericUnit<T>& OutValue, const TCHAR* String);
 
-
 // Include template definitions
-#include "Math/UnitConversion.inl"
+#include "Math/UnitConversion.inl" // IWYU pragma: export

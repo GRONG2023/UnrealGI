@@ -26,6 +26,9 @@ enum class EMultiBoxType : uint8
 	/** Vertical tool bar */
 	VerticalToolBar,
 
+	/** Toolbar which is a slim version of the toolbar that aligns an icon and a text element horizontally */
+	SlimHorizontalToolBar,
+
 	/** A toolbar that tries to arrange all toolbar items uniformly (supports only horizontal toolbars for now) */
 	UniformToolBar,
 
@@ -34,6 +37,9 @@ enum class EMultiBoxType : uint8
 
 	/** Buttons arranged in rows, with a maximum number of buttons per row, like a toolbar but can have multiple rows*/
 	ButtonRow,
+
+	/** A toolbar with horizontally-oriented buttons that tries to arrange all toolbar items uniformly */
+	SlimHorizontalUniformToolBar,
 };
 
 
@@ -55,27 +61,29 @@ enum class EMultiBlockType : uint8
 };
 
 
-class SLATE_API FMultiBoxSettings
+class FMultiBoxSettings
 {
 public:
 
 	DECLARE_DELEGATE_RetVal_ThreeParams( TSharedRef< SToolTip >, FConstructToolTip, const TAttribute<FText>& /*ToolTipText*/, const TSharedPtr<SWidget>& /*OverrideContent*/, const TSharedPtr<const FUICommandInfo>& /*Action*/ );
 
 	/** Access to whether multiboxes use small icons or default sized icons */
-	static TAttribute<bool> UseSmallToolBarIcons;
-	static TAttribute<bool> DisplayMultiboxHooks;
-	static FConstructToolTip ToolTipConstructor;
+	static SLATE_API TAttribute<bool> UseSmallToolBarIcons;
+	static SLATE_API TAttribute<bool> DisplayMultiboxHooks;
+	static SLATE_API FConstructToolTip ToolTipConstructor;
+	
+	static SLATE_API TAttribute<int> MenuSearchFieldVisibilityThreshold;
 
-	FMultiBoxSettings();
+	SLATE_API FMultiBoxSettings();
 
-	static TSharedRef< SToolTip > ConstructDefaultToolTip( const TAttribute<FText>& ToolTipText, const TSharedPtr<SWidget>& OverrideContent, const TSharedPtr<const FUICommandInfo>& Action );
+	static SLATE_API TSharedRef< SToolTip > ConstructDefaultToolTip( const TAttribute<FText>& ToolTipText, const TSharedPtr<SWidget>& OverrideContent, const TSharedPtr<const FUICommandInfo>& Action );
 
-	static void ResetToolTipConstructor();
+	static SLATE_API void ResetToolTipConstructor();
 };
 
-struct SLATE_API FMultiBoxCustomization
+struct FMultiBoxCustomization
 {
-	static const FMultiBoxCustomization None;
+	static SLATE_API const FMultiBoxCustomization None;
 
 	static FMultiBoxCustomization AllowCustomization( FName InCustomizationName )
 	{

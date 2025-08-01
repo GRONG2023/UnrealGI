@@ -5,6 +5,7 @@
 #include "Modules/ModuleInterface.h"
 #include "Interfaces/IBuildInstaller.h"
 #include "Interfaces/IBuildStatistics.h"
+#include "Interfaces/IBuildInstallStreamer.h"
 #include "Interfaces/IPatchDataEnumeration.h"
 #include "BuildPatchSettings.h"
 
@@ -38,11 +39,26 @@ public:
 	virtual ~IBuildPatchServicesModule() { }
 
 	/**
+	 * Factory providing construction of a build streamer class.
+	 * @param Configuration     The configuration for the installer.
+	 * @return an instance of an IBuildInstallStreamer implementation.
+	 */
+	virtual IBuildInstallStreamerRef CreateBuildInstallStreamer(BuildPatchServices::FBuildInstallStreamerConfiguration Configuration) = 0;
+
+	/**
 	 * Factory providing construction of a build installer class.
 	 * @param Configuration     The configuration for the installer.
+	 * @param OnComplete        The delegate that will be called when the installer completes.
 	 * @return an instance of an IBuildInstaller implementation.
 	 */
 	virtual IBuildInstallerRef CreateBuildInstaller(BuildPatchServices::FBuildInstallerConfiguration Configuration, FBuildPatchInstallerDelegate OnComplete) const = 0;
+
+	/**
+	 * Factory providing construction of a build installer shared context class.
+	 * @param DebugName          Used to tag resources allocated with the shared context.
+	 * @return an instance of an IBuildInstallerSharedContex implementation.
+	 */
+	virtual IBuildInstallerSharedContextRef CreateBuildInstallerSharedContext(const TCHAR* DebugName) const = 0;
 
 	/**
 	 * Factory providing construction of a build statistics class.
@@ -226,16 +242,6 @@ public:
 
 	UE_DEPRECATED(4.21, "MakeManifestFromJSON(const FString& ManifestJSON) has been deprecated.  Please use MakeManifestFromData(const TArray<uint8>& ManifestData) instead.")
 	virtual IBuildManifestPtr MakeManifestFromJSON(const FString& ManifestJSON) = 0;
-
-	UE_DEPRECATED(4.16, "Please use EnumeratePatchData instead.")
-	virtual bool EnumerateManifestData(const FString& ManifestFilePath, const FString& OutputFile, bool bIncludeSizes)
-	{
-		BuildPatchServices::FPatchDataEnumerationConfiguration Configuration;
-		Configuration.InputFile = ManifestFilePath;
-		Configuration.OutputFile = OutputFile;
-		Configuration.bIncludeSizes = bIncludeSizes;
-		return EnumeratePatchData(Configuration);
-	}
 
 	UE_DEPRECATED(4.21, "Please use ChunkBuildDirectory instead.")
 	virtual bool GenerateChunksManifestFromDirectory(const BuildPatchServices::FGenerationConfiguration& Configuration)

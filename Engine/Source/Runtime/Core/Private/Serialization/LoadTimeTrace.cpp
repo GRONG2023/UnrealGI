@@ -9,8 +9,11 @@
 #include "HAL/PlatformTLS.h"
 
 UE_TRACE_CHANNEL_DEFINE(LoadTimeChannel)
+UE_TRACE_CHANNEL_DEFINE(AssetLoadTimeChannel)
 
 UE_TRACE_EVENT_BEGIN(LoadTime, BeginRequestGroup)
+	UE_TRACE_EVENT_FIELD(UE::Trace::WideString, Format)
+	UE_TRACE_EVENT_FIELD(uint8[], FormatArgs)
 UE_TRACE_EVENT_END()
 
 UE_TRACE_EVENT_BEGIN(LoadTime, EndRequestGroup)
@@ -23,14 +26,9 @@ FLoadTimeProfilerTrace::FRequestGroupScope::~FRequestGroupScope()
 
 void FLoadTimeProfilerTrace::FRequestGroupScope::OutputBegin()
 {
-	uint16 FormatStringSize = (uint16)((FCString::Strlen(FormatString) + 1) * sizeof(TCHAR));
-	auto Attachment = [this, FormatStringSize](uint8* Out)
-	{
-		memcpy(Out, FormatString, FormatStringSize);
-		memcpy(Out + FormatStringSize, FormatArgsBuffer, FormatArgsSize);
-	};
-	UE_TRACE_LOG(LoadTime, BeginRequestGroup, LoadTimeChannel, FormatStringSize + FormatArgsSize)
-		<< BeginRequestGroup.Attachment(Attachment);
+	UE_TRACE_LOG(LoadTime, BeginRequestGroup, LoadTimeChannel)
+		<< BeginRequestGroup.Format(FormatString)
+		<< BeginRequestGroup.FormatArgs(FormatArgsBuffer, FormatArgsSize);
 }
 
 

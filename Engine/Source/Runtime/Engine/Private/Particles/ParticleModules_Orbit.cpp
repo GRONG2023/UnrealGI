@@ -4,14 +4,15 @@
 	ParticleModules_Orbit.cpp: Orbit particle modules implementation.
 =============================================================================*/
 
-#include "CoreMinimal.h"
-#include "ParticleHelper.h"
+#include "ParticleEmitterInstances.h"
 #include "Particles/ParticleSystemComponent.h"
 #include "Distributions/DistributionVectorUniform.h"
 #include "Particles/Orbit/ParticleModuleOrbitBase.h"
 #include "Particles/Orbit/ParticleModuleOrbit.h"
+#include "Particles/ParticleModule.h"
 #include "Particles/TypeData/ParticleModuleTypeDataGpu.h"
 #include "Particles/ParticleLODLevel.h"
+#include "Particles/TypeData/ParticleModuleTypeDataBase.h"
 
 UParticleModuleOrbitBase::UParticleModuleOrbitBase(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -126,9 +127,9 @@ void UParticleModuleOrbit::Spawn(FParticleEmitterInstance* Owner, int32 Offset, 
 			{
 				LocalOffset = OffsetAmount.GetValue(Owner->EmitterTime, Owner->Component);
 			}
-			OrbitPayload.BaseOffset += LocalOffset;
+			OrbitPayload.BaseOffset += (FVector3f)LocalOffset;
 			OrbitPayload.PreviousOffset = OrbitPayload.Offset;
-			OrbitPayload.Offset += LocalOffset;
+			OrbitPayload.Offset += (FVector3f)LocalOffset;
 		}
 
 		if (RotationOptions.bProcessDuringSpawn == true)
@@ -143,7 +144,7 @@ void UParticleModuleOrbit::Spawn(FParticleEmitterInstance* Owner, int32 Offset, 
 			{
 				LocalRotation = RotationAmount.GetValue(Owner->EmitterTime, Owner->Component);
 			}
-			OrbitPayload.Rotation += LocalRotation;
+			OrbitPayload.Rotation += (FVector3f)LocalRotation;
 		}
 
 		if (RotationRateOptions.bProcessDuringSpawn == true)
@@ -158,8 +159,8 @@ void UParticleModuleOrbit::Spawn(FParticleEmitterInstance* Owner, int32 Offset, 
 			{
 				LocalRotationRate = RotationRateAmount.GetValue(Owner->EmitterTime, Owner->Component);
 			}
-			OrbitPayload.BaseRotationRate += LocalRotationRate;
-			OrbitPayload.RotationRate += LocalRotationRate;
+			OrbitPayload.BaseRotationRate += (FVector3f)LocalRotationRate;
+			OrbitPayload.RotationRate += (FVector3f)LocalRotationRate;
 		}
 	}
 }
@@ -186,7 +187,7 @@ void UParticleModuleOrbit::Update(FParticleEmitterInstance* Owner, int32 Offset,
 			//@todo. Do we need to update the base offset here???
 //			OrbitPayload.BaseOffset += LocalOffset;
 			OrbitPayload.PreviousOffset = OrbitPayload.Offset;
-			OrbitPayload.Offset += LocalOffset;
+			OrbitPayload.Offset += (FVector3f)LocalOffset;
 		}
 
 		if (RotationOptions.bProcessDuringUpdate == true)
@@ -201,7 +202,7 @@ void UParticleModuleOrbit::Update(FParticleEmitterInstance* Owner, int32 Offset,
 			{
 				LocalRotation = RotationAmount.GetValue(Owner->EmitterTime, Owner->Component);
 			}
-			OrbitPayload.Rotation += LocalRotation;
+			OrbitPayload.Rotation += (FVector3f)LocalRotation;
 		}
 
 
@@ -219,7 +220,7 @@ void UParticleModuleOrbit::Update(FParticleEmitterInstance* Owner, int32 Offset,
 			}
 			//@todo. Do we need to update the base rotationrate here???
 //			OrbitPayload.BaseRotationRate += LocalRotationRate;
-			OrbitPayload.RotationRate += LocalRotationRate;
+			OrbitPayload.RotationRate += (FVector3f)LocalRotationRate;
 		}
 	}
 	END_UPDATE_LOOP;

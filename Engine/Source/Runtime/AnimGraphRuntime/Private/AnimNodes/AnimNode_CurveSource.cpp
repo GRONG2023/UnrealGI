@@ -2,8 +2,12 @@
 
 #include "AnimNodes/AnimNode_CurveSource.h"
 #include "AnimationRuntime.h"
+#include "Animation/AnimCurveUtils.h"
 #include "Animation/AnimInstanceProxy.h"
+#include "Animation/AnimStats.h"
 #include "Animation/AnimTrace.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNode_CurveSource)
 
 FAnimNode_CurveSource::FAnimNode_CurveSource()
 	: SourceBinding(ICurveSourceInterface::DefaultBinding)
@@ -74,6 +78,8 @@ public:
 void FAnimNode_CurveSource::Evaluate_AnyThread(FPoseContext& Output)
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_ANIMNODE(Evaluate_AnyThread)
+	ANIM_MT_SCOPE_CYCLE_COUNTER_VERBOSE(CurveSource, !IsInGameThread());
+
 	SourcePose.Evaluate(Output);
 
 	if (CurveSource.GetInterface() != nullptr)
@@ -82,21 +88,27 @@ void FAnimNode_CurveSource::Evaluate_AnyThread(FPoseContext& Output)
 		NamedCurveValues.Reset();
 		CurveSource->Execute_GetCurves(CurveSource.GetObject(), NamedCurveValues);
 
-		USkeleton* Skeleton = Output.AnimInstanceProxy->GetSkeleton();
+		const float ClampedAlpha = FMath::Clamp(Alpha, 0.0f, 1.0f);
 
+		FBlendedCurve Curve;
+		UE::Anim::FCurveUtils::BuildUnsorted(Curve, NamedCurveValues.Num(),
+			[&NamedCurveValues](int32 InCurveIndex)
+			{
+				return NamedCurveValues[InCurveIndex].Name;
+			},
+			[&NamedCurveValues](int32 InCurveIndex)
+			{
+				return NamedCurveValues[InCurveIndex].Value;
+			});
+
+#if ANIM_TRACE_ENABLED
 		for (FNamedCurveValue NamedValue : NamedCurveValues)
 		{
-			SmartName::UID_Type NameUID = Skeleton->GetUIDByName(USkeleton::AnimCurveMappingName, NamedValue.Name);
-			if (NameUID != SmartName::MaxUID)
-			{
-				const float CurrentValue = Output.Curve.Get(NameUID);
-				const float ClampedAlpha = FMath::Clamp(Alpha, 0.0f, 1.0f);
-				const float LerpedValue = FMath::Lerp(CurrentValue, NamedValue.Value, ClampedAlpha);
-				Output.Curve.Set(NameUID, LerpedValue);
-
-				TRACE_ANIM_NODE_VALUE(Output, *NamedValue.Name.ToString(), LerpedValue);
-			}
+			TRACE_ANIM_NODE_VALUE(Output, *NamedValue.Name.ToString(), NamedValue.Value);
 		}
+#endif
+
+		Output.Curve.LerpToValid(Curve, ClampedAlpha);
 	}
 }
 

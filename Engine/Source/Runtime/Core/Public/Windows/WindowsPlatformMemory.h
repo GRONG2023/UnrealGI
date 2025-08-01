@@ -6,14 +6,14 @@
 #include "GenericPlatform/GenericPlatformMemory.h"
 #include "Windows/WindowsSystemIncludes.h"
 
+#include <malloc.h>
+
 class FString;
 class FMalloc;
 struct FGenericMemoryStats;
 
 /**
  *	Windows implementation of the FGenericPlatformMemoryStats.
- *	At this moment it's just the same as the FGenericPlatformMemoryStats.
- *	Can be extended as shown in the following example.
  */
 struct FPlatformMemoryStats
 	: public FGenericPlatformMemoryStats
@@ -22,17 +22,25 @@ struct FPlatformMemoryStats
 	FPlatformMemoryStats()
 		: FGenericPlatformMemoryStats()
 		, WindowsSpecificMemoryStat(0)
+		, MemoryPressureStatus(EMemoryPressureStatus::Unknown)
 	{ }
 
-	/** Memory stat specific only for Windows. */
+	EMemoryPressureStatus GetMemoryPressureStatus() const
+	{
+		return MemoryPressureStatus;
+	}
+
+	/** Example of a memory stat that is specific to Windows. */
 	SIZE_T WindowsSpecificMemoryStat;
+	/** Status reported by QueryMemoryResourceNotification. */
+	EMemoryPressureStatus MemoryPressureStatus;
 };
 
 
 /**
 * Windows implementation of the memory OS functions
 **/
-struct CORE_API FWindowsPlatformMemory
+struct FWindowsPlatformMemory
 	: public FGenericPlatformMemory
 {
 	enum EMemoryCounterRegion
@@ -70,7 +78,7 @@ struct CORE_API FWindowsPlatformMemory
 	};
 
 	//~ Begin FGenericPlatformMemory Interface
-	static void Init();
+	static CORE_API void Init();
 	static uint32 GetBackMemoryPoolSize()
 	{
 		/**
@@ -83,13 +91,14 @@ struct CORE_API FWindowsPlatformMemory
 		return 32 * 1024 * 1024;
 	}
 
-	static class FMalloc* BaseAllocator();
-	static FPlatformMemoryStats GetStats();
-	static void GetStatsForMallocProfiler( FGenericMemoryStats& out_Stats );
-	static const FPlatformMemoryConstants& GetConstants();
-	static bool PageProtect(void* const Ptr, const SIZE_T Size, const bool bCanRead, const bool bCanWrite);
-	static void* BinnedAllocFromOS( SIZE_T Size );
-	static void BinnedFreeToOS( void* Ptr, SIZE_T Size );
+	static CORE_API class FMalloc* BaseAllocator();
+	static CORE_API FPlatformMemoryStats GetStats();
+	static CORE_API void GetStatsForMallocProfiler( FGenericMemoryStats& out_Stats );
+	static CORE_API const FPlatformMemoryConstants& GetConstants();
+	static CORE_API bool PageProtect(void* const Ptr, const SIZE_T Size, const bool bCanRead, const bool bCanWrite);
+	static CORE_API void* BinnedAllocFromOS( SIZE_T Size );
+	static CORE_API void BinnedFreeToOS( void* Ptr, SIZE_T Size );
+	static CORE_API void MiMallocInit();
 
 	class FPlatformVirtualMemoryBlock : public FBasicVirtualMemoryBlock
 	{
@@ -106,9 +115,9 @@ struct CORE_API FWindowsPlatformMemory
 		FPlatformVirtualMemoryBlock(const FPlatformVirtualMemoryBlock& Other) = default;
 		FPlatformVirtualMemoryBlock& operator=(const FPlatformVirtualMemoryBlock& Other) = default;
 
-		void Commit(size_t InOffset, size_t InSize);
-		void Decommit(size_t InOffset, size_t InSize);
-		void FreeVirtual();
+		CORE_API void Commit(size_t InOffset, size_t InSize);
+		CORE_API void Decommit(size_t InOffset, size_t InSize);
+		CORE_API void FreeVirtual();
 
 		FORCEINLINE void CommitByPtr(void *InPtr, size_t InSize)
 		{
@@ -135,18 +144,18 @@ struct CORE_API FWindowsPlatformMemory
 			return VMSizeDivVirtualSizeAlignment * GetVirtualSizeAlignment();
 		}
 
-		static FPlatformVirtualMemoryBlock AllocateVirtual(size_t Size, size_t InAlignment = FPlatformVirtualMemoryBlock::GetVirtualSizeAlignment());
-		static size_t GetCommitAlignment();
-		static size_t GetVirtualSizeAlignment();
+		static CORE_API FPlatformVirtualMemoryBlock AllocateVirtual(size_t Size, size_t InAlignment = FPlatformVirtualMemoryBlock::GetVirtualSizeAlignment());
+		static CORE_API size_t GetCommitAlignment();
+		static CORE_API size_t GetVirtualSizeAlignment();
 	};
 
-	static FSharedMemoryRegion* MapNamedSharedMemoryRegion(const FString& InName, bool bCreate, uint32 AccessMode, SIZE_T Size, const void* pSecurityAttributes = nullptr);
-	static bool UnmapNamedSharedMemoryRegion(FSharedMemoryRegion * MemoryRegion);
-	static bool GetLLMAllocFunctions(void*(*&OutAllocFunction)(size_t), void(*&OutFreeFunction)(void*, size_t), int32& OutAlignment);
+	static CORE_API FSharedMemoryRegion* MapNamedSharedMemoryRegion(const FString& InName, bool bCreate, uint32 AccessMode, SIZE_T Size, const void* pSecurityAttributes = nullptr);
+	static CORE_API bool UnmapNamedSharedMemoryRegion(FSharedMemoryRegion * MemoryRegion);
+	static CORE_API bool GetLLMAllocFunctions(void*(*&OutAllocFunction)(size_t), void(*&OutFreeFunction)(void*, size_t), int32& OutAlignment);
 protected:
 	friend struct FGenericStatsUpdater;
 
-	static void InternalUpdateStats( const FPlatformMemoryStats& MemoryStats );
+	static CORE_API void InternalUpdateStats( const FPlatformMemoryStats& MemoryStats );
 	//~ End FGenericPlatformMemory Interface
 };
 

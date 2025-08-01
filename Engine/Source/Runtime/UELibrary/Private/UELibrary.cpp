@@ -128,8 +128,6 @@ int UELibrary_Tick()
 	return 0;
 }
 
-#if WINDOWS_USE_FEATURE_LAUNCH
-
 LRESULT UELibrary_WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
 	// Do default handling if the library isn't initialized
@@ -143,8 +141,6 @@ LRESULT UELibrary_WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	}
 }
 
-#endif
-
 int UELibrary_Shutdown()
 {
 	// Validate that we have already been initialized
@@ -156,6 +152,7 @@ int UELibrary_Shutdown()
 	EngineExit();
 	LaunchWindowsShutdown();
 	UE::UELibrary::Private::LibraryIsInitialized = false;
+	UE::Trace::Shutdown();
 	return 0;
 }
 

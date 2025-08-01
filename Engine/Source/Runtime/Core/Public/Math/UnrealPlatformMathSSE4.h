@@ -2,55 +2,59 @@
 
 #pragma once
 
+// HEADER_UNIT_SKIP - Included through other header
+
 #include "HAL/Platform.h"
 #include "Math/UnrealPlatformMathSSE.h"
-// Code including this header is responsible for including the correct platform-specific header for SSE intrinsics.
 
+// UE5.2+ requires SSE4.2
+
+// We have to retain this #if because it's pulled in via the linux header chain
+// for all platforms at the moment and we rely on the parent class to implement
+// the functions
 #if PLATFORM_MAYBE_HAS_SSE4_1
+#include <smmintrin.h>
 
-// SSE4_1 instrinsics are only available for compile if PLATFORM_MAYBE_HAS_SSE4_1 is 1, and even if compiled, should not
-// be called at runtime unless PLATFORM_ALWAYS_HAS_SSE4_1 is 1 or cpuid has been checked to verify that the current hardware
-// instance supports it.
 namespace UE4
 {
 namespace SSE4
 {
-	static FORCEINLINE float TruncToFloat(float F)
+	FORCEINLINE float TruncToFloat(float F)
 	{
 		return _mm_cvtss_f32(_mm_round_ps(_mm_set_ss(F), 3));
 	}
 
-	static FORCEINLINE double TruncToDouble(double F)
+	FORCEINLINE double TruncToDouble(double F)
 	{
 		return _mm_cvtsd_f64(_mm_round_pd(_mm_set_sd(F), 3));
 	}
 
-	static FORCEINLINE float FloorToFloat(float F)
+	FORCEINLINE float FloorToFloat(float F)
 	{
 		return _mm_cvtss_f32(_mm_floor_ps(_mm_set_ss(F)));
 	}
 
-	static FORCEINLINE double FloorToDouble(double F)
+	FORCEINLINE double FloorToDouble(double F)
 	{
 		return _mm_cvtsd_f64(_mm_floor_pd(_mm_set_sd(F)));
 	}
 
-	static FORCEINLINE float RoundToFloat(float F)
+	FORCEINLINE float RoundToFloat(float F)
 	{
 		return FloorToFloat(F + 0.5f);
 	}
 
-	static FORCEINLINE double RoundToDouble(double F)
+	FORCEINLINE double RoundToDouble(double F)
 	{
 		return FloorToDouble(F + 0.5);
 	}
 
-	static FORCEINLINE float CeilToFloat(float F)
+	FORCEINLINE float CeilToFloat(float F)
 	{
 		return _mm_cvtss_f32(_mm_ceil_ps(_mm_set_ss(F)));
 	}
 
-	static FORCEINLINE double CeilToDouble(double F)
+	FORCEINLINE double CeilToDouble(double F)
 	{
 		return _mm_cvtsd_f64(_mm_ceil_pd(_mm_set_sd(F)));
 	}
@@ -59,14 +63,15 @@ namespace SSE4
 
 #endif // PLATFORM_MAYBE_HAS_SSE4_1
 
-// We currently don't have any runtime checks in FPlatforMath for whether the SSE4_1 intrinsics are available,
-// so we have to not call them from FPlatformMath classes unless PLATFORM_ALWAYS_HAS_SSE4_1
 #define UNREALPLATFORMMATH_SSE4_1_ENABLED PLATFORM_ALWAYS_HAS_SSE4_1
 
 template<class Base>
 struct TUnrealPlatformMathSSE4Base : public TUnrealPlatformMathSSEBase<Base>
 {
 #if UNREALPLATFORMMATH_SSE4_1_ENABLED
+
+	// Truncate
+
 	static FORCEINLINE float TruncToFloat(float F)
 	{
 		return UE4::SSE4::TruncToFloat(F);
@@ -76,6 +81,9 @@ struct TUnrealPlatformMathSSE4Base : public TUnrealPlatformMathSSEBase<Base>
 	{
 		return UE4::SSE4::TruncToDouble(F);
 	}
+
+	// Round
+
 	static FORCEINLINE float RoundToFloat(float F)
 	{
 		return UE4::SSE4::RoundToFloat(F);
@@ -85,6 +93,8 @@ struct TUnrealPlatformMathSSE4Base : public TUnrealPlatformMathSSEBase<Base>
 	{
 		return UE4::SSE4::RoundToDouble(F);
 	}
+
+	// Floor
 
 	static FORCEINLINE float FloorToFloat(float F)
 	{
@@ -96,6 +106,8 @@ struct TUnrealPlatformMathSSE4Base : public TUnrealPlatformMathSSEBase<Base>
 		return UE4::SSE4::FloorToDouble(F);
 	}
 
+	// Ceil
+
 	static FORCEINLINE float CeilToFloat(float F)
 	{
 		return UE4::SSE4::CeilToFloat(F);
@@ -105,5 +117,16 @@ struct TUnrealPlatformMathSSE4Base : public TUnrealPlatformMathSSEBase<Base>
 	{
 		return UE4::SSE4::CeilToDouble(F);
 	}
+
+
+	//
+	// Wrappers for overloads in the base, required since calls declared in base struct won't redirect back to this class
+	//
+
+	static FORCEINLINE double TruncToFloat(double F) { return TruncToDouble(F); }
+	static FORCEINLINE double RoundToFloat(double F) { return RoundToDouble(F); }
+	static FORCEINLINE double FloorToFloat(double F) { return FloorToDouble(F); }
+	static FORCEINLINE double CeilToFloat(double F) { return CeilToDouble(F); }
+
 #endif // UNREALPLATFORMMATH_SSE4_ENABLED
 };

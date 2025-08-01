@@ -1,18 +1,22 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/DataTable.h"
-#include "Internationalization/TextPackageNamespaceUtil.h"
+#include "AssetRegistry/AssetData.h"
 #include "Internationalization/StabilizeLocalizationKeys.h"
+#include "Misc/PackageName.h"
 #include "Serialization/PropertyLocalizationDataGathering.h"
 #include "Serialization/ObjectWriter.h"
 #include "Serialization/ObjectReader.h"
-#include "Serialization/StructuredArchive.h"
+#include "UObject/AssetRegistryTagsContext.h"
 #include "UObject/LinkerLoad.h"
 #include "DataTableCSV.h"
-#include "Policies/PrettyJsonPrintPolicy.h"
 #include "DataTableJSON.h"
 #include "EditorFramework/AssetImportData.h"
 #include "Engine/UserDefinedStruct.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(DataTable)
+
+LLM_DEFINE_TAG(DataTable);
 
 namespace
 {
@@ -23,14 +27,19 @@ namespace
 
 		PropertyLocalizationDataGatherer.GatherLocalizationDataFromObject(DataTable, GatherTextFlags);
 
-		const FString PathToObject = DataTable->GetPathName();
-		for (const auto& Pair : DataTable->GetRowMap())
+		if (DataTable->RowStruct)
 		{
-			const FString PathToRow = PathToObject + TEXT(".") + Pair.Key.ToString();
-			PropertyLocalizationDataGatherer.GatherLocalizationDataFromStructFields(PathToRow, DataTable->RowStruct, Pair.Value, nullptr, GatherTextFlags);
+			const FString PathToObject = DataTable->GetPathName();
+			for (const auto& Pair : DataTable->GetRowMap())
+			{
+				const FString PathToRow = PathToObject + TEXT(".") + Pair.Key.ToString();
+				PropertyLocalizationDataGatherer.GatherLocalizationDataFromStructWithCallbacks(PathToRow, DataTable->RowStruct, Pair.Value, nullptr, GatherTextFlags);
+			}
 		}
 	}
 #endif // WITH_EDITORONLY_DATA
+
+	UE_CALL_ONCE(UE::GC::RegisterSlowImplementation, &UDataTable::AddReferencedObjects, UE::GC::EAROFlags::ExtraSlow);
 }
 
 UDataTable::FScopedDataTableChange::FScopedDataTableChange(UDataTable* InTable)
@@ -88,7 +97,7 @@ void UDataTable::LoadStructData(FStructuredArchiveSlot Slot)
 	{
 		if (!HasAnyFlags(RF_ClassDefaultObject) && GetOutermost() != GetTransientPackage())
 		{
-			UE_LOG(LogDataTable, Error, TEXT("Missing RowStruct while loading DataTable '%s'!"), *GetPathName());
+			UE_LOG(LogDataTable, Error, TEXT("Missing RowStruct while loading DataTable '%s', NeedLoad: '%s'!"), *GetPathName(), HasAnyFlags(RF_NeedLoad) ? TEXT("true") : TEXT("false"));
 		}
 		LoadUsingStruct = FTableRowBase::StaticStruct();
 	}
@@ -113,7 +122,7 @@ void UDataTable::LoadStructData(FStructuredArchiveSlot Slot)
 		// And be sure to call DestroyScriptStruct later
 		LoadUsingStruct->InitializeStruct(RowData);
 
-		LoadUsingStruct->SerializeItem(RowRecord.EnterField(SA_FIELD_NAME(TEXT("Value"))), RowData, nullptr);
+		LoadUsingStruct->SerializeItem(RowRecord.EnterField(TEXT("Value")), RowData, nullptr);
 
 		// Add to map
 		RowMap.Add(RowName, RowData);
@@ -127,7 +136,7 @@ void UDataTable::SaveStructData(FStructuredArchiveSlot Slot)
 	{
 		if (!HasAnyFlags(RF_ClassDefaultObject) && GetOutermost() != GetTransientPackage())
 		{
-			UE_LOG(LogDataTable, Error, TEXT("Missing RowStruct while saving DataTable '%s'!"), *GetPathName());
+			UE_LOG(LogDataTable, Error, TEXT("Missing RowStruct while saving DataTable '%s', NeedLoad: '%s'!"), *GetPathName(), HasAnyFlags(RF_NeedLoad) ? TEXT("true") : TEXT("false"));
 		}
 		SaveUsingStruct = FTableRowBase::StaticStruct();
 	}
@@ -146,7 +155,7 @@ void UDataTable::SaveStructData(FStructuredArchiveSlot Slot)
 		// Save out data
 		uint8* RowData = RowIt.Value();
 
-		SaveUsingStruct->SerializeItem(Row.EnterField(SA_FIELD_NAME(TEXT("Value"))), RowData, nullptr);
+		SaveUsingStruct->SerializeItem(Row.EnterField(TEXT("Value")), RowData, nullptr);
 	}
 }
 
@@ -192,7 +201,7 @@ void UDataTable::OnPostDataImported(TArray<FString>& OutCollectedImportProblems)
 
 void UDataTable::HandleDataTableChanged(FName ChangedRowName)
 {
-	if (IsPendingKillOrUnreachable() || HasAnyFlags(RF_BeginDestroyed))
+	if (!IsValidChecked(this) || IsUnreachable() || HasAnyFlags(RF_BeginDestroyed))
 	{
 		// This gets called during destruction, don't broadcast callbacks
 		return;
@@ -224,12 +233,14 @@ void UDataTable::HandleDataTableChanged(FName ChangedRowName)
 void UDataTable::Serialize(FStructuredArchiveRecord Record)
 {
 	FArchive& BaseArchive = Record.GetUnderlyingArchive();
+	LLM_SCOPE_BYTAG(DataTable);
 
 #if WITH_EDITORONLY_DATA
 	// Make sure and update RowStructName before calling the parent Serialize (which will save the properties)
 	if (BaseArchive.IsSaving() && RowStruct)
 	{
-		RowStructName = RowStruct->GetFName();
+		RowStructName_DEPRECATED = RowStruct->GetFName();
+		RowStructPathName = RowStruct->GetStructPathName();
 	}
 #endif	// WITH_EDITORONLY_DATA
 
@@ -248,11 +259,11 @@ void UDataTable::Serialize(FStructuredArchiveRecord Record)
 	{
 		DATATABLE_CHANGE_SCOPE();
 		EmptyTable();
-		LoadStructData(Record.EnterField(SA_FIELD_NAME(TEXT("Data"))));
+		LoadStructData(Record.EnterField(TEXT("Data")));
 	}
 	else if(BaseArchive.IsSaving())
 	{
-		SaveStructData(Record.EnterField(SA_FIELD_NAME(TEXT("Data"))));
+		SaveStructData(Record.EnterField(TEXT("Data")));
 	}
 }
 
@@ -264,15 +275,11 @@ void UDataTable::AddReferencedObjects(UObject* InThis, FReferenceCollector& Coll
 	if(This->RowStruct != nullptr && This->RowStruct->RefLink != nullptr)
 	{
 		// Now iterate over rows in the map
-		for ( auto RowIt = This->RowMap.CreateIterator(); RowIt; ++RowIt )
+		for (const TPair<FName, uint8*>& Pair : This->RowMap)
 		{
-			uint8* RowData = RowIt.Value();
-
-			if (RowData)
+			if (uint8* RowData = Pair.Value)
 			{
-				FVerySlowReferenceCollectorArchiveScope CollectorScope(Collector.GetVerySlowReferenceCollectorArchive(), This);
-				// Serialize all of the properties to make sure they get in the collector
-				This->RowStruct->SerializeBin(CollectorScope.GetArchive(), RowData);
+				Collector.AddPropertyReferencesWithStructARO(This->RowStruct, RowData, This);
 			}
 		}
 	}
@@ -303,23 +310,35 @@ void UDataTable::FinishDestroy()
 #if WITH_EDITORONLY_DATA
 FName UDataTable::GetRowStructName() const
 {
-	return (RowStruct) ? RowStruct->GetFName() : RowStructName;
+	return (RowStruct) ? RowStruct->GetFName() : RowStructName_DEPRECATED;
+}
+
+FTopLevelAssetPath UDataTable::GetRowStructPathName() const
+{
+	return (RowStruct) ? RowStruct->GetStructPathName() : RowStructPathName;
 }
 
 void UDataTable::GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+	Super::GetAssetRegistryTags(OutTags);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void UDataTable::GetAssetRegistryTags(FAssetRegistryTagsContext Context) const
+{
 	if (AssetImportData)
 	{
-		OutTags.Add( FAssetRegistryTag(SourceFileTagName(), AssetImportData->GetSourceData().ToJson(), FAssetRegistryTag::TT_Hidden) );
+		Context.AddTag( FAssetRegistryTag(SourceFileTagName(), AssetImportData->GetSourceData().ToJson(), FAssetRegistryTag::TT_Hidden) );
 	}
 
 	// Add the row structure tag
 	{
 		static const FName RowStructureTag = "RowStructure";
-		OutTags.Add( FAssetRegistryTag(RowStructureTag, GetRowStructName().ToString(), FAssetRegistryTag::TT_Alphabetical) );
+		Context.AddTag( FAssetRegistryTag(RowStructureTag, GetRowStructPathName().ToString(), FAssetRegistryTag::TT_Alphabetical) );
 	}
 
-	Super::GetAssetRegistryTags(OutTags);
+	Super::GetAssetRegistryTags(Context);
 }
 
 void UDataTable::PostInitProperties()
@@ -341,8 +360,42 @@ void UDataTable::PostLoad()
 		Info.Insert(FAssetImportInfo::FSourceFile(ImportPath_DEPRECATED));
 		AssetImportData->SourceData = MoveTemp(Info);
 	}
+	if (!RowStructName_DEPRECATED.IsNone())
+	{
+		UStruct* SavedRowStruct = RowStruct;
+		if (!SavedRowStruct)
+		{
+			SavedRowStruct = FindFirstObjectSafe<UStruct>(*RowStructName_DEPRECATED.ToString());
+		}
+		if (SavedRowStruct)
+		{
+			RowStructPathName = SavedRowStruct->GetStructPathName();
+		}
+		else
+		{
+			UE_LOG(LogDataTable, Error, TEXT("Unable to resolved RowStruct PathName from serialized short name '%s'!"), *RowStructName_DEPRECATED.ToString());
+		}
+	}
 }
 #endif // WITH_EDITORONLY_DATA
+
+#if WITH_EDITOR
+void UDataTable::PostLoadAssetRegistryTags(const FAssetData& InAssetData, TArray<FAssetRegistryTag>& OutTagsAndValuesToUpdate) const
+{
+	Super::PostLoadAssetRegistryTags(InAssetData, OutTagsAndValuesToUpdate);
+
+	static const FName RowStructureTag(TEXT("RowStructure"));
+	FString TagValue = InAssetData.GetTagValueRef<FString>(RowStructureTag);
+	if (!TagValue.IsEmpty() && FPackageName::IsShortPackageName(TagValue))
+	{
+		FTopLevelAssetPath PathName = UClass::TryConvertShortTypeNameToPathName<UField>(TagValue, ELogVerbosity::Warning, TEXT("UDataTable::PostLoadAssetRegistryTags"));
+		if (!PathName.IsNull())
+		{
+			OutTagsAndValuesToUpdate.Add(FAssetRegistryTag(RowStructureTag, PathName.ToString(), FAssetRegistryTag::TT_Alphabetical));
+		}
+	}
+}
+#endif // WITH_EDITOR
 
 UScriptStruct& UDataTable::GetEmptyUsingStruct() const
 {
@@ -351,7 +404,7 @@ UScriptStruct& UDataTable::GetEmptyUsingStruct() const
 	{
 		if (!HasAnyFlags(RF_ClassDefaultObject) && GetOutermost() != GetTransientPackage())
 		{
-			UE_LOG(LogDataTable, Error, TEXT("Missing RowStruct while emptying DataTable '%s'!"), *GetPathName());
+			UE_LOG(LogDataTable, Error, TEXT("Missing RowStruct while emptying DataTable '%s', NeedLoad: '%s'!"), *GetPathName(), HasAnyFlags(RF_NeedLoad) ? TEXT("true") : TEXT("false"));
 		}
 		EmptyUsingStruct = FTableRowBase::StaticStruct();
 	}
@@ -381,6 +434,11 @@ void UDataTable::RemoveRow(FName RowName)
 {
 	DATATABLE_CHANGE_SCOPE();
 
+	RemoveRowInternal(RowName);
+}
+
+void UDataTable::RemoveRowInternal(FName RowName)
+{
 	UScriptStruct& EmptyUsingStruct = GetEmptyUsingStruct();
 
 	uint8* RowData = nullptr;
@@ -393,13 +451,14 @@ void UDataTable::RemoveRow(FName RowName)
 	}
 }
 
-	
 void UDataTable::AddRow(FName RowName, const FTableRowBase& RowData)
 {
 	DATATABLE_CHANGE_SCOPE();
 
 	UScriptStruct& EmptyUsingStruct = GetEmptyUsingStruct();
-	RemoveRow(RowName);
+
+	// We want to delete the row memory even for child classes that override remove
+	RemoveRowInternal(RowName);
 		
 	uint8* NewRawRowData = (uint8*)FMemory::Malloc(EmptyUsingStruct.GetStructureSize());
 	
@@ -461,9 +520,9 @@ void UDataTable::CleanBeforeStructChange()
 		{
 			class FRawStructWriter : public FObjectWriter
 			{
-				TSet<UObject*>& TemporarilyReferencedObjects;
+				TSet<TObjectPtr<UObject>>& TemporarilyReferencedObjects;
 			public:
-				FRawStructWriter(TArray<uint8>& InBytes, TSet<UObject*>& InTemporarilyReferencedObjects)
+				FRawStructWriter(TArray<uint8>& InBytes, TSet<TObjectPtr<UObject>>& InTemporarilyReferencedObjects)
 					: FObjectWriter(InBytes), TemporarilyReferencedObjects(InTemporarilyReferencedObjects) {}
 				virtual FArchive& operator<<(class UObject*& Res) override
 				{
@@ -602,7 +661,8 @@ bool UDataTable::CopyImportOptions(UDataTable* SourceTable)
 
 	if (RowStruct)
 	{
-		RowStructName = RowStruct->GetFName();
+		RowStructName_DEPRECATED = RowStruct->GetFName();
+		RowStructPathName = RowStruct->GetStructPathName();
 	}
 
 	if (SourceTable->AssetImportData)
@@ -790,6 +850,38 @@ TArray<FString> UDataTable::CreateTableFromOtherTable(const UDataTable* InTable)
 	return OutProblems;
 }
 
+TArray<FString> UDataTable::CreateTableFromRawData(TMap<FName, const uint8*>& DataMap, UScriptStruct* InRowStruct)
+{
+	DATATABLE_CHANGE_SCOPE();
+
+	// Array used to store problems about table creation
+	TArray<FString> OutProblems;
+
+	if (InRowStruct == nullptr)
+	{
+		OutProblems.Add(TEXT("No input struct provided"));
+		return OutProblems;
+	}
+
+	if (RowStruct && RowMap.Num() > 0)
+	{
+		EmptyTable();
+	}
+
+	RowStruct = InRowStruct;
+
+	UScriptStruct& EmptyUsingStruct = GetEmptyUsingStruct();
+	for (TMap<FName, const uint8*>::TConstIterator RowMapIter(DataMap.CreateConstIterator()); RowMapIter; ++RowMapIter)
+	{
+		uint8* NewRawRowData = static_cast<uint8*>(FMemory::Malloc(EmptyUsingStruct.GetStructureSize()));
+		EmptyUsingStruct.InitializeStruct(NewRawRowData);
+		EmptyUsingStruct.CopyScriptStruct(NewRawRowData, RowMapIter.Value());
+		RowMap.Add(RowMapIter.Key(), NewRawRowData);
+	}
+
+	return OutProblems;
+}
+
 #if WITH_EDITOR
 
 TArray<FString> UDataTable::GetColumnTitles() const
@@ -899,3 +991,4 @@ bool FDataTableCategoryHandle::operator != (FDataTableCategoryHandle const& Othe
 {
 	return DataTable != Other.DataTable || ColumnName != Other.ColumnName || RowContents != Other.RowContents;
 }
+

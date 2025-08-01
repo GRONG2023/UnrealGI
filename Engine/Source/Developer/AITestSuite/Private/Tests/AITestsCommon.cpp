@@ -27,7 +27,7 @@ namespace FAITestHelpers
 
 bool FAITestCommand_WaitSeconds::Update()
 {
-	float NewTime = FPlatformTime::Seconds();
+	const double NewTime = FPlatformTime::Seconds();
 	if (NewTime - StartTime >= Duration)
 	{
 		return true;
@@ -53,6 +53,16 @@ bool FAITestCommand_SetUpTest::Update()
 bool FAITestCommand_PerformTest::Update()
 {
 	return AITest == nullptr || AITest->Update();
+}
+
+bool FAITestCommand_VerifyTestResults::Update()
+{
+	if (AITest)
+	{
+		AITest->VerifyLatentResults();
+	}
+	// signal "done"
+	return true; 
 }
 
 bool FAITestCommand_TearDownTest::Update()
@@ -107,6 +117,7 @@ void FAITestBase::TearDown()
 	for (auto AutoDestroyedObject : SpawnedObjects)
 	{
 		AutoDestroyedObject->RemoveFromRoot();
+		AutoDestroyedObject->MarkAsGarbage();
 	}
 	SpawnedObjects.Reset();
 }

@@ -1,7 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Sound/DialogueVoice.h"
+#include "Sound/DialogueTypes.h"
+#include "UObject/AssetRegistryTagsContext.h"
 #include "UObject/UnrealType.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(DialogueVoice)
 
 UDialogueVoice::UDialogueVoice(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -41,7 +45,14 @@ FString UDialogueVoice::GetDesc()
 
 void UDialogueVoice::GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
 	Super::GetAssetRegistryTags(OutTags);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void UDialogueVoice::GetAssetRegistryTags(FAssetRegistryTagsContext Context) const
+{
+	Super::GetAssetRegistryTags(Context);
 }
 
 void UDialogueVoice::PostDuplicate(bool bDuplicateForPIE)
@@ -53,3 +64,4 @@ void UDialogueVoice::PostDuplicate(bool bDuplicateForPIE)
 	}
 }
 // End UObject interface. 
+

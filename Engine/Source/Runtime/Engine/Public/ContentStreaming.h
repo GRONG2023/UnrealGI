@@ -6,21 +6,34 @@
 
 #pragma once
 
+#include "Async/TaskGraphInterfaces.h"
 #include "CoreMinimal.h"
-#include "UObject/WeakObjectPtr.h"
+#include "RenderedTextureStats.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "CanvasTypes.h"
 #include "UnrealClient.h"
+#endif
+#include "Serialization/BulkData.h"
+#include "UObject/ObjectKey.h"
+#include "UObject/WeakObjectPtr.h"
 
 class AActor;
 class FSoundSource;
 class UPrimitiveComponent;
-class USoundWave;
+class FCanvas;
+class FViewport;
+class FSoundWaveData;
+class FSoundWaveProxy;
 class ICompressedAudioInfo;
 class UTexture2D;
 struct FRenderAssetStreamingManager;
 struct FWaveInstance;
 class UAnimStreamable;
+enum class EStreamableRenderAssetType : uint8;
 struct FCompressedAnimSequence;
+class UStreamableSparseVolumeTexture;
+
+using FSoundWaveProxyPtr = TSharedPtr<FSoundWaveProxy, ESPMode::ThreadSafe>;
 
 /*-----------------------------------------------------------------------------
 	Stats.
@@ -32,12 +45,16 @@ class AActor;
 class UTexture2D;
 class UStaticMesh;
 class USkeletalMesh;
-class ULandscapeLODStreamingProxy;
 class UStreamableRenderAsset;
 class FSoundSource;
-class USoundWave;
+class FAudioStreamCacheMemoryHandle;
 struct FWaveInstance;
 struct FRenderAssetStreamingManager;
+
+namespace Nanite
+{
+	class FCoarseMeshStreamingManager;
+}
 
 /** Helper function to flush resource streaming. */
 void FlushResourceStreaming();
@@ -89,51 +106,48 @@ struct FStreamingViewInfo
  * This structure allows audio chunk data to be accessed, and guarantees that the chunk in question will not be deleted
  * during it's lifecycle.
  */
-class ENGINE_API FAudioChunkHandle
+class FAudioChunkHandle
 {
 public:
-	FAudioChunkHandle();
-	FAudioChunkHandle(const FAudioChunkHandle& Other);
-	FAudioChunkHandle(FAudioChunkHandle&& Other);
+	ENGINE_API FAudioChunkHandle();
+	ENGINE_API FAudioChunkHandle(const FAudioChunkHandle& Other);
+	ENGINE_API FAudioChunkHandle(FAudioChunkHandle&& Other);
 
-	FAudioChunkHandle& operator=(const FAudioChunkHandle& Other);
-	FAudioChunkHandle& operator=(FAudioChunkHandle&& Other);
+	ENGINE_API FAudioChunkHandle& operator=(const FAudioChunkHandle& Other);
+	ENGINE_API FAudioChunkHandle& operator=(FAudioChunkHandle&& Other);
 
-	~FAudioChunkHandle();
+	ENGINE_API ~FAudioChunkHandle();
 
 	// gets a pointer to the compressed chunk.
-	const uint8* GetData() const;
+	ENGINE_API const uint8* GetData() const;
 
 	// Returns the num bytes pointed to by GetData().
-	uint32 Num() const;
+	ENGINE_API uint32 Num() const;
 
 	// Checks whether this points to a valid compressed chunk.
-	bool IsValid() const;
+	ENGINE_API bool IsValid() const;
 
 #if WITH_EDITOR
 	// If the soundwave has been recompressed, the compressed audio retained by this handle will not be up to date, and this will return true. 
-	bool IsStale() const;
+	ENGINE_API bool IsStale() const;
 #endif
 
 private:
 	// This constructor should only be called by an implementation of IAudioStreamingManager.
-	FAudioChunkHandle(const uint8* InData, uint32 NumBytes, const USoundWave* InSoundWave, const FName& SoundWaveName, uint32 InChunkIndex, uint64 InCacheLookupID);
+	ENGINE_API FAudioChunkHandle(const uint8* InData, uint32 NumBytes, const FSoundWaveProxyPtr&  InSoundWave, const FName& SoundWaveName, uint32 InChunkIndex, uint64 InCacheLookupID);
 
 	const uint8*  CachedData;
 	int32 CachedDataNumBytes;
 
-	const USoundWave* CorrespondingWave;
 	FName CorrespondingWaveName;
+	FGuid CorrespondingWaveGuid;
 
 	// The index of this chunk in the sound wave's full set of chunks of compressed audio.
 	int32 ChunkIndex;
 
-	// This ID can be used to access the element this handle is for directly,
-	// rather than linearly searching the cache. This should only be used by the stream cache itself.
-	uint64 CacheLookupID;
-
 #if WITH_EDITOR
-	uint32 ChunkGeneration;
+	TWeakPtr<FSoundWaveData, ESPMode::ThreadSafe> CorrespondingWave;
+	uint32 ChunkRevision;
 #endif
 
 	friend struct IAudioStreamingManager;
@@ -187,11 +201,8 @@ struct IStreamingManager
 	 * @param TimeLimit					Maximum number of seconds to wait for streaming I/O. If zero, uses .ini setting
 	 * @return							Number of streaming requests still in flight, if the time limit was reached before they were finished.
 	 */
-	virtual int32 StreamAllResources(float TimeLimit = 0.0f)
-	{
-		return 0;
-	}
-
+	ENGINE_API virtual int32 StreamAllResources(float TimeLimit = 0.0f);
+	
 	/**
 	 * Blocks till all pending requests are fulfilled.
 	 *
@@ -231,15 +242,21 @@ struct IStreamingManager
 	ENGINE_API void AddViewInformation(const FVector& ViewOrigin, float ScreenSize, float FOVScreenSize, float BoostFactor = 1.0f, bool bOverrideLocation = false, float Duration = 0.0f, TWeakObjectPtr<AActor> InActorToBoost = NULL);
 
 	/**
-	 * Queue up view "slave" locations to the streaming system. These locations will be added properly at the next call to AddViewInformation,
+	 * Queue up view locations to the streaming system. These locations will be added properly at the next call to AddViewInformation,
 	 * re-using the screensize and FOV settings.
 	 *
-	 * @param SlaveLocation			World-space view origin
+	 * @param Location				World-space view origin
 	 * @param BoostFactor			A factor that affects all streaming distances for this location. 1.0f is default. Higher means higher-resolution textures and vice versa.
 	 * @param bOverrideLocation		Whether this is an override location, which forces the streaming system to ignore all other locations
 	 * @param Duration				How long the streaming system should keep checking this location, in seconds. 0 means just for the next Tick.
 	 */
-	ENGINE_API void AddViewSlaveLocation(const FVector& SlaveLocation, float BoostFactor = 1.0f, bool bOverrideLocation = false, float Duration = 0.0f);
+	ENGINE_API void AddViewLocation(const FVector& Location, float BoostFactor = 1.0f, bool bOverrideLocation = false, float Duration = 0.0f);
+
+	UE_DEPRECATED(5.1, "This is deprecated to follow inclusive naming rules. Use AddViewLocation() instead.")
+	void AddViewSlaveLocation(const FVector& Location, float BoostFactor = 1.0f, bool bOverrideLocation = false, float Duration = 0.0f)
+	{
+		AddViewLocation(Location, BoostFactor, bOverrideLocation, Duration);
+	}
 
 	/** Don't stream world resources for the next NumFrames. */
 	virtual void SetDisregardWorldResourcesForFrames(int32 NumFrames) = 0;
@@ -289,13 +306,13 @@ struct IStreamingManager
 	}
 
 	/** Returns the number of view infos. */
-	ENGINE_API int32 GetNumViews() const
+	int32 GetNumViews() const
 	{
 		return CurrentViewInfos.Num();
 	}
 
 	/** Returns the view info by the specified index. */
-	ENGINE_API const FStreamingViewInfo& GetViewInformation(int32 ViewIndex) const
+	const FStreamingViewInfo& GetViewInformation(int32 ViewIndex) const
 	{
 		return CurrentViewInfos[ViewIndex];
 	}
@@ -323,13 +340,13 @@ struct IStreamingManager
 	}
 
 #if WITH_EDITOR
-	ENGINE_API virtual void OnAudioStreamingParamsChanged() {};
+	virtual void OnAudioStreamingParamsChanged() {};
 #endif
 
 protected:
 
 	/**
-	 * Sets up the CurrentViewInfos array based on PendingViewInfos, LastingViewInfos and SlaveLocations.
+	 * Sets up the CurrentViewInfos array based on PendingViewInfos, LastingViewInfos and SecondaryLocations.
 	 * Removes out-dated LastingViewInfos.
 	 *
 	 * @param DeltaTime		Time since last call in seconds
@@ -358,9 +375,9 @@ protected:
 	 */
 	static void RemoveViewInfoFromArray( TArray<FStreamingViewInfo> &ViewInfos, const FVector& ViewOrigin );
 
-	struct FSlaveLocation
+	struct FSecondaryLocation
 	{
-		FSlaveLocation( const FVector& InLocation, float InBoostFactor, bool bInOverrideLocation, float InDuration )
+		FSecondaryLocation( const FVector& InLocation, float InBoostFactor, bool bInOverrideLocation, float InDuration )
 		:	Location( InLocation )
 		,	BoostFactor( InBoostFactor )
 		,	Duration( InDuration )
@@ -387,7 +404,7 @@ protected:
 	static TArray<FStreamingViewInfo> LastingViewInfos;
 
 	/** Collection of view locations that will be added at the next call to AddViewInformation. */
-	static TArray<FSlaveLocation> SlaveLocations;
+	static TArray<FSecondaryLocation> SecondaryLocations;
 
 	/** Set when Tick() has been called. The first time a new view is added, it will clear out all old views. */
 	static bool bPendingRemoveViews;
@@ -405,15 +422,6 @@ protected:
 };
 
 /**
- * Lightweight struct used to list the MIP levels of rendered assets.
- */
-struct FRenderedTextureStats
-{
-	int32 MaxMipLevelShown;
-	FString TextureGroup;
-};
-
-/**
  * Interface to add functions specifically related to texture/mesh streaming
  */
 struct IRenderAssetStreamingManager : public IStreamingManager
@@ -425,8 +433,8 @@ struct IRenderAssetStreamingManager : public IStreamingManager
 	*/
 	virtual void UpdateIndividualRenderAsset(UStreamableRenderAsset* RenderAsset) = 0;
 
-	/** Stream in non-resident mips for an asset ASAP. */
-	virtual void FastForceFullyResident(UStreamableRenderAsset* RenderAsset) = 0;
+	/** Stream in non-resident mips for an asset ASAP. Returns true if streaming request will be successful. */
+	virtual bool FastForceFullyResident(UStreamableRenderAsset* RenderAsset) = 0;
 
 	/**
 	* Temporarily boosts the streaming distance factor by the specified number.
@@ -447,6 +455,9 @@ struct IRenderAssetStreamingManager : public IStreamingManager
 	/** Removes a texture/mesh from the streaming manager. */
 	virtual void RemoveStreamingRenderAsset(UStreamableRenderAsset* RenderAsset) = 0;
 
+	/** Check whether all runtime-allowed LODs have been loaded. */
+	virtual bool IsFullyStreamedIn(UStreamableRenderAsset* RenderAsset) = 0;
+
 	virtual int64 GetMemoryOverBudget() const = 0;
 
 	/** Pool size for streaming. */
@@ -458,6 +469,9 @@ struct IRenderAssetStreamingManager : public IStreamingManager
 	/** Max required textures/meshes ever seen in bytes. */
 	virtual int64 GetMaxEverRequired() const = 0;
 
+	/** Amount of memory cached in pool */
+	virtual float GetCachedMips() const = 0;
+
 	/** Resets the max ever required textures/meshes.  For possibly when changing resolutions or screen pct. */
 	virtual void ResetMaxEverRequired() = 0;
 
@@ -465,10 +479,10 @@ struct IRenderAssetStreamingManager : public IStreamingManager
 	virtual void PauseRenderAssetStreaming(bool bInShouldPause) = 0;
 
 	/** Return all bounds related to the ref object */
-	ENGINE_API virtual void GetObjectReferenceBounds(const UObject* RefObject, TArray<FBox>& AssetBoxes) = 0;
+	virtual void GetObjectReferenceBounds(const UObject* RefObject, TArray<FBox>& AssetBoxes) = 0;
 
 	/** Return all components referencing the asset */
-	ENGINE_API virtual void GetAssetComponents(
+	virtual void GetAssetComponents(
 		const UStreamableRenderAsset* RenderAsset,
 		TArray<const UPrimitiveComponent*>& OutComps,
 		TFunction<bool(const UPrimitiveComponent*)> ShouldChoose = [](const UPrimitiveComponent*) { return true; }) = 0;
@@ -484,7 +498,7 @@ struct IRenderAssetStreamingManager : public IStreamingManager
 	/** Notify the streamer that the mounted state of a file needs to be re-evaluated. */
 	virtual void MarkMountedStateDirty(FIoFilenameHash FilenameHash) = 0;
 
-	ENGINE_API virtual void AddRenderedTextureStats(TMap<FString, FRenderedTextureStats>& InOutRenderedTextureAssets) = 0;
+	virtual void AddRenderedTextureStats(TMap<FString, FRenderedTextureStats>& InOutRenderedTextureAssets) = 0;
 };
 
 enum class EAudioChunkLoadResult : uint8
@@ -502,10 +516,16 @@ enum class EAudioChunkLoadResult : uint8
 struct IAudioStreamingManager : public IStreamingManager
 {
 	/** Adds a new Sound Wave to the streaming manager. */
-	virtual void AddStreamingSoundWave(USoundWave* SoundWave) = 0;
+	virtual void AddStreamingSoundWave(const FSoundWaveProxyPtr& SoundWave) = 0;
 
 	/** Removes a Sound Wave from the streaming manager. */
-	virtual void RemoveStreamingSoundWave(USoundWave* SoundWave) = 0;
+	virtual void RemoveStreamingSoundWave(const FSoundWaveProxyPtr& SoundWave) = 0;
+
+	/** Adds the memory usage of the force inline sound to the streaming cache budget */
+	virtual void AddForceInlineSoundWave(const FSoundWaveProxyPtr& SoundWave) { };
+
+	/** Removes the memory usage of the force inline sound from the streaming cache budget */
+	virtual void RemoveForceInlineSoundWave(const FSoundWaveProxyPtr& SoundWave) { };
 
 	/** Adds the decoder to the streaming manager to prevent stream chunks from getting reaped from underneath it */
 	virtual void AddDecoder(ICompressedAudioInfo* CompressedAudioInfo) = 0;
@@ -514,10 +534,10 @@ struct IAudioStreamingManager : public IStreamingManager
 	virtual void RemoveDecoder(ICompressedAudioInfo* CompressedAudioInfo) = 0;
 
 	/** Returns true if this is a Sound Wave that is managed by the streaming manager. */
-	virtual bool IsManagedStreamingSoundWave(const USoundWave* SoundWave) const = 0;
+	virtual bool IsManagedStreamingSoundWave(const FSoundWaveProxyPtr&  SoundWave) const = 0;
 
 	/** Returns true if this Sound Wave is currently streaming a chunk. */
-	virtual bool IsStreamingInProgress(const USoundWave* SoundWave) = 0;
+	virtual bool IsStreamingInProgress(const FSoundWaveProxyPtr&  SoundWave) = 0;
 
 	virtual bool CanCreateSoundSource(const FWaveInstance* WaveInstance) const = 0;
 
@@ -538,7 +558,7 @@ struct IAudioStreamingManager : public IStreamingManager
 	 * @param ThreadToCallOnLoadCompleteOn. Optional specifier for which thread OnLoadCompleted should be called on.
 	 * @param bForImmediatePlaybac if true, this will optionally reprioritize this chunk's load request.
 	 */
-	virtual bool RequestChunk(USoundWave* SoundWave, uint32 ChunkIndex, TFunction<void(EAudioChunkLoadResult)> OnLoadCompleted = [](EAudioChunkLoadResult) {}, ENamedThreads::Type ThreadToCallOnLoadCompletedOn = ENamedThreads::AnyThread, bool bForImmediatePlayback = false) = 0;
+	virtual bool RequestChunk(const FSoundWaveProxyPtr& SoundWave, uint32 ChunkIndex, TFunction<void(EAudioChunkLoadResult)> OnLoadCompleted = [](EAudioChunkLoadResult) {}, ENamedThreads::Type ThreadToCallOnLoadCompletedOn = ENamedThreads::AnyThread, bool bForImmediatePlayback = false) = 0;
 
 	/**
 	 * Gets a pointer to a chunk of audio data
@@ -549,7 +569,7 @@ struct IAudioStreamingManager : public IStreamingManager
 	 * @param bForImmediatePlayback if true, will optionally reprioritize this chunk's load request. See au.streamcaching.PlaybackRequestPriority.
 	 * @return a handle to the loaded chunk. Can return a default constructed FAudioChunkHandle if the chunk is not loaded yet.
 	 */
-	virtual FAudioChunkHandle GetLoadedChunk(const USoundWave* SoundWave, uint32 ChunkIndex,  bool bBlockForLoad = false, bool bForImmediatePlayback = false) const = 0;
+	virtual FAudioChunkHandle GetLoadedChunk(const FSoundWaveProxyPtr&  SoundWave, uint32 ChunkIndex,  bool bBlockForLoad = false, bool bForImmediatePlayback = false) const = 0;
 
 	/**
 	 * This will start evicting elements from the cache until either hit our target of bytes or run out of chunks we can free.
@@ -576,9 +596,10 @@ struct IAudioStreamingManager : public IStreamingManager
 
 protected:
 	friend FAudioChunkHandle;
+	friend FAudioStreamCacheMemoryHandle;
 
 	/** This can be called by implementers of IAudioStreamingManager to construct an FAudioChunkHandle using an otherwise inaccessible constructor. */
-	static FAudioChunkHandle BuildChunkHandle(const uint8* InData, uint32 NumBytes, const USoundWave* InSoundWave, const FName& SoundWaveName, uint32 InChunkIndex, uint64 CacheLookupID);
+	static FAudioChunkHandle BuildChunkHandle(const uint8* InData, uint32 NumBytes, const FSoundWaveProxyPtr& InSoundWave, const FName& SoundWaveName, uint32 InChunkIndex, uint64 CacheLookupID);
 
 	/**
 	 * This can be used to increment reference counted handles to audio chunks. Called by the copy constructor of FAudioChunkHandle.
@@ -589,6 +610,57 @@ protected:
 	 * This can be used to decrement reference counted handles to audio chunks. Called by the destructor of FAudioChunkHandle.
 	 */
 	virtual void RemoveReferenceToChunk(const FAudioChunkHandle& InHandle) = 0;
+
+	/**
+     * This can be used to increase the memory count for external features. Called by FAudioStreamCacheMemoryHandle.
+     * The pattern for _changing_ the amount of memory of an already added feature is to first remove and then add again with the new number
+     */
+	virtual void AddMemoryCountedFeature(const FAudioStreamCacheMemoryHandle& Feature) { };
+
+	/**
+	* This can be used to decrease the memory count for external features. Called by FAudioStreamCacheMemoryHandle.
+	*/
+	virtual void RemoveMemoryCountedFeature(const FAudioStreamCacheMemoryHandle& Feature) { };
+};
+
+/**
+ * Dummy audio streaming manager used on the servers and whenever we cannot render audio
+ */
+struct FDummyAudioStreamingManager final : public IAudioStreamingManager
+{
+	virtual void UpdateResourceStreaming(float DeltaTime, bool bProcessEverything = false) override {}
+	virtual int32 BlockTillAllRequestsFinished(float TimeLimit = 0.0f, bool bLogResults = false) override { return 0; }
+	virtual void CancelForcedResources() override {}
+	virtual void NotifyLevelChange() override {}
+	virtual void SetDisregardWorldResourcesForFrames(int32 NumFrames) {}
+	virtual void AddLevel(class ULevel* Level) {}
+	virtual void RemoveLevel(class ULevel* Level) {}
+	virtual void NotifyLevelOffset(class ULevel* Level, const FVector& Offset) {}
+
+	virtual void AddStreamingSoundWave(const FSoundWaveProxyPtr& SoundWave) override {}
+	virtual void RemoveStreamingSoundWave(const FSoundWaveProxyPtr& SoundWave) override {}
+	virtual void AddForceInlineSoundWave(const FSoundWaveProxyPtr& SoundWave) override {}
+	virtual void RemoveForceInlineSoundWave(const FSoundWaveProxyPtr& SoundWave) override {}
+	virtual void AddMemoryCountedFeature(const FAudioStreamCacheMemoryHandle& Feature) override {}
+	virtual void RemoveMemoryCountedFeature(const FAudioStreamCacheMemoryHandle& Feature) override {}
+	virtual void AddDecoder(ICompressedAudioInfo* CompressedAudioInfo) override {}
+	virtual void RemoveDecoder(ICompressedAudioInfo* CompressedAudioInfo) override {}
+	virtual bool IsManagedStreamingSoundWave(const FSoundWaveProxyPtr& SoundWave) const override { return false; }
+	virtual bool IsStreamingInProgress(const FSoundWaveProxyPtr& SoundWave) override { return false; }
+	virtual bool CanCreateSoundSource(const FWaveInstance* WaveInstance) const override { return false; }
+	virtual void AddStreamingSoundSource(FSoundSource* SoundSource) override {}
+	virtual void RemoveStreamingSoundSource(FSoundSource* SoundSource) override {}
+	virtual bool IsManagedStreamingSoundSource(const FSoundSource* SoundSource) const override { return false; }
+	virtual bool RequestChunk(const FSoundWaveProxyPtr& SoundWave, uint32 ChunkIndex, TFunction<void(EAudioChunkLoadResult)> OnLoadCompleted = [](EAudioChunkLoadResult) {}, ENamedThreads::Type ThreadToCallOnLoadCompletedOn = ENamedThreads::AnyThread, bool bForImmediatePlayback = false) override { return false; }
+	virtual FAudioChunkHandle GetLoadedChunk(const FSoundWaveProxyPtr& SoundWave, uint32 ChunkIndex, bool bBlockForLoad = false, bool bForImmediatePlayback = false) const override { return FAudioChunkHandle(); }
+	virtual uint64 TrimMemory(uint64 NumBytesToFree) override { return 0; }
+	virtual int32 RenderStatAudioStreaming(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation, const FRotator* ViewRotation) override { return 0; }
+	virtual FString GenerateMemoryReport() override { return TEXT(""); }
+	virtual void SetProfilingMode(bool bEnabled) override {}
+
+protected:
+	virtual void AddReferenceToChunk(const FAudioChunkHandle& InHandle) override {}
+	virtual void RemoveReferenceToChunk(const FAudioChunkHandle& InHandle) override {}
 };
 
 /**
@@ -687,12 +759,12 @@ struct FStreamingManagerCollection : public IStreamingManager
 	/**
 	 * Checks whether texture streaming is enabled. 
 	 */
-	FORCEINLINE bool IsTextureStreamingEnabled() const { return IsRenderAssetStreamingEnabled(EStreamableRenderAssetType::Texture); }
+	ENGINE_API bool IsTextureStreamingEnabled() const;
 
 	/**
 	 * Checks whether texture/mesh streaming is enabled
 	 */
-	ENGINE_API bool IsRenderAssetStreamingEnabled(EStreamableRenderAssetType FilteredAssetType = EStreamableRenderAssetType::None) const;
+	ENGINE_API bool IsRenderAssetStreamingEnabled(EStreamableRenderAssetType FilteredAssetType) const;
 
 	/**
 	 * Gets a reference to the Texture Streaming Manager interface
@@ -718,6 +790,11 @@ struct FStreamingManagerCollection : public IStreamingManager
 	 * Gets a reference to the Virtual Texture Streaming Manager
 	*/
 	ENGINE_API struct FVirtualTextureChunkStreamingManager& GetVirtualTextureStreamingManager() const;
+
+	/**
+	 * Gets a reference to the Nanite Coarse Mesh Streaming Manager
+	*/
+	ENGINE_API Nanite::FCoarseMeshStreamingManager* GetNaniteCoarseMeshStreamingManager() const;
 
 	/**
 	 * Adds a streaming manager to the array of managers to route function calls to.
@@ -820,9 +897,11 @@ protected:
 	/** The virtual texture streaming manager, should always exist */
 	FVirtualTextureChunkStreamingManager* VirtualTextureStreamingManager;
 
+	/** The nanite coarse mesh streaming manager, should always exist */
+	Nanite::FCoarseMeshStreamingManager* NaniteCoarseMeshStreamingManager;
+
 #if WITH_EDITOR
 	// Locks out any audio streaming manager call when we are re-initializing the audio streaming manager.
 	mutable FCriticalSection AudioStreamingManagerCriticalSection;
 #endif
 };
-

@@ -1,13 +1,19 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
-#include "UObject/Object.h"
-
 #include "ClothVertBoneData.h"
 #include "Containers/Array.h"
 #include "Containers/Map.h"
+#include "CoreTypes.h"
+#include "Math/UnrealMathSSE.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
 
 #include "ClothPhysicalMeshDataBase_Legacy.generated.h"
+
+struct FClothVertBoneData;
+struct FColor;
 
 /**
  * Deprecated, use FClothPhysicalMeshData instead.
@@ -16,35 +22,35 @@
  *
  * Created curing asset import or created from a skeletal mesh.
  */
-UCLASS()
-class CLOTHINGSYSTEMRUNTIMEINTERFACE_API UClothPhysicalMeshDataBase_Legacy : public UObject
+UCLASS(MinimalAPI)
+class UClothPhysicalMeshDataBase_Legacy : public UObject
 {
 	GENERATED_BODY()
 public:
-	UClothPhysicalMeshDataBase_Legacy();
-	virtual ~UClothPhysicalMeshDataBase_Legacy();
+	CLOTHINGSYSTEMRUNTIMEINTERFACE_API UClothPhysicalMeshDataBase_Legacy();
+	CLOTHINGSYSTEMRUNTIMEINTERFACE_API virtual ~UClothPhysicalMeshDataBase_Legacy();
 
 	/** Retrieve a registered vertex weight array by unique @param Id. */
-	TArray<float>* GetFloatArray(const uint32 Id) const;
+	CLOTHINGSYSTEMRUNTIMEINTERFACE_API TArray<float>* GetFloatArray(const uint32 Id) const;
 
 	/** Get ids for all registered weight arrays. */
-	TArray<uint32> GetFloatArrayIds() const;
+	CLOTHINGSYSTEMRUNTIMEINTERFACE_API TArray<uint32> GetFloatArrayIds() const;
 
 	/** Get all registered weight arrays. */
-	TArray<TArray<float>*> GetFloatArrays() const;
+	CLOTHINGSYSTEMRUNTIMEINTERFACE_API TArray<TArray<float>*> GetFloatArrays() const;
 
 protected:
 	/** Register an @param Array keyed by a unique @param Id. */
-	void RegisterFloatArray(const uint32 Id, TArray<float> *Array);
+	CLOTHINGSYSTEMRUNTIMEINTERFACE_API void RegisterFloatArray(const uint32 Id, TArray<float> *Array);
 
 public:
 	// Positions of each simulation vertex
 	UPROPERTY()
-	TArray<FVector> Vertices;
+	TArray<FVector3f> Vertices;
 
 	// Normal at each vertex
 	UPROPERTY()
-	TArray<FVector> Normals;
+	TArray<FVector3f> Normals;
 
 #if WITH_EDITORONLY_DATA
 	// Color at each vertex

@@ -96,5 +96,5 @@ private:
 	
 	/** The track's sections. */
 	UPROPERTY()
-	TArray<UMovieSceneSection*> Sections;
+	TArray<TObjectPtr<UMovieSceneSection>> Sections;
 };

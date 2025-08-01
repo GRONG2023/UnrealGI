@@ -3,6 +3,7 @@
 #include "Containers/UnrealString.h"
 #include "GeometryCollection/GeometryCollectionBoneNode.h"
 #include "GeometryCollection/GeometryCollectionSection.h"
+#include "GeometryCollection/ManagedArray.h"
 #include "Math/Color.h"
 #include "Math/IntVector.h"
 #include "Math/Quat.h"
@@ -15,14 +16,15 @@
 #include "Chaos/BVHParticles.h"
 #include "Chaos/ParticleHandle.h"
 #include "Chaos/ParticleHandleFwd.h"
+#include "Chaos/Convex.h"
 
-inline FArchive& operator<<(FArchive& Ar, TArray<FVector>*& ValueIn)
+inline FArchive& operator<<(FArchive& Ar, TArray<FVector3f>*& ValueIn)
 {
 	check(false);	//We don't serialize raw pointers to arrays. Use unique ptr
 	return Ar;
 }
 
-inline FArchive& operator<<(FArchive& Ar, TUniquePtr<TArray<FVector>>& ValueIn)
+inline FArchive& operator<<(FArchive& Ar, TUniquePtr<TArray<FVector3f>>& ValueIn)
 {
 	bool bExists = ValueIn.Get() != nullptr;
 	Ar << bExists;
@@ -30,7 +32,7 @@ inline FArchive& operator<<(FArchive& Ar, TUniquePtr<TArray<FVector>>& ValueIn)
 	{
 		if (Ar.IsLoading())
 		{
-			ValueIn = MakeUnique<TArray<FVector>>();
+			ValueIn = MakeUnique<TArray<FVector3f>>();
 		}
 		Ar << *ValueIn;
 	}
@@ -82,22 +84,6 @@ template<class T> inline EManagedArrayType ManagedArrayType();
 //     passed type.
 //
 inline FManagedArrayBase* NewManagedTypedArray(EManagedArrayType ArrayType)
-{
-	switch (ArrayType)
-	{
-#define MANAGED_ARRAY_TYPE(a,A)	case EManagedArrayType::F##A##Type:\
-		return new TManagedArray<a>();
-#include "ManagedArrayTypeValues.inl"
-#undef MANAGED_ARRAY_TYPE
-	}
-	check(false);
-	return nullptr;
-}
-
-// ---------------------------------------------------------
-//     Makes a copy from one array to another
-//
-inline FManagedArrayBase* CopyManagedTypedArray(EManagedArrayType ArrayType, FManagedArrayBase* Dest, FManagedArrayBase* Src)
 {
 	switch (ArrayType)
 	{

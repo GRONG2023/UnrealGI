@@ -36,10 +36,10 @@ void FWeakObjectPtr::operator=(const class UObject *Object)
 	}
 }
 
-bool FWeakObjectPtr::IsValid(bool bEvenIfPendingKill, bool bThreadsafeTest) const
+bool FWeakObjectPtr::IsValid(bool bEvenIfGarbage, bool bThreadsafeTest) const
 {
 	// This is the external function, so we just pass through to the internal inlined method.
-	return Internal_IsValid(bEvenIfPendingKill, bThreadsafeTest);
+	return Internal_IsValid(bEvenIfGarbage, bThreadsafeTest);
 }
 
 bool FWeakObjectPtr::IsValid() const
@@ -48,13 +48,20 @@ bool FWeakObjectPtr::IsValid() const
 	return Internal_IsValid(false, false);
 }
 
-bool FWeakObjectPtr::IsStale(bool bEvenIfPendingKill, bool bThreadsafeTest) const
+bool FWeakObjectPtr::IsStale(bool bIncludingGarbage, bool bThreadsafeTest) const
 {
+	using namespace UE::Core::Private;
+
 	if (ObjectSerialNumber == 0)
 	{
+#if UE_WEAKOBJECTPTR_ZEROINIT_FIX
+		checkSlow(ObjectIndex == InvalidWeakObjectIndex); // otherwise this is a corrupted weak pointer
+#else
 		checkSlow(ObjectIndex == 0 || ObjectIndex == -1); // otherwise this is a corrupted weak pointer
+#endif
 		return false;
 	}
+
 	if (ObjectIndex < 0)
 	{
 		return true;
@@ -72,18 +79,18 @@ bool FWeakObjectPtr::IsStale(bool bEvenIfPendingKill, bool bThreadsafeTest) cons
 	{
 		return false;
 	}
-	return GUObjectArray.IsStale(ObjectItem, bEvenIfPendingKill);
+	return GUObjectArray.IsStale(ObjectItem, bIncludingGarbage);
 }
 
-UObject* FWeakObjectPtr::Get(/*bool bEvenIfPendingKill = false*/) const
+UObject* FWeakObjectPtr::Get(/*bool bEvenIfGarbage = false*/) const
 {
 	// Using a literal here allows the optimizer to remove branches later down the chain.
 	return Internal_Get(false);
 }
 
-UObject* FWeakObjectPtr::Get(bool bEvenIfPendingKill) const
+UObject* FWeakObjectPtr::Get(bool bEvenIfGarbage) const
 {
-	return Internal_Get(bEvenIfPendingKill);
+	return Internal_Get(bEvenIfGarbage);
 }
 
 UObject* FWeakObjectPtr::GetEvenIfUnreachable() const
@@ -91,7 +98,7 @@ UObject* FWeakObjectPtr::GetEvenIfUnreachable() const
 	UObject* Result = nullptr;
 	if (Internal_IsValid(true, true))
 	{
-		FUObjectItem* ObjectItem = GUObjectArray.IndexToObject(GetObjectIndex(), true);
+		FUObjectItem* ObjectItem = GUObjectArray.IndexToObject(GetObjectIndex_Private(), true);
 		Result = static_cast<UObject*>(ObjectItem->Object);
 	}
 	return Result;

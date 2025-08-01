@@ -1,14 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "DSP/LinkwitzRileyBandSplitter.h"
-#include "DSP/BufferVectorOperations.h"
+#include "DSP/FloatArrayMath.h"
 
 #ifndef TWO_PI
 #define TWO_PI (6.28318530718)
 #endif
 namespace Audio
 {
-	void FLinkwitzRileyBandSplitter::Init(const int32 InChannels, const float InSampleRate, const EFilterOrder InFilterOrder, const TArray<float>& InCrossovers)
+	void FLinkwitzRileyBandSplitter::Init(const int32 InChannels, const float InSampleRate, const EFilterOrder InFilterOrder, const bool bInPhaseCompensate, const TArray<float>& InCrossovers)
 	{
 		NumBands = InCrossovers.Num() + 1;
 		NumChannels = InChannels;
@@ -42,7 +42,8 @@ namespace Audio
 
 		for (int32 BandId = 1; BandId < NumBands; BandId++)
 		{
-			BandFilters[BandId].Filters.AddDefaulted(NumBands - BandId);
+			const int32 NumFilters = NumBands - BandId;
+			BandFilters[BandId].Filters.AddDefaulted( bInPhaseCompensate ? NumFilters : FMath::Clamp(NumFilters, 1, 2) );
 		}
 
 		// band 0 special case
@@ -148,14 +149,11 @@ namespace Audio
 			return;
 		}
 
-		FStackSampleBuffer SharedStackBuffer;
-		SharedStackBuffer.SetNumZeroed(NumSamples);
+		SharedAlignedBuffer.SetNumZeroed(NumSamples, EAllowShrinking::No);
+		BandAlignedBuffer.SetNumUninitialized(NumSamples, EAllowShrinking::No);
 
-		FStackSampleBuffer BandStackBuffer;
-		BandStackBuffer.SetNumUninitialized(NumSamples);
-
-		float* const SharedBufferPtr = SharedStackBuffer.GetData();
-		float* const BandBufferPtr = BandStackBuffer.GetData();
+		float* const SharedBufferPtr = SharedAlignedBuffer.GetData();
+		float* const BandBufferPtr = BandAlignedBuffer.GetData();
 
 		CopyToBuffer(SharedBufferPtr, InBuffer, NumSamples);
 
@@ -180,7 +178,8 @@ namespace Audio
 			constexpr int32 IsOddBitMask = 0x00000001;
 			if ((static_cast<int32>(FilterOrder) & IsOddBitMask) && (BandId & IsOddBitMask))
 			{
-				MultiplyBufferByConstantInPlace(BandBufferPtr, NumSamples, -1.f);
+				TArrayView<float> BandBufferView(BandBufferPtr, NumSamples);
+				ArrayMultiplyByConstantInPlace(BandBufferView, -1.f);
 			}
 
 			CopyToBuffer(OutBuffer[BandId], BandBufferPtr, NumSamples);
@@ -247,17 +246,27 @@ namespace Audio
 
 	float FLinkwitzRileyBandSplitter::GetQ(EFilterOrder InFilterOrder)
 	{
-		switch (FilterOrder)
+		/*
+		* a two-pole filter naturally crosses its corner frequency at -3db with a Q of 1.
+		* with a Q of -3db, that makes it -6db, which is our target for LR crossover filters
+		* 
+		* with stacked filters, that -3db point adds per filter, but the goal is still -6db,
+		* so four-pole filters automatically reach the correct level at the crossover
+		* 
+		* passed that, the Q needs to raise the crossover point back to -6, but now it must be split over several stacked filters, so:
+		* 
+		* Q(db) = (3db * NumFilters - 6db) / NumFilters
+		*/
+
+		const int32 NumFilters = static_cast<int32>(InFilterOrder);
+
+		if (ensure(NumFilters > 0) == false)
 		{
-			case EFilterOrder::TwoPole:
-				return 0.7071f; //-3db
-			case EFilterOrder::FourPole:
-				return 1.f;
-			default:
-				ensure(false); //danger here
-				break;
+			return 1.f;
 		}
 
-		return 1.f;
+		const float Qdb = (3.f * NumFilters - 6.f) / NumFilters;
+
+		return Audio::ConvertToLinear(Qdb);
 	}
 }

@@ -1,25 +1,44 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ComponentMaterialCategory.h"
-#include "UObject/UnrealType.h"
-#include "Components/ActorComponent.h"
-#include "Misc/App.h"
-#include "UObject/UObjectHash.h"
-#include "Components/PrimitiveComponent.h"
-#include "Components/MeshComponent.h"
-#include "AI/NavigationSystemBase.h"
-#include "Editor/UnrealEdEngine.h"
-#include "Components/DecalComponent.h"
-#include "Components/TextRenderComponent.h"
-#include "UnrealEdGlobals.h"
-#include "Editor.h"
-#include "DetailLayoutBuilder.h"
-#include "DetailCategoryBuilder.h"
-#include "MaterialList.h"
-#include "IPropertyUtilities.h"
 
-#include "LandscapeProxy.h"
+#include "AI/NavigationSystemBase.h"
+#include "AssetRegistry/AssetData.h"
+#include "Components/ActorComponent.h"
+#include "Components/DecalComponent.h"
+#include "Components/MeshComponent.h"
+#include "Components/PrimitiveComponent.h"
+#include "Components/SceneComponent.h"
+#include "Components/TextRenderComponent.h"
+#include "Delegates/Delegate.h"
+#include "DetailCategoryBuilder.h"
+#include "DetailLayoutBuilder.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Editor/UnrealEdEngine.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMath.h"
+#include "HAL/PlatformApplicationMisc.h"
+#include "IPropertyUtilities.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "JsonObjectConverter.h"
 #include "LandscapeComponent.h"
+#include "LandscapeProxy.h"
+#include "MaterialList.h"
+#include "Misc/App.h"
+#include "Misc/NotifyHook.h"
+#include "Templates/Casts.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectHash.h"
+#include "UObject/UnrealType.h"
+#include "UnrealEdGlobals.h"
+#include "PropertyCustomizationHelpers.h"
+
+class AActor;
+class UWorld;
 
 #define LOCTEXT_NAMESPACE "SMaterialList"
 
@@ -30,7 +49,7 @@
 class FMaterialIterator
 {
 public:
-	FMaterialIterator( TArray< TWeakObjectPtr<USceneComponent> >& InSelectedComponents )
+	FMaterialIterator( const TArray< TWeakObjectPtr<USceneComponent> >& InSelectedComponents )
 		: SelectedComponents( InSelectedComponents )
 		, CurMaterial( NULL )
 		, CurComponent( NULL )
@@ -63,10 +82,12 @@ public:
 				// Primitive components and some actor components have materials
 				UPrimitiveComponent* PrimitiveComp = Cast<UPrimitiveComponent>( CurComponent );
 				UDecalComponent* DecalComponent = (PrimitiveComp ? NULL : Cast<UDecalComponent>( CurComponent ));
+				TArray<FName> MaterialSlotNames;
 
 				if( PrimitiveComp )
 				{
 					NumMaterials = PrimitiveComp->GetNumMaterials();
+					MaterialSlotNames = PrimitiveComp->GetMaterialSlotNames();
 				}
 				else if( DecalComponent )
 				{
@@ -81,11 +102,20 @@ public:
 
 					if( PrimitiveComp )
 					{
-						Material = PrimitiveComp->GetMaterial(CurMaterialIndex);
+						Material = PrimitiveComp->GetEditorMaterial(CurMaterialIndex);
+						if (MaterialSlotNames.IsValidIndex(CurMaterialIndex))
+						{
+							CurMaterialSlotName = MaterialSlotNames[CurMaterialIndex];
+						}
+						else
+						{
+							CurMaterialSlotName = FName();
+						}
 					}
 					else if( DecalComponent )
 					{
 						Material = DecalComponent->GetMaterial(CurMaterialIndex);
+						CurMaterialSlotName = FName();
 					}
 
 					CurMaterial = Material;
@@ -99,6 +129,7 @@ public:
 				}
 				// Out of materials on this component, reset for the next component
 				CurMaterialIndex = 0;
+				CurMaterialSlotName = FName();
 			}
 			// Advance to the next compoment
 			++CurComponentIndex;
@@ -111,6 +142,7 @@ public:
 		CurComponent = NULL;
 		CurMaterial = NULL;
 		CurMaterialIndex = INDEX_NONE;
+		CurMaterialSlotName = FName();
 	}
 
 	/**
@@ -132,13 +164,18 @@ public:
 	int32 GetMaterialIndex() const { return CurMaterialIndex; }
 
 	/**
+	 * @return The material slot name of the material in the current component, if applicable.
+	 */
+	FName GetMaterialSlotName() const { return CurMaterialSlotName; }
+
+	/**
 	 * @return The current component using the current material
 	 */
 	UActorComponent* GetComponent() const { return CurComponent; }
 
 private:
 	/** Reference to the selected components */
-	TArray< TWeakObjectPtr<USceneComponent> >& SelectedComponents;
+	const TArray< TWeakObjectPtr<USceneComponent> >& SelectedComponents;
 	/** The current material the iterator is stopped on */
 	UMaterialInterface* CurMaterial;
 	/** The current component using the current material */
@@ -147,6 +184,8 @@ private:
 	int32 CurComponentIndex;
 	/** The index of the material we are stopped on */
 	int32 CurMaterialIndex;
+	/** The slot name of the material we are stopped on, if applicable */
+	FName CurMaterialSlotName;
 	/** Whether or not we've reached the end of the components */
 	uint32 bReachedEnd:1;
 };
@@ -165,6 +204,10 @@ void FComponentMaterialCategory::Create( IDetailLayoutBuilder& DetailBuilder )
 	FMaterialListDelegates MaterialListDelegates;
 	MaterialListDelegates.OnGetMaterials.BindSP( this, &FComponentMaterialCategory::OnGetMaterialsForView );
 	MaterialListDelegates.OnMaterialChanged.BindSP( this, &FComponentMaterialCategory::OnMaterialChanged );
+	MaterialListDelegates.OnCanCopyMaterialItem.BindSP( this, &FComponentMaterialCategory::OnCanCopyMaterialItem );
+	MaterialListDelegates.OnCopyMaterialItem.BindSP( this, &FComponentMaterialCategory::OnCopyMaterialItem );
+	MaterialListDelegates.OnPasteMaterialItem.BindSP(this, &FComponentMaterialCategory::OnPasteMaterialItem);
+	MaterialListDelegates.OnGenerateCustomMaterialWidgets.BindSP(this, &FComponentMaterialCategory::OnGenerateWidgetsForMaterial);
 	
 	//Pass an empty material list owner (owner can be use by the asset picker filter. In this case we do not need it)
 	TArray<FAssetData> MaterialListOwner;
@@ -184,13 +227,26 @@ void FComponentMaterialCategory::Create( IDetailLayoutBuilder& DetailBuilder )
 		}
 	}
 
-
 	// Make a category for the materials.
 	MaterialCategory = &DetailBuilder.EditCategory("Materials", FText::GetEmpty(), ECategoryPriority::TypeSpecific );
 
-	MaterialCategory->AddCustomBuilder( MaterialList );
-	MaterialCategory->SetCategoryVisibility( bAnyMaterialsToDisplay );
+	if (bAnyMaterialsToDisplay)
+	{
+		MaterialCategory->AddCustomBuilder( MaterialList );
+		MaterialCategory->SetCategoryVisibility( bAnyMaterialsToDisplay );
+		return;
+	}
+
+	// Check again - if there are any properties in the category, we don't want to hide it
+	TArray<TSharedRef<IPropertyHandle>> DefaultMaterialProperties;
+	MaterialCategory->GetDefaultProperties(DefaultMaterialProperties);
 	
+	if (!DefaultMaterialProperties.IsEmpty())
+	{
+		bAnyMaterialsToDisplay = true;
+	}
+	
+	MaterialCategory->SetCategoryVisibility( bAnyMaterialsToDisplay );
 }
 
 void FComponentMaterialCategory::OnGetMaterialsForView( IMaterialListBuilder& MaterialList )
@@ -220,10 +276,25 @@ void FComponentMaterialCategory::OnGetMaterialsForView( IMaterialListBuilder& Ma
 			// Add the material if we allow null materials to be added or we have a valid material
 			if( bAllowNullEntries || Material )
 			{
-				MaterialList.AddMaterial( MaterialIndex, Material, bCanBeReplaced );
+				MaterialList.AddMaterial( MaterialIndex, Material, bCanBeReplaced, CurrentComponent );
 				bAnyMaterialsToDisplay = true;
 			}
 		}
+	}
+
+	if (bAnyMaterialsToDisplay)
+	{
+		MaterialCategory->SetCategoryVisibility(true);
+		return;
+	}
+
+	// Check again - if there are any properties in the category, we don't want to hide it
+	TArray<TSharedRef<IPropertyHandle>> DefaultMaterialProperties;
+	MaterialCategory->GetDefaultProperties(DefaultMaterialProperties);
+
+	if (!DefaultMaterialProperties.IsEmpty())
+	{
+		bAnyMaterialsToDisplay = true;
 	}
 
 	MaterialCategory->SetCategoryVisibility(bAnyMaterialsToDisplay);
@@ -317,7 +388,13 @@ void FComponentMaterialCategory::OnMaterialChanged( UMaterialInterface* NewMater
 					NavUpdateLock = MakeShareable( new FNavigationLockContext(World, ENavigationLockReason::MaterialUpdate) );
 				}
 
-				EditChangeObject->PreEditChange( MaterialProperty );
+				{
+					FEditPropertyChain EditPropertyChain;
+					EditPropertyChain.AddHead(MaterialProperty);
+					EditPropertyChain.SetActivePropertyNode(MaterialProperty);
+					// Use a property chain so that FCoreUObjectDelegates::OnPreObjectPropertyChanged is emitted
+					EditChangeObject->PreEditChange(EditPropertyChain);
+				}
 
 				if( NotifyHook && MaterialProperty )
 				{
@@ -402,6 +479,133 @@ void FComponentMaterialCategory::OnMaterialChanged( UMaterialInterface* NewMater
 		// Redraw viewports to reflect the material changes 
 		GUnrealEd->RedrawLevelEditingViewports();
 	}
+}
+
+void FComponentMaterialCategory::OnCopyMaterialItem(int32 CurrentSlot)
+{
+	// For now we don't support multi-select
+	// TODO: Pass through more data to these delegates that allows us to know which
+	// material should be copied, or allow reaching into the generated material list from here
+	if (SelectedComponents.Num() != 1)
+	{
+		return;
+	}
+
+	for (FMaterialIterator It(SelectedComponents); It; ++It)
+	{
+		if (It.GetMaterialIndex() == CurrentSlot)
+		{
+			TSharedRef<FJsonObject> RootJsonObject = MakeShareable(new FJsonObject());
+
+			const FStaticMaterial StaticMaterial(It.GetMaterial());
+			FJsonObjectConverter::UStructToJsonObject(FStaticMaterial::StaticStruct(), &StaticMaterial, RootJsonObject, 0, 0);
+
+			typedef TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>> FStringWriter;
+			typedef TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>> FStringWriterFactory;
+
+			FString CopyStr;
+			TSharedRef<FStringWriter> Writer = FStringWriterFactory::Create(&CopyStr);
+			FJsonSerializer::Serialize(RootJsonObject, Writer);
+
+			if (!CopyStr.IsEmpty())
+			{
+				FPlatformApplicationMisc::ClipboardCopy(*CopyStr);
+			}
+
+			break;
+		}
+	}
+}
+
+bool FComponentMaterialCategory::OnCanCopyMaterialItem(int32 CurrentSlot) const
+{
+	// For now we don't support multi-select
+	if (SelectedComponents.Num() != 1)
+	{
+		return false;
+	}
+
+	for (FMaterialIterator It(SelectedComponents); It; ++It)
+	{
+		const UActorComponent* CurrentComponent = It.GetComponent();
+
+		// We need to handle the same various component types as OnMaterialChanged,
+		// which are all primitive components except decals, which only have a single material slot anyway
+		if (const UPrimitiveComponent* PrimitiveComponent = Cast<UPrimitiveComponent>(CurrentComponent))
+		{
+			if (CurrentSlot >= PrimitiveComponent->GetNumMaterials())
+			{
+				return false;
+			}
+		}
+		else if (CurrentComponent->IsA<UDecalComponent>())
+		{
+			return CurrentSlot == 0;
+		}
+	}
+
+	return true;
+}
+
+void FComponentMaterialCategory::OnPasteMaterialItem(int32 CurrentSlot)
+{
+	// For now we don't support multi-select
+	if (SelectedComponents.Num() != 1)
+	{
+		return;
+	}
+
+	FString PastedText;
+	FPlatformApplicationMisc::ClipboardPaste(PastedText);
+
+	TSharedPtr<FJsonObject> RootJsonObject;
+	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(PastedText);
+	FJsonSerializer::Deserialize(Reader, RootJsonObject);
+
+	if (RootJsonObject.IsValid())
+	{
+		FStaticMaterial TmpStaticMaterial;
+		FJsonObjectConverter::JsonObjectToUStruct(RootJsonObject.ToSharedRef(), FStaticMaterial::StaticStruct(), &TmpStaticMaterial, 0, 0);
+		UMaterialInterface* NewMaterial = TmpStaticMaterial.MaterialInterface;
+
+		// Try to find the previous material used for this slot so we can piggy-back on the existing material change method
+		for (FMaterialIterator It(SelectedComponents); It; ++It)
+		{
+			if (It.GetMaterialIndex() == CurrentSlot)
+			{
+				UMaterialInterface* PreviousMaterial = It.GetMaterial();
+				OnMaterialChanged(NewMaterial, PreviousMaterial, CurrentSlot, /* bReplaceAll */ false);
+				break;
+			}
+		}
+	}
+}
+
+TSharedRef<SWidget> FComponentMaterialCategory::OnGenerateWidgetsForMaterial(UMaterialInterface* Material, int32 SlotIndex)
+{
+	return
+		SNew(SMaterialSlotWidget, SlotIndex, true)
+		.MaterialName(this, &FComponentMaterialCategory::GetMaterialNameText, SlotIndex)
+		.IsMaterialSlotNameReadOnly(true)
+		.DeleteMaterialSlotVisibility(EVisibility::Collapsed);
+}
+
+FText FComponentMaterialCategory::GetMaterialNameText(int32 MaterialIndex) const
+{
+	// For now we don't support multi-select
+	if (SelectedComponents.Num() != 1)
+	{
+		return FText::FromName(NAME_None);
+	}
+	for (FMaterialIterator It(SelectedComponents); It; ++It)
+	{
+		if (It.GetMaterialIndex() == MaterialIndex)
+		{
+			return FText::FromName(It.GetMaterialSlotName());
+		}
+	}
+
+	return FText::FromName(NAME_None);
 }
 
 #undef LOCTEXT_NAMESPACE

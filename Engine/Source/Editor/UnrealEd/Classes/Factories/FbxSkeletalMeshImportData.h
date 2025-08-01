@@ -24,7 +24,7 @@ namespace SkeletalMeshImportData
 }
 
 UENUM(BlueprintType)
-enum EFBXImportContentType
+enum EFBXImportContentType : int
 {
 	FBXICT_All UMETA(DisplayName = "Geometry and Skinning Weights.", ToolTip = "Import all fbx content: geometry, skinning and weights."),
 	FBXICT_Geometry UMETA(DisplayName = "Geometry Only", ToolTip = "Import the skeletal mesh geometry only (will create a default skeleton, or map the geometry to the existing one). Morph and LOD can be imported with it."),
@@ -76,6 +76,10 @@ public:
 	UPROPERTY(EditAnywhere, AdvancedDisplay, config, Category=Mesh, meta=(ImportType="SkeletalMesh|GeoOnly"))
 	uint32 bPreserveSmoothingGroups:1;
 
+	/** If checked, sections with matching materials are kept separate and will not get combined. */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, config, Category=Mesh, meta=(ImportType="SkeletalMesh|GeoOnly"))
+	uint32 bKeepSectionsSeparate:1;
+
 	/** If checked, meshes nested in bone hierarchies will be imported instead of being converted to bones. */
 	UPROPERTY(EditAnywhere, AdvancedDisplay, config, Category=Mesh, meta=(ImportType="SkeletalMesh"))
 	uint32 bImportMeshesInBoneHierarchy:1;
@@ -83,6 +87,10 @@ public:
 	/** True to import morph target meshes from the FBX file */
 	UPROPERTY(EditAnywhere, AdvancedDisplay, config, Category=Mesh, meta=(ImportType="SkeletalMesh|GeoOnly", ToolTip="If enabled, creates Unreal morph objects for the imported meshes"))
 	uint32 bImportMorphTargets:1;
+	
+	/** True to import per-vertex attributes from the FBX file */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, config, Category=Mesh, meta=(ImportType="SkeletalMesh|GeoOnly", ToolTip="If enabled, creates a named vertex attribute for each single-channel weight map of the imported mesh."))
+	uint32 bImportVertexAttributes:1;
 
 	/** Threshold to compare vertex position equality. */
 	UPROPERTY(EditAnywhere, config, Category="Mesh", meta = (ImportType = "SkeletalMesh|GeoOnly", SubCategory = "Thresholds", NoSpinbox = "true", ClampMin = "0.0"))
@@ -108,5 +116,7 @@ public:
 	bool GetImportContentFilename(FString& OutFilename, FString& OutFilenameLabel) const;
 
 	/** This function add the last import content type to the asset registry which is use by the thumbnail overlay of the skeletal mesh */
-	virtual void AppendAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags);
+	virtual void AppendAssetRegistryTags(FAssetRegistryTagsContext Context) override;
+	UE_DEPRECATED(5.4, "Implement the version that takes FAssetRegistryTagsContext instead.")
+	virtual void AppendAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) override;
 };

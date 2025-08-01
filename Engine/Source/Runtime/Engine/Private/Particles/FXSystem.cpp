@@ -5,27 +5,48 @@
 =============================================================================*/
 
 #include "FXSystem.h"
-#include "RenderingThread.h"
-#include "VectorField.h"
+#include "EngineModule.h"
 #include "Particles/FXSystemPrivate.h"
 #include "Particles/FXSystemSet.h"
 #include "GPUSort.h"
 #include "Particles/ParticleCurveTexture.h"
+#include "Particles/ParticleSortingGPU.h"
 #include "VectorField/VectorField.h"
 #include "Components/VectorFieldComponent.h"
-#include "SceneUtils.h"
-#include "Renderer/Private/SceneRendering.h" // needed for STATGROUP_CommandListMarkers
-#include "GPUSortManager.h"
-
+#include "SceneInterface.h"
+#include "RenderCore.h" // needed for STATGROUP_CommandListMarkers
+#include "DataDrivenShaderPlatformInfo.h"
+#include "FXRenderingUtils.h"
+#include "Containers/StridedView.h"
+#include "ProfilingDebugging/RealtimeGPUProfiler.h"
+#include "RenderGraphEvent.h"
+#include "RenderGraphUtils.h"
 
 TMap<FName, FCreateCustomFXSystemDelegate> FFXSystemInterface::CreateCustomFXDelegates;
+
+bool IsParticleCollisionModeSupported(EShaderPlatform InPlatform, EParticleCollisionShaderMode InCollisionShaderMode)
+{
+	switch (InCollisionShaderMode)
+	{
+	case PCM_None:
+		return true;
+	case PCM_DepthBuffer:
+		return IsFeatureLevelSupported(InPlatform, ERHIFeatureLevel::SM5);
+	case PCM_DistanceField:
+		return FDataDrivenShaderPlatformInfo::GetSupportsDistanceFields(InPlatform);
+	}
+	check(0);
+	return IsFeatureLevelSupported(InPlatform, ERHIFeatureLevel::SM5);
+}
 
 /*-----------------------------------------------------------------------------
 	External FX system interface.
 -----------------------------------------------------------------------------*/
 
-FFXSystemInterface* FFXSystemInterface::Create(ERHIFeatureLevel::Type InFeatureLevel, EShaderPlatform InShaderPlatform)
+FFXSystemInterface* FFXSystemInterface::Create(ERHIFeatureLevel::Type InFeatureLevel, FSceneInterface* Scene)
 {
+	check(Scene);
+	EShaderPlatform InShaderPlatform = Scene->GetShaderPlatform();
 	// The FGPUSortManager is currently only being used by FFXSystemInterface implementations.
 	// Because of this, the lifetime management of the GPUSortManager only consists of a ref counter incremented initially 
 	// in the gamethread (in this function) and decremented on the renderthread (when the system interfaces are deleted).
@@ -34,6 +55,10 @@ FFXSystemInterface* FFXSystemInterface::Create(ERHIFeatureLevel::Type InFeatureL
 	if (CreateCustomFXDelegates.Num())
 	{
 		FFXSystemSet* Set = new FFXSystemSet(GPUSortManager);
+		Scene->SetFXSystem(Set);
+		Set->SetSceneInterface(Scene);
+		Set->SetScene((FScene*)Scene);
+
 		Set->FXSystems.Add(new FFXSystem(InFeatureLevel, InShaderPlatform, GPUSortManager));
 
 		for (TMap<FName, FCreateCustomFXSystemDelegate>::TConstIterator Ite(CreateCustomFXDelegates); Ite; ++Ite)
@@ -41,6 +66,8 @@ FFXSystemInterface* FFXSystemInterface::Create(ERHIFeatureLevel::Type InFeatureL
 			FFXSystemInterface* CustomFX = Ite.Value().Execute(InFeatureLevel, InShaderPlatform, GPUSortManager);
 			if (CustomFX)
 			{
+				CustomFX->SetSceneInterface(Scene);
+				CustomFX->SetScene((FScene*)Scene);
 				Set->FXSystems.Add(CustomFX);
 			}
 		}
@@ -48,8 +75,13 @@ FFXSystemInterface* FFXSystemInterface::Create(ERHIFeatureLevel::Type InFeatureL
 	}
 	else
 	{
-		return new FFXSystem(InFeatureLevel, InShaderPlatform, GPUSortManager);
+		FFXSystemInterface* Ret = new FFXSystem(InFeatureLevel, InShaderPlatform, GPUSortManager);
+		Scene->SetFXSystem(Ret);
+		Ret->SetSceneInterface(Scene);
+		Ret->SetScene((FScene*)Scene);
+		return Ret;
 	}
+
 }
 void FFXSystemInterface::QueueDestroyGPUSimulation(FFXSystemInterface* FXSystem)
 {
@@ -117,7 +149,7 @@ namespace FXConsoleVariables
 		TEXT("FX.AllowGPUSorting"),
 		bAllowGPUSorting,
 		TEXT("Allow particles to be sorted on the GPU."),
-		ECVF_ReadOnly
+		ECVF_ReadOnly | ECVF_Preview
 		);
 	FAutoConsoleVariableRef CVarFreezeGPUSimulation(
 		TEXT("FX.FreezeGPUSimulation"),
@@ -192,12 +224,17 @@ namespace FXConsoleVariables
 FFXSystem::FFXSystem(ERHIFeatureLevel::Type InFeatureLevel, EShaderPlatform InShaderPlatform, FGPUSortManager* InGPUSortManager)
 	: ParticleSimulationResources(NULL)
 	, FeatureLevel(InFeatureLevel)
-	, ShaderPlatform(InShaderPlatform)
-	, GPUSortManager(InGPUSortManager)
+	, GPUSortManager(nullptr)
 #if WITH_EDITOR
 	, bSuspended(false)
 #endif // #if WITH_EDITOR
 {
+	// FXSystem GPU sorting is disabled for mobile, see FParticleSortKeyGenCS
+	if (FeatureLevel >= ERHIFeatureLevel::SM5)
+	{
+		GPUSortManager = InGPUSortManager;
+	}
+	
 	InitGPUSimulation();
 
 	// Register the callback in the GPUSortManager. 
@@ -236,7 +273,7 @@ FFXSystemInterface* FFXSystem::GetInterface(const FName& InName)
 	return InName == Name ? this : nullptr;
 }
 
-void FFXSystem::Tick(float DeltaSeconds)
+void FFXSystem::Tick(UWorld* World, float DeltaSeconds)
 {
 	if (RHISupportsGPUParticles())
 	{
@@ -386,15 +423,19 @@ void FFXSystem::DrawDebug( FCanvas* Canvas )
 	}
 }
 
-void FFXSystem::PreInitViews(FRHICommandListImmediate& RHICmdList, bool bAllowGPUParticleUpdate)
+DECLARE_GPU_DRAWCALL_STAT(FXSystemPreInitViews);
+
+void FFXSystem::PreInitViews(FRDGBuilder& GraphBuilder, bool bAllowGPUParticleUpdate, const TArrayView<const FSceneViewFamily*>& ViewFamilies, const FSceneViewFamily* CurrentFamily)
 {
 	if (RHISupportsGPUParticles())
 	{
-		AdvanceGPUParticleFrame(bAllowGPUParticleUpdate);
+		// Note: This can not be put into a GraphBuilder pass directly, the internals need to be refactored in order to that.
+		// This is because the data modified in here will be used in GDME pass which must have the most up to date information
+		AdvanceGPUParticleFrame(GraphBuilder.RHICmdList, bAllowGPUParticleUpdate);
 	}
 }
 
-void FFXSystem::PostInitViews(FRHICommandListImmediate& RHICmdList, FRHIUniformBuffer* ViewUniformBuffer, bool bAllowGPUParticleUpdate)
+void FFXSystem::PostInitViews(FRDGBuilder& GraphBuilder, TConstStridedView<FSceneView> Views, bool bAllowGPUParticleUpdate)
 {
 	// nothing to do here
 }
@@ -429,6 +470,16 @@ bool FFXSystem::RequiresEarlyViewUniformBuffer() const
 	return false;
 }
 
+bool FFXSystem::RequiresRayTracingScene() const
+{
+	if (RHISupportsGPUParticles())
+	{
+		return RequiresRayTracingSceneInternal();
+	}
+
+	return false;
+}
+
 DECLARE_CYCLE_STAT(TEXT("FXPreRender_Prepare"), STAT_CLM_FXPreRender_Prepare, STATGROUP_CommandListMarkers);
 DECLARE_CYCLE_STAT(TEXT("FXPreRender_Simulate"), STAT_CLM_FXPreRender_Simulate, STATGROUP_CommandListMarkers);
 DECLARE_CYCLE_STAT(TEXT("FXPreRender_Finalize"), STAT_CLM_FXPreRender_Finalize, STATGROUP_CommandListMarkers);
@@ -436,53 +487,76 @@ DECLARE_CYCLE_STAT(TEXT("FXPreRender_PrepareCDF"), STAT_CLM_FXPreRender_PrepareC
 DECLARE_CYCLE_STAT(TEXT("FXPreRender_SimulateCDF"), STAT_CLM_FXPreRender_SimulateCDF, STATGROUP_CommandListMarkers);
 DECLARE_CYCLE_STAT(TEXT("FXPreRender_FinalizeCDF"), STAT_CLM_FXPreRender_FinalizeCDF, STATGROUP_CommandListMarkers);
 
+DECLARE_GPU_DRAWCALL_STAT(FXSystemPreRender);
+DECLARE_GPU_DRAWCALL_STAT(FXSystemPostRenderOpaque);
 
-void FFXSystem::PreRender(FRHICommandListImmediate& RHICmdList, const FGlobalDistanceFieldParameterData* GlobalDistanceFieldParameterData, bool bAllowGPUParticleSceneUpdate)
+void FFXSystem::PreRender(FRDGBuilder& GraphBuilder, TConstStridedView<FSceneView> Views, FSceneUniformBuffer &SceneUniformBuffer, bool bAllowGPUParticleSceneUpdate)
 {
+	bAllowGPUParticleSceneUpdate = bAllowGPUParticleSceneUpdate && Views.Num() > 0 && Views[0].AllowGPUParticleUpdate();
+
 	if (RHISupportsGPUParticles() && bAllowGPUParticleSceneUpdate)
 	{
-		SCOPED_DRAW_EVENT(RHICmdList, GPUParticles_PreRender);
-		UpdateMultiGPUResources(RHICmdList);
+		RDG_GPU_STAT_SCOPE(GraphBuilder, FXSystemPreRender);
+		RDG_CSV_STAT_EXCLUSIVE_SCOPE(GraphBuilder, FXSystem);
 
-		RHICmdList.SetCurrentStat(GET_STATID(STAT_CLM_FXPreRender_Prepare));
-		PrepareGPUSimulation(RHICmdList);
+		TUniformBufferRef<FViewUniformShaderParameters> ViewUniformBuffer = Views[0].ViewUniformBuffer;
+		const FGlobalDistanceFieldParameterData* GlobalDistanceFieldParameterData = GetRendererModule().GetGlobalDistanceFieldParameterData(Views[0]);
 
-		RHICmdList.SetCurrentStat(GET_STATID(STAT_CLM_FXPreRender_Simulate));
-		SimulateGPUParticles(RHICmdList, EParticleSimulatePhase::Main, nullptr, nullptr, nullptr, nullptr);
+		AddPass(
+			GraphBuilder,
+			RDG_EVENT_NAME("FFXSystem::PreRender"),
+			[this, ViewUniformBuffer, GlobalDistanceFieldParameterData](FRHICommandListImmediate& RHICmdList)
+			{
+				//SCOPE_CYCLE_COUNTER(STAT_FDeferredShadingSceneRenderer_FXSystem_PostRenderOpaque);
 
-		RHICmdList.SetCurrentStat(GET_STATID(STAT_CLM_FXPreRender_Finalize));
-		FinalizeGPUSimulation(RHICmdList);
+				SCOPED_DRAW_EVENT(RHICmdList, GPUParticles_PreRender);
+				UpdateMultiGPUResources(RHICmdList);
 
-		if (IsParticleCollisionModeSupported(GetShaderPlatform(), PCM_DistanceField))
-		{
-			RHICmdList.SetCurrentStat(GET_STATID(STAT_CLM_FXPreRender_PrepareCDF));
-			PrepareGPUSimulation(RHICmdList);
+				RHICmdList.SetCurrentStat(GET_STATID(STAT_CLM_FXPreRender_Prepare));
+				PrepareGPUSimulation(RHICmdList);
 
-			RHICmdList.SetCurrentStat(GET_STATID(STAT_CLM_FXPreRender_SimulateCDF));
-			SimulateGPUParticles(RHICmdList, EParticleSimulatePhase::CollisionDistanceField, nullptr, GlobalDistanceFieldParameterData, nullptr, nullptr);
-			//particles rendered during basepass may need to read pos/velocity buffers; must finalize unless we know for sure that nothing in base pass will read it.
-			RHICmdList.SetCurrentStat(GET_STATID(STAT_CLM_FXPreRender_FinalizeCDF));
-			FinalizeGPUSimulation(RHICmdList);
-		}
+				RHICmdList.SetCurrentStat(GET_STATID(STAT_CLM_FXPreRender_Simulate));
+				SimulateGPUParticles(RHICmdList, EParticleSimulatePhase::Main, {}, nullptr);
+
+				RHICmdList.SetCurrentStat(GET_STATID(STAT_CLM_FXPreRender_Finalize));
+				FinalizeGPUSimulation(RHICmdList);
+
+				if (IsParticleCollisionModeSupported(GetShaderPlatform(), PCM_DistanceField))
+				{
+					RHICmdList.SetCurrentStat(GET_STATID(STAT_CLM_FXPreRender_PrepareCDF));
+					PrepareGPUSimulation(RHICmdList);
+
+					RHICmdList.SetCurrentStat(GET_STATID(STAT_CLM_FXPreRender_SimulateCDF));
+					SimulateGPUParticles(RHICmdList, EParticleSimulatePhase::CollisionDistanceField, ViewUniformBuffer, GlobalDistanceFieldParameterData);
+					//particles rendered during basepass may need to read pos/velocity buffers; must finalize unless we know for sure that nothing in base pass will read it.
+					RHICmdList.SetCurrentStat(GET_STATID(STAT_CLM_FXPreRender_FinalizeCDF));
+					FinalizeGPUSimulation(RHICmdList);
+				}
+			}
+		);
     }
 }
 
-void FFXSystem::PostRenderOpaque(
-	FRHICommandListImmediate& RHICmdList, 
-	FRHIUniformBuffer* ViewUniformBuffer,
-	const FShaderParametersMetadata* SceneTexturesUniformBufferStruct,
-	FRHIUniformBuffer* SceneTexturesUniformBuffer,
-	bool bAllowGPUParticleUpdate)
+void FFXSystem::PostRenderOpaque(FRDGBuilder& GraphBuilder, TConstStridedView<FSceneView> Views, FSceneUniformBuffer &SceneUniformBuffer, bool bAllowGPUParticleUpdate)
 {
-	if (RHISupportsGPUParticles() && IsParticleCollisionModeSupported(GetShaderPlatform(), PCM_DepthBuffer))
+	bAllowGPUParticleUpdate = bAllowGPUParticleUpdate && Views.Num() > 0 && Views[0].AllowGPUParticleUpdate();
+
+	if (RHISupportsGPUParticles() && IsParticleCollisionModeSupported(GetShaderPlatform(), PCM_DepthBuffer) && bAllowGPUParticleUpdate)
 	{
-		if (bAllowGPUParticleUpdate)
-		{
-			SCOPED_DRAW_EVENT(RHICmdList, GPUParticles_PostRenderOpaque);
-			PrepareGPUSimulation(RHICmdList);
-			SimulateGPUParticles(RHICmdList, EParticleSimulatePhase::CollisionDepthBuffer, ViewUniformBuffer, NULL, SceneTexturesUniformBufferStruct, SceneTexturesUniformBuffer);
-			FinalizeGPUSimulation(RHICmdList);
-		}
+		RDG_GPU_STAT_SCOPE(GraphBuilder, FXSystemPostRenderOpaque);
+		RDG_CSV_STAT_EXCLUSIVE_SCOPE(GraphBuilder, FXSystem);
+
+		TUniformBufferRef<FViewUniformShaderParameters> ViewUniformBuffer = Views[0].ViewUniformBuffer;
+
+		AddPass(GraphBuilder, RDG_EVENT_NAME("FFXSystem::PostRenderOpaque"), 
+			[this, ViewUniformBuffer](FRHICommandListImmediate& RHICmdList)
+			{
+				SCOPED_DRAW_EVENT(RHICmdList, GPUParticles_PostRenderOpaque);
+				PrepareGPUSimulation(RHICmdList);
+				SimulateGPUParticles(RHICmdList, EParticleSimulatePhase::CollisionDepthBuffer, ViewUniformBuffer, nullptr);
+				FinalizeGPUSimulation(RHICmdList);
+			}
+		);
 	}
 }
 

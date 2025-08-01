@@ -2,8 +2,9 @@
 
 #include "Engine/Attenuation.h"
 
-#include "DSP/Dsp.h"
-#include "EngineDefines.h"
+#include "AudioDevice.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(Attenuation)
 
 
 namespace
@@ -16,11 +17,13 @@ namespace
 FBaseAttenuationSettings::FBaseAttenuationSettings()
 	: DistanceAlgorithm(EAttenuationDistanceModel::Linear)
 	, AttenuationShape(EAttenuationShape::Sphere)
-	, dBAttenuationAtMax(MinAttenuationValueDb)
 	, FalloffMode(ENaturalSoundFalloffMode::Continues)
+	, dBAttenuationAtMax(MinAttenuationValueDb)
 	, AttenuationShapeExtents(400.f, 0.f, 0.f)
 	, ConeOffset(0.f)
 	, FalloffDistance(3600.f)
+	, ConeSphereRadius(0.f)
+	, ConeSphereFalloffDistance(0.f)
 {
 }
 
@@ -50,12 +53,12 @@ float FBaseAttenuationSettings::GetMaxDimension() const
 		check(false);
 	}
 
-	return FMath::Clamp(MaxDimension, 0.0f, static_cast<float>(WORLD_MAX));
+	return FMath::Clamp(MaxDimension, 0.0f, static_cast<float>(FAudioDevice::GetMaxWorldDistance()));
 }
 
 float FBaseAttenuationSettings::GetMaxFalloffDistance() const
 {
-	static const float WorldMax = static_cast<float>(WORLD_MAX);
+	static const float WorldMax = static_cast<float>(FAudioDevice::GetMaxWorldDistance());
 	if (FalloffDistance > WorldMax)
 	{
 		return WorldMax;
@@ -107,7 +110,7 @@ float FBaseAttenuationSettings::GetMaxFalloffDistance() const
 
 				case ENaturalSoundFalloffMode::Continues:
 				{
-					MaxFalloffDistance = FalloffDistance * MinAttenuationValueDb / FMath::Min(dBAttenuationAtMax, -KINDA_SMALL_NUMBER);
+					MaxFalloffDistance = FalloffDistance * MinAttenuationValueDb / FMath::Min(dBAttenuationAtMax, -UE_KINDA_SMALL_NUMBER);
 				}
 				break;
 
@@ -138,7 +141,7 @@ float FBaseAttenuationSettings::Evaluate(const FTransform& Origin, const FVector
 	{
 	case EAttenuationShape::Sphere:
 	{
-		const float Distance = FMath::Max(FVector::Dist( Origin.GetTranslation(), Location ) - AttenuationShapeExtents.X, 0.f);
+		const float Distance = FMath::Max<float>(FVector::Dist( Origin.GetTranslation(), Location ) - AttenuationShapeExtents.X, 0.f);
 		AttenuationMultiplier = AttenuationEval(Distance, FalloffDistance, DistanceScale);
 		break;
 	}
@@ -183,14 +186,14 @@ float FBaseAttenuationSettings::AttenuationEval(const float Distance, const floa
 
 		case EAttenuationDistanceModel::Logarithmic:
 			{
-				DistanceCopy = FMath::Max(DistanceCopy, KINDA_SMALL_NUMBER);
+				DistanceCopy = FMath::Max(DistanceCopy, UE_KINDA_SMALL_NUMBER);
 				Result = 0.5f * -FMath::Loge(DistanceCopy / FalloffCopy);
 			}
 			break;
 
 		case EAttenuationDistanceModel::Inverse:
 			{
-				DistanceCopy = FMath::Max(DistanceCopy, KINDA_SMALL_NUMBER);
+				DistanceCopy = FMath::Max(DistanceCopy, UE_KINDA_SMALL_NUMBER);
 				Result = 0.02f / (DistanceCopy / FalloffCopy);
 			}
 			break;
@@ -203,7 +206,7 @@ float FBaseAttenuationSettings::AttenuationEval(const float Distance, const floa
 			}
 			else
 			{
-				const float Argument = FMath::Max(1.0f - (DistanceCopy / FalloffCopy), KINDA_SMALL_NUMBER);
+				const float Argument = FMath::Max(1.0f - (DistanceCopy / FalloffCopy), UE_KINDA_SMALL_NUMBER);
 				Result = 1.0f + 0.5f * FMath::Loge(Argument);
 			}
 		}
@@ -272,7 +275,7 @@ float FBaseAttenuationSettings::AttenuationEvalCapsule(const FTransform& Origin,
 	// Capsule devolves to a sphere if HalfHeight <= Radius
 	if (CapsuleHalfHeight <= CapsuleRadius )
 	{
-		Distance = FMath::Max(FVector::Dist( Origin.GetTranslation(), Location ) - CapsuleRadius, 0.f);
+		Distance = FMath::Max<FVector::FReal>(FVector::Dist( Origin.GetTranslation(), Location ) - CapsuleRadius, 0.f);
 	}
 	else
 	{
@@ -291,16 +294,34 @@ float FBaseAttenuationSettings::AttenuationEvalCone(const FTransform& Origin, co
 	const FVector Forward = Origin.GetUnitAxis( EAxis::X );
 
 	float AttenuationMultiplier = 1.f;
+	float SphereAttenuationMultiplier = 0.f;
 
 	const FVector ConeOrigin = Origin.GetTranslation() - (Forward * ConeOffset);
 
-	const float Distance = FMath::Max(FVector::Dist( ConeOrigin, Location ) - AttenuationShapeExtents.X, 0.f);
-	AttenuationMultiplier *= AttenuationEval(Distance, FalloffDistance, DistanceScale);
-
-	if (AttenuationMultiplier > 0.f)
+	// Evaluate sphere attenuation If ConeSphereRadius is nonzero
+	if (!FMath::IsNearlyZero(ConeSphereRadius))
 	{
-		const float theta = FMath::RadiansToDegrees(FMath::Abs(FMath::Acos( FVector::DotProduct(Forward, (Location - ConeOrigin).GetSafeNormal()))));
-		AttenuationMultiplier *= AttenuationEval(theta - AttenuationShapeExtents.Y, AttenuationShapeExtents.Z, 1.0f);
+		const float SphereDistance = FMath::Max<float>(FVector::Dist(ConeOrigin, Location) - ConeSphereRadius, 0.f);
+		SphereAttenuationMultiplier = AttenuationEval(SphereDistance, ConeSphereFalloffDistance, DistanceScale);
+	}
+
+	// Cone devolves into sphere check if ConeSphereRadius >= AttenuationShapeExtents.X
+	if (ConeSphereRadius >= AttenuationShapeExtents.X)
+	{
+		AttenuationMultiplier = SphereAttenuationMultiplier;
+	}
+	else
+	{
+		const float Distance = FMath::Max(FVector::Dist(ConeOrigin, Location) - AttenuationShapeExtents.X, 0.f);
+		AttenuationMultiplier *= AttenuationEval(Distance, FalloffDistance, DistanceScale);
+
+		if (AttenuationMultiplier > 0.f)
+		{
+			const float theta = FMath::RadiansToDegrees(FMath::Abs(FMath::Acos(FVector::DotProduct(Forward, (Location - ConeOrigin).GetSafeNormal()))));
+			AttenuationMultiplier *= AttenuationEval(theta - AttenuationShapeExtents.Y, AttenuationShapeExtents.Z, 1.0f);
+		}
+
+		AttenuationMultiplier = FMath::Max(AttenuationMultiplier, SphereAttenuationMultiplier);
 	}
 
 	return AttenuationMultiplier;
@@ -312,6 +333,8 @@ void FBaseAttenuationSettings::CollectAttenuationShapesForVisualization(TMultiMa
 	ShapeDetails.Extents = AttenuationShapeExtents;
 	ShapeDetails.Falloff = FalloffDistance;
 	ShapeDetails.ConeOffset = ConeOffset;
+	ShapeDetails.ConeSphereRadius = ConeSphereRadius;
+	ShapeDetails.ConeSphereFalloff = ConeSphereFalloffDistance;
 
-	ShapeDetailsMap.Add(AttenuationShape, ShapeDetails);
+	ShapeDetailsMap.Add(AttenuationShape, MoveTemp(ShapeDetails));
 }

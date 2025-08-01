@@ -5,19 +5,27 @@
 =============================================================================*/
 
 #include "PackageBackup.h"
+
+#include "CoreGlobals.h"
 #include "HAL/FileManager.h"
-#include "Misc/Paths.h"
+#include "Internationalization/Internationalization.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/CString.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Misc/DateTime.h"
 #include "Misc/FeedbackContext.h"
-#include "UObject/Package.h"
 #include "Misc/PackageName.h"
+#include "Misc/Paths.h"
+#include "Misc/Timespan.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/Package.h"
 
 /**
  * Helper struct to hold information on backup files to prevent redundant checks
  */
 struct FBackupFileInfo
 {
-	int32 FileSize;						/** Size of the file */
+	int64 FileSize;						/** Size of the file */
 	FString FileName;					/** Name of the file */
 	FDateTime FileTimeStamp;			/** Timestamp of the file */
 };
@@ -118,12 +126,12 @@ bool FAutoPackageBackup::ShouldBackupPackage( const UPackage& InPackage, FString
 	{
 		GWarn->StatusUpdate( -1, -1, NSLOCTEXT("UnrealEd", "PackageBackup_ValidityWarning", "Determining asset backup validity...") );
 
-		bShouldBackup =	FPackageName::DoesPackageExist( InPackage.GetName(), NULL, &OutFilename );	// Make sure the file already exists (no sense in backing up a new package)
+		bShouldBackup =	FPackageName::DoesPackageExist( InPackage.GetName(), &OutFilename );	// Make sure the file already exists (no sense in backing up a new package)
 	}
 	
 	// If the package passed the initial backup checks, proceed to check more specific conditions
 	// that might disqualify the package from being backed up
-	const int32 FileSizeOfBackup = IFileManager::Get().FileSize( *OutFilename );
+	const int64 FileSizeOfBackup = IFileManager::Get().FileSize( *OutFilename );
 	if ( bShouldBackup )
 	{
 		// Ensure that the size the backup would require is less than that of the maximum allowed
@@ -148,7 +156,7 @@ bool FAutoPackageBackup::ShouldBackupPackage( const UPackage& InPackage, FString
 		FString ExistingFileNameExtension = FPaths::GetExtension(OutFilename);
 
 		bool bFoundExistingBackup = false;
-		int32 DirectorySize = 0;
+		int64 DirectorySize = 0;
 		FDateTime LastBackupTimeStamp = FDateTime::MinValue();
 
 		TArray<FBackupFileInfo> BackupFileInfoArray;
@@ -182,7 +190,7 @@ bool FAutoPackageBackup::ShouldBackupPackage( const UPackage& InPackage, FString
 			FString CurBackupFileNameExtension = FPaths::GetExtension(CurBackupFileName);
 
 			// The base file name of the backup file is going to include an underscore followed by a timestamp, so they must be removed for comparison's sake
-			CurBackupBaseFileName.LeftInline( CurBackupBaseFileName.Find( TEXT("_"), ESearchCase::CaseSensitive, ESearchDir::FromEnd ), false );
+			CurBackupBaseFileName.LeftInline( CurBackupBaseFileName.Find( TEXT("_"), ESearchCase::CaseSensitive, ESearchDir::FromEnd ), EAllowShrinking::No);
 					
 			// If the base file names and extensions match, we've found a backup
 			if ( CurBackupBaseFileName == ExistingBaseFileName &&  CurBackupFileNameExtension == ExistingFileNameExtension )
@@ -295,7 +303,7 @@ FString FAutoPackageBackup::GetBackupDirectory()
  * @return	true if the space was successfully provided, false if not or if the requested space was
  *			greater than the max allowed space by the user
  */
-bool FAutoPackageBackup::PerformBackupSpaceMaintenance( TArray<FBackupFileInfo>& InBackupFiles, int32 InSpaceUsed, int32 InSpaceRequired )
+bool FAutoPackageBackup::PerformBackupSpaceMaintenance( TArray<FBackupFileInfo>& InBackupFiles, int64 InSpaceUsed, int64 InSpaceRequired )
 {
 	bool bSpaceFreed = false;
 
@@ -316,7 +324,7 @@ bool FAutoPackageBackup::PerformBackupSpaceMaintenance( TArray<FBackupFileInfo>&
 		};
 		InBackupFiles.Sort( FCompareFBackupFileInfo() );
 		
-		int32 CurSpaceUsed = InSpaceUsed;
+		int64 CurSpaceUsed = InSpaceUsed;
 		TArray<FBackupFileInfo>::TConstIterator BackupFileIter( InBackupFiles );
 		
 		// Iterate through the backup files until all of the files have been deleted or enough space has been freed

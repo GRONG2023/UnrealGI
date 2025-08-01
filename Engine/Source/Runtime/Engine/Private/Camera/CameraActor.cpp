@@ -2,9 +2,11 @@
 
 #include "Camera/CameraActor.h"
 #include "Engine/World.h"
+#include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Camera/CameraComponent.h"
-#include "Camera/CameraAnim.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(CameraActor)
 
 #define LOCTEXT_NAMESPACE "CameraActor"
 
@@ -40,7 +42,7 @@ void ACameraActor::Serialize(FArchive& Ar)
 {
 	Super::Serialize(Ar);
 
-	if ((Ar.UE4Ver() < VER_UE4_CAMERA_ACTOR_USING_CAMERA_COMPONENT) && Ar.IsLoading())
+	if ((Ar.UEVer() < VER_UE4_CAMERA_ACTOR_USING_CAMERA_COMPONENT) && Ar.IsLoading())
 	{
 		CameraComponent->bConstrainAspectRatio = bConstrainAspectRatio_DEPRECATED;
 		CameraComponent->ProjectionMode = ECameraProjectionMode::Perspective;
@@ -60,13 +62,13 @@ void ACameraActor::PostLoadSubobjects(FObjectInstancingGraph* OuterInstanceGraph
 
 	Super::PostLoadSubobjects(OuterInstanceGraph);
 	
-	if (GetLinkerUE4Version() < VER_UE4_CAMERA_ACTOR_USING_CAMERA_COMPONENT)
+	if (GetLinkerUEVersion() < VER_UE4_CAMERA_ACTOR_USING_CAMERA_COMPONENT)
 	{
 		CameraComponent->SetupAttachment(OldAttachParent, OldSocketName);
 		OldRoot->SetupAttachment(nullptr);
 	}
 
-	if (GetLinkerUE4Version() < VER_UE4_CAMERA_COMPONENT_ATTACH_TO_ROOT)
+	if (GetLinkerUEVersion() < VER_UE4_CAMERA_COMPONENT_ATTACH_TO_ROOT)
 	{
 		RootComponent = SceneComponent;
 		if (OldAttachParent != SceneComponent)
@@ -74,18 +76,6 @@ void ACameraActor::PostLoadSubobjects(FObjectInstancingGraph* OuterInstanceGraph
 			CameraComponent->SetupAttachment(RootComponent);
 			RootComponent->SetupAttachment(OldAttachParent, OldSocketName);
 		}
-	}
-}
-
-void ACameraActor::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
-{
-	Super::PostEditChangeProperty(PropertyChangedEvent);
-
-	if (PreviewedCameraAnim.IsValid() && CameraComponent)
-	{
-		PreviewedCameraAnim->BaseFOV = CameraComponent->FieldOfView;
-		PreviewedCameraAnim->BasePostProcessSettings = CameraComponent->PostProcessSettings;
-		PreviewedCameraAnim->BasePostProcessBlendWeight = CameraComponent->PostProcessBlendWeight;
 	}
 }
 
@@ -130,4 +120,5 @@ void ACameraActor::BeginPlay()
 }
 
 #undef LOCTEXT_NAMESPACE
+
 

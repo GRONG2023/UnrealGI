@@ -9,12 +9,9 @@
 #include "CoreMinimal.h"
 #include "UnrealType.h"
 
-// WARNING: This should always be the last include in any file that needs it (except .generated.h)
-#include "UObject/UndefineUPropertyMacros.h"
-
 #define USE_UPROPERTY_LOAD_DEFERRING (USE_CIRCULAR_DEPENDENCY_LOAD_DEFERRING && WITH_EDITORONLY_DATA)
 
-class COREUOBJECT_API UProperty : public UField
+class UProperty : public UField
 {
 	DECLARE_CASTED_CLASS_INTRINSIC_NO_CTOR(UProperty, UField, CLASS_Abstract, TEXT("/Script/CoreUObject"), CASTCLASS_FProperty, NO_API)
 	DECLARE_WITHIN(UObject)
@@ -38,19 +35,19 @@ public:
 	UProperty*	PropertyLinkNext;
 	/** In memory only: Linked list of object reference properties from most-derived to base **/
 	UProperty*  NextRef;
-	/** In memory only: Linked list of properties requiring destruction. Note this does not include things that will be destroyed byt he native destructor **/
+	/** In memory only: Linked list of properties requiring destruction. Note this does not include things that will be destroyed by the native destructor **/
 	UProperty*	DestructorLinkNext;
 	/** In memory only: Linked list of properties requiring post constructor initialization.**/
 	UProperty*	PostConstructLinkNext;
 
 
 	// Constructors.
-	UProperty(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
-	UProperty(ECppProperty, int32 InOffset, EPropertyFlags InFlags);
-	UProperty( const FObjectInitializer& ObjectInitializer, ECppProperty, int32 InOffset, EPropertyFlags InFlags );
+	COREUOBJECT_API UProperty(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
+	COREUOBJECT_API UProperty(ECppProperty, int32 InOffset, EPropertyFlags InFlags);
+	COREUOBJECT_API UProperty( const FObjectInitializer& ObjectInitializer, ECppProperty, int32 InOffset, EPropertyFlags InFlags );
 
 	// UObject interface
-	virtual void Serialize( FArchive& Ar ) override;
+	COREUOBJECT_API virtual void Serialize( FArchive& Ar ) override;
 	// End of UObject interface
 
 	/**
@@ -177,12 +174,12 @@ public:
 
 	FField* AssociatedField;
 
-	virtual FField* GetAssociatedFField() override;
-	virtual void SetAssociatedFField(FField* InField) override;
+	COREUOBJECT_API virtual FField* GetAssociatedFField() override;
+	COREUOBJECT_API virtual void SetAssociatedFField(FField* InField) override;
 #endif // WITH_EDITORONLY_DATA
 };
 
-class COREUOBJECT_API UNumericProperty : public UProperty
+class UNumericProperty : public UProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UNumericProperty, UProperty, CLASS_Abstract, TEXT("/Script/CoreUObject"), CASTCLASS_FNumericProperty)
 
@@ -195,14 +192,14 @@ class COREUOBJECT_API UNumericProperty : public UProperty
 	{}
 };
 
-class COREUOBJECT_API UByteProperty : public UNumericProperty
+class UByteProperty : public UNumericProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UByteProperty, UNumericProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FByteProperty)
 
 public:
 
 	// Variables.
-	UEnum* Enum;
+	TObjectPtr<UEnum> Enum;
 
 	UByteProperty(ECppProperty, int32 InOffset, EPropertyFlags InFlags, UEnum* InEnum = nullptr)
 	: UNumericProperty(FObjectInitializer::Get(), EC_CppProperty, InOffset, InFlags)
@@ -217,12 +214,12 @@ public:
 	}
 
 	// UObject interface.
-	virtual void Serialize( FArchive& Ar ) override;
-	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
+	COREUOBJECT_API virtual void Serialize( FArchive& Ar ) override;
+	static COREUOBJECT_API void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
 	// End of UObject interface
 };
 
-class COREUOBJECT_API UInt8Property : public UNumericProperty
+class UInt8Property : public UNumericProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UInt8Property, UNumericProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FInt8Property)
 
@@ -237,7 +234,7 @@ class COREUOBJECT_API UInt8Property : public UNumericProperty
 	}
 };
 
-class COREUOBJECT_API UInt16Property : public UNumericProperty
+class UInt16Property : public UNumericProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UInt16Property, UNumericProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FInt16Property)
 
@@ -252,7 +249,7 @@ class COREUOBJECT_API UInt16Property : public UNumericProperty
 	}
 };
 
-class COREUOBJECT_API UIntProperty : public UNumericProperty
+class UIntProperty : public UNumericProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UIntProperty, UNumericProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FIntProperty)
 
@@ -267,7 +264,7 @@ class COREUOBJECT_API UIntProperty : public UNumericProperty
 	}
 };
 
-class COREUOBJECT_API UInt64Property : public UNumericProperty
+class UInt64Property : public UNumericProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UInt64Property, UNumericProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FInt64Property)
 
@@ -282,7 +279,7 @@ class COREUOBJECT_API UInt64Property : public UNumericProperty
 	}
 };
 
-class COREUOBJECT_API UUInt16Property : public UNumericProperty
+class UUInt16Property : public UNumericProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UUInt16Property, UNumericProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FUInt16Property)
 
@@ -297,7 +294,7 @@ class COREUOBJECT_API UUInt16Property : public UNumericProperty
 	}
 };
 
-class COREUOBJECT_API UUInt32Property : public UNumericProperty
+class UUInt32Property : public UNumericProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UUInt32Property, UNumericProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FUInt32Property)
 
@@ -307,7 +304,7 @@ class COREUOBJECT_API UUInt32Property : public UNumericProperty
 	}
 };
 
-class COREUOBJECT_API UUInt64Property : public UNumericProperty
+class UUInt64Property : public UNumericProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UUInt64Property, UNumericProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FUInt64Property)
 
@@ -322,7 +319,7 @@ class COREUOBJECT_API UUInt64Property : public UNumericProperty
 	}
 };
 
-class COREUOBJECT_API UFloatProperty : public UNumericProperty
+class UFloatProperty : public UNumericProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UFloatProperty, UNumericProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FFloatProperty)
 
@@ -337,7 +334,7 @@ class COREUOBJECT_API UFloatProperty : public UNumericProperty
 	}
 };
 
-class COREUOBJECT_API UDoubleProperty : public UNumericProperty
+class UDoubleProperty : public UNumericProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UDoubleProperty, UNumericProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FDoubleProperty)
 
@@ -352,7 +349,7 @@ class COREUOBJECT_API UDoubleProperty : public UNumericProperty
 	}
 };
 
-class COREUOBJECT_API UBoolProperty : public UProperty
+class UBoolProperty : public UProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC_NO_CTOR(UBoolProperty, UProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FBoolProperty, NO_API)
 
@@ -368,7 +365,7 @@ public:
 	/** Mask of the field with the property value. Either equal to ByteMask or 255 in case of 'bool' type. */
 	uint8 FieldMask;
 
-	UBoolProperty(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
+	COREUOBJECT_API UBoolProperty(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 	
 	/**
 	 * Constructor.
@@ -381,7 +378,7 @@ public:
 	 * @param InElementSize Sizeof of the boolean type this property represents.
 	 * @param bIsNativeBool true if this property represents C++ bool type.
 	 */
-	UBoolProperty(ECppProperty, int32 InOffset, EPropertyFlags InFlags, uint32 InBitMask, uint32 InElementSize, bool bIsNativeBool);
+	COREUOBJECT_API UBoolProperty(ECppProperty, int32 InOffset, EPropertyFlags InFlags, uint32 InBitMask, uint32 InElementSize, bool bIsNativeBool);
 
 	/**
 	 * Constructor.
@@ -395,10 +392,10 @@ public:
 	 * @param InElementSize Sizeof of the boolean type this property represents.
 	 * @param bIsNativeBool true if this property represents C++ bool type.
 	 */
-	UBoolProperty( const FObjectInitializer& ObjectInitializer, ECppProperty, int32 InOffset, EPropertyFlags InFlags, uint32 InBitMask, uint32 InElementSize, bool bIsNativeBool );
+	COREUOBJECT_API UBoolProperty( const FObjectInitializer& ObjectInitializer, ECppProperty, int32 InOffset, EPropertyFlags InFlags, uint32 InBitMask, uint32 InElementSize, bool bIsNativeBool );
 
 	// UObject interface.
-	virtual void Serialize( FArchive& Ar ) override;
+	COREUOBJECT_API virtual void Serialize( FArchive& Ar ) override;
 	// End of UObject interface
 
 	/** 
@@ -408,7 +405,7 @@ public:
 	 * @param InSize size of the bitfield/bool type.
 	 * @param bIsNativeBool true if this property represents C++ bool type.
 	 */
-	void SetBoolSize( const uint32 InSize, const bool bIsNativeBool = false, const uint32 InBitMask = 0 );
+	COREUOBJECT_API void SetBoolSize( const uint32 InSize, const bool bIsNativeBool = false, const uint32 InBitMask = 0 );
 
 	/**
 	 * If the return value is true this UBoolProperty represents C++ bool type.
@@ -419,14 +416,14 @@ public:
 	}
 };
 
-class COREUOBJECT_API UObjectPropertyBase : public UProperty
+class UObjectPropertyBase : public UProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UObjectPropertyBase, UProperty, CLASS_Abstract, TEXT("/Script/CoreUObject"), CASTCLASS_FObjectPropertyBase)
 
 public:
 
 	// Variables.
-	class UClass* PropertyClass;
+	TObjectPtr<class UClass> PropertyClass;
 
 	UObjectPropertyBase(ECppProperty, int32 InOffset, EPropertyFlags InFlags, UClass* InClass = NULL)
 		: UProperty(FObjectInitializer::Get(), EC_CppProperty, InOffset, InFlags)
@@ -439,19 +436,19 @@ public:
 	{}
 
 	// UObject interface
-	virtual void Serialize( FArchive& Ar ) override;
-	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
-	virtual void BeginDestroy() override;
+	COREUOBJECT_API virtual void Serialize( FArchive& Ar ) override;
+	static COREUOBJECT_API void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
+	COREUOBJECT_API virtual void BeginDestroy() override;
 	// End of UObject interface
 
 #if USE_UPROPERTY_LOAD_DEFERRING
-	void SetPropertyClass(UClass* NewPropertyClass);
+	COREUOBJECT_API void SetPropertyClass(UClass* NewPropertyClass);
 #else
 	FORCEINLINE void SetPropertyClass(UClass* NewPropertyClass) { PropertyClass = NewPropertyClass; }
 #endif // USE_UPROPERTY_LOAD_DEFERRING
 };
 
-class COREUOBJECT_API UObjectProperty : public UObjectPropertyBase
+class UObjectProperty : public UObjectPropertyBase
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UObjectProperty, UObjectPropertyBase, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FObjectProperty)
 
@@ -466,7 +463,7 @@ class COREUOBJECT_API UObjectProperty : public UObjectPropertyBase
 	}
 };
 
-class COREUOBJECT_API UWeakObjectProperty : public UObjectPropertyBase
+class UWeakObjectProperty : public UObjectPropertyBase
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UWeakObjectProperty, UObjectPropertyBase, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FWeakObjectProperty)
 
@@ -481,7 +478,7 @@ class COREUOBJECT_API UWeakObjectProperty : public UObjectPropertyBase
 	}
 };
 
-class COREUOBJECT_API ULazyObjectProperty : public UObjectPropertyBase
+class ULazyObjectProperty : public UObjectPropertyBase
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(ULazyObjectProperty, UObjectPropertyBase, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FLazyObjectProperty)
 
@@ -496,7 +493,7 @@ class COREUOBJECT_API ULazyObjectProperty : public UObjectPropertyBase
 	}
 };
 
-class COREUOBJECT_API USoftObjectProperty : public UObjectPropertyBase
+class USoftObjectProperty : public UObjectPropertyBase
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(USoftObjectProperty, UObjectPropertyBase, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FSoftObjectProperty)
 
@@ -509,14 +506,14 @@ class COREUOBJECT_API USoftObjectProperty : public UObjectPropertyBase
 	{}
 };
 
-class COREUOBJECT_API UClassProperty : public UObjectProperty
+class UClassProperty : public UObjectProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UClassProperty, UObjectProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FClassProperty)
 
 public:
 
 	// Variables.
-	class UClass* MetaClass;
+	TObjectPtr<class UClass> MetaClass;
 
 	UClassProperty(ECppProperty, int32 InOffset, EPropertyFlags InFlags, UClass* InMetaClass, UClass* InClassType)
 		: UObjectProperty(FObjectInitializer::Get(), EC_CppProperty, InOffset, InFlags, InClassType ? InClassType : UClass::StaticClass())
@@ -531,9 +528,9 @@ public:
 	}
 
 	// UObject interface
-	virtual void Serialize( FArchive& Ar ) override;
-	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
-	virtual void BeginDestroy() override;
+	COREUOBJECT_API virtual void Serialize( FArchive& Ar ) override;
+	static COREUOBJECT_API void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
+	COREUOBJECT_API virtual void BeginDestroy() override;
 	// End of UObject interface
 
 	/**
@@ -546,20 +543,20 @@ public:
 	 * @param  NewMetaClass    The MetaClass you want this property set with.
 	 */
 #if USE_UPROPERTY_LOAD_DEFERRING
-	void SetMetaClass(UClass* NewMetaClass);
+	COREUOBJECT_API void SetMetaClass(UClass* NewMetaClass);
 #else
 	FORCEINLINE void SetMetaClass(UClass* NewMetaClass) { MetaClass = NewMetaClass; }
 #endif // USE_UPROPERTY_LOAD_DEFERRING
 };
 
-class COREUOBJECT_API USoftClassProperty : public USoftObjectProperty
+class USoftClassProperty : public USoftObjectProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(USoftClassProperty, USoftObjectProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FSoftClassProperty)
 
 public:
 
 	// Variables.
-	class UClass* MetaClass;
+	TObjectPtr<class UClass> MetaClass;
 
 	USoftClassProperty(ECppProperty, int32 InOffset, EPropertyFlags InFlags, UClass* InMetaClass)
 		: Super(FObjectInitializer::Get(), EC_CppProperty, InOffset, InFlags, UClass::StaticClass())
@@ -572,9 +569,9 @@ public:
 	{}
 
 	// UObject interface
-	virtual void Serialize( FArchive& Ar ) override;
-	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
-	virtual void BeginDestroy() override;
+	COREUOBJECT_API virtual void Serialize( FArchive& Ar ) override;
+	static COREUOBJECT_API void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
+	COREUOBJECT_API virtual void BeginDestroy() override;
 	// End of UObject interface
 
 	/**
@@ -587,20 +584,20 @@ public:
 	 * @param  NewMetaClass    The MetaClass you want this property set with.
 	 */
 #if USE_UPROPERTY_LOAD_DEFERRING
-	void SetMetaClass(UClass* NewMetaClass);
+	COREUOBJECT_API void SetMetaClass(UClass* NewMetaClass);
 #else
 	FORCEINLINE void SetMetaClass(UClass* NewMetaClass) { MetaClass = NewMetaClass; }
 #endif // USE_UPROPERTY_LOAD_DEFERRING
 };
 
-class COREUOBJECT_API UInterfaceProperty : public UProperty
+class UInterfaceProperty : public UProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UInterfaceProperty, UProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FInterfaceProperty)
 
 public:
 
 	/** The native interface class that this interface property refers to */
-	class	UClass*		InterfaceClass;
+	TObjectPtr<class	UClass>		InterfaceClass;
 
 	UInterfaceProperty(ECppProperty, int32 InOffset, EPropertyFlags InFlags, UClass* InInterfaceClass)
 	: UProperty(FObjectInitializer::Get(), EC_CppProperty, InOffset, (InFlags & ~CPF_InterfaceClearMask))
@@ -615,9 +612,9 @@ public:
 	}
 
 	// UObject interface
-	virtual void Serialize( FArchive& Ar ) override;
-	virtual void BeginDestroy() override;
-	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
+	COREUOBJECT_API virtual void Serialize( FArchive& Ar ) override;
+	COREUOBJECT_API virtual void BeginDestroy() override;
+	static COREUOBJECT_API void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
 	// End of UObject interface
 
 	/**
@@ -630,13 +627,13 @@ public:
 	 * @param  NewInterfaceClass    The InterfaceClass you want this property set with.
 	 */
 #if USE_UPROPERTY_LOAD_DEFERRING
-	void SetInterfaceClass(UClass* NewInterfaceClass);
+	COREUOBJECT_API void SetInterfaceClass(UClass* NewInterfaceClass);
 #else
 	FORCEINLINE void SetInterfaceClass(UClass* NewInterfaceClass) { InterfaceClass = NewInterfaceClass; }
 #endif // USE_UPROPERTY_LOAD_DEFERRING
 };
 
-class COREUOBJECT_API UNameProperty : public UProperty
+class UNameProperty : public UProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UNameProperty, UProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FNameProperty)
 public:
@@ -652,7 +649,7 @@ public:
 	}
 };
 
-class COREUOBJECT_API UStrProperty : public UProperty
+class UStrProperty : public UProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UStrProperty, UProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FStrProperty)
 public:
@@ -668,14 +665,14 @@ public:
 	}
 };
 
-class COREUOBJECT_API UArrayProperty : public UProperty
+class UArrayProperty : public UProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UArrayProperty, UProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FArrayProperty)
 
 public:
 
 	// Variables.
-	UProperty* Inner;
+	TObjectPtr<UProperty> Inner;
 
 	UArrayProperty(ECppProperty, int32 InOffset, EPropertyFlags InFlags)
 	: UProperty(FObjectInitializer::Get(), EC_CppProperty, InOffset, InFlags)
@@ -688,67 +685,67 @@ public:
 	}
 
 	// UObject interface
-	virtual void Serialize( FArchive& Ar ) override;
-	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
+	COREUOBJECT_API virtual void Serialize( FArchive& Ar ) override;
+	static COREUOBJECT_API void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
 	// End of UObject interface
 };
 
-class COREUOBJECT_API UMapProperty : public UProperty
+class UMapProperty : public UProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UMapProperty, UProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FMapProperty)
 
 public:
 
 	// Properties representing the key type and value type of the contained pairs
-	UProperty*       KeyProp;
-	UProperty*       ValueProp;
+	TObjectPtr<UProperty>       KeyProp;
+	TObjectPtr<UProperty>       ValueProp;
 	FScriptMapLayout MapLayout;
 
-	UMapProperty(const FObjectInitializer& ObjectInitializer, ECppProperty, int32 InOffset, EPropertyFlags InFlags);
+	COREUOBJECT_API UMapProperty(const FObjectInitializer& ObjectInitializer, ECppProperty, int32 InOffset, EPropertyFlags InFlags);
 
 	// UObject interface
-	virtual void Serialize(FArchive& Ar) override;
-	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
+	COREUOBJECT_API virtual void Serialize(FArchive& Ar) override;
+	static COREUOBJECT_API void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
 	// End of UObject interface
 };
 
-class COREUOBJECT_API USetProperty : public UProperty
+class USetProperty : public UProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(USetProperty, UProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FSetProperty)
 
 public:
 
 	// Properties representing the key type and value type of the contained pairs
-	UProperty*       ElementProp;
+	TObjectPtr<UProperty>       ElementProp;
 	FScriptSetLayout SetLayout;
 
-	USetProperty(const FObjectInitializer& ObjectInitializer, ECppProperty, int32 InOffset, EPropertyFlags InFlags);
+	COREUOBJECT_API USetProperty(const FObjectInitializer& ObjectInitializer, ECppProperty, int32 InOffset, EPropertyFlags InFlags);
 
 	// UObject interface
-	virtual void Serialize(FArchive& Ar) override;
-	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
+	COREUOBJECT_API virtual void Serialize(FArchive& Ar) override;
+	static COREUOBJECT_API void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
 	// End of UObject interface
 };
 
-class COREUOBJECT_API UStructProperty : public UProperty
+class UStructProperty : public UProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UStructProperty, UProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FStructProperty)
 
 public:
 
 	// Variables.
-	class UScriptStruct* Struct;
+	TObjectPtr<class UScriptStruct> Struct;
 
-	UStructProperty(ECppProperty, int32 InOffset, EPropertyFlags InFlags, UScriptStruct* InStruct);
-	UStructProperty( const FObjectInitializer& ObjectInitializer, ECppProperty, int32 InOffset, EPropertyFlags InFlags, UScriptStruct* InStruct );
+	COREUOBJECT_API UStructProperty(ECppProperty, int32 InOffset, EPropertyFlags InFlags, UScriptStruct* InStruct);
+	COREUOBJECT_API UStructProperty( const FObjectInitializer& ObjectInitializer, ECppProperty, int32 InOffset, EPropertyFlags InFlags, UScriptStruct* InStruct );
 
 	// UObject interface
-	virtual void Serialize( FArchive& Ar ) override;
-	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
+	COREUOBJECT_API virtual void Serialize( FArchive& Ar ) override;
+	static COREUOBJECT_API void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
 	// End of UObject interface
 };
 
-class COREUOBJECT_API UDelegateProperty : public UProperty
+class UDelegateProperty : public UProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UDelegateProperty, UProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FDelegateProperty)
 
@@ -770,12 +767,12 @@ public:
 	}
 
 	// UObject interface
-	virtual void Serialize( FArchive& Ar ) override;
-	virtual void BeginDestroy() override;
+	COREUOBJECT_API virtual void Serialize( FArchive& Ar ) override;
+	COREUOBJECT_API virtual void BeginDestroy() override;
 	// End of UObject interface
 };
 
-class COREUOBJECT_API UMulticastDelegateProperty : public UProperty
+class UMulticastDelegateProperty : public UProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UMulticastDelegateProperty, UProperty, CLASS_Abstract, TEXT("/Script/CoreUObject"), CASTCLASS_FMulticastDelegateProperty)
 
@@ -791,12 +788,12 @@ public:
 	}
 
 	// UObject interface
-	virtual void Serialize( FArchive& Ar ) override;
-	virtual void BeginDestroy() override;
+	COREUOBJECT_API virtual void Serialize( FArchive& Ar ) override;
+	COREUOBJECT_API virtual void BeginDestroy() override;
 	// End of UObject interface
 };
 
-class COREUOBJECT_API UMulticastInlineDelegateProperty : public UMulticastDelegateProperty
+class UMulticastInlineDelegateProperty : public UMulticastDelegateProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UMulticastInlineDelegateProperty, UMulticastDelegateProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FMulticastInlineDelegateProperty)
 
@@ -813,7 +810,7 @@ public:
 	}
 };
 
-class COREUOBJECT_API UMulticastSparseDelegateProperty : public UMulticastDelegateProperty
+class UMulticastSparseDelegateProperty : public UMulticastDelegateProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UMulticastSparseDelegateProperty, UMulticastDelegateProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FMulticastSparseDelegateProperty)
 
@@ -830,24 +827,24 @@ public:
 	}
 };
 
-class COREUOBJECT_API UEnumProperty : public UProperty
+class UEnumProperty : public UProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UEnumProperty, UProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FEnumProperty)
 
 public:
-	UEnumProperty(const FObjectInitializer& ObjectInitializer, UEnum* InEnum);
-	UEnumProperty(const FObjectInitializer& ObjectInitializer, ECppProperty, int32 InOffset, EPropertyFlags InFlags, UEnum* InEnum);
+	COREUOBJECT_API UEnumProperty(const FObjectInitializer& ObjectInitializer, UEnum* InEnum);
+	COREUOBJECT_API UEnumProperty(const FObjectInitializer& ObjectInitializer, ECppProperty, int32 InOffset, EPropertyFlags InFlags, UEnum* InEnum);
 
 	// UObject interface
-	virtual void Serialize(FArchive& Ar) override;
-	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
+	COREUOBJECT_API virtual void Serialize(FArchive& Ar) override;
+	static COREUOBJECT_API void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
 	// End of UObject interface
 
-	UNumericProperty* UnderlyingProp; // The property which represents the underlying type of the enum
-	UEnum* Enum; // The enum represented by this property
+	TObjectPtr<UNumericProperty> UnderlyingProp; // The property which represents the underlying type of the enum
+	TObjectPtr<UEnum> Enum; // The enum represented by this property
 };
 
-class COREUOBJECT_API UTextProperty : public UProperty
+class UTextProperty : public UProperty
 {
 	DECLARE_CASTED_CLASS_INTRINSIC(UTextProperty, UProperty, 0, TEXT("/Script/CoreUObject"), CASTCLASS_FTextProperty)
 
@@ -863,6 +860,3 @@ public:
 	{
 	}
 };
-
-// WARNING: This should always be the last include in any file that needs it (except .generated.h)
-#include "UObject/DefineUPropertyMacros.h"

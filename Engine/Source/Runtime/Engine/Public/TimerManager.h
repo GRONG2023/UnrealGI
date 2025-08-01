@@ -9,12 +9,19 @@
 #include "CoreMinimal.h"
 #include "Stats/Stats.h"
 #include "UObject/Object.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "Engine/EngineTypes.h"
+#endif
+#include "Engine/TimerHandle.h"
+#include "Templates/Function.h"
 
 class UGameInstance;
+enum class ELevelCollectionType : uint8;
 struct FTimerSourceList;
 
-DECLARE_DELEGATE(FTimerDelegate);
+// using "not checked" user policy (means race detection is disabled) because this delegate is stored in a TSparseArray and causes its reallocation
+// from inside delegate's execution. This is incompatible with race detection that needs to access the delegate instance after its execution
+using FTimerDelegate = TDelegate<void(), FNotThreadSafeNotCheckedDelegateUserPolicy>;
 
 #ifndef UE_ENABLE_TRACKING_TIMER_SOURCES
 #define UE_ENABLE_TRACKING_TIMER_SOURCES !UE_BUILD_SHIPPING
@@ -39,23 +46,17 @@ struct FTimerUnifiedDelegate
 	{
 		if (FuncDelegate.IsBound())
 		{
-#if STATS
-			TStatId StatId = TStatId();
-			UObject* Object = FuncDelegate.GetUObject();
-			if (Object)
-			{
-				StatId = Object->GetStatID();
-			}
-			FScopeCycleCounter Context(StatId);
-#endif
+			FScopeCycleCounterUObject Context(FuncDelegate.GetUObject());
 			FuncDelegate.Execute();
 		}
 		else if (FuncDynDelegate.IsBound())
 		{
+			// stat scope is handled by UObject::ProcessEvent for the UFunction.
 			FuncDynDelegate.ProcessDelegate<UObject>(nullptr);
 		}
 		else if ( FuncCallback )
 		{
+			QUICK_SCOPE_CYCLE_COUNTER(STAT_FTimerUnifiedDelegate_Execute);
 			FuncCallback();
 		}
 	}
@@ -110,6 +111,11 @@ struct FTimerData
 	/** If true, this timer will loop indefinitely.  Otherwise, it will be destroyed when it expires. */
 	uint8 bLoop : 1;
 
+	/** If true for a looping timer, it will run a maximum of once per frame when it expires. Otherwise, it will run as many times as can fit in
+	 *  the current frame's delta time (rounding down).
+	 */
+	uint8 bMaxOncePerFrame : 1;
+
 	/** If true, this timer was created with a delegate to call (which means if the delegate becomes invalid, we should invalidate the timer too). */
 	uint8 bRequiresDelegate : 1;
 
@@ -133,19 +139,12 @@ struct FTimerData
 	FTimerHandle Handle;
 
 	/** This is the key to the TimerIndicesByObject map - this is kept so that we can look up even if the referenced object is expired */
-	const void* TimerIndicesByObjectKey;
+	const void* TimerIndicesByObjectKey = nullptr;
 
 	/** The level collection that was active when this timer was created. Used to set the correct context before executing the timer's delegate. */
 	ELevelCollectionType LevelCollection;
 
-	FTimerData()
-		: bLoop(false)
-		, bRequiresDelegate(false)
-		, Status(ETimerStatus::Active)
-		, Rate(0)
-		, ExpireTime(0)
-		, LevelCollection(ELevelCollectionType::DynamicSourceLevels)
-	{}
+	ENGINE_API FTimerData();
 
 	// Movable only
 	FTimerData(FTimerData&&) = default;
@@ -154,27 +153,36 @@ struct FTimerData
 	FTimerData& operator=(const FTimerData&) = delete;
 };
 
+/**
+ * Structure to support specialized looping behavior.
+ */
+struct FTimerManagerTimerParameters
+{
+	bool bLoop = false;
+	bool bMaxOncePerFrame = false;
+	float FirstDelay = -1.f;
+};
 
 /** 
  * Class to globally manage timers.
  */
-class ENGINE_API FTimerManager : public FNoncopyable
+class FTimerManager : public FNoncopyable
 {
 public:
 
-	void Tick(float DeltaTime);
-	TStatId GetStatId() const;
+	ENGINE_API void Tick(float DeltaTime);
+	ENGINE_API TStatId GetStatId() const;
 
 	// ----------------------------------
 	// Timer API
 
-	explicit FTimerManager(UGameInstance* GameInstance = nullptr);
-	virtual ~FTimerManager();
+	ENGINE_API explicit FTimerManager(UGameInstance* GameInstance = nullptr);
+	ENGINE_API virtual ~FTimerManager();
 
 	/**
 	 * Called from crash handler to provide more debug information.
 	 */
-	virtual void OnCrash();
+	ENGINE_API virtual void OnCrash();
 
 	/**
 	 * Sets a timer to call the given native function at a set interval.  If a timer is already set
@@ -188,12 +196,12 @@ public:
 	 * @param InFirstDelay			The time (in seconds) for the first iteration of a looping timer. If < 0.f InRate will be used.
 	 */
 	template< class UserClass >
-	FORCEINLINE void SetTimer(FTimerHandle& InOutHandle, UserClass* InObj, typename FTimerDelegate::TUObjectMethodDelegate< UserClass >::FMethodPtr InTimerMethod, float InRate, bool InbLoop = false, float InFirstDelay = -1.f)
+	FORCEINLINE void SetTimer(FTimerHandle& InOutHandle, UserClass* InObj, typename FTimerDelegate::TMethodPtr< UserClass > InTimerMethod, float InRate, bool InbLoop = false, float InFirstDelay = -1.f)
 	{
 		InternalSetTimer(InOutHandle, FTimerUnifiedDelegate( FTimerDelegate::CreateUObject(InObj, InTimerMethod) ), InRate, InbLoop, InFirstDelay);
 	}
 	template< class UserClass >
-	FORCEINLINE void SetTimer(FTimerHandle& InOutHandle, UserClass* InObj, typename FTimerDelegate::TUObjectMethodDelegate_Const< UserClass >::FMethodPtr InTimerMethod, float InRate, bool InbLoop = false, float InFirstDelay = -1.f)
+	FORCEINLINE void SetTimer(FTimerHandle& InOutHandle, UserClass* InObj, typename FTimerDelegate::TConstMethodPtr< UserClass > InTimerMethod, float InRate, bool InbLoop = false, float InFirstDelay = -1.f)
 	{
 		InternalSetTimer(InOutHandle, FTimerUnifiedDelegate( FTimerDelegate::CreateUObject(InObj, InTimerMethod) ), InRate, InbLoop, InFirstDelay);
 	}
@@ -219,6 +227,50 @@ public:
 		InternalSetTimer(InOutHandle, FTimerUnifiedDelegate(MoveTemp(Callback)), InRate, InbLoop, InFirstDelay);
 	}
 
+	/* Preferred versions of the above methods that now take a more configurable structure that specifies timer looping and delay behavior. */
+
+	/**
+	 * Sets a timer to call the given native function at a set interval.  If a timer is already set
+	 * for this handle, it will replace the current timer.
+	 *
+	 * @param InOutHandle			If the passed-in handle refers to an existing timer, it will be cleared before the new timer is added. A new handle to the new timer is returned in either case.
+	 * @param InObj					Object to call the timer function on.
+	 * @param InTimerMethod			Method to call when timer fires.
+	 * @param InRate				The amount of time (in seconds) between set and firing.  If <= 0.f, clears existing timers.
+	 * @param InTimerParameters		The structure with additional timer looping and delay parameters.
+	 */
+	template <class UserClass>
+	FORCEINLINE void SetTimer(FTimerHandle& InOutHandle, UserClass* InObj, typename FTimerDelegate::TMethodPtr<UserClass> InTimerMethod, float InRate, const FTimerManagerTimerParameters& InTimerParameters)
+	{
+		InternalSetTimer(InOutHandle, FTimerUnifiedDelegate(FTimerDelegate::CreateUObject(InObj, InTimerMethod)), InRate, InTimerParameters);
+	}
+	template< class UserClass >
+	FORCEINLINE void SetTimer(FTimerHandle& InOutHandle, UserClass* InObj, typename FTimerDelegate::TConstMethodPtr<UserClass> InTimerMethod, float InRate, const FTimerManagerTimerParameters& InTimerParameters)
+	{
+		InternalSetTimer(InOutHandle, FTimerUnifiedDelegate(FTimerDelegate::CreateUObject(InObj, InTimerMethod)), InRate, InTimerParameters);
+	}
+
+	/** Version that takes any generic delegate. */
+	FORCEINLINE void SetTimer(FTimerHandle& InOutHandle, FTimerDelegate const& InDelegate, float InRate, const FTimerManagerTimerParameters& InTimerParameters)
+	{
+		InternalSetTimer(InOutHandle, FTimerUnifiedDelegate(InDelegate), InRate, InTimerParameters);
+	}
+	/** Version that takes a dynamic delegate (e.g. for UFunctions). */
+	FORCEINLINE void SetTimer(FTimerHandle& InOutHandle, FTimerDynamicDelegate const& InDynDelegate, float InRate, const FTimerManagerTimerParameters& InTimerParameters)
+	{
+		InternalSetTimer(InOutHandle, FTimerUnifiedDelegate(InDynDelegate), InRate, InTimerParameters);
+	}
+	/*** Version that doesn't take a delegate */
+	FORCEINLINE void SetTimer(FTimerHandle& InOutHandle, float InRate, const FTimerManagerTimerParameters& InTimerParameters)
+	{
+		InternalSetTimer(InOutHandle, FTimerUnifiedDelegate(), InRate, InTimerParameters);
+	}
+	/** Version that takes a TFunction */
+	FORCEINLINE void SetTimer(FTimerHandle& InOutHandle, TFunction<void(void)>&& Callback, float InRate, const FTimerManagerTimerParameters& InTimerParameters)
+	{
+		InternalSetTimer(InOutHandle, FTimerUnifiedDelegate(MoveTemp(Callback)), InRate, InTimerParameters);
+	}
+
 	/**
 	 * Sets a timer to call the given native function on the next tick.
 	 *
@@ -226,12 +278,12 @@ public:
 	 * @param inTimerMethod			Method to call when timer fires.
 	 */
 	template< class UserClass >
-	FORCEINLINE FTimerHandle SetTimerForNextTick(UserClass* inObj, typename FTimerDelegate::TUObjectMethodDelegate< UserClass >::FMethodPtr inTimerMethod)
+	FORCEINLINE FTimerHandle SetTimerForNextTick(UserClass* inObj, typename FTimerDelegate::TMethodPtr< UserClass > inTimerMethod)
 	{
 		return InternalSetTimerForNextTick(FTimerUnifiedDelegate(FTimerDelegate::CreateUObject(inObj, inTimerMethod)));
 	}
 	template< class UserClass >
-	FORCEINLINE FTimerHandle SetTimerForNextTick(UserClass* inObj, typename FTimerDelegate::TUObjectMethodDelegate_Const< UserClass >::FMethodPtr inTimerMethod)
+	FORCEINLINE FTimerHandle SetTimerForNextTick(UserClass* inObj, typename FTimerDelegate::TConstMethodPtr< UserClass > inTimerMethod)
 	{
 		return InternalSetTimerForNextTick(FTimerUnifiedDelegate(FTimerDelegate::CreateUObject(inObj, inTimerMethod)));
 	}
@@ -281,14 +333,14 @@ public:
 	 *
 	 * @param InHandle The handle of the timer to pause.
 	 */
-	void PauseTimer(FTimerHandle InHandle);
+	ENGINE_API void PauseTimer(FTimerHandle InHandle);
 
 	/**
 	 * Unpauses a previously set timer
 	 *
 	 * @param InHandle The handle of the timer to unpause.
 	 */
-	void UnPauseTimer(FTimerHandle InHandle);
+	ENGINE_API void UnPauseTimer(FTimerHandle InHandle);
 
 	/**
 	 * Gets the current rate (time between activations) for the specified timer.
@@ -386,18 +438,18 @@ public:
 	 *
 	 * @return A handle to the found timer - !IsValid() if no such timer was found.
 	 */
-	FTimerHandle K2_FindDynamicTimerHandle(FTimerDynamicDelegate InDynamicDelegate) const;
+	ENGINE_API FTimerHandle K2_FindDynamicTimerHandle(FTimerDynamicDelegate InDynamicDelegate) const;
 
 	/** Debug command to output info on all timers currently set to the log. */
-	void ListTimers() const;
+	ENGINE_API void ListTimers() const;
 
 private:
-	void SetGameInstance(UGameInstance* InGameInstance);
+	ENGINE_API void SetGameInstance(UGameInstance* InGameInstance);
 
 // This should be private, but needs to be public for testing.
 public:
 	/** Generates a handle for a timer at a given index */
-	FTimerHandle GenerateHandle(int32 Index);
+	ENGINE_API FTimerHandle GenerateHandle(int32 Index);
 
 // These should be private, but need to be protected so IMPLEMENT_GET_PROTECTED_FUNC works for testing.
 protected:
@@ -406,29 +458,30 @@ protected:
 	{
 		return const_cast<FTimerManager*>(this)->FindTimer(InHandle);
 	}
-	FTimerData* FindTimer( FTimerHandle const& InHandle );
+	ENGINE_API FTimerData* FindTimer( FTimerHandle const& InHandle );
 
 private:
-	void InternalSetTimer( FTimerHandle& InOutHandle, FTimerUnifiedDelegate&& InDelegate, float InRate, bool InbLoop, float InFirstDelay );
-	FTimerHandle InternalSetTimerForNextTick( FTimerUnifiedDelegate&& InDelegate );
-	void InternalClearTimer( FTimerHandle InDelegate );
-	void InternalClearAllTimers( void const* Object );
-	float InternalGetTimerRate( FTimerData const* const TimerData ) const;
-	float InternalGetTimerElapsed( FTimerData const* const TimerData ) const;
-	float InternalGetTimerRemaining( FTimerData const* const TimerData ) const;
+	ENGINE_API void InternalSetTimer( FTimerHandle& InOutHandle, FTimerUnifiedDelegate&& InDelegate, float InRate, bool bInLoop, float InFirstDelay );
+	ENGINE_API void InternalSetTimer( FTimerHandle& InOutHandle, FTimerUnifiedDelegate&& InDelegate, float InRate, const FTimerManagerTimerParameters& InTimerParameters );
+	ENGINE_API FTimerHandle InternalSetTimerForNextTick( FTimerUnifiedDelegate&& InDelegate );
+	ENGINE_API void InternalClearTimer( FTimerHandle InDelegate );
+	ENGINE_API void InternalClearAllTimers( void const* Object );
+	ENGINE_API float InternalGetTimerRate( FTimerData const* const TimerData ) const;
+	ENGINE_API float InternalGetTimerElapsed( FTimerData const* const TimerData ) const;
+	ENGINE_API float InternalGetTimerRemaining( FTimerData const* const TimerData ) const;
 
 	/** Will get a timer in the active, paused, or pending list.  Expected to be given a valid, non-stale handle */
 	FORCEINLINE const FTimerData& GetTimer(const FTimerHandle& InHandle) const
 	{
 		return const_cast<FTimerManager*>(this)->GetTimer(InHandle);
 	}
-	FTimerData& GetTimer(FTimerHandle const& InHandle);
+	ENGINE_API FTimerData& GetTimer(FTimerHandle const& InHandle);
 
 	/** Adds a timer from the Timers list, also updating the TimerIndicesByObject map.  Returns the insertion index. */
-	FTimerHandle AddTimer(FTimerData&& TimerData);
+	ENGINE_API FTimerHandle AddTimer(FTimerData&& TimerData);
 	/** Removes a timer from the Timers list at the given index, also cleaning up the TimerIndicesByObject map */
-	void RemoveTimer(FTimerHandle Handle);
-	bool WillRemoveTimerAssert(FTimerHandle Handle) const;
+	ENGINE_API void RemoveTimer(FTimerHandle Handle);
+	ENGINE_API bool WillRemoveTimerAssert(FTimerHandle Handle) const;
 
 	/** The array of timers - all other arrays will index into this */
 	TSparseArray<FTimerData> Timers;
@@ -451,7 +504,7 @@ private:
 	uint64 LastTickedFrame;
 
 	/** The last serial number we assigned from this timer manager */
-	static uint64 LastAssignedSerialNumber;
+	static ENGINE_API uint64 LastAssignedSerialNumber;
 
 	/** The game instance that created this timer manager. May be null if this timer manager wasn't created by a game instance. */
 	UGameInstance* OwningGameInstance;

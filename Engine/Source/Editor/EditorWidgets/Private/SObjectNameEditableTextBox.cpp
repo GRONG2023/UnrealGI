@@ -1,14 +1,32 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SObjectNameEditableTextBox.h"
-#include "Rendering/DrawElements.h"
-#include "Framework/Application/SlateApplication.h"
-#include "Widgets/Input/SEditableTextBox.h"
-#include "EditorStyleSet.h"
-#include "GameFramework/Actor.h"
-#include "ScopedTransaction.h"
+
 #include "ActorEditorUtils.h"
-#include "Editor/EditorEngine.h"
+#include "Delegates/Delegate.h"
+#include "Framework/Application/SlateApplication.h"
+#include "IObjectNameEditSink.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Children.h"
+#include "Layout/Geometry.h"
+#include "Math/Color.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector2D.h"
+#include "ObjectNameEditSinkRegistry.h"
+#include "Rendering/DrawElements.h"
+#include "Rendering/RenderingCommon.h"
+#include "ScopedTransaction.h"
+#include "Styling/AppStyle.h"
+#include "Styling/WidgetStyle.h"
+#include "Types/WidgetActiveTimerDelegate.h"
+#include "UObject/Object.h"
+#include "UObject/WeakObjectPtr.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/SWindow.h"
+#include "Widgets/Text/SInlineEditableTextBlock.h"
+
+class FSlateRect;
+struct FSlateBrush;
 
 const float SObjectNameEditableTextBox::HighlightRectLeftOffset = 0.0f;
 const float SObjectNameEditableTextBox::HighlightRectRightOffset = 0.0f;
@@ -25,20 +43,19 @@ void SObjectNameEditableTextBox::Construct( const FArguments& InArgs )
 	bUpdateHighlightSpring = false;
 
 	Objects = InArgs._Objects;
+	ObjectNameEditSinkRegistry = InArgs._Registry;
 
 	ChildSlot
-		[
-			SAssignNew(TextBox, SEditableTextBox)
-			.Text( this, &SObjectNameEditableTextBox::GetNameText )
-			.ToolTipText( this, &SObjectNameEditableTextBox::GetNameTooltipText )
-			.Visibility( this, &SObjectNameEditableTextBox::GetNameVisibility )
-			.HintText( this, &SObjectNameEditableTextBox::GetNameHintText )
-			.OnTextCommitted( this, &SObjectNameEditableTextBox::OnNameTextCommitted )
-			.IsReadOnly( this, &SObjectNameEditableTextBox::CannotEditNameText )
-			.SelectAllTextWhenFocused( this, &SObjectNameEditableTextBox::CanEditNameText )
-			.OnTextChanged(this, &SObjectNameEditableTextBox::OnTextChanged )
-			.RevertTextOnEscape( true )
-		];
+	[
+		SAssignNew(TextBox, SInlineEditableTextBlock)
+		.Style(FAppStyle::Get(), "DetailsView.NameTextBlockStyle")
+		.Text( this, &SObjectNameEditableTextBox::GetNameText )
+		.ToolTipText( this, &SObjectNameEditableTextBox::GetNameTooltipText )
+		.Visibility( this, &SObjectNameEditableTextBox::GetNameVisibility )
+		.OnTextCommitted( this, &SObjectNameEditableTextBox::OnNameTextCommitted )
+		.IsReadOnly( this, &SObjectNameEditableTextBox::IsReadOnly )
+		.OnVerifyTextChanged_Static(&FActorEditorUtils::ValidateActorName)
+	];
 }
 
 EActiveTimerReturnType SObjectNameEditableTextBox::UpdateHighlightSpringState( double InCurrentTime, float InDeltaTime )
@@ -96,7 +113,7 @@ int32 SObjectNameEditableTextBox::OnPaint( const FPaintArgs& Args, const FGeomet
 		float EffectOpacity = EffectAlpha;
 
 		// Figure out a universally visible highlight color.
-		FLinearColor HighlightTargetColorAndOpacity = ( (FLinearColor::White - ColorAndOpacity.Get())*0.5f + FLinearColor(+0.4f, +0.1f, -0.2f)) * InWidgetStyle.GetColorAndOpacityTint();
+		FLinearColor HighlightTargetColorAndOpacity = ( (FLinearColor::White - GetColorAndOpacity())*0.5f + FLinearColor(+0.4f, +0.1f, -0.2f)) * InWidgetStyle.GetColorAndOpacityTint();
 		HighlightTargetColorAndOpacity.A = HighlightTargetOpacity * EffectOpacity * 255.0f;
 
 		// Compute the bounds offset of the highlight target from where the highlight target spring
@@ -114,24 +131,24 @@ int32 SObjectNameEditableTextBox::OnPaint( const FPaintArgs& Args, const FGeomet
 		const FVector2D DrawPosition = FVector2D( HighlightLeftX, HighlightTopY );
 		const FVector2D DrawSize = FVector2D( HighlightRightX - HighlightLeftX, HighlightBottomY - HighlightTopY );
 
-		const FSlateBrush* StyleInfo = FEditorStyle::GetBrush("DetailsView.NameChangeCommitted");
+		const FSlateBrush* StyleInfo = FAppStyle::GetBrush("DetailsView.NameChangeCommitted");
 
 		// NOTE: We rely on scissor clipping for the highlight rectangle
 		FSlateDrawElement::MakeBox(
 			OutDrawElements,
 			LayerId + TextLayer,
-			AllottedGeometry.ToPaintGeometry( DrawPosition, DrawSize ),	// Position, Size, Scale
+			AllottedGeometry.ToPaintGeometry( DrawSize, FSlateLayoutTransform(DrawPosition) ),	// Position, Size, Scale
 			StyleInfo,													// Style
 			DrawEffects,												// Effects to use
 			HighlightTargetColorAndOpacity );							// Color
 	}
 
-	return LayerId + TextLayer;
+	return FMath::Max(StartLayer, LayerId + TextLayer);
 }
 
 FText SObjectNameEditableTextBox::GetNameText() const
 {
-	FString Result;
+	FText Result;
 
 	if (Objects.Num() == 1)
 	{
@@ -141,39 +158,44 @@ FText SObjectNameEditableTextBox::GetNameText() const
 	{
 		if (!UserSetCommonName.IsEmpty())
 		{
-			Result = UserSetCommonName;
+			Result = FText::FromString(UserSetCommonName);
 		}
 	}
 
-	return FText::FromString(Result);
+	return Result;
 }
 
 FText SObjectNameEditableTextBox::GetNameTooltipText() const
 {
-	FText Result = FText::GetEmpty();
+	FText Result;
 
 	if (Objects.Num() == 0)
 	{
 		Result = LOCTEXT("EditableActorLabel_NoObjectsTooltip", "Nothing selected");
 	}
-	else if (Objects.Num() == 1 && Objects[0].IsValid())
+	else if (Objects.Num() == 1)
 	{
-		if (CanEditNameText())
+		UObject* ObjectPtr = Objects[0].Get();
+		if (!ObjectPtr)
 		{
-			Result = FText::Format(LOCTEXT("EditableActorLabel_ActorTooltipFmt", "Rename the selected {0}"), FText::FromString(Objects[0].Get()->GetClass()->GetName()));
+			return Result;
 		}
-		else if (Objects[0].Get()->IsA(AActor::StaticClass()))
+
+		TSharedPtr<UE::EditorWidgets::FObjectNameEditSinkRegistry> RegistryPtr = ObjectNameEditSinkRegistry.Pin();
+		if (!RegistryPtr.IsValid())
 		{
-			Result = LOCTEXT("EditableActorLabel_NoEditActorTooltip", "Can't rename selected actor (its label isn't editable)");
+			return Result;
 		}
-		else
+
+		TSharedPtr<UE::EditorWidgets::IObjectNameEditSink> ObjectNameEditPtr = RegistryPtr->GetObjectNameEditSinkForClass(ObjectPtr->GetClass());
+		if (ObjectNameEditPtr)
 		{
-			Result = LOCTEXT("EditableActorLabel_NoEditObjectTooltip", "Can't rename selected object (only actors can have editable labels)");
+			Result = ObjectNameEditPtr->GetObjectNameTooltip(ObjectPtr);
 		}
 	}
 	else if (Objects.Num() > 1)
 	{
-		if (CanEditNameText())
+		if (!IsReadOnly())
 		{
 			Result = LOCTEXT("EditableActorLabel_MultiActorTooltip", "Rename multiple selected actors at once");
 		}
@@ -188,181 +210,118 @@ FText SObjectNameEditableTextBox::GetNameTooltipText() const
 
 EVisibility SObjectNameEditableTextBox::GetNameVisibility() const
 {
-	if (Objects.Num() == 1 && Objects[0].IsValid())
-	{
-		if (CanEditNameText())
-		{
-			return EVisibility::Visible;
-		}
-		else if (Objects[0].Get()->IsA(AActor::StaticClass()))
-		{
-			return EVisibility::Visible;
-		}
-		else
-		{
-			return EVisibility::Collapsed;
-		}
-	}
-	else if (Objects.Num() > 1)
-	{
-		if (CanEditNameText())
-		{
-			return EVisibility::Visible;
-		}
-		else
-		{
-			return EVisibility::Collapsed;
-		}
-	}
-
-	return EVisibility::Collapsed;
-}
-
-FText SObjectNameEditableTextBox::GetNameHintText() const
-{
-	FText Result;
-
-	if (Objects.Num() == 0)
-	{
-		Result = LOCTEXT("EditableActorLabel_NoObjectsHint", "<Nothing Selected>");
-	}
-	else if (Objects.Num() == 1 && Objects[0].IsValid())
-	{
-		Result = FText::Format(LOCTEXT("EditableActorLabel_MultiObjectsHint_SameType", "<Selected {0}>"), FText::FromName(Objects[0].Get()->GetClass()->GetFName()));
-	}
-	else if (Objects.Num() > 1)
-	{
-		Result = LOCTEXT("EditableActorLabel_MultiObjectsHint_DifferentTypes", "<Selected Objects>");
-	}
-
-	return Result;
+	return ((Objects.Num() == 1 && Objects[0].IsValid()) || Objects.Num() > 1)
+		? EVisibility::Visible
+		: EVisibility::Collapsed;
 }
 
 void SObjectNameEditableTextBox::OnNameTextCommitted(const FText& NewText, ETextCommit::Type InTextCommit)
 {
 	// Don't apply the change if the TextCommit type is OnCleared - this will only be the case if the keyboard focus was cleared due to
 	// Enter being pressed, in which case we will already have been here once with a TextCommit type of OnEnter.
-	FText ErrorMessage;
-	if (InTextCommit != ETextCommit::OnCleared && FActorEditorUtils::ValidateActorName(NewText, ErrorMessage))
+	if (InTextCommit == ETextCommit::OnCleared)
 	{
-		FText TrimmedText = FText::TrimPrecedingAndTrailing(NewText);
-
-		if (!TrimmedText.IsEmpty())
-		{
-			if (Objects.Num() == 1)
-			{
-				// Apply the change to the selected actor
-				AActor* Actor = Cast<AActor>(Objects[0].Get());
-				if(Actor != NULL)
-				{
-					const FScopedTransaction Transaction( LOCTEXT("RenameActorTransaction", "Rename Actor") );
-
-					if (Actor->IsActorLabelEditable())
-					{
-						FActorLabelUtilities::RenameExistingActor(Actor, TrimmedText.ToString());
-						LastCommittedTime = FSlateApplication::Get().GetCurrentTime();
-						RegisterActiveTimer( 0.f, FWidgetActiveTimerDelegate::CreateSP( this, &SObjectNameEditableTextBox::UpdateHighlightSpringState ) );
-					}
-				}
-			}
-			else if (Objects.Num() > 1)
-			{
-				const FScopedTransaction Transaction( LOCTEXT("RenameActorsTransaction", "Rename Multiple Actors") );
-
-				UserSetCommonName = TrimmedText.ToString();
-
-				for (int32 i=0; i<Objects.Num(); i++)
-				{
-					// Apply the change to the selected actor
-					if(Objects[i].IsValid() && Objects[i].Get()->IsA(AActor::StaticClass()))
-					{
-						AActor* Actor = (AActor*)Objects[i].Get();
-						if (Actor->IsActorLabelEditable())
-						{
-							FActorLabelUtilities::RenameExistingActor(Actor, TrimmedText.ToString());
-							LastCommittedTime = FSlateApplication::Get().GetCurrentTime();
-							RegisterActiveTimer( 0.f, FWidgetActiveTimerDelegate::CreateSP( this, &SObjectNameEditableTextBox::UpdateHighlightSpringState ) );
-						}
-					}
-				}
-			}
-		}
-		// Remove ourselves from the window focus so we don't get automatically reselected when scrolling around the context menu.
-		TSharedPtr< SWindow > ParentWindow = FSlateApplication::Get().FindWidgetWindow( SharedThis(this) );
-		if( ParentWindow.IsValid() )
-		{
-			ParentWindow->SetWidgetToFocusOnActivate( NULL );
-		}
+		return;
 	}
 
-	// Clear Error 
-	TextBox->SetError(FText::GetEmpty());
-}
-
-void SObjectNameEditableTextBox::OnTextChanged( const FText& InLabel )
-{
-	FText OutErrorMessage;
-
-	if(!FActorEditorUtils::ValidateActorName(InLabel, OutErrorMessage))
+	FText TrimmedText = FText::TrimPrecedingAndTrailing(NewText);
+	if (TrimmedText.IsEmpty())
 	{
-		TextBox->SetError(OutErrorMessage);
-	}
-	else
-	{
-		TextBox->SetError( FText::GetEmpty() );
-	}
-}
-
-bool SObjectNameEditableTextBox::CanEditNameText() const
-{
-	bool Result = false;
-
-	if (Objects.Num() > 0)
-	{
-		Result = true;
-		for (int32 i=0; i<Objects.Num(); i++)
-		{
-			if(Objects[i].IsValid())
-			{
-				if (Objects[i].Get()->IsA(AActor::StaticClass()))
-				{
-					AActor* Actor = (AActor*)Objects[i].Get();
-					if (!Actor->IsActorLabelEditable())
-					{
-						// can't edit the name when a non-editable actor is selected
-						Result = false;
-						break;
-					}
-				}
-				else
-				{
-					// can't edit the name when a non-actor is selected
-					Result = false;
-					break;
-				}
-			}
-		}
+		return;
 	}
 
-	return Result;
-}
+	TSharedPtr<UE::EditorWidgets::FObjectNameEditSinkRegistry> RegistryPtr = ObjectNameEditSinkRegistry.Pin();
+	if (!RegistryPtr.IsValid())
+	{
+		return;
+	}
 
-FString SObjectNameEditableTextBox::GetObjectDisplayName(TWeakObjectPtr<UObject> Object)
-{
-	FString Result;
-	if(Object.IsValid())
+	UserSetCommonName = TrimmedText.ToString();
+
+	const FScopedTransaction Transaction( LOCTEXT("RenameActorsTransaction", "Rename Multiple Actors") );
+
+	bool bChanged = false;
+	for (TWeakObjectPtr<UObject> Object : Objects)
 	{
 		UObject* ObjectPtr = Object.Get();
-		if (ObjectPtr->IsA(AActor::StaticClass()))
+		if (!ObjectPtr)
 		{
-			Result =  ((AActor*)ObjectPtr)->GetActorLabel();
+			continue;
 		}
-		else
+
+		TSharedPtr<UE::EditorWidgets::IObjectNameEditSink> ObjectNameEditPtr = RegistryPtr->GetObjectNameEditSinkForClass(ObjectPtr->GetClass());
+		if (ObjectNameEditPtr && ObjectNameEditPtr->SetObjectDisplayName(ObjectPtr, UserSetCommonName))
 		{
-			Result = ObjectPtr->GetName();
+			bChanged = true;
 		}
 	}
-	return Result;
+
+	if (bChanged)
+	{
+		LastCommittedTime = FSlateApplication::Get().GetCurrentTime();
+		RegisterActiveTimer( 0.f, FWidgetActiveTimerDelegate::CreateSP( this, &SObjectNameEditableTextBox::UpdateHighlightSpringState ) );
+	}
+
+	// Remove ourselves from the window focus so we don't get automatically reselected when scrolling around the context menu.
+	TSharedPtr< SWindow > ParentWindow = FSlateApplication::Get().FindWidgetWindow( SharedThis(this) );
+	if (ParentWindow.IsValid())
+	{
+		ParentWindow->SetWidgetToFocusOnActivate(nullptr);
+	}
+}
+
+bool SObjectNameEditableTextBox::IsReadOnly() const
+{
+	if (Objects.Num() == 0)
+	{
+		// can't edit if nothing is selected
+		return true;
+	}
+
+	TSharedPtr<UE::EditorWidgets::FObjectNameEditSinkRegistry> RegistryPtr = ObjectNameEditSinkRegistry.Pin();
+	// this shouldn't happen but let's be safe and say readonly
+	if (!RegistryPtr.IsValid())
+	{
+		return true;
+	}
+
+	for (TWeakObjectPtr<UObject> Object : Objects)
+	{
+		UObject* ObjectPtr = Object.Get();
+		if (!ObjectPtr)
+		{
+			continue;
+		}
+
+		TSharedPtr<UE::EditorWidgets::IObjectNameEditSink> ObjectNameEditPtr = RegistryPtr->GetObjectNameEditSinkForClass(ObjectPtr->GetClass());
+		if (ObjectNameEditPtr && ObjectNameEditPtr->IsObjectDisplayNameReadOnly(ObjectPtr))
+		{
+			// if any objects are read only then the whole box is
+			return true;
+		}
+	}
+	return false;
+}
+
+FText SObjectNameEditableTextBox::GetObjectDisplayName(TWeakObjectPtr<UObject> Object) const
+{
+	UObject* ObjectPtr = Object.Get();
+	// no display name for no object
+	if (!ObjectPtr)
+	{
+		return FText();
+	}
+	TSharedPtr<UE::EditorWidgets::FObjectNameEditSinkRegistry> RegistryPtr = ObjectNameEditSinkRegistry.Pin();
+	if (RegistryPtr.IsValid())
+	{
+		TSharedPtr<UE::EditorWidgets::IObjectNameEditSink> ObjectNameEditPtr = RegistryPtr->GetObjectNameEditSinkForClass(ObjectPtr->GetClass());
+		if (ObjectNameEditPtr)
+		{
+			return ObjectNameEditPtr->GetObjectDisplayName(ObjectPtr);
+		}
+	}
+	// this shouldn't happen but let's be safe and just give the default name
+	return FText::FromString(ObjectPtr->GetName());
 }
 
 // No code beyond this point

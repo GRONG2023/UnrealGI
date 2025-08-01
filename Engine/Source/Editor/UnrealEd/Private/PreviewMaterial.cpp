@@ -11,6 +11,7 @@
 #include "MaterialEditor/DEditorStaticSwitchParameterValue.h"
 #include "MaterialEditor/DEditorTextureParameterValue.h"
 #include "MaterialEditor/DEditorVectorParameterValue.h"
+#include "MaterialEditor/DEditorDoubleVectorParameterValue.h"
 #include "AI/NavigationSystemBase.h"
 #include "MaterialEditor/MaterialEditorInstanceConstant.h"
 #include "MaterialEditor/MaterialEditorPreviewParameters.h"
@@ -27,6 +28,7 @@
 #include "Materials/MaterialExpressionMaterialAttributeLayers.h"
 #include "Materials/MaterialExpressionStaticBoolParameter.h"
 #include "Materials/MaterialExpressionStaticComponentMaskParameter.h"
+#include "Materials/MaterialFunction.h"
 #include "UObject/UObjectIterator.h"
 #include "PropertyEditorDelegates.h"
 #include "IDetailsView.h"
@@ -97,13 +99,9 @@ public:
 					return false;
 				}
 
-				extern ENGINE_API bool IsGPUSkinCacheAvailable(EShaderPlatform Platform);
-				bool bSkinCache = IsGPUSkinCacheAvailable(Platform) && (VertexFactoryType == FindVertexFactoryType(FName(TEXT("FGPUSkinPassthroughVertexFactory"), FNAME_Find)));
-					
 				if (
 					VertexFactoryType != FindVertexFactoryType(FName(TEXT("TGPUSkinVertexFactoryDefault"), FNAME_Find)) &&
-					VertexFactoryType != FindVertexFactoryType(FName(TEXT("TGPUSkinVertexFactoryUnlimited"), FNAME_Find)) &&
-					!bSkinCache
+					VertexFactoryType != FindVertexFactoryType(FName(TEXT("TGPUSkinVertexFactoryUnlimited"), FNAME_Find))
 					)
 				{
 					return false;
@@ -199,6 +197,10 @@ public:
 			{
 				bShaderTypeMatches = true;
 			}
+			else if (FCString::Stristr(ShaderType->GetName(), TEXT("FDebugViewModePS")))
+			{
+				bShaderTypeMatches = true;
+			}
 			else if (FCString::Stristr(ShaderType->GetName(), TEXT("FVelocity")))
 			{
 				bShaderTypeMatches = true;
@@ -211,8 +213,7 @@ public:
 			{
 				bShaderTypeMatches = true;
 			}
-			else if (FCString::Stristr(ShaderType->GetName(), TEXT("FRealtimeGICardCaptureVS"))
-				  || FCString::Stristr(ShaderType->GetName(), TEXT("FRealtimeGICardCapturePS")))
+			else if (FCString::Stristr(ShaderType->GetName(), TEXT("FLumenCard")))
 			{
 				bShaderTypeMatches = true;
 			}
@@ -226,6 +227,9 @@ public:
 	 * Should shaders compiled for this material be saved to disk?
 	 */
 	virtual bool IsPersistent() const override { return false; }
+	virtual FString GetAssetName() const override { return FString::Printf(TEXT("Preview:%s"), *FMaterialResource::GetAssetName()); }
+
+	virtual bool IsPreview() const override { return true; }
 };
 
 /** Implementation of Preview Material functions*/
@@ -237,201 +241,6 @@ UPreviewMaterial::UPreviewMaterial(const FObjectInitializer& ObjectInitializer)
 FMaterialResource* UPreviewMaterial::AllocateResource()
 {
 	return new FPreviewMaterial();
-}
-
-// Helper struct to cache data for UMaterialEditorInstanceConstant/UMaterialEditorPreviewParameters::RegenerateArrays()
-struct FMaterialParamExpressionData
-{
-	FName Name = NAME_None;
-	FName Group = NAME_None;
-	UClass* ParamType = nullptr;
-	int32 SortPriority = 32;
-};
-
-// Helper struct to cache data for UMaterialEditorInstanceConstant/UMaterialEditorPreviewParameters::RegenerateArrays()
-struct FMaterialExpressionParameterDataCache
-{
-	TMap<FName, FMaterialParamExpressionData> GlobalParameters;
-	FName LayerParameterName = NAME_None;
-	TArray<TMap<FName, FMaterialParamExpressionData>> LayerParameters;
-	TArray<TMap<FName, FMaterialParamExpressionData>> BlendParameters;
-};
-
-// Helper function for UMaterialEditorInstanceConstant/UMaterialEditorPreviewParameters::RegenerateArrays()
-// Cache material expression parameter for group and sort priority for quick lookup while creating UDEditorParameterValue
-FMaterialExpressionParameterDataCache CacheMaterialExpressionParameterData(const UMaterial* InBaseMaterial, const FStaticParameterSet& InStaticParameters)
-{
-	FMaterialExpressionParameterDataCache ParamCache;
-	ParamCache.GlobalParameters.Reserve(InBaseMaterial->Expressions.Num());
-
-	// Function replicating UMaterialFunctionInterface::GetParameterGroupName & UMaterialFunctionInterface::GetParameterSortPriority behavior 
-	// but caching all the data in one pass
-	auto CacheMaterialFunctionParameterData = [](UMaterialFunctionInterface* ParameterFunction, TMap<FName, FMaterialParamExpressionData>& ParamDatas)
-	{
-		if (ParameterFunction)
-		{
-			TArray<UMaterialFunctionInterface*> Functions;
-			ParameterFunction->GetDependentFunctions(Functions);
-			Functions.AddUnique(ParameterFunction);
-
-			for (UMaterialFunctionInterface* Function : Functions)
-			{
-				for (UMaterialExpression* FunctionExpression : *Function->GetFunctionExpressions())
-				{
-					if (const UMaterialExpressionParameter* Parameter = Cast<const UMaterialExpressionParameter>(FunctionExpression))
-					{
-						FMaterialParamExpressionData ParamData;
-						ParamData.ParamType = UMaterialExpressionParameter::StaticClass();
-
-						ParamData.Name = Parameter->ParameterName;
-						ParamData.SortPriority = Parameter->SortPriority;
-						ParamData.Group = Parameter->Group;
-
-						//ensure(!ParamDatas.Contains(ParamData.Name));
-						ParamDatas.Add(ParamData.Name, ParamData);
-					}
-					else if (const UMaterialExpressionTextureSampleParameter* TexParameter = Cast<const UMaterialExpressionTextureSampleParameter>(FunctionExpression))
-					{
-						FMaterialParamExpressionData ParamData;
-						ParamData.ParamType = UMaterialExpressionTextureSampleParameter::StaticClass();
-
-						ParamData.Name = TexParameter->ParameterName;
-						ParamData.SortPriority = TexParameter->SortPriority;
-						ParamData.Group = TexParameter->Group;
-
-						//ensure(!ParamDatas.Contains(ParamData.Name));
-						ParamDatas.Add(ParamData.Name, ParamData);
-					}
-					else if (const UMaterialExpressionFontSampleParameter* FontParameter = Cast<const UMaterialExpressionFontSampleParameter>(FunctionExpression))
-					{
-						FMaterialParamExpressionData ParamData;
-						ParamData.ParamType = UMaterialExpressionFontSampleParameter::StaticClass();
-
-						ParamData.Name = FontParameter->ParameterName;
-						ParamData.SortPriority = FontParameter->SortPriority;
-						ParamData.Group = FontParameter->Group;
-
-						//ensure(!ParamDatas.Contains(ParamData.Name));
-						ParamDatas.Add(ParamData.Name, ParamData);
-					}
-				}
-			}
-		}
-	};
-
-	for (int32 Index = 0; Index < InBaseMaterial->Expressions.Num(); ++Index)
-	{
-		UMaterialExpression* Expression = InBaseMaterial->Expressions[Index];
-
-		if (UMaterialExpressionParameter* Parameter = Cast<UMaterialExpressionParameter>(Expression))
-		{
-			FMaterialParamExpressionData ParamData;
-			ParamData.ParamType = UMaterialExpressionParameter::StaticClass();
-
-			ParamData.Name = Parameter->GetParameterName();
-			ParamData.SortPriority = Parameter->SortPriority;
-			ParamData.Group = Parameter->Group;
-
-			//ensure(ParamCache.GlobalParameters.Contains(ParamData.Name));
-			ParamCache.GlobalParameters.Add(ParamData.Name, ParamData);
-		}
-		else if (UMaterialExpressionTextureSampleParameter* TexParameter = Cast<UMaterialExpressionTextureSampleParameter>(Expression))
-		{
-			FMaterialParamExpressionData ParamData;
-			ParamData.ParamType = UMaterialExpressionTextureSampleParameter::StaticClass();
-
-			ParamData.Name = TexParameter->GetParameterName();
-			ParamData.SortPriority = TexParameter->SortPriority;
-			ParamData.Group = TexParameter->Group;
-
-			//ensure(!ParamCache.GlobalParameters.Contains(ParamData.Name));
-			ParamCache.GlobalParameters.Add(ParamData.Name, ParamData);
-		}
-		else if (UMaterialExpressionRuntimeVirtualTextureSampleParameter* VTTexParameter = Cast<UMaterialExpressionRuntimeVirtualTextureSampleParameter>(Expression))
-		{
-			FMaterialParamExpressionData ParamData;
-			ParamData.ParamType = UMaterialExpressionRuntimeVirtualTextureSampleParameter::StaticClass();
-
-			ParamData.Name = VTTexParameter->GetParameterName();
-			ParamData.SortPriority = VTTexParameter->SortPriority;
-			ParamData.Group = VTTexParameter->Group;
-
-			//ensure(!ParamCache.GlobalParameters.Contains(ParamData.Name));
-			ParamCache.GlobalParameters.Add(ParamData.Name, ParamData);
-		}
-		else if (UMaterialExpressionFontSampleParameter* FontParameter = Cast<UMaterialExpressionFontSampleParameter>(Expression))
-		{
-			FMaterialParamExpressionData ParamData;
-			ParamData.ParamType = UMaterialExpressionFontSampleParameter::StaticClass();
-
-			ParamData.Name = FontParameter->GetParameterName();
-			ParamData.SortPriority = FontParameter->SortPriority;
-			ParamData.Group = FontParameter->Group;
-
-			//ensure(!ParamCache.GlobalParameters.Contains(ParamData.Name));
-			ParamCache.GlobalParameters.Add(ParamData.Name, ParamData);
-		}
-		else if (UMaterialExpressionMaterialFunctionCall* FuncParameter = Cast<UMaterialExpressionMaterialFunctionCall>(Expression))
-		{
-			if (FuncParameter->MaterialFunction)
-			{
-				if (UMaterialFunctionInterface* ParameterFunction = FuncParameter->MaterialFunction->GetBaseFunction())
-				{
-					CacheMaterialFunctionParameterData(ParameterFunction, ParamCache.GlobalParameters);
-				}
-			}
-		}
-		else if (UMaterialExpressionMaterialAttributeLayers* LayerParameter = Cast<UMaterialExpressionMaterialAttributeLayers>(Expression))
-		{
-			// there should only be one Material attribute layer expression per material
-			check(ParamCache.LayerParameterName == NAME_None);
-			ParamCache.LayerParameterName = LayerParameter->ParameterName;
-
-			// look into the instance static parameters first for overrides
-			UMaterialFunctionInterface* Function = nullptr;
-			const FStaticMaterialLayersParameter* StaticLayers = InStaticParameters.MaterialLayersParameters.FindByPredicate([LayerParameterName = LayerParameter->ParameterName](const FStaticMaterialLayersParameter& Layers)
-			{
-				return LayerParameterName == Layers.ParameterInfo.Name;
-			});
-
-			// If we found one cache those instead of what is on the material itself since they take precedence
-			if (StaticLayers)
-			{
-				// Replicate FStaticMaterialLayersParameter::GetParameterAssociatedFunction behavior while caching all function needed info
-
-				// Cache layer parameters
-				for (UMaterialFunctionInterface* Layer : StaticLayers->Value.Layers)
-				{
-					TMap<FName, FMaterialParamExpressionData>& LayerCache = ParamCache.LayerParameters.AddDefaulted_GetRef();
-					CacheMaterialFunctionParameterData(Layer, LayerCache);
-				}
-
-				// Cache blend parameters
-				for (UMaterialFunctionInterface* Blend : StaticLayers->Value.Blends)
-				{
-					TMap<FName, FMaterialParamExpressionData>& BlendCache = ParamCache.LayerParameters.AddDefaulted_GetRef();
-					CacheMaterialFunctionParameterData(Blend, BlendCache);
-				}
-			}
-			else
-			{
-				// Cache layer parameters
-				for (UMaterialFunctionInterface* Layer : LayerParameter->GetLayers())
-				{
-					TMap<FName, FMaterialParamExpressionData>& LayerCache = ParamCache.LayerParameters.AddDefaulted_GetRef();
-					CacheMaterialFunctionParameterData(Layer, LayerCache);
-				}
-
-				// Cache blend parameters
-				for (UMaterialFunctionInterface* Blend : LayerParameter->GetBlends())
-				{
-					TMap<FName, FMaterialParamExpressionData>& BlendCache = ParamCache.LayerParameters.AddDefaulted_GetRef();
-					CacheMaterialFunctionParameterData(Blend, BlendCache);
-				}
-			}
-		}
-	}
-	return ParamCache;
 }
 
 void UMaterialEditorPreviewParameters::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
@@ -455,21 +264,11 @@ void UMaterialEditorPreviewParameters::PostEditChangeProperty(FPropertyChangedEv
 	}
 }
 
-void UMaterialEditorPreviewParameters::AssignParameterToGroup(UMaterial* ParentMaterial, UDEditorParameterValue* ParameterValue, FName* OptionalGroupName)
+void UMaterialEditorPreviewParameters::AssignParameterToGroup(UDEditorParameterValue* ParameterValue, const FName& InParameterGroupName)
 {
-	check(ParentMaterial);
 	check(ParameterValue);
 
-	FName ParameterGroupName;
-	if (OptionalGroupName)
-	{
-		ParameterGroupName = *OptionalGroupName;
-	}
-	else
-	{
-		ParentMaterial->GetGroupName(ParameterValue->ParameterInfo, ParameterGroupName);
-	}
-	
+	FName ParameterGroupName = InParameterGroupName;
 	if (ParameterGroupName == TEXT("") || ParameterGroupName == TEXT("None"))
 	{
 		ParameterGroupName = TEXT("None");
@@ -513,259 +312,35 @@ void UMaterialEditorPreviewParameters::RegenerateArrays()
 		// Only operate on base materials
 		UMaterial* ParentMaterial = PreviewMaterial;
 
-		// Use param cache to lookup group and sort priority
-		auto AssignGroupAndSortPriority = [this, ParentMaterial](UDEditorParameterValue* InEditorParamValue, const FMaterialExpressionParameterDataCache& InCachedExpressionData)
-		{
-			const FMaterialParamExpressionData* ParamData = nullptr;
-			if (InEditorParamValue->ParameterInfo.Association == EMaterialParameterAssociation::GlobalParameter)
-			{
-				ParamData = InCachedExpressionData.GlobalParameters.Find(InEditorParamValue->ParameterInfo.Name);
-			}
-			// if the association is not 'global parameter', look into attribute layers if we have a potentially valid index
-			else if (InEditorParamValue->ParameterInfo.Index >= 0)
-			{
-				if (InEditorParamValue->ParameterInfo.Association == EMaterialParameterAssociation::LayerParameter
-					&& InCachedExpressionData.LayerParameters.IsValidIndex(InEditorParamValue->ParameterInfo.Index))
-				{
-					ParamData = InCachedExpressionData.LayerParameters[InEditorParamValue->ParameterInfo.Index].Find(InEditorParamValue->ParameterInfo.Name);
-				}
-				else if (InEditorParamValue->ParameterInfo.Association == EMaterialParameterAssociation::BlendParameter
-					&& InCachedExpressionData.BlendParameters.IsValidIndex(InEditorParamValue->ParameterInfo.Index))
-				{
-					ParamData = InCachedExpressionData.BlendParameters[InEditorParamValue->ParameterInfo.Index].Find(InEditorParamValue->ParameterInfo.Name);
-				}
-			}
-			FName GroupName = NAME_None;
-			if (ParamData)
-			{
-				InEditorParamValue->SortPriority = ParamData->SortPriority;
-				GroupName = ParamData->Group;
-			}
-			AssignParameterToGroup(ParentMaterial, InEditorParamValue, &GroupName);
-		};
-
 		// This can run before UMaterial::PostEditChangeProperty has a chance to run, so explicitly call UpdateCachedExpressionData here
 		PreviewMaterial->UpdateCachedExpressionData();
 
-		// Cache relevant material expression data used to resolve editor param value info in RegenerateArrays
-		//@todo FH: can this be/should be part of `UpdateCachedExpressionData`?
-		FMaterialExpressionParameterDataCache ExpressionParameterDataCache = CacheMaterialExpressionParameterData(PreviewMaterial, FStaticParameterSet());
-
 		// Loop through all types of parameters for this material and add them to the parameter arrays.
-		TArray<FMaterialParameterInfo> ParameterInfo;
-		TArray<FGuid> Guids;
-		ParentMaterial->GetAllVectorParameterInfo(ParameterInfo, Guids);
-
-		// Vector Parameters.
-		for (int32 ParameterIdx = 0; ParameterIdx < ParameterInfo.Num(); ParameterIdx++)
+		TMap<FMaterialParameterInfo, FMaterialParameterMetadata> ParameterValues;
+		for (int32 TypeIndex = 0; TypeIndex < NumMaterialParameterTypes; ++TypeIndex)
 		{
-			UDEditorVectorParameterValue& ParameterValue = *(NewObject<UDEditorVectorParameterValue>(this));
-			FName ParameterName = ParameterInfo[ParameterIdx].Name;
-			FLinearColor Value;
-			ParameterValue.bOverride = true;
-			ParameterValue.ExpressionId = Guids[ParameterIdx];
-			ParameterValue.ParameterInfo = ParameterInfo[ParameterIdx];
-			if (PreviewMaterial->GetVectorParameterValue(ParameterValue.ParameterInfo, Value))
+			const EMaterialParameterType ParameterType = (EMaterialParameterType)TypeIndex;
+
+			ParentMaterial->GetAllParametersOfType(ParameterType, ParameterValues);
+			for (const auto& It : ParameterValues)
 			{
-				ParameterValue.ParameterValue = Value;
-				PreviewMaterial->IsVectorParameterUsedAsChannelMask(ParameterValue.ParameterInfo, ParameterValue.bIsUsedAsChannelMask);		
-				PreviewMaterial->GetVectorParameterChannelNames(ParameterValue.ParameterInfo, ParameterValue.ChannelNames);
+				UDEditorParameterValue* Parameter = UDEditorParameterValue::Create(this, ParameterType, It.Key, It.Value);
+				Parameter->bOverride = true;
+				AssignParameterToGroup(Parameter, It.Value.Group);
 			}
-			AssignGroupAndSortPriority(&ParameterValue, ExpressionParameterDataCache);
 		}
 
-		// Scalar Parameters.
-		ParentMaterial->GetAllScalarParameterInfo(ParameterInfo, Guids);
-		for (int32 ParameterIdx = 0; ParameterIdx < ParameterInfo.Num(); ParameterIdx++)
+		// Static Material Layers
 		{
-			UDEditorScalarParameterValue& ParameterValue = *(NewObject<UDEditorScalarParameterValue>(this));
-			FName ParameterName = ParameterInfo[ParameterIdx].Name;
-			float Value;
-
-			ParameterValue.bOverride = true;
-			ParameterValue.ParameterInfo = ParameterInfo[ParameterIdx];
-			ParameterValue.ExpressionId = Guids[ParameterIdx];
-
-			if (PreviewMaterial->GetScalarParameterValue(ParameterValue.ParameterInfo, Value))
+			FMaterialLayersFunctions MaterialLayers;
+			if (ParentMaterial->GetMaterialLayers(MaterialLayers))
 			{
-				ParentMaterial->GetScalarParameterSliderMinMax(ParameterName, ParameterValue.SliderMin, ParameterValue.SliderMax);
-				ParentMaterial->IsScalarParameterUsedAsAtlasPosition(ParameterName, ParameterValue.AtlasData.bIsUsedAsAtlasPosition, ParameterValue.AtlasData.Curve, ParameterValue.AtlasData.Atlas);
-				ParameterValue.ParameterValue = Value;
+				UDEditorMaterialLayersParameterValue* ParameterValue = NewObject<UDEditorMaterialLayersParameterValue>(this);
+				ParameterValue->bOverride = true;
+				ParameterValue->ParameterValue = MoveTemp(MaterialLayers);
+				AssignParameterToGroup(ParameterValue, FName());
 			}
-			AssignGroupAndSortPriority(&ParameterValue, ExpressionParameterDataCache);
 		}
-
-		// Texture Parameters.
-		ParentMaterial->GetAllTextureParameterInfo(ParameterInfo, Guids);
-		for (int32 ParameterIdx = 0; ParameterIdx < ParameterInfo.Num(); ParameterIdx++)
-		{
-			UDEditorTextureParameterValue& ParameterValue = *(NewObject<UDEditorTextureParameterValue>(this));
-			FName ParameterName = ParameterInfo[ParameterIdx].Name;
-			UTexture* Value;
-
-			ParameterValue.bOverride = true;
-			ParameterValue.ParameterInfo = ParameterInfo[ParameterIdx];
-			ParameterValue.ExpressionId = Guids[ParameterIdx];
-
-			if (PreviewMaterial->GetTextureParameterValue(ParameterValue.ParameterInfo, Value))
-			{
-				ParameterValue.ParameterValue = Value;
-				PreviewMaterial->GetTextureParameterChannelNames(ParameterValue.ParameterInfo, ParameterValue.ChannelNames);
-			}
-			AssignGroupAndSortPriority(&ParameterValue, ExpressionParameterDataCache);
-		}
-
-		// Runtime Virtual Texture Parameters.
-		ParentMaterial->GetAllTextureParameterInfo(ParameterInfo, Guids);
-		for (int32 ParameterIdx = 0; ParameterIdx < ParameterInfo.Num(); ParameterIdx++)
-		{
-			UDEditorRuntimeVirtualTextureParameterValue& ParameterValue = *(NewObject<UDEditorRuntimeVirtualTextureParameterValue>(this));
-			FName ParameterName = ParameterInfo[ParameterIdx].Name;
-			URuntimeVirtualTexture* Value;
-
-			ParameterValue.bOverride = true;
-			ParameterValue.ParameterInfo = ParameterInfo[ParameterIdx];
-			ParameterValue.ExpressionId = Guids[ParameterIdx];
-
-			if (PreviewMaterial->GetRuntimeVirtualTextureParameterValue(ParameterValue.ParameterInfo, Value))
-			{
-				ParameterValue.ParameterValue = Value;
-			}
-			AssignGroupAndSortPriority(&ParameterValue, ExpressionParameterDataCache);
-		}
-
-		// Font Parameters.
-		ParentMaterial->GetAllFontParameterInfo(ParameterInfo, Guids);
-		for (int32 ParameterIdx = 0; ParameterIdx < ParameterInfo.Num(); ParameterIdx++)
-		{
-			UDEditorFontParameterValue& ParameterValue = *(NewObject<UDEditorFontParameterValue>(this));
-			FName ParameterName = ParameterInfo[ParameterIdx].Name;
-			UFont* FontValue;
-			int32 FontPage;
-
-			ParameterValue.bOverride = true;
-			ParameterValue.ParameterInfo = ParameterInfo[ParameterIdx];
-			ParameterValue.ExpressionId = Guids[ParameterIdx];
-
-			if (PreviewMaterial->GetFontParameterValue(ParameterValue.ParameterInfo, FontValue, FontPage))
-			{
-				ParameterValue.ParameterValue.FontValue = FontValue;
-				ParameterValue.ParameterValue.FontPage = FontPage;
-			}
-			AssignGroupAndSortPriority(&ParameterValue, ExpressionParameterDataCache);
-		}
-
-		// Get all static parameters from the source instance.  This will handle inheriting parent values.
-		FStaticParameterSet SourceStaticParameters;
-		// Static Material Layers Parameters
-		ParentMaterial->GetAllMaterialLayersParameterInfo(ParameterInfo, Guids);
-		SourceStaticParameters.MaterialLayersParameters.AddZeroed(ParameterInfo.Num());
-
-		for (int32 ParameterIdx = 0; ParameterIdx < ParameterInfo.Num(); ParameterIdx++)
-		{
-			FStaticMaterialLayersParameter& ParameterValue = SourceStaticParameters.MaterialLayersParameters[ParameterIdx];
-			ParameterValue.ParameterInfo = ParameterInfo[ParameterIdx];
-			FMaterialLayersFunctions Value = FMaterialLayersFunctions();
-			FGuid ExpressionId = Guids[ParameterIdx];
-
-			ParameterValue.bOverride = true;
-
-			//get the settings from the parent in the MIC chain
-			if (PreviewMaterial->GetMaterialLayersParameterValue(ParameterValue.ParameterInfo, Value, ExpressionId))
-			{
-				ParameterValue.Value = Value;
-			}
-			ParameterValue.ExpressionGUID = ExpressionId;
-		}
-
-		// Static Switch Parameters
-		ParentMaterial->GetAllStaticSwitchParameterInfo(ParameterInfo, Guids);
-		SourceStaticParameters.StaticSwitchParameters.AddZeroed(ParameterInfo.Num());
-
-		for (int32 ParameterIdx = 0; ParameterIdx < ParameterInfo.Num(); ParameterIdx++)
-		{
-			FStaticSwitchParameter& ParameterValue = SourceStaticParameters.StaticSwitchParameters[ParameterIdx];
-			ParameterValue.ParameterInfo = ParameterInfo[ParameterIdx];
-			bool Value = false;
-			FGuid ExpressionId = Guids[ParameterIdx];
-
-			ParameterValue.bOverride = true;
-
-			//get the settings from the parent in the MIC chain
-			if (PreviewMaterial->GetStaticSwitchParameterValue(ParameterValue.ParameterInfo, Value, ExpressionId))
-			{
-				ParameterValue.Value = Value;
-			}
-			ParameterValue.ExpressionGUID = ExpressionId;
-		}
-
-		// Static Component Mask Parameters
-		ParentMaterial->GetAllStaticComponentMaskParameterInfo(ParameterInfo, Guids);
-		SourceStaticParameters.StaticComponentMaskParameters.AddZeroed(ParameterInfo.Num());
-		for (int32 ParameterIdx = 0; ParameterIdx < ParameterInfo.Num(); ParameterIdx++)
-		{
-			FStaticComponentMaskParameter& ParameterValue = SourceStaticParameters.StaticComponentMaskParameters[ParameterIdx];
-			bool R = false;
-			bool G = false;
-			bool B = false;
-			bool A = false;
-			FGuid ExpressionId = Guids[ParameterIdx];
-
-			ParameterValue.bOverride = true;
-			ParameterValue.ParameterInfo = ParameterInfo[ParameterIdx];
-
-			//get the settings from the parent in the MIC chain
-			if (PreviewMaterial->GetStaticComponentMaskParameterValue(ParameterValue.ParameterInfo, R, G, B, A, ExpressionId))
-			{
-				ParameterValue.R = R;
-				ParameterValue.G = G;
-				ParameterValue.B = B;
-				ParameterValue.A = A;
-			}
-			ParameterValue.ExpressionGUID = ExpressionId;
-		}
-
-		// Copy material layer Parameters
-		for (int32 ParameterIdx = 0; ParameterIdx < SourceStaticParameters.MaterialLayersParameters.Num(); ParameterIdx++)
-		{
-			FStaticMaterialLayersParameter MaterialLayersParameterValue = FStaticMaterialLayersParameter(SourceStaticParameters.MaterialLayersParameters[ParameterIdx]);
-			UDEditorMaterialLayersParameterValue& ParameterValue = *(NewObject<UDEditorMaterialLayersParameterValue>(this));
-			ParameterValue.ParameterValue = MaterialLayersParameterValue.Value;
-			ParameterValue.bOverride = MaterialLayersParameterValue.bOverride;
-			ParameterValue.ParameterInfo = MaterialLayersParameterValue.ParameterInfo;
-			ParameterValue.ExpressionId = MaterialLayersParameterValue.ExpressionGUID;
-
-			AssignGroupAndSortPriority(&ParameterValue, ExpressionParameterDataCache);
-		}
-
-		// Copy Static Switch Parameters
-		for (int32 ParameterIdx = 0; ParameterIdx < SourceStaticParameters.StaticSwitchParameters.Num(); ParameterIdx++)
-		{
-			FStaticSwitchParameter StaticSwitchParameterValue = FStaticSwitchParameter(SourceStaticParameters.StaticSwitchParameters[ParameterIdx]);
-			UDEditorStaticSwitchParameterValue& ParameterValue = *(NewObject<UDEditorStaticSwitchParameterValue>(this));
-			ParameterValue.ParameterValue = StaticSwitchParameterValue.Value;
-			ParameterValue.bOverride = StaticSwitchParameterValue.bOverride;
-			ParameterValue.ParameterInfo = StaticSwitchParameterValue.ParameterInfo;
-			ParameterValue.ExpressionId = StaticSwitchParameterValue.ExpressionGUID;
-
-			AssignGroupAndSortPriority(&ParameterValue, ExpressionParameterDataCache);
-		}
-
-		// Copy Static Component Mask Parameters
-		for (int32 ParameterIdx = 0; ParameterIdx < SourceStaticParameters.StaticComponentMaskParameters.Num(); ParameterIdx++)
-		{
-			FStaticComponentMaskParameter StaticComponentMaskParameterValue = FStaticComponentMaskParameter(SourceStaticParameters.StaticComponentMaskParameters[ParameterIdx]);
-			UDEditorStaticComponentMaskParameterValue& ParameterValue = *(NewObject<UDEditorStaticComponentMaskParameterValue>(this));
-			ParameterValue.ParameterValue.R = StaticComponentMaskParameterValue.R;
-			ParameterValue.ParameterValue.G = StaticComponentMaskParameterValue.G;
-			ParameterValue.ParameterValue.B = StaticComponentMaskParameterValue.B;
-			ParameterValue.ParameterValue.A = StaticComponentMaskParameterValue.A;
-			ParameterValue.bOverride = StaticComponentMaskParameterValue.bOverride;
-			ParameterValue.ParameterInfo = StaticComponentMaskParameterValue.ParameterInfo;
-			ParameterValue.ExpressionId = StaticComponentMaskParameterValue.ExpressionGUID;
-			AssignGroupAndSortPriority(&ParameterValue, ExpressionParameterDataCache);
-		}
-
 	}
 	// sort contents of groups
 	for (int32 ParameterIdx = 0; ParameterIdx < ParameterGroups.Num(); ParameterIdx++)
@@ -832,57 +407,14 @@ void UMaterialEditorPreviewParameters::CopyToSourceInstance()
 			FEditorParameterGroup & Group = ParameterGroups[GroupIdx];
 			for (int32 ParameterIdx = 0; ParameterIdx < Group.Parameters.Num(); ParameterIdx++)
 			{
-				if (Group.Parameters[ParameterIdx] == NULL)
+				UDEditorParameterValue* Parameter = Group.Parameters[ParameterIdx];
+				if (Parameter)
 				{
-					continue;
-				}
-				UDEditorScalarParameterValue* ScalarParameterValue = Cast<UDEditorScalarParameterValue>(Group.Parameters[ParameterIdx]);
-				if (ScalarParameterValue)
-				{
-					PreviewMaterial->SetScalarParameterValueEditorOnly(ScalarParameterValue->ParameterInfo.Name, ScalarParameterValue->ParameterValue);
-					continue;
-				}
-				UDEditorFontParameterValue* FontParameterValue = Cast<UDEditorFontParameterValue>(Group.Parameters[ParameterIdx]);
-				if (FontParameterValue)
-				{
-					PreviewMaterial->SetFontParameterValueEditorOnly(FontParameterValue->ParameterInfo.Name, FontParameterValue->ParameterValue.FontValue, FontParameterValue->ParameterValue.FontPage);
-					continue;
-				}
-				UDEditorTextureParameterValue* TextureParameterValue = Cast<UDEditorTextureParameterValue>(Group.Parameters[ParameterIdx]);
-				if (TextureParameterValue)
-				{
-					PreviewMaterial->SetTextureParameterValueEditorOnly(TextureParameterValue->ParameterInfo.Name, TextureParameterValue->ParameterValue);
-					continue;
-				}
-				UDEditorRuntimeVirtualTextureParameterValue* RuntimeVirtualTextureParameterValue = Cast<UDEditorRuntimeVirtualTextureParameterValue>(Group.Parameters[ParameterIdx]);
-				if (RuntimeVirtualTextureParameterValue)
-				{
-					PreviewMaterial->SetRuntimeVirtualTextureParameterValueEditorOnly(RuntimeVirtualTextureParameterValue->ParameterInfo.Name, RuntimeVirtualTextureParameterValue->ParameterValue);
-					continue;
-				}
-				UDEditorVectorParameterValue* VectorParameterValue = Cast<UDEditorVectorParameterValue>(Group.Parameters[ParameterIdx]);
-				if (VectorParameterValue)
-				{
-					PreviewMaterial->SetVectorParameterValueEditorOnly(VectorParameterValue->ParameterInfo.Name, VectorParameterValue->ParameterValue);
-						continue;
-				}
-				UDEditorStaticComponentMaskParameterValue* MaskParameterValue = Cast<UDEditorStaticComponentMaskParameterValue>(Group.Parameters[ParameterIdx]);
-				if (MaskParameterValue)
-				{
-					bool MaskR = MaskParameterValue->ParameterValue.R;
-					bool MaskG = MaskParameterValue->ParameterValue.G;
-					bool MaskB = MaskParameterValue->ParameterValue.B;
-					bool MaskA = MaskParameterValue->ParameterValue.A;
-					FGuid ExpressionIdValue = MaskParameterValue->ExpressionId;
-					PreviewMaterial->SetStaticComponentMaskParameterValueEditorOnly(MaskParameterValue->ParameterInfo.Name, MaskR, MaskG, MaskB, MaskA, ExpressionIdValue);
-					continue;
-				}
-				UDEditorStaticSwitchParameterValue* SwitchParameterValue = Cast<UDEditorStaticSwitchParameterValue>(Group.Parameters[ParameterIdx]);
-				if (SwitchParameterValue)
-				{
-					bool SwitchValue = SwitchParameterValue->ParameterValue;
-					PreviewMaterial->SetStaticSwitchParameterValueEditorOnly(SwitchParameterValue->ParameterInfo.Name, SwitchValue, SwitchParameterValue->ExpressionId);
-					continue;
+					FMaterialParameterMetadata EditorValue;
+					if (Parameter->GetValue(EditorValue))
+					{
+						PreviewMaterial->SetParameterValueEditorOnly(Parameter->ParameterInfo.Name, EditorValue);
+					}
 				}
 			}
 		}
@@ -904,57 +436,14 @@ void UMaterialEditorPreviewParameters::ApplySourceFunctionChanges()
 			FEditorParameterGroup & Group = ParameterGroups[GroupIdx];
 			for (int32 ParameterIdx = 0; ParameterIdx < Group.Parameters.Num(); ParameterIdx++)
 			{
-				if (Group.Parameters[ParameterIdx] == NULL)
+				UDEditorParameterValue* Parameter = Group.Parameters[ParameterIdx];
+				if (Parameter)
 				{
-					continue;
-				}
-				UDEditorScalarParameterValue * ScalarParameterValue = Cast<UDEditorScalarParameterValue>(Group.Parameters[ParameterIdx]);
-				if (ScalarParameterValue)
-				{
-					OriginalFunction->SetScalarParameterValueEditorOnly(ScalarParameterValue->ParameterInfo.Name, ScalarParameterValue->ParameterValue);
-					continue;
-				}
-				UDEditorFontParameterValue * FontParameterValue = Cast<UDEditorFontParameterValue>(Group.Parameters[ParameterIdx]);
-				if (FontParameterValue)
-				{
-					OriginalFunction->SetFontParameterValueEditorOnly(FontParameterValue->ParameterInfo.Name, FontParameterValue->ParameterValue.FontValue, FontParameterValue->ParameterValue.FontPage);
-					continue;
-				}
-				UDEditorTextureParameterValue * TextureParameterValue = Cast<UDEditorTextureParameterValue>(Group.Parameters[ParameterIdx]);
-				if (TextureParameterValue)
-				{
-					OriginalFunction->SetTextureParameterValueEditorOnly(TextureParameterValue->ParameterInfo.Name, TextureParameterValue->ParameterValue);
-					continue;
-				}
-				UDEditorRuntimeVirtualTextureParameterValue * RuntimeVirtualTextureParameterValue = Cast<UDEditorRuntimeVirtualTextureParameterValue>(Group.Parameters[ParameterIdx]);
-				if (RuntimeVirtualTextureParameterValue)
-				{
-					OriginalFunction->SetRuntimeVirtualTextureParameterValueEditorOnly(RuntimeVirtualTextureParameterValue->ParameterInfo.Name, RuntimeVirtualTextureParameterValue->ParameterValue);
-					continue;
-				}
-				UDEditorVectorParameterValue * VectorParameterValue = Cast<UDEditorVectorParameterValue>(Group.Parameters[ParameterIdx]);
-				if (VectorParameterValue)
-				{
-					OriginalFunction->SetVectorParameterValueEditorOnly(VectorParameterValue->ParameterInfo.Name, VectorParameterValue->ParameterValue);
-					continue;
-				}
-				UDEditorStaticComponentMaskParameterValue * MaskParameterValue = Cast<UDEditorStaticComponentMaskParameterValue>(Group.Parameters[ParameterIdx]);
-				if (MaskParameterValue)
-				{
-					bool MaskR = MaskParameterValue->ParameterValue.R;
-					bool MaskG = MaskParameterValue->ParameterValue.G;
-					bool MaskB = MaskParameterValue->ParameterValue.B;
-					bool MaskA = MaskParameterValue->ParameterValue.A;
-					FGuid ExpressionIdValue = MaskParameterValue->ExpressionId;
-					OriginalFunction->SetStaticComponentMaskParameterValueEditorOnly(MaskParameterValue->ParameterInfo.Name, MaskR, MaskG, MaskB, MaskA, ExpressionIdValue);
-					continue;
-				}
-				UDEditorStaticSwitchParameterValue * SwitchParameterValue = Cast<UDEditorStaticSwitchParameterValue>(Group.Parameters[ParameterIdx]);
-				if (SwitchParameterValue)
-				{
-					bool SwitchValue = SwitchParameterValue->ParameterValue;
-					OriginalFunction->SetStaticSwitchParameterValueEditorOnly(SwitchParameterValue->ParameterInfo.Name, SwitchValue, SwitchParameterValue->ExpressionId);
-					continue;
+					FMaterialParameterMetadata EditorValue;
+					if (Parameter->GetValue(EditorValue))
+					{
+						OriginalFunction->SetParameterValueEditorOnly(Parameter->ParameterInfo.Name, EditorValue);
+					}
 				}
 			}
 		}
@@ -978,12 +467,18 @@ UMaterialEditorInstanceConstant::UMaterialEditorInstanceConstant(const FObjectIn
 {
 	bIsFunctionPreviewMaterial = false;
 	bShowOnlyOverrides = false;
+
+	// Default to override with nothing on MIC (don't inherit parent setting).
+	bNaniteOverride = true;
 }
 
 void UMaterialEditorInstanceConstant::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	if (SourceInstance)
 	{
+		// Warn our source instance that it is about to be updated.
+		SourceInstance->PreEditChange(PropertyChangedEvent.Property);
+
 		FProperty* PropertyThatChanged = PropertyChangedEvent.Property;
 		bool bLayersParameterChanged = false;
 
@@ -1007,7 +502,6 @@ void UMaterialEditorInstanceConstant::PostEditChangeProperty(FPropertyChangedEve
 				// Fully update static parameters before recreating render state for all components
 				SetSourceInstance(SourceInstance);
 			}
-		
 		}
 		else if (!bIsFunctionPreviewMaterial)
 		{
@@ -1019,10 +513,10 @@ void UMaterialEditorInstanceConstant::PostEditChangeProperty(FPropertyChangedEve
 				{
 					if (UDEditorMaterialLayersParameterValue* LayersParam = Cast<UDEditorMaterialLayersParameterValue>(Parameter))
 					{
-						if (SourceInstance->UpdateMaterialLayersParameterValue(LayersParam->ParameterInfo, LayersParam->ParameterValue, LayersParam->bOverride, LayersParam->ExpressionId))
+						if (SourceInstance->SetMaterialLayers(LayersParam->ParameterValue))
 						{
 							bLayersParameterChanged = true;
-						}	
+						}
 					}
 				}
 			}
@@ -1043,60 +537,16 @@ void UMaterialEditorInstanceConstant::PostEditChangeProperty(FPropertyChangedEve
 	}
 }
 
-void  UMaterialEditorInstanceConstant::AssignParameterToGroup(UMaterial*, UDEditorParameterValue* ParameterValue, const FName* OptionalGroupName)
+void  UMaterialEditorInstanceConstant::AssignParameterToGroup(UDEditorParameterValue* ParameterValue, const FName& InParameterGroupName)
 {
 	check(ParameterValue);
 
-	FName ParameterGroupName;
-	if (OptionalGroupName)
-	{
-		ParameterGroupName = *OptionalGroupName;
-	}
-	else
-	{
-		SourceInstance->GetGroupName(ParameterValue->ParameterInfo, ParameterGroupName);
-	}
-
+	FName ParameterGroupName = InParameterGroupName;
 	if (ParameterGroupName == TEXT("") || ParameterGroupName == TEXT("None"))
 	{
 		if (bUseOldStyleMICEditorGroups == true)
 		{
-			if (Cast<UDEditorVectorParameterValue>(ParameterValue))
-			{
-				ParameterGroupName = TEXT("Vector Parameter Values");
-			}
-			else if (Cast<UDEditorTextureParameterValue>(ParameterValue))
-			{
-				ParameterGroupName = TEXT("Texture Parameter Values");
-			}
-			else if (Cast<UDEditorRuntimeVirtualTextureParameterValue>(ParameterValue))
-			{
-				ParameterGroupName = TEXT("Texture Parameter Values");
-			}
-			else if (Cast<UDEditorScalarParameterValue>(ParameterValue))
-			{
-				ParameterGroupName = TEXT("Scalar Parameter Values");
-			}
-			else if (Cast<UDEditorStaticSwitchParameterValue>(ParameterValue))
-			{
-				ParameterGroupName = TEXT("Static Switch Parameter Values");
-			}
-			else if (Cast<UDEditorStaticComponentMaskParameterValue>(ParameterValue))
-			{
-				ParameterGroupName = TEXT("Static Component Mask Parameter Values");
-			}
-			else if (Cast<UDEditorFontParameterValue>(ParameterValue))
-			{
-				ParameterGroupName = TEXT("Font Parameter Values");
-			}
-			else if (Cast<UDEditorMaterialLayersParameterValue>(ParameterValue))
-			{
-				ParameterGroupName = TEXT("Material Layers Parameter Values");
-			}
-			else
-			{
-				ParameterGroupName = TEXT("None");
-			}
+			ParameterGroupName = ParameterValue->GetDefaultGroupName();
 		}
 		else
 		{
@@ -1134,263 +584,33 @@ void UMaterialEditorInstanceConstant::RegenerateArrays()
 
 	if (Parent)
 	{	
-		// Use param cache to lookup group and sort priority
-		auto AssignGroupAndSortPriority = [this](UDEditorParameterValue* InEditorParamValue, const FMaterialExpressionParameterDataCache& InCachedExpressionData)
-		{
-			const FMaterialParamExpressionData* ParamData = nullptr;
-			if (InEditorParamValue->ParameterInfo.Association == EMaterialParameterAssociation::GlobalParameter)
-			{
-				ParamData = InCachedExpressionData.GlobalParameters.Find(InEditorParamValue->ParameterInfo.Name);
-			}
-			// if the association is not 'global parameter', look into attribute layers if we have a potentially valid index
-			else if (InEditorParamValue->ParameterInfo.Index >= 0)
-			{
-				if (InEditorParamValue->ParameterInfo.Association == EMaterialParameterAssociation::LayerParameter
-					&& InCachedExpressionData.LayerParameters.IsValidIndex(InEditorParamValue->ParameterInfo.Index))
-				{
-					ParamData = InCachedExpressionData.LayerParameters[InEditorParamValue->ParameterInfo.Index].Find(InEditorParamValue->ParameterInfo.Name);
-				}
-				else if (InEditorParamValue->ParameterInfo.Association == EMaterialParameterAssociation::BlendParameter
-					&& InCachedExpressionData.BlendParameters.IsValidIndex(InEditorParamValue->ParameterInfo.Index))
-				{
-					ParamData = InCachedExpressionData.BlendParameters[InEditorParamValue->ParameterInfo.Index].Find(InEditorParamValue->ParameterInfo.Name);
-				}
-			}
-			if (ParamData)
-			{
-				InEditorParamValue->SortPriority = ParamData->SortPriority;
-			}
-			AssignParameterToGroup(nullptr/*useless param: Parent->GetMaterial()*/, InEditorParamValue, ParamData ? &ParamData->Group : nullptr);
-		};
-
 		// Only operate on base materials
 		UMaterial* ParentMaterial = Parent->GetMaterial();
 		SourceInstance->UpdateParameterNames();	// Update any parameter names that may have changed.
-		SourceInstance->UpdateCachedLayerParameters();
+		SourceInstance->UpdateCachedData();
 
-		// Get all static parameters from the source instance.  This will handle inheriting parent values.	
-		FStaticParameterSet SourceStaticParameters;
- 		SourceInstance->GetStaticParameterValues(SourceStaticParameters);
-
-		// Loop through all types of parameters for this material and add them to the parameter arrays.
-		TArray<FMaterialParameterInfo> OutParameterInfo;
-		TArray<FGuid> Guids;
 		// Need to get layer info first as other params are collected from layers
-		SourceInstance->GetAllMaterialLayersParameterInfo(OutParameterInfo, Guids);
-		// Copy Static Material Layers Parameters
-		for (int32 ParameterIdx = 0; ParameterIdx < SourceStaticParameters.MaterialLayersParameters.Num(); ParameterIdx++)
 		{
-			FStaticMaterialLayersParameter MaterialLayersParameterParameterValue = FStaticMaterialLayersParameter(SourceStaticParameters.MaterialLayersParameters[ParameterIdx]);
-			UDEditorMaterialLayersParameterValue& ParameterValue = *(NewObject<UDEditorMaterialLayersParameterValue>(this));
-
-			ParameterValue.ParameterValue = MaterialLayersParameterParameterValue.Value;
-			ParameterValue.bOverride = MaterialLayersParameterParameterValue.bOverride;
-			ParameterValue.ParameterInfo = MaterialLayersParameterParameterValue.ParameterInfo;
-			ParameterValue.ExpressionId = MaterialLayersParameterParameterValue.ExpressionGUID;
-
-			AssignParameterToGroup(ParentMaterial, &ParameterValue);
-		}
-
-		// Cache relevant material expression data to resolve editor param value info
-		FMaterialExpressionParameterDataCache ExpressionParameterDataCache = CacheMaterialExpressionParameterData(SourceInstance->GetMaterial(), SourceInstance->GetStaticParameters());
-
-		// Scalar Parameters.
-		SourceInstance->GetAllScalarParameterInfo(OutParameterInfo, Guids);		
-		for (int32 ParameterIdx = 0; ParameterIdx < OutParameterInfo.Num(); ParameterIdx++)
-		{			
-			UDEditorScalarParameterValue* ParamValue = NewObject<UDEditorScalarParameterValue>(this);
-
-			UDEditorScalarParameterValue& ParameterValue = *ParamValue;
-			const FMaterialParameterInfo& ParameterInfo = OutParameterInfo[ParameterIdx];
-
-			ParameterValue.bOverride = false;
-			ParameterValue.ParameterInfo = ParameterInfo;
-			ParameterValue.ExpressionId = Guids[ParameterIdx];
-
-			if (SourceInstance->GetScalarParameterValue(ParameterInfo, ParameterValue.ParameterValue))
+			FMaterialLayersFunctions MaterialLayers;
+			if (SourceInstance->GetMaterialLayers(MaterialLayers))
 			{
-				SourceInstance->IsScalarParameterUsedAsAtlasPosition(ParameterInfo, ParameterValue.AtlasData.bIsUsedAsAtlasPosition, ParameterValue.AtlasData.Curve, ParameterValue.AtlasData.Atlas);
-				SourceInstance->GetScalarParameterSliderMinMax(ParameterInfo, ParameterValue.SliderMin, ParameterValue.SliderMax);		
+				UDEditorMaterialLayersParameterValue& ParameterValue = *(NewObject<UDEditorMaterialLayersParameterValue>(this));
+				ParameterValue.bOverride = true;
+				ParameterValue.ParameterValue = MoveTemp(MaterialLayers);
+				AssignParameterToGroup(&ParameterValue, FName());
 			}
+		}
 
-			// @todo: This is kind of slow, maybe store these in a map for lookup?
-			// See if this keyname exists in the source instance.
-			for(int32 ScalarParameterIdx = 0; ScalarParameterIdx < SourceInstance->ScalarParameterValues.Num(); ScalarParameterIdx++)
+		TMap<FMaterialParameterInfo, FMaterialParameterMetadata> ParameterValues;
+		for (int32 TypeIndex = 0; TypeIndex < NumMaterialParameterTypes; ++TypeIndex)
+		{
+			const EMaterialParameterType ParameterType = (EMaterialParameterType)TypeIndex;
+			SourceInstance->GetAllParametersOfType(ParameterType, ParameterValues);
+			for (const auto& It : ParameterValues)
 			{
-				FScalarParameterValue& SourceParam = SourceInstance->ScalarParameterValues[ScalarParameterIdx];
-				if(ParameterInfo == SourceParam.ParameterInfo)
-				{
-					ParameterValue.bOverride = true;
-					ParameterValue.ParameterValue = SourceParam.ParameterValue;
-				}
+				UDEditorParameterValue* Parameter = UDEditorParameterValue::Create(this, ParameterType, It.Key, It.Value);
+				AssignParameterToGroup(Parameter, It.Value.Group);
 			}
-			AssignGroupAndSortPriority(ParamValue, ExpressionParameterDataCache);
-		}
-		
-
-		// Vector Parameters.
-		SourceInstance->GetAllVectorParameterInfo(OutParameterInfo, Guids);
-		for(int32 ParameterIdx = 0; ParameterIdx < OutParameterInfo.Num(); ParameterIdx++)
-		{
-			UDEditorVectorParameterValue* ParamValue = NewObject<UDEditorVectorParameterValue>(this);
-
-			UDEditorVectorParameterValue& ParameterValue = *ParamValue;
-			const FMaterialParameterInfo& ParameterInfo = OutParameterInfo[ParameterIdx];
-			
-			ParameterValue.bOverride = false;
-			ParameterValue.ParameterInfo = ParameterInfo;
-			ParameterValue.ExpressionId = Guids[ParameterIdx];
-
-			SourceInstance->GetVectorParameterValue(ParameterInfo, ParameterValue.ParameterValue);
-			SourceInstance->IsVectorParameterUsedAsChannelMask(ParameterInfo, ParameterValue.bIsUsedAsChannelMask);
-			SourceInstance->GetVectorParameterChannelNames(ParameterInfo, ParameterValue.ChannelNames);
-
-			// @todo: This is kind of slow, maybe store these in a map for lookup?
-			// See if this keyname exists in the source instance.
-			for(int32 VectorParameterIdx = 0; VectorParameterIdx < SourceInstance->VectorParameterValues.Num(); VectorParameterIdx++)
-			{
-				FVectorParameterValue& SourceParam = SourceInstance->VectorParameterValues[VectorParameterIdx];
-				if(ParameterInfo == SourceParam.ParameterInfo)
-				{
-					ParameterValue.bOverride = true;
-					ParameterValue.ParameterValue = SourceParam.ParameterValue;
-				}
-			}
-			AssignGroupAndSortPriority(ParamValue, ExpressionParameterDataCache);
-		}
-		
-
-		// Texture Parameters.
-		SourceInstance->GetAllTextureParameterInfo(OutParameterInfo, Guids);
-		for(int32 ParameterIdx=0; ParameterIdx<OutParameterInfo.Num(); ParameterIdx++)
-		{		
-			UDEditorTextureParameterValue* ParamValue = NewObject<UDEditorTextureParameterValue>(this);
-
-			UDEditorTextureParameterValue& ParameterValue = *ParamValue;
-			const FMaterialParameterInfo& ParameterInfo = OutParameterInfo[ParameterIdx];
-
-			ParameterValue.bOverride = false;
-			ParameterValue.ParameterInfo = ParameterInfo;
-			ParameterValue.ExpressionId = Guids[ParameterIdx];
-
-			ParameterValue.ParameterValue = nullptr;
-			SourceInstance->GetTextureParameterValue(ParameterInfo, ParameterValue.ParameterValue);
-			SourceInstance->GetTextureParameterChannelNames(ParameterInfo, ParameterValue.ChannelNames);
-
-			// @todo: This is kind of slow, maybe store these in a map for lookup?
-			// See if this keyname exists in the source instance.
-			for(int32 TextureParameterIdx=0; TextureParameterIdx<SourceInstance->TextureParameterValues.Num(); TextureParameterIdx++)
-			{
-				FTextureParameterValue& SourceParam = SourceInstance->TextureParameterValues[TextureParameterIdx];
-				if(ParameterInfo == SourceParam.ParameterInfo)
-				{
-					ParameterValue.bOverride = true;
-					ParameterValue.ParameterValue = SourceParam.ParameterValue;
-				}
-			}			
-			AssignGroupAndSortPriority(ParamValue, ExpressionParameterDataCache);
-		}
-
-		// Runtime Virtual Texture Parameters.
-		SourceInstance->GetAllRuntimeVirtualTextureParameterInfo(OutParameterInfo, Guids);
-		for (int32 ParameterIdx = 0; ParameterIdx < OutParameterInfo.Num(); ParameterIdx++)
-		{
-			UDEditorRuntimeVirtualTextureParameterValue* ParamValue = NewObject<UDEditorRuntimeVirtualTextureParameterValue>(this);
-
-			UDEditorRuntimeVirtualTextureParameterValue& ParameterValue = *ParamValue;
-			const FMaterialParameterInfo& ParameterInfo = OutParameterInfo[ParameterIdx];
-
-			ParameterValue.bOverride = false;
-			ParameterValue.ParameterInfo = ParameterInfo;
-			ParameterValue.ExpressionId = Guids[ParameterIdx];
-
-			ParameterValue.ParameterValue = nullptr;
-			SourceInstance->GetRuntimeVirtualTextureParameterValue(ParameterInfo, ParameterValue.ParameterValue);
-
-			// @todo: This is kind of slow, maybe store these in a map for lookup?
-			// See if this keyname exists in the source instance.
-			for (int32 TextureParameterIdx = 0; TextureParameterIdx < SourceInstance->RuntimeVirtualTextureParameterValues.Num(); TextureParameterIdx++)
-			{
-				FRuntimeVirtualTextureParameterValue& SourceParam = SourceInstance->RuntimeVirtualTextureParameterValues[TextureParameterIdx];
-				if (ParameterInfo == SourceParam.ParameterInfo)
-				{
-					ParameterValue.bOverride = true;
-					ParameterValue.ParameterValue = SourceParam.ParameterValue;
-				}
-				if (ParameterInfo.Name.IsEqual(SourceParam.ParameterInfo.Name) && ParameterInfo.Association == SourceParam.ParameterInfo.Association && ParameterInfo.Index == SourceParam.ParameterInfo.Index)
-				{
-					ParameterValue.bOverride = true;
-					ParameterValue.ParameterValue = SourceParam.ParameterValue;
-				}
-			}
-			AssignGroupAndSortPriority(ParamValue, ExpressionParameterDataCache);
-		}
-
-		// Font Parameters.
-		SourceInstance->GetAllFontParameterInfo(OutParameterInfo, Guids);
-		for(int32 ParameterIdx=0; ParameterIdx<OutParameterInfo.Num(); ParameterIdx++)
-		{
-			UDEditorFontParameterValue* ParamValue = NewObject<UDEditorFontParameterValue>(this);
-
-			UDEditorFontParameterValue& ParameterValue = *ParamValue;
-			const FMaterialParameterInfo& ParameterInfo = OutParameterInfo[ParameterIdx];
-
-			ParameterValue.bOverride = false;
-			ParameterValue.ParameterInfo = ParameterInfo;
-			ParameterValue.ExpressionId = Guids[ParameterIdx];
-
-			ParameterValue.ParameterValue.FontValue = nullptr;
-			ParameterValue.ParameterValue.FontPage = 0;
-			SourceInstance->GetFontParameterValue(ParameterInfo, ParameterValue.ParameterValue.FontValue, ParameterValue.ParameterValue.FontPage);
-
-			// @todo: This is kind of slow, maybe store these in a map for lookup?
-			// See if this keyname exists in the source instance.
-			for(int32 FontParameterIdx = 0; FontParameterIdx < SourceInstance->FontParameterValues.Num(); FontParameterIdx++)
-			{
-				FFontParameterValue& SourceParam = SourceInstance->FontParameterValues[FontParameterIdx];
-				if(ParameterInfo == SourceParam.ParameterInfo)
-				{
-					ParameterValue.bOverride = true;
-					ParameterValue.ParameterValue.FontValue = SourceParam.FontValue;
-					ParameterValue.ParameterValue.FontPage = SourceParam.FontPage;
-				}
-			}	
-			AssignGroupAndSortPriority(ParamValue, ExpressionParameterDataCache);
-		}
-
-		// Copy Static Switch Parameters
-		SourceInstance->GetAllStaticSwitchParameterInfo(OutParameterInfo, Guids);
-		for(int32 ParameterIdx = 0; ParameterIdx < SourceStaticParameters.StaticSwitchParameters.Num(); ParameterIdx++)
-		{	
-			FStaticSwitchParameter StaticSwitchParameterValue = FStaticSwitchParameter(SourceStaticParameters.StaticSwitchParameters[ParameterIdx]);
-			UDEditorStaticSwitchParameterValue* ParamValue = NewObject<UDEditorStaticSwitchParameterValue>(this);
-
-			UDEditorStaticSwitchParameterValue& ParameterValue = *ParamValue;
-
-			ParameterValue.ParameterValue = StaticSwitchParameterValue.Value;
-			ParameterValue.bOverride = StaticSwitchParameterValue.bOverride;
-			ParameterValue.ParameterInfo = StaticSwitchParameterValue.ParameterInfo;
-			ParameterValue.ExpressionId = StaticSwitchParameterValue.ExpressionGUID;
-			AssignGroupAndSortPriority(ParamValue, ExpressionParameterDataCache);
-		}
-
-		// Copy Static Component Mask Parameters
-		SourceInstance->GetAllStaticComponentMaskParameterInfo(OutParameterInfo, Guids);
-		for(int32 ParameterIdx=0; ParameterIdx<SourceStaticParameters.StaticComponentMaskParameters.Num(); ParameterIdx++)
-		{
-			FStaticComponentMaskParameter StaticComponentMaskParameterValue = FStaticComponentMaskParameter(SourceStaticParameters.StaticComponentMaskParameters[ParameterIdx]);
-			UDEditorStaticComponentMaskParameterValue* ParamValue = NewObject<UDEditorStaticComponentMaskParameterValue>(this);
-
-			UDEditorStaticComponentMaskParameterValue& ParameterValue = *ParamValue;
-
-			ParameterValue.ParameterValue.R = StaticComponentMaskParameterValue.R;
-			ParameterValue.ParameterValue.G = StaticComponentMaskParameterValue.G;
-			ParameterValue.ParameterValue.B = StaticComponentMaskParameterValue.B;
-			ParameterValue.ParameterValue.A = StaticComponentMaskParameterValue.A;
-			ParameterValue.bOverride = StaticComponentMaskParameterValue.bOverride;
-			ParameterValue.ParameterInfo = StaticComponentMaskParameterValue.ParameterInfo;
-			ParameterValue.ExpressionId = StaticComponentMaskParameterValue.ExpressionGUID;
-			AssignGroupAndSortPriority(ParamValue, ExpressionParameterDataCache);
 		}
 
 		IMaterialEditorModule* MaterialEditorModule = &FModuleManager::LoadModuleChecked<IMaterialEditorModule>( "MaterialEditor" );
@@ -1503,60 +723,23 @@ void UMaterialEditorInstanceConstant::ResetOverrides(int32 Index, EMaterialParam
 {
 	check(GIsEditor);
 
-	for (FEditorParameterGroup Group : ParameterGroups)
+	for (const FEditorParameterGroup& Group : ParameterGroups)
 	{
 		for (UDEditorParameterValue* Parameter : Group.Parameters)
 		{
 			if (Parameter->ParameterInfo.Association == MaterialType
 				&& Parameter->ParameterInfo.Index == Index)
 			{
-				UDEditorScalarParameterValue* ScalarParameterValue = Cast<UDEditorScalarParameterValue>(Parameter);
-				UDEditorVectorParameterValue* VectorParameterValue = Cast<UDEditorVectorParameterValue>(Parameter);
-				UDEditorTextureParameterValue* TextureParameterValue = Cast<UDEditorTextureParameterValue>(Parameter);
-				UDEditorRuntimeVirtualTextureParameterValue* RuntimeVirtualTextureParameterValue = Cast<UDEditorRuntimeVirtualTextureParameterValue>(Parameter);
-				UDEditorFontParameterValue* FontParameterValue = Cast<UDEditorFontParameterValue>(Parameter);
-				UDEditorStaticSwitchParameterValue* StaticSwitchParameterValue = Cast<UDEditorStaticSwitchParameterValue>(Parameter);
-				UDEditorStaticComponentMaskParameterValue* StaticMaskParameterValue = Cast<UDEditorStaticComponentMaskParameterValue>(Parameter);
-				if (ScalarParameterValue)
+				const EMaterialParameterType ParameterType = Parameter->GetParameterType();
+				if (ParameterType != EMaterialParameterType::None)
 				{
-					float Value;
-					Parameter->bOverride = SourceInstance->GetScalarParameterValue(Parameter->ParameterInfo, Value, true);
-				}
-				if (VectorParameterValue)
-				{
-					FLinearColor Value;
-					Parameter->bOverride = SourceInstance->GetVectorParameterValue(Parameter->ParameterInfo, Value, true);
-				}
-				if (TextureParameterValue)
-				{
-					UTexture* Value;
-					Parameter->bOverride = SourceInstance->GetTextureParameterValue(Parameter->ParameterInfo, Value, true);
-				}
-				if (RuntimeVirtualTextureParameterValue)
-				{
-					URuntimeVirtualTexture* Value;
-					Parameter->bOverride = SourceInstance->GetRuntimeVirtualTextureParameterValue(Parameter->ParameterInfo, Value, true);
-				}
-				if (FontParameterValue)
-				{
-					UFont* FontValue;
-					int32 FontPage;
-					Parameter->bOverride = SourceInstance->GetFontParameterValue(Parameter->ParameterInfo, FontValue, FontPage, true);
-				}
-				if (StaticSwitchParameterValue)
-				{
-					bool Value;
-					FGuid ExpressionId;
-					Parameter->bOverride = SourceInstance->GetStaticSwitchParameterValue(Parameter->ParameterInfo, Value, ExpressionId, true);
-				}
-				if (StaticMaskParameterValue)
-				{
-					bool R;
-					bool G;
-					bool B;
-					bool A;
-					FGuid ExpressionId;
-					Parameter->bOverride = SourceInstance->GetStaticComponentMaskParameterValue(Parameter->ParameterInfo, R, G, B, A, ExpressionId, true);
+					FMaterialParameterMetadata SourceValue;
+					bool bOverride = false;
+					if (SourceInstance->GetParameterValue(ParameterType, Parameter->ParameterInfo, SourceValue, EMaterialGetParameterValueFlags::CheckInstanceOverrides))
+					{
+						bOverride = SourceValue.bOverride;
+					}
+					Parameter->bOverride = bOverride;
 				}
 			}
 		}
@@ -1579,61 +762,37 @@ void UMaterialEditorInstanceConstant::CopyToSourceInstance(const bool bForceStat
 			SourceInstance->MarkPackageDirty();
 		}
 
-		SourceInstance->ClearParameterValuesEditorOnly();
-
-		for (int32 GroupIdx=0; GroupIdx<ParameterGroups.Num(); GroupIdx++)
 		{
-			FEditorParameterGroup & Group = ParameterGroups[GroupIdx];
-			for (int32 ParameterIdx=0; ParameterIdx<Group.Parameters.Num(); ParameterIdx++)
-			{
-				if (Group.Parameters[ParameterIdx] == NULL)
-				{
-					continue;
-				}
+			FMaterialInstanceParameterUpdateContext UpdateContext(SourceInstance, EMaterialInstanceClearParameterFlag::All);
+			UpdateContext.SetBasePropertyOverrides(BasePropertyOverrides);
+			UpdateContext.SetForceStaticPermutationUpdate(bForceStaticPermutationUpdate);
 
-				UDEditorScalarParameterValue* ScalarParameterValue = Cast<UDEditorScalarParameterValue>(Group.Parameters[ParameterIdx]);
-				UDEditorVectorParameterValue* VectorParameterValue = Cast<UDEditorVectorParameterValue>(Group.Parameters[ParameterIdx]);
-				UDEditorTextureParameterValue* TextureParameterValue = Cast<UDEditorTextureParameterValue>(Group.Parameters[ParameterIdx]);
-				UDEditorRuntimeVirtualTextureParameterValue* RuntimeVirtualTextureParameterValue = Cast<UDEditorRuntimeVirtualTextureParameterValue>(Group.Parameters[ParameterIdx]);
-				UDEditorFontParameterValue* FontParameterValue = Cast<UDEditorFontParameterValue>(Group.Parameters[ParameterIdx]);
-				if (ScalarParameterValue && ScalarParameterValue->bOverride)
+			for (int32 GroupIdx = 0; GroupIdx < ParameterGroups.Num(); GroupIdx++)
+			{
+				FEditorParameterGroup& Group = ParameterGroups[GroupIdx];
+				for (int32 ParameterIdx = 0; ParameterIdx < Group.Parameters.Num(); ParameterIdx++)
 				{
-					SourceInstance->SetScalarParameterValueEditorOnly(ScalarParameterValue->ParameterInfo, ScalarParameterValue->ParameterValue);
-					// Copy from editor parameter to saved FParameter
-					if (ScalarParameterValue->AtlasData.bIsUsedAsAtlasPosition)
+					UDEditorParameterValue* Parameter = Group.Parameters[ParameterIdx];
+					if (Parameter && Parameter->bOverride)
 					{
-						FScalarParameterAtlasInstanceData InAtlasData = FScalarParameterAtlasInstanceData();
-						InAtlasData.bIsUsedAsAtlasPosition = ScalarParameterValue->AtlasData.bIsUsedAsAtlasPosition;
-						InAtlasData.Curve = ScalarParameterValue->AtlasData.Curve;
-						InAtlasData.Atlas = ScalarParameterValue->AtlasData.Atlas;
-						SourceInstance->SetScalarParameterAtlasEditorOnly(ScalarParameterValue->ParameterInfo, InAtlasData);
+						FMaterialParameterMetadata EditorValue;
+						if (Parameter->GetValue(EditorValue))
+						{
+							UpdateContext.SetParameterValueEditorOnly(Parameter->ParameterInfo, EditorValue, EMaterialSetParameterValueFlags::SetCurveAtlas);
+						}
+						else if (UDEditorMaterialLayersParameterValue* LayersParameter = Cast<UDEditorMaterialLayersParameterValue>(Parameter))
+						{
+							UpdateContext.SetMaterialLayers(LayersParameter->ParameterValue);
+						}
 					}
-				}
-				else if (VectorParameterValue && VectorParameterValue->bOverride)
-				{
-					SourceInstance->SetVectorParameterValueEditorOnly(VectorParameterValue->ParameterInfo, VectorParameterValue->ParameterValue);
-				}
-				else if (TextureParameterValue && TextureParameterValue->bOverride)
-				{
-					SourceInstance->SetTextureParameterValueEditorOnly(TextureParameterValue->ParameterInfo, TextureParameterValue->ParameterValue);
-				}
-				else if (RuntimeVirtualTextureParameterValue && RuntimeVirtualTextureParameterValue->bOverride)
-				{
-					SourceInstance->SetRuntimeVirtualTextureParameterValueEditorOnly(RuntimeVirtualTextureParameterValue->ParameterInfo, RuntimeVirtualTextureParameterValue->ParameterValue);
-				}
-				else if (FontParameterValue && FontParameterValue->bOverride)
-				{
-					SourceInstance->SetFontParameterValueEditorOnly(FontParameterValue->ParameterInfo, FontParameterValue->ParameterValue.FontValue, FontParameterValue->ParameterValue.FontPage);
 				}
 			}
 		}
 
-		FStaticParameterSet NewStaticParameters;
-		BuildStaticParametersForSourceInstance(NewStaticParameters);
-		SourceInstance->UpdateStaticPermutation(NewStaticParameters, BasePropertyOverrides, bForceStaticPermutationUpdate);
-
 		// Copy phys material back to source instance
 		SourceInstance->PhysMaterial = PhysMaterial;
+		SourceInstance->NaniteOverrideMaterial.bEnableOverride = bNaniteOverride;
+		SourceInstance->NaniteOverrideMaterial.OverrideMaterialEditor = NaniteOverrideMaterial;
 
 		// Copy the Lightmass settings...
 		SourceInstance->SetOverrideCastShadowAsMasked(LightmassSettings.CastShadowAsMasked.bOverride);
@@ -1675,12 +834,15 @@ void UMaterialEditorInstanceConstant::ApplySourceFunctionChanges()
 		// Copy updated function parameter values	
 		SourceFunction->ScalarParameterValues = SourceInstance->ScalarParameterValues;
 		SourceFunction->VectorParameterValues = SourceInstance->VectorParameterValues;
+		SourceFunction->DoubleVectorParameterValues = SourceInstance->DoubleVectorParameterValues;
 		SourceFunction->TextureParameterValues = SourceInstance->TextureParameterValues;
 		SourceFunction->RuntimeVirtualTextureParameterValues = SourceInstance->RuntimeVirtualTextureParameterValues;
+		SourceFunction->SparseVolumeTextureParameterValues = SourceInstance->SparseVolumeTextureParameterValues;
 		SourceFunction->FontParameterValues = SourceInstance->FontParameterValues;
 
-		const FStaticParameterSet& StaticParameters = SourceInstance->GetStaticParameters();
-		SourceFunction->StaticSwitchParameterValues = StaticParameters.StaticSwitchParameters;
+		
+		SourceFunction->StaticSwitchParameterValues = SourceInstance->GetStaticParameters().StaticSwitchParameters;
+		const FStaticParameterSetEditorOnlyData& StaticParameters = SourceInstance->GetEditorOnlyStaticParameters();
 		SourceFunction->StaticComponentMaskParameterValues = StaticParameters.StaticComponentMaskParameters;
 
 		SourceFunction->MarkPackageDirty();
@@ -1690,74 +852,46 @@ void UMaterialEditorInstanceConstant::ApplySourceFunctionChanges()
 	}
 }
 
-void UMaterialEditorInstanceConstant::BuildStaticParametersForSourceInstance(FStaticParameterSet& OutStaticParameters)
-{
-	for(int32 GroupIdx=0; GroupIdx<ParameterGroups.Num(); GroupIdx++)
-	{
-		FEditorParameterGroup& Group = ParameterGroups[GroupIdx];
-
-		for(int32 ParameterIdx=0; ParameterIdx<Group.Parameters.Num(); ParameterIdx++)
-		{
-			if (Group.Parameters[ParameterIdx] == NULL)
-			{
-				continue;
-			}
-
-			// Static switch
-			UDEditorStaticSwitchParameterValue* StaticSwitchParameterValue = Cast<UDEditorStaticSwitchParameterValue>(Group.Parameters[ParameterIdx]);
-			if (StaticSwitchParameterValue && StaticSwitchParameterValue->bOverride)
-			{
-				bool SwitchValue = StaticSwitchParameterValue->ParameterValue;
-				FGuid ExpressionIdValue = StaticSwitchParameterValue->ExpressionId;
-
-				FStaticSwitchParameter* NewParameter = new(OutStaticParameters.StaticSwitchParameters)
-					FStaticSwitchParameter(StaticSwitchParameterValue->ParameterInfo, SwitchValue, StaticSwitchParameterValue->bOverride, ExpressionIdValue);
-			}
-
-			// Static component mask
-			UDEditorStaticComponentMaskParameterValue* StaticComponentMaskParameterValue = Cast<UDEditorStaticComponentMaskParameterValue>(Group.Parameters[ParameterIdx]);
-			if (StaticComponentMaskParameterValue && StaticComponentMaskParameterValue->bOverride)
-			{
-				bool MaskR = StaticComponentMaskParameterValue->ParameterValue.R;
-				bool MaskG = StaticComponentMaskParameterValue->ParameterValue.G;
-				bool MaskB = StaticComponentMaskParameterValue->ParameterValue.B;
-				bool MaskA = StaticComponentMaskParameterValue->ParameterValue.A;
-				FGuid ExpressionIdValue = StaticComponentMaskParameterValue->ExpressionId;
-
-				FStaticComponentMaskParameter* NewParameter = new(OutStaticParameters.StaticComponentMaskParameters) 
-					FStaticComponentMaskParameter(StaticComponentMaskParameterValue->ParameterInfo, MaskR, MaskG, MaskB, MaskA, StaticComponentMaskParameterValue->bOverride, ExpressionIdValue);
-			}
-
-			// Material layers param
-			UDEditorMaterialLayersParameterValue* MaterialLayersParameterValue = Cast<UDEditorMaterialLayersParameterValue>(Group.Parameters[ParameterIdx]);
-			if (MaterialLayersParameterValue && MaterialLayersParameterValue->bOverride)
-			{
-				const FMaterialLayersFunctions& MaterialLayers = MaterialLayersParameterValue->ParameterValue;
-				FGuid ExpressionIdValue = MaterialLayersParameterValue->ExpressionId;
-
-				FStaticMaterialLayersParameter* NewParameter = new(OutStaticParameters.MaterialLayersParameters)
-					FStaticMaterialLayersParameter(MaterialLayersParameterValue->ParameterInfo, MaterialLayers, MaterialLayersParameterValue->bOverride, ExpressionIdValue);
-			}
-		}
-	}
-}
-
-
 void UMaterialEditorInstanceConstant::SetSourceInstance(UMaterialInstanceConstant* MaterialInterface)
 {
 	check(MaterialInterface);
 	SourceInstance = MaterialInterface;
 	Parent = SourceInstance->Parent;
 	PhysMaterial = SourceInstance->PhysMaterial;
+	bNaniteOverride = SourceInstance->NaniteOverrideMaterial.bEnableOverride;
+	NaniteOverrideMaterial = SourceInstance->NaniteOverrideMaterial.OverrideMaterialEditor;
 
 	CopyBasePropertiesFromParent();
 
 	RegenerateArrays();
 
 	//propagate changes to the base material so the instance will be updated if it has a static permutation resource
-	FStaticParameterSet NewStaticParameters;
-	BuildStaticParametersForSourceInstance(NewStaticParameters);
-	SourceInstance->UpdateStaticPermutation(NewStaticParameters);
+	FMaterialInstanceParameterUpdateContext UpdateContext(SourceInstance, EMaterialInstanceClearParameterFlag::Static);
+
+	for (int32 GroupIdx = 0; GroupIdx < ParameterGroups.Num(); GroupIdx++)
+	{
+		FEditorParameterGroup& Group = ParameterGroups[GroupIdx];
+		for (int32 ParameterIdx = 0; ParameterIdx < Group.Parameters.Num(); ParameterIdx++)
+		{
+			UDEditorParameterValue* Parameter = Group.Parameters[ParameterIdx];
+			if (Parameter && Parameter->bOverride)
+			{
+				FMaterialParameterMetadata EditorValue;
+				if (Parameter->GetValue(EditorValue))
+				{
+					// Only want to update static parameters here
+					if (IsStaticMaterialParameter(EditorValue.Value.Type))
+					{
+						UpdateContext.SetParameterValueEditorOnly(Parameter->ParameterInfo, EditorValue);
+					}
+				}
+				else if (UDEditorMaterialLayersParameterValue* LayersParameter = Cast<UDEditorMaterialLayersParameterValue>(Parameter))
+				{
+					UpdateContext.SetMaterialLayers(LayersParameter->ParameterValue);
+				}
+			}
+		}
+	}
 }
 
 void UMaterialEditorInstanceConstant::SetSourceFunction(UMaterialFunctionInstance* MaterialFunction)
@@ -1806,9 +940,37 @@ void UMaterialEditorInstanceConstant::CopyBasePropertiesFromParent()
 	{
 		BasePropertyOverrides.TwoSided = SourceInstance->IsTwoSided();
 	}
+	if (!BasePropertyOverrides.bOverride_bIsThinSurface)
+	{
+		BasePropertyOverrides.bIsThinSurface = SourceInstance->IsThinSurface();
+	}
+	if (!BasePropertyOverrides.bOverride_OutputTranslucentVelocity)
+	{
+		BasePropertyOverrides.bOutputTranslucentVelocity = SourceInstance->IsTranslucencyWritingVelocity();
+	}
+	if (!BasePropertyOverrides.bOverride_bHasPixelAnimation)
+	{
+		BasePropertyOverrides.bHasPixelAnimation = SourceInstance->HasPixelAnimation();
+	}
+	if (!BasePropertyOverrides.bOverride_bEnableTessellation)
+	{
+		BasePropertyOverrides.bEnableTessellation = SourceInstance->IsTessellationEnabled();
+	}
 	if (!BasePropertyOverrides.DitheredLODTransition)
 	{
 		BasePropertyOverrides.DitheredLODTransition = SourceInstance->IsDitheredLODTransition();
+	}
+	if (!BasePropertyOverrides.bOverride_DisplacementScaling)
+	{
+		BasePropertyOverrides.DisplacementScaling = SourceInstance->GetDisplacementScaling();
+	}
+	if (!BasePropertyOverrides.bOverride_MaxWorldPositionOffsetDisplacement)
+	{
+		BasePropertyOverrides.MaxWorldPositionOffsetDisplacement = SourceInstance->GetMaxWorldPositionOffsetDisplacement();
+	}
+	if (!BasePropertyOverrides.bOverride_CastDynamicShadowAsMasked)
+	{
+		BasePropertyOverrides.bCastDynamicShadowAsMasked = SourceInstance->GetCastDynamicShadowAsMasked();
 	}
 
 	// Copy the Lightmass settings...
@@ -1839,6 +1001,8 @@ void UMaterialEditorInstanceConstant::PostEditUndo()
 	}
 	else if (SourceInstance)
 	{
+		SourceInstance->PostEditUndo();
+
 		FMaterialUpdateContext Context;
 
 		UpdateSourceInstanceParent();

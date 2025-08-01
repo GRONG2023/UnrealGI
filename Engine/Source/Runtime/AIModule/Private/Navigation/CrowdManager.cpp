@@ -5,10 +5,12 @@
 #include "GameFramework/Pawn.h"
 #include "GameFramework/Controller.h"
 #include "NavigationSystem.h"
+#include "NavFilters/NavigationQueryFilter.h"
 #include "NavMesh/RecastNavMesh.h"
 #include "VisualLogger/VisualLogger.h"
 #include "AIModuleLog.h"
 #include "Engine/Engine.h"
+#include "Math/UnrealMathUtility.h"
 
 #if WITH_RECAST
 #include "NavMesh/RecastHelpers.h"
@@ -19,6 +21,8 @@
 #endif
 
 #include "Navigation/CrowdFollowingComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(CrowdManager)
 
 DECLARE_STATS_GROUP(TEXT("Crowd"), STATGROUP_AICrowd, STATCAT_Advanced);
 
@@ -204,32 +208,6 @@ UCrowdManager::UCrowdManager(const FObjectInitializer& ObjectInitializer) : Supe
 	AvoidanceConfig.Add(AvoidanceConfig66);
 }
 
-void UCrowdManager::PostInitProperties() 
-{
-	Super::PostInitProperties();
-
-#if WITH_EDITORONLY_DATA
-	if (HasAnyFlags(RF_ClassDefaultObject) == false)
-	{
-		DebugDrawingWorld = GetWorld();
-		// note that being ENetMode::NM_DedicatedServer implies DebugDrawingWorld is a game world, which is exactly what we need
-		if (DebugDrawingWorld != nullptr && DebugDrawingWorld->GetNetMode() == ENetMode::NM_DedicatedServer)
-		{
-			// no point in trying to draw on dedicated server. Let's see if there's a client world we can use for drawing!
-			const TIndirectArray<FWorldContext>& WorldContexts = GEngine->GetWorldContexts();
-			for (const FWorldContext& Context : WorldContexts)
-			{
-				if (Context.World()->IsGameWorld() && Context.World()->GetNetMode() != ENetMode::NM_DedicatedServer)
-				{
-					DebugDrawingWorld = Context.World();
-					break;
-				}
-			}
-		}
-	}
-#endif // WITH_EDITORONLY_DATA && ENABLE_DRAW_DEBUG
-}
-
 void UCrowdManager::BeginDestroy()
 {
 #if WITH_RECAST
@@ -244,7 +222,9 @@ void UCrowdManager::BeginDestroy()
 	delete TickHelper;
 #endif
 
+#if WITH_RECAST
 	DestroyCrowdManager();
+#endif // WITH_RECAST
 	Super::BeginDestroy();
 }
 
@@ -766,7 +746,7 @@ void UCrowdManager::GetAgentParams(const ICrowdAgentInterface* Agent, dtCrowdAge
 		AgentParams.collisionQueryRange = CrowdComponent->GetCrowdCollisionQueryRange();
 		AgentParams.pathOptimizationRange = CrowdComponent->GetCrowdPathOptimizationRange();
 		AgentParams.separationWeight = CrowdComponent->GetCrowdSeparationWeight();
-		AgentParams.obstacleAvoidanceType = CrowdComponent->GetCrowdAvoidanceQuality();
+		AgentParams.obstacleAvoidanceType = IntCastChecked<unsigned char>((int32)CrowdComponent->GetCrowdAvoidanceQuality());
 		AgentParams.avoidanceQueryMultiplier = CrowdComponent->GetCrowdAvoidanceRangeMultiplier();
 
 		if (CrowdComponent->IsCrowdSimulationEnabled())
@@ -815,7 +795,7 @@ void UCrowdManager::ApplyVelocity(UCrowdFollowingComponent* AgentComponent, int3
 	const dtCrowdAgentAnimation* anims = DetourCrowd->getAgentAnims();
 
 	const FVector NewVelocity = Recast2UnrealPoint(ag->nvel);
-	const float* RcDestCorner = anims[AgentIndex].active ? anims[AgentIndex].endPos : 
+	const FVector::FReal* RcDestCorner = anims[AgentIndex].active ? anims[AgentIndex].endPos : 
 		ag->ncorners ? &ag->cornerVerts[0] : &ag->npos[0];
 
 	const bool bIsNearEndOfPath = (ag->ncorners == 1) && ((ag->cornerFlags[0] & DT_STRAIGHTPATH_OFFMESH_CONNECTION) == 0);
@@ -858,7 +838,7 @@ void UCrowdManager::UpdateAgentPaths()
 
 				if (AnimInfo.t == 0)
 				{
-					const uint32 NavLinkId = RecastNavData->GetLinkUserId(AnimInfo.polyRef);
+					const FNavLinkId NavLinkId = RecastNavData->GetNavLinkUserId(AnimInfo.polyRef);
 					INavLinkCustomInterface* CustomLink = NavSys->GetCustomLink(NavLinkId);
 
 					if (CustomLink)
@@ -945,7 +925,10 @@ void UCrowdManager::CreateCrowdManager()
 			const FCrowdAvoidanceSamplingPattern& Info = SamplingPatterns[Idx];
 			if (Info.Angles.Num() > 0 && Info.Angles.Num() == Info.Radii.Num())
 			{
-				DetourCrowd->setObstacleAvoidancePattern(Idx, Info.Angles.GetData(), Info.Radii.GetData(), Info.Angles.Num());
+				const TArray<FVector::FReal> Angles = UE::LWC::ConvertArrayType<FVector::FReal>(Info.Angles);
+				const TArray<FVector::FReal> Radii = UE::LWC::ConvertArrayType<FVector::FReal>(Info.Radii);
+
+				DetourCrowd->setObstacleAvoidancePattern(Idx, Angles.GetData(), Radii.GetData(), Angles.Num());
 			}
 		}
 
@@ -969,11 +952,33 @@ void UCrowdManager::DestroyCrowdManager()
 }
 
 #if ENABLE_DRAW_DEBUG
+UWorld* UCrowdManager::GetDebugDrawingWorld() const
+{
+	UWorld* DebugDrawingWorld = GetWorld();
+
+#if WITH_EDITORONLY_DATA
+	// note that being ENetMode::NM_DedicatedServer implies DebugDrawingWorld is a game world, which is exactly what we need
+	if (DebugDrawingWorld != nullptr && DebugDrawingWorld->GetNetMode() == ENetMode::NM_DedicatedServer)
+	{
+		// no point in trying to draw on dedicated server. Let's see if there's a client world we can use for drawing!
+		const TIndirectArray<FWorldContext>& WorldContexts = GEngine->GetWorldContexts();
+		for (const FWorldContext& Context : WorldContexts)
+		{
+			if (Context.World()->IsGameWorld() && Context.World()->GetNetMode() != ENetMode::NM_DedicatedServer)
+			{
+				DebugDrawingWorld = Context.World();
+				break;
+			}
+		}
+	}
+#endif
+
+	return DebugDrawingWorld;
+}
+
 void UCrowdManager::DrawDebugCorners(const dtCrowdAgent* CrowdAgent) const
 {
-#if !WITH_EDITORONLY_DATA
-	UWorld* DebugDrawingWorld = GetWorld();
-#endif // !WITH_EDITORONLY_DATA
+	UWorld* DebugDrawingWorld = GetDebugDrawingWorld();
 
 	{
 		FVector P0 = Recast2UnrealPoint(CrowdAgent->npos);
@@ -994,16 +999,14 @@ void UCrowdManager::DrawDebugCorners(const dtCrowdAgent* CrowdAgent) const
 
 void UCrowdManager::DrawDebugCollisionSegments(const dtCrowdAgent* CrowdAgent) const
 {
-#if !WITH_EDITORONLY_DATA
-	UWorld* DebugDrawingWorld = GetWorld();
-#endif // !WITH_EDITORONLY_DATA
+	UWorld* DebugDrawingWorld = GetDebugDrawingWorld();
 
 	FVector Center = Recast2UnrealPoint(CrowdAgent->boundary.getCenter()) + FCrowdDebug::Offset;
-	DrawDebugCylinder(DebugDrawingWorld, Center - FCrowdDebug::Offset, Center, CrowdAgent->params.collisionQueryRange, 32, FCrowdDebug::CollisionRange);
+	DrawDebugCylinder(DebugDrawingWorld, Center - FCrowdDebug::Offset, Center, UE_REAL_TO_FLOAT_CLAMPED_MAX(CrowdAgent->params.collisionQueryRange), 32, FCrowdDebug::CollisionRange);
 
 	for (int32 Idx = 0; Idx < CrowdAgent->boundary.getSegmentCount(); Idx++)
 	{
-		const float* s = CrowdAgent->boundary.getSegment(Idx);
+		const FVector::FReal* s = CrowdAgent->boundary.getSegment(Idx);
 		const int32 SegFlags = CrowdAgent->boundary.getSegmentFlags(Idx);
 		const FColor Color = (SegFlags & DT_CROWD_BOUNDARY_IGNORE) ? FCrowdDebug::CollisionSegIgnored :
 			(dtTriArea2D(CrowdAgent->npos, s, s + 3) < 0.0f) ? FCrowdDebug::CollisionSeg1 :
@@ -1018,9 +1021,7 @@ void UCrowdManager::DrawDebugCollisionSegments(const dtCrowdAgent* CrowdAgent) c
 
 void UCrowdManager::DrawDebugPath(const dtCrowdAgent* CrowdAgent) const
 {
-#if !WITH_EDITORONLY_DATA
-	UWorld* DebugDrawingWorld = GetWorld();
-#endif // !WITH_EDITORONLY_DATA
+	UWorld* DebugDrawingWorld = GetDebugDrawingWorld();
 
 	ARecastNavMesh* NavMesh = Cast<ARecastNavMesh>(MyNavData);
 	if (NavMesh == NULL)
@@ -1059,22 +1060,21 @@ void UCrowdManager::DrawDebugPath(const dtCrowdAgent* CrowdAgent) const
 
 void UCrowdManager::DrawDebugVelocityObstacles(const dtCrowdAgent* CrowdAgent) const
 {
-#if !WITH_EDITORONLY_DATA
-	UWorld* DebugDrawingWorld = GetWorld();
-#endif // !WITH_EDITORONLY_DATA
-	FVector Center = Recast2UnrealPoint(CrowdAgent->npos) + FCrowdDebug::Offset;
-	DrawDebugCylinder(DebugDrawingWorld, Center - FCrowdDebug::Offset, Center, CrowdAgent->params.maxSpeed, 32, FCrowdDebug::AvoidanceRange);
+	UWorld* DebugDrawingWorld = GetDebugDrawingWorld();
 
-	const float InvQueryMultiplier = 1.0f / CrowdAgent->params.avoidanceQueryMultiplier;
+	FVector Center = Recast2UnrealPoint(CrowdAgent->npos) + FCrowdDebug::Offset;
+	DrawDebugCylinder(DebugDrawingWorld, Center - FCrowdDebug::Offset, Center, UE_REAL_TO_FLOAT_CLAMPED_MAX(CrowdAgent->params.maxSpeed), 32, FCrowdDebug::AvoidanceRange);
+
+	const FVector::FReal InvQueryMultiplier = 1.0f / (float)CrowdAgent->params.avoidanceQueryMultiplier;
 	float BestSampleScore = -1.0f;
 	FVector BestSampleLocation = FVector::ZeroVector;
 
 	for (int32 Idx = 0; Idx < DetourAvoidanceDebug->getSampleCount(); Idx++)
 	{
-		const float* p = DetourAvoidanceDebug->getSampleVelocity(Idx);
-		const float sr = DetourAvoidanceDebug->getSampleSize(Idx) * InvQueryMultiplier;
-		const float pen = DetourAvoidanceDebug->getSamplePenalty(Idx);
-		const float pen2 = DetourAvoidanceDebug->getSamplePreferredSidePenalty(Idx);
+		const FVector::FReal* p = DetourAvoidanceDebug->getSampleVelocity(Idx);
+		const float sr = UE_REAL_TO_FLOAT_CLAMPED_MAX(DetourAvoidanceDebug->getSampleSize(Idx) * InvQueryMultiplier);
+		const float pen = UE_REAL_TO_FLOAT(DetourAvoidanceDebug->getSamplePenalty(Idx));
+		const float pen2 = UE_REAL_TO_FLOAT(DetourAvoidanceDebug->getSamplePreferredSidePenalty(Idx));
 
 		FVector SamplePos = Center + Recast2UnrealPoint(p);
 
@@ -1099,9 +1099,8 @@ void UCrowdManager::DrawDebugVelocityObstacles(const dtCrowdAgent* CrowdAgent) c
 
 void UCrowdManager::DrawDebugPathOptimization(const dtCrowdAgent* CrowdAgent) const
 {
-#if !WITH_EDITORONLY_DATA
-	UWorld* DebugDrawingWorld = GetWorld();
-#endif // !WITH_EDITORONLY_DATA
+	UWorld* DebugDrawingWorld = GetDebugDrawingWorld();
+
 	FVector Pt0 = Recast2UnrealPoint(DetourAgentDebug->optStart) + FCrowdDebug::Offset * 1.25f;
 	FVector Pt1 = Recast2UnrealPoint(DetourAgentDebug->optEnd) + FCrowdDebug::Offset * 1.25f;
 
@@ -1110,11 +1109,10 @@ void UCrowdManager::DrawDebugPathOptimization(const dtCrowdAgent* CrowdAgent) co
 
 void UCrowdManager::DrawDebugNeighbors(const dtCrowdAgent* CrowdAgent) const
 {
-#if !WITH_EDITORONLY_DATA
-	UWorld* DebugDrawingWorld = GetWorld();
-#endif // !WITH_EDITORONLY_DATA
+	UWorld* DebugDrawingWorld = GetDebugDrawingWorld();
+
 	FVector Center = Recast2UnrealPoint(CrowdAgent->npos) + FCrowdDebug::Offset;
-	DrawDebugCylinder(DebugDrawingWorld, Center - FCrowdDebug::Offset, Center, CrowdAgent->params.collisionQueryRange, 32, FCrowdDebug::CollisionRange);
+	DrawDebugCylinder(DebugDrawingWorld, Center - FCrowdDebug::Offset, Center, UE_REAL_TO_FLOAT_CLAMPED_MAX(CrowdAgent->params.collisionQueryRange), 32, FCrowdDebug::CollisionRange);
 
 	for (int32 Idx = 0; Idx < CrowdAgent->nneis; Idx++)
 	{
@@ -1129,9 +1127,8 @@ void UCrowdManager::DrawDebugNeighbors(const dtCrowdAgent* CrowdAgent) const
 
 void UCrowdManager::DrawDebugSharedBoundary() const
 {
-#if !WITH_EDITORONLY_DATA
-	UWorld* DebugDrawingWorld = GetWorld();
-#endif // !WITH_EDITORONLY_DATA
+	UWorld* DebugDrawingWorld = GetDebugDrawingWorld();
+
 	FColor Colors[] = { FColorList::Red, FColorList::Orange };
 
 	const dtSharedBoundary* sharedBounds = DetourCrowd->getSharedBoundary();
@@ -1139,7 +1136,7 @@ void UCrowdManager::DrawDebugSharedBoundary() const
 	{
 		FColor Color = Colors[Idx % UE_ARRAY_COUNT(Colors)];
 		const FVector Center = Recast2UnrealPoint(sharedBounds->Data[Idx].Center);
-		DrawDebugCylinder(DebugDrawingWorld, Center - FCrowdDebug::Offset, Center, sharedBounds->Data[Idx].Radius, 32, Color);
+		DrawDebugCylinder(DebugDrawingWorld, Center - FCrowdDebug::Offset, Center, UE_REAL_TO_FLOAT_CLAMPED_MAX(sharedBounds->Data[Idx].Radius), 32, Color);
 
 		for (int32 WallIdx = 0; WallIdx < sharedBounds->Data[Idx].Edges.Num(); WallIdx++)
 		{
@@ -1279,7 +1276,7 @@ void UCrowdManager::DebugTick() const
 
 				for (int32 Idx = 0; Idx < CrowdAgent->boundary.getSegmentCount(); Idx++)
 				{
-					const float* s = CrowdAgent->boundary.getSegment(Idx);
+					const FVector::FReal* s = CrowdAgent->boundary.getSegment(Idx);
 					const int32 SegFlags = CrowdAgent->boundary.getSegmentFlags(Idx);
 					const FColor Color = (SegFlags & DT_CROWD_BOUNDARY_IGNORE) ? FCrowdDebug::CollisionSegIgnored :
 						(dtTriArea2D(CrowdAgent->npos, s, s + 3) < 0.0f) ? FCrowdDebug::CollisionSeg1 :
@@ -1288,7 +1285,7 @@ void UCrowdManager::DebugTick() const
 					FVector Pt0 = Recast2UnrealPoint(s);
 					FVector Pt1 = Recast2UnrealPoint(s + 3);
 
-					UE_VLOG_SEGMENT_THICK(LogOwner, LogCrowdFollowing, Log, Pt0 + FCrowdDebug::Offset, Pt1 + FCrowdDebug::Offset, Color, 3.0f, TEXT(""));
+					UE_VLOG_SEGMENT_THICK(LogOwner, LogCrowdFollowing, Log, Pt0 + FCrowdDebug::Offset, Pt1 + FCrowdDebug::Offset, Color, 3, TEXT(""));
 				}
 			}
 		}
@@ -1493,3 +1490,4 @@ UCrowdManager* UCrowdManager::GetCurrent(UWorld* World)
 	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
 	return NavSys ? Cast<UCrowdManager>(NavSys->GetCrowdManager()) : NULL;
 }
+

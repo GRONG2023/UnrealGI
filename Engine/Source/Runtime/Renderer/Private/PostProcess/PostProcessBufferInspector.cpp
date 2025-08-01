@@ -5,6 +5,8 @@
 #include "PostProcess/PostProcessBufferInspector.h"
 #include "SceneTextureParameters.h"
 #include "ScenePrivate.h"
+#include "UnrealClient.h"
+#include "UnrealEngine.h"
 
 BEGIN_SHADER_PARAMETER_STRUCT(FPixelInspectorParameters, )
 	RDG_TEXTURE_ACCESS(GBufferA, ERHIAccess::CopySrc)
@@ -38,11 +40,11 @@ void ProcessPixelInspectorRequests(
 		if (PixelInspectorRequest->RequestComplete == true)
 		{
 			PixelInspectorRequest->RenderingCommandSend = true;
-			ProcessRequests.Add(KeyValue.Key);
+			ProcessRequests.Add(FVector2D(KeyValue.Key));
 		}
 		else if (PixelInspectorRequest->RenderingCommandSend == false && PixelInspectorRequest->ViewId == ViewUniqueId)
 		{
-			FVector2D SourceViewportUV = PixelInspectorRequest->SourceViewportUV;
+			FVector2D SourceViewportUV = FVector2D(PixelInspectorRequest->SourceViewportUV);
 			FVector2D ExtendSize(1.0f, 1.0f);
 
 			//////////////////////////////////////////////////////////////////////////
@@ -255,14 +257,14 @@ void ProcessPixelInspectorRequests(
 			}
 
 			PixelInspectorRequest->RenderingCommandSend = true;
-			ProcessRequests.Add(KeyValue.Key);
+			ProcessRequests.Add(FVector2D(KeyValue.Key));
 		}
 	}
 
 	// Remove request we just processed.
 	for (FVector2D RequestKey : ProcessRequests)
 	{
-		PixelInspectorData.Requests.Remove(RequestKey);
+		PixelInspectorData.Requests.Remove(FVector2f(RequestKey));	// LWC_TODO: Precision loss
 	}
 }
 
@@ -278,7 +280,7 @@ FScreenPassTexture AddPixelInspectorPass(FRDGBuilder& GraphBuilder, const FViewI
 
 	// Perform copies of scene textures data into staging resources for visualization.
 	{
-		FSceneTextureParameters SceneTextures = GetSceneTextureParameters(GraphBuilder);
+		FSceneTextureParameters SceneTextures = GetSceneTextureParameters(GraphBuilder, View);
 
 		// GBufferF is optional, so it may be a dummy texture. Revert it to null if so.
 		if (SceneTextures.GBufferFTexture->Desc.Extent != Inputs.OriginalSceneColor.Texture->Desc.Extent)

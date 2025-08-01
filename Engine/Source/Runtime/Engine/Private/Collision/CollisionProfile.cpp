@@ -2,12 +2,11 @@
 
 #include "Engine/CollisionProfile.h"
 #include "Misc/ConfigCacheIni.h"
-#include "UObject/Package.h"
-#include "CollisionQueryParams.h"
-#include "PhysicsEngine/BodyInstance.h"
 #include "Components/PrimitiveComponent.h"
-#include "UObject/UObjectHash.h"
 #include "UObject/UObjectIterator.h"
+#include "UObject/UnrealType.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(CollisionProfile)
 
 DEFINE_LOG_CATEGORY_STATIC(LogCollisionProfile, Warning, All)
 
@@ -149,7 +148,8 @@ bool UCollisionProfile::CheckRedirect(FName ProfileName, FBodyInstance& BodyInst
 			// if new profile name exists
 			if ( *NewName != NAME_None )
 			{
-				check (FindProfileData(Profiles, *NewName, Template));
+				const bool bSuccessfullyFoundProfileData = FindProfileData(Profiles, *NewName, Template);
+				check(bSuccessfullyFoundProfileData);
 			}
 
 			return true;
@@ -271,14 +271,14 @@ void UCollisionProfile::LoadProfileConfig(bool bForceInit)
 	 * 4. It loads profile redirect data 
 	 **/
 	// read "EngineTraceChanne" and "GameTraceChanne" and set meta data
-	FConfigSection* Configs = GConfig->GetSectionPrivate( TEXT("/Script/Engine.CollisionProfile"), false, true, GEngineIni );
+	const FConfigSection* Configs = GConfig->GetSection( TEXT("/Script/Engine.CollisionProfile"), false, GEngineIni );
 
 	OnLoadProfileConfig.Broadcast(this);
 
 	// before any op, verify if profiles contains invalid name - such as Custom profile name - remove all of them
 	for (auto Iter=Profiles.CreateConstIterator(); Iter; ++Iter)
 	{
-		// make sure it doens't have any 
+		// make sure it doesn't have any 
 		if (Iter->Name == CustomCollisionProfileName)
 		{
 			UE_LOG(LogCollisionProfile, Error, TEXT("Profiles contain invalid name : %s is reserved for internal use"), *CustomCollisionProfileName.ToString());
@@ -322,7 +322,7 @@ void UCollisionProfile::LoadProfileConfig(bool bForceInit)
 	for ( int32 EnumIndex=0; EnumIndex<NumEnum; ++EnumIndex )
 	{
 		FString EnumName = Enum->GetNameStringByIndex(EnumIndex);
-		EnumName.RightChopInline(Prefix.Len(), false);
+		EnumName.RightChopInline(Prefix.Len(), EAllowShrinking::No);
 		FName DisplayName = FName(*EnumName);
 
 		if ( IS_VALID_COLLISIONCHANNEL(EnumIndex) )
@@ -840,9 +840,10 @@ bool FCollisionProfilePrivateAccessor::AddProfileTemplate(FCollisionResponseTemp
 		if (CollisionProfile->GetProfileTemplate(NewProfileData.Name, ProfileData))
 		{
 			CollisionProfile->LoadProfileConfig(true);
-			CollisionProfile->UpdateDefaultConfigFile();
+			CollisionProfile->TryUpdateDefaultConfigFile();
 			return true;
 		}
 	}
 	return false;
 }
+

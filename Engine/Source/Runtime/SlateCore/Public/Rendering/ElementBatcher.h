@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Rendering/RenderingCommon.h"
+#include "Rendering/SlateRendererTypes.h"
 #include "Layout/Clipping.h"
 #include "Stats/Stats.h"
 #include "SlateGlobals.h"
@@ -11,12 +12,14 @@
 
 class FSlateBatchData;
 class FSlateDrawElement;
+class FSlateRenderBatch;
 class FSlateRenderingPolicy;
 class FSlateShaderResource;
 class FSlateWindowElementList;
 struct FShaderParams;
 struct FSlateCachedElementData;
 struct FSlateCachedElementList;
+enum class ETextOverflowDirection : uint8;
 
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Add Elements Time"), STAT_SlateAddElements, STATGROUP_Slate, SLATECORE_API);
 
@@ -25,6 +28,7 @@ DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Elements (Box)"), STAT_SlateElements_Box
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Elements (Border)"), STAT_SlateElements_Border, STATGROUP_Slate, SLATECORE_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Elements (Text)"), STAT_SlateElements_Text, STATGROUP_Slate, SLATECORE_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Elements (ShapedText)"), STAT_SlateElements_ShapedText, STATGROUP_Slate, SLATECORE_API);
+DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Elements (Sdf)"), STAT_SlateElements_ShapedTextSdf, STATGROUP_Slate, SLATECORE_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Elements (Line)"), STAT_SlateElements_Line, STATGROUP_Slate, SLATECORE_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Elements (Other)"), STAT_SlateElements_Other, STATGROUP_Slate, SLATECORE_API);
 
@@ -59,7 +63,7 @@ public:
 	int32 GetInstanceCount() const { return BatchKey.InstanceCount; }
 	uint32 GetInstanceOffset() const { return BatchKey.InstanceOffset; }
 	const ISlateUpdatableInstanceBuffer* GetInstanceData() const { return BatchKey.InstanceData; }
-	int32 GetSceneIndex() const { return BatchKey.SceneIndex; }
+	int8 GetSceneIndex() const { return BatchKey.SceneIndex; }
 private:
 	struct FBatchKey
 	{
@@ -73,9 +77,9 @@ private:
 		const int32 InstanceCount;
 		const uint32 InstanceOffset;
 		const ISlateUpdatableInstanceBuffer* InstanceData;
-		const int32 SceneIndex;
+		const int8 SceneIndex;
 
-		FBatchKey(const FShaderParams& InShaderParams, ESlateShader InShaderType, ESlateDrawPrimitive InDrawPrimitiveType, ESlateDrawEffect InDrawEffects, ESlateBatchDrawFlag InDrawFlags, const FClipStateHandle InClipStateHandle, int32 InInstanceCount, uint32 InInstanceOffset, ISlateUpdatableInstanceBuffer* InInstanceBuffer, int32 InSceneIndex)
+		FBatchKey(const FShaderParams& InShaderParams, ESlateShader InShaderType, ESlateDrawPrimitive InDrawPrimitiveType, ESlateDrawEffect InDrawEffects, ESlateBatchDrawFlag InDrawFlags, const FClipStateHandle InClipStateHandle, int32 InInstanceCount, uint32 InInstanceOffset, ISlateUpdatableInstanceBuffer* InInstanceBuffer, int8 InSceneIndex)
 			: ShaderParams(InShaderParams)
 			, DrawFlags(InDrawFlags)
 			, ShaderType(InShaderType)
@@ -151,23 +155,15 @@ public:
 class FSlateBatchData
 {
 public:
-	FSlateBatchData()
-		: FirstRenderBatchIndex(INDEX_NONE)
-		, NumLayers(0)
-		, NumBatches(0)
-		, bIsStencilBufferRequired(false)
-	{}
+	SLATECORE_API FSlateBatchData();
+	SLATECORE_API ~FSlateBatchData();
 
 	SLATECORE_API void ResetData();
 
-	/**
-	* Returns a list of element batches for this window
-	*/
+	/** Returns a list of element batches for this window */
 	const TArray<FSlateRenderBatch>& GetRenderBatches() const { return RenderBatches; }
 
-	/**
-	*
-	*/
+	/** True if stencil buffer / clipping is needed. */
 	SLATECORE_API bool IsStencilClippingRequired() const;
 
 	int32 GetFirstRenderBatchIndex() const { return FirstRenderBatchIndex; }
@@ -180,22 +176,18 @@ public:
 	const FSlateIndexArray& GetFinalIndexData() const { return FinalIndexData; }
 
 	/**
-	* Fills batch data into the actual vertex and index buffer
-	*
-	* @param VertexBuffer	Pointer to the actual memory for the vertex buffer
-	* @param IndexBuffer	Pointer to the actual memory for an index buffer
-	* @param bAbsoluteIndices	Whether to write absolute indices (simplifies draw call setup on RHIs that do not support BaseVertex)
-	*/
+	 * Fills batch data into the actual vertex and index buffer
+	 *
+	 * @param VertexBuffer	Pointer to the actual memory for the vertex buffer
+	 * @param IndexBuffer	Pointer to the actual memory for an index buffer
+	 * @param bAbsoluteIndices	Whether to write absolute indices (simplifies draw call setup on RHIs that do not support BaseVertex)
+	 */
 	SLATECORE_API void FillVertexAndIndexBuffer(uint8* VertexBuffer, uint8* IndexBuffer, bool bAbsoluteIndices);
 
-	/**
-	* Creates rendering data from batched elements
-	*/
-	//SLATECORE_API void CreateRenderBatches(class FElementBatchMap& LayerToElementBatches);
-
+	/** Merges render batches across all elements where possible for final submit to GPU */
 	SLATECORE_API void MergeRenderBatches();
 
-	/** */
+	/** Adds a new render batch to list of batches */
 	FSlateRenderBatch& AddRenderBatch(
 		int32 InLayer,
 		const FShaderParams& InShaderParams,
@@ -206,7 +198,9 @@ public:
 		ESlateBatchDrawFlag InDrawFlags,
 		int8 SceneIndex);
 
+	/** Adds a cached batch, used in retained rendering */
 	void AddCachedBatches(const TSparseArray<FSlateRenderBatch>& InCachedBatches);
+	static void AddCachedBatchesToBatchData(FSlateBatchData* BatchDataSDR, FSlateBatchData* BatchDataHDR, const TSparseArray<FSlateRenderBatch>& InCachedBatches);
 private:
 	void FillBuffersFromNewBatch(FSlateRenderBatch& Batch, FSlateVertexArray& FinalVertices, FSlateIndexArray& FinalIndices);
 	void CombineBatches(FSlateRenderBatch& FirstBatch, FSlateRenderBatch& SecondBatch, FSlateVertexArray& FinalVertices, FSlateIndexArray& FinalIndices);
@@ -241,8 +235,6 @@ private:
  */
 class FSlateElementBatcher
 {
-
-	friend struct FLineBuilder;
 public:
 
 	SLATECORE_API FSlateElementBatcher( TSharedRef<FSlateRenderingPolicy> InRenderingPolicy );
@@ -263,6 +255,20 @@ public:
 	/** Whether or not any post process passes were batched */
 	bool HasFXPassses() const { return NumPostProcessPasses > 0;}
 
+	bool CompositeHDRViewports() const { return bCompositeHDRViewports; }
+
+	ESlatePostRT GetUsedSlatePostBuffers() const { return UsedSlatePostBuffers; }
+
+	ESlatePostRT GetResourceUpdatingPostBuffers() const { return ResourceUpdatingPostBuffers; }
+
+	ESlatePostRT GetSkipDefaultUpdatePostBuffers() const { return SkipDefaultUpdatePostBuffers; }
+
+	void SetResourceUpdatingPostBuffers(ESlatePostRT InResourceUpdatingPostBuffers) { ResourceUpdatingPostBuffers = InResourceUpdatingPostBuffers; }
+
+	void SetSkipDefaultUpdatePostBuffers(ESlatePostRT InSkipDefaultUpdatePostBuffers) { SkipDefaultUpdatePostBuffers = InSkipDefaultUpdatePostBuffers; }
+
+	void SetCompositeHDRViewports(bool bInCompositeHDRViewports) { bCompositeHDRViewports = bInCompositeHDRViewports; }
+
 	/** 
 	 * Resets all stored data accumulated during the batching process
 	 */
@@ -276,69 +282,125 @@ public:
 	}
 
 private:
-	void AddElementsInternal(const FSlateDrawElementArray& DrawElements, const FVector2D& ViewportSize);
-	void AddCachedElements(FSlateCachedElementData& CachedElementData, const FVector2D& ViewportSize);
+	void AddElementsInternal(const FSlateDrawElementMap& DrawElements, FVector2f ViewportSize);
+	void AddCachedElements(FSlateCachedElementData& CachedElementData, FVector2f ViewportSize);
+
+	/**
+	 * Generates Vertices, Indices, Renderbatches, & associates each of these together correctly
+	 * Attempts to reuse renderbatches across elements if possible. 
+	 * 
+	 * Note: Future more efficient and less generic reuse is something we may consider.
+	 * 
+	 * @param DrawElements - Elements to iterate over
+	 * @param InElementAdder - Functor to add an individual slate draw element
+	 * @param InElementBatchParamCreator - Functor that generates batch params given a slate draw element, used during batch-reuse
+	 * @param InElementBatchReserver - Functor that reserves vertexes and indicies given an element range and list of elements
+	 */
+	template<typename ElementType, typename ElementAdder, typename ElementBatchParamCreator, typename ElementBatchReserver>
+	FORCEINLINE void GenerateIndexedVertexBatches(const FSlateDrawElementArray<ElementType>& DrawElements
+		, ElementAdder&& InElementAdder
+		, ElementBatchParamCreator&& InElementBatchParamCreator
+		, ElementBatchReserver&& InElementBatchReserver);
 
 	/** 
 	 * Creates vertices necessary to draw a Quad element 
 	 */
 	template<ESlateVertexRounding Rounding>
-	void AddQuadElement( const FSlateDrawElement& DrawElement );
+	void AddDebugQuadElement( const FSlateBoxElement& DrawElement);
 
 	/** 
-	 * Creates vertices necessary to draw a 3x3 element
+	 * Creates vertices necessary to draw multiple 3x3 elements
 	 */
-	template<ESlateVertexRounding Rounding>
-	void AddBoxElement( const FSlateDrawElement& DrawElement );
+	template<typename ElementType>
+	void AddBoxElements( const FSlateDrawElementArray<ElementType>& DrawElement );
 
 	/** 
 	 * Creates vertices necessary to draw a string (one quad per character)
 	 */
 	template<ESlateVertexRounding Rounding>
-	void AddTextElement( const FSlateDrawElement& DrawElement );
+	void AddTextElement( const FSlateTextElement& DrawElement );
 
 	/** 
 	 * Creates vertices necessary to draw a shaped glyph sequence (one quad per glyph)
 	 */
 	template<ESlateVertexRounding Rounding>
-	void AddShapedTextElement( const FSlateDrawElement& DrawElement );
+	void AddShapedTextElement( const FSlateShapedTextElement& DrawElement );
 
 	/** 
 	 * Creates vertices necessary to draw a gradient box (horizontal or vertical)
 	 */
 	template<ESlateVertexRounding Rounding>
-	void AddGradientElement( const FSlateDrawElement& DrawElement );
+	void AddGradientElement( const FSlateGradientElement& DrawElement );
 
 	/** 
 	 * Creates vertices necessary to draw a spline (Bezier curve)
 	 */
-	void AddSplineElement( const FSlateDrawElement& DrawElement );
+	void AddSplineElement( const FSlateSplineElement& DrawElement );
 
 	/** 
-	 * Creates vertices necessary to draw a series of attached line segments
+	 * Creates vertices necessary to draw a multiple attached line segments
 	 */
-	template<ESlateVertexRounding Rounding>
-	void AddLineElement( const FSlateDrawElement& DrawElement );
+	void AddLineElements(const FSlateDrawElementArray<FSlateLineElement>& DrawElements);
 	
 	/** 
 	 * Creates vertices necessary to draw a viewport (just a textured quad)
 	 */
 	template<ESlateVertexRounding Rounding>
-	void AddViewportElement( const FSlateDrawElement& DrawElement );
+	void AddViewportElement( const FSlateViewportElement& DrawElement );
 
 	/** 
 	 * Creates vertices necessary to draw a border element
 	 */
 	template<ESlateVertexRounding Rounding>
-	void AddBorderElement( const FSlateDrawElement& DrawElement );
+	void AddBorderElement( const FSlateBoxElement& DrawElement );
 
-	void AddCustomElement( const FSlateDrawElement& DrawElement );
+	void AddCustomElement( const FSlateCustomDrawerElement& DrawElement );
 
-	void AddCustomVerts( const FSlateDrawElement& DrawElement );
+	void AddCustomVerts( const FSlateCustomVertsElement& DrawElement );
 
-	void AddPostProcessPass(const FSlateDrawElement& DrawElement, const FVector2D& WindowSize);
+	void AddPostProcessPass(const FSlatePostProcessElement& DrawElement, FVector2f WindowSize);
 
 	FSlateRenderBatch& CreateRenderBatch(
+		int32 Layer,
+		const FShaderParams& ShaderParams,
+		const FSlateShaderResource* InResource,
+		ESlateDrawPrimitive PrimitiveType,
+		ESlateShader ShaderType,
+		ESlateDrawEffect DrawEffects,
+		ESlateBatchDrawFlag DrawFlags,
+		int8 SceneIndex,
+		const FSlateClippingState* ClippingState)
+	{
+		return CreateRenderBatch(BatchData, Layer, ShaderParams, InResource, PrimitiveType, ShaderType, DrawEffects, DrawFlags, SceneIndex, ClippingState);
+	}
+
+	FSlateRenderBatch& CreateRenderBatch(
+		int32 Layer,
+		const FShaderParams& ShaderParams,
+		const FSlateShaderResource* InResource,
+		ESlateDrawPrimitive PrimitiveType,
+		ESlateShader ShaderType,
+		ESlateDrawEffect DrawEffects,
+		ESlateBatchDrawFlag DrawFlags,
+		const FSlateDrawElement& DrawElement)
+	{
+		return CreateRenderBatch(BatchData, Layer, ShaderParams, InResource, PrimitiveType, ShaderType, DrawEffects, DrawFlags, DrawElement);
+	}
+
+	FSlateRenderBatch& CreateRenderBatch(
+		FSlateBatchData* SlateBatchData,
+		int32 Layer,
+		const FShaderParams& ShaderParams,
+		const FSlateShaderResource* InResource,
+		ESlateDrawPrimitive PrimitiveType,
+		ESlateShader ShaderType,
+		ESlateDrawEffect DrawEffects,
+		ESlateBatchDrawFlag DrawFlags,
+		int8 SceneIndex, 
+		const FSlateClippingState* ClippingState);
+
+	FSlateRenderBatch& CreateRenderBatch(
+		FSlateBatchData* SlateBatchData,
 		int32 Layer,
 		const FShaderParams& ShaderParams,
 		const FSlateShaderResource* InResource,
@@ -350,9 +412,37 @@ private:
 
 	const FSlateClippingState* ResolveClippingState(const FSlateDrawElement& DrawElement) const;
 
+	struct FShapedTextBuildContext
+	{
+		const class FShapedGlyphSequence* ShapedGlyphSequence;
+		const class FShapedGlyphSequence* OverflowGlyphSequence;
+		const UObject* FontMaterial;
+		const UObject* OutlineFontMaterial;
+		const struct FFontOutlineSettings* OutlineSettings;
+		const FSlateDrawElement* DrawElement;
+		class FSlateFontCache* FontCache;
+		const FSlateRenderTransform* RenderTransform;
+		float TextBaseline;
+		float MaxHeight;
+		float StartLineX;
+		float StartLineY;
+		float LocalClipBoundingBoxLeft = 0;
+		float LocalClipBoundingBoxRight = 0;
+		int32 LayerId;
+		FColor FontTint;
+		ETextOverflowDirection OverflowDirection;
+		bool bEnableOutline : 1;
+		bool bEnableCulling : 1;
+		bool bForceEllipsis : 1;
+		
+	};
+
+	template<ESlateVertexRounding Rounding>
+	void BuildShapedTextSequence(const FShapedTextBuildContext& Context);
 private:
 	/** Uncached Batch data currently being filled in */
 	FSlateBatchData* BatchData;
+	FSlateBatchData* BatchDataHDR;
 
 	/** Cached batches currently being filled in */
 	FSlateCachedElementList* CurrentCachedElementList;
@@ -376,6 +466,9 @@ private:
 	/** Track the number of drawn shaped text from the previous frame to report to stats. */
 	int32 ElementStat_ShapedText;
 
+	/** Track the number of drawn shaped text using signed distance field from the previous frame to report to stats. */
+	int32 ElementStat_ShapedTextSdf;
+
 	/** Track the number of drawn lines from the previous frame to report to stats. */
 	int32 ElementStat_Line;
 
@@ -396,4 +489,16 @@ private:
 
 	// true if any element in the batch requires vsync.
 	bool bRequiresVsync;
+
+	// true if viewports get composited as a separate pass, instead of being rendered directly to the render target. Useful for HDR displays
+	bool bCompositeHDRViewports;
+
+	// true if we added a resource that is using a slate post buffer 
+	ESlatePostRT UsedSlatePostBuffers;
+
+	// true if a resource is updating a slate post buffer, if true we need to add a fence for the scene draw to complete before clearing unused post buffers
+	ESlatePostRT ResourceUpdatingPostBuffers;
+
+	// true if we should skip the default population of the post buffers with the scene & no UI.
+	ESlatePostRT SkipDefaultUpdatePostBuffers;
 };

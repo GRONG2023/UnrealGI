@@ -1,26 +1,42 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "CameraDetails.h"
-#include "Styling/SlateColor.h"
-#include "Fonts/SlateFontInfo.h"
-#include "Misc/Attribute.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/SBoxPanel.h"
-#include "SlateOptMacros.h"
-#include "Textures/SlateIcon.h"
-#include "Framework/Commands/UIAction.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Widgets/Input/SEditableTextBox.h"
-#include "Widgets/Input/SComboButton.h"
-#include "EditorStyleSet.h"
+
 #include "Camera/CameraComponent.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "DetailCategoryBuilder.h"
 #include "DetailLayoutBuilder.h"
 #include "DetailWidgetRow.h"
-#include "IDetailPropertyRow.h"
-#include "DetailCategoryBuilder.h"
-#include "Widgets/Input/SNumericEntryBox.h"
 #include "EditorCategoryUtils.h"
+#include "Fonts/SlateFontInfo.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "HAL/PlatformCrt.h"
+#include "IDetailPropertyRow.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Layout/Margin.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "PropertyEditorModule.h"
+#include "PropertyHandle.h"
+#include "SlateOptMacros.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateColor.h"
+#include "Textures/SlateIcon.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SComboButton.h"
+#include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Input/SNumericEntryBox.h"
+#include "Widgets/SBoxPanel.h"
 
 
 #define LOCTEXT_NAMESPACE "CameraDetails"
@@ -40,7 +56,7 @@ TSharedRef<IDetailCustomization> FCameraDetails::MakeInstance()
 BEGIN_SLATE_FUNCTION_BUILD_OPTIMIZATION
 void FCameraDetails::CustomizeDetails( IDetailLayoutBuilder& DetailLayout )
 {
-	FSlateFontInfo FontStyle = FEditorStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont"));
+	FSlateFontInfo FontStyle = FAppStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont"));
 
 	LastParsedAspectRatioValue = -1.0f;
 
@@ -91,11 +107,23 @@ void FCameraDetails::CustomizeDetails( IDetailLayoutBuilder& DetailLayout )
 		IDetailPropertyRow& OrthoWidthRow = CameraCategory.AddProperty(DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UCameraComponent, OrthoWidth)));
 		OrthoWidthRow.Visibility(OrthographicVisibility);
 
+		IDetailPropertyRow& AutoCalculateOrthoPlanesRow = CameraCategory.AddProperty(DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UCameraComponent, bAutoCalculateOrthoPlanes)));
+		AutoCalculateOrthoPlanesRow.Visibility(OrthographicVisibility);
+
+		IDetailPropertyRow& AutoPlanesShift = CameraCategory.AddProperty(DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UCameraComponent, AutoPlaneShift)));
+		AutoPlanesShift.Visibility(OrthographicVisibility);
+
 		IDetailPropertyRow& OrthoNearClipPlaneRow = CameraCategory.AddProperty(DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UCameraComponent, OrthoNearClipPlane)));
 		OrthoNearClipPlaneRow.Visibility(OrthographicVisibility);
 
 		IDetailPropertyRow& OrthoFarClipPlaneRow = CameraCategory.AddProperty(DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UCameraComponent, OrthoFarClipPlane)));
 		OrthoFarClipPlaneRow.Visibility(OrthographicVisibility);
+
+		IDetailPropertyRow& UpdateOrthoPlanesRow = CameraCategory.AddProperty(DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UCameraComponent, bUpdateOrthoPlanes)));
+		UpdateOrthoPlanesRow.Visibility(OrthographicVisibility);
+
+		IDetailPropertyRow& CameraHeightAsViewTargetRow = CameraCategory.AddProperty(DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UCameraComponent, bUseCameraHeightAsViewTarget)));
+		CameraHeightAsViewTargetRow.Visibility(OrthographicVisibility);
 
 		// Aspect ratio
 		IDetailPropertyRow& AspectRatioRow = CameraCategory.AddProperty(AspectRatioProperty);
@@ -128,7 +156,7 @@ void FCameraDetails::CustomizeDetails( IDetailLayoutBuilder& DetailLayout )
 					SNew(SComboButton)
 					.OnGetMenuContent( this, &FCameraDetails::OnGetComboContent )
 					.ContentPadding(0.0f)
-					.ButtonStyle( FEditorStyle::Get(), "ToggleButton" )
+					.ButtonStyle( FAppStyle::Get(), "ToggleButton" )
 					.ForegroundColor(FSlateColor::UseForeground())
 					.VAlign(VAlign_Center)
 					.ButtonContent()
@@ -256,7 +284,7 @@ void FCameraDetails::OnCommitAspectRatioText(const FText& ItemFText, ETextCommit
 			FString RemainingText = ItemText.Mid(DelimIdx + 1).TrimStart();
 			if (RemainingText.FindChar(TCHAR(' '), WSIdx))
 			{
-				RemainingText.LeftInline(WSIdx, false);
+				RemainingText.LeftInline(WSIdx, EAllowShrinking::No);
 			}
 			int32 Height;
 			TTypeFromString<int32>::FromString(Height, *RemainingText);

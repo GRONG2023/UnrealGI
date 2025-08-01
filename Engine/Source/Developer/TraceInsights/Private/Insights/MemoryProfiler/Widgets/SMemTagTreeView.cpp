@@ -3,7 +3,6 @@
 #include "SMemTagTreeView.h"
 
 #include "DesktopPlatformModule.h"
-#include "EditorStyleSet.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "SlateOptMacros.h"
 #include "Templates/UniquePtr.h"
@@ -12,13 +11,14 @@
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SSearchBox.h"
+#include "Widgets/Input/SSegmentedControl.h"
 #include "Widgets/Images/SImage.h"
-#include "Widgets/Layout/SGridPanel.h"
-#include "Widgets/Layout/SSeparator.h"
 #include "Widgets/SToolTip.h"
 #include "Widgets/Views/STableViewBase.h"
 
 // Insights
+#include "Insights/Common/Stopwatch.h"
+#include "Insights/Common/TimeUtils.h"
 #include "Insights/InsightsStyle.h"
 #include "Insights/MemoryProfiler/MemoryProfilerManager.h"
 #include "Insights/MemoryProfiler/ViewModels/MemoryTag.h"
@@ -30,19 +30,17 @@
 #include "Insights/MemoryProfiler/Widgets/SMemoryProfilerWindow.h"
 #include "Insights/Table/ViewModels/Table.h"
 #include "Insights/Table/ViewModels/TableColumn.h"
-#include "Insights/ViewModels/TimingGraphTrack.h"
-#include "Insights/Widgets/STimingView.h"
 
 #define LOCTEXT_NAMESPACE "SMemTagTreeView"
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 SMemTagTreeView::SMemTagTreeView()
-	: ProfilerWindow()
+	: ProfilerWindowWeakPtr()
 	, Table(MakeShared<Insights::FTable>())
 	, bExpansionSaved(false)
 	, bFilterOutZeroCountMemTags(false)
-	, bFilterByTracker(true)
+	, TrackersFilter(uint64(-1))
 	, GroupingMode(EMemTagNodeGroupingMode::Flat)
 	, AvailableSorters()
 	, CurrentSorter(nullptr)
@@ -62,15 +60,17 @@ SMemTagTreeView::~SMemTagTreeView()
 	{
 		FInsightsManager::Get()->GetSessionChangedEvent().RemoveAll(this);
 	}
+
+	Session.Reset();
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-
 BEGIN_SLATE_FUNCTION_BUILD_OPTIMIZATION
+
 void SMemTagTreeView::Construct(const FArguments& InArgs, TSharedPtr<SMemoryProfilerWindow> InProfilerWindow)
 {
 	check(InProfilerWindow.IsValid());
-	ProfilerWindow = InProfilerWindow;
+	ProfilerWindowWeakPtr = InProfilerWindow;
 
 	SAssignNew(ExternalScrollbar, SScrollBar)
 	.AlwaysShowScrollbar(true);
@@ -82,243 +82,42 @@ void SMemTagTreeView::Construct(const FArguments& InArgs, TSharedPtr<SMemoryProf
 		+ SVerticalBox::Slot()
 		.VAlign(VAlign_Center)
 		.AutoHeight()
+		.Padding(2.0f, 2.0f, 2.0f, 2.0f)
 		[
-			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+			SNew(SVerticalBox)
+
+			// Search and Filtering
+			+ SVerticalBox::Slot()
+			.VAlign(VAlign_Center)
 			.Padding(2.0f)
+			.AutoHeight()
 			[
-				SNew(SVerticalBox)
+				ConstructTagsFilteringWidgetArea()
+			]
 
-				+ SVerticalBox::Slot()
-				.VAlign(VAlign_Center)
-				.Padding(2.0f)
-				.AutoHeight()
-				[
-					SNew(SHorizontalBox)
+			// Tracker and Grouping
+			+ SVerticalBox::Slot()
+			.VAlign(VAlign_Center)
+			.Padding(2.0f)
+			.AutoHeight()
+			[
+				ConstructTagsGroupingWidgetArea()
+			]
 
-					// Search box
-					+ SHorizontalBox::Slot()
-					.VAlign(VAlign_Center)
-					.Padding(2.0f)
-					.FillWidth(1.0f)
-					[
-						SAssignNew(SearchBox, SSearchBox)
-						.HintText(LOCTEXT("SearchBoxHint", "Search LLM tags or groups"))
-						.OnTextChanged(this, &SMemTagTreeView::SearchBox_OnTextChanged)
-						.IsEnabled(this, &SMemTagTreeView::SearchBox_IsEnabled)
-						.ToolTipText(LOCTEXT("FilterSearchHint", "Type here to search LLM tags or groups"))
-					]
-
-					// Filter out LLM tags with zero instance count.
-					//+ SHorizontalBox::Slot()
-					//.VAlign(VAlign_Center)
-					//.Padding(2.0f)
-					//.AutoWidth()
-					//[
-					//	SNew(SCheckBox)
-					//	.Style(FEditorStyle::Get(), "ToggleButtonCheckbox")
-					//	.HAlign(HAlign_Center)
-					//	.Padding(2.0f)
-					//	.OnCheckStateChanged(this, &SMemTagTreeView::FilterOutZeroCountMemTags_OnCheckStateChanged)
-					//	.IsChecked(this, &SMemTagTreeView::FilterOutZeroCountMemTags_IsChecked)
-					//	.ToolTipText(LOCTEXT("FilterOutZeroCountMemTags_Tooltip", "Filter out the LLM tags having zero total instance count (aggregated stats)."))
-					//	[
-					//		SNew(STextBlock)
-					//		.Text(LOCTEXT("FilterOutZeroCountMemTags_Button", " !0 "))
-					//		.TextStyle(FEditorStyle::Get(), TEXT("Profiler.Caption"))
-					//	]
-					//]
-
-					// Filter out LLM tags by current tracker.
-					+ SHorizontalBox::Slot()
-					.VAlign(VAlign_Center)
-					.Padding(2.0f)
-					.AutoWidth()
-					[
-						SNew(SCheckBox)
-						.Style(FEditorStyle::Get(), "ToggleButtonCheckbox")
-						.HAlign(HAlign_Center)
-						.Padding(2.0f)
-						.OnCheckStateChanged(this, &SMemTagTreeView::FilterByTracker_OnCheckStateChanged)
-						.IsChecked(this, &SMemTagTreeView::FilterByTracker_IsChecked)
-						.ToolTipText(LOCTEXT("FilterByTracker_Tooltip", "Filter the LLM tags to show only the ones used by the current tracker."))
-						[
-							SNew(STextBlock)
-							.Text(LOCTEXT("FilterByTracker_Button", " T "))
-							.TextStyle(FEditorStyle::Get(), TEXT("Profiler.Caption"))
-						]
-					]
-				]
-
-				// Group by
-				+ SVerticalBox::Slot()
-				.VAlign(VAlign_Center)
-				.Padding(2.0f)
-				.AutoHeight()
-				[
-					SNew(SHorizontalBox)
-
-					+ SHorizontalBox::Slot()
-					.AutoWidth()
-					.VAlign(VAlign_Center)
-					.Padding(0.0f, 0.0f, 4.0f, 0.0f)
-					[
-						SNew(STextBlock)
-						.Text(LOCTEXT("TrackerText", "Tracker:"))
-					]
-
-					+ SHorizontalBox::Slot()
-					.FillWidth(1.0f)
-					.VAlign(VAlign_Center)
-					[
-						SAssignNew(TrackerComboBox, SComboBox<TSharedPtr<Insights::FMemoryTracker>>)
-						.ToolTipText(this, &SMemTagTreeView::Tracker_GetTooltipText)
-						.OptionsSource(GetAvailableTrackers())
-						.OnSelectionChanged(this, &SMemTagTreeView::Tracker_OnSelectionChanged)
-						.OnGenerateWidget(this, &SMemTagTreeView::Tracker_OnGenerateWidget)
-						[
-							SNew(STextBlock)
-							.Text(this, &SMemTagTreeView::Tracker_GetSelectedText)
-						]
-					]
-
-					+ SHorizontalBox::Slot()
-					.AutoWidth()
-					.VAlign(VAlign_Center)
-					.Padding(0.0f, 0.0f, 4.0f, 0.0f)
-					[
-						SNew(STextBlock)
-						.MinDesiredWidth(60.0f)
-						.Justification(ETextJustify::Right)
-						.Text(LOCTEXT("GroupByText", "Group by:"))
-					]
-
-					+ SHorizontalBox::Slot()
-					.FillWidth(1.0f)
-					.VAlign(VAlign_Center)
-					[
-						SAssignNew(GroupByComboBox, SComboBox<TSharedPtr<EMemTagNodeGroupingMode>>)
-						.ToolTipText(this, &SMemTagTreeView::GroupBy_GetSelectedTooltipText)
-						.OptionsSource(&GroupByOptionsSource)
-						.OnSelectionChanged(this, &SMemTagTreeView::GroupBy_OnSelectionChanged)
-						.OnGenerateWidget(this, &SMemTagTreeView::GroupBy_OnGenerateWidget)
-						[
-							SNew(STextBlock)
-							.Text(this, &SMemTagTreeView::GroupBy_GetSelectedText)
-						]
-					]
-				]
-
-				// Tracks
-				+ SVerticalBox::Slot()
-				.VAlign(VAlign_Center)
-				.Padding(2.0f)
-				.AutoHeight()
-				[
-					SNew(SHorizontalBox)
-
-					+ SHorizontalBox::Slot()
-					.VAlign(VAlign_Center)
-					.Padding(FMargin(2.0f, 0.0f, 2.0f, 0.0f))
-					.AutoWidth()
-					[
-						SNew(SButton)
-						.ToolTipText(LOCTEXT("HideAll_ToolTip", "Remove all memory graph tracks."))
-						.ContentPadding(FMargin(2.0f, 0.0f, 2.0f, 0.0f))
-						.OnClicked(this, &SMemTagTreeView::HideAllTracks_OnClicked)
-						.Content()
-						[
-							SNew(SImage)
-							.ColorAndOpacity(FSlateColor(FLinearColor(0.5f, 0.0f, 0.0f, 1.0f)))
-							.Image(FInsightsStyle::Get().GetBrush("Mem.Remove.Small"))
-						]
-					]
-
-					+ SHorizontalBox::Slot()
-					.VAlign(VAlign_Center)
-					.Padding(FMargin(2.0f, 0.0f, 2.0f, 0.0f))
-					.AutoWidth()
-					[
-						SNew(SButton)
-						.ToolTipText(LOCTEXT("ShowAll_ToolTip", "Create memory graph tracks for all visible (filtered) LLM tags."))
-						.ContentPadding(FMargin(2.0f, 0.0f, 2.0f, 0.0f))
-						.OnClicked(this, &SMemTagTreeView::ShowAllTracks_OnClicked)
-						.Content()
-						[
-							SNew(SImage)
-							.ColorAndOpacity(FSlateColor(FLinearColor(0.0f, 0.5f, 0.0f, 1.0f)))
-							.Image(FInsightsStyle::Get().GetBrush("Mem.Add.Small"))
-						]
-					]
-
-					+ SHorizontalBox::Slot()
-					.VAlign(VAlign_Center)
-					.Padding(2.0f)
-					.AutoWidth()
-					[
-						SNew(SButton)
-						.ToolTipText(LOCTEXT("LoadReportXML_ToolTip", "Load LLMReportTypes.xml"))
-						.ContentPadding(FMargin(2.0f, 2.0f, 2.0f, 2.0f))
-						.OnClicked(this, &SMemTagTreeView::LoadReportXML_OnClicked)
-						.Content()
-						[
-							SNew(STextBlock)
-							.Text(LOCTEXT("LoadReportXML_Text", "Load XML..."))
-						]
-					]
-
-					+ SHorizontalBox::Slot()
-					.VAlign(VAlign_Center)
-					.Padding(2.0f)
-					[
-						SNew(SButton)
-						.ToolTipText(LOCTEXT("SmallHeight_ToolTip", "Change height of LLM Tag Graph tracks to Small."))
-						.ContentPadding(FMargin(2.0f, 2.0f, 2.0f, 2.0f))
-						.OnClicked(this, &SMemTagTreeView::AllTracksSmallHeight_OnClicked)
-						.Content()
-						[
-							SNew(STextBlock)
-							.Text(LOCTEXT("SmallHeight_Text", "\u2195S"))
-						]
-					]
-
-					+ SHorizontalBox::Slot()
-					.VAlign(VAlign_Center)
-					.Padding(2.0f)
-					[
-						SNew(SButton)
-						.ToolTipText(LOCTEXT("MediumHeight_ToolTip", "Change height of LLM Tag Graph tracks to Medium."))
-						.ContentPadding(FMargin(2.0f, 2.0f, 2.0f, 2.0f))
-						.OnClicked(this, &SMemTagTreeView::AllTracksMediumHeight_OnClicked)
-						.Content()
-						[
-							SNew(STextBlock)
-							.Text(LOCTEXT("MediumHeight_Text", "\u2195M"))
-						]
-					]
-
-					+ SHorizontalBox::Slot()
-					.VAlign(VAlign_Center)
-					.Padding(2.0f)
-					[
-						SNew(SButton)
-						.ToolTipText(LOCTEXT("LargeHeight_ToolTip", "Change height of LLM Tag Graph tracks to Large."))
-						.ContentPadding(FMargin(2.0f, 2.0f, 2.0f, 2.0f))
-						.OnClicked(this, &SMemTagTreeView::AllTracksLargeHeight_OnClicked)
-						.Content()
-						[
-							SNew(STextBlock)
-							.Text(LOCTEXT("LargeHeight_Text", "\u2195L"))
-						]
-					]
-				]
+			// Tracks Mini Toolbar
+			+ SVerticalBox::Slot()
+			.VAlign(VAlign_Center)
+			.Padding(2.0f)
+			.AutoHeight()
+			[
+				ConstructTracksMiniToolbar()
 			]
 		]
 
 		// Tree view
 		+ SVerticalBox::Slot()
 		.FillHeight(1.0f)
-		.Padding(0.0f, 6.0f, 0.0f, 0.0f)
+		.Padding(0.0f, 2.0f, 0.0f, 0.0f)
 		[
 			SNew(SHorizontalBox)
 
@@ -326,32 +125,21 @@ void SMemTagTreeView::Construct(const FArguments& InArgs, TSharedPtr<SMemoryProf
 			.FillWidth(1.0f)
 			.Padding(0.0f)
 			[
-				SNew(SScrollBox)
-				.Orientation(Orient_Horizontal)
-
-				+ SScrollBox::Slot()
-				[
-					SNew(SBorder)
-					.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
-					.Padding(0.0f)
-					[
-						SAssignNew(TreeView, STreeView<FMemTagNodePtr>)
-						.ExternalScrollbar(ExternalScrollbar)
-						.SelectionMode(ESelectionMode::Multi)
-						.TreeItemsSource(&FilteredGroupNodes)
-						.OnGetChildren(this, &SMemTagTreeView::TreeView_OnGetChildren)
-						.OnGenerateRow(this, &SMemTagTreeView::TreeView_OnGenerateRow)
-						.OnSelectionChanged(this, &SMemTagTreeView::TreeView_OnSelectionChanged)
-						.OnMouseButtonDoubleClick(this, &SMemTagTreeView::TreeView_OnMouseButtonDoubleClick)
-						.OnContextMenuOpening(FOnContextMenuOpening::CreateSP(this, &SMemTagTreeView::TreeView_GetMenuContent))
-						.ItemHeight(12.0f)
-						.HeaderRow
-						(
-							SAssignNew(TreeViewHeaderRow, SHeaderRow)
-							.Visibility(EVisibility::Visible)
-						)
-					]
-				]
+				SAssignNew(TreeView, STreeView<FMemTagNodePtr>)
+				.ExternalScrollbar(ExternalScrollbar)
+				.SelectionMode(ESelectionMode::Multi)
+				.TreeItemsSource(&FilteredGroupNodes)
+				.OnGetChildren(this, &SMemTagTreeView::TreeView_OnGetChildren)
+				.OnGenerateRow(this, &SMemTagTreeView::TreeView_OnGenerateRow)
+				.OnSelectionChanged(this, &SMemTagTreeView::TreeView_OnSelectionChanged)
+				.OnMouseButtonDoubleClick(this, &SMemTagTreeView::TreeView_OnMouseButtonDoubleClick)
+				.OnContextMenuOpening(FOnContextMenuOpening::CreateSP(this, &SMemTagTreeView::TreeView_GetMenuContent))
+				.ItemHeight(16.0f)
+				.HeaderRow
+				(
+					SAssignNew(TreeViewHeaderRow, SHeaderRow)
+					.Visibility(EVisibility::Visible)
+				)
 			]
 
 			+ SHorizontalBox::Slot()
@@ -368,7 +156,6 @@ void SMemTagTreeView::Construct(const FArguments& InArgs, TSharedPtr<SMemoryProf
 	];
 
 	InitializeAndShowHeaderColumns();
-	//BindCommands();
 
 	// Create the search filters: text based, type based etc.
 	TextFilter = MakeShared<FMemTagNodeTextFilter>(FMemTagNodeTextFilter::FItemToStringArray::CreateSP(this, &SMemTagTreeView::HandleItemToStringArray));
@@ -384,6 +171,301 @@ void SMemTagTreeView::Construct(const FArguments& InArgs, TSharedPtr<SMemoryProf
 	// Update the Session (i.e. when analysis session was already started).
 	InsightsManager_OnSessionChanged();
 }
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+TSharedRef<SWidget> SMemTagTreeView::MakeTrackersMenu()
+{
+	FMenuBuilder MenuBuilder(/*bInShouldCloseWindowAfterMenuSelection=*/true, nullptr);
+
+	MenuBuilder.BeginSection("Trackers"/*, LOCTEXT("ContextMenu_Section_Trackers", "Trackers")*/);
+	CreateTrackersMenuSection(MenuBuilder);
+	MenuBuilder.EndSection();
+
+	return MenuBuilder.MakeWidget();
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void SMemTagTreeView::CreateTrackersMenuSection(FMenuBuilder& MenuBuilder)
+{
+	TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
+	if (ProfilerWindow.IsValid())
+	{
+		FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
+		const TArray<TSharedPtr<Insights::FMemoryTracker>>& Trackers = SharedState.GetTrackers();
+		for (const TSharedPtr<Insights::FMemoryTracker>& Tracker : Trackers)
+		{
+			const Insights::FMemoryTrackerId TrackerId = Tracker->GetId();
+			MenuBuilder.AddMenuEntry(
+				FText::FromString(Tracker->GetName()),
+				TAttribute<FText>(),
+				FSlateIcon(),
+				FUIAction(
+					FExecuteAction::CreateSP(this, &SMemTagTreeView::ToggleTracker, TrackerId),
+					FCanExecuteAction(),
+					FIsActionChecked::CreateSP(this, &SMemTagTreeView::IsTrackerChecked, TrackerId)),
+				NAME_None,
+				EUserInterfaceActionType::ToggleButton
+			);
+		}
+	}
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void SMemTagTreeView::ToggleTracker(Insights::FMemoryTrackerId InTrackerId)
+{
+	TrackersFilter ^= Insights::FMemoryTracker::AsFlag(InTrackerId);
+	ApplyFiltering();
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+bool SMemTagTreeView::IsTrackerChecked(Insights::FMemoryTrackerId InTrackerId) const
+{
+	return (TrackersFilter & Insights::FMemoryTracker::AsFlag(InTrackerId)) != 0;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+TSharedRef<SWidget> SMemTagTreeView::ConstructTagsFilteringWidgetArea()
+{
+	FSlimHorizontalToolBarBuilder ToolbarBuilder(TSharedPtr<const FUICommandList>(), FMultiBoxCustomization::None);
+	ToolbarBuilder.SetStyle(&FInsightsStyle::Get(), "SecondaryToolbar");
+
+	ToolbarBuilder.BeginSection("Filters");
+	{
+		// Text Filter (Search Box)
+		//ToolbarBuilder.AddWidget(
+		//	SAssignNew(SearchBox, SSearchBox)
+		//	.HintText(LOCTEXT("SearchBoxHint", "Search LLM tags or groups"))
+		//	.ToolTipText(LOCTEXT("FilterSearchHint", "Type here to search LLM tags or groups"))
+		//	.OnTextChanged(this, &SMemTagTreeView::SearchBox_OnTextChanged)
+		//	.IsEnabled(this, &SMemTagTreeView::SearchBox_IsEnabled)
+		//);
+
+		// Filter Trackers
+		ToolbarBuilder.AddComboButton(
+			FUIAction(),
+			FOnGetContent::CreateSP(this, &SMemTagTreeView::MakeTrackersMenu),
+			LOCTEXT("TrackersMenuText", "Trackers"),
+			LOCTEXT("TrackersMenuToolTip", "Filter list of LLM tags by tracker."),
+			FSlateIcon(FInsightsStyle::GetStyleSetName(), "Icons.Filter.ToolBar"),
+			false
+		);
+	}
+	ToolbarBuilder.EndSection();
+
+	TSharedRef<SWidget> Widget = SNew(SHorizontalBox)
+
+	// Search box
+	+ SHorizontalBox::Slot()
+	.VAlign(VAlign_Center)
+	.Padding(2.0f)
+	.FillWidth(1.0f)
+	[
+		SAssignNew(SearchBox, SSearchBox)
+		.HintText(LOCTEXT("SearchBoxHint", "Search LLM tags or groups"))
+		.OnTextChanged(this, &SMemTagTreeView::SearchBox_OnTextChanged)
+		.IsEnabled(this, &SMemTagTreeView::SearchBox_IsEnabled)
+		.ToolTipText(LOCTEXT("FilterSearchHint", "Type here to search LLM tags or groups"))
+	]
+
+	// Filter out LLM tags with zero instance count.
+	//+ SHorizontalBox::Slot()
+	//.VAlign(VAlign_Center)
+	//.Padding(2.0f)
+	//.AutoWidth()
+	//[
+	//	SNew(SCheckBox)
+	//	.Style(FAppStyle::Get(), "ToggleButtonCheckbox")
+	//	.HAlign(HAlign_Center)
+	//	.Padding(3.0f)
+	//	.OnCheckStateChanged(this, &SMemTagTreeView::FilterOutZeroCountMemTags_OnCheckStateChanged)
+	//	.IsChecked(this, &SMemTagTreeView::FilterOutZeroCountMemTags_IsChecked)
+	//	.ToolTipText(LOCTEXT("FilterOutZeroCountMemTags_Tooltip", "Filter out the LLM tags having zero total instance count (aggregated stats)."))
+	//	[
+	//		SNew(SImage)
+	//		.Image(FInsightsStyle::Get().GetBrush("Icons.ZeroCountFilter"))
+	//	]
+	//]
+
+	// Filter LLM tags by tracker.
+	+ SHorizontalBox::Slot()
+	.VAlign(VAlign_Center)
+	.Padding(FMargin(-2.0f, -5.0f))
+	.AutoWidth()
+	[
+		ToolbarBuilder.MakeWidget()
+	];
+
+	return Widget;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+TSharedRef<SWidget> SMemTagTreeView::ConstructTagsGroupingWidgetArea()
+{
+	TSharedRef<SWidget> Widget = SNew(SHorizontalBox)
+
+	+ SHorizontalBox::Slot()
+	.AutoWidth()
+	.VAlign(VAlign_Center)
+	.Padding(0.0f, 0.0f, 4.0f, 0.0f)
+	[
+		SNew(STextBlock)
+		.MinDesiredWidth(60.0f)
+		.Justification(ETextJustify::Right)
+		.Text(LOCTEXT("GroupByText", "Group by"))
+	]
+
+	+ SHorizontalBox::Slot()
+	.AutoWidth()
+	.VAlign(VAlign_Center)
+	[
+		SNew(SBox)
+		.MinDesiredWidth(100.0f)
+		[
+			SAssignNew(GroupByComboBox, SComboBox<TSharedPtr<EMemTagNodeGroupingMode>>)
+			.ToolTipText(this, &SMemTagTreeView::GroupBy_GetSelectedTooltipText)
+			.OptionsSource(&GroupByOptionsSource)
+			.OnSelectionChanged(this, &SMemTagTreeView::GroupBy_OnSelectionChanged)
+			.OnGenerateWidget(this, &SMemTagTreeView::GroupBy_OnGenerateWidget)
+			[
+				SNew(STextBlock)
+				.Text(this, &SMemTagTreeView::GroupBy_GetSelectedText)
+			]
+		]
+	];
+
+	return Widget;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+TSharedRef<SWidget> SMemTagTreeView::ConstructTracksMiniToolbar()
+{
+	TSharedRef<SWidget> Widget = SNew(SHorizontalBox)
+
+	+ SHorizontalBox::Slot()
+	.VAlign(VAlign_Center)
+	.Padding(FMargin(0.0f, 0.0f, 0.0f, 0.0f))
+	.AutoWidth()
+	[
+		SNew(SButton)
+		.ToolTipText(LOCTEXT("HideAll_ToolTip", "Remove memory graph tracks for all LLM tags."))
+		.OnClicked(this, &SMemTagTreeView::HideAllTracks_OnClicked)
+		.ButtonStyle(&FAppStyle::Get().GetWidgetStyle<FButtonStyle>("SimpleButton"))
+		.ContentPadding(FMargin(2.0f, 2.0f, 2.0f, 2.0f))
+		[
+			SNew(SBox)
+			.HAlign(HAlign_Center)
+			.VAlign(VAlign_Center)
+			[
+				SNew(SImage)
+				//.ColorAndOpacity(FSlateColor::UseForeground())
+				.ColorAndOpacity(FSlateColor(FLinearColor(1.0f, 0.5f, 0.5f, 1.0f)))
+				.Image(FInsightsStyle::Get().GetBrush("Icons.RemoveAllMemTagGraphs"))
+			]
+		]
+	]
+
+	+ SHorizontalBox::Slot()
+	.VAlign(VAlign_Center)
+	.Padding(FMargin(0.0f, 0.0f, 0.0f, 0.0f))
+	.AutoWidth()
+	[
+		SNew(SButton)
+		.ToolTipText(LOCTEXT("ShowAll_ToolTip", "Create memory graph tracks for all visible (filtered) LLM tags."))
+		.OnClicked(this, &SMemTagTreeView::ShowAllTracks_OnClicked)
+		.ButtonStyle(&FAppStyle::Get().GetWidgetStyle<FButtonStyle>("SimpleButton"))
+		.ContentPadding(FMargin(2.0f, 2.0f, 2.0f, 2.0f))
+		[
+			SNew(SBox)
+			.HAlign(HAlign_Center)
+			.VAlign(VAlign_Center)
+			[
+				SNew(SImage)
+				//.ColorAndOpacity(FSlateColor::UseForeground())
+				.ColorAndOpacity(FSlateColor(FLinearColor(0.5f, 1.0f, 0.5f, 1.0f)))
+				.Image(FInsightsStyle::Get().GetBrush("Icons.AddAllMemTagGraphs"))
+			]
+		]
+	]
+
+	+ SHorizontalBox::Slot()
+	.VAlign(VAlign_Center)
+	.Padding(FMargin(2.0f, 0.0f, 2.0f, 0.0f))
+	.AutoWidth()
+	[
+		SNew(SButton)
+		.ToolTipText(LOCTEXT("LoadReportXML_ToolTip", "Load LLMReportTypes.xml"))
+		.OnClicked(this, &SMemTagTreeView::LoadReportXML_OnClicked)
+		.ButtonStyle(&FAppStyle::Get().GetWidgetStyle<FButtonStyle>("SimpleButton"))
+		.ContentPadding(FMargin(4.0f, 2.0f, 4.0f, 2.0f))
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SImage)
+				.ColorAndOpacity(FSlateColor::UseForeground())
+				.Image(FAppStyle::Get().GetBrush("Icons.FolderOpen"))
+			]
+			+ SHorizontalBox::Slot()
+			.VAlign(VAlign_Center)
+			.Padding(4.0f, 0.0f, 0.0f, 0.0f)
+			.AutoWidth()
+			[
+				SNew(STextBlock)
+				.TextStyle(&FAppStyle::Get().GetWidgetStyle< FTextBlockStyle >(TEXT("ButtonText")))
+				.Justification(ETextJustify::Center)
+				.Text(LOCTEXT("LoadReportXML_Text", "Load XML..."))
+			]
+		]
+	]
+
+	+ SHorizontalBox::Slot()
+	.VAlign(VAlign_Center)
+	.HAlign(HAlign_Right)
+	.Padding(FMargin(0.0f, 0.0f, 0.0f, 0.0f))
+	[
+		SNew(SSegmentedControl<uint32>)
+		.OnValueChanged_Lambda([this](uint32 InValue)
+			{
+				TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
+				if (ProfilerWindow.IsValid())
+				{
+					FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
+					SharedState.SetTrackHeightMode((EMemoryTrackHeightMode)InValue);
+				}
+			})
+		.Value_Lambda([this]
+			{
+				TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
+				if (ProfilerWindow.IsValid())
+				{
+					FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
+					return (uint32)SharedState.GetTrackHeightMode();
+				}
+				return (uint32)EMemoryTrackHeightMode::Medium;
+			})
+		+ SSegmentedControl<uint32>::Slot((uint32)EMemoryTrackHeightMode::Small)
+		.Icon(FInsightsStyle::GetBrush("Icons.SizeSmall"))
+		.ToolTip(LOCTEXT("SmallHeight_ToolTip", "Change height of LLM Tag Graph tracks to Small."))
+		+ SSegmentedControl<uint32>::Slot((uint32)EMemoryTrackHeightMode::Medium)
+		.Icon(FInsightsStyle::GetBrush("Icons.SizeMedium"))
+		.ToolTip(LOCTEXT("MediumHeight_ToolTip", "Change height of LLM Tag Graph tracks to Medium."))
+		+ SSegmentedControl<uint32>::Slot((uint32)EMemoryTrackHeightMode::Large)
+		.Icon(FInsightsStyle::GetBrush("Icons.SizeLarge"))
+		.ToolTip(LOCTEXT("LargeHeight_ToolTip", "Change height of LLM Tag Graph tracks to Large."))
+	];
+
+	return Widget;
+}
+
 END_SLATE_FUNCTION_BUILD_OPTIMIZATION
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -394,23 +476,13 @@ TSharedPtr<SWidget> SMemTagTreeView::TreeView_GetMenuContent()
 	const int32 NumSelectedNodes = SelectedNodes.Num();
 	FMemTagNodePtr SelectedNode = NumSelectedNodes ? SelectedNodes[0] : nullptr;
 
-	const TSharedPtr<Insights::FTableColumn> HoveredColumnPtr = Table->FindColumn(HoveredColumnId);
-
 	FText SelectionStr;
-	FText PropertyName;
-	FText PropertyValue;
-
 	if (NumSelectedNodes == 0)
 	{
 		SelectionStr = LOCTEXT("NothingSelected", "Nothing selected");
 	}
 	else if (NumSelectedNodes == 1)
 	{
-		if (HoveredColumnPtr != nullptr)
-		{
-			PropertyName = HoveredColumnPtr->GetShortName();
-			PropertyValue = HoveredColumnPtr->GetValueAsTooltipText(*SelectedNode);
-		}
 		FString ItemName = SelectedNode->GetName().ToString();
 		const int32 MaxStringLen = 64;
 		if (ItemName.Len() > MaxStringLen)
@@ -421,14 +493,14 @@ TSharedPtr<SWidget> SMemTagTreeView::TreeView_GetMenuContent()
 	}
 	else
 	{
-		SelectionStr = LOCTEXT("MultipleSelection", "Multiple selection");
+		SelectionStr = FText::Format(LOCTEXT("MultipleSelection_Fmt", "{0} selected items"), FText::AsNumber(NumSelectedNodes));
 	}
 
 	const bool bShouldCloseWindowAfterMenuSelection = true;
 	FMenuBuilder MenuBuilder(bShouldCloseWindowAfterMenuSelection, NULL);
 
 	// Selection menu
-	MenuBuilder.BeginSection("Selection", LOCTEXT("ContextMenu_Header_Selection", "Selection"));
+	MenuBuilder.BeginSection("Selection", LOCTEXT("ContextMenu_Section_Selection", "Selection"));
 	{
 		struct FLocal
 		{
@@ -444,31 +516,20 @@ TSharedPtr<SWidget> SMemTagTreeView::TreeView_GetMenuContent()
 		(
 			SelectionStr,
 			LOCTEXT("ContextMenu_Selection", "Currently selected items"),
-			FSlateIcon(FEditorStyle::GetStyleSetName(), "@missing.icon"), DummyUIAction, NAME_None, EUserInterfaceActionType::Button
+			FSlateIcon(),
+			DummyUIAction,
+			NAME_None,
+			EUserInterfaceActionType::Button
 		);
 	}
 	MenuBuilder.EndSection();
 
-	MenuBuilder.BeginSection("Misc", LOCTEXT("ContextMenu_Header_Misc", "Miscellaneous"));
+	MenuBuilder.BeginSection("Misc", LOCTEXT("ContextMenu_Section_Misc", "Miscellaneous"));
 	{
-		/*TODO
-		FUIAction Action_CopySelectedToClipboard
-		(
-			FExecuteAction::CreateSP(this, &SMemTagTreeView::ContextMenu_CopySelectedToClipboard_Execute),
-			FCanExecuteAction::CreateSP(this, &SMemTagTreeView::ContextMenu_CopySelectedToClipboard_CanExecute)
-		);
-		MenuBuilder.AddMenuEntry
-		(
-			LOCTEXT("ContextMenu_Header_Misc_CopySelectedToClipboard", "Copy To Clipboard"),
-			LOCTEXT("ContextMenu_Header_Misc_CopySelectedToClipboard_Desc", "Copies selection to clipboard"),
-			FSlateIcon(FEditorStyle::GetStyleSetName(), "Profiler.Misc.CopyToClipboard"), Action_CopySelectedToClipboard, NAME_None, EUserInterfaceActionType::Button
-		);
-		*/
-
 		MenuBuilder.AddSubMenu
 		(
-			LOCTEXT("ContextMenu_Misc_CreateGraphTracks", "Create Graph Tracks"),
-			LOCTEXT("ContextMenu_Misc_CreateGraphTracks_Desc", "Create memory graph tracks."),
+			LOCTEXT("ContextMenu_CreateGraphTracks_SubMenu", "Create Graph Tracks"),
+			LOCTEXT("ContextMenu_CreateGraphTracks_SubMenu_Desc", "Create memory graph tracks."),
 			FNewMenuDelegate::CreateSP(this, &SMemTagTreeView::TreeView_BuildCreateGraphTracksMenu),
 			false,
 			FSlateIcon()
@@ -476,8 +537,8 @@ TSharedPtr<SWidget> SMemTagTreeView::TreeView_GetMenuContent()
 
 		MenuBuilder.AddSubMenu
 		(
-			LOCTEXT("ContextMenu_Misc_RemoveGraphTracks", "Remove Graph Tracks"),
-			LOCTEXT("ContextMenu_Misc_RemoveGraphTracks_Desc", "Remove memory graph tracks."),
+			LOCTEXT("ContextMenu_RemoveGraphTracks_SubMenu", "Remove Graph Tracks"),
+			LOCTEXT("ContextMenu_RemoveGraphTracks_SubMenu_Desc", "Remove memory graph tracks."),
 			FNewMenuDelegate::CreateSP(this, &SMemTagTreeView::TreeView_BuildRemoveGraphTracksMenu),
 			false,
 			FSlateIcon()
@@ -490,9 +551,12 @@ TSharedPtr<SWidget> SMemTagTreeView::TreeView_GetMenuContent()
 		);
 		MenuBuilder.AddMenuEntry
 		(
-			LOCTEXT("ContextMenu_Misc_GenerateColorForSelectedMemTags", "Generate New Color"),
-			LOCTEXT("ContextMenu_Misc_GenerateColorForSelectedMemTags_Desc", "Generate new color for selected LLM tag(s)."),
-			FSlateIcon(), Action_GenerateColorForSelectedMemTags, NAME_None, EUserInterfaceActionType::Button
+			LOCTEXT("ContextMenu_GenerateColorForSelectedMemTags", "Generate New Color"),
+			LOCTEXT("ContextMenu_GenerateColorForSelectedMemTags_Desc", "Generate new color for selected LLM tag(s)."),
+			FSlateIcon(),
+			Action_GenerateColorForSelectedMemTags,
+			NAME_None,
+			EUserInterfaceActionType::Button
 		);
 
 		FUIAction Action_EditColorForSelectedMemTags
@@ -502,67 +566,12 @@ TSharedPtr<SWidget> SMemTagTreeView::TreeView_GetMenuContent()
 		);
 		MenuBuilder.AddMenuEntry
 		(
-			LOCTEXT("ContextMenu_Misc_EditColorForSelectedMemTags", "Edit Color..."),
-			LOCTEXT("ContextMenu_Misc_EditColorForSelectedMemTags_Desc", "Edit color for selected LLM tag(s)."),
-			FSlateIcon(), Action_EditColorForSelectedMemTags, NAME_None, EUserInterfaceActionType::Button
-		);
-
-		MenuBuilder.AddSubMenu
-		(
-			LOCTEXT("ContextMenu_Header_Misc_Sort", "Sort By"),
-			LOCTEXT("ContextMenu_Header_Misc_Sort_Desc", "Sort by column"),
-			FNewMenuDelegate::CreateSP(this, &SMemTagTreeView::TreeView_BuildSortByMenu),
-			false,
-			FSlateIcon(FEditorStyle::GetStyleSetName(), "Profiler.Misc.SortBy")
-		);
-	}
-	MenuBuilder.EndSection();
-
-	MenuBuilder.BeginSection("Columns", LOCTEXT("ContextMenu_Header_Columns", "Columns"));
-	{
-		MenuBuilder.AddSubMenu
-		(
-			LOCTEXT("ContextMenu_Header_Columns_View", "View Column"),
-			LOCTEXT("ContextMenu_Header_Columns_View_Desc", "Hides or shows columns"),
-			FNewMenuDelegate::CreateSP(this, &SMemTagTreeView::TreeView_BuildViewColumnMenu),
-			false,
-			FSlateIcon(FEditorStyle::GetStyleSetName(), "Profiler.EventGraph.ViewColumn")
-		);
-
-		FUIAction Action_ShowAllColumns
-		(
-			FExecuteAction::CreateSP(this, &SMemTagTreeView::ContextMenu_ShowAllColumns_Execute),
-			FCanExecuteAction::CreateSP(this, &SMemTagTreeView::ContextMenu_ShowAllColumns_CanExecute)
-		);
-		MenuBuilder.AddMenuEntry
-		(
-			LOCTEXT("ContextMenu_Header_Columns_ShowAllColumns", "Show All Columns"),
-			LOCTEXT("ContextMenu_Header_Columns_ShowAllColumns_Desc", "Resets tree view to show all columns"),
-			FSlateIcon(FEditorStyle::GetStyleSetName(), "Profiler.EventGraph.ResetColumn"), Action_ShowAllColumns, NAME_None, EUserInterfaceActionType::Button
-		);
-
-		//FUIAction Action_ShowMinMaxMedColumns
-		//(
-		//	FExecuteAction::CreateSP(this, &SMemTagTreeView::ContextMenu_ShowMinMaxMedColumns_Execute),
-		//	FCanExecuteAction::CreateSP(this, &SMemTagTreeView::ContextMenu_ShowMinMaxMedColumns_CanExecute)
-		//);
-		//MenuBuilder.AddMenuEntry
-		//(
-		//	LOCTEXT("ContextMenu_Header_Columns_ShowMinMaxMedColumns", "Reset Columns to Min/Max/Median Preset"),
-		//	LOCTEXT("ContextMenu_Header_Columns_ShowMinMaxMedColumns_Desc", "Resets columns to Min/Max/Median preset"),
-		//	FSlateIcon(FEditorStyle::GetStyleSetName(), "Profiler.EventGraph.ResetColumn"), Action_ShowMinMaxMedColumns, NAME_None, EUserInterfaceActionType::Button
-		//);
-
-		FUIAction Action_ResetColumns
-		(
-			FExecuteAction::CreateSP(this, &SMemTagTreeView::ContextMenu_ResetColumns_Execute),
-			FCanExecuteAction::CreateSP(this, &SMemTagTreeView::ContextMenu_ResetColumns_CanExecute)
-		);
-		MenuBuilder.AddMenuEntry
-		(
-			LOCTEXT("ContextMenu_Header_Columns_ResetColumns", "Reset Columns to Default"),
-			LOCTEXT("ContextMenu_Header_Columns_ResetColumns_Desc", "Resets columns to default"),
-			FSlateIcon(FEditorStyle::GetStyleSetName(), "Profiler.EventGraph.ResetColumn"), Action_ResetColumns, NAME_None, EUserInterfaceActionType::Button
+			LOCTEXT("ContextMenu_EditColorForSelectedMemTags", "Edit Color..."),
+			LOCTEXT("ContextMenu_EditColorForSelectedMemTags_Desc", "Edit color for selected LLM tag(s)."),
+			FSlateIcon(),
+			Action_EditColorForSelectedMemTags,
+			NAME_None,
+			EUserInterfaceActionType::Button
 		);
 	}
 	MenuBuilder.EndSection();
@@ -584,9 +593,12 @@ void SMemTagTreeView::TreeView_BuildCreateGraphTracksMenu(FMenuBuilder& MenuBuil
 		);
 		MenuBuilder.AddMenuEntry
 		(
-			LOCTEXT("ContextMenu_Misc_CreateGraphTracksForSelectedMemTags", "Selected"),
-			LOCTEXT("ContextMenu_Misc_CreateGraphTracksForSelectedMemTags_Desc", "Create memory graph tracks for selected LLM tag(s)."),
-			FSlateIcon(), Action_CreateGraphTracksForSelectedMemTags, NAME_None, EUserInterfaceActionType::Button
+			LOCTEXT("ContextMenu_CreateGraphTracksForSelectedMemTags", "Selected"),
+			LOCTEXT("ContextMenu_CreateGraphTracksForSelectedMemTags_Desc", "Create memory graph tracks for selected LLM tag(s)."),
+			FSlateIcon(),
+			Action_CreateGraphTracksForSelectedMemTags,
+			NAME_None,
+			EUserInterfaceActionType::Button
 		);
 
 		// Create memory graph tracks for filtered LLM tags
@@ -597,12 +609,15 @@ void SMemTagTreeView::TreeView_BuildCreateGraphTracksMenu(FMenuBuilder& MenuBuil
 		);
 		MenuBuilder.AddMenuEntry
 		(
-			LOCTEXT("ContextMenu_Misc_CreateGraphTracksForFilteredMemTags", "Filtered"),
-			LOCTEXT("ContextMenu_Misc_CreateGraphTracksForFilteredMemTags_Desc", "Create memory graph tracks for all visible (filtered) LLM tags."),
-			FSlateIcon(), Action_CreateGraphTracksForFilteredMemTags, NAME_None, EUserInterfaceActionType::Button
+			LOCTEXT("ContextMenu_CreateGraphTracksForFilteredMemTags", "Filtered"),
+			LOCTEXT("ContextMenu_CreateGraphTracksForFilteredMemTags_Desc", "Create memory graph tracks for all visible (filtered) LLM tags."),
+			FSlateIcon(),
+			Action_CreateGraphTracksForFilteredMemTags,
+			NAME_None,
+			EUserInterfaceActionType::Button
 		);
 
-		// Create all graph series
+		// Create memory graph tracks for all LLM tags
 		FUIAction Action_CreateAllGraphTracks
 		(
 			FExecuteAction::CreateSP(this, &SMemTagTreeView::CreateAllGraphTracks),
@@ -610,9 +625,12 @@ void SMemTagTreeView::TreeView_BuildCreateGraphTracksMenu(FMenuBuilder& MenuBuil
 		);
 		MenuBuilder.AddMenuEntry
 		(
-			LOCTEXT("ContextMenu_Misc_CreateAllGraphTracks", "All"),
-			LOCTEXT("ContextMenu_Misc_CreateAllGraphTracks_Desc", "Create memory graph tracks for all LLM tags"),
-			FSlateIcon(), Action_CreateAllGraphTracks, NAME_None, EUserInterfaceActionType::Button
+			LOCTEXT("ContextMenu_CreateAllGraphTracks", "All"),
+			LOCTEXT("ContextMenu_CreateAllGraphTracks_Desc", "Create memory graph tracks for all LLM tags."),
+			FSlateIcon(),
+			Action_CreateAllGraphTracks,
+			NAME_None,
+			EUserInterfaceActionType::Button
 		);
 	}
 	MenuBuilder.EndSection();
@@ -632,25 +650,15 @@ void SMemTagTreeView::TreeView_BuildRemoveGraphTracksMenu(FMenuBuilder& MenuBuil
 		);
 		MenuBuilder.AddMenuEntry
 		(
-			LOCTEXT("ContextMenu_Misc_RemoveGraphTracksForSelectedMemTags", "Selected"),
-			LOCTEXT("ContextMenu_Misc_RemoveGraphTracksForSelectedMemTags_Desc", "Remove memory graph tracks for selected LLM tag(s)"),
-			FSlateIcon(), Action_RemoveGraphTracksForSelectedMemTags, NAME_None, EUserInterfaceActionType::Button
+			LOCTEXT("ContextMenu_RemoveGraphTracksForSelectedMemTags", "Selected"),
+			LOCTEXT("ContextMenu_RemoveGraphTracksForSelectedMemTags_Desc", "Remove memory graph tracks for selected LLM tag(s)."),
+			FSlateIcon(),
+			Action_RemoveGraphTracksForSelectedMemTags,
+			NAME_None,
+			EUserInterfaceActionType::Button
 		);
 
-		// Remove memory graph tracks for LLM tags not used by the current tracker
-		FUIAction Action_RemoveGraphTracksForUnusedMemTags
-		(
-			FExecuteAction::CreateSP(this, &SMemTagTreeView::RemoveGraphTracksForUnusedMemTags),
-			FCanExecuteAction::CreateSP(this, &SMemTagTreeView::CanRemoveGraphTracksForUnusedMemTags)
-		);
-		MenuBuilder.AddMenuEntry
-		(
-			LOCTEXT("ContextMenu_Misc_RemoveGraphTracksForUnusedMemTags", "Unused"),
-			LOCTEXT("ContextMenu_Misc_RemoveGraphTracksForUnusedMemTags_Desc", "Remove memory graph tracks for LLM tags not used by the current tracker"),
-			FSlateIcon(), Action_RemoveGraphTracksForUnusedMemTags, NAME_None, EUserInterfaceActionType::Button
-		);
-
-		// Remove all graph series
+		// Remove memory graph tracks for all LLM tags
 		FUIAction Action_RemoveAllGraphTracks
 		(
 			FExecuteAction::CreateSP(this, &SMemTagTreeView::RemoveAllGraphTracks),
@@ -658,9 +666,12 @@ void SMemTagTreeView::TreeView_BuildRemoveGraphTracksMenu(FMenuBuilder& MenuBuil
 		);
 		MenuBuilder.AddMenuEntry
 		(
-			LOCTEXT("ContextMenu_Misc_RemoveAllGraphTracks", "All"),
-			LOCTEXT("ContextMenu_Misc_RemoveAllGraphTracks_Desc", "Remove all memory graph tracks."),
-			FSlateIcon(), Action_RemoveAllGraphTracks, NAME_None, EUserInterfaceActionType::Button
+			LOCTEXT("ContextMenu_RemoveAllGraphTracks", "All"),
+			LOCTEXT("ContextMenu_RemoveAllGraphTracks_Desc", "Remove memory graph tracks for all LLM tags."),
+			FSlateIcon(),
+			Action_RemoveAllGraphTracks,
+			NAME_None,
+			EUserInterfaceActionType::Button
 		);
 	}
 	MenuBuilder.EndSection();
@@ -670,9 +681,7 @@ void SMemTagTreeView::TreeView_BuildRemoveGraphTracksMenu(FMenuBuilder& MenuBuil
 
 void SMemTagTreeView::TreeView_BuildSortByMenu(FMenuBuilder& MenuBuilder)
 {
-	// TODO: Refactor later @see TSharedPtr<SWidget> SCascadePreviewViewportToolBar::GenerateViewMenu() const
-
-	MenuBuilder.BeginSection("ColumnName", LOCTEXT("ContextMenu_Header_Misc_ColumnName", "Column Name"));
+	MenuBuilder.BeginSection("SortColumn", LOCTEXT("ContextMenu_Section_SortColumn", "Sort Column"));
 
 	for (const TSharedRef<Insights::FTableColumn>& ColumnRef : Table->GetColumns())
 	{
@@ -690,16 +699,17 @@ void SMemTagTreeView::TreeView_BuildSortByMenu(FMenuBuilder& MenuBuilder)
 			(
 				Column.GetTitleName(),
 				Column.GetDescription(),
-				FSlateIcon(), Action_SortByColumn, NAME_None, EUserInterfaceActionType::RadioButton
+				FSlateIcon(),
+				Action_SortByColumn,
+				NAME_None,
+				EUserInterfaceActionType::RadioButton
 			);
 		}
 	}
 
 	MenuBuilder.EndSection();
 
-	//-----------------------------------------------------------------------------
-
-	MenuBuilder.BeginSection("SortMode", LOCTEXT("ContextMenu_Header_Misc_Sort_SortMode", "Sort Mode"));
+	MenuBuilder.BeginSection("SortMode", LOCTEXT("ContextMenu_Section_SortMode", "Sort Mode"));
 	{
 		FUIAction Action_SortAscending
 		(
@@ -709,9 +719,12 @@ void SMemTagTreeView::TreeView_BuildSortByMenu(FMenuBuilder& MenuBuilder)
 		);
 		MenuBuilder.AddMenuEntry
 		(
-			LOCTEXT("ContextMenu_Header_Misc_Sort_SortAscending", "Sort Ascending"),
-			LOCTEXT("ContextMenu_Header_Misc_Sort_SortAscending_Desc", "Sorts ascending"),
-			FSlateIcon(FEditorStyle::GetStyleSetName(), "Profiler.Misc.SortAscending"), Action_SortAscending, NAME_None, EUserInterfaceActionType::RadioButton
+			LOCTEXT("ContextMenu_SortAscending", "Sort Ascending"),
+			LOCTEXT("ContextMenu_SortAscending_Desc", "Sorts ascending."),
+			FSlateIcon(FAppStyle::Get().GetStyleSetName(), "Icons.SortUp"),
+			Action_SortAscending,
+			NAME_None,
+			EUserInterfaceActionType::RadioButton
 		);
 
 		FUIAction Action_SortDescending
@@ -722,9 +735,12 @@ void SMemTagTreeView::TreeView_BuildSortByMenu(FMenuBuilder& MenuBuilder)
 		);
 		MenuBuilder.AddMenuEntry
 		(
-			LOCTEXT("ContextMenu_Header_Misc_Sort_SortDescending", "Sort Descending"),
-			LOCTEXT("ContextMenu_Header_Misc_Sort_SortDescending_Desc", "Sorts descending"),
-			FSlateIcon(FEditorStyle::GetStyleSetName(), "Profiler.Misc.SortDescending"), Action_SortDescending, NAME_None, EUserInterfaceActionType::RadioButton
+			LOCTEXT("ContextMenu_SortDescending", "Sort Descending"),
+			LOCTEXT("ContextMenu_SortDescending_Desc", "Sorts descending."),
+			FSlateIcon(FAppStyle::Get().GetStyleSetName(), "Icons.SortDown"),
+			Action_SortDescending,
+			NAME_None,
+			EUserInterfaceActionType::RadioButton
 		);
 	}
 	MenuBuilder.EndSection();
@@ -734,7 +750,7 @@ void SMemTagTreeView::TreeView_BuildSortByMenu(FMenuBuilder& MenuBuilder)
 
 void SMemTagTreeView::TreeView_BuildViewColumnMenu(FMenuBuilder& MenuBuilder)
 {
-	MenuBuilder.BeginSection("ViewColumn", LOCTEXT("ContextMenu_Header_Columns_View", "View Column"));
+	MenuBuilder.BeginSection("Columns", LOCTEXT("ContextMenu_Section_Columns", "Columns"));
 
 	for (const TSharedRef<Insights::FTableColumn>& ColumnRef : Table->GetColumns())
 	{
@@ -750,7 +766,10 @@ void SMemTagTreeView::TreeView_BuildViewColumnMenu(FMenuBuilder& MenuBuilder)
 		(
 			Column.GetTitleName(),
 			Column.GetDescription(),
-			FSlateIcon(), Action_ToggleColumn, NAME_None, EUserInterfaceActionType::ToggleButton
+			FSlateIcon(),
+			Action_ToggleColumn,
+			NAME_None,
+			EUserInterfaceActionType::ToggleButton
 		);
 	}
 
@@ -788,35 +807,13 @@ FText SMemTagTreeView::GetColumnHeaderText(const FName ColumnId) const
 
 TSharedRef<SWidget> SMemTagTreeView::TreeViewHeaderRow_GenerateColumnMenu(const Insights::FTableColumn& Column)
 {
-	bool bIsMenuVisible = false;
-
 	const bool bShouldCloseWindowAfterMenuSelection = true;
 	FMenuBuilder MenuBuilder(bShouldCloseWindowAfterMenuSelection, NULL);
+
+	MenuBuilder.BeginSection("Sorting", LOCTEXT("ContextMenu_Section_Sorting", "Sorting"));
 	{
-		if (Column.CanBeHidden())
-		{
-			MenuBuilder.BeginSection("Column", LOCTEXT("TreeViewHeaderRow_Header_Column", "Column"));
-
-			FUIAction Action_HideColumn
-			(
-				FExecuteAction::CreateSP(this, &SMemTagTreeView::HideColumn, Column.GetId()),
-				FCanExecuteAction::CreateSP(this, &SMemTagTreeView::CanHideColumn, Column.GetId())
-			);
-			MenuBuilder.AddMenuEntry
-			(
-				LOCTEXT("TreeViewHeaderRow_HideColumn", "Hide"),
-				LOCTEXT("TreeViewHeaderRow_HideColumn_Desc", "Hides the selected column"),
-				FSlateIcon(), Action_HideColumn, NAME_None, EUserInterfaceActionType::Button
-			);
-
-			bIsMenuVisible = true;
-			MenuBuilder.EndSection();
-		}
-
 		if (Column.CanBeSorted())
 		{
-			MenuBuilder.BeginSection("SortMode", LOCTEXT("ContextMenu_Header_Misc_Sort_SortMode", "Sort Mode"));
-
 			FUIAction Action_SortAscending
 			(
 				FExecuteAction::CreateSP(this, &SMemTagTreeView::HeaderMenu_SortMode_Execute, Column.GetId(), EColumnSortMode::Ascending),
@@ -825,54 +822,126 @@ TSharedRef<SWidget> SMemTagTreeView::TreeViewHeaderRow_GenerateColumnMenu(const 
 			);
 			MenuBuilder.AddMenuEntry
 			(
-				LOCTEXT("ContextMenu_Header_Misc_Sort_SortAscending", "Sort Ascending"),
-				LOCTEXT("ContextMenu_Header_Misc_Sort_SortAscending_Desc", "Sorts ascending"),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "Profiler.Misc.SortAscending"), Action_SortAscending, NAME_None, EUserInterfaceActionType::RadioButton
+				FText::Format(LOCTEXT("ContextMenu_SortAscending_Fmt", "Sort Ascending (by {0})"), Column.GetTitleName()),
+				FText::Format(LOCTEXT("ContextMenu_SortAscending_Desc_Fmt", "Sorts ascending by {0}."), Column.GetTitleName()),
+				FSlateIcon(FAppStyle::Get().GetStyleSetName(), "Icons.SortUp"),
+				Action_SortAscending,
+				NAME_None,
+				EUserInterfaceActionType::RadioButton
 			);
 
-			FUIAction Action_SortDescending
+				FUIAction Action_SortDescending
+				(
+					FExecuteAction::CreateSP(this, &SMemTagTreeView::HeaderMenu_SortMode_Execute, Column.GetId(), EColumnSortMode::Descending),
+					FCanExecuteAction::CreateSP(this, &SMemTagTreeView::HeaderMenu_SortMode_CanExecute, Column.GetId(), EColumnSortMode::Descending),
+					FIsActionChecked::CreateSP(this, &SMemTagTreeView::HeaderMenu_SortMode_IsChecked, Column.GetId(), EColumnSortMode::Descending)
+				);
+				MenuBuilder.AddMenuEntry
+				(
+				FText::Format(LOCTEXT("ContextMenu_SortDescending_Fmt", "Sort Descending (by {0})"), Column.GetTitleName()),
+				FText::Format(LOCTEXT("ContextMenu_SortDescending_Desc_Fmt", "Sorts descending by {0}."), Column.GetTitleName()),
+					FSlateIcon(FAppStyle::Get().GetStyleSetName(), "Icons.SortDown"),
+					Action_SortDescending,
+					NAME_None,
+					EUserInterfaceActionType::RadioButton
+				);
+			}
+
+			MenuBuilder.AddSubMenu
 			(
-				FExecuteAction::CreateSP(this, &SMemTagTreeView::HeaderMenu_SortMode_Execute, Column.GetId(), EColumnSortMode::Descending),
-				FCanExecuteAction::CreateSP(this, &SMemTagTreeView::HeaderMenu_SortMode_CanExecute, Column.GetId(), EColumnSortMode::Descending),
-				FIsActionChecked::CreateSP(this, &SMemTagTreeView::HeaderMenu_SortMode_IsChecked, Column.GetId(), EColumnSortMode::Descending)
+				LOCTEXT("ContextMenu_SortBy_SubMenu", "Sort By"),
+				LOCTEXT("ContextMenu_SortBy_SubMenu_Desc", "Sorts by a column."),
+				FNewMenuDelegate::CreateSP(this, &SMemTagTreeView::TreeView_BuildSortByMenu),
+				false,
+				FSlateIcon(FInsightsStyle::GetStyleSetName(), "Icons.SortBy")
+			);
+		}
+		MenuBuilder.EndSection();
+
+	MenuBuilder.BeginSection("ColumnVisibility", LOCTEXT("ContextMenu_Section_ColumnVisibility", "Column Visibility"));
+	{
+		if (Column.CanBeHidden())
+		{
+			FUIAction Action_HideColumn
+			(
+				FExecuteAction::CreateSP(this, &SMemTagTreeView::HideColumn, Column.GetId()),
+				FCanExecuteAction::CreateSP(this, &SMemTagTreeView::CanHideColumn, Column.GetId())
 			);
 			MenuBuilder.AddMenuEntry
 			(
-				LOCTEXT("ContextMenu_Header_Misc_Sort_SortDescending", "Sort Descending"),
-				LOCTEXT("ContextMenu_Header_Misc_Sort_SortDescending_Desc", "Sorts descending"),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "Profiler.Misc.SortDescending"), Action_SortDescending, NAME_None, EUserInterfaceActionType::RadioButton
+				LOCTEXT("ContextMenu_HideColumn", "Hide"),
+				LOCTEXT("ContextMenu_HideColumn_Desc", "Hides the selected column."),
+				FSlateIcon(),
+				Action_HideColumn,
+				NAME_None,
+				EUserInterfaceActionType::Button
 			);
-
-			bIsMenuVisible = true;
-			MenuBuilder.EndSection();
 		}
 
-		//if (Column.CanBeFiltered())
-		//{
-		//	MenuBuilder.BeginSection("FilterMode", LOCTEXT("ContextMenu_Header_Misc_Filter_FilterMode", "Filter Mode"));
-		//	bIsMenuVisible = true;
-		//	MenuBuilder.EndSection();
-		//}
+		MenuBuilder.AddSubMenu
+		(
+			LOCTEXT("ContextMenu_ViewColumn_SubMenu", "View Column"),
+			LOCTEXT("ContextMenu_ViewColumn_SubMenu_Desc", "Hides or shows columns."),
+			FNewMenuDelegate::CreateSP(this, &SMemTagTreeView::TreeView_BuildViewColumnMenu),
+			false,
+			FSlateIcon(FInsightsStyle::GetStyleSetName(), "Icons.ViewColumn")
+		);
+
+		FUIAction Action_ShowAllColumns
+		(
+			FExecuteAction::CreateSP(this, &SMemTagTreeView::ContextMenu_ShowAllColumns_Execute),
+			FCanExecuteAction::CreateSP(this, &SMemTagTreeView::ContextMenu_ShowAllColumns_CanExecute)
+		);
+		MenuBuilder.AddMenuEntry
+		(
+			LOCTEXT("ContextMenu_ShowAllColumns", "Show All Columns"),
+			LOCTEXT("ContextMenu_ShowAllColumns_Desc", "Resets tree view to show all columns."),
+			FSlateIcon(FInsightsStyle::GetStyleSetName(), "Icons.ResetColumn"),
+			Action_ShowAllColumns,
+			NAME_None,
+			EUserInterfaceActionType::Button
+		);
+
+		//FUIAction Action_ShowMinMaxMedColumns
+		//(
+		//	FExecuteAction::CreateSP(this, &SMemTagTreeView::ContextMenu_ShowMinMaxMedColumns_Execute),
+		//	FCanExecuteAction::CreateSP(this, &SMemTagTreeView::ContextMenu_ShowMinMaxMedColumns_CanExecute)
+		//);
+		//MenuBuilder.AddMenuEntry
+		//(
+		//	LOCTEXT("ContextMenu_ShowMinMaxMedColumns", "Reset Columns to Min/Max/Median Preset"),
+		//	LOCTEXT("ContextMenu_ShowMinMaxMedColumns_Desc", "Resets columns to Min/Max/Median preset."),
+		//	FSlateIcon(FInsightsStyle::GetStyleSetName(), "Icons.ResetColumn"),
+		//	Action_ShowMinMaxMedColumns,
+		//	NAME_None,
+		//	EUserInterfaceActionType::Button
+		//);
+
+		FUIAction Action_ResetColumns
+		(
+			FExecuteAction::CreateSP(this, &SMemTagTreeView::ContextMenu_ResetColumns_Execute),
+			FCanExecuteAction::CreateSP(this, &SMemTagTreeView::ContextMenu_ResetColumns_CanExecute)
+		);
+		MenuBuilder.AddMenuEntry
+		(
+			LOCTEXT("ContextMenu_ResetColumns", "Reset Columns to Default"),
+			LOCTEXT("ContextMenu_ResetColumns_Desc", "Resets columns to default."),
+			FSlateIcon(FInsightsStyle::GetStyleSetName(), "Icons.ResetColumn"),
+			Action_ResetColumns,
+			NAME_None,
+			EUserInterfaceActionType::Button
+		);
 	}
+	MenuBuilder.EndSection();
 
-	/*
-	TODO:
-	- Show top ten
-	- Show top bottom
-	- Filter by list (avg, median, 10%, 90%, etc.)
-	- Text box for filtering for each column instead of one text box used for filtering
-	- Grouping button for flat view modes (show at most X groups, show all groups for names)
-	*/
-
-	return bIsMenuVisible ? MenuBuilder.MakeWidget() : (TSharedRef<SWidget>)SNullWidget::NullWidget;
+	return MenuBuilder.MakeWidget();
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void SMemTagTreeView::InsightsManager_OnSessionChanged()
 {
-	TSharedPtr<const Trace::IAnalysisSession> NewSession = FInsightsManager::Get()->GetSession();
-
+	TSharedPtr<const TraceServices::IAnalysisSession> NewSession = FInsightsManager::Get()->GetSession();
 	if (NewSession != Session)
 	{
 		Session = NewSession;
@@ -918,36 +987,26 @@ void SMemTagTreeView::ApplyFiltering()
 {
 	FilteredGroupNodes.Reset();
 
-	uint64 TrackerFilterMask = uint64(-1);
-	if (ProfilerWindow.IsValid())
-	{
-		FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
-		if (SharedState.GetCurrentTracker())
-		{
-			TrackerFilterMask = 1ULL << static_cast<int32>(SharedState.GetCurrentTracker()->GetId());
-		}
-	}
-
 	// Apply filter to all groups and its children.
 	const int32 NumGroups = GroupNodes.Num();
 	for (int32 GroupIndex = 0; GroupIndex < NumGroups; ++GroupIndex)
 	{
 		FMemTagNodePtr& GroupPtr = GroupNodes[GroupIndex];
 		GroupPtr->ClearFilteredChildren();
+
 		const bool bIsGroupVisible = Filters->PassesAllFilters(GroupPtr);
+		int32 NumVisibleChildren = 0;
 
 		const TArray<Insights::FBaseTreeNodePtr>& GroupChildren = GroupPtr->GetChildren();
-		const int32 NumChildren = GroupChildren.Num();
-		int32 NumVisibleChildren = 0;
-		for (int32 Cx = 0; Cx < NumChildren; ++Cx)
+		for (const Insights::FBaseTreeNodePtr& Child : GroupChildren)
 		{
-			// Add a child.
-			const FMemTagNodePtr& NodePtr = StaticCastSharedPtr<FMemTagNode, Insights::FBaseTreeNode>(GroupChildren[Cx]);
+			const FMemTagNodePtr& NodePtr = StaticCastSharedPtr<FMemTagNode, Insights::FBaseTreeNode>(Child);
 			const bool bIsChildVisible = (!bFilterOutZeroCountMemTags || NodePtr->GetAggregatedStats().InstanceCount > 0)
-									  && (!bFilterByTracker || (NodePtr->GetTrackers() & TrackerFilterMask) != 0)
+									  && (!Insights::FMemoryTracker::IsValidTrackerId(NodePtr->GetMemTrackerId()) || ((Insights::FMemoryTracker::AsFlag(NodePtr->GetMemTrackerId()) & TrackersFilter) != 0))
 									  && Filters->PassesAllFilters(NodePtr);
 			if (bIsChildVisible)
 			{
+				// Add a child node.
 				GroupPtr->AddFilteredChild(NodePtr);
 				NumVisibleChildren++;
 			}
@@ -1023,21 +1082,6 @@ ECheckBoxState SMemTagTreeView::FilterOutZeroCountMemTags_IsChecked() const
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-
-void SMemTagTreeView::FilterByTracker_OnCheckStateChanged(ECheckBoxState NewRadioState)
-{
-	bFilterByTracker = (NewRadioState == ECheckBoxState::Checked);
-	ApplyFiltering();
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-ECheckBoxState SMemTagTreeView::FilterByTracker_IsChecked() const
-{
-	return bFilterByTracker ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
 // TreeView
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -1086,18 +1130,21 @@ void SMemTagTreeView::TreeView_OnMouseButtonDoubleClick(FMemTagNodePtr MemTagNod
 	}
 	else
 	{
+		TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
 		if (ProfilerWindow.IsValid())
 		{
 			FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
+			const Insights::FMemoryTrackerId MemTrackerId = MemTagNodePtr->GetMemTrackerId();
 			const Insights::FMemoryTagId MemTagId = MemTagNodePtr->GetMemTagId();
-			TSharedPtr<FMemoryGraphTrack> GraphTrack = SharedState.GetMemTagGraphTrack(MemTagId);
+
+			TSharedPtr<FMemoryGraphTrack> GraphTrack = SharedState.GetMemTagGraphTrack(MemTrackerId, MemTagId);
 			if (!GraphTrack.IsValid())
 			{
-				SharedState.CreateMemTagGraphTrack(MemTagId);
+				SharedState.CreateMemTagGraphTrack(MemTrackerId, MemTagId);
 			}
 			else
 			{
-				SharedState.RemoveMemTagGraphTrack(MemTagId);
+				SharedState.RemoveMemTagGraphTrack(MemTrackerId, MemTagId);
 			}
 		}
 	}
@@ -1214,7 +1261,7 @@ void SMemTagTreeView::CreateGroups()
 
 		for (const FMemTagNodePtr& NodePtr : MemTagNodes)
 		{
-			GroupPtr->AddChildAndSetGroupPtr(NodePtr);
+			GroupPtr->AddChildAndSetParent(NodePtr);
 		}
 		TreeView->SetItemExpansion(GroupPtr, true);
 	}
@@ -1231,7 +1278,7 @@ void SMemTagTreeView::CreateGroups()
 				const FName GroupName = *MemTagNodeTypeHelper::ToText(NodeType).ToString();
 				GroupPtr = GroupNodeSet.Add(NodeType, MakeShared<FMemTagNode>(GroupName));
 			}
-			GroupPtr->AddChildAndSetGroupPtr(NodePtr);
+			GroupPtr->AddChildAndSetParent(NodePtr);
 			TreeView->SetItemExpansion(GroupPtr, true);
 		}
 		GroupNodeSet.KeySort([](const EMemTagNodeType& A, const EMemTagNodeType& B) { return A < B; }); // sort groups by type
@@ -1251,7 +1298,7 @@ void SMemTagTreeView::CreateGroups()
 				const FName GroupName(FirstLetterStr);
 				GroupPtr = GroupNodeSet.Add(FirstLetter, MakeShared<FMemTagNode>(GroupName));
 			}
-			GroupPtr->AddChildAndSetGroupPtr(NodePtr);
+			GroupPtr->AddChildAndSetParent(NodePtr);
 		}
 		GroupNodeSet.KeySort([](const TCHAR& A, const TCHAR& B) { return A < B; }); // sort groups alphabetically
 		GroupNodeSet.GenerateValueArray(GroupNodes);
@@ -1259,17 +1306,17 @@ void SMemTagTreeView::CreateGroups()
 	// Groups LLM tags by tracker.
 	else if (GroupingMode == EMemTagNodeGroupingMode::ByTracker)
 	{
-		TMap<uint64, FMemTagNodePtr> GroupNodeSet;
+		TMap<Insights::FMemoryTrackerId, FMemTagNodePtr> GroupNodeSet;
 		for (const FMemTagNodePtr& NodePtr : MemTagNodes)
 		{
-			const uint64 Tracker = NodePtr->GetTrackers();
-			FMemTagNodePtr GroupPtr = GroupNodeSet.FindRef(Tracker);
+			Insights::FMemoryTrackerId TrackerId = NodePtr->GetMemTrackerId();
+			FMemTagNodePtr GroupPtr = GroupNodeSet.FindRef(TrackerId);
 			if (!GroupPtr)
 			{
 				const FName GroupName = *NodePtr->GetTrackerText().ToString();
-				GroupPtr = GroupNodeSet.Add(Tracker, MakeShared<FMemTagNode>(GroupName));
+				GroupPtr = GroupNodeSet.Add(TrackerId, MakeShared<FMemTagNode>(GroupName));
 			}
-			GroupPtr->AddChildAndSetGroupPtr(NodePtr);
+			GroupPtr->AddChildAndSetParent(NodePtr);
 			TreeView->SetItemExpansion(GroupPtr, true);
 		}
 		GroupNodeSet.GenerateValueArray(GroupNodes);
@@ -1286,7 +1333,7 @@ void SMemTagTreeView::CreateGroups()
 			{
 				GroupPtr = GroupNodeSet.Add(GroupName, MakeShared<FMemTagNode>(GroupName));
 			}
-			GroupPtr->AddChildAndSetGroupPtr(NodePtr);
+			GroupPtr->AddChildAndSetParent(NodePtr);
 			TreeView->SetItemExpansion(GroupPtr, true);
 		}
 		GroupNodeSet.GenerateValueArray(GroupNodes);
@@ -1436,19 +1483,13 @@ void SMemTagTreeView::SortTreeNodes()
 
 void SMemTagTreeView::SortTreeNodesRec(FMemTagNode& Node, const Insights::ITableCellValueSorter& Sorter)
 {
-	if (ColumnSortMode == EColumnSortMode::Type::Descending)
-	{
-		Node.SortChildrenDescending(Sorter);
-	}
-	else // if (ColumnSortMode == EColumnSortMode::Type::Ascending)
-	{
-		Node.SortChildrenAscending(Sorter);
-	}
+	Insights::ESortMode SortMode = (ColumnSortMode == EColumnSortMode::Type::Descending) ? Insights::ESortMode::Descending : Insights::ESortMode::Ascending;
+	Node.SortChildren(Sorter, SortMode);
 
 	for (Insights::FBaseTreeNodePtr ChildPtr : Node.GetChildren())
 	{
 		//if (ChildPtr->IsGroup())
-		if (ChildPtr->GetChildren().Num() > 0)
+		if (ChildPtr->GetChildrenCount() > 0)
 		{
 			SortTreeNodesRec(*StaticCastSharedPtr<FMemTagNode>(ChildPtr), Sorter);
 		}
@@ -1580,20 +1621,21 @@ void SMemTagTreeView::ShowColumn(const FName ColumnId)
 	ColumnArgs
 		.ColumnId(Column.GetId())
 		.DefaultLabel(Column.GetShortName())
-		.HAlignHeader(HAlign_Fill)
-		.VAlignHeader(VAlign_Fill)
-		.HeaderContentPadding(FMargin(2.0f))
+		.ToolTip(SMemTagTreeViewTooltip::GetColumnTooltip(Column))
+		.HAlignHeader(Column.GetHorizontalAlignment())
+		.VAlignHeader(VAlign_Center)
 		.HAlignCell(HAlign_Fill)
 		.VAlignCell(VAlign_Fill)
+		.InitialSortMode(Column.GetInitialSortMode())
 		.SortMode(this, &SMemTagTreeView::GetSortModeForColumn, Column.GetId())
 		.OnSort(this, &SMemTagTreeView::OnSortModeChanged)
-		.ManualWidth(Column.GetInitialWidth())
-		.FixedWidth(Column.IsFixedWidth() ? Column.GetInitialWidth() : TOptional<float>())
+		.FillWidth(Column.GetInitialWidth())
+		//.FixedWidth(Column.IsFixedWidth() ? Column.GetInitialWidth() : TOptional<float>())
 		.HeaderContent()
 		[
 			SNew(SBox)
-			.ToolTip(SMemTagTreeViewTooltip::GetColumnTooltip(Column))
-			.HAlign(Column.GetHorizontalAlignment())
+			.HeightOverride(24.0f)
+			.Padding(FMargin(0.0f))
 			.VAlign(VAlign_Center)
 			[
 				SNew(STextBlock)
@@ -1817,9 +1859,11 @@ void SMemTagTreeView::Tick(const FGeometry& AllottedGeometry, const double InCur
 
 void SMemTagTreeView::RebuildTree(bool bResync)
 {
-	FStopwatch SyncStopwatch;
 	FStopwatch Stopwatch;
 	Stopwatch.Start();
+
+	FStopwatch SyncStopwatch;
+	SyncStopwatch.Start();
 
 	bool bListHasChanged = false;
 
@@ -1833,7 +1877,7 @@ void SMemTagTreeView::RebuildTree(bool bResync)
 
 	const uint32 PreviousNodeCount = MemTagNodes.Num();
 
-	SyncStopwatch.Start();
+	TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
 	if (ProfilerWindow.IsValid())
 	{
 		FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
@@ -1872,6 +1916,7 @@ void SMemTagTreeView::RebuildTree(bool bResync)
 			}
 		}
 	}
+
 	SyncStopwatch.Stop();
 
 	if (bListHasChanged)
@@ -1907,7 +1952,7 @@ void SMemTagTreeView::RebuildTree(bool bResync)
 	if (TotalTime > 0.01)
 	{
 		const double SyncTime = SyncStopwatch.GetAccumulatedTime();
-		UE_LOG(MemoryProfiler, Log, TEXT("[LLM Tags] Tree view rebuilt in %.3fs (%.3fs + %.3fs) --> %d LLM tags (%d added)"),
+		UE_LOG(MemoryProfiler, Log, TEXT("[LLM Tags] Tree view rebuilt in %.4fs (sync: %.4fs + update: %.4fs) --> %d LLM tags (%d added)"),
 			TotalTime, SyncTime, TotalTime - SyncTime, MemTagNodes.Num(), MemTagNodes.Num() - PreviousNodeCount);
 	}
 }
@@ -1954,22 +1999,22 @@ void SMemTagTreeView::UpdateStatsInternal()
 	/*
 	if (Session.IsValid())
 	{
-		TUniquePtr<Trace::ITable<Trace::FMemoryProfilerAggregatedStats>> AggregationResultTable;
+		TUniquePtr<TraceServices::ITable<TraceServices::FMemoryProfilerAggregatedStats>> AggregationResultTable;
 
 		AggregationStopwatch.Start();
 		{
-			Trace::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
-			const Trace::IMemoryProfilerProvider& MemoryProfilerProvider = Trace::ReadMemoryProfilerProvider(*Session.Get());
+			TraceServices::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
+			const TraceServices::IMemoryProfilerProvider& MemoryProfilerProvider = TraceServices::ReadMemoryProfilerProvider(*Session.Get());
 			AggregationResultTable.Reset(MemoryProfilerProvider.CreateAggregation(StatsStartTime, StatsEndTime));
 		}
 		AggregationStopwatch.Stop();
 
 		if (AggregationResultTable.IsValid())
 		{
-			TUniquePtr<Trace::ITableReader<Trace::FMemoryProfilerAggregatedStats>> TableReader(AggregationResultTable->CreateReader());
+			TUniquePtr<TraceServices::ITableReader<TraceServices::FMemoryProfilerAggregatedStats>> TableReader(AggregationResultTable->CreateReader());
 			while (TableReader->IsValid())
 			{
-				const Trace::FMemoryProfilerAggregatedStats* Row = TableReader->GetCurrentRow();
+				const TraceServices::FMemoryProfilerAggregatedStats* Row = TableReader->GetCurrentRow();
 				FMemTagNodePtr* MemTagNodePtrPtr = MemTagNodesIdMap.Find(static_cast<uint64>(Row->EventTypeIndex));
 				if (MemTagNodePtrPtr != nullptr)
 				{
@@ -2017,110 +2062,12 @@ void SMemTagTreeView::SelectMemTagNode(Insights::FMemoryTagId MemTagId)
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-
-const TArray<TSharedPtr<Insights::FMemoryTracker>>* SMemTagTreeView::GetAvailableTrackers()
-{
-	if (ProfilerWindow.IsValid())
-	{
-		FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
-		return &SharedState.GetTrackers();
-	}
-	return nullptr;
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-void SMemTagTreeView::Tracker_OnSelectionChanged(TSharedPtr<Insights::FMemoryTracker> InTracker, ESelectInfo::Type SelectInfo)
-{
-	if (SelectInfo != ESelectInfo::Direct)
-	{
-		if (ProfilerWindow.IsValid())
-		{
-			FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
-			SharedState.SetCurrentTracker(InTracker);
-			if (bFilterByTracker)
-			{
-				ApplyFiltering();
-			}
-		}
-	}
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-TSharedRef<SWidget> SMemTagTreeView::Tracker_OnGenerateWidget(TSharedPtr<Insights::FMemoryTracker> InTracker)
-{
-	const FText TrackerText = FText::Format(LOCTEXT("TrackerComboBox_TextFmt", "{0} Tracker (id {1})"), FText::FromString(InTracker->GetName()), FText::AsNumber(InTracker->GetId()));
-	return SNew(SCheckBox)
-		.Style(FEditorStyle::Get(), "Toolbar.RadioButton")
-		.OnCheckStateChanged(this, &SMemTagTreeView::Tracker_OnCheckStateChanged, InTracker)
-		.IsChecked(this, &SMemTagTreeView::Tracker_IsChecked, InTracker)
-		.Content()
-		[
-			SNew(STextBlock)
-			.Text(TrackerText)
-			.Margin(2.0f)
-		];
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-void SMemTagTreeView::Tracker_OnCheckStateChanged(ECheckBoxState CheckType, TSharedPtr<Insights::FMemoryTracker> InTracker)
-{
-	if (CheckType == ECheckBoxState::Checked)
-	{
-		if (ProfilerWindow.IsValid())
-		{
-			FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
-			SharedState.SetCurrentTracker(InTracker);
-			if (bFilterByTracker)
-			{
-				ApplyFiltering();
-			}
-		}
-	}
-	TrackerComboBox->SetIsOpen(false);
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-ECheckBoxState SMemTagTreeView::Tracker_IsChecked(TSharedPtr<Insights::FMemoryTracker> InTracker) const
-{
-	TSharedPtr<Insights::FMemoryTracker> CurrentTracker = nullptr;
-	if (ProfilerWindow.IsValid())
-	{
-		FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
-		CurrentTracker = SharedState.GetCurrentTracker();
-	}
-	return (InTracker == CurrentTracker) ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-FText SMemTagTreeView::Tracker_GetSelectedText() const
-{
-	if (ProfilerWindow.IsValid())
-	{
-		FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
-		if (SharedState.GetCurrentTracker())
-		{
-			return FText::FromString(SharedState.GetCurrentTracker()->GetName());
-		}
-	}
-	return FText::GetEmpty();
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-FText SMemTagTreeView::Tracker_GetTooltipText() const
-{
-	return LOCTEXT("TrackerComboBox_Tooltip", "Choose the current memory tracker.");
-}
-
+// Load Report XML button action
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 FReply SMemTagTreeView::LoadReportXML_OnClicked()
 {
+	TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
 	if (ProfilerWindow.IsValid())
 	{
 		TArray<FString> OutFiles;
@@ -2149,7 +2096,7 @@ FReply SMemTagTreeView::LoadReportXML_OnClicked()
 		if (bOpened == true && OutFiles.Num() == 1)
 		{
 			FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
-			SharedState.RemoveAllMemoryGraphTracks();
+			SharedState.RemoveAllMemTagGraphTracks();
 			SharedState.CreateTracksFromReport(OutFiles[0]);
 		}
 	}
@@ -2157,6 +2104,8 @@ FReply SMemTagTreeView::LoadReportXML_OnClicked()
 	return FReply::Handled();
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// Button actions re graph tracks
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 FReply SMemTagTreeView::ShowAllTracks_OnClicked()
@@ -2174,50 +2123,12 @@ FReply SMemTagTreeView::HideAllTracks_OnClicked()
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-
-FReply SMemTagTreeView::AllTracksSmallHeight_OnClicked()
-{
-	if (ProfilerWindow.IsValid())
-	{
-		FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
-		SharedState.SetTrackHeightMode(EMemoryTrackHeightMode::Small);
-	}
-
-	return FReply::Handled();
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-FReply SMemTagTreeView::AllTracksMediumHeight_OnClicked()
-{
-	if (ProfilerWindow.IsValid())
-	{
-		FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
-		SharedState.SetTrackHeightMode(EMemoryTrackHeightMode::Medium);
-	}
-
-	return FReply::Handled();
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-FReply SMemTagTreeView::AllTracksLargeHeight_OnClicked()
-{
-	if (ProfilerWindow.IsValid())
-	{
-		FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
-		SharedState.SetTrackHeightMode(EMemoryTrackHeightMode::Large);
-	}
-
-	return FReply::Handled();
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
 // Create memory graph tracks for selected LLM tag(s)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 bool SMemTagTreeView::CanCreateGraphTracksForSelectedMemTags() const
 {
+	TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
 	return ProfilerWindow.IsValid() && TreeView->GetNumItemsSelected() > 0;
 }
 
@@ -2225,6 +2136,7 @@ bool SMemTagTreeView::CanCreateGraphTracksForSelectedMemTags() const
 
 void SMemTagTreeView::CreateGraphTracksForSelectedMemTags()
 {
+	TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
 	if (ProfilerWindow.IsValid())
 	{
 		FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
@@ -2237,14 +2149,16 @@ void SMemTagTreeView::CreateGraphTracksForSelectedMemTags()
 				for (const Insights::FBaseTreeNodePtr& Child : Children)
 				{
 					FMemTagNodePtr MemTagNode = StaticCastSharedPtr<FMemTagNode, Insights::FBaseTreeNode>(Child);
+					const Insights::FMemoryTrackerId MemTrackerId = MemTagNode->GetMemTrackerId();
 					const Insights::FMemoryTagId MemTagId = MemTagNode->GetMemTagId();
-					SharedState.CreateMemTagGraphTrack(MemTagId);
+					SharedState.CreateMemTagGraphTrack(MemTrackerId, MemTagId);
 				}
 			}
 			else
 			{
+				const Insights::FMemoryTrackerId MemTrackerId = SelectedMemTagNode->GetMemTrackerId();
 				const Insights::FMemoryTagId MemTagId = SelectedMemTagNode->GetMemTagId();
-				SharedState.CreateMemTagGraphTrack(MemTagId);
+				SharedState.CreateMemTagGraphTrack(MemTrackerId, MemTagId);
 			}
 		}
 	}
@@ -2256,6 +2170,7 @@ void SMemTagTreeView::CreateGraphTracksForSelectedMemTags()
 
 bool SMemTagTreeView::CanCreateGraphTracksForFilteredMemTags() const
 {
+	TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
 	if (!ProfilerWindow.IsValid())
 	{
 		return false;
@@ -2272,6 +2187,7 @@ bool SMemTagTreeView::CanCreateGraphTracksForFilteredMemTags() const
 
 void SMemTagTreeView::CreateGraphTracksForFilteredMemTags()
 {
+	TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
 	if (ProfilerWindow.IsValid())
 	{
 		FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
@@ -2281,8 +2197,9 @@ void SMemTagTreeView::CreateGraphTracksForFilteredMemTags()
 			for (const Insights::FBaseTreeNodePtr& Child : Children)
 			{
 				FMemTagNodePtr MemTagNode = StaticCastSharedPtr<FMemTagNode, Insights::FBaseTreeNode>(Child);
+				const Insights::FMemoryTrackerId MemTrackerId = MemTagNode->GetMemTrackerId();
 				const Insights::FMemoryTagId MemTagId = MemTagNode->GetMemTagId();
-				SharedState.CreateMemTagGraphTrack(MemTagId);
+				SharedState.CreateMemTagGraphTrack(MemTrackerId, MemTagId);
 			}
 		}
 	}
@@ -2294,6 +2211,7 @@ void SMemTagTreeView::CreateGraphTracksForFilteredMemTags()
 
 bool SMemTagTreeView::CanCreateAllGraphTracks() const
 {
+	TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
 	return ProfilerWindow.IsValid();
 }
 
@@ -2301,13 +2219,15 @@ bool SMemTagTreeView::CanCreateAllGraphTracks() const
 
 void SMemTagTreeView::CreateAllGraphTracks()
 {
+	TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
 	if (ProfilerWindow.IsValid())
 	{
 		FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
 		for (const FMemTagNodePtr& MemTagNode : MemTagNodes)
 		{
+			const Insights::FMemoryTrackerId MemTrackerId = MemTagNode->GetMemTrackerId();
 			const Insights::FMemoryTagId MemTagId = MemTagNode->GetMemTagId();
-			SharedState.CreateMemTagGraphTrack(MemTagId);
+			SharedState.CreateMemTagGraphTrack(MemTrackerId, MemTagId);
 		}
 	}
 }
@@ -2318,6 +2238,7 @@ void SMemTagTreeView::CreateAllGraphTracks()
 
 bool SMemTagTreeView::CanRemoveGraphTracksForSelectedMemTags() const
 {
+	TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
 	return ProfilerWindow.IsValid() && TreeView->GetNumItemsSelected() > 0;
 }
 
@@ -2325,6 +2246,7 @@ bool SMemTagTreeView::CanRemoveGraphTracksForSelectedMemTags() const
 
 void SMemTagTreeView::RemoveGraphTracksForSelectedMemTags()
 {
+	TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
 	if (ProfilerWindow.IsValid())
 	{
 		FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
@@ -2337,36 +2259,18 @@ void SMemTagTreeView::RemoveGraphTracksForSelectedMemTags()
 				for (const Insights::FBaseTreeNodePtr& Child : Children)
 				{
 					FMemTagNodePtr MemTagNode = StaticCastSharedPtr<FMemTagNode, Insights::FBaseTreeNode>(Child);
+					const Insights::FMemoryTrackerId MemTrackerId = MemTagNode->GetMemTrackerId();
 					const Insights::FMemoryTagId MemTagId = MemTagNode->GetMemTagId();
-					SharedState.RemoveMemTagGraphTrack(MemTagId);
+					SharedState.RemoveMemTagGraphTrack(MemTrackerId, MemTagId);
 				}
 			}
 			else
 			{
+				const Insights::FMemoryTrackerId MemTrackerId = SelectedMemTagNode->GetMemTrackerId();
 				const Insights::FMemoryTagId MemTagId = SelectedMemTagNode->GetMemTagId();
-				SharedState.RemoveMemTagGraphTrack(MemTagId);
+				SharedState.RemoveMemTagGraphTrack(MemTrackerId, MemTagId);
 			}
 		}
-	}
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-// Remove memory graph tracks for LLM tags not used by the current tracker
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-bool SMemTagTreeView::CanRemoveGraphTracksForUnusedMemTags() const
-{
-	return ProfilerWindow.IsValid();
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-void SMemTagTreeView::RemoveGraphTracksForUnusedMemTags()
-{
-	if (ProfilerWindow.IsValid())
-	{
-		FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
-		SharedState.RemoveUnusedMemTagGraphTracks();
 	}
 }
 
@@ -2376,6 +2280,7 @@ void SMemTagTreeView::RemoveGraphTracksForUnusedMemTags()
 
 bool SMemTagTreeView::CanRemoveAllGraphTracks() const
 {
+	TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
 	return ProfilerWindow.IsValid();
 }
 
@@ -2383,10 +2288,11 @@ bool SMemTagTreeView::CanRemoveAllGraphTracks() const
 
 void SMemTagTreeView::RemoveAllGraphTracks()
 {
+	TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
 	if (ProfilerWindow.IsValid())
 	{
 		FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
-		SharedState.RemoveAllMemoryGraphTracks();
+		SharedState.RemoveAllMemTagGraphTracks();
 	}
 }
 
@@ -2396,6 +2302,7 @@ void SMemTagTreeView::RemoveAllGraphTracks()
 
 bool SMemTagTreeView::CanGenerateColorForSelectedMemTags() const
 {
+	TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
 	return ProfilerWindow.IsValid() && TreeView->GetNumItemsSelected() > 0;
 }
 
@@ -2403,6 +2310,7 @@ bool SMemTagTreeView::CanGenerateColorForSelectedMemTags() const
 
 void SMemTagTreeView::GenerateColorForSelectedMemTags()
 {
+	TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
 	if (ProfilerWindow.IsValid())
 	{
 		const TArray<FMemTagNodePtr> SelectedNodes = TreeView->GetSelectedItems();
@@ -2449,9 +2357,14 @@ void SMemTagTreeView::SetColorToNode(const FMemTagNodePtr& MemTagNode, FLinearCo
 
 	const Insights::FMemoryTagId MemTagId = MemTagNode->GetMemTagId();
 
-	FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
+	TSharedPtr<FMemoryGraphTrack> MainGraphTrack;
+	TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
+	if (ProfilerWindow.IsValid())
+	{
+		FMemorySharedState& SharedState = ProfilerWindow->GetSharedState();
+		MainGraphTrack = SharedState.GetMainGraphTrack();
+	}
 
-	TSharedPtr<FMemoryGraphTrack> MainGraphTrack = SharedState.GetMainGraphTrack();
 	for (const TSharedPtr<FMemoryGraphTrack>& GraphTrack : MemTag->GetGraphTracks())
 	{
 		for (TSharedPtr<FGraphSeries>& Series : GraphTrack->GetSeries())
@@ -2479,6 +2392,7 @@ void SMemTagTreeView::SetColorToNode(const FMemTagNodePtr& MemTagNode, FLinearCo
 
 bool SMemTagTreeView::CanEditColorForSelectedMemTags() const
 {
+	TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
 	return ProfilerWindow.IsValid() && TreeView->GetNumItemsSelected() > 0;
 }
 
@@ -2486,6 +2400,7 @@ bool SMemTagTreeView::CanEditColorForSelectedMemTags() const
 
 void SMemTagTreeView::EditColorForSelectedMemTags()
 {
+	TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
 	if (ProfilerWindow.IsValid())
 	{
 		EditableColorValue = FLinearColor(0.5f, 0.5f, 0.5f, 1.0f);
@@ -2507,7 +2422,7 @@ void SMemTagTreeView::EditColorForSelectedMemTags()
 			//PickerArgs.OnInteractivePickBegin = FSimpleDelegate::CreateSP(this, &SMemTagTreeView::InteractivePickBegin);
 			//PickerArgs.OnInteractivePickEnd = FSimpleDelegate::CreateSP(this, &SMemTagTreeView::InteractivePickEnd);
 			//PickerArgs.OnColorPickerWindowClosed = FOnWindowClosed::CreateSP(this, &SMemTagTreeView::ColorPickerClosed);
-			PickerArgs.InitialColorOverride = EditableColorValue;
+			PickerArgs.InitialColor = EditableColorValue;
 			PickerArgs.ParentWidget = SharedThis(this);
 		}
 

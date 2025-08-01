@@ -3,27 +3,26 @@
 #pragma once
 
 #include "RenderGraph.h"
-#include "DecalRenderingCommon.h"
-#include "PostProcess/RenderingCompositionGraph.h"
+#include "SceneTextureParameters.h"
+#include "SceneView.h"
+#include "InstanceCulling/InstanceCullingContext.h"
 
+enum class EDecalRenderStage : uint8;
+enum class EDecalRenderTargetMode : uint8;
+struct FTransientDecalRenderData;
+struct FDBufferTextures;
+struct FSceneTextures;
 class FViewInfo;
 
-inline bool IsWritingToGBufferA(FDecalRenderingCommon::ERenderTargetMode RenderTargetMode)
-{
-	return RenderTargetMode == FDecalRenderingCommon::RTM_SceneColorAndGBufferWithNormal
-		|| RenderTargetMode == FDecalRenderingCommon::RTM_SceneColorAndGBufferDepthWriteWithNormal
-		|| RenderTargetMode == FDecalRenderingCommon::RTM_GBufferNormal;
-}
+DECLARE_UNIFORM_BUFFER_STRUCT(FSceneUniformParameters, RENDERER_API)
 
-inline bool IsWritingToDepth(FDecalRenderingCommon::ERenderTargetMode RenderTargetMode)
-{
-	return RenderTargetMode == FDecalRenderingCommon::RTM_SceneColorAndGBufferDepthWriteWithNormal
-		|| RenderTargetMode == FDecalRenderingCommon::RTM_SceneColorAndGBufferDepthWriteNoNormal;
-}
+bool AreDecalsEnabled(const FSceneViewFamily& ViewFamily);
+bool IsDBufferEnabled(const FSceneViewFamily& ViewFamily, EShaderPlatform ShaderPlatform);
 
-BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FDecalPassUniformParameters,)
+BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FDecalPassUniformParameters, )
 	SHADER_PARAMETER_STRUCT(FSceneTextureUniformParameters, SceneTextures)
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, EyeAdaptationTexture)
+	SHADER_PARAMETER_STRUCT(FMobileSceneTextureUniformParameters, MobileSceneTextures)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, EyeAdaptationBuffer)
 END_GLOBAL_SHADER_PARAMETER_STRUCT()
 
 struct FDeferredDecalPassTextures
@@ -38,39 +37,73 @@ struct FDeferredDecalPassTextures
 	FRDGTextureRef GBufferB = nullptr;
 	FRDGTextureRef GBufferC = nullptr;
 	FRDGTextureRef GBufferE = nullptr;
-
-	// [Input / Output]: D-Buffer targets allocated on-demand for the D-Buffer pass.
-	FRDGTextureRef DBufferA = nullptr;
-	FRDGTextureRef DBufferB = nullptr;
-	FRDGTextureRef DBufferC = nullptr;
-	FRDGTextureRef DBufferMask = nullptr;
-
-	ERenderTargetLoadAction DBufferLoadAction = ERenderTargetLoadAction::EClear;
+	FDBufferTextures* DBufferTextures = nullptr;
 };
 
 FDeferredDecalPassTextures GetDeferredDecalPassTextures(
-	FRDGBuilder& GraphBuilder,
-	const FViewInfo& View);
+	FRDGBuilder& GraphBuilder, 
+	const FSceneView& ViewInfo,
+	const FSceneTextures& SceneTextures, 
+	FDBufferTextures* DBufferTextures);
 
 void AddDeferredDecalPass(
 	FRDGBuilder& GraphBuilder,
 	const FViewInfo& ViewInfo,
-	FDeferredDecalPassTextures& Textures,
+	TConstArrayView<FTransientDecalRenderData> VisibleDecals,
+	const FDeferredDecalPassTextures& Textures,
+	FInstanceCullingManager& InstanceCullingManager,
 	EDecalRenderStage RenderStage);
 
+BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FDeferredDecalUniformParameters, )
+	SHADER_PARAMETER_TEXTURE(Texture2D, PreviousFrameNormal)
+	SHADER_PARAMETER(int32, NormalReprojectionEnabled)
+	SHADER_PARAMETER(float, NormalReprojectionThresholdLow)
+	SHADER_PARAMETER(float, NormalReprojectionThresholdHigh)
+	SHADER_PARAMETER(float, NormalReprojectionThresholdScaleHelper)
+	SHADER_PARAMETER(FVector2f, NormalReprojectionJitter)
+END_SHADER_PARAMETER_STRUCT()
+
+TUniformBufferRef<FDeferredDecalUniformParameters> CreateDeferredDecalUniformBuffer(const FViewInfo& View);
+
 BEGIN_SHADER_PARAMETER_STRUCT(FDeferredDecalPassParameters, )
+	SHADER_PARAMETER_STRUCT_INCLUDE(FViewShaderParameters, View)
+	SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSceneUniformParameters, Scene)
+	SHADER_PARAMETER_STRUCT_REF(FDeferredDecalUniformParameters, DeferredDecal)
 	SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FDecalPassUniformParameters, DecalPass)
+	SHADER_PARAMETER_STRUCT_INCLUDE(FInstanceCullingDrawParams, InstanceCullingDrawParams)
 	RENDER_TARGET_BINDING_SLOTS()
 END_SHADER_PARAMETER_STRUCT()
 
+void GetDeferredDecalRenderTargetsInfo(
+	const FSceneTexturesConfig& Config,
+	EShaderPlatform ShaderPlatform,
+	EDecalRenderTargetMode RenderTargetMode,
+	FGraphicsPipelineRenderTargetsInfo& RenderTargetsInfo);
+
+void CollectDeferredDecalPassPSOInitializers(
+	int32 PSOCollectorIndex,
+	ERHIFeatureLevel::Type FeatureLevel,
+	const FSceneTexturesConfig& SceneTexturesConfig,
+	const FMaterial& Material,
+	EDecalRenderStage DecalRenderStage,
+	TArray<FPSOPrecacheData>& PSOInitializers);
+
 void GetDeferredDecalPassParameters(
+	FRDGBuilder& GraphBuilder,
 	const FViewInfo& View,
-	FDeferredDecalPassTextures& DecalPassTextures,
-	FDecalRenderingCommon::ERenderTargetMode RenderTargetMode,
+	const FDeferredDecalPassTextures& DecalPassTextures,
+	EDecalRenderTargetMode RenderTargetMode,
 	FDeferredDecalPassParameters& PassParameters);
 
 void RenderMeshDecals(
 	FRDGBuilder& GraphBuilder,
+	const FScene& Scene,
 	const FViewInfo& View,
-	FDeferredDecalPassTextures& DecalPassTextures,
+	const FDeferredDecalPassTextures& DecalPassTextures,
+	FInstanceCullingManager& InstanceCullingManager, 
 	EDecalRenderStage DecalRenderStage);
+
+void ExtractNormalsForNextFrameReprojection(
+	FRDGBuilder& GraphBuilder,
+	const FSceneTextures& SceneTextures,
+	const TArray<FViewInfo>& Views);

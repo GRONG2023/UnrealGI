@@ -6,14 +6,14 @@
 
 namespace Chaos
 {
-	class CHAOS_API FEventDefaults
+	class FEventDefaults
 	{
 	public:
 
 		/**
 		 * Register default event types
 		 */
-		static void RegisterSystemEvents(FEventManager& EventManager);
+		static CHAOS_API void RegisterSystemEvents(FEventManager& EventManager);
 
 	private:
 
@@ -32,8 +32,20 @@ namespace Chaos
 		 */
 		static void RegisterTrailingEvent(FEventManager& EventManager);
 
-
+		/**
+		 * Register sleeping event gathering function & data type
+		 */
 		static void RegisterSleepingEvent(FEventManager& EventManager);
+
+		/**
+		 * Register removal event gathering function & data type
+		 */
+		static void RegisterRemovalEvent(FEventManager& EventManager);
+
+		/**
+		* Register crumbling event gathering function & data type
+		*/
+		static void RegisterCrumblingEvent(FEventManager& EventManager);
 
 	};
 }

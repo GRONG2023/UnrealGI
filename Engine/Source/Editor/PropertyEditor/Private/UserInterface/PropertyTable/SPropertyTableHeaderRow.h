@@ -7,7 +7,7 @@
 #include "Widgets/SNullWidget.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Textures/SlateIcon.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Framework/Commands/UIAction.h"
 #include "Widgets/Views/SHeaderRow.h"
 #include "IPropertyTable.h"
@@ -41,7 +41,7 @@ public:
 		Style = InArgs._Style;
 
 		SHeaderRow::FArguments HeaderRowArgs;
-		HeaderRowArgs.Style( FEditorStyle::Get(), FEditorStyle::Join( Style, ".HeaderRow" ) );
+		HeaderRowArgs.Style( FAppStyle::Get(), FAppStyle::Join( Style, ".HeaderRow" ) );
 		SHeaderRow::Construct( HeaderRowArgs );
 
 		PropertyTable = InPropertyTable;
@@ -83,6 +83,7 @@ public:
 				AddColumn( 
 					SHeaderRow::Column( ColumnId )
 					.SortMode( TableRef, &IPropertyTable::GetColumnSortMode, Column )
+					.HeaderComboVisibility(EHeaderComboVisibility::Never)
 					.SortPriority( TableRef, &IPropertyTable::GetColumnSortPriority, Column)
 					.OnSort( TableRef, &IPropertyTable::SortByColumnWithId )
 					.MenuContent()
@@ -111,6 +112,7 @@ public:
 				AddColumn(
 					SHeaderRow::Column( ColumnId )
 					.SortMode( SortMode )
+					.HeaderComboVisibility(EHeaderComboVisibility::Never)
 					.SortPriority( SortPriority )
 					.OnSort( OnSort )
 					.MenuContent()

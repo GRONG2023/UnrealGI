@@ -1,16 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/InheritableComponentHandler.h"
-#include "Components/ActorComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/SCS_Node.h"
-#include "UObject/PropertyPortFlags.h"
-#include "UObject/LinkerLoad.h"
+#include "EngineLogs.h"
 #include "UObject/BlueprintsObjectVersion.h"
-#include "UObject/UObjectHash.h" // for FindObjectWithOuter()
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(InheritableComponentHandler)
 
 #if WITH_EDITOR
 #include "Kismet2/BlueprintEditorUtils.h"
+#else
+#include "UObject/LinkerLoad.h"
 #endif // WITH_EDITOR
 
 // UInheritableComponentHandler
@@ -44,22 +45,23 @@ void UInheritableComponentHandler::PostLoad()
 						Record.ComponentClass = Record.ComponentTemplate->GetClass();
 					}
 				}
-				
+
 				// Fix up component template name on load, if it doesn't match the original template name. Otherwise, archetype lookups will fail for this template.
 				// For example, this can occur after a component variable rename in a parent BP class, but before a child BP class with an override template is loaded.
+				// Note: If the key maps to an SCS node, the node's variable GUID will be used for the lookup instead of the name below (that's only used for UCS keys).
 				if (UActorComponent* OriginalTemplate = Record.ComponentKey.GetOriginalTemplate(Record.ComponentTemplate->GetFName()))
 				{
-					FString ExpectedTemplateName = OriginalTemplate->GetName();
+					FName ExpectedTemplateName = OriginalTemplate->GetFName();
 					if (USCS_Node* SCSNode = Record.ComponentKey.FindSCSNode())
 					{
 						// We append a prefix onto SCS default scene root node overrides. This is done to ensure that the override template does not collide with our owner's own SCS default scene root node template.
 						if (SCSNode == SCSNode->GetSCS()->GetDefaultSceneRootNode())
 						{
-							ExpectedTemplateName = SCSDefaultSceneRootOverrideNamePrefix + ExpectedTemplateName;
+							ExpectedTemplateName = FName(SCSDefaultSceneRootOverrideNamePrefix + ExpectedTemplateName.ToString());
 						}
 					}
 
-					if (ExpectedTemplateName != Record.ComponentTemplate->GetName())
+					if (ExpectedTemplateName != Record.ComponentTemplate->GetFName())
 					{
 						FixComponentTemplateName(Record.ComponentTemplate, ExpectedTemplateName);
 					}
@@ -67,7 +69,7 @@ void UInheritableComponentHandler::PostLoad()
 
 				if (!CastChecked<UActorComponent>(Record.ComponentTemplate->GetArchetype())->IsEditableWhenInherited())
 				{
-					Record.ComponentTemplate->MarkPendingKill(); // hack needed to be able to identify if NewObject returns this back to us in the future
+					Record.ComponentTemplate->MarkAsGarbage(); // hack needed to be able to identify if NewObject returns this back to us in the future
 					Records.RemoveAtSwap(Index);
 				}
 			}
@@ -77,6 +79,28 @@ void UInheritableComponentHandler::PostLoad()
 }
 
 #if WITH_EDITOR
+EDataValidationResult UInheritableComponentHandler::IsDataValid(FDataValidationContext& Context) const
+{
+	EDataValidationResult Result = Super::IsDataValid(Context);
+
+	// If nothing has performed any validation yet, start with a valid result.
+	if (Result == EDataValidationResult::NotValidated)
+	{
+		Result = EDataValidationResult::Valid;
+	}
+
+	for (const FComponentOverrideRecord& Record : Records)
+	{
+		if (const UActorComponent* ActorComponent = Record.ComponentTemplate)
+		{
+			EDataValidationResult OverrideResult = ActorComponent->IsDataValid(Context);
+			Result = CombineDataValidationResults(Result, OverrideResult);
+		}
+	}
+
+	return Result;
+}
+
 UActorComponent* UInheritableComponentHandler::CreateOverridenComponentTemplate(const FComponentKey& Key)
 {
 	for (int32 Index = 0; Index < Records.Num(); ++Index)
@@ -104,9 +128,11 @@ UActorComponent* UInheritableComponentHandler::CreateOverridenComponentTemplate(
 	FName NewComponentTemplateName = BestArchetype->GetFName();
 	if (USCS_Node* SCSNode = Key.FindSCSNode())
 	{
+		const USCS_Node* DefaultSceneRootNode = SCSNode->GetSCS()->GetDefaultSceneRootNode();
+
 		// If this template will override an inherited DefaultSceneRoot node from a parent class's SCS, adjust the template name so that we don't reallocate our owner class's SCS DefaultSceneRoot node template.
 		// Note: This is currently the only case where a child class can have both an SCS node template and an override template associated with the same variable name, that is not considered to be a collision.
-		if (SCSNode == SCSNode->GetSCS()->GetDefaultSceneRootNode())
+		if (SCSNode == DefaultSceneRootNode && BestArchetype == DefaultSceneRootNode->ComponentTemplate)
 		{
 			NewComponentTemplateName = FName(*(SCSDefaultSceneRootOverrideNamePrefix + BestArchetype->GetName()));
 		}
@@ -117,16 +143,16 @@ UActorComponent* UInheritableComponentHandler::CreateOverridenComponentTemplate(
 	// If we find an existing object with our name that the object recycling system won't allow for we need to deal with it 
 	// or else the NewObject call below will fatally assert
 	UObject* ExistingObj = FindObjectFast<UObject>(GetOuter(), NewComponentTemplateName);
-	if (ExistingObj && !ExistingObj->GetClass()->IsChildOf(BestArchetype->GetClass()))
+	if (ExistingObj && (!ExistingObj->GetClass()->IsChildOf(BestArchetype->GetClass()) || ExistingObj->HasAnyFlags(RF_NeedLoad | RF_NeedPostLoad)))
 	{
 		// If this isn't an unnecessary component there is something else we need to investigate
 		// but if it is, just consign it to oblivion as its purpose is no longer required with the allocation
 		// of an object of the same name
 		UActorComponent* ExistingComp = Cast<UActorComponent>(ExistingObj);
-		if (ensure(ExistingComp) && ensure(UnnecessaryComponents.RemoveSwap(ExistingComp) > 0))
+		if (ensure(ExistingComp) && ensure(UnnecessaryComponents.RemoveSwap(ExistingComp) > 0 || GetPackage()->HasAnyPackageFlags(PKG_ForDiffing)))
 		{
 			ExistingObj->Rename(nullptr, GetTransientPackage(), REN_DontCreateRedirectors | REN_ForceNoResetLoaders);
-			ExistingObj->MarkPendingKill();
+			ExistingObj->MarkAsGarbage();
 		}
 	}
 
@@ -135,9 +161,9 @@ UActorComponent* UInheritableComponentHandler::CreateOverridenComponentTemplate(
 
 	// HACK: NewObject can return a pre-existing object which will not have been initialized to the archetype.  When we remove the old handlers, we mark them pending
 	//       kill so we can identify that situation here (see UE-13987/UE-13990)
-	if (NewComponentTemplate->IsPendingKill())
+	if (!::IsValid(NewComponentTemplate))
 	{
-		NewComponentTemplate->ClearPendingKill();
+		NewComponentTemplate->ClearGarbage();
 		UEngine::FCopyPropertiesForUnrelatedObjectsParams CopyParams;
 		CopyParams.bDoDelta = false;
 		// No good can come of replacing references to BestArchetype with references to NewComponentTemplate
@@ -178,7 +204,7 @@ void UInheritableComponentHandler::RemoveOverridenComponentTemplate(const FCompo
 		const FComponentOverrideRecord& Record = Records[Index];
 		if (Record.ComponentKey.Match(Key))
 		{
-			Record.ComponentTemplate->MarkPendingKill(); // hack needed to be able to identify if NewObject returns this back to us in the future
+			Record.ComponentTemplate->MarkAsGarbage(); // hack needed to be able to identify if NewObject returns this back to us in the future
 			Records.RemoveAtSwap(Index);
 			break;
 		}
@@ -229,6 +255,20 @@ void UInheritableComponentHandler::ValidateTemplates()
 					if (Record.ComponentTemplate)
 					{
 						Record.ComponentTemplate->SetFlags(RF_Transient);
+#if WITH_EDITOR
+						// in editor, move the component template aside so its name is free:
+						Record.ComponentTemplate->Rename(nullptr, GetTransientPackage(), REN_DoNotDirty | REN_DontCreateRedirectors | REN_ForceNoResetLoaders | REN_NonTransactional);
+						Record.ComponentTemplate->ClearFlags(RF_Standalone);
+						Record.ComponentTemplate->RemoveFromRoot();
+						Record.ComponentTemplate->MarkAsGarbage();
+						// Rename won't invalidate the linker's export, and linker lifetime extends long beyond an actual loadpackage 
+						// invocation. Consequently, if the template object is garbage collected (as we hope it will be) it 
+						// could tragically be recreated by FLinkerLoad unless we invalidate the export. Zen loader has some 
+						// logic to avoid recreating the object, but it is buggy and we want to avoid object recreation when 
+						// not using Zen, anyway. We would not need to invalidate the export if: 1. Rename invalidated the 
+						// export or 2. FLinkerLoad's lifetime were reigned in.
+						FLinkerLoad::InvalidateExport(Record.ComponentTemplate);
+#endif // WITH_EDITOR
 						UnnecessaryComponents.AddUnique(Record.ComponentTemplate);
 					}
 
@@ -382,9 +422,18 @@ UActorComponent* UInheritableComponentHandler::FindBestArchetype(const FComponen
 	UBlueprintGeneratedClass* ActualBPGC = Cast<UBlueprintGeneratedClass>(GetOuter());
 	if (ActualBPGC && Key.GetComponentOwner() && (ActualBPGC != Key.GetComponentOwner()))
 	{
-		// During reparenting the outer's Class isn't always the Blueprint's class when the ICH is updating so reference
-		// the Blueprint's ParentClass instead
-		ActualBPGC = Cast<UBlueprintGeneratedClass>(CastChecked<UBlueprint>(ActualBPGC->ClassGeneratedBy)->ParentClass);
+		if (UBlueprint* ClassGeneratedByBP = Cast<UBlueprint>(ActualBPGC->ClassGeneratedBy))
+		{
+			// During reparenting the outer's Class isn't always the Blueprint's class when the ICH is updating so reference
+			// the Blueprint's ParentClass instead
+			ActualBPGC = Cast<UBlueprintGeneratedClass>(ClassGeneratedByBP->ParentClass);
+		}
+		else
+		{
+			// Blueprint assets aren't available in cooked editors (only the BPGC), so just use the super class directly
+			// since we know it will be up-to-date
+			ActualBPGC = Cast<UBlueprintGeneratedClass>(ActualBPGC->GetSuperClass());
+		}
 
 		while (!ClosestArchetype && ActualBPGC)
 		{
@@ -441,7 +490,10 @@ void UInheritableComponentHandler::PreloadAllTemplates()
 			{
 				Linker->Preload(Record.ComponentTemplate);
 
-				ForEachObjectWithOuter(Record.ComponentTemplate, [](UObject* SubObj)
+				TArray<UObject*> ComponentTemplateSubobjects;
+				// Can't use ForEachObjectWithOuter here as Preloading may modify UObject hash tables (it will most likely create new objects)
+				GetObjectsWithOuter(Record.ComponentTemplate, ComponentTemplateSubobjects);
+				for (UObject* SubObj : ComponentTemplateSubobjects)
 				{
 					if (SubObj->HasAllFlags(RF_NeedLoad))
 					{
@@ -450,7 +502,7 @@ void UInheritableComponentHandler::PreloadAllTemplates()
 							SubObjLinker->Preload(SubObj);
 						}
 					}
-				});
+				}
 			}
 		}
 	}
@@ -466,6 +518,13 @@ void UInheritableComponentHandler::PreloadAll()
 		}
 	}
 	PreloadAllTemplates();
+	// This will get component names up to date - since these component 
+	// templates are used by GetArchetypeFromRequiredInfo we want to have real
+	// names as quickly as possible. The circumstances that require
+	// this are not clear to me, but that the logic exists and occasionally
+	// runs means we should run it ASAP - otherwise we may use the wrong
+	// archetype on construction.
+	ConditionalPostLoad();
 }
 
 FComponentKey UInheritableComponentHandler::FindKey(const FName VariableName) const
@@ -504,33 +563,18 @@ const FComponentOverrideRecord* UInheritableComponentHandler::FindRecord(const F
 	return nullptr;
 }
 
-void UInheritableComponentHandler::FixComponentTemplateName(UActorComponent* ComponentTemplate, const FString& NewName)
+void UInheritableComponentHandler::FixComponentTemplateName(UActorComponent* ComponentTemplate, const FName NewName)
 {
-	// Look for a collision with the template we're trying to rename here. It's possible that names were swapped on the
-	// original component template objects that were inherited from the associated Blueprint's parent class, for example.
-	FComponentOverrideRecord* MatchingRecord = Records.FindByPredicate([ComponentTemplate, &NewName](FComponentOverrideRecord& Record)
-	{
-		if (Record.ComponentTemplate && Record.ComponentTemplate != ComponentTemplate && Record.ComponentTemplate->GetName() == NewName)
-		{
-			const FName OverrideTemplateName = ComponentTemplate->GetFName();
-			const UActorComponent* OriginalTemplate = Record.ComponentKey.GetOriginalTemplate(OverrideTemplateName);
-			return ensureMsgf(OriginalTemplate && OriginalTemplate->GetFName() != OverrideTemplateName,
-				TEXT("Found a collision with an existing override record, but its associated template object is either invalid or already matches its inherited template's name (%s). This is unexpected."), *NewName);
-		}
-
-		return false;
-	});
-
 	// If we found a collision, temporarily rename the associated template object to something unique so that it no longer
 	// collides with the one we're trying to correct here. This will be fixed up when we later encounter this record during
 	// PostLoad() validation and see that it still doesn't match its original template name.
-	if (MatchingRecord)
+	if (UObject* ExistingObject = (UObject*)FindObjectWithOuter(ComponentTemplate->GetOuter(), nullptr, NewName))
 	{
-		MatchingRecord->ComponentTemplate->Rename(nullptr, nullptr, REN_DontCreateRedirectors | REN_ForceNoResetLoaders);
+		ExistingObject->Rename(nullptr, nullptr, REN_DontCreateRedirectors | REN_ForceNoResetLoaders);
 	}
 
 	// Now that we're sure there are no collisions with other records, we can safely rename this one to its new name.
-	ComponentTemplate->Rename(*NewName, nullptr, REN_DontCreateRedirectors | REN_ForceNoResetLoaders);
+	ComponentTemplate->Rename(*NewName.ToString(), nullptr, REN_DontCreateRedirectors | REN_ForceNoResetLoaders);
 }
 
 // FComponentOverrideRecord
@@ -599,3 +643,4 @@ bool FComponentKey::RefreshVariableName()
 	}
 	return false;
 }
+

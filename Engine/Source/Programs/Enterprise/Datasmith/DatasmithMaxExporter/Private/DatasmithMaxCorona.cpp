@@ -4,8 +4,10 @@
 
 #include "DatasmithSceneFactory.h"
 #include "DatasmithMaxTexmapParser.h"
-#include "DatasmithMaxSceneParser.h"
+#include "DatasmithMaxSceneHelper.h"
 #include "DatasmithMaxSceneExporter.h"
+
+#include "DatasmithMaterialsUtils.h"
 
 #include "Misc/Paths.h"
 
@@ -65,58 +67,6 @@ FString FDatasmithMaxMatWriter::DumpBitmapCorona(TSharedPtr<IDatasmithCompositeT
 	return *Base;
 }
 
-void FDatasmithMaxMatWriter::GetCoronaTexmap(TSharedRef< IDatasmithScene > DatasmithScene, BitmapTex* InBitmapTex)
-{
-	FString Path = TEXT("");
-
-	int NumParamBlocks = InBitmapTex->NumParamBlocks();
-	
-	for (int j = 0; j < NumParamBlocks; j++)
-	{
-		IParamBlock2* ParamBlock2 = InBitmapTex->GetParamBlockByID((short)j);
-		// The the descriptor to 'decode'
-		ParamBlockDesc2* ParamBlockDesc = ParamBlock2->GetDesc();
-		// Loop through all the defined parameters therein
-		for (int i = 0; i < ParamBlockDesc->count; i++)
-		{
-			const ParamDef& ParamDefinition = ParamBlockDesc->paramdefs[i];
-
-			if (FCString::Stricmp(ParamDefinition.int_name, TEXT("filename")) == 0)
-			{
-				Path = FDatasmithMaxSceneExporter::GetActualPath(ParamBlock2->GetStr(ParamDefinition.ID, GetCOREInterface()->GetTime()));
-				continue;
-			}
-		}
-		ParamBlock2->ReleaseDesc();
-	}
-
-	if (Path.IsEmpty())
-	{
-		return;
-	}
-
-	float Gamma = GetCoronaTexmapGamma(InBitmapTex);
-
-	FString BaseName = FPaths::GetBaseFilename(Path);
-	FString Base = BaseName + FString("_") + FString::SanitizeFloat(Gamma).Replace(TEXT("."), TEXT("_")) + TextureSuffix;
-
-	for (int i = 0; i < DatasmithScene->GetTexturesCount(); i++)
-	{
-		if (DatasmithScene->GetTexture(i)->GetFile() == Path && DatasmithScene->GetTexture(i)->GetName() == Base)
-		{
-			return;
-		}
-	}
-
-	TSharedPtr< IDatasmithTextureElement > TextureElement = FDatasmithSceneFactory::CreateTexture(*Base);
-	if (gammaMgr.IsEnabled())
-	{
-		TextureElement->SetRGBCurve(Gamma / 2.2f);
-	}
-	TextureElement->SetFile(*Path);
-	DatasmithScene->AddTexture(TextureElement);
-}
-
 void FDatasmithMaxMatWriter::ExportCoronaMaterial(TSharedRef< IDatasmithScene > DatasmithScene, TSharedPtr< IDatasmithMaterialElement >& MaterialElement, Mtl* Material)
 {
 	TSharedPtr< IDatasmithShaderElement > MaterialShader = FDatasmithSceneFactory::CreateShader((TCHAR*)Material->GetName().data());
@@ -129,7 +79,6 @@ void FDatasmithMaxMatWriter::ExportCoronaMaterial(TSharedRef< IDatasmithScene > 
 	bool bGlossyTexEnable = true;
 	bool bBumpTexEnable = true;
 	bool bOpacityTexEnable = true;
-	bool bDisplaceTexEnable = true;
 
 	float DiffuseTexAmount = 0.f;
 	float ReflectanceTexAmount = 0.f;
@@ -214,13 +163,6 @@ void FDatasmithMaxMatWriter::ExportCoronaMaterial(TSharedRef< IDatasmithScene > 
 			{
 				BumpAmount = ParamBlock2->GetFloat(ParamDefinition.ID, GetCOREInterface()->GetTime());
 			}
-			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("texmapDisplace")) == 0)
-			{
-				if (ParamBlock2->GetTexmap(ParamDefinition.ID, GetCOREInterface()->GetTime()) == NULL)
-				{
-					bDisplaceTexEnable = false;
-				}
-			}
 			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("texmapOnDiffuse")) == 0)
 			{
 				if (ParamBlock2->GetInt(ParamDefinition.ID, GetCOREInterface()->GetTime()) == 0)
@@ -270,13 +212,6 @@ void FDatasmithMaxMatWriter::ExportCoronaMaterial(TSharedRef< IDatasmithScene > 
 				if (ParamBlock2->GetInt(ParamDefinition.ID, GetCOREInterface()->GetTime()) == 0)
 				{
 					bBumpTexEnable = false;
-				}
-			}
-			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("texmapOnDisplacement")) == 0)
-			{
-				if (ParamBlock2->GetInt(ParamDefinition.ID, GetCOREInterface()->GetTime()) == 0)
-				{
-					bDisplaceTexEnable = false;
 				}
 			}
 			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("texmapOnOpacity")) == 0)
@@ -528,16 +463,6 @@ void FDatasmithMaxMatWriter::ExportCoronaMaterial(TSharedRef< IDatasmithScene > 
 					}
 				}
 			}
-			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("texmapDisplace")) == 0 && bDisplaceTexEnable)
-			{
-				Texmap* LocalTex = ParamBlock2->GetTexmap(ParamDefinition.ID, GetCOREInterface()->GetTime());
-				if (LocalTex)
-				{
-					DumpTexture(DatasmithScene, MaterialShader->GetDisplaceComp(), LocalTex, DATASMITH_DISPLACETEXNAME, DATASMITH_DISPLACETEXNAME, false, true);
-					MaterialShader->SetDisplace(10.f);
-					MaterialShader->SetDisplaceSubDivision(4.0);
-				}
-			}
 		}
 		ParamBlock2->ReleaseDesc();
 	}
@@ -716,7 +641,7 @@ FString FDatasmithMaxMatWriter::DumpCoronaColor(TSharedPtr<IDatasmithCompositeTe
 		CoronaColor.B = ColorParameters.ColorHdr.Z;
 		break;
 	case 2:
-		CoronaColor = FDatasmithMaxMatHelper::MaxLinearColorToFLinearColor( FDatasmithMaxMatHelper::TemperatureToColor( ColorParameters.Temperature ) );
+		CoronaColor = DatasmithMaterialsUtils::TemperatureToColor( ColorParameters.Temperature );
 		ColorParameters.bInputIsLinear = true;
 		break;
 	case 3:

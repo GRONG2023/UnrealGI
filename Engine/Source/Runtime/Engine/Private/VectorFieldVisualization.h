@@ -37,9 +37,10 @@ class FSceneView;
  * Uniform buffer to hold parameters for vector field visualization.
  */
 BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT( FVectorFieldVisualizationParameters, )
-	SHADER_PARAMETER( FMatrix, VolumeToWorld )
-	SHADER_PARAMETER( FMatrix, VolumeToWorldNoScale )
-	SHADER_PARAMETER( FVector, VoxelSize )
+	SHADER_PARAMETER( FVector3f, VolumeToWorldTile )
+	SHADER_PARAMETER( FMatrix44f, VolumeToWorld )
+	SHADER_PARAMETER( FMatrix44f, VolumeToWorldNoScale )
+	SHADER_PARAMETER( FVector3f, VoxelSize )
 	SHADER_PARAMETER( float, Scale )
 END_GLOBAL_SHADER_PARAMETER_STRUCT()
 typedef TUniformBufferRef<FVectorFieldVisualizationParameters> FVectorFieldVisualizationBufferRef;
@@ -60,7 +61,7 @@ public:
 	/**
 	 * Constructs render resources for this vertex factory.
 	 */
-	virtual void InitRHI() override;
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 
 	/**
 	 * Should we cache the material's shadertype on this platform with this vertex factory? 

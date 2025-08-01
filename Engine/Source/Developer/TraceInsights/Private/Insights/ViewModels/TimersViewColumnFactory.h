@@ -4,6 +4,8 @@
 
 #include "CoreMinimal.h"
 
+#include "Insights/Table/ViewModels/TableColumn.h"
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 struct FTimersViewColumns
@@ -15,6 +17,7 @@ struct FTimersViewColumns
 	static const FName MetaGroupNameColumnID;
 	static const FName TypeColumnID;
 	static const FName InstanceCountColumnID;
+	static const FName ChildInstanceCountColumnID;
 
 	// Inclusive Time columns
 	static const FName TotalInclusiveTimeColumnID;
@@ -37,10 +40,51 @@ struct FTimersViewColumns
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-namespace Insights
+class FTimersTableColumn : public Insights::FTableColumn
 {
-	class FTableColumn;
-}
+public:
+	FTimersTableColumn(const FName InId)
+		: Insights::FTableColumn(InId)
+	{}
+
+	FText GetDescription(ETraceFrameType InAggreagationMode) const
+	{
+		switch (InAggreagationMode)
+		{
+		case TraceFrameType_Game:
+			return GameFrame_Description;
+			break;
+		case TraceFrameType_Rendering:
+			return RenderingFrame_Description;
+			break;
+		default:
+			return FTableColumn::GetDescription();
+		}
+	}
+
+	void SetDescription(ETraceFrameType InAggreagationMode, FText InDescription)
+	{
+		switch (InAggreagationMode)
+		{
+		case TraceFrameType_Game:
+			GameFrame_Description = InDescription;
+			break;
+		case TraceFrameType_Rendering:
+			RenderingFrame_Description = InDescription;
+			break;
+		case TraceFrameType_Count:
+			Insights::FTableColumn::SetDescription(InDescription);
+			break;
+		default:
+			ensure(0);
+		}
+	}
+
+private:
+
+	FText GameFrame_Description;
+	FText RenderingFrame_Description;
+};
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -54,6 +98,7 @@ public:
 	static TSharedRef<Insights::FTableColumn> CreateMetaGroupNameColumn();
 	static TSharedRef<Insights::FTableColumn> CreateTypeColumn();
 	static TSharedRef<Insights::FTableColumn> CreateInstanceCountColumn();
+	static TSharedRef<Insights::FTableColumn> CreateChildInstanceCountColumn();
 
 	static TSharedRef<Insights::FTableColumn> CreateTotalInclusiveTimeColumn();
 	static TSharedRef<Insights::FTableColumn> CreateMaxInclusiveTimeColumn();

@@ -9,6 +9,8 @@
 #include "MovieScene.h"
 #include "Compilation/MovieSceneSegmentCompiler.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneSubTrack)
+
 
 #define LOCTEXT_NAMESPACE "MovieSceneSubTrack"
 
@@ -20,9 +22,12 @@ UMovieSceneSubTrack::UMovieSceneSubTrack( const FObjectInitializer& ObjectInitia
 {
 #if WITH_EDITORONLY_DATA
 	TrackTint = FColor(180, 0, 40, 65);
+	RowHeight = 50;
 #endif
 
 	BuiltInTreePopulationMode = ETreePopulationMode::Blended;
+
+	SupportedBlendTypes.Add(EMovieSceneBlendType::Absolute);
 }
 
 UMovieSceneSubSection* UMovieSceneSubTrack::AddSequenceOnRow(UMovieSceneSequence* Sequence, FFrameNumber StartTime, int32 Duration, int32 RowIndex)
@@ -64,36 +69,11 @@ UMovieSceneSubSection* UMovieSceneSubTrack::AddSequenceOnRow(UMovieSceneSequence
 	Sections.Add(NewSection);
 
 #if WITH_EDITORONLY_DATA
-	if (Sequence && Sequence->GetMovieScene())
+	if (Sequence)
 	{
-		NewSection->TimecodeSource = Sequence->GetMovieScene()->TimecodeSource;
+		NewSection->TimecodeSource = Sequence->GetEarliestTimecodeSource();
 	}
 #endif
-
-	return NewSection;
-}
-
-UMovieSceneSubSection* UMovieSceneSubTrack::AddSequenceToRecord()
-{
-	Modify();
-
-	UMovieScene* MovieScene = CastChecked<UMovieScene>(GetOuter());
-	TRange<FFrameNumber> PlaybackRange = MovieScene->GetPlaybackRange();
-
-	int32 MaxRowIndex = -1;
-	for (auto Section : Sections)
-	{
-		MaxRowIndex = FMath::Max(Section->GetRowIndex(), MaxRowIndex);
-	}
-
-	UMovieSceneSubSection* NewSection = CastChecked<UMovieSceneSubSection>(CreateNewSection());
-	{
-		NewSection->SetRowIndex(MaxRowIndex + 1);
-		NewSection->SetAsRecording(true);
-		NewSection->SetRange(PlaybackRange);
-	}
-
-	Sections.Add(NewSection);
 
 	return NewSection;
 }
@@ -141,7 +121,7 @@ bool UMovieSceneSubTrack::ContainsSequence(const UMovieSceneSequence& Sequence, 
 			continue;
 		}
 
-		UMovieSceneSubTrack* SubSubTrack = SubMovieScene->FindMasterTrack<UMovieSceneSubTrack>();
+		UMovieSceneSubTrack* SubSubTrack = SubMovieScene->FindTrack<UMovieSceneSubTrack>();
 
 		if ((SubSubTrack != nullptr) && SubSubTrack->ContainsSequence(Sequence))
 		{
@@ -219,9 +199,10 @@ bool UMovieSceneSubTrack::SupportsMultipleRows() const
 #if WITH_EDITORONLY_DATA
 FText UMovieSceneSubTrack::GetDefaultDisplayName() const
 {
-	return LOCTEXT("TrackName", "Subscenes");
+	return LOCTEXT("TrackName", "Subsequences");
 }
 #endif
 
 
 #undef LOCTEXT_NAMESPACE
+

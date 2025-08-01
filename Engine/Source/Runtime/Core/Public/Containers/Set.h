@@ -7,6 +7,7 @@
 #include "Templates/UnrealTypeTraits.h"
 #include "Templates/UnrealTemplate.h"
 #include "Containers/ContainerAllocationPolicies.h"
+#include "Containers/ContainerElementTypeCompatibility.h"
 #include "Templates/Sorting.h"
 #include "Containers/Array.h"
 #include "Math/UnrealMathUtility.h"
@@ -15,12 +16,11 @@
 #include <initializer_list>
 #include "Templates/TypeHash.h"
 #include "Containers/SparseArray.h"
-#include "Templates/AreTypesEqual.h"
-#include "Templates/Decay.h"
 #include "Serialization/StructuredArchive.h"
 #include "Serialization/MemoryImageWriter.h"
 #include "ContainersFwd.h"
 #include "Templates/RetainedRef.h"
+#include <type_traits>
 
 /**
  * The base KeyFuncs type with some useful definitions for all KeyFuncs; meant to be derived from instead of used directly.
@@ -112,9 +112,7 @@ public:
 	friend class TScriptSet;
 
 	/** Default constructor. */
-	FORCEINLINE FSetElementId():
-		Index(INDEX_NONE)
-	{}
+	FORCEINLINE FSetElementId() = default;
 
 	/** @return a boolean value representing whether the id is NULL. */
 	FORCEINLINE bool IsValidId() const
@@ -122,10 +120,14 @@ public:
 		return Index != INDEX_NONE;
 	}
 
-	/** Comparison operator. */
+	/** Comparison operators. */
 	FORCEINLINE friend bool operator==(const FSetElementId& A,const FSetElementId& B)
 	{
 		return A.Index == B.Index;
+	}
+	FORCEINLINE friend bool operator!=(const FSetElementId& A, const FSetElementId& B)
+	{
+		return A.Index != B.Index;
 	}
 
 	FORCEINLINE int32 AsInteger() const
@@ -139,28 +141,13 @@ public:
 	}
 
 private:
-	
-	/** Reset a range of FSetElementIds to invalid */
-	FORCEINLINE static void ResetRange(FSetElementId* Range, int32 Count)
-	{
-		for (int32 I = 0; I < Count; ++I)
-		{
-			Range[I] = FSetElementId();
-		}
-	}
-	
 	/** The index of the element in the set's element array. */
-	int32 Index;
+	int32 Index = INDEX_NONE;
 
 	/** Initialization constructor. */
-	FORCEINLINE FSetElementId(int32 InIndex):
-		Index(InIndex)
-	{}
-
-	/** Implicit conversion to the element index. */
-	FORCEINLINE operator int32() const
+	FORCEINLINE explicit FSetElementId(int32 InIndex)
+		: Index(InIndex)
 	{
-		return Index;
 	}
 };
 
@@ -176,7 +163,14 @@ public:
 	FORCEINLINE TSetElementBase() {}
 
 	/** Initialization constructor. */
-	template <typename InitType, typename = typename TEnableIf<!TAreTypesEqual<TSetElementBase, typename TDecay<InitType>::Type>::Value>::Type> explicit FORCEINLINE TSetElementBase(InitType&& InValue) : Value(Forward<InitType>(InValue)) {}
+	template <
+		typename InitType
+		UE_REQUIRES(!std::is_same_v<TSetElementBase, std::decay_t<InitType>>)
+	>
+	explicit FORCEINLINE TSetElementBase(InitType&& InValue)
+		: Value(Forward<InitType>(InValue))
+	{
+	}
 
 	TSetElementBase(TSetElementBase&&) = default;
 	TSetElementBase(const TSetElementBase&) = default;
@@ -203,7 +197,14 @@ public:
 	FORCEINLINE TSetElementBase() {}
 
 	/** Initialization constructor. */
-	template <typename InitType, typename = typename TEnableIf<!TAreTypesEqual<TSetElementBase, typename TDecay<InitType>::Type>::Value>::Type> explicit FORCEINLINE TSetElementBase(InitType&& InValue) : Value(Forward<InitType>(InValue)) {}
+	template <
+		typename InitType
+		UE_REQUIRES(!std::is_same_v<TSetElementBase, std::decay_t<InitType>>)
+	>
+	explicit FORCEINLINE TSetElementBase(InitType&& InValue)
+		: Value(Forward<InitType>(InValue))
+	{
+	}
 
 	TSetElementBase(TSetElementBase&&) = default;
 	TSetElementBase(const TSetElementBase&) = default;
@@ -231,24 +232,19 @@ public:
 	{}
 
 	/** Initialization constructor. */
-	template <typename InitType, typename = typename TEnableIf<!TAreTypesEqual<TSetElement, typename TDecay<InitType>::Type>::Value>::Type> explicit FORCEINLINE TSetElement(InitType&& InValue) : Super(Forward<InitType>(InValue)) {}
+	template <
+		typename InitType
+		UE_REQUIRES(!std::is_same_v<TSetElement, std::decay_t<InitType>>)
+	>
+	explicit FORCEINLINE TSetElement(InitType&& InValue)
+		: Super(Forward<InitType>(InValue))
+	{
+	}
 
 	TSetElement(TSetElement&&) = default;
 	TSetElement(const TSetElement&) = default;
 	TSetElement& operator=(TSetElement&&) = default;
 	TSetElement& operator=(const TSetElement&) = default;
-
-	/** Serializer. */
-	FORCEINLINE friend FArchive& operator<<(FArchive& Ar,TSetElement& Element)
-	{
-		return Ar << Element.Value;
-	}
-
-	/** Structured archive serializer. */
- 	FORCEINLINE friend void operator<<(FStructuredArchive::FSlot Slot, TSetElement& Element)
- 	{
- 		Slot << Element.Value;
- 	}
 
 	// Comparison operators
 	FORCEINLINE bool operator==(const TSetElement& Other) const
@@ -260,6 +256,11 @@ public:
 		return this->Value != Other.Value;
 	}
 };
+
+namespace UE::Core::Private
+{
+	[[noreturn]] CORE_API void OnInvalidSetNum(unsigned long long NewNum);
+}
 
 /**
  * A set with an optional KeyFuncs parameters for customizing how the elements are compared and searched.  
@@ -284,10 +285,16 @@ template<
 class TSet
 {
 public:
-	static const bool SupportsFreezeMemoryImage = TAllocatorTraits<Allocator>::SupportsFreezeMemoryImage && THasTypeLayout<InElementType>::Value;
+	typedef InElementType ElementType;
+	typedef KeyFuncs    KeyFuncsType;
+	typedef Allocator   AllocatorType;
+
+	using SizeType = typename Allocator::SparseArrayAllocator::ElementAllocator::SizeType;
+
+	static_assert(std::is_same_v<SizeType, int32>, "TSet currently only supports 32-bit allocators");
 
 private:
-	friend struct TContainerTraits<TSet>;
+	using USizeType = std::make_unsigned_t<SizeType>;
 
 	template <typename, typename>
 	friend class TScriptSet;
@@ -298,8 +305,6 @@ private:
 	typedef TSetElement<InElementType> SetElementType;
 
 public:
-	typedef InElementType ElementType;
-
 	/** Initialization constructor. */
 	FORCEINLINE TSet()
 	:	HashSize(0)
@@ -349,7 +354,7 @@ public:
 
 private:
 	template <typename SetType>
-	static FORCEINLINE typename TEnableIf<TContainerTraits<SetType>::MoveWillEmptyContainer>::Type MoveOrCopy(SetType& ToSet, SetType& FromSet)
+	static FORCEINLINE void Move(SetType& ToSet, SetType& FromSet)
 	{
 		ToSet.Elements = (ElementArrayType&&)FromSet.Elements;
 
@@ -357,12 +362,6 @@ private:
 
 		ToSet  .HashSize = FromSet.HashSize;
 		FromSet.HashSize = 0;
-	}
-
-	template <typename SetType>
-	static FORCEINLINE typename TEnableIf<!TContainerTraits<SetType>::MoveWillEmptyContainer>::Type MoveOrCopy(SetType& ToSet, SetType& FromSet)
-	{
-		ToSet = FromSet;
 	}
 
 public:
@@ -377,7 +376,7 @@ public:
 	TSet(TSet&& Other)
 		: HashSize(0)
 	{
-		MoveOrCopy(*this, Other);
+		this->Move(*this, Other);
 	}
 
 	/** Move assignment operator. */
@@ -385,7 +384,7 @@ public:
 	{
 		if (this != &Other)
 		{
-			MoveOrCopy(*this, Other);
+			this->Move(*this, Other);
 		}
 
 		return *this;
@@ -441,7 +440,7 @@ public:
 	{
 		// Empty the elements array, and reallocate it for the expected number of elements.
 		const int32 DesiredHashSize = Allocator::GetNumberOfHashBuckets(ExpectedNumElements);
-		const bool ShouldDoRehash = ShouldRehash(ExpectedNumElements,DesiredHashSize,true);
+		const bool ShouldDoRehash = ShouldRehash(ExpectedNumElements, DesiredHashSize, EAllowShrinking::Yes);
 
 		if (!ShouldDoRehash)
 		{
@@ -484,6 +483,7 @@ public:
 	{
 		if (Elements.Compact())
 		{
+			HashSize = Allocator::GetNumberOfHashBuckets(Elements.Num());
 			Rehash();
 		}
 	}
@@ -493,6 +493,7 @@ public:
 	{
 		if (Elements.CompactStable())
 		{
+			HashSize = Allocator::GetNumberOfHashBuckets(Elements.Num());
 			Rehash();
 		}
 	}
@@ -502,8 +503,14 @@ public:
 	{
 		// makes sense only when Number > Elements.Num() since TSparseArray::Reserve 
 		// does any work only if that's the case
-		if (Number > Elements.Num())
+		if ((USizeType)Number > (USizeType)Elements.Num())
 		{
+			// Trap negative reserves
+			if (Number < 0)
+			{
+				UE::Core::Private::OnInvalidSetNum((unsigned long long)Number);
+			}
+
 			// Preallocates memory for array of elements
 			Elements.Reserve(Number);
 
@@ -523,7 +530,7 @@ public:
 	/** Relaxes the set's hash to a size strictly bounded by the number of elements in the set. */
 	FORCEINLINE void Relax()
 	{
-		ConditionalRehash(Elements.Num(),true);
+		ConditionalRehash(Elements.Num(), EAllowShrinking::Yes);
 	}
 
 	/** 
@@ -531,9 +538,9 @@ public:
 	 * Only returns the size of allocations made directly by the container, not the elements themselves.
 	 * @return number of bytes allocated by this container
 	 */
-	FORCEINLINE uint32 GetAllocatedSize( void ) const
+	FORCEINLINE SIZE_T GetAllocatedSize( void ) const
 	{
-		return Elements.GetAllocatedSize() + (HashSize * sizeof(FSetElementId));
+		return Elements.GetAllocatedSize() + Hash.GetAllocatedSize(HashSize, sizeof(FSetElementId));
 	}
 
 	/** Tracks the container's memory use through an archive. */
@@ -541,6 +548,17 @@ public:
 	{
 		Elements.CountBytes(Ar);
 		Ar.CountBytes(HashSize * sizeof(int32),HashSize * sizeof(FSetElementId));
+	}
+
+	/**
+	 * Returns true if the sets is empty and contains no elements. 
+	 *
+	 * @returns True if the set is empty.
+	 * @see Num
+	 */
+	bool IsEmpty() const
+	{
+		return Elements.IsEmpty();
 	}
 
 	/** @return the number of elements. */
@@ -561,22 +579,35 @@ public:
 	 */
 	FORCEINLINE bool IsValidId(FSetElementId Id) const
 	{
-		return	Id.IsValidId() && 
-				Id >= 0 &&
-				Id < Elements.GetMaxIndex() &&
-				Elements.IsAllocated(Id);
+		SizeType Index = Id.Index;
+		return Index != INDEX_NONE &&
+			Index >= 0 &&
+			Index < Elements.GetMaxIndex() &&
+			Elements.IsAllocated(Index);
 	}
 
-	/** Accesses the identified element's value. */
+	/** Accesses the identified element's value. Element must be valid (see @IsValidId). */
 	FORCEINLINE ElementType& operator[](FSetElementId Id)
 	{
-		return Elements[Id].Value;
+		return Elements[Id.Index].Value;
 	}
 
-	/** Accesses the identified element's value. */
+	/** Accesses the identified element's value. Element must be valid (see @IsValidId). */
 	FORCEINLINE const ElementType& operator[](FSetElementId Id) const
 	{
-		return Elements[Id].Value;
+		return Elements[Id.Index].Value;
+	}
+
+	/** Accesses the identified element's value. Element must be valid (see @IsValidId). */
+	[[nodiscard]] FORCEINLINE ElementType& Get(FSetElementId Id)
+	{
+		return Elements[Id.Index].Value;
+	}
+
+	/** Accesses the identified element's value. Element must be valid (see @IsValidId). */
+	[[nodiscard]] FORCEINLINE const ElementType& Get(FSetElementId Id) const
+	{
+		return Elements[Id.Index].Value;
 	}
 
 	/**
@@ -588,6 +619,22 @@ public:
 	 */
 	FORCEINLINE FSetElementId Add(const InElementType&  InElement, bool* bIsAlreadyInSetPtr = nullptr) { return Emplace(                   InElement , bIsAlreadyInSetPtr); }
 	FORCEINLINE FSetElementId Add(      InElementType&& InElement, bool* bIsAlreadyInSetPtr = nullptr) { return Emplace(MoveTempIfPossible(InElement), bIsAlreadyInSetPtr); }
+
+	/**
+	 * Adds an element to the set if not already present and returns a reference to the added or existing element.
+	 *
+	 * @param	InElement					Element to add to set
+	 * @param	bIsAlreadyInSetPtr	[out]	Optional pointer to bool that will be set depending on whether element is already in set
+	 * @return	A reference to the element stored in the set.
+	 */
+	FORCEINLINE ElementType& FindOrAdd(const InElementType& InElement, bool* bIsAlreadyInSetPtr = nullptr)
+	{
+		return FindOrAddByHash(KeyFuncs::GetKeyHash(KeyFuncs::GetSetKey(InElement)), InElement, bIsAlreadyInSetPtr);
+	}
+	FORCEINLINE ElementType& FindOrAdd(InElementType&& InElement, bool* bIsAlreadyInSetPtr = nullptr)
+	{
+		return FindOrAddByHash(KeyFuncs::GetKeyHash(KeyFuncs::GetSetKey(InElement)), MoveTempIfPossible(InElement), bIsAlreadyInSetPtr);
+	}
 
 	/**
 	 * Adds an element to the set.
@@ -606,49 +653,76 @@ public:
 		return EmplaceByHash(KeyHash, MoveTempIfPossible(InElement), bIsAlreadyInSetPtr);
 	}
 
+	/**
+	 * Adds an element to the set if not already present and returns a reference to the added or existing element.
+	 *
+	 * @see		Class documentation section on ByHash() functions
+	 * @param	InElement					Element to add to set
+	 * @param	bIsAlreadyInSetPtr	[out]	Optional pointer to bool that will be set depending on whether element is already in set
+	 * @return  A reference to the element stored in the set
+	 */
+	template <typename ElementReferenceType>
+	ElementType& FindOrAddByHash(uint32 KeyHash, ElementReferenceType&& InElement, bool* bIsAlreadyInSetPtr = nullptr)
+	{
+		SizeType ExistingIndex = FindIndexByHash(KeyHash, KeyFuncs::GetSetKey(InElement));
+		bool bIsAlreadyInSet = ExistingIndex != INDEX_NONE;
+		if (bIsAlreadyInSetPtr)
+		{
+			*bIsAlreadyInSetPtr = bIsAlreadyInSet;
+		}
+		if (bIsAlreadyInSet)
+		{
+			return Elements[ExistingIndex].Value;
+		}
+
+		// Create a new element.
+		FSparseArrayAllocationInfo ElementAllocation = Elements.AddUninitialized();
+		SetElementType& Element = *new (ElementAllocation) SetElementType(Forward<ElementReferenceType>(InElement));
+		RehashOrLink(KeyHash, Element, ElementAllocation.Index);
+		return Element.Value;
+	}
+
 private:
-	FSetElementId EmplaceImpl(uint32 KeyHash, SetElementType& Element, FSetElementId ElementId, bool* bIsAlreadyInSetPtr)
+	bool TryReplaceExisting(uint32 KeyHash, SetElementType& Element, SizeType& InOutElementIndex, bool* bIsAlreadyInSetPtr)
 	{
 		bool bIsAlreadyInSet = false;
-		if (!KeyFuncs::bAllowDuplicateKeys)
+		if constexpr (!KeyFuncs::bAllowDuplicateKeys)
 		{
 			// If the set doesn't allow duplicate keys, check for an existing element with the same key as the element being added.
 
 			// Don't bother searching for a duplicate if this is the first element we're adding
 			if (Elements.Num() != 1)
 			{
-				FSetElementId ExistingId = FindIdByHash(KeyHash, KeyFuncs::GetSetKey(Element.Value));
-				bIsAlreadyInSet = ExistingId.IsValidId();
+				SizeType ExistingIndex = FindIndexByHash(KeyHash, KeyFuncs::GetSetKey(Element.Value));
+				bIsAlreadyInSet = ExistingIndex != INDEX_NONE;
 				if (bIsAlreadyInSet)
 				{
 					// If there's an existing element with the same key as the new element, replace the existing element with the new element.
-					MoveByRelocate(Elements[ExistingId].Value, Element.Value);
+					MoveByRelocate(Elements[ExistingIndex].Value, Element.Value);
 
 					// Then remove the new element.
-					Elements.RemoveAtUninitialized(ElementId);
+					Elements.RemoveAtUninitialized(InOutElementIndex);
 
 					// Then point the return value at the replaced element.
-					ElementId = ExistingId;
+					InOutElementIndex = ExistingIndex;
 				}
 			}
 		}
-
-		if (!bIsAlreadyInSet)
-		{
-			// Check if the hash needs to be resized.
-			if (!ConditionalRehash(Elements.Num()))
-			{
-				// If the rehash didn't add the new element to the hash, add it.
-				LinkElement(ElementId, Element, KeyHash);
-			}
-		}
-
 		if (bIsAlreadyInSetPtr)
 		{
 			*bIsAlreadyInSetPtr = bIsAlreadyInSet;
 		}
+		return bIsAlreadyInSet;
+	}
 
-		return ElementId;
+	FORCEINLINE void RehashOrLink(uint32 KeyHash, SetElementType& Element, SizeType ElementIndex)
+	{
+		// Check if the hash needs to be resized.
+		if (!ConditionalRehash(Elements.Num(), EAllowShrinking::No))
+		{
+			// If the rehash didn't add the new element to the hash, add it.
+			LinkElement(ElementIndex, Element, KeyHash);
+		}
 	}
 
 public:
@@ -659,15 +733,21 @@ public:
 	 * @param	bIsAlreadyInSetPtr	[out]	Optional pointer to bool that will be set depending on whether element is already in set
 	 * @return	A handle to the element stored in the set.
 	 */
-	template <typename ArgsType>
+	template <typename ArgsType = ElementType>
 	FSetElementId Emplace(ArgsType&& Args, bool* bIsAlreadyInSetPtr = nullptr)
 	{
 		// Create a new element.
 		FSparseArrayAllocationInfo ElementAllocation = Elements.AddUninitialized();
 		SetElementType& Element = *new (ElementAllocation) SetElementType(Forward<ArgsType>(Args));
 
+		SizeType NewHashIndex = ElementAllocation.Index;
+
 		uint32 KeyHash = KeyFuncs::GetKeyHash(KeyFuncs::GetSetKey(Element.Value));
-		return EmplaceImpl(KeyHash, Element, ElementAllocation.Index, bIsAlreadyInSetPtr);
+		if (!TryReplaceExisting(KeyHash, Element, NewHashIndex, bIsAlreadyInSetPtr))
+		{
+			RehashOrLink(KeyHash, Element, NewHashIndex);
+		}
+		return FSetElementId(NewHashIndex);
 	}
 	
 	/**
@@ -678,14 +758,40 @@ public:
 	 * @param	bIsAlreadyInSetPtr	[out]	Optional pointer to bool that will be set depending on whether element is already in set
 	 * @return	A handle to the element stored in the set.
 	 */
-	template <typename ArgsType>
+	template <typename ArgsType = ElementType>
 	FSetElementId EmplaceByHash(uint32 KeyHash, ArgsType&& Args, bool* bIsAlreadyInSetPtr = nullptr)
 	{
 		// Create a new element.
 		FSparseArrayAllocationInfo ElementAllocation = Elements.AddUninitialized();
 		SetElementType& Element = *new (ElementAllocation) SetElementType(Forward<ArgsType>(Args));
 
-		return EmplaceImpl(KeyHash, Element, ElementAllocation.Index, bIsAlreadyInSetPtr);
+		SizeType NewHashIndex = ElementAllocation.Index;
+
+		if (!TryReplaceExisting(KeyHash, Element, ElementAllocation.Index, bIsAlreadyInSetPtr))
+		{
+			RehashOrLink(KeyHash, Element, NewHashIndex);
+		}
+		return FSetElementId(NewHashIndex);
+	}
+
+	template<typename ViewSizeType>
+	void Append(TArrayView<ElementType, ViewSizeType> InElements)
+	{
+		Reserve(Elements.Num() + InElements.Num());
+		for (const ElementType& Element : InElements)
+		{
+			Add(Element);
+		}
+	}
+
+	template<typename ViewSizeType>
+	void Append(TArrayView<const ElementType, ViewSizeType> InElements)
+	{
+		Reserve(Elements.Num() + InElements.Num());
+		for (const ElementType& Element : InElements)
+		{
+			Add(Element);
+		}
 	}
 
 	template<typename ArrayAllocator>
@@ -743,33 +849,78 @@ public:
 		}
 	}
 
+private:
+	void RemoveByIndex(SizeType ElementIndex)
+	{
+		checkf(Elements.IsValidIndex(ElementIndex), TEXT("Invalid ElementIndex passed to TSet::RemoveByIndex"));
+
+		const SetElementType& ElementBeingRemoved = Elements[ElementIndex];
+
+		// Remove the element from the hash.
+		FSetElementId* HashPtr              = Hash.GetAllocation();
+		SizeType*      NextElementIndexIter = &HashPtr[ElementBeingRemoved.HashIndex].Index;
+		for (;;)
+		{
+			SizeType NextElementIndex = *NextElementIndexIter;
+			checkf(NextElementIndex != INDEX_NONE, TEXT("Corrupt hash"));
+
+			if (NextElementIndex == ElementIndex)
+			{
+				*NextElementIndexIter = ElementBeingRemoved.HashNextId.Index;
+				break;
+			}
+
+			NextElementIndexIter = &Elements[NextElementIndex].HashNextId.Index;
+		}
+
+		// Remove the element from the elements array.
+		Elements.RemoveAt(ElementIndex);
+	}
+
+public:
 	/**
 	 * Removes an element from the set.
 	 * @param Element - A pointer to the element in the set, as returned by Add or Find.
 	 */
 	void Remove(FSetElementId ElementId)
 	{
-		if (Elements.Num())
-		{
-			const auto& ElementBeingRemoved = Elements[ElementId];
-
-			// Remove the element from the hash.
-			for(FSetElementId* NextElementId = &GetTypedHash(ElementBeingRemoved.HashIndex);
-				NextElementId->IsValidId();
-				NextElementId = &Elements[*NextElementId].HashNextId)
-			{
-				if(*NextElementId == ElementId)
-				{
-					*NextElementId = ElementBeingRemoved.HashNextId;
-					break;
-				}
-			}
-		}
-
-		// Remove the element from the elements array.
-		Elements.RemoveAt(ElementId);
+		RemoveByIndex(ElementId.Index);
 	}
 
+private:
+	/**
+	 * Finds an element with a pre-calculated hash and a key that can be compared to KeyType
+	 * @see	Class documentation section on ByHash() functions
+	 * @return The element id that matches the key and hash or an invalid element id
+	 */
+	template <typename ComparableKey>
+	SizeType FindIndexByHash(uint32 KeyHash, const ComparableKey& Key) const
+	{
+		if (Elements.Num() == 0)
+		{
+			return INDEX_NONE;
+		}
+
+		FSetElementId* HashPtr      = Hash.GetAllocation();
+		SizeType       ElementIndex = HashPtr[KeyHash & (HashSize - 1)].Index;
+		for (;;)
+		{
+			if (ElementIndex == INDEX_NONE)
+			{
+				return INDEX_NONE;
+			}
+
+			if (KeyFuncs::Matches(KeyFuncs::GetSetKey(Elements[ElementIndex].Value), Key))
+			{
+				// Return the first match, regardless of whether the set has multiple matches for the key or not.
+				return ElementIndex;
+			}
+
+			ElementIndex = Elements[ElementIndex].HashNextId.Index;
+		}
+	}
+
+public:
 	/**
 	 * Finds an element with the given key in the set.
 	 * @param Key - The key to search for.
@@ -777,20 +928,7 @@ public:
 	 */
 	FSetElementId FindId(KeyInitType Key) const
 	{
-		if (Elements.Num())
-		{
-			for(FSetElementId ElementId = GetTypedHash(KeyFuncs::GetKeyHash(Key));
-				ElementId.IsValidId();
-				ElementId = Elements[ElementId].HashNextId)
-			{
-				if(KeyFuncs::Matches(KeyFuncs::GetSetKey(Elements[ElementId].Value),Key))
-				{
-					// Return the first match, regardless of whether the set has multiple matches for the key or not.
-					return ElementId;
-				}
-			}
-		}
-		return FSetElementId();
+		return FSetElementId(FindIndexByHash(KeyFuncs::GetKeyHash(Key), Key));
 	}
 
 	/**
@@ -801,22 +939,12 @@ public:
 	template<typename ComparableKey>
 	FSetElementId FindIdByHash(uint32 KeyHash, const ComparableKey& Key) const
 	{
-		if (Elements.Num())
-		{
-			checkSlow(KeyHash == KeyFuncs::GetKeyHash(Key));
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		// Disable deprecations warnings to stop warnings being thrown by our check macro.
+		checkSlow(KeyHash == KeyFuncs::GetKeyHash(Key));
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
-			for (FSetElementId ElementId = GetTypedHash(KeyHash);
-				ElementId.IsValidId();
-				ElementId = Elements[ElementId].HashNextId)
-			{
-				if (KeyFuncs::Matches(KeyFuncs::GetSetKey(Elements[ElementId].Value), Key))
-				{
-					// Return the first match, regardless of whether the set has multiple matches for the key or not.
-					return ElementId;
-				}
-			}
-		}
-		return FSetElementId();
+		return FSetElementId(FindIndexByHash(KeyHash, Key));
 	}
 
 	/**
@@ -826,10 +954,10 @@ public:
 	 */
 	FORCEINLINE ElementType* Find(KeyInitType Key)
 	{
-		FSetElementId ElementId = FindId(Key);
-		if(ElementId.IsValidId())
+		SizeType ElementIndex = FindIndexByHash(KeyFuncs::GetKeyHash(Key), Key);
+		if (ElementIndex != INDEX_NONE)
 		{
-			return &Elements[ElementId].Value;
+			return &Elements[ElementIndex].Value;
 		}
 		else
 		{
@@ -855,10 +983,10 @@ public:
 	template<typename ComparableKey>
 	ElementType* FindByHash(uint32 KeyHash, const ComparableKey& Key)
 	{
-		FSetElementId ElementId = FindIdByHash(KeyHash, Key);
-		if (ElementId.IsValidId())
+		SizeType ElementIndex = FindIndexByHash(KeyHash, Key);
+		if (ElementIndex != INDEX_NONE)
 		{
-			return &Elements[ElementId].Value;
+			return &Elements[ElementIndex].Value;
 		}
 		else
 		{
@@ -881,15 +1009,16 @@ private:
 		FSetElementId* NextElementId = &GetTypedHash(KeyHash);
 		while (NextElementId->IsValidId())
 		{
-			auto& Element = Elements[*NextElementId];
+			SetElementType& Element = Elements[NextElementId->Index];
+
 			if (KeyFuncs::Matches(KeyFuncs::GetSetKey(Element.Value), Key))
 			{
 				// This element matches the key, remove it from the set.  Note that Remove sets *NextElementId to point to the next
 				// element after the removed element in the hash bucket.
-				Remove(*NextElementId);
+				RemoveByIndex(NextElementId->Index);
 				NumRemovedElements++;
 
-				if (!KeyFuncs::bAllowDuplicateKeys)
+				if constexpr (!KeyFuncs::bAllowDuplicateKeys)
 				{
 					// If the hash disallows duplicate keys, we're done removing after the first matched key.
 					break;
@@ -930,7 +1059,10 @@ public:
 	template<typename ComparableKey>
 	int32 RemoveByHash(uint32 KeyHash, const ComparableKey& Key)
 	{
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		// Disable deprecations warnings to stop warnings being thrown by our check macro.
 		checkSlow(KeyHash == KeyFuncs::GetKeyHash(Key));
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 		if (Elements.Num())
 		{
@@ -947,7 +1079,7 @@ public:
 	 */
 	FORCEINLINE bool Contains(KeyInitType Key) const
 	{
-		return FindId(Key).IsValidId();
+		return FindIndexByHash(KeyFuncs::GetKeyHash(Key), Key) != INDEX_NONE;
 	}
 
 	/**
@@ -958,7 +1090,12 @@ public:
 	template<typename ComparableKey>
 	FORCEINLINE bool ContainsByHash(uint32 KeyHash, const ComparableKey& Key) const
 	{
-		return FindIdByHash(KeyHash, Key).IsValidId();
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		// Disable deprecations warnings to stop warnings being thrown by our check macro.
+		checkSlow(KeyHash == KeyFuncs::GetKeyHash(Key));
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+		return FindIndexByHash(KeyHash, Key) != INDEX_NONE;
 	}
 
 	/**
@@ -987,40 +1124,15 @@ public:
 		Rehash();
 	}
 
-	/** Serializer. */
-	friend FArchive& operator<<(FArchive& Ar,TSet& Set)
+	/**
+	* Sort the free element list so that subsequent additions will occur in the lowest available
+	* TSparseArray index resulting in tighter packing without moving any existing items. Also useful for
+	* some types of determinism. @see TSparseArray::SortFreeList() for more info.
+	*/
+	void SortFreeList()
 	{
-		// Load the set's new elements.
-		Ar << Set.Elements;
-
-		if(Ar.IsLoading())
-		{
-			// Free the old hash.
-			Set.Hash.ResizeAllocation(0,0,sizeof(FSetElementId));
-			Set.HashSize = 0;
-
-			// Hash the newly loaded elements.
-			Set.ConditionalRehash(Set.Elements.Num());
-		}
-
-		return Ar;
+		Elements.SortFreeList();
 	}
-
-	/** Structured archive serializer. */
- 	friend void operator<<(FStructuredArchive::FSlot Slot, TSet& Set)
- 	{
-		Slot << Set.Elements;
-
-		if (Slot.GetUnderlyingArchive().IsLoading())
-		{
-			// Free the old hash.
-			Set.Hash.ResizeAllocation(0, 0, sizeof(FSetElementId));
-			Set.HashSize = 0;
-
-			// Hash the newly loaded elements.
-			Set.ConditionalRehash(Set.Elements.Num());
-		}
- 	}
 
 	/**
 	 * Describes the set's contents through an output device.
@@ -1035,7 +1147,7 @@ public:
 			int32 NumElementsInBucket = 0;
 			for(FSetElementId ElementId = GetTypedHash(HashIndex);
 				ElementId.IsValidId();
-				ElementId = Elements[ElementId].HashNextId)
+				ElementId = Elements[ElementId.Index].HashNextId)
 			{
 				NumElementsInBucket++;
 			}
@@ -1059,7 +1171,7 @@ public:
 					bResult=false;
 					break;
 				}
-				ElementId = Elements[ElementId].HashNextId;
+				ElementId = Elements[ElementId.Index].HashNextId;
 			}
 		}
 		return bResult;
@@ -1087,16 +1199,6 @@ public:
 				ElementId = Elements[ElementId].HashNextId;
 			}
 		}
-	}
-
-	// Legacy comparison operators.  Note that these also test whether the set's elements were added in the same order!
-	friend bool LegacyCompareEqual(const TSet& A,const TSet& B)
-	{
-		return A.Elements == B.Elements;
-	}
-	friend bool LegacyCompareNotEqual(const TSet& A,const TSet& B)
-	{
-		return A.Elements != B.Elements;
 	}
 
 	/** @return the intersection of two sets. (A AND B)*/
@@ -1204,6 +1306,88 @@ public:
 		Elements.CheckAddress(Addr);
 	}
 
+	/**
+	 * Move assignment operator.
+	 * Compatible element type version.
+	 *
+	 * @param Other Set to assign and move from.
+	 */
+	template <
+		typename OtherKeyFuncs,
+		typename AliasElementType = ElementType
+		UE_REQUIRES(TIsContainerElementTypeCopyable_V<AliasElementType>)
+	>
+	TSet& operator=(TSet<typename TContainerElementTypeCompatibility<ElementType>::CopyFromOtherType, OtherKeyFuncs, Allocator>&& Other)
+	{
+		TContainerElementTypeCompatibility<ElementType>::CopyingFromOtherType();
+		Reset();
+		Append(MoveTemp(Other));
+		return *this;
+	}
+
+	/**
+	 * Assignment operator. First deletes all currently contained elements
+	 * and then copies from other set.
+	 * Compatible element type version.
+	 *
+	 * @param Other The source set to assign from.
+	 */
+	template <
+		typename OtherKeyFuncs,
+		typename OtherAllocator,
+		typename AliasElementType = ElementType
+		UE_REQUIRES(TIsContainerElementTypeCopyable_V<AliasElementType>)
+	>
+	TSet& operator=(const TSet<typename TContainerElementTypeCompatibility<ElementType>::CopyFromOtherType, OtherKeyFuncs, OtherAllocator>& Other)
+	{
+		TContainerElementTypeCompatibility<ElementType>::CopyingFromOtherType();
+		Reset();
+		Append(Other);
+		return *this;
+	}
+
+	/**
+	 * Add all items from another set to our set (union without creating a new set)
+	 * Compatible element type version.
+	 * @param OtherSet - The other set of items to add.
+	 */
+	template <
+		typename OtherKeyFuncs,
+		typename OtherAllocator,
+		typename AliasElementType = ElementType
+		UE_REQUIRES(TIsContainerElementTypeCopyable_V<AliasElementType>)
+	>
+	void Append(const TSet<typename TContainerElementTypeCompatibility<ElementType>::CopyFromOtherType, OtherKeyFuncs, OtherAllocator>& OtherSet)
+	{
+		TContainerElementTypeCompatibility<ElementType>::CopyingFromOtherType();
+		Reserve(Elements.Num() + OtherSet.Num());
+		for (const ElementType& Element : OtherSet)
+		{
+			Add(Element);
+		}
+	}
+
+	/**
+	 * Add all items from another set to our set (union without creating a new set)
+	 * Compatible element type version.
+	 * @param OtherSet - The other set of items to add.
+	 */
+	template <
+		typename OtherKeyFuncs,
+		typename AliasElementType = ElementType
+		UE_REQUIRES(TIsContainerElementTypeCopyable_V<AliasElementType>)
+	>
+	void Append(TSet<typename TContainerElementTypeCompatibility<ElementType>::CopyFromOtherType, OtherKeyFuncs, Allocator>&& OtherSet)
+	{
+		TContainerElementTypeCompatibility<ElementType>::CopyingFromOtherType();
+		Reserve(Elements.Num() + OtherSet.Num());
+		for (ElementType& Element : OtherSet)
+		{
+			Add(MoveTempIfPossible(Element));
+		}
+		OtherSet.Reset();
+	}
+
 private:
 	/** Extracts the element value from the set's element structure and passes it to the user provided comparison class. */
 	template <typename PREDICATE_CLASS>
@@ -1222,53 +1406,46 @@ private:
 		}
 	};
 
-	typedef TSparseArray<SetElementType,typename Allocator::SparseArrayAllocator>     ElementArrayType;
-	typedef typename Allocator::HashAllocator::template ForElementType<FSetElementId> HashType;
+	using ElementArrayType = TSparseArray<SetElementType, typename Allocator::SparseArrayAllocator>;
+	using HashType         = typename Allocator::HashAllocator::template ForElementType<FSetElementId>;
 
 	ElementArrayType Elements;
 
 	mutable HashType Hash;
 	mutable int32	 HashSize;
 
-	template<bool bFreezeMemoryImage, typename Dummy=void>
-	struct TSupportsFreezeMemoryImageHelper
-	{
-		static void WriteMemoryImage(FMemoryImageWriter& Writer, const TSet&) { Writer.WriteBytes(TSet()); }
-		static void CopyUnfrozen(const FMemoryUnfreezeContent& Context, const TSet&, void* Dst) { new(Dst) TSet(); }
-	};
-
-	template<typename Dummy>
-	struct TSupportsFreezeMemoryImageHelper<true, Dummy>
-	{
-		static void WriteMemoryImage(FMemoryImageWriter& Writer, const TSet& Object)
-		{
-			Object.Elements.WriteMemoryImage(Writer);
-			Object.Hash.WriteMemoryImage(Writer, StaticGetTypeLayoutDesc<FSetElementId>(), Object.HashSize);
-			Writer.WriteBytes(Object.HashSize);
-		}
-
-		static void CopyUnfrozen(const FMemoryUnfreezeContent& Context, const TSet& Object, void* Dst)
-		{
-			TSet* DstObject = static_cast<TSet*>(Dst);
-			Object.Elements.CopyUnfrozen(Context, &DstObject->Elements);
-
-			new(&DstObject->Hash) HashType();
-			DstObject->Hash.ResizeAllocation(0, Object.HashSize, sizeof(FSetElementId));
-			FMemory::Memcpy(DstObject->Hash.GetAllocation(), Object.Hash.GetAllocation(), sizeof(FSetElementId) * Object.HashSize);
-			DstObject->HashSize = Object.HashSize;
-		}
-	};
-
 public:
 	void WriteMemoryImage(FMemoryImageWriter& Writer) const
 	{
 		checkf(!Writer.Is32BitTarget(), TEXT("TSet does not currently support freezing for 32bits"));
-		TSupportsFreezeMemoryImageHelper<SupportsFreezeMemoryImage>::WriteMemoryImage(Writer, *this);
+		if constexpr (TAllocatorTraits<Allocator>::SupportsFreezeMemoryImage && THasTypeLayout<InElementType>::Value)
+		{
+			this->Elements.WriteMemoryImage(Writer);
+			this->Hash.WriteMemoryImage(Writer, StaticGetTypeLayoutDesc<FSetElementId>(), this->HashSize);
+			Writer.WriteBytes(this->HashSize);
+		}
+		else
+		{
+			Writer.WriteBytes(TSet());
+		}
 	}
 
 	void CopyUnfrozen(const FMemoryUnfreezeContent& Context, void* Dst) const
 	{
-		TSupportsFreezeMemoryImageHelper<SupportsFreezeMemoryImage>::CopyUnfrozen(Context, *this, Dst);
+		if constexpr (TAllocatorTraits<Allocator>::SupportsFreezeMemoryImage && THasTypeLayout<InElementType>::Value)
+		{
+			TSet* DstObject = static_cast<TSet*>(Dst);
+			this->Elements.CopyUnfrozen(Context, &DstObject->Elements);
+
+			new(&DstObject->Hash) HashType();
+			DstObject->Hash.ResizeAllocation(0, this->HashSize, sizeof(FSetElementId));
+			FMemory::Memcpy(DstObject->Hash.GetAllocation(), this->Hash.GetAllocation(), sizeof(FSetElementId) * this->HashSize);
+			DstObject->HashSize = this->HashSize;
+		}
+		else
+		{
+			new(Dst) TSet();
+		}
 	}
 
 	static void AppendHash(const FPlatformTypeLayoutParameters& LayoutParams, FSHA1& Hasher)
@@ -1283,65 +1460,44 @@ private:
 		return ((FSetElementId*)Hash.GetAllocation())[HashIndex & (HashSize - 1)];
 	}
 
-	/**
-	 * Accesses an element in the set.
-	 * This is needed because the iterator classes aren't friends of FSetElementId and so can't access the element index.
-	 */
-	FORCEINLINE const SetElementType& GetInternalElement(FSetElementId Id) const
-	{
-		return Elements[Id];
-	}
-	FORCEINLINE SetElementType& GetInternalElement(FSetElementId Id)
-	{
-		return Elements[Id];
-	}
-
-	/**
-	 * Translates an element index into an element ID.
-	 * This is needed because the iterator classes aren't friends of FSetElementId and so can't access the FSetElementId private constructor.
-	 */
-	static FORCEINLINE FSetElementId IndexToId(int32 Index)
-	{
-		return FSetElementId(Index);
-	}
-
 	/** Links an added element to the hash chain. */
-	FORCEINLINE void LinkElement(FSetElementId ElementId, const SetElementType& Element, uint32 KeyHash) const
+	FORCEINLINE void LinkElement(SizeType ElementIndex, const SetElementType& Element, uint32 KeyHash) const
 	{
 		// Compute the hash bucket the element goes in.
 		Element.HashIndex = KeyHash & (HashSize - 1);
 
 		// Link the element into the hash bucket.
-		Element.HashNextId = GetTypedHash(Element.HashIndex);
-		GetTypedHash(Element.HashIndex) = ElementId;
+		Element.HashNextId.Index = GetTypedHash(Element.HashIndex).Index;
+		GetTypedHash(Element.HashIndex).Index = ElementIndex;
 	}
 
 	/** Hashes and links an added element to the hash chain. */
-	FORCEINLINE void HashElement(FSetElementId ElementId, const SetElementType& Element) const
+	FORCEINLINE void HashElement(SizeType ElementIndex, const SetElementType& Element) const
 	{
-		LinkElement(ElementId, Element, KeyFuncs::GetKeyHash(KeyFuncs::GetSetKey(Element.Value)));
+		LinkElement(ElementIndex, Element, KeyFuncs::GetKeyHash(KeyFuncs::GetSetKey(Element.Value)));
 	}
 
-	/** Returns if it should be faster to clear the hash by going through elements instead of reseting the whole bucket lists*/
-	FORCEINLINE bool ShouldClearByElements()
-	{
-		return Num() < (HashSize / 4);
-	}
-
-	/** Reset elements buckets of FSetElementIds to invalid */
+	/** Reset hash buckets to invalid */
 	void UnhashElements()
 	{
-		if (ShouldClearByElements())
+		FSetElementId* HashPtr = Hash.GetAllocation();
+
+		// Check if it should be faster to clear the hash by going through elements instead of resetting the whole hash
+		if (Num() < (HashSize / 4))
 		{
-			// Faster path: only reset hash buckets to FSetElementId for elements in the hash
+			// Faster path: only reset hash buckets to invalid for elements in the hash
 			for (const SetElementType& Element: Elements)
 			{
-				Hash.GetAllocation()[Element.HashIndex] = FSetElementId();
+				HashPtr[Element.HashIndex].Index = INDEX_NONE;
 			}
 		}
 		else
 		{
-			FSetElementId::ResetRange(Hash.GetAllocation(), HashSize);
+			/** Reset the whole hash to invalid */
+			for (int32 I = 0; I < HashSize; ++I)
+			{
+				HashPtr[I].Index = INDEX_NONE;
+			}
 		}
 	}
 
@@ -1349,30 +1505,28 @@ private:
 	 * Checks if the hash has an appropriate number of buckets, and if it should be resized.
 	 * @param NumHashedElements - The number of elements to size the hash for.
 	 * @param DesiredHashSize - Desired size if we should rehash.
-	 * @param bAllowShrinking - true if the hash is allowed to shrink.
+	 * @param AllowShrinking - If the hash is allowed to shrink.
 	 * @return true if the set should berehashed.
 	 */
-	FORCEINLINE bool ShouldRehash(int32 NumHashedElements,int32 DesiredHashSize,bool bAllowShrinking = false) const
+	FORCEINLINE bool ShouldRehash(int32 NumHashedElements, int32 DesiredHashSize, EAllowShrinking AllowShrinking) const
 	{
 		// If the hash hasn't been created yet, or is smaller than the desired hash size, rehash.
-		return (NumHashedElements > 0 &&
-				(!HashSize ||
-				HashSize < DesiredHashSize ||
-				(HashSize > DesiredHashSize && bAllowShrinking)));
+		// If shrinking is allowed and the hash is bigger than the desired hash size, rehash.
+		return ((NumHashedElements > 0 && HashSize < DesiredHashSize) || (AllowShrinking == EAllowShrinking::Yes && HashSize > DesiredHashSize));
 	}
 
 	/**
 	 * Checks if the hash has an appropriate number of buckets, and if not resizes it.
 	 * @param NumHashedElements - The number of elements to size the hash for.
-	 * @param bAllowShrinking - true if the hash is allowed to shrink.
+	 * @param AllowShrinking - If the hash is allowed to shrink.
 	 * @return true if the set was rehashed.
 	 */
-	bool ConditionalRehash(int32 NumHashedElements,bool bAllowShrinking = false) const
+	bool ConditionalRehash(int32 NumHashedElements, EAllowShrinking AllowShrinking) const
 	{
 		// Calculate the desired hash size for the specified number of elements.
 		const int32 DesiredHashSize = Allocator::GetNumberOfHashBuckets(NumHashedElements);
 
-		if (ShouldRehash(NumHashedElements, DesiredHashSize, bAllowShrinking))
+		if (ShouldRehash(NumHashedElements, DesiredHashSize, AllowShrinking))
 		{
 			HashSize = DesiredHashSize;
 			Rehash();
@@ -1402,7 +1556,7 @@ private:
 			// Add the existing elements to the new hash.
 			for(typename ElementArrayType::TConstIterator ElementIt(Elements);ElementIt;++ElementIt)
 			{
-				HashElement(FSetElementId(ElementIt.GetIndex()),*ElementIt);
+				HashElement(ElementIt.GetIndex(), *ElementIt);
 			}
 		}
 	}
@@ -1414,14 +1568,14 @@ private:
 	private:
 		friend class TSet;
 
-		typedef typename TChooseClass<bConst,const ElementType,ElementType>::Result ItElementType;
+		typedef std::conditional_t<bConst,const ElementType,ElementType> ItElementType;
 
 	public:
-		typedef typename TChooseClass<
+		typedef std::conditional_t<
 			bConst,
-			typename TChooseClass<bRangedFor, typename ElementArrayType::TRangedForConstIterator, typename ElementArrayType::TConstIterator>::Result,
-			typename TChooseClass<bRangedFor, typename ElementArrayType::TRangedForIterator,      typename ElementArrayType::TIterator     >::Result
-		>::Result ElementItType;
+			std::conditional_t<bRangedFor, typename ElementArrayType::TRangedForConstIterator, typename ElementArrayType::TConstIterator>,
+			std::conditional_t<bRangedFor, typename ElementArrayType::TRangedForIterator,      typename ElementArrayType::TIterator     >
+		> ElementItType;
 
 		FORCEINLINE TBaseIterator(const ElementItType& InElementIt)
 			: ElementIt(InElementIt)
@@ -1449,7 +1603,7 @@ private:
 		// Accessors.
 		FORCEINLINE FSetElementId GetId() const
 		{
-			return TSet::IndexToId(ElementIt.GetIndex());
+			return FSetElementId(ElementIt.GetIndex());
 		}
 		FORCEINLINE ItElementType* operator->() const
 		{
@@ -1460,59 +1614,64 @@ private:
 			return ElementIt->Value;
 		}
 
-		FORCEINLINE friend bool operator==(const TBaseIterator& Lhs, const TBaseIterator& Rhs) { return Lhs.ElementIt == Rhs.ElementIt; }
-		FORCEINLINE friend bool operator!=(const TBaseIterator& Lhs, const TBaseIterator& Rhs) { return Lhs.ElementIt != Rhs.ElementIt; }
+		FORCEINLINE bool operator==(const TBaseIterator& Rhs) const { return ElementIt == Rhs.ElementIt; }
+		FORCEINLINE bool operator!=(const TBaseIterator& Rhs) const { return ElementIt != Rhs.ElementIt; }
 
 		ElementItType ElementIt;
 	};
 
 	/** The base type of whole set iterators. */
-	template <bool bConst>
+	template<bool bConst>
 	class TBaseKeyIterator
 	{
 	private:
-		typedef typename TChooseClass<bConst,const TSet,TSet>::Result SetType;
-		typedef typename TChooseClass<bConst,const ElementType,ElementType>::Result ItElementType;
+		typedef std::conditional_t<bConst, const TSet, TSet> SetType;
+		typedef std::conditional_t<bConst,const ElementType,ElementType> ItElementType;
 		typedef typename TTypeTraits<typename KeyFuncs::KeyType>::ConstPointerType ReferenceOrValueType;
 
 	public:
 		using KeyArgumentType =
 			std::conditional_t<
-				std::is_reference<ReferenceOrValueType>::value,
+				std::is_reference_v<ReferenceOrValueType>,
 				TRetainedRef<std::remove_reference_t<ReferenceOrValueType>>,
 				KeyInitType
 			>;
 
 		/** Initialization constructor. */
 		FORCEINLINE TBaseKeyIterator(SetType& InSet, KeyArgumentType InKey)
-			: Set(InSet)
-			, Key(InKey)
+			: Set  (InSet)
+			, Key  (InKey) //-V1041
+			, Index(INDEX_NONE)
 		{
 			// The set's hash needs to be initialized to find the elements with the specified key.
-			Set.ConditionalRehash(Set.Elements.Num());
-			if(Set.HashSize)
+			Set.ConditionalRehash(Set.Elements.Num(), EAllowShrinking::No);
+			if (Set.HashSize)
 			{
-				NextId = Set.GetTypedHash(KeyFuncs::GetKeyHash(Key));
+				NextIndex = Set.GetTypedHash(KeyFuncs::GetKeyHash(Key)).Index;
 				++(*this);
+			}
+			else
+			{
+				NextIndex = INDEX_NONE;
 			}
 		}
 
 		/** Advances the iterator to the next element. */
 		FORCEINLINE TBaseKeyIterator& operator++()
 		{
-			Id = NextId;
+			Index = NextIndex;
 
-			while(Id.IsValidId())
+			while (Index != INDEX_NONE)
 			{
-				NextId = Set.GetInternalElement(Id).HashNextId;
-				checkSlow(Id != NextId);
+				NextIndex = Set.Elements[Index].HashNextId.Index;
+				checkSlow(Index != NextIndex);
 
-				if(KeyFuncs::Matches(KeyFuncs::GetSetKey(Set[Id]),Key))
+				if (KeyFuncs::Matches(KeyFuncs::GetSetKey(Set.Elements[Index].Value),Key))
 				{
 					break;
 				}
 
-				Id = NextId;
+				Index = NextIndex;
 			}
 			return *this;
 		}
@@ -1520,7 +1679,7 @@ private:
 		/** conversion to "bool" returning true if the iterator is valid. */
 		FORCEINLINE explicit operator bool() const
 		{ 
-			return Id.IsValidId(); 
+			return Index != INDEX_NONE;
 		}
 		/** inverse of the "bool" operator */
 		FORCEINLINE bool operator !() const 
@@ -1529,20 +1688,24 @@ private:
 		}
 
 		// Accessors.
+		[[nodiscard]] FORCEINLINE FSetElementId GetId() const
+		{
+			return FSetElementId(Index);
+		}
 		FORCEINLINE ItElementType* operator->() const
 		{
-			return &Set[Id];
+			return &Set.Elements[Index].Value;
 		}
 		FORCEINLINE ItElementType& operator*() const
 		{
-			return Set[Id];
+			return Set.Elements[Index].Value;
 		}
 
 	protected:
 		SetType& Set;
 		ReferenceOrValueType Key;
-		FSetElementId Id;
-		FSetElementId NextId;
+		SizeType Index;
+		SizeType NextIndex;
 	};
 
 public:
@@ -1574,7 +1737,7 @@ public:
 		/** Removes the current element from the set. */
 		FORCEINLINE void RemoveCurrent()
 		{
-			Set.Remove(TBaseIterator<false>::GetId());
+			Set.RemoveByIndex(TBaseIterator<false>::ElementIt.GetIndex());
 		}
 
 	private:
@@ -1616,8 +1779,8 @@ public:
 		/** Removes the current element from the set. */
 		FORCEINLINE void RemoveCurrent()
 		{
-			this->Set.Remove(TBaseKeyIterator<false>::Id);
-			TBaseKeyIterator<false>::Id = FSetElementId();
+			this->Set.RemoveByIndex(TBaseKeyIterator<false>::Index);
+			TBaseKeyIterator<false>::Index = INDEX_NONE;
 		}
 	};
 
@@ -1632,6 +1795,8 @@ public:
 	{
 		return TConstIterator(*this);
 	}
+
+	friend struct TSetPrivateFriend;
 
 public:
 	/**
@@ -1653,9 +1818,10 @@ namespace Freeze
 	}
 
 	template<typename ElementType, typename KeyFuncs, typename Allocator>
-	void IntrinsicUnfrozenCopy(const FMemoryUnfreezeContent& Context, const TSet<ElementType, KeyFuncs, Allocator>& Object, void* OutDst)
+	uint32 IntrinsicUnfrozenCopy(const FMemoryUnfreezeContent& Context, const TSet<ElementType, KeyFuncs, Allocator>& Object, void* OutDst)
 	{
 		Object.CopyUnfrozen(Context, OutDst);
+		return sizeof(Object);
 	}
 
 	template<typename ElementType, typename KeyFuncs, typename Allocator>
@@ -1667,15 +1833,6 @@ namespace Freeze
 }
 
 DECLARE_TEMPLATE_INTRINSIC_TYPE_LAYOUT((template <typename ElementType, typename KeyFuncs, typename Allocator>), (TSet<ElementType, KeyFuncs, Allocator>));
-
-template<typename ElementType, typename KeyFuncs, typename Allocator>
-struct TContainerTraits<TSet<ElementType, KeyFuncs, Allocator> > : public TContainerTraitsBase<TSet<ElementType, KeyFuncs, Allocator> >
-{
-	static_assert(TAllocatorTraits<typename Allocator::HashAllocator>::SupportsMove, "TSet no longer supports move-unaware allocators");
-	enum { MoveWillEmptyContainer =
-		TContainerTraits<typename TSet<ElementType, KeyFuncs, Allocator>::ElementArrayType>::MoveWillEmptyContainer &&
-		TAllocatorTraits<typename Allocator::HashAllocator>::SupportsMove };
-};
 
 struct FScriptSetLayout
 {
@@ -1692,7 +1849,7 @@ struct FScriptSetLayout
 template <typename Allocator, typename InDerivedType>
 class TScriptSet
 {
-	using DerivedType = typename TChooseClass<TIsVoidType<InDerivedType>::Value, TScriptSet, InDerivedType>::Result;
+	using DerivedType = std::conditional_t<std::is_void_v<InDerivedType>, TScriptSet, InDerivedType>;
 
 public:
 	static FScriptSetLayout GetScriptLayout(int32 ElementSize, int32 ElementAlignment)
@@ -1720,6 +1877,11 @@ public:
 	bool IsValidIndex(int32 Index) const
 	{
 		return Elements.IsValidIndex(Index);
+	}
+
+	bool IsEmpty() const
+	{
+		return Elements.IsEmpty();
 	}
 
 	int32 Num() const
@@ -1768,7 +1930,11 @@ public:
 			Hash.ResizeAllocation(0, HashSize, sizeof(FSetElementId));
 		}
 
-		FSetElementId::ResetRange(Hash.GetAllocation(), HashSize);
+		FSetElementId* HashPtr = Hash.GetAllocation();
+		for (int32 I = 0; I < HashSize; ++I)
+		{
+			HashPtr[I].Index = INDEX_NONE;
+		}
 	}
 
 	void RemoveAt(int32 Index, const FScriptSetLayout& Layout)
@@ -1778,9 +1944,9 @@ public:
 		void* ElementBeingRemoved = Elements.GetData(Index, Layout.SparseArrayLayout);
 
 		// Remove the element from the hash.
-		for (FSetElementId* NextElementId = &GetTypedHash(GetHashIndexRef(ElementBeingRemoved, Layout)); NextElementId->IsValidId(); NextElementId = &GetHashNextIdRef(Elements.GetData(NextElementId->AsInteger(), Layout.SparseArrayLayout), Layout))
+		for (FSetElementId* NextElementId = &GetTypedHash(GetHashIndexRef(ElementBeingRemoved, Layout)); NextElementId->IsValidId(); NextElementId = &GetHashNextIdRef(Elements.GetData(NextElementId->Index, Layout.SparseArrayLayout), Layout))
 		{
-			if (NextElementId->AsInteger() == Index)
+			if (NextElementId->Index == Index)
 			{
 				*NextElementId = GetHashNextIdRef(ElementBeingRemoved, Layout);
 				break;
@@ -1857,10 +2023,10 @@ private:
 			ElementId.IsValidId();
 			ElementId = GetHashNextIdRef(CurrentElement, Layout))
 		{
-			CurrentElement = (uint8*)Elements.GetData(ElementId, Layout.SparseArrayLayout);
+			CurrentElement = (uint8*)Elements.GetData(ElementId.Index, Layout.SparseArrayLayout);
 			if (EqualityFn(Element, CurrentElement))
 			{
-				return ElementId;
+				return ElementId.Index;
 			}
 		}
 	
@@ -1914,7 +2080,10 @@ public:
 
 			// We don't update the hash because we don't need to - the new element
 			// should have the same hash, but let's just check.
+			PRAGMA_DISABLE_DEPRECATION_WARNINGS
+			// Disable deprecations warnings to stop warnings being thrown by our check macro.
 			checkSlow(KeyHash == GetKeyHash(ElementPtr));
+			PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		}
 		else
 		{
@@ -2005,6 +2174,16 @@ struct TIsZeroConstructType<TScriptSet<AllocatorType, InDerivedType>>
 	enum { Value = true };
 };
 
+/**
+ * Traits class which determines whether or not a type is a TSet.
+ */
+template <typename T> struct TIsTSet { enum { Value = false }; };
+
+template <typename ElementType, typename KeyFuncs, typename Allocator> struct TIsTSet<               TSet<ElementType, KeyFuncs, Allocator>> { enum { Value = true }; };
+template <typename ElementType, typename KeyFuncs, typename Allocator> struct TIsTSet<const          TSet<ElementType, KeyFuncs, Allocator>> { enum { Value = true }; };
+template <typename ElementType, typename KeyFuncs, typename Allocator> struct TIsTSet<      volatile TSet<ElementType, KeyFuncs, Allocator>> { enum { Value = true }; };
+template <typename ElementType, typename KeyFuncs, typename Allocator> struct TIsTSet<const volatile TSet<ElementType, KeyFuncs, Allocator>> { enum { Value = true }; };
+
 class FScriptSet : public TScriptSet<FDefaultSetAllocator, FScriptSet>
 {
 	using Super = TScriptSet<FDefaultSetAllocator, FScriptSet>;
@@ -2012,3 +2191,94 @@ class FScriptSet : public TScriptSet<FDefaultSetAllocator, FScriptSet>
 public:
 	using Super::Super;
 };
+
+struct TSetPrivateFriend
+{
+	/** Serializer. */
+	template<typename ElementType, typename KeyFuncs,typename Allocator>
+	static FArchive& Serialize(FArchive& Ar,TSet<ElementType, KeyFuncs, Allocator>& Set)
+	{
+		// Load the set's new elements.
+		Ar << Set.Elements;
+
+		if(Ar.IsLoading() || Ar.IsModifyingWeakAndStrongReferences())
+		{
+			// Free the old hash.
+			Set.Hash.ResizeAllocation(0,0,sizeof(FSetElementId));
+			Set.HashSize = 0;
+
+			// Hash the newly loaded elements.
+			Set.ConditionalRehash(Set.Elements.Num(), EAllowShrinking::No);
+		}
+
+		return Ar;
+	}
+
+	/** Structured archive serializer. */
+	template<typename ElementType, typename KeyFuncs,typename Allocator>
+ 	static void SerializeStructured(FStructuredArchive::FSlot Slot, TSet<ElementType, KeyFuncs, Allocator>& Set)
+ 	{
+		Slot << Set.Elements;
+
+		if (Slot.GetUnderlyingArchive().IsLoading() || Slot.GetUnderlyingArchive().IsModifyingWeakAndStrongReferences())
+		{
+			// Free the old hash.
+			Set.Hash.ResizeAllocation(0, 0, sizeof(FSetElementId));
+			Set.HashSize = 0;
+
+			// Hash the newly loaded elements.
+			Set.ConditionalRehash(Set.Elements.Num(), EAllowShrinking::No);
+		}
+ 	}
+
+	// Legacy comparison operators.  Note that these also test whether the set's elements were added in the same order!
+	template<typename ElementType, typename KeyFuncs,typename Allocator>
+	static bool LegacyCompareEqual(const TSet<ElementType, KeyFuncs, Allocator>& A, const TSet<ElementType, KeyFuncs, Allocator>& B)
+	{
+		return A.Elements == B.Elements;
+	}
+};
+
+/** Serializer. */
+template <typename ElementType>
+FORCEINLINE FArchive& operator<<(FArchive& Ar, TSetElement<ElementType>& Element)
+{
+	return Ar << Element.Value;
+}
+
+/** Structured archive serializer. */
+template <typename ElementType>
+FORCEINLINE void operator<<(FStructuredArchive::FSlot& Ar, TSetElement<ElementType>& Element)
+{
+	Ar << Element.Value;
+}
+
+/** Serializer. */
+template<typename ElementType, typename KeyFuncs,typename Allocator>
+FArchive& operator<<(FArchive& Ar, TSet<ElementType, KeyFuncs, Allocator>& Set)
+{
+	return TSetPrivateFriend::Serialize(Ar, Set);
+}
+
+/** Structured archive serializer. */
+template<typename ElementType, typename KeyFuncs,typename Allocator>
+void operator<<(FStructuredArchive::FSlot& Ar, TSet<ElementType, KeyFuncs, Allocator>& Set)
+{
+	TSetPrivateFriend::SerializeStructured(Ar, Set);
+}
+
+// Legacy comparison operators.  Note that these also test whether the set's elements were added in the same order!
+template<typename ElementType, typename KeyFuncs,typename Allocator>
+bool LegacyCompareEqual(const TSet<ElementType, KeyFuncs, Allocator>& A,const TSet<ElementType, KeyFuncs, Allocator>& B)
+{
+	return TSetPrivateFriend::LegacyCompareEqual(A, B);
+}
+template<typename ElementType, typename KeyFuncs,typename Allocator>
+bool LegacyCompareNotEqual(const TSet<ElementType, KeyFuncs, Allocator>& A,const TSet<ElementType, KeyFuncs, Allocator>& B)
+{
+	return !TSetPrivateFriend::LegacyCompareEqual(A, B);
+}
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
+#include "Templates/Decay.h"
+#endif

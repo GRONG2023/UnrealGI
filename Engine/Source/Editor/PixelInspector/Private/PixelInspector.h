@@ -33,17 +33,20 @@ namespace PixelInspector
 		virtual void SetupViewFamily(FSceneViewFamily& InViewFamily) override {};
 		virtual void SetupView(FSceneViewFamily& InViewFamily, FSceneView& InView) override {};
 		virtual void BeginRenderViewFamily(FSceneViewFamily& InViewFamily) override;
-		virtual void PreRenderViewFamily_RenderThread(FRHICommandListImmediate& RHICmdList, FSceneViewFamily& InViewFamily) override {};
-		virtual void PreRenderView_RenderThread(FRHICommandListImmediate& RHICmdList, FSceneView& InView) override {};
+		virtual void PreRenderViewFamily_RenderThread(FRDGBuilder& GraphBuilder, FSceneViewFamily& InViewFamily) override {};
+		virtual void PreRenderView_RenderThread(FRDGBuilder& GraphBuilder, FSceneView& InView) override {};
 		virtual void SubscribeToPostProcessingPass(EPostProcessingPass PassId, FAfterPassCallbackDelegateArray& InOutPassCallbacks, bool bIsPassEnabled) override;
 
 	public:
 		FScreenPassTexture PostProcessPassAfterFxaa_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessMaterialInputs& InOutInputs);
-		const EPixelFormat GetPixelFormat() const { return FinalColorPixelFormat; }
+		FScreenPassTexture PostProcessPassAfterMotionBlur_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessMaterialInputs& InOutInputs);
+		const EPixelFormat GetFinalColorPixelFormat() const { return FinalColorPixelFormat; }
+		const EPixelFormat GetHDRPixelFormat() const { return HDRPixelFormat; }
 		const float GetGamma() const { return FinalColorGamma; }
 		
 	private:
 		EPixelFormat FinalColorPixelFormat;
+		EPixelFormat HDRPixelFormat;
 		float FinalColorGamma;
 	};
 
@@ -173,10 +176,9 @@ namespace PixelInspector
 		UTextureRenderTarget2D* Buffer_FinalColor_AnyFormat[2];
 		//Depth Buffer
 		UTextureRenderTarget2D* Buffer_Depth_Float[2];
-		//SceneColor Buffer
-		UTextureRenderTarget2D* Buffer_SceneColor_Float[2];
-		//HDR Buffer
-		UTextureRenderTarget2D* Buffer_HDR_Float[2];
+		//SceneColor Buffers
+		UTextureRenderTarget2D* Buffer_SceneColorBeforePost_Float[2];
+		UTextureRenderTarget2D* Buffer_SceneColorBeforeToneMap_Float[2];
 		//GBufferA RenderTarget
 		UTextureRenderTarget2D* Buffer_A_Float[2];
 		UTextureRenderTarget2D* Buffer_A_RGB8[2];

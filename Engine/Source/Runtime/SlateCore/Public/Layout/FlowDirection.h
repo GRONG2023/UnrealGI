@@ -3,8 +3,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "HAL/Platform.h"
 #include "UObject/Class.h"
+#include "UObject/ObjectMacros.h"
 
 #include "FlowDirection.generated.h"
 
@@ -44,9 +45,9 @@ extern SLATECORE_API int32 GSlateFlowDirectionShouldFollowCultureByDefault;
 /**
  * Class containing utilities for getting layout localization information.
  */
-class SLATECORE_API FLayoutLocalization
+class FLayoutLocalization
 {
 public:
 	/** Gets the current expected flow direction based on localization. */
-	static EFlowDirection GetLocalizedLayoutDirection();
+	static SLATECORE_API EFlowDirection GetLocalizedLayoutDirection();
 };

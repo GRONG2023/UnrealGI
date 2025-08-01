@@ -8,6 +8,7 @@ TextureInstanceView.h: Definitions of classes used for texture streaming.
 
 #include "CoreMinimal.h"
 #include "Templates/RefCounting.h"
+#include "Containers/ChunkedArray.h"
 #include "Streaming/StreamingTexture.h"
 
 class UPrimitiveComponent;
@@ -46,27 +47,27 @@ public:
 		FVector4 RangeOriginZ;
 
 		/** X size of the bounds box extent of 4 texture/mesh instances */
-		FVector4 ExtentX;
+		FVector4f ExtentX;
 		/** Y size of the bounds box extent of 4 texture/mesh instances */
-		FVector4 ExtentY;
+		FVector4f ExtentY;
 		/** Z size of the bounds box extent of 4 texture/mesh instances */
-		FVector4 ExtentZ;
+		FVector4f ExtentZ;
 
-		/** Sphere radii for the bounding sphere of 4 texture/mesh instances */
-		FVector4 Radius;
+		/** Sphere radii for the bounding sphere of 4 texture/mesh static instances or component scale for dynamic instances */
+		FVector4f RadiusOrComponentScale;
 
 		/** The relative box the bound was computed with. Aligned to be interpreted as FVector4  */
 		MS_ALIGN(16) FUintVector4 PackedRelativeBox;
 
 		/** Minimal distance (between the bounding sphere origin and the view origin) for which this entry is valid */
-		FVector4 MinDistanceSq;
+		FVector4f MinDistanceSq;
 		/** Minimal range distance (between the bounding sphere origin and the view origin) for which this entry is valid */
-		FVector4 MinRangeSq;
+		FVector4f MinRangeSq;
 		/** Maximal range distance (between the bounding sphere origin and the view origin) for which this entry is valid */
-		FVector4 MaxRangeSq;
+		FVector4f MaxRangeSq;
 
 		/** Last visibility time for this bound, used for priority */
-		FVector4 LastRenderTime; //(FApp::GetCurrentTime() - Component->LastRenderTime);
+		FVector4f LastRenderTime; //(FApp::GetCurrentTime() - Component->LastRenderTime);
 
 
 		void Set(int32 Index, const FBoxSphereBounds& Bounds, uint32 InPackedRelativeBox, float LastRenderTime, const FVector& RangeOrigin, float MinDistanceSq, float MinRangeSq, float MaxRangeSq);
@@ -83,7 +84,16 @@ public:
 
 	struct FElement
 	{
-		FORCEINLINE FElement();
+		FORCEINLINE FElement()
+			: Component(nullptr)
+			, RenderAsset(nullptr)
+			, BoundsIndex(INDEX_NONE)
+			, TexelFactor(0)
+			, PrevRenderAssetLink(INDEX_NONE)
+			, NextRenderAssetLink(INDEX_NONE)
+			, NextComponentLink(INDEX_NONE)
+		{
+		}
 
 		const UPrimitiveComponent* Component; // Which component this relates too
 		const UStreamableRenderAsset* RenderAsset;	// Texture or mesh, never dereferenced.
@@ -142,8 +152,6 @@ public:
 		FORCEINLINE bool GetForceLoad() const { return State.Elements[CurrElementIndex].bForceLoad; }
 
 		FBoxSphereBounds GetBounds() const;
-
-		int32 GetCurElementIdx_ForDebuggingOnly() const { return CurrElementIndex; }
 
 		FORCEINLINE const UPrimitiveComponent* GetComponent() const { return State.Elements[CurrElementIndex].Component; }
 
@@ -206,23 +214,11 @@ public:
 
 	static void GetDistanceAndRange(const UPrimitiveComponent* Component, const FBoxSphereBounds& RenderAssetInstanceBounds, float& MinDistanceSq, float& MinRangeSq, float& MaxRangeSq);
 
-	// FORT-159677
-	FORCEINLINE void VerifyElementIdx_DebuggingOnly(int32 Idx, int32 IterationCount, TMap<const UPrimitiveComponent*, int32>* ComponentMapPtr = nullptr, TArray<int32>* FreeIndicesPtr = nullptr) const
-	{
-#if PLATFORM_WINDOWS && 0 // TEMPORARILY DISABLED
-		const bool bInRange = Idx >= 0 && Idx < Elements.Num();
-		if (!bInRange)
-		{
-			OnVerifyElementIdxFailed(Idx, bInRange, IterationCount, ComponentMapPtr, FreeIndicesPtr);
-		}
-#endif
-	}
-
 protected:
 
 	TArray<FBounds4> Bounds4;
 
-	TArray<FElement> Elements;
+	TChunkedArray<FElement> Elements;
 
 	TMap<const UStreamableRenderAsset*, FRenderAssetDesc> RenderAssetMap;
 
@@ -234,9 +230,6 @@ protected:
 
 	/** Max texel factor across all elements. Used for early culling */
 	float MaxTexelFactor;
-
-private:
-	FORCENOINLINE void OnVerifyElementIdxFailed(int32 Idx, bool bInRange, int32 IterationCount, TMap<const UPrimitiveComponent*, int32>* ComponentMapPtr, TArray<int32>* FreeIndicesPtr) const;
 };
 
 struct FStreamingViewInfoExtra
@@ -255,9 +248,9 @@ class FRenderAssetInstanceAsyncView
 {
 public:
 
-	FRenderAssetInstanceAsyncView() : MaxLevelRenderAssetScreenSize(MAX_FLT) {}
+	FRenderAssetInstanceAsyncView() : MaxLevelRenderAssetScreenSize(UE_MAX_FLT) {}
 
-	FRenderAssetInstanceAsyncView(const FRenderAssetInstanceView* InView) : View(InView), MaxLevelRenderAssetScreenSize(MAX_FLT) {}
+	FRenderAssetInstanceAsyncView(const FRenderAssetInstanceView* InView) : View(InView), MaxLevelRenderAssetScreenSize(UE_MAX_FLT) {}
 
 	void UpdateBoundSizes_Async(
 		const TArray<FStreamingViewInfo>& ViewInfos,
@@ -277,11 +270,20 @@ public:
 		int32& MaxNumForcedLODs,
 		const TCHAR* LogPrefix) const;
 
-	bool HasRenderAssetReferences(const UStreamableRenderAsset* InAsset) const;
+	FORCEINLINE bool HasRenderAssetReferences(const UStreamableRenderAsset* InAsset) const
+	{
+		return View.IsValid() && (bool)View->GetElementIterator(InAsset);
+	}
 
-	bool HasComponentWithForcedLOD(const UStreamableRenderAsset* InAsset) const;
+	FORCEINLINE bool HasComponentWithForcedLOD(const UStreamableRenderAsset* InAsset) const
+	{
+		return View.IsValid() && View->HasComponentWithForcedLOD(InAsset);
+	}
 
-	bool HasAnyComponentWithForcedLOD() const;
+	FORCEINLINE bool HasAnyComponentWithForcedLOD() const
+	{
+		return View.IsValid() && View->HasAnyComponentWithForcedLOD();
+	}
 
 	// Release the data now as this is expensive.
 	void OnTaskDone() { BoundsViewInfo.Empty(); }
@@ -301,6 +303,8 @@ private:
 		 * Visible instances are the one that are in range and also that have been seen recently.
 		 */
 		float MaxNormalizedSize_VisibleOnly;
+		/** A custom per component scale applied to the texel factor. */
+		float ComponentScale;
 	};
 
 	// Normalized Texel Factors for each bounds and view. This is the data built by ComputeBoundsViewInfos

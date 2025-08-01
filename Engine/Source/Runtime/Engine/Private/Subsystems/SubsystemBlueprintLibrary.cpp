@@ -4,8 +4,11 @@
 
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
-#include "GameFramework/PlayerController.h"
+#include "AudioDevice.h"
 #include "Blueprint/UserWidget.h"
+#include "Subsystems/EngineSubsystem.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SubsystemBlueprintLibrary)
 
 /*static*/  UEngineSubsystem* USubsystemBlueprintLibrary::GetEngineSubsystem(TSubclassOf<UEngineSubsystem> Class)
 {
@@ -54,6 +57,19 @@ UWorldSubsystem* USubsystemBlueprintLibrary::GetWorldSubsystem(UObject* ContextO
 	if (const UWorld* World = ThisClass::GetWorldFrom(ContextObject))
 	{
 		return World->GetSubsystemBase(Class);
+	}
+	return nullptr;
+}
+
+/*static*/ UAudioEngineSubsystem* USubsystemBlueprintLibrary::GetAudioEngineSubsystem(UObject* ContextObject, TSubclassOf<UAudioEngineSubsystem> Class)
+{
+	if (UWorld* World = ThisClass::GetWorldFrom(ContextObject))
+	{
+		FAudioDeviceHandle AudioDeviceHandle = World->GetAudioDevice();
+		if (AudioDeviceHandle.IsValid())
+		{
+			return AudioDeviceHandle->GetSubsystemBase(Class);
+		}
 	}
 	return nullptr;
 }

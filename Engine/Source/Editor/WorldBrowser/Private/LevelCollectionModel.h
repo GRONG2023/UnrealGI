@@ -133,10 +133,10 @@ public:
 	virtual void TranslateLevels(const FLevelModelList& InLevelList, FVector2D InAbsoluteDelta, bool bSnapDelta = true);
 	
 	/** Snaps translation delta */
-	virtual FVector2D SnapTranslationDelta(const FLevelModelList& InLevelList, FVector2D InAbsoluteDelta, bool bBoundsSnapping, float SnappingValue);
+	virtual FVector2D SnapTranslationDelta(const FLevelModelList& InLevelList, FVector2D InAbsoluteDelta, bool bBoundsSnapping, FVector2D::FReal SnappingValue);
 
 	/**	Updates current translation delta, when user drags levels on minimap */
-	virtual void UpdateTranslationDelta(const FLevelModelList& InLevelList, FVector2D InTranslationDelta, bool bBoundsSnapping, float SnappingValue);
+	virtual void UpdateTranslationDelta(const FLevelModelList& InLevelList, FVector2D InTranslationDelta, bool bBoundsSnapping, FVector2D::FReal SnappingValue);
 
 	/** Attach levels as children to specified level */
 	void AssignParent(const FLevelModelList& InLevels, TSharedPtr<FLevelModel> InParent);
@@ -206,6 +206,9 @@ public:
 
 	/** @return	whether at least one level is selected */
 	bool AreAnyLevelsSelected() const;
+
+	/** @return wether all selected levels are user managed */
+	bool AreAllSelectedLevelsUserManaged() const;
 
 	/** @return whether all the currently selected levels are loaded */
 	bool AreAllSelectedLevelsLoaded() const;
@@ -296,7 +299,7 @@ public:
 	void BroadcastPostLevelsUnloaded();
 	
 	/** Editable world axis length  */
-	static float EditableAxisLength();
+	static double EditableAxisLength();
 
 	/** Editable world bounds */
 	static FBox EditableWorldArea();

@@ -8,7 +8,7 @@
 #if WITH_UNREALPNG
 
 THIRD_PARTY_INCLUDES_START
-	#include "ThirdParty/zlib/zlib-1.2.5/Inc/zlib.h"
+	#include "zlib.h"
 
 	// make sure no other versions of libpng headers are picked up
 #if WITH_LIBPNG_1_6
@@ -49,6 +49,9 @@ public:
 	virtual void Reset() override;
 	virtual bool SetCompressed(const void* InCompressedData, int64 InCompressedSize) override;
 	virtual void Uncompress(const ERGBFormat InFormat, int32 InBitDepth) override;
+	
+	virtual bool CanSetRawFormat(const ERGBFormat InFormat, const int32 InBitDepth) const override;
+	virtual ERawImageFormat::Type GetSupportedRawFormat(const ERawImageFormat::Type InFormat) const override;
 
 public:
 
@@ -91,7 +94,7 @@ private:
 	/** The number of channels. */
 	uint8 Channels;
 
-#if PLATFORM_ANDROID || PLATFORM_LUMIN || PLATFORM_LUMINGL4
+#if PLATFORM_ANDROID
 	//Other platforms rely on libPNG internal mechanism to achieve concurrent compression\decompression on multiple threads
 	/** setjmp buffer for error recovery. */
 	jmp_buf SetjmpBuffer;

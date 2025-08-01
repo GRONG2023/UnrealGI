@@ -2,10 +2,19 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
 #include "IPAddress.h"
-#include "SocketSubsystem.h"
 #include "Interfaces/IPv4/IPv4Address.h"
+#include "Internationalization/Text.h"
+#include "Misc/AssertionMacros.h"
+#include "Serialization/Archive.h"
+#include "SocketSubsystem.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
 
 /**
  * Implements an endpoint for IPv4 networks.
@@ -52,7 +61,7 @@ public:
 		int32 OutPort;
 		InternetAddr->GetIp(Address.Value);
 		InternetAddr->GetPort(OutPort);
-		Port = OutPort;
+		Port = static_cast<uint16>(OutPort);
 	}
 
 public:

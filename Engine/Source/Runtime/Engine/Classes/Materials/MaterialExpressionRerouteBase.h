@@ -5,8 +5,10 @@
 #include "Materials/MaterialExpression.h"
 #include "MaterialExpressionRerouteBase.generated.h"
 
-UCLASS(abstract)
-class ENGINE_API UMaterialExpressionRerouteBase : public UMaterialExpression
+class FMaterialExpressionKey;
+
+UCLASS(abstract, MinimalAPI)
+class UMaterialExpressionRerouteBase : public UMaterialExpression
 {
 	GENERATED_UCLASS_BODY()
 
@@ -16,15 +18,18 @@ class ENGINE_API UMaterialExpressionRerouteBase : public UMaterialExpression
 	 * @param OutputIndex The output index of the connection that was traced back.
 	 * @return The final traced material expression.
 	*/
-	UMaterialExpression* TraceInputsToRealExpression(int32& OutputIndex) const;
+	ENGINE_API UMaterialExpression* TraceInputsToRealExpression(int32& OutputIndex) const;
 
-	FExpressionInput TraceInputsToRealInput() const;
+	ENGINE_API FExpressionInput TraceInputsToRealInput() const;
 
 	//~ Begin UMaterialExpression Interface
 #if WITH_EDITOR
-	virtual uint32 GetInputType(int32 InputIndex) override;
-	virtual uint32 GetOutputType(int32 OutputIndex) override;
-	virtual bool IsResultMaterialAttributes(int32 OutputIndex) override;
+	ENGINE_API virtual uint32 GetInputType(int32 InputIndex) override;
+	ENGINE_API virtual uint32 GetOutputType(int32 OutputIndex) override;
+	ENGINE_API virtual bool IsResultMaterialAttributes(int32 OutputIndex) override;
+	ENGINE_API virtual bool IsResultSubstrateMaterial(int32 OutputIndex) override;
+	ENGINE_API void GatherSubstrateMaterialInfo(FSubstrateMaterialInfo& SubstrateMaterialInfo, int32 OutputIndex) override;
+	ENGINE_API FSubstrateOperator* SubstrateGenerateMaterialTopologyTree(class FMaterialCompiler* Compiler, class UMaterialExpression* Parent, int32 OutputIndex) override;
 #endif
 	//~ End UMaterialExpression Interface
 
@@ -37,5 +42,5 @@ protected:
 	 virtual bool GetRerouteInput(FExpressionInput& OutInput) const { return false; }
 
 private:
-	FExpressionInput TraceInputsToRealExpressionInternal(TSet<FMaterialExpressionKey>& VisitedExpressions) const;
+	ENGINE_API FExpressionInput TraceInputsToRealExpressionInternal(TSet<FMaterialExpressionKey>& VisitedExpressions) const;
 };

@@ -20,7 +20,7 @@ public:
 	/** Test the given value against the strings extracted from the current item */
 	virtual bool TestBasicStringExpression(const FTextFilterString& InValue, const ETextFilterTextComparisonMode InTextComparisonMode) const override
 	{
-		return TextFilterUtils::TestBasicStringExpression(Message->Message.ToString(), InValue, InTextComparisonMode);
+		return TextFilterUtils::TestBasicStringExpression(Message->GetMessageAsString(), InValue, InTextComparisonMode);
 	}
 
 	/**
@@ -107,7 +107,7 @@ bool FLogFilter::IsMessageAllowed(const FLogMessageRecord& Message)
 	// Filter by Verbosity
 	if (bIsFilterSetByVerbosity)
 	{
-		if (Message.Verbosity > VerbosityThreshold)
+		if (Message.GetVerbosity() > VerbosityThreshold)
 		{
 			return false;
 		}
@@ -116,7 +116,7 @@ bool FLogFilter::IsMessageAllowed(const FLogMessageRecord& Message)
 	// Filter by Category
 	if (bIsFilterSetByCategory)
 	{
-		if (!EnabledLogCategories.Contains(FName(*Message.Category.ToString())))
+		if (!EnabledLogCategories.Contains(FName(Message.GetCategory())))
 		{
 			return false;
 		}
@@ -271,6 +271,7 @@ void FLogFilteringAsyncTask::DoWork()
 	bool bCanceled = false;
 	FilteredMessages.Reset();
 
+#if !WITH_EDITOR
 	if (Filter.IsFilterSetByText())
 	{
 		UE_LOG(TraceInsights, Log, TEXT("[LogView] FLogFilteringAsyncTask::DoWork [%d to %d] by Text (\"%s\")"), StartIndex, EndIndex, *Filter.GetFilterText().ToString());
@@ -279,6 +280,7 @@ void FLogFilteringAsyncTask::DoWork()
 	{
 		UE_LOG(TraceInsights, Log, TEXT("[LogView] FLogFilteringAsyncTask::DoWork [%d to %d]"), StartIndex, EndIndex);
 	}
+#endif // !WITH_EDITOR
 
 	for (int32 Index = StartIndex; Index < EndIndex && !bCanceled; ++Index)
 	{
@@ -295,11 +297,15 @@ void FLogFilteringAsyncTask::DoWork()
 	if (bCanceled)
 	{
 		FilteredMessages.Reset();
+#if !WITH_EDITOR
 		UE_LOG(TraceInsights, Log, TEXT("[LogView] FLogFilteringAsyncTask::DoWork CANCELED"));
+#endif // !WITH_EDITOR
 	}
 	else
 	{
+#if !WITH_EDITOR
 		UE_LOG(TraceInsights, Log, TEXT("[LogView] FLogFilteringAsyncTask::DoWork DONE (%d filtered messages)"), FilteredMessages.Num());
+#endif // !WITH_EDITOR
 	}
 }
 

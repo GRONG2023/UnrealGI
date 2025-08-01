@@ -1,28 +1,43 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "CoreMinimal.h"
-#include "Modules/ModuleManager.h"
-#include "Layout/Visibility.h"
-#include "Layout/Margin.h"
-#include "Misc/Attribute.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/SBoxPanel.h"
-#include "Widgets/SOverlay.h"
-#include "Textures/SlateIcon.h"
-#include "Framework/Commands/UIAction.h"
-#include "Widgets/Images/SImage.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Layout/SBox.h"
-#include "Framework/MultiBox/MultiBox.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Interfaces/IProjectTargetPlatformEditorModule.h"
-#include "EditorStyleSet.h"
+#include "Containers/Array.h"
+#include "CoreGlobals.h"
+#include "Delegates/Delegate.h"
 #include "Dialogs/Dialogs.h"
-#include "PlatformInfo.h"
-#include "Widgets/SProjectTargetPlatformSettings.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
 #include "ISettingsModule.h"
 #include "Interfaces/IProjectManager.h"
+#include "Interfaces/IProjectTargetPlatformEditorModule.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Layout/Margin.h"
+#include "Layout/Visibility.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/DataDrivenPlatformInfoRegistry.h"
+#include "Modules/ModuleManager.h"
+#include "PlatformInfo.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/CoreStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Templates/SharedPointer.h"
+#include "Textures/SlateIcon.h"
+#include "Types/SlateEnums.h"
+#include "Types/SlateStructs.h"
+#include "UObject/NameTypes.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SOverlay.h"
+#include "Widgets/SProjectTargetPlatformSettings.h"
+#include "Widgets/Text/STextBlock.h"
+
+class SWidget;
 
 
 #define LOCTEXT_NAMESPACE "FProjectTargetPlatformEditorModule"
@@ -69,7 +84,7 @@ public:
 			);
 	}
 
-	virtual TSharedRef<SWidget> MakePlatformMenuItemWidget(const PlatformInfo::FPlatformInfo& PlatformInfo, const bool bForCheckBox = false, const FText& DisplayNameOverride = FText()) const override
+	virtual TSharedRef<SWidget> MakePlatformMenuItemWidget(const PlatformInfo::FTargetPlatformInfo& PlatformInfo, const bool bForCheckBox = false, const FText& DisplayNameOverride = FText()) const override
 	{
 		struct Local
 		{
@@ -79,6 +94,8 @@ public:
 				return (!IProjectManager::Get().QueryStatusForCurrentProject(ProjectStatus) || ProjectStatus.IsTargetPlatformSupported(PlatformName)) ? EVisibility::Hidden : EVisibility::Visible;
 			}
 		};
+
+		const float MenuIconSize = FCoreStyle::Get().GetFloat("Menu.MenuIconSize", nullptr, 16.f);
 
 		return 
 			SNew(SHorizontalBox)
@@ -94,25 +111,25 @@ public:
 				.VAlign(VAlign_Center)
 				[
 					SNew(SBox)
-					.WidthOverride(MultiBoxConstants::MenuIconSize)
-					.HeightOverride(MultiBoxConstants::MenuIconSize)
+					.WidthOverride(MenuIconSize)
+					.HeightOverride(MenuIconSize)
 					[
 						SNew(SImage)
-						.Image(FEditorStyle::GetBrush(PlatformInfo.GetIconStyleName(PlatformInfo::EPlatformIconSize::Normal)))
+						.Image(FAppStyle::GetBrush(PlatformInfo.GetIconStyleName(EPlatformIconSize::Normal)))
 					]
 				]
 				+SOverlay::Slot()
-				.Padding(FMargin(MultiBoxConstants::MenuIconSize * 0.5f, 0, 0, 0))
+				.Padding(FMargin(MenuIconSize * 0.5f, 0, 0, 0))
 				.HAlign(HAlign_Left)
 				.VAlign(VAlign_Bottom)
 				[
 					SNew(SBox)
-					.WidthOverride(MultiBoxConstants::MenuIconSize)
-					.HeightOverride(MultiBoxConstants::MenuIconSize)
+					.WidthOverride(MenuIconSize)
+					.HeightOverride(MenuIconSize)
 					[
 						SNew(SImage)
-						.Visibility(TAttribute<EVisibility>::Create(TAttribute<EVisibility>::FGetter::CreateStatic(&Local::IsUnsupportedPlatformWarningVisible, PlatformInfo.VanillaPlatformName)))
-						.Image(FEditorStyle::GetBrush("Launcher.Platform.Warning"))
+						.Visibility(TAttribute<EVisibility>::Create(TAttribute<EVisibility>::FGetter::CreateStatic(&Local::IsUnsupportedPlatformWarningVisible, PlatformInfo.VanillaInfo->Name)))
+						.Image(FAppStyle::GetBrush("Launcher.Platform.Warning"))
 					]
 				]
 			]
@@ -122,19 +139,19 @@ public:
 			.VAlign(VAlign_Center)
 			[
 				SNew(STextBlock)
-				.TextStyle(FEditorStyle::Get(), "Menu.Label")
+				.TextStyle(FAppStyle::Get(), "Menu.Label")
 				.Text((DisplayNameOverride.IsEmpty()) ? PlatformInfo.DisplayName : DisplayNameOverride)
 			];
 	}
 
 	virtual bool ShowUnsupportedTargetWarning(const FName PlatformName) const override
 	{
-		const PlatformInfo::FPlatformInfo* const PlatformInfo = PlatformInfo::FindPlatformInfo(PlatformName);
+		const PlatformInfo::FTargetPlatformInfo* const PlatformInfo = PlatformInfo::FindPlatformInfo(PlatformName);
 		check(PlatformInfo);
 
 		// Don't show the warning during automation testing; the dlg is modal and blocks
 		FProjectStatus ProjectStatus;
-		if(!GIsAutomationTesting && IProjectManager::Get().QueryStatusForCurrentProject(ProjectStatus) && !ProjectStatus.IsTargetPlatformSupported(PlatformInfo->VanillaPlatformName))
+		if(!GIsAutomationTesting && IProjectManager::Get().QueryStatusForCurrentProject(ProjectStatus) && !ProjectStatus.IsTargetPlatformSupported(PlatformInfo->VanillaInfo->Name))
 		{
 			FFormatNamedArguments Args;
 			Args.Add(TEXT("DisplayName"), PlatformInfo->DisplayName);

@@ -16,7 +16,6 @@ class ITargetPlatform;
 #if ENABLE_HTTP_FOR_NFS
 
 #if PLATFORM_WINDOWS
-	#include "Windows/WindowsHWrapper.h"
 	#include "Windows/AllowWindowsPlatformTypes.h"
 #endif
 
@@ -42,7 +41,7 @@ class FNetworkFileServerHttp
 {
 
 public:
-	FNetworkFileServerHttp(int32 InPort, FNetworkFileDelegateContainer InNetworkFileDelegateContainer, const TArray<ITargetPlatform*>& InActiveTargetPlatforms );
+	FNetworkFileServerHttp(FNetworkFileServerOptions InFileServerOptions);
 
 	// INetworkFileServer Interface.
 
@@ -74,10 +73,8 @@ private:
 	// factory method for creating a new Client Connection.
 	class FNetworkFileServerClientConnectionHTTP* CreateNewConnection();
 
-	FNetworkFileDelegateContainer NetworkFileDelegates;
-
-	// cached copy of the active target platforms (if any)
-	const TArray<ITargetPlatform*> ActiveTargetPlatforms;
+	// File server options
+	FNetworkFileServerOptions FileServerOptions;
 
 	/** OpenSSL context */
 	SSL_CTX* SslContext;
@@ -87,9 +84,6 @@ private:
 
 	// Service Http connections on this thread.
 	FRunnableThread* WorkerThread;
-
-	// port on which this http server runs.
-	int32 Port;
 
 	// used to send simple message.
 	FThreadSafeCounter StopRequested;

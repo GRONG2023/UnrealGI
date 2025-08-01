@@ -1,8 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "UnrealWidget.h"
+#include "UnrealWidgetFwd.h"
 #include "Materials/Material.h"
 #include "CanvasItem.h"
+#include "SceneView.h"
 #include "Settings/LevelEditorViewportSettings.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "EditorViewportClient.h"
@@ -11,6 +13,7 @@
 #include "SnappingUtils.h"
 #include "DynamicMeshBuilder.h"
 #include "CanvasTypes.h"
+#include "EditorInteractiveGizmoManager.h"
 
 /*
  *  Simple struct used to create and group data related to the current window's / viewport's space,
@@ -179,13 +182,22 @@ void FWidget::Render( const FSceneView* View,FPrimitiveDrawInterface* PDI, FEdit
 
 	const bool bShowFlagsSupportsWidgetDrawing = View->Family->EngineShowFlags.ModeWidgets;
 	const bool bEditorModeToolsSupportsWidgetDrawing = EditorModeTools ? EditorModeTools->GetShowWidget() : true;
+
+	// Use legacy widget for TranslateRotateZ or 2D modes or when UseLegacyWidget cvar is true
+	UE::Widget::EWidgetMode WidgetMode = ViewportClient->GetWidgetMode();
+	bool bUseLegacyWidget = (WidgetMode == UE::Widget::EWidgetMode::WM_TranslateRotateZ || WidgetMode == UE::Widget::EWidgetMode::WM_2D);
+	if (!bUseLegacyWidget)
+	{
+		bUseLegacyWidget = !UEditorInteractiveGizmoManager::UsesNewTRSGizmos();
+	}
+
 	bool bDrawWidget;
 
 	// Because the movement routines use the widget axis to determine how to transform mouse movement into
 	// editor object movement, we need to still run through the Render routine even though widget drawing may be
 	// disabled.  So we keep a flag that is used to determine whether or not to actually render anything.  This way
 	// we can still update the widget axis' based on the Context's transform matrices, even though drawing is disabled.
-	if(bDefaultVisibility && bShowFlagsSupportsWidgetDrawing && bEditorModeToolsSupportsWidgetDrawing)
+	if(bDefaultVisibility && bShowFlagsSupportsWidgetDrawing && bEditorModeToolsSupportsWidgetDrawing && bUseLegacyWidget)
 	{
 		bDrawWidget = true;
 
@@ -214,25 +226,25 @@ void FWidget::Render( const FSceneView* View,FPrimitiveDrawInterface* PDI, FEdit
 		Origin = NewOrigin;
 	}
 
-	switch( ViewportClient->GetWidgetMode() )
+	switch( WidgetMode )
 	{
-		case WM_Translate:
+		case UE::Widget::EWidgetMode::WM_Translate:
 			Render_Translate(View, PDI, ViewportClient, WidgetLocation, bDrawWidget);
 			break;
 
-		case WM_Rotate:
+		case UE::Widget::EWidgetMode::WM_Rotate:
 			Render_Rotate(View, PDI, ViewportClient, WidgetLocation, bDrawWidget);
 			break;
 
-		case WM_Scale:
+		case UE::Widget::EWidgetMode::WM_Scale:
 			Render_Scale(View, PDI, ViewportClient, WidgetLocation, bDrawWidget);
 			break;
 
-		case WM_TranslateRotateZ:
+		case UE::Widget::EWidgetMode::WM_TranslateRotateZ:
 			Render_TranslateRotateZ(View, PDI, ViewportClient, WidgetLocation, bDrawWidget);
 			break;
 
-		case WM_2D:
+		case UE::Widget::EWidgetMode::WM_2D:
 			Render_2D(View, PDI, ViewportClient, WidgetLocation, bDrawWidget);
 			break;
 
@@ -366,10 +378,10 @@ void DrawCornerHelper( FPrimitiveDrawInterface* PDI, const FMatrix& LocalToWorld
 	// Top
 	{
 		int32 VertexIndices[4];
-		VertexIndices[0] = MeshBuilder.AddVertex( FVector(-TX, -TY, +TZ), FVector2D::ZeroVector, FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), FColor::White );
-		VertexIndices[1] = MeshBuilder.AddVertex( FVector(-TX, +TY, +TZ), FVector2D::ZeroVector, FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), FColor::White );
-		VertexIndices[2] = MeshBuilder.AddVertex( FVector(+TX, +TY, +TZ), FVector2D::ZeroVector, FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), FColor::White );
-		VertexIndices[3] = MeshBuilder.AddVertex( FVector(+TX, -TY, +TZ), FVector2D::ZeroVector, FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), FColor::White );
+		VertexIndices[0] = MeshBuilder.AddVertex( FVector3f(-TX, -TY, +TZ), FVector2f::ZeroVector, FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), FColor::White );
+		VertexIndices[1] = MeshBuilder.AddVertex( FVector3f(-TX, +TY, +TZ), FVector2f::ZeroVector, FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), FColor::White );
+		VertexIndices[2] = MeshBuilder.AddVertex( FVector3f(+TX, +TY, +TZ), FVector2f::ZeroVector, FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), FColor::White );
+		VertexIndices[3] = MeshBuilder.AddVertex( FVector3f(+TX, -TY, +TZ), FVector2f::ZeroVector, FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), FColor::White );
 
 		MeshBuilder.AddTriangle(VertexIndices[0],VertexIndices[1],VertexIndices[2]);
 		MeshBuilder.AddTriangle(VertexIndices[0],VertexIndices[2],VertexIndices[3]);
@@ -378,10 +390,10 @@ void DrawCornerHelper( FPrimitiveDrawInterface* PDI, const FMatrix& LocalToWorld
 	//Left
 	{
 		int32 VertexIndices[4];
-		VertexIndices[0] = MeshBuilder.AddVertex( FVector(-TX,  -TY, TZ-TH),	FVector2D::ZeroVector, FVector(0,0,1), FVector(0,1,0), FVector(-1,0,0), FColor::White );
-		VertexIndices[1] = MeshBuilder.AddVertex( FVector(-TX, -TY, TZ),		FVector2D::ZeroVector, FVector(0,0,1), FVector(0,1,0), FVector(-1,0,0), FColor::White );
-		VertexIndices[2] = MeshBuilder.AddVertex( FVector(-TX, +TY, TZ),		FVector2D::ZeroVector, FVector(0,0,1), FVector(0,1,0), FVector(-1,0,0), FColor::White );
-		VertexIndices[3] = MeshBuilder.AddVertex( FVector(-TX, +TY, TZ-TH),		FVector2D::ZeroVector, FVector(0,0,1), FVector(0,1,0), FVector(-1,0,0), FColor::White );
+		VertexIndices[0] = MeshBuilder.AddVertex( FVector3f(-TX,  -TY, TZ-TH),	FVector2f::ZeroVector, FVector3f(0,0,1), FVector3f(0,1,0), FVector3f(-1,0,0), FColor::White );
+		VertexIndices[1] = MeshBuilder.AddVertex( FVector3f(-TX, -TY, TZ),		FVector2f::ZeroVector, FVector3f(0,0,1), FVector3f(0,1,0), FVector3f(-1,0,0), FColor::White );
+		VertexIndices[2] = MeshBuilder.AddVertex( FVector3f(-TX, +TY, TZ),		FVector2f::ZeroVector, FVector3f(0,0,1), FVector3f(0,1,0), FVector3f(-1,0,0), FColor::White );
+		VertexIndices[3] = MeshBuilder.AddVertex( FVector3f(-TX, +TY, TZ-TH),	FVector2f::ZeroVector, FVector3f(0,0,1), FVector3f(0,1,0), FVector3f(-1,0,0), FColor::White );
 
 
 		MeshBuilder.AddTriangle(VertexIndices[0],VertexIndices[1],VertexIndices[2]);
@@ -391,11 +403,11 @@ void DrawCornerHelper( FPrimitiveDrawInterface* PDI, const FMatrix& LocalToWorld
 	// Front
 	{
 		int32 VertexIndices[5];
-		VertexIndices[0] = MeshBuilder.AddVertex( FVector(-TX,	+TY, TZ-TH),	FVector2D::ZeroVector, FVector(1,0,0), FVector(0,0,-1), FVector(0,1,0), FColor::White );
-		VertexIndices[1] = MeshBuilder.AddVertex( FVector(-TX,	+TY, +TZ  ),	FVector2D::ZeroVector, FVector(1,0,0), FVector(0,0,-1), FVector(0,1,0), FColor::White );
-		VertexIndices[2] = MeshBuilder.AddVertex( FVector(+TX-TH, +TY, +TX  ),	FVector2D::ZeroVector, FVector(1,0,0), FVector(0,0,-1), FVector(0,1,0), FColor::White );
-		VertexIndices[3] = MeshBuilder.AddVertex( FVector(+TX,	+TY, +TZ  ),	FVector2D::ZeroVector, FVector(1,0,0), FVector(0,0,-1), FVector(0,1,0), FColor::White );
-		VertexIndices[4] = MeshBuilder.AddVertex( FVector(+TX-TH, +TY, TZ-TH),	FVector2D::ZeroVector, FVector(1,0,0), FVector(0,0,-1), FVector(0,1,0), FColor::White );
+		VertexIndices[0] = MeshBuilder.AddVertex( FVector3f(-TX,	+TY, TZ-TH),	FVector2f::ZeroVector, FVector3f(1,0,0), FVector3f(0,0,-1), FVector3f(0,1,0), FColor::White );
+		VertexIndices[1] = MeshBuilder.AddVertex( FVector3f(-TX,	+TY, +TZ  ),	FVector2f::ZeroVector, FVector3f(1,0,0), FVector3f(0,0,-1), FVector3f(0,1,0), FColor::White );
+		VertexIndices[2] = MeshBuilder.AddVertex( FVector3f(+TX-TH, +TY, +TX  ),	FVector2f::ZeroVector, FVector3f(1,0,0), FVector3f(0,0,-1), FVector3f(0,1,0), FColor::White );
+		VertexIndices[3] = MeshBuilder.AddVertex( FVector3f(+TX,	+TY, +TZ  ),	FVector2f::ZeroVector, FVector3f(1,0,0), FVector3f(0,0,-1), FVector3f(0,1,0), FColor::White );
+		VertexIndices[4] = MeshBuilder.AddVertex( FVector3f(+TX-TH, +TY, TZ-TH),	FVector2f::ZeroVector, FVector3f(1,0,0), FVector3f(0,0,-1), FVector3f(0,1,0), FColor::White );
 
 		MeshBuilder.AddTriangle(VertexIndices[0],VertexIndices[1],VertexIndices[2]);
 		MeshBuilder.AddTriangle(VertexIndices[0],VertexIndices[2],VertexIndices[4]);
@@ -405,11 +417,11 @@ void DrawCornerHelper( FPrimitiveDrawInterface* PDI, const FMatrix& LocalToWorld
 	// Back
 	{
 		int32 VertexIndices[5];
-		VertexIndices[0] = MeshBuilder.AddVertex( FVector(-TX,	-TY, TZ-TH),	FVector2D::ZeroVector, FVector(1,0,0), FVector(0,0,1), FVector(0,-1,0), FColor::White );
-		VertexIndices[1] = MeshBuilder.AddVertex( FVector(-TX,	-TY, +TZ),		FVector2D::ZeroVector, FVector(1,0,0), FVector(0,0,1), FVector(0,-1,0), FColor::White );
-		VertexIndices[2] = MeshBuilder.AddVertex( FVector(+TX-TH, -TY, +TX),	FVector2D::ZeroVector, FVector(1,0,0), FVector(0,0,1), FVector(0,-1,0), FColor::White );
-		VertexIndices[3] = MeshBuilder.AddVertex( FVector(+TX,	-TY, +TZ),		FVector2D::ZeroVector, FVector(1,0,0), FVector(0,0,1), FVector(0,-1,0), FColor::White );
-		VertexIndices[4] = MeshBuilder.AddVertex( FVector(+TX-TH, -TY, TZ-TH),	FVector2D::ZeroVector, FVector(1,0,0), FVector(0,0,1), FVector(0,-1,0), FColor::White );
+		VertexIndices[0] = MeshBuilder.AddVertex( FVector3f(-TX,	-TY, TZ-TH),	FVector2f::ZeroVector, FVector3f(1,0,0), FVector3f(0,0,1), FVector3f(0,-1,0), FColor::White );
+		VertexIndices[1] = MeshBuilder.AddVertex( FVector3f(-TX,	-TY, +TZ),		FVector2f::ZeroVector, FVector3f(1,0,0), FVector3f(0,0,1), FVector3f(0,-1,0), FColor::White );
+		VertexIndices[2] = MeshBuilder.AddVertex( FVector3f(+TX-TH, -TY, +TX),		FVector2f::ZeroVector, FVector3f(1,0,0), FVector3f(0,0,1), FVector3f(0,-1,0), FColor::White );
+		VertexIndices[3] = MeshBuilder.AddVertex( FVector3f(+TX,	-TY, +TZ),		FVector2f::ZeroVector, FVector3f(1,0,0), FVector3f(0,0,1), FVector3f(0,-1,0), FColor::White );
+		VertexIndices[4] = MeshBuilder.AddVertex( FVector3f(+TX-TH, -TY, TZ-TH),	FVector2f::ZeroVector, FVector3f(1,0,0), FVector3f(0,0,1), FVector3f(0,-1,0), FColor::White );
 
 		MeshBuilder.AddTriangle(VertexIndices[0],VertexIndices[1],VertexIndices[2]);
 		MeshBuilder.AddTriangle(VertexIndices[0],VertexIndices[2],VertexIndices[4]);
@@ -418,10 +430,10 @@ void DrawCornerHelper( FPrimitiveDrawInterface* PDI, const FMatrix& LocalToWorld
 	// Bottom
 	{
 		int32 VertexIndices[4];
-		VertexIndices[0] = MeshBuilder.AddVertex( FVector(-TX, -TY, TZ-TH),		FVector2D::ZeroVector, FVector(1,0,0), FVector(0,0,-1), FVector(0,0,1), FColor::White );
-		VertexIndices[1] = MeshBuilder.AddVertex( FVector(-TX, +TY, TZ-TH),		FVector2D::ZeroVector, FVector(1,0,0), FVector(0,0,-1), FVector(0,0,1), FColor::White );
-		VertexIndices[2] = MeshBuilder.AddVertex( FVector(+TX-TH, +TY, TZ-TH),	FVector2D::ZeroVector, FVector(1,0,0), FVector(0,0,-1), FVector(0,0,1), FColor::White );
-		VertexIndices[3] = MeshBuilder.AddVertex( FVector(+TX-TH, -TY, TZ-TH),	FVector2D::ZeroVector, FVector(1,0,0), FVector(0,0,-1), FVector(0,0,1), FColor::White );
+		VertexIndices[0] = MeshBuilder.AddVertex( FVector3f(-TX, -TY, TZ-TH),		FVector2f::ZeroVector, FVector3f(1,0,0), FVector3f(0,0,-1), FVector3f(0,0,1), FColor::White );
+		VertexIndices[1] = MeshBuilder.AddVertex( FVector3f(-TX, +TY, TZ-TH),		FVector2f::ZeroVector, FVector3f(1,0,0), FVector3f(0,0,-1), FVector3f(0,0,1), FColor::White );
+		VertexIndices[2] = MeshBuilder.AddVertex( FVector3f(+TX-TH, +TY, TZ-TH),	FVector2f::ZeroVector, FVector3f(1,0,0), FVector3f(0,0,-1), FVector3f(0,0,1), FColor::White );
+		VertexIndices[3] = MeshBuilder.AddVertex( FVector3f(+TX-TH, -TY, TZ-TH),	FVector2f::ZeroVector, FVector3f(1,0,0), FVector3f(0,0,-1), FVector3f(0,0,1), FColor::White );
 
 		MeshBuilder.AddTriangle(VertexIndices[0],VertexIndices[1],VertexIndices[2]);
 		MeshBuilder.AddTriangle(VertexIndices[0],VertexIndices[2],VertexIndices[3]);
@@ -575,8 +587,8 @@ void FWidget::DrawColoredSphere(FPrimitiveDrawInterface* PDI, const FVector& Cen
 			ArcVert->Position.Z = FMath::Cos(angle);
 
 			ArcVert->SetTangents(
-				FVector(1, 0, 0),
-				FVector(0.0f, -ArcVert->Position.Z, ArcVert->Position.Y),
+				FVector3f(1, 0, 0),
+				FVector3f(0.0f, -ArcVert->Position.Z, ArcVert->Position.Y),
 				ArcVert->Position
 			);
 
@@ -587,8 +599,8 @@ void FWidget::DrawColoredSphere(FPrimitiveDrawInterface* PDI, const FVector& Cen
 		// Then rotate this arc NumSides+1 times.
 		for (int32 s = 0; s < NumSides + 1; s++)
 		{
-			FRotator ArcRotator(0, 360.f * (float)s / NumSides, 0);
-			FRotationMatrix ArcRot(ArcRotator);
+			FRotator3f ArcRotator(0, 360.f * (float)s / NumSides, 0);
+			FRotationMatrix44f ArcRot(ArcRotator);
 			float XTexCoord = ((float)s / NumSides);
 
 			for (int32 v = 0; v < NumRings + 1; v++)
@@ -598,9 +610,9 @@ void FWidget::DrawColoredSphere(FPrimitiveDrawInterface* PDI, const FVector& Cen
 				Verts[VIx].Position = ArcRot.TransformPosition(ArcVerts[v].Position);
 
 				Verts[VIx].SetTangents(
-					ArcRot.TransformVector(ArcVerts[v].TangentX.ToFVector()),
+					ArcRot.TransformVector(ArcVerts[v].TangentX.ToFVector3f()),
 					ArcRot.TransformVector(ArcVerts[v].GetTangentY()),
-					ArcRot.TransformVector(ArcVerts[v].TangentZ.ToFVector())
+					ArcRot.TransformVector(ArcVerts[v].TangentZ.ToFVector3f())
 				);
 
 				Verts[VIx].TextureCoordinate[0].X = XTexCoord;
@@ -633,6 +645,15 @@ void FWidget::DrawColoredSphere(FPrimitiveDrawInterface* PDI, const FVector& Cen
 	}
 	MeshBuilder.Draw(PDI, FScaleMatrix(Radii) * FRotationMatrix(Orientation) * FTranslationMatrix(Center), MaterialRenderProxy, DepthPriority, bDisableBackfaceCulling);
 }
+//CVAR for the arcball size, so animators can adjust it
+//DEPRECRATREDin 5.1, since changing the size will cause hit test problems.
+static TAutoConsoleVariable<float> CVarArcballSize(
+	TEXT("r.Editor.ArcballSize"),
+	1.0,
+	TEXT("DEPRECRATED in 5.1)"),
+	ECVF_RenderThreadSafe
+);
+
 /**
  * Draws the rotation widget.
  */
@@ -648,15 +669,6 @@ void FWidget::Render_Rotate( const FSceneView* View,FPrimitiveDrawInterface* PDI
 
 	EAxisList::Type DrawAxis = GetAxisToDraw(ViewportClient->GetWidgetMode());
 
-	//if drawing arcball, and dragging make sure axis is showing local
-	if (DrawAxis&EAxisList::XYZ  && CurrentAxis == EAxisList::XYZ && bDragging)
-	{
-		FMatrix LocalCoordinate = ViewportClient->GetLocalCoordinateSystem();
-		XAxis = LocalCoordinate.TransformVector(FVector(1, 0, 0));
-		YAxis = LocalCoordinate.TransformVector(FVector(0, 1, 0));
-		ZAxis = LocalCoordinate.TransformVector(FVector(0, 0, 1));
-	}
-
 	FVector DirectionToWidget = View->IsPerspectiveProjection() ? (InLocation - View->ViewMatrices.GetViewOrigin()) : -View->GetViewDirection();
 	DirectionToWidget.Normalize();
 
@@ -664,27 +676,34 @@ void FWidget::Render_Rotate( const FSceneView* View,FPrimitiveDrawInterface* PDI
 	if (bDrawWidget || bDragging)
 	{
 		bIsOrthoDrawingFullRing = false;
-		//now draw the arc segments
-		if (DrawAxis&EAxisList::X)
+		//now draw the arc segments, only if we are not dragging and moving the arcball per animators request
+		if ((DrawAxis & EAxisList::XYZ && CurrentAxis == EAxisList::XYZ && bDragging) == false) 
 		{
-			DrawRotationArc(View, PDI, EAxisList::X, InLocation, ZAxis, YAxis, DirectionToWidget, AxisColorX.ToFColor(true), Scale, XAxisDir);
-		}
 
-		if (DrawAxis&EAxisList::Y)
-		{
-			DrawRotationArc(View, PDI, EAxisList::Y, InLocation, XAxis, ZAxis, DirectionToWidget, AxisColorY.ToFColor(true), Scale, YAxisDir);
-		}
+			if (DrawAxis & EAxisList::X)
+			{
+				DrawRotationArc(View, PDI, EAxisList::X, InLocation, ZAxis, YAxis, DirectionToWidget, AxisColorX.ToFColor(true), Scale, XAxisDir);
+			}
 
-		if (DrawAxis&EAxisList::Z)
-		{
-			DrawRotationArc(View, PDI, EAxisList::Z, InLocation, XAxis, YAxis, DirectionToWidget, AxisColorZ.ToFColor(true), Scale, ZAxisDir);
+			if (DrawAxis & EAxisList::Y)
+			{
+				DrawRotationArc(View, PDI, EAxisList::Y, InLocation, XAxis, ZAxis, DirectionToWidget, AxisColorY.ToFColor(true), Scale, YAxisDir);
+			}
+
+			if (DrawAxis & EAxisList::Z)
+			{
+				DrawRotationArc(View, PDI, EAxisList::Z, InLocation, XAxis, YAxis, DirectionToWidget, AxisColorZ.ToFColor(true), Scale, ZAxisDir);
+			}
+			
 		}
 
 		if (DrawAxis&EAxisList::XYZ  && (!bDragging || CurrentAxis == EAxisList::XYZ) && GetDefault<ULevelEditorViewportSettings>()->bAllowArcballRotate)
 		{
 			FVector Center = InLocation;
 			FRotator Orientation = FRotator::ZeroRotator;
-			const float InnerDistance = (INNER_AXIS_CIRCLE_RADIUS * ARCALL_RELATIVE_INNER_SIZE * Scale) + GetDefault<ULevelEditorViewportSettings>()->TransformWidgetSizeAdjustment;
+			const float ArcballSize = 1.0f; //always constant, otherwise can cause hit testing issues
+
+			const float InnerDistance = (INNER_AXIS_CIRCLE_RADIUS * ArcballSize * Scale) + GetDefault<ULevelEditorViewportSettings>()->TransformWidgetSizeAdjustment;
 			FVector Radii(InnerDistance, InnerDistance, InnerDistance);
 			const bool bDisabled = IsWidgetDisabled();
 			FColor ArcColor = ArcBallColor;
@@ -1265,7 +1284,7 @@ void FWidget::DrawThickArc (const FThickArcParams& InParams, const FVector& Axis
 	RingColor.A = MAX_uint8;
 
 	FVector ZAxis = Axis0 ^ Axis1;
-	FVector LastVertex;
+	FVector LastWorldVertex;
 
 	FDynamicMeshBuilder MeshBuilder(InParams.PDI->View->GetFeatureLevel());
 
@@ -1284,33 +1303,36 @@ void FWidget::DrawThickArc (const FThickArcParams& InParams, const FVector& Axis
 			VertexDir.Normalize();
 
 			float TCAngle = Percent*(PI/2);
-			FVector2D TC(TCRadius*FMath::Cos(Angle), TCRadius*FMath::Sin(Angle));
+			FVector2f TC(TCRadius*FMath::Cos(Angle), TCRadius*FMath::Sin(Angle));
 
-			const FVector VertexPosition = InParams.Position + VertexDir*Radius;
-			FVector Normal = VertexPosition - InParams.Position;
+			// Keep the vertices in local space so that we don't lose precision when dealing with LWC
+			// The local-to-world transform is handled in the MeshBuilder.Draw() call at the end of this function
+			const FVector VertexPosition = VertexDir*Radius;
+			FVector Normal = VertexPosition;
 			Normal.Normalize();
 
 			FDynamicMeshVertex MeshVertex;
-			MeshVertex.Position = VertexPosition;
+			MeshVertex.Position = (FVector3f)VertexPosition;
 			MeshVertex.Color = TriangleColor;
 			MeshVertex.TextureCoordinate[0] = TC;
 
 			MeshVertex.SetTangents(
-				-ZAxis,
-				(-ZAxis) ^ Normal,
-				Normal
+				(FVector3f)-ZAxis,
+				FVector3f((-ZAxis) ^ Normal),
+				(FVector3f)Normal
 				);
 
 			MeshBuilder.AddVertex(MeshVertex); //Add bottom vertex
 
 			// Push out the arc line borders so they dont z-fight with the mesh arcs
-			FVector StartLinePos = LastVertex;
-			FVector EndLinePos = VertexPosition;
+			// DrawLine needs vertices in world space, but this is fine because it takes FVectors and works with LWC well
+			FVector StartLinePos = LastWorldVertex;
+			FVector EndLinePos = VertexPosition + InParams.Position;
 			if (VertexIndex != 0)
 			{
 				InParams.PDI->DrawLine(StartLinePos,EndLinePos,RingColor,SDPG_Foreground);
 			}
-			LastVertex = VertexPosition;
+			LastWorldVertex = EndLinePos;
 		}
 	}
 
@@ -1322,7 +1344,7 @@ void FWidget::DrawThickArc (const FThickArcParams& InParams, const FVector& Axis
 		MeshBuilder.AddTriangle(VertexIndex+1, InnerVertexStartIndex+VertexIndex+1, InnerVertexStartIndex+VertexIndex);
 	}
 
-	MeshBuilder.Draw(InParams.PDI, FMatrix::Identity, InParams.Material->GetRenderProxy(),SDPG_Foreground,0.f);
+	MeshBuilder.Draw(InParams.PDI, FTranslationMatrix(InParams.Position), InParams.Material->GetRenderProxy(),SDPG_Foreground,0.f);
 }
 
 /**
@@ -1346,21 +1368,22 @@ void FWidget::DrawSnapMarker(FPrimitiveDrawInterface* PDI, const FVector& InLoca
 	const float MarkerWidth = MaxMarkerHeight*InWidthPercent;
 	const float MarkerHeight = MaxMarkerHeight*InPercentSize;
 
-	FVector Vertices[4];
-	Vertices[0] = InLocation + (OuterDistance)*Axis0 - (MarkerWidth*.5)*Axis1;
-	Vertices[1] = Vertices[0] + (MarkerWidth)*Axis1;
-	Vertices[2] = InLocation + (OuterDistance-MarkerHeight)*Axis0 - (MarkerWidth*.5)*Axis1;
-	Vertices[3] = Vertices[2] + (MarkerWidth)*Axis1;
+	FVector LocalVertices[4];
+	LocalVertices[0] = (OuterDistance)*Axis0 - (MarkerWidth*.5)*Axis1;
+	LocalVertices[1] = LocalVertices[0] + (MarkerWidth)*Axis1;
+	LocalVertices[2] = (OuterDistance-MarkerHeight)*Axis0 - (MarkerWidth*.5)*Axis1;
+	LocalVertices[3] = LocalVertices[2] + (MarkerWidth)*Axis1;
 
 	//draw at least one line
-	PDI->DrawLine(Vertices[0], Vertices[2], InColor, SDPG_Foreground);
+	// DrawLine needs vertices in world space, but this is fine because it takes FVectors and works with LWC well
+	PDI->DrawLine(LocalVertices[0] + InLocation, LocalVertices[2] + InLocation, InColor, SDPG_Foreground);
 
 	//if there should be thickness, draw the other lines
 	if (InWidthPercent > 0.0f)
 	{
-		PDI->DrawLine(Vertices[0], Vertices[1], InColor, SDPG_Foreground);
-		PDI->DrawLine(Vertices[1], Vertices[3], InColor, SDPG_Foreground);
-		PDI->DrawLine(Vertices[2], Vertices[3], InColor, SDPG_Foreground);
+		PDI->DrawLine(LocalVertices[0] + InLocation, LocalVertices[1] + InLocation, InColor, SDPG_Foreground);
+		PDI->DrawLine(LocalVertices[1] + InLocation, LocalVertices[3] + InLocation, InColor, SDPG_Foreground);
+		PDI->DrawLine(LocalVertices[2] + InLocation, LocalVertices[3] + InLocation, InColor, SDPG_Foreground);
 
 		//fill in the box
 		FDynamicMeshBuilder MeshBuilder(PDI->View->GetFeatureLevel());
@@ -1368,20 +1391,20 @@ void FWidget::DrawSnapMarker(FPrimitiveDrawInterface* PDI, const FVector& InLoca
 		for(int32 VertexIndex = 0;VertexIndex < 4; VertexIndex++)
 		{
 			FDynamicMeshVertex MeshVertex;
-			MeshVertex.Position = Vertices[VertexIndex];
+			MeshVertex.Position = (FVector3f)LocalVertices[VertexIndex];
 			MeshVertex.Color = InColor;
-			MeshVertex.TextureCoordinate[0] = FVector2D(0.0f, 0.0f);
+			MeshVertex.TextureCoordinate[0] = FVector2f(0.0f, 0.0f);
 			MeshVertex.SetTangents(
-				Axis0,
-				Axis1,
-				(Axis0) ^ Axis1
+				(FVector3f)Axis0,
+				(FVector3f)Axis1,
+				FVector3f((Axis0) ^ Axis1)
 				);
 			MeshBuilder.AddVertex(MeshVertex); //Add bottom vertex
 		}
 
 		MeshBuilder.AddTriangle(0, 1, 2);
 		MeshBuilder.AddTriangle(1, 3, 2);
-		MeshBuilder.Draw(PDI, FMatrix::Identity, TransparentPlaneMaterialXY->GetRenderProxy(),SDPG_Foreground,0.f);
+		MeshBuilder.Draw(PDI, FTranslationMatrix(InLocation), TransparentPlaneMaterialXY->GetRenderProxy(),SDPG_Foreground,0.f);
 	}
 }
 
@@ -1409,14 +1432,15 @@ void FWidget::DrawStartStopMarker(FPrimitiveDrawInterface* PDI, const FVector& I
 	FVector RotatedAxis0 = Axis0.RotateAngleAxis(InAngle, ZAxis);
 	FVector RotatedAxis1 = Axis1.RotateAngleAxis(InAngle, ZAxis);
 
-	FVector Vertices[3];
-	Vertices[0] = InLocation + (OuterDistance)*RotatedAxis0;
-	Vertices[1] = Vertices[0] + (ArrowHeight)*RotatedAxis0 - HalfArrowidth*RotatedAxis1;
-	Vertices[2] = Vertices[1] + (2*HalfArrowidth)*RotatedAxis1;
+	FVector LocalVertices[3];
+	LocalVertices[0] = (OuterDistance)*RotatedAxis0;
+	LocalVertices[1] = LocalVertices[0] + (ArrowHeight)*RotatedAxis0 - HalfArrowidth*RotatedAxis1;
+	LocalVertices[2] = LocalVertices[1] + (2*HalfArrowidth)*RotatedAxis1;
 
-	PDI->DrawLine(Vertices[0], Vertices[1], InColor, SDPG_Foreground);
-	PDI->DrawLine(Vertices[1], Vertices[2], InColor, SDPG_Foreground);
-	PDI->DrawLine(Vertices[0], Vertices[2], InColor, SDPG_Foreground);
+	// DrawLine needs vertices in world space, but this is fine because it takes FVectors and works with LWC well
+	PDI->DrawLine(LocalVertices[0] + InLocation, LocalVertices[1] + InLocation, InColor, SDPG_Foreground);
+	PDI->DrawLine(LocalVertices[1] + InLocation, LocalVertices[2] + InLocation, InColor, SDPG_Foreground);
+	PDI->DrawLine(LocalVertices[0] + InLocation, LocalVertices[2] + InLocation, InColor, SDPG_Foreground);
 
 	if (InColor.A > 0)
 	{
@@ -1426,23 +1450,23 @@ void FWidget::DrawStartStopMarker(FPrimitiveDrawInterface* PDI, const FVector& I
 		for(int32 VertexIndex = 0;VertexIndex < 3; VertexIndex++)
 		{
 			FDynamicMeshVertex MeshVertex;
-			MeshVertex.Position = Vertices[VertexIndex];
+			MeshVertex.Position = (FVector3f)LocalVertices[VertexIndex];
 			MeshVertex.Color = InColor;
-			MeshVertex.TextureCoordinate[0] = FVector2D(0.0f, 0.0f);
+			MeshVertex.TextureCoordinate[0] = FVector2f(0.0f, 0.0f);
 			MeshVertex.SetTangents(
-				RotatedAxis0,
-				RotatedAxis1,
-				(RotatedAxis0) ^ RotatedAxis1
+				(FVector3f)RotatedAxis0,
+				(FVector3f)RotatedAxis1,
+				FVector3f((RotatedAxis0) ^ RotatedAxis1)
 				);
 			MeshBuilder.AddVertex(MeshVertex); //Add bottom vertex
 		}
 
 		MeshBuilder.AddTriangle(0, 1, 2);
-		MeshBuilder.Draw(PDI, FMatrix::Identity, TransparentPlaneMaterialXY->GetRenderProxy(),SDPG_Foreground,0.f);
+		MeshBuilder.Draw(PDI, FTranslationMatrix(InLocation), TransparentPlaneMaterialXY->GetRenderProxy(),SDPG_Foreground,0.f);
 	}
 }
 
-EAxisList::Type FWidget::GetAxisToDraw( EWidgetMode WidgetMode ) const
+EAxisList::Type FWidget::GetAxisToDraw( UE::Widget::EWidgetMode WidgetMode ) const
 {
 	return EditorModeTools ? EditorModeTools->GetWidgetAxisToDraw( WidgetMode ) : EAxisList::All;
 }

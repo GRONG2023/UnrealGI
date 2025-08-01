@@ -23,7 +23,7 @@ public:
 	SLATE_BEGIN_ARGS( SDetailNameArea ){}
 		SLATE_EVENT( FOnClicked, OnLockButtonClicked )
 		SLATE_ARGUMENT( bool, ShowLockButton )
-		SLATE_ARGUMENT( bool, ShowActorLabel )
+		SLATE_ARGUMENT( bool, ShowObjectLabel )
 		SLATE_ATTRIBUTE( bool, IsLocked )
 		SLATE_ATTRIBUTE( bool, SelectionTip )
 	SLATE_END_ARGS()
@@ -35,14 +35,12 @@ public:
 	 *
 	 * @param SelectedObjects	the new list of selected objects
 	 */
-	void Refresh( const TArray< TWeakObjectPtr<UObject> >& SelectedObjects );
-	
+	void Refresh( const TArray< TWeakObjectPtr<UObject> >& SelectedObjects, int32 NameAreaSettings );
+
 	/**
-	 * Refreshes the name area when selection changes
-	 *
-	 * @param SelectedActors	the new list of selected actors
+	 * Inserts Custom Content (typically tool buttons) before the lock
 	 */
-	void Refresh( const TArray< TWeakObjectPtr<AActor> >& SelectedActors, const TArray< TWeakObjectPtr<UObject> >& SelectedObjects, FDetailsViewArgs::ENameAreaSettings NameAreaSettings  );
+	virtual void SetCustomContent(TSharedRef<SWidget>& InCustomContent);
 
 private:
 	/** @return the Slate brush to use for the lock image */
@@ -57,6 +55,12 @@ private:
 	FOnClicked OnLockButtonClicked;
 	TAttribute<bool> IsLocked;
 	TAttribute<bool> SelectionTip;
+
+	TSharedPtr<SWidget> CustomContent;
+
 	bool bShowLockButton;
-	bool bShowActorLabel;
+	bool bShowObjectLabel;
+
+	/** Area where the customs content resides */
+	SHorizontalBox::FSlot* CustomContentSlot;
 };

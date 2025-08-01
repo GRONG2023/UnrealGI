@@ -11,26 +11,36 @@
 #include "Engine/EngineTypes.h"
 #include "EdGraph/EdGraphPin.h"
 #include "Engine/BlueprintCore.h"
+#include "Blueprint/BlueprintPropertyGuidProvider.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "Engine/BlueprintGeneratedClass.h"
+#endif
 #include "UObject/SoftObjectPath.h"
 #include "Blueprint/BlueprintSupport.h"
+
+#if WITH_EDITOR
+#include "EngineLogs.h"
+#include "Kismet2/CompilerResultsLog.h"
+#endif
+
 #include "Blueprint.generated.h"
 
-class FCompilerResultsLog;
 class ITargetPlatform;
 class UActorComponent;
 class UEdGraph;
 class FKismetCompilerContext;
 class UInheritableComponentHandler;
 class UBlueprintExtension;
+class UBlueprintGeneratedClass;
 class FBlueprintActionDatabaseRegistrar;
+struct FBPComponentClassOverride;
 struct FDiffResults;
 
 /**
  * Enumerates states a blueprint can be in.
  */
 UENUM()
-enum EBlueprintStatus
+enum EBlueprintStatus : int
 {
 	/** Blueprint is in an unknown state. */
 	BS_Unknown,
@@ -50,7 +60,7 @@ enum EBlueprintStatus
 
 /** Enumerates types of blueprints. */
 UENUM()
-enum EBlueprintType
+enum EBlueprintType : int
 {
 	/** Normal blueprint. */
 	BPTYPE_Normal				UMETA(DisplayName="Blueprint Class"),
@@ -78,8 +88,16 @@ namespace EKismetCompileType
 		Full,
 		StubAfterFailure, 
 		BytecodeOnly,
-		Cpp,
+		// Cpp type was removed with BP nativization
 	};
+};
+
+/** Breakpoints have been moved to Engine/Source/Editor/UnrealEd/Public/Kismet2/Breakpoint.h,
+*   renamed to FBlueprintBreakpoint, and are now UStructs */
+UCLASS(deprecated)
+class UDEPRECATED_Breakpoint : public UObject
+{
+	GENERATED_BODY()
 };
 
 /** Compile modes. */
@@ -89,41 +107,6 @@ enum class EBlueprintCompileMode : uint8
 	Default UMETA(DisplayName="Use Default", ToolTip="Use the default setting."),
 	Development UMETA(ToolTip="Always compile in development mode (even when cooking)."),
 	FinalRelease UMETA(ToolTip="Always compile in final release mode.")
-};
-
-USTRUCT()
-struct FCompilerNativizationOptions
-{
-	GENERATED_USTRUCT_BODY()
-
-	UPROPERTY()
-	FName PlatformName;
-
-	UPROPERTY()
-	bool ServerOnlyPlatform;
-
-	UPROPERTY()
-	bool ClientOnlyPlatform;
-
-	UPROPERTY()
-	bool bExcludeMonolithicHeaders;
-
-	UPROPERTY()
-	TArray<FName> ExcludedModules;
-
-	// Individually excluded assets
-	UPROPERTY()
-	TSet<FSoftObjectPath> ExcludedAssets;
-
-	// Excluded folders. It excludes only BPGCs, enums and structures are still converted.
-	UPROPERTY()
-	TArray<FString> ExcludedFolderPaths;
-
-	FCompilerNativizationOptions()
-		: ServerOnlyPlatform(false)
-		, ClientOnlyPlatform(false)
-		, bExcludeMonolithicHeaders(false)
-	{}
 };
 
 /** Cached 'cosmetic' information about a macro graph (this is transient and is computed at load) */
@@ -141,6 +124,7 @@ struct FBlueprintMacroCosmeticInfo
 	}
 };
 
+/** Options used for a specific invication of the blueprint compiler */
 struct FKismetCompilerOptions
 {
 public:
@@ -168,20 +152,16 @@ public:
 	/** Whether or not to use Delta Serialization when copying unrelated objects */
 	bool bUseDeltaSerializationDuringReinstancing;
 
+	/** Whether or not to skip new variable defaults detection */
+	bool bSkipNewVariableDefaultsDetection;
+
 	TSharedPtr<FString> OutHeaderSourceCode;
 	TSharedPtr<FString> OutCppSourceCode;
-	FCompilerNativizationOptions NativizationOptions;
-
-	bool DoesRequireCppCodeGeneration() const
-	{
-		return (CompileType == EKismetCompileType::Cpp);
-	}
 
 	bool DoesRequireBytecodeGeneration() const
 	{
 		return (CompileType == EKismetCompileType::Full) 
-			|| (CompileType == EKismetCompileType::BytecodeOnly) 
-			|| (CompileType == EKismetCompileType::Cpp);
+			|| (CompileType == EKismetCompileType::BytecodeOnly);
 	}
 
 	FKismetCompilerOptions()
@@ -195,7 +175,6 @@ public:
 	{
 	};
 };
-
 
 /** One metadata entry for a variable */
 USTRUCT()
@@ -263,11 +242,7 @@ struct FBPVariableDescription
 	UPROPERTY(EditAnywhere, Category=BPVariableDescription)
 	FString DefaultValue;
 
-	FBPVariableDescription()
-		: PropertyFlags(CPF_Edit)
-		, ReplicationCondition(ELifetimeCondition::COND_None)
-	{
-	}
+	ENGINE_API FBPVariableDescription();
 
 	/** Set a metadata value on the variable */
 	ENGINE_API void SetMetaData(FName Key, FString Value);
@@ -295,7 +270,7 @@ struct FBPInterfaceDescription
 
 	/** References to the graphs associated with the required functions for this interface */
 	UPROPERTY()
-	TArray<UEdGraph*> Graphs;
+	TArray<TObjectPtr<UEdGraph>> Graphs;
 
 
 	FBPInterfaceDescription()
@@ -359,7 +334,7 @@ struct FEditedDocumentInfo
 private:
 	// Legacy hard reference is now serialized as a soft reference (see above).
 	UPROPERTY()
-	UObject* EditedObject_DEPRECATED;
+	TObjectPtr<UObject> EditedObject_DEPRECATED;
 };
 
 template<>
@@ -396,11 +371,22 @@ struct FBPEditorBookmarkNode
 };
 
 UENUM()
-enum class EBlueprintNativizationFlag : uint8
+enum class UE_DEPRECATED(5.0, "Blueprint Nativization has been removed as a supported feature. This type will eventually be removed.") EBlueprintNativizationFlag : uint8
 {
 	Disabled,
 	Dependency, // conditionally enabled (set from sub-class as a dependency)
 	ExplicitlyEnabled
+};
+
+UENUM()
+enum class EShouldCookBlueprintPropertyGuids
+{
+	/** Don't cook the property GUIDs for this Blueprint */
+	No,
+	/** Cook the property GUIDs for this Blueprint (see UCookerSettings::BlueprintPropertyGuidsCookingMethod) */
+	Yes,
+	/** Inherit whether to cook the property GUIDs for this Blueprint from the parent Blueprint (behaves like 'No' if there is no parent Blueprint) */
+	Inherit,
 };
 
 #if WITH_EDITOR
@@ -422,8 +408,8 @@ ENUM_CLASS_FLAGS(EGetObjectOrWorldBeingDebuggedFlags);
  * and script level events; giving designers and gameplay programmers the tools to quickly create and iterate gameplay from
  * within Unreal Editor without ever needing to write a line of code.
  */
-UCLASS(config=Engine)
-class ENGINE_API UBlueprint : public UBlueprintCore
+UCLASS(config=Engine, MinimalAPI)
+class UBlueprint : public UBlueprintCore, public IBlueprintPropertyGuidProvider
 {
 	GENERATED_UCLASS_BODY()
 
@@ -432,7 +418,7 @@ class ENGINE_API UBlueprint : public UBlueprintCore
 	 * one such case can be created by creating a blueprint (A) based on another blueprint (B), shutting down the editor, and
 	 * deleting the parent blueprint. Exported as Alphabetical in GetAssetRegistryTags
 	 */
-	UPROPERTY()
+	UPROPERTY(meta=(NoResetToDefault))
 	TSubclassOf<UObject> ParentClass;
 
 	/** The type of this blueprint */
@@ -509,15 +495,22 @@ class ENGINE_API UBlueprint : public UBlueprintCore
 	UPROPERTY()
 	mutable uint8 bDuplicatingReadOnly:1;
 
-private:
-	/** Deprecated properties. */
-	UPROPERTY()
-	uint8 bNativize_DEPRECATED:1;
+	/**
+	 * Whether to include the property GUIDs for the generated class in a cooked build.
+	 * @note This option may slightly increase memory usage in a cooked build, but can avoid needing to add CoreRedirect data for Blueprint classes stored within SaveGame archives.
+	 */
+	UPROPERTY(EditAnywhere, Category=ClassOptions, AdvancedDisplay, meta=(DisplayName="Should Cook Property Guids?"))
+	EShouldCookBlueprintPropertyGuids ShouldCookPropertyGuidsValue = EShouldCookBlueprintPropertyGuids::Inherit;
+
+	ENGINE_API bool ShouldCookPropertyGuids() const;
 
 public:
 	/** When exclusive nativization is enabled, then this asset will be nativized. All super classes must be also nativized. */
+	UE_DEPRECATED(5.0, "Blueprint Nativization has been removed as a supported feature. This property will eventually be removed.")
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	UPROPERTY(transient)
 	EBlueprintNativizationFlag NativizationFlag;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	/** The mode that will be used when compiling this class. */
 	UPROPERTY(EditAnywhere, Category=ClassOptions, AdvancedDisplay)
@@ -555,45 +548,45 @@ public:
 
 	/** 'Simple' construction script - graph of components to instance */
 	UPROPERTY()
-	class USimpleConstructionScript* SimpleConstructionScript;
+	TObjectPtr<class USimpleConstructionScript> SimpleConstructionScript;
 
 #if WITH_EDITORONLY_DATA
 	/** Set of pages that combine into a single uber-graph */
 	UPROPERTY()
-	TArray<UEdGraph*> UbergraphPages;
+	TArray<TObjectPtr<UEdGraph>> UbergraphPages;
 
 	/** Set of functions implemented for this class graphically */
 	UPROPERTY()
-	TArray<UEdGraph*> FunctionGraphs;
+	TArray<TObjectPtr<UEdGraph>> FunctionGraphs;
 
 	/** Graphs of signatures for delegates */
 	UPROPERTY()
-	TArray<UEdGraph*> DelegateSignatureGraphs;
+	TArray<TObjectPtr<UEdGraph>> DelegateSignatureGraphs;
 
 	/** Set of macros implemented for this class */
 	UPROPERTY()
-	TArray<UEdGraph*> MacroGraphs;
+	TArray<TObjectPtr<UEdGraph>> MacroGraphs;
 
 	/** Set of functions actually compiled for this class */
 	UPROPERTY(transient, duplicatetransient)
-	TArray<UEdGraph*> IntermediateGeneratedGraphs;
+	TArray<TObjectPtr<UEdGraph>> IntermediateGeneratedGraphs;
 
 	/** Set of functions actually compiled for this class */
 	UPROPERTY(transient, duplicatetransient)
-	TArray<UEdGraph*> EventGraphs;
+	TArray<TObjectPtr<UEdGraph>> EventGraphs;
 
 	/** Cached cosmetic information about macro graphs, use GetCosmeticInfoForMacro() to access */
 	UPROPERTY(Transient)
-	TMap<UEdGraph*, FBlueprintMacroCosmeticInfo> PRIVATE_CachedMacroInfo;
+	TMap<TObjectPtr<UEdGraph>, FBlueprintMacroCosmeticInfo> PRIVATE_CachedMacroInfo;
 #endif // WITH_EDITORONLY_DATA
 
 	/** Array of component template objects, used by AddComponent function */
 	UPROPERTY()
-	TArray<class UActorComponent*> ComponentTemplates;
+	TArray<TObjectPtr<class UActorComponent>> ComponentTemplates;
 
 	/** Array of templates for timelines that should be created */
 	UPROPERTY()
-	TArray<class UTimelineTemplate*> Timelines;
+	TArray<TObjectPtr<class UTimelineTemplate>> Timelines;
 
 	/** Array of blueprint overrides of component classes in parent classes */
 	UPROPERTY()
@@ -601,9 +594,12 @@ public:
 
 	/** Stores data to override (in children classes) components (created by SCS) from parent classes */
 	UPROPERTY()
-	class UInheritableComponentHandler* InheritableComponentHandler;
+	TObjectPtr<class UInheritableComponentHandler> InheritableComponentHandler;
 
 #if WITH_EDITORONLY_DATA
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnExtensionAdded, UBlueprintExtension*);
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnExtensionRemoved, UBlueprintExtension*);
+
 	/** Array of new variables to be added to generated class */
 	UPROPERTY()
 	TArray<struct FBPVariableDescription> NewVariables;
@@ -611,6 +607,10 @@ public:
 	/** Array of user sorted categories */
 	UPROPERTY()
 	TArray<FName> CategorySorting;
+
+	/** Namespaces imported by this blueprint */
+	UPROPERTY(AssetRegistrySearchable)
+	TSet<FString> ImportedNamespaces;
 
 	/** Array of info about the interfaces we implement in this blueprint */
 	UPROPERTY(AssetRegistrySearchable)
@@ -628,15 +628,16 @@ public:
 	UPROPERTY()
 	TArray<FBPEditorBookmarkNode> BookmarkNodes;
 
-	/** Persistent debugging options */
+	// moved to FPerBlueprintSettings
 	UPROPERTY()
-	TArray<class UBreakpoint*> Breakpoints;
+	TArray<TObjectPtr<class UDEPRECATED_Breakpoint>> Breakpoints_DEPRECATED;
+
+	// moved to FPerBlueprintSettings
+	UPROPERTY()
+	TArray<FEdGraphPinReference> WatchedPins_DEPRECATED;
 
 	UPROPERTY()
-	TArray<FEdGraphPinReference> WatchedPins;
-
-	UPROPERTY()
-	TArray<class UEdGraphPin_Deprecated*> DeprecatedPinWatches;
+	TArray<TObjectPtr<class UEdGraphPin_Deprecated>> DeprecatedPinWatches;
 
 	/** Index map for component template names */
 	UPROPERTY()
@@ -647,9 +648,15 @@ public:
 	TMap<FName, FName> OldToNewComponentTemplateNames;
 
 	/** Array of extensions for this blueprint */
+	UE_DEPRECATED(5.1, "Please do not access this member directly; Instead use: UBlueprint::GetExtensions / UBlueprint::AddExtension / UBlueprint::RemoveExtension[At].")
 	UPROPERTY()
-	TArray<UBlueprintExtension*> Extensions;
+	TArray<TObjectPtr<UBlueprintExtension>> Extensions;
 
+	/** Fires whenever BP extension added */
+	FOnExtensionAdded OnExtensionAdded;
+
+	/** Fires whenever BP extension removed */
+	FOnExtensionRemoved OnExtensionRemoved;
 #endif // WITH_EDITORONLY_DATA
 
 public:
@@ -666,7 +673,38 @@ public:
 	DECLARE_EVENT_OneParam(UBlueprint, FCompiledEvent, class UBlueprint*);
 	FCompiledEvent& OnCompiled() { return CompiledEvent; }
 	void BroadcastCompiled() { CompiledEvent.Broadcast(this); }
-#endif
+
+	/** Gives const access to extensions. */
+	ENGINE_API TArrayView<const TObjectPtr<UBlueprintExtension>> GetExtensions() const;
+
+	/** Adds given extension, broadcasting on add. */
+	ENGINE_API int32 AddExtension(const TObjectPtr<UBlueprintExtension>& InExtension);
+
+	/** Removes given extension, broadcasting on remove. */
+	ENGINE_API int32 RemoveExtension(const TObjectPtr<UBlueprintExtension>& InExtension);
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	/** Removes all extensions matching the predicate, broadcasting on remove if one exists. */
+	template <class PREDICATE_CLASS>
+	int32 RemoveAllExtension(const PREDICATE_CLASS& Predicate)
+	{
+		auto BroadcastRemovePredicate = [&Predicate, this](UBlueprintExtension* InExtension)
+		{
+			bool NotMatch = !::Invoke(Predicate, InExtension); // use a ! to guarantee it can't be anything other than zero or one
+
+			if (!NotMatch)
+			{
+				OnExtensionRemoved.Broadcast(InExtension);
+			}
+
+			return !NotMatch;
+		};
+
+		return Extensions.RemoveAll(BroadcastRemovePredicate);
+	}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+#endif // WITH_EDITOR
 
 	/** Whether or not this blueprint can be considered for a bytecode only compile */
 	virtual bool IsValidForBytecodeOnlyRecompile() const { return true; }
@@ -693,7 +731,7 @@ public:
 
 	/** Information for thumbnail rendering */
 	UPROPERTY(VisibleAnywhere, Instanced, Category=Thumbnail)
-	class UThumbnailInfo* ThumbnailInfo;
+	TObjectPtr<class UThumbnailInfo> ThumbnailInfo;
 
 	/** CRC for CDO calculated right after the latest compilation used by Reinstancer to check if default values were changed */
 	UPROPERTY(transient, duplicatetransient)
@@ -702,36 +740,54 @@ public:
 	UPROPERTY(transient, duplicatetransient)
 	uint32 CrcLastCompiledSignature;
 
+	/**
+	 * Transient flag that indicates whether or not the internal dependency
+	 * cache needs to be updated. This is not carried forward by duplication so
+	 * that the post-duplicate compile path is forced to reinitialize the cache.
+	 */
+	UPROPERTY(transient, duplicatetransient)
 	bool bCachedDependenciesUpToDate;
+
 	/**
 	 * Set of blueprints that we reference - i.e. blueprints that we have
-	 * some kind of reference to (variable of that blueprints type or function 
+	 * some kind of reference to (variable of that blueprints type or function
 	 * call
+	 *
+	 * We need this to be serializable so that its references can be collected.
+	 *
+	 * This is intentionally marked 'duplicatetransient' so that it won't carry
+	 * over to a duplicated Blueprint object. The post-duplicate compile path
+	 * will instead regenerate this set to be relative to the duplicated object.
 	 */
+	UPROPERTY(transient, duplicatetransient)
 	TSet<TWeakObjectPtr<UBlueprint>> CachedDependencies;
 
-	/** 
+	/**
 	 * Transient cache of dependent blueprints - i.e. blueprints that call
-	 * functions declared in this blueprint. Used to speed up compilation checks 
+	 * functions declared in this blueprint. Used to speed up compilation checks
+	 *
+	 * This is intentionally marked 'duplicatetransient' so that it won't carry
+	 * over to a duplicated Blueprint object. However, the post-duplicate compile
+	 * path will not regenerate this set, since it is populated by each dependent
+	 * Blueprint's compile. In this case, a duplicated Blueprint equates to a
+	 * new Blueprint, so it won't initially have any dependents to include here.
 	 */
+	UPROPERTY(transient, duplicatetransient)
 	TSet<TWeakObjectPtr<UBlueprint>> CachedDependents;
 
-	// User Defined Structures, the blueprint depends on
+	/**
+	 * User Defined Structures the blueprint depends on
+	 *
+	 * This is intentionally marked 'duplicatetransient' so that it won't carry
+	 * over to a duplicated Blueprint object. The post-duplicate compile path
+	 * will instead regenerate this set to be relative to the duplicated object.
+	 */
+	UPROPERTY(transient, duplicatetransient)
 	TSet<TWeakObjectPtr<UStruct>> CachedUDSDependencies;
-
-	enum class EIsBPNonReducible : uint8
-	{
-		Unkown,
-		Yes,
-		No,
-	};
-
-	// Cached information if the BP contains any non-reducible functions (that can benefit from nativization).
-	EIsBPNonReducible bHasAnyNonReducibleFunction;
 
 	// If this BP is just a duplicate created for a specific compilation, the reference to original GeneratedClass is needed
 	UPROPERTY(transient, duplicatetransient)
-	UClass* OriginalClass;
+	TObjectPtr<UClass> OriginalClass;
 
 	bool IsUpToDate() const
 	{
@@ -745,22 +801,26 @@ public:
 #endif // WITH_EDITORONLY_DATA
 
 #if WITH_EDITOR
-	static bool ForceLoad(UObject* Obj);
+	virtual bool RequiresForceLoadMembers(UObject* InObject) const { return true; }
 
-	static void ForceLoadMembers(UObject* InObject);
+	static ENGINE_API bool ForceLoad(UObject* Obj);
 
-	static void ForceLoadMetaData(UObject* InObject);
+	static ENGINE_API void ForceLoadMembers(UObject* InObject);
 
-	static bool ValidateGeneratedClass(const UClass* InClass);
+	static ENGINE_API void ForceLoadMembers(UObject* InObject, const UBlueprint* InBlueprint);
+
+	static ENGINE_API void ForceLoadMetaData(UObject* InObject);
+
+	static ENGINE_API bool ValidateGeneratedClass(const UClass* InClass);
 
 	/** Find the object in the TemplateObjects array with the supplied name */
-	UActorComponent* FindTemplateByName(const FName& TemplateName) const;
+	ENGINE_API UActorComponent* FindTemplateByName(const FName& TemplateName) const;
 
 	/** Find a timeline by name */
-	class UTimelineTemplate* FindTimelineTemplateByVariableName(const FName& TimelineName);	
+	ENGINE_API class UTimelineTemplate* FindTimelineTemplateByVariableName(const FName& TimelineName);	
 
 	/** Find a timeline by name */
-	const class UTimelineTemplate* FindTimelineTemplateByVariableName(const FName& TimelineName) const;	
+	ENGINE_API const class UTimelineTemplate* FindTimelineTemplateByVariableName(const FName& TimelineName) const;	
 
 	void GetBlueprintClassNames(FName& GeneratedClassName, FName& SkeletonClassName, FName NameOverride = NAME_None) const
 	{
@@ -785,7 +845,7 @@ public:
 	}
 
 	/** Gets the class generated when this blueprint is compiled. */
-	virtual UClass* GetBlueprintClass() const;
+	ENGINE_API virtual UClass* GetBlueprintClass() const;
 
 	// Should the generic blueprint factory work for this blueprint?
 	virtual bool SupportedByDefaultBlueprintFactory() const
@@ -794,32 +854,44 @@ public:
 	}
 
 	/** Sets the current object being debugged */
-	virtual void SetObjectBeingDebugged(UObject* NewObject);
+	ENGINE_API virtual void SetObjectBeingDebugged(UObject* NewObject);
 
 	/** Clears the current object being debugged because it is gone, but do not reset the saved information */
-	virtual void UnregisterObjectBeingDebugged();
+	ENGINE_API virtual void UnregisterObjectBeingDebugged();
 
-	virtual void SetWorldBeingDebugged(UWorld* NewWorld);
+	ENGINE_API virtual void SetWorldBeingDebugged(UWorld* NewWorld);
 
-	virtual void GetReparentingRules(TSet< const UClass* >& AllowedChildrenOfClasses, TSet< const UClass* >& DisallowedChildrenOfClasses) const;
+	ENGINE_API virtual void GetReparentingRules(TSet< const UClass* >& AllowedChildrenOfClasses, TSet< const UClass* >& DisallowedChildrenOfClasses) const;
 
 	/**
 	* Allows derived blueprints to require compilation on load, otherwise they may get treated as data only and not compiled on load.
 	*/
 	virtual bool AlwaysCompileOnLoad() const { return false; }
 
-	/** Some Blueprints (and classes) can recompile while we are debugging a live session. This function controls whether this can occur. */
-	virtual bool CanRecompileWhilePlayingInEditor() const;
+	/**
+	 * Some Blueprints (and classes) can recompile while we are debugging a live session (play in editor).
+	 * This function controls whether this can always occur.
+	 * There are also editor preferences and project settings that can be used to opt-in other classes even
+	 * when this returns false
+	 */
+	ENGINE_API virtual bool CanAlwaysRecompileWhilePlayingInEditor() const;
+
+	UE_DEPRECATED(5.0, "CanRecompileWhilePlayingInEditor was renamed to CanAlwaysRecompileWhilePlayingInEditor to better explain usage.")
+	bool CanRecompileWhilePlayingInEditor() const
+	{
+		return CanAlwaysRecompileWhilePlayingInEditor();
+	}
 
 	/**
 	 * Check whether this blueprint can be nativized or not
 	 */
-	virtual bool SupportsNativization(FText* OutReason = nullptr) const;
+	UE_DEPRECATED(5.0, "Blueprint Nativization has been removed as a supported feature. This API will eventually be removed.")
+	virtual bool SupportsNativization(FText* OutReason = nullptr) const { return false; }
 
 private:
 
 	/** Sets the current object being debugged */
-	void DebuggingWorldRegistrationHelper(UObject* ObjectProvidingWorld, UObject* ValueToRegister);
+	ENGINE_API void DebuggingWorldRegistrationHelper(UObject* ObjectProvidingWorld, UObject* ValueToRegister);
 	
 public:
 
@@ -844,52 +916,59 @@ public:
 	}
 
 	/** Renames only the generated classes. Should only be used internally or when testing for rename. */
-	virtual bool RenameGeneratedClasses(const TCHAR* NewName = nullptr, UObject* NewOuter = nullptr, ERenameFlags Flags = REN_None);
+	ENGINE_API virtual bool RenameGeneratedClasses(const TCHAR* NewName = nullptr, UObject* NewOuter = nullptr, ERenameFlags Flags = REN_None);
 
 	//~ Begin UObject Interface (WITH_EDITOR)
-	virtual void PostDuplicate(bool bDuplicateForPIE) override;
-	virtual bool Rename(const TCHAR* NewName = nullptr, UObject* NewOuter = nullptr, ERenameFlags Flags = REN_None) override;
-	virtual UClass* RegenerateClass(UClass* ClassToRegenerate, UObject* PreviousCDO) override;
-	virtual void PostLoad() override;
-	virtual bool Modify(bool bAlwaysMarkDirty = true) override;
-	virtual void GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const override;
-	virtual FPrimaryAssetId GetPrimaryAssetId() const override;
-	virtual void BeginCacheForCookedPlatformData(const ITargetPlatform *TargetPlatform) override;
-	virtual bool IsCachedCookedPlatformDataLoaded(const ITargetPlatform* TargetPlatform) override;
-	virtual void ClearAllCachedCookedPlatformData() override;
-	virtual void BeginDestroy() override;
+	ENGINE_API virtual void PostDuplicate(bool bDuplicateForPIE) override;
+	ENGINE_API virtual bool Rename(const TCHAR* NewName = nullptr, UObject* NewOuter = nullptr, ERenameFlags Flags = REN_None) override;
+	ENGINE_API virtual UClass* RegenerateClass(UClass* ClassToRegenerate, UObject* PreviousCDO) override;
+	ENGINE_API virtual void PostLoad() override;
+#if WITH_EDITORONLY_DATA
+	static ENGINE_API void DeclareConstructClasses(TArray<FTopLevelAssetPath>& OutConstructClasses, const UClass* SpecificSubclass);
+#endif
+	ENGINE_API virtual bool Modify(bool bAlwaysMarkDirty = true) override;
+	ENGINE_API virtual void GetAssetRegistryTags(FAssetRegistryTagsContext Context) const override;
+	UE_DEPRECATED(5.4, "Implement the version that takes FAssetRegistryTagsContext instead.")
+	ENGINE_API virtual void GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const override;
+	ENGINE_API virtual void PostLoadAssetRegistryTags(const FAssetData& InAssetData, TArray<FAssetRegistryTag>& OutTagsAndValuesToUpdate) const;
+	static ENGINE_API void PostLoadBlueprintAssetRegistryTags(const FAssetData& InAssetData, TArray<FAssetRegistryTag>& OutTagsAndValuesToUpdate);
+	ENGINE_API virtual FPrimaryAssetId GetPrimaryAssetId() const override;
+	ENGINE_API virtual void BeginCacheForCookedPlatformData(const ITargetPlatform *TargetPlatform) override;
+	ENGINE_API virtual bool IsCachedCookedPlatformDataLoaded(const ITargetPlatform* TargetPlatform) override;
+	ENGINE_API virtual void ClearAllCachedCookedPlatformData() override;
+	ENGINE_API virtual void BeginDestroy() override;
 	//~ End UObject Interface
 
 	/** Removes any child redirectors from the root set and marks them as transient */
-	void RemoveChildRedirectors();
+	ENGINE_API void RemoveChildRedirectors();
 
 	/** Consigns the GeneratedClass and the SkeletonGeneratedClass to oblivion, and nulls their references */
-	void RemoveGeneratedClasses();
+	ENGINE_API void RemoveGeneratedClasses();
 
 	/** @return the user-friendly name of the blueprint */
-	virtual FString GetFriendlyName() const;
+	ENGINE_API virtual FString GetFriendlyName() const;
 
 	/** @return true if the blueprint supports event binding for multicast delegates */
-	virtual bool AllowsDynamicBinding() const;
+	ENGINE_API virtual bool AllowsDynamicBinding() const;
 
 	/** @return true if the blueprint supports event binding for input events */
-	virtual bool SupportsInputEvents() const;
+	ENGINE_API virtual bool SupportsInputEvents() const;
 
-	bool ChangeOwnerOfTemplates();
+	ENGINE_API bool ChangeOwnerOfTemplates();
 
-	UInheritableComponentHandler* GetInheritableComponentHandler(bool bCreateIfNecessary);
+	ENGINE_API UInheritableComponentHandler* GetInheritableComponentHandler(bool bCreateIfNecessary);
 
 	/** Collect blueprints that depend on this blueprint. */
-	virtual void GatherDependencies(TSet<TWeakObjectPtr<UBlueprint>>& InDependencies) const;
+	ENGINE_API virtual void GatherDependencies(TSet<TWeakObjectPtr<UBlueprint>>& InDependencies) const;
 
 	/** Checks all nodes in all graphs to see if they should be replaced by other nodes */
-	virtual void ReplaceDeprecatedNodes();
+	ENGINE_API virtual void ReplaceDeprecatedNodes();
 
 	/** Clears out any editor data regarding a blueprint class, this can be called when you want to unload a blueprint */
-	virtual void ClearEditorReferences();
+	ENGINE_API virtual void ClearEditorReferences();
 
 	/** Returns Valid if this object has data validation rules set up for it and the data for this object is valid. Returns Invalid if it does not pass the rules. Returns NotValidated if no rules are set for this object. */
-	virtual EDataValidationResult IsDataValid(TArray<FText>& ValidationErrors) override;
+	ENGINE_API virtual EDataValidationResult IsDataValid(class FDataValidationContext& Context) const override;
 
 	/** 
 	 * Fills in a list of differences between this blueprint and another blueprint.
@@ -899,26 +978,37 @@ public:
 	 * @param Results			List of diff results to fill in with type-specific differences
 	 * @return					True if these blueprints were checked for specific differences, false if they are not comparable
 	 */
-	virtual bool FindDiffs(const UBlueprint* OtherBlueprint, FDiffResults& Results) const;
+	ENGINE_API virtual bool FindDiffs(const UBlueprint* OtherBlueprint, FDiffResults& Results) const;
 
-	void ConformNativeComponents();
+	ENGINE_API void ConformNativeComponents();
 #endif	//#if WITH_EDITOR
+
+	//~ Begin IBlueprintPropertyGuidProvider interface
+	ENGINE_API virtual FName FindBlueprintPropertyNameFromGuid(const FGuid& PropertyGuid) const override final;
+	ENGINE_API virtual FGuid FindBlueprintPropertyGuidFromName(const FName PropertyName) const override final;
+	//~ End IBlueprintPropertyGuidProvider interface
 
 	//~ Begin UObject Interface
 #if WITH_EDITORONLY_DATA
-	virtual void PreSave(const class ITargetPlatform* TargetPlatform) override;
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS // Suppress compiler warning on override of deprecated function
+	UE_DEPRECATED(5.0, "Use version that takes FObjectPreSaveContext instead.")
+	ENGINE_API virtual void PreSave(const class ITargetPlatform* TargetPlatform) override;
+	ENGINE_API PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	virtual void PreSave(FObjectPreSaveContext ObjectSaveContext) override;
+	ENGINE_API virtual void GetPreloadDependencies(TArray<UObject*>& OutDeps) override;
 #endif // WITH_EDITORONLY_DATA
-	virtual void Serialize(FArchive& Ar) override;
-	virtual void GetPreloadDependencies(TArray<UObject*>& OutDeps) override;
-	virtual FString GetDesc(void) override;
-	virtual void TagSubobjects(EObjectFlags NewFlags) override;
-	virtual bool NeedsLoadForClient() const override;
-	virtual bool NeedsLoadForServer() const override;
-	virtual bool NeedsLoadForEditorGame() const override;
+	ENGINE_API virtual void Serialize(FArchive& Ar) override;
+	ENGINE_API virtual FString GetDesc(void) override;
+	ENGINE_API virtual void TagSubobjects(EObjectFlags NewFlags) override;
+	ENGINE_API virtual bool NeedsLoadForClient() const override;
+	ENGINE_API virtual bool NeedsLoadForServer() const override;
+	ENGINE_API virtual bool NeedsLoadForEditorGame() const override;
+	ENGINE_API virtual bool HasNonEditorOnlyReferences() const override;
 	//~ End UObject Interface
 
+#if WITH_EDITORONLY_DATA
 	/** Get the Blueprint object that generated the supplied class */
-	static UBlueprint* GetBlueprintFromClass(const UClass* InClass);
+	static ENGINE_API UBlueprint* GetBlueprintFromClass(const UClass* InClass);
 
 	/** 
 	 * Gets an array of all blueprints used to generate this class and its parents.  0th elements is the BP used to generate InClass
@@ -927,7 +1017,8 @@ public:
 	 * @param OutBlueprintParents	Array with the blueprints used to generate this class and its parents.  0th = this, Nth = least derived BP-based parent
 	 * @return						true if there were no status errors in any of the parent blueprints, otherwise false
 	 */
-	static bool GetBlueprintHierarchyFromClass(const UClass* InClass, TArray<UBlueprint*>& OutBlueprintParents);
+	static ENGINE_API bool GetBlueprintHierarchyFromClass(const UClass* InClass, TArray<UBlueprint*>& OutBlueprintParents);
+#endif
 
 	/**
 	 * Gets an array of all BPGCs used to generate this class and its parents.  0th elements is the BPGC used to generate InClass
@@ -936,32 +1027,38 @@ public:
 	 * @param OutBlueprintParents	Array of BPGCs used to generate this class and its parents.  0th = this, Nth = least derived BP-based parent
 	 * @return						true if there were no status errors in any of the parent blueprints, otherwise false
 	 */
-	static bool GetBlueprintHierarchyFromClass(const UClass* InClass, TArray<UBlueprintGeneratedClass*>& OutBlueprintParents);
-	
+	static ENGINE_API bool GetBlueprintHierarchyFromClass(const UClass* InClass, TArray<UBlueprintGeneratedClass*>& OutBlueprintParents);
+
+private:
+	/**
+	 * Gets an array of all IBlueprintPropertyGuidProviders for this class and its parents.  0th elements is the IBlueprintPropertyGuidProvider for InClass
+	 *
+	 * @param InClass				The class to get the blueprint lineage for
+	 * @param OutBlueprintParents	Array of IBlueprintPropertyGuidProviders for this class and its parents.  0th = this, Nth = least derived BP-based parent
+	 * @return						true if there were no status errors in any of the parent blueprints, otherwise false
+	 */
+	static ENGINE_API bool GetBlueprintHierarchyFromClass(const UClass* InClass, TArray<IBlueprintPropertyGuidProvider*>& OutBlueprintParents);
+
+public:
 #if WITH_EDITOR
 	/** returns true if the class hierarchy is error free */
-	static bool IsBlueprintHierarchyErrorFree(const UClass* InClass);
+	static ENGINE_API bool IsBlueprintHierarchyErrorFree(const UClass* InClass);
 #endif
 
-#if WITH_EDITOR
 	template<class TFieldType>
 	static FName GetFieldNameFromClassByGuid(const UClass* InClass, const FGuid VarGuid)
 	{
 		FProperty* AssertPropertyType = (TFieldType*)0;
 
-		TArray<UBlueprint*> Blueprints;
-		UBlueprint::GetBlueprintHierarchyFromClass(InClass, Blueprints);
+		TArray<IBlueprintPropertyGuidProvider*> BlueprintPropertyGuidProviders;
+		UBlueprint::GetBlueprintHierarchyFromClass(InClass, BlueprintPropertyGuidProviders);
 
-		for (int32 BPIndex = 0; BPIndex < Blueprints.Num(); ++BPIndex)
+		for (IBlueprintPropertyGuidProvider* BlueprintPropertyGuidProvider : BlueprintPropertyGuidProviders)
 		{
-			UBlueprint* Blueprint = Blueprints[BPIndex];
-			for (int32 VarIndex = 0; VarIndex < Blueprint->NewVariables.Num(); ++VarIndex)
+			const FName FoundPropertyName = BlueprintPropertyGuidProvider->FindBlueprintPropertyNameFromGuid(VarGuid);
+			if (FoundPropertyName != NAME_None)
 			{
-				const FBPVariableDescription& BPVarDesc = Blueprint->NewVariables[VarIndex];
-				if (BPVarDesc.VarGuid == VarGuid)
-				{
-					return BPVarDesc.VarName;
-				}
+				return FoundPropertyName;
 			}
 		}
 
@@ -973,41 +1070,42 @@ public:
 	{
 		FProperty* AssertPropertyType = (TFieldType*)0;
 
-		TArray<UBlueprint*> Blueprints;
-		UBlueprint::GetBlueprintHierarchyFromClass(InClass, Blueprints);
+		TArray<IBlueprintPropertyGuidProvider*> BlueprintPropertyGuidProviders;
+		UBlueprint::GetBlueprintHierarchyFromClass(InClass, BlueprintPropertyGuidProviders);
 
-		for (int32 BPIndex = 0; BPIndex < Blueprints.Num(); ++BPIndex)
+		for (IBlueprintPropertyGuidProvider* BlueprintPropertyGuidProvider : BlueprintPropertyGuidProviders)
 		{
-			UBlueprint* Blueprint = Blueprints[BPIndex];
-			for (int32 VarIndex = 0; VarIndex < Blueprint->NewVariables.Num(); ++VarIndex)
+			const FGuid FoundPropertyGuid = BlueprintPropertyGuidProvider->FindBlueprintPropertyGuidFromName(VarName);
+			if (FoundPropertyGuid.IsValid())
 			{
-				const FBPVariableDescription& BPVarDesc = Blueprint->NewVariables[VarIndex];
-				if (BPVarDesc.VarName == VarName)
-				{
-					VarGuid = BPVarDesc.VarGuid;
-					return true;
-				}
+				VarGuid = FoundPropertyGuid;
+				return true;
 			}
 		}
 
 		return false;
 	}
-
-	static FName GetFunctionNameFromClassByGuid(const UClass* InClass, const FGuid FunctionGuid);
-	static bool GetFunctionGuidFromClassByFieldName(const UClass* InClass, const FName FunctionName, FGuid& FunctionGuid);
+	
+#if WITH_EDITOR
+	static ENGINE_API FName GetFunctionNameFromClassByGuid(const UClass* InClass, const FGuid FunctionGuid);
+	static ENGINE_API bool GetFunctionGuidFromClassByFieldName(const UClass* InClass, const FName FunctionName, FGuid& FunctionGuid);
 
 	/**
 	 * Gets the last edited uber graph.  If no graph was found in the last edited document set, the first
 	 * ubergraph is returned.  If there are no ubergraphs nullptr is returned.
 	 */
-	UEdGraph* GetLastEditedUberGraph() const;
+	ENGINE_API UEdGraph* GetLastEditedUberGraph() const;
 
 	/* Notify the blueprint when a graph is renamed to allow for additional fixups. */
 	virtual void NotifyGraphRenamed(class UEdGraph* Graph, FName OldName, FName NewName) { }
 #endif
 
+#if WITH_EDITOR
+	static ENGINE_API UClass* GetBlueprintParentClassFromAssetTags(const FAssetData& BlueprintAsset);
+#endif
+
 	/** Find a function given its name and optionally an object property name within this Blueprint */
-	ETimelineSigType GetTimelineSignatureForFunctionByName(const FName& FunctionName, const FName& ObjectPropertyName);
+	ENGINE_API ETimelineSigType GetTimelineSignatureForFunctionByName(const FName& FunctionName, const FName& ObjectPropertyName);
 
 	/** Gets the current blueprint system version. Note- incrementing this version will invalidate ALL existing blueprints! */
 	static int32 GetCurrentBlueprintSystemVersion()
@@ -1016,7 +1114,7 @@ public:
 	}
 
 	/** Get all graphs in this blueprint */
-	void GetAllGraphs(TArray<UEdGraph*>& Graphs) const;
+	ENGINE_API void GetAllGraphs(TArray<UEdGraph*>& Graphs) const;
 
 	/**
 	* Allow each blueprint type (AnimBlueprint or ControlRigBlueprint) to add specific
@@ -1054,21 +1152,56 @@ private:
 
 public:
 	/** If this blueprint is currently being compiled, the CurrentMessageLog will be the log currently being used to send logs to. */
-	class FCompilerResultsLog* CurrentMessageLog;
+	FCompilerResultsLog* CurrentMessageLog;
 
 	/** Message log for storing upgrade notes that were generated within the Blueprint, will be displayed to the compiler results each compiler and will remain until saving */
-	TSharedPtr<class FCompilerResultsLog> UpgradeNotesLog;
+	TSharedPtr<FCompilerResultsLog> UpgradeNotesLog;
 
 	/** Message log for storing pre-compile errors/notes/warnings that will only last until the next Blueprint compile */
-	TSharedPtr<class FCompilerResultsLog> PreCompileLog;
+	TSharedPtr<FCompilerResultsLog> PreCompileLog;
 
 	/** 
 	 * Sends a message to the CurrentMessageLog, if there is one available.  Otherwise, defaults to logging to the normal channels.
 	 * Should use this for node and blueprint actions that happen during compilation!
 	 */
-	void Message_Note(const FString& MessageToLog);
-	void Message_Warn(const FString& MessageToLog);
-	void Message_Error(const FString& MessageToLog);
+	template<typename... ArgTypes>
+	void Message_Note(const FString& MessageToLog, ArgTypes... Args)
+	{
+		if (CurrentMessageLog)
+		{
+			CurrentMessageLog->Note(*MessageToLog, Forward<ArgTypes>(Args)...);
+		}
+		else
+		{
+			UE_LOG(LogBlueprint, Log, TEXT("[%s] %s"), *GetName(), *MessageToLog);
+		}
+	}
+
+	template<typename... ArgTypes>
+	void Message_Warn(const FString& MessageToLog, ArgTypes... Args)
+	{
+		if (CurrentMessageLog)
+		{
+			CurrentMessageLog->Warning(*MessageToLog, Forward<ArgTypes>(Args)...);
+		}
+		else
+		{
+			UE_LOG(LogBlueprint, Warning, TEXT("[%s] %s"), *GetName(), *MessageToLog);
+		}
+	}
+
+	template<typename... ArgTypes>
+	void Message_Error(const FString& MessageToLog, ArgTypes... Args)
+	{
+		if (CurrentMessageLog)
+		{
+			CurrentMessageLog->Error(*MessageToLog, Forward<ArgTypes>(Args)...);
+		}
+		else
+		{
+			UE_LOG(LogBlueprint, Error, TEXT("[%s] %s"), *GetName(), *MessageToLog);
+		}
+	}
 #endif
 	
 #if WITH_EDITORONLY_DATA
@@ -1076,7 +1209,7 @@ protected:
 	/** 
 	 * Blueprint can choose to load specific modules for compilation. Children are expected to call base implementation.
 	 */
-	virtual void LoadModulesRequiredForCompilation();
+	ENGINE_API virtual void LoadModulesRequiredForCompilation();
 #endif
 
 #if WITH_EDITOR
@@ -1098,6 +1231,11 @@ public:
 	virtual bool SupportsFunctions() const { return true; }
 
 	/**
+	 * Returns true if this blueprints allows the given function to be overridden
+	 */
+	virtual bool AllowFunctionOverride(const UFunction* const InFunction) const { return true; }
+		
+	/**
 	 * Returns true if this blueprint supports macros
 	 */
 	virtual bool SupportsMacros() const { return true; }
@@ -1115,23 +1253,45 @@ public:
 	/**
 	 * Returns true if this blueprint supports animation layers
 	 */
-	virtual bool SupportsAnimLayers() const { return true; }
+	virtual bool SupportsAnimLayers() const { return false; }
+
+	/**
+	 * Copies a given graph into a text buffer. Returns true if successful.
+	 */
+	virtual bool ExportGraphToText(UEdGraph* InEdGraph, FString& OutText) { return false; }
+
+	/**
+	 * Returns true if the blueprint can import a given InClipboardText.
+	 * If this return false the default BP functionality will be used.
+	 */
+	virtual bool CanImportGraphFromText(const FString& InClipboardText) { return false; }
+
+	/**
+	 * Returns a new ed graph if the blueprint's specialization imported a graph based on 
+	 * a clipboard text content an nullptr if that's not successful.
+	 */
+	virtual bool TryImportGraphFromText(const FString& InClipboardText, UEdGraph** OutGraphPtr = nullptr) { return false; }
 
 #endif
 };
 
 
-#if WITH_EDITOR
 template<>
 inline FName UBlueprint::GetFieldNameFromClassByGuid<UFunction>(const UClass* InClass, const FGuid FunctionGuid)
 {
+#if WITH_EDITOR
 	return GetFunctionNameFromClassByGuid(InClass, FunctionGuid);
+#else	// WITH_EDITOR
+	return NAME_None;
+#endif	// WITH_EDITOR
 }
 
 template<>
 inline bool UBlueprint::GetGuidFromClassByFieldName<UFunction>(const UClass* InClass, const FName FunctionName, FGuid& FunctionGuid)
 {
+#if WITH_EDITOR
 	return GetFunctionGuidFromClassByFieldName(InClass, FunctionName, FunctionGuid);
+#else	// WITH_EDITOR
+	return false;
+#endif	// WITH_EDITOR
 }
-
-#endif // #if WITH_EDITOR

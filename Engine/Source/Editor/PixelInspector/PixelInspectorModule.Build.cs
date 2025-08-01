@@ -1,7 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 using UnrealBuildTool;
-using System.IO;
 
 public class PixelInspectorModule : ModuleRules
 {
@@ -16,27 +15,18 @@ public class PixelInspectorModule : ModuleRules
 				"RHI",
 				"RenderCore",
 				"Slate",
-                "EditorStyle",
                 "Engine",
                 "UnrealEd",
                 "PropertyEditor",
 			}
         );
-		var EngineDir = Path.GetFullPath(Target.RelativeEnginePath);
-
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				// required for PostProcessing.
-				Path.Combine(EngineDir, "Source/Runtime/Renderer/Private")
-			}
-		);
 
 		PrivateDependencyModuleNames.AddRange(
-             new string[] {
-					"Engine",
-                    "UnrealEd"
-				}
-         );
+			new string[] {
+				"ColorManagement",
+				"Renderer",
+			}
+		);
 
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
@@ -48,9 +38,8 @@ public class PixelInspectorModule : ModuleRules
         {
             PrivateDependencyModuleNames.AddRange(
                 new string[] {
-                    "UnrealEd",
+					"EditorFramework",
     				"SlateCore",
-    				"Slate",
                 }
             );
 

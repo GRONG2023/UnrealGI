@@ -2,26 +2,30 @@
 #pragma once
 
 #include "ClothingSystemRuntimeTypes.h"
+#include "Containers/Map.h"
+#include "CoreTypes.h"
+#include "Math/MathFwd.h"
 
 class UClothingAssetBase;
 class USkeletalMeshComponent;
 class USkinnedMeshComponent;
 struct FClothCollisionData;
+struct FClothSimulData;
 
 /** Empty interface, derived simulation modules define the contents of the context. */
-class CLOTHINGSYSTEMRUNTIMEINTERFACE_API IClothingSimulationContext
+class IClothingSimulationContext
 {
 public:
-	IClothingSimulationContext();
-	virtual ~IClothingSimulationContext();
+	CLOTHINGSYSTEMRUNTIMEINTERFACE_API IClothingSimulationContext();
+	CLOTHINGSYSTEMRUNTIMEINTERFACE_API virtual ~IClothingSimulationContext();
 };
 
 /** Base class for clothing simulators. */
-class CLOTHINGSYSTEMRUNTIMEINTERFACE_API IClothingSimulation
+class IClothingSimulation
 {
 public:
-	IClothingSimulation();
-	virtual ~IClothingSimulation();
+	CLOTHINGSYSTEMRUNTIMEINTERFACE_API IClothingSimulation();
+	CLOTHINGSYSTEMRUNTIMEINTERFACE_API virtual ~IClothingSimulation();
 
 	// The majority of the API for this class is protected. The required objects (skel meshes and the parallel task)
 	// are friends so they can use the functionality. For the most part the simulation is not designed to be used
@@ -60,6 +64,14 @@ protected:
 	 */
 	virtual void FillContext(USkeletalMeshComponent* InComponent, float InDeltaTime, IClothingSimulationContext* InOutContext) = 0;
 
+	/**
+	 * Fills an existing context for a single simulation step, called by the engine on the game thread prior to simulation 
+	 * @param InComponent - The component to fill the context for
+	 * @param InOutContext - The context to fill
+	 * @param bIsInitialization - Whether this fill is occurring as part of the actor creation stage
+	 */
+	virtual void FillContext(USkeletalMeshComponent* InComponent, float InDeltaTime, IClothingSimulationContext* InOutContext, bool bIsInitialization) = 0;
+
 	/** Initialize the simulation, will be called before any Simulate calls */
 	virtual void Initialize() = 0;
 
@@ -97,7 +109,7 @@ protected:
 	 * Fill FClothSimulData map for the clothing simulation. Should fill a map pair per-actor 
 	 * @param OutData - The simulation data to write to
 	 * @param InOwnerComponent - the component that owns the simulation
-	 * @param InOverrideComponent - An override component if bound to a master pose component
+	 * @param InOverrideComponent - An override component if bound to a leader pose component
 	 */
 	virtual void GetSimulationData(TMap<int32, FClothSimulData>& OutData, USkeletalMeshComponent* InOwnerComponent, USkinnedMeshComponent* InOverrideComponent) const = 0;
 
@@ -134,6 +146,11 @@ public:
 	 * Implementation is not considered thread safe, and therefore this function must be called at a synchronization point.
 	 */
 	virtual void SetNumIterations(int32 /*NumIterations*/) {}
+	/**
+	 * Set the maximum number of iterations used by the solver.
+	 * Implementation is not considered thread safe, and therefore this function must be called at a synchronization point.
+	 */
+	virtual void SetMaxNumIterations(int32 /*MaxNumIterations*/) {}
 	/**
 	 * Set the number of substeps used by the solver.
 	 * Implementation is not considered thread safe, and therefore this function must be called at a synchronization point.

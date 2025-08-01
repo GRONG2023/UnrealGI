@@ -21,7 +21,7 @@ namespace Audio
 		void CloseFile();
 
 		//~ Begin IAudioMixerPlatformInterface
-		virtual EAudioMixerPlatformApi::Type GetPlatformApi() const override { return EAudioMixerPlatformApi::XAudio2; }
+		virtual FString GetPlatformApi() const override { return TEXT("NonRealtime"); }
 		virtual bool InitializeHardware() override;
 		virtual bool CheckAudioDeviceChange() override;
 		virtual bool TeardownHardware() override;
@@ -37,11 +37,7 @@ namespace Audio
 		virtual void ResumePlaybackOnNewDevice() override;
 		virtual FAudioPlatformDeviceInfo GetPlatformDeviceInfo() const override;
 		virtual void SubmitBuffer(const uint8* Buffer) override;
-		virtual FName GetRuntimeFormat(USoundWave* InSoundWave) override;
-		virtual bool HasCompressedAudioInfoClass(USoundWave* InSoundWave) override;
-		virtual bool SupportsRealtimeDecompression() const override { return true; }
-		virtual bool DisablePCMAudioCaching() const override;
-		virtual ICompressedAudioInfo* CreateCompressedAudioInfo(USoundWave* InSoundWave) override;
+		virtual bool DisablePCMAudioCaching() const override;		
 		virtual FString GetDefaultDeviceName() override;
 		virtual FAudioPlatformSettings GetPlatformSettings() const override;
 		virtual void OnHardwareUpdate() override;

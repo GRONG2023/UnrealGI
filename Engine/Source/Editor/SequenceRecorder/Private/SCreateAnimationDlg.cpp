@@ -12,13 +12,14 @@
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Input/SButton.h"
 #include "Editor.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
+#include "PropertyEditorModule.h"
 #include "Styling/CoreStyle.h"
 //#include "Persona.h"
-#include "Developer/AssetTools/Public/IAssetTools.h"
-#include "Developer/AssetTools/Public/AssetToolsModule.h"
-#include "Editor/ContentBrowser/Public/IContentBrowserSingleton.h"
-#include "Editor/ContentBrowser/Public/ContentBrowserModule.h"
+#include "IAssetTools.h"
+#include "AssetToolsModule.h"
+#include "IContentBrowserSingleton.h"
+#include "ContentBrowserModule.h"
 
 #define LOCTEXT_NAMESPACE "SCreateAnimationDlg"
 
@@ -69,6 +70,22 @@ void SCreateAnimationDlg::Construct(const FArguments& InArgs)
 	PathPickerConfig.bAddDefaultPath = true;
 
 	FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser");
+	FPropertyEditorModule& PropertyEditorModule = FModuleManager::GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
+	
+	FDetailsViewArgs DetailsViewArgs;
+	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+	DetailsViewArgs.bShowOptions = false;
+	DetailsViewArgs.bAllowSearch = false;
+	DetailsViewArgs.bShowPropertyMatrixButton = false;
+	DetailsViewArgs.bUpdatesFromSelection = false;
+	DetailsViewArgs.bLockable = false;
+	DetailsViewArgs.bAllowFavoriteSystem = false;
+	DetailsViewArgs.ViewIdentifier = "AnimationRecorder";
+
+	TSharedPtr<class IDetailsView> DetailsView = PropertyEditorModule.CreateDetailView(DetailsViewArgs);
+	GetMutableDefault<UAnimationRecordingParameters>()->LoadConfig();
+	DetailsView->SetObject(GetMutableDefault<UAnimationRecordingParameters>(), true);
+	DetailsView->OnFinishedChangingProperties().AddLambda([](const FPropertyChangedEvent& InEvent) { GetMutableDefault<UAnimationRecordingParameters>()->SaveConfig(); });
 
 	SWindow::Construct(SWindow::FArguments()
 		.Title(LOCTEXT("SCreateAnimationDlg_Title", "Create New Animation Object"))
@@ -83,7 +100,7 @@ void SCreateAnimationDlg::Construct(const FArguments& InArgs)
 			.Padding(2)
 			[
 				SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 				[
 					SNew(SVerticalBox)
 
@@ -131,6 +148,14 @@ void SCreateAnimationDlg::Construct(const FArguments& InArgs)
 							.MinDesiredWidth(250)
 						]
 					]
+
+					+ SVerticalBox::Slot()
+					.AutoHeight()
+					.HAlign(HAlign_Fill)
+					[
+						DetailsView.ToSharedRef()
+					]
+
 				]
 			]
 
@@ -140,14 +165,14 @@ void SCreateAnimationDlg::Construct(const FArguments& InArgs)
 			.Padding(5)
 			[
 				SNew(SUniformGridPanel)
-				.SlotPadding(FEditorStyle::GetMargin("StandardDialog.SlotPadding"))
-				.MinDesiredSlotWidth(FEditorStyle::GetFloat("StandardDialog.MinDesiredSlotWidth"))
-				.MinDesiredSlotHeight(FEditorStyle::GetFloat("StandardDialog.MinDesiredSlotHeight"))
+				.SlotPadding(FAppStyle::GetMargin("StandardDialog.SlotPadding"))
+				.MinDesiredSlotWidth(FAppStyle::GetFloat("StandardDialog.MinDesiredSlotWidth"))
+				.MinDesiredSlotHeight(FAppStyle::GetFloat("StandardDialog.MinDesiredSlotHeight"))
 				+SUniformGridPanel::Slot(0,0)
 				[
 					SNew(SButton) 
 					.HAlign(HAlign_Center)
-					.ContentPadding(FEditorStyle::GetMargin("StandardDialog.ContentPadding"))
+					.ContentPadding(FAppStyle::GetMargin("StandardDialog.ContentPadding"))
 					.Text(LOCTEXT("OK", "OK"))
 					.OnClicked(this, &SCreateAnimationDlg::OnButtonClick, EAppReturnType::Ok)
 				]
@@ -155,7 +180,7 @@ void SCreateAnimationDlg::Construct(const FArguments& InArgs)
 					[
 						SNew(SButton) 
 						.HAlign(HAlign_Center)
-						.ContentPadding(FEditorStyle::GetMargin("StandardDialog.ContentPadding"))
+						.ContentPadding(FAppStyle::GetMargin("StandardDialog.ContentPadding"))
 						.Text(LOCTEXT("Cancel", "Cancel"))
 						.OnClicked(this, &SCreateAnimationDlg::OnButtonClick, EAppReturnType::Cancel)
 					]

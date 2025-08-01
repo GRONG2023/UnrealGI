@@ -1,12 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "GPUDefragAllocator.h"
-#include "HAL/FileManager.h"
-#include "Misc/ScopeLock.h"
-#include "Math/RandomStream.h"
+#include "HAL/IConsoleManager.h"
 #include "Stats/StatsMisc.h"
 #include "RHI.h"
-#include "ProfilingDebugging/ScopedTimers.h"
+#include "Stats/Stats.h"
 
 DECLARE_STATS_GROUP(TEXT("TexturePool"), STATGROUP_TexturePool, STATCAT_ADVANCED);
 
@@ -223,7 +221,8 @@ void* FGPUDefragAllocator::Allocate(int64 AllocationSize, int32 Alignment, TStat
 
 	check(IsAligned(AllocatedChunk->Base, Alignment));
 
-	LLM(FLowLevelMemTracker::Get().OnLowLevelAlloc(ELLMTracker::Default, AllocatedChunk->Base, AllocationSize));
+	MemoryTrace_Alloc((uint64)AllocatedChunk->Base, AllocationSize, Alignment);
+	LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelAlloc(ELLMTracker::Default, AllocatedChunk->Base, AllocationSize));
 
 	return AllocatedChunk->Base;
 }
@@ -354,6 +353,7 @@ void* GBestFitAllocatorFreePointer = nullptr;
 */
 void FGPUDefragAllocator::Free(void* Pointer)
 {
+	MemoryTrace_Free((uint64)Pointer);
 #if ENABLE_LOW_LEVEL_MEM_TRACKER
 	if (Pointer)
 	{
@@ -1198,7 +1198,7 @@ void FGPUDefragAllocator::SetStaticMemoryPrivileges()
 		if (Block.SyncIndex >= CompletedSyncIndex)
 		{
 			PlatformSetStaticMemoryPrivileges(Block);
-			BlocksToUnProtect.RemoveAtSwap(i, 1, false);
+			BlocksToUnProtect.RemoveAtSwap(i, 1, EAllowShrinking::No);
 		}
 	}	
 }
@@ -1592,7 +1592,7 @@ void FGPUDefragAllocator::DumpAllocs(FOutputDevice& Ar/*=*GLog*/)
 
 	// Fragmentation and allocation size visualization.
 	int64				NumBlocks = MemorySize / AllocationAlignment;
-	int64				Dimension = 1 + NumBlocks / FMath::TruncToInt(FMath::Sqrt(NumBlocks));
+	int64				Dimension = 1 + NumBlocks / FMath::TruncToInt(FMath::Sqrt(static_cast<float>(NumBlocks)));
 	TArray<FColor>	AllocationVisualization;
 	AllocationVisualization.AddZeroed(Dimension * Dimension);
 	int64				VisIndex = 0;
@@ -1745,7 +1745,7 @@ void FGPUDefragAllocator::GetMemoryLayout(TArray<FMemoryLayoutElement>& MemoryLa
 	while (Chunk)
 	{
 		EMemoryElementType ChunkType = GetChunkType(Chunk);
-		new (MemoryLayout)FMemoryLayoutElement(Chunk->Size, ChunkType);
+		MemoryLayout.Emplace(Chunk->Size, ChunkType);
 		Chunk = Chunk->NextChunk;
 	}
 }

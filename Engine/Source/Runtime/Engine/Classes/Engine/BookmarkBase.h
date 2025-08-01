@@ -21,8 +21,8 @@ struct FBookmarkBaseJumpToSettings
  *
  * See UBookMark, UBookMark2D, AGameWorldSettings::DefaultBookmarkClass, IBookmarkEditorInteractor.
  */
-UCLASS(hidecategories=Object, Abstract)
-class ENGINE_API UBookmarkBase : public UObject
+UCLASS(hidecategories=Object, Abstract, MinimalAPI)
+class UBookmarkBase : public UObject
 {
 	GENERATED_BODY()
 
@@ -34,6 +34,6 @@ public:
 	virtual void OnCleared()
 	{
 		Modify();
-		MarkPendingKill();
+		MarkAsGarbage();
 	}
 };

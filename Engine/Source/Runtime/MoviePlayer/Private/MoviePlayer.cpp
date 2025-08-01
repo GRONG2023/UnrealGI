@@ -11,6 +11,7 @@
 #include "NullMoviePlayer.h"
 #include "DefaultGameMoviePlayer.h"
 #include "Widgets/Images/SThrobber.h"
+#include "RenderingThread.h"
 
 IMPLEMENT_MODULE(FDefaultModuleImpl, MoviePlayer);
 
@@ -122,8 +123,10 @@ bool IsMoviePlayerEnabled()
 	bool bEnabled = !GIsEditor && !IsRunningDedicatedServer() && !IsRunningCommandlet() && GUseThreadedRendering;
 
 #if !UE_BUILD_SHIPPING
-	bEnabled &= !FParse::Param(FCommandLine::Get(), TEXT("NoLoadingScreen"));
+	static bool bNoLoadingScreen = FParse::Param(FCommandLine::Get(), TEXT("NoLoadingScreen"));
+	bEnabled &= !bNoLoadingScreen;
 #endif
 
 	return bEnabled;
 }
+

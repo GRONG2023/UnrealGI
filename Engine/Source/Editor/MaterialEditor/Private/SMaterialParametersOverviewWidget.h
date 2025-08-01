@@ -3,16 +3,17 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Object.h"
+#include "DetailColumnSizeData.h"
 #include "Engine/EngineTypes.h"
+#include "IDetailTreeNode.h"
+#include "MaterialPropertyHelpers.h"
+#include "Materials/Material.h"
+#include "PropertyCustomizationHelpers.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/Views/STreeView.h"
-#include "Materials/Material.h"
-#include "IDetailTreeNode.h"
-#include "IDetailPropertyRow.h"
-#include "MaterialPropertyHelpers.h"
 
 class IPropertyHandle;
 class SMaterialParametersOverviewTree;
@@ -48,6 +49,7 @@ private:
 
 	const FSlateBrush* GetBorderImage() const;
 
+	FSlateColor GetOuterBackgroundColor(TSharedPtr<FSortedParamData> InParamData) const;
 private:
 
 	/** The node info to build the tree view row from. */
@@ -58,8 +60,6 @@ private:
 
 	/** The set of material parameters this is associated with */
 	UMaterialEditorPreviewParameters* MaterialEditorInstance;
-
-	FMaterialTreeColumnSizeData ColumnSizeData;
 };
 
 // ********* SMaterialParametersOverviewPanel *******
@@ -93,6 +93,7 @@ private:
 
 	TSharedPtr<class SScrollBar> ExternalScrollbar;
 	TWeakPtr<class IPropertyRowGenerator> Generator;
+	
 };
 
 // ********* SMaterialParametersOverviewTree *******
@@ -120,9 +121,6 @@ public:
 	void OnExpansionChanged(TSharedPtr<FSortedParamData> Item, bool bIsExpanded);
 	void SetParentsExpansionState();
 
-	float OnGetLeftColumnWidth() const { return 1.0f - ColumnWidth; }
-	float OnGetRightColumnWidth() const { return ColumnWidth; }
-	void OnSetColumnWidth(float InWidth) { ColumnWidth = InWidth; }
 	TSharedPtr<class FAssetThumbnailPool> GetTreeThumbnailPool();
 
 	/** Object that stores all of the possible parameters we can edit */
@@ -134,6 +132,8 @@ public:
 	TWeakPtr<SMaterialParametersOverviewPanel> GetOwner() { return Owner; }
 	bool HasAnyParameters() const { return bHasAnyParameters; }
 
+	FDetailColumnSizeData& GetColumnSizeData() { return ColumnSizeData; }
+
 protected:
 
 	void ShowSubParameters();
@@ -144,11 +144,9 @@ private:
 
 	TArray<FUnsortedParamData> UnsortedParameters;
 
-	/** The actual width of the right column.  The left column is 1-ColumnWidth */
-	float ColumnWidth;
-
 	TWeakPtr<SMaterialParametersOverviewPanel> Owner;
 
 	bool bHasAnyParameters;
-
+	
+	FDetailColumnSizeData ColumnSizeData;
 };

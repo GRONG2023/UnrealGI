@@ -4,11 +4,15 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
-using System.Xml.Serialization;
 using System.Net;
-using UnrealBuildTool;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using UnrealBuildBase;
+
+
+#pragma warning disable SYSLIB0014
 
 namespace AutomationTool.DeviceReservation
 {
@@ -29,12 +33,15 @@ namespace AutomationTool.DeviceReservation
 		// Max times to attempt reservation renewal, in case device starvation, reservation service being restarted, etc
 		private static readonly int RenewRetryMax = 14;
 		private static readonly TimeSpan RenewRetryTime = TimeSpan.FromMinutes(1);
-		
+
 		private Thread RenewThread;
 		private AutoResetEvent WaitEvent = new AutoResetEvent(false);
 
 		private Reservation ActiveReservation;
 		private List<Device> ReservedDevices;
+
+		// Whether the reservation requires an installation
+		public bool? InstallRequired => ActiveReservation?.InstallRequired;
 
 		public IReadOnlyList<Device> Devices
 		{
@@ -98,7 +105,7 @@ namespace AutomationTool.DeviceReservation
 					// try again
 					RetryCurrent++;
 					RenewTimeCurrent = RenewRetryTime;
-				}				
+				}
 			}
 
 			// Delete reservation on server, if the web request fails backend has logic to cleanup reservations
@@ -171,7 +178,8 @@ namespace AutomationTool.DeviceReservation
 
 		public static T InvokeAPI<T>(Uri UriToRequest, string Method, object ObjectToSerialize)
 		{
-			fastJSON.JSON.Instance.RegisterCustomType(typeof(TimeSpan), (o) => o.ToString(), (s) => TimeSpan.Parse(s));
+			var SerializeOptions = new JsonSerializerOptions() { PropertyNameCaseInsensitive = true };
+			SerializeOptions.Converters.Add(new TimeSpanJsonConverter());
 
 			var Request = (HttpWebRequest)WebRequest.Create(UriToRequest);
 			Request.UseDefaultCredentials = true;
@@ -183,7 +191,7 @@ namespace AutomationTool.DeviceReservation
 
 				using (var RequestStream = Request.GetRequestStream())
 				{
-					var JsonString = fastJSON.JSON.Instance.ToJSON(ObjectToSerialize, new fastJSON.JSONParameters() { UseExtensions = false });
+					var JsonString = JsonSerializer.Serialize(ObjectToSerialize, SerializeOptions);
 					var Writer = new StreamWriter(RequestStream);
 					Writer.Write(JsonString);
 					Writer.Flush();
@@ -197,7 +205,7 @@ namespace AutomationTool.DeviceReservation
 				MemoryStream MemoryStream = new MemoryStream();
 				ResponseStream.CopyTo(MemoryStream);
 				string JsonString = Encoding.UTF8.GetString(MemoryStream.ToArray());
-				return fastJSON.JSON.Instance.ToObject<T>(JsonString);
+				return JsonSerializer.Deserialize<T>(JsonString, SerializeOptions );
 			}
 		}
 
@@ -213,7 +221,7 @@ namespace AutomationTool.DeviceReservation
 
 				using (var RequestStream = Request.GetRequestStream())
 				{
-					var JsonString = fastJSON.JSON.Instance.ToJSON(ObjectToSerialize, new fastJSON.JSONParameters() { UseExtensions = false });
+					var JsonString = JsonSerializer.Serialize(ObjectToSerialize, new JsonSerializerOptions());
 					var Writer = new StreamWriter(RequestStream);
 					Writer.Write(JsonString);
 					Writer.Flush();
@@ -224,7 +232,7 @@ namespace AutomationTool.DeviceReservation
 			{
 				Request.ContentLength = 0;
 			}
-			
+
 			using (var Response = (HttpWebResponse)Request.GetResponse())
 			using (var ResponseStream = Response.GetResponseStream())
 			{
@@ -241,16 +249,17 @@ namespace AutomationTool.DeviceReservation
 		public TimeSpan Duration { get; set; }
 		public Guid Guid { get; set; }
 		public static string ReservationDetails = "";
+		public bool? InstallRequired { get; set; } = null;
 
 		private sealed class CreateReservationData
 		{
-			public string[] DeviceTypes;
-			public string Hostname;
-			public TimeSpan Duration;
-			public string ReservationDetails;
-			public string PoolId;
-			public string JobId;
-			public string StepId;
+			public string[] DeviceTypes { get; set; }
+			public string Hostname { get; set; }
+			public TimeSpan Duration { get; set; }
+			public string ReservationDetails { get; set; }
+			public string PoolId { get; set; }
+			public string JobId { get; set; }
+			public string StepId { get; set; }
 		}
 
 		public static Reservation Create(Uri BaseUri, string[] DeviceTypes, TimeSpan Duration, int RetryMax = 5, string PoolID = "")
@@ -262,7 +271,7 @@ namespace AutomationTool.DeviceReservation
 			while (true)
 			{
 				if (!bFirst)
-				{					
+				{
 					Thread.Sleep(RetryTime);
 				}
 
@@ -277,7 +286,7 @@ namespace AutomationTool.DeviceReservation
 					return Utils.InvokeAPI<Reservation>(BaseUri.AppendPath("api/v1/reservations"), "POST", new CreateReservationData()
 					{
 						DeviceTypes = DeviceTypes,
-						Hostname = Environment.MachineName,
+						Hostname = Unreal.MachineName,
 						Duration = Duration,
 						ReservationDetails = ReservationDetails,
 						PoolId = PoolID,
@@ -286,34 +295,32 @@ namespace AutomationTool.DeviceReservation
 					});
 				}
 				catch (WebException WebEx)
-				{					
+				{
 
 					if (RetryCount == RetryMax)
 					{
 						Console.WriteLine("Device reservation unsuccessful");
-						throw new AutomationException(WebEx, "Device reservation unsuccessful, devices unavailable");
+						string FinalMessage = "Device reservation unsuccessful";
+						string MaxRetryWebExMessage = GetReservationErrorMessage(WebEx);
+						if (!string.IsNullOrEmpty(MaxRetryWebExMessage))
+						{
+							FinalMessage = string.Format("{0} - Caused by: {1}", FinalMessage, MaxRetryWebExMessage);
+						}
+						else
+						{
+							FinalMessage = string.Format("{0} - Request returned status {1}", FinalMessage, WebEx.Status.ToString());
+						}
+						throw new AutomationException(WebEx, FinalMessage);
 					}
 
 					string RetryMessage = String.Format("retry {0} of {1} in {2} minutes", RetryCount + 1, RetryMax, RetryTime.Minutes);
 					string Message = String.Format("Unknown device server error, {0}", RetryMessage);
 
-					if (WebEx.Response == null)
+					string WebExMessage = GetReservationErrorMessage(WebEx, RetryMessage);
+
+					if (!string.IsNullOrEmpty(WebExMessage))
 					{
-						Message = String.Format("Devices service currently not available, {0}", RetryMessage);
-					}
-					else if ((WebEx.Response as HttpWebResponse).StatusCode == HttpStatusCode.Conflict)
-					{
-						Message = String.Format("No devices currently available, {0}", RetryMessage);
-					}
-					else
-					{
-						using (HttpWebResponse Response = (HttpWebResponse)WebEx.Response)
-						{
-							using (StreamReader Reader = new StreamReader(Response.GetResponseStream()))
-							{
-								Message = String.Format("WebException on reservation request: {0} : {1} : {2}", WebEx.Message, WebEx.Status, Reader.ReadToEnd());
-							}
-						}						
+						Message = WebExMessage;
 					}
 
 					Console.WriteLine(Message);
@@ -328,29 +335,41 @@ namespace AutomationTool.DeviceReservation
 			}
 		}
 
+		private static string GetReservationErrorMessage(WebException WebEx, string RetryMessage = "")
+		{
+			string Message = string.Empty;
+			string RetryMessageEx = string.IsNullOrEmpty(RetryMessage) ? string.Empty : (", " + RetryMessage);
+
+			if (WebEx.Response == null)
+			{
+				Message = String.Format("Devices service currently not available{0}", RetryMessageEx);
+			}
+			else if ((WebEx.Response as HttpWebResponse).StatusCode == HttpStatusCode.Conflict)
+			{
+				Message = String.Format("No devices currently available{0}", RetryMessageEx);
+			}
+			else
+			{
+				using (HttpWebResponse Response = (HttpWebResponse)WebEx.Response)
+				{
+					using (StreamReader Reader = new StreamReader(Response.GetResponseStream()))
+					{
+						Message = String.Format("WebException on reservation request: {0} : {1} : {2}", WebEx.Message, WebEx.Status, Reader.ReadToEnd());
+					}
+				}
+			}
+			return Message;
+		}
+
 		public void Renew(Uri BaseUri, TimeSpan NewDuration)
 		{
-			try
-			{
-				Utils.InvokeAPI(BaseUri.AppendPath("api/v1/reservations/" + Guid.ToString()), "PUT", NewDuration);				
-			}
-			catch (Exception ex)
-			{
-				throw new AutomationException(ex, "Failed to renew device reservation.");
-			}
+			Utils.InvokeAPI(BaseUri.AppendPath("api/v1/reservations/" + Guid.ToString()), "PUT", NewDuration);
 		}
-		
+
 		public void Delete(Uri BaseUri)
 		{
-			try
-			{
-				Utils.InvokeAPI(BaseUri.AppendPath("api/v1/reservations/" + Guid.ToString()), "DELETE");
-				Console.WriteLine("Successfully deleted device reservation \"{0}\".", Guid);
-			}
-			catch (Exception ex)
-			{
-				Utils.Log(string.Format("Failed to delete device reservation: {0}", ex.Message));
-			}
+			Utils.InvokeAPI(BaseUri.AppendPath("api/v1/reservations/" + Guid.ToString()), "DELETE");
+			Console.WriteLine("Successfully deleted device reservation \"{0}\".", Guid);
 		}
 
 		static public void ReportDeviceError(string InBaseUri, string DeviceName, string Error)
@@ -380,6 +399,7 @@ namespace AutomationTool.DeviceReservation
 		public string Type { get; set; }
 		public string IPOrHostName { get; set; }
 		public string PerfSpec { get; set; }
+		public string Model { get; set; }
 		public TimeSpan AvailableStartTime { get; set; }
 		public TimeSpan AvailableEndTime { get; set; }
 		public bool Enabled { get; set; }
@@ -390,6 +410,25 @@ namespace AutomationTool.DeviceReservation
 		public static Device Get(Uri BaseUri, string DeviceName)
 		{
 			return Utils.InvokeAPI<Device>(BaseUri.AppendPath("api/v1/devices/" + DeviceName), "GET", null);
+		}
+	}
+
+	public class TimeSpanJsonConverter : JsonConverter<TimeSpan>
+	{
+		public override bool CanConvert(Type ObjectType)
+		{
+			return ObjectType == typeof(TimeSpan);
+		}
+
+		public override TimeSpan Read(ref Utf8JsonReader Reader, Type TypeToConvert, JsonSerializerOptions Options)
+		{
+			return TimeSpan.Parse(Reader.GetString());
+		}
+
+		public override void Write(Utf8JsonWriter Writer, TimeSpan Value, JsonSerializerOptions Options)
+		{
+			var StrValue = Value.ToString();
+			Writer.WriteStringValue(Options.PropertyNamingPolicy?.ConvertName(StrValue) ?? StrValue);
 		}
 	}
 }

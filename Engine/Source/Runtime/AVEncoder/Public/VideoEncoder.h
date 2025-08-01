@@ -2,21 +2,31 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "VideoEncoderInput.h"
+#include "HAL/CriticalSection.h"
+#include "HAL/Platform.h"
 #include "Misc/FrameRate.h"
 #include "Misc/ScopeLock.h"
+#include "Templates/Function.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UnrealTemplate.h"
+#include "VideoEncoderInput.h"
 
 namespace AVEncoder
 {
-    class AVENCODER_API FVideoEncoder
+	class FCodecPacket;
+	class FVideoEncoderInput;
+	class FVideoEncoderInputFrame;
+
+    class UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") FVideoEncoder
     {
     public:
         enum class RateControlMode { UNKNOWN, CONSTQP, VBR, CBR };
         enum class MultipassMode { UNKNOWN, DISABLED, QUARTER, FULL };
 		enum class H264Profile { AUTO, CONSTRAINED_BASELINE, BASELINE, MAIN, CONSTRAINED_HIGH, HIGH, HIGH444, STEREO, SVC_TEMPORAL_SCALABILITY, PROGRESSIVE_HIGH };
 
-        struct FLayerConfig
+        struct UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") FLayerConfig
         {
             uint32			Width = 0;
             uint32			Height = 0;
@@ -51,22 +61,26 @@ namespace AVEncoder
 			}
         };
 
-        virtual ~FVideoEncoder();
+        AVENCODER_API virtual ~FVideoEncoder();
 
+        PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		virtual bool Setup(TSharedRef<FVideoEncoderInput> input, FLayerConfig const& config) { return false; }
+        PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		virtual void Shutdown() {}
 
-        virtual bool AddLayer(FLayerConfig const& config);
+        AVENCODER_API virtual bool AddLayer(FLayerConfig const& config);
         uint32 GetNumLayers() const { return static_cast<uint32>(Layers.Num()); }
         virtual uint32 GetMaxLayers() const { return 1; }
 
-		FLayerConfig GetLayerConfig(uint32 layerIdx) const;
-        void UpdateLayerConfig(uint32 layerIdx, FLayerConfig const& config);
+		AVENCODER_API FLayerConfig GetLayerConfig(uint32 layerIdx) const;
+        AVENCODER_API void UpdateLayerConfig(uint32 layerIdx, FLayerConfig const& config);
 
-        using OnFrameEncodedCallback = TFunction<void(const FVideoEncoderInputFrame* /* InCompletedFrame */)>;
-        using OnEncodedPacketCallback = TFunction<void(uint32 /* LayerIndex */, const FVideoEncoderInputFrame* /* Frame */, const FCodecPacket& /* Packet */)>;
+        PRAGMA_DISABLE_DEPRECATION_WARNINGS
+        using OnFrameEncodedCallback = TFunction<void(const TSharedPtr<FVideoEncoderInputFrame> /* InCompletedFrame */)>;
+        using OnEncodedPacketCallback = TFunction<void(uint32 /* LayerIndex */, const TSharedPtr<FVideoEncoderInputFrame> /* Frame */, const FCodecPacket& /* Packet */)>;
+        PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
-        struct FEncodeOptions
+        struct UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") FEncodeOptions
         {
             bool					bForceKeyFrame = false;
             OnFrameEncodedCallback	OnFrameEncoded;
@@ -75,12 +89,14 @@ namespace AVEncoder
         void SetOnEncodedPacket(OnEncodedPacketCallback callback) { OnEncodedPacket = MoveTemp(callback); }
         void ClearOnEncodedPacket() { OnEncodedPacket = nullptr; }
 
-		virtual void Encode(FVideoEncoderInputFrame const* frame, FEncodeOptions const& options) {}
+        PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		virtual void Encode(const TSharedPtr<FVideoEncoderInputFrame> frame, FEncodeOptions const& options) {}
+        PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
     protected:
         FVideoEncoder() = default;
 
-        class FLayer
+        class UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") FLayer
         {
         public:
             explicit FLayer(FLayerConfig const& layerConfig)

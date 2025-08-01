@@ -22,10 +22,7 @@ CORE_API bool GAlwaysReportCrash = false;
 /** Whether to use ClientReportClient rather than the old AutoReporter. */
 CORE_API bool GUseCrashReportClient = true;
 
-/** Whether we should ignore the attached debugger. */
-CORE_API bool GIgnoreDebugger = false;
-
-CORE_API TCHAR MiniDumpFilenameW[1024] = TEXT("");
+CORE_API TCHAR MiniDumpFilenameW[1024] = {};
 
 
 bool GEnsureShowsCRC = false;
@@ -34,11 +31,9 @@ void ReportInteractiveEnsure(const TCHAR* InMessage)
 {
 	GEnsureShowsCRC = true;
 
-#if PLATFORM_DESKTOP
-	GLog->PanicFlushThreadedLogs();
-	// Skip macros and FDebug, we always want this to fire
-	const int32 NumStackFramesToIgnore = 1;
-	ReportEnsure(InMessage, NumStackFramesToIgnore);
+#if PLATFORM_USE_REPORT_ENSURE
+	GLog->FlushThreadedLogs();
+	ReportEnsure(InMessage, nullptr);
 #endif
 
 	GEnsureShowsCRC = false;

@@ -1,19 +1,22 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AnimationEditorUtils.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Framework/Commands/UIAction.h"
 #include "Textures/SlateIcon.h"
 #include "Misc/MessageDialog.h"
 #include "Misc/FeedbackContext.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SSeparator.h"
+#include "Widgets/Layout/SSplitter.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Layout/SUniformGridPanel.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Input/SButton.h"
 #include "Styling/CoreStyle.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Animation/AnimMontage.h"
 #include "Animation/AnimBlueprint.h"
 #include "Factories/AnimBlueprintFactory.h"
@@ -41,7 +44,7 @@
 #include "AnimationStateMachineGraph.h"
 #include "K2Node_Composite.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Interfaces/IMainFrameModule.h"
 
 #define LOCTEXT_NAMESPACE "AnimationEditorUtils"
@@ -91,7 +94,7 @@ void SCreateAnimationAssetDlg::Construct(const FArguments& InArgs)
 			.Padding(2)
 			[
 				SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 				[
 					SNew(SVerticalBox)
 
@@ -149,14 +152,14 @@ void SCreateAnimationAssetDlg::Construct(const FArguments& InArgs)
 				.Padding(5)
 				[
 					SNew(SUniformGridPanel)
-					.SlotPadding(FEditorStyle::GetMargin("StandardDialog.SlotPadding"))
-					.MinDesiredSlotWidth(FEditorStyle::GetFloat("StandardDialog.MinDesiredSlotWidth"))
-					.MinDesiredSlotHeight(FEditorStyle::GetFloat("StandardDialog.MinDesiredSlotHeight"))
+					.SlotPadding(FAppStyle::GetMargin("StandardDialog.SlotPadding"))
+					.MinDesiredSlotWidth(FAppStyle::GetFloat("StandardDialog.MinDesiredSlotWidth"))
+					.MinDesiredSlotHeight(FAppStyle::GetFloat("StandardDialog.MinDesiredSlotHeight"))
 					+ SUniformGridPanel::Slot(0, 0)
 					[
 						SNew(SButton)
 						.HAlign(HAlign_Center)
-						.ContentPadding(FEditorStyle::GetMargin("StandardDialog.ContentPadding"))
+						.ContentPadding(FAppStyle::GetMargin("StandardDialog.ContentPadding"))
 						.Text(LOCTEXT("OK", "OK"))
 						.OnClicked(this, &SCreateAnimationAssetDlg::OnButtonClick, EAppReturnType::Ok)
 					]
@@ -164,7 +167,7 @@ void SCreateAnimationAssetDlg::Construct(const FArguments& InArgs)
 						[
 							SNew(SButton)
 							.HAlign(HAlign_Center)
-							.ContentPadding(FEditorStyle::GetMargin("StandardDialog.ContentPadding"))
+							.ContentPadding(FAppStyle::GetMargin("StandardDialog.ContentPadding"))
 							.Text(LOCTEXT("Cancel", "Cancel"))
 							.OnClicked(this, &SCreateAnimationAssetDlg::OnButtonClick, EAppReturnType::Cancel)
 						]
@@ -317,7 +320,7 @@ bool SAnimationCompressionSelectionDialog::IsConfirmButtonEnabled() const
 void SAnimationCompressionSelectionDialog::Construct(const FArguments& InArgs, const FAnimationCompressionSelectionDialogConfig& InConfig)
 {
 	FAssetPickerConfig AssetPickerConfig;
-	AssetPickerConfig.Filter.ClassNames.Push(UAnimBoneCompressionSettings::StaticClass()->GetFName());
+	AssetPickerConfig.Filter.ClassPaths.Push(UAnimBoneCompressionSettings::StaticClass()->GetClassPathName());
 	AssetPickerConfig.Filter.bRecursiveClasses = true;
 	AssetPickerConfig.InitialAssetViewType = EAssetViewType::List;
 	AssetPickerConfig.OnAssetSelected = FOnAssetSelected::CreateSP(this, &SAnimationCompressionSelectionDialog::OnAssetSelected);
@@ -355,7 +358,7 @@ void SAnimationCompressionSelectionDialog::Construct(const FArguments& InArgs, c
 			.Value(0.75f)
 			[
 				SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 				[
 					AssetPicker.ToSharedRef()
 				]
@@ -458,20 +461,29 @@ namespace AnimationEditorUtils
 		AssetToolsModule.Get().CreateUniqueAssetName(InBasePackageName, InSuffix, OutPackageName, OutAssetName);
 	}
 
-	void CreateAnimationAssets(const TArray<TWeakObjectPtr<UObject>>& SkeletonsOrSkeletalMeshes, TSubclassOf<UAnimationAsset> AssetClass, const FString& InPrefix, FAnimAssetCreated AssetCreated, UObject* NameBaseObject /*= nullptr*/, bool bDoNotShowNameDialog /*= false*/)
+	void CreateAnimationAssets(const TArray<TSoftObjectPtr<UObject>>& SkeletonsOrSkeletalMeshes, TSubclassOf<UAnimationAsset> AssetClass, const FString& InPrefix, FAnimAssetCreated AssetCreated, UObject* NameBaseObject /*= nullptr*/, bool bDoNotShowNameDialog /*= false*/, bool bAllowReplaceExisting /*= false*/)
 	{
 		TArray<UObject*> ObjectsToSync;
-		for(auto SkelIt = SkeletonsOrSkeletalMeshes.CreateConstIterator(); SkelIt; ++SkelIt)
+		for (auto SkelIt = SkeletonsOrSkeletalMeshes.CreateConstIterator(); SkelIt; ++SkelIt)
 		{
+			UObject* SkeletonOrSkeletalMeshObject = SkelIt->LoadSynchronous();
+			
 			USkeletalMesh* SkeletalMesh = nullptr;
-			USkeleton* Skeleton = Cast<USkeleton>(SkelIt->Get());
+			USkeleton* Skeleton = Cast<USkeleton>(SkeletonOrSkeletalMeshObject);
 			if (Skeleton == nullptr)
 			{
-				SkeletalMesh = CastChecked<USkeletalMesh>(SkelIt->Get());
-				Skeleton = SkeletalMesh->GetSkeleton();
+				SkeletalMesh = Cast<USkeletalMesh>(SkeletonOrSkeletalMeshObject);
+				if (SkeletalMesh)
+				{
+					Skeleton = SkeletalMesh->GetSkeleton();				
+				}
+				else
+				{
+					UE_LOG(LogAnimation, Warning, TEXT("Invalid skeleton or skeletal mesh passed to CreateAnimationAssets. No asset will be generated."));
+				}
 			}
 
-			if(Skeleton)
+			if (Skeleton)
 			{
 				FString Name;
 				FString PackageName;
@@ -498,11 +510,44 @@ namespace AnimationEditorUtils
 
 				// Create the asset, and assign its skeleton
 				FAssetToolsModule& AssetToolsModule = FModuleManager::GetModuleChecked<FAssetToolsModule>("AssetTools");
-				UAnimationAsset* NewAsset = Cast<UAnimationAsset>(AssetToolsModule.Get().CreateAsset(Name, FPackageName::GetLongPackagePath(PackageName), AssetClass, NULL));
 
+				UAnimationAsset* NewAsset = nullptr;
+
+				if (bAllowReplaceExisting)
+				{
+					UPackage* ExistingPackage = FindPackage(nullptr, *PackageName);
+					UObject* ExistingObject = StaticFindObject(AssetClass.Get(), ExistingPackage, *Name);
+					if (ExistingObject)
+					{
+						EAppReturnType::Type UserResponse = FMessageDialog::Open(
+							EAppMsgType::YesNo,
+							FText::Format(LOCTEXT("CreateAnimationAssetsAlreadyExists", "Do you want to replace the existing asset?\n\nAn asset already exists at the import location: {0}"), FText::FromString(PackageName)));
+
+						if (UserResponse == EAppReturnType::Yes)
+						{
+							NewAsset = Cast<UAnimationAsset>(ExistingObject);
+						}
+						else
+						{
+							return;
+						}
+					}
+				}
+				
+				if (!NewAsset)
+				{
+					NewAsset = Cast<UAnimationAsset>(AssetToolsModule.Get().CreateAsset(Name, FPackageName::GetLongPackagePath(PackageName), AssetClass, nullptr));
+				}
+				
 				if(NewAsset)
 				{
 					NewAsset->SetSkeleton(Skeleton);
+
+					if (UAnimSequenceBase* SequenceBase = Cast<UAnimSequenceBase>(NewAsset))
+					{
+						SequenceBase->GetController().InitializeModel();
+					}
+					
 					if (SkeletalMesh)
 					{
 						NewAsset->SetPreviewMesh(SkeletalMesh);
@@ -518,31 +563,44 @@ namespace AnimationEditorUtils
 		{
 			if (!AssetCreated.Execute(ObjectsToSync))
 			{
-				//Destroy the assets we just create
+				// Rename the objects we created out of the way
 				for (UObject* ObjectToDelete : ObjectsToSync)
 				{
 					// Notify the asset registry
 					FAssetRegistryModule::AssetDeleted(ObjectToDelete);
-					ObjectToDelete->ClearFlags(RF_Standalone | RF_Public);
-					ObjectToDelete->RemoveFromRoot();
-					ObjectToDelete->MarkPendingKill();
+					ObjectToDelete->Rename(nullptr, GetTransientPackage(), REN_DontCreateRedirectors | REN_ForceNoResetLoaders | REN_NonTransactional);
 				}
-				CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
 			}
 		}
 	}
 
-	void CreateNewAnimBlueprint(TArray<TWeakObjectPtr<UObject>> SkeletonsOrSkeletalMeshes, FAnimAssetCreated AssetCreated, bool bInContentBrowser)
+	void CreateNewAnimBlueprint(TArray<TSoftObjectPtr<UObject>> SkeletonsOrSkeletalMeshes, FAnimAssetCreated AssetCreated, bool bInContentBrowser)
 	{
+		TArray<TWeakObjectPtr<UObject>> SkeletonsOrSkeletalMeshesLoaded;
+		for (TSoftObjectPtr<UObject>& SkeletonsOrSkeletalMesh : SkeletonsOrSkeletalMeshes)
+		{
+			if (UObject* SkeletonOrSkeletalMeshObject = SkeletonsOrSkeletalMesh.LoadSynchronous())
+			{
+				SkeletonsOrSkeletalMeshesLoaded.Add(SkeletonOrSkeletalMeshObject);
+			}
+		}
+
+		CreateNewAnimBlueprint(SkeletonsOrSkeletalMeshesLoaded, AssetCreated, bInContentBrowser);
+	}
+	
+	void CreateNewAnimBlueprint(TArray<TWeakObjectPtr<UObject>> SkeletonsOrSkeletalMeshes, FAnimAssetCreated AssetCreated, bool bInContentBrowser)
+    {
 		const FString DefaultSuffix = TEXT("_AnimBlueprint");
 
 		if (SkeletonsOrSkeletalMeshes.Num() == 1)
 		{
+			UObject* SkeletonOrSkeletalMeshObject = SkeletonsOrSkeletalMeshes[0].Get();
+			
 			USkeletalMesh* SkeletalMesh = nullptr;
-			USkeleton* Skeleton = Cast<USkeleton>(SkeletonsOrSkeletalMeshes[0].Get());
+			USkeleton* Skeleton = Cast<USkeleton>(SkeletonOrSkeletalMeshObject);
 			if (Skeleton == nullptr)
 			{
-				SkeletalMesh = CastChecked<USkeletalMesh>(SkeletonsOrSkeletalMeshes[0].Get());
+				SkeletalMesh = CastChecked<USkeletalMesh>(SkeletonOrSkeletalMeshObject);
 				Skeleton = SkeletalMesh->GetSkeleton();
 			}
 
@@ -578,7 +636,7 @@ namespace AnimationEditorUtils
 							{
 								ObjectToDelete->ClearFlags(RF_Standalone | RF_Public);
 								ObjectToDelete->RemoveFromRoot();
-								ObjectToDelete->MarkPendingKill();
+								ObjectToDelete->MarkAsGarbage();
 							}
 							CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
 						}
@@ -630,7 +688,7 @@ namespace AnimationEditorUtils
 					{
 						ObjectToDelete->ClearFlags(RF_Standalone | RF_Public);
 						ObjectToDelete->RemoveFromRoot();
-						ObjectToDelete->MarkPendingKill();
+						ObjectToDelete->MarkAsGarbage();
 					}
 					CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
 				}
@@ -638,88 +696,117 @@ namespace AnimationEditorUtils
 		}
 	}
 
-	void FillCreateAssetMenu(FMenuBuilder& MenuBuilder, const TArray<TWeakObjectPtr<UObject>>& SkeletonsOrSkeletalMeshes, FAnimAssetCreated AssetCreated, bool bInContentBrowser)
+	bool CanCreateAssetOfType(const UClass* InClass)
 	{
+		IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
+		return AssetTools.IsAssetClassSupported(InClass);
+	}
+
+	void FillCreateAssetMenu(FMenuBuilder& MenuBuilder, const TArray<TSoftObjectPtr<UObject>>& SkeletonsOrSkeletalMeshes, FAnimAssetCreated AssetCreated, bool bInContentBrowser)
+	{
+		const bool bAllowReplaceExisting = false;
+
 		MenuBuilder.BeginSection("CreateAnimAssets", LOCTEXT("CreateAnimAssetsMenuHeading", "Anim Assets"));
 		{
-			// only allow for content browser until we support multi assets so we can open new persona with this BP
-			MenuBuilder.AddMenuEntry(
-				LOCTEXT("Skeleton_NewAnimBlueprint", "Anim Blueprint"),
-				LOCTEXT("Skeleton_NewAnimBlueprintTooltip", "Creates an Anim Blueprint using the selected skeleton."),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "ClassIcon.AnimBlueprint"),
-				FUIAction(
-					FExecuteAction::CreateStatic(&CreateNewAnimBlueprint, SkeletonsOrSkeletalMeshes, AssetCreated, bInContentBrowser),
-					FCanExecuteAction()
-					)
-				);
+			if(CanCreateAssetOfType(UAnimBlueprint::StaticClass()))
+			{
+				// only allow for content browser until we support multi assets so we can open new persona with this BP
+				MenuBuilder.AddMenuEntry(
+					LOCTEXT("Skeleton_NewAnimBlueprint", "Anim Blueprint"),
+					LOCTEXT("Skeleton_NewAnimBlueprintTooltip", "Creates an Anim Blueprint using the selected skeleton."),
+					FSlateIcon(FAppStyle::GetAppStyleSetName(), "ClassIcon.AnimBlueprint"),
+					FUIAction(
+						FExecuteAction::CreateStatic(&CreateNewAnimBlueprint, SkeletonsOrSkeletalMeshes, AssetCreated, bInContentBrowser),
+						FCanExecuteAction()
+						)
+					);
+			}
 
-			MenuBuilder.AddMenuEntry(
-				LOCTEXT("Skeleton_NewAnimComposite", "Anim Composite"),
-				LOCTEXT("Skeleton_NewAnimCompositeTooltip", "Creates an AnimComposite using the selected skeleton."),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "ClassIcon.AnimComposite"),
-				FUIAction(
-					FExecuteAction::CreateStatic(&ExecuteNewAnimAsset<UAnimCompositeFactory, UAnimComposite>, SkeletonsOrSkeletalMeshes, FString("_Composite"), AssetCreated, bInContentBrowser),
-					FCanExecuteAction()
-					)
-				);
+			if(CanCreateAssetOfType(UAnimComposite::StaticClass()))
+			{
+				MenuBuilder.AddMenuEntry(
+					LOCTEXT("Skeleton_NewAnimComposite", "Anim Composite"),
+					LOCTEXT("Skeleton_NewAnimCompositeTooltip", "Creates an AnimComposite using the selected skeleton."),
+					FSlateIcon(FAppStyle::GetAppStyleSetName(), "ClassIcon.AnimComposite"),
+					FUIAction(
+						FExecuteAction::CreateStatic(&ExecuteNewAnimAsset<UAnimCompositeFactory, UAnimComposite>, SkeletonsOrSkeletalMeshes, FString("_Composite"), AssetCreated, bInContentBrowser, bAllowReplaceExisting),
+						FCanExecuteAction()
+						)
+					);
+			}
 
-			MenuBuilder.AddMenuEntry(
-				LOCTEXT("Skeleton_NewAnimMontage", "Anim Montage"),
-				LOCTEXT("Skeleton_NewAnimMontageTooltip", "Creates an AnimMontage using the selected skeleton."),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "ClassIcon.AnimMontage"),
-				FUIAction(
-					FExecuteAction::CreateStatic(&ExecuteNewAnimAsset<UAnimMontageFactory, UAnimMontage>, SkeletonsOrSkeletalMeshes, FString("_Montage"), AssetCreated, bInContentBrowser),
-					FCanExecuteAction()
-					)
-				);
+			if(CanCreateAssetOfType(UAnimMontage::StaticClass()))
+			{
+				MenuBuilder.AddMenuEntry(
+					LOCTEXT("Skeleton_NewAnimMontage", "Anim Montage"),
+					LOCTEXT("Skeleton_NewAnimMontageTooltip", "Creates an AnimMontage using the selected skeleton."),
+					FSlateIcon(FAppStyle::GetAppStyleSetName(), "ClassIcon.AnimMontage"),
+					FUIAction(
+						FExecuteAction::CreateStatic(&ExecuteNewAnimAsset<UAnimMontageFactory, UAnimMontage>, SkeletonsOrSkeletalMeshes, FString("_Montage"), AssetCreated, bInContentBrowser, bAllowReplaceExisting),
+						FCanExecuteAction()
+						)
+					);
+			}
 		}
 		MenuBuilder.EndSection();
 
 		MenuBuilder.BeginSection("CreateBlendSpace", LOCTEXT("CreateBlendSpaceMenuHeading", "Blend Spaces"));
 		{
-			MenuBuilder.AddMenuEntry(
-				LOCTEXT("SkeletalMesh_New2DBlendspace", "Blend Space"),
-				LOCTEXT("SkeletalMesh_New2DBlendspaceTooltip", "Creates a Blend Space using the selected skeleton."),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "ClassIcon.BlendSpace"),
-				FUIAction(
-					FExecuteAction::CreateStatic(&ExecuteNewAnimAsset<UBlendSpaceFactoryNew, UBlendSpace>, SkeletonsOrSkeletalMeshes, FString("_BlendSpace"), AssetCreated, bInContentBrowser),
-					FCanExecuteAction()
-					)
-				);
+			if (CanCreateAssetOfType(UBlendSpace::StaticClass()))
+			{
+				MenuBuilder.AddMenuEntry(
+					LOCTEXT("SkeletalMesh_New2DBlendspace", "Blend Space"),
+					LOCTEXT("SkeletalMesh_New2DBlendspaceTooltip", "Creates a Blend Space using the selected skeleton."),
+					FSlateIcon(FAppStyle::GetAppStyleSetName(), "ClassIcon.BlendSpace"),
+					FUIAction(
+						FExecuteAction::CreateStatic(&ExecuteNewAnimAsset<UBlendSpaceFactoryNew, UBlendSpace>, SkeletonsOrSkeletalMeshes, FString("_BlendSpace"), AssetCreated, bInContentBrowser, bAllowReplaceExisting),
+						FCanExecuteAction()
+						)
+					);
+			}
 
-			MenuBuilder.AddMenuEntry(
-				LOCTEXT("SkeletalMesh_New1DBlendspace", "Blend Space 1D"),
-				LOCTEXT("SkeletalMesh_New1DBlendspaceTooltip", "Creates a 1D Blend Space using the selected skeleton."),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "ClassIcon.BlendSpace1D"),
-				FUIAction(
-					FExecuteAction::CreateStatic(&ExecuteNewAnimAsset<UBlendSpaceFactory1D, UBlendSpace1D>, SkeletonsOrSkeletalMeshes, FString("_BlendSpace1D"), AssetCreated, bInContentBrowser),
-					FCanExecuteAction()
-					)
-				);
+			if (CanCreateAssetOfType(UBlendSpace1D::StaticClass()))
+			{
+				MenuBuilder.AddMenuEntry(
+					LOCTEXT("SkeletalMesh_New1DBlendspace", "Blend Space 1D"),
+					LOCTEXT("SkeletalMesh_New1DBlendspaceTooltip", "Creates a 1D Blend Space using the selected skeleton."),
+					FSlateIcon(FAppStyle::GetAppStyleSetName(), "ClassIcon.BlendSpace1D"),
+					FUIAction(
+						FExecuteAction::CreateStatic(&ExecuteNewAnimAsset<UBlendSpaceFactory1D, UBlendSpace1D>, SkeletonsOrSkeletalMeshes, FString("_BlendSpace1D"), AssetCreated, bInContentBrowser, bAllowReplaceExisting),
+						FCanExecuteAction()
+						)
+					);
+			}
 		}
 		MenuBuilder.EndSection();
 
 		MenuBuilder.BeginSection("CreateAimOffset", LOCTEXT("CreateAimOffsetMenuHeading", "Aim Offsets"));
 		{
-			MenuBuilder.AddMenuEntry(
-				LOCTEXT("SkeletalMesh_New2DAimOffset", "Aim Offset"),
-				LOCTEXT("SkeletalMesh_New2DAimOffsetTooltip", "Creates a Aim Offset blendspace using the selected skeleton."),
-				FSlateIcon(),
-				FUIAction(
-					FExecuteAction::CreateStatic(&ExecuteNewAnimAsset<UAimOffsetBlendSpaceFactoryNew, UAimOffsetBlendSpace>, SkeletonsOrSkeletalMeshes, FString("_AimOffset2D"), AssetCreated, bInContentBrowser),
-					FCanExecuteAction()
-					)
-				);
+			if (CanCreateAssetOfType(UAimOffsetBlendSpace::StaticClass()))
+			{
+				MenuBuilder.AddMenuEntry(
+					LOCTEXT("SkeletalMesh_New2DAimOffset", "Aim Offset"),
+					LOCTEXT("SkeletalMesh_New2DAimOffsetTooltip", "Creates a Aim Offset blendspace using the selected skeleton."),
+					FSlateIcon(),
+					FUIAction(
+						FExecuteAction::CreateStatic(&ExecuteNewAnimAsset<UAimOffsetBlendSpaceFactoryNew, UAimOffsetBlendSpace>, SkeletonsOrSkeletalMeshes, FString("_AimOffset2D"), AssetCreated, bInContentBrowser, bAllowReplaceExisting),
+						FCanExecuteAction()
+						)
+					);
+			}
 
-			MenuBuilder.AddMenuEntry(
-				LOCTEXT("SkeletalMesh_New1DAimOffset", "Aim Offset 1D"),
-				LOCTEXT("SkeletalMesh_New1DAimOffsetTooltip", "Creates a 1D Aim Offset blendspace using the selected skeleton."),
-				FSlateIcon(),
-				FUIAction(
-					FExecuteAction::CreateStatic(&ExecuteNewAnimAsset<UAimOffsetBlendSpaceFactory1D, UAimOffsetBlendSpace1D>, SkeletonsOrSkeletalMeshes, FString("_AimOffset1D"), AssetCreated, bInContentBrowser),
-					FCanExecuteAction()
-					)
-				);
+			if (CanCreateAssetOfType(UAimOffsetBlendSpace1D::StaticClass()))
+			{
+				MenuBuilder.AddMenuEntry(
+					LOCTEXT("SkeletalMesh_New1DAimOffset", "Aim Offset 1D"),
+					LOCTEXT("SkeletalMesh_New1DAimOffsetTooltip", "Creates a 1D Aim Offset blendspace using the selected skeleton."),
+					FSlateIcon(),
+					FUIAction(
+						FExecuteAction::CreateStatic(&ExecuteNewAnimAsset<UAimOffsetBlendSpaceFactory1D, UAimOffsetBlendSpace1D>, SkeletonsOrSkeletalMeshes, FString("_AimOffset1D"), AssetCreated, bInContentBrowser, bAllowReplaceExisting),
+						FCanExecuteAction()
+						)
+					);
+			}
 		}
 		MenuBuilder.EndSection();
 	}
@@ -733,8 +820,7 @@ namespace AnimationEditorUtils
 			GWarn->BeginSlowTask(LOCTEXT("AnimCompressing", "Compressing"), true);
 
 			{
-				TSharedPtr<FAnimCompressContext> CompressContext = MakeShareable(new FAnimCompressContext(false, true, AnimSequencePtrs.Num()));
-
+				UE::Anim::Compression::FAnimationCompressionMemorySummaryScope Scope;
 				for (UAnimSequence* AnimSeq : AnimSequencePtrs)
 				{
 					if (OverrideSettings != nullptr)
@@ -744,8 +830,8 @@ namespace AnimationEditorUtils
 
 					// Clear CompressCommandletVersion so we can recompress these animations later.
 					AnimSeq->CompressCommandletVersion = 0;
-					AnimSeq->RequestAnimCompression(FRequestAnimCompressionParams(true, CompressContext));
-					++CompressContext->AnimIndex;
+					AnimSeq->ClearAllCachedCookedPlatformData();
+					AnimSeq->CacheDerivedDataForCurrentPlatform();
 				}
 			}
 
@@ -816,7 +902,13 @@ namespace AnimationEditorUtils
 			}
 			else if(UAnimStateNodeBase* StateNode = Cast<UAnimStateNodeBase>(CurrentNode))
 			{
-				ChildGraphs.AddUnique(StateNode->GetBoundGraph());
+				UEdGraph* BoundGraph = StateNode->GetBoundGraph();
+				if (BoundGraph == nullptr)
+				{
+					continue;
+				}
+
+				ChildGraphs.AddUnique(BoundGraph);
 
 				if(UAnimStateTransitionNode* TransitionNode = Cast<UAnimStateTransitionNode>(StateNode))
 				{
@@ -833,24 +925,44 @@ namespace AnimationEditorUtils
 		}
 	}
 
+	static FOnPoseWatchesChanged OnPoseWatchesChangedDelegate;
+
 	void SetPoseWatch(UPoseWatch* PoseWatch, UAnimBlueprint* AnimBlueprintIfKnown)
 	{
 #if WITH_EDITORONLY_DATA
-		if (UAnimGraphNode_Base* TargetNode = Cast<UAnimGraphNode_Base>(PoseWatch->Node))
-		{
-			UAnimBlueprint* AnimBlueprint = AnimBlueprintIfKnown ? AnimBlueprintIfKnown : Cast<UAnimBlueprint>(FBlueprintEditorUtils::FindBlueprintForNode(TargetNode));
-
-			if ((AnimBlueprint != NULL) && (AnimBlueprint->GeneratedClass != NULL))
+			if (UAnimGraphNode_Base* TargetNode = Cast<UAnimGraphNode_Base>(PoseWatch->Node))
 			{
-				if (UAnimBlueprintGeneratedClass* AnimBPGenClass = Cast<UAnimBlueprintGeneratedClass>(*AnimBlueprint->GeneratedClass))
+				UAnimBlueprint* AnimBlueprint = AnimBlueprintIfKnown ? AnimBlueprintIfKnown : Cast<UAnimBlueprint>(FBlueprintEditorUtils::FindBlueprintForNode(TargetNode));
+				if ((AnimBlueprint != nullptr) && (AnimBlueprint->GeneratedClass != nullptr))
 				{
-					// Find the insertion point from the debugging data
-					int32 LinkID = AnimBPGenClass->GetLinkIDForNode<FAnimNode_Base>(TargetNode);
-					AnimBPGenClass->GetAnimBlueprintDebugData().AddPoseWatch(LinkID, PoseWatch->PoseWatchColour);
+					if (UAnimBlueprintGeneratedClass* AnimBPGenClass = Cast<UAnimBlueprintGeneratedClass>(*AnimBlueprint->GeneratedClass))
+					{
+						// Find the insertion point from the debugging data
+						const int32 LinkID = AnimBPGenClass->GetLinkIDForNode<FAnimNode_Base>(TargetNode);
+
+						for (const TObjectPtr<UPoseWatchElement>& PoseWatchElement : PoseWatch->GetElements())
+						{
+							if (UPoseWatchPoseElement* PoseWatchPoseElement = Cast<UPoseWatchPoseElement>(PoseWatchElement.Get()))
+							{
+								AnimBPGenClass->GetAnimBlueprintDebugData().AddPoseWatch(LinkID, PoseWatchPoseElement);
+							}
+						}
+
+						OnPoseWatchesChangedDelegate.Broadcast(AnimBlueprint, TargetNode);
+					}
 				}
 			}
+#endif
+	}
+
+	void RemovePoseWatchesFromGraph(UAnimBlueprint* AnimBlueprint, class UEdGraph* Graph)
+	{
+#if WITH_EDITORONLY_DATA
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			RemovePoseWatchFromNode(Node, AnimBlueprint);
 		}
-#endif	//#if WITH_EDITORONLY_DATA
+#endif
 	}
 
 	UPoseWatch* FindPoseWatchForNode(const UEdGraphNode* Node, UAnimBlueprint* AnimBlueprintIfKnown)
@@ -882,15 +994,19 @@ namespace AnimationEditorUtils
 #endif
 	}
 
-	void MakePoseWatchForNode(UAnimBlueprint* AnimBlueprint, UEdGraphNode* Node, FColor PoseWatchColour)
+	UPoseWatch* MakePoseWatchForNode(UAnimBlueprint* AnimBlueprint, UEdGraphNode* Node)
 	{
 #if WITH_EDITORONLY_DATA
+		check(CastChecked<UAnimGraphNode_Base>(Node)->IsPoseWatchable());
 		UPoseWatch* NewPoseWatch = NewObject<UPoseWatch>(AnimBlueprint);
 		NewPoseWatch->Node = Node;
-		NewPoseWatch->PoseWatchColour = PoseWatchColour;
+		NewPoseWatch->SetUniqueDefaultLabel();
+		NewPoseWatch->AddElement<UPoseWatchPoseElement>(LOCTEXT("PoseWatchElementLabel_PoseWatch", "Pose Watch"), TEXT("AnimGraph.PoseWatch.Icon"));
 		AnimBlueprint->PoseWatches.Add(NewPoseWatch);
-
 		SetPoseWatch(NewPoseWatch, AnimBlueprint);
+		return NewPoseWatch;
+#else
+		return nullptr;
 #endif
 	}
 
@@ -900,42 +1016,111 @@ namespace AnimationEditorUtils
 		if (UAnimGraphNode_Base* TargetNode = Cast<UAnimGraphNode_Base>(PoseWatch->Node))
 		{
 			UAnimBlueprint* AnimBlueprint = AnimBlueprintIfKnown ? AnimBlueprintIfKnown : Cast<UAnimBlueprint>(FBlueprintEditorUtils::FindBlueprintForNode(TargetNode));
-
 			if (AnimBlueprint)
 			{
 				AnimBlueprint->PoseWatches.Remove(PoseWatch);
-
 				if (UAnimBlueprintGeneratedClass* AnimBPGenClass = AnimBlueprint->GetAnimBlueprintGeneratedClass())
 				{
 					int32 LinkID = AnimBPGenClass->GetLinkIDForNode<FAnimNode_Base>(Cast<UAnimGraphNode_Base>(PoseWatch->Node));
 					AnimBPGenClass->GetAnimBlueprintDebugData().RemovePoseWatch(LinkID);
+					OnPoseWatchesChangedDelegate.Broadcast(AnimBlueprint, TargetNode);
 				}
 			}
 		}
 #endif
 	}
 
-	void UpdatePoseWatchColour(UPoseWatch* PoseWatch, FColor NewPoseWatchColour)
+	void RemovePoseWatchFromNode(UEdGraphNode* Node, UAnimBlueprint* AnimBlueprint)
 	{
 #if WITH_EDITORONLY_DATA
-		PoseWatch->PoseWatchColour = NewPoseWatchColour;
-
-		if (UAnimGraphNode_Base* TargetNode = Cast<UAnimGraphNode_Base>(PoseWatch->Node))
+		if (AnimBlueprint)
 		{
-			UAnimBlueprint* AnimBlueprint = Cast<UAnimBlueprint>(FBlueprintEditorUtils::FindBlueprintForNode(TargetNode));
-
-			if ((AnimBlueprint != NULL) && (AnimBlueprint->GeneratedClass != NULL))
+			for (UPoseWatch* SomePoseWatch : AnimBlueprint->PoseWatches)
 			{
-				if (UAnimBlueprintGeneratedClass* AnimBPGenClass = Cast<UAnimBlueprintGeneratedClass>(*AnimBlueprint->GeneratedClass))
+				if (SomePoseWatch->Node == Node)
 				{
-					// Find the insertion point from the debugging data
-					int32 LinkID = AnimBPGenClass->GetLinkIDForNode<FAnimNode_Base>(TargetNode);
+					if (UAnimBlueprintGeneratedClass* AnimBPGenClass = AnimBlueprint->GetAnimBlueprintGeneratedClass())
+					{
+						int32 LinkID = AnimBPGenClass->GetLinkIDForNode<FAnimNode_Base>(Cast<UAnimGraphNode_Base>(SomePoseWatch->Node));
+						AnimBPGenClass->GetAnimBlueprintDebugData().RemovePoseWatch(LinkID);
 
-					AnimBPGenClass->GetAnimBlueprintDebugData().UpdatePoseWatchColour(LinkID, NewPoseWatchColour);
+						OnPoseWatchesChangedDelegate.Broadcast(AnimBlueprint, Node);
+					}
+
+					SomePoseWatch->OnRemoved();
+					return;
 				}
 			}
 		}
 #endif
+	}
+
+	FOnPoseWatchesChanged& OnPoseWatchesChanged()
+	{
+		return OnPoseWatchesChangedDelegate;
+	}
+
+	int32 GetPoseWatchNodeLinkID(UPoseWatch* PoseWatch, UAnimBlueprintGeneratedClass*& OutAnimBPGenClass)
+	{
+#if WITH_EDITORONLY_DATA
+		if (UAnimGraphNode_Base* TargetNode = Cast<UAnimGraphNode_Base>(PoseWatch->Node))
+		{
+			UAnimBlueprint* AnimBlueprint = Cast<UAnimBlueprint>(FBlueprintEditorUtils::FindBlueprintForNode(TargetNode));
+
+			if ((AnimBlueprint != nullptr) && (AnimBlueprint->GeneratedClass != nullptr))
+			{
+				if (UAnimBlueprintGeneratedClass* AnimBPGenClass = Cast<UAnimBlueprintGeneratedClass>(*AnimBlueprint->GeneratedClass))
+				{
+					// Find the insertion point from the debugging data
+					OutAnimBPGenClass = AnimBPGenClass;
+					return AnimBPGenClass->GetLinkIDForNode<FAnimNode_Base>(TargetNode);
+				}
+			}
+		}
+#endif
+		return INDEX_NONE;
+	}
+
+	void SetupDebugLinkedAnimInstances(UAnimBlueprint* InAnimBlueprint, UObject* InRootObjectBeingDebugged)
+	{
+		check(IsInGameThread());
+		
+		static bool bSettingDebugInstances = false;
+
+		if(!bSettingDebugInstances)
+		{
+			TGuardValue<bool> GuardValue(bSettingDebugInstances, true);
+			if(InRootObjectBeingDebugged)
+			{
+				if(const USkeletalMeshComponent* Component = Cast<USkeletalMeshComponent>(InRootObjectBeingDebugged->GetOuter()))
+				{
+					// See if we have any linked instances
+					const TArray<UAnimInstance*> LinkedInstances = Component->GetLinkedAnimInstances();
+					for(UAnimInstance* LinkedInstance : LinkedInstances)
+					{
+						if(UAnimBlueprint* LinkedAnimBlueprint = Cast<UAnimBlueprint>(LinkedInstance->GetClass()->ClassGeneratedBy))
+						{
+							LinkedAnimBlueprint->SetObjectBeingDebugged(LinkedInstance);
+						}
+					}
+				}
+			}
+			else if(UObject* OldDebuggedObject = InAnimBlueprint->GetObjectBeingDebugged())
+			{
+				if(const USkeletalMeshComponent* Component = Cast<USkeletalMeshComponent>(OldDebuggedObject->GetOuter()))
+				{
+					// See if we have any linked instances
+					const TArray<UAnimInstance*> LinkedInstances = Component->GetLinkedAnimInstances();
+					for(UAnimInstance* LinkedInstance : LinkedInstances)
+					{
+						if(UAnimBlueprint* LinkedAnimBlueprint = Cast<UAnimBlueprint>(LinkedInstance->GetClass()->ClassGeneratedBy))
+						{
+							LinkedAnimBlueprint->SetObjectBeingDebugged(nullptr);
+						}
+					}
+				}
+			}
+		}
 	}
 }
 

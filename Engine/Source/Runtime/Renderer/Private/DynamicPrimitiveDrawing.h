@@ -10,12 +10,14 @@
 #include "SceneManagement.h"
 #include "SceneRendering.h"
 
+class FGPUScenePrimitiveCollector;
+
 /** A primitive draw interface which adds the drawn elements to the view's batched elements. */
 class FViewElementPDI : public FPrimitiveDrawInterface
 {
 public:
 
-	FViewElementPDI(FViewInfo* InViewInfo,FHitProxyConsumer* InHitProxyConsumer,TArray<FPrimitiveUniformShaderParameters>* InDynamicPrimitiveShaderData);
+	FViewElementPDI(FViewInfo* InViewInfo,FHitProxyConsumer* InHitProxyConsumer, FGPUScenePrimitiveCollector *InDynamicPrimitiveCollector);
 
 	// FPrimitiveDrawInterface interface.
 	virtual bool IsHitTesting() override;
@@ -33,8 +35,10 @@ public:
 		float UL,
 		float V,
 		float VL,
-		uint8 BlendMode = SE_BLEND_Masked
+		uint8 BlendMode = SE_BLEND_Masked,
+		float OpacityMaskRefVal = .5f
 		) override;
+
 	virtual void DrawLine(
 		const FVector& Start,
 		const FVector& End,
@@ -44,6 +48,15 @@ public:
 		float DepthBias = 0.0f,
 		bool bScreenSpace = false
 		) override;
+	virtual void DrawTranslucentLine(
+		const FVector& Start,
+		const FVector& End,
+		const FLinearColor& Color,
+		uint8 DepthPriorityGroup,
+		float Thickness = 0.0f,
+		float DepthBias = 0.0f,
+		bool bScreenSpace = false
+	) override;
 	virtual void DrawPoint(
 		const FVector& Position,
 		const FLinearColor& Color,
@@ -56,11 +69,11 @@ private:
 	FViewInfo* ViewInfo;
 	TRefCountPtr<HHitProxy> CurrentHitProxy;
 	FHitProxyConsumer* HitProxyConsumer;
-	TArray<FPrimitiveUniformShaderParameters>* DynamicPrimitiveShaderData;
+	FGPUScenePrimitiveCollector* DynamicPrimitiveCollector;
 
 	/** Depending of the DPG we return a different FBatchedElement instance. */
 	FBatchedElements& GetElements(uint8 DepthPriorityGroup) const;
 };
 
-#include "DynamicPrimitiveDrawing.inl"
+#include "DynamicPrimitiveDrawing.inl" // IWYU pragma: export
 

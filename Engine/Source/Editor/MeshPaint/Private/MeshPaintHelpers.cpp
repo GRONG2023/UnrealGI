@@ -12,7 +12,10 @@
 #include "Components/StaticMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/SkeletalMesh.h"
+#include "Engine/SkinnedAssetCommon.h"
 #include "Engine/Texture2D.h"
+#include "SceneView.h"
+#include "StaticMeshComponentLODInfo.h"
 #include "StaticMeshResources.h"
 #include "StaticMeshAttributes.h"
 
@@ -39,13 +42,6 @@
 #include "EditorViewportClient.h"
 #include "LevelEditorViewport.h"
 
-#include "VREditorMode.h"
-#include "IVREditorModule.h"
-#include "ViewportWorldInteraction.h"
-#include "ViewportInteractableInterface.h"
-#include "VREditorInteractor.h"
-#include "EditorWorldExtension.h"
-
 #include "Factories/FbxSkeletalMeshImportData.h"
 
 #include "Async/ParallelFor.h"
@@ -60,7 +56,7 @@ void MeshPaintHelpers::RemoveInstanceVertexColors(UObject* Obj)
 	if (Actor != nullptr)
 	{
 		TArray<UStaticMeshComponent*> StaticMeshComponents;
-		Actor->GetComponents<UStaticMeshComponent>(StaticMeshComponents);
+		Actor->GetComponents(StaticMeshComponents);
 		for (const auto& StaticMeshComponent : StaticMeshComponents)
 		{
 			if (StaticMeshComponent != nullptr)
@@ -123,7 +119,7 @@ bool MeshPaintHelpers::PropagateColorsToRawMesh(UStaticMesh* StaticMesh, int32 L
 		int32 NumWedges = MeshDescription->VertexInstances().Num();
 		if (RenderModel.WedgeMap.Num() == NumWedges)
 		{
-			TVertexInstanceAttributesRef<FVector4> Colors = Attributes.GetVertexInstanceColors();
+			TVertexInstanceAttributesRef<FVector4f> Colors = Attributes.GetVertexInstanceColors();
 			int32 VertexInstanceIndex = 0;
 			for (const FVertexInstanceID VertexInstanceID : MeshDescription->VertexInstances().GetElementIDs())
 			{
@@ -152,12 +148,12 @@ bool MeshPaintHelpers::PropagateColorsToRawMesh(UStaticMesh* StaticMesh, int32 L
 		FStaticMeshAttributes Attributes(*MeshDescription);
 
 		// Fall back to mapping based on position.
-		TVertexAttributesConstRef<FVector> VertexPositions = Attributes.GetVertexPositions();
-		TVertexInstanceAttributesRef<FVector4> Colors = Attributes.GetVertexInstanceColors();
+		TVertexAttributesConstRef<FVector3f> VertexPositions = Attributes.GetVertexPositions();
+		TVertexInstanceAttributesRef<FVector4f> Colors = Attributes.GetVertexInstanceColors();
 		TArray<FColor> NewVertexColors;
 		FPositionVertexBuffer TempPositionVertexBuffer;
 		int32 NumVertex = MeshDescription->Vertices().Num();
-		TArray<FVector> VertexPositionsDup;
+		TArray<FVector3f> VertexPositionsDup;
 		VertexPositionsDup.AddZeroed(NumVertex);
 		int32 VertexIndex = 0;
 		for (const FVertexID VertexID : MeshDescription->Vertices().GetElementIDs())
@@ -572,76 +568,27 @@ bool MeshPaintHelpers::RetrieveViewportPaintRays(const FSceneView* View, FViewpo
 
 	if (ViewportClient->IsPerspective())
 	{
-		// If in VR mode retrieve possible viewport interactors and render widgets for them
-		UVREditorMode* VREditorMode = nullptr;
-		if (MeshPaintHelpers::IsInVRMode(ViewportClient))
+
+		// Make sure the cursor is visible OR we're flood filling.  No point drawing a paint cue when there's no cursor.
+		if (Viewport->IsCursorVisible())
 		{
-			VREditorMode = Cast<UVREditorMode>(GEditor->GetEditorWorldExtensionsManager()->GetEditorWorldExtensions(ViewportClient->GetWorld())->FindExtension(UVREditorMode::StaticClass()));
-
-			TArray<UViewportInteractor*> Interactors = VREditorMode->GetWorldInteraction().GetInteractors();
-
-			for (UViewportInteractor* Interactor : Interactors)
+			if (!PDI->IsHitTesting())
 			{
-				checkf(Interactor, TEXT("Invalid VR Interactor"));
-				
-				// Don't draw visual cue if we're hovering over a viewport interact able, such as a dockable window selection bar
-				bool bShouldDrawInteractor = false;
-				FHitResult HitResult = Interactor->GetHitResultFromLaserPointer();
-				if (HitResult.Actor.IsValid())
+				// Grab the mouse cursor position
+				FIntPoint MousePosition;
+				Viewport->GetMousePos(MousePosition);
+
+				// Is the mouse currently over the viewport? or flood filling
+				if ((MousePosition.X >= 0 && MousePosition.Y >= 0 && MousePosition.X < (int32)Viewport->GetSizeXY().X && MousePosition.Y < (int32)Viewport->GetSizeXY().Y))
 				{
-					UViewportWorldInteraction& WorldInteraction = VREditorMode->GetWorldInteraction();
+					// Compute a world space ray from the screen space mouse coordinates
+					FViewportCursorLocation MouseViewportRay(View, ViewportClient, MousePosition.X, MousePosition.Y);
 
-					if (WorldInteraction.IsInteractableComponent(HitResult.GetComponent()))
-					{
-						AActor* Actor = HitResult.Actor.Get();
-
-						// Make sure we're not hovering over some other viewport interactable, such as a dockable window selection bar or close button
-						IViewportInteractableInterface* ActorInteractable = Cast<IViewportInteractableInterface>(Actor);
-						bShouldDrawInteractor = (ActorInteractable == nullptr);
-					}
-				}
-				
-				// Don't draw visual cue for paint brush when the interactor is hovering over UI
-				if (bShouldDrawInteractor && !Interactor->IsHoveringOverPriorityType())
-				{
-					FVector LaserPointerStart, LaserPointerEnd;
-					if (Interactor->GetLaserPointer( /* Out */ LaserPointerStart, /* Out */ LaserPointerEnd))
-					{
-						const FVector LaserPointerDirection = (LaserPointerEnd - LaserPointerStart).GetSafeNormal();
-
-						FPaintRay& NewPaintRay = *new(OutPaintRays) FPaintRay();
-						NewPaintRay.CameraLocation = VREditorMode->GetHeadTransform().GetLocation();
-						NewPaintRay.RayStart = LaserPointerStart;
-						NewPaintRay.RayDirection = LaserPointerDirection;
-						NewPaintRay.ViewportInteractor = Interactor;
-					}
-				}
-			}
-		}
-		else
-		{
-			// Else we're painting with mouse
-			// Make sure the cursor is visible OR we're flood filling.  No point drawing a paint cue when there's no cursor.
-			if (Viewport->IsCursorVisible())
-			{
-				if (!PDI->IsHitTesting())
-				{
-					// Grab the mouse cursor position
-					FIntPoint MousePosition;
-					Viewport->GetMousePos(MousePosition);
-
-					// Is the mouse currently over the viewport? or flood filling
-					if ((MousePosition.X >= 0 && MousePosition.Y >= 0 && MousePosition.X < (int32)Viewport->GetSizeXY().X && MousePosition.Y < (int32)Viewport->GetSizeXY().Y))
-					{
-						// Compute a world space ray from the screen space mouse coordinates
-						FViewportCursorLocation MouseViewportRay(View, ViewportClient, MousePosition.X, MousePosition.Y);
-
-						FPaintRay& NewPaintRay = *new(OutPaintRays) FPaintRay();
-						NewPaintRay.CameraLocation = View->ViewMatrices.GetViewOrigin();
-						NewPaintRay.RayStart = MouseViewportRay.GetOrigin();
-						NewPaintRay.RayDirection = MouseViewportRay.GetDirection();
-						NewPaintRay.ViewportInteractor = nullptr;
-					}
+					FPaintRay& NewPaintRay = *new(OutPaintRays) FPaintRay();
+					NewPaintRay.CameraLocation = View->ViewMatrices.GetViewOrigin();
+					NewPaintRay.RayStart = MouseViewportRay.GetOrigin();
+					NewPaintRay.RayDirection = MouseViewportRay.GetDirection();
+					NewPaintRay.ViewportInteractor = nullptr;
 				}
 			}
 		}
@@ -722,7 +669,7 @@ TArray<FVector> MeshPaintHelpers::GetVerticesForLOD( const UStaticMesh* StaticMe
 		const uint32 NumVertices = VertexBuffer->GetNumVertices();
 		for (uint32 VertexIndex = 0; VertexIndex < NumVertices; ++VertexIndex)
 		{
-			Vertices.Add(VertexBuffer->VertexPosition(VertexIndex));
+			Vertices.Add((FVector)VertexBuffer->VertexPosition(VertexIndex));
 		}		
 	}
 	return Vertices;
@@ -889,7 +836,7 @@ void MeshPaintHelpers::FillStaticMeshVertexColors(UStaticMeshComponent* MeshComp
 void MeshPaintHelpers::FillSkeletalMeshVertexColors(USkeletalMeshComponent* MeshComponent, int32 LODIndex, const FColor FillColor, const FColor MaskColor)
 {
 	TUniquePtr< FSkinnedMeshComponentRecreateRenderStateContext > RecreateRenderStateContext;
-	USkeletalMesh* Mesh = MeshComponent->SkeletalMesh;
+	USkeletalMesh* Mesh = MeshComponent->GetSkeletalMeshAsset();
 	if (Mesh)
 	{
 		// Dirty the mesh
@@ -1059,10 +1006,10 @@ void MeshPaintHelpers::ImportVertexColorsFromTexture(UMeshComponent* MeshCompone
 				{
 					USkeletalMeshComponent* SkeletalMeshComponent = Cast<USkeletalMeshComponent>(MeshComponent);
 
-					if (SkeletalMeshComponent->SkeletalMesh)
+					if (SkeletalMeshComponent->GetSkeletalMeshAsset())
 					{
 						// Import colors to skeletal mesh
-						ImportVertexColorsToSkeletalMesh(SkeletalMeshComponent->SkeletalMesh, Options, ColorTexture);
+						ImportVertexColorsToSkeletalMesh(SkeletalMeshComponent->GetSkeletalMeshAsset(), Options, ColorTexture);
 					}			
 				}
 			}
@@ -1172,21 +1119,6 @@ void MeshPaintHelpers::SetRealtimeViewport(bool bRealtime)
 	}
 }
 
-
-bool MeshPaintHelpers::IsInVRMode(const FEditorViewportClient* ViewportClient)
-{
-	bool bIsInVRMode = false;
-	if (IVREditorModule::IsAvailable())
-	{
-		UVREditorMode* VREditorMode = Cast<UVREditorMode>(GEditor->GetEditorWorldExtensionsManager()->GetEditorWorldExtensions(ViewportClient->GetWorld())->FindExtension(UVREditorMode::StaticClass()));
-		if (VREditorMode != nullptr && VREditorMode->IsFullyInitialized() && VREditorMode->IsActive())
-		{
-			bIsInVRMode = true;
-		}
-	}
-
-	return bIsInVRMode;
-}
 
 void MeshPaintHelpers::ForceRenderMeshLOD(UMeshComponent* Component, int32 LODIndex)
 {
@@ -1325,7 +1257,7 @@ bool MeshPaintHelpers::TryGetNumberOfLODs(const UMeshComponent* MeshComponent, i
 	}
 	else if (const USkeletalMeshComponent* SkeletalMeshComponent = Cast<USkeletalMeshComponent>(MeshComponent))
 	{
-		const USkeletalMesh* SkeletalMesh = SkeletalMeshComponent->SkeletalMesh;
+		const USkeletalMesh* SkeletalMesh = SkeletalMeshComponent->GetSkeletalMeshAsset();
 		if (SkeletalMesh != nullptr)
 		{
 			OutNumLODs = SkeletalMesh->GetLODNum();
@@ -1357,7 +1289,7 @@ int32 MeshPaintHelpers::GetNumberOfUVs(const UMeshComponent* MeshComponent, int3
 	}
 	else if (const USkeletalMeshComponent* SkeletalMeshComponent = Cast<USkeletalMeshComponent>(MeshComponent))
 	{
-		const USkeletalMesh* SkeletalMesh = SkeletalMeshComponent->SkeletalMesh;
+		const USkeletalMesh* SkeletalMesh = SkeletalMeshComponent->GetSkeletalMeshAsset();
 		if (SkeletalMesh != nullptr && SkeletalMesh->GetResourceForRendering() && SkeletalMesh->GetResourceForRendering()->LODRenderData.IsValidIndex(LODIndex))
 		{
 			NumUVs = SkeletalMesh->GetResourceForRendering()->LODRenderData[LODIndex].GetNumTexCoords();
@@ -1395,7 +1327,7 @@ bool MeshPaintHelpers::DoesMeshComponentContainPerLODColors(const UMeshComponent
 	}
 	else if (const USkeletalMeshComponent* SkeletalMeshComponent = Cast<USkeletalMeshComponent>(MeshComponent))
 	{
-		USkeletalMesh* SkeletalMesh = SkeletalMeshComponent->SkeletalMesh;
+		USkeletalMesh* SkeletalMesh = SkeletalMeshComponent->GetSkeletalMeshAsset();
 		if (SkeletalMesh)
 		{
 			const TArray<FSkeletalMeshLODInfo>& LODInfo = SkeletalMesh->GetLODInfoArray();
@@ -1438,8 +1370,9 @@ void MeshPaintHelpers::ImportVertexColorsToStaticMesh(UStaticMesh* StaticMesh, c
 	checkf(StaticMesh && Options && Texture, TEXT("Invalid ptr"));
 
 	// Extract color data from texture
+	// todo: use GetMipImage instead of GetMipData
 	TArray64<uint8> SrcMipData;
-	Texture->Source.GetMipData(SrcMipData, 0);
+	verify( Texture->Source.GetMipData(SrcMipData, 0) );
 	const uint8* MipData = SrcMipData.GetData();
 
 	TUniquePtr< FStaticMeshComponentRecreateRenderStateContext > RecreateRenderStateContext = MakeUnique<FStaticMeshComponentRecreateRenderStateContext>(StaticMesh);
@@ -1469,7 +1402,7 @@ void MeshPaintHelpers::ImportVertexColorsToStaticMesh(UStaticMesh* StaticMesh, c
 	const FColor ColorMask = Options->CreateColorMask();
 	for (uint32 VertexIndex = 0; VertexIndex < LODModel.VertexBuffers.StaticMeshVertexBuffer.GetNumVertices(); ++VertexIndex)
 	{
-		const FVector2D UV = LODModel.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(VertexIndex, UVIndex);
+		const FVector2D UV = FVector2D(LODModel.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(VertexIndex, UVIndex));
 		LODModel.VertexBuffers.ColorVertexBuffer.VertexColor(VertexIndex) = PickVertexColorFromTextureData(MipData, UV, Texture, ColorMask);
 	}
 
@@ -1483,8 +1416,9 @@ void MeshPaintHelpers::ImportVertexColorsToStaticMeshComponent(UStaticMeshCompon
 	checkf(StaticMeshComponent && Options && Texture, TEXT("Invalid ptr"));
 
 	// Extract color data from texture
+	// todo: use GetMipImage instead of GetMipData
 	TArray64<uint8> SrcMipData;
-	Texture->Source.GetMipData(SrcMipData, 0);
+	verify( Texture->Source.GetMipData(SrcMipData, 0) );
 	const uint8* MipData = SrcMipData.GetData();
 
 	TUniquePtr< FComponentReregisterContext > ComponentReregisterContext;
@@ -1532,7 +1466,7 @@ void MeshPaintHelpers::ImportVertexColorsToStaticMeshComponent(UStaticMeshCompon
 		const FColor ColorMask = Options->CreateColorMask();
 		for (uint32 VertexIndex = 0; VertexIndex < LODModel.VertexBuffers.StaticMeshVertexBuffer.GetNumVertices(); ++VertexIndex)
 		{
-			const FVector2D UV = LODModel.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(VertexIndex, UVIndex);
+			const FVector2D UV = FVector2D(LODModel.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(VertexIndex, UVIndex));
 			InstanceMeshLODInfo.OverrideVertexColors->VertexColor(VertexIndex) = PickVertexColorFromTextureData(MipData, UV, Texture, ColorMask);
 		}
 
@@ -1553,8 +1487,9 @@ void MeshPaintHelpers::ImportVertexColorsToSkeletalMesh(USkeletalMesh* SkeletalM
 	checkf(SkeletalMesh && Options && Texture, TEXT("Invalid ptr"));
 
 	// Extract color data from texture
+	// todo: use GetMipImage instead of GetMipData
 	TArray64<uint8> SrcMipData;
-	Texture->Source.GetMipData(SrcMipData, 0);
+	verify( Texture->Source.GetMipData(SrcMipData, 0) );
 	const uint8* MipData = SrcMipData.GetData();
 
 	TUniquePtr< FSkinnedMeshComponentRecreateRenderStateContext > RecreateRenderStateContext;
@@ -1579,7 +1514,7 @@ void MeshPaintHelpers::ImportVertexColorsToSkeletalMesh(USkeletalMesh* SkeletalM
 
 		for (uint32 VertexIndex = 0; VertexIndex < LODData.GetNumVertices(); ++VertexIndex)
 		{
-			const FVector2D UV = LODData.StaticVertexBuffers.StaticMeshVertexBuffer.GetVertexUV(VertexIndex, UVIndex);
+			const FVector2D UV = FVector2D(LODData.StaticVertexBuffers.StaticMeshVertexBuffer.GetVertexUV(VertexIndex, UVIndex));
 			LODData.StaticVertexBuffers.ColorVertexBuffer.VertexColor(VertexIndex) = PickVertexColorFromTextureData(MipData, UV, Texture, ColorMask);
 		}
 		
@@ -1596,7 +1531,7 @@ void MeshPaintHelpers::ImportVertexColorsToSkeletalMesh(USkeletalMesh* SkeletalM
 		int32 SectionVertexIndex = INDEX_NONE;
 		LODModel.GetSectionFromVertexIndex(VertexIndex, SectionIndex, SectionVertexIndex);
 
-		const FVector2D UV = LODModel.Sections[SectionIndex].SoftVertices[SectionVertexIndex].UVs[UVIndex];
+		const FVector2D UV = FVector2D(LODModel.Sections[SectionIndex].SoftVertices[SectionVertexIndex].UVs[UVIndex]);
 		LODModel.Sections[SectionIndex].SoftVertices[SectionVertexIndex].Color = PickVertexColorFromTextureData(MipData, UV, Texture, ColorMask);
 	}
 
@@ -1765,7 +1700,7 @@ typedef TOctree2<FPaintedMeshVertex, FVertexColorPropogationOctreeSemantics> TVe
 void MeshPaintHelpers::ApplyVertexColorsToAllLODs(IMeshPaintGeometryAdapter& GeometryInfo, USkeletalMeshComponent* SkeletalMeshComponent)
 {
 	checkf(SkeletalMeshComponent != nullptr, TEXT("Invalid Skeletal Mesh Component"));
-	USkeletalMesh* Mesh = SkeletalMeshComponent->SkeletalMesh;
+	USkeletalMesh* Mesh = SkeletalMeshComponent->GetSkeletalMeshAsset();
 	if (Mesh)
 	{
 		FSkeletalMeshRenderData* Resource = Mesh->GetResourceForRendering();
@@ -1788,7 +1723,7 @@ void MeshPaintHelpers::ApplyVertexColorsToAllLODs(IMeshPaintGeometryAdapter& Geo
 				FPaintedMeshVertex PaintedVertex;
 				for (uint32 VertexIndex = 0; VertexIndex < BaseLOD.GetNumVertices(); ++VertexIndex )
 				{
-					const FVector VertexPos = BaseLOD.StaticVertexBuffers.PositionVertexBuffer.VertexPosition(VertexIndex);
+					const FVector VertexPos = (FVector)BaseLOD.StaticVertexBuffers.PositionVertexBuffer.VertexPosition(VertexIndex);
 
 					FPackedNormal VertexTangentX, VertexTangentZ;
 					VertexTangentX = BaseLOD.StaticVertexBuffers.StaticMeshVertexBuffer.VertexTangentX(VertexIndex);
@@ -1817,7 +1752,7 @@ void MeshPaintHelpers::ApplyVertexColorsToAllLODs(IMeshPaintGeometryAdapter& Geo
 
 					for (uint32 VertIndex=0; VertIndex<ApplyLOD.GetNumVertices(); VertIndex++)
 					{
-						const FVector VertexPos = ApplyLOD.StaticVertexBuffers.PositionVertexBuffer.VertexPosition(VertIndex);
+						const FVector VertexPos = (FVector)ApplyLOD.StaticVertexBuffers.PositionVertexBuffer.VertexPosition(VertIndex);
 						CombinedBounds += VertexPos;
 					}
 					
@@ -1836,7 +1771,7 @@ void MeshPaintHelpers::ApplyVertexColorsToAllLODs(IMeshPaintGeometryAdapter& Geo
 					for (uint32 VertexIndex = 0; VertexIndex < ApplyLOD.GetNumVertices(); ++VertexIndex)
 					{
 						TArray<FPaintedMeshVertex> PointsToConsider;
-						const FVector CurPosition = ApplyLOD.StaticVertexBuffers.PositionVertexBuffer.VertexPosition(VertexIndex);
+						const FVector CurPosition = (FVector)ApplyLOD.StaticVertexBuffers.PositionVertexBuffer.VertexPosition(VertexIndex);
 
 						FPackedNormal VertexTangentZ;
 						VertexTangentZ = BaseLOD.StaticVertexBuffers.StaticMeshVertexBuffer.VertexTangentZ(VertexIndex);

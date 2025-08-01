@@ -4,8 +4,11 @@
 #include "AnimationRuntime.h"
 #include "Animation/AnimInstanceProxy.h"
 #include "Animation/AnimTrace.h"
+#include "Animation/AnimCurveTypes.h"
+#include "Animation/AnimCurveUtils.h"
 
-#define DEFAULT_SOURCEINDEX 0xFF
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNode_LayeredBoneBlend)
+
 /////////////////////////////////////////////////////
 // FAnimNode_LayeredBoneBlend
 
@@ -29,34 +32,39 @@ void FAnimNode_LayeredBoneBlend::Initialize_AnyThread(const FAnimationInitialize
 	}
 }
 
-#if WITH_EDITOR
-void FAnimNode_LayeredBoneBlend::PostCompile(const class USkeleton* InSkeleton)
-{
-	FAnimNode_Base::PostCompile(InSkeleton);
-	RebuildCacheData(InSkeleton);
-}
-#endif // WITH_EDITOR
-
-void FAnimNode_LayeredBoneBlend::RebuildCacheData(const USkeleton* InSkeleton)
+void FAnimNode_LayeredBoneBlend::RebuildPerBoneBlendWeights(const USkeleton* InSkeleton)
 {
 	if (InSkeleton)
 	{
-		FAnimationRuntime::CreateMaskWeights(PerBoneBlendWeights, LayerSetup, InSkeleton);
+		if (BlendMode == ELayeredBoneBlendMode::BranchFilter)
+		{
+			FAnimationRuntime::CreateMaskWeights(PerBoneBlendWeights, LayerSetup, InSkeleton);
+		}
+		else
+		{
+			FAnimationRuntime::CreateMaskWeights(PerBoneBlendWeights, BlendMasks, InSkeleton);
+		}
+
 		SkeletonGuid = InSkeleton->GetGuid();
 		VirtualBoneGuid = InSkeleton->GetVirtualBoneGuid();
 	}
 }
 
-bool FAnimNode_LayeredBoneBlend::IsCacheInvalid(const USkeleton* InSkeleton) const
+bool FAnimNode_LayeredBoneBlend::ArePerBoneBlendWeightsValid(const USkeleton* InSkeleton) const
 {
-	return (InSkeleton->GetGuid() != SkeletonGuid || InSkeleton->GetVirtualBoneGuid() != VirtualBoneGuid);
+	return (InSkeleton != nullptr && InSkeleton->GetGuid() == SkeletonGuid && InSkeleton->GetVirtualBoneGuid() == VirtualBoneGuid);
 }
 
-void FAnimNode_LayeredBoneBlend::ReinitializeBoneBlendWeights(const FBoneContainer& RequiredBones, const USkeleton* Skeleton)
+void FAnimNode_LayeredBoneBlend::UpdateCachedBoneData(const FBoneContainer& RequiredBones, const USkeleton* Skeleton)
 {
-	if (IsCacheInvalid(Skeleton))
+	if(RequiredBones.GetSerialNumber() == RequiredBonesSerialNumber)
 	{
-		RebuildCacheData(Skeleton);
+		return;
+	}
+
+	if (!ArePerBoneBlendWeightsValid(Skeleton))
+	{
+		RebuildPerBoneBlendWeights(Skeleton);
 	}
 	
 	// build desired bone weights
@@ -78,46 +86,37 @@ void FAnimNode_LayeredBoneBlend::ReinitializeBoneBlendWeights(const FBoneContain
 	//Reinitialize bone blend weights now that we have cleared them
 	FAnimationRuntime::UpdateDesiredBoneWeight(DesiredBoneBlendWeights, CurrentBoneBlendWeights, BlendWeights);
 
-	TArray<uint16> const& CurveUIDFinder = RequiredBones.GetUIDToArrayLookupTable();
-	const int32 CurveUIDCount = CurveUIDFinder.Num();
-	const int32 TotalCount = FBlendedCurve::GetValidElementCount(&CurveUIDFinder);
-	if (TotalCount > 0)
+	// Build curve source indices
 	{
-		CurvePoseSourceIndices.Reset(TotalCount);
-		// initialize with FF - which is default
-		CurvePoseSourceIndices.Init(DEFAULT_SOURCEINDEX, TotalCount);
+		// Get the original Reserve value
+		int32 OriginalReserve = CurvePoseSourceIndices.Max();
+		CurvePoseSourceIndices.Empty();
 
-		// now go through point to correct source indices. Curve only picks one source index
-		for (int32 UIDIndex = 0; UIDIndex < CurveUIDCount; ++UIDIndex)
+		Skeleton->ForEachCurveMetaData([this, &RequiredBones](const FName& InCurveName, const FCurveMetaData& InMetaData)
 		{
-			int32 CurrentPoseIndex = CurveUIDFinder[UIDIndex];
-			if (CurrentPoseIndex != MAX_uint16)
+			for (const FBoneReference& LinkedBone : InMetaData.LinkedBones)
 			{
-				SmartName::UID_Type CurveUID = (SmartName::UID_Type)UIDIndex;
-
-				const FCurveMetaData* CurveMetaData = Skeleton->GetCurveMetaData(CurveUID);
-				if (CurveMetaData)
+				FCompactPoseBoneIndex CompactPoseIndex = LinkedBone.GetCompactPoseIndex(RequiredBones);
+				if (CompactPoseIndex != INDEX_NONE)
 				{
-					const TArray<FBoneReference>& LinkedBones = CurveMetaData->LinkedBones;
-					for (int32 LinkedBoneIndex = 0; LinkedBoneIndex < LinkedBones.Num(); ++LinkedBoneIndex)
+					if (DesiredBoneBlendWeights[CompactPoseIndex.GetInt()].BlendWeight > 0.f)
 					{
-						FCompactPoseBoneIndex CompactPoseIndex = LinkedBones[LinkedBoneIndex].GetCompactPoseIndex(RequiredBones);
-						if (CompactPoseIndex != INDEX_NONE)
-						{
-							if (DesiredBoneBlendWeights[CompactPoseIndex.GetInt()].BlendWeight > 0.f)
-							{
-								CurvePoseSourceIndices[CurrentPoseIndex] = DesiredBoneBlendWeights[CompactPoseIndex.GetInt()].SourceIndex;
-							}
-						}
+						CurvePoseSourceIndices.Add(InCurveName, DesiredBoneBlendWeights[CompactPoseIndex.GetInt()].SourceIndex);
+						break;
 					}
 				}
 			}
+		});
+
+		// Shrink afterwards to exactly what was used if the Reserve increased, to save memory.  Eventually the reserve will
+		// stabilize at the maximum number of nodes actually used in practice for this specific anim node.
+		if (CurvePoseSourceIndices.Num() > OriginalReserve)
+		{
+			CurvePoseSourceIndices.Shrink();
 		}
 	}
-	else
-	{
-		CurvePoseSourceIndices.Reset();
-	}
+
+	RequiredBonesSerialNumber = RequiredBones.GetSerialNumber();
 }
 
 void FAnimNode_LayeredBoneBlend::CacheBones_AnyThread(const FAnimationCacheBonesContext& Context)
@@ -130,10 +129,7 @@ void FAnimNode_LayeredBoneBlend::CacheBones_AnyThread(const FAnimationCacheBones
 		BlendPoses[ChildIndex].CacheBones(Context);
 	}
 
-	if (NumPoses > 0)
-	{
-		ReinitializeBoneBlendWeights(Context.AnimInstanceProxy->GetRequiredBones(), Context.AnimInstanceProxy->GetSkeleton());
-	}
+	UpdateCachedBoneData(Context.AnimInstanceProxy->GetRequiredBones(), Context.AnimInstanceProxy->GetSkeleton());
 }
 
 void FAnimNode_LayeredBoneBlend::Update_AnyThread(const FAnimationUpdateContext& Context)
@@ -155,26 +151,14 @@ void FAnimNode_LayeredBoneBlend::Update_AnyThread(const FAnimationUpdateContext&
 			{
 				if (bHasRelevantPoses == false)
 				{
-					// If our cache is invalid, attempt to update it.
-					if (IsCacheInvalid(Context.AnimInstanceProxy->GetSkeleton()))
-					{
-						ReinitializeBoneBlendWeights(Context.AnimInstanceProxy->GetRequiredBones(), Context.AnimInstanceProxy->GetSkeleton());
+					// Update cached data now we know we might be valid
+					UpdateCachedBoneData(Context.AnimInstanceProxy->GetRequiredBones(), Context.AnimInstanceProxy->GetSkeleton());
 
-						// If Cache is still invalid, we don't have correct DesiredBoneBlendWeights, so abort.
-						// bHasRelevantPoses == false, will passthrough in evaluate.
-						if (!ensure(IsCacheInvalid(Context.AnimInstanceProxy->GetSkeleton())))
-						{
-							break;
-						}
-					}
-					else
-					{
-						FAnimationRuntime::UpdateDesiredBoneWeight(DesiredBoneBlendWeights, CurrentBoneBlendWeights, BlendWeights);
-					}
-
+					// Update weights
+					FAnimationRuntime::UpdateDesiredBoneWeight(DesiredBoneBlendWeights, CurrentBoneBlendWeights, BlendWeights);
 					bHasRelevantPoses = true;
 
-					if(bBlendRootMotionBasedOnRootBone)
+					if(bBlendRootMotionBasedOnRootBone && !CurrentBoneBlendWeights.IsEmpty())
 					{
 						const float NewRootMotionWeight = CurrentBoneBlendWeights[0].BlendWeight;
 						if(NewRootMotionWeight > ZERO_ANIMWEIGHT_THRESH)
@@ -189,11 +173,6 @@ void FAnimNode_LayeredBoneBlend::Update_AnyThread(const FAnimationUpdateContext&
 				BlendPoses[ChildIndex].Update(Context.FractionalWeightAndRootMotion(ChildWeight, ThisPoseRootMotionWeight));
 			}
 		}
-	}
-	else
-	{
-		// Clear BlendWeights if disabled by LODThreshold.
-		BlendWeights.Init(0.f, BlendWeights.Num());
 	}
 
 	// initialize children
@@ -234,7 +213,7 @@ void FAnimNode_LayeredBoneBlend::Evaluate_AnyThread(FPoseContext& Output)
 		TArray<FBlendedCurve> TargetBlendCurves;
 		TargetBlendCurves.SetNum(NumPoses);
 
-		TArray<FStackCustomAttributes> TargetBlendAttributes;
+		TArray<UE::Anim::FStackAttributeContainer> TargetBlendAttributes;
 		TargetBlendAttributes.SetNum(NumPoses);
 
 		for (int32 ChildIndex = 0; ChildIndex < NumPoses; ++ChildIndex)
@@ -255,30 +234,23 @@ void FAnimNode_LayeredBoneBlend::Evaluate_AnyThread(FPoseContext& Output)
 			}
 		}
 
-		// filter to make sure it only includes curves that is linked to the correct bone filter
-		TArray<uint16> const* CurveUIDFinder = Output.Curve.UIDToArrayIndexLUT;
-		const int32 TotalCount = Output.Curve.NumValidCurveCount;
-		// now go through point to correct source indices. Curve only picks one source index
-		for (int32 UIDIndex = 0; UIDIndex < CurveUIDFinder->Num(); ++UIDIndex)
-		{
-			int32 CurvePoseIndex = Output.Curve.GetArrayIndexByUID(UIDIndex);
-			if (CurvePoseSourceIndices.IsValidIndex(CurvePoseIndex))
+		// filter to make sure it only includes curves that are linked to the correct bone filter
+		UE::Anim::FNamedValueArrayUtils::RemoveByPredicate(BasePoseContext.Curve, CurvePoseSourceIndices,
+			[](const UE::Anim::FCurveElement& InOutBasePoseElement, const UE::Anim::FCurveElementIndexed& InSourceIndexElement)
 			{
-				int32 SourceIndex = CurvePoseSourceIndices[CurvePoseIndex];
-				if (SourceIndex != DEFAULT_SOURCEINDEX)
+				// if source index is set, remove base pose curve value
+				return (InSourceIndexElement.Index != INDEX_NONE);
+			});
+
+		// Filter child pose curves
+		for (int32 ChildIndex = 0; ChildIndex < NumPoses; ++ChildIndex)
+		{
+			UE::Anim::FNamedValueArrayUtils::RemoveByPredicate(TargetBlendCurves[ChildIndex], CurvePoseSourceIndices,
+				[ChildIndex](const UE::Anim::FCurveElement& InOutBasePoseElement, const UE::Anim::FCurveElementIndexed& InSourceIndexElement)
 				{
-					// if source index is set, clear base pose curve value
-					BasePoseContext.Curve.Set(UIDIndex, 0.f);
-					for (int32 ChildIndex = 0; ChildIndex < NumPoses; ++ChildIndex)
-					{
-						if (SourceIndex != ChildIndex)
-						{
-							// if not source, clear it
-							TargetBlendCurves[ChildIndex].Set(UIDIndex, 0.f);
-						}
-					}
-				}
-			}
+					// if not source, remove it
+					return (InSourceIndexElement.Index != INDEX_NONE) && (InSourceIndexElement.Index != ChildIndex);
+				});
 		}
 
 		FAnimationRuntime::EBlendPosesPerBoneFilterFlags BlendFlags = FAnimationRuntime::EBlendPosesPerBoneFilterFlags::None;
@@ -314,37 +286,13 @@ void FAnimNode_LayeredBoneBlend::GatherDebugData(FNodeDebugData& DebugData)
 	}
 }
 
-#if WITH_EDITOR
-void FAnimNode_LayeredBoneBlend::ValidateData()
+void FAnimNode_LayeredBoneBlend::SetBlendMask(int32 InPoseIndex, UBlendProfile* InBlendMask)
 {
-	// ideally you don't like to get to situation where it becomes inconsistent, but this happened, 
-	// and we don't know what caused this. Possibly copy/paste, but I tried copy/paste and that didn't work
-	// so here we add code to fix this up manually in editor, so that they can continue working on it. 
-	int32 PoseNum = BlendPoses.Num();
-	int32 WeightNum = BlendWeights.Num();
-	int32 LayerNum = LayerSetup.Num();
+	check(BlendMode == ELayeredBoneBlendMode::BlendMask);
+	check(BlendPoses.IsValidIndex(InPoseIndex));
+	check(BlendMasks.IsValidIndex(InPoseIndex));
 
-	int32 Max = FMath::Max3(PoseNum, WeightNum, LayerNum);
-	int32 Min = FMath::Min3(PoseNum, WeightNum, LayerNum);
-	// if they are not all same
-	if (Min != Max)
-	{
-		// we'd like to increase to all Max
-		// sadly we don't have add X for how many
-		for (int32 Index=PoseNum; Index<Max; ++Index)
-		{
-			BlendPoses.Add(FPoseLink());
-		}
+	BlendMasks[InPoseIndex] = InBlendMask;
 
-		for(int32 Index=WeightNum; Index<Max; ++Index)
-		{
-			BlendWeights.Add(1.f);
-		}
-
-		for(int32 Index=LayerNum; Index<Max; ++Index)
-		{
-			LayerSetup.Add(FInputBlendPose());
-		}
-	}
+	InvalidatePerBoneBlendWeights();
 }
-#endif

@@ -2,9 +2,16 @@
 
 #pragma once
 
+#include "Containers/SparseArray.h"
+#include "Containers/UnrealString.h"
 #include "EntitySystem/MovieSceneComponentTypeInfo.h"
 #include "EntitySystem/MovieSceneEntityFactory.h"
+#include "EntitySystem/MovieSceneEntityIDs.h"
+#include "EntitySystem/MovieSceneEntitySystemTypes.h"
+#include "HAL/Platform.h"
 #include "Misc/GeneratedTypeName.h"
+
+class UScriptStruct;
 
 namespace UE
 {
@@ -13,7 +20,29 @@ namespace MovieScene
 
 template<typename> struct TPropertyComponents;
 
-struct MOVIESCENE_API FComponentRegistry
+struct FNewComponentTypeParams
+{
+	FNewComponentTypeParams()
+		: ReferenceCollectionCallback(nullptr)
+		, Flags(EComponentTypeFlags::None)
+	{}
+
+	/** Implicit construction from type flags to support legacy API */
+	FNewComponentTypeParams(EComponentTypeFlags InFlags)
+		: ReferenceCollectionCallback(nullptr)
+		, Flags(InFlags)
+	{}
+
+	explicit FNewComponentTypeParams(FComponentReferenceCollectionPtr RefCollectionPtr, EComponentTypeFlags InFlags)
+		: ReferenceCollectionCallback(RefCollectionPtr)
+		, Flags(InFlags)
+	{}
+
+	FComponentReferenceCollectionPtr ReferenceCollectionCallback;
+	EComponentTypeFlags Flags;
+};
+
+struct FComponentRegistry
 {
 public:
 	FEntityFactories Factories;
@@ -32,11 +61,11 @@ public:
 	 * Define a new tag type using the specified information. Tags have 0 memory overhead.
 	 * @note Transitory tag types must be unregistered when no longer required by calling DestroyComponentTypeSafe or Unsafe to prevent leaking component type IDs
 	 *
-	 * @param Flags          Flags relating to the new component type
 	 * @param DebugName      A developer friendly name that accompanies this component type for debugging purposes
+	 * @param Flags          Flags relating to the new component type
 	 * @return A new component type identifier for the tag
 	 */
-	FComponentTypeID NewTag(const TCHAR* const DebugName, EComponentTypeFlags Flags = EComponentTypeFlags::None);
+	MOVIESCENE_API FComponentTypeID NewTag(const TCHAR* const DebugName, EComponentTypeFlags Flags = EComponentTypeFlags::None);
 
 
 	/**
@@ -44,16 +73,28 @@ public:
 	 * @note Transitory tag types must be unregistered when no longer required by calling DestroyComponentTypeSafe or Unsafe to prevent leaking component type IDs
 	 *
 	 * @param DebugName      A developer friendly name that accompanies this component type for debugging purposes
-	 * @param Flags          (Optional) Flags relating to the new component type
+	 * @param Params         (Optional) Parameters for the type including component flags
 	 * @return A new component type identifier for the tag
 	 */
 	template<typename T>
-	TComponentTypeID<T> NewComponentType(const TCHAR* const DebugName, EComponentTypeFlags Flags = EComponentTypeFlags::None);
+	TComponentTypeID<T> NewComponentType(const TCHAR* const DebugName, const FNewComponentTypeParams& Params = FNewComponentTypeParams());
+
+	/**
+	 * Same as NewComponentType but specifically does not expose the component type to the reference graph. Use with caution!
+	 */
+	template<typename T>
+	TComponentTypeID<T> NewComponentTypeNoAddReferencedObjects(const TCHAR* const DebugName, const FNewComponentTypeParams& Params = FNewComponentTypeParams());
 
 	template<typename T>
-	void NewComponentType(TComponentTypeID<T>* Ref, const TCHAR* const DebugName, EComponentTypeFlags Flags = EComponentTypeFlags::None)
+	void NewComponentType(TComponentTypeID<T>* Ref, const TCHAR* const DebugName, const FNewComponentTypeParams& Params = FNewComponentTypeParams())
 	{
-		*Ref = NewComponentType<T>(DebugName, Flags);
+		*Ref = NewComponentType<T>(DebugName, Params);
+	}
+
+	template<typename T>
+	void NewComponentTypeNoAddReferencedObjects(TComponentTypeID<T>* Ref, const TCHAR* const DebugName, const FNewComponentTypeParams& Params = FNewComponentTypeParams())
+	{
+		*Ref = NewComponentTypeNoAddReferencedObjects<T>(DebugName, Params);
 	}
 
 	template<typename PropertyTraits>
@@ -70,7 +111,7 @@ public:
 #endif
 	}
 
-	const FComponentTypeInfo& GetComponentTypeChecked(FComponentTypeID ComponentTypeID) const;
+	MOVIESCENE_API const FComponentTypeInfo& GetComponentTypeChecked(FComponentTypeID ComponentTypeID) const;
 
 public:
 
@@ -81,7 +122,7 @@ public:
 	 *
 	 * @param ComponentTypeID The component type to destroy
 	 */
-	void DestroyComponentTypeSafe(FComponentTypeID ComponentTypeID);
+	MOVIESCENE_API void DestroyComponentTypeSafe(FComponentTypeID ComponentTypeID);
 
 
 	/**
@@ -90,7 +131,7 @@ public:
 	 *
 	 * @param ComponentTypeID The component type to destroy
 	 */
-	void DestroyComponentUnsafeFast(FComponentTypeID ComponentTypeID);
+	MOVIESCENE_API void DestroyComponentUnsafeFast(FComponentTypeID ComponentTypeID);
 
 public:
 
@@ -128,7 +169,10 @@ public:
 
 private:
 
-	FComponentTypeID NewComponentTypeInternal(FComponentTypeInfo&& TypeInfo);
+	MOVIESCENE_API FComponentTypeID NewComponentTypeInternal(FComponentTypeInfo&& TypeInfo);
+
+	template<typename T>
+	FComponentTypeInfo MakeComponentTypeInfoWithoutComponentOps(const TCHAR* const DebugName, const FNewComponentTypeParams& Params);
 
 private:
 

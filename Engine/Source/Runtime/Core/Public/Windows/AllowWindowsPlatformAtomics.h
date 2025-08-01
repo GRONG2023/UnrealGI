@@ -2,7 +2,7 @@
 
 // #TODO: redirect to platform-agnostic version for the time being. Eventually this will become an error
 #include "HAL/Platform.h"
-#if !PLATFORM_WINDOWS && !PLATFORM_HOLOLENS
+#if !PLATFORM_WINDOWS
 	#include "Microsoft/AllowMicrosoftPlatformAtomics.h"
 #else
 
@@ -14,7 +14,7 @@
 
 #define InterlockedIncrement _InterlockedIncrement
 #define InterlockedDecrement _InterlockedDecrement
-#if !defined(InterlockedAdd)
+#if !defined(InterlockedAdd) && !defined(_M_ARM64EC)
 	#define InterlockedAdd _InterlockedAdd
 #endif
 #define InterlockedExchange _InterlockedExchange

@@ -2,17 +2,29 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "InputCoreTypes.h"
-#include "UnrealWidget.h"
 #include "EditorViewportClient.h"
+#include "Engine/EngineBaseTypes.h"
+#include "InputCoreTypes.h"
+#include "Math/Axis.h"
+#include "Math/BoxSphereBounds.h"
+#include "Math/Matrix.h"
+#include "Math/Rotator.h"
+#include "Math/UnrealMathSSE.h"
+#include "Templates/SharedPointer.h"
+#include "UnrealWidgetFwd.h"
 
-class FBlueprintEditor;
+class AActor;
 class FCanvas;
 class FPreviewScene;
+class FPrimitiveDrawInterface;
+class FSceneView;
 class FScopedTransaction;
+class FText;
+class FViewport;
 class SSCSEditorViewport;
 class UStaticMeshComponent;
+struct FInputKeyEventArgs;
+struct FGizmoState;
 
 /**
  * An editor viewport client subclass for the SCS editor viewport.
@@ -37,13 +49,15 @@ public:
 	virtual void Tick(float DeltaSeconds) override;
 	virtual void Draw(const FSceneView* View,FPrimitiveDrawInterface* PDI) override;
 	virtual void DrawCanvas( FViewport& InViewport, FSceneView& View, FCanvas& Canvas ) override;
-	virtual bool InputKey(FViewport* Viewport, int32 ControllerId, FKey Key, EInputEvent Event, float AmountDepressed = 1.f, bool bGamepad=false) override;
+	virtual bool InputKey(const FInputKeyEventArgs& EventArgs) override;
 	virtual void ProcessClick(class FSceneView& View, class HHitProxy* HitProxy, FKey Key, EInputEvent Event, uint32 HitX, uint32 HitY) override;
 	virtual bool InputWidgetDelta( FViewport* Viewport, EAxisList::Type CurrentAxis, FVector& Drag, FRotator& Rot, FVector& Scale ) override;
 	virtual void TrackingStarted( const struct FInputEventState& InInputState, bool bIsDragging, bool bNudge ) override;
 	virtual void TrackingStopped() override;
-	virtual FWidget::EWidgetMode GetWidgetMode() const override;
-	virtual void SetWidgetMode( FWidget::EWidgetMode NewMode ) override;
+	virtual bool BeginTransform(const FGizmoState& InState) override;
+	virtual bool EndTransform(const FGizmoState& InState) override;
+	virtual UE::Widget::EWidgetMode GetWidgetMode() const override;
+	virtual void SetWidgetMode( UE::Widget::EWidgetMode NewMode ) override;
 	virtual void SetWidgetCoordSystemSpace( ECoordSystem NewCoordSystem ) override;
 	virtual FVector GetWidgetLocation() const override;
 	virtual FMatrix GetWidgetCoordSystem() const override;
@@ -136,7 +150,7 @@ protected:
 	void RefreshPreviewBounds();
 
 private:
-	FWidget::EWidgetMode WidgetMode;
+	UE::Widget::EWidgetMode WidgetMode;
 	ECoordSystem WidgetCoordSystem;
 
 	/** Weak reference to the editor hosting the viewport */
@@ -156,4 +170,7 @@ private:
 
 	/** If true, the physics simulation gets ticked */
 	bool bIsSimulateEnabled;
+
+	bool HandleBeginTransform();
+	bool HandleEndTransform();
 };

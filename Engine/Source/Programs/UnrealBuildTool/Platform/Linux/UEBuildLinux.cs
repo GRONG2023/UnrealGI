@@ -2,28 +2,36 @@
 
 using System;
 using System.Collections.Generic;
-using System.Text;
-using System.Diagnostics;
 using System.IO;
-using Tools.DotNETCommon;
-using System.Text.RegularExpressions;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
+using UnrealBuildBase;
 
 namespace UnrealBuildTool
 {
-	/** Architecture as stored in the ini. */
-	enum LinuxArchitecture
+	partial struct UnrealArch
 	{
-		/** x86_64, most commonly used architecture.*/
-		X86_64UnknownLinuxGnu,
+		private static IReadOnlyDictionary<UnrealArch, string> LinuxToolchainArchitectures = new Dictionary<UnrealArch, string>()
+		{
+			{ UnrealArch.Arm64,         "aarch64-unknown-linux-gnueabi" },
+			{ UnrealArch.X64,           "x86_64-unknown-linux-gnu" },
+		};
 
-		/** A.k.a. AArch32, ARM 32-bit with hardware floats */
-		ArmUnknownLinuxGnueabihf,
+		/// <summary>
+		/// Returns the low-architecture specific string for the generic architectures
+		/// </summary>
+		public string LinuxName
+		{
+			get
+			{
+				if (AppleToolchainArchitectures.ContainsKey(this))
+				{
+					return LinuxToolchainArchitectures[this];
+				}
 
-		/** AArch64, ARM 64-bit */
-		AArch64UnknownLinuxGnueabi,
-
-		/** i686, Intel 32-bit */
-		I686UnknownLinuxGnu
+				throw new BuildException($"Unknown architecture {ToString()} passed to UnrealArch.LinuxName");
+			}
+		}
 	}
 
 	/// <summary>
@@ -47,6 +55,13 @@ namespace UnrealBuildTool
 		public bool bEnableAddressSanitizer = false;
 
 		/// <summary>
+		/// Enables LibFuzzer
+		/// </summary>
+		[CommandLine("-EnableLibFuzzer")]
+		[XmlConfigFile(Category = "BuildConfiguration", Name = "bEnableLibFuzzer")]
+		public bool bEnableLibFuzzer = false;
+
+		/// <summary>
 		/// Enables thread sanitizer (TSan)
 		/// </summary>
 		[CommandLine("-EnableTSan")]
@@ -68,16 +83,30 @@ namespace UnrealBuildTool
 		public bool bEnableMemorySanitizer = false;
 
 		/// <summary>
-		/// Enables "thin" LTO
-		/// </summary>
-		[CommandLine("-ThinLTO")]
-		public bool bEnableThinLTO = false;
-
-		/// <summary>
 		/// Whether or not to preserve the portable symbol file produced by dump_syms
 		/// </summary>
 		[ConfigFile(ConfigHierarchyType.Engine, "/Script/LinuxPlatform.LinuxTargetSettings")]
 		public bool bPreservePSYM = false;
+
+		/// <summary>
+		/// Turns on tuning of debug info for LLDB
+		/// </summary>
+		[CommandLine("-EnableLLDB")]
+		[XmlConfigFile(Category = "BuildConfiguration", Name = "bTuneDebugInfoForLLDB")]
+		public bool bTuneDebugInfoForLLDB = false;
+
+		/// <summary>
+		/// Whether to globally disable calling dump_syms
+		/// </summary>
+		[CommandLine("-NoDumpSyms")]
+		[XmlConfigFile(Category = "BuildConfiguration", Name = "bDisableDumpSyms")]
+		public bool bDisableDumpSyms = false;
+
+		/// <summary>
+		/// Enables runtime ray tracing support.
+		/// </summary>
+		[ConfigFile(ConfigHierarchyType.Engine, "/Script/LinuxTargetPlatform.LinuxTargetSettings")]
+		public bool bEnableRayTracing = false;
 	}
 
 	/// <summary>
@@ -85,9 +114,6 @@ namespace UnrealBuildTool
 	/// </summary>
 	public class ReadOnlyLinuxTargetRules
 	{
-		/// <summary>
-		/// The private mutable settings object
-		/// </summary>
 		private LinuxTargetRules Inner;
 
 		/// <summary>
@@ -103,52 +129,46 @@ namespace UnrealBuildTool
 		/// Accessors for fields on the inner TargetRules instance
 		/// </summary>
 		#region Read-only accessor properties 
-		#if !__MonoCS__
-		#pragma warning disable CS1591
-		#endif
+#pragma warning disable CS1591
 
-		public bool bPreservePSYM
-		{
-			get { return Inner.bPreservePSYM; }
-		}
+		public bool bPreservePSYM => Inner.bPreservePSYM;
 
-		public bool bEnableAddressSanitizer
-		{
-			get { return Inner.bEnableAddressSanitizer; }
-		}
+		public bool bEnableAddressSanitizer => Inner.bEnableAddressSanitizer;
 
-		public bool bEnableThreadSanitizer
-		{
-			get { return Inner.bEnableThreadSanitizer; }
-		}
+		public bool bEnableLibFuzzer => Inner.bEnableLibFuzzer;
 
-		public bool bEnableUndefinedBehaviorSanitizer
-		{
-			get { return Inner.bEnableUndefinedBehaviorSanitizer; }
-		}
+		public bool bEnableThreadSanitizer => Inner.bEnableThreadSanitizer;
 
-		public bool bEnableMemorySanitizer
-		{
-			get { return Inner.bEnableMemorySanitizer; }
-		}
+		public bool bEnableUndefinedBehaviorSanitizer => Inner.bEnableUndefinedBehaviorSanitizer;
 
-		public bool bEnableThinLTO
-		{
-			get { return Inner.bEnableThinLTO; }
-		}
+		public bool bEnableMemorySanitizer => Inner.bEnableMemorySanitizer;
 
-		#if !__MonoCS__
-		#pragma warning restore CS1591
-		#endif
+		public bool bTuneDebugInfoForLLDB => Inner.bTuneDebugInfoForLLDB;
+
+		public bool bDisableDumpSyms => Inner.bDisableDumpSyms;
+
+		public bool bEnableRayTracing => Inner.bEnableRayTracing;
+
+#pragma warning restore CS1591
 		#endregion
+	}
+
+	// Usable by both Linux and LinuxArm64 (platform passed to constructor)
+	class LinuxArchitectureConfig : UnrealArchitectureConfig
+	{
+		public LinuxArchitectureConfig(UnrealTargetPlatform Platform)
+			: base(Platform == UnrealTargetPlatform.Linux ? UnrealArch.X64 : UnrealArch.Arm64)
+		{
+		}
 	}
 
 	class LinuxPlatform : UEBuildPlatform
 	{
 		/// <summary>
 		/// Linux host architecture (compiler target triplet)
+		/// @todo Remove this and get the actual Host architecture?
 		/// </summary>
-		public const string DefaultHostArchitecture = "x86_64-unknown-linux-gnu";
+		public static readonly UnrealArch DefaultHostArchitecture = UnrealArch.X64;
 
 		/// <summary>
 		/// SDK in use by the platform
@@ -158,64 +178,16 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// Constructor
 		/// </summary>
-		public LinuxPlatform(LinuxPlatformSDK InSDK) 
-			: this(UnrealTargetPlatform.Linux, InSDK)
+		public LinuxPlatform(LinuxPlatformSDK InSDK, ILogger Logger)
+			: this(UnrealTargetPlatform.Linux, InSDK, Logger)
 		{
 			SDK = InSDK;
 		}
 
-		public LinuxPlatform(UnrealTargetPlatform UnrealTarget, LinuxPlatformSDK InSDK)
-			: base(UnrealTarget)
+		public LinuxPlatform(UnrealTargetPlatform UnrealTarget, LinuxPlatformSDK InSDK, ILogger Logger)
+			: base(UnrealTarget, InSDK, new LinuxArchitectureConfig(UnrealTarget), Logger)
 		{
 			SDK = InSDK;
-		}
-
-		/// <summary>
-		/// Whether the required external SDKs are installed for this platform. Could be either a manual install or an AutoSDK.
-		/// </summary>
-		public override SDKStatus HasRequiredSDKsInstalled()
-		{
-			return SDK.HasRequiredSDKsInstalled();
-		}
-
-		/// <summary>
-		/// Returns SDK string as required by the platform
-		/// </summary>
-		/// <returns>Valid SDK string</returns>
-		public override string GetRequiredSDKString()
-		{
-			return SDK.GetRequiredSDKString();
-		}
-
-		/// <summary>
-		/// Find the default architecture for the given project
-		/// </summary>
-		public override string GetDefaultArchitecture(FileReference ProjectFile)
-		{
-			if (Platform == UnrealTargetPlatform.LinuxAArch64)
-			{
-				return "aarch64-unknown-linux-gnueabi";
-			}
-			else
-			{
-				return "x86_64-unknown-linux-gnu";
-			}
-		}
-
-		/// <summary>
-		/// Get name for architecture-specific directories (can be shorter than architecture name itself)
-		/// </summary>
-		public override string GetFolderNameForArchitecture(string Architecture)
-		{
-			// shorten the string (heuristically)
-			uint Sum = 0;
-			int Len = Architecture.Length;
-			for (int Index = 0; Index < Len; ++Index)
-			{
-				Sum += (uint)(Architecture[Index]);
-				Sum <<= 1;	// allowed to overflow
-			}
-			return Sum.ToString("X");
 		}
 
 		public override void ResetTarget(TargetRules Target)
@@ -223,16 +195,48 @@ namespace UnrealBuildTool
 			ValidateTarget(Target);
 		}
 
-		public override void ValidateTarget(TargetRules Target)
+		public bool IsLTOEnabled(ReadOnlyTargetRules Target)
 		{
-			if(Target.LinuxPlatform.bEnableThinLTO)
+			// Force LTO on if using PGO, or if specified in the target rules.
+			if (Target.bAllowLTCG || Target.bPGOOptimize || Target.bPGOProfile)
 			{
-				Target.bAllowLTCG = true;
+				return true;
 			}
 
-			if (!Target.IsNameOverriden())
+			return false;
+		}
+
+		public override void ValidateTarget(TargetRules Target)
+		{
+			if (!String.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CLANG_STATIC_ANALYZER_MODE")))
 			{
-				string SanitizerSuffix = null;
+				Target.StaticAnalyzer = StaticAnalyzer.Default;
+				Target.StaticAnalyzerOutputType = (Environment.GetEnvironmentVariable("CLANG_ANALYZER_OUTPUT")?.Contains("html", StringComparison.OrdinalIgnoreCase) == true) ? StaticAnalyzerOutputType.Html : StaticAnalyzerOutputType.Text;
+				Target.StaticAnalyzerMode = String.Equals(Environment.GetEnvironmentVariable("CLANG_STATIC_ANALYZER_MODE"), "shallow", StringComparison.OrdinalIgnoreCase) ? StaticAnalyzerMode.Shallow : StaticAnalyzerMode.Deep;
+			}
+			else if (Target.StaticAnalyzer == StaticAnalyzer.Clang)
+			{
+				Target.StaticAnalyzer = StaticAnalyzer.Default;
+			}
+
+			// Disable linking and ignore build outputs if we're using a static analyzer
+			if (Target.StaticAnalyzer == StaticAnalyzer.Default)
+			{
+				Target.bDisableLinking = true;
+				Target.bIgnoreBuildOutputs = true;
+
+				// Clang static analysis requires non unity builds
+				Target.bUseUnityBuild = false;
+			}
+
+			// Editor target types get overwritten in UEBuildTarget.cs so lets avoid adding this here. ResetTarget is called with
+			// default settings for TargetRules meanings Type == Game once then Type == Editor a 2nd time when building the Editor.
+			// BuildVersion string is not set at this point so we can avoid setting a Sanitizer suffix if this is the first ResetTarget
+			// with an unset TargetType. This avoids creating UnrealEditor-ASan.target while the binary is UnrealEditor.
+			// These need to be promoted to higher level concepts vs this hacky solution
+			if (!Target.IsNameOverriden() && !String.IsNullOrEmpty(Target.BuildVersion) && Target.Type != TargetType.Editor)
+			{
+				string? SanitizerSuffix = null;
 
 				if (Target.LinuxPlatform.bEnableAddressSanitizer)
 				{
@@ -250,6 +254,10 @@ namespace UnrealBuildTool
 				{
 					SanitizerSuffix = "MSan";
 				}
+				if (Target.LinuxPlatform.bEnableLibFuzzer)
+				{
+					SanitizerSuffix += "LibFuzzer";
+				}
 
 				if (!String.IsNullOrEmpty(SanitizerSuffix))
 				{
@@ -262,29 +270,23 @@ namespace UnrealBuildTool
 				throw new BuildException("LTO (LTCG) for modular builds is not supported (lld is not currently used for dynamic libraries).");
 			}
 
-			// depends on arch, APEX cannot be as of November'16 compiled for AArch32/64
-			Target.bCompileAPEX = Target.Architecture.StartsWith("x86_64");
-			Target.bCompileNvCloth = Target.Architecture.StartsWith("x86_64");
-
 			if (Target.GlobalDefinitions.Contains("USE_NULL_RHI=1"))
-			{				
+			{
 				Target.bCompileCEF3 = false;
 			}
 
 			// check if OS update invalidated our build
 			Target.bCheckSystemHeadersForModification = (BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Linux);
 
-			Target.bCompileISPC = Target.Architecture.StartsWith("x86_64");
-		}
+			Target.bCompileISPC = true;
 
-		/// <summary>
-		/// Allows the platform to override whether the architecture name should be appended to the name of binaries.
-		/// </summary>
-		/// <returns>True if the architecture name should be appended to the binary</returns>
-		public override bool RequiresArchitectureSuffix()
-		{
-			// Linux ignores architecture-specific names, although it might be worth it to prepend architecture
-			return false;
+			if (Target.bIWYU)
+			{
+				IWYUToolChain.ValidateTarget(Target);
+			}
+
+			// Disable chaining PCHs for the moment because it is crashing clang
+			Target.bChainPCHs = false;
 		}
 
 		public override bool CanUseXGE()
@@ -298,17 +300,11 @@ namespace UnrealBuildTool
 			return BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Win64;
 		}
 
-		public override bool CanUseParallelExecutor()
-		{
-			// No known problems with parallel executor, always use for build machines
-			return true;
-		}
-
 		/// <summary>
 		/// Determines if the given name is a build product for a target.
 		/// </summary>
 		/// <param name="FileName">The name to check</param>
-		/// <param name="NamePrefixes">Target or application names that may appear at the start of the build product name (eg. "UE4Editor", "ShooterGameEditor")</param>
+		/// <param name="NamePrefixes">Target or application names that may appear at the start of the build product name (eg. "UnrealEditor", "ShooterGameEditor")</param>
 		/// <param name="NameSuffixes">Suffixes which may appear at the end of the build product name</param>
 		/// <returns>True if the string matches the name of a build product, false otherwise</returns>
 		public override bool IsBuildProduct(string FileName, string[] NamePrefixes, string[] NameSuffixes)
@@ -363,14 +359,14 @@ namespace UnrealBuildTool
 				case UEBuildBinaryType.Executable:
 					if (InTarget.LinuxPlatform.bPreservePSYM)
 					{
-						return new string[] {".psym", ".sym", ".debug"};
+						return new string[] { ".psym", ".sym", ".debug" };
 					}
 					else
 					{
-						return new string[] {".sym", ".debug"};
+						return new string[] { ".sym", ".debug" };
 					}
 			}
-			return new string [] {};
+			return new string[] { };
 		}
 
 		/// <summary>
@@ -383,12 +379,12 @@ namespace UnrealBuildTool
 		public override void ModifyModuleRulesForOtherPlatform(string ModuleName, ModuleRules Rules, ReadOnlyTargetRules Target)
 		{
 			// don't do any target platform stuff if SDK is not available
-			if (!UEBuildPlatform.IsPlatformAvailable(Platform))
+			if (!UEBuildPlatform.IsPlatformAvailableForTarget(Platform, Target, bIgnoreSDKCheck:true))
 			{
 				return;
 			}
 
-			if ((Target.Platform == UnrealTargetPlatform.Win32) || (Target.Platform == UnrealTargetPlatform.Win64))
+			if (Target.Platform == UnrealTargetPlatform.Win64)
 			{
 				if (!Target.bBuildRequiresCookedData)
 				{
@@ -397,12 +393,7 @@ namespace UnrealBuildTool
 						if (Target.bBuildDeveloperTools)
 						{
 							Rules.DynamicallyLoadedModuleNames.Add("LinuxTargetPlatform");
-							Rules.DynamicallyLoadedModuleNames.Add("LinuxNoEditorTargetPlatform");
-							Rules.DynamicallyLoadedModuleNames.Add("LinuxAArch64NoEditorTargetPlatform");
-							Rules.DynamicallyLoadedModuleNames.Add("LinuxClientTargetPlatform");
-							Rules.DynamicallyLoadedModuleNames.Add("LinuxAArch64ClientTargetPlatform");
-							Rules.DynamicallyLoadedModuleNames.Add("LinuxServerTargetPlatform");
-							Rules.DynamicallyLoadedModuleNames.Add("LinuxAArch64ServerTargetPlatform");
+							Rules.DynamicallyLoadedModuleNames.Add("LinuxArm64TargetPlatform");
 						}
 					}
 				}
@@ -411,12 +402,7 @@ namespace UnrealBuildTool
 				if (Target.bForceBuildTargetPlatforms && ModuleName == "TargetPlatform")
 				{
 					Rules.DynamicallyLoadedModuleNames.Add("LinuxTargetPlatform");
-					Rules.DynamicallyLoadedModuleNames.Add("LinuxNoEditorTargetPlatform");
-					Rules.DynamicallyLoadedModuleNames.Add("LinuxAArch64NoEditorTargetPlatform");
-					Rules.DynamicallyLoadedModuleNames.Add("LinuxClientTargetPlatform");
-					Rules.DynamicallyLoadedModuleNames.Add("LinuxAArch64ClientTargetPlatform");
-					Rules.DynamicallyLoadedModuleNames.Add("LinuxServerTargetPlatform");
-					Rules.DynamicallyLoadedModuleNames.Add("LinuxAArch64ServerTargetPlatform");
+					Rules.DynamicallyLoadedModuleNames.Add("LinuxArm64TargetPlatform");
 				}
 			}
 		}
@@ -446,13 +432,7 @@ namespace UnrealBuildTool
 				if (Target.bForceBuildTargetPlatforms)
 				{
 					Rules.DynamicallyLoadedModuleNames.Add("LinuxTargetPlatform");
-					Rules.DynamicallyLoadedModuleNames.Add("LinuxNoEditorTargetPlatform");
-					Rules.DynamicallyLoadedModuleNames.Add("LinuxAArch64NoEditorTargetPlatform");
-					Rules.DynamicallyLoadedModuleNames.Add("LinuxClientTargetPlatform");
-					Rules.DynamicallyLoadedModuleNames.Add("LinuxAArch64ClientTargetPlatform");
-					Rules.DynamicallyLoadedModuleNames.Add("LinuxServerTargetPlatform");
-					Rules.DynamicallyLoadedModuleNames.Add("LinuxAArch64ServerTargetPlatform");
-					Rules.DynamicallyLoadedModuleNames.Add("AllDesktopTargetPlatform");
+					Rules.DynamicallyLoadedModuleNames.Add("LinuxArm64TargetPlatform");
 				}
 
 				if (bBuildShaderFormats)
@@ -474,24 +454,19 @@ namespace UnrealBuildTool
 			// this define does not set jemalloc as default, just indicates its support
 			CompileEnvironment.Definitions.Add("PLATFORM_SUPPORTS_JEMALLOC=1");
 
-			// LinuxAArch64 uses only Linux header files
+			// LinuxArm64 uses only Linux header files
 			CompileEnvironment.Definitions.Add("OVERRIDE_PLATFORM_HEADER_NAME=Linux");
 
-			CompileEnvironment.Definitions.Add("PLATFORM_LINUXAARCH64=" +
-				(Target.Platform == UnrealTargetPlatform.LinuxAArch64 ? "1" : "0"));
+			CompileEnvironment.Definitions.Add("PLATFORM_LINUXARM64=" +
+				(Target.Platform == UnrealTargetPlatform.LinuxArm64 ? "1" : "0"));
 		}
 
-		/// <summary>
-		/// Setup the target environment for building
-		/// </summary>
-		/// <param name="Target">Settings for the target being compiled</param>
-		/// <param name="CompileEnvironment">The compile environment for this target</param>
-		/// <param name="LinkEnvironment">The link environment for this target</param>
+		/// <inheritdoc/>
 		public override void SetUpEnvironment(ReadOnlyTargetRules Target, CppCompileEnvironment CompileEnvironment, LinkEnvironment LinkEnvironment)
 		{
 			// During the native builds, check the system includes as well (check toolchain when cross-compiling?)
-			string BaseLinuxPath = SDK.GetBaseLinuxPathForArchitecture(Target.Architecture);
-			if (BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Linux && String.IsNullOrEmpty(BaseLinuxPath))
+			DirectoryReference? BaseLinuxPath = SDK.GetBaseLinuxPathForArchitecture(Target.Architecture);
+			if (BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Linux && BaseLinuxPath == null)
 			{
 				CompileEnvironment.SystemIncludePaths.Add(new DirectoryReference("/usr/include"));
 			}
@@ -514,17 +489,49 @@ namespace UnrealBuildTool
 
 			if (CompileEnvironment.bPGOOptimize)
 			{
-				DirectoryReference BaseDir = UnrealBuildTool.EngineDirectory;
+				DirectoryReference BaseDir = Unreal.WritableEngineDirectory;
 				if (Target.ProjectFile != null)
 				{
 					BaseDir = DirectoryReference.FromFile(Target.ProjectFile);
+					// projects put PGO data in Platform/Linux/Build/PGO, even if Linux platform isn't a Platform Extension
+					CompileEnvironment.PGODirectory = Path.Combine(BaseDir.FullName, "Platforms", Target.Platform.ToString(), "Build", "PGO");
 				}
-				CompileEnvironment.PGODirectory = Path.Combine(BaseDir.FullName, "Build", Target.Platform.ToString(), "PGO").Replace('\\', '/') + "/";
-				CompileEnvironment.PGOFilenamePrefix = "profile.profdata";
+				else
+				{
+					// project-less build put PGO data in Engine/Build/Linux/PGO, because Linux platform isn't a Platform Extension
+					CompileEnvironment.PGODirectory = Path.Combine(BaseDir.FullName, "Build", Target.Platform.ToString(), "PGO");
+				}
+				CompileEnvironment.PGODirectory = CompileEnvironment.PGODirectory.Replace('\\', '/') + "/";
+				CompileEnvironment.PGOFilenamePrefix = string.Format("{0}-{1}-{2}.profdata", Target.Name, Target.Platform, Target.Configuration);
 
-				LinkEnvironment.PGODirectory = CompileEnvironment.PGODirectory;
-				LinkEnvironment.PGOFilenamePrefix = CompileEnvironment.PGOFilenamePrefix;
+				// Check if the profdata file exists and disable if not.
+				// If the file exists but has zero length, this is a "soft" disabling. E.g. PGO data has become stale and we want to temporarily compile without PGO - do not complain about it.
+				String PGOFilePath = Path.Combine(CompileEnvironment.PGODirectory, CompileEnvironment.PGOFilenamePrefix);
+				FileInfo Info = new FileInfo(PGOFilePath);
+				if (!Info.Exists || Info.Length == 0)
+				{
+					if (!Info.Exists)
+					{
+						Logger.LogWarning("Warning: PGO file '{0}' does not exist, disabling optimization", PGOFilePath);
+					}
+					else
+					{
+						Logger.LogInformation("PGO file '{0}' exists but has 0 length. Assuming that PGO data is temporarily missing, disabling optimization without a warning.", PGOFilePath);
+					}
+					CompileEnvironment.bPGOOptimize = false;
+					LinkEnvironment.bPGOOptimize = false;
+
+					CompileEnvironment.PGODirectory = "";
+					CompileEnvironment.PGOFilenamePrefix = "";
+				}
+				else
+				{
+					LinkEnvironment.PGODirectory = CompileEnvironment.PGODirectory;
+					LinkEnvironment.PGOFilenamePrefix = CompileEnvironment.PGOFilenamePrefix;
+				}
 			}
+
+			LinkEnvironment.bCodeCoverage = CompileEnvironment.bCodeCoverage;
 
 			// For consistency with other platforms, also enable LTO whenever doing profile-guided optimizations.
 			// Obviously both PGI (instrumented) and PGO (optimized) binaries need to have that
@@ -542,7 +549,12 @@ namespace UnrealBuildTool
 				);
 			}
 
-			CompileEnvironment.Definitions.Add("UINT64_T_IS_UNSIGNED_LONG=1");
+			CompileEnvironment.Definitions.Add("INT64_T_TYPES_NOT_LONG_LONG=1");
+
+			if (Target.LinuxPlatform.bEnableRayTracing && Target.Type != TargetType.Server)
+			{
+				CompileEnvironment.Definitions.Add("RHI_RAYTRACING=1");
+			}
 
 			// link with Linux libraries.
 			LinkEnvironment.SystemLibraries.Add("pthread");
@@ -576,20 +588,25 @@ namespace UnrealBuildTool
 		/// <returns>New toolchain instance.</returns>
 		public override UEToolChain CreateToolChain(ReadOnlyTargetRules Target)
 		{
-			LinuxToolChainOptions Options = LinuxToolChainOptions.None;
+			if (Target.bIWYU)
+			{
+				return new IWYUToolChain(Target, Logger);
+			}
+
+			ClangToolChainOptions Options = ClangToolChainOptions.None;
 
 			if (Target.LinuxPlatform.bEnableAddressSanitizer)
 			{
-				Options |= LinuxToolChainOptions.EnableAddressSanitizer;
+				Options |= ClangToolChainOptions.EnableAddressSanitizer;
 
 				if (Target.LinkType != TargetLinkType.Monolithic)
 				{
-					Options |= LinuxToolChainOptions.EnableSharedSanitizer;
+					Options |= ClangToolChainOptions.EnableSharedSanitizer;
 				}
 			}
 			if (Target.LinuxPlatform.bEnableThreadSanitizer)
 			{
-				Options |= LinuxToolChainOptions.EnableThreadSanitizer;
+				Options |= ClangToolChainOptions.EnableThreadSanitizer;
 
 				if (Target.LinkType != TargetLinkType.Monolithic)
 				{
@@ -598,351 +615,119 @@ namespace UnrealBuildTool
 			}
 			if (Target.LinuxPlatform.bEnableUndefinedBehaviorSanitizer)
 			{
-				Options |= LinuxToolChainOptions.EnableUndefinedBehaviorSanitizer;
+				Options |= ClangToolChainOptions.EnableUndefinedBehaviorSanitizer;
 
 				if (Target.LinkType != TargetLinkType.Monolithic)
 				{
-					Options |= LinuxToolChainOptions.EnableSharedSanitizer;
+					Options |= ClangToolChainOptions.EnableSharedSanitizer;
 				}
 			}
 			if (Target.LinuxPlatform.bEnableMemorySanitizer)
 			{
-				Options |= LinuxToolChainOptions.EnableMemorySanitizer;
+				Options |= ClangToolChainOptions.EnableMemorySanitizer;
 
 				if (Target.LinkType != TargetLinkType.Monolithic)
 				{
 					throw new BuildException("Memory Sanitizer (MSan) unsupported for non-monolithic builds");
 				}
 			}
-			if (Target.LinuxPlatform.bEnableThinLTO)
+			if (Target.LinuxPlatform.bDisableDumpSyms)
 			{
-				Options |= LinuxToolChainOptions.EnableThinLTO;
+				Options |= ClangToolChainOptions.DisableDumpSyms;
+			}
+			if (Target.LinuxPlatform.bEnableLibFuzzer)
+			{
+				Options |= ClangToolChainOptions.EnableLibFuzzer;
+
+				if (Target.LinkType != TargetLinkType.Monolithic)
+				{
+					throw new BuildException("LibFuzzer is unsupported for non-monolithic builds.");
+				}
 			}
 
-			// When building a monolithic editor we have to avoid using objcopy.exe as it cannot handle files
-			// larger then 4GB. This is only an issue with our binutils objcopy.exe.
-			// llvm-objcopy.exe does not have this issue and once we switch over to using that in clang 10.0.1 we can remove this!
-			if ((BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Win64) &&
-				(Target.LinkType == TargetLinkType.Monolithic) &&
-				(Target.Type == TargetType.Editor))
+			if (IsLTOEnabled(Target))
 			{
-				Options |= LinuxToolChainOptions.DisableSplitDebugInfoWithObjCopy;
+				Options |= ClangToolChainOptions.EnableLinkTimeOptimization;
+
+				if (Target.bPreferThinLTO)
+				{
+					Options |= ClangToolChainOptions.EnableThinLTO;
+				}
+			}
+			else if (Target.bPreferThinLTO)
+			{
+				// warn about ThinLTO not being useful on its own
+				Logger.LogWarning("Warning: bPreferThinLTO is set, but LTO is disabled. Flag will have no effect");
 			}
 
-			return new LinuxToolChain(Target.Architecture, SDK, Target.LinuxPlatform.bPreservePSYM, Options);
+			if (Target.bUseAutoRTFMCompiler)
+			{
+				Options |= ClangToolChainOptions.UseAutoRTFMCompiler;
+			}
+
+			if (Target.LinuxPlatform.bTuneDebugInfoForLLDB)
+			{
+				Options |= ClangToolChainOptions.TuneDebugInfoForLLDB;
+			}
+
+			if (Target.LinuxPlatform.bPreservePSYM)
+			{
+				Options |= ClangToolChainOptions.PreservePSYM;
+			}
+
+			// Disable color logging if we are on a build machine
+			if (Unreal.IsBuildMachine())
+			{
+				Log.ColorConsoleOutput = false;
+			}
+
+			return new LinuxToolChain(Target.Architecture, SDK, Options, Logger);
 		}
 
-		/// <summary>
-		/// Deploys the given target
-		/// </summary>
-		/// <param name="Receipt">Receipt for the target being deployed</param>
+		/// <inheritdoc/>
 		public override void Deploy(TargetReceipt Receipt)
 		{
+			new UEDeployLinux(Logger).PrepTargetForDeployment(Receipt);
 		}
 	}
 
-	class LinuxPlatformSDK : UEBuildPlatformSDK
+	class UEDeployLinux : UEBuildDeploy
 	{
-		/// <summary>
-		/// This is the SDK version we support
-		/// </summary>
-		static string ExpectedSDKVersion = "v19_clang-11.0.1-centos7";	// now unified for all the architectures
-
-		/// <summary>
-		/// Platform name (embeds architecture for now)
-		/// </summary>
-		static private string TargetPlatformName = "Linux_x64";
-
-		/// <summary>
-		/// Force using system compiler and error out if not possible
-		/// </summary>
-		private int bForceUseSystemCompiler = -1;
-
-		/// <summary>
-		/// Whether to compile with the verbose flag
-		/// </summary>
-		public bool bVerboseCompiler = false;
-
-		/// <summary>
-		/// Whether to link with the verbose flag
-		/// </summary>
-		public bool bVerboseLinker = false;
-
-		/// <summary>
-		/// Whether platform supports switching SDKs during runtime
-		/// </summary>
-		/// <returns>true if supports</returns>
-		protected override bool PlatformSupportsAutoSDKs()
+		public UEDeployLinux(ILogger InLogger)
+			: base(InLogger)
 		{
-			return true;
 		}
 
-		protected override bool DoesHookRequireAdmin(SDKHookType Hook)
+		public override bool PrepTargetForDeployment(TargetReceipt Receipt)
 		{
-			return false;
-		}
-
-		/// <summary>
-		/// Returns platform-specific name used in SDK repository
-		/// </summary>
-		/// <returns>path to SDK Repository</returns>
-		public override string GetSDKTargetPlatformName()
-		{
-			return TargetPlatformName;
-		}
-
-		/// <summary>
-		/// Returns a path to the internal SDK
-		/// </summary>
-		/// <returns>Valid path to the internal SDK, null otherwise</returns>
-		static public string GetInternalSDKPath()
-		{
-			string SDKRoot = Environment.GetEnvironmentVariable(SDKRootEnvVar);
-			if (!String.IsNullOrEmpty(SDKRoot))
-			{
-				string AutoSDKPath = Path.Combine(SDKRoot, "Host" + BuildHostPlatform.Current.Platform, TargetPlatformName, ExpectedSDKVersion, LinuxPlatform.DefaultHostArchitecture);
-				if (DirectoryReference.Exists(new DirectoryReference(AutoSDKPath)))
-				{
-					return AutoSDKPath;
-				}
-			}
-
-			string InTreeSDKPath = Path.Combine(LinuxPlatformSDK.GetInTreeSDKRoot().FullName, ExpectedSDKVersion, LinuxPlatform.DefaultHostArchitecture);
-			if (DirectoryReference.Exists(new DirectoryReference(InTreeSDKPath)))
-			{
-				return InTreeSDKPath;
-			}
-
-			return null;
-		}
-
-		/// <summary>
-		/// Returns SDK string as required by the platform
-		/// </summary>
-		/// <returns>Valid SDK string</returns>
-		public override string GetRequiredSDKString()
-		{
-			return ExpectedSDKVersion;
-		}
-
-		protected override String GetRequiredScriptVersionString()
-		{
-			return "3.0";
-		}
-
-		protected override bool PreferAutoSDK()
-		{
-			// having LINUX_ROOT set (for legacy reasons or for convenience of cross-compiling certain third party libs) should not make UBT skip AutoSDKs
-			return true;
-		}
-
-		public string HaveLinuxDependenciesFile()
-		{
-			// This file must have no extension so that GitDeps considers it a binary dependency - it will only be pulled by the Setup script if Linux is enabled.
-			return "HaveLinuxDependencies";
-		}
-
-		public string SDKVersionFileName()
-		{
-			return "ToolchainVersion.txt";
-		}
-
-		protected static int GetLinuxToolchainVersionFromString(string SDKVersion)
-		{
-			// Example: v11_clang-5.0.0-centos7
-			string FullVersionPattern = @"^v[0-9]+_.*$";
-			Regex Regex = new Regex(FullVersionPattern);
-			if (Regex.IsMatch(SDKVersion))
-			{
-				string VersionPattern = @"[0-9]+";
-				Regex = new Regex(VersionPattern);
-				Match Match = Regex.Match(SDKVersion);
-				if (Match.Success)
-				{
-					int Version;
-					bool bParsed = Int32.TryParse(Match.Value, out Version);
-					if (bParsed)
-					{
-						return Version;
-					}
-				}
-			}
-
-			return -1;
-		}
-
-		public bool CheckSDKCompatible(string VersionString, out string ErrorMessage)
-		{
-			int Version = GetLinuxToolchainVersionFromString(VersionString);
-			int ExpectedVersion = GetLinuxToolchainVersionFromString(ExpectedSDKVersion);
-			if (Version >= 0 && ExpectedVersion >= 0 && Version != ExpectedVersion)
-			{
-				if (Version < ExpectedVersion)
-				{
-					ErrorMessage = "Toolchain found \"" + VersionString + "\" is older then the required version \"" + ExpectedSDKVersion + "\"";
-					return false;
-				}
-				else
-				{
-					Log.TraceWarning("Toolchain \"{0}\" is newer than the expected version \"{1}\", you may run into compilation errors", VersionString, ExpectedSDKVersion);
-				}
-			}
-			else if (VersionString != ExpectedSDKVersion)
-			{
-				ErrorMessage = "Failed to find a supported toolchain, found \"" + VersionString + "\", expected \"" + ExpectedSDKVersion + "\"";
-				return false;
-			}
-
-			ErrorMessage = "";
-			return true;
-		}
-
-		/// <summary>
-		/// Returns the in-tree root for the Linux Toolchain for this host platform.
-		/// </summary>
-		private static DirectoryReference GetInTreeSDKRoot()
-		{
-			return DirectoryReference.Combine(UnrealBuildTool.RootDirectory, "Engine/Extras/ThirdPartyNotUE/SDKs", "Host" + BuildHostPlatform.Current.Platform, TargetPlatformName);
-		}
-
-		/// <summary>
-		/// Whether a host can use its system sdk for this platform
-		/// </summary>
-		public virtual bool ForceUseSystemCompiler()
-		{
-			// by default tools chains don't parse arguments, but we want to be able to check the -bForceUseSystemCompiler flag.
-			if (bForceUseSystemCompiler == -1)
-			{
-				bForceUseSystemCompiler = 0;
-				string[] CmdLine = Environment.GetCommandLineArgs();
-
-				foreach (string CmdLineArg in CmdLine)
-				{
-					if (CmdLineArg.Equals("-ForceUseSystemCompiler", StringComparison.OrdinalIgnoreCase))
-					{
-						bForceUseSystemCompiler = 1;
-						break;
-					}
-				}
-			}
-
-			return bForceUseSystemCompiler == 1;
-		}
-
-		/// <summary>
-		/// Returns the root SDK path for all architectures
-		/// WARNING: Do not cache this value - it may be changed after sourcing OutputEnvVars.txt
-		/// </summary>
-		/// <returns>Valid SDK string</returns>
-		public virtual string GetSDKLocation()
-		{
-			// if new multi-arch toolchain is used, prefer it
-			string MultiArchRoot = Environment.GetEnvironmentVariable("LINUX_MULTIARCH_ROOT");
-
-			if (String.IsNullOrEmpty(MultiArchRoot))
-			{
-				// check if in-tree SDK is available
-				DirectoryReference InTreeSDKVersionRoot = GetInTreeSDKRoot();
-				if (InTreeSDKVersionRoot != null)
-				{
-					DirectoryReference InTreeSDKVersionPath = DirectoryReference.Combine(InTreeSDKVersionRoot, ExpectedSDKVersion);
-					if (DirectoryReference.Exists(InTreeSDKVersionPath))
-					{
-						MultiArchRoot = InTreeSDKVersionPath.FullName;
-					}
-				}
-			}
-			return MultiArchRoot;
-		}
-
-		/// <summary>
-		/// Returns the SDK path for a specific architecture
-		/// WARNING: Do not cache this value - it may be changed after sourcing OutputEnvVars.txt
-		/// </summary>
-		/// <returns>Valid SDK string</returns>
-		public virtual string GetBaseLinuxPathForArchitecture(string Architecture)
-		{
-			// if new multi-arch toolchain is used, prefer it
-			string MultiArchRoot = GetSDKLocation();
-			string BaseLinuxPath;
-
-			if (!String.IsNullOrEmpty(MultiArchRoot))
-			{
-				BaseLinuxPath = Path.Combine(MultiArchRoot, Architecture);
-			}
-			else
-			{
-				// use cross linux toolchain if LINUX_ROOT is specified
-				BaseLinuxPath = Environment.GetEnvironmentVariable("LINUX_ROOT");
-			} 
-			return BaseLinuxPath;
-		}
-
-		/// <summary>
-		/// Whether the path contains a valid clang version
-		/// </summary>
-		private static bool IsValidClangPath(DirectoryReference BaseLinuxPath)
-		{
-			FileReference ClangPath = FileReference.Combine(BaseLinuxPath, @"bin", (BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Win64) ? "clang++.exe" : "clang++");
-			return FileReference.Exists(ClangPath);
-		}
-
-		/// <summary>
-		/// Whether the required external SDKs are installed for this platform
-		/// </summary>
-		protected override SDKStatus HasRequiredManualSDKInternal()
-		{
-			// FIXME: UBT should loop across all the architectures and compile for all the selected ones.
-
-			// do not cache this value - it may be changed after sourcing OutputEnvVars.txt
-			string BaseLinuxPath = GetBaseLinuxPathForArchitecture(LinuxPlatform.DefaultHostArchitecture);
-
-			if (ForceUseSystemCompiler())
-			{
-				if (!String.IsNullOrEmpty(LinuxCommon.WhichClang()) || !String.IsNullOrEmpty(LinuxCommon.WhichGcc()))
-				{
-					return SDKStatus.Valid;
-				}
-			}
-			else if (!String.IsNullOrEmpty(BaseLinuxPath))
-			{
-				// paths to our toolchains if BaseLinuxPath is specified
-				BaseLinuxPath = BaseLinuxPath.Replace("\"", "");
-
-				if (IsValidClangPath(new DirectoryReference(BaseLinuxPath)))
-				{
-					return SDKStatus.Valid;
-				}
-			}
-
-			return SDKStatus.Invalid;
+			return base.PrepTargetForDeployment(Receipt);
 		}
 	}
 
 	class LinuxPlatformFactory : UEBuildPlatformFactory
 	{
-		public override UnrealTargetPlatform TargetPlatform
-		{
-			get { return UnrealTargetPlatform.Linux; }
-		}
+		public override UnrealTargetPlatform TargetPlatform => UnrealTargetPlatform.Linux;
 
 		/// <summary>
 		/// Register the platform with the UEBuildPlatform class
 		/// </summary>
-		public override void RegisterBuildPlatforms()
+		public override void RegisterBuildPlatforms(ILogger Logger)
 		{
-			LinuxPlatformSDK SDK = new LinuxPlatformSDK();
-			SDK.ManageAndValidateSDK();
+			LinuxPlatformSDK SDK = new LinuxPlatformSDK(Logger);
+			LinuxPlatformSDK SDKArm64 = new LinuxPlatformSDK(Logger);
 
-			// Register this build platform for Linux x86-64 and AArch64
-			UEBuildPlatform.RegisterBuildPlatform(new LinuxPlatform(UnrealTargetPlatform.Linux, SDK));
+			// Register this build platform for Linux x86-64 and Arm64
+			UEBuildPlatform.RegisterBuildPlatform(new LinuxPlatform(UnrealTargetPlatform.Linux, SDK, Logger), Logger);
 			UEBuildPlatform.RegisterPlatformWithGroup(UnrealTargetPlatform.Linux, UnrealPlatformGroup.Linux);
 			UEBuildPlatform.RegisterPlatformWithGroup(UnrealTargetPlatform.Linux, UnrealPlatformGroup.Unix);
 			UEBuildPlatform.RegisterPlatformWithGroup(UnrealTargetPlatform.Linux, UnrealPlatformGroup.Desktop);
+			UEBuildPlatform.RegisterPlatformWithGroup(UnrealTargetPlatform.Linux, UnrealPlatformGroup.PosixOS);
 
-			UEBuildPlatform.RegisterBuildPlatform(new LinuxPlatform(UnrealTargetPlatform.LinuxAArch64, SDK));
-			UEBuildPlatform.RegisterPlatformWithGroup(UnrealTargetPlatform.LinuxAArch64, UnrealPlatformGroup.Linux);
-			UEBuildPlatform.RegisterPlatformWithGroup(UnrealTargetPlatform.LinuxAArch64, UnrealPlatformGroup.Unix);
+			UEBuildPlatform.RegisterBuildPlatform(new LinuxPlatform(UnrealTargetPlatform.LinuxArm64, SDKArm64, Logger), Logger);
+			UEBuildPlatform.RegisterPlatformWithGroup(UnrealTargetPlatform.LinuxArm64, UnrealPlatformGroup.Linux);
+			UEBuildPlatform.RegisterPlatformWithGroup(UnrealTargetPlatform.LinuxArm64, UnrealPlatformGroup.Unix);
+			UEBuildPlatform.RegisterPlatformWithGroup(UnrealTargetPlatform.LinuxArm64, UnrealPlatformGroup.Desktop);
+			UEBuildPlatform.RegisterPlatformWithGroup(UnrealTargetPlatform.LinuxArm64, UnrealPlatformGroup.PosixOS);
 		}
 	}
 }

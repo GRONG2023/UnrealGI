@@ -2,12 +2,12 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Widgets/SWidget.h"
-#include "Toolkits/IToolkitHost.h"
+#include "Containers/Array.h"
+#include "EdMode.h"
+#include "Internationalization/Text.h"
+#include "Templates/SharedPointer.h"
 #include "Toolkits/BaseToolkit.h"
-
-class SFoliageEdit;
+#include "UObject/NameTypes.h"
 
 /**
  * Public interface to Foliage Edit mode.
@@ -15,9 +15,6 @@ class SFoliageEdit;
 class FFoliageEdModeToolkit : public FModeToolkit
 {
 public:
-	virtual void RegisterTabSpawners(const TSharedRef<class FTabManager>& TabManager) override;
-	virtual void UnregisterTabSpawners(const TSharedRef<class FTabManager>& TabManager) override;
-
 	/** Initializes the foliage mode toolkit */
 	virtual void Init(const TSharedPtr< class IToolkitHost >& InitToolkitHost) override;
 
@@ -40,6 +37,7 @@ public:
 
 	void RefreshFullList();
 	void NotifyFoliageTypeMeshChanged(class UFoliageType* FoliageType);
+	void ReflectSelectionInPalette();
 
 private:
 	TSharedPtr< class SFoliageEdit > FoliageEdWidget;

@@ -1,82 +1,63 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "DSP/Noise.h"
+#include "DSP/Dsp.h"
+#include "HAL/PlatformTime.h"
 
 namespace Audio
 {
-	FWhiteNoise::FWhiteNoise(const float InScale, const float InAdd)
+	FWhiteNoise::FWhiteNoise(int32 InRandomSeed)
+		: RandomStream{ InRandomSeed }
+	{}
+
+	FWhiteNoise::FWhiteNoise()
+		: FWhiteNoise{ static_cast<int32>(FPlatformTime::Cycles()) }
+	{}
+
+	FPinkNoise::FPinkNoise(int32 InRandomSeed)
+		: Noise{ InRandomSeed }
+		, X_Z{ 0,0,0,0 }
+		, Y_Z{ 0,0.0,0 }
+		, A0{ 1.0f }	// Not used.
 	{
-		SetScaleAdd(InScale, InAdd);
+		static_assert(UE_ARRAY_COUNT(X_Z) == 4, "sizeof(X_Z)==4");
+		static_assert(UE_ARRAY_COUNT(Y_Z) == 4, "sizeof(Y_Z)==4");
 	}
 
-	void FWhiteNoise::SetScaleAdd(const float InScale, const float InAdd)
-	{
-		if (Scale == InScale && Add == InAdd)
-		{
-			return;
-		}
-
-		Scale = InScale;
-		Add = InAdd;
-
-		RandomStream.Initialize(HashCombine(GetTypeHash(Scale), GetTypeHash(Add)));
-	}
-
-	float FWhiteNoise::Generate()
-	{
-		return Add + Scale * RandomStream.FRand() * 2 - 1.0f;
-	}
-
-	FPinkNoise::FPinkNoise(const float InScale, const float InAdd)
-	{
-		InitFilter();
-		Noise.SetScaleAdd(InScale, InAdd);
-	}
-
-	void FPinkNoise::InitFilter()
-	{
-		for (int32 i = 0; i < 4; ++i)
-		{
-			X[i] = 0.0f;
-			Y[i] = 0.0f;
-		}
-
-		A[0] = 0.0f;
-		A[1] = -2.495f;
-		A[2] = 2.017;
-		A[3] = -0.522f;
-
-		B[0] = 0.041f;
-		B[1] = -0.96f;
-		B[2] = 0.051f;
-		B[3] = -0.004f;
-	}
-
-	/** Sets the output scale and add parameter. */
-	void FPinkNoise::SetScaleAdd(const float InScale, const float InAdd)
-	{
-		Noise.SetScaleAdd(InScale, InAdd);
-	}
+	FPinkNoise::FPinkNoise()
+		: FPinkNoise{static_cast<int32>(FPlatformTime::Cycles())}
+	{}
 
 	float FPinkNoise::Generate()
 	{
-		X[0] = Noise.Generate();
+		// Filter Coefficients based on:
+		// https://ccrma.stanford.edu/~jos/sasp/Example_Synthesis_1_F_Noise.html
+		static constexpr float A[3] { -2.494956002f,2.017265875f, -0.522189400f };
+		static constexpr float B[4] { 0.049922035f,-0.095993537f,0.050612699f,-0.004408786f};	
 
-		float Output = 0.0f;
-		for (int32 i = 0; i < 4; ++i)
-		{
-			Output += (B[i] * X[i] - A[i] * Y[i]);
-		}
+		X_Z[0] = Noise.Generate(); // Xn
 
-		X[3] = X[2];
-		X[2] = X[1];
-		X[1] = X[0];
+		float Yn = 
+			  X_Z[0]*B[0] 
+			+ X_Z[1]*B[1] 
+			+ X_Z[2]*B[2] 
+			+ X_Z[3]*B[3]
 
-		Y[3] = Y[2];
-		Y[2] = Y[1];
-		Y[1] = Y[0];
-		Y[0] = Output;
+			- Y_Z[0]*A[0] 
+			- Y_Z[1]*A[1] 
+			- Y_Z[2]*A[2];
 
-		return Output;
+		// Shuffle feed-forward state by one.
+		X_Z[3] = X_Z[2];
+		X_Z[2] = X_Z[1];
+		X_Z[1] = X_Z[0];
+
+		// Shuffle feed-back state by one.
+		Y_Z[3] = Y_Z[2]; 
+		Y_Z[2] = Y_Z[1];
+		Y_Z[1] = Y_Z[0];
+		Y_Z[0] = Yn;
+
+		return Yn;
 	}
 }

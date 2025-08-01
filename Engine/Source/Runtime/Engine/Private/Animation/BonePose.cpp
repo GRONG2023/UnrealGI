@@ -1,17 +1,32 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BonePose.h"
+#include "Animation/AnimCurveTypes.h"
 #include "AnimationRuntime.h"
 #include "AnimEncoding.h"
-#include "HAL/ThreadSingleton.h"
+#include "Animation/AnimSequenceHelpers.h"
 #if INTEL_ISPC
 #include "BonePose.ispc.generated.h"
+
+static_assert(sizeof(ispc::FTransform) == sizeof(FTransform), "sizeof(ispc::FTransform) != sizeof(FTransform)");
+#endif
+
+#if !defined(ANIM_BONE_POSE_ISPC_ENABLED_DEFAULT)
+#define ANIM_BONE_POSE_ISPC_ENABLED_DEFAULT 1
+#endif
+
+// Support run-time toggling on supported platforms in non-shipping configurations
+#if !INTEL_ISPC || UE_BUILD_SHIPPING
+static constexpr bool bAnim_BonePose_ISPC_Enabled = INTEL_ISPC && ANIM_BONE_POSE_ISPC_ENABLED_DEFAULT;
+#else
+static bool bAnim_BonePose_ISPC_Enabled = ANIM_BONE_POSE_ISPC_ENABLED_DEFAULT;
+static FAutoConsoleVariableRef CVarAnimBonePoseISPCEnabled(TEXT("a.BonePose.ISPC"), bAnim_BonePose_ISPC_Enabled, TEXT("Whether to use ISPC optimizations in bone pose calculations"));
 #endif
 
 // Normalizes all rotations in this pose
 void FCompactPose::NormalizeRotations()
 {
-	if (INTEL_ISPC)
+	if (bAnim_BonePose_ISPC_Enabled)
 	{
 #if INTEL_ISPC
 		ispc::NormalizeRotations((ispc::FTransform*)this->Bones.GetData(), this->Bones.Num());
@@ -29,7 +44,7 @@ void FCompactPose::NormalizeRotations()
 // Sets every bone transform to Identity
 void FCompactPose::ResetToAdditiveIdentity()
 {
-	if (INTEL_ISPC)
+	if (bAnim_BonePose_ISPC_Enabled)
 	{
 #if INTEL_ISPC
 		ispc::ResetToAdditiveIdentity((ispc::FTransform*)this->Bones.GetData(), this->Bones.Num());
@@ -39,8 +54,7 @@ void FCompactPose::ResetToAdditiveIdentity()
 	{
 		for (FTransform& Bone : this->Bones)
 		{
-			Bone.SetIdentity();
-			Bone.SetScale3D(FVector::ZeroVector);
+			Bone.SetIdentityZeroScale();
 		}
 	}
 }
@@ -48,7 +62,7 @@ void FCompactPose::ResetToAdditiveIdentity()
 // Normalizes all rotations in this pose
 void FCompactHeapPose::NormalizeRotations()
 {
-	if (INTEL_ISPC)
+	if (bAnim_BonePose_ISPC_Enabled)
 	{
 #if INTEL_ISPC
 		ispc::NormalizeRotations((ispc::FTransform*)this->Bones.GetData(), this->Bones.Num());
@@ -66,7 +80,7 @@ void FCompactHeapPose::NormalizeRotations()
 // Sets every bone transform to Identity
 void FCompactHeapPose::ResetToAdditiveIdentity()
 {
-	if (INTEL_ISPC)
+	if (bAnim_BonePose_ISPC_Enabled)
 	{
 #if INTEL_ISPC
 		ispc::ResetToAdditiveIdentity((ispc::FTransform*)this->Bones.GetData(), this->Bones.Num());
@@ -76,8 +90,7 @@ void FCompactHeapPose::ResetToAdditiveIdentity()
 	{
 		for (FTransform& Bone : this->Bones)
 		{
-			Bone.SetIdentity();
-			Bone.SetScale3D(FVector::ZeroVector);
+			Bone.SetIdentityZeroScale();
 		}
 	}
 }
@@ -124,17 +137,6 @@ bool FMeshPose::IsNormalized() const
 	return true;
 }
 
-struct FRetargetTracking
-{
-	const FCompactPoseBoneIndex PoseBoneIndex;
-	const int32 SkeletonBoneIndex;
-
-	FRetargetTracking(const FCompactPoseBoneIndex InPoseBoneIndex, const int32 InSkeletonBoneIndex)
-		: PoseBoneIndex(InPoseBoneIndex), SkeletonBoneIndex(InSkeletonBoneIndex)
-	{
-	}
-};
-
 FTransform ExtractTransformForKey(int32 Key, const FRawAnimSequenceTrack &TrackToExtract)
 {
 	static const FVector DefaultScale3D = FVector(1.f);
@@ -145,31 +147,24 @@ FTransform ExtractTransformForKey(int32 Key, const FRawAnimSequenceTrack &TrackT
 	if (bHasScaleKey)
 	{
 		const int32 ScaleKeyIndex = FMath::Min(Key, TrackToExtract.ScaleKeys.Num() - 1);
-		return FTransform(TrackToExtract.RotKeys[RotKeyIndex], TrackToExtract.PosKeys[PosKeyIndex], TrackToExtract.ScaleKeys[ScaleKeyIndex]);
+		return FTransform(FQuat(TrackToExtract.RotKeys[RotKeyIndex]), FVector(TrackToExtract.PosKeys[PosKeyIndex]), FVector(TrackToExtract.ScaleKeys[ScaleKeyIndex]));
 	}
 	else
 	{
-		return FTransform(TrackToExtract.RotKeys[RotKeyIndex], TrackToExtract.PosKeys[PosKeyIndex], DefaultScale3D);
+		return FTransform(FQuat(TrackToExtract.RotKeys[RotKeyIndex]), FVector(TrackToExtract.PosKeys[PosKeyIndex]), FVector(DefaultScale3D));
 	}
 }
 
-struct FBuildRawPoseScratchArea : public TThreadSingleton<FBuildRawPoseScratchArea>
-{
-	TArray<FRetargetTracking> RetargetTracking;
-	TArray<FVirtualBoneCompactPoseData> VirtualBoneCompactPoseData;
-};
-
-
 template<bool bInterpolateT>
-void BuildPoseFromRawDataInternal(const TArray<FRawAnimSequenceTrack>& InAnimationData, const TArray<struct FTrackToSkeletonMap>& TrackToSkeletonMapTable, FCompactPose& InOutPose, int32 KeyIndex1, int32 KeyIndex2, float Alpha)
+void BuildPoseFromRawDataInternal(const TArray<FRawAnimSequenceTrack>& InAnimationData, const TArray<struct FTrackToSkeletonMap>& TrackToSkeletonMapTable, FCompactPose& InOutPose, int32 KeyIndex1, int32 KeyIndex2, float Alpha, float TimePerKey, const TMap<int32, const FTransformCurve*>* AdditiveBoneTransformCurves)
 {
 	const int32 NumTracks = InAnimationData.Num();
 	const FBoneContainer& RequiredBones = InOutPose.GetBoneContainer();
 
-	TArray<FRetargetTracking>& RetargetTracking = FBuildRawPoseScratchArea::Get().RetargetTracking;
+	TArray<UE::Anim::Retargeting::FRetargetTracking>& RetargetTracking = UE::Anim::FBuildRawPoseScratchArea::Get().RetargetTracking;
 	RetargetTracking.Reset(NumTracks);
 
-	TArray<FVirtualBoneCompactPoseData>& VBCompactPoseData = FBuildRawPoseScratchArea::Get().VirtualBoneCompactPoseData;
+	TArray<FVirtualBoneCompactPoseData>& VBCompactPoseData =  UE::Anim::FBuildRawPoseScratchArea::Get().VirtualBoneCompactPoseData;
 	VBCompactPoseData = RequiredBones.GetVirtualBoneCompactPoseData();
 
 	FCompactPose Key2Pose;
@@ -192,14 +187,16 @@ void BuildPoseFromRawDataInternal(const TArray<FRawAnimSequenceTrack>& InAnimati
 					FVirtualBoneCompactPoseData& VB = VBCompactPoseData[Idx];
 					if (PoseBoneIndex == VB.VBIndex)
 					{
-						// Remove this bone as we have written data for it (false so we dont resize allocation)
-						VBCompactPoseData.RemoveAtSwap(Idx, 1, false);
+						// Remove this bone as we have written data for it
+						VBCompactPoseData.RemoveAtSwap(Idx, 1, EAllowShrinking::No);
 						break; //Modified TArray so must break here
 					}
 				}
 				// extract animation
 
 				const FRawAnimSequenceTrack& TrackToExtract = InAnimationData[TrackIndex];
+
+				const FTransformCurve* const * AdditiveBoneTransformCurve = AdditiveBoneTransformCurves ? AdditiveBoneTransformCurves->Find(SkeletonBoneIndex) : nullptr;
 
 				// Bail out (with rather wacky data) if data is empty for some reason.
 				if (TrackToExtract.PosKeys.Num() == 0 || TrackToExtract.RotKeys.Num() == 0)
@@ -219,9 +216,28 @@ void BuildPoseFromRawDataInternal(const TArray<FRawAnimSequenceTrack>& InAnimati
 					{
 						Key2Pose[PoseBoneIndex] = ExtractTransformForKey(KeyIndex2, TrackToExtract);
 					}
+
+
+					if (AdditiveBoneTransformCurve)
+					{
+						const FTransform PoseOneAdditive = (*AdditiveBoneTransformCurve)->Evaluate(KeyIndex1 * TimePerKey, 1.f);
+						const FTransform PoseOneLocalTransform = InOutPose[PoseBoneIndex];
+						InOutPose[PoseBoneIndex].SetRotation(PoseOneLocalTransform.GetRotation() * PoseOneAdditive.GetRotation());
+						InOutPose[PoseBoneIndex].SetTranslation(PoseOneLocalTransform.TransformPosition(PoseOneAdditive.GetTranslation()));
+						InOutPose[PoseBoneIndex].SetScale3D(PoseOneLocalTransform.GetScale3D() * PoseOneAdditive.GetScale3D());
+
+						if (bInterpolateT)
+						{
+							const FTransform PoseTwoAdditive = (*AdditiveBoneTransformCurve)->Evaluate(KeyIndex2 * TimePerKey, 1.f);
+							const FTransform PoseTwoLocalTransform = Key2Pose[PoseBoneIndex];
+							Key2Pose[PoseBoneIndex].SetRotation(PoseTwoLocalTransform.GetRotation() * PoseTwoAdditive.GetRotation());
+							Key2Pose[PoseBoneIndex].SetTranslation(PoseTwoLocalTransform.TransformPosition(PoseTwoAdditive.GetTranslation()));
+							Key2Pose[PoseBoneIndex].SetScale3D(PoseTwoLocalTransform.GetScale3D() * PoseTwoAdditive.GetScale3D());
+						}
+					}
 				}
 
-				RetargetTracking.Add(FRetargetTracking(PoseBoneIndex, SkeletonBoneIndex));
+				RetargetTracking.Add(UE::Anim::Retargeting::FRetargetTracking(PoseBoneIndex, SkeletonBoneIndex));
 			}
 		}
 	}
@@ -262,21 +278,46 @@ void BuildPoseFromRawDataInternal(const TArray<FRawAnimSequenceTrack>& InAnimati
 	}
 }
 
-void BuildPoseFromRawData(const TArray<FRawAnimSequenceTrack>& InAnimationData, const TArray<struct FTrackToSkeletonMap>& TrackToSkeletonMapTable, FCompactPose& InOutPose, float InTime, EAnimInterpolationType Interpolation, int32 NumFrames, float SequenceLength, FName RetargetSource)
+void BuildPoseFromRawData(
+	const TArray<FRawAnimSequenceTrack>& InAnimationData, 
+	const TArray<struct FTrackToSkeletonMap>& TrackToSkeletonMapTable, 
+	FCompactPose& InOutPose, 
+	float InTime, 
+	EAnimInterpolationType Interpolation, 
+	int32 NumFrames, 
+	float SequenceLength, 
+	FName RetargetSource, 
+	const TMap<int32, const FTransformCurve*>* AdditiveBoneTransformCurves /*= nullptr*/
+	)
 {
 	USkeleton* MySkeleton = InOutPose.GetBoneContainer().GetSkeletonAsset();
 	if (MySkeleton)
 	{
 		const TArray<FTransform>& RetargetTransforms = MySkeleton->GetRefLocalPoses(RetargetSource);
-		BuildPoseFromRawData(InAnimationData, TrackToSkeletonMapTable, InOutPose, InTime, Interpolation, NumFrames, SequenceLength, RetargetSource, RetargetTransforms);
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		BuildPoseFromRawData(InAnimationData, TrackToSkeletonMapTable, InOutPose, InTime, Interpolation, NumFrames, SequenceLength, RetargetSource, RetargetTransforms, AdditiveBoneTransformCurves);
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
 }
 
-void BuildPoseFromRawData(const TArray<FRawAnimSequenceTrack>& InAnimationData, const TArray<struct FTrackToSkeletonMap>& TrackToSkeletonMapTable, FCompactPose& InOutPose, float InTime, EAnimInterpolationType Interpolation, int32 NumFrames, float SequenceLength, FName SourceName, const TArray<FTransform>& RetargetTransforms)
+void BuildPoseFromRawData(
+	const TArray<FRawAnimSequenceTrack>& InAnimationData, 
+	const TArray<struct FTrackToSkeletonMap>& TrackToSkeletonMapTable, 
+	FCompactPose& InOutPose, 
+	float InTime, 
+	EAnimInterpolationType Interpolation, 
+	int32 NumFrames, 
+	float SequenceLength, 
+	FName SourceName, 
+	const TArray<FTransform>& RetargetTransforms,
+	const TMap<int32, const FTransformCurve*>* AdditiveBoneTransformCurves /*= nullptr*/
+	)
 {
 	int32 KeyIndex1, KeyIndex2;
 	float Alpha;
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	FAnimationRuntime::GetKeyIndicesFromTime(KeyIndex1, KeyIndex2, Alpha, InTime, NumFrames, SequenceLength);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	if (Interpolation == EAnimInterpolationType::Step)
 	{
@@ -285,24 +326,26 @@ void BuildPoseFromRawData(const TArray<FRawAnimSequenceTrack>& InAnimationData, 
 
 	bool bInterpolate = true;
 
-	if (Alpha < KINDA_SMALL_NUMBER)
+	if (Alpha < UE_KINDA_SMALL_NUMBER)
 	{
 		Alpha = 0.f;
 		bInterpolate = false;
 	}
-	else if (Alpha > 1.f - KINDA_SMALL_NUMBER)
+	else if (Alpha > 1.f - UE_KINDA_SMALL_NUMBER)
 	{
 		bInterpolate = false;
 		KeyIndex1 = KeyIndex2;
 	}
 
+	const float TimePerFrame = SequenceLength / (float)FMath::Max(NumFrames - 1, 1);
+
 	if (bInterpolate)
 	{
-		BuildPoseFromRawDataInternal<true>(InAnimationData, TrackToSkeletonMapTable, InOutPose, KeyIndex1, KeyIndex2, Alpha);
+		BuildPoseFromRawDataInternal<true>(InAnimationData, TrackToSkeletonMapTable, InOutPose, KeyIndex1, KeyIndex2, Alpha, TimePerFrame, AdditiveBoneTransformCurves);
 	}
 	else
 	{
-		BuildPoseFromRawDataInternal<false>(InAnimationData, TrackToSkeletonMapTable, InOutPose, KeyIndex1, KeyIndex2, Alpha);
+		BuildPoseFromRawDataInternal<false>(InAnimationData, TrackToSkeletonMapTable, InOutPose, KeyIndex1, KeyIndex2, Alpha, TimePerFrame, AdditiveBoneTransformCurves);
 	}
 
 	const FBoneContainer& RequiredBones = InOutPose.GetBoneContainer();
@@ -310,16 +353,14 @@ void BuildPoseFromRawData(const TArray<FRawAnimSequenceTrack>& InAnimationData, 
 
 	if (!bDisableRetargeting)
 	{
-		const TArray<FRetargetTracking>& RetargetTracking = FBuildRawPoseScratchArea::Get().RetargetTracking;
+		const TArray<UE::Anim::Retargeting::FRetargetTracking>& RetargetTracking = UE::Anim::FBuildRawPoseScratchArea::Get().RetargetTracking;
 
-		USkeleton* Skeleton = RequiredBones.GetSkeletonAsset();
-
-		for (const FRetargetTracking& RT : RetargetTracking)
+		const USkeleton* Skeleton = RequiredBones.GetSkeletonAsset();
+		for (const UE::Anim::Retargeting::FRetargetTracking& RT : RetargetTracking)
 		{
 			FAnimationRuntime::RetargetBoneTransform(Skeleton, SourceName, RetargetTransforms, InOutPose[RT.PoseBoneIndex], RT.SkeletonBoneIndex, RT.PoseBoneIndex, RequiredBones, false);
 		}
 	}
-
 }
 
 

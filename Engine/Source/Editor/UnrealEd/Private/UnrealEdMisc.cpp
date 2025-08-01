@@ -1,6 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "UnrealEdMisc.h"
+
+#include "Engine/Blueprint.h"
+#include "GameFramework/Pawn.h"
+#include "Model.h"
 #include "TickableEditorObject.h"
 #include "Components/PrimitiveComponent.h"
 #include "Misc/MessageDialog.h"
@@ -27,6 +31,7 @@
 #include "HAL/PlatformSplash.h"
 #include "Internationalization/Culture.h"
 #include "Misc/ConfigCacheIni.h"
+#include "UObject/ObjectSaveContext.h"
 #include "UObject/UObjectIterator.h"
 #include "EngineUtils.h"
 #include "EditorViewportClient.h"
@@ -48,7 +53,8 @@
 #include "Kismet2/KismetDebugUtilities.h"
 #include "FbxLibs.h"
 #include "Kismet2/CompilerResultsLog.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/AssetDataToken.h"
 #include "EngineAnalytics.h"
 #include "AnalyticsEventAttribute.h"
 #include "Interfaces/IAnalyticsProvider.h"
@@ -67,6 +73,9 @@
 #include "Misc/HotReloadInterface.h"
 #include "PerformanceMonitor.h"
 #include "Engine/WorldComposition.h"
+#include "WorldPartition/WorldPartition.h"
+#include "WorldPartition/WorldPartitionActorDesc.h"
+#include "WorldPartition/WorldPartitionActorDescUtils.h"
 #include "Interfaces/IProjectManager.h"
 #include "FeaturePackContentSource.h"
 #include "ProjectDescriptor.h"
@@ -85,6 +94,8 @@
 #include "ILauncherServicesModule.h"
 #include "HAL/PlatformTime.h"
 #include "StudioAnalytics.h"
+#include "DeveloperToolSettingsDelegates.h"
+#include "Cooker/PackageBuildDependencyTracker.h"
 
 #define USE_UNIT_TESTS 0
 
@@ -202,7 +213,6 @@ namespace UnrealEdMiscDefs
 }
 
 FUnrealEdMisc::FUnrealEdMisc() :
-	AutosaveState( EAutosaveState::Inactive ), 
 	bCancelBuild( false ),
 	bInitialized( false ),
 	bSaveLayoutOnClose( true ),
@@ -211,6 +221,14 @@ FUnrealEdMisc::FUnrealEdMisc() :
 	PerformanceAnalyticsStats(new FPerformanceAnalyticsStats()),
 	NavigationBuildingNotificationHandler(NULL)
 {
+	//This is an early entry-point into the UnrealEd module to perform some editor-specific configuration
+#if UE_WITH_PACKAGE_ACCESS_TRACKING
+	const bool bBuildDependencyTrackingNeeded = GIsEditor && (IsRunningCookCommandlet() || !GetDefault<UEditorExperimentalSettings>()->bDisableCookInEditor);
+	if (!bBuildDependencyTrackingNeeded)
+	{
+		FPackageBuildDependencyTracker::Get().Disable();
+	}
+#endif
 }
 
 FUnrealEdMisc::~FUnrealEdMisc()
@@ -243,12 +261,11 @@ void FUnrealEdMisc::OnInit()
 	FEditorDelegates::DisplayLoadErrors.AddRaw(this, &FUnrealEdMisc::CB_DisplayLoadErrors);
 	FEditorDelegates::MapChange.AddRaw(this, &FUnrealEdMisc::CB_MapChange);
 	FEditorDelegates::RefreshEditor.AddRaw(this, &FUnrealEdMisc::CB_RefreshEditor);
-	FEditorDelegates::PreSaveWorld.AddRaw(this, &FUnrealEdMisc::PreSaveWorld);
+	FEditorDelegates::PreSaveWorldWithContext.AddRaw(this, &FUnrealEdMisc::PreSaveWorld);
 	FEditorSupportDelegates::RedrawAllViewports.AddRaw(this, &FUnrealEdMisc::CB_RedrawAllViewports);
 	GEngine->OnLevelActorAdded().AddRaw( this, &FUnrealEdMisc::CB_LevelActorsAdded );
 
-	FCoreUObjectDelegates::OnObjectSaved.AddRaw(this, &FUnrealEdMisc::OnObjectSaved);
-	FEditorDelegates::PreSaveWorld.AddRaw(this, &FUnrealEdMisc::OnWorldSaved);
+	FCoreUObjectDelegates::OnObjectPreSave.AddRaw(this, &FUnrealEdMisc::OnObjectSaved);
 
 #if USE_UNIT_TESTS
 	FAutomationTestFramework::Get().PreTestingEvent.AddRaw(this, &FUnrealEdMisc::CB_PreAutomationTesting);
@@ -310,11 +327,11 @@ void FUnrealEdMisc::OnInit()
 		FPlatformSplash::Show();
 	}
 
-	const double InitialEditorStartupTime = (FStudioAnalytics::GetAnalyticSeconds() - GStartTime);
+	const double InitialEditorStartupTime = (FPlatformTime::Seconds() - GStartTime);
 	UE_LOG(LogUnrealEdMisc, Log, TEXT("Loading editor; pre map load, took %.3f"), InitialEditorStartupTime);
 
-	FStudioAnalytics::FireEvent_Loading(TEXT("InitializeEditor"), InitialEditorStartupTime);
-
+	FEditorDelegates::OnEditorBoot.Broadcast(InitialEditorStartupTime);
+	
 	// Check for automated build/submit option
 	const bool bDoAutomatedMapBuild = FParse::Param( ParsedCmdLine, TEXT("AutomatedMapBuild") );
 
@@ -501,8 +518,10 @@ void FUnrealEdMisc::OnInit()
 	FMessageLog::OnMessageSelectionChanged().BindRaw(this, &FUnrealEdMisc::OnMessageSelectionChanged);
 	FUObjectToken::DefaultOnMessageTokenActivated().BindRaw(this, &FUnrealEdMisc::OnMessageTokenActivated);
 	FUObjectToken::DefaultOnGetObjectDisplayName().BindRaw(this, &FUnrealEdMisc::OnGetDisplayName);
-	FURLToken::OnGenerateURL().BindRaw(this, &FUnrealEdMisc::GenerateURL);
 	FAssetNameToken::OnGotoAsset().BindRaw(this, &FUnrealEdMisc::OnGotoAsset);
+	FActorToken::DefaultOnMessageTokenActivated().BindRaw(this, &FUnrealEdMisc::OnActorTokenActivated);
+	FAssetDataToken::DefaultOnMessageTokenActivated().BindRaw(this, &FUnrealEdMisc::OnAssetDataTokenActivated);
+	FAssetDataToken::DefaultOnGetAssetDisplayName().BindRaw(this, &FUnrealEdMisc::OnGetAssetDataDisplayName);
 
 	// Register to receive notification of new key bindings
 	OnUserDefinedChordChangedDelegateHandle = FInputBindingManager::Get().RegisterUserDefinedChordChanged(FOnUserDefinedChordChanged::FDelegate::CreateRaw( this, &FUnrealEdMisc::OnUserDefinedChordChanged ));
@@ -520,7 +539,7 @@ void FUnrealEdMisc::OnInit()
 
 	// Give the settings editor a way to restart the editor when it needs to
 	ISettingsEditorModule& SettingsEditorModule = FModuleManager::GetModuleChecked<ISettingsEditorModule>("SettingsEditor");
-	SettingsEditorModule.SetRestartApplicationCallback(FSimpleDelegate::CreateRaw(this, &FUnrealEdMisc::RestartEditor, false));
+	SettingsEditorModule.SetRestartApplicationCallback(FSimpleDelegate::CreateLambda([this]() { RestartEditor(/*bWarn =*/false); }));
 
 	// add handler to notify about navmesh building process
 	NavigationBuildingNotificationHandler = MakeShareable(new FNavigationBuildingNotificationImpl());
@@ -528,10 +547,14 @@ void FUnrealEdMisc::OnInit()
 	// Handles "Enable World Composition" option in WorldSettings
 	UWorldComposition::EnableWorldCompositionEvent.BindRaw(this, &FUnrealEdMisc::EnableWorldComposition);
 
-	const double TotalEditorStartupTime = (FStudioAnalytics::GetAnalyticSeconds() - GStartTime);
+	const double TotalEditorStartupTime = (FPlatformTime::Seconds() - GStartTime);
 	UE_LOG(LogUnrealEdMisc, Log, TEXT("Total Editor Startup Time, took %.3f"), TotalEditorStartupTime);
 
-	FStudioAnalytics::FireEvent_Loading(TEXT("TotalEditorStartup"), TotalEditorStartupTime);
+	TRACE_BOOKMARK(TEXT("Editor Startup"));
+
+	FEditorDelegates::OnEditorInitialized.Broadcast(TotalEditorStartupTime);
+	
+	GShaderCompilingManager->PrintStats();
 }
 
 FString FUnrealEdMisc::FindMapFileFromPartialName(const FString& PartialMapName)
@@ -556,7 +579,15 @@ FString FUnrealEdMisc::FindMapFileFromPartialName(const FString& PartialMapName)
 		
 			if (ShortMapName == PartialMapName)
 			{
-				if (FPaths::FileExists(RelativeFileName))
+				// Verify both that the file exists and that it's actually
+				// mounted. This ensures that we don't use a stale cache
+				// entry to an unmounted file in case a previously opened
+				// map was copied to a different location on disk and is
+				// now being mounted from there, but the original file still
+				// exists.
+				FString PackageName;
+				if (FPaths::FileExists(RelativeFileName) &&
+					FPackageName::TryConvertFilenameToLongPackageName(RelativeFileName, PackageName))
 				{
 					FoundMapFile = RelativeFileName;
 					break;
@@ -605,6 +636,8 @@ void FUnrealEdMisc::InitEngineAnalytics()
 {
 	if ( FEngineAnalytics::IsAvailable() )
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(FUnrealEdMisc::InitEngineAnalytics);
+
 		IAnalyticsProvider& EngineAnalytics = FEngineAnalytics::GetProvider();
 
 		// Send analytics about sample projects
@@ -799,8 +832,10 @@ void FUnrealEdMisc::EditorAnalyticsHeartbeat()
 
 void FUnrealEdMisc::TickAssetAnalytics()
 {
-	if( bIsAssetAnalyticsPending )
+	if( bIsAssetAnalyticsPending && FEngineAnalytics::IsAvailable())
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(FUnrealEdMisc::TickAssetAnalytics);
+
 		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(AssetRegistryName);
 
 		if( !AssetRegistryModule.Get().IsLoadingAssets())
@@ -814,26 +849,26 @@ void FUnrealEdMisc::TickAssetAnalytics()
 			TArray< FAnalyticsEventAttribute > AssetAttributes;
 			int32 NumMapFiles = 0;
 			TSet< FName > PackageNames;
-			TMap< FName, int32 > ClassInstanceCounts;
+			TMap< FTopLevelAssetPath, int32 > ClassInstanceCounts;
 
 			for( auto AssetIter = AssetData.CreateConstIterator(); AssetIter; ++AssetIter )
 			{
 				PackageNames.Add( AssetIter->PackageName );
-				if( AssetIter->AssetClass == UWorld::StaticClass()->GetFName()  )
+				if( AssetIter->AssetClassPath == UWorld::StaticClass()->GetClassPathName()  )
 				{
 					NumMapFiles++;
 				}
 
-				if( AssetIter->AssetClass != NAME_None )
+				if (!AssetIter->AssetClassPath.IsNull())
 				{
-					int32* ExistingClassCount = ClassInstanceCounts.Find( AssetIter->AssetClass );
+					int32* ExistingClassCount = ClassInstanceCounts.Find( AssetIter->AssetClassPath);
 					if( ExistingClassCount )
 					{
 						++(*ExistingClassCount);
 					}
 					else
 					{
-						ClassInstanceCounts.Add( AssetIter->AssetClass, 1 );
+						ClassInstanceCounts.Add( AssetIter->AssetClassPath, 1 );
 					}
 				}
 			}
@@ -870,7 +905,7 @@ bool FUnrealEdMisc::EnableWorldComposition(UWorld* InWorld, bool bEnable)
 		if (InWorld->WorldComposition != nullptr)
 		{
 			InWorld->FlushLevelStreaming();
-			InWorld->WorldComposition->MarkPendingKill();
+			InWorld->WorldComposition->MarkAsGarbage();
 			InWorld->WorldComposition = nullptr;
 			UWorldComposition::WorldCompositionChangedEvent.Broadcast(InWorld);
 		}
@@ -911,7 +946,7 @@ bool FUnrealEdMisc::EnableWorldComposition(UWorld* InWorld, bool bEnable)
 			auto AppResult = FMessageDialog::Open(EAppMsgType::OkCancel, Message);
 			if (AppResult != EAppReturnType::Ok)
 			{
-				WorldCompostion->MarkPendingKill();
+				WorldCompostion->MarkAsGarbage();
 				return false;
 			}
 		}
@@ -924,15 +959,14 @@ bool FUnrealEdMisc::EnableWorldComposition(UWorld* InWorld, bool bEnable)
 	return true;
 }
 
-/** Build and return the path to the current project (used for relaunching the editor.)	 */
-FString CreateProjectPath()
+FString FUnrealEdMisc::GetProjectEditorBinaryPath()
 {
 #if PLATFORM_WINDOWS
 	return FPlatformProcess::ExecutablePath();
 #elif PLATFORM_MAC
 	@autoreleasepool
 	{
-		return UTF8_TO_TCHAR([[[NSBundle mainBundle] executablePath] fileSystemRepresentation]);
+		return UTF8_TO_TCHAR([[[NSBundle mainBundle]executablePath] fileSystemRepresentation] );
 	}
 #elif PLATFORM_LINUX
 	const TCHAR* PlatformConfig = FPlatformMisc::GetUBTPlatform();
@@ -941,6 +975,21 @@ FString CreateProjectPath()
 #else
 #error "Unknown platform"
 #endif
+}
+
+bool FUnrealEdMisc::SpawnEditorInstance(const FString& ProjectName)
+{
+	// Use the same command line parameters that were used for this editor instance.
+	const FString Cmd = FString::Printf(TEXT("%s %s"), *ProjectName, *PendingCommandLine.Get(FCommandLine::Get()));
+
+	const FString ExeFilename = GetProjectEditorBinaryPath();
+	FProcHandle Handle = FPlatformProcess::CreateProc(*ExeFilename, *Cmd, true, false, false, NULL, 0, NULL, NULL);
+	const bool bSuccess = Handle.IsValid();
+	if (bSuccess)
+	{
+		FPlatformProcess::CloseProc(Handle);
+	}
+	return bSuccess;
 }
 
 void FUnrealEdMisc::OnExit()
@@ -991,8 +1040,8 @@ void FUnrealEdMisc::OnExit()
 	FMessageLog::OnMessageSelectionChanged().Unbind();
 	FUObjectToken::DefaultOnMessageTokenActivated().Unbind();
 	FUObjectToken::DefaultOnGetObjectDisplayName().Unbind();
-	FURLToken::OnGenerateURL().Unbind();
 	FAssetNameToken::OnGotoAsset().Unbind();
+	FActorToken::DefaultOnMessageTokenActivated().Unbind();
 
 	// Unregister message log UIs
 	FMessageLogModule& MessageLogModule = FModuleManager::LoadModuleChecked<FMessageLogModule>("MessageLog");
@@ -1013,7 +1062,7 @@ void FUnrealEdMisc::OnExit()
 	FEditorDelegates::DisplayLoadErrors.RemoveAll(this);
 	FEditorDelegates::MapChange.RemoveAll(this);
 	FEditorDelegates::RefreshEditor.RemoveAll(this);
-	FEditorDelegates::PreSaveWorld.RemoveAll(this);
+	FEditorDelegates::PreSaveWorldWithContext.RemoveAll(this);
 	FEditorSupportDelegates::RedrawAllViewports.RemoveAll(this);
 	GEngine->OnLevelActorAdded().RemoveAll(this);
 
@@ -1055,24 +1104,33 @@ void FUnrealEdMisc::OnExit()
 	const FString& PendingProjName = FUnrealEdMisc::Get().GetPendingProjectName();
 	if( PendingProjName.Len() > 0 )
 	{
-		// If there is a pending project switch, spawn that process now and use the same command line parameters that were used for this editor instance.
-		FString Cmd = FString::Printf(TEXT("%s %s"), *PendingProjName, FCommandLine::Get());
-
-		FString ExeFilename = CreateProjectPath();
-		FProcHandle Handle = FPlatformProcess::CreateProc( *ExeFilename, *Cmd, true, false, false, NULL, 0, NULL, NULL );
-		if( !Handle.IsValid() )
+#if WITH_EDITOR
+			// Prevent the Zen subprocess data path from being inherited by a post-close process spawn
+			// such as when the editor is restarting itself.
+			FPlatformMisc::SetEnvironmentVar(TEXT("UE-ZenSubprocessDataPath"), nullptr);
+#endif // WITH_EDITOR
+		bool bSuccess = false;
+		if (FEditorDelegates::OnRestartRequested.IsBound())
+		{
+			bSuccess = FEditorDelegates::OnRestartRequested.Execute(PendingProjName);
+		}
+		else
+		{
+			bSuccess = SpawnEditorInstance(PendingProjName);
+		}
+		
+		if (!bSuccess)
 		{
 			// We were not able to spawn the new project exe.
 			// Its likely that the exe doesn't exist.
 			// Skip shutting down the editor if this happens
-			UE_LOG(LogUnrealEdMisc, Warning, TEXT("Could not restart the editor") );
+			UE_LOG(LogUnrealEdMisc, Warning, TEXT("Could not restart the editor"));
 
 			// Clear the pending project to ensure the editor can still be shut down normally
-			FUnrealEdMisc::Get().ClearPendingProjectName();
+			ClearPendingProjectName();
 
 			return;
 		}
-		FPlatformProcess::CloseProc(Handle);
 	}
 
 	// Unregister the command executor
@@ -1116,10 +1174,11 @@ void FUnrealEdMisc::CB_RefreshEditor()
 	FEditorDelegates::RefreshAllBrowsers.Broadcast();
 }
 
-void FUnrealEdMisc::PreSaveWorld(uint32 SaveFlags, UWorld* World)
+void FUnrealEdMisc::PreSaveWorld(UWorld* World, FObjectPreSaveContext ObjectSaveContext)
 {
-	const bool bAutosaveOrPIE = (SaveFlags & SAVE_FromAutosave) != 0;
-	if (bAutosaveOrPIE || World == NULL || World != GEditor->GetEditorWorldContext().World() || !FEngineAnalytics::IsAvailable())
+	LogAssetUpdate(World, ObjectSaveContext);
+	const bool bAutosaveOrPIE = (ObjectSaveContext.GetSaveFlags() & SAVE_FromAutosave) != 0;
+	if (bAutosaveOrPIE || !World || World != GEditor->GetEditorWorldContext().World() || !FEngineAnalytics::IsAvailable())
 	{
 		return;
 	}
@@ -1163,16 +1222,11 @@ void FUnrealEdMisc::CB_MapChange( uint32 InFlags )
 		// Minor things like brush subtraction will set it to "0".
 		if (InFlags != MapChangeEventFlags::Default)
 		{
-			World->ClearWorldComponents();
-
-			// Note: CleanupWorld is being abused here to detach components and some other stuff
-			// CleanupWorld should only be called before destroying the world
-			// So bCleanupResources is being passed as false
-			World->CleanupWorld(true, false);
-
-			// CleanupWorld will have nulled the FXSystem, create a new one or else the dependent
-			// FXSystemComponents will be left unregistered and/or fail to activate.
-			World->CreateFXSystem();
+			if (World->IsInitialized())
+			{
+				// Call CleanupWorld/InitWorld to detach components and some other stuff
+				World->ReInitWorld();
+			}
 		}
 
 		GEditor->EditorUpdateComponents();
@@ -1355,15 +1409,7 @@ void FUnrealEdMisc::OnMessageTokenActivated(const TSharedRef<IMessageToken>& Tok
 
 			if (Actor && Actor->GetLevel() != nullptr)
 			{
-				// Select the actor
-				GEditor->SelectNone(false, true);
-				GEditor->SelectActor(Actor, /*InSelected=*/true, /*bNotify=*/false, /*bSelectEvenIfHidden=*/true); 
-				GEditor->NoteSelectionChange();
-				GEditor->MoveViewportCamerasToActor(*Actor, false);
-
-				// Update the property windows and create one if necessary
-				GUnrealEd->ShowActorProperties();
-				GUnrealEd->UpdateFloatingPropertyWindows();
+				SelectActorFromMessageToken(Actor);
 			}
 			else
 			{
@@ -1403,6 +1449,102 @@ void FUnrealEdMisc::OnMessageTokenActivated(const TSharedRef<IMessageToken>& Tok
 			}
 		}
 	}
+}
+
+/** Delegate used to get a display name for a message log FAssetData token  */
+FText FUnrealEdMisc::OnGetAssetDataDisplayName(const FAssetData& InObject, const bool bFullPath)
+{
+	static FName NAME_ActorLabel("ActorLabel");
+	FString DisplayName;
+	TStringBuilder<FName::StringBufferSize> Buffer;
+	if (InObject.GetTagValue(NAME_ActorLabel, DisplayName) || 
+		InObject.GetTagValue(FPrimaryAssetId::PrimaryAssetDisplayNameTag, DisplayName))
+	{
+		Buffer << DisplayName << TEXT(" (");
+		InObject.AppendObjectPath(Buffer);
+		Buffer << TEXT(")");
+		return FText::FromStringView(Buffer.ToView());
+	}
+	else if (bFullPath)
+	{
+		InObject.AppendObjectPath(Buffer);
+		return FText::FromStringView(Buffer.ToView());
+	}
+	return FText::FromName(InObject.PackageName);
+}
+
+/** Delegate used on message log FAssetData token activation */
+void FUnrealEdMisc::OnAssetDataTokenActivated(const TSharedRef<class IMessageToken>& InToken)
+{
+	if (InToken->GetType() != EMessageToken::AssetData)
+	{
+		return;
+	}
+	
+	const TSharedRef<FAssetDataToken> Token = StaticCastSharedRef<FAssetDataToken>(InToken);
+	const FAssetData& AssetData = Token->GetAssetData();
+	// If this is a standalone asset, jump to it in the content browser
+	if (AssetData.GetOptionalOuterPathName().IsNone())
+	{
+		GEditor->SyncBrowserToObjects({ AssetData });
+	}
+	// If this is a loaded actor, resolve the pointer and select it
+	else if (AActor* Actor = Cast<AActor>(AssetData.GetSoftObjectPath().ResolveObject()))
+	{
+		SelectActorFromMessageToken(Actor);
+	}
+	else
+	{
+		FName PackageName = FName(FPackageName::ObjectPathToPackageName(WriteToString<FName::StringBufferSize>(AssetData.GetOptionalOuterPathName()).ToView()));
+		UWorld* EditorWorld = GEditor->GetEditorWorldContext().World();
+		// If this is an unloaded actor in the currently loaded level, select it as an unloaded actor
+		if (EditorWorld && EditorWorld->GetPackage()->GetFName() == PackageName)
+		{
+			TUniquePtr<FWorldPartitionActorDesc> Desc = FWorldPartitionActorDescUtils::GetActorDescriptorFromAssetData(AssetData);
+			if (Desc.IsValid())
+			{
+				GEditor->BroadcastSelectUnloadedActors({ Desc->GetGuid() });
+			}
+		}
+		// If this is an actor in an unloaded level, jump to the level in the content browser
+		else 
+		{
+			FAssetRegistryModule& AssetRegistryModule = FModuleManager::GetModuleChecked<FAssetRegistryModule>("AssetRegistry");
+			IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+			TArray<FAssetData> OutAssets;
+			AssetRegistry.GetAssetsByPackageName(PackageName, OutAssets);
+			GEditor->SyncBrowserToObjects(OutAssets);
+		}
+	}
+}
+
+void FUnrealEdMisc::OnActorTokenActivated(const TSharedRef<class IMessageToken>& Token)
+{
+	if (Token->GetType() == EMessageToken::Actor)
+	{
+		const TSharedRef<FActorToken> ActorToken = StaticCastSharedRef<FActorToken>(Token);
+		if (AActor* Actor = FindObject<AActor>(nullptr, *ActorToken->GetActorPath()))
+		{
+			SelectActorFromMessageToken(Actor);
+		}
+		else
+		{
+			GEditor->BroadcastSelectUnloadedActors({ ActorToken->GetActorGuid() });
+		}
+	}
+}
+
+void FUnrealEdMisc::SelectActorFromMessageToken(AActor* InActor)
+{
+	// Select the actor
+	GEditor->SelectNone(false, true);
+	GEditor->SelectActor(InActor, /*InSelected=*/true, /*bNotify=*/false, /*bSelectEvenIfHidden=*/true);
+	GEditor->NoteSelectionChange();
+	GEditor->MoveViewportCamerasToActor(*InActor, false);
+
+	// Update the property windows and create one if necessary
+	GUnrealEd->ShowActorProperties();
+	GUnrealEd->UpdateFloatingPropertyWindows();
 }
 
 FText FUnrealEdMisc::OnGetDisplayName(const UObject* InObject, const bool bFullPath)
@@ -1582,80 +1724,24 @@ void FUnrealEdMisc::OnMessageSelectionChanged(TArray< TSharedRef<FTokenizedMessa
 	}
 }
 
-FString FUnrealEdMisc::GenerateURL(const FString& InUDNPage)
-{
-	if( InUDNPage.Len() > 0 )
-	{
-		FInternationalization& I18N = FInternationalization::Get();
-		// The I18N info and version is now stored in MapErrorURL in the ini
-		const FString PageURL =  TEXT("/Editor/LevelEditing/MapErrors/index.html");
-		const FString BookmarkURL = FString::Printf( TEXT( "#%s" ), *InUDNPage );
-
-		// Developers can browse documentation included with the engine distribution, check for file presence...
-		FString MapErrorURL = FString::Printf( TEXT( "%sDocumentation/HTML/%s" ), *FPaths::ConvertRelativePathToFull( FPaths::EngineDir() ), *PageURL );
-
-		static FString Version = FString::FromInt(FEngineVersion::Current().GetMajor()) + TEXT(".") + FString::FromInt(FEngineVersion::Current().GetMinor());
-		const FString PartialPath = FString::Printf(TEXT("%s/%s%s/index.html"), *Version, *(*I18N.GetCurrentCulture()->GetName()), *PageURL);
-		return FString::Printf(TEXT("%sDocumentation/HTML/%s"), *FPaths::ConvertRelativePathToFull(FPaths::EngineDir()), *PartialPath);
-		if (IFileManager::Get().FileSize(*MapErrorURL) != INDEX_NONE)
-		{
-			MapErrorURL = FString::Printf( TEXT( "file://%s%s" ), *MapErrorURL, *BookmarkURL );
-		}
-		// ... if it's not present, fallback to using the online version, if the full URL is provided...
-		else if(FUnrealEdMisc::Get().GetURL( TEXT("MapErrorURL"), MapErrorURL, true ) && MapErrorURL.EndsWith( TEXT( ".html" ) ))
-		{	
-			FUnrealEdMisc::Get().ReplaceDocumentationURLWildcards(MapErrorURL, I18N.GetCurrentCulture());
-			MapErrorURL += BookmarkURL;
-		}
-		// ...otherwise, attempt to create the URL from what we know here...
-		else if(FUnrealEdMisc::Get().GetURL( TEXT("UDNDocsURL"), MapErrorURL, true ))
-		{
-			if ( !MapErrorURL.EndsWith( TEXT( "/" ) ) )
-			{
-				MapErrorURL += TEXT( "/" );
-			}
-
-			// UDNDocsURL is now stored with placeholders for internalization and version to be replaced
-			FUnrealEdMisc::Get().ReplaceDocumentationURLWildcards(MapErrorURL, I18N.GetCurrentCulture());
-			MapErrorURL += PageURL;
-			MapErrorURL += BookmarkURL;
-		}
-		// ... failing that, just try to access the UDN, period.
-		else
-		{
-			FUnrealEdMisc::Get().GetURL( TEXT("UDNURL"), MapErrorURL, true );
-		}
-
-		return MapErrorURL;
-	}
-
-	return FString();
-}
-
 void FUnrealEdMisc::OnGotoAsset(const FString& InAssetPath) const
 {
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(AssetRegistryName);
 	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
-	FAssetData AssetData = AssetRegistry.GetAssetByObjectPath( *InAssetPath );
+	FAssetData AssetData = AssetRegistry.GetAssetByObjectPath( FSoftObjectPath(InAssetPath) );
 	if ( AssetData.IsValid() )
 	{
 		TArray<FAssetData> AssetDataToSync;
 
 		// if its a package, sync the browser to the assets inside the package
-		if(AssetData.GetClass() == UPackage::StaticClass())
+		if(AssetData.GetClass() == UPackage::StaticClass() && !AssetData.HasAnyPackageFlags(PKG_ContainsMapData | PKG_ContainsNoAsset))
 		{
-			TArray<UPackage*> Packages;
-			Packages.Add(CastChecked<UPackage>(AssetData.GetAsset()));
-			TArray<UObject*> ObjectsInPackages;
-			UPackageTools::GetObjectsInPackages(&Packages, ObjectsInPackages);
-
-			for(auto It(ObjectsInPackages.CreateConstIterator()); It; ++It)
+			TArray<FAssetData> AssetsInPackage;
+			if (AssetRegistry.GetAssetsByPackageName(AssetData.PackageName, AssetsInPackage))
 			{
-				UObject* ObjectInPackage = *It;
-				if(ObjectInPackage->IsAsset())
+				for (const FAssetData& SubAssetData : AssetsInPackage)
 				{
-					FAssetData SubAssetData(ObjectInPackage);
-					if(SubAssetData.IsValid())
+					if (SubAssetData.IsValid() && SubAssetData.IsUAsset())
 					{
 						AssetDataToSync.Add(SubAssetData);
 					}
@@ -1672,34 +1758,29 @@ void FUnrealEdMisc::OnGotoAsset(const FString& InAssetPath) const
 	}	
 }
 
-void FUnrealEdMisc::OnObjectSaved(UObject* SavedObject)
+void FUnrealEdMisc::OnObjectSaved(UObject* SavedObject, FObjectPreSaveContext SaveContext)
 {
 	// Ensure the saved object is a non-UWorld asset (UWorlds are handled separately)
 	if (!SavedObject->IsA<UWorld>() && SavedObject->IsAsset())
 	{
-		LogAssetUpdate(SavedObject);
+		LogAssetUpdate(SavedObject, SaveContext);
 	}
 }
 
-void FUnrealEdMisc::OnWorldSaved(uint32 SaveFlags, UWorld* SavedWorld)
-{
-	LogAssetUpdate(SavedWorld);
-}
-
-void FUnrealEdMisc::LogAssetUpdate(UObject* UpdatedAsset)
+void FUnrealEdMisc::LogAssetUpdate(UObject* UpdatedAsset, FObjectPreSaveContext SaveContext)
 {
 	UPackage* AssetPackage = UpdatedAsset->GetOutermost();
 	const bool bIsPIESave = AssetPackage->RootPackageHasAnyFlags(PKG_PlayInEditor);
 	const bool bIsAutosave = GUnrealEd->GetPackageAutoSaver().IsAutoSaving();
 
-	if (!bIsPIESave && !bIsAutosave && !GIsAutomationTesting)
+	if (!bIsPIESave && !bIsAutosave && !GIsAutomationTesting && !SaveContext.IsProceduralSave())
 	{
 		uint32& NumUpdates = NumUpdatesByAssetName.FindOrAdd(UpdatedAsset->GetClass()->GetFName());
 		NumUpdates++;
 	}
 }
 
-void FUnrealEdMisc::SwitchProject(const FString& GameOrProjectFileName, bool bWarn)
+void FUnrealEdMisc::SwitchProject(const FString& GameOrProjectFileName, bool bWarn, const TOptional<FString>& NewCommandLine)
 {
 	if (GUnrealEd->WarnIfLightingBuildIsCurrentlyRunning())
 	{
@@ -1753,6 +1834,7 @@ void FUnrealEdMisc::SwitchProject(const FString& GameOrProjectFileName, bool bWa
 		}
 
 		SetPendingProjectName( PendingProjName );
+		PendingCommandLine = NewCommandLine;
 
 		// Close the editor.  This will prompt the user to save changes.  If they hit cancel, we abort the project switch
 		GEngine->DeferredCommands.Add( TEXT("CLOSE_SLATE_MAINFRAME"));
@@ -1763,7 +1845,7 @@ void FUnrealEdMisc::SwitchProject(const FString& GameOrProjectFileName, bool bWa
 	}
 }
 
-void FUnrealEdMisc::RestartEditor(bool bWarn)
+void FUnrealEdMisc::RestartEditor(bool bWarn, const TOptional<FString>& NewCommandLine)
 {
 	if (GUnrealEd->WarnIfLightingBuildIsCurrentlyRunning())
 	{
@@ -1772,15 +1854,15 @@ void FUnrealEdMisc::RestartEditor(bool bWarn)
 
 	if( FPaths::IsProjectFilePathSet() )
 	{
-		SwitchProject(FPaths::GetProjectFilePath(), bWarn);
+		SwitchProject(FPaths::GetProjectFilePath(), bWarn, NewCommandLine);
 	}
 	else if(FApp::HasProjectName())
 	{
-		SwitchProject(FApp::GetProjectName(), bWarn);
+		SwitchProject(FApp::GetProjectName(), bWarn, NewCommandLine);
 	}
 	else
 	{
-		SwitchProject(TEXT(""), bWarn);
+		SwitchProject(TEXT(""), bWarn, NewCommandLine);
 	}
 }
 
@@ -1919,11 +2001,12 @@ bool FUnrealEdMisc::GetURL( const TCHAR* InKey, FString& OutURL, const bool bChe
 	return bFound;
 }
 
-void FUnrealEdMisc::ReplaceDocumentationURLWildcards(FString& Url, const FCultureRef& Culture)
+void FUnrealEdMisc::ReplaceDocumentationURLWildcards(FString& Url, const FCultureRef& Culture, const FString& PageId)
 {
 	static FString Version = FString::FromInt(FEngineVersion::Current().GetMajor()) + TEXT(".") + FString::FromInt(FEngineVersion::Current().GetMinor());
 	Url.ReplaceInline(TEXT("{VERSION}"), *Version);
 	Url.ReplaceInline(TEXT("{I18N}"), *(Culture->GetName()));
+	Url.ReplaceInline(TEXT("{PAGEID}"), *PageId);
 }
 
 FString FUnrealEdMisc::GetExecutableForCommandlets() const

@@ -5,7 +5,10 @@
 #include "CoreMinimal.h"
 #include "RenderResource.h"
 #include "Textures/SlateTextureData.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "RenderingThread.h"
+#endif
+#include "RenderDeferredCleanup.h"
 #include "Textures/SlateShaderResource.h"
 #include "TextureResource.h"
 #include "Engine/Texture.h"
@@ -14,29 +17,29 @@
 /**
  * Encapsulates a Texture2DRHIRef for use by a Slate rendering implementation                   
  */
-class ENGINE_API FSlateTexture2DRHIRef : public TSlateTexture<FTexture2DRHIRef>, public FSlateUpdatableTexture, public FDeferredCleanupInterface, public FRenderResource
+class FSlateTexture2DRHIRef : public TSlateTexture<FTexture2DRHIRef>, public FSlateUpdatableTexture, public FDeferredCleanupInterface, public FRenderResource
 {
 public:
-	FSlateTexture2DRHIRef( FTexture2DRHIRef InRef, uint32 InWidth, uint32 InHeight );
-	FSlateTexture2DRHIRef( uint32 InWidth, uint32 InHeight, EPixelFormat InPixelFormat, TSharedPtr<FSlateTextureData, ESPMode::ThreadSafe> InTextureData, ETextureCreateFlags InTexCreateFlags = TexCreate_None, bool bCreateEmptyTexture = false );
+	ENGINE_API FSlateTexture2DRHIRef( FTexture2DRHIRef InRef, uint32 InWidth, uint32 InHeight );
+	ENGINE_API FSlateTexture2DRHIRef( uint32 InWidth, uint32 InHeight, EPixelFormat InPixelFormat, TSharedPtr<FSlateTextureData, ESPMode::ThreadSafe> InTextureData, ETextureCreateFlags InTexCreateFlags = TexCreate_None, bool bCreateEmptyTexture = false );
 
-	virtual ~FSlateTexture2DRHIRef();
+	ENGINE_API virtual ~FSlateTexture2DRHIRef();
 
-	virtual void Cleanup() override;
+	ENGINE_API virtual void Cleanup() override;
 
 	virtual uint32 GetWidth() const override { return Width; }
 	virtual uint32 GetHeight() const override { return Height; }
 
 	/** FRenderResource Interface.  Called when render resources need to be initialized */
-	virtual void InitDynamicRHI() override;
+	ENGINE_API virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 
 	/** FRenderResource Interface.  Called when render resources need to be released */
-	virtual void ReleaseDynamicRHI() override;
+	ENGINE_API virtual void ReleaseRHI() override;
 
 	/**
 	 * Resize the texture.  Can only be called on the render thread
 	 */
-	void Resize( uint32 Width, uint32 Height );
+	ENGINE_API void Resize( uint32 Width, uint32 Height );
 
 	/**
 	 * @return true if the texture is valid
@@ -46,7 +49,7 @@ public:
 	/** 
 	 *  Sets the RHI Ref to use. 
 	 */
-	void SetRHIRef( FTexture2DRHIRef InRenderTargetTexture, uint32 InWidth, uint32 InHeight );
+	ENGINE_API void SetRHIRef( FTexture2DRHIRef InRenderTargetTexture, uint32 InWidth, uint32 InHeight );
 
 	FTexture2DRHIRef GetRHIRef() const { return ShaderResource; }
 
@@ -55,7 +58,7 @@ public:
 	 *
 	 * @param NewTextureData	The new bulk data
 	 */
-	void SetTextureData( FSlateTextureDataPtr NewTextureData );
+	ENGINE_API void SetTextureData( FSlateTextureDataPtr NewTextureData );
 	
 	/**
 	 * Sets the bulk data for this texture and the format of the rendering resource
@@ -65,12 +68,12 @@ public:
 	 * @param InPixelFormat		The format of the texture data
 	 * @param InTexCreateFlags	Flags for creating the rendering resource  
 	 */
-	void SetTextureData( FSlateTextureDataPtr NewTextureData, EPixelFormat InPixelFormat, ETextureCreateFlags InTexCreateFlags );
+	ENGINE_API void SetTextureData( FSlateTextureDataPtr NewTextureData, EPixelFormat InPixelFormat, ETextureCreateFlags InTexCreateFlags );
 
 	/**
 	 * Clears texture data being used.  Can only be accessed on the render thread                   
 	 */
-	void ClearTextureData();
+	ENGINE_API void ClearTextureData();
 
 	/**
 	 * Returns the pixel format of this texture
@@ -80,22 +83,23 @@ public:
 	// FSlateUpdatableTexture interface
 	virtual FSlateShaderResource* GetSlateResource() override {return this;}
 	virtual FRenderResource* GetRenderResource() override {return this;}
-	virtual void ResizeTexture( uint32 Width, uint32 Height ) override;
-	virtual void UpdateTexture(const TArray<uint8>& Bytes) override;
-	virtual void UpdateTextureThreadSafe(const TArray<uint8>& Bytes) override;
-	virtual void UpdateTextureThreadSafeRaw(uint32 Width, uint32 Height, const void* Buffer, const FIntRect& Dirty) override;
-	virtual void UpdateTextureThreadSafeWithTextureData(FSlateTextureData* BulkData) override;
+	ENGINE_API virtual void ResizeTexture( uint32 Width, uint32 Height ) override;
+	ENGINE_API virtual void UpdateTexture(const TArray<uint8>& Bytes) override;
+	ENGINE_API virtual void UpdateTextureThreadSafe(const TArray<uint8>& Bytes) override;
+	ENGINE_API virtual void UpdateTextureThreadSafeRaw(uint32 Width, uint32 Height, const void* Buffer, const FIntRect& Dirty) override;
+	ENGINE_API virtual void UpdateTextureThreadSafeWithTextureData(FSlateTextureData* BulkData) override;
+	virtual void UpdateTextureThreadSafeWithKeyedTextureHandle(void* TextureHandle, int KeyLockVal, int KeyUnlockVal, const FIntRect& Dirty = FIntRect()) override {}
 protected:
 	/** Width of this texture */
 	uint32 Width;
 	/** Height of this texture */
 	uint32 Height;
 private:
-	void SetTextureData(const TArray<uint8>& Bytes);
+	ENGINE_API void SetTextureData(const TArray<uint8>& Bytes);
 
 	/** Texture creation flags for if this texture needs to be recreated dynamically */
 	ETextureCreateFlags TexCreateFlags;
-	/** Data used between ReleaseDynamicRHI and InitDynamicRHI.  May be null if the data is not used */
+	/** Data used between ReleaseRHI and InitRHI.  May be null if the data is not used */
 	TSharedPtr<FSlateTextureData, ESPMode::ThreadSafe> TextureData;
 	/** Pixel format of the texture */
 	EPixelFormat PixelFormat;
@@ -116,12 +120,12 @@ public:
 	{
 	}
 
-	virtual void InitDynamicRHI() override {}
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override {}
 
 	/** 
 	 * Releases all dynamic RHI data
 	 */
-	virtual void ReleaseDynamicRHI() override
+	virtual void ReleaseRHI() override
 	{
 		ShaderResource.SafeRelease();
 	}
@@ -152,16 +156,13 @@ public:
 	/** Resizes the render target */
 	virtual void SetSize(int32 InSizeX,int32 InSizeY);
 
-	/** Gets the RHI resource for this render target */
-	FTexture2DRHIRef GetTextureRHI() { return Texture2DRHI; }
-
 public:
 	// FTextureRenderTargetResource implementation
 	virtual void ClampSize(int32 SizeX,int32 SizeY) override;
 
 	// FRenderResource implementation
-	virtual void InitDynamicRHI() override;
-	virtual void ReleaseDynamicRHI() override;
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
+	virtual void ReleaseRHI() override;
 
 	// FRenderTarget interface
 	virtual uint32 GetSizeX() const override;
@@ -176,7 +177,6 @@ protected:
 
 
 private:
-	FTexture2DRHIRef Texture2DRHI;
 	FLinearColor ClearColor;
 	int32 TargetSizeX,TargetSizeY;
 

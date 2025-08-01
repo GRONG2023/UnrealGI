@@ -1,48 +1,94 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SCurveEditorPanel.h"
-#include "Templates/Tuple.h"
-#include "Algo/Partition.h"
-#include "Rendering/DrawElements.h"
-#include "CurveDrawInfo.h"
-#include "CurveEditorSettings.h"
-#include "CurveEditorCommands.h"
-#include "Framework/Commands/UICommandList.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Widgets/SNullWidget.h"
-#include "Widgets/SOverlay.h"
-#include "Widgets/SWindow.h"
-#include "Widgets/Layout/SScrollBox.h"
-#include "Widgets/Layout/SSplitter.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Docking/SDockTab.h"
-#include "Framework/Docking/TabManager.h"
-#include "EditorStyleSet.h"
-#include "Misc/Attribute.h"
+
 #include "Algo/Sort.h"
+#include "CommonFrameRates.h"
+#include "Containers/Array.h"
+#include "CurveEditor.h"
+#include "CurveEditorCommands.h"
 #include "CurveEditorEditObjectContainer.h"
-#include "Modules/ModuleManager.h"
-#include "PropertyEditorModule.h"
-#include "IDetailsView.h"
-#include "IPropertyRowGenerator.h"
-#include "SCurveKeyDetailPanel.h"
-#include "ICurveEditorExtension.h"
-#include "ISequencerWidgetsModule.h"
-#include "CurveEditorScreenSpace.h"
-#include "Widgets/Layout/SBox.h"
-#include "Framework/MultiBox/MultiBoxExtender.h"
-#include "Filters/SCurveEditorFilterPanel.h"
-#include "Filters/CurveEditorFilterBase.h"
+#include "CurveEditorKeyProxy.h"
+#include "CurveEditorSelection.h"
+#include "CurveEditorSettings.h"
+#include "CurveEditorSnapMetrics.h"
+#include "CurveEditorViewRegistry.h"
+#include "CurveModel.h"
+#include "Curves/KeyHandle.h"
+#include "Delegates/Delegate.h"
+#include "Editor.h"
 #include "Filters/CurveEditorBakeFilter.h"
 #include "Filters/CurveEditorReduceFilter.h"
-#include "SGridLineSpacingList.h"
-#include "Widgets/SFrameRatePicker.h"
-#include "CommonFrameRates.h"
-#include "CurveEditorViewRegistry.h"
-#include "SCurveEditorViewContainer.h"
-#include "SCurveEditorToolProperties.h"
+#include "Filters/SCurveEditorFilterPanel.h"
 #include "Fonts/FontMeasure.h"
-#include "CurveEditorHelpers.h"
+#include "Fonts/SlateFontInfo.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandInfo.h"
+#include "Framework/Commands/UICommandList.h"
+#include "Framework/Docking/TabManager.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Framework/MultiBox/MultiBoxExtender.h"
+#include "Framework/SlateDelegates.h"
+#include "HAL/IConsoleManager.h"
+#include "HAL/PlatformCrt.h"
+#include "ICurveEditorDragOperation.h"
+#include "ICurveEditorModule.h"
+#include "ICurveEditorToolExtension.h"
+#include "IPropertyRowGenerator.h"
+#include "ISequencerWidgetsModule.h"
+#include "Input/Events.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/BasicLayoutWidgetSlot.h"
+#include "Layout/Children.h"
+#include "Layout/Clipping.h"
+#include "Layout/Margin.h"
+#include "Layout/PaintGeometry.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector2D.h"
+#include "Misc/Attribute.h"
+#include "Misc/EnumClassFlags.h"
+#include "Misc/FrameRate.h"
+#include "Modules/ModuleManager.h"
+#include "Rendering/DrawElements.h"
+#include "Rendering/RenderingCommon.h"
+#include "Rendering/SlateLayoutTransform.h"
+#include "Rendering/SlateRenderer.h"
+#include "SCurveEditorToolProperties.h"
+#include "SCurveEditorView.h"
+#include "SCurveEditorViewContainer.h"
+#include "SCurveKeyDetailPanel.h"
+#include "SGridLineSpacingList.h"
+#include "ScopedTransaction.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/CoreStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/SlateColor.h"
+#include "Templates/Casts.h"
+#include "Templates/Tuple.h"
+#include "Templates/TypeHash.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "Widgets/Docking/SDockTab.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SScrollBar.h"
+#include "Widgets/Layout/SScrollBox.h"
+#include "Widgets/Layout/SSplitter.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SFrameRatePicker.h"
+#include "Widgets/SNullWidget.h"
+#include "Widgets/SOverlay.h"
+#include "Widgets/Text/STextBlock.h"
+
+class FPaintArgs;
+class FSlateRect;
+class FWidgetStyle;
+class SWidget;
+class SWindow;
+struct FSlateBrush;
 
 #define LOCTEXT_NAMESPACE "SCurveEditorPanel"
 
@@ -59,45 +105,6 @@ static FAutoConsoleVariableRef CVarCurveEditorMaxCurvesPerPinnedView(
 	GCurveEditorMaxCurvesPerPinnedView,
 	TEXT("When CurveEditor.PinnedViews is 1, defines the maximum number of curves allowed on a pinned view (0 for no maximum).")
 );
-
-/**
- * Utility class to hold an overlay which tells the user how to use the editor when there are no curves selected.
- */
-class SCurveEditorViewOverlay : public SCompoundWidget
-{
-	SLATE_BEGIN_ARGS(SCurveEditorViewOverlay)
-	{}
-	SLATE_END_ARGS()
-
-	void Construct(const FArguments& InArgs) {}
-
-
-	virtual int32 OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override
-	{
-		static const FLinearColor BackgroundColor = FLinearColor::Black.CopyWithNewOpacity(0.35f);
-		static const FText InstructionText = LOCTEXT("CurveEditorTutorialOverlay", "Select a curve on the left to begin editing.");
-		const FSlateBrush*   WhiteBrush = FEditorStyle::GetBrush("WhiteBrush");
-		const TSharedRef<FSlateFontMeasure> FontMeasure = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
-		const FSlateFontInfo FontInfo = FCoreStyle::Get().GetFontStyle("FontAwesome.13");
-
-		// Draw a darkened background
-		{
-			FSlateDrawElement::MakeBox(OutDrawElements, LayerId, AllottedGeometry.ToPaintGeometry(), WhiteBrush, ESlateDrawEffect::None, BackgroundColor);
-		}
-
-		// Draw the tutorial text centered
-		{
-			const FVector2D LabelSize = FontMeasure->Measure(InstructionText, FontInfo);
-			const FVector2D GeometrySize = AllottedGeometry.GetLocalSize();
-			const FVector2D LabelOffset = FVector2D((GeometrySize.X - LabelSize.X) / 2.f, (GeometrySize.Y - LabelSize.Y) / 2.f);
-			const FPaintGeometry LabelGeometry = AllottedGeometry.ToPaintGeometry(FSlateLayoutTransform(LabelOffset));
-
-			FSlateDrawElement::MakeText(OutDrawElements, LayerId, LabelGeometry, InstructionText, FontInfo);
-		}
-
-		return LayerId + 1;
-	}
-};
 
 /**
  * Implemented as a friend struct to SCurveEditorView to ensure that SCurveEditorPanel is the only thing that can add/remove curves from views
@@ -136,6 +143,7 @@ void SCurveEditorPanel::Construct(const FArguments& InArgs, TSharedRef<FCurveEdi
 	WeakTabManager = InArgs._TabManager;
 
 	CachedSelectionSerialNumber = 0;
+
 	CurveEditor = InCurveEditor;
 
 	CurveEditor->SetPanel(SharedThis(this));
@@ -149,6 +157,21 @@ void SCurveEditorPanel::Construct(const FArguments& InArgs, TSharedRef<FCurveEdi
 	CommandList->Append(InCurveEditor->GetCommands().ToSharedRef());
 
 	BindCommands();
+
+	ColumnFillCoefficients[0] = 0.3f;
+	ColumnFillCoefficients[1] = 0.7f;
+
+	if (CurveEditor->GetSettings())
+	{
+		ColumnFillCoefficients[0] = CurveEditor->GetSettings()->GetTreeViewWidth();
+		ColumnFillCoefficients[1] = 1.f - CurveEditor->GetSettings()->GetTreeViewWidth();
+	}
+
+	TAttribute<float> FillCoefficient_0, FillCoefficient_1;
+	{
+		FillCoefficient_0.Bind(TAttribute<float>::FGetter::CreateSP(this, &SCurveEditorPanel::GetColumnFillCoefficient, 0));
+		FillCoefficient_1.Bind(TAttribute<float>::FGetter::CreateSP(this, &SCurveEditorPanel::GetColumnFillCoefficient, 1));
+	}
 
 	// Create some Widgets
 	ISequencerWidgetsModule& SequencerWidgets = FModuleManager::Get().LoadModuleChecked<ISequencerWidgetsModule>("SequencerWidgets");
@@ -173,7 +196,7 @@ void SCurveEditorPanel::Construct(const FArguments& InArgs, TSharedRef<FCurveEdi
 			[
 				// Top Time Slider
 				SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 				.BorderBackgroundColor(FLinearColor(.50f, .50f, .50f, 1.0f))
 				.Padding(0)
 				.Clipping(EWidgetClipping::ClipToBounds)
@@ -221,8 +244,32 @@ void SCurveEditorPanel::Construct(const FArguments& InArgs, TSharedRef<FCurveEdi
 		// An overlay for the main area which lets us put system-wide overlays
 		+ SOverlay::Slot()
 		[
-			SNew(SCurveEditorViewOverlay)
+			SNew(SOverlay)
 			.Visibility(this, &SCurveEditorPanel::ShouldInstructionOverlayBeVisible)
+
+			// Darker background
+			+ SOverlay::Slot()
+			[
+				SNew(SBorder)
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+				.BorderBackgroundColor(FLinearColor::Black.CopyWithNewOpacity(0.35f))
+			]
+
+			// Text
+			+ SOverlay::Slot()
+			[
+				SNew(SVerticalBox)
+
+				+ SVerticalBox::Slot()
+				.HAlign(HAlign_Center)
+				.VAlign(VAlign_Center)
+				[
+					SNew(STextBlock)
+					.Text(LOCTEXT("CurveEditorTutorialOverlay", "Select a curve on the left to begin editing."))
+					.Font(FCoreStyle::Get().GetFontStyle("FontAwesome.13"))
+					.ColorAndOpacity(FLinearColor::White)
+				]
+			]
 		];
 	
 
@@ -230,19 +277,22 @@ void SCurveEditorPanel::Construct(const FArguments& InArgs, TSharedRef<FCurveEdi
 	{
 		ChildSlot
 		[
-			SNew(SSplitter)
+			SAssignNew(TreeViewSplitter, SSplitter)
 			.Orientation(Orient_Horizontal)
-			.Style(FEditorStyle::Get(), "SplitterDark")
-			.PhysicalSplitterHandleSize(2.0f)
+			.Style(FAppStyle::Get(), "SplitterDark")
+			.PhysicalSplitterHandleSize(3.0f)
+			.OnSplitterFinishedResizing(this, &SCurveEditorPanel::OnSplitterFinishedResizing)
 
 			+ SSplitter::Slot()
-			.Value(InArgs._TreeSplitterWidth)
+			.Value(FillCoefficient_0)
+			.OnSlotResized(SSplitter::FOnSlotResized::CreateSP(this, &SCurveEditorPanel::OnColumnFillCoefficientChanged, 0))
 			[
 				InArgs._TreeContent.Widget
 			]
 
 			+ SSplitter::Slot()
-			.Value(InArgs._ContentSplitterWidth)
+			.Value(FillCoefficient_1)
+			.OnSlotResized(SSplitter::FOnSlotResized::CreateSP(this, &SCurveEditorPanel::OnColumnFillCoefficientChanged, 1))
 			[
 				MainContent
 			]
@@ -284,6 +334,7 @@ void SCurveEditorPanel::BindCommands()
 		FExecuteAction SetConstant   = FExecuteAction::CreateSP(this, &SCurveEditorPanel::SetKeyAttributes, FKeyAttributes().SetInterpMode(RCIM_Constant).SetTangentMode(RCTM_Auto), LOCTEXT("SetInterpConstant", "Set Interp Constant"));
 		FExecuteAction SetLinear     = FExecuteAction::CreateSP(this, &SCurveEditorPanel::SetKeyAttributes, FKeyAttributes().SetInterpMode(RCIM_Linear).SetTangentMode(RCTM_Auto),   LOCTEXT("SetInterpLinear",   "Set Interp Linear"));
 		FExecuteAction SetCubicAuto  = FExecuteAction::CreateSP(this, &SCurveEditorPanel::SetKeyAttributes, FKeyAttributes().SetInterpMode(RCIM_Cubic).SetTangentMode(RCTM_Auto),    LOCTEXT("SetInterpCubic",    "Set Interp Auto"));
+		FExecuteAction SetCubicSmartAuto = FExecuteAction::CreateSP(this, &SCurveEditorPanel::SetKeyAttributes, FKeyAttributes().SetInterpMode(RCIM_Cubic).SetTangentMode(RCTM_SmartAuto),	LOCTEXT("SetInterpSmartAuto", "Set Interp Smart Auto"));
 		FExecuteAction SetCubicUser  = FExecuteAction::CreateSP(this, &SCurveEditorPanel::SetKeyAttributes, FKeyAttributes().SetInterpMode(RCIM_Cubic).SetTangentMode(RCTM_User),    LOCTEXT("SetInterpUser",     "Set Interp User"));
 		FExecuteAction SetCubicBreak = FExecuteAction::CreateSP(this, &SCurveEditorPanel::SetKeyAttributes, FKeyAttributes().SetInterpMode(RCIM_Cubic).SetTangentMode(RCTM_Break),   LOCTEXT("SetInterpBreak",    "Set Interp Break"));
 
@@ -293,19 +344,42 @@ void SCurveEditorPanel::BindCommands()
 		FIsActionChecked IsConstantCommon   = FIsActionChecked::CreateSP(this, &SCurveEditorPanel::CompareCommonInterpolationMode, RCIM_Constant);
 		FIsActionChecked IsLinearCommon     = FIsActionChecked::CreateSP(this, &SCurveEditorPanel::CompareCommonInterpolationMode, RCIM_Linear);
 		FIsActionChecked IsCubicAutoCommon  = FIsActionChecked::CreateSP(this, &SCurveEditorPanel::CompareCommonTangentMode, RCIM_Cubic, RCTM_Auto);
+		FIsActionChecked IsCubicSmartAutoCommon = FIsActionChecked::CreateSP(this, &SCurveEditorPanel::CompareCommonTangentMode, RCIM_Cubic, RCTM_SmartAuto);
 		FIsActionChecked IsCubicUserCommon  = FIsActionChecked::CreateSP(this, &SCurveEditorPanel::CompareCommonTangentMode, RCIM_Cubic, RCTM_User);
 		FIsActionChecked IsCubicBreakCommon = FIsActionChecked::CreateSP(this, &SCurveEditorPanel::CompareCommonTangentMode, RCIM_Cubic, RCTM_Break);
 		FIsActionChecked IsCubicWeightCommon = FIsActionChecked::CreateSP(this, &SCurveEditorPanel::CompareCommonTangentWeightMode, RCIM_Cubic, RCTWM_WeightedBoth);
 
 		FCanExecuteAction CanSetKeyTangent = FIsActionChecked::CreateSP(this, &SCurveEditorPanel::CanSetKeyInterpolation);
 
-		CommandList->MapAction(FCurveEditorCommands::Get().InterpolationConstant, SetConstant, CanSetKeyTangent, IsConstantCommon);
-		CommandList->MapAction(FCurveEditorCommands::Get().InterpolationLinear, SetLinear, CanSetKeyTangent, IsLinearCommon);
-		CommandList->MapAction(FCurveEditorCommands::Get().InterpolationCubicAuto, SetCubicAuto, CanSetKeyTangent, IsCubicAutoCommon);
-		CommandList->MapAction(FCurveEditorCommands::Get().InterpolationCubicUser, SetCubicUser, CanSetKeyTangent, IsCubicUserCommon);
-		CommandList->MapAction(FCurveEditorCommands::Get().InterpolationCubicBreak, SetCubicBreak, CanSetKeyTangent, IsCubicBreakCommon);
-		CommandList->MapAction(FCurveEditorCommands::Get().InterpolationToggleWeighted, ToggleWeighted, CanToggleWeighted, IsCubicWeightCommon);
-
+		int32 SupportedTangentTypes = CurveEditor->GetSupportedTangentTypes();
+		if (SupportedTangentTypes & (int32)ECurveEditorTangentTypes::InterpolationCubicSmartAuto)
+		{
+			CommandList->MapAction(FCurveEditorCommands::Get().InterpolationCubicSmartAuto, SetCubicSmartAuto, CanSetKeyTangent, IsCubicSmartAutoCommon);
+		};
+		if (SupportedTangentTypes & (int32)ECurveEditorTangentTypes::InterpolationCubicAuto)
+		{
+			CommandList->MapAction(FCurveEditorCommands::Get().InterpolationCubicAuto, SetCubicAuto, CanSetKeyTangent, IsCubicAutoCommon);
+		};
+		if (SupportedTangentTypes & (int32)ECurveEditorTangentTypes::InterpolationCubicUser)
+		{
+			CommandList->MapAction(FCurveEditorCommands::Get().InterpolationCubicUser, SetCubicUser, CanSetKeyTangent, IsCubicUserCommon);
+		}
+		if (SupportedTangentTypes & (int32)ECurveEditorTangentTypes::InterpolationCubicBreak)
+		{
+			CommandList->MapAction(FCurveEditorCommands::Get().InterpolationCubicBreak, SetCubicBreak, CanSetKeyTangent, IsCubicBreakCommon);
+		}
+		if (SupportedTangentTypes & (int32)ECurveEditorTangentTypes::InterpolationLinear)
+		{
+			CommandList->MapAction(FCurveEditorCommands::Get().InterpolationLinear, SetLinear, CanSetKeyTangent, IsLinearCommon);
+		}
+		if (SupportedTangentTypes & (int32)ECurveEditorTangentTypes::InterpolationConstant)
+		{
+			CommandList->MapAction(FCurveEditorCommands::Get().InterpolationConstant, SetConstant, CanSetKeyTangent, IsConstantCommon);
+		}
+		if (SupportedTangentTypes & (int32)ECurveEditorTangentTypes::InterpolationCubicWeighted)
+		{
+			CommandList->MapAction(FCurveEditorCommands::Get().InterpolationToggleWeighted, ToggleWeighted, CanToggleWeighted, IsCubicWeightCommon);
+		}
 	}
 
 	// Pre Extrapolation Modes
@@ -426,7 +500,6 @@ void SCurveEditorPanel::Tick(const FGeometry& AllottedGeometry, const double InC
 		{
 			CurveEditor->ZoomToFitCurves(CurveEditor->GetEditedCurves().Array());
 		}
-
 		bNeedsRefresh = false;
 		CachedActiveCurvesSerialNumber = CurveEditor->GetActiveCurvesSerialNumber();
 		bWasRefreshed = true;
@@ -434,15 +507,40 @@ void SCurveEditorPanel::Tick(const FGeometry& AllottedGeometry, const double InC
 
 	UpdateCommonCurveInfo();
 	UpdateEditBox();
+	UpdateTime();
 
 	CachedSelectionSerialNumber = CurveEditor->Selection.GetSerialNumber();
+}
+
+void SCurveEditorPanel::ResetMinMaxes()
+{
+	//only reset the min/max if we have views since we will then get these values from them
+	//otherwise if we didn't we would end up with everything back to 0,1 again.
+	if (CurveViews.IsEmpty() == false)
+	{
+		LastOutputMin = DBL_MAX;
+		LastOutputMax = DBL_MIN;
+	}
 }
 
 void SCurveEditorPanel::RemoveCurveFromViews(FCurveModelID InCurveID)
 {
 	for (auto It = CurveViews.CreateKeyIterator(InCurveID); It; ++It)
 	{
-		FCurveEditorPanelViewTracker::RemoveCurveFromView(&It.Value().Get(), InCurveID);
+		SCurveEditorView* View = &It.Value().Get();
+		//cache these so we can re-use it on reconstruction
+		if (View)
+		{
+			if (View->GetOutputMin() < LastOutputMin)
+			{
+				LastOutputMin = View->GetOutputMin();
+			}
+			if (View->GetOutputMax() > LastOutputMax)
+			{
+				LastOutputMax = View->GetOutputMax();
+			}
+		}
+		FCurveEditorPanelViewTracker::RemoveCurveFromView(View, InCurveID);
 		It.RemoveCurrent();
 	}
 }
@@ -450,7 +548,13 @@ void SCurveEditorPanel::RemoveCurveFromViews(FCurveModelID InCurveID)
 void SCurveEditorPanel::PostUndo()
 {
 	EditObjects->CurveIDToKeyProxies.Empty();
+
+	// Force the edit box to update (ie. the value of the keys might have changed)
 	CachedSelectionSerialNumber = 0;
+	UpdateEditBox();
+
+	// Reset the selection serial number so that time doesn't change since selection didn't really change on undo
+	CachedSelectionSerialNumber = CurveEditor->Selection.GetSerialNumber();
 }
 
 void SCurveEditorPanel::AddView(TSharedRef<SCurveEditorView> ViewToAdd)
@@ -479,6 +583,10 @@ TSharedPtr<SCurveEditorView> SCurveEditorPanel::CreateViewOfType(FCurveModelID C
 			if (!View->HasCapacity())
 			{
 				It.RemoveCurrent();
+			}
+			if (LastOutputMin != DBL_MAX && LastOutputMax != DBL_MIN)
+			{
+				View->SetOutputBounds(LastOutputMin, LastOutputMax);
 			}
 
 			return View;
@@ -688,15 +796,29 @@ void SCurveEditorPanel::OnCurveEditorToolChanged(FCurveEditorToolID InToolId)
 	ToolPropertiesPanel->OnToolChanged(InToolId);
 }
 
+void SCurveEditorPanel::UpdateTime()
+{
+	const FCurveEditorSelection& Selection = CurveEditor->Selection;
+	if (CachedSelectionSerialNumber == Selection.GetSerialNumber())
+	{
+		return;
+	}
+
+	if (CurveEditor->GetSettings()->GetSnapTimeToSelection())
+	{
+		CurveEditor->SnapToSelectedKey();
+	}
+}
+
 void SCurveEditorPanel::UpdateEditBox()
 {
 	const FCurveEditorSelection& Selection = CurveEditor->Selection;
-	for (TTuple<FCurveModelID, TMap<FKeyHandle, UObject*>>& OuterPair : EditObjects->CurveIDToKeyProxies)
+	for (auto& OuterPair : EditObjects->CurveIDToKeyProxies)
 	{
 		const FKeyHandleSet* SelectedKeys = Selection.FindForCurve(OuterPair.Key);
 		if(SelectedKeys)
 		{
-			for (TTuple<FKeyHandle, UObject*>& InnerPair : OuterPair.Value)
+			for (auto& InnerPair : OuterPair.Value)
 			{
 				if (ICurveEditorKeyProxy* Proxy = Cast<ICurveEditorKeyProxy>(InnerPair.Value))
 				{
@@ -726,7 +848,7 @@ void SCurveEditorPanel::UpdateEditBox()
 		KeyHandleScratch.Reset();
 		NewProxiesScratch.Reset();
 
-		TMap<FKeyHandle, UObject*>& KeyHandleToEditObject = EditObjects->CurveIDToKeyProxies.FindOrAdd(Pair.Key);
+		auto& KeyHandleToEditObject = EditObjects->CurveIDToKeyProxies.FindOrAdd(Pair.Key);
 		for (FKeyHandle Handle : Pair.Value.AsArray())
 		{
 			if (UObject* Existing = KeyHandleToEditObject.FindRef(Handle))
@@ -890,12 +1012,22 @@ TSharedRef<SWidget> SCurveEditorPanel::MakeCurveEditorCurveViewOptionsMenu()
 
 	MenuBuilder.AddMenuSeparator();
 	MenuBuilder.AddMenuEntry(FCurveEditorCommands::Get().ToggleAutoFrameCurveEditor);
+	MenuBuilder.AddMenuEntry(FCurveEditorCommands::Get().ToggleSnapTimeToSelection);
+	MenuBuilder.AddMenuEntry(FCurveEditorCommands::Get().ToggleShowBufferedCurves);
+	MenuBuilder.AddMenuEntry(FCurveEditorCommands::Get().ToggleShowBars);
 	MenuBuilder.AddMenuEntry(FCurveEditorCommands::Get().ToggleShowCurveEditorCurveToolTips);
 
 	MenuBuilder.BeginSection("Organize", LOCTEXT("CurveEditorMenuOrganizeHeader", "Organize"));
 	{
 		MenuBuilder.AddMenuEntry(FCurveEditorCommands::Get().ToggleExpandCollapseNodes);
 		MenuBuilder.AddMenuEntry(FCurveEditorCommands::Get().ToggleExpandCollapseNodesAndDescendants);
+	}
+	MenuBuilder.EndSection();
+
+	MenuBuilder.BeginSection("CurveColors", LOCTEXT("CurveColorsHeader", "Curve Colors"));
+	{
+		MenuBuilder.AddMenuEntry(FCurveEditorCommands::Get().SetRandomCurveColorsForSelected);
+		MenuBuilder.AddMenuEntry(FCurveEditorCommands::Get().SetCurveColorsForSelected);
 	}
 	MenuBuilder.EndSection();
 
@@ -961,7 +1093,7 @@ FSlateIcon SCurveEditorPanel::GetCurveExtrapolationPreIcon() const
 	}
 	else
 	{
-		return FSlateIcon(FEditorStyle::GetStyleSetName(), "GenericCurveEditor.PreInfinityMixed");
+		return FSlateIcon(FAppStyle::GetAppStyleSetName(), "GenericCurveEditor.PreInfinityMixed");
 	}
 }
 
@@ -990,7 +1122,7 @@ FSlateIcon SCurveEditorPanel::GetCurveExtrapolationPostIcon() const
 	}
 	else
 	{
-		return FSlateIcon(FEditorStyle::GetStyleSetName(), "GenericCurveEditor.PostInfinityMixed");
+		return FSlateIcon(FAppStyle::GetAppStyleSetName(), "GenericCurveEditor.PostInfinityMixed");
 	}
 }
 
@@ -1001,8 +1133,17 @@ void SCurveEditorPanel::ShowCurveFilterUI(TSubclassOf<UCurveEditorFilterBase> Fi
 	TSharedPtr<SDockTab> OwnerTab = TabManager.IsValid() ? TabManager->GetOwnerTab() : TSharedPtr<SDockTab>();
 	TSharedPtr<SWindow> RootWindow = OwnerTab.IsValid() ? OwnerTab->GetParentWindow() : TSharedPtr<SWindow>();
 
-	SCurveEditorFilterPanel::OpenDialog(RootWindow, CurveEditor.ToSharedRef(), FilterClass);
+	FilterPanel = SCurveEditorFilterPanel::OpenDialog(RootWindow, CurveEditor.ToSharedRef(), FilterClass);
+	FilterPanel->OnFilterClassChanged.BindRaw(this, &SCurveEditorPanel::FilterClassChanged);
+
+	FilterClassChanged();
 }
+
+void SCurveEditorPanel::FilterClassChanged()
+{
+	OnFilterClassChanged.ExecuteIfBound();
+}
+
 
 const FGeometry& SCurveEditorPanel::GetScrollPanelGeometry() const
 {
@@ -1031,6 +1172,7 @@ TSharedPtr<FExtender> SCurveEditorPanel::GetToolbarExtender()
 		static void FillToolbar(FToolBarBuilder& ToolBarBuilder, TSharedRef<SCurveKeyDetailPanel> InKeyDetailsPanel, TSharedRef<SCurveEditorPanel> InEditorPanel)
 		{
 			ToolBarBuilder.BeginSection("View");
+			ToolBarBuilder.BeginStyleOverride("CurveEditorToolbar");
 			{
 				// Dropdown Menu for choosing your viewing mode
 				TAttribute<FSlateIcon> ViewModeIcon;
@@ -1072,7 +1214,7 @@ TSharedPtr<FExtender> SCurveEditorPanel::GetToolbarExtender()
 					FOnGetContent::CreateSP(InEditorPanel, &SCurveEditorPanel::MakeCurveEditorCurveViewOptionsMenu),
 					LOCTEXT("CurveEditorCurveOptions", "Curves Options"),
 					LOCTEXT("CurveEditorCurveOptionsToolTip", "Curve Options"),
-					FSlateIcon(FEditorStyle::GetStyleSetName(), "GenericCurveEditor.VisibilityOptions"));
+					FSlateIcon(FAppStyle::Get().GetStyleSetName(), "Icons.Visibility"));
 
 			}
 			ToolBarBuilder.EndSection();
@@ -1142,13 +1284,36 @@ TSharedPtr<FExtender> SCurveEditorPanel::GetToolbarExtender()
 
 			ToolBarBuilder.BeginSection("Tangents");
 			{
-				ToolBarBuilder.AddToolBarButton(FCurveEditorCommands::Get().InterpolationCubicAuto);
-				ToolBarBuilder.AddToolBarButton(FCurveEditorCommands::Get().InterpolationCubicUser);
-				ToolBarBuilder.AddToolBarButton(FCurveEditorCommands::Get().InterpolationCubicBreak);
-				ToolBarBuilder.AddToolBarButton(FCurveEditorCommands::Get().InterpolationLinear);
-				ToolBarBuilder.AddToolBarButton(FCurveEditorCommands::Get().InterpolationConstant);
-				ToolBarBuilder.AddToolBarButton(FCurveEditorCommands::Get().InterpolationToggleWeighted);
-				
+				int32 SupportedTangentTypes = InEditorPanel->CurveEditor->GetSupportedTangentTypes();
+				if (SupportedTangentTypes & (int32)ECurveEditorTangentTypes::InterpolationCubicSmartAuto)
+				{
+					ToolBarBuilder.AddToolBarButton(FCurveEditorCommands::Get().InterpolationCubicSmartAuto);
+				};
+				if (SupportedTangentTypes & (int32)ECurveEditorTangentTypes::InterpolationCubicAuto)
+				{
+					ToolBarBuilder.AddToolBarButton(FCurveEditorCommands::Get().InterpolationCubicAuto);
+				};
+				if (SupportedTangentTypes & (int32)ECurveEditorTangentTypes::InterpolationCubicUser)
+				{
+					ToolBarBuilder.AddToolBarButton(FCurveEditorCommands::Get().InterpolationCubicUser);
+				}
+				if (SupportedTangentTypes & (int32)ECurveEditorTangentTypes::InterpolationCubicBreak)
+				{
+					ToolBarBuilder.AddToolBarButton(FCurveEditorCommands::Get().InterpolationCubicBreak);
+				}
+				if (SupportedTangentTypes & (int32)ECurveEditorTangentTypes::InterpolationLinear)
+				{
+					ToolBarBuilder.AddToolBarButton(FCurveEditorCommands::Get().InterpolationLinear);
+				}
+				if (SupportedTangentTypes & (int32)ECurveEditorTangentTypes::InterpolationConstant)
+				{
+					ToolBarBuilder.AddToolBarButton(FCurveEditorCommands::Get().InterpolationConstant);
+				}
+				if (SupportedTangentTypes & (int32)ECurveEditorTangentTypes::InterpolationCubicWeighted)
+				{
+					ToolBarBuilder.AddToolBarButton(FCurveEditorCommands::Get().InterpolationToggleWeighted);
+				}
+
 				// We re-use key interpolation checks here, as you can set them under the same conditions.
 				FCanExecuteAction CanSetInfinities = FCanExecuteAction::CreateSP(InEditorPanel, &SCurveEditorPanel::CanSetKeyInterpolation);
 				
@@ -1179,7 +1344,9 @@ TSharedPtr<FExtender> SCurveEditorPanel::GetToolbarExtender()
 				ToolBarBuilder.AddToolBarButton(FCurveEditorCommands::Get().OpenUserImplementableFilterWindow);
 			}
 			ToolBarBuilder.EndSection();
+			ToolBarBuilder.EndStyleOverride();
 		}
+
 	};
 
 	Extender->AddToolBarExtension(
@@ -1288,4 +1455,21 @@ EVisibility SCurveEditorPanel::ShouldInstructionOverlayBeVisible() const
 	const bool bCurvesAreVisible = CurveEditor->GetTreeSelection().Num() > 0 || CurveEditor->GetPinnedCurves().Num() > 0;
 	return bCurvesAreVisible ? EVisibility::Hidden : EVisibility::HitTestInvisible;
 }
+
+void SCurveEditorPanel::OnSplitterFinishedResizing()
+{
+	SSplitter::FSlot const& LeftSplitterSlot = TreeViewSplitter->SlotAt(0);
+	SSplitter::FSlot const& RightSplitterSlot = TreeViewSplitter->SlotAt(1);
+
+	OnColumnFillCoefficientChanged(LeftSplitterSlot.GetSizeValue(), 0);
+	OnColumnFillCoefficientChanged(RightSplitterSlot.GetSizeValue(), 1);
+
+	CurveEditor->GetSettings()->SetTreeViewWidth(LeftSplitterSlot.GetSizeValue());
+}
+
+void SCurveEditorPanel::OnColumnFillCoefficientChanged(float FillCoefficient, int32 ColumnIndex)
+{
+	ColumnFillCoefficients[ColumnIndex] = FillCoefficient;
+}
+
 #undef LOCTEXT_NAMESPACE

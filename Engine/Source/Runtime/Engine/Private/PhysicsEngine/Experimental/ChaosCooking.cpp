@@ -1,13 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "PhysicsEngine/Experimental/ChaosCooking.h"
+#include "Chaos/CollisionConvexMesh.h"
 #include "ChaosDerivedDataUtil.h"
-#include "Chaos/Particles.h"
-#include "Chaos/AABB.h"
 #include "Chaos/Convex.h"
 #include "Chaos/TriangleMeshImplicitObject.h"
-
-#if WITH_CHAOS
 
 int32 EnableMeshClean = 1;
 FAutoConsoleVariableRef CVarEnableMeshClean(TEXT("p.EnableMeshClean"), EnableMeshClean, TEXT("Enable/Disable mesh cleanup during cook."));
@@ -16,23 +13,33 @@ namespace Chaos
 {
 	namespace Cooking
 	{
-		TUniquePtr<Chaos::FTriangleMeshImplicitObject> BuildSingleTrimesh(const FTriMeshCollisionData& Desc, TArray<int32>& OutFaceRemap, TArray<int32>& OutVertexRemap)
+		static void CopyUpdatedFaceRemapFromTriangleMesh(const Chaos::FTriangleMeshImplicitObject& TriangleMesh, TArray<int32>& OutFaceRemap)
+		{
+			for (int32 TriangleIndex = 0; TriangleIndex < OutFaceRemap.Num(); TriangleIndex++)
+			{
+				OutFaceRemap[TriangleIndex] = TriangleMesh.GetExternalFaceIndexFromInternal(TriangleIndex);
+			}
+		}
+
+		Chaos::FTriangleMeshImplicitObjectPtr BuildSingleTrimesh(const FTriMeshCollisionData& Desc, TArray<int32>& OutFaceRemap, TArray<int32>& OutVertexRemap)
 		{
 			if(Desc.Vertices.Num() == 0)
 			{
 				return nullptr;
 			}
 
-			TArray<FVector> FinalVerts = Desc.Vertices;
+			TArray<FVector3f> FinalVerts = Desc.Vertices;
 
 			// Push indices into one flat array
 			TArray<int32> FinalIndices;
 			FinalIndices.Reserve(Desc.Indices.Num() * 3);
 			for(const FTriIndices& Tri : Desc.Indices)
 			{
-				//question: It seems like unreal triangles are CW, but couldn't find confirmation for this
-				FinalIndices.Add(Tri.v1);
-				FinalIndices.Add(Tri.v0);
+				// NOTE: This is where the Winding order of the triangles are changed to be consistent throughout the rest of the physics engine
+				// After this point we should have clockwise (CW) winding in left handed (LH) coordinates (or equivalently CCW in RH)
+				// This is the opposite convention followed in most of the unreal engine
+				FinalIndices.Add(Desc.bFlipNormals ? Tri.v1 : Tri.v0);
+				FinalIndices.Add(Desc.bFlipNormals ? Tri.v0 : Tri.v1);
 				FinalIndices.Add(Tri.v2);
 			}
 
@@ -42,17 +49,17 @@ namespace Chaos
 			}
 
 			// Build particle list #BG Maybe allow TParticles to copy vectors?
-			Chaos::TParticles<Chaos::FReal, 3> TriMeshParticles;
+			Chaos::FTriangleMeshImplicitObject::ParticlesType TriMeshParticles;
 			TriMeshParticles.AddParticles(FinalVerts.Num());
 
 			const int32 NumVerts = FinalVerts.Num();
 			for(int32 VertIndex = 0; VertIndex < NumVerts; ++VertIndex)
 			{
-				TriMeshParticles.X(VertIndex) = FinalVerts[VertIndex];
+				TriMeshParticles.SetX(VertIndex, FinalVerts[VertIndex]);
 			}
 
 			// Build chaos triangle list. #BGTODO Just make the clean function take these types instead of double copying
-			auto LambdaHelper = [&Desc, &FinalVerts, &FinalIndices, &TriMeshParticles, &OutFaceRemap, &OutVertexRemap](auto& Triangles) -> TUniquePtr<Chaos::FTriangleMeshImplicitObject>
+			auto LambdaHelper = [&Desc, &FinalVerts, &FinalIndices, &TriMeshParticles, &OutFaceRemap, &OutVertexRemap](auto& Triangles) -> Chaos::FTriangleMeshImplicitObjectPtr
 			{
 				const int32 NumTriangles = FinalIndices.Num() / 3;
 				bool bHasMaterials = Desc.MaterialIndices.Num() > 0;
@@ -62,6 +69,10 @@ namespace Chaos
 				{
 					MaterialIndices.Reserve(NumTriangles);
 				}
+
+				// Need to rebuild face remap array, in case there are any invalid triangles
+				TArray<int32> OldFaceRemap = MoveTemp(OutFaceRemap);
+				OutFaceRemap.Reserve(OldFaceRemap.Num());
 
 				Triangles.Reserve(NumTriangles);
 				for(int32 TriangleIndex = 0; TriangleIndex < NumTriangles; ++TriangleIndex)
@@ -78,19 +89,23 @@ namespace Chaos
 					if(bIsValidTriangle)
 					{
 						Triangles.Add(Chaos::TVector<int32, 3>(FinalIndices[BaseIndex], FinalIndices[BaseIndex + 1], FinalIndices[BaseIndex + 2]));
+						if (!OldFaceRemap.IsEmpty())
+						{
+							OutFaceRemap.Add(OldFaceRemap[TriangleIndex]);
+						}
 
 						if(bHasMaterials)
 						{
 							if(EnableMeshClean)
 							{
-								if(!ensure(OutFaceRemap.IsValidIndex(TriangleIndex)))
+								if(!ensure(OldFaceRemap.IsValidIndex(TriangleIndex)))
 								{
 									MaterialIndices.Empty();
 									bHasMaterials = false;
 								}
 								else
 								{
-									const int32 OriginalIndex = OutFaceRemap[TriangleIndex];
+									const int32 OriginalIndex = OldFaceRemap[TriangleIndex];
 
 									if(ensure(Desc.MaterialIndices.IsValidIndex(OriginalIndex)))
 									{
@@ -122,7 +137,12 @@ namespace Chaos
 
 				TUniquePtr<TArray<int32>> OutFaceRemapPtr = MakeUnique<TArray<int32>>(OutFaceRemap);
 				TUniquePtr<TArray<int32>> OutVertexRemapPtr = Chaos::TriMeshPerPolySupport ? MakeUnique<TArray<int32>>(OutVertexRemap) : nullptr;
-				return MakeUnique<Chaos::FTriangleMeshImplicitObject>(MoveTemp(TriMeshParticles), MoveTemp(Triangles), MoveTemp(MaterialIndices), MoveTemp(OutFaceRemapPtr), MoveTemp(OutVertexRemapPtr));
+				Chaos::FTriangleMeshImplicitObjectPtr TriangleMesh( new Chaos::FTriangleMeshImplicitObject(MoveTemp(TriMeshParticles), MoveTemp(Triangles), MoveTemp(MaterialIndices), MoveTemp(OutFaceRemapPtr), MoveTemp(OutVertexRemapPtr)));
+
+				// Propagate remapped indices from the FTriangleMeshImplicitObject back to the remap array
+				CopyUpdatedFaceRemapFromTriangleMesh(*TriangleMesh.GetReference(), OutFaceRemap);
+
+				return TriangleMesh;
 			};
 
 			if(FinalVerts.Num() < TNumericLimits<uint16>::Max())
@@ -135,14 +155,12 @@ namespace Chaos
 				TArray<Chaos::TVector<int32, 3>> TrianglesLargeIdx;
 				return LambdaHelper(TrianglesLargeIdx);
 			}
-
-			return nullptr;
 		}
 
-		void BuildConvexMeshes(TArray<TUniquePtr<Chaos::FImplicitObject>>& OutConvexMeshes, const FCookBodySetupInfo& InParams)
+		void BuildConvexMeshes(TArray<Chaos::FImplicitObjectPtr>& OutConvexMeshes, const FCookBodySetupInfo& InParams)
 		{
 			using namespace Chaos;
-			auto BuildConvexFromVerts = [](TArray<TUniquePtr<Chaos::FImplicitObject>>& OutConvexes, const TArray<TArray<FVector>>& InMeshVerts, const bool bMirrored)
+			auto BuildConvexFromVerts = [](TArray<Chaos::FImplicitObjectPtr>& OutConvexes, const TArray<TArray<FVector>>& InMeshVerts, const bool bMirrored)
 			{
 				for(const TArray<FVector>& HullVerts : InMeshVerts)
 				{
@@ -161,13 +179,13 @@ namespace Chaos
 					}
 
 					// Create the corner vertices for the convex
-					TArray<FVec3> ConvexVertices;
+					TArray<FConvex::FVec3Type> ConvexVertices;
 					ConvexVertices.SetNumZeroed(NumHullVerts);
 
 					for(int32 VertIndex = 0; VertIndex < NumHullVerts; ++VertIndex)
 					{
 						const FVector& HullVert = HullVerts[VertIndex];
-						ConvexVertices[VertIndex] = FVector(bMirrored ? -HullVert.X : HullVert.X, HullVert.Y, HullVert.Z);
+						ConvexVertices[VertIndex] = FConvex::FVec3Type(bMirrored ? -HullVert.X : HullVert.X, HullVert.Y, HullVert.Z);
 					}
 
 					// Margin is always zero on convex shapes - they are intended to be instanced
@@ -186,23 +204,25 @@ namespace Chaos
 			}
 		}
 
-		void BuildTriangleMeshes(TArray<TUniquePtr<Chaos::FTriangleMeshImplicitObject>>& OutTriangleMeshes, TArray<int32>& OutFaceRemap, TArray<int32>& OutVertexRemap, const FCookBodySetupInfo& InParams)
+		void BuildTriangleMeshes(TArray<Chaos::FTriangleMeshImplicitObjectPtr>& OutTriangleMeshes, TArray<int32>& OutFaceRemap, TArray<int32>& OutVertexRemap, const FCookBodySetupInfo& InParams)
 		{
 			if(!InParams.bCookTriMesh)
 			{
 				return;
 			}
 
-			TArray<FVector> FinalVerts = InParams.TriangleMeshDesc.Vertices;
+			TArray<FVector3f> FinalVerts = InParams.TriangleMeshDesc.Vertices;
 
 			// Push indices into one flat array
 			TArray<int32> FinalIndices;
 			FinalIndices.Reserve(InParams.TriangleMeshDesc.Indices.Num() * 3);
 			for(const FTriIndices& Tri : InParams.TriangleMeshDesc.Indices)
 			{
-				//question: It seems like unreal triangles are CW, but couldn't find confirmation for this
-				FinalIndices.Add(Tri.v1);
-				FinalIndices.Add(Tri.v0);
+				// NOTE: This is where the Winding order of the triangles are changed to be consistent throughout the rest of the physics engine
+				// After this point we should have clockwise (CW) winding in left handed (LH) coordinates (or equivalently CCW in RH)
+				// This is the opposite convention followed in most of the unreal engine
+				FinalIndices.Add(InParams.TriangleMeshDesc.bFlipNormals ? Tri.v1 : Tri.v0);
+				FinalIndices.Add(InParams.TriangleMeshDesc.bFlipNormals ? Tri.v0 : Tri.v1);
 				FinalIndices.Add(Tri.v2);
 			}
 
@@ -212,13 +232,13 @@ namespace Chaos
 			}
 
 			// Build particle list #BG Maybe allow TParticles to copy vectors?
-			Chaos::TParticles<Chaos::FReal, 3> TriMeshParticles;
+			Chaos::FTriangleMeshImplicitObject::ParticlesType TriMeshParticles;
 			TriMeshParticles.AddParticles(FinalVerts.Num());
 
 			const int32 NumVerts = FinalVerts.Num();
 			for(int32 VertIndex = 0; VertIndex < NumVerts; ++VertIndex)
 			{
-				TriMeshParticles.X(VertIndex) = FinalVerts[VertIndex];
+				TriMeshParticles.SetX(VertIndex, FinalVerts[VertIndex]);
 			}
 
 			// Build chaos triangle list. #BGTODO Just make the clean function take these types instead of double copying
@@ -232,6 +252,10 @@ namespace Chaos
 				{
 					MaterialIndices.Reserve(NumTriangles);
 				}
+
+				// Need to rebuild face remap array, in case there are any invalid triangles
+				TArray<int32> OldFaceRemap = MoveTemp(OutFaceRemap);
+				OutFaceRemap.Reserve(OldFaceRemap.Num());
 
 				Triangles.Reserve(NumTriangles);
 				for(int32 TriangleIndex = 0; TriangleIndex < NumTriangles; ++TriangleIndex)
@@ -248,19 +272,23 @@ namespace Chaos
 					if(bIsValidTriangle)
 					{
 						Triangles.Add(Chaos::TVector<int32, 3>(FinalIndices[BaseIndex], FinalIndices[BaseIndex + 1], FinalIndices[BaseIndex + 2]));
+						if (OldFaceRemap.Num())
+						{
+							OutFaceRemap.Add(OldFaceRemap[TriangleIndex]);
+						}
 
 						if(bHasMaterials)
 						{
 							if(EnableMeshClean)
 							{
-								if(!ensure(OutFaceRemap.IsValidIndex(TriangleIndex)))
+								if(!ensure(OldFaceRemap.IsValidIndex(TriangleIndex)))
 								{
 									MaterialIndices.Empty();
 									bHasMaterials = false;
 								}
 								else
 								{
-									const int32 OriginalIndex = OutFaceRemap[TriangleIndex];
+									const int32 OriginalIndex = OldFaceRemap[TriangleIndex];
 
 									if(ensure(InParams.TriangleMeshDesc.MaterialIndices.IsValidIndex(OriginalIndex)))
 									{
@@ -292,7 +320,11 @@ namespace Chaos
 
 				TUniquePtr<TArray<int32>> OutFaceRemapPtr = MakeUnique<TArray<int32>>(OutFaceRemap);
 				TUniquePtr<TArray<int32>> OutVertexRemapPtr = Chaos::TriMeshPerPolySupport ? MakeUnique<TArray<int32>>(OutVertexRemap) : nullptr;
-				OutTriangleMeshes.Emplace(new Chaos::FTriangleMeshImplicitObject(MoveTemp(TriMeshParticles), MoveTemp(Triangles), MoveTemp(MaterialIndices), MoveTemp(OutFaceRemapPtr), MoveTemp(OutVertexRemapPtr)));
+				Chaos::FTriangleMeshImplicitObject* TriangleMesh = new Chaos::FTriangleMeshImplicitObject(MoveTemp(TriMeshParticles), MoveTemp(Triangles), MoveTemp(MaterialIndices), MoveTemp(OutFaceRemapPtr), MoveTemp(OutVertexRemapPtr));
+				OutTriangleMeshes.Emplace(TriangleMesh);
+
+				// Propagate remapped indices from the FTriangleMeshImplicitObject back to the remap array
+				CopyUpdatedFaceRemapFromTriangleMesh(*TriangleMesh, OutFaceRemap);
 			};
 
 			if(FinalVerts.Num() < TNumericLimits<uint16>::Max())
@@ -310,6 +342,7 @@ namespace Chaos
 
 	FCookHelper::FCookHelper(UBodySetup* InSetup)
 		: SourceSetup(InSetup)
+		, bCanceled(false)
 	{
 		check(SourceSetup);
 		EPhysXMeshCookFlags TempFlags = static_cast<EPhysXMeshCookFlags>(0);
@@ -318,6 +351,8 @@ namespace Chaos
 
 	void FCookHelper::Cook()
 	{
+		if (bCanceled) return;
+
 		Cooking::BuildConvexMeshes(SimpleImplicits, CookInfo);
 		Cooking::BuildTriangleMeshes(ComplexImplicits, FaceRemap, VertexRemap, CookInfo);
 
@@ -343,5 +378,3 @@ namespace Chaos
 		return CookInfo.bCookTriMesh || CookInfo.bCookNonMirroredConvex || CookInfo.bCookMirroredConvex;
 	}
 }
-
-#endif

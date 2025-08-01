@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreTypes.h"
+#include "Math/Box.h"
 #include "Math/UnrealMathUtility.h"
 #include "Math/Vector.h"
 #include "Math/Matrix.h"
@@ -142,7 +143,7 @@ public:
 	FVector GetUnitVector() const
 	{
 		FVector Result;
-		float L;
+		FVector::FReal L;
 
 		do
 		{
@@ -152,7 +153,7 @@ public:
 			Result.Z = GetFraction() * 2.f - 1.f;
 			L = Result.SizeSquared();
 		}
-		while(L > 1.f || L < KINDA_SMALL_NUMBER);
+		while(L > 1.f || L < UE_KINDA_SMALL_NUMBER);
 
 		return Result.GetUnsafeNormal();
 	}
@@ -205,7 +206,7 @@ public:
 	 *
 	 * @return A random number >= Min and <= Max
 	 */
-	FORCEINLINE float FRandRange( float InMin, float InMax ) const
+	FORCEINLINE FVector::FReal FRandRange( FVector::FReal InMin, FVector::FReal InMax ) const
 	{
 		return InMin + (InMax - InMin) * FRand();
 	}
@@ -218,6 +219,13 @@ public:
 	FORCEINLINE FVector VRand() const
 	{
 		return GetUnitVector();
+	}
+
+	FORCEINLINE FVector RandPointInBox(const FBox& Box) const
+	{
+		return FVector(	FRandRange(Box.Min.X, Box.Max.X),
+						FRandRange(Box.Min.Y, Box.Max.Y),
+						FRandRange(Box.Min.Z, Box.Max.Z) );
 	}
 
 	/**
@@ -236,7 +244,7 @@ public:
 
 			// Get spherical coords that have an even distribution over the unit sphere
 			// Method described at http://mathworld.wolfram.com/SpherePointPicking.html	
-			float Theta = 2.f * PI * RandU;
+			float Theta = 2.f * UE_PI * RandU;
 			float Phi = FMath::Acos((2.f * RandV) - 1.f);
 
 			// restrict phi to [0, ConeHalfAngleRad]
@@ -250,8 +258,8 @@ public:
 			FVector const DirZ = DirMat.GetUnitAxis( EAxis::X );		
 			FVector const DirY = DirMat.GetUnitAxis( EAxis::Y );
 
-			FVector Result = Dir.RotateAngleAxis(Phi * 180.f / PI, DirY);
-			Result = Result.RotateAngleAxis(Theta * 180.f / PI, DirZ);
+			FVector Result = Dir.RotateAngleAxis(Phi * 180.f / UE_PI, DirY);
+			Result = Result.RotateAngleAxis(Theta * 180.f / UE_PI, DirZ);
 
 			// ensure it's a unit vector (might not have been passed in that way)
 			Result = Result.GetSafeNormal();
@@ -281,7 +289,7 @@ public:
 
 			// Get spherical coords that have an even distribution over the unit sphere
 			// Method described at http://mathworld.wolfram.com/SpherePointPicking.html	
-			float Theta = 2.f * PI * RandU;
+			float Theta = 2.f * UE_PI * RandU;
 			float Phi = FMath::Acos((2.f * RandV) - 1.f);
 
 			// restrict phi to [0, ConeHalfAngleRad]
@@ -300,8 +308,8 @@ public:
 			FVector const DirZ = DirMat.GetUnitAxis( EAxis::X );		
 			FVector const DirY = DirMat.GetUnitAxis( EAxis::Y );
 
-			FVector Result = Dir.RotateAngleAxis(Phi * 180.f / PI, DirY);
-			Result = Result.RotateAngleAxis(Theta * 180.f / PI, DirZ);
+			FVector Result = Dir.RotateAngleAxis(Phi * 180.f / UE_PI, DirY);
+			Result = Result.RotateAngleAxis(Theta * 180.f / UE_PI, DirZ);
 
 			// ensure it's a unit vector (might not have been passed in that way)
 			Result = Result.GetSafeNormal();
@@ -313,19 +321,6 @@ public:
 			return Dir.GetSafeNormal();
 		}
 	}
-
-	/**
-	 * Exports the RandomStreams value to a string.
-	 *
-	 * @param ValueStr Will hold the string value.
-	 * @param DefaultValue The default value.
-	 * @param Parent Not used.
-	 * @param PortFlags Not used.
-	 * @param ExportRootScope Not used.
-	 * @return true on success, false otherwise.
-	 * @see ImportTextItem
-	 */
-	CORE_API bool ExportTextItem(FString& ValueStr, FRandomStream const& DefaultValue, class UObject* Parent, int32 PortFlags, class UObject* ExportRootScope) const;
 
 	/**
 	 * Get a textual representation of the RandomStream.

@@ -6,6 +6,8 @@
 #include "Interfaces/IPluginManager.h"
 #include "Interfaces/IProjectManager.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PluginCommandlet)
+
 
 DEFINE_LOG_CATEGORY_STATIC(LogPluginCommandlet, Log, All);
 
@@ -22,7 +24,7 @@ DEFINE_LOG_CATEGORY_STATIC(LogPluginCommandlet, Log, All);
  *
  * Example:
  *	Plugin Enable NetcodeUnitTest
- *	Plugin Enable NetcodeUnitTest,NUTUnrealEngine4
+ *	Plugin Enable NetcodeUnitTest,NUTUnrealEngine
  */
 
 UPluginCommandlet::UPluginCommandlet(const FObjectInitializer& ObjectInitializer)
@@ -140,3 +142,4 @@ int32 UPluginCommandlet::Main(const FString& Params)
 
 	return bSuccess ? 0 : 1;
 }
+

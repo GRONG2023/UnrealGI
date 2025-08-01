@@ -4,12 +4,18 @@
 #include "Systems/MovieScenePropertyInstantiator.h"
 
 #include "EntitySystem/MovieSceneEntitySystemLinker.h"
-#include "Evaluation/PreAnimatedState/MovieScenePreAnimatedEntityCaptureSource.h"
+#include "EntitySystem/Interrogation/MovieSceneInterrogationLinker.h"
+#include "Evaluation/PreAnimatedState/MovieScenePreAnimatedCaptureSources.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieScenePropertySystem)
 
 UMovieScenePropertySystem::UMovieScenePropertySystem(const FObjectInitializer& ObjInit)
 	: Super(ObjInit)
 {
-	SystemExclusionContext |= UE::MovieScene::EEntitySystemContext::Interrogation;
+	using namespace UE::MovieScene;
+
+	Phase = ESystemPhase::Scheduling;
+	SystemCategories = EEntitySystemCategory::PropertySystems | FSystemInterrogator::GetExcludedFromInterrogationCategory();
 }
 
 void UMovieScenePropertySystem::OnLink()
@@ -17,10 +23,30 @@ void UMovieScenePropertySystem::OnLink()
 	using namespace UE::MovieScene;
 
 	// Never apply properties during evaluation. This code is necessary if derived types do support interrogation.
-	if (!EnumHasAnyFlags(Linker->GetSystemContext(), EEntitySystemContext::Interrogation))
+	InstantiatorSystem = Linker->LinkSystemIfAllowed<UMovieScenePropertyInstantiatorSystem>();
+	if (InstantiatorSystem)
 	{
-		InstantiatorSystem = Linker->LinkSystem<UMovieScenePropertyInstantiatorSystem>();
 		Linker->SystemGraph.AddReference(this, InstantiatorSystem);
+	}
+}
+
+void UMovieScenePropertySystem::OnSchedulePersistentTasks(UE::MovieScene::IEntitySystemScheduler* TaskScheduler)
+{
+	using namespace UE::MovieScene;
+
+	// Never apply properties during evaluation. This code is necessary if derived types do support interrogation.
+	if (!InstantiatorSystem)
+	{
+		return;
+	}
+
+	FPropertyStats Stats = InstantiatorSystem->GetStatsForProperty(CompositePropertyID);
+	if (Stats.NumProperties > 0)
+	{
+		const FPropertyRegistry&   PropertyRegistry = FBuiltInComponentTypes::Get()->PropertyRegistry;
+		const FPropertyDefinition& Definition       = PropertyRegistry.GetDefinition(CompositePropertyID);
+
+		Definition.Handler->ScheduleSetterTasks(Definition, PropertyRegistry.GetComposites(Definition), Stats, TaskScheduler, Linker);
 	}
 }
 
@@ -29,7 +55,7 @@ void UMovieScenePropertySystem::OnRun(FSystemTaskPrerequisites& InPrerequisites,
 	using namespace UE::MovieScene;
 
 	// Never apply properties during evaluation. This code is necessary if derived types do support interrogation.
-	if (EnumHasAnyFlags(Linker->GetSystemContext(), EEntitySystemContext::Interrogation))
+	if (!InstantiatorSystem)
 	{
 		return;
 	}
@@ -62,11 +88,13 @@ void UMovieScenePropertySystem::SavePreAnimatedState(const FPreAnimationParamete
 
 	PreAnimatedStorageID = PreAnimatedStorage->GetStorageType();
 
-	FComponentMask ComponentMask({ Definition.PropertyType });
+	FComponentMask IncludeMask({ Definition.PropertyType });
 	if (!InParameters.CacheExtension->AreEntriesInvalidated())
 	{
-		ComponentMask.Set(BuiltInComponents->Tags.NeedsLink);
+		IncludeMask.Set(BuiltInComponents->Tags.NeedsLink);
 	}
+
+	FComponentMask ExcludeMask({ BuiltInComponents->Tags.NeedsUnlink, BuiltInComponents->Tags.Finished, BuiltInComponents->Tags.Ignored });
 
 	if (IPreAnimatedObjectEntityStorage* ObjectStorage = PreAnimatedStorage->AsObjectStorage())
 	{
@@ -74,9 +102,10 @@ void UMovieScenePropertySystem::SavePreAnimatedState(const FPreAnimationParamete
 		.ReadEntityIDs()
 		.Read(BuiltInComponents->RootInstanceHandle)
 		.Read(BuiltInComponents->BoundObject)
-		.FilterAll(ComponentMask)
+		.FilterAll(IncludeMask)
+		.FilterNone(ExcludeMask)
 		.Iterate_PerAllocation(&Linker->EntityManager,
-			[ObjectStorage](FEntityAllocationIteratorItem Item, TRead<FMovieSceneEntityID> EntityIDs, TRead<FInstanceHandle> RootInstanceHandles, TRead<UObject*> BoundObjects)
+			[ObjectStorage](FEntityAllocationIteratorItem Item, TRead<FMovieSceneEntityID> EntityIDs, TRead<FRootInstanceHandle> RootInstanceHandles, TRead<UObject*> BoundObjects)
 			{
 				ObjectStorage->BeginTrackingEntities(Item, EntityIDs, RootInstanceHandles, BoundObjects);
 			}
@@ -84,7 +113,8 @@ void UMovieScenePropertySystem::SavePreAnimatedState(const FPreAnimationParamete
 
 		FEntityTaskBuilder()
 		.Read(BuiltInComponents->BoundObject)
-		.FilterAll(ComponentMask)
+		.FilterAll(IncludeMask)
+		.FilterNone(ExcludeMask)
 		.Iterate_PerAllocation(&Linker->EntityManager,
 			[ObjectStorage](FEntityAllocationIteratorItem Item, TRead<UObject*> Objects)
 			{
@@ -100,9 +130,10 @@ void UMovieScenePropertySystem::SavePreAnimatedState(const FPreAnimationParamete
 		.Read(BuiltInComponents->RootInstanceHandle)
 		.Read(BuiltInComponents->BoundObject)
 		.Read(BuiltInComponents->PropertyBinding)
-		.FilterAll(ComponentMask)
+		.FilterAll(IncludeMask)
+		.FilterNone(ExcludeMask)
 		.Iterate_PerAllocation(&Linker->EntityManager,
-			[PropertyStorage](FEntityAllocationIteratorItem Item, TRead<FMovieSceneEntityID> EntityIDs, TRead<FInstanceHandle> RootInstanceHandles, TRead<UObject*> BoundObjects, TRead<FMovieScenePropertyBinding> PropertyBindings)
+			[PropertyStorage](FEntityAllocationIteratorItem Item, TRead<FMovieSceneEntityID> EntityIDs, TRead<FRootInstanceHandle> RootInstanceHandles, TRead<UObject*> BoundObjects, TRead<FMovieScenePropertyBinding> PropertyBindings)
 			{
 				PropertyStorage->BeginTrackingEntities(Item, EntityIDs, RootInstanceHandles, BoundObjects, PropertyBindings);
 			}
@@ -112,7 +143,8 @@ void UMovieScenePropertySystem::SavePreAnimatedState(const FPreAnimationParamete
 		.Read(BuiltInComponents->BoundObject)
 		.Read(BuiltInComponents->PropertyBinding)
 		.ReadOneOf(BuiltInComponents->CustomPropertyIndex, BuiltInComponents->FastPropertyOffset, BuiltInComponents->SlowProperty)
-		.FilterAll(ComponentMask)
+		.FilterAll(IncludeMask)
+		.FilterNone(ExcludeMask)
 		.Iterate_PerAllocation(&Linker->EntityManager,
 			[PropertyStorage](FEntityAllocationIteratorItem Item, TRead<UObject*> Objects, TRead<FMovieScenePropertyBinding> PropertyBindings, FThreeWayAccessor ResolvedProperties)
 			{
@@ -125,18 +157,6 @@ void UMovieScenePropertySystem::SavePreAnimatedState(const FPreAnimationParamete
 
 void UMovieScenePropertySystem::RestorePreAnimatedState(const FPreAnimationParameters& InParameters)
 {
-	using namespace UE::MovieScene;
 
-	FPreAnimatedEntityCaptureSource* EntityMetaData = InParameters.CacheExtension->GetEntityMetaData();
-
-	if (EntityMetaData)
-	{
-		FBuiltInComponentTypes* BuiltInComponents = FBuiltInComponentTypes::Get();
-		const FPropertyDefinition& Definition = BuiltInComponents->PropertyRegistry.GetDefinition(CompositePropertyID);
-
-		FEntityTaskBuilder()
-		.ReadEntityIDs()
-		.FilterAll({ BuiltInComponents->BoundObject, Definition.PropertyType, BuiltInComponents->Tags.NeedsUnlink })
-		.Iterate_PerEntity(&Linker->EntityManager, [this, EntityMetaData](FMovieSceneEntityID EntityID) { EntityMetaData->StopTrackingEntity(EntityID, this->PreAnimatedStorageID); });
-	}
 }
+

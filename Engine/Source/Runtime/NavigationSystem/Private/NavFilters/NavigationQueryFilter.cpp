@@ -7,6 +7,8 @@
 #include "NavigationData.h"
 #include "EngineGlobals.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(NavigationQueryFilter)
+
 //----------------------------------------------------------------------//
 // UNavigationQueryFilter
 //----------------------------------------------------------------------//
@@ -68,18 +70,18 @@ void UNavigationQueryFilter::InitializeFilter(const ANavigationData& NavData, co
 
 		if (AreaData.bIsExcluded)
 		{
-			Filter.SetExcludedArea(AreaId);
+			Filter.SetExcludedArea(IntCastChecked<uint8>(AreaId));
 		}
 		else
 		{
 			if (AreaData.bOverrideTravelCost)
 			{
-				Filter.SetAreaCost(AreaId, FMath::Max(1.0f, AreaData.TravelCostOverride));
+				Filter.SetAreaCost(IntCastChecked<uint8>(AreaId), FMath::Max(1.0f, AreaData.TravelCostOverride));
 			}
 
 			if (AreaData.bOverrideEnteringCost)
 			{
-				Filter.SetFixedAreaEnteringCost(AreaId, FMath::Max(0.0f, AreaData.EnteringCostOverride));
+				Filter.SetFixedAreaEnteringCost(IntCastChecked<uint8>(AreaId), FMath::Max(0.0f, AreaData.EnteringCostOverride));
 			}
 		}
 	}
@@ -188,3 +190,4 @@ void UNavigationQueryFilter::PostEditChangeProperty(FPropertyChangedEvent& Prope
 	}
 }
 #endif
+

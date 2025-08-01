@@ -8,69 +8,52 @@
 #include "SceneRendering.h"
 #include "LightSceneInfo.h"
 #include "RayTracingDefinitions.h"
+#include "RayTracingTypes.h"
 #include "Containers/DynamicRHIResourceArray.h"
 
 #if RHI_RAYTRACING
 
-BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FRaytracingLightDataPacked, RENDERER_API)
-	SHADER_PARAMETER(uint32, Count)
-	SHADER_PARAMETER(float, IESLightProfileInvCount)
-	SHADER_PARAMETER(uint32, CellCount)
-	SHADER_PARAMETER(float, CellScale)
-	SHADER_PARAMETER_TEXTURE(Texture2D, LTCMatTexture)
-	SHADER_PARAMETER_SAMPLER(SamplerState, LTCMatSampler)
-	SHADER_PARAMETER_TEXTURE(Texture2D, LTCAmpTexture)
-	SHADER_PARAMETER_SAMPLER(SamplerState, LTCAmpSampler)
-	SHADER_PARAMETER_TEXTURE(Texture2D, RectLightTexture0)
-	SHADER_PARAMETER_TEXTURE(Texture2D, RectLightTexture1)
-	SHADER_PARAMETER_TEXTURE(Texture2D, RectLightTexture2)
-	SHADER_PARAMETER_TEXTURE(Texture2D, RectLightTexture3)
-	SHADER_PARAMETER_TEXTURE(Texture2D, RectLightTexture4)
-	SHADER_PARAMETER_TEXTURE(Texture2D, RectLightTexture5)
-	SHADER_PARAMETER_TEXTURE(Texture2D, RectLightTexture6)
-	SHADER_PARAMETER_TEXTURE(Texture2D, RectLightTexture7)
-	SHADER_PARAMETER_SAMPLER(SamplerState, IESLightProfileTextureSampler)
-	SHADER_PARAMETER_TEXTURE(Texture2D, IESLightProfileTexture)
-	SHADER_PARAMETER_SRV(Texture2D, SSProfilesTexture)
-	SHADER_PARAMETER_SRV(StructuredBuffer<uint4>, LightDataBuffer)
-	SHADER_PARAMETER_SRV(Buffer<uint>, LightIndices)
-	SHADER_PARAMETER_SRV(StructuredBuffer<uint4>, LightCullingVolume)
+FRHIRayTracingShader* GetRayTracingLightingMissShader(const FGlobalShaderMap* ShaderMap);
+
+// This struct holds a light grid and list of raytracing lights for both building and rendering
+BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FRayTracingLightGrid, )
+	SHADER_PARAMETER(uint32, SceneLightCount)
+	SHADER_PARAMETER(uint32, SceneInfiniteLightCount)
+	SHADER_PARAMETER(FVector3f, SceneLightsTranslatedBoundMin)
+	SHADER_PARAMETER(FVector3f, SceneLightsTranslatedBoundMax)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRTLightingData>, SceneLights)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, LightGrid)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, LightGridData)
+	SHADER_PARAMETER(unsigned, LightGridResolution)
+	SHADER_PARAMETER(unsigned, LightGridMaxCount)
+	SHADER_PARAMETER(int, LightGridAxis)
 END_GLOBAL_SHADER_PARAMETER_STRUCT()
 
-// Must match struct definition in RayTacedLightingCommon.ush
-struct FRTLightingData
-{
-	int32 Type;
-	int32 LightProfileIndex;
-	int32 RectLightTextureIndex;
+using FRayTracingLightFunctionMap = TMap<const FLightSceneInfo*, int32>;
 
-	// Force alignment before next vector
-	int32 Pad;
+// Register this in the graph builder so we can easily move it around and access it from both the main rendering thread and RDG passes
+RDG_REGISTER_BLACKBOARD_STRUCT(FRayTracingLightFunctionMap)
 
-	float LightPosition[3];
-	float InvRadius;
-	float Direction[3];
-	float FalloffExponent;
-	float LightColor[3];
-	float SpecularScale;
-	float Tangent[3];
-	float SourceRadius;
-	float SpotAngles[2];
-	float SourceLength;
-	float SoftSourceRadius;
-	float DistanceFadeMAD[2];
-	float RectLightBarnCosAngle;
-	float RectLightBarnLength;
+FRayTracingLightFunctionMap GatherLightFunctionLights(FScene* Scene, const FEngineShowFlags EngineShowFlags, ERHIFeatureLevel::Type InFeatureLevel);
+FRayTracingLightFunctionMap GatherLightFunctionLightsPathTracing(FScene* Scene, const FEngineShowFlags EngineShowFlags, ERHIFeatureLevel::Type InFeatureLevel);
 
-	// Align struct to 128 bytes to better match cache lines
-	float Dummy[4];
-};
+TRDGUniformBufferRef<FRayTracingLightGrid> CreateRayTracingLightData(
+	FRDGBuilder& GraphBuilder,
+	const FScene* Scene,
+	const FSceneView& View,
+	FGlobalShaderMap* ShaderMap,
+	bool bBuildLightGrid);
 
-static_assert(sizeof(FRTLightingData) == 128, "Unexpected FRTLightingData size.");
+void BindLightFunctionShaders(
+	FRHICommandList& RHICmdList,
+	const FScene* Scene,
+	const FRayTracingLightFunctionMap* RayTracingLightFunctionMap,
+	const class FViewInfo& View);
 
-FRayTracingLightData CreateRayTracingLightData(
-	FRHICommandListImmediate& RHICmdList,
-	const TSparseArray<FLightSceneInfoCompact>& Lights,
-	const FViewInfo& View, EUniformBufferUsage Usage);
+void BindLightFunctionShadersPathTracing(
+	FRHICommandList& RHICmdList,
+	const FScene* Scene,
+	const FRayTracingLightFunctionMap* RayTracingLightFunctionMap,
+	const class FViewInfo& View);
 
 #endif

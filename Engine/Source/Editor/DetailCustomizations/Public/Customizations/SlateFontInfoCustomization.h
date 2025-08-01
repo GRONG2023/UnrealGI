@@ -2,13 +2,29 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
 #include "CoreMinimal.h"
-#include "Widgets/SWidget.h"
+#include "Delegates/Delegate.h"
+#include "HAL/PlatformCrt.h"
 #include "IPropertyTypeCustomization.h"
+#include "Internationalization/Text.h"
+#include "Misc/Optional.h"
+#include "Serialization/Archive.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
 #include "Widgets/Input/SComboBox.h"
+#include "Widgets/SWidget.h"
 
-struct FAssetData;
 class IPropertyHandle;
+class SWidget;
+struct FAssetData;
+struct FSlateFontInfo;
 
 /** Customize the appearance of an FSlateFontInfo */
 class DETAILCUSTOMIZATIONS_API FSlateFontInfoStructCustomization : public IPropertyTypeCustomization
@@ -21,6 +37,30 @@ public:
 	virtual void CustomizeChildren(TSharedRef<class IPropertyHandle> InStructPropertyHandle, class IDetailChildrenBuilder& InStructBuilder, IPropertyTypeCustomizationUtils& InStructCustomizationUtils) override;
 
 protected:
+	void AddFontSizeProperty(IDetailChildrenBuilder& InStructBuilder);
+	bool IsFontSizeEnabled() const;
+
+	/** @return The value or unset if properties with multiple values are viewed */
+	TOptional<float> OnFontSizeGetValue() const;
+	void OnFontSizeValueChanged(float NewDisplayValue);
+	void OnFontSizeValueCommitted(float NewDisplayValue, ETextCommit::Type CommitInfo);
+
+	/**
+	 * Called when the slider begins to move.  We create a transaction here to undo the property
+	 */
+	void OnFontSizeBeginSliderMovement();
+
+	/**
+	 * Called when the slider stops moving.  We end the previously created transaction
+	 */
+	void OnFontSizeEndSliderMovement(float NewDisplayValue);
+
+	/** @return a dynamic text explaining what the size does and showing the current Font DPI setting */
+	FText GetFontSizeTooltipText() const;
+
+	static float ConvertFontSizeFromNativeToDisplay(float FontSize);
+	static float ConvertFontSizeFromDisplayToNative(float FontSize);
+
 	/** Called to filter out invalid font assets */
 	static bool OnFilterFontAsset(const FAssetData& InAssetData);
 
@@ -66,4 +106,11 @@ protected:
 
 	/** Source data for the font entry combo widget */
 	TArray<TSharedPtr<FName>> FontEntryComboData;
+
+	/** True if the slider is being used to change the value of the property */
+	bool bIsUsingSlider = false;
+
+	/** When using the slider, what was the last committed value */
+	float LastSliderFontSizeCommittedValue = 0.0f;
+
 };

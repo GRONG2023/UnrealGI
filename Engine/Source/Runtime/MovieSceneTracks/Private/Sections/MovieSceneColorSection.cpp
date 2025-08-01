@@ -9,27 +9,33 @@
 #include "UObject/SequencerObjectVersion.h"
 #include "UObject/StructOnScope.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneColorSection)
+
 #if WITH_EDITOR
 struct FColorSectionEditorData
 {
 	FColorSectionEditorData()
 	{
 		MetaData[0].SetIdentifiers("Color.R", FCommonChannelData::ChannelR);
+		MetaData[0].SubPropertyPath = TEXT("R");
 		MetaData[0].SortOrder = 0;
 		MetaData[0].Color = FCommonChannelData::RedChannelColor;
 		MetaData[0].bCanCollapseToTrack = false;
 
 		MetaData[1].SetIdentifiers("Color.G", FCommonChannelData::ChannelG);
+		MetaData[1].SubPropertyPath = TEXT("G");
 		MetaData[1].SortOrder = 1;
 		MetaData[1].Color = FCommonChannelData::GreenChannelColor;
 		MetaData[1].bCanCollapseToTrack = false;
 
 		MetaData[2].SetIdentifiers("Color.B", FCommonChannelData::ChannelB);
+		MetaData[2].SubPropertyPath = TEXT("B");
 		MetaData[2].SortOrder = 2;
 		MetaData[2].Color = FCommonChannelData::BlueChannelColor;
 		MetaData[2].bCanCollapseToTrack = false;
 
 		MetaData[3].SetIdentifiers("Color.A", FCommonChannelData::ChannelA);
+		MetaData[3].SubPropertyPath = TEXT("A");
 		MetaData[3].SortOrder = 3;
 		MetaData[3].bCanCollapseToTrack = false;
 
@@ -176,3 +182,4 @@ void UMovieSceneColorSection::ImportEntityImpl(UMovieSceneEntitySystemLinker* En
 		.AddConditional(Components->FloatChannel[3], &AlphaCurve, AlphaCurve.HasAnyData())
 		.Commit(this, Params, OutImportedEntity);
 }
+

@@ -2,9 +2,9 @@
 #pragma once
 
 #include "Chaos/Array.h"
-#include "Chaos/ConstraintHandle.h"
+#include "Chaos/Collision/PBDCollisionSolver.h"
+#include "Chaos/Evolution/IndexedConstraintContainer.h"
 #include "Chaos/ParticleHandle.h"
-#include "Chaos/PBDConstraintContainer.h"
 #include "Chaos/PBDSuspensionConstraintTypes.h"
 #include "Chaos/PBDSuspensionConstraintData.h"
 #include "Chaos/Particle/ParticleUtilities.h"
@@ -14,44 +14,57 @@
 
 namespace Chaos
 {
+	class FSolverBody;
 	class FPBDSuspensionConstraints;
 
-	class CHAOS_API FPBDSuspensionConstraintHandle : public TContainerConstraintHandle<FPBDSuspensionConstraints>
+	namespace Private
+	{
+		class FPBDCollisionSolver;
+		class FPBDCollisionSolverManifoldPoint;
+	}
+
+	class FPBDSuspensionConstraintHandle final : public TIndexedContainerConstraintHandle<FPBDSuspensionConstraints>
 	{
 	public:
-		using Base = TContainerConstraintHandle<FPBDSuspensionConstraints>;
+		using Base = TIndexedContainerConstraintHandle<FPBDSuspensionConstraints>;
 		using FConstraintContainer = FPBDSuspensionConstraints;
 
 		FPBDSuspensionConstraintHandle() {}
 		FPBDSuspensionConstraintHandle(FConstraintContainer* InConstraintContainer, int32 InConstraintIndex);
-		static FConstraintHandle::EType StaticType() { return FConstraintHandle::EType::Suspension; }
 
-		FPBDSuspensionSettings& GetSettings();
-		const FPBDSuspensionSettings& GetSettings() const;
+		CHAOS_API FPBDSuspensionSettings& GetSettings();
+		CHAOS_API const FPBDSuspensionSettings& GetSettings() const;
 
-		void SetSettings(const FPBDSuspensionSettings& Settings);
+		CHAOS_API void SetSettings(const FPBDSuspensionSettings& Settings);
 
-		TVec2<FGeometryParticleHandle*> GetConstrainedParticles() const;
+		CHAOS_API virtual FParticlePair GetConstrainedParticles() const override final;
 
+		static const FConstraintHandleTypeID& StaticType()
+		{
+			static FConstraintHandleTypeID STypeID(TEXT("FSuspensionConstraintHandle"), &FIndexedConstraintHandle::StaticType());
+			return STypeID;
+		}
 	protected:
 		using Base::ConstraintIndex;
-		using Base::ConstraintContainer;
+		using Base::ConcreteContainer;
 	};
 
-	class CHAOS_API FPBDSuspensionConstraints : public FPBDConstraintContainer
+	class FPBDSuspensionConstraints : public TPBDIndexedConstraintContainer<FPBDSuspensionConstraints>
 	{
 	public:
-		using Base = FPBDConstraintContainer;
+		using Base = TPBDIndexedConstraintContainer<FPBDSuspensionConstraints>;
 		using FConstraintContainerHandle = FPBDSuspensionConstraintHandle;
 		using FConstraintHandleAllocator = TConstraintHandleAllocator<FPBDSuspensionConstraints>;
 		using FHandles = TArray<FConstraintContainerHandle*>;
 
 		FPBDSuspensionConstraints(const FPBDSuspensionSolverSettings& InSolverSettings = FPBDSuspensionSolverSettings())
-			: SolverSettings(InSolverSettings)
+			: TPBDIndexedConstraintContainer<FPBDSuspensionConstraints>(FConstraintContainerHandle::StaticType())
+			, SolverSettings(InSolverSettings)
 		{}
 
 		FPBDSuspensionConstraints(TArray<FVec3>&& Locations, TArray<TGeometryParticleHandle<FReal,3>*>&& InConstrainedParticles, TArray<FVec3>&& InLocalOffset, TArray<FPBDSuspensionSettings>&& InConstraintSettings)
-			: ConstrainedParticles(MoveTemp(InConstrainedParticles)), SuspensionLocalOffset(MoveTemp(InLocalOffset)), ConstraintSettings(MoveTemp(InConstraintSettings))
+			: TPBDIndexedConstraintContainer<FPBDSuspensionConstraints>(FConstraintContainerHandle::StaticType())
+			, ConstrainedParticles(MoveTemp(InConstrainedParticles)), SuspensionLocalOffset(MoveTemp(InLocalOffset)), ConstraintSettings(MoveTemp(InConstraintSettings))
 		{
 			if (ConstrainedParticles.Num() > 0)
 			{
@@ -80,26 +93,68 @@ namespace Chaos
 		/**
 		 * Add a constraint.
 		 */
-		FConstraintContainerHandle* AddConstraint(TGeometryParticleHandle<FReal, 3>* Particle, const FVec3& InConstraintFrame, const FPBDSuspensionSettings& InConstraintSettings);
+		CHAOS_API FConstraintContainerHandle* AddConstraint(TGeometryParticleHandle<FReal, 3>* Particle, const FVec3& InConstraintFrame, const FPBDSuspensionSettings& InConstraintSettings);
 
 		/**
 		 * Remove a constraint.
 		 */
-		void RemoveConstraint(int ConstraintIndex);
+		CHAOS_API void RemoveConstraint(int ConstraintIndex);
 
 
-		/**
-		 * Disabled the specified constraint.
-		 */
-		void DisableConstraints(const TSet<TGeometryParticleHandle<FReal, 3>*>& RemovedParticles)
+		/*
+		* Disconnect the constraints from the attached input particles.
+		* This will set the constrained Particle elements to nullptr and
+		* set the Enable flag to false.
+		*
+		* The constraint is unuseable at this point and pending deletion.
+		*/
+
+		void DisconnectConstraints(const TSet<TGeometryParticleHandle<FReal, 3>*>& RemovedParticles)
 		{
-			for (TGeometryParticleHandle<FReal, 3>* RemovedParticle : RemovedParticles)
+			for (FGeometryParticleHandle* RemovedParticle : RemovedParticles)
 			{
 				for (FConstraintHandle* ConstraintHandle : RemovedParticle->ParticleConstraints())
 				{
-					ConstraintHandle->SetEnabled(false); // constraint lifespan is managed by the proxy
+					if (FPBDSuspensionConstraintHandle* SuspensionHandle = ConstraintHandle->As<FPBDSuspensionConstraintHandle>())
+					{
+						SuspensionHandle->SetEnabled(false); // constraint lifespan is managed by the proxy
+
+						int ConstraintIndex = SuspensionHandle->GetConstraintIndex();
+						if (ConstraintIndex != INDEX_NONE)
+						{
+							if (ConstrainedParticles[ConstraintIndex] == RemovedParticle)
+							{
+								ConstrainedParticles[ConstraintIndex] = nullptr;
+							}
+						}
+					}
 				}
 			}
+		}
+
+		bool IsConstraintEnabled(int32 ConstraintIndex) const
+		{
+			return ConstraintEnabledStates[ConstraintIndex];
+		}
+
+		void SetConstraintEnabled(int32 ConstraintIndex, bool bEnabled)
+		{
+			const FGenericParticleHandle Particle = FGenericParticleHandle(ConstrainedParticles[ConstraintIndex]);
+
+			if (bEnabled)
+			{
+				// only enable constraint if the particle is valid and not disabled
+				if (Particle->Handle() != nullptr && !Particle->Disabled())
+				{
+					ConstraintEnabledStates[ConstraintIndex] = true;
+				}
+			}
+			else
+			{
+				// desirable to allow disabling no matter what state the endpoint
+				ConstraintEnabledStates[ConstraintIndex] = false;
+			}
+
 		}
 
 		//
@@ -120,6 +175,15 @@ namespace Chaos
 			ConstraintSettings[ConstraintIndex] = Settings;
 		}
 
+		void SetTarget(int32 ConstraintIndex, const FVector& TargetPos)
+		{
+			ConstraintSettings[ConstraintIndex].Target = TargetPos;
+		}
+
+		const FPBDSuspensionResults& GetResults(int32 ConstraintIndex) const
+		{
+			return ConstraintResults[ConstraintIndex];
+		}
 
 		FHandles& GetConstraintHandles()
 		{
@@ -161,45 +225,64 @@ namespace Chaos
 			SuspensionLocalOffset[ConstraintIndex] = Position;
 		}
 
+		//
+		// FConstraintContainer Implementation
+		//
+		virtual int32 GetNumConstraints() const override final { return NumConstraints(); }
+		virtual void ResetConstraints() override final {}
+		CHAOS_API virtual void AddConstraintsToGraph(Private::FPBDIslandManager& IslandManager) override final;
+		virtual void PrepareTick() override final {}
+		virtual void UnprepareTick() override final {}
 
 		//
-		// Island Rule API
+		// TSimpleConstraintContainerSolver API - used by RBAN
 		//
+		CHAOS_API void AddBodies(FSolverBodyContainer& SolverBodyContainer);
+		CHAOS_API void GatherInput(const FReal Dt);
+		CHAOS_API void ScatterOutput(const FReal Dt);
+		CHAOS_API void ApplyPositionConstraints(const FReal Dt, const int32 It, const int32 NumIts);
+		CHAOS_API void ApplyVelocityConstraints(const FReal Dt, const int32 It, const int32 NumIts);
+		void ApplyProjectionConstraints(const FReal Dt, const int32 It, const int32 NumIts) {}
 
-		void PrepareTick() {}
+		//
+		// TIndexedConstraintContainerSolver API - used by World solvers
+		//
+		CHAOS_API void AddBodies(const TArrayView<int32>& ConstraintIndices, FSolverBodyContainer& SolverBodyContainer);
+		CHAOS_API void GatherInput(const TArrayView<int32>& ConstraintIndices, const FReal Dt);
+		CHAOS_API void ScatterOutput(const TArrayView<int32>& ConstraintIndices, const FReal Dt);
+		CHAOS_API void ApplyPositionConstraints(const TArrayView<int32>& ConstraintIndices, const FReal Dt, const int32 It, const int32 NumIts);
+		CHAOS_API void ApplyVelocityConstraints(const TArrayView<int32>& ConstraintIndices, const FReal Dt, const int32 It, const int32 NumIts);
+		void ApplyProjectionConstraints(const TArrayView<int32>& ConstraintIndices, const FReal Dt, const int32 It, const int32 NumIts) {}
 
-		void UnprepareTick() {}
-
-		void PrepareIteration(FReal Dt) {}
-
-		void UnprepareIteration(FReal Dt) {}
-
-		void UpdatePositionBasedState(const FReal Dt) {}
-
-		bool Apply(const FReal Dt, const TArray<FConstraintContainerHandle*>& ConstraintHandles, const int32 It, const int32 NumIts) const;
-
-		bool ApplyPushOut(const FReal Dt, const TArray<FConstraintContainerHandle*>& InConstraintIndices, const int32 It, const int32 NumIts) const
-		{
-			return false;
-		}
 
 	protected:
 		using Base::GetConstraintIndex;
 		using Base::SetConstraintIndex;
 
 	private:
-
-		void ApplySingle(const FReal Dt, int32 ConstraintIndex) const;
+		CHAOS_API void AddBodies(const int32 ConstraintIndex, FSolverBodyContainer& SolverBodyContainer);
+		CHAOS_API void GatherInput(const int32 ConstraintIndex, FReal Dt);
+		CHAOS_API void ScatterOutput(const int32 ConstraintIndex, FReal Dt);
+		CHAOS_API void ApplyPositionConstraint(const int32 ConstraintIndex, const FReal Dt, const int32 It, const int32 NumIts);
+		CHAOS_API void ApplyVelocityConstraint(const int32 ConstraintIndex, const FReal Dt, const int32 It, const int32 NumIts);
+		CHAOS_API void ApplySingle(int32 ConstraintIndex, const FReal Dt);
 		
-		void ApplyPositionConstraintSoft(const int ConstraintIndex, const FReal Dt, const bool bAccelerationMode) const;
 		FPBDSuspensionSolverSettings SolverSettings;
 
 		TArray<FGeometryParticleHandle*> ConstrainedParticles;
 		TArray<FVec3> SuspensionLocalOffset;
 		TArray<FPBDSuspensionSettings> ConstraintSettings;
+		TArray<FPBDSuspensionResults> ConstraintResults;
+		TArray<bool> ConstraintEnabledStates;
+
+		TArray<FSolverBody*> ConstraintSolverBodies;
 
 		FHandles Handles;
 		FConstraintHandleAllocator HandleAllocator;
+
+		TArray<Private::FPBDCollisionSolver> CollisionSolvers;
+		TArray<Private::FPBDCollisionSolverManifoldPoint> CollisionSolverManifoldPoints;
+		TArray<FSolverBody> StaticCollisionBodies;
 	};
 }
 

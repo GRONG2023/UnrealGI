@@ -6,6 +6,55 @@
 
 #include "Curves/CurveVector.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(CurveVector)
+
+FVector FRuntimeVectorCurve::GetValue(float InTime) const
+{
+	if (ExternalCurve)
+	{
+		return ExternalCurve->GetVectorValue(InTime);
+	}
+
+	FVector Result;
+	Result.X = VectorCurves[0].Eval(InTime);
+	Result.Y = VectorCurves[1].Eval(InTime);
+	Result.Z = VectorCurves[2].Eval(InTime);
+	return Result;
+}
+
+FRichCurve* FRuntimeVectorCurve::GetRichCurve(int32 Index)
+{
+	if (Index < 0 || Index >= 3)
+	{
+		return nullptr; 
+	}
+
+	if (ExternalCurve != nullptr)
+	{
+		return &(ExternalCurve->FloatCurves[Index]);
+	}
+	else
+	{
+		return &(VectorCurves[Index]);
+	}
+}
+
+const FRichCurve* FRuntimeVectorCurve::GetRichCurveConst(int32 Index) const
+{
+	if (Index < 0 || Index >= 3)
+	{
+		return nullptr; 
+	}
+	
+	if (ExternalCurve != nullptr)
+	{
+		return &(ExternalCurve->FloatCurves[Index]);
+	}
+	else
+	{
+		return &(VectorCurves[Index]);
+	}
+}
 
 UCurveVector::UCurveVector(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -54,4 +103,5 @@ bool UCurveVector::IsValidCurve( FRichCurveEditInfo CurveInfo )
 		CurveInfo.CurveToEdit == &FloatCurves[1] ||
 		CurveInfo.CurveToEdit == &FloatCurves[2];
 }
+
 

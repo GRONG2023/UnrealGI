@@ -18,13 +18,13 @@ struct FLiveLinkSubjectFrameData;
 struct FTimecode;
 class ULiveLinkSourceSettings;
 
-DECLARE_EVENT_OneParam(ILiveLinkClient, FOnLiveLinkSourceChangedDelegate, FGuid /*SourceGuid*/);
-DECLARE_EVENT_OneParam(ILiveLinkClient, FOnLiveLinkSubjectChangedDelegate, FLiveLinkSubjectKey /*SubjectKey*/);
-DECLARE_EVENT_OneParam(ILiveLinkClient, FOnLiveLinkSubjectStaticDataReceived, const FLiveLinkStaticDataStruct& /*InStaticData*/)
-DECLARE_EVENT_OneParam(ILiveLinkClient, FOnLiveLinkSubjectFrameDataReceived, const FLiveLinkFrameDataStruct& /*InFrameData*/)
-DECLARE_EVENT_ThreeParams(ILiveLinkClient, FOnLiveLinkSubjectStaticDataAdded, FLiveLinkSubjectKey /*InSubjectKey*/, TSubclassOf<ULiveLinkRole> /*SubjectRole*/, const FLiveLinkStaticDataStruct& /*InStaticData*/)
-DECLARE_EVENT_ThreeParams(ILiveLinkClient, FOnLiveLinkSubjectFrameDataAdded, FLiveLinkSubjectKey /*InSubjectKey*/, TSubclassOf<ULiveLinkRole> /*SubjectRole*/, const FLiveLinkFrameDataStruct& /*InFrameData*/)
-DECLARE_EVENT_FiveParams(ILiveLinkClient, FOnLiveLinkSubjectEvaluated, FLiveLinkSubjectKey /*InSubjectKey*/, TSubclassOf<ULiveLinkRole> /*RequestedRole*/, const FLiveLinkTime& /*RequestedTime*/, bool /*bResult*/, const FLiveLinkTime& /*EvaluatedFrameTime*/)
+DECLARE_TS_MULTICAST_DELEGATE_OneParam(FOnLiveLinkSourceChangedDelegate, FGuid /*SourceGuid*/);
+DECLARE_TS_MULTICAST_DELEGATE_OneParam(FOnLiveLinkSubjectChangedDelegate, FLiveLinkSubjectKey /*SubjectKey*/);
+DECLARE_TS_MULTICAST_DELEGATE_OneParam(FOnLiveLinkSubjectStaticDataReceived, const FLiveLinkStaticDataStruct& /*InStaticData*/)
+DECLARE_TS_MULTICAST_DELEGATE_OneParam(FOnLiveLinkSubjectFrameDataReceived, const FLiveLinkFrameDataStruct& /*InFrameData*/)
+DECLARE_TS_MULTICAST_DELEGATE_ThreeParams(FOnLiveLinkSubjectStaticDataAdded, FLiveLinkSubjectKey /*InSubjectKey*/, TSubclassOf<ULiveLinkRole> /*SubjectRole*/, const FLiveLinkStaticDataStruct& /*InStaticData*/)
+DECLARE_TS_MULTICAST_DELEGATE_ThreeParams(FOnLiveLinkSubjectFrameDataAdded, FLiveLinkSubjectKey /*InSubjectKey*/, TSubclassOf<ULiveLinkRole> /*SubjectRole*/, const FLiveLinkFrameDataStruct& /*InFrameData*/)
+DECLARE_TS_MULTICAST_DELEGATE_FiveParams(FOnLiveLinkSubjectEvaluated, FLiveLinkSubjectKey /*InSubjectKey*/, TSubclassOf<ULiveLinkRole> /*RequestedRole*/, const FLiveLinkTime& /*RequestedTime*/, bool /*bResult*/, const FLiveLinkTime& /*EvaluatedFrameTime*/)
 
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
 class ILiveLinkClient_Base_DEPRECATED : public IModularFeature
@@ -84,20 +84,24 @@ public:
 	UE_DEPRECATED(4.23, "ILiveLinkClient::GetAndFreeLastRecordedFrames is deprecated. Please register using RegisterForSubjectFrames to receive subject frames instead!")
 	virtual void GetAndFreeLastRecordedFrames(const FGuid& InHandlerGuid, FName SubjectName, TArray<FLiveLinkFrame> &OutFrames) {}
 
-	UE_DEPRECATED(4.23, "ILiveLinkClient::AddSourceToSubjectWhiteList is deprecated. Please register using SetSubjectEnabled to enabled a subject instead!")
-	virtual void AddSourceToSubjectWhiteList(FName SubjectName, FGuid SourceGuid) {}
-
-	UE_DEPRECATED(4.23, "ILiveLinkClient::RemoveSourceFromSubjectWhiteList is deprecated. Please register using SetSubjectEnabled to disable a subject instead!")
-	virtual void RemoveSourceFromSubjectWhiteList(FName SubjectName, FGuid SourceGuid) {}
-	
-	UE_DEPRECATED(4.23, "ILiveLinkClient::ClearSourceWhiteLists is deprecated. Please register using SetSubjectEnabled to disable a subject instead!")
-	virtual void ClearSourceWhiteLists() {}
-
 	UE_DEPRECATED(4.23, "ILiveLinkClient::RegisterSubjectsChangedHandle is deprecated. Please register using OnLiveLinkSubjectAdded and OnLiveLinkSubjectRemoved instead!")
 	virtual FDelegateHandle RegisterSubjectsChangedHandle(const FSimpleMulticastDelegate::FDelegate& SubjectsChanged) { return FDelegateHandle(); }
 
 	UE_DEPRECATED(4.23, "ILiveLinkClient::UnregisterSubjectsChangedHandle is deprecated. Please unregister using OnLiveLinkSubjectAdded and OnLiveLinkSubjectRemoved instead!")
 	virtual void UnregisterSubjectsChangedHandle(FDelegateHandle Handle) {}
+
+	UE_DEPRECATED(5.0, "ILiveLinkClient::GetSubjectRole is deprecated. Please use GetSubjectRole_AnyThread instead!")
+	virtual TSubclassOf<ULiveLinkRole> GetSubjectRole(const FLiveLinkSubjectKey& SubjectKey) const = 0;
+
+	UE_DEPRECATED(5.0, "ILiveLinkClient::GetSubjectRole is deprecated. Please use GetSubjectRole_AnyThread instead!")
+	virtual TSubclassOf<ULiveLinkRole> GetSubjectRole(FLiveLinkSubjectName SubjectName) const = 0;
+
+	UE_DEPRECATED(5.0, "ILiveLinkClient::DoesSubjectSupportsRole is deprecated. Please use DoesSubjectSupportsRole_AnyThread instead!")
+	virtual bool DoesSubjectSupportsRole(const FLiveLinkSubjectKey& SubjectKey, TSubclassOf<ULiveLinkRole> SupportedRole) const = 0;
+
+	UE_DEPRECATED(5.0, "ILiveLinkClient::DoesSubjectSupportsRole is deprecated. Please use DoesSubjectSupportsRole_AnyThread instead!")
+	virtual bool DoesSubjectSupportsRole(FLiveLinkSubjectName SubjectName, TSubclassOf<ULiveLinkRole> SupportedRole) const = 0;
+
 };
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
@@ -154,6 +158,15 @@ public:
 
 	/** Get the type of a source */
 	virtual FText GetSourceType(FGuid SourceGuid) const = 0;
+	
+	/** Get the status of a source */
+	virtual FText GetSourceStatus(FGuid EntryGuid) const = 0;
+
+	/** Get the machine name of the source. */
+	virtual FText GetSourceMachineName(FGuid EntryGuid) const = 0;
+
+	/** Returns whether the Source is connected to its data provider and can still push valid data. */
+	virtual bool IsSourceStillValid(FGuid EntryGuid) const = 0;
 
 	/** Push static data for a specific subject for a certain role. This will clear all buffered frames */
 	virtual void PushSubjectStaticData_AnyThread(const FLiveLinkSubjectKey& SubjectKey, TSubclassOf<ULiveLinkRole> Role, FLiveLinkStaticDataStruct&& StaticData) = 0;
@@ -181,6 +194,18 @@ public:
 
 	/** Clear all subjects frames */
 	virtual void ClearAllSubjectsFrames_AnyThread() = 0;
+
+	/** Get the role of a subject from a specific source */
+	virtual TSubclassOf<ULiveLinkRole> GetSubjectRole_AnyThread(const FLiveLinkSubjectKey& SubjectKey) const = 0;
+
+	/** Get the role of the subject with this name */
+	virtual TSubclassOf<ULiveLinkRole> GetSubjectRole_AnyThread(FLiveLinkSubjectName SubjectName) const = 0;
+
+	/** Whether a subject support a particular role, either directly or through a translator */
+	virtual bool DoesSubjectSupportsRole_AnyThread(const FLiveLinkSubjectKey& SubjectKey, TSubclassOf<ULiveLinkRole> SupportedRole) const = 0;
+
+	/** Whether a subject support a particular role, either directly or through a translator */
+	virtual bool DoesSubjectSupportsRole_AnyThread(FLiveLinkSubjectName SubjectName, TSubclassOf<ULiveLinkRole> SupportedRole) const = 0;
 
 	/** Get the subject preset from the live link client. The settings will be duplicated into DuplicatedObjectOuter. */
 	virtual FLiveLinkSubjectPreset GetSubjectPreset(const FLiveLinkSubjectKey& SubjectKey, UObject* DuplicatedObjectOuter) const = 0;
@@ -228,23 +253,11 @@ public:
 	/** Whether the subject key points to a virtual subject */
 	virtual bool IsVirtualSubject(const FLiveLinkSubjectKey& SubjectKey) const = 0;
 
-	/** Get the role of a subject from a specific source */
-	virtual TSubclassOf<ULiveLinkRole> GetSubjectRole(const FLiveLinkSubjectKey& SubjectKey) const = 0;
-
-	/** Get the role of the subject with this name */
-	virtual TSubclassOf<ULiveLinkRole> GetSubjectRole(FLiveLinkSubjectName SubjectName) const = 0;
-
 	/** Get a list of name of subjects supporting a certain role */
 	virtual TArray<FLiveLinkSubjectKey> GetSubjectsSupportingRole(TSubclassOf<ULiveLinkRole> SupportedRole, bool bIncludeDisabledSubject, bool bIncludeVirtualSubject) const = 0;
 
-	/** Whether a subject support a particular role, either directly or through a translator */
-	virtual bool DoesSubjectSupportsRole(const FLiveLinkSubjectKey& SubjectKey, TSubclassOf<ULiveLinkRole> SupportedRole) const = 0;
-
-	/** Whether a subject support a particular role, either directly or through a translator */
-	virtual bool DoesSubjectSupportsRole(FLiveLinkSubjectName SubjectName, TSubclassOf<ULiveLinkRole> SupportedRole) const = 0;
-
 	/**
-	 * Get the time of all the frames for a specific source.
+	 * Get the time of all the frames for a specific subject, including computed offsets.
 	 * @note Use for debugging purposes.
 	 */
 	virtual TArray<FLiveLinkTime> GetSubjectFrameTimes(const FLiveLinkSubjectKey& SubjectKey) const = 0;
@@ -255,7 +268,7 @@ public:
 	virtual ULiveLinkSourceSettings* GetSourceSettings(const FGuid& SourceKey) const = 0;
 
 	/**
-	 * Get the time of all the frames for a source.
+	 * Get the time of all the frames for a specific subject, including computed offsets.
 	 * @note Use for debugging purposes.
 	 */
 	virtual TArray<FLiveLinkTime> GetSubjectFrameTimes(FLiveLinkSubjectName SubjectName) const = 0;

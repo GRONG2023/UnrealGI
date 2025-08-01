@@ -29,7 +29,7 @@ public:
 
 	void PushTriangle(float InAera, float InUVArea)
 	{
-		if (InAera > SMALL_NUMBER && InUVArea > SMALL_NUMBER)
+		if (InAera > UE_SMALL_NUMBER && InUVArea > UE_SMALL_NUMBER)
 		{
 			Elements.Add(FElementInfo(FMath::Sqrt(InAera), FMath::Sqrt(InAera / InUVArea)));
 		}
@@ -61,15 +61,15 @@ public:
 
 		AccumulateDensity(WeightedUVDensity, Weight, DiscardPercentage);
 
-		return (Weight > SMALL_NUMBER) ? (WeightedUVDensity / Weight) : 0;
+		return (Weight > UE_SMALL_NUMBER) ? (WeightedUVDensity / Weight) : 0;
 	}
 
 	FORCEINLINE_DEBUGGABLE 
-	static float GetTriangleAera(const FVector& Pos0, const FVector& Pos1, const FVector& Pos2)
+	static float GetTriangleAera(const FVector3f& Pos0, const FVector3f& Pos1, const FVector3f& Pos2)
 	{
-		FVector P01 = Pos1 - Pos0;
-		FVector P02 = Pos2 - Pos0;
-		return FVector::CrossProduct(P01, P02).Size();
+		FVector3f P01 = Pos1 - Pos0;
+		FVector3f P02 = Pos2 - Pos0;
+		return FVector3f::CrossProduct(P01, P02).Size();
 	}
 
 	FORCEINLINE_DEBUGGABLE 

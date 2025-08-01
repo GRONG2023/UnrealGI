@@ -14,17 +14,17 @@ DECLARE_CYCLE_STAT_EXTERN(TEXT("Submix EQ"), STAT_AudioMixerSubmixEQ, STATGROUP_
 
 // A multiband EQ submix effect.
 USTRUCT(BlueprintType)
-struct AUDIOMIXER_API FSubmixEffectEQBand
+struct FSubmixEffectEQBand
 {
 	GENERATED_USTRUCT_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SubmixEffect|Preset", meta = (ClampMin = "0.0", ClampMax = "20000.0", UIMin = "0.0", UIMax = "15000.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SubmixEffect|Preset", meta = (ClampMin = "20.0", ClampMax = "20000.0", UIMin = "20.0", UIMax = "15000.0"))
 	float Frequency;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SubmixEffect|Preset", meta = (ClampMin = "0.0", ClampMax = "10.0", UIMin = "0.0", UIMax = "10.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SubmixEffect|Preset", meta = (ClampMin = "0.1", ClampMax = "2.0", UIMin = "0.1", UIMax = "2.0"))
 	float Bandwidth;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SubmixEffect|Preset", meta = (ClampMin = "-90.0", ClampMax = "20.0", UIMin = "-90.0", UIMax = "20.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SubmixEffect|Preset", meta = (DisplayName = "Gain (dB)", ClampMin = "-90.0", ClampMax = "20.0", UIMin = "-90.0", UIMax = "20.0"))
 	float GainDb;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SubmixEffect|Preset")
@@ -50,19 +50,19 @@ struct FSubmixEffectSubmixEQSettings
 	TArray<FSubmixEffectEQBand> EQBands;
 };
 
-class AUDIOMIXER_API FSubmixEffectSubmixEQ : public FSoundEffectSubmix
+class FSubmixEffectSubmixEQ : public FSoundEffectSubmix
 {
 public:
-	FSubmixEffectSubmixEQ();
+	AUDIOMIXER_API FSubmixEffectSubmixEQ();
 
 	// Called on an audio effect at initialization on main thread before audio processing begins.
-	virtual void Init(const FSoundEffectSubmixInitData& InSampleRate) override;
+	AUDIOMIXER_API virtual void Init(const FSoundEffectSubmixInitData& InSampleRate) override;
 
 	// Process the input block of audio. Called on audio thread.
-	virtual void OnProcessAudio(const FSoundEffectSubmixInputData& InData, FSoundEffectSubmixOutputData& OutData) override;
+	AUDIOMIXER_API virtual void OnProcessAudio(const FSoundEffectSubmixInputData& InData, FSoundEffectSubmixOutputData& OutData) override;
 
 	// Sets the effect parameters using the old audio engine preset setting object
-	virtual bool SetParameters(const FAudioEffectParameters& InParameters) override;
+	AUDIOMIXER_API virtual bool SetParameters(const FAudioEffectParameters& InParameters) override;
 
 	virtual bool SupportsDefaultEQ() const override
 	{
@@ -70,10 +70,10 @@ public:
 	}
 
 	// Called when an audio effect preset is changed
-	virtual void OnPresetChanged() override;
+	AUDIOMIXER_API virtual void OnPresetChanged() override;
 
 protected:
-	void UpdateParameters(const int32 NumOutputChannels);
+	AUDIOMIXER_API void UpdateParameters(const int32 NumOutputChannels);
 
 	// An EQ effect is a bank of biquad filters
 	struct FEQ
@@ -105,8 +105,8 @@ protected:
 	FSubmixEffectSubmixEQSettings RenderThreadEQSettings;
 };
 
-UCLASS(ClassGroup = AudioSourceEffect, meta = (BlueprintSpawnableComponent))
-class AUDIOMIXER_API USubmixEffectSubmixEQPreset : public USoundEffectSubmixPreset
+UCLASS(ClassGroup = AudioSourceEffect, meta = (BlueprintSpawnableComponent), MinimalAPI)
+class USubmixEffectSubmixEQPreset : public USoundEffectSubmixPreset
 {
 	GENERATED_BODY()
 
@@ -115,7 +115,7 @@ public:
 	EFFECT_PRESET_METHODS(SubmixEffectSubmixEQ)
 
 	UFUNCTION(BlueprintCallable, Category = "Audio|Effects")
-	void SetSettings(const FSubmixEffectSubmixEQSettings& InSettings);
+	AUDIOMIXER_API void SetSettings(const FSubmixEffectSubmixEQSettings& InSettings);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = SubmixEffectPreset)
 	FSubmixEffectSubmixEQSettings Settings;

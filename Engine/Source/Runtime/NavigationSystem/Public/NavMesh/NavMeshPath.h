@@ -2,7 +2,9 @@
 
 #pragma once
 
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "CoreMinimal.h"
+#endif
 #include "UObject/ObjectMacros.h"
 #include "UObject/Object.h"
 #include "NavigationPath.h"
@@ -11,7 +13,7 @@
 #define RECAST_STRAIGHTPATH_OFFMESH_CONNECTION 0x04
 
 /** Helper to translate FNavPathPoint.Flags. */
-struct NAVIGATIONSYSTEM_API FNavMeshNodeFlags
+struct FNavMeshNodeFlags
 {
 	/** Extra node information (like "path start", "off-mesh connection"). */
 	uint8 PathFlags;
@@ -21,7 +23,7 @@ struct NAVIGATIONSYSTEM_API FNavMeshNodeFlags
 	uint16 AreaFlags;
 
 	FNavMeshNodeFlags() : PathFlags(0), Area(0), AreaFlags(0) {}
-	FNavMeshNodeFlags(uint32 Flags) : PathFlags(Flags), Area(Flags >> 8), AreaFlags(Flags >> 16) {}
+	FNavMeshNodeFlags(const uint32 Flags) : PathFlags((uint8)Flags), Area((uint8)(Flags >> 8)), AreaFlags((uint16)(Flags >> 16)) {}
 	uint32 Pack() const { return PathFlags | ((uint32)Area << 8) | ((uint32)AreaFlags << 16); }
 	bool IsNavLink() const { return (PathFlags & RECAST_STRAIGHTPATH_OFFMESH_CONNECTION) != 0; }
 
@@ -33,18 +35,25 @@ struct NAVIGATIONSYSTEM_API FNavMeshNodeFlags
 };
 
 
-struct NAVIGATIONSYSTEM_API FNavMeshPath : public FNavigationPath
+struct FNavMeshPath : public FNavigationPath
 {
 	typedef FNavigationPath Super;
 
-	FNavMeshPath();
+	NAVIGATIONSYSTEM_API FNavMeshPath();
+
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	FNavMeshPath(const FNavMeshPath&) = default;
+	FNavMeshPath(FNavMeshPath&& Other) = default;
+	FNavMeshPath& operator=(const FNavMeshPath& Other) = default;
+	FNavMeshPath& operator=(FNavMeshPath&& Other) = default;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	FORCEINLINE void SetWantsStringPulling(const bool bNewWantsStringPulling) { bWantsStringPulling = bNewWantsStringPulling; }
 	FORCEINLINE bool WantsStringPulling() const { return bWantsStringPulling; }
 	FORCEINLINE bool IsStringPulled() const { return bStringPulled; }
 
 	/** find string pulled path from PathCorridor */
-	void PerformStringPulling(const FVector& StartLoc, const FVector& EndLoc);
+	NAVIGATIONSYSTEM_API void PerformStringPulling(const FVector& StartLoc, const FVector& EndLoc);
 
 	FORCEINLINE void SetWantsPathCorridor(const bool bNewWantsPathCorridor) { bWantsPathCorridor = bNewWantsPathCorridor; }
 	FORCEINLINE bool WantsPathCorridor() const { return bWantsPathCorridor; }
@@ -54,27 +63,27 @@ struct NAVIGATIONSYSTEM_API FNavMeshPath : public FNavigationPath
 
 	FORCEINLINE void OnPathCorridorUpdated() { bCorridorEdgesGenerated = false; }
 
-	virtual void DebugDraw(const ANavigationData* NavData, FColor PathColor, UCanvas* Canvas, bool bPersistent, const uint32 NextPathPointIndex = 0) const override;
+	NAVIGATIONSYSTEM_API virtual void DebugDraw(const ANavigationData* NavData, const FColor PathColor, UCanvas* Canvas, const bool bPersistent, const float LifeTime, const uint32 NextPathPointIndex = 0) const override;
 
-	bool ContainsWithSameEnd(const FNavMeshPath* Other) const;
+	NAVIGATIONSYSTEM_API bool ContainsWithSameEnd(const FNavMeshPath* Other) const;
 
-	void OffsetFromCorners(float Distance);
+	NAVIGATIONSYSTEM_API void OffsetFromCorners(FVector::FReal Distance);
 
-	void ApplyFlags(int32 NavDataFlags);
+	NAVIGATIONSYSTEM_API void ApplyFlags(int32 NavDataFlags);
 
-	virtual void ResetForRepath() override;
+	NAVIGATIONSYSTEM_API virtual void ResetForRepath() override;
 
 	/** get flags of path point or corridor poly (depends on bStringPulled flag) */
-	bool GetNodeFlags(int32 NodeIdx, FNavMeshNodeFlags& Flags) const;
+	NAVIGATIONSYSTEM_API bool GetNodeFlags(int32 NodeIdx, FNavMeshNodeFlags& Flags) const;
 
 	/** get cost of path, starting from next poly in corridor */
-	virtual float GetCostFromNode(NavNodeRef PathNode) const override { return GetCostFromIndex(PathCorridor.Find(PathNode) + 1); }
+	virtual FVector::FReal GetCostFromNode(NavNodeRef PathNode) const override { return GetCostFromIndex(PathCorridor.Find(PathNode) + 1); }
 
 	/** get cost of path, starting from given point */
-	virtual float GetCostFromIndex(int32 PathPointIndex) const override
+	virtual FVector::FReal GetCostFromIndex(int32 PathPointIndex) const override
 	{
-		float TotalCost = 0.f;
-		const float* Cost = PathCorridorCost.GetData();
+		FVector::FReal TotalCost = 0.f;
+		const FVector::FReal* Cost = PathCorridorCost.GetData();
 		for (int32 PolyIndex = PathPointIndex; PolyIndex < PathCorridorCost.Num(); ++PolyIndex, ++Cost)
 		{
 			TotalCost += *Cost;
@@ -83,7 +92,7 @@ struct NAVIGATIONSYSTEM_API FNavMeshPath : public FNavigationPath
 		return TotalCost;
 	}
 
-	FORCEINLINE_DEBUGGABLE float GetTotalPathLength() const
+	FORCEINLINE_DEBUGGABLE FVector::FReal GetTotalPathLength() const
 	{
 		return bStringPulled ? GetStringPulledLength(0) : GetPathCorridorLength(0);
 	}
@@ -93,44 +102,44 @@ struct NAVIGATIONSYSTEM_API FNavMeshPath : public FNavigationPath
 	/** check if path (all polys in corridor) contains given node */
 	virtual bool ContainsNode(NavNodeRef NodeRef) const override { return PathCorridor.Contains(NodeRef); }
 
-	virtual bool ContainsCustomLink(uint32 UniqueLinkId) const override { return CustomLinkIds.Contains(UniqueLinkId); }
-	virtual bool ContainsAnyCustomLink() const override { return CustomLinkIds.Num() > 0; }
+	virtual bool ContainsCustomLink(FNavLinkId UniqueLinkId) const override { return CustomNavLinkIds.Contains(UniqueLinkId); }
+	virtual bool ContainsAnyCustomLink() const override { return CustomNavLinkIds.Num() > 0; }
 
-	bool IsPathSegmentANavLink(const int32 PathSegmentStartIndex) const;
+	NAVIGATIONSYSTEM_API bool IsPathSegmentANavLink(const int32 PathSegmentStartIndex) const;
 
-	virtual bool DoesIntersectBox(const FBox& Box, uint32 StartingIndex = 0, int32* IntersectingSegmentIndex = NULL, FVector* AgentExtent = NULL) const override;
-	virtual bool DoesIntersectBox(const FBox& Box, const FVector& AgentLocation, uint32 StartingIndex = 0, int32* IntersectingSegmentIndex = NULL, FVector* AgentExtent = NULL) const override;
+	NAVIGATIONSYSTEM_API virtual bool DoesIntersectBox(const FBox& Box, uint32 StartingIndex = 0, int32* IntersectingSegmentIndex = NULL, FVector* AgentExtent = NULL) const override;
+	NAVIGATIONSYSTEM_API virtual bool DoesIntersectBox(const FBox& Box, const FVector& AgentLocation, uint32 StartingIndex = 0, int32* IntersectingSegmentIndex = NULL, FVector* AgentExtent = NULL) const override;
 	/** retrieves normalized direction vector to given path segment. If path is not string pulled navigation corridor is being used */
-	virtual FVector GetSegmentDirection(uint32 SegmentEndIndex) const override;
+	NAVIGATIONSYSTEM_API virtual FVector GetSegmentDirection(uint32 SegmentEndIndex) const override;
 
-	void Invert();
+	NAVIGATIONSYSTEM_API void Invert();
 
 private:
-	bool DoesPathIntersectBoxImplementation(const FBox& Box, const FVector& StartLocation, uint32 StartingIndex, int32* IntersectingSegmentIndex, FVector* AgentExtent) const;
-	void InternalResetNavMeshPath();
+	NAVIGATIONSYSTEM_API bool DoesPathIntersectBoxImplementation(const FBox& Box, const FVector& StartLocation, uint32 StartingIndex, int32* IntersectingSegmentIndex, FVector* AgentExtent) const;
+	NAVIGATIONSYSTEM_API void InternalResetNavMeshPath();
 
 public:
 
 #if ENABLE_VISUAL_LOG
-	virtual void DescribeSelfToVisLog(struct FVisualLogEntry* Snapshot) const override;
-	virtual FString GetDescription() const override;
+	NAVIGATIONSYSTEM_API virtual void DescribeSelfToVisLog(struct FVisualLogEntry* Snapshot) const override;
+	NAVIGATIONSYSTEM_API virtual FString GetDescription() const override;
 #endif // ENABLE_VISUAL_LOG
 
 protected:
 	/** calculates total length of string pulled path. Does not generate string pulled
 	*	path if it's not already generated (see bWantsStringPulling and bStrigPulled)
 	*	Internal use only */
-	float GetStringPulledLength(const int32 StartingPoint) const;
+	NAVIGATIONSYSTEM_API FVector::FReal GetStringPulledLength(const int32 StartingPoint) const;
 
 	/** calculates estimated length of path expressed as sequence of navmesh edges.
 	*	It basically sums up distances between every subsequent nav edge pair edge middles.
 	*	Internal use only */
-	float GetPathCorridorLength(const int32 StartingEdge) const;
+	NAVIGATIONSYSTEM_API FVector::FReal GetPathCorridorLength(const int32 StartingEdge) const;
 
 	/** it's only const to be callable in const environment. It's not supposed to be called directly externally anyway,
 	*	just as part of retrieving corridor on demand or generating it in internal processes. It fills a mutable
 	*	array. */
-	const TArray<FNavigationPortalEdge>& GeneratePathCorridorEdges() const;
+	NAVIGATIONSYSTEM_API const TArray<FNavigationPortalEdge>& GeneratePathCorridorEdges() const;
 
 public:
 
@@ -138,10 +147,13 @@ public:
 	TArray<NavNodeRef> PathCorridor;
 
 	/** for every poly in PathCorridor stores traversal cost from previous navpoly */
-	TArray<float> PathCorridorCost;
+	TArray<FVector::FReal> PathCorridorCost;
 
 	/** set of unique link Ids */
+	UE_DEPRECATED(5.3, "LinkIds are now based on FNavLinkId. Use CustomNavLinkIds instead. CustomLinkIds array is no longer populated or used in the engine")
 	TArray<uint32> CustomLinkIds;
+
+	TArray<FNavLinkId> CustomNavLinkIds;
 
 private:
 	/** sequence of FVector pairs where each pair represents navmesh portal edge between two polygons navigation corridor.
@@ -171,5 +183,5 @@ protected:
 	uint32 bWantsPathCorridor : 1;
 
 public:
-	static const FNavPathType Type;
+	static NAVIGATIONSYSTEM_API const FNavPathType Type;
 };

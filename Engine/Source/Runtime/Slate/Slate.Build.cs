@@ -13,40 +13,18 @@ public class Slate : ModuleRules
 			new string[] {
 				"Core",
 				"CoreUObject",
-				"ApplicationCore",
 				"InputCore",
 				"Json",
 				"SlateCore",
 				"ImageWrapper"
 			});
 
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				"Runtime/Slate/Private",
-				"Runtime/Slate/Private/Framework",
-				"Runtime/Slate/Private/Framework/Application",
-				"Runtime/Slate/Private/Framework/Commands",
-				"Runtime/Slate/Private/Framework/Docking",
-				"Runtime/Slate/Private/Framework/Layout",
-				"Runtime/Slate/Private/Framework/MultiBox",
-				"Runtime/Slate/Private/Framework/Notifications",
-				"Runtime/Slate/Private/Framework/Styling",
-				"Runtime/Slate/Private/Framework/Text",
-				"Runtime/Slate/Private/Framework/Text/IOS",
-				"Runtime/Slate/Private/Widgets/Colors",
-				"Runtime/Slate/Private/Widgets/Docking",
-				"Runtime/Slate/Private/Widgets/Images",
-				"Runtime/Slate/Private/Widgets/Input",
-				"Runtime/Slate/Private/Widgets/Layout",
-				"Runtime/Slate/Private/Widgets/Notifications",
-				"Runtime/Slate/Private/Widgets/Text",
-				"Runtime/Slate/Private/Widgets/Views",
+		if (Target.bCompileAgainstApplicationCore)
+		{
+			PublicDependencyModuleNames.Add("ApplicationCore");
+		}
 
-				"Runtime/Toolbox/Public/"
-			});
-
-		if ((Target.Platform == UnrealTargetPlatform.Win64) ||
-			(Target.Platform == UnrealTargetPlatform.Win32))
+		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
 			AddEngineThirdPartyPrivateStaticDependencies(Target, "XInput");
 		}
@@ -58,8 +36,16 @@ public class Slate : ModuleRules
 		// Add slate runtime dependencies
 		if (Target.bUsesSlate)
 		{
-			RuntimeDependencies.Add("$(EngineDir)/Content/Slate/...", StagedFileType.UFS);
+			RuntimeDependencies.Add("$(EngineDir)/Content/Slate/...*.ttf", StagedFileType.UFS);
+			RuntimeDependencies.Add("$(EngineDir)/Content/Slate/...*.png", StagedFileType.UFS);
+			RuntimeDependencies.Add("$(EngineDir)/Content/Slate/...*.svg", StagedFileType.UFS);
+			RuntimeDependencies.Add("$(EngineDir)/Content/Slate/...*.tps", StagedFileType.UFS);
 			RuntimeDependencies.Add("$(EngineDir)/Content/SlateDebug/...", StagedFileType.DebugNonUFS);
+
+			if (Target.Platform == UnrealTargetPlatform.Win64)
+			{ 
+				RuntimeDependencies.Add("$(EngineDir)/Content/Slate/...*.cur", StagedFileType.NonUFS);
+			}
 
 			if (Target.ProjectFile != null)
 			{
@@ -72,5 +58,7 @@ public class Slate : ModuleRules
         {
             DynamicallyLoadedModuleNames.Add("Settings");
         }
+
+		PrivateIncludePaths.Add(System.IO.Path.Combine(EngineDirectory,"Source/ThirdParty/AHEasing/AHEasing-1.3.2"));
 	}
 }

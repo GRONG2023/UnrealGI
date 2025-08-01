@@ -1,27 +1,41 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "MovieSceneObjectBindingIDPicker.h"
-#include "IPropertyUtilities.h"
-#include "MovieSceneBindingOwnerInterface.h"
-#include "MovieSceneSequence.h"
-#include "MovieScene.h"
-#include "SequenceBindingTree.h"
-#include "Widgets/Input/SComboButton.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Textures/SlateIcon.h"
-#include "EditorStyleSet.h"
-#include "Widgets/Images/SImage.h"
-#include "EditorFontGlyphs.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/SOverlay.h"
-#include "ISequencer.h"
+
+#include "Containers/Array.h"
+#include "Delegates/Delegate.h"
 #include "Evaluation/MovieSceneEvaluationTemplateInstance.h"
-#include "Evaluation/MovieSceneSequenceHierarchy.h"
-#include "Compilation/MovieSceneCompiledDataManager.h"
 #include "Framework/Application/SlateApplication.h"
-#include "EditorStyleSet.h"
-#include "EditorFontGlyphs.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "ISequencer.h"
+#include "Input/Reply.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Margin.h"
+#include "Layout/Visibility.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/Guid.h"
+#include "MovieSceneObjectBindingID.h"
+#include "MovieSceneSequence.h"
+#include "SequenceBindingTree.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/CoreStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/StarshipCoreStyle.h"
+#include "Textures/SlateIcon.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SOverlay.h"
+#include "Widgets/Text/STextBlock.h"
+
+struct FMovieSceneSequenceHierarchy;
 
 #define LOCTEXT_NAMESPACE "MovieSceneObjectBindingIDPicker"
 
@@ -108,8 +122,14 @@ void FMovieSceneObjectBindingIDPicker::OnGetMenuContent(FMenuBuilder& MenuBuilde
 
 TSharedRef<SWidget> FMovieSceneObjectBindingIDPicker::GetPickerMenu()
 {
+	// The menu are generated through reflection and sometime the API exposes some recursivity (think about a Widget returning it parent which is also a Widget). Just by reflection
+	// it is not possible to determine when the root object is reached. It needs a kind of simulation which is not implemented. Also, even if the recursivity was correctly handled, the possible
+	// permutations tend to grow exponentially. Until a clever solution is found, the simple approach is to disable recursively searching those menus. User can still search the current one though.
+	// See UE-131257
+	const bool bInRecursivelySearchable = false;
+
 	// Close self only to enable use inside context menus
-	FMenuBuilder MenuBuilder(true, nullptr, nullptr, true);
+	FMenuBuilder MenuBuilder(true, nullptr, nullptr, true, &FCoreStyle::Get(), true, NAME_None, bInRecursivelySearchable);
 
 	Initialize();
 	GetPickerMenu(MenuBuilder);
@@ -148,7 +168,7 @@ TSharedRef<SWidget> FMovieSceneObjectBindingIDPicker::GetCurrentItemWidget(TShar
 			[
 				SNew(SImage)
 				.Visibility_Raw(this, &FMovieSceneObjectBindingIDPicker::GetSpawnableIconOverlayVisibility)
-				.Image(FEditorStyle::GetBrush("Sequencer.SpawnableIconOverlay"))
+				.Image(FAppStyle::GetBrush("Sequencer.SpawnableIconOverlay"))
 			]
 		]
 
@@ -166,15 +186,13 @@ TSharedRef<SWidget> FMovieSceneObjectBindingIDPicker::GetWarningWidget()
 		.HAlign(HAlign_Center)
 		.VAlign(VAlign_Center)
 		.ContentPadding(FMargin(0))
-		.ButtonStyle(FEditorStyle::Get(), "HoverHintOnly")
-		.ToolTipText(LOCTEXT("FixedBindingWarningText", "This binding is fixed to the current Master Sequence hierarchy, so will break if evaluated in a different hierarchy.\nClick here to fix this problem."))
+		.ButtonStyle(FAppStyle::Get(), "HoverHintOnly")
+		.ToolTipText(LOCTEXT("FixedBindingWarningText", "This binding is fixed to the current Root Sequence hierarchy, so will break if evaluated in a different hierarchy.\nClick here to fix this problem."))
 		.Visibility_Raw(this, &FMovieSceneObjectBindingIDPicker::GetFixedWarningVisibility)
 		.OnClicked_Raw(this, &FMovieSceneObjectBindingIDPicker::AttemptBindingFixup)
 		[
-			SNew(STextBlock)
-			.ColorAndOpacity(FLinearColor::Yellow)
-			.Font(FEditorStyle::Get().GetFontStyle("FontAwesome.11"))
-			.Text(FEditorFontGlyphs::Exclamation_Triangle)
+			SNew(SImage)
+			.Image(FStarshipCoreStyle::GetCoreStyle().GetBrush("Icons.Warning"))
 		];
 }
 
@@ -287,17 +305,22 @@ void FMovieSceneObjectBindingIDPicker::SetCurrentValueFromFixed(UE::MovieScene::
 	TSharedPtr<ISequencer>              Sequencer = WeakSequencer.Pin();
 	const FMovieSceneSequenceHierarchy* Hierarchy = Sequencer.IsValid() ? Sequencer->GetEvaluationTemplate().GetHierarchy() : nullptr;
 
-	// If we don't know the local sequence ID, or we have no hierarchy, or we're resetting the binding; just set the ID directly
-	if (LocalSequenceID == MovieSceneSequenceID::Invalid || !InValue.Guid.IsValid())
+	// If there is no sequencer, just set the ID directly 
+	if (!Sequencer.IsValid())
 	{
 		SetCurrentValue(InValue);
+	}
+	// If we don't know the local sequence ID, or we have no hierarchy, or we're resetting the binding; set a relative ID
+	else if (LocalSequenceID == MovieSceneSequenceID::Invalid || !InValue.Guid.IsValid() || Hierarchy == nullptr)
+	{
+		SetCurrentValue(UE::MovieScene::FRelativeObjectBindingID(InValue.Guid));
 	}
 	else
 	{
 		// Attempt to remap the desired binding to the current local sequence by either making it local to this sequence
-		// or specifying a parent index so that this binding is still able to resolve correctly if the master sequence is added
+		// or specifying a parent index so that this binding is still able to resolve correctly if the root sequence is added
 		// as a subsequence elsewhere
-		// This ensures that you can work on sub sequences on their own, or within a master sequence and the binding will resolve correctly.
+		// This ensures that you can work on sub sequences on their own, or within a root sequence and the binding will resolve correctly.
 		SetCurrentValue(InValue.ConvertToRelative(LocalSequenceID, Hierarchy));
 	}
 }

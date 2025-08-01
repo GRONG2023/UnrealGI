@@ -13,17 +13,17 @@
 *
 * @see FTransformCollectionComponent
 */
-class CHAOS_API FTransformCollection : public FManagedArrayCollection
+class FTransformCollection : public FManagedArrayCollection
 {
 public:
 	typedef FManagedArrayCollection Super;
 
-	FTransformCollection();
+	CHAOS_API FTransformCollection();
 	FTransformCollection(FTransformCollection &) = delete;
 	FTransformCollection& operator=(const FTransformCollection&) = delete;
 	FTransformCollection(FTransformCollection&&) = default;
 	FTransformCollection& operator=(FTransformCollection&&) = default;
-
+	MANAGED_ARRAY_COLLECTION_INTERNAL(FTransformCollection);
 
 	/***
 	*  Attribute Groups
@@ -33,7 +33,7 @@ public:
 	*   TransformGroup ("Transform")
 	*		Default Attributes :
 	*
-	*          FTransformArray Transform =  GetAttribute<FTransform>("Transform", TransformGroup)
+	*          FTransform3fArray Transform =  GetAttribute<FTransform3f>("Transform", TransformGroup)
 	*		   FInt32Array Level = GetAttribute<int32>("Level", TransformGroup) FIX
 	*		   FInt32Array Parent = GetAttribute<int32>("Parent", TransformGroup) FIX
 	*		   FInt32Array Children = GetAttribute<TSet<int32>>("Children", TransformGroup) FIX
@@ -45,42 +45,55 @@ public:
 	*       Children defines the child indices of the transform node in the transform hierarchy (leaf nodes will have no children)
 	*       Level is the distance from the root node at level 0. Leaf nodes will have the highest level number.
 	*/
-	static const FName TransformGroup;
-	static const FName TransformAttribute;
-	static const FName ParentAttribute;
-	static const FName ChildrenAttribute;
-	static const FName ParticlesAttribute;
+	static CHAOS_API const FName TransformGroup;
+	static CHAOS_API const FName TransformAttribute;
+	static CHAOS_API const FName ParentAttribute;
+	static CHAOS_API const FName ChildrenAttribute;
+	static CHAOS_API const FName ParticlesAttribute;
+	static CHAOS_API const FName LevelAttribute;
+	static CHAOS_API const FName ConvexGroup;
+	static CHAOS_API const FName ConvexHullAttribute;
+	
+	/** Schema */
+	static CHAOS_API void DefineTransformSchema(FManagedArrayCollection&);
+
 
 	/** Serialize */
-	virtual void Serialize(Chaos::FChaosArchive& Ar) override;
+	CHAOS_API virtual void Serialize(Chaos::FChaosArchive& Ar) override;
 
 	/*
 	* SingleTransform:
 	*   Create a single transform.
 	*/
-	static FTransformCollection SingleTransform(const FTransform& TransformRoot = FTransform::Identity);
+	static CHAOS_API FTransformCollection SingleTransform(const FTransform& TransformRoot = FTransform::Identity);
+
+	/**
+	* Append Collection and reindex dependencies on this collection.
+	* @param InCollection : Collection to add.
+	*/
+	CHAOS_API virtual void Append(const FManagedArrayCollection& Collection);
 
 	/*
 	* AppendTransform:
 	*   Append a transform at the end of the collection without
 	*   parenting. 
 	*/
-	int32 AppendTransform(const FTransformCollection & GeometryCollection, const FTransform& TransformRoot = FTransform::Identity);
+	CHAOS_API int32 AppendTransform(const FTransformCollection & GeometryCollection, const FTransform& TransformRoot = FTransform::Identity);
 
 	/*
 	* ParentTransforms
 	*   Parent Transforms under the specified node using local parent
 	*   hierarchy compensation. .
 	*/
-	void ParentTransforms(const int32 TransformIndex, const int32 ChildIndex);
-	void ParentTransforms(const int32 TransformIndex, const TArray<int32>& SelectedBones);
-	void UnparentTransform(const int32 ChildIndex);
+	CHAOS_API void ParentTransforms(const int32 TransformIndex, const int32 ChildIndex);
+	CHAOS_API void ParentTransforms(const int32 TransformIndex, const TArray<int32>& SelectedBones);
+	CHAOS_API void UnparentTransform(const int32 ChildIndex);
 
 	/*
 	* RelativeTransformation
 	*   Modify the specified index by the local matrix offset. 
 	*/
-	void RelativeTransformation(const int32& Index, const FTransform& LocalOffset); 
+	CHAOS_API void RelativeTransformation(const int32& Index, const FTransform& LocalOffset); 
 
 	/**
 	* RemoveElements
@@ -88,10 +101,15 @@ public:
 	*   under the deleted elements parent using local parent compensation [relative local matrices].
 	* 
 	*/
-	virtual void RemoveElements(const FName & Group, const TArray<int32> & SortedDeletionList, FProcessingParameters Params = FProcessingParameters()) override;
+	CHAOS_API virtual void RemoveElements(const FName & Group, const TArray<int32> & SortedDeletionList, FProcessingParameters Params = FProcessingParameters()) override;
+
+	/**
+	* reset internal state
+	*/
+	CHAOS_API virtual void Reset() override;
 
 	// Transform Group
-	TManagedArray<FTransform>   Transform;
+	TManagedArray<FTransform3f> Transform;
 	TManagedArray<FString>      BoneName;
 	TManagedArray<FLinearColor> BoneColor;
 	TManagedArray<int32>        Parent;
@@ -101,5 +119,5 @@ public:
 protected:
 
 	/** Construct */
-	void Construct();
+	CHAOS_API void Construct();
 };

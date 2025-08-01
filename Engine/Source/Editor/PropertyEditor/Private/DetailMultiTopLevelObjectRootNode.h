@@ -13,6 +13,7 @@
 #include "SDetailsViewBase.h"
 #include "SDetailTableRowBase.h"
 #include "IDetailRootObjectCustomization.h"
+#include "PropertyCustomizationHelpers.h"
 
 using EExpansionArrowUsage = IDetailRootObjectCustomization::EExpansionArrowUsage;
 
@@ -28,39 +29,41 @@ public:
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs, TSharedRef<FDetailTreeNode> InOwnerTreeNode, const TSharedRef<STableViewBase>& InOwnerTableView);
-	void SetContent(TSharedRef<SWidget> InContent);
-private:
-	const FSlateBrush* GetBackgroundImage() const;
+	void SetContent(TSharedRef<SWidget> InContent) override;
 
 private:
+	const FSlateBrush* GetBackgroundImage() const;
 	virtual FReply OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
 	virtual FReply OnMouseButtonDoubleClick(const FGeometry& InMyGeometry, const FPointerEvent& InMouseEvent) override;
+
 private:
 	EExpansionArrowUsage ExpansionArrowUsage;
 	SHorizontalBox::FSlot* ContentSlot = nullptr;
+	TWeakPtr<STableViewBase> OwnerTableViewWeak;
 };
-
 
 class FDetailMultiTopLevelObjectRootNode : public FDetailTreeNode, public TSharedFromThis<FDetailMultiTopLevelObjectRootNode>
 {
 public:
-	FDetailMultiTopLevelObjectRootNode(const FDetailNodeList& InChildNodes, const TSharedPtr<IDetailRootObjectCustomization>& RootObjectCustomization, IDetailsViewPrivate* InDetailsView, const FObjectPropertyNode* RootNode);
+	FDetailMultiTopLevelObjectRootNode(const TSharedPtr<IDetailRootObjectCustomization>& RootObjectCustomization, IDetailsViewPrivate* InDetailsView, const FObjectPropertyNode* RootNode);
+	void SetChildren(const FDetailNodeList& InChildNodes);
 private:
+	virtual IDetailsView* GetNodeDetailsView() const override { return DetailsView; }
 	virtual IDetailsViewPrivate* GetDetailsView() const override { return DetailsView; }
 	virtual void OnItemExpansionChanged(bool bIsExpanded, bool bShouldSaveState) override;
 	virtual bool ShouldBeExpanded() const override;
 	virtual ENodeVisibility GetVisibility() const override;
-	virtual TSharedRef<ITableRow> GenerateWidgetForTableView(const TSharedRef<STableViewBase>& OwnerTable, const FDetailColumnSizeData& ColumnSizeData, bool bAllowFavoriteSystem) override;
+	virtual TSharedRef<ITableRow> GenerateWidgetForTableView(const TSharedRef<STableViewBase>& OwnerTable, bool bAllowFavoriteSystem) override;
 	virtual bool GenerateStandaloneWidget(FDetailWidgetRow& OutRow) const override;
-	virtual void GetChildren(FDetailNodeList& OutChildren)  override;
+	virtual void GetChildren(FDetailNodeList& OutChildren, const bool& bInIgnoreVisibility) override;
 	virtual void FilterNode(const FDetailFilter& InFilter) override;
 	virtual void Tick(float DeltaTime) override {}
 	virtual bool ShouldShowOnlyChildren() const override;
 	virtual FName GetNodeName() const override { return NodeName; }
 	virtual EDetailNodeType GetNodeType() const override { return EDetailNodeType::Object; }
 	virtual TSharedPtr<IPropertyHandle> CreatePropertyHandle() const override { return nullptr; }
-private:
 	void GenerateWidget_Internal(FDetailWidgetRow& Row, TSharedPtr<SDetailMultiTopLevelObjectTableRow> TableRow) const;
+
 private:
 	FDetailNodeList ChildNodes;
 	IDetailsViewPrivate* DetailsView;

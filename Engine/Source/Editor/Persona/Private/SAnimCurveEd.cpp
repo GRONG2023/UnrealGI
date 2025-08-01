@@ -2,11 +2,23 @@
 
 
 #include "SAnimCurveEd.h"
-#include "Rendering/DrawElements.h"
+
 #include "Animation/AnimTypes.h"
-
-
+#include "GenericPlatform/ICursor.h"
+#include "HAL/PlatformCrt.h"
+#include "Input/Events.h"
+#include "Layout/Clipping.h"
+#include "Layout/Geometry.h"
+#include "Layout/PaintGeometry.h"
+#include "Math/Color.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/Optional.h"
+#include "Rendering/DrawElements.h"
+#include "Rendering/RenderingCommon.h"
 #include "SScrubWidget.h"
+
+class FSlateRect;
+class FWidgetStyle;
 
 #define LOCTEXT_NAMESPACE "AnimCurveEd"
 
@@ -66,17 +78,15 @@ FReply SAnimCurveEd::OnMouseWheel(const FGeometry& MyGeometry, const FPointerEve
 	const float ZoomDelta = -0.1f * MouseEvent.GetWheelDelta();
 
 	const FVector2D WidgetSpace = MyGeometry.AbsoluteToLocal(MouseEvent.GetScreenSpacePosition());
-	const float ZoomRatio = FMath::Clamp((WidgetSpace.X / MyGeometry.GetLocalSize().X), 0.f, 1.f);
+	const float ZoomRatio = FMath::Clamp(static_cast<float>(WidgetSpace.X / MyGeometry.GetLocalSize().X), 0.f, 1.f);
 
-	{
-		const float InputViewSize = ViewMaxInput.Get() - ViewMinInput.Get();
-		const float InputChange = InputViewSize * ZoomDelta;
+	const float InputViewSize = ViewMaxInput.Get() - ViewMinInput.Get();
+	const float InputChange = InputViewSize * ZoomDelta;
 
-		float NewViewMinInput = ViewMinInput.Get() - (InputChange * ZoomRatio);
-		float NewViewMaxInput = ViewMaxInput.Get() + (InputChange * (1.f - ZoomRatio));
+	const float NewViewMinInput = ViewMinInput.Get() - (InputChange * ZoomRatio);
+	const float NewViewMaxInput = ViewMaxInput.Get() + (InputChange * (1.f - ZoomRatio));
 
-		SetInputMinMax(NewViewMinInput, NewViewMaxInput);
-	}
+	SetInputMinMax(NewViewMinInput, NewViewMaxInput);
 
 	return FReply::Handled();
 }

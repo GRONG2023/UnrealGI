@@ -24,6 +24,7 @@ namespace Gauntlet
 		WantRetry,
 		Cancelled,
 		TimedOut,
+		InsufficientDevices,
 	};
 
 	/// <summary>
@@ -38,6 +39,15 @@ namespace Gauntlet
 	};
 
 	/// <summary>
+	/// Describes why a test is stopping
+	/// </summary>
+	public enum StopReason
+	{
+		Completed,				// Test reported itself as complete so we're asking it to stop
+		MaxDuration,			// Test reached a maximum running time
+	};
+
+	/// <summary>
 	/// Describes the priority of test. 
 	/// </summary>
 	public enum TestPriority
@@ -47,6 +57,44 @@ namespace Gauntlet
 		Normal,
 		Low,
 		Idle
+	};
+
+	/// <summary>
+	/// Describes the severity level of an event
+	/// </summary>
+	public enum EventSeverity
+	{
+		Info,
+		Warning,
+		Error,
+		Fatal
+	}
+
+	/// <summary>
+	/// Interface for test event that provides must-have information
+	/// </summary>
+	public interface ITestEvent
+	{
+		/// <summary>
+		/// Level of severity that descrives this event
+		/// </summary>
+		EventSeverity Severity { get; }
+
+		/// <summary>
+		/// High level single-line summary of what occurred. Should neber be null
+		/// </summary>
+		string Summary { get; }
+
+		/// <summary>
+		/// Details for this event. E.g this could be a list of error messages or warnings for a failed test.
+		/// May be empty, should never be null
+		/// </summary>
+		IEnumerable<string> Details { get; }
+
+		/// <summary>
+		/// Callstack for this event if that information is available. May be empty, should never be null
+		/// </summary>
+		IEnumerable<string> Callstack { get; }
 	};
 
 	/// <summary>
@@ -110,11 +158,18 @@ namespace Gauntlet
 		void TickTest();
 
 		/// <summary>
+		/// Sets Cancellation Reason.
+		/// </summary>
+		/// <param name="Reason"></param>
+		/// <returns></returns>
+		void SetCancellationReason(string Reason);
+
+		/// <summary>
 		/// Called to request that the test stop, either because it's reported that its complete or due to external factors.
 		/// Tests should consider whether they passed or succeeded (even a terminated test may have gotten all the data it needs) 
 		/// and set their result appropriately.
 		/// </summary>
-		void StopTest(bool WasCancelled);
+		void StopTest(StopReason InReason);
 
 		/// <summary>
 		/// Allows the node to restart with the same assigned devices. Only called if the expresses 
@@ -134,6 +189,16 @@ namespace Gauntlet
 		/// times.
 		/// </summary>
 		TestResult GetTestResult();
+		
+		/// <summary>
+		/// Set the Test Result value
+		/// </summary>
+		void SetTestResult(TestResult testResult);
+
+		/// <summary>
+		/// Add a new Test Event to be rolled up and summarized at the end of this test.
+		/// </summary>
+		void AddTestEvent(UnrealTestEvent InEvent);
 
 		/// <summary>
 		/// Summary of the test. Only called once GetTestStatus() returns complete, but may be called multiple
@@ -150,6 +215,11 @@ namespace Gauntlet
 		/// Return a list of all errors that should be reported. May be different than Summary contents
 		/// </summary>
 		IEnumerable<string> GetErrors();
+
+		/// <summary>
+		/// returns a string that will be how to run this test locally with RunUAT.bat
+		/// </summary>
+		string GetRunLocalCommand(string LaunchingBuildCommand);
 
 		/// <summary>
 		/// Called to request any that any necessary cleanup be performed. After CleanupTest is called no further calls will be

@@ -2,40 +2,41 @@
 #pragma once
 
 #include "Chaos/Collision/CollisionContext.h"
-#include "Chaos/Collision/StatsData.h"
+
+#include "ChaosStats.h"
 
 namespace Chaos
 {
 	class FPBDCollisionConstraints;
-	class FNarrowPhase;
 	class FEvolutionResimCache;
 
-	DECLARE_CYCLE_STAT_EXTERN(TEXT("Collisions::Detect"), STAT_Collisions_Detect, STATGROUP_ChaosCollision, CHAOS_API);
-
-	class CHAOS_API FCollisionDetector
+	class FCollisionDetector
 	{
 	public:
-		FCollisionDetector(FNarrowPhase& InNarrowPhase, FPBDCollisionConstraints& InCollisionContainer)
-			: NarrowPhase(InNarrowPhase)
-			, CollisionContainer(InCollisionContainer)
+		FCollisionDetector(FPBDCollisionConstraints& InCollisionContainer)
+			: CollisionContainer(InCollisionContainer)
 		{
 		}
 
 		virtual ~FCollisionDetector() {}
 
+		UE_DEPRECATED(5.2, "Moved to FPBDCollisionConstraints")
+		CHAOS_API const FCollisionDetectorSettings& GetSettings() const;
+
+		UE_DEPRECATED(5.2, "Moved to FPBDCollisionConstraints")
+		CHAOS_API void SetSettings(const FCollisionDetectorSettings& InSettings);
+
+		UE_DEPRECATED(5.2, "Moved to FPBDCollisionConstraints and renamed to SetCullDistance")
+		CHAOS_API void SetBoundsExpansion(const FReal InBoundsExpansion);
+
+		UE_DEPRECATED(5.2, "No longer supported")
+		void SetBoundsVelocityInflation(const FReal InBoundsVelocityInflation) {}
+
 		FPBDCollisionConstraints& GetCollisionContainer() { return CollisionContainer; }
-		FNarrowPhase& GetNarrowPhase() { return NarrowPhase; }
 
-		virtual void DetectCollisionsWithStats(const FReal Dt, CollisionStats::FStatData& StatData, FEvolutionResimCache* ResimCache) = 0;
-
-		void DetectCollisions(const FReal Dt)
-		{
-			CollisionStats::FStatData StatData(false);
-			DetectCollisionsWithStats(Dt, StatData, nullptr);
-		}
+		virtual void DetectCollisions(const FReal Dt, FEvolutionResimCache* ResimCache) = 0;
 
 	protected:
-		FNarrowPhase& NarrowPhase;
 		FPBDCollisionConstraints& CollisionContainer;
 	};
 

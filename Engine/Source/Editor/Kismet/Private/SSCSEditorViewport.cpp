@@ -1,19 +1,56 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SSCSEditorViewport.h"
-#include "Framework/Application/SlateApplication.h"
-#include "Widgets/Layout/SBorder.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "EditorStyleSet.h"
+
+#include "BlueprintEditor.h"
 #include "BlueprintEditorCommands.h"
-#include "SSCSEditor.h"
-#include "Slate/SceneViewport.h"
-#include "SViewportToolBar.h"
-#include "STransformViewportToolbar.h"
-#include "EditorViewportCommands.h"
-#include "SEditorViewportToolBarMenu.h"
-#include "BlueprintEditorTabs.h"
 #include "BlueprintEditorSettings.h"
+#include "BlueprintEditorTabs.h"
+#include "Containers/EnumAsByte.h"
+#include "CoreGlobals.h"
+#include "Delegates/Delegate.h"
+#include "Editor/EditorEngine.h"
+#include "EditorViewportClient.h"
+#include "EditorViewportCommands.h"
+#include "Engine/Engine.h"
+#include "Engine/EngineBaseTypes.h"
+#include "Engine/World.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandList.h"
+#include "Framework/Docking/TabManager.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "GenericPlatform/ICursor.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Text.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Misc/Attribute.h"
+#include "Misc/Optional.h"
+#include "PreviewScene.h"
+#include "RHIDefinitions.h"
+#include "SCSEditorViewportClient.h"
+#include "SEditorViewportToolBarMenu.h"
+#include "SSubobjectEditor.h"
+#include "STransformViewportToolbar.h"
+#include "SViewportToolBar.h"
+#include "Slate/SceneViewport.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Types/WidgetActiveTimerDelegate.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/SOverlay.h"
+
+class FDragDropEvent;
+class SDockTab;
+class SWidget;
+struct FGeometry;
 
 /*-----------------------------------------------------------------------------
    SSCSEditorViewportToolBar
@@ -31,50 +68,46 @@ public:
 	{
 		EditorViewport = InArgs._EditorViewport;
 
-		static const FName DefaultForegroundName("DefaultForeground");
+		const FMargin ToolbarSlotPadding(4.0f, 1.0f);
 
 		this->ChildSlot
 		[
 			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("NoBorder"))
-			.ColorAndOpacity(this, &SViewportToolBar::OnGetColorAndOpacity)
-			.ForegroundColor(FEditorStyle::GetSlateColor(DefaultForegroundName))
+			.BorderImage(FAppStyle::Get().GetBrush("EditorViewportToolBar.Background"))
+			.Cursor(EMouseCursor::Default)
 			[
 				SNew(SHorizontalBox)
 				+SHorizontalBox::Slot()
 				.AutoWidth()
-				.Padding(2.0f, 2.0f)
+				.Padding(ToolbarSlotPadding)
 				[
 					SNew(SEditorViewportToolbarMenu)
 					.ParentToolBar(SharedThis(this))
 					.Cursor(EMouseCursor::Default)
-					.Image("EditorViewportToolBar.MenuDropdown")
+					.Image("EditorViewportToolBar.OptionsDropdown")
 					.OnGetMenuContent(this, &SSCSEditorViewportToolBar::GeneratePreviewMenu)
 				]
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
-				.Padding(2.0f, 2.0f)
+				.Padding(ToolbarSlotPadding)
 				[
 					SNew( SEditorViewportToolbarMenu )
 					.ParentToolBar( SharedThis( this ) )
-					.Cursor( EMouseCursor::Default )
 					.Label(this, &SSCSEditorViewportToolBar::GetCameraMenuLabel)
-					.LabelIcon(this, &SSCSEditorViewportToolBar::GetCameraMenuLabelIcon)
 					.OnGetMenuContent(this, &SSCSEditorViewportToolBar::GenerateCameraMenu)
 				]
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
-				.Padding(2.0f, 2.0f)
+				.Padding(ToolbarSlotPadding)
 				[
 					SNew( SEditorViewportToolbarMenu )
 					.ParentToolBar( SharedThis( this ) )
 					.Cursor( EMouseCursor::Default )
 					.Label(this, &SSCSEditorViewportToolBar::GetViewMenuLabel)
-					.LabelIcon(this, &SSCSEditorViewportToolBar::GetViewMenuLabelIcon)
 					.OnGetMenuContent(this, &SSCSEditorViewportToolBar::GenerateViewMenu)
 				]
 				+ SHorizontalBox::Slot()
-				.Padding( 3.0f, 1.0f )
+				.Padding(ToolbarSlotPadding)
 				.HAlign( HAlign_Right )
 				[
 					SNew(STransformViewportToolBar)
@@ -119,16 +152,6 @@ public:
 		return NSLOCTEXT("BlueprintEditor", "CameraMenuTitle_Default", "Camera");
 	}
 
-	const FSlateBrush* GetCameraMenuLabelIcon() const
-	{
-		if(EditorViewport.IsValid())
-		{
-			return GetCameraMenuLabelIconFromViewportType( EditorViewport.Pin()->GetViewportClient()->GetViewportType() );
-		}
-
-		return FEditorStyle::GetBrush(NAME_None);
-	}
-
 	TSharedRef<SWidget> GenerateCameraMenu() const
 	{
 		TSharedPtr<const FUICommandList> CommandList = EditorViewport.IsValid()? EditorViewport.Pin()->GetCommandList(): nullptr;
@@ -169,39 +192,14 @@ public:
 			case VMI_BrushWireframe:
 				Label = NSLOCTEXT("BlueprintEditor", "ViewMenuTitle_Wireframe", "Wireframe");
 				break;
+
+			case VMI_CollisionVisibility:
+				Label = NSLOCTEXT("BlueprintEditor", "ViewMenuTitle_CollisionVisibility", "Collision Visibility");
+				break;
 			}
 		}
 
 		return Label;
-	}
-
-	const FSlateBrush* GetViewMenuLabelIcon() const
-	{
-		static FName LitModeIconName("EditorViewport.LitMode");
-		static FName UnlitModeIconName("EditorViewport.UnlitMode");
-		static FName WireframeModeIconName("EditorViewport.WireframeMode");
-
-		FName Icon = NAME_None;
-
-		if (EditorViewport.IsValid())
-		{
-			switch (EditorViewport.Pin()->GetViewportClient()->GetViewMode())
-			{
-			case VMI_Lit:
-				Icon = LitModeIconName;
-				break;
-
-			case VMI_Unlit:
-				Icon = UnlitModeIconName;
-				break;
-
-			case VMI_BrushWireframe:
-				Icon = WireframeModeIconName;
-				break;
-			}
-		}
-
-		return FEditorStyle::GetBrush(Icon);
 	}
 
 	TSharedRef<SWidget> GenerateViewMenu() const
@@ -214,6 +212,7 @@ public:
 		ViewMenuBuilder.AddMenuEntry(FEditorViewportCommands::Get().LitMode, NAME_None, NSLOCTEXT("BlueprintEditor", "LitModeMenuOption", "Lit"));
 		ViewMenuBuilder.AddMenuEntry(FEditorViewportCommands::Get().UnlitMode, NAME_None, NSLOCTEXT("BlueprintEditor", "UnlitModeMenuOption", "Unlit"));
 		ViewMenuBuilder.AddMenuEntry(FEditorViewportCommands::Get().WireframeMode, NAME_None, NSLOCTEXT("BlueprintEditor", "WireframeModeMenuOption", "Wireframe"));
+		ViewMenuBuilder.AddMenuEntry(FEditorViewportCommands::Get().CollisionVisibility, NAME_None, NSLOCTEXT("BlueprintEditor", "CollisionVisibilityMenuOption", "Visibility Collision"));
 
 		return ViewMenuBuilder.MakeWidget();
 	}
@@ -243,7 +242,7 @@ void SSCSEditorViewport::Construct(const FArguments& InArgs)
 		UWorld* World = ViewportClient->GetPreviewScene()->GetWorld();
 		if (World != nullptr)
 		{
-			World->ChangeFeatureLevel(GWorld->FeatureLevel);
+			World->ChangeFeatureLevel(GWorld->GetFeatureLevel());
 		}
 	}
 
@@ -326,8 +325,9 @@ void SSCSEditorViewport::BindCommands()
 	FSCSEditorViewportCommands::Register(); // make sure the viewport specific commands have been registered
 
 	TSharedPtr<FBlueprintEditor> BlueprintEditor = BlueprintEditorPtr.Pin();
-	TSharedPtr<SSCSEditor> SCSEditorWidgetPtr = BlueprintEditor->GetSCSEditor();
-	SSCSEditor* SCSEditorWidget = SCSEditorWidgetPtr.Get();
+	TSharedPtr<SSubobjectEditor> SubobjectEditorPtr = BlueprintEditor->GetSubobjectEditor();
+	SSubobjectEditor* SubobjectEditorWidget = SubobjectEditorPtr.Get(); 
+	
 	// for mac, we have to bind a command that would override the BP-Editor's 
 	// "NavigateToParentBackspace" command, because the delete key is the 
 	// backspace key for that platform (and "NavigateToParentBackspace" does not 
@@ -335,13 +335,18 @@ void SSCSEditorViewport::BindCommands()
 	// 
 	// NOTE: this needs to come before we map any other actions (so it is 
 	// prioritized first)
-	CommandList->MapAction(
-		FSCSEditorViewportCommands::Get().DeleteComponent,
-		FExecuteAction::CreateSP(SCSEditorWidget, &SSCSEditor::OnDeleteNodes),
-		FCanExecuteAction::CreateSP(SCSEditorWidget, &SSCSEditor::CanDeleteNodes)
-	);
 
-	CommandList->Append(BlueprintEditor->GetSCSEditor()->CommandList.ToSharedRef());
+	if(SubobjectEditorWidget)
+	{
+		CommandList->MapAction(
+		    FSCSEditorViewportCommands::Get().DeleteComponent,
+		    FExecuteAction::CreateSP(SubobjectEditorWidget, &SSubobjectEditor::OnDeleteNodes),
+		    FCanExecuteAction::CreateSP(SubobjectEditorWidget, &SSubobjectEditor::CanDeleteNodes)
+		);
+		
+		CommandList->Append(SubobjectEditorWidget->GetCommandList().ToSharedRef());
+	}
+	
 	CommandList->Append(BlueprintEditor->GetToolkitCommands());
 	SEditorViewport::BindCommands();
 
@@ -357,7 +362,7 @@ void SSCSEditorViewport::BindCommands()
 	// Toggle camera lock on/off
 	CommandList->MapAction(
 		Commands.ResetCamera,
-		FExecuteAction::CreateSP(ViewportClient.Get(), &FSCSEditorViewportClient::ResetCamera) );
+		FExecuteAction::CreateSP(ViewportClient.Get(), &FSCSEditorViewportClient::ResetCamera));
 
 	CommandList->MapAction(
 		Commands.ShowFloor,
@@ -461,8 +466,9 @@ TSharedPtr<SDockTab> SSCSEditorViewport::GetOwnerTab() const
 
 FReply SSCSEditorViewport::OnDrop(const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent)
 {
-	TSharedPtr<SSCSEditor> SCSEditor = BlueprintEditorPtr.Pin()->GetSCSEditor();
-	return SCSEditor->TryHandleAssetDragDropOperation(DragDropEvent);
+	TSharedPtr<SSubobjectEditor> SubobjectEditor = BlueprintEditorPtr.Pin()->GetSubobjectEditor();
+
+	return SubobjectEditor->TryHandleAssetDragDropOperation(DragDropEvent);
 }
 
 EActiveTimerReturnType SSCSEditorViewport::DeferredUpdatePreview(double InCurrentTime, float InDeltaTime, bool bResetCamera)

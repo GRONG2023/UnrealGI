@@ -7,7 +7,7 @@
 #include "Engine/EngineBaseTypes.h"
 #include "Widgets/SWidget.h"
 #include "Framework/Commands/Commands.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Engine/TextureStreamingTypes.h"
 
 class FUICommandList;
@@ -110,6 +110,8 @@ public:
 	TSharedPtr< FUICommandInfo > RequiredTextureResolutionMode;
 	TSharedPtr< FUICommandInfo > RequiredTextureResolutionSingle[TEXSTREAM_MAX_NUM_TEXTURES_PER_MATERIAL];
 
+	TSharedPtr< FUICommandInfo > VirtualTexturePendingMipsMode;
+
 	/** Changes the viewport to stationary light overlap mode */
 	TSharedPtr< FUICommandInfo > StationaryLightOverlapMode;
 
@@ -127,6 +129,24 @@ public:
 
 	/** Changes the viewport to visualize the buffer content */
 	TSharedPtr< FUICommandInfo > VisualizeBufferMode;
+
+	/** Changes the viewport to visualize Nanite content */
+	TSharedPtr< FUICommandInfo > VisualizeNaniteMode;
+
+	/** Changes the viewport to visualize Lumen debug views */
+	TSharedPtr< FUICommandInfo > VisualizeLumenMode;
+
+	/** Changes the viewport to visualize Substrate debug views */
+	TSharedPtr< FUICommandInfo > VisualizeSubstrateMode;
+
+	/** Changes the viewport to visualize Groom debug views */
+	TSharedPtr< FUICommandInfo > VisualizeGroomMode;
+
+	/** Changes the viewport to visualize virtual shadow map content */
+	TSharedPtr< FUICommandInfo > VisualizeVirtualShadowMapMode;
+
+	/** Changes the viewport to Skin Cache mode */
+	TSharedPtr< FUICommandInfo > VisualizeGPUSkinCacheMode;
 
 	/** Collision Draw Mode */
 	TSharedPtr< FUICommandInfo > CollisionPawn;
@@ -159,6 +179,9 @@ public:
 	/** Captures the viewport and updates the project thumbnail png file */
 	TSharedPtr< FUICommandInfo > ScreenCaptureForProjectThumbnail;
 
+	/** Select Mode */
+	TSharedPtr< FUICommandInfo > SelectMode;
+
 	/** Translate Mode */
 	TSharedPtr< FUICommandInfo > TranslateMode;
 
@@ -189,12 +212,22 @@ public:
 	TSharedPtr< FUICommandInfo > CycleTransformGizmos;
 	TSharedPtr< FUICommandInfo > CycleTransformGizmoCoordSystem;
 
+	TSharedPtr< FUICommandInfo > FocusAllViewportsToSelection;
 	TSharedPtr< FUICommandInfo > FocusViewportToSelection;
+	TSharedPtr< FUICommandInfo > FocusOutlinerToSelection;
 
 	/** Toggle automatic exposure */
 	TSharedPtr< FUICommandInfo > ToggleAutoExposure;
 	/** Toggle game settings exposure */
 	TSharedPtr< FUICommandInfo > ToggleInGameExposure;
+	/** Toggle the in-viewport context menu */
+	TSharedPtr< FUICommandInfo > ToggleInViewportContextMenu;
+
+	/** Toggle to override the viewport screen percentage */
+	TSharedPtr< FUICommandInfo > ToggleOverrideViewportScreenPercentage;
+	/** Opens the advanced viewport settings */
+	TSharedPtr< FUICommandInfo > OpenEditorPerformanceProjectSettings;
+	TSharedPtr< FUICommandInfo > OpenEditorPerformanceEditorPreferences;
 
 	/**
 	 * Grid commands

@@ -4,7 +4,11 @@
 #include "TimerManager.h"
 #include "Engine/World.h"
 
-UPawnAction_Wait::UPawnAction_Wait(const FObjectInitializer& ObjectInitializer)
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PawnAction_Wait)
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+
+UDEPRECATED_PawnAction_Wait::UDEPRECATED_PawnAction_Wait(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 	, TimeToWait(0.f)
 	, FinishTimeStamp(0.f)
@@ -12,9 +16,9 @@ UPawnAction_Wait::UPawnAction_Wait(const FObjectInitializer& ObjectInitializer)
 
 }
 
-UPawnAction_Wait* UPawnAction_Wait::CreateAction(UWorld& World, float InTimeToWait)
+UDEPRECATED_PawnAction_Wait* UDEPRECATED_PawnAction_Wait::CreateAction(UWorld& World, float InTimeToWait)
 {
-	UPawnAction_Wait* Action = UPawnAction::CreateActionInstance<UPawnAction_Wait>(World);
+	UDEPRECATED_PawnAction_Wait* Action = UDEPRECATED_PawnAction::CreateActionInstance<UDEPRECATED_PawnAction_Wait>(World);
 	
 	if (Action != NULL)
 	{
@@ -24,13 +28,13 @@ UPawnAction_Wait* UPawnAction_Wait::CreateAction(UWorld& World, float InTimeToWa
 	return Action;
 }
 
-bool UPawnAction_Wait::Start()
+bool UDEPRECATED_PawnAction_Wait::Start()
 {
 	if (Super::Start())
 	{
 		if (TimeToWait >= 0)
 		{
-			GetWorld()->GetTimerManager().SetTimer(TimerHandle, this, &UPawnAction_Wait::TimerDone, TimeToWait);
+			GetWorld()->GetTimerManager().SetTimer(TimerHandle, this, &UDEPRECATED_PawnAction_Wait::TimerDone, TimeToWait);
 		}
 		// else hang in there for ever!
 
@@ -40,25 +44,27 @@ bool UPawnAction_Wait::Start()
 	return false;
 }
 
-bool UPawnAction_Wait::Pause(const UPawnAction* PausedBy)
+bool UDEPRECATED_PawnAction_Wait::Pause(const UDEPRECATED_PawnAction* PausedBy)
 {
 	GetWorld()->GetTimerManager().PauseTimer(TimerHandle);
 	return true;
 }
 
-bool UPawnAction_Wait::Resume()
+bool UDEPRECATED_PawnAction_Wait::Resume()
 {
 	GetWorld()->GetTimerManager().UnPauseTimer(TimerHandle);
 	return true;
 }
 
-EPawnActionAbortState::Type UPawnAction_Wait::PerformAbort(EAIForceParam::Type ShouldForce)
+EPawnActionAbortState::Type UDEPRECATED_PawnAction_Wait::PerformAbort(EAIForceParam::Type ShouldForce)
 {
 	GetWorld()->GetTimerManager().ClearTimer(TimerHandle);
 	return EPawnActionAbortState::AbortDone;
 }
 
-void UPawnAction_Wait::TimerDone()
+void UDEPRECATED_PawnAction_Wait::TimerDone()
 {
 	Finish(EPawnActionResult::Success);
 }
+
+PRAGMA_ENABLE_DEPRECATION_WARNINGS

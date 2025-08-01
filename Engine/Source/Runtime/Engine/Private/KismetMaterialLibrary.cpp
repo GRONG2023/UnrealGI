@@ -1,14 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Kismet/KismetMaterialLibrary.h"
-#include "EngineGlobals.h"
 #include "Engine/Engine.h"
+#include "Engine/World.h"
 #include "Materials/MaterialInstanceDynamic.h"
-#include "Logging/TokenizedMessage.h"
 #include "Logging/MessageLog.h"
 #include "Misc/UObjectToken.h"
 #include "Materials/MaterialParameterCollection.h"
 #include "Materials/MaterialParameterCollectionInstance.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(KismetMaterialLibrary)
 
 //////////////////////////////////////////////////////////////////////////
 // UKismetMaterialLibrary
@@ -126,10 +127,10 @@ class UMaterialInstanceDynamic* UKismetMaterialLibrary::CreateDynamicMaterialIns
 	if (Parent)
 	{
 
-		// MIDs need to be created within a persistent object if in the construction script (or editor utility) or else they will not be saved.
-		// If this MID is created at runtime then put it in the transient package
+		// In editor MIDs need to be created within a persistent object or else they will not be saved.
+		// If this MID is created at runtime or specifically marked as transient then put it in the transient package.
 		UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::ReturnNull);
-		UObject* MIDOuter = (!EnumHasAnyFlags(CreationFlags, EMIDCreationFlags::Transient) &&  World && (World->bIsRunningConstructionScript  || !World->IsGameWorld()) ? WorldContextObject : nullptr);
+		UObject* MIDOuter = !EnumHasAnyFlags(CreationFlags, EMIDCreationFlags::Transient) && World && !World->IsGameWorld() ? WorldContextObject : nullptr;
 		NewMID = UMaterialInstanceDynamic::Create(Parent, MIDOuter, OptionalName);
 		if (MIDOuter == nullptr)
 		{
@@ -141,3 +142,4 @@ class UMaterialInstanceDynamic* UKismetMaterialLibrary::CreateDynamicMaterialIns
 }
 
 #undef LOCTEXT_NAMESPACE
+

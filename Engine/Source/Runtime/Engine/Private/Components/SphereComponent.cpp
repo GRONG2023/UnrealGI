@@ -2,13 +2,15 @@
 
 
 #include "Components/SphereComponent.h"
-#include "WorldCollision.h"
+#include "CollisionShape.h"
+#include "PhysicsEngine/BodySetup.h"
 #include "PrimitiveViewRelevance.h"
 #include "PrimitiveSceneProxy.h"
 #include "PhysicsEngine/SphereElem.h"
 #include "SceneManagement.h"
-#include "PhysicsEngine/BodySetup.h"
 #include "PrimitiveSceneProxy.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SphereComponent)
 
 USphereComponent::USphereComponent(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -30,8 +32,8 @@ void USphereComponent::CalcBoundingCylinder(float& CylinderRadius, float& Cylind
 	CylinderHalfHeight = CylinderRadius;
 }
 
-template <EShapeBodySetupHelper UpdateBodySetupAction>
-bool InvalidateOrUpdateSphereBodySetup(UBodySetup*& ShapeBodySetup, bool bUseArchetypeBodySetup, float SphereRadius)
+template <EShapeBodySetupHelper UpdateBodySetupAction, typename BodySetupType>
+bool InvalidateOrUpdateSphereBodySetup(BodySetupType& ShapeBodySetup, bool bUseArchetypeBodySetup, float SphereRadius)
 {
 	check((bUseArchetypeBodySetup && UpdateBodySetupAction == EShapeBodySetupHelper::InvalidateSharingIfStale) || (!bUseArchetypeBodySetup && UpdateBodySetupAction == EShapeBodySetupHelper::UpdateBodySetup) );
 	check(ShapeBodySetup->AggGeom.SphereElems.Num() == 1);
@@ -39,7 +41,7 @@ bool InvalidateOrUpdateSphereBodySetup(UBodySetup*& ShapeBodySetup, bool bUseArc
 
 	// check for mal formed values
 	float Radius = SphereRadius;
-	if (Radius < KINDA_SMALL_NUMBER)
+	if (Radius < UE_KINDA_SMALL_NUMBER)
 	{
 		Radius = 0.1f;
 	}
@@ -120,6 +122,7 @@ FPrimitiveSceneProxy* USphereComponent::CreateSceneProxy()
 			,	bDrawOnlyIfSelected( InComponent->bDrawOnlyIfSelected )
 			,	SphereColor(InComponent->ShapeColor)
 			,	SphereRadius(InComponent->SphereRadius)
+			,	LineThickness(InComponent->LineThickness)
 		{
 			bWillEverBeLit = false;
 		}
@@ -157,9 +160,9 @@ FPrimitiveSceneProxy* USphereComponent::CreateSceneProxy()
 					FVector ScaledZ = LocalToWorld.GetUnitAxis(EAxis::Z) * MinAbsScale;
 
 					const int32 SphereSides = FMath::Clamp<int32>(SphereRadius / 4.f, 16, 64);
-					DrawCircle(PDI, LocalToWorld.GetOrigin(), ScaledX, ScaledY, DrawSphereColor, SphereRadius, SphereSides, SDPG_World);
-					DrawCircle(PDI, LocalToWorld.GetOrigin(), ScaledX, ScaledZ, DrawSphereColor, SphereRadius, SphereSides, SDPG_World);
-					DrawCircle(PDI, LocalToWorld.GetOrigin(), ScaledY, ScaledZ, DrawSphereColor, SphereRadius, SphereSides, SDPG_World);
+					DrawCircle(PDI, LocalToWorld.GetOrigin(), ScaledX, ScaledY, DrawSphereColor, SphereRadius, SphereSides, SDPG_World, LineThickness);
+					DrawCircle(PDI, LocalToWorld.GetOrigin(), ScaledX, ScaledZ, DrawSphereColor, SphereRadius, SphereSides, SDPG_World, LineThickness);
+					DrawCircle(PDI, LocalToWorld.GetOrigin(), ScaledY, ScaledZ, DrawSphereColor, SphereRadius, SphereSides, SDPG_World, LineThickness);
 				}
 			}
 		}
@@ -187,6 +190,7 @@ FPrimitiveSceneProxy* USphereComponent::CreateSceneProxy()
 		const uint32				bDrawOnlyIfSelected:1;
 		const FColor				SphereColor;
 		const float					SphereRadius;
+		const float					LineThickness;
 	};
 
 	return new FSphereSceneProxy( this );
@@ -205,3 +209,4 @@ bool USphereComponent::AreSymmetricRotations(const FQuat& A, const FQuat& B, con
 	// Not detecting rotations around non-uniform scale.
 	return Scale3D.GetAbs().AllComponentsEqual() || A.Equals(B);
 }
+

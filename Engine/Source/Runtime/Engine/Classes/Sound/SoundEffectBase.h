@@ -28,8 +28,8 @@ class USoundEffectPreset;
 #define EFFECT_PRESET_NAME(CLASS_NAME)			 EFFECT_PRESET_NAME1(CLASS_NAME, Preset)
 
 #define GET_EFFECT_SETTINGS(EFFECT_NAME) \
-		U##EFFECT_NAME##Preset* _Preset = CastChecked<U##EFFECT_NAME##Preset>(Preset); \
-		F##EFFECT_NAME##Settings Settings = _Preset->GetSettings(); \
+		U##EFFECT_NAME##Preset* _Preset = Cast<U##EFFECT_NAME##Preset>(Preset); \
+		F##EFFECT_NAME##Settings Settings = _Preset != nullptr ? _Preset->GetSettings() : F##EFFECT_NAME##Settings(); \
 
 #define EFFECT_PRESET_METHODS(EFFECT_NAME) \
 		virtual bool CanFilter() const override { return false; } \
@@ -86,6 +86,7 @@ public:
 	bool Update();
 
 	USoundEffectPreset* GetPreset();
+	TWeakObjectPtr<USoundEffectPreset>& GetPresetPtr();
 
 	/** Queries if the given preset object is the uobject preset for this preset instance, i.e. the preset which spawned this effect instance. */
 	bool IsPreset(USoundEffectPreset* InPreset) const;

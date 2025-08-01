@@ -2,11 +2,12 @@
 
 #pragma once
 
+#include "HAL/Platform.h"
 #include "MediaPacket.h"
 #include "Templates/RefCounting.h"
 #include "VideoCommon.h"
 
-#if PLATFORM_WINDOWS || (PLATFORM_XBOXONE && WITH_LEGACY_XDK)
+#if PLATFORM_WINDOWS
 
 namespace AVEncoder
 {
@@ -14,15 +15,16 @@ namespace AVEncoder
 //
 // Wrapper for IMFSample, to make it easier to report errors
 //
-class AVENCODER_API FIMFSampleWrapper
+class UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") FIMFSampleWrapper
 {
 public:
-
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	FIMFSampleWrapper(EPacketType InMediaType = EPacketType::Invalid, IMFSample* InSample = nullptr)
 		: MediaType(InMediaType)
 		, Sample(InSample)
 	{
 	}
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	const IMFSample* GetSample() const
 	{
@@ -34,19 +36,19 @@ public:
 		return Sample;
 	}
 
-	bool CreateSample();
+	AVENCODER_API bool CreateSample();
 
-	FTimespan GetTime() const;
+	AVENCODER_API FTimespan GetTime() const;
 
-	void SetTime(FTimespan Time);
+	AVENCODER_API void SetTime(FTimespan Time);
 
-	FTimespan GetDuration() const;
+	AVENCODER_API FTimespan GetDuration() const;
 
-	void SetDuration(FTimespan Duration);
+	AVENCODER_API void SetDuration(FTimespan Duration);
 
-	bool IsVideoKeyFrame() const;
+	AVENCODER_API bool IsVideoKeyFrame() const;
 
-	int GetBufferCount() const;
+	AVENCODER_API int GetBufferCount() const;
 
 	/**
 	*
@@ -91,14 +93,16 @@ public:
 		Sample = nullptr;
 	}
 
-	FIMFSampleWrapper Clone() const;
+	AVENCODER_API FIMFSampleWrapper Clone() const;
 
 private:
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	EPacketType MediaType;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	TRefCountPtr<IMFSample> Sample;
 };
 
 }
 
-#endif // PLATFORM_WINDOWS || (PLATFORM_XBOXONE && WITH_LEGACY_XDK)
+#endif // PLATFORM_WINDOWS
 

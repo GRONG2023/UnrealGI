@@ -2,7 +2,9 @@
 
 #pragma once
 
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "CoreMinimal.h"
+#endif
 #include "UObject/ObjectMacros.h"
 #include "Components/SceneComponent.h"
 #include "NavGraph/NavigationGraph.h"
@@ -17,10 +19,10 @@ class UNavigationGraphNodeComponent : public USceneComponent
 	FNavGraphNode Node;
 
 	UPROPERTY()
-	UNavigationGraphNodeComponent* NextNodeComponent;
+	TObjectPtr<UNavigationGraphNodeComponent> NextNodeComponent;
 
 	UPROPERTY()
-	UNavigationGraphNodeComponent* PrevNodeComponent;
+	TObjectPtr<UNavigationGraphNodeComponent> PrevNodeComponent;
 
 	//~ Begin UObject Interface.
 	virtual void BeginDestroy() override;

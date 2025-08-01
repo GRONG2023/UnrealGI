@@ -2,90 +2,25 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Layout/Visibility.h"
-#include "Widgets/SWidget.h"
+#include "Containers/Map.h"
+#include "Debugging/SKismetDebugTreeView.h"
+#include "HAL/Platform.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
-#include "Widgets/Views/STableViewBase.h"
-#include "Widgets/Views/STableRow.h"
-#include "Widgets/Views/STreeView.h"
 
-class FDebugLineItem;
-class FTraceStackParentItem;
+class SComboButton;
+class SHorizontalBox;
+class SSearchBox;
+class SWidget;
 class UBlueprint;
-class UBlueprintGeneratedClass;
-
-//////////////////////////////////////////////////////////////////////////
-// FDebugLineItem
-
-// Shared pointer to a debugging tree line entry
-typedef TSharedPtr<class FDebugLineItem> FDebugTreeItemPtr;
-
-// The base class for a line entry in the debugging tree view
-class FDebugLineItem : public TSharedFromThis<FDebugLineItem>
-{
-public:
-	enum EDebugLineType
-	{
-		DLT_Message,
-		DLT_TraceStackParent,
-		DLT_TraceStackChild,
-		DLT_Parent,
-		DLT_Watch,
-		DLT_LatentAction,
-		DLT_Breakpoint
-	};
-
-	virtual ~FDebugLineItem() {}
-	
-	// Create the widget for the name column
-	virtual TSharedRef<SWidget> GenerateNameWidget();
-
-	// Create the widget for the value column
-	virtual TSharedRef<SWidget> GenerateValueWidget();
-
-	// Add any context menu items that can act on this node
-	virtual void MakeMenu(class FMenuBuilder& MenuBuilder) { }
-
-	// Gather all of the children
-	virtual void GatherChildren(TArray<FDebugTreeItemPtr>& OutChildren) {}
-
-	// @return The object that will act as a parent to more items in the tree, or NULL if this is a leaf node
-	virtual UObject* GetParentObject() { return NULL; }
-
-	// Helper function to try to get the blueprint for a given object;
-	//   Returns the blueprint that was used to create the instance if there was one
-	//   Returns the object itself if it is already a blueprint
-	//   Otherwise returns NULL
-	static UBlueprint* GetBlueprintForObject(UObject* ParentObject);
-
-	static UBlueprintGeneratedClass* GetClassForObject(UObject* ParentObject);
-protected:
-	// Adds either Item or an identical node that was previously created (present in ChildrenMirrors) as a child to OutChildren
-	void EnsureChildIsAdded(TArray<FDebugTreeItemPtr>& ChildrenMirrors, TArray<FDebugTreeItemPtr>& OutChildren, const FDebugLineItem& Item);
-
-	// Cannot create an instance of this class, it's just for use as a base class
-	FDebugLineItem(EDebugLineType InType)
-		: Type(InType)
-	{
-	}
-
-	// Duplicate this item
-	virtual FDebugLineItem* Duplicate() const=0;
-
-	// Compare this item to another of the same type
-	virtual bool Compare(const FDebugLineItem* Other) const=0;
-
-	// @return The text to display in the name column, unless GenerateNameWidget is overridden
-	virtual FText GetDisplayName() const;
-
-	// @return The text to display in the value column, unless GenerateValueWidget is overridden
-	virtual FText GetDescription() const;
-private:
-	// Type of action (poor mans RTTI for the tree, really only used to accelerate Compare checks)
-	EDebugLineType Type;
-};
+class UClass;
+class UObject;
+struct FGeometry;
 
 //////////////////////////////////////////////////////////////////////////
 // SKismetDebuggingView
@@ -105,22 +40,50 @@ public:
 	// SWidget interface
 	virtual void Tick( const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime ) override;
 	// End of SWidget interface
+
+	/* set to an object that's paused at a breakpoint and null otherwise */
+	static TWeakObjectPtr<const UObject> CurrentActiveObject;
+	
+	FText GetTabLabel() const;
+
+	/** Registers the Kismet.DebuggingViewToolBar if it hasn't already been registered */
+	static void TryRegisterDebugToolbar();
+
+	void SetBlueprintToWatch(TWeakObjectPtr<UBlueprint> InBlueprintToWatch);
 protected:
 	FText GetTopText() const;
+	bool CanToggleAllBreakpoints() const;
+	FText GetToggleAllBreakpointsText() const;
+	FReply OnToggleAllBreakpointsClicked();
 
-	TSharedRef<ITableRow> OnGenerateRowForWatchTree(FDebugTreeItemPtr InItem, const TSharedRef<STableViewBase>& OwnerTable);
-	void OnGetChildrenForWatchTree(FDebugTreeItemPtr InParent, TArray<FDebugTreeItemPtr>& OutChildren);
-	EVisibility IsDebuggerVisible() const;
+	void OnBlueprintClassPicked(UClass* PickedClass);
+	TSharedRef<SWidget> ConstructBlueprintClassPicker();
 
-	TSharedPtr<SWidget> OnMakeContextMenu();
+	static TSharedRef<SHorizontalBox> GetDebugLineTypeToggle(FDebugLineItem::EDebugLineType Type, const FText& Text);
+	
+	// called when SearchBox query is changed by user
+	void OnSearchTextChanged(const FText& Text);
 protected:
-	TSharedPtr< STreeView<FDebugTreeItemPtr> > DebugTreeView;
+	TSharedPtr<SKismetDebugTreeView> DebugTreeView;
 	TMap<UObject*, FDebugTreeItemPtr> ObjectToTreeItemMap;
-	TArray<FDebugTreeItemPtr> RootTreeItems;
 
-	// The trace stack parent item
-	TSharedPtr< class FTraceStackParentItem > TraceStackItem;
+	// includes items such as breakpoints and Exectution trace
+	TSharedPtr< SKismetDebugTreeView > OtherTreeView;
 
-	/** Pointer to the blueprint to observe when not in PIE/SIE; can be NULL for a free-floating watch window */
+	// UI tree entries for stack trace and breakpoints
+	FDebugTreeItemPtr TraceStackItem;
+	FDebugTreeItemPtr BreakpointParentItem;
+
+	// Combo button for selecting which blueprint is being watched
+	TSharedPtr<SComboButton> DebugClassComboButton;
 	TWeakObjectPtr<UBlueprint> BlueprintToWatchPtr;
+
+	// Search Box for tree
+	TSharedPtr<SSearchBox> SearchBox;
+
+	// updating the tree every tick is slow. use this to
+	// update less frequently
+	static constexpr uint8 TreeUpdatesPerSecond = 2;
+	static constexpr float UpdateInterval = 1.f / TreeUpdatesPerSecond;
+	float TreeUpdateTimer = UpdateInterval;
 };

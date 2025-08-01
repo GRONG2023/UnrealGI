@@ -5,6 +5,7 @@
 #include "EdGraph/EdGraph.h"
 #include "Materials/Material.h"
 #include "MaterialGraph/MaterialGraphSchema.h"
+#include "MaterialGraph/MaterialGraphNode_Composite.h"
 #include "IMaterialEditor.h"
 
 #include "Materials/MaterialExpressionFunctionInput.h"
@@ -14,9 +15,11 @@
 #include "Materials/MaterialExpressionStaticBool.h"
 #include "Materials/MaterialExpressionStaticSwitch.h"
 #include "Materials/MaterialExpressionComment.h"
+#include "Materials/MaterialExpressionComposite.h"
 #include "Materials/MaterialExpressionTextureSample.h"
 #include "Materials/MaterialExpressionTextureSampleParameter.h"
 #include "Materials/MaterialExpressionRuntimeVirtualTextureSampleParameter.h"
+#include "Materials/MaterialExpressionSparseVolumeTextureSample.h"
 #include "Materials/MaterialExpressionFontSampleParameter.h"
 #include "Materials/MaterialExpressionMaterialFunctionCall.h"
 #include "Materials/MaterialExpressionScalarParameter.h"
@@ -25,7 +28,10 @@
 #include "Materials/MaterialExpressionCustomOutput.h"
 #include "Materials/MaterialExpressionMaterialAttributeLayers.h"
 #include "Materials/MaterialExpressionRerouteBase.h"
+#include "Materials/MaterialExpressionExecBegin.h"
+#include "Materials/MaterialExpressionExecEnd.h"
 
+#include "DebugViewModeHelpers.h"
 #include "Toolkits/ToolkitManager.h"
 #include "MaterialEditor.h"
 #include "MaterialExpressionClasses.h"
@@ -45,9 +51,19 @@ UMaterialExpression* FMaterialEditorUtilities::CreateNewMaterialExpression(const
 	TSharedPtr<class IMaterialEditor> MaterialEditor = GetIMaterialEditorForObject(Graph);
 	if (MaterialEditor.IsValid())
 	{
-		return MaterialEditor->CreateNewMaterialExpression(NewExpressionClass, NodePos, bAutoSelect, bAutoAssignResource);
+		return MaterialEditor->CreateNewMaterialExpression(NewExpressionClass, NodePos, bAutoSelect, bAutoAssignResource, Graph);
 	}
-	return NULL;
+	return nullptr;
+}
+
+UMaterialExpressionComposite* FMaterialEditorUtilities::CreateNewMaterialExpressionComposite(const class UEdGraph* Graph, const FVector2D& NodePos)
+{
+	TSharedPtr<class IMaterialEditor> MaterialEditor = GetIMaterialEditorForObject(Graph);
+	if (MaterialEditor.IsValid())
+	{
+		return MaterialEditor->CreateNewMaterialExpressionComposite(NodePos, Graph);
+	}
+	return nullptr;
 }
 
 UMaterialExpressionComment* FMaterialEditorUtilities::CreateNewMaterialExpressionComment(const class UEdGraph* Graph, const FVector2D& NodePos)
@@ -55,9 +71,9 @@ UMaterialExpressionComment* FMaterialEditorUtilities::CreateNewMaterialExpressio
 	TSharedPtr<class IMaterialEditor> MaterialEditor = GetIMaterialEditorForObject(Graph);
 	if (MaterialEditor.IsValid())
 	{
-		return MaterialEditor->CreateNewMaterialExpressionComment(NodePos);
+		return MaterialEditor->CreateNewMaterialExpressionComment(NodePos, Graph);
 	}
-	return NULL;
+	return nullptr;
 }
 
 void FMaterialEditorUtilities::ForceRefreshExpressionPreviews(const class UEdGraph* Graph)
@@ -113,6 +129,24 @@ void FMaterialEditorUtilities::UpdateMaterialAfterGraphChange(const class UEdGra
 	if (MaterialEditor.IsValid())
 	{
 		MaterialEditor->UpdateMaterialAfterGraphChange();
+	}
+}
+
+void FMaterialEditorUtilities::MarkMaterialDirty(const class UEdGraph* Graph)
+{
+	TSharedPtr<class IMaterialEditor> MaterialEditor = GetIMaterialEditorForObject(Graph);
+	if (MaterialEditor.IsValid())
+	{
+		MaterialEditor->MarkMaterialDirty();
+	}
+}
+
+void FMaterialEditorUtilities::UpdateDetailView(const class UEdGraph* Graph)
+{
+	TSharedPtr<class IMaterialEditor> MaterialEditor = GetIMaterialEditorForObject(Graph);
+	if (MaterialEditor.IsValid())
+	{
+		MaterialEditor->UpdateDetailView();
 	}
 }
 
@@ -221,19 +255,42 @@ void FMaterialEditorUtilities::UpdateSearchResults(const class UEdGraph* Graph)
 
 void FMaterialEditorUtilities::GetVisibleMaterialParameters(const UMaterial* Material, UMaterialInstance* MaterialInstance, TArray<FMaterialParameterInfo>& VisibleExpressions)
 {
+	check(Material);
+	check(MaterialInstance);
+
 	VisibleExpressions.Empty();
+	if (Material->IsUsingNewHLSLGenerator())
+	{
+		// When using the new HLSL generator, MI parameter list will already have unused parameters culled
+		// We can assume that any remaining parameters are visible
+		TArray<FMaterialParameterInfo> ParameterInfo;
+		TArray<FGuid> ParamterGuid;
+		for (int32 TypeIndex = 0; TypeIndex < NumMaterialParameterTypes; ++TypeIndex)
+		{
+			MaterialInstance->GetAllParameterInfoOfType((EMaterialParameterType)TypeIndex, ParameterInfo, ParamterGuid);
+			VisibleExpressions.Append(ParameterInfo);
+		}
+		return;
+	}
 
 	TUniquePtr<FGetVisibleMaterialParametersFunctionState> FunctionState = MakeUnique<FGetVisibleMaterialParametersFunctionState>(nullptr);
 	TArray<FGetVisibleMaterialParametersFunctionState*> FunctionStack;
 	FunctionStack.Push(FunctionState.Get());
 
-	for(uint32 i = 0; i < MP_MAX; ++i)
+	if (Material->IsUsingControlFlow())
 	{
-		FExpressionInput* ExpressionInput = ((UMaterial *)Material)->GetExpressionInputForProperty((EMaterialProperty)i);
-
-		if(ExpressionInput)
+		GetVisibleMaterialParametersFromExpression(FMaterialExpressionKey(Material->GetExpressionExecBegin(), INDEX_NONE), MaterialInstance, VisibleExpressions, FunctionStack);
+	}
+	else
+	{
+		for (uint32 i = 0; i < MP_MAX; ++i)
 		{
-			GetVisibleMaterialParametersFromExpression(FMaterialExpressionKey(ExpressionInput->Expression, ExpressionInput->OutputIndex), MaterialInstance, VisibleExpressions, FunctionStack);
+			FExpressionInput* ExpressionInput = ((UMaterial*)Material)->GetExpressionInputForProperty((EMaterialProperty)i);
+
+			if (ExpressionInput)
+			{
+				GetVisibleMaterialParametersFromExpression(FMaterialExpressionKey(ExpressionInput->Expression, ExpressionInput->OutputIndex), MaterialInstance, VisibleExpressions, FunctionStack);
+			}
 		}
 	}
 
@@ -259,20 +316,21 @@ bool FMaterialEditorUtilities::GetStaticSwitchExpressionValue(UMaterialInstance*
 	if(FunctionInputExpression && FunctionInputExpression->InputType == FunctionInput_StaticBool)
 	{
 		FGetVisibleMaterialParametersFunctionState* TopmostFunctionState = FunctionStack.Pop();
-		check(TopmostFunctionState->FunctionCall);
-		const TArray<FFunctionExpressionInput>* FunctionInputs = &TopmostFunctionState->FunctionCall->FunctionInputs;
-
-		// Get the FFunctionExpressionInput which stores information about the input node from the parent that this is linked to.
-		const FFunctionExpressionInput* MatchingInput = FindInputById(FunctionInputExpression, *FunctionInputs);
-		if (MatchingInput && (MatchingInput->Input.Expression || !FunctionInputExpression->bUsePreviewValueAsDefault))
+		if (TopmostFunctionState->FunctionCall)
 		{
-			GetStaticSwitchExpressionValue(MaterialInstance, MatchingInput->Input.Expression, bOutValue, OutExpressionID, FunctionStack);
-		}
-		else
-		{
-			GetStaticSwitchExpressionValue(MaterialInstance, FunctionInputExpression->Preview.Expression, bOutValue, OutExpressionID, FunctionStack);
-		}
+			const TArray<FFunctionExpressionInput>* FunctionInputs = &TopmostFunctionState->FunctionCall->FunctionInputs;
 
+			// Get the FFunctionExpressionInput which stores information about the input node from the parent that this is linked to.
+			const FFunctionExpressionInput* MatchingInput = FindInputById(FunctionInputExpression, *FunctionInputs);
+			if (MatchingInput && (MatchingInput->Input.Expression || !FunctionInputExpression->bUsePreviewValueAsDefault))
+			{
+				GetStaticSwitchExpressionValue(MaterialInstance, MatchingInput->Input.Expression, bOutValue, OutExpressionID, FunctionStack);
+			}
+			else
+			{
+				GetStaticSwitchExpressionValue(MaterialInstance, FunctionInputExpression->Preview.Expression, bOutValue, OutExpressionID, FunctionStack);
+			}
+		}
 		FunctionStack.Push(TopmostFunctionState);
 	}
 
@@ -333,8 +391,7 @@ void FMaterialEditorUtilities::InitExpressions(UMaterial* Material)
 {
 	FString ParmName;
 
-	Material->EditorComments.Empty();
-	Material->Expressions.Empty();
+	Material->GetExpressionCollection().Empty();
 
 	TArray<UObject*> ChildObjects;
 	GetObjectsWithOuter(Material, ChildObjects, /*bIncludeNestedObjects=*/false);
@@ -342,16 +399,24 @@ void FMaterialEditorUtilities::InitExpressions(UMaterial* Material)
 	for ( int32 ChildIdx = 0; ChildIdx < ChildObjects.Num(); ++ChildIdx )
 	{
 		UMaterialExpression* MaterialExpression = Cast<UMaterialExpression>(ChildObjects[ChildIdx]);
-		if( MaterialExpression != NULL && !MaterialExpression->IsPendingKill() )
+		if( IsValid(MaterialExpression) )
 		{
 			// Comment expressions are stored in a separate list.
 			if ( MaterialExpression->IsA( UMaterialExpressionComment::StaticClass() ) )
 			{
-				Material->EditorComments.Add( static_cast<UMaterialExpressionComment*>(MaterialExpression) );
+				Material->GetExpressionCollection().AddComment( static_cast<UMaterialExpressionComment*>(MaterialExpression) );
 			}
 			else
 			{
-				Material->Expressions.Add( MaterialExpression );
+				Material->GetExpressionCollection().AddExpression( MaterialExpression );
+				if (MaterialExpression->IsA(UMaterialExpressionExecBegin::StaticClass()))
+				{
+					Material->GetExpressionCollection().ExpressionExecBegin = static_cast<UMaterialExpressionExecBegin*>(MaterialExpression);
+				}
+				else if (MaterialExpression->IsA(UMaterialExpressionExecEnd::StaticClass()))
+				{
+					Material->GetExpressionCollection().ExpressionExecEnd = static_cast<UMaterialExpressionExecEnd*>(MaterialExpression);
+				}
 			}
 		}
 	}
@@ -360,18 +425,15 @@ void FMaterialEditorUtilities::InitExpressions(UMaterial* Material)
 
 	// Propagate RF_Transactional to all referenced material expressions.
 	Material->SetFlags( RF_Transactional );
-	for( int32 MaterialExpressionIndex = 0 ; MaterialExpressionIndex < Material->Expressions.Num() ; ++MaterialExpressionIndex )
+	for(UMaterialExpression* MaterialExpression : Material->GetExpressions())
 	{
-		UMaterialExpression* MaterialExpression = Material->Expressions[ MaterialExpressionIndex ];
-
 		if(MaterialExpression)
 		{
 			MaterialExpression->SetFlags( RF_Transactional );
 		}
 	}
-	for( int32 MaterialExpressionIndex = 0 ; MaterialExpressionIndex < Material->EditorComments.Num() ; ++MaterialExpressionIndex )
+	for(UMaterialExpressionComment* Comment : Material->GetEditorComments())
 	{
-		UMaterialExpressionComment* Comment = Material->EditorComments[ MaterialExpressionIndex ];
 		Comment->SetFlags( RF_Transactional );
 	}
 }
@@ -410,6 +472,7 @@ void FMaterialEditorUtilities::GetVisibleMaterialParametersFromExpression(
 	UMaterialExpressionParameter* Param = Cast<UMaterialExpressionParameter>( MaterialExpressionKey.Expression );
 	UMaterialExpressionTextureSampleParameter* TexParam = Cast<UMaterialExpressionTextureSampleParameter>( MaterialExpressionKey.Expression );
 	UMaterialExpressionRuntimeVirtualTextureSampleParameter* RuntimeVirtualTexParam = Cast<UMaterialExpressionRuntimeVirtualTextureSampleParameter>(MaterialExpressionKey.Expression);
+	UMaterialExpressionSparseVolumeTextureSampleParameter* SparseVolumeTexParam = Cast<UMaterialExpressionSparseVolumeTextureSampleParameter>(MaterialExpressionKey.Expression);
 	UMaterialExpressionFontSampleParameter* FontParam = Cast<UMaterialExpressionFontSampleParameter>( MaterialExpressionKey.Expression );
 
 	if (Param)
@@ -424,12 +487,16 @@ void FMaterialEditorUtilities::GetVisibleMaterialParametersFromExpression(
 	{
 		ParameterInfo.Name = RuntimeVirtualTexParam->ParameterName;
 	}
+	else if (SparseVolumeTexParam)
+	{
+		ParameterInfo.Name = SparseVolumeTexParam->ParameterName;
+	}
 	else if (FontParam)
 	{
 		ParameterInfo.Name = FontParam->ParameterName;
 	}
 		
-	if (Param || TexParam || FontParam || RuntimeVirtualTexParam)
+	if (Param || TexParam || FontParam || RuntimeVirtualTexParam || SparseVolumeTexParam)
 	{
 		VisibleExpressions.AddUnique(ParameterInfo);
 	}
@@ -479,7 +546,7 @@ void FMaterialEditorUtilities::GetVisibleMaterialParametersFromExpression(
 	}
 	else if (FunctionCallExpression)
 	{
-		if (FunctionCallExpression->MaterialFunction)
+		if (FunctionCallExpression->MaterialFunction && FunctionCallExpression->FunctionOutputs.IsValidIndex(MaterialExpressionKey.OutputIndex))
 		{			
 			for (int32 FunctionCallIndex = 0; FunctionCallIndex < FunctionStack.Num(); FunctionCallIndex++)
 			{
@@ -498,22 +565,20 @@ void FMaterialEditorUtilities::GetVisibleMaterialParametersFromExpression(
 	}
 	else if (LayersExpression)
 	{
-		FMaterialLayersFunctions LayersValue;
-		FGuid LayersGuid;
-
-		ParameterInfo.Name = LayersExpression->ParameterName;
-		VisibleExpressions.AddUnique(ParameterInfo);
+		//ParameterInfo.Name = LayersExpression->ParameterName;
+		//VisibleExpressions.AddUnique(ParameterInfo);
 
 		// TODO: We only need to traverse a solo Layer[0] or the final Blend[N-1] here it will recurse anyway
-		if (MaterialInstance->GetMaterialLayersParameterValue(ParameterInfo, LayersValue, LayersGuid))
+		FMaterialLayersFunctions LayersValue;
+		if (MaterialInstance->GetMaterialLayers(LayersValue))
 		{
 			LayersExpression->OverrideLayerGraph(&LayersValue);
-
 			if (LayersExpression->bIsLayerGraphBuilt)
 			{
-				for (auto* Layer : LayersExpression->LayerCallers)
+				for (auto& Layer : LayersExpression->LayerCallers)
 				{
-					if (Layer && Layer->MaterialFunction)
+					// Possible that Layer->FunctionOutputs will be empty if this is a newly create layer
+					if (Layer && Layer->MaterialFunction && Layer->FunctionOutputs.IsValidIndex(MaterialExpressionKey.OutputIndex))
 					{
 						TUniquePtr<FGetVisibleMaterialParametersFunctionState> NewFunctionState = MakeUnique<FGetVisibleMaterialParametersFunctionState>(Layer);
 						FunctionStack.Push(NewFunctionState.Get());
@@ -524,9 +589,9 @@ void FMaterialEditorUtilities::GetVisibleMaterialParametersFromExpression(
 					}
 				}
 
-				for (auto* Blend : LayersExpression->BlendCallers)
+				for (auto& Blend : LayersExpression->BlendCallers)
 				{
-					if (Blend && Blend->MaterialFunction)
+					if (Blend && Blend->MaterialFunction && Blend->FunctionOutputs.IsValidIndex(MaterialExpressionKey.OutputIndex))
 					{
 						TUniquePtr<FGetVisibleMaterialParametersFunctionState> NewFunctionState = MakeUnique<FGetVisibleMaterialParametersFunctionState>(Blend);
 						FunctionStack.Push(NewFunctionState.Get());
@@ -550,7 +615,7 @@ void FMaterialEditorUtilities::GetVisibleMaterialParametersFromExpression(
 
 		const FFunctionExpressionInput* MatchingInput = FindInputById(FunctionInputExpression, FunctionState->FunctionCall->FunctionInputs);
 		check(MatchingInput);
-
+		
 		GetVisibleMaterialParametersFromExpression(FMaterialExpressionKey(MatchingInput->Input.Expression, MatchingInput->Input.OutputIndex), MaterialInstance, VisibleExpressions, FunctionStack);
 
 		FunctionStack.Push(FunctionState);
@@ -565,12 +630,18 @@ void FMaterialEditorUtilities::GetVisibleMaterialParametersFromExpression(
 		}
 		else
 		{
-			const TArray<FExpressionInput*>& ExpressionInputs = MaterialExpressionKey.Expression->GetInputs();
-			for (int32 ExpressionInputIndex = 0; ExpressionInputIndex < ExpressionInputs.Num(); ExpressionInputIndex++)
+			// Retrieve the expression input and then start parsing its children
+			for (int32 i = 0; i < MaterialExpressionKey.Expression->GetInputsView().Num(); i++)
 			{
-				//retrieve the expression input and then start parsing its children
-				FExpressionInput* Input = ExpressionInputs[ExpressionInputIndex];
+				FExpressionInput* Input = MaterialExpressionKey.Expression->GetInputsView()[i];
 				GetVisibleMaterialParametersFromExpression(FMaterialExpressionKey(Input->Expression, Input->OutputIndex), MaterialInstance, VisibleExpressions, FunctionStack);
+			}
+
+			TArray<FExpressionExecOutputEntry> ExpressionExecOutputs;
+			MaterialExpressionKey.Expression->GetExecOutputs(ExpressionExecOutputs);
+			for (const FExpressionExecOutputEntry& Entry : ExpressionExecOutputs)
+			{
+				GetVisibleMaterialParametersFromExpression(FMaterialExpressionKey(Entry.Output->GetExpression(), INDEX_NONE), MaterialInstance, VisibleExpressions, FunctionStack);
 			}
 		}
 	}
@@ -588,6 +659,15 @@ TSharedPtr<class IMaterialEditor> FMaterialEditorUtilities::GetIMaterialEditorFo
 	// Find the associated Material
 	UMaterial* Material = Cast<UMaterial>(ObjectToFocusOn->GetOuter());
 
+	// May be inspecting a subgraph, in which case, get the material from the composite node 
+	if (!Material)
+	{
+		if (UMaterialGraphNode_Composite* Composite = Cast<UMaterialGraphNode_Composite>(ObjectToFocusOn->GetOuter()))
+		{
+			Material = Composite->MaterialExpression->Material;
+		}
+	}
+
 	TSharedPtr<IMaterialEditor> MaterialEditor;
 	if (Material != NULL)
 	{
@@ -598,6 +678,16 @@ TSharedPtr<class IMaterialEditor> FMaterialEditorUtilities::GetIMaterialEditorFo
 		}
 	}
 	return MaterialEditor;
+}
+
+void FMaterialEditorUtilities::BringFocusAttentionOnObject(const UObject* ObjectToFocusOn)
+{
+	TSharedPtr<IMaterialEditor> MaterialEditor = GetIMaterialEditorForObject(ObjectToFocusOn);
+	if (MaterialEditor.IsValid())
+	{
+		MaterialEditor->FocusWindow();
+		MaterialEditor->JumpToHyperlink(ObjectToFocusOn);
+	}
 }
 
 void FMaterialEditorUtilities::AddMaterialExpressionCategory(FGraphActionMenuBuilder& ActionMenuBuilder, FText CategoryName, TArray<struct FMaterialExpression>* MaterialExpressions, bool bMaterialFunction)
@@ -612,7 +702,7 @@ void FMaterialEditorUtilities::AddMaterialExpressionCategory(FGraphActionMenuBui
 	for (int32 Index = 0; Index < MaterialExpressions->Num(); ++Index)
 	{
 		const FMaterialExpression& MaterialExpression = (*MaterialExpressions)[Index];
-		if (IsAllowedExpressionType(MaterialExpression.MaterialClass, bMaterialFunction))
+		if (IsAllowedExpressionType(MaterialExpression.MaterialClass, bMaterialFunction) && MaterialExpression.MaterialClass != UMaterialExpressionComposite::StaticClass())
 		{
 			if (!ActionMenuBuilder.FromPin || HasCompatibleConnection(MaterialExpression.MaterialClass, FromPinType, ActionMenuBuilder.FromPin->Direction, bMaterialFunction))
 			{
@@ -647,7 +737,7 @@ bool FMaterialEditorUtilities::HasCompatibleConnection(UClass* ExpressionClass, 
 		UMaterialExpression* DefaultExpression = CastChecked<UMaterialExpression>(ExpressionClass->GetDefaultObject());
 		if (TestDirection == EGPD_Output)
 		{
-			int32 NumInputs = DefaultExpression->GetInputs().Num();
+			int32 NumInputs = DefaultExpression->GetInputsView().Num();
 			for (int32 Index = 0; Index < NumInputs; ++Index)
 			{
 				uint32 InputType = DefaultExpression->GetInputType(Index);
@@ -700,7 +790,8 @@ void FMaterialEditorUtilities::BuildTextureStreamingData(UMaterialInterface* Upd
 
 	if (UpdatedMaterial)
 	{
-		CollectGarbage( GARBAGE_COLLECTION_KEEPFLAGS );
+
+		CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
 
 		FScopedSlowTask SlowTask(2.f, (LOCTEXT("MaterialEditorUtilities_UpdatingTextureStreamingData", "Updating Texture Streaming Data")));
 		SlowTask.MakeDialog(true);
@@ -709,19 +800,24 @@ void FMaterialEditorUtilities::BuildTextureStreamingData(UMaterialInterface* Upd
 		const TArray<FMaterialTextureInfo> EmptyTextureStreamingData;
 		UpdatedMaterial->SetTextureStreamingData(EmptyTextureStreamingData);
 
-		TSet<UMaterialInterface*> Materials;
-		Materials.Add(UpdatedMaterial);
-
-		if (CompileDebugViewModeShaders(DVSM_OutputMaterialTextureScales, QualityLevel, FeatureLevel, Materials, &SlowTask))
+		// Skip compilation for cooked materials
+		UMaterial* RootMaterial = UpdatedMaterial->GetMaterial();
+		if (!RootMaterial || !RootMaterial->GetPackage()->HasAnyPackageFlags(PKG_Cooked))
 		{
-			FMaterialUtilities::FExportErrorManager ExportErrors(FeatureLevel);
-			for (UMaterialInterface* MaterialInterface : Materials)
-			{
-				FMaterialUtilities::ExportMaterialUVDensities(MaterialInterface, QualityLevel, FeatureLevel, ExportErrors);
-			}
-			ExportErrors.OutputToLog();
+			TSet<UMaterialInterface*> Materials;
+			Materials.Add(UpdatedMaterial);
 
-			CollectGarbage( GARBAGE_COLLECTION_KEEPFLAGS );
+			if (CompileDebugViewModeShaders(DVSM_OutputMaterialTextureScales, QualityLevel, FeatureLevel, Materials, &SlowTask))
+			{
+				FMaterialUtilities::FExportErrorManager ExportErrors(FeatureLevel);
+				for (UMaterialInterface* MaterialInterface : Materials)
+				{
+					FMaterialUtilities::ExportMaterialUVDensities(MaterialInterface, QualityLevel, FeatureLevel, ExportErrors);
+				}
+				ExportErrors.OutputToLog();
+
+				CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+			}
 		}
 	}
 }

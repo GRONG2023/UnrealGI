@@ -3,8 +3,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Templates/UnrealTemplate.h"
 #include "Templates/SharedPointer.h"
+#include "Templates/UnrealTemplate.h"
 
 class IAnalyticsProviderET;
 
@@ -29,7 +29,7 @@ public:
 		return Analytics.IsValid(); 
 	}
 	/** Called to initialize the singleton. */
-	static void Initialize();
+	static void Initialize(const FString& EpicAccountId = FString());
 	/** Called to shut down the singleton */
 	static void Shutdown();
 

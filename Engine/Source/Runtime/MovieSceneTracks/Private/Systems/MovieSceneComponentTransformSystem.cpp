@@ -1,28 +1,41 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Systems/MovieSceneComponentTransformSystem.h"
-#include "Systems/FloatChannelEvaluatorSystem.h"
-#include "Systems/MovieScenePiecewiseFloatBlenderSystem.h"
+#include "Systems/DoubleChannelEvaluatorSystem.h"
+#include "Systems/MovieScenePiecewiseDoubleBlenderSystem.h"
 #include "Systems/MovieScenePropertyInstantiator.h"
+#include "Systems/MovieSceneQuaternionInterpolationRotationSystem.h"
 
 #include "EntitySystem/BuiltInComponentTypes.h"
+#include "EntitySystem/Interrogation/MovieSceneInterrogationLinker.h"
 
 #include "MovieSceneTracksComponentTypes.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneComponentTransformSystem)
 
 UMovieSceneComponentTransformSystem::UMovieSceneComponentTransformSystem(const FObjectInitializer& ObjInit)
 	: Super(ObjInit)
 {
-	// This system can be used for interrogation
-	SystemExclusionContext = UE::MovieScene::EEntitySystemContext::None;
+	using namespace UE::MovieScene;
 
-	BindToProperty(UE::MovieScene::FMovieSceneTracksComponentTypes::Get()->ComponentTransform);
+	// This system can be used for interrogation
+	SystemCategories &= ~FSystemInterrogator::GetExcludedFromInterrogationCategory();
+
+	const FBuiltInComponentTypes* BuiltInComponents = FBuiltInComponentTypes::Get();
+	const FMovieSceneTracksComponentTypes* TrackComponents = FMovieSceneTracksComponentTypes::Get();
+
+	BindToProperty(TrackComponents->ComponentTransform);
 
 	if (HasAnyFlags(RF_ClassDefaultObject))
 	{
-		DefineImplicitPrerequisite(UMovieScenePiecewiseFloatBlenderSystem::StaticClass(), GetClass());
-		DefineImplicitPrerequisite(UFloatChannelEvaluatorSystem::StaticClass(), GetClass());
+		DefineImplicitPrerequisite(UMovieScenePiecewiseDoubleBlenderSystem::StaticClass(), GetClass());
 
-		DefineComponentConsumer(GetClass(), UE::MovieScene::FMovieSceneTracksComponentTypes::Get()->ComponentTransform.PropertyTag);
+		DefineComponentConsumer(GetClass(), TrackComponents->ComponentTransform.PropertyTag);
+
+		for (int32 Index = 0; Index < UE_ARRAY_COUNT(BuiltInComponents->DoubleResult); ++Index)
+		{
+			DefineComponentConsumer(GetClass(), BuiltInComponents->DoubleResult[Index]);
+		}
 	}
 }
 
@@ -30,3 +43,4 @@ void UMovieSceneComponentTransformSystem::OnRun(FSystemTaskPrerequisites& InPrer
 {
 	Super::OnRun(InPrerequisites, Subsequents);
 }
+

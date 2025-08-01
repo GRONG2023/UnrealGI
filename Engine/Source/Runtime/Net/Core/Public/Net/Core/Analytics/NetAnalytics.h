@@ -33,13 +33,19 @@
  */
 
 // Includes
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "HAL/Platform.h"
 #include "Templates/Atomic.h"
-
+#include "Templates/SharedPointer.h"
+#include "Templates/UnrealTypeTraits.h"
+#include "UObject/NameTypes.h"
 
 // Forward Declarations
-class IAnalyticsProvider;
 class FNetAnalyticsAggregator;
+class IAnalyticsProvider;
+struct FAnalyticsEventAttribute;
 
 
 // Defines
@@ -48,11 +54,7 @@ class FNetAnalyticsAggregator;
 #define NET_ANALYTICS_MULTITHREADING 0
 
 
-#if NET_ANALYTICS_MULTITHREADING
-	constexpr const ESPMode NetAnalyticsThreadSafety = ESPMode::ThreadSafe;
-#else
-	constexpr const ESPMode NetAnalyticsThreadSafety = ESPMode::Fast;
-#endif
+inline constexpr const ESPMode NetAnalyticsThreadSafety = ESPMode::ThreadSafe;
 
 
 // Forward Declarations
@@ -104,7 +106,7 @@ struct FLocalNetAnalyticsStruct : public FVirtualDestructor
 /**
  * Subclassed struct which holds net analytics data which is aggregated or to-be-aggregated, and dispatched upon SendAnalytics
  */
-struct NETCORE_API FNetAnalyticsData : public FVirtualDestructor, public TSharedFromThis<FNetAnalyticsData, NetAnalyticsThreadSafety>
+struct FNetAnalyticsData : public FVirtualDestructor, public TSharedFromThis<FNetAnalyticsData, NetAnalyticsThreadSafety>
 {
 	friend class FNetAnalyticsAggregator;
 	friend struct FNetAnalyticsDataDeleter;
@@ -133,7 +135,7 @@ protected:
 	/**
 	 * Called by the Net Analytics Aggregator, when ready to send analytics - some implementations don't send immediately
 	 */
-	virtual void InternalSendAnalytics();
+	NETCORE_API virtual void InternalSendAnalytics();
 
 	/**
 	 * Called just before the last shared reference to this data is released - used to trigger analytics send in threadsafe version
@@ -175,18 +177,18 @@ template<class TDataStruct> struct TBasicNetAnalyticsData : public FNetAnalytics
  *
  * The last thread to release this analytics data, triggers SendAnalytics - thread safety is partially provided by shared pointer atomics.
  */
-struct NETCORE_API FThreadedNetAnalyticsData : public FNetAnalyticsData
+struct FThreadedNetAnalyticsData : public FNetAnalyticsData
 {
 	/**
 	 * Default constructor
 	 */
-	FThreadedNetAnalyticsData();
+	NETCORE_API FThreadedNetAnalyticsData();
 
 
 protected:
-	virtual void InternalSendAnalytics() override;
+	NETCORE_API virtual void InternalSendAnalytics() override;
 
-	virtual void NotifyFinalRelease() override;
+	NETCORE_API virtual void NotifyFinalRelease() override;
 
 
 protected:
@@ -320,31 +322,36 @@ struct FNetAnalyticsDataDeleter
 /**
  * Central object (usually within NetDriver) which handles registration/retrieval/type-checking of net analytics data holders.
  */
-class NETCORE_API FNetAnalyticsAggregator
+class FNetAnalyticsAggregator
 {
 public:
 	/**
 	 * Base constructor
 	 */
-	FNetAnalyticsAggregator(TSharedPtr<IAnalyticsProvider> InProvider, FName InNetDriverName);
+	NETCORE_API FNetAnalyticsAggregator(TSharedPtr<IAnalyticsProvider> InProvider, FName InNetDriverName);
 
 	FNetAnalyticsAggregator() = delete;
 
 	/**
 	 * Initialize the net analytics aggregator
 	 */
-	void Init();
+	NETCORE_API void Init();
 
 	/**
 	 * Initialize the net analytics aggregator config - must support hotfixing
 	 */
-	void InitConfig();
+	NETCORE_API void InitConfig();
+
+	/**
+	 * Adds game and engine specific attributes to the passed in array.
+	 */
+	NETCORE_API void AppendGameInstanceAttributes(TArray<FAnalyticsEventAttribute>& OutAttributes);
 
 	/**
 	 * Tells the analytics data holders to finish aggregating their analytics data, and to dispatch it.
 	 * Only called once, at NetDriver shutdown.
 	 */
-	void SendAnalytics();
+	NETCORE_API void SendAnalytics();
 
 
 	/**
@@ -358,7 +365,7 @@ public:
 	 * @param InTypeName	Compile-time derived type name for the analytics data - for type checking
 	 * @return				Returns the newly added analytics data shared reference
 	 */
-	TNetAnalyticsDataPtr<> RegisterAnalyticsData_Internal(TNetAnalyticsDataRef<> InData, const FName& InDataName, FString InTypeName);
+	NETCORE_API TNetAnalyticsDataPtr<> RegisterAnalyticsData_Internal(TNetAnalyticsDataRef<> InData, const FName& InDataName, FString InTypeName);
 
 
 	/** Accessor for AnalyticsProvider */
@@ -367,6 +374,16 @@ public:
 		return AnalyticsProvider;
 	}
 
+	/** Accessor for NetDriverName */
+	FName GetNetDriverName() const
+	{
+		return NetDriverName;
+	}
+
+public:
+
+	using FAnalyticsAppender = TFunction<void(TArray<FAnalyticsEventAttribute>&)>;	
+	NETCORE_API void SetAnalyticsAppender(FAnalyticsAppender AppenderFunction);
 
 private:
 	/** The analytics provider we are aggregating data for */
@@ -383,6 +400,9 @@ private:
 
 	/** Maps analytics data holder names, to a config value specifying whether that data holder is enabled or not */
 	TMap<FName, bool> AnalyticsDataConfigMap;
+
+	/** Optional functor that can be used to append game specific attributes to your analytics */
+	FAnalyticsAppender AnalyticsAppender;
 
 	/** Whether or not analytics was already sent */
 	bool bSentAnalytics;

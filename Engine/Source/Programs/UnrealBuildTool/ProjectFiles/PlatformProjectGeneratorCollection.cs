@@ -1,12 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Reflection;
 using System.Text;
-using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using System.Linq;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
 
 namespace UnrealBuildTool
 {
@@ -18,19 +16,29 @@ namespace UnrealBuildTool
 		Dictionary<UnrealTargetPlatform, PlatformProjectGenerator> ProjectGeneratorDictionary = new Dictionary<UnrealTargetPlatform, PlatformProjectGenerator>();
 
 		/// <summary>
+		/// Returns the list of platforms that have been registered in this collection
+		/// </summary>
+		/// <returns>Registered platforms</returns>
+		public List<UnrealTargetPlatform> GetRegisteredPlatforms()
+		{
+			return ProjectGeneratorDictionary.Keys.ToList();
+		}
+
+		/// <summary>
 		/// Register the given platforms UEPlatformProjectGenerator instance
 		/// </summary>
 		/// <param name="InPlatform">  The UnrealTargetPlatform to register with</param>
 		/// <param name="InProjectGenerator">The UEPlatformProjectGenerator instance to use for the InPlatform</param>
-		public void RegisterPlatformProjectGenerator(UnrealTargetPlatform InPlatform, PlatformProjectGenerator InProjectGenerator)
+		/// <param name="Logger">Logger for output</param>
+		public void RegisterPlatformProjectGenerator(UnrealTargetPlatform InPlatform, PlatformProjectGenerator InProjectGenerator, ILogger Logger)
 		{
 			// Make sure the build platform is legal
-			UEBuildPlatform BuildPlatform = UEBuildPlatform.GetBuildPlatform(InPlatform, true);
-			if (BuildPlatform != null)
+			UEBuildPlatform? BuildPlatform;
+			if (UEBuildPlatform.TryGetBuildPlatform(InPlatform, out BuildPlatform))
 			{
 				if (ProjectGeneratorDictionary.ContainsKey(InPlatform) == true)
 				{
-					Log.TraceInformation("RegisterPlatformProjectGenerator Warning: Registering project generator {0} for {1} when it is already set to {2}",
+					Logger.LogInformation("RegisterPlatformProjectGenerator Warning: Registering project generator {Generator} for {Platform} when it is already set to {ExistingGenerator}",
 						InProjectGenerator.ToString(), InPlatform.ToString(), ProjectGeneratorDictionary[InPlatform].ToString());
 					ProjectGeneratorDictionary[InPlatform] = InProjectGenerator;
 				}
@@ -41,7 +49,7 @@ namespace UnrealBuildTool
 			}
 			else
 			{
-				Log.TraceVerbose("Skipping project file generator registration for {0} due to no valid BuildPlatform.", InPlatform.ToString());
+				Logger.LogDebug("Skipping project file generator registration for {Platform} due to no valid BuildPlatform.", InPlatform.ToString());
 			}
 		}
 
@@ -51,7 +59,7 @@ namespace UnrealBuildTool
 		/// <param name="InPlatform">    The UnrealTargetPlatform being built</param>
 		/// <param name="bInAllowFailure">   If true, do not throw an exception and return null</param>
 		/// <returns>UEPlatformProjectGenerator The instance of the project generator</returns>
-		public PlatformProjectGenerator GetPlatformProjectGenerator(UnrealTargetPlatform InPlatform, bool bInAllowFailure = false)
+		public PlatformProjectGenerator? GetPlatformProjectGenerator(UnrealTargetPlatform InPlatform, bool bInAllowFailure = false)
 		{
 			if (ProjectGeneratorDictionary.ContainsKey(InPlatform) == true)
 			{
@@ -61,7 +69,7 @@ namespace UnrealBuildTool
 			{
 				return null;
 			}
-			throw new BuildException("GetPlatformProjectGenerator: No PlatformProjectGenerator found for {0}", InPlatform.ToString());
+			throw new BuildException("GetPlatformProjectGenerator: No PlatformProjectGenerator found for {Platform}", InPlatform.ToString());
 		}
 
 		/// <summary>
@@ -99,7 +107,7 @@ namespace UnrealBuildTool
 		{
 			if (ProjectGeneratorDictionary.ContainsKey(InPlatform) == true)
 			{
-				ProjectGeneratorDictionary[InPlatform].GenerateGameProperties(Configuration, VCProjectFileContent, TargetType, RootDirectory, TargetFilePath); ;
+				ProjectGeneratorDictionary[InPlatform].GenerateGameProperties(Configuration, VCProjectFileContent, TargetType, RootDirectory, TargetFilePath);
 			}
 			return true;
 		}

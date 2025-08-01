@@ -158,10 +158,16 @@ FEndpoint::FEndpoint(const FString& InName)
 	, InternalPtr(MakeUnique<FInternalThreadState>(*this, SharedState))
 	, Internal(*InternalPtr)
 {
+	if (!FPlatformProcess::SupportsMultithreading())
+	{
+		UE_LOG(LogDirectLinkNet, Error, TEXT("Endpoint '%s': Unable to start endpoint: support for threads is required for DirectLink."), *SharedState.NiceName);
+		return;
+	}
+
 	ECommunicationStatus ComStatus = ValidateCommunicationStatus();
 	if (ComStatus != ECommunicationStatus::NoIssue)
 	{
-		UE_LOG(LogDirectLinkNet, Error, TEXT("Endpoint '%s': Unable to start communication (error code:%d):"), *SharedState.NiceName, ComStatus);
+		UE_LOG(LogDirectLinkNet, Error, TEXT("Endpoint '%s': Unable to start communication (error code:%d):"), *SharedState.NiceName, int(ComStatus));
 		return;
 	}
 
@@ -226,7 +232,7 @@ void FEndpoint::RemoveSource(const FSourceHandle& SourceId)
 		for (FStreamDescription& Stream : SharedState.Streams)
 		{
 			if (Stream.SourcePoint == SourceId
-			 && Stream.Status != FStreamDescription::EConnectionState::Closed)
+			 && Stream.Status != EStreamConnectionState::Closed)
 			{
 				SharedState.CloseStreamInternal(Stream, _);
 			}
@@ -307,7 +313,7 @@ void FEndpoint::RemoveDestination(const FDestinationHandle& Destination)
 		for (FStreamDescription& Stream : SharedState.Streams)
 		{
 			if (Stream.DestinationPoint == Destination
-			 && Stream.Status != FStreamDescription::EConnectionState::Closed)
+			 && Stream.Status != EStreamConnectionState::Closed)
 			{
 				SharedState.CloseStreamInternal(Stream, _);
 			}
@@ -364,8 +370,8 @@ FEndpoint::EOpenStreamResult FEndpoint::OpenStream(const FSourceHandle& SourceId
 		{
 			if (Stream.SourcePoint == SourceId && Stream.DestinationPoint == DestinationId)
 			{
-				if (Stream.Status == FStreamDescription::EConnectionState::Active
-				 || Stream.Status == FStreamDescription::EConnectionState::RequestSent)
+				if (Stream.Status == EStreamConnectionState::Active
+				 || Stream.Status == EStreamConnectionState::RequestSent)
 				{
 					// useless case, temp because of the unfinished connection policy.
 					// #ue_directlink_connexion Replace with proper policy (user driven connection map) + log if this happen
@@ -440,7 +446,7 @@ FEndpoint::EOpenStreamResult FEndpoint::OpenStream(const FSourceHandle& SourceId
 		FRWScopeLock _(SharedState.StreamsLock, SLT_Write);
 		FStreamPort StreamPort = ++SharedState.StreamPortIdGenerator;
 
-		FDirectLinkMsg_OpenStreamRequest* Request = NewMessage<FDirectLinkMsg_OpenStreamRequest>();
+		FDirectLinkMsg_OpenStreamRequest* Request = FMessageEndpoint::MakeMessage<FDirectLinkMsg_OpenStreamRequest>();
 		Request->bRequestFromSource = bRequestFromSource;
 		Request->RequestFromStreamPort = StreamPort;
 		Request->SourceGuid = SourceId;
@@ -455,7 +461,7 @@ FEndpoint::EOpenStreamResult FEndpoint::OpenStream(const FSourceHandle& SourceId
 		NewStream.DestinationPoint = DestinationId;
 		NewStream.LocalStreamPort = StreamPort;
 		NewStream.RemoteAddress = RemoteAddress;
-		NewStream.Status = FStreamDescription::EConnectionState::RequestSent;
+		NewStream.Status = EStreamConnectionState::RequestSent;
 	}
 	else
 	{
@@ -473,7 +479,7 @@ void FEndpoint::CloseStream(const FSourceHandle& SourceId, const FDestinationHan
 	{
 		if (Stream.SourcePoint == SourceId
 		 && Stream.DestinationPoint == DestinationId
-		 && Stream.Status != FStreamDescription::EConnectionState::Closed)
+		 && Stream.Status != EStreamConnectionState::Closed)
 		{
 			SharedState.CloseStreamInternal(Stream, _);
 		}
@@ -539,10 +545,10 @@ FString FInternalThreadState::ToString_dbg() const
 			const TCHAR* StatusText = TEXT("?"); //Stream.stabThisIsSource ? 'S' : 'D';
 			switch (Stream.Status)
 			{
-				case FStreamDescription::EConnectionState::Uninitialized: StatusText = TEXT("Uninitialized"); break;
-				case FStreamDescription::EConnectionState::RequestSent:   StatusText = TEXT("RequestSent  "); break;
-				case FStreamDescription::EConnectionState::Active:        StatusText = TEXT("Active       "); break;
-				case FStreamDescription::EConnectionState::Closed:        StatusText = TEXT("Closed       "); break;
+				case EStreamConnectionState::Uninitialized: StatusText = TEXT("Uninitialized"); break;
+				case EStreamConnectionState::RequestSent:   StatusText = TEXT("RequestSent  "); break;
+				case EStreamConnectionState::Active:        StatusText = TEXT("Active       "); break;
+				case EStreamConnectionState::Closed:        StatusText = TEXT("Closed       "); break;
 			}
 			Out.Appendf(TEXT("-- [%s] stream: %08X:%d %s %08X:%d\n"), StatusText, LocalPoint.A, Stream.LocalStreamPort, OrientationText, RemotePoint.A, Stream.RemoteStreamPort);
 		}
@@ -567,7 +573,7 @@ void FInternalThreadState::Handle_DeltaMessage(const FDirectLinkMsg_DeltaMessage
 		}
 
 		FStreamDescription& Stream = *StreamPtr;
-		bool bIsActive = Stream.Status == FStreamDescription::EConnectionState::Active;
+		bool bIsActive = Stream.Status == EStreamConnectionState::Active;
 		bool bIsReceiver = Stream.Receiver.IsValid();
 		bool bIsExpectedSender = Stream.RemoteAddress == Context->GetSender();
 		if (!bIsActive || !bIsReceiver || !bIsExpectedSender)
@@ -595,7 +601,7 @@ void FInternalThreadState::Handle_HaveListMessage(const FDirectLinkMsg_HaveListM
 		}
 
 		FStreamDescription& Stream = *StreamPtr;
-		bool bIsActive = Stream.Status == FStreamDescription::EConnectionState::Active;
+		bool bIsActive = Stream.Status == EStreamConnectionState::Active;
 		bool bIsSender = Stream.Sender.IsValid();
 		bool bIsExpectedRemote = Stream.RemoteAddress == Context->GetSender();
 		if (!bIsActive || !bIsSender || !bIsExpectedRemote)
@@ -644,7 +650,7 @@ void FInternalThreadState::Handle_EndpointLifecycle(const FDirectLinkMsg_Endpoin
 			if (!bIsUpToDate)
 			{
 				UE_CLOG(SharedState.bDebugLog, LogDirectLinkNet, Log, TEXT("Endpoint '%s': Send FDirectLinkMsg_QueryEndpointState"), *SharedState.NiceName);
-				MessageEndpoint->Send(NewMessage<FDirectLinkMsg_QueryEndpointState>(), RemoteEndpointAddress);
+				MessageEndpoint->Send(FMessageEndpoint::MakeMessage<FDirectLinkMsg_QueryEndpointState>(), RemoteEndpointAddress);
 			}
 			break;
 		}
@@ -703,7 +709,7 @@ void FInternalThreadState::Handle_OpenStreamRequest(const FDirectLinkMsg_OpenStr
 
 	const FMessageAddress& RemoteEndpointAddress = Context->GetSender();
 
-	FDirectLinkMsg_OpenStreamAnswer* Answer = NewMessage<FDirectLinkMsg_OpenStreamAnswer>();
+	FDirectLinkMsg_OpenStreamAnswer* Answer = FMessageEndpoint::MakeMessage<FDirectLinkMsg_OpenStreamAnswer>();
 	Answer->RecipientStreamPort = Message.RequestFromStreamPort;
 
 	auto DenyConnection = [&](const FString& Reason)
@@ -728,7 +734,7 @@ void FInternalThreadState::Handle_OpenStreamRequest(const FDirectLinkMsg_OpenStr
 			if (Stream.SourcePoint == Message.SourceGuid && Stream.DestinationPoint == Message.DestinationGuid)
 			{
 				// #ue_directlink_cleanup implement a robust handling of duplicated connections, reopened connections, etc...
-				if (Stream.Status == FStreamDescription::EConnectionState::Active)
+				if (Stream.Status == EStreamConnectionState::Active)
 				{
 					DenyConnection(TEXT("Connection already active"));
 					return;
@@ -768,7 +774,7 @@ void FInternalThreadState::Handle_OpenStreamRequest(const FDirectLinkMsg_OpenStr
 		NewStream.LocalStreamPort = StreamPort;
 		NewStream.Sender = MoveTemp(NewSender);
 		NewStream.Receiver = MoveTemp(NewReceiver);
-		NewStream.Status = FStreamDescription::EConnectionState::Active;
+		NewStream.Status = EStreamConnectionState::Active;
 
 		UE_LOG(LogDirectLinkNet, Log, TEXT("Endpoint '%s': Accepted connection"), *SharedState.NiceName);
 		MessageEndpoint->Send(Answer, RemoteEndpointAddress);
@@ -789,7 +795,7 @@ void FInternalThreadState::Handle_OpenStreamAnswer(const FDirectLinkMsg_OpenStre
 		if (FStreamDescription* StreamPtr = SharedState.GetStreamByLocalPort(Message.RecipientStreamPort, _))
 		{
 			FStreamDescription& Stream = *StreamPtr;
-			if (Stream.Status == FStreamDescription::EConnectionState::RequestSent)
+			if (Stream.Status == EStreamConnectionState::RequestSent)
 			{
 				if (Message.bAccepted)
 				{
@@ -804,11 +810,11 @@ void FInternalThreadState::Handle_OpenStreamAnswer(const FDirectLinkMsg_OpenStre
 					}
 
 					check(Stream.Receiver || Stream.Sender)
-					Stream.Status = FStreamDescription::EConnectionState::Active;
+					Stream.Status = EStreamConnectionState::Active;
 				}
 				else
 				{
-					Stream.Status = FStreamDescription::EConnectionState::Closed;
+					Stream.Status = EStreamConnectionState::Closed;
 					UE_LOG(LogDirectLinkNet, Warning, TEXT("stream connection refused. %s"), *Message.Error);
 				}
 			}
@@ -855,7 +861,7 @@ void FInternalThreadState::ReplicateState(const FMessageAddress& RemoteEndpointA
 {
 	if (MessageEndpoint.IsValid())
 	{
-		FDirectLinkMsg_EndpointState* EndpointStateMessage = NewMessage<FDirectLinkMsg_EndpointState>();
+		FDirectLinkMsg_EndpointState* EndpointStateMessage = FMessageEndpoint::MakeMessage<FDirectLinkMsg_EndpointState>();
 		*EndpointStateMessage = ThisDescription;
 
 		if (RemoteEndpointAddress.IsValid())
@@ -974,7 +980,7 @@ void FInternalThreadState::RemoveEndpoint(const FMessageAddress& RemoteEndpointA
 		for (auto& Stream : SharedState.Streams)
 		{
 			if (Stream.RemoteAddress == RemoteEndpointAddress
-				&& Stream.Status != FStreamDescription::EConnectionState::Closed)
+				&& Stream.Status != EStreamConnectionState::Closed)
 			{
 				UE_CLOG(SharedState.bDebugLog, LogDirectLinkNet, Log, TEXT("Endpoint '%s': Closed connection  (reason: remote endpoint removed)"), *SharedState.NiceName);
 				bool bNotifyRemote = false;
@@ -1083,7 +1089,7 @@ void FInternalThreadState::Run()
 	}
 
 	UE_CLOG(SharedState.bDebugLog, LogDirectLinkNet, Verbose, TEXT("Endpoint '%s': Publishing FDirectLinkMsg_EndpointLifecycle Start"), *SharedState.NiceName);
-	MessageEndpoint->Publish(NewMessage<FDirectLinkMsg_EndpointLifecycle>(FDirectLinkMsg_EndpointLifecycle::ELifecycle::Start));
+	MessageEndpoint->Publish(FMessageEndpoint::MakeMessage<FDirectLinkMsg_EndpointLifecycle>(FDirectLinkMsg_EndpointLifecycle::ELifecycle::Start));
 
 	while (SharedState.bInnerThreadShouldRun)
 	{
@@ -1107,7 +1113,7 @@ void FInternalThreadState::Run()
 		if (Now_s - LastHeartbeatTime_s > gConfig.HeartbeatThreshold_s)
 		{
 			UE_CLOG(SharedState.bDebugLog, LogDirectLinkNet, Verbose, TEXT("Endpoint '%s': Publishing FDirectLinkMsg_EndpointLifecycle Heartbeat %f"), *SharedState.NiceName, Now_s);
-			MessageEndpoint->Publish(NewMessage<FDirectLinkMsg_EndpointLifecycle>(FDirectLinkMsg_EndpointLifecycle::ELifecycle::Heartbeat, ThisDescription.StateRevision));
+			MessageEndpoint->Publish(FMessageEndpoint::MakeMessage<FDirectLinkMsg_EndpointLifecycle>(FDirectLinkMsg_EndpointLifecycle::ELifecycle::Heartbeat, ThisDescription.StateRevision));
 			LastHeartbeatTime_s = Now_s;
 		}
 
@@ -1127,7 +1133,7 @@ void FInternalThreadState::Run()
 			FRWScopeLock _(SharedState.StreamsLock, SLT_ReadOnly);
 			for (FStreamDescription& Stream : SharedState.Streams)
 			{
-				if (Stream.Status == FStreamDescription::EConnectionState::Active
+				if (Stream.Status == EStreamConnectionState::Active
 					&& Stream.bThisIsSource && ensure(Stream.Sender.IsValid()))
 				{
 					Stream.Sender->Tick(Now_s);
@@ -1179,8 +1185,8 @@ void FInternalThreadState::Run()
 					StreamInfo.StreamId = Stream.LocalStreamPort;
 					StreamInfo.Source = Stream.SourcePoint;
 					StreamInfo.Destination = Stream.DestinationPoint;
-					StreamInfo.bIsActive = Stream.Status == FStreamDescription::EConnectionState::Active;
-					if (StreamInfo.bIsActive)
+					StreamInfo.ConnectionState = Stream.Status;
+					if (Stream.Status == EStreamConnectionState::Active)
 					{
 						if (Stream.Sender)
 						{
@@ -1260,8 +1266,8 @@ void FInternalThreadState::Run()
 		}
 	}
 
-	UE_CLOG(SharedState.bDebugLog, LogDirectLinkNet, Display, TEXT("Endpoint '%s': Publishing FDirectLinkMsg_EndpointLifecycle Stop"), *SharedState.NiceName);
-	MessageEndpoint->Publish(NewMessage<FDirectLinkMsg_EndpointLifecycle>(FDirectLinkMsg_EndpointLifecycle::ELifecycle::Stop));
+	UE_CLOG(SharedState.bDebugLog, LogDirectLinkNet, Verbose, TEXT("Endpoint '%s': Publishing FDirectLinkMsg_EndpointLifecycle Stop"), *SharedState.NiceName);
+	MessageEndpoint->Publish(FMessageEndpoint::MakeMessage<FDirectLinkMsg_EndpointLifecycle>(FDirectLinkMsg_EndpointLifecycle::ELifecycle::Stop));
 	FMessageEndpoint::SafeRelease(MessageEndpoint);
 }
 
@@ -1288,7 +1294,7 @@ FStreamDescription* FSharedState::GetStreamByLocalPort(FStreamPort LocalPort, co
 
 void FSharedState::CloseStreamInternal(FStreamDescription& Stream, const FRWScopeLock& _, bool bNotifyRemote)
 {
-	if (Stream.Status == FStreamDescription::EConnectionState::Closed)
+	if (Stream.Status == EStreamConnectionState::Closed)
 	{
 		return;
 	}
@@ -1296,7 +1302,7 @@ void FSharedState::CloseStreamInternal(FStreamDescription& Stream, const FRWScop
 	if (bNotifyRemote && Stream.RemoteAddress.IsValid())
 	{
 		UE_CLOG(bDebugLog, LogDirectLinkNet, Log, TEXT("Endpoint '%s': Stream removed"), *NiceName, *Stream.SourcePoint.ToString());
-		FDirectLinkMsg_CloseStreamRequest* Request = NewMessage<FDirectLinkMsg_CloseStreamRequest>();
+		FDirectLinkMsg_CloseStreamRequest* Request = FMessageEndpoint::MakeMessage<FDirectLinkMsg_CloseStreamRequest>();
 		Request->RecipientStreamPort = Stream.RemoteStreamPort;
 
 		UE_CLOG(bDebugLog, LogDirectLinkNet, Log, TEXT("Endpoint '%s': Send FDirectLinkMsg_CloseStreamRequest"), *NiceName);
@@ -1304,7 +1310,7 @@ void FSharedState::CloseStreamInternal(FStreamDescription& Stream, const FRWScop
 	}
 
 	// close local stream
-	Stream.Status = FStreamDescription::EConnectionState::Closed;
+	Stream.Status = EStreamConnectionState::Closed;
 	Stream.Sender.Reset();
 	Stream.Receiver.Reset(); // #ue_directlink_cleanup notify associated scene provider
 }

@@ -18,15 +18,12 @@
 #include "Misc/PathViews.h"
 #include "SocketSubsystem.h"
 
-#if ENABLE_HTTP_FOR_NETWORK_FILE
-#include "HTTPTransport.h"
-#endif
-#include "TCPTransport.h"
-
 #include "HAL/IPlatformFileModule.h"
 #include "Templates/UniquePtr.h"
 
 #include "UObject/Object.h"
+#include "CookOnTheFly.h"
+#include "CookOnTheFlyMessages.h"
 
 DEFINE_LOG_CATEGORY(LogNetworkPlatformFile);
 
@@ -34,6 +31,18 @@ FString FNetworkPlatformFile::MP4Extension = TEXT(".mp4");
 FString FNetworkPlatformFile::BulkFileExtension = TEXT(".ubulk");
 FString FNetworkPlatformFile::ExpFileExtension = TEXT(".uexp");
 FString FNetworkPlatformFile::FontFileExtension = TEXT(".ufont");
+
+// These are marked unsafe because they do not work with Programs. However, COTF is unlikely to be used with Programs
+// These are also temporary until some issues can be debugged
+static FString UnsafeEnginePlatformExtensionDir()
+{
+	return FPaths::EnginePlatformExtensionDir(TEXT("")).TrimChar('/');
+}
+
+static FString UnsafeProjectPlatformExtensionDir()
+{
+	return FPaths::ProjectPlatformExtensionDir(TEXT("")).TrimChar('/');
+}
 
 FNetworkPlatformFile::FNetworkPlatformFile()
 	: bHasLoadedDDCDirectories(false)
@@ -44,11 +53,7 @@ FNetworkPlatformFile::FNetworkPlatformFile()
 	, HeartbeatFrequency(5.0f)
 	, FinishedAsyncNetworkReadUnsolicitedFiles(NULL)
 	, FinishedAsyncWriteUnsolicitedFiles(NULL)
-	, Transport(NULL)
 {
-
-
-	
 	TotalWriteTime = 0.0; // total non async time spent writing to disk
 	TotalNetworkSyncTime = 0.0; // total non async time spent syncing to network
 	TotalTimeSpentInUnsolicitedPackages = 0.0; // total time async processing unsolicited packages
@@ -58,70 +63,36 @@ FNetworkPlatformFile::FNetworkPlatformFile()
 	TotalUnsolicitedPackages = 0; // total number unsolicited files synced  
 	UnsolicitedPackagesHits = 0; // total number of hits from waiting on unsolicited packages
 	UnsolicitedPackageWaits = 0; // total number of waits on unsolicited packages
-	
-
 }
 
 bool FNetworkPlatformFile::ShouldBeUsed(IPlatformFile* Inner, const TCHAR* CmdLine) const
 {
 	FString HostIp;
-	return FParse::Value(CmdLine, TEXT("-FileHostIP="), HostIp);
-}
-
-ITransport *CreateTransportForHostAddress(const FString &HostIp )
-{
-	if ( HostIp.StartsWith(TEXT("tcp://")))
+	if (!FParse::Value(CmdLine, TEXT("-FileHostIP="), HostIp))
 	{
-		return new FTCPTransport();
+		return false;
 	}
-
-	if ( HostIp.StartsWith(TEXT("http://")))
-	{
-#if ENABLE_HTTP_FOR_NETWORK_FILE
-		return new FHTTPTransport();
-#endif
-	}
-
-	// no transport specified assuming tcp
-	return new FTCPTransport();
+	UE::Cook::ICookOnTheFlyModule& CookOnTheFlyModule = FModuleManager::LoadModuleChecked<UE::Cook::ICookOnTheFlyModule>(TEXT("CookOnTheFly"));
+	TSharedPtr<UE::Cook::ICookOnTheFlyServerConnection> DefaultConnection = CookOnTheFlyModule.GetDefaultServerConnection();
+	return !DefaultConnection.IsValid() || DefaultConnection->GetZenProjectName().IsEmpty();
 }
 
 bool FNetworkPlatformFile::Initialize(IPlatformFile* Inner, const TCHAR* CmdLine)
 {
-	bool bResult = false;
-	FString HostIpString;	
-	if (FParse::Value(CmdLine, TEXT("-FileHostIP="), HostIpString))
+	UE::Cook::ICookOnTheFlyModule& CookOnTheFlyModule = FModuleManager::LoadModuleChecked<UE::Cook::ICookOnTheFlyModule>(TEXT("CookOnTheFly"));
+	Connection = CookOnTheFlyModule.GetDefaultServerConnection();
+	if (!Connection.IsValid())
 	{
-		TArray<FString> HostIpList;
-		if (HostIpString.ParseIntoArray(HostIpList, TEXT("+"), true) > 0)
-		{
-			for (int32 HostIpIndex = 0; !bResult && HostIpIndex < HostIpList.Num(); ++HostIpIndex)
-			{
-				// Try to initialize with each of the IP addresses found in the command line until we 
-				// get a working one.
-
-				// find the correct transport for this ip address 
-				Transport = CreateTransportForHostAddress( HostIpList[HostIpIndex] );
-
-				UE_LOG(LogNetworkPlatformFile, Warning, TEXT("Created transport for %s."), *HostIpList[HostIpIndex]);
-
-				if ( Transport )
-				{
-					bResult = Transport->Initialize( *HostIpList[HostIpIndex] ) && InitializeInternal(Inner, *HostIpList[HostIpIndex]);		
-					if (bResult)
-						break;
-
-					UE_LOG(LogNetworkPlatformFile, Warning, TEXT("Failed to initialize %s."), *HostIpList[HostIpIndex]);
-
-					// try a different host might be a different protocol
-					delete Transport;
-				}
-				Transport = NULL;
-			}
-		}
+		UE_LOG(LogNetworkPlatformFile, Warning, TEXT("No COTF server connection."));
+		return false;
 	}
-
-	return bResult;
+	if (!InitializeInternal(Inner, *Connection->GetHost()))
+	{
+		UE_LOG(LogNetworkPlatformFile, Warning, TEXT("Failed to initialize %s."), *Connection->GetHost());
+		return false;
+	}
+	Connection->OnMessage().AddRaw(this, &FNetworkPlatformFile::OnCookOnTheFlyMessage);
+	return true;
 }
 
 bool FNetworkPlatformFile::InitializeInternal(IPlatformFile* Inner, const TCHAR* HostIP)
@@ -173,6 +144,9 @@ bool FNetworkPlatformFile::InitializeInternal(IPlatformFile* Inner, const TCHAR*
 
 bool FNetworkPlatformFile::SendPayloadAndReceiveResponse(TArray<uint8>& In, TArray<uint8>& Out)
 {
+	using namespace UE::Cook;
+	using namespace UE::ZenCookOnTheFly::Messaging;
+
 	{
 		FScopeLock ScopeLock(&SynchronizationObject);
 		if ( FinishedAsyncNetworkReadUnsolicitedFiles )
@@ -181,13 +155,67 @@ bool FNetworkPlatformFile::SendPayloadAndReceiveResponse(TArray<uint8>& In, TArr
 			FinishedAsyncNetworkReadUnsolicitedFiles = NULL;
 		}
 	}
+
+	FCookOnTheFlyRequest Request(ECookOnTheFlyMessage::NetworkPlatformFile);
+	TUniquePtr<FArchive> RequestPayload = Request.WriteBody();
+	RequestPayload->Serialize(In.GetData(), In.Num());
+	FCookOnTheFlyResponse Response = Connection->SendRequest(Request).Get();
+
+	if (!Response.IsOk())
+	{
+		UE_LOG(LogCookOnTheFly, Warning, TEXT("Failed to send 'NetworkPlatformFile' request"));
+		return false;
+	}
+
+	TUniquePtr<FArchive> ResponsePayload = Response.ReadBody();
 	
-	return Transport->SendPayloadAndReceiveResponse( In, Out );
+	if (!IntFitsIn<int32, int64>(ResponsePayload->TotalSize()))
+	{
+		UE_LOG(LogCookOnTheFly, Warning, TEXT("Failed to parse 'CookOnTheFlyResponse' because the payload was too large"));
+		return false;
+	}
+	
+	Out.SetNum(static_cast<int32>(ResponsePayload->TotalSize()));
+	ResponsePayload->Serialize(Out.GetData(), Out.Num());
+	return true;
+}
+
+void FNetworkPlatformFile::OnCookOnTheFlyMessage(const UE::Cook::FCookOnTheFlyMessage& Message)
+{
+	using namespace UE::Cook;
+	using namespace UE::ZenCookOnTheFly::Messaging;
+
+	if (Message.GetHeader().MessageType == ECookOnTheFlyMessage::NetworkPlatformFile)
+	{
+		TUniquePtr<FArchive> PayloadReader = Message.ReadBody();
+		TArray<uint8> Payload;
+
+		if (!IntFitsIn<int32, int64>(PayloadReader->TotalSize()))
+		{
+			UE_LOG(LogCookOnTheFly, Warning, TEXT("Failed to parse 'CookOnTheFlyMessage' because the payload was too large"));
+			return;
+		}
+
+		Payload.SetNum(static_cast<int32>(PayloadReader->TotalSize()));
+		PayloadReader->Serialize(Payload.GetData(), Payload.Num());
+		PendingPayloads.Enqueue(MoveTemp(Payload));
+		NewPayloadEvent->Trigger();
+	}
 }
 
 bool FNetworkPlatformFile::ReceiveResponse(TArray<uint8> &Out )
 {
-	return Transport->ReceiveResponse( Out );
+	for (;;)
+	{
+		NewPayloadEvent->Wait();
+		TOptional<TArray<uint8>> Payload = PendingPayloads.Dequeue();
+		if (Payload.IsSet())
+		{
+			Out = MoveTemp(Payload.GetValue());
+			break;
+		}
+	}
+	return true;
 }
 
 
@@ -205,13 +233,13 @@ void FNetworkPlatformFile::InitializeAfterSetActive()
 		FArrayReader Response;
 		if (!SendPayloadAndReceiveResponse(Payload, Response))
 		{
-			delete Transport; 
+			Connection.Reset();
 			return; 
 		}
 		else
 		{
 			// receive the cooked version information
-			int32 ServerPackageVersion = 0;
+			FPackageFileVersion ServerPackageVersion;
 			int32 ServerPackageLicenseeVersion = 0;
 			ProcessServerInitialResponse(Response, ServerPackageVersion, ServerPackageLicenseeVersion);
 			ProcessServerCachedFilesResponse(Response, ServerPackageVersion, ServerPackageLicenseeVersion);
@@ -239,7 +267,7 @@ void FNetworkPlatformFile::InitializeAfterSetActive()
 
 }
 
-void FNetworkPlatformFile::ProcessServerCachedFilesResponse(FArrayReader& Response, const int32 ServerPackageVersion, const int32 ServerPackageLicenseeVersion)
+void FNetworkPlatformFile::ProcessServerCachedFilesResponse(FArrayReader& Response, const FPackageFileVersion& ServerPackageVersion, const int32 ServerPackageLicenseeVersion)
 {
 	/* The server root content directories */
 	TArray<FString> ServerRootContentDirectories;
@@ -247,7 +275,21 @@ void FNetworkPlatformFile::ProcessServerCachedFilesResponse(FArrayReader& Respon
 
 	// receive a list of the cache files and their timestamps
 	TMap<FString, FDateTime> ServerCachedFiles;
-	Response << ServerCachedFiles;
+	{
+		TMap<FString, FDateTime> ServerCachedFileResponse;
+		Response << ServerCachedFileResponse;
+
+		ServerCachedFiles.Reserve(ServerCachedFileResponse.Num());
+		for (const auto& ServerFileTimePair : ServerCachedFileResponse)
+		{
+			FString Filename = ServerFileTimePair.Key;
+			ConvertServerFilenameToClientFilename(Filename);
+			Filename.ToLowerInline();
+			ServerCachedFiles.Emplace(MoveTemp(Filename), ServerFileTimePair.Value);
+		}
+	}
+
+	UE_LOG(LogNetworkPlatformFile, Display, TEXT("Received '%d' cached file(s) from server"), ServerCachedFiles.Num());
 
 	bool bDeleteAllFiles = true;
 	// Check the stored cooked version
@@ -255,12 +297,12 @@ void FNetworkPlatformFile::ProcessServerCachedFilesResponse(FArrayReader& Respon
 
 	if (InnerPlatformFile->FileExists(*CookedVersionFile) == true)
 	{
-		IFileHandle* FileHandle = InnerPlatformFile->OpenRead(*CookedVersionFile);
-		if (FileHandle != NULL)
+		TUniquePtr<IFileHandle> FileHandle(InnerPlatformFile->OpenRead(*CookedVersionFile));
+		if (FileHandle.IsValid())
 		{
-			int32 StoredPackageCookedVersion;
+			FPackageFileVersion StoredPackageCookedVersion;
 			int32 StoredPackageCookedLicenseeVersion;
-			if (FileHandle->Read((uint8*)&StoredPackageCookedVersion, sizeof(int32)) == true)
+			if (FileHandle->Read((uint8*)&StoredPackageCookedVersion, sizeof(FPackageFileVersion)) == true)
 			{
 				if (FileHandle->Read((uint8*)&StoredPackageCookedLicenseeVersion, sizeof(int32)) == true)
 				{
@@ -273,13 +315,11 @@ void FNetworkPlatformFile::ProcessServerCachedFilesResponse(FArrayReader& Respon
 					{
 						UE_LOG(LogNetworkPlatformFile, Display,
 							TEXT("Engine version mismatch: Server %d.%d, Stored %d.%d\n"),
-							ServerPackageVersion, ServerPackageLicenseeVersion,
-							StoredPackageCookedVersion, StoredPackageCookedLicenseeVersion);
+							ServerPackageVersion.ToValue(), ServerPackageLicenseeVersion,
+							StoredPackageCookedVersion.ToValue(), StoredPackageCookedLicenseeVersion);
 					}
 				}
 			}
-
-			delete FileHandle;
 		}
 	}
 	else
@@ -287,105 +327,94 @@ void FNetworkPlatformFile::ProcessServerCachedFilesResponse(FArrayReader& Respon
 		UE_LOG(LogNetworkPlatformFile, Display, TEXT("Cooked version file missing: %s\n"), *CookedVersionFile);
 	}
 
-	if (bDeleteAllFiles == true)
+	TMap<FString, FDateTime> ClientLocalFiles;
 	{
+		TArray<FString> DirectoriesToSkip;
+		TArray<FString> DirectoriesToNotRecurse;
+		FLocalTimestampDirectoryVisitor Visitor(*InnerPlatformFile, DirectoriesToSkip, DirectoriesToNotRecurse, false, /* bMakeLowerCased */ true);
+
+		for (TArray<FString>::TConstIterator RootPathIt(ServerRootContentDirectories); RootPathIt; ++RootPathIt)
+		{
+			const FString& ContentFolder = *RootPathIt;
+			InnerPlatformFile->IterateDirectory(*ContentFolder, Visitor);
+		}
+
+		ClientLocalFiles = MoveTemp(Visitor.FileTimes);
+	}
+
+	UE_LOG(LogNetworkPlatformFile, Display, TEXT("Found '%d' locally cached file(s)"), ClientLocalFiles.Num());
+
+	if (FParse::Param(FCommandLine::Get(), TEXT("DeleteLocalCache")))
+	{
+		bDeleteAllFiles = true;
+	}
+
+	if (bDeleteAllFiles)
+	{
+		UE_LOG(LogNetworkPlatformFile, Display, TEXT("Deleting all '%d' cached file(s) due to missing cooked version file..."), ClientLocalFiles.Num());
+
 		// Make sure the config file exists...
 		InnerPlatformFile->CreateDirectoryTree(*(FPaths::GeneratedConfigDir()));
 		// Update the cooked version file
-		IFileHandle* FileHandle = InnerPlatformFile->OpenWrite(*CookedVersionFile);
-		if (FileHandle != NULL)
+		TUniquePtr<IFileHandle> FileHandle(InnerPlatformFile->OpenWrite(*CookedVersionFile));
+		if (FileHandle.IsValid())
 		{
-			FileHandle->Write((const uint8*)&ServerPackageVersion, sizeof(int32));
+			FileHandle->Write((const uint8*)&ServerPackageVersion, sizeof(FPackageFileVersion));
 			FileHandle->Write((const uint8*)&ServerPackageLicenseeVersion, sizeof(int32));
-			delete FileHandle;
+		}
+		else
+		{
+			UE_LOG(LogNetworkPlatformFile, Warning, TEXT("Failed to write cooked version file '%s'"), *CookedVersionFile);
 		}
 	}
 
-	// list of directories to skip
-	TArray<FString> DirectoriesToSkip;
-	TArray<FString> DirectoriesToNotRecurse;
-	// use the timestamp grabbing visitor to get all the content times
-	FLocalTimestampDirectoryVisitor Visitor(*InnerPlatformFile, DirectoriesToSkip, DirectoriesToNotRecurse, false);
-
-	/*TArray<FString> RootContentPaths;
-	FPackageName::QueryRootContentPaths(RootContentPaths); */
-	for (TArray<FString>::TConstIterator RootPathIt(ServerRootContentDirectories); RootPathIt; ++RootPathIt)
+	int32 NumDeleted = 0;
+	for (const auto& ClientFileTimePair : ClientLocalFiles)
 	{
-		/*const FString& RootPath = *RootPathIt;
-		const FString& ContentFolder = FPackageName::LongPackageNameToFilename(RootPath);*/
-		const FString& ContentFolder = *RootPathIt;
-		InnerPlatformFile->IterateDirectory(*ContentFolder, Visitor);
-	}
-
-	// delete out of date files using the server cached files
-	for (TMap<FString, FDateTime>::TIterator It(ServerCachedFiles); It; ++It)
-	{
+		const FString& Filename = ClientFileTimePair.Key;
 		bool bDeleteFile = bDeleteAllFiles;
-		FString ServerFile = It.Key();
 
-		// Convert the filename to the client version
-		ConvertServerFilenameToClientFilename(ServerFile);
-
-		// Set it in the visitor file times list
-		// If there is any pathing difference (relative path, or whatever) between the server's filelist and the results
-		// of platform directory iteration then this will Add a new entry rather than override the existing one.  This causes local file deletes
-		// and longer loads as we will never see the benefits of local device caching.
-		Visitor.FileTimes.Add(ServerFile, FDateTime::MinValue());
-
-		if (bDeleteFile == false)
+		if (bDeleteFile)
 		{
-			// Check the time stamps...
-			// get local time
-			FDateTime LocalTime = InnerPlatformFile->GetTimeStamp(*ServerFile);
-			// If local time == MinValue than the file does not exist in the cache.
-			if (LocalTime != FDateTime::MinValue())
+			UE_LOG(LogNetworkPlatformFile, Display, TEXT("Deleting cached file '%s'"), *Filename);
+		}
+		else
+		{
+			if (const FDateTime* ServerTime = ServerCachedFiles.Find(Filename))
 			{
-				FDateTime ServerTime = It.Value();
-				// delete if out of date
-				// We will use 1.0 second as the tolerance to cover any platform differences in resolution
-				FTimespan TimeDiff = LocalTime - ServerTime;
+				FDateTime ClientTime = ClientFileTimePair.Value;
+				FTimespan TimeDiff = *ServerTime - ClientTime;
 				double TimeDiffInSeconds = TimeDiff.GetTotalSeconds();
 				bDeleteFile = (TimeDiffInSeconds > 1.0) || (TimeDiffInSeconds < -1.0);
-				if (bDeleteFile == true)
+
+				if (bDeleteFile)
 				{
-					if (InnerPlatformFile->FileExists(*ServerFile) == true)
-					{
-						UE_LOG(LogNetworkPlatformFile, Display, TEXT("Deleting cached file: TimeDiff %5.3f, %s"), TimeDiffInSeconds, *It.Key());
-					}
-					else
-					{
-						// It's a directory
-						bDeleteFile = false;
-					}
+					UE_LOG(LogNetworkPlatformFile, Display, TEXT("Deleting outdated cached file '%s' with time difference '%.3f's"), *Filename, TimeDiffInSeconds);
 				}
 				else
 				{
-					UE_LOG(LogNetworkPlatformFile, Display, TEXT("Keeping cached file: %s, TimeDiff worked out ok"), *ServerFile);
+					UE_LOG(LogNetworkPlatformFile, Display, TEXT("Keeping cached file '%s' with time difference '%.3f's"), *Filename, TimeDiffInSeconds);
 				}
 			}
+			else
+			{
+				UE_LOG(LogNetworkPlatformFile, Display, TEXT("Deleting cached file '%s' missing on server"), *Filename);
+				bDeleteFile = true;
+			}
 		}
-		if (bDeleteFile == true)
+
+		if (bDeleteFile)
 		{
-			UE_LOG(LogNetworkPlatformFile, Display, TEXT("Deleting cached file: %s"), *ServerFile);
-			InnerPlatformFile->DeleteFile(*ServerFile);
+			// ignore pak files they won't be mounted anyway 
+			if (FCString::Stricmp(*FPaths::GetExtension(Filename), TEXT("pak")) != 0)
+			{
+				InnerPlatformFile->DeleteFile(*Filename);
+				++NumDeleted;
+			}
 		}
 	}
 
-	// Any content files we have locally that were not cached, delete them
-	for (TMap<FString, FDateTime>::TIterator It(Visitor.FileTimes); It; ++It)
-	{
-		if ( FCString::Stricmp( *FPaths::GetExtension( It.Key() ), TEXT("pak")) == 0 )
-		{
-			// ignore pak files they won't be mounted anyway 
-			continue;
-		}
-		if (It.Value() != FDateTime::MinValue())
-		{
-			// This was *not* found in the server file list... delete it
-			UE_LOG(LogNetworkPlatformFile, Display, TEXT("Deleting cached file: %s"), *It.Key());
-			InnerPlatformFile->DeleteFile(*It.Key());
-		}
-	}
+	UE_LOG(LogNetworkPlatformFile, Display, TEXT("Deleted '%d' of '%d' cached file(s)"), NumDeleted, ClientLocalFiles.Num());
 }
 
 FNetworkPlatformFile::~FNetworkPlatformFile()
@@ -404,7 +433,7 @@ FNetworkPlatformFile::~FNetworkPlatformFile()
 			FinishedAsyncWriteUnsolicitedFiles = NULL;
 		}
 		
-		delete Transport; // close our sockets.
+		Connection.Reset(); // close our sockets.
 	}
 }
 
@@ -552,7 +581,7 @@ bool FNetworkPlatformFile::IterateDirectory(const TCHAR* InDirectory, IPlatformF
 				bool bIsDirectory = It.Value() == 0;
 			
 				// visit (stripping off the path if needed)
-				RetVal = Visitor.Visit(bHadNoPath ? *FPaths::GetCleanFilename(It.Key()) : *It.Key(), bIsDirectory);
+				RetVal = Visitor.CallShouldVisitAndVisit(bHadNoPath ? *FPaths::GetCleanFilename(It.Key()) : *It.Key(), bIsDirectory);
 			}
 		}
 	}
@@ -589,7 +618,7 @@ bool FNetworkPlatformFile::IterateDirectoryRecursively(const TCHAR* InDirectory,
 				bool bIsDirectory = It.Value() == 0;
 
 				// visit!
-				RetVal = Visitor.Visit(*It.Key(), bIsDirectory);
+				RetVal = Visitor.CallShouldVisitAndVisit(*It.Key(), bIsDirectory);
 			}
 		}
 	}
@@ -638,7 +667,7 @@ bool FNetworkPlatformFile::IterateDirectoryStat(const TCHAR* InDirectory, IPlatf
 					);
 
 				// visit (stripping off the path if needed)
-				RetVal = Visitor.Visit(bHadNoPath ? *FPaths::GetCleanFilename(It.Key()) : *It.Key(), StatData);
+				RetVal = Visitor.CallShouldVisitAndVisit(bHadNoPath ? *FPaths::GetCleanFilename(It.Key()) : *It.Key(), StatData);
 			}
 		}
 	}
@@ -685,7 +714,7 @@ bool FNetworkPlatformFile::IterateDirectoryStatRecursively(const TCHAR* InDirect
 					);
 
 				// visit!
-				RetVal = Visitor.Visit(*It.Key(), StatData);
+				RetVal = Visitor.CallShouldVisitAndVisit(*It.Key(), StatData);
 			}
 		}
 	}
@@ -795,8 +824,8 @@ void FNetworkPlatformFile::FillGetFileList(FNetworkFileArchive& Payload)
 	FString EngineRelPluginPath = FPaths::EnginePluginsDir();
 	FString GameRelPath = FPaths::ProjectDir();
 	FString GameRelPluginPath = FPaths::ProjectPluginsDir();
-	FString EnginePlatformExtensionsDir = FPaths::EnginePlatformExtensionsDir();
-	FString ProjectPlatformExtensionsDir = FPaths::ProjectPlatformExtensionsDir();
+	FString EnginePlatformExtensionsDir = UnsafeEnginePlatformExtensionDir();
+	FString ProjectPlatformExtensionsDir = UnsafeProjectPlatformExtensionDir();
 
 	TArray<FString> Directories;
 	Directories.Add(EngineRelPath);
@@ -826,7 +855,7 @@ void FNetworkPlatformFile::FillGetFileList(FNetworkFileArchive& Payload)
 	Payload << CustomPlatformData;
 }
 
-void FNetworkPlatformFile::ProcessServerInitialResponse(FArrayReader& InResponse, int32& OutServerPackageVersion, int32& OutServerPackageLicenseeVersion)
+void FNetworkPlatformFile::ProcessServerInitialResponse(FArrayReader& InResponse, FPackageFileVersion& OutServerPackageVersion, int32& OutServerPackageLicenseeVersion)
 {
 	// Receive the cooked version information.
 	InResponse << OutServerPackageVersion;
@@ -843,9 +872,9 @@ void FNetworkPlatformFile::ProcessServerInitialResponse(FArrayReader& InResponse
 	UE_LOG(LogNetworkPlatformFile, Display, TEXT("    Server ProjectDir     = %s"), *ServerProjectDir);
 	UE_LOG(LogNetworkPlatformFile, Display, TEXT("     Local ProjectDir     = %s"), *FPaths::ProjectDir());
 	UE_LOG(LogNetworkPlatformFile, Display, TEXT("    Server EnginePlatformExtDir = %s"), *ServerEnginePlatformExtensionsDir);
-	UE_LOG(LogNetworkPlatformFile, Display, TEXT("     Local EnginePlatformExtDir = %s"), *FPaths::EnginePlatformExtensionsDir());
+	UE_LOG(LogNetworkPlatformFile, Display, TEXT("     Local EnginePlatformExtDir = %s"), *UnsafeEnginePlatformExtensionDir());
 	UE_LOG(LogNetworkPlatformFile, Display, TEXT("    Server ProjectPlatformExtDir = %s"), *ServerProjectPlatformExtensionsDir);
-	UE_LOG(LogNetworkPlatformFile, Display, TEXT("     Local ProjectPlatformExtDir = %s"), *FPaths::ProjectPlatformExtensionsDir());
+	UE_LOG(LogNetworkPlatformFile, Display, TEXT("     Local ProjectPlatformExtDir = %s"), *UnsafeProjectPlatformExtensionDir());
 
 	// Receive a list of files and their timestamps.
 	TMap<FString, FDateTime> ServerFileMap;
@@ -880,46 +909,30 @@ bool FNetworkPlatformFile::SendWriteMessage(const uint8* Source, int64 BytesToWr
 
 bool FNetworkPlatformFile::SendMessageToServer(const TCHAR* Message, IPlatformFile::IFileServerMessageHandler* Handler)
 {
-	// handle the recompile shaders message
-	// @todo: Maybe we should just send the string message to the server, but then we'd have to 
-	// handle the return from the server in a generic way
+#if WITH_COTF
+	if (!Connection->IsConnected())
+	{
+		return false;
+	}
 	if (FCString::Stricmp(Message, TEXT("RecompileShaders")) == 0)
 	{
-		FNetworkFileArchive Payload(NFS_Messages::RecompileShaders);
-
-		// let the handler fill out the object
-		Handler->FillPayload(Payload);
-
-		FArrayReader Response;
+		UE::Cook::FCookOnTheFlyRequest Request(UE::Cook::ECookOnTheFlyMessage::RecompileShaders);
 		{
-			FScopeLock ScopeLock(&SynchronizationObject);
-			if (!SendPayloadAndReceiveResponse(Payload, Response))
-			{
-				return false;
-			}
+			TUniquePtr<FArchive> Ar = Request.WriteBody();
+			Handler->FillPayload(*Ar);
 		}
 
-		// locally delete any files that were modified on the server, so that any read will recache the file
-		// this has to be done in this class, not in the Handler (which can't access these members)
-		TArray<FString> ModifiedFiles;
-		Response << ModifiedFiles;
-
-		if( InnerPlatformFile != NULL )
+		UE::Cook::FCookOnTheFlyResponse Response = Connection->SendRequest(Request).Get();
+		if (Response.IsOk())
 		{
-			for (int32 Index = 0; Index < ModifiedFiles.Num(); Index++)
-			{
-				InnerPlatformFile->DeleteFile(*ModifiedFiles[Index]);
-				CachedLocalFiles.Remove(ModifiedFiles[Index]);
-				ServerFiles.AddFileOrDirectory(ModifiedFiles[Index], FDateTime::UtcNow());
-			}
+			TUniquePtr<FArchive> Ar = Response.ReadBody();
+			Handler->ProcessResponse(*Ar);
 		}
 
-
-		// let the handler process the response directly
-		Handler->ProcessResponse(Response);
+		return Response.IsOk();
 	}
-
-	return true;
+#endif
+	return false;
 }
 
 
@@ -932,18 +945,28 @@ public:
 	FString							Filename;
 	/** An archive to read the file contents from */
 	FArrayReader* FileArchive;
+	TUniquePtr<FArrayReader> FileArchiveOwner;
+
 	/** timestamp for the file **/
 	FDateTime ServerTimeStamp;
 	IPlatformFile& InnerPlatformFile;
 	FScopedEvent* Event;
 
-	/** Constructor
-	*/
-	FAsyncNetworkWriteWorker(const TCHAR* InFilename, FArrayReader* InArchive, FDateTime InServerTimeStamp, IPlatformFile* InInnerPlatformFile, FScopedEvent* InEvent)
+	FAsyncNetworkWriteWorker(const TCHAR* InFilename, FArrayReader& InArchive, FDateTime InServerTimeStamp, IPlatformFile& InInnerPlatformFile)
 		: Filename(InFilename)
-		, FileArchive(InArchive)
+		, FileArchive(&InArchive)
 		, ServerTimeStamp(InServerTimeStamp)
-		, InnerPlatformFile(*InInnerPlatformFile)
+		, InnerPlatformFile(InInnerPlatformFile)
+		, Event(nullptr)
+	{
+	}
+
+	FAsyncNetworkWriteWorker(const TCHAR* InFilename, TUniquePtr<FArrayReader> InArchive, FDateTime InServerTimeStamp, IPlatformFile& InInnerPlatformFile, FScopedEvent* InEvent)
+		: Filename(InFilename)
+		, FileArchive(InArchive.Get())
+		, FileArchiveOwner(MoveTemp(InArchive))
+		, ServerTimeStamp(InServerTimeStamp)
+		, InnerPlatformFile(InInnerPlatformFile)
 		, Event(InEvent)
 	{
 	}
@@ -953,7 +976,7 @@ public:
 	{
 		// Read FileSize first so that the correct amount of data is read from the archive
 		// before exiting this worker.
-		uint64 FileSize;
+		uint64 FileSize = 0;
 		*FileArchive << FileSize;
 
 		bool bCopiedExternally = (FileSize == MAX_uint64); // -1 filesize means that we already copied it via TargetPlatform
@@ -991,7 +1014,8 @@ public:
 					// delete async write archives
 					if (Event)
 					{
-						delete FileArchive;
+						FileArchive = nullptr;
+						FileArchiveOwner.Reset();
 					}
 
 					if (InnerPlatformFile.FileSize(*TempFilename) != FileSize)
@@ -1033,15 +1057,14 @@ public:
 /**
  * Write a file async or sync, with the data coming from a FArrayReader
  */
-void SyncWriteFile(FArrayReader* Archive, const FString& Filename, FDateTime ServerTimeStamp, IPlatformFile& InnerPlatformFile)
+static void SyncWriteFile(FArrayReader* Archive, const FString& Filename, FDateTime ServerTimeStamp, IPlatformFile& InnerPlatformFile)
 {
-	FScopedEvent* NullEvent = NULL;
-	(new FAutoDeleteAsyncTask<FAsyncNetworkWriteWorker>(*Filename, Archive, ServerTimeStamp, &InnerPlatformFile, NullEvent))->StartSynchronousTask();
+	(new FAutoDeleteAsyncTask<FAsyncNetworkWriteWorker>(*Filename, *Archive, ServerTimeStamp, InnerPlatformFile))->StartSynchronousTask();
 }
 
-void AsyncWriteFile(FArrayReader* Archive, const FString& Filename, FDateTime ServerTimeStamp, IPlatformFile& InnerPlatformFile, FScopedEvent* Event = NULL)
+static void AsyncWriteFile(TUniquePtr<FArrayReader> Archive, const FString& Filename, FDateTime ServerTimeStamp, IPlatformFile& InnerPlatformFile, FScopedEvent* Event)
 {
-	(new FAutoDeleteAsyncTask<FAsyncNetworkWriteWorker>(*Filename, Archive, ServerTimeStamp, &InnerPlatformFile, Event))->StartBackgroundTask();
+	(new FAutoDeleteAsyncTask<FAsyncNetworkWriteWorker>(*Filename, MoveTemp(Archive), ServerTimeStamp, InnerPlatformFile, Event))->StartBackgroundTask();
 }
 
 void AsyncReadUnsolicitedFiles(int32 InNumUnsolictedFiles, FNetworkPlatformFile& InNetworkFile, IPlatformFile& InInnerPlatformFile, FString& InServerEngineDir, FString& InServerProjectDir, FString& InServerEnginePlatformExtensionsDir, FString& InServerProjectPlatformExtensionsDir, FScopedEvent *InNetworkDoneEvent, FScopedEvent *InWritingDoneEvent)
@@ -1078,7 +1101,7 @@ void AsyncReadUnsolicitedFiles(int32 InNumUnsolictedFiles, FNetworkPlatformFile&
 			OutstandingAsyncWrites.Add( NumUnsolictedFiles );
 			for (int32 Index = 0; Index < NumUnsolictedFiles; Index++)
 			{
-				FArrayReader* UnsolictedResponse = new FArrayReader;
+				TUniquePtr<FArrayReader> UnsolictedResponse(new FArrayReader);
 				if (!NetworkFile.ReceiveResponse(*UnsolictedResponse))
 				{
 					UE_LOG(LogNetworkPlatformFile, Fatal, TEXT("Receive failure!"));
@@ -1095,7 +1118,7 @@ void AsyncReadUnsolicitedFiles(int32 InNumUnsolictedFiles, FNetworkPlatformFile&
 					*UnsolictedResponse << UnsolictedServerTimeStamp;
 
 					// write the file by pulling out of the FArrayReader
-					AsyncWriteFile(UnsolictedResponse, UnsolictedReplyFile, UnsolictedServerTimeStamp, InnerPlatformFile, WritingDoneEvent);
+					AsyncWriteFile(MoveTemp(UnsolictedResponse), UnsolictedReplyFile, UnsolictedServerTimeStamp, InnerPlatformFile, WritingDoneEvent);
 				}
 			}
 			NetworkDoneEvent->Trigger();
@@ -1482,11 +1505,11 @@ void FNetworkPlatformFile::ConvertServerFilenameToClientFilename(FString& Filena
 	}
 	else if (FilenameToConvert.StartsWith(InServerEnginePlatformExtensionsDir))
 	{
-		FilenameToConvert = FilenameToConvert.Replace(*InServerEnginePlatformExtensionsDir, *(FPaths::EnginePlatformExtensionsDir()));
+		FilenameToConvert = FilenameToConvert.Replace(*InServerEnginePlatformExtensionsDir, *(UnsafeEnginePlatformExtensionDir()));
 	}
 	else if (FilenameToConvert.StartsWith(InServerProjectPlatformExtensionsDir))
 	{
-		FilenameToConvert = FilenameToConvert.Replace(*InServerProjectPlatformExtensionsDir, *(FPaths::ProjectPlatformExtensionsDir()));
+		FilenameToConvert = FilenameToConvert.Replace(*InServerProjectPlatformExtensionsDir, *(UnsafeProjectPlatformExtensionDir()));
 	}
 }
 
@@ -1531,7 +1554,7 @@ void FNetworkPlatformFile::Tick()
 	}
 }
 
-bool FNetworkPlatformFile::Exec(class UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar )
+bool FNetworkPlatformFile::Exec_Runtime(class UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar )
 {
 	if (FParse::Command(&Cmd, TEXT("networkfile")))
 	{

@@ -5,15 +5,19 @@
 =============================================================================*/ 
 
 #include "PhysicsEngine/PhysicsAsset.h"
+#include "Animation/MirrorDataTable.h"
+#include "Engine/SkinnedAsset.h"
 #include "UObject/FrameworkObjectVersion.h"
 #include "Serialization/ObjectWriter.h"
 #include "Serialization/ObjectReader.h"
-#include "Components/SkinnedMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "PhysicsEngine/PhysicsConstraintTemplate.h"
+#include "UObject/AssetRegistryTagsContext.h"
 #include "UObject/ReleaseObjectVersion.h"
-#include "Logging/MessageLog.h"
 #include "UObject/UObjectIterator.h"
+#include "UObject/FortniteSeasonBranchObjectVersion.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PhysicsAsset)
 
 #if WITH_EDITOR
 #include "Misc/MessageDialog.h"
@@ -24,9 +28,19 @@
 bool bUseRBANForDefaultPhysicsAssetSolverType = false;
 FAutoConsoleVariableRef CVarUseRBANForDefaultPhysicsAssetSolverType(TEXT("p.Chaos.UseRBANForDefaultPhysicsAssetSolverType"), bUseRBANForDefaultPhysicsAssetSolverType, TEXT("Boolean to use RBAN for default physics asset solver type (false by default)"));
 
+FPhysicsAssetSolverSettings::FPhysicsAssetSolverSettings()
+	: PositionIterations(6)
+	, VelocityIterations(1)
+	, ProjectionIterations(1)
+	, CullDistance(3.0f)
+	, MaxDepenetrationVelocity(0.0f)
+	, FixedTimeStep(0.0f)
+	, bUseLinearJointSolver(true)
+{
+}
+
 FSolverIterations::FSolverIterations()
-	: FixedTimeStep(0)
-	, SolverIterations(3)
+	: SolverIterations(3)
 	, JointIterations(2)
 	, CollisionIterations(2)
 	, SolverPushOutIterations(1)
@@ -195,8 +209,20 @@ void UPhysicsAsset::PostLoad()
 	}
 }
 
+#if WITH_EDITORONLY_DATA
+void UPhysicsAsset::DeclareConstructClasses(TArray<FTopLevelAssetPath>& OutConstructClasses, const UClass* SpecificSubclass)
+{
+	Super::DeclareConstructClasses(OutConstructClasses, SpecificSubclass);
+
+	OutConstructClasses.Add(FTopLevelAssetPath(USkeletalBodySetup::StaticClass()));
+}
+#endif
+
+
 void UPhysicsAsset::Serialize(FArchive& Ar)
 {
+	Ar.UsingCustomVersion(FFortniteSeasonBranchObjectVersion::GUID);
+
 	Super::Serialize(Ar);
 	Ar << CollisionDisableTable;
 
@@ -207,6 +233,19 @@ void UPhysicsAsset::Serialize(FArchive& Ar)
 		DefaultSkelMesh_DEPRECATED = NULL;
 	}
 #endif
+
+	// Transfer the legacy solver iteration counts to the new ones. These settings are used by the RBAN solver.
+	// These settings are intended to be roughly equivalent to the previous settings (the new solver adds VelocityIterations
+	// and provides the linear/non-linear joint solver option). Any new PhysicsAssets will get the defaults (new linear solver etc)
+	const bool bRequiresSettingsTransfer = (Ar.CustomVer(FFortniteSeasonBranchObjectVersion::GUID) < FFortniteSeasonBranchObjectVersion::PhysicsAssetNewSolverSettings);
+	if (bRequiresSettingsTransfer)
+	{
+		SolverSettings.PositionIterations = SolverIterations.SolverIterations * SolverIterations.JointIterations;
+		SolverSettings.VelocityIterations = 1;
+		SolverSettings.ProjectionIterations = SolverIterations.SolverPushOutIterations;
+		SolverSettings.bUseLinearJointSolver = false;
+		SolverSettings.CullDistance = 1.0f;
+	}
 
 	Ar.UsingCustomVersion(FFrameworkObjectVersion::GUID);
 	Ar.UsingCustomVersion(FReleaseObjectVersion::GUID);
@@ -266,12 +305,10 @@ bool UPhysicsAsset::IsCollisionEnabled(int32 BodyIndexA, int32 BodyIndexB) const
 
 void UPhysicsAsset::SetPrimitiveCollision(int32 BodyIndex, EAggCollisionShape::Type PrimitiveType, int32 PrimitiveIndex, ECollisionEnabled::Type CollisionEnabled)
 {
-#if WITH_CHAOS
 	check(SkeletalBodySetups.IsValidIndex(BodyIndex));
 	FKAggregateGeom* AggGeom = &SkeletalBodySetups[BodyIndex]->AggGeom;
 	ensure(PrimitiveIndex < AggGeom->GetElementCount());
 	AggGeom->GetElement(PrimitiveType, PrimitiveIndex)->SetCollisionEnabled(CollisionEnabled);
-#endif
 }
 
 ECollisionEnabled::Type UPhysicsAsset::GetPrimitiveCollision(int32 BodyIndex, EAggCollisionShape::Type PrimitiveType, int32 PrimitiveIndex) const
@@ -356,17 +393,17 @@ FBox UPhysicsAsset::CalcAABB(const USkinnedMeshComponent* MeshComp, const FTrans
 					// @TODO: Maybe CalcAABB should handle that inside and never return a reversed FBox
 					if (BodySetupBounds.Min.X > BodySetupBounds.Max.X)
 					{
-						Swap<float>(BodySetupBounds.Min.X, BodySetupBounds.Max.X);
+						Swap(BodySetupBounds.Min.X, BodySetupBounds.Max.X);
 					}
 
 					if (BodySetupBounds.Min.Y > BodySetupBounds.Max.Y)
 					{
-						Swap<float>(BodySetupBounds.Min.Y, BodySetupBounds.Max.Y);
+						Swap(BodySetupBounds.Min.Y, BodySetupBounds.Max.Y);
 					}
 
 					if (BodySetupBounds.Min.Z > BodySetupBounds.Max.Z)
 					{
-						Swap<float>(BodySetupBounds.Min.Z, BodySetupBounds.Max.Z);
+						Swap(BodySetupBounds.Min.Z, BodySetupBounds.Max.Z);
 					}
 
 					Box += BodySetupBounds;
@@ -376,7 +413,7 @@ FBox UPhysicsAsset::CalcAABB(const USkinnedMeshComponent* MeshComp, const FTrans
 	}
 	else
 	{
-		UE_LOG(LogPhysics, Log,  TEXT("UPhysicsAsset::CalcAABB : Non-uniform scale factor. You will not be able to collide with it.  Turn off collision and wrap it with a blocking volume.  MeshComp: %s  SkelMesh: %s"), *MeshComp->GetFullName(), MeshComp->SkeletalMesh ? *MeshComp->SkeletalMesh->GetFullName() : TEXT("NULL") );
+		UE_LOG(LogPhysics, Log,  TEXT("UPhysicsAsset::CalcAABB : Non-uniform scale factor. You will not be able to collide with it.  Turn off collision and wrap it with a blocking volume.  MeshComp: %s  SkelMesh: %s"), *MeshComp->GetFullName(), MeshComp->GetSkinnedAsset() ? *MeshComp->GetSkinnedAsset()->GetFullName() : TEXT("NULL") );
 	}
 
 	if(!Box.IsValid)
@@ -389,7 +426,7 @@ FBox UPhysicsAsset::CalcAABB(const USkinnedMeshComponent* MeshComp, const FTrans
 
 	if(BoxSize.GetMin() < MinBoundSize)
 	{
-		const FVector ExpandByDelta ( FMath::Max(0.f, MinBoundSize - BoxSize.X), FMath::Max(0.f, MinBoundSize - BoxSize.Y), FMath::Max(0.f, MinBoundSize - BoxSize.Z) );
+		const FVector ExpandByDelta ( FMath::Max<FVector::FReal>(0, MinBoundSize - BoxSize.X), FMath::Max<FVector::FReal>(0, MinBoundSize - BoxSize.Y), FMath::Max<FVector::FReal>(0, MinBoundSize - BoxSize.Z) );
 		Box = Box.ExpandBy(ExpandByDelta * 0.5f);	//expand by applies to both directions with GetSize applies to total size so divide by 2
 	}
 
@@ -422,10 +459,10 @@ bool UPhysicsAsset::CanCalculateValidAABB(const USkinnedMeshComponent* MeshComp,
 			if (BoneIndex != INDEX_NONE)
 			{
 				FTransform WorldBoneTransform = MeshComp->GetBoneTransform(BoneIndex, LocalToWorld);
-				if (FMath::Abs(WorldBoneTransform.GetDeterminant()) >(float)KINDA_SMALL_NUMBER)
+				if (FMath::Abs(WorldBoneTransform.GetDeterminant()) >(float)UE_KINDA_SMALL_NUMBER)
 				{
 					FBox Box = bs->AggGeom.CalcAABB(WorldBoneTransform);
-					if (Box.GetSize().SizeSquared() > (float)KINDA_SMALL_NUMBER)
+					if (Box.GetSize().SizeSquared() > (float)UE_KINDA_SMALL_NUMBER)
 					{
 						ValidBox = true;
 						break;
@@ -460,13 +497,23 @@ int32	UPhysicsAsset::FindControllingBodyIndex(class USkeletalMesh* skelMesh, int
 	return INDEX_NONE; // Shouldn't reach here.
 }
 
-int32 UPhysicsAsset::FindParentBodyIndex(class USkeletalMesh * skelMesh, int32 StartBoneIndex) const
+int32 UPhysicsAsset::FindParentBodyIndex(class USkeletalMesh* skelMesh, int32 StartBoneIndex) const
+{
+	if (skelMesh)
+	{
+		return FindParentBodyIndex(skelMesh->GetRefSkeleton(), StartBoneIndex);
+	}
+
+	return INDEX_NONE;
+}
+
+int32 UPhysicsAsset::FindParentBodyIndex(const FReferenceSkeleton& RefSkeleton, const int32 StartBoneIndex) const
 {
 	int32 BoneIndex = StartBoneIndex;
-	while ((BoneIndex = skelMesh->GetRefSkeleton().GetParentIndex(BoneIndex)) != INDEX_NONE)
+	while ((BoneIndex = RefSkeleton.GetParentIndex(BoneIndex)) != INDEX_NONE)
 	{
-		FName BoneName = skelMesh->GetRefSkeleton().GetBoneName(BoneIndex);
-		int32 BodyIndex = FindBodyIndex(BoneName);
+		const FName BoneName = RefSkeleton.GetBoneName(BoneIndex);
+		const int32 BodyIndex = FindBodyIndex(BoneName);
 
 		if (StartBoneIndex == BoneIndex)
 			return INDEX_NONE;
@@ -503,6 +550,20 @@ int32 UPhysicsAsset::FindConstraintIndex(FName ConstraintName)
 	return INDEX_NONE;
 }
 
+int32 UPhysicsAsset::FindConstraintIndex(FName Bone1Name, FName Bone2Name)
+{
+	for (int32 i = 0; i < ConstraintSetup.Num(); i++)
+	{
+		if (ConstraintSetup[i]->DefaultInstance.ConstraintBone1 == Bone1Name &&
+			ConstraintSetup[i]->DefaultInstance.ConstraintBone2 == Bone2Name)
+		{
+			return i;
+		}
+	}
+
+	return INDEX_NONE;
+}
+
 FName UPhysicsAsset::FindConstraintBoneName(int32 ConstraintIndex)
 {
 	if ( (ConstraintIndex < 0) || (ConstraintIndex >= ConstraintSetup.Num()) )
@@ -510,54 +571,50 @@ FName UPhysicsAsset::FindConstraintBoneName(int32 ConstraintIndex)
 		return NAME_None;
 	}
 
-	return ConstraintSetup[ConstraintIndex]->DefaultInstance.JointName;
+	return ConstraintSetup[ConstraintIndex]->DefaultInstance.GetChildBoneName();
 }
 
-int32 UPhysicsAsset::FindMirroredBone(class USkeletalMesh* skelMesh, int32 BoneIndex)
+int32 UPhysicsAsset::FindMirroredBone(USkeletalMesh* SkelMesh,  int32 BoneIndex)
 {
-	if (BoneIndex == INDEX_NONE)
+	if (SkelMesh)
 	{
-		return INDEX_NONE;
-	}
-	//we try to find the mirroed bone using several approaches. The first is to look for the same name but with _R instead of _L or vise versa
-	FName BoneName = skelMesh->GetRefSkeleton().GetBoneName(BoneIndex);
-	FString BoneNameString = BoneName.ToString();
-
-	bool bIsLeft = BoneNameString.Find("_L", ESearchCase::IgnoreCase, ESearchDir::FromEnd) == (BoneNameString.Len() - 2);	//has _L at the end
-	bool bIsRight = BoneNameString.Find("_R", ESearchCase::IgnoreCase, ESearchDir::FromEnd) == (BoneNameString.Len() - 2);	//has _R at the end
-	bool bMirrorConvention = bIsLeft || bIsRight;
-
-	//if the bone follows our left right naming convention then let's try and find its mirrored bone
-	int32 BoneIndexMirrored = INDEX_NONE;
-	if (bMirrorConvention)
-	{
-		FString BoneNameMirrored = BoneNameString.LeftChop(2);
-		BoneNameMirrored.Append(bIsLeft ? "_R" : "_L");
-
-		BoneIndexMirrored = skelMesh->GetRefSkeleton().FindBoneIndex(FName(*BoneNameMirrored));
+		FName BoneName = SkelMesh->GetRefSkeleton().GetBoneName(BoneIndex);
+		FName MirrorName = UMirrorDataTable::GetSettingsMirrorName(BoneName);
+		return SkelMesh->GetRefSkeleton().FindBoneIndex(MirrorName); 
 	}
 
-	return BoneIndexMirrored;
+	return INDEX_NONE; 
 }
 
 void UPhysicsAsset::GetBodyIndicesBelow(TArray<int32>& OutBodyIndices, FName InBoneName, USkeletalMesh* SkelMesh, bool bIncludeParent /*= true*/)
 {
-	int32 BaseIndex = SkelMesh->GetRefSkeleton().FindBoneIndex(InBoneName);
-
-	// Iterate over all other bodies, looking for 'children' of this one
-	for(int32 i=0; i<SkeletalBodySetups.Num(); i++)
+	if (SkelMesh)
 	{
-		UBodySetup* BS = SkeletalBodySetups[i];
-		if (!ensure(BS))
-		{
-			continue;
-		}
-		FName TestName = BS->BoneName;
-		int32 TestIndex = SkelMesh->GetRefSkeleton().FindBoneIndex(TestName);
+		GetBodyIndicesBelow(OutBodyIndices, InBoneName, SkelMesh->GetRefSkeleton(), bIncludeParent);
+	}
+}
 
-		if( (bIncludeParent && TestIndex == BaseIndex) || SkelMesh->GetRefSkeleton().BoneIsChildOf(TestIndex, BaseIndex))
+void UPhysicsAsset::GetBodyIndicesBelow(TArray<int32>& OutBodyIndices, const FName InBoneName, const FReferenceSkeleton& RefSkeleton, const bool bIncludeParent /*= true*/)
+{
+	const int32 BaseIndex = RefSkeleton.FindBoneIndex(InBoneName);
+
+	if (BaseIndex != INDEX_NONE)
+	{
+		// Iterate over all other bodies, looking for 'children' of this one
+		for (int32 i = 0; i < SkeletalBodySetups.Num(); i++)
 		{
-			OutBodyIndices.Add(i);
+			UBodySetup* BS = SkeletalBodySetups[i];
+			if (!ensure(BS))
+			{
+				continue;
+			}
+			FName TestName = BS->BoneName;
+			int32 TestIndex = RefSkeleton.FindBoneIndex(TestName);
+
+			if ((bIncludeParent && TestIndex == BaseIndex) || RefSkeleton.BoneIsChildOf(TestIndex, BaseIndex))
+			{
+				OutBodyIndices.Add(i);
+			}
 		}
 	}
 }
@@ -653,10 +710,10 @@ void SanitizeProfilesHelper(const TArray<T*>& SetupInstances, const TArray<FName
 
 	if (ArrayIdx != INDEX_NONE)
 	{
-		if(PropertyChangedEvent.ChangeType != EPropertyChangeType::Unspecified && PropertyChangedEvent.ChangeType != EPropertyChangeType::ArrayRemove)
+		if(PropertyChangedEvent.ChangeType != EPropertyChangeType::ArrayMove && PropertyChangedEvent.ChangeType != EPropertyChangeType::ArrayRemove)
 		{
 			int32 CollisionCount = 0;
-			FName NewName = PostProfiles[ArrayIdx] == NAME_None ? FName(TEXT("New")) : PostProfiles[ArrayIdx];
+			FName NewName = (PostProfiles[ArrayIdx] == NAME_None) ? FName(TEXT("New")) : PostProfiles[ArrayIdx];
 			const FString NewNameNoNumber = NewName.ToString();
 			while(PreProfiles.Contains(NewName))
 			{
@@ -762,12 +819,12 @@ void UPhysicsAsset::PostEditChangeProperty(FPropertyChangedEvent& PropertyChange
 	RefreshPhysicsAssetChange();
 }
 
-EDataValidationResult UPhysicsAsset::IsDataValid(TArray<FText>& ValidationErrors)
+EDataValidationResult UPhysicsAsset::IsDataValid(FDataValidationContext& Context) const
 {
 	EDataValidationResult Result = EDataValidationResult::Valid;
 	for (USkeletalBodySetup* BodySetup : SkeletalBodySetups)
 	{
-		Result = CombineDataValidationResults(Result, BodySetup->IsDataValid(ValidationErrors));
+		Result = CombineDataValidationResults(Result, BodySetup->IsDataValid(Context));
 	}
 	return Result;
 }
@@ -786,10 +843,17 @@ FString UPhysicsAsset::GetDesc()
 
 void UPhysicsAsset::GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const
 {
-	OutTags.Add( FAssetRegistryTag("Bodies", FString::FromInt(SkeletalBodySetups.Num()), FAssetRegistryTag::TT_Numerical) );
-	OutTags.Add( FAssetRegistryTag("Constraints", FString::FromInt(ConstraintSetup.Num()), FAssetRegistryTag::TT_Numerical) );
-
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
 	Super::GetAssetRegistryTags(OutTags);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void UPhysicsAsset::GetAssetRegistryTags(FAssetRegistryTagsContext Context) const
+{
+	Context.AddTag( FAssetRegistryTag("Bodies", FString::FromInt(SkeletalBodySetups.Num()), FAssetRegistryTag::TT_Numerical) );
+	Context.AddTag( FAssetRegistryTag("Constraints", FString::FromInt(ConstraintSetup.Num()), FAssetRegistryTag::TT_Numerical) );
+
+	Super::GetAssetRegistryTags(Context);
 }
 
 
@@ -854,6 +918,65 @@ USkeletalMesh* UPhysicsAsset::GetPreviewMesh() const
 #endif
 }
 
+#if WITH_EDITOR
+FConstraintInstanceAccessor UPhysicsAsset::GetConstraintInstanceAccessorByIndex(int32 ConstraintIndex)
+{
+	if (ConstraintIndex == INDEX_NONE || ConstraintIndex >= ConstraintSetup.Num())
+	{
+		return FConstraintInstanceAccessor();
+	}
+
+	if (ConstraintSetup[ConstraintIndex])
+	{
+		// Implementation note: Any changes on the constraint must be propagated from the instance to its profile
+		return FConstraintInstanceAccessor(this, ConstraintIndex, [this, ConstraintIndex]() {
+			ConstraintSetup[ConstraintIndex]->UpdateProfileInstance(); });
+	}
+
+	return FConstraintInstanceAccessor();
+}
+
+FConstraintInstanceAccessor UPhysicsAsset::GetConstraintByName(FName ConstraintName)
+{
+	return GetConstraintInstanceAccessorByIndex(FindConstraintIndex(ConstraintName));
+}
+
+FConstraintInstanceAccessor UPhysicsAsset::GetConstraintByBoneNames(FName Bone1Name, FName Bone2Name)
+{
+	return GetConstraintInstanceAccessorByIndex(FindConstraintIndex(Bone1Name, Bone2Name));
+}
+
+void UPhysicsAsset::GetConstraints(bool bIncludesTerminated, TArray<FConstraintInstanceAccessor>& OutConstraints)
+{
+	for (int32 i = 0; i < ConstraintSetup.Num(); ++i)
+	{
+		if (ConstraintSetup[i])
+		{
+			if (bIncludesTerminated || ConstraintSetup[i]->DefaultInstance.IsTerminated())
+			{
+				// Implementation note: Any changes on the constraint must be propagated from the instance to its profile
+				OutConstraints.Emplace(this, i, [this, i]() {
+					ConstraintSetup[i]->UpdateProfileInstance();
+					});
+			}
+		}
+	}
+}
+
+FConstraintInstance* UPhysicsAsset::GetConstraintInstanceByIndex(uint32 Index)
+{
+	if (Index < (uint32)ConstraintSetup.Num())
+	{
+		if (ConstraintSetup[Index])
+		{
+			return &ConstraintSetup[Index]->DefaultInstance;
+		}
+	}
+
+	return nullptr;
+}
+#endif
+
 void UPhysicsAsset::SetPreviewMesh(USkeletalMesh* PreviewMesh, bool bMarkAsDirty/*=true*/)
 {
 #if WITH_EDITORONLY_DATA
@@ -892,3 +1015,4 @@ void UPhysicsAsset::GetResourceSizeEx(FResourceSizeEx& CumulativeResourceSize)
 }
 
 #undef LOCTEXT_NAMESPACE
+

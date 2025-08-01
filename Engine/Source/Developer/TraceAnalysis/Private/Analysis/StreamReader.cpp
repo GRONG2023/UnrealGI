@@ -1,17 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "StreamReader.h"
-#include "HAL/UnrealMemory.h"
 #include "Math/UnrealMath.h"
 
-namespace Trace
-{
-
-////////////////////////////////////////////////////////////////////////////////
-FStreamReader::~FStreamReader()
-{
-	FMemory::Free(Buffer);
-}
+namespace UE {
+namespace Trace {
 
 ////////////////////////////////////////////////////////////////////////////////
 const uint8* FStreamReader::GetPointer(uint32 Size)
@@ -32,9 +25,35 @@ void FStreamReader::Advance(uint32 Size)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+uint32 FStreamReader::GetRemaining() const
+{
+	check(End >= Cursor);
+	return End - Cursor;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+bool FStreamReader::CanMeetDemand() const
+{
+	return GetRemaining() >= DemandHint;
+}
+
+////////////////////////////////////////////////////////////////////////////////
 bool FStreamReader::IsEmpty() const
 {
 	return Cursor >= End;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+bool FStreamReader::Backtrack(const uint8* To)
+{
+	uint32 BacktrackedCursor = uint32(UPTRINT(To - Buffer));
+	if (BacktrackedCursor > End)
+	{
+		return false;
+	}
+
+	Cursor = BacktrackedCursor;
+	return true;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -54,6 +73,13 @@ void FStreamReader::RestoreMark(struct FMark* Mark)
 }
 
 
+
+////////////////////////////////////////////////////////////////////////////////
+FStreamBuffer::FStreamBuffer(uint32 InitialBufferSize)
+: BufferSize(InitialBufferSize)
+{
+	Buffer = (uint8*)FMemory::Malloc(BufferSize);
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 void FStreamBuffer::Append(const uint8* Data, uint32 Size)
@@ -76,13 +102,14 @@ uint8* FStreamBuffer::Append(uint32 Size)
 ////////////////////////////////////////////////////////////////////////////////
 void FStreamBuffer::Consolidate()
 {
-	int32 Remaining = End - Cursor;
+	uint32 Remaining = GetRemaining();
+	check((uint64)DemandHint + (uint64)Remaining < (1ull << 31));
 	DemandHint += Remaining;
 
 	if (DemandHint >= BufferSize)
 	{
-		const uint32 GrowthSizeMask = (8 << 10) - 1;
-		BufferSize = (DemandHint + GrowthSizeMask + 1) & ~GrowthSizeMask;
+		check(DemandHint < (1u << 31));
+		BufferSize = FMath::Max(64u << 10, FMath::RoundUpToPowerOfTwo(DemandHint + 1));
 		Buffer = (uint8*)FMemory::Realloc(Buffer, BufferSize);
 	}
 
@@ -103,3 +130,4 @@ void FStreamBuffer::Consolidate()
 }
 
 } // namespace Trace
+} // namespace UE

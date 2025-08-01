@@ -1,12 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AudioCompressionSettingsUtils.h"
-#include "AudioCompressionSettings.h"
+#include "AudioStreamingCache.h"
 #include "Misc/DataDrivenPlatformInfoRegistry.h"
 
 #define ENABLE_PLATFORM_COMPRESSION_OVERRIDES 1
 
-#if PLATFORM_ANDROID && !PLATFORM_LUMIN && ENABLE_PLATFORM_COMPRESSION_OVERRIDES
+#if PLATFORM_ANDROID && ENABLE_PLATFORM_COMPRESSION_OVERRIDES
 #include "AndroidRuntimeSettings.h"
 #endif
 
@@ -20,7 +20,7 @@
 
 #include "Misc/ConfigCacheIni.h"
 
-static float CookOverrideCachingIntervalCvar = 1.0f;
+static float CookOverrideCachingIntervalCvar = 60.0f;
 FAutoConsoleVariableRef CVarCookOverrideCachingIntervalCVar(
 	TEXT("au.editor.CookOverrideCachingInterval"),
 	CookOverrideCachingIntervalCvar,
@@ -53,7 +53,7 @@ FAutoConsoleVariableRef CVarChunkSlotNumScalar(
 
 const FPlatformRuntimeAudioCompressionOverrides* FPlatformCompressionUtilities::GetRuntimeCompressionOverridesForCurrentPlatform()
 {
-#if PLATFORM_ANDROID && !PLATFORM_LUMIN && ENABLE_PLATFORM_COMPRESSION_OVERRIDES
+#if PLATFORM_ANDROID && ENABLE_PLATFORM_COMPRESSION_OVERRIDES
 	static const UAndroidRuntimeSettings* Settings = GetDefault<UAndroidRuntimeSettings>();
 	if (Settings)
 	{
@@ -76,18 +76,20 @@ const FPlatformRuntimeAudioCompressionOverrides* FPlatformCompressionUtilities::
 		return &(Settings->CompressionOverrides);
 	}
 
-#endif // PLATFORM_ANDROID && !PLATFORM_LUMIN
+#endif // PLATFORM_ANDROID
 	return nullptr;
 }
 
 void CacheAudioCookOverrides(FPlatformAudioCookOverrides& OutOverrides, const TCHAR* InPlatformName=nullptr)
 {
+	SCOPED_NAMED_EVENT(CacheAudioCookOverrides, FColor::Blue);
+
 	// if the platform was passed in, use it, otherwise, get the runtime platform's name for looking up DDPI
 	FString PlatformName = InPlatformName ? FString(InPlatformName) : FString(FPlatformProperties::IniPlatformName());
 	
 	// now use that platform name to get the ini section out of DDPI
-	const FDataDrivenPlatformInfoRegistry::FPlatformInfo& PlatformInfo = FDataDrivenPlatformInfoRegistry::GetPlatformInfo(PlatformName);
-	const FString& CategoryName = PlatformInfo.AudioCompressionSettingsIniSectionName;
+	const FDataDrivenPlatformInfo& PlatformInfo = FDataDrivenPlatformInfoRegistry::GetPlatformInfo(PlatformName);
+	const FString& CategoryName = PlatformInfo.TargetSettingsIniSectionName;
 
 	// if we don't support platform overrides, then return 
 	if (CategoryName.Len() == 0)
@@ -95,82 +97,90 @@ void CacheAudioCookOverrides(FPlatformAudioCookOverrides& OutOverrides, const TC
 		OutOverrides = FPlatformAudioCookOverrides();
 		return;
 	}
-	
-	FConfigFile PlatformFile;
-	FConfigCacheIni::LoadLocalIniFile(PlatformFile, TEXT("Engine"), true, *PlatformName);
 
+	FConfigFile LocalPlatformEngineIni;
+	const FConfigFile* PlatformFile = FConfigCacheIni::FindOrLoadPlatformConfig(LocalPlatformEngineIni, TEXT("Engine"), *PlatformName);
 
 	int32 SoundCueQualityIndex = INDEX_NONE;
-	if (PlatformFile.GetInt(*CategoryName, TEXT("SoundCueCookQualityIndex"), SoundCueQualityIndex))
+	if (PlatformFile->GetInt(*CategoryName, TEXT("SoundCueCookQualityIndex"), SoundCueQualityIndex))
 	{
 		OutOverrides.SoundCueCookQualityIndex = SoundCueQualityIndex;
 	}
 
-	PlatformFile.GetBool(*CategoryName, TEXT("bUseAudioStreamCaching"), OutOverrides.bUseStreamCaching);
+	if (bool bInlineFirstAudioChunk = false; PlatformFile->GetBool(*CategoryName, TEXT("bInlineFirstAudioChunk"), bInlineFirstAudioChunk))
+	{
+		OutOverrides.bInlineFirstAudioChunk = bInlineFirstAudioChunk;
+	}
 
-	GConfig->GetBool(*CategoryName, TEXT("bInlineStreamedAudioChunks"), OutOverrides.bInlineStreamedAudioChunks, GEngineIni);
+	if (float LengthOfFirstAudioChunkInSeconds = 0.f; PlatformFile->GetFloat(*CategoryName, TEXT("LengthOfFirstAudioChunkInSeconds"), LengthOfFirstAudioChunkInSeconds))
+	{
+		OutOverrides.LengthOfFirstAudioChunkInSecs = LengthOfFirstAudioChunkInSeconds;
+	}
 
 	/** Memory Load On Demand Settings */
-	if (OutOverrides.bUseStreamCaching)
+	// Cache size:
+	constexpr int32 DefaultCacheSizeKB = FAudioStreamCachingSettings::DefaultCacheSize;
+	int32 RetrievedCacheSize = DefaultCacheSizeKB;
+	if (PlatformFile->GetInt(*CategoryName, TEXT("CacheSizeKB"), RetrievedCacheSize))
 	{
-		// Cache size:
-		int32 RetrievedCacheSize = 32 * 1024;
-		int32 RetrievedChunkSizeOverride = INDEX_NONE;
-		PlatformFile.GetInt(*CategoryName, TEXT("CacheSizeKB"), RetrievedCacheSize);
-		OutOverrides.StreamCachingSettings.CacheSizeKB = RetrievedCacheSize;
+		if (RetrievedCacheSize == 0)
+		{
+			UE_LOG(LogConfig, Display, TEXT("Audio Stream Cache \"Max Cache Size KB\" set to 0 by config: \"%s%s.ini\". Default value of %d KB will be used. You can update Project Settings here: Project Settings->Platforms->%s->Audio->Cook Overrides->Stream Caching->Max Cache Size (KB)"),
+				*PlatformFile->SourceProjectConfigDir, *PlatformFile->Name.ToString(), DefaultCacheSizeKB, *PlatformFile->PlatformName);
+			RetrievedCacheSize = DefaultCacheSizeKB;
+		}
+	}
 
-		PlatformFile.GetInt(*CategoryName, TEXT("MaxChunkSizeOverrideKB"), RetrievedChunkSizeOverride);
+	OutOverrides.StreamCachingSettings.CacheSizeKB = RetrievedCacheSize;
+
+	int32 RetrievedChunkSizeOverride = INDEX_NONE;
+	if (PlatformFile->GetInt(*CategoryName, TEXT("MaxChunkSizeOverrideKB"), RetrievedChunkSizeOverride))
+	{
 		OutOverrides.StreamCachingSettings.MaxChunkSizeOverrideKB = RetrievedChunkSizeOverride;
+	}
 
-		bool bForceLegacyStreamChunking = false;
-		PlatformFile.GetBool(*CategoryName, TEXT("bForceLegacyStreamChunking"), bForceLegacyStreamChunking);
+	bool bForceLegacyStreamChunking = false;
+	if (PlatformFile->GetBool(*CategoryName, TEXT("bForceLegacyStreamChunking"), bForceLegacyStreamChunking))
+	{
 		OutOverrides.StreamCachingSettings.bForceLegacyStreamChunking = bForceLegacyStreamChunking;
+	}
 
-		int32 ZerothChunkSizeForLegacyStreamChunking = 0;
-		PlatformFile.GetInt(*CategoryName, TEXT("ZerothChunkSizeForLegacyStreamChunking"), ZerothChunkSizeForLegacyStreamChunking);
+	int32 ZerothChunkSizeForLegacyStreamChunking = 0;
+	if (PlatformFile->GetInt(*CategoryName, TEXT("ZerothChunkSizeForLegacyStreamChunking"), ZerothChunkSizeForLegacyStreamChunking))
+	{
 		OutOverrides.StreamCachingSettings.ZerothChunkSizeForLegacyStreamChunkingKB = ZerothChunkSizeForLegacyStreamChunking;
 	}
 
-	PlatformFile.GetBool(*CategoryName, TEXT("bResampleForDevice"), OutOverrides.bResampleForDevice);
+	bool bResampleForDevice = false;
+	if (PlatformFile->GetBool(*CategoryName, TEXT("bResampleForDevice"), bResampleForDevice))
+	{
+		OutOverrides.bResampleForDevice = bResampleForDevice;
+	}
 
-	PlatformFile.GetFloat(*CategoryName, TEXT("CompressionQualityModifier"), OutOverrides.CompressionQualityModifier);
+	float CompressionQualityModifier = 0.0f;
+	if (PlatformFile->GetFloat(*CategoryName, TEXT("CompressionQualityModifier"), CompressionQualityModifier))
+	{
+		OutOverrides.CompressionQualityModifier = CompressionQualityModifier;
+	}
 
-	PlatformFile.GetFloat(*CategoryName, TEXT("AutoStreamingThreshold"), OutOverrides.AutoStreamingThreshold);
+	float AutoStreamingThreshold = 0.0f;
+	if (PlatformFile->GetFloat(*CategoryName, TEXT("AutoStreamingThreshold"), AutoStreamingThreshold))
+	{
+		OutOverrides.AutoStreamingThreshold = AutoStreamingThreshold;
+	}
 
 #if 1
 	//Cache sample rate map:
 	float RetrievedSampleRate = -1.0f;
 
-	PlatformFile.GetFloat(*CategoryName, TEXT("MaxSampleRate"), RetrievedSampleRate);
-	float* FoundSampleRate = OutOverrides.PlatformSampleRates.Find(ESoundwaveSampleRateSettings::Max);
-
-	if (FoundSampleRate)
-	{
-		if (!FMath::IsNearlyEqual(*FoundSampleRate, RetrievedSampleRate))
-		{
-			*FoundSampleRate = RetrievedSampleRate;
-		}
-
-	}
-	else
+	if (PlatformFile->GetFloat(*CategoryName, TEXT("MaxSampleRate"), RetrievedSampleRate))
 	{
 		OutOverrides.PlatformSampleRates.Add(ESoundwaveSampleRateSettings::Max, RetrievedSampleRate);
 	}
 
 	RetrievedSampleRate = -1.0f;
 
-	PlatformFile.GetFloat(*CategoryName, TEXT("HighSampleRate"), RetrievedSampleRate);
-	FoundSampleRate = OutOverrides.PlatformSampleRates.Find(ESoundwaveSampleRateSettings::High);
-
-	if (FoundSampleRate)
-	{
-		if (!FMath::IsNearlyEqual(*FoundSampleRate, RetrievedSampleRate))
-		{
-			*FoundSampleRate = RetrievedSampleRate;
-		}
-
-	}
-	else
+	if (PlatformFile->GetFloat(*CategoryName, TEXT("HighSampleRate"), RetrievedSampleRate))
 	{
 		OutOverrides.PlatformSampleRates.Add(ESoundwaveSampleRateSettings::High, RetrievedSampleRate);
 	}
@@ -178,55 +188,24 @@ void CacheAudioCookOverrides(FPlatformAudioCookOverrides& OutOverrides, const TC
 
 	RetrievedSampleRate = -1.0f;
 
-	PlatformFile.GetFloat(*CategoryName, TEXT("MedSampleRate"), RetrievedSampleRate);
-	FoundSampleRate = OutOverrides.PlatformSampleRates.Find(ESoundwaveSampleRateSettings::Medium);
-
-	if (FoundSampleRate)
-	{
-		if (!FMath::IsNearlyEqual(*FoundSampleRate, RetrievedSampleRate))
-		{
-			*FoundSampleRate = RetrievedSampleRate;
-		}
-	}
-	else
+	if (PlatformFile->GetFloat(*CategoryName, TEXT("MedSampleRate"), RetrievedSampleRate))
 	{
 		OutOverrides.PlatformSampleRates.Add(ESoundwaveSampleRateSettings::Medium, RetrievedSampleRate);
 	}
 
 	RetrievedSampleRate = -1.0f;
 
-	PlatformFile.GetFloat(*CategoryName, TEXT("LowSampleRate"), RetrievedSampleRate);
-	FoundSampleRate = OutOverrides.PlatformSampleRates.Find(ESoundwaveSampleRateSettings::Low);
-
-	if (FoundSampleRate)
-	{
-		if (!FMath::IsNearlyEqual(*FoundSampleRate, RetrievedSampleRate))
-		{
-			*FoundSampleRate = RetrievedSampleRate;
-		}
-	}
-	else
+	if (PlatformFile->GetFloat(*CategoryName, TEXT("LowSampleRate"), RetrievedSampleRate))
 	{
 		OutOverrides.PlatformSampleRates.Add(ESoundwaveSampleRateSettings::Low, RetrievedSampleRate);
 	}
 
 	RetrievedSampleRate = -1.0f;
 
-	PlatformFile.GetFloat(*CategoryName, TEXT("MinSampleRate"), RetrievedSampleRate);
-	FoundSampleRate = OutOverrides.PlatformSampleRates.Find(ESoundwaveSampleRateSettings::Min);
-
-	if (FoundSampleRate)
-	{
-		if (!FMath::IsNearlyEqual(*FoundSampleRate, RetrievedSampleRate))
-		{
-			*FoundSampleRate = RetrievedSampleRate;
-		}
-	}
-	else
+	if (PlatformFile->GetFloat(*CategoryName, TEXT("MinSampleRate"), RetrievedSampleRate))
 	{
 		OutOverrides.PlatformSampleRates.Add(ESoundwaveSampleRateSettings::Min, RetrievedSampleRate);
 	}
-
 #else
 
 	//Cache sample rate map.
@@ -262,7 +241,7 @@ void CacheAudioCookOverrides(FPlatformAudioCookOverrides& OutOverrides, const TC
 
 static bool PlatformSupportsCompressionOverrides(const FString& PlatformName)
 {
-	return FDataDrivenPlatformInfoRegistry::GetPlatformInfo(PlatformName).AudioCompressionSettingsIniSectionName.Len() > 0;
+	return FDataDrivenPlatformInfoRegistry::GetPlatformInfo(PlatformName).TargetSettingsIniSectionName.Len() > 0;
 }
 
 static inline FString GetCookOverridePlatformName(const TCHAR* PlatformName)
@@ -347,8 +326,7 @@ const FPlatformAudioCookOverrides* FPlatformCompressionUtilities::GetCookOverrid
 
 bool FPlatformCompressionUtilities::IsCurrentPlatformUsingStreamCaching()
 {
-	const FPlatformAudioCookOverrides* Settings = GetCookOverrides();
-	return Settings && Settings->bUseStreamCaching;
+	return true;
 }
 
 const FAudioStreamCachingSettings& FPlatformCompressionUtilities::GetStreamCachingSettingsForCurrentPlatform()
@@ -370,7 +348,7 @@ FCachedAudioStreamingManagerParams FPlatformCompressionUtilities::BuildCachedStr
 	}
 
 	// Our number of elements is tweakable based on the minimum cache usage we want to support.
-	const float MinimumCacheUsage = FMath::Clamp(MinimumCacheUsageCvar, 0.0f, (1.0f - KINDA_SMALL_NUMBER));
+	const float MinimumCacheUsage = FMath::Clamp(MinimumCacheUsageCvar, 0.0f, (1.0f - UE_KINDA_SMALL_NUMBER));
 	int32 MinChunkSize = (1.0f - MinimumCacheUsage) * MaxChunkSize;
 	
 	uint64 TempNumElements = ((CacheSettings.CacheSizeKB * 1024) / MinChunkSize) * FMath::Max(ChunkSlotNumScalarCvar, 1.0f);
@@ -381,8 +359,8 @@ FCachedAudioStreamingManagerParams FPlatformCompressionUtilities::BuildCachedStr
 
 	// Primary cache defined here:
 	CacheDimensions.MaxChunkSize = 256 * 1024; // max possible chunk size (hard coded for legacy streaming path)
-	CacheDimensions.MaxMemoryInBytes = CacheSettings.CacheSizeKB * 1024;
-	CacheDimensions.NumElements = NumElements;
+	CacheDimensions.MaxMemoryInBytes = CacheSettings.CacheSizeKB > 0 ? CacheSettings.CacheSizeKB * 1024 : FAudioStreamCachingSettings::DefaultCacheSize * 1024;
+	CacheDimensions.NumElements = FMath::Max(NumElements, 1); // force at least a single cache element to avoid crashes
 	Params.Caches.Add(CacheDimensions);
 
 	// TODO: When settings are added to support multiple sub-caches, add it here.

@@ -8,6 +8,8 @@
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SPopup.h"
 #include "Framework/Application/Menu.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Images/SImage.h"
 
 #define LOCTEXT_NAMESPACE "MenuStack"
 
@@ -34,7 +36,7 @@ public:
 		SOverlay::Construct(SOverlay::FArguments());
 	}
 
-	void PushMenu(TSharedRef<FMenuBase> InMenu, const FVector2D& InLocation)
+	void PushMenu(TSharedRef<FMenuBase> InMenu, const FVector2f& InLocation)
 	{
 		check(InMenu->GetContent().IsValid());
 
@@ -42,10 +44,10 @@ public:
 		check(ParentWindow.IsValid());
 
 		// Transform InLocation into a position local to this panel (assumes the panel is in an overlay that covers the whole of the panel window) 
-		FVector2D PanelInScreen = ParentWindow->GetRectInScreen().GetTopLeft();
-		FVector2D PanelInWindow = ParentWindow->GetLocalToScreenTransform().Inverse().TransformPoint(PanelInScreen);
-		FVector2D LocationInWindow = ParentWindow->GetLocalToScreenTransform().Inverse().TransformPoint(InLocation);
-		FVector2D LocationInPanel = LocationInWindow - PanelInWindow;
+		FVector2f PanelInScreen = ParentWindow->GetRectInScreen().GetTopLeft();
+		FVector2f PanelInWindow = ParentWindow->GetLocalToScreenTransform().Inverse().TransformPoint(PanelInScreen);
+		FVector2f LocationInWindow = ParentWindow->GetLocalToScreenTransform().Inverse().TransformPoint(InLocation);
+		FVector2f LocationInPanel = LocationInWindow - PanelInWindow;
 
 		// Add the new menu into a slot on this panel and set the padding so that its position is correct
 		AddSlot()
@@ -80,6 +82,7 @@ namespace MenuStackInternal
 				, _OnKeyDown()
 				, _OptionalMinMenuWidth()
 				, _OptionalMinMenuHeight()
+				, _bShowBackground(true)
 			{}
 
 			SLATE_DEFAULT_SLOT(FArguments, MenuContent)
@@ -87,31 +90,74 @@ namespace MenuStackInternal
 			SLATE_EVENT(FOnMenuLostFocus, OnMenuLostFocus)
 			SLATE_ARGUMENT(FOptionalSize, OptionalMinMenuWidth)
 			SLATE_ARGUMENT(FOptionalSize, OptionalMinMenuHeight)
+			SLATE_ARGUMENT(bool, bShowBackground)
 		SLATE_END_ARGS()
 
 		/** Construct this widget */
 		void Construct(const FArguments& InArgs)
 		{
 			// The visibility of the content wrapper should match that of the provided content
-			Visibility = AccessWidgetVisibilityAttribute(InArgs._MenuContent.Widget);
+			SetVisibility(AccessWidgetVisibilityAttribute(InArgs._MenuContent.Widget));
 
 			OnKeyDownDelegate = InArgs._OnKeyDown;
 			OnMenuLostFocus = InArgs._OnMenuLostFocus;
+
+			TSharedPtr<SWidget> ChildContent;
+			if (InArgs._bShowBackground)
+			{
+				// Always add a background to the menu. This includes a small outline around the background to distinguish open menus from each other
+				ChildContent = SNew(SOverlay)
+					+ SOverlay::Slot()
+					[
+						SNew(SImage)
+						.Image(FCoreStyle::Get().GetBrush("Menu.Background"))
+					]
+					+ SOverlay::Slot()
+					[
+						SNew(SImage)
+						.Image(FCoreStyle::Get().GetOptionalBrush("Menu.Outline", nullptr))
+					]
+					+ SOverlay::Slot()
+					[
+						SNew(SBorder)
+						.Padding(0.f)
+						.BorderImage(FStyleDefaults::GetNoBrush())
+						.ForegroundColor(FCoreStyle::Get().GetSlateColor("DefaultForeground"))
+						[
+							InArgs._MenuContent.Widget
+						]
+					];
+			}
+			else
+			{
+				ChildContent = SNew(SOverlay)
+					+ SOverlay::Slot()
+					[
+						SNew(SBorder)
+						.Padding(0.f)
+						.BorderImage(FStyleDefaults::GetNoBrush())
+						.ForegroundColor(FCoreStyle::Get().GetSlateColor("DefaultForeground"))
+						[
+							InArgs._MenuContent.Widget
+						]
+					];
+			}
+
 			ChildSlot
-			[
-				SNew(SBox)
-				.MinDesiredWidth(InArgs._OptionalMinMenuWidth)
-				.MaxDesiredHeight(InArgs._OptionalMinMenuHeight)
 				[
-				InArgs._MenuContent.Widget
-				]
+					SNew(SBox)
+					.MinDesiredWidth(InArgs._OptionalMinMenuWidth)
+					.MaxDesiredHeight(InArgs._OptionalMinMenuHeight)
+					[
+						ChildContent.ToSharedRef()
+					]
 			];
 		}
 
 		virtual void OnFocusChanging(const FWeakWidgetPath& PreviousFocusPath, const FWidgetPath& NewWidgetPath, const FFocusEvent& InFocusEvent) override
 		{
 			// if focus changed and this menu content had focus (or one of its children did) then inform the stack via the OnMenuLostFocus event
-			if (OnMenuLostFocus.IsBound() && PreviousFocusPath.ContainsWidget(AsShared()))
+			if (OnMenuLostFocus.IsBound() && PreviousFocusPath.ContainsWidget(this))
 			{
 				return OnMenuLostFocus.Execute(NewWidgetPath);
 			}
@@ -149,7 +195,7 @@ namespace MenuStackInternal
 		if (Key == EKeys::Escape)
 		{
 			FSlateApplication::Get().DismissAllMenus();
-			return FReply::Handled();
+			return FReply::Handled().ClearUserFocus();
 		}
 
 		return FReply::Unhandled();
@@ -158,10 +204,15 @@ namespace MenuStackInternal
 	FSimpleDelegate MenuStackPushDebuggingInfo;
 }	// anon namespace
 
-TSharedRef<IMenu> FMenuStack::Push(const FWidgetPath& InOwnerPath, const TSharedRef<SWidget>& InContent, const FVector2D& SummonLocation, const FPopupTransitionEffect& TransitionEffect, const bool bFocusImmediately, const FVector2D& SummonLocationSize, TOptional<EPopupMethod> InMethod, const bool bIsCollapsedByParent, const bool bEnablePerPixelTransparency)
+TSharedRef<IMenu> FMenuStack::Push(const FWidgetPath& InOwnerPath, const TSharedRef<SWidget>& InContent, const UE::Slate::FDeprecateVector2DParameter& SummonLocation, const FPopupTransitionEffect& TransitionEffect, const bool bFocusImmediately, const UE::Slate::FDeprecateVector2DParameter& SummonLocationSize, TOptional<EPopupMethod> InMethod, const bool bIsCollapsedByParent, const bool bEnablePerPixelTransparency)
 {
-	// We want to ensure that when the window is restored to restore the current keyboard focus
-	InOwnerPath.GetWindow()->SetWidgetToFocusOnActivate(FSlateApplication::Get().GetKeyboardFocusedWidget());
+	// We want to ensure that when the window is restored, we restore the current keyboard focus, 
+	// but only if it is valid, otherwise we could end up clearing a previously valid path.
+	TSharedPtr<SWidget> FocusedWidget = FSlateApplication::Get().GetKeyboardFocusedWidget();
+	if (FocusedWidget.IsValid())
+	{
+		InOwnerPath.GetWindow()->SetWidgetToFocusOnActivate(FocusedWidget);
+	}
 
 	FSlateRect Anchor(SummonLocation, SummonLocation + SummonLocationSize);
 	TSharedPtr<IMenu> ParentMenu;
@@ -213,7 +264,7 @@ TSharedRef<IMenu> FMenuStack::Push(const FWidgetPath& InOwnerPath, const TShared
 	return PushInternal(ParentMenu, InContent, Anchor, TransitionEffect, bFocusImmediately, ActiveMethod.GetShouldThrottle(), bIsCollapsedByParent, bEnablePerPixelTransparency);
 }
 
-TSharedRef<IMenu> FMenuStack::Push(const TSharedPtr<IMenu>& InParentMenu, const TSharedRef<SWidget>& InContent, const FVector2D& SummonLocation, const FPopupTransitionEffect& TransitionEffect, const bool bFocusImmediately, const FVector2D& SummonLocationSize, const bool bIsCollapsedByParent, const bool bEnablePerPixelTransparency)
+TSharedRef<IMenu> FMenuStack::Push(const TSharedPtr<IMenu>& InParentMenu, const TSharedRef<SWidget>& InContent, const UE::Slate::FDeprecateVector2DParameter& SummonLocation, const FPopupTransitionEffect& TransitionEffect, const bool bFocusImmediately, const UE::Slate::FDeprecateVector2DParameter& SummonLocationSize, const bool bIsCollapsedByParent, const bool bEnablePerPixelTransparency)
 {
 	check(Stack.Contains(InParentMenu));
 	check(HostWindow.IsValid());
@@ -253,7 +304,7 @@ TSharedRef<IMenu> FMenuStack::PushHosted(const TSharedPtr<IMenu>& InParentMenu, 
 	check(HostWindow.IsValid());
 
 	// Create a FMenuInHostWidget
-	TSharedRef<SWidget> WrappedContent = WrapContent(InContent);
+	TSharedRef<SWidget> WrappedContent = WrapContent(InContent, FOptionalSize(), FOptionalSize(), InMenuHost->bShowMenuBackground);
 	TSharedRef<FMenuInHostWidget> OutMenu = MakeShareable(new FMenuInHostWidget(InMenuHost, WrappedContent, bIsCollapsedByParent));
 	PendingNewMenu = OutMenu;
 
@@ -315,14 +366,15 @@ FMenuStack::FPrePushResults FMenuStack::PrePush(const FPrePushArgs& InArgs)
 
 	// Calc the max height available on screen for the menu
 	float MaxHeight;
+	const float ApplicationScale = FSlateApplication::Get().GetApplicationScale() * HostWindow->GetNativeWindow()->GetDPIScaleFactor();
 	if (ActiveMethod.GetPopupMethod() == EPopupMethod::CreateNewWindow)
 	{
 		FSlateRect WorkArea = FSlateApplication::Get().GetWorkArea(InArgs.Anchor);
-		MaxHeight = FMenuStackDefs::MaxMenuScreenHeightFraction * WorkArea.GetSize().Y;
+		MaxHeight = FMenuStackDefs::MaxMenuScreenHeightFraction * WorkArea.GetSize().Y / ApplicationScale;
 	}
 	else
 	{
-		MaxHeight = FMenuStackDefs::MaxMenuScreenHeightFraction * HostWindow->GetClientSizeInScreen().Y;
+		MaxHeight = FMenuStackDefs::MaxMenuScreenHeightFraction * HostWindow->GetClientSizeInScreen().Y / ApplicationScale;
 	}
 
 	bool bAnchorSetsMinWidth = InArgs.TransitionEffect.SlideDirection == FPopupTransitionEffect::ComboButton;
@@ -336,7 +388,6 @@ FMenuStack::FPrePushResults FMenuStack::PrePush(const FPrePushArgs& InArgs)
 
 	OutResults.WrappedContent = WrapContent(TempContent, OptionalMinWidth, OptionalMinHeight);
 
-	const float ApplicationScale = FSlateApplication::Get().GetApplicationScale() * HostWindow->GetNativeWindow()->GetDPIScaleFactor();
 	OutResults.WrappedContent->SlatePrepass(ApplicationScale);
 	// @todo slate: Doesn't take into account potential window border size
 	OutResults.ExpectedSize = OutResults.WrappedContent->GetDesiredSize() * ApplicationScale;
@@ -349,12 +400,12 @@ FMenuStack::FPrePushResults FMenuStack::PrePush(const FPrePushArgs& InArgs)
 		// already handled
 		const bool bAutoAdjustForDPIScale = false;
 		// Places the menu's window in the work area
-		OutResults.AnimStartLocation = OutResults.AnimFinalLocation = FSlateApplication::Get().CalculatePopupWindowPosition(InArgs.Anchor, OutResults.ExpectedSize, bAutoAdjustForDPIScale, FVector2D::ZeroVector, Orientation);
+		OutResults.AnimStartLocation = OutResults.AnimFinalLocation = FSlateApplication::Get().CalculatePopupWindowPosition(InArgs.Anchor, OutResults.ExpectedSize, bAutoAdjustForDPIScale, FVector2f::ZeroVector, Orientation);
 	}
 	else
 	{
 		// Places the menu's content in the host window
-		const FVector2D ProposedPlacement(
+		const FVector2f ProposedPlacement(
 			Orientation == Orient_Horizontal ? InArgs.Anchor.Right : InArgs.Anchor.Left,
 			Orientation == Orient_Horizontal ? InArgs.Anchor.Top : InArgs.Anchor.Bottom);
 
@@ -610,7 +661,7 @@ void FMenuStack::SetHostPath(const FWidgetPath& InOwnerPath)
 
 	if ( HostPopupLayer.IsValid() )
 	{
-		if ( !InOwnerPath.ContainsWidget(HostPopupLayer->GetHost()) )
+		if ( !InOwnerPath.ContainsWidget(&HostPopupLayer->GetHost().Get()) )
 		{
 			HostPopupLayer->Remove();
 			HostPopupLayer.Reset();
@@ -620,13 +671,15 @@ void FMenuStack::SetHostPath(const FWidgetPath& InOwnerPath)
 
 	HostWindow = InOwnerPath.IsValid() ? InOwnerPath.GetWindow() : TSharedPtr<SWindow>();
 
+	HostWidget = InOwnerPath.IsValid() ? InOwnerPath.GetLastWidget() : TWeakPtr<SWidget>();
+
 	if ( HostWindow.IsValid() && !HostWindowPopupPanel.IsValid() )
 	{
 		TSharedRef<SMenuPanel> NewHostWindowPopupPanel = SNew(SMenuPanel);
 		for ( int i = InOwnerPath.Widgets.Num() - 1; i >= 0; i-- )
 		{
-			const TSharedRef<SWidget>& HostWidget = InOwnerPath.Widgets[i].Widget;
-			HostPopupLayer = HostWidget->OnVisualizePopup(NewHostWindowPopupPanel);
+			const TSharedRef<SWidget>& CurrentWidget = InOwnerPath.Widgets[i].Widget;
+			HostPopupLayer = CurrentWidget->OnVisualizePopup(NewHostWindowPopupPanel);
 			if ( HostPopupLayer.IsValid() )
 			{
 				HostWindowPopupPanel = NewHostWindowPopupPanel;
@@ -701,7 +754,7 @@ void FMenuStack::OnMenuContentLostFocus(const FWidgetPath& InFocussedPath)
 	}
 }
 
-TSharedRef<SWidget> FMenuStack::WrapContent(TSharedRef<SWidget> InContent, FOptionalSize OptionalMinWidth, FOptionalSize OptionalMinHeight)
+TSharedRef<SWidget> FMenuStack::WrapContent(TSharedRef<SWidget> InContent, FOptionalSize OptionalMinWidth, FOptionalSize OptionalMinHeight, bool bShouldShowBackground)
 {
 	// Wrap menu content in a box that limits its maximum height
 	// and in a SMenuContentWrapper that handles key presses and focus changes.
@@ -710,6 +763,7 @@ TSharedRef<SWidget> FMenuStack::WrapContent(TSharedRef<SWidget> InContent, FOpti
 		.OnMenuLostFocus_Raw(this, &FMenuStack::OnMenuContentLostFocus)
 		.OptionalMinMenuWidth(OptionalMinWidth)
 		.OptionalMinMenuHeight(OptionalMinHeight)
+		.bShowBackground(bShouldShowBackground)
 		.MenuContent()
 		[
 				InContent
@@ -755,7 +809,7 @@ void FMenuStack::OnWindowDestroyed(TSharedRef<SWindow> InWindow)
 
 void FMenuStack::OnWindowActivated( TSharedRef<SWindow> ActivatedWindow )
 {
-	if (ActivatedWindow != PendingNewWindow && HasMenus())
+	if (ActivatedWindow != PendingNewWindow && HasMenus() && !FSlateApplication::Get().IsWindowHousingInteractiveTooltip(ActivatedWindow))
 	{
 		TWeakPtr<IMenu> ActivatedMenu = FindMenuFromWindow(ActivatedWindow);
 
@@ -848,6 +902,11 @@ bool FMenuStack::HasOpenSubMenus(TSharedPtr<IMenu> InMenu) const
 TSharedPtr<SWindow> FMenuStack::GetHostWindow() const
 {
 	return HostWindow;
+}
+
+TSharedPtr<SWidget> FMenuStack::GetHostWidget() const
+{
+	return HostWidget.Pin();
 }
 
 #undef LOCTEXT_NAMESPACE

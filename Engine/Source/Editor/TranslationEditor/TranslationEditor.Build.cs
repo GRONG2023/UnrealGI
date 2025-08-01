@@ -14,27 +14,23 @@ public class TranslationEditor : ModuleRules
         PrivateIncludePathModuleNames.AddRange(
 			new string[] {
 				"DesktopPlatform",
-                "MessageLog",
 			}
 		);
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
-				"Core",
-				"CoreUObject",
-				"Engine",
+				"EngineSettings",
                 "InputCore",
 				"Json",
                 "PropertyEditor",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
+				"EditorFramework",
 				"UnrealEd",
                 "GraphEditor",
 				"SourceControl",
                 "MessageLog",
                 "Documentation",
-                "Localization",
 				"LocalizationCommandletExecution",
 				"LocalizationService",
 			}
@@ -55,19 +51,5 @@ public class TranslationEditor : ModuleRules
 				"DesktopPlatform",
 			}
 		);
-
-        PrivateIncludePaths.AddRange(
-            new string[]
-			{
-				"Editor/TranslationEditor/Private",
-			}
-        );
-
-        PublicIncludePaths.AddRange(
-            new string[]
-			{
-				"Editor/TranslationEditor/Public",
-			}
-        );
 	}
 }

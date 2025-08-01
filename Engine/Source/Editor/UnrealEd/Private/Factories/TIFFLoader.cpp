@@ -4,7 +4,14 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogTIFFLoader, Log, All);
 
+
+// disable warnings about myself :
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+
+
 #if WITH_FREEIMAGE_LIB
+
+#include "Misc/Paths.h"
 
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
@@ -383,3 +390,5 @@ bool FTiffLoadHelper::IsValid()
 }
 
 #endif // WITH_FREEIMAGE_LIB
+
+PRAGMA_ENABLE_DEPRECATION_WARNINGS

@@ -5,7 +5,7 @@
 #include "Framework/Commands/UIAction.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "ToolMenus.h"
-#include "Classes/EditorStyleSettings.h"
+#include "Settings/EditorStyleSettings.h"
 #include "EdGraph/EdGraph.h"
 #include "AIGraphNode.h"
 #include "GraphEditorActions.h"
@@ -71,11 +71,11 @@ UEdGraphNode* FAISchemaAction_NewNode::PerformAction(class UEdGraph* ParentGraph
 
 		// For input pins, new node will generally overlap node being dragged off
 		// Work out if we want to visually push away from connected node
-		int32 XLocation = Location.X;
+		int32 XLocation = static_cast<int32>(Location.X);
 		if (FromPin && FromPin->Direction == EGPD_Input)
 		{
 			UEdGraphNode* PinNode = FromPin->GetOwningNode();
-			const float XDelta = FMath::Abs(PinNode->NodePosX - Location.X);
+			const FVector::FReal XDelta = FMath::Abs(PinNode->NodePosX - Location.X);
 
 			if (XDelta < NodeDistance)
 			{
@@ -86,7 +86,7 @@ UEdGraphNode* FAISchemaAction_NewNode::PerformAction(class UEdGraph* ParentGraph
 		}
 
 		NodeTemplate->NodePosX = XLocation;
-		NodeTemplate->NodePosY = Location.Y;
+		NodeTemplate->NodePosY = static_cast<int32>(Location.Y);
 		NodeTemplate->SnapToGrid(GetDefault<UEditorStyleSettings>()->GridSnapSize);
 
 		// setup pins after placing node in correct spot, since pin sorting will happen as soon as link connection change occurs
@@ -190,7 +190,7 @@ void UAIGraphSchema::GetGraphNodeContextActions(FGraphContextMenuBuilder& Contex
 			UAIGraphNode* OpNode = NewObject<UAIGraphNode>(Graph, GraphNodeClass);
 			OpNode->ClassData = NodeClass;
 
-			TSharedPtr<FAISchemaAction_NewSubNode> AddOpAction = UAIGraphSchema::AddNewSubNodeAction(ContextMenuBuilder, NodeClass.GetCategory(), NodeTypeName, FText::GetEmpty());
+			TSharedPtr<FAISchemaAction_NewSubNode> AddOpAction = UAIGraphSchema::AddNewSubNodeAction(ContextMenuBuilder, NodeClass.GetCategory(), NodeTypeName, NodeClass.GetTooltip());
 			AddOpAction->ParentNode = Cast<UAIGraphNode>(ContextMenuBuilder.SelectedObjects[0]);
 			AddOpAction->NodeTemplate = OpNode;
 		}

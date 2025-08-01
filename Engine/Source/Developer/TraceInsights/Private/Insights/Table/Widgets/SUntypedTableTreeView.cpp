@@ -2,7 +2,8 @@
 
 #include "SUntypedTableTreeView.h"
 
-#include "TraceServices/AnalysisService.h"
+#include "TraceServices/Containers/Tables.h"
+#include "TraceServices/Model/Threads.h"
 
 // Insights
 #include "Insights/Common/Stopwatch.h"
@@ -30,6 +31,7 @@ SUntypedTableTreeView::~SUntypedTableTreeView()
 
 void SUntypedTableTreeView::Construct(const FArguments& InArgs, TSharedPtr<Insights::FUntypedTable> InTablePtr)
 {
+	bRunInAsyncMode = InArgs._RunInAsyncMode;
 	ConstructWidget(InTablePtr);
 }
 
@@ -43,7 +45,7 @@ void SUntypedTableTreeView::Reset()
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void SUntypedTableTreeView::UpdateSourceTable(TSharedPtr<Trace::IUntypedTable> SourceTable)
+void SUntypedTableTreeView::UpdateSourceTable(TSharedPtr<TraceServices::IUntypedTable> SourceTable)
 {
 	//check(Table->Is<Insights::FUntypedTable>());
 	TSharedPtr<Insights::FUntypedTable> UntypedTable = StaticCastSharedPtr<Insights::FUntypedTable>(Table);
@@ -60,30 +62,31 @@ void SUntypedTableTreeView::UpdateSourceTable(TSharedPtr<Trace::IUntypedTable> S
 
 void SUntypedTableTreeView::RebuildTree(bool bResync)
 {
-	FStopwatch SyncStopwatch;
 	FStopwatch Stopwatch;
 	Stopwatch.Start();
 
+	FStopwatch SyncStopwatch;
+	SyncStopwatch.Start();
+
 	if (bResync)
 	{
-		TableTreeNodes.Empty();
+		TableRowNodes.Empty();
 	}
 
-	const int32 PreviousNodeCount = TableTreeNodes.Num();
+	const int32 PreviousNodeCount = TableRowNodes.Num();
 
 	//check(Table->Is<Insights::FUntypedTable>());
 	TSharedPtr<Insights::FUntypedTable> UntypedTable = StaticCastSharedPtr<Insights::FUntypedTable>(Table);
 
-	TSharedPtr<Trace::IUntypedTable> SourceTable = UntypedTable->GetSourceTable();
-	TSharedPtr<Trace::IUntypedTableReader> TableReader = UntypedTable->GetTableReader();
+	TSharedPtr<TraceServices::IUntypedTable> SourceTable = UntypedTable->GetSourceTable();
+	TSharedPtr<TraceServices::IUntypedTableReader> TableReader = UntypedTable->GetTableReader();
 
-	SyncStopwatch.Start();
-	if (Session.IsValid() && SourceTable.IsValid() && TableReader.IsValid())
+	if (SourceTable.IsValid() && TableReader.IsValid())
 	{
-		const int32 TotalRowCount = SourceTable->GetRowCount();
-		if (TotalRowCount != TableTreeNodes.Num())
+		const int32 TotalRowCount = static_cast<int32>(SourceTable->GetRowCount());
+		if (TotalRowCount != TableRowNodes.Num())
 		{
-			TableTreeNodes.Empty(TotalRowCount);
+			TableRowNodes.Empty(TotalRowCount);
 			FName BaseNodeName(TEXT("row"));
 			for (int32 RowIndex = 0; RowIndex < TotalRowCount; ++RowIndex)
 			{
@@ -91,14 +94,15 @@ void SUntypedTableTreeView::RebuildTree(bool bResync)
 				FName NodeName(BaseNodeName, RowIndex + 1);
 				FTableTreeNodePtr NodePtr = MakeShared<FTableTreeNode>(NodeName, Table, RowIndex);
 				NodePtr->SetDefaultSortOrder(RowIndex + 1);
-				TableTreeNodes.Add(NodePtr);
+				TableRowNodes.Add(NodePtr);
 			}
-			ensure(TableTreeNodes.Num() == TotalRowCount);
+			ensure(TableRowNodes.Num() == TotalRowCount);
 		}
 	}
+
 	SyncStopwatch.Stop();
 
-	if (bResync || TableTreeNodes.Num() != PreviousNodeCount)
+	if (bResync || TableRowNodes.Num() != PreviousNodeCount)
 	{
 		// Save selection.
 		TArray<FTableTreeNodePtr> SelectedItems;
@@ -130,9 +134,59 @@ void SUntypedTableTreeView::RebuildTree(bool bResync)
 	if (TotalTime > 0.01)
 	{
 		const double SyncTime = SyncStopwatch.GetAccumulatedTime();
-		UE_LOG(TraceInsights, Log, TEXT("[Table] Tree view rebuilt in %.3fs (%.3fs + %.3fs) --> %d rows (%d added)"),
-			TotalTime, SyncTime, TotalTime - SyncTime, TableTreeNodes.Num(), TableTreeNodes.Num() - PreviousNodeCount);
+		UE_LOG(TraceInsights, Log, TEXT("[Table] Tree view rebuilt in %.4fs (sync: %.4fs + update: %.4fs) --> %d rows (%d added)"),
+			TotalTime, SyncTime, TotalTime - SyncTime, TableRowNodes.Num(), TableRowNodes.Num() - PreviousNodeCount);
 	}
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+bool SUntypedTableTreeView::IsRunning() const
+{
+	return !CurrentOperationNameOverride.IsEmpty() || STableTreeView::IsRunning();
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+double SUntypedTableTreeView::GetAllOperationsDuration()
+{
+	if (!CurrentOperationNameOverride.IsEmpty())
+	{
+		CurrentOperationStopwatch.Update();
+		return CurrentOperationStopwatch.GetAccumulatedTime();
+	}
+	
+	return STableTreeView::GetAllOperationsDuration();
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+FText SUntypedTableTreeView::GetCurrentOperationName() const
+{
+	if (!CurrentOperationNameOverride.IsEmpty())
+	{
+		return CurrentOperationNameOverride;
+	}
+
+	return STableTreeView::GetCurrentOperationName();
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void SUntypedTableTreeView::SetCurrentOperationNameOverride(const FText& InOperationName)
+{
+	CurrentOperationStopwatch.Start();
+	CurrentOperationNameOverride = InOperationName;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void SUntypedTableTreeView::ClearCurrentOperationNameOverride()
+{
+	CurrentOperationStopwatch.Stop();
+	CurrentOperationStopwatch.Reset();
+
+	CurrentOperationNameOverride = FText::GetEmpty();
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

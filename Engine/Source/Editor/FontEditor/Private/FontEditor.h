@@ -2,21 +2,34 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/GCObject.h"
-#include "Toolkits/IToolkitHost.h"
-#include "IFontEditor.h"
-#include "Misc/NotifyHook.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "EditorUndoClient.h"
+#include "Framework/Docking/TabManager.h"
+#include "HAL/Platform.h"
+#include "IFontEditor.h"
+#include "Internationalization/Text.h"
+#include "Math/Color.h"
+#include "Misc/NotifyHook.h"
+#include "Misc/Optional.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/SharedPointer.h"
+#include "Toolkits/IToolkit.h"
+#include "UObject/GCObject.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
 
-class IDetailsView;
+class FReferenceCollector;
 class SCompositeFontEditor;
+class SDockTab;
 class SEditableTextBox;
 class SFontEditorViewport;
+class SVerticalBox;
 class UFont;
 class UTextureExporterTGA;
 class UTextureFactory;
 struct FPropertyChangedEvent;
+
 enum class EFontCacheType : uint8;
 
 /*-----------------------------------------------------------------------------
@@ -50,6 +63,10 @@ public:
 
 	/** FGCObject interface */
 	virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FFontEditor");
+	}
 
 	/** Called to determine if the user should be prompted for a new file if one is missing during an asset reload*/
 	virtual bool ShouldPromptForNewFilesOnReload(const UObject& object) const override;
@@ -61,6 +78,10 @@ protected:
 	/** Called to handle the "Draw Font Metrics" check box */
 	ECheckBoxState GetDrawFontMetricsState() const;
 	void OnDrawFontMetricsStateChanged(ECheckBoxState NewState);
+
+	/** Called to handle the "Draw Font Scale" numeric entry box */
+	TOptional<float> GetDrawFontScale() const;
+	void OnDrawFontScaleChanged(float InNewValue, ETextCommit::Type CommitType);
 
 	//~ Begin FEditorUndoClient Interface
 	/** Handles any post undo cleanup of the GUI so that we don't have stale data being displayed. */
@@ -135,7 +156,7 @@ private:
 
 private:
 	/** The font asset being inspected */
-	UFont* Font;
+	TObjectPtr<UFont> Font;
 
 	/** List of open tool panels; used to ensure only one exists at any one time */
 	TMap< FName, TWeakPtr<SDockTab> > SpawnedToolPanels;
@@ -165,10 +186,10 @@ private:
 	static FString LastPath;
 	
 	/** The exporter to use for all font page exporting */
-	UTextureExporterTGA* TGAExporter;
+	TObjectPtr<UTextureExporterTGA> TGAExporter;
 
 	/** The factory to create updated pages with */
-	UTextureFactory* Factory;
+	TObjectPtr<UTextureFactory> Factory;
 
 	/** The current font editor layout (if any) */
 	TOptional<EFontCacheType> CurrentEditorLayout;

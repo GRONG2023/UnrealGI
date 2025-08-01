@@ -1,12 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Modules/ModuleManager.h"
-#include "Interfaces/IBuildPatchServicesModule.h"
 #include "BuildPatchSettings.h"
+#include "CoreMinimal.h"
+#include "Interfaces/IBuildPatchServicesModule.h"
+#include "Modules/ModuleManager.h"
+#include "UObject/NameTypes.h"
 
-class BUILDPATCHSERVICES_API FBuildPatchServices
+class FBuildPatchServices
 {
 public:
 	static bool IsAvailable()
@@ -47,6 +48,6 @@ public:
 
 private:
 
-	static FName ModuleName;
-	static BuildPatchServices::FBuildPatchServicesInitSettings InitSettings;
+	static BUILDPATCHSERVICES_API FName ModuleName;
+	static BUILDPATCHSERVICES_API BuildPatchServices::FBuildPatchServicesInitSettings InitSettings;
 };

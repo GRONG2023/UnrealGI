@@ -23,32 +23,18 @@ public class LocalizationDashboard : ModuleRules
 				"Slate",
 				"SlateCore",
 				"InputCore",
+				"EditorFramework",
                 "UnrealEd",
-                "EditorStyle",
 				"DesktopPlatform",
                 "TranslationEditor",
                 "MainFrame",
                 "SourceControl",
                 "SharedSettingsWidgets",
-                "Localization",
 				"LocalizationCommandletExecution",
 				"LocalizationService",
 				"InternationalizationSettings",
 				"ToolMenus",
-			}
-		);
-
-		PrivateIncludePaths.AddRange(
-			new string[]
-			{
-				"Editor/LocalizationDashboard/Private",
-			}
-		);
-
-        PublicIncludePaths.AddRange(
-			new string[]
-			{
-				"Editor/LocalizationDashboard/Public",
+				"WorkspaceMenuStructure",
 			}
 		);
 

@@ -5,19 +5,13 @@
 =============================================================================*/
 
 #include "EngineGlobals.h"
-#include "HAL/IConsoleManager.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Class.h"
-#include "UObject/UObjectIterator.h"
-#include "Components/ActorComponent.h"
 #include "ComponentReregisterContext.h"
 #include "EditorSupportDelegates.h"
-#include "UObject/UObjectHash.h"
-#include "UObject/Package.h"
 #include "MaterialShared.h"
 #include "Modules/ModuleManager.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInstanceConstant.h"
+#include "RendererInterface.h"
 
 #if !UE_BUILD_SHIPPING && PLATFORM_DESKTOP 
 #include "ISlateReflectorModule.h"
@@ -59,8 +53,7 @@ FEditorSupportDelegates::FOnWindowsMessage FEditorSupportDelegates::PreWindowsMe
 FEditorSupportDelegates::FOnWindowsMessage FEditorSupportDelegates::PostWindowsMessage;
 /** Sent after the usages flags on a material have changed*/
 FEditorSupportDelegates::FOnMaterialUsageFlagsChanged FEditorSupportDelegates::MaterialUsageFlagsChanged;
-FEditorSupportDelegates::FOnVectorParameterDefaultChanged FEditorSupportDelegates::VectorParameterDefaultChanged;
-FEditorSupportDelegates::FOnScalarParameterDefaultChanged FEditorSupportDelegates::ScalarParameterDefaultChanged;
+FEditorSupportDelegates::FOnNumericParameterDefaultChanged FEditorSupportDelegates::NumericParameterDefaultChanged;
 
 #endif // WITH_EDITOR
 
@@ -153,7 +146,7 @@ void ReattachComponents(const TArray<FString>& Args)
 	UE_LOG(LogConsoleResponse, Display, TEXT("Reattach.Components:"));
 
 	UClass* Class=NULL;
-	if( ParseObject<UClass>( *Args[0], TEXT("CLASS="), Class, ANY_PACKAGE ) &&
+	if( ParseObject<UClass>( *Args[0], TEXT("CLASS="), Class, nullptr ) &&
 		Class->IsChildOf(UActorComponent::StaticClass()) )
 	{
 		for( FThreadSafeObjectIterator It(Class); It; ++It )

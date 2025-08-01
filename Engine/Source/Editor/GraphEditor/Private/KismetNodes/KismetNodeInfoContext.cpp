@@ -1,12 +1,25 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "KismetNodes/KismetNodeInfoContext.h"
-#include "Engine/Engine.h"
-#include "EngineGlobals.h"
-#include "Engine/BlueprintGeneratedClass.h"
+
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
+#include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/Engine.h"
+#include "Engine/LatentActionManager.h"
+#include "Engine/World.h"
+#include "HAL/PlatformCrt.h"
 #include "K2Node_CallFunction.h"
 #include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/KismetDebugUtilities.h"
+#include "Misc/AssertionMacros.h"
+#include "UObject/Class.h"
+#include "UObject/Field.h"
+#include "UObject/UnrealType.h"
+
+class UEdGraphNode;
 
 //////////////////////////////////////////////////////////////////////////
 // FKismetNodeInfoContext
@@ -86,23 +99,26 @@ FKismetNodeInfoContext::FKismetNodeInfoContext(UEdGraph* SourceGraph)
 		}
 
 		// Covert the watched pin array into a set
-		for (auto WatchedPinIt = SourceBlueprint->WatchedPins.CreateConstIterator(); WatchedPinIt; ++WatchedPinIt)
-		{
-			UEdGraphPin* WatchedPin = WatchedPinIt->Get();
-			if (!ensure(WatchedPin))
-			{
-				continue;
-			}
+		FKismetDebugUtilities::ForeachPinWatch(
+			SourceBlueprint,
+			[&WatchedPinSet = WatchedPinSet, &WatchedNodeSet = WatchedNodeSet]
+				(UEdGraphPin* WatchedPin)
+				{
+					if (!ensure(WatchedPin))
+					{
+						return; // ~continue
+					}
 
-			UEdGraphNode* OwningNode = WatchedPin->GetOuter();
-			if (!ensure(OwningNode != NULL)) // shouldn't happen, but just in case a dead pin was added to the WatchedPins array
-			{
-				continue;
-			}
-			check(OwningNode == WatchedPin->GetOwningNode());
+					UEdGraphNode* OwningNode = WatchedPin->GetOuter();
+					if (!ensure(OwningNode != NULL)) // shouldn't happen, but just in case a dead pin was added to the WatchedPins array
+					{
+						return; // ~continue
+					}
+					check(OwningNode == WatchedPin->GetOwningNode());
 
-			WatchedPinSet.Add(WatchedPin);
-			WatchedNodeSet.Add(OwningNode);
-		}
+					WatchedPinSet.Add(WatchedPin);
+					WatchedNodeSet.Add(OwningNode);
+				}
+		);
 	}
 }

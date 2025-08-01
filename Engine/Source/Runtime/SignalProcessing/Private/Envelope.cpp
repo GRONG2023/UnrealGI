@@ -53,6 +53,11 @@ namespace Audio
 		}
 	}
 
+	FEnvelope::EEnvelopeState FEnvelope::GetState() const
+	{
+		return CurrentState;
+	}
+
 	void FEnvelope::SetSimulateAnalog(const bool bInSimulatingAnalog)
 	{
 		bIsSimulatingAnalog = bInSimulatingAnalog;
@@ -73,7 +78,7 @@ namespace Audio
 		Reset();
 
 		// Set the state back to attack no matter where it is
-		CurrentState = EEnvelopeState::Attack;
+		CurrentState = FEnvelope::EEnvelopeState::Attack;
 	}
 
 	// logic for one mono note interrupting another mono note (same voice)
@@ -379,26 +384,26 @@ namespace Audio
 
 	void FEnvelope::SetAttackTime(const float InAttackTimeMsec)
 	{
+		bChanged |= !FMath::IsNearlyEqual(AttackTimeMSec, InAttackTimeMsec);
 		AttackTimeMSec = InAttackTimeMsec;
-		bChanged = true;
 	}
 
 	void FEnvelope::SetDecayTime(const float InDecayTimeMsec)
 	{
+		bChanged |= !FMath::IsNearlyEqual(DecayTimeMsec, InDecayTimeMsec);
 		DecayTimeMsec = InDecayTimeMsec;
-		bChanged = true;
 	}
 
 	void FEnvelope::SetSustainGain(const float InSustainGain)
 	{
+		bChanged |= !FMath::IsNearlyEqual(SustainGain, InSustainGain);
 		SustainGain = InSustainGain;
-		bChanged = true;
 	}
 
 	void FEnvelope::SetReleaseTime(const float InReleaseTimeMsec)
 	{
+		bChanged |= !FMath::IsNearlyEqual(ReleaseTimeMsec, InReleaseTimeMsec);
 		ReleaseTimeMsec = InReleaseTimeMsec;
-		bChanged = true;
 	}
 
 	void FEnvelope::SetInvert(const bool bInInvert)
@@ -419,5 +424,155 @@ namespace Audio
 	void FEnvelope::SetBiasDepth(const float InDepth)
 	{
 		BiasDepth = InDepth;
+	}
+
+	void FADEnvelope::Init(int32 InSampleRate)
+	{
+		SampleRate = (float)InSampleRate;
+		SetAttackTimeSeconds(AttackTimeSeconds);
+		SetDecayTimeSeconds(DecayTimeSeconds);
+	}
+
+
+	void FADEnvelope::SetAttackTimeSeconds(float InAttackTimeSeconds)
+	{
+		AttackTimeSeconds = FMath::Max(0.0f, InAttackTimeSeconds);
+		AttackSampleCount = SampleRate * AttackTimeSeconds;
+	}
+
+	void FADEnvelope::SetDecayTimeSeconds(float InDecayTimeSeconds)
+	{
+		DecayTimeSeconds = FMath::Max(0.0f, InDecayTimeSeconds);
+		DecaySampleCount = SampleRate * DecayTimeSeconds;
+	}
+
+	void FADEnvelope::SetAttackCurveFactor(float InAttackCurveFactor)
+	{
+		AttackCurveFactor = FMath::Max(KINDA_SMALL_NUMBER, AttackCurveFactor);
+	}
+
+	void FADEnvelope::SetDecayCurveFactor(float InDecayCurveFactor)
+	{
+		DecayCurveFactor = FMath::Max(KINDA_SMALL_NUMBER, InDecayCurveFactor);
+	}
+
+	void FADEnvelope::Attack()
+	{
+		// Resets the envelope state
+		CurrentSampleIndex = 0;
+		StartingEnvelopeValue = CurrentEnvelopeValue;
+	}
+
+	void FADEnvelope::GetNextEnvelopeOut(int32 StartFrame, int32 EndFrame, TArray<int32>& OutFinishedFrames, Audio::AlignedFloatBuffer& OutEnvelope)
+	{
+		if (CurrentSampleIndex == INDEX_NONE)
+		{
+			return;
+		}
+
+		float* OutEnvPtr = OutEnvelope.GetData();
+		int32 FrameIndex = StartFrame;
+
+		for (int32 i = StartFrame; i < EndFrame; ++i)
+		{
+			// In attack
+			if (CurrentSampleIndex <= AttackSampleCount)
+			{
+				float EnvelopeLeft = 1.0f - StartingEnvelopeValue;
+				float AttackFraction = (float)CurrentSampleIndex++ / AttackSampleCount;
+				CurrentEnvelopeValue = StartingEnvelopeValue + EnvelopeLeft * FMath::Pow(AttackFraction, AttackCurveFactor);
+				OutEnvPtr[i] = CurrentEnvelopeValue;
+			}
+			else
+			{
+				int32 TotalSampleCount = AttackSampleCount + DecaySampleCount;
+
+				// In decay
+				if (CurrentSampleIndex < TotalSampleCount)
+				{
+					int32 SampleCountInDecayState = CurrentSampleIndex++ - AttackSampleCount;
+					float DecayFraction = (float)SampleCountInDecayState / DecaySampleCount;
+					CurrentEnvelopeValue = FMath::Pow(DecayFraction, DecayCurveFactor);
+					OutEnvPtr[i] = CurrentEnvelopeValue;
+				}
+				// We're looping, so we reset the envelope state and continue on, which will go into attack phase
+				else if (bIsLooping)
+				{
+					Attack();
+					// We still want to render this frame of audio for the restart envelope. Our AD envelope always starts from 0.0, so we know the first sample will be 0.0.
+					OutEnvPtr[i] = 0.0f;
+					// Still want to increment the sample index to avoid off-by one error with AD timing
+					CurrentSampleIndex++;
+					// Output that we "finished" this envelope. This may result in multiple entries if the AD loop repeats faster than the render block.
+					OutFinishedFrames.Add(i);
+				}
+				// we're done
+				else
+				{
+					int32 NumSamplesLeft = EndFrame - i;
+					if (NumSamplesLeft > 0)
+					{
+						FMemory::Memzero(&OutEnvPtr[i], sizeof(float)*NumSamplesLeft);
+					}
+					CurrentSampleIndex = INDEX_NONE;
+					OutFinishedFrames.Add(i);
+					break;
+				}
+			}
+
+		}
+	}
+
+	bool FADEnvelope::GetNextEnvelopeOut(float& OutEnvelope)
+	{
+		TArray<int32> OutFinishedFrames;
+		GetNextEnvelopeOut(0, 1, OutFinishedFrames, OutEnvelope);
+		return OutFinishedFrames.Num() > 0;
+	}
+
+	void FADEnvelope::GetNextEnvelopeOut(int32 StartFrame, int32 EndFrame, TArray<int32>& OutFinishedFrames, float& OutEnvelope)
+	{
+		// Don't need to do anything if we're not generating the envelope at the top of the block since this is a block-rate envelope
+		if (StartFrame > 0 || CurrentSampleIndex == INDEX_NONE)
+		{
+			OutEnvelope = 0.0f;
+			return;
+		}
+
+		// We are in attack
+		if (CurrentSampleIndex < AttackSampleCount)
+		{
+			float EnvelopeLeft = 1.0f - StartingEnvelopeValue;
+			float AttackFraction = (float)CurrentSampleIndex++ / AttackSampleCount;
+
+			CurrentEnvelopeValue = StartingEnvelopeValue + EnvelopeLeft * FMath::Pow(AttackFraction, AttackCurveFactor);
+			OutEnvelope = CurrentEnvelopeValue;
+		}
+		else
+		{
+			int32 TotalEnvSampleCount = (AttackSampleCount + DecaySampleCount);
+
+			// We are in Decay
+			if (CurrentSampleIndex < TotalEnvSampleCount)
+			{
+				int32 SampleCountInDecayState = CurrentSampleIndex++ - AttackSampleCount;
+				float DecayFraction = (float)SampleCountInDecayState / DecaySampleCount;
+				CurrentEnvelopeValue = 1.0f - FMath::Pow(DecayFraction, DecayCurveFactor);
+				OutEnvelope = CurrentEnvelopeValue;
+			}
+			// We are looping so reset the sample index
+			else if (bIsLooping)
+			{
+				CurrentSampleIndex = 0;
+				OutFinishedFrames.Add(0);
+			}
+			else
+			{
+				// Envelope is done
+				CurrentSampleIndex = INDEX_NONE;
+				OutEnvelope = 0.0f;
+				OutFinishedFrames.Add(0);
+			}
+		}
 	}
 }

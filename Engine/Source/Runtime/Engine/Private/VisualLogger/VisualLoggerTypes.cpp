@@ -1,9 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "VisualLogger/VisualLoggerTypes.h"
-#include "Engine/World.h"
-#include "Misc/Paths.h"
 #include "VisualLogger/VisualLoggerDebugSnapshotInterface.h"
+
+#if ENABLE_VISUAL_LOG
+#include "Engine/World.h"
+#include "UObject/Interface.h"
+#include "UObject/UE5MainStreamObjectVersion.h"
+#include "VisualLogger/VisualLoggerCustomVersion.h"
+#include "VisualLogger/VisualLogger.h"
+#endif
 
 namespace
 {
@@ -18,7 +24,9 @@ UVisualLoggerDebugSnapshotInterface::UVisualLoggerDebugSnapshotInterface(const F
 #if ENABLE_VISUAL_LOG
 
 #define DEPRECATED_VISUAL_LOGGER_MAGIC_NUMBER 0xFAFAAFAF
-#define VISUAL_LOGGER_MAGIC_NUMBER 0xAFAFFAFA
+#define VISUAL_LOGGER_MAGIC_NUMBER_OLD_CUSTOM_VERSION 0xAFAFFAFA
+#define VISUAL_LOGGER_MAGIC_NUMBER_CUSTOM_VERSION_CONTAINER 0xBFBFBBFB
+#define VISUAL_LOGGER_MAGIC_NUMBER_LATEST VISUAL_LOGGER_MAGIC_NUMBER_CUSTOM_VERSION_CONTAINER
 
 //----------------------------------------------------------------------//
 // FVisualLogShapeElement 
@@ -55,52 +63,52 @@ bool FVisualLogStatusCategory::GetDesc(int32 Index, FString& Key, FString& Value
 	return false;
 }
 
-FVisualLogEntry::FVisualLogEntry(const FVisualLogEntry& Entry)
-{
-	TimeStamp = Entry.TimeStamp;
-	Location = Entry.Location;
-
-	Events = Entry.Events;
-	LogLines = Entry.LogLines;
-	Status = Entry.Status;
-	ElementsToDraw = Entry.ElementsToDraw;
-	HistogramSamples = Entry.HistogramSamples;
-	DataBlocks = Entry.DataBlocks;
-}
-
 FVisualLogEntry::FVisualLogEntry(const AActor* InActor, TArray<TWeakObjectPtr<UObject> >* Children)
 {
-	if (InActor && InActor->IsPendingKill() == false)
+	if (!IsValid(InActor))
 	{
-		TimeStamp = InActor->GetWorld()->TimeSeconds;
-		Location = InActor->GetActorLocation();
-		const IVisualLoggerDebugSnapshotInterface* DebugSnapshotInterface = Cast<const IVisualLoggerDebugSnapshotInterface>(InActor);
-		if (DebugSnapshotInterface)
+		Reset();
+		return;
+	}
+
+	WorldTimeStamp = InActor->GetWorld()->TimeSeconds;
+	Location = InActor->GetActorLocation();
+	bIsLocationValid = true;
+
+#if ENABLE_VISUAL_LOG
+	TimeStamp = FVisualLogger::Get().GetTimeStampForObject(InActor);
+#else
+	TimeStamp = WorldTimeStamp;
+#endif
+
+	const IVisualLoggerDebugSnapshotInterface* DebugSnapshotInterface = Cast<const IVisualLoggerDebugSnapshotInterface>(InActor);
+	if (DebugSnapshotInterface)
+	{
+		DebugSnapshotInterface->GrabDebugSnapshot(this);
+	}
+	if (Children != nullptr)
+	{
+		TWeakObjectPtr<UObject>* WeakActorPtr = Children->GetData();
+		for (int32 Index = 0; Index < Children->Num(); ++Index, ++WeakActorPtr)
 		{
-			DebugSnapshotInterface->GrabDebugSnapshot(this);
-		}
-		if (Children != nullptr)
-		{
-			TWeakObjectPtr<UObject>* WeakActorPtr = Children->GetData();
-			for (int32 Index = 0; Index < Children->Num(); ++Index, ++WeakActorPtr)
+			if (WeakActorPtr->IsValid())
 			{
-				if (WeakActorPtr->IsValid())
+				const IVisualLoggerDebugSnapshotInterface* ChildActor = Cast<const IVisualLoggerDebugSnapshotInterface>(WeakActorPtr->Get());
+				if (ChildActor)
 				{
-					const IVisualLoggerDebugSnapshotInterface* ChildActor = Cast<const IVisualLoggerDebugSnapshotInterface>(WeakActorPtr->Get());
-					if (ChildActor)
-					{
-						ChildActor->GrabDebugSnapshot(this);
-					}
+					ChildActor->GrabDebugSnapshot(this);
 				}
 			}
 		}
 	}
 }
 
-FVisualLogEntry::FVisualLogEntry(float InTimeStamp, FVector InLocation, const UObject* Object, TArray<TWeakObjectPtr<UObject> >* Children)
+FVisualLogEntry::FVisualLogEntry(double InTimeStamp, FVector InLocation, const UObject* Object, TArray<TWeakObjectPtr<UObject> >* Children)
 {
 	TimeStamp = InTimeStamp;
 	Location = InLocation;
+	bIsLocationValid = true;
+
 	const IVisualLoggerDebugSnapshotInterface* DebugSnapshotInterface = Cast<const IVisualLoggerDebugSnapshotInterface>(Object);
 	if (DebugSnapshotInterface)
 	{
@@ -123,27 +131,59 @@ FVisualLogEntry::FVisualLogEntry(float InTimeStamp, FVector InLocation, const UO
 	}
 }
 
+void FVisualLogEntry::InitializeEntry(const double InTimeStamp)
+{
+	Reset();
+	TimeStamp = InTimeStamp;
+	WorldTimeStamp = InTimeStamp;
+	bIsInitialized = true;
+}
+
 void FVisualLogEntry::Reset()
 {
-	TimeStamp = -1;
+	TimeStamp = -1.0;
+	WorldTimeStamp = -1.0;
 	Location = FVector::ZeroVector;
+	bIsLocationValid = false;
 	Events.Reset();
 	LogLines.Reset();
 	Status.Reset();
 	ElementsToDraw.Reset();
 	HistogramSamples.Reset();
 	DataBlocks.Reset();
+	bIsInitialized = false;
+}
+
+void FVisualLogEntry::SetPassedObjectAllowList(const bool bPassed)
+{
+	bPassedObjectAllowList = bPassed;
+	UpdateAllowedToLog();
 }
 
 void FVisualLogEntry::UpdateAllowedToLog()
 {
-	// object whitelist purpose is to create exceptions in class whitelist filter, expanding allowed set
-	bIsAllowedToLog = bIsClassWhitelisted || bIsObjectWhitelisted;
+	bIsAllowedToLog = bPassedClassAllowList || bPassedObjectAllowList;
 }
 
 int32 FVisualLogEntry::AddEvent(const FVisualLogEventBase& Event)
 {
 	return Events.Add(Event);
+}
+
+void FVisualLogEntry::MoveTo(FVisualLogEntry& Other)
+{
+	ensureMsgf(bIsInitialized && Other.bIsInitialized, TEXT("Both entries need to be initialized to move to the other"));
+	ensureMsgf(TimeStamp == Other.TimeStamp, TEXT("Can only move similar entries"));
+	ensureMsgf(bPassedClassAllowList == Other.bPassedClassAllowList, TEXT("Can only move similar entries"));
+	ensureMsgf(bPassedObjectAllowList == Other.bPassedObjectAllowList, TEXT("Can only move similar entries"));
+	ensureMsgf(bIsAllowedToLog == Other.bIsAllowedToLog, TEXT("Can only move similar entries"));
+	Other.Events.Append(Events);
+	Other.LogLines.Append(LogLines);
+	Other.Status.Append(Status);
+	Other.ElementsToDraw.Append(ElementsToDraw);
+	Other.HistogramSamples.Append(HistogramSamples);
+	Other.DataBlocks.Append(DataBlocks);
+	Reset();
 }
 
 void FVisualLogEntry::AddText(const FString& TextLine, const FName& CategoryName, ELogVerbosity::Type Verbosity)
@@ -156,7 +196,13 @@ void FVisualLogEntry::AddElement(const FVisualLogShapeElement& Element)
 	ElementsToDraw.Add(Element);
 }
 
+// Deprecated : 
 void FVisualLogEntry::AddElement(const TArray<FVector>& Points, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description, uint16 Thickness)
+{
+	AddPath(Points, CategoryName, Verbosity, Color, Description, Thickness);
+}
+
+void FVisualLogEntry::AddPath(const TArray<FVector>&Points, const FName & CategoryName, ELogVerbosity::Type Verbosity, const FColor & Color, const FString & Description, uint16 Thickness)
 {
 	FVisualLogShapeElement Element(Description, Color, Thickness, CategoryName);
 	Element.Points = Points;
@@ -165,7 +211,12 @@ void FVisualLogEntry::AddElement(const TArray<FVector>& Points, const FName& Cat
 	ElementsToDraw.Add(Element);
 }
 
+// Deprecated : 
 void FVisualLogEntry::AddElement(const FVector& Point, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description, uint16 Thickness)
+{
+	AddLocation(Point, CategoryName, Verbosity, Color, Description, Thickness);
+}
+void FVisualLogEntry::AddLocation(const FVector& Point, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description, uint16 Thickness)
 {
 	FVisualLogShapeElement Element(Description, Color, Thickness, CategoryName);
 	Element.Points.Add(Point);
@@ -174,7 +225,21 @@ void FVisualLogEntry::AddElement(const FVector& Point, const FName& CategoryName
 	ElementsToDraw.Add(Element);
 }
 
+void FVisualLogEntry::AddSphere(const FVector& Center, float Radius, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description, bool bInUseWires)
+{
+	FVisualLogShapeElement Element(Description, Color, Radius, CategoryName);
+	Element.Points.Add(Center);
+	Element.Type = bInUseWires ? EVisualLoggerShapeElement::WireSphere : EVisualLoggerShapeElement::Sphere;
+	Element.Verbosity = Verbosity;
+	ElementsToDraw.Add(Element);
+}
+
+// Deprecated : 
 void FVisualLogEntry::AddElement(const FVector& Start, const FVector& End, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description, uint16 Thickness)
+{
+	AddSegment(Start, End, CategoryName, Verbosity, Color, Description, Thickness);
+}
+void FVisualLogEntry::AddSegment(const FVector& Start, const FVector& End, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description, uint16 Thickness)
 {
 	FVisualLogShapeElement Element(Description, Color, Thickness, CategoryName);
 	Element.Points.Reserve(2);
@@ -198,13 +263,33 @@ void FVisualLogEntry::AddArrow(const FVector& Start, const FVector& End, const F
 	ElementsToDraw.Add(Element);
 }
 
-void FVisualLogEntry::AddElement(const FBox& Box, const FMatrix& Matrix, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description, uint16 Thickness)
+void FVisualLogEntry::AddCircle(const FVector& Center, const FVector& UpAxis, const float Radius, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description, const uint16 Thickness)
+{
+	FVisualLogShapeElement Element(EVisualLoggerShapeElement::Circle);
+	Element.Category = CategoryName;
+	Element.SetColor(Color);
+	Element.Thicknes = Thickness;
+	Element.Description = Description;
+	Element.Points.Reserve(3);
+	Element.Points.Add(Center);
+	Element.Points.Add(UpAxis);
+	Element.Points.Add(FVector(Radius, 0., 0.));
+	Element.Verbosity = Verbosity;
+	ElementsToDraw.Add(Element);
+}
+
+// Deprecated : 
+void FVisualLogEntry::AddElement(const FBox& Box, const FMatrix& Matrix, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description, uint16 Thickness, bool bInUseWires)
+{
+	AddBox(Box, Matrix, CategoryName, Verbosity, Color, Description, Thickness, bInUseWires);
+}
+void FVisualLogEntry::AddBox(const FBox& Box, const FMatrix& Matrix, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description, uint16 Thickness, bool bInUseWires)
 {
 	FVisualLogShapeElement Element(Description, Color, Thickness, CategoryName);
 	Element.Points.Reserve(2);
 	Element.Points.Add(Box.Min);
 	Element.Points.Add(Box.Max);
-	Element.Type = EVisualLoggerShapeElement::Box;
+	Element.Type = bInUseWires ? EVisualLoggerShapeElement::WireBox : EVisualLoggerShapeElement::Box;
 	Element.Verbosity = Verbosity;
 	Element.TransformationMatrix = Matrix;
 	ElementsToDraw.Add(Element);
@@ -224,54 +309,79 @@ void FVisualLogEntry::AddBoxes(const TArray<FBox>& Boxes, const FName& CategoryN
 	Element.Verbosity = Verbosity;
 }
 
-void FVisualLogEntry::AddElement(const FVector& Orgin, const FVector& Direction, float Length, float AngleWidth, float AngleHeight, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description, uint16 Thickness)
+// Deprecated : 
+void FVisualLogEntry::AddElement(const FVector& Origin, const FVector& Direction, float Length, float AngleWidth, float AngleHeight, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description, uint16 Thickness, bool bInUseWires)
+{
+	AddCone(Origin, Direction, Length, AngleWidth, AngleHeight, CategoryName, Verbosity, Color, Description, Thickness, bInUseWires);
+}
+void FVisualLogEntry::AddCone(const FVector& Origin, const FVector& Direction, float Length, float AngleWidth, float AngleHeight, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description, uint16 Thickness, bool bInUseWires)
 {
 	FVisualLogShapeElement Element(Description, Color, Thickness, CategoryName);
 	Element.Points.Reserve(3);
-	Element.Points.Add(Orgin);
+	Element.Points.Add(Origin);
 	Element.Points.Add(Direction);
 	Element.Points.Add(FVector(Length, AngleWidth, AngleHeight));
-	Element.Type = EVisualLoggerShapeElement::Cone;
+	Element.Type = bInUseWires ? EVisualLoggerShapeElement::WireCone : EVisualLoggerShapeElement::Cone;
 	Element.Verbosity = Verbosity;
 	ElementsToDraw.Add(Element);
 }
 
-void FVisualLogEntry::AddElement(const FVector& Start, const FVector& End, float Radius, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description, uint16 Thickness)
+// Deprecated : 
+void FVisualLogEntry::AddElement(const FVector& Start, const FVector& End, float Radius, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description, uint16 Thickness, bool bInUseWires)
+{
+	AddCylinder(Start, End, Radius, CategoryName, Verbosity, Color, Description, Thickness, bInUseWires);
+}
+void FVisualLogEntry::AddCylinder(const FVector& Start, const FVector& End, float Radius, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description, uint16 Thickness, bool bInUseWires)
 {
 	FVisualLogShapeElement Element(Description, Color, Thickness, CategoryName);
 	Element.Points.Reserve(3);
 	Element.Points.Add(Start);
 	Element.Points.Add(End);
 	Element.Points.Add(FVector(Radius, Thickness, 0));
-	Element.Type = EVisualLoggerShapeElement::Cylinder;
+	Element.Type = bInUseWires ? EVisualLoggerShapeElement::WireCylinder : EVisualLoggerShapeElement::Cylinder;
 	Element.Verbosity = Verbosity;
 	ElementsToDraw.Add(Element);
 }
 
-void FVisualLogEntry::AddElement(const FVector& Center, float HalfHeight, float Radius, const FQuat & Rotation, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description)
+// Deprecated : 
+void FVisualLogEntry::AddElement(const FVector& Base, float HalfHeight, float Radius, const FQuat& Rotation, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description, bool bInUseWires)
+{
+	AddCapsule(Base, HalfHeight, Radius, Rotation, CategoryName, Verbosity, Color, Description, bInUseWires);
+}
+void FVisualLogEntry::AddCapsule(const FVector& Base, float HalfHeight, float Radius, const FQuat & Rotation, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description, bool bInUseWires)
 {
 	FVisualLogShapeElement Element(Description, Color, 0, CategoryName);
 	Element.Points.Reserve(3);
-	Element.Points.Add(Center);
+	Element.Points.Add(Base);
 	Element.Points.Add(FVector(HalfHeight, Radius, Rotation.X));
 	Element.Points.Add(FVector(Rotation.Y, Rotation.Z, Rotation.W));
-	Element.Type = EVisualLoggerShapeElement::Capsule;
+	Element.Type = bInUseWires ? EVisualLoggerShapeElement::WireCapsule : EVisualLoggerShapeElement::Capsule;
 	Element.Verbosity = Verbosity;
 	ElementsToDraw.Add(Element);
 }
 
-void FVisualLogEntry::AddElement(const TArray<FVector>& ConvexPoints, float MinZ, float MaxZ, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description)
+// Deprecated : 
+void FVisualLogEntry::AddElement(const TArray<FVector>& ConvexPoints, FVector::FReal MinZ, FVector::FReal MaxZ, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description)
+{
+	AddPulledConvex(ConvexPoints, MinZ, MaxZ, CategoryName, Verbosity, Color, Description);
+}
+void FVisualLogEntry::AddPulledConvex(const TArray<FVector>& ConvexPoints, FVector::FReal MinZ, FVector::FReal MaxZ, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description)
 {
 	FVisualLogShapeElement Element(Description, Color, 0, CategoryName);
 	Element.Points.Reserve(1 + ConvexPoints.Num());
-	Element.Points.Add(FVector(MinZ, MaxZ, 0));
+	Element.Points.Add(FVector(MinZ, MaxZ, 0.));
 	Element.Points.Append(ConvexPoints);
 	Element.Type = EVisualLoggerShapeElement::NavAreaMesh;
 	Element.Verbosity = Verbosity;
 	ElementsToDraw.Add(Element);
 }
 
+// Deprecated : 
 void FVisualLogEntry::AddElement(const TArray<FVector>& Vertices, const TArray<int32>& Indices, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description)
+{
+	AddMesh(Vertices, Indices, CategoryName, Verbosity, Color, Description);
+}
+void FVisualLogEntry::AddMesh(const TArray<FVector>& Vertices, const TArray<int32>& Indices, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description)
 {
 	FVisualLogShapeElement Element(Description, Color, 0, CategoryName);
 	uint32 FacesNum = Indices.Num() / 3;
@@ -342,7 +452,18 @@ FArchive& operator<<(FArchive& Ar, FVisualLogHistogramSample& Sample)
 	FVisualLoggerHelpers::Serialize(Ar, Sample.GraphName);
 	FVisualLoggerHelpers::Serialize(Ar, Sample.DataName);
 	Ar << Sample.Verbosity;
-	Ar << Sample.SampleValue;
+
+	if (Ar.CustomVer(EVisualLoggerVersion::GUID) >= EVisualLoggerVersion::LargeWorldCoordinatesAndLocationValidityFlag)
+	{
+		Ar << Sample.SampleValue;
+	}
+	else
+	{
+		FVector2f SampleValueFlt;
+		Ar << SampleValueFlt;
+		Sample.SampleValue = FVector2D(SampleValueFlt);
+	}
+
 	Ar << Sample.UniqueId;
 
 	return Ar;
@@ -368,12 +489,37 @@ FArchive& operator<<(FArchive& Ar, FVisualLogShapeElement& Element)
 	Ar << Element.Verbosity;
 	const int32 VLogsVer = Ar.CustomVer(EVisualLoggerVersion::GUID);
 
+	const bool bUseLargeWorldCoordinates = (VLogsVer >= EVisualLoggerVersion::LargeWorldCoordinatesAndLocationValidityFlag);
+	
 	if (VLogsVer >= EVisualLoggerVersion::TransformationForShapes)
 	{
-		Ar << Element.TransformationMatrix;
+		if (bUseLargeWorldCoordinates)
+		{
+			Ar << Element.TransformationMatrix;
+		}
+		else
+		{
+			FMatrix44f TransformationMatrixFlt;
+        	Ar << TransformationMatrixFlt;
+        	Element.TransformationMatrix = FMatrix(TransformationMatrixFlt);
+		}
 	}
 
-	Ar << Element.Points;
+	if (bUseLargeWorldCoordinates)
+	{
+		Ar << Element.Points;
+	}
+	else
+	{
+		TArray<FVector3f> FltPoints;
+		Ar << FltPoints;
+		Element.Points.Reserve(FltPoints.Num());
+		for (FVector3f Point : FltPoints)
+		{
+			Element.Points.Emplace(Point);
+		}
+	}
+
 	Ar << Element.UniqueId;
 	Ar << Element.Type;
 	Ar << Element.Color;
@@ -460,16 +606,51 @@ FArchive& operator<<(FArchive& Ar, FVisualLogStatusCategory& Status)
 
 FArchive& operator<<(FArchive& Ar, FVisualLogEntry& LogEntry)
 {
-	Ar << LogEntry.TimeStamp;
-	Ar << LogEntry.Location;
+	const int32 VLogsOldVer = Ar.CustomVer(EVisualLoggerVersion::GUID);
+	const int32 VLogsStreamObjectVer = Ar.CustomVer(FUE5MainStreamObjectVersion::GUID);
+
+	if (VLogsStreamObjectVer >= FUE5MainStreamObjectVersion::VisualLoggerTimeStampAsDouble)
+	{
+		Ar << LogEntry.TimeStamp;
+	}
+	else
+	{
+		float TimeStampFlt = static_cast<float>(LogEntry.TimeStamp);
+		Ar << TimeStampFlt;
+		LogEntry.TimeStamp = TimeStampFlt;
+	}
+
+	if (VLogsStreamObjectVer < FUE5MainStreamObjectVersion::VisualLoggerAddedSeparateWorldTime)
+	{
+		LogEntry.WorldTimeStamp = LogEntry.TimeStamp;
+	}
+	else
+	{
+		Ar << LogEntry.WorldTimeStamp;
+	}
+
+	if (VLogsOldVer >= EVisualLoggerVersion::LargeWorldCoordinatesAndLocationValidityFlag)
+	{
+		Ar << LogEntry.Location;
+
+		uint8 bTempIsLocationValid = (LogEntry.bIsLocationValid != 0);
+		Ar.SerializeBits(&bTempIsLocationValid, 1);
+		LogEntry.bIsLocationValid = bTempIsLocationValid != 0;
+	}
+	else
+	{
+		FVector3f LocationFlt(LogEntry.Location);
+		Ar << LocationFlt;
+		LogEntry.Location = FVector(LocationFlt);
+	}
+
 	Ar << LogEntry.LogLines;
 	Ar << LogEntry.Status;
 	Ar << LogEntry.Events;
 	Ar << LogEntry.ElementsToDraw;
 	Ar << LogEntry.DataBlocks;
-
-	const int32 VLogsVer = Ar.CustomVer(EVisualLoggerVersion::GUID);
-	if (VLogsVer > EVisualLoggerVersion::Initial)
+	
+	if (VLogsOldVer > EVisualLoggerVersion::Initial)
 	{
 		Ar << LogEntry.HistogramSamples;
 	}
@@ -494,7 +675,7 @@ FString FVisualLoggerHelpers::GenerateTemporaryFilename(const FString& FileExt)
 	return FString::Printf(TEXT("VTEMP_%s.%s"), *FDateTime::Now().ToString(), *FileExt);
 }
 
-FString FVisualLoggerHelpers::GenerateFilename(const FString& TempFileName, const FString& Prefix, float StartRecordingTime, float EndTimeStamp)
+FString FVisualLoggerHelpers::GenerateFilename(const FString& TempFileName, const FString& Prefix, double StartRecordingTime, double EndTimeStamp)
 {
 	const FString FullFilename = FString::Printf(TEXT("%s_%s"), *Prefix, *TempFileName);
 	const FString TimeFrameString = FString::Printf(TEXT("%d-%d_"), FMath::TruncToInt(StartRecordingTime), FMath::TruncToInt(EndTimeStamp));
@@ -521,30 +702,42 @@ FArchive& FVisualLoggerHelpers::Serialize(FArchive& Ar, FName& Name)
 FArchive& FVisualLoggerHelpers::Serialize(FArchive& Ar, TArray<FVisualLogDevice::FVisualLogEntryItem>& RecordedLogs)
 {
 	Ar.UsingCustomVersion(EVisualLoggerVersion::GUID);
+	Ar.UsingCustomVersion(FUE5MainStreamObjectVersion::GUID);
 
 	if (Ar.IsLoading())
 	{
 		TArray<FVisualLogDevice::FVisualLogEntryItem> CurrentFrame;
 		while (Ar.AtEnd() == false)
 		{
-			int32 FrameTag = VISUAL_LOGGER_MAGIC_NUMBER;
+			int32 FrameTag = VISUAL_LOGGER_MAGIC_NUMBER_LATEST;
 			Ar << FrameTag;
-			if (FrameTag != DEPRECATED_VISUAL_LOGGER_MAGIC_NUMBER && FrameTag != VISUAL_LOGGER_MAGIC_NUMBER)
+			if (FrameTag != DEPRECATED_VISUAL_LOGGER_MAGIC_NUMBER && FrameTag != VISUAL_LOGGER_MAGIC_NUMBER_OLD_CUSTOM_VERSION && FrameTag != VISUAL_LOGGER_MAGIC_NUMBER_CUSTOM_VERSION_CONTAINER)
 			{
 				break;
 			}
 
-			if (FrameTag == DEPRECATED_VISUAL_LOGGER_MAGIC_NUMBER)
+			if (FrameTag == VISUAL_LOGGER_MAGIC_NUMBER_CUSTOM_VERSION_CONTAINER)
 			{
-				Ar.SetCustomVersion(EVisualLoggerVersion::GUID, EVisualLoggerVersion::Initial, TEXT("VisualLogger"));
+				FCustomVersionContainer CustomVersions;
+				CustomVersions.Serialize(Ar);
+				Ar.SetCustomVersions(CustomVersions);
 			}
 			else
 			{
-				int32 ArchiveVer = -1;
-				Ar << ArchiveVer;
-				check(ArchiveVer >= EVisualLoggerVersion::Initial);
+				Ar.SetCustomVersion(FUE5MainStreamObjectVersion::GUID, FUE5MainStreamObjectVersion::BeforeCustomVersionWasAdded, TEXT("VisualLogger"));
 
-				Ar.SetCustomVersion(EVisualLoggerVersion::GUID, ArchiveVer, TEXT("VisualLogger"));
+				if (FrameTag == VISUAL_LOGGER_MAGIC_NUMBER_OLD_CUSTOM_VERSION)
+				{
+					int32 ArchiveOldVer = -1;
+					Ar << ArchiveOldVer;
+					check(ArchiveOldVer >= 0);
+
+					Ar.SetCustomVersion(EVisualLoggerVersion::GUID, ArchiveOldVer, TEXT("VisualLogger"));
+				}
+				else // DEPRECATED_VISUAL_LOGGER_MAGIC_NUMBER
+				{
+					Ar.SetCustomVersion(EVisualLoggerVersion::GUID, EVisualLoggerVersion::Initial, TEXT("VisualLogger"));
+				}
 			}
 
 			Ar << CurrentFrame;
@@ -554,15 +747,14 @@ FArchive& FVisualLoggerHelpers::Serialize(FArchive& Ar, TArray<FVisualLogDevice:
 	}
 	else
 	{
-		int32 FrameTag = VISUAL_LOGGER_MAGIC_NUMBER;
+		int32 FrameTag = VISUAL_LOGGER_MAGIC_NUMBER_LATEST;
 		Ar << FrameTag;
 
-		int32 ArchiveVer = Ar.CustomVer(EVisualLoggerVersion::GUID);
-		Ar << ArchiveVer;
+		FCustomVersionContainer CustomVersions = Ar.GetCustomVersions();
+		CustomVersions.Serialize(Ar);
+
 		Ar << RecordedLogs;
 	}
-
-	int32 CustomVer = Ar.CustomVer(EVisualLoggerVersion::GUID);
 
 	return Ar;
 }

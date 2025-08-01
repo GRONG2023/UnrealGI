@@ -1,53 +1,67 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SAssetDropTarget.h"
-#include "AssetData.h"
-#include "DragAndDrop/AssetDragDropOp.h"
+
+#include "AssetSelection.h"
 #include "DragAndDrop/ActorDragDropOp.h"
 #include "DragAndDrop/DecoratedDragDropOp.h"
-#include "AssetSelection.h"
+#include "GameFramework/Actor.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Input/DragAndDrop.h"
+#include "Styling/AppStyle.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+
+struct FGeometry;
 
 #define LOCTEXT_NAMESPACE "EditorWidgets"
 
 void SAssetDropTarget::Construct(const FArguments& InArgs )
 {
-	OnAssetDropped = InArgs._OnAssetDropped;
-	OnIsAssetAcceptableForDrop = InArgs._OnIsAssetAcceptableForDrop;
-	OnIsAssetAcceptableForDropWithReason = InArgs._OnIsAssetAcceptableForDropWithReason;
+	OnAssetsDropped = InArgs._OnAssetsDropped;
+	OnAreAssetsAcceptableForDrop = InArgs._OnAreAssetsAcceptableForDrop;
+	OnAreAssetsAcceptableForDropWithReason = InArgs._OnAreAssetsAcceptableForDropWithReason;
+	bSupportsMultiDrop = InArgs._bSupportsMultiDrop;
 
 	SDropTarget::Construct(
 		SDropTarget::FArguments()
-		.OnDrop(this, &SAssetDropTarget::OnDropped)
+		.OnDropped(this, &SAssetDropTarget::OnDropped)
 		[
 			InArgs._Content.Widget
 		]);
 }
 
-FReply SAssetDropTarget::OnDropped(TSharedPtr<FDragDropOperation> DragDropOperation)
+FReply SAssetDropTarget::OnDropped(const FGeometry& InGeometry, const FDragDropEvent& InDragDropEvent)
 {
-	bool bUnused;
-	UObject* Object = GetDroppedObject(DragDropOperation, bUnused);
-
-	if ( Object )
+	if (OnAssetsDropped.IsBound())
 	{
-		OnAssetDropped.ExecuteIfBound(Object);
+		bool bRecongnizedEvent = false;
+		TArray<FAssetData> AssetDatas = GetDroppedAssets(InDragDropEvent.GetOperation(), bRecongnizedEvent);
+
+		if (bRecongnizedEvent)
+		{
+			OnAssetsDropped.Execute(InDragDropEvent, AssetDatas);
+			return FReply::Handled();
+		}
 	}
 
-	return FReply::Handled();
+	return FReply::Unhandled();
 }
 
 bool SAssetDropTarget::OnAllowDrop(TSharedPtr<FDragDropOperation> DragDropOperation) const
 {
-	bool bUnused = false;
-	UObject* Object = GetDroppedObject(DragDropOperation, bUnused);
+	bool bRecongnizedEvent = false;
+	TArray<FAssetData> AssetDatas = GetDroppedAssets(DragDropOperation, bRecongnizedEvent);
 
-	if ( Object )
+	if (bRecongnizedEvent)
 	{
 		// Check and see if its valid to drop this object
-		if (OnIsAssetAcceptableForDropWithReason.IsBound())
+		if (OnAreAssetsAcceptableForDropWithReason.IsBound())
 		{
 			FText FailureReason;
-			if (OnIsAssetAcceptableForDropWithReason.Execute(Object, FailureReason))
+			if (OnAreAssetsAcceptableForDropWithReason.Execute(AssetDatas, FailureReason))
 			{
 				return true;
 			}
@@ -60,7 +74,7 @@ bool SAssetDropTarget::OnAllowDrop(TSharedPtr<FDragDropOperation> DragDropOperat
 						TSharedPtr<FDecoratedDragDropOp> DragDropOp = StaticCastSharedPtr<FDecoratedDragDropOp>(DragDropOperation);
 						if (DragDropOp.IsValid())
 						{
-							DragDropOp->SetToolTip(FailureReason, FEditorStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Error")));
+							DragDropOp->SetToolTip(FailureReason, FAppStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Error")));
 						}
 					}
 				}
@@ -68,9 +82,9 @@ bool SAssetDropTarget::OnAllowDrop(TSharedPtr<FDragDropOperation> DragDropOperat
 				return false;
 			}
 		}
-		else if ( OnIsAssetAcceptableForDrop.IsBound() )
+		else if (OnAreAssetsAcceptableForDrop.IsBound())
 		{
-			return OnIsAssetAcceptableForDrop.Execute(Object);
+			return OnAreAssetsAcceptableForDrop.Execute(AssetDatas);
 		}
 		else
 		{
@@ -85,7 +99,7 @@ bool SAssetDropTarget::OnAllowDrop(TSharedPtr<FDragDropOperation> DragDropOperat
 bool SAssetDropTarget::OnIsRecognized(TSharedPtr<FDragDropOperation> DragDropOperation) const
 {
 	bool bRecognizedEvent = false;
-	UObject* Object = GetDroppedObject(DragDropOperation, bRecognizedEvent);
+	GetDroppedAssets(DragDropOperation, bRecognizedEvent);
 
 	return bRecognizedEvent;
 }
@@ -102,52 +116,36 @@ void SAssetDropTarget::OnDragLeave(const FDragDropEvent& DragDropEvent)
 	}
 }
 
-UObject* SAssetDropTarget::GetDroppedObject(TSharedPtr<FDragDropOperation> DragDropOperation, bool& bOutRecognizedEvent) const
+TArray<FAssetData> SAssetDropTarget::GetDroppedAssets(TSharedPtr<FDragDropOperation> DragDropOperation, bool& bOutRecognizedEvent) const
 {
-	bOutRecognizedEvent = false;
-	UObject* DroppedObject = NULL;
-
-	// Asset being dragged from content browser
-	if ( DragDropOperation->IsOfType<FAssetDragDropOp>() )
+	TArray<FAssetData> DroppedAssets;
+	if (!DragDropOperation)
 	{
-		bOutRecognizedEvent = true;
-		TSharedPtr<FAssetDragDropOp> DragDropOp = StaticCastSharedPtr<FAssetDragDropOp>(DragDropOperation);
-		const TArray<FAssetData>& DroppedAssets = DragDropOp->GetAssets();
-
-		bool bCanDrop = DroppedAssets.Num() == 1;
-
-		if( bCanDrop )
-		{
-			const FAssetData& AssetData = DroppedAssets[0];
-
-			// Make sure the asset is loaded
-			DroppedObject = AssetData.GetAsset();
-		}
+		return DroppedAssets;
 	}
-	// Asset being dragged from some external source
-	else if ( DragDropOperation->IsOfType<FExternalDragOperation>() )
+	
+	if ( DragDropOperation->IsOfType<FActorDragDropOp>() )
 	{
-		TArray<FAssetData> DroppedAssetData = AssetUtil::ExtractAssetDataFromDrag(DragDropOperation);
-
-		if (DroppedAssetData.Num() == 1)
-		{
-			bOutRecognizedEvent = true;
-			DroppedObject = DroppedAssetData[0].GetAsset();
-		}
-	}
-	// Actor being dragged?
-	else if ( DragDropOperation->IsOfType<FActorDragDropOp>() )
-	{
-		bOutRecognizedEvent = true;
+		// Handle actors being dragged
 		TSharedPtr<FActorDragDropOp> ActorDragDrop = StaticCastSharedPtr<FActorDragDropOp>(DragDropOperation);
 
-		if (ActorDragDrop->Actors.Num() == 1)
+		for (TWeakObjectPtr<AActor> Actor : ActorDragDrop->Actors)
 		{
-			DroppedObject = ActorDragDrop->Actors[0].Get();
+			FAssetData DroppedActorAsset(Actor.Get());
+			if (DroppedActorAsset.IsValid())
+			{
+				DroppedAssets.Emplace(Actor.Get());
+			}
 		}
 	}
+	else
+	{
+		// Handle assets being dragged
+		DroppedAssets = AssetUtil::ExtractAssetDataFromDrag(DragDropOperation);
+	}
 
-	return DroppedObject;
+	bOutRecognizedEvent = (bSupportsMultiDrop && (DroppedAssets.Num() > 0)) || (DroppedAssets.Num() == 1);
+	return DroppedAssets;
 }
 
 #undef LOCTEXT_NAMESPACE

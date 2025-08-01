@@ -4,15 +4,24 @@
 #include "ToolMenus.h"
 
 #include "Kismet2/CompilerResultsLog.h"
-#include "GraphEditorActions.h"
+#include "AnimGraphCommands.h"
 #include "Animation/AnimComposite.h"
 #include "Animation/AnimSequence.h"
 #include "AnimGraphNode_SequenceEvaluator.h"
 
+#include "AnimGraphNodeBinding.h"
+#include "BlueprintNodeSpawner.h"
+#include "EditorCategoryUtils.h"
+#include "IAnimBlueprintNodeOverrideAssetsContext.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "BlueprintActionDatabaseRegistrar.h"
+#include "BlueprintNodeTemplateCache.h"
+#include "Animation/AnimRootMotionProvider.h"
+
 /////////////////////////////////////////////////////
 // UAnimGraphNode_SequenceEvaluator
 
-#define LOCTEXT_NAMESPACE "A3Nodes"
+#define LOCTEXT_NAMESPACE "UAnimGraphNode_SequenceEvaluator"
 
 UAnimGraphNode_SequenceEvaluator::UAnimGraphNode_SequenceEvaluator(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -21,7 +30,7 @@ UAnimGraphNode_SequenceEvaluator::UAnimGraphNode_SequenceEvaluator(const FObject
 
 void UAnimGraphNode_SequenceEvaluator::PreloadRequiredAssets()
 {
-	PreloadObject(Node.Sequence);
+	PreloadRequiredAssetsHelper(Node.GetSequence(), FindPin(GET_MEMBER_NAME_STRING_CHECKED(FAnimNode_SequenceEvaluator, Sequence)));
 
 	Super::PreloadRequiredAssets();
 }
@@ -29,15 +38,12 @@ void UAnimGraphNode_SequenceEvaluator::PreloadRequiredAssets()
 void UAnimGraphNode_SequenceEvaluator::BakeDataDuringCompilation(class FCompilerResultsLog& MessageLog)
 {
 	UAnimBlueprint* AnimBlueprint = GetAnimBlueprint();
-	AnimBlueprint->FindOrAddGroup(SyncGroup.GroupName);
-	Node.GroupName = SyncGroup.GroupName;
-	Node.GroupRole = SyncGroup.GroupRole;
-	Node.GroupScope = SyncGroup.GroupScope;
+	AnimBlueprint->FindOrAddGroup(Node.GetGroupName());
 }
 
 void UAnimGraphNode_SequenceEvaluator::GetAllAnimationSequencesReferred(TArray<UAnimationAsset*>& AnimationAssets) const
 {
-	if(Node.Sequence)
+	if(Node.GetSequence())
 	{
 		HandleAnimReferenceCollection(Node.Sequence, AnimationAssets);
 	}
@@ -48,72 +54,129 @@ void UAnimGraphNode_SequenceEvaluator::ReplaceReferredAnimations(const TMap<UAni
 	HandleAnimReferenceReplacement(Node.Sequence, AnimAssetReplacementMap);
 }
 
-FText UAnimGraphNode_SequenceEvaluator::GetTooltipText() const
+FText UAnimGraphNode_SequenceEvaluator::GetMenuCategory() const
 {
-	// FText::Format() is slow, so we utilize the cached list title
-	return GetNodeTitle(ENodeTitleType::ListView);
-}
-
-FText UAnimGraphNode_SequenceEvaluator::GetNodeTitleForSequence(ENodeTitleType::Type TitleType, UAnimSequenceBase* InSequence) const
-{
-	const FText SequenceName = FText::FromString(InSequence->GetName());
-
-	FFormatNamedArguments Args;
-	Args.Add(TEXT("SequenceName"), SequenceName);
-
-	// FText::Format() is slow, so we cache this to save on performance
-	if (InSequence->IsValidAdditive())
-	{
-		CachedNodeTitle.SetCachedText(FText::Format(LOCTEXT("EvaluateSequence_Additive", "Evaluate {SequenceName} (additive)"), Args), this);
-	}
-	else
-	{
-		CachedNodeTitle.SetCachedText(FText::Format(LOCTEXT("EvaluateSequence", "Evaluate {SequenceName}"), Args), this);
-	}
-
-	return CachedNodeTitle;
+	return LOCTEXT("MenuCategory", "Animation|Sequences");
 }
 
 FText UAnimGraphNode_SequenceEvaluator::GetNodeTitle(ENodeTitleType::Type TitleType) const
 {
-	if (Node.Sequence == nullptr)
-	{
-		// we may have a valid variable connected or default pin value
-		UEdGraphPin* SequencePin = FindPin(GET_MEMBER_NAME_STRING_CHECKED(FAnimNode_SequenceEvaluator, Sequence));
-		if (SequencePin && SequencePin->LinkedTo.Num() > 0)
-		{
-			return LOCTEXT("EvaluateSequence_TitleVariable", "Evaluate Animation Sequence");
-		}
-		else if (SequencePin && SequencePin->DefaultObject != nullptr)
-		{
-			return GetNodeTitleForSequence(TitleType, CastChecked<UAnimSequenceBase>(SequencePin->DefaultObject));
-		}
-		else
-		{
-			return LOCTEXT("EvaluateSequence_TitleNONE", "Evaluate (None)");
-		}
-	}
-	// @TODO: don't know enough about this node type to comfortably assert that
-	//        the CacheName won't change after the node has spawned... until
-	//        then, we'll leave this optimization off
-	else //if (CachedNodeTitle.IsOutOfDate(this))
-	{
-		GetNodeTitleForSequence(TitleType, Node.Sequence);
-	}
-
-	return CachedNodeTitle;
+	UEdGraphPin* SequencePin = FindPin(GET_MEMBER_NAME_STRING_CHECKED(FAnimNode_SequenceEvaluator, Sequence));
+	return GetNodeTitleHelper(TitleType, SequencePin, Node.ShouldUseExplicitFrame() ? LOCTEXT("PlayerDescByFrame", "Sequence Evaluator (by frame)") :  LOCTEXT("PlayerDescByTime", "Sequence Evaluator (by time)"));
 }
 
-void UAnimGraphNode_SequenceEvaluator::GetMenuActions(FBlueprintActionDatabaseRegistrar& ActionRegistrar) const
+FSlateIcon UAnimGraphNode_SequenceEvaluator::GetIconAndTint(FLinearColor& OutColor) const
 {
-	// Intentionally empty; you can drop down a regular sequence player and convert into a sequence evaluator in the right-click menu.
+	return FSlateIcon(FAppStyle::GetAppStyleSetName(), "ClassIcon.AnimSequence");
+}
+
+void UAnimGraphNode_SequenceEvaluator::GetMenuActions(FBlueprintActionDatabaseRegistrar& InActionRegistrar) const
+{
+	GetMenuActionsHelper(
+		InActionRegistrar,
+		GetClass(),
+		{ UAnimSequence::StaticClass() },
+		{ },
+		[](const FAssetData& InAssetData, UClass* InClass)
+		{
+			if(InAssetData.IsValid())
+			{
+				const FString TagValue = InAssetData.GetTagValueRef<FString>(GET_MEMBER_NAME_CHECKED(UAnimSequence, AdditiveAnimType));
+				if(const bool bKnownToBeAdditive = (!TagValue.IsEmpty() && !TagValue.Equals(TEXT("AAT_None"))))
+				{
+					return FText::Format(LOCTEXT("MenuDescFormatAdditive", "Evaluate '{0}' (additive)"), FText::FromName(InAssetData.AssetName));
+				}
+				else
+				{
+					return FText::Format(LOCTEXT("MenuDescFormat", "Evaluate '{0}'"), FText::FromName(InAssetData.AssetName));
+				}
+			}
+			else
+			{
+				return LOCTEXT("MenuDesc", "Sequence Evaluator");
+			}
+		},
+		[](const FAssetData& InAssetData, UClass* InClass)
+		{
+			if(InAssetData.IsValid())
+			{
+				const FString TagValue = InAssetData.GetTagValueRef<FString>(GET_MEMBER_NAME_CHECKED(UAnimSequence, AdditiveAnimType));
+				if(const bool bKnownToBeAdditive = (!TagValue.IsEmpty() && !TagValue.Equals(TEXT("AAT_None"))))
+				{
+					return FText::Format(LOCTEXT("MenuDescTooltipFormat_EvaluateAdditive", "Evaluate (additive)\n'{0}'"), FText::FromString(InAssetData.GetObjectPathString()));
+				}
+				else
+				{
+					return FText::Format(LOCTEXT("MenuDescTooltipFormat_Evaluate", "Evaluate\n'{0}'"), FText::FromString(InAssetData.GetObjectPathString()));
+				}
+			}
+			else
+			{
+				return LOCTEXT("MenuDescTooltip", "Sequence Evaluator");
+			}
+		},
+		[](UEdGraphNode* InNewNode, bool bInIsTemplateNode, const FAssetData InAssetData)
+		{
+			UAnimGraphNode_AssetPlayerBase::SetupNewNode(InNewNode, bInIsTemplateNode, InAssetData);
+		});
 }
 
 void UAnimGraphNode_SequenceEvaluator::SetAnimationAsset(UAnimationAsset* Asset)
 {
 	if (UAnimSequenceBase* Seq =  Cast<UAnimSequence>(Asset))
 	{
-		Node.Sequence = Seq;
+		Node.SetSequence(Seq);
+	}
+}
+
+void UAnimGraphNode_SequenceEvaluator::CopySettingsFromAnimationAsset(UAnimationAsset* Asset)
+{
+	if (UAnimSequenceBase* Seq = Cast<UAnimSequence>(Asset))
+	{
+		Node.SetShouldLoop(Seq->bLoop);
+	}
+}
+
+void UAnimGraphNode_SequenceEvaluator::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+
+	if( PropertyChangedEvent.GetPropertyName() == GET_MEMBER_NAME_CHECKED(FAnimNode_SequenceEvaluator, bUseExplicitFrame))
+	{
+		UEdGraphPin** Pin = nullptr;
+		if (Node.bUseExplicitFrame)
+		{
+			Pin = Pins.FindByPredicate([](const UEdGraphPin* InPin)
+			{
+				return InPin->PinName == GET_MEMBER_NAME_STRING_CHECKED(FAnimNode_SequenceEvaluator, ExplicitTime);
+			});
+		}
+		else
+		{
+			Pin = Pins.FindByPredicate([](const UEdGraphPin* InPin)
+			{
+				return InPin->PinName == GET_MEMBER_NAME_STRING_CHECKED(FAnimNode_SequenceEvaluator, ExplicitFrame);
+			});			
+		}
+
+		if (Pin)
+		{			
+			Modify();
+			(*Pin)->BreakAllPinLinks();
+			RemoveBindings((*Pin)->PinName);
+		}
+	}
+}
+
+void UAnimGraphNode_SequenceEvaluator::OnOverrideAssets(IAnimBlueprintNodeOverrideAssetsContext& InContext) const
+{
+	if(InContext.GetAssets().Num() > 0)
+	{
+		if (UAnimSequenceBase* Sequence = Cast<UAnimSequenceBase>(InContext.GetAssets()[0]))
+		{
+			FAnimNode_SequenceEvaluator& AnimNode = InContext.GetAnimNode<FAnimNode_SequenceEvaluator>();
+			AnimNode.SetSequence(Sequence);
+		}
 	}
 }
 
@@ -121,40 +184,7 @@ void UAnimGraphNode_SequenceEvaluator::ValidateAnimNodeDuringCompilation(class U
 {
 	Super::ValidateAnimNodeDuringCompilation(ForSkeleton, MessageLog);
 
-	UAnimSequenceBase* SequenceToCheck = Node.Sequence;
-	UEdGraphPin* SequencePin = FindPin(GET_MEMBER_NAME_STRING_CHECKED(FAnimNode_SequenceEvaluator, Sequence));
-	if (SequencePin != nullptr && SequenceToCheck == nullptr)
-	{
-		SequenceToCheck = Cast<UAnimSequenceBase>(SequencePin->DefaultObject);
-	}
-
-	if (SequenceToCheck == nullptr)
-	{
-		// Check for bindings
-		bool bHasBinding = false;
-		if(SequencePin != nullptr)
-		{
-			if (FAnimGraphNodePropertyBinding* BindingPtr = PropertyBindings.Find(SequencePin->GetFName()))
-			{
-				bHasBinding = true;
-			}
-		}
-
-		// we may have a connected node or binding
-		if (SequencePin == nullptr || (SequencePin->LinkedTo.Num() == 0 && !bHasBinding))
-		{
-			MessageLog.Error(TEXT("@@ references an unknown sequence"), this);
-		}
-	}
-	else
-	{
-		USkeleton* SeqSkeleton = SequenceToCheck->GetSkeleton();
-		if (SeqSkeleton&& // if anim sequence doesn't have skeleton, it might be due to anim sequence not loaded yet, @todo: wait with anim blueprint compilation until all assets are loaded?
-			!SeqSkeleton->IsCompatible(ForSkeleton))
-		{
-			MessageLog.Error(TEXT("@@ references sequence that uses different skeleton @@"), this, SeqSkeleton);
-		}
-	}
+	ValidateAnimNodeDuringCompilationHelper(ForSkeleton, MessageLog, Node.GetSequence(), UAnimSequenceBase::StaticClass(), FindPin(GET_MEMBER_NAME_STRING_CHECKED(FAnimNode_SequenceEvaluator, Sequence)), GET_MEMBER_NAME_CHECKED(FAnimNode_SequenceEvaluator, Sequence));
 }
 
 void UAnimGraphNode_SequenceEvaluator::GetNodeContextMenuActions(UToolMenu* Menu, UGraphNodeContextMenuContext* Context) const
@@ -163,9 +193,9 @@ void UAnimGraphNode_SequenceEvaluator::GetNodeContextMenuActions(UToolMenu* Menu
 	{
 		// add an option to convert to a regular sequence player
 		{
-			FToolMenuSection& Section = Menu->AddSection("AnimGraphNodeSequenceEvaluator", NSLOCTEXT("A3Nodes", "SequenceEvaluatorHeading", "Sequence Evaluator"));
-			Section.AddMenuEntry(FGraphEditorCommands::Get().OpenRelatedAsset);
-			Section.AddMenuEntry(FGraphEditorCommands::Get().ConvertToSeqPlayer);
+			FToolMenuSection& Section = Menu->AddSection("AnimGraphNodeSequenceEvaluator", LOCTEXT("SequenceEvaluatorHeading", "Sequence Evaluator"));
+			Section.AddMenuEntry(FAnimGraphCommands::Get().OpenRelatedAsset);
+			Section.AddMenuEntry(FAnimGraphCommands::Get().ConvertToSeqPlayer);
 		}
 	}
 }
@@ -177,14 +207,14 @@ bool UAnimGraphNode_SequenceEvaluator::DoesSupportTimeForTransitionGetter() cons
 
 UAnimationAsset* UAnimGraphNode_SequenceEvaluator::GetAnimationAsset() const 
 {
-	UAnimSequenceBase* Sequence = Node.Sequence;
+	UAnimSequenceBase* Sequence = Node.GetSequence();
 	UEdGraphPin* SequencePin = FindPin(GET_MEMBER_NAME_STRING_CHECKED(FAnimNode_SequenceEvaluator, Sequence));
 	if (SequencePin != nullptr && Sequence == nullptr)
 	{
 		Sequence = Cast<UAnimSequenceBase>(SequencePin->DefaultObject);
 	}
 
-	return Node.Sequence;
+	return Sequence;
 }
 
 const TCHAR* UAnimGraphNode_SequenceEvaluator::GetTimePropertyName() const 
@@ -206,6 +236,16 @@ EAnimAssetHandlerType UAnimGraphNode_SequenceEvaluator::SupportsAssetClass(const
 	else
 	{
 		return EAnimAssetHandlerType::NotSupported;
+	}
+}
+
+void UAnimGraphNode_SequenceEvaluator::GetOutputLinkAttributes(FNodeAttributeArray& OutAttributes) const
+{
+	Super::GetOutputLinkAttributes(OutAttributes);
+
+	if (UE::Anim::IAnimRootMotionProvider::Get())
+	{
+		OutAttributes.Add(UE::Anim::IAnimRootMotionProvider::AttributeName);
 	}
 }
 

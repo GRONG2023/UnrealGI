@@ -10,13 +10,13 @@
 #include "GameplayTagAssetInterface.generated.h"
 
 /** Interface for assets which contain gameplay tags */
-UINTERFACE(Blueprintable, MinimalAPI, meta=(CannotImplementInterfaceInBlueprint))
+UINTERFACE(BlueprintType, MinimalAPI, meta=(CannotImplementInterfaceInBlueprint))
 class UGameplayTagAssetInterface : public UInterface
 {
 	GENERATED_UINTERFACE_BODY()
 };
 
-class GAMEPLAYTAGS_API IGameplayTagAssetInterface
+class IGameplayTagAssetInterface
 {
 	GENERATED_IINTERFACE_BODY()
 
@@ -36,7 +36,7 @@ class GAMEPLAYTAGS_API IGameplayTagAssetInterface
 	 * @return True if the asset has a gameplay tag that matches, false if not
 	 */
 	UFUNCTION(BlueprintCallable, Category=GameplayTags)
-	virtual bool HasMatchingGameplayTag(FGameplayTag TagToCheck) const;
+	GAMEPLAYTAGS_API virtual bool HasMatchingGameplayTag(FGameplayTag TagToCheck) const;
 
 	/**
 	 * Check if the asset has gameplay tags that matches against all of the specified tags (expands to include parents of asset tags)
@@ -46,7 +46,7 @@ class GAMEPLAYTAGS_API IGameplayTagAssetInterface
 	 * @return True if the asset has matches all of the gameplay tags, will be true if container is empty
 	 */
 	UFUNCTION(BlueprintCallable, Category=GameplayTags)
-	virtual bool HasAllMatchingGameplayTags(const FGameplayTagContainer& TagContainer) const;
+	GAMEPLAYTAGS_API virtual bool HasAllMatchingGameplayTags(const FGameplayTagContainer& TagContainer) const;
 
 	/**
 	 * Check if the asset has gameplay tags that matches against any of the specified tags (expands to include parents of asset tags)
@@ -56,6 +56,6 @@ class GAMEPLAYTAGS_API IGameplayTagAssetInterface
 	 * @return True if the asset has matches any of the gameplay tags, will be false if container is empty
 	 */
 	UFUNCTION(BlueprintCallable, Category=GameplayTags)
-	virtual bool HasAnyMatchingGameplayTags(const FGameplayTagContainer& TagContainer) const;
+	GAMEPLAYTAGS_API virtual bool HasAnyMatchingGameplayTags(const FGameplayTagContainer& TagContainer) const;
 };
 

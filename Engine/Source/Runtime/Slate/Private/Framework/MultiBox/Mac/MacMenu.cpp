@@ -4,6 +4,7 @@
 #include "Framework/Application/SlateApplication.h"
 #include "Mac/CocoaThread.h"
 #include "Mac/MacApplication.h"
+#include "Misc/ConfigCacheIni.h"
 #include "Misc/ScopeLock.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "Framework/Commands/Commands.h"
@@ -280,11 +281,33 @@ namespace MacMenuHelper
 	
 	NSString* ComputeAppName()
 	{
-		return GIsEditor ? NSLOCTEXT("UnrealEditor", "ApplicationTitle", "Unreal Editor").ToString().GetNSString() : FString(FApp::GetProjectName()).GetNSString();
+        if (GIsEditor)
+        {
+            return NSLOCTEXT("UnrealEditor", "ApplicationTitle", "Unreal Editor").ToString().GetNSString();
+        }
+        
+        FText ProjectTitle;
+        GConfig->GetText(TEXT("/Script/EngineSettings.GeneralProjectSettings"), TEXT("ProjectDisplayedTitle"), ProjectTitle, GGameIni);
+        if (!ProjectTitle.IsEmpty())
+        {
+            return ProjectTitle.ToString().GetNSString();
+        }
+        
+        return FString(FApp::GetProjectName()).GetNSString();
 	}
 	
 	bool GMacPostInitStartupRequested = false;
-	bool GMacPostInitStartUpComplete = false; 
+	bool GMacPostInitStartUpComplete = false;
+
+	void ConditionalDelayPostStartup()
+	{
+		// In case an obsecure app startup sequence has not managed to finish the menu startup correctly
+		// However only do this if the post init has been called
+		if(!MacMenuHelper::GMacPostInitStartUpComplete && MacMenuHelper::GMacPostInitStartupRequested)
+		{
+			FSlateMacMenu::PostInitStartup();
+		}
+	}
 };
 
 // Bind all low-level Application hooks that require to access this high-level MacMenu system which includes NSApp Menu's and slate menus
@@ -336,88 +359,96 @@ void FSlateMacMenu::PostInitStartup()
 		FMacMenuCommands::Register();
 	
 		// Build Default menu's
-        FCocoaMenu* MenuBar = [[FCocoaMenu new] autorelease];
-        FCocoaMenu* AppMenu = [[FCocoaMenu new] autorelease];
-        NSMenuItem* AppMenuItem = [[NSMenuItem new] autorelease];
-        [AppMenuItem setTitle:@"AppMenuItem"];
-        [MenuBar addItem:AppMenuItem];
-        [AppMenuItem setSubmenu:AppMenu];
-        [NSApp setMainMenu:MenuBar];
+        MainThreadCall(^{
+            FCocoaMenu* MenuBar = [[FCocoaMenu new] autorelease];
+            FCocoaMenu* AppMenu = [[FCocoaMenu new] autorelease];
+            NSMenuItem* AppMenuItem = [[NSMenuItem new] autorelease];
+            [AppMenuItem setTitle:@"AppMenuItem"];
+            [MenuBar addItem:AppMenuItem];
+            [AppMenuItem setSubmenu:AppMenu];
+            [NSApp setMainMenu:MenuBar];
 
-        NSString* AppName = MacMenuHelper::ComputeAppName();
+            NSString* AppName = MacMenuHelper::ComputeAppName();
+            
+            NSMenu* MainMenu = [NSApp mainMenu];
         
-        NSMenu* MainMenu = [NSApp mainMenu];
-	
-        NSMenuItem* PreferencesItem = GIsEditor ? MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().Preferences, @selector(showPreferencesWindow:), MacMenuHelper::CmdID_Preferences) : nil;
-        NSMenuItem* HideItem = MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().Hide, @selector(hide:), MacMenuHelper::CmdID_Hide, AppName);
-        NSMenuItem* HideOthersItem = MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().HideOthers, @selector(hideOtherApplications:), MacMenuHelper::CmdID_HideOthers);
-		NSMenuItem* ShowAllItem = MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().ShowAll, @selector(unhideAllApplications:), MacMenuHelper::CmdID_ShowAll);
+            NSMenuItem* PreferencesItem = GIsEditor ? MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().Preferences, @selector(showPreferencesWindow:), MacMenuHelper::CmdID_Preferences) : nil;
+            NSMenuItem* HideItem = MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().Hide, @selector(hide:), MacMenuHelper::CmdID_Hide, AppName);
+            NSMenuItem* HideOthersItem = MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().HideOthers, @selector(hideOtherApplications:), MacMenuHelper::CmdID_HideOthers);
+            NSMenuItem* ShowAllItem = MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().ShowAll, @selector(unhideAllApplications:), MacMenuHelper::CmdID_ShowAll);
 
-		SEL ShowAboutSelector = [[NSApp delegate] respondsToSelector:@selector(showAboutWindow:)] ? @selector(showAboutWindow:) : @selector(orderFrontStandardAboutPanel:);
-		NSMenuItem* AboutItem = MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().About, ShowAboutSelector, MacMenuHelper::CmdID_About, AppName);
-		
-        SEL RequestQuitSelector = [[NSApp delegate] respondsToSelector:@selector(requestQuit:)] ? @selector(requestQuit:) : @selector(terminate:);
-        NSMenuItem* QuitItem = MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().Quit, RequestQuitSelector, MacMenuHelper::CmdID_Quit, AppName);
-        
-        NSMenuItem* ServicesItem = [[NSMenuItem new] autorelease];
-        FCocoaMenu* ServicesMenu = [[FCocoaMenu new] autorelease];
-        [ServicesItem setTitle:NSLOCTEXT("MainMenu","ServicesMenu","Services").ToString().GetNSString()];
-        [ServicesItem setSubmenu:ServicesMenu];
-        [ServicesItem setTag:MacMenuHelper::CmdID_ServicesMenu];
-        [NSApp setServicesMenu:ServicesMenu];
-        [AppMenu addItem:AboutItem];
-        [AppMenu addItem:[NSMenuItem separatorItem]];
-        if (PreferencesItem)
-        {
-            [AppMenu addItem:PreferencesItem];
+            SEL ShowAboutSelector = [[NSApp delegate] respondsToSelector:@selector(showAboutWindow:)] ? @selector(showAboutWindow:) : @selector(orderFrontStandardAboutPanel:);
+            NSMenuItem* AboutItem = MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().About, ShowAboutSelector, MacMenuHelper::CmdID_About, AppName);
+            
+            SEL RequestQuitSelector = [[NSApp delegate] respondsToSelector:@selector(requestQuit:)] ? @selector(requestQuit:) : @selector(terminate:);
+            NSMenuItem* QuitItem = MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().Quit, RequestQuitSelector, MacMenuHelper::CmdID_Quit, AppName);
+            
+            NSMenuItem* ServicesItem = [[NSMenuItem new] autorelease];
+            FCocoaMenu* ServicesMenu = [[FCocoaMenu new] autorelease];
+            [ServicesItem setTitle:NSLOCTEXT("MainMenu","ServicesMenu","Services").ToString().GetNSString()];
+            [ServicesItem setSubmenu:ServicesMenu];
+            [ServicesItem setTag:MacMenuHelper::CmdID_ServicesMenu];
+            [NSApp setServicesMenu:ServicesMenu];
+            [AppMenu addItem:AboutItem];
             [AppMenu addItem:[NSMenuItem separatorItem]];
-        }
-        [AppMenu addItem:ServicesItem];
-        [AppMenu addItem:[NSMenuItem separatorItem]];
-        [AppMenu addItem:HideItem];
-        [AppMenu addItem:HideOthersItem];
-        [AppMenu addItem:ShowAllItem];
-        [AppMenu addItem:[NSMenuItem separatorItem]];
-        [AppMenu addItem:QuitItem];
+            if (PreferencesItem)
+            {
+                [AppMenu addItem:PreferencesItem];
+                [AppMenu addItem:[NSMenuItem separatorItem]];
+            }
+            [AppMenu addItem:ServicesItem];
+            [AppMenu addItem:[NSMenuItem separatorItem]];
+            [AppMenu addItem:HideItem];
+            [AppMenu addItem:HideOthersItem];
+            [AppMenu addItem:ShowAllItem];
+            [AppMenu addItem:[NSMenuItem separatorItem]];
+            [AppMenu addItem:QuitItem];
 
-		if (FApp::IsGame())
-		{
-			NSMenu* ViewMenu = [[FCocoaMenu new] autorelease];
-			[ViewMenu setTitle:NSLOCTEXT("MainMenu","ViewMenu","View").ToString().GetNSString()];
-			NSMenuItem* ViewMenuItem = [[NSMenuItem new] autorelease];
-			[ViewMenuItem setSubmenu:ViewMenu];
-			[[NSApp mainMenu] addItem:ViewMenuItem];
+            if (FApp::IsGame())
+            {
+                NSMenu* ViewMenu = [[FCocoaMenu new] autorelease];
+                [ViewMenu setTitle:NSLOCTEXT("MainMenu","ViewMenu","View").ToString().GetNSString()];
+                NSMenuItem* ViewMenuItem = [[NSMenuItem new] autorelease];
+                [ViewMenuItem setSubmenu:ViewMenu];
+                [[NSApp mainMenu] addItem:ViewMenuItem];
 
-			NSMenuItem* ToggleFullscreenItem = MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().ToggleFullScreen, @selector(toggleFullScreen:), MacMenuHelper::CmdID_ToggleFullScreen);
-			[ViewMenu addItem:ToggleFullscreenItem];
-		}
-		
-        NSMenu* WindowMenu = [NSApp windowsMenu];
-        if (!WindowMenu)
-        {
-            WindowMenu = [[FCocoaMenu new] autorelease];
-            [WindowMenu setTitle:NSLOCTEXT("MainMenu","WindowMenu","Window").ToString().GetNSString()];
-            NSMenuItem* WindowMenuItem = [[NSMenuItem new] autorelease];
-            [WindowMenuItem setSubmenu:WindowMenu];
-            [[NSApp mainMenu] addItem:WindowMenuItem];
-            [NSApp setWindowsMenu:WindowMenu];
-        }
-        
-        NSMenuItem* MinimizeItem = MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().Minimize, @selector(miniaturize:), MacMenuHelper::CmdID_Minimize);
-        NSMenuItem* ZoomItem = MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().Zoom, @selector(zoom:), MacMenuHelper::CmdID_Zoom);
-        NSMenuItem* CloseItem = MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().Close, @selector(performClose:), MacMenuHelper::CmdID_Close);
-        NSMenuItem* BringAllToFrontItem = MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().BringAllToFront, @selector(arrangeInFront:), MacMenuHelper::CmdID_BringAllToFront);
-        [WindowMenu addItem:MinimizeItem];
-        [WindowMenu addItem:ZoomItem];
-        [WindowMenu addItem:CloseItem];
-        [WindowMenu addItem:[NSMenuItem separatorItem]];
-        [WindowMenu addItem:BringAllToFrontItem];
-        [WindowMenu addItem:[NSMenuItem separatorItem]];
+                NSMenuItem* ToggleFullscreenItem = MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().ToggleFullScreen, @selector(toggleFullScreen:), MacMenuHelper::CmdID_ToggleFullScreen);
+                [ViewMenu addItem:ToggleFullscreenItem];
+            }
+            
+            NSMenu* WindowMenu = [NSApp windowsMenu];
+            if (!WindowMenu)
+            {
+                WindowMenu = [[FCocoaMenu new] autorelease];
+                [WindowMenu setTitle:NSLOCTEXT("MainMenu","WindowMenu","Window").ToString().GetNSString()];
+                NSMenuItem* WindowMenuItem = [[NSMenuItem new] autorelease];
+                [WindowMenuItem setSubmenu:WindowMenu];
+                [[NSApp mainMenu] addItem:WindowMenuItem];
+                [NSApp setWindowsMenu:WindowMenu];
+            }
+            
+            NSMenuItem* MinimizeItem = MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().Minimize, @selector(miniaturize:), MacMenuHelper::CmdID_Minimize);
+            NSMenuItem* ZoomItem = MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().Zoom, @selector(zoom:), MacMenuHelper::CmdID_Zoom);
+            NSMenuItem* CloseItem = MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().Close, @selector(performClose:), MacMenuHelper::CmdID_Close);
+            NSMenuItem* BringAllToFrontItem = MacMenuHelper::CreateNSMenuItemForCommand(FMacMenuCommands::Get().BringAllToFront, @selector(arrangeInFront:), MacMenuHelper::CmdID_BringAllToFront);
+            [WindowMenu addItem:MinimizeItem];
+            [WindowMenu addItem:ZoomItem];
+            [WindowMenu addItem:CloseItem];
+            [WindowMenu addItem:[NSMenuItem separatorItem]];
+            [WindowMenu addItem:BringAllToFrontItem];
+            [WindowMenu addItem:[NSMenuItem separatorItem]];
+        }, NSDefaultRunLoopMode, false);
 	}
 }
 
 void FSlateMacMenu::LanguageChanged()
 {
+    if (!MacMenuHelper::GMacPostInitStartupRequested)
+    {
+        // if MacMenu not even done init setup yet, ignore LanguageChanged call
+        return;
+    }
+    
 	NSMenu* MainMenu = [NSApp mainMenu];
 	NSMenuItem* AppMenuItem = [MainMenu itemWithTitle:@"AppMenuItem"];
 	NSMenu* AppMenu = [AppMenuItem submenu];
@@ -443,13 +474,8 @@ void FSlateMacMenu::LanguageChanged()
 
 void FSlateMacMenu::UpdateApplicationMenu(bool bMacApplicationModalMode)
 {
-	// In case an obsecure app startup sequence has not managed to finish the menu startup correctly
-	// However only do this if the post init has been called
-	if(!MacMenuHelper::GMacPostInitStartUpComplete && MacMenuHelper::GMacPostInitStartupRequested)
-	{
-		PostInitStartup();
-	}
-
+	MacMenuHelper::ConditionalDelayPostStartup();
+	
     NSMenu* MainMenu = [NSApp mainMenu];
     NSMenuItem* AppMenuItem = [MainMenu itemWithTitle:@"AppMenuItem"];
     NSMenu* AppMenu = [AppMenuItem submenu];
@@ -521,6 +547,8 @@ void FSlateMacMenu::UpdateWindowMenu(bool bMacApplicationModalMode)
 
 void FSlateMacMenu::UpdateWithMultiBox(const TSharedPtr< FMultiBox > MultiBox)
 {
+	MacMenuHelper::ConditionalDelayPostStartup();
+	
 	// The dispatch block can't handle TSharedPtr correctly, so we use a small trick to pass MultiBox safely
 	struct FSafeMultiBoxPass
 	{
@@ -755,76 +783,113 @@ void FSlateMacMenu::UpdateCachedState()
 
 	if (bShouldUpdate)
 	{
-		FScopeLock CachedMenuStateLock(&GCachedMenuStateCS);
+		TMap<TSharedPtr<const FMenuEntryBlock>, TSharedRef<SWidget>> InvalidMenuEntryBlocks;
 
-		for (TMap<FMacMenu*, TSharedPtr<TArray<FMacMenuItemState>>>::TIterator It(GCachedMenuState); It; ++It)
+		//Step 1: Gather list of null widgets, with GCachedMenuStateCS locked.
 		{
-			FMacMenu* Menu = It.Key();
-			TSharedPtr<TArray<FMacMenuItemState>> MenuState = It.Value();
+			FScopeLock CachedMenuStateLock(&GCachedMenuStateCS);
 
-			TSharedRef<SWidget> Widget = SNullWidget::NullWidget;
-			if (!Menu.MultiBox.IsValid())
+			//Ensure we will alloc only a single time, even if most of the time it will be bigger than necessary (but always quite small anyway).
+			InvalidMenuEntryBlocks.Reserve(GCachedMenuState.Num());
+
+			for (TMap<FMacMenu*, TSharedPtr<TArray<FMacMenuItemState>>>::TIterator It(GCachedMenuState); It; ++It)
 			{
-				TSharedPtr<const FMenuEntryBlock> MenuEntryBlock = Menu.MenuEntryBlock.Pin();
-				if (MenuEntryBlock.IsValid())
-				{
-					if (MenuEntryBlock->MenuBuilder.IsBound())
-					{
-						Widget = MenuEntryBlock->MenuBuilder.Execute();
-					}
-					else
-					{
-						const bool bShouldCloseWindowAfterMenuSelection = true;
-						FMenuBuilder MenuBuilder(bShouldCloseWindowAfterMenuSelection, MenuEntryBlock->GetActionList(), MenuEntryBlock->Extender);
-						{
-							// Have the menu fill its contents
-							MenuEntryBlock->EntryBuilder.ExecuteIfBound(MenuBuilder);
-						}
- 
-                        // Use INT_MAX for MaxHeight to so that SMultiBoxWidget is returned by MakeWidget instead of SVerticalBox
-                        const int32 MaxHeight = INT_MAX;
-						Widget = MenuBuilder.MakeWidget(/*InMakeMultiBoxBuilderOverride=*/ nullptr, MaxHeight);
-					}
+				FMacMenu* Menu = It.Key();
 
-					if (Widget->GetType() == FName(TEXT("SMultiBoxWidget")))
+				if (!Menu.MultiBox.IsValid())
+				{
+					TSharedPtr<const FMenuEntryBlock> MenuEntryBlock = Menu.MenuEntryBlock.Pin();
+					if (MenuEntryBlock.IsValid())
 					{
-						Menu.MultiBox = TSharedPtr<const FMultiBox>(StaticCastSharedRef<SMultiBoxWidget>(Widget)->GetMultiBox());
-					}
-					else
-					{
-                        const FName ActionName = MenuEntryBlock->GetAction().IsValid() ? MenuEntryBlock->GetAction()->GetCommandName() : NAME_None;
-						UE_LOG(LogMac, Warning, TEXT("Unsupported type of menu widget in FSlateMacMenu::UpdateCachedState(): %s, %s, %s"),
-                               *Widget->GetType().ToString(), *MenuEntryBlock->GetExtensionHook().ToString(), *ActionName.ToString());
+						InvalidMenuEntryBlocks.Add(MenuEntryBlock, SNullWidget::NullWidget);
 					}
 				}
 			}
+		}
+		
+		//Step 2: Create the widgets, which can be a complex process (like when creating a new window that will try to perform a call on the main thread, that may already have locked GCachedMenuStateCS).
+		//So we ensure that GCachedMenuStateCS is not locked for this step.
+		for(TPair<TSharedPtr<const FMenuEntryBlock>, TSharedRef<SWidget>>& It : InvalidMenuEntryBlocks)
+		{
+			TSharedPtr<const FMenuEntryBlock> MenuEntryBlock = It.Key;
+			TSharedRef<SWidget> Widget = SNullWidget::NullWidget;
 
-			if (Menu.MultiBox.IsValid())
+			if (MenuEntryBlock->MenuBuilder.IsBound())
 			{
-				const TArray<TSharedRef<const FMultiBlock>>& MenuBlocks = Menu.MultiBox.Pin()->GetBlocks();
-				for (int32 Index = MenuState->Num(); MenuBlocks.Num() > MenuState->Num(); Index++)
+				Widget = MenuEntryBlock->MenuBuilder.Execute();
+			}
+			else
+			{
+				const bool bShouldCloseWindowAfterMenuSelection = true;
+				FMenuBuilder MenuBuilder(bShouldCloseWindowAfterMenuSelection, MenuEntryBlock->GetActionList(), MenuEntryBlock->Extender);
 				{
-					MenuState->Add(FMacMenuItemState());
+					// Have the menu fill its contents
+					MenuEntryBlock->EntryBuilder.ExecuteIfBound(MenuBuilder);
 				}
-				for (int32 Index = 0; Index < MenuBlocks.Num(); Index++)
-				{
-					FMacMenuItemState& ItemState = (*MenuState)[Index];
-					ItemState.Type = MenuBlocks[Index]->GetType();
+ 
+				// Use INT_MAX for MaxHeight to so that SMultiBoxWidget is returned by MakeWidget instead of SVerticalBox
+				const int32 MaxHeight = INT_MAX;
+				Widget = MenuBuilder.MakeWidget(/*InMakeMultiBoxBuilderOverride=*/ nullptr, MaxHeight);
+			}
+			
+			It.Value = Widget;
+		}
 
-					if (ItemState.Type == EMultiBlockType::MenuEntry)
+		//Step 3: assign the widgets and setup the menu state.
+		{
+			FScopeLock CachedMenuStateLock(&GCachedMenuStateCS);
+
+			for (TMap<FMacMenu*, TSharedPtr<TArray<FMacMenuItemState>>>::TIterator It(GCachedMenuState); It; ++It)
+			{
+				FMacMenu* Menu = It.Key();
+				TSharedRef<SWidget> Widget = SNullWidget::NullWidget;
+				
+				if (!Menu.MultiBox.IsValid())
+				{
+					TSharedPtr<const FMenuEntryBlock> MenuEntryBlock = Menu.MenuEntryBlock.Pin();
+					TSharedRef<SWidget>* Value = InvalidMenuEntryBlocks.Find(MenuEntryBlock);
+					if (Value!= nullptr)
 					{
-						TSharedRef<const FMenuEntryBlock> Block = StaticCastSharedRef<const FMenuEntryBlock>(MenuBlocks[Index]);
-						ItemState.Block = Block;
-						ItemState.Title = [FSlateMacMenu::GetMenuItemTitle(Block) retain];
-						ItemState.KeyEquivalent = [MacMenuHelper::GetMenuItemKeyEquivalent(Block, &ItemState.KeyModifiers) retain];
-						if (!ItemState.Icon)
+						Widget = *Value;
+						if (Widget->GetType() == FName(TEXT("SMultiBoxWidget")))
 						{
-							SCOPED_AUTORELEASE_POOL;
-							ItemState.Icon = [FSlateMacMenu::GetMenuItemIcon(Block) retain];
+							Menu.MultiBox = TSharedPtr<const FMultiBox>(StaticCastSharedRef<SMultiBoxWidget>(Widget)->GetMultiBox());
 						}
-						ItemState.IsSubMenu = Block->bIsSubMenu;
-						ItemState.IsEnabled = FSlateMacMenu::IsMenuItemEnabled(Block);
-						ItemState.State = ItemState.IsSubMenu ? 0 : FSlateMacMenu::GetMenuItemState(Block);
+						else
+						{
+							const FName ActionName = MenuEntryBlock->GetAction().IsValid() ? MenuEntryBlock->GetAction()->GetCommandName() : NAME_None;
+							UE_LOG(LogMac, Warning, TEXT("Unsupported type of menu widget in FSlateMacMenu::UpdateCachedState(): %s, %s, %s"),
+								   *Widget->GetType().ToString(), *MenuEntryBlock->GetExtensionHook().ToString(), *ActionName.ToString());
+						}
+					}
+				}
+
+				if (Menu.MultiBox.IsValid())
+				{
+					TSharedPtr<TArray<FMacMenuItemState>> MenuState = It.Value();
+					const TArray<TSharedRef<const FMultiBlock>>& MenuBlocks = Menu.MultiBox.Pin()->GetBlocks();
+					MenuState->AddDefaulted(FMath::Max(0, MenuBlocks.Num() - MenuState->Num()));
+
+					for (int32 Index = 0; Index < MenuBlocks.Num(); Index++)
+					{
+						FMacMenuItemState& ItemState = (*MenuState)[Index];
+						ItemState.Type = MenuBlocks[Index]->GetType();
+
+						if (ItemState.Type == EMultiBlockType::MenuEntry)
+						{
+							TSharedRef<const FMenuEntryBlock> Block = StaticCastSharedRef<const FMenuEntryBlock>(MenuBlocks[Index]);
+							ItemState.Block = Block;
+							ItemState.Title = [FSlateMacMenu::GetMenuItemTitle(Block) retain];
+							ItemState.KeyEquivalent = [MacMenuHelper::GetMenuItemKeyEquivalent(Block, &ItemState.KeyModifiers) retain];
+							if (!ItemState.Icon)
+							{
+								SCOPED_AUTORELEASE_POOL;
+								ItemState.Icon = [FSlateMacMenu::GetMenuItemIcon(Block) retain];
+							}
+							ItemState.IsSubMenu = Block->bIsSubMenu;
+							ItemState.IsEnabled = FSlateMacMenu::IsMenuItemEnabled(Block);
+							ItemState.State = ItemState.IsSubMenu ? 0 : FSlateMacMenu::GetMenuItemState(Block);
+						}
 					}
 				}
 			}

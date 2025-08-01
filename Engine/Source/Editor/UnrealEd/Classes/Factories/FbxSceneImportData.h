@@ -23,8 +23,8 @@ enum class EFbxSceneReimportStatusFlags : uint8
 ENUM_CLASS_FLAGS(EFbxSceneReimportStatusFlags);
 
 
-UCLASS()
-class UNREALED_API UFbxSceneImportData : public UObject
+UCLASS(MinimalAPI)
+class UFbxSceneImportData : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
@@ -55,14 +55,18 @@ public:
 	ImportOptionsNameMap NameOptionsMap;
 
 	/** Convert this import information to JSON */
-	FString ToJson() const;
+	UNREALED_API FString ToJson() const;
 
 	/** Attempt to parse an asset import structure from the specified json string. */
-	void FromJson(FString InJsonString);
+	UNREALED_API void FromJson(FString InJsonString);
+
+	UNREALED_API virtual void GetAssetRegistryTags(FAssetRegistryTagsContext Context) const override;
+	UE_DEPRECATED(5.4, "Implement the version that takes FAssetRegistryTagsContext instead.")
+	UNREALED_API virtual void GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const override;
 
 protected:
 	/** Overridden serialize function to write out the underlying data as json */
-	virtual void Serialize(FArchive& Ar) override;
+	UNREALED_API virtual void Serialize(FArchive& Ar) override;
 #endif
 };
 

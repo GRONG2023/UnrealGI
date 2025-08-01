@@ -1,12 +1,21 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Misc/OutputDevice.h"
+
 #include "Containers/UnrealString.h"
-#include "Logging/LogMacros.h"
+#include "CoreGlobals.h"
+#include "HAL/PlatformTime.h"
 #include "Internationalization/Text.h"
+#include "Logging/LogMacros.h"
 #include "Logging/LogScopedCategoryAndVerbosityOverride.h"
-#include "Misc/OutputDeviceHelper.h"
+#include "Logging/StructuredLog.h"
+#include "Misc/StringBuilder.h"
 #include "Misc/VarargsHelper.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
+
+class FOutputDeviceError;
 
 DEFINE_LOG_CATEGORY(LogOutputDevice);
 
@@ -61,8 +70,12 @@ FORCENOINLINE void FOutputDevice::LogfImpl(const TCHAR* Fmt, ...)
 	GROWABLE_LOGF(Serialize(Buffer, TLS->Verbosity, TLS->Category))
 }
 
-
+void FOutputDevice::SerializeRecord(const UE::FLogRecord& Record)
+{
+	TStringBuilder<512> Text;
+	Record.FormatMessageTo(Text);
+	Serialize(*Text, Record.GetVerbosity(), Record.GetCategory());
+}
 
 /** Critical errors. */
 CORE_API FOutputDeviceError* GError = NULL;
-

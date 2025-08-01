@@ -4,8 +4,6 @@
     ModelCollision.cpp: Simple physics and occlusion testing for editor
 =============================================================================*/
 
-#include "CoreMinimal.h"
-#include "GameFramework/Actor.h"
 #include "Model.h"
 
 
@@ -26,11 +24,11 @@ void UModel::GetSurfacePlanes(
 			// BSP is in world space
 			FMatrix::Identity;
 		const FMatrix MatrixTA = Matrix.TransposeAdjoint();
-		const float DetM = Matrix.Determinant();
+		const FMatrix::FReal DetM = Matrix.Determinant();
 
 		for (int32 SurfaceIndex = 0; SurfaceIndex < Surfs.Num(); SurfaceIndex++)
 		{
-			OutPlanes.Add(Surfs[SurfaceIndex].Plane.TransformByUsingAdjointT(Matrix, DetM, MatrixTA));
+			OutPlanes.Add(FPlane(Surfs[SurfaceIndex].Plane).TransformByUsingAdjointT(Matrix, DetM, MatrixTA));
 		}
 	}
 }
@@ -47,8 +45,8 @@ void UModel::GetSurfacePlanes(
 static float FindNearestVertex
 (
 	const UModel	&Model, 
-	const FVector	&SourcePoint,
-	FVector			&DestPoint, 
+	const FVector3f	&SourcePoint,
+	FVector3f			&DestPoint, 
 	float			MinRadius, 
 	int32				iNode, 
 	int32				&pVertex
@@ -74,8 +72,8 @@ static float FindNearestVertex
 				// Loop through all coplanars.
 				Node                    = &Model.Nodes	[iNode];
 				const FBspSurf* Surf    = &Model.Surfs	[Node->iSurf];
-				const FVector *Base	    = &Model.Points	[Surf->pBase];
-				const float TempRadiusSquared	= FVector::DistSquared( SourcePoint, *Base );
+				const FVector3f *Base	    = &Model.Points	[Surf->pBase];
+				const float TempRadiusSquared	= FVector3f::DistSquared( SourcePoint, *Base );
 
 				if( TempRadiusSquared < FMath::Square(MinRadius) )
 				{
@@ -87,8 +85,8 @@ static float FindNearestVertex
 				const FVert* VertPool = &Model.Verts[Node->iVertPool];
 				for (uint8 B=0; B<Node->NumVertices; B++)
 				{
-					const FVector *Vertex   = &Model.Points[VertPool->pVertex];
-					const float TempRadiusSquared2 = FVector::DistSquared( SourcePoint, *Vertex );
+					const FVector3f *Vertex   = &Model.Points[VertPool->pVertex];
+					const float TempRadiusSquared2 = FVector3f::DistSquared( SourcePoint, *Vertex );
 					if( TempRadiusSquared2 < FMath::Square(MinRadius) )
 					{
 						pVertex      = VertPool->pVertex;
@@ -113,8 +111,8 @@ static float FindNearestVertex
 //
 float UModel::FindNearestVertex
 (
-	const FVector	&SourcePoint,
-	FVector			&DestPoint,
+	const FVector3f	&SourcePoint,
+	FVector3f			&DestPoint,
 	float			MinRadius, 
 	int32				&pVertex
 ) const
@@ -128,7 +126,7 @@ float UModel::FindNearestVertex
 //
 // ClipNode - return the node containing a specified location from a number of coplanar nodes.
 //
-int32 ClipNode(const UModel& Model, int32 iNode, const FVector& HitLocation)
+int32 ClipNode(const UModel& Model, int32 iNode, const FVector3f& HitLocation)
 {
 	while (iNode != INDEX_NONE)
 	{
@@ -140,14 +138,14 @@ int32 ClipNode(const UModel& Model, int32 iNode, const FVector& HitLocation)
 		{
 			int32 iVertPool = Node.iVertPool;
 
-			FVector PrevPt = Model.Points[Model.Verts[iVertPool + NumVertices - 1].pVertex];
-			FVector Normal = Model.Surfs[Node.iSurf].Plane;
+			FVector PrevPt(Model.Points[Model.Verts[iVertPool + NumVertices - 1].pVertex]);
+			FVector Normal(Model.Surfs[Node.iSurf].Plane);
 			float PrevDot = 0.f;
 
 			for (int32 i = 0; i<NumVertices; i++)
 			{
-				FVector Pt = Model.Points[Model.Verts[iVertPool + i].pVertex];
-				float Dot = FPlane(Pt, Normal ^ (Pt - PrevPt)).PlaneDot(HitLocation);
+				FVector Pt(Model.Points[Model.Verts[iVertPool + i].pVertex]);
+				float Dot = FPlane(Pt, Normal ^ (Pt - PrevPt)).PlaneDot((FVector)HitLocation);
 				// Check for sign change
 				if ((Dot < 0.f && PrevDot > 0.f) || (Dot > 0.f && PrevDot < 0.f))
 				{
@@ -169,7 +167,7 @@ int32 ClipNode(const UModel& Model, int32 iNode, const FVector& HitLocation)
 //
 // Find the iSurf for node the point lies upon. Returns INDEX_NONE if the point does not lie on a surface.
 //
-static int32 FindSurf(const UModel &Model, const FVector &SourcePoint, int32 iNode, float Tolerance)
+static int32 FindSurf(const UModel &Model, const FVector3f &SourcePoint, int32 iNode, float Tolerance)
 {
 	while (iNode != INDEX_NONE)
 	{
@@ -197,7 +195,7 @@ static int32 FindSurf(const UModel &Model, const FVector &SourcePoint, int32 iNo
 				return Tolerance;
 			}
 		}
-		if (PlaneDist > KINDA_SMALL_NUMBER)
+		if (PlaneDist > UE_KINDA_SMALL_NUMBER)
 		{
 			break;
 		}
@@ -209,7 +207,7 @@ static int32 FindSurf(const UModel &Model, const FVector &SourcePoint, int32 iNo
 //
 // Find the brush actor associated with this point, or NULL if the point does not lie on a BSP surface.
 //
-ABrush* UModel::FindBrush(const FVector	&SourcePoint) const
+ABrush* UModel::FindBrush(const FVector3f	&SourcePoint) const
 {
 	if (Nodes.Num())
 	{
@@ -235,7 +233,7 @@ static void PrecomputeSphereFilter( UModel& Model, int32 iNode, const FPlane& Sp
 	{
 		FBspNode* Node   = &Model.Nodes[ iNode ];
 		Node->NodeFlags &= ~(NF_IsFront | NF_IsBack);
-		float Dist       = Node->Plane.PlaneDot( Sphere );
+		float Dist       = Node->Plane.PlaneDot( (FVector3f)Sphere );
 		if( Dist < -Sphere.W )
 		{
 			Node->NodeFlags |= NF_IsBack;
@@ -282,8 +280,8 @@ void UModel::GetNodeBoundingBox( const FBspNode& Node, FBox& OutBox ) const
 	for( int32 VertexIndex=0; VertexIndex<Node.NumVertices; VertexIndex++ )
 	{
 		const FVert&	ModelVert	= Verts[ FirstVertexIndex + VertexIndex ];
-		const FVector	Vertex		= Points[ ModelVert.pVertex ];
-		OutBox += Vertex;
+		const FVector3f	Vertex		= Points[ ModelVert.pVertex ];
+		OutBox += (FVector)Vertex;
 	}
 }
 

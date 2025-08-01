@@ -2,12 +2,24 @@
 
 #pragma once
 
-#include "EntitySystem/MovieSceneEntitySystem.h"
-#include "Evaluation/IMovieSceneEvaluationHook.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
 #include "EntitySystem/BuiltInComponentTypes.h"
+#include "EntitySystem/MovieSceneEntitySystem.h"
+#include "EntitySystem/MovieSceneSequenceInstanceHandle.h"
+#include "Evaluation/IMovieSceneEvaluationHook.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Misc/FrameTime.h"
+#include "MovieSceneSequenceID.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "MovieSceneEvaluationHookSystem.generated.h"
 
 class IMovieScenePlayer;
+class UMovieSceneEntitySystemLinker;
+class UObject;
 
 
 USTRUCT()
@@ -17,6 +29,8 @@ struct FMovieSceneEvaluationHookEvent
 
 	UPROPERTY()
 	FMovieSceneEvaluationHookComponent Hook;
+
+	UE::MovieScene::FRootInstanceHandle RootInstanceHandle;
 
 	FMovieSceneSequenceID SequenceID;
 
@@ -63,27 +77,28 @@ struct FMovieSceneEvaluationInstanceKey
 };
 
 
-UCLASS()
-class MOVIESCENE_API UMovieSceneEvaluationHookSystem : public UMovieSceneEntitySystem
+UCLASS(MinimalAPI)
+class UMovieSceneEvaluationHookSystem : public UMovieSceneEntitySystem
 {
 public:
 	GENERATED_BODY()
 
-	UMovieSceneEvaluationHookSystem(const FObjectInitializer& ObjInit);
+	MOVIESCENE_API UMovieSceneEvaluationHookSystem(const FObjectInitializer& ObjInit);
 
-	void AddEvent(UE::MovieScene::FInstanceHandle RootInstance, const FMovieSceneEvaluationHookEvent& InEvent);
+	MOVIESCENE_API void AddEvent(UE::MovieScene::FInstanceHandle RootInstance, const FMovieSceneEvaluationHookEvent& InEvent);
 
-	void SortEvents();
+	MOVIESCENE_API void SortEvents();
 
 protected:
 
-	bool HasEvents() const;
-	void TriggerAllEvents();
+	MOVIESCENE_API bool HasEvents() const;
+	MOVIESCENE_API void TriggerAllEvents();
 
 private:
 
-	virtual void OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents) override;
-	virtual bool IsRelevantImpl(UMovieSceneEntitySystemLinker* InLinker) const override;
+	MOVIESCENE_API virtual void OnSchedulePersistentTasks(UE::MovieScene::IEntitySystemScheduler* TaskScheduler) override;
+	MOVIESCENE_API virtual void OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents) override;
+	MOVIESCENE_API virtual bool IsRelevantImpl(UMovieSceneEntitySystemLinker* InLinker) const override;
 
 	void UpdateHooks();
 

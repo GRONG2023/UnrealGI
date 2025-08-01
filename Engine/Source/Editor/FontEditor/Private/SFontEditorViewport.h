@@ -2,16 +2,19 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "HAL/Platform.h"
 #include "Layout/Visibility.h"
+#include "Templates/SharedPointer.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
 
 class FFontEditorViewportClient;
 class FSceneViewport;
+class FText;
 class IFontEditor;
 class SScrollBar;
 class SViewport;
+struct FColor;
 
 /*-----------------------------------------------------------------------------
    SFontEditorViewport
@@ -44,6 +47,8 @@ public:
 	const FColor& GetPreviewBackgroundColor() const;
 	void SetPreviewForegroundColor(const FColor& ForgroundColor);
 	const FColor& GetPreviewForegroundColor() const;
+	void SetPreviewFontScale(float InScale);
+	float GetPreviewFontScale() const;
 	void SetPreviewFontMetrics(const bool InDrawFontMetrics);
 	bool GetPreviewFontMetrics() const;
 	TWeakPtr<IFontEditor> GetFontEditor() const;

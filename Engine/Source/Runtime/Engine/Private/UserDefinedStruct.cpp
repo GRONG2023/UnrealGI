@@ -1,19 +1,20 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/UserDefinedStruct.h"
-#include "UObject/UObjectHash.h"
-#include "UObject/StructOnScope.h"
+#include "Templates/SubclassOf.h"
+#include "UObject/AssetRegistryTagsContext.h"
+#include "UObject/Package.h"
+#include "UObject/Package.h"
 #include "UObject/UnrealType.h"
 #include "UObject/LinkerLoad.h"
+#include "UObject/ObjectSaveContext.h"
 #include "UObject/FrameworkObjectVersion.h"
-#include "Misc/SecureHash.h"
-#include "UObject/PropertyPortFlags.h"
 #include "Misc/PackageName.h"
 #include "Blueprint/BlueprintSupport.h"
 
 #if WITH_EDITOR
+#include "UObject/CookedMetaData.h"
 #include "UserDefinedStructure/UserDefinedStructEditorData.h"
-#include "Kismet2/StructureEditorUtils.h"
 #endif //WITH_EDITOR
 
 FUserStructOnScopeIgnoreDefaults::FUserStructOnScopeIgnoreDefaults(const UUserDefinedStruct* InUserStruct)
@@ -84,7 +85,7 @@ void UUserDefinedStruct::Serialize(FStructuredArchive::FRecord Record)
 			uint8* StructData = DefaultStructInstance.GetStructMemory();
 
 			FScopedPlaceholderRawContainerTracker TrackStruct(StructData);
-			SerializeItem(Record.EnterField(SA_FIELD_NAME(TEXT("Data"))), StructData, nullptr);
+			SerializeItem(Record.EnterField(TEXT("Data")), StructData, nullptr);
 
 			// Now that defaults have been loaded we can inspect our properties
 			// and default values and set the StructFlags accordingly:
@@ -116,9 +117,9 @@ void UUserDefinedStruct::Serialize(FStructuredArchive::FRecord Record)
 				if (!(UnderlyingArchive.GetPortFlags() & PPF_Duplicate))
 				{
 					if(!DefaultStructInstance.IsValid())
-				{
-					FStructureEditorUtils::RecreateDefaultInstanceInEditorData(this);
-				}
+					{
+						FStructureEditorUtils::RecreateDefaultInstanceInEditorData(this);
+					}
 					else
 					{
 						UUserDefinedStructEditorData* UDSEditorData = Cast<UUserDefinedStructEditorData>(EditorData);
@@ -164,11 +165,45 @@ void UUserDefinedStruct::PostLoad()
 	ValidateGuid();
 }
 
+void UUserDefinedStruct::PreSaveRoot(FObjectPreSaveRootContext ObjectSaveContext)
+{
+	Super::PreSaveRoot(ObjectSaveContext);
+
+	if (ObjectSaveContext.IsCooking() && (ObjectSaveContext.GetSaveFlags() & SAVE_Optional))
+	{
+		UStructCookedMetaData* CookedMetaData = NewCookedMetaData();
+		CookedMetaData->CacheMetaData(this);
+
+		if (!CookedMetaData->HasMetaData())
+		{
+			PurgeCookedMetaData();
+		}
+	}
+	else
+	{
+		PurgeCookedMetaData();
+	}
+}
+
+void UUserDefinedStruct::PostSaveRoot(FObjectPostSaveRootContext ObjectSaveContext)
+{
+	Super::PostSaveRoot(ObjectSaveContext);
+
+	PurgeCookedMetaData();
+}
+
 void UUserDefinedStruct::GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
 	Super::GetAssetRegistryTags(OutTags);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
 
-	OutTags.Add(FAssetRegistryTag(TEXT("Tooltip"), FStructureEditorUtils::GetTooltip(this), FAssetRegistryTag::TT_Hidden));
+void UUserDefinedStruct::GetAssetRegistryTags(FAssetRegistryTagsContext Context) const
+{
+	Super::GetAssetRegistryTags(Context);
+
+	Context.AddTag(FAssetRegistryTag(TEXT("Tooltip"), FStructureEditorUtils::GetTooltip(this), FAssetRegistryTag::TT_Hidden));
 }
 
 void UUserDefinedStruct::ValidateGuid()
@@ -187,18 +222,26 @@ void UUserDefinedStruct::ValidateGuid()
 	}
 }
 
+void UUserDefinedStruct::OnChanged()
+{
+	ChangedEvent.Broadcast(this);
+}
+
 #endif	// WITH_EDITOR
 
 FProperty* UUserDefinedStruct::CustomFindProperty(const FName Name) const
 {
 #if WITH_EDITOR
-	// If we have the editor data, check that first as it's more up to date
-	const FGuid PropertyGuid = FStructureEditorUtils::GetGuidFromPropertyName(Name);
-	FProperty* EditorProperty = PropertyGuid.IsValid() ? FStructureEditorUtils::GetPropertyByGuid(this, PropertyGuid) : FStructureEditorUtils::GetPropertyByFriendlyName(this, Name.ToString());
-	ensure(!EditorProperty || !PropertyGuid.IsValid() || PropertyGuid == FStructureEditorUtils::GetGuidForProperty(EditorProperty));
-	if (EditorProperty)
+	if (EditorData != nullptr)
 	{
-		return EditorProperty;
+		// If we have the editor data, check that first as it's more up to date
+		const FGuid PropertyGuid = FStructureEditorUtils::GetGuidFromPropertyName(Name);
+		FProperty* EditorProperty = PropertyGuid.IsValid() ? FStructureEditorUtils::GetPropertyByGuid(this, PropertyGuid) : FStructureEditorUtils::GetPropertyByFriendlyName(this, Name.ToString());
+		ensure(!EditorProperty || !PropertyGuid.IsValid() || PropertyGuid == FStructureEditorUtils::GetGuidForProperty(EditorProperty));
+		if (EditorProperty)
+		{
+			return EditorProperty;
+		}
 	}
 #endif // WITH_EDITOR
 
@@ -253,25 +296,27 @@ void UUserDefinedStruct::InitializeStructIgnoreDefaults(void* Dest, int32 ArrayD
 
 void UUserDefinedStruct::InitializeStruct(void* Dest, int32 ArrayDim) const
 {
-	InitializeStructIgnoreDefaults(Dest, ArrayDim);
+	check(Dest);
 
-	if (Dest)
+	const uint8* DefaultInstance = GetDefaultInstance();
+	if ((StructFlags & STRUCT_IsPlainOldData) == 0 || !DefaultInstance)
 	{
-		const uint8* DefaultInstance = GetDefaultInstance();
-		if (DefaultInstance)
+		InitializeStructIgnoreDefaults(Dest, ArrayDim);
+	}
+
+	if (DefaultInstance)
+	{
+		int32 Stride = GetStructureSize();
+
+		for (int32 ArrayIndex = 0; ArrayIndex < ArrayDim; ArrayIndex++)
 		{
-			int32 Stride = GetStructureSize();
+			void* DestStruct = (uint8*)Dest + (Stride * ArrayIndex);
+			CopyScriptStruct(DestStruct, DefaultInstance);
 
-			for (int32 ArrayIndex = 0; ArrayIndex < ArrayDim; ArrayIndex++)
-			{
-				void* DestStruct = (uint8*)Dest + (Stride * ArrayIndex);
-				CopyScriptStruct(DestStruct, DefaultInstance);
-
-				// When copying into another struct we need to register this raw struct pointer so any deferred dependencies will get fixed later
-				FScopedPlaceholderRawContainerTracker TrackStruct(DestStruct);
-				FBlueprintSupport::RegisterDeferredDependenciesInStruct(this, DestStruct);
-			}	
-		}
+			// When copying into another struct we need to register this raw struct pointer so any deferred dependencies will get fixed later
+			FScopedPlaceholderRawContainerTracker TrackStruct(DestStruct);
+			FBlueprintSupport::RegisterDeferredDependenciesInStruct(this, DestStruct);
+		}	
 	}
 }
 
@@ -350,19 +395,22 @@ FGuid UUserDefinedStruct::GetCustomGuid() const
 ENGINE_API FString GetPathPostfix(const UObject* ForObject)
 {
 	FString FullAssetName = ForObject->GetOutermost()->GetPathName();
-	if (FullAssetName.StartsWith(UDynamicClass::GetTempPackagePrefix(), ESearchCase::CaseSensitive))
-	{
-		FullAssetName.RemoveFromStart(UDynamicClass::GetTempPackagePrefix(), ESearchCase::CaseSensitive);
-	}
 	FString AssetName = FPackageName::GetLongPackageAssetName(FullAssetName);
 	// append a hash of the path, this uniquely identifies assets with the same name, but different folders:
 	FullAssetName.RemoveFromEnd(AssetName);
 	return FString::Printf(TEXT("%u"), GetTypeHash(FullAssetName));
 }
 
-FString UUserDefinedStruct::GetStructCPPName() const
+FString UUserDefinedStruct::GetStructCPPName(uint32 CPPExportFlags) const
 {
-	return ::UnicodeToCPPIdentifier(*GetName(), false, GetPrefixCPP()) + GetPathPostfix(this);
+	if (CPPExportFlags & CPPF_BlueprintCppBackend)
+	{
+		return ::UnicodeToCPPIdentifier(*GetName(), false, GetPrefixCPP()) + GetPathPostfix(this);
+	}
+	else
+	{
+		return Super::GetStructCPPName(CPPExportFlags);
+	}
 }
 
 uint32 UUserDefinedStruct::GetUserDefinedStructTypeHash(const void* Src, const UScriptStruct* Type)
@@ -428,13 +476,11 @@ const uint8* UUserDefinedStruct::GetDefaultInstance() const
 void UUserDefinedStruct::AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector)
 {
 	UUserDefinedStruct* This = CastChecked<UUserDefinedStruct>(InThis);
-
 	ensure(!This->DefaultStructInstance.IsValid() || This->DefaultStructInstance.GetStruct() == This);
-	uint8* StructData = This->DefaultStructInstance.GetStructMemory();
-	if (StructData)
+
+	if (uint8* StructData = This->DefaultStructInstance.GetStructMemory())
 	{
-		FVerySlowReferenceCollectorArchiveScope CollectorScope(Collector.GetVerySlowReferenceCollectorArchive(), This);
-		This->SerializeBin(FStructuredArchiveFromArchive(CollectorScope.GetArchive()).GetSlot(), StructData);
+		Collector.AddPropertyReferences(This, StructData, This);
 	}
 
 	Super::AddReferencedObjects(This, Collector);
@@ -521,3 +567,36 @@ void UUserDefinedStruct::UpdateStructFlags()
 	}
 
 }
+
+#if WITH_EDITORONLY_DATA
+TSubclassOf<UStructCookedMetaData> UUserDefinedStruct::GetCookedMetaDataClass() const
+{
+	return UStructCookedMetaData::StaticClass();
+}
+
+UStructCookedMetaData* UUserDefinedStruct::NewCookedMetaData()
+{
+	if (!CachedCookedMetaDataPtr)
+	{
+		CachedCookedMetaDataPtr = CookedMetaDataUtil::NewCookedMetaData<UStructCookedMetaData>(this, "CookedStructMetaData", GetCookedMetaDataClass());
+	}
+	return CachedCookedMetaDataPtr;
+}
+
+const UStructCookedMetaData* UUserDefinedStruct::FindCookedMetaData()
+{
+	if (!CachedCookedMetaDataPtr)
+	{
+		CachedCookedMetaDataPtr = CookedMetaDataUtil::FindCookedMetaData<UStructCookedMetaData>(this, TEXT("CookedStructMetaData"));
+	}
+	return CachedCookedMetaDataPtr;
+}
+
+void UUserDefinedStruct::PurgeCookedMetaData()
+{
+	if (CachedCookedMetaDataPtr)
+	{
+		CookedMetaDataUtil::PurgeCookedMetaData<UStructCookedMetaData>(CachedCookedMetaDataPtr);
+	}
+}
+#endif // WITH_EDITORONLY_DATA

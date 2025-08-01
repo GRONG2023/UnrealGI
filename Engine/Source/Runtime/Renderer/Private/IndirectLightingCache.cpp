@@ -17,12 +17,14 @@
 #include "DynamicPrimitiveDrawing.h"
 #include "ScenePrivate.h"
 #include "PrecomputedLightVolume.h"
+#include "RenderCore.h"
+#include "UnrealEngine.h"
 
 /** 
  * Primitive bounds size will be rounded up to the next value of Pow(BoundSizeRoundUpBase, N) and N is an integer. 
  * This provides some stability as bounds get larger and smaller, although by adding some waste.
  */
-const float BoundSizeRoundUpBase = FMath::Sqrt(2);
+const float BoundSizeRoundUpBase = FMath::Sqrt(2.f);
 const float LogEBoundSizeRoundUpBase = FMath::Loge(BoundSizeRoundUpBase);
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -134,10 +136,7 @@ static FAutoConsoleVariableRef CVarLightingCacheDimension(
 
 bool IsIndirectLightingCacheAllowed(ERHIFeatureLevel::Type InFeatureLevel) 
 {
-	static const auto* AllowStaticLightingVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.AllowStaticLighting"));
-	const bool bAllowStaticLighting = (!AllowStaticLightingVar || AllowStaticLightingVar->GetValueOnAnyThread() != 0);
-
-	return GIndirectLightingCache != 0 && bAllowStaticLighting;
+	return GIndirectLightingCache != 0 && IsStaticLightingAllowed();
 }
 
 bool CanIndirectLightingCacheUseVolumeTexture(ERHIFeatureLevel::Type InFeatureLevel)
@@ -155,7 +154,7 @@ FIndirectLightingCache::FIndirectLightingCache(ERHIFeatureLevel::Type InFeatureL
 	CacheSize = GLightingCacheDimension;
 }
 
-void FIndirectLightingCache::InitDynamicRHI()
+void FIndirectLightingCache::InitRHI(FRHICommandListBase&)
 {
 	if (CanIndirectLightingCacheUseVolumeTexture(GetFeatureLevel()))
 	{
@@ -179,7 +178,7 @@ void FIndirectLightingCache::InitDynamicRHI()
 	}
 }
 
-void FIndirectLightingCache::ReleaseDynamicRHI()
+void FIndirectLightingCache::ReleaseRHI()
 {
 	GRenderTargetPool.FreeUnusedResource(Texture0);
 	GRenderTargetPool.FreeUnusedResource(Texture1);
@@ -492,8 +491,6 @@ void FIndirectLightingCache::ProcessPrimitiveUpdate(FScene* Scene, FViewInfo& Vi
 	// This also ensures that a primitive does not get added twice to the list, which could create an array reallocation.
 	if (!bIndirectLightingCacheBufferWasDirty && PrimitiveSceneInfo->NeedsIndirectLightingCacheBufferUpdate())
 	{
-		// Since the update can be executed on a threaded job (see GILCUpdatePrimTaskEnabled), no reallocation must happen here.
-		check(View.DirtyIndirectLightingCacheBufferPrimitives.Num() < View.DirtyIndirectLightingCacheBufferPrimitives.Max());
 		View.DirtyIndirectLightingCacheBufferPrimitives.Push(PrimitiveSceneInfo);
 	}
 }
@@ -505,7 +502,12 @@ void FIndirectLightingCache::UpdateCachePrimitivesInternal(FScene* Scene, FScene
 	const TMap<FPrimitiveComponentId, FAttachmentGroupSceneInfo>& AttachmentGroups = Scene->AttachmentGroups;
 
 	if (IndirectLightingAllowed(Scene, Renderer))
-	{		
+	{
+		for (FViewInfo& View : Renderer.Views)
+		{
+			View.DirtyIndirectLightingCacheBufferPrimitivesMutex.Lock();
+		}
+
 		if (bUpdateAllCacheEntries)
 		{
 			const uint32 PrimitiveCount = Scene->Primitives.Num();
@@ -518,7 +520,6 @@ void FIndirectLightingCache::UpdateCachePrimitivesInternal(FScene* Scene, FScene
 				UpdateCachePrimitive(AttachmentGroups, PrimitiveSceneInfo, false, true, OutBlocksToUpdate, OutTransitionsOverTimeToUpdate, OutPrimitivesToUpdateStaticMeshes);
 
 				// If it was already dirty, then the primitive is already in one of the view dirty primitive list at this point.
-				// This also ensures that a primitive does not get added twice to the list, which could create an array reallocation.
 				if (!bIndirectLightingCacheBufferWasDirty)
 				{
 					PrimitiveSceneInfo->MarkIndirectLightingCacheBufferDirty();
@@ -530,8 +531,6 @@ void FIndirectLightingCache::UpdateCachePrimitivesInternal(FScene* Scene, FScene
 
 						if (View.PrimitiveVisibilityMap[PrimitiveIndex])
 						{
-							// Since the update can be executed on a threaded job (see GILCUpdatePrimTaskEnabled), no reallocation must happen here.
-							checkSlow(View.DirtyIndirectLightingCacheBufferPrimitives.Num() < View.DirtyIndirectLightingCacheBufferPrimitives.Max());
 							View.DirtyIndirectLightingCacheBufferPrimitives.Push(PrimitiveSceneInfo);
 							break; // We only need to add it in one of the view list.
 						}
@@ -563,7 +562,12 @@ void FIndirectLightingCache::UpdateCachePrimitivesInternal(FScene* Scene, FScene
 						ProcessPrimitiveUpdate(Scene, View, PrimitiveIndex, bAllowUnbuiltPreview, true, OutBlocksToUpdate, OutTransitionsOverTimeToUpdate, OutPrimitivesToUpdateStaticMeshes);
 					}
 				}
-			}			
+			}
+		}
+
+		for (FViewInfo& View : Renderer.Views)
+		{
+			View.DirtyIndirectLightingCacheBufferPrimitivesMutex.Unlock();
 		}
 
 		bUpdateAllCacheEntries = false;
@@ -583,18 +587,18 @@ void FIndirectLightingCache::FinalizeUpdateInternal_RenderThread(FScene* Scene, 
 
 		{
 			SCOPE_CYCLE_COUNTER(STAT_UpdateIndirectLightingCacheTransitions);
-			UpdateTransitionsOverTime(TransitionsOverTimeToUpdate, Renderer.ViewFamily.DeltaWorldTime);
+			UpdateTransitionsOverTime(TransitionsOverTimeToUpdate, Renderer.ViewFamily.Time.GetDeltaWorldTimeSeconds());
 		}
 
 		for (int32 PrimitiveIndex = 0; PrimitiveIndex < PrimitivesToUpdateStaticMeshes.Num(); ++PrimitiveIndex)
 		{
-			PrimitivesToUpdateStaticMeshes[PrimitiveIndex]->BeginDeferredUpdateStaticMeshes();
+			PrimitivesToUpdateStaticMeshes[PrimitiveIndex]->RequestStaticMeshUpdate();
 		}
 	}	
 
 	if (GCacheDrawLightingSamples || Renderer.ViewFamily.EngineShowFlags.VolumeLightingSamples || GCacheDrawDirectionalShadowing)
 	{
-		FViewElementPDI DebugPDI(&Renderer.Views[0], nullptr, &Renderer.Views[0].DynamicPrimitiveShaderData);
+		FViewElementPDI DebugPDI(&Renderer.Views[0], nullptr, &Renderer.Views[0].DynamicPrimitiveCollector);
 
 		for (int32 VolumeIndex = 0; VolumeIndex < Scene->PrecomputedLightVolumes.Num(); VolumeIndex++)
 		{
@@ -757,7 +761,7 @@ void FIndirectLightingCache::UpdateBlocks(FScene* Scene, FViewInfo* DebugDrawing
 {
 	if (BlocksToUpdate.Num() > 0 && !IsInitialized())
 	{
-		InitResource();
+		InitResource(FRHICommandListImmediate::Get());
 	}
 
 	INC_DWORD_STAT_BY(STAT_IndirectLightingCacheUpdates, BlocksToUpdate.Num());
@@ -790,14 +794,14 @@ void FIndirectLightingCache::UpdateTransitionsOverTime(const TArray<FIndirectLig
 			Allocation->SingleSamplePacked2 = FMath::Lerp(Allocation->SingleSamplePacked2, Allocation->TargetSamplePacked2, LerpFactor);
 			Allocation->CurrentDirectionalShadowing = FMath::Lerp(Allocation->CurrentDirectionalShadowing, Allocation->TargetDirectionalShadowing, LerpFactor);
 
-			const FVector CurrentSkyBentNormal = FMath::Lerp(
-				FVector(Allocation->CurrentSkyBentNormal) * Allocation->CurrentSkyBentNormal.W, 
-				FVector(Allocation->TargetSkyBentNormal) * Allocation->TargetSkyBentNormal.W, 
+			const FVector3f CurrentSkyBentNormal = FMath::Lerp(
+				FVector3f(Allocation->CurrentSkyBentNormal) * Allocation->CurrentSkyBentNormal.W, 
+				FVector3f(Allocation->TargetSkyBentNormal) * Allocation->TargetSkyBentNormal.W, 
 				LerpFactor);
 
 			const float BentNormalLength = CurrentSkyBentNormal.Size();
 
-			Allocation->CurrentSkyBentNormal = FVector4(CurrentSkyBentNormal / FMath::Max(BentNormalLength, .0001f), BentNormalLength);
+			Allocation->CurrentSkyBentNormal = FVector4f(CurrentSkyBentNormal / FMath::Max(BentNormalLength, .0001f), BentNormalLength);
 		}
 	}
 }
@@ -891,9 +895,9 @@ void FIndirectLightingCache::UpdateBlock(FScene* Scene, FViewInfo* DebugDrawingV
 			BlockInfo.Block.TexelSize);
 
 		// Update the volume texture atlas
-		RHIUpdateTexture3D((const FTexture3DRHIRef&)GetTexture0().ShaderResourceTexture, 0, UpdateRegion, BlockInfo.Block.TexelSize * FormatSize, BlockInfo.Block.TexelSize * BlockInfo.Block.TexelSize * FormatSize, (const uint8*)Texture0Data.GetData());
-		RHIUpdateTexture3D((const FTexture3DRHIRef&)GetTexture1().ShaderResourceTexture, 0, UpdateRegion, BlockInfo.Block.TexelSize * FormatSize, BlockInfo.Block.TexelSize * BlockInfo.Block.TexelSize * FormatSize, (const uint8*)Texture1Data.GetData());
-		RHIUpdateTexture3D((const FTexture3DRHIRef&)GetTexture2().ShaderResourceTexture, 0, UpdateRegion, BlockInfo.Block.TexelSize * FormatSize, BlockInfo.Block.TexelSize * BlockInfo.Block.TexelSize * FormatSize, (const uint8*)Texture2Data.GetData());
+		RHIUpdateTexture3D(GetTexture0(), 0, UpdateRegion, BlockInfo.Block.TexelSize * FormatSize, BlockInfo.Block.TexelSize * BlockInfo.Block.TexelSize * FormatSize, (const uint8*)Texture0Data.GetData());
+		RHIUpdateTexture3D(GetTexture1(), 0, UpdateRegion, BlockInfo.Block.TexelSize * FormatSize, BlockInfo.Block.TexelSize * BlockInfo.Block.TexelSize * FormatSize, (const uint8*)Texture1Data.GetData());
+		RHIUpdateTexture3D(GetTexture2(), 0, UpdateRegion, BlockInfo.Block.TexelSize * FormatSize, BlockInfo.Block.TexelSize * BlockInfo.Block.TexelSize * FormatSize, (const uint8*)Texture2Data.GetData());
 	}
 	else
 	{
@@ -908,18 +912,18 @@ void FIndirectLightingCache::UpdateBlock(FScene* Scene, FViewInfo* DebugDrawingV
 	// Record the position that the sample was taken at
 	BlockInfo.Allocation->TargetPosition = BlockInfo.Block.Min + BlockInfo.Block.Size / 2;
 
-	BlockInfo.Allocation->TargetSamplePacked0[0] = FVector4(SingleSample.R.V[0], SingleSample.R.V[1], SingleSample.R.V[2], SingleSample.R.V[3]) / PI;
-	BlockInfo.Allocation->TargetSamplePacked0[1] = FVector4(SingleSample.G.V[0], SingleSample.G.V[1], SingleSample.G.V[2], SingleSample.G.V[3]) / PI;
-	BlockInfo.Allocation->TargetSamplePacked0[2] = FVector4(SingleSample.B.V[0], SingleSample.B.V[1], SingleSample.B.V[2], SingleSample.B.V[3]) / PI;
-	BlockInfo.Allocation->TargetSamplePacked1[0] = FVector4(SingleSample.R.V[4], SingleSample.R.V[5], SingleSample.R.V[6], SingleSample.R.V[7]) / PI;
-	BlockInfo.Allocation->TargetSamplePacked1[1] = FVector4(SingleSample.G.V[4], SingleSample.G.V[5], SingleSample.G.V[6], SingleSample.G.V[7]) / PI;
-	BlockInfo.Allocation->TargetSamplePacked1[2] = FVector4(SingleSample.B.V[4], SingleSample.B.V[5], SingleSample.B.V[6], SingleSample.B.V[7]) / PI;
-	BlockInfo.Allocation->TargetSamplePacked2 = FVector4(SingleSample.R.V[8], SingleSample.G.V[8], SingleSample.B.V[8], 0) / PI;
+	BlockInfo.Allocation->TargetSamplePacked0[0] = FVector4f(SingleSample.R.V[0], SingleSample.R.V[1], SingleSample.R.V[2], SingleSample.R.V[3]) / PI;
+	BlockInfo.Allocation->TargetSamplePacked0[1] = FVector4f(SingleSample.G.V[0], SingleSample.G.V[1], SingleSample.G.V[2], SingleSample.G.V[3]) / PI;
+	BlockInfo.Allocation->TargetSamplePacked0[2] = FVector4f(SingleSample.B.V[0], SingleSample.B.V[1], SingleSample.B.V[2], SingleSample.B.V[3]) / PI;
+	BlockInfo.Allocation->TargetSamplePacked1[0] = FVector4f(SingleSample.R.V[4], SingleSample.R.V[5], SingleSample.R.V[6], SingleSample.R.V[7]) / PI;
+	BlockInfo.Allocation->TargetSamplePacked1[1] = FVector4f(SingleSample.G.V[4], SingleSample.G.V[5], SingleSample.G.V[6], SingleSample.G.V[7]) / PI;
+	BlockInfo.Allocation->TargetSamplePacked1[2] = FVector4f(SingleSample.B.V[4], SingleSample.B.V[5], SingleSample.B.V[6], SingleSample.B.V[7]) / PI;
+	BlockInfo.Allocation->TargetSamplePacked2 = FVector4f(SingleSample.R.V[8], SingleSample.G.V[8], SingleSample.B.V[8], 0) / PI;
 
 	BlockInfo.Allocation->TargetDirectionalShadowing = DirectionalShadowing;
 
 	const float BentNormalLength = SkyBentNormal.Size();
-	BlockInfo.Allocation->TargetSkyBentNormal = FVector4(SkyBentNormal / FMath::Max(BentNormalLength, .0001f), BentNormalLength);
+	BlockInfo.Allocation->TargetSkyBentNormal = FVector4f(FVector3f(SkyBentNormal / FMath::Max(BentNormalLength, .0001f)), BentNormalLength);
 
 	if (!BlockInfo.Allocation->bHasEverUpdatedSingleSample)
 	{

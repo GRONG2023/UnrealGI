@@ -8,10 +8,8 @@
 #include "Lock.hpp"
 #include "ModelElement.hpp"
 
-DISABLE_SDK_WARNINGS_START
 #include "Map.h"
 #include "List.h"
-DISABLE_SDK_WARNINGS_END
 
 BEGIN_NAMESPACE_UE_AC
 
@@ -93,6 +91,9 @@ class FMeshClass
 
 	// Set Mesh Element to the sync data
 	void SetWaitingInstanceMesh(FSyncDatabase* IOSyncDatabase);
+
+	FVector Translation;
+	FQuat Rotation;
 
   private:
 	typedef TList< FSyncData* > FSyncDataList;
@@ -189,6 +190,12 @@ class FSyncDatabase
 
 	// Return layer sync data (Create it if not present)
 	FSyncData& GetLayerSyncData(short InLayer);
+#if AC_VERSION > 26
+	FSyncData& GetLayerSyncData(const API_AttributeIndex& InLayer)
+	{
+		return GetLayerSyncData(short(InLayer.ToInt32_Deprecated()));
+	}
+#endif
 
 	// Delete obsolete syncdata (and it's Datasmith Element)
 	void DeleteSyncData(const GS::Guid& InGuid);

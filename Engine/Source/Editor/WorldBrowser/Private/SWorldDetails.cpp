@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #include "SWorldDetails.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "LevelCollectionModel.h"
 #include "Modules/ModuleManager.h"
 #include "Widgets/Images/SImage.h"
@@ -8,6 +8,7 @@
 #include "EditorModeManager.h"
 #include "EditorModes.h"
 #include "WorldBrowserModule.h"
+#include "SSimpleButton.h"
 
 #include "IDetailsView.h"
 #include "LevelEditor.h"
@@ -66,21 +67,23 @@ void SWorldDetails::OnBrowseWorld(UWorld* InWorld)
 		WorldModel->CollectionChanged.AddSP(this, &SWorldDetails::OnCollectionChanged);
 	
 		FPropertyEditorModule& PropertyModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
-		FDetailsViewArgs Args(false, false, false, FDetailsViewArgs::HideNameArea, true);
-		Args.bShowActorLabel = false;
+		FDetailsViewArgs Args;
+		Args.bAllowSearch = false;
+		Args.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+		Args.bHideSelectionTip = true;
 	
 		DetailsView = PropertyModule.CreateDetailView(Args);
-		WorldDetailsView = PropertyModule.CreateDetailView(Args);
 		ChildSlot
 		[
-			SAssignNew(VerticalBox, SVerticalBox)
-
-			// Inspect level box
-			+SVerticalBox::Slot()
-			.AutoHeight()
+			SNew(SBorder)
+			.BorderImage(FAppStyle::Get().GetBrush("Brushes.Panel"))
+			.Padding(FMargin(8.f))
 			[
-				SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush(TEXT("ToolPanel.GroupBorder")))
+				SAssignNew(VerticalBox, SVerticalBox)
+
+				// Inspect level box
+				+SVerticalBox::Slot()
+				.AutoHeight()
 				[
 					SNew(SHorizontalBox)
 
@@ -97,7 +100,7 @@ void SWorldDetails::OnBrowseWorld(UWorld* InWorld)
 					.AutoWidth()
 					.VAlign(VAlign_Center)
 					.HAlign(HAlign_Left)
-					.Padding(4,0,4,0)
+					.Padding(4.f, 0.f, 0.f, 0.f)
 					[
 						SAssignNew(SubLevelsComboBox, SComboBox<TSharedPtr<FLevelModel>>)
 						.OptionsSource(&WorldModel->GetFilteredLevels())
@@ -115,18 +118,12 @@ void SWorldDetails::OnBrowseWorld(UWorld* InWorld)
 					.AutoWidth()
 					.VAlign(VAlign_Center)
 					.HAlign(HAlign_Left)
+					.Padding(4.f, 0.f, 0.f, 0.f)
 					[
-						SNew(SButton)
-						.ButtonStyle(FEditorStyle::Get(), "ToggleButton")
+						SNew(SSimpleButton)
 						.OnClicked(this, &SWorldDetails::OnSummonHierarchy)
 						.ToolTipText(LOCTEXT("SummonHierarchyToolTipText", "Summons levels hierarchy"))
-						.HAlign(HAlign_Center)
-						.VAlign(VAlign_Center)
-						.Content()
-						[
-							SNew(SImage)
-							.Image(this, &SWorldDetails::GetSummonHierarchyBrush)
-						]
+						.Icon(FAppStyle::Get().GetBrush("WorldBrowser.HierarchyButtonBrush"))
 					]
 
 					// Button to summon world composition tab
@@ -135,29 +132,18 @@ void SWorldDetails::OnBrowseWorld(UWorld* InWorld)
 					.VAlign(VAlign_Center)
 					.HAlign(HAlign_Left)
 					[
-						SNew(SButton)
+						SNew(SSimpleButton)
 						.Visibility(this, &SWorldDetails::GetCompositionButtonVisibility)
-						.ButtonStyle(FEditorStyle::Get(), "ToggleButton")
 						.OnClicked(this, &SWorldDetails::OnSummonComposition)
 						.ToolTipText(LOCTEXT("SummonCompositionToolTipText", "Summons world composition"))
-						.HAlign(HAlign_Center)
-						.VAlign(VAlign_Center)
-						.Content()
-						[
-							SNew(SImage)
-							.Image(this, &SWorldDetails::GetSummonCompositionBrush)
-						]
+						.Icon(FAppStyle::Get().GetBrush("WorldBrowser.CompositionButtonBrush"))
 					]
 				]
-			]
 			
-			// Level details
-			+SVerticalBox::Slot()
-			.FillHeight(1.f)
-			.Padding(0,4,0,0)
-			[
-				SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush(TEXT("ToolPanel.GroupBorder")))
+				// Level details
+				+SVerticalBox::Slot()
+				.FillHeight(1.f)
+				.Padding(0,4,0,0)
 				[
 					DetailsView.ToSharedRef()
 				]
@@ -199,29 +185,10 @@ void SWorldDetails::OnSelectionChanged()
 	{
 		// Clear ComboBox selection in case we have multiple selection
 		SubLevelsComboBox->ClearSelection();
-		WorldDetailsView->SetObject(nullptr);
 	}
 	else
 	{
 		SubLevelsComboBox->SetSelectedItem(SelectedLevels[0]);
-		ULevel* LevelObject = SelectedLevels[0]->GetLevelObject();
-		UObject* LevelPartition = Cast<UObject>(LevelObject ? LevelObject->GetLevelPartition() : nullptr);
-
-		if (LevelPartition)
-		{
-			VerticalBox->AddSlot()
-				.FillHeight(1.f)
-				.Padding(0,4,0,0)
-				[
-					SAssignNew(VerticalBoxBorder, SBorder)
-					.BorderImage(FEditorStyle::GetBrush(TEXT("ToolPanel.GroupBorder")))
-					[
-						WorldDetailsView.ToSharedRef()
-					]
-				];
-		}
-
-		WorldDetailsView->SetObject(LevelPartition);
 	}
 
 	bUpdatingSelection = false;
@@ -273,11 +240,6 @@ FReply SWorldDetails::OnSummonHierarchy()
 	return FReply::Handled();
 }
 
-const FSlateBrush* SWorldDetails::GetSummonHierarchyBrush() const
-{
-	return FEditorStyle::GetBrush("WorldBrowser.HierarchyButtonBrush");
-}
-
 EVisibility SWorldDetails::GetCompositionButtonVisibility() const
 {
 	return WorldModel->IsTileWorld() ? EVisibility::Visible : EVisibility::Collapsed;
@@ -289,11 +251,5 @@ FReply SWorldDetails::OnSummonComposition()
 	LevelEditorModule.SummonWorldBrowserComposition();
 	return FReply::Handled();
 }
-
-const FSlateBrush* SWorldDetails::GetSummonCompositionBrush() const
-{
-	return FEditorStyle::GetBrush("WorldBrowser.CompositionButtonBrush");
-}
-
 
 #undef LOCTEXT_NAMESPACE

@@ -7,6 +7,7 @@
 #include "EntitySystem/IMovieSceneEntityProvider.h"
 #include "Evaluation/MovieSceneEvaluationCustomVersion.h"
 #include "Evaluation/MovieSceneRootOverridePath.h"
+#include "MovieScene.h"
 #include "MovieSceneSequence.h"
 #include "Sections/MovieSceneSubSection.h"
 #include "Tracks/MovieSceneSubTrack.h"
@@ -21,6 +22,8 @@
 #include "UObject/UObjectGlobals.h"
 #include "UObject/Package.h"
 #include "UObject/PackageReload.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneCompiledDataManager)
 
 
 FString GMovieSceneCompilerVersion = TEXT("7D4B98092FAC4A6B964ECF72D8279EF8");
@@ -139,7 +142,7 @@ struct FGatherParameters
 		, LocalClampRange(RootClampRange)
 		, Flags(ESectionEvaluationFlags::None)
 		, HierarchicalBias(0)
-		, bHasHierarchicalEasing(false)
+		, AccumulatedFlags(EMovieSceneSubSectionFlags::None)
 	{}
 
 	FGatherParameters CreateForSubData(const FMovieSceneSubSequenceData& SubData, FMovieSceneSequenceID InSubSequenceID) const
@@ -151,13 +154,13 @@ struct FGatherParameters
 	{
 		FGatherParameters SubParams = *this;
 
-		SubParams.RootToSequenceTransform	= SubData.RootToSequenceTransform;
+		SubParams.RootToSequenceTransform   = SubData.RootToSequenceTransform;
 		SubParams.HierarchicalBias          = SubData.HierarchicalBias;
-		SubParams.bHasHierarchicalEasing    = SubData.bHasHierarchicalEasing;
+		SubParams.AccumulatedFlags          = SubData.AccumulatedFlags;
 		SubParams.SequenceID                = InSubSequenceID;
 		SubParams.RootToSequenceWarpCounter = WarpCounter;
 
-		SubParams.LocalClampRange			= SubData.RootToSequenceTransform.TransformRangeUnwarped(SubParams.RootClampRange);
+		SubParams.LocalClampRange           = SubData.RootToSequenceTransform.TransformRangeUnwarped(SubParams.RootClampRange);
 
 		return SubParams;
 	}
@@ -194,8 +197,8 @@ struct FGatherParameters
 	/** Current accumulated hierarchical bias */
 	int16 HierarchicalBias;
 
-	/** Whether the current sequence is receiving hierarchical easing from some parent sequence */
-	bool bHasHierarchicalEasing;
+	/** Current accumulated sub-section flags */
+	EMovieSceneSubSectionFlags AccumulatedFlags;
 
 	EMovieSceneServerClientMask NetworkMask;
 };
@@ -612,6 +615,11 @@ void UMovieSceneCompiledDataManager::DestroyTemplate(FMovieSceneCompiledDataID D
 
 bool UMovieSceneCompiledDataManager::IsDirty(const FMovieSceneCompiledDataEntry& Entry) const
 {
+	if (!Entry.GetSequence())
+	{
+		return false;
+	}
+
 	if (Entry.CompiledSignature != Entry.GetSequence()->GetSignature())
 	{
 		return true;
@@ -658,13 +666,39 @@ bool UMovieSceneCompiledDataManager::IsDirty(UMovieSceneSequence* Sequence) cons
 	return true;
 }
 
+bool UMovieSceneCompiledDataManager::ValidateEntry(FMovieSceneCompiledDataID DataID, UMovieSceneSequence* Sequence) const
+{
+	if (!ensureMsgf(
+			CompiledDataEntries.IsValidIndex(DataID.Value),
+			TEXT("Given DataID %d is not valid! (%d entries in the data manager)"), DataID.Value, CompiledDataEntries.Num()))
+	{
+		return false;
+	}
+
+	const FMovieSceneCompiledDataEntry& Entry = CompiledDataEntries[DataID.Value];
+	UMovieSceneSequence* EntrySequence = Entry.GetSequence();
+	if (!ensureMsgf(
+			EntrySequence == Sequence,
+			TEXT("Unexpected sequence for data ID! Expected '%s', but data manager has '%s'."), *GetNameSafe(Sequence), *GetNameSafe(EntrySequence)))
+	{
+		return false;
+	}
+
+	return true;
+}
 
 void UMovieSceneCompiledDataManager::Compile(FMovieSceneCompiledDataID DataID)
+{
+	Compile(DataID, NetworkMask);
+}
+
+
+void UMovieSceneCompiledDataManager::Compile(FMovieSceneCompiledDataID DataID, EMovieSceneServerClientMask InNetworkMask)
 {
 	check(DataID.IsValid() && CompiledDataEntries.IsValidIndex(DataID.Value));
 	UMovieSceneSequence* Sequence = CompiledDataEntries[DataID.Value].GetSequence();
 	check(Sequence);
-	Compile(DataID, Sequence);
+	Compile(DataID, Sequence, InNetworkMask);
 }
 
 FMovieSceneCompiledDataID UMovieSceneCompiledDataManager::Compile(UMovieSceneSequence* Sequence)
@@ -675,6 +709,11 @@ FMovieSceneCompiledDataID UMovieSceneCompiledDataManager::Compile(UMovieSceneSeq
 }
 
 void UMovieSceneCompiledDataManager::Compile(FMovieSceneCompiledDataID DataID, UMovieSceneSequence* Sequence)
+{
+	Compile(DataID, Sequence, NetworkMask);
+}
+
+void UMovieSceneCompiledDataManager::Compile(FMovieSceneCompiledDataID DataID, UMovieSceneSequence* Sequence, EMovieSceneServerClientMask InNetworkMask)
 {
 	check(DataID.IsValid() && CompiledDataEntries.IsValidIndex(DataID.Value));
 	FMovieSceneCompiledDataEntry Entry = CompiledDataEntries[DataID.Value];
@@ -689,12 +728,19 @@ void UMovieSceneCompiledDataManager::Compile(FMovieSceneCompiledDataID DataID, U
 	Entry.DeterminismFences.Empty();
 	Entry.AccumulatedFlags = Sequence->GetFlags();
 	Params.TemplateGenerator.Reset(&Entry);
-	Params.NetworkMask = NetworkMask;
+	Params.NetworkMask = InNetworkMask;
 
 	// ---------------------------------------------------------------------------------------------------
 	// Step 1 - Always ensure the hierarchy information is completely up to date first
 	FMovieSceneSequenceHierarchy NewHierarchy;
 	const bool bHasHierarchy = CompileHierarchy(Sequence, Params, &NewHierarchy);
+
+	// If the network mask of the compiled data manager is 'all', but the sequence has been created with client-only and/or server-only subsections,
+	// then we mark the sequence volatile as we may need to recompile it at runtime in order to exclude these subsections depending on the net mode at runtime.
+	if (Params.NetworkMask == EMovieSceneServerClientMask::All && NewHierarchy.GetAccumulatedNetworkMask() != EMovieSceneServerClientMask::All)
+	{
+		Entry.AccumulatedFlags |= EMovieSceneSequenceFlags::Volatile;
+	}
 
 	if (IMovieSceneDeterminismSource* DeterminismSource = Cast<IMovieSceneDeterminismSource>(Sequence))
 	{
@@ -706,29 +752,32 @@ void UMovieSceneCompiledDataManager::Compile(FMovieSceneCompiledDataID DataID, U
 	{
 		UMovieScene* MovieScene = Sequence->GetMovieScene();
 
-		for (const FMovieSceneMarkedFrame& Mark : MovieScene->GetMarkedFrames())
+		if (ensure(MovieScene))
 		{
-			if (Mark.bIsDeterminismFence)
+			for (const FMovieSceneMarkedFrame& Mark : MovieScene->GetMarkedFrames())
 			{
-				GatheredData.DeterminismData.Fences.Add(Mark.FrameNumber);
+				if (Mark.bIsDeterminismFence)
+				{
+					GatheredData.DeterminismData.Fences.Add(Mark.FrameNumber);
+				}
 			}
-		}
 
-		if (UMovieSceneTrack* Track = MovieScene->GetCameraCutTrack())
-		{
-			CompileTrack(&Entry, nullptr, Track, Params, &GatheredSignatures, &GatheredData);
-		}
-
-		for (UMovieSceneTrack* Track : MovieScene->GetMasterTracks())
-		{
-			CompileTrack(&Entry, nullptr, Track, Params, &GatheredSignatures, &GatheredData);
-		}
-
-		for (const FMovieSceneBinding& ObjectBinding : MovieScene->GetBindings())
-		{
-			for (UMovieSceneTrack* Track : ObjectBinding.GetTracks())
+			if (UMovieSceneTrack* Track = MovieScene->GetCameraCutTrack())
 			{
-				CompileTrack(&Entry, &ObjectBinding, Track, Params, &GatheredSignatures, &GatheredData);
+				CompileTrack(&Entry, nullptr, Track, Params, &GatheredSignatures, &GatheredData);
+			}
+
+			for (UMovieSceneTrack* Track : MovieScene->GetTracks())
+			{
+				CompileTrack(&Entry, nullptr, Track, Params, &GatheredSignatures, &GatheredData);
+			}
+
+			for (const FMovieSceneBinding& ObjectBinding : MovieScene->GetBindings())
+			{
+				for (UMovieSceneTrack* Track : ObjectBinding.GetTracks())
+				{
+					CompileTrack(&Entry, &ObjectBinding, Track, Params, &GatheredSignatures, &GatheredData);
+				}
 			}
 		}
 	}
@@ -820,7 +869,7 @@ void UMovieSceneCompiledDataManager::Compile(FMovieSceneCompiledDataID DataID, U
 	else
 	{
 		UE_LOG(LogMovieScene, Log, TEXT("No sequence hierarchy"));
-	}
+}
 #endif
 #endif
 }
@@ -832,21 +881,24 @@ void UMovieSceneCompiledDataManager::Gather(const FMovieSceneCompiledDataEntry& 
 
 	UMovieScene* MovieScene = Sequence->GetMovieScene();
 
-	if (UMovieSceneTrack* Track = MovieScene->GetCameraCutTrack())
+	if (ensure(MovieScene))
 	{
-		GatherTrack(nullptr, Track, Params, TrackTemplate, OutCompilerData);
-	}
-
-	for (UMovieSceneTrack* Track : MovieScene->GetMasterTracks())
-	{
-		GatherTrack(nullptr, Track, Params, TrackTemplate, OutCompilerData);
-	}
-
-	for (const FMovieSceneBinding& ObjectBinding : MovieScene->GetBindings())
-	{
-		for (UMovieSceneTrack* Track : ObjectBinding.GetTracks())
+		if (UMovieSceneTrack* Track = MovieScene->GetCameraCutTrack())
 		{
-			GatherTrack(&ObjectBinding, Track, Params, TrackTemplate, OutCompilerData);
+			GatherTrack(nullptr, Track, Params, TrackTemplate, OutCompilerData);
+		}
+
+		for (UMovieSceneTrack* Track : MovieScene->GetTracks())
+		{
+			GatherTrack(nullptr, Track, Params, TrackTemplate, OutCompilerData);
+		}
+
+		for (const FMovieSceneBinding& ObjectBinding : MovieScene->GetBindings())
+		{
+			for (UMovieSceneTrack* Track : ObjectBinding.GetTracks())
+			{
+				GatherTrack(&ObjectBinding, Track, Params, TrackTemplate, OutCompilerData);
+			}
 		}
 	}
 }
@@ -1235,8 +1287,24 @@ void UMovieSceneCompiledDataManager::GatherTrack(const FMovieSceneBinding* Objec
 			FieldBuilder.GetSharedMetaData().ObjectBindingID = ObjectBinding->GetObjectGuid();
 		}
 
-		for (const FMovieSceneTrackEvaluationFieldEntry& Entry : EvaluationField.Entries)
+		IMovieSceneEntityProvider* TrackEntityProvider = Cast<IMovieSceneEntityProvider>(Track);
+
+		// If the track is an entity provider, allow it to add entries first
+		if (TrackEntityProvider)
 		{
+			FMovieSceneEvaluationFieldEntityMetaData MetaData(PreCompileResult.DefaultMetaData);
+			MetaData.bEvaluateInSequencePreRoll  = Track->EvalOptions.bEvaluateInPreroll;
+			MetaData.bEvaluateInSequencePostRoll = Track->EvalOptions.bEvaluateInPostroll;
+
+			TrackEntityProvider->PopulateEvaluationField(Params.LocalClampRange, MetaData, &FieldBuilder);
+		}
+		else for (const FMovieSceneTrackEvaluationFieldEntry& Entry : EvaluationField.Entries)
+		{
+			if (Entry.Section && Track->IsRowEvalDisabled(Entry.Section->GetRowIndex()))
+			{
+				continue;
+			}
+
 			IMovieSceneEntityProvider* EntityProvider = Cast<IMovieSceneEntityProvider>(Entry.Section);
 			if (!EntityProvider)
 			{
@@ -1273,7 +1341,7 @@ void UMovieSceneCompiledDataManager::GatherTrack(const FMovieSceneBinding* Objec
 		// Iterate everything in the field
 		for (const FMovieSceneTrackEvaluationFieldEntry& Entry : EvaluationField.Entries)
 		{
-			FMovieSceneSequenceTransform SequenceToRootTransform  = Params.RootToSequenceTransform.InverseFromWarp(Params.RootToSequenceWarpCounter);
+			FMovieSceneSequenceTransform SequenceToRootTransform  = Params.RootToSequenceTransform.InverseFromLoop(Params.RootToSequenceWarpCounter);
 			TRange<FFrameNumber>         ClampedRangeRoot         = Params.ClampRoot(SequenceToRootTransform.TransformRangeUnwarped(Entry.Range));
 			UMovieSceneSection*          Section                  = Entry.Section;
 
@@ -1312,6 +1380,15 @@ void UMovieSceneCompiledDataManager::GatherTrack(const FMovieSceneBinding* Objec
 				check(ChildTemplateIndex >= 0 && ChildTemplateIndex < TNumericLimits<uint16>::Max());
 
 				ESectionEvaluationFlags Flags = Params.Flags == ESectionEvaluationFlags::None ? Entry.Flags : Params.Flags;
+
+				if (EnumHasAnyFlags(Params.AccumulatedFlags, EMovieSceneSubSectionFlags::OverrideRestoreState))
+				{
+					Flags |= ESectionEvaluationFlags::ForceRestoreState;
+				}
+				else if (EnumHasAnyFlags(Params.AccumulatedFlags, EMovieSceneSubSectionFlags::OverrideKeepState))
+				{
+					Flags |= ESectionEvaluationFlags::ForceKeepState;
+				}
 
 				CompileData.ChildPriority = Entry.LegacySortOrder;
 				CompileData.Child         = FMovieSceneFieldEntry_ChildTemplate((uint16)ChildTemplateIndex, Flags, Entry.ForcedTime);
@@ -1361,7 +1438,7 @@ bool UMovieSceneCompiledDataManager::GenerateSubSequenceData(UMovieSceneSequence
 
 	bool bContainsSubSequences = false;
 
-	for (UMovieSceneTrack* Track : MovieScene->GetMasterTracks())
+	for (UMovieSceneTrack* Track : MovieScene->GetTracks())
 	{
 		if (UMovieSceneSubTrack* SubTrack = Cast<UMovieSceneSubTrack>(Track))
 		{
@@ -1415,6 +1492,12 @@ bool UMovieSceneCompiledDataManager::GenerateSubSequenceData(UMovieSceneSubTrack
 			continue;
 		}
 
+		UMovieScene* MovieScene = SubSequence->GetMovieScene();
+		if (!MovieScene)
+		{
+			continue;
+		}
+
 		const FMovieSceneSequenceID InnerSequenceID = RootPath->ResolveChildSequenceID(SubSection->GetSequenceID());
 
 		FSubSequenceInstanceDataParams InstanceParams{ InnerSequenceID, Operand };
@@ -1427,7 +1510,7 @@ bool UMovieSceneCompiledDataManager::GenerateSubSequenceData(UMovieSceneSubTrack
 		NewSubData.PlayRange               = TRange<FFrameNumber>::Intersection(InnerClampRange, NewSubData.PlayRange.Value);
 		NewSubData.RootToSequenceTransform = NewSubData.RootToSequenceTransform * Params.RootToSequenceTransform;
 		NewSubData.HierarchicalBias        = Params.HierarchicalBias + NewSubData.HierarchicalBias;
-		NewSubData.bHasHierarchicalEasing  = Params.bHasHierarchicalEasing || NewSubData.bHasHierarchicalEasing;
+		NewSubData.AccumulatedFlags        = UE::MovieScene::AccumulateChildSubSectionFlags(Params.AccumulatedFlags, NewSubData.AccumulatedFlags);
 
 		// Add the sub data to the root hierarchy
 		InOutHierarchy->Add(NewSubData, InnerSequenceID, ParentSequenceID);
@@ -1459,7 +1542,7 @@ void UMovieSceneCompiledDataManager::PopulateSubSequenceTree(UMovieSceneSequence
 
 	check(RootPath && InOutHierarchy);
 
-	for (UMovieSceneTrack* Track : MovieScene->GetMasterTracks())
+	for (UMovieSceneTrack* Track : MovieScene->GetTracks())
 	{
 		if (UMovieSceneSubTrack* SubTrack = Cast<UMovieSceneSubTrack>(Track))
 		{
@@ -1508,7 +1591,7 @@ void UMovieSceneCompiledDataManager::PopulateSubSequenceTree(UMovieSceneSubTrack
 	for (const FMovieSceneTrackEvaluationFieldEntry& Entry : SubTrack->GetEvaluationField().Entries)
 	{
 		UMovieSceneSubSection* SubSection  = Cast<UMovieSceneSubSection>(Entry.Section);
-		if (!SubSection || SubSection->GetSequence() == nullptr)
+		if (!SubSection || SubSection->GetSequence() == nullptr || SubSection->GetSequence()->GetMovieScene() == nullptr)
 		{
 			continue;
 		}
@@ -1524,7 +1607,23 @@ void UMovieSceneCompiledDataManager::PopulateSubSequenceTree(UMovieSceneSubTrack
 			continue;
 		}
 
-		TRange<FFrameNumber> EffectiveRange = Params.ClampRoot(Entry.Range * Params.RootToSequenceTransform.InverseFromWarp(Params.RootToSequenceWarpCounter));
+		InOutHierarchy->AccumulateNetworkMask(SubSection->GetNetworkMask());
+		
+
+		const FMovieSceneSequenceTransform SequenceToRootTransform = Params.RootToSequenceTransform.InverseFromLoop(Params.RootToSequenceWarpCounter);
+
+		// In the case the Sequence to Root Transform contains an infinite timescale, then one of the timescales above us is zero. In this case, we cannot
+		// rely on a simple multiply by an inverse transform to figure out an effective range of this entry in root space, as this is non-deterministic.
+		// It all comes down to whether the single frame is inside or outside of this entry. 
+		// If inside, the effective range in root space is the entire clamp range.
+		// If outside, the effective range in root space is empty, and we should not include this entry.
+
+		TRange<FFrameNumber> EffectiveRange = TRange<FFrameNumber>::Empty();
+		if (FMath::IsFinite(SequenceToRootTransform.GetTimeScale()) || !TRange<FFrameNumber>::Intersection(Params.LocalClampRange, Entry.Range).IsEmpty())
+		{
+			EffectiveRange = Params.ClampRoot(SequenceToRootTransform.TransformRangeConstrained(Entry.Range));
+		}
+
 		if (EffectiveRange.IsEmpty())
 		{
 			continue;
@@ -1540,14 +1639,26 @@ void UMovieSceneCompiledDataManager::PopulateSubSequenceTree(UMovieSceneSubTrack
 
 		const ESectionEvaluationFlags SubEntryFlags = Entry.Flags | Params.Flags;
 
-		if (!SubSectionParams.bCanLoop)
+		// If we can't loop, or our timescale is zero, and therefore looping is irrelevant
+		if (!SubSectionParams.bCanLoop || FMath::IsNearlyZero(SubData->RootToSequenceTransform.GetTimeScale()))
 		{
 			FGatherParameters SubParams = Params.CreateForSubData(*SubData, SubSequenceID, Params.RootToSequenceWarpCounter);
 			SubParams.SetClampRange(EffectiveRange);
 			SubParams.Flags |= Entry.Flags;
 			SubParams.NetworkMask = NewMask;
-			SubParams.RootToSequenceWarpCounter.AddNonWarpingLevel();
 
+			for (int i = 0; i < SubParams.RootToSequenceTransform.NestedTransforms.Num(); ++i)
+			{
+				if (SubParams.RootToSequenceTransform.NestedTransforms[i].IsLooping())
+				{
+					SubParams.RootToSequenceWarpCounter.AddWarpingLevel(1);
+				}
+				else
+				{
+					SubParams.RootToSequenceWarpCounter.AddNonWarpingLevel();
+				}
+			}
+			
 			// The section isn't looping, so we can just add it to the tree.
 			InOutHierarchy->AddRange(EffectiveRange, SubSequenceID, SubEntryFlags, SubParams.RootToSequenceWarpCounter);
 
@@ -1561,8 +1672,6 @@ void UMovieSceneCompiledDataManager::PopulateSubSequenceTree(UMovieSceneSubTrack
 		else
 		{
 			// The section is looping so we need to add its contents to the tree as many times as it has loops.
-			const FMovieSceneSequenceTransform SequenceToRootTransform = Params.RootToSequenceTransform.InverseFromWarp(Params.RootToSequenceWarpCounter);
-
 			const float RootToSubSequenceTimeScale = SubData->RootToSequenceTransform.GetTimeScale();
 			const float SubSequenceToRootTimeScale = (RootToSubSequenceTimeScale != 0.f) ? 1.0f / RootToSubSequenceTimeScale : 1.f;
 
@@ -1589,14 +1698,16 @@ void UMovieSceneCompiledDataManager::PopulateSubSequenceTree(UMovieSceneSubTrack
 				{
 					if (CurRootRange.Overlaps(Params.RootClampRange))
 					{
+						// Clamp the sub-sequence's range by the containing section's range and the current compilation range.
+						const TRange<FFrameNumber> ClampedCurRootRange = TRange<FFrameNumber>::Intersection(CurRootRange, EffectiveRange);
+
 						FGatherParameters CurLoopParams = Params.CreateForSubData(*SubData, SubSequenceID, Params.RootToSequenceWarpCounter);
-						CurLoopParams.SetClampRange(EffectiveRange);
+						CurLoopParams.SetClampRange(ClampedCurRootRange);
 						CurLoopParams.Flags |= Entry.Flags;
 						CurLoopParams.NetworkMask = NewMask;
 						CurLoopParams.RootToSequenceWarpCounter.AddWarpingLevel(LoopCount);
 
 						// Add the section to the tree for the current loop.
-						const TRange<FFrameNumber> ClampedCurRootRange = TRange<FFrameNumber>::Intersection(CurRootRange, Params.RootClampRange);
 						InOutHierarchy->AddRange(ClampedCurRootRange, SubSequenceID, SubEntryFlags, CurLoopParams.RootToSequenceWarpCounter);
 
 						// Recurse into this loop's sub sequence.
@@ -1607,6 +1718,7 @@ void UMovieSceneCompiledDataManager::PopulateSubSequenceTree(UMovieSceneSubTrack
 						RootPath->PopGenerations(1);
 					}
 
+					// Move on to the next loop.
 					CurRootRangeStart = CurRootRange.GetUpperBoundValue();
 					CurRootRange = TRange<FFrameNumber>(CurRootRangeStart.FloorToFrame(), (CurRootRangeStart + RootLoopLength).FloorToFrame());
 					if (CurRootRange.GetUpperBoundValue() > RootSectionEndTime)
@@ -1614,7 +1726,7 @@ void UMovieSceneCompiledDataManager::PopulateSubSequenceTree(UMovieSceneSubTrack
 					++LoopCount;
 				}
 			}
-			// Faced with the cosmic horror or infinites, we choose to shield our sanity and skip this sub-section.
+			// Faced with the cosmic horror of infinites, we choose to shield our sanity and skip this sub-section.
 			// (it either has an open-ended start time, which means we needed to loop since before time began, which means
 			//  we don't know where loops are in the present... or it means the section and root sequence have open-ended
 			//  end times, which means we would need to compile loops forever)
@@ -1647,3 +1759,4 @@ TOptional<FFrameNumber> UMovieSceneCompiledDataManager::GetLoopingSubSectionEndT
 	// indefinitely... we don't support that yet.
 	return TOptional<FFrameNumber>();
 }
+

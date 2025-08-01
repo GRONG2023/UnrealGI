@@ -1,11 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Slate/SlateVectorArtData.h"
+
 #include "RawIndexBuffer.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "UMGPrivate.h"
 #include "StaticMeshResources.h"
 #include "Engine/StaticMesh.h"
+#include "UObject/ObjectSaveContext.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SlateVectorArtData)
 
 static void StaticMeshToSlateRenderData(const UStaticMesh& DataSource, TArray<FSlateMeshVertex>& OutSlateVerts, TArray<uint32>& OutIndexes, FVector2D& OutExtentMin, FVector2D& OutExtentMax )
 {
@@ -36,7 +40,7 @@ static void StaticMeshToSlateRenderData(const UStaticMesh& DataSource, TArray<FS
 			for (uint32 i = 0; i < NumVerts; ++i)
 			{
 				// Copy Position
-				const FVector& Position = LOD.VertexBuffers.PositionVertexBuffer.VertexPosition(i);
+				const FVector3f& Position = LOD.VertexBuffers.PositionVertexBuffer.VertexPosition(i);
 				OutExtentMin.X = FMath::Min(Position.X, OutExtentMin.X);
 				OutExtentMin.Y = FMath::Min(Position.Y, OutExtentMin.Y);
 				OutExtentMax.X = FMath::Max(Position.X, OutExtentMax.X);
@@ -46,20 +50,20 @@ static void StaticMeshToSlateRenderData(const UStaticMesh& DataSource, TArray<FS
 				FColor Color = (LOD.VertexBuffers.ColorVertexBuffer.GetNumVertices() > 0) ? LOD.VertexBuffers.ColorVertexBuffer.VertexColor(i) : FColor::White;
 				
 				// Copy all the UVs that we have, and as many as we can fit.
-				const FVector2D& UV0 = (TexCoordsPerVertex > 0) ? LOD.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(i, 0) : FVector2D(1, 1);
+				const FVector2f& UV0 = (TexCoordsPerVertex > 0) ? LOD.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(i, 0) : FVector2f(1, 1);
 
-				const FVector2D& UV1 = (TexCoordsPerVertex > 1) ? LOD.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(i, 1) : FVector2D(1, 1);
+				const FVector2f& UV1 = (TexCoordsPerVertex > 1) ? LOD.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(i, 1) : FVector2f(1, 1);
 
-				const FVector2D& UV2 = (TexCoordsPerVertex > 2) ? LOD.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(i, 2) : FVector2D(1, 1);
+				const FVector2f& UV2 = (TexCoordsPerVertex > 2) ? LOD.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(i, 2) : FVector2f(1, 1);
 
-				const FVector2D& UV3 = (TexCoordsPerVertex > 3) ? LOD.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(i, 3) : FVector2D(1, 1);
+				const FVector2f& UV3 = (TexCoordsPerVertex > 3) ? LOD.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(i, 3) : FVector2f(1, 1);
 
-				const FVector2D& UV4 = (TexCoordsPerVertex > 4) ? LOD.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(i, 4) : FVector2D(1, 1);
+				const FVector2f& UV4 = (TexCoordsPerVertex > 4) ? LOD.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(i, 4) : FVector2f(1, 1);
 
-				const FVector2D& UV5 = (TexCoordsPerVertex > 5) ? LOD.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(i, 5) : FVector2D(1, 1);
+				const FVector2f& UV5 = (TexCoordsPerVertex > 5) ? LOD.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(i, 5) : FVector2f(1, 1);
 
 				OutSlateVerts.Add(FSlateMeshVertex(
-					FVector2D(Position.X, Position.Y),
+					FVector2f(Position.X, Position.Y),
 					Color,
 					UV0,
 					UV1,
@@ -146,13 +150,32 @@ UMaterialInstanceDynamic* USlateVectorArtData::ConvertToMaterialInstanceDynamic(
 void USlateVectorArtData::EnsureValidData()
 {
 #if WITH_EDITORONLY_DATA
-	InitFromStaticMesh(*MeshAsset);
+	if (MeshAsset)
+	{
+		InitFromStaticMesh(*MeshAsset);
+	}
+	else
+	{
+		SourceMaterial = nullptr;
+		VertexData.Reset();
+		IndexData.Reset();
+		Material = nullptr;
+		ExtentMin = FVector2D(FLT_MAX, FLT_MAX);
+		ExtentMax = FVector2D(-FLT_MAX, -FLT_MAX);
+	}
 #endif
 }
 
 void USlateVectorArtData::PreSave(const class ITargetPlatform* TargetPlatform)
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
 	Super::PreSave(TargetPlatform);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void USlateVectorArtData::PreSave(FObjectPreSaveContext ObjectSaveContext)
+{
+	Super::PreSave(ObjectSaveContext);
 	EnsureValidData();
 }
 
@@ -185,3 +208,4 @@ FVector2D USlateVectorArtData::GetExtentMax() const
 {
 	return ExtentMax;
 }
+

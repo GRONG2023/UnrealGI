@@ -2,11 +2,8 @@
 
 
 #include "Sound/SoundSourceBus.h"
-#include "AudioDeviceManager.h"
-#include "EngineGlobals.h"
-#include "Engine/Engine.h"
-#include "UObject/UObjectIterator.h"
-#include "ActiveSound.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SoundSourceBus)
 
 USoundSourceBus::USoundSourceBus(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -57,8 +54,9 @@ bool USoundSourceBus::IsPlayable() const
 	return true;
 }
 
-float USoundSourceBus::GetDuration()
+float USoundSourceBus::GetDuration() const
 {
 	return (SourceBusDuration > 0.0f) ? SourceBusDuration : INDEFINITELY_LOOPING_DURATION;
 }
+
 

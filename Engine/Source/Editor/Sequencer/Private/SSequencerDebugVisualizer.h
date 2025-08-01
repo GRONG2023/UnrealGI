@@ -18,13 +18,17 @@
 
 class FArrangedChildren;
 class SSequencerDebugSlot;
-struct FMovieSceneEvaluationField;
 struct FTimeToPixel;
+struct FMovieSceneEvaluationField;
 
-namespace UE { namespace MovieScene {
+namespace UE
+{
+namespace MovieScene
+{
 	class FEntityManager;
 	struct FMovieSceneEntityID;
-} }
+}
+}
 
 class SSequencerDebugVisualizer : public SVerticalBox
 {
@@ -165,5 +169,5 @@ private:
  	FGuid CachedSignature;
 
 	/** Last known selection */
-	TSet<TWeakObjectPtr<UMovieSceneSection>> CachedSelection;
+	uint32 CachedSelectionSerialNumber;
 };

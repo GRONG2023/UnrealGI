@@ -4,8 +4,13 @@
 
 #include "HAL/Platform.h"
 
-namespace Trace
-{
+////////////////////////////////////////////////////////////////////////////////
+/* Indicates if the external store is supported or if an instance should be
+   self-hosted by something */
+#define WITH_TRACE_STORE 0
+
+namespace UE {
+namespace Trace {
 
 ////////////////////////////////////////////////////////////////////////////////
 class TRACEANALYSIS_API FStoreService
@@ -33,3 +38,4 @@ private:
 };
 
 } // namespace Trace
+} // namespace UE

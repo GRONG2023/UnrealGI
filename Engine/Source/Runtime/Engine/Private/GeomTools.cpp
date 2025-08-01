@@ -4,10 +4,7 @@
  =============================================================================*/
 
 #include "GeomTools.h"
-#include "EngineDefines.h"
-#include "RawIndexBuffer.h"
 #include "StaticMeshResources.h"
-#include "Engine/Polys.h"
 #include "Engine/StaticMesh.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogGeomTools, Log, All);
@@ -25,7 +22,7 @@ static FClipSMVertex GetVert(const UStaticMesh* StaticMesh, int32 VertIndex)
 	const int32 NumUVs = LODModel.VertexBuffers.StaticMeshVertexBuffer.GetNumTexCoords();
 	for(int32 UVIndex = 0;UVIndex < NumUVs;UVIndex++)
 	{
-		Result.UVs[UVIndex] = LODModel.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(VertIndex,UVIndex);
+		Result.UVs[UVIndex] = FVector2D(LODModel.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(VertIndex,UVIndex));
 	}
 	for(int32 UVIndex = NumUVs;UVIndex < UE_ARRAY_COUNT(Result.UVs);UVIndex++)
 	{
@@ -114,7 +111,7 @@ void FGeomTools::ClipMeshWithPlane( TArray<FClipSMTriangle>& OutTris, TArray<FUt
 		float PlaneDist[3];
 		for(int32 i=0; i<3; i++)
 		{
-			PlaneDist[i] = Plane.PlaneDot(SrcTri->Vertices[i].Pos);
+			PlaneDist[i] = Plane.PlaneDot(FVector(SrcTri->Vertices[i].Pos));
 		}
 
 		TArray<FClipSMVertex> FinalVerts;
@@ -126,7 +123,7 @@ void FGeomTools::ClipMeshWithPlane( TArray<FClipSMTriangle>& OutTris, TArray<FUt
 			int32 ThisVert = EdgeIdx;
 
 			// If start vert is inside, add it.
-			if(FMath::IsNegativeFloat(PlaneDist[ThisVert]))
+			if(PlaneDist[ThisVert] < 0.0f)
 			{
 				FinalVerts.Add( SrcTri->Vertices[ThisVert] );
 			}
@@ -134,7 +131,7 @@ void FGeomTools::ClipMeshWithPlane( TArray<FClipSMTriangle>& OutTris, TArray<FUt
 			// If start and next vert are on opposite sides, add intersection
 			int32 NextVert = (EdgeIdx+1)%3;
 
-			if(FMath::IsNegativeFloat(PlaneDist[EdgeIdx]) != FMath::IsNegativeFloat(PlaneDist[NextVert]))
+			if((PlaneDist[EdgeIdx] < 0.0f) != (PlaneDist[NextVert] < 0.0f))
 			{
 				// Find distance along edge that plane is
 				float Alpha = -PlaneDist[ThisVert] / (PlaneDist[NextVert] - PlaneDist[ThisVert]);
@@ -187,11 +184,11 @@ void FGeomTools::ProjectEdges( TArray<FUtilEdge2D>& Out2DEdges, FMatrix& ToWorld
 	Out2DEdges.AddUninitialized( In3DEdges.Num() );
 	for(int32 i=0; i<In3DEdges.Num(); i++)
 	{
-		FVector P = ToWorld.InverseTransformPosition(In3DEdges[i].V0);
+		FVector P = ToWorld.InverseTransformPosition(FVector(In3DEdges[i].V0));
 		Out2DEdges[i].V0.X = P.X;
 		Out2DEdges[i].V0.Y = P.Y;
 
-		P = ToWorld.InverseTransformPosition(In3DEdges[i].V1);
+		P = ToWorld.InverseTransformPosition(FVector(In3DEdges[i].V1));
 		Out2DEdges[i].V1.X = P.X;
 		Out2DEdges[i].V1.Y = P.Y;
 	}
@@ -203,7 +200,7 @@ static float EdgeMatchTolerance = 0.01f;
 /** Util to look for best next edge start from Start. Returns false if no good next edge found. Edge is removed from InEdgeSet when found. */
 static bool FindNextEdge(FUtilEdge2D& OutNextEdge, const FVector2D& Start, TArray<FUtilEdge2D>& InEdgeSet)
 {
-	float ClosestDistSqr = BIG_NUMBER;
+	float ClosestDistSqr = UE_BIG_NUMBER;
 	FUtilEdge2D OutEdge;
 	int32 OutEdgeIndex = INDEX_NONE;
 	// Search set of edges for one that starts closest to Start
@@ -327,16 +324,16 @@ void FGeomTools::Buid2DPolysFromEdges(TArray<FUtilPoly2D>& OutPolys, const TArra
 }
 
 /** Given three direction vectors, indicates if A and B are on the same 'side' of Vec. */
-bool FGeomTools::VectorsOnSameSide(const FVector& Vec, const FVector& A, const FVector& B, const float SameSideDotProductEpsilon)
+bool FGeomTools::VectorsOnSameSide(const FVector3f& Vec, const FVector3f& A, const FVector3f& B, const float SameSideDotProductEpsilon)
 {
-	const FVector CrossA = Vec ^ A;
-	const FVector CrossB = Vec ^ B;
+	const FVector3f CrossA = Vec ^ A;
+	const FVector3f CrossB = Vec ^ B;
 	float DotWithEpsilon = SameSideDotProductEpsilon + ( CrossA | CrossB );
-	return !FMath::IsNegativeFloat(DotWithEpsilon);
+	return !(DotWithEpsilon < 0.0f);
 }
 
 /** Util to see if P lies within triangle created by A, B and C. */
-bool FGeomTools::PointInTriangle(const FVector& A, const FVector& B, const FVector& C, const FVector& P, const float InsideTriangleDotProductEpsilon)
+bool FGeomTools::PointInTriangle(const FVector3f& A, const FVector3f& B, const FVector3f& C, const FVector3f& P, const float InsideTriangleDotProductEpsilon)
 {
 	// Cross product indicates which 'side' of the vector the point is on
 	// If its on the same side as the remaining vert for all edges, then its inside.	
@@ -355,22 +352,22 @@ bool FGeomTools::PointInTriangle(const FVector& A, const FVector& B, const FVect
 /** Compare all aspects of two verts of two triangles to see if they are the same. */
 static bool VertsAreEqual(const FClipSMVertex& A,const FClipSMVertex& B)
 {
-	if( !A.Pos.Equals(B.Pos, THRESH_POINTS_ARE_SAME) )
+	if( !A.Pos.Equals(B.Pos, UE_THRESH_POINTS_ARE_SAME) )
 	{
 		return false;
 	}
 
-	if( !A.TangentX.Equals(B.TangentX, THRESH_NORMALS_ARE_SAME) )
+	if( !A.TangentX.Equals(B.TangentX, UE_THRESH_NORMALS_ARE_SAME) )
 	{
 		return false;
 	}
 	
-	if( !A.TangentY.Equals(B.TangentY, THRESH_NORMALS_ARE_SAME) )
+	if( !A.TangentY.Equals(B.TangentY, UE_THRESH_NORMALS_ARE_SAME) )
 	{
 		return false;
 	}
 	
-	if( !A.TangentZ.Equals(B.TangentZ, THRESH_NORMALS_ARE_SAME) )
+	if( !A.TangentZ.Equals(B.TangentZ, UE_THRESH_NORMALS_ARE_SAME) )
 	{
 		return false;
 	}
@@ -398,9 +395,9 @@ static bool AreEdgesMergeable(
 	const FClipSMVertex& V2
 	)
 {
-	const FVector MergedEdgeVector = V2.Pos - V0.Pos;
+	const FVector3f MergedEdgeVector = V2.Pos - V0.Pos;
 	const float MergedEdgeLengthSquared = MergedEdgeVector.SizeSquared();
-	if(MergedEdgeLengthSquared > DELTA)
+	if(MergedEdgeLengthSquared > UE_DELTA)
 	{
 		// Find the vertex closest to A1/B0 that is on the hypothetical merged edge formed by A0-B1.
 		const float IntermediateVertexEdgeFraction =
@@ -464,10 +461,10 @@ bool FGeomTools::TriangulatePoly(TArray<FClipSMTriangle>& OutTris, const FClipSM
 				const int32 CIndex = (EarVertexIndex+1)%PolyVerts.Num();
 
 				// Check that this vertex is convex (cross product must be positive)
-				const FVector ABEdge = PolyVerts[BIndex].Pos - PolyVerts[AIndex].Pos;
-				const FVector ACEdge = PolyVerts[CIndex].Pos - PolyVerts[AIndex].Pos;
-				const float TriangleDeterminant = (ABEdge ^ ACEdge) | InPoly.FaceNormal;
-				if(FMath::IsNegativeFloat(TriangleDeterminant))
+				const FVector3f ABEdge = PolyVerts[BIndex].Pos - PolyVerts[AIndex].Pos;
+				const FVector3f ACEdge = PolyVerts[CIndex].Pos - PolyVerts[AIndex].Pos;
+				const float TriangleDeterminant = (ABEdge ^ ACEdge) | (FVector3f)InPoly.FaceNormal;
+				if(TriangleDeterminant < 0.0f)
 				{
 					continue;
 				}
@@ -528,7 +525,7 @@ FClipSMPolygon FGeomTools::Transform2DPolygonToSMPolygon(const FUtilPoly2D& InPo
 
 		FClipSMVertex* OutVertex = new(Result.Vertices) FClipSMVertex;
 		FMemory::Memzero(OutVertex,sizeof(*OutVertex));
-		OutVertex->Pos = InMatrix.TransformPosition( FVector(InVertex.Pos.X, InVertex.Pos.Y, 0.f) );
+		OutVertex->Pos = (FVector4f)InMatrix.TransformPosition( FVector(InVertex.Pos.X, InVertex.Pos.Y, 0.f) );
 		OutVertex->Color = InVertex.Color;
 		OutVertex->UVs[0] = InVertex.UV;
 	}
@@ -543,8 +540,8 @@ FClipSMPolygon FGeomTools::Transform2DPolygonToSMPolygon(const FUtilPoly2D& InPo
 void FGeomTools::GeneratePlanarFitPolyUVs(FUtilPoly2D& Polygon)
 {
 	// First work out 2D bounding box for tris.
-	FVector2D Min(BIG_NUMBER, BIG_NUMBER);
-	FVector2D Max(-BIG_NUMBER, -BIG_NUMBER);
+	FVector2D Min(UE_BIG_NUMBER, UE_BIG_NUMBER);
+	FVector2D Max(-UE_BIG_NUMBER, -UE_BIG_NUMBER);
 	for(int32 VertexIndex = 0;VertexIndex < Polygon.Verts.Num();VertexIndex++)
 	{
 		const FUtilVertex2D& Vertex = Polygon.Verts[VertexIndex];
@@ -603,16 +600,16 @@ static FVector ColorToVector(const FLinearColor& Color)
 void FClipSMTriangle::ComputeGradientsAndNormal()
 {
 	// Compute the transform from triangle parameter space to local space.
-	const FMatrix ParameterToLocal = ComputeTriangleParameterToAttribute(Vertices[0].Pos,Vertices[1].Pos,Vertices[2].Pos);
+	const FMatrix ParameterToLocal = ComputeTriangleParameterToAttribute((FVector)Vertices[0].Pos, (FVector)Vertices[1].Pos, (FVector)Vertices[2].Pos);
 	const FMatrix LocalToParameter = ParameterToLocal.Inverse();
 
 	// Compute the triangle's normal.
 	FaceNormal = ParameterToLocal.TransformVector(FVector(0,0,1));
 
 	// Compute the normal's gradient in local space.
-	const FMatrix ParameterToTangentX = ComputeTriangleParameterToAttribute(Vertices[0].TangentX,Vertices[1].TangentX,Vertices[2].TangentX);
-	const FMatrix ParameterToTangentY = ComputeTriangleParameterToAttribute(Vertices[0].TangentY,Vertices[1].TangentY,Vertices[2].TangentY);
-	const FMatrix ParameterToTangentZ = ComputeTriangleParameterToAttribute(Vertices[0].TangentZ,Vertices[1].TangentZ,Vertices[2].TangentZ);
+	const FMatrix ParameterToTangentX = ComputeTriangleParameterToAttribute((FVector)Vertices[0].TangentX, (FVector)Vertices[1].TangentX, (FVector)Vertices[2].TangentX);
+	const FMatrix ParameterToTangentY = ComputeTriangleParameterToAttribute((FVector)Vertices[0].TangentY, (FVector)Vertices[1].TangentY, (FVector)Vertices[2].TangentY);
+	const FMatrix ParameterToTangentZ = ComputeTriangleParameterToAttribute((FVector)Vertices[0].TangentZ, (FVector)Vertices[1].TangentZ, (FVector)Vertices[2].TangentZ);
 	TangentXGradient = LocalToParameter * ParameterToTangentX;
 	TangentYGradient = LocalToParameter * ParameterToTangentY;
 	TangentZGradient = LocalToParameter * ParameterToTangentZ;
@@ -659,7 +656,7 @@ static bool MergeTriangleIntoPolygon(
 	}
 
 	// The triangle must have the same normal as the polygon
-	if(!Triangle.FaceNormal.Equals(Polygon.FaceNormal,THRESH_NORMALS_ARE_SAME))
+	if(!Triangle.FaceNormal.Equals(Polygon.FaceNormal,UE_THRESH_NORMALS_ARE_SAME))
 	{
 		return false;
 	}
@@ -987,9 +984,9 @@ static bool IsPointOnLineSegment(const FVector2D& TestPoint, const FVector2D& A,
 {
 	FVector2D BA = B - A;
 	FVector2D PA = TestPoint - A;
-	float SizeSquaredBA = FVector2D::DotProduct(BA, BA);
-	float AreaCompareThreshold = 0.01f * SizeSquaredBA;
-	float ParallelogramArea = BA.X * PA.Y - BA.Y * PA.X;
+	double SizeSquaredBA = FVector2D::DotProduct(BA, BA);
+	double AreaCompareThreshold = UE_DOUBLE_KINDA_SMALL_NUMBER * SizeSquaredBA;
+	double ParallelogramArea = BA.X * PA.Y - BA.Y * PA.X;
 
 	return  TestPoint.X >= FMath::Min(A.X, B.X) && TestPoint.X <= FMath::Max(A.X, B.X) && // X within AB.X, including ON A or B
 		TestPoint.Y >= FMath::Min(A.Y, B.Y) && TestPoint.Y <= FMath::Max(A.Y, B.Y) && // Y within AB.Y, including ON A or B
@@ -1048,7 +1045,7 @@ static void JoinMutuallyVisible(TArray<FVector2D>& AdditivePoly, const TArray<FV
 	int EdgeStartPointIndex = 0;
 	int EdgeEndPointIndex = 0;
 	bool bIntersectedAtVertex = false;
-	float LeftMostIntersectX = MAX_FLT;
+	float LeftMostIntersectX = UE_MAX_FLT;
 	const FVector2D A = PointMaxX;
 	const FVector2D AB = FVector2D(1.0f, 0.0f);
 	for (int AdditiveIndex = 0; AdditiveIndex < NumAdditivePoly; ++AdditiveIndex)
@@ -1106,7 +1103,7 @@ static void JoinMutuallyVisible(TArray<FVector2D>& AdditivePoly, const TArray<FV
 	const FVector2D TriB = (P.Y < Intersect.Y) ? P : Intersect;
 	const FVector2D TriC = (P.Y < Intersect.Y) ? Intersect : P;
 	float CosAngleMax = 0.0f;
-	float DistanceMin = MAX_FLT;
+	float DistanceMin = UE_MAX_FLT;
 	int IndexR = -1;
 	for (int AdditiveIndex = 0; AdditiveIndex < NumAdditivePoly; ++AdditiveIndex)
 	{
@@ -1155,8 +1152,8 @@ static bool MergeTriangleIntoPolygon(
 
 			// If the triangle and polygon share an edge, then the triangle is in the same plane (implied by the above normal check),
 			// and may be merged into the polygon.
-			if (PolygonVertices[PolygonEdgeVertex0].Equals(TriangleVertices[TriangleEdgeVertex1], THRESH_POINTS_ARE_SAME) &&
-				PolygonVertices[PolygonEdgeVertex1].Equals(TriangleVertices[TriangleEdgeVertex0], THRESH_POINTS_ARE_SAME))
+			if (PolygonVertices[PolygonEdgeVertex0].Equals(TriangleVertices[TriangleEdgeVertex1], UE_THRESH_POINTS_ARE_SAME) &&
+				PolygonVertices[PolygonEdgeVertex1].Equals(TriangleVertices[TriangleEdgeVertex0], UE_THRESH_POINTS_ARE_SAME))
 			{
 				bool bMergeTriangle = true;
 				if (bConvex)
@@ -1193,7 +1190,7 @@ TArray<TArray<FVector2D>> FGeomTools2D::ReducePolygons(const TArray<TArray<FVect
 	TArray<float> MaxXValues; // per polygon
 	for (int PolyIndex = 0; PolyIndex < NumPolygons; ++PolyIndex)
 	{
-		float MaxX = -BIG_NUMBER;
+		float MaxX = -UE_BIG_NUMBER;
 		const TArray<FVector2D>& Vertices = Polygons[PolyIndex];
 		for (int VertexIndex = 0; VertexIndex < Vertices.Num(); ++VertexIndex)
 		{
@@ -1281,6 +1278,7 @@ TArray<TArray<FVector2D>> FGeomTools2D::ReducePolygons(const TArray<TArray<FVect
 
 void FGeomTools2D::CorrectPolygonWinding(TArray<FVector2D>& OutVertices, const TArray<FVector2D>& Vertices, const bool bNegativeWinding)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FGeomTools2D::CorrectPolygonWinding);
 	if (Vertices.Num() >= 3)
 	{
 		// Make sure the polygon winding is correct
@@ -1399,14 +1397,14 @@ static bool AreEdgesMergeable(const FVector2D& V0, const FVector2D& V1, const FV
 {
 	const FVector2D MergedEdgeVector = V2 - V0;
 	const float MergedEdgeLengthSquared = MergedEdgeVector.SizeSquared();
-	if (MergedEdgeLengthSquared > DELTA)
+	if (MergedEdgeLengthSquared > UE_DELTA)
 	{
 		// Find the vertex closest to A1/B0 that is on the hypothetical merged edge formed by A0-B1.
 		const float IntermediateVertexEdgeFraction = ((V2 - V0) | (V1 - V0)) / MergedEdgeLengthSquared;
 		const FVector2D InterpolatedVertex = V0 + (V2 - V0) * IntermediateVertexEdgeFraction;
 
 		// The edges are merge-able if the interpolated vertex is close enough to the intermediate vertex.
-		return InterpolatedVertex.Equals(V1, THRESH_POINTS_ARE_SAME);
+		return InterpolatedVertex.Equals(V1, UE_THRESH_POINTS_ARE_SAME);
 	}
 	else
 	{
@@ -1419,6 +1417,7 @@ static bool AreEdgesMergeable(const FVector2D& V0, const FVector2D& V1, const FV
 // Expected input - PolygonVertices in CCW order, not overlapping
 bool FGeomTools2D::TriangulatePoly(TArray<FVector2D>& OutTris, const TArray<FVector2D>& InPolyVerts, bool bKeepColinearVertices)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FGeomTools2D::TriangulatePoly);
 	// Can't work if not enough verts for 1 triangle
 	if (InPolyVerts.Num() < 3)
 	{
@@ -1466,7 +1465,7 @@ bool FGeomTools2D::TriangulatePoly(TArray<FVector2D>& OutTris, const TArray<FVec
 				// Check that this vertex is convex (cross product must be positive)
 				const FVector2D ABEdge = PolyVerts[BIndex] - PolyVerts[AIndex];
 				const FVector2D ACEdge = PolyVerts[CIndex] - PolyVerts[AIndex];
-				if (FMath::IsNegativeFloat(ABEdge ^ ACEdge))
+				if ((ABEdge ^ ACEdge) < 0.0f)
 				{
 					continue;
 				}
@@ -1522,6 +1521,7 @@ bool FGeomTools2D::TriangulatePoly(TArray<FVector2D>& OutTris, const TArray<FVec
 // 2D version of GeomTools RemoveRedundantTriangles
 void FGeomTools2D::RemoveRedundantTriangles(TArray<FVector2D>& OutTriangles, const TArray<FVector2D>& InTriangleVertices)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FGeomTools2D::RemoveRedundantTriangles);
 	struct FLocalTriangle
 	{
 		int VertexA, VertexB, VertexC;
@@ -1540,7 +1540,7 @@ void FGeomTools2D::RemoveRedundantTriangles(TArray<FVector2D>& OutTriangles, con
 	{
 		TArray<FVector2D> PolygonVertices;
 
-		const FLocalTriangle InitialTriangle = Triangles.Pop(/*bAllowShrinking=*/ false);
+		const FLocalTriangle InitialTriangle = Triangles.Pop(EAllowShrinking::No);
 		PolygonVertices.Add(InTriangleVertices[InitialTriangle.VertexA]);
 		PolygonVertices.Add(InTriangleVertices[InitialTriangle.VertexB]);
 		PolygonVertices.Add(InTriangleVertices[InitialTriangle.VertexC]);
@@ -1569,6 +1569,7 @@ void FGeomTools2D::RemoveRedundantTriangles(TArray<FVector2D>& OutTriangles, con
 // Find convex polygons from triangle soup
 void FGeomTools2D::GenerateConvexPolygonsFromTriangles(TArray<TArray<FVector2D>>& OutPolygons, const TArray<FVector2D>& InTriangleVertices)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FGeomTools2D::GenerateConvexPolygonsFromTriangles);
 	struct FLocalTriangle
 	{
 		int VertexA, VertexB, VertexC;
@@ -1587,7 +1588,7 @@ void FGeomTools2D::GenerateConvexPolygonsFromTriangles(TArray<TArray<FVector2D>>
 	{
 		TArray<FVector2D> PolygonVertices;
 
-		const FLocalTriangle InitialTriangle = Triangles.Pop(/*bAllowShrinking=*/ false);
+		const FLocalTriangle InitialTriangle = Triangles.Pop(EAllowShrinking::No);
 		PolygonVertices.Add(InTriangleVertices[InitialTriangle.VertexA]);
 		PolygonVertices.Add(InTriangleVertices[InitialTriangle.VertexB]);
 		PolygonVertices.Add(InTriangleVertices[InitialTriangle.VertexC]);

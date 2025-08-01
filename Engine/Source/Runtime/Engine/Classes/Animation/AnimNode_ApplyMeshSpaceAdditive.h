@@ -9,7 +9,7 @@
 #include "AnimNode_ApplyMeshSpaceAdditive.generated.h"
 
 USTRUCT(BlueprintInternalUseOnly)
-struct ENGINE_API FAnimNode_ApplyMeshSpaceAdditive : public FAnimNode_Base
+struct FAnimNode_ApplyMeshSpaceAdditive : public FAnimNode_Base
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -47,7 +47,7 @@ struct ENGINE_API FAnimNode_ApplyMeshSpaceAdditive : public FAnimNode_Base
 
 	/*
 	* Max LOD that this node is allowed to run
-	* For example if you have LODThreadhold to be 2, it will run until LOD 2 (based on 0 index)
+	* For example if you have LODThreshold to be 2, it will run until LOD 2 (based on 0 index)
 	* when the component LOD becomes 3, it will stop update/evaluate
 	* currently transition would be issue and that has to be re-visited
 	*/
@@ -57,14 +57,14 @@ struct ENGINE_API FAnimNode_ApplyMeshSpaceAdditive : public FAnimNode_Base
 	float ActualAlpha;
 
 public:
-	FAnimNode_ApplyMeshSpaceAdditive();
+	ENGINE_API FAnimNode_ApplyMeshSpaceAdditive();
 
 	// FAnimNode_Base interface
-	virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
-	virtual void CacheBones_AnyThread(const FAnimationCacheBonesContext& Context) override;
-	virtual void Update_AnyThread(const FAnimationUpdateContext& Context) override;
-	virtual void Evaluate_AnyThread(FPoseContext& Output) override;
-	virtual void GatherDebugData(FNodeDebugData& DebugData) override;
+	ENGINE_API virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
+	ENGINE_API virtual void CacheBones_AnyThread(const FAnimationCacheBonesContext& Context) override;
+	ENGINE_API virtual void Update_AnyThread(const FAnimationUpdateContext& Context) override;
+	ENGINE_API virtual void Evaluate_AnyThread(FPoseContext& Output) override;
+	ENGINE_API virtual void GatherDebugData(FNodeDebugData& DebugData) override;
 	virtual int32 GetLODThreshold() const override { return LODThreshold; }
 	// End of FAnimNode_Base interface
 };

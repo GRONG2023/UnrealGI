@@ -2,26 +2,28 @@
 
 #pragma once
 
-#include "CoreTypes.h"
 #include "Containers/Array.h"
 #include "Containers/UnrealString.h"
-#include "UObject/NameTypes.h"
-#include "Templates/SharedPointer.h"
+#include "CoreTypes.h"
 #include "Delegates/Delegate.h"
 #include "Internationalization/Text.h"
 #include "Misc/Attribute.h"
+#include "Misc/Guid.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
 
 /** The severity of the message type */
 namespace EMessageSeverity
 {
 	/** Ordered according to their severity */
-	enum Type
+	enum Type : int
 	{
-		CriticalError		= 0,
-		Error				= 1,
-		PerformanceWarning	= 2,
-		Warning				= 3,
-		Info				= 4,	// Should be last
+		CriticalError UE_DEPRECATED(5.1, "CriticalError was removed because it can't trigger an assert at the callsite. Use 'checkf' instead.") = 0,
+		Error = 1,
+		PerformanceWarning = 2,
+		Warning = 3,
+		Info = 4,	// Should be last
 	};
 }
 
@@ -33,7 +35,9 @@ namespace EMessageToken
 	enum Type
 	{
 		Action,
+		Actor,
 		AssetName,
+		AssetData,
 		Documentation,
 		Image,
 		Object,
@@ -105,6 +109,9 @@ protected:
 /** This class represents a rich tokenized message, such as would be used for compiler output with 'hyperlinks' to source file locations */
 class FTokenizedMessage : public TSharedFromThis<FTokenizedMessage>
 {
+	// The private token allows only members or friends to call MakeShared.
+	struct FPrivateToken { explicit FPrivateToken() = default; };
+
 public:
 
 	/** 
@@ -115,6 +122,12 @@ public:
 	 * @returns	the generated message for temporary storage or so other tokens can be added to it if required.
 	 */
 	CORE_API static TSharedRef<FTokenizedMessage> Create(EMessageSeverity::Type InSeverity, const FText& InMessageText = FText());
+
+	/**
+	 * Clone this message.
+	 * @note The message tokens are shared between the original and the clone.
+	 */
+	CORE_API TSharedRef<FTokenizedMessage> Clone() const;
 
 	/** 
 	 * Get this tokenized message as a string
@@ -130,6 +143,26 @@ public:
 	 * @returns this message, for chaining calls.
 	 */
 	CORE_API TSharedRef<FTokenizedMessage> AddToken( const TSharedRef<IMessageToken>& InToken );
+
+	/** 
+	 * Adds a text token to a message.
+	 * @param	InMessage	The message to insert a token into
+	 * @param	InText		The text to insert as a token
+	 * @returns this message, for chaining calls.
+	 */
+	CORE_API TSharedRef<FTokenizedMessage> AddText(const FText& InText);
+
+	/** 
+	 * Adds a text token to a message as by calling FText::FormatOrdered
+	 * @param	InMessage	The message to insert a token into
+	 * @param	InText		The text to insert as a token
+	 * @returns this message, for chaining calls.
+	 */
+	template<typename... TArguments>
+	TSharedRef<FTokenizedMessage> AddText(FTextFormat InTextFormat, TArguments&&... InArgs)
+	{
+		return AddText(FText::FormatOrdered(InTextFormat, Forward<TArguments...>(InArgs...)));
+	}
 
 	/** 
 	 * Sets the severity of this message
@@ -191,12 +224,12 @@ public:
 	/** Assigns Identifier for the message to the provided name */
 	CORE_API void SetIdentifier(FName InIdentifier);
 
-private:
 	/** Private constructor - we want to only create these structures as shared references via Create() */
-	FTokenizedMessage()
+	explicit FTokenizedMessage(FPrivateToken)
 		: Severity( EMessageSeverity::Info )
 		, Identifier(NAME_None)
-	{ }
+	{
+	}
 
 protected:
 
@@ -218,12 +251,12 @@ private:
 /** Basic message token with a localized text payload */
 class FTextToken : public IMessageToken
 {
+	// The private token allows only members or friends to call MakeShared.
+	struct FPrivateToken { explicit FPrivateToken() = default; };
+
 public:
 	/** Factory method, tokens can only be constructed as shared refs */
-	CORE_API static TSharedRef<FTextToken> Create( const FText& InMessage )
-	{
-		return MakeShareable(new FTextToken(InMessage));
-	}
+	CORE_API static TSharedRef<FTextToken> Create(const FText& InMessage, bool InIsSourceLinkOnLeft = true);
 
 	/** Begin IMessageToken interface */
 	virtual EMessageToken::Type GetType() const override
@@ -232,23 +265,32 @@ public:
 	}
 	/** End IMessageToken interface */
 
-private:
 	/** Private constructor */
-	FTextToken( const FText& InMessage )
+	FTextToken(FPrivateToken, const FText& InMessage, bool InIsSourceLinkOnLeft)
 	{
 		CachedText = InMessage;
+		bIsSourceLinkOnLeft = InIsSourceLinkOnLeft;
 	}
+
+	bool IsSourceLinkOnLeft() const
+	{
+		return bIsSourceLinkOnLeft;
+	}
+
+private:
+	/** Whether the source address is located on the left or right of the text message. */
+	bool bIsSourceLinkOnLeft;
 };
 
 /** Message token with a localized attribute text payload */
 class FDynamicTextToken : public IMessageToken
 {
+	// The private token allows only members or friends to call MakeShared.
+	struct FPrivateToken { explicit FPrivateToken() = default; };
+
 public:
 	/** Factory method, tokens can only be constructed as shared refs */
-	CORE_API static TSharedRef<FDynamicTextToken> Create(const TAttribute<FText>& InMessage)
-	{
-		return MakeShareable(new FDynamicTextToken(InMessage));
-	}
+	CORE_API static TSharedRef<FDynamicTextToken> Create(const TAttribute<FText>& InMessage);
 
 	/** Begin IMessageToken interface */
 	virtual EMessageToken::Type GetType() const override
@@ -267,14 +309,14 @@ public:
 		return Message;
 	}
 
-private:
 	/** Private constructor */
-	FDynamicTextToken(const TAttribute<FText>& InMessage)
+	FDynamicTextToken(FPrivateToken, const TAttribute<FText>& InMessage)
 		: Message(InMessage)
 	{
 		CachedText = InMessage.Get();
 	}
 
+private:
 	/** The attribute text of this message */
 	TAttribute<FText> Message;
 };
@@ -282,12 +324,12 @@ private:
 /** Basic message token with an icon/image payload */
 class FImageToken : public IMessageToken
 {
+	// The private token allows only members or friends to call MakeShared.
+	struct FPrivateToken { explicit FPrivateToken() = default; };
+
 public:
 	/** Factory method, tokens can only be constructed as shared refs */
-	CORE_API static TSharedRef<FImageToken> Create( const FName& InImageName )
-	{
-		return MakeShareable(new FImageToken(InImageName));
-	}
+	CORE_API static TSharedRef<FImageToken> Create(const FName& InImageName);
 
 	/** Begin IMessageToken interface */
 	virtual EMessageToken::Type GetType() const override
@@ -302,14 +344,14 @@ public:
 		return ImageName;
 	}
 
-private:
 	/** Private constructor */
-	FImageToken( const FName& InImageName )
+	FImageToken(FPrivateToken, const FName& InImageName)
 		: ImageName(InImageName)
 	{
 		CachedText = FText::FromName( InImageName );
 	}
 
+private:
 	/** A name to be used as a brush in this message */
 	FName ImageName;
 };
@@ -317,12 +359,12 @@ private:
 /** Basic message token with a severity payload */
 class FSeverityToken : public IMessageToken
 {
+	// The private token allows only members or friends to call MakeShared.
+	struct FPrivateToken { explicit FPrivateToken() = default; };
+
 public:
 	/** Factory method, tokens can only be constructed as shared refs */
-	CORE_API static TSharedRef<FSeverityToken> Create( EMessageSeverity::Type InSeverity )
-	{
-		return MakeShareable(new FSeverityToken(InSeverity));
-	}
+	CORE_API static TSharedRef<FSeverityToken> Create(EMessageSeverity::Type InSeverity);
 
 	/** Begin IMessageToken interface */
 	virtual EMessageToken::Type GetType() const override
@@ -337,14 +379,14 @@ public:
 		return Severity;
 	}
 
-private:
 	/** Private constructor */
-	FSeverityToken( EMessageSeverity::Type InSeverity )
+	FSeverityToken(FPrivateToken, EMessageSeverity::Type InSeverity)
 		: Severity(InSeverity)
 	{
 		CachedText = FTokenizedMessage::GetSeverityText( InSeverity );
 	}
 
+private:
 	/** A severity for this token */
 	EMessageSeverity::Type Severity;
 };
@@ -352,12 +394,12 @@ private:
 /** Basic message token that defaults is activated method to traverse a URL */
 class FURLToken : public IMessageToken
 {
+	// The private token allows only members or friends to call MakeShared.
+	struct FPrivateToken { explicit FPrivateToken() = default; };
+
 public:
 	/** Factory method, tokens can only be constructed as shared refs */
-	CORE_API static TSharedRef<FURLToken> Create( const FString& InURL, const FText& InMessage = FText() )
-	{
-		return MakeShareable(new FURLToken(InURL, InMessage));
-	}
+	CORE_API static TSharedRef<FURLToken> Create(const FString& InURL, const FText& InMessage = FText());
 
 	/** Begin IMessageToken interface */
 	virtual EMessageToken::Type GetType() const override
@@ -372,15 +414,15 @@ public:
 		return URL;
 	}
 
-	DECLARE_DELEGATE_RetVal_OneParam(FString, FGenerateURL, const FString&);
-	CORE_API static FGenerateURL& OnGenerateURL()
+	/** Private constructor */
+	inline FURLToken(FPrivateToken, const FString& InURL, const FText& InMessage)
+		: FURLToken(InURL, InMessage)
 	{
-		return GenerateURL;
 	}
 
 private:
 	/** Private constructor */
-	FURLToken( const FString& InURL, const FText& InMessage );
+	FURLToken(const FString& InURL, const FText& InMessage);
 
 	/**
 	 * Delegate used to visit a URL
@@ -391,9 +433,6 @@ private:
 
 	/** The URL we will follow */
 	FString URL;
-
-	/** The delegate we will use to generate our URL */
-	CORE_API static FGenerateURL GenerateURL;
 };
 
 /** 
@@ -402,6 +441,9 @@ private:
  */
 class FAssetNameToken : public IMessageToken
 {
+	// The private token allows only members or friends to call MakeShared.
+	struct FPrivateToken { explicit FPrivateToken() = default; };
+
 public:
 	/** Factory method, tokens can only be constructed as shared refs */
 	CORE_API static TSharedRef<FAssetNameToken> Create(const FString& InAssetName, const FText& InMessage = FText());
@@ -420,14 +462,20 @@ public:
 	}
 
 	DECLARE_DELEGATE_OneParam(FOnGotoAsset, const FString&);
-	CORE_API static FOnGotoAsset& OnGotoAsset()
+	static FOnGotoAsset& OnGotoAsset()
 	{
 		return GotoAsset;
 	}
 
+	/** Private constructor */
+	inline FAssetNameToken(FPrivateToken, const FString& InAssetName, const FText& InMessage)
+		: FAssetNameToken(InAssetName, InMessage)
+	{
+	}
+
 private:
 	/** Private constructor */
-	FAssetNameToken( const FString& InAssetName, const FText& InMessage );
+	FAssetNameToken(const FString& InAssetName, const FText& InMessage);
 
 	/**
 	 * Delegate used to find a file
@@ -448,6 +496,9 @@ private:
  */
 class FDocumentationToken : public IMessageToken
 {
+	// The private token allows only members or friends to call MakeShared.
+	struct FPrivateToken { explicit FPrivateToken() = default; };
+
 public:
 	/** Factory method, tokens can only be constructed as shared refs */
 	CORE_API static TSharedRef<FDocumentationToken> Create(const FString& InDocumentationLink, const FString& InPreviewExcerptLink = FString(), const FString& InPreviewExcerptName = FString());
@@ -477,9 +528,14 @@ public:
 		return PreviewExcerptName;
 	}
 
+	inline FDocumentationToken(FPrivateToken, const FString& InDocumentationLink, const FString& InPreviewExcerptLink, const FString& InPreviewExcerptName)
+		: FDocumentationToken(InDocumentationLink, InPreviewExcerptLink, InPreviewExcerptName)
+	{
+	}
+
 protected:
 	/** Protected constructor */
-	FDocumentationToken( FString InDocumentationLink, FString InPreviewExcerptLink, FString InPreviewExcerptName );
+	FDocumentationToken(const FString& InDocumentationLink, const FString& InPreviewExcerptLink, const FString& InPreviewExcerptName);
 
 private:
 	/** The documentation path we link to when clicked */
@@ -494,6 +550,7 @@ private:
 
 
 DECLARE_DELEGATE(FOnActionTokenExecuted);
+DECLARE_DELEGATE_RetVal(bool, FCanExecuteActionToken);
 
 /**
  * Message token that performs an action when activated.
@@ -501,18 +558,19 @@ DECLARE_DELEGATE(FOnActionTokenExecuted);
 class FActionToken
 	: public IMessageToken
 {
+	// The private token allows only members or friends to call MakeShared.
+	struct FPrivateToken { explicit FPrivateToken() = default; };
+
 public:
 
-	/** Factory method, tokens can only be constructed as shared refs */
-	CORE_API static TSharedRef<FActionToken> Create( const FText& ActionName, const FText& ActionDescription, const FOnActionTokenExecuted& Action, bool bInSingleUse=false )
-	{
-		return MakeShareable(new FActionToken(ActionName, ActionDescription, Action, bInSingleUse));
-	}
+	/** Factory methods, tokens can only be constructed as shared refs */
+	CORE_API static TSharedRef<FActionToken> Create(const FText& InActionName, const FText& InActionDescription, const FOnActionTokenExecuted& InAction, bool bInSingleUse = false);
+	CORE_API static TSharedRef<FActionToken> Create(const FText& InActionName, const FText& InActionDescription, const FOnActionTokenExecuted& InAction, const FCanExecuteActionToken& InCanExecuteAction, bool bInSingleUse = false);
 
 	/** Executes the assigned action delegate. */
 	void ExecuteAction()
 	{
-		Action.ExecuteIfBound();
+		ActionDelegate.ExecuteIfBound();
 		bActionExecuted = true;
 	}
 
@@ -525,10 +583,14 @@ public:
 	/** Returns true if the action can be activated */
 	bool CanExecuteAction() const
 	{
-		return Action.IsBound() && (!bSingleUse || !bActionExecuted);
+		return ActionDelegate.IsBound() && (!bSingleUse || !bActionExecuted) && (!CanExecuteActionDelegate.IsBound() || CanExecuteActionDelegate.Execute());
 	}
 
-public:
+	/** Returns true if the action is properly set */
+	bool IsValidAction() const
+	{
+		return ActionDelegate.IsBound();
+	}
 
 	// IMessageToken interface
 	virtual EMessageToken::Type GetType() const override
@@ -536,11 +598,31 @@ public:
 		return EMessageToken::Action;
 	}
 
+	inline FActionToken(FPrivateToken, const FText& InActionName, const FText& InActionDescription, const FOnActionTokenExecuted& InAction, bool bInSingleUse)
+		: FActionToken(InActionName, InActionDescription, InAction, bInSingleUse)
+	{
+	}
+
+	inline FActionToken(FPrivateToken, const FText& InActionName, const FText& InActionDescription, const FOnActionTokenExecuted& InAction, const FCanExecuteActionToken& InCanExecuteAction, bool bInSingleUse)
+		: FActionToken(InActionName, InActionDescription, InAction, InCanExecuteAction, bInSingleUse)
+	{
+	}
+
 protected:
 
-	/** Hidden constructor. */
+	/** Hidden constructors. */
 	FActionToken(const FText& InActionName, const FText& InActionDescription, const FOnActionTokenExecuted& InAction, bool bInSingleUse)
-		: Action(InAction)
+		: ActionDelegate(InAction)
+		, ActionDescription(InActionDescription)
+		, bSingleUse(bInSingleUse)
+		, bActionExecuted(false)
+	{
+		CachedText = InActionName;
+	}
+
+	FActionToken(const FText& InActionName, const FText& InActionDescription, const FOnActionTokenExecuted& InAction, const FCanExecuteActionToken& InCanExecuteAction, bool bInSingleUse)
+		: ActionDelegate(InAction)
+		, CanExecuteActionDelegate(InCanExecuteAction)
 		, ActionDescription(InActionDescription)
 		, bSingleUse(bInSingleUse)
 		, bActionExecuted(false)
@@ -551,7 +633,10 @@ protected:
 private:
 
 	/** Holds a delegate that is executed when this token is activated. */
-	FOnActionTokenExecuted Action;
+	FOnActionTokenExecuted ActionDelegate;
+
+	/** Holds a delegate that is executed to know whether this token's action can actually execute. */
+	FCanExecuteActionToken CanExecuteActionDelegate;
 
 	/** The action's description text. */
 	const FText ActionDescription;
@@ -567,13 +652,13 @@ private:
 class FTutorialToken
 	: public IMessageToken
 {
+	// The private token allows only members or friends to call MakeShared.
+	struct FPrivateToken { explicit FPrivateToken() = default; };
+
 public:
 
 	/** Factory method, tokens can only be constructed as shared refs */
-	CORE_API static TSharedRef<FTutorialToken> Create( const FString& TutorialAssetName )
-	{
-		return MakeShareable(new FTutorialToken(TutorialAssetName));
-	}
+	CORE_API static TSharedRef<FTutorialToken> Create(const FString& TutorialAssetName);
 
 public:
 
@@ -590,6 +675,11 @@ public:
 		return TutorialAssetName;
 	}
 
+	FTutorialToken(FPrivateToken, const FString& InTutorialAssetName)
+		: FTutorialToken(InTutorialAssetName)
+	{
+	}
+
 protected:
 	/** Protected constructor */
 	FTutorialToken( const FString& InTutorialAssetName )
@@ -602,3 +692,61 @@ private:
 	FString TutorialAssetName;
 };
 
+/** 
+ * Basic message token that defaults its activated method to select an actor in the opened level
+ */
+class FActorToken : public IMessageToken
+{
+	// The private token allows only members or friends to call MakeShared.
+	struct FPrivateToken { explicit FPrivateToken() = default; };
+
+public:
+	/** Factory method, tokens can only be constructed as shared refs */
+	CORE_API static TSharedRef<FActorToken> Create(const FString& InActorPath, const FGuid& InActorGuid, const FText& InMessage = FText());
+
+	/** Begin IMessageToken interface */
+	virtual EMessageToken::Type GetType() const override
+	{
+		return EMessageToken::Actor;
+	}
+
+	virtual const FOnMessageTokenActivated& GetOnMessageTokenActivated() const override;
+	/** End IMessageToken interface */
+
+	/** Get the actor name used by this token */
+	const FString& GetActorPath() const
+	{
+		return ActorPath;
+	}
+
+	/** Get the actor guid used by this token */
+	const FGuid& GetActorGuid() const
+	{
+		return ActorGuid;
+	}
+
+	/** Get the delegate for default token activation */
+	static FOnMessageTokenActivated& DefaultOnMessageTokenActivated()
+	{
+		return DefaultMessageTokenActivated;
+	}
+
+	/** Private constructor */
+	inline FActorToken(FPrivateToken, const FString& InActorPath, const FGuid& InActorGuid, const FText& InMessage)
+		: FActorToken(InActorPath, InActorGuid, InMessage)
+	{
+	}
+
+private:
+	/** Private constructor */
+	FActorToken(const FString& InActorPath, const FGuid& InActorGuid, const FText& InMessage);
+
+	/** The actor path we will select */
+	FString ActorPath;
+
+	/** The actor guid we will select */
+	FGuid ActorGuid;
+
+	/** The default activation method, if any */
+	CORE_API static FOnMessageTokenActivated DefaultMessageTokenActivated;
+};

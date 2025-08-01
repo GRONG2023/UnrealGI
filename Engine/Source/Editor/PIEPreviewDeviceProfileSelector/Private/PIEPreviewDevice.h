@@ -3,9 +3,10 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "RHIDefinitions.h"
 #include "Layout/Margin.h"
 #include "PIEPreviewDeviceSpecification.h"
+
+namespace ERHIFeatureLevel { enum Type : int; }
 
 /**
  * FPIEPreviewDevice class stores specific device settings (FPIEPreviewDeviceSpecifications) and, on request, applies them to the Unreal runtime system
@@ -116,6 +117,8 @@ public:
 	void ComputeContentScaledResolution(int32& ScreenWidth, int32& ScreenHeight);
 
 	FString GetProfile() const;
+
+	bool GetSelectorPropertyValue(const FName& PropertyType, FString& PropertyValueOUT) const;
 
 	UTexture2D *GetBezelTexture();
 };

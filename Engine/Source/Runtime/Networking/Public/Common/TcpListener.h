@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "HAL/PlatformProcess.h"
 #include "HAL/Runnable.h"
 #include "IPAddress.h"
 #include "SocketSubsystem.h"
@@ -188,7 +189,7 @@ public:
 			}
 			else
 			{
-				FPlatformProcess::Sleep(SleepTime.GetSeconds());
+				FPlatformProcess::Sleep(static_cast<float>(SleepTime.GetSeconds()));
 			}
 		}
 

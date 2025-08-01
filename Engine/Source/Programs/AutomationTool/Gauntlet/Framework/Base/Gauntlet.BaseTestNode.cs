@@ -1,10 +1,6 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
-using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace Gauntlet
 {
@@ -32,12 +28,17 @@ namespace Gauntlet
 		/// <summary>
 		/// Return the name of this test
 		/// </summary>
-		public abstract string Name { get;  }
+		public abstract string Name { get; }
 
 		/// <summary>
 		/// Returns true if the test has encountered warnings. Test is expected to list any warnings it considers appropriate in the summary
 		/// </summary>
 		public virtual bool HasWarnings { get; protected set; }
+
+		/// <summary>
+		/// Returns reason for the test cancellation
+		/// </summary>
+		public virtual string CancellationReason { get; protected set; }
 
 		/// <summary>
 		/// Returns true if the test was cancelled
@@ -55,11 +56,11 @@ namespace Gauntlet
 		public virtual bool LogWarningsAndErrorsAfterSummary { get; protected set; } = true;
 
 		/// <summary>
-		/// 
+		/// Default BaseTest Constructor
 		/// </summary>
 		public BaseTest()
 		{
-			InnerStatus = TestStatus.NotStarted;
+			SetTestStatus(TestStatus.NotStarted);
 		}
 
 		/// <summary>
@@ -67,6 +68,19 @@ namespace Gauntlet
 		/// </summary>
 		/// <returns></returns>
 		public abstract TestResult GetTestResult();
+
+		/// <summary>
+		/// Set the test result value of the test.
+		/// </summary>
+		/// <param name="InTestResult">New result that the Test should have.</param>
+		public abstract void SetTestResult(TestResult InTestResult);
+
+		/// <summary>
+		/// Add a new test event to be rolled up into the summary at the end of this test.
+		/// </summary>
+		public virtual void AddTestEvent(UnrealTestEvent InEvent)
+		{
+		}
 
 		/// <summary>
 		/// Summarize the result of the test
@@ -83,7 +97,7 @@ namespace Gauntlet
 		/// <returns></returns>
 		public virtual IEnumerable<string> GetWarnings()
 		{
-			return new string[0];
+			return System.Array.Empty<string>();
 		}
 
 		/// <summary>
@@ -92,7 +106,23 @@ namespace Gauntlet
 		/// <returns></returns>
 		public virtual IEnumerable<string> GetErrors()
 		{
-			return new string[0];
+			return System.Array.Empty<string>();
+		}
+
+		public virtual string GetRunLocalCommand(string LaunchingBuildCommand)
+		{
+			string CommandToRunLocally =
+				string.Format("RunUAT {0} -Test={1} ", LaunchingBuildCommand, GetType());
+			return CommandToRunLocally;
+		}
+
+		/// <summary>
+		/// Updates the test status to the passed in value
+		/// </summary>
+		/// <param name="InStatus"></param>
+		protected void SetTestStatus(TestStatus InStatus)
+		{
+			InnerStatus = InStatus;
 		}
 
 		/// <summary>
@@ -101,7 +131,8 @@ namespace Gauntlet
 		/// <returns></returns>
 		protected void MarkTestStarted()
 		{
-			InnerStatus = TestStatus.InProgress;
+			SetTestStatus(TestStatus.InProgress);
+			SetTestResult(TestResult.Invalid);
 		}
 
 		/// <summary>
@@ -110,7 +141,7 @@ namespace Gauntlet
 		/// <returns></returns>
 		protected void MarkTestComplete()
 		{
-			InnerStatus = TestStatus.Complete;
+			SetTestStatus(TestStatus.Complete);
 		}
 
 		/// <summary>
@@ -147,7 +178,7 @@ namespace Gauntlet
 		public virtual bool RestartTest()
 		{
 			CleanupTest();
-			return StartTest(0,1);
+			return StartTest(0, 1);
 		}
 
 		/// <summary>
@@ -160,13 +191,23 @@ namespace Gauntlet
 		}
 
 		/// <summary>
+		/// Sets Cancellation Reason.
+		/// </summary>
+		/// <param name="InReason"></param>
+		/// <returns></returns>
+		public virtual void SetCancellationReason(string InReason)
+		{
+			CancellationReason = InReason;
+		}
+
+		/// <summary>
 		/// Called after the test is completed and shutdown
 		/// </summary>
-		/// <param name="WasCancelled"></param>
+		/// <param name="InReason"></param>
 		/// <returns></returns>
-		public virtual void StopTest(bool InWasCancelled)
+		public virtual void StopTest(StopReason InReason)
 		{
-			WasCancelled = InWasCancelled;
+			WasCancelled = InReason != StopReason.Completed;
 		}
 
 		/// <summary>
@@ -182,7 +223,7 @@ namespace Gauntlet
 		/// Output all defined commandline information for this test to the gauntlet window and exit test early.
 		/// </summary>
 		public virtual void DisplayCommandlineHelp()
-		{ 
+		{
 		}
 	}
 }

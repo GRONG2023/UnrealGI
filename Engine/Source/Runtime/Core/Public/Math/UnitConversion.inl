@@ -1,19 +1,19 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+#pragma once
+
 /** Inline file for UnitConversion.h to separate the implementation from the header */
 
 
 #include "CoreTypes.h"
 #include "CoreFwd.h"
+#include "Misc/OptionalFwd.h"
 
 struct FMath;
 struct FUnitConversion;
 enum class EUnit : uint8;
 enum class EUnitType;
 template<typename NumericType> struct FNumericUnit;
-/// @cond DOXYGEN_WARNINGS
-template<typename OptionalType> struct TOptional;
-/// @endcond
 template<typename ValueType, typename ErrorType> class TValueOrError;
 
 namespace UnitConversion
@@ -24,12 +24,22 @@ namespace UnitConversion
 	CORE_API double AngleUnificationFactor(EUnit From);
 	/** Find the common quantization factor for the specified speed unit. Quantizes to km/h. */
 	CORE_API double SpeedUnificationFactor(EUnit From);
+	/** Find the common quantization factor for the specified angular speed unit. Quantizes to DegreesPerSecond. */
+	CORE_API double AngularSpeedUnificationFactor(EUnit From);
+	/** Find the common quantization factor for the specified acceleration unit. Quantizes to m/s2. */
+	CORE_API double AccelerationUnificationFactor(EUnit From);
 	/** Find the common quantization factor for the specified temperature unit. Quantizes to Kelvin. */
 	CORE_API double TemperatureUnificationFactor(EUnit From);
 	/** Find the common quantization factor for the specified mass unit. Quantizes to Grams. */
 	CORE_API double MassUnificationFactor(EUnit From);
+	/** Find the common quantization factor for the specified density unit. Quantizes to GramsPerCubicCentimeter. */
+	CORE_API double DensityUnificationFactor(EUnit From);
 	/** Find the common quantization factor for the specified force unit. Quantizes to Newtons. */
 	CORE_API double ForceUnificationFactor(EUnit From);
+	/** Find the common quantization factor for the specified torque unit. Quantizes to Newton meters. */
+	CORE_API double TorqueUnificationFactor(EUnit From);
+	/** Find the common quantization factor for the specified position impulse unit. Quantizes to kilogram centimeters. */
+	CORE_API double PositionalImpulseUnificationFactor(EUnit From);
 	/** Find the common quantization factor for the specified frequency unit. Quantizes to KHz. */
 	CORE_API double FrequencyUnificationFactor(EUnit From);
 	/** Find the common quantization factor for the specified data size unit. Quantizes to MB. */
@@ -38,6 +48,8 @@ namespace UnitConversion
 	CORE_API double TimeUnificationFactor(EUnit From);
 	/** Find the common quantization factor for the specified multiplier unit. Quantizes to 1.0 scale (where 1.0 == 100%). */
 	CORE_API double MultiplierUnificationFactor(EUnit From);
+	/** Find the common quantization factor for the specified multiplier unit. Quantizes to 1.0 scale (where 1.0 == 100%). */
+	CORE_API double StressUnificationFactor(EUnit From);
 
 	/** Attempt to parse an expression into a numeric unit */
 	CORE_API TValueOrError<FNumericUnit<double>, FText> TryParseExpression(const TCHAR* InExpression, EUnit DefaultUnit, const FNumericUnit<double>& InExistingValue);
@@ -76,16 +88,22 @@ T FUnitConversion::Convert(T InValue, EUnit From, EUnit To)
 
 	switch(FUnitConversion::GetUnitType(From))
 	{
-		case EUnitType::Distance:			return InValue * DistanceUnificationFactor(From)		* (1.0 / DistanceUnificationFactor(To));
-		case EUnitType::Angle:				return InValue * AngleUnificationFactor(From) 			* (1.0 / AngleUnificationFactor(To));
-		case EUnitType::Speed:				return InValue * SpeedUnificationFactor(From) 			* (1.0 / SpeedUnificationFactor(To));
-		case EUnitType::Mass:				return InValue * MassUnificationFactor(From) 			* (1.0 / MassUnificationFactor(To));
-		case EUnitType::Force:				return InValue * ForceUnificationFactor(From) 			* (1.0 / ForceUnificationFactor(To));
-		case EUnitType::Frequency:			return InValue * FrequencyUnificationFactor(From) 		* (1.0 / FrequencyUnificationFactor(To));
-		case EUnitType::DataSize:			return InValue * DataSizeUnificationFactor(From) 		* (1.0 / DataSizeUnificationFactor(To));
-		case EUnitType::LuminousFlux:		return InValue;
-		case EUnitType::Time:				return InValue * TimeUnificationFactor(From) 			* (1.0 / TimeUnificationFactor(To));
-		case EUnitType::Multipliers:		return InValue * MultiplierUnificationFactor(From) 		* (1.0 / MultiplierUnificationFactor(To));
+		case EUnitType::Distance:			return InValue * DistanceUnificationFactor(From)			* (1.0 / DistanceUnificationFactor(To));
+		case EUnitType::Angle:				return InValue * AngleUnificationFactor(From) 				* (1.0 / AngleUnificationFactor(To));
+		case EUnitType::Speed:				return InValue * SpeedUnificationFactor(From) 				* (1.0 / SpeedUnificationFactor(To));
+		case EUnitType::AngularSpeed:		return InValue * AngularSpeedUnificationFactor(From)		* (1.0 / AngularSpeedUnificationFactor(To));
+		case EUnitType::Acceleration:		return InValue * AccelerationUnificationFactor(From)		* (1.0 / AccelerationUnificationFactor(To));
+		case EUnitType::Mass:				return InValue * MassUnificationFactor(From) 				* (1.0 / MassUnificationFactor(To));
+		case EUnitType::Density:			return InValue * DensityUnificationFactor(From)				* (1.0 / DensityUnificationFactor(To));
+		case EUnitType::Force:				return InValue * ForceUnificationFactor(From) 				* (1.0 / ForceUnificationFactor(To));
+		case EUnitType::Torque:				return InValue * TorqueUnificationFactor(From)				* (1.0 / TorqueUnificationFactor(To));
+		case EUnitType::PositionalImpulse:	return InValue * PositionalImpulseUnificationFactor(From)	* (1.0 / PositionalImpulseUnificationFactor(To));
+		case EUnitType::Frequency:			return InValue * FrequencyUnificationFactor(From) 			* (1.0 / FrequencyUnificationFactor(To));
+		case EUnitType::DataSize:			return InValue * DataSizeUnificationFactor(From) 			* (1.0 / DataSizeUnificationFactor(To));
+		case EUnitType::LuminousFlux:		return InValue;	
+		case EUnitType::Time:				return InValue * TimeUnificationFactor(From) 				* (1.0 / TimeUnificationFactor(To));
+		case EUnitType::Multipliers:		return InValue * MultiplierUnificationFactor(From) 			* (1.0 / MultiplierUnificationFactor(To));
+		case EUnitType::Stress:				return InValue * StressUnificationFactor(From)				* (1.0 / StressUnificationFactor(To));
 		// Temperature conversion is not just a simple multiplication, so needs special treatment
 		case EUnitType::Temperature:
 		{
@@ -178,7 +196,7 @@ EUnit FUnitConversion::CalculateDisplayUnit(T Value, EUnit InUnits)
 	{
 		return QuantizeUnitsToBestFit(Value, InUnits).Units;
 	}
-	else if (DisplayUnits.Num() == 1)
+	if (DisplayUnits.Num() == 1)
 	{
 		return DisplayUnits[0];
 	}
@@ -192,16 +210,35 @@ EUnit FUnitConversion::CalculateDisplayUnit(T Value, EUnit InUnits)
 	int32 BestIndex = 0;
 	for (int32 Index = 0; Index < DisplayUnits.Num() - 1; ++Index)
 	{
-		double This = Convert(Value, InUnits, DisplayUnits[Index]);
-		double Next = Convert(Value, InUnits, DisplayUnits[Index + 1]);
-
-		if (FMath::Abs(FMath::LogX(10.0f, (float)This)) < FMath::Abs(FMath::LogX(10.0f, (float)Next)))
+		T Best, Next;
+		if constexpr (std::is_signed_v<T>)
 		{
-			BestIndex = Index;
+			Best = FMath::Abs(Convert(Value, InUnits, DisplayUnits[BestIndex]));
+			Next = FMath::Abs(Convert(Value, InUnits, DisplayUnits[Index + 1]));
 		}
 		else
 		{
+			Best = Convert(Value, InUnits, DisplayUnits[BestIndex]);
+			Next = Convert(Value, InUnits, DisplayUnits[Index + 1]);
+		}
+
+		if (Best < 1.0 && Next >= 1.0)
+		{
 			BestIndex = Index + 1;
+		}
+		else if (Best < 1.0 && Next < 1.0)
+		{
+			if (Next > Best)
+			{
+				BestIndex = Index + 1;
+			}
+		}
+		else if (Best >= 1.0 && Next >= 1.0)
+		{
+			if (FMath::LogX(10.0f, Next) < FMath::LogX(10.0f, Best))
+			{
+				BestIndex = Index + 1;
+			}
 		}
 	}
 
@@ -235,6 +272,7 @@ FNumericUnit<NumericType>& FNumericUnit<NumericType>::operator=(const FNumericUn
 /** Templated Copy construction/assignment from differing numeric types. Relies on implicit conversion of the two numeric types. */
 template<typename NumericType> template<typename OtherType>
 FNumericUnit<NumericType>::FNumericUnit(const FNumericUnit<OtherType>& Other)
+	: Units(EUnit::Unspecified)
 {
 	(*this) = Other;
 }
@@ -380,51 +418,25 @@ bool FNumericUnit<NumericType>::ExtractNumberBoundary(const TCHAR* Start, const 
 	return true;
 }
 
-/** Global arithmetic operators for number types. Deals with conversion from related units correctly. */
-template<typename NumericType, typename OtherType>
-bool operator==(const FNumericUnit<NumericType>& LHS, const FNumericUnit<OtherType>& RHS)
-{
-	if (LHS.Units != EUnit::Unspecified && RHS.Units != EUnit::Unspecified)
-	{
-		if (LHS.Units == RHS.Units)
-		{
-			return LHS.Value == RHS.Value;
-		}
-		else if (FUnitConversion::AreUnitsCompatible(LHS.Units, RHS.Units))
-		{
-			return LHS.Value == FUnitConversion::Convert(RHS.Value, RHS.Units, LHS.Units);
-		}
-		else
-		{
-			// Invalid conversion
-			return false;
-		}
-	}
-	else
-	{
-		return LHS.Value == RHS.Value;
-	}
-}
-
-template<typename NumericType, typename OtherType>
-bool operator!=(const FNumericUnit<NumericType>& LHS, const FNumericUnit<OtherType>& RHS)
-{
-	return !(LHS == RHS);
-}
-
-
 template <typename NumericType>
 struct TNumericLimits<FNumericUnit<NumericType>> : public TNumericLimits<NumericType>
 { };
 
+template <typename CharType, typename T>
+TStringBuilderBase<CharType>& operator<<(TStringBuilderBase<CharType>& Builder, const FNumericUnit<T>& NumericUnit)
+{
+	Builder << NumericUnit.Value;
+	Builder << ANSITEXTVIEW(" ");
+	Builder << FUnitConversion::GetUnitDisplayString(NumericUnit.Units);
+	return Builder;
+}
+
 template<typename T>
 FString LexToString(const FNumericUnit<T>& NumericUnit)
 {
-	FString String = LexToString(NumericUnit.Value);
-	String += TEXT(" ");
-	String += FUnitConversion::GetUnitDisplayString(NumericUnit.Units);
-
-	return String;
+	TStringBuilder<128> Builder;
+	Builder << NumericUnit;
+	return FString(Builder);
 }
 
 template<typename T>

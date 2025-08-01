@@ -6,14 +6,12 @@
 
 #include "Net/NetworkProfiler.h"
 #include "HAL/FileManager.h"
-#include "Misc/CommandLine.h"
+#include "HAL/IConsoleManager.h"
 #include "Misc/Paths.h"
 #include "Misc/App.h"
-#include "Engine/EngineBaseTypes.h"
 #include "Engine/World.h"
-#include "Serialization/MemoryWriter.h"
-#include "HAL/IConsoleManager.h"
-#include "Engine/Public/TimerManager.h"
+#include "TimerManager.h"
+#include "UObject/UnrealType.h"
 
 #if USE_NETWORK_PROFILER
 
@@ -691,9 +689,6 @@ void FNetworkProfiler::TrackSessionChange( bool bShouldContinueTracking, const F
 			uint8 Type = NPTYPE_EndOfStreamMarker;
 			( *FileWriter ) << Type;
 
-			// Close file writer so we can rename the file to its final destination.
-			FileWriter->Close();
-
 			if (OnNetworkProfileFinished().IsBound())
 			{
 				OnNetworkProfileFinished().Broadcast(FileWriter->GetArchiveName());
@@ -712,7 +707,18 @@ void FNetworkProfiler::TrackSessionChange( bool bShouldContinueTracking, const F
 
 			static int32 Salt = 0;
 			Salt++;		// Use a salt to solve the issue where this function is called so fast it produces the same time (seems to happen during seamless travel)
-			const FString FinalFileName = FPaths::ProfilingDir() + FApp::GetProjectName() + FString::Printf(TEXT("-Pid%i"), FPlatformProcess::GetCurrentProcessId()) + TEXT( "-" ) + FDateTime::Now().ToString() + FString::Printf( TEXT( "[%i]" ), Salt ) + TEXT( ".nprof" );
+
+			FString FileName;
+
+			if (NextFileName.IsEmpty())
+			{
+				FileName = FApp::GetProjectName() + FString::Printf(TEXT("-Pid%i"), FPlatformProcess::GetCurrentProcessId()) + TEXT("-") + FDateTime::Now().ToString() + FString::Printf(TEXT("[%i]"), Salt) + TEXT(".nprof");
+			}
+			else
+			{
+				FileName = MoveTemp(NextFileName);
+			}
+			const FString FinalFileName = FPaths::ProfilingDir() + FileName;
 
 			IFileManager::Get().MakeDirectory( *FPaths::GetPath( FinalFileName ) );
 			FileWriter = IFileManager::Get().CreateFileWriter( *FinalFileName, FILEWRITE_EvenIfReadOnly );
@@ -732,6 +738,11 @@ void FNetworkProfiler::TrackSessionChange( bool bShouldContinueTracking, const F
 
 			//Mark that tracking truly is enabled now
 			bIsTrackingEnabled = bShouldTrackingBeEnabled = true;
+
+			if (OnNetworkProfileStarted().IsBound())
+			{
+				OnNetworkProfileStarted().Broadcast(FileWriter->GetArchiveName());
+			}
 		}
 		else
 		{
@@ -833,6 +844,11 @@ void FNetworkProfiler::TrackWritePropertyHandle( uint16 NumBits, UNetConnection*
 	}
 }
 
+void FNetworkProfiler::SetNextFileName(const FString& FileName)
+{
+	NextFileName = FileName;
+}
+
 /**
  * Processes any network profiler specific exec commands
  *
@@ -846,11 +862,11 @@ bool FNetworkProfiler::Exec( UWorld * InWorld, const TCHAR* Cmd, FOutputDevice &
 {
 	if (FParse::Command(&Cmd, TEXT("ENABLE")))
 	{
-		EnableTracking( true );
+		EnableTracking(true);
 	}
 	else if (FParse::Command(&Cmd, TEXT("DISABLE")))
 	{
-		EnableTracking( false );
+		EnableTracking(false);
 	} 
 	else if (FParse::Command(&Cmd, TEXT("AUTOSTOP")))
 	{

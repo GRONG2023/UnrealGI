@@ -15,14 +15,13 @@
 
 #include "../Resource/SphereGeometry.h"
 
-
 namespace GeometryCollectionTest
 {
 	TSharedPtr<FGeometryCollection> MakeSphereElement(
 		FTransform RootTranform, FTransform GeomTransform,
 		const int NumberOfMaterials = 2)
 	{
-		FSphereGenerator SphereGen;
+		UE::Geometry::FSphereGenerator SphereGen;
 		SphereGen.Radius = 1.f;
 		SphereGen.NumPhi = 16;		// Vertical divisions
 		SphereGen.NumTheta = 16;	// Horizontal divisions
@@ -86,8 +85,10 @@ namespace GeometryCollectionTest
 
 	TSharedPtr<FGeometryCollection> MakeCubeElement(FTransform RootTranform, FTransform GeomTransform)
 	{
-		const TArray<FVector> PointsIn = { FVector(-1,1,-1), FVector(1,1,-1), FVector(1,-1,-1), FVector(-1,-1,-1), FVector(-1,1,1), FVector(1,1,1), FVector(1,-1,1), FVector(-1,-1,1) };
-		const TArray<FVector> NormalsIn = { FVector(-1,1,-1).GetSafeNormal(), FVector(1,1,-1).GetSafeNormal(), FVector(1,-1,-1).GetSafeNormal(), FVector(-1,-1,-1).GetSafeNormal(), FVector(-1,1,1).GetSafeNormal(), FVector(1,1,1).GetSafeNormal(), FVector(1,-1,1).GetSafeNormal(), FVector(-1,-1,1).GetSafeNormal() };
+		using FVector3i = UE::Geometry::FVector3i;
+
+		const TArray<FVector3f> PointsIn = { FVector3f(-1,1,-1), FVector3f(1,1,-1), FVector3f(1,-1,-1), FVector3f(-1,-1,-1), FVector3f(-1,1,1), FVector3f(1,1,1), FVector3f(1,-1,1), FVector3f(-1,-1,1) };
+		const TArray<FVector3f> NormalsIn = { FVector3f(-1,1,-1).GetSafeNormal(), FVector3f(1,1,-1).GetSafeNormal(), FVector3f(1,-1,-1).GetSafeNormal(), FVector3f(-1,-1,-1).GetSafeNormal(), FVector3f(-1,1,1).GetSafeNormal(), FVector3f(1,1,1).GetSafeNormal(), FVector3f(1,-1,1).GetSafeNormal(), FVector3f(-1,-1,1).GetSafeNormal() };
 		const TArray<FVector3i> TrianglesIn = { FVector3i(0,1,2),FVector3i(0,2,3), FVector3i(2,1,6),FVector3i(1,5,6),FVector3i(2,6,7),FVector3i(3,2,7),FVector3i(4,7,3),FVector3i(4,0,3),FVector3i(4,1,0),FVector3i(4,5,1),FVector3i(5,4,7),FVector3i(5,7,6) };
 		const TArray<FVector2f> UVsIn = { FVector2f(0.f,0.f), FVector2f(0.f,0.f), FVector2f(0.f,0.f), FVector2f(0.f,0.f),FVector2f(0.f,0.f), FVector2f(0.f,0.f), FVector2f(0.f,0.f), FVector2f(0.f,0.f) };
 		return GeometryCollection::MakeMeshElement(PointsIn, NormalsIn, TrianglesIn, UVsIn, RootTranform, GeomTransform);
@@ -95,8 +96,10 @@ namespace GeometryCollectionTest
 
 	TSharedPtr<FGeometryCollection> MakeTetrahedronElement(FTransform RootTranform, FTransform GeomTransform)
 	{
-		const TArray<FVector> PointsIn = { FVector(-1,1,-1), FVector(-1,-1,1), FVector(1,-1,-1), FVector(1,1,1) };
-		const TArray<FVector> NormalsIn = { FVector(-1,1,-1).GetSafeNormal(), FVector(-1,-1,1).GetSafeNormal(), FVector(1,-1,-1).GetSafeNormal(), FVector(1,1,1).GetSafeNormal() };
+		using FVector3i = UE::Geometry::FVector3i;
+
+		const TArray<FVector3f> PointsIn = { FVector3f(-1,1,-1), FVector3f(-1,-1,1), FVector3f(1,-1,-1), FVector3f(1,1,1) };
+		const TArray<FVector3f> NormalsIn = { FVector3f(-1,1,-1).GetSafeNormal(), FVector3f(-1,-1,1).GetSafeNormal(), FVector3f(1,-1,-1).GetSafeNormal(), FVector3f(1,1,1).GetSafeNormal() };
 		const TArray<FVector3i> TrianglesIn = { FVector3i(1,0,2), FVector3i(2,1,3), FVector3i(3,2,0), FVector3i(3,0,1) };
 		const TArray<FVector2f> UVsIn = { FVector2f(0.f,0.f), FVector2f(0.f,0.f), FVector2f(0.f,0.f), FVector2f(0.f,0.f) };
 		return GeometryCollection::MakeMeshElement(PointsIn, NormalsIn, TrianglesIn, UVsIn, RootTranform, GeomTransform);
@@ -105,8 +108,8 @@ namespace GeometryCollectionTest
 	TSharedPtr<FGeometryCollection> MakeImportedSphereElement(FTransform RootTranform, FTransform GeomTransform)
 	{
 		FGeometryCollection* Collection = FGeometryCollection::NewGeometryCollection(SphereGeometry::RawVertexArray, SphereGeometry::RawIndicesArray);
-		TManagedArray<FVector>& Vertices = Collection->Vertex;
-		for (int i = 0; i < Vertices.Num(); i++) Vertices[i] = GeomTransform.TransformPosition(Vertices[i]);
+		TManagedArray<FVector3f>& Vertices = Collection->Vertex;
+		for (int i = 0; i < Vertices.Num(); i++) Vertices[i] = FVector3f(GeomTransform.TransformPosition(FVector(Vertices[i])));
 		return TSharedPtr<FGeometryCollection>(Collection);
 	}
 
@@ -114,11 +117,12 @@ namespace GeometryCollectionTest
 	TSharedPtr<FGeometryCollection> MakeGriddedBoxElement(
 		FTransform RootTranform, FTransform GeomTransform,
 		const FVector& Extents = FVector(1, 1, 1),
-		const FIndex3i& EdgeVertices = FIndex3i(4, 4, 4),
+		const UE::Geometry::FIndex3i& EdgeVertices = UE::Geometry::FIndex3i(4, 4, 4),
 		const int NumberOfMaterials = 2)
 	{
-		FGridBoxMeshGenerator BoxGen;
-		BoxGen.Box = FOrientedBox3d(FVector(0), Extents); // box center, box dimensions
+		using GeomVector = UE::Math::TVector<double>;
+		UE::Geometry::FGridBoxMeshGenerator BoxGen;
+		BoxGen.Box = UE::Geometry::FOrientedBox3d(GeomVector::Zero(), GeomVector(Extents)); // box center, box dimensions
 		BoxGen.EdgeVertices = EdgeVertices;
 		BoxGen.Generate();
 
@@ -152,23 +156,27 @@ namespace GeometryCollectionTest
 			SimulationParams.PhysicalMaterialHandle = NewHandle;
 			SimulationParams.Shared.Mass = Params.Mass;
 			SimulationParams.Shared.bMassAsDensity = Params.bMassAsDensity;
-			SimulationParams.Shared.SizeSpecificData[0].CollisionType = Params.CollisionType;
-			SimulationParams.Shared.SizeSpecificData[0].ImplicitType = Params.ImplicitType;
+			SimulationParams.Shared.SizeSpecificData[0].CollisionShapesData[0].CollisionType = Params.CollisionType;
+			SimulationParams.Shared.SizeSpecificData[0].CollisionShapesData[0].ImplicitType = Params.ImplicitType;
+			SimulationParams.Shared.SizeSpecificData[0].CollisionShapesData[0].LevelSetData.MinLevelSetResolution = Params.MinLevelSetResolution;
+			SimulationParams.Shared.SizeSpecificData[0].CollisionShapesData[0].LevelSetData.MaxLevelSetResolution = Params.MaxLevelSetResolution;
+			SimulationParams.Shared.SizeSpecificData[0].CollisionShapesData[0].ImplicitType = Params.ImplicitType;
+			SimulationParams.Shared.SizeSpecificData[0].CollisionShapesData[0].CollisionParticleData.CollisionParticlesFraction = Params.CollisionParticleFraction;
+			SimulationParams.CollisionSampleFraction = Params.CollisionParticleFraction; // this should not be here, must remove/replace SimulationParams.CollisionSampleFraction in other files.
 			SimulationParams.Simulating = Params.Simulating;
 			SimulationParams.EnableClustering = Params.EnableClustering;
 			SimulationParams.InitialLinearVelocity = Params.InitialLinearVelocity;
 			SimulationParams.InitialVelocityType = Params.InitialVelocityType;
 			SimulationParams.DamageThreshold = Params.DamageThreshold;
 			SimulationParams.MaxClusterLevel = Params.MaxClusterLevel;
+			SimulationParams.MaxSimulatedLevel = Params.MaxSimulatedLevel;
 			SimulationParams.ClusterConnectionMethod = Params.ClusterConnectionMethod;
-			SimulationParams.RemoveOnFractureEnabled = Params.RemoveOnFractureEnabled;
 			SimulationParams.CollisionGroup = Params.CollisionGroup;
 			SimulationParams.ClusterGroupIndex = Params.ClusterGroupIndex;
-
-			FSharedSimulationSizeSpecificData Tmp;
-			Tmp.MinLevelSetResolution = Params.MinLevelSetResolution;
-			Tmp.MaxLevelSetResolution = Params.MaxLevelSetResolution;
-			SimulationParams.Shared.SizeSpecificData.Add(Tmp);
+			SimulationParams.LinearDamping = 0;
+			SimulationParams.AngularDamping = 0;
+			SimulationParams.UseCCD = false;
+			SimulationParams.UseMACD = false;
 
 			Chaos::FErrorReporter ErrorReporter;
 			BuildSimulationData(ErrorReporter, *RestCollection.Get(), SimulationParams.Shared);
@@ -189,10 +197,7 @@ namespace GeometryCollectionTest
 				*DynamicCollection, // Game thread collection
 				SimulationParams,
 				SimFilterData,
-				QueryFilterData,
-				nullptr,			// Init func
-				nullptr,			// Cache sync func
-				nullptr);			// Final sync func
+				QueryFilterData);
 		return new FGeometryCollectionWrapper(RestCollection, DynamicCollection, PhysObject);
 	}
 
@@ -224,7 +229,7 @@ namespace GeometryCollectionTest
 			RestCollection->InnerRadius[0] = 1.f;	// Assume sphere w/radius 1
 			RestCollection->OuterRadius[0] = 1.f;	// Assume sphere w/radius 1
 			RestCollection->AddElements(1, FGeometryCollection::TransformGroup);
-			RestCollection->Transform[0] = Params.RootTransform;
+			RestCollection->Transform[0] = FTransform3f(Params.RootTransform);
 			RestCollection->Transform[0].NormalizeRotation();
 			break;
 		default:
@@ -241,7 +246,7 @@ namespace GeometryCollectionTest
 		TSharedPtr<Chaos::FChaosPhysicsMaterial> PhysicalMaterial = MakeShared<Chaos::FChaosPhysicsMaterial>(); InitMaterialToZero(PhysicalMaterial.Get());
 		auto Proxy = FSingleParticlePhysicsProxy::Create(Chaos::FGeometryParticle::CreateParticle());
 		auto& Particle = Proxy->GetGameThreadAPI();
-		Particle.SetGeometry(TUniquePtr<TPlane<FReal, 3>>(new TPlane<FReal, 3>(FVector(0), FVector(0, 0, 1))));
+		Particle.SetGeometry(MakeImplicitObjectPtr<Chaos::TPlane<FReal, 3>>(FVector(0), FVector(0, 0, 1)));
 
 		FCollisionFilterData FilterData;
 		FilterData.Word1 = 0xFFFF;
@@ -265,7 +270,7 @@ namespace GeometryCollectionTest
 	, Module(FChaosSolversModule::GetModule())
 	, Solver(nullptr)
 	{
-		Solver = Module->CreateSolver(nullptr,Parameters.ThreadingMode);	//until refactor is done, solver must be created after thread change
+		Solver = Module->CreateSolver(nullptr, /*AsyncDt=*/-1, Parameters.ThreadingMode);	//until refactor is done, solver must be created after thread change
 		ChaosTest::InitSolverSettings(Solver);
 	}
 

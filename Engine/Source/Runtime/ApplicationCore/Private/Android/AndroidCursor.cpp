@@ -21,11 +21,11 @@ void FAndroidCursor::ComputeUIScaleFactor()
 
 	if (ScreenWidth > ScreenHeight)
 	{
-		UIScaleFactor = (ScreenRect.Bottom - ScreenRect.Top) / (float)ScreenHeight;
+		UIScaleFactor = (float)(ScreenRect.Bottom - ScreenRect.Top) / (float)ScreenHeight;
 	}
 	else
 	{
-		UIScaleFactor = (ScreenRect.Right - ScreenRect.Left) / (float)ScreenWidth;
+		UIScaleFactor = (float)(ScreenRect.Right - ScreenRect.Left) / (float)ScreenWidth;
 	}
 }
 
@@ -69,10 +69,10 @@ void FAndroidCursor::Lock(const RECT* const Bounds)
 	}
 	else
 	{
-		CursorClipRect.Min.X = FMath::TruncToInt(Bounds->left);
-		CursorClipRect.Min.Y = FMath::TruncToInt(Bounds->top);
-		CursorClipRect.Max.X = FMath::TruncToInt(Bounds->right) - 1;
-		CursorClipRect.Max.Y = FMath::TruncToInt(Bounds->bottom) - 1;
+		CursorClipRect.Min.X = (int32)Bounds->left;
+		CursorClipRect.Min.Y = (int32)Bounds->top;
+		CursorClipRect.Max.X = (int32)Bounds->right - 1;
+		CursorClipRect.Max.Y = (int32)Bounds->bottom - 1;
 	}
 
 	FVector2D Position = GetPosition();

@@ -18,9 +18,9 @@ class IDetailPropertyRow;
 class FDetailGroup : public IDetailGroup, public TSharedFromThis<FDetailGroup>
 {
 public:
-	FDetailGroup( const FName InGroupName, TSharedRef<FDetailCategoryImpl> InParentCategory, const FText& InLocalizedDisplayName, const bool bStartExpanded = false );
+	FDetailGroup( const FName InGroupName, TSharedRef<FDetailCategoryImpl> InParentCategory, const FText& InLocalizedDisplayName, const bool bInStartExpanded = false );
 
-	/** IDetailGroup interface */     
+	/** IDetailGroup interface */
 	virtual FDetailWidgetRow& HeaderRow() override;
 	virtual IDetailPropertyRow& HeaderProperty( TSharedRef<IPropertyHandle> PropertyHandle ) override;
 	virtual FDetailWidgetRow& AddWidgetRow() override;
@@ -29,22 +29,33 @@ public:
 
 	virtual void ToggleExpansion( bool bExpand ) override;
 	virtual bool GetExpansionState() const override;
+	virtual void SetDisplayMode(EDetailGroupDisplayMode Mode) override;
+
+	/** IDetailLayoutRow interface */
+	virtual FName GetRowName() const override { return GroupName; }
+	virtual TOptional<FResetToDefaultOverride> GetCustomResetToDefault() const override;
 
 	TSharedPtr<FDetailPropertyRow> GetHeaderPropertyRow() const;
 	TSharedPtr<FPropertyNode> GetHeaderPropertyNode() const;
 
 	/** @return The name of the group */
-	virtual FName GetGroupName() const override { return GroupName; }
+	virtual FName GetGroupName() const override { return GetRowName(); }
 
+	/** @return The localized display name of the group */
+	const FText& GetGroupDisplayName() const { return LocalizedDisplayName; }
+	
 	/** Whether or not the group has columns */
 	bool HasColumns() const;
 
 	/** @return true if this row should be ticked */
 	bool RequiresTick() const;
 
-	/** @return true is this row should start expanded */
+	/** @return true if this row should start expanded */
 	bool ShouldStartExpanded() const { return bStartExpanded; }
 
+	/** @return the display mode that this group should use */
+	EDetailGroupDisplayMode GetDisplayMode() const { return DisplayMode; }
+	
 	/** 
 	 * @return The visibility of this group
 	 */
@@ -85,6 +96,11 @@ public:
 	*/
 	virtual FDetailGroupReset& GetOnDetailGroupReset() override { return OnDetailGroupReset; }
 
+	/**
+	 * Return an optional PasteFromText delegate
+	 */
+	virtual TSharedPtr<FOnPasteFromText> OnPasteFromText() const override { return PasteFromTextDelegate; }
+
 private:
 	/**
 	 * Called when the name of the group is clicked to expand the group
@@ -97,8 +113,8 @@ private:
 	TSharedRef<SWidget> MakeNameWidget();
 
 	/** Called when the "Reset to Default" button for the location has been clicked */
-	FReply OnResetClicked();
-	EVisibility GetResetVisibility() const;
+	void OnResetClicked();
+	bool IsResetVisible() const;
 	bool GetAllChildrenPropertyHandles(TArray<TSharedPtr<IPropertyHandle>>& PropertyHandles) const;
 	bool GetAllChildrenPropertyHandlesRecursive(const FDetailGroup* CurrentDetailGroup, TArray<TSharedPtr<IPropertyHandle>>& PropertyHandles) const;
 
@@ -118,9 +134,13 @@ private:
 	/** Name identifier of this group */
 	FName GroupName;
 	/** Whether the detail group should start expanded or not */
-	bool bStartExpanded;
+	bool bStartExpanded : 1;
 	/** Permit resetting all the properties in the group */
-	bool ResetEnabled;
+	bool bResetEnabled : 1;
+	/** Whether the detail group should appear like it's a subcategory or not */
+	EDetailGroupDisplayMode DisplayMode;
 	/**	Delegate called when user press the Group Reset ui */
 	FDetailGroupReset OnDetailGroupReset;
+	/** Delegate handling pasting an optionally tagged text snippet */
+	TSharedPtr<FOnPasteFromText> PasteFromTextDelegate;
 };

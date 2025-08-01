@@ -1,25 +1,27 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Kismet/KismetSystemLibrary.h"
-#include "HAL/IConsoleManager.h"
+#include "AssetRegistry/ARFilter.h"
+#include "Blueprint/BlueprintSupport.h"
+#include "Blueprint/BlueprintExceptionInfo.h"
+#include "Engine/AssetManagerTypes.h"
+#include "Engine/BlueprintGeneratedClass.h"
 #include "HAL/FileManager.h"
-#include "GenericPlatform/GenericApplication.h"
-#include "Misc/CommandLine.h"
-#include "Misc/App.h"
+#include "Engine/OverlapResult.h"
+#include "Engine/World.h"
 #include "Misc/EngineVersion.h"
-#include "Misc/Paths.h"
+#include "EngineLogs.h"
+#include "Misc/PackageName.h"
+#include "GameFramework/PlayerController.h"
 #include "Misc/RuntimeErrors.h"
-#include "UObject/GCObject.h"
-#include "EngineGlobals.h"
-#include "Components/ActorComponent.h"
+#include "Misc/URLRequestFilter.h"
 #include "TimerManager.h"
-#include "GameFramework/Actor.h"
-#include "CollisionQueryParams.h"
-#include "WorldCollision.h"
+#include "UObject/EnumProperty.h"
+#include "UObject/Package.h"
 #include "Components/PrimitiveComponent.h"
 #include "Engine/CollisionProfile.h"
+#include "Engine/GameViewportClient.h"
 #include "Kismet/GameplayStatics.h"
-#include "LatentActions.h"
 #include "Engine/LocalPlayer.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Engine/GameEngine.h"
@@ -32,36 +34,74 @@
 #include "Camera/CameraComponent.h"
 #include "Engine/StreamableManager.h"
 #include "Net/OnlineEngineInterface.h"
+#include "UObject/FieldPath.h"
 #include "UserActivityTracking.h"
 #include "KismetTraceUtils.h"
 #include "Engine/AssetManager.h"
+#include "RHI.h"
+#include "HAL/IConsoleManager.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "UObject/FieldPathProperty.h"
 #include "Commandlets/Commandlet.h"
-#include "PlatformFeatures.h"
+#include "UObject/PropertyAccessUtil.h"
+#include "UObject/TextProperty.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(KismetSystemLibrary)
 
 //////////////////////////////////////////////////////////////////////////
 // UKismetSystemLibrary
 
 #define LOCTEXT_NAMESPACE "UKismetSystemLibrary"
 
-const FName PropertyGetFailedWarning = FName("PropertyGetFailedWarning");
-const FName PropertySetFailedWarning = FName("PropertySetFailedWarning");
+namespace UE::Blueprint::Private
+{
+	const FName PropertyGetFailedWarning = FName("PropertyGetFailedWarning");
+	const FName PropertySetFailedWarning = FName("PropertySetFailedWarning");
+
+	bool bBlamePrintString = false;
+	FAutoConsoleVariableRef CVarBlamePrintString(TEXT("bp.BlamePrintString"), 
+		bBlamePrintString,
+		TEXT("When true, prints the Blueprint Asset and Function that generated calls to Print String. Useful for tracking down screen message spam."));
+
+	void Generic_SetStructurePropertyByName(UObject* OwnerObject, FName StructPropertyName, FStructProperty* SrcStructProperty, const void* SrcStructAddr)
+	{
+		if (OwnerObject != nullptr)
+		{
+			FStructProperty* DestStructProperty = FindFProperty<FStructProperty>(OwnerObject->GetClass(), StructPropertyName);
+
+			// SrcStructAddr and SrcStructProperty can be null in certain scenarios.
+			// For example, retrieving an element reference from an array of user structs in BP can result in a null source.
+			// We'll report a BP exception in that case, but we also need to soft-fail here to prevent an assert in CopyValuesInternal.
+
+			bool bCanSetStructureProperty =
+				(DestStructProperty != nullptr) &&
+				(SrcStructProperty != nullptr) &&
+				(SrcStructAddr != nullptr) &&
+				SrcStructProperty->SameType(DestStructProperty);
+
+			if (bCanSetStructureProperty)
+			{
+				void* DestStructAddr = DestStructProperty->ContainerPtrToValuePtr<void>(OwnerObject);
+				DestStructProperty->CopyValuesInternal(DestStructAddr, SrcStructAddr, 1);
+			}
+		}
+	}
+}
 
 UKismetSystemLibrary::UKismetSystemLibrary(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
 	FBlueprintSupport::RegisterBlueprintWarning(
 		FBlueprintWarningDeclaration(
-			PropertyGetFailedWarning,
-			LOCTEXT("PropertyGetFailedWarning", "Property Get Failed")
+			UE::Blueprint::Private::PropertyGetFailedWarning,
+			LOCTEXT("UE::Blueprint::Private::PropertyGetFailedWarning", "Property Get Failed")
 		)
 	);
 
 	FBlueprintSupport::RegisterBlueprintWarning(
 		FBlueprintWarningDeclaration(
-			PropertySetFailedWarning,
-			LOCTEXT("PropertySetFailedWarning", "Property Set Failed")
+			UE::Blueprint::Private::PropertySetFailedWarning,
+			LOCTEXT("UE::Blueprint::Private::PropertySetFailedWarning", "Property Set Failed")
 		)
 	);
 }
@@ -82,6 +122,11 @@ FString UKismetSystemLibrary::GetPathName(const UObject* Object)
 	return GetPathNameSafe(Object);
 }
 
+FSoftObjectPath UKismetSystemLibrary::GetSoftObjectPath(const UObject* Object)
+{
+	return FSoftObjectPath(Object);
+}
+
 FString UKismetSystemLibrary::GetSystemPath(const UObject* Object)
 {
 	if (Object && Object->IsAsset())
@@ -99,14 +144,11 @@ FString UKismetSystemLibrary::GetSystemPath(const UObject* Object)
 
 FString UKismetSystemLibrary::GetDisplayName(const UObject* Object)
 {
-#if WITH_EDITOR
 	if (const AActor* Actor = Cast<const AActor>(Object))
 	{
-		return Actor->GetActorLabel();
+		return Actor->GetActorNameOrLabel();
 	}
-#endif
-
-	if (const UActorComponent* Component = Cast<const UActorComponent>(Object))
+	else if (const UActorComponent* Component = Cast<const UActorComponent>(Object))
 	{
 		return Component->GetReadableName();
 	}
@@ -114,9 +156,32 @@ FString UKismetSystemLibrary::GetDisplayName(const UObject* Object)
 	return Object ? Object->GetName() : FString();
 }
 
-FString UKismetSystemLibrary::GetClassDisplayName(UClass* Class)
+FString UKismetSystemLibrary::GetClassDisplayName(const UClass* Class)
 {
 	return Class ? Class->GetName() : FString();
+}
+
+FSoftClassPath UKismetSystemLibrary::GetSoftClassPath(const UClass* Class)
+{
+	return FSoftClassPath(Class);
+}
+
+FTopLevelAssetPath UKismetSystemLibrary::GetClassTopLevelAssetPath(const UClass* Class)
+{
+	// This will succeed for all valid classes as they are never subobjects
+	return FTopLevelAssetPath(Class);
+}
+
+FTopLevelAssetPath UKismetSystemLibrary::GetStructTopLevelAssetPath(const UScriptStruct* Struct)
+{
+	// This will succeed for all valid structs as they are never subobjects
+	return FTopLevelAssetPath(Struct);
+}
+
+FTopLevelAssetPath UKismetSystemLibrary::GetEnumTopLevelAssetPath(const UEnum* Enum)
+{
+	// This will succeed for all valid enums as they are never subobjects
+	return FTopLevelAssetPath(Enum);
 }
 
 UObject* UKismetSystemLibrary::GetOuterObject(const UObject* Object)
@@ -127,6 +192,16 @@ UObject* UKismetSystemLibrary::GetOuterObject(const UObject* Object)
 FString UKismetSystemLibrary::GetEngineVersion()
 {
 	return FEngineVersion::Current().ToString();
+}
+
+FString UKismetSystemLibrary::GetBuildVersion()
+{
+	return FApp::GetBuildVersion();
+}
+
+FString UKismetSystemLibrary::GetBuildConfiguration()
+{
+	return LexToString(FApp::GetBuildConfiguration());
 }
 
 FString UKismetSystemLibrary::GetGameName()
@@ -183,25 +258,47 @@ FString UKismetSystemLibrary::GetPlatformUserDir()
 
 bool UKismetSystemLibrary::DoesImplementInterface(const UObject* TestObject, TSubclassOf<UInterface> Interface)
 {
-	if (Interface != NULL && TestObject != NULL)
+	if (TestObject)
 	{
-		checkf(Interface->IsChildOf(UInterface::StaticClass()), TEXT("Interface parameter %s is not actually an interface."), *Interface->GetName());
-		return TestObject->GetClass()->ImplementsInterface(Interface);
+		return UKismetSystemLibrary::DoesClassImplementInterface(TestObject->GetClass(), Interface);
 	}
 
 	return false;
 }
 
-float UKismetSystemLibrary::GetGameTimeInSeconds(const UObject* WorldContextObject)
+bool UKismetSystemLibrary::DoesClassImplementInterface(const UClass* TestClass, TSubclassOf<UInterface> Interface)
+{
+	if (TestClass && Interface)
+	{
+		if (!Interface->IsChildOf(UInterface::StaticClass()))
+		{
+			LogRuntimeError(FText::Format(LOCTEXT("DoesClassImplementInterface.InvalidInterface", "Interface parameter {0} is not actually an interface."), FText::AsCultureInvariant(Interface->GetName())));
+			return false;
+		}
+
+		return TestClass->ImplementsInterface(Interface);
+	}
+
+	return false;
+}
+
+double UKismetSystemLibrary::GetGameTimeInSeconds(const UObject* WorldContextObject)
 {
 	UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
-	return World ? World->GetTimeSeconds() : 0.f;
+	return World ? World->GetTimeSeconds() : 0.0;
 }
 
 int64 UKismetSystemLibrary::GetFrameCount()
 {
 	return (int64) GFrameCounter;
 }
+
+#if WITH_EDITOR
+double UKismetSystemLibrary::GetPlatformTime_Seconds()
+{
+	return FPlatformTime::Seconds();
+}
+#endif//WITH_EDITOR
 
 bool UKismetSystemLibrary::IsServer(const UObject* WorldContextObject)
 {
@@ -227,8 +324,13 @@ bool UKismetSystemLibrary::IsStandalone(const UObject* WorldContextObject)
 
 bool UKismetSystemLibrary::IsSplitScreen(const UObject* WorldContextObject)
 {
+	return HasMultipleLocalPlayers(WorldContextObject);
+}
+
+bool UKismetSystemLibrary::HasMultipleLocalPlayers(const UObject* WorldContextObject)
+{
 	UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
-	return World ? GEngine->IsSplitScreen(World) : false;
+	return World ? GEngine->HasMultipleLocalPlayers(World) : false;
 }
 
 bool UKismetSystemLibrary::IsPackagedForDistribution()
@@ -246,14 +348,38 @@ FString UKismetSystemLibrary::GetDeviceId()
 	return FPlatformMisc::GetDeviceId();
 }
 
+UClass* UKismetSystemLibrary::Conv_ObjectToClass(UObject* Object, TSubclassOf<UObject> Class)
+{
+	return Cast<UClass>(Object);
+}
+
 UObject* UKismetSystemLibrary::Conv_InterfaceToObject(const FScriptInterface& Interface)
 {
 	return Interface.GetObject();
 }
 
-void UKismetSystemLibrary::PrintString(const UObject* WorldContextObject, const FString& InString, bool bPrintToScreen, bool bPrintToLog, FLinearColor TextColor, float Duration)
+bool UKismetSystemLibrary::IsValidInterface(const FScriptInterface& Interface)
 {
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST) // Do not Print in Shipping or Test
+	return IsValid(Interface.GetObject());
+}
+
+void UKismetSystemLibrary::LogString(const FString& InString, bool bPrintToLog)
+{
+#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST) || USE_LOGGING_IN_SHIPPING // Do not Print in Shipping or Test unless explictly enabled.
+	if(bPrintToLog)
+	{
+		UE_LOG(LogBlueprintUserMessages, Log, TEXT("%s"), *InString);
+	}
+	else
+	{
+		UE_LOG(LogBlueprintUserMessages, Verbose, TEXT("%s"), *InString);
+	}	
+#endif
+}
+
+void UKismetSystemLibrary::PrintString(const UObject* WorldContextObject, const FString& InString, bool bPrintToScreen, bool bPrintToLog, FLinearColor TextColor, float Duration, const FName Key)
+{
+#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST) || USE_LOGGING_IN_SHIPPING // Do not Print in Shipping or Test unless explictly enabled.
 
 	UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::ReturnNull);
 	FString Prefix;
@@ -277,7 +403,18 @@ void UKismetSystemLibrary::PrintString(const UObject* WorldContextObject, const 
 			}
 		}
 	}
-	
+
+#if DO_BLUEPRINT_GUARD
+	if (UE::Blueprint::Private::bBlamePrintString && !FBlueprintContextTracker::Get().GetCurrentScriptStack().IsEmpty())
+	{
+		const TArrayView<const FFrame* const> ScriptStack = FBlueprintContextTracker::Get().GetCurrentScriptStack();
+		Prefix = FString::Printf(TEXT("Blueprint Object: %s\nBlueprint Function: %s\n%s"), 
+			*ScriptStack.Last()->Node->GetPackage()->GetPathName(),
+			*ScriptStack.Last()->Node->GetName(),
+			*Prefix);
+	}
+#endif
+
 	const FString FinalDisplayString = Prefix + InString;
 	FString FinalLogString = FinalDisplayString;
 
@@ -313,7 +450,12 @@ void UKismetSystemLibrary::PrintString(const UObject* WorldContextObject, const 
 			{
 				GConfig->GetFloat( TEXT("Kismet"), TEXT("PrintStringDuration"), Duration, GEngineIni );
 			}
-			GEngine->AddOnScreenDebugMessage((uint64)-1, Duration, TextColor.ToFColor(true), FinalDisplayString);
+			uint64 InnerKey = -1;
+			if (Key != NAME_None)
+			{
+				InnerKey = GetTypeHash(Key);
+			}
+			GEngine->AddOnScreenDebugMessage(InnerKey, Duration, TextColor.ToFColor(true), FinalDisplayString);
 		}
 		else
 		{
@@ -323,16 +465,16 @@ void UKismetSystemLibrary::PrintString(const UObject* WorldContextObject, const 
 #endif
 }
 
-void UKismetSystemLibrary::PrintText(const UObject* WorldContextObject, const FText InText, bool bPrintToScreen, bool bPrintToLog, FLinearColor TextColor, float Duration)
+void UKismetSystemLibrary::PrintText(const UObject* WorldContextObject, const FText InText, bool bPrintToScreen, bool bPrintToLog, FLinearColor TextColor, float Duration, const FName Key)
 {
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST) // Do not Print in Shipping or Test
-	PrintString(WorldContextObject, InText.ToString(), bPrintToScreen, bPrintToLog, TextColor, Duration);
+#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST) || USE_LOGGING_IN_SHIPPING // Do not Print in Shipping or Test unless explictly enabled.
+	PrintString(WorldContextObject, InText.ToString(), bPrintToScreen, bPrintToLog, TextColor, Duration, Key);
 #endif
 }
 
 void UKismetSystemLibrary::PrintWarning(const FString& InString)
 {
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST) // Do not Print in Shipping or Test
+#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST) || USE_LOGGING_IN_SHIPPING // Do not Print in Shipping or Test unless explictly enabled.
 	PrintString(NULL, InString, true, true);
 #endif
 }
@@ -352,17 +494,41 @@ void UKismetSystemLibrary::SetWindowTitle(const FText& Title)
 
 void UKismetSystemLibrary::ExecuteConsoleCommand(const UObject* WorldContextObject, const FString& Command, APlayerController* Player)
 {
-	// First, try routing through the primary player
 	UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::ReturnNull);
-	APlayerController* TargetPC = Player || !World ? Player : World->GetFirstPlayerController();
-	if (TargetPC)
+
+	// First, try routing through the console manager directly.
+	// This is needed in case the Exec commands have been compiled out, meaning that GEngine->Exec wouldn't route to anywhere.
+	if (IConsoleManager::Get().ProcessUserConsoleInput(*Command, *GLog, World) == false)
 	{
-		TargetPC->ConsoleCommand(Command, true);
+		APlayerController* TargetPC = Player || !World ? Player : World->GetFirstPlayerController();
+
+		// Second, try routing through the primary player
+		if (TargetPC)
+		{
+			TargetPC->ConsoleCommand(Command, true);
+		}
+		else
+		{
+			GEngine->Exec(World, *Command);
+		}
+	}
+}
+
+FString UKismetSystemLibrary::GetConsoleVariableStringValue(const FString& VariableName)
+{
+	FString Value = "";
+	
+	IConsoleVariable* Variable = IConsoleManager::Get().FindConsoleVariable(*VariableName);
+	if (Variable)
+	{
+		Value = Variable->GetString();
 	}
 	else
 	{
-		GEngine->Exec(World, *Command);
+		UE_LOG(LogBlueprintUserMessages, Warning, TEXT("Failed to find console variable '%s'."), *VariableName);
 	}
+	
+	return Value;
 }
 
 float UKismetSystemLibrary::GetConsoleVariableFloatValue(const FString& VariableName)
@@ -446,7 +612,7 @@ FTimerHandle UKismetSystemLibrary::K2_InvalidateTimerHandle(FTimerHandle& TimerH
 	return TimerHandle;
 }
 
-FTimerHandle UKismetSystemLibrary::K2_SetTimer(UObject* Object, FString FunctionName, float Time, bool bLooping, float InitialStartDelay, float InitialStartDelayVariance)
+FTimerHandle UKismetSystemLibrary::K2_SetTimer(UObject* Object, FString FunctionName, float Time, bool bLooping, bool bMaxOncePerFrame, float InitialStartDelay, float InitialStartDelayVariance)
 {
 	FName const FunctionFName(*FunctionName);
 
@@ -465,10 +631,32 @@ FTimerHandle UKismetSystemLibrary::K2_SetTimer(UObject* Object, FString Function
 
 	FTimerDynamicDelegate Delegate;
 	Delegate.BindUFunction(Object, FunctionFName);
-	return K2_SetTimerDelegate(Delegate, Time, bLooping, InitialStartDelay);
+	return K2_SetTimerDelegate(Delegate, Time, bLooping, bMaxOncePerFrame, InitialStartDelay);
 }
 
-FTimerHandle UKismetSystemLibrary::K2_SetTimerDelegate(FTimerDynamicDelegate Delegate, float Time, bool bLooping, float InitialStartDelay, float InitialStartDelayVariance)
+FTimerHandle UKismetSystemLibrary::K2_SetTimerForNextTick(UObject* Object, FString FunctionName)
+{
+	FName const FunctionFName(*FunctionName);
+
+	if (Object)
+	{
+		UFunction* const Func = Object->FindFunction(FunctionFName);
+		if (Func && (Func->ParmsSize > 0))
+		{
+			// User passed in a valid function, but one that takes parameters
+			// FTimerDynamicDelegate expects zero parameters and will choke on execution if it tries
+			// to execute a mismatched function
+			UE_LOG(LogBlueprintUserMessages, Warning, TEXT("SetTimerForNextTick passed a function (%s) that expects parameters."), *FunctionName);
+			return FTimerHandle();
+		}
+	}
+
+	FTimerDynamicDelegate Delegate;
+	Delegate.BindUFunction(Object, FunctionFName);
+	return K2_SetTimerForNextTickDelegate(Delegate);
+}
+
+FTimerHandle UKismetSystemLibrary::K2_SetTimerDelegate(FTimerDynamicDelegate Delegate, float Time, bool bLooping, bool bMaxOncePerFrame, float InitialStartDelay, float InitialStartDelayVariance)
 {
 	FTimerHandle Handle;
 	if (Delegate.IsBound())
@@ -486,13 +674,35 @@ FTimerHandle UKismetSystemLibrary::K2_SetTimerDelegate(FTimerDynamicDelegate Del
 
 			FTimerManager& TimerManager = World->GetTimerManager();
 			Handle = TimerManager.K2_FindDynamicTimerHandle(Delegate);
-			TimerManager.SetTimer(Handle, Delegate, Time, bLooping, (Time + InitialStartDelay));
+			TimerManager.SetTimer(Handle, Delegate, Time, FTimerManagerTimerParameters { .bLoop = bLooping, .bMaxOncePerFrame = bMaxOncePerFrame, .FirstDelay = Time + InitialStartDelay });
 		}
 	}
 	else
 	{
 		UE_LOG(LogBlueprintUserMessages, Warning, 
 			TEXT("SetTimer passed a bad function (%s) or object (%s)"),
+			*Delegate.GetFunctionName().ToString(), *GetNameSafe(Delegate.GetUObject()));
+	}
+
+	return Handle;
+}
+
+FTimerHandle UKismetSystemLibrary::K2_SetTimerForNextTickDelegate(FTimerDynamicDelegate Delegate)
+{
+	FTimerHandle Handle;
+	if (Delegate.IsBound())
+	{
+		const UWorld* const World = GEngine->GetWorldFromContextObject(Delegate.GetUObject(), EGetWorldErrorMode::LogAndReturnNull);
+		if (World)
+		{
+			FTimerManager& TimerManager = World->GetTimerManager();
+			Handle = TimerManager.SetTimerForNextTick(Delegate);
+		}
+	}
+	else
+	{
+		UE_LOG(LogBlueprintUserMessages, Warning,
+			TEXT("SetTimerForNextTick passed a bad function (%s) or object (%s)"),
 			*Delegate.GetFunctionName().ToString(), *GetNameSafe(Delegate.GetUObject()));
 	}
 
@@ -910,6 +1120,24 @@ void UKismetSystemLibrary::SetFloatPropertyByName(UObject* Object, FName Propert
 	}
 }
 
+void UKismetSystemLibrary::SetDoublePropertyByName(UObject* Object, FName PropertyName, double Value)
+{
+	if (Object != nullptr)
+	{
+		if (FDoubleProperty* DoubleProp = FindFProperty<FDoubleProperty>(Object->GetClass(), PropertyName))
+		{
+			DoubleProp->SetPropertyValue_InContainer(Object, Value);
+		}
+		// It's entirely possible that the property refers to a native float property,
+		// so we need to make that check here.
+		else if (FFloatProperty* FloatProp = FindFProperty<FFloatProperty>(Object->GetClass(), PropertyName))
+		{
+			float floatValue = static_cast<float>(Value);
+			FloatProp->SetPropertyValue_InContainer(Object, floatValue);
+		}
+	}
+}
+
 void UKismetSystemLibrary::SetBoolPropertyByName(UObject* Object, FName PropertyName, bool Value)
 {
 	if(Object != NULL)
@@ -1002,6 +1230,36 @@ void UKismetSystemLibrary::SetFieldPathPropertyByName(UObject* Object, FName Pro
 	}
 }
 
+DEFINE_FUNCTION(UKismetSystemLibrary::execSetCollisionProfileNameProperty)
+{
+	P_GET_OBJECT(UObject, OwnerObject);
+	P_GET_PROPERTY(FNameProperty, StructPropertyName);
+
+	Stack.StepCompiledIn<FStructProperty>(nullptr);
+	FStructProperty* SrcStructProperty = CastField<FStructProperty>(Stack.MostRecentProperty);
+	void* SrcStructAddr = Stack.MostRecentPropertyAddress;
+
+	P_FINISH;
+	P_NATIVE_BEGIN;
+	UE::Blueprint::Private::Generic_SetStructurePropertyByName(OwnerObject, StructPropertyName, SrcStructProperty, SrcStructAddr);
+	P_NATIVE_END;
+}
+
+DEFINE_FUNCTION(UKismetSystemLibrary::execSetStructurePropertyByName)
+{
+	P_GET_OBJECT(UObject, OwnerObject);
+	P_GET_PROPERTY(FNameProperty, StructPropertyName);
+
+	Stack.StepCompiledIn<FStructProperty>(nullptr);
+	FStructProperty* SrcStructProperty = CastField<FStructProperty>(Stack.MostRecentProperty);
+	void* SrcStructAddr = Stack.MostRecentPropertyAddress;
+
+	P_FINISH;
+	P_NATIVE_BEGIN;
+	UE::Blueprint::Private::Generic_SetStructurePropertyByName(OwnerObject, StructPropertyName, SrcStructProperty, SrcStructAddr);
+	P_NATIVE_END;
+}
+
 void UKismetSystemLibrary::SetSoftClassPropertyByName(UObject* Object, FName PropertyName, const TSoftClassPtr<UObject>& Value)
 {
 	if (Object != NULL)
@@ -1035,6 +1293,55 @@ TSoftObjectPtr<UObject> UKismetSystemLibrary::Conv_SoftObjPathToSoftObjRef(const
 	return TSoftObjectPtr<UObject>(SoftObjectPath);
 }
 
+FSoftObjectPath UKismetSystemLibrary::Conv_SoftObjRefToSoftObjPath(TSoftObjectPtr<UObject> SoftObjectReference)
+{
+	return SoftObjectReference.ToSoftObjectPath();
+}
+
+FTopLevelAssetPath UKismetSystemLibrary::MakeTopLevelAssetPath(const FString& FullPathOrPackageName, const FString& AssetName)
+{
+	if (!FullPathOrPackageName.StartsWith(TEXT("/")))
+	{
+		FFormatNamedArguments Args;
+		Args.Add(TEXT("PathString"), FText::AsCultureInvariant(FullPathOrPackageName));
+		LogRuntimeError(FText::Format(NSLOCTEXT("KismetSystemLibrary", "TopLevelAssetPath_UnrootedPath",
+			"Short path \"{PathString}\" not valid for MakeTopLevelAssetPath. Path must be rooted with /, for example /Game."), Args));
+
+		return FTopLevelAssetPath();
+	}
+	
+	if (AssetName.IsEmpty())
+	{
+		FTopLevelAssetPath Result = FTopLevelAssetPath(FullPathOrPackageName);
+		if (!Result.IsValid() && !FullPathOrPackageName.IsEmpty())
+		{
+			FFormatNamedArguments Args;
+			Args.Add(TEXT("PathString"), FText::AsCultureInvariant(FullPathOrPackageName));
+			LogRuntimeError(FText::Format(NSLOCTEXT("KismetSystemLibrary", "TopLevelAssetPath_PathStringInvalid",
+				"String \"{PathString}\" is invalid for MakeTopLevelAssetPath."), Args));
+		}
+		return Result;
+	}
+	else
+	{
+		FTopLevelAssetPath Result = FTopLevelAssetPath(*FullPathOrPackageName, *AssetName);
+		if (!Result.IsValid())
+		{
+			FFormatNamedArguments Args;
+			Args.Add(TEXT("PackageName"), FText::AsCultureInvariant(FullPathOrPackageName));
+			Args.Add(TEXT("AssetName"), FText::AsCultureInvariant(AssetName));
+			LogRuntimeError(FText::Format(NSLOCTEXT("KismetSystemLibrary", "TopLevelAssetPath_PackageAndAssetStringsInvalid",
+				"Strings (\"{PackageName}\", \"{AssetName}\") are invalid for MakeTopLevelAssetPath."), Args));
+		}
+		return Result;
+	}
+}
+
+void UKismetSystemLibrary::BreakTopLevelAssetPath(const FTopLevelAssetPath& InTopLevelAssetPath, FString& PathString)
+{
+	InTopLevelAssetPath.ToString(PathString);
+}
+
 FSoftClassPath UKismetSystemLibrary::MakeSoftClassPath(const FString& PathString)
 {
 	FSoftClassPath SoftClassPath(PathString);
@@ -1056,6 +1363,12 @@ void UKismetSystemLibrary::BreakSoftClassPath(FSoftClassPath InSoftClassPath, FS
 TSoftClassPtr<UObject> UKismetSystemLibrary::Conv_SoftClassPathToSoftClassRef(const FSoftClassPath& SoftClassPath)
 {
 	return TSoftClassPtr<UObject>(SoftClassPath);
+}
+
+FSoftClassPath UKismetSystemLibrary::Conv_SoftObjRefToSoftClassPath(TSoftClassPtr<UObject> SoftClassReference)
+{
+	// TSoftClassPtr and FSoftClassPath are not directly compatible
+	return FSoftClassPath(SoftClassReference.ToString());
 }
 
 bool UKismetSystemLibrary::IsValidSoftObjectReference(const TSoftObjectPtr<UObject>& SoftObjectReference)
@@ -1086,6 +1399,15 @@ UObject* UKismetSystemLibrary::LoadAsset_Blocking(TSoftObjectPtr<UObject> Asset)
 bool UKismetSystemLibrary::IsValidSoftClassReference(const TSoftClassPtr<UObject>& SoftClassReference)
 {
 	return !SoftClassReference.IsNull();
+}
+
+FTopLevelAssetPath UKismetSystemLibrary::GetSoftClassTopLevelAssetPath(TSoftClassPtr<UObject> SoftClassReference)
+{
+	const FSoftObjectPath& ObjectPath = SoftClassReference.ToSoftObjectPath();
+
+	// Class paths should never have a subpath
+	ensure(ObjectPath.GetSubPathString().IsEmpty());
+	return ObjectPath.GetAssetPath();
 }
 
 FString UKismetSystemLibrary::Conv_SoftClassReferenceToString(const TSoftClassPtr<UObject>& SoftClassReference)
@@ -1128,12 +1450,24 @@ TSoftClassPtr<UObject> UKismetSystemLibrary::Conv_ClassToSoftClassReference(cons
 	return TSoftClassPtr<UObject>(*Class);
 }
 
+FSoftComponentReference UKismetSystemLibrary::Conv_ComponentReferenceToSoftComponentReference(const FComponentReference& ComponentReference)
+{
+	FSoftComponentReference SoftComponentReference;
+	SoftComponentReference.ComponentProperty = ComponentReference.ComponentProperty;
+	SoftComponentReference.PathToComponent = ComponentReference.PathToComponent;
+	if (ComponentReference.OtherActor.IsValid())
+	{
+		SoftComponentReference.OtherActor = ComponentReference.OtherActor.Get();
+	}
+	return SoftComponentReference;
+}
+
 void UKismetSystemLibrary::SetTextPropertyByName(UObject* Object, FName PropertyName, const FText& Value)
 {
-	if(Object != NULL)
+	if(Object != nullptr)
 	{
 		FTextProperty* TextProp = FindFProperty<FTextProperty>(Object->GetClass(), PropertyName);
-		if(TextProp != NULL)
+		if(TextProp != nullptr)
 		{
 			TextProp->SetPropertyValue_InContainer(Object, Value);
 		}		
@@ -1142,24 +1476,37 @@ void UKismetSystemLibrary::SetTextPropertyByName(UObject* Object, FName Property
 
 void UKismetSystemLibrary::SetVectorPropertyByName(UObject* Object, FName PropertyName, const FVector& Value)
 {
-	if(Object != NULL)
+	if(Object != nullptr)
 	{
 		UScriptStruct* VectorStruct = TBaseStructure<FVector>::Get();
 		FStructProperty* VectorProp = FindFProperty<FStructProperty>(Object->GetClass(), PropertyName);
-		if(VectorProp != NULL && VectorProp->Struct == VectorStruct)
+		if(VectorProp != nullptr && VectorProp->Struct == VectorStruct)
 		{
 			*VectorProp->ContainerPtrToValuePtr<FVector>(Object) = Value;
 		}		
 	}
 }
 
+void UKismetSystemLibrary::SetVector3fPropertyByName(UObject* Object, FName PropertyName, const FVector3f& Value)
+{
+	if (Object != nullptr)
+	{
+		UScriptStruct* Vector3fStruct = TVariantStructure<FVector3f>::Get();
+		FStructProperty* Vector3fProp = FindFProperty<FStructProperty>(Object->GetClass(), PropertyName);
+		if (Vector3fProp != nullptr && Vector3fProp->Struct == Vector3fStruct)
+		{
+			*Vector3fProp->ContainerPtrToValuePtr<FVector3f>(Object) = Value;
+		}
+	}
+}
+
 void UKismetSystemLibrary::SetRotatorPropertyByName(UObject* Object, FName PropertyName, const FRotator& Value)
 {
-	if(Object != NULL)
+	if(Object != nullptr)
 	{
 		UScriptStruct* RotatorStruct = TBaseStructure<FRotator>::Get();
 		FStructProperty* RotatorProp = FindFProperty<FStructProperty>(Object->GetClass(), PropertyName);
-		if(RotatorProp != NULL && RotatorProp->Struct == RotatorStruct)
+		if(RotatorProp != nullptr && RotatorProp->Struct == RotatorStruct)
 		{
 			*RotatorProp->ContainerPtrToValuePtr<FRotator>(Object) = Value;
 		}		
@@ -1194,11 +1541,11 @@ void UKismetSystemLibrary::SetColorPropertyByName(UObject* Object, FName Propert
 
 void UKismetSystemLibrary::SetTransformPropertyByName(UObject* Object, FName PropertyName, const FTransform& Value)
 {
-	if(Object != NULL)
+	if(Object != nullptr)
 	{
 		UScriptStruct* TransformStruct = TBaseStructure<FTransform>::Get();
 		FStructProperty* TransformProp = FindFProperty<FStructProperty>(Object->GetClass(), PropertyName);
-		if(TransformProp != NULL && TransformProp->Struct == TransformStruct)
+		if(TransformProp != nullptr && TransformProp->Struct == TransformStruct)
 		{
 			*TransformProp->ContainerPtrToValuePtr<FTransform>(Object) = Value;
 		}		
@@ -1213,10 +1560,10 @@ void UKismetSystemLibrary::SetCollisionProfileNameProperty(UObject* Object, FNam
 
 void UKismetSystemLibrary::Generic_SetStructurePropertyByName(UObject* OwnerObject, FName StructPropertyName, const void* SrcStructAddr)
 {
-	if (OwnerObject != NULL)
+	if (OwnerObject != nullptr)
 	{
 		FStructProperty* StructProp = FindFProperty<FStructProperty>(OwnerObject->GetClass(), StructPropertyName);
-		if (StructProp != NULL)
+		if (StructProp != nullptr)
 		{
 			void* Dest = StructProp->ContainerPtrToValuePtr<void>(OwnerObject);
 			StructProp->CopyValuesInternal(Dest, SrcStructAddr, 1);
@@ -1891,6 +2238,25 @@ bool UKismetSystemLibrary::CapsuleTraceMultiByProfile(const UObject* WorldContex
 	return bHit;
 }
 
+#if WITH_EDITOR
+TArray<FName> UKismetSystemLibrary::GetCollisionProfileNames()
+{
+	TArray<TSharedPtr<FName>> SharedNames;
+	UCollisionProfile::GetProfileNames(SharedNames);
+
+	TArray<FName> Names;
+	Names.Reserve(SharedNames.Num());
+	for (const TSharedPtr<FName>& SharedName : SharedNames)
+	{
+		if (const FName* Name = SharedName.Get())
+		{
+			Names.Add(*Name);
+		}
+	}
+
+	return Names;
+}
+#endif
 
 /** Draw a debug line */
 void UKismetSystemLibrary::DrawDebugLine(const UObject* WorldContextObject, FVector const LineStart, FVector const LineEnd, FLinearColor Color, float LifeTime, float Thickness)
@@ -2173,6 +2539,18 @@ void UKismetSystemLibrary::Delay(const UObject* WorldContextObject, float Durati
 	}
 }
 
+void UKismetSystemLibrary::DelayUntilNextTick(const UObject* WorldContextObject, FLatentActionInfo LatentInfo)
+{
+	if (UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull))
+	{
+		FLatentActionManager& LatentActionManager = World->GetLatentActionManager();
+		if (LatentActionManager.FindExistingAction<FDelayAction>(LatentInfo.CallbackTarget, LatentInfo.UUID) == NULL)
+		{
+			LatentActionManager.AddNewAction(LatentInfo.CallbackTarget, LatentInfo.UUID, new FDelayUntilNextTickAction(LatentInfo));
+		}
+	}
+}
+
 // Delay execution by Duration seconds; Calling again before the delay has expired will reset the countdown to Duration.
 void UKismetSystemLibrary::RetriggerableDelay(const UObject* WorldContextObject, float Duration, FLatentActionInfo LatentInfo)
 {
@@ -2260,7 +2638,7 @@ int32 UKismetSystemLibrary::GetRenderingDetailMode()
 	static const IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.DetailMode"));
 
 	// clamp range
-	int32 Ret = FMath::Clamp(CVar->GetInt(), 0, 2);
+	int32 Ret = FMath::Clamp(CVar->GetInt(), 0, DM_MAX - 1);
 
 	return Ret;
 }
@@ -2367,7 +2745,9 @@ void UKismetSystemLibrary::LaunchURL(const FString& URL)
 {
 	if (!URL.IsEmpty())
 	{
-		FPlatformProcess::LaunchURL(*URL, nullptr, nullptr);
+		UE::Core::FURLRequestFilter Filter(TEXT("SystemLibrary.LaunchURLFilter"), GEngineIni);
+
+		FPlatformProcess::LaunchURLFiltered(*URL, nullptr, nullptr, Filter);
 	}
 }
 
@@ -2744,25 +3124,57 @@ bool UKismetSystemLibrary::GetEditorProperty(UObject* Object, const FName Proper
 	return false;
 }
 
-bool UKismetSystemLibrary::Generic_GetEditorProperty(const UObject* Object, const FProperty* ObjectProp, void* ValuePtr, const FProperty* ValueProp)
+bool UKismetSystemLibrary::Generic_GetEditorProperty(const UObject* Object, const FName PropertyName, void* ValuePtr, const FProperty* ValueProp)
 {
-	const EPropertyAccessResultFlags AccessResult = PropertyAccessUtil::GetPropertyValue_Object(ObjectProp, Object, ValueProp, ValuePtr, INDEX_NONE);
+	const FProperty* ObjectProp = PropertyAccessUtil::FindPropertyByName(PropertyName, Object->GetClass());
+	TOptional<EPropertyAccessResultFlags> SparseDataAccessResult;
+	if ((!ObjectProp || ObjectProp->HasAnyPropertyFlags(CPF_Deprecated)) && Object->HasAllFlags(RF_ClassDefaultObject))
+	{
+		// look for a sparse member of the same name - the sparse data is treated as an extension
+		// of the class default object by the details panel:
+		const UStruct* SparseDataStruct = Object->GetClass()->GetSparseClassDataStruct();
+		if (SparseDataStruct)
+		{
+			const FProperty* SparseProp = PropertyAccessUtil::FindPropertyByName(PropertyName, SparseDataStruct);
+			if (SparseProp)
+			{
+				void* SparseDest = Object->GetClass()->GetOrCreateSparseClassData();
+
+				SparseDataAccessResult = PropertyAccessUtil::GetPropertyValue_InContainer(
+					SparseProp,
+					SparseDest,
+					ValueProp,
+					ValuePtr,
+					INDEX_NONE);
+			}
+		}
+	}
+
+	if (!ObjectProp && !SparseDataAccessResult.IsSet())
+	{
+		FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' on '%s' (%s) was missing"), *PropertyName.ToString(), *Object->GetPathName(), *Object->GetClass()->GetName()), ELogVerbosity::Warning, UE::Blueprint::Private::PropertyGetFailedWarning);
+		return false;
+	}
+
+	const EPropertyAccessResultFlags AccessResult = SparseDataAccessResult.IsSet() ?
+		SparseDataAccessResult.GetValue() : 
+		PropertyAccessUtil::GetPropertyValue_Object(ObjectProp, Object, ValueProp, ValuePtr, INDEX_NONE);
 
 	if (EnumHasAnyFlags(AccessResult, EPropertyAccessResultFlags::PermissionDenied))
 	{
 		if (EnumHasAnyFlags(AccessResult, EPropertyAccessResultFlags::AccessProtected))
 		{
-			FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' on '%s' (%s) is protected and cannot be read"), *ObjectProp->GetName(), *Object->GetPathName(), *Object->GetClass()->GetName()), ELogVerbosity::Warning, PropertyGetFailedWarning);
+			FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' on '%s' (%s) is protected and cannot be read"), *ObjectProp->GetName(), *Object->GetPathName(), *Object->GetClass()->GetName()), ELogVerbosity::Warning, UE::Blueprint::Private::PropertyGetFailedWarning);
 			return false;
 		}
 
-		FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' on '%s' (%s) cannot be read"), *ObjectProp->GetName(), *Object->GetPathName(), *Object->GetClass()->GetName()), ELogVerbosity::Warning, PropertyGetFailedWarning);
+		FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' on '%s' (%s) cannot be read"), *ObjectProp->GetName(), *Object->GetPathName(), *Object->GetClass()->GetName()), ELogVerbosity::Warning, UE::Blueprint::Private::PropertyGetFailedWarning);
 		return false;
 	}
 
 	if (EnumHasAnyFlags(AccessResult, EPropertyAccessResultFlags::ConversionFailed))
 	{
-		FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' (%s) on '%s' (%s) tried to get to a property value of the incorrect type (%s)"), *ObjectProp->GetName(), *ObjectProp->GetClass()->GetName(), *Object->GetPathName(), *Object->GetClass()->GetName(), *ValueProp->GetClass()->GetName()), ELogVerbosity::Warning, PropertyGetFailedWarning);
+		FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' (%s) on '%s' (%s) tried to get to a property value of the incorrect type (%s)"), *ObjectProp->GetName(), *ObjectProp->GetClass()->GetName(), *Object->GetPathName(), *Object->GetClass()->GetName(), *ValueProp->GetClass()->GetName()), ELogVerbosity::Warning, UE::Blueprint::Private::PropertyGetFailedWarning);
 		return false;
 	}
 
@@ -2802,17 +3214,9 @@ DEFINE_FUNCTION(UKismetSystemLibrary::execGetEditorProperty)
 
 	if (Object)
 	{
-		const FProperty* ObjectProp = PropertyAccessUtil::FindPropertyByName(PropertyName, Object->GetClass());
-		if (ObjectProp)
-		{
-			P_NATIVE_BEGIN;
-			bResult = Generic_GetEditorProperty(Object, ObjectProp, ValuePtr, ValueProp);
-			P_NATIVE_END;
-		}
-		else
-		{
-			FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' on '%s' (%s) was missing"), *PropertyName.ToString(), *Object->GetPathName(), *Object->GetClass()->GetName()), ELogVerbosity::Warning, PropertyGetFailedWarning);
-		}
+		P_NATIVE_BEGIN;
+		bResult = Generic_GetEditorProperty(Object, PropertyName, ValuePtr, ValueProp);
+		P_NATIVE_END;
 	}
 
 	*(bool*)RESULT_PARAM = bResult;
@@ -2825,43 +3229,92 @@ bool UKismetSystemLibrary::SetEditorProperty(UObject* Object, const FName Proper
 	return false;
 }
 
-bool UKismetSystemLibrary::Generic_SetEditorProperty(UObject* Object, const FProperty* ObjectProp, const void* ValuePtr, const FProperty* ValueProp, const EPropertyAccessChangeNotifyMode ChangeNotifyMode)
+bool UKismetSystemLibrary::Generic_SetEditorProperty(UObject* Object, const FName PropertyName, const void* ValuePtr, const FProperty* ValueProp, const EPropertyAccessChangeNotifyMode ChangeNotifyMode)
 {
-	const EPropertyAccessResultFlags AccessResult = PropertyAccessUtil::SetPropertyValue_Object(ObjectProp, Object, ValueProp, ValuePtr, INDEX_NONE, PropertyAccessUtil::EditorReadOnlyFlags, ChangeNotifyMode);
+	TOptional<EPropertyAccessResultFlags> SparseDataAccessResult;
+	const FProperty* ObjectProp = PropertyAccessUtil::FindPropertyByName(PropertyName, Object->GetClass());
+	if ((!ObjectProp || ObjectProp->HasAnyPropertyFlags(CPF_Deprecated)) && Object->HasAllFlags(RF_ClassDefaultObject))
+	{
+		// look for a sparse member of the same name - the sparse data is treated as an extension
+		// of the class default object by the details panel:
+		const UStruct* SparseDataStruct = Object->GetClass()->GetSparseClassDataStruct();
+		if (SparseDataStruct)
+		{
+			const FProperty* SparseProp = PropertyAccessUtil::FindPropertyByName(PropertyName, SparseDataStruct);
+			if (SparseProp)
+			{
+				void* SparseDest = Object->GetClass()->GetOrCreateSparseClassData();
+
+				SparseDataAccessResult = PropertyAccessUtil::SetPropertyValue_InContainer(
+					SparseProp,
+					SparseDest,
+					ValueProp,
+					ValuePtr,
+					INDEX_NONE,
+					PropertyAccessUtil::EditorReadOnlyFlags,
+					PropertyAccessUtil::IsObjectTemplate(Object),
+					[SparseProp, Object, ChangeNotifyMode]()
+					{
+						return PropertyAccessUtil::BuildBasicChangeNotify(SparseProp, Object, ChangeNotifyMode);
+					});
+				if (*SparseDataAccessResult == EPropertyAccessResultFlags::Success)
+				{
+					if(UBlueprintGeneratedClass* AsBPGC = Cast<UBlueprintGeneratedClass>(Object->GetClass()))
+					{
+						AsBPGC->bIsSparseClassDataSerializable = true;
+					}
+					else
+					{
+						FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' on '%s' (%s) is in sparse class data but not owned by a BlueprintGeneratedClass and may not be saved"), *ObjectProp->GetName(), *Object->GetPathName(), *Object->GetClass()->GetName()), ELogVerbosity::Warning, UE::Blueprint::Private::PropertySetFailedWarning);
+					}
+				}
+			}
+		}
+	}
+
+	if(!ObjectProp && !SparseDataAccessResult.IsSet())
+	{
+		FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' on '%s' (%s) was missing"), *PropertyName.ToString(), *Object->GetPathName(), *Object->GetClass()->GetName()), ELogVerbosity::Warning, UE::Blueprint::Private::PropertySetFailedWarning);
+		return false;
+	}
+
+	const EPropertyAccessResultFlags AccessResult = SparseDataAccessResult.IsSet() ?
+		SparseDataAccessResult.GetValue() :
+		PropertyAccessUtil::SetPropertyValue_Object(ObjectProp, Object, ValueProp, ValuePtr, INDEX_NONE, PropertyAccessUtil::EditorReadOnlyFlags, ChangeNotifyMode);
 
 	if (EnumHasAnyFlags(AccessResult, EPropertyAccessResultFlags::PermissionDenied))
 	{
 		if (EnumHasAnyFlags(AccessResult, EPropertyAccessResultFlags::AccessProtected))
 		{
-			FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' on '%s' (%s) is protected and cannot be set"), *ObjectProp->GetName(), *Object->GetPathName(), *Object->GetClass()->GetName()), ELogVerbosity::Warning, PropertySetFailedWarning);
+			FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' on '%s' (%s) is protected and cannot be set"), *ObjectProp->GetName(), *Object->GetPathName(), *Object->GetClass()->GetName()), ELogVerbosity::Warning, UE::Blueprint::Private::PropertySetFailedWarning);
 			return false;
 		}
 
 		if (EnumHasAnyFlags(AccessResult, EPropertyAccessResultFlags::CannotEditTemplate))
 		{
-			FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' on '%s' (%s) cannot be edited on templates"), *ObjectProp->GetName(), *Object->GetPathName(), *Object->GetClass()->GetName()), ELogVerbosity::Warning, PropertySetFailedWarning);
+			FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' on '%s' (%s) cannot be edited on templates"), *ObjectProp->GetName(), *Object->GetPathName(), *Object->GetClass()->GetName()), ELogVerbosity::Warning, UE::Blueprint::Private::PropertySetFailedWarning);
 			return false;
 		}
 
 		if (EnumHasAnyFlags(AccessResult, EPropertyAccessResultFlags::CannotEditInstance))
 		{
-			FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' on '%s' (%s) cannot be edited on instances"), *ObjectProp->GetName(), *Object->GetPathName(), *Object->GetClass()->GetName()), ELogVerbosity::Warning, PropertySetFailedWarning);
+			FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' on '%s' (%s) cannot be edited on instances"), *ObjectProp->GetName(), *Object->GetPathName(), *Object->GetClass()->GetName()), ELogVerbosity::Warning, UE::Blueprint::Private::PropertySetFailedWarning);
 			return false;
 		}
 
 		if (EnumHasAnyFlags(AccessResult, EPropertyAccessResultFlags::ReadOnly))
 		{
-			FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' on '%s' (%s) is read-only and cannot be set"), *ObjectProp->GetName(), *Object->GetPathName(), *Object->GetClass()->GetName()), ELogVerbosity::Warning, PropertySetFailedWarning);
+			FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' on '%s' (%s) is read-only and cannot be set"), *ObjectProp->GetName(), *Object->GetPathName(), *Object->GetClass()->GetName()), ELogVerbosity::Warning, UE::Blueprint::Private::PropertySetFailedWarning);
 			return false;
 		}
 
-		FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' on '%s' (%s) cannot be set"), *ObjectProp->GetName(), *Object->GetPathName(), *Object->GetClass()->GetName()), ELogVerbosity::Warning, PropertySetFailedWarning);
+		FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' on '%s' (%s) cannot be set"), *ObjectProp->GetName(), *Object->GetPathName(), *Object->GetClass()->GetName()), ELogVerbosity::Warning, UE::Blueprint::Private::PropertySetFailedWarning);
 		return false;
 	}
 
 	if (EnumHasAnyFlags(AccessResult, EPropertyAccessResultFlags::ConversionFailed))
 	{
-		FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' (%s) on '%s' (%s) tried to set from a property value of the incorrect type (%s)"), *ObjectProp->GetName(), *ObjectProp->GetClass()->GetName(), *Object->GetPathName(), *Object->GetClass()->GetName(), *ValueProp->GetClass()->GetName()), ELogVerbosity::Warning, PropertySetFailedWarning);
+		FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' (%s) on '%s' (%s) tried to set from a property value of the incorrect type (%s)"), *ObjectProp->GetName(), *ObjectProp->GetClass()->GetName(), *Object->GetPathName(), *Object->GetClass()->GetName(), *ValueProp->GetClass()->GetName()), ELogVerbosity::Warning, UE::Blueprint::Private::PropertySetFailedWarning);
 		return false;
 	}
 
@@ -2903,20 +3356,66 @@ DEFINE_FUNCTION(UKismetSystemLibrary::execSetEditorProperty)
 
 	if (Object)
 	{
-		const FProperty* ObjectProp = PropertyAccessUtil::FindPropertyByName(PropertyName, Object->GetClass());
-		if (ObjectProp)
-		{
-			P_NATIVE_BEGIN;
-			bResult = Generic_SetEditorProperty(Object, ObjectProp, ValuePtr, ValueProp, ChangeNotifyMode);
-			P_NATIVE_END;
-		}
-		else
-		{
-			FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' on '%s' (%s) was missing"), *PropertyName.ToString(), *Object->GetPathName(), *Object->GetClass()->GetName()), ELogVerbosity::Warning, PropertySetFailedWarning);
-		}
+		P_NATIVE_BEGIN;
+		bResult = Generic_SetEditorProperty(Object, PropertyName, ValuePtr, ValueProp, ChangeNotifyMode);
+		P_NATIVE_END;
 	}
 
 	*(bool*)RESULT_PARAM = bResult;
+}
+
+bool UKismetSystemLibrary::ResetEditorProperty(UObject* Object, const FName PropertyName, const EPropertyAccessChangeNotifyMode ChangeNotifyMode)
+{
+	if (!Object)
+	{
+		LogRuntimeError(NSLOCTEXT("KismetSystemLibrary", "ResetEditorProperty_AccessNone", "Accessed None attempting to call ResetEditorProperty."));
+		return false;
+	}
+
+	auto FindArchetypeValue = [Object, PropertyName](const FProperty*& OutArchetypeProperty, const void*& OutArchetypeValuePtr)
+	{
+		OutArchetypeProperty = nullptr;
+		OutArchetypeValuePtr = nullptr;
+
+		const FProperty* ObjectProp = PropertyAccessUtil::FindPropertyByName(PropertyName, Object->GetClass());
+		if ((!ObjectProp || ObjectProp->HasAnyPropertyFlags(CPF_Deprecated)) && Object->HasAllFlags(RF_ClassDefaultObject))
+		{
+			// look for a sparse member of the same name - the sparse data is treated as an extension
+			// of the class default object by the details panel:
+			if (const UScriptStruct* SparseDataStruct = Object->GetClass()->GetSparseClassDataStruct())
+			{
+				if (const FProperty* SparseProp = PropertyAccessUtil::FindPropertyByName(PropertyName, SparseDataStruct))
+				{
+					if (UScriptStruct* SparseDataArchetypeStruct = Object->GetClass()->GetSparseClassDataArchetypeStruct())
+					{
+						OutArchetypeProperty = SparseProp;
+						OutArchetypeValuePtr = SparseProp->ContainerPtrToValuePtrForDefaults<const void>(SparseDataArchetypeStruct, Object->GetClass()->GetArchetypeForSparseClassData());
+					}
+					return;
+				}
+			}
+		}
+
+		if (ObjectProp)
+		{
+			if (const UObject* ObjectArchetype = Object->GetArchetype())
+			{
+				OutArchetypeProperty = ObjectProp;
+				OutArchetypeValuePtr = ObjectProp->ContainerPtrToValuePtrForDefaults<const void>(ObjectArchetype->GetClass(), ObjectArchetype);
+			}
+		}
+	};
+
+	const FProperty* ArchetypeProperty = nullptr;
+	const void* ArchetypeValuePtr = nullptr;
+	FindArchetypeValue(ArchetypeProperty, ArchetypeValuePtr);
+	if (!ArchetypeValuePtr)
+	{
+		FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Property '%s' on '%s' (%s) had no archetype value to reset to"), *PropertyName.ToString(), *Object->GetPathName(), *Object->GetClass()->GetName()), ELogVerbosity::Warning, UE::Blueprint::Private::PropertySetFailedWarning);
+		return false;
+	}
+
+	return Generic_SetEditorProperty(Object, PropertyName, ArchetypeValuePtr, ArchetypeProperty, ChangeNotifyMode);
 }
 
 #endif	// WITH_EDITOR
@@ -2971,104 +3470,88 @@ void UKismetSystemLibrary::SnapshotObject(UObject* Object)
 
 UObject* UKismetSystemLibrary::GetObjectFromPrimaryAssetId(FPrimaryAssetId PrimaryAssetId)
 {
-	if (UAssetManager* Manager = UAssetManager::GetIfValid())
+	check(UAssetManager::IsInitialized());
+	UAssetManager& Manager = UAssetManager::Get();
+	FPrimaryAssetTypeInfo Info;
+	if (Manager.GetPrimaryAssetTypeInfo(PrimaryAssetId.PrimaryAssetType, Info) && !Info.bHasBlueprintClasses)
 	{
-		FPrimaryAssetTypeInfo Info;
-		if (Manager->GetPrimaryAssetTypeInfo(PrimaryAssetId.PrimaryAssetType, Info) && !Info.bHasBlueprintClasses)
-		{
-			return Manager->GetPrimaryAssetObject(PrimaryAssetId);
-		}
+		return Manager.GetPrimaryAssetObject(PrimaryAssetId);
 	}
 	return nullptr;
 }
 
 TSubclassOf<UObject> UKismetSystemLibrary::GetClassFromPrimaryAssetId(FPrimaryAssetId PrimaryAssetId)
 {
-	if (UAssetManager* Manager = UAssetManager::GetIfValid())
+	check(UAssetManager::IsInitialized());
+	UAssetManager& Manager = UAssetManager::Get();
+	FPrimaryAssetTypeInfo Info;
+	if (Manager.GetPrimaryAssetTypeInfo(PrimaryAssetId.PrimaryAssetType, Info) && Info.bHasBlueprintClasses)
 	{
-		FPrimaryAssetTypeInfo Info;
-		if (Manager->GetPrimaryAssetTypeInfo(PrimaryAssetId.PrimaryAssetType, Info) && Info.bHasBlueprintClasses)
-		{
-			return Manager->GetPrimaryAssetObjectClass<UObject>(PrimaryAssetId);
-		}
+		return Manager.GetPrimaryAssetObjectClass<UObject>(PrimaryAssetId);
 	}
 	return nullptr;
 }
 
 TSoftObjectPtr<UObject> UKismetSystemLibrary::GetSoftObjectReferenceFromPrimaryAssetId(FPrimaryAssetId PrimaryAssetId)
 {
-	if (UAssetManager* Manager = UAssetManager::GetIfValid())
+	check(UAssetManager::IsInitialized());
+	UAssetManager& Manager = UAssetManager::Get();
+	FPrimaryAssetTypeInfo Info;
+	if (Manager.GetPrimaryAssetTypeInfo(PrimaryAssetId.PrimaryAssetType, Info) && !Info.bHasBlueprintClasses)
 	{
-		FPrimaryAssetTypeInfo Info;
-		if (Manager->GetPrimaryAssetTypeInfo(PrimaryAssetId.PrimaryAssetType, Info) && !Info.bHasBlueprintClasses)
-		{
-			return TSoftObjectPtr<UObject>(Manager->GetPrimaryAssetPath(PrimaryAssetId));
-		}
+		return TSoftObjectPtr<UObject>(Manager.GetPrimaryAssetPath(PrimaryAssetId));
 	}
 	return nullptr;
 }
 
 TSoftClassPtr<UObject> UKismetSystemLibrary::GetSoftClassReferenceFromPrimaryAssetId(FPrimaryAssetId PrimaryAssetId)
 {
-	if (UAssetManager* Manager = UAssetManager::GetIfValid())
+	check(UAssetManager::IsInitialized());
+	UAssetManager& Manager = UAssetManager::Get();
+	FPrimaryAssetTypeInfo Info;
+	if (Manager.GetPrimaryAssetTypeInfo(PrimaryAssetId.PrimaryAssetType, Info) && Info.bHasBlueprintClasses)
 	{
-		FPrimaryAssetTypeInfo Info;
-		if (Manager->GetPrimaryAssetTypeInfo(PrimaryAssetId.PrimaryAssetType, Info) && Info.bHasBlueprintClasses)
-		{
-			return TSoftClassPtr<UObject>(Manager->GetPrimaryAssetPath(PrimaryAssetId));
-		}
+		return TSoftClassPtr<UObject>(Manager.GetPrimaryAssetPath(PrimaryAssetId));
 	}
 	return nullptr;
 }
 
 FPrimaryAssetId UKismetSystemLibrary::GetPrimaryAssetIdFromObject(UObject* Object)
 {
-	if (UAssetManager* Manager = UAssetManager::GetIfValid())
+	if (Object)
 	{
-		if (Object)
-		{
-			return Manager->GetPrimaryAssetIdForObject(Object);
-		}
+		check(UAssetManager::IsInitialized());
+		return UAssetManager::Get().GetPrimaryAssetIdForObject(Object);
 	}
 	return FPrimaryAssetId();
 }
 
 FPrimaryAssetId UKismetSystemLibrary::GetPrimaryAssetIdFromClass(TSubclassOf<UObject> Class)
 {
-	if (UAssetManager* Manager = UAssetManager::GetIfValid())
+	if (Class)
 	{
-		if (Class)
-		{
-			return Manager->GetPrimaryAssetIdForObject(*Class);
-		}
+		check(UAssetManager::IsInitialized());
+		return UAssetManager::Get().GetPrimaryAssetIdForObject(*Class);
 	}
 	return FPrimaryAssetId();
 }
 
 FPrimaryAssetId UKismetSystemLibrary::GetPrimaryAssetIdFromSoftObjectReference(TSoftObjectPtr<UObject> SoftObjectReference)
 {
-	if (UAssetManager* Manager = UAssetManager::GetIfValid())
-	{
-		return Manager->GetPrimaryAssetIdForPath(SoftObjectReference.ToSoftObjectPath());
-	}
-	return FPrimaryAssetId();
+	check(UAssetManager::IsInitialized());
+	return UAssetManager::Get().GetPrimaryAssetIdForPath(SoftObjectReference.ToSoftObjectPath());
 }
 
 FPrimaryAssetId UKismetSystemLibrary::GetPrimaryAssetIdFromSoftClassReference(TSoftClassPtr<UObject> SoftClassReference)
 {
-	if (UAssetManager* Manager = UAssetManager::GetIfValid())
-	{
-		return Manager->GetPrimaryAssetIdForPath(SoftClassReference.ToSoftObjectPath());
-	}
-	return FPrimaryAssetId();
+	check(UAssetManager::IsInitialized());
+	return UAssetManager::Get().GetPrimaryAssetIdForPath(SoftClassReference.ToSoftObjectPath());
 }
 
 void UKismetSystemLibrary::GetPrimaryAssetIdList(FPrimaryAssetType PrimaryAssetType, TArray<FPrimaryAssetId>& OutPrimaryAssetIdList)
 {
-	if (UAssetManager* Manager = UAssetManager::GetIfValid())
-	{
-		Manager->GetPrimaryAssetIdList(PrimaryAssetType, OutPrimaryAssetIdList);
-	}
+	check(UAssetManager::IsInitialized());
+	UAssetManager::Get().GetPrimaryAssetIdList(PrimaryAssetType, OutPrimaryAssetIdList);
 }
 
 bool UKismetSystemLibrary::IsValidPrimaryAssetId(FPrimaryAssetId PrimaryAssetId)
@@ -3113,37 +3596,114 @@ bool UKismetSystemLibrary::NotEqual_PrimaryAssetType(FPrimaryAssetType A, FPrima
 
 void UKismetSystemLibrary::UnloadPrimaryAsset(FPrimaryAssetId PrimaryAssetId)
 {
-	if (UAssetManager* Manager = UAssetManager::GetIfValid())
-	{
-		Manager->UnloadPrimaryAsset(PrimaryAssetId);
-	}
+	check(UAssetManager::IsInitialized());
+	UAssetManager::Get().UnloadPrimaryAsset(PrimaryAssetId);
 }
 
 void UKismetSystemLibrary::UnloadPrimaryAssetList(const TArray<FPrimaryAssetId>& PrimaryAssetIdList)
 {
-	if (UAssetManager* Manager = UAssetManager::GetIfValid())
-	{
-		Manager->UnloadPrimaryAssets(PrimaryAssetIdList);
-	}
+	check(UAssetManager::IsInitialized());
+	UAssetManager::Get().UnloadPrimaryAssets(PrimaryAssetIdList);
 }
 
 bool UKismetSystemLibrary::GetCurrentBundleState(FPrimaryAssetId PrimaryAssetId, bool bForceCurrentState, TArray<FName>& OutBundles)
 {
-	if (UAssetManager* Manager = UAssetManager::GetIfValid())
-	{
-		if (Manager->GetPrimaryAssetHandle(PrimaryAssetId, bForceCurrentState, &OutBundles).IsValid())
-		{
-			return true;
-		}
-	}
-	return false;
+	check(UAssetManager::IsInitialized());
+	return UAssetManager::Get().GetPrimaryAssetHandle(PrimaryAssetId, bForceCurrentState, &OutBundles).IsValid();
 }
 
 void UKismetSystemLibrary::GetPrimaryAssetsWithBundleState(const TArray<FName>& RequiredBundles, const TArray<FName>& ExcludedBundles, const TArray<FPrimaryAssetType>& ValidTypes, bool bForceCurrentState, TArray<FPrimaryAssetId>& OutPrimaryAssetIdList)
 {
-	if (UAssetManager* Manager = UAssetManager::GetIfValid())
+	check(UAssetManager::IsInitialized());
+	UAssetManager::Get().GetPrimaryAssetsWithBundleState(OutPrimaryAssetIdList, ValidTypes, RequiredBundles, ExcludedBundles, bForceCurrentState);
+}
+
+FARFilter UKismetSystemLibrary::MakeARFilter(
+	const TArray<FName>& PackageNames, 
+	const TArray<FName>& PackagePaths, 
+	const TArray<FSoftObjectPath>& SoftObjectPaths, 
+	const TArray<FTopLevelAssetPath>& ClassPaths,
+	const TSet<FTopLevelAssetPath>& RecursiveClassPathsExclusionSet, 
+	const TArray<FName>& ClassNames, 
+	const TSet<FName>& RecursiveClassesExclusionSet, 
+	const bool bRecursivePaths, 
+	const bool bRecursiveClasses, 
+	const bool bIncludeOnlyOnDiskAssets
+	)
+{
+	FARFilter NewFilter;
+	NewFilter.PackageNames = PackageNames;
+	NewFilter.PackagePaths = PackagePaths;
+	NewFilter.SoftObjectPaths = SoftObjectPaths;
+	NewFilter.bRecursivePaths = bRecursivePaths;
+	NewFilter.bRecursiveClasses = bRecursiveClasses;
+	NewFilter.bIncludeOnlyOnDiskAssets = bIncludeOnlyOnDiskAssets;
+
+	NewFilter.ClassPaths = ClassPaths;
+	NewFilter.RecursiveClassPathsExclusionSet = RecursiveClassPathsExclusionSet;
+
+	// Fixup to move to FTopLevelAssetPath
+	for (const FName& ClassName : ClassNames)
 	{
-		Manager->GetPrimaryAssetsWithBundleState(OutPrimaryAssetIdList, ValidTypes, RequiredBundles, ExcludedBundles, bForceCurrentState);
+		FTopLevelAssetPath ClassPathName;
+		if (!ClassName.IsNone())
+		{
+			FString ShortClassName = ClassName.ToString();
+			ClassPathName = UClass::TryConvertShortTypeNameToPathName<UStruct>(*ShortClassName, ELogVerbosity::Warning, TEXT("MakeARFilter should use ClassPaths, ClassNames is deprecated."));
+			UE_CLOG(ClassPathName.IsNull(), LogClass, Error, TEXT("Failed to convert short class name %s to class path name."), *ShortClassName);
+		}
+		
+		NewFilter.ClassPaths.Add(ClassPathName);
+	}
+	for (const FName& RecursiveClassToExclude : RecursiveClassesExclusionSet)
+	{
+		FTopLevelAssetPath ClassPathName;
+		if (!RecursiveClassToExclude.IsNone())
+		{
+			FString ShortClassName = RecursiveClassToExclude.ToString();
+			ClassPathName = UClass::TryConvertShortTypeNameToPathName<UStruct>(*ShortClassName, ELogVerbosity::Warning, TEXT("MakeARFilter should use RecursiveClassPathsExclusionSet, RecursiveClassesExclusionSet is deprecated."));
+			UE_CLOG(ClassPathName.IsNull(), LogClass, Error, TEXT("Failed to convert short class name %s to class path name."), *ShortClassName);
+		}
+		
+		NewFilter.RecursiveClassPathsExclusionSet.Add(ClassPathName);
+	}
+
+	return NewFilter;
+}
+
+void UKismetSystemLibrary::BreakARFilter(
+	FARFilter InARFilter,
+	TArray<FName>& PackageNames,
+	TArray<FName>& PackagePaths,
+	TArray<FSoftObjectPath>& SoftObjectPaths,
+	TArray<FTopLevelAssetPath>& ClassPaths,
+	TSet<FTopLevelAssetPath>& RecursiveClassPathsExclusionSet,
+	TArray<FName>& ClassNames,
+	TSet<FName>& RecursiveClassesExclusionSet,
+	bool& bRecursivePaths,
+	bool& bRecursiveClasses,
+	bool& bIncludeOnlyOnDiskAssets
+	)
+{
+	PackageNames = InARFilter.PackageNames;
+	PackagePaths = InARFilter.PackagePaths;
+	SoftObjectPaths = InARFilter.SoftObjectPaths;
+	ClassPaths = InARFilter.ClassPaths;
+	RecursiveClassPathsExclusionSet = InARFilter.RecursiveClassPathsExclusionSet;
+	bRecursivePaths = InARFilter.bRecursivePaths;
+	bRecursiveClasses = InARFilter.bRecursiveClasses;
+	bIncludeOnlyOnDiskAssets = InARFilter.bIncludeOnlyOnDiskAssets;
+
+	// Fixup to move from FTopLevelAssetPath to legacy types
+	for (const FTopLevelAssetPath& ClassPath : ClassPaths)
+	{
+		ClassNames.Add(ClassPath.GetAssetName());
+	}
+	for (const FTopLevelAssetPath& RecursiveClassPathToExclude : RecursiveClassPathsExclusionSet)
+	{
+		RecursiveClassesExclusionSet.Add(RecursiveClassPathToExclude.GetAssetName());
 	}
 }
+
 #undef LOCTEXT_NAMESPACE
+

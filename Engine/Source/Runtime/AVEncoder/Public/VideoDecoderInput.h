@@ -3,18 +3,22 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "HAL/Platform.h"
+#include "Templates/SharedPointer.h"
 #include "VideoCommon.h"
 #include "VideoDecoderAllocationTypes.h"
+
+struct FVideoDecoderAllocFrameBufferResult;
 
 
 namespace AVEncoder
 {
 
-	class AVENCODER_API FVideoDecoderInput
+	class UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") FVideoDecoderInput
 	{
 	public:
 
-		struct FInputData
+		struct UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") FInputData
 		{
 			const void* EncodedData = nullptr;
 			int64		PTS = 0;
@@ -28,7 +32,7 @@ namespace AVEncoder
 			bool		bMissingFrames = false;
 		};
 
-		static TSharedPtr<FVideoDecoderInput> Create(const FInputData& InInputData);
+		static AVENCODER_API TSharedPtr<FVideoDecoderInput> Create(const FInputData& InInputData);
 
 		virtual int32 GetWidth() const = 0;
 		virtual int32 GetHeight() const = 0;
@@ -50,7 +54,7 @@ namespace AVEncoder
 
 
 
-	class AVENCODER_API FVideoDecoderOutput
+	class UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") FVideoDecoderOutput
 	{
 	public:
 		virtual int32 AddRef() = 0;
@@ -59,7 +63,9 @@ namespace AVEncoder
 		virtual int32 GetHeight() const = 0;
 		virtual int64 GetPTS() const = 0;
 
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		virtual const FVideoDecoderAllocFrameBufferResult* GetAllocatedBuffer() const = 0;
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 		virtual int32 GetCropLeft() const = 0;
 		virtual int32 GetCropRight() const = 0;

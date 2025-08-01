@@ -6,11 +6,13 @@ public class UnrealMultiUserServer : ModuleRules
 {
 	public UnrealMultiUserServer(ReadOnlyTargetRules Target) : base(Target)
 	{
+		IncludeOrderVersion = EngineIncludeOrderVersion.Latest;
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
 				"CoreUObject",
 				"Concert",
+				"ConcertServer",
 				"TraceInsights",
 				"ApplicationCore",					// for LaunchEngineLoop.cpp dependency
 				"Projects",							// for LaunchEngineLoop.cpp dependency
@@ -21,19 +23,13 @@ public class UnrealMultiUserServer : ModuleRules
 			new string[] {
 				"Launch",
 				"ConcertSyncCore",
-				"ConcertSyncServer",
-			}
-		);
-
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				"Runtime/Launch/Private",           // for LaunchEngineLoop.cpp include
+				"ConcertSyncServer"
 			}
 		);
 
 		DynamicallyLoadedModuleNames.AddRange(
 			new string[] {
-				"ConcertSyncServer",
+				"ConcertSyncServer"
 			}
 		);
 	}

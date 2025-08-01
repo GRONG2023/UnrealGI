@@ -6,12 +6,6 @@ namespace UnrealBuildTool.Rules
 	{
 		public GameplayTags(ReadOnlyTargetRules Target) : base(Target)
 		{
-			PrivateIncludePaths.AddRange(
-				new string[] {
-					"Runtime/GameplayTags/Private",
-				}
-				);
-
 			PublicDependencyModuleNames.AddRange(
 				new string[]
 				{
@@ -25,11 +19,13 @@ namespace UnrealBuildTool.Rules
 			PrivateDependencyModuleNames.AddRange(
 				new string[]
 				{
-					"Projects"
+					"Projects",
+					"Json",
+					"JsonUtilities"
 				}
 			);
 
-			if (Target.Type == TargetType.Editor)
+			if (Target.bCompileAgainstEditor)
             {
                 PrivateDependencyModuleNames.AddRange(
                 new string[]
@@ -39,6 +35,10 @@ namespace UnrealBuildTool.Rules
 				}
                 );
             }
-        }
+
+			bAllowAutoRTFMInstrumentation = true;
+
+			SetupIrisSupport(Target);
+		}
 	}
 }

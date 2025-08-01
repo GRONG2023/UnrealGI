@@ -28,8 +28,6 @@ public:
 
 private:
 
-	FReply OnBorderFadeClicked(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent);
-
 	FReply Close();
 	FReply Apply();
 
@@ -43,6 +41,10 @@ private:
 	void OnSetTickResolution(FFrameRate InTickResolution);
 
 	void UpdateCommonFrameRates();
+	
+	ECheckBoxState GetIsRecursive() const;
+	void OnSetIsRecursive(ECheckBoxState InCheckBoxState);
+
 
 	UMovieSceneSequence* GetFocusedSequence() const;
 
@@ -53,4 +55,5 @@ private:
 	TOptional<FFrameRate> CurrentTickResolution;
 	TSharedPtr<SVerticalBox> CommonFrameRates;
 	TWeakPtr<FSequencer> WeakSequencer;
+	bool bIsRecursive;
 };

@@ -22,6 +22,7 @@ public class FunctionalTesting : ModuleRules
                 "RHI",
                 "UMG",
 				"AutomationController",
+				"ImageWrapper",
             }
         );
 
@@ -30,6 +31,7 @@ public class FunctionalTesting : ModuleRules
 			PrivateDependencyModuleNames.AddRange(
 				new string[] {
 					"SourceControl",
+					"EditorFramework",
 					"UnrealEd",
 					"LevelEditor"
 				}
@@ -42,13 +44,6 @@ public class FunctionalTesting : ModuleRules
 				}
 			);
 		}
-
-        PrivateIncludePaths.AddRange(
-            new string[]
-            {
-                "Developer/FunctionalTesting/Private",
-            }
-        );
 
 		//make sure this is compiled for binary builds
 		if (Target.Configuration != UnrealTargetConfiguration.Shipping)

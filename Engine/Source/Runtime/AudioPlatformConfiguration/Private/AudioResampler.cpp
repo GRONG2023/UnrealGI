@@ -41,8 +41,12 @@ namespace Audio
 
 	int32 GetOutputBufferSize(const FResamplingParameters& InParameters)
 	{
+		const int32 NumChannels = FMath::Max(1, InParameters.NumChannels);
+		const int32 NumInputFrames = InParameters.InputBuffer.Num() / NumChannels;
 		const float Ratio = InParameters.DestinationSampleRate / InParameters.SourceSampleRate;
-		return InParameters.InputBuffer.Num() * Ratio;
+		const int32 NumOutputFrames = FMath::CeilToInt(Ratio * NumInputFrames);
+
+		return NumChannels * NumOutputFrames;
 	}
 
 	bool Resample(const FResamplingParameters& InParameters, FResamplerResults& OutData)
@@ -56,10 +60,14 @@ namespace Audio
 
 		// Create new converter
 		int32 Error = 0;
+#ifdef LIBSAMPLERATE_WITHOUT_SINC
+		SRC_STATE* Converter = src_new(SRC_LINEAR, InParameters.NumChannels, &Error);
+#else
 		SRC_STATE* Converter = src_new(SRC_SINC_BEST_QUALITY, InParameters.NumChannels, &Error);
+#endif
 		if (Converter == nullptr || Error != 0)
 		{
-			UE_LOG(LogTemp, Error, TEXT("Error creating sample converter: %s"), src_strerror(Error));
+			UE_LOG(LogTemp, Error, TEXT("Error creating sample converter: %hs"), src_strerror(Error));
 			return false;
 		}
 
@@ -69,12 +77,13 @@ namespace Audio
 		SrcData.input_frames = InParameters.InputBuffer.Num() / InParameters.NumChannels;
 		SrcData.output_frames = OutData.OutBuffer->Num() / InParameters.NumChannels;
 		SrcData.src_ratio = InParameters.DestinationSampleRate / InParameters.SourceSampleRate;
+		SrcData.end_of_input = 1;
 
 		Error = src_process(Converter, &SrcData);
 
 		if (Error != 0)
 		{
-			UE_LOG(LogTemp, Error, TEXT("Error on Resampling process: %s"), src_strerror(Error));
+			UE_LOG(LogTemp, Error, TEXT("Error on Resampling process: %hs"), src_strerror(Error));
 			return false;
 		}
 
@@ -125,25 +134,35 @@ namespace Audio
 	{
 		int32 ErrorResult = 0;
 
-		// Reset the SRC state if we already have one
+		// Reset the SRC state if we already have one with equal channels
 		if (LibSRCState)
 		{
-			ErrorResult = src_reset(LibSRCState);
-			if (ErrorResult != 0)
+			if (InNumChannels == src_get_channels(LibSRCState))
 			{
-				const char* ErrorString = src_strerror(ErrorResult);
-				UE_LOG(LogAudioResampler, Error, TEXT("Failed to reset sample converter state: %s."), ErrorString);
-				return;
+				ErrorResult = src_reset(LibSRCState);
+				if (ErrorResult != 0)
+				{
+					const char* ErrorString = src_strerror(ErrorResult);
+					UE_LOG(LogAudioResampler, Error, TEXT("Failed to reset sample converter state: %hs."), ErrorString);
+					return;
+				}
+			}
+			else
+			{
+				// If the channel counts do not match, then remove one.
+				LibSRCState = src_delete(LibSRCState);
+				check(nullptr == LibSRCState);
 			}
 		}
-		// Otherwise create a new one
-		else
+
+		// Create a new one if one does not exist.
+		if (nullptr == LibSRCState)	
 		{
 			LibSRCState = src_new((int32)ResamplingMethod, InNumChannels, &ErrorResult);
 			if (!LibSRCState)
 			{
 				const char* ErrorString = src_strerror(ErrorResult);
-				UE_LOG(LogAudioResampler, Error, TEXT("Failed to create a sample rate convertor state object: %s."), ErrorString);
+				UE_LOG(LogAudioResampler, Error, TEXT("Failed to create a sample rate convertor state object: %hs."), ErrorString);
 			}
 		}
 
@@ -153,7 +172,7 @@ namespace Audio
 			if (ErrorResult != 0)
 			{
 				const char* ErrorString = src_strerror(ErrorResult);
-				UE_LOG(LogAudioResampler, Error, TEXT("Failed to set sample rate ratio: %s."), ErrorString);
+				UE_LOG(LogAudioResampler, Error, TEXT("Failed to set sample rate ratio: %hs."), ErrorString);
 			}
 		}
 
@@ -180,7 +199,7 @@ namespace Audio
 			if (ErrorResult != 0)
 			{
 				const char* ErrorString = src_strerror(ErrorResult);
-				UE_LOG(LogAudioResampler, Error, TEXT("Failed to process audio: %s."), ErrorString);
+				UE_LOG(LogAudioResampler, Error, TEXT("Failed to process audio: %hs."), ErrorString);
 				return ErrorResult;
 			}
 

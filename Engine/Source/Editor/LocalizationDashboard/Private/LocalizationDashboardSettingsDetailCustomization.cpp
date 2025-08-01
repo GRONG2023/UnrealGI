@@ -1,18 +1,34 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "LocalizationDashboardSettingsDetailCustomization.h"
-#include "Styling/SlateTypes.h"
+
+#include "Containers/BitArray.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "Delegates/Delegate.h"
+#include "DetailCategoryBuilder.h"
+#include "DetailLayoutBuilder.h"
+#include "DetailWidgetRow.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "ILocalizationDashboardModule.h"
+#include "ILocalizationServiceModule.h"
 #include "ILocalizationServiceProvider.h"
+#include "Internationalization/Internationalization.h"
+#include "LocalizationSettings.h"
+#include "Misc/Attribute.h"
+#include "Misc/Optional.h"
+#include "Serialization/Archive.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/NameTypes.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Input/SCheckBox.h"
-#include "Widgets/Text/STextBlock.h"
-#include "DetailLayoutBuilder.h"
-#include "LocalizationSettings.h"
-#include "DetailWidgetRow.h"
-#include "DetailCategoryBuilder.h"
-#include "ILocalizationServiceModule.h"
-#include "ILocalizationDashboardModule.h"
 #include "Widgets/Input/SComboBox.h"
+#include "Widgets/Text/STextBlock.h"
+
+class SWidget;
 
 #define LOCTEXT_NAMESPACE "LocalizationDashboard"
 
@@ -75,33 +91,35 @@ void FLocalizationDashboardSettingsDetailCustomization::CustomizeDetails(IDetail
 				]
 			];
 
+#if LOCALIZATION_SERVICES_WITH_SLATE
 		const ILocalizationServiceProvider& LSP = ILocalizationServiceModule::Get().GetProvider();
 		if (ServiceProviderCategoryBuilder != nullptr)
 		{
 			LSP.CustomizeSettingsDetails(*ServiceProviderCategoryBuilder);
 		}
+#endif
 	}
 
 	// Source Control
 	{
-		IDetailCategoryBuilder& SourceControlCategoryBuilder = DetailLayoutBuilder->EditCategory("SourceControl", LOCTEXT("SourceControl", "Source Control"), ECategoryPriority::Important);
+		IDetailCategoryBuilder& SourceControlCategoryBuilder = DetailLayoutBuilder->EditCategory("SourceControl", LOCTEXT("SourceControl", "Revision Control"), ECategoryPriority::Important);
 
 		// Enable Source Control
 		{
-			SourceControlCategoryBuilder.AddCustomRow(LOCTEXT("EnableSourceControl", "Enable Source Control"))
+			SourceControlCategoryBuilder.AddCustomRow(LOCTEXT("EnableSourceControl", "Enable Revision Control"))
 				.NameContent()
 				[
 					SNew(STextBlock)
 					.Font(DetailLayoutBuilder->GetDetailFont())
-					.Text(LOCTEXT("EnableSourceControl", "Enable Source Control"))
-					.ToolTipText(LOCTEXT("EnableSourceControlToolTip", "Should we use source control when running the localization commandlets. This will optionally pass \"-EnableSCC\" to the commandlet."))
+					.Text(LOCTEXT("EnableSourceControl", "Enable Revision Control"))
+					.ToolTipText(LOCTEXT("EnableSourceControlToolTip", "Should we use revision control when running the localization commandlets. This will optionally pass \"-EnableSCC\" to the commandlet."))
 				]
 				.ValueContent()
 				.MinDesiredWidth(TOptional<float>())
 				.MaxDesiredWidth(TOptional<float>())
 				[
 					SNew(SCheckBox)
-					.ToolTipText(LOCTEXT("EnableSourceControlToolTip", "Should we use source control when running the localization commandlets. This will optionally pass \"-EnableSCC\" to the commandlet."))
+					.ToolTipText(LOCTEXT("EnableSourceControlToolTip", "Should we use revision control when running the localization commandlets. This will optionally pass \"-EnableSCC\" to the commandlet."))
 					.IsEnabled_Lambda([]() -> bool
 					{
 						return FLocalizationSourceControlSettings::IsSourceControlAvailable();
@@ -171,10 +189,12 @@ void FLocalizationDashboardSettingsDetailCustomization::ServiceProviderComboBox_
 	FName ServiceProviderName = LSP ? LSP->GetName() : FName(TEXT("None"));
 	ILocalizationServiceModule::Get().SetProvider(ServiceProviderName);
 
+#if LOCALIZATION_SERVICES_WITH_SLATE
 	if (LSP && ServiceProviderCategoryBuilder)
 	{
 		LSP->CustomizeSettingsDetails(*ServiceProviderCategoryBuilder);
 	}
+#endif
 	DetailLayoutBuilder->ForceRefreshDetails();
 }
 

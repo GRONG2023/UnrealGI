@@ -3,10 +3,12 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Input/Reply.h"
 
 class AActor;
+struct FTypedElementHandle;
+class IAssetFactoryInterface;
 class UActorFactory;
 class ULevel;
 class UMaterialInterface;
@@ -26,8 +28,7 @@ namespace AssetUtil
 	/** Extract the names of the assets which are being dragged*/
 	UNREALED_API TArray<FAssetData>	ExtractAssetDataFromDrag( const FDragDropEvent& DragDropEvent );
 
-	/** Extract the names of the assets which are being dragged*/
-	UNREALED_API TArray<FAssetData> ExtractAssetDataFromDrag( const TSharedPtr<FDragDropOperation>& Operation );
+	UNREALED_API TArray<FAssetData> ExtractAssetDataFromDrag(const TSharedPtr<const FDragDropOperation>& Operation);
 
 	/**
 	 *  Given an array of asset names, loads the assets into an array of objects
@@ -105,8 +106,6 @@ struct FSelectedActorInfo
 	uint32 bHaveSkeletalMesh:1;
 	/** true if an actor in the selection is an emitter */
 	uint32 bHaveEmitter:1;
-	/** true if an actor in the selection is a matinee actor */
-	uint32 bHaveMatinee:1;
 	/** true if an actor in the selection is hidden */
 	uint32 bHaveHidden:1;
 	/** true if a landscape is in the selection */
@@ -115,6 +114,8 @@ struct FSelectedActorInfo
 	uint32 bHaveExperimentalClass:1;
 	/** true if an early access actor (or actor containing such a component) is selected */
 	uint32 bHaveEarlyAccessClass:1;
+	/** true if an actor in the selection has an override for the asset it browses to in the Content Browser*/
+	uint32 bHaveBrowseOverride:1;
 
 	FSelectedActorInfo()
 		: SelectionClass(NULL)
@@ -144,11 +145,11 @@ struct FSelectedActorInfo
 		, bHavePawn(false)
 		, bHaveSkeletalMesh(false)
 		, bHaveEmitter(false)
-		, bHaveMatinee(false)
 		, bHaveHidden(false)
 		, bHaveLandscape(false)
 		, bHaveExperimentalClass(false)
 		, bHaveEarlyAccessClass(false)
+		, bHaveBrowseOverride(false)
 	{
 	}
 
@@ -222,7 +223,7 @@ namespace ActorPlacementUtils
 	UNREALED_API bool IsLevelValidForActorPlacement(ULevel* Level, TArray<FTransform>& InActorTransforms);
 }
 
-class UNREALED_API FActorFactoryAssetProxy
+class FActorFactoryAssetProxy
 {
 public:
 
@@ -251,7 +252,7 @@ public:
 	 * @param	OutMenuItems				receives the list of menu items to use for populating an actor factory menu.
 	 * @param	ExcludeStandAloneFactories	if true, only factories that can create actors with the currently selected assets will be added
 	 */
-	static void GenerateActorFactoryMenuItems( const FAssetData& AssetData, TArray<FMenuItem>* OutMenuItems, bool ExcludeStandAloneFactories );
+	static UNREALED_API void GenerateActorFactoryMenuItems( const FAssetData& AssetData, TArray<FMenuItem>* OutMenuItems, bool ExcludeStandAloneFactories );
 
 	/**
 	 * Find the appropriate actor factory for an asset by type.
@@ -262,7 +263,7 @@ public:
 	 *
 	 * @return	the factory that is responsible for creating actors for the specified asset type.
 	 */
-	static UActorFactory* GetFactoryForAsset( const FAssetData& DropData, bool bRequireValidObject=false );
+	static UNREALED_API UActorFactory* GetFactoryForAsset( const FAssetData& DropData, bool bRequireValidObject=false );
 
 	/**
 	 * Find the appropriate actor factory for an asset.
@@ -271,8 +272,9 @@ public:
 	 *
 	 * @return	The factory that is responsible for creating actors for the specified asset
 	 */
-	static UActorFactory* GetFactoryForAssetObject( UObject* AssetObj );
+	static UNREALED_API UActorFactory* GetFactoryForAssetObject( UObject* AssetObj );
 
+	//~ TODO: UE_DEPRECATED(5.4, "Use UE::AssetPlacementUtil::PlaceAssetInCurrentLevel instead")
 	/**
 	 * Places an actor instance using the factory appropriate for the type of asset
 	 *
@@ -284,8 +286,9 @@ public:
 	 * @return	the actor that was created by the factory, or NULL if there aren't any factories for this asset (or
 	 *			the actor couldn't be created for some other reason)
 	 */
-	static AActor* AddActorForAsset( UObject* AssetObj, bool SelectActor = true, EObjectFlags ObjectFlags = RF_Transactional, UActorFactory* FactoryToUse = NULL, const FName Name = NAME_None );
+	static UNREALED_API AActor* AddActorForAsset( UObject* AssetObj, bool SelectActor = true, EObjectFlags ObjectFlags = RF_Transactional, UActorFactory* FactoryToUse = NULL, const FName Name = NAME_None );
 
+	//~ TODO: UE_DEPRECATED(5.4)
 	/**
 	 * Places an actor instance using the factory appropriate for the type of asset using the current object selection as the asset
 	 *
@@ -299,7 +302,7 @@ public:
 	 * @return	the actor that was created by the factory, or NULL if there aren't any factories for this asset (or
 	 *			the actor couldn't be created for some other reason)
 	 */
-	static AActor* AddActorFromSelection( UClass* ActorClass, const FVector* ActorLocation=NULL, bool SelectActor = true, EObjectFlags ObjectFlags = RF_Transactional, UActorFactory* ActorFactory = NULL, const FName Name = NAME_None );
+	static UNREALED_API AActor* AddActorFromSelection( UClass* ActorClass, const FVector* ActorLocation=NULL, bool SelectActor = true, EObjectFlags ObjectFlags = RF_Transactional, UActorFactory* ActorFactory = NULL, const FName Name = NAME_None );
 
 	/**
 	 * Determines if the provided actor is capable of having a material applied to it.
@@ -308,7 +311,7 @@ public:
 	 *
 	 * @return	true if the actor is valid for material application; false otherwise
 	 */
-	static bool IsActorValidForMaterialApplication( AActor* TargetActor );
+	static UNREALED_API bool IsActorValidForMaterialApplication( AActor* TargetActor );
 
 	/**
 	 * Attempts to apply the material to the specified actor.
@@ -319,7 +322,7 @@ public:
 	 *
 	 * @return	true if the material was successfully applied to the actor
 	 */
-	static bool ApplyMaterialToActor( AActor* TargetActor, UMaterialInterface* MaterialToApply, int32 OptionalMaterialSlot = -1 );
+	static UNREALED_API bool ApplyMaterialToActor( AActor* TargetActor, UMaterialInterface* MaterialToApply, int32 OptionalMaterialSlot = -1 );
 
 private:
 	/**
@@ -331,3 +334,24 @@ private:
 	{
 	}
 };
+
+namespace UE::AssetPlacementUtil
+{
+	struct FExtraPlaceAssetOptions
+	{
+		bool bSelectOutput = true;
+		EObjectFlags ObjectFlags = RF_Transactional;
+		TScriptInterface<IAssetFactoryInterface> FactoryToUse = NULL;
+		FName Name = NAME_None;
+	};
+
+	/**
+	 * Places an asset instance using the factory appropriate for the type of asset
+	 *
+	 * @param	AssetObj						the asset that is contained in the d&d operation
+	 *
+	 * @return	the object that was created by the factory, or NULL if there aren't any factories for this asset (or
+	 *			the object couldn't be created for some other reason)
+	 */
+	UNREALED_API TArray<FTypedElementHandle> PlaceAssetInCurrentLevel(UObject* AssetObj, const FExtraPlaceAssetOptions& ExtraParams);
+}

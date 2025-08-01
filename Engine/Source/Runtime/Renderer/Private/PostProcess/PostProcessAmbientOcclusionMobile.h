@@ -8,22 +8,6 @@
 #include "CoreMinimal.h"
 #include "RendererInterface.h"
 
-struct FAmbientOcclusionMobileOutputs
-{
-	TRefCountPtr<IPooledRenderTarget> AmbientOcclusionTexture;
+FRDGTextureRef CreateMobileScreenSpaceAOTexture(FRDGBuilder& GraphBuilder, const struct FSceneTexturesConfig& Config);
 
-	bool IsValid()
-	{
-		return AmbientOcclusionTexture.IsValid();
-	}
-
-	void Release()
-	{
-		AmbientOcclusionTexture.SafeRelease();
-	}
-};
-
-extern FAmbientOcclusionMobileOutputs GAmbientOcclusionMobileOutputs;
-
-bool IsMobileAmbientOcclusionEnabled(EShaderPlatform ShaderPlatform);
 bool IsUsingMobileAmbientOcclusion(EShaderPlatform ShaderPlatform);

@@ -34,6 +34,11 @@ public class ApplicationCore : ModuleRules
 			if (Target.bCompileWithAccessibilitySupport && !Target.bIsBuildingConsoleApplication)
 			{
 				PublicSystemLibraries.Add("uiautomationcore.lib");
+				PublicDefinitions.Add("UE_WINDOWS_USING_UIA=1");
+			}
+			else
+			{
+				PublicDefinitions.Add("UE_WINDOWS_USING_UIA=0");
 			}
 
 			// Uses DXGI to query GPU hardware prior to RHI startup
@@ -46,8 +51,8 @@ public class ApplicationCore : ModuleRules
 			);
 			if (Target.bBuildEditor == true)
 			{
-				string SDKROOT = Utils.RunLocalProcessAndReturnStdOut("/usr/bin/xcrun", "--sdk macosx --show-sdk-path");
-				PublicAdditionalLibraries.Add(SDKROOT + "/System/Library/PrivateFrameworks/MultitouchSupport.framework/Versions/Current/MultitouchSupport.tbd");
+				string XcodeRoot = Utils.RunLocalProcessAndReturnStdOut("/usr/bin/xcode-select", "--print-path");
+				PublicAdditionalLibraries.Add(XcodeRoot + "/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/PrivateFrameworks/MultitouchSupport.framework/Versions/Current/MultitouchSupport.tbd");
 			}
 			
 			PublicFrameworks.Add("GameController");
@@ -59,14 +64,14 @@ public class ApplicationCore : ModuleRules
 			);
 
 			// We need FreeType2 and GL for the Splash, but only in the Editor
-			if (Target.Type == TargetType.Editor)
+			if (Target.bCompileAgainstEditor)
 			{
 				AddEngineThirdPartyPrivateStaticDependencies(Target, "FreeType2");
 				AddEngineThirdPartyPrivateStaticDependencies(Target, "OpenGL");
 				PrivateIncludePathModuleNames.Add("ImageWrapper");
 			}
 		}
-		else if (Target.Platform == UnrealTargetPlatform.IOS || Target.Platform == UnrealTargetPlatform.TVOS)
+		else if (Target.IsInPlatformGroup(UnrealPlatformGroup.IOS))
 		{
 			PublicIncludePaths.AddRange(new string[] {"Runtime/ApplicationCore/Public/IOS"});
 			PublicIncludePaths.AddRange(new string[] {"Runtime/ApplicationCore/Private/Apple"});
@@ -78,7 +83,7 @@ public class ApplicationCore : ModuleRules
 			//Need to add this as BackgroundHTTP files can end up doing work directly from our AppDelegate in iOS and thus we need acccess to correct file locations to save these very early.
 			PrivateDependencyModuleNames.Add("BackgroundHTTPFileHash");
 		}
-		else if (Target.Platform == UnrealTargetPlatform.Android || Target.Platform == UnrealTargetPlatform.Lumin)
+		else if (Target.Platform == UnrealTargetPlatform.Android)
 		{
 			PrivateIncludePathModuleNames.AddRange(
 				new string[] {
@@ -87,9 +92,11 @@ public class ApplicationCore : ModuleRules
 			);
 		}
 
-		if (!Target.bCompileAgainstApplicationCore)
+		if (!Target.IsTestTarget && !Target.bCompileAgainstApplicationCore)
 		{
 			throw new System.Exception("ApplicationCore cannot be used when Target.bCompileAgainstApplicationCore = false.");
 		}
+
+		UnsafeTypeCastWarningLevel = WarningLevel.Error;
 	}
 }

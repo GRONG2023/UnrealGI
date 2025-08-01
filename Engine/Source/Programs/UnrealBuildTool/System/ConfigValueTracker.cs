@@ -4,9 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 
 namespace UnrealBuildTool
 {
@@ -24,8 +22,8 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// Project directory to read config files from
 		/// </summary>
-		public DirectoryReference ProjectDir;
-		
+		public DirectoryReference? ProjectDir;
+
 		/// <summary>
 		/// The platform being built
 		/// </summary>
@@ -49,7 +47,7 @@ namespace UnrealBuildTool
 		/// <param name="Platform">The platform being built</param>
 		/// <param name="SectionName">The section name</param>
 		/// <param name="KeyName">The key name</param>
-		public ConfigDependencyKey(ConfigHierarchyType Type, DirectoryReference ProjectDir, UnrealTargetPlatform Platform, string SectionName, string KeyName)
+		public ConfigDependencyKey(ConfigHierarchyType Type, DirectoryReference? ProjectDir, UnrealTargetPlatform Platform, string SectionName, string KeyName)
 		{
 			this.Type = Type;
 			this.ProjectDir = ProjectDir;
@@ -67,8 +65,8 @@ namespace UnrealBuildTool
 			Type = (ConfigHierarchyType)Reader.ReadInt();
 			ProjectDir = Reader.ReadDirectoryReference();
 			Platform = Reader.ReadUnrealTargetPlatform();
-			SectionName = Reader.ReadString();
-			KeyName = Reader.ReadString();
+			SectionName = Reader.ReadString()!;
+			KeyName = Reader.ReadString()!;
 		}
 
 		/// <summary>
@@ -89,9 +87,9 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="Other">The object to compare to</param>
 		/// <returns>True if the keys are equal, false otherwise</returns>
-		public override bool Equals(object Other)
+		public override bool Equals(object? Other)
 		{
-			return (Other is ConfigDependencyKey) && Equals((ConfigDependencyKey)Other);
+			return (Other is ConfigDependencyKey key) && Equals(key);
 		}
 
 		/// <summary>
@@ -99,9 +97,9 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="Other">The key to compare to</param>
 		/// <returns>True if the keys are equal, false otherwise</returns>
-		public bool Equals(ConfigDependencyKey Other)
+		public bool Equals(ConfigDependencyKey? Other)
 		{
-			return Type == Other.Type && ProjectDir == Other.ProjectDir && Platform == Other.Platform && SectionName == Other.SectionName && KeyName == Other.KeyName;
+			return !ReferenceEquals(Other, null) && Type == Other.Type && ProjectDir == Other.ProjectDir && Platform == Other.Platform && SectionName == Other.SectionName && KeyName == Other.KeyName;
 		}
 
 		/// <summary>
@@ -128,14 +126,14 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// The dependencies list
 		/// </summary>
-		Dictionary<ConfigDependencyKey, IReadOnlyList<string>> Dependencies;
+		readonly IReadOnlyDictionary<ConfigDependencyKey, IReadOnlyList<string>?> Dependencies;
 
 		/// <summary>
 		/// Constructor
 		/// </summary>
-		public ConfigValueTracker()
+		public ConfigValueTracker(IReadOnlyDictionary<ConfigDependencyKey, IReadOnlyList<string>?> ConfigValues)
 		{
-			Dependencies = new Dictionary<ConfigDependencyKey, IReadOnlyList<string>>();
+			Dependencies = new Dictionary<ConfigDependencyKey, IReadOnlyList<string>?>(ConfigValues);
 		}
 
 		/// <summary>
@@ -144,7 +142,7 @@ namespace UnrealBuildTool
 		/// <param name="Reader">Archive to read from</param>
 		public ConfigValueTracker(BinaryArchiveReader Reader)
 		{
-			Dependencies = Reader.ReadDictionary(() => new ConfigDependencyKey(Reader), () => (IReadOnlyList<string>)Reader.ReadList(() => Reader.ReadString()));
+			Dependencies = Reader.ReadDictionary(() => new ConfigDependencyKey(Reader), () => (IReadOnlyList<string>?)Reader.ReadList(() => Reader.ReadString()))!;
 		}
 
 		/// <summary>
@@ -157,46 +155,31 @@ namespace UnrealBuildTool
 		}
 
 		/// <summary>
-		/// Adds a new configuration value
-		/// </summary>
-		/// <param name="Type">The config hierarchy type</param>
-		/// <param name="ProjectDir">The project directory</param>
-		/// <param name="Platform">The platform being built</param>
-		/// <param name="SectionName">Name of the config file section</param>
-		/// <param name="KeyName">Name of the config file key</param>
-		/// <param name="Values">Current values for this key</param>
-		public void Add(ConfigHierarchyType Type, DirectoryReference ProjectDir, UnrealTargetPlatform Platform, string SectionName, string KeyName, IReadOnlyList<string> Values)
-		{
-			ConfigDependencyKey Key = new ConfigDependencyKey(Type, ProjectDir, Platform, SectionName, KeyName);
-			Dependencies[Key] = Values;
-		}
-
-		/// <summary>
 		/// Checks whether the list of dependencies is still valid
 		/// </summary>
 		/// <returns></returns>
 		public bool IsValid()
 		{
-			foreach(KeyValuePair<ConfigDependencyKey, IReadOnlyList<string>> Pair in Dependencies)
+			foreach (KeyValuePair<ConfigDependencyKey, IReadOnlyList<string>?> Pair in Dependencies)
 			{
 				// Read the appropriate hierarchy
 				ConfigHierarchy Hierarchy = ConfigCache.ReadHierarchy(Pair.Key.Type, Pair.Key.ProjectDir, Pair.Key.Platform);
 
 				// Get the value(s) associated with this key
-				IReadOnlyList<string> NewValues;
+				IReadOnlyList<string>? NewValues;
 				Hierarchy.TryGetValues(Pair.Key.SectionName, Pair.Key.KeyName, out NewValues);
 
 				// Check if they're different
-				if(Pair.Value == null)
+				if (Pair.Value == null)
 				{
-					if(NewValues != null)
+					if (NewValues != null)
 					{
 						return false;
 					}
 				}
 				else
 				{
-					if(NewValues == null || !Enumerable.SequenceEqual(Pair.Value, NewValues, StringComparer.Ordinal))
+					if (NewValues == null || !Enumerable.SequenceEqual(Pair.Value, NewValues, StringComparer.Ordinal))
 					{
 						return false;
 					}

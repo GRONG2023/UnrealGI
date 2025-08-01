@@ -14,6 +14,7 @@ LandscapeEdit.h: Classes for the editor to access to Landscape data
 #include "Components/ActorComponent.h"
 #include "LandscapeInfo.h"
 #include "LandscapeComponent.h"
+#include "LandscapeEditTypes.h"
 #include "LandscapeHeightfieldCollisionComponent.h"
 #include "InstancedFoliageActor.h"
 #include "LandscapeLayerInfoObject.h"
@@ -32,23 +33,13 @@ class ULandscapeLayerInfoObject;
 
 #if WITH_EDITOR
 
-namespace ELandscapeToolTargetType
-{
-	enum Type : int8
-	{
-		Heightmap = 0,
-		Weightmap = 1,
-		Visibility = 2,
-		Invalid = -1, // only valid for LandscapeEdMode->CurrentToolTarget.TargetType
-	};
-}
 
 /** Landscape EdMode Interface (used by ALandscape in Editor mode to access EdMode properties) */
 class ILandscapeEdModeInterface
 {
 public:
 	virtual void PostUpdateLayerContent() = 0;
-	virtual ELandscapeToolTargetType::Type GetLandscapeToolTargetType() const = 0;
+	virtual ELandscapeToolTargetType GetLandscapeToolTargetType() const = 0;
 	virtual const FLandscapeLayer* GetLandscapeSelectedLayer() const = 0;
 	virtual ULandscapeLayerInfoObject* GetSelectedLandscapeLayerInfo() const = 0;
 	virtual void OnCanHaveLayersContentChanged() = 0;
@@ -87,11 +78,11 @@ struct FLandscapeTextureDataInfo
 			MipInfo[MipNum].bFull = true;
 			MipInfo[MipNum].MipUpdateRegions.Reset();
 			// Push a full region for UpdateTextureData() to process later
-			new(MipInfo[MipNum].MipUpdateRegions) FUpdateTextureRegion2D(0, 0, 0, 0, Width, Height);
+			MipInfo[MipNum].MipUpdateRegions.Emplace(0, 0, 0, 0, Width, Height);
 			return;
 		}
 
-		new(MipInfo[MipNum].MipUpdateRegions) FUpdateTextureRegion2D(InX1, InY1, InX1, InY1, Width, Height);
+		MipInfo[MipNum].MipUpdateRegions.Emplace(InX1, InY1, InX1, InY1, Width, Height);
 	}
 		
 	void* GetMipData(int32 MipNum)
@@ -99,7 +90,12 @@ struct FLandscapeTextureDataInfo
 		check( MipNum < MipInfo.Num() );
 		if( !MipInfo[MipNum].MipData )
 		{
+			// will Unlock in destructor
 			MipInfo[MipNum].MipData = Texture->Source.LockMip(MipNum);
+			// probably should check that we got the lock :
+			//check( MipInfo[MipNum].MipData != nullptr );
+			// also this return value is usually cast to FColor *
+			// should instead have a function that returns FColor * and ensures the mip actually is BGRA8
 		}
 		return MipInfo[MipNum].MipData;
 	}
@@ -119,65 +115,74 @@ private:
 	TArray<FMipInfo> MipInfo;
 };
 
-struct LANDSCAPE_API FLandscapeTextureDataInterface
+struct FLandscapeTextureDataInterface
 {
-	FLandscapeTextureDataInterface(bool bInUploadTextureChangesToGPU = true);
-	virtual ~FLandscapeTextureDataInterface();
+	LANDSCAPE_API FLandscapeTextureDataInterface(bool bInUploadTextureChangesToGPU = true);
+	LANDSCAPE_API virtual ~FLandscapeTextureDataInterface();
 		
 	void SetShouldDirtyPackage(bool bValue) { bShouldDirtyPackage = bValue; }
 	bool GetShouldDirtyPackage() const { return bShouldDirtyPackage; }
 
 	// Texture data access
-	FLandscapeTextureDataInfo* GetTextureDataInfo(UTexture2D* Texture);
+	LANDSCAPE_API FLandscapeTextureDataInfo* GetTextureDataInfo(UTexture2D* Texture);
 
 	// Flush texture updates
-	void Flush();
+	LANDSCAPE_API void Flush();
 
 	// Texture bulk operations for weightmap reallocation
-	void CopyTextureChannel(UTexture2D* Dest, int32 DestChannel, UTexture2D* Src, int32 SrcChannel);
-	void ZeroTextureChannel(UTexture2D* Dest, int32 DestChannel);
-	void CopyTextureFromHeightmap(UTexture2D* Dest, ULandscapeComponent* Comp, int32 MipIndex);
-	void CopyTextureFromHeightmap(UTexture2D* Dest, int32 DestChannel, ULandscapeComponent* Comp, int32 SrcChannel);
-	void CopyTextureFromWeightmap(UTexture2D* Dest, int32 DestChannel, ULandscapeComponent* Comp, ULandscapeLayerInfoObject* LayerInfo);
-	void CopyTextureFromWeightmap(UTexture2D* Dest, int32 DestChannel, ULandscapeComponent* Comp, ULandscapeLayerInfoObject* LayerInfo, int32 MipIndex);
+	LANDSCAPE_API void CopyTextureChannel(UTexture2D* Dest, int32 DestChannel, UTexture2D* Src, int32 SrcChannel);
+	LANDSCAPE_API void ZeroTextureChannel(UTexture2D* Dest, int32 DestChannel);
+	LANDSCAPE_API void CopyTextureFromHeightmap(UTexture2D* Dest, ULandscapeComponent* Comp, int32 MipIndex);
+	LANDSCAPE_API void CopyTextureFromHeightmap(UTexture2D* Dest, int32 DestChannel, ULandscapeComponent* Comp, int32 SrcChannel);
+	LANDSCAPE_API void CopyTextureFromWeightmap(UTexture2D* Dest, int32 DestChannel, ULandscapeComponent* Comp, ULandscapeLayerInfoObject* LayerInfo);
+	LANDSCAPE_API void CopyTextureFromWeightmap(UTexture2D* Dest, int32 DestChannel, ULandscapeComponent* Comp, ULandscapeLayerInfoObject* LayerInfo, int32 MipIndex);
 
 	template<typename TData>
 	void SetTextureValueTempl(UTexture2D* Dest, TData Value);
-	void ZeroTexture(UTexture2D* Dest);
-	void SetTextureValue(UTexture2D* Dest, FColor Value);
+	LANDSCAPE_API void ZeroTexture(UTexture2D* Dest);
+	LANDSCAPE_API void SetTextureValue(UTexture2D* Dest, FColor Value);
 
 	template<typename TData>
 	bool EqualTextureValueTempl(UTexture2D* Src, TData Value);
-	bool EqualTextureValue(UTexture2D* Src, FColor Value);
+	LANDSCAPE_API bool EqualTextureValue(UTexture2D* Src, FColor Value);
 
 private:
-	void CopyTextureFromWeightmap(FLandscapeTextureDataInfo* DestDataInfo, int32 DestChannel, ULandscapeComponent* Comp, ULandscapeLayerInfoObject* LayerInfo, int32 MipIndex);
+	LANDSCAPE_API void CopyTextureFromWeightmap(FLandscapeTextureDataInfo* DestDataInfo, int32 DestChannel, ULandscapeComponent* Comp, ULandscapeLayerInfoObject* LayerInfo, int32 MipIndex);
 
 	TMap<UTexture2D*, FLandscapeTextureDataInfo*> TextureDataMap;
 	bool bUploadTextureChangesToGPU;
 	bool bShouldDirtyPackage;
 };
 
-struct LANDSCAPE_API FLandscapeEditDataInterface : public FLandscapeTextureDataInterface
+struct FLandscapeEditDataInterface : public FLandscapeTextureDataInterface
 {
-	// tor
-	FLandscapeEditDataInterface(ULandscapeInfo* InLandscape, bool bInUploadTextureChangesToGPU = true);
+	// this constructor will build an interface that works in the current edit layer (uses the ALandscape PrivateEditingLayer state)
+	LANDSCAPE_API FLandscapeEditDataInterface(ULandscapeInfo* InLandscape, bool bInUploadTextureChangesToGPU = true);
+
+	// this constructor will build an interface that works in the specified edit layer : InEditLayerGUID
+	LANDSCAPE_API FLandscapeEditDataInterface(ULandscapeInfo* InLandscape, const FGuid& InEditLayerGUID, bool bInUploadTextureChangesToGPU = true);
+
+	// switch the layer this interface works in
+	LANDSCAPE_API void SetEditLayer(const FGuid& InEditLayerGUID);
+
+	// returns the current layer this interface is working in
+	LANDSCAPE_API FGuid GetEditLayer() const;
 
 	// Misc
-	bool GetComponentsInRegion(int32 X1, int32 Y1, int32 X2, int32 Y2, TSet<ULandscapeComponent*>* OutComponents = NULL);
+	LANDSCAPE_API bool GetComponentsInRegion(int32 X1, int32 Y1, int32 X2, int32 Y2, TSet<ULandscapeComponent*>* OutComponents = NULL);
 
 	//
 	// Heightmap access
 	//
-	void SetHeightData(int32 X1, int32 Y1, int32 X2, int32 Y2, const uint16* InData, int32 InStride, bool InCalcNormals, const uint16* InNormalData = nullptr, const uint16* InHeightAlphaBlendData = nullptr, const uint8* InHeightRaiseLowerData = nullptr, bool InCreateComponents = false, UTexture2D* InHeightmap = nullptr, UTexture2D* InXYOffsetmapTexture = nullptr,
+	LANDSCAPE_API void SetHeightData(int32 X1, int32 Y1, int32 X2, int32 Y2, const uint16* InData, int32 InStride, bool InCalcNormals, const uint16* InNormalData = nullptr, const uint16* InHeightAlphaBlendData = nullptr, const uint8* InHeightRaiseLowerData = nullptr, bool InCreateComponents = false, UTexture2D* InHeightmap = nullptr, UTexture2D* InXYOffsetmapTexture = nullptr,
 					   bool InUpdateBounds = true, bool InUpdateCollision = true, bool InGenerateMips = true);
 
 	// Helper accessor
-	FORCEINLINE uint16 GetHeightMapData(const ULandscapeComponent* Component, int32 TexU, int32 TexV, FColor* TextureData = NULL);
+	LANDSCAPE_API FORCEINLINE uint16 GetHeightMapData(const ULandscapeComponent* Component, int32 TexU, int32 TexV, FColor* TextureData = NULL);
 	// Helper accessor
-	FORCEINLINE uint16 GetHeightMapAlphaBlendData(const ULandscapeComponent* Component, int32 TexU, int32 TexV, FColor* TextureData = NULL);
+	LANDSCAPE_API FORCEINLINE uint16 GetHeightMapAlphaBlendData(const ULandscapeComponent* Component, int32 TexU, int32 TexV, FColor* TextureData = NULL);
 	// Helper accessor
-	FORCEINLINE uint8 GetHeightMapFlagsData(const ULandscapeComponent* Component, int32 TexU, int32 TexV, FColor* TextureData = NULL);
+	LANDSCAPE_API FORCEINLINE uint8 GetHeightMapFlagsData(const ULandscapeComponent* Component, int32 TexU, int32 TexV, FColor* TextureData = NULL);
 	// Generic
 	template<typename TStoreData>
 	void GetHeightDataTempl(int32& X1, int32& Y1, int32& X2, int32& Y2, TStoreData& StoreData);
@@ -189,105 +194,106 @@ struct LANDSCAPE_API FLandscapeEditDataInterface : public FLandscapeTextureDataI
 	template<typename TStoreData>
 	void GetHeightDataTemplFast(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TStoreData& StoreData, UTexture2D* InHeightmap = nullptr, TStoreData* NormalData = NULL);
 	// Implementation for fixed array
-	void GetHeightData(int32& X1, int32& Y1, int32& X2, int32& Y2, uint16* Data, int32 Stride);
-	void GetHeightDataFast(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, uint16* Data, int32 Stride, uint16* NormalData = NULL, UTexture2D* InHeightmap = nullptr);
-	void GetHeightAlphaBlendData(int32& X1, int32& Y1, int32& X2, int32& Y2, uint16* Data, int32 Stride);
-	void GetHeightFlagsData(int32& X1, int32& Y1, int32& X2, int32& Y2, uint8* Data, int32 Stride);
+	LANDSCAPE_API void GetHeightData(int32& X1, int32& Y1, int32& X2, int32& Y2, uint16* Data, int32 Stride);
+	LANDSCAPE_API void GetHeightDataFast(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, uint16* Data, int32 Stride, uint16* NormalData = NULL, UTexture2D* InHeightmap = nullptr);
+	LANDSCAPE_API void GetHeightAlphaBlendData(int32& X1, int32& Y1, int32& X2, int32& Y2, uint16* Data, int32 Stride);
+	LANDSCAPE_API void GetHeightFlagsData(int32& X1, int32& Y1, int32& X2, int32& Y2, uint8* Data, int32 Stride);
 	// Implementation for sparse array
-	void GetHeightData(int32& X1, int32& Y1, int32& X2, int32& Y2, TMap<FIntPoint, uint16>& SparseData);
-	void GetHeightDataFast(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TMap<FIntPoint, uint16>& SparseData, TMap<FIntPoint, uint16>* NormalData = NULL, UTexture2D* InHeightmap = nullptr);
+	LANDSCAPE_API void GetHeightData(int32& X1, int32& Y1, int32& X2, int32& Y2, TMap<FIntPoint, uint16>& SparseData);
+	LANDSCAPE_API void GetHeightDataFast(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TMap<FIntPoint, uint16>& SparseData, TMap<FIntPoint, uint16>* NormalData = NULL, UTexture2D* InHeightmap = nullptr);
 
 	// Recaclulate normals for the entire landscape.
-	void RecalculateNormals();
+	LANDSCAPE_API void RecalculateNormals();
 
 	//
 	// Weightmap access
 	//
 	// Helper accessor
-	FORCEINLINE uint8 GetWeightMapData(const ULandscapeComponent* Component, ULandscapeLayerInfoObject* LayerInfo, int32 TexU, int32 TexV, uint8 Offset = 0, UTexture2D* Texture = NULL, uint8* TextureData = NULL);
+	LANDSCAPE_API FORCEINLINE uint8 GetWeightMapData(const ULandscapeComponent* Component, ULandscapeLayerInfoObject* LayerInfo, int32 TexU, int32 TexV, uint8 Offset = 0, UTexture2D* Texture = NULL, uint8* TextureData = NULL);
 	template<typename TStoreData>
 	void GetWeightDataTempl(ULandscapeLayerInfoObject* LayerInfo, int32& X1, int32& Y1, int32& X2, int32& Y2, TStoreData& StoreData);
 	// Without data interpolation
 	template<typename TStoreData>
 	void GetWeightDataTemplFast(ULandscapeLayerInfoObject* LayerInfo, const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TStoreData& StoreData);
 	// Implementation for fixed array
-	void GetWeightData(ULandscapeLayerInfoObject* LayerInfo, int32& X1, int32& Y1, int32& X2, int32& Y2, uint8* Data, int32 Stride);
+	LANDSCAPE_API void GetWeightData(ULandscapeLayerInfoObject* LayerInfo, int32& X1, int32& Y1, int32& X2, int32& Y2, uint8* Data, int32 Stride);
 	//void GetWeightData(FName LayerName, int32& X1, int32& Y1, int32& X2, int32& Y2, TArray<uint8>* Data, int32 Stride);
-	void GetWeightDataFast(ULandscapeLayerInfoObject* LayerInfo, const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, uint8* Data, int32 Stride);
-	void GetWeightDataFast(ULandscapeLayerInfoObject* LayerInfo, const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TArray<uint8>* Data, int32 Stride);
+	LANDSCAPE_API void GetWeightDataFast(ULandscapeLayerInfoObject* LayerInfo, const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, uint8* Data, int32 Stride);
+	LANDSCAPE_API void GetWeightDataFast(ULandscapeLayerInfoObject* LayerInfo, const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TArray<uint8>* Data, int32 Stride);
 	// Implementation for sparse array
-	void GetWeightData(ULandscapeLayerInfoObject* LayerInfo, int32& X1, int32& Y1, int32& X2, int32& Y2, TMap<FIntPoint, uint8>& SparseData);
+	LANDSCAPE_API void GetWeightData(ULandscapeLayerInfoObject* LayerInfo, int32& X1, int32& Y1, int32& X2, int32& Y2, TMap<FIntPoint, uint8>& SparseData);
 	//void GetWeightData(FName LayerName, int32& X1, int32& Y1, int32& X2, int32& Y2, TMap<uint64, TArray<uint8>>& SparseData);
-	void GetWeightDataFast(ULandscapeLayerInfoObject* LayerInfo, const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TMap<FIntPoint, uint8>& SparseData);
-	void GetWeightDataFast(ULandscapeLayerInfoObject* LayerInfo, const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TMap<FIntPoint, TArray<uint8>>& SparseData);
+	LANDSCAPE_API void GetWeightDataFast(ULandscapeLayerInfoObject* LayerInfo, const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TMap<FIntPoint, uint8>& SparseData);
+	LANDSCAPE_API void GetWeightDataFast(ULandscapeLayerInfoObject* LayerInfo, const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TMap<FIntPoint, TArray<uint8>>& SparseData);
 	// Updates weightmap for LayerInfo, optionally adjusting all other weightmaps.
-	void SetAlphaData(ULandscapeLayerInfoObject* LayerInfo, const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, const uint8* Data, int32 Stride, ELandscapeLayerPaintingRestriction PaintingRestriction = ELandscapeLayerPaintingRestriction::None, bool bWeightAdjust = true, bool bTotalWeightAdjust = false);
+	LANDSCAPE_API void SetAlphaData(ULandscapeLayerInfoObject* LayerInfo, const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, const uint8* Data, int32 Stride, ELandscapeLayerPaintingRestriction PaintingRestriction = ELandscapeLayerPaintingRestriction::None, bool bWeightAdjust = true, bool bTotalWeightAdjust = false);
 	// Updates weightmaps for all layers. Data points to packed data for all layers in the landscape info
-	void SetAlphaData(const TSet<ULandscapeLayerInfoObject*>& DirtyLayerInfos, const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, const uint8* Data, int32 Stride, ELandscapeLayerPaintingRestriction PaintingRestriction = ELandscapeLayerPaintingRestriction::None);
+	LANDSCAPE_API void SetAlphaData(const TSet<ULandscapeLayerInfoObject*>& DirtyLayerInfos, const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, const uint8* Data, int32 Stride, ELandscapeLayerPaintingRestriction PaintingRestriction = ELandscapeLayerPaintingRestriction::None);
 	// Delete a layer and re-normalize other layers
-	void DeleteLayer(ULandscapeLayerInfoObject* LayerInfo);
+	LANDSCAPE_API void DeleteLayer(ULandscapeLayerInfoObject* LayerInfo);
 	// Fill a layer and re-normalize other layers
-	void FillLayer(ULandscapeLayerInfoObject* LayerInfo);
+	LANDSCAPE_API void FillLayer(ULandscapeLayerInfoObject* LayerInfo);
 	// Fill all empty layers and re-normalize layers
-	void FillEmptyLayers(ULandscapeLayerInfoObject* LayerInfo);
-	// Replace/merge a layer
-	void ReplaceLayer(ULandscapeLayerInfoObject* FromLayerInfo, ULandscapeLayerInfoObject* ToLayerInfo);
+	LANDSCAPE_API void FillEmptyLayers(ULandscapeLayerInfoObject* LayerInfo);
+	
+	// Replace/merge a layer (across all edit layers and the main runtime layer)
+	LANDSCAPE_API void ReplaceLayer(ULandscapeLayerInfoObject* FromLayerInfo, ULandscapeLayerInfoObject* ToLayerInfo);
 
 	template<typename TStoreData>
 	void GetEditToolTextureData(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TStoreData& StoreData, TFunctionRef<UTexture2D*(ULandscapeComponent*)> GetComponentTexture);
-	void SetEditToolTextureData(int32 X1, int32 Y1, int32 X2, int32 Y2, const uint8* Data, int32 Stride, TFunctionRef<UTexture2D*&(ULandscapeComponent*)> GetComponentTexture, TextureGroup InTextureGroup = TEXTUREGROUP_Terrain_Weightmap);
+	LANDSCAPE_API void SetEditToolTextureData(int32 X1, int32 Y1, int32 X2, int32 Y2, const uint8* Data, int32 Stride, TFunctionRef<UTexture2D*&(ULandscapeComponent*)> GetComponentTexture, TextureGroup InTextureGroup = TEXTUREGROUP_Terrain_Weightmap);
 
 	// Without data interpolation, Select Data 
 	template<typename TStoreData>
 	void GetSelectDataTempl(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TStoreData& StoreData);
-	void GetSelectData(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, uint8* Data, int32 Stride);
-	void GetSelectData(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TMap<FIntPoint, uint8>& SparseData);
-	void SetSelectData(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, const uint8* Data, int32 Stride);
+	LANDSCAPE_API void GetSelectData(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, uint8* Data, int32 Stride);
+	LANDSCAPE_API void GetSelectData(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TMap<FIntPoint, uint8>& SparseData);
+	LANDSCAPE_API void SetSelectData(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, const uint8* Data, int32 Stride);
 	
 	template<typename TStoreData>
 	void GetLayerContributionDataTempl(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TStoreData& StoreData);
-	void GetLayerContributionData(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, uint8* Data, int32 Stride);
-	void GetLayerContributionData(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TMap<FIntPoint, uint8>& SparseData);
-	void SetLayerContributionData(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, const uint8* Data, int32 Stride);
+	LANDSCAPE_API void GetLayerContributionData(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, uint8* Data, int32 Stride);
+	LANDSCAPE_API void GetLayerContributionData(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TMap<FIntPoint, uint8>& SparseData);
+	LANDSCAPE_API void SetLayerContributionData(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, const uint8* Data, int32 Stride);
 
 	template<typename TStoreData>
 	void GetDirtyDataTempl(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TStoreData& StoreData);
-	void GetDirtyData(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, uint8* Data, int32 Stride);
-	void GetDirtyData(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TMap<FIntPoint, uint8>& SparseData);
-	void SetDirtyData(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, const uint8* Data, int32 Stride);
+	LANDSCAPE_API void GetDirtyData(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, uint8* Data, int32 Stride);
+	LANDSCAPE_API void GetDirtyData(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TMap<FIntPoint, uint8>& SparseData);
+	LANDSCAPE_API void SetDirtyData(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, const uint8* Data, int32 Stride);
 
 	//
 	// XYOffsetmap access
 	//
 	template<typename T>
 	void SetXYOffsetDataTempl(int32 X1, int32 Y1, int32 X2, int32 Y2, const T* Data, int32 Stride);
-	void SetXYOffsetData(int32 X1, int32 Y1, int32 X2, int32 Y2, const FVector2D* Data, int32 Stride);
-	void SetXYOffsetData(int32 X1, int32 Y1, int32 X2, int32 Y2, const FVector* Data, int32 Stride);
+	LANDSCAPE_API void SetXYOffsetData(int32 X1, int32 Y1, int32 X2, int32 Y2, const FVector2D* Data, int32 Stride);
+	LANDSCAPE_API void SetXYOffsetData(int32 X1, int32 Y1, int32 X2, int32 Y2, const FVector* Data, int32 Stride);
 	// Helper accessor
-	FORCEINLINE FVector2D GetXYOffsetmapData(const ULandscapeComponent* Component, int32 TexU, int32 TexV, FColor* TextureData = NULL);
+	LANDSCAPE_API FORCEINLINE FVector2D GetXYOffsetmapData(const ULandscapeComponent* Component, int32 TexU, int32 TexV, FColor* TextureData = NULL);
 
 	template<typename TStoreData>
 	void GetXYOffsetDataTempl(int32& X1, int32& Y1, int32& X2, int32& Y2, TStoreData& StoreData);
-	void GetXYOffsetData(int32& X1, int32& Y1, int32& X2, int32& Y2, FVector2D* Data, int32 Stride);
-	void GetXYOffsetData(int32& X1, int32& Y1, int32& X2, int32& Y2, TMap<FIntPoint, FVector2D>& SparseData);
-	void GetXYOffsetData(int32& X1, int32& Y1, int32& X2, int32& Y2, FVector* Data, int32 Stride);
-	void GetXYOffsetData(int32& X1, int32& Y1, int32& X2, int32& Y2, TMap<FIntPoint, FVector>& SparseData);
+	LANDSCAPE_API void GetXYOffsetData(int32& X1, int32& Y1, int32& X2, int32& Y2, FVector2D* Data, int32 Stride);
+	LANDSCAPE_API void GetXYOffsetData(int32& X1, int32& Y1, int32& X2, int32& Y2, TMap<FIntPoint, FVector2D>& SparseData);
+	LANDSCAPE_API void GetXYOffsetData(int32& X1, int32& Y1, int32& X2, int32& Y2, FVector* Data, int32 Stride);
+	LANDSCAPE_API void GetXYOffsetData(int32& X1, int32& Y1, int32& X2, int32& Y2, TMap<FIntPoint, FVector>& SparseData);
 	// Without data interpolation
 	template<typename TStoreData>
 	void GetXYOffsetDataTemplFast(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TStoreData& StoreData);
 	// Without data interpolation, able to get normal data
-	void GetXYOffsetDataFast(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, FVector2D* Data, int32 Stride);
-	void GetXYOffsetDataFast(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TMap<FIntPoint, FVector2D>& SparseData);
-	void GetXYOffsetDataFast(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, FVector* Data, int32 Stride);
-	void GetXYOffsetDataFast(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TMap<FIntPoint, FVector>& SparseData);
+	LANDSCAPE_API void GetXYOffsetDataFast(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, FVector2D* Data, int32 Stride);
+	LANDSCAPE_API void GetXYOffsetDataFast(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TMap<FIntPoint, FVector2D>& SparseData);
+	LANDSCAPE_API void GetXYOffsetDataFast(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, FVector* Data, int32 Stride);
+	LANDSCAPE_API void GetXYOffsetDataFast(const int32 X1, const int32 Y1, const int32 X2, const int32 Y2, TMap<FIntPoint, FVector>& SparseData);
 
 	template<typename T>
 	static void ShrinkData(TArray<T>& Data, int32 OldMinX, int32 OldMinY, int32 OldMaxX, int32 OldMaxY, int32 NewMinX, int32 NewMinY, int32 NewMaxX, int32 NewMaxY);
 
-	const ALandscape* GetTargetLandscape() const;
+	LANDSCAPE_API const ALandscape* GetTargetLandscape() const;
 
-	bool CanHaveLandscapeLayersContent() const;
-	bool HasLandscapeLayersContent() const;
+	LANDSCAPE_API bool CanHaveLandscapeLayersContent() const;
+	LANDSCAPE_API bool HasLandscapeLayersContent() const;
 
 private:
 	int32 ComponentSizeQuads;
@@ -296,8 +302,12 @@ private:
 	FVector DrawScale;
 
 	ULandscapeInfo* LandscapeInfo;
+	
+	// if true, we use the LandscapeActor->PrivateEditingLayer, otherwise we use the LocalEditLayerGUID specified below
+	bool bUseSharedLandscapeEditLayer;
+	FGuid LocalEditLayerGUID;
 
-	void FillLayer(ULandscapeLayerInfoObject* LayerInfo, bool bEmptyLayersOnly);
+	LANDSCAPE_API void FillLayer(ULandscapeLayerInfoObject* LayerInfo, bool bEmptyLayersOnly);
 
 	// Only for Missing Data interpolation... only internal usage
 	template<typename TData, typename TStoreData, typename FType>
@@ -310,10 +320,10 @@ private:
 	template<typename TStoreData, typename TGetHeightMapDataFunction>
 	void GetHeightDataInternal(int32& ValidX1, int32& ValidY1, int32& ValidX2, int32& ValidY2, TStoreData& StoreData, TGetHeightMapDataFunction GetHeightMapDataFunction);
 
-	FORCEINLINE FColor& GetHeightMapColor(const ULandscapeComponent* Component, int32 TexU, int32 TexV, FColor* TextureData);
+	LANDSCAPE_API FORCEINLINE FColor& GetHeightMapColor(const ULandscapeComponent* Component, int32 TexU, int32 TexV, FColor* TextureData);
 
-	// test if layer is whitelisted for a given texel
-	inline bool IsWhitelisted(const ULandscapeLayerInfoObject* LayerInfo,
+	// test if layer is allowed for a given texel
+	inline bool IsLayerAllowed(const ULandscapeLayerInfoObject* LayerInfo,
 	                          int32 ComponentIndexX, int32 SubIndexX, int32 SubX,
 	                          int32 ComponentIndexY, int32 SubIndexY, int32 SubY);
 
@@ -321,10 +331,10 @@ private:
 	inline TMap<const ULandscapeLayerInfoObject*, uint32> CountWeightBlendedLayerInfluence(int32 ComponentIndexX, int32 ComponentIndexY, TOptional<TArrayView<const uint8* const>> LayerDataPtrs);
 
 	// chooses a replacement layer to use when erasing from 100% influence on a texel
-	const ULandscapeLayerInfoObject* ChooseReplacementLayer(const ULandscapeLayerInfoObject* LayerInfo, int32 ComponentIndexX, int32 SubIndexX, int32 SubX, int32 ComponentIndexY, int32 SubIndexY, int32 SubY, TMap<FIntPoint, TMap<const ULandscapeLayerInfoObject*, uint32>>& LayerInfluenceCache, TArrayView<const uint8* const> LayerDataPtrs);
+	LANDSCAPE_API const ULandscapeLayerInfoObject* ChooseReplacementLayer(const ULandscapeLayerInfoObject* LayerInfo, int32 ComponentIndexX, int32 SubIndexX, int32 SubX, int32 ComponentIndexY, int32 SubIndexY, int32 SubY, TMap<FIntPoint, TMap<const ULandscapeLayerInfoObject*, uint32>>& LayerInfluenceCache, TArrayView<const uint8* const> LayerDataPtrs);
 };
 
-struct LANDSCAPE_API FLandscapeDoNotDirtyScope
+struct FLandscapeDoNotDirtyScope
 {
 	FLandscapeDoNotDirtyScope(FLandscapeEditDataInterface& InEditInterface, bool bInScopeEnabled = true)
 		: EditInterface(InEditInterface), bScopeEnabled(bInScopeEnabled)
@@ -389,6 +399,16 @@ struct FHeightmapAccessor
 		LandscapeEdit = new FLandscapeEditDataInterface(InLandscapeInfo);
 	}
 
+	void SetEditLayer(const FGuid& InEditLayerGUID)
+	{
+		LandscapeEdit->SetEditLayer(InEditLayerGUID);
+	}
+
+	FGuid GetEditLayer() const
+	{
+		return LandscapeEdit->GetEditLayer();
+	}
+
 	// accessors
 	void GetData(int32& X1, int32& Y1, int32& X2, int32& Y2, TMap<FIntPoint, uint16>& Data)
 	{
@@ -430,7 +450,7 @@ struct FHeightmapAccessor
 				bUpdateNormals = true;
 				for (ULandscapeComponent* Component : Components)
 				{
-					ULandscapeHeightfieldCollisionComponent* CollisionComponent = Component->CollisionComponent.Get();
+					ULandscapeHeightfieldCollisionComponent* CollisionComponent = Component->GetCollisionComponent();
 					if (CollisionComponent && AInstancedFoliageActor::HasFoliageAttached(CollisionComponent))
 					{
 						bUpdateFoliage = true;
@@ -449,7 +469,7 @@ struct FHeightmapAccessor
 
 				for (ULandscapeComponent* Component : Components)
 				{
-					ULandscapeHeightfieldCollisionComponent* CollisionComponent = Component->CollisionComponent.Get();
+					ULandscapeHeightfieldCollisionComponent* CollisionComponent = Component->GetCollisionComponent();
 					if (CollisionComponent)
 					{
 						CollisionComponents.Add(CollisionComponent);
@@ -495,7 +515,7 @@ struct FHeightmapAccessor
 				(*It)->UpdateComponentToWorld();
 
 				// Recreate collision for modified components to update the physical materials
-				ULandscapeHeightfieldCollisionComponent* CollisionComponent = (*It)->CollisionComponent.Get();
+				ULandscapeHeightfieldCollisionComponent* CollisionComponent = (*It)->GetCollisionComponent();
 				if (CollisionComponent)
 				{
 					CollisionComponent->RecreateCollision();
@@ -549,7 +569,7 @@ struct FAlphamapAccessor
 			// Recreate collision for modified components to update the physical materials
 			for (ULandscapeComponent* Component : ModifiedComponents)
 			{
-				ULandscapeHeightfieldCollisionComponent* CollisionComponent = Component->CollisionComponent.Get();
+				ULandscapeHeightfieldCollisionComponent* CollisionComponent = Component->GetCollisionComponent();
 				if (CollisionComponent)
 				{
 					CollisionComponent->RecreateCollision();
@@ -604,6 +624,16 @@ struct FAlphamapAccessor
 	void Flush()
 	{
 		LandscapeEdit.Flush();
+	}
+
+	void SetEditLayer(const FGuid& InEditLayerGUID)
+	{
+		LandscapeEdit.SetEditLayer(InEditLayerGUID);
+	}
+	
+	FGuid GetEditLayer() const
+	{
+		return LandscapeEdit.GetEditLayer();
 	}
 
 private:

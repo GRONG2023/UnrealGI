@@ -114,19 +114,6 @@ private:
 	TRefCountPtr<ID3D11InputLayout> InputLayout;
 };
 
-class FSlateD3DGeometryShader
-{
-public:
-	virtual ~FSlateD3DGeometryShader() {}
-	void Create( const FString& Filename, const FString& EntryPoint, const FString& ShaderModel );
-	void BindShader();
-	void BindParameters();
-protected:
-	virtual void UpdateParameters() {}
-private:
-	FSlateD3DShaderBindings ShaderBindings;
-	TRefCountPtr<ID3D11GeometryShader> GeometryShader;
-};
 
 class FSlateD3DPS
 {
@@ -154,9 +141,10 @@ private:
 	
 	struct FPerElementConstants
 	{
-		FMatrix ViewProjection;
-		FVector4 VertexShaderParams;
+		FMatrix44f ViewProjection;
+		FVector4f VertexShaderParams;
 	};
+	static_assert(sizeof(FPerElementConstants) == sizeof(float) * 20, "Size mismatch");	// LWC_TODO: Fix for FVector4f
 
 	FSlateD3DConstantBuffer<FPerElementConstants> ConstantBuffer;
 	TSlateD3DTypedShaderParameter<ID3D11Buffer>* Constants;
@@ -173,26 +161,29 @@ public:
 		SamplerState = InSamplerState;
 	}
 
-	void SetShaderType( uint32 InShaderType );
-	void SetDrawEffects( ESlateDrawEffect InDrawEffects );
-	void SetShaderParams( const FVector4& InShaderParams );
-	void SetGammaValues(const FVector2D& InGammaValues);
+	void SetShaderType(uint32 InShaderType);
+	void SetDrawEffects(ESlateDrawEffect InDrawEffects);
+	void SetShaderParams(const FShaderParams& InShaderParams);
+	void SetGammaValues(const FVector2f& InGammaValues);
 protected:
 	void UpdateParameters();
 private:
 	MS_ALIGN(16) struct FPerElementConstants
 	{
+		FVector4f ShaderParams;		// 16 bytes
+		FVector4f ShaderParams2;	// 16 bytes
 		uint32 ShaderType;			//  4 bytes
-		FVector4 ShaderParams;		// 16 bytes
-		uint32 IgnoreTextureAlpha;	//	4 byte
-		uint32 DisableEffect;		//  4 byte
+		uint32 IgnoreTextureAlpha;	//	4 bytes
+		uint32 DisableEffect;		//  4 bytes
 		uint32 UNUSED[1];			//  4 bytes
 	};
+	static_assert(sizeof(FPerElementConstants) == sizeof(float) * 8 + sizeof(uint32) * 4, "Size mismatch");	// LWC_TODO: Fix for FVector4f
 
 	MS_ALIGN(16) struct FPerFrameConstants
 	{
-		FVector2D GammaValues;
+		FVector2f GammaValues;
 	};
+	static_assert(sizeof(FVector2f) == sizeof(float) * 2, "Size mismatch");
 
 	FSlateD3DConstantBuffer<FPerElementConstants> PerElementConstants;
 	FSlateD3DConstantBuffer<FPerFrameConstants> PerFrameConstants;

@@ -95,7 +95,8 @@ public:
 				else
 				{
 					TRACE_PLATFORMFILE_FAIL_CLOSE(FileHandle);
-					UE_LOG(LogInit, Warning, TEXT("Failed to properly close readable file: %s with errno: %d"), *Filename, errno);
+					UE_LOG(LogInit, Warning, TEXT("Failed to properly close readable file: %s with errno: %d: %s"),
+						*Filename, errno, UTF8_TO_TCHAR(strerror(errno)));
 				}
 				ActiveHandles[ HandleSlot ] = nullptr;
 			}
@@ -108,7 +109,8 @@ public:
                 int Result = fsync(FileHandle);
 				if (Result < 0)
 				{
-					UE_LOG(LogInit, Error, TEXT("Failed to properly flush writable file with errno: %d"), errno);
+					UE_LOG(LogInit, Error, TEXT("Failed to properly flush writable file with errno: %d: %s"),
+						errno, UTF8_TO_TCHAR(strerror(errno)));
 				}
             }
 			TRACE_PLATFORMFILE_BEGIN_CLOSE(FileHandle);
@@ -121,7 +123,8 @@ public:
 			else
 			{
 				TRACE_PLATFORMFILE_FAIL_CLOSE(FileHandle);
-				UE_LOG(LogInit, Warning, TEXT("Failed to properly close file with errno: %d"), errno);
+				UE_LOG(LogInit, Warning, TEXT("Failed to properly close file with errno: %d: %s"),
+					errno, UTF8_TO_TCHAR(strerror(errno)));
 			}
 		}
 		FileHandle = -1;
@@ -280,7 +283,7 @@ private:
 				ReserveSlot();
 
 				TRACE_PLATFORMFILE_BEGIN_OPEN(*Filename);
-				FileHandle = open(TCHAR_TO_UTF8(*Filename), O_RDONLY | O_SHLOCK);
+				FileHandle = open(TCHAR_TO_UTF8(*Filename), O_RDONLY | O_SHLOCK | O_CLOEXEC);
 				if( FileHandle != -1 )
 				{
 					TRACE_PLATFORMFILE_END_OPEN(FileHandle);
@@ -512,7 +515,7 @@ FDateTime FApplePlatformFile::GetTimeStamp(const TCHAR* Filename)
 {
 	// get file times
 	struct stat FileInfo;
-	if(Stat(Filename, &FileInfo) == -1)
+	if(Stat(Filename, &FileInfo) != 0)
 	{
 		return FDateTime::MinValue();
 	}
@@ -527,7 +530,7 @@ void FApplePlatformFile::SetTimeStamp(const TCHAR* Filename, const FDateTime Dat
 {
 	// get file times
 	struct stat FileInfo;
-	if (Stat(Filename, &FileInfo) == 0)
+	if (Stat(Filename, &FileInfo) != 0)
 	{
 		return;
 	}
@@ -535,7 +538,7 @@ void FApplePlatformFile::SetTimeStamp(const TCHAR* Filename, const FDateTime Dat
 	// change the modification time only
 	struct utimbuf Times;
 	Times.actime = FileInfo.st_atime;
-	Times.modtime = (DateTime - MacEpoch).GetTotalSeconds();
+	Times.modtime = (time_t)(DateTime - MacEpoch).GetTotalSeconds();
 	utime(TCHAR_TO_UTF8(*NormalizeFilename(Filename)), &Times);
 }
 
@@ -558,16 +561,26 @@ FString FApplePlatformFile::GetFilenameOnDisk(const TCHAR* Filename)
 	return Filename;
 }
 
+ESymlinkResult FApplePlatformFile::IsSymlink(const TCHAR* Filename)
+{
+	struct stat FileInfo;
+	if (Stat(Filename, &FileInfo) != -1 && S_ISLNK(FileInfo.st_mode))
+	{
+		return ESymlinkResult::Symlink;
+	}
+	return ESymlinkResult::NonSymlink;
+}
+
 IFileHandle* FApplePlatformFile::OpenRead(const TCHAR* Filename, bool bAllowWrite)
 {
 	TRACE_PLATFORMFILE_BEGIN_OPEN(Filename);
-	int32 Handle = open(TCHAR_TO_UTF8(*NormalizeFilename(Filename)), O_RDONLY);
+	int32 Handle = open(TCHAR_TO_UTF8(*NormalizeFilename(Filename)), O_RDONLY | O_CLOEXEC);
 	if (Handle != -1)
 	{
 		TRACE_PLATFORMFILE_END_OPEN(Handle);
-#if PLATFORM_MAC && !UE_BUILD_SHIPPING
+#if PLATFORM_MAC && UE_EDITOR && !UE_BUILD_SHIPPING
 		// No blocking attempt shared lock, failure means we should not have opened the file for reading, protect against multiple instances and client/server versions
-		if(!bAllowWrite && flock(Handle, LOCK_NB | LOCK_SH) == -1)
+		if(flock(Handle, LOCK_NB | LOCK_SH) != 0)
 		{
 			TRACE_PLATFORMFILE_BEGIN_CLOSE(Handle);
 			int CloseResult = close(Handle);
@@ -602,7 +615,7 @@ IFileHandle* FApplePlatformFile::OpenRead(const TCHAR* Filename, bool bAllowWrit
 
 IFileHandle* FApplePlatformFile::OpenWrite(const TCHAR* Filename, bool bAppend, bool bAllowRead)
 {
-	int Flags = O_CREAT;
+	int Flags = O_CREAT | O_CLOEXEC;
 	
 	if (bAllowRead)
 	{
@@ -620,8 +633,8 @@ IFileHandle* FApplePlatformFile::OpenWrite(const TCHAR* Filename, bool bAppend, 
 	{
 		TRACE_PLATFORMFILE_END_OPEN(Handle);
 #if PLATFORM_MAC && UE_EDITOR && !UE_BUILD_SHIPPING
-		// No blocking attempt exclusive lock, failure means we should not have opened the file for writing, protect against multiple instances and client/server versions
-		if(!bAllowRead && flock(Handle, LOCK_NB | LOCK_EX) == -1)
+		// No blocking attempt EXclusive lock, failure means we should not have opened the file for writing, protect against multiple instances and client/server versions
+		if(flock(Handle, LOCK_NB | LOCK_EX) != 0)
 		{
 			TRACE_PLATFORMFILE_BEGIN_CLOSE(Handle);
 			int CloseResult = close(Handle);
@@ -638,6 +651,12 @@ IFileHandle* FApplePlatformFile::OpenWrite(const TCHAR* Filename, bool bAppend, 
 			(void)CloseResult;
 #endif
 			return nullptr;
+		}
+		
+		// We have created the writer, if reading is required downgrade the lock to SHared
+		if(bAllowRead)
+		{
+			flock(Handle, LOCK_NB | LOCK_SH);
 		}
 #endif
 		
@@ -677,13 +696,12 @@ bool FApplePlatformFile::DirectoryExists(const TCHAR* Directory)
 
 bool FApplePlatformFile::CreateDirectory(const TCHAR* Directory)
 {
-	@autoreleasepool
-	{
-		CFStringRef CFDirectory = FPlatformString::TCHARToCFString(*NormalizeFilename(Directory));
-		bool Result = [[NSFileManager defaultManager] createDirectoryAtPath:(NSString*)CFDirectory withIntermediateDirectories:true attributes:nil error:nil];
-		CFRelease(CFDirectory);
-		return Result;
-	}
+	SCOPED_AUTORELEASE_POOL;
+
+	CFStringRef CFDirectory = FPlatformString::TCHARToCFString(*NormalizeFilename(Directory));
+	bool Result = [[NSFileManager defaultManager] createDirectoryAtPath:(NSString*)CFDirectory withIntermediateDirectories:true attributes:nil error:nil];
+	CFRelease(CFDirectory);
+	return Result;
 }
 
 bool FApplePlatformFile::DeleteDirectory(const TCHAR* Directory)
@@ -704,53 +722,51 @@ FFileStatData FApplePlatformFile::GetStatData(const TCHAR* FilenameOrDirectory)
 
 bool FApplePlatformFile::IterateDirectory(const TCHAR* Directory, FDirectoryVisitor& Visitor)
 {
-	@autoreleasepool
-	{
-		const FString DirectoryStr = Directory;
-		const FString NormalizedDirectoryStr = NormalizeFilename(Directory);
+	const FString DirectoryStr = Directory;
+	const FString NormalizedDirectoryStr = NormalizeFilename(Directory);
 
-		return IterateDirectoryCommon(Directory, [&](struct dirent* InEntry) -> bool
+	return IterateDirectoryCommon(Directory, [&Visitor, &DirectoryStr, &NormalizedDirectoryStr](struct dirent* InEntry) -> bool
+	{
+		SCOPED_AUTORELEASE_POOL;
+
+		// Normalize any unicode forms so we match correctly
+		const FString NormalizedFilename = UTF8_TO_TCHAR(([[[NSString stringWithUTF8String:InEntry->d_name] precomposedStringWithCanonicalMapping] cStringUsingEncoding:NSUTF8StringEncoding]));
+
+		// Figure out whether it's a directory. Some protocols (like NFS) do not voluntarily return this as part of the directory entry, and need to be queried manually.
+		bool bIsDirectory = (InEntry->d_type == DT_DIR);
+		if (InEntry->d_type == DT_UNKNOWN || InEntry->d_type == DT_LNK)
 		{
-			// Normalize any unicode forms so we match correctly
-			const FString NormalizedFilename = UTF8_TO_TCHAR(([[[NSString stringWithUTF8String:InEntry->d_name] precomposedStringWithCanonicalMapping] cStringUsingEncoding:NSUTF8StringEncoding]));
-				
-			// Figure out whether it's a directory. Some protocols (like NFS) do not voluntarily return this as part of the directory entry, and need to be queried manually.
-			bool bIsDirectory = (InEntry->d_type == DT_DIR);
-			if (InEntry->d_type == DT_UNKNOWN || InEntry->d_type == DT_LNK)
+			struct stat StatInfo;
+			if (stat(TCHAR_TO_UTF8(*(NormalizedDirectoryStr / NormalizedFilename)), &StatInfo) == 0)
 			{
-				struct stat StatInfo;
-				if (stat(TCHAR_TO_UTF8(*(NormalizedDirectoryStr / NormalizedFilename)), &StatInfo) == 0)
-				{
-					bIsDirectory = S_ISDIR(StatInfo.st_mode);
-				}
+				bIsDirectory = S_ISDIR(StatInfo.st_mode);
 			}
-					
-			return Visitor.Visit(*(DirectoryStr / NormalizedFilename), bIsDirectory);
-		});
-	}
+		}
+
+		return Visitor.CallShouldVisitAndVisit(*(DirectoryStr / NormalizedFilename), bIsDirectory);
+	});
 }
 
 bool FApplePlatformFile::IterateDirectoryStat(const TCHAR* Directory, FDirectoryStatVisitor& Visitor)
 {
-	@autoreleasepool
+	const FString DirectoryStr = Directory;
+	const FString NormalizedDirectoryStr = NormalizeFilename(Directory);
+
+	return IterateDirectoryCommon(Directory, [&Visitor, &DirectoryStr, &NormalizedDirectoryStr](struct dirent* InEntry) -> bool
 	{
-		const FString DirectoryStr = Directory;
-		const FString NormalizedDirectoryStr = NormalizeFilename(Directory);
+		SCOPED_AUTORELEASE_POOL;
 
-		return IterateDirectoryCommon(Directory, [&](struct dirent* InEntry) -> bool
+		// Normalize any unicode forms so we match correctly
+		const FString NormalizedFilename = UTF8_TO_TCHAR(([[[NSString stringWithUTF8String:InEntry->d_name] precomposedStringWithCanonicalMapping] cStringUsingEncoding:NSUTF8StringEncoding]));
+
+		struct stat StatInfo;
+		if (stat(TCHAR_TO_UTF8(*(NormalizedDirectoryStr / NormalizedFilename)), &StatInfo) == 0)
 		{
-			// Normalize any unicode forms so we match correctly
-			const FString NormalizedFilename = UTF8_TO_TCHAR(([[[NSString stringWithUTF8String:InEntry->d_name] precomposedStringWithCanonicalMapping] cStringUsingEncoding:NSUTF8StringEncoding]));
-				
-			struct stat StatInfo;
-			if (stat(TCHAR_TO_UTF8(*(NormalizedDirectoryStr / NormalizedFilename)), &StatInfo) == 0)
-			{
-				return Visitor.Visit(*(DirectoryStr / NormalizedFilename), MacStatToUEFileData(StatInfo));
-			}
+			return Visitor.CallShouldVisitAndVisit(*(DirectoryStr / NormalizedFilename), MacStatToUEFileData(StatInfo));
+		}
 
-			return true;
-		});
-	}
+		return true;
+	});
 }
 
 bool FApplePlatformFile::IterateDirectoryCommon(const TCHAR* Directory, const TFunctionRef<bool(struct dirent*)>& Visitor)
@@ -761,7 +777,7 @@ bool FApplePlatformFile::IterateDirectoryCommon(const TCHAR* Directory, const TF
 	{
 		Result = true;
 		struct dirent *Entry;
-		while ((Entry = readdir(Handle)) != NULL)
+		while (Result && (Entry = readdir(Handle)) != NULL)
 		{
 			if (FCStringAnsi::Strcmp(Entry->d_name, ".") && FCStringAnsi::Strcmp(Entry->d_name, "..") && FCStringAnsi::Strcmp(Entry->d_name, ".DS_Store"))
 			{

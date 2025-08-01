@@ -2,14 +2,21 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UnrealWidget.h"
 #include "AnimNodeEditMode.h"
-#include "AnimGraphNode_TwoBoneIK.h"
+#include "Animation/AnimTypes.h"
+#include "Animation/BoneSocketReference.h"
+#include "Delegates/IDelegateInstance.h"
+#include "Math/MathFwd.h"
+#include "UnrealWidgetFwd.h"
 
 class FEditorViewportClient;
 class FPrimitiveDrawInterface;
-class USkeletalMeshComponent;
+class FSceneView;
+class FViewport;
+class HHitProxy;
+class UAnimGraphNode_TwoBoneIK;
+struct FColor;
+struct FPropertyChangedEvent;
 struct FViewportClick;
 
 class FTwoBoneIKEditMode : public FAnimNodeEditMode
@@ -29,7 +36,8 @@ public:
 	virtual void EnterMode(class UAnimGraphNode_Base* InEditorNode, struct FAnimNode_Base* InRuntimeNode) override;
 	virtual void ExitMode() override;
 	virtual FVector GetWidgetLocation() const override;
-	virtual FWidget::EWidgetMode GetWidgetMode() const override;
+	virtual UE::Widget::EWidgetMode GetWidgetMode() const override;
+	virtual bool UsesTransformWidget(UE::Widget::EWidgetMode InWidgetMode) const override;
 	FBoneSocketTarget GetSelectedTarget() const;
 	virtual void DoTranslation(FVector& InTranslation) override;
 

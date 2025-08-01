@@ -16,6 +16,7 @@
 class FActiveTimerHandle;
 class IDetailsView;
 class SWindow;
+class SBox;
 
 namespace ELoginConnectionState
 {
@@ -39,7 +40,7 @@ public:
 	/** A reference to the parent window */
 	SLATE_ARGUMENT(TSharedPtr<SWindow>, ParentWindow)
 
-	/** Callback to be called when the "Disable Source Control" button is pressed. */
+	/** Callback to be called when the "Disable Revision Control" button is pressed. */
 	SLATE_ARGUMENT(FSourceControlLoginClosed, OnSourceControlLoginClosed)
 
 	SLATE_END_ARGS()
@@ -88,6 +89,9 @@ private:
 	/** Delegate to determine visibility of the disabled text widget */
 	EVisibility GetDisabledTextVisibility() const;
 
+	/** Requests confirmation of disabling source control */
+	bool ConfirmDisableSourceControl() const;
+
 private:
 	/** The frequency at which to tick to scc module when inside a modal window */
 	static const float RefreshFrequency;
@@ -105,7 +109,7 @@ private:
 	FSourceControlLoginClosed SourceControlLoginClosed;
 
 	/** The currently displayed settings widget container */
-	TSharedPtr<class SBorder> SettingsBorder;
+	TSharedPtr<SBox> SettingsBorder;
 
 	/** The handle to the active scc module tick */
 	TWeakPtr<FActiveTimerHandle> ActiveTimerHandle;

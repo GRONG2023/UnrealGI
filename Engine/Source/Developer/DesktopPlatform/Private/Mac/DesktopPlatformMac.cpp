@@ -9,6 +9,7 @@
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/Guid.h"
 #include "HAL/FileManager.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #define LOCTEXT_NAMESPACE "DesktopPlatform"
 
@@ -127,8 +128,8 @@ private:
 	}
 	else
 	{
-		// Allow all file types
-		[DialogPanel setAllowedFileTypes:nil];
+		// Allow all file types (empty array means all types)
+		DialogPanel.allowedContentTypes = @[];
 	}
 }
 
@@ -146,7 +147,8 @@ private:
 	NSString* ExtsToParse = [AllowedFileTypes objectAtIndex:index * 2 + 1];
 	if( [ExtsToParse compare:@"*.*"] == NSOrderedSame )
 	{
-		[DialogPanel setAllowedFileTypes: nil];
+		// Allow all file types (empty array means all types)
+		DialogPanel.allowedContentTypes = @[];
 	}
 	else
 	{
@@ -156,10 +158,10 @@ private:
 		for( int32 Index = 0; Index < [ExtensionsWildcards count]; ++Index )
 		{
 			NSString* Temp = [[ExtensionsWildcards objectAtIndex:Index] stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"*."]];
-			[Extensions addObject: Temp];
+			[Extensions addObject: [UTType typeWithFilenameExtension:Temp]];
 		}
 
-		[DialogPanel setAllowedFileTypes: Extensions];
+		DialogPanel.allowedContentTypes = Extensions;
 	}
 }
 
@@ -337,7 +339,7 @@ bool FDesktopPlatformMac::OpenFontDialog(const void* ParentWindowHandle, FString
 				FPlatformString::CFStringToTCHAR((CFStringRef)[Font fontName], FontName);
 
 				OutFontName = FontName;
-				OutHeight = [Font pointSize];
+				OutHeight = (float)[Font pointSize];
 
 				auto FontFlags = EFontImportFlags::None;
 
@@ -376,7 +378,7 @@ bool FDesktopPlatformMac::FileDialogShared(bool bSave, const void* ParentWindowH
 				NSOpenPanel* OpenPanel = (NSOpenPanel*)Panel;
 				[OpenPanel setCanChooseFiles: true];
 				[OpenPanel setCanChooseDirectories: false];
-				[OpenPanel setAllowsMultipleSelection: Flags & EFileDialogFlags::Multiple];
+				[OpenPanel setAllowsMultipleSelection: (Flags & EFileDialogFlags::Multiple) != 0];
 			}
 
 			[Panel setCanCreateDirectories: bSave];
@@ -493,11 +495,9 @@ bool FDesktopPlatformMac::RegisterEngineInstallation(const FString &RootDir, FSt
 		FString ConfigPath = FString(FPlatformProcess::ApplicationSettingsDir()) / FString(TEXT("UnrealEngine")) / FString(TEXT("Install.ini"));
 		ConfigFile.Read(ConfigPath);
 
-		FConfigSection &Section = ConfigFile.FindOrAdd(TEXT("Installations"));
 		OutIdentifier = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensInBraces);
-		Section.AddUnique(*OutIdentifier, RootDir);
+		ConfigFile.AddToSection(TEXT("Installations"), *OutIdentifier, RootDir);
 
-		ConfigFile.Dirty = true;
 		ConfigFile.Write(ConfigPath);
 	}
 	return bRes;
@@ -525,10 +525,10 @@ void FDesktopPlatformMac::EnumerateEngineInstallations(TMap<FString, FString> &O
 	FString ConfigPath = FString(FPlatformProcess::ApplicationSettingsDir()) / FString(TEXT("UnrealEngine")) / FString(TEXT("Install.ini"));
 	ConfigFile.Read(ConfigPath);
 
-	FConfigSection &Section = ConfigFile.FindOrAdd(TEXT("Installations"));
+	const FConfigSection *Section = ConfigFile.FindOrAddConfigSection(TEXT("Installations"));
 	// Remove invalid entries
 	TArray<FName> KeysToRemove;
-	for (auto It : Section)
+	for (const TPair<FName, FConfigValue>& It : *Section)
 	{
 		const FString& EngineDir = It.Value.GetValue();
 		if (EngineDir.Contains("Unreal Engine.app/Contents/") || EngineDir.Contains("Epic Games Launcher.app/Contents/") || EngineDir.Contains("/Users/Shared/UnrealEngine/Launcher") || !IFileManager::Get().DirectoryExists(*EngineDir))
@@ -536,9 +536,9 @@ void FDesktopPlatformMac::EnumerateEngineInstallations(TMap<FString, FString> &O
 			KeysToRemove.Add(It.Key);
 		}
 	}
-	for (auto Key : KeysToRemove)
+	for (FName Key : KeysToRemove)
 	{
-		Section.Remove(Key);
+		ConfigFile.RemoveKeyFromSection(TEXT("Installations"), Key);
 	}
 
 	CFArrayRef AllApps = LSCopyApplicationURLsForURL((__bridge CFURLRef)[NSURL fileURLWithPath:UProjectPath.GetNSString()], kLSRolesAll);
@@ -550,11 +550,11 @@ void FDesktopPlatformMac::EnumerateEngineInstallations(TMap<FString, FString> &O
 			NSURL* AppURL = (NSURL*)CFArrayGetValueAtIndex(AllApps, Index);
 			NSBundle* AppBundle = [NSBundle bundleWithURL:AppURL];
 			FString EngineDir = FString([[AppBundle bundlePath] stringByDeletingLastPathComponent]);
-			if (([[AppBundle bundleIdentifier] isEqualToString:@"com.epicgames.UE4Editor"] || [[AppBundle bundleIdentifier] isEqualToString:@"com.epicgames.UE4EditorServices"])
+			if (([[AppBundle bundleIdentifier] isEqualToString:@"com.epicgames.UnrealEditor"] || [[AppBundle bundleIdentifier] isEqualToString:@"com.epicgames.UnrealEditorServices"])
 				&& EngineDir.RemoveFromEnd(TEXT("/Engine/Binaries/Mac")) && !EngineDir.Contains("Unreal Engine.app/Contents/") && !EngineDir.Contains("Epic Games Launcher.app/Contents/") && !EngineDir.Contains("/Users/Shared/UnrealEngine/Launcher"))
 			{
 				FString EngineId;
-				const FName* Key = Section.FindKey(EngineDir);
+				const FName* Key = Section->FindKey(EngineDir);
 				if (Key)
 				{
 					FGuid IdGuid;
@@ -566,8 +566,7 @@ void FDesktopPlatformMac::EnumerateEngineInstallations(TMap<FString, FString> &O
 					if (!OutInstallations.FindKey(EngineDir))
 					{
 						EngineId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensInBraces);
-						Section.AddUnique(*EngineId, EngineDir);
-						ConfigFile.Dirty = true;
+						ConfigFile.AddToSection(TEXT("Installations"), *EngineId, EngineDir);
 					}
 				}
 				if (!EngineId.IsEmpty() && !OutInstallations.Find(EngineId))
@@ -595,7 +594,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		NSBundle* GlobalDefaultAppBundle = [NSBundle bundleWithURL:(__bridge NSURL*)GlobalDefaultAppURL];
 		CFRelease(GlobalDefaultAppURL);
 
-		if ([[GlobalDefaultAppBundle bundleIdentifier] isEqualToString:@"com.epicgames.UE4EditorServices"])
+		if ([[GlobalDefaultAppBundle bundleIdentifier] isEqualToString:@"com.epicgames.UnrealEditorServices"])
 		{
 			return true;
 		}
@@ -605,7 +604,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 bool FDesktopPlatformMac::UpdateFileAssociations()
 {
-	OSStatus Status = LSSetDefaultRoleHandlerForContentType(CFSTR("com.epicgames.uproject"), kLSRolesAll, CFSTR("com.epicgames.UE4EditorServices"));
+	OSStatus Status = LSSetDefaultRoleHandlerForContentType(CFSTR("com.epicgames.uproject"), kLSRolesAll, CFSTR("com.epicgames.UnrealEditorServices"));
 	return Status == noErr;
 }
 
@@ -614,26 +613,15 @@ bool FDesktopPlatformMac::RunUnrealBuildTool(const FText& Description, const FSt
 	OutExitCode = 1;
 
 	// Get the path to UBT
-	FString UnrealBuildToolPath = RootDir / TEXT("Engine/Binaries/DotNET/UnrealBuildTool.exe");
+	FString UnrealBuildToolPath = GetUnrealBuildToolExecutableFilename(RootDir);
 	if(IFileManager::Get().FileSize(*UnrealBuildToolPath) < 0)
 	{
 		Warn->Logf(ELogVerbosity::Error, TEXT("Couldn't find UnrealBuildTool at '%s'"), *UnrealBuildToolPath);
 		return false;
 	}
 
-	// On Mac we launch UBT with Mono
-	FString ScriptPath = FPaths::ConvertRelativePathToFull(RootDir / TEXT("Engine/Build/BatchFiles/Mac/RunMono.sh"));
-	FString CmdLineParams = FString::Printf(TEXT("\"%s\" \"%s\" %s"), *ScriptPath, *UnrealBuildToolPath, *Arguments);
-
 	// Spawn it
-	return FFeedbackContextMarkup::PipeProcessOutput(Description, TEXT("/bin/sh"), CmdLineParams, Warn, &OutExitCode) && OutExitCode == 0;
-}
-
-bool FDesktopPlatformMac::IsUnrealBuildToolRunning()
-{
-	// For now assume that if mono application is running, we're running UBT
-	// @todo: we need to get the commandline for the mono process and check if UBT.exe is in there.
-	return FPlatformProcess::IsApplicationRunning(TEXT("mono"));
+	return FFeedbackContextMarkup::PipeProcessOutput(Description, UnrealBuildToolPath, Arguments, Warn, &OutExitCode) && OutExitCode == 0;
 }
 
 FFeedbackContext* FDesktopPlatformMac::GetNativeFeedbackContext()
@@ -647,4 +635,8 @@ FString FDesktopPlatformMac::GetUserTempPath()
 	return FString(FPlatformProcess::UserTempDir());
 }
 
+FString FDesktopPlatformMac::GetOidcTokenExecutableFilename(const FString& RootDir) const
+{
+	return FPaths::ConvertRelativePathToFull(RootDir / TEXT("Engine/Binaries/DotNET/OidcToken/osx-x64/OidcToken"));
+}
 #undef LOCTEXT_NAMESPACE

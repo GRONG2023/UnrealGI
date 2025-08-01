@@ -2,35 +2,42 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "Logging/LogMacros.h"
+#include "Templates/SharedPointer.h"
 #include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "AutomatedAssetImportData.generated.h"
 
-class UFactory;
 class FJsonObject;
+class UFactory;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogAutomatedImport, Log, All);
 
 /**
  * Contains data for a group of assets to import
  */ 
-UCLASS(Transient, BlueprintType)
-class UNREALED_API UAutomatedAssetImportData : public UObject
+UCLASS(Transient, BlueprintType, MinimalAPI)
+class UAutomatedAssetImportData : public UObject
 {
 	GENERATED_BODY()
 
 public:
-	UAutomatedAssetImportData();
+	UNREALED_API UAutomatedAssetImportData();
 
 	/** @return true if this group contains enough valid data to import*/
-	bool IsValid() const;
+	UNREALED_API bool IsValid() const;
 
 	/** Initalizes the group */
-	void Initialize(TSharedPtr<FJsonObject> InImportGroupJsonData);
+	UNREALED_API void Initialize(TSharedPtr<FJsonObject> InImportGroupJsonData);
 
 	/** @return the display name of the group */
-	FString GetDisplayName() const; 
+	UNREALED_API FString GetDisplayName() const; 
 public:
 	/** Display name of the group. This is for logging purposes only. */
 	UPROPERTY(BlueprintReadWrite, Category="Asset Import Data")
@@ -58,7 +65,7 @@ public:
 
 	/** Pointer to the factory currently being used */
 	UPROPERTY(BlueprintReadWrite, Category = "Asset Import Data")
-	UFactory* Factory;
+	TObjectPtr<UFactory> Factory;
 
 	/** Full path to level to load before importing this group (only matters if importing assets into a level) */
 	UPROPERTY(BlueprintReadWrite, Category = "Asset Import Data")

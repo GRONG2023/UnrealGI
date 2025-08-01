@@ -38,6 +38,7 @@ FDuplicateDataWriter::FDuplicateDataWriter( FUObjectAnnotationSparse<FDuplicated
 {
 	this->SetIsSaving(true);
 	this->SetIsPersistent(true);
+	this->SetUseUnversionedPropertySerialization(true);
 	this->ArNoIntraPropertyDelta = true;
 	ArAllowLazyLoading	= false;
 	ArPortFlags |= PPF_Duplicate | InPortFlags;
@@ -74,6 +75,22 @@ FArchive& FDuplicateDataWriter::operator<<(UObject*& Object)
 	{
 		UObject* NullObject = nullptr;
 		Serialize(&NullObject, sizeof(UObject*));
+	}
+	return *this;
+}
+
+
+FArchive& FDuplicateDataWriter::operator<<(FObjectPtr& ObjectPtr)
+{
+	if (ObjectPtr.IsResolved())
+	{
+		UObject* Object = ObjectPtr.Get();
+		*this << Object;
+	}
+	else
+	{
+		FObjectHandle& Handle = ObjectPtr.GetHandleRef();
+		Serialize(&Handle, sizeof(FObjectHandle));
 	}
 	return *this;
 }
@@ -132,7 +149,7 @@ UObject* FDuplicateDataWriter::GetDuplicatedObject(UObject* Object, bool bCreate
 		FDuplicatedObject DupObjectInfo = DuplicatedObjectAnnotation.GetAnnotation( Object );
 		if( !DupObjectInfo.IsDefault() )
 		{
-			Result = DupObjectInfo.DuplicatedObject;
+			Result = DupObjectInfo.DuplicatedObject.GetEvenIfUnreachable();
 		}
 		else if (bCreateIfMissing)
 		{

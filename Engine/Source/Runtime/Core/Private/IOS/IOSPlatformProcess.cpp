@@ -6,7 +6,6 @@ IOSPlatformProcess.cpp: iOS implementations of Process functions
 
 #include "IOS/IOSPlatformProcess.h"
 #include "Apple/ApplePlatformRunnableThread.h"
-#include "IOS/IOSAppDelegate.h"
 #include "Misc/CoreDelegates.h"
 #include "Apple/PreAppleSystemHeaders.h"
 #include <mach-o/dyld.h>
@@ -42,6 +41,9 @@ FRunnableThread* FIOSPlatformProcess::CreateRunnableThread()
 
 void FIOSPlatformProcess::LaunchURL( const TCHAR* URL, const TCHAR* Parms, FString* Error )
 {
+#if PLATFORM_VISIONOS
+	*Error = TEXT("LaunchURL is not supported on VisionOS");
+#else
 	UE_LOG(LogIOS, Log,  TEXT("LaunchURL %s %s"), URL, Parms?Parms:TEXT("") );
 
 	if (FCoreDelegates::ShouldLaunchUrl.IsBound() && !FCoreDelegates::ShouldLaunchUrl.Execute(URL))
@@ -61,6 +63,7 @@ void FIOSPlatformProcess::LaunchURL( const TCHAR* URL, const TCHAR* Parms, FStri
 	{
 		*Error = Result ? TEXT("") : TEXT("unable to open url");
 	}
+#endif
 }
 
 bool FIOSPlatformProcess::CanLaunchURL(const TCHAR* URL)
@@ -118,6 +121,18 @@ void FIOSPlatformProcess::SetThreadAffinityMask(uint64 AffinityMask)
 	{
 		FGenericPlatformProcess::SetThreadAffinityMask(AffinityMask);
 	}
+}
+
+const TCHAR* FIOSPlatformProcess::ExecutablePath()
+{
+	static TCHAR Result[512]=TEXT("");
+	if( !Result[0] )
+	{
+		SCOPED_AUTORELEASE_POOL;
+		NSString *NSExeName = [[NSBundle mainBundle] executablePath];
+		FPlatformString::CFStringToTCHAR( ( CFStringRef )NSExeName, Result );
+	}
+	return Result;
 }
 
 const TCHAR* FIOSPlatformProcess::ExecutableName(bool bRemoveExtension)
@@ -239,28 +254,6 @@ const uint64 FIOSPlatformAffinity::GetTaskGraphThreadMask()
 			break;
 		default:
 			Mask = FGenericPlatformAffinity::GetTaskGraphThreadMask();
-			break;
-		}
-	}
-
-	return Mask;
-}
-
-const uint64 FIOSPlatformAffinity::GetStatsThreadMask()
-{
-	static int Mask = 0;
-	if (Mask == 0)
-	{
-		switch (FPlatformMisc::NumberOfCores())
-		{
-		case 2:
-			Mask = MAKEAFFINITYMASK1(0);
-			break;
-		case 3:
-			Mask = MAKEAFFINITYMASK1(2);
-			break;
-		default:
-			Mask = FGenericPlatformAffinity::GetStatsThreadMask();
 			break;
 		}
 	}

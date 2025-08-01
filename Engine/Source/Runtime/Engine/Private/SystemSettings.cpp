@@ -5,8 +5,9 @@
 =============================================================================*/
 
 #include "SystemSettings.h"
-#include "Misc/CommandLine.h"
+#include "HAL/IConsoleManager.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Misc/ConfigUtilities.h"
 #include "Engine/Texture2D.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogSystemSettings, Log, All);
@@ -74,7 +75,7 @@ public:
 
 	void OnEntry(const TCHAR *Key, const TCHAR* Value)
 	{
-		OnSetCVarFromIniEntry(*IniFilename, Key, Value, ECVF_SetBySystemSettingsIni);
+		UE::ConfigUtilities::OnSetCVarFromIniEntry(*IniFilename, Key, Value, ECVF_SetBySystemSettingsIni);
 	}
 };
 
@@ -239,11 +240,13 @@ void FSystemSettings::CVarSink()
 	ApplyOverrides();
 }
 
+#if UE_ALLOW_EXEC_COMMANDS
 bool FSystemSettings::Exec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar )
 {
 	// no longer needed, we have the "Scalability" console command
 	return false;
 }
+#endif // UE_ALLOW_EXEC_COMMANDS
 
 /*-----------------------------------------------------------------------------
 	Resolution.
@@ -314,3 +317,8 @@ void FSystemSettings::ApplyOverrides()
 	}
 }
 
+
+ENGINE_API void OnSetCVarFromIniEntry(const TCHAR* IniFile, const TCHAR* Key, const TCHAR* Value, uint32 SetBy, bool bAllowCheating)
+{
+	UE::ConfigUtilities::OnSetCVarFromIniEntry(IniFile, Key, Value, SetBy, bAllowCheating);
+}

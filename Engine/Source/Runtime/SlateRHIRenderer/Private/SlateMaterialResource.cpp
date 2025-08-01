@@ -1,7 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SlateMaterialResource.h"
+#include "SlateRHIRendererSettings.h"
+#include "Engine/Texture.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#include "Materials/MaterialRenderProxy.h"
+#include "MaterialShared.h"
 #include "Styling/SlateBrush.h"
 
 namespace SlateMaterialResource
@@ -13,11 +17,11 @@ namespace SlateMaterialResource
 		if (GSlateCheckUObjectRenderResources)
 		{
 			bool bIsValidLowLevel = InMaterialResource.IsValidLowLevelFast(false);
-			if (!bIsValidLowLevel || InMaterialResource.IsPendingKill() || InMaterialResource.GetClass() == UMaterialInterface::StaticClass())
+			if (!bIsValidLowLevel || !IsValid(&InMaterialResource) || InMaterialResource.GetClass() == UMaterialInterface::StaticClass())
 			{
 				UE_LOG(LogSlate, Error, TEXT("Material '%s' is not valid. PendingKill:'%d'. ValidLowLevelFast:'%d'. InvalidClass:'%d'")
 					, *InDebugName.ToString()
-					, (bIsValidLowLevel ? InMaterialResource.IsPendingKill() : false)
+					, (bIsValidLowLevel ? !IsValid(&InMaterialResource) : false)
 					, bIsValidLowLevel
 					, (bIsValidLowLevel ? InMaterialResource.GetClass() == UMaterialInterface::StaticClass() : false));
 
@@ -62,12 +66,13 @@ namespace SlateMaterialResource
 
 }
 
-FSlateMaterialResource::FSlateMaterialResource(const UMaterialInterface& InMaterialResource, const FVector2D& InImageSize, FSlateShaderResource* InTextureMask )
+FSlateMaterialResource::FSlateMaterialResource(const UMaterialInterface& InMaterialResource, const FVector2f InImageSize, FSlateShaderResource* InTextureMask )
 	: MaterialObject( &InMaterialResource)
 	, SlateProxy( new FSlateShaderResourceProxy )
 	, TextureMaskResource( InTextureMask )
 	, Width(FMath::RoundToInt(InImageSize.X))
 	, Height(FMath::RoundToInt(InImageSize.Y))
+	, CachedSlatePostBuffers(ESlatePostRT::None)
 {
 #if SLATE_CHECK_UOBJECT_RENDER_RESOURCES
 	SlateMaterialResource::CheckInvalidUMaterial(InMaterialResource, NAME_None);
@@ -85,6 +90,28 @@ FSlateMaterialResource::FSlateMaterialResource(const UMaterialInterface& InMater
 	SlateProxy->ActualSize = InImageSize.IntPoint();
 	SlateProxy->Resource = this;
 
+	if (MaterialObject && (IsInRenderingThread() || IsInGameThread()))
+	{
+		// Quality / Feature level irrelevant since flag to search all levels for both is true
+		TArray<UTexture*> OutUsedTextures;
+		MaterialObject->GetUsedTextures(OutUsedTextures, EMaterialQualityLevel::Num, true, ERHIFeatureLevel::Num, true);
+
+		CachedSlatePostBuffers = ESlatePostRT::None;
+		for (const UTexture* OutUsedTexture : OutUsedTextures)
+		{
+			for (const TPair<ESlatePostRT, FSlatePostSettings>& SlatePostSetting : USlateRHIRendererSettings::Get()->GetSlatePostSettings())
+			{
+				const ESlatePostRT SlatePostBitflag = SlatePostSetting.Key;
+				const FSlatePostSettings& SlatePostSettingValue = SlatePostSetting.Value;
+
+				if (SlatePostSettingValue.bEnabled && OutUsedTexture && OutUsedTexture->GetPathName() == SlatePostSettingValue.GetPathToSlatePostRT())
+				{
+					CachedSlatePostBuffers |= SlatePostBitflag;
+				}
+			}
+		}
+	}
+
 	if (MaterialProxy && (MaterialProxy->IsDeleted() || MaterialProxy->IsMarkedForGarbageCollection()))
 	{
 		MaterialProxy = nullptr;
@@ -99,24 +126,57 @@ FSlateMaterialResource::~FSlateMaterialResource()
 	}
 }
 
-void FSlateMaterialResource::UpdateMaterial(const UMaterialInterface& InMaterialResource, const FVector2D& InImageSize, FSlateShaderResource* InTextureMask)
+ESlatePostRT FSlateMaterialResource::GetUsedSlatePostBuffers() const
 {
+	return CachedSlatePostBuffers;
+}
+
+bool FSlateMaterialResource::IsResourceValid() const
+{
+	if (MaterialProxy && MaterialObject)
+	{
+		// Conservatively only return invalid in scenarios where proxy is mismatched
+		return MaterialProxy == MaterialObject->GetRenderProxy();
+	}
+
+	return true;
+}
+
+void FSlateMaterialResource::UpdateMaterial(const UMaterialInterface& InMaterialResource, const FVector2f InImageSize, FSlateShaderResource* InTextureMask)
+{
+	MaterialObject = ensure(IsValid(&InMaterialResource) && InMaterialResource.IsValidLowLevelFast(false)) ? &InMaterialResource : nullptr;
+	MaterialProxy = MaterialObject ? MaterialObject->GetRenderProxy() : nullptr;
+
 #if SLATE_CHECK_UOBJECT_RENDER_RESOURCES
 	SlateMaterialResource::CheckInvalidUMaterial(InMaterialResource, DebugName);
-
-	MaterialObject = &InMaterialResource;
-	MaterialProxy = InMaterialResource.GetRenderProxy();
 
 	MaterialObjectWeakPtr = MaterialObject;
 	UpdateMaterialName();
 
 	SlateMaterialResource::CheckInvalidMaterialProxy(MaterialProxy, DebugName);
-
-#else
-
-	MaterialObject = &InMaterialResource;
-	MaterialProxy = InMaterialResource.GetRenderProxy();
 #endif
+
+	if (MaterialObject && (IsInRenderingThread() || IsInGameThread()))
+	{
+		// Quality / Feature level irrelevant since flag to search all levels for both is true
+		TArray<UTexture*> OutUsedTextures;
+		MaterialObject->GetUsedTextures(OutUsedTextures, EMaterialQualityLevel::Num, true, ERHIFeatureLevel::Num, true);
+
+		CachedSlatePostBuffers = ESlatePostRT::None;
+		for (const UTexture* OutUsedTexture : OutUsedTextures)
+		{
+			for (const TPair<ESlatePostRT, FSlatePostSettings>& SlatePostSetting : USlateRHIRendererSettings::Get()->GetSlatePostSettings())
+			{
+				const ESlatePostRT SlatePostBitflag = SlatePostSetting.Key;
+				const FSlatePostSettings& SlatePostSettingValue = SlatePostSetting.Value;
+
+				if (SlatePostSettingValue.bEnabled && OutUsedTexture && OutUsedTexture->GetPathName() == SlatePostSettingValue.GetPathToSlatePostRT())
+				{
+					CachedSlatePostBuffers |= SlatePostBitflag;
+				}
+			}
+		}
+	}
 
 	if (MaterialProxy && (MaterialProxy->IsDeleted() || MaterialProxy->IsMarkedForGarbageCollection()))
 	{
@@ -146,6 +206,8 @@ void FSlateMaterialResource::ResetMaterial()
 	MaterialObjectWeakPtr = nullptr;
 	UpdateMaterialName();
 #endif
+
+	CachedSlatePostBuffers = ESlatePostRT::None;
 
 	TextureMaskResource = nullptr;
 	if (SlateProxy)

@@ -29,6 +29,12 @@ public:
 
 	virtual TSharedPtr<FExtensibilityManager> GetSecondaryToolBarExtensibilityManager() = 0;
 
+	DECLARE_DELEGATE_RetVal_TwoParams(TSharedRef<FExtender>, FStaticMeshEditorToolbarExtender, const TSharedRef<FUICommandList>, TSharedRef<IStaticMeshEditor>);
+	virtual TArray<FStaticMeshEditorToolbarExtender>& GetAllStaticMeshEditorToolbarExtenders() = 0;
+
+	DECLARE_EVENT_OneParam(IStaticMeshEditor, FOnRegisterLayoutExtensions, FLayoutExtender&);
+	virtual FOnRegisterLayoutExtensions& OnRegisterLayoutExtensions() = 0;
+
 private:
 	FStaticMeshEditorOpenedEvent StaticMeshEditorOpenedEvent;
 };

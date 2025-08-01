@@ -11,27 +11,30 @@ namespace Audio
 	using SoundFileCount = int64;
 
 	/**
- * Specifies a sound file description.
- */
+	 * Specifies a sound file description.
+	 * 
+	 * Note that libsndfile reads some of these fields (noteably FormatFlags and bIsSeekable)
+	 * at file open time so we zero them out at construction time to avoid unexpected/intermintent issues.
+	 */
 	struct FSoundFileDescription
 	{
 		/** The number of frames (interleaved samples) in the sound file. */
-		int64 NumFrames;
+		int64 NumFrames = 0;
 
 		/** The sample rate of the sound file. */
-		int32 SampleRate;
+		int32 SampleRate = 0;
 
 		/** The number of channels of the sound file. */
-		int32 NumChannels;
+		int32 NumChannels = 0;
 
 		/** The format flags of the sound file. */
-		int32 FormatFlags;
+		int32 FormatFlags = 0;
 
 		/** The number of sections of the sound file. */
-		int32 NumSections;
+		int32 NumSections = 0;
 
 		/** Whether or not the sound file is seekable. */
-		int32 bIsSeekable;
+		int32 bIsSeekable = 0;
 	};
 
 	struct FSoundFileConvertFormat
@@ -60,7 +63,91 @@ namespace Audio
 			return MoveTemp(Default);
 		}
 	};
+	
+	/**
+	 * FSoundFileChunkInfo which maps to libsndfile SF_CHUNK_INFO struct.
+	 */
 
+	struct FSoundFileChunkInfo
+	{
+		/** Chunk Id **/
+		ANSICHAR ChunkId[64];
+
+		/** Size of the Chunk Id **/
+		uint32 ChunkIdSize = 0;
+
+		/** Size of the data in this chunk **/
+		uint32 DataLength = 0;
+
+		/** Pointer to chunk data **/
+		void* DataPtr = nullptr;
+	};
+
+	/**
+	 * FSoundFileChunkInfoWrapper wraps FSoundFileChunkInfo and manages
+	 * chunk data memory.
+	 */
+	class FSoundFileChunkInfoWrapper
+	{
+	public:
+		FSoundFileChunkInfoWrapper() = default;
+		~FSoundFileChunkInfoWrapper() = default;
+		FSoundFileChunkInfoWrapper(const FSoundFileChunkInfoWrapper& Other) = delete;
+		FSoundFileChunkInfoWrapper& operator=(const FSoundFileChunkInfoWrapper& Other) = delete;
+
+		FSoundFileChunkInfoWrapper(FSoundFileChunkInfoWrapper&& Other) noexcept
+		{
+			if (Other.ChunkInfo.ChunkIdSize)
+			{
+				FMemory::Memcpy(ChunkInfo.ChunkId, Other.ChunkInfo.ChunkId, sizeof(ChunkInfo.ChunkId));
+			}
+			ChunkInfo.ChunkIdSize = Other.ChunkInfo.ChunkIdSize;
+			ChunkInfo.DataLength = Other.ChunkInfo.DataLength;
+			ChunkInfo.DataPtr = Other.ChunkInfo.DataPtr;
+
+			ChunkData = MoveTemp(Other.ChunkData);
+		}
+
+		FSoundFileChunkInfoWrapper& operator=(FSoundFileChunkInfoWrapper&& Other) noexcept
+		{
+			if (Other.ChunkInfo.ChunkIdSize)
+			{
+				FMemory::Memcpy(ChunkInfo.ChunkId, Other.ChunkInfo.ChunkId, sizeof(ChunkInfo.ChunkId));
+			}
+			ChunkInfo.ChunkIdSize = Other.ChunkInfo.ChunkIdSize;
+			ChunkInfo.DataLength = Other.ChunkInfo.DataLength;
+			ChunkInfo.DataPtr = Other.ChunkInfo.DataPtr;
+
+			ChunkData = MoveTemp(Other.ChunkData);
+			
+			return *this;
+		}
+
+		void AllocateChunkData()
+		{
+			if (ChunkInfo.DataLength > 0 && ensure(ChunkInfo.DataPtr == nullptr))
+			{
+				ChunkData = MakeUnique<uint8[]>(ChunkInfo.DataLength);
+				ChunkInfo.DataPtr = ChunkData.Get();
+			}
+		}
+
+		FSoundFileChunkInfo* GetPtr()
+		{
+			return &ChunkInfo;
+		}
+
+		const FSoundFileChunkInfo* GetPtr() const
+		{
+			return &ChunkInfo;
+		}
+
+	private:
+		FSoundFileChunkInfo	ChunkInfo;
+		TUniquePtr<uint8[]>	ChunkData;
+	};
+	typedef TArray<FSoundFileChunkInfoWrapper> FSoundFileChunkArray;
+	
 	/**
 	 * ISoundFile
 	 */
@@ -93,6 +180,7 @@ namespace Audio
 		virtual ESoundFileError::Type ReadSamples(float* DataPtr, SoundFileCount NumSamples, SoundFileCount& OutNumSamplesRead) = 0;
 		virtual ESoundFileError::Type ReadSamples(double* DataPtr, SoundFileCount NumSamples, SoundFileCount& OutNumSamplesRead) = 0;
 		virtual ESoundFileError::Type GetDescription(FSoundFileDescription& OutputDescription, TArray<ESoundFileChannelMap::Type>& OutChannelMap) = 0;
+		virtual ESoundFileError::Type GetOptionalChunks(FSoundFileChunkArray& OutChunkInfoArray) = 0;
 	};
 
 	class ISoundFileWriter
@@ -108,5 +196,6 @@ namespace Audio
 		virtual ESoundFileError::Type WriteSamples(const float* DataPtr, SoundFileCount NumSamples, SoundFileCount& OutNumSampleWritten) = 0;
 		virtual ESoundFileError::Type WriteSamples(const double* DataPtr, SoundFileCount NumSamples, SoundFileCount& OutNumSampleWritten) = 0;
 		virtual ESoundFileError::Type GetData(TArray<uint8>** OutData) = 0;
+		virtual ESoundFileError::Type WriteOptionalChunks(const FSoundFileChunkArray& ChunkInfoArray) = 0;
 	};
 } // namespace Audio

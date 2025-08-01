@@ -1,22 +1,20 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-using System;
 using System.Collections.Generic;
-using System.Text;
-using System.Diagnostics;
-using System.IO;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
 
 namespace UnrealBuildTool
 {
 	class TVOSProjectGenerator : IOSProjectGenerator
-    {
+	{
 		/// <summary>
 		/// Constructor
 		/// </summary>
 		/// <param name="Arguments">Command line arguments passed to the project generator</param>
-		public TVOSProjectGenerator(CommandLineArguments Arguments)
-			: base(Arguments)
+		/// <param name="Logger">Logger for output</param>
+		public TVOSProjectGenerator(CommandLineArguments Arguments, ILogger Logger)
+			: base(Arguments, Logger)
 		{
 		}
 
@@ -27,5 +25,5 @@ namespace UnrealBuildTool
 		{
 			yield return UnrealTargetPlatform.TVOS;
 		}
-    }
+	}
 }

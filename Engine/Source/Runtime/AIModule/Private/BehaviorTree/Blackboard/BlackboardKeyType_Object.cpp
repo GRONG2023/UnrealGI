@@ -4,6 +4,8 @@
 #include "UObject/WeakObjectPtr.h"
 #include "GameFramework/Actor.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BlackboardKeyType_Object)
+
 const UBlackboardKeyType_Object::FDataType UBlackboardKeyType_Object::InvalidValue = nullptr;
 
 UBlackboardKeyType_Object::UBlackboardKeyType_Object(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
@@ -56,7 +58,8 @@ FString UBlackboardKeyType_Object::DescribeSelf() const
 bool UBlackboardKeyType_Object::IsAllowedByFilter(UBlackboardKeyType* FilterOb) const
 {
 	UBlackboardKeyType_Object* FilterObject = Cast<UBlackboardKeyType_Object>(FilterOb);
-	return (FilterObject && (FilterObject->BaseClass == BaseClass || BaseClass->IsChildOf(FilterObject->BaseClass)));
+	UE_CLOG(BaseClass == nullptr, LogBlackboard, Warning, TEXT("Cannot assign %s to a Blackboard Key with null base class. Should the base class be changed?"), FilterObject ? *FilterObject->DescribeSelf() : TEXT("NULL"));
+	return (FilterObject && (FilterObject->BaseClass == BaseClass || (BaseClass != nullptr && BaseClass->IsChildOf(FilterObject->BaseClass))));
 }
 
 bool UBlackboardKeyType_Object::GetLocation(const UBlackboardComponent& OwnerComp, const uint8* RawData, FVector& Location) const
@@ -93,3 +96,4 @@ bool UBlackboardKeyType_Object::TestBasicOperation(const UBlackboardComponent& O
 	FWeakObjectPtr WeakObjPtr = GetValueFromMemory<FWeakObjectPtr>(MemoryBlock);
 	return (Op == EBasicKeyOperation::Set) ? WeakObjPtr.IsValid() : !WeakObjPtr.IsValid();
 }
+

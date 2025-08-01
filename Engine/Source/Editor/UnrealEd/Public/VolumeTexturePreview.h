@@ -12,21 +12,22 @@
 /**
  * Batched element parameters for previewing 2d textures.
  */
-class UNREALED_API FBatchedElementVolumeTexturePreviewParameters : public FBatchedElementParameters
+class FBatchedElementVolumeTexturePreviewParameters : public FBatchedElementParameters
 {
 public:
-	FBatchedElementVolumeTexturePreviewParameters(bool InViewModeAsDepthSlices, int32 InSizeZ, float InMipLevel, float InOpacity, bool InShowSlices, const FRotator& InTraceOrientation)
+	FBatchedElementVolumeTexturePreviewParameters(bool InViewModeAsDepthSlices, int32 InSizeZ, float InMipLevel, float InOpacity, bool InShowSlices, const FRotator& InTraceOrientation, bool bInUsePointSampling)
 		: bViewModeAsDepthSlices(InViewModeAsDepthSlices)
 		, SizeZ(InSizeZ)
 		, MipLevel(InMipLevel)
 		, Opacity(InOpacity)
 		, bShowSlices(InShowSlices)
 		, TraceOrientation(InTraceOrientation)
+		, bUsePointSampling(bInUsePointSampling)
 	{
 	}
 
 	/** Binds vertex and pixel shaders for this element */
-	virtual void BindShaders(FRHICommandList& RHICmdList, FGraphicsPipelineStateInitializer& GraphicsPSOInit, ERHIFeatureLevel::Type InFeatureLevel, const FMatrix& InTransform, const float InGamma, const FMatrix& ColorWeights, const FTexture* Texture) override;
+	UNREALED_API virtual void BindShaders(FRHICommandList& RHICmdList, FGraphicsPipelineStateInitializer& GraphicsPSOInit, ERHIFeatureLevel::Type InFeatureLevel, const FMatrix& InTransform, const float InGamma, const FMatrix& ColorWeights, const FTexture* Texture) override;
 
 private:
 
@@ -46,4 +47,7 @@ private:
 
 	/** The orientation when tracing */
 	FRotator TraceOrientation;
+
+	/** Whether to use nearest-point sampling when rendering the volume */
+	bool bUsePointSampling;
 };

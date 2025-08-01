@@ -12,12 +12,15 @@
 #include "ILevelEditor.h"
 #include "Toolkits/AssetEditorToolkit.h"
 #include "ViewportTypeDefinition.h"
+#include "LevelEditorOutlinerSettings.h"
 
 class AActor;
 class IAssetViewport;
+class SDockTab;
 class SLevelEditor;
 class UAnimSequence;
 class USkeletalMeshComponent;
+class UTypedElementSelectionSet;
 
 enum class EMapChangeType : uint8;
 
@@ -25,7 +28,7 @@ extern const FName LevelEditorApp;
 
 DECLARE_DELEGATE_RetVal_OneParam(bool, FAreObjectsEditable, const TArray<TWeakObjectPtr<UObject>>&);
 
-class LevelEditorTabIds
+class LEVELEDITOR_API LevelEditorTabIds
 {
 public:
 	static const FName LevelEditorViewport;
@@ -33,7 +36,6 @@ public:
 	static const FName LevelEditorViewport_Clone2;
 	static const FName LevelEditorViewport_Clone3;
 	static const FName LevelEditorViewport_Clone4;
-	static const FName LevelEditorToolBar;
 	static const FName LevelEditorToolBox;
 	static const FName LevelEditorSelectionDetails;
 	static const FName LevelEditorSelectionDetails2;
@@ -42,12 +44,17 @@ public:
 	static const FName PlacementBrowser;
 	static const FName LevelEditorBuildAndSubmit;
 	static const FName LevelEditorSceneOutliner;
+	static const FName LevelEditorSceneOutliner2;
+	static const FName LevelEditorSceneOutliner3;
+	static const FName LevelEditorSceneOutliner4;
 	static const FName LevelEditorStatsViewer;
 	static const FName LevelEditorLayerBrowser;
+	static const FName LevelEditorDataLayerBrowser;
 	static const FName Sequencer;
 	static const FName SequencerGraphEditor;
 	static const FName WorldSettings;
 	static const FName WorldBrowserComposition;
+	static const FName WorldBrowserPartitionEditor;
 	static const FName WorldBrowserHierarchy;
 	static const FName WorldBrowserDetails;
 	static const FName LevelEditorHierarchicalLODOutliner;
@@ -101,13 +108,13 @@ public:
 	virtual void SummonWorldBrowserHierarchy();
 	virtual void SummonWorldBrowserDetails();
 	virtual void SummonWorldBrowserComposition();
-
+	
 	// @todo remove when world-centric mode is added
 	/**
 	 * Spawns a new sequencer tab if one doesn't exist already
 	 * @todo This only works with the first level editor. Fix it.
 	 */
-	virtual void AttachSequencer(TSharedPtr<SWidget> SequencerWidget, TSharedPtr<class IAssetEditorInstance> SequencerAssetEditor );
+	virtual TSharedPtr<SDockTab> AttachSequencer(TSharedPtr<SWidget> SequencerWidget, TSharedPtr<class IAssetEditorInstance> SequencerAssetEditor );
 
 	/**
 	 * Starts a play in editor session using the active viewport
@@ -125,7 +132,7 @@ public:
 	virtual void ToggleImmersiveOnActiveLevelViewport();
 
 	/** @return Returns the first Level Editor that we currently know about */
-	virtual TSharedPtr< class ILevelEditor > GetFirstLevelEditor();
+	virtual TSharedPtr< class ILevelEditor > GetFirstLevelEditor() const;
 
 	/** @return the dock tab in which the level editor currently resides. */
 	virtual TSharedPtr<SDockTab> GetLevelEditorTab() const;
@@ -203,6 +210,7 @@ public:
 	/** Called when a level editor widget has been created */
 	DECLARE_EVENT_OneParam(FLevelEditorModule, FOnLevelEditorCreated, TSharedPtr<ILevelEditor>);
 	virtual FOnLevelEditorCreated& OnLevelEditorCreated() { return LevelEditorCreatedEvent; }
+	
 	/**
 	 * Called when actor selection changes
 	 * 
@@ -210,6 +218,20 @@ public:
 	 */
 	virtual void BroadcastActorSelectionChanged(const TArray<UObject*>& NewSelection, bool bForceRefresh=false);
 	
+	/**
+	 * Called when element selection changes
+	 *
+	 * @param SelectionSet	Set of selected elements
+	 */
+	virtual void BroadcastElementSelectionChanged(const UTypedElementSelectionSet* SelectionSet, bool bForceRefresh=false);
+
+	/**
+	 * Called to set property editors to show the given actors, even if those actors aren't in the current selection set
+	 * 
+	 * @param NewSelection	List of actors to edit the properties of
+	 */
+	virtual void BroadcastOverridePropertyEditorSelection(const TArray<AActor*>& NewSelection, bool bForceRefresh=false);
+
 	/**
 	 * Called by the engine when level editing viewports need to be redrawn
 	 * 
@@ -236,6 +258,14 @@ public:
 	/** Called when actor selection changes */
 	DECLARE_EVENT_TwoParams(FLevelEditorModule, FActorSelectionChangedEvent, const TArray<UObject*>&, bool);
 	virtual FActorSelectionChangedEvent& OnActorSelectionChanged() { return ActorSelectionChangedEvent; }
+
+	/** Called when element selection changes */
+	DECLARE_EVENT_TwoParams(FLevelEditorModule, FElementSelectionChangedEvent, const UTypedElementSelectionSet*, bool);
+	virtual FElementSelectionChangedEvent& OnElementSelectionChanged() { return ElementSelectionChangedEvent; }
+
+	/** Called to set property editors to show the given actors, even if those actors aren't in the current selection set */
+	DECLARE_EVENT_TwoParams(FLevelEditorModule, FOverridePropertyEditorSelectionEvent, const TArray<AActor*>&, bool);
+	virtual FOverridePropertyEditorSelectionEvent& OnOverridePropertyEditorSelection() { return OverridePropertyEditorSelectionEvent; }
 
 	/** Called when level editor viewports should be redrawn */
 	DECLARE_EVENT_OneParam( FLevelEditorModule, FRedrawLevelEditingViewportsEvent, bool );
@@ -271,7 +301,6 @@ public:
 	virtual TSharedPtr<FExtensibilityManager> GetMenuExtensibilityManager() override {return MenuExtensibilityManager;}
 	virtual TSharedPtr<FExtensibilityManager> GetToolBarExtensibilityManager() override {return ToolBarExtensibilityManager;}
 	virtual TSharedPtr<FExtensibilityManager> GetModeBarExtensibilityManager() {return ModeBarExtensibilityManager;}
-	virtual TSharedPtr<FExtensibilityManager> GetNotificationBarExtensibilityManager() {return NotificationBarExtensibilityManager;}
 
 	virtual TSharedPtr<FExtender> AssembleExtenders(TSharedRef<FUICommandList>& InCommandList, TArray<FLevelEditorMenuExtender>& MenuExtenderDelegates) const;
 
@@ -281,25 +310,25 @@ public:
 	DECLARE_EVENT_OneParam(ILevelEditor, FOnRegisterLayoutExtensions, FLayoutExtender&);
 	FOnRegisterLayoutExtensions& OnRegisterLayoutExtensions() { return RegisterLayoutExtensions; }
 
-	/** Add / Remove status bar item */
-	struct FStatusBarItem
+	/** Add / Remove title bar item */
+	struct FTitleBarItem
 	{
-		/* Visiblility of the status bar item. */
+		/* Visiblility of the title bar item. */
 		TAttribute<EVisibility> Visibility;
-		/* Label of the status bar item. */
+		/* Label of the title bar item. */
 		TAttribute<FText> Label;
-		/* Value of the status bar item. */
+		/* Value of the title bar item. */
 		TAttribute<FText> Value;
 	};
-	const TMap<FName, FStatusBarItem>& GetStatusBarItems() const { return StatusBarItems; }
-	virtual void AddStatusBarItem(FName InStatusBarIdentifier, const FStatusBarItem& InStatusBarItem);
-	virtual void RemoveStatusBarItem(FName InStatusBarIdentifier);
+	const TMap<FName, FTitleBarItem>& GetTitleBarItems() const { return TitleBarItems; }
+	virtual void AddTitleBarItem(FName InTitleBarIdentifier, const FTitleBarItem& InTitleBarITem);
+	virtual void RemoveTitleBarItem(FName InTitleBarIdentifier);
 
 	/** Called when a new map is loaded */
-	DECLARE_EVENT( FLevelEditorModule, FNotificationBarChanged );
-	virtual FNotificationBarChanged& OnNotificationBarChanged() { return NotificationBarChangedEvent; }
+	DECLARE_EVENT( FLevelEditorModule, FTitleBarMessagesChanged );
+	virtual FTitleBarMessagesChanged& OnTitleBarMessagesChanged() { return TitleBarMessagesChangedEvent; }
 
-	virtual void BroadcastNotificationBarChanged() { NotificationBarChangedEvent.Broadcast(); }
+	virtual void BroadcastTitleBarMessagesChanged() { TitleBarMessagesChangedEvent.Broadcast(); }
 
 	/** Called when a high res screenshot is requested. */
 	DECLARE_EVENT( FLevelEditorModule, FTakeHighResScreenShotsEvent );
@@ -308,6 +337,33 @@ public:
 	/** Delegate used to capture skeltal meshes to single-frame animations when 'keeping simulation changes' */
 	DECLARE_DELEGATE_RetVal_OneParam(UAnimSequence*, FCaptureSingleFrameAnimSequence, USkeletalMeshComponent* /*Component*/);
 	virtual FCaptureSingleFrameAnimSequence& OnCaptureSingleFrameAnimSequence() { return CaptureSingleFrameAnimSequenceDelegate; }
+	
+	/**  Add a custom filter to the outliner filter bar. These are all AND'd together
+	 * @see FLevelEditorOutlinerSettings
+	 *   @see FGenericFilter on how to create generic filters
+	 *   NOTE: Currently does not support adding filters dynamically, they must be added before the Level Editor is init
+	 */
+	UE_DEPRECATED(5.2, "Use the AddCustomFilterToOutliner override that takes in a delegate instead so each Outliner can have a unique instance of the filter")
+	virtual void AddCustomFilterToOutliner(TSharedRef<FFilterBase<const ISceneOutlinerTreeItem&>> InCustomFilter);
+
+	/**  Add a custom filter to the outliner filter bar. These are all AND'd together
+	 *	 This function takes in a delegate that will be called to create an instance of the custom filter for each Outliner that
+	 *	 the level editor creates.
+	 *   @see FGenericFilter on how to create generic filters
+	 */
+	void AddCustomFilterToOutliner(FLevelEditorOutlinerSettings::FOutlinerFilterFactory InCreateCustomFilter);
+
+	/**  Add a custom class filter to the outliner filter bar. These represent asset/actor type filters and are OR'd
+	 *   @see FLevelEditorOutlinerSettings
+	 *   Can be created using IAssetTypeActions or UClass (@see constructor)
+	 *   NOTE: Currently does not support adding filters dynamically, they must be added before the Level Editor is init
+	 */
+	virtual void AddCustomClassFilterToOutliner(TSharedRef<FCustomClassFilterData> InCustomClassFilterData);
+	
+	/** Get the FFilterCategory attached to the given category name. Use this to add filters to the built in categories
+	 *  @see FLevelEditorOutlinerBuiltInCategories
+	 */
+	virtual TSharedPtr<FFilterCategory> GetOutlinerFilterCategory(const FName& CategoryName) const;
 
 public:
 
@@ -337,6 +393,9 @@ public:
 		return true;
 	}
 
+	/** Return the settings (containing the outliner filters) used to create the level editor's outliners  */
+	TSharedPtr<FLevelEditorOutlinerSettings> GetLevelEditorOutlinerSettings() const;
+
 public:
 	
 	/** Register a viewport type for the level editor */
@@ -361,7 +420,8 @@ public:
 	}
 
 	/** Create an instance of a custom viewport from the specified viewport type name */
-	TSharedRef<ILevelViewportLayoutEntity> FactoryViewport(FName InTypeName, const FViewportConstructionArgs& ConstructionArgs) const;
+	UE_DEPRECATED(4.26, "Use FactoryViewport from inside of a FLevelViewportTabContent.")
+	TSharedRef<ILevelViewportLayoutEntity> FactoryViewport(FName InTypeName, const FAssetEditorViewportConstructionArgs& ConstructionArgs) const;
 
 private:
 	/**
@@ -387,8 +447,8 @@ private:
 	TSharedPtr<FExtensibilityManager> ModeBarExtensibilityManager;
 	TSharedPtr<FExtensibilityManager> NotificationBarExtensibilityManager;
 
-	TMap<FName, FStatusBarItem> StatusBarItems;
-	FNotificationBarChanged NotificationBarChangedEvent;
+	TMap<FName, FTitleBarItem> TitleBarItems;
+	FTitleBarMessagesChanged TitleBarMessagesChangedEvent;
 
 	/** 
 	 * A command list that can be passed around and isn't bound to an instance of a level editor. 
@@ -409,6 +469,12 @@ private:
 
 	/** Multicast delegate executed when actor selection changes */
 	FActorSelectionChangedEvent ActorSelectionChangedEvent;
+
+	/** Multicast delegate executed when element selection changes */
+	FElementSelectionChangedEvent ElementSelectionChangedEvent;
+
+	/** Multicast delegate executed to set property editors to show the given actors, even if those actors aren't in the current selection set */
+	FOverridePropertyEditorSelectionEvent OverridePropertyEditorSelectionEvent;
 
 	/** Multicast delegate executed when viewports should be redrawn */
 	FRedrawLevelEditingViewportsEvent RedrawLevelEditingViewportsEvent;
@@ -460,4 +526,7 @@ private:
 
 	/** Array of delegates that are used to check if the specified objects should be editable on the details panel */
 	TArray<FAreObjectsEditable> AreObjectsEditableDelegates;
+
+	/** The settings used to create any Outliners in the Level Editor */
+	TSharedPtr<FLevelEditorOutlinerSettings> OutlinerSettings;
 };

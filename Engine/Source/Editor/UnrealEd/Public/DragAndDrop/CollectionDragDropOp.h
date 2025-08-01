@@ -2,14 +2,25 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Input/DragAndDrop.h"
-#include "DragAndDrop/DecoratedDragDropOp.h"
-#include "CollectionManagerTypes.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "AssetTagItemTypes.h"
+#include "CollectionManagerTypes.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "CoreMinimal.h"
+#include "DragAndDrop/DecoratedDragDropOp.h"
+#include "GenericPlatform/ICursor.h"
+#include "HAL/PlatformCrt.h"
+#include "Input/DragAndDrop.h"
+#include "Internationalization/Text.h"
+#include "Misc/Optional.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UnrealTemplate.h"
 
-class UNREALED_API FCollectionDragDropOp : public FDecoratedDragDropOp
+class SWidget;
+struct FAssetData;
+
+class FCollectionDragDropOp : public FDecoratedDragDropOp
 {
 public:
 	DRAG_DROP_OPERATOR_TYPE(FCollectionDragDropOp, FDecoratedDragDropOp)
@@ -31,12 +42,12 @@ public:
 	
 public:
 	/** @return The assets from this drag operation */
-	TArray<FAssetData> GetAssets() const;
+	UNREALED_API TArray<FAssetData> GetAssets() const;
 
-	virtual TSharedPtr<SWidget> GetDefaultDecorator() const override;
+	UNREALED_API virtual TSharedPtr<SWidget> GetDefaultDecorator() const override;
 
 private:
-	FText GetDecoratorText() const;
+	UNREALED_API FText GetDecoratorText() const;
 
 	EAssetTagItemViewMode AssetTagViewMode = EAssetTagItemViewMode::Standard;
 };

@@ -4,6 +4,8 @@
 #include "GameFramework/Actor.h"
 #include "BehaviorTree/BlackboardComponent.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BTDecorator_KeepInCone)
+
 UBTDecorator_KeepInCone::UBTDecorator_KeepInCone(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
 	NodeName = "Keep in Cone";
@@ -14,8 +16,7 @@ UBTDecorator_KeepInCone::UBTDecorator_KeepInCone(const FObjectInitializer& Objec
 	Observed.AddObjectFilter(this, GET_MEMBER_NAME_CHECKED(UBTDecorator_KeepInCone, Observed), AActor::StaticClass());
 	Observed.AddVectorFilter(this, GET_MEMBER_NAME_CHECKED(UBTDecorator_KeepInCone, Observed));
 
-	bNotifyBecomeRelevant = true;
-	bNotifyTick = true;
+	INIT_DECORATOR_NODE_NOTIFY_FLAGS();
 
 	// KeepInCone always abort current branch
 	bAllowAbortLowerPri = false;
@@ -55,7 +56,7 @@ void UBTDecorator_KeepInCone::InitializeFromAsset(UBehaviorTree& Asset)
 bool UBTDecorator_KeepInCone::CalculateCurrentDirection(const UBehaviorTreeComponent& OwnerComp, FVector& Direction) const
 {
 	const UBlackboardComponent* BlackboardComp = OwnerComp.GetBlackboardComponent();
-	if (BlackboardComp == NULL)
+	if (BlackboardComp == nullptr)
 	{
 		return false;
 	}
@@ -85,12 +86,12 @@ void UBTDecorator_KeepInCone::OnBecomeRelevant(UBehaviorTreeComponent& OwnerComp
 
 void UBTDecorator_KeepInCone::TickNode(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds)
 {
-	TNodeInstanceMemory* DecoratorMemory = CastInstanceNodeMemory<TNodeInstanceMemory>(NodeMemory);
+	const TNodeInstanceMemory* DecoratorMemory = CastInstanceNodeMemory<TNodeInstanceMemory>(NodeMemory);
 	FVector CurrentDir(1.0f, 0, 0);
 	
 	if (CalculateCurrentDirection(OwnerComp, CurrentDir))
 	{
-		const float Angle = DecoratorMemory->InitialDirection.CosineAngle2D(CurrentDir);
+		const FVector::FReal Angle = DecoratorMemory->InitialDirection.CosineAngle2D(CurrentDir);
 		if (Angle < ConeHalfAngleDot || (IsInversed() && Angle > ConeHalfAngleDot))
 		{
 			OwnerComp.RequestExecution(this);
@@ -110,13 +111,13 @@ FString UBTDecorator_KeepInCone::GetStaticDescription() const
 
 void UBTDecorator_KeepInCone::DescribeRuntimeValues(const UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTDescriptionVerbosity::Type Verbosity, TArray<FString>& Values) const
 {
-	TNodeInstanceMemory* DecoratorMemory = CastInstanceNodeMemory<TNodeInstanceMemory>(NodeMemory);
+	const TNodeInstanceMemory* DecoratorMemory = CastInstanceNodeMemory<TNodeInstanceMemory>(NodeMemory);
 	FVector CurrentDir(1.0f, 0, 0);
 	
 	if (CalculateCurrentDirection(OwnerComp, CurrentDir))
 	{
-		const float CurrentAngleDot = DecoratorMemory->InitialDirection.CosineAngle2D(CurrentDir);
-		const float CurrentAngleRad = FMath::Acos(CurrentAngleDot);
+		const FVector::FReal CurrentAngleDot = DecoratorMemory->InitialDirection.CosineAngle2D(CurrentDir);
+		const FVector::FReal CurrentAngleRad = FMath::Acos(CurrentAngleDot);
 
 		Values.Add(FString::Printf(TEXT("Angle: %.0f (%s cone)"),
 			FMath::RadiansToDegrees(CurrentAngleRad),
@@ -131,6 +132,16 @@ uint16 UBTDecorator_KeepInCone::GetInstanceMemorySize() const
 	return sizeof(TNodeInstanceMemory);
 }
 
+void UBTDecorator_KeepInCone::InitializeMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryInit::Type InitType) const
+{
+	InitializeNodeMemory<TNodeInstanceMemory>(NodeMemory, InitType);
+}
+
+void UBTDecorator_KeepInCone::CleanupMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryClear::Type CleanupType) const
+{
+	CleanupNodeMemory<TNodeInstanceMemory>(NodeMemory, CleanupType);
+}
+
 #if WITH_EDITOR
 
 FName UBTDecorator_KeepInCone::GetNodeIconName() const
@@ -139,3 +150,4 @@ FName UBTDecorator_KeepInCone::GetNodeIconName() const
 }
 
 #endif	// WITH_EDITOR
+

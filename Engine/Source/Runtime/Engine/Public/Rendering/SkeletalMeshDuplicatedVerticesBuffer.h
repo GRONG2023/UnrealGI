@@ -38,7 +38,14 @@ public:
 
     bool bHasOverlappingVertices;
 
-    FDuplicatedVerticesBuffer() : DupVertData(true), DupVertIndexData(true), bHasOverlappingVertices(false) {}
+    FDuplicatedVerticesBuffer() 
+#if WITH_EDITOR
+	// Keep CPU copy in editor for geometry operations
+	: DupVertData(true), DupVertIndexData(true)
+#else
+	: DupVertData(false), DupVertIndexData(false)
+#endif
+	, bHasOverlappingVertices(false) {}
 	
     /** Destructor. */
 	virtual ~FDuplicatedVerticesBuffer() {}
@@ -92,24 +99,37 @@ public:
         }
     }
 
-    virtual void InitRHI() override
+	void ReleaseCPUResources()
+	{
+		DupVertData.Discard();
+		DupVertIndexData.Discard();
+	}
+
+    virtual void InitRHI(FRHICommandListBase& RHICmdList) override
     {
+		const static FLazyName DuplicatedVerticesBuffeName(TEXT("FDuplicatedVerticesBuffer"));
         {
             FResourceArrayInterface* ResourceArray = DupVertData.GetResourceArray();
             check(ResourceArray->GetResourceDataSize() > 0);
 
-            FRHIResourceCreateInfo CreateInfo(ResourceArray);
-            DuplicatedVerticesIndexBuffer.VertexBufferRHI = RHICreateVertexBuffer(ResourceArray->GetResourceDataSize(), BUF_Static | BUF_ShaderResource, CreateInfo);
-            DuplicatedVerticesIndexBuffer.VertexBufferSRV = RHICreateShaderResourceView(DuplicatedVerticesIndexBuffer.VertexBufferRHI, sizeof(uint32), PF_R32_UINT);
+            FRHIResourceCreateInfo CreateInfo(TEXT("DuplicatedVerticesIndexBuffer"), ResourceArray);
+			CreateInfo.ClassName = DuplicatedVerticesBuffeName;
+			CreateInfo.OwnerName = GetOwnerName();
+            DuplicatedVerticesIndexBuffer.VertexBufferRHI = RHICmdList.CreateVertexBuffer(ResourceArray->GetResourceDataSize(), BUF_Static | BUF_ShaderResource, CreateInfo);
+			DuplicatedVerticesIndexBuffer.VertexBufferRHI->SetOwnerName(GetOwnerName());
+            DuplicatedVerticesIndexBuffer.VertexBufferSRV = RHICmdList.CreateShaderResourceView(DuplicatedVerticesIndexBuffer.VertexBufferRHI, sizeof(uint32), PF_R32_UINT);
         }
 
         {
             FResourceArrayInterface* ResourceArray = DupVertIndexData.GetResourceArray();
             check(ResourceArray->GetResourceDataSize() > 0);
 
-            FRHIResourceCreateInfo CreateInfo(ResourceArray);
-            LengthAndIndexDuplicatedVerticesIndexBuffer.VertexBufferRHI = RHICreateVertexBuffer(ResourceArray->GetResourceDataSize(), BUF_Static | BUF_ShaderResource, CreateInfo);
-            LengthAndIndexDuplicatedVerticesIndexBuffer.VertexBufferSRV = RHICreateShaderResourceView(LengthAndIndexDuplicatedVerticesIndexBuffer.VertexBufferRHI, sizeof(uint32), PF_R32_UINT);
+            FRHIResourceCreateInfo CreateInfo(TEXT("LengthAndIndexDuplicatedVerticesIndexBuffer"), ResourceArray);
+			CreateInfo.ClassName = DuplicatedVerticesBuffeName;
+			CreateInfo.OwnerName = GetOwnerName();
+            LengthAndIndexDuplicatedVerticesIndexBuffer.VertexBufferRHI = RHICmdList.CreateVertexBuffer(ResourceArray->GetResourceDataSize(), BUF_Static | BUF_ShaderResource, CreateInfo);
+			LengthAndIndexDuplicatedVerticesIndexBuffer.VertexBufferRHI->SetOwnerName(GetOwnerName());
+            LengthAndIndexDuplicatedVerticesIndexBuffer.VertexBufferSRV = RHICmdList.CreateShaderResourceView(LengthAndIndexDuplicatedVerticesIndexBuffer.VertexBufferRHI, sizeof(uint32), PF_R32_UINT);
         }
     }
 

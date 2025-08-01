@@ -44,14 +44,17 @@ struct FBaseMaterialData
  */
 enum EBlendMode
 {
-    BLEND_Opaque            =0,
-    BLEND_Masked            =1,
-    BLEND_Translucent       =2,
-    BLEND_Additive          =3,
-    BLEND_Modulate          =4,
-	BLEND_AlphaComposite    =5,
-	BLEND_AlphaHoldout      =6,
-	BLEND_MAX               =7,
+    BLEND_Opaque                          =0,
+    BLEND_Masked                          =1,
+    BLEND_Translucent                     =2,
+    BLEND_Additive                        =3,
+    BLEND_Modulate                        =4,
+	BLEND_AlphaComposite                  =5,
+	BLEND_AlphaHoldout                    =6,
+	BLEND_TranslucentColoredTransmittance =7,					/*Substrate only */
+	BLEND_MAX                             =8,
+	BLEND_TranslucentGreyTransmittance    = BLEND_Translucent,	/*Substrate only */
+	BLEND_ColoredTransmittanceOnly        = BLEND_Modulate,		/*Substrate only */
 };
 
 struct FMaterialData
@@ -60,6 +63,8 @@ struct FMaterialData
 	EBlendMode BlendMode;
 	/** Whether the material is two-sided or not */
 	uint32 bTwoSided:1;
+	/** Whether the material is thin-surface or not */
+	uint32 bIsThinSurface: 1;
 	/** Whether the material should cast shadows as masked even though it has a translucent blend mode. */
 	uint32 bCastShadowAsMasked:1;
 	uint32 bSurfaceDomain:1;
@@ -78,7 +83,7 @@ struct FMaterialData
 	int32 TransmissionSize;
 	int32 NormalSize;
 
-	FMaterialData() : 
+	FMaterialData() :
 		  EmissiveBoost(1.0f)
 		, DiffuseBoost(1.0f)
 		, EmissiveSize(0)

@@ -26,9 +26,6 @@ enum class EDownsampleQuality : uint8
 	MAX
 };
 
-// Returns the global downsample quality specified by the r.Downsample.Quality CVar.
-EDownsampleQuality GetDownsampleQuality();
-
 // The set of inputs needed to add a downsample pass to RDG.
 struct FDownsamplePassInputs
 {
@@ -37,8 +34,11 @@ struct FDownsamplePassInputs
 	// Friendly name of the pass. Used for logging and profiling.
 	const TCHAR* Name = nullptr;
 
+	// Optional user supplied output buffer.
+	IPooledRenderTarget* UserSuppliedOutput = nullptr;
+
 	// Input scene color RDG texture / view rect. Must not be null.
-	FScreenPassTexture SceneColor;
+	FScreenPassTextureSlice SceneColor;
 
 	// The downsample method to use.
 	EDownsampleQuality Quality = EDownsampleQuality::Low;
@@ -52,6 +52,10 @@ struct FDownsamplePassInputs
 
 FScreenPassTexture AddDownsamplePass(FRDGBuilder& GraphBuilder, const FViewInfo& View, const FDownsamplePassInputs& Inputs);
 
+void AddDownsampleComputePass(FRDGBuilder& GraphBuilder, const FViewInfo& View, FScreenPassTexture Input, FScreenPassTexture Output, EDownsampleQuality Quality, ERDGPassFlags PassFlags);
+void AddDownsampleComputePass(FRDGBuilder& GraphBuilder, const FViewInfo& View, FScreenPassTextureSlice Input, FScreenPassTexture Output, EDownsampleQuality Quality, ERDGPassFlags PassFlags);
+
+
 class FSceneDownsampleChain
 {
 public:
@@ -64,7 +68,7 @@ public:
 		FRDGBuilder& GraphBuilder,
 		const FViewInfo& View,
 		const FEyeAdaptationParameters& EyeAdaptationParameters,
-		FScreenPassTexture HalfResolutionSceneColor,
+		FScreenPassTextureSlice HalfResolutionSceneColor,
 		EDownsampleQuality DownsampleQuality,
 		bool bLogLumaInAlpha);
 
@@ -73,22 +77,22 @@ public:
 		return bInitialized;
 	}
 
-	FScreenPassTexture GetTexture(uint32 StageIndex) const
+	FScreenPassTextureSlice GetTexture(uint32 StageIndex) const
 	{
 		return Textures[StageIndex];
 	}
 
-	FScreenPassTexture GetFirstTexture() const
+	FScreenPassTextureSlice GetFirstTexture() const
 	{
 		return Textures[0];
 	}
 
-	FScreenPassTexture GetLastTexture() const
+	FScreenPassTextureSlice GetLastTexture() const
 	{
 		return Textures[StageCount - 1];
 	}
 
 private:
-	TStaticArray<FScreenPassTexture, StageCount> Textures;
+	TStaticArray<FScreenPassTextureSlice, StageCount> Textures;
 	bool bInitialized = false;
 };

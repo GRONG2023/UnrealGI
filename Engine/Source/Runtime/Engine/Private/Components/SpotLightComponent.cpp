@@ -5,10 +5,15 @@
 =============================================================================*/
 
 #include "Components/SpotLightComponent.h"
+#include "RenderUtils.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Engine/Texture2D.h"
-#include "SceneManagement.h"
 #include "PointLightSceneProxy.h"
+#include "UObject/UnrealType.h"
+#include "SceneInterface.h"
+#include "SceneView.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SpotLightComponent)
 
 
 /**
@@ -40,8 +45,8 @@ public:
 	FSpotLightSceneProxy(const USpotLightComponent* Component)
 	:	FPointLightSceneProxy(Component)
 	{
-		const float ClampedInnerConeAngle = FMath::Clamp(Component->InnerConeAngle,0.0f,89.0f) * (float)PI / 180.0f;
-		const float ClampedOuterConeAngle = FMath::Clamp(Component->OuterConeAngle * (float)PI / 180.0f,ClampedInnerConeAngle + 0.001f,89.0f * (float)PI / 180.0f + 0.001f);
+		const float ClampedInnerConeAngle = FMath::Clamp(Component->InnerConeAngle,0.0f,89.0f) * (float)UE_PI / 180.0f;
+		const float ClampedOuterConeAngle = FMath::Clamp(Component->OuterConeAngle * (float)UE_PI / 180.0f,ClampedInnerConeAngle + 0.001f,89.0f * (float)UE_PI / 180.0f + 0.001f);
 		OuterConeAngle = ClampedOuterConeAngle;
 		CosOuterCone = FMath::Cos(ClampedOuterConeAngle);
 		SinOuterCone = FMath::Sin(ClampedOuterConeAngle);
@@ -51,22 +56,32 @@ public:
 	}
 
 	/** Accesses parameters needed for rendering the light. */
-	virtual void GetLightShaderParameters(FLightShaderParameters& LightParameters) const override
+	virtual void GetLightShaderParameters(FLightRenderParameters& LightParameters, uint32 Flags=0) const override
 	{
-		LightParameters.Position = GetOrigin();
+		LightParameters.WorldPosition = GetOrigin();
 		LightParameters.InvRadius = InvRadius;
-		LightParameters.Color = FVector(GetColor());
+		LightParameters.Color = GetColor();
 		LightParameters.FalloffExponent = FalloffExponent;
-		LightParameters.Direction = -GetDirection();
-		LightParameters.Tangent = FVector(WorldToLight.M[0][2], WorldToLight.M[1][2], WorldToLight.M[2][2]);
-		LightParameters.SpotAngles = FVector2D(CosOuterCone, InvCosConeDifference);
+		LightParameters.Direction = FVector3f(-GetDirection());
+		LightParameters.Tangent = FVector3f(WorldToLight.M[0][2], WorldToLight.M[1][2], WorldToLight.M[2][2]);
+		LightParameters.SpotAngles = FVector2f(CosOuterCone, InvCosConeDifference);
 		LightParameters.SpecularScale = SpecularScale;
 		LightParameters.SourceRadius = SourceRadius;
 		LightParameters.SoftSourceRadius = SoftSourceRadius;
 		LightParameters.SourceLength = SourceLength;
-		LightParameters.SourceTexture = GWhiteTexture->TextureRHI;
 		LightParameters.RectLightBarnCosAngle = 0.0f;
 		LightParameters.RectLightBarnLength = -2.0f;
+		LightParameters.RectLightAtlasUVOffset = FVector2f::ZeroVector;
+		LightParameters.RectLightAtlasUVScale = FVector2f::ZeroVector;
+		LightParameters.RectLightAtlasMaxLevel = FLightRenderParameters::GetRectLightAtlasInvalidMIPLevel();
+		LightParameters.IESAtlasIndex = INDEX_NONE;
+		LightParameters.LightFunctionAtlasLightIndex = GetLightFunctionAtlasLightIndex();
+		LightParameters.InverseExposureBlend = InverseExposureBlend;
+
+		if (IESAtlasId != uint32(INDEX_NONE))
+		{
+			GetSceneInterface()->GetLightIESAtlasSlot(this, &LightParameters);
+		}
 	}
 
 	// FLightSceneInfo interface.
@@ -101,11 +116,10 @@ public:
 	 */
 	virtual bool GetWholeSceneProjectedShadowInitializer(const FSceneViewFamily& ViewFamily, TArray<FWholeSceneProjectedShadowInitializer, TInlineAllocator<6> >& OutInitializers) const override
 	{
-		FWholeSceneProjectedShadowInitializer& OutInitializer = *new(OutInitializers) FWholeSceneProjectedShadowInitializer;
+		FWholeSceneProjectedShadowInitializer& OutInitializer = OutInitializers.AddDefaulted_GetRef();
 		OutInitializer.PreShadowTranslation = -GetLightToWorld().GetOrigin();
 		OutInitializer.WorldToLight = GetWorldToLight().RemoveTranslation();
-		OutInitializer.Scales = FVector(1.0f,InvTanOuterCone,InvTanOuterCone);
-		OutInitializer.FaceDirection = FVector(1,0,0);
+		OutInitializer.Scales = FVector2D(InvTanOuterCone,InvTanOuterCone);
 
 		const FSphere AbsoluteBoundingSphere = FSpotLightSceneProxy::GetBoundingSphere();
 		OutInitializer.SubjectBounds = FBoxSphereBounds(
@@ -125,7 +139,27 @@ public:
 
 	virtual FSphere GetBoundingSphere() const override
 	{
-		return FMath::ComputeBoundingSphereForCone(GetOrigin(), GetDirection(), Radius, CosOuterCone, SinOuterCone);
+		return FMath::ComputeBoundingSphereForCone(GetOrigin(), GetDirection(), (FSphere::FReal)Radius, (FSphere::FReal)CosOuterCone, (FSphere::FReal)SinOuterCone);
+	}
+	
+	virtual float GetEffectiveScreenRadius(const FViewMatrices& ShadowViewMatrices, const FIntPoint& CameraViewRectSize) const 
+	{
+		// Heuristic: use the radius of the inscribed sphere at the cone's end as the light's effective screen radius
+		// We do so because we do not want to use the light's radius directly, which will make us overestimate the shadow map resolution greatly for a spot light
+
+		// In the correct form,
+		//   InscribedSpherePosition = GetOrigin() + GetDirection() * GetRadius() / CosOuterCone
+		//   InscribedSphereRadius = GetRadius() / SinOuterCone
+		// Do it incorrectly to avoid division which is more expensive and risks division by zero
+		const FVector InscribedSpherePosition = GetOrigin() + GetDirection() * GetRadius() * CosOuterCone;
+		const float InscribedSphereRadius = GetRadius() * SinOuterCone;
+
+		const float SphereDistanceFromViewOrigin = (InscribedSpherePosition - ShadowViewMatrices.GetViewOrigin()).Size();
+
+		const FVector2D &ProjectionScale = ShadowViewMatrices.GetProjectionScale();
+		const float ScreenScale = FMath::Max(CameraViewRectSize.X * 0.5f * ProjectionScale.X, CameraViewRectSize.Y * 0.5f * ProjectionScale.Y);
+
+		return ScreenScale * InscribedSphereRadius / FMath::Max(SphereDistanceFromViewOrigin, 1.0f);
 	}
 
 	virtual float GetEffectiveScreenRadius(const FViewMatrices& ShadowViewMatrices) const override
@@ -168,8 +202,8 @@ USpotLightComponent::USpotLightComponent(const FObjectInitializer& ObjectInitial
 
 float USpotLightComponent::GetHalfConeAngle() const
 {
-	const float ClampedInnerConeAngle = FMath::Clamp(InnerConeAngle, 0.0f, 89.0f) * (float)PI / 180.0f;
-	const float ClampedOuterConeAngle = FMath::Clamp(OuterConeAngle * (float)PI / 180.0f, ClampedInnerConeAngle + 0.001f, 89.0f * (float)PI / 180.0f + 0.001f);
+	const float ClampedInnerConeAngle = FMath::Clamp(InnerConeAngle, 0.0f, 89.0f) * (float)UE_PI / 180.0f;
+	const float ClampedOuterConeAngle = FMath::Clamp(OuterConeAngle * (float)UE_PI / 180.0f, ClampedInnerConeAngle + 0.001f, 89.0f * (float)UE_PI / 180.0f + 0.001f);
 	return ClampedOuterConeAngle;
 }
 
@@ -210,7 +244,11 @@ float USpotLightComponent::ComputeLightBrightness() const
 		}
 		else if (IntensityUnits == ELightUnits::Lumens)
 		{
-			LightBrightness *= (100.f * 100.f / 2.f / PI / (1.f - GetCosHalfConeAngle())); // Conversion from cm2 to m2 and cone remapping.
+			LightBrightness *= (100.f * 100.f / 2.f / UE_PI / (1.f - GetCosHalfConeAngle())); // Conversion from cm2 to m2 and cone remapping.
+		}
+		else if (IntensityUnits == ELightUnits::EV)
+		{
+			LightBrightness = EV100ToLuminance(LightBrightness) * (100.f * 100.f);
 		}
 		else
 		{
@@ -231,7 +269,11 @@ void USpotLightComponent::SetLightBrightness(float InBrightness)
 		}
 		else if (IntensityUnits == ELightUnits::Lumens)
 		{
-			ULightComponent::SetLightBrightness(InBrightness / (100.f * 100.f / 2.f / PI / (1.f - GetCosHalfConeAngle()))); // Conversion from cm2 to m2 and cone remapping
+			ULightComponent::SetLightBrightness(InBrightness / (100.f * 100.f / 2.f / UE_PI / (1.f - GetCosHalfConeAngle()))); // Conversion from cm2 to m2 and cone remapping
+		}
+		else if (IntensityUnits == ELightUnits::EV)
+		{
+			ULightComponent::SetLightBrightness(LuminanceToEV100(InBrightness / (100.f * 100.f)));
 		}
 		else
 		{
@@ -243,6 +285,12 @@ void USpotLightComponent::SetLightBrightness(float InBrightness)
 		ULightComponent::SetLightBrightness(InBrightness);
 	}
 }
+
+FBox USpotLightComponent::GetStreamingBounds() const
+{
+	const FSphere BoundingSphere = GetBoundingSphere();
+	return FBox(BoundingSphere.Center - BoundingSphere.W, BoundingSphere.Center + BoundingSphere.W);
+}
 #endif // WITH_EDITOR
 
 static bool IsSpotLightSupported(const USpotLightComponent* InLight)
@@ -252,9 +300,7 @@ static bool IsSpotLightSupported(const USpotLightComponent* InLight)
 		if (!IsMobileDeferredShadingEnabled(GMaxRHIShaderPlatform))
 		{
 			// if project does not support dynamic point/spot lights on mobile do not add them to the renderer 
-			static auto* CVarPointLights = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.MobileNumDynamicPointLights"));
-			const bool bPointLights = CVarPointLights->GetValueOnAnyThread() > 0;
-			return bPointLights;
+			return MobileForwardEnableLocalLights(GMaxRHIShaderPlatform);
 		}
 	}
 	return true;
@@ -271,10 +317,10 @@ FLightSceneProxy* USpotLightComponent::CreateSceneProxy() const
 
 FSphere USpotLightComponent::GetBoundingSphere() const
 {
-	float ConeAngle = GetHalfConeAngle();
-	float CosConeAngle = FMath::Cos(ConeAngle);
-	float SinConeAngle = FMath::Sin(ConeAngle);
-	return FMath::ComputeBoundingSphereForCone(GetComponentTransform().GetLocation(), GetDirection(), AttenuationRadius, CosConeAngle, SinConeAngle);
+	FSphere::FReal ConeAngle = GetHalfConeAngle();
+	FSphere::FReal CosConeAngle = FMath::Cos(ConeAngle);
+	FSphere::FReal SinConeAngle = FMath::Sin(ConeAngle);
+	return FMath::ComputeBoundingSphereForCone(GetComponentTransform().GetLocation(), GetDirection(), (FSphere::FReal)AttenuationRadius, CosConeAngle, SinConeAngle);
 }
 
 bool USpotLightComponent::AffectsBounds(const FBoxSphereBounds& InBounds) const
@@ -284,8 +330,8 @@ bool USpotLightComponent::AffectsBounds(const FBoxSphereBounds& InBounds) const
 		return false;
 	}
 
-	float	ClampedInnerConeAngle = FMath::Clamp(InnerConeAngle,0.0f,89.0f) * (float)PI / 180.0f,
-			ClampedOuterConeAngle = FMath::Clamp(OuterConeAngle * (float)PI / 180.0f,ClampedInnerConeAngle + 0.001f,89.0f * (float)PI / 180.0f + 0.001f);
+	float	ClampedInnerConeAngle = FMath::Clamp(InnerConeAngle,0.0f,89.0f) * (float)UE_PI / 180.0f,
+			ClampedOuterConeAngle = FMath::Clamp(OuterConeAngle * (float)UE_PI / 180.0f,ClampedInnerConeAngle + 0.001f,89.0f * (float)UE_PI / 180.0f + 0.001f);
 
 	float	Sin = FMath::Sin(ClampedOuterConeAngle),
 			Cos = FMath::Cos(ClampedOuterConeAngle);
@@ -336,3 +382,4 @@ void USpotLightComponent::PostEditChangeProperty( FPropertyChangedEvent& Propert
 }
 
 #endif	// WITH_EDITOR
+

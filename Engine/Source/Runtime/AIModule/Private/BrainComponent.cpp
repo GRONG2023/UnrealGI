@@ -9,6 +9,8 @@
 #include "VisualLogger/VisualLoggerTypes.h"
 #include "VisualLogger/VisualLogger.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BrainComponent)
+
 const FName UBrainComponent::AIMessage_MoveFinished = TEXT("MoveFinished");
 const FName UBrainComponent::AIMessage_RepathFailed = TEXT("RepathFailed");
 const FName UBrainComponent::AIMessage_QueryFinished = TEXT("QueryFinished");
@@ -197,7 +199,7 @@ void UBrainComponent::DescribeSelfToVisLog(FVisualLogEntry* Snapshot) const
 {
 	const static UEnum* PriorityEnum = StaticEnum<EAIRequestPriority::Type>();
 
-	if (IsPendingKill())
+	if (!IsValid(this))
 	{
 		return;
 	}
@@ -287,7 +289,7 @@ void UBrainComponent::TickComponent(float DeltaTime, enum ELevelTick TickType, F
 				MessageObservers[ObserverIndex]->OnMessage(MessageCopy);
 			}
 		}
-		MessagesToProcess.RemoveAt(0, NumMessages, false);
+		MessagesToProcess.RemoveAt(0, NumMessages, EAllowShrinking::No);
 	}
 }
 

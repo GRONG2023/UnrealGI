@@ -1,9 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #pragma once
-#include "CoreMinimal.h"
-#include "DSP/FloatArrayMath.h"
 
+#include "DSP/FloatArrayMath.h"
+#include "HAL/Platform.h"
+#include "Templates/UniquePtr.h"
 
 namespace Audio
 {
@@ -23,7 +24,7 @@ namespace Audio
 
 	/** Settings for a mel kernel which transforms an linearly space spectrum (e.g. FFT Magnitude)
 	 * to a mel spectrum */
-	struct SIGNALPROCESSING_API FMelSpectrumKernelSettings
+	struct FMelSpectrumKernelSettings
 	{
 		int32 NumBands;						//< Number of bands in Mel spectrum
 		float KernelMinCenterFreq;			//< Minimum frequency of lowest mel band.

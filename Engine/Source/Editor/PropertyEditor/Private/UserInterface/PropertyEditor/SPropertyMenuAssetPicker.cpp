@@ -1,19 +1,23 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "UserInterface/PropertyEditor/SPropertyMenuAssetPicker.h"
+
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetToolsModule.h"
+#include "ContentBrowserModule.h"
+#include "Editor.h"
 #include "Factories/Factory.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Editor.h"
-#include "Modules/ModuleManager.h"
-#include "Widgets/Layout/SBox.h"
-#include "AssetRegistryModule.h"
-#include "IAssetTools.h"
-#include "AssetToolsModule.h"
-#include "IContentBrowserSingleton.h"
-#include "ContentBrowserModule.h"
-#include "UserInterface/PropertyEditor/PropertyEditorAssetConstants.h"
-#include "Styling/SlateIconFinder.h"
 #include "HAL/PlatformApplicationMisc.h"
+#include "IAssetTools.h"
+#include "IContentBrowserSingleton.h"
+#include "Layout/WidgetPath.h"
+#include "Modules/ModuleManager.h"
+#include "PropertyEditorClipboard.h"
+#include "PropertyEditorCopyPastePrivate.h"
+#include "Styling/SlateIconFinder.h"
+#include "UserInterface/PropertyEditor/PropertyEditorAssetConstants.h"
+#include "Widgets/Layout/SBox.h"
 
 #define LOCTEXT_NAMESPACE "PropertyEditor"
 
@@ -36,8 +40,9 @@ void SPropertyMenuAssetPicker::Construct( const FArguments& InArgs )
 
 	const bool bInShouldCloseWindowAfterMenuSelection = true;
 	const bool bCloseSelfOnly = true;
+	const bool bSearchable = false;
 	
-	FMenuBuilder MenuBuilder(bInShouldCloseWindowAfterMenuSelection, nullptr, nullptr, bCloseSelfOnly);
+	FMenuBuilder MenuBuilder(bInShouldCloseWindowAfterMenuSelection, nullptr, nullptr, bCloseSelfOnly, &FCoreStyle::Get(), bSearchable);
 
 	if (NewAssetFactories.Num() > 0)
 	{
@@ -67,7 +72,7 @@ void SPropertyMenuAssetPicker::Construct( const FArguments& InArgs )
 				MenuBuilder.AddMenuEntry(
 					LOCTEXT("EditAsset", "Edit"),
 					LOCTEXT("EditAsset_Tooltip", "Edit this asset"),
-					FSlateIcon(),
+					FSlateIcon(FAppStyle::GetAppStyleSetName(),"Icons.Edit"),
 					FUIAction(FExecuteAction::CreateSP(this, &SPropertyMenuAssetPicker::OnEdit)));
 			}
 
@@ -76,14 +81,14 @@ void SPropertyMenuAssetPicker::Construct( const FArguments& InArgs )
 				MenuBuilder.AddMenuEntry(
 					LOCTEXT("CopyAsset", "Copy"),
 					LOCTEXT("CopyAsset_Tooltip", "Copies the asset to the clipboard"),
-					FSlateIcon(),
+					FSlateIcon(FAppStyle::GetAppStyleSetName(),"GenericCommands.Copy"),
 					FUIAction(FExecuteAction::CreateSP(this, &SPropertyMenuAssetPicker::OnCopy))
 				);
 
 				MenuBuilder.AddMenuEntry(
 					LOCTEXT("PasteAsset", "Paste"),
 					LOCTEXT("PasteAsset_Tooltip", "Pastes an asset from the clipboard to this field"),
-					FSlateIcon(),
+					FSlateIcon(FAppStyle::GetAppStyleSetName(),"GenericCommands.Paste"),
 					FUIAction(
 						FExecuteAction::CreateSP(this, &SPropertyMenuAssetPicker::OnPaste),
 						FCanExecuteAction::CreateSP(this, &SPropertyMenuAssetPicker::CanPaste))
@@ -95,7 +100,7 @@ void SPropertyMenuAssetPicker::Construct( const FArguments& InArgs )
 				MenuBuilder.AddMenuEntry(
 					LOCTEXT("ClearAsset", "Clear"),
 					LOCTEXT("ClearAsset_ToolTip", "Clears the asset set on this field"),
-					FSlateIcon(),
+					FSlateIcon(FAppStyle::GetAppStyleSetName(),"GenericCommands.Delete"),
 					FUIAction(FExecuteAction::CreateSP(this, &SPropertyMenuAssetPicker::OnClear))
 				);
 			}
@@ -105,27 +110,25 @@ void SPropertyMenuAssetPicker::Construct( const FArguments& InArgs )
 
 	MenuBuilder.BeginSection(NAME_None, LOCTEXT("BrowseHeader", "Browse"));
 	{
-		TSharedPtr<SWidget> MenuContent;
-
 		FContentBrowserModule& ContentBrowserModule = FModuleManager::Get().LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
 
 		FAssetPickerConfig AssetPickerConfig;
 		// Add filter classes - if we have a single filter class of "Object" then don't set a filter since it would always match everything (but slower!)
 		if (AllowedClasses.Num() == 1 && AllowedClasses[0] == UObject::StaticClass())
 		{
-			AssetPickerConfig.Filter.ClassNames.Reset();
+			AssetPickerConfig.Filter.ClassPaths.Reset();
 		}
 		else
 		{
 			for(int32 i = 0; i < AllowedClasses.Num(); ++i)
 			{
-				AssetPickerConfig.Filter.ClassNames.Add( AllowedClasses[i]->GetFName() );
+				AssetPickerConfig.Filter.ClassPaths.Add( AllowedClasses[i]->GetClassPathName() );
 			}
 		}
 
 		for (int32 i = 0; i < DisallowedClasses.Num(); ++i)
 		{
-			AssetPickerConfig.Filter.RecursiveClassesExclusionSet.Add(DisallowedClasses[i]->GetFName());
+			AssetPickerConfig.Filter.RecursiveClassPathsExclusionSet.Add(DisallowedClasses[i]->GetClassPathName());
 		}
 
 		// Allow child classes
@@ -157,15 +160,17 @@ void SPropertyMenuAssetPicker::Construct( const FArguments& InArgs )
 		// Force show plugin content if meta data says so
 		AssetPickerConfig.bForceShowPluginContent = bForceShowPluginContent;
 
-		MenuContent =
+		AssetPickerWidget = ContentBrowserModule.Get().CreateAssetPicker(AssetPickerConfig);
+
+		TSharedRef<SWidget> MenuContent =
 			SNew(SBox)
-			.WidthOverride(PropertyEditorAssetConstants::ContentBrowserWindowSize.X)
-			.HeightOverride(PropertyEditorAssetConstants::ContentBrowserWindowSize.Y)
+			.WidthOverride(static_cast<float>(PropertyEditorAssetConstants::ContentBrowserWindowSize.X))
+			.HeightOverride(static_cast<float>(PropertyEditorAssetConstants::ContentBrowserWindowSize.Y))
 			[
-				ContentBrowserModule.Get().CreateAssetPicker(AssetPickerConfig)
+				AssetPickerWidget.ToSharedRef()
 			];
 
-		MenuBuilder.AddWidget(MenuContent.ToSharedRef(), FText::GetEmpty(), true);
+		MenuBuilder.AddWidget(MenuContent, FText::GetEmpty(), true);
 	}
 	MenuBuilder.EndSection();
 
@@ -173,6 +178,39 @@ void SPropertyMenuAssetPicker::Construct( const FArguments& InArgs )
 	[
 		MenuBuilder.MakeWidget()
 	];
+}
+
+FReply SPropertyMenuAssetPicker::OnPreviewKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)
+{
+	if (!AssetPickerWidget.IsValid())
+	{
+		return FReply::Unhandled();
+	}
+	
+	// only give the search box focus if it's not a command like Ctrl+C
+	if (InKeyEvent.GetCharacter() == 0 || 
+		InKeyEvent.IsAltDown() ||
+		InKeyEvent.IsControlDown() ||
+		InKeyEvent.IsCommandDown())
+	{
+		return FReply::Unhandled();
+	}
+
+	const FWidgetPath* Path = InKeyEvent.GetEventPath();
+	if (Path != nullptr)
+	{
+		FContentBrowserModule& ContentBrowserModule = FModuleManager::Get().LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
+		TSharedPtr<SWidget> SearchBox = ContentBrowserModule.Get().GetAssetPickerSearchBox(AssetPickerWidget.ToSharedRef());
+		if (SearchBox.IsValid())
+		{
+			if (!Path->ContainsWidget(SearchBox.Get()))
+			{
+				return FReply::Unhandled().SetUserFocus(SearchBox.ToSharedRef());
+			}
+		}
+	}
+
+	return FReply::Unhandled();
 }
 
 void SPropertyMenuAssetPicker::OnEdit()
@@ -192,7 +230,7 @@ void SPropertyMenuAssetPicker::OnCopy()
 {
 	if( CurrentObject.IsValid() )
 	{
-		FPlatformApplicationMisc::ClipboardCopy(*CurrentObject.GetExportTextName());
+		FPropertyEditorClipboard::ClipboardCopy(*CurrentObject.GetExportTextName());
 	}
 	OnClose.ExecuteIfBound();
 }
@@ -200,15 +238,32 @@ void SPropertyMenuAssetPicker::OnCopy()
 void SPropertyMenuAssetPicker::OnPaste()
 {
 	FString DestPath;
-	FPlatformApplicationMisc::ClipboardPaste(DestPath);
+	FPropertyEditorClipboard::ClipboardPaste(DestPath);
 
-	if(DestPath == TEXT("None"))
+	PasteFromText(TEXT(""), DestPath);
+}
+
+void SPropertyMenuAssetPicker::OnPasteFromText(
+	const FString& InTag,
+	const FString& InText,
+	const TOptional<FGuid>& InOperationId)
+{
+	// Naive check done elsewhere, guard with proper check here 
+	if (CanPasteFromText(InTag, InText))
 	{
-		SetValue(NULL);
+		PasteFromText(InTag, InText);
+	}
+}
+
+void SPropertyMenuAssetPicker::PasteFromText(const FString& InTag, const FString& InText)
+{
+	if(InText == TEXT("None"))
+	{
+		SetValue(nullptr);
 	}
 	else
 	{
-		UObject* Object = LoadObject<UObject>(NULL, *DestPath);
+		UObject* Object = LoadObject<UObject>(nullptr, *InText);
 		bool PassesAllowedClassesFilter = true;
 		if (Object && AllowedClasses.Num())
 		{
@@ -242,26 +297,40 @@ void SPropertyMenuAssetPicker::OnPaste()
 bool SPropertyMenuAssetPicker::CanPaste()
 {
 	FString ClipboardText;
-	FPlatformApplicationMisc::ClipboardPaste(ClipboardText);
+	FPropertyEditorClipboard::ClipboardPaste(ClipboardText);
+	
+	return CanPasteFromText(TEXT(""), ClipboardText);
+}
+
+bool SPropertyMenuAssetPicker::CanPasteFromText(const FString& InTag, const FString& InText) const
+{
+	if (!bAllowCopyPaste)
+	{
+		return false;
+	}
+
+	if (!UE::PropertyEditor::TagMatchesProperty(InTag, PropertyHandle))
+	{
+		return false;
+	}
 
 	FString Class;
-	FString PossibleObjectPath = ClipboardText;
-	if( ClipboardText.Split( TEXT("'"), &Class, &PossibleObjectPath, ESearchCase::CaseSensitive) )
+	FString PossibleObjectPath = InText;
+	if( InText.Split( TEXT("'"), &Class, &PossibleObjectPath, ESearchCase::CaseSensitive) )
 	{
 		// Remove the last item
-		PossibleObjectPath.LeftChopInline( 1, false );
+		PossibleObjectPath.LeftChopInline( 1, EAllowShrinking::No );
 	}
 
 	bool bCanPaste = false;
-
 	if( PossibleObjectPath == TEXT("None") )
 	{
 		bCanPaste = true;
 	}
 	else
 	{
-		FAssetRegistryModule& AssetRegistryModule = FModuleManager::Get().LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-		bCanPaste = PossibleObjectPath.Len() < NAME_SIZE && AssetRegistryModule.Get().GetAssetByObjectPath( *PossibleObjectPath ).IsValid();
+		const FAssetRegistryModule& AssetRegistryModule = FModuleManager::Get().LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+		bCanPaste = PossibleObjectPath.Len() < NAME_SIZE && AssetRegistryModule.Get().GetAssetByObjectPath( FSoftObjectPath(PossibleObjectPath) ).IsValid();
 	}
 
 	return bCanPaste;
@@ -269,7 +338,7 @@ bool SPropertyMenuAssetPicker::CanPaste()
 
 void SPropertyMenuAssetPicker::OnClear()
 {
-	SetValue(NULL);
+	SetValue(nullptr);
 	OnClose.ExecuteIfBound();
 }
 

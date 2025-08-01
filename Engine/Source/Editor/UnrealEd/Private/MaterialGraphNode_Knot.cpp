@@ -7,6 +7,8 @@
 #include "MaterialEditorUtilities.h"
 #include "EdGraph/EdGraphPin.h"
 
+#include "SGraphNodeKnot.h"
+
 #define LOCTEXT_NAMESPACE "MaterialGraphNode_Knot"
 
 static const char* PC_Wildcard = "wildcard";
@@ -26,9 +28,11 @@ void UMaterialGraphNode_Knot::AllocateDefaultPins()
 	const FName OutputPinName(TEXT("OutputPin"));
 
 	UEdGraphPin* MyInputPin = CreatePin(EGPD_Input, PC_Wildcard, InputPinName);
+	MyInputPin->SourceIndex = 0;
 	MyInputPin->bDefaultValueIsIgnored = true;
 
 	UEdGraphPin* MyOutputPin = CreatePin(EGPD_Output, PC_Wildcard, OutputPinName);
+	MyOutputPin->SourceIndex = 0;
 }
 
 FText UMaterialGraphNode_Knot::GetTooltipText() const
@@ -90,6 +94,11 @@ UEdGraphPin* UMaterialGraphNode_Knot::GetPassThroughPin(const UEdGraphPin* FromP
 	}
 
 	return nullptr;
+}
+
+TSharedPtr<SGraphNode> UMaterialGraphNode_Knot::CreateVisualWidget()
+{
+	return SNew(SGraphNodeKnot, this);
 }
 
 

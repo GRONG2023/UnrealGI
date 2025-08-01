@@ -8,53 +8,39 @@
 #include "MetalFrameAllocator.h"
 #include "MetalUniformBuffer.h"
 #include "ShaderParameterStruct.h"
+#include "RHIUniformBufferDataShared.h"
 
 #pragma mark Suballocated Uniform Buffer Implementation
 
-FMetalSuballocatedUniformBuffer::FMetalSuballocatedUniformBuffer(const FRHIUniformBufferLayout& Layout, EUniformBufferUsage Usage, EUniformBufferValidation InValidation)
+FMetalSuballocatedUniformBuffer::FMetalSuballocatedUniformBuffer(const void *Contents, const FRHIUniformBufferLayout* Layout, EUniformBufferUsage Usage, EUniformBufferValidation InValidation)
     : FRHIUniformBuffer(Layout)
     , LastFrameUpdated(0)
     , Offset(0)
-    , Backing(nil)
-    , Shadow(nullptr)
-    , ResourceTable()
+    , Shadow(FMemory::Malloc(GetSize()))
 #if METAL_UNIFORM_BUFFER_VALIDATION
     , Validation(InValidation)
 #endif // METAL_UNIFORM_BUFFER_VALIDATION
 {
-    // Slate can create SingleDraw uniform buffers and use them several frames later. So it must be included.
-    if (Usage == UniformBuffer_SingleDraw || Usage == UniformBuffer_MultiFrame)
-    {
-        Shadow = FMemory::Malloc(GetSize());
-    }
+	if (Contents)
+	{
+        UE::RHICore::UpdateUniformBufferConstants(Shadow, Contents, GetLayout());
+		CopyResourceTable(Contents, ResourceTable);
+	}
 }
 
 FMetalSuballocatedUniformBuffer::~FMetalSuballocatedUniformBuffer()
 {
-    if (HasShadow())
-    {
-        FMemory::Free(Shadow);
-    }
+	FMemory::Free(Shadow);
 
     // Note: this object does NOT own a reference
     // to the uniform buffer backing store
 }
 
-bool FMetalSuballocatedUniformBuffer::HasShadow()
+void FMetalSuballocatedUniformBuffer::Update(const void* Contents)
 {
-    return Shadow != nullptr;
-}
-
-void FMetalSuballocatedUniformBuffer::Update(const void* Contents, TArray<TRefCountPtr<FRHIResource> > const& InResourceTable)
-{
-    if (HasShadow())
-    {
-        FMemory::Memcpy(Shadow, Contents, GetSize());
-    }
-
-	ResourceTable = InResourceTable;
-
-	PushToGPUBacking(Contents);
+    UE::RHICore::UpdateUniformBufferConstants(Shadow, Contents, GetLayout());
+	CopyResourceTable(Contents, ResourceTable);
+	PushToGPUBacking(Shadow);
 }
 
 // Acquires a region in the current frame's uniform buffer and
@@ -62,8 +48,6 @@ void FMetalSuballocatedUniformBuffer::Update(const void* Contents, TArray<TRefCo
 // The amount of data read from Contents is given by the Layout
 void FMetalSuballocatedUniformBuffer::PushToGPUBacking(const void* Contents)
 {
-    check(IsInRenderingThread() ^ IsRunningRHIInSeparateThread());
-    
     FMetalDeviceContext& DeviceContext = GetMetalDeviceContext();
     
     FMetalFrameAllocator* Allocator = DeviceContext.GetUniformAllocator();
@@ -71,7 +55,7 @@ void FMetalSuballocatedUniformBuffer::PushToGPUBacking(const void* Contents)
     // copy contents into backing
     Backing = Entry.Backing;
     Offset = Entry.Offset;
-    uint8* ConstantSpace = reinterpret_cast<uint8*>([Backing contents]) + Entry.Offset;
+    uint8* ConstantSpace = reinterpret_cast<uint8*>(Backing->contents()) + Entry.Offset;
     FMemory::Memcpy(ConstantSpace, Contents, GetSize());
     LastFrameUpdated = DeviceContext.GetFrameNumberRHIThread();
 }
@@ -82,13 +66,13 @@ void FMetalSuballocatedUniformBuffer::PushToGPUBacking(const void* Contents)
 void FMetalSuballocatedUniformBuffer::PrepareToBind()
 {
     FMetalDeviceContext& DeviceContext = GetMetalDeviceContext();
-    if(Shadow && LastFrameUpdated < DeviceContext.GetFrameNumberRHIThread())
+    if(!LastFrameUpdated || LastFrameUpdated < DeviceContext.GetFrameNumberRHIThread())
     {
         PushToGPUBacking(Shadow);
     }
 }
 
-void FMetalSuballocatedUniformBuffer::CopyResourceTable_RenderThread(const void* Contents, TArray<TRefCountPtr<FRHIResource> >& OutResourceTable)
+void FMetalSuballocatedUniformBuffer::CopyResourceTable(const void* Contents, TArray<TRefCountPtr<FRHIResource> >& OutResourceTable) const
 {
 #if METAL_UNIFORM_BUFFER_VALIDATION
 	if (Validation == EUniformBufferValidation::ValidateResources)

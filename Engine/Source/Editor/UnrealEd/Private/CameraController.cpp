@@ -91,6 +91,14 @@ void FEditorCameraController::UpdateSimulation(
 }
 
 
+void FEditorCameraController::ResetVelocity()
+{
+	MovementVelocity = FVector::ZeroVector;
+	FOVVelocity = 0.f;
+	RotationVelocityEuler = FVector::ZeroVector;
+}
+
+
 /**true if this camera currently has rotational velocity*/
 bool FEditorCameraController::IsRotating (void) const
 {
@@ -288,14 +296,14 @@ void FEditorCameraController::UpdateRotation( const FCameraControllerUserImpulse
 	for( int32 CurRotationAxis = 0; CurRotationAxis < 3; ++CurRotationAxis )
 	{
 		// This will serve as both our source and destination rotation value
-		float& RotationVelocity = RotationVelocityEuler[ CurRotationAxis ];
+		FVector::FReal& RotationVelocity = RotationVelocityEuler[ CurRotationAxis ];
 
-		const float RotationImpulse = RotateImpulseEuler[ CurRotationAxis ];
-		const float RotationVelocityModifier = RotateVelocityModifierEuler[ CurRotationAxis ];
+		const FVector::FReal RotationImpulse = RotateImpulseEuler[CurRotationAxis];
+		const FVector::FReal RotationVelocityModifier = RotateVelocityModifierEuler[ CurRotationAxis ];
 
 
 		// Compute acceleration
-		float RotationAcceleration = RotationImpulse * Config.RotationAccelerationRate;
+		FVector::FReal RotationAcceleration = RotationImpulse * Config.RotationAccelerationRate;
 
 		if( Config.bUsePhysicsBasedRotation || Config.bForceRotationalPhysics)
 		{
@@ -329,7 +337,7 @@ void FEditorCameraController::UpdateRotation( const FCameraControllerUserImpulse
 
 
 		// Constrain maximum rotation speed
-		RotationVelocity = FMath::Clamp<float>(RotationVelocity, -Config.MaximumRotationSpeed, Config.MaximumRotationSpeed);
+		RotationVelocity = FMath::Clamp(RotationVelocity, -Config.MaximumRotationSpeed, Config.MaximumRotationSpeed);
 
 		// Clamp velocity to a reasonably small number
 		if( FMath::Abs( RotationVelocity ) < KINDA_SMALL_NUMBER )
@@ -346,24 +354,23 @@ void FEditorCameraController::UpdateRotation( const FCameraControllerUserImpulse
 		if( CurRotationAxis == 1 )		// 1 == pitch
 		{
 			// Normalize the angle to -180 to 180.
-			float Angle = FMath::Fmod(InOutCameraEuler[ CurRotationAxis ], 360.0f);
-			if (Angle > 180.f)
+			FVector::FReal Angle = FMath::Fmod(InOutCameraEuler[ CurRotationAxis ], 360.0);
+			if (Angle > 180.)
 			{
-				Angle -= 360.f;
+				Angle -= 360.;
 			}
-			else if (Angle < -180.f)
+			else if (Angle < -180.)
 			{
-				Angle += 360.f;
+				Angle += 360.;
 			}
 			
-			//allow for unlocked pitch constraints while in matinee
-			if (Config.bLockedPitch || !GLevelEditorModeTools().GetActiveMode(FBuiltinEditorModes::EM_InterpEdit)) 
+			if (Config.bLockedPitch) 
 			{
 				// Clamp the angle.
 				InOutCameraEuler[ CurRotationAxis ] =
 					FMath::Clamp( Angle,
-					Config.MinimumAllowedPitchRotation,
-					Config.MaximumAllowedPitchRotation );
+					(FVector::FReal)Config.MinimumAllowedPitchRotation,
+					(FVector::FReal)Config.MaximumAllowedPitchRotation );
 			}
 		}
 	}

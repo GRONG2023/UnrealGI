@@ -5,11 +5,12 @@
 =============================================================================*/
 
 #include "ModelLight.h"
-#include "EngineDefines.h"
+#include "Engine/Level.h"
 #include "Engine/MapBuildDataRegistry.h"
 #include "Components/LightComponent.h"
 #include "Misc/ScopedSlowTask.h"
 #include "ComponentReregisterContext.h"
+#include "RenderUtils.h"
 #include "UnrealEngine.h"
 #include "TextureLayout.h"
 #include "Collision.h"
@@ -65,8 +66,8 @@ static bool SphereOnNode(UModel* Model,uint32 NodeIndex,FVector Point,float Radi
 	for(uint32 VertexIndex = 0;VertexIndex < Node.NumVertices;VertexIndex++)
 	{
 		// Create plane perpendicular to both this side and the polygon's normal.
-		FVector	Edge = Model->Points[Model->Verts[Node.iVertPool + VertexIndex].pVertex] - Model->Points[Model->Verts[Node.iVertPool + ((VertexIndex + Node.NumVertices - 1) % Node.NumVertices)].pVertex],
-				EdgeNormal = Edge ^ (FVector)Surf.Plane;
+		FVector	Edge(Model->Points[Model->Verts[Node.iVertPool + VertexIndex].pVertex] - Model->Points[Model->Verts[Node.iVertPool + ((VertexIndex + Node.NumVertices - 1) % Node.NumVertices)].pVertex]);
+		FVector EdgeNormal = Edge ^ (FVector)Surf.Plane;
 		float	VertexDot = Node.Plane.PlaneDot(Model->Points[Model->Verts[Node.iVertPool + VertexIndex].pVertex]);
 
 		// Ignore degenerate edges.
@@ -74,7 +75,7 @@ static bool SphereOnNode(UModel* Model,uint32 NodeIndex,FVector Point,float Radi
 			continue;
 
 		// If point is not behind all the planes created by this polys edges, it's outside the poly.
-		if(FVector::PointPlaneDist(Point,Model->Points[Model->Verts[Node.iVertPool + VertexIndex].pVertex],EdgeNormal.GetSafeNormal()) > Radius)
+		if(FVector::PointPlaneDist(Point, (FVector)Model->Points[Model->Verts[Node.iVertPool + VertexIndex].pVertex],EdgeNormal.GetSafeNormal()) > Radius)
 			return 0;
 	}
 
@@ -397,9 +398,9 @@ void UModelComponent::GetSurfaceLightMapResolution( int32 SurfaceIndex, int32 Qu
 	FBspSurf& Surf = Model->Surfs[SurfaceIndex];
 
 	// Find a plane parallel to the surface.
-	FVector MapX;
-	FVector MapY;
-	Surf.Plane.FindBestAxisVectors(MapX,MapY);
+	FVector3f MapXf, MapYf;
+	Surf.Plane.FindBestAxisVectors(MapXf,MapYf);
+	FVector3d MapX(MapXf), MapY(MapYf);
 
 	// Find the surface's nodes and the part of the plane they map to.
 	bool bFoundNode = false;
@@ -419,8 +420,8 @@ void UModelComponent::GetSurfaceLightMapResolution( int32 SurfaceIndex, int32 Qu
 			{
 				bFoundNode = true;
 
-				FVector	Position = Model->Points[Model->Verts[Node.iVertPool + VertexIndex].pVertex];
-				float	X = MapX | Position,
+				FVector3d	Position = (FVector3d)Model->Points[Model->Verts[Node.iVertPool + VertexIndex].pVertex];
+				double X = MapX | Position,
 					Y = MapY | Position;
 				MinUV.X = FMath::Min(X,MinUV.X);
 				MinUV.Y = FMath::Min(Y,MinUV.Y);
@@ -432,19 +433,24 @@ void UModelComponent::GetSurfaceLightMapResolution( int32 SurfaceIndex, int32 Qu
 
 	if (bFoundNode)
 	{
-		float Scale = Surf.LightMapScale * QualityScale;
+		double Scale = Surf.LightMapScale * QualityScale;
 		MinUV.X = FMath::FloorToFloat(MinUV.X / Scale) * Scale;
 		MinUV.Y = FMath::FloorToFloat(MinUV.Y / Scale) * Scale;
 		MaxUV.X = FMath::CeilToFloat(MaxUV.X / Scale) * Scale;
 		MaxUV.Y = FMath::CeilToFloat(MaxUV.Y / Scale) * Scale;
+		// The intent of the above is that Min and Max should be separated by at least Scale, from the floor/ceil,
+		// but in the unlucky case that the range is ~0 and exactly aligned to Scale, Min and Max can take the same value.
+		// To avoid this causing a divide by zero below, we enforce the at-least-Scale delta explicitly.
+		double UVDx = FMath::Max(Scale, (MaxUV.X - MinUV.X));
+		double UVDy = FMath::Max(Scale, (MaxUV.Y - MinUV.Y));
 
-		Width = FMath::Clamp(FMath::CeilToInt((MaxUV.X - MinUV.X) / (Surf.LightMapScale * QualityScale)),4,SHADOWMAP_MAX_WIDTH);
-		Height = FMath::Clamp(FMath::CeilToInt((MaxUV.Y - MinUV.Y) / (Surf.LightMapScale * QualityScale)),4,SHADOWMAP_MAX_HEIGHT);
+		Width = FMath::Clamp(FMath::CeilToInt32((UVDx) / (Surf.LightMapScale * QualityScale)),4,SHADOWMAP_MAX_WIDTH);
+		Height = FMath::Clamp(FMath::CeilToInt32((UVDy) / (Surf.LightMapScale * QualityScale)),4,SHADOWMAP_MAX_HEIGHT);
 		WorldToMap = FMatrix(
-			FPlane(MapX.X / (MaxUV.X - MinUV.X),	MapY.X / (MaxUV.Y - MinUV.Y),	Surf.Plane.X,	0),
-			FPlane(MapX.Y / (MaxUV.X - MinUV.X),	MapY.Y / (MaxUV.Y - MinUV.Y),	Surf.Plane.Y,	0),
-			FPlane(MapX.Z / (MaxUV.X - MinUV.X),	MapY.Z / (MaxUV.Y - MinUV.Y),	Surf.Plane.Z,	0),
-			FPlane(-MinUV.X / (MaxUV.X - MinUV.X),	-MinUV.Y / (MaxUV.Y - MinUV.Y),	-Surf.Plane.W,	1)
+			FPlane(MapX.X / UVDx,	MapY.X / UVDy,	Surf.Plane.X,	0),
+			FPlane(MapX.Y / UVDx,	MapY.Y / UVDy,	Surf.Plane.Y,	0),
+			FPlane(MapX.Z / UVDx,	MapY.Z / UVDy,	Surf.Plane.Z,	0),
+			FPlane(-MinUV.X / UVDx,	-MinUV.Y / UVDy,	-Surf.Plane.W,	1)
 			);
 	}
 	else
@@ -468,7 +474,7 @@ bool UModelComponent::GetLightMapResolution( int32& Width, int32& Height ) const
 		LightMapArea += SizeX * SizeY;
 	}
 
-	Width = FMath::TruncToInt( FMath::Sqrt( LightMapArea ) );
+	Width = FMath::TruncToInt( FMath::Sqrt( static_cast<float>(LightMapArea) ) );
 	Height = Width;
 	return false;
 }
@@ -495,7 +501,7 @@ void UModelComponent::GetLightAndShadowMapMemoryUsage( int32& LightMapMemoryUsag
 	ShadowMapMemoryUsage	= FMath::TruncToInt( MIP_FACTOR * LightMapWidth * LightMapHeight ); // G8
 
 	UWorld* World = GetWorld();
-	ERHIFeatureLevel::Type FeatureLevel = World ? World->FeatureLevel.GetValue() : GMaxRHIFeatureLevel;
+	ERHIFeatureLevel::Type FeatureLevel = World ? World->GetFeatureLevel() : GMaxRHIFeatureLevel;
 	if (AllowHighQualityLightmaps(FeatureLevel))
 	{ 
 		LightMapMemoryUsage = FMath::TruncToInt( NUM_HQ_LIGHTMAP_COEF * MIP_FACTOR * LightMapWidth * LightMapHeight ); // DXT5
@@ -786,10 +792,10 @@ void UModel::GroupAllNodes(ULevel* Level, const TArray<ULightComponentBase*>& Li
 	{
 		const FBspNode& Node = Nodes[NodeIndex];
 
-		if (Node.NumVertices > 0 && HasStaticLightingCache[Node.ComponentIndex])
+		if (Node.NumVertices > 0 && HasStaticLightingCache.Num() && HasStaticLightingCache[Node.ComponentIndex])
 		{
 			const FBspSurf& Surf = Surfs[Node.iSurf];
-			PlaneMap.AddPlane(Surf.Plane, NodeIndex);
+			PlaneMap.AddPlane(FPlane(Surf.Plane), NodeIndex);	// LWC_TODO: Perf pessimization
 		}
 	}
 
@@ -941,8 +947,9 @@ void UModel::GroupAllNodes(ULevel* Level, const TArray<ULightComponentBase*>& Li
 
 									// add the relevant lights to the nodegroup
 									TArray<ULightComponent*>* RelevantLights = ComponentRelevantLights.Find(Nodes[NodeIndex].ComponentIndex);
-									check(RelevantLights);
-									for (int32 LightIndex = 0; LightIndex < RelevantLights->Num(); LightIndex++)
+									
+									// add null check in case there is no light at all and the user presses build lighting.
+									for (int32 LightIndex = 0; RelevantLights && LightIndex < RelevantLights->Num(); LightIndex++)
 									{
 										NodeGroup->RelevantLights.AddUnique((*RelevantLights)[LightIndex]);
 									}
@@ -973,8 +980,9 @@ void UModel::GroupAllNodes(ULevel* Level, const TArray<ULightComponentBase*>& Li
 
 			// add the relevant lights to the nodegroup
 			TArray<ULightComponent*>* RelevantLights = ComponentRelevantLights.Find(Nodes[NodeIndex].ComponentIndex);
-			check(RelevantLights);
-			for (int32 LightIndex = 0; LightIndex < RelevantLights->Num(); LightIndex++)
+
+			// add null check in case there is no light at all and the user presses build lighting.
+			for (int32 LightIndex = 0; RelevantLights && LightIndex < RelevantLights->Num(); LightIndex++)
 			{
 				NodeGroup->RelevantLights.AddUnique((*RelevantLights)[LightIndex]);
 			}
@@ -990,7 +998,7 @@ void UModel::ApplyStaticLighting(ULevel* LightingScenario)
 {
 #if WITH_EDITOR
 	static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.VirtualTexturedLightmaps"));
-	const bool bUseVirtualTextures = (CVar->GetValueOnAnyThread() != 0) && UseVirtualTexturing(GMaxRHIFeatureLevel);
+	const bool bUseVirtualTextures = (CVar->GetValueOnAnyThread() != 0) && UseVirtualTexturing(GMaxRHIShaderPlatform);
 
 	check(CachedMappings[0]->QuantizedData);
 
@@ -1114,7 +1122,7 @@ void UModel::ApplyStaticLighting(ULevel* LightingScenario)
 		{
 			for(int32 ColorIndex = 0;ColorIndex < 4;ColorIndex++)
 			{
-				GroupQuantizedData->Scale[CoefficientIndex][ColorIndex] = FMath::Max(MaxCoefficient[CoefficientIndex][ColorIndex] - MinCoefficient[CoefficientIndex][ColorIndex], DELTA);
+				GroupQuantizedData->Scale[CoefficientIndex][ColorIndex] = FMath::Max(MaxCoefficient[CoefficientIndex][ColorIndex] - MinCoefficient[CoefficientIndex][ColorIndex], UE_DELTA);
 				GroupQuantizedData->Add[CoefficientIndex][ColorIndex] = MinCoefficient[CoefficientIndex][ColorIndex];
 			}
 		}
@@ -1293,8 +1301,8 @@ void UModel::ApplyStaticLighting(ULevel* LightingScenario)
 				for(int32 VertexIndex = 0;VertexIndex < Node.NumVertices;VertexIndex++)
 				{
 					FVert& Vert = Verts[Node.iVertPool + VertexIndex];
-					const FVector& WorldPosition = Points[Vert.pVertex];
-					const FVector4 StaticLightingTextureCoordinate = SurfaceStaticLighting->NodeGroup->WorldToMap.TransformPosition(WorldPosition);
+					const FVector3f& WorldPosition = Points[Vert.pVertex];
+					const FVector4 StaticLightingTextureCoordinate = SurfaceStaticLighting->NodeGroup->WorldToMap.TransformPosition((FVector)WorldPosition);
 
 					uint32 PaddedSizeX = SurfaceStaticLighting->SizeX;
 					uint32 PaddedSizeY = SurfaceStaticLighting->SizeY;

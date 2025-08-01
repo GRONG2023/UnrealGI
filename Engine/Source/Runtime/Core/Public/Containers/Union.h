@@ -3,12 +3,15 @@
 #pragma once
 
 #include "CoreTypes.h"
+#include "HAL/PlatformCrt.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
 #include "Misc/AssertionMacros.h"
-#include "Templates/AreTypesEqual.h"
-#include "Templates/UnrealTypeTraits.h"
+#include "Serialization/Archive.h"
 #include "Templates/TypeCompatibleBytes.h"
 #include "Templates/UnrealTemplate.h"
-#include "Logging/LogMacros.h"
+#include "Templates/UnrealTypeTraits.h"
+#include "Trace/Detail/Channel.h"
 
 
 CORE_API DECLARE_LOG_CATEGORY_EXTERN(LogUnion, Log, All);
@@ -61,54 +64,46 @@ public:
 
 	/** Default constructor. */
 	TUnion()
-		: CurrentSubtypeIndex(-1)
 	{ }
 
 	/** Initialization constructor. */
 	explicit TUnion(typename TCallTraits<TypeA>::ParamType InValue, TDisambiguater<0> Disambiguater = TDisambiguater<0>())
-		: CurrentSubtypeIndex(-1)
 	{
 		SetSubtype<TypeA>(InValue);
 	}
 	
 	/** Initialization constructor. */
 	explicit TUnion(typename TCallTraits<TypeB>::ParamType InValue, TDisambiguater<1> Disambiguater = TDisambiguater<1>())
-		: CurrentSubtypeIndex(-1)
 	{
 		SetSubtype<TypeB>(InValue);
 	}
 	
 	/** Initialization constructor. */
 	explicit TUnion(typename TCallTraits<TypeC>::ParamType InValue, TDisambiguater<2> Disambiguater = TDisambiguater<2>())
-		: CurrentSubtypeIndex(-1)
 	{
 		SetSubtype<TypeC>(InValue);
 	}
 	
 	/** Initialization constructor. */
 	explicit TUnion(typename TCallTraits<TypeD>::ParamType InValue, TDisambiguater<3> Disambiguater = TDisambiguater<3>())
-		: CurrentSubtypeIndex(-1)
 	{
 		SetSubtype<TypeD>(InValue);
 	}
 	
 	/** Initialization constructor. */
 	explicit TUnion(typename TCallTraits<TypeE>::ParamType InValue, TDisambiguater<4> Disambiguater = TDisambiguater<4>())
-		: CurrentSubtypeIndex(-1)
 	{
 		SetSubtype<TypeE>(InValue);
 	}
 	
 	/** Initialization constructor. */
 	explicit TUnion(typename TCallTraits<TypeF>::ParamType InValue, TDisambiguater<5> Disambiguater = TDisambiguater<5>())
-		: CurrentSubtypeIndex(-1)
 	{
 		SetSubtype<TypeF>(InValue);
 	}
 
 	/** Copy constructor. */
 	TUnion(const TUnion& Other)
-	:	CurrentSubtypeIndex(-1)
 	{
 		*this = Other;
 	}
@@ -125,7 +120,7 @@ public:
 	bool HasSubtype() const
 	{
 		// Determine the subtype's index and reference.
-		int32 SubtypeIndex;
+		uint8 SubtypeIndex;
 		const Subtype* SubtypeValuePointer;
 		GetSubtypeIndexAndReference<Subtype,const Subtype*>(*this,SubtypeIndex,SubtypeValuePointer);
 
@@ -137,7 +132,7 @@ public:
 	void ResetSubtype()
 	{
 		// Determine the subtype's index and reference.
-		int32 SubtypeIndex;
+		uint8 SubtypeIndex;
 		Subtype* SubtypeValuePointer;
 		GetSubtypeIndexAndReference<Subtype,Subtype*>(*this,SubtypeIndex,SubtypeValuePointer);
 
@@ -156,7 +151,7 @@ public:
 	const Subtype& GetSubtype() const
 	{
 		// Determine the subtype's index and reference.
-		int32 SubtypeIndex;
+		uint8 SubtypeIndex;
 		const Subtype* SubtypeValuePointer;
 		GetSubtypeIndexAndReference<Subtype,const Subtype*>(*this,SubtypeIndex,SubtypeValuePointer);
 
@@ -171,7 +166,7 @@ public:
 	Subtype& GetSubtype()
 	{
 		// Determine the subtype's index and reference.
-		int32 SubtypeIndex;
+		uint8 SubtypeIndex;
 		Subtype* SubtypeValuePointer;
 		GetSubtypeIndexAndReference<Subtype,Subtype*>(*this,SubtypeIndex,SubtypeValuePointer);
 
@@ -183,9 +178,25 @@ public:
 
 	/** Replaces the value of the union with a value of the given subtype. */
 	template<typename Subtype>
+	Subtype* SetSubtype()
+	{
+		uint8 SubtypeIndex;
+		Subtype* SubtypeValuePointer;
+		GetSubtypeIndexAndReference<Subtype, Subtype*>(*this, SubtypeIndex, SubtypeValuePointer);
+
+		Reset();
+
+		new(SubtypeValuePointer) Subtype();
+
+		CurrentSubtypeIndex = SubtypeIndex;
+		return SubtypeValuePointer;
+	}
+
+	/** Replaces the value of the union with a value of the given subtype. */
+	template<typename Subtype>
 	Subtype* SetSubtype(typename TCallTraits<Subtype>::ParamType NewValue)
 	{
-		int32 SubtypeIndex;
+		uint8 SubtypeIndex;
 		Subtype* SubtypeValuePointer;
 		GetSubtypeIndexAndReference<Subtype,Subtype*>(*this,SubtypeIndex,SubtypeValuePointer);
 
@@ -274,41 +285,40 @@ public:
 		return false;
 	}
 
-	friend FArchive& operator<<(FArchive& Ar,TUnion& Union)
+	void Serialize(FArchive& Ar)
 	{
 		if(Ar.IsLoading())
 		{
-			Union.Reset();
+			Reset();
 
-			Ar << Union.CurrentSubtypeIndex;
+			Ar << CurrentSubtypeIndex;
 
-			switch(Union.CurrentSubtypeIndex)
+			switch(CurrentSubtypeIndex)
 			{
-			case 0: Ar << Union.InitSubtype<TypeA>(); break;
-			case 1: Ar << Union.InitSubtype<TypeB>(); break;
-			case 2: Ar << Union.InitSubtype<TypeC>(); break;
-			case 3: Ar << Union.InitSubtype<TypeD>(); break;
-			case 4: Ar << Union.InitSubtype<TypeE>(); break;
-			case 5: Ar << Union.InitSubtype<TypeF>(); break;
+			case 0: Ar << InitSubtype<TypeA>(); break;
+			case 1: Ar << InitSubtype<TypeB>(); break;
+			case 2: Ar << InitSubtype<TypeC>(); break;
+			case 3: Ar << InitSubtype<TypeD>(); break;
+			case 4: Ar << InitSubtype<TypeE>(); break;
+			case 5: Ar << InitSubtype<TypeF>(); break;
 			default: FatalErrorUndefinedSubtype(); break;
 			};
 		}
 		else
 		{
-			Ar << Union.CurrentSubtypeIndex;
+			Ar << CurrentSubtypeIndex;
 
-			switch(Union.CurrentSubtypeIndex)
+			switch(CurrentSubtypeIndex)
 			{
-			case 0: Ar << Union.GetSubtype<TypeA>(); break;
-			case 1: Ar << Union.GetSubtype<TypeB>(); break;
-			case 2: Ar << Union.GetSubtype<TypeC>(); break;
-			case 3: Ar << Union.GetSubtype<TypeD>(); break;
-			case 4: Ar << Union.GetSubtype<TypeE>(); break;
-			case 5: Ar << Union.GetSubtype<TypeF>(); break;
+			case 0: Ar << GetSubtype<TypeA>(); break;
+			case 1: Ar << GetSubtype<TypeB>(); break;
+			case 2: Ar << GetSubtype<TypeC>(); break;
+			case 3: Ar << GetSubtype<TypeD>(); break;
+			case 4: Ar << GetSubtype<TypeE>(); break;
+			case 5: Ar << GetSubtype<TypeF>(); break;
 			default: FatalErrorUndefinedSubtype(); break;
 			};
 		}
-		return Ar;
 	}
 
 private:
@@ -325,7 +335,7 @@ private:
 	} Values;
 
 	/** The index of the subtype that the union's current value is of. */
-	uint8 CurrentSubtypeIndex;
+	uint8 CurrentSubtypeIndex = (uint8)-1;
 
 	/** Sets the union's value to a default value of the given subtype. */
 	template<typename Subtype>
@@ -339,51 +349,44 @@ private:
 	template<typename Subtype,typename PointerType>
 	static void GetSubtypeIndexAndReference(
 		const TUnion& Union,
-		int32& OutIndex,
+		uint8& OutIndex,
 		PointerType& OutValuePointer
 		)
 	{
-		if(TAreTypesEqual<TypeA,Subtype>::Value)
+		if constexpr (std::is_same_v<TypeA,Subtype>)
 		{
 			OutIndex = 0;
 			OutValuePointer = (PointerType)&Union.Values.A;
 		}
-		else if(TAreTypesEqual<TypeB,Subtype>::Value)
+		else if constexpr (std::is_same_v<TypeB,Subtype>)
 		{
 			OutIndex = 1;
 			OutValuePointer = (PointerType)&Union.Values.B;
 		}
-		else if(TAreTypesEqual<TypeC,Subtype>::Value)
+		else if constexpr (std::is_same_v<TypeC,Subtype>)
 		{
 			OutIndex = 2;
 			OutValuePointer = (PointerType)&Union.Values.C;
 		}
-		else if(TAreTypesEqual<TypeD,Subtype>::Value)
+		else if constexpr (std::is_same_v<TypeD,Subtype>)
 		{
 			OutIndex = 3;
 			OutValuePointer = (PointerType)&Union.Values.D;
 		}
-		else if(TAreTypesEqual<TypeE,Subtype>::Value)
+		else if constexpr (std::is_same_v<TypeE,Subtype>)
 		{
 			OutIndex = 4;
 			OutValuePointer = (PointerType)&Union.Values.E;
 		}
-		else if(TAreTypesEqual<TypeF,Subtype>::Value)
+		else if constexpr (std::is_same_v<TypeF,Subtype>)
 		{
 			OutIndex = 5;
 			OutValuePointer = (PointerType)&Union.Values.F;
 		}
 		else
 		{
-			static_assert(
-				TAreTypesEqual<TEMPLATE_PARAMETERS2(TypeA, Subtype)>::Value ||
-				TAreTypesEqual<TEMPLATE_PARAMETERS2(TypeB, Subtype)>::Value ||
-				TAreTypesEqual<TEMPLATE_PARAMETERS2(TypeC, Subtype)>::Value ||
-				TAreTypesEqual<TEMPLATE_PARAMETERS2(TypeD, Subtype)>::Value ||
-				TAreTypesEqual<TEMPLATE_PARAMETERS2(TypeE, Subtype)>::Value ||
-				TAreTypesEqual<TEMPLATE_PARAMETERS2(TypeF, Subtype)>::Value,
-				"Type is not subtype of union.");
-			OutIndex = -1;
+			static_assert(sizeof(TypeA) == 0, "Type is not subtype of union.");
+			OutIndex = (uint8)-1;
 			OutValuePointer = NULL;
 		}
 	}
@@ -393,3 +396,10 @@ private:
 		UE_LOG(LogUnion, Fatal, TEXT("Unrecognized TUnion subtype"));
 	}
 };
+
+template<typename TypeA,typename TypeB,typename TypeC,typename TypeD,typename TypeE,typename TypeF>
+FArchive& operator<<(FArchive& Ar, TUnion<TypeA, TypeB, TypeC, TypeD, TypeE, TypeF>& Union)
+{
+	Union.Serialize(Ar);
+	return Ar;
+}

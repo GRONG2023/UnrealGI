@@ -4,11 +4,12 @@
 
 #include "MovieScene.h"
 #include "Tracks/MovieSceneCameraCutTrack.h"
-#include "MovieScene.h"
+#include "MovieSceneSequenceID.h"
 #include "IMovieScenePlayer.h"
 #include "Camera/CameraComponent.h"
 #include "Evaluation/MovieSceneEvaluationTemplateInstance.h"
 #include "Evaluation/MovieSceneEvalTemplate.h"
+#include "Evaluation/MovieSceneSequenceHierarchy.h"
 #include "EntitySystem/MovieSceneEntityManager.h"
 #include "EntitySystem/MovieSceneEntityBuilder.h"
 #include "EntitySystem/BuiltInComponentTypes.h"
@@ -20,6 +21,8 @@
 #include "Tracks/MovieScene3DTransformTrack.h"
 #include "Tracks/MovieSceneTransformTrack.h"
 #include "UObject/LinkerLoad.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneCameraCutSection)
 
 /* UMovieSceneCameraCutSection interface
  *****************************************************************************/
@@ -35,13 +38,15 @@ UMovieSceneCameraCutSection::UMovieSceneCameraCutSection(const FObjectInitialize
 	SetBlendType(EMovieSceneBlendType::Absolute);
 }
 
-void UMovieSceneCameraCutSection::OnBindingsUpdated(const TMap<FGuid, FGuid>& OldGuidToNewGuidMap)
+void UMovieSceneCameraCutSection::OnBindingIDsUpdated(const TMap<UE::MovieScene::FFixedObjectBindingID, UE::MovieScene::FFixedObjectBindingID>& OldFixedToNewFixedMap, FMovieSceneSequenceID LocalSequenceID, const FMovieSceneSequenceHierarchy* Hierarchy, IMovieScenePlayer& Player)
 {
-	if (OldGuidToNewGuidMap.Contains(CameraBindingID.GetGuid()))
+	UE::MovieScene::FFixedObjectBindingID FixedBindingID = CameraBindingID.ResolveToFixed(LocalSequenceID, Player);
+
+	if (OldFixedToNewFixedMap.Contains(FixedBindingID))
 	{
 		Modify();
 
-		CameraBindingID.SetGuid(OldGuidToNewGuidMap[CameraBindingID.GetGuid()]);
+		CameraBindingID = OldFixedToNewFixedMap[FixedBindingID].ConvertToRelative(LocalSequenceID, Hierarchy);
 	}
 }
 
@@ -103,11 +108,11 @@ void UMovieSceneCameraCutSection::ImportEntityImpl(UMovieSceneEntitySystemLinker
 {
 	using namespace UE::MovieScene;
 
-	FMovieSceneTrackInstanceComponent TrackInstance { this, UMovieSceneCameraCutTrackInstance::StaticClass() };
+	FMovieSceneTrackInstanceComponent TrackInstance { decltype(FMovieSceneTrackInstanceComponent::Owner)(this), UMovieSceneCameraCutTrackInstance::StaticClass() };
 
 	OutImportedEntity->AddBuilder(
 		FEntityBuilder()
-		.AddTag(FBuiltInComponentTypes::Get()->Tags.Master)
+		.AddTag(FBuiltInComponentTypes::Get()->Tags.Root)
 		.Add(FBuiltInComponentTypes::Get()->TrackInstance, TrackInstance)
 	);
 }
@@ -132,17 +137,14 @@ void UMovieSceneCameraCutSection::ComputeInitialCameraCutTransform()
 		UMovieScene* MovieScene = GetTypedOuter<UMovieScene>();
 		check(MovieScene);
 
-		for (const FMovieSceneBinding& Binding : MovieScene->GetBindings())
+		if (const FMovieSceneBinding* Binding = MovieScene->FindBinding(CameraBindingID.GetGuid()))
 		{
-			if (Binding.GetObjectGuid() == CameraBindingID.GetGuid())
+			for (UMovieSceneTrack* Track : Binding->GetTracks())
 			{
-				for (UMovieSceneTrack* Track : Binding.GetTracks())
+				CameraTransformTrack = Cast<UMovieScene3DTransformTrack>(Track);
+				if (CameraTransformTrack)
 				{
-					CameraTransformTrack = Cast<UMovieScene3DTransformTrack>(Track);
-					if (CameraTransformTrack)
-					{
-						break;
-					}
+					break;
 				}
 			}
 		}
@@ -175,3 +177,4 @@ void UMovieSceneCameraCutSection::ComputeInitialCameraCutTransform()
 		bHasInitialCameraCutTransform = true;
 	}
 }
+

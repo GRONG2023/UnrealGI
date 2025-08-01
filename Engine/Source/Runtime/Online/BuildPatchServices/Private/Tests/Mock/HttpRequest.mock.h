@@ -52,10 +52,10 @@ namespace BuildPatchServices
 			return FString();
 		}
 
-		virtual int32 GetContentLength() const override
+		virtual uint64 GetContentLength() const override
 		{
 			MOCK_FUNC_NOT_IMPLEMENTED("FMockHttpRequest::GetContentLength");
-			return int32();
+			return uint64();
 		}
 
 		virtual const TArray<uint8>& GetContent() const override
@@ -108,6 +108,12 @@ namespace BuildPatchServices
 			return false;
 		}
 
+		virtual bool SetResponseBodyReceiveStream(TSharedRef<FArchive> Stream) override
+		{
+			MOCK_FUNC_NOT_IMPLEMENTED("FMockHttpRequest::SetResponseBodyReceiveStream");
+			return false;
+		}
+
 		virtual void SetHeader(const FString& HeaderName, const FString& HeaderValue) override
 		{
 			MOCK_FUNC_NOT_IMPLEMENTED("FMockHttpRequest::SetHeader");
@@ -134,6 +140,15 @@ namespace BuildPatchServices
 			return TOptional<float>();
 		}
 
+		virtual void SetActivityTimeout(float InTimeoutSecs) override
+		{
+			MOCK_FUNC_NOT_IMPLEMENTED("FMockHttpRequest::SetActivityTimeout");
+		}
+
+		virtual void ProcessRequestUntilComplete() override
+		{
+		}
+
 		virtual bool ProcessRequest() override
 		{
 			++RxProcessRequest;
@@ -150,6 +165,16 @@ namespace BuildPatchServices
 			return HttpRequestProgressDelegate;
 		}
 
+		virtual FHttpRequestProgressDelegate64& OnRequestProgress64() override
+		{
+			return HttpRequestProgressDelegate64;
+		}
+
+		virtual FHttpRequestStatusCodeReceivedDelegate& OnStatusCodeReceived() override
+		{
+			return HttpStatusCodeReceivedDelegate;
+		}
+
 		virtual FHttpRequestHeaderReceivedDelegate& OnHeaderReceived() override
 		{
 			return HttpHeaderReceivedDelegate;
@@ -164,6 +189,12 @@ namespace BuildPatchServices
 		{
 			MOCK_FUNC_NOT_IMPLEMENTED("FMockHttpRequest::GetStatus");
 			return EHttpRequestStatus::Type();
+		}
+
+		virtual EHttpFailureReason GetFailureReason() const override
+		{
+			MOCK_FUNC_NOT_IMPLEMENTED("FMockHttpRequest::GetFailureReason");
+			return EHttpFailureReason::None;
 		}
 
 		virtual const FHttpResponsePtr GetResponse() const override
@@ -183,9 +214,28 @@ namespace BuildPatchServices
 			return float();
 		}
 
+		virtual void SetDelegateThreadPolicy(EHttpRequestDelegateThreadPolicy InThreadPolicy) override
+		{
+			MOCK_FUNC_NOT_IMPLEMENTED("FMockHttpRequest::SetDelegateThreadPolicy");
+		}
+
+		virtual EHttpRequestDelegateThreadPolicy GetDelegateThreadPolicy() const override
+		{
+			MOCK_FUNC_NOT_IMPLEMENTED("FMockHttpRequest::GetDelegateThreadPolicy");
+			return EHttpRequestDelegateThreadPolicy::CompleteOnGameThread;
+		}
+
+		virtual const FString& GetEffectiveURL() const override
+		{
+			MOCK_FUNC_NOT_IMPLEMENTED("FMockHttpRequest::GetEffectiveURL");
+			return EffectiveURL;
+		}
+
 	public:
 		FHttpRequestProgressDelegate HttpRequestProgressDelegate;
+		FHttpRequestProgressDelegate64 HttpRequestProgressDelegate64;
 		FHttpRequestCompleteDelegate HttpRequestCompleteDelegate;
+		FHttpRequestStatusCodeReceivedDelegate HttpStatusCodeReceivedDelegate;
 		FHttpRequestHeaderReceivedDelegate HttpHeaderReceivedDelegate;
 		FHttpRequestWillRetryDelegate HttpRequestWillRetryDelegate;
 
@@ -193,6 +243,7 @@ namespace BuildPatchServices
 		TArray<FRxSetURL> RxSetURL;
 		int32 RxProcessRequest;
 		int32 RxCancelRequest;
+		FString EffectiveURL;
 	};
 }
 

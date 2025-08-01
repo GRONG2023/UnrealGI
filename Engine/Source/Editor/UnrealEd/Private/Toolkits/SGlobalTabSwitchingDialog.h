@@ -60,9 +60,6 @@ private:
 	// The chord that triggered the dialog (so we can handle the correct Tab/`/etc... key repeat, and dismiss on the correct control/command modifier release
 	FInputChord TriggerChord;
 
-	// Pool for maintaining and rendering thumbnails
-	TSharedPtr<class FAssetThumbnailPool> AssetThumbnailPool;
-
 	// The array of 'document' items
 	TArray<FTabListItemPtr> MainTabsListDataSource;
 
@@ -74,9 +71,6 @@ private:
 
 	// The container widget for the indication of the path to the asset that will be activated when the dialog closes
 	TSharedPtr<SBox> NewTabItemToActivatePathBox;
-
-	// The container widget for the tool tabs list
-	TSharedPtr<SBox> ToolTabsListBox;
 
 	static bool bIsAlreadyOpen;
 };

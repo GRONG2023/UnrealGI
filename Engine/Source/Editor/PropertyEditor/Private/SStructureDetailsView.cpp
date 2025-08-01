@@ -28,14 +28,17 @@ SStructureDetailsView::~SStructureDetailsView()
 
 UStruct* SStructureDetailsView::GetBaseScriptStruct() const
 {
-	const UStruct* Struct = StructData.IsValid() ? StructData->GetStruct() : NULL;
+	const UStruct* Struct = StructProvider.IsValid() ? StructProvider->GetBaseStructure() : nullptr;
 	return const_cast<UStruct*>(Struct);
 }
 
 void SStructureDetailsView::Construct(const FArguments& InArgs)
 {
 	DetailsViewArgs = InArgs._DetailsViewArgs;
-	
+
+	ColumnSizeData.SetValueColumnWidth(DetailsViewArgs.ColumnWidth);
+	ColumnSizeData.SetRightColumnMinWidth(DetailsViewArgs.RightColumnMinWidth);
+
 	CustomName = InArgs._CustomName;
 
 	// Create the root property now
@@ -46,11 +49,6 @@ void SStructureDetailsView::Construct(const FArguments& InArgs)
 	PropertyUtilities = MakeShareable( new FPropertyDetailsUtilities( *this ) );
 	PropertyGenerationUtilities = MakeShareable(new FDetailsViewPropertyGenerationUtilities(*this));
 	
-	ColumnWidth = DetailsViewArgs.ColumnWidth;
-	ColumnSizeData.LeftColumnWidth = TAttribute<float>(this, &SStructureDetailsView::OnGetLeftColumnWidth);
-	ColumnSizeData.RightColumnWidth = TAttribute<float>(this, &SStructureDetailsView::OnGetRightColumnWidth);
-	ColumnSizeData.OnWidthChanged = SSplitter::FOnSlotResized::CreateSP(this, &SStructureDetailsView::OnSetColumnWidth);
-
 	TSharedRef<SScrollBar> ExternalScrollbar = SNew(SScrollBar);
 
 	// See note in SDetailsView for why visibility is set after construction
@@ -149,9 +147,9 @@ void SStructureDetailsView::Construct(const FArguments& InArgs)
 			.AutoWidth()
 			[
 				SNew( SComboButton )
-				.ContentPadding(0)
+				.ContentPadding(0.0f)
 				.ForegroundColor( FSlateColor::UseForeground() )
-				.ButtonStyle( FEditorStyle::Get(), "ToggleButton" )
+				.ButtonStyle( FAppStyle::Get(), "ToggleButton" )
 				.MenuContent()
 				[
 					DetailViewOptions.MakeWidget()
@@ -159,7 +157,7 @@ void SStructureDetailsView::Construct(const FArguments& InArgs)
 				.ButtonContent()
 				[
 					SNew(SImage)
-					.Image( FEditorStyle::GetBrush("GenericViewButton") )
+					.Image( FAppStyle::GetBrush("GenericViewButton") )
 				]
 			];
 	}
@@ -187,16 +185,16 @@ void SStructureDetailsView::Construct(const FArguments& InArgs)
 				FilterBoxRow
 			]
 			+ SVerticalBox::Slot()
-			.FillHeight(1)
-			.Padding(0)
+			.FillHeight(1.0f)
+			.Padding(0.0f)
 			[
-				SNew( SHorizontalBox )
-				+ SHorizontalBox::Slot()
+				SNew( SOverlay )
+				+ SOverlay::Slot()
 				[
 					DetailTree.ToSharedRef()
 				]
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
+				+ SOverlay::Slot()
+				.HAlign(HAlign_Right)
 				[
 					SNew( SBox )
 					.WidthOverride( 16.0f )
@@ -211,33 +209,45 @@ void SStructureDetailsView::Construct(const FArguments& InArgs)
 
 void SStructureDetailsView::SetStructureData(TSharedPtr<FStructOnScope> InStructData)
 {
+	SetStructureProvider(InStructData ? MakeShared<FStructOnScopeStructureDataProvider>(InStructData) : TSharedPtr<IStructureDataProvider>());
+}
+
+void SStructureDetailsView::SetStructureProvider(TSharedPtr<IStructureDataProvider> InStructProvider)
+{
+
 	TSharedPtr<FComplexPropertyNode> RootNode = GetRootNode();
 	//PRE SET
 	SaveExpandedItems(RootNode.ToSharedRef() );
-	RootNode->AsStructureNode()->SetStructure(nullptr);
+	RootNode->AsStructureNode()->RemoveStructure();
 	RootNodesPendingKill.Add(RootNode);
 
 	RootNodes.Empty(1);
-	ExpandedDetailNodes.Empty();
+	ExpandedDetailNodes.Clear();
 
 	RootNode = MakeShareable(new FStructurePropertyNode);
 	RootNodes.Add(RootNode);
 
 	//SET
-	StructData = InStructData;
-	RootNode->AsStructureNode()->SetStructure(StructData);
-	if (!StructData.IsValid())
+	StructProvider = InStructProvider;
+	RootNode->AsStructureNode()->SetStructure(StructProvider);
+	if (!StructProvider.IsValid())
 	{
 		bIsLocked = false;
 	}
 	
 	//POST SET
-	DestroyColorPicker();
-	ColorPropertyNode = NULL;
+	TSharedPtr<SColorPicker> ExistingColorPicker = GetColorPicker();
+	if (ExistingColorPicker.IsValid()
+		&& (!ExistingColorPicker->GetOptionalOwningDetailsView().IsValid()
+			|| ExistingColorPicker->GetOptionalOwningDetailsView().Get() == this))
+	{
+		DestroyColorPicker();
+		bHasOpenColorPicker = false;
+	}
 
 	FPropertyNodeInitParams InitParams;
-	InitParams.ParentNode = NULL;
-	InitParams.Property = NULL;
+	InitParams.ParentNode = nullptr;
+	InitParams.Property = nullptr;
 	InitParams.ArrayOffset = 0;
 	InitParams.ArrayIndex = INDEX_NONE;
 	InitParams.bAllowChildren = true;
@@ -261,7 +271,9 @@ void SStructureDetailsView::SetCustomName(const FText& Text)
 
 void SStructureDetailsView::ForceRefresh()
 {
-	SetStructureData(StructData);
+	ClearPendingRefreshTimer();
+
+	SetStructureProvider(StructProvider);
 }
 
 void SStructureDetailsView::ClearSearch()
@@ -293,7 +305,7 @@ const FSelectedActorInfo& SStructureDetailsView::GetSelectedActorInfo() const
 bool SStructureDetailsView::IsConnected() const
 {
 	const FStructurePropertyNode* RootNode = GetRootNode().IsValid() ? GetRootNode()->AsStructureNode() : nullptr;
-	return StructData.IsValid() && StructData->IsValid() && RootNode && RootNode->HasValidStructData();
+	return StructProvider.IsValid() && StructProvider->IsValid() && RootNode && RootNode->HasValidStructData();
 }
 
 FRootPropertyNodeList& SStructureDetailsView::GetRootNodes()
@@ -313,13 +325,26 @@ const TSharedPtr<class FComplexPropertyNode> SStructureDetailsView::GetRootNode(
 
 void SStructureDetailsView::CustomUpdatePropertyMap(TSharedPtr<FDetailLayoutBuilderImpl>& InDetailLayout)
 {
-	InDetailLayout->DefaultCategory(NAME_None).SetDisplayName(NAME_None, CustomName);
+	FName StructCategoryName = NAME_None;
+	
+	const UStruct* Struct = StructProvider.IsValid() ? StructProvider->GetBaseStructure() : nullptr;
+	if (Struct)
+	{
+		TArray<FName> CategoryNames;
+		InDetailLayout->GetCategoryNames(CategoryNames);
+
+		int32 StructCategoryNameIndex = INDEX_NONE;
+		CategoryNames.Find(Struct->GetFName(), StructCategoryNameIndex);
+		StructCategoryName = StructCategoryNameIndex != INDEX_NONE ? CategoryNames[StructCategoryNameIndex] : NAME_None;
+	}
+	
+	InDetailLayout->DefaultCategory(StructCategoryName).SetDisplayName(NAME_None, CustomName);
 }
 
 EVisibility SStructureDetailsView::GetPropertyEditingVisibility() const
 {
 	const FStructurePropertyNode* RootNode = GetRootNode().IsValid() ? GetRootNode()->AsStructureNode() : nullptr;
-	return StructData.IsValid() && StructData->IsValid() && RootNode && RootNode->HasValidStructData() ? EVisibility::Visible : EVisibility::Collapsed;
+	return StructProvider.IsValid() && StructProvider->IsValid() && RootNode && RootNode->HasValidStructData() ? EVisibility::Visible : EVisibility::Collapsed;
 }
 
 #undef LOCTEXT_NAMESPACE

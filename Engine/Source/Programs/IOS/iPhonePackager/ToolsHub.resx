@@ -117,8 +117,8 @@
   <resheader name="writer">
     <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </resheader>
-  <data name="linkLabel2.Text" xml:space="preserve">
-    <value>To run UE4 on iOS hardware, new users need to register with Apple as an iOS developer (http://developer.apple.com/programs/ios/).
+  <data name="label21.Text" xml:space="preserve">
+    <value>To run Unreal Engine on iOS hardware, new users need to register with Apple as an iOS developer.
 
 Once you are approved by Apple, generate a certificate request and upload it to the iOS Provisioning Portal to create your signing certificate.</value>
   </data>

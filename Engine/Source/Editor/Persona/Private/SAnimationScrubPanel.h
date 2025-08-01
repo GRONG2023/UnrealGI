@@ -8,7 +8,7 @@
 #include "Input/Reply.h"
 #include "Widgets/SCompoundWidget.h"
 #include "SScrubWidget.h"
-#include "Editor/EditorWidgets/Public/ITransportControl.h"
+#include "ITransportControl.h"
 
 class SScrubControlPanel;
 class UAnimationAsset;
@@ -28,6 +28,7 @@ public:
 		/** View Input range **/
 		SLATE_ATTRIBUTE( float, ViewInputMin )
 		SLATE_ATTRIBUTE( float, ViewInputMax )
+		SLATE_ARGUMENT( bool, bDisplayAnimScrubBarEditing)
 		SLATE_EVENT( FOnSetInputViewRange, OnSetInputViewRange )
 		/** Called when an anim sequence is cropped before/after a selected frame */
 		SLATE_EVENT( FOnCropAnimSequence, OnCropAnimSequence )
@@ -99,7 +100,7 @@ protected:
 
 	/** Do I need to sync with viewport? **/
 	bool DoesSyncViewport() const;
-	uint32 GetNumOfFrames() const;
+	uint32 GetNumberOfKeys() const;
 	float GetSequenceLength() const;
 
 	// Returns a UAnimInstance that came from a blueprint, or NULL (even if the UAnimInstance is not null, but it didn't come from a blueprint)

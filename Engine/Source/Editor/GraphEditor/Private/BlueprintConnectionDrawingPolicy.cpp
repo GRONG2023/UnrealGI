@@ -1,17 +1,43 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BlueprintConnectionDrawingPolicy.h"
-#include "Misc/App.h"
+
+#include "BlueprintEditorSettings.h"
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/UnrealString.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphSchema.h"
+#include "EdGraphSchema_K2.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
-#include "EdGraphSchema_K2.h"
-#include "K2Node_Composite.h"
+#include "GraphEditorSettings.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Text.h"
 #include "K2Node_Knot.h"
-#include "K2Node_MacroInstance.h"
-#include "K2Node_TunnelBoundary.h"
-#include "Kismet2/KismetDebugUtilities.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "BlueprintEditorSettings.h"
+#include "Kismet2/KismetDebugUtilities.h"
+#include "Layout/ArrangedWidget.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/App.h"
+#include "Misc/AssertionMacros.h"
+#include "SGraphPin.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateBrush.h"
+#include "Templates/Casts.h"
+#include "Trace/Detail/Channel.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+
+class FArrangedChildren;
+class FSlateRect;
+class SWidget;
 
 /////////////////////////////////////////////////////
 // FKismetConnectionDrawingPolicy
@@ -27,7 +53,7 @@ FKismetConnectionDrawingPolicy::FKismetConnectionDrawingPolicy(int32 InBackLayer
 	// But we do want to draw midpoint arrowheads
 	if (GetDefault<UBlueprintEditorSettings>()->bDrawMidpointArrowsInBlueprints)
 	{
-		MidpointImage = FEditorStyle::GetBrush( TEXT("Graph.Arrow") );
+		MidpointImage = FAppStyle::GetBrush( TEXT("Graph.Arrow") );
 		MidpointRadius = MidpointImage->ImageSize * ZoomFactor * 0.5f;
 	}
 
@@ -104,12 +130,7 @@ UBlueprint* FKismetConnectionDrawingPolicy::GetTargetBlueprint() const
 
 bool FKismetConnectionDrawingPolicy::CanBuildRoadmap(UBlueprint* TargetBP) const
 {
-	UObject* ActiveObject = nullptr;
-	if (TargetBP)
-	{
-		ActiveObject = TargetBP->GetObjectBeingDebugged();
-	}
-
+	UObject* ActiveObject = GetObjectBeingDebugged(TargetBP);
 	return ActiveObject != nullptr;
 }
 
@@ -130,7 +151,7 @@ void FKismetConnectionDrawingPolicy::BuildExecutionRoadmap()
 		return;
 	}
 
-	UObject* ActiveObject = TargetBP->GetObjectBeingDebugged();
+	UObject* ActiveObject = GetObjectBeingDebugged(TargetBP);
 	check(ActiveObject); // Due to CanBuildRoadmap
 
 	TArray<UEdGraphNode*> SequentialNodesInGraph;
@@ -375,6 +396,21 @@ bool FKismetConnectionDrawingPolicy::FindPinCenter(UEdGraphPin* Pin, FVector2D& 
 	return false;
 }
 
+UObject* FKismetConnectionDrawingPolicy::GetObjectBeingDebugged(UBlueprint* TargetBP)
+{
+	UObject* ActiveObject = nullptr;
+	if (TargetBP)
+	{
+		ActiveObject = TargetBP->GetObjectBeingDebugged();
+		if (UClass* GeneratedClass = TargetBP->GeneratedClass;
+			ActiveObject == nullptr && BPTYPE_FunctionLibrary == TargetBP->BlueprintType && GeneratedClass)
+		{
+			ActiveObject = GeneratedClass->ClassDefaultObject;
+		}
+	}
+	return ActiveObject;
+}
+
 bool FKismetConnectionDrawingPolicy::GetAverageConnectedPosition(class UK2Node_Knot* Knot, EEdGraphPinDirection Direction, FVector2D& OutPos) const
 {
 	FVector2D Result = FVector2D::ZeroVector;
@@ -584,17 +620,27 @@ void FKismetConnectionDrawingPolicy::DetermineWiringStyle(UEdGraphPin* OutputPin
 
 void FKismetConnectionDrawingPolicy::SetIncompatiblePinDrawState(const TSharedPtr<SGraphPin>& StartPin, const TSet< TSharedRef<SWidget> >& VisiblePins)
 {
+	if (VisiblePins.IsEmpty())
+	{
+		return;
+	}
+	
+	static const FLinearColor DisallowColor(0.25f, 0.25f, 0.25f, 0.5f);
+	
 	ResetIncompatiblePinDrawState(VisiblePins);
 
+	const UEdGraphPin* StartPinObj = StartPin->GetPinObj();
+	const UEdGraphSchema* EdGraphSchema = StartPinObj->GetSchema();
+	
 	for (auto VisiblePinIterator = VisiblePins.CreateConstIterator(); VisiblePinIterator; ++VisiblePinIterator)
 	{
 		TSharedPtr<SGraphPin> CheckPin = StaticCastSharedRef<SGraphPin>(*VisiblePinIterator);
 		if (CheckPin != StartPin)
 		{
-			const FPinConnectionResponse Response = StartPin->GetPinObj()->GetSchema()->CanCreateConnection(StartPin->GetPinObj(), CheckPin->GetPinObj());
-			if (Response.Response == CONNECT_RESPONSE_DISALLOW)
+			const FPinConnectionResponse Response = EdGraphSchema->CanCreateConnection(StartPinObj, CheckPin->GetPinObj());
+			if (Response.Response == CONNECT_RESPONSE_DISALLOW) //-V1051
 			{
-				CheckPin->SetPinColorModifier(FLinearColor(0.25f, 0.25f, 0.25f, 0.5f));
+				CheckPin->SetPinColorModifier(DisallowColor);
 			}
 		}
 	}

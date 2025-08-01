@@ -99,7 +99,7 @@ struct FLandscapeSplineSegmentConnection
 
 	// Control point connected to this end of the segment
 	UPROPERTY()
-	ULandscapeSplineControlPoint* ControlPoint;
+	TObjectPtr<ULandscapeSplineControlPoint> ControlPoint;
 
 	// Tangent length of the connection
 	UPROPERTY(EditAnywhere, Category=LandscapeSplineSegmentConnection)
@@ -119,7 +119,7 @@ struct FLandscapeSplineSegmentConnection
 
 // Deprecated
 UENUM()
-enum LandscapeSplineMeshOrientation
+enum LandscapeSplineMeshOrientation : int
 {
 	LSMO_XUp,
 	LSMO_YUp,
@@ -133,11 +133,11 @@ struct FLandscapeSplineMeshEntry
 
 	/** Mesh to use on the spline */
 	UPROPERTY(EditAnywhere, Category=LandscapeSplineMeshEntry)
-	UStaticMesh* Mesh;
+	TObjectPtr<UStaticMesh> Mesh;
 
 	/** Overrides mesh's materials */
 	UPROPERTY(EditAnywhere, Category=LandscapeSplineMeshEntry, AdvancedDisplay)
-	TArray<UMaterialInterface*> MaterialOverrides;
+	TArray<TObjectPtr<UMaterialInterface>> MaterialOverrides;
 
 	/** Whether to automatically center the mesh horizontally on the spline */
 	UPROPERTY(EditAnywhere, Category=LandscapeSplineMeshEntry, meta=(DisplayName="Center Horizontally"))
@@ -216,14 +216,8 @@ class ULandscapeSplineSegment : public UObject
 	UPROPERTY()
 	uint32 bEnableCollision_DEPRECATED:1;
 
-	/** Name of the collision profile to use for this spline */
-	//
-	// TODO: This field does not have proper Slate customization.
-	// Instead of a text field, this should be a dropdown with the
-	// default option.
-	//
-	UPROPERTY(EditAnywhere, Category=LandscapeSplineMeshes)
-	FName CollisionProfileName;
+	UPROPERTY()
+	FName CollisionProfileName_DEPRECATED;
 
 	/** Whether the Spline Meshes should cast a shadow. */
 	UPROPERTY(EditAnywhere, Category=LandscapeSplineMeshes)
@@ -273,7 +267,7 @@ class ULandscapeSplineSegment : public UObject
 	 * The material also needs to be set up to output to a virtual texture. 
 	 */
 	UPROPERTY(EditAnywhere, Category = VirtualTexture, meta = (DisplayName = "Draw in Virtual Textures"))
-	TArray<URuntimeVirtualTexture*> RuntimeVirtualTextures;
+	TArray<TObjectPtr<URuntimeVirtualTexture>> RuntimeVirtualTextures;
 
 	/** Lod bias for rendering to runtime virtual texture. */
 	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = VirtualTexture, meta = (DisplayName = "Virtual Texture LOD Bias", UIMin = "-7", UIMax = "8"))
@@ -323,7 +317,7 @@ protected:
 
 	/** Spline meshes */
 	UPROPERTY(TextExportTransient)
-	TArray<USplineMeshComponent*> LocalMeshComponents;
+	TArray<TObjectPtr<USplineMeshComponent>> LocalMeshComponents;
 
 #if WITH_EDITORONLY_DATA
 	/** World references for mesh components stored in other streaming levels */
@@ -340,6 +334,8 @@ public:
 	const TArray<FLandscapeSplineInterpPoint>& GetPoints() const { return Points; }
 
 #if WITH_EDITOR
+	bool SupportsForeignSplineMesh() const;
+
 	bool IsSplineSelected() const { return bSelected; }
 	virtual void SetSplineSelected(bool bInSelected);
 
@@ -352,6 +348,8 @@ public:
 
 	void UpdateSplineEditorMesh();
 	virtual void DeleteSplinePoints();
+
+	LANDSCAPE_API FName GetCollisionProfileName() const;
 
 	const TArray<TSoftObjectPtr<UWorld>>& GetForeignWorlds() const { return ForeignWorlds; }
 	FGuid GetModificationKey() const { return ModificationKey; }

@@ -5,6 +5,7 @@
 
 #include "BlueprintNodeSpawner.h"
 #include "BlueprintActionDatabaseRegistrar.h"
+#include "AnimBlueprintExtension_CachedPose.h"
 
 /////////////////////////////////////////////////////
 // FCachedPoseNameValidator
@@ -62,7 +63,7 @@ FText UAnimGraphNode_SaveCachedPose::GetNodeTitle(ENodeTitleType::Type TitleType
 
 FString UAnimGraphNode_SaveCachedPose::GetNodeCategory() const
 {
-	return TEXT("Cached Poses");
+	return TEXT("Animation|Cached Poses");
 }
 
 void UAnimGraphNode_SaveCachedPose::GetMenuActions(FBlueprintActionDatabaseRegistrar& ActionRegistrar) const
@@ -114,6 +115,11 @@ void UAnimGraphNode_SaveCachedPose::OnRenameNode(const FString& NewName)
 TSharedPtr<class INameValidatorInterface> UAnimGraphNode_SaveCachedPose::MakeNameValidator() const
 {
 	return MakeShareable(new FCachedPoseNameValidator(GetBlueprint(), CacheName));
+}
+
+void UAnimGraphNode_SaveCachedPose::GetRequiredExtensions(TArray<TSubclassOf<UAnimBlueprintExtension>>& OutExtensions) const
+{
+	OutExtensions.Add(UAnimBlueprintExtension_CachedPose::StaticClass());
 }
 
 #undef LOCTEXT_NAMESPACE

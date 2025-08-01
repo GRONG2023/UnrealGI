@@ -5,6 +5,7 @@
 
 #if WITH_WEBSOCKETS
 #include "PlatformWebSocket.h"
+#include "Misc/ConfigCacheIni.h"
 #endif // #if WITH_WEBSOCKETS
 
 DEFINE_LOG_CATEGORY(LogWebSockets);
@@ -29,7 +30,14 @@ void FWebSocketsModule::StartupModule()
 	Singleton = this;
 
 #if WITH_WEBSOCKETS
-	const FString Protocols[] = {TEXT("ws"), TEXT("wss"), TEXT("v10.stomp"), TEXT("v11.stomp"), TEXT("v12.stomp"), TEXT("xmpp")};
+	// Default configuration values can be found in BaseEngine.ini
+	TArray<FString> Protocols;
+	GConfig->GetArray(TEXT("WebSockets"), TEXT("WebSocketsProtocols"), Protocols, GEngineIni);
+	if (Protocols.IsEmpty())
+	{
+		Protocols.Add(TEXT("ws"));
+		Protocols.Add(TEXT("wss"));
+	}
 
 	WebSocketsManager = new FPlatformWebSocketsManager;
 	WebSocketsManager->InitWebSockets(Protocols);
@@ -52,6 +60,12 @@ void FWebSocketsModule::ShutdownModule()
 
 FWebSocketsModule& FWebSocketsModule::Get()
 {
+	if (nullptr == Singleton)
+	{
+		check(IsInGameThread());
+		FModuleManager::LoadModuleChecked<FWebSocketsModule>("WebSockets");
+	}
+	check(Singleton);
 	return *Singleton;
 }
 

@@ -43,8 +43,8 @@ struct FExponentialHeightFogData
 /**
  *	Used to create fogging effects such as clouds but with a density that is related to the height of the fog.
  */
-UCLASS(ClassGroup=Rendering, collapsecategories, hidecategories=(Object, Mobility), editinlinenew, meta=(BlueprintSpawnableComponent))
-class ENGINE_API UExponentialHeightFogComponent : public USceneComponent
+UCLASS(ClassGroup=Rendering, collapsecategories, hidecategories=(Object, Mobility), editinlinenew, meta=(BlueprintSpawnableComponent), MinimalAPI)
+class UExponentialHeightFogComponent : public USceneComponent
 {
 	GENERATED_UCLASS_BODY()
 
@@ -63,15 +63,22 @@ class ENGINE_API UExponentialHeightFogComponent : public USceneComponent
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=ExponentialHeightFogComponent)
 	FExponentialHeightFogData SecondFogData;
 
-	UPROPERTY(BlueprintReadOnly, interp, Category=ExponentialHeightFogComponent)
-	FLinearColor FogInscatteringColor;
+	UPROPERTY()
+	FLinearColor FogInscatteringColor_DEPRECATED;
+
+	UPROPERTY(BlueprintReadOnly, interp, Category=ExponentialHeightFogComponent, meta = (DisplayName = "Fog Inscattering Color"))
+	FLinearColor FogInscatteringLuminance;
+
+	/** Color used to modulate the SkyAtmosphere component contribution to the non directional component of the fog. Only effective when r.SupportSkyAtmosphereAffectsHeightFog>0 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = ExponentialHeightFogComponent)
+	FLinearColor SkyAtmosphereAmbientContributionColorScale;
 
 	/** 
 	 * Cubemap that can be specified for fog color, which is useful to make distant, heavily fogged scene elements match the sky.
 	 * When the cubemap is specified, FogInscatteringColor is ignored and Directional inscattering is disabled. 
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=InscatteringTexture)
-	class UTextureCube* InscatteringColorCubemap;
+	TObjectPtr<class UTextureCube> InscatteringColorCubemap;
 
 	/** Angle to rotate the InscatteringColorCubemap around the Z axis. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=InscatteringTexture, meta=(UIMin = "0", UIMax = "360"))
@@ -103,12 +110,15 @@ class ENGINE_API UExponentialHeightFogComponent : public USceneComponent
 	UPROPERTY(BlueprintReadOnly, interp, Category=DirectionalInscattering)
 	float DirectionalInscatteringStartDistance;
 
+	UPROPERTY()
+	FLinearColor DirectionalInscatteringColor_DEPRECATED;
+
 	/** 
 	 * Controls the color of the directional inscattering, which is used to approximate inscattering from a directional light. 
 	 * Note: there must be a directional light with bUsedAsAtmosphereSunLight enabled for DirectionalInscattering to be used.
 	 */
-	UPROPERTY(BlueprintReadOnly, interp, Category=DirectionalInscattering)
-	FLinearColor DirectionalInscatteringColor;
+	UPROPERTY(BlueprintReadOnly, interp, Category=DirectionalInscattering, meta = (DisplayName = "Directional Inscattering Color"))
+	FLinearColor DirectionalInscatteringLuminance;
 
 	/** 
 	 * Maximum opacity of the fog.  
@@ -162,10 +172,22 @@ class ENGINE_API UExponentialHeightFogComponent : public USceneComponent
 	float VolumetricFogExtinctionScale;
 
 	/** 
-	 * Distance over which volumetric fog should be computed.  Larger values extend the effect into the distance but expose under-sampling artifacts in details.
+	 * Distance over which volumetric fog should be computed, after the start distance.  Larger values extend the effect into the distance but expose under-sampling artifacts in details.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = VolumetricFog, meta=(DisplayName = "View Distance", UIMin = "1000", UIMax = "10000"))
 	float VolumetricFogDistance;
+
+	/** 
+	 * Distance from the camera that the volumetric fog will start, in world units. 
+	 */
+	UPROPERTY(BlueprintReadOnly, interp, Category= VolumetricFog, meta=(DisplayName = "Start Distance", UIMin = "0", UIMax = "5000"))
+	float VolumetricFogStartDistance;
+
+	/** 
+	 * Distance over which volumetric fog will fade in from the start distance.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = VolumetricFog, meta=(DisplayName = "Near Fade In Distance", UIMin = "0", UIMax = "1000"))
+	float VolumetricFogNearFadeInDistance;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = VolumetricFog, meta=(DisplayName = "Static Lighting Scattering Intensity", UIMin = "0", UIMax = "10"))
 	float VolumetricFogStaticLightingScatteringIntensity;
@@ -178,83 +200,110 @@ class ENGINE_API UExponentialHeightFogComponent : public USceneComponent
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = VolumetricFog, AdvancedDisplay)
 	bool bOverrideLightColorsWithFogInscatteringColors;
 
+	/** If this is True, this primitive will render black with an alpha of 0, but all secondary effects (shadows, reflections, indirect lighting) remain. This feature required the project setting "Enable alpha channel support in post processing". */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadOnly, Category = Rendering, Interp)
+	uint8 bHoldout : 1;
+
+	/** If true, this component will be rendered in the main pass (basepass, transparency) */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadOnly, Category = Rendering)
+	uint8 bRenderInMainPass : 1;
+
+
 public:
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|ExponentialHeightFog")
-	void SetFogDensity(float Value);
+	ENGINE_API void SetFogDensity(float Value);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|ExponentialHeightFog")
-	void SetFogInscatteringColor(FLinearColor Value);
+	ENGINE_API void SetSecondFogDensity(float Value);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|ExponentialHeightFog")
-	void SetInscatteringColorCubemap(UTextureCube* Value);
+	ENGINE_API void SetFogInscatteringColor(FLinearColor Value);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|ExponentialHeightFog")
-	void SetInscatteringColorCubemapAngle(float Value);
+	ENGINE_API void SetInscatteringColorCubemap(UTextureCube* Value);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|ExponentialHeightFog")
-	void SetFullyDirectionalInscatteringColorDistance(float Value);
+	ENGINE_API void SetInscatteringColorCubemapAngle(float Value);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|ExponentialHeightFog")
-	void SetNonDirectionalInscatteringColorDistance(float Value);
+	ENGINE_API void SetFullyDirectionalInscatteringColorDistance(float Value);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|ExponentialHeightFog")
-	void SetInscatteringTextureTint(FLinearColor Value);
+	ENGINE_API void SetNonDirectionalInscatteringColorDistance(float Value);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|ExponentialHeightFog")
-	void SetDirectionalInscatteringExponent(float Value);
+	ENGINE_API void SetInscatteringTextureTint(FLinearColor Value);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|ExponentialHeightFog")
-	void SetDirectionalInscatteringStartDistance(float Value);
+	ENGINE_API void SetDirectionalInscatteringExponent(float Value);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|ExponentialHeightFog")
-	void SetDirectionalInscatteringColor(FLinearColor Value);
+	ENGINE_API void SetDirectionalInscatteringStartDistance(float Value);
+
+	UFUNCTION(BlueprintCallable, Category="Rendering|Components|ExponentialHeightFog")
+	ENGINE_API void SetDirectionalInscatteringColor(FLinearColor Value);
+
+	UFUNCTION(BlueprintCallable, Category="Rendering|Components|ExponentialHeightFog")
+	ENGINE_API void SetSecondFogHeightOffset(float Value);
 	
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|ExponentialHeightFog")
-	void SetFogHeightFalloff(float Value);
+	ENGINE_API void SetFogHeightFalloff(float Value);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|ExponentialHeightFog")
-	void SetFogMaxOpacity(float Value);
+	ENGINE_API void SetSecondFogHeightFalloff(float Value);
+
+	UFUNCTION(BlueprintCallable, Category="Rendering|Components|ExponentialHeightFog")
+	ENGINE_API void SetFogMaxOpacity(float Value);
 	
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|ExponentialHeightFog")
-	void SetStartDistance(float Value);
+	ENGINE_API void SetStartDistance(float Value);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|ExponentialHeightFog")
-	void SetFogCutoffDistance(float Value);
+	ENGINE_API void SetFogCutoffDistance(float Value);
+	
+	UFUNCTION(BlueprintCallable, Category="Rendering|VolumetricFog")
+	ENGINE_API void SetVolumetricFog(bool bNewValue);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|VolumetricFog")
-	void SetVolumetricFog(bool bNewValue);
+	ENGINE_API void SetVolumetricFogScatteringDistribution(float NewValue);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|VolumetricFog")
-	void SetVolumetricFogScatteringDistribution(float NewValue);
+	ENGINE_API void SetVolumetricFogExtinctionScale(float NewValue);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|VolumetricFog")
-	void SetVolumetricFogExtinctionScale(float NewValue);
+	ENGINE_API void SetVolumetricFogAlbedo(FColor NewValue);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|VolumetricFog")
-	void SetVolumetricFogAlbedo(FColor NewValue);
+	ENGINE_API void SetVolumetricFogEmissive(FLinearColor NewValue);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|VolumetricFog")
-	void SetVolumetricFogEmissive(FLinearColor NewValue);
+	ENGINE_API void SetVolumetricFogDistance(float NewValue);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|VolumetricFog")
-	void SetVolumetricFogDistance(float NewValue);
+	ENGINE_API void SetSecondFogData(FExponentialHeightFogData NewValue);
+
+	UFUNCTION(BlueprintCallable, Category = "Rendering")
+	ENGINE_API void SetHoldout(bool bNewHoldout);
+
+	UFUNCTION(BlueprintCallable, Category = "Rendering")
+	ENGINE_API void SetRenderInMainPass(bool bValue);
 
 protected:
 	//~ Begin UActorComponent Interface.
-	virtual void CreateRenderState_Concurrent(FRegisterComponentContext* Context) override;
-	virtual void SendRenderTransform_Concurrent() override;
-	virtual void DestroyRenderState_Concurrent() override;
+	ENGINE_API virtual void CreateRenderState_Concurrent(FRegisterComponentContext* Context) override;
+	ENGINE_API virtual void SendRenderTransform_Concurrent() override;
+	ENGINE_API virtual void DestroyRenderState_Concurrent() override;
 	//~ End UActorComponent Interface.
 
-	void AddFogIfNeeded();
+	ENGINE_API void AddFogIfNeeded();
 
 public:
 	//~ Begin UObject Interface
 #if WITH_EDITOR
-	virtual bool CanEditChange(const FProperty* InProperty) const override;
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	ENGINE_API virtual bool CanEditChange(const FProperty* InProperty) const override;
+	ENGINE_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif // WITH_EDITOR
-	virtual void PostInterpChange(FProperty* PropertyThatChanged) override;
+	ENGINE_API virtual void Serialize(FArchive& Ar) override;
 	//~ End UObject Interface
 };
 

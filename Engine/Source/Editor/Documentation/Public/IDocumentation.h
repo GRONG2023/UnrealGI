@@ -7,6 +7,8 @@
 #include "Modules/ModuleManager.h"
 #include "IDocumentationModule.h"
 
+struct FDocumentationRedirect;
+
 template< typename ObjectType > class TAttribute;
 
 /** Invoked when someone clicks on a hyperlink. */
@@ -177,17 +179,17 @@ public:
 
 public:
 
-	virtual bool OpenHome(FDocumentationSourceInfo Source = FDocumentationSourceInfo()) const = 0;
+	virtual bool OpenHome(FDocumentationSourceInfo Source = FDocumentationSourceInfo(), const FString& BaseUrlId = FString()) const = 0;
 
-	virtual bool OpenHome(const FCultureRef& Culture, FDocumentationSourceInfo Source = FDocumentationSourceInfo()) const = 0;
+	virtual bool OpenHome(const FCultureRef& Culture, FDocumentationSourceInfo Source = FDocumentationSourceInfo(), const FString & BaseUrlId = FString()) const = 0;
 
 	virtual bool OpenAPIHome(FDocumentationSourceInfo Source = FDocumentationSourceInfo()) const = 0;
 
-	virtual bool Open(const FString& Link, FDocumentationSourceInfo Source = FDocumentationSourceInfo()) const = 0;
+	virtual bool Open(const FString& Link, FDocumentationSourceInfo Source = FDocumentationSourceInfo(), const FString& BaseUrlId = FString()) const = 0;
 
-	virtual bool Open(const FString& Link, const FCultureRef& Culture, FDocumentationSourceInfo Source = FDocumentationSourceInfo()) const = 0;
+	virtual bool Open(const FString& Link, const FCultureRef& Culture, FDocumentationSourceInfo Source = FDocumentationSourceInfo(), const FString& BaseUrlId = FString()) const = 0;
 
-	virtual TSharedRef< class SWidget > CreateAnchor( const TAttribute<FString>& Link, const FString& PreviewLink = FString(), const FString& PreviewExcerptName = FString() ) const = 0;
+	virtual TSharedRef< class SWidget > CreateAnchor( const TAttribute<FString>& Link, const FString& PreviewLink = FString(), const FString& PreviewExcerptName = FString(), const TAttribute<FString>& BaseUrlId = FString()) const = 0;
 
 	virtual TSharedRef< class IDocumentationPage > GetPage( const FString& Link, const TSharedPtr< FParserConfiguration >& Config, const FDocumentationStyle& Style = FDocumentationStyle() ) = 0;
 
@@ -195,7 +197,27 @@ public:
 
 	virtual bool PageExists(const FString& Link, const FCultureRef& Culture) const = 0;
 
+	virtual const TArray < FString >& GetSourcePaths() const = 0;
+
 	virtual TSharedRef< class SToolTip > CreateToolTip( const TAttribute<FText>& Text, const TSharedPtr<SWidget>& OverrideContent, const FString& Link, const FString& ExcerptName ) const = 0;
 
 	virtual TSharedRef< class SToolTip > CreateToolTip(const TAttribute<FText>& Text, const TSharedRef<SWidget>& OverrideContent, const TSharedPtr<class SVerticalBox>& DocVerticalBox, const FString& Link, const FString& ExcerptName) const = 0;
+
+	virtual bool RegisterBaseUrl(const FString& Id, const FString& Url) = 0;
+
+	virtual FString GetBaseUrl(const FString& Id) const = 0;
+
+	/**
+	 * Registers a documentation redirect for an owner
+	 * @param Owner Name of owner for redirect
+	 * @param Redirect Redirect to register
+	 * @return Was the redirect successfully registered?
+	 */
+	virtual bool RegisterRedirect(const FName& Owner, const FDocumentationRedirect& Redirect) = 0;
+
+	/**
+	 * Unregisters all redirects owned by a specific owner
+	 * @param Owner Name of owner to unregister for
+	 */
+	virtual void UnregisterRedirects(const FName& Owner) = 0;
 };

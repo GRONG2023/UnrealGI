@@ -18,6 +18,7 @@
 #include "Misc/EngineVersion.h"
 #include "Misc/LazySingleton.h"
 #include "Misc/Fork.h"
+#include "Misc/URLRequestFilter.h"
 #include "ProfilingDebugging/CsvProfiler.h"
 #include "Async/TaskGraphInterfaces.h"
 
@@ -67,6 +68,11 @@ void FGenericPlatformProcess::SetThreadAffinityMask( uint64 AffinityMask )
 	// Not implemented cross-platform. Each platform may or may not choose to implement this.
 }
 
+void FGenericPlatformProcess::SetThreadPriority(EThreadPriority NewPriority)
+{
+	// Not implemented cross-platform. Each platform may or may not choose to implement this.
+}
+
 uint32 FGenericPlatformProcess::GetStackSize()
 {
 	return 0;
@@ -107,6 +113,13 @@ const TCHAR* FGenericPlatformProcess::ApplicationSettingsDir()
 	// default to the root directory
 	return FPlatformMisc::RootDir();
 }
+
+FString FGenericPlatformProcess::GetApplicationSettingsDir(const ApplicationSettingsContext& Settings)
+{
+	// Default to returning the original `ApplicationSettingsDir` if it's unimplemented.
+	return ApplicationSettingsDir();
+}
+
 
 const TCHAR* FGenericPlatformProcess::ComputerName()
 {
@@ -222,6 +235,22 @@ void FGenericPlatformProcess::LaunchURL( const TCHAR* URL, const TCHAR* Parms, F
 	UE_LOG(LogHAL, Fatal, TEXT("FGenericPlatformProcess::LaunchURL not implemented on this platform"));
 }
 
+bool FGenericPlatformProcess::LaunchURLFiltered(const TCHAR* URL, const TCHAR* Parms, FString* Error, const UE::Core::FURLRequestFilter& Filter)
+{
+	const bool bAllowedByFilter = Filter.IsRequestAllowed(URL);
+
+	if (bAllowedByFilter)
+	{
+		FPlatformProcess::LaunchURL(URL, Parms, Error);
+	}
+	else if (Error)
+	{
+		*Error = TEXT("URL rejected by filter");
+	}
+
+	return bAllowedByFilter;
+}
+
 bool FGenericPlatformProcess::CanLaunchURL(const TCHAR* URL)
 {
 	UE_LOG(LogHAL, Warning, TEXT("FGenericPlatformProcess::CanLaunchURL not implemented on this platform"));
@@ -234,9 +263,15 @@ FString FGenericPlatformProcess::GetGameBundleId()
 	return TEXT("");
 }
 
-FProcHandle FGenericPlatformProcess::CreateProc( const TCHAR* URL, const TCHAR* Parms, bool bLaunchDetached, bool bLaunchHidden, bool bLaunchReallyHidden, uint32* OutProcessID, int32 PriorityModifier, const TCHAR* OptionalWorkingDirectory, void* PipeWriteChild, void * PipeReadChild)
+FProcHandle FGenericPlatformProcess::CreateProc( const TCHAR* URL, const TCHAR* Parms, bool bLaunchDetached, bool bLaunchHidden, bool bLaunchReallyHidden, uint32* OutProcessID, int32 PriorityModifier, const TCHAR* OptionalWorkingDirectory, void* PipeWriteChild, void* PipeReadChild )
 {
 	UE_LOG(LogHAL, Fatal, TEXT("FGenericPlatformProcess::CreateProc not implemented on this platform"));
+	return FProcHandle();
+}
+
+FProcHandle FGenericPlatformProcess::CreateProc( const TCHAR* URL, const TCHAR* Parms, bool bLaunchDetached, bool bLaunchHidden, bool bLaunchReallyHidden, uint32* OutProcessID, int32 PriorityModifier, const TCHAR* OptionalWorkingDirectory, void* PipeWriteChild, void* PipeReadChild, void* PipeStdErrChild )
+{
+	UE_LOG(LogHAL, Fatal, TEXT("FGenericPlatformProcess::CreateProc with std out/in/err not implemented on this platform"));
 	return FProcHandle();
 }
 
@@ -265,6 +300,13 @@ void FGenericPlatformProcess::CloseProc(FProcHandle & ProcessHandle)
 void FGenericPlatformProcess::TerminateProc( FProcHandle & ProcessHandle, bool KillTree )
 {
 	UE_LOG(LogHAL, Fatal, TEXT("FGenericPlatformProcess::TerminateProc not implemented on this platform"));
+}
+
+void FGenericPlatformProcess::TerminateProcTreeWithPredicate(
+	FProcHandle& ProcessHandle,
+	TFunctionRef<bool(uint32 ProcessId, const TCHAR* ApplicationName)> Predicate)
+{
+	UE_LOG(LogHAL, Fatal, TEXT("FGenericPlatformProcess::TerminateProcTreeWithPredicate not implemented on this platform"));
 }
 
 FGenericPlatformProcess::EWaitAndForkResult FGenericPlatformProcess::WaitAndFork()
@@ -303,7 +345,7 @@ FString FGenericPlatformProcess::GetApplicationName( uint32 ProcessId )
 	return FString(TEXT(""));
 }
 
-bool FGenericPlatformProcess::ExecProcess(const TCHAR* URL, const TCHAR* Params, int32* OutReturnCode, FString* OutStdOut, FString* OutStdErr, const TCHAR* OptionalWorkingDirectory)
+bool FGenericPlatformProcess::ExecProcess(const TCHAR* URL, const TCHAR* Params, int32* OutReturnCode, FString* OutStdOut, FString* OutStdErr, const TCHAR* OptionalWorkingDirectory, bool bShouldEndWithParentProcess)
 {
 	UE_LOG(LogHAL, Fatal, TEXT("FGenericPlatformProcess::ExecProcess not implemented on this platform"));
 	return false;
@@ -314,9 +356,10 @@ bool FGenericPlatformProcess::ExecElevatedProcess(const TCHAR* URL, const TCHAR*
 	return FPlatformProcess::ExecProcess(URL, Params, OutReturnCode, NULL, NULL);
 }
 
-void FGenericPlatformProcess::LaunchFileInDefaultExternalApplication( const TCHAR* FileName, const TCHAR* Parms, ELaunchVerb::Type Verb )
+bool FGenericPlatformProcess::LaunchFileInDefaultExternalApplication( const TCHAR* FileName, const TCHAR* Parms, ELaunchVerb::Type Verb, bool bPromptToOpenOnFailure )
 {
 	UE_LOG(LogHAL, Fatal, TEXT("FGenericPlatformProcess::LaunchFileInDefaultExternalApplication not implemented on this platform"));
+	return false;
 }
 
 void FGenericPlatformProcess::ExploreFolder( const TCHAR* FilePath )
@@ -351,7 +394,10 @@ void FGenericPlatformProcess::SleepNoStats( float Seconds )
 void FGenericPlatformProcess::SleepInfinite()
 {
 	// stop this thread forever
-	pause();
+	while (true)
+	{
+		pause();
+	}
 }
 
 void FGenericPlatformProcess::YieldThread()
@@ -465,7 +511,7 @@ FEvent* FGenericPlatformProcess::CreateSynchEvent(bool bIsManualReset)
 	
 	// Create fake singlethread events in environments that don't support multithreading
 	// For processes that intend to fork: create real events even in the master process since the allocated mutex might get reused by the
-	//forked child process when he gets to run in multithread mode.
+	//forked child process when it gets to run in multithread mode.
 	const bool bIsMultithread = FPlatformProcess::SupportsMultithreading() || FForkProcessHelper::SupportsMultithreadingPostFork();
 
 	if (bIsMultithread)
@@ -495,14 +541,14 @@ FEvent* FGenericPlatformProcess::CreateSynchEvent(bool bIsManualReset)
 FEvent* FGenericPlatformProcess::GetSynchEventFromPool(bool bIsManualReset)
 {
 	return bIsManualReset
-		? TLazySingleton<FEventPool<EEventPoolTypes::ManualReset>>::Get().GetEventFromPool()
-		: TLazySingleton<FEventPool<EEventPoolTypes::AutoReset>>::Get().GetEventFromPool();
+		? TLazySingleton<TEventPool<EEventMode::ManualReset>>::Get().GetEventFromPool()
+		: TLazySingleton<TEventPool<EEventMode::AutoReset>>::Get().GetEventFromPool();
 }
 
 void FGenericPlatformProcess::FlushPoolSyncEvents()
 {
-	TLazySingleton<FEventPool<EEventPoolTypes::ManualReset>>::Get().EmptyPool();
-	TLazySingleton<FEventPool<EEventPoolTypes::AutoReset>>::Get().EmptyPool();
+	TLazySingleton<TEventPool<EEventMode::ManualReset>>::Get().EmptyPool();
+	TLazySingleton<TEventPool<EEventMode::AutoReset>>::Get().EmptyPool();
 }
 
 void FGenericPlatformProcess::ReturnSynchEventToPool(FEvent* Event)
@@ -514,11 +560,11 @@ void FGenericPlatformProcess::ReturnSynchEventToPool(FEvent* Event)
 
 	if (Event->IsManualReset())
 	{
-		TLazySingleton<FEventPool<EEventPoolTypes::ManualReset>>::Get().ReturnToPool(Event);
+		TLazySingleton<TEventPool<EEventMode::ManualReset>>::Get().ReturnToPool(Event);
 	}
 	else
 	{
-		TLazySingleton<FEventPool<EEventPoolTypes::AutoReset>>::Get().ReturnToPool(Event);
+		TLazySingleton<TEventPool<EEventMode::AutoReset>>::Get().ReturnToPool(Event);
 	}
 }
 
@@ -542,7 +588,7 @@ void FGenericPlatformProcess::ClosePipe( void* ReadPipe, void* WritePipe )
 	UE_LOG(LogHAL, Fatal, TEXT("FGenericPlatformProcess::ClosePipe not implemented on this platform"));
 }
 
-bool FGenericPlatformProcess::CreatePipe( void*& ReadPipe, void*& WritePipe )
+bool FGenericPlatformProcess::CreatePipe(void*& ReadPipe, void*& WritePipe, bool bWritePipeLocal)
 {
 	UE_LOG(LogHAL, Fatal, TEXT("FGenericPlatformProcess::CreatePipe not implemented on this platform"));
 	return false;
@@ -625,11 +671,9 @@ bool FGenericPlatformProcess::Daemonize()
 
 bool FGenericPlatformProcess::IsFirstInstance()
 {
-#if !(UE_BUILD_SHIPPING && WITH_EDITOR)
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	return GIsFirstInstance;
-#else
-	return true;
-#endif
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 FSystemWideCriticalSectionNotImplemented::FSystemWideCriticalSectionNotImplemented(const FString& Name, FTimespan Timeout)
@@ -639,8 +683,8 @@ FSystemWideCriticalSectionNotImplemented::FSystemWideCriticalSectionNotImplement
 
 void FGenericPlatformProcess::TearDown()
 {
-	TLazySingleton<FEventPool<EEventPoolTypes::AutoReset>>::TearDown();
-	TLazySingleton<FEventPool<EEventPoolTypes::ManualReset>>::TearDown();
+	TLazySingleton<TEventPool<EEventMode::AutoReset>>::TearDown();
+	TLazySingleton<TEventPool<EEventMode::ManualReset>>::TearDown();
 }
 
 ENamedThreads::Type FGenericPlatformProcess::GetDesiredThreadForUObjectReferenceCollector()
@@ -654,6 +698,10 @@ void FGenericPlatformProcess::ModifyThreadAssignmentForUObjectReferenceCollector
 	// On devices with overridden affinity only HiPri threads can run on big cores
 	NormalThreadName = ENamedThreads::AnyHiPriThreadHiPriTask; 
 	NumBackgroundThreads = 0; // run on single group
+#elif WITH_EDITOR
+	// Avoid the ReferenceCollector being slowed down by long running background tasks, async compilation, etc...
+	NormalThreadName = ENamedThreads::AnyHiPriThreadHiPriTask;
+	BackgroundThreadName = ENamedThreads::AnyHiPriThreadHiPriTask;
 #endif
 }
 

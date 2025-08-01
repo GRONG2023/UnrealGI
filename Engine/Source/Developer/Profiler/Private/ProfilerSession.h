@@ -3,6 +3,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
+
+#if STATS
+
 #include "Containers/LockFreeList.h"
 #include "Misc/Guid.h"
 #include "Async/TaskGraphInterfaces.h"
@@ -14,6 +17,7 @@
 #include "IProfilerServiceManager.h"
 #include "Stats/StatsData.h"
 #include "ProfilerStream.h"
+
 
 class FFPSAnalyzer;
 class FProfilerGroup;
@@ -684,7 +688,7 @@ public:
 	/** @return The average number of calls of all combined instances. */
 	const float AvgNumCalls() const 
 	{
-		return (double)_NumCallsAllFrames / (double)_NumFrames;
+		return static_cast<float>((double)_NumCallsAllFrames / (double)_NumFrames);
 	}
 
 	/** @return The min number of calls of all combined instances. */
@@ -704,7 +708,7 @@ public:
 	 */
 	const float FramesWithCallPct() const
 	{
-		return (double)_NumFramesWithCall / (double)_NumFrames * 100.0f;
+		return static_cast<float>((double)_NumFramesWithCall / (double)_NumFrames * 100.0);
 	}
 
 	/**
@@ -1055,7 +1059,7 @@ protected:
 	FTickerDelegate OnTick;
 
 	/** Handle to the registered OnTick. */
-	FDelegateHandle OnTickHandle;
+	FTSTicker::FDelegateHandle OnTickHandle;
 
 	/** The data provider which holds all the collected profiler samples. */
 	TSharedRef<IDataProvider> DataProvider;
@@ -1116,3 +1120,5 @@ public:
 	/** Provides analysis of the frame rate */
 	TSharedRef<FFPSAnalyzer> FPSAnalyzer;
 };
+
+#endif // STATS

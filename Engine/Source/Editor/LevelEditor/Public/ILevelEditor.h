@@ -7,6 +7,8 @@
 #include "Widgets/SWidget.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Editor/UnrealEdTypes.h"
+#include "Elements/Framework/TypedElementHandle.h"
+#include "Elements/Framework/EngineElementsLibrary.h"
 #include "Framework/Docking/TabManager.h"
 #include "Framework/Commands/UICommandList.h"
 #include "AssetThumbnail.h"
@@ -17,6 +19,7 @@ class IDetailRootObjectCustomization;
 class ISceneOutliner;
 class IAssetViewport;
 class SLevelViewport;
+class UTypedElementSelectionSet;
 
 /**
  * Public interface to SLevelEditor
@@ -26,8 +29,26 @@ class ILevelEditor : public SCompoundWidget, public IToolkitHost
 
 public:
 
+	/** Get the element selection set used by this level editor */
+	virtual const UTypedElementSelectionSet* GetElementSelectionSet() const = 0;
+	virtual UTypedElementSelectionSet* GetMutableElementSelectionSet() = 0;
+
 	/** Summons a context menu for this level editor at the mouse cursor's location */
-	virtual void SummonLevelViewportContextMenu() = 0;
+	virtual void SummonLevelViewportContextMenu(const FTypedElementHandle& HitProxyElement = FTypedElementHandle()) = 0;
+
+	UE_DEPRECATED(5.0, "Use the SummonLevelViewportContextMenu overload which takes a FTypedElementHandle.")
+	void SummonLevelViewportContextMenu(AActor* HitProxyActor)
+	{
+		FTypedElementHandle HitProxyElement;
+		if (HitProxyActor)
+		{
+			HitProxyElement = UEngineElementsLibrary::AcquireEditorActorElementHandle(HitProxyActor);
+		}
+		SummonLevelViewportContextMenu(HitProxyElement);
+	}
+
+	/** Gets the title for the context menu for this level editor */
+	virtual FText GetLevelViewportContextMenuTitle() const = 0;
 
 	/** Summons a context menu for view options */
 	virtual void SummonLevelViewportViewOptionMenu(ELevelViewportType ViewOption) = 0;
@@ -36,12 +57,13 @@ public:
 	virtual const TArray< TSharedPtr< IToolkit > >& GetHostedToolkits() const = 0;
 
 	/** Gets an array of all viewports in this level editor */
-	virtual TArray< TSharedPtr< IAssetViewport > > GetViewports() const = 0;
+	virtual TArray< TSharedPtr< SLevelViewport > > GetViewports() const = 0;
 	
 	/** Gets the active level viewport for this level editor */
-	virtual TSharedPtr<IAssetViewport> GetActiveViewportInterface() = 0;
+	virtual TSharedPtr<SLevelViewport> GetActiveViewportInterface() = 0;
 
 	/** Get the thumbnail pool used by this level editor */
+	UE_DEPRECATED(5.0, "GetThumbnailPool has been replaced by UThumbnailManager::Get().GetSharedThumbnailPool().")
 	virtual TSharedPtr< class FAssetThumbnailPool > GetThumbnailPool() const = 0;
 
 	/** Access the level editor's action command list */
@@ -66,10 +88,18 @@ public:
 	/** Sets the UI customization of the SCSEditor inside the level editor details panel. */
 	virtual void SetActorDetailsSCSEditorUICustomization(TSharedPtr<class ISCSEditorUICustomization> ActorDetailsSCSEditorUICustomization) = 0;
 
-	/** Spawns a level editor ToolBox widget (aka. "Modes") */
-	virtual TSharedRef<SWidget> CreateToolBox() = 0;
-
+	/** Return the most recently interacted with Outliner */
+	UE_DEPRECATED(5.1, "The Level Editor has multiple outliners, use GetAllSceneOutliners() or GetMostRecentlyUsedSceneOutliner() instead to avoid ambiguity")
 	virtual TSharedPtr<ISceneOutliner> GetSceneOutliner() const = 0;
+
+	/** Get an array containing weak pointers to all 4 Scene Outliners which could be potentially active */
+	virtual TArray<TWeakPtr<ISceneOutliner>> GetAllSceneOutliners() const = 0;
+
+	/** Set the outliner with the given name as the most recently interacted with */
+	virtual void SetMostRecentlyUsedSceneOutliner(FName OutlinerIdentifier) = 0;
+
+	/** Return the most recently interacted with Outliner */
+	virtual TSharedPtr<ISceneOutliner> GetMostRecentlyUsedSceneOutliner() = 0;
 };
 
 

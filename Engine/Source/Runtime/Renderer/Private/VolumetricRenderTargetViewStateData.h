@@ -23,13 +23,27 @@ public:
 
 	void Initialise(
 		FIntPoint& ViewRectResolutionIn,
-		float UvNoiseScale,
 		int32 Mode,
-		int32 UpsamplingMode);
+		int32 UpsamplingMode,
+		bool bCameraCut);
+
+	void Reset();
+
+	void PostRenderUpdate(float ViewExposure)
+	{
+		PreViewExposure = ViewExposure;
+	}
+
+	float GetPrevViewExposure()
+	{
+		return PreViewExposure;
+	}
 
 	FRDGTextureRef GetOrCreateVolumetricTracingRT(FRDGBuilder& GraphBuilder);
+	FRDGTextureRef GetOrCreateVolumetricSecondaryTracingRT(FRDGBuilder& GraphBuilder);
 	FRDGTextureRef GetOrCreateVolumetricTracingRTDepth(FRDGBuilder& GraphBuilder);
 
+	FRDGTextureRef GetDstVolumetricReconstructRT(FRDGBuilder& GraphBuilder);
 	FRDGTextureRef GetOrCreateDstVolumetricReconstructRT(FRDGBuilder& GraphBuilder);
 	FRDGTextureRef GetOrCreateDstVolumetricReconstructRTDepth(FRDGBuilder& GraphBuilder);
 
@@ -49,10 +63,12 @@ public:
 	const uint32 GetVolumetricTracingRTDownsampleFactor() const { return VolumetricTracingRTDownsampleFactor; }
 
 	FUintVector4 GetTracingCoordToZbufferCoordScaleBias() const;
+	FUintVector4 GetTracingCoordToFullResPixelCoordScaleBias() const;
 
-	float GetUvNoiseScale()		const { return UvNoiseScale; }
 	int32 GetMode()				const { return Mode; }
 	int32 GetUpsamplingMode()	const { return UpsamplingMode; }
+
+	uint64 GetGPUSizeBytes(bool bLogSizes) const;
 
 private:
 
@@ -62,6 +78,7 @@ private:
 	uint32 CurrentRT;
 	bool bFirstTimeUsed;
 	bool bHistoryValid;
+	float PreViewExposure;
 
 	int32 FrameId;
 	uint32 NoiseFrameIndex;	// This is only incremented once all Volumetric render target samples have been iterated
@@ -77,9 +94,9 @@ private:
 	TRefCountPtr<IPooledRenderTarget> VolumetricReconstructRTDepth[kRenderTargetCount];
 
 	TRefCountPtr<IPooledRenderTarget> VolumetricTracingRT;
+	TRefCountPtr<IPooledRenderTarget> VolumetricSecondaryTracingRT;
 	TRefCountPtr<IPooledRenderTarget> VolumetricTracingRTDepth;
 
-	float UvNoiseScale;
 	int32 Mode;
 	int32 UpsamplingMode;
 };
@@ -109,6 +126,8 @@ public:
 	uint32 GetPreviousIndex() { return 1 - CurrentRT; }
 
 	void Reset();
+
+	uint64 GetGPUSizeBytes(bool bLogSizes) const;
 
 private:
 

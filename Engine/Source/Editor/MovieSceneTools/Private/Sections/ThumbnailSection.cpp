@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Sections/ThumbnailSection.h"
+#include "AnimatedRange.h"
 #include "Rendering/DrawElements.h"
 #include "Textures/SlateIcon.h"
 #include "Framework/Commands/UIAction.h"
@@ -10,7 +11,7 @@
 #include "Application/ThrottleManager.h"
 #include "Widgets/Layout/SBox.h"
 #include "SequencerSectionPainter.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "LevelEditorViewport.h"
 #include "Widgets/Text/SInlineEditableTextBlock.h"
 #include "PropertyEditorModule.h"
@@ -40,7 +41,7 @@ FThumbnailSection::FThumbnailSection(TSharedPtr<ISequencer> InSequencer, TShared
 	, AdditionalDrawEffect(ESlateDrawEffect::None)
 	, TimeSpace(ETimeSpace::Global)
 {
-	WhiteBrush = FEditorStyle::GetBrush("WhiteBrush");
+	WhiteBrush = FAppStyle::GetBrush("WhiteBrush");
 	RedrawThumbnailDelegateHandle = GetMutableDefault<UMovieSceneUserThumbnailSettings>()->OnForceRedraw().AddRaw(this, &FThumbnailSection::RedrawThumbnails);
 }
 
@@ -52,7 +53,7 @@ FThumbnailSection::FThumbnailSection(TSharedPtr<ISequencer> InSequencer, TShared
 	, AdditionalDrawEffect(ESlateDrawEffect::None)
 	, TimeSpace(ETimeSpace::Global)
 {
-	WhiteBrush = FEditorStyle::GetBrush("WhiteBrush");
+	WhiteBrush = FAppStyle::GetBrush("WhiteBrush");
 	RedrawThumbnailDelegateHandle = GetMutableDefault<UMovieSceneUserThumbnailSettings>()->OnForceRedraw().AddRaw(this, &FThumbnailSection::RedrawThumbnails);
 }
 
@@ -76,7 +77,7 @@ TSharedRef<SWidget> FThumbnailSection::GenerateSectionWidget()
 	return SNew(SBox)
 		.HAlign(HAlign_Left)
 		.VAlign(VAlign_Top)
-		.Padding(GetContentPadding())
+		.Padding_Lambda([&]() { return GetContentPadding(); })
 		[
 			SAssignNew(NameWidget, SInlineEditableTextBlock)
 				.ToolTipText(CanRename() ? LOCTEXT("RenameThumbnail", "Click or hit F2 to rename") : FText::GetEmpty())
@@ -114,7 +115,7 @@ void FThumbnailSection::BuildSectionContextMenu(FMenuBuilder& MenuBuilder, const
 		MenuBuilder.AddSubMenu(
 			LOCTEXT("ThumbnailsMenu", "Thumbnails"),
 			FText(),
-			FNewMenuDelegate::CreateLambda([=](FMenuBuilder& InMenuBuilder){
+			FNewMenuDelegate::CreateLambda([this](FMenuBuilder& InMenuBuilder){
 
 				TSharedPtr<ISequencer> Sequencer = SequencerPtr.Pin();
 
@@ -133,7 +134,7 @@ void FThumbnailSection::BuildSectionContextMenu(FMenuBuilder& MenuBuilder, const
 						LOCTEXT("SetSingleTimeTooltip", "Defines the time at which this section should draw its single thumbnail to the current cursor position"),
 						FSlateIcon(),
 						FUIAction(
-							FExecuteAction::CreateLambda([=]{
+						FExecuteAction::CreateLambda([this, Sequencer]{
 								SetSingleTime(Sequencer->GetLocalTime().AsSeconds());
 								GetMutableDefault<UMovieSceneUserThumbnailSettings>()->bDrawSingleThumbnails = true;
 								GetMutableDefault<UMovieSceneUserThumbnailSettings>()->SaveConfig();
@@ -156,7 +157,10 @@ void FThumbnailSection::BuildSectionContextMenu(FMenuBuilder& MenuBuilder, const
 
 					FPropertyEditorModule& PropertyModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
 
-					FDetailsViewArgs Args(false, false, false, FDetailsViewArgs::HideNameArea);
+					FDetailsViewArgs Args;
+					Args.bAllowSearch = false;
+					Args.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+
 					TSharedRef<IDetailsView> DetailView = PropertyModule.CreateDetailView(Args);
 					DetailView->SetObject(GetMutableDefault<UMovieSceneUserThumbnailSettings>());
 					InMenuBuilder.AddWidget(DetailView, FText(), true);
@@ -175,7 +179,7 @@ float FThumbnailSection::GetSectionGripSize() const
 }
 
 
-float FThumbnailSection::GetSectionHeight() const
+float FThumbnailSection::GetSectionHeight(const UE::Sequencer::FViewDensityInfo& ViewDensity) const
 {
 	auto* Settings = GetDefault<UMovieSceneUserThumbnailSettings>();
 	if (Settings->bDrawThumbnails)
@@ -184,7 +188,7 @@ float FThumbnailSection::GetSectionHeight() const
 	}
 	else
 	{
-		return FEditorStyle::GetFontStyle("NormalFont").Size + 8.f;
+		return FAppStyle::GetFontStyle("NormalFont").Size + 8.f;
 	}
 }
 

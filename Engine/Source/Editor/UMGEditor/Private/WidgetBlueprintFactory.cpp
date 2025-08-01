@@ -8,6 +8,7 @@
 #include "WidgetBlueprint.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Modules/ModuleManager.h"
+#include "UMGEditorModule.h"
 
 #include "Blueprint/WidgetTree.h"
 #include "UMGEditorProjectSettings.h"
@@ -15,9 +16,6 @@
 #include "Kismet2/SClassPickerDialog.h"
 #include "ClassViewerFilter.h"
 #include "Components/CanvasPanel.h"
-#include "Components/HorizontalBox.h"
-#include "Components/VerticalBox.h"
-#include "Components/GridPanel.h"
 
 #define LOCTEXT_NAMESPACE "UWidgetBlueprintFactory"
 
@@ -59,6 +57,56 @@ UWidgetBlueprintFactory::UWidgetBlueprintFactory(const FObjectInitializer& Objec
 
 bool UWidgetBlueprintFactory::ConfigureProperties()
 {
+	if (GetDefault<UUMGEditorProjectSettings>()->bUseUserWidgetParentClassViewerSelector || GetDefault<UUMGEditorProjectSettings>()->bUseUserWidgetParentDefaultClassViewerSelector)
+	{
+		FClassViewerModule& ClassViewerModule = FModuleManager::LoadModuleChecked<FClassViewerModule>("ClassViewer");
+
+		// Fill in options
+		FClassViewerInitializationOptions Options;
+		Options.DisplayMode = EClassViewerDisplayMode::Type::TreeView;
+		Options.Mode = EClassViewerMode::ClassPicker;
+		Options.bShowNoneOption = false;
+		Options.bExpandAllNodes = true;
+		Options.bIsBlueprintBaseOnly = true;
+		Options.bShowDefaultClasses = GetDefault<UUMGEditorProjectSettings>()->bUseUserWidgetParentDefaultClassViewerSelector;
+		Options.bShowClassesViewer = GetDefault<UUMGEditorProjectSettings>()->bUseUserWidgetParentClassViewerSelector;
+
+		TSharedPtr<FWidgetClassFilter> Filter = MakeShareable(new FWidgetClassFilter);
+		Options.ClassFilters.Add(Filter.ToSharedRef());
+
+		const TArray<TSoftClassPtr<UUserWidget>>& FavoriteWidgetParentClasses = GetDefault<UUMGEditorProjectSettings>()->FavoriteWidgetParentClasses;
+		for (int32 Index = 0; Index < FavoriteWidgetParentClasses.Num(); ++Index)
+		{
+			UClass* FavoriteWidgetParentClass = FavoriteWidgetParentClasses[Index].LoadSynchronous();
+			if (FavoriteWidgetParentClass && FavoriteWidgetParentClass->IsChildOf(UUserWidget::StaticClass()))
+			{
+				if (!Options.ExtraPickerCommonClasses.Contains(FavoriteWidgetParentClass))
+				{
+					Options.ExtraPickerCommonClasses.Add(FavoriteWidgetParentClass);
+				}
+			}
+		}
+
+		if (Options.ExtraPickerCommonClasses.Num() == 0)
+		{
+			Options.ExtraPickerCommonClasses.Add(UUserWidget::StaticClass());
+		}
+
+		Filter->DisallowedClassFlags = CLASS_Deprecated | CLASS_NewerVersionExists | CLASS_Hidden | CLASS_HideDropDown;
+		Filter->AllowedChildrenOfClasses.Add(UUserWidget::StaticClass());
+
+		const FText TitleText = LOCTEXT("CreateWidgetBlueprint", "Pick Parent Class for New Widget Blueprint");
+
+		UClass* ChosenParentClass = nullptr;
+		bool isSuccessful = SClassPickerDialog::PickClass(TitleText, Options, ChosenParentClass, UUserWidget::StaticClass());
+		ParentClass = ChosenParentClass ? ChosenParentClass : UUserWidget::StaticClass();
+
+		if (!isSuccessful)
+		{
+			return false;
+		}
+	}
+
 	if (GetDefault<UUMGEditorProjectSettings>()->bUseWidgetTemplateSelector)
 	{
 		// Load the classviewer module to display a class picker
@@ -69,19 +117,32 @@ bool UWidgetBlueprintFactory::ConfigureProperties()
 		Options.Mode = EClassViewerMode::ClassPicker;
 		Options.bShowNoneOption = true;
 
-		Options.ExtraPickerCommonClasses.Add(UHorizontalBox::StaticClass());
-		Options.ExtraPickerCommonClasses.Add(UVerticalBox::StaticClass());
-		Options.ExtraPickerCommonClasses.Add(UGridPanel::StaticClass());
-		Options.ExtraPickerCommonClasses.Add(UCanvasPanel::StaticClass());
+		TArray<TSoftClassPtr<UPanelWidget>> CommonRootWidgetClasses = GetDefault <UUMGEditorProjectSettings>()->CommonRootWidgetClasses;
+		for (int32 Index = 0; Index < CommonRootWidgetClasses.Num(); ++Index)
+		{
+			UClass* PanelWidgetClass = CommonRootWidgetClasses[Index].LoadSynchronous();
+			if (PanelWidgetClass && PanelWidgetClass->IsChildOf(UPanelWidget::StaticClass()))
+			{
+				if (!Options.ExtraPickerCommonClasses.Contains(PanelWidgetClass))
+				{
+					Options.ExtraPickerCommonClasses.Add(PanelWidgetClass);
+				}
+			}
+		}
+
+		if (Options.ExtraPickerCommonClasses.Num() == 0)
+		{
+			Options.ExtraPickerCommonClasses.Add(UCanvasPanel::StaticClass());
+		}
 
 		TSharedPtr<FWidgetClassFilter> Filter = MakeShareable(new FWidgetClassFilter);
-		Options.ClassFilter = Filter;
+		Options.ClassFilters.Add(Filter.ToSharedRef());
 
 		Filter->DisallowedClassFlags = CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists;
 		Filter->AllowedChildrenOfClasses.Add(UPanelWidget::StaticClass());
 
-		const FText TitleText = LOCTEXT("CreateWidgetBlueprint", "Pick Root Widget for New Widget Blueprint");
-		return SClassPickerDialog::PickClass(TitleText, Options, RootWidgetClass, UPanelWidget::StaticClass());
+		const FText TitleText = LOCTEXT("CreateRootWidgetBlueprint", "Pick Root Widget for New Widget Blueprint");
+		return SClassPickerDialog::PickClass(TitleText, Options, static_cast<UClass*&>(RootWidgetClass), UPanelWidget::StaticClass());
 
 	}
 	return true;
@@ -100,7 +161,7 @@ UObject* UWidgetBlueprintFactory::FactoryCreateNew(UClass* Class, UObject* InPar
 	UClass* CurrentParentClass = ParentClass;
 	if (CurrentParentClass == nullptr)
 	{
-		CurrentParentClass = GetDefault <UUMGEditorProjectSettings>()->DefaultWidgetParentClass.LoadSynchronous();
+		CurrentParentClass = UUserWidget::StaticClass();
 	}
 
 	// If they selected an interface, force the parent class to be UInterface
@@ -133,6 +194,17 @@ UObject* UWidgetBlueprintFactory::FactoryCreateNew(UClass* Class, UObject* InPar
 				UWidget* Root = NewBP->WidgetTree->ConstructWidget<UWidget>(RootWidgetPanel);
 				NewBP->WidgetTree->RootWidget = Root;
 			}
+		}
+
+		NewBP->bCanCallInitializedWithoutPlayerContext = GetDefault<UUMGEditorProjectSettings>()->bCanCallInitializedWithoutPlayerContext;
+
+		{
+			IUMGEditorModule::FWidgetBlueprintCreatedArgs Args;
+			Args.ParentClass = CurrentParentClass;
+			Args.Blueprint = NewBP;
+
+			IUMGEditorModule& UMGEditor = FModuleManager::LoadModuleChecked<IUMGEditorModule>("UMGEditor");
+			UMGEditor.OnWidgetBlueprintCreated().Broadcast(Args);
 		}
 
 		return NewBP;

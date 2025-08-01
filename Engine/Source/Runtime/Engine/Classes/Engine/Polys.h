@@ -38,16 +38,16 @@ class FPoly
 {
 public:
 	// Store up to 16 vertices inline.
-	typedef TArray<FVector,TInlineAllocator<16> > VerticesArrayType;
+	typedef TArray<FVector3f,TInlineAllocator<16> > VerticesArrayType;
 
-	FVector				Base;					// Base point of polygon.
-	FVector				Normal;					// Normal of polygon.
-	FVector				TextureU;				// Texture U vector.
-	FVector				TextureV;				// Texture V vector.
+	FVector3f				Base;					// Base point of polygon.
+	FVector3f				Normal;					// Normal of polygon.
+	FVector3f				TextureU;				// Texture U vector.
+	FVector3f				TextureV;				// Texture V vector.
 	VerticesArrayType	Vertices;
 	uint32				PolyFlags;				// FPoly & Bsp poly bit flags (PF_).
-	ABrush*				Actor;					// Brush where this originated, or NULL.
-	UMaterialInterface*	Material;				// Material.
+	TObjectPtr<ABrush>				Actor;					// Brush where this originated, or NULL.
+	TObjectPtr<UMaterialInterface>	Material;				// Material.
 	FName				RulesetVariation;		// Name of variation within a ProcBuilding Ruleset for this face
 	FName				ItemName;				// Item name.
 	int32					iLink;					// iBspSurf, or brush fpoly index of first identical polygon, or MAX_uint16.
@@ -79,17 +79,17 @@ public:
 	/**
 	 * Transform an editor polygon with a post-transformation addition.
 	 */
-	ENGINE_API void Transform(const FVector &PostAdd);
+	ENGINE_API void Transform(const FVector3f &PostAdd);
 
 	/**
 	 * Rotate an editor polygon.
 	 */
-	ENGINE_API void Rotate(const FRotator &Rotation);
+	ENGINE_API void Rotate(const FRotator3f &Rotation);
 
 	/**
 	 * Scale an editor polygon.
 	 */
-	ENGINE_API void Scale(const FVector &Scale);
+	ENGINE_API void Scale(const FVector3f &Scale);
 
 	/**
 	 * Fix up an editor poly by deleting vertices that are identical.  Sets
@@ -107,7 +107,7 @@ public:
 	/**
 	 * Split with plane. Meant to be numerically stable.
 	 */
-	ENGINE_API int32 SplitWithPlane(const FVector &InBase,const FVector &InNormal,FPoly *FrontPoly,FPoly *BackPoly,int32 VeryPrecise) const;
+	ENGINE_API int32 SplitWithPlane(const FVector3f &InBase,const FVector3f &InNormal,FPoly *FrontPoly,FPoly *BackPoly,int32 VeryPrecise) const;
 
 	/** Split with a Bsp node. */
 	ENGINE_API int32 SplitWithNode(const UModel *Model,int32 iNode,FPoly *FrontPoly,FPoly *BackPoly,int32 VeryPrecise) const;
@@ -119,7 +119,7 @@ public:
 	ENGINE_API int32 SplitWithPlaneFast(const FPlane& Plane,FPoly *FrontPoly,FPoly *BackPoly) const;
 
 	/** Split a poly and keep only the front half. Returns number of vertices, 0 if clipped away. */
-	ENGINE_API int32 Split(const FVector &InNormal, const FVector &InBase );
+	ENGINE_API int32 Split(const FVector3f &InNormal, const FVector3f &InBase );
 
 	/** Remove colinear vertices and check convexity.  Returns 1 if convex, 0 if nonconvex or collapsed. */
 	ENGINE_API int32 RemoveColinears();
@@ -184,7 +184,7 @@ public:
 	 *
 	 * @return	The index of the vertex, if found.  Otherwise INDEX_NONE.
 	 */
-	ENGINE_API int32 GetVertexIndex( FVector& InVtx );
+	ENGINE_API int32 GetVertexIndex( FVector3f& InVtx );
 
 	/** Computes the mid point of the polygon (in local space). */
 	ENGINE_API FVector GetMidPoint();
@@ -218,186 +218,7 @@ public:
 	* @param	InPolygons		An array of FPolys that will be replaced with a new set of polygons that are merged together as much as possible.
 	*/
 	template<typename ArrayType>
-	static void OptimizeIntoConvexPolys( ABrush* InOwnerBrush, ArrayType& InPolygons )
-	{
-		bool bDidMergePolygons = true;
-
-		while( bDidMergePolygons )
-		{
-			bDidMergePolygons = false;
-
-			for( int32 PolyIndex = 0 ; PolyIndex < InPolygons.Num() && !bDidMergePolygons ; ++PolyIndex )
-			{
-				const FPoly* PolyMain = &InPolygons[PolyIndex];
-
-				// Find all the polygons that neighbor this one (aka share an edge)
-
-				for( int32 p2 = 0 ; p2 < InPolygons.Num() && !bDidMergePolygons ; ++p2 )
-				{
-					const FPoly* PolyNeighbor = &InPolygons[p2];
-
-					if( PolyMain != PolyNeighbor && PolyMain->Normal.Equals( PolyNeighbor->Normal ) )
-					{
-						// See if PolyNeighbor is sharing an edge with Poly
-
-						int32 Index1 = INDEX_NONE, Index2 = INDEX_NONE;
-						FVector EdgeVtx1(0), EdgeVtx2(0);
-
-						for( int32 v = 0 ; v < PolyMain->Vertices.Num() ; ++v )
-						{
-							FVector vtx = PolyMain->Vertices[v];
-
-							int32 idx = INDEX_NONE;
-
-							for( int32 v2 = 0 ; v2 < PolyNeighbor->Vertices.Num() ; ++v2 )
-							{
-								const FVector* vtx2 = &PolyNeighbor->Vertices[v2];
-
-								if( vtx.Equals( *vtx2 ) )
-								{
-									idx = v2;
-									break;
-								}
-							}
-
-							if( idx != INDEX_NONE )
-							{
-								if( Index1 == INDEX_NONE )
-								{
-									Index1 = v;
-									EdgeVtx1 = vtx;
-								}
-								else if( Index2 == INDEX_NONE )
-								{
-									Index2 = v;
-									EdgeVtx2 = vtx;
-									break;
-								}
-							}
-						}
-
-						if( Index1 != INDEX_NONE && Index2 != INDEX_NONE )
-						{
-							// Found a shared edge.  Let's see if we can merge these polygons together.
-
-							// Create a list of cutting planes
-
-							TArray<FPlane> CuttingPlanes;
-
-							for( int32 v = 0 ; v < PolyMain->Vertices.Num() ; ++v )
-							{
-								const FVector* vtx1 = &PolyMain->Vertices[v];
-								const FVector* vtx2 = &PolyMain->Vertices[(v+1)%PolyMain->Vertices.Num()];
-
-								if( (vtx1->Equals( EdgeVtx1 ) && vtx2->Equals( EdgeVtx2 ) )
-									|| (vtx1->Equals( EdgeVtx2 ) && vtx2->Equals( EdgeVtx1 ) ) )
-								{
-									// If these verts are on the shared edge, don't include this edge in the cutting planes array.
-									continue;
-								}
-
-								FPlane plane( *vtx1, *vtx2, (*vtx2) + (PolyMain->Normal * 16.f) );
-								CuttingPlanes.Add( plane );
-							}
-
-							for( int32 v = 0 ; v < PolyNeighbor->Vertices.Num() ; ++v )
-							{
-								const FVector* vtx1 = &PolyNeighbor->Vertices[v];
-								const FVector* vtx2 = &PolyNeighbor->Vertices[(v+1)%PolyNeighbor->Vertices.Num()];
-
-								if( (vtx1->Equals( EdgeVtx1 ) && vtx2->Equals( EdgeVtx2 ) )
-									|| (vtx1->Equals( EdgeVtx2 ) && vtx2->Equals( EdgeVtx1 ) ) )
-								{
-									// If these verts are on the shared edge, don't include this edge in the cutting planes array.
-									continue;
-								}
-
-								FPlane plane( *vtx1, *vtx2, (*vtx2) + (PolyNeighbor->Normal * 16.f) );
-								CuttingPlanes.Add( plane );
-							}
-
-							// Make sure that all verts lie behind all cutting planes.  This serves as our convexity check for the merged polygon.
-
-							bool bMergedPolyIsConvex = true;
-							float dot;
-
-							for( int32 p = 0 ; p < CuttingPlanes.Num() && bMergedPolyIsConvex ; ++p )
-							{
-								FPlane* plane = &CuttingPlanes[p];
-
-								for( int32 v = 0 ; v < PolyMain->Vertices.Num() ; ++v )
-								{
-									dot = plane->PlaneDot( PolyMain->Vertices[v] );
-									if( dot > THRESH_POINT_ON_PLANE )
-									{
-										bMergedPolyIsConvex = false;
-										break;
-									}
-								}
-
-								for( int32 v = 0 ; v < PolyNeighbor->Vertices.Num() && bMergedPolyIsConvex ; ++v )
-								{
-									dot = plane->PlaneDot( PolyNeighbor->Vertices[v] );
-									if( dot > THRESH_POINT_ON_PLANE )
-									{
-										bMergedPolyIsConvex = false;
-										break;
-									}
-								}
-							}
-
-							if( bMergedPolyIsConvex )
-							{
-								// OK, the resulting polygon will result in a convex polygon.  So create it by clipping a large polygon using
-								// the cutting planes we created earlier.  The resulting polygon will be the merged result.
-
-								FPlane NormalPlane = FPlane( PolyMain->Vertices[0], PolyMain->Vertices[1], PolyMain->Vertices[2] );
-								FPoly PolyMerged = BuildAndCutInfiniteFPoly( NormalPlane, CuttingPlanes, InOwnerBrush );
-
-								// Verts that result from these clips are assured of being on the 1 grid.  Go through and snap them
-								// there to make sure (aka avoid float drift).
-
-								for( int32 v = 0 ; v < PolyMerged.Vertices.Num() ; ++v )
-								{
-									FVector* vtx = &PolyMerged.Vertices[v];
-									*vtx = vtx->GridSnap( 1.0f );
-								}
-
-								PolyMerged.CalcNormal(1);
-
-								if( PolyMerged.Finalize( InOwnerBrush, 1 ) == 0 )
-								{
-									// Remove the original polygons from the list
-
-									int32 idx1 = InPolygons.Find( *PolyMain );
-									int32 idx2 = InPolygons.Find( *PolyNeighbor );
-
-									if( idx2 > idx1 )
-									{
-										InPolygons.RemoveAt( idx2 );
-										InPolygons.RemoveAt( idx1 );
-									}
-									else
-									{
-										InPolygons.RemoveAt( idx1 );
-										InPolygons.RemoveAt( idx2 );
-									}
-
-									// Add the newly merged polygon into the list
-
-									InPolygons.Add( PolyMerged );
-
-									// Tell the outside loop that we merged polygons and need to run through it all again
-
-									bDidMergePolygons = true;
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
+	static void OptimizeIntoConvexPolys(ABrush* InOwnerBrush, ArrayType& InPolygons);
 
 	/**
 	* Takes a set of polygons and returns a vertex array representing the outside winding
@@ -410,10 +231,10 @@ public:
 	* @param	InWindings		The resulting sets of vertices that represent the windings
 	*/
 	template<typename ArrayType>
-	static void GetOutsideWindings( ABrush* InOwnerBrush, ArrayType& InPolygons, TArray< TArray<FVector> >& InWindings )
+	static void GetOutsideWindings( ABrush* InOwnerBrush, ArrayType& InPolygons, TArray< TArray<FVector3f> >& InWindings )
 	{
 		InWindings.Empty();
-		FVector SaveNormal(0);
+		FVector3f SaveNormal(0);
 
 		// Break up every polygon passed into triangles
 
@@ -443,10 +264,10 @@ public:
 
 			for( int32 v = 0 ; v < Poly->Vertices.Num() ; ++v )
 			{
-				const FVector vtx0 = Poly->Vertices[v];
-				const FVector vtx1 = Poly->Vertices[ (v+1) % Poly->Vertices.Num() ];
+				const FVector3f vtx0 = Poly->Vertices[v];
+				const FVector3f vtx1 = Poly->Vertices[ (v+1) % Poly->Vertices.Num() ];
 
-				FEdge Edge( vtx0, vtx1 );
+				FEdge Edge( (FVector)vtx0, (FVector)vtx1 );
 
 				int32 idx;
 				if( EdgePool.Find( Edge, idx ) )
@@ -518,9 +339,9 @@ public:
 				FPoly TestPoly;
 				TestPoly.Init();
 
-				TestPoly.Vertices.Add( OrderedEdges[0].Vertex[0] );
-				TestPoly.Vertices.Add( OrderedEdges[1].Vertex[0] );
-				TestPoly.Vertices.Add( OrderedEdges[2].Vertex[0] );
+				TestPoly.Vertices.Add( (FVector3f)OrderedEdges[0].Vertex[0] );
+				TestPoly.Vertices.Add( (FVector3f)OrderedEdges[1].Vertex[0] );
+				TestPoly.Vertices.Add( (FVector3f)OrderedEdges[2].Vertex[0] );
 
 				if( TestPoly.Finalize( InOwnerBrush, 1 ) == 0 )
 				{
@@ -542,12 +363,12 @@ public:
 
 			// Create the winding array
 
-			TArray<FVector> WindingVerts;
+			TArray<FVector3f> WindingVerts;
 			for( int32 e = 0 ; e < OrderedEdges.Num() ; ++e )
 			{
 				FEdge* Edge = &OrderedEdges[e];
 
-				WindingVerts.Add( Edge->Vertex[0] );
+				WindingVerts.Add( (FVector3f)Edge->Vertex[0] );
 			}
 
 			InWindings.Add( WindingVerts );
@@ -559,7 +380,7 @@ public:
 	ENGINE_API friend FArchive& operator<<( FArchive& Ar, FPoly& Poly );
 
 	// Inlines.
-	int32 IsBackfaced( const FVector &Point ) const
+	int32 IsBackfaced( const FVector3f &Point ) const
 		{return ((Point-Base) | Normal) < 0.f;}
 	int32 IsCoplanar( const FPoly &Test ) const
 		{return FMath::Abs((Base - Test.Base)|Normal)<0.01f && FMath::Abs(Normal|Test.Normal)>0.9999f;}
@@ -608,8 +429,7 @@ class UPolys : public UObject
 
 	//~ Begin UObject Interface
 #if WITH_EDITOR
-	ENGINE_API virtual bool Modify(bool bAlwaysMarkDirty = false) override;	
-	virtual void PreEditChange(FProperty*) override;
+	ENGINE_API virtual bool Modify(bool bAlwaysMarkDirty = true) override;	
 #endif
 	ENGINE_API virtual void Serialize( FArchive& Ar ) override;
 	virtual bool IsAsset() const override { return false; }

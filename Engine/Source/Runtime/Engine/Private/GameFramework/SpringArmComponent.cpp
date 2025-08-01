@@ -2,10 +2,13 @@
 
 #include "GameFramework/SpringArmComponent.h"
 #include "GameFramework/Pawn.h"
-#include "CollisionQueryParams.h"
-#include "WorldCollision.h"
+#include "Engine/HitResult.h"
 #include "Engine/World.h"
 #include "DrawDebugHelpers.h"
+#include "Math/RotationMatrix.h"
+#include "PhysicsEngine/PhysicsSettings.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SpringArmComponent)
 
 //////////////////////////////////////////////////////////////////////////
 // USpringArmComponent
@@ -38,6 +41,7 @@ USpringArmComponent::USpringArmComponent(const FObjectInitializer& ObjectInitial
 	CameraRotationLagSpeed = 10.f;
 	CameraLagMaxTimeStep = 1.f / 60.f;
 	CameraLagMaxDistance = 0.f;
+	bClampToMaxPhysicsDeltaTime = false;
 
  	UnfixedCameraPosition = FVector::ZeroVector;
 }
@@ -90,6 +94,13 @@ void USpringArmComponent::UpdateDesiredArmLocation(bool bDoTrace, bool bDoLocati
 {
 	FRotator DesiredRot = GetTargetRotation();
 
+	// If our viewtarget is simulating using physics, we may need to clamp deltatime
+	if (bClampToMaxPhysicsDeltaTime)
+	{
+		// Use the same max timestep cap as the physics system to avoid camera jitter when the viewtarget simulates less time than the camera
+		DeltaTime = FMath::Min(DeltaTime, UPhysicsSettings::Get()->MaxPhysicsDeltaTime);
+	}
+
 	// Apply 'lag' to rotation if desired
 	if(bDoRotationLag)
 	{
@@ -98,7 +109,7 @@ void USpringArmComponent::UpdateDesiredArmLocation(bool bDoTrace, bool bDoLocati
 			const FRotator ArmRotStep = (DesiredRot - PreviousDesiredRot).GetNormalized() * (1.f / DeltaTime);
 			FRotator LerpTarget = PreviousDesiredRot;
 			float RemainingTime = DeltaTime;
-			while (RemainingTime > KINDA_SMALL_NUMBER)
+			while (RemainingTime > UE_KINDA_SMALL_NUMBER)
 			{
 				const float LerpAmount = FMath::Min(CameraLagMaxTimeStep, RemainingTime);
 				LerpTarget += ArmRotStep * LerpAmount;
@@ -127,7 +138,7 @@ void USpringArmComponent::UpdateDesiredArmLocation(bool bDoTrace, bool bDoLocati
 			FVector LerpTarget = PreviousDesiredLoc;
 
 			float RemainingTime = DeltaTime;
-			while (RemainingTime > KINDA_SMALL_NUMBER)
+			while (RemainingTime > UE_KINDA_SMALL_NUMBER)
 			{
 				const float LerpAmount = FMath::Min(CameraLagMaxTimeStep, RemainingTime);
 				LerpTarget += ArmMovementStep * LerpAmount;
@@ -295,3 +306,4 @@ bool USpringArmComponent::IsCollisionFixApplied() const
 {
 	return bIsCameraFixed;
 }
+

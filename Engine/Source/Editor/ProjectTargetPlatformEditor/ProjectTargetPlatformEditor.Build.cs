@@ -18,10 +18,6 @@ public class ProjectTargetPlatformEditor : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
-				"CoreUObject",
-				"InputCore",
-				"EditorStyle",
-				"TargetPlatform",
 				"DesktopPlatform",
 				"Settings",
 				"UnrealEd",
@@ -38,14 +34,6 @@ public class ProjectTargetPlatformEditor : ModuleRules
 		DynamicallyLoadedModuleNames.AddRange(
 			new string[] {
 				"GameProjectGeneration",
-			}
-		);
-
-		PrivateIncludePaths.AddRange(
-			new string[]
-			{
-				"Editor/ProjectTargetPlatformEditor/Private",
-				"Editor/ProjectTargetPlatformEditor/Private/Widgets",
 			}
 		);
 	}

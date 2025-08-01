@@ -9,28 +9,62 @@
 
 #include "SafeZoneSlot.generated.h"
 
-UCLASS()
-class UMG_API USafeZoneSlot : public UPanelSlot
+class SSafeZone;
+
+UCLASS(MinimalAPI)
+class USafeZoneSlot : public UPanelSlot
 {
 	GENERATED_BODY()
 public:
 
-	UPROPERTY( EditAnywhere, BlueprintReadOnly, Category = SafeZone )
+	UE_DEPRECATED(5.2, "Direct access to bIsTitleSafe is deprecated. Please use the getter or setter.")
+	UPROPERTY( EditAnywhere, BlueprintReadWrite, Getter = "IsTitleSafe", Setter = "SetIsTitleSafe", Category = SafeZone)
 	bool bIsTitleSafe;
 
-	UPROPERTY( EditAnywhere, BlueprintReadOnly, Category = SafeZone )
+	UE_DEPRECATED(5.2, "Direct access to SafeAreaScale is deprecated. Please use the getter or setter.")
+	UPROPERTY( EditAnywhere, BlueprintReadWrite, Getter, Setter, Category = SafeZone )
 	FMargin SafeAreaScale;
 
-	UPROPERTY( EditAnywhere, BlueprintReadOnly, Category = SafeZone )
+	UE_DEPRECATED(5.2, "Direct access to HAlign is deprecated. Please use the getter or setter.")
+	UPROPERTY( EditAnywhere, BlueprintReadWrite, Getter = "GetHorizontalAlignment", Setter = "SetHorizontalAlignment", Category = SafeZone)
 	TEnumAsByte< EHorizontalAlignment > HAlign;
 
-	UPROPERTY( EditAnywhere, BlueprintReadOnly, Category = SafeZone )
+	UE_DEPRECATED(5.2, "Direct access to VAlign is deprecated. Please use the getter or setter.")
+	UPROPERTY( EditAnywhere, BlueprintReadWrite, Getter = "GetVerticalAlignment", Setter = "SetVerticalAlignment", Category = SafeZone)
 	TEnumAsByte< EVerticalAlignment > VAlign;
 
-	UPROPERTY( EditAnywhere, BlueprintReadOnly, Category = SafeZone )
+	UE_DEPRECATED(5.2, "Direct access to Padding is deprecated. Please use the getter or setter.")
+	UPROPERTY( EditAnywhere, BlueprintReadWrite, Getter, Setter, Category = SafeZone )
 	FMargin Padding;
 
-	USafeZoneSlot();
+	UMG_API USafeZoneSlot();
 
-	virtual void SynchronizeProperties() override;
+	UMG_API void SetIsTitleSafe(bool InIsTitleSafe);
+	UMG_API bool IsTitleSafe() const;
+
+	UMG_API void SetSafeAreaScale(const FMargin& InSafeAreaScale);
+	UMG_API const FMargin& GetSafeAreaScale() const;
+
+	UMG_API void SetHorizontalAlignment(EHorizontalAlignment InHAlign);
+	UMG_API const EHorizontalAlignment GetHorizontalAlignment() const;
+
+	UMG_API void SetVerticalAlignment(EVerticalAlignment InVAlign);
+	UMG_API const EVerticalAlignment GetVerticalAlignment() const;
+
+	UMG_API void SetPadding(const FMargin& InPadding);
+	UMG_API const FMargin& GetPadding() const;
+
+	//~ UPanelSlot interface
+	UMG_API virtual void SynchronizeProperties() override;
+	//~ End of UPanelSlot interface
+
+	/** Builds the underlying slot for the slate button. */
+	UMG_API void BuildSlot(TSharedRef<SSafeZone> InSafeZone);
+
+	UMG_API virtual void ReleaseSlateResources(bool bReleaseChildren) override;
+
+private:
+
+	/** A pointer to the button to allow us to adjust the alignment, padding...etc at runtime. */
+	TWeakPtr<SSafeZone> SafeZone;
 };

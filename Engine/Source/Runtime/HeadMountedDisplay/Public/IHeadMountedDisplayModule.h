@@ -74,6 +74,7 @@ public:
 	 */
 	static inline IHeadMountedDisplayModule& Get()
 	{
+		check(IsInGameThread());
 		TArray<IHeadMountedDisplayModule*> HMDModules = IModularFeatures::Get().GetModularFeatureImplementations<IHeadMountedDisplayModule>(GetModularFeatureName());
 		HMDModules.Sort(FCompareModulePriority());
 		return *HMDModules[0];
@@ -86,6 +87,7 @@ public:
 	 */
 	static inline bool IsAvailable()
 	{
+		check(IsInGameThread());
 		return IModularFeatures::Get().IsModularFeatureAvailable(GetModularFeatureName());
 	}
 
@@ -133,6 +135,11 @@ public:
 	 * Get name of audio output device where the HMD was last connected
 	 */
 	virtual FString GetAudioOutputDevice() { return FString(); }
+
+	/**
+	 * Get XR system name
+	 */
+	virtual FString GetDeviceSystemName() { return FString(); }
 
 	/**
 	 * Attempts to create a new head tracking device interface

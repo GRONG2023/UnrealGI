@@ -67,6 +67,9 @@ enum EKismetCompiledStatementType
 	KCST_GotoReturnIfNot = 28,
 	KCST_SwitchValue = 29,
 	
+	KCST_DoubleToFloatCast = 30,
+	KCST_FloatToDoubleCast = 31,
+
 	//~ Kismet instrumentation extensions:
 
 	// Instrumented event

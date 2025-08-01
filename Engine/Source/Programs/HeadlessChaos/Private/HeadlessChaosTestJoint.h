@@ -3,7 +3,6 @@
 
 #include "HeadlessChaosTestConstraints.h"
 #include "Chaos/ParticleHandle.h"
-#include "Chaos/PBDConstraintRule.h"
 #include "Chaos/PBDRigidsEvolution.h"
 #include "Chaos/PBDRigidsEvolutionGBF.h"
 #include "Chaos/PBDRigidParticles.h"
@@ -29,14 +28,16 @@ namespace ChaosTest
 
 		FJointChainTest(const int32 NumIterations, const FReal Gravity)
 			: Base(NumIterations, Gravity)
-			, JointsRule(Joints)
 		{
-			Evolution.AddConstraintRule(&JointsRule);
 		}
 
 		FPBDJointConstraintHandle* AddJoint(const TVec2<TGeometryParticleHandle<FReal, 3>*>& InConstrainedParticleIndices, const int32 JointIndex)
 		{
-			FPBDJointConstraintHandle* Joint = Joints.AddConstraint(InConstrainedParticleIndices, FRigidTransform3(JointPositions[JointIndex], FRotation3::FromIdentity()));
+			FPBDJointConstraintHandle* Joint = Evolution.GetJointConstraints().AddConstraint(InConstrainedParticleIndices, FRigidTransform3(JointPositions[JointIndex], FRotation3::FromIdentity()));
+
+			// @todo(chaos): this indicates we need to change the AddConstraint API (since ConnectorTransforms were added to Settings). 
+			// Calling AddConstraint followed by SetSettings will overwrite the ConnectorTransforms
+			JointSettings[JointIndex].ConnectorTransforms = Joint->GetSettings().ConnectorTransforms;
 
 			if (JointIndex < JointSettings.Num())
 			{
@@ -44,6 +45,11 @@ namespace ChaosTest
 			}
 
 			return Joint;
+		}
+
+		FPBDJointConstraintHandle* GetJoint(const int32 JointIndex)
+		{
+			return Evolution.GetJointConstraints().GetConstConstraintHandles()[JointIndex];
 		}
 
 		void Create()
@@ -84,6 +90,12 @@ namespace ChaosTest
 			JointSettings.SetNum(NumParticles - 1);
 		}
 
+		void Advance(const FReal Dt)
+		{
+			Evolution.AdvanceOneTimeStep(Dt);
+			Evolution.EndFrame(Dt);
+		}
+
 		// Initial particles setup
 		TArray<FVec3> ParticlePositions;
 		TArray<FVec3> ParticleSizes;
@@ -93,10 +105,6 @@ namespace ChaosTest
 		TArray<FVec3> JointPositions;
 		TArray<TVec2<int32>> JointParticleIndices;
 		TArray<FPBDJointSettings> JointSettings;
-
-		// Solver state
-		FPBDJointConstraints Joints;
-		TPBDConstraintIslandRule<FPBDJointConstraints> JointsRule;
 	};
 
 }

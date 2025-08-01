@@ -1,22 +1,30 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "GameFramework/GameUserSettings.h"
+#include "GenericPlatform/GenericPlatformFramePacer.h"
 #include "HAL/FileManager.h"
 #include "Misc/ConfigCacheIni.h"
-#include "HAL/IConsoleManager.h"
-#include "GenericPlatform/GenericApplication.h"
+#include "Misc/ConfigContext.h"
 #include "Misc/App.h"
-#include "EngineGlobals.h"
 #include "Kismet/KismetSystemLibrary.h"
+#include "Kismet/GameplayStatics.h"
 #include "Engine/GameViewportClient.h"
 #include "UnrealEngine.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Engine/GameEngine.h"
-#include "Sound/AudioSettings.h"
 #include "Sound/SoundCue.h"
 #include "AudioDevice.h"
-#include "DynamicResolutionState.h"
 #include "HAL/PlatformFramePacer.h"
+#include "HDRHelper.h"
+#include "UnrealClient.h"
+#include "ComponentRecreateRenderStateContext.h"
+
+// For sandboxing migration of UserSettings from AppData\Local to AppData\LocalLow.
+#if PLATFORM_WINDOWS
+#include "Windows/WindowsPlatformProcess.h"
+#endif
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(GameUserSettings)
 
 extern EWindowMode::Type GetWindowModeType(EWindowMode::Type WindowMode);
 
@@ -96,6 +104,11 @@ EWindowMode::Type UGameUserSettings::GetLastConfirmedFullscreenMode() const
 
 void UGameUserSettings::SetFullscreenMode(EWindowMode::Type InFullscreenMode)
 {
+	if (FPlatformProperties::HasFixedResolution())
+	{
+		return;
+	}
+
 	if (FullscreenMode != InFullscreenMode)
 	{
 		switch (InFullscreenMode)
@@ -169,7 +182,7 @@ bool UGameUserSettings::IsVSyncDirty() const
 	if (GEngine && GEngine->GameViewport && GEngine->GameViewport->ViewportFrame)
 	{
 		static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.VSync"));
-		bIsDirty = (bUseVSync != (CVar->GetValueOnGameThread() != 0));
+		bIsDirty = (bUseVSync != (CVar->GetValueOnAnyThread() != 0));
 	}
 	return bIsDirty;
 }
@@ -211,7 +224,9 @@ void UGameUserSettings::SetToDefaults()
 	WindowPosY = GetDefaultWindowPosition().Y;
 	FullscreenMode = GetDefaultWindowMode();
 	FrameRateLimit = 0.0f;
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	MinResolutionScale = Scalability::MinResolutionScale;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	DesiredScreenWidth = 1280;
 	DesiredScreenHeight = 720;
 	LastUserConfirmedDesiredScreenWidth = DesiredScreenWidth;
@@ -254,7 +269,9 @@ void UGameUserSettings::UpdateResolutionQuality()
 	const int32 MinHeight = UKismetSystemLibrary::GetMinYResolutionFor3DView();
 	const int32 ScreenWidth = (FullscreenMode == EWindowMode::WindowedFullscreen) ? GetDesktopResolution().X : ResolutionSizeX;
 	const int32 ScreenHeight = (FullscreenMode == EWindowMode::WindowedFullscreen) ? GetDesktopResolution().Y : ResolutionSizeY;
-	MinResolutionScale = FMath::Max<float>(Scalability::MinResolutionScale, ((float)MinHeight / (float)ScreenHeight) * 100.0f);
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	MinResolutionScale = Scalability::MinResolutionScale;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	if (bUseDesiredScreenHeight)
 	{
@@ -262,7 +279,7 @@ void UGameUserSettings::UpdateResolutionQuality()
 	}
 	else
 	{
-		ScalabilityQuality.ResolutionQuality = FMath::Max(ScalabilityQuality.ResolutionQuality, MinResolutionScale);
+		ScalabilityQuality.ResolutionQuality = FMath::Max(ScalabilityQuality.ResolutionQuality, Scalability::MinResolutionScale);
 	}
 }
 
@@ -274,14 +291,14 @@ float UGameUserSettings::GetDefaultResolutionScale()
 	const int32 ClampedHeight = (ScreenHeight > 0 && DesiredScreenHeight > ScreenHeight) ? ScreenHeight : DesiredScreenHeight;
 
 	const float DesiredResQuality = FindResolutionQualityForScreenSize(ClampedWidth, ClampedHeight);
-	return FMath::Max(DesiredResQuality, MinResolutionScale);
+	return FMath::Max(DesiredResQuality, Scalability::MinResolutionScale);
 }
 
 float UGameUserSettings::GetRecommendedResolutionScale()
 {
 	const float RecommendedResQuality = FindResolutionQualityForScreenSize(LastRecommendedScreenWidth, LastRecommendedScreenHeight);
 
-	return FMath::Max(RecommendedResQuality, MinResolutionScale);
+	return FMath::Max(RecommendedResQuality, Scalability::MinResolutionScale);
 }
 
 float UGameUserSettings::FindResolutionQualityForScreenSize(float Width, float Height)
@@ -319,15 +336,6 @@ float UGameUserSettings::FindResolutionQualityForScreenSize(float Width, float H
 void UGameUserSettings::SetFrameRateLimitCVar(float InLimit)
 {
 	GEngine->SetMaxFPS(FMath::Max(InLimit, 0.0f));
-}
-
-void UGameUserSettings::SetSyncIntervalCVar(int32 InInterval)
-{
-	static IConsoleVariable* SyncIntervalCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("rhi.syncinterval"));
-	if (ensure(SyncIntervalCVar))
-	{
-		SyncIntervalCVar->Set(InInterval, ECVF_SetByCode);
-	}
 }
 
 void UGameUserSettings::SetSyncTypeCVar(int32 InType)
@@ -464,26 +472,21 @@ void UGameUserSettings::ApplyNonResolutionSettings()
 
 	IConsoleManager::Get().CallAllConsoleVariableSinks();
 
-	bool bWithEditor = false;
-#if WITH_EDITOR
-	if (GIsEditor)
-	{
-		bWithEditor = true;
-	}
-#endif
+	bool bEnableHDR = (IsHDRAllowed() && bUseHDRDisplayOutput);
 
-	bool bEnableHDR = (IsHDRAllowed() && bUseHDRDisplayOutput && !bWithEditor);
-
-	EnableHDRDisplayOutput(bEnableHDR, HDRDisplayOutputNits);
+	EnableHDRDisplayOutputInternal(bEnableHDR, HDRDisplayOutputNits, true);
 
 }
 
 void UGameUserSettings::ApplyResolutionSettings(bool bCheckForCommandLineOverrides)
 {
-#if UE_SERVER
-	return;
-#endif
+#if !UE_SERVER
 	QUICK_SCOPE_CYCLE_COUNTER(GameUserSettings_ApplyResolutionSettings);
+
+	if (FPlatformProperties::HasFixedResolution())
+	{
+		return;
+	}
 
 	ValidateSettings();
 
@@ -498,12 +501,17 @@ void UGameUserSettings::ApplyResolutionSettings(bool bCheckForCommandLineOverrid
 	}
 
 	IConsoleManager::Get().CallAllConsoleVariableSinks();
+#endif
 }
 
 void UGameUserSettings::ApplySettings(bool bCheckForCommandLineOverrides)
 {
-	ApplyResolutionSettings(bCheckForCommandLineOverrides);
-	ApplyNonResolutionSettings();
+	{
+		// Push recreate render state context to force single recreate instead of multiple recreates for each changed cvar
+		FGlobalComponentRecreateRenderStateContext Context;
+		ApplyResolutionSettings(bCheckForCommandLineOverrides);
+		ApplyNonResolutionSettings();
+	}
 	RequestUIUpdate();
 
 	SaveSettings();
@@ -515,6 +523,17 @@ void UGameUserSettings::LoadSettings(bool bForceReload/*=false*/)
 
 	if (bForceReload)
 	{
+        if (OnUpdateGameUserSettingsFileFromCloud.IsBound())
+        {
+            FString IniFileLocation = FPaths::GeneratedConfigDir() + UGameplayStatics::GetPlatformName() + "/" +  GGameUserSettingsIni + ".ini";
+            UE_LOG(LogTemp, Verbose, TEXT("%s"), *IniFileLocation);
+
+            if (!OnUpdateGameUserSettingsFileFromCloud.Execute(FString(*IniFileLocation)))
+            {
+                UE_LOG(LogTemp, Warning, TEXT("Failed to read the ini file from the Cloud interface %s"), *IniFileLocation);
+            }
+        }
+        
 		LoadConfigIni(bForceReload);
 	}
 	LoadConfig(GetClass(), *GGameUserSettingsIni);
@@ -536,6 +555,11 @@ void UGameUserSettings::LoadSettings(bool bForceReload/*=false*/)
 
 void UGameUserSettings::RequestResolutionChange(int32 InResolutionX, int32 InResolutionY, EWindowMode::Type InWindowMode, bool bInDoOverrides /* = true */)
 {
+	if (FPlatformProperties::HasFixedResolution())
+	{
+		return;
+	}
+
 	if (bInDoOverrides)
 	{
 		UGameEngine::ConditionallyOverrideSettings(InResolutionX, InResolutionY, InWindowMode);
@@ -551,12 +575,66 @@ void UGameUserSettings::SaveSettings()
 	// Save the Scalability state to the same ini file as it was loaded from in FEngineLoop::Preinit
 	Scalability::SaveState(GIsEditor ? GEditorSettingsIni : GGameUserSettingsIni);
 	SaveConfig(CPF_Config, *GGameUserSettingsIni);
+    
+    if (OnUpdateCloudDataFromGameUserSettings.IsBound())
+    {
+        FString IniFileLocation = FPaths::GeneratedConfigDir() + UGameplayStatics::GetPlatformName() + "/" +  GGameUserSettingsIni + ".ini";
+        UE_LOG(LogTemp, Verbose, TEXT("%s"), *IniFileLocation);
+
+        bool bDidSucceed = false;
+        bDidSucceed = OnUpdateCloudDataFromGameUserSettings.Execute(FString(*IniFileLocation));
+        
+        if (!bDidSucceed)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("Failed to load the ini file from the Cloud interface %s"), *IniFileLocation);
+        }
+    }
 }
 
 void UGameUserSettings::LoadConfigIni(bool bForceReload/*=false*/)
 {
-	// Load .ini, allowing merging
-	FConfigCacheIni::LoadGlobalIniFile(GGameUserSettingsIni, TEXT("GameUserSettings"), nullptr, bForceReload, false, true, true, *FPaths::GeneratedConfigDir());
+#if PLATFORM_WINDOWS
+	// If configured, try to migrate the user ini file by copying it from AppData\Local to AppData\LocalLow.
+	static const bool bShouldAutomigrateUserData = FPaths::ShouldSaveToUserDir() &&
+		FWindowsPlatformProcess::ShouldExpectLowIntegrityLevel() &&
+		(WINDOWS_LOWINTEGRITYLEVEL_AUTOMIGRATE_USERDATA || FParse::Param(FCommandLine::Get(), TEXT("AutomigrateUserDataToLowIntegrity")));
+	if (bShouldAutomigrateUserData)
+	{
+		static bool bAttemptedSettingsMigration = false;
+		if (!bAttemptedSettingsMigration)
+		{
+			bAttemptedSettingsMigration = true;
+
+			// The low integrity ini file path e.g. AppData\LocalLow\...
+			const FString LowIntegrityPath = FConfigCacheIni::GetDestIniFilename(*GGameUserSettingsIni, nullptr, *FPaths::GeneratedConfigDir());
+			if (LowIntegrityPath.StartsWith(FWindowsPlatformProcess::UserSettingsDir())) // Confirm that assumptions are valid.
+			{
+				// The medium integrity ini file path e.g. AppData\Local\...
+				const FString MediumIntegrityPath = LowIntegrityPath.Replace(FWindowsPlatformProcess::UserSettingsDir(), FWindowsPlatformProcess::UserSettingsDirMediumIntegrity());
+
+				// This file must exist for migration to proceed. We only migrate from medium integrity to low integrity, not the reverse.
+				if (FPaths::FileExists(MediumIntegrityPath))
+				{
+					FDateTime MediumIntegrityTimestamp, LowIntegrityTimestamp;
+					IFileManager::Get().GetTimeStampPair(*MediumIntegrityPath, *LowIntegrityPath, MediumIntegrityTimestamp, LowIntegrityTimestamp);
+					if (MediumIntegrityTimestamp > LowIntegrityTimestamp)
+					{
+						UE_LOG(LogTemp, Log, TEXT("Migrating config file to low integrity. %s to %s"), *MediumIntegrityPath, *LowIntegrityPath);
+						IFileManager::Get().Copy(*LowIntegrityPath, *MediumIntegrityPath, true);
+					}
+					else
+					{
+						UE_LOG(LogTemp, Log, TEXT("Skipping config file migration to low integrity. %s is newer than %s"), *LowIntegrityPath, *MediumIntegrityPath);
+					}
+				}
+			}
+		}
+	}
+#endif
+
+	FConfigContext Context = FConfigContext::ReadIntoGConfig();
+	Context.bForceReload = bForceReload;
+	Context.Load(TEXT("GameUserSettings"), GGameUserSettingsIni);
 }
 
 void UGameUserSettings::PreloadResolutionSettings(bool bAllowCmdLineOverrides /*= true*/)
@@ -671,13 +749,10 @@ void UGameUserSettings::ResetToCurrentSettings()
 		// Set the current dynamic resolution state
 		SetDynamicResolutionEnabled(GEngine->GetDynamicResolutionUserSetting());
 
-		// Reset to confirmed settings
-		FullscreenMode = LastConfirmedFullscreenMode;
-		ResolutionSizeX = LastUserConfirmedResolutionSizeX;
-		ResolutionSizeY = LastUserConfirmedResolutionSizeY;
-
-		DesiredScreenWidth = LastUserConfirmedDesiredScreenWidth;
-		DesiredScreenHeight = LastUserConfirmedDesiredScreenHeight;
+		// Reset confirmed settings
+		ConfirmVideoMode();
+		LastUserConfirmedDesiredScreenWidth = DesiredScreenWidth;
+		LastUserConfirmedDesiredScreenHeight = DesiredScreenHeight;
 
 		// Reset the quality settings to the current levels
 		ScalabilityQuality = Scalability::GetQualityLevels();
@@ -735,18 +810,10 @@ int32 UGameUserSettings::GetOverallScalabilityLevel() const
 	return ScalabilityQuality.GetSingleQualityLevel();
 }
 
-void UGameUserSettings::GetResolutionScaleInformation(float& CurrentScaleNormalized, int32& CurrentScaleValue, int32& MinScaleValue, int32& MaxScaleValue) const
-{
-	CurrentScaleValue = ScalabilityQuality.ResolutionQuality;
-	MinScaleValue = MinResolutionScale;
-	MaxScaleValue = Scalability::MaxResolutionScale;
-	CurrentScaleNormalized = ((float)CurrentScaleValue - (float)MinScaleValue) / (float)(MaxScaleValue - MinScaleValue);
-}
-
 void UGameUserSettings::GetResolutionScaleInformationEx(float& CurrentScaleNormalized, float& CurrentScaleValue, float& MinScaleValue, float& MaxScaleValue) const
 {
 	CurrentScaleValue = ScalabilityQuality.ResolutionQuality;
-	MinScaleValue = MinResolutionScale;
+	MinScaleValue = Scalability::MinResolutionScale;
 	MaxScaleValue = Scalability::MaxResolutionScale;
 	CurrentScaleNormalized = ((float)CurrentScaleValue - (float)MinScaleValue) / (float)(MaxScaleValue - MinScaleValue);
 }
@@ -759,14 +826,9 @@ float UGameUserSettings::GetResolutionScaleNormalized() const
 	return CurrentScaleNormalized;
 }
 
-void UGameUserSettings::SetResolutionScaleValue(int32 NewScaleValue)
-{
-	SetResolutionScaleValueEx((float)NewScaleValue);
-}
-
 void UGameUserSettings::SetResolutionScaleValueEx(float NewScaleValue)
 {
-	ScalabilityQuality.ResolutionQuality = FMath::Clamp(NewScaleValue, MinResolutionScale, Scalability::MaxResolutionScale);
+	ScalabilityQuality.ResolutionQuality = FMath::Clamp(NewScaleValue, Scalability::MinResolutionScale, Scalability::MaxResolutionScale);
 	const int32 ScreenWidth = (FullscreenMode == EWindowMode::WindowedFullscreen) ? GetDesktopResolution().X : ResolutionSizeX;
 	const int32 ScreenHeight = (FullscreenMode == EWindowMode::WindowedFullscreen) ? GetDesktopResolution().Y : ResolutionSizeY;
 	DesiredScreenWidth = ScreenWidth * ScalabilityQuality.ResolutionQuality / 100.0f;
@@ -775,7 +837,7 @@ void UGameUserSettings::SetResolutionScaleValueEx(float NewScaleValue)
 
 void UGameUserSettings::SetResolutionScaleNormalized(float NewScaleNormalized)
 {
-	const float RemappedValue = FMath::Lerp((float)MinResolutionScale, (float)Scalability::MaxResolutionScale, NewScaleNormalized);
+	const float RemappedValue = FMath::Lerp((float)Scalability::MinResolutionScale, (float)Scalability::MaxResolutionScale, NewScaleNormalized);
 	SetResolutionScaleValueEx(RemappedValue);
 }
 
@@ -797,6 +859,26 @@ void UGameUserSettings::SetShadowQuality(int32 Value)
 int32 UGameUserSettings::GetShadowQuality() const
 {
 	return ScalabilityQuality.ShadowQuality;
+}
+
+void UGameUserSettings::SetGlobalIlluminationQuality(int32 Value)
+{
+	ScalabilityQuality.SetGlobalIlluminationQuality(Value);
+}
+
+int32 UGameUserSettings::GetGlobalIlluminationQuality() const
+{
+	return ScalabilityQuality.GlobalIlluminationQuality;
+}
+
+void UGameUserSettings::SetReflectionQuality(int32 Value)
+{
+	ScalabilityQuality.SetReflectionQuality(Value);
+}
+
+int32 UGameUserSettings::GetReflectionQuality() const
+{
+	return ScalabilityQuality.ReflectionQuality;
 }
 
 void UGameUserSettings::SetAntiAliasingQuality(int32 Value)
@@ -890,6 +972,11 @@ bool UGameUserSettings::SupportsHDRDisplayOutput() const
 
 void UGameUserSettings::EnableHDRDisplayOutput(bool bEnable, int32 DisplayNits /*= 1000*/)
 {
+	EnableHDRDisplayOutputInternal(bEnable, DisplayNits, false);
+}
+
+void UGameUserSettings::EnableHDRDisplayOutputInternal(bool bEnable, int32 DisplayNits, bool bFromUserSettings)
+{
 	static IConsoleVariable* CVarHDROutputEnabled = IConsoleManager::Get().FindConsoleVariable(TEXT("r.HDR.EnableHDROutput"));
 
 	if (CVarHDROutputEnabled)
@@ -901,13 +988,13 @@ void UGameUserSettings::EnableHDRDisplayOutput(bool bEnable, int32 DisplayNits /
 		}
 
 		// Only support 1000 and 2000 nit curves so push to closest
-		int32 DisplayNitLevel = (DisplayNits < 1500) ? 1000 : 2000;
+		int32 DisplayNitLevel = DisplayNits;
 
 		// Apply device-specific output encoding
 		if (bEnable)
 		{
 #if PLATFORM_WINDOWS
-			if (IsRHIDeviceNVIDIA() || IsRHIDeviceAMD())
+			if (GRHIHDRNeedsVendorExtensions)
 			{
 				// Force exclusive fullscreen
 				SetPreferredFullscreenMode(0);
@@ -916,17 +1003,17 @@ void UGameUserSettings::EnableHDRDisplayOutput(bool bEnable, int32 DisplayNits /
 				RequestUIUpdate();
 			}
 #endif
-			CVarHDROutputEnabled->Set(1, ECVF_SetByGameSetting);
+			CVarHDROutputEnabled->Set(1, bFromUserSettings ? ECVF_SetByGameSetting : ECVF_SetByCode);
 		}
 
 		// Always test this branch as can be used to flush errors
 		if (!bEnable)
 		{
-			CVarHDROutputEnabled->Set(0, ECVF_SetByGameSetting);
+			CVarHDROutputEnabled->Set(0, bFromUserSettings ? ECVF_SetByGameSetting : ECVF_SetByCode);
 		}
 
 		// Update final requested state for saved config
-#if !PLATFORM_PS4 && !PLATFORM_USES_FIXED_HDR_SETTING
+#if !PLATFORM_USES_FIXED_HDR_SETTING
 		// Do not override the user setting on console (we rely on the OS setting)
 		bUseHDRDisplayOutput = bEnable;
 #endif
@@ -943,3 +1030,4 @@ bool UGameUserSettings::IsHDREnabled() const
 {
 	return bUseHDRDisplayOutput;
 }
+

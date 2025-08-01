@@ -52,7 +52,6 @@ public:
 	virtual void BuildObjectBindingTrackMenu(FMenuBuilder& MenuBuilder, const TArray<FGuid>& ObjectBindings, const UClass* ObjectClass) override;
 	virtual TSharedRef<ISequencerSection> MakeSectionInterface( UMovieSceneSection& SectionObject, UMovieSceneTrack& Track, FGuid ObjectBinding ) override;
 	virtual bool SupportsType( TSubclassOf<UMovieSceneTrack> Type ) const override;
-	virtual void BuildTrackContextMenu( FMenuBuilder& MenuBuilder, UMovieSceneTrack* Track ) override;
 	
 	void AddParticleKey(TArray<FGuid> ObjectGuids);
 private:
@@ -78,7 +77,7 @@ public:
 
 	// ISequencerSection interface
 	virtual UMovieSceneSection* GetSectionObject() override;
-	virtual float GetSectionHeight() const override;
+	virtual float GetSectionHeight(const UE::Sequencer::FViewDensityInfo& ViewDensity) const override;
 	virtual int32 OnPaintSection( FSequencerSectionPainter& InPainter ) const override;
 	virtual bool SectionIsResizable() const override { return false; }
 

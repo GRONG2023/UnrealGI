@@ -5,8 +5,6 @@
 #include "NavMesh/RecastNavMeshGenerator.h"
 #include "NavigationSystem.h"
 #include "Engine/World.h"
-#include "AbstractNavData.h"
-#include "NavigationOctree.h"
 #include "NavCollision.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "Components/StaticMeshComponent.h"
@@ -14,20 +12,20 @@
 
 namespace
 {
-	FORCEINLINE_DEBUGGABLE float RawGeometryFall(const AActor* Querier, const FVector& FallStart, const float FallLimit)
+	FORCEINLINE_DEBUGGABLE FVector::FReal RawGeometryFall(const AActor* Querier, const FVector& FallStart, const FVector::FReal FallLimit)
 	{
-		float FallDownHeight = 0.f;
+		FVector::FReal FallDownHeight = 0.;
 
 		UE_VLOG_SEGMENT(Querier, LogNavigation, Log, FallStart, FallStart + FVector(0, 0, -FallLimit)
 			, FColor::Red, TEXT("TerrainTrace"));
 
 		FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(RawGeometryFall), true, Querier);
 		FHitResult Hit;
-		const bool bHit = Querier->GetWorld()->LineTraceSingleByChannel(Hit, FallStart, FallStart + FVector(0, 0, -FallLimit), ECC_WorldStatic, TraceParams);
+		const bool bHit = Querier->GetWorld()->LineTraceSingleByChannel(Hit, FallStart, FallStart + FVector(0., 0., -FallLimit), ECC_WorldStatic, TraceParams);
 		if (bHit)
 		{
 			UE_VLOG_LOCATION(Querier, LogNavigation, Log, Hit.Location, 15, FColor::Red, TEXT("%s")
-				, Hit.Actor.IsValid() ? *Hit.Actor->GetName() : TEXT("NULL"));
+				, *Hit.HitObjectHandle.GetName());
 
 			if (Cast<UStaticMeshComponent>(Hit.Component.Get()))
 			{
@@ -43,14 +41,14 @@ namespace
 
 namespace NavigationHelper
 {
-	void GatherCollision(UBodySetup* RigidBody, TNavStatArray<FVector>& OutVertexBuffer, TNavStatArray<int32>& OutIndexBuffer, const FTransform& LocalToWorld)
+	void GatherCollision(UBodySetup* RigidBody, TNavStatArray<FVector>& OutVertexBuffer, TNavStatArray<int32>& OutIndexBuffer, const FTransform& LocalToWorld, FBox& OutBounds)
 	{
 		if (RigidBody == NULL)
 		{
 			return;
 		}
 #if WITH_RECAST
-		FRecastNavMeshGenerator::ExportRigidBodyGeometry(*RigidBody, OutVertexBuffer, OutIndexBuffer, LocalToWorld);
+		FRecastNavMeshGenerator::ExportRigidBodyGeometry(*RigidBody, OutVertexBuffer, OutIndexBuffer, OutBounds, LocalToWorld);
 #endif // WITH_RECAST
 	}
 
@@ -64,14 +62,20 @@ namespace NavigationHelper
 		FRecastNavMeshGenerator::ExportRigidBodyGeometry(*RigidBody
 			, NavCollision->GetMutableTriMeshCollision().VertexBuffer, NavCollision->GetMutableTriMeshCollision().IndexBuffer
 			, NavCollision->GetMutableConvexCollision().VertexBuffer, NavCollision->GetMutableConvexCollision().IndexBuffer
-			, NavCollision->ConvexShapeIndices);
+			, NavCollision->ConvexShapeIndices
+			, NavCollision->Bounds);
 #endif // WITH_RECAST
 	}
 
 	void GatherCollision(const FKAggregateGeom& AggGeom, UNavCollision& NavCollision)
 	{
 #if WITH_RECAST
-		FRecastNavMeshGenerator::ExportAggregatedGeometry(AggGeom, NavCollision.GetMutableConvexCollision().VertexBuffer, NavCollision.GetMutableConvexCollision().IndexBuffer, NavCollision.ConvexShapeIndices);
+		FRecastNavMeshGenerator::ExportAggregatedGeometry(
+			AggGeom,
+			NavCollision.GetMutableConvexCollision().VertexBuffer,
+			 NavCollision.GetMutableConvexCollision().IndexBuffer,
+			 NavCollision.ConvexShapeIndices,
+			 NavCollision.Bounds);
 #endif // WITH_RECAST
 	}
 
@@ -105,9 +109,9 @@ namespace NavigationHelper
 			if (Link.MaxFallDownLength > 0)
 			{
 				const FVector WorldRight = OwnerData.LinkToWorld.TransformPosition(Link.Right);
-				const float FallDownHeight = RawGeometryFall(OwnerData.Actor, WorldRight, Link.MaxFallDownLength);
+				const FVector::FReal FallDownHeight = RawGeometryFall(OwnerData.Actor, WorldRight, Link.MaxFallDownLength);
 
-				if (FallDownHeight > 0.f)
+				if (FallDownHeight > 0.)
 				{
 					// @todo maybe it's a good idea to clear ModifiedLink.MaxFallDownLength here
 					UE_VLOG_SEGMENT(OwnerData.Actor, LogNavigation, Log, WorldRight, WorldRight + FVector(0, 0, -FallDownHeight), FColor::Green, TEXT("FallDownHeight %d"), LinkIndex);
@@ -119,9 +123,9 @@ namespace NavigationHelper
 			if (Link.LeftProjectHeight > 0)
 			{
 				const FVector WorldLeft = OwnerData.LinkToWorld.TransformPosition(Link.Left);
-				const float FallDownHeight = RawGeometryFall(OwnerData.Actor, WorldLeft, Link.LeftProjectHeight);
+				const FVector::FReal FallDownHeight = RawGeometryFall(OwnerData.Actor, WorldLeft, Link.LeftProjectHeight);
 
-				if (FallDownHeight > 0.f)
+				if (FallDownHeight > 0.)
 				{
 					// @todo maybe it's a good idea to clear ModifiedLink.LeftProjectHeight here
 					UE_VLOG_SEGMENT(OwnerData.Actor, LogNavigation, Log, WorldLeft, WorldLeft + FVector(0, 0, -FallDownHeight), FColor::Green, TEXT("LeftProjectHeight %d"), LinkIndex);
@@ -155,17 +159,17 @@ namespace NavigationHelper
 				const FVector WorldRightStart = OwnerData.LinkToWorld.TransformPosition(Link.RightStart);
 				const FVector WorldRightEnd = OwnerData.LinkToWorld.TransformPosition(Link.RightEnd);
 
-				const float FallDownHeightStart = RawGeometryFall(OwnerData.Actor, WorldRightStart, Link.MaxFallDownLength);
-				const float FallDownHeightEnd = RawGeometryFall(OwnerData.Actor, WorldRightEnd, Link.MaxFallDownLength);
+				const FVector::FReal FallDownHeightStart = RawGeometryFall(OwnerData.Actor, WorldRightStart, Link.MaxFallDownLength);
+				const FVector::FReal FallDownHeightEnd = RawGeometryFall(OwnerData.Actor, WorldRightEnd, Link.MaxFallDownLength);
 
-				if (FallDownHeightStart > 0.f)
+				if (FallDownHeightStart > 0.)
 				{
 					// @todo maybe it's a good idea to clear ModifiedLink.MaxFallDownLength here
 					UE_VLOG_SEGMENT(OwnerData.Actor, LogNavigation, Log, WorldRightStart, WorldRightStart + FVector(0, 0, -FallDownHeightStart), FColor::Green, TEXT("FallDownHeightStart %d"), LinkIndex);
 
 					Link.RightStart.Z -= FallDownHeightStart;
 				}
-				if (FallDownHeightEnd > 0.f)
+				if (FallDownHeightEnd > 0.)
 				{
 					// @todo maybe it's a good idea to clear ModifiedLink.MaxFallDownLength here
 					UE_VLOG_SEGMENT(OwnerData.Actor, LogNavigation, Log, WorldRightEnd, WorldRightEnd + FVector(0, 0, -FallDownHeightEnd), FColor::Green, TEXT("FallDownHeightEnd %d"), LinkIndex);
@@ -233,13 +237,7 @@ namespace NavigationHelper
 
 	bool IsBodyNavigationRelevant(const UBodySetup& BodySetup)
 	{
-#if PHYSICS_INTERFACE_PHYSX
-		const bool bBodyHasGeometry = (BodySetup.AggGeom.GetElementCount() > 0 || BodySetup.TriMeshes.Num() > 0);
-#elif WITH_CHAOS
-		const bool bBodyHasGeometry = (BodySetup.AggGeom.GetElementCount() > 0 || BodySetup.ChaosTriMeshes.Num() > 0);
-#else
-		const bool bBodyHasGeometry = (BodySetup.AggGeom.GetElementCount() > 0);
-#endif
+		const bool bBodyHasGeometry = (BodySetup.AggGeom.GetElementCount() > 0 || BodySetup.TriMeshGeometries.Num() > 0);
 
 		// has any colliding geometry
 		return bBodyHasGeometry
@@ -247,25 +245,6 @@ namespace NavigationHelper
 			&& (BodySetup.DefaultInstance.GetResponseToChannel(ECC_Pawn) == ECR_Block || BodySetup.DefaultInstance.GetResponseToChannel(ECC_Vehicle) == ECR_Block)
 			// AND has full colliding capabilities 
 			&& BodySetup.DefaultInstance.GetCollisionEnabled() == ECollisionEnabled::QueryAndPhysics;
-	}
-
-	//////////////////////////////////////////////////////////////////////////
-	// DEPRECATED FUNCTIONS
-
-	void DefaultNavLinkProcessorImpl(FCompositeNavModifier* OUT CompositeModifier, const AActor* Actor, const TArray<FNavigationLink>& IN NavLinks)
-	{
-		if (Actor)
-		{
-			DefaultNavLinkProcessorImpl(CompositeModifier, FNavLinkOwnerData(*Actor), NavLinks);
-		}
-	}
-
-	void DefaultNavLinkSegmentProcessorImpl(FCompositeNavModifier* OUT CompositeModifier, const AActor* Actor, const TArray<FNavigationSegmentLink>& IN NavLinks)
-	{
-		if (Actor)
-		{
-			DefaultNavLinkSegmentProcessorImpl(CompositeModifier, FNavLinkOwnerData(*Actor), NavLinks);
-		}
 	}
 }
 
@@ -298,21 +277,32 @@ UObject* INavLinkCustomInterface::GetLinkOwner() const
 
 uint32 INavLinkCustomInterface::GetUniqueId()
 {
-	UE_LOG(LogNavLink, VeryVerbose, TEXT("%s id: %u."), ANSI_TO_TCHAR(__FUNCTION__), NextUniqueId);
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	UE_LOG(LogNavLink, VeryVerbose, TEXT("%hs id: %u."), __FUNCTION__, NextUniqueId);
 	return NextUniqueId++;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
-void INavLinkCustomInterface::UpdateUniqueId(uint32 AlreadyUsedId)
+void INavLinkCustomInterface::UpdateUniqueId(FNavLinkId AlreadyUsedId)
 {
-	UE_CLOG(AlreadyUsedId + 1 > NextUniqueId, LogNavLink, VeryVerbose, TEXT("%s, updating NextUniqueId to: %u."), ANSI_TO_TCHAR(__FUNCTION__), AlreadyUsedId + 1)
-	NextUniqueId = FMath::Max(NextUniqueId, AlreadyUsedId + 1);
+	// Only update NextUniqueId for old style incremental Ids.
+	if (AlreadyUsedId.IsLegacyId())
+	{
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		UE_CLOG(AlreadyUsedId.GetId() + 1 > NextUniqueId, LogNavLink, VeryVerbose, TEXT("%hs, updating NextUniqueId to: %llu."), __FUNCTION__, AlreadyUsedId.GetId() + 1)
+		const uint64 NextId = FMath::Max((uint64)NextUniqueId, AlreadyUsedId.GetId() + 1);
+		ensureMsgf(NextId <= TNumericLimits<uint32>::Max(), TEXT("Overflowing uint32 using legacy nav link id system!"));
+
+		NextUniqueId = (uint32)NextId;
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	}
 }
 
 FNavigationLink INavLinkCustomInterface::GetModifier(const INavLinkCustomInterface* CustomNavLink)
 {
 	FNavigationLink LinkMod;
 	LinkMod.SetAreaClass(CustomNavLink->GetLinkAreaClass());
-	LinkMod.UserId = CustomNavLink->GetLinkId();
+	LinkMod.NavLinkId = CustomNavLink->GetId();
 
 	ENavLinkDirection::Type LinkDirection = ENavLinkDirection::BothWays;
 	CustomNavLink->GetLinkData(LinkMod.Left, LinkMod.Right, LinkDirection);
@@ -322,13 +312,17 @@ FNavigationLink INavLinkCustomInterface::GetModifier(const INavLinkCustomInterfa
 	return LinkMod;
 }
 
-void INavLinkCustomInterface::OnPreWorldInitialization(UWorld* World, const UWorld::InitializationValues IVS)
+void INavLinkCustomInterface::OnPreWorldInitialization(UWorld* World, const FWorldInitializationValues IVS)
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	ResetUniqueId();
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 void INavLinkCustomInterface::ResetUniqueId()
 {
 	UE_LOG(LogNavLink, VeryVerbose, TEXT("Reset navlink id."));
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	NextUniqueId = 1;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }

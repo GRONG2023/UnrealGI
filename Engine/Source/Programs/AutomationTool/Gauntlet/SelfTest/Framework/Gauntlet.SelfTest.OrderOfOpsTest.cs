@@ -91,12 +91,23 @@ namespace Gauntlet.SelfTest
 			return TestResult.Passed;
 		}
 
+		/// <summary>
+		/// Manually set the value of the test result
+		/// </summary>
+		public void SetTestResult(TestResult testResult)
+		{
+		}
+
 		public string GetTestSummary()
 		{
 			SetNewStage(TestStages.Summary);
 			return "";
 		}
 
+		public virtual void AddTestEvent(UnrealTestEvent InEvent)
+		{
+
+		}
 
 		public TestStatus GetTestStatus()
 		{
@@ -140,7 +151,11 @@ namespace Gauntlet.SelfTest
 			return true;
 		}
 
-		public void StopTest(bool WasCancelled)
+		public virtual void SetCancellationReason(string Reason)
+		{
+		}
+
+		public void StopTest(StopReason InReason)
 		{
 			SetNewStage(TestStages.StopTest);
 		}
@@ -158,6 +173,13 @@ namespace Gauntlet.SelfTest
 
 		public void SetContext(ITestContext InContext)
 		{
+		}
+
+		public virtual string GetRunLocalCommand(string LaunchingBuildCommand)
+		{
+			string CommandToRunLocally =
+				string.Format("RunUAT {0} -Test={1} ", LaunchingBuildCommand, GetType());
+			return CommandToRunLocally;
 		}
 
 		public void CleanupTest()

@@ -148,6 +148,23 @@ FArchive& FArchiveUObjectFromStructuredArchiveImpl::operator<<(FWeakObjectPtr& V
 	return *this;
 }
 
+FArchive& FArchiveUObjectFromStructuredArchiveImpl::operator<<(FObjectPtr& Value)
+{
+	OpenArchive();
+
+	if (InnerArchive.IsTextFormat())
+	{
+		UObject* Obj = Value.Get();
+		*this << Obj;
+		Value = Obj;
+	}
+	else
+	{
+		InnerArchive << Value;
+	}
+	return *this;
+}
+
 void FArchiveUObjectFromStructuredArchiveImpl::PushFileRegionType(EFileRegionType Type)
 {
 	check(CurrentFileRegionType == EFileRegionType::None);
@@ -183,25 +200,25 @@ bool FArchiveUObjectFromStructuredArchiveImpl::Finalize(FStructuredArchive::FRec
 	bool bShouldSerialize = Super::Finalize(Record);
 	if (bShouldSerialize)
 	{
-		TOptional<FStructuredArchive::FSlot> LazyObjectPtrsSlot = Record.TryEnterField(SA_FIELD_NAME(TEXT("LazyObjectPtrs")), LazyObjectPtrs.Num() > 0);
+		TOptional<FStructuredArchive::FSlot> LazyObjectPtrsSlot = Record.TryEnterField(TEXT("LazyObjectPtrs"), LazyObjectPtrs.Num() > 0);
 		if (LazyObjectPtrsSlot.IsSet())
 		{
 			LazyObjectPtrsSlot.GetValue() << LazyObjectPtrs;
 		}
 
-		TOptional<FStructuredArchive::FSlot> SoftObjectPtrsSlot = Record.TryEnterField(SA_FIELD_NAME(TEXT("SoftObjectPtrs")), SoftObjectPtrs.Num() > 0);
+		TOptional<FStructuredArchive::FSlot> SoftObjectPtrsSlot = Record.TryEnterField(TEXT("SoftObjectPtrs"), SoftObjectPtrs.Num() > 0);
 		if (SoftObjectPtrsSlot.IsSet())
 		{
 			SoftObjectPtrsSlot.GetValue() << SoftObjectPtrs;
 		}
 
-		TOptional<FStructuredArchive::FSlot> SoftObjectPathsSlot = Record.TryEnterField(SA_FIELD_NAME(TEXT("SoftObjectPaths")), SoftObjectPaths.Num() > 0);
+		TOptional<FStructuredArchive::FSlot> SoftObjectPathsSlot = Record.TryEnterField(TEXT("SoftObjectPaths"), SoftObjectPaths.Num() > 0);
 		if (SoftObjectPathsSlot.IsSet())
 		{
 			SoftObjectPathsSlot.GetValue() << SoftObjectPaths;
 		}
 
-		TOptional<FStructuredArchive::FSlot> WeakObjectPtrsSlot = Record.TryEnterField(SA_FIELD_NAME(TEXT("WeakObjectPtrs")), WeakObjectPtrs.Num() > 0);
+		TOptional<FStructuredArchive::FSlot> WeakObjectPtrsSlot = Record.TryEnterField(TEXT("WeakObjectPtrs"), WeakObjectPtrs.Num() > 0);
 		if (WeakObjectPtrsSlot.IsSet())
 		{
 			WeakObjectPtrsSlot.GetValue() << WeakObjectPtrs;

@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Framework/Docking/SDockingSplitter.h"
+
+#include "SDockingArea.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Framework/Docking/SDockingTabStack.h"
 
@@ -41,6 +43,14 @@ void SDockingSplitter::AddChildNode( const TSharedRef<SDockingNode>& InChild, in
 	InChild->SetParentNode( SharedThis(this) );
 }
 
+void SDockingSplitter::OnResized()
+{
+	if (TSharedPtr<SDockingArea> Area = GetDockArea())
+	{
+		Area->GetTabManager()->RequestSavePersistentLayout();
+	}
+}
+
 void SDockingSplitter::ReplaceChild( const TSharedRef<SDockingNode>& InChildToReplace, const TSharedRef<SDockingNode>& Replacement )
 {
 	// We want to replace this placeholder with whatever is being dragged.
@@ -50,13 +60,11 @@ void SDockingSplitter::ReplaceChild( const TSharedRef<SDockingNode>& InChildToRe
 
 	Replacement->SetSizeCoefficient(InChildToReplace->GetSizeCoefficient());
 
-	Splitter->SlotAt( IndexInParentSplitter )
-	.Value( TAttribute<float>(Replacement, &SDockingNode::GetSizeCoefficient) )
-	.OnSlotResized( SSplitter::FOnSlotResized::CreateSP( Replacement, &SDockingNode::SetSizeCoefficient ) )
-	.SizeRule( TAttribute<SSplitter::ESizeRule>(Replacement, &SDockingNode::GetSizeRule) )
-	[
-		Replacement
-	];
+	SSplitter::FSlot& Slot = Splitter->SlotAt(IndexInParentSplitter);
+	Slot.SetSizeValue(TAttribute<float>(Replacement, &SDockingNode::GetSizeCoefficient));
+	Slot.OnSlotResized().BindSP(Replacement, &SDockingNode::SetSizeCoefficient);
+	Slot.SetSizingRule(TAttribute<SSplitter::ESizeRule>(Replacement, &SDockingNode::GetSizeRule));
+	Slot[Replacement];
 
 	Replacement->SetParentNode( SharedThis(this) );
 }
@@ -85,6 +93,47 @@ bool SDockingSplitter::DoesDirectionMatchOrientation( SDockingNode::RelativeDire
 SDockingNode::ECleanupRetVal SDockingSplitter::MostResponsibility( SDockingNode::ECleanupRetVal A, SDockingNode::ECleanupRetVal B )
 {
 	return FMath::Min(A, B);
+}
+
+void SDockingSplitter::AdjustDockedTabsIfNeeded()
+{
+	TSharedPtr<SDockingArea> DockingArea = nullptr;
+
+	if (ParentNodePtr != nullptr && ParentNodePtr.IsValid())
+	{
+		DockingArea = ParentNodePtr.Pin()->GetDockArea().ToSharedRef();
+	}
+	else if (GetNodeType() == DockArea)
+	{
+		DockingArea = StaticCastSharedRef<SDockingArea>(AsShared());
+	}
+
+	// if is in floating window, set the first docking tab stack to have it's tab well unhidden.
+	if (DockingArea != nullptr && DockingArea->GetParentWindow().IsValid())
+	{
+		for (const TSharedRef<SDockingNode>& ChildNode : Children)
+		{
+			/*
+			 * if the node type is a tab stack AND it is visible, this must be the first tab stack and we should not
+			 * hide the tabwell. Unhide it and break out of the method, no need to go further
+			 */
+			if (ChildNode->GetNodeType() == DockTabStack && ChildNode->GetVisibility() == EVisibility::Visible)
+			{
+				TSharedRef<SDockingTabStack> TabStack = StaticCastSharedRef<SDockingTabStack>(ChildNode);
+				if (TabStack->IsTabWellHidden())
+				{
+					TabStack->SetTabWellHidden(false);
+				}
+				break;
+			}
+			// else if  node type is splitter, the first tab stack might be in there... check its children to see
+			else if (ChildNode->GetNodeType() == DockSplitter)
+			{
+				TSharedRef<SDockingSplitter> ChildSplitter = StaticCastSharedRef<SDockingSplitter>(ChildNode);
+				ChildSplitter->AdjustDockedTabsIfNeeded();
+			}
+		}
+	}
 }
 
 SDockingNode::ECleanupRetVal SDockingSplitter::CleanUpNodes()
@@ -181,7 +230,7 @@ SDockingNode::ECleanupRetVal SDockingSplitter::CleanUpNodes()
 		const bool bIsDockArea = !(this->ParentNodePtr.IsValid());
 		if (!bIsDockArea)
 		{
-			this->Visibility = EVisibility::Collapsed;
+			SetVisibility(EVisibility::Collapsed);
 		}		
 	}
 		
@@ -272,9 +321,9 @@ TArray< TSharedRef<SDockingNode> > SDockingSplitter::GetChildNodesRecursively() 
 	return ChildNodes;
 }
 
-TArray< TSharedRef<SDockTab> > SDockingSplitter::GetAllChildTabs() const
+TArray<TSharedRef<SDockTab>> SDockingSplitter::GetAllChildTabs() const
 {
-	TArray< TSharedRef<SDockTab> > ChildTabs;
+	TArray<TSharedRef<SDockTab>> ChildTabs;
 	for (int32 i = 0; i < Children.Num(); ++i)
 	{
 		const TSharedRef<SDockingNode>& Child = Children[i];
@@ -283,6 +332,18 @@ TArray< TSharedRef<SDockTab> > SDockingSplitter::GetAllChildTabs() const
 	return ChildTabs;
 }
 
+
+int32 SDockingSplitter::GetNumTabs() const
+{
+	int32 NumTabs = 0;
+	for (int32 i = 0; i < Children.Num(); ++i)
+	{
+		const TSharedRef<SDockingNode>& Child = Children[i];
+		NumTabs += Child->GetNumTabs();
+	}
+
+	return NumTabs;
+}
 
 EOrientation SDockingSplitter::GetOrientation() const
 {
@@ -332,7 +393,7 @@ TSharedRef<SDockingTabStack> SDockingSplitter::FindTabStackToHouseWindowIcon() c
 
 TSharedRef<SDockingNode> SDockingSplitter::FindTabStack(ETabStackToFind FindMe) const
 {
-	auto FindFirstVisibleChild = [=]() -> TSharedRef<SDockingNode>
+	auto FindFirstVisibleChild = [this]() -> TSharedRef<SDockingNode>
 	{
 		for (auto ChildNode : Children)
 		{
@@ -346,7 +407,7 @@ TSharedRef<SDockingNode> SDockingSplitter::FindTabStack(ETabStackToFind FindMe) 
 		return Children[0];
 	};
 
-	auto FindLastVisibleChild = [=]() -> TSharedRef<SDockingNode>
+	auto FindLastVisibleChild = [this]() -> TSharedRef<SDockingNode>
 	{
 		for (int32 i = Children.Num() - 1; i >= 0; --i)
 		{

@@ -1,13 +1,27 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Misc/EngineVersion.h"
+
+#include "BuildSettings.h"
+#include "Math/NumericLimits.h"
+#include "Misc/CString.h"
 #include "Misc/Guid.h"
 #include "Misc/LazySingleton.h"
-#include "Serialization/CustomVersion.h"
 #include "Runtime/Launch/Resources/Version.h"
+#include "Serialization/Archive.h"
+#include "Serialization/CustomVersion.h"
+#include "Serialization/StructuredArchiveAdapters.h"
+#include "Serialization/StructuredArchiveNameHelpers.h"
+#include "Serialization/StructuredArchiveSlots.h"
 #include "UObject/ReleaseObjectVersion.h"
-#include "BuildSettings.h"
-#include "CoreGlobals.h"
+#include "HAL/IConsoleManager.h" // for FAutoConsoleVariableRef
+
+int32 GSkipChangelistCompatibilityVersionCheck = 0;
+static FAutoConsoleVariableRef CSkipChangelistCompatibilityVersionCheck(
+	TEXT("s.SkipChangelistCompatibilityVersionCheck"),
+	GSkipChangelistCompatibilityVersionCheck,
+	TEXT("If true, engine version compatibility checks will not use changelist numbers to determine compatibility. NOTE: Changelist compatibility checks are automatically skipped in licensee builds."),
+	ECVF_Default);
 
 FEngineVersionBase::FEngineVersionBase(uint16 InMajor, uint16 InMinor, uint16 InPatch, uint32 InChangelist)
 : Major(InMajor)
@@ -115,7 +129,11 @@ bool FEngineVersion::IsCompatibleWith(const FEngineVersionBase &Other) const
 	}
 	else
 	{
-		return FEngineVersion::GetNewest(*this, Other, nullptr) != EVersionComparison::Second;
+		EVersionComponent ConflictingComponent = EVersionComponent::Minor;
+		EVersionComparison CompareResult = FEngineVersion::GetNewest(*this, Other, &ConflictingComponent);
+		
+		const bool bIsCompatible = (CompareResult != EVersionComparison::Second) || (GSkipChangelistCompatibilityVersionCheck && ConflictingComponent == EVersionComponent::Changelist);
+		return bIsCompatible;
 	}
 }
 
@@ -244,20 +262,7 @@ void operator<<(FStructuredArchive::FSlot Slot, FEngineVersion &Version)
 	}
 }
 
-bool ReleaseObjectVersionValidator(const FCustomVersion& Version, const FCustomVersionArray& AllVersions, const TCHAR* DebugContext)
-{
-	// Any asset saved as ReleaseObjectVersion 31 or 32 will be broken in the future due to the
-	// inadvertent changing of release object version in another stream
-	// Asset must be resaved with an appropriate version of the engine to arrange its versions correctly
-	const bool bInvalidReleaseObjectVersion = (Version.Version == FReleaseObjectVersion::ReleaseObjectVersionFixup || Version.Version == FReleaseObjectVersion::PinTypeIncludesUObjectWrapperFlag);
-	if (bInvalidReleaseObjectVersion)
-	{
-		UE_LOG(LogInit, Error, TEXT("Package %s must be resaved with an appropriate engine version or else future versions will be incorrectly applied."), DebugContext ? DebugContext : TEXT("(unknown)"));
-	}
-	return !bInvalidReleaseObjectVersion;
-}
-
 // Unique Release Object version id
 const FGuid FReleaseObjectVersion::GUID(0x9C54D522, 0xA8264FBE, 0x94210746, 0x61B482D0);
 // Register Release custom version with Core
-FCustomVersionRegistration GRegisterReleaseObjectVersion(FReleaseObjectVersion::GUID, FReleaseObjectVersion::LatestVersion, TEXT("Release"), (FPlatformProperties::RequiresCookedData() ? nullptr : &ReleaseObjectVersionValidator));
+FCustomVersionRegistration GRegisterReleaseObjectVersion(FReleaseObjectVersion::GUID, FReleaseObjectVersion::LatestVersion, TEXT("Release"));

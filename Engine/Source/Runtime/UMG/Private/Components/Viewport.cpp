@@ -14,6 +14,9 @@
 #include "EngineModule.h"
 #include "Slate/SceneViewport.h"
 #include "LegacyScreenPercentageDriver.h"
+#include "SceneInterface.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(Viewport)
 
 #define LOCTEXT_NAMESPACE "UMG"
 
@@ -96,7 +99,8 @@ FUMGViewportClient::FUMGViewportClient(FPreviewScene* InPreviewScene)
 	, Viewport(nullptr)
 	, EngineShowFlags(ESFIM_Game)
 {
-	ViewState.Allocate();
+	FSceneInterface* Scene = GetScene();
+	ViewState.Allocate(Scene ? Scene->GetFeatureLevel() : GMaxRHIFeatureLevel);
 
 	BackgroundColor = FColor(55, 55, 55);
 }
@@ -111,13 +115,13 @@ void FUMGViewportClient::Tick(float InDeltaTime)
 	{
 		// Begin Play
 		UWorld* PreviewWorld = PreviewScene->GetWorld();
-		if ( !PreviewWorld->bBegunPlay )
+		if ( !PreviewWorld->GetBegunPlay() )
 		{
 			for ( FActorIterator It(PreviewWorld); It; ++It )
 			{
 				It->DispatchBeginPlay();
 			}
-			PreviewWorld->bBegunPlay = true;
+			PreviewWorld->SetBegunPlay(true);
 		}
 
 		// Tick
@@ -130,26 +134,17 @@ void FUMGViewportClient::Draw(FViewport* InViewport, FCanvas* Canvas)
 	FViewport* ViewportBackup = Viewport;
 	Viewport = InViewport ? InViewport : Viewport;
 
-	// Determine whether we should use world time or real time based on the scene.
-	float TimeSeconds;
-	float RealTimeSeconds;
-	float DeltaTimeSeconds;
-
 	const bool bIsRealTime = true;
 
-	UWorld* World = GWorld;
+	UWorld* World = GetWorld();
+	FGameTime Time;
 	if ( bIsRealTime || GetScene() != World->Scene )
 	{
-		// Use time relative to start time to avoid issues with float vs double
-		TimeSeconds = FApp::GetCurrentTime() - GStartTime;
-		RealTimeSeconds = FApp::GetCurrentTime() - GStartTime;
-		DeltaTimeSeconds = FApp::GetDeltaTime();
+		Time = FGameTime::GetTimeSinceAppStart();
 	}
 	else
 	{
-		TimeSeconds = World->GetTimeSeconds();
-		RealTimeSeconds = World->GetRealTimeSeconds();
-		DeltaTimeSeconds = World->GetDeltaSeconds();
+		Time = World->GetTime();
 	}
 
 	// Setup a FSceneViewFamily/FSceneView for the viewport.
@@ -157,7 +152,7 @@ void FUMGViewportClient::Draw(FViewport* InViewport, FCanvas* Canvas)
 		Canvas->GetRenderTarget(),
 		GetScene(),
 		EngineShowFlags)
-		.SetWorldTimes(TimeSeconds, DeltaTimeSeconds, RealTimeSeconds)
+		.SetTime(Time)
 		.SetRealtimeUpdate(bIsRealTime));
 
 	// Get DPI derived view fraction.
@@ -175,7 +170,7 @@ void FUMGViewportClient::Draw(FViewport* InViewport, FCanvas* Canvas)
 	FSceneView* View = CalcSceneView(&ViewFamily);
 
 	ViewFamily.SetScreenPercentageInterface(new FLegacyScreenPercentageDriver(
-		ViewFamily, GlobalResolutionFraction, /* AllowPostProcessSettingsScreenPercentage = */ false));
+		ViewFamily, GlobalResolutionFraction));
 
 	//SetupViewForRendering(ViewFamily, *View);
 
@@ -256,7 +251,7 @@ FLinearColor FUMGViewportClient::GetBackgroundColor() const
 
 float FUMGViewportClient::GetOrthoUnitsPerPixel(const FViewport* InViewport) const
 {
-	const float SizeX = InViewport->GetSizeXY().X;
+	const int32 SizeX = InViewport->GetSizeXY().X;
 
 	// 15.0f was coming from the CAMERA_ZOOM_DIV marco, seems it was chosen arbitrarily
 	return ( GetOrthoZoom() / ( SizeX * 15.f ) )/* * ComputeOrthoZoomFactor(SizeX)*/;
@@ -296,11 +291,6 @@ FSceneView* FUMGViewportClient::CalcSceneView(FSceneViewFamily* ViewFamily)
 	ViewInitOptions.BackgroundColor = GetBackgroundColor();
 
 	//ViewInitOptions.EditorViewBitflag = 0, // send the bit for this view - each actor will check it's visibility bits against this
-
-	// for ortho views to steal perspective view origin
-	//ViewInitOptions.OverrideLODViewOrigin = FVector::ZeroVector;
-	//ViewInitOptions.bUseFauxOrthoViewPos = true;
-
 	//ViewInitOptions.CursorPos = CurrentMousePos;
 
 	FSceneView* View = new FSceneView(ViewInitOptions);
@@ -371,8 +361,9 @@ UViewport::UViewport(const FObjectInitializer& ObjectInitializer)
 	, ShowFlags(ESFIM_Game)
 {
 	bIsVariable = true;
-
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	BackgroundColor = FLinearColor::Black;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	ShowFlags.DisableAdvancedFeatures();
 	//ParentArgs.IgnoreTextureAlpha(false);
 	//ParentArgs.EnableBlending(true);
@@ -417,7 +408,10 @@ void UViewport::SynchronizeProperties()
 
 	if ( ViewportWidget.IsValid() )
 	{
+		check(ViewportWidget->ViewportClient.IsValid());
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		ViewportWidget->ViewportClient->SetBackgroundColor(BackgroundColor);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		ViewportWidget->ViewportClient->SetEngineShowFlags(ShowFlags);
 	}
 }
@@ -502,6 +496,63 @@ AActor* UViewport::Spawn(TSubclassOf<AActor> ActorClass)
 	return NULL;
 }
 
+void UViewport::SetShowFlag(FString InShowFlagName, bool InValue)
+{
+	if (ShowFlags.IsNameThere(*InShowFlagName, 0))
+	{
+		int32 FlagIndex = ShowFlags.FindIndexByName(*InShowFlagName);
+		ShowFlags.SetSingleFlag(FlagIndex, InValue);
+		ViewportWidget->ViewportClient->SetEngineShowFlags(ShowFlags);
+	}
+}
+
+void UViewport::SetEnableAdvancedFeatures(bool InEnableAdvancedFeatures)
+{
+	ShowFlags.DisableAdvancedFeatures();
+	if (ViewportWidget.IsValid())
+	{
+		check(ViewportWidget->ViewportClient.IsValid());
+		if (InEnableAdvancedFeatures)
+		{
+			ShowFlags.EnableAdvancedFeatures();
+			ViewportWidget->ViewportClient->SetEngineShowFlags(ShowFlags);
+		}
+		else
+		{
+			ShowFlags.DisableAdvancedFeatures();
+			ViewportWidget->ViewportClient->SetEngineShowFlags(ShowFlags);
+		}
+
+	}
+}
+
+void UViewport::SetLightIntensity(float InLightIntensity)
+{
+	ViewportWidget->PreviewScene.SetLightBrightness(InLightIntensity);
+}
+
+void UViewport::SetSkyIntensity(float InLightIntensity)
+{
+	ViewportWidget->PreviewScene.SetSkyBrightness(InLightIntensity);
+}
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+const FLinearColor& UViewport::GetBackgroundColor() const
+{
+	return BackgroundColor;
+}
+
+void UViewport::SetBackgroundColor(const FLinearColor& InColor)
+{
+	BackgroundColor = InColor;
+	if (ViewportWidget.IsValid())
+	{
+		check(ViewportWidget->ViewportClient.IsValid());
+		ViewportWidget->ViewportClient->SetBackgroundColor(BackgroundColor);
+	}
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
 #if WITH_EDITOR
 
 const FText UViewport::GetPaletteCategory()
@@ -514,3 +565,4 @@ const FText UViewport::GetPaletteCategory()
 /////////////////////////////////////////////////////
 
 #undef LOCTEXT_NAMESPACE
+

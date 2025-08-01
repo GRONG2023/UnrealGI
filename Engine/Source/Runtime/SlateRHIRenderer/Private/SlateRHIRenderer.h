@@ -6,6 +6,7 @@
 #include "Textures/SlateShaderResource.h"
 #include "Rendering/DrawElements.h"
 #include "RHI.h"
+#include "RenderCommandFence.h"
 #include "RenderResource.h"
 #include "SlateRHIResourceManager.h"
 #include "UnrealClient.h"
@@ -16,8 +17,12 @@
 
 class FSlateElementBatcher;
 class FSlateRHIRenderingPolicy;
+class FSlateRHIRenderingPolicyInterface;
+class USlateRHIPostBufferProcessor;
+class USlateRHIRendererSettings;
 class ISlateStyle;
 class SWindow;
+struct FSlatePostSettings;
 struct Rect;
 
 template<typename TCmd, typename NameType> struct FRHICommand;
@@ -63,12 +68,9 @@ struct FViewportInfo : public FRenderResource
 	/** sRGB UI render target */
 	TRefCountPtr<IPooledRenderTarget> UITargetRT;
 	TRefCountPtr<IPooledRenderTarget> UITargetRTMask;
-	/** Copy of the HDR backbuffer */
-	TRefCountPtr<IPooledRenderTarget> HDRSourceRT;
 
 	/** Color-space LUT for HDR UI composition. */
-	FTexture3DRHIRef ColorSpaceLUTRT;
-	FTexture3DRHIRef ColorSpaceLUTSRV;
+	FTextureRHIRef ColorSpaceLUT;
 	int32 ColorSpaceLUTOutputDevice;
 	int32 ColorSpaceLUTOutputGamut;
 		
@@ -92,17 +94,20 @@ struct FViewportInfo : public FRenderResource
 	/** The desired SDR pixel format for this viewport */
 	EPixelFormat SDRPixelFormat;
 	/** Color gamut for output to HDR display */
-	int32 HDRColorGamut;
+	EDisplayColorGamut HDRDisplayColorGamut;
 	/** Device format for output to HDR display */
-	int32 HDROutputDevice;
+	EDisplayOutputFormat HDRDisplayOutputFormat;
 
 	IViewportRenderTargetProvider* RTProvider;
 	
 	/** Whether is in a HDR Color Space */
 	bool bHDREnabled;
-	
+
+	/** Whether the scene output is in HDR. bHDREnabled only affects Slate rendering */
+	bool bSceneHDREnabled;
+
 	/** FRenderResource interface */
-	virtual void InitRHI() override;
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 	virtual void ReleaseRHI() override;
 	virtual void ReleaseResource() override;
 
@@ -118,16 +123,18 @@ struct FViewportInfo : public FRenderResource
 			bFullscreen(false),
 			PixelFormat(EPixelFormat::PF_Unknown),
 			SDRPixelFormat(EPixelFormat::PF_Unknown),
+			HDRDisplayColorGamut(EDisplayColorGamut::sRGB_D65),
+			HDRDisplayOutputFormat(EDisplayOutputFormat::SDR_sRGB),
 			RTProvider(nullptr),
-			bHDREnabled(false)
+			bHDREnabled(false),
+			bSceneHDREnabled(false)
 	{
 	}
 
 	~FViewportInfo()
 	{
 		DepthStencil.SafeRelease();
-		ColorSpaceLUTRT.SafeRelease();
-		ColorSpaceLUTSRV.SafeRelease();
+		ColorSpaceLUT.SafeRelease();
 	}
 
 	void ConditionallyUpdateDepthBuffer(bool bInRequiresStencilTest, uint32 Width, uint32 Height);
@@ -173,11 +180,14 @@ public:
 	 * @return The created projection matrix
 	 */
 	static FMatrix CreateProjectionMatrix( uint32 Width, uint32 Height );
+	static int32 GetDrawToVRRenderTarget();
+	static int32 GetProcessSlatePostBuffers();
 
 	/** FSlateRenderer interface */
 	virtual bool Initialize() override;
 	virtual void Destroy() override;
-	virtual FSlateDrawBuffer& GetDrawBuffer() override;
+	virtual FSlateDrawBuffer& AcquireDrawBuffer() override;
+	virtual void ReleaseDrawBuffer(FSlateDrawBuffer& InWindowDrawBuffer) override;
 	virtual void OnWindowDestroyed( const TSharedRef<SWindow>& InWindow ) override;
 	virtual void OnWindowFinishReshaped(const TSharedPtr<SWindow>& InWindow) override;
 	virtual void RequestResize( const TSharedPtr<SWindow>& Window, uint32 NewWidth, uint32 NewHeight ) override;
@@ -193,11 +203,12 @@ public:
 	virtual FIntPoint GenerateDynamicImageResource(const FName InTextureName) override;
 	virtual bool GenerateDynamicImageResource( FName ResourceName, uint32 Width, uint32 Height, const TArray< uint8 >& Bytes ) override;
 	virtual bool GenerateDynamicImageResource( FName ResourceName, FSlateTextureDataRef TextureData ) override;
-	virtual FSlateResourceHandle GetResourceHandle( const FSlateBrush& Brush ) override;
+	virtual FSlateResourceHandle GetResourceHandle(const FSlateBrush& Brush, FVector2f LocalSize, float DrawScale) override;
 	virtual bool CanRenderResource(UObject& InResourceObject) const override;
 	virtual void* GetViewportResource( const SWindow& Window ) override;
 	virtual void SetColorVisionDeficiencyType(EColorVisionDeficiency Type, int32 Severity, bool bCorrectDeficiency, bool bShowCorrectionWithDeficiency) override;
 	virtual FSlateUpdatableTexture* CreateUpdatableTexture(uint32 Width, uint32 Height) override;
+	virtual FSlateUpdatableTexture* CreateSharedHandleTexture(void* SharedHandle) override;
 	virtual void ReleaseUpdatableTexture(FSlateUpdatableTexture* Texture) override;
 	virtual ISlateAtlasProvider* GetTextureAtlasProvider() override;
 	virtual FCriticalSection* GetResourceCriticalSection() override;
@@ -213,7 +224,7 @@ public:
 	virtual void AddWidgetRendererUpdate(const struct FRenderThreadUpdateContext& Context, bool bDeferredRenderTargetUpdate) override;
 
 	/** Draws windows from a FSlateDrawBuffer on the render thread */
-	void DrawWindow_RenderThread(FRHICommandListImmediate& RHICmdList, FViewportInfo& ViewportInfo, FSlateWindowElementList& WindowElementList, const struct FSlateDrawWindowCommandParams& DrawParams);
+	void DrawWindow_RenderThread(FRHICommandListImmediate& RHICmdList, FViewportInfo& ViewportInfo, FSlateWindowElementList& WindowElementList, const struct FSlateDrawWindowCommandParams& DrawCommandParams);
 
 	/**
 	 * Reloads texture resources from disk                   
@@ -233,9 +244,11 @@ public:
 	virtual void InvalidateAllViewports() override;
 
 	virtual void PrepareToTakeScreenshot(const FIntRect& Rect, TArray<FColor>* OutColorData, SWindow* ScreenshotWindow) override;
+	virtual void PrepareToTakeHDRScreenshot(const FIntRect& Rect, TArray<FLinearColor>* OutColorData, SWindow* ScreenshotWindow) override;
 
 	virtual void SetWindowRenderTarget(const SWindow& Window, class IViewportRenderTargetProvider* Provider) override;
 
+	FSlateRHIRenderingPolicyInterface GetRenderingPolicyInterface();
 
 private:
 	/** Loads all known textures from Slate styles */
@@ -249,7 +262,7 @@ private:
 	 * @param Height		The height that we shoudl size to
 	 * @param bFullscreen	If we should be in fullscreen
 	 */
-	void ConditionalResizeViewport( FViewportInfo* ViewportInfo, uint32 Width, uint32 Height, bool bFullscreen );
+	void ConditionalResizeViewport( FViewportInfo* ViewportInfo, uint32 Width, uint32 Height, bool bFullscreen, SWindow* Window);
 	
 	/** 
 	 * Creates necessary resources to render a window and sends draw commands to the rendering thread
@@ -263,6 +276,8 @@ private:
 	 * have already been used on the game thread at the time they were released.
 	 */
 	void CleanUpdatableTextures();
+
+	virtual void OnVirtualDesktopSizeChanged(const FDisplayMetrics& NewDisplayMetric);
 
 private:
 	/** A mapping of SWindows to their RHI implementation */
@@ -297,9 +312,14 @@ private:
 
 	bool bIsStandaloneStereoOnlyDevice;
 	bool bTakingAScreenShot;
+	bool bUpdateHDRDisplayInformation;
+	ESlatePostRT bShrinkPostBufferRequested;
+	uint64 LastFramesPostBufferUsed[(uint8)ESlatePostRT::Num];
+	FRenderCommandFence SlatePostRTFences[(uint8)ESlatePostRT::Num];
 	FIntRect ScreenshotRect;
 	FViewportInfo* ScreenshotViewportInfo;
 	TArray<FColor>* OutScreenshotData;
+	TArray<FLinearColor>* OutHDRScreenshotData;
 
 	/** These are state management variables for Scenes on the game thread. A similar copy exists on the RHI Rendering Policy for the rendering thread.*/
 	TArray<FSceneInterface*, TInlineAllocator<4>> ActiveScenes;
@@ -323,4 +343,19 @@ struct FSlateEndDrawingWindowsCommand final : public FRHICommand < FSlateEndDraw
 	void Execute(FRHICommandListBase& CmdList);
 
 	static void EndDrawingWindows(FRHICommandListImmediate& RHICmdList, FSlateDrawBuffer* DrawBuffer, FSlateRHIRenderingPolicy& Policy);
+};
+
+struct FSlateReleaseDrawBufferCommandString
+{
+	static const TCHAR* TStr() { return TEXT("FSlateReleaseDrawBufferCommand"); }
+};
+struct FSlateReleaseDrawBufferCommand final : public FRHICommand < FSlateReleaseDrawBufferCommand, FSlateReleaseDrawBufferCommandString >
+{
+	FSlateDrawBuffer* DrawBuffer;
+
+	FSlateReleaseDrawBufferCommand(FSlateDrawBuffer* InDrawBuffer);
+
+	void Execute(FRHICommandListBase& CmdList);
+
+	static void ReleaseDrawBuffer(FRHICommandListImmediate& RHICmdList, FSlateDrawBuffer* DrawBuffer);
 };

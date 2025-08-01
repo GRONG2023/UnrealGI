@@ -4,6 +4,7 @@
 #include "CoreMinimal.h"
 #include "Layout/Visibility.h"
 #include "Input/Reply.h"
+#include "ViewportClient.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "ShowFlags.h"
 #include "Widgets/SCompoundWidget.h"
@@ -75,17 +76,12 @@ private:
 
 	bool IsSetCameraSafeAreaCaptureRegionEnabled() const;
 
-	void OnResolutionMultiplierChanged( float NewValue, ETextCommit::Type CommitInfo )
-	{
-		NewValue = FMath::Clamp(NewValue, FHighResScreenshotConfig::MinResolutionMultipler, FHighResScreenshotConfig::MaxResolutionMultipler);
-		Config.ResolutionMultiplier = NewValue;
-		Config.ResolutionMultiplierScale = (NewValue - FHighResScreenshotConfig::MinResolutionMultipler) / (FHighResScreenshotConfig::MaxResolutionMultipler - FHighResScreenshotConfig::MinResolutionMultipler);
-	}
-
 	void OnResolutionMultiplierSliderChanged( float NewValue )
 	{
-		Config.ResolutionMultiplierScale = NewValue;
-		Config.ResolutionMultiplier = FMath::RoundToFloat(FMath::Lerp(FHighResScreenshotConfig::MinResolutionMultipler, FHighResScreenshotConfig::MaxResolutionMultipler, NewValue));
+		Config.ResolutionMultiplier = NewValue;
+
+		// scale needs to be [0, 1.0]
+		Config.ResolutionMultiplierScale = (NewValue - FHighResScreenshotConfig::MinResolutionMultipler) / (FHighResScreenshotConfig::MaxResolutionMultipler - FHighResScreenshotConfig::MinResolutionMultipler);
 	}
 
 	void OnMaskEnabledChanged( ECheckBoxState NewValue )
@@ -135,12 +131,12 @@ private:
 
 	EVisibility GetSpecifyCaptureRegionVisibility() const
 	{
-		return bCaptureRegionControlsVisible ? EVisibility::Hidden : EVisibility::Visible;
+		return bCaptureRegionControlsVisible ? EVisibility::Collapsed: EVisibility::Visible;
 	}
 
 	EVisibility GetCaptureRegionControlsVisibility() const
 	{
-		return bCaptureRegionControlsVisible ? EVisibility::Visible : EVisibility::Hidden;
+		return bCaptureRegionControlsVisible ? EVisibility::Visible : EVisibility::Collapsed;
 	}
 
 	void SetCaptureRegionControlsVisibility(bool bVisible)
@@ -148,14 +144,9 @@ private:
 		bCaptureRegionControlsVisible = bVisible;
 	}
 
-	TOptional<float> GetResolutionMultiplier() const
-	{
-		return TOptional<float>(Config.ResolutionMultiplier);
-	}
-
 	float GetResolutionMultiplierSlider() const
 	{
-		return Config.ResolutionMultiplierScale;
+		return Config.ResolutionMultiplier;
 	}
 
 	ECheckBoxState GetMaskEnabled() const
@@ -203,6 +194,7 @@ private:
 	static void WindowClosedHandler(const TSharedRef<SWindow>& InWindow);
 
 	static void ResetViewport();
+	static void ResetFrameBuffer();
 
 	TSharedPtr<SWindow> Window;
 	TSharedPtr<class SCaptureRegionWidget> CaptureRegionWidget;

@@ -15,44 +15,44 @@ MS_ALIGN(16) struct FMatrix3x4
 
 	FORCEINLINE void SetMatrix(const FMatrix& Mat)
 	{
-		const float* RESTRICT Src = &(Mat.M[0][0]);
+		const FMatrix::FReal* RESTRICT Src = &(Mat.M[0][0]);
 		float* RESTRICT Dest = &(M[0][0]);
 
-		Dest[0] = Src[0];   // [0][0]
-		Dest[1] = Src[1];   // [0][1]
-		Dest[2] = Src[2];   // [0][2]
-		Dest[3] = Src[3];   // [0][3]
+		Dest[0] = (float)Src[0];   // [0][0]
+		Dest[1] = (float)Src[1];   // [0][1]
+		Dest[2] = (float)Src[2];   // [0][2]
+		Dest[3] = (float)Src[3];   // [0][3]
 
-		Dest[4] = Src[4];   // [1][0]
-		Dest[5] = Src[5];   // [1][1]
-		Dest[6] = Src[6];   // [1][2]
-		Dest[7] = Src[7];   // [1][3]
+		Dest[4] = (float)Src[4];   // [1][0]
+		Dest[5] = (float)Src[5];   // [1][1]
+		Dest[6] = (float)Src[6];   // [1][2]
+		Dest[7] = (float)Src[7];   // [1][3]
 
-		Dest[8] = Src[8];   // [2][0]
-		Dest[9] = Src[9];   // [2][1]
-		Dest[10] = Src[10]; // [2][2]
-		Dest[11] = Src[11]; // [2][3]
+		Dest[8] = (float)Src[8];   // [2][0]
+		Dest[9] = (float)Src[9];   // [2][1]
+		Dest[10] = (float)Src[10]; // [2][2]
+		Dest[11] = (float)Src[11]; // [2][3]
 	}
 
 	FORCEINLINE void SetMatrixTranspose(const FMatrix& Mat)
 	{
-		const float* RESTRICT Src = &(Mat.M[0][0]);
+		const FMatrix::FReal* RESTRICT Src = &(Mat.M[0][0]);
 		float* RESTRICT Dest = &(M[0][0]);
 
-		Dest[0] = Src[0];   // [0][0]
-		Dest[1] = Src[4];   // [1][0]
-		Dest[2] = Src[8];   // [2][0]
-		Dest[3] = Src[12];  // [3][0]
+		Dest[0] = (float)Src[0];   // [0][0]
+		Dest[1] = (float)Src[4];   // [1][0]
+		Dest[2] = (float)Src[8];   // [2][0]
+		Dest[3] = (float)Src[12];  // [3][0]
 
-		Dest[4] = Src[1];   // [0][1]
-		Dest[5] = Src[5];   // [1][1]
-		Dest[6] = Src[9];   // [2][1]
-		Dest[7] = Src[13];  // [3][1]
+		Dest[4] = (float)Src[1];   // [0][1]
+		Dest[5] = (float)Src[5];   // [1][1]
+		Dest[6] = (float)Src[9];   // [2][1]
+		Dest[7] = (float)Src[13];  // [3][1]
 
-		Dest[8] = Src[2];   // [0][2]
-		Dest[9] = Src[6];   // [1][2]
-		Dest[10] = Src[10]; // [2][2]
-		Dest[11] = Src[14]; // [3][2]
+		Dest[8] = (float)Src[2];   // [0][2]
+		Dest[9] = (float)Src[6];   // [1][2]
+		Dest[10] = (float)Src[10]; // [2][2]
+		Dest[11] = (float)Src[14]; // [3][2]
 	}
 } GCC_ALIGN(16);
 

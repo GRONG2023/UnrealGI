@@ -2,18 +2,30 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "Styling/SlateColor.h"
-#include "Styling/SlateBrush.h"
-#include "EdGraph/EdGraphSchema.h"
 #include "BlueprintNodeBinder.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "CoreMinimal.h"
+#include "EdGraph/EdGraphSchema.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
+#include "Styling/SlateBrush.h"
+#include "Styling/SlateColor.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+
 #include "BlueprintActionMenuItem.generated.h"
 
+class FReferenceCollector;
 class UBlueprintNodeSpawner;
 class UEdGraph;
+class UEdGraphNode;
+class UEdGraphPin;
 struct FBlueprintActionContext;
 struct FBlueprintActionUiSpec;
+struct FSlateBrush;
 
 /**
  * Wrapper around a UBlueprintNodeSpawner, which takes care of specialized
@@ -66,7 +78,7 @@ public:
 
 private:
 	/** Specialized node-spawner, that comprises the action portion of this menu entry. */
-	UBlueprintNodeSpawner const* Action;
+	TObjectPtr<const UBlueprintNodeSpawner> Action;
 	/** Tint to return along with the icon brush. */
 	FSlateColor IconTint;
 	/** Brush that should be used for the icon on this menu item. */

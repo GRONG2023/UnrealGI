@@ -4,7 +4,7 @@
 #include "RequiredProgramMainCPPInclude.h"
 #include "DesktopPlatformModule.h"
 #include "PlatformInstallation.h"
-#include "Json/Public/Serialization/JsonSerializer.h"
+#include "Serialization/JsonSerializer.h"
 
 IMPLEMENT_APPLICATION(UnrealVersionSelector, "UnrealVersionSelector")
 
@@ -447,12 +447,8 @@ int Main(const TArray<FString>& Arguments)
 
 		FEngineLoop::AppPreExit();
 		FModuleManager::Get().UnloadModulesAtShutdown();
+		FEngineLoop::AppExit();
 
-	#if STATS
-		FThreadStats::StopThread();
-	#endif
-
-		FTaskGraphInterface::Shutdown();
 		return Result;
 	}
 

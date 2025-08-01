@@ -3,16 +3,19 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "SViewportToolBar.h"
 #include "Layout/Visibility.h"
+#include "SAnimationEditorViewport.h"
+#include "SEditorViewport.h"
+#include "ScopedTransaction.h"
 #include "Styling/SlateColor.h"
+#include "Types/SlateEnums.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SWidget.h"
-#include "SEditorViewport.h"
-#include "SAnimationEditorViewport.h"
-#include "Editor/UnrealEd/Public/SViewportToolBar.h"
 
 class FMenuBuilder;
 class SComboButton;
+
 
 /**
  * A level viewport toolbar widget that is placed in a viewport
@@ -85,6 +88,11 @@ private:
 	void FillCharacterAdvancedMenu(FMenuBuilder& MenuBuilder) const;
 
 	/**
+	* Generates the Show -> Mirror sub menu content
+	*/
+	void FillCharacterMirrorMenu(FMenuBuilder& MenuBuilder) const;
+
+	/**
 	* Generates the Show -> Clothing sub menu content
 	*/
 	void FillCharacterClothingMenu(FMenuBuilder& MenuBuilder);
@@ -132,6 +140,12 @@ private:
 	 * @return	Label to use for this Menu
 	 */
 	FText GetCameraMenuLabel() const;
+
+	/* Returns the label icon for the Camera tool bar menu, which changes depending on viewport type 
+	 *
+	 * @return	Label icon to use for this menu label
+	 *
+	 */
 	const FSlateBrush* GetCameraMenuLabelIcon() const;
 
 	/** Called by the FOV slider in the perspective viewport to get the FOV value */
@@ -147,10 +161,15 @@ private:
 	void OnCamSpeedScalarChanged(float NewValue);
 
 	/** Called by the floor offset slider in the perspective viewport to get the offset value */
-	TOptional<float> OnGetFloorOffset() const;
+	float OnGetFloorOffset() const;
 	/** Called when the floor offset slider is adjusted in the perspective viewport */
+	void OnBeginSliderMovementFloorOffset();
 	void OnFloorOffsetChanged( float NewValue );
+	void OnFloorOffsetCommitted ( float NewValue, ETextCommit::Type CommitType );
 
+	/** Called when users select the mirror table in the menu */
+	void OnMirrorDataTableSelected(const FAssetData& SelectedMirrorTableData);
+	
 	// Called to determine if the gizmos can be used in the current preview
 	EVisibility GetTransformToolbarVisibility() const;
 
@@ -190,6 +209,9 @@ private:
 
 	/** Pinned commands widget */
 	TSharedPtr<IPinnedCommandList> PinnedCommands;
+
+	/** Transaction to handle scoping updates for sliders we own that transact objects (i.e. floor mesh) */
+	TUniquePtr<FScopedTransaction> PendingTransaction;
 
 	/** Whether to show the 'Show' menu */
 	bool bShowShowMenu;

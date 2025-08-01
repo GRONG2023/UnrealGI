@@ -2,8 +2,9 @@
 
 #include "Engine/LevelScriptBlueprint.h"
 #include "Misc/PackageName.h"
-#include "Engine/LevelScriptActor.h"
 #include "UObject/Package.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(LevelScriptBlueprint)
 
 //////////////////////////////////////////////////////////////////////////
 // ULevelScriptBlueprint
@@ -19,8 +20,9 @@ FString ULevelScriptBlueprint::GetFriendlyName() const
 {
 #if WITH_EDITORONLY_DATA
 	return FriendlyName;
-#endif
+#else
 	return UBlueprint::GetFriendlyName();
+#endif
 }
 
 FString ULevelScriptBlueprint::CreateLevelScriptNameFromLevel(const ULevel* Level)
@@ -33,4 +35,5 @@ FString ULevelScriptBlueprint::CreateLevelScriptNameFromLevel(const ULevel* Leve
 }
 
 #endif	//#if WITH_EDITOR
+
 

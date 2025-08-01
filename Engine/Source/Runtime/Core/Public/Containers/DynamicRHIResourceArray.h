@@ -66,6 +66,11 @@ public:
 	*/
 	virtual uint32 GetResourceDataSize() const
 	{
+		if (this->Num() > UINT32_MAX / sizeof(ElementType))
+		{
+			UE_LOG(LogCore, Fatal, TEXT("Resource data size too large for uint32, will overflow. Calculate with larger data type or use fewer elements. sizeof(ElementType): %d"), sizeof(ElementType));
+			return 0;
+		}
 		return this->Num() * sizeof(ElementType);
 	}
 
@@ -126,16 +131,6 @@ public:
 		Super::BulkSerialize(Ar, bForcePerElementSerialization);
 	}
 
-	/**
-	* Serializer for this class
-	* @param Ar - archive to serialize to
-	* @param ResourceArray - resource array data to serialize
-	*/
-	friend FArchive& operator<<(FArchive& Ar,TResourceArray<ElementType,Alignment>& ResourceArray)
-	{
-		return Ar << *(Super*)&ResourceArray;
-	}	
-
 private:
 	/** 
 	* true if this array needs to be accessed by the CPU.  
@@ -144,8 +139,13 @@ private:
 	LAYOUT_FIELD(bool, bNeedsCPUAccess);
 };
 
-template< typename ElementType, uint32 Alignment>
-struct TContainerTraits<TResourceArray<ElementType, Alignment>> : public TContainerTraitsBase<TResourceArray<ElementType, Alignment>>
+/**
+* Serializer for this class
+* @param Ar - archive to serialize to
+* @param ResourceArray - resource array data to serialize
+*/
+template<typename ElementType, uint32 Alignment>
+FArchive& operator<<(FArchive& Ar,TResourceArray<ElementType,Alignment>& ResourceArray)
 {
-	enum { MoveWillEmptyContainer = TContainerTraits<typename TResourceArray<ElementType, Alignment>::Super>::MoveWillEmptyContainer };
-};
+	return Ar << *(typename TResourceArray<ElementType,Alignment>::Super*)&ResourceArray;
+}	

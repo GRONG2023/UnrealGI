@@ -5,7 +5,6 @@
 #include "CoreMinimal.h"
 
 #if PLATFORM_WINDOWS
-#include "Windows/WindowsHWrapper.h"
 #include "Windows/AllowWindowsPlatformTypes.h"
 
 // D3D headers.
@@ -16,8 +15,7 @@
 #pragma warning(disable : 4005)	// macro redefinition
 
 #include <d3d11.h>
-#include <d3dx11.h>
-#include <D3DX10.h>
+#include <d3d11_1.h>
 #include <D3Dcompiler.h>
 
 #pragma warning(pop)

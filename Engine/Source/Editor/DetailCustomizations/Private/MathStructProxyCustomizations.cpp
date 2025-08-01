@@ -1,17 +1,43 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "MathStructProxyCustomizations.h"
-#include "Framework/Commands/UIAction.h"
-#include "UObject/UnrealType.h"
-#include "Editor.h"
-#include "IDetailChildrenBuilder.h"
-#include "DetailWidgetRow.h"
-#include "DetailLayoutBuilder.h"
-#include "IPropertyUtilities.h"
-#include "ScopedTransaction.h"
-#include "Widgets/Input/SNumericEntryBox.h"
-#include "HAL/PlatformApplicationMisc.h"
+#include "Customizations/MathStructProxyCustomizations.h"
 
+#include "Containers/ArrayView.h"
+#include "Containers/UnrealString.h"
+#include "CoreGlobals.h"
+#include "DetailLayoutBuilder.h"
+#include "DetailWidgetRow.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Framework/Commands/UIAction.h"
+#include "HAL/PlatformApplicationMisc.h"
+#include "HAL/PlatformCrt.h"
+#include "IDetailChildrenBuilder.h"
+#include "IPropertyTypeCustomization.h"
+#include "IPropertyUtilities.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Margin.h"
+#include "Math/Matrix.h"
+#include "Math/Quat.h"
+#include "Math/ScaleRotationTranslationMatrix.h"
+#include "Math/TransformVectorized.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/VectorRegister.h"
+#include "Misc/AssertionMacros.h"
+#include "PropertyHandle.h"
+#include "ScopedTransaction.h"
+#include "SlotBase.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Object.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SNumericEntryBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SNullWidget.h"
+
+class SWidget;
+
+#define LOCTEXT_NAMESPACE "MatrixStructCustomization"
 void FMathStructProxyCustomization::CustomizeChildren( TSharedRef<class IPropertyHandle> StructPropertyHandle, class IDetailChildrenBuilder& StructBuilder, IPropertyTypeCustomizationUtils& StructCustomizationUtils )
 {
 	PropertyUtilities = StructCustomizationUtils.GetPropertyUtilities();
@@ -23,31 +49,32 @@ void FMathStructProxyCustomization::MakeHeaderRow( TSharedRef<class IPropertyHan
 }
 
 template<typename ProxyType, typename NumericType>
-TSharedRef<SWidget> FMathStructProxyCustomization::MakeNumericProxyWidget(TSharedRef<IPropertyHandle>& StructPropertyHandle, TSharedRef< TProxyProperty<ProxyType, NumericType> >& ProxyValue, const FText& Label, bool bRotationInDegrees, const FLinearColor& LabelColor, const FLinearColor& LabelBackgroundColor)
+TSharedRef<SWidget> FMathStructProxyCustomization::MakeNumericProxyWidget(TSharedRef<IPropertyHandle>& StructPropertyHandle, TSharedRef< TProxyProperty<ProxyType, NumericType> >& ProxyValue, const FText& Label, bool bRotationInDegrees, const FLinearColor& LabelBackgroundColor)
 {
 	TWeakPtr<IPropertyHandle> WeakHandlePtr = StructPropertyHandle;
 
-	return 
-		SNew( SNumericEntryBox<NumericType> )
-		.IsEnabled( this, &FMathStructProxyCustomization::IsValueEnabled, WeakHandlePtr )
-		.Value( this, &FMathStructProxyCustomization::OnGetValue<ProxyType, NumericType>, WeakHandlePtr, ProxyValue )
-		.Font( IDetailLayoutBuilder::GetDetailFont() )
-		.UndeterminedString( NSLOCTEXT("PropertyEditor", "MultipleValues", "Multiple Values") )
-		.OnValueCommitted( this, &FMathStructProxyCustomization::OnValueCommitted<ProxyType, NumericType>, WeakHandlePtr, ProxyValue )
-		.OnValueChanged( this, &FMathStructProxyCustomization::OnValueChanged<ProxyType, NumericType>, WeakHandlePtr, ProxyValue )
-		.OnBeginSliderMovement( this, &FMathStructProxyCustomization::OnBeginSliderMovement )
-		.OnEndSliderMovement( this, &FMathStructProxyCustomization::OnEndSliderMovement<ProxyType, NumericType>, WeakHandlePtr, ProxyValue )
-		.LabelVAlign(VAlign_Fill)
-		.LabelPadding(0)
+	return
+		SNew(SNumericEntryBox<NumericType>)
+		.IsEnabled(this, &FMathStructProxyCustomization::IsValueEnabled, WeakHandlePtr)
+		.Value(this, &FMathStructProxyCustomization::OnGetValue<ProxyType, NumericType>, WeakHandlePtr, ProxyValue)
+		.Font(IDetailLayoutBuilder::GetDetailFont())
+		.UndeterminedString(NSLOCTEXT("PropertyEditor", "MultipleValues", "Multiple Values"))
+		.OnValueCommitted(this, &FMathStructProxyCustomization::OnValueCommitted<ProxyType, NumericType>, WeakHandlePtr, ProxyValue)
+		.OnValueChanged(this, &FMathStructProxyCustomization::OnValueChanged<ProxyType, NumericType>, WeakHandlePtr, ProxyValue)
+		.OnBeginSliderMovement(this, &FMathStructProxyCustomization::OnBeginSliderMovement)
+		.OnEndSliderMovement(this, &FMathStructProxyCustomization::OnEndSliderMovement<ProxyType, NumericType>, WeakHandlePtr, ProxyValue)
 		// Only allow spin on handles with one object.  Otherwise it is not clear what value to spin
-		.AllowSpin( StructPropertyHandle->GetNumOuterObjects() == 1 )
+		.AllowSpin(StructPropertyHandle->GetNumOuterObjects() == 1)
 		.MinValue(TOptional<NumericType>())
 		.MaxValue(TOptional<NumericType>())
 		.MaxSliderValue(bRotationInDegrees ? 360.0f : TOptional<NumericType>())
 		.MinSliderValue(bRotationInDegrees ? 0.0f : TOptional<NumericType>())
+		.LabelPadding(FMargin(3))
+		.ToolTipText(this, &FMathStructProxyCustomization::OnGetValueToolTip<ProxyType, NumericType>, WeakHandlePtr, ProxyValue, Label)
+		.LabelLocation(SNumericEntryBox<NumericType>::ELabelLocation::Inside)
 		.Label()
 		[
-			SNumericEntryBox<float>::BuildLabel( Label, LabelColor, LabelBackgroundColor )
+			SNumericEntryBox<NumericType>::BuildNarrowColorLabel(LabelBackgroundColor)
 		];
 }
 
@@ -97,14 +124,26 @@ void FMathStructProxyCustomization::OnEndSliderMovement( NumericType NewValue, T
 }
 
 
-#define LOCTEXT_NAMESPACE "MatrixStructCustomization"
-
-TSharedRef<IPropertyTypeCustomization> FMatrixStructCustomization::MakeInstance()
+template <typename ProxyType, typename NumericType>
+FText FMathStructProxyCustomization::OnGetValueToolTip(TWeakPtr<IPropertyHandle> WeakHandlePtr, TSharedRef<TProxyProperty<ProxyType, NumericType>> ProxyValue, FText Label) const
 {
-	return MakeShareable( new FMatrixStructCustomization );
+	TOptional<NumericType> Value = OnGetValue<ProxyType, NumericType>(WeakHandlePtr, ProxyValue);
+	if (Value.IsSet())
+	{
+		return FText::Format(LOCTEXT("ValueToolTip", "{0}: {1}"), Label, FText::AsNumber(Value.GetValue()));
+	}
+
+	return FText::GetEmpty();
 }
 
-void FMatrixStructCustomization::MakeHeaderRow(TSharedRef<class IPropertyHandle>& StructPropertyHandle, FDetailWidgetRow& Row)
+template<typename T>
+TSharedRef<IPropertyTypeCustomization> FMatrixStructCustomization<T>::MakeInstance()
+{
+	return MakeShareable( new FMatrixStructCustomization<T> );
+}
+
+template<typename T>
+void FMatrixStructCustomization<T>::MakeHeaderRow(TSharedRef<class IPropertyHandle>& StructPropertyHandle, FDetailWidgetRow& Row)
 {
 	Row
 	.NameContent()
@@ -119,13 +158,19 @@ void FMatrixStructCustomization::MakeHeaderRow(TSharedRef<class IPropertyHandle>
 	];
 }
 
-void FMatrixStructCustomization::CustomizeLocation(TSharedRef<class IPropertyHandle> StructPropertyHandle, FDetailWidgetRow& Row)
+template<typename T>
+void FMatrixStructCustomization<T>::CustomizeLocation(TSharedRef<class IPropertyHandle> StructPropertyHandle, FDetailWidgetRow& Row)
 {
 	TWeakPtr<IPropertyHandle> WeakHandlePtr = StructPropertyHandle;
 
+	if (Row.IsPasteFromTextBound())
+	{
+		Row.OnPasteFromTextDelegate.Pin()->AddSP(this, &FMatrixStructCustomization<T>::OnPasteFromText, FTransformField::Location, WeakHandlePtr);
+	}
+	
 	Row
-	.CopyAction(FUIAction(FExecuteAction::CreateSP(this, &FMatrixStructCustomization::OnCopy, FTransformField::Location, WeakHandlePtr)))
-	.PasteAction(FUIAction(FExecuteAction::CreateSP(this, &FMatrixStructCustomization::OnPaste, FTransformField::Location, WeakHandlePtr)))
+	.CopyAction(FUIAction(FExecuteAction::CreateSP(this, &FMatrixStructCustomization<T>::OnCopy, FTransformField::Location, WeakHandlePtr)))
+	.PasteAction(FUIAction(FExecuteAction::CreateSP(this, &FMatrixStructCustomization<T>::OnPaste, FTransformField::Location, WeakHandlePtr)))
 	.NameContent()
 	[
 		StructPropertyHandle->CreatePropertyNameWidget(LOCTEXT("LocationLabel", "Location"))
@@ -138,29 +183,34 @@ void FMatrixStructCustomization::CustomizeLocation(TSharedRef<class IPropertyHan
 		+ SHorizontalBox::Slot()
 		.Padding(FMargin(0.0f, 2.0f, 3.0f, 2.0f))
 		[
-			MakeNumericProxyWidget<FVector, float>(StructPropertyHandle, CachedTranslationX, LOCTEXT("TranslationX", "X"), false, FLinearColor::White, SNumericEntryBox<float>::RedLabelBackgroundColor)
+			MakeNumericProxyWidget<UE::Math::TVector<T>, T>(StructPropertyHandle, CachedTranslationX, LOCTEXT("TranslationX", "X"), false, SNumericEntryBox<T>::RedLabelBackgroundColor)
 		]
 		+ SHorizontalBox::Slot()
 		.Padding(FMargin(0.0f, 2.0f, 3.0f, 2.0f))
 		[
-			MakeNumericProxyWidget<FVector, float>(StructPropertyHandle, CachedTranslationY, LOCTEXT("TranslationY", "Y"), false, FLinearColor::White, SNumericEntryBox<float>::GreenLabelBackgroundColor)
+			MakeNumericProxyWidget<UE::Math::TVector<T>, T>(StructPropertyHandle, CachedTranslationY, LOCTEXT("TranslationY", "Y"), false, SNumericEntryBox<T>::GreenLabelBackgroundColor)
 		]
 		+ SHorizontalBox::Slot()
 		.Padding(FMargin(0.0f, 2.0f, 0.0f, 2.0f))
 		[
-			MakeNumericProxyWidget<FVector, float>(StructPropertyHandle, CachedTranslationZ, LOCTEXT("TranslationZ", "Z"), false, FLinearColor::White, SNumericEntryBox<float>::BlueLabelBackgroundColor)
+			MakeNumericProxyWidget<UE::Math::TVector<T>, T>(StructPropertyHandle, CachedTranslationZ, LOCTEXT("TranslationZ", "Z"), false, SNumericEntryBox<T>::BlueLabelBackgroundColor)
 		]
 	];
 }
 
-
-void FMatrixStructCustomization::CustomizeRotation(TSharedRef<class IPropertyHandle> StructPropertyHandle, FDetailWidgetRow& Row)
+template<typename T>
+void FMatrixStructCustomization<T>::CustomizeRotation(TSharedRef<class IPropertyHandle> StructPropertyHandle, FDetailWidgetRow& Row)
 {
 	TWeakPtr<IPropertyHandle> WeakHandlePtr = StructPropertyHandle;
 
+	if (Row.IsPasteFromTextBound())
+	{
+		Row.OnPasteFromTextDelegate.Pin()->AddSP(this, &FMatrixStructCustomization<T>::OnPasteFromText, FTransformField::Rotation, WeakHandlePtr);
+	}
+
 	Row
-	.CopyAction(FUIAction(FExecuteAction::CreateSP(this, &FMatrixStructCustomization::OnCopy, FTransformField::Rotation, WeakHandlePtr)))
-	.PasteAction(FUIAction(FExecuteAction::CreateSP(this, &FMatrixStructCustomization::OnPaste, FTransformField::Rotation, WeakHandlePtr)))
+	.CopyAction(FUIAction(FExecuteAction::CreateSP(this, &FMatrixStructCustomization<T>::OnCopy, FTransformField::Rotation, WeakHandlePtr)))
+	.PasteAction(FUIAction(FExecuteAction::CreateSP(this, &FMatrixStructCustomization<T>::OnPaste, FTransformField::Rotation, WeakHandlePtr)))
 	.NameContent()
 	[
 		StructPropertyHandle->CreatePropertyNameWidget(LOCTEXT("RotationLabel", "Rotation"))
@@ -173,29 +223,34 @@ void FMatrixStructCustomization::CustomizeRotation(TSharedRef<class IPropertyHan
 		+ SHorizontalBox::Slot()
 		.Padding(FMargin(0.0f, 2.0f, 3.0f, 2.0f))
 		[
-			MakeNumericProxyWidget<FRotator, float>(StructPropertyHandle, CachedRotationRoll, LOCTEXT("RotationRoll", "X"), true, FLinearColor::White, SNumericEntryBox<float>::RedLabelBackgroundColor)
+			MakeNumericProxyWidget<UE::Math::TRotator<T>, T>(StructPropertyHandle, CachedRotationRoll, LOCTEXT("RotationRoll", "X"), true, SNumericEntryBox<T>::RedLabelBackgroundColor)
 		]
 		+ SHorizontalBox::Slot()
 		.Padding(FMargin(0.0f, 2.0f, 3.0f, 2.0f))
 		[
-			MakeNumericProxyWidget<FRotator, float>(StructPropertyHandle, CachedRotationPitch, LOCTEXT("RotationPitch", "Y"), true, FLinearColor::White, SNumericEntryBox<float>::GreenLabelBackgroundColor)
+			MakeNumericProxyWidget<UE::Math::TRotator<T>, T>(StructPropertyHandle, CachedRotationPitch, LOCTEXT("RotationPitch", "Y"), true, SNumericEntryBox<T>::GreenLabelBackgroundColor)
 		]
 		+ SHorizontalBox::Slot()
 		.Padding(FMargin(0.0f, 2.0f, 0.0f, 2.0f))
 		[
-			MakeNumericProxyWidget<FRotator, float>(StructPropertyHandle, CachedRotationYaw, LOCTEXT("RotationYaw", "Z"), true, FLinearColor::White, SNumericEntryBox<float>::BlueLabelBackgroundColor)
+			MakeNumericProxyWidget<UE::Math::TRotator<T>, T>(StructPropertyHandle, CachedRotationYaw, LOCTEXT("RotationYaw", "Z"), true, SNumericEntryBox<T>::BlueLabelBackgroundColor)
 		]
 	];
 }
 
-
-void FMatrixStructCustomization::CustomizeScale(TSharedRef<class IPropertyHandle> StructPropertyHandle, FDetailWidgetRow& Row)
+template<typename T>
+void FMatrixStructCustomization<T>::CustomizeScale(TSharedRef<class IPropertyHandle> StructPropertyHandle, FDetailWidgetRow& Row)
 {
 	TWeakPtr<IPropertyHandle> WeakHandlePtr = StructPropertyHandle;
 
+	if (Row.IsPasteFromTextBound())
+	{
+		Row.OnPasteFromTextDelegate.Pin()->AddSP(this, &FMatrixStructCustomization<T>::OnPasteFromText, FTransformField::Scale, WeakHandlePtr);
+	}
+
 	Row
-	.CopyAction(FUIAction(FExecuteAction::CreateSP(this, &FMatrixStructCustomization::OnCopy, FTransformField::Scale, WeakHandlePtr)))
-	.PasteAction(FUIAction(FExecuteAction::CreateSP(this, &FMatrixStructCustomization::OnPaste, FTransformField::Scale, WeakHandlePtr)))
+	.CopyAction(FUIAction(FExecuteAction::CreateSP(this, &FMatrixStructCustomization<T>::OnCopy, FTransformField::Scale, WeakHandlePtr)))
+	.PasteAction(FUIAction(FExecuteAction::CreateSP(this, &FMatrixStructCustomization<T>::OnPaste, FTransformField::Scale, WeakHandlePtr)))
 	.NameContent()
 	[
 		StructPropertyHandle->CreatePropertyNameWidget(LOCTEXT("ScaleLabel", "Scale"))
@@ -208,22 +263,23 @@ void FMatrixStructCustomization::CustomizeScale(TSharedRef<class IPropertyHandle
 		+ SHorizontalBox::Slot()
 		.Padding(FMargin(0.0f, 2.0f, 3.0f, 2.0f))
 		[
-			MakeNumericProxyWidget<FVector, float>(StructPropertyHandle, CachedScaleX, LOCTEXT("ScaleX", "X"), false, FLinearColor::White, SNumericEntryBox<float>::RedLabelBackgroundColor)
+			MakeNumericProxyWidget<UE::Math::TVector<T>, T>(StructPropertyHandle, CachedScaleX, LOCTEXT("ScaleX", "X"), false, SNumericEntryBox<T>::RedLabelBackgroundColor)
 		]
 		+ SHorizontalBox::Slot()
 		.Padding(FMargin(0.0f, 2.0f, 3.0f, 2.0f))
 		[
-			MakeNumericProxyWidget<FVector, float>(StructPropertyHandle, CachedScaleY, LOCTEXT("ScaleY", "Y"), false, FLinearColor::White, SNumericEntryBox<float>::GreenLabelBackgroundColor)
+			MakeNumericProxyWidget<UE::Math::TVector<T>, T>(StructPropertyHandle, CachedScaleY, LOCTEXT("ScaleY", "Y"), false, SNumericEntryBox<T>::GreenLabelBackgroundColor)
 		]
 		+ SHorizontalBox::Slot()
 		.Padding(FMargin(0.0f, 2.0f, 0.0f, 2.0f))
 		[
-			MakeNumericProxyWidget<FVector, float>(StructPropertyHandle, CachedScaleZ, LOCTEXT("ScaleZ", "Z"), false, FLinearColor::White, SNumericEntryBox<float>::BlueLabelBackgroundColor)
+			MakeNumericProxyWidget<UE::Math::TVector<T>, T>(StructPropertyHandle, CachedScaleZ, LOCTEXT("ScaleZ", "Z"), false, SNumericEntryBox<T>::BlueLabelBackgroundColor)
 		]
 	];
 }
 
-void FMatrixStructCustomization::CustomizeChildren(TSharedRef<class IPropertyHandle> StructPropertyHandle, class IDetailChildrenBuilder& StructBuilder, IPropertyTypeCustomizationUtils& StructCustomizationUtils)
+template<typename T>
+void FMatrixStructCustomization<T>::CustomizeChildren(TSharedRef<class IPropertyHandle> StructPropertyHandle, class IDetailChildrenBuilder& StructBuilder, IPropertyTypeCustomizationUtils& StructCustomizationUtils)
 {
 	FMathStructProxyCustomization::CustomizeChildren(StructPropertyHandle, StructBuilder, StructCustomizationUtils);
 
@@ -234,7 +290,8 @@ void FMatrixStructCustomization::CustomizeChildren(TSharedRef<class IPropertyHan
 	CustomizeScale(StructPropertyHandle, StructBuilder.AddCustomRow(LOCTEXT("ScaleLabel", "Scale")));
 }
 
-void FMatrixStructCustomization::OnCopy(FTransformField::Type Type, TWeakPtr<IPropertyHandle> PropertyHandlePtr)
+template<typename T>
+void FMatrixStructCustomization<T>::OnCopy(FTransformField::Type Type, TWeakPtr<IPropertyHandle> PropertyHandlePtr)
 {
 	auto PropertyHandle = PropertyHandlePtr.Pin();
 
@@ -250,21 +307,21 @@ void FMatrixStructCustomization::OnCopy(FTransformField::Type Type, TWeakPtr<IPr
 	{
 		case FTransformField::Location:
 		{
-			FVector Location = CachedTranslation->Get();
+			UE::Math::TVector<T> Location = CachedTranslation->Get();
 			CopyStr = FString::Printf(TEXT("(X=%f,Y=%f,Z=%f)"), Location.X, Location.Y, Location.Z);
 			break;
 		}
 
 		case FTransformField::Rotation:
 		{
-			FRotator Rotation = CachedRotation->Get();
+			UE::Math::TRotator<T> Rotation = CachedRotation->Get();
 			CopyStr = FString::Printf(TEXT("(Pitch=%f,Yaw=%f,Roll=%f)"), Rotation.Pitch, Rotation.Yaw, Rotation.Roll);
 			break;
 		}
 
 		case FTransformField::Scale:
 		{
-			FVector Scale = CachedScale->Get();
+			UE::Math::TVector<T> Scale = CachedScale->Get();
 			CopyStr = FString::Printf(TEXT("(X=%f,Y=%f,Z=%f)"), Scale.X, Scale.Y, Scale.Z);
 			break;
 		}
@@ -276,23 +333,46 @@ void FMatrixStructCustomization::OnCopy(FTransformField::Type Type, TWeakPtr<IPr
 	}
 }
 
-void FMatrixStructCustomization::OnPaste(FTransformField::Type Type, TWeakPtr<IPropertyHandle> PropertyHandlePtr)
+template<typename T>
+void FMatrixStructCustomization<T>::OnPaste(FTransformField::Type Type, TWeakPtr<IPropertyHandle> PropertyHandlePtr)
+{
+	FString PastedText;
+	FPlatformApplicationMisc::ClipboardPaste(PastedText);
+
+	PasteFromText(TEXT(""), PastedText, Type, PropertyHandlePtr);
+}
+
+template <typename T>
+void FMatrixStructCustomization<T>::OnPasteFromText(
+	const FString& InTag,
+	const FString& InText,
+	const TOptional<FGuid>& InOperationId,
+	FTransformField::Type Type,
+	TWeakPtr<IPropertyHandle> PropertyHandlePtr)
+{
+	PasteFromText(InTag, InText, Type, PropertyHandlePtr);
+}
+
+template <typename T>
+void FMatrixStructCustomization<T>::PasteFromText(
+	const FString& InTag,
+	const FString& InText,
+	FTransformField::Type Type,
+	TWeakPtr<IPropertyHandle> PropertyHandlePtr)
 {
 	auto PropertyHandle = PropertyHandlePtr.Pin();
-
 	if (!PropertyHandle.IsValid())
 	{
 		return;
 	}
 
-	FString PastedText;
-	FPlatformApplicationMisc::ClipboardPaste(PastedText);
+	FString PastedText = InText;
 
 	switch (Type)
 	{
 		case FTransformField::Location:
 		{
-			FVector Location;
+			UE::Math::TVector<T> Location;
 			if (Location.InitFromString(PastedText))
 			{
 				FScopedTransaction Transaction(LOCTEXT("PasteLocation", "Paste Location"));
@@ -306,7 +386,7 @@ void FMatrixStructCustomization::OnPaste(FTransformField::Type Type, TWeakPtr<IP
 
 		case FTransformField::Rotation:
 		{
-			FRotator Rotation;
+			UE::Math::TRotator<T> Rotation;
 			PastedText.ReplaceInline(TEXT("Pitch="), TEXT("P="));
 			PastedText.ReplaceInline(TEXT("Yaw="), TEXT("Y="));
 			PastedText.ReplaceInline(TEXT("Roll="), TEXT("R="));
@@ -323,7 +403,7 @@ void FMatrixStructCustomization::OnPaste(FTransformField::Type Type, TWeakPtr<IP
 
 		case FTransformField::Scale:
 		{
-			FVector Scale;
+			UE::Math::TVector<T> Scale;
 			if (Scale.InitFromString(PastedText))
 			{
 				FScopedTransaction Transaction(LOCTEXT("PasteScale", "Paste Scale"));
@@ -337,7 +417,8 @@ void FMatrixStructCustomization::OnPaste(FTransformField::Type Type, TWeakPtr<IP
 	}
 }
 
-bool FMatrixStructCustomization::CacheValues( TWeakPtr<IPropertyHandle> PropertyHandlePtr ) const
+template<typename T>
+bool FMatrixStructCustomization<T>::CacheValues( TWeakPtr<IPropertyHandle> PropertyHandlePtr ) const
 {
 	auto PropertyHandle = PropertyHandlePtr.Pin();
 
@@ -349,22 +430,41 @@ bool FMatrixStructCustomization::CacheValues( TWeakPtr<IPropertyHandle> Property
 	TArray<void*> RawData;
 	PropertyHandle->AccessRawData(RawData);
 
-	if (RawData.Num() == 1)
+	const UE::Math::TMatrix<T>* FirstMatrixValue = nullptr;
+	for(void* RawDataPtr : RawData)
 	{
-		FMatrix* MatrixValue = reinterpret_cast<FMatrix*>(RawData[0]);
-		if (MatrixValue != NULL)
+		UE::Math::TMatrix<T>* MatrixValue = reinterpret_cast<UE::Math::TMatrix<T>*>(RawDataPtr);
+		if (MatrixValue == nullptr)
 		{
-			CachedTranslation->Set(MatrixValue->GetOrigin());
-			CachedRotation->Set(MatrixValue->Rotator());
-			CachedScale->Set(MatrixValue->GetScaleVector());
-			return true;
+			return false;
 		}
+
+		if(FirstMatrixValue)
+		{
+			if(!FirstMatrixValue->Equals(*MatrixValue, 0.0001f))
+			{
+				return false;
+			}
+		}
+		else
+		{
+			FirstMatrixValue = MatrixValue;
+		}
+	}
+
+	if(FirstMatrixValue)
+	{
+		CachedTranslation->Set(FirstMatrixValue->GetOrigin());
+		CachedRotation->Set(FirstMatrixValue->Rotator());
+		CachedScale->Set(FirstMatrixValue->GetScaleVector());
+		return true;
 	}
 
 	return false;
 }
 
-bool FMatrixStructCustomization::FlushValues( TWeakPtr<IPropertyHandle> PropertyHandlePtr ) const
+template<typename T>
+bool FMatrixStructCustomization<T>::FlushValues( TWeakPtr<IPropertyHandle> PropertyHandlePtr ) const
 {
 	auto PropertyHandle = PropertyHandlePtr.Pin();
 	if (!PropertyHandle.IsValid())
@@ -387,31 +487,31 @@ bool FMatrixStructCustomization::FlushValues( TWeakPtr<IPropertyHandle> Property
 	bool bNotifiedPreChange = false;
 	for (int32 ValueIndex = 0; ValueIndex < RawData.Num(); ValueIndex++)
 	{
-		FMatrix* MatrixValue = reinterpret_cast<FMatrix*>(RawData[ValueIndex]);
+		UE::Math::TMatrix<T>* MatrixValue = reinterpret_cast<UE::Math::TMatrix<T>*>(RawData[ValueIndex]);
 		if (MatrixValue != NULL)
 		{
-			const FMatrix PreviousValue = *MatrixValue;
-			const FRotator CurrentRotation = MatrixValue->Rotator();
-			const FVector CurrentTranslation = MatrixValue->GetOrigin();
-			const FVector CurrentScale = MatrixValue->GetScaleVector();
+			const UE::Math::TMatrix<T> PreviousValue = *MatrixValue;
+			const UE::Math::TRotator<T> CurrentRotation = MatrixValue->Rotator();
+			const UE::Math::TVector<T> CurrentTranslation = MatrixValue->GetOrigin();
+			const UE::Math::TVector<T> CurrentScale = MatrixValue->GetScaleVector();
 
-			FRotator Rotation(
+			UE::Math::TRotator<T> Rotation(
 				CachedRotationPitch->IsSet() ? CachedRotationPitch->Get() : CurrentRotation.Pitch,
 				CachedRotationYaw->IsSet() ? CachedRotationYaw->Get() : CurrentRotation.Yaw,
 				CachedRotationRoll->IsSet() ? CachedRotationRoll->Get() : CurrentRotation.Roll
 				);
-			FVector Translation(
+			UE::Math::TVector<T> Translation(
 				CachedTranslationX->IsSet() ? CachedTranslationX->Get() : CurrentTranslation.X,
 				CachedTranslationY->IsSet() ? CachedTranslationY->Get() : CurrentTranslation.Y,
 				CachedTranslationZ->IsSet() ? CachedTranslationZ->Get() : CurrentTranslation.Z
 				);
-			FVector Scale(
+			UE::Math::TVector<T> Scale(
 				CachedScaleX->IsSet() ? CachedScaleX->Get() : CurrentScale.X,
 				CachedScaleY->IsSet() ? CachedScaleY->Get() : CurrentScale.Y,
 				CachedScaleZ->IsSet() ? CachedScaleZ->Get() : CurrentScale.Z
 				);
 
-			const FMatrix NewValue = FScaleRotationTranslationMatrix(Scale, Rotation, Translation);
+			const UE::Math::TMatrix<T> NewValue = UE::Math::TScaleRotationTranslationMatrix<T>(Scale, Rotation, Translation);
 
 			if (!bNotifiedPreChange && (!MatrixValue->Equals(NewValue, 0.0f) || (!bIsUsingSlider && bIsInteractiveChangeInProgress)))
 			{
@@ -431,14 +531,14 @@ bool FMatrixStructCustomization::FlushValues( TWeakPtr<IPropertyHandle> Property
 
 			// Propagate default value changes after updating, for archetypes. As per usual, we only propagate the change if the instance matches the archetype's value.
 			// Note: We cannot use the "normal" PropertyNode propagation logic here, because that is string-based and the decision to propagate relies on an exact value match.
-			// Here, we're dealing with conversions between FMatrix and FVector/FRotator values, so there is some precision loss that requires a tolerance when comparing values.
+			// Here, we're dealing with conversions between UE::Math::TMatrix<T> and UE::Math::TVector<T>/UE::Math::TRotator<T> values, so there is some precision loss that requires a tolerance when comparing values.
 			if (ValueIndex < OuterObjects.Num() && OuterObjects[ValueIndex]->IsTemplate())
 			{
 				TArray<UObject*> ArchetypeInstances;
 				OuterObjects[ValueIndex]->GetArchetypeInstances(ArchetypeInstances);
 				for (UObject* ArchetypeInstance : ArchetypeInstances)
 				{
-					FMatrix* CurrentValue = reinterpret_cast<FMatrix*>(PropertyHandle->GetValueBaseAddress(reinterpret_cast<uint8*>(ArchetypeInstance)));
+					UE::Math::TMatrix<T>* CurrentValue = reinterpret_cast<UE::Math::TMatrix<T>*>(PropertyHandle->GetValueBaseAddress(reinterpret_cast<uint8*>(ArchetypeInstance)));
 					if (CurrentValue && CurrentValue->Equals(PreviousValue))
 					{
 						*CurrentValue = NewValue;
@@ -461,21 +561,21 @@ bool FMatrixStructCustomization::FlushValues( TWeakPtr<IPropertyHandle> Property
 
 	if (PropertyUtilities.IsValid() && !bIsInteractiveChangeInProgress)
 	{
-		FPropertyChangedEvent ChangeEvent(PropertyHandle->GetProperty(), EPropertyChangeType::ValueSet);
+		FPropertyChangedEvent ChangeEvent(PropertyHandle->GetProperty(), EPropertyChangeType::ValueSet, OuterObjects);
 		PropertyUtilities->NotifyFinishedChangingProperties(ChangeEvent);
 	}
 
 	return true;
 }
 
-#undef LOCTEXT_NAMESPACE
-
-TSharedRef<IPropertyTypeCustomization> FTransformStructCustomization::MakeInstance() 
+template<typename T>
+TSharedRef<IPropertyTypeCustomization> FTransformStructCustomization<T>::MakeInstance() 
 {
 	return MakeShareable( new FTransformStructCustomization );
 }
 
-bool FTransformStructCustomization::CacheValues( TWeakPtr<IPropertyHandle> PropertyHandlePtr ) const
+template<typename T>
+bool FTransformStructCustomization<T>::CacheValues( TWeakPtr<IPropertyHandle> PropertyHandlePtr ) const
 {
 	auto PropertyHandle = PropertyHandlePtr.Pin();
 
@@ -487,22 +587,41 @@ bool FTransformStructCustomization::CacheValues( TWeakPtr<IPropertyHandle> Prope
 	TArray<void*> RawData;
 	PropertyHandle->AccessRawData(RawData);
 
-	if (RawData.Num() == 1)
+	const UE::Math::TTransform<T>* FirstTransformValue = nullptr;
+	for(void* RawDataPtr : RawData)
 	{
-		FTransform* TransformValue = reinterpret_cast<FTransform*>(RawData[0]);
-		if (TransformValue != NULL)
+		UE::Math::TTransform<T>* TransformValue = reinterpret_cast<UE::Math::TTransform<T>*>(RawDataPtr);
+		if (TransformValue == nullptr)
 		{
-			CachedTranslation->Set(TransformValue->GetTranslation());
-			CachedRotation->Set(TransformValue->GetRotation().Rotator());
-			CachedScale->Set(TransformValue->GetScale3D());
-			return true;
+			return false;
 		}
+
+		if(FirstTransformValue)
+		{
+			if(!FirstTransformValue->Equals(*TransformValue, 0.0001f))
+			{
+				return false;
+			}
+		}
+		else
+		{
+			FirstTransformValue = TransformValue;
+		}
+	}
+
+	if(FirstTransformValue)
+	{
+		this->CachedTranslation->Set(FirstTransformValue->GetTranslation());
+		this->CachedRotation->Set(FirstTransformValue->GetRotation().Rotator());
+		this->CachedScale->Set(FirstTransformValue->GetScale3D());
+		return true;
 	}
 
 	return false;
 }
 
-bool FTransformStructCustomization::FlushValues( TWeakPtr<IPropertyHandle> PropertyHandlePtr ) const
+template<typename T>
+bool FTransformStructCustomization<T>::FlushValues( TWeakPtr<IPropertyHandle> PropertyHandlePtr ) const
 {
 	auto PropertyHandle = PropertyHandlePtr.Pin();
 
@@ -526,33 +645,33 @@ bool FTransformStructCustomization::FlushValues( TWeakPtr<IPropertyHandle> Prope
 	bool bNotifiedPreChange = false;
 	for (int32 ValueIndex = 0; ValueIndex < RawData.Num(); ValueIndex++)
 	{
-		FTransform* TransformValue = reinterpret_cast<FTransform*>(RawData[0]);
+		UE::Math::TTransform<T>* TransformValue = reinterpret_cast<UE::Math::TTransform<T>*>(RawData[ValueIndex]);
 		if (TransformValue != NULL)
 		{
-			const FTransform PreviousValue = *TransformValue;
-			const FRotator CurrentRotation = TransformValue->GetRotation().Rotator();
-			const FVector CurrentTranslation = TransformValue->GetTranslation();
-			const FVector CurrentScale = TransformValue->GetScale3D();
+			const UE::Math::TTransform<T> PreviousValue = *TransformValue;
+			const UE::Math::TRotator<T> CurrentRotation = TransformValue->GetRotation().Rotator();
+			const UE::Math::TVector<T> CurrentTranslation = TransformValue->GetTranslation();
+			const UE::Math::TVector<T> CurrentScale = TransformValue->GetScale3D();
 
-			FRotator Rotation(
-				CachedRotationPitch->IsSet() ? CachedRotationPitch->Get() : CurrentRotation.Pitch,
-				CachedRotationYaw->IsSet() ? CachedRotationYaw->Get() : CurrentRotation.Yaw,
-				CachedRotationRoll->IsSet() ? CachedRotationRoll->Get() : CurrentRotation.Roll
+			UE::Math::TRotator<T> Rotation(
+				this->CachedRotationPitch->IsSet() ? this->CachedRotationPitch->Get() : CurrentRotation.Pitch,
+				this->CachedRotationYaw->IsSet() ? this->CachedRotationYaw->Get() : CurrentRotation.Yaw,
+				this->CachedRotationRoll->IsSet() ? this->CachedRotationRoll->Get() : CurrentRotation.Roll
 				);
-			FVector Translation(
-				CachedTranslationX->IsSet() ? CachedTranslationX->Get() : CurrentTranslation.X,
-				CachedTranslationY->IsSet() ? CachedTranslationY->Get() : CurrentTranslation.Y,
-				CachedTranslationZ->IsSet() ? CachedTranslationZ->Get() : CurrentTranslation.Z
+			UE::Math::TVector<T> Translation(
+				this->CachedTranslationX->IsSet() ? this->CachedTranslationX->Get() : CurrentTranslation.X,
+				this->CachedTranslationY->IsSet() ? this->CachedTranslationY->Get() : CurrentTranslation.Y,
+				this->CachedTranslationZ->IsSet() ? this->CachedTranslationZ->Get() : CurrentTranslation.Z
 				);
-			FVector Scale(
-				CachedScaleX->IsSet() ? CachedScaleX->Get() : CurrentScale.X,
-				CachedScaleY->IsSet() ? CachedScaleY->Get() : CurrentScale.Y,
-				CachedScaleZ->IsSet() ? CachedScaleZ->Get() : CurrentScale.Z
+			UE::Math::TVector<T> Scale(
+				this->CachedScaleX->IsSet() ? this->CachedScaleX->Get() : CurrentScale.X,
+				this->CachedScaleY->IsSet() ? this->CachedScaleY->Get() : CurrentScale.Y,
+				this->CachedScaleZ->IsSet() ? this->CachedScaleZ->Get() : CurrentScale.Z
 				);
 
-			const FTransform NewValue = FTransform(Rotation, Translation, Scale);
+			const UE::Math::TTransform<T> NewValue = UE::Math::TTransform<T>(Rotation, Translation, Scale);
 
-			if (!bNotifiedPreChange && (!TransformValue->Equals(NewValue, 0.0f) || (!bIsUsingSlider && bIsInteractiveChangeInProgress)))
+			if (!bNotifiedPreChange && (!TransformValue->Equals(NewValue, 0.0f) || (!this->bIsUsingSlider && bIsInteractiveChangeInProgress)))
 			{
 				if (!bIsInteractiveChangeInProgress)
 				{
@@ -562,7 +681,7 @@ bool FTransformStructCustomization::FlushValues( TWeakPtr<IPropertyHandle> Prope
 				PropertyHandle->NotifyPreChange();
 				bNotifiedPreChange = true;
 
-				bIsInteractiveChangeInProgress = bIsUsingSlider;
+				bIsInteractiveChangeInProgress = this->bIsUsingSlider;
 			}
 
 			// Set the new value.
@@ -570,14 +689,14 @@ bool FTransformStructCustomization::FlushValues( TWeakPtr<IPropertyHandle> Prope
 
 			// Propagate default value changes after updating, for archetypes. As per usual, we only propagate the change if the instance matches the archetype's value.
 			// Note: We cannot use the "normal" PropertyNode propagation logic here, because that is string-based and the decision to propagate relies on an exact value match.
-			// Here, we're dealing with conversions between FTransform and FVector/FRotator values, so there is some precision loss that requires a tolerance when comparing values.
+			// Here, we're dealing with conversions between UE::Math::TTransform<T> and UE::Math::TVector<T>/UE::Math::TRotator<T> values, so there is some precision loss that requires a tolerance when comparing values.
 			if (ValueIndex < OuterObjects.Num() && OuterObjects[ValueIndex]->IsTemplate())
 			{
 				TArray<UObject*> ArchetypeInstances;
 				OuterObjects[ValueIndex]->GetArchetypeInstances(ArchetypeInstances);
 				for (UObject* ArchetypeInstance : ArchetypeInstances)
 				{
-					FTransform* CurrentValue = reinterpret_cast<FTransform*>(PropertyHandle->GetValueBaseAddress(reinterpret_cast<uint8*>(ArchetypeInstance)));
+					UE::Math::TTransform<T>* CurrentValue = reinterpret_cast<UE::Math::TTransform<T>*>(PropertyHandle->GetValueBaseAddress(reinterpret_cast<uint8*>(ArchetypeInstance)));
 					if (CurrentValue && CurrentValue->Equals(PreviousValue))
 					{
 						*CurrentValue = NewValue;
@@ -589,44 +708,45 @@ bool FTransformStructCustomization::FlushValues( TWeakPtr<IPropertyHandle> Prope
 	
 	if (bNotifiedPreChange)
 	{
-		PropertyHandle->NotifyPostChange(bIsUsingSlider ? EPropertyChangeType::Interactive : EPropertyChangeType::ValueSet);
+		PropertyHandle->NotifyPostChange(this->bIsUsingSlider ? EPropertyChangeType::Interactive : EPropertyChangeType::ValueSet);
 
-		if (!bIsUsingSlider)
+		if (!this->bIsUsingSlider)
 		{
 			GEditor->EndTransaction();
 			bIsInteractiveChangeInProgress = false;
 		}
 	}
 
-	if (PropertyUtilities.IsValid() && !bIsInteractiveChangeInProgress)
+	if (this->PropertyUtilities.IsValid() && !bIsInteractiveChangeInProgress)
 	{
-		FPropertyChangedEvent ChangeEvent(PropertyHandle->GetProperty(), EPropertyChangeType::ValueSet);
-		PropertyUtilities->NotifyFinishedChangingProperties(ChangeEvent);
+		FPropertyChangedEvent ChangeEvent(PropertyHandle->GetProperty(), EPropertyChangeType::ValueSet, OuterObjects);
+		this->PropertyUtilities->NotifyFinishedChangingProperties(ChangeEvent);
 	}
 
 	return true;
 }
 
-
-TSharedRef<IPropertyTypeCustomization> FQuatStructCustomization::MakeInstance()
+template<typename T>
+TSharedRef<IPropertyTypeCustomization> FQuatStructCustomization<T>::MakeInstance()
 {
 	return MakeShareable(new FQuatStructCustomization);
 }
 
 
-void FQuatStructCustomization::MakeHeaderRow(TSharedRef<class IPropertyHandle>& InStructPropertyHandle, FDetailWidgetRow& Row)
+template<typename T>
+void FQuatStructCustomization<T>::MakeHeaderRow(TSharedRef<class IPropertyHandle>& InStructPropertyHandle, FDetailWidgetRow& Row)
 {
-	CustomizeRotation(InStructPropertyHandle, Row);
+	this->CustomizeRotation(InStructPropertyHandle, Row);
 }
 
-
-void FQuatStructCustomization::CustomizeChildren(TSharedRef<class IPropertyHandle> StructPropertyHandle, class IDetailChildrenBuilder& StructBuilder, IPropertyTypeCustomizationUtils& StructCustomizationUtils)
+template<typename T>
+void FQuatStructCustomization<T>::CustomizeChildren(TSharedRef<class IPropertyHandle> StructPropertyHandle, class IDetailChildrenBuilder& StructBuilder, IPropertyTypeCustomizationUtils& StructCustomizationUtils)
 {
 	FMathStructProxyCustomization::CustomizeChildren(StructPropertyHandle, StructBuilder, StructCustomizationUtils);
 }
 
-
-bool FQuatStructCustomization::CacheValues(TWeakPtr<IPropertyHandle> PropertyHandlePtr) const
+template<typename T>
+bool FQuatStructCustomization<T>::CacheValues(TWeakPtr<IPropertyHandle> PropertyHandlePtr) const
 {
 	auto PropertyHandle = PropertyHandlePtr.Pin();
 
@@ -640,10 +760,10 @@ bool FQuatStructCustomization::CacheValues(TWeakPtr<IPropertyHandle> PropertyHan
 
 	if (RawData.Num() == 1)
 	{
-		FQuat* QuatValue = reinterpret_cast<FQuat*>(RawData[0]);
+		UE::Math::TQuat<T>* QuatValue = reinterpret_cast<UE::Math::TQuat<T>*>(RawData[0]);
 		if (QuatValue != NULL)
 		{
-			CachedRotation->Set(QuatValue->Rotator());
+			this->CachedRotation->Set(QuatValue->Rotator());
 			return true;
 		}
 	}
@@ -651,7 +771,8 @@ bool FQuatStructCustomization::CacheValues(TWeakPtr<IPropertyHandle> PropertyHan
 	return false;
 }
 
-bool FQuatStructCustomization::FlushValues(TWeakPtr<IPropertyHandle> PropertyHandlePtr) const
+template<typename T>
+bool FQuatStructCustomization<T>::FlushValues(TWeakPtr<IPropertyHandle> PropertyHandlePtr) const
 {
 	auto PropertyHandle = PropertyHandlePtr.Pin();
 
@@ -675,25 +796,25 @@ bool FQuatStructCustomization::FlushValues(TWeakPtr<IPropertyHandle> PropertyHan
 	bool bNotifiedPreChange = false;
 	for (int32 ValueIndex = 0; ValueIndex < RawData.Num(); ValueIndex++)
 	{
-		FQuat* QuatValue = reinterpret_cast<FQuat*>(RawData[0]);
+		UE::Math::TQuat<T>* QuatValue = reinterpret_cast<UE::Math::TQuat<T>*>(RawData[0]);
 		if (QuatValue != NULL)
 		{
-			const FQuat PreviousValue = *QuatValue;
-			const FRotator CurrentRotation = QuatValue->Rotator();
+			const UE::Math::TQuat<T> PreviousValue = *QuatValue;
+			const UE::Math::TRotator<T> CurrentRotation = QuatValue->Rotator();
 
-			FRotator Rotation(
-				CachedRotationPitch->IsSet() ? CachedRotationPitch->Get() : CurrentRotation.Pitch,
-				CachedRotationYaw->IsSet() ? CachedRotationYaw->Get() : CurrentRotation.Yaw,
-				CachedRotationRoll->IsSet() ? CachedRotationRoll->Get() : CurrentRotation.Roll
+			UE::Math::TRotator<T> Rotation(
+				this->CachedRotationPitch->IsSet() ? this->CachedRotationPitch->Get() : CurrentRotation.Pitch,
+				this->CachedRotationYaw->IsSet() ? this->CachedRotationYaw->Get() : CurrentRotation.Yaw,
+				this->CachedRotationRoll->IsSet() ? this->CachedRotationRoll->Get() : CurrentRotation.Roll
 				);
 			
-			const FQuat NewValue = Rotation.Quaternion();
+			const UE::Math::TQuat<T> NewValue = Rotation.Quaternion();
 
-			// In some cases the FQuat pointed to in RawData is no longer aligned to 16 bytes.
-			// Make a local copy to guarantee the alignment criterions of the vector intrinsics inside FQuat::Equals
-			const FQuat AlignedQuatValue = *QuatValue; 
+			// In some cases the UE::Math::TQuat<T> pointed to in RawData is no longer aligned to 16 bytes.
+			// Make a local copy to guarantee the alignment criterions of the vector intrinsics inside UE::Math::TQuat<T>::Equals
+			const UE::Math::TQuat<T> AlignedQuatValue = *QuatValue; 
 
-			if (!bNotifiedPreChange && (!AlignedQuatValue.Equals(NewValue, 0.0f) || (!bIsUsingSlider && bIsInteractiveChangeInProgress)))
+			if (!bNotifiedPreChange && (!AlignedQuatValue.Equals(NewValue, 0.0f) || (!this->bIsUsingSlider && bIsInteractiveChangeInProgress)))
 			{
 				if (!bIsInteractiveChangeInProgress)
 				{
@@ -703,7 +824,7 @@ bool FQuatStructCustomization::FlushValues(TWeakPtr<IPropertyHandle> PropertyHan
 				PropertyHandle->NotifyPreChange();
 				bNotifiedPreChange = true;
 
-				bIsInteractiveChangeInProgress = bIsUsingSlider;
+				bIsInteractiveChangeInProgress = this->bIsUsingSlider;
 			}
 
 			// Set the new value.
@@ -711,14 +832,14 @@ bool FQuatStructCustomization::FlushValues(TWeakPtr<IPropertyHandle> PropertyHan
 
 			// Propagate default value changes after updating, for archetypes. As per usual, we only propagate the change if the instance matches the archetype's value.
 			// Note: We cannot use the "normal" PropertyNode propagation logic here, because that is string-based and the decision to propagate relies on an exact value match.
-			// Here, we're dealing with conversions between FQuat and FRotator values, so there is some precision loss that requires a tolerance when comparing values.
+			// Here, we're dealing with conversions between UE::Math::TQuat<T> and UE::Math::TRotator<T> values, so there is some precision loss that requires a tolerance when comparing values.
 			if (ValueIndex < OuterObjects.Num() && OuterObjects[ValueIndex]->IsTemplate())
 			{
 				TArray<UObject*> ArchetypeInstances;
 				OuterObjects[ValueIndex]->GetArchetypeInstances(ArchetypeInstances);
 				for (UObject* ArchetypeInstance : ArchetypeInstances)
 				{
-					FQuat* CurrentValue = reinterpret_cast<FQuat*>(PropertyHandle->GetValueBaseAddress(reinterpret_cast<uint8*>(ArchetypeInstance)));
+					UE::Math::TQuat<T>* CurrentValue = reinterpret_cast<UE::Math::TQuat<T>*>(PropertyHandle->GetValueBaseAddress(reinterpret_cast<uint8*>(ArchetypeInstance)));
 					if (CurrentValue && CurrentValue->Equals(PreviousValue))
 					{
 						*CurrentValue = NewValue;
@@ -730,21 +851,30 @@ bool FQuatStructCustomization::FlushValues(TWeakPtr<IPropertyHandle> PropertyHan
 
 	if (bNotifiedPreChange)
 	{
-		PropertyHandle->NotifyPostChange(bIsUsingSlider ? EPropertyChangeType::Interactive : EPropertyChangeType::ValueSet);
+		PropertyHandle->NotifyPostChange(this->bIsUsingSlider ? EPropertyChangeType::Interactive : EPropertyChangeType::ValueSet);
 
-		if (!bIsUsingSlider)
+		if (!this->bIsUsingSlider)
 		{
 			GEditor->EndTransaction();
 			bIsInteractiveChangeInProgress = false;
 		}
 	}
 
-	if (PropertyUtilities.IsValid() && !bIsInteractiveChangeInProgress)
+	if (this->PropertyUtilities.IsValid() && !bIsInteractiveChangeInProgress)
 	{
-		FPropertyChangedEvent ChangeEvent(PropertyHandle->GetProperty(), EPropertyChangeType::ValueSet);
-		PropertyUtilities->NotifyFinishedChangingProperties(ChangeEvent);
+		FPropertyChangedEvent ChangeEvent(PropertyHandle->GetProperty(), EPropertyChangeType::ValueSet, OuterObjects);
+		this->PropertyUtilities->NotifyFinishedChangingProperties(ChangeEvent);
 	}
 
 	return true;
 }
 
+// Instantiate for linker
+template class FMatrixStructCustomization<float>;
+template class FMatrixStructCustomization<double>;
+template class FTransformStructCustomization<float>;
+template class FTransformStructCustomization<double>;
+template class FQuatStructCustomization<float>;
+template class FQuatStructCustomization<double>;
+
+#undef LOCTEXT_NAMESPACE

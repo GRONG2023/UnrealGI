@@ -7,7 +7,7 @@ public class IOSTargetPlatform : ModuleRules
 	public IOSTargetPlatform(ReadOnlyTargetRules Target) : base(Target)
 	{
 		BinariesSubFolder = "IOS";
-		
+
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
@@ -17,6 +17,7 @@ public class IOSTargetPlatform : ModuleRules
 				"DesktopPlatform",
 				"LaunchDaemonMessages",
 				"Projects",
+				"Json",
 				"AudioPlatformConfiguration",
 				"Sockets",
 				"Networking"
@@ -25,20 +26,8 @@ public class IOSTargetPlatform : ModuleRules
 
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
-                "MessagingCommon",
+				"MessagingCommon",
 				"TargetDeviceServices",
-			}
-		);
-
-		PrivateIncludePaths.Add("Developer/IOS/IOSTargetPlatform/Private");
-
-		//This is somehow necessary for getting iOS to build on, at least, windows. It seems like the target platform is included for cooking, and thus it requirtes a bunch of other info.
-		PublicIncludePaths.AddRange(
-			new string[]
-			{
-				"Runtime/Core/Public/Apple",
-				"Runtime/Core/Public/IOS",
-				"Runtime/Networking/Public",
 			}
 		);
 
@@ -49,7 +38,7 @@ public class IOSTargetPlatform : ModuleRules
 
 		if (Target.Platform == UnrealTargetPlatform.Mac)
 		{
-            PublicAdditionalLibraries.Add("/System/Library/PrivateFrameworks/MobileDevice.framework/Versions/Current/MobileDevice");
+			PublicAdditionalLibraries.Add("/System/Library/PrivateFrameworks/MobileDevice.framework/Versions/Current/MobileDevice");
 		}
 	}
 }

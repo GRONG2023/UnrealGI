@@ -1,11 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
-#include "CoreTypes.h"
-#include "Misc/Guid.h"
+#include "DevObjectVersion.h"
+#include "Containers/Map.h"
 
 // Custom serialization version for changes made in the //Fortnite/Main stream
-struct CORE_API FFortniteMainBranchObjectVersion
+struct FFortniteMainBranchObjectVersion
 {
 	enum Type
 	{
@@ -69,7 +69,7 @@ struct CORE_API FFortniteMainBranchObjectVersion
 		// TimelineTemplates store their derived names instead of dynamically generating
 		StoreTimelineNamesInTemplate,
 		
-		// New Pose Asset data type
+		// Avoid duplicating widget animations to save space.
 		WidgetStopDuplicatingAnimations,
 
 		// Allow reducing of the base LOD, we need to store some imported model data so we can reduce again from the same data.
@@ -152,13 +152,280 @@ struct CORE_API FFortniteMainBranchObjectVersion
 		// Remove the WaterVelocityHeightTexture dependency on MPC_Landscape and LandscapeWaterIndo 
 		RemoveLandscapeWaterInfo,
 
+		// Added the weighted value property type to store the cloths weight maps' low/high ranges
+		ChaosClothAddWeightedValue,
+
+		// Added the Long Range Attachment stiffness weight map
+		ChaosClothAddTetherStiffnessWeightMap,
+
+		// Fix corrupted LOD transition maps
+		ChaosClothFixLODTransitionMaps,
+
+		// Enable a few more weight maps to better art direct the cloth simulation
+		ChaosClothAddTetherScaleAndDragLiftWeightMaps,
+
+		// Enable material (edge, bending, and area stiffness) weight maps
+		ChaosClothAddMaterialWeightMaps,
+
+		// Added bShowCurve for movie scene float channel serialization
+		SerializeFloatChannelShowCurve,
+
+		// Minimize slack waste by using a single array for grass data
+		LandscapeGrassSingleArray,
+
+		// Add loop counters to sequencer's compiled sub-sequence data
+		AddedSubSequenceEntryWarpCounter,
+
+		// Water plugin is now component-based rather than actor based
+		WaterBodyComponentRefactor,
+
+		// Cooked BPGC storing editor-only asset tags
+		BPGCCookedEditorTags,
+
+		// Terrain layer weights are no longer considered material parameters
+		TerrainLayerWeightsAreNotParameters,
+
+		// Anim Dynamics Node Gravity Override vector is now defined in world space, not simulation space. 
+		// Legacy behavior can be maintained with a flag, which is set false by default for new nodes, 
+		// true for nodes predating this change.
+		GravityOverrideDefinedInWorldSpace,
+
+		// Anim Dynamics Node Physics parameters for each body in a chain are now stored in an array and can be edited.
+		AnimDynamicsEditableChainParameters,
+
+		// Decoupled the generation of the water texture from the Water Brush and the landscape
+		WaterZonesRefactor,
+
+		// Add faster damping calculations to the cloth simulation and rename previous Damping parameter to LocalDamping.
+		ChaosClothFasterDamping,
+
+		// Migrated function handlers to the CDO/archetype data
+		MigratedFunctionHandlersToDefaults,
+
+		// Storing inertia tensor as vec3 instead of matrix.
+		ChaosInertiaConvertedToVec3,
+
+		// Migrated event definitions to the CDO/archetype data
+		MigratedEventDefinitionToDefaults,
+
+		// Serialize LevelInstanceActorGuid on new ILevelInstanceInterface implementation
+		LevelInstanceActorGuidSerialize,
+
+		// Single-frame/key AnimDataModel patch-up
+		SingleFrameAndKeyAnimModel,
+
+		// Remapped bEvaluateWorldPositionOffset to bEvaluateWorldPositionOffsetInRayTracing
+		RemappedEvaluateWorldPositionOffsetInRayTracing,
+
+		// Water body collision settings are now those of the base UPrimitiveComponent, rather than duplicated in UWaterBodyComponent
+		WaterBodyComponentCollisionSettingsRefactor,
+
+		// Introducing widget inherited named slots.  This wouldn't have required a version bump, except in the previous
+		// version, users could make NamedSlots and then Seed them with any random widgets, as a sorta 'default' setup.
+		// In order to preserve that, we're bumping the version so that we can set a new field on UNamedSlot to control
+		// if a widget exposes its named slot to everyone (even if it has content), which by default they wont any longer.
+		WidgetInheritedNamedSlots,
+
+		// Added water HLOD material
+		WaterHLODSupportAdded,
+
+		// Moved parameters affecting Skeleton pose rendering from the PoseWatch class to the PoseWatchPoseElement class.
+		PoseWatchMigrateSkeletonDrawParametersToPoseElement,
+
+		// Reset default value for Water exclusion volumes to make them more intuitive and support the "it just works" philosophy.
+		WaterExclusionVolumeExcludeAllDefault,
+		
+		// Added water non-tessellated LOD
+		WaterNontessellatedLODSupportAdded,
+
+		// Added FHierarchicalSimplification::SimplificationMethod
+		HierarchicalSimplificationMethodEnumAdded,
+
+		// Changed how world partition streaming cells are named
+		WorldPartitionStreamingCellsNamingShortened,
+
+		// Serialize ContentBundleGuid in WorldPartitionActorDesc
+		WorldPartitionActorDescSerializeContentBundleGuid,
+
+		// Serialize IsActorRuntimeOnly in WorldPartitionActorDesc
+		WorldPartitionActorDescSerializeActorIsRuntimeOnly,
+
+		// Add Nanite Material Override option to materials and material instances.
+		NaniteMaterialOverride,
+
+		// Serialize HLOD stats in HLODActorDesc
+		WorldPartitionHLODActorDescSerializeStats,
+
+		// WorldPartitionStreamingSourceComponent property deprecation
+		WorldPartitionStreamingSourceComponentTargetDeprecation,
+
+		// Fixed localization gathering for external actor packages
+		FixedLocalizationGatherForExternalActorPackage,
+
+		// Change HLODActors to RuntimeCells mapping to use a GUID instead of the cell name
+		WorldPartitionHLODActorUseSourceCellGuid,
+
+		// Add an attribute to geometry collection to track internal faces, rather than relying on material ID numbering
+		ChaosGeometryCollectionInternalFacesAttribute,
+
+		// Dynamic cast nodes use an enumerated pure node state to include a value for the default setting
+		DynamicCastNodesUsePureStateEnum,
+
+		// Add FWorldPartitionActorFilter to FLevelInstanceActorDesc/FDataLayerInstanceDesc
+		WorldPartitionActorFilter,
+
+		// Change the non-spatialized radius to blend to a pure 2D spatialized sound vs omnidirectional
+		AudioAttenuationNonSpatializedRadiusBlend,
+
+		// Serialize actor class descriptors
+		WorldPartitionActorClassDescSerialize,
+
+		// FActorContainerID is now an FGuid instead of a uint64
+		WorldPartitionFActorContainerIDu64ToGuid,
+
+		// FDataLayerInstanceDesc support for private data layers
+		WorldPartitionPrivateDataLayers,
+
+		// Reduce size and improve behaviour of Chaos::FImplicitObjectUnion
+		ChaosImplicitObjectUnionBVHRefactor,
+
+		// FLevelInstanceActorDesc DeltaSerialize Filter
+		LevelInstanceActorDescDeltaSerializeFilter,
+
+		// Fix the Nanite landscape mesh non-deterministic DDC keys
+		FixNaniteLandscapeMeshDDCKey,
+
+		// Change how connection graphs are stored on Geometry Collections to an edge-array representation
+		ChaosGeometryCollectionConnectionEdgeGroup,
+
+		// Moved the water info mesh data and static water body meshes into new static mesh components for water bodies.
+		WaterBodyStaticMeshComponents,
+
+		// Serialize invalid bounds in world partition actor descriptors
+		WorldPartitionActorDescSerializeInvalidBounds,
+
+		// Upgrade Navigation Links to use 64 bits for the ID
+		NavigationLinkID32To64,
+
+		// Serialize editor only references in world partition actor descriptors
+		WorldPartitionActorDescSerializeEditorOnlyReferences,
+
+		// Add support for soft object paths in actor descriptors
+		WorldPartitionActorDescSerializeSoftObjectPathSupport,
+
+		// Don't serialize class descriptor GUIDs
+		WorldPartitionClasDescGuidTransient,
+
+		// Serialize ActorDesc bIsMainWorldOnly
+		WorldPartitionActorDescIsMainWorldOnly,
+
+		// FWorldPartitionActorFilter go back to FString serialize of AssetPaths to avoid FArchiveReplaceOrClearExternalReferences clearing CDO references on BP Compile
+		WorldPartitionActorFilterStringAssetPath,
+
+		// Add FPackedLevelActorDesc for APackedLevelActor and support for APackedLevelActor Filters
+		PackedLevelActorDesc,
+
+		// Add customizable values for several UWorldPartitionRuntimeSpatialHash cvars
+		WorldPartitionRuntimeSpatialHashCVarOverrides,
+
+		// WorldPartition HLOD now contains a source actors object
+		WorldPartitionHLODSourceActorsRefactor,
+
+		WaterBodyStaticMeshRename,
+
+		// Geometry Collection now by-default converts vertex colors to sRGB when creating render data
+		GeometryCollectionConvertVertexColorToSRGB,
+
+		// Water bodies before this version need to update their water zone on load since they won't have been serialized yet.
+		WaterOwningZonePointerFixup,
+
+		// Set flags on water static meshes to duplicate transient to avoid underlying static mesh duplication issue
+		WaterBodyStaticMeshDuplicateTransient,
+
+		// Update paths to use the SkeletalClass
+		MVVMConvertPropertyPathToSkeletalClass,
+
+		// Fixup all flags/outering on static meshes on water bodies by rebuilding them completely
+		WaterBodyStaticMeshFixup,
+
+		// Binding extensions for anim graph nodes
+		AnimGraphNodeBindingExtensions,
+
+		// Function data stores a map from work to debug operands
+		RigVMSaveDebugMapInGraphFunctionData,
+
+		// Fix missing binding extensions for some anim graph nodes
+		FixMissingAnimGraphNodeBindingExtensions,
+
+		// EditableWhenInherited: Skip custom serialization on non Archetypes
+		ISMComponentEditableWhenInheritedSkipSerialization,
+
+		// GrassTypes are now per-component, rather than per-landscape proxy :
+		LandscapeSupportPerComponentGrassTypes,
+
+		// World partition actor data layers activation logic operator support defaults for old maps
+		WorldPartitionDataLayersLogicOperatorAdded,
+
+		// Started sorting Possessables, Spawnables, and MovieSceneBindings for better search performance.
+		MovieSceneSortedBindings,
+
+		// Remove the UAnimCurveCompressionCodec::InstanceGuid which causes cook determinism issues
+		RemoveAnimCurveCompressionCodecInstanceGuid,
+
+		// Serialize the source HLOD Layer for HLOD actor descriptors.
+		WorldPartitionHLODActorDescSerializeSourceHLODLayer,
+
+		// Serialize custom editor bounds for HLOD actor descriptors.
+		WorldPartitionHLODActorDescSerializeEditorBounds,
+
+		// Changed default Local Exposure Contrast from 1.0 to 0.8 (reverted)
+		LocalExposureDefaultChangeFrom1_Reverted,
+
+		// Added support of external packaging of Data Layer Instances
+		AddDataLayerInstanceExternalPackage,
+
+		// Update paths to keep a flag if they are the widget BP
+		MVVMPropertyPathSelf,
+
+		// Enabled ObjectPtr property serialization for Dataflow nodes
+		AddDataflowObjectSerialization,
+
+		// Add anim notify rate scaling, defaults to on for new content, off for old content
+		AnimNotifyAddRateScale,
+
+		// Fix tangents for non-uniform build scales, and add a flag to optionally match the previous (incorrect) tangents
+		FixedTangentTransformForNonuniformBuildScale,
+
+		// AnimNode Layers will now start in a Shared Group, instead of being each one on a different group at runtime
+		AnimNodeRootDefaultGroupChange,
+
+		// Move AnimNext graphs to sub-entries of assets
+		AnimNextMoveGraphsToEntries,
+
+		// Removed debug information containing compressed data author, time etc. from animation DDC data as it introduces indeterminism
+		AnimationSequenceCompressedDataRemoveDebugData,
+
+		// Changes to Orthographic Camera default settings
+		OrthographicCameraDefaultSettings,
+
+		// Added settings to Landscape HLODs
+		LandscapeAddedHLODSettings,
+
+		// Skeletal Mesh uses Mesh Description to store mesh bulk data.
+		MeshDescriptionForSkeletalMesh,
+
+		// Skeletal Mesh optionally cooks half edge data per lod
+		SkeletalHalfEdgeData,
+		
 		// -----<new versions can be added above this line>-------------------------------------------------
 		VersionPlusOne,
 		LatestVersion = VersionPlusOne - 1
 	};
 
 	// The GUID for this custom version number
-	const static FGuid GUID;
+	CORE_API const static FGuid GUID;
+
+	static CORE_API TMap<FGuid, FGuid> GetSystemGuids();
 
 private:
 	FFortniteMainBranchObjectVersion() {}

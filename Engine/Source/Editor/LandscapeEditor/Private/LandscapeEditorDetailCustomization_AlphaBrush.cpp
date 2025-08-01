@@ -2,6 +2,7 @@
 
 #include "LandscapeEditorDetailCustomization_AlphaBrush.h"
 #include "UnrealClient.h"
+#include "ViewportClient.h"
 #include "Engine/Texture2D.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Modules/ModuleManager.h"
@@ -22,6 +23,8 @@
 #include "IAssetTypeActions.h"
 #include "AssetToolsModule.h"
 #include "CanvasTypes.h"
+#include "TextureCompiler.h"
+#include "TextureResource.h"
 #include "Editor.h"
 
 #define LOCTEXT_NAMESPACE "LandscapeEditor.Brushes.Alpha"
@@ -58,25 +61,29 @@ public:
 		TextureChannel = InArgs._TextureChannel;
 
 		FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-		TWeakPtr<IAssetTypeActions> AssetTypeActions = AssetToolsModule.Get().GetAssetTypeActionsForClass(Texture.Get()->GetClass());
-		FLinearColor AssetColor = AssetTypeActions.Pin()->GetTypeColor();
+		FLinearColor AssetColor(ForceInitToZero);
+		if (UTexture2D* Texture2D = Texture.Get())
+		{
+			TWeakPtr<IAssetTypeActions> AssetTypeActions = AssetToolsModule.Get().GetAssetTypeActionsForClass(Texture2D->GetClass());
+			AssetColor = AssetTypeActions.Pin()->GetTypeColor();
+		}
 
 		ChildSlot
 		[
 			SNew(SBorder)
 			.Padding(4.0f)
-			.BorderImage( FEditorStyle::GetBrush("PropertyEditor.AssetThumbnailShadow") )
+			.BorderImage( FAppStyle::GetBrush("PropertyEditor.AssetTileItem.DropShadow") )
 			.OnMouseDoubleClick(this, &STextureMaskThumbnail::OnAssetThumbnailDoubleClick)
 			//.OnClicked_Static(&FLandscapeEditorDetailCustomization_AlphaBrush::OnTextureButtonClicked)
 			[
 				SNew(SBox)
 				.ToolTipText(this, &STextureMaskThumbnail::OnGetToolTip)
-				.WidthOverride(64)
-				.HeightOverride(64)
+				.WidthOverride(64.0f)
+				.HeightOverride(64.0f)
 				[
 					SNew(SBorder)
 					.Padding(2)
-					.BorderImage(FEditorStyle::GetBrush("AssetThumbnail", ".Border"))
+					.BorderImage(FAppStyle::GetBrush("AssetThumbnail", ".Border"))
 					//.BorderBackgroundColor(this, &SAssetThumbnail::GetViewportBorderColorAndOpacity)
 					.BorderBackgroundColor(AssetColor)
 					//.ColorAndOpacity(this, &SAssetThumbnail::GetViewportColorAndOpacity)
@@ -126,7 +133,7 @@ public:
 				|| NewTextureChannel != CachedTextureChannel)
 			{
 				CachedTexture = NewTexture;
-				CachedTextureChannel = NewTextureChannel;
+				CachedTextureChannel = static_cast<uint8>(NewTextureChannel);
 				Viewport->Invalidate();
 			}
 		}
@@ -154,18 +161,20 @@ void FTextureMaskThumbnailViewportClient::Draw(FViewport* Viewport, FCanvas* Can
 		return;
 	}
 
-	UTexture2D* Texture = PinnedParent->Texture.Get();
-
 	Canvas->Clear( FLinearColor::Black);
 
-	// Fully stream in the texture before drawing it.
-	Texture->SetForceMipLevelsToBeResident(30.0f);
-	Texture->WaitForStreaming();
+	if (UTexture2D* Texture = PinnedParent->Texture.Get())
+	{
+		// Fully stream in the texture before drawing it.
+		FTextureCompilingManager::Get().FinishCompilation({ Texture });
+		Texture->SetForceMipLevelsToBeResident(30.0f);
+		Texture->WaitForStreaming();
 
-	//Draw the selected texture, uses ColourChannelBlend mode parameter to filter colour channels and apply grayscale
-	FCanvasTileItem TileItem( FVector2D( 0.0f, 0.0f ), Texture->Resource, Viewport->GetSizeXY(), FLinearColor::White );
-	TileItem.BlendMode = (ESimpleElementBlendMode)(SE_BLEND_RGBA_MASK_START + (1<<PinnedParent->TextureChannel.Get()) + 16);
-	Canvas->DrawItem( TileItem );
+		//Draw the selected texture, uses ColourChannelBlend mode parameter to filter colour channels and apply grayscale
+		FCanvasTileItem TileItem( FVector2D( 0.0f, 0.0f ), Texture->GetResource(), Viewport->GetSizeXY(), FLinearColor::White );
+		TileItem.BlendMode = (ESimpleElementBlendMode)(SE_BLEND_RGBA_MASK_START + (1<<PinnedParent->TextureChannel.Get()) + 16);
+		Canvas->DrawItem( TileItem );
+	}
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -191,7 +200,6 @@ void FLandscapeEditorDetailCustomization_AlphaBrush::CustomizeDetails(IDetailLay
 	DetailBuilder.HideProperty(PropertyHandle_AlphaTextureChannel);
 
 	BrushSettingsCategory.AddProperty(PropertyHandle_AlphaTexture)
-	.OverrideResetToDefault(FResetToDefaultOverride::Hide())
 	.CustomWidget()
 	.NameContent()
 	[
@@ -202,8 +210,8 @@ void FLandscapeEditorDetailCustomization_AlphaBrush::CustomizeDetails(IDetailLay
 	.MaxDesiredWidth(0)
 	[
 		SNew(SAssetDropTarget)
-		.OnAssetDropped_Static(&FLandscapeEditorDetailCustomization_AlphaBrush::OnAssetDropped, PropertyHandle_AlphaTexture)
-		.OnIsAssetAcceptableForDrop_Static(&FLandscapeEditorDetailCustomization_AlphaBrush::OnAssetDraggedOver)
+		.OnAssetsDropped_Static(&FLandscapeEditorDetailCustomization_AlphaBrush::OnAssetDropped, PropertyHandle_AlphaTexture)
+		.OnAreAssetsAcceptableForDrop_Static(&FLandscapeEditorDetailCustomization_AlphaBrush::OnAssetDraggedOver)
 		.ToolTipText(PropertyHandle_AlphaTexture->GetToolTipText())
 		[
 			SNew(SHorizontalBox)
@@ -222,13 +230,24 @@ void FLandscapeEditorDetailCustomization_AlphaBrush::CustomizeDetails(IDetailLay
 				.IsEnabled(true)
 				.PropertyHandle(PropertyHandle_AlphaTexture)
 				.AllowedClass(UTexture2D::StaticClass())
+				.OnShouldFilterAsset_Lambda([](const FAssetData& AssetData) -> bool
+				{
+					// We cannot use cooked texture as parameter for now.
+					if ((AssetData.PackageFlags & PKG_Cooked) != 0)
+					{
+						return true;
+					}
+
+					const UTexture2D* Texture = Cast<UTexture2D>(AssetData.GetAsset());
+
+					return (Texture == nullptr) || !Texture->Source.IsValid();
+				})
 				.AllowClear(false)
 			]
 		]
 	];
 
-	BrushSettingsCategory.AddProperty(PropertyHandle_AlphaTextureChannel)
-	.OverrideResetToDefault(FResetToDefaultOverride::Hide());
+	BrushSettingsCategory.AddProperty(PropertyHandle_AlphaTextureChannel);
 
 	if (IsBrushSetActive("BrushSet_Pattern"))
 	{
@@ -264,16 +283,14 @@ void FLandscapeEditorDetailCustomization_AlphaBrush::CustomizeDetails(IDetailLay
 }
 END_SLATE_FUNCTION_BUILD_OPTIMIZATION
 
-bool FLandscapeEditorDetailCustomization_AlphaBrush::OnAssetDraggedOver(const UObject* InObject)
+bool FLandscapeEditorDetailCustomization_AlphaBrush::OnAssetDraggedOver(TArrayView<FAssetData> InAssets)
 {
-	check(InObject);
-
-	return InObject->IsA(UTexture2D::StaticClass());
+	return Cast<UTexture2D>(InAssets[0].GetAsset()) != nullptr;
 }
 
-void FLandscapeEditorDetailCustomization_AlphaBrush::OnAssetDropped(UObject* InObject, TSharedRef<IPropertyHandle> PropertyHandle_AlphaTexture)
+void FLandscapeEditorDetailCustomization_AlphaBrush::OnAssetDropped(const FDragDropEvent&, TArrayView<FAssetData> InAssets, TSharedRef<IPropertyHandle> PropertyHandle_AlphaTexture)
 {
-	ensure(PropertyHandle_AlphaTexture->SetValue(InObject) == FPropertyAccess::Success);
+	ensure(PropertyHandle_AlphaTexture->SetValue(InAssets[0].GetAsset()) == FPropertyAccess::Success);
 }
 
 #undef LOCTEXT_NAMESPACE

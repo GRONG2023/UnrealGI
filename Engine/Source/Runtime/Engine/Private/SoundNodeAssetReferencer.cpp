@@ -1,14 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Sound/SoundNodeAssetReferencer.h"
-#include "Sound/SoundNodeQualityLevel.h"
-#include "Sound/SoundNodeRandom.h"
-#include "Sound/SoundCue.h"
-#include "UObject/FrameworkObjectVersion.h"
-#include "Interfaces/ITargetPlatform.h"
-#include "AudioCompressionSettings.h"
-#include "Sound/AudioSettings.h"
-#include "AudioCompressionSettingsUtils.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SoundNodeAssetReferencer)
 
 #define ASYNC_LOAD_RANDOMIZED_SOUNDS 1
 
@@ -95,3 +89,4 @@ void USoundNodeAssetReferencer::PostEditImport()
 	LoadAsset();
 }
 #endif
+

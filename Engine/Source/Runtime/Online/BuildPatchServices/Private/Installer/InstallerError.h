@@ -18,6 +18,7 @@ namespace BuildPatchServices
 		static const TCHAR* InvalidInstallTags = TEXT("04");
 		static const TCHAR* ChunkReferenceTracking = TEXT("05");
 		static const TCHAR* MissingPrereqForPrereqOnlyInstall = TEXT("06");
+		static const TCHAR* InvalidDataInManifest = TEXT("07");
 	}
 
 	/**
@@ -197,6 +198,11 @@ namespace BuildPatchServices
 		 * @param Handle        The value that was returned RegisterForErrors for the delegate to be removed.
 		 */
 		virtual void UnregisterForErrors(int32 Handle) = 0;
+
+		/**
+		 * Reset internal state to be ready for a new process.
+		 */
+		virtual void Reset() = 0;
 	};
 
 	/**

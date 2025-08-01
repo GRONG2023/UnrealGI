@@ -59,13 +59,13 @@ struct TLegacySkinWeightInfo
 struct FSkinWeightInfo
 {
 	FBoneIndexType	InfluenceBones[MAX_TOTAL_INFLUENCES];
-	uint8			InfluenceWeights[MAX_TOTAL_INFLUENCES];
+	uint16			InfluenceWeights[MAX_TOTAL_INFLUENCES];
 };
 
 struct FSkinWeightRHIInfo
 {
-	FVertexBufferRHIRef DataVertexBufferRHI;
-	FVertexBufferRHIRef LookupVertexBufferRHI;
+	FBufferRHIRef DataVertexBufferRHI;
+	FBufferRHIRef LookupVertexBufferRHI;
 };
 
 /** A lookup vertex buffer storing skin weight stream offset / influence count. Only used for unlimited bone influences. */
@@ -90,6 +90,16 @@ public:
 	/** @return true is LookupData is valid */
 	bool IsLookupDataValid() const;
 
+	const uint8* GetLookupData() const
+	{
+		return Data;
+	}
+
+	uint8* GetLookupData()
+	{
+		return Data;
+	}
+
 	void Init(uint32 InNumVertices);
 
 	friend FArchive& operator<<(FArchive& Ar, FSkinWeightLookupVertexBuffer& VertexBuffer);
@@ -98,7 +108,7 @@ public:
 	void CopyMetaData(const FSkinWeightLookupVertexBuffer& Other);
 
 	// FRenderResource interface.
-	virtual void InitRHI() override;
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 	virtual void ReleaseRHI() override;
 
 	virtual FString GetFriendlyName() const override
@@ -128,33 +138,16 @@ public:
 	{ return bNeedsCPUAccess; }
 
 	/** Create an RHI vertex buffer with CPU data. CPU data may be discarded after creation (see TResourceArray::Discard) */
-	FVertexBufferRHIRef CreateRHIBuffer_RenderThread();
-	FVertexBufferRHIRef CreateRHIBuffer_Async();
+	FBufferRHIRef CreateRHIBuffer(FRHICommandListBase& RHICmdList);
+
+	UE_DEPRECATED(5.4, "Use CreateRHIBuffer instead.")
+	FBufferRHIRef CreateRHIBuffer_RenderThread();
+	UE_DEPRECATED(5.4, "Use CreateRHIBuffer instead.")
+	FBufferRHIRef CreateRHIBuffer_Async();
 
 	/** Similar to Init/ReleaseRHI but only update existing SRV so references to the SRV stays valid */
-	template <uint32 MaxNumUpdates>
-	void InitRHIForStreaming(FRHIVertexBuffer* IntermediateBuffer, TRHIResourceUpdateBatcher<MaxNumUpdates>& Batcher)
-	{
-		if (VertexBufferRHI && IntermediateBuffer)
-		{
-			check(SRVValue);
-			Batcher.QueueUpdateRequest(VertexBufferRHI, IntermediateBuffer);
-			Batcher.QueueUpdateRequest(SRVValue, VertexBufferRHI, PixelFormatStride, PixelFormat);
-		}
-	}
-
-	template <uint32 MaxNumUpdates>
-	void ReleaseRHIForStreaming(TRHIResourceUpdateBatcher<MaxNumUpdates>& Batcher)
-	{
-		if (VertexBufferRHI)
-		{
-			Batcher.QueueUpdateRequest(VertexBufferRHI, nullptr);
-		}
-		if (SRVValue)
-		{
-			Batcher.QueueUpdateRequest(SRVValue, nullptr, 0, 0);
-		}
-	}
+	void InitRHIForStreaming(FRHIBuffer* IntermediateBuffer, FRHIResourceUpdateBatcher& Batcher);
+	void ReleaseRHIForStreaming(FRHIResourceUpdateBatcher& Batcher);
 
 	void GetWeightOffsetAndInfluenceCount(uint32 VertexIndex, uint32& OutWeightOffset, uint32& OutInfluenceCount) const;
 	void SetWeightOffsetAndInfluenceCount(uint32 VertexIndex, uint32 WeightOffset, uint32 InfluenceCount);
@@ -168,9 +161,6 @@ private:
 
 	/** Allocates the vertex data storage type. */
 	ENGINE_API void AllocateData();
-
-	template <bool bRenderThread>
-	FVertexBufferRHIRef CreateRHIBuffer_Internal();
 
 	/** true if this vertex buffer will be used with CPU skinning. Resource arrays are set to cpu accessible if this is true */
 	bool bNeedsCPUAccess;
@@ -218,7 +208,7 @@ public:
 	/** Delete existing resources */
 	ENGINE_API void CleanUp();
 
-	ENGINE_API void Init(uint32 InNumBones, uint32 InNumVertices);
+	ENGINE_API void Init(uint32 InNumWeights, uint32 InNumVertices);
 
 	friend FArchive& operator<<(FArchive& Ar, FSkinWeightDataVertexBuffer& VertexBuffer);
 
@@ -226,7 +216,7 @@ public:
 	void CopyMetaData(const FSkinWeightDataVertexBuffer& Other);
 
 	// FRenderResource interface.
-	ENGINE_API virtual void InitRHI() override;
+	ENGINE_API virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 	ENGINE_API virtual void ReleaseRHI() override;
 
 	virtual FString GetFriendlyName() const override 
@@ -236,17 +226,27 @@ public:
 	FORCEINLINE uint32 GetNumVertices() const
 	{ return NumVertices; }
 
-	/** @return number of bones in this vertex buffer */
-	FORCEINLINE uint32 GetNumBones() const
-	{ return NumBones; }
+	/** @return number of bone weights in this vertex buffer */
+	FORCEINLINE uint32 GetNumBoneWeights() const
+	{ return NumBoneWeights; }
 
 	/** @return byte size of each bone index */
 	FORCEINLINE uint32 GetBoneIndexByteSize() const
 	{ return (Use16BitBoneIndex() ? sizeof(FBoneIndex16) : sizeof(FBoneIndex8)); }
 
+	FORCEINLINE uint32 GetBoneWeightByteSize() const
+	{
+		return Use16BitBoneWeight() ? sizeof(uint16) : sizeof(uint8);
+	}
+
+	FORCEINLINE uint32 GetBoneIndexAndWeightByteSize() const
+	{
+		return GetBoneIndexByteSize() + GetBoneWeightByteSize(); 
+	}
+
 	/** @return vertex stride for when using constant number of bones per vertex buffer */
 	FORCEINLINE uint32 GetConstantInfluencesVertexStride() const
-	{ return (GetBoneIndexByteSize() + sizeof(uint8)) * MaxBoneInfluences; }
+	{ return GetBoneIndexAndWeightByteSize() * MaxBoneInfluences; }
 
 	/** @return offset position for bone weights data for each vertex */
 	FORCEINLINE uint32 GetConstantInfluencesBoneWeightsOffset() const
@@ -254,7 +254,7 @@ public:
 
 	/** @return total size of data in resource array */
 	FORCEINLINE uint32 GetVertexDataSize() const
-	{ return NumBones * (GetBoneIndexByteSize() + sizeof(uint8)); }
+	{ return NumBoneWeights * GetBoneIndexAndWeightByteSize(); }
 
 	// @param guaranteed only to be valid if the vertex buffer is valid
 	FRHIShaderResourceView* GetSRV() const
@@ -281,59 +281,55 @@ public:
 
 	FORCEINLINE bool Use16BitBoneIndex() const
 	{ return bUse16BitBoneIndex; }
+	
+	void SetUse16BitBoneWeight(bool bInUse16BitBoneWeight)
+	{ bUse16BitBoneWeight = bInUse16BitBoneWeight; }
+
+	bool Use16BitBoneWeight() const
+	{ return bUse16BitBoneWeight; }
+	
+	
 
 	ENGINE_API GPUSkinBoneInfluenceType GetBoneInfluenceType() const;
 	ENGINE_API bool GetRigidWeightBone(uint32 VertexWeightOffset, uint32 VertexInfluenceCount, int32& OutBoneIndex) const;
 	ENGINE_API uint32 GetBoneIndex(uint32 VertexWeightOffset, uint32 VertexInfluenceCount, uint32 InfluenceIndex) const;
 	ENGINE_API void SetBoneIndex(uint32 VertexWeightOffset, uint32 VertexInfluenceCount, uint32 InfluenceIndex, uint32 BoneIndex);
-	ENGINE_API uint8 GetBoneWeight(uint32 VertexWeightOffset, uint32 VertexInfluenceCount, uint32 InfluenceIndex) const;
-	ENGINE_API void SetBoneWeight(uint32 VertexWeightOffset, uint32 VertexInfluenceCount, uint32 InfluenceIndex, uint8 BoneWeight);
+	ENGINE_API uint16 GetBoneWeight(uint32 VertexWeightOffset, uint32 VertexInfluenceCount, uint32 InfluenceIndex) const;
+	ENGINE_API void SetBoneWeight(uint32 VertexWeightOffset, uint32 VertexInfluenceCount, uint32 InfluenceIndex, uint16 BoneWeight);
 	ENGINE_API void ResetVertexBoneWeights(uint32 VertexWeightOffset, uint32 VertexInfluenceCount);
 
-	ENGINE_API void CopyDataFromBuffer(const TArrayView<const FSkinWeightInfo>& SkinWeightData);
+	ENGINE_API void CopyDataFromBuffer(const uint8* InSkinWeightData, uint32 InNumVertices);
 
 	/** Create an RHI vertex buffer with CPU data. CPU data may be discarded after creation (see TResourceArray::Discard) */
-	FVertexBufferRHIRef CreateRHIBuffer_RenderThread();
-	FVertexBufferRHIRef CreateRHIBuffer_Async();
+	FBufferRHIRef CreateRHIBuffer(FRHICommandListBase& RHICmdList);
+
+	UE_DEPRECATED(5.4, "Use CreateRHIBuffer instead.")
+	FBufferRHIRef CreateRHIBuffer_RenderThread();
+	UE_DEPRECATED(5.4, "Use CreateRHIBuffer instead.")
+	FBufferRHIRef CreateRHIBuffer_Async();
 
 	/** Similar to Init/ReleaseRHI but only update existing SRV so references to the SRV stays valid */
-	template <uint32 MaxNumUpdates>
-	void InitRHIForStreaming(FRHIVertexBuffer* IntermediateBuffer, TRHIResourceUpdateBatcher<MaxNumUpdates>& Batcher)
-	{
-		if (VertexBufferRHI && IntermediateBuffer)
-		{
-			check(SRVValue);
-			Batcher.QueueUpdateRequest(VertexBufferRHI, IntermediateBuffer);
-			Batcher.QueueUpdateRequest(SRVValue, VertexBufferRHI, GetPixelFormatStride(), GetPixelFormat());
-		}
-	}
-
-	template <uint32 MaxNumUpdates>
-	void ReleaseRHIForStreaming(TRHIResourceUpdateBatcher<MaxNumUpdates>& Batcher)
-	{
-		if (VertexBufferRHI)
-		{
-			Batcher.QueueUpdateRequest(VertexBufferRHI, nullptr);
-		}
-		if (SRVValue)
-		{
-			Batcher.QueueUpdateRequest(SRVValue, nullptr, 0, 0);
-		}
-	}
+	void InitRHIForStreaming(FRHIBuffer* IntermediateBuffer, FRHIResourceUpdateBatcher& Batcher);
+	void ReleaseRHIForStreaming(FRHIResourceUpdateBatcher& Batcher);
 
 	bool IsWeightDataValid() const;
 
-	FSkinWeightInfo* GetWeightData() const
+	const uint8* GetWeightData() const
 	{
-		return (FSkinWeightInfo*)Data;
+		return Data;
 	}
 
+	uint8* GetWeightData()
+	{
+		return Data;
+	}
+	
 protected:
 	// guaranteed only to be valid if the vertex buffer is valid
 	FShaderResourceViewRHIRef SRVValue;
 
 private:
-	void ResizeBuffer(uint32 InNumBones, uint32 InNumVertices);
+	void ResizeBuffer(uint32 InNumWeights, uint32 InNumVertices);
 
 	EPixelFormat GetPixelFormat() const
 	{ return bVariableBonesPerVertex ? PF_R8_UINT : PF_R32_UINT; }
@@ -352,6 +348,9 @@ private:
 	/** Use 16 bit bone index instead of 8 bit */
 	bool bUse16BitBoneIndex;
 
+	/** Use 16 bit bone weight instead of 8 bit */
+	bool bUse16BitBoneWeight;
+
 	/** The vertex data storage type */
 	FStaticMeshVertexDataInterface* WeightData;
 
@@ -361,14 +360,11 @@ private:
 	/** The cached number of vertices. */
 	uint32 NumVertices;
 
-	/** The cached number of bones. */
-	uint32 NumBones;
+	/** Total number of bone weights across all vertices */
+	uint32 NumBoneWeights;
 
 	/** Allocates the vertex data storage type. */
 	ENGINE_API void AllocateData();
-
-	template <bool bRenderThread>
-	FVertexBufferRHIRef CreateRHIBuffer_Internal();
 };
 
 /** A container for skin weights data vertex buffer and lookup vertex buffer. */
@@ -400,7 +396,7 @@ public:
 	ENGINE_API void GetSkinWeights(TArray<FSkinWeightInfo>& OutVertices) const;
 	ENGINE_API FSkinWeightInfo GetVertexSkinWeights(uint32 VertexIndex) const;
 
-	ENGINE_API void CopySkinWeightInfoData(const TArrayView<const FSkinWeightInfo>& SkinWeightData);
+	ENGINE_API void CopySkinWeightRawDataFromBuffer(const uint8* InSkinWeightData, uint32 InNumVertices);
 
 	friend FArchive& operator<<(FArchive& Ar, FSkinWeightVertexBuffer& VertexBuffer);
 
@@ -436,9 +432,21 @@ public:
 	bool Use16BitBoneIndex() const
 	{ return DataVertexBuffer.Use16BitBoneIndex(); }
 
+	void SetUse16BitBoneWeight(bool bInUse16BitBoneWeight)
+	{ DataVertexBuffer.SetUse16BitBoneWeight(bInUse16BitBoneWeight); }
+	
+	bool Use16BitBoneWeight() const
+	{ return DataVertexBuffer.Use16BitBoneWeight(); }
+	
 	uint32 GetBoneIndexByteSize() const
 	{ return DataVertexBuffer.GetBoneIndexByteSize(); }
 
+	uint32 GetBoneWeightByteSize() const
+	{ return DataVertexBuffer.GetBoneWeightByteSize(); }
+	
+	uint32 GetBoneIndexAndWeightByteSize() const
+	{ return DataVertexBuffer.GetBoneIndexAndWeightByteSize(); }
+	
 	bool GetVariableBonesPerVertex() const
 	{ return DataVertexBuffer.GetVariableBonesPerVertex(); }
 
@@ -448,13 +456,20 @@ public:
 	uint32 GetConstantInfluencesBoneWeightsOffset() const
 	{ return DataVertexBuffer.GetConstantInfluencesBoneWeightsOffset(); }
 
+	FSkinWeightDataVertexBuffer* GetDataVertexBuffer()
+	{ return &DataVertexBuffer; }
+	
 	const FSkinWeightDataVertexBuffer* GetDataVertexBuffer() const
 	{ return &DataVertexBuffer; }
 
 	const FSkinWeightLookupVertexBuffer* GetLookupVertexBuffer() const
 	{ return &LookupVertexBuffer; }
 
+	FSkinWeightRHIInfo CreateRHIBuffer(FRHICommandListBase& RHICmdList);
+
+	UE_DEPRECATED(5.4, "Use CreateRHIBuffer instead.")
 	FSkinWeightRHIInfo CreateRHIBuffer_RenderThread();
+	UE_DEPRECATED(5.4, "Use CreateRHIBuffer instead.")
 	FSkinWeightRHIInfo CreateRHIBuffer_Async();
 
 	ENGINE_API GPUSkinBoneInfluenceType GetBoneInfluenceType() const;
@@ -462,24 +477,28 @@ public:
 	ENGINE_API bool GetRigidWeightBone(uint32 VertexIndex, int32& OutBoneIndex) const;
 	ENGINE_API uint32 GetBoneIndex(uint32 VertexIndex, uint32 InfluenceIndex) const;
 	ENGINE_API void SetBoneIndex(uint32 VertexIndex, uint32 InfluenceIndex, uint32 BoneIndex);
-	ENGINE_API uint8 GetBoneWeight(uint32 VertexIndex, uint32 InfluenceIndex) const;
-	ENGINE_API void SetBoneWeight(uint32 VertexIndex, uint32 InfluenceIndex, uint8 BoneWeight);
+	ENGINE_API uint16 GetBoneWeight(uint32 VertexIndex, uint32 InfluenceIndex) const;
+	ENGINE_API void SetBoneWeight(uint32 VertexIndex, uint32 InfluenceIndex, uint16 BoneWeight);
 	ENGINE_API void ResetVertexBoneWeights(uint32 VertexIndex);
+	
+	/** Should only be called for legacy meshes or meshes that don't really have a LookupVertexBuffer, for example created in realtime.
+		All variable influence meshes imported after the FAnimObjectVersion::UnlimitedBoneInfluences version already have a LookupVertexBuffer */
+	ENGINE_API void RebuildLookupVertexBuffer();
 
+	/** SetOwnerName should be called before BeginInitResources for the owner name to be successfully tracked. */
+	ENGINE_API void SetOwnerName(const FName& OwnerName);
 	ENGINE_API void BeginInitResources();
 	ENGINE_API void BeginReleaseResources();
 	ENGINE_API void ReleaseResources();
 
 	/** Similar to Init/ReleaseRHI but only update existing SRV so references to the SRV stays valid */
-	template <uint32 MaxNumUpdates>
-	void InitRHIForStreaming(const FSkinWeightRHIInfo& RHIInfo, TRHIResourceUpdateBatcher<MaxNumUpdates>& Batcher)
+	void InitRHIForStreaming(const FSkinWeightRHIInfo& RHIInfo, FRHIResourceUpdateBatcher& Batcher)
 	{
 		DataVertexBuffer.InitRHIForStreaming(RHIInfo.DataVertexBufferRHI, Batcher);
-		LookupVertexBuffer.InitRHIForStreaming(RHIInfo.DataVertexBufferRHI, Batcher);
+		LookupVertexBuffer.InitRHIForStreaming(RHIInfo.LookupVertexBufferRHI, Batcher);
 	}
 
-	template <uint32 MaxNumUpdates>
-	void ReleaseRHIForStreaming(TRHIResourceUpdateBatcher<MaxNumUpdates>& Batcher)
+	void ReleaseRHIForStreaming(FRHIResourceUpdateBatcher& Batcher)
 	{
 		DataVertexBuffer.ReleaseRHIForStreaming(Batcher);
 		LookupVertexBuffer.ReleaseRHIForStreaming(Batcher);

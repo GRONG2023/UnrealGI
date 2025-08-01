@@ -3,8 +3,16 @@
 #include "Widgets/Layout/SDPIScaler.h"
 #include "Layout/ArrangedChildren.h"
 
+SLATE_IMPLEMENT_WIDGET(SDPIScaler)
+void SDPIScaler::PrivateRegisterAttributes(FSlateAttributeInitializer& AttributeInitializer)
+{
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION_WITH_NAME(AttributeInitializer, "SlotPadding", ChildSlot.SlotPaddingAttribute, EInvalidateWidgetReason::Layout);
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION_WITH_NAME(AttributeInitializer, "DPIScale", DPIScaleAttribute, EInvalidateWidgetReason::Prepass);
+}
+
 SDPIScaler::SDPIScaler()
 	: ChildSlot(this)
+	, DPIScaleAttribute(*this, 1.f)
 {
 	SetCanTick(false);
 	bCanSupportFocus = false;
@@ -13,7 +21,7 @@ SDPIScaler::SDPIScaler()
 
 void SDPIScaler::Construct( const FArguments& InArgs )
 {
-	DPIScale = InArgs._DPIScale;
+	SetDPIScale(InArgs._DPIScale);
 
 	ChildSlot
 	[
@@ -26,7 +34,7 @@ void SDPIScaler::OnArrangeChildren( const FGeometry& AllottedGeometry, FArranged
 	const EVisibility MyVisibility = this->GetVisibility();
 	if ( ArrangedChildren.Accepts( MyVisibility ) )
 	{
-		const float MyDPIScale = DPIScale.Get();
+		const float MyDPIScale = DPIScaleAttribute.Get();
 
 		ArrangedChildren.AddWidget( AllottedGeometry.MakeChild(
 			this->ChildSlot.GetWidget(),
@@ -39,7 +47,12 @@ void SDPIScaler::OnArrangeChildren( const FGeometry& AllottedGeometry, FArranged
 	
 FVector2D SDPIScaler::ComputeDesiredSize( float ) const
 {
-	return DPIScale.Get() * ChildSlot.GetWidget()->GetDesiredSize();
+	float DPIScaleValue = DPIScaleAttribute.Get();
+	if (ensure(DPIScaleValue > 0.f))
+	{
+		return DPIScaleValue * ChildSlot.GetWidget()->GetDesiredSize();
+	}
+	return ChildSlot.GetWidget()->GetDesiredSize();
 }
 
 FChildren* SDPIScaler::GetChildren()
@@ -57,13 +70,11 @@ void SDPIScaler::SetContent(TSharedRef<SWidget> InContent)
 
 void SDPIScaler::SetDPIScale(TAttribute<float> InDPIScale)
 {
-	if (SetAttribute(DPIScale, InDPIScale, EInvalidateWidgetReason::Layout))
-	{
-		InvalidatePrepass();
-	}
+	DPIScaleAttribute.Assign(*this, MoveTemp(InDPIScale), 1.f);
+	DPIScaleAttribute.UpdateNow(*this);
 }
 
 float SDPIScaler::GetRelativeLayoutScale(int32 ChildIndex, float LayoutScaleMultiplier) const
 {
-	return DPIScale.Get();
+	return DPIScaleAttribute.Get();
 }

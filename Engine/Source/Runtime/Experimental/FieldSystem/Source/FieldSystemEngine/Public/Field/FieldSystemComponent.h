@@ -33,8 +33,8 @@ class FChaosSolversModule;
 /**
 *	FieldSystemComponent
 */
-UCLASS(meta = (BlueprintSpawnableComponent))
-class FIELDSYSTEMENGINE_API UFieldSystemComponent : public UPrimitiveComponent
+UCLASS(meta = (BlueprintSpawnableComponent), MinimalAPI)
+class UFieldSystemComponent : public UPrimitiveComponent
 {
 	GENERATED_UCLASS_BODY()
 		friend class FFieldSystemEditorCommands;
@@ -45,7 +45,7 @@ public:
 	//~ Begin USceneComponent Interface.
 
 	//~ Begin UPrimitiveComponent Interface.
-	virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
+	FIELDSYSTEMENGINE_API virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
 	//~ End UPrimitiveComponent Interface.
 
 	/** Set the field system asset @todo(remove the field system, we dont need the asset */
@@ -55,8 +55,8 @@ public:
 	FORCEINLINE const UFieldSystem* GetFieldSystem() const { return FieldSystem; }
 
 	/** Field system asset to be used to store the construction fields */
-	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadOnly, Category = "Field", meta = (ToolTip = "Field system asset to be used to store the construction fields"))
-	UFieldSystem* FieldSystem;
+	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadOnly, Category = "Field", meta = (ToolTip = "Field system asset to be used to store the construction fields. This asset is not required anymore and will be deprecated soon."))
+	TObjectPtr<UFieldSystem> FieldSystem;
 
 	/** If enabled the field will be pushed to the world fields and will be available to materials and niagara */
 	UPROPERTY(EditAnywhere, Category = "Field", meta = (ToolTip = "If enabled the field will be pushed to the world fields and will be available to materials and niagara"))
@@ -93,7 +93,7 @@ public:
 	*
 	*/
 	UFUNCTION(BlueprintCallable, Category = "Field", DisplayName = "Apply Uniform Force", meta = (UnsafeDuringActorConstruction = "true"))
-	void ApplyLinearForce(UPARAM(DisplayName = "Enable Field") bool Enabled,
+	FIELDSYSTEMENGINE_API void ApplyLinearForce(UPARAM(DisplayName = "Enable Field") bool Enabled,
 			UPARAM(DisplayName = "Uniform Direction") FVector Direction,
 			UPARAM(DisplayName = "Field Magnitude") float Magnitude);
 
@@ -108,7 +108,7 @@ public:
 	*
 	*/
 	UFUNCTION(BlueprintCallable, Category = "Field", DisplayName = "Set Dynamic State", meta = (UnsafeDuringActorConstruction = "true"))
-	void ApplyStayDynamicField(UPARAM(DisplayName = "Enable Field") bool Enabled,
+	FIELDSYSTEMENGINE_API void ApplyStayDynamicField(UPARAM(DisplayName = "Enable Field") bool Enabled,
 			UPARAM(DisplayName = "Center Position") FVector Position,
 			UPARAM(DisplayName = "Field Radius") float Radius);
 
@@ -123,7 +123,7 @@ public:
 	*
 	*/
 	UFUNCTION(BlueprintCallable, Category = "Field", DisplayName = "Apply Radial Force", meta = (UnsafeDuringActorConstruction = "true"))
-	void ApplyRadialForce(UPARAM(DisplayName = "Enable Field") bool Enabled,
+	FIELDSYSTEMENGINE_API void ApplyRadialForce(UPARAM(DisplayName = "Enable Field") bool Enabled,
 			UPARAM(DisplayName = "Center Position") FVector Position,
 			UPARAM(DisplayName = "Field Magnitude") float Magnitude);
 
@@ -140,7 +140,7 @@ public:
 	*
 	*/
 	UFUNCTION(BlueprintCallable, Category = "Field", DisplayName = "Falloff Radial Force", meta = (UnsafeDuringActorConstruction = "true"))
-	void ApplyRadialVectorFalloffForce(UPARAM(DisplayName = "Enable Field") bool Enabled,
+	FIELDSYSTEMENGINE_API void ApplyRadialVectorFalloffForce(UPARAM(DisplayName = "Enable Field") bool Enabled,
 			UPARAM(DisplayName = "Center Position") FVector Position,
 			UPARAM(DisplayName = "Falloff Radius") float Radius,
 			UPARAM(DisplayName = "Field Magnitude") float Magnitude);
@@ -159,7 +159,7 @@ public:
 	*
 	*/
 	UFUNCTION(BlueprintCallable, Category = "Field", DisplayName = "Falloff Uniform Force", meta = (UnsafeDuringActorConstruction = "true"))
-	void ApplyUniformVectorFalloffForce(UPARAM(DisplayName = "Enable Field") bool Enabled,
+	FIELDSYSTEMENGINE_API void ApplyUniformVectorFalloffForce(UPARAM(DisplayName = "Enable Field") bool Enabled,
 			UPARAM(DisplayName = "Center Position") FVector Position,
 			UPARAM(DisplayName = "Uniform Direction") FVector Direction,
 			UPARAM(DisplayName = "Falloff Radius") float Radius,
@@ -179,7 +179,7 @@ public:
 	*
 	*/
 	UFUNCTION(BlueprintCallable, Category = "Field", DisplayName = "Apply External Strain", meta = (UnsafeDuringActorConstruction = "true"))
-	void ApplyStrainField(UPARAM(DisplayName = "Enable Field") bool Enabled,
+	FIELDSYSTEMENGINE_API void ApplyStrainField(UPARAM(DisplayName = "Enable Field") bool Enabled,
 			UPARAM(DisplayName = "Center Position") FVector Position,
 			UPARAM(DisplayName = "Falloff Radius") float Radius,
 			UPARAM(DisplayName = "Field Magnitude") float Magnitude,
@@ -192,8 +192,6 @@ public:
 	*    for examples of how to recreate variations of the above generic
 	*    fields using field networks
 	*
-	*    (https://wiki.it.epicgames.net/display/~Brice.Criswell/Fields)
-	*
 	*    @param Enabled Is this force enabled for evaluation.
 	*    @param Target Type of field supported by the solver.
 	*    @param MetaData Meta data used to assist in evaluation
@@ -201,7 +199,7 @@ public:
 	*
 	*/
 	UFUNCTION(BlueprintCallable, Category = "Field", DisplayName = "Add Transient Field", meta = (UnsafeDuringActorConstruction = "true"))
-	void ApplyPhysicsField(UPARAM(DisplayName = "Enable Field") bool Enabled,
+	FIELDSYSTEMENGINE_API void ApplyPhysicsField(UPARAM(DisplayName = "Enable Field") bool Enabled,
 			UPARAM(DisplayName = "Physics Type") EFieldPhysicsType Target,
 			UPARAM(DisplayName = "Meta Data") UFieldSystemMetaData* MetaData,
 			UPARAM(DisplayName = "Field Node") UFieldNodeBase* Field);
@@ -218,8 +216,6 @@ public:
 	*    for examples of how to recreate variations of the above generic
 	*    fields using field networks
 	*
-	*    (https://wiki.it.epicgames.net/display/~Brice.Criswell/Fields)
-	*
 	*    @param Enabled Is this force enabled for evaluation.
 	*    @param Target Type of field supported by the solver.
 	*    @param MetaData Meta data used to assist in evaluation
@@ -227,7 +223,7 @@ public:
 	*
 	*/
 	UFUNCTION(BlueprintCallable, Category = "Field", DisplayName = "Add Persistent Field", meta = (UnsafeDuringActorConstruction = "true"))
-	void AddPersistentField(UPARAM(DisplayName = "Enable Field") bool Enabled,
+	FIELDSYSTEMENGINE_API void AddPersistentField(UPARAM(DisplayName = "Enable Field") bool Enabled,
 			UPARAM(DisplayName = "Physics Type") EFieldPhysicsType Target,
 			UPARAM(DisplayName = "Meta Data")  UFieldSystemMetaData* MetaData,
 			UPARAM(DisplayName = "Field Node") UFieldNodeBase* Field);
@@ -238,7 +234,7 @@ public:
 	*
 	*/
 	UFUNCTION(BlueprintCallable, Category = "Field", DisplayName = "Remove Persistent Fields", meta = (UnsafeDuringActorConstruction = "true"))
-	void RemovePersistentFields();
+	FIELDSYSTEMENGINE_API void RemovePersistentFields();
 
 	//
 	// Blueprint construction field interface
@@ -252,8 +248,6 @@ public:
 	*    for examples of how to recreate variations of the above generic
 	*    fields using field networks
 	*
-	*    (https://wiki.it.epicgames.net/display/~Brice.Criswell/Fields)
-	*
 	*    @param Enabled Is this force enabled for evaluation.
 	*    @param Target Type of field supported by the solver.
 	*    @param MetaData Meta data used to assist in evaluation
@@ -262,7 +256,7 @@ public:
 	*/
 
 	UFUNCTION(BlueprintCallable, Category = "Field", DisplayName = "Add Construction Field")
-	void AddFieldCommand(UPARAM(DisplayName = "Enable Field") bool Enabled,
+	FIELDSYSTEMENGINE_API void AddFieldCommand(UPARAM(DisplayName = "Enable Field") bool Enabled,
 			UPARAM(DisplayName = "Physics Type") EFieldPhysicsType Target,
 			UPARAM(DisplayName = "Meta Data") UFieldSystemMetaData* MetaData,
 			UPARAM(DisplayName = "Field Node") UFieldNodeBase* Field);
@@ -274,7 +268,7 @@ public:
 	*/
 
 	UFUNCTION(BlueprintCallable, Category = "Field", DisplayName = "Remove Construction Fields")
-	void ResetFieldSystem();
+	FIELDSYSTEMENGINE_API void ResetFieldSystem();
 
 	/** Get all the construction fields*/
 	const TArray< FFieldSystemCommand >& GetConstructionFields() const { return SetupConstructionFields; }
@@ -282,25 +276,25 @@ public:
 protected:
 
 	/** Get ell ethe supported physics scenes */
-	TSet<FPhysScene_Chaos*> GetPhysicsScenes() const;
+	FIELDSYSTEMENGINE_API TSet<FPhysScene_Chaos*> GetPhysicsScenes() const;
 
 	/** Get ell the supported physics solvers */
-	TArray<Chaos::FPhysicsSolverBase*> GetPhysicsSolvers() const;
+	FIELDSYSTEMENGINE_API TArray<Chaos::FPhysicsSolverBase*> GetPhysicsSolvers() const;
 
 	/** Build a physics field command and dispatch it */
-	void BuildFieldCommand(bool Enabled, EFieldPhysicsType Target, UFieldSystemMetaData* MetaData, UFieldNodeBase* Field, const bool IsTransient);
+	FIELDSYSTEMENGINE_API void BuildFieldCommand(bool Enabled, EFieldPhysicsType Target, UFieldSystemMetaData* MetaData, UFieldNodeBase* Field, const bool IsTransient);
 
 	/** Dispatch the field command to chaos/world */
-	void DispatchFieldCommand(const FFieldSystemCommand& InCommand, const bool IsTransient);
+	FIELDSYSTEMENGINE_API void DispatchFieldCommand(const FFieldSystemCommand& InCommand, const bool IsTransient);
 
 	/** Remove the persistent commands from chaos/world  */
-	void ClearFieldCommands();
+	FIELDSYSTEMENGINE_API void ClearFieldCommands();
 
 	//~ Begin UActorComponent Interface.
-	virtual void OnCreatePhysicsState() override;
-	virtual void OnDestroyPhysicsState() override;
-	virtual bool ShouldCreatePhysicsState() const override;
-	virtual bool HasValidPhysicsState() const override;
+	FIELDSYSTEMENGINE_API virtual void OnCreatePhysicsState() override;
+	FIELDSYSTEMENGINE_API virtual void OnDestroyPhysicsState() override;
+	FIELDSYSTEMENGINE_API virtual bool ShouldCreatePhysicsState() const override;
+	FIELDSYSTEMENGINE_API virtual bool HasValidPhysicsState() const override;
 	//~ End UActorComponent Interface.
 
 	/** Chaos module linked to that component */

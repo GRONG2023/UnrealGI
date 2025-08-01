@@ -6,8 +6,10 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using UnrealBuildBase;
 using UnrealBuildTool;
+using Microsoft.Extensions.Logging;
 
 namespace AutomationTool
 {
@@ -31,12 +33,13 @@ namespace AutomationTool
 				Platform = HostPlatform.Current.HostEditorPlatform;
 			}
 			UnrealTargetConfiguration Configuration = ParseOptionalEnumParam<UnrealTargetConfiguration>("Configuration") ?? UnrealTargetConfiguration.Development;
-			string Architecture = ParseOptionalStringParam("Architecture");
+			string ArchitectureString = ParseOptionalStringParam("Architecture");
+			UnrealArchitectures Architecture = UnrealArchitectures.FromString(ArchitectureString, Platform);
 			FileReference ProjectFile = ParseOptionalFileReferenceParam("Project");
 			DirectoryReference ToDir = ParseRequiredDirectoryReferenceParam("To");
 
 			// Read the receipt
-			FileReference ReceiptFile = TargetReceipt.GetDefaultPath(DirectoryReference.FromFile(ProjectFile) ?? EngineDirectory, TargetName, Platform, Configuration, Architecture);
+			FileReference ReceiptFile = TargetReceipt.GetDefaultPath(DirectoryReference.FromFile(ProjectFile) ?? Unreal.EngineDirectory, TargetName, Platform, Configuration, Architecture);
 			if(!FileReference.Exists(ReceiptFile))
 			{
 				throw new AutomationException("Unable to find '{0}'", ReceiptFile);
@@ -54,8 +57,8 @@ namespace AutomationTool
 			CommandUtils.DeleteDirectoryContents(ToDir.FullName);
 			foreach(FileReference SourceFile in FilesToMove)
 			{
-				FileReference TargetFile = FileReference.Combine(ToDir, SourceFile.MakeRelativeTo(RootDirectory));
-				LogInformation("Copying {0} to {1}", SourceFile, TargetFile);
+				FileReference TargetFile = FileReference.Combine(ToDir, SourceFile.MakeRelativeTo(Unreal.RootDirectory));
+				Logger.LogInformation("Copying {SourceFile} to {TargetFile}", SourceFile, TargetFile);
 				CommandUtils.CopyFile(SourceFile.FullName, TargetFile.FullName);
 			}
 		}
@@ -77,8 +80,8 @@ namespace AutomationTool
 			// Just copy all the files into place
 			foreach(FileReference SourceFile in DirectoryReference.EnumerateFiles(FromDir, "*", SearchOption.AllDirectories))
 			{
-				FileReference TargetFile = FileReference.Combine(RootDirectory, SourceFile.MakeRelativeTo(FromDir));
-				LogInformation("Copying {0} to {1}", SourceFile, TargetFile);
+				FileReference TargetFile = FileReference.Combine(Unreal.RootDirectory, SourceFile.MakeRelativeTo(FromDir));
+				Logger.LogInformation("Copying {SourceFile} to {TargetFile}", SourceFile, TargetFile);
 				CopyFile(SourceFile.FullName, TargetFile.FullName);
 			}
 		}

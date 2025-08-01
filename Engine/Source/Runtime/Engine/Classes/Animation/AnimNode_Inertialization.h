@@ -6,6 +6,10 @@
 #include "UObject/ObjectMacros.h"
 #include "Animation/AnimNodeBase.h"
 #include "Animation/AnimCurveTypes.h"
+#include "Animation/AnimNodeMessages.h"
+#include "AlphaBlend.h" // Required for EAlphaBlendOption
+#include "Interfaces/Interface_BoneReferenceSkeletonProvider.h"
+
 #include "AnimNode_Inertialization.generated.h"
 
 
@@ -17,6 +21,31 @@
 // https://www.gdcvault.com/play/1025331/Inertialization
 
 
+namespace UE::Anim
+{
+
+// Event that can be subscribed to request inertialization-based blends
+class IInertializationRequester : public IGraphMessage
+{
+	DECLARE_ANIMGRAPH_MESSAGE_API(IInertializationRequester, ENGINE_API);
+
+public:
+	static ENGINE_API const FName Attribute;
+
+	// Request to activate inertialization for a duration.
+	// If multiple requests are made on the same inertialization node, the minimum requested time will be used.
+	virtual void RequestInertialization(float InRequestedDuration, const UBlendProfile* InBlendProfile = nullptr) = 0;
+
+	// Request to activate inertialization.
+	// If multiple requests are made on the same inertialization node, the minimum requested time will be used.
+	ENGINE_API virtual void RequestInertialization(const FInertializationRequest& InInertializationRequest);
+
+	// Add a record of this request
+	virtual void AddDebugRecord(const FAnimInstanceProxy& InSourceProxy, int32 InSourceNodeId) = 0;
+};
+
+}	// namespace UE::Anim
+
 UENUM()
 enum class EInertializationState : uint8
 {
@@ -25,9 +54,8 @@ enum class EInertializationState : uint8
 	Active			// Inertialization active... apply the previously captured pose difference
 };
 
-
 UENUM()
-enum class EInertializationBoneState : uint8
+enum class UE_DEPRECATED(5.4, "Internal private pose storage is now used by inertialization.") EInertializationBoneState : uint8
 {
 	Invalid,		// Invalid bone (ie: bone was present in the skeleton but was not present in the pose when it was captured)
 	Valid,			// Valid bone
@@ -43,9 +71,11 @@ enum class EInertializationSpace : uint8
 	WorldRotation	// Inertialize rotation only in world space (to conceal discontinuities in actor orientation)
 };
 
-struct ENGINE_API FInertializationCurve
+struct FInertializationCurve
 {
 	FBlendedHeapCurve BlendedCurve;
+
+	UE_DEPRECATED(5.3, "CurveUIDToArrayIndexLUT is no longer used.")
 	TArray<uint16> CurveUIDToArrayIndexLUT;
 
 	FInertializationCurve() = default;
@@ -63,55 +93,111 @@ struct ENGINE_API FInertializationCurve
 	FInertializationCurve& operator=(const FInertializationCurve& Other)
 	{
 		BlendedCurve.CopyFrom(Other.BlendedCurve);
-		BlendedCurve.UIDToArrayIndexLUT = &CurveUIDToArrayIndexLUT;
-		CurveUIDToArrayIndexLUT = Other.CurveUIDToArrayIndexLUT;
 		return *this;
 	}
 
 	FInertializationCurve& operator=(FInertializationCurve&& Other)
 	{
 		BlendedCurve.MoveFrom(Other.BlendedCurve);
-		BlendedCurve.UIDToArrayIndexLUT = &CurveUIDToArrayIndexLUT;
-		CurveUIDToArrayIndexLUT = MoveTemp(Other.CurveUIDToArrayIndexLUT);
 		return *this;
 	}
 
 	template <typename OtherAllocator>
-	void InitFrom(const FBaseBlendedCurve<OtherAllocator>& Other)
+	void InitFrom(const TBaseBlendedCurve<OtherAllocator>& Other)
 	{
-		CurveUIDToArrayIndexLUT.Reset();
-
 		BlendedCurve.CopyFrom(Other);
-		BlendedCurve.UIDToArrayIndexLUT = &CurveUIDToArrayIndexLUT;
-
-		if (Other.UIDToArrayIndexLUT)
-		{
-			CurveUIDToArrayIndexLUT = *Other.UIDToArrayIndexLUT;
-		}
 	}
 };
 
 USTRUCT()
-struct FInertializationPose
+struct FInertializationRequest
+{
+	GENERATED_BODY()
+
+	ENGINE_API FInertializationRequest();
+	ENGINE_API FInertializationRequest(float InDuration, const UBlendProfile* InBlendProfile);
+
+	// Note: We need to explicitly disable warnings on these constructors/operators for clang to be happy with deprecated variables
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	~FInertializationRequest() = default;
+	FInertializationRequest(const FInertializationRequest&) = default;
+	FInertializationRequest(FInertializationRequest&&) = default;
+	FInertializationRequest& operator=(const FInertializationRequest&) = default;
+	FInertializationRequest& operator=(FInertializationRequest&&) = default;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+	ENGINE_API void Clear();
+
+	// Comparison operator used to test for equality in the array of animation requests to that
+	// only unique requests are added. This does not take into account the properties that are 
+	// used only for debugging and only used when ANIM_TRACE_ENABLED
+	friend bool operator==(const FInertializationRequest& A, const FInertializationRequest& B)
+	{
+		return
+			(A.Duration == B.Duration) &&
+			(A.BlendProfile == B.BlendProfile) &&
+			(A.bUseBlendMode == B.bUseBlendMode) &&
+			(A.BlendMode == B.BlendMode) &&
+			(A.CustomBlendCurve == B.CustomBlendCurve);
+	}
+
+	friend bool operator!=(const FInertializationRequest& A, const FInertializationRequest& B)
+	{
+		return !(A == B);
+	}
+
+	// Blend duration of the inertialization request.
+	UPROPERTY(Transient)
+	float Duration = -1.0f;
+
+	// Blend profile to control per-joint blend times.
+	UPROPERTY(Transient)
+	TObjectPtr<const UBlendProfile> BlendProfile = nullptr;
+
+	// If to use the provided blend mode.
+	UPROPERTY(Transient)
+	bool bUseBlendMode = false;
+
+	// Blend mode to use.
+	UPROPERTY(Transient)
+	EAlphaBlendOption BlendMode = EAlphaBlendOption::Linear;
+
+	// Custom blend curve to use when use of the blend mode is active.
+	UPROPERTY(Transient)
+	TObjectPtr<UCurveFloat> CustomBlendCurve = nullptr;
+
+// if ANIM_TRACE_ENABLED - these properties are only used for debugging when ANIM_TRACE_ENABLED == 1
+	
+	UE_DEPRECATED(5.4, "Use DescriptionString instead.")
+	UPROPERTY(Transient, meta = (DeprecatedProperty, DeprecationMessage = "Use DescriptionString instead."))
+	FText Description_DEPRECATED;
+
+	// Description of the request
+	UPROPERTY(Transient)
+	FString DescriptionString;
+
+	// Node id from which this request was made.
+	UPROPERTY(Transient)
+	int32 NodeId = INDEX_NONE;
+
+	// Anim instance from which this request was made.
+	UPROPERTY(Transient)
+	TObjectPtr<UObject> AnimInstance = nullptr;
+
+// endif ANIM_TRACE_ENABLED
+};
+
+USTRUCT()
+struct UE_DEPRECATED(5.4, "Internal private pose storage is now used by inertialization.") FInertializationPose
 {
 	GENERATED_BODY()
 
 	FTransform ComponentTransform;
-
-	// Bone transforms indexed by skeleton bone index.  Transforms are in local space except for direct descendants of
-	// the root which are in component space (ie: they have been multiplied by the root).  Invalid bones (ie: bones
-	// that are present in the skeleton but were not present in the pose when it was captured) are all zero
-	//
 	TArray<FTransform> BoneTransforms;
-
-	// Bone states indexed by skeleton bone index
-	//
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	TArray<EInertializationBoneState> BoneStates;
-
-	// Snapshot of active curves
-	// 
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	FInertializationCurve Curves;
-
 	FName AttachParentName;
 	float DeltaTime;
 
@@ -121,6 +207,7 @@ struct FInertializationPose
 		, DeltaTime(0.0f)
 	{
 	}
+	
 
 	FInertializationPose(const FInertializationPose&) = default;
 	FInertializationPose(FInertializationPose&&) = default;
@@ -130,15 +217,54 @@ struct FInertializationPose
 	void InitFrom(const FCompactPose& Pose, const FBlendedCurve& InCurves, const FTransform& InComponentTransform, const FName& InAttachParentName, float InDeltaTime);
 };
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 template <>
 struct TUseBitwiseSwap<FInertializationPose>
 {
 	enum { Value = false };
 };
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
+// Internal private structure used for storing a pose snapshots sparsely (i.e. when we may not have the full set of transform for every bone)
+struct FInertializationSparsePose
+{
+	friend struct FAnimNode_Inertialization;
+	friend struct FAnimNode_DeadBlending;
+
+private:
+
+	// Transform of the component at the point of the snapshot
+	FTransform ComponentTransform;
+	
+	// For each SkeletonPoseBoneIndex this array stores the index into the BoneTranslations, BoneRotations, and 
+	// BoneScales arrays which contains that bone's data. Or INDEX_NONE if this bone's data is not in the snapshot.
+	TArray<int32> BoneIndices;
+	
+	// Bone translation Data
+	TArray<FVector> BoneTranslations;
+	
+	// Bone Rotation Data
+	TArray<FQuat> BoneRotations;
+	
+	// Bone Scale Data
+	TArray<FVector> BoneScales;
+
+    // Curve Data
+	FInertializationCurve Curves;
+
+	// Attached Parent object Name
+	FName AttachParentName = NAME_None;
+	
+	// Delta Time since last snapshot
+	float DeltaTime = 0.0f;
+
+	void InitFrom(const FCompactPose& Pose, const FBlendedCurve& InCurves, const FTransform& InComponentTransform, const FName InAttachParentName, const float InDeltaTime);
+	bool IsEmpty() const;
+	void Empty();
+};
 
 USTRUCT()
-struct FInertializationBoneDiff
+struct UE_DEPRECATED(5.4, "Internal private pose difference storage is now used by inertialization.") FInertializationBoneDiff
 {
 	GENERATED_BODY()
 
@@ -182,29 +308,23 @@ struct FInertializationBoneDiff
 	}
 };
 
-USTRUCT()
-struct FInertializationCurveDiff
+struct FInertializationCurveDiffElement : public UE::Anim::FCurveElement
 {
-	GENERATED_BODY();
+	float Delta = 0.0f;
+	float Derivative = 0.0f;
 
-	float Delta;
-	float Derivative;
-
-	FInertializationCurveDiff()
-		: Delta(0.0f)
-		, Derivative(0.0f)
-	{}
+	FInertializationCurveDiffElement() = default;
 
 	void Clear()
 	{
+		Value = 0.0f;
 		Delta = 0.0f;
 		Derivative = 0.0f;
 	}
 };
 
-
 USTRUCT()
-struct FInertializationPoseDiff
+struct UE_DEPRECATED(5.4, "Internal private pose difference storage is now used by inertialization.") FInertializationPoseDiff
 {
 	GENERATED_BODY()
 
@@ -213,29 +333,18 @@ struct FInertializationPoseDiff
 	{
 	}
 
-	void Reset()
+	void Reset(uint32 NumBonesSlack = 0)
 	{
-		BoneDiffs.Empty();
+		BoneDiffs.Empty(NumBonesSlack);
 		CurveDiffs.Empty();
 		InertializationSpace = EInertializationSpace::Default;
 	}
 
-	// Initialize the pose difference from the current pose and the two previous snapshots
-	//
-	// Pose					the current frame's pose
-	// ComponentTransform	the current frame's component to world transform
-	// AttachParentName		the current frame's attach parent name (for checking if the attachment has changed)
-	// Prev1				the previous frame's pose
-	// Prev2				the pose from two frames before
-	//
-	void InitFrom(const FCompactPose& Pose, const FBlendedCurve& Curves, const FTransform& ComponentTransform, const FName& AttachParentName, const FInertializationPose& Prev1, const FInertializationPose& Prev2);
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 
-	// Apply this difference to a pose, decaying over time as InertializationElapsedTime approaches InertializationDuration
-	//
-	void ApplyTo(FCompactPose& Pose, FBlendedCurve& Curves, float InertializationElapsedTime, float InertializationDuration) const;
+	void InitFrom(const FCompactPose& Pose, const FBlendedCurve& Curves, const FTransform& ComponentTransform, const FName& AttachParentName, const FInertializationPose& Prev1, const FInertializationPose& Prev2, const UE::Anim::FCurveFilter& CurveFilter);
+	void ApplyTo(FCompactPose& Pose, FBlendedCurve& Curves, float InertializationElapsedTime, float InertializationDuration, TArrayView<const float> InertializationDurationPerBone) const;
 
-	// Get the inertialization space for this pose diff (for debug display)
-	//
 	EInertializationSpace GetInertializationSpace() const
 	{
 		return InertializationSpace;
@@ -243,106 +352,212 @@ struct FInertializationPoseDiff
 
 private:
 
-	static float CalcInertialFloat(float x0, float v0, float t, float t1);
-
-	// Bone differences indexed by skeleton bone index
 	TArray<FInertializationBoneDiff> BoneDiffs;
-
-	// Curve differences indexed by CurveID
-	TArray<FInertializationCurveDiff> CurveDiffs;
-
-	// Inertialization space (local vs world for situations where we wish to correct a world-space discontinuity such as an abrupt orientation change)
+	TBaseBlendedCurve<FDefaultAllocator, FInertializationCurveDiffElement> CurveDiffs;
 	EInertializationSpace InertializationSpace;
+
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 };
 
-
 USTRUCT(BlueprintInternalUseOnly)
-struct ENGINE_API FAnimNode_Inertialization : public FAnimNode_Base
+struct FAnimNode_Inertialization : public FAnimNode_Base, public IBoneReferenceSkeletonProvider
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Links)
+	UPROPERTY(EditAnywhere, Category = Links)
 	FPoseLink Source;
+
+private:
+
+	// Optional default blend profile to use when no blend profile is supplied with the inertialization request
+	UPROPERTY(EditAnywhere, Category = BlendProfile, meta = (UseAsBlendProfile = true))
+	TObjectPtr<UBlendProfile> DefaultBlendProfile = nullptr;
+
+	// List of curves that should not use inertial blending. These curves will instantly change when inertialization begins.
+	UPROPERTY(EditAnywhere, Category = Filter)
+	TArray<FName> FilteredCurves;
+
+	// List of bones that should not use inertial blending. These bones will change instantly when the animation switches.
+	UPROPERTY(EditAnywhere, Category = Filter)
+	TArray<FBoneReference> FilteredBones;
+
+#if WITH_EDITORONLY_DATA
+	UE_DEPRECATED(5.4, "Preallocate Memory has been deprecated.")
+	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "Preallocate Memory has been deprecated."))
+	bool bPreallocateMemory_DEPRECATED = false;
+#endif
+
+	/**
+	* Clear any active blends if we just became relevant, to avoid carrying over undesired blends.
+	*/	
+	UPROPERTY(EditAnywhere, Category = Blending)
+	bool bResetOnBecomingRelevant = false;
+
+	/**
+	* When enabled this option will forward inertialization requests through any downstream UseCachedPose nodes which 
+	* have had their update skipped (e.g. because they have already been updated in another location). This can be
+	* useful in the case where the same cached pose is used in multiple places, and having an inertialization request 
+	* that goes with it caught in only one of those places would create popping.
+	*/
+	UPROPERTY(EditAnywhere, Category = Requests)
+	bool bForwardRequestsThroughSkippedCachedPoseNodes = true;
 
 public: // FAnimNode_Inertialization
 
-	FAnimNode_Inertialization();
+	// Note: We need to explicitly disable warnings on these constructors/operators for clang to be happy with deprecated variables
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	ENGINE_API FAnimNode_Inertialization() = default;
+	ENGINE_API ~FAnimNode_Inertialization() = default;
+	ENGINE_API FAnimNode_Inertialization(const FAnimNode_Inertialization&) = default;
+	ENGINE_API FAnimNode_Inertialization(FAnimNode_Inertialization&&) = default;
+	ENGINE_API FAnimNode_Inertialization& operator=(const FAnimNode_Inertialization&) = default;
+	ENGINE_API FAnimNode_Inertialization& operator=(FAnimNode_Inertialization&&) = default;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	
 	// Request to activate inertialization for a duration.
 	// If multiple requests are made on the same inertialization node, the minimum requested time will be used.
 	//
-	virtual void RequestInertialization(float Duration);
+	ENGINE_API virtual void RequestInertialization(float Duration, const UBlendProfile* BlendProfile);
 
-	virtual float GetRequestedDuration() const { return RequestedDuration; }
+	// Request to activate inertialization.
+	// If multiple requests are made on the same inertialization node, the minimum requested time will be used.
+	//
+	ENGINE_API virtual void RequestInertialization(const FInertializationRequest& InertializationRequest);
 
 	// Log an error when a node wants to inertialize but no inertialization ancestor node exists
 	//
-	static void LogRequestError(const FAnimationUpdateContext& Context, const FPoseLinkBase& RequesterPoseLink);
+	static ENGINE_API void LogRequestError(const FAnimationUpdateContext& Context, const int32 NodePropertyIndex);
+	static ENGINE_API void LogRequestError(const FAnimationUpdateContext& Context, const FPoseLinkBase& RequesterPoseLink);
 
 public: // FAnimNode_Base
 
-	virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
-	virtual void CacheBones_AnyThread(const FAnimationCacheBonesContext& Context) override;
-	virtual void Update_AnyThread(const FAnimationUpdateContext& Context) override;
-	virtual void Evaluate_AnyThread(FPoseContext& Output) override;
-	virtual void GatherDebugData(FNodeDebugData& DebugData) override;
+	ENGINE_API virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
+	ENGINE_API virtual void CacheBones_AnyThread(const FAnimationCacheBonesContext& Context) override;
+	ENGINE_API virtual void Update_AnyThread(const FAnimationUpdateContext& Context) override;
+	ENGINE_API virtual void Evaluate_AnyThread(FPoseContext& Output) override;
+	ENGINE_API virtual void GatherDebugData(FNodeDebugData& DebugData) override;
 
-	virtual bool NeedsDynamicReset() const override;
-	virtual void ResetDynamics(ETeleportType InTeleportType) override;
-
-	virtual bool WantsSkippedUpdates() const override;
-	virtual void OnUpdatesSkipped(TArrayView<const FAnimationUpdateContext *> SkippedUpdateContexts) override;
-
+	ENGINE_API virtual bool NeedsDynamicReset() const override;
+	ENGINE_API virtual void ResetDynamics(ETeleportType InTeleportType) override;
 
 protected:
 
-	// Consume Inertialization Request
-	//
-	// Returns any pending inertialization request and removes it from future processing.  Returns zero if there is no pending request.
-	// This function is virtual so that a derived class could optionally hook into other external sources of inertialization requests
-	// (for example from the owning actor for requests triggered from game code).
-	//
-	virtual float ConsumeInertializationRequest(FPoseContext& Context);
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 
-	// Start Inertialization
-	//
-	// Computes the inertialization pose difference from the current pose and the two previous poses (to capture velocity).  This function
-	// is virtual so that a derived class could optionally regularize the pose snapshots to align better with the current frame's pose
-	// before computing the inertial difference (for example to correct for instantaneous changes in the root relative to its children).
-	//
-	virtual void StartInertialization(FPoseContext& Context, FInertializationPose& PreviousPose1, FInertializationPose& PreviousPose2, float Duration, /*OUT*/ FInertializationPoseDiff& OutPoseDiff);
+	UE_DEPRECATED(5.4, "This function is longer called by the node internally as inertialization method is now private.")
+	ENGINE_API virtual void StartInertialization(FPoseContext& Context, FInertializationPose& PreviousPose1, FInertializationPose& PreviousPose2, float Duration, TArrayView<const float> DurationPerBone, /*OUT*/ FInertializationPoseDiff& OutPoseDiff);
 
-	// Apply Inertialization
-	//
-	// Applies the inertialization pose difference to the current pose (feathering down to zero as ElapsedTime approaches Duration).  This
-	// function is virtual so that a derived class could optionally adjust the pose based on any regularization done in StartInertialization.
-	//
-	virtual void ApplyInertialization(FPoseContext& Context, const FInertializationPoseDiff& PoseDiff, float ElapsedTime, float Duration);
+	UE_DEPRECATED(5.4, "This function is longer called by the node internally as inertialization method is now private.")
+	ENGINE_API virtual void ApplyInertialization(FPoseContext& Context, const FInertializationPoseDiff& PoseDiff, float ElapsedTime, float Duration, TArrayView<const float> DurationPerBone);
 
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 private:
 
-	// Snapshots of the actor pose from past frames
-	TArray<FInertializationPose> PoseSnapshots;
+	/**
+	 * Deactivates the inertialization and frees any temporary memory.
+	 */
+	void Deactivate();
+
+	/**
+	 * Computes the inertialization pose difference between the current pose and the previous pose and computes the velocity of this difference.
+	 *
+	 * @param InPose				The current pose for the animation being transitioned to.
+	 * @param InCurves				The current curves for the animation being transitioned to.
+	 * @param ComponentTransform	The component transform of the current pose
+	 * @param AttachParentName		The name of the attached parent object
+	 * @param PreviousPose1			The pose recorded as output of the inertializer on the previous frame.
+	 * @param PreviousPose2			The pose recorded as output of the inertializer two frames ago.
+	 */
+	void InitFrom(
+		const FCompactPose& InPose, 
+		const FBlendedCurve& InCurves, 
+		const FTransform& ComponentTransform, 
+		const FName AttachParentName, 
+		const FInertializationSparsePose& PreviousPose1, 
+		const FInertializationSparsePose& PreviousPose2);
+
+	/**
+	 * Applies the inertialization difference to the given pose (decaying to zero as ElapsedTime approaches Duration)
+	 *
+	 * @param InOutPose		The current pose to blend with the extrapolated pose.
+	 * @param InOutCurves	The current curves to blend with the extrapolated curves.
+	 */
+	void ApplyTo(FCompactPose& InOutPose, FBlendedCurve& InOutCurves);
+
+	// Snapshots of the actor pose generated as output.
+	FInertializationSparsePose PrevPoseSnapshot;
+	FInertializationSparsePose CurrPoseSnapshot;
 
 	// Elapsed delta time between calls to evaluate
-	float DeltaTime;
+	float DeltaTime = 0.0f;
 
-	// Pending inertialization request
-	float RequestedDuration;
+	// Pending inertialization requests
+	UPROPERTY(Transient)
+	TArray<FInertializationRequest> RequestQueue;
 
-	// Teleport type
-	ETeleportType TeleportType;
+	// Update Counter for detecting being relevant
+	FGraphTraversalCounter UpdateCounter;
 
 	// Inertialization state
-	EInertializationState InertializationState;
-	float InertializationElapsedTime;
-	float InertializationDuration;
-	float InertializationDeficit;
+	EInertializationState InertializationState = EInertializationState::Inactive;
+
+	// Amount of time elapsed during the Inertialization
+	float InertializationElapsedTime = 0.0f;
+
+	// Inertialization duration for the main inertialization request (used for curve blending and deficit tracking)
+	float InertializationDuration = 0.0f;
+
+	// Inertialization durations indexed by skeleton bone index (used for per-bone blending)
+	TCustomBoneIndexArray<float, FSkeletonPoseBoneIndex> InertializationDurationPerBone;
+
+	// Maximum of InertializationDuration and all entries in InertializationDurationPerBone (used for knowing when to shutdown the inertialization)
+	float InertializationMaxDuration = 0.0f;
+
+	// Inertialization deficit (for tracking and reducing 'pose melting' when thrashing inertialization requests)
+	float InertializationDeficit = 0.0f;
 
 	// Inertialization pose differences
-	FInertializationPoseDiff InertializationPoseDiff;
+	TArray<int32> BoneIndices;
+	TArray<FVector3f> BoneTranslationDiffDirection;
+	TArray<float> BoneTranslationDiffMagnitude;
+	TArray<float> BoneTranslationDiffSpeed;
+	TArray<FVector3f> BoneRotationDiffAxis;
+	TArray<float> BoneRotationDiffAngle;
+	TArray<float> BoneRotationDiffSpeed;
+	TArray<FVector3f> BoneScaleDiffAxis;
+	TArray<float> BoneScaleDiffMagnitude;
+	TArray<float> BoneScaleDiffSpeed;
 
-	// Reset inertialization timing and state
-	void Deactivate();
+	// Curve differences
+	TBaseBlendedCurve<FDefaultAllocator, FInertializationCurveDiffElement> CurveDiffs;
+
+	// Temporary storage for curve data of the Destination Pose
+	TBaseBlendedCurve<TInlineAllocator<8>, UE::Anim::FCurveElement> PoseCurveData;
+
+public: // IBoneReferenceSkeletonProvider
+	ENGINE_API class USkeleton* GetSkeleton(bool& bInvalidSkeletonIsError, const IPropertyHandle* PropertyHandle) override;
+
+private:
+
+	// Cached curve filter built from FilteredCurves
+	UE::Anim::FCurveFilter CurveFilter;
+
+	// Cache compact pose bone index for FilteredBones
+	TArray<FCompactPoseBoneIndex, TInlineAllocator<8>> BoneFilter;
+
+// if ANIM_TRACE_ENABLED - these properties are only used for debugging when ANIM_TRACE_ENABLED == 1
+
+	// Description for the current inertialization request
+	FString InertializationRequestDescription;
+
+	// Node Id for the current inertialization request
+	int32 InertializationRequestNodeId = INDEX_NONE;
+
+	// Anim Instance for the current inertialization request
+	UPROPERTY(Transient)
+	TObjectPtr<UObject> InertializationRequestAnimInstance = nullptr;
+
+// endif ANIM_TRACE_ENABLED
+
 };

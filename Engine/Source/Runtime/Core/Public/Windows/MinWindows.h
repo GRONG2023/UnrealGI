@@ -2,22 +2,26 @@
 
 #pragma once
 
+#if !defined(WINDOWS_H_WRAPPER_GUARD)
+#pragma message("WARNING: do not include Windows/MinWindows.h file directly. Use Windows/WindowsHWrapper.h instead")
+#endif
+
 // #TODO: redirect to platform-agnostic version for the time being. Eventually this will become an error
 #include "HAL/Platform.h"
-#if !PLATFORM_WINDOWS && !PLATFORM_HOLOLENS
+#if !PLATFORM_WINDOWS
 	#include "Microsoft/MinWindows.h"
 #else
 
 #include "CoreTypes.h"
 
-#if defined(_WINDOWS_) && !defined(UE4_MINIMAL_WINDOWS_INCLUDE)
+#if defined(_WINDOWS_) && !defined(UE_MINIMAL_WINDOWS_INCLUDE)
 	#pragma message ( " " )
 	#pragma message ( "You have included windows.h before MinWindows.h" )
 	#pragma message ( "All useless stuff from the windows headers won't be excluded !!!" )
 	#pragma message ( " " )
 #endif // _WINDOWS_
 
-#define UE4_MINIMAL_WINDOWS_INCLUDE
+#define UE_MINIMAL_WINDOWS_INCLUDE
 
 // WIN32_LEAN_AND_MEAN excludes rarely-used services from windows headers.
 #define WIN32_LEAN_AND_MEAN
@@ -39,7 +43,7 @@
 //#define NOCLIPBOARD			// Clipboard routines
 //#define NOCOLOR				// Screen colors
 //#define NOCTLMGR				// Control and Dialog routines
-#define NODRAWTEXT				// DrawText() and DT_*
+//#define NODRAWTEXT				// DrawText() and DT_*
 //#define NOGDI					// All GDI #defines and routines
 #define NOKERNEL				// All KERNEL #defines and routines
 //#define NOUSER				// All USER #defines and routines

@@ -29,8 +29,11 @@ FVulkanQueue::FVulkanQueue(FVulkanDevice* InDevice, uint32 InFamilyIndex)
 	, LastSubmittedCmdBuffer(nullptr)
 	, LastSubmittedCmdBufferFenceCounter(0)
 	, SubmitCounter(0)
+	, LayoutManager(false, nullptr)
 {
 	VulkanRHI::vkGetDeviceQueue(Device->GetInstanceHandle(), FamilyIndex, QueueIndex, &Queue);
+
+	FillSupportedStageBits();
 }
 
 FVulkanQueue::~FVulkanQueue()
@@ -79,7 +82,7 @@ void FVulkanQueue::Submit(FVulkanCmdBuffer* CmdBuffer, uint32 NumSignalSemaphore
 
 	if (GWaitForIdleOnSubmit != 0)
 	{
-		FVulkanCommandBufferManager* CmdBufferMgr = Device->GetImmediateContext().GetCommandBufferManager();
+		FVulkanCommandBufferManager* CmdBufferMgr = &CmdBuffer->GetOwner()->GetMgr();
 
 		switch(GWaitForIdleOnSubmit)
 		{
@@ -113,6 +116,9 @@ void FVulkanQueue::Submit(FVulkanCmdBuffer* CmdBuffer, uint32 NumSignalSemaphore
 	CmdBuffer->GetOwner()->RefreshFenceStatus(CmdBuffer);
 
 	Device->GetStagingManager().ProcessPendingFree(false, false);
+
+	// If we're tracking layouts for the queue, merge in the changes recorded in this command buffer's context
+	CmdBuffer->GetLayoutManager().TransferTo(LayoutManager);
 }
 
 void FVulkanQueue::UpdateLastSubmittedCommandBuffer(FVulkanCmdBuffer* CmdBuffer)
@@ -121,4 +127,67 @@ void FVulkanQueue::UpdateLastSubmittedCommandBuffer(FVulkanCmdBuffer* CmdBuffer)
 	LastSubmittedCmdBuffer = CmdBuffer;
 	LastSubmittedCmdBufferFenceCounter = CmdBuffer->GetFenceSignaledCounterH();
 	++SubmitCounter;
+}
+
+void FVulkanQueue::FillSupportedStageBits()
+{
+	check(Device);
+	check((int32)FamilyIndex < Device->GetQueueFamilyProps().Num());
+
+	const VkQueueFamilyProperties& QueueProps = Device->GetQueueFamilyProps()[FamilyIndex];
+
+	SupportedStages = 
+		VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT | 
+		VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT |
+		VK_PIPELINE_STAGE_HOST_BIT |
+		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+
+	if (VKHasAnyFlags(QueueProps.queueFlags, VK_QUEUE_GRAPHICS_BIT))
+	{
+		SupportedStages |=
+			VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
+			VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+			VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+			VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+			VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+			VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+			VK_PIPELINE_STAGE_TRANSFER_BIT |
+			VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+
+		if (Device->GetPhysicalDeviceFeatures().Core_1_0.geometryShader)
+		{
+			SupportedStages |= VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT;
+		}
+		if (Device->GetOptionalExtensions().HasKHRFragmentShadingRate)
+		{
+			SupportedStages |= VK_PIPELINE_STAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
+		}
+		if (Device->GetOptionalExtensions().HasEXTFragmentDensityMap)
+		{
+			SupportedStages |= VK_PIPELINE_STAGE_FRAGMENT_DENSITY_PROCESS_BIT_EXT;
+		}
+	}
+
+	if (VKHasAnyFlags(QueueProps.queueFlags, VK_QUEUE_COMPUTE_BIT))
+	{
+		SupportedStages |=
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+			VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
+			VK_PIPELINE_STAGE_TRANSFER_BIT;
+
+#if VULKAN_RHI_RAYTRACING
+		SupportedStages |= VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+#endif
+	}
+
+	if (VKHasAnyFlags(QueueProps.queueFlags, VK_QUEUE_TRANSFER_BIT))
+	{
+		SupportedStages |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+	}
+}
+
+void FVulkanQueue::NotifyDeletedImage(VkImage Image)
+{
+	LayoutManager.NotifyDeletedImage(Image);
 }

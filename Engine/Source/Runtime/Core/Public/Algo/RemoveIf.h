@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "CoreTypes.h"
 #include "Templates/Invoke.h"
 
 namespace Algo
@@ -17,7 +18,7 @@ namespace Algo
 	 * @return The index of the first element after those which were not removed.
 	 */
 	template <typename RangeType, typename Predicate>
-	int32 RemoveIf(RangeType& Range, Predicate Pred)
+	[[nodiscard]] int32 RemoveIf(RangeType& Range, Predicate Pred)
 	{
 		auto* First = GetData(Range);
 		auto* Last  = First + GetNum(Range);
@@ -31,7 +32,7 @@ namespace Algo
 			{
 				if (IterStart == IterEnd)
 				{
-					return IterStart - First;
+					return UE_PTRDIFF_TO_INT32(IterStart - First);
 				}
 
 				if (Invoke(Pred, *IterStart))
@@ -54,7 +55,7 @@ namespace Algo
 
 				if (IterStart == IterEnd)
 				{
-					return IterStart - First;
+					return UE_PTRDIFF_TO_INT32(IterStart - First);
 				}
 			}
 
@@ -76,7 +77,7 @@ namespace Algo
 	 * @return The index of the first element after those which were not removed.
 	 */
 	template <typename RangeType, typename Predicate>
-	int32 StableRemoveIf(RangeType& Range, Predicate Pred)
+	[[nodiscard]] int32 StableRemoveIf(RangeType& Range, Predicate Pred)
 	{
 		auto* First = GetData(Range);
 		auto* Last  = First + GetNum(Range);
@@ -88,7 +89,7 @@ namespace Algo
 		{
 			if (IterStart == Last)
 			{
-				return IterStart - First;
+				return UE_PTRDIFF_TO_INT32(IterStart - First);
 			}
 
 			if (Invoke(Pred, *IterStart))
@@ -106,7 +107,7 @@ namespace Algo
 		{
 			if (IterKeep == Last)
 			{
-				return IterStart - First;
+				return UE_PTRDIFF_TO_INT32(IterStart - First);
 			}
 
 			if (!Invoke(Pred, *IterKeep))

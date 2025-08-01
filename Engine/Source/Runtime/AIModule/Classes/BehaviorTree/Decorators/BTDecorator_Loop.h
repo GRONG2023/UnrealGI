@@ -10,20 +10,20 @@ struct FBTLoopDecoratorMemory
 {
 	int32 SearchId;
 	uint8 RemainingExecutions;
-	float TimeStarted;
+	double TimeStarted;
 };
 
 /**
  * Loop decorator node.
  * A decorator node that bases its condition on whether its loop counter has been exceeded.
  */
-UCLASS(HideCategories=(Condition))
-class AIMODULE_API UBTDecorator_Loop : public UBTDecorator
+UCLASS(HideCategories=(Condition), MinimalAPI)
+class UBTDecorator_Loop : public UBTDecorator
 {
 	GENERATED_UCLASS_BODY()
 
 	/** number of executions */
-	UPROPERTY(Category=Decorator, EditAnywhere, meta=(EditCondition="!bInfiniteLoop", ClampMin="1"))
+	UPROPERTY(Category=Decorator, EditAnywhere, meta=(EditCondition="!bInfiniteLoop", ClampMin="1", ClampMax="255"))
 	int32 NumLoops;
 
 	/** infinite loop */
@@ -34,15 +34,17 @@ class AIMODULE_API UBTDecorator_Loop : public UBTDecorator
 	UPROPERTY(Category = Decorator, EditAnywhere, meta = (EditCondition = "bInfiniteLoop"))
 	float InfiniteLoopTimeoutTime;
 
-	virtual uint16 GetInstanceMemorySize() const override;
-	virtual void DescribeRuntimeValues(const UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTDescriptionVerbosity::Type Verbosity, TArray<FString>& Values) const override;
-	virtual FString GetStaticDescription() const override;
+	AIMODULE_API virtual uint16 GetInstanceMemorySize() const override;
+	AIMODULE_API virtual void InitializeMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryInit::Type InitType) const override;
+	AIMODULE_API virtual void CleanupMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryClear::Type CleanupType) const override;
+	AIMODULE_API virtual void DescribeRuntimeValues(const UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTDescriptionVerbosity::Type Verbosity, TArray<FString>& Values) const override;
+	AIMODULE_API virtual FString GetStaticDescription() const override;
 
 #if WITH_EDITOR
-	virtual FName GetNodeIconName() const override;
+	AIMODULE_API virtual FName GetNodeIconName() const override;
 #endif // WITH_EDITOR
 
 protected:
 
-	virtual void OnNodeActivation(FBehaviorTreeSearchData& SearchData) override;
+	AIMODULE_API virtual void OnNodeActivation(FBehaviorTreeSearchData& SearchData) override;
 };

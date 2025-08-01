@@ -16,7 +16,11 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using UnrealBuildBase;
+using Microsoft.Extensions.Logging;
+
+using static AutomationTool.CommandUtils;
 
 namespace AutomationTool
 {
@@ -171,9 +175,10 @@ namespace AutomationTool
 
 		public override void ExecuteBuild()
 		{
-			string BucketName = ParseRequiredStringParam("Bucket");
-			FileReference CredentialsFile = ParseRequiredFileReferenceParam("CredentialsFile");
-			string CredentialsKey = ParseRequiredStringParam("CredentialsKey");
+			bool bLocal = ParseParam("Local");
+			string BucketName = !bLocal ? ParseRequiredStringParam("Bucket") : "";
+			FileReference CredentialsFile = !bLocal ? ParseRequiredFileReferenceParam("CredentialsFile") : null;
+			string CredentialsKey = !bLocal ? ParseRequiredStringParam("CredentialsKey") : "";
 			DirectoryReference CacheDir = ParseRequiredDirectoryReferenceParam("CacheDir");
 			DirectoryReference FilterDir = ParseRequiredDirectoryReferenceParam("FilterDir");
 			int Days = ParseParamInt("Days", 7);
@@ -182,18 +187,19 @@ namespace AutomationTool
 			string KeyPrefix = ParseParamValue("KeyPrefix", "");
 			bool bReset = ParseParam("Reset");
 
-			// The credentials to upload with
-			AWSCredentials Credentials;
-
 			// Try to get the credentials by the key passed in from the script
-			CredentialProfileStoreChain CredentialsChain = new CredentialProfileStoreChain(CredentialsFile.FullName);
-			if (!CredentialsChain.TryGetAWSCredentials(CredentialsKey, out Credentials))
+			AWSCredentials Credentials = null;
+			if (!bLocal)
 			{
-				throw new AutomationException("Unknown credentials key: {0}", CredentialsKey);
+				CredentialProfileStoreChain CredentialsChain = new CredentialProfileStoreChain(CredentialsFile.FullName);
+				if (!CredentialsChain.TryGetAWSCredentials(CredentialsKey, out Credentials))
+				{
+					throw new AutomationException("Unknown credentials key: {0}", CredentialsKey);
+				}
 			}
 
 			// Create the new client
-			using (AmazonS3Client Client = new AmazonS3Client(Credentials, Region))
+			using (AmazonS3Client Client = !bLocal ? new AmazonS3Client(Credentials, Region) : null)
 			{
 				using (SemaphoreSlim RequestSemaphore = new SemaphoreSlim(4))
 				{
@@ -204,7 +210,7 @@ namespace AutomationTool
 						TimeSpan Age = DateTime.UtcNow - FilterFile.LastWriteTimeUtc;
 						if (Age < TimeSpan.FromDays(3))
 						{
-							Log.TraceInformation("Reading {0}", FilterFile.FullName);
+							Logger.LogInformation("Reading {Arg0}", FilterFile.FullName);
 
 							string[] Lines = File.ReadAllLines(FilterFile.FullName);
 							foreach (string Line in Lines)
@@ -220,37 +226,37 @@ namespace AutomationTool
 						{
 							try
 							{
-								Log.TraceInformation("Deleting {0}", FilterFile.FullName);
+								Logger.LogInformation("Deleting {Arg0}", FilterFile.FullName);
 								FilterFile.Delete();
 							}
 							catch (Exception Ex)
 							{
-								Log.TraceWarning("Unable to delete: {0}", Ex.Message);
-								Log.TraceLog(ExceptionUtils.FormatExceptionDetails(Ex));
+								Logger.LogWarning("Unable to delete: {Arg0}", Ex.Message);
+								Logger.LogDebug("{Text}", ExceptionUtils.FormatExceptionDetails(Ex));
 							}
 						}
 					}
-					Log.TraceInformation("Found {0:n0} files", Paths.Count);
+					Logger.LogInformation("Found {0:n0} files", Paths.Count);
 
 					// Enumerate all the files that are in the network DDC
-					Log.TraceInformation("");
-					Log.TraceInformation("Filtering files in {0}...", CacheDir);
+					Logger.LogInformation("");
+					Logger.LogInformation("Filtering files in {CacheDir}...", CacheDir);
 					List<DerivedDataFile> Files = ParallelExecute<string, DerivedDataFile>(Paths, (Path, FilesBag) => ReadFileInfo(CacheDir, Path, FilesBag));
 
 					// Filter to the maximum size
 					if (MaxFileSize != 0)
 					{
 						int NumRemovedMaxSize = Files.RemoveAll(x => x.Info.Length > MaxFileSize);
-						Log.TraceInformation("");
-						Log.TraceInformation("Removed {0} files above size limit ({1:n0} bytes)", NumRemovedMaxSize, MaxFileSize);
+						Logger.LogInformation("");
+						Logger.LogInformation("Removed {NumRemovedMaxSize} files above size limit ({1:n0} bytes)", NumRemovedMaxSize, MaxFileSize);
 					}
 
 					// Create the working directory
-					DirectoryReference WorkingDir = DirectoryReference.Combine(EngineDirectory, "Saved", "UploadDDC");
+					DirectoryReference WorkingDir = DirectoryReference.Combine(Unreal.EngineDirectory, "Saved", "UploadDDC");
 					DirectoryReference.CreateDirectory(WorkingDir);
 
 					// Get the path to the manifest
-					FileReference RootManifestFile = FileReference.Combine(CommandUtils.RootDirectory, RootManifestPath);
+					FileReference RootManifestFile = FileReference.Combine(Unreal.RootDirectory, RootManifestPath);
 
 					// Read the old root manifest
 					RootManifest OldRootManifest = new RootManifest();
@@ -281,12 +287,12 @@ namespace AutomationTool
 							FileReference BundleFile = FileReference.Combine(WorkingDir, Bundle.Name);
 							if (!FileReference.Exists(BundleFile))
 							{
-								Log.TraceInformation("Downloading {0}", BundleFile);
+								Logger.LogInformation("Downloading {BundleFile}", BundleFile);
 
 								FileReference TempCompressedFile = new FileReference(BundleFile.FullName + ".incoming.gz");
 								if (!TryDownloadFile(Client, BucketName, Bundle.ObjectKey, TempCompressedFile))
 								{
-									Log.TraceWarning("Unable to download {0}", Bundle.ObjectKey);
+									Logger.LogWarning("Unable to download {Arg0}", Bundle.ObjectKey);
 									continue;
 								}
 
@@ -297,7 +303,7 @@ namespace AutomationTool
 								}
 								catch (Exception Ex)
 								{
-									Log.TraceWarning("Unable to uncompress {0}: {1}", Bundle.ObjectKey, Ex.ToString());
+									Logger.LogWarning("Unable to uncompress {Arg0}: {Arg1}", Bundle.ObjectKey, Ex.ToString());
 									continue;
 								}
 
@@ -365,35 +371,34 @@ namespace AutomationTool
 					int NumRemovedExist = Files.RemoveAll(x => ReusedKeyHashes.Contains(x.KeyHash));
 					if (NumRemovedExist > 0)
 					{
-						Log.TraceInformation("");
-						Log.TraceInformation("Removed {0:n0} files which already exist", NumRemovedExist);
+						Logger.LogInformation("");
+						Logger.LogInformation("Removed {0:n0} files which already exist", NumRemovedExist);
 					}
 
 					// Read all the files we want to include
 					List<Tuple<DerivedDataFile, byte[]>> FilesToInclude = new List<Tuple<DerivedDataFile, byte[]>>();
 					if (Files.Count > 0)
 					{
-						Log.TraceInformation("");
-						Log.TraceInformation("Reading remaining {0:n0} files into memory ({1:n1}mb)...", Files.Count, (float)Files.Sum(x => (long)x.Info.Length) / (1024 * 1024));
+						Logger.LogInformation("");
+						Logger.LogInformation("Reading remaining {0:n0} files into memory ({1:n1}mb)...", Files.Count, (float)Files.Sum(x => (long)x.Info.Length) / (1024 * 1024));
 						FilesToInclude.AddRange(ParallelExecute<DerivedDataFile, Tuple<DerivedDataFile, byte[]>>(Files, (x, y) => ReadFileData(x, y)));
 					}
 
 					// Generate new data
-					using (RNGCryptoServiceProvider Crypto = new RNGCryptoServiceProvider())
 					{
 						// Flag for whether to update the manifest
 						bool bUpdateManifest = false;
 
 						// Upload the new bundle
-						Log.TraceInformation("");
+						Logger.LogInformation("");
 						if (FilesToInclude.Count == 0)
 						{
-							Log.TraceInformation("No new files to add.");
+							Logger.LogInformation("No new files to add.");
 						}
 						else
 						{
 							// Sort the files to include by creation time. This will bias towards grouping older, more "permanent", items together.
-							Log.TraceInformation("Sorting input files");
+							Logger.LogInformation("Sorting input files");
 							List<Tuple<DerivedDataFile, byte[]>> SortedFilesToInclude = FilesToInclude.OrderBy(x => x.Item1.Info.CreationTimeUtc).ToList();
 
 							// Get the target bundle size
@@ -426,7 +431,7 @@ namespace AutomationTool
 								string NewBundleName = String.Format("Bundle-{0:yyyy.MM.dd-HH.mm}{1}.ddb", NewBundleTime.ToLocalTime(), NewBundleSuffix);
 
 								// Create a random number for the object key
-								string NewBundleObjectKey = KeyPrefix + "bulk/" + CreateObjectName(Crypto);
+								string NewBundleObjectKey = KeyPrefix + "bulk/" + CreateObjectName();
 
 								// Create the bundle header
 								byte[] Header;
@@ -447,7 +452,7 @@ namespace AutomationTool
 
 								// Create the output file
 								FileReference NewBundleFile = FileReference.Combine(WorkingDir, NewBundleName + ".gz");
-								Log.TraceInformation("Writing {0}", NewBundleFile);
+								Logger.LogInformation("Writing {NewBundleFile}", NewBundleFile);
 								using (FileStream BundleStream = FileReference.Open(NewBundleFile, FileMode.Create, FileAccess.Write, FileShare.Read))
 								{
 									using (GZipStream ZipStream = new GZipStream(BundleStream, CompressionLevel.Optimal, true))
@@ -463,7 +468,7 @@ namespace AutomationTool
 								// Upload the file
 								long NewBundleCompressedLength = NewBundleFile.ToFileInfo().Length;
 								long NewBundleUncompressedLength = Header.Length + BundleFilesToInclude.Sum(x => (long)x.Item2.Length);
-								Log.TraceInformation("Uploading bundle to {0} ({1:n1}mb)", NewBundleObjectKey, NewBundleCompressedLength / (1024.0f * 1024.0f));
+								Logger.LogInformation("Uploading bundle to {NewBundleObjectKey} ({1:n1}mb)", NewBundleObjectKey, NewBundleCompressedLength / (1024.0f * 1024.0f));
 								UploadFile(Client, BucketName, NewBundleFile, 0, NewBundleObjectKey, RequestSemaphore, null);
 
 								// Add the bundle to the new manifest
@@ -504,7 +509,7 @@ namespace AutomationTool
 							{
 								RootManifest.Entry NewEntry = new RootManifest.Entry();
 								NewEntry.CreateTime = UtcNow;
-								NewEntry.Key = KeyPrefix + CreateObjectName(Crypto);
+								NewEntry.Key = KeyPrefix + CreateObjectName();
 								NewRootManifest.Entries.Add(NewEntry);
 							}
 
@@ -515,17 +520,27 @@ namespace AutomationTool
 							// Update all the bundle manifests still valid
 							foreach (RootManifest.Entry Entry in NewRootManifest.Entries)
 							{
-								Log.TraceInformation("Uploading bundle manifest to {0}", Entry.Key);
+								Logger.LogInformation("Uploading bundle manifest to {Arg0}", Entry.Key);
 								UploadFile(Client, BucketName, NewBundleManifestFile, 0, Entry.Key, RequestSemaphore, null);
 							}
 
+							string LocalBundleManifestPath = String.Format("file://{0}", NewBundleManifestFile.FullName.Replace('\\', '/'));
+							if (bLocal && NewRootManifest.Entries.LastOrDefault()?.Key != LocalBundleManifestPath)
+							{
+								RootManifest.Entry NewEntry = new RootManifest.Entry();
+								NewEntry.CreateTime = UtcNow;
+								NewEntry.Key = LocalBundleManifestPath;
+								NewRootManifest.Entries.Add(NewEntry);
+							}
+
 							// Overwrite all the existing manifests
-							if (AllowSubmit)
+							int ChangeNumber = 0;
+							if (AllowSubmit || (P4Enabled && bLocal))
 							{
 								List<string> ExistingFiles = P4.Files(CommandUtils.MakePathSafeToUseWithCommandLine(RootManifestFile.FullName));
 
 								// Create a changelist containing the new manifest
-								int ChangeNumber = P4.CreateChange(Description: "Updating DDC bundle manifest");
+								ChangeNumber = P4.CreateChange(Description: "Updating DDC bundle manifest\n#skipci");
 								if (ExistingFiles.Count > 0)
 								{
 									P4.Edit(ChangeNumber, CommandUtils.MakePathSafeToUseWithCommandLine(RootManifestFile.FullName));
@@ -536,7 +551,14 @@ namespace AutomationTool
 									NewRootManifest.Save(RootManifestFile);
 									P4.Add(ChangeNumber, CommandUtils.MakePathSafeToUseWithCommandLine(RootManifestFile.FullName));
 								}
+							}
+							else if (bLocal)
+							{
+								NewRootManifest.Save(RootManifestFile);
+							}
 
+							if (AllowSubmit)
+							{
 								// Submit it
 								int SubmittedChangeNumber;
 								P4.Submit(ChangeNumber, out SubmittedChangeNumber, true);
@@ -552,7 +574,7 @@ namespace AutomationTool
 								{
 									if (!KeepObjectKeys.Contains(OldEntry.ObjectKey))
 									{
-										Log.TraceInformation("Deleting unreferenced bundle {0}", OldEntry.ObjectKey);
+										Logger.LogInformation("Deleting unreferenced bundle {Arg0}", OldEntry.ObjectKey);
 										DeleteFile(Client, BucketName, OldEntry.ObjectKey, RequestSemaphore, null);
 									}
 								}
@@ -563,7 +585,7 @@ namespace AutomationTool
 								{
 									if (!KeepManifestKeys.Contains(OldEntry.Key))
 									{
-										Log.TraceInformation("Deleting unreferenced manifest {0}", OldEntry.Key);
+										Logger.LogInformation("Deleting unreferenced manifest {Arg0}", OldEntry.Key);
 										DeleteFile(Client, BucketName, OldEntry.Key, RequestSemaphore, null);
 									}
 								}
@@ -571,7 +593,7 @@ namespace AutomationTool
 							else
 							{
 								// Skip submitting
-								Log.TraceWarning("Skipping manifest submit due to missing -Submit argument.");
+								Logger.LogWarning("Skipping manifest submit due to missing -Submit argument.");
 							}
 
 							// Update the new download size
@@ -580,33 +602,36 @@ namespace AutomationTool
 					}
 
 					// Print some stats about the final manifest
-					Log.TraceInformation("");
-					Log.TraceInformation("Total download size {0:n1}mb", DownloadSize / (1024.0 * 1024.0));
-					Log.TraceInformation("");
+					Logger.LogInformation("");
+					Logger.LogInformation("Total download size {0:n1}mb", DownloadSize / (1024.0 * 1024.0));
+					Logger.LogInformation("");
 				}
 			}
 		}
 
-		private string CreateObjectName(RNGCryptoServiceProvider Crypto)
+		private string CreateObjectName()
 		{
-			byte[] NameBytes = new byte[40];
-			Crypto.GetBytes(NameBytes);
+			byte[] NameBytes = RandomNumberGenerator.GetBytes(40);
 			return StringUtils.FormatHexString(NameBytes);
 		}
 
 		private bool TryDownloadFile(AmazonS3Client Client, string BucketName, string Key, FileReference OutputFile)
 		{
+			if (Client == null)
+			{
+				return false;
+			}
 			try
 			{
 				GetObjectRequest Request = new GetObjectRequest();
 				Request.BucketName = BucketName;
 				Request.Key = Key;
 
-				using (GetObjectResponse Response = Client.GetObject(Request))
+				using (GetObjectResponse Response = Client.GetObjectAsync(Request).Result)
 				{
 					if ((int)Response.HttpStatusCode >= 200 && (int)Response.HttpStatusCode <= 299)
 					{
-						Response.WriteResponseStreamToFile(OutputFile.FullName);
+						Response.WriteResponseStreamToFileAsync(OutputFile.FullName, false, CancellationToken.None).Wait();
 						return true;
 					}
 				}
@@ -617,7 +642,7 @@ namespace AutomationTool
 				AmazonS3Exception AmazonEx = Ex as AmazonS3Exception;
 				if (AmazonEx == null || AmazonEx.StatusCode != HttpStatusCode.NotFound)
 				{
-					Log.TraceWarning("Exception while downloading {0}: {1}", Key, Ex);
+					Logger.LogWarning("Exception while downloading {Key}: {Ex}", Key, Ex);
 				}
 				return false;
 			}
@@ -644,12 +669,12 @@ namespace AutomationTool
 				if (Info.Exists)
 				{
 					string Key = new FileReference(Info).MakeRelativeTo(BaseDir).Replace('\\', '/');
-					Files.Add(new DerivedDataFile(Info, Path));
+					Files.Add(new DerivedDataFile(Info, Key));
 				}
 			}
 			catch (Exception Ex)
 			{
-				Log.TraceWarning("Unable to read file info {0}: {1}", Location, Ex);
+				Logger.LogWarning("Unable to read file info {Location}: {Ex}", Location, Ex);
 			}
 		}
 
@@ -662,7 +687,7 @@ namespace AutomationTool
 			}
 			catch(Exception Ex)
 			{
-				Log.TraceWarning("Unable to read file {0}: {1}", DerivedDataFile.Info.FullName, Ex);
+				Logger.LogWarning("Unable to read file {Arg0}: {Ex}", DerivedDataFile.Info.FullName, Ex);
 			}
 		}
 
@@ -682,7 +707,7 @@ namespace AutomationTool
 					Queue.Wait(TimeSpan.FromSeconds(10.0));
 
 					int NumRemaining = Queue.NumRemaining;
-					Log.TraceInformation("Processed {0:n0} ({1}%)", TotalCount - NumRemaining, ((TotalCount - NumRemaining) * 100) / TotalCount);
+					Logger.LogInformation("Processed {0:n0} ({Arg1}%)", TotalCount - NumRemaining, ((TotalCount - NumRemaining) * 100) / TotalCount);
 
 					if (NumRemaining == 0)
 					{
@@ -701,13 +726,17 @@ namespace AutomationTool
 
 		protected void UploadFile(AmazonS3Client Client, string BucketName, FileReference File, long Length, string Key, SemaphoreSlim Semaphore, UploadState State)
 		{
+			if (Client == null)
+			{
+				return;
+			}
 			try
 			{
 				Retry(() => UploadFileInner(Client, BucketName, File, Length, Key, Semaphore, State), 10);
 			}
 			catch (Exception Ex)
 			{
-				Log.TraceWarning("Exception trying to upload {0}: {1}", File, ExceptionUtils.FormatExceptionDetails(Ex));
+				Logger.LogWarning("Exception trying to upload {File}: {Arg1}", File, ExceptionUtils.FormatExceptionDetails(Ex));
 			}
 		}
 
@@ -724,7 +753,7 @@ namespace AutomationTool
 					Request.Key = Key;
 					Request.FilePath = File.FullName;
 					Request.CannedACL = S3CannedACL.NoACL;
-					Client.PutObject(Request);
+					Client.PutObjectAsync(Request).Wait();
 				}
 
 				if (State != null)
@@ -747,7 +776,7 @@ namespace AutomationTool
 			}
 			catch (Exception Ex)
 			{
-				Log.TraceWarning("Exception trying to delete {0}: {1}", Key, ExceptionUtils.FormatExceptionDetails(Ex));
+				Logger.LogWarning("Exception trying to delete {Key}: {Arg1}", Key, ExceptionUtils.FormatExceptionDetails(Ex));
 			}
 		}
 
@@ -760,8 +789,7 @@ namespace AutomationTool
 				DeleteObjectRequest Request = new DeleteObjectRequest();
 				Request.BucketName = BucketName;
 				Request.Key = Key;
-				Client.DeleteObject(Request);
-
+				Client.DeleteObjectAsync(Request).Wait();
 				if (State != null)
 				{
 					Interlocked.Increment(ref State.NumFiles);
@@ -792,7 +820,7 @@ namespace AutomationTool
 				{
 					if (NumAttempts < MaxAttempts)
 					{
-						Log.TraceLog("Attempt {0}: {1}", NumAttempts, ExceptionUtils.FormatExceptionDetails(Ex));
+						Logger.LogDebug("Attempt {NumAttempts}: {Arg1}", NumAttempts, ExceptionUtils.FormatExceptionDetails(Ex));
 					}
 					else
 					{

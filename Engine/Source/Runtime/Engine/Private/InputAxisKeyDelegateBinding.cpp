@@ -1,15 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/InputAxisKeyDelegateBinding.h"
-#include "GameFramework/Actor.h"
 #include "Components/InputComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(InputAxisKeyDelegateBinding)
 
 UInputAxisKeyDelegateBinding::UInputAxisKeyDelegateBinding(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
 }
 
-void UInputAxisKeyDelegateBinding::BindToInputComponent(UInputComponent* InputComponent) const
+void UInputAxisKeyDelegateBinding::BindToInputComponent(UInputComponent* InputComponent, UObject* ObjectToBindTo) const
 {
 	TArray<FInputAxisKeyBinding> BindsToAdd;
 
@@ -20,7 +21,7 @@ void UInputAxisKeyDelegateBinding::BindToInputComponent(UInputComponent* InputCo
 		FInputAxisKeyBinding AB( Binding.AxisKey );
 		AB.bConsumeInput = Binding.bConsumeInput;
 		AB.bExecuteWhenPaused = Binding.bExecuteWhenPaused;
-		AB.AxisDelegate.BindDelegate(InputComponent->GetOwner(), Binding.FunctionNameToBind);
+		AB.AxisDelegate.BindDelegate(ObjectToBindTo, Binding.FunctionNameToBind);
 
 		if (Binding.bOverrideParentBinding)
 		{
@@ -43,3 +44,4 @@ void UInputAxisKeyDelegateBinding::BindToInputComponent(UInputComponent* InputCo
 		InputComponent->AxisKeyBindings.Add(BindsToAdd[Index]);
 	}
 }
+

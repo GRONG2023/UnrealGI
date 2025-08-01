@@ -4,20 +4,15 @@
 	Timeline.cpp
 =============================================================================*/
 
-#include "CoreMinimal.h"
-#include "Stats/Stats.h"
-#include "UObject/Class.h"
-#include "UObject/CoreNet.h"
-#include "UObject/UnrealType.h"
 #include "Curves/CurveLinearColor.h"
 #include "Curves/CurveVector.h"
-#include "Curves/CurveFloat.h"
+#include "ProfilingDebugging/CsvProfiler.h"
+#include "UObject/EnumProperty.h"
 #include "UObject/Package.h"
 #include "GameFramework/WorldSettings.h"
 #include "Net/UnrealNetwork.h"
 #include "Components/TimelineComponent.h"
 #include "Engine/World.h"
-#include "ProfilingDebugging/CsvProfiler.h"
 #include "Misc/App.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogTimeline, Log, All);
@@ -29,11 +24,11 @@ DECLARE_CYCLE_STAT(TEXT("TimelineComp Tick"), STAT_TimelineCompTick, STATGROUP_D
 
 UEnum* FTimeline::GetTimelineDirectionEnum()
 {
-	static UEnum* TimelineDirectionEnum = NULL;
-	if(NULL == TimelineDirectionEnum)
+	static UEnum* TimelineDirectionEnum = nullptr;
+	if (nullptr == TimelineDirectionEnum)
 	{
-		FName TimelineDirectionEnumName(TEXT("ETimelineDirection::Forward"));
-		UEnum::LookupEnumName(TimelineDirectionEnumName, &TimelineDirectionEnum);
+		FTopLevelAssetPath TimelineDirectionEnumEnumPath(TEXT("/Script/Engine"), TEXT("ETimelineDirection"));
+		TimelineDirectionEnum = FindObject<UEnum>(TimelineDirectionEnumEnumPath);
 		check(TimelineDirectionEnum);
 	}
 	return TimelineDirectionEnum;
@@ -84,128 +79,191 @@ void FTimeline::AddEvent(float Time, FOnTimelineEvent Event)
 
 void FTimeline::AddInterpVector(UCurveVector* VectorCurve, FOnTimelineVector InterpFunc, FName PropertyName, FName TrackName)
 {
-	FTimelineVectorTrack NewEntry;
-	NewEntry.VectorCurve = VectorCurve;
-	NewEntry.InterpFunc = InterpFunc;
-	NewEntry.TrackName = TrackName;
-	NewEntry.VectorPropertyName = PropertyName;
+	if (VectorCurve)
+	{
+		FTimelineVectorTrack NewEntry;
+		NewEntry.VectorCurve = VectorCurve;
+		NewEntry.InterpFunc = InterpFunc;
+		NewEntry.TrackName = TrackName;
+		NewEntry.VectorPropertyName = PropertyName;
 
-	InterpVectors.Add(NewEntry);
+		InterpVectors.Add(NewEntry);
+	}
+	else
+	{
+		UE_LOG(LogTimeline, Warning, TEXT("FTimeline::AddInterpVector: VectorCurve is null so it will not be added!"));
+	}
 }
 
 void FTimeline::AddInterpVector(UCurveVector* VectorCurve, FOnTimelineVectorStatic InterpFunc)
 {
-	FTimelineVectorTrack NewEntry;
-	NewEntry.VectorCurve = VectorCurve;
-	NewEntry.InterpFuncStatic = InterpFunc;
+	if (VectorCurve)
+	{
+		FTimelineVectorTrack NewEntry;
+		NewEntry.VectorCurve = VectorCurve;
+		NewEntry.InterpFuncStatic = InterpFunc;
 
-	InterpVectors.Add(NewEntry);
+		InterpVectors.Add(NewEntry);
+	}
+	else
+	{
+		UE_LOG(LogTimeline, Warning, TEXT("FTimeline::AddInterpVector: VectorCurve is null so it will not be added!"));
+	}
 }
 
 void FTimeline::AddInterpFloat(UCurveFloat* FloatCurve, FOnTimelineFloat InterpFunc, FName PropertyName, FName TrackName)
 {
-	FTimelineFloatTrack NewEntry;
-	NewEntry.FloatCurve = FloatCurve;
-	NewEntry.InterpFunc = InterpFunc;
-	NewEntry.TrackName = TrackName;
-	NewEntry.FloatPropertyName = PropertyName;
+	if (FloatCurve)
+	{
+		FTimelineFloatTrack NewEntry;
+		NewEntry.FloatCurve = FloatCurve;
+		NewEntry.InterpFunc = InterpFunc;
+		NewEntry.TrackName = TrackName;
+		NewEntry.FloatPropertyName = PropertyName;
 
-	InterpFloats.Add(NewEntry);
+		InterpFloats.Add(NewEntry);
+	}
+	else
+	{
+		UE_LOG(LogTimeline, Warning, TEXT("FTimeline::AddInterpFloat: FloatCurve is null so it will not be added!"));
+	}
 }
 
 void FTimeline::AddInterpFloat(UCurveFloat* FloatCurve, FOnTimelineFloatStatic InterpFunc)
 {
-	FTimelineFloatTrack NewEntry;
-	NewEntry.FloatCurve = FloatCurve;
-	NewEntry.InterpFuncStatic = InterpFunc;
+	if (FloatCurve)
+	{
+		FTimelineFloatTrack NewEntry;
+		NewEntry.FloatCurve = FloatCurve;
+		NewEntry.InterpFuncStatic = InterpFunc;
 
-	InterpFloats.Add(NewEntry);
+		InterpFloats.Add(NewEntry);
+	}
+	else
+	{
+		UE_LOG(LogTimeline, Warning, TEXT("FTimeline::AddInterpFloat: FloatCurve is null so it will not be added!"));
+	}
 }
 
 void FTimeline::AddInterpLinearColor(UCurveLinearColor* LinearColorCurve, FOnTimelineLinearColor InterpFunc, FName PropertyName, FName TrackName)
 {
-	FTimelineLinearColorTrack NewEntry;
-	NewEntry.LinearColorCurve = LinearColorCurve;
-	NewEntry.InterpFunc = InterpFunc;
-	NewEntry.TrackName = TrackName;
-	NewEntry.LinearColorPropertyName = PropertyName;
+	if (LinearColorCurve)
+	{
+		FTimelineLinearColorTrack NewEntry;
+		NewEntry.LinearColorCurve = LinearColorCurve;
+		NewEntry.InterpFunc = InterpFunc;
+		NewEntry.TrackName = TrackName;
+		NewEntry.LinearColorPropertyName = PropertyName;
 
-	InterpLinearColors.Add(NewEntry);
+		InterpLinearColors.Add(NewEntry);
+	}
+	else
+	{
+		UE_LOG(LogTimeline, Warning, TEXT("FTimeline::AddInterpLinearColor: LinearColorCurve is null so it will not be added!"));
+	}
 }
 
 void FTimeline::AddInterpLinearColor(UCurveLinearColor* LinearColorCurve, FOnTimelineLinearColorStatic InterpFunc)
 {
-	FTimelineLinearColorTrack NewEntry;
-	NewEntry.LinearColorCurve = LinearColorCurve;
-	NewEntry.InterpFuncStatic = InterpFunc;
+	if (LinearColorCurve)
+	{
+		FTimelineLinearColorTrack NewEntry;
+		NewEntry.LinearColorCurve = LinearColorCurve;
+		NewEntry.InterpFuncStatic = InterpFunc;
 
-	InterpLinearColors.Add(NewEntry);
+		InterpLinearColors.Add(NewEntry);
+	}
+	else
+	{
+		UE_LOG(LogTimeline, Warning, TEXT("FTimeline::AddInterpLinearColor: LinearColorCurve is null so it will not be added!"));
+	}
 }
 
 void FTimeline::SetFloatCurve(UCurveFloat* NewFloatCurve, FName FloatTrackName)
 {
-	bool bFoundTrack = false;
-	if (FloatTrackName != NAME_None)
+	if (NewFloatCurve)
 	{
-		for (FTimelineFloatTrack& FloatTrack : InterpFloats)
+		bool bFoundTrack = false;
+		if (FloatTrackName != NAME_None)
 		{
-			if (FloatTrack.TrackName == FloatTrackName)
+			for (FTimelineFloatTrack& FloatTrack : InterpFloats)
 			{
-				FloatTrack.FloatCurve = NewFloatCurve;
-				bFoundTrack = true;
-				break;
+				if (FloatTrack.TrackName == FloatTrackName)
+				{
+					FloatTrack.FloatCurve = NewFloatCurve;
+					bFoundTrack = true;
+					break;
+				}
 			}
 		}
-	}
 
-	if(!bFoundTrack)
+		if(!bFoundTrack)
+		{
+			UE_LOG(LogTimeline, Log, TEXT("SetFloatCurve: No float track with name %s!"), *FloatTrackName.ToString());
+		}
+	}
+	else
 	{
-		UE_LOG(LogTimeline, Log, TEXT("SetFloatCurve: No float track with name %s!"), *FloatTrackName.ToString());
+		UE_LOG(LogTimeline, Warning, TEXT("FTimeline::SetFloatCurve: NewFloatCurve is null so it will not be set!"));
 	}
 }
 
 void FTimeline::SetVectorCurve(UCurveVector* NewVectorCurve, FName VectorTrackName)
 {
-	bool bFoundTrack = false;
-	if (VectorTrackName != NAME_None)
+	if (NewVectorCurve)
 	{
-		for (FTimelineVectorTrack& VectorTrack : InterpVectors)
+		bool bFoundTrack = false;
+		if (VectorTrackName != NAME_None)
 		{
-			if (VectorTrack.TrackName == VectorTrackName)
+			for (FTimelineVectorTrack& VectorTrack : InterpVectors)
 			{
-				VectorTrack.VectorCurve = NewVectorCurve;
-				bFoundTrack = true;
-				break;
+				if (VectorTrack.TrackName == VectorTrackName)
+				{
+					VectorTrack.VectorCurve = NewVectorCurve;
+					bFoundTrack = true;
+					break;
+				}
 			}
 		}
-	}
 
-	if (!bFoundTrack)
+		if (!bFoundTrack)
+		{
+			UE_LOG(LogTimeline, Log, TEXT("SetVectorCurve: No vector track with name %s!"), *VectorTrackName.ToString());
+		}
+	}
+	else
 	{
-		UE_LOG(LogTimeline, Log, TEXT("SetVectorCurve: No vector track with name %s!"), *VectorTrackName.ToString());
+		UE_LOG(LogTimeline, Warning, TEXT("FTimeline::SetVectorCurve: NewVectorCurve is null so it will not be set!"));
 	}
 }
 
 void FTimeline::SetLinearColorCurve(UCurveLinearColor* NewLinearColorCurve, FName LinearColorTrackName)
 {
-	bool bFoundTrack = false;
-	if (LinearColorTrackName != NAME_None)
+	if (NewLinearColorCurve)
 	{
-		for (FTimelineLinearColorTrack& ColorTrack : InterpLinearColors)
+		bool bFoundTrack = false;
+		if (LinearColorTrackName != NAME_None)
 		{
-			if (ColorTrack.TrackName == LinearColorTrackName)
+			for (FTimelineLinearColorTrack& ColorTrack : InterpLinearColors)
 			{
-				ColorTrack.LinearColorCurve = NewLinearColorCurve;
-				bFoundTrack = true;
-				break;
-			}
+				if (ColorTrack.TrackName == LinearColorTrackName)
+				{
+					ColorTrack.LinearColorCurve = NewLinearColorCurve;
+					bFoundTrack = true;
+					break;
+				}
 
+			}
+		}
+
+		if (!bFoundTrack)
+		{
+			UE_LOG(LogTimeline, Log, TEXT("SetLinearColorCurve: No color track with name %s!"), *LinearColorTrackName.ToString());
 		}
 	}
-
-	if (!bFoundTrack)
+	else
 	{
-		UE_LOG(LogTimeline, Log, TEXT("SetLinearColorCurve: No color track with name %s!"), *LinearColorTrackName.ToString());
+		UE_LOG(LogTimeline, Warning, TEXT("FTimeline::SetLinearColorCurve: NewLinearColorCurve is null so it will not be set!"));
 	}
 }
 
@@ -368,7 +426,7 @@ void FTimeline::SetPlaybackPosition(float NewPosition, bool bFireEvents, bool bF
 			// Slight hack here.. if playing forwards and reaching the end of the sequence, force it over a little to ensure we fire events actually on the end of the sequence.
 			if (MaxTime == GetTimelineLength())
 			{
-				MaxTime += (float)KINDA_SMALL_NUMBER;
+				MaxTime += (float)UE_KINDA_SMALL_NUMBER;
 			}
 		}
 		// If playing sequence backwards.
@@ -380,7 +438,7 @@ void FTimeline::SetPlaybackPosition(float NewPosition, bool bFireEvents, bool bF
 			// Same small hack as above for backwards case.
 			if (MinTime == 0.f)
 			{
-				MinTime -= (float)KINDA_SMALL_NUMBER;
+				MinTime -= (float)UE_KINDA_SMALL_NUMBER;
 			}
 		}
 
@@ -557,6 +615,20 @@ float FTimeline::GetTimelineLength() const
 	}
 }
 
+float FTimeline::GetScaledTimelineLength() const
+{
+	const float CurrentPlayRate = GetPlayRate();
+	if(CurrentPlayRate != 0.0f)
+	{
+		return GetTimelineLength() / CurrentPlayRate;	
+	}
+	else
+	{
+		UE_LOG(LogTimeline, Error, TEXT("Invalid timeline PlayRate!"));
+		return 0.0f;
+	}
+}
+
 /** Sets the timeline length mode */
 void FTimeline::SetTimelineLengthMode(ETimelineLengthMode NewMode)
 {
@@ -568,7 +640,7 @@ void FTimeline::SetTimelineLength(float NewLength)
 	Length = NewLength;
 	if(Position > NewLength)
 	{
-		SetNewTime(NewLength-KINDA_SMALL_NUMBER);
+		SetNewTime(NewLength-UE_KINDA_SMALL_NUMBER);
 	}
 }
 
@@ -756,14 +828,29 @@ void UTimelineComponent::AddInterpVector(UCurveVector* VectorCurve, FOnTimelineV
 	TheTimeline.AddInterpVector(VectorCurve, InterpFunc, PropertyName, TrackName);
 }
 
+void UTimelineComponent::AddInterpVector(UCurveVector* VectorCurve, const FOnTimelineVectorStatic InterpFunc)
+{
+	TheTimeline.AddInterpVector(VectorCurve, InterpFunc);
+}
+
 void UTimelineComponent::AddInterpFloat(UCurveFloat* FloatCurve, FOnTimelineFloat InterpFunc, FName PropertyName, FName TrackName)
 {
 	TheTimeline.AddInterpFloat(FloatCurve, InterpFunc, PropertyName, TrackName);
 }
 
+void UTimelineComponent::AddInterpFloat(UCurveFloat* FloatCurve, const FOnTimelineFloatStatic InterpFunc)
+{
+	TheTimeline.AddInterpFloat(FloatCurve, InterpFunc);
+}
+
 void UTimelineComponent::AddInterpLinearColor(UCurveLinearColor* LinearColorCurve, FOnTimelineLinearColor InterpFunc, FName PropertyName, FName TrackName)
 {
 	TheTimeline.AddInterpLinearColor(LinearColorCurve, InterpFunc, PropertyName, TrackName);
+}
+
+void UTimelineComponent::AddInterpLinearColor(UCurveLinearColor* LinearColorCurve, const FOnTimelineLinearColorStatic InterpFunc)
+{
+	TheTimeline.AddInterpLinearColor(LinearColorCurve, InterpFunc);
 }
 
 void UTimelineComponent::SetPlaybackPosition(float NewPosition, bool bFireEvents, bool bFireUpdate)
@@ -801,7 +888,7 @@ float UTimelineComponent::GetPlayRate() const
 	return TheTimeline.GetPlayRate();
 }
 
-void UTimelineComponent::SetNewTime (float NewTime)
+void UTimelineComponent::SetNewTime(float NewTime)
 {
 	TheTimeline.SetNewTime(NewTime);
 }
@@ -809,6 +896,11 @@ void UTimelineComponent::SetNewTime (float NewTime)
 float UTimelineComponent::GetTimelineLength() const
 {
 	return TheTimeline.GetTimelineLength();
+}
+
+float UTimelineComponent::GetScaledTimelineLength() const
+{
+	return TheTimeline.GetScaledTimelineLength();
 }
 
 void UTimelineComponent::SetTimelineLength(float NewLength)
@@ -928,12 +1020,11 @@ void UTimelineComponent::SetDirectionPropertyName(FName DirectionPropertyName)
 	TheTimeline.SetDirectionPropertyName(DirectionPropertyName);
 }
 
-void UTimelineComponent::OnRep_Timeline()
+void UTimelineComponent::OnRep_Timeline(FTimeline& OldTimeline)
 {
-	if (!TheTimeline.IsPlaying())
+	if (!TheTimeline.IsPlaying() && OldTimeline.GetPlaybackPosition() != TheTimeline.GetPlaybackPosition())
 	{
 		// make sure a final update call occurs on the client for the final position
-		// FIXME: this is incomplete, we need to compare vs the last simulated position for firing events and such
 		TheTimeline.SetPlaybackPosition(TheTimeline.GetPlaybackPosition(), false, true);
 	}
 }

@@ -9,6 +9,8 @@ using System.Text.RegularExpressions;
 using System.Linq;
 using System.Text;
 using System.Threading;
+using EpicGames.Core;
+using System.Diagnostics;
 
 namespace Gauntlet
 {
@@ -51,13 +53,9 @@ namespace Gauntlet
 		{
 			get
 			{
-				if (bHaveSavedArtifacts == false)
+				if (HasExited)
 				{
-					if (HasExited)
-					{
-						SaveArtifacts();
-						bHaveSavedArtifacts = true;
-					}
+					SaveArtifacts();
 				}
 				
 				return Path.Combine(AndroidDevice.LocalCachePath, "Saved");
@@ -108,6 +106,11 @@ namespace Gauntlet
 				return false;
 			}
 
+			if(AndroidDevice.Disposed)
+			{
+				return false;
+			}
+
 			ActivityCheckTime = DateTime.UtcNow;
 
 			// get activities filtered by our package name
@@ -115,7 +118,7 @@ namespace Gauntlet
 
 			// We have exited if our activity doesn't appear in the activity query or is not the focused activity.
 			bool bActivityPresent = ActivityQuery.Output.Contains(Install.AndroidPackageName);
-			bool bActivityInForeground = ActivityQuery.Output.Contains("mResumedActivity");
+			bool bActivityInForeground = ActivityQuery.Output.Contains("ResumedActivity");
 			bool bHasExited = !bActivityPresent || !bActivityInForeground;
 			if (bHasExited)
 			{
@@ -160,11 +163,12 @@ namespace Gauntlet
 
 			if (Install.AndroidDevice != null && Install.AndroidDevice.Disposed)
 			{
-				Log.Warning("Attempting to cache log using disposed Android device");
+				Log.Warning(KnownLogEvents.Gauntlet_DeviceEvent, "Attempting to cache log using disposed Android device");
 				return;
 			}
 
-			string GetLogCommand = string.Format("shell cat {0}/Logs/{1}.log", Install.AndroidDevice.DeviceArtifactPath, Install.Name);
+			// Note: DeviceLogPath has the correct location for the current app. Apps can be configured to override the default log storage path. 
+			string GetLogCommand = string.Format("shell cat {0}", Install.AndroidDevice.DeviceLogPath);
 			IProcessResult LogQuery = Install.AndroidDevice.RunAdbDeviceCommand(GetLogCommand, true);
 
 			if (LogQuery.ExitCode != 0)
@@ -203,7 +207,7 @@ namespace Gauntlet
 
 		public void Kill()
 		{
-			if (!HasExited)
+			if (!HasExited && !AndroidDevice.Disposed)
 			{
 				WasKilled = true;
 				Install.AndroidDevice.KillRunningProcess(Install.AndroidPackageName);
@@ -213,6 +217,8 @@ namespace Gauntlet
 
 		protected void SaveArtifacts()
 		{
+			if (bHaveSavedArtifacts)
+				return;
 
 			// copy remote artifacts to local
 			if (Directory.Exists(Install.AndroidDevice.LocalCachePath))
@@ -227,7 +233,7 @@ namespace Gauntlet
 				}
 				catch
 				{
-					Log.Warning("Failed to remove old cache folder {0}", Install.AndroidDevice.LocalCachePath);
+					Log.Warning(KnownLogEvents.Gauntlet_DeviceEvent, "Failed to remove old cache folder {Folder}", Install.AndroidDevice.LocalCachePath);
 				}
 			}
 
@@ -238,7 +244,7 @@ namespace Gauntlet
 			}
 			catch (Exception Ex)
 			{
-				Log.Warning("Exception marking directory for cleanup {0}", Ex.Message);
+				Log.Warning(KnownLogEvents.Gauntlet_DeviceEvent, "Exception marking directory for cleanup {Exception}", Ex.Message);
 			}			
 
 			string LocalSaved = Path.Combine(Install.AndroidDevice.LocalCachePath, "Saved");
@@ -255,12 +261,12 @@ namespace Gauntlet
 
 			if (PullCmd.ExitCode != 0)
 			{
-				Log.Warning("Failed to retrieve artifacts. {0}", PullCmd.Output);
+				Log.Warning(KnownLogEvents.Gauntlet_DeviceEvent, "Failed to retrieve artifacts. {Output}", PullCmd.Output);
 			}
 			else
 			{
 				// update final cached stdout property
-				string LogFilename = string.Format("{0}/Logs/{1}.log", LocalSaved, Install.Name);
+				string LogFilename = Install.AndroidDevice.DeviceLogPath;
 				if (File.Exists(LogFilename))
 				{
 					ActivityLogCached = File.ReadAllText(LogFilename);
@@ -277,6 +283,8 @@ namespace Gauntlet
 			File.WriteAllText(Path.Combine(LocalSaved, LogcatFilename), LogcatResult.Output);
 
 			Install.AndroidDevice.PostRunCleanup();
+
+			bHaveSavedArtifacts = true;
 		}
 	}
 
@@ -317,6 +325,12 @@ namespace Gauntlet
 		{
 			return TargetDeviceAndroid.GetDefaultDevices();
 		}
+	}
+
+	public class AndroidBuildSupport : BaseBuildSupport
+	{
+		protected override BuildFlags SupportedBuildTypes => BuildFlags.Packaged | BuildFlags.CanReplaceCommandLine | BuildFlags.CanReplaceExecutable | BuildFlags.Bulk | BuildFlags.NotBulk;
+		protected override UnrealTargetPlatform? Platform => UnrealTargetPlatform.Android;
 	}
 
 	public class AndroidDeviceFactory : IDeviceFactory
@@ -369,11 +383,25 @@ namespace Gauntlet
 		/// </summary>
 		public string LocalCachePath { get; protected set; }
 
-
 		/// <summary>
 		/// Artifact (e.g. Saved) path on the device
 		/// </summary>
 		public string DeviceArtifactPath { get; protected set;  }
+
+		/// <summary>
+		/// External storage path on the device, e.g. /sdcard/UEGame/ etc..
+		/// </summary>
+		public string DeviceExternalStorageSavedPath { get; protected set; }
+
+		/// <summary>
+		/// External files path on the device, this is the app's own publically accessible data directory e.g. /sdcard/Android/data/[com.package.name]/files/UnrealGame etc..
+		/// </summary>
+		public string DeviceExternalFilesSavedPath { get; protected set; }
+
+		/// <summary>
+		/// Path to the log file. (This takes public logs setting of the package in to account.)
+		/// </summary>
+		public string DeviceLogPath { get; protected set; }		
 
 		/// <summary>
 		/// Path to a command line if installed
@@ -392,9 +420,9 @@ namespace Gauntlet
 					return false;
 				}
 
-				if (AllDevices[DeviceName] == false)
+				if (AllDevices[DeviceName] != "device")
 				{
-					Log.Warning("Device {0} is connected but we are not authorized", DeviceName);
+					Log.Warning(KnownLogEvents.Gauntlet_DeviceEvent, "Device {Name} is '{State}'", DeviceName, AllDevices[DeviceName]);
 					return false;
 				}
 
@@ -416,7 +444,8 @@ namespace Gauntlet
 			LocalDirectoryMappings.Add(EIntendedBaseCopyDirectory.Config, Path.Combine(ProjectDir, "Config"));
             LocalDirectoryMappings.Add(EIntendedBaseCopyDirectory.Content, Path.Combine(ProjectDir, "Content"));
             LocalDirectoryMappings.Add(EIntendedBaseCopyDirectory.Demos, Path.Combine(ProjectDir, "Demos"));
-            LocalDirectoryMappings.Add(EIntendedBaseCopyDirectory.Profiling, Path.Combine(ProjectDir, "Profiling"));
+			LocalDirectoryMappings.Add(EIntendedBaseCopyDirectory.PersistentDownloadDir, Path.Combine(ProjectDir, "Saved", "PersistentDownloadDir"));
+			LocalDirectoryMappings.Add(EIntendedBaseCopyDirectory.Profiling, Path.Combine(ProjectDir, "Profiling"));
             LocalDirectoryMappings.Add(EIntendedBaseCopyDirectory.Saved, ProjectDir);
         }
         public bool IsConnected { get	{ return IsAvailable; }	}
@@ -444,7 +473,7 @@ namespace Gauntlet
 				{
 					if (GetAllConnectedDevices().Count > 0)
 					{
-						throw new AutomationException("No default device available. One or more devices are connected but unauthorized. See 'adb devices'");
+						throw new AutomationException("No default device available. One or more devices are connected but unauthorized or offline. See 'adb devices'");
 					}
 					else
 					{
@@ -514,10 +543,10 @@ namespace Gauntlet
 				throw new AutomationException("Failed to find new device {0} in connection list", DeviceName);
 			}
 
-			if (ConnectedDevices[DeviceName] == false)
+			if (ConnectedDevices[DeviceName] != "device")
 			{
 				Dispose();
-				throw new AutomationException("Device {0} is connected but this PC is not authorized.", DeviceName);
+				throw new AutomationException("Device {0} is '{1}'.", DeviceName, ConnectedDevices[DeviceName]);
 			}
 		}
 
@@ -545,12 +574,12 @@ namespace Gauntlet
 				}
 				catch (Exception Ex)
 				{
-					Log.Warning("TargetDeviceAndroid.Dispose() threw: {0}", Ex.Message);
+					Log.Warning(KnownLogEvents.Gauntlet_DeviceEvent, "TargetDeviceAndroid.Dispose() threw: {Exception}", Ex.Message);
 				}
 				finally
 				{
 					disposedValue = true;
-					AdbCredentialCache.RemoveInstance();					
+					AdbCredentialCache.RemoveInstance();
 				}
 
 			}
@@ -580,15 +609,15 @@ namespace Gauntlet
 		/// Returns a list of locally connected devices (e.g. 'adb devices'). 
 		/// </summary>
 		/// <returns></returns>
-		static private Dictionary<string, bool> GetAllConnectedDevices()
+		static private Dictionary<string, string> GetAllConnectedDevices()
 		{
            var Result = RunAdbGlobalCommand("devices");
 
-            MatchCollection DeviceMatches = Regex.Matches(Result.Output, @"^([\d\w\.\:]{6,32})\s+(\w+)", RegexOptions.Multiline);
+            MatchCollection DeviceMatches = Regex.Matches(Result.Output, @"^([\d\w\.\:\-]{6,32})\s+(\w+)", RegexOptions.Multiline);
 
             var DeviceList = DeviceMatches.Cast<Match>().ToDictionary(
                 M => M.Groups[1].ToString(),
-                M => !M.Groups[2].ToString().ToLower().Contains("unauthorized")
+                M => M.Groups[2].ToString().ToLower()
             );
 
             return DeviceList;
@@ -597,7 +626,7 @@ namespace Gauntlet
 		static private IEnumerable<string> GetAllAvailableDevices()
 		{
 			var AllDevices = GetAllConnectedDevices();
-			return AllDevices.Keys.Where(D => AllDevices[D] == true);
+			return AllDevices.Keys.Where(D => AllDevices[D] == "device");
 		}
 
 		static public ITargetDevice[] GetDefaultDevices()
@@ -634,8 +663,7 @@ namespace Gauntlet
 			get
 			{
 				string CommandLine = "shell dumpsys power";
-				IProcessResult OnAndUnlockedQuery = RunAdbDeviceCommand(CommandLine);
-
+				IProcessResult OnAndUnlockedQuery = RunAdbDeviceCommand(CommandLine, bPauseErrorParsing: true);
 				return OnAndUnlockedQuery.Output.Contains("mHoldingDisplaySuspendBlocker=true")
 					&& OnAndUnlockedQuery.Output.Contains("mHoldingWakeLockSuspendBlocker=true");
 			}
@@ -645,16 +673,15 @@ namespace Gauntlet
 		{
 			Log.Verbose("{0}: Powering on", ToString());
 			string CommandLine = "shell \"input keyevent KEYCODE_WAKEUP && input keyevent KEYCODE_MENU\"";
-			RunAdbDeviceCommand(CommandLine);
-			return true;
+			IProcessResult PowerOnQuery = RunAdbDeviceCommand(CommandLine, bPauseErrorParsing: true);
+			return !PowerOnQuery.Output.Contains("error");
 		}
 		public bool PowerOff()
 		{
 			Log.Verbose("{0}: Powering off", ToString());
-
 			string CommandLine = "shell \"input keyevent KEYCODE_SLEEP\"";
-			RunAdbDeviceCommand(CommandLine);
-			return true;
+			IProcessResult PowerOffQuery = RunAdbDeviceCommand(CommandLine, bPauseErrorParsing: true);
+			return !PowerOffQuery.Output.Contains("error");
 		}
 
 		public bool Reboot()
@@ -706,9 +733,9 @@ namespace Gauntlet
             }
 
             // dependency info is a hash of the destination name, saved under a folder on /sdcard
-            int DestHash = DestPath.GetHashCode();
+            string DestHash = ContentHash.MD5(DestPath).ToString();
 			string DependencyCacheDir = "/sdcard/gdeps";
-			string DepFile = string.Format("{0}/{1:X}", DependencyCacheDir, DestHash);	
+			string DepFile = string.Format("{0}/{1}", DependencyCacheDir, DestHash);
 
 			IProcessResult AdbResult = null;
 
@@ -798,7 +825,29 @@ namespace Gauntlet
 
 					if (AdbResult.ExitCode != 0)
 					{
-						throw new AutomationException("Failed to push {0} to device. Error {1}", SourcePath, AdbResult.Output);
+						if ((AdbResult.Output.Contains("couldn't read from device") || AdbResult.Output.Contains("offline")) && !IsConnected)
+						{
+							Log.Info("Lost connection with device '{Name}'.", Name);
+							// Disconnection occurred. Let's retry a second time before given up
+							// Try to reconnect
+							if (Connect())
+							{
+								Log.Info("Retrying to copy via adb push...");
+								AdbResult = RunAdbDeviceCommand(AdbCommand);
+								if (AdbResult.ExitCode != 0)
+								{
+									throw new AutomationException("Failed to push {0} to device. Error {1}", SourcePath, AdbResult.Output);
+								}
+							}
+							else
+							{
+								throw new AutomationException("Failed to reconnect {0}", Name);
+							}
+						}
+						else
+						{
+							throw new AutomationException("Failed to push {0} to device. Error {1}", SourcePath, AdbResult.Output);
+						}
 					}
 
 					// Now pull info about the file which we'll write as a dep
@@ -817,7 +866,7 @@ namespace Gauntlet
 
 				if (AdbResult.ExitCode != 0)
 				{
-					Log.Warning("Failed to write dependency file {0}", DepFile);
+					Log.Warning(KnownLogEvents.Gauntlet_DeviceEvent, "Failed to write dependency file {File}", DepFile);
 				}
 			}
 
@@ -838,35 +887,46 @@ namespace Gauntlet
 			// kill any currently running instance:
 			KillRunningProcess(Build.AndroidPackageName);
 
-			bool SkipDeploy = Globals.Params.ParseParam("SkipDeploy");
+			string DeviceStorageQueryCommand = AndroidPlatform.GetStorageQueryCommand();
+			IProcessResult StorageQueryResult = RunAdbDeviceCommand(DeviceStorageQueryCommand);
+			string StorageLocation = StorageQueryResult.Output.Trim(); // "/mnt/sdcard";
+																	   // remote dir used to save things
+			string ExternalStoragePath = StorageLocation + "/UnrealGame/" + AppConfig.ProjectName;
+			string ExternalFilesPath = StorageLocation + "/Android/data/" + Build.AndroidPackageName + "/files/UnrealGame/" + AppConfig.ProjectName;
+			string DeviceBaseDir = Build.UsesExternalFilesDir ? ExternalFilesPath : ExternalStoragePath;
 
-			if (SkipDeploy == false)
+			// get the device's external file paths, always clear between runs
+			DeviceExternalStorageSavedPath = string.Format("{0}/{1}/Saved", ExternalStoragePath, AppConfig.ProjectName);
+			DeviceExternalFilesSavedPath = string.Format("{0}/{1}/Saved", ExternalFilesPath, AppConfig.ProjectName);
+			DeviceLogPath = string.Format("{0}/Logs/{1}.log", Build.UsesPublicLogs ? DeviceExternalFilesSavedPath : DeviceExternalStorageSavedPath, AppConfig.ProjectName);
+			DeviceArtifactPath = Build.UsesExternalFilesDir ? DeviceExternalFilesSavedPath : DeviceExternalStorageSavedPath;
+
+			// path for OBB files
+			string OBBRemoteDestination = string.Format("{0}/obb/{1}", StorageLocation, Build.AndroidPackageName);
+
+			Log.Info("DeviceBaseDir: " + DeviceBaseDir);
+			Log.Info("DeviceExternalStorageSavedPath: " + DeviceExternalStorageSavedPath);
+			Log.Info("DeviceExternalFilesSavedPath: " + DeviceExternalFilesSavedPath);
+			Log.Info("DeviceLogPath: " + DeviceLogPath);
+			Log.Info("DeviceArtifactPath: " + DeviceArtifactPath);
+
+			// clear all file store paths between installs:
+			RunAdbDeviceCommand(string.Format("shell rm -r {0}", DeviceExternalStorageSavedPath));
+			RunAdbDeviceCommand(string.Format("shell rm -r {0}", DeviceExternalFilesSavedPath));
+		
+			if (AppConfig.FullClean)
 			{
-				// Establish remote directory locations
-				string DeviceStorageQueryCommand = AndroidPlatform.GetStorageQueryCommand();
-				IProcessResult StorageQueryResult = RunAdbDeviceCommand(DeviceStorageQueryCommand);
-				string StorageLocation = StorageQueryResult.Output.Trim(); // "/mnt/sdcard";
+				Log.Info("Fully cleaning console before install...");
+				RunAdbDeviceCommand(string.Format("shell rm -r {0}/UnrealGame/*", StorageLocation));
+				RunAdbDeviceCommand(string.Format("shell rm -r {0}/Android/data/{1}/*", StorageLocation, Build.AndroidPackageName));
+				RunAdbDeviceCommand(string.Format("shell rm -r {0}/Android/obb/{1}/*", StorageLocation, Build.AndroidPackageName));
+				RunAdbDeviceCommand(string.Format("shell rm -r {0}/Download/*", StorageLocation));
+			}			
 
-				// remote dir used to save things
-				string RemoteDir = StorageLocation + "/UE4Game/" + AppConfig.ProjectName;
-
-				// if using a non-bulk test configuration, implies com.epicgames.ue4.GameActivity.bUseExternalFilesDir = true
-				// @todo: query this from the apk? 
-				if (AppConfig.Configuration == UnrealTargetConfiguration.Test && ((Build.Flags & BuildFlags.NotBulk) == BuildFlags.NotBulk))
-				{
-					RemoteDir = StorageLocation + "/Android/data/" + Build.AndroidPackageName + "/files/UE4Game/" + AppConfig.ProjectName;
-				}
-
-				string DependencyDir = RemoteDir + "/deps";
-
-				// device artifact path, always clear between runs
-				DeviceArtifactPath = string.Format("{0}/{1}/Saved", RemoteDir, AppConfig.ProjectName);
-				RunAdbDeviceCommand(string.Format("shell rm -r {0}", DeviceArtifactPath));
-
-				// path for OBB files
-				string OBBRemoteDestination = string.Format("{0}/obb/{1}", StorageLocation, Build.AndroidPackageName);
-
-				if (Globals.Params.ParseParam("cleandevice"))
+			if (!AppConfig.SkipInstall)
+			{
+				if (Globals.Params.ParseParam("cleandevice")
+					|| AppConfig.FullClean)
 				{
 					Log.Info("Cleaning previous builds due to presence of -cleandevice");
 
@@ -874,18 +934,17 @@ namespace Gauntlet
 					Log.Info("Uninstalling {0}", Build.AndroidPackageName);
 					RunAdbDeviceCommand(string.Format("uninstall {0}", Build.AndroidPackageName));
 
-					Log.Info("Removing {0}", RemoteDir);
-					RunAdbDeviceCommand(string.Format("shell rm -r {0}", RemoteDir));
+					// delete DeviceExternalStorageSavedPath, note: DeviceExternalFilesSavedPath is removed with package uninstall.
+					Log.Info("Removing {0}", DeviceExternalStorageSavedPath);
+					RunAdbDeviceCommand(string.Format("shell rm -r {0}", DeviceExternalStorageSavedPath));
 
 					Log.Info("Removing {0}", OBBRemoteDestination);
 					RunAdbDeviceCommand(string.Format("shell rm -r {0}", OBBRemoteDestination));
 				}
 
 				// remote dir on the device, create it if it doesn't exist
-				RunAdbDeviceCommand(string.Format("shell mkdir -p {0}/", RemoteDir));
-
-				IProcessResult AdbResult;
-				string AdbCommand;
+				RunAdbDeviceCommand(string.Format("shell mkdir -p {0}/", DeviceExternalStorageSavedPath));
+				RunAdbDeviceCommand(string.Format("shell mkdir -p {0}/", DeviceExternalFilesSavedPath));
 
 				// path to the APK to install.
 				string ApkPath = Build.SourceApkPath;
@@ -913,7 +972,39 @@ namespace Gauntlet
 
 				// first install the APK
 				CopyFileToDevice(Build.AndroidPackageName, ApkPath, "");
+			}
 
+			// Convert the files from the source to final destination names
+			Dictionary<string, string> FilesToInstall = new Dictionary<string, string>();
+
+			Console.WriteLine("trying to copy files over.");
+            if (AppConfig.FilesToCopy != null)
+            {
+                if (LocalDirectoryMappings.Count == 0)
+                {
+                    Console.WriteLine("Populating Directory");
+                    PopulateDirectoryMappings(DeviceArtifactPath);
+                }
+                Console.WriteLine("trying to copy files over.");
+                foreach (UnrealFileToCopy FileToCopy in AppConfig.FilesToCopy)
+                {
+                    string PathToCopyTo = Path.Combine(LocalDirectoryMappings[FileToCopy.TargetBaseDirectory], FileToCopy.TargetRelativeLocation);
+                    if (File.Exists(FileToCopy.SourceFileLocation))
+                    {
+                        FileInfo SrcInfo = new FileInfo(FileToCopy.SourceFileLocation);
+                        SrcInfo.IsReadOnly = false;
+                        FilesToInstall.Add(FileToCopy.SourceFileLocation, PathToCopyTo.Replace("\\", "/"));
+                    }
+
+                    else
+                    {
+                        Log.Warning(KnownLogEvents.Gauntlet_DeviceEvent, "File to copy {File} not found", FileToCopy);
+                    }
+                }
+            }
+
+			if (!AppConfig.SkipInstall)
+			{
 				// obb files need to be named based on APK version (grrr), so find that out. This should return something like
 				// versionCode=2 minSdk=21 targetSdk=21
 				string PackageInfo = RunAdbDeviceCommand(string.Format("shell dumpsys package {0} | grep versionCode", Build.AndroidPackageName)).Output;
@@ -924,49 +1015,19 @@ namespace Gauntlet
 				}
 				string PackageVersion = Match.Groups[1].ToString();
 
-				// Convert the files from the source to final destination names
-				Dictionary<string, string> FilesToInstall = new Dictionary<string, string>();
-
-                if (AppConfig.FilesToCopy != null)
-                {
-                    if (LocalDirectoryMappings.Count == 0)
-                    {
-                        Console.WriteLine("Populating Directory");
-                        PopulateDirectoryMappings(DeviceArtifactPath);
-                    }
-                    Console.WriteLine("trying to copy files over.");
-                    foreach (UnrealFileToCopy FileToCopy in AppConfig.FilesToCopy)
-                    {
-                        string PathToCopyTo = Path.Combine(LocalDirectoryMappings[FileToCopy.TargetBaseDirectory], FileToCopy.TargetRelativeLocation);
-                        if (File.Exists(FileToCopy.SourceFileLocation))
-                        {
-                            FileInfo SrcInfo = new FileInfo(FileToCopy.SourceFileLocation);
-                            SrcInfo.IsReadOnly = false;
-                            FilesToInstall.Add(FileToCopy.SourceFileLocation, PathToCopyTo.Replace("\\", "/"));
-                            Console.WriteLine("Copying {0} to {1}", FileToCopy.SourceFileLocation, PathToCopyTo);
-                        }
-
-                        else
-                        {
-                            Log.Warning("File to copy {0} not found", FileToCopy);
-                        }
-                    }
-                }
-
-                Build.FilesToInstall.Keys.ToList().ForEach(K =>
+				Build.FilesToInstall.Keys.ToList().ForEach(K =>
 				{
-
 					string SrcPath = K;
-					string DestPath = Build.FilesToInstall[K];
+					string SrcFile = Path.GetFileName(SrcPath);
 
+					string DestPath = Build.FilesToInstall[K];
 					string DestFile = Path.GetFileName(DestPath);
 
 					// If we installed a new APK we need to change the package version
-					Match OBBMatch = Regex.Match(DestFile, @"\.(\d+)\.com.*\.obb");
+					Match OBBMatch = Regex.Match(SrcFile, @"\.(\d+)\.com.*\.obb");
 					if (OBBMatch.Success)
 					{
-						string NewFileName = DestFile.Replace(OBBMatch.Groups[1].ToString(), PackageVersion);
-						DestPath = DestPath.Replace(DestFile, NewFileName);
+						DestPath = StorageLocation + "/obb/" + Build.AndroidPackageName + "/" + SrcFile.Replace(".Client.obb", ".obb").Replace(OBBMatch.Groups[1].ToString(), PackageVersion);
 					}
 
 					DestPath = Regex.Replace(DestPath, "%STORAGE%", StorageLocation, RegexOptions.IgnoreCase);
@@ -974,10 +1035,9 @@ namespace Gauntlet
 					FilesToInstall.Add(SrcPath, DestPath);
 				});
 
-
-
-                // get a list of files in the destination OBB directory
-                AdbResult = RunAdbDeviceCommand(string.Format("shell ls {0}", OBBRemoteDestination));
+				// get a list of files in the destination OBB directory
+				IProcessResult AdbResult;
+				AdbResult = RunAdbDeviceCommand(string.Format("shell ls {0}", OBBRemoteDestination));
 
 				// if != 0 then no folder exists
 				if (AdbResult.ExitCode == 0)
@@ -1006,36 +1066,59 @@ namespace Gauntlet
 					}
 				}
 
-				foreach (var KV in FilesToInstall)
-				{
-					string LocalFile = KV.Key;
-					string RemoteFile = KV.Value;
-
-					CopyFileToDevice(Build.AndroidPackageName, LocalFile, RemoteFile);
-				}
-
-				// create a tempfile, insert the command line, and push it over
-				string TmpFile = Path.GetTempFileName();
-
-				CommandLineFilePath = string.Format("{0}/UE4CommandLine.txt", RemoteDir);
-
-				// I've seen a weird thing where adb push truncates by a byte, so add some padding...
-				File.WriteAllText(TmpFile, AppConfig.CommandLine + "    ");
-				AdbCommand = string.Format("push {0} {1}", TmpFile, CommandLineFilePath);
-				RunAdbDeviceCommand(AdbCommand);
-
 				EnablePermissions(Build.AndroidPackageName);
-
-				File.Delete(TmpFile);
 			}
 			else
 			{
 				Log.Info("Skipping install of {0} (-skipdeploy)", Build.AndroidPackageName);
 			}
 
+			// create a tempfile, insert the command line, and push it over
+			string CommandLineTmpFile = Path.GetTempFileName();
+			CommandLineFilePath = string.Format("{0}/UECommandLine.txt", DeviceBaseDir);
+			// I've seen a weird thing where adb push truncates by a byte, so add some padding...
+			File.WriteAllText(CommandLineTmpFile, AppConfig.CommandLine + "    ");
+			FilesToInstall.Add(CommandLineTmpFile, CommandLineFilePath);
+
+			foreach (var KV in FilesToInstall)
+			{
+				string LocalFile = KV.Key;
+				string RemoteFile = KV.Value;
+
+				Console.WriteLine("Copying {0} to {1}", LocalFile, RemoteFile);
+				CopyFileToDevice(Build.AndroidPackageName, LocalFile, RemoteFile);
+			}
+
+			File.Delete(CommandLineTmpFile);
+
 			AndroidAppInstall AppInstall = new AndroidAppInstall(this, AppConfig.ProjectName, Build.AndroidPackageName, AppConfig.CommandLine);
 
 			return AppInstall;
+		}
+
+		public void FullClean()
+		{
+
+		}
+
+		public void CleanArtifacts()
+		{
+
+		}
+
+		public void InstallBuild(UnrealAppConfig AppConfiguration)
+		{
+
+		}
+
+		public IAppInstall CreateAppInstall(UnrealAppConfig AppConfig)
+		{
+			return null;
+		}
+
+		public void CopyAdditionalFiles(IEnumerable<UnrealFileToCopy> FilesToCopy)
+		{
+
 		}
 
 		public IAppInstance Run(IAppInstall App)
@@ -1119,7 +1202,7 @@ namespace Gauntlet
 		/// <returns></returns>
 		public static IProcessResult RunAdbGlobalCommand(string Args, bool Wait = true, bool bShouldLogCommand = false, bool bPauseErrorParsing = false)
 		{
-			CommandUtils.ERunOptions RunOptions = CommandUtils.ERunOptions.AppMustExist | CommandUtils.ERunOptions.NoWaitForExit;
+			CommandUtils.ERunOptions RunOptions = CommandUtils.ERunOptions.AppMustExist | CommandUtils.ERunOptions.NoWaitForExit | CommandUtils.ERunOptions.SpewIsVerbose;
 
 			if (Log.IsVeryVerbose)
 			{
@@ -1182,18 +1265,6 @@ namespace Gauntlet
 				Log.Warning("Platform directory mappings have not been populated for this platform! This should be done within InstallApplication()");
 			}
 			return LocalDirectoryMappings;
-		}
-
-		public bool IsOSOutOfDate()
-		{
-			//TODO: not yet implemented
-			return false;
-		}
-
-		public bool UpdateOS()
-		{
-			//TODO: not yet implemented
-			return true;
 		}
 	}
 
@@ -1282,6 +1353,10 @@ namespace Gauntlet
 					Log.Info("Using adb keys at {0}", KeyPath);
 
 					string LocalKeyPath = Path.Combine(Environment.GetEnvironmentVariable("USERPROFILE"), ".android");
+					if(!Directory.Exists(LocalKeyPath))
+					{
+						Directory.CreateDirectory(LocalKeyPath);
+					}
 
 					string RemoteKeyFile = Path.Combine(KeyPath, "adbkey");
 					string RemotePubKeyFile = Path.Combine(KeyPath, "adbkey.pub");
@@ -1350,6 +1425,17 @@ namespace Gauntlet
 				{
 					Reset();
 					KillAdbServer();
+					// Kill ADB server, just as a safety measure to ensure it closes
+					IEnumerable<Process> ADBProcesses = Process.GetProcesses().Where(p => p.ProcessName.Equals("adb"));
+					if (ADBProcesses.Count() > 0)
+					{
+						Log.Info("Terminating {0} ADB Process(es)", ADBProcesses.Count());
+						foreach (Process ADBProcess in ADBProcesses)
+						{
+							Log.Info("Killing ADB process {0}", ADBProcess.Id);
+							ADBProcess.Kill();
+						}
+					}
 				}
 			}
 		}

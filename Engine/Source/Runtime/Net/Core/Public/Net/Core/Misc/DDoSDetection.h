@@ -2,8 +2,11 @@
 
 #pragma once
 
-// Includes
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "Delegates/Delegate.h"
+#include "HAL/Platform.h"
 #include "HAL/PlatformTime.h"
 
 
@@ -19,7 +22,7 @@ DECLARE_DELEGATE_OneParam(FDDoSSeverityEscalation, FString /*SeverityCategory*/)
 /**
  * Struct containing the per-second packet counters
  */
-struct NETCORE_API FDDoSPacketCounters
+struct FDDoSPacketCounters
 {
 	/** Counter for non-NetConnection packets received, since the last per second quota period began */
 	int32 NonConnPacketCounter;
@@ -59,7 +62,7 @@ struct NETCORE_API FDDoSPacketCounters
 /**
  * Stores the DDoS detection state (either settings from the config file, or the active DDoS detection state)
  */
-struct NETCORE_API FDDoSState
+struct FDDoSState
 {
 	/** Whether or not to send analytics when escalating to this state */
 	bool bSendEscalateAnalytics;
@@ -123,7 +126,7 @@ struct NETCORE_API FDDoSState
 /**
  * DDoS detection state, with functions for applying the state to active DDoS detection
  */
-struct NETCORE_API FDDoSStateConfig : public FDDoSState
+struct FDDoSStateConfig : public FDDoSState
 {
 	/** The name of the DDoS severity level this config section represents */
 	FString SeverityCategory;
@@ -155,9 +158,9 @@ struct NETCORE_API FDDoSStateConfig : public FDDoSState
 	{
 		// Exclude escalation triggers from this
 		//Target.EscalateTimeQuotaMSPerFrame		= (EscalateTimeQuotaMSPerFrame == -1 ? -1 : EscalateTimeQuotaMSPerFrame * FrameAdjustment);
-		Target.PacketLimitPerFrame				= (PacketLimitPerFrame == -1 ? -1 : PacketLimitPerFrame * FrameAdjustment);
-		Target.PacketTimeLimitMSPerFrame		= (PacketTimeLimitMSPerFrame == -1 ? -1 : PacketTimeLimitMSPerFrame * FrameAdjustment);
-		Target.NetConnPacketTimeLimitMSPerFrame	= (NetConnPacketTimeLimitMSPerFrame == -1 ? -1 : NetConnPacketTimeLimitMSPerFrame * FrameAdjustment);
+		Target.PacketLimitPerFrame				= (PacketLimitPerFrame == -1 ? -1 : (int32)((float)PacketLimitPerFrame * FrameAdjustment));
+		Target.PacketTimeLimitMSPerFrame		= (PacketTimeLimitMSPerFrame == -1 ? -1 : (int32)((float)PacketTimeLimitMSPerFrame * FrameAdjustment));
+		Target.NetConnPacketTimeLimitMSPerFrame	= (NetConnPacketTimeLimitMSPerFrame == -1 ? -1 : (int32)((float)NetConnPacketTimeLimitMSPerFrame * FrameAdjustment));
 	}
 };
 
@@ -166,13 +169,13 @@ struct NETCORE_API FDDoSStateConfig : public FDDoSState
  * The main DDoS detection tracking class, for counting packets and applying restrictions.
  * Implemented separate to the NetDriver, to allow wider use e.g. potentially at socket level, if useful.
  */
-class NETCORE_API FDDoSDetection : protected FDDoSPacketCounters, protected FDDoSState
+class FDDoSDetection : protected FDDoSPacketCounters, protected FDDoSState
 {
 public:
 	/**
 	 * Default constructor
 	 */
-	FDDoSDetection();
+	NETCORE_API FDDoSDetection();
 
 
 	/**
@@ -180,30 +183,35 @@ public:
 	 *
 	 * @param MaxTickRate	The maximum tick rate of the server
 	 */
-	void Init(int32 MaxTickRate);
+	NETCORE_API void Init(int32 MaxTickRate);
 
 	/**
 	 * Initializes the settings from the .ini file - must support reloading of settings on-the-fly
 	 */
-	void InitConfig();
+	NETCORE_API void InitConfig();
+
+	/**
+	* Initialize the expected tick rate.
+	*/
+	NETCORE_API void SetMaxTickRate(int32 MaxTickRate);
 
 	/**
 	 * Updates the current DDoS detection severity state
 	 *
 	 * @param bEscalate		Whether or not we are escalating or de-escalating the severity state
 	 */
-	void UpdateSeverity(bool bEscalate);
+	NETCORE_API void UpdateSeverity(bool bEscalate);
 
 
 	/**
 	 * Triggered before packet receive begins, during the current frame
 	 */
-	void PreFrameReceive(float DeltaTime);
+	NETCORE_API void PreFrameReceive(float DeltaTime);
 
 	/**
 	 * Triggered after packet receive ends, during the current frame
 	 */
-	void PostFrameReceive();
+	NETCORE_API void PostFrameReceive();
 
 
 	/**
@@ -266,7 +274,7 @@ protected:
 	 *
 	 * @return	Whether or not non-NetConnection packet limits have been reached
 	 */
-	bool CheckNonConnQuotasAndLimits();
+	NETCORE_API bool CheckNonConnQuotasAndLimits();
 
 	/**
 	 * Performs periodic checks on NetConnection packet limits

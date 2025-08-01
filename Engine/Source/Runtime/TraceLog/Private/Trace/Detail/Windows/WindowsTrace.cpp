@@ -2,11 +2,10 @@
 
 #include "Trace/Config.h"
 
-#if UE_TRACE_ENABLED
+#if UE_TRACE_ENABLED && PLATFORM_WINDOWS
 
 #include "Windows/AllowWindowsPlatformTypes.h"
-#	include "Windows/WindowsHWrapper.h"
-#	define _WINSOCK_DEPRECATED_NO_WARNINGS  
+#	define _WINSOCK_DEPRECATED_NO_WARNINGS
 #	include <winsock2.h>
 #	include <ws2tcpip.h>
 #	pragma comment(lib, "ws2_32.lib")
@@ -15,11 +14,25 @@
 #pragma warning(push)
 #pragma warning(disable : 6031) // WSAStartup() return ignore  - we're error tolerant
 
+namespace UE {
 namespace Trace {
 namespace Private {
 
+struct FSetLastErrorScope
+{
+	FSetLastErrorScope(DWORD InError)
+		: Error(InError){}
+	~FSetLastErrorScope()
+	{
+		SetLastError(Error);
+	}
+
+private:
+	DWORD Error;
+};
+
 ////////////////////////////////////////////////////////////////////////////////
-UPTRINT ThreadCreate(const ANSICHAR* Name, void (*Entry)())
+UPTRINT ThreadCreate(const ANSICHAR*, void (*Entry)())
 {
 	DWORD (WINAPI *WinApiThunk)(void*) = [] (void* Param) -> DWORD
 	{
@@ -127,12 +140,14 @@ UPTRINT TcpSocketConnect(const ANSICHAR* Host, uint16 Port)
 	int Result = connect(Socket, Info->ai_addr, int(Info->ai_addrlen));
 	if (Result == SOCKET_ERROR)
 	{
+		FSetLastErrorScope _(GetLastError());
 		closesocket(Socket);
 		return 0;
 	}
 
 	if (!TcpSocketSetNonBlocking(Socket, 0))
 	{
+		FSetLastErrorScope _(GetLastError());
 		closesocket(Socket);
 		return 0;
 	}
@@ -159,6 +174,7 @@ UPTRINT TcpSocketListen(uint16 Port)
 	int Result = bind(Socket, (SOCKADDR*)&SockAddr, sizeof(SockAddr));
 	if (Result == INVALID_SOCKET)
 	{
+		FSetLastErrorScope _(GetLastError());
 		closesocket(Socket);
 		return 0;
 	}
@@ -166,12 +182,14 @@ UPTRINT TcpSocketListen(uint16 Port)
 	Result = listen(Socket, 1);
 	if (Result == INVALID_SOCKET)
 	{
+		FSetLastErrorScope _(GetLastError());
 		closesocket(Socket);
 		return 0;
 	}
 
 	if (!TcpSocketSetNonBlocking(Socket, 1))
 	{
+		FSetLastErrorScope _(GetLastError());
 		closesocket(Socket);
 		return 0;
 	}
@@ -192,6 +210,7 @@ int32 TcpSocketAccept(UPTRINT Socket, UPTRINT& Out)
 
 	if (!TcpSocketSetNonBlocking(Inner, 0))
 	{
+		FSetLastErrorScope _(GetLastError());
 		closesocket(Inner);
 		return 0;
 	}
@@ -264,8 +283,22 @@ UPTRINT FileOpen(const ANSICHAR* Path)
 	return UPTRINT(Out) + 1;
 }
 
+	
+////////////////////////////////////////////////////////////////////////////////
+int32 GetLastErrorCode()
+{
+	return ::GetLastError();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+bool GetErrorMessage(char* OutBuffer, uint32 BufferSize, int32 ErrorCode)
+{
+	return FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM, NULL, ErrorCode, 0, OutBuffer, BufferSize, NULL) != 0;
+}
+	
 } // namespace Private
 } // namespace Trace
+} // namespace UE
 
 #pragma warning(pop)
 

@@ -7,10 +7,76 @@ using System.Linq;
 using System.Text;
 using System.Reflection;
 using UnrealBuildTool;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using UnrealBuildBase;
+using Microsoft.Extensions.Logging;
+
+using static AutomationTool.CommandUtils;
 
 namespace AutomationTool
 {
+	public interface ITurnkeyContext
+	{
+		string RetrieveFileSource(string Name, string InType = "Misc", string InPlatform = null, string SubType = null);
+		string RetrieveFileSource(object HintObject);
+		string GetVariable(string VariableName);
+		int RunExternalCommand(string Command, string Params, bool bRequiresPrivilegeElevation, bool bUnattended, bool bCreateWindow);
+		void Log(string Message);
+		void ReportError(string Message);
+		void PauseForUser(string Message);
+		int ReadInputInt(string Prompt, List<string> Options, bool bIsCancellable, int DefaultValue = -1);
+	}
+
+	//public interface InputOutput
+	//{
+	//	string RetrieveByTags(string[] RequiredTags, string[] PreferredTags, Dictionary<string, string> ExtraVariables = null);
+	//}
+
+	public class DeviceInfo
+	{
+		public enum AutoSoftwareUpdateMode
+		{
+			Unknown,
+			Disabled,
+			Enabled
+		}
+
+		public DeviceInfo(UnrealTargetPlatform Platform)
+		{
+			this.Platform = Platform;
+		}
+
+		public DeviceInfo(UnrealTargetPlatform Platform, string Name, string Id, string SoftwareVersion, string Type, bool bIsDefault, bool bCanConnect, Dictionary<string, string> PlatformValues = null, AutoSoftwareUpdateMode AutoSoftwareUpdates = AutoSoftwareUpdateMode.Unknown)
+		{
+			this.Platform = Platform;
+			this.Name = Name;
+			this.Id = Id;
+			this.SoftwareVersion = SoftwareVersion;
+			this.Type = Type;
+			this.bIsDefault = bIsDefault;
+			this.bCanConnect = bCanConnect;
+			this.AutoSoftwareUpdates = AutoSoftwareUpdates;
+			if (PlatformValues != null)
+			{
+				this.PlatformValues = new Dictionary<string, string>(PlatformValues);
+			}
+		}
+
+		public UnrealTargetPlatform Platform;
+		public string Name;
+		public string Id;
+		public string SoftwareVersion;
+		public string Type;
+		public bool bIsDefault = false;
+		// is the device able to be connected to (this is more about able to flash SDK or run, not about matching SDK version)
+		// if false, any of the above fields are suspect, especially SoftwareVersion
+		public bool bCanConnect = true;
+		public AutoSoftwareUpdateMode AutoSoftwareUpdates = AutoSoftwareUpdateMode.Unknown;
+
+		// case insensitive platform value dictionary. turnkey doesn't use this, but the platform can look up the device during deployment, etc to get this out
+		public Dictionary<string, string> PlatformValues = new Dictionary<string, string>(StringComparer.InvariantCultureIgnoreCase);
+	}
+
 	/// <summary>
 	/// Holds information for targeting specific platform (platform type + cook flavor)
 	/// </summary>
@@ -27,7 +93,7 @@ namespace AutomationTool
 		public TargetPlatformDescriptor(UnrealTargetPlatform InType, string InCookFlavor)
 		{
 			Type = InType;
-			CookFlavor = InCookFlavor;
+			CookFlavor = InCookFlavor ?? "";
 		}
 
 		public override string ToString()
@@ -42,12 +108,12 @@ namespace AutomationTool
 	public class Platform : CommandUtils
 	{
 		private static Dictionary<TargetPlatformDescriptor, Platform> AllPlatforms = new Dictionary<TargetPlatformDescriptor, Platform>();
-		internal static void InitializePlatforms(Assembly[] AssembliesWithPlatforms = null)
+		internal static void InitializePlatforms(HashSet<Assembly> AssembliesWithPlatforms)
 		{
-			LogVerbose("Creating platforms.");
+			Logger.LogDebug("Creating platforms.");
 
 			// Create all available platforms.
-			foreach (var ScriptAssembly in (AssembliesWithPlatforms != null ? AssembliesWithPlatforms : AppDomain.CurrentDomain.GetAssemblies()))
+			foreach (var ScriptAssembly in AssembliesWithPlatforms)
 			{
 				CreatePlatformsFromAssembly(ScriptAssembly);
 			}
@@ -58,7 +124,7 @@ namespace AutomationTool
 				Platform ExistingInstance;
 				if (AllPlatforms.TryGetValue(TargetDesc, out ExistingInstance) == false)
 				{
-					LogVerbose("Creating placeholder platform for target: {0}", TargetDesc.Type);
+					Logger.LogDebug("Creating placeholder platform for target: {TargetType}", TargetDesc.Type);
 					AllPlatforms.Add(TargetDesc, new Platform(TargetDesc.Type));
 				}
 			}
@@ -66,7 +132,7 @@ namespace AutomationTool
 
 		private static void CreatePlatformsFromAssembly(Assembly ScriptAssembly)
 		{
-			LogVerbose("Looking for platforms in {0}", ScriptAssembly.Location);
+			Logger.LogDebug("Looking for platforms in {Location}", ScriptAssembly.Location);
 			Type[] AllTypes = null;
 			try
 			{
@@ -74,31 +140,31 @@ namespace AutomationTool
 			}
 			catch (Exception Ex)
 			{
-				LogError("Failed to get assembly types for {0}", ScriptAssembly.Location);
+				Logger.LogError("Failed to get assembly types for {Location}", ScriptAssembly.Location);
 				if (Ex is ReflectionTypeLoadException)
 				{
 					var TypeLoadException = (ReflectionTypeLoadException)Ex;
 					if (!IsNullOrEmpty(TypeLoadException.LoaderExceptions))
 					{
-						LogError("Loader Exceptions:");
+						Logger.LogError("Loader Exceptions:");
 						foreach (var LoaderException in TypeLoadException.LoaderExceptions)
 						{
-							LogError(LogUtils.FormatException(LoaderException));
+							Logger.LogError(LoaderException, "{Text}", LogUtils.FormatException(LoaderException));
 						}
 					}
 					else
 					{
-						LogError("No Loader Exceptions available.");
+						Logger.LogError("No Loader Exceptions available.");
 					}
 				}
 				// Re-throw, this is still a critical error!
-				throw Ex;
+				throw;
 			}
 			foreach (var PotentialPlatformType in AllTypes)
 			{
 				if (PotentialPlatformType != typeof(Platform) && typeof(Platform).IsAssignableFrom(PotentialPlatformType) && !PotentialPlatformType.IsAbstract)
 				{
-					LogVerbose("Creating platform {0} from {1}.", PotentialPlatformType.Name, ScriptAssembly.Location);
+					Logger.LogDebug("Creating platform {Platform} from {Location}.", PotentialPlatformType.Name, ScriptAssembly.Location);
 					var PlatformInstance = Activator.CreateInstance(PotentialPlatformType) as Platform;
 					var PlatformDesc = PlatformInstance.GetTargetPlatformDescriptor();
 
@@ -111,7 +177,7 @@ namespace AutomationTool
 					{
 						if (ExistingInstance.GetType() != PlatformInstance.GetType())
 						{
-							LogWarning("Platform {0} already exists", PotentialPlatformType.Name);
+							Logger.LogWarning("Platform {Platform} already exists", PotentialPlatformType.Name);
 						}
 					}
 				}
@@ -125,6 +191,8 @@ namespace AutomationTool
 		{
 			TargetPlatformType = PlatformType;
 			TargetIniPlatformType = PlatformType;
+
+			Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 		}
 
 		/// <summary>
@@ -140,6 +208,124 @@ namespace AutomationTool
 		{
 			return new TargetPlatformDescriptor(TargetPlatformType, "");
 		}
+
+		/// <summary>
+		/// Allows a platform to add runtime dependencies to UAT that may not be referenced in other ways, but are needed for staging UAT
+		/// </summary>
+		/// <param name="Dependencies"></param>
+		public virtual void GetPlatformUATDependencies(DirectoryReference ProjectDirectory, List<FileReference> Dependencies)
+		{
+
+		}
+
+
+		#region Turnkey
+
+		public virtual DeviceInfo[] GetDevices()
+		{
+			return null;
+		}
+
+		public virtual DeviceInfo GetDeviceByName( string DeviceName )
+		{
+			DeviceInfo[] Devices = GetDevices();
+			if (Devices == null)
+			{
+				return null;
+			}
+			// look by Id first
+			DeviceInfo Device = Array.Find(Devices, x => string.Compare(x.Id, DeviceName, true) == 0);
+			// if that fails, use Name
+			if (Device == null)
+			{
+				Device = Array.Find(Devices, x => string.Compare(x.Name, DeviceName, true) == 0);
+			}
+			return Device;
+
+		}
+
+		public virtual bool InstallSDK(BuildCommand BuildCommand, ITurnkeyContext TurnkeyContext, DeviceInfo Device, bool bUnattended, bool bSdkAlreadyInstalled)
+		{
+			string Command, Params;
+
+			bool bRequiresPrivilegeElevation = false;
+			bool bCreateWindow = false;
+			if (Device != null && GetDeviceUpdateSoftwareCommand(out Command, out Params, ref bRequiresPrivilegeElevation, ref bCreateWindow, TurnkeyContext, Device))
+			{
+				int ExitCode = TurnkeyContext.RunExternalCommand(Command, Params, bRequiresPrivilegeElevation, bUnattended, bCreateWindow);
+				return OnSDKInstallComplete(ExitCode, TurnkeyContext, Device);
+			}
+			else if (Device == null && GetSDKInstallCommand(out Command, out Params, ref bRequiresPrivilegeElevation, ref bCreateWindow, TurnkeyContext, bSdkAlreadyInstalled))
+			{
+				int ExitCode = TurnkeyContext.RunExternalCommand(Command, Params, bRequiresPrivilegeElevation, bUnattended, bCreateWindow);
+				return OnSDKInstallComplete(ExitCode, TurnkeyContext, null);
+			}
+
+			return false;
+		}
+
+		/// <summary>
+		/// Return a list of versions that will be used to create "fake" FileSource objects which are used
+		/// for install Sdks where no file downloads are needed
+		/// </summary>
+		/// <returns></returns>
+		public virtual string[] GetCodeSpecifiedSdkVersions()
+		{
+			return new string[] { };
+		}
+
+		public virtual bool GetSDKInstallCommand(out string Command, out string Params, ref bool bRequiresPrivilegeElevation, ref bool bCreateWindow, ITurnkeyContext TurnkeyContext)
+		{
+			Command = null;
+			Params = null;
+			return false;
+		}
+
+		public virtual bool GetSDKInstallCommand(out string Command, out string Params, ref bool bRequiresPrivilegeElevation, ref bool bCreateWindow, ITurnkeyContext TurnkeyContext, bool bSdkAlreadyInstalled)
+		{
+			return GetSDKInstallCommand(out Command, out Params, ref bRequiresPrivilegeElevation, ref bCreateWindow, TurnkeyContext);
+		}
+
+		public virtual bool GetDeviceUpdateSoftwareCommand(out string Command, out string Params, ref bool bRequiresPrivilegeElevation, ref bool bCreateWindow, ITurnkeyContext TurnkeyContext, DeviceInfo Device = null)
+		{
+			Command = null;
+			Params = null;
+			return false;
+		}
+
+		/// <summary>
+		/// Let's the platform handle the result of 
+		/// </summary>
+		/// <param name="ExitCode"></param>
+		/// <param name="Device"></param>
+		/// <returns>True if the installation was a success (defaults to ExitCode == 0)</returns>
+		public virtual bool OnSDKInstallComplete(int ExitCode, ITurnkeyContext TurnkeyContext, DeviceInfo Device)
+		{
+			return ExitCode == 0;
+		}
+
+		public virtual string GetSDKCreationHelp()
+		{
+			return null;
+		}
+
+		public virtual bool UpdateHostPrerequisites(BuildCommand Command, ITurnkeyContext TurnkeyContext, bool bVerifyOnly)
+		{
+			return true;
+		}
+
+		public virtual bool UpdateDevicePrerequisites(DeviceInfo Device, BuildCommand Command, ITurnkeyContext TurnkeyContext, bool bVerifyOnly)
+		{
+			return true;
+		}
+
+		public virtual bool SetDeviceAutoSoftwareUpdateMode(DeviceInfo Device, bool bEnableAutoSoftwareUpdates)
+		{
+			Logger.LogWarning("{PlatformType} does not implement SetDeviceAutoSoftwareUpdateMode", PlatformType);
+			return false;
+		}
+
+		#endregion
 
 		/// <summary>
 		/// Package files for the current platform.
@@ -178,7 +364,7 @@ namespace AutomationTool
 		public virtual void GetConnectedDevices(ProjectParams Params, out List<string> Devices)
 		{
 			Devices = null;
-			LogWarning("{0} does not implement GetConnectedDevices", PlatformType);
+			Logger.LogWarning("{PlatformType} does not implement GetConnectedDevices", PlatformType);
 		}
 
 		/// <summary>
@@ -199,7 +385,20 @@ namespace AutomationTool
 		/// <param name="SC"></param>
 		public virtual void Deploy(ProjectParams Params, DeploymentContext SC)
 		{
-			LogWarning("{0} does not implement Deploy...", PlatformType);
+			Logger.LogWarning("{PlatformType} does not implement Deploy...", PlatformType);
+		}
+
+		/// <summary>
+		/// Run the client application on the platform
+		/// </summary>
+		/// <param name="ClientRunFlags"></param>
+		/// <param name="ClientApp"></param>
+		/// <param name="ClientCmdLine"></param>
+		/// <param name="Params"></param>
+		/// <param name="SC"></param>
+		public virtual IProcessResult RunClient(ERunOptions ClientRunFlags, string ClientApp, string ClientCmdLine, ProjectParams Params, DeploymentContext SC)
+		{
+			return RunClient(ClientRunFlags, ClientApp, ClientCmdLine, Params );
 		}
 
 		/// <summary>
@@ -264,7 +463,7 @@ namespace AutomationTool
 						}
 						else
 						{
-							ExecutableNames.Add(FileReference.Combine(SC.RuntimeRootDir, BuildProductFile.MakeRelativeTo(RootDirectory)));
+							ExecutableNames.Add(FileReference.Combine(SC.RuntimeRootDir, BuildProductFile.MakeRelativeTo(Unreal.RootDirectory)));
 						}
 					}
 				}
@@ -282,8 +481,15 @@ namespace AutomationTool
 		}
 
 		/// <summary>
+		/// Get additional platform specific files to stage when staging DLC
+		/// </summary>
+		/// <param name="SC">Deployment Context</param>
+		public virtual void GetFilesToStageForDLC(ProjectParams Params, DeploymentContext SC)
+		{
+		}
+
+		/// <summary>
 		/// Called after CopyUsingStagingManifest.  Does anything platform specific that requires a final list of staged files.
-		/// e.g.  PlayGo emulation control file generation for PS4.
 		/// </summary>
 		/// <param name="Params"></param>
 		/// <param name="SC"></param>
@@ -308,7 +514,11 @@ namespace AutomationTool
 		/// <returns>Cook platform string.</returns>
 		public virtual string GetCookPlatform(bool bDedicatedServer, bool bIsClientOnly)
 		{
-			throw new AutomationException("{0} does not yet implement GetCookPlatform.", PlatformType);
+			// this should get all cases, but a platform can override if needed
+
+			string Suffix = bIsClientOnly ? "Client" : bDedicatedServer ? "Server" : "";
+			string PlatformName = GetGenericPlatformName(TargetPlatformType);
+			return $"{PlatformName}{Suffix}";
 		}
 
 		/// <summary>
@@ -361,11 +571,23 @@ namespace AutomationTool
 		/// <summary>
 		/// return true if we need to change the case of filenames outside of pak files
 		/// </summary>
-		/// <returns></returns>
-		public virtual bool DeployLowerCaseFilenames()
+		/// <param name="FileType">The staged file type to check (UFS vs SsytemNonUFS, etc)</param>
+		/// <returns>true if files should be lower-cased during staging, for the given filetype</returns>
+		public virtual bool DeployLowerCaseFilenames(StagedFileType FileType)
 		{
 			return false;
 		}
+
+		/// <summary>
+		/// return true if we need to change the case of a particular file
+		/// </summary>
+		/// <param name="FileType">The staged file type to check (UFS vs SsytemNonUFS, etc)</param>
+		/// <returns>true if files should be lower-cased during staging, for the given filetype</returns>
+		public virtual bool DeployLowerCaseFile(FileReference File, StagedFileType FileType)
+		{
+			return DeployLowerCaseFilenames(FileType);
+		}
+
 
 		/// <summary>
 		/// Converts local path to target platform path.
@@ -383,7 +605,7 @@ namespace AutomationTool
 		/// </summary>
 		/// <param name="Agenda">Agenda to update</param>
 		/// <param name="ExtraBuildProducts">Any additional files that will be created</param>
-		public virtual void MakeAgenda(UE4Build.BuildAgenda Agenda, List<string> ExtraBuildProducts)
+		public virtual void MakeAgenda(UnrealBuild.BuildAgenda Agenda, List<string> ExtraBuildProducts)
 		{
 		}
 
@@ -447,11 +669,28 @@ namespace AutomationTool
 		}
 
 		/// <summary>
+		/// Modify or override the list of file host addresses for this platform.
+		/// </summary>
+		public virtual void ModifyFileHostAddresses(List<string> HostAddresses)
+		{
+		}
+
+		/// <summary>
 		/// True if this platform can write to the abslog path that's on the host desktop.
 		/// </summary>
 		public virtual bool UseAbsLog
 		{
 			get { return BuildHostPlatform.Current.Platform == PlatformType; }
+		}
+
+		/// <summary>
+		/// return true if we need to call Remap of a specific file type
+		/// </summary>
+		/// <param name="FileType">The staged file type to check (UFS vs SsytemNonUFS, etc)</param>
+		/// <returns>true if files should be remaped, for the given filetype</returns>
+		public virtual bool RemapFileType(StagedFileType FileType)
+		{
+			return (FileType == StagedFileType.UFS || FileType == StagedFileType.NonUFS);
 		}
 
 		/// <summary>
@@ -465,7 +704,6 @@ namespace AutomationTool
 		/// <summary>
 		/// Tri-state - The intent is to override command line parameters for pak if needed per platform.
 		/// </summary>
-		///
 		public enum PakType { Always, Never, DontCare };
 
 		public virtual PakType RequiresPak(ProjectParams Params)
@@ -498,6 +736,14 @@ namespace AutomationTool
 		}
 
 		/// <summary>
+		/// Returns the ICU data version we use for this platform
+		/// </summary>
+		public virtual string ICUDataVersion
+		{
+			get { return "icudt64l"; }
+		}
+
+		/// <summary>
 		/// Returns true if the platform wants patches to generate a small .pak file containing the difference
 		/// of current data against a shipped pak file.
 		/// </summary>
@@ -510,9 +756,9 @@ namespace AutomationTool
 		/// <summary>
 		///  Returns whether the platform requires a package to deploy to a device
 		/// </summary>
-		public virtual bool RequiresPackageToDeploy
+		public virtual bool RequiresPackageToDeploy(ProjectParams Params)
 		{
-			get { return false; }
+			return false;
 		}
 
 		/// <summary>
@@ -525,8 +771,9 @@ namespace AutomationTool
 
 		public virtual HashSet<StagedFileReference> GetFilesForCRCCheck()
 		{
-			string CmdLine = "UE4CommandLine.txt";
-			if (DeployLowerCaseFilenames())
+			string CmdLine = "UECommandLine.txt";
+			// using SystemNonUFS because that is how it's staged in CreateStagingManifest
+			if (DeployLowerCaseFilenames(StagedFileType.SystemNonUFS))
 			{
 				CmdLine = CmdLine.ToLowerInvariant();
 			}
@@ -537,19 +784,27 @@ namespace AutomationTool
 		{
 			if (SourceFile == TargetFile)
 			{
-				CommandUtils.LogWarning("StripSymbols() has not been implemented for {0}", PlatformType.ToString());
+				Logger.LogWarning("StripSymbols() has not been implemented for {Arg0}", PlatformType.ToString());
 			}
 			else
 			{
-				CommandUtils.LogWarning("StripSymbols() has not been implemented for {0}; copying files", PlatformType.ToString());
+				Logger.LogWarning("StripSymbols() has not been implemented for {Arg0}; copying files", PlatformType.ToString());
 				File.Copy(SourceFile.FullName, TargetFile.FullName, true);
 			}
 		}
 
-		public virtual bool PublishSymbols(DirectoryReference SymbolStoreDirectory, List<FileReference> Files, string Product, string BuildVersion = null)
+		public virtual bool PublishSymbols(DirectoryReference SymbolStoreDirectory, List<FileReference> Files,
+			bool bIndexSources, List<FileReference> SourceFiles,
+			string Product, string Branch, int Change, string BuildVersion = null)
 		{
-			CommandUtils.LogWarning("PublishSymbols() has not been implemented for {0}", PlatformType.ToString());
+			Logger.LogWarning("PublishSymbols() has not been implemented for {Arg0}", PlatformType.ToString());
 			return false;
+		}
+
+		public virtual int GetExecutableSize(DirectoryReference BinariesDirectory, string ClientName, HashSet<FileReference> BuildProducts)
+		{
+			Logger.LogWarning("GetExecutableSize() has not been implemented for {Arg0}", PlatformType.ToString());
+			return -1;
 		}
 
 		/// <summary>
@@ -572,6 +827,16 @@ namespace AutomationTool
 		}
 
 		/// <summary>
+		/// When true, callers of PublishSymbols() must provide an explicit list of source files to create the index from.
+		/// Some platforms discover the source files via other means, so it is possible to turn this step of the process
+		/// off, since it can be slow.
+		/// </summary>
+		public virtual bool SymbolServerSourceIndexingRequiresListOfSourceFiles
+		{
+			get { return true; }
+		}
+
+		/// <summary>
 		/// If true, indicates the platform's symbol server directory must be locked for
 		/// exclusive access before any operation is performed on it. Platforms may override
 		/// this to disable if their tools support concurrent access to the symbol server directory.
@@ -581,9 +846,17 @@ namespace AutomationTool
 			get { return true; }
 		}
 
-		public virtual void PreBuildAgenda(UE4Build Build, UE4Build.BuildAgenda Agenda, ProjectParams Params)
+		public virtual void PreBuildAgenda(UnrealBuild Build, UnrealBuild.BuildAgenda Agenda, ProjectParams Params)
 		{
 
+		}
+
+		/// <summary>
+		/// Allows a platform to use the crash reporter from a different (built-in) platform
+		/// </summary>
+		public virtual UnrealTargetPlatform? CrashReportPlatform
+		{
+			get { return null; }
 		}
 
 		/// <summary>
@@ -596,7 +869,7 @@ namespace AutomationTool
 		}
 
 		/// <summary>
-		/// Determines whether we should stage a UE4CommandLine.txt for this platform
+		/// Determines whether we should stage a UECommandLine.txt for this platform
 		/// </summary>
 		public virtual bool ShouldStageCommandLine(ProjectParams Params, DeploymentContext SC)
 		{
@@ -604,7 +877,7 @@ namespace AutomationTool
 		}
 
 		/// <summary>
-		/// Only relevant for the mac and PC at the moment. Example calling the Mac platform with PS4 as an arg will return false. Can't compile or cook for the PS4 on the mac.
+		/// Can host compile and cook for the platform
 		/// </summary>
 		public virtual bool CanHostPlatform(UnrealTargetPlatform Platform)
 		{
@@ -642,6 +915,16 @@ namespace AutomationTool
 			return DirectoryReference.Combine(RuntimeRoot, RelativeProjectRootForStage.Name);
 		}
 
+		public virtual void PrepareForDebugging(string SourcePackage, string ProjectFilePath, string ClientPlatform)
+		{
+			Logger.LogError("Not implemented for the {Platform} platform.", ClientPlatform);
+		}
+
+		public virtual void SetSecondaryRemoteMac(string ProjectFilePath, string ClientPlatform)
+		{
+			Logger.LogError("Not implemented for this platform.");
+		}
+
 		// let the platform set the exe extension if it chooses (otherwise, use
 		// the switch statement in GetExeExtension below)
 		protected virtual string GetPlatformExeExtension()
@@ -658,19 +941,15 @@ namespace AutomationTool
 				return PlatformExeExtension;
 			}
 
-			if (Target == UnrealTargetPlatform.Win32 || Target == UnrealTargetPlatform.Win64 || Target == UnrealTargetPlatform.XboxOne|| Target == UnrealTargetPlatform.HoloLens)
+			if (Target == UnrealTargetPlatform.Win64)
 			{
 				return ".exe";
-			}
-			if (Target == UnrealTargetPlatform.PS4)
-			{
-				return ".self";
 			}
 			if (Target == UnrealTargetPlatform.IOS)
 			{
 				return ".stub";
 			}
-			if (Target == UnrealTargetPlatform.Linux || Target == UnrealTargetPlatform.LinuxAArch64)
+			if (Target == UnrealTargetPlatform.Linux || Target == UnrealTargetPlatform.LinuxArm64)
 			{
 				return "";
 			}

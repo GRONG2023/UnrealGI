@@ -2,14 +2,20 @@
 
 #pragma once
 
-#include "CoreTypes.h"
 #include "Containers/Array.h"
-#include "Templates/SharedPointer.h"
+#include "Containers/SortedMap.h"
+#include "CoreTypes.h"
 #include "Delegates/Delegate.h"
 #include "Internationalization/Text.h"
+#include "Logging/LogVerbosity.h"
 #include "Logging/TokenizedMessage.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
+#include "HAL/LowLevelMemTracker.h"
 
 class IMessageLog;
+
+LLM_DECLARE_TAG_API(EngineMisc_MessageLog, CORE_API);
 
 class FMessageLog
 {
@@ -25,6 +31,9 @@ public:
 	 * When this object goes out of scope, its buffered messages will be flushed.
 	 */
 	CORE_API ~FMessageLog();
+
+	/** Send the currently buffered messages to the log & clear the buffer */
+	CORE_API void Flush();
 
 	/**
 	 * Add a message to the log.
@@ -47,7 +56,8 @@ public:
 	 * @return the message for chaining calls.
 	 */
 	CORE_API TSharedRef<FTokenizedMessage> Message( EMessageSeverity::Type InSeverity, const FText& InMessage = FText() );
-	CORE_API TSharedRef<FTokenizedMessage> CriticalError( const FText& InMessage = FText() );
+	UE_DEPRECATED(5.1, "CriticalError was removed because it can't trigger an assert at the callsite. Use 'checkf' instead.")
+	CORE_API TSharedRef<FTokenizedMessage> CriticalError(const FText& InMessage = FText());
 	CORE_API TSharedRef<FTokenizedMessage> Error( const FText& InMessage = FText() );
 	CORE_API TSharedRef<FTokenizedMessage> PerformanceWarning( const FText& InMessage = FText() );
 	CORE_API TSharedRef<FTokenizedMessage> Warning( const FText& InMessage = FText() );
@@ -87,6 +97,13 @@ public:
 	 */
 	CORE_API void NewPage( const FText& InLabel );
 
+	/**
+	* Sets the current page to the one specified by the label.
+	* This call will cause a flush so that the logs state is properly reflected.
+	* @param	InLabel		The label for the page.
+	*/
+	CORE_API void SetCurrentPage( const FText& InLabel );
+
 	/** Should we mirror message log messages from this instance to the output log during flush? */
 	CORE_API FMessageLog& SuppressLoggingToOutputLog(bool bShouldSuppress = true);
 
@@ -95,14 +112,14 @@ public:
 	 * This allows systems that implement IMessageLog to receive messages.
 	 */
 	DECLARE_DELEGATE_RetVal_OneParam( TSharedRef<class IMessageLog>, FGetLog, const FName& );
-	CORE_API static FGetLog& OnGetLog() { return GetLog; }
+	static FGetLog& OnGetLog() { return GetLog; }
 
 	/**
 	 * Delegate used when message selection changes.
 	 * This is used to select object in the scene according to objects referenced in message tokens.
 	 */
 	DECLARE_DELEGATE_OneParam( FMessageSelectionChanged, TArray< TSharedRef<FTokenizedMessage> >& );
-	CORE_API static FMessageSelectionChanged& OnMessageSelectionChanged() { return MessageSelectionChanged; }
+	static FMessageSelectionChanged& OnMessageSelectionChanged() { return MessageSelectionChanged; }
 
 	/** Helper function to convert message log severity to log verbosity */
 	CORE_API static ELogVerbosity::Type GetLogVerbosity( EMessageSeverity::Type InSeverity );
@@ -111,15 +128,14 @@ public:
 	CORE_API static const TCHAR* const GetLogColor( EMessageSeverity::Type InSeverity );
 
 private:
-	/** Send the currently buffered messages to the log & clear the buffer */
-	void Flush();
-
-private:
 	/** Buffer for messages */
 	TArray< TSharedRef<FTokenizedMessage> > Messages;
 
 	/** The message log we use for output */
 	TSharedPtr<class IMessageLog> MessageLog;
+
+	/** Name of this message log */
+	FName LogName;
 
 	/** Do we want to suppress logging to the output log in addition to the message log? */
 	bool bSuppressLoggingToOutputLog;
@@ -131,3 +147,29 @@ private:
 	CORE_API static FMessageSelectionChanged MessageSelectionChanged;
 };
 
+/**
+ * Scoped override for FMessageLog behavior.
+ * This can override the log behavior of a given named FMessageLog for the duration of the overrides lifetime, optionally suppressing 
+ * output log mirroring, or promoting/demoting log categories (eg, to make errors act as warnings, or warnings act as errors).
+ */
+class FMessageLogScopedOverride final
+{
+public:
+	CORE_API explicit FMessageLogScopedOverride(const FName InLogName);
+	CORE_API ~FMessageLogScopedOverride();
+
+	UE_NONCOPYABLE(FMessageLogScopedOverride);
+
+	/** Should we mirror message log messages to the output log during flush? */
+	CORE_API FMessageLogScopedOverride& SuppressLoggingToOutputLog(const bool bShouldSuppress = true);
+
+	/** Map category X to category Y when adding messages to this log */
+	CORE_API FMessageLogScopedOverride& RemapMessageSeverity(const EMessageSeverity::Type SrcSeverity, const EMessageSeverity::Type DestSeverity);
+
+private:
+	friend class FMessageLog;
+
+	FName LogName;
+	TOptional<bool> bSuppressLoggingToOutputLog;
+	TSortedMap<EMessageSeverity::Type, EMessageSeverity::Type> MessageSeverityRemapping;
+};

@@ -21,19 +21,22 @@ int32 FSlateTextHighlightRunRenderer::OnPaint( const FPaintArgs& Args, const FTe
 	FSlateDrawElement::MakeBox(
 		OutDrawElements,
 		++LayerId,
-		AllottedGeometry.ToPaintGeometry(TransformVector(InverseScale, FVector2D( Block->GetSize().X, Line.Size.Y )), FSlateLayoutTransform(TransformPoint(InverseScale, Location))), 
+		AllottedGeometry.ToPaintGeometry(TransformVector(InverseScale, FVector2D(Block->GetSize().X, Line.Size.Y)), FSlateLayoutTransform(TransformPoint(InverseScale, Location))),
 		&DefaultStyle.HighlightShape,
 		bParentEnabled ? ESlateDrawEffect::None : ESlateDrawEffect::DisabledEffect,
-		InWidgetStyle.GetColorAndOpacityTint() * DefaultStyle.HighlightColor
+		InWidgetStyle.GetColorAndOpacityTint() * DefaultStyle.HighlightShape.TintColor.GetColor(InWidgetStyle)
 		);
 
-	FLinearColor InvertedHighlightColor = FLinearColor::White - DefaultStyle.HighlightColor;
+	FLinearColor InvertedHighlightColor = DefaultStyle.HighlightColor.GetColor(InWidgetStyle);
 	InvertedHighlightColor.A = InWidgetStyle.GetForegroundColor().A;
 
 	FWidgetStyle WidgetStyle( InWidgetStyle );
 	WidgetStyle.SetForegroundColor( InvertedHighlightColor );
 
-	return Run->OnPaint( Args, Line, Block, DefaultStyle, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, WidgetStyle, bParentEnabled );
+	// When highlighting text we want the actual text so do not replace any of it with ellipsis
+	const ETextOverflowPolicy OverflowPolicy = ETextOverflowPolicy::Clip;
+
+	return Run->OnPaint( Args, FTextArgs(Line, Block, DefaultStyle, OverflowPolicy, ETextOverflowDirection::NoOverflow), AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, WidgetStyle, bParentEnabled );
 }
 
 TSharedRef< FSlateTextHighlightRunRenderer > FSlateTextHighlightRunRenderer::Create()

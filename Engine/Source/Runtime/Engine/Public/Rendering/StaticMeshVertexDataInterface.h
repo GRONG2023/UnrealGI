@@ -2,6 +2,10 @@
 
 #pragma once
 
+#include "CoreTypes.h"
+#include "Misc/EnumClassFlags.h"
+
+class FArchive;
 class FResourceArrayInterface;
 
 enum class EResizeBufferFlags

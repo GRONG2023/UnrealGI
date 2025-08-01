@@ -59,8 +59,6 @@ public:
 	*/
 	bool Initialize(const FIntPoint& InDim)
 	{
-		BufferSize = 0;
-
 		if (InDim.GetMin() <= 0)
 		{ 
 			return false;
@@ -112,6 +110,31 @@ public:
 	}
 
 	/**
+	* Initialize the sample for copy externally.
+	*
+	* @return The size of the buffer
+	* @see InitializeTexture
+	*/
+	int32 InitializeBufferForCopy()
+	{
+		SIZE_T RequiredBufferSize = Dim.X * Dim.Y * sizeof(int32);
+		if (BufferSize < RequiredBufferSize)
+		{
+			if (BufferSize == 0)
+			{
+				Buffer = FMemory::Malloc(RequiredBufferSize);
+			}
+			else
+			{
+				Buffer = FMemory::Realloc(Buffer, RequiredBufferSize);
+			}
+
+			BufferSize = RequiredBufferSize;
+		}
+		return BufferSize;
+	}
+
+	/**
 	* Initialize the sample with a texture resource.
 	*
 	* @return The texture resource object that will hold the sample data.
@@ -127,23 +150,14 @@ public:
 			return Texture;
 		}
 
-		const ETextureCreateFlags CreateFlags = TexCreate_Dynamic | TexCreate_SRGB;
+		const FRHITextureCreateDesc Desc =
+			FRHITextureCreateDesc::Create2D(TEXT("FWebBrowserTextureSample"))
+			.SetExtent(Dim)
+			.SetFormat(PF_B8G8R8A8)
+			.SetFlags(ETextureCreateFlags::Dynamic | ETextureCreateFlags::SRGB | ETextureCreateFlags::RenderTargetable | ETextureCreateFlags::ShaderResource)
+			.SetInitialState(ERHIAccess::SRVMask);
 
-		TRefCountPtr<FRHITexture2D> DummyTexture2DRHI;
-		FRHIResourceCreateInfo CreateInfo;
-
-		RHICreateTargetableShaderResource2D(
-			Dim.X,
-			Dim.Y,
-			PF_B8G8R8A8,
-			1,
-			CreateFlags,
-			TexCreate_RenderTargetable,
-			false,
-			CreateInfo,
-			Texture,
-			DummyTexture2DRHI
-		);
+		Texture = RHICreateTexture(Desc);
 
 		return Texture;
 	}

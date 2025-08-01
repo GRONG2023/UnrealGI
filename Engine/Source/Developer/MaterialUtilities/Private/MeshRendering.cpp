@@ -16,16 +16,19 @@
 #include "PackedNormal.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Misc/App.h"
+#include "Materials/MaterialRenderProxy.h"
 #include "MaterialUtilities.h"
+#include "MeshBuilderOneFrameResources.h"
 #include "Misc/FileHelper.h"
 #include "StaticMeshAttributes.h"
 #include "SceneView.h"
 #include "MeshBatch.h"
 #include "CanvasItem.h"
-#include "CanvasTypes.h"
+#include "CanvasRender.h"
 #include "LocalVertexFactory.h"
 #include "Rendering/SkeletalMeshLODRenderData.h"
 #include "MeshPassProcessor.h"
+#include "RHIStaticStates.h"
 #include "RendererInterface.h"
 #include "EngineModule.h"
 #include "LightMapHelpers.h"
@@ -151,12 +154,12 @@ public:
 	{
 		// count triangles for selected material
 		int32 NumTris = 0;
-		for (const FPolygonID PolygonID : RawMesh.Polygons().GetElementIDs())
+		for (const FTriangleID TriangleID : RawMesh.Triangles().GetElementIDs())
 		{
-			const FPolygonGroupID PolygonGroupID = RawMesh.GetPolygonPolygonGroup(PolygonID);
+			const FPolygonGroupID PolygonGroupID = RawMesh.GetTrianglePolygonGroup(TriangleID);
 			if (PolygonGroupID.GetValue() == Data.MaterialIndex)
 			{
-				NumTris += RawMesh.GetPolygonTriangleIDs(PolygonID).Num();
+				NumTris++;
 			}
 		}
 		if (NumTris == 0)
@@ -165,12 +168,13 @@ public:
 			return 0;
 		}
 
-		TVertexAttributesConstRef<FVector> VertexPositions = RawMesh.VertexAttributes().GetAttributesRef<FVector>(MeshAttribute::Vertex::Position);
-		TVertexInstanceAttributesConstRef<FVector> VertexInstanceNormals = RawMesh.VertexInstanceAttributes().GetAttributesRef<FVector>(MeshAttribute::VertexInstance::Normal);
-		TVertexInstanceAttributesConstRef<FVector> VertexInstanceTangents = RawMesh.VertexInstanceAttributes().GetAttributesRef<FVector>(MeshAttribute::VertexInstance::Tangent);
-		TVertexInstanceAttributesConstRef<float> VertexInstanceBinormalSigns = RawMesh.VertexInstanceAttributes().GetAttributesRef<float>(MeshAttribute::VertexInstance::BinormalSign);
-		TVertexInstanceAttributesConstRef<FVector2D> VertexInstanceUVs = RawMesh.VertexInstanceAttributes().GetAttributesRef<FVector2D>(MeshAttribute::VertexInstance::TextureCoordinate);
-		TVertexInstanceAttributesConstRef<FVector4> VertexInstanceColors = RawMesh.VertexInstanceAttributes().GetAttributesRef<FVector4>(MeshAttribute::VertexInstance::Color);
+		FStaticMeshConstAttributes Attributes(RawMesh);
+		TVertexAttributesConstRef<FVector3f> VertexPositions = Attributes.GetVertexPositions();
+		TVertexInstanceAttributesConstRef<FVector3f> VertexInstanceNormals = Attributes.GetVertexInstanceNormals();
+		TVertexInstanceAttributesConstRef<FVector3f> VertexInstanceTangents = Attributes.GetVertexInstanceTangents();
+		TVertexInstanceAttributesConstRef<float> VertexInstanceBinormalSigns = Attributes.GetVertexInstanceBinormalSigns();
+		TVertexInstanceAttributesConstRef<FVector2f> VertexInstanceUVs = Attributes.GetVertexInstanceUVs();
+		TVertexInstanceAttributesConstRef<FVector4f> VertexInstanceColors = Attributes.GetVertexInstanceColors();
 
 		int32 NumVerts = NumTris * 3;
 
@@ -186,7 +190,7 @@ public:
 		float ScaleY = (SizeV != 0) ? Data.Size.Y / SizeV : 1.0;
 
 		// count number of texture coordinates for this mesh
-		int32 NumTexcoords = FMath::Min(VertexInstanceUVs.GetNumIndices(), (int32)MAX_STATIC_TEXCOORDS);
+		int32 NumTexcoords = FMath::Min(VertexInstanceUVs.GetNumChannels(), (int32)MAX_STATIC_TEXCOORDS);
 
 		// check if we should use NewUVs or original UV set
 		bool bUseNewUVs = Data.TexCoords.Num() > 0;
@@ -200,62 +204,59 @@ public:
 		// add vertices
 		int32 VertIndex = 0;
 		int32 FaceIndex = 0;
-		for (const FPolygonID PolygonID : RawMesh.Polygons().GetElementIDs())
+		for (const FTriangleID TriangleID : RawMesh.Triangles().GetElementIDs())
 		{
-			const FPolygonGroupID PolygonGroupID = RawMesh.GetPolygonPolygonGroup(PolygonID);
-			const TArray<FTriangleID>& TriangleIDs = RawMesh.GetPolygonTriangleIDs(PolygonID);
-			for (const FTriangleID& TriangleID : TriangleIDs)
+			const FPolygonGroupID PolygonGroupID = RawMesh.GetTrianglePolygonGroup(TriangleID);
+
+			if (PolygonGroupID.GetValue() == Data.MaterialIndex)
 			{
-				if (PolygonGroupID.GetValue() == Data.MaterialIndex)
+				for (int32 Corner = 0; Corner < 3; Corner++)
 				{
-					for (int32 Corner = 0; Corner < 3; Corner++)
+					const int32 SrcVertIndex = FaceIndex * 3 + Corner;
+					const FVertexInstanceID SrcVertexInstanceID = RawMesh.GetTriangleVertexInstance(TriangleID, Corner);
+					const FVertexID SrcVertexID = RawMesh.GetVertexInstanceVertex(SrcVertexInstanceID);
+
+					// add vertex
+					FDynamicMeshVertex* Vert = new(OutVerts)FDynamicMeshVertex();
+					if (!bUseNewUVs)
 					{
-						const int32 SrcVertIndex = FaceIndex * 3 + Corner;
-						const FVertexInstanceID SrcVertexInstanceID = RawMesh.GetTriangleVertexInstance(TriangleID, Corner);
-						const FVertexID SrcVertexID = RawMesh.GetVertexInstanceVertex(SrcVertexInstanceID);
-
-						// add vertex
-						FDynamicMeshVertex* Vert = new(OutVerts)FDynamicMeshVertex();
-						if (!bUseNewUVs)
-						{
-							// compute vertex position from original UV
-							const FVector2D& UV = VertexInstanceUVs.Get(SrcVertexInstanceID, 0);
-							Vert->Position.Set((UV.X - U) * ScaleX, (UV.Y - V) * ScaleY, 0);
-						}
-						else
-						{
-							const FVector2D& UV = Data.TexCoords[SrcVertIndex];
-							Vert->Position.Set(UV.X * ScaleX, UV.Y * ScaleY, 0);
-						}
-						FVector TangentX = VertexInstanceTangents[SrcVertexInstanceID];
-						FVector TangentZ = VertexInstanceNormals[SrcVertexInstanceID];
-						FVector TangentY = FVector::CrossProduct(TangentZ, TangentX).GetSafeNormal() * VertexInstanceBinormalSigns[SrcVertexInstanceID];
-						Vert->SetTangents(TangentX, TangentY, TangentZ);
-						for (int32 TexcoordIndex = 0; TexcoordIndex < NumTexcoords; TexcoordIndex++)
-						{
-							Vert->TextureCoordinate[TexcoordIndex] = VertexInstanceUVs.Get(SrcVertexInstanceID, TexcoordIndex);
-						}
-
-						// Store original vertex positions in texture coordinate data
-						Vert->TextureCoordinate[6].X = VertexPositions[SrcVertexID].X;
-						Vert->TextureCoordinate[6].Y = VertexPositions[SrcVertexID].Y;
-						Vert->TextureCoordinate[7].X = VertexPositions[SrcVertexID].Z;
-
-						Vert->Color = FLinearColor(VertexInstanceColors[SrcVertexInstanceID]).ToFColor(true);
-						// add index
-						OutIndices.Add(VertIndex);
-						VertIndex++;
+						// compute vertex position from original UV
+						const FVector2f& UV = VertexInstanceUVs.Get(SrcVertexInstanceID, 0);
+						Vert->Position.Set((UV.X - U) * ScaleX, (UV.Y - V) * ScaleY, 0);
 					}
-					if (bDuplicateTris)
+					else
 					{
-						// add the same triangle with opposite vertex order
-						OutIndices.Add(VertIndex - 3);
-						OutIndices.Add(VertIndex - 1);
-						OutIndices.Add(VertIndex - 2);
+						const FVector2D& UV = Data.TexCoords[SrcVertIndex];
+						Vert->Position.Set(UV.X * ScaleX, UV.Y * ScaleY, 0);
 					}
+					FVector3f TangentX = VertexInstanceTangents[SrcVertexInstanceID];
+					FVector3f TangentZ = VertexInstanceNormals[SrcVertexInstanceID];
+					FVector3f TangentY = FVector3f::CrossProduct(TangentZ, TangentX).GetSafeNormal() * VertexInstanceBinormalSigns[SrcVertexInstanceID];
+					Vert->SetTangents(TangentX, TangentY, TangentZ);
+					for (int32 TexcoordIndex = 0; TexcoordIndex < NumTexcoords; TexcoordIndex++)
+					{
+						Vert->TextureCoordinate[TexcoordIndex] = VertexInstanceUVs.Get(SrcVertexInstanceID, TexcoordIndex);
+					}
+
+					// Store original vertex positions in texture coordinate data
+					Vert->TextureCoordinate[6].X = VertexPositions[SrcVertexID].X;
+					Vert->TextureCoordinate[6].Y = VertexPositions[SrcVertexID].Y;
+					Vert->TextureCoordinate[7].X = VertexPositions[SrcVertexID].Z;
+
+					Vert->Color = FLinearColor(VertexInstanceColors[SrcVertexInstanceID]).ToFColor(true);
+					// add index
+					OutIndices.Add(VertIndex);
+					VertIndex++;
 				}
-				FaceIndex++;
+				if (bDuplicateTris)
+				{
+					// add the same triangle with opposite vertex order
+					OutIndices.Add(VertIndex - 3);
+					OutIndices.Add(VertIndex - 1);
+					OutIndices.Add(VertIndex - 2);
+				}
 			}
+			FaceIndex++;
 		}
 		return NumTris;
 	}
@@ -343,7 +344,7 @@ public:
 						FDynamicMeshVertex* DstVert = new(OutVerts)FDynamicMeshVertex();
 
 						// compute vertex position from original UV
-						const FVector2D UV = LODData.StaticVertexBuffers.StaticMeshVertexBuffer.GetVertexUV(SrcVertIndex, 0);
+						const FVector2f UV = LODData.StaticVertexBuffers.StaticMeshVertexBuffer.GetVertexUV(SrcVertIndex, 0);
 						DstVert->Position.Set((UV.X - U) * ScaleX, (UV.Y - V) * ScaleY, 0);
 
 						DstVert->TangentX = LODData.StaticVertexBuffers.StaticMeshVertexBuffer.VertexTangentX(SrcVertIndex);
@@ -405,7 +406,7 @@ public:
 							int32 SrcVertIndex = IndexData[CornerIndex];
 							FDynamicMeshVertex* DstVert = new(OutVerts)FDynamicMeshVertex();
 
-							const FVector2D UV = LODData.StaticVertexBuffers.StaticMeshVertexBuffer.GetVertexUV(SrcVertIndex, 0);
+							const FVector2f UV = LODData.StaticVertexBuffers.StaticMeshVertexBuffer.GetVertexUV(SrcVertIndex, 0);
 							DstVert->Position.Set(UV.X * ScaleX, UV.Y * ScaleY, 0);
 
 							DstVert->TangentX = LODData.StaticVertexBuffers.StaticMeshVertexBuffer.VertexTangentX(SrcVertIndex);
@@ -457,7 +458,7 @@ public:
 			int Y = (VertIndex >> 1) & 1;
 
 			Vert->Position.Set(ScaleX * X, ScaleY * Y, 0);
-			Vert->SetTangents(FVector(1, 0, 0), FVector(0, 1, 0), FVector(0, 0, 1));
+			Vert->SetTangents(FVector3f(1, 0, 0), FVector3f(0, 1, 0), FVector3f(0, 0, 1));
 			FMemory::Memzero(&Vert->TextureCoordinate, sizeof(Vert->TextureCoordinate));
 			Vert->TextureCoordinate[0].Set(U + SizeU * X, V + SizeV * Y);
 			Vert->Color = FColor::White;
@@ -470,7 +471,7 @@ public:
 		return 2;
 	}
 
-	static void RenderMaterial(FRHICommandListImmediate& RHICmdList, FMeshPassProcessorRenderState& DrawRenderState, const class FSceneView& View, FRenderData& Data)
+	static void RenderMaterial(FCanvasRenderContext& RenderContext, FMeshPassProcessorRenderState& DrawRenderState, const class FSceneView& View, FRenderData& Data)
 	{
 		// Check if material is TwoSided - single-sided materials should be rendered with normal and reverse
 		// triangle corner orders, to avoid problems with inside-out meshes or mesh parts. Note:
@@ -508,8 +509,8 @@ public:
 		DynamicMeshBuilder.AddVertices(Verts);
 		DynamicMeshBuilder.AddTriangles(Indices);
 
-		FMeshBatch MeshElement;
-		FMeshBuilderOneFrameResources OneFrameResource;
+		FMeshBatch& MeshElement = *RenderContext.Alloc<FMeshBatch>();
+		FMeshBuilderOneFrameResources& OneFrameResource = *RenderContext.Alloc<FMeshBuilderOneFrameResources>();
 		DynamicMeshBuilder.GetMeshElement(FMatrix::Identity, Data.MaterialRenderProxy, SDPG_Foreground, true, false, 0, OneFrameResource, MeshElement);
 
 		check(OneFrameResource.IsValidForRendering());
@@ -522,10 +523,10 @@ public:
 		MeshElement.bWireframe = true;
 #endif
 
-		GetRendererModule().DrawTileMesh(RHICmdList, DrawRenderState, View, MeshElement, false /*bIsHitTesting*/, FHitProxyId());
+		GetRendererModule().DrawTileMesh(RenderContext, DrawRenderState, View, MeshElement, false /*bIsHitTesting*/, FHitProxyId());
 	}
 
-	virtual bool Render_RenderThread(FRHICommandListImmediate& RHICmdList, FMeshPassProcessorRenderState& DrawRenderState, const FCanvas* Canvas)
+	virtual bool Render_RenderThread(FCanvasRenderContext& RenderContext, FMeshPassProcessorRenderState& DrawRenderState, const FCanvas* Canvas)
 	{
 		checkSlow(Data);
 		// current render target set for the canvas
@@ -542,26 +543,21 @@ public:
 		ViewInitOptions.BackgroundColor = FLinearColor::Black;
 		ViewInitOptions.OverlayColor = FLinearColor::White;
 
-		bool bNeedsToSwitchVerticalAxis = RHINeedsToSwitchVerticalAxis(Canvas->GetShaderPlatform()) && !Canvas->GetAllowSwitchVerticalAxis();
-		check(bNeedsToSwitchVerticalAxis == false);
-
 		FSceneView* View = new FSceneView(ViewInitOptions);
 
-		RenderMaterial(RHICmdList, DrawRenderState, *View, *Data);
+		RenderMaterial(RenderContext, DrawRenderState, *View, *Data);
 
-		delete View;
+		RenderContext.DeferredDelete(View);
+
 		if (Canvas->GetAllowedModes() & FCanvas::Allow_DeleteOnRender)
 		{
-			delete Data;
-		}
-		if (Canvas->GetAllowedModes() & FCanvas::Allow_DeleteOnRender)
-		{
-			Data = NULL;
+			RenderContext.DeferredDelete(Data);
+			Data = nullptr;
 		}
 		return true;
 	}
 
-	virtual bool Render_GameThread(const FCanvas* Canvas, FRenderThreadScope& RenderScope)
+	virtual bool Render_GameThread(const FCanvas* Canvas, FCanvasRenderThreadScope& RenderScope)
 	{
 		checkSlow(Data);
 		// current render target set for the canvas
@@ -580,8 +576,6 @@ public:
 
 		FSceneView* View = new FSceneView(ViewInitOptions);
 
-		bool bNeedsToSwitchVerticalAxis = RHINeedsToSwitchVerticalAxis(Canvas->GetShaderPlatform()) && !Canvas->GetAllowSwitchVerticalAxis();
-		check(bNeedsToSwitchVerticalAxis == false);
 		struct FDrawMaterialParameters
 		{
 			FSceneView* View;
@@ -597,24 +591,24 @@ public:
 
 		FDrawMaterialParameters Parameters = DrawMaterialParameters;
 		RenderScope.EnqueueRenderCommand(
-			[Parameters](FRHICommandListImmediate& RHICmdList)
+			[Parameters](FCanvasRenderContext& RenderContext)
 		{
-			FMeshPassProcessorRenderState DrawRenderState(*Parameters.View);
+			FMeshPassProcessorRenderState DrawRenderState;
 
 			// disable depth test & writes
 			DrawRenderState.SetDepthStencilState(TStaticDepthStencilState<false, CF_Always>::GetRHI());
 
-			RenderMaterial(RHICmdList, DrawRenderState, *Parameters.View, *Parameters.RenderData);
+			RenderMaterial(RenderContext, DrawRenderState, *Parameters.View, *Parameters.RenderData);
 
-			delete Parameters.View;
+			RenderContext.DeferredDelete(Parameters.View);
 			if (Parameters.AllowedCanvasModes & FCanvas::Allow_DeleteOnRender)
 			{
-				delete Parameters.RenderData;
+				RenderContext.DeferredDelete(Parameters.RenderData);
 			}
 		});
 		if (Canvas->GetAllowedModes() & FCanvas::Allow_DeleteOnRender)
 		{
-			Data = NULL;
+			Data = nullptr;
 		}
 		return true;
 	}
@@ -628,7 +622,7 @@ bool FMeshRenderer::RenderMaterial(struct FMaterialMergeData& InMaterialData, FM
 
 	{
 		// Create a canvas for the render target and clear it to black
-		FCanvas Canvas(RTResource, NULL, FApp::GetCurrentTime() - GStartTime, FApp::GetDeltaTime(), FApp::GetCurrentTime() - GStartTime, GMaxRHIFeatureLevel);
+		FCanvas Canvas(RTResource, NULL, FGameTime::GetTimeSinceAppStart(), GMaxRHIFeatureLevel);
 
 #if 0	// original FFlattenMaterial code - kept here for comparison
 
@@ -648,17 +642,12 @@ bool FMeshRenderer::RenderMaterial(struct FMaterialMergeData& InMaterialData, FM
 #else
 
 		// create ViewFamily
-		float CurrentRealTime = 0.f;
-		float CurrentWorldTime = 0.f;
-		float DeltaWorldTime = 0.f;
-
 		const FRenderTarget* CanvasRenderTarget = Canvas.GetRenderTarget();
 		FSceneViewFamily ViewFamily(FSceneViewFamily::ConstructionValues(
 			CanvasRenderTarget,
 			NULL,
 			FEngineShowFlags(ESFIM_Game))
-			.SetWorldTimes(CurrentWorldTime, DeltaWorldTime, CurrentRealTime)
-			.SetGammaCorrection(CanvasRenderTarget->GetDisplayGamma()));
+			.SetTime(FGameTime()));
 		
 #if !SHOW_WIREFRAME_MESH
 		Canvas.Clear(InRenderTarget->ClearColor);
@@ -763,14 +752,10 @@ bool FMeshRenderer::RenderMaterialTexCoordScales(struct FMaterialMergeData& InMa
 {
 	check(IsInGameThread());
 	check(InRenderTarget);
-	// create ViewFamily
-	float CurrentRealTime = 0.f;
-	float CurrentWorldTime = 0.f;
-	float DeltaWorldTime = 0.f;
 
 	// Create a canvas for the render target and clear it to black
 	FTextureRenderTargetResource* RTResource = InRenderTarget->GameThread_GetRenderTargetResource();
-	FCanvas Canvas(RTResource, NULL, FApp::GetCurrentTime() - GStartTime, FApp::GetDeltaTime(), FApp::GetCurrentTime() - GStartTime, GMaxRHIFeatureLevel);
+	FCanvas Canvas(RTResource, NULL, FGameTime::GetTimeSinceAppStart(), GMaxRHIFeatureLevel);
 	const FRenderTarget* CanvasRenderTarget = Canvas.GetRenderTarget();
 	Canvas.Clear(FLinearColor::Black);
 
@@ -780,8 +765,7 @@ bool FMeshRenderer::RenderMaterialTexCoordScales(struct FMaterialMergeData& InMa
 	ShowFlags.OutputMaterialTextureScales = true; // This will bind the DVSM_OutputMaterialTextureScales
 
 	FSceneViewFamily ViewFamily(FSceneViewFamily::ConstructionValues(CanvasRenderTarget, nullptr, ShowFlags)
-		.SetWorldTimes(CurrentWorldTime, DeltaWorldTime, CurrentRealTime)
-		.SetGammaCorrection(CanvasRenderTarget->GetDisplayGamma()));
+		.SetTime(FGameTime()));
 
 	// The next line ensures a constant view vector of (0,0,1) for all pixels. Required because here SVPositionToTranslatedWorld is identity, making excessive view angle increase per pixel.
 	// That creates bad side effects for anything that depends on the view vector, like parallax or bump offset mappings. For those, we want the tangent

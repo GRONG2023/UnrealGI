@@ -240,12 +240,12 @@ public:
 		// Draw the child nodes
 
 		// When drawing a marquee, need a preview of what the selection will be.
-		const auto* SelectionToVisualize = &(SelectionManager.SelectedNodes);
-		FGraphPanelSelectionSet SelectionPreview;
+		const auto* SelectionToVisualize = &ObjectPtrDecay(SelectionManager.SelectedNodes);
+		decltype(SelectionManager.SelectedNodes) SelectionPreview;
 		if (Marquee.IsValid())
 		{			
-			ApplyMarqueeSelection(Marquee, SelectionManager.SelectedNodes, SelectionPreview);
-			SelectionToVisualize = &SelectionPreview;
+			ApplyMarqueeSelection(Marquee, ObjectPtrDecay(SelectionManager.SelectedNodes), SelectionPreview);
+			SelectionToVisualize = &ObjectPtrDecay(SelectionPreview);
 		}
 	
 		int32 NodesLayerId = LayerId;
@@ -278,7 +278,7 @@ public:
 				OutDrawElements,
 				++LayerId,
 				EditableArea,
-				FEditorStyle::GetBrush(TEXT("Graph.CompactNode.ShadowSelected")),
+				FAppStyle::GetBrush(TEXT("Graph.CompactNode.ShadowSelected")),
 				ESlateDrawEffect::None,
 				PaintColor
 				);
@@ -297,7 +297,7 @@ public:
 				OutDrawElements,
 				LayerId,
 				AllottedGeometry.ToPaintGeometry(),
-				FEditorStyle::GetBrush(TEXT("Graph.PlayInEditor"))
+				FAppStyle::GetBrush(TEXT("Graph.PlayInEditor"))
 				);
 		}
 
@@ -308,15 +308,15 @@ public:
 			if (WorldModel->GetObserverView(ObserverPosition, ObserverRotation))
 			{
 				FVector2D ObserverPositionScreen = GraphCoordToPanelCoord(FVector2D(ObserverPosition.X, ObserverPosition.Y));
-				const FSlateBrush* CameraImage = FEditorStyle::GetBrush(TEXT("WorldBrowser.SimulationViewPositon"));
+				const FSlateBrush* CameraImage = FAppStyle::GetBrush(TEXT("WorldBrowser.SimulationViewPosition"));
 	
 				//AllottedGeometry.GetAccumulatedRenderTransform();
 				//FSlateLayoutTransform LayoutTransform(Scale, AllottedGeometry.GetAccumulatedLayoutTransform().GetTranslation() - InflateAmount);
 				//FSlateRenderTransform SlateRenderTransform(Scale, AllottedGeometry.GetAccumulatedRenderTransform().GetTranslation() - InflateAmount);
 
-				FPaintGeometry PaintGeometry = AllottedGeometry.ToPaintGeometry(
-					ObserverPositionScreen - CameraImage->ImageSize*0.5f, 
-					CameraImage->ImageSize
+				FPaintGeometry PaintGeometry = AllottedGeometry.ToPaintGeometry( 
+					CameraImage->ImageSize,
+					FSlateLayoutTransform(ObserverPositionScreen - CameraImage->ImageSize*0.5f)
 				);
 
 				FSlateDrawElement::MakeRotatedBox(
@@ -336,11 +336,11 @@ public:
 			if (WorldModel->GetPlayerView(PlayerPosition, PlayerRotation))
 			{
 				FVector2D PlayerPositionScreen = GraphCoordToPanelCoord(FVector2D(PlayerPosition.X, PlayerPosition.Y));
-				const FSlateBrush* CameraImage = FEditorStyle::GetBrush(TEXT("WorldBrowser.SimulationViewPositon"));
+				const FSlateBrush* CameraImage = FAppStyle::GetBrush(TEXT("WorldBrowser.SimulationViewPosition"));
 	
 				FPaintGeometry PaintGeometry = AllottedGeometry.ToPaintGeometry(
-					PlayerPositionScreen - CameraImage->ImageSize*0.5f, 
-					CameraImage->ImageSize
+					CameraImage->ImageSize,
+					FSlateLayoutTransform(PlayerPositionScreen - CameraImage->ImageSize*0.5f)
 					);
 
 				FSlateDrawElement::MakeRotatedBox(
@@ -392,7 +392,7 @@ public:
 				}
 
 				// Panning and mouse is outside of panel? Pasting should just go to the screen center.
-				PastePosition = PanelCoordToGraphCoord( 0.5 * MyGeometry.GetLocalSize() );
+				PastePosition = PanelCoordToGraphCoord( 0.5f * MyGeometry.GetLocalSize() );
 
 				this->bIsPanning = true;
 				ViewOffset -= CursorDelta / GetZoomAmount();
@@ -557,7 +557,7 @@ protected:
 			LayerId,
 			AllottedGeometry.ToOffsetPaintGeometry(FVector2D(10, 27)),
 			RulerText,
-			FEditorStyle::GetFontStyle("NormalFont"),
+			FAppStyle::GetFontStyle("NormalFont"),
 			ESlateDrawEffect::None,
 			FColor(200, 200, 200));
 		
@@ -595,7 +595,8 @@ protected:
 		}
 
 		FArrangedChildren ArrangedChildren(EVisibility::Visible);
-		ArrangeChildren(MyGeometry, ArrangedChildren);
+		const bool bUpdateVisibilityAttributes = true;
+		ArrangeChildren(MyGeometry, ArrangedChildren, bUpdateVisibilityAttributes);
 
 		const int32 NodeUnderMouseIndex = SWidget::FindChildUnderMouse( ArrangedChildren, MouseEvent );
 		if (NodeUnderMouseIndex != INDEX_NONE)
@@ -878,7 +879,7 @@ protected:
 	/**  Converts cursor absolute position to the world position */
 	FVector2D CursorToWorldPosition(const FGeometry& InGeometry, FVector2D InAbsoluteCursorPosition)
 	{
-		FVector2D ViewSpacePosition = (InAbsoluteCursorPosition - InGeometry.AbsolutePosition)/InGeometry.Scale;
+		FVector2D ViewSpacePosition = (InAbsoluteCursorPosition - FVector2D(InGeometry.AbsolutePosition))/InGeometry.Scale;
 		return PanelCoordToGraphCoord(ViewSpacePosition);
 	}
 
@@ -936,7 +937,7 @@ void SWorldComposition::Construct(const FArguments& InArgs)
 	ChildSlot
 	[
 		SAssignNew(ContentParent, SBorder)
-		.BorderImage(FEditorStyle::GetBrush(TEXT("ToolPanel.GroupBorder")))
+		.BorderImage(FAppStyle::GetBrush(TEXT("ToolPanel.GroupBorder")))
 	];
 	
 	OnBrowseWorld(InArgs._InWorld);
@@ -999,7 +1000,7 @@ TSharedRef<SWidget> SWorldComposition::ConstructContentWidget()
 			.VAlign(VAlign_Top)
 			[
 				SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush(TEXT("Graph.TitleBackground")))
+				.BorderImage(FAppStyle::GetBrush(TEXT("Graph.TitleBackground")))
 				[
 					SNew(SVerticalBox)
 
@@ -1025,13 +1026,13 @@ TSharedRef<SWidget> SWorldComposition::ConstructContentWidget()
 						.AutoWidth()
 						[
 							SNew(SImage)
-							.Image(FEditorStyle::GetBrush( "WorldBrowser.WorldOrigin" ))
+							.Image(FAppStyle::GetBrush( "WorldBrowser.WorldOrigin" ))
 						]
 						+SHorizontalBox::Slot()
 						.Padding(5,0,0,0)
 						[
 							SNew(STextBlock)
-							.TextStyle( FEditorStyle::Get(), "WorldBrowser.StatusBarText" )
+							.TextStyle( FAppStyle::Get(), "WorldBrowser.StatusBarText" )
 							.Text(this, &SWorldComposition::GetCurrentOriginText)
 						]
 
@@ -1041,7 +1042,7 @@ TSharedRef<SWidget> SWorldComposition::ConstructContentWidget()
 						.Padding(0,0,5,0)
 						[
 							SNew(STextBlock)
-							.TextStyle( FEditorStyle::Get(), "WorldBrowser.StatusBarText" )
+							.TextStyle( FAppStyle::Get(), "WorldBrowser.StatusBarText" )
 							.Text(this, &SWorldComposition::GetCurrentLevelText)
 						]											
 					]
@@ -1052,7 +1053,7 @@ TSharedRef<SWidget> SWorldComposition::ConstructContentWidget()
 			.VAlign(VAlign_Bottom)
 			[
 				SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush(TEXT("Graph.TitleBackground")))
+				.BorderImage(FAppStyle::GetBrush(TEXT("Graph.TitleBackground")))
 				[
 					SNew(SVerticalBox)
 
@@ -1066,13 +1067,13 @@ TSharedRef<SWidget> SWorldComposition::ConstructContentWidget()
 						.AutoWidth()
 						[
 							SNew(SImage)
-							.Image(FEditorStyle::GetBrush( "WorldBrowser.MouseLocation" ))
+							.Image(FAppStyle::GetBrush( "WorldBrowser.MouseLocation" ))
 						]
 						+SHorizontalBox::Slot()
 						.Padding(5,0,0,0)
 						[
 							SNew(STextBlock)
-							.TextStyle( FEditorStyle::Get(), "WorldBrowser.StatusBarText" )
+							.TextStyle( FAppStyle::Get(), "WorldBrowser.StatusBarText" )
 							.Text(this, &SWorldComposition::GetMouseLocationText)
 						]
 
@@ -1081,13 +1082,13 @@ TSharedRef<SWidget> SWorldComposition::ConstructContentWidget()
 						.AutoWidth()
 						[
 							SNew(SImage)
-							.Image(FEditorStyle::GetBrush( "WorldBrowser.MarqueeRectSize" ))
+							.Image(FAppStyle::GetBrush( "WorldBrowser.MarqueeRectSize" ))
 						]
 						+SHorizontalBox::Slot()
 						.Padding(5,0,0,0)
 						[
 							SNew(STextBlock)
-							.TextStyle( FEditorStyle::Get(), "WorldBrowser.StatusBarText" )
+							.TextStyle( FAppStyle::Get(), "WorldBrowser.StatusBarText" )
 							.Text(this, &SWorldComposition::GetMarqueeSelectionSizeText)
 						]
 
@@ -1101,14 +1102,14 @@ TSharedRef<SWidget> SWorldComposition::ConstructContentWidget()
 							.AutoWidth()
 							[
 								SNew(SImage)
-								.Image(FEditorStyle::GetBrush( "WorldBrowser.WorldSize" ))
+								.Image(FAppStyle::GetBrush( "WorldBrowser.WorldSize" ))
 							]
 
 							+SHorizontalBox::Slot()
 							.Padding(5,0,5,0)
 							[
 								SNew(STextBlock)
-								.TextStyle( FEditorStyle::Get(), "WorldBrowser.StatusBarText" )
+								.TextStyle( FAppStyle::Get(), "WorldBrowser.StatusBarText" )
 								.Text(this, &SWorldComposition::GetWorldSizeText)
 							]
 						]											
@@ -1124,7 +1125,7 @@ TSharedRef<SWidget> SWorldComposition::ConstructContentWidget()
 			[
 				SNew(STextBlock)
 				.Visibility(this, &SWorldComposition::IsSimulationVisible)
-				.TextStyle( FEditorStyle::Get(), "Graph.SimulatingText" )
+				.TextStyle( FAppStyle::Get(), "Graph.SimulatingText" )
 				.Text(LOCTEXT("SimulatingNotification", "SIMULATING"))
 			]
 		];
@@ -1156,7 +1157,7 @@ void SWorldComposition::PopulateLayersList()
 		.Content()
 		[
 			SNew(SImage)
-			.Image(FEditorStyle::GetBrush("WorldBrowser.AddLayer"))
+			.Image(FAppStyle::GetBrush("WorldBrowser.AddLayer"))
 		]
 	];
 }

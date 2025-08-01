@@ -1,23 +1,46 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "CurveEditorViewportClient.h"
-#include "Engine/InterpCurveEdSetup.h"
-#include "SCurveEditorViewport.h"
-#include "Widgets/Layout/SScrollBar.h"
-#include "Preferences/CurveEdOptions.h"
+
 #include "CanvasItem.h"
-#include "Settings/LevelEditorViewportSettings.h"
-#include "Editor/UnrealEdEngine.h"
-#include "Preferences/UnrealEdOptions.h"
-#include "EngineGlobals.h"
-#include "Editor.h"
-#include "UnrealEdGlobals.h"
-#include "CurveEditorSharedData.h"
-#include "SDistributionCurveEditor.h"
-#include "CurveEditorHitProxies.h"
-#include "Slate/SceneViewport.h"
 #include "CanvasTypes.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "CurveEditorHitProxies.h"
+#include "CurveEditorSharedData.h"
+#include "Delegates/Delegate.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Editor/UnrealEdEngine.h"
+#include "Engine/Engine.h"
+#include "Engine/InterpCurveEdSetup.h"
 #include "Framework/Application/SlateApplication.h"
+#include "GenericPlatform/GenericWindow.h"
+#include "HAL/PlatformCrt.h"
+#include "HitProxies.h"
+#include "IDistCurveEditor.h"
+#include "Internationalization/Text.h"
+#include "Layout/Visibility.h"
+#include "Math/CurveEdInterface.h"
+#include "Math/IntRect.h"
+#include "Math/InterpCurvePoint.h"
+#include "Math/TranslationMatrix.h"
+#include "Math/Vector.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Parse.h"
+#include "Preferences/CurveEdOptions.h"
+#include "Preferences/UnrealEdOptions.h"
+#include "SCurveEditorViewport.h"
+#include "SDistributionCurveEditor.h"
+#include "Settings/LevelEditorViewportSettings.h"
+#include "Slate/SceneViewport.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+#include "UnrealEdGlobals.h"
+#include "Widgets/Layout/SScrollBar.h"
+#include "Widgets/SWindow.h"
+
+class UObject;
 
 FCurveEditorViewportClient::FCurveEditorViewportClient(TWeakPtr<SDistributionCurveEditor> InCurveEditor, TWeakPtr<SCurveEditorViewport> InCurveEditorViewport)
 	: CurveEditorPtr(InCurveEditor)
@@ -672,7 +695,7 @@ bool FCurveEditorViewportClient::InputKey(FViewport* Viewport, int32 ControllerI
 }
 
 void FCurveEditorViewportClient::MouseMove(FViewport* Viewport, int32 X, int32 Y)
-{	
+{
 	bool bCtrlDown = Viewport->KeyState(EKeys::LeftControl) || Viewport->KeyState(EKeys::RightControl);
 	bool bShiftDown = Viewport->KeyState(EKeys::LeftShift) || Viewport->KeyState(EKeys::RightShift);
 
@@ -771,6 +794,11 @@ void FCurveEditorViewportClient::MouseMove(FViewport* Viewport, int32 X, int32 Y
 	}
 
 	Viewport->InvalidateDisplay();
+}
+
+void FCurveEditorViewportClient::CapturedMouseMove(FViewport* Viewport, int32 X, int32 Y)
+{
+	MouseMove(Viewport, X, Y);
 }
 
 bool FCurveEditorViewportClient::InputAxis(FViewport* Viewport, int32 ControllerId, FKey Key, float Delta, float DeltaTime, int32 NumSamples, bool bGamepad)
@@ -1409,20 +1437,20 @@ FColor FCurveEditorViewportClient::GetLineColor(FCurveEdInterface* EdInterface, 
 			float Value;
 
 			Value = EdInterface->EvalSub(0, InVal);
-			Value *= 255.9f;
-			StepColor.R = FMath::TruncToInt(FMath::Clamp<float>(Value, 0.f, 255.9f));
+			Value *= 255.f;
+			StepColor.R = FMath::RoundToInt(FMath::Clamp<float>(Value, 0.f, 255.f));
 			Value = EdInterface->EvalSub(1, InVal);
-			Value *= 255.9f;
-			StepColor.G = FMath::TruncToInt(FMath::Clamp<float>(Value, 0.f, 255.9f));
+			Value *= 255.f;
+			StepColor.G = FMath::RoundToInt(FMath::Clamp<float>(Value, 0.f, 255.f));
 			Value = EdInterface->EvalSub(2, InVal);
-			Value *= 255.9f;
-			StepColor.B = FMath::TruncToInt(FMath::Clamp<float>(Value, 0.f, 255.9f));
+			Value *= 255.f;
+			StepColor.B = FMath::RoundToInt(FMath::Clamp<float>(Value, 0.f, 255.f));
 		}
 		else
 		{
-			StepColor.R = FMath::TruncToInt(FMath::Clamp<float>(EdInterface->EvalSub(0, InVal), 0.f, 255.9f));
-			StepColor.G = FMath::TruncToInt(FMath::Clamp<float>(EdInterface->EvalSub(1, InVal), 0.f, 255.9f));
-			StepColor.B = FMath::TruncToInt(FMath::Clamp<float>(EdInterface->EvalSub(2, InVal), 0.f, 255.9f));
+			StepColor.R = FMath::RoundToInt(FMath::Clamp<float>(EdInterface->EvalSub(0, InVal), 0.f, 255.f));
+			StepColor.G = FMath::RoundToInt(FMath::Clamp<float>(EdInterface->EvalSub(1, InVal), 0.f, 255.f));
+			StepColor.B = FMath::RoundToInt(FMath::Clamp<float>(EdInterface->EvalSub(2, InVal), 0.f, 255.f));
 		}
 		StepColor.A = 255;
 	}
@@ -1433,12 +1461,12 @@ FColor FCurveEditorViewportClient::GetLineColor(FCurveEdInterface* EdInterface, 
 			float Value;
 
 			Value = EdInterface->EvalSub(0, InVal);
-			Value *= 255.9f;
-			StepColor.R = FMath::TruncToInt(FMath::Clamp<float>(Value, 0.f, 255.9f));
+			Value *= 255.f;
+			StepColor.R = FMath::RoundToInt(FMath::Clamp<float>(Value, 0.f, 255.f));
 		}
 		else
 		{
-			StepColor.R = FMath::TruncToInt(FMath::Clamp<float>(EdInterface->EvalSub(0, InVal), 0.f, 255.9f));
+			StepColor.R = FMath::RoundToInt(FMath::Clamp<float>(EdInterface->EvalSub(0, InVal), 0.f, 255.f));
 		}
 		StepColor.G = StepColor.R;
 		StepColor.B = StepColor.R;

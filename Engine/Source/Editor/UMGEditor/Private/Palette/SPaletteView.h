@@ -60,6 +60,8 @@ private:
 	 */
 	void OnFavoriteToggled(ECheckBoxState InNewState);
 
+	EVisibility GetFavoritedStateVisibility() const;
+
 	virtual FReply OnMouseButtonDoubleClick(const FGeometry& InMyGeometry, const FPointerEvent& InMouseEvent) override;
 
 private:
@@ -83,6 +85,9 @@ public:
 
 	/** Gets the text currently displayed in the search box. */
 	FText GetSearchText() const;
+
+	/** On item clicked in palette view */
+	void WidgetPalette_OnClick(TSharedPtr<FWidgetViewModel> SelectedItem);
 
 	/** On Selected template widget changed in palette view */
 	void WidgetPalette_OnSelectionChanged(TSharedPtr<FWidgetViewModel> SelectedItem, ESelectInfo::Type SelectInfo);

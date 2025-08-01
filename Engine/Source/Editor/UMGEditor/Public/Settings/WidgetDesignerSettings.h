@@ -2,12 +2,30 @@
 
 #pragma once
 
+#include "Containers/EnumAsByte.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Object.h"
 #include "Engine/DeveloperSettings.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
 #include "WidgetPaletteFavorites.h"
+
 #include "WidgetDesignerSettings.generated.h"
+
+class UObject;
+class UWidgetPaletteFavorites;
+
+UENUM()
+enum EDisplayOnCompile : int
+{
+	DoC_ErrorsOrWarnings,
+	DoC_ErrorsOnly,
+	DoC_WarningsOnly,
+	DoC_Never,
+};
 
 /**
  * Implements the settings for the Widget Blueprint Designer.
@@ -42,6 +60,10 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, config, Category = Dragging)
 	bool bLockToPanelOnDragByDefault;
+	
+	/** The default preview resolution in the designer.*/
+	UPROPERTY(EditAnywhere, config, Category = Visuals)
+	FUintVector2 DefaultPreviewResolution;
 
 	/**
 	 * Should the designer show outlines by default?
@@ -62,11 +84,19 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, config, Category = Interaction)
 	bool bRespectLocks;
+
+	/** Setting to automatically create compile tab based on compile results */
+	UPROPERTY(EditAnywhere, config, Category = Interaction)
+	TEnumAsByte<EDisplayOnCompile> CreateOnCompile;
+
+	/** Setting to automatically dismiss compile tab based on compile results */
+	UPROPERTY(EditAnywhere, config, Category = Interaction)
+	TEnumAsByte<EDisplayOnCompile> DismissOnCompile;
 	
 	/**
 	 * List of Favorites widgets used to populate the Favorites Palette
 	 */
 	UPROPERTY()
-	UWidgetPaletteFavorites* Favorites;
+	TObjectPtr<UWidgetPaletteFavorites> Favorites;
 
 };

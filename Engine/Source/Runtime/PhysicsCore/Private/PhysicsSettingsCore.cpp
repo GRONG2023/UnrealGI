@@ -3,6 +3,8 @@
 #include "PhysicsSettingsCore.h"
 #include "Chaos/ChaosEngineInterface.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PhysicsSettingsCore)
+
 UPhysicsSettingsCore* UPhysicsSettingsCore::DefaultSettings = nullptr;
 
 void UPhysicsSettingsCore::SetDefaultSettings(UPhysicsSettingsCore* InSettings)
@@ -30,12 +32,13 @@ UPhysicsSettingsCore::UPhysicsSettingsCore(const FObjectInitializer& ObjectIniti
 	, SimulateScratchMemorySize(262144)
 	, RagdollAggregateThreshold(4)
 	, TriangleMeshTriangleMinAreaThreshold(5.0f)
+	, bEnableEnhancedDeterminism(false)
 	, bEnableShapeSharing(false)
 	, bEnablePCM(true)
 	, bEnableStabilization(false)
 	, bWarnMissingLocks(true)
 	, bEnable2DPhysics(false)
-	,bDefaultHasComplexCollision_DEPRECATED(true)
+	, bDefaultHasComplexCollision_DEPRECATED(true)
 	, BounceThresholdVelocity(200.f)
 	, MaxAngularVelocity(3600)	//10 revolutions per second
 	, ContactOffsetMultiplier(0.02f)
@@ -55,5 +58,8 @@ void UPhysicsSettingsCore::PostInitProperties()
 	{
 		DefaultShapeComplexity = bDefaultHasComplexCollision_DEPRECATED ? CTF_UseSimpleAndComplex : CTF_UseSimpleAsComplex;
 	}
+
+	SolverOptions.MoveRenamedPropertyValues();
 }
+
 

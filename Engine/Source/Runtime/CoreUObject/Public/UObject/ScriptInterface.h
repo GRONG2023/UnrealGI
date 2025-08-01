@@ -6,46 +6,55 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
 #include "UObject/UObjectGlobals.h"
 #include "Templates/Casts.h"
+#include "Templates/UnrealTemplate.h"
+
+#include <type_traits>
 
 /**
- * FScriptInterface
- *
- * This utility class stores the FProperty data for a native interface property.  ObjectPointer and InterfacePointer point to different locations in the same UObject.
+ * This utility class stores the FProperty data for an interface property used in both blueprint and native code.
+ * For objects natively implementing an interface, ObjectPointer and InterfacePointer point to different locations in the same UObject.
+ * For objects that only implement an interface in blueprint, only ObjectPointer will be set because there is no native representation.
+ * UClass::ImplementsInterface can be used along with Execute_ event wrappers to properly handle BP-implemented interfaces.
  */
 class FScriptInterface
 {
 private:
 	/**
-	 * A pointer to a UObject that implements a native interface.
+	 * A pointer to a UObject that implements an interface.
 	 */
-	UObject*	ObjectPointer;
+	TObjectPtr<UObject>	ObjectPointer = nullptr;
 
 	/**
-	 * Pointer to the location of the interface object within the UObject referenced by ObjectPointer.
+	 * For native interfaces, pointer to the location of the interface object within the UObject referenced by ObjectPointer.
 	 */
-	void*		InterfacePointer;
+	void*		InterfacePointer = nullptr;
 
+protected:
 	/**
 	 * Serialize ScriptInterface
 	 */
-	FArchive& Serialize(FArchive& Ar, class UClass* InterfaceType);
+	COREUOBJECT_API FArchive& Serialize(FArchive& Ar, class UClass* InterfaceType);
 
 public:
 	/**
 	 * Default constructor
 	 */
-	FScriptInterface( UObject* InObjectPointer=NULL, void* InInterfacePointer=NULL )
+	FScriptInterface() = default;
+
+	/**
+	 * Construction from object and interface
+	 */
+	FScriptInterface( UObject* InObjectPointer, void* InInterfacePointer )
 	: ObjectPointer(InObjectPointer), InterfacePointer(InInterfacePointer)
 	{}
 
-	void operator=(const FScriptInterface& Other)
-	{
-		ObjectPointer = Other.ObjectPointer;
-		InterfacePointer = Other.InterfacePointer;
-	}
+	/**
+	 * Copyable
+	 */
+	FScriptInterface(const FScriptInterface&) = default;
+	FScriptInterface& operator=(const FScriptInterface&) = default;
 
 	/**
 	 * Returns the ObjectPointer contained by this FScriptInterface
@@ -58,19 +67,19 @@ public:
 	/**
 	 * Returns the ObjectPointer contained by this FScriptInterface
 	 */
-	FORCEINLINE UObject*& GetObjectRef()
+	FORCEINLINE TObjectPtr<UObject>& GetObjectRef()
 	{
 		return ObjectPointer;
 	}
 
 	/**
-	 * Returns the pointer to the interface
+	 * Returns the pointer to the native interface if it is valid
 	 */
 	FORCEINLINE void* GetInterface() const
 	{
-		// only allow access to InterfacePointer if we have a valid ObjectPointer.  This is necessary because the garbage collector will set ObjectPointer to NULL
-		// without using the accessor methods
-		return ObjectPointer != NULL ? InterfacePointer : NULL;
+		// Only access the InterfacePointer if we have a valid ObjectPointer. This is necessary because garbage collection may only clear the ObjectPointer.
+		// This will also return null for objects that only implement the interface in a blueprint class because there is no native representation.
+		return ObjectPointer ? InterfacePointer : nullptr;
 	}
 
 	/**
@@ -79,9 +88,9 @@ public:
 	FORCEINLINE void SetObject( UObject* InObjectPointer )
 	{
 		ObjectPointer = InObjectPointer;
-		if ( ObjectPointer == NULL )
+		if ( ObjectPointer == nullptr )
 		{
-			SetInterface(NULL);
+			SetInterface(nullptr);
 		}
 	}
 
@@ -109,6 +118,11 @@ public:
 	{
 		Collector.AddReferencedObject(ObjectPointer);
 	}
+
+	friend inline uint32 GetTypeHash(const FScriptInterface& Instance)
+	{
+		return GetTypeHash(Instance.InterfacePointer);
+	}
 };
 
 
@@ -117,15 +131,19 @@ template<> struct TIsPODType<class FScriptInterface> { enum { Value = true }; };
 template<> struct TIsZeroConstructType<class FScriptInterface> { enum { Value = true }; };
 
 /**
- * Templated version of FScriptInterface, which provides accessors and operators for referencing the interface portion of a UObject that implements a native interface.
+ * Templated version of FScriptInterface, which provides accessors and operators for referencing the interface portion of an object implementing an interface.
+ * This type is only useful with native interfaces, UClass::ImplementsInterface should be used to check for blueprint interfaces.
  */
-template< class InterfaceType > class TScriptInterface : public FScriptInterface
+template <typename InInterfaceType>
+class TScriptInterface : public FScriptInterface
 {
 public:
+	using InterfaceType = InInterfaceType;
+	
 	/**
 	 * Default constructor
 	 */
-	TScriptInterface() {}
+	TScriptInterface() = default;
 
 	/**
 	 * Construction from nullptr
@@ -133,54 +151,131 @@ public:
 	TScriptInterface(TYPE_OF_NULLPTR) {}
 
 	/**
-	 * Standard constructor.
-	 *
-	 * @param	SourceObject	a pointer to a UObject that implements the InterfaceType native interface class.
+	 * Construction from an object type that may natively implement InterfaceType
 	 */
-	template <class UObjectType> TScriptInterface( UObjectType* SourceObject )
+	template <
+		typename U,
+		decltype(ImplicitConv<UObject*>(std::declval<U>()))* = nullptr
+	>
+	FORCEINLINE TScriptInterface(U&& Source)
 	{
-		(*this) = SourceObject;
+		// Always set the object
+		UObject* SourceObject = ImplicitConv<UObject*>(Source);
+		SetObject(SourceObject);
+
+		if constexpr (std::is_base_of<InInterfaceType, std::remove_pointer_t<std::remove_reference_t<U>>>::value)
+		{
+			// If we know at compile time that we got passed some subclass of InInterfaceType, set it
+			// without a cast (avoiding the cast also allows us to not require linking to its module)
+			SetInterface(Source);
+		}
+		else
+		{
+			// Tries to set the native interface instance, this will set it to null for BP-implemented interfaces
+			InInterfaceType* SourceInterface = Cast<InInterfaceType>(SourceObject);
+			SetInterface(SourceInterface);
+		}
 	}
+
 	/**
-	 * Copy constructor
+	 * Construction from another script interface of a compatible interface type
 	 */
-	TScriptInterface( const TScriptInterface& Other )
+	template <
+		typename OtherInterfaceType,
+		decltype(ImplicitConv<InInterfaceType*>(std::declval<OtherInterfaceType*>()))* = nullptr
+	>
+	FORCEINLINE TScriptInterface(const TScriptInterface<OtherInterfaceType>& Other)
 	{
 		SetObject(Other.GetObject());
-		SetInterface(Other.GetInterface());
+
+		InInterfaceType* SourceInterface = Other.GetInterface();
+		SetInterface(SourceInterface);
 	}
 
 	/**
-	 * Assignment operator.
-	 *
-	 * @param	SourceObject	a pointer to a UObject that implements the InterfaceType native interface class.
+	 * Assignment from an object type that may natively implement InterfaceType
 	 */
-	template<class UObjectType> InterfaceType& operator=( UObjectType* SourceObject )
+	template <typename ObjectType>
+	TScriptInterface(TObjectPtr<ObjectType> SourceObject)
 	{
+		// Always set the object
 		SetObject(SourceObject);
-		
-		InterfaceType* SourceInterface = Cast<InterfaceType>(SourceObject);
-		SetInterface( SourceInterface );
 
-		return *((InterfaceType*)GetInterface());
+		if constexpr (std::is_base_of<InInterfaceType, ObjectType>::value)
+		{
+			// If we know at compile time that we got passed some subclass of InInterfaceType, set it
+			// without a cast (avoiding the cast also allows us to not require linking to its module)
+			SetInterface(SourceObject.Get());
+		}
+		else
+		{
+			// Tries to set the native interface instance, this will set it to null for BP-implemented interfaces
+			InInterfaceType* SourceInterface = Cast<InInterfaceType>(ToRawPtr(SourceObject));
+			SetInterface(SourceInterface);
+		}
 	}
+
+	/**
+	 * Copyable
+	 */
+	TScriptInterface(const TScriptInterface&) = default;
+	TScriptInterface& operator=(const TScriptInterface&) = default;
 
 	/**
 	 * Assignment from nullptr
 	 */
-	void operator=(TYPE_OF_NULLPTR)
+	TScriptInterface& operator=(TYPE_OF_NULLPTR)
 	{
 		*this = TScriptInterface();
+		return *this;
+	}
+
+	/**
+	 * Assignment from an object type that may natively implement InterfaceType
+	 */
+	template <
+		typename U,
+		decltype(ImplicitConv<UObject*>(std::declval<U>()))* = nullptr
+	>
+	TScriptInterface& operator=(U&& Source)
+	{
+		*this = TScriptInterface(Source);
+		return *this;
+	}
+
+	/**
+	 * Assignment from another script interface of a compatible interface type
+	 */
+	template <
+		typename OtherInterfaceType,
+		decltype(ImplicitConv<InInterfaceType*>(std::declval<OtherInterfaceType>()))* = nullptr
+	>
+	TScriptInterface& operator=(const TScriptInterface<OtherInterfaceType>& Other)
+	{
+		*this = TScriptInterface(Other);
+		return *this;
+	}
+
+	/**
+	 * Assignment from an object type that may natively implement InterfaceType
+	 */
+	template <typename ObjectType>
+	TScriptInterface& operator=(TObjectPtr<ObjectType> SourceObject)
+	{
+		*this = TScriptInterface(SourceObject);
+		return *this;
 	}
 
 	/**
 	 * Comparison operator, taking a pointer to InterfaceType
 	 */
-	FORCEINLINE bool operator==( const InterfaceType* Other ) const
+	template <typename OtherInterface, typename = decltype(ImplicitConv<InInterfaceType*>((OtherInterface*)nullptr))>
+	FORCEINLINE bool operator==( const OtherInterface* Other ) const
 	{
 		return GetInterface() == Other;
 	}
-	FORCEINLINE bool operator!=( const InterfaceType* Other ) const
+	template <typename OtherInterface, typename = decltype(ImplicitConv<InInterfaceType*>((OtherInterface*)nullptr))>
+	FORCEINLINE bool operator!=( const OtherInterface* Other ) const
 	{
 		return GetInterface() != Other;
 	}
@@ -198,35 +293,72 @@ public:
 	}
 
 	/**
-	 * Member access operator.  Provides transparent access to the interface pointer contained by this TScriptInterface
+	 * Comparison operator, taking a nullptr
 	 */
-	FORCEINLINE InterfaceType* operator->() const
+	FORCEINLINE bool operator==(TYPE_OF_NULLPTR) const
 	{
-		return (InterfaceType*)GetInterface();
+		return GetInterface() == nullptr;
+	}
+	FORCEINLINE bool operator!=(TYPE_OF_NULLPTR) const
+	{
+		return GetInterface() != nullptr;
 	}
 
 	/**
-	 * Dereference operator.  Provides transparent access to the interface pointer contained by this TScriptInterface
+	 * Member access operator.  Provides transparent access to the native interface pointer contained by this TScriptInterface
+	 */
+	FORCEINLINE InInterfaceType* operator->() const
+	{
+		return GetInterface();
+	}
+
+	/**
+	 * Dereference operator.  Provides transparent access to the native interface pointer contained by this TScriptInterface
 	 *
 	 * @return	a reference (of type InterfaceType) to the object pointed to by InterfacePointer
 	 */
-	FORCEINLINE InterfaceType& operator*() const
+	FORCEINLINE InInterfaceType& operator*() const
 	{
-		return *((InterfaceType*)GetInterface());
+		return *GetInterface();
 	}
 
 	/**
-	 * Boolean operator.  Provides transparent access to the interface pointer contained by this TScriptInterface.
-	 *
-	 * @return	true if InterfacePointer is non-NULL.
+	 * Returns the pointer to the interface
+	 */
+	FORCEINLINE InInterfaceType* GetInterface() const
+	{
+		return (InInterfaceType*)FScriptInterface::GetInterface();
+	}
+
+	/**
+	 * Sets the value of the InterfacePointer for this TScriptInterface
+	 */
+	FORCEINLINE void SetInterface(InInterfaceType* InInterfacePointer)
+	{
+		FScriptInterface::SetInterface((void*)InInterfacePointer);
+	}
+
+	/**
+	 * Boolean operator, returns true if this object natively implements InterfaceType.
+	 * This will return false for objects that only implement the interface in blueprint classes.
 	 */
 	FORCEINLINE explicit operator bool() const
 	{
-		return GetInterface() != NULL;
+		return GetInterface() != nullptr;
 	}
 
 	friend FArchive& operator<<( FArchive& Ar, TScriptInterface& Interface )
 	{
-		return Interface.Serialize(Ar, InterfaceType::UClassType::StaticClass());
+		return Interface.Serialize(Ar, InInterfaceType::UClassType::StaticClass());
 	}
 };
+
+template <typename InterfaceType>
+struct TCallTraits<TScriptInterface<InterfaceType>> : public TCallTraitsBase<TScriptInterface<InterfaceType>>
+{
+	using ConstPointerType = TScriptInterface<const InterfaceType>;
+};
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
+#endif

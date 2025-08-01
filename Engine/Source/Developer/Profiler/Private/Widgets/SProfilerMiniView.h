@@ -3,6 +3,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
+
+#if STATS
+
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "ProfilerCommon.h"
 #include "Layout/Geometry.h"
@@ -290,7 +293,7 @@ protected:
 	*/
 	const float FrameIndexToPosition( const int32 FrameIndex ) const
 	{
-		return FrameIndex*NumPixelsPerFrame;
+		return (float)FrameIndex * NumPixelsPerFrame;
 	}
 
 protected:
@@ -298,7 +301,7 @@ protected:
 
 	void UpdateNumPixelsPerSample()
 	{
-		NumPixelsPerSample = FMath::Max( (float)MIN_NUM_PIXELS_PER_SAMPLE, ThisGeometry.GetLocalSize().X / AllFrames.Num() );
+		NumPixelsPerSample = FMath::Max( (float)MIN_NUM_PIXELS_PER_SAMPLE, (float)ThisGeometry.GetLocalSize().X / (float)AllFrames.Num() );
 	}
 
 	const float GetNumPixelsPerSample() const
@@ -414,3 +417,5 @@ private:
 	/** True if the active timer is currently registered */
 	bool bIsActiveTimerRegistered;
 };
+
+#endif // STATS

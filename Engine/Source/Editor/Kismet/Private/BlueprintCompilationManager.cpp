@@ -2,6 +2,7 @@
 
 #include "BlueprintCompilationManager.h"
 
+#include "Async/Async.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "BlueprintCompilerExtension.h"
 #include "BlueprintEditorSettings.h"
@@ -11,30 +12,42 @@
 #include "Editor.h"
 #include "Editor/UnrealEdEngine.h"
 #include "Engine/Engine.h"
+#include "Editor/Transactor.h"
 #include "Engine/LevelScriptBlueprint.h"
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "Engine/TimelineTemplate.h"
 #include "FileHelpers.h"
 #include "FindInBlueprintManager.h"
+#include "HAL/LowLevelMemTracker.h"
 #include "IMessageLogListing.h"
+#include "INotifyFieldValueChanged.h"
+#include "K2Node_CreateDelegate.h"
 #include "K2Node_CustomEvent.h"
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_FunctionResult.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Kismet2/KismetReinstanceUtilities.h"
 #include "KismetCompiler.h"
+#include "Misc/ScopedSlowTask.h"
+#include "Misc/DataValidation.h"
+#include "Misc/PackageAccessTrackingOps.h"
 #include "ProfilingDebugging/ScopedTimers.h"
 #include "Serialization/ArchiveHasReferences.h"
 #include "Serialization/ArchiveReplaceObjectRef.h"
-#include "Settings/EditorProjectSettings.h"
+#include "ProfilingDebugging/LoadTimeTracker.h"
 #include "TickableEditorObject.h"
+#include "UObject/FortniteMainBranchObjectVersion.h"
 #include "UObject/MetaData.h"
 #include "UObject/ReferenceChainSearch.h"
 #include "UObject/UObjectHash.h"
 #include "Kismet2/KismetDebugUtilities.h"
 #include "BlueprintEditorModule.h"
+#include "Algo/TopologicalSort.h"
+#include "Animation/AnimBlueprint.h"
 #include "Stats/StatsHierarchical.h"
+#include "UObject/PropertyBagRepository.h"
+#include "UObject/OverridableManager.h"
 
 extern UNREALED_API UUnrealEdEngine* GUnrealEd;
 
@@ -87,14 +100,6 @@ struct FReinstancingJob;
 struct FSkeletonFixupData;
 struct FCompilerData;
 
-struct FBPCompilationManagerCPPResults
-{
-	const FCompilerNativizationOptions* CppOptions = nullptr;
-
-	TSharedPtr<FString> CppSource;
-	TSharedPtr<FString> HeaderSource;
-};
-
 struct FBPCompileRequestInternal
 {
 	FBPCompileRequestInternal(FBPCompileRequest InUserData)
@@ -103,7 +108,6 @@ struct FBPCompileRequestInternal
 	}
 
 	FBPCompileRequest UserData;
-	FBPCompilationManagerCPPResults CPPResults;
 };
 
 enum class EReparentClassOptions
@@ -127,19 +131,22 @@ struct FBlueprintCompilationManagerImpl : public FGCObject
 
 	void QueueForCompilation(const FBPCompileRequestInternal& CompileJob);
 	void CompileSynchronouslyImpl(const FBPCompileRequestInternal& Request);
-	void FlushCompilationQueueImpl(bool bSuppressBroadcastCompiled, TArray<UBlueprint*>* BlueprintsCompiled, TArray<UBlueprint*>* BlueprintsCompiledOrSkeletonCompiled, FUObjectSerializeContext* InLoadContext);
+	void FlushCompilationQueueImpl(bool bSuppressBroadcastCompiled, TArray<UBlueprint*>* BlueprintsCompiled, TArray<UBlueprint*>* BlueprintsCompiledOrSkeletonCompiled, FUObjectSerializeContext* InLoadContext, TMap<UClass*, TMap<UObject*, UObject*>>* OldToNewTemplates = nullptr);
+	void FixupDelegateProperties(const TArray<FCompilerData>& CurrentlyCompilingBPs);
 	void ProcessExtensions(const TArray<FCompilerData>& InCurrentlyCompilingBPs);
-	void FlushReinstancingQueueImpl();
+	void FlushReinstancingQueueImpl(bool bFindAndReplaceCDOReferences = false, TMap<UClass*, TMap<UObject*, UObject*>>* OldToNewTemplates = nullptr);
 	bool HasBlueprintsToCompile() const;
 	bool IsGeneratedClassLayoutReady() const;
 	void GetDefaultValue(const UClass* ForClass, const FProperty* Property, FString& OutDefaultValueAsString) const;
+	void VerifyNoQueuedRequests(const TArray<FCompilerData>& CurrentlyCompilingBPs);
 
 	static void ReparentHierarchies(const TMap<UClass*, UClass*>& OldClassToNewClass, EReparentClassOptions Options);
 	static void BuildDSOMap(UObject* OldObject, UObject* NewObject, TMap<UObject*, UObject*>& OutOldToNewDSO);
-	static void ReinstanceBatch(TArray<FReinstancingJob>& Reinstancers, TMap< UClass*, UClass* >& InOutOldToNewClassMap, FUObjectSerializeContext* InLoadContext);
+	static void ReinstanceBatch(TArray<FReinstancingJob>& Reinstancers, TMap< UClass*, UClass* >& InOutOldToNewClassMap, FUObjectSerializeContext* InLoadContext, TMap<UClass*, TMap<UObject*, UObject*>>* OldToNewTemplates = nullptr);
 	static UClass* FastGenerateSkeletonClass(UBlueprint* BP, FKismetCompilerContext& CompilerContext, bool bIsSkeletonOnly, TArray<FSkeletonFixupData>& OutSkeletonFixupData);
 	static bool IsQueuedForCompilation(UBlueprint* BP);
-	static UObject* GetOuterForRename(UClass* ForClass);
+	static void ConformToParentAndInterfaces(UBlueprint* BP);
+	static void RelinkSkeleton(UClass* SkeletonToRelink);
 
 	// Declaration of archive to fix up bytecode references of blueprints that are actively compiled:
 	class FFixupBytecodeReferences : public FArchiveUObject
@@ -155,24 +162,29 @@ struct FBlueprintCompilationManagerImpl : public FGCObject
 	// Extension data, could be organized in many ways, but this provides an easy way
 	// to extend blueprint compilation after the graph has been pruned and functions
 	// have been generated (but before code is generated):
-	TMap<UClass*, TArray<UBlueprintCompilerExtension*> > CompilerExtensions;
+	TMap<TObjectPtr<UClass>, TArray<TObjectPtr<UBlueprintCompilerExtension>> > CompilerExtensions;
 
 	// Queued requests to be processed in the next FlushCompilationQueueImpl call:
 	TArray<FBPCompileRequestInternal> QueuedRequests;
 	
 	// Data stored for reinstancing, which finishes much later than compilation,
 	// populated by FlushCompilationQueueImpl, cleared by FlushReinstancingQueueImpl:
-	TMap<UClass*, UClass*> ClassesToReinstance;
+	TMap<TObjectPtr<UClass>, TObjectPtr<UClass>> ClassesToReinstance;
 	
 	// Map to old default values, useful for providing access to this data throughout
 	// the compilation process:
-	TMap<UBlueprint*, UObject*> OldCDOs;
+	TMap<TObjectPtr<UBlueprint>, TObjectPtr<UObject>> OldCDOs;
 	
 	// Blueprints that should be saved after the compilation pass is complete:
 	TArray<UBlueprint*> CompiledBlueprintsToSave;
 
 	// State stored so that we can check what stage of compilation we're in:
 	bool bGeneratedClassLayoutReady;
+
+#if WITH_EDITOR
+	// Used to avoid reinstanciation on the GT while compiling on the loading thread
+	FCriticalSection Lock;
+#endif
 };
 
 // free function that we use to cross a module boundary (from CoreUObject to here)
@@ -198,7 +210,7 @@ FBlueprintCompilationManagerImpl::~FBlueprintCompilationManagerImpl()
 
 void FBlueprintCompilationManagerImpl::AddReferencedObjects(FReferenceCollector& Collector)
 {
-	for(TPair<UClass*, TArray<UBlueprintCompilerExtension*>>& Extensions : CompilerExtensions)
+	for(auto& Extensions : CompilerExtensions)
 	{
 		Collector.AddReferencedObject(Extensions.Key);
 		Collector.AddReferencedObjects(Extensions.Value);
@@ -225,8 +237,28 @@ void FBlueprintCompilationManagerImpl::RegisterCompilerExtension(TSubclassOf<UBl
 
 void FBlueprintCompilationManagerImpl::QueueForCompilation(const FBPCompileRequestInternal& CompileJob)
 {
+#if WITH_EDITOR
+	FScopeLock ScopeLock(&Lock);
+#endif
 	if(!CompileJob.UserData.BPToCompile->bQueuedForCompilation)
 	{
+		if(GCompilingBlueprint)
+		{
+			FString CurrentlyCompiling;
+			for (const TPair<TObjectPtr<UClass>, TObjectPtr<UClass>>& CompilerData : ClassesToReinstance)
+			{
+				if (!CompilerData.Value)
+				{
+					continue;
+				}
+				CurrentlyCompiling += CompilerData.Value->GetName() + TEXT(" ");
+			}
+			ensureMsgf(false, 
+				TEXT("Attempting to enqueue %s for compile while compiling: %s"), 
+				*CompileJob.UserData.BPToCompile->GetName(),
+				*CurrentlyCompiling);
+		}
+
 		CompileJob.UserData.BPToCompile->bQueuedForCompilation = true;
 		QueuedRequests.Add(CompileJob);
 	}
@@ -234,17 +266,21 @@ void FBlueprintCompilationManagerImpl::QueueForCompilation(const FBPCompileReque
 
 void FBlueprintCompilationManagerImpl::CompileSynchronouslyImpl(const FBPCompileRequestInternal& Request)
 {
-	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
+	TRACE_CPUPROFILER_EVENT_SCOPE(CompileSynchronouslyImpl);
 
+#if WITH_EDITOR
+	FScopeLock ScopeLock(&Lock);
+#endif
 	Request.UserData.BPToCompile->bQueuedForCompilation = true;
 
-	const bool bIsRegeneratingOnLoad		= (Request.UserData.CompileOptions & EBlueprintCompileOptions::IsRegeneratingOnLoad		) != EBlueprintCompileOptions::None;
-	const bool bRegenerateSkeletonOnly		= (Request.UserData.CompileOptions & EBlueprintCompileOptions::RegenerateSkeletonOnly	) != EBlueprintCompileOptions::None;
-	const bool bSkipGarbageCollection		= (Request.UserData.CompileOptions & EBlueprintCompileOptions::SkipGarbageCollection	) != EBlueprintCompileOptions::None
+	const bool bIsRegeneratingOnLoad		= (Request.UserData.CompileOptions & EBlueprintCompileOptions::IsRegeneratingOnLoad				) != EBlueprintCompileOptions::None;
+	const bool bRegenerateSkeletonOnly		= (Request.UserData.CompileOptions & EBlueprintCompileOptions::RegenerateSkeletonOnly			) != EBlueprintCompileOptions::None;
+	const bool bSkipGarbageCollection		= (Request.UserData.CompileOptions & EBlueprintCompileOptions::SkipGarbageCollection			) != EBlueprintCompileOptions::None
 		|| bRegenerateSkeletonOnly;
-	const bool bBatchCompile				= (Request.UserData.CompileOptions & EBlueprintCompileOptions::BatchCompile				) != EBlueprintCompileOptions::None;
-	const bool bSkipReinstancing			= (Request.UserData.CompileOptions & EBlueprintCompileOptions::SkipReinstancing			) != EBlueprintCompileOptions::None;
-	const bool bSkipSaving					= (Request.UserData.CompileOptions & EBlueprintCompileOptions::SkipSave					) != EBlueprintCompileOptions::None;
+	const bool bBatchCompile				= (Request.UserData.CompileOptions & EBlueprintCompileOptions::BatchCompile						) != EBlueprintCompileOptions::None;
+	const bool bSkipReinstancing			= (Request.UserData.CompileOptions & EBlueprintCompileOptions::SkipReinstancing					) != EBlueprintCompileOptions::None;
+	const bool bSkipSaving					= (Request.UserData.CompileOptions & EBlueprintCompileOptions::SkipSave							) != EBlueprintCompileOptions::None;
+	const bool bFindAndReplaceCDOReferences	= (Request.UserData.CompileOptions & EBlueprintCompileOptions::IncludeCDOInReferenceReplacement	) != EBlueprintCompileOptions::None;
 
 	ensure(!bIsRegeneratingOnLoad); // unexpected code path, compile on load handled with different function call
 	ensure(!bSkipReinstancing); // This is an internal option, should not go through CompileSynchronouslyImpl
@@ -270,21 +306,12 @@ void FBlueprintCompilationManagerImpl::CompileSynchronouslyImpl(const FBPCompile
 	// We suppress normal compilation broadcasts because the old code path 
 	// did this after GC and we want to match the old behavior:
 	const bool bSuppressBroadcastCompiled = true;
+	TMap<UClass*, TMap<UObject*, UObject*>> OldToNewTemplates;
 	TArray<UBlueprint*> CompiledBlueprints;
 	TArray<UBlueprint*> SkeletonCompiledBlueprints;
-	FlushCompilationQueueImpl(bSuppressBroadcastCompiled, &CompiledBlueprints, &SkeletonCompiledBlueprints, nullptr);
-	FlushReinstancingQueueImpl();
+	FlushCompilationQueueImpl(bSuppressBroadcastCompiled, &CompiledBlueprints, &SkeletonCompiledBlueprints, nullptr, bFindAndReplaceCDOReferences ? &OldToNewTemplates : nullptr);
+	FlushReinstancingQueueImpl(bFindAndReplaceCDOReferences, bFindAndReplaceCDOReferences ? &OldToNewTemplates : nullptr);
 	
-	if( Request.UserData.ClientResultsLog && Request.UserData.ClientResultsLog->bLogDetailedResults)
-	{
-		Request.UserData.ClientResultsLog->Note(
-			*FText::Format(
-				LOCTEXT("TotalCompiledBPs", "Compiled {0} total blueprints"),
-				CompiledBlueprints.Num()
-			).ToString()
-		);
-	}
-
 	if (FBlueprintEditorUtils::IsLevelScriptBlueprint(Request.UserData.BPToCompile) && !bRegenerateSkeletonOnly)
 	{
 		// When the Blueprint is recompiled, then update the bound events for level scripting
@@ -304,7 +331,7 @@ void FBlueprintCompilationManagerImpl::CompileSynchronouslyImpl(const FBPCompile
 
 	if ( GEditor && !bRegenerateSkeletonOnly)
 	{
-		DECLARE_SCOPE_HIERARCHICAL_COUNTER(BroadcastBlueprintReinstanced)
+		TRACE_CPUPROFILER_EVENT_SCOPE(BroadcastBlueprintReinstanced)
 
 		// Make sure clients know they're being reinstanced as part of blueprint compilation. After this point
 		// compilation is completely done:
@@ -316,15 +343,13 @@ void FBlueprintCompilationManagerImpl::CompileSynchronouslyImpl(const FBPCompile
 
 	if(!bSkipGarbageCollection)
 	{
-		DECLARE_SCOPE_HIERARCHICAL_COUNTER(CollectGarbage)
-
 		TGuardValue<bool> GuardTemplateNameFlag(GIsGCingAfterBlueprintCompile, true);
 		CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
 	}
 
 	if (!bRegenerateSkeletonOnly)
 	{
-		DECLARE_SCOPE_HIERARCHICAL_COUNTER(BroadcastChanged)
+		TRACE_CPUPROFILER_EVENT_SCOPE(BroadcastChanged);
 
 		for(UBlueprint* BP : SkeletonCompiledBlueprints)
 		{
@@ -338,7 +363,7 @@ void FBlueprintCompilationManagerImpl::CompileSynchronouslyImpl(const FBPCompile
 
 	if (!bBatchCompile && !bRegenerateSkeletonOnly)
 	{
-		DECLARE_SCOPE_HIERARCHICAL_COUNTER(BroadCastCompiled)
+		TRACE_CPUPROFILER_EVENT_SCOPE(BroadCastCompiled);
 
 		for(UBlueprint* BP : SkeletonCompiledBlueprints)
 		{
@@ -386,6 +411,22 @@ struct FSkeletonFixupData
 {
 	FSimpleMemberReference MemberReference;
 	FProperty* DelegateProperty;
+
+	template<typename T>
+	static void FixUpDelegateProperty(T* DelegateProperty, const FSimpleMemberReference& MemberReference, UClass* SkeletonGeneratedClass)
+	{
+		check(DelegateProperty);
+	
+		UFunction* OldFunction = DelegateProperty->SignatureFunction;
+		DelegateProperty->SignatureFunction = FMemberReference::ResolveSimpleMemberReference<UFunction>(MemberReference, SkeletonGeneratedClass);
+		UStruct* Owner = DelegateProperty->template GetOwnerChecked<UStruct>();
+
+		int32 Index = Owner->ScriptAndPropertyObjectReferences.Find(OldFunction);
+		if (Index != INDEX_NONE)
+		{
+			Owner->ScriptAndPropertyObjectReferences[Index] = DelegateProperty->SignatureFunction.Get();
+		}
+	}
 };
 
 struct FCompilerData
@@ -395,7 +436,6 @@ struct FCompilerData
 		ECompilationManagerJobType InJobType, 
 		FCompilerResultsLog* InResultsLogOverride, 
 		EBlueprintCompileOptions UserOptions, 
-		const FBPCompilationManagerCPPResults& CPPResults,
 		bool bBytecodeOnly)
 	{
 		check(InBP);
@@ -423,27 +463,19 @@ struct FCompilerData
 		InternalOptions.bSkipDefaultObjectValidation = (UserOptions & EBlueprintCompileOptions::SkipDefaultObjectValidation) != EBlueprintCompileOptions::None;
 		InternalOptions.bSkipFiBSearchMetaUpdate = (UserOptions & EBlueprintCompileOptions::SkipFiBSearchMetaUpdate) != EBlueprintCompileOptions::None;
 		InternalOptions.bUseDeltaSerializationDuringReinstancing = (UserOptions & EBlueprintCompileOptions::UseDeltaSerializationDuringReinstancing) != EBlueprintCompileOptions::None;
+		InternalOptions.bSkipNewVariableDefaultsDetection = (UserOptions & EBlueprintCompileOptions::SkipNewVariableDefaultsDetection) != EBlueprintCompileOptions::None;
 		InternalOptions.CompileType = bBytecodeOnly ? EKismetCompileType::BytecodeOnly : EKismetCompileType::Full;
-
-		if(!bBytecodeOnly && CPPResults.CppOptions)
-		{
-			InternalOptions.OutCppSourceCode = CPPResults.CppSource;
-			InternalOptions.OutHeaderSourceCode = CPPResults.HeaderSource;
-			InternalOptions.NativizationOptions = *CPPResults.CppOptions;
-			InternalOptions.CompileType = EKismetCompileType::Cpp;
-		}
 
 		Compiler = FKismetCompilerContext::GetCompilerForBP(BP, *ActiveResultsLog, InternalOptions);
 	}
 
 	bool IsSkeletonOnly() const { return JobType == ECompilationManagerJobType::SkeletonOnly; }
-	bool IsCppCompileType() const { return InternalOptions.CompileType == EKismetCompileType::Cpp; }
 	bool ShouldSetTemporaryBlueprintFlags() const { return JobType != ECompilationManagerJobType::RelinkOnly; }
 	bool ShouldResetErrorState() const { return JobType == ECompilationManagerJobType::Normal && InternalOptions.CompileType != EKismetCompileType::BytecodeOnly; }
 	bool ShouldValidate() const { return JobType == ECompilationManagerJobType::Normal; }
 	bool ShouldRegenerateSkeleton() const { return JobType != ECompilationManagerJobType::RelinkOnly; }
 	bool ShouldMarkUpToDateAfterSkeletonStage() const { return IsSkeletonOnly(); }
-	bool ShouldReconstructNodes() const { return JobType == ECompilationManagerJobType::Normal; }
+	bool ShouldReconstructNodes() const { return JobType == ECompilationManagerJobType::Normal || (!IsSkeletonOnly() && BP->bIsRegeneratingOnLoad); }
 	bool ShouldSkipReinstancerCreation() const { return (IsSkeletonOnly() && (!BP->ParentClass || BP->ParentClass->IsNative())); }
 	bool ShouldInitiateReinstancing() const { return JobType == ECompilationManagerJobType::Normal || BP->bIsRegeneratingOnLoad; }
 	bool ShouldCompileClassLayout() const { return JobType == ECompilationManagerJobType::Normal; }
@@ -453,7 +485,8 @@ struct FCompilerData
 	bool ShouldValidateClassDefaultObject() const { return JobType == ECompilationManagerJobType::Normal && !InternalOptions.bSkipDefaultObjectValidation; }
 	bool ShouldUpdateBlueprintSearchMetadata() const { return JobType == ECompilationManagerJobType::Normal && !InternalOptions.bSkipFiBSearchMetaUpdate; }
 	bool UseDeltaSerializationDuringReinstancing() const { return InternalOptions.bUseDeltaSerializationDuringReinstancing; }
-
+	bool ShouldSkipNewVariableDefaultsDetection() const { return InternalOptions.bSkipNewVariableDefaultsDetection; }
+	
 	UBlueprint* BP;
 	FCompilerResultsLog* ActiveResultsLog;
 	TUniquePtr<FCompilerResultsLog> ResultsLog;
@@ -461,6 +494,8 @@ struct FCompilerData
 	FKismetCompilerOptions InternalOptions;
 	TSharedPtr<FBlueprintCompileReinstancer> Reinstancer;
 	TArray<FSkeletonFixupData> SkeletonFixupData;
+	/** variables that are new to the generated class and will need their default set (can occur when a new variable is added to a BP's ancestor class) */
+	TArray<FBPVariableDescription> NewDefaultVariables;	
 
 	ECompilationManagerJobType JobType;
 	bool bPackageWasDirty;
@@ -479,6 +514,31 @@ struct FReinstancingJob
 
 	// always set:
 	TPair<UClass*, UClass*> OldToNew;
+
+	struct FArchetypeInfo
+	{
+		FArchetypeInfo(UObject* Archetype)
+			: Archetype(Archetype)
+			, ArchetypeTemplate(Archetype ? Archetype->GetArchetype() : nullptr)
+		{}
+
+		bool operator==(const FArchetypeInfo& Other) const
+		{
+			return Archetype == Other.Archetype;
+		}
+
+		friend int32 GetTypeHash(const FArchetypeInfo& Info)
+		{
+			return GetTypeHash(Info.Archetype);
+		}
+
+		UObject* Archetype = nullptr;
+		UObject* ArchetypeTemplate;
+	};
+
+
+	// Old archetype to re-instantiate and its old associated template
+	TArray<FArchetypeInfo> OldArchetypeObjects;
 };
 
 FReinstancingJob::FReinstancingJob(TSharedPtr<FBlueprintCompileReinstancer> InReinstancer)
@@ -508,19 +568,33 @@ FReinstancingJob::FReinstancingJob(TPair<UClass*, UClass*> InOldToNew)
 {
 }
 
-namespace SkelReinstUtils
+namespace UE::Kismet::BlueprintCompilationManager::Private
 {
-	/** Flag to use the new FBlueprintCompileReinstancer::MoveDependentSkelToReinst and avoid problematic recursion during reinstancing */
-	static bool bEnableSkelReinstUpdate = false;
-	static FAutoConsoleVariableRef CVarEnableSkelReinstUpdate(
-		TEXT("BP.bEnableSkelReinstUpdate"), bEnableSkelReinstUpdate,
-		TEXT("If true the Reinstancing of SKEL classes will use the new FBlueprintCompileReinstancer::MoveDependentSkelToReinst(o(n)) instead of the old MoveSkelCDOAside (o(n^2))"),
-		ECVF_Default);
+	namespace ConsoleVariables
+	{
+		/** Flag to use the new FBlueprintCompileReinstancer::MoveDependentSkelToReinst and avoid problematic recursion during reinstancing */
+		static bool bEnableSkelReinstUpdate = true;
+		static FAutoConsoleVariableRef CVarEnableSkelReinstUpdate(
+			TEXT("BP.bEnableSkelReinstUpdate"), bEnableSkelReinstUpdate,
+			TEXT("If true the Reinstancing of SKEL classes will use the new FBlueprintCompileReinstancer::MoveDependentSkelToReinst(o(n)) instead of the old MoveSkelCDOAside (o(n^2))"),
+			ECVF_Default);
+
+		/** Flag to disable faster compiles for individual blueprints if they have no function signature changes */
+		static bool bForceAllDependenciesToRecompile = false;
+		static FAutoConsoleVariableRef CVarForceAllDependenciesToRecompile(
+			TEXT("BP.bForceAllDependenciesToRecompile"), bForceAllDependenciesToRecompile,
+			TEXT("If true all dependencies will be bytecode-compiled even when all referenced functions have no signature changes. Intended for compiler development/debugging purposes."),
+			ECVF_Default);
+	}
 }
 
-void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressBroadcastCompiled, TArray<UBlueprint*>* BlueprintsCompiled, TArray<UBlueprint*>* BlueprintsCompiledOrSkeletonCompiled, FUObjectSerializeContext* InLoadContext)
+void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressBroadcastCompiled, TArray<UBlueprint*>* BlueprintsCompiled, TArray<UBlueprint*>* BlueprintsCompiledOrSkeletonCompiled, FUObjectSerializeContext* InLoadContext, TMap<UClass*, TMap<UObject*, UObject*>>* OldToNewTemplates /* = nullptr*/)
 {
-	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
+	TRACE_CPUPROFILER_EVENT_SCOPE(FlushCompilationQueueImpl);
+
+#if WITH_EDITOR
+	FScopeLock ScopeLock(&Lock);
+#endif
 
 	TGuardValue<bool> GuardTemplateNameFlag(GCompilingBlueprint, true);
 	ensure(bGeneratedClassLayoutReady);
@@ -529,6 +603,9 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 	{
 		return;
 	}
+
+	FScopedSlowTask SlowTask(17.f /* Number of steps */, LOCTEXT("FlushCompilationQueue", "Compiling blueprints..."));
+	SlowTask.MakeDialogDelayed(1.0f);
 
 	TArray<FCompilerData> CurrentlyCompilingBPs;
 	{ // begin GTimeCompiling scope 
@@ -555,6 +632,8 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 				BP->bCachedDependenciesUpToDate = false;
 			}
 
+			const bool bWasDependencyCacheOutOfDate = !BP->bCachedDependenciesUpToDate;
+
 			FBlueprintEditorUtils::EnsureCachedDependenciesUpToDate(BP);
 
 			if ((CompileJob.UserData.CompileOptions & 
@@ -572,14 +651,16 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 				{
 					if(!IsQueuedForCompilation(DependentBlueprint))
 					{
+						// The macro may have updated its dependency cache above; if so, we'll need to regenerate the dependent's set as well.
+						DependentBlueprint->bCachedDependenciesUpToDate &= !bWasDependencyCacheOutOfDate;
+
 						DependentBlueprint->bQueuedForCompilation = true;
 						CurrentlyCompilingBPs.Emplace(
 							FCompilerData(
 								DependentBlueprint, 
 								ECompilationManagerJobType::Normal, 
 								nullptr, 
-								EBlueprintCompileOptions::None, 
-								FBPCompilationManagerCPPResults(),
+								EBlueprintCompileOptions::None,
 								false // full compile
 							)
 						);
@@ -588,6 +669,8 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 				}
 			}
 		}
+
+		SlowTask.EnterProgressFrame();
 
 		// then make sure any normal blueprints have their bytecode dependents recompiled, this is in case a function signature changes:
 		for(const FBPCompileRequestInternal& CompileJob : QueuedRequests)
@@ -616,8 +699,7 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 							DependentBlueprint, 
 							ECompilationManagerJobType::Normal, 
 							nullptr, 
-							EBlueprintCompileOptions::None, 
-							FBPCompilationManagerCPPResults(),
+							EBlueprintCompileOptions::None,
 							true
 						)
 					);
@@ -626,10 +708,11 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 			}
 		}
 
+		SlowTask.EnterProgressFrame();
+
 		// STAGE II: Filter out data only and interface blueprints:
 		for(int32 I = 0; I < QueuedRequests.Num(); ++I)
 		{
-			bool bSkipCompile = false;
 			FBPCompileRequestInternal& QueuedJob = QueuedRequests[I];
 			UBlueprint* QueuedBP = QueuedJob.UserData.BPToCompile;
 
@@ -638,8 +721,9 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 				!(QueuedBP->GeneratedClass->ClassDefaultObject->HasAnyFlags(RF_NeedLoad)));
 			bool bDefaultComponentMustBeAdded = false;
 			bool bHasPendingUberGraphFrame = false;
+			UBlueprintGeneratedClass* BPGC = Cast<UBlueprintGeneratedClass>(QueuedBP->GeneratedClass);
 
-			if(UBlueprintGeneratedClass* BPGC = Cast<UBlueprintGeneratedClass>(QueuedBP->GeneratedClass))
+			if(BPGC)
 			{
 				if( BPGC->SimpleConstructionScript &&
 					BPGC->SimpleConstructionScript->GetSceneRootComponentTemplate(true) == nullptr)
@@ -647,14 +731,17 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 					bDefaultComponentMustBeAdded = true;
 				}
 
-#if USE_UBER_GRAPH_PERSISTENT_FRAME
 				bHasPendingUberGraphFrame = BPGC->UberGraphFramePointerProperty || BPGC->UberGraphFunction;
-#endif//USE_UBER_GRAPH_PERSISTENT_FRAME
 			}
-			
-			if( FBlueprintEditorUtils::IsDataOnlyBlueprint(QueuedBP) && !QueuedBP->bHasBeenRegenerated && QueuedBP->GetLinker() && !bDefaultComponentMustBeAdded && !bHasPendingUberGraphFrame)
+
+			bool bSkipCompile = false;
+			const UClass* ParentClass = QueuedBP->ParentClass;
+			const bool bHasClassAndMatchesParent = BPGC && BPGC->GetSuperClass() == ParentClass;
+			if( bHasClassAndMatchesParent &&
+				FBlueprintEditorUtils::IsDataOnlyBlueprint(QueuedBP) && !QueuedBP->bHasBeenRegenerated && 
+				QueuedBP->GetLinker() && !bDefaultComponentMustBeAdded && !bHasPendingUberGraphFrame )
 			{
-				const UClass* ParentClass = QueuedBP->ParentClass;
+				// consider skipping the compile operation for this DOB:
 				if (ParentClass && ParentClass->HasAllClassFlags(CLASS_Native))
 				{
 					bSkipCompile = true;
@@ -676,7 +763,6 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 						ECompilationManagerJobType::SkeletonOnly, 
 						QueuedJob.UserData.ClientResultsLog, 
 						QueuedJob.UserData.CompileOptions,
-						FBPCompilationManagerCPPResults(),
 						false
 					)
 				);
@@ -713,7 +799,6 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 						JobType, 
 						QueuedJob.UserData.ClientResultsLog, 
 						QueuedJob.UserData.CompileOptions, 
-						QueuedJob.CPPResults, 
 						false
 					)
 				);
@@ -721,7 +806,9 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 				BlueprintsToRecompile.Add(QueuedBP);
 			}
 		}
-			
+
+		SlowTask.EnterProgressFrame();
+
 		for(UBlueprint* BP : BlueprintsToRecompile)
 		{
 			// make sure all children are at least re-linked:
@@ -745,8 +832,7 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 									ChildBlueprint, 
 									ECompilationManagerJobType::RelinkOnly, 
 									nullptr, 
-									EBlueprintCompileOptions::None, 
-									FBPCompilationManagerCPPResults(),
+									EBlueprintCompileOptions::None,
 									false
 								)
 							);
@@ -754,6 +840,10 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 					}
 				}
 			}
+
+			// Don't report progress for substep but gives a chance to tick slate to improve the responsiveness of the 
+			// progress bar being shown. We expect slate to be ticked at regular intervals throughout the loading.
+			SlowTask.TickProgress();
 		}
 
 		/*	Prevent 'pending kill' blueprints from being recompiled. Dependency
@@ -773,7 +863,7 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 		CurrentlyCompilingBPs.RemoveAll(
 			[](FCompilerData& Data)
 			{ 
-				if(Data.BP->IsPendingKill())
+				if(!IsValid(Data.BP))
 				{
 					check(!Data.BP->bBeingCompiled);
 					check(Data.BP->CurrentMessageLog == nullptr);
@@ -794,6 +884,8 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 
 		BlueprintsToRecompile.Empty();
 		QueuedRequests.Empty();
+
+		SlowTask.EnterProgressFrame();
 
 		// STAGE III: Sort into correct compilation order. We want to compile root types before their derived (child) types:
 		auto HierarchyDepthSortFn = [](const FCompilerData& CompilerDataA, const FCompilerData& CompilerDataB)
@@ -816,6 +908,8 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 			return FBlueprintCompileReinstancer::ReinstancerOrderingFunction(A.GeneratedClass, B.GeneratedClass);
 		};
 		CurrentlyCompilingBPs.Sort( HierarchyDepthSortFn );
+
+		SlowTask.EnterProgressFrame();
 
 		// STAGE IV: Set UBlueprint flags (bBeingCompiled, bIsRegeneratingOnLoad)
 		for (FCompilerData& CompilerData : CurrentlyCompilingBPs)
@@ -847,6 +941,8 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 			}
 		}
 
+		SlowTask.EnterProgressFrame();
+
 		// STAGE V: Validate
 		for (FCompilerData& CompilerData : CurrentlyCompilingBPs)
 		{
@@ -858,6 +954,9 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 			CompilerData.Compiler->ValidateVariableNames();
 			CompilerData.Compiler->ValidateClassPropertyDefaults();
 		}
+
+		SlowTask.EnterProgressFrame();
+
 		// STAGE V (phase 2): Give the blueprint the possibility for edits
 		for (FCompilerData& CompilerData : CurrentlyCompilingBPs)
 		{
@@ -869,6 +968,8 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 			}
 		}
 
+		SlowTask.EnterProgressFrame();
+
 		// STAGE VI: Purge null graphs, misc. data fixup
 		for (FCompilerData& CompilerData : CurrentlyCompilingBPs)
 		{
@@ -879,7 +980,7 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 				BP->ConformNativeComponents();
 				if (FLinkerLoad* Linker = BP->GetLinker())
 				{
-					if (Linker->UE4Ver() < VER_UE4_EDITORONLY_BLUEPRINTS)
+					if (Linker->UEVer() < VER_UE4_EDITORONLY_BLUEPRINTS)
 					{
 						BP->ChangeOwnerOfTemplates();
 					}
@@ -887,8 +988,12 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 			}
 		}
 
+		SlowTask.EnterProgressFrame();
+
 		// STAGE VII: safely throw away old skeleton CDOs:
 		{
+			using namespace UE::Kismet::BlueprintCompilationManager;
+
 			TMap<UClass*, UClass*> NewSkeletonToOldSkeleton;
 			for (FCompilerData& CompilerData : CurrentlyCompilingBPs)
 			{
@@ -896,7 +1001,7 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 				UClass* OldSkeletonClass = BP->SkeletonGeneratedClass;
 				if(OldSkeletonClass)
 				{
-					if (SkelReinstUtils::bEnableSkelReinstUpdate)
+					if (Private::ConsoleVariables::bEnableSkelReinstUpdate)
 					{
 						TRACE_CPUPROFILER_EVENT_SCOPE(MoveDependentSkelToReinst);
 
@@ -904,8 +1009,7 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 					}
 					else
 					{
-						TRACE_CPUPROFILER_EVENT_SCOPE(MoveSkelCDOAside_OLD);
-
+						// Old code path
 						MoveSkelCDOAside(OldSkeletonClass, NewSkeletonToOldSkeleton);
 					}
 				}
@@ -916,8 +1020,7 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 
 			// if any function signatures have changed in this skeleton class we will need to recompile all dependencies, but if not
 			// then we can avoid dependency recompilation:
-			const UBlueprintEditorProjectSettings* EditorProjectSettings = GetDefault<UBlueprintEditorProjectSettings>();
-			bool bSkipUnneededDependencyCompilation = !EditorProjectSettings->bForceAllDependenciesToRecompile;
+			bool bSkipUnneededDependencyCompilation = !Private::ConsoleVariables::bForceAllDependenciesToRecompile;
 			TSet<UObject*> OldFunctionsWithSignatureChanges;
 
 			for (FCompilerData& CompilerData : CurrentlyCompilingBPs)
@@ -926,7 +1029,8 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 		
 				if(CompilerData.ShouldRegenerateSkeleton())
 				{
-					DECLARE_SCOPE_HIERARCHICAL_COUNTER(RecompileSkeleton)
+					TRACE_CPUPROFILER_EVENT_SCOPE(RecompileSkeleton);
+					SCOPED_LOADTIMER_ASSET_TEXT(*BP->GetPathName());
 
 					if(BlueprintsCompiledOrSkeletonCompiled)
 					{
@@ -967,23 +1071,11 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 				}
 				else
 				{
-					DECLARE_SCOPE_HIERARCHICAL_COUNTER(RelinkSkeleton)
+					TRACE_CPUPROFILER_EVENT_SCOPE(RelinkSkeleton);
 
 					// Just relink, note that UProperties that reference *other* types may be stale until
 					// we fixup below:
-					UClass* SkeletonToRelink = BP->SkeletonGeneratedClass;
-
-					// CDO needs to be moved aside already:
-					ensure(SkeletonToRelink->ClassDefaultObject == nullptr);
-					ensure(!SkeletonToRelink->GetSuperClass()->HasAnyClassFlags(CLASS_NewerVersionExists));
-					
-					SkeletonToRelink->ClassConstructor = nullptr;
-					SkeletonToRelink->ClassVTableHelperCtorCaller = nullptr;
-					SkeletonToRelink->ClassAddReferencedObjects = nullptr;
-					SkeletonToRelink->Bind();
-					SkeletonToRelink->ClearFunctionMapsCaches();
-					SkeletonToRelink->StaticLink(true);
-					SkeletonToRelink->GetDefaultObject();
+					RelinkSkeleton(BP->SkeletonGeneratedClass);
 				}
 
 				if(CompilerData.ShouldMarkUpToDateAfterSkeletonStage())
@@ -993,7 +1085,6 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 					BP->bHasBeenRegenerated = true;
 					if (BP->GeneratedClass)
 					{
-						DECLARE_SCOPE_HIERARCHICAL_COUNTER(ClearFunctionMapsCaches)
 						BP->GeneratedClass->ClearFunctionMapsCaches();
 					}
 				}
@@ -1003,19 +1094,19 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 			// that may have been created as part of skeleton generation:
 			for (FCompilerData& CompilerData : CurrentlyCompilingBPs)
 			{
-				DECLARE_SCOPE_HIERARCHICAL_COUNTER(FixUpDelegateParameters)
+				TRACE_CPUPROFILER_EVENT_SCOPE(FixUpDelegateParameters);
 
 				UBlueprint* BP = CompilerData.BP;
-				TArray< FSkeletonFixupData >& ParamsToFix = CompilerData.SkeletonFixupData;
+				TArray<FSkeletonFixupData>& ParamsToFix = CompilerData.SkeletonFixupData;
 				for( const FSkeletonFixupData& FixupData : ParamsToFix )
 				{
 					if(FDelegateProperty* DelegateProperty = CastField<FDelegateProperty>(FixupData.DelegateProperty))
 					{
-						DelegateProperty->SignatureFunction = FMemberReference::ResolveSimpleMemberReference<UFunction>(FixupData.MemberReference, BP->SkeletonGeneratedClass);
+						FSkeletonFixupData::FixUpDelegateProperty(DelegateProperty, FixupData.MemberReference, BP->SkeletonGeneratedClass);
 					}
 					else if(FMulticastDelegateProperty* MCDelegateProperty = CastField<FMulticastDelegateProperty>(FixupData.DelegateProperty))
 					{
-						MCDelegateProperty->SignatureFunction = FMemberReference::ResolveSimpleMemberReference<UFunction>(FixupData.MemberReference, BP->SkeletonGeneratedClass);
+						FSkeletonFixupData::FixUpDelegateProperty(MCDelegateProperty, FixupData.MemberReference, BP->SkeletonGeneratedClass);
 					}
 				}
 			}
@@ -1031,6 +1122,14 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 						return false;
 					}
 
+					// Anim BPs cannot skip un-needed dependency compilation as their property access bytecode
+					// will need refreshing due to external class layouts changing (they require at least a bytecode recompile or a relink)
+					const bool bIsAnimBlueprintClass = !!Cast<UAnimBlueprint>(Data.BP);
+					if(bIsAnimBlueprintClass)
+					{
+						return false;
+					}
+					
 					// if our parent is still being compiled, then we still need to be compiled:
 					UClass* Iter = Data.BP->ParentClass;
 					while(Iter)
@@ -1084,6 +1183,37 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 				CurrentlyCompilingBPs.RemoveAll(HasNoReferencesToChangedFunctions);
 			}
 		}
+		
+		// Detect any variable-based properties that are not in the old generated class, save them for after reinstancing. This can occur 
+		//    when a new variable is introduced in an ancestor class, and we'll need to use its default as our generated class's initial value.
+		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(DetectNewDefaultVariables);
+
+			for (FCompilerData& CompilerData : CurrentlyCompilingBPs)
+			{
+				if (CompilerData.JobType == ECompilationManagerJobType::Normal &&
+					 CompilerData.BP->bHasBeenRegenerated &&		// Note: This ensures that we'll only do this after the Blueprint has been loaded/created; otherwise the class may not contain any properties to find.
+					 CompilerData.BP->GeneratedClass &&
+					 !CompilerData.ShouldSkipNewVariableDefaultsDetection())
+				{
+					const UClass* ParentClass = CompilerData.BP->ParentClass;
+					while (const UBlueprint* ParentBP = UBlueprint::GetBlueprintFromClass(ParentClass))
+					{
+						for (const FBPVariableDescription& ParentBPVarDesc : ParentBP->NewVariables)
+						{
+							if (!CompilerData.BP->GeneratedClass->FindPropertyByName(ParentBPVarDesc.VarName))
+							{
+								CompilerData.NewDefaultVariables.Add(ParentBPVarDesc);
+							}
+						}
+
+						ParentClass = ParentBP->ParentClass;
+					}
+				}
+			}
+		}
+
+		SlowTask.EnterProgressFrame();
 
 		// STAGE IX: Reconstruct nodes and replace deprecated nodes, then broadcast 'precompile
 		for (FCompilerData& CompilerData : CurrentlyCompilingBPs)
@@ -1093,9 +1223,12 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 				continue;
 			}
 
-			DECLARE_SCOPE_HIERARCHICAL_COUNTER(ReconstructNodes)
-
 			UBlueprint* BP = CompilerData.BP;
+			TRACE_CPUPROFILER_EVENT_SCOPE(ReconstructNodes);
+			SCOPED_LOADTIMER_ASSET_TEXT(*BP->GetPathName());
+			UE_TRACK_REFERENCING_PACKAGE_SCOPED(BP, PackageAccessTrackingOps::NAME_CookerBuildObject);
+
+			ConformToParentAndInterfaces(BP);
 
 			// Some nodes are set up to do things during reconstruction only when this flag is NOT set.
 			if(BP->bIsRegeneratingOnLoad)
@@ -1155,10 +1288,13 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 			BP->bHasBeenRegenerated = true;
 		}
 	
+		SlowTask.EnterProgressFrame();
+
 		// STAGE X: reinstance every blueprint that is queued, note that this means classes in the hierarchy that are *not* being 
 		// compiled will be parented to REINST versions of the class, so type checks (IsA, etc) involving those types
 		// will be incoherent!
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(ReinstanceQueued);
 			for (FCompilerData& CompilerData : CurrentlyCompilingBPs)
 			{
 				// we including skeleton only compilation jobs for reinstancing because we need UpdateCustomPropertyListForPostConstruction
@@ -1168,8 +1304,6 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 				{
 					continue;
 				}
-
-				DECLARE_SCOPE_HIERARCHICAL_COUNTER(ReinstanceQueuedBlueprint)
 
 				// no need to reinstance skeleton or relink jobs that are not in a hierarchy that has had reinstancing initiated:
 				bool bRequiresReinstance = CompilerData.ShouldInitiateReinstancing();
@@ -1198,6 +1332,7 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 				}
 
 				UBlueprint* BP = CompilerData.BP;
+				SCOPED_LOADTIMER_ASSET_TEXT(*BP->GetPathName());
 
 				if(BP->GeneratedClass)
 				{
@@ -1205,11 +1340,8 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 				}
 
 				EBlueprintCompileReinstancerFlags CompileReinstancerFlags =
-					EBlueprintCompileReinstancerFlags::AutoInferSaveOnCompile;
-				if (!CompilerData.IsCppCompileType())
-				{
-					CompileReinstancerFlags |= EBlueprintCompileReinstancerFlags::AvoidCDODuplication;
-				}
+					EBlueprintCompileReinstancerFlags::AutoInferSaveOnCompile
+					| EBlueprintCompileReinstancerFlags::AvoidCDODuplication;
 
 				if (CompilerData.UseDeltaSerializationDuringReinstancing())
 				{
@@ -1230,12 +1362,15 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 
 				if(BP->GeneratedClass)
 				{
-					BP->GeneratedClass->ClassFlags |= CLASS_LayoutChanging;
+					BP->GeneratedClass->bLayoutChanging = true;
+					CompilerData.Reinstancer->SaveSparseClassData(BP->GeneratedClass);
 				}
 			}
 		}
 
-		// STAGE XI: Reinstancing done, lets fix up child->parent pointers
+		SlowTask.EnterProgressFrame();
+
+		// STAGE XI: Reinstancing done, lets fix up child->parent pointers and take ownership of SCD:
 		for (FCompilerData& CompilerData : CurrentlyCompilingBPs)
 		{
 			UBlueprint* BP = CompilerData.BP;
@@ -1243,7 +1378,13 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 			{
 				BP->GeneratedClass->SetSuperStruct(BP->GeneratedClass->GetSuperClass()->GetAuthoritativeClass());
 			}
+			if(BP->GeneratedClass && CompilerData.Reinstancer.IsValid())
+			{
+				CompilerData.Reinstancer->TakeOwnershipOfSparseClassData(BP->GeneratedClass);
+			}
 		}
+
+		SlowTask.EnterProgressFrame();
 
 		// STAGE XII: Recompile every blueprint
 		bGeneratedClassLayoutReady = false;
@@ -1252,7 +1393,8 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 			UBlueprint* BP = CompilerData.BP;
 			if(CompilerData.ShouldCompileClassLayout())
 			{
-				DECLARE_SCOPE_HIERARCHICAL_COUNTER(CompileClassLayout)
+				TRACE_CPUPROFILER_EVENT_SCOPE(CompileClassLayout);
+				SCOPED_LOADTIMER_ASSET_TEXT(*BP->GetPathName());
 
 				ensure( BP->GeneratedClass == nullptr ||
 						BP->GeneratedClass->ClassDefaultObject == nullptr || 
@@ -1260,7 +1402,7 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 				// default value propagation occurs in ReinstaneBatch, CDO will be created via CompileFunctions call:
 				if(BP->ParentClass)
 				{
-					if(BP->GeneratedClass && !CompilerData.IsCppCompileType())
+					if(BP->GeneratedClass)
 					{
 						BP->GeneratedClass->ClassDefaultObject = nullptr;
 					}
@@ -1268,6 +1410,8 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 					// Reset the flag, so if the user tries to use PIE it will warn them if the BP did not compile
 					BP->bDisplayCompilePIEWarning = true;
 		
+					// this will create FProperties for the UClass and generate the sparse class data
+					// if the compiler in question wants to:
 					FKismetCompilerContext& CompilerContext = *(CompilerData.Compiler);
 					CompilerContext.CompileClassLayout(EInternalCompilerFlags::PostponeLocalsGenerationUntilPhaseTwo);
 
@@ -1291,9 +1435,26 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 				CompilerData.Compiler->SetNewClass( CastChecked<UBlueprintGeneratedClass>(BP->GeneratedClass) );
 			}
 		}
+
+		// If we're compiling more than one Blueprint as part of a batch operation, we may have generated
+		// delegate properties (e.g. function parameters) that reference a function dependency in one of
+		// the other Blueprints in the batched set. Depending on the compile order, those functions may get
+		// regenerated in a subsequent pass above, invalidating the delegate property references as a result.
+		// Invalidating references that exist outside of the class layout (e.g. in bytecode) is fine, as
+		// those will be fixed up after we've finished compiling. However, the next stage (compiling functions)
+		// will attempt to validate generated fields for function parameters against their source pin types,
+		// and that logic will throw an error for generated delegate properties if they reference a signature
+		// function that has not yet been replaced. As a result, we run a small pass here to find/fix those up.
+		// 
+		// Note: It is *not* necessary to also verify ScriptAndPropertyObjectReferences here, as that will be
+		// updated in the next stage via reference collection (@see FKismetCompilerContext::CompileFunctions).
+		FixupDelegateProperties(CurrentlyCompilingBPs);
+
 		bGeneratedClassLayoutReady = true;
 		
 		ProcessExtensions(CurrentlyCompilingBPs);
+
+		SlowTask.EnterProgressFrame();
 
 		// STAGE XIII: Compile functions
 		UBlueprintEditorSettings* Settings = GetMutableDefault<UBlueprintEditorSettings>();
@@ -1312,8 +1473,12 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 					(	BPGC->ClassDefaultObject == nullptr || 
 						BPGC->ClassDefaultObject->GetClass() != BPGC) )
 				{
+					if (CompilerData.Reinstancer.IsValid())
+					{
+						CompilerData.Reinstancer->PropagateSparseClassDataToNewClass(BPGC);
+					}
 					// relink, generate CDO:
-					BPGC->ClassFlags &= ~CLASS_LayoutChanging;
+					BPGC->bLayoutChanging = false;
 					BPGC->Bind();
 					BPGC->StaticLink(true);
 					BPGC->ClassDefaultObject = nullptr;
@@ -1322,11 +1487,17 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 			}
 			else
 			{
-				DECLARE_SCOPE_HIERARCHICAL_COUNTER(CompileClassFunctions)
+				TRACE_CPUPROFILER_EVENT_SCOPE(CompileClassFunctions);
+				SCOPED_LOADTIMER_ASSET_TEXT(*BP->GetPathName());
 
 				// default value propagation occurs below:
 				if(BPGC)
 				{
+					if (CompilerData.Reinstancer.IsValid())
+					{
+						CompilerData.Reinstancer->PropagateSparseClassDataToNewClass(BPGC);
+					}
+
 					if( BPGC->ClassDefaultObject && 
 						BPGC->ClassDefaultObject->GetClass() == BPGC)
 					{
@@ -1348,8 +1519,8 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 					}
 					BPGC->ClassDefaultObject = nullptr;
 		
-					// class layout is ready, we can clear CLASS_LayoutChanging and CompileFunctions can create the CDO:
-					BPGC->ClassFlags &= ~CLASS_LayoutChanging;
+					// class layout is ready, we can clear bLayoutChanging and CompileFunctions can create the CDO:
+					BPGC->bLayoutChanging = false;
 
 					FKismetCompilerContext& CompilerContext = *(CompilerData.Compiler);
 					CompilerContext.CompileFunctions(
@@ -1367,10 +1538,13 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 					BP->BlueprintSystemVersion = UBlueprint::GetCurrentBlueprintSystemVersion();
 
 					// Reapply breakpoints to the bytecode of the new class
-					for (UBreakpoint* Breakpoint  : BP->Breakpoints)
-					{
-						FKismetDebugUtilities::ReapplyBreakpoint(Breakpoint);
-					}
+					FKismetDebugUtilities::ForeachBreakpoint(
+						BP,
+						[](FBlueprintBreakpoint& Breakpoint)
+						{
+							FKismetDebugUtilities::ReapplyBreakpoint(Breakpoint);
+						}
+					);
 				}
 				else
 				{
@@ -1399,10 +1573,12 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 		}
 	} // end GTimeCompiling scope
 
+	SlowTask.EnterProgressFrame();
+
 	// STAGE XIV: Now we can finish the first stage of the reinstancing operation, moving old classes to new classes:
 	{
 		{
-			DECLARE_SCOPE_HIERARCHICAL_COUNTER(MoveOldClassesToNewClasses)
+			TRACE_CPUPROFILER_EVENT_SCOPE(MoveOldClassesToNewClasses);
 
 			TArray<FReinstancingJob> Reinstancers;
 			// Set up reinstancing jobs - we need a reference to the compiler in order to honor 
@@ -1418,93 +1594,153 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 			}
 
 			FScopedDurationTimer ReinstTimer(GTimeReinstancing);
-			ReinstanceBatch(Reinstancers, ClassesToReinstance, InLoadContext);
+			ReinstanceBatch(Reinstancers, MutableView(ClassesToReinstance), InLoadContext, OldToNewTemplates);
 
 			// We purposefully do not remove the OldCDOs yet, need to keep them in memory past first GC
+		}
+
+		// Set default values on any newly-introduced variables (from ancestor BPs)
+		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(SetNewDefaultVariables);
+
+			for (FCompilerData& CompilerData : CurrentlyCompilingBPs)
+			{
+				if (!CompilerData.NewDefaultVariables.Num())
+				{
+					continue;
+				}
+
+				const UBlueprintGeneratedClass* GenClass = Cast<UBlueprintGeneratedClass>(CompilerData.BP->GeneratedClass);
+
+				if (GenClass && GenClass->ClassDefaultObject)
+				{
+					for (const FBPVariableDescription& NewInheritedVar : CompilerData.NewDefaultVariables)
+					{
+						if (const FProperty* MatchingProperty = GenClass->FindPropertyByName(NewInheritedVar.VarName))
+						{
+							FBlueprintEditorUtils::PropertyValueFromString(MatchingProperty, NewInheritedVar.DefaultValue, reinterpret_cast<uint8*>(GenClass->ClassDefaultObject.Get()));
+						}
+					}
+				}
+			}
 		}
 		
 		// STAGE XV: POST CDO COMPILED
 		for (FCompilerData& CompilerData : CurrentlyCompilingBPs)
 		{
-			DECLARE_SCOPE_HIERARCHICAL_COUNTER(PostCDOCompiled)
+			TRACE_CPUPROFILER_EVENT_SCOPE(PostCDOCompiled);
 
-			if(!CompilerData.IsSkeletonOnly() && CompilerData.Compiler.IsValid())
+			if (CompilerData.Compiler.IsValid())
 			{
-				CompilerData.Compiler->PostCDOCompiled();
+				SCOPED_LOADTIMER_ASSET_TEXT(*CompilerData.BP->GetPathName());
+				UObject::FPostCDOCompiledContext PostCDOCompiledContext;
+				PostCDOCompiledContext.bIsRegeneratingOnLoad = CompilerData.BP->bIsRegeneratingOnLoad;
+				PostCDOCompiledContext.bIsSkeletonOnly = CompilerData.IsSkeletonOnly();
+
+				CompilerData.Compiler->PostCDOCompiled(PostCDOCompiledContext);
 			}
 		}
 
 		// STAGE XVI: CLEAR TEMPORARY FLAGS
 		for (FCompilerData& CompilerData : CurrentlyCompilingBPs)
 		{
-			DECLARE_SCOPE_HIERARCHICAL_COUNTER(ClearTemporaryFlags)
+			TRACE_CPUPROFILER_EVENT_SCOPE(ClearTemporaryFlags);
 
 			UBlueprint* BP = CompilerData.BP;
 
-			if (!CompilerData.IsSkeletonOnly())
+			// Ensure that delegate nodes/pins conform to compiled function names/signatures. In general,
+			// these will rely on the skeleton class, so we must also include it for a skeleton-only pass.
+			FBlueprintEditorUtils::UpdateDelegatesInBlueprint(BP);
+
+			// These are post-compile validations that generally rely on a fully-generated up-to-date class,
+			// so we defer it on skeleton-only passes as well as during compile-on-load, where it's generally
+			// going to be handled during the PostLoad() phase after all dependencies have been loaded/compiled.
+			if (!CompilerData.IsSkeletonOnly() && !BP->bIsRegeneratingOnLoad && BP->GeneratedClass)
 			{
-				FBlueprintEditorUtils::UpdateDelegatesInBlueprint(BP);
-				if (!BP->bIsRegeneratingOnLoad && BP->GeneratedClass)
+				FKismetEditorUtilities::StripExternalComponents(BP);
+
+				if (BP->SimpleConstructionScript)
 				{
-					FKismetEditorUtilities::StripExternalComponents(BP);
+					BP->SimpleConstructionScript->FixupRootNodeParentReferences();
+				}
 
-					if (BP->SimpleConstructionScript)
+				if (BP->Status != BS_Error)
+				{
+					if (CompilerData.Compiler.IsValid())
 					{
-						BP->SimpleConstructionScript->FixupRootNodeParentReferences();
-					}
+						// Route through the compiler context in order to perform type-specific Blueprint class validation.
+						CompilerData.Compiler->ValidateGeneratedClass(CastChecked<UBlueprintGeneratedClass>(BP->GeneratedClass));
 
-					if (BP->Status != BS_Error)
-					{
-						if (CompilerData.Compiler.IsValid())
+						if (CompilerData.ShouldValidateClassDefaultObject())
 						{
-							// Route through the compiler context in order to perform type-specific Blueprint class validation.
-							CompilerData.Compiler->ValidateGeneratedClass(CastChecked<UBlueprintGeneratedClass>(BP->GeneratedClass));
-
-							if (CompilerData.ShouldValidateClassDefaultObject())
+							// Our CDO should be properly constructed by this point and should always exist
+							const UObject* ClassDefaultObject = BP->GeneratedClass->GetDefaultObject(false);
+							if (ensureAlways(ClassDefaultObject))
 							{
-								// Our CDO should be properly constructed by this point and should always exist
-								UObject* ClassDefaultObject = BP->GeneratedClass->GetDefaultObject(false);
-								if (ensureAlways(ClassDefaultObject))
+								FKismetCompilerUtilities::ValidateEnumProperties(ClassDefaultObject, *CompilerData.ActiveResultsLog);
+
+								// Make sure any class-specific validation passes on the CDO
+								FDataValidationContext Context;
+								EDataValidationResult ValidateCDOResult = ClassDefaultObject->IsDataValid(/*out*/ Context);
+								if (Context.GetNumErrors() + Context.GetNumWarnings() > 0)
 								{
-									FKismetCompilerUtilities::ValidateEnumProperties(ClassDefaultObject, *CompilerData.ActiveResultsLog);
+									TArray<FText> Warnings, Errors;
+									Context.SplitIssues(Warnings, Errors);
 
-									// Make sure any class-specific validation passes on the CDO
-									TArray<FText> ValidationErrors;
-									EDataValidationResult ValidateCDOResult = ClassDefaultObject->IsDataValid(/*out*/ ValidationErrors);
-									if (ValidateCDOResult == EDataValidationResult::Invalid)
+									for (const FText& Warning : Warnings)
 									{
-										for (const FText& ValidationError : ValidationErrors)
-										{
-											CompilerData.ActiveResultsLog->Error(*ValidationError.ToString());
-										}
+										CompilerData.ActiveResultsLog->Warning(*Warning.ToString());
 									}
 
-									// Adjust Blueprint status to match anything new that was found during validation.
-									if (CompilerData.ActiveResultsLog->NumErrors > 0)
+									for (const FText& Error : Errors)
 									{
-										BP->Status = BS_Error;
+										CompilerData.ActiveResultsLog->Error(*Error.ToString());
 									}
-									else if (BP->Status == BS_UpToDate && CompilerData.ActiveResultsLog->NumWarnings > 0)
-									{
-										BP->Status = BS_UpToDateWithWarnings;
-									}
+								}
+
+								// Adjust Blueprint status to match anything new that was found during validation.
+								if (CompilerData.ActiveResultsLog->NumErrors > 0)
+								{
+									BP->Status = BS_Error;
+								}
+								else if (BP->Status == BS_UpToDate && CompilerData.ActiveResultsLog->NumWarnings > 0)
+								{
+									BP->Status = BS_UpToDateWithWarnings;
 								}
 							}
 						}
-						else
-						{
-							UBlueprint::ValidateGeneratedClass(BP->GeneratedClass);
-						}
+					}
+					else
+					{
+						UBlueprint::ValidateGeneratedClass(BP->GeneratedClass);
 					}
 				}
 			}
 
 			if(CompilerData.ShouldRegisterCompilerResults())
 			{
-				// This helper structure registers the results log messages with the UI control that displays them:
-				FScopedBlueprintMessageLog MessageLog(BP);
-				MessageLog.Log->ClearMessages();
-				MessageLog.Log->AddMessages(CompilerData.ActiveResultsLog->Messages, false);
+				if (IsInGameThread())
+				{
+					// This helper structure registers the results log messages with the UI control that displays them:
+					FScopedBlueprintMessageLog MessageLog(BP);
+					MessageLog.Log->ClearMessages();
+					MessageLog.Log->AddMessages(CompilerData.ActiveResultsLog->Messages, false);
+				}
+				else
+				{
+					Async(EAsyncExecution::TaskGraphMainThread,
+						[Messages = CompilerData.ActiveResultsLog->Messages, WeakBP = TWeakObjectPtr<UBlueprint>(BP)]()
+						{
+							if (WeakBP.IsValid())
+							{
+								FScopedBlueprintMessageLog MessageLog(WeakBP.Get());
+								MessageLog.Log->ClearMessages();
+								MessageLog.Log->AddMessages(Messages, false);
+							}
+						}
+					);
+				}
+				
 			}
 
 			if(CompilerData.ShouldSetTemporaryBlueprintFlags())
@@ -1554,7 +1790,7 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 
 		if (!bSuppressBroadcastCompiled)
 		{
-			DECLARE_SCOPE_HIERARCHICAL_COUNTER(BroadcastBlueprintCompiled)
+			TRACE_CPUPROFILER_EVENT_SCOPE(BroadcastBlueprintCompiled);
 
 			if(GEditor)
 			{
@@ -1562,6 +1798,8 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 			}
 		}
 	}
+
+	SlowTask.EnterProgressFrame();
 
 	for (FCompilerData& CompilerData : CurrentlyCompilingBPs)
 	{
@@ -1573,19 +1811,73 @@ void FBlueprintCompilationManagerImpl::FlushCompilationQueueImpl(bool bSuppressB
 	}
 
 	{
-		DECLARE_SCOPE_HIERARCHICAL_COUNTER(UEdGraphPin::Purge)
+		TRACE_CPUPROFILER_EVENT_SCOPE(UEdGraphPin::Purge);
 		UEdGraphPin::Purge();
 	}
+
+	SlowTask.EnterProgressFrame();
 
 	UE_LOG(LogBlueprint, Display, TEXT("Time Compiling: %f, Time Reinstancing: %f"),  GTimeCompiling, GTimeReinstancing);
 	//GTimeCompiling = 0.0;
 	//GTimeReinstancing = 0.0;
-	ensure(QueuedRequests.Num() == 0);
+	VerifyNoQueuedRequests(CurrentlyCompilingBPs);
+}
+
+void FBlueprintCompilationManagerImpl::FixupDelegateProperties(const TArray<FCompilerData>& InCurrentlyCompilingBPs)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(FixupDelegateProperties);
+
+	if (InCurrentlyCompilingBPs.Num() <= 1)
+	{
+		// It's safe to bypass the fixup logic in this case.
+		return;
+	}
+
+	// Gather old->new field mappings for each regenerated class.
+	TMap<FFieldVariant, FFieldVariant> AllFieldMappings;
+	for (const FCompilerData& CompilerData : InCurrentlyCompilingBPs)
+	{
+		// If there's no reinstancer, then we don't need to include it (e.g. skeleton-only compiles and/or when the layout wasn't regenerated).
+		if (CompilerData.Reinstancer.IsValid())
+		{
+			TMap<FFieldVariant, FFieldVariant> FieldMappings;
+			CompilerData.Reinstancer->GenerateFieldMappings(FieldMappings);
+			AllFieldMappings.Append(MoveTemp(FieldMappings));
+		}
+	}
+
+	auto FixupDelegateProperty = [&AllFieldMappings](FDelegateProperty* DelegateProperty)
+	{
+		// See if the current signature references a stale function (i.e. one that has been regenerated).
+		auto* PossiblyStaleFunctionPtr = &DelegateProperty->SignatureFunction;
+		if (FFieldVariant* GeneratedFunctionMapping = AllFieldMappings.Find(*PossiblyStaleFunctionPtr))
+		{
+			// Update the stale reference to point to the regenerated function instead.
+			*PossiblyStaleFunctionPtr = CastChecked<UFunction>(GeneratedFunctionMapping->ToUObject());
+		}
+	};
+
+	for (const TPair<FFieldVariant, FFieldVariant>& FieldMapping : AllFieldMappings)
+	{
+		// Check signatures for any delegate properties owned by the regenerated class.
+		if (FDelegateProperty* ClassDelegateProperty = CastField<FDelegateProperty>(FieldMapping.Value.ToField()))
+		{
+			FixupDelegateProperty(ClassDelegateProperty);
+		}
+		else if (UFunction* Function = Cast<UFunction>(FieldMapping.Value.ToUObject()))
+		{
+			// Check signatures for any delegate properties owned by a regenerated class function (e.g. parameters).
+			for (FDelegateProperty* LocalDelegateProperty : TFieldRange<FDelegateProperty>(Function, EFieldIterationFlags::IncludeDeprecated))
+			{
+				FixupDelegateProperty(LocalDelegateProperty);
+			}
+		}
+	}
 }
 
 void FBlueprintCompilationManagerImpl::ProcessExtensions(const TArray<FCompilerData>& InCurrentlyCompilingBPs)
 {
-	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
+	TRACE_CPUPROFILER_EVENT_SCOPE(ProcessExtensions);
 
 	if(CompilerExtensions.Num() == 0)
 	{
@@ -1603,7 +1895,7 @@ void FBlueprintCompilationManagerImpl::ProcessExtensions(const TArray<FCompilerD
 			UClass* Iter = BP->GetClass();
 			while(Iter != UBlueprint::StaticClass()->GetSuperClass())
 			{
-				TArray<UBlueprintCompilerExtension*>* Extensions = CompilerExtensions.Find(Iter);
+				auto* Extensions = CompilerExtensions.Find(Iter);
 				if(Extensions)
 				{
 					// extension found, store off data from compiler that we want to expose to extensions:
@@ -1636,9 +1928,13 @@ void FBlueprintCompilationManagerImpl::ProcessExtensions(const TArray<FCompilerD
 	}
 }
 
-void FBlueprintCompilationManagerImpl::FlushReinstancingQueueImpl()
+void FBlueprintCompilationManagerImpl::FlushReinstancingQueueImpl(bool bFindAndReplaceCDOReferences, TMap<UClass*, TMap<UObject*, UObject*>>* OldToNewTemplates /* = nullptr*/)
 {
-	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
+	TRACE_CPUPROFILER_EVENT_SCOPE(FlushReinstancingQueueImpl);
+
+#if WITH_EDITOR
+	FScopeLock ScopeLock(&Lock);
+#endif
 
 	if(GCompilingBlueprint)
 	{
@@ -1657,17 +1953,24 @@ void FBlueprintCompilationManagerImpl::FlushReinstancingQueueImpl()
 		
 		TGuardValue<bool> ReinstancingGuard(GIsReinstancing, true);
 		
-		FBatchReplaceInstancesOfClassParameters Options;
-		Options.bArchetypesAreUpToDate = true;
-		FBlueprintCompileReinstancer::BatchReplaceInstancesOfClass(ClassesToReinstance, Options);
+		TMap<UClass*, UClass*> ClassesToReinstanceOwned = ObjectPtrDecay(MoveTemp(ClassesToReinstance));
+		ClassesToReinstance = {};
 
-		if (IsAsyncLoading())
+		FReplaceInstancesOfClassParameters Options;
+		Options.bArchetypesAreUpToDate = true;
+		Options.bReplaceReferencesToOldCDOs = bFindAndReplaceCDOReferences;
+		Options.OldToNewTemplates = OldToNewTemplates;
+		FBlueprintCompileReinstancer::BatchReplaceInstancesOfClass(ClassesToReinstanceOwned, Options);
+
+		// Special case when we run on ALT, we want to cleanup all classes flagged for reinstanciation right away.
+		const bool bIsInActualAsyncLoadingThread = IsInAsyncLoadingThread() && !IsInGameThread();
+		if (IsAsyncLoading() && (!IsAsyncLoadingMultithreaded() || !bIsInActualAsyncLoadingThread))
 		{
 			// While async loading we only remove classes that have no instances being
 			// async loaded. Those instances will need to be reinstanced once they finish
 			// loading, there's no race here because if any instances are created after
 			// we check ClassHasInstancesAsyncLoading they will be created with the new class:
-			for( TMap<UClass*, UClass*>::TIterator It(ClassesToReinstance); It; ++It )
+			for( TMap<UClass*, UClass*>::TIterator It(ClassesToReinstanceOwned); It; ++It )
 			{
 				if (!ClassHasInstancesAsyncLoading(It->Key))
 				{
@@ -1677,16 +1980,17 @@ void FBlueprintCompilationManagerImpl::FlushReinstancingQueueImpl()
 					It.RemoveCurrent();
 				}
 			}
+			// preserve any pairs that are currently loading:
+			ClassesToReinstance = ObjectPtrWrap(MoveTemp(ClassesToReinstanceOwned));
 		}
 		else
 		{
 			// Make sure to cleanup all properties that couldn't be destroyed in PurgeClass
-			for (TMap<UClass*, UClass*>::TIterator It(ClassesToReinstance); It; ++It)
+			for (decltype(ClassesToReinstanceOwned)::TIterator It(ClassesToReinstanceOwned); It; ++It)
 			{
 				It->Key->DestroyPropertiesPendingDestruction();
 				It->Value->DestroyPropertiesPendingDestruction();
 			}
-			ClassesToReinstance.Empty();
 		}
 	}
 	
@@ -1720,30 +2024,52 @@ void FBlueprintCompilationManagerImpl::GetDefaultValue(const UClass* ForClass, c
 
 	if (ForClass->ClassDefaultObject)
 	{
-		FBlueprintEditorUtils::PropertyValueToString(Property, (uint8*)ForClass->ClassDefaultObject, OutDefaultValueAsString);
+		FBlueprintEditorUtils::PropertyValueToString(Property, (uint8*)ForClass->ClassDefaultObject.Get(), OutDefaultValueAsString);
 	}
 	else
 	{
 		UBlueprint* BP = Cast<UBlueprint>(ForClass->ClassGeneratedBy);
 		if(ensure(BP))
 		{
-			const UObject* const* OldCDO = OldCDOs.Find(BP);
+			const auto* OldCDO = OldCDOs.Find(BP);
 			if(OldCDO && *OldCDO)
 			{
 				const UClass* OldClass = (*OldCDO)->GetClass();
 				const FProperty* OldProperty = OldClass->FindPropertyByName(Property->GetFName());
 				if(OldProperty)
 				{
-					FBlueprintEditorUtils::PropertyValueToString(OldProperty, (uint8*)*OldCDO, OutDefaultValueAsString);
+					FBlueprintEditorUtils::PropertyValueToString(OldProperty, (uint8*)OldCDO->Get(), OutDefaultValueAsString);
 				}
 			}
 		}
 	}
 }
 
+void FBlueprintCompilationManagerImpl::VerifyNoQueuedRequests(const TArray<FCompilerData>& CurrentlyCompilingBPs)
+{
+	if (QueuedRequests.Num() != 0)
+	{
+		FString QueuedBlueprints = TEXT("");
+		for (const FBPCompileRequestInternal& Request: QueuedRequests)
+		{
+			QueuedBlueprints += Request.UserData.BPToCompile->GetName() + TEXT(" ");
+		}
+		FString CompilingBlueprints = TEXT("");
+		for (const FCompilerData& CompilerData : CurrentlyCompilingBPs)
+		{
+			CompilingBlueprints += CompilerData.BP->GetName() + TEXT(" ");
+		}
+
+		ensureMsgf(false, 
+			TEXT("Blueprints requested compilation while compiling other blueprints: %s\nWhile Compiling: %s"),
+			*QueuedBlueprints, *CompilingBlueprints);
+	}
+}
+
 void FBlueprintCompilationManagerImpl::ReparentHierarchies(const TMap<UClass*, UClass*>& OldToNewClasses, EReparentClassOptions Options)
 {
 	const bool bReplaceReferencesToOldClasses = (Options & EReparentClassOptions::ReplaceReferencesToOldClasses) != EReparentClassOptions::None;
+	TRACE_CPUPROFILER_EVENT_SCOPE(ReparentHierarchies);
 
 	// something has decided to replace instances of a class. We need to update all the children of those types:
 	TArray< UClass* > ClassesOrdered;
@@ -1769,9 +2095,17 @@ void FBlueprintCompilationManagerImpl::ReparentHierarchies(const TMap<UClass*, U
 
 			for(UClass* DerivedClass : DerivedClasses)
 			{
-				if(DerivedClass->ClassDefaultObject == nullptr)
+				if (DerivedClass->ClassDefaultObject == nullptr && 
+					DerivedClass->GetSparseClassData(EGetSparseClassDataMethod::ReturnIfNull) == nullptr)
 				{
-					// on CDO->no other instances->no need to reinstance..
+					// no CDO->no other instances->no need to reinstance..
+					// and we have no sparse classs data to manage...
+					continue;
+				}
+
+				if (DerivedClass->HasAnyClassFlags(CLASS_NewerVersionExists))
+				{
+					// Don't reinstance artifacts from classes that have been previously been reinstanced/trashed but aren't cleaned up yet.
 					continue;
 				}
 
@@ -1811,11 +2145,21 @@ void FBlueprintCompilationManagerImpl::ReparentHierarchies(const TMap<UClass*, U
 			) );
 
 			FReinstancingJob& ReinstancingJob = Reinstancers.Last();
+			ReinstancingJob.Reinstancer->SaveSparseClassData(Class);
 			ensure(ReinstancingJob.Reinstancer->DuplicatedClass && ReinstancingJob.Reinstancer->ClassToReinstance);
 		}
 	}
-	
-	// Reparent and Link:
+
+	for (const FReinstancingJob& ReinstancingJob : Reinstancers)
+	{
+		if (ReinstancingJob.Reinstancer.IsValid())
+		{
+			ReinstancingJob.Reinstancer->TakeOwnershipOfSparseClassData(ReinstancingJob.OldToNew.Value);
+		}
+	}
+
+	// Reparent and Link - this is .. kind of pointless.. ReinstanceBatch should
+	// be doing this
 	TMap<UClass*, UClass*> OldClassToNewClassIncludingChildren = OldToNewClasses;
 	for(const FReinstancingJob& ReinstancingJob : Reinstancers)
 	{
@@ -1826,7 +2170,7 @@ void FBlueprintCompilationManagerImpl::ReparentHierarchies(const TMap<UClass*, U
 		{
 			ClassToReinstance->ClassConstructor = nullptr;
 			ClassToReinstance->ClassVTableHelperCtorCaller = nullptr;
-			ClassToReinstance->ClassAddReferencedObjects = nullptr;
+			ClassToReinstance->CppClassStaticFunctions.Reset();
 		
 			// check to see if we're a direct parent of one of the new classes:
 			UClass* const* NewParent = OldToNewClasses.Find(ClassToReinstance->GetSuperClass());
@@ -1844,7 +2188,8 @@ void FBlueprintCompilationManagerImpl::ReparentHierarchies(const TMap<UClass*, U
 	}
 	
 	// Reparenting done, reinstance the hierarchy and update archetypes:
-	ReinstanceBatch(Reinstancers, OldClassToNewClassIncludingChildren, nullptr);
+	TMap<UClass*, TMap<UObject*, UObject*>> OldToNewTemplates;
+	ReinstanceBatch(Reinstancers, OldClassToNewClassIncludingChildren, nullptr, &OldToNewTemplates);
 
 	// Reinstance (non archetype) instances
 	TMap<UClass*, UClass*> OldClassToNewClassDerivedTypes;
@@ -1859,7 +2204,7 @@ void FBlueprintCompilationManagerImpl::ReparentHierarchies(const TMap<UClass*, U
 		OldClassToNewClassDerivedTypes.Add(ReinstancingJob.OldToNew);
 	}
 	TGuardValue<bool> ReinstancingGuard(GIsReinstancing, true);
-	FBatchReplaceInstancesOfClassParameters BatchOptions;
+	FReplaceInstancesOfClassParameters BatchOptions;
 	BatchOptions.bArchetypesAreUpToDate = true;
 	BatchOptions.bReplaceReferencesToOldClasses = bReplaceReferencesToOldClasses;
 
@@ -1882,18 +2227,20 @@ void FBlueprintCompilationManagerImpl::ReparentHierarchies(const TMap<UClass*, U
 	}
 	BatchOptions.ObjectsThatShouldUseOldStuff = &OldObjects;
 	BatchOptions.InstancesThatShouldUseOldClass = &OldObjects;
+	BatchOptions.bReplaceReferencesToOldCDOs = true;
+	BatchOptions.OldToNewTemplates = &OldToNewTemplates;
 
-	FBlueprintCompileReinstancer::BatchReplaceInstancesOfClass( OldClassToNewClassDerivedTypes, BatchOptions);
+	FBlueprintCompileReinstancer::BatchReplaceInstancesOfClass(OldClassToNewClassDerivedTypes, BatchOptions );
 }
 
 
 void FBlueprintCompilationManagerImpl::BuildDSOMap(UObject* OldObject, UObject* NewObject, TMap<UObject*, UObject*>& OutOldToNewDSO)
 {
-	// IsDefaultObject() unfortunately cannot be relied upon for archetypes, so we explicitly search for the flag:
+	// IsDefaultSubObject() unfortunately cannot be relied upon for archetypes, so we explicitly search for the flag:
 	TArray<UObject*> OldSubobjects;
 	ForEachObjectWithOuter(OldObject, [&OldSubobjects](UObject* Object)
 	{
-		if (Object->HasAnyFlags(RF_DefaultSubObject))
+		if (Object->HasAnyFlags(RF_DefaultSubObject|RF_ArchetypeObject))
 		{
 			OldSubobjects.Add(Object);
 		}
@@ -1909,12 +2256,15 @@ void FBlueprintCompilationManagerImpl::BuildDSOMap(UObject* OldObject, UObject* 
 	}
 }
 
-void FBlueprintCompilationManagerImpl::ReinstanceBatch(TArray<FReinstancingJob>& Reinstancers, TMap< UClass*, UClass* >& InOutOldToNewClassMap, FUObjectSerializeContext* InLoadContext)
+void FBlueprintCompilationManagerImpl::ReinstanceBatch(TArray<FReinstancingJob>& Reinstancers, TMap< UClass*, UClass* >& InOutOldToNewClassMap, FUObjectSerializeContext* InLoadContext, TMap<UClass*, TMap<UObject*, UObject*>>* OldToNewTemplates /* = nullptr*/)
 {
+	TGuardValue<bool> ReinstancingGuard(GIsReinstancing, true);
+
 	const auto FilterOutOfDateClasses = [](TArray<UClass*>& ClassList)
 	{
 		// Old versions of classes can be abandoned, classes without CDOs have no instances and don't require reinstancing
-		ClassList.RemoveAllSwap( [](UClass* Class) { return Class->HasAnyClassFlags(CLASS_NewerVersionExists) || Class->ClassDefaultObject == nullptr; } );
+		// but they may still require reparenting..
+		ClassList.RemoveAllSwap( [](UClass* Class) { return Class->HasAnyClassFlags(CLASS_NewerVersionExists); } );
 	};
 
 	const auto HasChildren = [FilterOutOfDateClasses](UClass* InClass) -> bool
@@ -1970,9 +2320,16 @@ void FBlueprintCompilationManagerImpl::ReinstanceBatch(TArray<FReinstancingJob>&
 			
 			for(UClass* ClassToReinstance : ClassesToReinstanceList)
 			{
-				if(!ClassToReinstance->IsPendingKill())
+				if(IsValid(ClassToReinstance))
 				{
-					ClassesToReinstance.Add(ClassToReinstance);
+					if (ClassToReinstance->ClassDefaultObject)
+					{
+						ClassesToReinstance.Add(ClassToReinstance);
+					}
+					else
+					{
+						ClassesToReparent.Add(ClassToReinstance);
+					}
 				}
 			}
 		}
@@ -1985,7 +2342,7 @@ void FBlueprintCompilationManagerImpl::ReinstanceBatch(TArray<FReinstancingJob>&
 			
 			for(UClass* ClassToReparent : ClassesToReparentList)
 			{
-				if(!ClassToReparent->IsPendingKill())
+				if(IsValid(ClassToReparent))
 				{
 					ClassesToReparent.Add(ClassToReparent);
 				}
@@ -2043,50 +2400,146 @@ void FBlueprintCompilationManagerImpl::ReinstanceBatch(TArray<FReinstancingJob>&
 	}
 
 	// run UpdateBytecodeReferences:
-	for (const FReinstancingJob& ReinstancingJob : Reinstancers)
 	{
-		if (ReinstancingJob.OldToNew.Key)
+		TSet<UBlueprint*> DependentBPs;
+		TMap<FFieldVariant, FFieldVariant> FieldMappings;
+		for (FReinstancingJob& ReinstancingJob : Reinstancers)
 		{
-			InOutOldToNewClassMap.Add(ReinstancingJob.OldToNew.Key, ReinstancingJob.OldToNew.Value);
+			if (ReinstancingJob.OldToNew.Key)
+			{
+				InOutOldToNewClassMap.Add(ReinstancingJob.OldToNew.Key, ReinstancingJob.OldToNew.Value);
+			}
+
+			if (ReinstancingJob.Reinstancer.IsValid())
+			{
+				UBlueprint* CompiledBlueprint = UBlueprint::GetBlueprintFromClass(ReinstancingJob.OldToNew.Value);
+				ReinstancingJob.Reinstancer->UpdateBytecodeReferences(DependentBPs, FieldMappings);
+			}
 		}
-			
-		if(ReinstancingJob.Reinstancer.IsValid())
-		{
-			UBlueprint* CompiledBlueprint = UBlueprint::GetBlueprintFromClass(ReinstancingJob.OldToNew.Value);
-			ReinstancingJob.Reinstancer->UpdateBytecodeReferences();
-		}
+
+		FBlueprintCompileReinstancer::FinishUpdateBytecodeReferences(DependentBPs, FieldMappings);
 	}
 	
 	// Now we can update templates and archetypes - note that we don't look for direct references to archetypes - doing
 	// so is very expensive and it will be much faster to directly update anything that cares to cache direct references
 	// to an archetype here (e.g. a UClass::ClassDefaultObject member):
-	
-	// 1. Sort classes so that most derived types are updated last - right now the only caller of this function
-	// also sorts, but we don't want to make too many assumptions about caller. We could refine this API so that
-	// we're not taking a raw list of reinstancers:
-	Reinstancers.Sort(
-		[](const FReinstancingJob& ReinstancingDataA, const FReinstancingJob& ReinstancingDataB)
-		{
-			return FBlueprintCompileReinstancer::ReinstancerOrderingFunction(
-				ReinstancingDataA.OldToNew.Value, 
-				ReinstancingDataB.OldToNew.Value
-			);
-		}
-	);
-
-	// 2. Copy defaults from old CDO - CDO may be missing if this class was reinstanced and relinked here,
-	// so use GetDefaultObject(true):
-	for (const FReinstancingJob& ReinstancingJob : Reinstancers)
+	TArray<FReinstancingJob*> ReinstancersPtr;
+	ReinstancersPtr.Reset(Reinstancers.Num());
+	for (FReinstancingJob& ReinstancingJob : Reinstancers)
 	{
-		UObject* OldCDO = nullptr;
-		if (ReinstancingJob.OldToNew.Key)
+		ReinstancersPtr.Add(&ReinstancingJob);
+	}
+
+	Algo::TopologicalSort(ReinstancersPtr, [&Reinstancers](FReinstancingJob* ReinstancingJob)
+	{
+		TArray<FReinstancingJob*> Dependencies;
+		auto AddDependentClass = [&Dependencies,&Reinstancers](UClass* DependentClass)
 		{
-			OldCDO = ReinstancingJob.OldToNew.Key->ClassDefaultObject;
+			if (FReinstancingJob* ReinstancingJob = Reinstancers.FindByPredicate([DependentClass](FReinstancingJob& ReinstancingJob) { return ReinstancingJob.OldToNew.Key == DependentClass;}))
+			{
+				Dependencies.Add(ReinstancingJob);
+			}
+		};
+
+		if (UClass* OldClass = ReinstancingJob->OldToNew.Key)
+		{
+			AddDependentClass(OldClass->GetSuperClass());
+
+			if (const UObject* CDO = OldClass->ClassDefaultObject)
+			{
+				TArray<UObject*> ContainedOldObjects;
+				GetObjectsWithOuter(CDO, ContainedOldObjects);
+				for (const UObject* OldObject : ContainedOldObjects)
+				{
+					AddDependentClass(OldObject->GetClass());
+				}
+			}
+		}
+
+		return Dependencies;
+	});
+
+	// 2. Update Sparse Class Data
+	for (const FReinstancingJob* ReinstancingJobPtr : ReinstancersPtr)
+	{
+		TSharedPtr<FBlueprintCompileReinstancer> const& Reinstancer = ReinstancingJobPtr->Reinstancer;
+		if (!Reinstancer.IsValid())
+		{
+			continue; // no reinstancer, we're not responsible for recreating this class (e.g. it came from verse compile or asset reload)
+		}
+
+		// if the new class already has a sparse class data, that indicates
+		// it was generated by its compiler and we can discard the old data:
+		UClass* NewClass = ReinstancingJobPtr->OldToNew.Value;
+		if (!NewClass || NewClass->GetSparseClassData(EGetSparseClassDataMethod::ReturnIfNull) != nullptr)
+		{
+			continue;
+		}
+
+		// New class has not created a sparse class data, if the old class had one copy it over:
+		Reinstancer->PropagateSparseClassDataToNewClass(NewClass);
+	}
+
+	// 3. Copy defaults from old CDO - CDO may be missing if this class was reinstanced and relinked here,
+	// so use GetDefaultObject(true):
+	for (const FReinstancingJob* ReinstancingJobPtr : ReinstancersPtr)
+	{
+		const FReinstancingJob& ReinstancingJob = *ReinstancingJobPtr;
+		UObject* OldCDO = nullptr;
+		UClass* OldClass = ReinstancingJob.OldToNew.Key;
+
+		if (OldClass)
+		{
+			OldCDO = OldClass->ClassDefaultObject;
 			if (OldCDO && ReinstancingJob.Reinstancer.IsValid())
 			{
-				const bool bUseDeltaSerialization = ReinstancingJob.Reinstancer.IsValid() ? ReinstancingJob.Reinstancer->bUseDeltaSerializationToCopyProperties : false;
-				UObject* NewCDO = ReinstancingJob.OldToNew.Value->GetDefaultObject(true);
-				FBlueprintCompileReinstancer::CopyPropertiesForUnrelatedObjects(OldCDO, NewCDO, true, bUseDeltaSerialization);
+				// Object using overridable serialization need to use delta serialization for it do work appropriatly
+				// Eventually we should do this to all BP classes CDO no matter what
+				const bool bUsingOverrideSerialization = FOverridableManager::Get().IsEnabled(*OldCDO);
+				const bool bUseDeltaSerialization = bUsingOverrideSerialization ? true : (ReinstancingJob.Reinstancer.IsValid() ? ReinstancingJob.Reinstancer->bUseDeltaSerializationToCopyProperties : false);
+				UClass* NewClass = ReinstancingJob.OldToNew.Value;
+
+				// We do not expect the CDO to be already created at this point. 
+				// Who ever bother to create it before didn't look if the parent was ready or not.
+				if (NewClass->ClassDefaultObject != nullptr && bUsingOverrideSerialization)
+				{
+					// Override serialization does not currently want to use any CDO created before this
+					// point. I do not have a test case justifying this need, but renaming the cdo here 
+					// causes various regressions for existing blueprints, because their compilers have put
+					// needed data on the generated CDO. If we want to use override serialization broadly
+					// we will have to address these shortcomings (likely by ordering compilation itself,
+					// rather than reinstancing, more carefully). Discarding the CDO here is also wasteful
+					// - if we cannot use the objects, why create them at all?
+					NewClass->ClassDefaultObject->Rename(nullptr, GetTransientPackage(), REN_DoNotDirty | REN_DontCreateRedirectors | REN_ForceNoResetLoaders | REN_NonTransactional);
+					NewClass->ClassDefaultObject = nullptr;
+				}
+				UObject* NewCDO = NewClass->GetDefaultObject(true);
+
+				UBlueprint* CompiledBlueprint = UBlueprint::GetBlueprintFromClass(OldClass);
+				if (CompiledBlueprint && CompiledBlueprint->bIsRegeneratingOnLoad)
+				{
+					// This is a catch-all for any deferred dependencies that didn't get resolved during loading/linking (that system is not bulletproof for complex circular dependencies)
+					FBlueprintSupport::RepairDeferredDependenciesInObject(OldCDO);
+				}
+
+				TMap<UObject*, UObject*> CreatedInstanceMap;
+				FBlueprintCompileReinstancer::PreCreateSubObjectsForReinstantiation(InOutOldToNewClassMap, OldCDO, NewCDO, CreatedInstanceMap);
+
+				// We only need to copy properties of the pre-created instances, the rest of the default sub object is done inside the UEditorEngine::CopyPropertiesForUnrelatedObjects
+				TMap<UObject*, UObject*> OldToNewInstanceMap(CreatedInstanceMap);
+				if (TMap<UObject*, UObject*>* OldToNewTemplateMap = OldToNewTemplates ? OldToNewTemplates->Find(OldClass->GetSuperClass()) : nullptr)
+				{
+					OldToNewInstanceMap.Append(*OldToNewTemplateMap);
+				}
+				for(const auto& Pair : CreatedInstanceMap)
+				{
+					FBlueprintCompileReinstancer::CopyPropertiesForUnrelatedObjects(Pair.Key, Pair.Value, /*bClearExternalReferences*/true, bUseDeltaSerialization, /*bOnlyHandleDirectSubObjects*/true, &OldToNewInstanceMap, &InOutOldToNewClassMap);
+				}
+
+				if (OldToNewTemplates && !OldToNewInstanceMap.IsEmpty())
+				{
+					OldToNewTemplates->FindOrAdd(OldClass).Append(OldToNewInstanceMap);
+				}
 
 				if (ReinstancingJob.Compiler.IsValid())
 				{
@@ -2110,7 +2563,15 @@ void FBlueprintCompilationManagerImpl::ReinstanceBatch(TArray<FReinstancingJob>&
 					for (int32 i = 0; i < CurrentLinker->ExportMap.Num(); i++)
 					{
 						FObjectExport& ThisExport = CurrentLinker->ExportMap[i];
-						if (ThisExport.ObjectFlags & RF_ClassDefaultObject)
+						// In addition to checking for RF_ClassDefaultObject, we also need to check if the object names
+						// match to for Control Rig BP use case
+						// 
+						// In a normal Blueprint, there is usually just 1 CDO in the package, so name checking was not necessary.
+						// 
+						// But in a Control Rig BP, multiple CDO can be in a package because custom UClasses are used to describe 
+						// the layout of RigVM Memory Storage. These UClasses and their CDO are serialzed with the package as well.
+						// Thus, we have to ensure that the export is not just a CDO, but also a CDO with the matching name
+						if ((ThisExport.ObjectFlags & RF_ClassDefaultObject) && (ThisExport.ObjectName == CurrentBP->GeneratedClass->ClassDefaultObject->GetFName()))
 						{
 							OldCDOIndex = i;
 							break;
@@ -2129,30 +2590,35 @@ void FBlueprintCompilationManagerImpl::ReinstanceBatch(TArray<FReinstancingJob>&
 
 	TMap<UObject*, UObject*> OldArchetypeToNewArchetype;
 
-	// 3. Update any remaining instances that are tagged as RF_ArchetypeObject or RF_InheritableComponentTemplate - 
+	// 4. Update any remaining instances that are tagged as RF_ArchetypeObject or RF_InheritableComponentTemplate - 
 	// we may need to do further sorting to ensure that interdependent archetypes are initialized correctly:
 	TSet<UObject*> ArchetypeReferencers;
 
 	// The transaction buffer could reference archetypes, and tag serialization
 	// will be simpler if we update the instance:
-	if(GUnrealEd && GUnrealEd->Trans)
+	if (IsInGameThread() && GUnrealEd && GUnrealEd->Trans)
 	{
 		ArchetypeReferencers.Add(GUnrealEd->Trans);
 	}
 
-	for (const FReinstancingJob& ReinstancingJob : Reinstancers)
+	for (FReinstancingJob* ReinstancingJobPtr : ReinstancersPtr)
 	{
+		FReinstancingJob& ReinstancingJob = *ReinstancingJobPtr;
 		UClass* OldClass = ReinstancingJob.OldToNew.Key;
-		if(OldClass)
+		if (OldClass)
 		{
+			SCOPED_LOADTIMER_ASSET_TEXT(*WriteToString<256>(TEXT("Reinstancing "), *GetPathNameSafe(ReinstancingJob.OldToNew.Value)));
+
 			UClass* NewClass = ReinstancingJob.OldToNew.Value;
-            if (NewClass && 
+			if (NewClass && 
 				OldClass->ClassDefaultObject && 
 				NewClass->ClassDefaultObject &&
 				OldClass->ClassDefaultObject != NewClass->ClassDefaultObject)
-            {
-                OldArchetypeToNewArchetype.Add(OldClass->ClassDefaultObject, NewClass->ClassDefaultObject);
-            }
+			{
+				OldArchetypeToNewArchetype.Add(OldClass->ClassDefaultObject, NewClass->ClassDefaultObject);
+				// also map old *default* subobjects to new default subobjects:
+				BuildDSOMap(OldClass->ClassDefaultObject, NewClass->ClassDefaultObject, OldArchetypeToNewArchetype);
+			}
 
 			TArray<UObject*> ArchetypeObjects;
 			GetObjectsOfClass(OldClass, ArchetypeObjects, false);
@@ -2162,7 +2628,7 @@ void FBlueprintCompilationManagerImpl::ReinstanceBatch(TArray<FReinstancingJob>&
 			// we simply detect that they are outered to a UBPGC or UBlueprint and assume that 
 			// they are archetype objects in practice:
 			ArchetypeObjects.RemoveAllSwap(
-				[](UObject* Obj) 
+				[&InOutOldToNewClassMap](UObject* Obj) 
 				{ 
 					bool bIsArchetype = 
 						Obj->HasAnyFlags(RF_ArchetypeObject|RF_InheritableComponentTemplate)
@@ -2172,22 +2638,29 @@ void FBlueprintCompilationManagerImpl::ReinstanceBatch(TArray<FReinstancingJob>&
 					// that things that are not directly outered to the transient package will be 
 					// 'reinst'd', this is specifically to handle components, which need to be up to date
 					// on the REINST_ actor class:
-					return !bIsArchetype || Obj->GetOuter() == GetTransientPackage() || Obj->HasAnyFlags(RF_NewerVersionExists); 
+					// Also no need to reinstantiate if our outer is also being reinstantiated as an archetype.
+					return !bIsArchetype || 
+							Obj->GetOutermost() == GetTransientPackage() || 
+							Obj->HasAnyFlags(RF_NewerVersionExists) ||
+							InOutOldToNewClassMap.Find(Obj->GetOuter()->GetClass()); 
 				}
 			);
 
 			// for each archetype:
-			for(UObject* Archetype : ArchetypeObjects )
+			for (UObject* Archetype : ArchetypeObjects)
 			{
+				ReinstancingJob.OldArchetypeObjects.Add(Archetype);
+
 				// make sure we fix up references in the owner:
 				{
 					UObject* Iter = Archetype->GetOuter();
 					while(Iter)
 					{
 						UBlueprintGeneratedClass* IterAsBPGC = Cast<UBlueprintGeneratedClass>(Iter);
+						UBlueprint* IterAsBP = Cast<UBlueprint>(Iter);
 						if(Iter->HasAnyFlags(RF_ClassDefaultObject)
 							|| (IterAsBPGC && !IterAsBPGC->HasAnyClassFlags(CLASS_NewerVersionExists))
-							|| Cast<UBlueprint>(Iter) )
+							|| IterAsBP)
 						{
 							ArchetypeReferencers.Add(Iter);
 
@@ -2197,6 +2670,14 @@ void FBlueprintCompilationManagerImpl::ReinstanceBatch(TArray<FReinstancingJob>&
 							if(IterAsBPGC)
 							{
 								ArchetypeReferencers.Add(IterAsBPGC->ClassGeneratedBy);
+								IterAsBP = Cast<UBlueprint>(IterAsBPGC->ClassGeneratedBy);
+							}
+							if (IterAsBP)
+							{
+								if (IterAsBP->SkeletonGeneratedClass)
+								{
+									ArchetypeReferencers.Add(IterAsBP->SkeletonGeneratedClass);
+								}
 							}
 
 							// this handles nested subobjects:
@@ -2207,14 +2688,54 @@ void FBlueprintCompilationManagerImpl::ReinstanceBatch(TArray<FReinstancingJob>&
 						Iter = Iter->GetOuter();
 					}
 				}
-				
-				// move aside:
-				FName OriginalName = Archetype->GetFName();
-				UObject* OriginalOuter = Archetype->GetOuter();
-				EObjectFlags OriginalFlags = Archetype->GetFlags();
+			}
 
-				UObject* Destination = GetOuterForRename(Archetype->GetClass());
-				Archetype->Rename(
+			// Sort all archetype between themselves, as one might depends on an other
+			// This happens when the class containing the archetype has derived classes.
+			Algo::TopologicalSort(ReinstancingJob.OldArchetypeObjects, [&ArchetypeObjects](const FReinstancingJob::FArchetypeInfo& OldArchetypeInfo)
+			{
+				TArray<UObject*> Dependencies;
+				if (OldArchetypeInfo.ArchetypeTemplate && !OldArchetypeInfo.ArchetypeTemplate->HasAnyFlags(RF_ClassDefaultObject))
+				{
+					if(ArchetypeObjects.Contains(OldArchetypeInfo.ArchetypeTemplate))
+					{
+						Dependencies.Add(OldArchetypeInfo.ArchetypeTemplate);
+					}
+					else
+					{
+						UE_LOG(LogBlueprint, Warning, TEXT("Expecting the template object (%s) of archetype (%s) to already be in the list of archetypes"), *GetNameSafe(OldArchetypeInfo.ArchetypeTemplate), *GetNameSafe(OldArchetypeInfo.Archetype));
+					}
+				}
+
+				return Dependencies;
+			});
+		}
+	}
+
+	// This loop finishes the reinstancing of archetypes after the entire Outer hierarchy has been updated with new instances:
+	for (const FReinstancingJob* ReinstancingJobPtr : ReinstancersPtr)
+	{
+		const FReinstancingJob& ReinstancingJob = *ReinstancingJobPtr;
+		UClass* OldClass = ReinstancingJob.OldToNew.Key;
+		if(OldClass)
+		{
+			SCOPED_LOADTIMER_ASSET_TEXT(*WriteToString<256>(TEXT("FinishReinstancing "), *GetPathNameSafe(ReinstancingJob.OldToNew.Value)));
+
+			UClass* NewClass = ReinstancingJob.OldToNew.Value;
+
+			TMap<UObject*, UObject*>* OldToNewTemplatesForClass = OldToNewTemplates ? &OldToNewTemplates->FindOrAdd(OldClass) : nullptr;
+
+			for(const FReinstancingJob::FArchetypeInfo& OldArchetypeInfo : ReinstancingJob.OldArchetypeObjects)
+			{
+				UObject* OldInstance = OldArchetypeInfo.Archetype;
+
+				// move aside:
+				FName OriginalName = OldInstance->GetFName();
+				UObject* OriginalOuter = OldInstance->GetOuter();
+				EObjectFlags OriginalFlags = OldInstance->GetFlags();
+
+				UObject* Destination = GetTransientOuterForRename(OldInstance->GetClass());
+				OldInstance->Rename(
 					nullptr,
 					// destination - this is the important part of this call. Moving the object 
 					// out of the way so we can reuse its name:
@@ -2225,78 +2746,70 @@ void FBlueprintCompilationManagerImpl::ReinstanceBatch(TArray<FReinstancingJob>&
 				// reconstruct
 				FMakeClassSpawnableOnScope TemporarilySpawnable(NewClass);
 				const EObjectFlags FlagMask = RF_Public | RF_ArchetypeObject | RF_Transactional | RF_Transient | RF_TextExportTransient | RF_InheritableComponentTemplate | RF_Standalone; //TODO: what about RF_RootSet?
-				UObject* NewArchetype = NewObject<UObject>(OriginalOuter, NewClass, OriginalName, OriginalFlags & FlagMask);
 
-				// grab the old archetype's subobjects:
+				UObject* Template = nullptr;
+				if (UObject** NewArchetypeTemplate = OldArchetypeInfo.ArchetypeTemplate ? OldArchetypeToNewArchetype.Find(OldArchetypeInfo.ArchetypeTemplate) : nullptr)
 				{
-					TArray<UObject*> OldSubobjects;
-					GetObjectsWithOuter( Archetype, OldSubobjects, false );
+					Template = *NewArchetypeTemplate;
+				}
+				UObject* NewArchetype = NewObject<UObject>(OriginalOuter, NewClass, OriginalName, OriginalFlags & FlagMask, Template);
 
-					for(UObject* Subobject : OldSubobjects )
-					{
-						if(Subobject->HasAnyFlags(RF_DefaultSubObject))
-						{
-							// CPFUO handles DSOs:
-							continue;
-						}
-
-						// Non DSO subobject - just reuse the subobject:
-						Subobject->Rename( 
-							nullptr, 
-							// destination:
-							NewArchetype, 
-							// Rename options:
-							REN_DoNotDirty | REN_DontCreateRedirectors | REN_ForceNoResetLoaders 
-						);
-					}
+				OldArchetypeToNewArchetype.Add(OldInstance, NewArchetype);
+				if (OldToNewTemplatesForClass)
+				{
+					OldToNewTemplatesForClass->Add(OldInstance, NewArchetype);
 				}
 
-				OldArchetypeToNewArchetype.Add(Archetype, NewArchetype);
-
 				// also map old *default* subobjects to new default subobjects:
-				BuildDSOMap(Archetype, NewArchetype, OldArchetypeToNewArchetype);
+				BuildDSOMap(OldInstance, NewArchetype, OldArchetypeToNewArchetype);
 
 				ArchetypeReferencers.Add(NewArchetype);
 
-				FLinkerLoad::PRIVATE_PatchNewObjectIntoExport(Archetype, NewArchetype);
+				FLinkerLoad::PRIVATE_PatchNewObjectIntoExport(OldInstance, NewArchetype);
 
-				Archetype->RemoveFromRoot();
-				Archetype->MarkPendingKill();
-			}
-		}
-	}
-
-	// This loop finishes the reinstancing of archetypes after the entire Outer hierarchy has been updated with new instances:
-	for (const FReinstancingJob& ReinstancingJob : Reinstancers)
-	{
-		UClass* OldClass = ReinstancingJob.OldToNew.Key;
-		if(OldClass)
-		{
-			TArray<UObject*> OldInstances;
-			GetObjectsOfClass( OldClass, OldInstances, false );
-
-			for(UObject* OldInstance : OldInstances)
-			{
-				UObject** NewInstance = OldArchetypeToNewArchetype.Find(OldInstance);
-				// NewInstance may be null in the case of deleted or EditorOnly (in -game) DSOs:
-				if(NewInstance && *NewInstance)
+				// NewArchetype may be null in the case of deleted or EditorOnly (in -game) DSOs:
+				if(NewArchetype)
 				{
 					// The new object hierarchy has been created, all of the old instances are in the transient package and new
-					// ones have taken their place. Referenc members will mostly be pointing at *old* instances, and will get fixed
+					// ones have taken their place. Reference members will mostly be pointing at *old* instances, and will get fixed
 					// up below:			
 					const bool bUseDeltaSerialization = ReinstancingJob.Reinstancer.IsValid() ? ReinstancingJob.Reinstancer->bUseDeltaSerializationToCopyProperties : false;
 
-					FBlueprintCompileReinstancer::CopyPropertiesForUnrelatedObjects(OldInstance, *NewInstance, false, bUseDeltaSerialization);
+					TMap<UObject*, UObject*> CreatedInstanceMap;
+					FBlueprintCompileReinstancer::PreCreateSubObjectsForReinstantiation(InOutOldToNewClassMap, OldInstance, NewArchetype, CreatedInstanceMap);
+
+					// We only need to copy properties of the pre-created instances, the rest of the default sub object is done inside the UEditorEngine::CopyPropertiesForUnrelatedObjects
+					TMap<UObject*, UObject*> OldToNewInstanceMap(CreatedInstanceMap);
+					if (TMap<UObject*, UObject*>* OldToNewTemplateMap = OldToNewTemplates ? OldToNewTemplates->Find(OldClass->GetSuperClass()) : nullptr)
+					{
+						OldToNewInstanceMap.Append(*OldToNewTemplateMap);
+					}
+					for (const auto& Pair : CreatedInstanceMap)
+					{
+						FBlueprintCompileReinstancer::CopyPropertiesForUnrelatedObjects(Pair.Key, Pair.Value, /*bClearExternalReferences*/true, bUseDeltaSerialization, /*bOnlyHandleDirectSubObjects*/true, &OldToNewInstanceMap, &InOutOldToNewClassMap);
+					}
+
+					if (OldToNewTemplates && !OldToNewInstanceMap.IsEmpty())
+					{
+						OldToNewTemplates->FindOrAdd(OldClass).Append(OldToNewInstanceMap);
+					}
+
+					OldInstance->RemoveFromRoot();
+					OldInstance->MarkAsGarbage();
 				}
 			}
 		}
 	}
 
-	// 4. update known references to archetypes (e.g. component templates, WidgetTree). We don't want to run the normal 
+	// Reassociate relevant property bags
+	UE::FPropertyBagRepository::Get().ReassociateObjects(OldArchetypeToNewArchetype);
+	
+	// 5. update known references to archetypes (e.g. component templates, WidgetTree). We don't want to run the normal 
 	// reference finder to update these because searching the entire object graph is time consuming. Instead we just replace
 	// all references in our UBlueprint and its generated class:
-	for (const FReinstancingJob& ReinstancingJob : Reinstancers)
+	for (const FReinstancingJob* ReinstancingJobPtr : ReinstancersPtr)
 	{
+		const FReinstancingJob& ReinstancingJob = *ReinstancingJobPtr;
 		ArchetypeReferencers.Add(ReinstancingJob.OldToNew.Value);
 		ArchetypeReferencers.Add(ReinstancingJob.OldToNew.Value->ClassGeneratedBy);
 
@@ -2323,9 +2836,24 @@ void FBlueprintCompilationManagerImpl::ReinstanceBatch(TArray<FReinstancingJob>&
 		}
 	}
 
+	// Data loading may be in flight, lets immediately patch existing redirectors - 
+	// we may want to search the entire graph some day, but that would be expensive:
+	for (TObjectIterator<UObjectRedirector> Itr; Itr; ++Itr)
+	{
+		if (Itr->DestinationObject && 
+			Itr->DestinationObject->HasAnyFlags(RF_ClassDefaultObject|RF_ArchetypeObject))
+		{
+			ArchetypeReferencers.Add(*Itr);
+		}
+	}
+
 	for(UObject* ArchetypeReferencer : ArchetypeReferencers)
 	{
-		FArchiveReplaceObjectRef<UObject> ReplaceInCDOAr(ArchetypeReferencer, OldArchetypeToNewArchetype, false, false, false);
+		// Do not bother trying to replace references in referencers that are not valid
+		if (IsValid(ArchetypeReferencer))
+		{
+			FArchiveReplaceObjectRef<UObject> ReplaceInCDOAr(ArchetypeReferencer, OldArchetypeToNewArchetype);
+		}
 	}
 }
 
@@ -2382,7 +2910,14 @@ UClass* FBlueprintCompilationManagerImpl::FastGenerateSkeletonClass(UBlueprint* 
 	else
 	{
 		Ret = CastChecked<UBlueprintGeneratedClass>(*(BP->SkeletonGeneratedClass));
-		CompilerContext.CleanAndSanitizeClass(Ret, Ret->ClassDefaultObject);
+
+		// If we're changing the parent class, first validate variable names against the inherited set to avoid collisions when we create properties.
+		if (Ret->GetSuperClass() != ParentClass)
+		{
+			CompilerContext.ValidateVariableNames();
+		}
+
+		CompilerContext.CleanAndSanitizeClass(Ret, MutableView(Ret->ClassDefaultObject));
 	}
 	
 	Ret->ClassGeneratedBy = BP;
@@ -2418,6 +2953,11 @@ UClass* FBlueprintCompilationManagerImpl::FastGenerateSkeletonClass(UBlueprint* 
 		}
 
 		UFunction* ParentFn = ParentClass->FindFunctionByName(NewFunction->GetFName());
+
+		// Set the parent function prior to searching for a corresponding interface class function. This matches what
+		// is done in the full path (@see FKismetCompilerContext::PrecompileFunction). It is ok for this to be NULL.
+		NewFunction->SetSuperStruct(ParentFn);
+
 		if(ParentFn == nullptr)
 		{
 			// check for function in implemented interfaces:
@@ -2445,7 +2985,6 @@ UClass* FBlueprintCompilationManagerImpl::FastGenerateSkeletonClass(UBlueprint* 
 				}
 			}
 		}
-		NewFunction->SetSuperStruct( ParentFn );
 		
 		InCurrentParamStorageLocation = &NewFunction->ChildProperties;
 
@@ -2456,7 +2995,7 @@ UClass* FBlueprintCompilationManagerImpl::FastGenerateSkeletonClass(UBlueprint* 
 			NewFunction->FunctionFlags |= (SignatureFn->FunctionFlags & (FUNC_FuncInherit | FUNC_Public | FUNC_Protected | FUNC_Private | FUNC_BlueprintPure));
 			for (TFieldIterator<FProperty> PropIt(SignatureFn); PropIt && (PropIt->PropertyFlags & CPF_Parm); ++PropIt)
 			{
-				FProperty* ClonedParam = CastField<FProperty>(FField::Duplicate(*PropIt, NewFunction, PropIt->GetFName(), RF_AllFlags, EInternalObjectFlags::AllFlags & ~(EInternalObjectFlags::Native)));
+				FProperty* ClonedParam = CastField<FProperty>(FField::Duplicate(*PropIt, NewFunction, PropIt->GetFName(), RF_AllFlags, EInternalObjectFlags_AllFlags & ~(EInternalObjectFlags::Native)));
 				check(ClonedParam);
 				ClonedParam->PropertyFlags |= CPF_BlueprintVisible|CPF_BlueprintReadOnly;
 				ClonedParam->Next = nullptr;
@@ -2541,7 +3080,6 @@ UClass* FBlueprintCompilationManagerImpl::FastGenerateSkeletonClass(UBlueprint* 
 				// Gather all input pins on these nodes, these are 
 				// the outputs of the function:
 				TSet<FName> UsedPinNames;
-				static const FName RetValName = FName(TEXT("ReturnValue"));
 				for(UK2Node_FunctionResult* Node : ReturnNodes)
 				{
 					for(UEdGraphPin* Pin : Node->Pins)
@@ -2557,7 +3095,7 @@ UClass* FBlueprintCompilationManagerImpl::FastGenerateSkeletonClass(UBlueprint* 
 								{
 									Param->SetFlags(RF_Transient);
 									// we only tag things as CPF_ReturnParm if the value is named ReturnValue.... this is *terrible* behavior:
-									if(Param->GetFName() == RetValName)
+									if(Param->GetFName() == UEdGraphSchema_K2::PN_ReturnValue)
 									{
 										Param->PropertyFlags |= CPF_ReturnParm;
 									}
@@ -2645,12 +3183,30 @@ UClass* FBlueprintCompilationManagerImpl::FastGenerateSkeletonClass(UBlueprint* 
 					}
 
 					CompilerContext.SetCalculatedMetaDataAndFlags(NewFunction, EntryNode, Schema);
+
+					if (EntryNode->MetaData.HasMetaData(FBlueprintMetadata::MD_FieldNotify) && Ret->ImplementsInterface(UNotifyFieldValueChanged::StaticClass()))
+					{
+						ensure(!Ret->FieldNotifies.Contains(FFieldNotificationId(NewFunction->GetFName())));
+						Ret->FieldNotifies.Add(FFieldNotificationId(NewFunction->GetFName()));
+					}
+				}
+
+				if (BP->bIsRegeneratingOnLoad)
+				{
+					// Ensure that the function's variable cache is up-to-date after property creation. Note that
+					// this may incur a load if the variable's default value (a string) refers to an external asset;
+					// that won't result in a package import until after the BP is compiled, and sometimes users will
+					// save the Blueprint after having set the variable's default value without also recompiling it.
+					// In that case we want to ensure these assets are loaded as part of regenerating classes on load.
+					EntryNode->RefreshFunctionVariableCache();
 				}
 			}
 		}
 	};
 
-	UField** CurrentFieldStorageLocation = &Ret->Children;
+
+	auto RetChildrenScope = MutableView(Ret->Children);
+	UField** CurrentFieldStorageLocation = ToRawPtr(RetChildrenScope);
 	
 	// Helper function for making UFunctions generated for 'event' nodes, e.g. custom event and timelines
 	const auto MakeEventFunction = [&CurrentFieldStorageLocation, MakeFunction, Schema]( FName InName, EFunctionFlags ExtraFnFlags, const TArray<UEdGraphPin*>& InputPins, const TArray< TSharedPtr<FUserPinInfo> >& UserPins, UFunction* InSourceFN, bool bInCallInEditor, bool bIsDeprecated, const FString& DeprecationMessage, FKismetUserDeclaredFunctionMetadata* UserDefinedMetaData = nullptr)
@@ -2694,6 +3250,28 @@ UClass* FBlueprintCompilationManagerImpl::FastGenerateSkeletonClass(UBlueprint* 
 
 			NewFunction->Bind();
 			NewFunction->StaticLink(true);
+		}
+	};
+
+	const auto CreateDelegateProxyFunctions = [Ret, &CompilerContext](UField**& InCurrentFieldStorageLocation)
+	{
+		for (const auto& DelegateInfo : CompilerContext.ConvertibleDelegates)
+		{
+			check(DelegateInfo.Key);
+
+			const UFunction* DelegateSignature = DelegateInfo.Key->GetDelegateSignature();
+
+			// The original signature function is actually a UDelegateFunction type.
+			// When we create our own function from the original, we need to ensure that it's a standard UFunction.
+
+			UObject* NewObject =
+				StaticDuplicateObject(DelegateSignature, Ret, DelegateInfo.Value.ProxyFunctionName, RF_AllFlags, UFunction::StaticClass());
+			UFunction* NewFunction = CastChecked<UFunction>(NewObject);
+
+			NewFunction->FunctionFlags &= ~(FUNC_Delegate | FUNC_MulticastDelegate);
+
+			*InCurrentFieldStorageLocation = NewFunction;
+			InCurrentFieldStorageLocation = &NewFunction->Next;
 		}
 	};
 
@@ -2776,10 +3354,17 @@ UClass* FBlueprintCompilationManagerImpl::FastGenerateSkeletonClass(UBlueprint* 
 
 	{
 		CompilerContext.NewClass = Ret;
+		CompilerContext.RegisterClassDelegateProxiesFromBlueprint();
+		CompilerContext.NewClass = OriginalNewClass;
+	}
+
+	{
+		CompilerContext.NewClass = Ret;
 		TGuardValue<bool> GuardAssignDelegateSignatureFunction( CompilerContext.bAssignDelegateSignatureFunction, true);
 		CompilerContext.CreateClassVariablesFromBlueprint();
 		CompilerContext.NewClass = OriginalNewClass;
 	}
+
 	UField* Iter = Ret->Children;
 	while(Iter)
 	{
@@ -2787,7 +3372,10 @@ UClass* FBlueprintCompilationManagerImpl::FastGenerateSkeletonClass(UBlueprint* 
 		Iter = Iter->Next;
 	}
 	
+	CreateDelegateProxyFunctions(CurrentFieldStorageLocation);
+
 	AddFunctionForGraphs(TEXT(""), BP->FunctionGraphs, CurrentFieldStorageLocation, BPTYPE_FunctionLibrary == BP->BlueprintType, false);
+	AddFunctionForGraphs(TEXT(""), CompilerContext.GeneratedFunctionGraphs, CurrentFieldStorageLocation, BPTYPE_FunctionLibrary == BP->BlueprintType, false);
 
 	// Add interface functions, often these are added by normal detection of implemented functions, but they won't be
 	// if the interface is added but the function is not implemented:
@@ -2857,18 +3445,50 @@ bool FBlueprintCompilationManagerImpl::IsQueuedForCompilation(UBlueprint* BP)
 	return BP->bQueuedForCompilation;
 }
 
-UObject* FBlueprintCompilationManagerImpl::GetOuterForRename(UClass* ForClass)
+void FBlueprintCompilationManagerImpl::ConformToParentAndInterfaces(UBlueprint* BP)
 {
-	// if someone has tautologically placed themself within their own hierarchy then we'll
-	// just assume they're ok with eventually being outered to a upackage, similar UPackage
-	// is a UObject, so if someone demands that they be outered to 'a uobject' we'll 
-	// just leave them directly parented to the transient package:
-	if(ForClass->ClassWithin && ForClass->ClassWithin != ForClass && ForClass->ClassWithin != UObject::StaticClass())
+	// If graphs are renamed the blueprint will be marked as not 'bCachedDependenciesUpToDate', but 
+	// because we're conforming an existing dependency we don't need to change bCachedDependenciesUpToDate:
+	TGuardValue<bool> LockDependenciesUpToDate(BP->bCachedDependenciesUpToDate, BP->bCachedDependenciesUpToDate);
+
+	// Make sure that this blueprint is up-to-date with regards to its parent functions
+	FBlueprintEditorUtils::ConformCallsToParentFunctions(BP);
+
+	// Conform implemented events here, to ensure we generate custom events if necessary after reparenting
+	FBlueprintEditorUtils::ConformImplementedEvents(BP);
+
+	// Conform implemented interfaces here, to ensure we generate all functions required by the interface as stubs
+	FBlueprintEditorUtils::ConformImplementedInterfaces(BP);
+
+	// Make sure we don't have any signature graphs with no corresponding variable - some assets have
+	// managed to get into this state - the UI does not provide a way to fix these objects manually
+	FBlueprintEditorUtils::ConformDelegateSignatureGraphs(BP);
+}
+
+void FBlueprintCompilationManagerImpl::RelinkSkeleton(UClass* SkeletonToRelink)
+{
+	// CDO needs to be moved aside already:
+	ensure(SkeletonToRelink->ClassDefaultObject == nullptr);
+	ensure(!SkeletonToRelink->GetSuperClass()->HasAnyClassFlags(CLASS_NewerVersionExists));
+
+	SkeletonToRelink->ClassConstructor = nullptr;
+	SkeletonToRelink->ClassVTableHelperCtorCaller = nullptr;
+	SkeletonToRelink->CppClassStaticFunctions.Reset();
+	SkeletonToRelink->Bind();
+	SkeletonToRelink->ClearFunctionMapsCaches();
+	SkeletonToRelink->StaticLink(true);
+	SkeletonToRelink->GetDefaultObject()->SetFlags(RF_Transient);
+
+	// Update UFunction SuperStruct pointers, which are typically set to their overridden function.
+	// For non-skeleton classes these are reassigned by the 'bytecode' recompile that we run on all
+	// referencing classes...
+	for (TFieldIterator<UFunction> FuncIter(SkeletonToRelink, EFieldIteratorFlags::ExcludeSuper); FuncIter; ++FuncIter)
 	{
-		FScopedAllowAbstractClassAllocation AllowAbstract;
-		return NewObject<UObject>( GetOuterForRename(ForClass->ClassWithin), ForClass->ClassWithin, NAME_None, RF_Transient );
+		if (UFunction* SuperFunction = SkeletonToRelink->GetSuperClass()->FindFunctionByName(FuncIter->GetFName()))
+		{
+			FuncIter->SetSuperStruct(SuperFunction);
+		}
 	}
-	return GetTransientPackage();
 }
 
 // FFixupBytecodeReferences Implementation:
@@ -3069,6 +3689,7 @@ void FBlueprintCompilationManager::FlushCompilationQueue(FUObjectSerializeContex
 {
 	if(BPCMImpl)
 	{
+		LLM_SCOPE_BYNAME(TEXT("Blueprints"));
 		BPCMImpl->FlushCompilationQueueImpl(false, nullptr, nullptr, InLoadContext);
 
 		// We can't support save on compile or keeping old CDOs from GCing when reinstancing is deferred:
@@ -3092,26 +3713,6 @@ void FBlueprintCompilationManager::CompileSynchronously(const FBPCompileRequest&
 {
 	if(BPCMImpl)
 	{
-		BPCMImpl->CompileSynchronouslyImpl(Request);
-	}
-}
-
-void FBlueprintCompilationManager::CompileSynchronouslyToCpp(UBlueprint* BP, TSharedPtr<FString> OutHeaderSource, TSharedPtr<FString> OutCppSource, const FCompilerNativizationOptions& NativizationOptions)
-{
-	if(BPCMImpl)
-	{
-		FBPCompileRequestInternal Request(
-			FBPCompileRequest( 
-				BP, 
-				EBlueprintCompileOptions::SkipGarbageCollection|EBlueprintCompileOptions::SkipSave,
-				nullptr
-			)
-		);
-
-		Request.CPPResults.CppOptions = &NativizationOptions;
-		Request.CPPResults.HeaderSource = OutHeaderSource;
-		Request.CPPResults.CppSource = OutCppSource;
-
 		BPCMImpl->CompileSynchronouslyImpl(Request);
 	}
 }

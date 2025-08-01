@@ -3,6 +3,8 @@
 #include "FrameTimingTrack.h"
 
 #include "Fonts/FontMeasure.h"
+#include "Framework/Commands/Commands.h"
+#include "Framework/Commands/UICommandList.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "Styling/SlateBrush.h"
@@ -11,6 +13,7 @@
 #include "Insights/Common/PaintUtils.h"
 #include "Insights/Common/TimeUtils.h"
 #include "Insights/InsightsManager.h"
+#include "Insights/InsightsStyle.h"
 #include "Insights/ITimingViewSession.h"
 #include "Insights/ViewModels/FrameTrackHelper.h"
 #include "Insights/ViewModels/TimerNode.h"
@@ -21,6 +24,39 @@
 #include "Insights/Widgets/STimingView.h"
 
 #define LOCTEXT_NAMESPACE "FrameTimingTrack"
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// FFrameTimingViewCommands
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+FFrameTimingViewCommands::FFrameTimingViewCommands()
+: TCommands<FFrameTimingViewCommands>(
+	TEXT("FrameTimingViewCommands"),
+	NSLOCTEXT("Contexts", "FrameTimingViewCommands", "Insights - Timing View - Frames"),
+	NAME_None,
+	FInsightsStyle::GetStyleSetName())
+{
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+FFrameTimingViewCommands::~FFrameTimingViewCommands()
+{
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// UI_COMMAND takes long for the compiler to optimize
+UE_DISABLE_OPTIMIZATION_SHIP
+void FFrameTimingViewCommands::RegisterCommands()
+{
+	UI_COMMAND(ShowHideAllFrameTracks,
+		"Frame Tracks",
+		"Shows/hides all Frame tracks.",
+		EUserInterfaceActionType::ToggleButton,
+		FInputChord(EKeys::R));
+}
+UE_ENABLE_OPTIMIZATION_SHIP
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // FFrameSharedState
@@ -68,7 +104,7 @@ void FFrameSharedState::OnEndSession(Insights::ITimingViewSession& InSession)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void FFrameSharedState::Tick(Insights::ITimingViewSession& InSession, const Trace::IAnalysisSession& InAnalysisSession)
+void FFrameSharedState::Tick(Insights::ITimingViewSession& InSession, const TraceServices::IAnalysisSession& InAnalysisSession)
 {
 	if (&InSession != TimingView)
 	{
@@ -116,28 +152,34 @@ void FFrameSharedState::Tick(Insights::ITimingViewSession& InSession, const Trac
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void FFrameSharedState::ExtendFilterMenu(Insights::ITimingViewSession& InSession, FMenuBuilder& InOutMenuBuilder)
+void FFrameSharedState::ExtendOtherTracksFilterMenu(Insights::ITimingViewSession& InSession, FMenuBuilder& InOutMenuBuilder)
 {
 	if (&InSession != TimingView)
 	{
 		return;
 	}
 
-	InOutMenuBuilder.BeginSection("FrameTracks", LOCTEXT("FrameTracksHeading", "Frames"));
+	InOutMenuBuilder.BeginSection("FrameTracks", LOCTEXT("ContextMenu_Section_FrameTracks", "Frames"));
 	{
-		//TODO: MenuBuilder.AddMenuEntry(Commands.ShowAllFrameTracks);
-		InOutMenuBuilder.AddMenuEntry(
-			LOCTEXT("ShowAllFrameTracks", "Frame Tracks - R"),
-			LOCTEXT("ShowAllFrameTracks_Tooltip", "Show/hide all Frame tracks"),
-			FSlateIcon(),
-			FUIAction(FExecuteAction::CreateSP(this, &FFrameSharedState::ShowHideAllFrameTracks),
-					  FCanExecuteAction(),
-					  FIsActionChecked::CreateSP(this, &FFrameSharedState::IsAllFrameTracksToggleOn)),
-			NAME_None, //"QuickFilterSeparator",
-			EUserInterfaceActionType::ToggleButton
-		);
+		InOutMenuBuilder.AddMenuEntry(FFrameTimingViewCommands::Get().ShowHideAllFrameTracks);
 	}
 	InOutMenuBuilder.EndSection();
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void FFrameSharedState::BindCommands()
+{
+	FFrameTimingViewCommands::Register();
+
+	TSharedPtr<FUICommandList> CommandList = TimingView->GetCommandList();
+	ensure(CommandList.IsValid());
+
+	CommandList->MapAction(
+		FFrameTimingViewCommands::Get().ShowHideAllFrameTracks,
+		FExecuteAction::CreateSP(this, &FFrameSharedState::ShowHideAllFrameTracks),
+		FCanExecuteAction(),
+		FIsActionChecked::CreateSP(this, &FFrameSharedState::IsAllFrameTracksToggleOn));
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -154,7 +196,7 @@ void FFrameSharedState::SetAllFrameTracksToggle(bool bOnOff)
 
 	if (TimingView)
 	{
-		TimingView->OnTrackVisibilityChanged();
+		TimingView->HandleTrackVisibilityChanged();
 	}
 }
 
@@ -180,11 +222,11 @@ void FFrameTimingTrack::Reset()
 
 void FFrameTimingTrack::BuildDrawState(ITimingEventsTrackDrawStateBuilder& Builder, const ITimingTrackUpdateContext& Context)
 {
-	TSharedPtr<const Trace::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
+	TSharedPtr<const TraceServices::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
 	if (Session.IsValid())
 	{
-		Trace::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
-		const Trace::IFrameProvider& FramesProvider = Trace::ReadFrameProvider(*Session.Get());
+		TraceServices::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
+		const TraceServices::IFrameProvider& FramesProvider = TraceServices::ReadFrameProvider(*Session.Get());
 		const FTimingTrackViewport& Viewport = Context.GetViewport();
 
 		const TArray64<double>& FrameStartTimes = FramesProvider.GetFrameStartTimes(static_cast<ETraceFrameType>(FrameType));
@@ -197,7 +239,7 @@ void FFrameTimingTrack::BuildDrawState(ITimingEventsTrackDrawStateBuilder& Build
 
 		const uint32 Color = FFrameTrackDrawHelper::GetColor32ByFrameType(FrameType);
 
-		FramesProvider.EnumerateFrames(static_cast<ETraceFrameType>(FrameType), StartIndex, EndIndex, [this, Color, &Builder](const Trace::FFrame& Frame)
+		FramesProvider.EnumerateFrames(static_cast<ETraceFrameType>(FrameType), StartIndex, EndIndex, [this, Color, &Builder](const TraceServices::FFrame& Frame)
 		{
 			constexpr uint32 Depth = 0;
 			const FString FrameName = GetShortFrameName(Frame.Index);
@@ -214,11 +256,11 @@ void FFrameTimingTrack::BuildFilteredDrawState(ITimingEventsTrackDrawStateBuilde
 	const TSharedPtr<ITimingEventFilter> EventFilterPtr = Context.GetEventFilter();
 	if (EventFilterPtr.IsValid() && EventFilterPtr->FilterTrack(*this))
 	{
-		TSharedPtr<const Trace::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
+		TSharedPtr<const TraceServices::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
 		if (Session.IsValid())
 		{
-			Trace::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
-			const Trace::IFrameProvider& FramesProvider = Trace::ReadFrameProvider(*Session.Get());
+			TraceServices::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
+			const TraceServices::IFrameProvider& FramesProvider = TraceServices::ReadFrameProvider(*Session.Get());
 			const FTimingTrackViewport& Viewport = Context.GetViewport();
 
 			const TArray64<double>& FrameStartTimes = FramesProvider.GetFrameStartTimes(static_cast<ETraceFrameType>(FrameType));
@@ -231,7 +273,7 @@ void FFrameTimingTrack::BuildFilteredDrawState(ITimingEventsTrackDrawStateBuilde
 
 			const uint32 Color = FFrameTrackDrawHelper::GetColor32ByFrameType(FrameType);
 
-			FramesProvider.EnumerateFrames(static_cast<ETraceFrameType>(FrameType), StartIndex, EndIndex, [this, Color, &Builder, &EventFilterPtr](const Trace::FFrame& Frame)
+			FramesProvider.EnumerateFrames(static_cast<ETraceFrameType>(FrameType), StartIndex, EndIndex, [this, Color, &Builder, &EventFilterPtr](const TraceServices::FFrame& Frame)
 			{
 				constexpr uint32 Depth = 0;
 				const uint64 IndexAsEventType = Frame.Index;
@@ -254,6 +296,7 @@ void FFrameTimingTrack::Update(const ITimingTrackUpdateContext& Context)
 {
 	FTimingEventsTrack::Update(Context);
 
+	Header.SetFontScale(Context.GetGeometry().Scale);
 	Header.UpdateSize();
 	Header.Update(Context);
 }
@@ -282,7 +325,7 @@ void FFrameTimingTrack::PostDraw(const ITimingTrackDrawContext& Context) const
 	if (!Header.IsCollapsed())
 	{
 		const FTimingTrackViewport& Viewport = Context.GetViewport();
-		DrawMarkers(Context, 0.0f, Viewport.GetHeight());
+		DrawMarkers(Context, Viewport.GetPosY(), Viewport.GetHeight());
 	}
 
 	const TSharedPtr<const ITimingEvent> SelectedEventPtr = Context.GetSelectedEvent();
@@ -292,6 +335,7 @@ void FFrameTimingTrack::PostDraw(const ITimingTrackDrawContext& Context) const
 	{
 		const FTimingEvent& SelectedEvent = SelectedEventPtr->As<FTimingEvent>();
 		const ITimingViewDrawHelper& Helper = Context.GetHelper();
+		const float FontScale = Context.GetDrawContext().Geometry.Scale;
 		DrawSelectedEventInfo(SelectedEvent, Context.GetViewport(), Context.GetDrawContext(), Helper.GetWhiteBrush(), Helper.GetEventFont());
 	}
 
@@ -302,21 +346,24 @@ void FFrameTimingTrack::PostDraw(const ITimingTrackDrawContext& Context) const
 
 void FFrameTimingTrack::DrawSelectedEventInfo(const FTimingEvent& SelectedEvent, const FTimingTrackViewport& Viewport, const FDrawContext& DrawContext, const FSlateBrush* WhiteBrush, const FSlateFontInfo& Font) const
 {
-	FindFrame(SelectedEvent, [this, &SelectedEvent, &Font, &Viewport, &DrawContext, &WhiteBrush](double InFoundStartTime, double InFoundEndTime, uint32 InFoundDepth, const Trace::FFrame& InFoundFrame)
+	FindFrame(SelectedEvent, [this, &SelectedEvent, &Font, &Viewport, &DrawContext, &WhiteBrush](double InFoundStartTime, double InFoundEndTime, uint32 InFoundDepth, const TraceServices::FFrame& InFoundFrame)
 	{
 		//const double Duration = SelectedEvent.GetDuration();
 		const double Duration = InFoundFrame.EndTime - InFoundFrame.StartTime;
 		const FString Str = GetCompleteFrameName(InFoundFrame.Index, Duration);
 
 		const TSharedRef<FSlateFontMeasure> FontMeasureService = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
-		const FVector2D Size = FontMeasureService->Measure(Str, Font);
-		const float X = Viewport.GetWidth() - Size.X - 23.0f;
-		const float Y = Viewport.GetHeight() - Size.Y - 18.0f;
+		const float FontScale = DrawContext.Geometry.Scale;
+		const FVector2D Size = FontMeasureService->Measure(Str, Font, FontScale) / FontScale;
+		const float W = static_cast<float>(Size.X);
+		const float H = static_cast<float>(Size.Y);
+		const float X = Viewport.GetWidth() - W - 23.0f;
+		const float Y = Viewport.GetPosY() + Viewport.GetHeight() - H - 18.0f;
 
 		const FLinearColor BackgroundColor(0.05f, 0.05f, 0.05f, 1.0f);
 		const FLinearColor TextColor(0.7f, 0.7f, 0.7f, 1.0f);
 
-		DrawContext.DrawBox(X - 8.0f, Y - 2.0f, Size.X + 16.0f, Size.Y + 4.0f, WhiteBrush, BackgroundColor);
+		DrawContext.DrawBox(X - 8.0f, Y - 2.0f, W + 16.0f, H + 4.0f, WhiteBrush, BackgroundColor);
 		DrawContext.LayerId++;
 
 		DrawContext.DrawText(X, Y, Str, Font, TextColor);
@@ -357,7 +404,7 @@ void FFrameTimingTrack::InitTooltip(FTooltipDrawState& InOutTooltip, const ITimi
 	{
 		const FTimingEvent& TooltipEvent = InTooltipEvent.As<FTimingEvent>();
 
-		FindFrame(TooltipEvent, [this, &InOutTooltip, &TooltipEvent](double InFoundStartTime, double InFoundEndTime, uint32 InFoundDepth, const Trace::FFrame& InFoundFrame)
+		FindFrame(TooltipEvent, [this, &InOutTooltip, &TooltipEvent](double InFoundStartTime, double InFoundEndTime, uint32 InFoundDepth, const TraceServices::FFrame& InFoundFrame)
 		{
 			InOutTooltip.ResetContent();
 
@@ -379,7 +426,7 @@ const TSharedPtr<const ITimingEvent> FFrameTimingTrack::SearchEvent(const FTimin
 {
 	TSharedPtr<const ITimingEvent> FoundEvent;
 
-	FindFrame(InSearchParameters, [this, &FoundEvent](double InFoundStartTime, double InFoundEndTime, uint32 InFoundDepth, const Trace::FFrame& InFoundFrame)
+	FindFrame(InSearchParameters, [this, &FoundEvent](double InFoundStartTime, double InFoundEndTime, uint32 InFoundDepth, const TraceServices::FFrame& InFoundFrame)
 	{
 		const uint64 IndexAsEventType = InFoundFrame.Index; // storing the frame index as event type
 		FoundEvent = MakeShared<FTimingEvent>(SharedThis(this), InFoundStartTime, InFoundEndTime, InFoundDepth, IndexAsEventType);
@@ -437,7 +484,7 @@ void FFrameTimingTrack::BuildContextMenu(FMenuBuilder& MenuBuilder)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-bool FFrameTimingTrack::FindFrame(const FTimingEvent& InTimingEvent, TFunctionRef<void(double, double, uint32, const Trace::FFrame&)> InFoundPredicate) const
+bool FFrameTimingTrack::FindFrame(const FTimingEvent& InTimingEvent, TFunctionRef<void(double, double, uint32, const TraceServices::FFrame&)> InFoundPredicate) const
 {
 	auto MatchEvent = [&InTimingEvent](double InStartTime, double InEndTime, uint32 InDepth)
 	{
@@ -453,18 +500,18 @@ bool FFrameTimingTrack::FindFrame(const FTimingEvent& InTimingEvent, TFunctionRe
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-bool FFrameTimingTrack::FindFrame(const FTimingEventSearchParameters& InParameters, TFunctionRef<void(double, double, uint32, const Trace::FFrame&)> InFoundPredicate) const
+bool FFrameTimingTrack::FindFrame(const FTimingEventSearchParameters& InParameters, TFunctionRef<void(double, double, uint32, const TraceServices::FFrame&)> InFoundPredicate) const
 {
-	return TTimingEventSearch<Trace::FFrame>::Search(
+	return TTimingEventSearch<TraceServices::FFrame>::Search(
 		InParameters,
 
-		[this](TTimingEventSearch<Trace::FFrame>::FContext& InContext)
+		[this](TTimingEventSearch<TraceServices::FFrame>::FContext& InContext)
 		{
-			TSharedPtr<const Trace::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
+			TSharedPtr<const TraceServices::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
 			if (Session.IsValid())
 			{
-				Trace::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
-				const Trace::IFrameProvider& FramesProvider = Trace::ReadFrameProvider(*Session.Get());
+				TraceServices::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
+				const TraceServices::IFrameProvider& FramesProvider = TraceServices::ReadFrameProvider(*Session.Get());
 
 				const TArray64<double>& FrameStartTimes = FramesProvider.GetFrameStartTimes(static_cast<ETraceFrameType>(FrameType));
 
@@ -474,7 +521,7 @@ bool FFrameTimingTrack::FindFrame(const FTimingEventSearchParameters& InParamete
 				const int64 EndLowerBound = Algo::LowerBound(FrameStartTimes, InContext.GetParameters().EndTime);
 				const uint64 EndIndex = EndLowerBound;
 
-				FramesProvider.EnumerateFrames(static_cast<ETraceFrameType>(FrameType), StartIndex, EndIndex, [&InContext](const Trace::FFrame& Frame)
+				FramesProvider.EnumerateFrames(static_cast<ETraceFrameType>(FrameType), StartIndex, EndIndex, [&InContext](const TraceServices::FFrame& Frame)
 				{
 					if (Frame.StartTime < InContext.GetParameters().EndTime &&
 						Frame.EndTime > InContext.GetParameters().StartTime)
@@ -486,7 +533,7 @@ bool FFrameTimingTrack::FindFrame(const FTimingEventSearchParameters& InParamete
 			}
 		},
 
-		[&InFoundPredicate](double InFoundStartTime, double InFoundEndTime, uint32 InFoundDepth, const Trace::FFrame& InEvent)
+		[&InFoundPredicate](double InFoundStartTime, double InFoundEndTime, uint32 InFoundDepth, const TraceServices::FFrame& InEvent)
 		{
 			InFoundPredicate(InFoundStartTime, InFoundEndTime, InFoundDepth, InEvent);
 		},

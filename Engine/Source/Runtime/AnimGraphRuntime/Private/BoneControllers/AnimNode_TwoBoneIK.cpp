@@ -3,6 +3,8 @@
 #include "BoneControllers/AnimNode_TwoBoneIK.h"
 #include "Engine/Engine.h"
 #include "AnimationRuntime.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Materials/Material.h"
 #include "TwoBoneIK.h"
 #include "AnimationCoreLibrary.h"
 #include "Animation/AnimInstanceProxy.h"
@@ -10,6 +12,8 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "MaterialShared.h"
 #include "Animation/AnimTrace.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNode_TwoBoneIK)
 
 DECLARE_CYCLE_STAT(TEXT("TwoBoneIK Eval"), STAT_TwoBoneIK_Eval, STATGROUP_Anim);
 

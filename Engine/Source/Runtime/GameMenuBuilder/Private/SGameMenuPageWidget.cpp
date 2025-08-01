@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SGameMenuPageWidget.h"
+#include "Engine/GameViewportClient.h"
+#include "UnrealClient.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SOverlay.h"
 #include "Framework/Application/SlateApplication.h"
@@ -157,7 +159,7 @@ void SGameMenuPageWidget::Construct(const FArguments& InArgs)
 	bGameMenu = InArgs._GameMenu;
 	UIScale.Bind(this, &SGameMenuPageWidget::GetUIScale);
 	//ControllerHideMenuKey = EKeys::Gamepad_Special_Right;
-	Visibility.Bind(this, &SGameMenuPageWidget::GetSlateVisibility);
+	SetVisibility(MakeAttributeSP(this, &SGameMenuPageWidget::GetSlateVisibility));
 		
 	// Create the title widget
 	TSharedRef<SHorizontalBox> TitleBoxWidget = SNew(SHorizontalBox)

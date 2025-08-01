@@ -17,10 +17,11 @@
 #include "MeshMergingTool/SMeshMergingDialog.h"
 #include "IContentBrowserSingleton.h"
 #include "ContentBrowserModule.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "ScopedTransaction.h"
 #include "MeshMergeModule.h"
 #include "ComponentReregisterContext.h"
+#include "ObjectTools.h"
 
 #define LOCTEXT_NAMESPACE "MeshMergingTool"
 
@@ -28,7 +29,6 @@ UMeshMergingSettingsObject* UMeshMergingSettingsObject::DefaultSettings = nullpt
 bool UMeshMergingSettingsObject::bInitialized = false;
 
 FMeshMergingTool::FMeshMergingTool()
-	: bReplaceSourceActors(false)
 {
 	SettingsObject = UMeshMergingSettingsObject::Get();
 }
@@ -45,14 +45,24 @@ TSharedRef<SWidget> FMeshMergingTool::GetWidget()
 	return MergingDialog.ToSharedRef();
 }
 
+FName FMeshMergingTool::GetIconName() const
+{
+	return "MergeActors.MeshMergingTool";
+}
+
+FText FMeshMergingTool::GetToolNameText() const
+{
+	return LOCTEXT("MeshMergingToolName", "Merge");
+}
+
 FText FMeshMergingTool::GetTooltipText() const
 {
-	return LOCTEXT("MeshMergingToolTooltip", "Harvest geometry from selected actors and merge grouping them by materials.");
+	return LOCTEXT("MeshMergingToolTooltip", "Merge the source actors components to generate a single mesh. No simplification pass is performed. Will generate a single static mesh & optionally bake down textures.");
 }
 
 FString FMeshMergingTool::GetDefaultPackageName() const
 {
-	FString PackageName = FPackageName::FilenameToLongPackageName(FPaths::ProjectContentDir() + TEXT("SM_MERGED"));
+	FString PackageName = FPackageName::FilenameToLongPackageName(FPaths::ProjectContentDir() + TEXT("MERGED"));
 
 	USelection* SelectedActors = GEditor->GetSelectedActors();
 	// Iterate through selected actors and find first static mesh asset
@@ -76,28 +86,25 @@ FString FMeshMergingTool::GetDefaultPackageName() const
 	return PackageName;
 }
 
-bool FMeshMergingTool::RunMerge(const FString& PackageName)
+const TArray<TSharedPtr<FMergeComponentData>>& FMeshMergingTool::GetSelectedComponentsInWidget() const
+{
+	return MergingDialog->GetSelectedComponents();
+}
+
+bool FMeshMergingTool::RunMerge(const FString& PackageName, const TArray<TSharedPtr<FMergeComponentData>>& SelectedComponents)
 {
 	const IMeshMergeUtilities& MeshUtilities = FModuleManager::Get().LoadModuleChecked<IMeshMergeModule>("MeshMergeUtilities").GetUtilities();
-	USelection* SelectedActors = GEditor->GetSelectedActors();
 	TArray<AActor*> Actors;
 	TArray<ULevel*> UniqueLevels;
-	for (FSelectionIterator Iter(*SelectedActors); Iter; ++Iter)
-	{
-		AActor* Actor = Cast<AActor>(*Iter);
-		if (Actor)
-		{
-			Actors.Add(Actor);
-			UniqueLevels.AddUnique(Actor->GetLevel());
-		}
-	}
+
+	BuildActorsListFromMergeComponentsData(SelectedComponents, Actors, bReplaceSourceActors ? &UniqueLevels : nullptr);
 
 	// This restriction is only for replacement of selected actors with merged mesh actor
 	if (UniqueLevels.Num() > 1 && bReplaceSourceActors)
 	{
 		FText Message = NSLOCTEXT("UnrealEd", "FailedToMergeActorsSublevels_Msg", "The selected actors should be in the same level");
 		const FText Title = NSLOCTEXT("UnrealEd", "FailedToMergeActors_Title", "Unable to merge actors");
-		FMessageDialog::Open(EAppMsgType::Ok, Message, &Title);
+		FMessageDialog::Open(EAppMsgType::Ok, Message, Title);
 		return false;
 	}
 
@@ -109,7 +116,6 @@ bool FMeshMergingTool::RunMerge(const FString& PackageName)
 		SlowTask.MakeDialog();
 
 		// Extracting static mesh components from the selected mesh components in the dialog
-		const TArray<TSharedPtr<FMergeComponentData>>& SelectedComponents = MergingDialog->GetSelectedComponents();
 		TArray<UPrimitiveComponent*> ComponentsToMerge;
 
 		for ( const TSharedPtr<FMergeComponentData>& SelectedComponent : SelectedComponents)
@@ -144,11 +150,41 @@ bool FMeshMergingTool::RunMerge(const FString& PackageName)
 	if (AssetsToSync.Num())
 	{
 		FAssetRegistryModule& AssetRegistry = FModuleManager::Get().LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-		int32 AssetCount = AssetsToSync.Num();
-		for (int32 AssetIndex = 0; AssetIndex < AssetCount; AssetIndex++)
+
+		for (UObject* AssetToSync : AssetsToSync)
 		{
-			AssetRegistry.AssetCreated(AssetsToSync[AssetIndex]);
-			GEditor->BroadcastObjectReimported(AssetsToSync[AssetIndex]);
+			// MergeComponentsToStaticMesh() will have outered all assets (material instance, textures) to the static mesh package.
+			// Move each of them to their own package, so that they show up in the Content Browser
+			if (AssetToSync && !AssetToSync->IsA<UStaticMesh>())
+			{
+				FString AssetName = AssetToSync->GetName();
+				FString AssetPackagePath = FPackageName::GetLongPackagePath(AssetToSync->GetPathName());
+				FString AssetPackageName = AssetPackagePath / AssetName;
+
+				UPackage* AssetPackage = CreatePackage(*AssetPackageName);
+				check(AssetPackage);
+				AssetPackage->FullyLoad();
+				AssetPackage->Modify();
+
+				// Replace existing asset by the new one.
+				if (UObject* OldAsset = FindObject<UObject>(AssetPackage, *AssetName))
+				{
+					FName ObjectName = OldAsset->GetFName();
+					UObject* Outer = OldAsset->GetOuter();
+					OldAsset->Rename(nullptr, GetTransientPackage(), REN_DoNotDirty | REN_DontCreateRedirectors);
+												
+					// Consolidate or "Replace" the old object with the new object for any living references.
+					bool bShowDeleteConfirmation = false;
+					TArray<UObject*> OldDataAssetArray = { OldAsset };
+					ObjectTools::ConsolidateObjects(AssetToSync, { OldDataAssetArray }, bShowDeleteConfirmation);
+				}
+
+				AssetToSync->Rename(*AssetName, AssetPackage, REN_DontCreateRedirectors);
+				AssetToSync->SetFlags(RF_Public | RF_Standalone);
+			}
+
+			AssetRegistry.AssetCreated(AssetToSync);
+			GEditor->BroadcastObjectReimported(AssetToSync);
 		}
 
 		//Also notify the content browser that the new assets exists
@@ -184,14 +220,12 @@ bool FMeshMergingTool::RunMerge(const FString& PackageName)
 		}
 	}
 
-	MergingDialog->Reset();
+	if (MergingDialog)
+	{
+		MergingDialog->Reset();
+	}
 
 	return true;
-}
-
-bool FMeshMergingTool::CanMerge() const
-{	
-	return MergingDialog->GetNumSelectedMeshComponents() >= 1;
 }
 
 #undef LOCTEXT_NAMESPACE

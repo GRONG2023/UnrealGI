@@ -2,20 +2,32 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Input/Reply.h"
-#include "Widgets/SWidget.h"
-#include "IDetailCustomization.h"
-#include "PropertyHandle.h"
-#include "UnrealClient.h"
-#include "AssetThumbnail.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "HAL/Platform.h"
 #include "IDetailCustomNodeBuilder.h"
-#include "IDetailChildrenBuilder.h"
+#include "IDetailCustomization.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
+class FAssetThumbnailPool;
 class FDetailWidgetRow;
 class FGameModeInfoCustomizer;
 class IDetailCategoryBuilder;
+class IDetailChildrenBuilder;
 class IDetailLayoutBuilder;
+class IPropertyHandle;
+class SWidget;
+class ULevel;
+class UObject;
+struct FGeometry;
+struct FPointerEvent;
 
 /**
  * Implements details panel customizations for AWorldSettings fields.
@@ -62,17 +74,32 @@ protected:
 	void AddLightmapCustomization( IDetailLayoutBuilder& DetailBuilder );
 
 	/**
-	 * Add the level external actors customization to the World section
+	 * Add customization to the World section
 	 * @param DetailBuilder the detail builder.
 	 */
-	void AddLevelExternalActorsCustomization(IDetailLayoutBuilder& DetailBuilder);
+	void AddWorldCustomization(IDetailLayoutBuilder& DetailBuilder);
 
 private:
+	// return true if level's owning world is partitioned.
+	bool IsPartitionedWorld(ULevel* Level) const;
+	
 	// Called when `ULevel::bUseExternalActors` changes.
 	void OnUseExternalActorsChanged(ECheckBoxState State, ULevel* Level);
 
-	// return the state of `ULevel::bUseExternalActors`
+	// return the state of `ULevel::bUseExternalActors`.
 	ECheckBoxState IsUseExternalActorsChecked(ULevel* Level) const;
+
+	// return true if the state of 'ULevel::bUseExternalActors' can be changed.
+	bool IsUseExternalActorsEnabled(ULevel* Level) const;
+
+	// Called when `ULevel::bUseActorFolders` changes.
+	void OnUseActorFoldersChanged(ECheckBoxState BoxState, ULevel* Level);
+
+	// return the state of `ULevel::bUseActorFolders`.
+	ECheckBoxState IsUsingActorFoldersChecked(ULevel* Level) const;
+
+	// return true if the state of 'ULevel::bUseActorFolders' can be changed.
+	bool IsUsingActorFoldersEnabled(ULevel* Level) const;
 
 	// Handles checking whether a given asset is acceptable for drag-and-drop.
 	bool HandleAssetDropTargetIsAssetAcceptableForDrop( const UObject* InObject ) const;
@@ -82,6 +109,8 @@ private:
 
 	/** Helper class to customizer GameMode property */
 	TSharedPtr<FGameModeInfoCustomizer>	GameInfoModeCustomizer;
+
+	TWeakObjectPtr<class AWorldSettings> SelectedWorldSettings;
 };
 
 
@@ -121,9 +150,6 @@ private:
 
 	/** Handler for when lighting has been rebuilt and kept */
 	void HandleLightingBuildKept();
-
-	/** Handler for when the map changed or was rebuilt */
-	void HandleMapChanged(uint32 MapChangeFlags);
 
 	/** Handler for when the current level changes */
 	void HandleNewCurrentLevel();

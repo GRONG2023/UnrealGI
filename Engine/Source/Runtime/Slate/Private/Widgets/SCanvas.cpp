@@ -5,8 +5,39 @@
 #include "Layout/ArrangedChildren.h"
 
 
+SLATE_IMPLEMENT_WIDGET(SCanvas)
+void SCanvas::PrivateRegisterAttributes(FSlateAttributeInitializer& AttributeInitializer)
+{
+	FSlateWidgetSlotAttributeInitializer Initializer = SLATE_ADD_PANELCHILDREN_DEFINITION(AttributeInitializer, Children);
+	FSlot::RegisterAttributes(Initializer);
+}
+
+void SCanvas::FSlot::RegisterAttributes(FSlateWidgetSlotAttributeInitializer& AttributeInitializer)
+{
+	TWidgetSlotWithAttributeSupport::RegisterAttributes(AttributeInitializer);
+	SLATE_ADD_SLOT_ATTRIBUTE_DEFINITION_WITH_NAME(FSlot, AttributeInitializer, "Slot.Size", Size, EInvalidateWidgetReason::Paint);
+	SLATE_ADD_SLOT_ATTRIBUTE_DEFINITION_WITH_NAME(FSlot, AttributeInitializer, "Slot.Position", Position, EInvalidateWidgetReason::Paint)
+		.UpdatePrerequisite("Slot.Size");
+}
+
+void SCanvas::FSlot::Construct(const FChildren& SlotOwner, FSlotArguments&& InArg)
+{
+	TWidgetSlotWithAttributeSupport<FSlot>::Construct(SlotOwner, MoveTemp(InArg));
+	if (InArg._Size.IsSet())
+	{
+		Size.Assign(*this, MoveTemp(InArg._Size));
+	}
+	if (InArg._Position.IsSet())
+	{
+		Position.Assign(*this, MoveTemp(InArg._Position));
+	}
+
+	TAlignmentWidgetSlotMixin<FSlot>::ConstructMixin(SlotOwner, MoveTemp(InArg));
+}
+
+
 SCanvas::SCanvas()
-: Children(this)
+	: Children(this, GET_MEMBER_NAME_CHECKED(SCanvas, Children))
 {
 	SetCanTick(false);
 	bCanSupportFocus = false;
@@ -14,11 +45,17 @@ SCanvas::SCanvas()
 
 void SCanvas::Construct( const SCanvas::FArguments& InArgs )
 {
-	const int32 NumSlots = InArgs.Slots.Num();
-	for ( int32 SlotIndex = 0; SlotIndex < NumSlots; ++SlotIndex )
-	{
-		Children.Add( InArgs.Slots[SlotIndex] );
-	}
+	Children.AddSlots(MoveTemp(const_cast<TArray<FSlot::FSlotArguments>&>(InArgs._Slots)));
+}
+
+SCanvas::FSlot::FSlotArguments SCanvas::Slot()
+{
+	return FSlot::FSlotArguments(MakeUnique<FSlot>());
+}
+
+SCanvas::FScopedWidgetSlotArguments SCanvas::AddSlot()
+{
+	return FScopedWidgetSlotArguments{ MakeUnique<FSlot>(), Children, INDEX_NONE };
 }
 
 void SCanvas::ClearChildren( )
@@ -28,16 +65,7 @@ void SCanvas::ClearChildren( )
 
 int32 SCanvas::RemoveSlot( const TSharedRef<SWidget>& SlotWidget )
 {
-	for (int32 SlotIdx = 0; SlotIdx < Children.Num(); ++SlotIdx)
-	{
-		if (SlotWidget == Children[SlotIdx].GetWidget())
-		{
-			Children.RemoveAt(SlotIdx);
-			return SlotIdx;
-		}
-	}
-
-	return -1;
+	return Children.Remove(SlotWidget);
 }
 
 void SCanvas::OnArrangeChildren( const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren ) const
@@ -47,12 +75,12 @@ void SCanvas::OnArrangeChildren( const FGeometry& AllottedGeometry, FArrangedChi
 		for (int32 ChildIndex = 0; ChildIndex < Children.Num(); ++ChildIndex)
 		{
 			const SCanvas::FSlot& CurChild = Children[ChildIndex];
-			const FVector2D Size = CurChild.SizeAttr.Get();
+			const FVector2D Size = CurChild.GetSize();
 
 			//Handle HAlignment
 			FVector2D Offset(0.0f, 0.0f);
 
-			switch (CurChild.HAlignment)
+			switch (CurChild.GetHorizontalAlignment())
 			{
 			case HAlign_Center:
 				Offset.X = -Size.X / 2.0f;
@@ -66,7 +94,7 @@ void SCanvas::OnArrangeChildren( const FGeometry& AllottedGeometry, FArrangedChi
 			}
 
 			//handle VAlignment
-			switch (CurChild.VAlignment)
+			switch (CurChild.GetVerticalAlignment())
 			{
 			case VAlign_Bottom:
 				Offset.Y = -Size.Y;
@@ -84,7 +112,7 @@ void SCanvas::OnArrangeChildren( const FGeometry& AllottedGeometry, FArrangedChi
 				// The child widget being arranged
 				CurChild.GetWidget(),
 				// Child's local position (i.e. position within parent)
-				CurChild.PositionAttr.Get() + Offset,
+				CurChild.GetPosition() + Offset,
 				// Child's size
 				Size
 			));

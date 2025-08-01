@@ -9,12 +9,13 @@
 #include "Launcher/LauncherProjectPath.h"
 #include "Profiles/LauncherDeviceGroup.h"
 #include "Profiles/LauncherProfile.h"
+#include "GameProjectHelper.h"
 
 LAUNCHERSERVICES_API bool HasPromotedTarget(const TCHAR* BaseDir, const TCHAR* TargetName, const TCHAR* Platform, EBuildConfiguration Configuration, const TCHAR* Architecture)
 {
 	// Get the path to the receipt, and check it exists
-	FString ReceiptPath = FTargetReceipt::GetDefaultPath(BaseDir, TargetName, Platform, Configuration, Architecture);
-	if (!FPaths::FileExists(*ReceiptPath))
+	const FString ReceiptPath = FTargetReceipt::GetDefaultPath(BaseDir, TargetName, Platform, Configuration, Architecture);
+	if (!FPaths::FileExists(ReceiptPath))
 	{
 		UE_LOG(LogLauncherProfile, Log, TEXT("Unable to use promoted target - %s does not exist."), *ReceiptPath);
 		return false;
@@ -455,6 +456,31 @@ void FLauncherProfileManager::SetProjectPath(const FString& InProjectPath)
 	if (ProjectPath != InProjectPath)
 	{
 		ProjectPath = InProjectPath;
+		ExplicitBuildTargets = FGameProjectHelper::GetExplicitBuildTargetsForProject(ProjectPath);
+
+		if (ExplicitBuildTargets.Num() == 0)
+		{
+			SetBuildTarget(FString());
+		}
+		else
+		{
+			// pick a default - otherwise the user will have to select one every time
+			FString DefaultBuildTarget = ExplicitBuildTargets[0];
+
+			// favor a Game target
+			const TArray<FTargetInfo>& Targets = FDesktopPlatformModule::Get()->GetTargetsForProject(ProjectPath);
+			for (const FTargetInfo& Target : Targets)
+			{
+				if (Target.Type == EBuildTargetType::Game && ExplicitBuildTargets.Contains(Target.Name))
+				{
+					DefaultBuildTarget = Target.Name;
+					break;
+				}
+			}
+
+			SetBuildTarget(DefaultBuildTarget);
+		}
+
 		for (ILauncherProfilePtr Profile : AllProfiles)
 		{
 			if (Profile.IsValid())
@@ -462,19 +488,47 @@ void FLauncherProfileManager::SetProjectPath(const FString& InProjectPath)
 				Profile->FallbackProjectUpdated();
 			}
 		}
+		
+		ProjectChangedDelegate.Broadcast();
 	}
 }
+
+FString FLauncherProfileManager::GetBuildTarget() const
+{
+	return BuildTarget;
+}
+
+void FLauncherProfileManager::SetBuildTarget( const FString& InBuildTarget )
+{
+	if (BuildTarget != InBuildTarget)
+	{
+		BuildTarget = InBuildTarget;
+		for (ILauncherProfilePtr Profile : AllProfiles)
+		{
+			if (Profile.IsValid())
+			{
+				Profile->FallbackBuildTargetUpdated();
+			}
+		}
+	}
+}
+
+const TArray<FString>& FLauncherProfileManager::GetAllExplicitBuildTargetNames() const
+{
+	return ExplicitBuildTargets;
+}
+
 
 void FLauncherProfileManager::LoadDeviceGroups( )
 {
 	if (GConfig != nullptr)
 	{
-		FConfigSection* LoadedDeviceGroups = GConfig->GetSectionPrivate(TEXT("Launcher.DeviceGroups"), false, true, GEngineIni);
+		const FConfigSection* LoadedDeviceGroups = GConfig->GetSection(TEXT("Launcher.DeviceGroups"), false, GEngineIni);
 
 		if (LoadedDeviceGroups != nullptr)
 		{
 			// parse the configuration file entries into device groups
-			for (FConfigSection::TIterator It(*LoadedDeviceGroups); It; ++It)
+			for (FConfigSection::TConstIterator It(*LoadedDeviceGroups); It; ++It)
 			{
 				if (It.Key() == TEXT("DeviceGroup"))
 				{

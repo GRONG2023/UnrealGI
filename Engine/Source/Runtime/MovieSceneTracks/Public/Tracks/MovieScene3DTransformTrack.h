@@ -6,6 +6,7 @@
 #include "UObject/ObjectMacros.h"
 #include "Tracks/MovieScenePropertyTrack.h"
 #include "Sections/MovieScene3DTransformSection.h"
+#include "EntitySystem/IMovieSceneBlenderSystemSupport.h"
 #include "MovieScene3DTransformTrack.generated.h"
 
 enum class EMovieSceneTransformChannel : uint32;
@@ -55,6 +56,7 @@ struct FTrajectoryKey
 UCLASS(MinimalAPI)
 class UMovieScene3DTransformTrack
 	: public UMovieScenePropertyTrack
+	, public IMovieSceneBlenderSystemSupport
 {
 	GENERATED_UCLASS_BODY()
 
@@ -65,9 +67,24 @@ public:
 	virtual bool SupportsType(TSubclassOf<UMovieSceneSection> SectionClass) const override;
 	virtual UMovieSceneSection* CreateNewSection() override;
 
+#if WITH_EDITORONLY_DATA
+	virtual bool CanRename() const override { return true; }
+#endif
+
+	// IMovieSceneBlenderSystemSupport
+	TSubclassOf<UMovieSceneBlenderSystem> GetBlenderSystem() const override;
+	void SetBlenderSystem(TSubclassOf<UMovieSceneBlenderSystem> BlenderSystemClass) override;
+	void GetSupportedBlenderSystems(TArray<TSubclassOf<UMovieSceneBlenderSystem>>& OutSystemClasses) const override;
+
 #if WITH_EDITOR
 
 	MOVIESCENETRACKS_API TArray<FTrajectoryKey> GetTrajectoryData(FFrameNumber Time, int32 MaxNumDataPoints, TRange<FFrameNumber>) const;
-
+	MOVIESCENETRACKS_API FSlateColor GetLabelColor(const FMovieSceneLabelParams& LabelParams) const override;
 #endif
+
+private:
+
+	/** User-defined blender system to use for this track */
+	UPROPERTY()
+	TSubclassOf<UMovieSceneBlenderSystem> BlenderSystemClass;
 };

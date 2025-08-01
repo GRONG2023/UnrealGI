@@ -18,16 +18,18 @@ class FMaterial;
  * Uniform buffer for particle beam/trail vertex factories.
  */
 BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT( FParticleBeamTrailUniformParameters, ENGINE_API)
-	SHADER_PARAMETER( FVector4, CameraRight )
-	SHADER_PARAMETER( FVector4, CameraUp )
-	SHADER_PARAMETER( FVector4, ScreenAlignment )
+	SHADER_PARAMETER( FVector4f, CameraRight )
+	SHADER_PARAMETER( FVector4f, CameraUp )
+	SHADER_PARAMETER( FVector4f, ScreenAlignment )
+	SHADER_PARAMETER( uint32, bUseLocalSpace)
+	SHADER_PARAMETER( FVector3f, LWCTile)
 END_GLOBAL_SHADER_PARAMETER_STRUCT()
 typedef TUniformBufferRef<FParticleBeamTrailUniformParameters> FParticleBeamTrailUniformBufferRef;
 
 /**
  * Beam/Trail particle vertex factory.
  */
-class ENGINE_API FParticleBeamTrailVertexFactory : public FParticleVertexFactoryBase
+class FParticleBeamTrailVertexFactory : public FParticleVertexFactoryBase
 {
 	DECLARE_VERTEX_FACTORY_TYPE(FParticleBeamTrailVertexFactory);
 
@@ -53,15 +55,21 @@ public:
 	/**
 	 * Should we cache the material's shadertype on this platform with this vertex factory? 
 	 */
-	static bool ShouldCompilePermutation(const FVertexFactoryShaderPermutationParameters& Parameters);
+	static ENGINE_API bool ShouldCompilePermutation(const FVertexFactoryShaderPermutationParameters& Parameters);
 
 	/**
 	 * Can be overridden by FVertexFactory subclasses to modify their compile environment just before compilation occurs.
 	 */
-	static void ModifyCompilationEnvironment(const FVertexFactoryShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+	static ENGINE_API void ModifyCompilationEnvironment(const FVertexFactoryShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+
+	/**
+	 * Get vertex elements used when during PSO precaching materials using this vertex factory type
+	 */
+	static ENGINE_API void GetPSOPrecacheVertexFetchElements(EVertexInputStreamType VertexInputStreamType, FVertexDeclarationElementList& Elements);
+	static ENGINE_API FRHIVertexDeclaration* GetPSOPrecacheVertexDeclaration(bool bUsesDynamicParameter);
 
 	// FRenderResource interface.
-	virtual void InitRHI() override;
+	ENGINE_API virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 
 	/**
 	 * Set the uniform buffer for this vertex factory.
@@ -82,12 +90,12 @@ public:
 	/**
 	 * Set the source vertex buffer.
 	 */
-	void SetVertexBuffer(const FVertexBuffer* InBuffer, uint32 StreamOffset, uint32 Stride);
+	ENGINE_API void SetVertexBuffer(const FVertexBuffer* InBuffer, uint32 StreamOffset, uint32 Stride);
 
 	/**
 	 * Set the source vertex buffer that contains particle dynamic parameter data.
 	 */
-	void SetDynamicParameterBuffer(const FVertexBuffer* InDynamicParameterBuffer, uint32 StreamOffset, uint32 Stride);
+	ENGINE_API void SetDynamicParameterBuffer(const FVertexBuffer* InDynamicParameterBuffer, uint32 StreamOffset, uint32 Stride);
 	inline void SetUsesDynamicParameter(bool bInUsesDynamicParameter)
 	{
 		bUsesDynamicParameter = bInUsesDynamicParameter;

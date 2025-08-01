@@ -51,7 +51,7 @@ class UPostProcessComponent : public USceneComponent, public IInterface_PostProc
  
 	//~ Begin IInterface_PostProcessVolume Interface
 	ENGINE_API virtual bool EncompassesPoint(FVector Point, float SphereRadius/*=0.f*/, float* OutDistanceToPoint) override;
-	ENGINE_API virtual FPostProcessVolumeProperties GetProperties() const override
+	virtual FPostProcessVolumeProperties GetProperties() const override
 	{
 		FPostProcessVolumeProperties Ret;
 		Ret.bIsEnabled = bEnabled != 0 && ShouldRender();
@@ -62,11 +62,17 @@ class UPostProcessComponent : public USceneComponent, public IInterface_PostProc
 		Ret.Settings = &Settings;
 		return Ret;
 	}
+#if DEBUG_POST_PROCESS_VOLUME_ENABLE
+	virtual FString GetDebugName() const override
+	{
+		return GetName();
+	}
+#endif
 	//~ End IInterface_PostProcessVolume Interface
 
 	/** Adds an Blendable (implements IBlendableInterface) to the array of Blendables (if it doesn't exist) and update the weight */
 	UFUNCTION(BlueprintCallable, Category="Rendering")
-	ENGINE_API void AddOrUpdateBlendable(TScriptInterface<IBlendableInterface> InBlendableObject, float InWeight = 1.0f) { Settings.AddBlendable(InBlendableObject, InWeight); }
+	void AddOrUpdateBlendable(TScriptInterface<IBlendableInterface> InBlendableObject, float InWeight = 1.0f) { Settings.AddBlendable(InBlendableObject, InWeight); }
 
 protected:
 

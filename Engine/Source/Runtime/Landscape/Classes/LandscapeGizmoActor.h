@@ -35,23 +35,20 @@ class ALandscapeGizmoActor : public AActor
 	float RelativeScaleZ;
 
 	UPROPERTY(EditAnywhere, transient, Category=Gizmo)
-	class ULandscapeInfo* TargetLandscapeInfo;
+	TObjectPtr<class ULandscapeInfo> TargetLandscapeInfo;
 
 private:
 	UPROPERTY()
-	UBillboardComponent* SpriteComponent;
+	TObjectPtr<UBillboardComponent> SpriteComponent;
 #endif // WITH_EDITORONLY_DATA
 public:
 
 
 #if WITH_EDITOR
+	virtual bool ShouldExport() override { return false; } // Prevent copy-pasting
 	virtual void Duplicate(ALandscapeGizmoActor* Gizmo); 
-	//virtual void EditorApplyTranslation(const FVector& DeltaTranslation, bool bAltDown, bool bShiftDown, bool bCtrlDown);
 
-	bool EditorCanAttachTo(const AActor* InParent, FText& OutReason) const override
-	{
-		return false;
-	}
+	bool EditorCanAttachTo(const AActor* InParent, FText& OutReason) const override	{ return false;	}
 #endif
 
 	/** 

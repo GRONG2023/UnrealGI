@@ -6,9 +6,32 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "CoreTypes.h"
+#include "Misc/AssertionMacros.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/ScriptDelegates.h"
 #include "UObject/UObjectArray.h"
-#include "UObject/FastReferenceCollectorOptions.h"
+#include "UObject/WeakObjectPtrFwd.h"
+
+#include <type_traits>
+
+class FArchive;
+class UObject;
+
+/** Invalid FWeakObjectPtr ObjectIndex values must be 0 to support zeroed initialization (this used to be INDEX_NONE, leading to subtle bugs). */
+#ifndef UE_WEAKOBJECTPTR_ZEROINIT_FIX
+	#define UE_WEAKOBJECTPTR_ZEROINIT_FIX 1
+#endif
+
+namespace UE::Core::Private
+{
+	/** Specifies the ObjectIndex used for invalid object pointers. */
+#if UE_WEAKOBJECTPTR_ZEROINIT_FIX
+	inline constexpr int32 InvalidWeakObjectIndex = 0;
+#else
+	inline constexpr int32 InvalidWeakObjectIndex = INDEX_NONE;
+#endif
+}
 
 /**
  * FWeakObjectPtr is a weak pointer to a UObject. 
@@ -22,22 +45,43 @@ struct FWeakObjectPtr
 {
 public:
 
-	template <typename ReferenceProcessorType, typename CollectorType, typename ArrayPoolType, EFastReferenceCollectorOptions Options>
-	friend class TFastReferenceCollector;
 	friend struct FFieldPath;
 
+#if UE_WEAKOBJECTPTR_ZEROINIT_FIX
+	FWeakObjectPtr() = default;
+
+	FORCEINLINE FWeakObjectPtr(TYPE_OF_NULLPTR)
+		: FWeakObjectPtr()
+	{
+	}
+#else
 	/** Null constructor **/
 	FORCEINLINE FWeakObjectPtr()
 	{
 		Reset();
 	}
-	/**  
-	 * Construct from an object pointer
+
+	/**
+	 * Construct from nullptr or something that can be implicitly converted to nullptr (eg: NULL)
 	 * @param Object object to create a weak pointer to
 	 */
-	FORCEINLINE FWeakObjectPtr(const class UObject* Object)
+	FORCEINLINE FWeakObjectPtr(TYPE_OF_NULLPTR)
 	{
-		(*this)=Object;
+		(*this) = nullptr;
+	}
+#endif
+
+	/**  
+	 * Construct from an object pointer or something that can be implicitly converted to an object pointer
+	 * @param Object object to create a weak pointer to
+	 */
+	template <
+		typename U,
+		decltype(ImplicitConv<const UObject*>(std::declval<U>()))* = nullptr
+	>
+	FORCEINLINE FWeakObjectPtr(U&& Object)
+	{
+		(*this) = ImplicitConv<const UObject*>(Object);
 	}
 
 	/**  
@@ -51,7 +95,9 @@ public:
 	 */
 	FORCEINLINE void Reset()
 	{
-		ObjectIndex = INDEX_NONE;
+		using namespace UE::Core::Private;
+
+		ObjectIndex = InvalidWeakObjectIndex;
 		ObjectSerialNumber = 0;
 	}
 
@@ -79,6 +125,7 @@ public:
 			(!IsValid() && !Other.IsValid());
 	}
 
+#if !PLATFORM_COMPILER_HAS_GENERATED_COMPARISON_OPERATORS
 	/**  
 	 * Compare weak pointers for inequality
 	 * @param Other weak pointer to compare to
@@ -89,6 +136,7 @@ public:
 			(ObjectIndex != Other.ObjectIndex || ObjectSerialNumber != Other.ObjectSerialNumber) &&
 			(IsValid() || Other.IsValid());
 	}
+#endif
 
 	/**
 	 * Returns true if two weak pointers were originally set to the same object, even if they are now stale
@@ -101,42 +149,53 @@ public:
 
 	/**  
 	 * Dereference the weak pointer.
-	 * @param bEvenIfPendingKill if this is true, pendingkill objects are considered valid
+	 * @param bEvenIfGarbage if this is true, Garbage objects are considered valid
 	 * @return nullptr if this object is gone or the weak pointer is explicitly null, otherwise a valid uobject pointer
 	 */
-	COREUOBJECT_API class UObject* Get(bool bEvenIfPendingKill) const;
+	COREUOBJECT_API class UObject* Get(bool bEvenIfGarbage) const;
 
 	/**  
-	 * Dereference the weak pointer. This is an optimized version implying bEvenIfPendingKill=false.
+	 * Dereference the weak pointer. This is an optimized version implying bEvenIfGarbage=false.
 	 * @return nullptr if this object is gone or the weak pointer is explicitly null, otherwise a valid uobject pointer
 	 */
-	COREUOBJECT_API class UObject* Get(/*bool bEvenIfPendingKill = false*/) const;
+	COREUOBJECT_API class UObject* Get(/*bool bEvenIfGarbage = false*/) const;
 
-	/** Dereference the weak pointer even if it is RF_PendingKill or RF_Unreachable */
+	/** Dereference the weak pointer even if it is marked as Garbage or Unreachable */
 	COREUOBJECT_API class UObject* GetEvenIfUnreachable() const;
+
+	// This is explicitly not added to avoid resolving weak pointers too often - use Get() once in a function.
+	explicit operator bool() const = delete;
 
 	/**  
 	 * Test if this points to a live UObject
-	 * @param bEvenIfPendingKill if this is true, pendingkill are not considered invalid
+	 * This should be done only when needed as excess resolution of the underlying pointer can cause performance issues.
+	 *
+	 * @param bEvenIfGarbage if this is true, Garbage objects are considered invalid
 	 * @param bThreadsafeTest if true then function will just give you information whether referenced
 	 *							UObject is gone forever (return false) or if it is still there (return true, no object flags checked).
+	 *							This is required as without it IsValid can return false during the mark phase of the GC
+	 *							due to the presence of the Unreachable flag.
 	 * @return true if Get() would return a valid non-null pointer
 	 */
-	COREUOBJECT_API bool IsValid(bool bEvenIfPendingKill, bool bThreadsafeTest = false) const;
+	COREUOBJECT_API bool IsValid(bool bEvenIfGarbage, bool bThreadsafeTest = false) const;
 
 	/**
-	 * Test if this points to a live UObject. This is an optimized version implying bEvenIfPendingKill=false, bThreadsafeTest=false.
+	 * Test if this points to a live UObject. This is an optimized version implying bEvenIfGarbage=false, bThreadsafeTest=false.
+	 * This should be done only when needed as excess resolution of the underlying pointer can cause performance issues.
+	 * Note that IsValid can not be used on another thread as it will incorrectly return false during the mark phase of the GC
+	 * due to the Unreachable flag being set. (see bThreadsafeTest above)
+
 	 * @return true if Get() would return a valid non-null pointer.
 	 */
-	COREUOBJECT_API bool IsValid(/*bool bEvenIfPendingKill = false, bool bThreadsafeTest = false*/) const;
+	COREUOBJECT_API bool IsValid(/*bool bEvenIfGarbage = false, bool bThreadsafeTest = false*/) const;
 
 	/**  
 	 * Slightly different than !IsValid(), returns true if this used to point to a UObject, but doesn't any more and has not been assigned or reset in the mean time.
-	 * @param bIncludingIfPendingKill if this is false, pendingkill objects are not considered stale
+	 * @param bIncludingGarbage if this is false, Garbage objects are NOT considered stale
 	 * @param bThreadsafeTest set it to true when testing outside of Game Thread. Results in false if WeakObjPtr point to an existing object (no flags checked)
 	 * @return true if this used to point at a real object but no longer does.
 	 */
-	COREUOBJECT_API bool IsStale(bool bIncludingIfPendingKill = true, bool bThreadsafeTest = false) const;
+	COREUOBJECT_API bool IsStale(bool bIncludingGarbage = true, bool bThreadsafeTest = false) const;
 
 	/**
 	 * Returns true if this pointer was explicitly assigned to null, was reset, or was never initialized.
@@ -144,13 +203,19 @@ public:
 	 */
 	FORCEINLINE bool IsExplicitlyNull() const
 	{
-		return ObjectIndex == INDEX_NONE;
+		using namespace UE::Core::Private;
+
+#if UE_WEAKOBJECTPTR_ZEROINIT_FIX
+		return ObjectIndex == InvalidWeakObjectIndex && ObjectSerialNumber == 0;
+#else
+		return ObjectIndex == InvalidWeakObjectIndex;
+#endif
 	}
 
 	/** Hash function. */
-	friend uint32 GetTypeHash(const FWeakObjectPtr& WeakObjectPtr)
+	FORCEINLINE uint32 GetTypeHash() const
 	{
-		return uint32(WeakObjectPtr.ObjectIndex ^ WeakObjectPtr.ObjectSerialNumber);
+		return uint32(ObjectIndex ^ ObjectSerialNumber);
 	}
 
 	/**
@@ -162,8 +227,14 @@ public:
 	COREUOBJECT_API void Serialize(FArchive& Ar);
 
 protected:
-
+	UE_DEPRECATED(5.1, "GetObjectIndex is now deprecated, and will be removed.")
 	FORCEINLINE int32 GetObjectIndex() const
+	{
+		return ObjectIndex;
+	}
+
+private:
+	FORCEINLINE int32 GetObjectIndex_Private() const
 	{
 		return ObjectIndex;
 	}
@@ -193,11 +264,19 @@ private:
 
 	FORCEINLINE FUObjectItem* Internal_GetObjectItem() const
 	{
+		using namespace UE::Core::Private;
+
 		if (ObjectSerialNumber == 0)
 		{
+#if UE_WEAKOBJECTPTR_ZEROINIT_FIX
+			checkSlow(ObjectIndex == InvalidWeakObjectIndex); // otherwise this is a corrupted weak pointer
+#else
 			checkSlow(ObjectIndex == 0 || ObjectIndex == -1); // otherwise this is a corrupted weak pointer
+#endif
+
 			return nullptr;
 		}
+
 		if (ObjectIndex < 0)
 		{
 			return nullptr;
@@ -215,7 +294,7 @@ private:
 	}
 
 	/** Private (inlined) version for internal use only. */
-	FORCEINLINE_DEBUGGABLE bool Internal_IsValid(bool bEvenIfPendingKill, bool bThreadsafeTest) const
+	FORCEINLINE_DEBUGGABLE bool Internal_IsValid(bool bEvenIfGarbage, bool bThreadsafeTest) const
 	{
 		FUObjectItem* const ObjectItem = Internal_GetObjectItem();
 		if (bThreadsafeTest)
@@ -224,25 +303,32 @@ private:
 		}
 		else
 		{
-			return (ObjectItem != nullptr) && GUObjectArray.IsValid(ObjectItem, bEvenIfPendingKill);
+			return (ObjectItem != nullptr) && GUObjectArray.IsValid(ObjectItem, bEvenIfGarbage);
 		}
 	}
 
 	/** Private (inlined) version for internal use only. */
-	FORCEINLINE_DEBUGGABLE UObject* Internal_Get(bool bEvenIfPendingKill) const
+	FORCEINLINE_DEBUGGABLE UObject* Internal_Get(bool bEvenIfGarbage) const
 	{
 		FUObjectItem* const ObjectItem = Internal_GetObjectItem();
-		return ((ObjectItem != nullptr) && GUObjectArray.IsValid(ObjectItem, bEvenIfPendingKill)) ? (UObject*)ObjectItem->Object : nullptr;
+		return ((ObjectItem != nullptr) && GUObjectArray.IsValid(ObjectItem, bEvenIfGarbage)) ? (UObject*)ObjectItem->Object : nullptr;
 	}
 
+#if UE_WEAKOBJECTPTR_ZEROINIT_FIX
+	int32		ObjectIndex = UE::Core::Private::InvalidWeakObjectIndex;
+	int32		ObjectSerialNumber = 0;
+#else
 	int32		ObjectIndex;
 	int32		ObjectSerialNumber;
+#endif
 };
 
-template<> struct TIsPODType<FWeakObjectPtr> { enum { Value = true }; };
-template<> struct TIsZeroConstructType<FWeakObjectPtr> { enum { Value = true }; };
-template<> struct TIsWeakPointerType<FWeakObjectPtr> { enum { Value = true }; };
+/** Hash function. */
+FORCEINLINE uint32 GetTypeHash(const FWeakObjectPtr& WeakObjectPtr)
+{
+	return WeakObjectPtr.GetTypeHash();
+}
 
-// Typedef script delegates for convenience.
-typedef TScriptDelegate<> FScriptDelegate;
-typedef TMulticastScriptDelegate<> FMulticastScriptDelegate;
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
+#endif

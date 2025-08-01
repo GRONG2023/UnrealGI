@@ -3,10 +3,13 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Layout/Visibility.h"
 #include "IPropertyTypeCustomization.h"
+#include "Layout/Visibility.h"
+#include "Math/Vector2D.h"
 #include "PropertyHandle.h"
+#include "Templates/SharedPointer.h"
 
+class IPropertyHandle;
 class SErrorText;
 
 class DETAILCUSTOMIZATIONS_API FSlateBrushStructCustomization : public IPropertyTypeCustomization
@@ -22,6 +25,11 @@ public:
 	virtual void CustomizeChildren( TSharedRef<IPropertyHandle> StructPropertyHandle, class IDetailChildrenBuilder& StructBuilder, IPropertyTypeCustomizationUtils& StructCustomizationUtils ) override;              
 
 private:
+	/**
+	 * Get the Slate Brush outline settings property row visibility
+	 */
+	EVisibility GetOutlineSettingsPropertyVisibility() const;
+
 	/**
 	 * Get the Slate Brush tiling property row visibility
 	 */
@@ -44,11 +52,17 @@ private:
 	/** Slate Brush DrawAs property */
 	TSharedPtr<IPropertyHandle> DrawAsProperty;
 
-/** Slate Brush Image Size property */
+	/** Slate Brush Image Size property */
 	TSharedPtr<IPropertyHandle> ImageSizeProperty;
 
-/** Slate Brush Resource Object property */
+	/** Slate Brush Resource Object property */
 	TSharedPtr<IPropertyHandle> ResourceObjectProperty;
+
+	/** Slate Brush Resource Name property */
+	TSharedPtr<IPropertyHandle> ResourceNameProperty;
+
+	/** Slate Brush Image Type property */
+	TSharedPtr<IPropertyHandle> ImageTypeProperty;
 
 	/** Error text to display if the resource object is not valid*/
 	TSharedPtr<SErrorText> ResourceErrorText;

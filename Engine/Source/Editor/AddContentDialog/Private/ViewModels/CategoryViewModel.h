@@ -2,9 +2,10 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
 
-struct FSlateBrush;
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
+
 enum class EContentSourceCategory:uint8;
 
 /** A view model for displaying a content source category in the UI. */
@@ -16,14 +17,11 @@ public:
 	FCategoryViewModel(EContentSourceCategory InCategory);
 
 	/** Gets the display name of the category. */
-	FText GetText() const;
-
-	/** Gets the brush which should be used to draw the icon for the category. */
-	const FSlateBrush* GetIconBrush() const;
+	const FText& GetText() const { return Text; }
 
 	inline bool operator==(const FCategoryViewModel& Other) const
 	{
-		return Other.Text.EqualTo(Text) && (Other.IconBrush == IconBrush);
+		return Category == Other.Category;
 	}
 
 	bool operator<(FCategoryViewModel const& Other) const
@@ -31,7 +29,7 @@ public:
 		return SortID < Other.SortID;
 	}
 
-	uint32 GetTypeHash() const;
+	uint32 GetTypeHash() const { return (uint32) Category; }
 
 private:
 	void Initialize();
@@ -39,7 +37,6 @@ private:
 private:
 	EContentSourceCategory Category;
 	FText Text;
-	const FSlateBrush* IconBrush;
 	int SortID;
 };
 

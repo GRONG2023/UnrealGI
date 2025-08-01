@@ -11,13 +11,14 @@
 #include "AnimSingleNodeInstanceProxy.generated.h"
 
 struct FAnimSingleNodeInstanceProxy;
+class UMirrorDataTable;
 
 /** 
  * Local anim node for extensible processing. 
  * Cant be used outside of this context as it has no graph node counterpart 
  */
 USTRUCT(BlueprintInternalUseOnly)
-struct ENGINE_API FAnimNode_SingleNode : public FAnimNode_Base
+struct FAnimNode_SingleNode : public FAnimNode_Base
 {
 	friend struct FAnimSingleNodeInstanceProxy;
 
@@ -30,8 +31,8 @@ struct ENGINE_API FAnimNode_SingleNode : public FAnimNode_Base
 	FName ActiveMontageSlot;
 
 	// FAnimNode_Base interface
-	virtual void Evaluate_AnyThread(FPoseContext& Output) override;
-	virtual void Update_AnyThread(const FAnimationUpdateContext& Context) override;
+	ENGINE_API virtual void Evaluate_AnyThread(FPoseContext& Output) override;
+	ENGINE_API virtual void Update_AnyThread(const FAnimationUpdateContext& Context) override;
 	// End of FAnimNode_Base interface
 
 private:
@@ -41,7 +42,7 @@ private:
 
 /** Proxy override for this UAnimInstance-derived class */
 USTRUCT()
-struct ENGINE_API FAnimSingleNodeInstanceProxy : public FAnimInstanceProxy
+struct FAnimSingleNodeInstanceProxy : public FAnimInstanceProxy
 {
 	friend struct FAnimNode_SingleNode;
 
@@ -52,14 +53,18 @@ public:
 	{
 #if WITH_EDITOR
 		bCanProcessAdditiveAnimations = false;
+		bIgnoreRootLock = false;
+		bIgnoreRootMotion = false;
 #endif
 	}
 
 	FAnimSingleNodeInstanceProxy(UAnimInstance* InAnimInstance)
 		: FAnimInstanceProxy(InAnimInstance)
 		, CurrentAsset(nullptr)
-		, BlendSpaceInput(0.0f, 0.0f, 0.0f)
+		, MirrorDataTable(nullptr)
+		, BlendSpacePosition(0.0f, 0.0f, 0.0f)
 		, CurrentTime(0.0f)
+		, DeltaTimeRecord()
 #if WITH_EDITORONLY_DATA
 		, PreviewPoseCurrentTime(0.0f)
 #endif
@@ -72,18 +77,20 @@ public:
 
 #if WITH_EDITOR
 		bCanProcessAdditiveAnimations = false;
+		bIgnoreRootLock = false;
+		bIgnoreRootMotion = false;
 #endif
 	}
 
-	virtual ~FAnimSingleNodeInstanceProxy();
+	ENGINE_API virtual ~FAnimSingleNodeInstanceProxy();
 
-	virtual void Initialize(UAnimInstance* InAnimInstance) override;
-	virtual bool Evaluate(FPoseContext& Output) override;
-	virtual void UpdateAnimationNode(const FAnimationUpdateContext& InContext) override;
-	virtual void PostUpdate(UAnimInstance* InAnimInstance) const override;
-	virtual void PreUpdate(UAnimInstance* InAnimInstance, float DeltaSeconds) override;
-	virtual void InitializeObjects(UAnimInstance* InAnimInstance) override;
-	virtual void ClearObjects() override;
+	ENGINE_API virtual void Initialize(UAnimInstance* InAnimInstance) override;
+	ENGINE_API virtual bool Evaluate(FPoseContext& Output) override;
+	ENGINE_API virtual void UpdateAnimationNode(const FAnimationUpdateContext& InContext) override;
+	ENGINE_API virtual void PostUpdate(UAnimInstance* InAnimInstance) const override;
+	ENGINE_API virtual void PreUpdate(UAnimInstance* InAnimInstance, float DeltaSeconds) override;
+	ENGINE_API virtual void InitializeObjects(UAnimInstance* InAnimInstance) override;
+	ENGINE_API virtual void ClearObjects() override;
 
 	void SetPlaying(bool bIsPlaying)
 	{
@@ -115,12 +122,18 @@ public:
 		WeightInfo.Reset();
 	}
 
-	virtual void SetAnimationAsset(UAnimationAsset* NewAsset, USkeletalMeshComponent* MeshComponent, bool bIsLooping, float InPlayRate);
+	ENGINE_API virtual void SetAnimationAsset(UAnimationAsset* NewAsset, USkeletalMeshComponent* MeshComponent, bool bIsLooping, float InPlayRate);
 
-	void UpdateBlendspaceSamples(FVector InBlendInput);
+	ENGINE_API void UpdateBlendspaceSamples(FVector InBlendInput);
 
 	void SetCurrentTime(float InCurrentTime)
 	{
+		if (InCurrentTime != CurrentTime)
+		{
+			// If the current time is changed externally then our record of where we are in relation to markers will be
+			// out of sync, so reset it and it will be updated when necessary.
+			MarkerTickRecord.Reset();
+		}
 		CurrentTime = InCurrentTime;
 	}
 
@@ -144,9 +157,21 @@ public:
 		return BlendFilter.GetFilterLastOutput();
 	}
 
-	void SetReverse(bool bInReverse);
+	ENGINE_API void SetReverse(bool bInReverse);
 
-	void SetBlendSpaceInput(const FVector& InBlendInput);
+	/** Sets the target blend space position */
+	ENGINE_API void SetBlendSpacePosition(const FVector& InPosition);
+
+	/**
+	 * Returns the current target/requested blend space position, and the filtered (smoothed) position.
+	 */
+	ENGINE_API void GetBlendSpaceState(FVector& OutPosition, FVector& OutFilteredPosition) const;
+
+	/** 
+	* Returns the length (seconds), not including any rate multipliers, calculated by 
+	* weighting the currently active samples 
+	*/
+	ENGINE_API float GetBlendSpaceLength() const;
 
 #if WITH_EDITOR
 	bool CanProcessAdditiveAnimations() const
@@ -155,26 +180,36 @@ public:
 	}
 #endif
 
+	ENGINE_API void SetMirrorDataTable(const UMirrorDataTable* InMirrorDataTable);
+
+	ENGINE_API const UMirrorDataTable* GetMirrorDataTable();
+
 #if WITH_EDITORONLY_DATA
-	void PropagatePreviewCurve(FPoseContext& Output);
+	ENGINE_API void PropagatePreviewCurve(FPoseContext& Output);
 #endif // WITH_EDITORONLY_DATA
 
-	void SetPreviewCurveOverride(const FName& PoseName, float Value, bool bRemoveIfZero);
+	ENGINE_API void SetPreviewCurveOverride(const FName& PoseName, float Value, bool bRemoveIfZero);
 
 	// Update internal weight structures for supplied slot name
-	void UpdateMontageWeightForSlot(const FName CurrentSlotNodeName, float InGlobalNodeWeight);
+	ENGINE_API void UpdateMontageWeightForSlot(const FName CurrentSlotNodeName, float InGlobalNodeWeight);
 
 	// Set the montage slot to preview
-	void SetMontagePreviewSlot(FName PreviewSlot);
+	ENGINE_API void SetMontagePreviewSlot(FName PreviewSlot);
 
 private:
-	void InternalBlendSpaceEvaluatePose(class UBlendSpaceBase* BlendSpace, TArray<FBlendSampleData>& BlendSampleDataCache, FPoseContext& OutContext);
+	ENGINE_API void InternalBlendSpaceEvaluatePose(class UBlendSpace* BlendSpace, TArray<FBlendSampleData>& BlendSampleDataCache, FPoseContext& OutContext);
 
 protected:
 #if WITH_EDITOR
 	/** If this is being used by a user (for instance on a skeletal mesh placed in a level) we don't want to allow
 	additives. But we need to be able to override this for editor preview windows */
 	bool bCanProcessAdditiveAnimations;
+
+	/** Allows editor previews to ignore root lock and show root motion in the editor, regardless of setting on sequence*/
+	bool bIgnoreRootLock;
+
+	/** Allows editor previews to ignore root motion in the editor, regardless of setting on sequence*/
+	bool bIgnoreRootMotion;
 #endif
 
 	/** Pose Weight value that can override curve data. In the future, we'd like to have UCurveSet that can play by default**/
@@ -183,12 +218,15 @@ protected:
 	/** Current Asset being played. Note that this will be nullptr outside of pre/post update **/
 	UAnimationAsset* CurrentAsset;
 
+	/** If set the result will be mirrored using the table */ 
+	const UMirrorDataTable* MirrorDataTable;
+	
 	/** The internal anim node that does our processing */
 	FAnimNode_SingleNode SingleNode;
 
 private:
 	/** Random cached values to play each asset **/
-	FVector BlendSpaceInput;
+	FVector BlendSpacePosition;
 
 	/** Random cached values to play each asset **/
 	TArray<FBlendSampleData> BlendSampleData;
@@ -201,6 +239,8 @@ private:
 
 	/** Shared parameters for previewing blendspace or animsequence **/
 	float CurrentTime;
+
+	FDeltaTimeRecord DeltaTimeRecord;
 
 #if WITH_EDITORONLY_DATA
 	float PreviewPoseCurrentTime;

@@ -2,11 +2,24 @@
 
 #pragma once
 
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "CoreTypes.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/CString.h"
+#include "Misc/EnumClassFlags.h"
 #include "Misc/Guid.h"
+#include "Serialization/StructuredArchive.h"
+#include "Serialization/StructuredArchiveAdapters.h"
+#include "Serialization/StructuredArchiveSlots.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
 
+class FArchive;
+class FLinkerLoad;
 class FPackageIndex;
+class UClass;
+class UObject;
 
 /**
  * Wrapper for index into a ULnker's ImportMap or ExportMap.
@@ -253,16 +266,18 @@ struct FObjectExport : public FObjectResource
 	int64         	SerialOffset;
 
 	/**
-	 * The location (into the FLinker's underlying file reader archive) of the beginning of the
-	 * portion of this export's data that is serialized using script serialization.
-	 * Transient
+	 * The location (relative to SerialOffset) of the beginning of the portion of this export's data that is
+	 * serialized using tagged property serialization.
+	 * Serialized into versioned packages as of EUnrealEngineObjectUE5Version::SCRIPT_SERIALIZATION_OFFSET
+	 * Otherwise transient
 	 */
 	int64				ScriptSerializationStartOffset;
 
 	/**
-	 * The location (into the FLinker's underlying file reader archive) of the end of the
-	 * portion of this export's data that is serialized using script serialization.
-	 * Transient
+	 * The location (relative to SerialOffset) of the end of the portion of this export's data that is 
+	 * serialized using tagged property serialization.
+	 * Serialized into versioned packages as of EUnrealEngineObjectUE5Version::SCRIPT_SERIALIZATION_OFFSET
+	 * Otherwise transient
 	 */
 	int64				ScriptSerializationEndOffset;
 
@@ -276,25 +291,25 @@ struct FObjectExport : public FObjectResource
 	 * The index into the FLinker's ExportMap for the next export in the linker's export hash table.
 	 * Transient
 	 */
-	int32				HashNext;
+	int32			HashNext;
 
 	/**
 	 * Whether the export was forced into the export table via OBJECTMARK_ForceTagExp.
 	 * Serialized
 	 */
-	bool			bForcedExport;   
+	bool			bForcedExport:1;   
 
 	/**
 	 * Whether the export should be loaded on clients
 	 * Serialized
 	 */
-	bool			bNotForClient;   
+	bool			bNotForClient:1;   
 
 	/**
 	 * Whether the export should be loaded on servers
 	 * Serialized
 	 */
-	bool			bNotForServer;
+	bool			bNotForServer:1;
 
 	/**
 	 * Whether the export should be always loaded in editor game
@@ -302,41 +317,33 @@ struct FObjectExport : public FObjectResource
 	 * True doesn't means, that the object won't be loaded.
 	 * Serialized
 	 */
-	bool			bNotAlwaysLoadedForEditorGame;
+	bool			bNotAlwaysLoadedForEditorGame:1;
 
 	/**
 	 * True if this export is an asset object.
 	 */
-	bool			bIsAsset;
+	bool			bIsAsset:1;
+
+	/**
+	 * If this export is an instanced object inherited from a template and should
+	 * only be created if the template has the object
+	 */
+	bool			bIsInheritedInstance:1;
+
+	/**
+	 * True if this export should have its iostore public hash generated even if not RF_Public.
+	 */
+	bool			bGeneratePublicHash:1;
 
 	/**
 	 * Force this export to not load, it failed because the outer didn't exist.
 	 */
-	bool			bExportLoadFailed;
-
-	/**
-	 * Export is a dynamic type.
-	 */
-	enum class EDynamicType : uint8
-	{
-		NotDynamicExport,
-		DynamicType,
-		ClassDefaultObject,
-	};
-
-	EDynamicType	DynamicType;
+	bool			bExportLoadFailed:1;
 
 	/**
 	 * Export was filtered out on load
 	 */
-	bool			bWasFiltered;
-
-	/** If this object is a top level package (which must have been forced into the export table via OBJECTMARK_ForceTagExp)
-	 * this is the GUID for the original package file
-	 * Serialized
-	 */
-	UE_DEPRECATED(4.27, "UPackage::Guid has not been used by the engine for a long time and FObjectExport::PackageGuid will be removed.")
-	FGuid			PackageGuid;
+	bool			bWasFiltered:1;
 
 	/** If this object is a top level package (which must have been forced into the export table via OBJECTMARK_ForceTagExp)
 	 * this is the package flags for the original package file
@@ -383,6 +390,7 @@ struct FObjectExport : public FObjectResource
 /**
  * Simple wrapper around a FObjectExport which does the text asset specific serialization of export data
  */
+// TODO SavePackageDeprecation: remove once SavePackage2 replaces SavePackage
 struct FObjectTextExport
 {
 	/**
@@ -445,26 +453,31 @@ struct FObjectImport : public FObjectResource
 #endif
 
 	/**
-	 * The UObject represented by this resource.  Assigned the first time CreateImport is called for this import.
-	 * Transient
-	 */
-	UObject*		XObject;
-
-	/**
-	 * The linker that contains the original FObjectExport resource associated with this import.
-	 * Transient
-	 */
-	FLinkerLoad*	SourceLinker;
-
-	/**
 	 * Index into SourceLinker's ExportMap for the export associated with this import's UObject.
 	 * Transient
 	 */
 	int32             SourceIndex;
 
+	/** 
+	 * Indicate if the import comes from an optional package, used to generate the proper chunk id in the io store
+	 */
+	bool			bImportOptional;
+
 	bool			bImportPackageHandled;
 	bool			bImportSearchedFor;
 	bool			bImportFailed;
+
+	/**
+	 * The UObject represented by this resource.  Assigned the first time CreateImport is called for this import.
+	 * Transient
+	 */
+	UObject* XObject;
+
+	/**
+	 * The linker that contains the original FObjectExport resource associated with this import.
+	 * Transient
+	 */
+	FLinkerLoad* SourceLinker;
 
 	/**
 	 * Constructors
@@ -516,4 +529,49 @@ struct FObjectImport : public FObjectResource
 	/** I/O functions */
 	friend COREUOBJECT_API FArchive& operator<<(FArchive& Ar, FObjectImport& I);
 	friend COREUOBJECT_API void operator<<( FStructuredArchive::FSlot Slot, FObjectImport& I );
+};
+
+/** Data resource flags. */
+enum class EObjectDataResourceFlags : uint32
+{
+	None					= 0,
+	Inline					= (1 << 0),
+	Streaming				= (1 << 1),
+	Optional				= (1 << 2),
+	Duplicate				= (1 << 3),
+	MemoryMapped			= (1 << 4),
+	DerivedDataReference	= (1 << 5),
+};
+ENUM_CLASS_FLAGS(EObjectDataResourceFlags);
+
+/**
+ * UObject binary/bulk data resource type.
+ */
+struct FObjectDataResource
+{
+	enum class EVersion : uint32
+	{
+		Invalid,
+		Initial,
+		LatestPlusOne,
+		Latest = LatestPlusOne - 1
+	};
+
+	/** Data resource flags. */
+	EObjectDataResourceFlags Flags = EObjectDataResourceFlags::None;
+	/** Location of the data in the underlying storage type. */
+	int64 SerialOffset = -1;
+	/** Location of the data in the underlying storage type if this data is duplicated. */
+	int64 DuplicateSerialOffset = -1;
+	/** Number of bytes to serialize when loading/saving the data. */
+	int64 SerialSize = -1;
+	/** Uncompressed size of the data. */
+	int64 RawSize = -1;
+	/** Location of this resource outer/owning object in the export table. */
+	FPackageIndex OuterIndex;
+	/** Bulk data flags. */
+	uint32 LegacyBulkDataFlags = 0;
+	/** I/O functions. */
+	COREUOBJECT_API static FArchive& Serialize(FArchive& Ar, TArray<FObjectDataResource>& DataResources);
+	COREUOBJECT_API static void Serialize(FStructuredArchive::FSlot Slot, TArray<FObjectDataResource>& DataResources);
 };

@@ -3,14 +3,25 @@
 #pragma once
 
 #include "Engine/Attenuation.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "IAudioExtensionPlugin.h"
+#endif
+#include "IAudioParameterInterfaceRegistry.h"
+#include "AudioLinkSettingsAbstract.h"
+#include "SoundAttenuationEditorSettings.h"
+#include "Sound/SoundSubmixSend.h"
+
 #include "SoundAttenuation.generated.h"
 
+class UOcclusionPluginSourceSettingsBase;
+class UReverbPluginSourceSettingsBase;
+class USourceDataOverridePluginSourceSettingsBase;
 class USoundSubmixBase;
+class USpatializationPluginSourceSettingsBase;
 
 // This enumeration is deprecated
 UENUM()
-enum ESoundDistanceCalc
+enum ESoundDistanceCalc : int
 {
 	SOUNDDISTANCE_Normal,
 	SOUNDDISTANCE_InfiniteXYPlane,
@@ -20,7 +31,7 @@ enum ESoundDistanceCalc
 };
 
 UENUM()
-enum ESoundSpatializationAlgorithm
+enum ESoundSpatializationAlgorithm : int
 {
 	// Standard panning method for spatialization (linear or equal power method defined in project settings)
 	SPATIALIZATION_Default UMETA(DisplayName = "Panning"),
@@ -54,20 +65,6 @@ enum class EReverbSendMethod : uint8
 };
 
 UENUM(BlueprintType)
-enum class ESubmixSendMethod : uint8
-{
-	// A submix send based on linear interpolation between a distance range and send-level range
-	Linear,
-
-	// A submix send based on a supplied curve
-	CustomCurve,
-
-	// A manual submix send level (Uses the specified constant send level value. Useful for 2D sounds.)
-	Manual,
-};
-
-
-UENUM(BlueprintType)
 enum class EPriorityAttenuationMethod : uint8
 {
 	// A priority attenuation based on linear interpolation between a distance range and priority attenuation range
@@ -82,66 +79,54 @@ enum class EPriorityAttenuationMethod : uint8
 
 
 USTRUCT(BlueprintType)
-struct ENGINE_API FSoundAttenuationPluginSettings
+struct FSoundAttenuationPluginSettings
 {
 	GENERATED_USTRUCT_BODY()
 
 	/** Settings to use with spatialization audio plugin. These are defined by the plugin creator. Not all audio plugins utilize this feature. This is an array so multiple plugins can have settings. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationSpatialization, meta = (DisplayName = "Spatialization Plugin Settings"))
-	TArray<USpatializationPluginSourceSettingsBase*> SpatializationPluginSettingsArray;
+	TArray<TObjectPtr<USpatializationPluginSourceSettingsBase>> SpatializationPluginSettingsArray;
 
-	/** Settings to use with occlusion audio plugin. These are defined by the plugin creator. Not all audio plugins utilize this feature. This  is an array so multiple plugins can have settings. */
+	/** Settings to use with occlusion audio plugin. These are defined by the plugin creator. Not all audio plugins utilize this feature. This is an array so multiple plugins can have settings. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationOcclusion, meta = (DisplayName = "Occlusion Plugin Settings"))
-	TArray<UOcclusionPluginSourceSettingsBase*> OcclusionPluginSettingsArray;
+	TArray<TObjectPtr<UOcclusionPluginSourceSettingsBase>> OcclusionPluginSettingsArray;
 
-	/** Settings to use with reverb audio plugin. These are defined by the plugin creator. Not all audio plugins utilize this feature. This  is an array so multiple plugins can have settings. */
+	/** Settings to use with reverb audio plugin. These are defined by the plugin creator. Not all audio plugins utilize this feature. This is an array so multiple plugins can have settings. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationReverbSend, meta = (DisplayName = "Reverb Plugin Settings"))
-	TArray<UReverbPluginSourceSettingsBase*> ReverbPluginSettingsArray;
+	TArray<TObjectPtr<UReverbPluginSourceSettingsBase>> ReverbPluginSettingsArray;
+
+	/** Settings to use with source data override audio plugin. These are defined by the plugin creator. Not all audio plugins utilize this feature. This is an array so multiple plugins can have settings. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationSourceDataOverride, meta = (DisplayName = "Source Data Override Plugin Settings"))
+	TArray<TObjectPtr<USourceDataOverridePluginSourceSettingsBase>> SourceDataOverridePluginSettingsArray;
+};
+
+// Defines how to speaker map the sound when using the non-spatialized radius feature
+UENUM(BlueprintType)
+enum class ENonSpatializedRadiusSpeakerMapMode : uint8
+{
+	// Will blend the 3D sound to an omni-directional sound (equal output mapping in all directions)
+	OmniDirectional,
+
+	// Will blend the 3D source to the same representation speaker map used when playing the asset 2D
+	Direct2D,
+
+	// Will blend the 3D source to a multichannel 2D version (i.e. upmix stereo to quad) if rendering in surround
+	Surround2D,
 };
 
 USTRUCT(BlueprintType)
-struct ENGINE_API FAttenuationSubmixSendSettings
+struct FAttenuationSubmixSendSettings : public FSoundSubmixSendInfoBase
 {
-	GENERATED_USTRUCT_BODY()
-
-	/** Submix to send audio to based on distance. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationSubmixSend)
-	USoundSubmixBase* Submix = nullptr;
-
-	/** What method to use to use for submix sends. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationReverbSend)
-	ESubmixSendMethod SubmixSendMethod = ESubmixSendMethod::Linear;
-
-	/** The amount to send to the Submix when the sound is located at a distance equal to value specified in the submix send distance min. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationSubmixSend, meta = (DisplayName = "Submix Min Send Level"))
-	float SubmixSendLevelMin = 0.0f;
-
-	/** The amount to send to the Submix when the sound is located at a distance equal to value specified in the reverb max send distance. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationSubmixSend, meta = (DisplayName = "Submix Max Send Level"))
-	float SubmixSendLevelMax = 1.0f;
-
-	/** The min distance to send to the Submix. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationSubmixSend, meta = (DisplayName = "Submix Min Send Distance"))
-	float SubmixSendDistanceMin = 400.0f;
-
-	/** The max distance to send to the Submix. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationSubmixSend, meta = (DisplayName = "Submix Max Send Distance"))
-	float SubmixSendDistanceMax = 6000.0f;
-
-	/* The manual Submix send level to use. Doesn't change as a function of distance. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationSubmixSend)
-	float ManualSubmixSendLevel = 0.2f;
-
-	/* The custom Submix send curve to use for distance-based send level. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationSubmixSend)
-	FRuntimeFloatCurve CustomSubmixSendCurve;
+	GENERATED_BODY();
+	
+	FAttenuationSubmixSendSettings();
 };
 
 /*
 The settings for attenuating.
 */
 USTRUCT(BlueprintType)
-struct ENGINE_API FSoundAttenuationSettings : public FBaseAttenuationSettings
+struct FSoundAttenuationSettings : public FBaseAttenuationSettings
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -193,13 +178,33 @@ struct ENGINE_API FSoundAttenuationSettings : public FBaseAttenuationSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationSubmixSend, meta = (DisplayName = "Enable Submix Send"))
 	uint8 bEnableSubmixSends : 1;
 
+	/** Enables overriding WaveInstance data using source data override plugin */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationSourceDataOverride, meta = (DisplayName = "Enable Source Data Override"))
+	uint8 bEnableSourceDataOverride : 1;
+
+	/** Enables/Disables AudioLink on all sources using this attenuation */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationAudioLink, meta = (DisplayName = "Enable Send to AudioLink"))
+	uint8 bEnableSendToAudioLink : 1;
+
 	/** What method we use to spatialize the sound. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationSpatialization, meta = (ClampMin = "0", EditCondition = "bSpatialize", DisplayName = "Spatialization Method"))
 	TEnumAsByte<enum ESoundSpatializationAlgorithm> SpatializationAlgorithm;
 
+	/** AudioLink Setting Overrides */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationAudioLink, meta = (DisplayName = "AudioLink Settings Override", EditCondition = "bEnableSendToAudioLink"))
+	TObjectPtr<UAudioLinkSettingsAbstract> AudioLinkSettingsOverride;
+
 	/** What min radius to use to swap to non-binaural audio when a sound starts playing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationSpatialization, meta = (ClampMin = "0", EditCondition = "bSpatialize"))
 	float BinauralRadius;
+
+	/* The normalized custom curve to use for the air absorption lowpass frequency values. Does a mapping from defined distance values (x-axis) and defined frequency values (y-axis) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationAirAbsorption)
+	FRuntimeFloatCurve CustomLowpassAirAbsorptionCurve;
+
+	/* The normalized custom curve to use for the air absorption highpass frequency values. Does a mapping from defined distance values (x-axis) and defined frequency values (y-axis) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationAirAbsorption)
+	FRuntimeFloatCurve CustomHighpassAirAbsorptionCurve;
 
 	/** What method to use to map distance values to frequency absorption values. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationAirAbsorption)
@@ -220,11 +225,22 @@ struct ENGINE_API FSoundAttenuationSettings : public FBaseAttenuationSettings
 #if WITH_EDITORONLY_DATA
 	UPROPERTY()
 	TEnumAsByte<enum ESoundDistanceCalc> DistanceType_DEPRECATED;
+
+ 	UPROPERTY()
+ 	float OmniRadius_DEPRECATED;
 #endif
 
-	/** The distance below which a sound is non-spatialized (2D). This prevents near-field audio from flipping as audio crosses the listener's position. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationSpatialization, meta=(ClampMin = "0", EditCondition="bSpatialize", DisplayName="Non-Spatialized Radius"))
-	float OmniRadius;
+	/** The distance below which a sound begins to linearly interpolate towards being non-spatialized (2D). See "Non Spatialized Radius End" to define the end of the interpolation and the "Non Spatialized Radius Mode" for the mode of the interpolation. Note: this does not apply when using a 3rd party binaural plugin (audio will remain spatialized). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationSpatialization, meta = (ClampMin = "0", EditCondition = "bSpatialize"))
+	float NonSpatializedRadiusStart;
+
+	/** The distance below which a sound is fully non-spatialized (2D). See "Non Spatialized Radius Start" to define the start of the interpolation and the "Non Spatialized Radius Mode" for the mode of the interpolation. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationSpatialization, meta = (ClampMin = "0", EditCondition = "bSpatialize"))
+	float NonSpatializedRadiusEnd;
+
+	/** Defines how to interpolate a 3D sound towards a 2D sound when using the non-spatialized radius start and end properties. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationSpatialization, meta = (ClampMin = "0", EditCondition = "bSpatialize"))
+	ENonSpatializedRadiusSpeakerMapMode NonSpatializedRadiusMode;
 
 	/** The world-space distance between left and right stereo channels when stereo assets are 3D spatialized. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationSpatialization, meta = (ClampMin = "0", EditCondition = "bSpatialize", DisplayName = "3D Stereo Spread"))
@@ -232,7 +248,7 @@ struct ENGINE_API FSoundAttenuationSettings : public FBaseAttenuationSettings
 
 #if WITH_EDITORONLY_DATA
 	UPROPERTY()
-	USpatializationPluginSourceSettingsBase* SpatializationPluginSettings_DEPRECATED;
+	TObjectPtr<USpatializationPluginSourceSettingsBase> SpatializationPluginSettings_DEPRECATED;
 
 	UPROPERTY()
 	float RadiusMin_DEPRECATED;
@@ -248,14 +264,6 @@ struct ENGINE_API FSoundAttenuationSettings : public FBaseAttenuationSettings
 	/* The max distance range at which to apply an absorption LPF filter. Absorption freq cutoff interpolates between filter frequency ranges between these distance values. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationAirAbsorption, meta = (DisplayName = "Max Distance Range"))
 	float LPFRadiusMax;
-
-	/* The normalized custom curve to use for the air absorption lowpass frequency values. Does a mapping from defined distance values (x-axis) and defined frequency values (y-axis) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationAirAbsorption)
-	FRuntimeFloatCurve CustomLowpassAirAbsorptionCurve;
-
-	/* The normalized custom curve to use for the air absorption highpass frequency values. Does a mapping from defined distance values (x-axis) and defined frequency values (y-axis) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationAirAbsorption)
-	FRuntimeFloatCurve CustomHighpassAirAbsorptionCurve;
 
 	/* The range of the cutoff frequency (in Hz) of the lowpass absorption filter. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationAirAbsorption, meta = (DisplayName = "Low Pass Cutoff Frequency Min"))
@@ -327,10 +335,10 @@ struct ENGINE_API FSoundAttenuationSettings : public FBaseAttenuationSettings
 
 #if WITH_EDITORONLY_DATA
 	UPROPERTY()
-	UOcclusionPluginSourceSettingsBase* OcclusionPluginSettings_DEPRECATED;
+	TObjectPtr<UOcclusionPluginSourceSettingsBase> OcclusionPluginSettings_DEPRECATED;
 
 	UPROPERTY()
-	UReverbPluginSourceSettingsBase* ReverbPluginSettings_DEPRECATED;
+	TObjectPtr<UReverbPluginSourceSettingsBase> ReverbPluginSettings_DEPRECATED;
 #endif
 
 	/** The amount to send to master reverb when sound is located at a distance equal to value specified in the reverb min send distance. */
@@ -353,14 +361,6 @@ struct ENGINE_API FSoundAttenuationSettings : public FBaseAttenuationSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationReverbSend)
 	float ManualReverbSendLevel;
 
-	/* The custom reverb send curve to use for distance-based send level. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationReverbSend)
-	FRuntimeFloatCurve CustomReverbSendCurve;
-
-	/** Set of submix send settings to use to send audio to submixes as a function of distance. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationSubmixSend)
-	TArray<FAttenuationSubmixSendSettings> SubmixSendSettings;
-
 	/** Interpolated value to scale priority against when the sound is at the minimum priority attenuation distance from the closest listener. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationPriority, meta = (ClampMin = "0.0", UIMin = "0.0", UIMax = "1.0", DisplayName = "Priority Attenuation At Min Distance"))
 	float PriorityAttenuationMin;
@@ -380,6 +380,14 @@ struct ENGINE_API FSoundAttenuationSettings : public FBaseAttenuationSettings
 	/* Static priority scalar to use (doesn't change as a function of distance). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationPriority, meta = (ClampMin = "0.0", UIMin = "0.0", UIMax = "1.0", DisplayName = "Attenuation Priority"))
 	float ManualPriorityAttenuation;
+
+	/* The custom reverb send curve to use for distance-based send level. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationReverbSend)
+	FRuntimeFloatCurve CustomReverbSendCurve;
+
+	/** Set of submix send settings to use to send audio to submixes as a function of distance. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationSubmixSend)
+	TArray<FAttenuationSubmixSendSettings> SubmixSendSettings;
 
 	/* The custom curve to use for distance-based priority attenuation. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationPriority)
@@ -402,7 +410,10 @@ struct ENGINE_API FSoundAttenuationSettings : public FBaseAttenuationSettings
 		, bApplyNormalizationToStereoSounds(false)
 		, bEnableLogFrequencyScaling(false)
 		, bEnableSubmixSends(false)
+		, bEnableSourceDataOverride(false)
+		, bEnableSendToAudioLink(true)
 		, SpatializationAlgorithm(ESoundSpatializationAlgorithm::SPATIALIZATION_Default)
+		, AudioLinkSettingsOverride(nullptr)
 		, BinauralRadius(0.0f)
 		, AbsorptionMethod(EAirAbsorptionMethod::Linear)
 		, OcclusionTraceChannel(ECC_Visibility)
@@ -410,8 +421,11 @@ struct ENGINE_API FSoundAttenuationSettings : public FBaseAttenuationSettings
 		, PriorityAttenuationMethod(EPriorityAttenuationMethod::Linear)
 #if WITH_EDITORONLY_DATA
 		, DistanceType_DEPRECATED(SOUNDDISTANCE_Normal)
+		, OmniRadius_DEPRECATED(0.0f)
 #endif
-		, OmniRadius(0.0f)
+		, NonSpatializedRadiusStart(0.0f)
+		, NonSpatializedRadiusEnd(0.0f)
+		, NonSpatializedRadiusMode(ENonSpatializedRadiusSpeakerMapMode::OmniDirectional)
 		, StereoSpread(200.0f)
 #if WITH_EDITORONLY_DATA
 		, SpatializationPluginSettings_DEPRECATED(nullptr)
@@ -443,26 +457,33 @@ struct ENGINE_API FSoundAttenuationSettings : public FBaseAttenuationSettings
 #endif
 		, ReverbWetLevelMin(0.3f)
 		, ReverbWetLevelMax(0.95f)
-		, ReverbDistanceMin(AttenuationShapeExtents.X)
-		, ReverbDistanceMax(AttenuationShapeExtents.X + FalloffDistance)
+		, ReverbDistanceMin(UE_REAL_TO_FLOAT(AttenuationShapeExtents.X))
+		, ReverbDistanceMax(UE_REAL_TO_FLOAT(AttenuationShapeExtents.X) + FalloffDistance)
 		, ManualReverbSendLevel(0.0f)
 		, PriorityAttenuationMin(1.0f)
 		, PriorityAttenuationMax(1.0f)
-		, PriorityAttenuationDistanceMin(AttenuationShapeExtents.X)
-		, PriorityAttenuationDistanceMax(AttenuationShapeExtents.X + FalloffDistance)
+		, PriorityAttenuationDistanceMin(UE_REAL_TO_FLOAT(AttenuationShapeExtents.X))
+		, PriorityAttenuationDistanceMax(UE_REAL_TO_FLOAT(AttenuationShapeExtents.X) + FalloffDistance)
 		, ManualPriorityAttenuation(1.0f)
 	{
+#if WITH_EDITOR
+		if (const USoundAttenuationEditorSettings* SoundAttenuationEditorSettings = GetDefault<USoundAttenuationEditorSettings>())
+		{
+			bEnableReverbSend = SoundAttenuationEditorSettings->bEnableReverbSend;
+			bEnableSendToAudioLink = SoundAttenuationEditorSettings->bEnableSendToAudioLink;
+		}
+#endif // WITH_EDITOR
 	}
 
-	bool operator==(const FSoundAttenuationSettings& Other) const;
+	ENGINE_API bool operator==(const FSoundAttenuationSettings& Other) const;
 #if WITH_EDITORONLY_DATA
-	void PostSerialize(const FArchive& Ar);
+	ENGINE_API void PostSerialize(const FArchive& Ar);
 #endif
 
-	virtual void CollectAttenuationShapesForVisualization(TMultiMap<EAttenuationShape::Type, FBaseAttenuationSettings::AttenuationShapeDetails>& ShapeDetailsMap) const override;
-	float GetFocusPriorityScale(const struct FGlobalFocusSettings& FocusSettings, float FocusFactor) const;
-	float GetFocusAttenuation(const struct FGlobalFocusSettings& FocusSettings, float FocusFactor) const;
-	float GetFocusDistanceScale(const struct FGlobalFocusSettings& FocusSettings, float FocusFactor) const;
+	ENGINE_API virtual void CollectAttenuationShapesForVisualization(TMultiMap<EAttenuationShape::Type, FBaseAttenuationSettings::AttenuationShapeDetails>& ShapeDetailsMap) const override;
+	ENGINE_API float GetFocusPriorityScale(const struct FGlobalFocusSettings& FocusSettings, float FocusFactor) const;
+	ENGINE_API float GetFocusAttenuation(const struct FGlobalFocusSettings& FocusSettings, float FocusFactor) const;
+	ENGINE_API float GetFocusDistanceScale(const struct FGlobalFocusSettings& FocusSettings, float FocusFactor) const;
 };
 
 #if WITH_EDITORONLY_DATA
@@ -484,6 +505,60 @@ class USoundAttenuation : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Settings, meta = (CustomizeProperty))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Settings, meta = (CustomizeProperty))
 	FSoundAttenuationSettings Attenuation;
 };
+
+namespace Audio
+{
+	namespace AttenuationInterface
+	{
+		ENGINE_API const extern FName Name;
+
+		namespace Inputs
+		{
+			ENGINE_API const extern FName Distance;
+		} // namespace Inputs
+
+		ENGINE_API Audio::FParameterInterfacePtr GetInterface();
+	} // namespace AttenuationInterface
+
+	namespace SpatializationInterface
+	{
+		ENGINE_API const extern FName Name;
+
+		namespace Inputs
+		{
+			ENGINE_API const extern FName Azimuth;
+			ENGINE_API const extern FName Elevation;
+		} // namespace Inputs
+
+		ENGINE_API Audio::FParameterInterfacePtr GetInterface();
+	} // namespace SpatializationInterface
+
+	namespace SourceOrientationInterface
+	{
+		ENGINE_API const extern FName Name;
+
+		namespace Inputs
+		{
+			ENGINE_API const extern FName Azimuth;
+			ENGINE_API const extern FName Elevation;
+		} // namespace Inputs
+
+		ENGINE_API Audio::FParameterInterfacePtr GetInterface();
+	} // namespace EmitterInterface
+
+	namespace ListenerOrientationInterface
+	{
+		ENGINE_API const extern FName Name;
+
+		namespace Inputs
+		{
+			ENGINE_API const extern FName Azimuth;
+			ENGINE_API const extern FName Elevation;
+		} // namespace Inputs
+
+		ENGINE_API Audio::FParameterInterfacePtr GetInterface();
+	} // namespace EmitterInterface
+} // namespace Audio

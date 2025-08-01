@@ -2,13 +2,22 @@
 
 #pragma once
 
-#include "Framework/DelayedDrag.h"
-#include "Misc/Optional.h"
-#include "ScopedTransaction.h"
-#include "CurveEditorTypes.h"
 #include "CurveEditorSnapMetrics.h"
+#include "CurveEditorTypes.h"
+#include "Framework/DelayedDrag.h"
+#include "HAL/Platform.h"
+#include "Input/Reply.h"
+#include "InputCoreTypes.h"
+#include "Math/Vector2D.h"
+#include "Misc/OptionalFwd.h"
+#include "ScopedTransaction.h"
+#include "Templates/UniquePtr.h"
 
 class FCurveEditor;
+class FSlateWindowElementList;
+struct FCurvePointHandle;
+struct FGeometry;
+struct FPointerEvent;
 
 /**
  * Interface for all drag operations in the curve editor

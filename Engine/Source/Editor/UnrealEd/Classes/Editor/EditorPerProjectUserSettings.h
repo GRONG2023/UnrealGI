@@ -17,7 +17,7 @@ class UEditorPerProjectUserSettings : public UObject
 	// The following options are exposed in the Preferences Editor 
 
 	/** If enabled, any newly opened UI menus, menu bars, and toolbars will show the developer hooks that would accept extensions */
-	UPROPERTY(EditAnywhere, config, Category=DeveloperTools, meta = (DisplayName = "Display UI Extension Points"))
+	UPROPERTY(EditAnywhere, config, Category=DeveloperTools, meta = (DisplayName = "Display UI Extension Points", ConfigRestartRequired=true))
 	uint32 bDisplayUIExtensionPoints:1;
 
 	/** If enabled, tooltips linked to documentation will show the developer the link bound to that UI item */
@@ -113,6 +113,10 @@ class UEditorPerProjectUserSettings : public UObject
 	UPROPERTY(EditAnywhere, config, Category = UnrealAutomationTool)
 	bool bGetAttentionOnUATCompletion;
 
+	/** Always build UAT\UBT before launching the game. It will decrease iteration times if disabled */
+	UPROPERTY(EditAnywhere, config, Category = UnrealAutomationTool)
+	bool bAlwaysBuildUAT = true;
+
 	/** How fast the SCS viewport camera moves */
 	UPROPERTY(config, meta=(UIMin = "1", UIMax = "8", ClampMin="1", ClampMax="8"))
 	int32 SCSViewportCameraSpeed;
@@ -143,8 +147,12 @@ class UEditorPerProjectUserSettings : public UObject
 	UPROPERTY(config)
 	uint32 bAllowSelectTranslucent:1;
 
+	/** If this is true, all of an actors' components will be drawn when the actor or one of its component is selected */
+	UPROPERTY(config)
+	uint32 bShowSelectionSubcomponents:1;
+
 	UPROPERTY()
-	class UBlueprintPaletteFavorites* BlueprintFavorites;
+	TObjectPtr<class UBlueprintPaletteFavorites> BlueprintFavorites;
 	
 public:
 	// Per project user settings for which asset viewer profile should be used
@@ -154,9 +162,6 @@ public:
 	UPROPERTY(config)
 	FString AssetViewerProfileName;
 
-	UPROPERTY(config)
-	int32 MaterialQualityLevel;
-
 	/** The feature level we should use when loading or creating a new world */
 	UPROPERTY(config)
 	int32 PreviewFeatureLevel;
@@ -165,13 +170,20 @@ public:
 	UPROPERTY(config)
 	FName PreviewPlatformName;
 
-	/** The shader platform to preview, or NAME_None if there is no preview platform */
+	/** The shader format to preview, or NAME_None if there is no preview platform */
 	UPROPERTY(config)
 	FName PreviewShaderFormatName;
 
+	/** The shader platform to preview, or NAME_None if there is no preview platform */
+	UPROPERTY(config)
+	FName PreviewShaderPlatformName;
+	
 	/** Is feature level preview currently active */
 	UPROPERTY(config)
 	bool bPreviewFeatureLevelActive;
+
+	UPROPERTY(config)
+	bool bPreviewFeatureLevelWasDefault;
 
 	UPROPERTY(config)
 	FName PreviewDeviceProfileName;

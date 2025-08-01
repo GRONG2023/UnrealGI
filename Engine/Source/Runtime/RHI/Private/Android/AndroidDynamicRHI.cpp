@@ -3,6 +3,7 @@
 #include "RHI.h"
 #include "Modules/ModuleManager.h"
 #include "Android/AndroidApplication.h"
+#include "Misc/App.h"
 
 FDynamicRHI* PlatformCreateDynamicRHI()
 {
@@ -40,7 +41,7 @@ FDynamicRHI* PlatformCreateDynamicRHI()
 	{
 
 	//	FMessageDialog::Open(EAppMsgType::Ok, TEXT("OpenGL 3.2 is required to run the engine."));
-		FPlatformMisc::RequestExit(1);
+		FPlatformMisc::RequestExit(true, TEXT("PlatformCreateDynamicRHI"));
 		DynamicRHIModule = NULL;
 	}
 
@@ -50,10 +51,6 @@ FDynamicRHI* PlatformCreateDynamicRHI()
 		// Create the dynamic RHI.
 		DynamicRHI = DynamicRHIModule->CreateRHI(RequestedFeatureLevel);
 	}
-
-#if !PLATFORM_LUMIN
-	FPlatformMisc::UnlockAndroidWindow();
-#endif
 
 	return DynamicRHI;
 }

@@ -17,8 +17,8 @@
 #	include "Android/AndroidWebBrowserWindow.h"
 #elif PLATFORM_IOS
 #	include "IOS/IOSPlatformWebBrowser.h"
-#elif PLATFORM_PS4
-#	include "PS4PlatformWebBrowser.h"
+#elif PLATFORM_SPECIFIC_WEB_BROWSER
+#	include COMPILED_PLATFORM_HEADER(PlatformWebBrowser.h)
 #elif WITH_CEF3
 #	include "CEF/CEFWebBrowserWindow.h"
 #else
@@ -47,6 +47,9 @@ SWebBrowserView::~SWebBrowserView()
 		BrowserWindow->OnDismissAllDialogs().Unbind();
 		BrowserWindow->OnCreateWindow().Unbind();
 		BrowserWindow->OnCloseWindow().Unbind();
+		BrowserWindow->OnSuppressContextMenu().Unbind();
+		BrowserWindow->OnDragWindow().Unbind();
+		BrowserWindow->OnConsoleMessage().Unbind();
 
 		if (BrowserWindow->OnBeforeBrowse().IsBoundToObject(this))
 		{
@@ -95,6 +98,7 @@ void SWebBrowserView::Construct(const FArguments& InArgs, const TSharedPtr<IWebB
 	OnUnhandledKeyDown = InArgs._OnUnhandledKeyDown;
 	OnUnhandledKeyUp = InArgs._OnUnhandledKeyUp;
 	OnUnhandledKeyChar = InArgs._OnUnhandledKeyChar;
+	OnConsoleMessage = InArgs._OnConsoleMessage;
 
 	BrowserWindow = InWebBrowserWindow;
 	if(!BrowserWindow.IsValid())
@@ -108,6 +112,7 @@ void SWebBrowserView::Construct(const FArguments& InArgs, const TSharedPtr<IWebB
 			FCreateBrowserWindowSettings Settings;
 			Settings.InitialURL = InArgs._InitialURL;
 			Settings.bUseTransparency = InArgs._SupportsTransparency;
+			Settings.bInterceptLoadRequests = InArgs._InterceptLoadRequests;
 			Settings.bThumbMouseButtonNavigation = InArgs._SupportsThumbMouseButtonNavigation;
 			Settings.ContentsToLoad = InArgs._ContentsToLoad;
 			Settings.bShowErrorMessage = InArgs._ShowErrorMessage;
@@ -116,7 +121,11 @@ void SWebBrowserView::Construct(const FArguments& InArgs, const TSharedPtr<IWebB
 			Settings.Context = InArgs._ContextSettings;
 			Settings.AltRetryDomains = InArgs._AltRetryDomains;
 
-			BrowserWindow = IWebBrowserModule::Get().GetSingleton()->CreateBrowserWindow(Settings);
+			// IWebBrowserModule::Get() was already callled in WebBrowserWidgetModule.cpp so we don't need to force the load again here
+			if (IWebBrowserModule::IsAvailable() && IWebBrowserModule::Get().IsWebModuleAvailable())
+			{
+				BrowserWindow = IWebBrowserModule::Get().GetSingleton()->CreateBrowserWindow(Settings);
+			}
 		}
 	}
 
@@ -206,6 +215,11 @@ void SWebBrowserView::Construct(const FArguments& InArgs, const TSharedPtr<IWebB
 		BrowserWindow->OnDragWindow().BindSP(this, &SWebBrowserView::HandleDrag);
 		OnDragWindow = InArgs._OnDragWindow;
 
+		if (!BrowserWindow->OnConsoleMessage().IsBound())
+		{
+			BrowserWindow->OnConsoleMessage().BindSP(this, &SWebBrowserView::HandleConsoleMessage);
+		}
+
 		BrowserViewport = MakeShareable(new FWebBrowserViewport(BrowserWindow));
 #if WITH_CEF3
 		BrowserWidget->SetViewportInterface(BrowserViewport.ToSharedRef());
@@ -251,6 +265,27 @@ void SWebBrowserView::HandleWindowDeactivated()
 	{
 		BrowserViewport->OnFocusLost(FFocusEvent());
 	}
+}
+
+FReply SWebBrowserView::OnFocusReceived(const FGeometry& MyGeometry, const FFocusEvent& InFocusEvent)
+{
+	FReply Reply = FReply::Handled();
+	if (InFocusEvent.GetCause() != EFocusCause::Cleared)
+	{
+		if (BrowserWidget.IsValid())
+		{
+			Reply.SetUserFocus(BrowserWidget.ToSharedRef(), InFocusEvent.GetCause());
+		}
+		else
+		{
+			Reply.SetUserFocus(this->AsShared());
+		}
+		if (BrowserWindow.IsValid())
+		{
+			BrowserWindow->OnFocus(true, false);
+		}
+	}
+	return Reply;
 }
 
 void SWebBrowserView::HandleWindowActivated()
@@ -438,7 +473,7 @@ void SWebBrowserView::HandleBrowserWindowDocumentStateChanged(EWebBrowserDocumen
 
 void SWebBrowserView::HandleBrowserWindowNeedsRedraw()
 {
-	if (FSlateApplication::Get().IsSlateAsleep())
+	if (FSlateApplication::IsInitialized() && FSlateApplication::Get().IsSlateAsleep())
 	{
 		// Tell slate that the widget needs to wake up for one frame to get redrawn
 		RegisterActiveTimer(0.f, FWidgetActiveTimerDelegate::CreateLambda([this](double InCurrentTime, float InDeltaTime) { return EActiveTimerReturnType::Stop; }));
@@ -455,6 +490,11 @@ void SWebBrowserView::HandleUrlChanged( FString NewUrl )
 {
 	AddressBarUrl = FText::FromString(NewUrl);
 	OnUrlChanged.ExecuteIfBound(AddressBarUrl);
+}
+
+void SWebBrowserView::CloseBrowser()
+{
+	BrowserWindow->CloseBrowser(true /*force*/, true /*block until closed*/);
 }
 
 void SWebBrowserView::HandleToolTip(FString ToolTipText)
@@ -614,8 +654,11 @@ void SWebBrowserView::HandleShowPopup(const FIntRect& PopupSize)
 				.EnableGammaCorrection(false)
 				.EnableBlending(false)
 				.IgnoreTextureAlpha(true)
+#if WITH_CEF3
+				.RenderTransform(this, &SWebBrowserView::GetPopupRenderTransform)
+#endif
 				.Visibility(EVisibility::Visible);
-	MenuViewport = MakeShareable(new FWebBrowserViewport(BrowserWindow, true));
+		MenuViewport = MakeShareable(new FWebBrowserViewport(BrowserWindow, true));
 	MenuContent->SetViewportInterface(MenuViewport.ToSharedRef());
 	FWidgetPath WidgetPath;
 	FSlateApplication::Get().GeneratePathToWidgetUnchecked(SharedThis(this), WidgetPath);
@@ -632,6 +675,28 @@ void SWebBrowserView::HandleShowPopup(const FIntRect& PopupSize)
 		PopupMenuPtr = NewMenu;
 	}
 
+}
+
+TOptional <FSlateRenderTransform> SWebBrowserView::GetPopupRenderTransform() const
+{
+	if (BrowserWindow.IsValid())
+	{
+#if !defined(DUMMY_WEB_BROWSER) && WITH_CEF3
+		TOptional<FSlateRenderTransform> LocalRenderTransform = FSlateRenderTransform();
+		if (static_cast<FWebBrowserWindow*>(BrowserWindow.Get())->UsingAcceleratedPaint())
+		{
+			// the accelerated renderer for CEF generates inverted textures (compared to the slate co-ord system), so flip it here
+			LocalRenderTransform = FSlateRenderTransform(Concatenate(FScale2D(1, -1), FVector2D(0, PopupMenuPtr.Pin()->GetContent()->GetDesiredSize().Y)));
+		}
+		return LocalRenderTransform;
+#else
+		return FSlateRenderTransform();
+#endif
+	}
+	else
+	{
+		return FSlateRenderTransform();
+	}
 }
 
 void SWebBrowserView::HandleMenuDismissed(TSharedRef<IMenu>)
@@ -694,5 +759,23 @@ bool SWebBrowserView::UnhandledKeyChar(const FCharacterEvent& CharacterEvent)
 	return false;
 }
 
+void SWebBrowserView::SetParentWindow(TSharedPtr<SWindow> Window)
+{
+	SetupParentWindowHandlers();
+	if (BrowserWindow.IsValid())
+	{
+		BrowserWindow->SetParentWindow(Window);
+	}
+}
+
+void SWebBrowserView::SetBrowserKeyboardFocus()
+{
+	BrowserWindow->OnFocus(HasAnyUserFocusOrFocusedDescendants(), false);
+}
+
+void SWebBrowserView::HandleConsoleMessage(const FString& Message, const FString& Source, int32 Line, EWebBrowserConsoleLogSeverity Serverity)
+{
+	OnConsoleMessage.ExecuteIfBound(Message, Source, Line, Serverity);
+}
 
 #undef LOCTEXT_NAMESPACE

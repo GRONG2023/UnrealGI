@@ -3,8 +3,7 @@
 #pragma once
 
 #include "SolverEventFilters.h"
-#include "Chaos/PBDRigidsEvolutionGBF.h"
-#include "PBDRigidsSolver.h"
+
 #include "ChaosSolverConfiguration.generated.h"
 
 UENUM()
@@ -14,6 +13,7 @@ enum class EClusterUnionMethod : uint8
 	DelaunayTriangulation,
 	MinimalSpanningSubsetDelaunayTriangulation,
 	PointImplicitAugmentedWithMinimalDelaunay,
+	BoundsOverlapFilteredDelaunayTriangulation,
 	None
 };
 
@@ -22,68 +22,55 @@ struct FChaosSolverConfiguration
 {
 	GENERATED_BODY();
 
-	FChaosSolverConfiguration()
-		: Iterations(FEvolution::DefaultNumIterations)
-		, CollisionPairIterations(FEvolution::DefaultNumCollisionPairIterations)
-		, PushOutIterations(FEvolution::DefaultNumPushOutIterations)
-		, CollisionPushOutPairIterations(FEvolution::DefaultNumCollisionPushOutPairIterations)
-		, CollisionMarginFraction(FEvolution::DefaultCollisionMarginFraction)
-		, CollisionMarginMax(FEvolution::DefaultCollisionMarginMax)
-		, CollisionCullDistance(FEvolution::DefaultCollisionCullDistance)
-		, JointPairIterations(FEvolution::DefaultNumJointPairIterations)
-		, JointPushOutPairIterations(FEvolution::DefaultNumJointPushOutPairIterations)
-		, ClusterConnectionFactor(1.0f)
-		, ClusterUnionConnectionType(EClusterUnionMethod::DelaunayTriangulation)
-		, bGenerateCollisionData(false)
-		, bGenerateBreakData(false)
-		, bGenerateTrailingData(false)
-		, bGenerateContactGraph(true)
-	{
-	}
+	CHAOS_API FChaosSolverConfiguration();
 
-	// The number of iterations to run during the constraint solver step
-	UPROPERTY(EditAnywhere, Category = "SolverConfiguration|Iterations")
-	int32 Iterations;
+	// Handle renamed properties
+	CHAOS_API void MoveRenamedPropertyValues();
 
-	// During solver iterations we solve each constraint in turn. For each constraint
-	// we run the solve step CollisionPairIterations times in a row.
-	UPROPERTY(EditAnywhere, Category = "SolverConfiguration|Iterations")
-	int32 CollisionPairIterations;
+	// The number of position iterations to run during the constraint solver step
+	UPROPERTY(EditAnywhere, Category = "SolverConfiguration|Iterations", meta = (ClampMin = "0"))
+	int32 PositionIterations;
+	
+	// The number of velocity iterations to run during the constraint solver step
+	UPROPERTY(EditAnywhere, Category = "SolverConfiguration|Iterations", meta = (ClampMin = "0"))
+	int32 VelocityIterations;
 
-	// The number of iterations to run during the constraint fixup step. This applies a post-solve
-	// correction that can address errors left behind during the main solver iterations.
-	UPROPERTY(EditAnywhere, Category = "SolverConfiguration|Iterations")
-	int32 PushOutIterations;
+	// The number of projection iterations to run during the constraint solver step
+	UPROPERTY(EditAnywhere, Category = "SolverConfiguration|Iterations", meta = (ClampMin = "0"))
+	int32 ProjectionIterations;
 
-	// During pushout iterations we pushout each constraint in turn. For each constraint
-	// we run the pushout step CollisionPairIterations times in a row.
-	UPROPERTY(EditAnywhere, Category = "SolverConfiguration|Iterations")
-	int32 CollisionPushOutPairIterations;
 
 	// A collision margin as a fraction of size used by some boxes and convex shapes to improve collision detection results.
 	// The core geometry of shapes that support a margin are reduced in size by the margin, and the margin
 	// is added back on during collision detection. The net result is a shape of the same size but with rounded corners.
-	UPROPERTY(EditAnywhere, Category = "SolverConfiguration|Collision")
+	UPROPERTY(EditAnywhere, Category = "SolverConfiguration|Collision", meta = (ClampMin = "0.0"))
 	float CollisionMarginFraction;
 
 	// An upper limit on the collision margin that will be subtracted from boxes and convex shapes. See CollisionMarginFraction
-	UPROPERTY(EditAnywhere, Category = "SolverConfiguration|Collision")
+	UPROPERTY(EditAnywhere, Category = "SolverConfiguration|Collision", meta = (ClampMin = "0.0"))
 	float CollisionMarginMax;
 
 	// During collision detection, if tweo shapes are at least this far apart we do not calculate their nearest features
 	// during the collision detection step.
-	UPROPERTY(EditAnywhere, Category = "SolverConfiguration|Collision")
+	UPROPERTY(EditAnywhere, Category = "SolverConfiguration|Collision", meta = (ClampMin = "0.0"))
 	float CollisionCullDistance;
 
-	// The number of iterations to run on each constraint during the constraint solver step
-	UPROPERTY(EditAnywhere, Category = "SolverConfiguration|Iterations")
-	int32 JointPairIterations;
+	// The maximum speed at which two bodies can be extracted from each other when they start a frame inter-penetrating. This can
+	// happen because they spawned on top of each other, or the solver failed to fully reolve collisions last frame. A value of
+	// zero means "no limit". A non-zero value can be used to prevent explosive behaviour when bodies start deeply penetrating. 
+	// An alternative to using this approach is to increase the number of Velocity Iterations, which is more expensive but will 
+	// ensure the bodies are depenetrated in a single frame without explosive behaviour.
+	UPROPERTY(EditAnywhere, Category = "SolverConfiguration|Collision", meta = (ClampMin = "0.0"))
+	float CollisionMaxPushOutVelocity;
 
-	// The number of iterations to run during the constraint fixup step for each joint. This applies a post-solve
-	// correction that can address errors left behind during the main solver iterations.
-	UPROPERTY(EditAnywhere, Category = "SolverConfiguration|Iterations")
-	int32 JointPushOutPairIterations;
-
+	// If two bodies start off in overlapping each other, they will depentrate at this speed when they wake.
+	// If set to a large value, initially-overlapping objects will tend to "explode" apart at a speed that depends on the
+	// overlap amount and the timestep (this is the original, previously untunable behaviour). If set to zero, 
+	// initially-overlapping objects will remain stationary and go to sleep until acted on by some other object or force.
+	// A negative value (-1) disables the feature and is equivalent to infinity.
+	// This property can be overridden per Body (see FBodyInstance::MaxDepenetrationVelocity)
+	UPROPERTY(EditAnywhere, Category = "SolverConfiguration|Collision")
+	float CollisionInitialOverlapDepenetrationVelocity;
 
 	UPROPERTY(EditAnywhere, Category = "SolverConfiguration|Clustering")
 	float ClusterConnectionFactor;
@@ -109,9 +96,17 @@ struct FChaosSolverConfiguration
 	UPROPERTY(EditAnywhere, Category = "SolverConfiguration|GeneratedData", meta = (EditCondition = bGenerateTrailingData))
 	FSolverTrailingFilterSettings TrailingFilterSettings;
 
-	UPROPERTY(EditAnywhere, Category = "SolverConfiguration|Contacts")
-	bool bGenerateContactGraph;
-
 private:
-	using FEvolution = Chaos::FPBDRigidsEvolutionGBF;
+
+	// Renamed to PositionIterations
+	UPROPERTY()
+	int32 Iterations_DEPRECATED;
+
+	// Renamed to VelocityIterations
+	UPROPERTY()
+	int32 PushOutIterations_DEPRECATED;
+
+	// No longer used
+	UPROPERTY()
+	bool bGenerateContactGraph_DEPRECATED;
 };

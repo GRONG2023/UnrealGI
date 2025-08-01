@@ -1,25 +1,24 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "GameFramework/PlayerController.h"
+#include "Engine/GameInstance.h"
+#include "Engine/GameViewportClient.h"
+#include "Materials/MaterialInterface.h"
+#include "GameFramework/CheatManagerDefines.h"
 #include "Misc/PackageName.h"
-#include "UObject/LinkerLoad.h"
-#include "EngineGlobals.h"
+#include "GameFramework/ForceFeedbackEffect.h"
 #include "TimerManager.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "CollisionQueryParams.h"
-#include "Engine/World.h"
+#include "Physics/Experimental/PhysScene_Chaos.h"
 #include "SceneView.h"
-#include "Components/PrimitiveComponent.h"
 #include "Camera/CameraActor.h"
 #include "UObject/Package.h"
+#include "EngineStats.h"
 #include "Engine/Canvas.h"
-#include "GameFramework/GameModeBase.h"
 #include "GameFramework/PlayerStart.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/AudioComponent.h"
 #include "Components/ForceFeedbackComponent.h"
 #include "Kismet/GameplayStatics.h"
-#include "LatentActions.h"
 #include "Engine/Engine.h"
 #include "Engine/LevelStreaming.h"
 #include "Engine/LocalPlayer.h"
@@ -32,6 +31,7 @@
 #include "Widgets/SViewport.h"
 #include "Engine/Console.h"
 #include "Net/UnrealNetwork.h"
+#include "Net/Core/Misc/NetConditionGroupManager.h"
 #include "Engine/WorldComposition.h"
 #include "Engine/LevelScriptActor.h"
 #include "GameFramework/GameNetworkManager.h"
@@ -44,9 +44,7 @@
 #include "IXRInput.h"
 #include "GameFramework/TouchInterface.h"
 #include "DisplayDebugHelpers.h"
-#include "Matinee/InterpTrackInstDirector.h"
-#include "Matinee/MatineeActor.h"
-#include "Engine/ActorChannel.h"
+#include "MoviePlayerProxy.h"
 #include "GameFramework/PawnMovementComponent.h"
 #include "GameFramework/SpectatorPawn.h"
 #include "GameFramework/HUD.h"
@@ -54,27 +52,40 @@
 #include "Widgets/Input/SVirtualJoystick.h"
 #include "GameFramework/LocalMessage.h"
 #include "GameFramework/CheatManager.h"
-#include "GameFramework/PlayerInput.h"
 #include "GameFramework/InputSettings.h"
 #include "GameFramework/PlayerState.h"
 #include "GameFramework/GameStateBase.h"
 #include "Haptics/HapticFeedbackEffect_Base.h"
 #include "Engine/ChildConnection.h"
 #include "VisualLogger/VisualLogger.h"
-#include "Logging/MessageLog.h"
 #include "Slate/SceneViewport.h"
 #include "Engine/NetworkObjectList.h"
 #include "GameFramework/GameSession.h"
 #include "GameMapsSettings.h"
+#include "Particles/EmitterCameraLensEffectBase.h"
+#include "LevelUtils.h"
+#include "WorldPartition/WorldPartitionSubsystem.h"
+#include "Physics/AsyncPhysicsInputComponent.h"
+#include "Physics/NetworkPhysicsComponent.h"
+#include "PBDRigidsSolver.h"
+#include "PhysicsEngine/PhysicsSettings.h"
+
+#if UE_WITH_IRIS
+#include "Iris/ReplicationSystem/ReplicationSystem.h"
+#include "Net/Iris/ReplicationSystem/ActorReplicationBridge.h"
+#include "Net/Iris/ReplicationSystem/ReplicationSystemUtil.h"
+#endif // UE_WITH_IRIS
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PlayerController)
 
 DEFINE_LOG_CATEGORY(LogPlayerController);
 
 #define LOCTEXT_NAMESPACE "PlayerController"
 
 DECLARE_CYCLE_STAT(TEXT("PC Tick Actor"), STAT_PC_TickActor, STATGROUP_PlayerController);
-DECLARE_CYCLE_STAT(TEXT("  PC Tick Input"), STAT_PC_TickInput, STATGROUP_PlayerController);
-DECLARE_CYCLE_STAT(TEXT("    PC Build Input Stack"), STAT_PC_BuildInputStack, STATGROUP_PlayerController);
-DECLARE_CYCLE_STAT(TEXT("    PC Process Input Stack"), STAT_PC_ProcessInputStack, STATGROUP_PlayerController);
+DECLARE_CYCLE_STAT(TEXT("PC Tick Input"), STAT_PC_TickInput, STATGROUP_PlayerController);
+DECLARE_CYCLE_STAT(TEXT("PC Build Input Stack"), STAT_PC_BuildInputStack, STATGROUP_PlayerController);
+DECLARE_CYCLE_STAT(TEXT("PC Process Input Stack"), STAT_PC_ProcessInputStack, STATGROUP_PlayerController);
 
 // CVars
 namespace PlayerControllerCVars
@@ -87,6 +98,59 @@ namespace PlayerControllerCVars
 		TEXT("Whether to reset server prediction data for the possessed Pawn when the pawn ack handshake completes.\n")
 		TEXT("0: Disable, 1: Enable"),
 		ECVF_Default);
+
+	static int32 ForceUsingCameraAsStreamingSource = 0;
+	FAutoConsoleVariableRef CVarForceUsingCameraAsStreamingSource(
+		TEXT("wp.Runtime.PlayerController.ForceUsingCameraAsStreamingSource"),
+		ForceUsingCameraAsStreamingSource,
+		TEXT("Whether to force the use of the camera as the streaming source for World Partition. By default the player pawn is used.\n")
+		TEXT("0: Use pawn as streaming source, 1: Use camera as streaming source"));
+}
+
+namespace NetworkPhysicsCvars
+{
+	/* DEPRECATED 5.4 */
+	int32 NumRedundantCmds = 3;
+	FAutoConsoleVariableRef CVarNumRedundantCmds(TEXT("np2.NumRedundantCmds"), NumRedundantCmds, TEXT("(DEPRECATED 5.4, only part of the legacy physics frame offset logic) Number of redundant user cmds to send per frame"));
+
+#if (UE_BUILD_SHIPPING || UE_BUILD_TEST)
+	int32 EnableDebugRPC = 0;
+#else
+	int32 EnableDebugRPC = 1;
+#endif
+	/* DEPRECATED 5.4 */
+	FAutoConsoleVariableRef CVarEnableDebugRPC(TEXT("np2.EnableDebugRPC"), EnableDebugRPC, TEXT("(DEPRECATED 5.4, only part of the legacy physics frame offset logic) Sends extra debug information to clients about server side input buffering"));
+	
+	/* DEPRECATED 5.4 */
+	int32 NetworkPhysicsPredictionFrameOffset = 4;
+	FAutoConsoleVariableRef CVarNetworkPhysicsPredictionFrameOffset(TEXT("np2.NetworkPhysicsPredictionFrameOffset"), NetworkPhysicsPredictionFrameOffset, TEXT("(DEPRECATED 5.4, use np2.PredictionAsyncFrameBuffer instead) Additional frame offset to be added to the local to server offset used by network prediction"));
+	
+	int32 PredictionAsyncFrameBuffer = 3;
+	FAutoConsoleVariableRef CVarPredictionAsyncFrameBuffer(TEXT("np2.PredictionAsyncFrameBuffer"), PredictionAsyncFrameBuffer, TEXT("Additional frame offset to be added to the local to server offset used by network prediction"));
+
+	int32 TickOffsetUpdateInterval = 10;
+	FAutoConsoleVariableRef CVarTickOffsetUpdateInterval(TEXT("np2.TickOffsetUpdateInterval"), TickOffsetUpdateInterval, TEXT("How many physics ticks to wait between each tick offset update. Lowest viable value = 1, which means update each tick. Deactivate physics offset updates by setting to 0 or negative value."));
+	
+	int32 TickOffsetCorrectionLimit = 10;
+	FAutoConsoleVariableRef CVarTickOffsetCorrectionLimit(TEXT("np2.TickOffsetCorrectionLimit"), TickOffsetCorrectionLimit, TEXT("If the client gets out of sync with physics ticks more than this limit, cut the losses and reset the offset."));
+	
+	float TimeDilationAmount = 0.01f;
+	FAutoConsoleVariableRef CVarTimeDilationAmount(TEXT("np2.TimeDilationAmount"), TimeDilationAmount, TEXT("Server-side CVar, Disable TimeDilation by setting to 0 | Default: 0.01 | Value is in percent where 0.01 = 1% dilation. Example: 1.0/0.01 = 100, meaning that over the time it usually takes to tick 100 physics steps we will tick 99 or 101 depending on if we dilate up or down."));
+
+	bool TimeDilationEscalation = true;
+	FAutoConsoleVariableRef CVarTimeDilationEscalation(TEXT("np2.TimeDilationEscalation"), TimeDilationEscalation, TEXT("Server-side CVar, Dilate the time more depending on how many ticks we need to adjust. When set to false we use the set TimeDilationAmount and wait the amount of time it takes to perform correct the offset. When set to true we multiply the TimeDilationAmount with the buffer offset count which will correct the offset in one TimeDilationAmount cycle."));
+
+	float TimeDilationEscalationDecay = 0.05f;
+	FAutoConsoleVariableRef CVarTimeDilationEscalationDecay(TEXT("np2.TimeDilationEscalationDecay"), TimeDilationEscalationDecay, TEXT("Value is a multiplier, Default: 0.05. For each escalated TimeDilation amount, also decay by this much. Disable by setting to 0."));
+
+	float TimeDilationEscalationDecayMax = 0.5f;
+	FAutoConsoleVariableRef CVarTimeDilationEscalationDecayMax(TEXT("np2.TimeDilationEscalationDecayMax"), TimeDilationEscalationDecayMax, TEXT("Value is a multiplier, Default: 0.5. The max decay value for escalated time dilation. Lower value means higher decay."));
+
+	float TimeDilationMax = 1.1f;
+	FAutoConsoleVariableRef CVarTimeDilationMax(TEXT("np2.TimeDilationMax"), TimeDilationMax, TEXT("Max value of the time dilation multiplier."));
+
+	float TimeDilationMin = 0.9f;
+	FAutoConsoleVariableRef CVarTimeDilationMin(TEXT("np2.TimeDilationMin"), TimeDilationMin, TEXT("Min value of the time dilation multiplier"));
 }
 
 const float RetryClientRestartThrottleTime = 0.5f;
@@ -96,12 +160,33 @@ const float RetryServerCheckSpectatorThrottleTime = 0.25f;
 // Note: This value should be sufficiently small such that it is considered to be in the past before RetryClientRestartThrottleTime and RetryServerAcknowledgeThrottleTime.
 const float ForceRetryClientRestartTime = -100.0f;
 
+//////////////////////////////////////////////////////////////////////////
+
+#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+/** Used to display the force feedback history of what was played most recently. */
+struct FForceFeedbackEffectHistoryEntry
+{
+	FActiveForceFeedbackEffect LastActiveForceFeedbackEffect;
+	float TimeShown;
+
+	FForceFeedbackEffectHistoryEntry(FActiveForceFeedbackEffect LastActiveFFE, float Time)
+	{
+		LastActiveForceFeedbackEffect = LastActiveFFE;
+		TimeShown = Time;
+	}
+};
+#endif
 
 //////////////////////////////////////////////////////////////////////////
 // APlayerController
 
 APlayerController::APlayerController(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	, InputBuffer_DEPRECATED(FInputCmdBuffer())
+	, ClientFrameInfo_DEPRECATED(FClientFrameInfo())
+	, ServerFrameInfo_DEPRECATED(FServerFrameInfo())
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 {
 	NetPriority = 3.0f;
 	CheatClass = UCheatManager::StaticClass();
@@ -128,6 +213,14 @@ APlayerController::APlayerController(const FObjectInitializer& ObjectInitializer
 	bForceFeedbackEnabled = true;
 	ForceFeedbackScale = 1.f;
 
+	// default to true; won't do anything if enable motion controls in input settings isn't also true
+	SetMotionControlsEnabled(true);
+
+	bEnableStreamingSource = true;
+	bStreamingSourceShouldActivate = true;
+	bStreamingSourceShouldBlockOnSlowStreaming = true;
+	StreamingSourcePriority = EStreamingSourcePriority::Default;
+
 	bAutoManageActiveCameraTarget = true;
 	bRenderPrimitiveComponents = true;
 	SmoothTargetViewRotationSpeed = 20.f;
@@ -136,6 +229,7 @@ APlayerController::APlayerController(const FObjectInitializer& ObjectInitializer
 	bIsPlayerController = true;
 	bIsLocalPlayerController = false;
 	bDisableHaptics = false;
+	bShouldFlushInputWhenViewportFocusChanges = true;
 
 	ClickEventKeys.Add(EKeys::LeftMouseButton);
 
@@ -144,6 +238,14 @@ APlayerController::APlayerController(const FObjectInitializer& ObjectInitializer
 		// We want to drive rotation with ControlRotation regardless of attachment state.
 		RootComponent->SetUsingAbsoluteRotation(true);
 	}
+
+	if (UPhysicsSettings::Get()->PhysicsPrediction.bEnablePhysicsPrediction)
+	{
+		bAsyncPhysicsTickEnabled = true;
+	}
+#if UE_ENABLE_DEBUG_DRAWING
+	CurrentInputModeDebugString = TEXT("Default");
+#endif	// UE_ENABLE_DEBUG_DRAWING
 }
 
 float APlayerController::GetNetPriority(const FVector& ViewPos, const FVector& ViewDir, AActor* Viewer, AActor* ViewTarget, UActorChannel* InChannel, float Time, bool bLowBandwidth)
@@ -182,7 +284,7 @@ bool APlayerController::DestroyNetworkActorHandled()
 	UNetConnection* C = Cast<UNetConnection>(Player);
 	if (C)
 	{
-		if (C->Channels[0] && C->State != USOCK_Closed)
+		if (C->Channels[0] && C->GetConnectionState() != USOCK_Closed)
 		{
 			C->bPendingDestroy = true;
 			C->Channels[0]->Close(EChannelCloseReason::Destroyed);
@@ -244,7 +346,7 @@ FName APlayerController::NetworkRemapPath(FName InPackageName, bool bReading)
 
 /// @cond DOXYGEN_WARNINGS
 
-void APlayerController::ClientUpdateLevelStreamingStatus_Implementation(FName PackageName, bool bNewShouldBeLoaded, bool bNewShouldBeVisible, bool bNewShouldBlockOnLoad, int32 LODIndex )
+void APlayerController::ClientUpdateLevelStreamingStatus_Implementation(FName PackageName, bool bNewShouldBeLoaded, bool bNewShouldBeVisible, bool bNewShouldBlockOnLoad, int32 LODIndex, FNetLevelVisibilityTransactionId TransactionId, bool bNewShouldBlockOnUnload)
 {
 	PackageName = NetworkRemapPath(PackageName, true);
 	
@@ -259,50 +361,38 @@ void APlayerController::ClientUpdateLevelStreamingStatus_Implementation(FName Pa
 		}
 	}
 
+	// Search for the streaming level object by name
+	ULevelStreaming* LevelStreamingObject = FLevelUtils::FindStreamingLevel(World, PackageName);
+
+	// Skip if streaming level object doesn't allow replicating the status
+	if (LevelStreamingObject && !LevelStreamingObject->CanReplicateStreamingStatus())
+	{
+		return;
+	}
+
 	// if we're about to commit a map change, we assume that the streaming update is based on the to be loaded map and so defer it until that is complete
 	if (GEngine->ShouldCommitPendingMapChange(World))
 	{
 		GEngine->AddNewPendingStreamingLevel(World, PackageName, bNewShouldBeLoaded, bNewShouldBeVisible, LODIndex);		
 	}
+	else if (LevelStreamingObject)
+	{
+		// If we're unloading any levels, we need to request a one frame delay of garbage collection to make sure it happens after the level is actually unloaded
+		if (LevelStreamingObject->ShouldBeLoaded() && !bNewShouldBeLoaded)
+		{
+			GEngine->DelayGarbageCollection();
+		}
+
+		LevelStreamingObject->SetShouldBeLoaded(bNewShouldBeLoaded);
+		LevelStreamingObject->SetShouldBeVisible(bNewShouldBeVisible);
+		LevelStreamingObject->bShouldBlockOnLoad = bNewShouldBlockOnLoad;
+		LevelStreamingObject->bShouldBlockOnUnload = bNewShouldBlockOnUnload;
+		LevelStreamingObject->SetLevelLODIndex(LODIndex);
+		LevelStreamingObject->UpdateNetVisibilityTransactionState(bNewShouldBeVisible, TransactionId);
+	}
 	else
 	{
-		// search for the level object by name
-		ULevelStreaming* LevelStreamingObject = nullptr;
-		if (World && PackageName != NAME_None)
-		{
-			for (ULevelStreaming* CurrentLevelStreamingObject : World->GetStreamingLevels())
-			{
-				if (CurrentLevelStreamingObject && CurrentLevelStreamingObject->GetWorldAssetPackageFName() == PackageName)
-				{
-					LevelStreamingObject = CurrentLevelStreamingObject;
-					if (LevelStreamingObject)
-					{
-						// If we're unloading any levels, we need to request a one frame delay of garbage collection to make sure it happens after the level is actually unloaded
-						if (LevelStreamingObject->ShouldBeLoaded() && !bNewShouldBeLoaded)
-						{
-							GEngine->DelayGarbageCollection();
-						}
-
-						LevelStreamingObject->SetShouldBeLoaded(bNewShouldBeLoaded);
-						LevelStreamingObject->SetShouldBeVisible(bNewShouldBeVisible);
-						LevelStreamingObject->bShouldBlockOnLoad = bNewShouldBlockOnLoad;
-						LevelStreamingObject->SetLevelLODIndex(LODIndex);
-					}
-					else
-					{
-						UE_LOG(LogStreaming, Log, TEXT("Unable to handle streaming object %s"),*LevelStreamingObject->GetName() );
-					}
-
-					// break out of object iterator if we found a match
-					break;
-				}
-			}
-		}
-
-		if (LevelStreamingObject == NULL)
-		{
-			UE_LOG(LogStreaming, Log, TEXT("Unable to find streaming object %s"), *PackageName.ToString() );
-		}
+		UE_LOG(LogStreaming, Log, TEXT("Unable to find streaming object %s"), *PackageName.ToString() );
 	}
 }
 
@@ -310,39 +400,63 @@ void APlayerController::ClientUpdateMultipleLevelsStreamingStatus_Implementation
 {
 	for( const FUpdateLevelStreamingLevelStatus& LevelStatus : LevelStatuses )
 	{
-		ClientUpdateLevelStreamingStatus_Implementation( LevelStatus.PackageName, LevelStatus.bNewShouldBeLoaded, LevelStatus.bNewShouldBeVisible, LevelStatus.bNewShouldBlockOnLoad, LevelStatus.LODIndex );
+		ClientUpdateLevelStreamingStatus_Implementation(LevelStatus.PackageName, LevelStatus.bNewShouldBeLoaded, LevelStatus.bNewShouldBeVisible, LevelStatus.bNewShouldBlockOnLoad, LevelStatus.LODIndex, FNetLevelVisibilityTransactionId(), LevelStatus.bNewShouldBlockOnUnload);
+	}
+}
+
+void APlayerController::ClientAckUpdateLevelVisibility_Implementation(FName PackageName, FNetLevelVisibilityTransactionId TransactionId, bool bClientAckCanMakeVisibleResponse)
+{
+	if (ensureAlwaysMsgf(TransactionId.IsClientTransaction(), TEXT("APlayerController::ClientAckUpdateLevelVisibility Expected TransactionId to be ClientTransaction")))
+	{
+		// find streaming levels and update request id
+		PackageName = NetworkRemapPath(PackageName, true);
+
+		if (ULevelStreaming* LevelStreamingObject = FLevelUtils::FindStreamingLevel(GetWorld(), PackageName))
+		{
+			FAckNetVisibilityTransaction::Call(LevelStreamingObject, TransactionId, bClientAckCanMakeVisibleResponse);
+		}
 	}
 }
 
 void APlayerController::ClientFlushLevelStreaming_Implementation()
 {
 	UWorld* World = GetWorld();
-	// if we're already doing a map change, requesting another blocking load is just wasting time	
-	if (GEngine->ShouldCommitPendingMapChange(World))
-	{
-		// request level streaming be flushed next frame
-		World->UpdateLevelStreaming();
-		World->bRequestedBlockOnAsyncLoading = true;
-		// request GC as soon as possible to remove any unloaded levels from memory
-		GEngine->ForceGarbageCollection();
-	}
+	// request level streaming be flushed next frame
+	World->UpdateLevelStreaming();
+	World->bRequestedBlockOnAsyncLoading = true;
+	// request GC as soon as possible to remove any unloaded levels from memory
+	GEngine->ForceGarbageCollection();
 }
 
 
 void APlayerController::ServerUpdateLevelVisibility_Implementation(const FUpdateLevelVisibilityLevelInfo& LevelVisibility)
 {
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_ServerUpdateLevelVisibility);
+
 	UNetConnection* Connection = Cast<UNetConnection>(Player);
 	if (Connection != NULL)
 	{
 		FUpdateLevelVisibilityLevelInfo LevelVisibilityCopy = LevelVisibility;
 		LevelVisibilityCopy.PackageName = NetworkRemapPath(LevelVisibilityCopy.PackageName, true);
+		// FileName and packageName might differ so we have to remap the filename as well.
+		LevelVisibilityCopy.FileName = NetworkRemapPath(LevelVisibilityCopy.FileName, true);
 
 		Connection->UpdateLevelVisibility(LevelVisibilityCopy);
+
+		// If this is a client instigated request respond with the request id so that the client knows that we have received the visibility update
+		if (LevelVisibilityCopy.VisibilityRequestId.IsClientTransaction())
+		{
+			// In case a making visible request was done but querying the server is not supported, reponse true to unblock the client
+			const bool bClientAckCanMakeVisibleResponse = !FLevelUtils::SupportsMakingVisibleTransactionRequests(GetWorld()) || (LevelVisibilityCopy.bTryMakeVisible && Connection->GetClientMakingVisibleLevelNames().Contains(LevelVisibilityCopy.PackageName));
+			ClientAckUpdateLevelVisibility(LevelVisibility.PackageName, LevelVisibilityCopy.VisibilityRequestId, bClientAckCanMakeVisibleResponse);
+		}
 	}
 }
 
 bool APlayerController::ServerUpdateLevelVisibility_Validate(const FUpdateLevelVisibilityLevelInfo& LevelVisibility)
 {
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_ServerUpdateLevelVisibility_Validate);
+
 	RPC_VALIDATE(LevelVisibility.PackageName.IsValid());
 
 	FText Reason;
@@ -381,7 +495,7 @@ void APlayerController::ClientAddTextureStreamingLoc_Implementation(FVector InLo
 {
 	if (!IStreamingManager::HasShutdown())
 	{
-		IStreamingManager::Get().AddViewSlaveLocation(InLoc, 1.0f, bOverrideLocation, Duration);
+		IStreamingManager::Get().AddViewLocation(InLoc, 1.0f, bOverrideLocation, Duration);
 	}
 }
 
@@ -427,19 +541,13 @@ void APlayerController::CleanUpAudioComponents()
 
 AActor* APlayerController::GetViewTarget() const
 {
-	return PlayerCameraManager ? PlayerCameraManager->GetViewTarget() : NULL;
+	AActor* CameraManagerViewTarget = PlayerCameraManager ? PlayerCameraManager->GetViewTarget() : NULL;
+
+	return CameraManagerViewTarget ? CameraManagerViewTarget : const_cast<APlayerController*>(this);
 }
 
 void APlayerController::SetViewTarget(class AActor* NewViewTarget, struct FViewTargetTransitionParams TransitionParams)
 {
-	// if we're being controlled by a director track, update it with the new viewtarget 
-	// so it returns to the proper viewtarget when it finishes.
-	UInterpTrackInstDirector* const Director = GetControllingDirector();
-	if (Director)
-	{
-		Director->OldViewTarget = NewViewTarget;
-	}
-
 	if (PlayerCameraManager)
 	{
 		PlayerCameraManager->SetViewTarget(NewViewTarget, TransitionParams);
@@ -533,24 +641,6 @@ ACameraActor* APlayerController::GetAutoActivateCameraForPlayer() const
 	return NULL;
 }
 
-
-
-void APlayerController::SetControllingDirector(UInterpTrackInstDirector* NewControllingDirector, bool bClientSimulatingViewTarget)
-{
-	ControllingDirTrackInst = NewControllingDirector;
-
-	if (PlayerCameraManager != NULL)
-	{
-		PlayerCameraManager->bClientSimulatingViewTarget = (NewControllingDirector != NULL) ? bClientSimulatingViewTarget : false;
-	}
-}
-
-
-UInterpTrackInstDirector* APlayerController::GetControllingDirector()
-{
-	return ControllingDirTrackInst;
-}
-
 /// @cond DOXYGEN_WARNINGS
 
 bool APlayerController::ServerNotifyLoadedWorld_Validate(FName WorldPackageName)
@@ -561,13 +651,15 @@ bool APlayerController::ServerNotifyLoadedWorld_Validate(FName WorldPackageName)
 
 void APlayerController::ServerNotifyLoadedWorld_Implementation(FName WorldPackageName)
 {
+	WorldPackageName = NetworkRemapPath(WorldPackageName, true);
+
 	UE_LOG(LogPlayerController, Verbose, TEXT("APlayerController::ServerNotifyLoadedWorld_Implementation: Client loaded %s"), *WorldPackageName.ToString());
 
 	UWorld* CurWorld = GetWorld();
 
 	// Only valid for calling, for PC's in the process of seamless traveling
 	// NOTE: SeamlessTravelCount tracks client seamless travel, through the serverside gameplay code; this should not be replaced.
-	if (CurWorld != NULL && CurWorld->IsServer() && SeamlessTravelCount > 0 && LastCompletedSeamlessTravelCount < SeamlessTravelCount)
+	if (CurWorld != NULL && !CurWorld->IsNetMode(NM_Client) && SeamlessTravelCount > 0 && LastCompletedSeamlessTravelCount < SeamlessTravelCount)
 	{
 		// Update our info on what world the client is in
 		UNetConnection* const Connection = Cast<UNetConnection>(Player);
@@ -601,7 +693,6 @@ bool APlayerController::HasClientLoadedCurrentWorld()
 	if (Connection != NULL)
 	{
 		// NOTE: To prevent exploits, child connections must not use the parent connections ClientWorldPackageName value at all.
-
 		return (Connection->GetClientWorldPackageName() == GetWorld()->GetOutermost()->GetFName());
 	}
 	else
@@ -617,31 +708,9 @@ void APlayerController::ForceSingleNetUpdateFor(AActor* Target)
 	{
 		UE_LOG(LogPlayerController, Warning, TEXT("PlayerController::ForceSingleNetUpdateFor(): No Target specified"));
 	}
-	else if (GetNetMode() == NM_Client)
-	{
-		UE_LOG(LogPlayerController, Warning, TEXT("PlayerController::ForceSingleNetUpdateFor(): Only valid on server"));
-	}
 	else
 	{
-		if (UNetConnection* Conn = Cast<UNetConnection>(Player))
-		{
-			if (Conn->GetUChildConnection() != NULL)
-			{
-				Conn = ((UChildConnection*)Conn)->Parent;
-				checkSlow(Conn != NULL);
-			}
-
-			if (UActorChannel* Channel = Conn->FindActorChannelRef(Target))
-			{
-				if (UNetDriver* NetDriver = Conn->GetDriver())
-				{
-					if (FNetworkObjectInfo* NetActor = NetDriver->FindOrAddNetworkObjectInfo(Target))
-					{
-						NetActor->bPendingNetUpdate = true; // will cause some other clients to do lesser checks too, but that's unavoidable with the current functionality
-					}
-				}
-			}
-		}
+		Target->ForceNetUpdate();
 	}
 }
 
@@ -653,9 +722,11 @@ void APlayerController::SmoothTargetViewRotation(APawn* TargetPawn, float DeltaS
 
 void APlayerController::InitInputSystem()
 {
-	if (PlayerInput == NULL)
+	if (PlayerInput == nullptr)
 	{
-		PlayerInput = NewObject<UPlayerInput>(this, UInputSettings::GetDefaultPlayerInputClass());
+		const UClass* OverrideClass = OverridePlayerInputClass.Get();
+		
+		PlayerInput = NewObject<UPlayerInput>(this, OverrideClass ? OverrideClass : UInputSettings::GetDefaultPlayerInputClass());
 	}
 
 	SetupInputComponent();
@@ -666,20 +737,6 @@ void APlayerController::InitInputSystem()
 	UWorld* World = GetWorld();
 	check(World);
 	World->PersistentLevel->PushPendingAutoReceiveInput(this);
-
-	// add the player to any matinees running so that it gets in on any cinematics already running, etc
-	// (already done on server in PostLogin())
-	if (GetLocalRole() < ROLE_Authority)
-	{
-		TArray<AMatineeActor*> AllMatineeActors;
-		World->GetMatineeActors(AllMatineeActors);
-
-		// tell them all to add this PC to any running Director tracks
-		for (int32 i = 0; i < AllMatineeActors.Num(); i++)
-		{
-			AllMatineeActors[i]->AddPlayerToDirectorTracks(this);
-		}
-	}
 
 	// setup optional touchscreen interface
 	CreateTouchInterface();
@@ -750,8 +807,14 @@ void APlayerController::ClientRestart_Implementation(APawn* NewPawn)
 	// but we may receive the function call before Pawn is replicated over, so it will resolve to NULL.
 	AcknowledgePossession(GetPawn());
 
+	AController* OldController = GetPawn()->Controller;
 	GetPawn()->Controller = this;
-	GetPawn()->PawnClientRestart();
+	if (OldController != this)
+	{
+		// In case this is received before APawn::OnRep_Controller is called
+		GetPawn()->NotifyControllerChanged();
+	}
+	GetPawn()->DispatchRestart(true);
 	
 	if (GetLocalRole() < ROLE_Authority)
 	{
@@ -808,7 +871,7 @@ void APlayerController::OnPossess(APawn* PawnToPossess)
 		// We're really just trying to avoid calling Restart() multiple times.
 		if (!IsLocalPlayerController())
 		{
-			GetPawn()->Restart();
+			GetPawn()->DispatchRestart(false);
 		}
 
 		ClientRestart(GetPawn());
@@ -844,6 +907,11 @@ void APlayerController::ReceivedPlayer()
 			BeginSpectatingState();
 		}
 	}
+
+	if (Player)
+	{
+		Player->ReceivedPlayerController(this);
+	}
 }
 
 FVector APlayerController::GetFocalLocation() const
@@ -862,7 +930,7 @@ void APlayerController::PostLoad()
 {
 	Super::PostLoad();
 
-	if (GetLinkerUE4Version() < VER_UE4_SPLIT_TOUCH_AND_CLICK_ENABLES)
+	if (GetLinkerUEVersion() < VER_UE4_SPLIT_TOUCH_AND_CLICK_ENABLES)
 	{
 		bEnableTouchEvents = bEnableClickEvents;
 	}
@@ -961,7 +1029,7 @@ void APlayerController::PostInitializeComponents()
 {
 	Super::PostInitializeComponents();
 
-	if ( !IsPendingKill() && (GetNetMode() != NM_Client) )
+	if ( IsValid(this) && (GetNetMode() != NM_Client) )
 	{
 		// create a new player replication info
 		InitPlayerState();
@@ -1038,6 +1106,8 @@ void APlayerController::ServerShortTimeout_Implementation()
 
 void APlayerController::AddCheats(bool bForce)
 {
+	// Cheat manager is completely disabled in shipping by default
+#if UE_WITH_CHEAT_MANAGER
 	UWorld* World = GetWorld();
 	check(World);
 
@@ -1053,17 +1123,18 @@ void APlayerController::AddCheats(bool bForce)
 		CheatManager = NewObject<UCheatManager>(this, CheatClass);
 		CheatManager->InitCheatManager();
 	}
+#endif
 }
 
 void APlayerController::EnableCheats()
 {
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+	// In non-shipping builds this can be called to enable cheats in multiplayer and override AllowCheats
+#if !UE_BUILD_SHIPPING
 	AddCheats(true);
 #else
 	AddCheats();
 #endif
 }
-
 
 void APlayerController::SpawnDefaultHUD()
 {
@@ -1143,7 +1214,7 @@ void APlayerController::SetMouseCursorWidget(EMouseCursor::Type Cursor, class UU
 	ULocalPlayer* LocalPlayer = Cast<ULocalPlayer>(Player);
 	if (LocalPlayer && LocalPlayer->ViewportClient)
 	{
-		LocalPlayer->ViewportClient->AddCursorWidget(Cursor, CursorWidget);
+		LocalPlayer->ViewportClient->SetSoftwareCursorWidget(Cursor, CursorWidget);
 	}
 }
 
@@ -1344,6 +1415,10 @@ void APlayerController::OnNetCleanup(UNetConnection* Connection)
 	//@note: if we ever implement support for splitscreen players leaving a match without the primary player leaving, we'll need to insert
 	// a call to ClearOnlineDelegates() here so that PlayerController.ClearOnlineDelegates can use the correct ControllerId (which lives
 	// in ULocalPlayer)
+	if (Player && Player->PlayerController == this)
+	{
+		Player->PlayerController = nullptr;
+	}
 	Player = NULL;
 	NetConnection = NULL;	
 	Destroy( true );
@@ -1629,10 +1704,33 @@ void APlayerController::ClientSetCameraFade_Implementation(bool bEnableFading, F
 
 void APlayerController::SendClientAdjustment()
 {
-	if (AcknowledgedPawn != GetPawn() && !GetSpectatorPawn())
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	if (ServerFrameInfo_DEPRECATED.LastProcessedInputFrame != INDEX_NONE && ServerFrameInfo_DEPRECATED.LastProcessedInputFrame != ServerFrameInfo_DEPRECATED.LastSentLocalFrame)
 	{
-		return;
+		ServerFrameInfo_DEPRECATED.LastSentLocalFrame = ServerFrameInfo_DEPRECATED.LastProcessedInputFrame;
+		ClientRecvServerAckFrame(ServerFrameInfo_DEPRECATED.LastProcessedInputFrame, ServerFrameInfo_DEPRECATED.LastLocalFrame, ServerFrameInfo_DEPRECATED.QuantizedTimeDilation);
+		
+		if (NetworkPhysicsCvars::EnableDebugRPC)
+		{
+			ClientRecvServerAckFrameDebug(InputBuffer_DEPRECATED.HeadFrame() - ServerFrameInfo_DEPRECATED.LastProcessedInputFrame, ServerFrameInfo_DEPRECATED.TargetNumBufferedCmds);
+		}
 	}
+
+	if (UPhysicsSettings::Get()->PhysicsPrediction.bEnablePhysicsPrediction)
+	{
+		if (ServerLatestTimestampToCorrect_DEPRECATED.ServerFrame != INDEX_NONE)
+		{
+			ClientCorrectionAsyncPhysicsTimestamp(ServerLatestTimestampToCorrect_DEPRECATED);
+			ServerLatestTimestampToCorrect_DEPRECATED.ServerFrame = INDEX_NONE;
+		}
+
+		if (AcknowledgedPawn != GetPawn() && !GetSpectatorPawn())
+		{
+			return;
+		}
+	}
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
 
 	// Server sends updates.
 	// Note: we do this for both the pawn and spectator in case an implementation has a networked spectator.
@@ -1645,6 +1743,70 @@ void APlayerController::SendClientAdjustment()
 			NetworkPredictionInterface->SendClientAdjustment();
 		}
 	}
+}
+
+void APlayerController::PushClientInput(int32 InRecvClientInputFrame, TArray<uint8>& Data)
+{
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	InputBuffer_DEPRECATED.Write(InRecvClientInputFrame) = MoveTemp(Data);
+	
+	// Do the RPC right here, including the redundant send. This should probably be time based and managed somewhere else like in Tick eventually
+	for (int32 Frame = FMath::Max(1, InRecvClientInputFrame - NetworkPhysicsCvars::NumRedundantCmds + 1); Frame <= InRecvClientInputFrame; ++Frame)
+	{
+		ServerRecvClientInputFrame(Frame, InputBuffer_DEPRECATED.Get(Frame));
+	}
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+}
+
+void APlayerController::ServerRecvClientInputFrame_Implementation(int32 InRecvClientInputFrame, const TArray<uint8>& Data)
+{
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	if (InRecvClientInputFrame < 0)
+	{
+		return;
+	}
+	
+	int32 ClampDroppedFrames = 30; // Temporary clamp to guard the for-loop from locking the thread on large discrepancies, function is deprecated and will get removed in UE 5.6
+	for (int32 DroppedFrame = InputBuffer_DEPRECATED.HeadFrame() + 1; DroppedFrame < InRecvClientInputFrame && DroppedFrame > 0; ++DroppedFrame)
+	{
+		UE_LOG(LogPlayerController, Warning, TEXT("ClientInput Gap in frames (Dropped). %s [%s]. DroppedFrame: %d. RecvFrame: %d. LastProcessInputFrame: %d"), *GetName(), PlayerState ? *PlayerState->GetPlayerName() : TEXT("???"), DroppedFrame, InRecvClientInputFrame, ServerFrameInfo_DEPRECATED.LastProcessedInputFrame);
+		//ServerFrameInfo.LastProcessedInputFrame++; // Ehh lets try this for now
+		InputBuffer_DEPRECATED.Write(DroppedFrame) = InputBuffer_DEPRECATED.Get(DroppedFrame - 1);
+	
+		if (--ClampDroppedFrames <= 0)
+		{
+			UE_LOG(LogPlayerController, Warning, TEXT("ClientInput Gap in frames (Dropped) reached max dropped frames, leaving a gap in the InputBuffer."));
+			break;
+		}
+	}
+	
+	InputBuffer_DEPRECATED.Write(InRecvClientInputFrame) = MoveTemp(const_cast<TArray<uint8>&>(Data));
+	
+	if (ServerFrameInfo_DEPRECATED.LastProcessedInputFrame < InputBuffer_DEPRECATED.TailFrame())
+	{
+		// At this point, things are pretty bad and we are going to drop commands. 
+		// We still need guards client side to not send too many commands
+		UE_LOG(LogPlayerController, Warning, TEXT("ClientInput buffer overflow. %s [%s]. RecvFrame: %d. LastProcessInputFrame: %d."), *GetName(), PlayerState ? *PlayerState->GetPlayerName() : TEXT("???"), InRecvClientInputFrame, ServerFrameInfo_DEPRECATED.LastProcessedInputFrame);
+		ServerFrameInfo_DEPRECATED.LastProcessedInputFrame = (InputBuffer_DEPRECATED.TailFrame() + InputBuffer_DEPRECATED.HeadFrame()) / 2;
+	}
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+}
+
+void APlayerController::ClientRecvServerAckFrame_Implementation(int32 LastProcessedInputFrame, int32 RecvServerFrameNumber, int8 TimeDilation)
+{
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	ClientFrameInfo_DEPRECATED.LastRecvServerFrame = RecvServerFrameNumber;
+	ClientFrameInfo_DEPRECATED.LastProcessedInputFrame = LastProcessedInputFrame;
+	ClientFrameInfo_DEPRECATED.QuantizedTimeDilation = TimeDilation;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+}
+
+void APlayerController::ClientRecvServerAckFrameDebug_Implementation(uint8 NumBuffered, float TargetNumBufferedCmds)
+{
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	ClientFrameInfo_DEPRECATED.LastRecvInputFrame = ClientFrameInfo_DEPRECATED.LastProcessedInputFrame + NumBuffered;
+	ClientFrameInfo_DEPRECATED.TargetNumBufferedCmds = TargetNumBufferedCmds;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 /// @cond DOXYGEN_WARNINGS
@@ -1722,7 +1884,7 @@ void APlayerController::ServerUpdateCamera_Implementation(FVector_NetQuantize Ca
 #endif
 	{
 		//@TODO: CAMERA: Fat pipe
-		FMinimalViewInfo NewInfo = PlayerCameraManager->GetCameraCachePOV();
+		FMinimalViewInfo NewInfo = PlayerCameraManager->GetCameraCacheView();
 		NewInfo.Location = NewPOV.Location;
 		NewInfo.Rotation = NewPOV.Rotation;
 		PlayerCameraManager->FillCameraCache(NewInfo);
@@ -1785,11 +1947,6 @@ void APlayerController::ClientReturnToMainMenuWithTextReason_Implementation(cons
 	}
 }
 
-void APlayerController::ClientReturnToMainMenu_Implementation(const FString& ReturnReason)
-{
-	ClientReturnToMainMenuWithTextReason_Implementation(FText::FromString(ReturnReason));
-}
-
 bool APlayerController::SetPause( bool bPause, FCanUnpause CanUnpauseDelegate)
 {
 	bool bResult = false;
@@ -1804,9 +1961,10 @@ bool APlayerController::SetPause( bool bPause, FCanUnpause CanUnpauseDelegate)
 				// Pause gamepad rumbling too if needed
 				bResult = GameMode->SetPause(this, CanUnpauseDelegate);
 
-				// Force an update, otherwise since the game time is not updating, the net driver
-				// might not see that it is time for the world settings actor to replicate
-				ForceSingleNetUpdateFor(GetWorldSettings());
+				if (AWorldSettings* WorldSettings = GetWorldSettings())
+				{
+					WorldSettings->ForceNetUpdate();
+				}
 			}
 			else if (!bPause && bCurrentPauseState)
 			{
@@ -1983,12 +2141,12 @@ bool APlayerController::GetHitResultUnderFinger(ETouchIndex::Type FingerIndex, E
 	bool bHit = false;
 	if (PlayerInput)
 	{
-		FVector2D TouchPosition;
+		FVector2f TouchPosition;
 		bool bIsPressed = false;
 		GetInputTouchState(FingerIndex, TouchPosition.X, TouchPosition.Y, bIsPressed);
 		if (bIsPressed)
 		{
-			bHit = GetHitResultAtScreenPosition(TouchPosition, TraceChannel, bTraceComplex, HitResult);
+			bHit = GetHitResultAtScreenPosition(FVector2D(TouchPosition), TraceChannel, bTraceComplex, HitResult);
 		}
 	}
 
@@ -2005,12 +2163,12 @@ bool APlayerController::GetHitResultUnderFingerByChannel(ETouchIndex::Type Finge
 	bool bHit = false;
 	if (PlayerInput)
 	{
-		FVector2D TouchPosition;
+		FVector2f TouchPosition;
 		bool bIsPressed = false;
 		GetInputTouchState(FingerIndex, TouchPosition.X, TouchPosition.Y, bIsPressed);
 		if (bIsPressed)
 		{
-			bHit = GetHitResultAtScreenPosition(TouchPosition, TraceChannel, bTraceComplex, HitResult);
+			bHit = GetHitResultAtScreenPosition(FVector2D(TouchPosition), TraceChannel, bTraceComplex, HitResult);
 		}
 	}
 
@@ -2027,12 +2185,12 @@ bool APlayerController::GetHitResultUnderFingerForObjects(ETouchIndex::Type Fing
 	bool bHit = false;
 	if (PlayerInput)
 	{
-		FVector2D TouchPosition;
+		FVector2f TouchPosition;
 		bool bIsPressed = false;
 		GetInputTouchState(FingerIndex, TouchPosition.X, TouchPosition.Y, bIsPressed);
 		if (bIsPressed)
 		{
-			bHit = GetHitResultAtScreenPosition(TouchPosition, ObjectTypes, bTraceComplex, HitResult);
+			bHit = GetHitResultAtScreenPosition(FVector2D(TouchPosition), ObjectTypes, bTraceComplex, HitResult);
 		}
 	}
 
@@ -2078,7 +2236,7 @@ bool APlayerController::ProjectWorldLocationToScreenWithDistance(FVector WorldLo
 	{
 		// get the projection data
 		FSceneViewProjectionData ProjectionData;
-		if (LP->GetProjectionData(LP->ViewportClient->Viewport, eSSP_FULL, /*out*/ ProjectionData))
+		if (LP->GetProjectionData(LP->ViewportClient->Viewport, /*out*/ ProjectionData))
 		{
 			FVector2D ScreenPosition2D;
 			FMatrix const ViewProjectionMatrix = ProjectionData.ComputeViewProjectionMatrix();
@@ -2232,87 +2390,122 @@ void APlayerController::FlushPressedKeys()
 	}
 }
 
+TSubclassOf<UPlayerInput> APlayerController::GetOverridePlayerInputClass() const
+{
+	return OverridePlayerInputClass;
+}
+
 bool APlayerController::InputKey(FKey Key, EInputEvent EventType, float AmountDepressed, bool bGamepad)
 {
+	FInputKeyParams Params;
+	Params.Key = Key;
+	Params.Event = EventType;
+	Params.Delta.X = AmountDepressed;
+	Params.bIsGamepadOverride = bGamepad;
 	
-	if (GEngine->XRSystem.IsValid())
+	return InputKey(Params);
+}
+
+bool APlayerController::InputKey(const FInputKeyParams& Params)
+{
+	bool bResult = false;
+
+	// Only process the given input if it came from an input device that is owned by our owning local player
+	if (GetDefault<UInputSettings>()->bFilterInputByPlatformUser &&
+		IPlatformInputDeviceMapper::Get().GetUserForInputDevice(Params.InputDevice) != GetPlatformUserId())
 	{
-		auto XRInput = GEngine->XRSystem->GetXRInput();
-		if (XRInput && XRInput->HandleInputKey(PlayerInput, Key, EventType, AmountDepressed, bGamepad))
+		return false;
+	}
+	
+	// Any analog values can simply be passed to the UPlayerInput
+	if(Params.Key.IsAnalog())
+	{
+		if(PlayerInput)
 		{
-			return true;
+			bResult = PlayerInput->InputKey(Params);
 		}
 	}
-
-	bool bResult = false;
-	if (PlayerInput)
+	// But we need special case XR handling for non-analog values...
+	else
 	{
-		bResult = PlayerInput->InputKey(Key, EventType, AmountDepressed, bGamepad);
-		if (bEnableClickEvents && (ClickEventKeys.Contains(Key) || ClickEventKeys.Contains(EKeys::AnyKey)))
+		if (GEngine->XRSystem.IsValid())
 		{
-			FVector2D MousePosition;
-			UGameViewportClient* ViewportClient = CastChecked<ULocalPlayer>(Player)->ViewportClient;
-			if (ViewportClient && ViewportClient->GetMousePosition(MousePosition))
+			auto XRInput = GEngine->XRSystem->GetXRInput();
+			if (XRInput && XRInput->HandleInputKey(PlayerInput, Params.Key, Params.Event, Params.Delta.X, Params.IsGamepad()))
 			{
-				UPrimitiveComponent* ClickedPrimitive = NULL;
-				if (bEnableMouseOverEvents)
+				return true;
+			}
+		}
+
+		if (PlayerInput)
+		{
+			bResult = PlayerInput->InputKey(Params);
+			if (bEnableClickEvents && (ClickEventKeys.Contains(Params.Key) || ClickEventKeys.Contains(EKeys::AnyKey)))
+			{
+				FVector2D MousePosition;
+				UGameViewportClient* ViewportClient = CastChecked<ULocalPlayer>(Player)->ViewportClient;
+				if (ViewportClient && ViewportClient->GetMousePosition(MousePosition))
 				{
-					ClickedPrimitive = CurrentClickablePrimitive.Get();
-				}
-				else
-				{
-					FHitResult HitResult;
-					const bool bHit = GetHitResultAtScreenPosition(MousePosition, CurrentClickTraceChannel, true, HitResult);
-					if (bHit)
+					UPrimitiveComponent* ClickedPrimitive = nullptr;
+					if (bEnableMouseOverEvents)
 					{
-						ClickedPrimitive = HitResult.Component.Get();
+						ClickedPrimitive = CurrentClickablePrimitive.Get();
 					}
-				}
-				if( GetHUD() )
-				{
-					if (GetHUD()->UpdateAndDispatchHitBoxClickEvents(MousePosition, EventType))
+					else
 					{
-						ClickedPrimitive = NULL;
+						FHitResult HitResult;
+						const bool bHit = GetHitResultAtScreenPosition(MousePosition, CurrentClickTraceChannel, true, HitResult);
+						if (bHit)
+						{
+							ClickedPrimitive = HitResult.Component.Get();
+						}
 					}
-				}
-
-				if (ClickedPrimitive)
-				{
-					switch(EventType)
+					if(GetHUD())
 					{
-					case IE_Pressed:
-					case IE_DoubleClick:
-						ClickedPrimitive->DispatchOnClicked(Key);
-						break;
-
-					case IE_Released:
-						ClickedPrimitive->DispatchOnReleased(Key);
-						break;
-
-					case IE_Axis:
-					case IE_Repeat:
-						break;
+						if (GetHUD()->UpdateAndDispatchHitBoxClickEvents(MousePosition, Params.Event))
+						{
+							ClickedPrimitive = nullptr;
+						}
 					}
-				}
 
-				bResult = true;
+					if (ClickedPrimitive)
+					{
+						switch(Params.Event)
+						{
+						case IE_Pressed:
+						case IE_DoubleClick:
+							ClickedPrimitive->DispatchOnClicked(Params.Key);
+							break;
+
+						case IE_Released:
+							ClickedPrimitive->DispatchOnReleased(Params.Key);
+							break;
+
+						case IE_Axis:
+						case IE_Repeat:
+							break;
+						}
+					}
+
+					bResult = true;
+				}
 			}
 		}
 	}
-
+	
 	return bResult;
 }
 
 bool APlayerController::InputAxis(FKey Key, float Delta, float DeltaTime, int32 NumSamples, bool bGamepad)
 {
-	bool bResult = false;
-	
-	if (PlayerInput)
-	{
-		bResult = PlayerInput->InputAxis(Key, Delta, DeltaTime, NumSamples, bGamepad);
-	}
+	FInputKeyParams Params;
+	Params.Key = Key;
+	Params.Delta = FVector(static_cast<double>(Delta), 0.0, 0.0);
+	Params.NumSamples = NumSamples;
+	Params.DeltaTime = DeltaTime;
+	Params.bIsGamepadOverride = bGamepad;
 
-	return bResult;
+	return InputKey(Params);
 }
 
 bool APlayerController::InputTouch(uint32 Handle, ETouchType::Type Type, const FVector2D& TouchLocation, float Force, FDateTime DeviceTimestamp, uint32 TouchpadIndex)
@@ -2405,12 +2598,21 @@ bool APlayerController::InputMotion(const FVector& Tilt, const FVector& Rotation
 {
 	bool bResult = false;
 
-	if (PlayerInput)
+	if (PlayerInput && bEnableMotionControls)
 	{
 		bResult = PlayerInput->InputMotion(Tilt, RotationRate, Gravity, Acceleration);
 	}
 
 	return bResult;
+}
+
+void APlayerController::SetMotionControlsEnabled(bool bEnabled)
+{
+	bEnableMotionControls = bEnabled;
+	if (bEnableMotionControls && !GetDefault<UInputSettings>()->bEnableMotionControls)
+	{
+		UE_LOG(LogPlayerController, Warning, TEXT("Player bEnableMotionControls has been set to true, but motion controls are disabled in the input settings! See UInputSettings::bEnableMotionControls"));
+	}
 }
 
 bool APlayerController::ShouldShowMouseCursor() const
@@ -2452,8 +2654,8 @@ void APlayerController::SetupInputComponent()
 
 	if (UInputDelegateBinding::SupportsInputDelegate(GetClass()))
 	{
-		InputComponent->bBlockInput = bBlockInput;
-		UInputDelegateBinding::BindInputDelegates(GetClass(), InputComponent);
+		InputComponent->bBlockInput = bBlockInput;		
+		UInputDelegateBinding::BindInputDelegatesWithSubojects(this, InputComponent);
 	}
 }
 
@@ -2846,6 +3048,81 @@ void APlayerController::ClientSetSpectatorWaiting_Implementation(bool bWaiting)
 	}
 }
 
+float APlayerController::GetDeprecatedInputYawScale() const
+{
+	if (GetDefault<UInputSettings>()->bEnableLegacyInputScales)
+	{
+		return InputYawScale_DEPRECATED;
+	}
+	else
+	{
+		UE_LOG(LogPlayerController, Warning, TEXT("Attempting to access legacy input scales without the setting enabled! See UInputSettings::bEnableLegacyInputScales."));
+		return 1.0f;
+	}
+}
+
+float APlayerController::GetDeprecatedInputPitchScale() const
+{
+	if (GetDefault<UInputSettings>()->bEnableLegacyInputScales)
+	{
+		return InputPitchScale_DEPRECATED;
+	}
+	else
+	{
+		UE_LOG(LogPlayerController, Warning, TEXT("Attempting to access legacy input scales without the setting enabled! See UInputSettings::bEnableLegacyInputScales."));
+		return 1.0f;
+	}
+}
+
+float APlayerController::GetDeprecatedInputRollScale() const
+{
+	if (GetDefault<UInputSettings>()->bEnableLegacyInputScales)
+	{
+		return InputRollScale_DEPRECATED;
+	}
+	else
+	{
+		UE_LOG(LogPlayerController, Warning, TEXT("Attempting to access legacy input scales without the setting enabled! See UInputSettings::bEnableLegacyInputScales."));
+		return 1.0f;
+	}
+}
+
+void APlayerController::SetDeprecatedInputYawScale(float NewValue)
+{
+	if (GetDefault<UInputSettings>()->bEnableLegacyInputScales)
+	{
+		InputYawScale_DEPRECATED = NewValue;
+	}
+	else
+	{
+		UE_LOG(LogPlayerController, Warning, TEXT("Attempting to access legacy input scales without the setting enabled! See UInputSettings::bEnableLegacyInputScales."));
+	}
+}
+
+void APlayerController::SetDeprecatedInputPitchScale(float NewValue)
+{
+	if (GetDefault<UInputSettings>()->bEnableLegacyInputScales)
+	{
+		InputPitchScale_DEPRECATED = NewValue;
+	}
+	else
+	{
+		UE_LOG(LogPlayerController, Warning, TEXT("Attempting to access legacy input scales without the setting enabled! See UInputSettings::bEnableLegacyInputScales."));
+	}
+}
+
+void APlayerController::SetDeprecatedInputRollScale(float NewValue)
+{
+	if (GetDefault<UInputSettings>()->bEnableLegacyInputScales)
+	{
+		InputRollScale_DEPRECATED = NewValue;
+	}
+	else
+	{
+		UE_LOG(LogPlayerController, Warning, TEXT("Attempting to access legacy input scales without the setting enabled! See UInputSettings::bEnableLegacyInputScales."));
+	}
+}
+
 bool APlayerController::ServerViewNextPlayer_Validate()
 {
 	return true;
@@ -3000,6 +3277,15 @@ void APlayerController::ServerRestartPlayer_Implementation()
 	if ( IsInState(NAME_Inactive) || (IsInState(NAME_Spectating) && bPlayerIsWaiting) )
 	{
 		AGameModeBase* const GameMode = GetWorld()->GetAuthGameMode();
+
+		// This can happen if you do something like delete a bunch of stuff at runtime in PIE or something like that.
+		// We need to check here to prevent a crash
+		if (!IsValid(GameMode))
+		{
+			UE_LOG(LogPlayerController, Warning, TEXT("[APlayerController::ServerRestartPlayer_Implementation] Player Controller '%s' requested restart but the game mode is null! Nothing will happen."), *GetNameSafe(this));
+			return;
+		}
+		
 		if ( !GameMode->PlayerCanRestart(this) )
 		{
 			return;
@@ -3107,7 +3393,7 @@ void APlayerController::DisplayDebug(class UCanvas* Canvas, const FDebugDisplayI
 		{
 			if (CurrentTime > ForceFeedbackEffectHistoryEntries[i].TimeShown + 5.0f)
 			{
-				ForceFeedbackEffectHistoryEntries.RemoveAtSwap(i, 1, /*bAllowShrinking=*/ false);
+				ForceFeedbackEffectHistoryEntries.RemoveAtSwap(i, 1, EAllowShrinking::No);
 			}
 			else
 			{
@@ -3144,7 +3430,7 @@ void APlayerController::DisplayDebug(class UCanvas* Canvas, const FDebugDisplayI
 		}
 		if (FForceFeedbackManager* FFM = FForceFeedbackManager::Get(GetWorld()))
 		{
-			FFM->DrawDebug(GetFocalLocation(), DisplayDebugManager);
+			FFM->DrawDebug(GetFocalLocation(), DisplayDebugManager, GetPlatformUserId());
 		}
 		DisplayDebugManager.DrawString(TEXT("-----------------------------------------------------"));
 #endif
@@ -3208,9 +3494,28 @@ void APlayerController::ClientForceGarbageCollection_Implementation()
 
 /// @endcond
 
-void APlayerController::LevelStreamingStatusChanged(ULevelStreaming* LevelObject, bool bNewShouldBeLoaded, bool bNewShouldBeVisible, bool bNewShouldBlockOnLoad, int32 LODIndex )
+void APlayerController::LevelStreamingStatusChanged(ULevelStreaming* LevelObject, bool bNewShouldBeLoaded, bool bNewShouldBeVisible, bool bNewShouldBlockOnLoad, int32 LODIndex)
+{ 
+	const bool bNewShouldBlockOnUnload = false;
+	LevelStreamingStatusChanged(LevelObject, bNewShouldBeLoaded, bNewShouldBeVisible, bNewShouldBlockOnLoad, bNewShouldBlockOnUnload, LODIndex);
+}
+
+void APlayerController::LevelStreamingStatusChanged(ULevelStreaming* LevelObject, bool bNewShouldBeLoaded, bool bNewShouldBeVisible, bool bNewShouldBlockOnLoad, bool bNewShouldBlockOnUnload, int32 LODIndex)
 {
-	ClientUpdateLevelStreamingStatus(NetworkRemapPath(LevelObject->GetWorldAssetPackageFName(), false), bNewShouldBeLoaded, bNewShouldBeVisible, bNewShouldBlockOnLoad, LODIndex);
+	FNetLevelVisibilityTransactionId TransactionId;
+	if (GetNetMode() == NM_Client)
+	{
+		TransactionId.SetIsClientInstigator(true);
+	}
+	else if (NetConnection)
+	{
+		// For server instigated visibility status changes we assign a transaction id that is used to ensure that we do not enable replication until visibility is confirmed by the client
+		const FName PackageName = NetworkRemapPath(LevelObject->GetWorldAssetPackageFName(), true);
+
+		TransactionId = NetConnection->UpdateLevelStreamStatusChangedTransactionId(LevelObject, PackageName, bNewShouldBeVisible);
+	}
+
+	ClientUpdateLevelStreamingStatus(NetworkRemapPath(LevelObject->GetWorldAssetPackageFName(), false), bNewShouldBeLoaded, bNewShouldBeVisible, bNewShouldBlockOnLoad, LODIndex, TransactionId, bNewShouldBlockOnUnload);
 }
 
 /// @cond DOXYGEN_WARNINGS
@@ -3323,6 +3628,10 @@ void APlayerController::SeamlessTravelFrom(APlayerController* OldPC)
 		OldPC->PlayerState->Destroy();
 		OldPC->PlayerState = NULL;
 	}
+
+	// Copy seamless travel state
+	SeamlessTravelCount = OldPC->SeamlessTravelCount;
+	LastCompletedSeamlessTravelCount = OldPC->LastCompletedSeamlessTravelCount;
 }
 
 void APlayerController::PostSeamlessTravel()
@@ -3337,6 +3646,80 @@ void APlayerController::PostSeamlessTravel()
 		SpawnPlayerCameraManager();
 	}
 
+}
+
+void APlayerController::OnAddedToPlayerControllerList()
+{
+	UWorld* World = GetWorld();
+	// Possible we are moved into a world with no WorldPartitionSubsystem by the seamless travel (FSeamlessTravelHandler::StartTravel with no TransitionMap)
+	if (UWorldPartitionSubsystem* WorldPartitionSubsystem = World->GetSubsystem<UWorldPartitionSubsystem>())
+	{
+		WorldPartitionSubsystem->RegisterStreamingSourceProvider(this);
+	}
+}
+
+void APlayerController::OnRemovedFromPlayerControllerList()
+{
+	if (UWorld* World = GetWorld())
+	{
+		if (UWorldPartitionSubsystem* WorldPartitionSubsystem = World->GetSubsystem<UWorldPartitionSubsystem>())
+		{
+			verify(WorldPartitionSubsystem->UnregisterStreamingSourceProvider(this));
+		}
+	}
+}
+
+void APlayerController::GetStreamingSourceLocationAndRotation(FVector& OutLocation, FRotator& OutRotation) const
+{
+	if (!PlayerControllerCVars::ForceUsingCameraAsStreamingSource)
+	{
+		if (const AActor* ViewTarget = GetViewTarget())
+		{
+			ViewTarget->GetActorEyesViewPoint(OutLocation, OutRotation);
+			return;
+		}
+	}
+
+	GetPlayerViewPoint(OutLocation, OutRotation);
+}
+
+void APlayerController::GetStreamingSourceShapes(TArray<FStreamingSourceShape>& OutShapes) const
+{
+	if (StreamingSourceShapes.Num())
+	{
+		OutShapes.Append(StreamingSourceShapes);
+	}
+}
+
+bool APlayerController::GetStreamingSource(FWorldPartitionStreamingSource& OutStreamingSource) const
+{
+	checkNoEntry();
+	return false;
+}
+
+bool APlayerController::GetStreamingSources(TArray<FWorldPartitionStreamingSource>& OutStreamingSources) const
+{
+	const ENetMode NetMode = GetNetMode();
+	const bool bIsServer = (NetMode == NM_DedicatedServer || NetMode == NM_ListenServer);
+	if (IsStreamingSourceEnabled() && (IsLocalController() || bIsServer))
+	{
+		return GetStreamingSourcesInternal(OutStreamingSources);
+	}
+	return false;
+}
+
+bool APlayerController::GetStreamingSourcesInternal(TArray<FWorldPartitionStreamingSource>& OutStreamingSources) const
+{
+	FWorldPartitionStreamingSource& StreamingSource = OutStreamingSources.AddDefaulted_GetRef();
+	GetStreamingSourceLocationAndRotation(StreamingSource.Location, StreamingSource.Rotation);
+	StreamingSource.Name = GetFName();
+	StreamingSource.TargetState = StreamingSourceShouldActivate() ? EStreamingSourceTargetState::Activated : EStreamingSourceTargetState::Loaded;
+	StreamingSource.bBlockOnSlowLoading = StreamingSourceShouldBlockOnSlowStreaming();
+	StreamingSource.DebugColor = StreamingSourceDebugColor;
+	StreamingSource.Priority = GetStreamingSourcePriority();
+	StreamingSource.bRemote = !IsLocalController();
+	GetStreamingSourceShapes(StreamingSource.Shapes);
+	return true;
 }
 
 /// @cond DOXYGEN_WARNINGS
@@ -3400,6 +3783,11 @@ void APlayerController::GameplayUnmutePlayer(const FUniqueNetIdRepl& PlayerNetId
 	}
 }
 
+void APlayerController::GameplayUnmuteAllPlayers()
+{
+	MuteList.GameplayUnmuteAllPlayers(this);
+}
+
 /// @cond DOXYGEN_WARNINGS
 
 void APlayerController::ServerMutePlayer_Implementation(FUniqueNetIdRepl PlayerId)
@@ -3409,12 +3797,7 @@ void APlayerController::ServerMutePlayer_Implementation(FUniqueNetIdRepl PlayerI
 
 bool APlayerController::ServerMutePlayer_Validate(FUniqueNetIdRepl PlayerId)
 {
-	if (!PlayerId.IsValid())
-	{
-		return false;
-	}
-
-	return true;
+	return PlayerId.IsValid();
 }
 
 void APlayerController::ServerUnmutePlayer_Implementation(FUniqueNetIdRepl PlayerId)
@@ -3424,44 +3807,91 @@ void APlayerController::ServerUnmutePlayer_Implementation(FUniqueNetIdRepl Playe
 
 bool APlayerController::ServerUnmutePlayer_Validate(FUniqueNetIdRepl PlayerId)
 {
-	if (!PlayerId.IsValid())
-	{
-		return false;
-	}
-
-	return true;
+	return PlayerId.IsValid();
 }
 
 void APlayerController::ClientMutePlayer_Implementation(FUniqueNetIdRepl PlayerId)
 {
-	MuteList.ClientMutePlayer(this, PlayerId);
+	// Use the local player to determine the controller id
+	ULocalPlayer* LP = Cast<ULocalPlayer>(Player);
+	UWorld* World = GetWorld();
+
+	// @todo: As of now we don't have a proper way to inform the client of the specific voice block reason
+	// without changing the function signatures, therefore all server reasons are funneled into the client
+	// as "muted" for the time being.
+	MuteList.AddVoiceBlockReason(PlayerId.GetUniqueNetId(), EVoiceBlockReasons::Muted);
+
+	if (LP != NULL && World)
+	{
+		// Have the voice subsystem mute this player
+		UOnlineEngineInterface::Get()->MuteRemoteTalker(World, LP->GetControllerId(), PlayerId, false);
+	}
 }
 
 void APlayerController::ClientUnmutePlayer_Implementation(FUniqueNetIdRepl PlayerId)
 {
-	MuteList.ClientUnmutePlayer(this, PlayerId);
+	// Use the local player to determine the controller id
+	ULocalPlayer* LP = Cast<ULocalPlayer>(Player);
+	UWorld* World = GetWorld();
+
+	MuteList.RemoveVoiceBlockReason(PlayerId.GetUniqueNetId(), EVoiceBlockReasons::Muted);
+
+	if (LP != NULL && World)
+	{
+		// Have the voice subsystem unmute this player
+		UOnlineEngineInterface::Get()->UnmuteRemoteTalker(World, LP->GetControllerId(), PlayerId, false);
+	}
+}
+
+void APlayerController::ClientUnmutePlayers_Implementation(const TArray<FUniqueNetIdRepl>& PlayerIds)
+{
+	ULocalPlayer* LP = Cast<ULocalPlayer>(Player);
+	UWorld* World = GetWorld();
+
+	// Use the local player to determine the controller id
+	if (LP != NULL && World)
+	{
+		for (const FUniqueNetIdRepl& UnmuteId : PlayerIds)
+		{
+			if (UnmuteId.IsValid())
+			{
+				// Have the voice subsystem mute this player
+				UOnlineEngineInterface::Get()->UnmuteRemoteTalker(World, LP->GetControllerId(), UnmuteId, false);
+			}
+		}
+	}
+}
+
+void APlayerController::ServerBlockPlayer_Implementation(FUniqueNetIdRepl PlayerId)
+{
+	MuteList.ServerBlockPlayer(this, PlayerId);
+}
+
+bool APlayerController::ServerBlockPlayer_Validate(FUniqueNetIdRepl PlayerId)
+{
+	return PlayerId.IsValid() && PlayerState->GetUniqueId().IsValid();
+}
+
+void APlayerController::ServerUnblockPlayer_Implementation(FUniqueNetIdRepl PlayerId)
+{
+	MuteList.ServerUnblockPlayer(this, PlayerId);
+}
+
+bool APlayerController::ServerUnblockPlayer_Validate(FUniqueNetIdRepl PlayerId)
+{
+	return PlayerId.IsValid() && PlayerState->GetUniqueId().IsValid();
 }
 
 /// @endcond
 
 APlayerController* APlayerController::GetPlayerControllerForMuting(const FUniqueNetIdRepl& PlayerNetId)
 {
-	return GetPlayerControllerFromNetId(GetWorld(), *PlayerNetId.GetUniqueNetId());
+	return GetPlayerControllerFromNetId(GetWorld(), PlayerNetId);
 }
 
 bool APlayerController::IsPlayerMuted(const FUniqueNetId& PlayerId)
 {
 	return MuteList.IsPlayerMuted(PlayerId);
-}
-
-void APlayerController::NotifyDirectorControl(bool bNowControlling, AMatineeActor* CurrentMatinee)
-{
-	// matinee is done, make sure client syncs up viewtargets, since we were ignoring
-	// ClientSetViewTarget during the matinee.
-	if (!bNowControlling && (GetNetMode() == NM_Client) && PlayerCameraManager && PlayerCameraManager->bClientSimulatingViewTarget)
-	{
-		ServerVerifyViewTarget();
-	}
 }
 
 /// @cond DOXYGEN_WARNINGS
@@ -3495,7 +3925,7 @@ void APlayerController::ConsoleKey(FKey Key)
 	{
 		if (LocalPlayer->ViewportClient && LocalPlayer->ViewportClient->ViewportConsole)
 		{
-			LocalPlayer->ViewportClient->ViewportConsole->InputKey(0, Key, IE_Pressed);
+			LocalPlayer->ViewportClient->ViewportConsole->InputKey(IPlatformInputDeviceMapper::Get().GetDefaultInputDevice(), Key, IE_Pressed);
 		}
 	}
 #endif // ALLOW_CONSOLE
@@ -3613,17 +4043,17 @@ APlayerState* APlayerController::GetSplitscreenPlayerByIndex(int32 PlayerIndex) 
 					if ( ChildRemoteConnection != NULL )
 					{
 						// this player controller is not the primary player in the splitscreen layout
-						UNetConnection* MasterConnection = ChildRemoteConnection->Parent;
+						UNetConnection* PrimaryConnection = ChildRemoteConnection->Parent;
 						if ( PlayerIndex == 0 )
 						{
-							Result = MasterConnection->PlayerController->PlayerState;
+							Result = PrimaryConnection->PlayerController->PlayerState;
 						}
 						else
 						{
 							PlayerIndex--;
-							if ( PlayerIndex >= 0 && PlayerIndex < MasterConnection->Children.Num() )
+							if ( PlayerIndex >= 0 && PlayerIndex < PrimaryConnection->Children.Num() )
 							{
-								ChildRemoteConnection = MasterConnection->Children[PlayerIndex];
+								ChildRemoteConnection = PrimaryConnection->Children[PlayerIndex];
 								Result = ChildRemoteConnection->PlayerController->PlayerState;
 							}
 						}
@@ -3649,19 +4079,19 @@ APlayerState* APlayerController::GetSplitscreenPlayerByIndex(int32 PlayerIndex) 
 					}
 					else
 					{
-						UE_LOG(LogPlayerController, Log, TEXT("(%s) APlayerController::%s:%s: %s IS NOT THE PRIMARY CONNECTION AND HAS NO CHILD CONNECTIONS!"), *GetFName().ToString(), *GetStateName().ToString(), Player);
+						UE_LOG(LogPlayerController, Log, TEXT("(%s) APlayerController::%s:GetSplitscreenPlayerByIndex: %s IS NOT THE PRIMARY CONNECTION AND HAS NO CHILD CONNECTIONS!"), *GetName(), *GetStateName().ToString(), *Player->GetName());
 					}
 				}
 			}
 			else
 			{
-				UE_LOG(LogPlayerController, Log, TEXT("(%s) APlayerController::%s:%s: %s IS NOT A ULocalPlayer* AND NOT A RemoteConnection! (No valid UPlayer* reference)"), *GetFName().ToString(), *GetStateName().ToString(), Player);
+				UE_LOG(LogPlayerController, Log, TEXT("(%s) APlayerController::%s:GetSplitscreenPlayerByIndex: %s IS NOT A ULocalPlayer* AND NOT A RemoteConnection! (No valid UPlayer* reference)"), *GetName(), *GetStateName().ToString(), *Player->GetName());
 			}
 		}
 	}
 	else
 	{
-		UE_LOG(LogPlayerController, Log, TEXT("(%s) APlayerController::%s:%s: %s"), *GetFName().ToString(), *GetStateName().ToString(),  "NULL value for Player!");
+		UE_LOG(LogPlayerController, Log, TEXT("(%s) APlayerController::%s:GetSplitscreenPlayerByIndex: %s"), *GetName(), *GetStateName().ToString(), TEXT("NULL value for Player!"));
 	}
 
 	return Result;
@@ -3695,12 +4125,12 @@ int32 APlayerController::GetSplitscreenPlayerCount() const
 			}
 			else
 			{
-				UE_LOG(LogPlayerController, Log, TEXT("(%s) APlayerController::%s:%s NOT A ULocalPlayer* AND NOT A RemoteConnection!"), *GetFName().ToString(), *GetStateName().ToString());
+				UE_LOG(LogPlayerController, Log, TEXT("(%s) APlayerController::%s:GetSplitscreenPlayerCount NOT A ULocalPlayer* AND NOT A RemoteConnection!"), *GetName(), *GetStateName().ToString());
 			}
 		}
 		else
 		{
-			UE_LOG(LogPlayerController, Log, TEXT("(%s) APlayerController::%s:%s called without a valid UPlayer* value!"), *GetFName().ToString(), *GetStateName().ToString());
+			UE_LOG(LogPlayerController, Log, TEXT("(%s) APlayerController::%s:GetSplitscreenPlayerCount called without a valid UPlayer* value!"), *GetName(), *GetStateName().ToString());
 		}
 	}
 
@@ -3735,12 +4165,14 @@ void APlayerController::ClientPlayForceFeedback_Internal_Implementation( UForceF
 			{
 				if (ActiveForceFeedbackEffects[Index].Parameters.Tag == Params.Tag)
 				{
+					// Reset the device properties on an active effect before removal
+					ActiveForceFeedbackEffects[Index].ResetDeviceProperties();
 					ActiveForceFeedbackEffects.RemoveAtSwap(Index);
 				}
 			}
 		}
-
-		ActiveForceFeedbackEffects.Emplace(ForceFeedbackEffect, Params);
+		
+		ActiveForceFeedbackEffects.Emplace(ForceFeedbackEffect, Params, GetPlatformUserId());
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 		ForceFeedbackEffectHistoryEntries.Emplace(ActiveForceFeedbackEffects.Last(), GetWorld()->GetTimeSeconds());
@@ -3758,27 +4190,15 @@ void APlayerController::K2_ClientPlayForceFeedback(class UForceFeedbackEffect* F
 	ClientPlayForceFeedback(ForceFeedbackEffect, Params);
 }
 
-void APlayerController::ClientPlayForceFeedback(class UForceFeedbackEffect* ForceFeedbackEffect, bool bLooping, bool bIgnoreTimeDilation, FName Tag)
-{
-	FForceFeedbackParameters Params;
-	Params.Tag = Tag;
-	Params.bLooping = bLooping;
-	Params.bIgnoreTimeDilation = bIgnoreTimeDilation;
-	ClientPlayForceFeedback(ForceFeedbackEffect, Params);
-}
-
-void APlayerController::ClientPlayForceFeedback(class UForceFeedbackEffect* ForceFeedbackEffect, bool bLooping, FName Tag)
-{
-	FForceFeedbackParameters Params;
-	Params.Tag = Tag;
-	Params.bLooping = bLooping;
-	ClientPlayForceFeedback(ForceFeedbackEffect, Params);
-}
-
 void APlayerController::ClientStopForceFeedback_Implementation( UForceFeedbackEffect* ForceFeedbackEffect, FName Tag)
 {
 	if (ForceFeedbackEffect == NULL && Tag == NAME_None)
 	{
+		// Reset all device properties
+		for (FActiveForceFeedbackEffect& Effect : ActiveForceFeedbackEffects)
+		{
+			Effect.ResetDeviceProperties();
+		}
 		ActiveForceFeedbackEffects.Empty();
 	}
 	else
@@ -3788,6 +4208,8 @@ void APlayerController::ClientStopForceFeedback_Implementation( UForceFeedbackEf
 			if (    (ForceFeedbackEffect == NULL || ActiveForceFeedbackEffects[Index].ForceFeedbackEffect == ForceFeedbackEffect)
 				 && (Tag == NAME_None || ActiveForceFeedbackEffects[Index].Parameters.Tag == Tag) )
 			{
+				// Reset the device properties on an active effect before removal
+				ActiveForceFeedbackEffects[Index].ResetDeviceProperties();
 				ActiveForceFeedbackEffects.RemoveAtSwap(Index);
 			}
 		}
@@ -4033,6 +4455,11 @@ void APlayerController::PlayHapticEffect(UHapticFeedbackEffect_Base* HapticEffec
 		case EControllerHand::Gun:
 			ActiveHapticEffect_Gun.Reset();
 			ActiveHapticEffect_Gun = MakeShareable(new FActiveHapticFeedbackEffect(HapticEffect, Scale, bLoop));
+			break;
+		case EControllerHand::HMD:
+			ActiveHapticEffect_HMD.Reset();
+			ActiveHapticEffect_HMD = MakeShareable(new FActiveHapticFeedbackEffect(HapticEffect, Scale, bLoop));
+			break;
 		default:
 			UE_LOG(LogPlayerController, Warning, TEXT("Invalid hand specified (%d) for haptic feedback effect %s"), (int32)Hand, *HapticEffect->GetName());
 			break;
@@ -4078,6 +4505,10 @@ void APlayerController::SetHapticsByValue(const float Frequency, const float Amp
 	else if (Hand == EControllerHand::Gun)
 	{
 		ActiveHapticEffect_Gun.Reset();
+	}
+	else if (Hand == EControllerHand::HMD)
+	{
+		ActiveHapticEffect_HMD.Reset();
 	}
 	else
 	{
@@ -4149,6 +4580,8 @@ void APlayerController::ProcessForceFeedbackAndHaptics(const float DeltaTime, co
 	bool bLeftHapticsNeedUpdate = false;
 	bool bRightHapticsNeedUpdate = false;
 	bool bGunHapticsNeedUpdate = false;
+	FHapticFeedbackValues HMDHaptics;
+	bool bHMDHapticsNeedUpdate = false;
 
 	// Always process feedback by default, but if the game is paused then only static
 	// effects that are flagged to play while paused will play
@@ -4179,6 +4612,8 @@ void APlayerController::ProcessForceFeedbackAndHaptics(const float DeltaTime, co
 			{
 				if (!ActiveForceFeedbackEffects[Index].Update(DeltaTime, ForceFeedbackValues))
 				{
+					// Reset any device properties that may need it (i.e. trigger resistance) 
+					ActiveForceFeedbackEffects[Index].ResetDeviceProperties();
 					ActiveForceFeedbackEffects.RemoveAtSwap(Index);
 				}
 			}
@@ -4203,7 +4638,7 @@ void APlayerController::ProcessForceFeedbackAndHaptics(const float DeltaTime, co
 
 		if (FForceFeedbackManager* ForceFeedbackManager = FForceFeedbackManager::Get(World))
 		{
-			ForceFeedbackManager->Update(GetFocalLocation(), ForceFeedbackValues);
+			ForceFeedbackManager->Update(GetFocalLocation(), ForceFeedbackValues, GetPlatformUserId());
 		}
 
 		// Apply ForceFeedbackScale
@@ -4247,6 +4682,16 @@ void APlayerController::ProcessForceFeedbackAndHaptics(const float DeltaTime, co
 
 				bGunHapticsNeedUpdate = true;
 			}
+			if (ActiveHapticEffect_HMD.IsValid())
+			{
+				const bool bPlaying = ActiveHapticEffect_HMD->Update(DeltaTime, HMDHaptics);
+				if (!bPlaying)
+				{
+					ActiveHapticEffect_HMD->bLoop ? ActiveHapticEffect_HMD->Restart() : ActiveHapticEffect_HMD.Reset();
+				}
+
+				bHMDHapticsNeedUpdate = true;
+			}
 		}
 	}
 
@@ -4284,6 +4729,10 @@ void APlayerController::ProcessForceFeedbackAndHaptics(const float DeltaTime, co
 					if (bGunHapticsNeedUpdate)
 					{
 						InputInterface->SetHapticFeedbackValues(ControllerId, (int32)EControllerHand::Gun, GunHaptics);
+					}
+					if (bHMDHapticsNeedUpdate)
+					{
+						InputInterface->SetHapticFeedbackValues(ControllerId, (int32)EControllerHand::HMD, HMDHaptics);
 					}
 				}
 			}
@@ -4330,21 +4779,11 @@ void APlayerController::ClientStopCameraShakesFromSource(class UCameraShakeSourc
 	}
 }
 
-void APlayerController::ClientPlayCameraAnim_Implementation( UCameraAnim* AnimToPlay, float Scale, float Rate,
-						float BlendInTime, float BlendOutTime, bool bLoop,
-						bool bRandomStartTime, ECameraShakePlaySpace Space, FRotator CustomPlaySpace )
+void APlayerController::ClientSpawnGenericCameraLensEffect_Implementation(TSubclassOf<class AActor> LensEffectEmitterClass)
 {
 	if (PlayerCameraManager != NULL)
 	{
-		PlayerCameraManager->PlayCameraAnim(AnimToPlay, Rate, Scale, BlendInTime, BlendOutTime, bLoop, bRandomStartTime, 0.f, Space, CustomPlaySpace);
-	}
-}
-
-void APlayerController::ClientStopCameraAnim_Implementation(UCameraAnim* AnimToStop)
-{
-	if (PlayerCameraManager != NULL)
-	{
-		PlayerCameraManager->StopAllInstancesOfCameraAnim(AnimToStop);
+		PlayerCameraManager->AddGenericCameraLensEffect(*LensEffectEmitterClass);
 	}
 }
 
@@ -4352,7 +4791,7 @@ void APlayerController::ClientSpawnCameraLensEffect_Implementation( TSubclassOf<
 {
 	if (PlayerCameraManager != NULL)
 	{
-		PlayerCameraManager->AddCameraLensEffect(LensEffectEmitterClass);
+		PlayerCameraManager->AddGenericCameraLensEffect(*LensEffectEmitterClass);
 	}
 }
 
@@ -4383,6 +4822,27 @@ void APlayerController::ReceivedSpectatorClass(TSubclassOf<ASpectatorPawn> Spect
 
 void APlayerController::SetPawn(APawn* InPawn)
 {
+#if UE_WITH_IRIS
+	if (GetLocalRole() == ROLE_Authority && UE::Net::FReplicationSystemUtil::GetNetHandle(this).IsValid())
+	{
+		if (const UReplicationSystem* ReplicationSystem = UE::Net::FReplicationSystemUtil::GetReplicationSystem(this))
+		{
+			if (APawn* PrevPawn = GetPawn(); PrevPawn != InPawn)
+			{
+				if (IsValid(PrevPawn))
+				{
+					UE::Net::FReplicationSystemUtil::RemoveDependentActor(this, PrevPawn);
+				}
+
+				if (IsValid(InPawn))
+				{
+					UE::Net::FReplicationSystemUtil::AddDependentActor(this, InPawn, UE::Net::EDependentObjectSchedulingHint::ScheduleBeforeParent);
+				}
+			}
+		}
+	}
+#endif
+
 	if (InPawn == NULL)
 	{
 		// Attempt to move the PC to the current camera location if no pawn was specified
@@ -4408,6 +4868,8 @@ void APlayerController::GetLifetimeReplicatedProps(TArray< FLifetimeProperty > &
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
+	DISABLE_REPLICATED_PROPERTY(APlayerController, AsyncPhysicsDataComponent_DEPRECARED);
+
 	// These used to only replicate if PlayerCameraManager->GetViewTargetPawn() != GetPawn()
 	// But, since they also don't update unless that condition is true, these values won't change, thus won't send
 	// This is a little less efficient, but fits into the new condition system well, and shouldn't really add much overhead
@@ -4417,8 +4879,12 @@ void APlayerController::GetLifetimeReplicatedProps(TArray< FLifetimeProperty > &
 	DOREPLIFETIME_CONDITION(APlayerController, SpawnLocation, COND_OwnerOnly);
 }
 
+void APlayerController::OnRep_AsyncPhysicsDataComponent()
+{}
+
 void APlayerController::SetPlayer( UPlayer* InPlayer )
 {
+	FMoviePlayerProxyBlock MoviePlayerBlock;
 	check(InPlayer!=NULL);
 
 	const bool bIsSameLevel = InPlayer->PlayerController && (InPlayer->PlayerController->GetLevel() == GetLevel());
@@ -4454,6 +4920,11 @@ void APlayerController::SetPlayer( UPlayer* InPlayer )
 		if (NetConnection)
 		{
 			NetConnection->OwningActor = this;
+
+#if UE_WITH_IRIS
+			UpdateOwningNetConnection();
+			UE::Net::FReplicationSystemUtil::UpdateSubObjectGroupMemberships(this);
+#endif // UE_WITH_IRIS
 		}
 	}
 
@@ -4473,6 +4944,15 @@ void APlayerController::SetPlayer( UPlayer* InPlayer )
 ULocalPlayer* APlayerController::GetLocalPlayer() const
 {
 	return Cast<ULocalPlayer>(Player);
+}
+
+FPlatformUserId APlayerController::GetPlatformUserId() const
+{
+	if (const ULocalPlayer* LocalPlayer = GetLocalPlayer())
+	{
+		return LocalPlayer->GetPlatformUserId();
+	}
+	return PLATFORMUSERID_NONE;
 }
 
 bool APlayerController::IsInViewportClient(UGameViewportClient* ViewportClient) const
@@ -4571,7 +5051,7 @@ void APlayerController::TickActor( float DeltaSeconds, ELevelTick TickType, FAct
 		// Clear axis inputs from previous frame.
 		RotationInput = FRotator::ZeroRotator;
 
-		if (!IsPendingKill())
+		if (IsValid(this))
 		{
 			Tick(DeltaSeconds);	// perform any tick functions unique to an actor subclass
 		}
@@ -4589,7 +5069,7 @@ void APlayerController::TickActor( float DeltaSeconds, ELevelTick TickType, FAct
 		// force physics update for clients that aren't sending movement updates in a timely manner 
 		// this prevents cheats associated with artificially induced ping spikes
 		// skip updates if pawn lost autonomous proxy role (e.g. TurnOff() call)
-		if (GetPawn() && !GetPawn()->IsPendingKill() && GetPawn()->GetRemoteRole() == ROLE_AutonomousProxy && GetPawn()->IsReplicatingMovement())
+		if (IsValid(GetPawn()) && GetPawn()->GetRemoteRole() == ROLE_AutonomousProxy && GetPawn()->IsReplicatingMovement())
 		{
 			UMovementComponent* PawnMovement = GetPawn()->GetMovementComponent();
 			INetworkPredictionInterface* NetworkPredictionInterface = Cast<INetworkPredictionInterface>(PawnMovement);
@@ -4613,15 +5093,18 @@ void APlayerController::TickActor( float DeltaSeconds, ELevelTick TickType, FAct
 						ServerData->bForcedUpdateDurationExceeded = false;
 						if (ServerData->bTriggeringForcedUpdates)
 						{
-							const float PawnTimeSinceForcingUpdates = (WorldTimeStamp - ServerData->ServerTimeBeginningForcedUpdates) * GetPawn()->CustomTimeDilation;
-							if (PawnTimeSinceForcingUpdates > ForcedUpdateMaxDuration * GetPawn()->GetActorTimeDilation())
+							if (ServerData->ServerTimeStamp > ServerData->ServerTimeLastForcedUpdate)
 							{
-								if (ServerData->ServerTimeStamp > ServerData->ServerTimeLastForcedUpdate)
-								{
-									// An update came in that was not a forced update (ie a real move), since ServerTimeStamp advanced outside this code.
-									ServerData->ResetForcedUpdateState();
-								}
-								else
+								// An update came in that was not a forced update (ie a real move), since ServerTimeStamp advanced outside this code.
+								UE_LOG(LogNetPlayerMovement, Log, TEXT("Movement detected, resetting forced update state (ServerTimeStamp %.6f > ServerTimeLastForcedUpdate %.6f)"), ServerData->ServerTimeStamp, ServerData->ServerTimeLastForcedUpdate);
+								ServerData->ResetForcedUpdateState();
+							}
+							else
+							{
+								const float PawnTimeSinceForcingUpdates = (WorldTimeStamp - ServerData->ServerTimeBeginningForcedUpdates) * GetPawn()->CustomTimeDilation;
+								const float PawnTimeForcedUpdateMaxDuration = ForcedUpdateMaxDuration * GetPawn()->GetActorTimeDilation();
+
+								if (PawnTimeSinceForcingUpdates > PawnTimeForcedUpdateMaxDuration)
 								{
 									if (ServerData->bLastRequestNeedsForcedUpdates)
 									{
@@ -4631,6 +5114,7 @@ void APlayerController::TickActor( float DeltaSeconds, ELevelTick TickType, FAct
 									else
 									{
 										// Waiting for ServerTimeStamp to advance from a client move.
+										UE_LOG(LogNetPlayerMovement, Log, TEXT("Setting bForcedUpdateDurationExceeded=true (PawnTimeSinceForcingUpdates %.6f > PawnTimeForcedUpdateMaxDuration %.6f)"), PawnTimeSinceForcingUpdates, PawnTimeForcedUpdateMaxDuration);
 										ServerData->bForcedUpdateDurationExceeded = true;
 									}
 								}
@@ -4644,7 +5128,10 @@ void APlayerController::TickActor( float DeltaSeconds, ELevelTick TickType, FAct
 						LastMovementUpdateTime = CurrentRealTime;
 
 						// Trigger forced update if allowed
-						if (!bRecentHitch && ForcedUpdateInterval > 0.f && PawnTimeSinceUpdate > FMath::Max<float>(DeltaSeconds+0.06f, ForcedUpdateInterval * GetPawn()->GetActorTimeDilation()))
+						const float PawnTimeMinForcedUpdateInterval = (DeltaSeconds + 0.06f) * GetPawn()->CustomTimeDilation;
+						const float PawnTimeForcedUpdateInterval = FMath::Max<float>(PawnTimeMinForcedUpdateInterval, ForcedUpdateInterval * GetPawn()->GetActorTimeDilation());
+
+						if (!bRecentHitch && ForcedUpdateInterval > 0.f && (PawnTimeSinceUpdate > PawnTimeForcedUpdateInterval))
 						{
 							//UE_LOG(LogPlayerController, Warning, TEXT("ForcedMovementTick. PawnTimeSinceUpdate: %f, DeltaSeconds: %f, DeltaSeconds+: %f"), PawnTimeSinceUpdate, DeltaSeconds, DeltaSeconds+0.06f);
 							const USkeletalMeshComponent* PawnMesh = GetPawn()->FindComponentByClass<USkeletalMeshComponent>();
@@ -4707,7 +5194,7 @@ void APlayerController::TickActor( float DeltaSeconds, ELevelTick TickType, FAct
 			PlayerTick(DeltaSeconds);
 		}
 
-		if (IsPendingKill())
+		if (!IsValid(this))
 		{
 			return;
 		}
@@ -4738,7 +5225,7 @@ void APlayerController::TickActor( float DeltaSeconds, ELevelTick TickType, FAct
 		}
 	}
 
-	if (!IsPendingKill())
+	if (IsValid(this))
 	{
 		QUICK_SCOPE_CYCLE_COUNTER(Tick);
 		Tick(DeltaSeconds);	// perform any tick functions unique to an actor subclass
@@ -4746,6 +5233,11 @@ void APlayerController::TickActor( float DeltaSeconds, ELevelTick TickType, FAct
 
 	// Clear old axis inputs since we are done with them. 
 	RotationInput = FRotator::ZeroRotator;
+
+	if(UPhysicsSettings::Get()->PhysicsPrediction.bEnablePhysicsPrediction && GetLocalRole() == ROLE_AutonomousProxy && bIsClient)
+	{
+		UpdateServerAsyncPhysicsTickOffset();
+	}
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 	if (CheatManager != nullptr)
@@ -4909,7 +5401,7 @@ ASpectatorPawn* APlayerController::SpawnSpectatorPawn()
 				{
 					SpawnedSpectator->SetReplicates(false); // Client-side only
 					SpawnedSpectator->PossessedBy(this);
-					SpawnedSpectator->PawnClientRestart();
+					SpawnedSpectator->DispatchRestart(true);
 					if (SpawnedSpectator->PrimaryActorTick.bStartWithTickEnabled)
 					{
 						SpawnedSpectator->SetActorTickEnabled(true);
@@ -5102,19 +5594,24 @@ bool APlayerController::PopInputComponent(UInputComponent* InInputComponent)
 	return false;
 }
 
-void APlayerController::AddPitchInput(float Val)
+bool APlayerController::IsInputComponentInStack(const UInputComponent* InInputComponent) const
 {
-	RotationInput.Pitch += !IsLookInputIgnored() ? Val * InputPitchScale : 0.f;
+	return InInputComponent && CurrentInputStack.Contains(InInputComponent);
+}
+
+void APlayerController::AddPitchInput(float Val)
+{	
+	RotationInput.Pitch += !IsLookInputIgnored() ? Val * (GetDefault<UInputSettings>()->bEnableLegacyInputScales ? InputPitchScale_DEPRECATED : 1.0f) : 0.0f;
 }
 
 void APlayerController::AddYawInput(float Val)
 {
-	RotationInput.Yaw += !IsLookInputIgnored() ? Val * InputYawScale : 0.f;
+	RotationInput.Yaw += !IsLookInputIgnored() ? Val * (GetDefault<UInputSettings>()->bEnableLegacyInputScales ? InputYawScale_DEPRECATED : 1.0f) : 0.0f;
 }
 
 void APlayerController::AddRollInput(float Val)
 {
-	RotationInput.Roll += !IsLookInputIgnored() ? Val * InputRollScale : 0.f;
+	RotationInput.Roll += !IsLookInputIgnored() ? Val * (GetDefault<UInputSettings>()->bEnableLegacyInputScales ? InputRollScale_DEPRECATED : 1.0f) : 0.0f;
 }
 
 bool APlayerController::IsInputKeyDown(const FKey Key) const
@@ -5164,6 +5661,13 @@ void APlayerController::GetInputTouchState(ETouchIndex::Type FingerIndex, float&
 		bIsCurrentlyPressed = false;
 	}
 }
+void APlayerController::GetInputTouchState(ETouchIndex::Type FingerIndex, double& LocationX, double& LocationY, bool& bIsCurrentlyPressed) const
+{
+	float X = (float)LocationX, Y = (float)LocationY;
+	GetInputTouchState(FingerIndex, X, Y, bIsCurrentlyPressed);
+	LocationX = X;
+	LocationY = Y;
+}
 
 void APlayerController::GetInputMotionState(FVector& Tilt, FVector& RotationRate, FVector& Gravity, FVector& Acceleration) const
 {
@@ -5198,6 +5702,17 @@ bool APlayerController::GetMousePosition(float& LocationX, float& LocationY) con
 
 	return bGotMousePosition;
 }
+bool APlayerController::GetMousePosition(double& LocationX, double& LocationY) const
+{
+	float X, Y;
+	if(GetMousePosition(X, Y))
+	{
+		LocationX = X;
+		LocationY = Y;
+		return true;
+	}
+	return false;
+}
 
 void APlayerController::GetInputMouseDelta(float& DeltaX, float& DeltaY) const
 {
@@ -5210,6 +5725,14 @@ void APlayerController::GetInputMouseDelta(float& DeltaX, float& DeltaY) const
 	{
 		DeltaX = DeltaY = 0.f;
 	}
+}
+
+void APlayerController::GetInputMouseDelta(double& DeltaX, double& DeltaY) const
+{
+	float DX, DY;
+	GetInputMouseDelta(DX, DY);
+	DeltaX = DX;
+	DeltaY = DY;
 }
 
 void APlayerController::GetInputAnalogStickState(EControllerAnalogStick::Type WhichStick, float& StickX, float& StickY) const
@@ -5237,6 +5760,13 @@ void APlayerController::GetInputAnalogStickState(EControllerAnalogStick::Type Wh
 	{
 		StickX = StickY = 0.f;
 	}
+}
+void APlayerController::GetInputAnalogStickState(EControllerAnalogStick::Type WhichStick, double& StickX, double& StickY) const
+{
+	float DX, DY;
+	GetInputAnalogStickState(WhichStick, DX, DY);
+	StickX = DX;
+	StickY = DY;
 }
 
 void APlayerController::EnableInput(class APlayerController* PlayerController)
@@ -5316,6 +5846,14 @@ void FInputModeDataBase::SetFocusAndLocking(FReply& SlateOperations, TSharedPtr<
 	}
 }
 
+#if UE_ENABLE_DEBUG_DRAWING
+const FString& FInputModeDataBase::GetDebugDisplayName() const
+{
+	static const FString DisplayName = TEXT("Base");
+	return DisplayName;
+}
+#endif	// UE_ENABLE_DEBUG_DRAWING
+
 FInputModeUIOnly& FInputModeUIOnly::SetWidgetToFocus(TSharedPtr<SWidget> InWidgetToFocus)
 {
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
@@ -5333,6 +5871,14 @@ FInputModeUIOnly& FInputModeUIOnly::SetLockMouseToViewportBehavior(EMouseLockMod
 	MouseLockMode = InMouseLockMode;
 	return *this;
 }
+
+#if UE_ENABLE_DEBUG_DRAWING
+const FString& FInputModeUIOnly::GetDebugDisplayName() const
+{
+	static const FString DebugName = TEXT("UI Only (Input will only be consumed by the UI, not the player!)");
+	return DebugName;
+}
+#endif	// UE_ENABLE_DEBUG_DRAWING
 
 void FInputModeUIOnly::ApplyInputMode(FReply& SlateOperations, class UGameViewportClient& GameViewportClient) const
 {
@@ -5369,6 +5915,22 @@ void FInputModeGameAndUI::ApplyInputMode(FReply& SlateOperations, class UGameVie
 	}
 }
 
+#if UE_ENABLE_DEBUG_DRAWING
+const FString& FInputModeGameAndUI::GetDebugDisplayName() const
+{
+	static const FString DisplayName = TEXT("Game and UI");
+	return DisplayName;
+}
+#endif	// UE_ENABLE_DEBUG_DRAWING
+
+#if UE_ENABLE_DEBUG_DRAWING
+const FString& FInputModeGameOnly::GetDebugDisplayName() const
+{
+	static const FString DisplayName = TEXT("Game Only (Input will only be consumed by the player, not UI)");
+	return DisplayName;
+}
+#endif	// UE_ENABLE_DEBUG_DRAWING
+
 void FInputModeGameOnly::ApplyInputMode(FReply& SlateOperations, class UGameViewportClient& GameViewportClient) const
 {
 	TSharedPtr<SViewport> ViewportWidget = GameViewportClient.GetGameViewportWidget();
@@ -5391,8 +5953,21 @@ void APlayerController::SetInputMode(const FInputModeDataBase& InData)
 	if ( GameViewportClient && LocalPlayer )
 	{
 		InData.ApplyInputMode( LocalPlayer->GetSlateOperations(), *GameViewportClient );
+		bShouldFlushInputWhenViewportFocusChanges = InData.ShouldFlushInputOnViewportFocus();
+
+		// Keep track of the name of this input mode for debug purposes
+#if UE_ENABLE_DEBUG_DRAWING
+		CurrentInputModeDebugString = InData.GetDebugDisplayName();
+#endif
 	}
 }
+
+#if UE_ENABLE_DEBUG_DRAWING
+const FString& APlayerController::GetCurrentInputModeDebugString() const
+{
+	return CurrentInputModeDebugString;
+}
+#endif // #if UE_ENABLE_DEBUG_DRAWING
 
 void APlayerController::UpdateCameraManager(float DeltaSeconds)
 {
@@ -5423,14 +5998,14 @@ void APlayerController::BuildHiddenComponentList(const FVector& ViewLocation, TS
 				UPrimitiveComponent* PrimitiveComponent = Components[ComponentIndex];
 				if (PrimitiveComponent->IsRegistered())
 				{
-					HiddenComponentsOut.Add(PrimitiveComponent->ComponentId);
+					HiddenComponentsOut.Add(PrimitiveComponent->GetPrimitiveSceneId());
 
 					for (USceneComponent* AttachedChild : PrimitiveComponent->GetAttachChildren())
 					{						
 						UPrimitiveComponent* AttachChildPC = Cast<UPrimitiveComponent>(AttachedChild);
 						if (AttachChildPC && AttachChildPC->IsRegistered())
 						{
-							HiddenComponentsOut.Add(AttachChildPC->ComponentId);
+							HiddenComponentsOut.Add(AttachChildPC->GetPrimitiveSceneId());
 						}
 					}
 				}
@@ -5444,20 +6019,19 @@ void APlayerController::BuildHiddenComponentList(const FVector& ViewLocation, TS
 	}
 
 	// iterate backwards so we can remove as we go
+	HiddenComponentsOut.Reserve(HiddenComponentsOut.Num() + HiddenPrimitiveComponents.Num());
 	for (int32 ComponentIndx = HiddenPrimitiveComponents.Num() - 1; ComponentIndx >= 0; --ComponentIndx)
 	{
-		TWeakObjectPtr<UPrimitiveComponent> ComponentPtr = HiddenPrimitiveComponents[ComponentIndx];
-		if (ComponentPtr.IsValid())
+		if (UPrimitiveComponent* Component = HiddenPrimitiveComponents[ComponentIndx].Get())
 		{
-			UPrimitiveComponent* Component = ComponentPtr.Get();
 			if (Component->IsRegistered())
 			{
-				HiddenComponentsOut.Add(Component->ComponentId);
+				HiddenComponentsOut.Add(Component->GetPrimitiveSceneId());
 			}
 		}
 		else
 		{
-			HiddenPrimitiveComponents.RemoveAt(ComponentIndx);
+			HiddenPrimitiveComponents.RemoveAtSwap(ComponentIndx);
 		}
 	}
 
@@ -5513,4 +6087,273 @@ bool APlayerController::ShouldPerformFullTickWhenPaused() const
 			GEngine->XRSystem.IsValid() && GEngine->XRSystem->GetHMDDevice() && GEngine->XRSystem->GetHMDDevice()->IsHMDConnected());
 }
 
+void APlayerController::IncludeInNetConditionGroup(FName NetGroup)
+{
+	checkf(!UE::Net::IsSpecialNetConditionGroup(NetGroup), TEXT("Cannot add a player to special netcondition group %s manually. This group membership is managed by the network engine automatically."), *NetGroup.ToString());
+	checkf(!NetGroup.IsNone(), TEXT("Invalid netcondition group: NONE"));
+	NetConditionGroups.AddUnique(NetGroup);
+
+#if UE_WITH_IRIS
+	UE::Net::FReplicationSystemUtil::UpdateSubObjectGroupMemberships(this);
+#endif
+}
+
+void APlayerController::RemoveFromNetConditionGroup(FName NetGroup)
+{
+	NetConditionGroups.RemoveSingleSwap(NetGroup);
+#if UE_WITH_IRIS
+	UE::Net::FReplicationSystemUtil::RemoveSubObjectGroupMembership(this, NetGroup);
+#endif
+}
+
+
+#if UE_WITH_IRIS
+void APlayerController::BeginReplication()
+{
+	using namespace UE::Net;
+
+	Super::BeginReplication();
+
+	// Bump prio of playercontroller in order to make sure it replicates really early
+	static constexpr float PlayerControllerStaticPriority = 100.f;
+	FReplicationSystemUtil::SetStaticPriority(this, PlayerControllerStaticPriority);
+
+	// Enable groups once owner is set!!
+	FReplicationSystemUtil::UpdateSubObjectGroupMemberships(this);
+}
+#endif // UE_WITH_IRIS
+
+UAsyncPhysicsData* APlayerController::GetAsyncPhysicsDataToWrite() const
+{
+	return nullptr;
+}
+
+const UAsyncPhysicsData* APlayerController::GetAsyncPhysicsDataToConsume() const
+{
+	return nullptr;  
+}
+
+void APlayerController::ExecuteAsyncPhysicsCommand(const FAsyncPhysicsTimestamp& AsyncPhysicsTimestamp, UObject* OwningObject, const TFunction<void()>& Command, const bool bEnableResim)
+{
+	if(UWorld* World = GetWorld())
+	{
+		if(FPhysScene* PhysScene = World->GetPhysicsScene())
+		{
+			const int32 PhysicsStep = IsLocalController() ? AsyncPhysicsTimestamp.LocalFrame : AsyncPhysicsTimestamp.ServerFrame;
+			PhysScene->EnqueueAsyncPhysicsCommand(PhysicsStep, OwningObject, Command, bEnableResim);
+		}
+	}
+}
+
+FAsyncPhysicsTimestamp APlayerController::GetAsyncPhysicsTimestamp(float DeltaSeconds)
+{
+	using namespace Chaos;
+
+	FAsyncPhysicsTimestamp Timestamp = GetPhysicsTimestamp(DeltaSeconds);
+	
+	// Handle deprecated flow using LocalToServerAsyncPhysicsTickOffset_DEPRECATED
+	if (Timestamp.IsValid() && IsLocalController())
+	{
+		Timestamp.ServerFrame -= NetworkPhysicsTickOffset;
+		Timestamp.ServerFrame += LocalToServerAsyncPhysicsTickOffset_DEPRECATED;
+	}
+
+	return Timestamp;
+}
+
+FAsyncPhysicsTimestamp APlayerController::GetPhysicsTimestamp(float DeltaSeconds)
+{
+	using namespace Chaos;
+
+	FAsyncPhysicsTimestamp Timestamp;
+
+	if(UWorld* World = GetWorld())
+	{
+		if (FPhysScene* PhysScene = World->GetPhysicsScene())
+		{
+			if (FPBDRigidsSolver* Solver = static_cast<FPBDRigidsSolver*>(PhysScene->GetSolver()))
+			{
+				const FReal DeltaTime = Solver->GetAsyncDeltaTime();
+				const int32 PendingSteps = (DeltaTime > 0.0) ? DeltaSeconds / DeltaTime : 0;
+
+				int32 LocalPhysicsStep = Solver->GetCurrentFrame();
+				
+				LocalPhysicsStep += PendingSteps;	//Add any pending steps user wants to wait on
+				Timestamp.ServerFrame = LocalPhysicsStep;
+				Timestamp.LocalFrame = LocalPhysicsStep;
+
+				if (IsLocalController())
+				{
+					//If local controller we update server frame based on our estimate
+					Timestamp.ServerFrame = LocalPhysicsStep + NetworkPhysicsTickOffset;
+				}
+			}
+		}
+	}
+
+	return Timestamp;
+}
+
+void APlayerController::UpdateServerAsyncPhysicsTickOffset()
+{
+	FAsyncPhysicsTimestamp Timestamp = GetPhysicsTimestamp();
+	if (NetworkPhysicsCvars::TickOffsetUpdateInterval <= 0 || ClientLatestAsyncPhysicsStepSent + NetworkPhysicsCvars::TickOffsetUpdateInterval > Timestamp.LocalFrame)
+	{
+		//Only send a new timestamp if enough physics ticks have passed, based on CVar.
+		//If GT is running faster than physics sim the physics timestep will not have changed, so no need to send another update to server
+		//This ensures monotonic increase
+		return;
+	}
+
+	ClientLatestAsyncPhysicsStepSent = Timestamp.LocalFrame;
+	Timestamp.ServerFrame = bNetworkPhysicsTickOffsetAssigned ? Timestamp.ServerFrame : INDEX_NONE; // If offset is not yet assigned, set an invalid ServerFrame
+	ServerSendLatestAsyncPhysicsTimestamp(Timestamp);
+}
+
+void APlayerController::ServerSendLatestAsyncPhysicsTimestamp_Implementation(FAsyncPhysicsTimestamp Timestamp)
+{
+	ensure(UPhysicsSettings::Get()->PhysicsPrediction.bEnablePhysicsPrediction);
+
+	//This tells the server how the client thinks the async physics tick will line up.
+	//If we have already received a more up to date timestamp from the client, early out
+	if (Timestamp.LocalFrame <= ServerLatestAsyncPhysicsStepReceived)
+	{
+		return;
+	}
+
+	ServerLatestAsyncPhysicsStepReceived = Timestamp.LocalFrame;
+
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	// Only cache the most up to date timestamp based on LocalFrame
+	if (Timestamp.LocalFrame > ServerPendingTimestamp_DEPRECATED.LocalFrame)
+	{
+		ServerPendingTimestamp_DEPRECATED = Timestamp;
+	}
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+	// Get current server timestamp and add the frame buffer to the ServerFrame
+	FAsyncPhysicsTimestamp ActualTimestamp = GetPhysicsTimestamp();
+	ActualTimestamp.ServerFrame += NetworkPhysicsCvars::PredictionAsyncFrameBuffer;
+
+	// Mark offset as assigned when we get a valid predicted server frame.
+	const int32 PredictedServerFrame = Timestamp.ServerFrame;
+	bNetworkPhysicsTickOffsetAssigned |= PredictedServerFrame != INDEX_NONE;
+
+	// Send update to client if offset is not assigned or over correction limit
+	// Note that we are sending the current ServerFrame along with the frame buffer added, to the client.
+	if (!bNetworkPhysicsTickOffsetAssigned || FMath::Abs(PredictedServerFrame - ActualTimestamp.ServerFrame) > NetworkPhysicsCvars::TickOffsetCorrectionLimit)
+	{
+		Timestamp.ServerFrame = ActualTimestamp.ServerFrame;
+		NetworkPhysicsTickOffset = Timestamp.ServerFrame - Timestamp.LocalFrame;
+		ClientSetupNetworkPhysicsTimestamp(Timestamp); /* Reliable RPC */
+	}
+
+	/*
+	* Use time dilation on client to adjust the frame offset and keep the buffer in check
+	* If buffer goes low, speed up the client by raising the time dilation multiplier (each deltaTime accounts for more of the accumulated time, filling the accumulated time faster to tick the next physics step)
+	* If buffer goes high, slow down the client by lowering the time dilation multiplier (each deltaTime accounts for less of the accumulated time, taking longer to fill the accumulated time
+	*/
+	if (bNetworkPhysicsTickOffsetAssigned)
+	{
+		// Get the buffer offset amount that deviates from the target buffer (Note: the buffer is already added to ActualTimestamp.ServerFrame here and in the PredictedServerFrame received from the client)
+		// 0 means buffer is perfect, positive value means the buffer is too large, negative value means the buffer is too small
+		int32 CurrentFrameBufferOffset = PredictedServerFrame - ActualTimestamp.ServerFrame;
+
+		if (NetworkPhysicsCvars::TimeDilationEscalation == false)
+		{
+			CurrentFrameBufferOffset = FMath::Clamp(CurrentFrameBufferOffset, -1, 1);
+		}
+			
+		// Calculate desired dilation and send to client
+		const float TimeDilationDecay = FMath::Clamp(1.0f - (NetworkPhysicsCvars::TimeDilationEscalationDecay * FMath::Abs(CurrentFrameBufferOffset)), NetworkPhysicsCvars::TimeDilationEscalationDecayMax, 1.0f);
+		float CalculatedTimeDilation = 1.0f + ((NetworkPhysicsCvars::TimeDilationAmount * -CurrentFrameBufferOffset) * TimeDilationDecay);
+		CalculatedTimeDilation = FMath::Clamp(CalculatedTimeDilation, NetworkPhysicsCvars::TimeDilationMin, NetworkPhysicsCvars::TimeDilationMax);
+
+		ClientAckTimeDilation(CalculatedTimeDilation, ActualTimestamp.LocalFrame);
+	}
+	
+}
+
+void APlayerController::ClientCorrectionAsyncPhysicsTimestamp_Implementation(FAsyncPhysicsTimestamp Timestamp)
+{
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+
+	//This tells the client that a timestamp it sent out was wrong (for example we ran locally on step 5 and expected server to run on step 10, but it actually ran on step 11).
+	//The error can only be later. That is, it can never be that we expect to run on server step 10 but actually ran on sever step 9
+	//Once a timestamp has been corrected, any earlier timestamps can be ignored (these can be out of order because of networking)
+	if (Timestamp.ServerFrame <= ClientLatestCorrectedOffsetServerStep_DEPRECATED)
+	{
+		//already corrected after this so do nothing
+		return;
+	}
+	ClientLatestCorrectedOffsetServerStep_DEPRECATED = Timestamp.ServerFrame;
+
+	if (UWorld* World = GetWorld())
+	{
+		if (FPhysScene* PhysScene = World->GetPhysicsScene())
+		{
+			if (PhysScene->GetSolver()->GetEvolution()->IsResimming())
+			{
+				return;
+			}
+		}
+	}
+
+	FAsyncPhysicsTimestamp CurrentTimestamp = GetAsyncPhysicsTimestamp();
+	// We need to avoid changing this offset as much as possible since it will invalidate histories and will trigger resim
+	// To deal with that we compute a safe margin based on a user cvar + half the RTT
+	// This margin will only be applied the first time we will compute the offset 
+	const int32 FrameOffset = LocalToServerAsyncPhysicsTickOffset_DEPRECATED == 0 ? (NetworkPhysicsCvars::NetworkPhysicsPredictionFrameOffset + (CurrentTimestamp.LocalFrame - Timestamp.LocalFrame) / 2) : 0;
+
+	const int32 NewOffset = FMath::Max(LocalToServerAsyncPhysicsTickOffset_DEPRECATED, Timestamp.ServerFrame - Timestamp.LocalFrame + FrameOffset); //The new offset as reported by the server
+	LocalToServerAsyncPhysicsTickOffset_DEPRECATED = NewOffset;
+
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+}
+
+void APlayerController::ClientSetupNetworkPhysicsTimestamp_Implementation(FAsyncPhysicsTimestamp Timestamp)
+{
+	ensure(UPhysicsSettings::Get()->PhysicsPrediction.bEnablePhysicsPrediction);
+
+	// Assign async physics tick offset
+	bNetworkPhysicsTickOffsetAssigned = true;
+	NetworkPhysicsTickOffset = Timestamp.ServerFrame - Timestamp.LocalFrame;
+}
+
+void APlayerController::ClientAckTimeDilation_Implementation(float TimeDilation, int32 ServerStep)
+{
+	if (ServerStep <= ClientLatestTimeDilationServerStep)
+	{
+		return;
+	}
+	ClientLatestTimeDilationServerStep = ServerStep;
+
+	if(UWorld* World = GetWorld())
+	{
+		World->GetPhysicsScene()->SetNetworkDeltaTimeScale(TimeDilation);
+	}
+}
+
+void APlayerController::UpdateServerTimestampToCorrect()
+{
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	// If the client has not sent the correct estimate of which server frame its local frame would correspond to, send back which server frame that local frame actually corresponded to
+	const FAsyncPhysicsTimestamp ActualTimestamp = GetAsyncPhysicsTimestamp();
+
+	if (ServerPendingTimestamp_DEPRECATED.ServerFrame != INDEX_NONE && ServerPendingTimestamp_DEPRECATED.ServerFrame != ActualTimestamp.ServerFrame)
+	{
+		ServerLatestTimestampToCorrect_DEPRECATED.ServerFrame = ActualTimestamp.ServerFrame;
+		ServerLatestTimestampToCorrect_DEPRECATED.LocalFrame = ServerPendingTimestamp_DEPRECATED.LocalFrame;
+		ServerPendingTimestamp_DEPRECATED.ServerFrame = INDEX_NONE;
+	}
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+}
+
+void APlayerController::AsyncPhysicsTickActor(float DeltaTime, float SimTime)
+{
+	Super::AsyncPhysicsTickActor(DeltaTime, SimTime);
+}
+
+
 #undef LOCTEXT_NAMESPACE
+

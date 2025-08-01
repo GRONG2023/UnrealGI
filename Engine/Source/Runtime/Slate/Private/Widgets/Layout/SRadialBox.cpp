@@ -4,56 +4,43 @@
 #include "Layout/LayoutUtils.h"
 
 SRadialBox::SRadialBox()
-: Slots(this)
+	: Slots(this)
+	, PreferredWidth(*this, 100.f)
 {
 }
 
-SRadialBox::FSlot& SRadialBox::Slot()
+SRadialBox::FSlot::FSlotArguments SRadialBox::Slot()
 {
-	return *( new SRadialBox::FSlot() );
+	return FSlot::FSlotArguments(MakeUnique<FSlot>());
 }
 
-SRadialBox::FSlot& SRadialBox::AddSlot()
+SRadialBox::FScopedWidgetSlotArguments SRadialBox::AddSlot()
 {
-	SRadialBox::FSlot* NewSlot = new SRadialBox::FSlot();
-	Slots.Add(NewSlot);
-	return *NewSlot;
+	return FScopedWidgetSlotArguments{ MakeUnique<FSlot>(), Slots, INDEX_NONE };
 }
 
 int32 SRadialBox::RemoveSlot( const TSharedRef<SWidget>& SlotWidget )
 {
-	for (int32 SlotIdx = 0; SlotIdx < Slots.Num(); ++SlotIdx)
-	{
-		if ( SlotWidget == Slots[SlotIdx].GetWidget() )
-		{
-			Slots.RemoveAt(SlotIdx);
-			return SlotIdx;
-		}
-	}
-
-	return -1;
+	return Slots.Remove(SlotWidget);
 }
 
 void SRadialBox::Construct( const FArguments& InArgs )
 {
-	PreferredWidth = InArgs._PreferredWidth;
+	PreferredWidth.Assign(*this, InArgs._PreferredWidth);
 	bUseAllottedWidth = InArgs._UseAllottedWidth;
 	StartingAngle = InArgs._StartingAngle;
 	bDistributeItemsEvenly = InArgs._bDistributeItemsEvenly;
-	SectorCentralAngle = NormalizeAngle(InArgs._SectorCentralAngle);
+	SectorCentralAngle = InternalNormalizeAngle(InArgs._SectorCentralAngle);
 	AngleBetweenItems = InArgs._AngleBetweenItems;
 
-	for ( int32 ChildIndex=0; ChildIndex < InArgs.Slots.Num(); ++ChildIndex )
-	{
-		Slots.Add( InArgs.Slots[ChildIndex] );
-	}
+	Slots.AddSlots(MoveTemp(const_cast<TArray<FSlot::FSlotArguments>&>(InArgs._Slots)));
 }
 
 void SRadialBox::Tick( const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime )
 {
 	if (bUseAllottedWidth)
 	{
-		PreferredWidth = AllottedGeometry.GetLocalSize().X;
+		PreferredWidth.Set(*this, AllottedGeometry.GetLocalSize().X);
 	}
 }
 
@@ -177,4 +164,10 @@ int32 SRadialBox::NormalizeAngle(int32 Angle) const
 {
 	int32 NormalizedAngle = Angle % 360;
 	return NormalizedAngle < 0 ? NormalizedAngle + 360 : NormalizedAngle;
+}
+
+float SRadialBox::InternalNormalizeAngle(float Angle) const
+{
+	float NormalizedAngle = FMath::Fmod(Angle, 360.f);
+	return NormalizedAngle < 0.f ? NormalizedAngle + 360.f : NormalizedAngle;
 }

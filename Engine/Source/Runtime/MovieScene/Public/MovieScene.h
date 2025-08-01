@@ -2,29 +2,60 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "CoreTypes.h"
+#include "Delegates/Delegate.h"
+#include "EventHandlers/MovieSceneDataEventContainer.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Text.h"
+#include "Math/Color.h"
+#include "Math/Range.h"
+#include "Misc/FrameNumber.h"
+#include "Misc/FrameRate.h"
 #include "Misc/Guid.h"
-#include "Misc/Timecode.h"
-#include "Templates/SubclassOf.h"
-#include "Templates/Casts.h"
-#include "MovieSceneFwd.h"
-#include "MovieSceneSpawnable.h"
 #include "MovieSceneBinding.h"
-#include "MovieScenePossessable.h"
-#include "MovieSceneSignedObject.h"
-#include "MovieSceneSequenceID.h"
-#include "MovieSceneObjectBindingID.h"
 #include "MovieSceneFrameMigration.h"
+#include "MovieSceneFwd.h"
+#include "MovieSceneMarkedFrame.h"
+#include "MovieSceneObjectBindingID.h"
+#include "MovieScenePossessable.h"
+#include "MovieSceneSequenceID.h"
+#include "MovieSceneSignedObject.h"
+#include "MovieSceneSpawnable.h"
 #include "MovieSceneTimeController.h"
+#include "MovieSceneTrack.h"
+#include "Templates/Casts.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/SubclassOf.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/SoftObjectPath.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+
 #include "MovieScene.generated.h"
 
-struct FMovieSceneTimeController;
-
+class FArchive;
+class FObjectPreSaveContext;
+class UClass;
+class UK2Node;
 class UMovieSceneFolder;
 class UMovieSceneSection;
 class UMovieSceneTrack;
+namespace UE { namespace MovieScene { class ISequenceDataEventHandler; } }
 struct FMovieSceneChannelMetaData;
+struct FMovieSceneTimeController;
+struct FMovieSceneTimecodeSource;
+template <typename FuncType> class TFunctionRef;
 
 //delegates for use when some data in the MovieScene changes, WIP right now, hopefully will replace delegates on ISequencer
 //and be used for moving towards a true MVC system
@@ -41,78 +72,6 @@ struct FMovieSceneExpansionState
 
 	UPROPERTY()
 	bool bExpanded;
-};
-
-USTRUCT()
-struct FMovieSceneTimecodeSource
-{
-	GENERATED_BODY()
-
-	FMovieSceneTimecodeSource(FTimecode InTimecode)
-		: Timecode(InTimecode)
-		, DeltaFrame(FFrameNumber())
-	{}
-
-	FMovieSceneTimecodeSource()
-		: Timecode(FTimecode())
-		, DeltaFrame(FFrameNumber())
-	{}
-
-	FORCEINLINE bool operator==(const FMovieSceneTimecodeSource& Other) const
-	{
-		return Timecode == Other.Timecode && DeltaFrame == Other.DeltaFrame;
-	}
-	FORCEINLINE bool operator!=(const FMovieSceneTimecodeSource& Other) const
-	{
-		return Timecode != Other.Timecode || DeltaFrame != Other.DeltaFrame;
-	}
-
-public:
-
-	/** The global timecode at which this target is based (ie. the timecode at the beginning of the movie scene section when it was recorded) */
-	UPROPERTY(EditAnywhere, Category="Timecode")
-	FTimecode Timecode;
-
-	/** The delta from the original placement of this target */
-	UPROPERTY(VisibleAnywhere, Category="Timecode")
-	FFrameNumber DeltaFrame;
-};
-
-USTRUCT(BlueprintType)
-struct FMovieSceneMarkedFrame
-{
-	GENERATED_BODY()
-
-	FMovieSceneMarkedFrame()
-		: Label(FString())
-#if WITH_EDITORONLY_DATA
-		, Color(0.f, 1.f, 1.f, 0.4f)
-#endif
-		, bIsDeterminismFence(false)
-	{}
-
-	FMovieSceneMarkedFrame(FFrameNumber InFrameNumber)
-		: FrameNumber(InFrameNumber)
-		, Label(FString())
-#if WITH_EDITORONLY_DATA
-		, Color(0.f, 1.f, 1.f, 0.4f)
-#endif
-		, bIsDeterminismFence(false)
-	{}
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Marked Frame")
-	FFrameNumber FrameNumber;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Marked Frame")
-	FString Label;
-
-#if WITH_EDITORONLY_DATA
-	UPROPERTY(EditAnywhere, Category = "Marked Frame")
-	FLinearColor Color;
-#endif
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Marked Frame", DisplayName="Is Determinism Fence?", meta=(Tooltip="When checked, treat this mark as a fence for evaluation purposes. Fences cannot be crossed in a single evaluation, and force the evaluation to be split into 2 separate parts."))
-	bool bIsDeterminismFence;
 };
 
 /**
@@ -262,8 +221,8 @@ public:
 /**
  * Structure that represents a group of nodes
  */
-UCLASS()
-class MOVIESCENE_API UMovieSceneNodeGroup : public UObject
+UCLASS(MinimalAPI)
+class UMovieSceneNodeGroup : public UObject
 {
 	GENERATED_BODY()
 
@@ -272,17 +231,17 @@ class MOVIESCENE_API UMovieSceneNodeGroup : public UObject
 #if WITH_EDITORONLY_DATA
 public:
 	const FName GetName() const { return Name; }
-	void SetName(const FName& Name);
+	MOVIESCENE_API void SetName(const FName& Name);
 
-	void AddNode(const FString& Path);
-	void RemoveNode(const FString& Path);
+	MOVIESCENE_API void AddNode(const FString& Path);
+	MOVIESCENE_API void RemoveNode(const FString& Path);
 	TArrayView<FString> GetNodes() { return Nodes; }
-	bool ContainsNode(const FString& Path) const;
+	MOVIESCENE_API bool ContainsNode(const FString& Path) const;
 
-	void UpdateNodePath(const FString& OldPath, const FString& NewPath);
+	MOVIESCENE_API void UpdateNodePath(const FString& OldPath, const FString& NewPath);
 
 	bool GetEnableFilter() const { return bEnableFilter; }
-	void SetEnableFilter(bool bInEnableFilter);
+	MOVIESCENE_API void SetEnableFilter(bool bInEnableFilter);
 
 	/** Event that is triggered whenever this node group has changed */
 	DECLARE_EVENT(UMovieSceneNodeGroup, FOnNodeGroupChanged)
@@ -321,8 +280,8 @@ private:
 /**
  * Structure that represents a collection of NodeGroups
  */
-UCLASS()
-class MOVIESCENE_API UMovieSceneNodeGroupCollection : public UObject
+UCLASS(MinimalAPI)
+class UMovieSceneNodeGroupCollection : public UObject
 {
 	GENERATED_BODY()
 
@@ -331,28 +290,32 @@ class MOVIESCENE_API UMovieSceneNodeGroupCollection : public UObject
 #if WITH_EDITORONLY_DATA
 public:
 	/** Called after this object has been deserialized */
-	virtual void PostLoad() override;
+	MOVIESCENE_API virtual void PostLoad() override;
+	MOVIESCENE_API virtual void PostEditUndo() override;
 
-	void AddNodeGroup(UMovieSceneNodeGroup* NodeGroup);
-	void RemoveNodeGroup(UMovieSceneNodeGroup* NodeGroup);
+	MOVIESCENE_API void AddNodeGroup(UMovieSceneNodeGroup* NodeGroup);
+	MOVIESCENE_API void RemoveNodeGroup(UMovieSceneNodeGroup* NodeGroup);
 
 	bool Contains(UMovieSceneNodeGroup* NodeGroup) const { return NodeGroups.Contains(NodeGroup); }
 	const int32 Num() const { return NodeGroups.Num(); }
 	bool HasAnyActiveFilter() const { return bAnyActiveFilter; }
 
-	void UpdateNodePath(const FString& OldPath, const FString& NewPath);
+	MOVIESCENE_API void UpdateNodePath(const FString& OldPath, const FString& NewPath);
 
 	/** Event that is triggered whenever this collection of node groups, or an included node group, has changed */
 	DECLARE_EVENT(UMovieSceneNodeGroupCollection, FOnNodeGroupCollectionChanged)
 	FOnNodeGroupCollectionChanged& OnNodeGroupCollectionChanged() { return OnNodeGroupCollectionChangedEvent; }
 
 private:
+
+	MOVIESCENE_API void Refresh();
+
 	UPROPERTY()
-	TArray<UMovieSceneNodeGroup*> NodeGroups;
+	TArray<TObjectPtr<UMovieSceneNodeGroup>> NodeGroups;
 
 	bool bAnyActiveFilter;
 
-	void OnNodeGroupChanged();
+	MOVIESCENE_API void OnNodeGroupChanged();
 
 	/** Event that is triggered whenever this collection of node groups, or an included node group, has changed */
 	FOnNodeGroupCollectionChanged OnNodeGroupCollectionChangedEvent;
@@ -363,18 +326,18 @@ public:
 	 * DO NOT USE DIRECTLY
 	 * STL-like iterators to enable range-based for loop support.
 	 */
-	FORCEINLINE TArray<UMovieSceneNodeGroup*>::RangedForIteratorType      begin()	{ return NodeGroups.begin(); }
-	FORCEINLINE TArray<UMovieSceneNodeGroup*>::RangedForConstIteratorType begin()	const { return NodeGroups.begin(); }
-	FORCEINLINE TArray<UMovieSceneNodeGroup*>::RangedForIteratorType      end()	{ return NodeGroups.end(); }
-	FORCEINLINE TArray<UMovieSceneNodeGroup*>::RangedForConstIteratorType end()	const { return NodeGroups.end(); }
+	FORCEINLINE auto begin()	{ return NodeGroups.begin(); }
+	FORCEINLINE auto begin()	const { return NodeGroups.begin(); }
+	FORCEINLINE auto end()	{ return NodeGroups.end(); }
+	FORCEINLINE auto end()	const { return NodeGroups.end(); }
 #endif
 };
 
 /**
  * Implements a movie scene asset.
  */
-UCLASS(DefaultToInstanced)
-class MOVIESCENE_API UMovieScene
+UCLASS(DefaultToInstanced, MinimalAPI)
+class UMovieScene
 	: public UMovieSceneSignedObject
 {
 	GENERATED_UCLASS_BODY()
@@ -382,16 +345,22 @@ class MOVIESCENE_API UMovieScene
 public:
 
 	/**~ UObject implementation */
-	virtual void Serialize( FArchive& Ar ) override;
-	virtual bool IsPostLoadThreadSafe() const override;
-	virtual void PostInitProperties() override;
-	virtual void PostLoad() override;
+	MOVIESCENE_API virtual void Serialize( FArchive& Ar ) override;
+	MOVIESCENE_API virtual bool IsPostLoadThreadSafe() const override;
+	MOVIESCENE_API virtual void PostInitProperties() override;
+	MOVIESCENE_API virtual void PostLoad() override;
+#if WITH_EDITORONLY_DATA
+	static MOVIESCENE_API void DeclareConstructClasses(TArray<FTopLevelAssetPath>& OutConstructClasses, const UClass* SpecificSubclass);
+#endif
+
 
 #if WITH_EDITOR
-	virtual void PostEditUndo() override;
+	MOVIESCENE_API virtual void PostEditUndo() override;
 #endif
 
 public:
+
+	UE::MovieScene::TDataEventContainer<UE::MovieScene::ISequenceDataEventHandler> EventHandlers;
 
 	/**
 	 * Add a spawnable to this movie scene's list of owned blueprints.
@@ -402,7 +371,7 @@ public:
 	 * @param ObjectTemplate The object template to use for the spawnable
 	 * @return Guid of the newly-added spawnable.
 	 */
-	FGuid AddSpawnable(const FString& Name, UObject& ObjectTemplate);
+	MOVIESCENE_API FGuid AddSpawnable(const FString& Name, UObject& ObjectTemplate);
 
 	/*
 	 * Adds an existing spawnable to this movie scene.
@@ -410,7 +379,7 @@ public:
 	 * @param InNewSpawnable The posssesable to add.
 	 * @param InNewBinding The object binding to add.
 	 */
-	void AddSpawnable(const FMovieSceneSpawnable& InNewSpawnable, const FMovieSceneBinding& InNewBinding);
+	MOVIESCENE_API void AddSpawnable(const FMovieSceneSpawnable& InNewSpawnable, const FMovieSceneBinding& InNewBinding);
 
 	/**
 	 * Removes a spawnable from this movie scene.
@@ -418,7 +387,7 @@ public:
 	 * @param Guid The guid of a spawnable to find and remove.
 	 * @return true if anything was removed.
 	 */
-	bool RemoveSpawnable(const FGuid& Guid);
+	MOVIESCENE_API bool RemoveSpawnable(const FGuid& Guid);
 
 	/**
 	 * Attempt to find a spawnable using some custom predicate
@@ -426,7 +395,7 @@ public:
 	 * @param InPredicate A predicate to test each spawnable against
 	 * @return Spawnable object that was found (or nullptr if not found).
 	 */
-	FMovieSceneSpawnable* FindSpawnable( const TFunctionRef<bool(FMovieSceneSpawnable&)>& InPredicate );
+	MOVIESCENE_API FMovieSceneSpawnable* FindSpawnable( const TFunctionRef<bool(FMovieSceneSpawnable&)>& InPredicate );
 
 	/**
 	 * Tries to locate a spawnable in this MovieScene for the specified spawnable GUID.
@@ -434,7 +403,7 @@ public:
 	 * @param Guid The spawnable guid to search for.
 	 * @return Spawnable object that was found (or nullptr if not found).
 	 */
-	FMovieSceneSpawnable* FindSpawnable(const FGuid& Guid);
+	MOVIESCENE_API FMovieSceneSpawnable* FindSpawnable(const FGuid& Guid);
 
 	/**
 	 * Grabs a reference to a specific spawnable by index.
@@ -442,14 +411,14 @@ public:
 	 * @param Index of spawnable to return. Must be between 0 and GetSpawnableCount()
 	 * @return Returns the specified spawnable by index.
 	 */
-	FMovieSceneSpawnable& GetSpawnable(int32 Index);
+	MOVIESCENE_API FMovieSceneSpawnable& GetSpawnable(int32 Index);
 
 	/**
 	 * Get the number of spawnable objects in this scene.
 	 *
 	 * @return Spawnable object count.
 	 */
-	int32 GetSpawnableCount() const;
+	MOVIESCENE_API int32 GetSpawnableCount() const;
 	
 public:
 
@@ -460,7 +429,7 @@ public:
 	 * @param Class The class of object that will be possessed.
 	 * @return Guid of the newly-added possessable.
 	 */
-	FGuid AddPossessable(const FString& Name, UClass* Class);
+	MOVIESCENE_API FGuid AddPossessable(const FString& Name, UClass* Class);
 
 	/*
 	 * Adds an existing possessable to this movie scene.
@@ -468,19 +437,19 @@ public:
 	 * @param InNewPossessable The posssesable to add.
 	 * @param InNewBinding The object binding to add.
 	 */
-	void AddPossessable(const FMovieScenePossessable& InNewPossessable, const FMovieSceneBinding& InNewBinding);
+	MOVIESCENE_API void AddPossessable(const FMovieScenePossessable& InNewPossessable, const FMovieSceneBinding& InNewBinding);
 
 	/**
 	 * Removes a possessable from this movie scene.
 	 *
 	 * @param PossessableGuid Guid of possessable to remove.
 	 */
-	bool RemovePossessable(const FGuid& PossessableGuid);
+	MOVIESCENE_API bool RemovePossessable(const FGuid& PossessableGuid);
 	
 	/*
 	* Replace an existing possessable with another 
 	*/
-	bool ReplacePossessable(const FGuid& OldGuid, const FMovieScenePossessable& InNewPosessable);
+	MOVIESCENE_API bool ReplacePossessable(const FGuid& OldGuid, const FMovieScenePossessable& InNewPosessable);
 
 	/**
 	 * Tries to locate a possessable in this MovieScene for the specified possessable GUID.
@@ -488,7 +457,7 @@ public:
 	 * @param Guid The possessable guid to search for.
 	 * @return Possessable object that was found (or nullptr if not found).
 	 */
-	struct FMovieScenePossessable* FindPossessable(const FGuid& Guid);
+	MOVIESCENE_API struct FMovieScenePossessable* FindPossessable(const FGuid& Guid);
 
 	/**
 	 * Attempt to find a possessable using some custom prdeicate
@@ -496,7 +465,7 @@ public:
 	 * @param InPredicate A predicate to test each possessable against
 	 * @return Possessable object that was found (or nullptr if not found).
 	 */
-	FMovieScenePossessable* FindPossessable( const TFunctionRef<bool(FMovieScenePossessable&)>& InPredicate );
+	MOVIESCENE_API FMovieScenePossessable* FindPossessable( const TFunctionRef<bool(FMovieScenePossessable&)>& InPredicate );
 
 	/**
 	 * Grabs a reference to a specific possessable by index.
@@ -504,14 +473,14 @@ public:
 	 * @param Index of possessable to return.
 	 * @return Returns the specified possessable by index.
 	 */
-	FMovieScenePossessable& GetPossessable(const int32 Index);
+	MOVIESCENE_API FMovieScenePossessable& GetPossessable(const int32 Index);
 
 	/**
 	 * Get the number of possessable objects in this scene.
 	 *
 	 * @return Possessable object count.
 	 */
-	int32 GetPossessableCount() const;
+	MOVIESCENE_API int32 GetPossessableCount() const;
 
 public:
 
@@ -525,7 +494,7 @@ public:
 	 * @param Type The newly created type.
 	 * @see  FindTrack, RemoveTrack
 	 */
-	UMovieSceneTrack* AddTrack(TSubclassOf<UMovieSceneTrack> TrackClass, const FGuid& ObjectGuid);
+	MOVIESCENE_API UMovieSceneTrack* AddTrack(TSubclassOf<UMovieSceneTrack> TrackClass, const FGuid& ObjectGuid);
 
 	/**
 	* Adds a given track.
@@ -535,7 +504,7 @@ public:
 	* @see  FindTrack, RemoveTrack
 	* @return true if the track is successfully added, false otherwise.
 	*/
-	bool AddGivenTrack(UMovieSceneTrack* InTrack, const FGuid& ObjectGuid);
+	MOVIESCENE_API bool AddGivenTrack(UMovieSceneTrack* InTrack, const FGuid& ObjectGuid);
 
 	/**
 	 * Adds a track.
@@ -560,9 +529,9 @@ public:
 	 * @param ObjectGuid The runtime object guid that the track is bound to.
 	 * @param TrackName The name of the track to differentiate the one we are searching for from other tracks of the same class (optional).
 	 * @return The found track or nullptr if one does not exist.
-	 * @see AddTrack, RemoveTrack
+	 * @see AddTrack, RemoveTrack, FindTracks
 	 */
-	UMovieSceneTrack* FindTrack(TSubclassOf<UMovieSceneTrack> TrackClass, const FGuid& ObjectGuid, const FName& TrackName = NAME_None) const;
+	MOVIESCENE_API UMovieSceneTrack* FindTrack(TSubclassOf<UMovieSceneTrack> TrackClass, const FGuid& ObjectGuid, const FName& TrackName = NAME_None) const;
 	
 	/**
 	 * Finds a track.
@@ -571,7 +540,7 @@ public:
 	 * @param ObjectGuid The runtime object guid that the track is bound to.
 	 * @param TrackName The name of the track to differentiate the one we are searching for from other tracks of the same class (optional).
 	 * @return The found track or nullptr if one does not exist.
-	 * @see AddTrack, RemoveTrack
+	 * @see AddTrack, RemoveTrack, FindTracks
 	 */
 	template<typename TrackClass>
 	TrackClass* FindTrack(const FGuid& ObjectGuid, const FName& TrackName = NAME_None) const
@@ -580,13 +549,24 @@ public:
 	}
 
 	/**
+	 * Find all tracks of a given class.
+	 *
+	 * @param TrackClass The class of the track to find.
+	 * @param ObjectGuid The runtime object guid that the track is bound to.
+	 * @param TrackName The name of the track to differentiate the one we are searching for from other tracks of the same class (optional).
+	 * @return The found tracks or an empty array if none exist
+	 * @see AddTrack, RemoveTrack, FindTrack
+	 */
+	MOVIESCENE_API TArray<UMovieSceneTrack*> FindTracks(TSubclassOf<UMovieSceneTrack> TrackClass, const FGuid& ObjectGuid, const FName& TrackName = NAME_None) const;
+
+	/**
 	 * Removes a track.
 	 *
 	 * @param Track The track to remove.
 	 * @return true if anything was removed.
 	 * @see AddTrack, FindTrack
 	 */
-	bool RemoveTrack(UMovieSceneTrack& Track);
+	MOVIESCENE_API bool RemoveTrack(UMovieSceneTrack& Track);
 
 	/**
 	 * Find a track binding Guid from a UMovieSceneTrack
@@ -595,94 +575,130 @@ public:
 	 * @param	OutGuid		The binding's Guid if one was found.
 	 * @return true if a binding was found for this track.
 	 */
-	bool FindTrackBinding(const UMovieSceneTrack& InTrack, FGuid& OutGuid) const;
+	MOVIESCENE_API bool FindTrackBinding(const UMovieSceneTrack& InTrack, FGuid& OutGuid) const;
+
+#if WITH_EDITOR
+
+	DECLARE_DELEGATE_RetVal_OneParam(bool, FIsTrackClassAllowedEvent, UClass*);
+
+	static MOVIESCENE_API FIsTrackClassAllowedEvent IsTrackClassAllowedEvent;
+
+	static MOVIESCENE_API bool IsTrackClassAllowed(UClass* InClass);
+
+	void OnDynamicBindingUserDefinedPinRenamed(UK2Node* InNode, FName OldPinName, FName NewPinName)
+	{
+		FixupDynamicBindingPayloadParameterNameEvent.Broadcast(this, InNode, OldPinName, NewPinName);
+	}
+
+	DECLARE_MULTICAST_DELEGATE_FourParams(FFixupDynamicBindingPayloadParameterNameEvent, UMovieScene*, UK2Node*, FName, FName);
+
+	static MOVIESCENE_API FFixupDynamicBindingPayloadParameterNameEvent FixupDynamicBindingPayloadParameterNameEvent;
+
+#endif
 
 public:
 
 	/**
-	 * Adds a master track.
+	 * Adds a track.
 	 *
 	 * Note: The type should not already exist.
 	 *
 	 * @param TrackClass The class of the track to create
 	 * @param Type	The newly created type
-	 * @see FindMasterTrack, GetMasterTracks, IsMasterTrack, RemoveMasterTrack
+	 * @see FindTrack, GetTracks, IsTrack, RemoveTrack
 	 */
-	UMovieSceneTrack* AddMasterTrack(TSubclassOf<UMovieSceneTrack> TrackClass);
+	MOVIESCENE_API UMovieSceneTrack* AddTrack(TSubclassOf<UMovieSceneTrack> TrackClass);
 	
-	/**
-	 * Adds a master track.
-	 *
-	 * Note: The type should not already exist.
-	 *
-	 * @param TrackClass The class of the track to create
-	 * @param Type	The newly created type
-	 * @see FindMasterTrack, GetMasterTracks, IsMasterTrack, RemoveMasterTrack
-	 */
-	template<typename TrackClass>
-	TrackClass* AddMasterTrack()
-	{
-		return Cast<TrackClass>(AddMasterTrack(TrackClass::StaticClass()));
-	}
+	UE_DEPRECATED(5.2, "AddMasterTrack is deprecated. Please use AddTrack instead")
+	UMovieSceneTrack* AddMasterTrack(TSubclassOf<UMovieSceneTrack> TrackClass) { return AddTrack(TrackClass); }
 
 	/**
-	* Adds a given track as a master track
+	 * Adds a track.
+	 *
+	 * Note: The type should not already exist.
+	 *
+	 * @param TrackClass The class of the track to create
+	 * @param Type	The newly created type
+	 * @see FindTrack, GetTracks, IsTrack, RemoveTrack
+	 */
+	template<typename TrackClass>
+	TrackClass* AddTrack()
+	{
+		return Cast<TrackClass>(AddTrack(TrackClass::StaticClass()));
+	}
+
+	template<typename TrackClass>
+	UE_DEPRECATED(5.2, "AddMasterTrack is deprecated. Please use AddTrack instead")
+	TrackClass* AddMasterTrack() { return AddTrack<TrackClass>(); }
+
+	/**
+	* Adds a given track as a track
 	*
 	* @param InTrack The track to add.
 	* @see  FindTrack, RemoveTrack
 	* @return true if the track is successfully added, false otherwise.
 	*/
-	bool AddGivenMasterTrack(UMovieSceneTrack* InTrack);
+	MOVIESCENE_API bool AddGivenTrack(UMovieSceneTrack* InTrack);
+
+	UE_DEPRECATED(5.2, "AddGivenMasterTrack is deprecated. Please use AddGivenTrack instead")
+	bool AddGivenMasterTrack(UMovieSceneTrack* InTrack) { return AddGivenTrack(InTrack); }
 
 	/**
-	 * Finds a master track (one not bound to a runtime objects).
+	 * Finds a track (one not bound to a runtime objects).
 	 *
 	 * @param TrackClass The class of the track to find.
 	 * @return The found track or nullptr if one does not exist.
-	 * @see AddMasterTrack, GetMasterTracks, IsMasterTrack, RemoveMasterTrack
+	 * @see AddTrack, GetTracks, IsTrack, RemoveTrack
 	 */
-	UMovieSceneTrack* FindMasterTrack(TSubclassOf<UMovieSceneTrack> TrackClass) const;
+	MOVIESCENE_API UMovieSceneTrack* FindTrack(TSubclassOf<UMovieSceneTrack> TrackClass) const;
+
+	UE_DEPRECATED(5.2, "FindMasterTrack is deprecated. Please use FindTrack instead")
+	UMovieSceneTrack* FindMasterTrack(TSubclassOf<UMovieSceneTrack> TrackClass) const { return FindTrack(TrackClass); }
 
 	/**
-	 * Finds a master track (one not bound to a runtime objects).
+	 * Finds a track (one not bound to a runtime objects).
 	 *
 	 * @param TrackClass The class of the track to find.
 	 * @return The found track or nullptr if one does not exist.
-	 * @see AddMasterTrack, GetMasterTracks, IsMasterTrack, RemoveMasterTrack
+	 * @see AddTrack, GetTracks, IsTrack, RemoveTrack
 	 */
 	template<typename TrackClass>
-	TrackClass* FindMasterTrack() const
+	TrackClass* FindTrack() const
 	{
-		return Cast<TrackClass>(FindMasterTrack(TrackClass::StaticClass()));
+		return Cast<TrackClass>(FindTrack(TrackClass::StaticClass()));
 	}
 
+	template<typename TrackClass>
+	UE_DEPRECATED(5.2, "FindMasterTrack is deprecated. Please use FindTrack instead")
+	TrackClass* FindMasterTrack() const { return FindTrack<TrackClass>(); }
+
 	/**
-	 * Get all master tracks.
+	 * Get all tracks.
 	 *
 	 * @return Track collection.
-	 * @see AddMasterTrack, FindMasterTrack, IsMasterTrack, RemoveMasterTrack
+	 * @see AddTrack, FindTrack, IsTrack, RemoveTrack
 	 */
-	const TArray<UMovieSceneTrack*>& GetMasterTracks() const
+	const TArray<UMovieSceneTrack*>& GetTracks() const
 	{
-		return MasterTracks;
+		return Tracks;
 	}
 
-	/**
-	 * Check whether the specified track is a master track in this scene.
-	 *
-	 * @return true if the track is a master track, false otherwise.
-	 * @see AddMasterTrack, FindMasterTrack, GetMasterTracks, RemoveMasterTrack
-	 */
-	bool IsAMasterTrack(const UMovieSceneTrack& Track) const;
+	UE_DEPRECATED(5.2, "GetMasterTracks is deprecated. Please use GetTracks instead")
+	const TArray<UMovieSceneTrack*>& GetMasterTracks() const { return GetTracks(); }
 
 	/**
-	 * Removes a master track.
+	 * Check whether the specified track is a track in this movie scene.
 	 *
-	 * @param Track The track to remove.
-	 * @return true if anything was removed.
-	 * @see AddMasterTrack, FindMasterTrack, GetMasterTracks, IsMasterTrack
+	 * @return true if the track is a track, false otherwise.
+	 * @see AddTrack, FindTrack, GetTracks, RemoveTrack
 	 */
-	bool RemoveMasterTrack(UMovieSceneTrack& Track);
+	MOVIESCENE_API bool ContainsTrack(const UMovieSceneTrack& Track) const;
+
+	UE_DEPRECATED(5.2, "IsAMasterTrack is deprecated. Please use ContainsTrack instead")
+	bool IsAMasterTrack(const UMovieSceneTrack& Track) const { return ContainsTrack(Track); }
+
+	UE_DEPRECATED(5.2, "RemoveMasterTrack is deprecated. Please use RemoveTrack instead")
+	bool RemoveMasterTrack(UMovieSceneTrack& Track) { return RemoveTrack(Track); }
 
 	/**
 	 * Move all the contents (tracks, child bindings) of the specified binding ID onto another
@@ -690,7 +706,7 @@ public:
 	 * @param SourceBindingId The identifier of the binding ID to move all tracks and children from
 	 * @param DestinationBindingId The identifier of the binding ID to move the contents to
 	 */
-	void MoveBindingContents(const FGuid& SourceBindingId, const FGuid& DestinationBindingId);
+	MOVIESCENE_API void MoveBindingContents(const FGuid& SourceBindingId, const FGuid& DestinationBindingId);
 
 	/**
 	 * Tries to find an FMovieSceneBinding for the specified Guid.
@@ -698,11 +714,16 @@ public:
 	 * @param ForGuid	The binding's Guid to look for.
 	 * @return			Pointer to the binding, otherwise nullptr.
 	 */
-	FMovieSceneBinding* FindBinding(const FGuid& ForGuid)
-	{
-		return ObjectBindings.FindByPredicate([ForGuid](const FMovieSceneBinding& Binding) { return Binding.GetObjectGuid() == ForGuid; });
-	}
+	MOVIESCENE_API FMovieSceneBinding* FindBinding(const FGuid& ForGuid);
 
+	/**
+	* Tries to find an FMovieSceneBinding for the specified Guid.
+	*
+	* @param ForGuid	The binding's Guid to look for.
+	* @return			Pointer to the binding, otherwise nullptr.
+	*/
+	MOVIESCENE_API const FMovieSceneBinding* FindBinding(const FGuid& ForGuid) const;
+	
 public:
 
 	// @todo sequencer: the following methods really shouldn't be here
@@ -715,15 +736,15 @@ public:
 	 * @param TrackClass  The camera cut track class type
 	 * @return The created camera cut track
 	 */
-	UMovieSceneTrack* AddCameraCutTrack( TSubclassOf<UMovieSceneTrack> TrackClass );
+	MOVIESCENE_API UMovieSceneTrack* AddCameraCutTrack( TSubclassOf<UMovieSceneTrack> TrackClass );
 	
 	/** @return The camera cut track if it exists. */
-	UMovieSceneTrack* GetCameraCutTrack() const;
+	MOVIESCENE_API UMovieSceneTrack* GetCameraCutTrack() const;
 
 	/** Removes the camera cut track if it exists. */
-	void RemoveCameraCutTrack();
+	MOVIESCENE_API void RemoveCameraCutTrack();
 
-	void SetCameraCutTrack(UMovieSceneTrack* Track);
+	MOVIESCENE_API void SetCameraCutTrack(UMovieSceneTrack* Track);
 
 public:
 
@@ -732,7 +753,7 @@ public:
 	 *
 	 * @return A list of sections with object bindings and names.
 	 */
-	TArray<UMovieSceneSection*> GetAllSections() const;
+	MOVIESCENE_API TArray<UMovieSceneSection*> GetAllSections() const;
 
 	/**
 	 * @return All object bindings.
@@ -754,7 +775,7 @@ public:
 	 * @param ObjectId The object identifier.
 	 * @return The object's display name.
 	 */
-	FText GetObjectDisplayName(const FGuid& ObjectId);
+	MOVIESCENE_API FText GetObjectDisplayName(const FGuid& ObjectId);
 
 	/** Get the playback time range of this movie scene, relative to its 0-time offset. */
 	TRange<FFrameNumber> GetPlaybackRange() const
@@ -826,7 +847,7 @@ public:
 	/**
 	 * Retrieve a time controller from this sequence instance, if the clock source is set to custom
 	 */
-	TSharedPtr<FMovieSceneTimeController> MakeCustomTimeController(UObject* PlaybackContext);
+	MOVIESCENE_API TSharedPtr<FMovieSceneTimeController> MakeCustomTimeController(UObject* PlaybackContext);
 
 	/**
 	 * Assign the clock source to be used for this moviescene
@@ -849,10 +870,15 @@ public:
 		CustomClockSourcePath = InNewClockSource;
 	}
 
+	/**
+	 * Get the earliest timecode source out of all of the movie scene sections contained within this movie scene.
+	 */
+	MOVIESCENE_API FMovieSceneTimecodeSource GetEarliestTimecodeSource() const;
+
 	/*
 	* Replace an existing binding with another 
 	*/
-	void ReplaceBinding(const FGuid& OldGuid, const FGuid& NewGuid, const FString& Name);
+	MOVIESCENE_API void ReplaceBinding(const FGuid& OldGuid, const FGuid& NewGuid, const FString& Name);
 
 	/*
 	* Replace an existing binding with another. Assumes ownership of any
@@ -860,7 +886,7 @@ public:
 	* @param BindingToReplaceGuid	Binding Guid that should be replaced
 	* @param NewBinding				Binding Data that should replace the original one specified by BindingToReplaceGuid.
 	*/
-	void ReplaceBinding(const FGuid& BindingToReplaceGuid, const FMovieSceneBinding& NewBinding);
+	MOVIESCENE_API void ReplaceBinding(const FGuid& BindingToReplaceGuid, const FMovieSceneBinding& NewBinding);
 
 #if WITH_EDITORONLY_DATA
 	/**
@@ -882,12 +908,47 @@ public:
 	 * @param ObjectId The object identifier.
 	 * @return The object's display name.
 	 */
-	void SetObjectDisplayName(const FGuid& ObjectId, const FText& DisplayName);
+	MOVIESCENE_API void SetObjectDisplayName(const FGuid& ObjectId, const FText& DisplayName);
 
 	/**
 	 * Gets the root folders for this movie scene.
 	 */
-	TArray<UMovieSceneFolder*>& GetRootFolders();
+	MOVIESCENE_API TArrayView<UMovieSceneFolder* const> GetRootFolders();
+
+	/**
+	 * Gets a copy of the root folders for this movie scene.
+	 */
+	MOVIESCENE_API void GetRootFolders(TArray<UMovieSceneFolder*>& InRootFolders);
+
+	/**
+	 * Gets the number of root folders in this movie scene.
+	 */
+	MOVIESCENE_API int32 GetNumRootFolders() const;
+
+	/**
+	 * Gets the i-th root folder for this movie scene.
+	 */
+	MOVIESCENE_API UMovieSceneFolder* GetRootFolder(int32 FolderIndex) const;
+
+	/**
+	 * Adds a root folder for this movie scene.
+	 */
+	MOVIESCENE_API void AddRootFolder(UMovieSceneFolder* Folder);
+
+	/**
+	 * Removes a root folder for this movie scene (does not delete tracks or objects contained within)
+	 */
+	MOVIESCENE_API int32 RemoveRootFolder(UMovieSceneFolder* Folder);
+
+	/**
+	 * Removes a root folder for this movie scene (does not delete tracks or objects contained within)
+	 */
+	MOVIESCENE_API bool RemoveRootFolder(int32 FolderIndex);
+
+	/**
+	 * Removes all root folders from this movie scene (does not delete tracks or objects contained within)
+	 */
+	MOVIESCENE_API void EmptyRootFolders();
 
 	/**
 	 * Gets the nodes marked as solo in the editor, as node tree paths
@@ -914,7 +975,7 @@ public:
 	 * @param bAlwaysMarkDirty Whether to always mark the playback range dirty when changing it. 
 	 *        In the case where the playback range is dynamic and based on section bounds, the playback range doesn't need to be dirtied when set
 	 */
-	void SetPlaybackRange(FFrameNumber Start, int32 Duration, bool bAlwaysMarkDirty = true);
+	MOVIESCENE_API void SetPlaybackRange(FFrameNumber Start, int32 Duration, bool bAlwaysMarkDirty = true);
 
 	/**
 	 * Set the playback range for this movie scene
@@ -923,7 +984,7 @@ public:
 	 * @param bAlwaysMarkDirty Whether to always mark the playback range dirty when changing it. 
 	 *        In the case where the playback range is dynamic and based on section bounds, the playback range doesn't need to be dirtied when set
 	 */
-	void SetPlaybackRange(const TRange<FFrameNumber>& NewRange, bool bAlwaysMarkDirty = true);
+	MOVIESCENE_API void SetPlaybackRange(const TRange<FFrameNumber>& NewRange, bool bAlwaysMarkDirty = true);
 
 	/**
 	 * Set the start and end working range (outer) for this movie scene
@@ -931,7 +992,7 @@ public:
 	 * @param Start The offset from 0-time to view this movie scene.
 	 * @param End The offset from 0-time to view this movie scene
 	 */
-	void SetWorkingRange(float Start, float End);
+	MOVIESCENE_API void SetWorkingRange(double Start, double End);
 
 	/**
 	 * Set the start and end view range (inner) for this movie scene
@@ -939,7 +1000,7 @@ public:
 	 * @param Start The offset from 0-time to view this movie scene
 	 * @param End The offset from 0-time to view this movie scene
 	 */
-	void SetViewRange(float Start, float End);
+	MOVIESCENE_API void SetViewRange(double Start, double End);
 
 #if WITH_EDITORONLY_DATA
 
@@ -958,17 +1019,31 @@ public:
 	/**
 	* Return whether the playback range is locked.
 	*/
-	bool IsPlaybackRangeLocked() const;
+	MOVIESCENE_API bool IsPlaybackRangeLocked() const;
 
 	/**
 	* Set whether the playback range is locked.
 	*/
-	void SetPlaybackRangeLocked(bool bLocked);
+	MOVIESCENE_API void SetPlaybackRangeLocked(bool bLocked);
+
+	/**
+	 * Return whether marked frames are locked.
+	 */
+	MOVIESCENE_API bool AreMarkedFramesLocked() const;
+
+	/**
+	 * Set whether marked frames are locked.
+	 */
+	MOVIESCENE_API void SetMarkedFramesLocked(bool bLocked);
 
 	/**
 	 * @return The editor only data for use with this movie scene
 	 */
 	FMovieSceneEditorData& GetEditorData()
+	{
+		return EditorData;
+	}
+	const FMovieSceneEditorData& GetEditorData() const
 	{
 		return EditorData;
 	}
@@ -981,33 +1056,29 @@ public:
 	/*
 	 * @return Whether the section is in a group
 	 */
-	bool IsSectionInGroup(const UMovieSceneSection& InSection) const;
+	MOVIESCENE_API bool IsSectionInGroup(const UMovieSceneSection& InSection) const;
 
 	/*
 	 * Create a group containing InSections, merging any existing groups the sections are in
 	 */
-	void GroupSections(const TArray<UMovieSceneSection*> InSections);
+	MOVIESCENE_API void GroupSections(const TArray<UMovieSceneSection*> InSections);
 
 	/*
 	 * Remove InSection from any group it currently is in
 	 */
-	void UngroupSection(const UMovieSceneSection& InSection);
+	MOVIESCENE_API void UngroupSection(const UMovieSceneSection& InSection);
 
 	/*
 	 * @return The group containing the InSection, or a nullptr if InSection is not grouped.
 	 */
-	const FMovieSceneSectionGroup* GetSectionGroup(const UMovieSceneSection& InSection) const;
+	MOVIESCENE_API const FMovieSceneSectionGroup* GetSectionGroup(const UMovieSceneSection& InSection) const;
 
 	/*
 	 * Cleans stale UMovieSceneSection pointers, and removes any section groups which are no longer valid, e.g. contain less that two valid sections
 	 */
-	void CleanSectionGroups();
+	MOVIESCENE_API void CleanSectionGroups();
 
 	UMovieSceneNodeGroupCollection& GetNodeGroups() { return *NodeGroupCollection; }
-
-	/** The timecode at which this movie scene section is based (ie. when it was recorded) */
-	UPROPERTY()
-	FMovieSceneTimecodeSource TimecodeSource;
 
 #endif	// WITH_EDITORONLY_DATA
 
@@ -1024,7 +1095,7 @@ public:
 	 * @InMarkIndex The given user marked frame index to edit
 	 * @InFrameNumber The frame number to set
 	 */
-	void SetMarkedFrame(int32 InMarkIndex, FFrameNumber InFrameNumber);
+	MOVIESCENE_API void SetMarkedFrame(int32 InMarkIndex, FFrameNumber InFrameNumber);
 
 	/*
 	 * Add a given user marked frame.
@@ -1033,38 +1104,38 @@ public:
 	 * @InMarkedFrame The given user marked frame to add
 	 * @return The index to the newly added marked frame
 	 */
-	int32 AddMarkedFrame(const FMovieSceneMarkedFrame& InMarkedFrame);
+	MOVIESCENE_API int32 AddMarkedFrame(const FMovieSceneMarkedFrame& InMarkedFrame);
 
 	/*
 	 * Delete the user marked frame by index.
 	 *
 	 * @DeleteIndex The index to the user marked frame to delete
 	 */
-	void DeleteMarkedFrame(int32 DeleteIndex);
+	MOVIESCENE_API void DeleteMarkedFrame(int32 DeleteIndex);
 
 	/*
 	 * Delete all user marked frames
 	 */
-	void DeleteMarkedFrames();
+	MOVIESCENE_API void DeleteMarkedFrames();
 
 	/*
 	 * Sort the marked frames in chronological order
 	 */
-	void SortMarkedFrames();
+	MOVIESCENE_API void SortMarkedFrames();
 
 	/*
 	 * Find the user marked frame by label
 	 *
 	 * @InLabel The label to the user marked frame to find
 	 */
-	int32 FindMarkedFrameByLabel(const FString& InLabel) const;
+	MOVIESCENE_API int32 FindMarkedFrameByLabel(const FString& InLabel) const;
 
 	/*
 	 * Find the user marked frame by frame number
 	 *
 	 * @InFrameNumber The frame number of the user marked frame to find
 	 */
-	int32 FindMarkedFrameByFrameNumber(FFrameNumber InFrameNumber) const;
+	MOVIESCENE_API int32 FindMarkedFrameByFrameNumber(FFrameNumber InFrameNumber) const;
 
 	/*
 	 * Find the next/previous user marked frame from the given frame number
@@ -1072,7 +1143,7 @@ public:
 	 * @InFrameNumber The frame number to find the next/previous user marked frame from
 	 * @bForward Find forward from the given frame number.
 	 */
-	int32 FindNextMarkedFrame(FFrameNumber InFrameNumber, bool bForward);
+	MOVIESCENE_API int32 FindNextMarkedFrame(FFrameNumber InFrameNumber, bool bForward);
 
 #if WITH_EDITORONLY_DATA
 	/*
@@ -1102,22 +1173,22 @@ public:
 	/*
 	 * Add a new binding group for the specified name
 	 */
-	void AddNewBindingTag(const FName& NewTag);
+	MOVIESCENE_API void AddNewBindingTag(const FName& NewTag);
 
 	/*
 	 * Tag the specified binding ID with the specified name
 	 */
-	void TagBinding(const FName& NewTag, const UE::MovieScene::FFixedObjectBindingID& BindingToTag);
+	MOVIESCENE_API void TagBinding(const FName& NewTag, const UE::MovieScene::FFixedObjectBindingID& BindingToTag);
 
 	/*
 	 * Remove a tag from the specified object binding
 	 */
-	void UntagBinding(const FName& Tag, const UE::MovieScene::FFixedObjectBindingID& Binding);
+	MOVIESCENE_API void UntagBinding(const FName& Tag, const UE::MovieScene::FFixedObjectBindingID& Binding);
 
 	/*
 	 * Remove the specified tag from any binding and forget about it completely
 	 */
-	void RemoveTag(const FName& TagToRemove);
+	MOVIESCENE_API void RemoveTag(const FName& TagToRemove);
 
 protected:
 
@@ -1126,20 +1197,47 @@ protected:
 	 *
 	 * @param Guid The guid bound to animation data to remove
 	 */
-	void RemoveBinding(const FGuid& Guid);
+	MOVIESCENE_API void RemoveBinding(const FGuid& Guid);
+
+
+	/**
+	 * Tries to find an FMovieSceneBinding for the specified Guid.
+	 *
+	 * @param ForGuid	The binding's Guid to look for.
+	 * @return			Index of the binding in ObjectBindings array, otherwise INDEX_NONE.
+	 */
+	int32 IndexOfBinding(const FGuid& ForGuid) const;
+
+	/**
+	* Tries to find an FMovieSceneSpawnable for the specified Guid.
+	*
+	* @param ForGuid	The spawnable's Guid to look for.
+	* @return			Index of the binding in Spawnables array, otherwise INDEX_NONE.
+	*/
+	int32 IndexOfSpawnable(const FGuid& ForGuid) const;
+
+
+	/**
+	* Tries to find an FMovieScenePossessable for the specified Guid.
+	*
+	* @param ForGuid	The possessable's Guid to look for.
+	* @return			Index of the binding in Possessables array, otherwise INDEX_NONE.
+	*/
+	int32 IndexOfPossessable(const FGuid& ForGuid) const;
 
 protected:
 
 	/** Called before this object is being deserialized. */
-	virtual void PreSave(const class ITargetPlatform* TargetPlatform) override;
+	MOVIESCENE_API virtual void PreSave(FObjectPreSaveContext ObjectSaveContext) override;
 
 	/** Perform legacy upgrade of time ranges */
-	void UpgradeTimeRanges();
+	MOVIESCENE_API void UpgradeTimeRanges();
 
 private:
 
 #if WITH_EDITOR
-	void RemoveNullTracks();
+	MOVIESCENE_API void OptimizeForCook();
+	MOVIESCENE_API void RemoveNullTracks();
 #endif
 
 private:
@@ -1164,13 +1262,13 @@ private:
 	UPROPERTY()
 	TMap<FName, FMovieSceneObjectBindingIDs> BindingGroups;
 
-	/** Master tracks which are not bound to spawned or possessed objects */
+	/** Tracks which are not bound to spawned or possessed objects */
 	UPROPERTY(Instanced)
-	TArray<UMovieSceneTrack*> MasterTracks;
+	TArray<TObjectPtr<UMovieSceneTrack>> Tracks;
 
 	/** The camera cut track is a specialized track for switching between cameras on a cinematic */
 	UPROPERTY(Instanced)
-	UMovieSceneTrack* CameraCutTrack;
+	TObjectPtr<UMovieSceneTrack> CameraCutTrack;
 
 	/** User-defined selection range. */
 	UPROPERTY()
@@ -1212,6 +1310,10 @@ private:
 	UPROPERTY()
 	bool bPlaybackRangeLocked;
 
+	/** User-defined marked frames are locked. */
+	UPROPERTY()
+	bool bMarkedFramesLocked;
+
 	/** Maps object GUIDs to user defined display names. */
 	UPROPERTY()
 	TMap<FString, FText> ObjectsToDisplayNames;
@@ -1226,7 +1328,7 @@ private:
 
 	/** The root folders for this movie scene. */
 	UPROPERTY()
-	TArray<UMovieSceneFolder*> RootFolders;
+	TArray<TObjectPtr<UMovieSceneFolder>> RootFolders;
 
 	/** Nodes currently marked Solo, stored as node tree paths */
 	UPROPERTY()
@@ -1242,9 +1344,10 @@ private:
 
 	/** Collection of user-defined groups */
 	UPROPERTY()
-	UMovieSceneNodeGroupCollection* NodeGroupCollection;
+	TObjectPtr<UMovieSceneNodeGroupCollection> NodeGroupCollection;
 
 	/** Whether this scene's marked frames should be shown globally */
+	UPROPERTY()
 	bool bGloballyShowMarkedFrames;
 
 private:
@@ -1267,10 +1370,11 @@ private:
 	UPROPERTY()
 	float FixedFrameInterval_DEPRECATED;
 
+	UPROPERTY()
+	TArray<TObjectPtr<UMovieSceneTrack>> MasterTracks_DEPRECATED;
+
 	//delegates
 	private:
 	FMovieSceneOnChannelChanged OnChannelChangedDelegate;
 #endif
-
-		
 };

@@ -6,7 +6,12 @@
 #include "UObject/ObjectMacros.h"
 #include "Styling/SlateColor.h"
 #include "Layout/Margin.h"
+#include "Rendering/SlateResourceHandle.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "Textures/SlateShaderResource.h"
+#endif
+#include "Types/SlateBox2.h"
+#include "Types/SlateVector2.h"
 #include "SlateBrush.generated.h"
 
 /**
@@ -15,7 +20,7 @@
 UENUM(BlueprintType)
 namespace ESlateBrushDrawType
 {
-	enum Type
+	enum Type : int
 	{
 		/** Don't do anything */
 		NoDrawType UMETA(DisplayName="None"),
@@ -27,7 +32,10 @@ namespace ESlateBrushDrawType
 		Border,
 
 		/** Draw an image; margin is ignored */
-		Image
+		Image,
+
+		/** Draw a solid rectangle with an outline and corner radius */
+		RoundedBox
 	};
 }
 
@@ -38,7 +46,7 @@ namespace ESlateBrushDrawType
 UENUM(BlueprintType)
 namespace ESlateBrushTileType
 {
-	enum Type
+	enum Type : int
 	{
 		/** Just stretch */
 		NoTile,
@@ -61,7 +69,7 @@ namespace ESlateBrushTileType
 UENUM()
 namespace ESlateBrushMirrorType
 {
-	enum Type
+	enum Type : int
 	{
 		/** Don't mirror anything, just draw the texture as it is. */
 		NoMirror,
@@ -84,7 +92,7 @@ namespace ESlateBrushMirrorType
 UENUM()
 namespace ESlateBrushImageType
 {
-	enum Type
+	enum Type : int
 	{
 		/** No image is loaded.  Color only brushes, transparent brushes etc. */
 		NoImage,
@@ -94,8 +102,123 @@ namespace ESlateBrushImageType
 
 		/** The image is a special texture in linear space (usually a rendering resource such as a lookup table). */
 		Linear,
+
+		/** The image is vector graphics and will be rendered and cached in full color using size/scale requested by slate */
+		Vector,
 	};
 }
+
+
+/**
+ * Enumerates rounding options
+ */
+UENUM()
+namespace ESlateBrushRoundingType
+{
+	enum Type : int
+	{
+		/** Use the specified Radius **/
+		FixedRadius, 
+
+		/** The rounding radius should be half the height such that it always looks perfectly round **/
+		HalfHeightRadius,
+	};
+}
+
+
+/**
+ * Possible options for rounded box brush image
+ */
+USTRUCT(BlueprintType)
+struct FSlateBrushOutlineSettings
+{
+	GENERATED_USTRUCT_BODY()
+
+	FSlateBrushOutlineSettings()
+		: CornerRadii(FVector4(0.0, 0.0, 0.0, 0.0))
+		, Color(FLinearColor::Transparent)
+		, Width(0.0)
+		, RoundingType(ESlateBrushRoundingType::HalfHeightRadius)
+		, bUseBrushTransparency(false)
+	{}
+
+	FSlateBrushOutlineSettings(float InUniformRadius)
+		: CornerRadii(FVector4(InUniformRadius, InUniformRadius, InUniformRadius, InUniformRadius))
+		, Color(FLinearColor::Transparent)
+		, Width(0.0)
+		, RoundingType(ESlateBrushRoundingType::FixedRadius)
+		, bUseBrushTransparency(false)
+	{}
+
+	FSlateBrushOutlineSettings(FVector4 InRadius)
+		: CornerRadii(InRadius)
+		, Color(FLinearColor::Transparent)
+		, Width(0.0)
+		, RoundingType(ESlateBrushRoundingType::FixedRadius)
+		, bUseBrushTransparency(false)
+	{}
+
+	FSlateBrushOutlineSettings(const FSlateColor& InColor, float InWidth)
+		: CornerRadii(FVector4(0.0, 0.0, 0.0, 0.0))
+		, Color(InColor)
+		, Width(InWidth)
+		, RoundingType(ESlateBrushRoundingType::HalfHeightRadius)
+		, bUseBrushTransparency(false)
+	{}
+
+	FSlateBrushOutlineSettings(float InUniformRadius, const FSlateColor& InColor, float InWidth)
+		: CornerRadii(FVector4(InUniformRadius, InUniformRadius, InUniformRadius, InUniformRadius))
+		, Color(InColor)
+		, Width(InWidth)
+		, RoundingType(ESlateBrushRoundingType::FixedRadius)
+		, bUseBrushTransparency(false)
+	{}
+
+	FSlateBrushOutlineSettings(FVector4 InRadius, const FSlateColor& InColor, float InWidth)
+		: CornerRadii(InRadius)
+		, Color(InColor)
+		, Width(InWidth)
+		, RoundingType(ESlateBrushRoundingType::FixedRadius)
+		, bUseBrushTransparency(false)
+	{}
+
+	/**
+	 * Compares these outline settings with another for equality.
+	 *
+	 * @param Other The other outline settings.
+	 *
+	 * @return true if settings are equal, false otherwise.
+	 */
+	bool operator==(const FSlateBrushOutlineSettings& Other) const
+	{
+		return CornerRadii == Other.CornerRadii
+			&& Color == Other.Color
+			&& Width == Other.Width
+			&& RoundingType == Other.RoundingType
+			&& bUseBrushTransparency == Other.bUseBrushTransparency;
+	}
+
+	/** Radius in Slate Units applied to the outline at each corner. X = Top Left, Y = Top Right, Z = Bottom Right, W = Bottom Left */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Brush)
+	FVector4 CornerRadii;
+
+	/** Tinting applied to the border outline. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Brush, meta=(DisplayName="Outline", sRGB="true"))
+	FSlateColor Color;
+
+	/** Line width in Slate Units applied to the border outline. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Brush)
+	float Width;
+
+	/** The Rounding Type **/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Brush)
+	TEnumAsByte<enum ESlateBrushRoundingType::Type > RoundingType;
+
+	/** True if we should use the owning brush's transparency as our own **/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Brush)
+	bool bUseBrushTransparency;
+
+};
 
 namespace SlateBrushDefs
 {
@@ -103,17 +226,49 @@ namespace SlateBrushDefs
 }
 
 /**
- * An brush which contains information about how to draw a Slate element
+ * A brush which contains information about how to draw a Slate element
  */
 USTRUCT(BlueprintType) //, meta = (HasNativeMake = ""))
-struct SLATECORE_API FSlateBrush
+struct FSlateBrush
 {
 	GENERATED_USTRUCT_BODY()
 
+	friend class FSlateShaderResourceManager;
+
+protected:
+	/** Whether or not the brush path is a path to a UObject */
+	UPROPERTY()
+	uint8 bIsDynamicallyLoaded:1;
+
+	/** Whether or not the brush has a UTexture resource */
+	UPROPERTY()
+	uint8 bHasUObject_DEPRECATED:1;
+
+	/** This is true for all constructed brushes except for optional brushes */
+	uint8 bIsSet : 1;
+
 public:
+
+	/** How to draw the image */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Brush)
+	TEnumAsByte<enum ESlateBrushDrawType::Type > DrawAs;
+
+	/** How to tile the image in Image mode */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Brush)
+	TEnumAsByte<enum ESlateBrushTileType::Type> Tiling;
+
+	/** How to mirror the image in Image mode.  This is normally only used for dynamic image brushes where the source texture
+	    comes from a hardware device such as a web camera. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Brush)
+	TEnumAsByte<enum ESlateBrushMirrorType::Type> Mirroring;
+
+	/** The type of image */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = Brush)
+	TEnumAsByte<enum ESlateBrushImageType::Type> ImageType;
+
 	/** Size of the resource in Slate Units */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Brush)
-	FVector2D ImageSize;
+	FDeprecateSlateVector2D ImageSize;
 
 	/** The margin to use in Box and Border modes */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Brush, meta=( UVSpace="true" ))
@@ -130,18 +285,23 @@ public:
 	FSlateColor TintColor;
 
 public:
+	/** How to draw the outline.  Currently only used for RoundedBox type brushes. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Brush)
+	FSlateBrushOutlineSettings OutlineSettings;
+
+public:
 
 	/**
 	 * Default constructor.
 	 */
-	FSlateBrush();
+	SLATECORE_API FSlateBrush();
 
 	virtual ~FSlateBrush(){}
 
 public:
 
-	FVector2D GetImageSize() const { return ImageSize; }
-	void SetImageSize(FVector2D InImageSize) { ImageSize = InImageSize; }
+	UE::Slate::FDeprecateVector2DResult GetImageSize() const { return UE::Slate::FDeprecateVector2DResult(ImageSize); }
+	void SetImageSize(UE::Slate::FDeprecateVector2DParameter InImageSize) { ImageSize = InImageSize; }
 
 	const FMargin& GetMargin() const { return Margin; }
 
@@ -180,7 +340,7 @@ public:
 	/**
 	 * Sets the UObject that represents the brush resource.
 	 */
-	void SetResourceObject(class UObject* InResourceObject);
+	SLATECORE_API void SetResourceObject(class UObject* InResourceObject);
 
 	/**
 	 * Gets the brush's tint color.
@@ -227,7 +387,7 @@ public:
 	 *
 	 * @return UV region
 	 */
-	const FBox2D& GetUVRegion() const
+	UE::Slate::FDeprecateBox2D GetUVRegion() const
 	{
 		return UVRegion;
 	}
@@ -237,7 +397,12 @@ public:
 	 *
 	 * @param InUVRegion When valid - overrides UV region specified in resource proxy
 	 */
-	void SetUVRegion(const FBox2D& InUVRegion)
+	void SetUVRegion(const FBox2d& InUVRegion)
+	{
+		UVRegion = FBox2f(InUVRegion);
+	}
+
+	void SetUVRegion(const FBox2f& InUVRegion)
 	{
 		UVRegion = InUVRegion;
 	}
@@ -260,7 +425,8 @@ public:
 			&& ResourceObject == Other.ResourceObject
 			&& ResourceName == Other.ResourceName
 			&& bIsDynamicallyLoaded == Other.bIsDynamicallyLoaded
-			&& UVRegion == Other.UVRegion;
+			&& UVRegion == Other.UVRegion
+			&& (DrawAs != ESlateBrushDrawType::RoundedBox || OutlineSettings == Other.OutlineSettings); // Compare outline settings for equality only if we have a rounded box brush.
 	}
 
 	/**
@@ -286,17 +452,18 @@ public:
 	 *
 	 * @return Texture identifier string.
 	 */
-	static const FString UTextureIdentifier( );
+	static SLATECORE_API const FString UTextureIdentifier( );
 	
-	const FSlateResourceHandle& GetRenderingResource() const
+	const FSlateResourceHandle& GetRenderingResource(UE::Slate::FDeprecateVector2DParameter LocalSize, float DrawScale) const
 	{
-		if (!ResourceHandle.IsValid())
-		{
-			UpdateRenderingResource();
-		}
+		UpdateRenderingResource(LocalSize, DrawScale);
 
 		return ResourceHandle;
 	}
+
+	SLATECORE_API const FSlateResourceHandle& GetRenderingResource() const;
+
+	bool IsSet() const { return bIsSet; }
 
 #if WITH_EDITOR
 	void InvalidateResourceHandle()
@@ -306,8 +473,8 @@ public:
 #endif
 
 private:
-	void UpdateRenderingResource() const;
-	bool CanRenderResourceObject(UObject* InResourceObject) const;
+	SLATECORE_API void UpdateRenderingResource(FVector2f LocalSize, float DrawScale) const;
+	SLATECORE_API bool CanRenderResourceObject(UObject* InResourceObject) const;
 
 private:
 
@@ -315,12 +482,12 @@ private:
 	 * The image to render for this brush, can be a UTexture or UMaterialInterface or an object implementing 
 	 * the AtlasedTextureInterface. 
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Brush, meta=( AllowPrivateAccess="true", DisplayThumbnail="true", DisplayName="Image", AllowedClasses="Texture,MaterialInterface,SlateTextureAtlasInterface", DisallowedClasses = "MediaTexture"))
-	UObject* ResourceObject;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Brush, meta=( AllowPrivateAccess="true", DisplayThumbnail="true", DisplayName="Image", AllowedClasses="/Script/Engine.Texture,/Script/Engine.MaterialInterface,/Script/Engine.SlateTextureAtlasInterface", DisallowedClasses = "/Script/MediaAssets.MediaTexture"))
+	TObjectPtr<UObject> ResourceObject;
 
 protected:
 	/** The name of the rendering resource to use */
-	UPROPERTY()
+	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = Brush)
 	FName ResourceName;
 
 	/** 
@@ -328,37 +495,13 @@ protected:
 	 *  When valid - overrides UV region specified in resource proxy
 	 */
 	UPROPERTY()
-	FBox2D UVRegion;
+	FBox2f UVRegion;
 
 public:
-	/** How to draw the image */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Brush)
-	TEnumAsByte<enum ESlateBrushDrawType::Type > DrawAs;
-
-	/** How to tile the image in Image mode */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Brush)
-	TEnumAsByte<enum ESlateBrushTileType::Type> Tiling;
-
-	/** How to mirror the image in Image mode.  This is normally only used for dynamic image brushes where the source texture
-	    comes from a hardware device such as a web camera. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Brush)
-	TEnumAsByte<enum ESlateBrushMirrorType::Type> Mirroring;
-
-	/** The type of image */
-	UPROPERTY()
-	TEnumAsByte<enum ESlateBrushImageType::Type> ImageType;
 
 	/** Rendering resource for this brush */
 	mutable FSlateResourceHandle ResourceHandle;
 protected:
-
-	/** Whether or not the brush path is a path to a UObject */
-	UPROPERTY()
-	uint8 bIsDynamicallyLoaded:1;
-
-	/** Whether or not the brush has a UTexture resource */
-	UPROPERTY()
-	uint8 bHasUObject_DEPRECATED:1;
 
 	/** 
 	 * This constructor is protected; use one of the deriving classes instead.
@@ -369,17 +512,20 @@ protected:
 	 * @param InTiling        Tile horizontally/vertically or both? (only in image mode)
 	 * @param InImageType	  The type of image
 	 * @param InTint		  Tint to apply to the element.
+	 * @param InOutlineSettings Optional Outline Border Settings for RoundedBox mode
 	 */
-	 FORCENOINLINE FSlateBrush( ESlateBrushDrawType::Type InDrawType, const FName InResourceName, const FMargin& InMargin, ESlateBrushTileType::Type InTiling, ESlateBrushImageType::Type InImageType, const FVector2D& InImageSize, const FLinearColor& InTint = FLinearColor::White, UObject* InObjectResource = nullptr, bool bInDynamicallyLoaded = false );
+	 SLATECORE_API FORCENOINLINE FSlateBrush( ESlateBrushDrawType::Type InDrawType, const FName InResourceName, const FMargin& InMargin, ESlateBrushTileType::Type InTiling, ESlateBrushImageType::Type InImageType, const UE::Slate::FDeprecateVector2DParameter& InImageSize, const FLinearColor& InTint = FLinearColor::White, UObject* InObjectResource = nullptr, bool bInDynamicallyLoaded = false);
 
-	 FORCENOINLINE FSlateBrush( ESlateBrushDrawType::Type InDrawType, const FName InResourceName, const FMargin& InMargin, ESlateBrushTileType::Type InTiling, ESlateBrushImageType::Type InImageType, const FVector2D& InImageSize, const TSharedRef< FLinearColor >& InTint, UObject* InObjectResource = nullptr, bool bInDynamicallyLoaded = false );
+	 SLATECORE_API FORCENOINLINE FSlateBrush( ESlateBrushDrawType::Type InDrawType, const FName InResourceName, const FMargin& InMargin, ESlateBrushTileType::Type InTiling, ESlateBrushImageType::Type InImageType, const UE::Slate::FDeprecateVector2DParameter& InImageSize, const TSharedRef< FLinearColor >& InTint, UObject* InObjectResource = nullptr, bool bInDynamicallyLoaded = false);
 
-	 FORCENOINLINE FSlateBrush( ESlateBrushDrawType::Type InDrawType, const FName InResourceName, const FMargin& InMargin, ESlateBrushTileType::Type InTiling, ESlateBrushImageType::Type InImageType, const FVector2D& InImageSize, const FSlateColor& InTint, UObject* InObjectResource = nullptr, bool bInDynamicallyLoaded = false );
+	 SLATECORE_API FORCENOINLINE FSlateBrush( ESlateBrushDrawType::Type InDrawType, const FName InResourceName, const FMargin& InMargin, ESlateBrushTileType::Type InTiling, ESlateBrushImageType::Type InImageType, const UE::Slate::FDeprecateVector2DParameter& InImageSize, const FSlateColor& InTint, UObject* InObjectResource = nullptr, bool bInDynamicallyLoaded = false);
+
 };
 
 /** Provides a means to hold onto the source of a slate brush. */
 class ISlateBrushSource
 {
 public:
+	virtual ~ISlateBrushSource() = default;
 	virtual const FSlateBrush* GetSlateBrush() const = 0;
 };

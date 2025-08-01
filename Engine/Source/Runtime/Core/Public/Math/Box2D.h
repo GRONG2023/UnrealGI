@@ -2,23 +2,39 @@
 
 #pragma once
 
-#include "CoreTypes.h"
-#include "Misc/AssertionMacros.h"
-#include "Math/UnrealMathUtility.h"
+#include "Containers/Array.h"
 #include "Containers/UnrealString.h"
+#include "CoreTypes.h"
+#include "Math/UnrealMathUtility.h"
 #include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/LargeWorldCoordinates.h"
+#include "Misc/LargeWorldCoordinatesSerializer.h"
+#include "Serialization/Archive.h"
+#include "Templates/IsUECoreType.h"
+#include "Templates/UnrealTypeTraits.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
+
+template <typename T> struct TIsPODType;
 
 /**
  * Implements a rectangular 2D Box.
  */
-struct FBox2D
+namespace UE {
+namespace Math {
+
+template<typename T>
+struct TBox2
 {
 public:
+	using FReal = T;
+	
 	/** Holds the box's minimum point. */
-	FVector2D Min;
+	TVector2<T> Min;
 
 	/** Holds the box's maximum point. */
-	FVector2D Max;
+	TVector2<T> Max;
 
 	/** Holds a flag indicating whether this box is valid. */
 	bool bIsValid;
@@ -26,18 +42,7 @@ public:
 public:
 
 	/** Default constructor (no initialization). */
-	FBox2D() { }
-
-	/**
-	 * Creates and initializes a new box.
-	 *
-	 * The box extents are initialized to zero and the box is marked as invalid.
-	 */
-	UE_DEPRECATED(4.16, "Use ForceInit constructor instead.")
-	FBox2D( int32 )
-	{
-		Init();
-	}
+	TBox2<T>() { }
 
 	/**
 	 * Creates and initializes a new box.
@@ -46,7 +51,7 @@ public:
 	 *
 	 * @param EForceInit Force Init Enum.
 	 */
-	explicit FBox2D( EForceInit )
+	explicit TBox2<T>( EForceInit )
 	{
 		Init();
 	}
@@ -57,7 +62,7 @@ public:
 	 * @param InMin The box's minimum point.
 	 * @param InMax The box's maximum point.
 	 */
-	FBox2D( const FVector2D& InMin, const FVector2D& InMax )
+	TBox2<T>( const TVector2<T>& InMin, const TVector2<T>& InMax )
 		: Min(InMin)
 		, Max(InMax)
 		, bIsValid(true)
@@ -69,14 +74,14 @@ public:
 	 * @param Points Array of Points to create for the bounding volume.
 	 * @param Count The number of points.
 	 */
-	CORE_API FBox2D( const FVector2D* Points, const int32 Count );
+	TBox2<T>( const TVector2<T>* Points, const int32 Count );
 
 	/**
 	 * Creates and initializes a new box from an array of points.
 	 *
 	 * @param Points Array of Points to create for the bounding volume.
 	 */
-	CORE_API FBox2D( const TArray<FVector2D>& Points );
+	TBox2<T>( const TArray<TVector2<T>>& Points );
 
 public:
 
@@ -86,20 +91,32 @@ public:
 	 * @param Other The other box to compare with.
 	 * @return true if the boxes are equal, false otherwise.
 	 */
-	bool operator==( const FBox2D& Other ) const
+	bool operator==( const TBox2<T>& Other ) const
 	{
 		return (Min == Other.Min) && (Max == Other.Max);
 	}
 
 	/**
-	* Compares two boxes for inequality.
-	*
-	* @param Other The other box to compare with.
-	* @return true if the boxes are not equal, false otherwise.
-	*/
-	bool operator!=(const FBox2D& Other) const
+	 * Compares two boxes for inequality.
+	 *
+	 * @param Other The other box to compare with.
+	 * @return true if the boxes are not equal, false otherwise.
+	 */
+	bool operator!=( const TBox2<T>& Other ) const
 	{
 		return !(*this == Other);
+	}
+
+	/**
+	 * Checks for equality with error-tolerant comparison.
+	 *
+	 * @param Other The box to compare.
+	 * @param Tolerance Error tolerance.
+	 * @return true if the boxes are equal within specified tolerance, otherwise false.
+	 */
+	bool Equals( const TBox2<T>& Other, T Tolerance = UE_KINDA_SMALL_NUMBER ) const
+	{
+		return Min.Equals(Other.Min, Tolerance) && Max.Equals(Other.Max, Tolerance);
 	}
 
 	/**
@@ -108,7 +125,7 @@ public:
 	 * @param Other The point to increase the bounding volume to.
 	 * @return Reference to this bounding box after resizing to include the other point.
 	 */
-	FORCEINLINE FBox2D& operator+=( const FVector2D &Other );
+	FORCEINLINE TBox2<T>& operator+=( const TVector2<T> &Other );
 
 	/**
 	 * Gets the result of addition to this bounding volume.
@@ -116,9 +133,9 @@ public:
 	 * @param Other The other point to add to this.
 	 * @return A new bounding volume.
 	 */
-	FBox2D operator+( const FVector2D& Other ) const
+	TBox2<T> operator+( const TVector2<T>& Other ) const
 	{
-		return FBox2D(*this) += Other;
+		return TBox2<T>(*this) += Other;
 	}
 
 	/**
@@ -127,7 +144,7 @@ public:
 	 * @param Other The bounding volume to increase the bounding volume to.
 	 * @return Reference to this bounding volume after resizing to include the other bounding volume.
 	 */
-	FORCEINLINE FBox2D& operator+=( const FBox2D& Other );
+	FORCEINLINE TBox2<T>& operator+=( const TBox2<T>& Other );
 
 	/**
 	 * Gets the result of addition to this bounding volume.
@@ -135,9 +152,9 @@ public:
 	 * @param Other The other volume to add to this.
 	 * @return A new bounding volume.
 	 */
-	FBox2D operator+( const FBox2D& Other ) const
+	TBox2<T> operator+( const TBox2<T>& Other ) const
 	{
-		return FBox2D(*this) += Other;
+		return TBox2<T>(*this) += Other;
 	}
 
 	/**
@@ -146,7 +163,7 @@ public:
 	 * @param Index The index into points of the bounding volume.
 	 * @return A reference to a point of the bounding volume.
 	 */
-   FVector2D& operator[]( int32 Index )
+   TVector2<T>& operator[]( int32 Index )
 	{
 		check((Index >= 0) && (Index < 2));
 
@@ -166,10 +183,10 @@ public:
 	 * @param Point The point.
 	 * @return The distance.
 	 */
-	FORCEINLINE float ComputeSquaredDistanceToPoint( const FVector2D& Point ) const
+	FORCEINLINE T ComputeSquaredDistanceToPoint( const TVector2<T>& Point ) const
 	{
 		// Accumulates the distance as we iterate axis
-		float DistSquared = 0.f;
+		T DistSquared = 0.f;
 		
 		if (Point.X < Min.X)
 		{
@@ -189,7 +206,7 @@ public:
 			DistSquared += FMath::Square(Point.Y - Max.Y);
 		}
 		
-		return DistSquared;
+		return (T)DistSquared;
 	}
 
 	/** 
@@ -198,9 +215,20 @@ public:
 	 * @param W The size to increase volume by.
 	 * @return A new bounding box increased in size.
 	 */
-	FBox2D ExpandBy( const float W ) const
+	TBox2<T> ExpandBy( const T W ) const
 	{
-		return FBox2D(Min - FVector2D(W, W), Max + FVector2D(W, W));
+		return TBox2<T>(Min - TVector2<T>(W, W), Max + TVector2<T>(W, W));
+	}
+
+	/**
+     * Returns a box of increased size.
+     *
+     * @param V The size to increase the volume by.
+     * @return A new bounding box.
+     */
+	TBox2<T> ExpandBy(const TVector2<T>& V) const
+	{
+		return TBox2<T>(Min - V, Max + V);
 	}
 
 	/**
@@ -209,7 +237,7 @@ public:
 	 * @return Box area.
 	 * @see GetCenter, GetCenterAndExtents, GetExtent, GetSize
 	 */
-	float GetArea() const
+	T GetArea() const
 	{
 		return (Max.X - Min.X) * (Max.Y - Min.Y);
 	}
@@ -220,9 +248,9 @@ public:
 	 * @return Th center point.
 	 * @see GetArea, GetCenterAndExtents, GetExtent, GetSize
 	 */
-	FVector2D GetCenter() const
+	TVector2<T> GetCenter() const
 	{
-		return FVector2D((Min + Max) * 0.5f);
+		return TVector2<T>((Min + Max) * 0.5f);
 	}
 
 	/**
@@ -232,7 +260,7 @@ public:
 	 * @param Extents[out] reference to the extent around the center
 	 * @see GetArea, GetCenter, GetExtent, GetSize
 	 */
-	void GetCenterAndExtents( FVector2D & center, FVector2D & Extents ) const
+	void GetCenterAndExtents( TVector2<T> & center, TVector2<T> & Extents ) const
 	{
 		Extents = GetExtent();
 		center = Min + Extents;
@@ -245,7 +273,7 @@ public:
 	 *
 	 * @return The closest point on or inside the box.
 	 */
-	FORCEINLINE FVector2D GetClosestPointTo( const FVector2D& Point ) const;
+	FORCEINLINE TVector2<T> GetClosestPointTo( const TVector2<T>& Point ) const;
 
 	/**
 	 * Gets the box extents around the center.
@@ -253,9 +281,9 @@ public:
 	 * @return Box extents.
 	 * @see GetArea, GetCenter, GetCenterAndExtents, GetSize
 	 */
-	FVector2D GetExtent() const
+	TVector2<T> GetExtent() const
 	{
-		return 0.5f * (Max - Min);
+		return 0.5f * TVector2<T>(Max - Min);
 	}
 
 
@@ -265,9 +293,9 @@ public:
 	 * @return Box size.
 	 * @see GetArea, GetCenter, GetCenterAndExtents, GetExtent
 	 */
-	FVector2D GetSize() const
+	TVector2<T> GetSize() const
 	{
-		return (Max - Min);
+		return TVector2<T>(Max - Min);
 	}
 
 	/**
@@ -275,9 +303,17 @@ public:
 	 */
 	void Init()
 	{
-		Min = Max = FVector2D::ZeroVector;
+		Min = Max = TVector2<T>::ZeroVector;
 		bIsValid = false;
 	}
+
+	/**
+	 * Returns the overlap box of two boxes
+	 *
+	 * @param Other The bounding box to test overlap
+	 * @return the overlap box. Result will be invalid if they don't overlap
+	 */
+	TBox2<T> Overlap( const TBox2<T>& Other ) const;
 
 	/**
 	 * Checks whether the given box intersects this box.
@@ -285,7 +321,7 @@ public:
 	 * @param other bounding box to test intersection
 	 * @return true if boxes intersect, false otherwise.
 	 */
-	FORCEINLINE bool Intersect( const FBox2D & other ) const;
+	FORCEINLINE bool Intersect( const TBox2<T> & other ) const;
 
 	/**
 	 * Checks whether the given point is inside this box.
@@ -293,9 +329,21 @@ public:
 	 * @param Point The point to test.
 	 * @return true if the point is inside this box, otherwise false.
 	 */
-	bool IsInside( const FVector2D & TestPoint ) const
+	bool IsInside( const TVector2<T> & TestPoint ) const
 	{
 		return ((TestPoint.X > Min.X) && (TestPoint.X < Max.X) && (TestPoint.Y > Min.Y) && (TestPoint.Y < Max.Y));
+	}
+
+	/**
+	 * Checks whether the given point is inside or on this box.
+	 *
+	 * @param Point The point to test.
+	 * @return true if point is inside or on this box, otherwise false.
+	 * @see IsInside
+	 */
+	bool IsInsideOrOn( const TVector2<T>& TestPoint ) const
+	{
+		return ((TestPoint.X >= Min.X) && (TestPoint.X <= Max.X) && (TestPoint.Y >= Min.Y) && (TestPoint.Y <= Max.Y));
 	}
 
 	/** 
@@ -304,7 +352,7 @@ public:
 	 * @param Other The box to test for encapsulation within the bounding volume.
 	 * @return true if box is inside this volume, false otherwise.
 	 */
-	bool IsInside( const FBox2D& Other ) const
+	bool IsInside( const TBox2<T>& Other ) const
 	{
 		return (IsInside(Other.Min) && IsInside(Other.Max));
 	}
@@ -315,9 +363,21 @@ public:
 	 * @param The offset vector to shift by.
 	 * @return A new shifted bounding box.
 	 */
-	FBox2D ShiftBy( const FVector2D& Offset ) const
+	TBox2<T> ShiftBy( const TVector2<T>& Offset ) const
 	{
-		return FBox2D(Min + Offset, Max + Offset);
+		return TBox2<T>(Min + Offset, Max + Offset);
+	}
+
+	/**
+	 * Returns a box with its center moved to the new destination.
+	 *
+	 * @param Destination The destination point to move center of box to.
+	 * @return A new bounding box.
+	 */
+	TBox2<T> MoveTo(const TVector2<T>& Destination) const
+	{
+		const TVector2<T> Offset = Destination - GetCenter();
+		return TBox2<T>(Min + Offset, Max + Offset);
 	}
 
 	/**
@@ -337,17 +397,60 @@ public:
 	 *
 	 * @return Reference to the Archive after serialization.
 	 */
-	friend FArchive& operator<<( FArchive& Ar, FBox2D& Box )
+	friend FArchive& operator<<( FArchive& Ar, TBox2<T>& Box )
 	{
 		return Ar << Box.Min << Box.Max << Box.bIsValid;
 	}
+
+	// Note: TBox2 is usually written via binary serialization. This function exists for SerializeFromMismatchedTag conversion usage. 
+	bool Serialize(FArchive& Ar)
+	{
+		Ar << Min << Max;
+		// Can't do Ar << bIsValid as that performs legacy UBOOL (uint32) serialization.
+		uint8 bValid = bIsValid;
+		Ar.Serialize(&bValid, sizeof(uint8));
+		bIsValid = !!bValid;
+		return true;
+	}
+
+	bool SerializeFromMismatchedTag(FName StructTag, FArchive& Ar);
+
+	// Conversion from other type. 
+	template<typename FArg, TEMPLATE_REQUIRES(!std::is_same_v<T, FArg>)>
+	explicit TBox2(const TBox2<FArg>& From) : Min((TVector2<T>)From.Min), Max((TVector2<T>)From.Max), bIsValid(From.bIsValid) {}
 };
 
 
-/* FBox2D inline functions
+/* TBox2 inline functions
  *****************************************************************************/
 
-FORCEINLINE FBox2D& FBox2D::operator+=( const FVector2D &Other )
+template<typename T>
+TBox2<T>::TBox2(const TVector2<T>* Points, const int32 Count)
+	: Min(0.f, 0.f)
+	, Max(0.f, 0.f)
+	, bIsValid(false)
+{
+	for (int32 PointItr = 0; PointItr < Count; PointItr++)
+	{
+		*this += Points[PointItr];
+	}
+}
+
+template<typename T>
+TBox2<T>::TBox2(const TArray<TVector2<T>>& Points)
+	: Min(0.f, 0.f)
+	, Max(0.f, 0.f)
+	, bIsValid(false)
+{
+	for(const TVector2<T>& EachPoint : Points)
+	{
+		*this += EachPoint;
+	}
+}
+
+
+template<typename T>
+FORCEINLINE TBox2<T>& TBox2<T>::operator+=( const TVector2<T> &Other )
 {
 	if (bIsValid)
 	{
@@ -367,8 +470,8 @@ FORCEINLINE FBox2D& FBox2D::operator+=( const FVector2D &Other )
 	return *this;
 }
 
-
-FORCEINLINE FBox2D& FBox2D::operator+=( const FBox2D& Other )
+template<typename T>
+FORCEINLINE TBox2<T>& TBox2<T>::operator+=( const TBox2<T>& Other )
 {
 	if (bIsValid && Other.bIsValid)
 	{
@@ -386,11 +489,11 @@ FORCEINLINE FBox2D& FBox2D::operator+=( const FBox2D& Other )
 	return *this;
 }
 
-
-FORCEINLINE FVector2D FBox2D::GetClosestPointTo( const FVector2D& Point ) const
+template<typename T>
+FORCEINLINE TVector2<T> TBox2<T>::GetClosestPointTo( const TVector2<T>& Point ) const
 {
 	// start by considering the point inside the box
-	FVector2D ClosestPoint = Point;
+	TVector2<T> ClosestPoint = Point;
 
 	// now clamp to inside box if it's outside
 	if (Point.X < Min.X)
@@ -415,8 +518,30 @@ FORCEINLINE FVector2D FBox2D::GetClosestPointTo( const FVector2D& Point ) const
 	return ClosestPoint;
 }
 
+template<typename T>
+TBox2<T> TBox2<T>::Overlap(const TBox2<T>& Other) const
+{
+	if (Intersect(Other) == false)
+	{
+		static TBox2<T> EmptyBox(ForceInit);
+		return EmptyBox;
+	}
 
-FORCEINLINE bool FBox2D::Intersect( const FBox2D & Other ) const
+	// otherwise they overlap
+	// so find overlapping box
+	TVector2<T> MinVector, MaxVector;
+
+	MinVector.X = FMath::Max(Min.X, Other.Min.X);
+	MaxVector.X = FMath::Min(Max.X, Other.Max.X);
+
+	MinVector.Y = FMath::Max(Min.Y, Other.Min.Y);
+	MaxVector.Y = FMath::Min(Max.Y, Other.Max.Y);
+
+	return TBox2<T>(MinVector, MaxVector);
+}
+
+template<typename T>
+FORCEINLINE bool TBox2<T>::Intersect( const TBox2<T> & Other ) const
 {
 	if ((Min.X > Other.Max.X) || (Other.Min.X > Max.X))
 	{
@@ -431,8 +556,34 @@ FORCEINLINE bool FBox2D::Intersect( const FBox2D & Other ) const
 	return true;
 }
 
-
-FORCEINLINE FString FBox2D::ToString() const
+template<typename T>
+FORCEINLINE FString TBox2<T>::ToString() const
 {
 	return FString::Printf(TEXT("bIsValid=%s, Min=(%s), Max=(%s)"), bIsValid ? TEXT("true") : TEXT("false"), *Min.ToString(), *Max.ToString());
+}
+
+} // namespace Math
+} // namespace UE
+
+UE_DECLARE_LWC_TYPE(Box2,, FBox2D);
+
+//template<> struct TCanBulkSerialize<FBox2f> { enum { Value = true }; };
+template<> struct TIsPODType<FBox2f> { enum { Value = true }; };
+template<> struct TIsUECoreVariant<FBox2f> { enum { Value = true }; };
+
+//template<> struct TCanBulkSerialize<FBox2d> { enum { Value = false }; };	// LWC_TODO: This can be done (via versioning) once LWC is fixed to on.
+template<> struct TIsPODType<FBox2d> { enum { Value = true }; };
+template<> struct TIsUECoreVariant<FBox2d> { enum { Value = true }; };
+
+
+template<>
+inline bool FBox2f::SerializeFromMismatchedTag(FName StructTag, FArchive& Ar)
+{
+	return UE_SERIALIZE_VARIANT_FROM_MISMATCHED_TAG(Ar, Box2D, Box2f, Box2d);
+}
+
+template<>
+inline bool FBox2d::SerializeFromMismatchedTag(FName StructTag, FArchive& Ar)
+{
+	return UE_SERIALIZE_VARIANT_FROM_MISMATCHED_TAG(Ar, Box2D, Box2d, Box2f);
 }

@@ -1,18 +1,50 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SBlueprintContextTargetMenu.h"
-#include "Engine/Blueprint.h"
-#include "Misc/ConfigCacheIni.h"
-#include "Widgets/SBoxPanel.h"
-#include "Styling/SlateTypes.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Input/SCheckBox.h"
-#include "EditorStyleSet.h"
-#include "Components/ActorComponent.h"
-#include "EdGraphSchema_K2.h"
-#include "K2Node.h"
+
+#include "BlueprintActionFilter.h"
 #include "BlueprintEditorSettings.h"
+#include "Components/ActorComponent.h"
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "CoreGlobals.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraphSchema_K2.h"
+#include "Engine/Blueprint.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "K2Node.h"
+#include "Layout/Margin.h"
+#include "Misc/Attribute.h"
+#include "Misc/ConfigCacheIni.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateColor.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/Casts.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/SubclassOf.h"
+#include "Types/SlateEnums.h"
+#include "Types/SlateStructs.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ReflectedTypeAccessors.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/Input/SCheckBox.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SSeparator.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SNullWidget.h"
+#include "Widgets/Text/STextBlock.h"
+
+class SWidget;
 
 #define LOCTEXT_NAMESPACE "SBlueprintContextTargetMenu"
 
@@ -372,6 +404,12 @@ FContextMenuTargetProfile::FContextMenuTargetProfile(const FBlueprintActionConte
 		SavedTargetFlags = 0;
 	}
 
+	if (BpSettings->bEnableNamespaceFilteringFeatures)
+	{
+		// Filter out non-imported types by default, but do so only if namespace filtering features are also enabled.
+		SavedTargetFlags &= ~EContextTargetFlags::TARGET_NonImportedTypes;
+	}
+
 	if (!LoadProfile())
 	{
 		// maybe they were originally using the shared context profile? so let's default to that
@@ -467,7 +505,7 @@ bool FContextMenuTargetProfile::LoadProfile()
 /**  */
 namespace BlueprintContextTargetMenuImpl
 {
-	static FText GetContextTargetDisplayName(UEnum* Enum, int32 EnumIndex)
+	static FText GetContextTargetDisplayName(const UEnum* Enum, int32 EnumIndex)
 	{
 		if (Enum != nullptr)
 		{
@@ -483,20 +521,41 @@ void SBlueprintContextTargetMenu::Construct(const FArguments& InArgs, const FBlu
 	TargetProfile = FContextMenuTargetProfile(MenuContext);
 	OnTargetMaskChanged = InArgs._OnTargetMaskChanged;
 
-	FSlateFontInfo HeaderFontStyle = FEditorStyle::GetFontStyle("BlueprintEditor.ActionMenu.ContextDescriptionFont");
-	HeaderFontStyle.Size -= 2.f;
-	FText const HeaderText = ContextMenuTargetProfileImpl::GetProfileDescription(MenuContext);
+	FSlateFontInfo HeaderFontStyle = FAppStyle::GetFontStyle("BlueprintEditor.ActionMenu.ContextDescriptionFont");
+	HeaderFontStyle.Size -= 2;
+	const FText HeaderText = ContextMenuTargetProfileImpl::GetProfileDescription(MenuContext);
 
-	FText const MenuToolTip = LOCTEXT("MenuToolTip", "Select whose functions/variables you want to see.\nNOTE: Unchecking everything is akin to 'SHOW EVERYTHING' (you're choosing to have NO target context and to not limit the scope)");
+	const FText MenuToolTip = LOCTEXT("MenuToolTip", "Select whose functions/variables you want to see.\nNOTE: Unchecking everything is akin to 'SHOW EVERYTHING' (you're choosing to have NO target context and to not limit the scope)");
+
+	TSharedRef<SWidget> CustomContentWidget = InArgs._CustomTargetContent.Widget;
+	if (CustomContentWidget != SNullWidget::NullWidget)
+	{
+		SAssignNew(CustomContentWidget, SBox)
+		[
+			SNew(SVerticalBox)
+			+SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.f, 4.f, 0.f, 0.f)
+			[
+				SNew(SSeparator)
+			]
+			+SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(4.f)
+			[
+				CustomContentWidget
+			]
+		];
+	}
 
 	TSharedPtr<SHorizontalBox> MenuBody;
 	SBorder::Construct(SBorder::FArguments()
-		.BorderImage(FEditorStyle::GetBrush("Menu.Background"))
+		.BorderImage(FAppStyle::GetBrush("Menu.Background"))
 		.Padding(5.f)
 		.ToolTipText(MenuToolTip)
 		[
 			SNew(SBox)
-				.MinDesiredWidth(200)
+				.MinDesiredWidth(200.0f)
 				.ToolTipText(MenuToolTip)
 				.Padding(FMargin(0.f, 0.f, 0.f, 18.f))
 			[
@@ -505,8 +564,8 @@ void SBlueprintContextTargetMenu::Construct(const FArguments& InArgs, const FBlu
 				.AutoHeight()
 				[
 					SNew(SBorder)
-						.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
-						.ForegroundColor(FEditorStyle::GetSlateColor("DefaultForeground"))
+						.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+						.ForegroundColor(FAppStyle::GetSlateColor("DefaultForeground"))
 					[
 						SNew(STextBlock)
 							.Text(HeaderText)
@@ -520,6 +579,11 @@ void SBlueprintContextTargetMenu::Construct(const FArguments& InArgs, const FBlu
 				[
 					SAssignNew(MenuBody, SHorizontalBox)
 						.ToolTipText(MenuToolTip)
+				]
+				+SVerticalBox::Slot()
+					.AutoHeight()
+				[
+					CustomContentWidget
 				]
 			]
 		]
@@ -538,8 +602,8 @@ void SBlueprintContextTargetMenu::Construct(const FArguments& InArgs, const FBlu
 		];
 	}
 
-	UEnum* const TargetEnum = StaticEnum<EContextTargetFlags::Type>();
-	uint32 const GreatestFlag = (EContextTargetFlags::ContextTargetFlagsEnd & ~1);
+	const UEnum* TargetEnum = StaticEnum<EContextTargetFlags::Type>();
+	const uint32 GreatestFlag = (EContextTargetFlags::ContextTargetFlagsEnd & ~1);
 
 	int32  ColIndex = 0;
 	for (int32 BitMaskOffset = 0; (1 << BitMaskOffset) <= GreatestFlag; ++BitMaskOffset)
@@ -550,8 +614,14 @@ void SBlueprintContextTargetMenu::Construct(const FArguments& InArgs, const FBlu
 		{
 			continue;
 		}
+
+		// Keep this target hidden for now unless namespace filtering features are turned on.
+		if (ContextTarget == EContextTargetFlags::TARGET_NonImportedTypes && !GetDefault<UBlueprintEditorSettings>()->bEnableNamespaceFilteringFeatures)
+		{
+			continue;
+		}
 		
-		FText const MenuName = BlueprintContextTargetMenuImpl::GetContextTargetDisplayName(TargetEnum, BitMaskOffset);
+		const FText MenuName = BlueprintContextTargetMenuImpl::GetContextTargetDisplayName(TargetEnum, BitMaskOffset);
 		const FContextMenuTargetProfile& ProfileRef = TargetProfile;
 
 		Columns[ColIndex]->AddSlot()

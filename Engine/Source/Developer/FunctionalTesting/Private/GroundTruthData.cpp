@@ -4,8 +4,9 @@
 
 #include "UObject/UnrealType.h"
 #include "UObject/Package.h"
+#include "UObject/SavePackage.h"
 #include "Misc/PackageName.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 
 #if WITH_EDITOR
 #include "ISourceControlModule.h"
@@ -13,6 +14,8 @@
 #include "SourceControlOperations.h"
 #include "SourceControlHelpers.h"
 #endif
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(GroundTruthData)
 
 DEFINE_LOG_CATEGORY_STATIC(GroundTruthLog, Log, Log)
 
@@ -70,7 +73,12 @@ void UGroundTruthData::SaveObject(UObject* GroundTruth)
 	GroundTruth->Rename(nullptr, this);
 	MarkPackageDirty();
 
-	if (!UPackage::SavePackage(GroundTruthPackage, NULL, RF_Standalone, *FPackageName::LongPackageNameToFilename(GroundTruthPackageName, FPackageName::GetAssetPackageExtension()), GError, nullptr, false, true, SAVE_NoError))
+	FSavePackageArgs SaveArgs;
+	SaveArgs.TopLevelFlags = RF_Standalone;
+	SaveArgs.SaveFlags = SAVE_NoError;
+	if (!UPackage::SavePackage(GroundTruthPackage, nullptr,
+		*FPackageName::LongPackageNameToFilename(GroundTruthPackageName, FPackageName::GetAssetPackageExtension()),
+		SaveArgs))
 	{
 		UE_LOG(GroundTruthLog, Error, TEXT("Failed to save ground truth data! %s"), *GroundTruthPackageName);
 	}
@@ -103,3 +111,23 @@ void UGroundTruthData::PostEditChangeProperty(FPropertyChangedEvent& PropertyCha
 }
 
 #endif
+
+void UGroundTruthData::ResetObject()
+{
+	#if WITH_EDITOR
+
+		if (ObjectData)
+		{
+			ObjectData->Rename(nullptr, GetTransientPackage());
+			ObjectData = nullptr;
+
+			MarkPackageDirty();
+		}
+
+	#else
+		FAssetData GroundTruthAssetData(this);
+		FString GroundTruthPackageName = GroundTruthAssetData.PackageName.ToString();
+
+		UE_LOG(GroundTruthLog, Error, TEXT("Can't reset ground truth data outside of the editor, '%s'."), *GroundTruthPackageName);
+	#endif
+}	

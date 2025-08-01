@@ -11,8 +11,9 @@
 #include "Engine/Level.h"
 #include "Engine/World.h"
 #include "Engine/LevelStreaming.h"
+#include "UObject/SavePackage.h"
 #include "UObject/UObjectHash.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "PackageHelperFunctions.h"
 #include "ISourceControlOperation.h"
 #include "SourceControlOperations.h"
@@ -63,32 +64,34 @@ void UConvertLevelsToExternalActorsCommandlet::GetSubLevelsToConvert(ULevel* Mai
 
 bool UConvertLevelsToExternalActorsCommandlet::CheckExternalActors(const FString& Level, bool bRepair)
 {
-	const FString LevelExternalPathActors = ULevel::GetExternalActorsPath(Level);
-
 	// Gather duplicated actor files.
-	TMultiMap<FName, FName> DuplicatedActorFiles;
+	TMultiMap<FSoftObjectPath, FName> DuplicatedActorFiles;
 	{
-		TMap<FName, FName> ActorFiles;
+		TMap<FSoftObjectPath, FName> ActorFiles;
 
 		IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+
+		// Let the asset registry process any pending operations before continuing
+		AssetRegistry.Tick(-1);
+
 		FDelegateHandle AddedCheckHandle = AssetRegistry.OnAssetAdded().AddLambda([&ActorFiles](const FAssetData& AssetData)
 		{
-			check(!ActorFiles.Contains(AssetData.ObjectPath));
-			ActorFiles.Add(AssetData.ObjectPath, AssetData.PackageName);
+			check(!ActorFiles.Contains(AssetData.GetSoftObjectPath()));
+			ActorFiles.Add(AssetData.GetSoftObjectPath(), AssetData.PackageName);
 		});
 
 		FDelegateHandle UpdatedCheckHandle = AssetRegistry.OnAssetUpdated().AddLambda([&ActorFiles, &DuplicatedActorFiles](const FAssetData& AssetData)
 		{
 			FName ExistingPackageName;
-			if (ActorFiles.RemoveAndCopyValue(AssetData.ObjectPath, ExistingPackageName))
+			if (ActorFiles.RemoveAndCopyValue(AssetData.GetSoftObjectPath(), ExistingPackageName))
 			{
-				DuplicatedActorFiles.Add(AssetData.ObjectPath, ExistingPackageName);
+				DuplicatedActorFiles.Add(AssetData.GetSoftObjectPath(), ExistingPackageName);
 			}
 
-			DuplicatedActorFiles.Add(AssetData.ObjectPath, AssetData.PackageName);			
+			DuplicatedActorFiles.Add(AssetData.GetSoftObjectPath(), AssetData.PackageName);
 		});
 
-		AssetRegistry.ScanPathsSynchronous({LevelExternalPathActors});
+		AssetRegistry.ScanPathsSynchronous(ULevel::GetExternalObjectsPaths(Level), /*bForceRescan*/true, /*bIgnoreDenyListScanFilters*/true);
 
 		AssetRegistry.OnAssetAdded().Remove(AddedCheckHandle);
 		AssetRegistry.OnAssetUpdated().Remove(UpdatedCheckHandle);
@@ -98,14 +101,14 @@ bool UConvertLevelsToExternalActorsCommandlet::CheckExternalActors(const FString
 	{
 		// Gather unique keys from the duplicated map.
 		// Note: TMultiMap::GenerateKeyArray will return duplicated keys, clean that.
-		TArray<FName> DuplicatedActorFilesKeys;
+		TArray<FSoftObjectPath> DuplicatedActorFilesKeys;
 		DuplicatedActorFiles.GenerateKeyArray(DuplicatedActorFilesKeys);
-		DuplicatedActorFilesKeys.Sort([](const FName& A, const FName& B) { return A.FastLess(B); });
+		DuplicatedActorFilesKeys.Sort([](const FSoftObjectPath& A, const FSoftObjectPath& B) { return A.FastLess(B); });
 		int32 EndIndex = Algo::Unique(DuplicatedActorFilesKeys);
 		DuplicatedActorFilesKeys.RemoveAt(EndIndex, DuplicatedActorFilesKeys.Num() - EndIndex);
 
 		// Report or delete duplicated entries, keeping the latest one
-		for (const FName& DuplicatedActorFileKey : DuplicatedActorFilesKeys)
+		for (const FSoftObjectPath& DuplicatedActorFileKey : DuplicatedActorFilesKeys)
 		{
 			TArray<FName> DuplicatedActorFilesPaths;
 			DuplicatedActorFiles.MultiFind(DuplicatedActorFileKey, DuplicatedActorFilesPaths);
@@ -159,10 +162,10 @@ bool UConvertLevelsToExternalActorsCommandlet::AddPackageToSourceControl(UPackag
 
 		if (SourceControlState.IsValid() && !SourceControlState->IsSourceControlled())
 		{
-			UE_LOG(LogConvertLevelsToExternalActorsCommandlet, Log, TEXT("Adding package %s to source control"), *PackageFilename);
+			UE_LOG(LogConvertLevelsToExternalActorsCommandlet, Log, TEXT("Adding package %s to revision control"), *PackageFilename);
 			if (GetSourceControlProvider().Execute(ISourceControlOperation::Create<FMarkForAdd>(), Package) != ECommandResult::Succeeded)
 			{
-				UE_LOG(LogConvertLevelsToExternalActorsCommandlet, Error, TEXT("Error adding %s to source control."), *PackageFilename);
+				UE_LOG(LogConvertLevelsToExternalActorsCommandlet, Error, TEXT("Error adding %s to revision control."), *PackageFilename);
 				return false;
 			}
 		}
@@ -175,8 +178,9 @@ bool UConvertLevelsToExternalActorsCommandlet::SavePackage(UPackage* Package)
 {
 	// Use GEditor save as it does some UWorld specific shenanigans such as handle level offsets
 	FString PackageFileName = SourceControlHelpers::PackageFilename(Package);
-	FSavePackageResultStruct SaveResult = GEditor->Save(Package, nullptr, RF_Standalone, *PackageFileName,
-		GError, nullptr, false, true, SAVE_None);
+	FSavePackageArgs SaveArgs;
+	SaveArgs.TopLevelFlags = RF_Standalone;
+	FSavePackageResultStruct SaveResult = GEditor->Save(Package, nullptr, *PackageFileName, SaveArgs);
 
 	if (SaveResult.Result != ESavePackageResult::Success)
 	{
@@ -214,7 +218,7 @@ bool UConvertLevelsToExternalActorsCommandlet::CheckoutPackage(UPackage* Package
 			}
 			else if (SourceControlState->IsSourceControlled())
 			{
-				UE_LOG(LogConvertLevelsToExternalActorsCommandlet, Log, TEXT("Checking out package %s from source control"), *PackageFilename);
+				UE_LOG(LogConvertLevelsToExternalActorsCommandlet, Log, TEXT("Checking out package %s from revision control"), *PackageFilename);
 				return GetSourceControlProvider().Execute(ISourceControlOperation::Create<FCheckOut>(), Package) == ECommandResult::Succeeded;
 			}
 		}
@@ -267,26 +271,26 @@ bool UConvertLevelsToExternalActorsCommandlet::DeleteFile(const FString& Filenam
 			{
 				if (GetSourceControlProvider().Execute(ISourceControlOperation::Create<FRevert>(), Filename) != ECommandResult::Succeeded)
 				{
-					UE_LOG(LogConvertLevelsToExternalActorsCommandlet, Error, TEXT("Error reverting package %s from source control"), *Filename);
+					UE_LOG(LogConvertLevelsToExternalActorsCommandlet, Error, TEXT("Error reverting package %s from revision control"), *Filename);
 					return false;
 				}
 			}
 			else
 			{
-				UE_LOG(LogConvertLevelsToExternalActorsCommandlet, Log, TEXT("Deleting package %s from source control"), *Filename);
+				UE_LOG(LogConvertLevelsToExternalActorsCommandlet, Log, TEXT("Deleting package %s from revision control"), *Filename);
 
 				if (SourceControlState->IsCheckedOut())
 				{
 					if (GetSourceControlProvider().Execute(ISourceControlOperation::Create<FRevert>(), Filename) != ECommandResult::Succeeded)
 					{
-						UE_LOG(LogConvertLevelsToExternalActorsCommandlet, Error, TEXT("Error reverting package %s from source control"), *Filename);
+						UE_LOG(LogConvertLevelsToExternalActorsCommandlet, Error, TEXT("Error reverting package %s from revision control"), *Filename);
 						return false;
 					}
 				}
 
 				if (GetSourceControlProvider().Execute(ISourceControlOperation::Create<FDelete>(), Filename) != ECommandResult::Succeeded)
 				{
-					UE_LOG(LogConvertLevelsToExternalActorsCommandlet, Error, TEXT("Error deleting package %s from source control"), *Filename);
+					UE_LOG(LogConvertLevelsToExternalActorsCommandlet, Error, TEXT("Error deleting package %s from revision control"), *Filename);
 					return false;
 				}
 			}
@@ -377,11 +381,17 @@ int32 UConvertLevelsToExternalActorsCommandlet::Main(const FString& Params)
 	TArray<UPackage*> PackagesToSave;
 	for(ULevel* Level : LevelsToConvert)
 	{
-		Level->SetUseExternalActors(bConvertToExternal);
 		Level->ConvertAllActorsToPackaging(bConvertToExternal);
 		UPackage* LevelPackage = Level->GetPackage();
 		PackagesToSave.Add(LevelPackage);
-		PackagesToSave.Append(Level->GetLoadedExternalActorPackages());
+
+		for (UPackage* ExternalPackage : Level->GetLoadedExternalObjectPackages())
+		{
+			if (!UPackage::IsEmptyPackage(ExternalPackage))
+			{
+				PackagesToSave.Add(ExternalPackage);
+			}
+		}
 	}
 
 	for (UPackage* PackageToSave : PackagesToSave)

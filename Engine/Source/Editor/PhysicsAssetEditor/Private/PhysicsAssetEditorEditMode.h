@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "UnrealWidget.h"
+#include "UnrealWidgetFwd.h"
 #include "IPersonaEditMode.h"
 #include "PhysicsEngine/ShapeElem.h"
 
@@ -44,12 +44,14 @@ public:
 	virtual bool AllowWidgetMove() override;
 	virtual bool ShouldDrawWidget() const override;
 	virtual bool UsesTransformWidget() const override;
-	virtual bool UsesTransformWidget(FWidget::EWidgetMode CheckMode) const override;
+	virtual bool UsesTransformWidget(UE::Widget::EWidgetMode CheckMode) const override;
 	virtual FVector GetWidgetLocation() const override;
 	virtual bool GetCustomDrawingCoordinateSystem(FMatrix& InMatrix, void* InData) override;
 	virtual bool GetCustomInputCoordinateSystem(FMatrix& InMatrix, void* InData) override;
 	virtual bool HandleClick(FEditorViewportClient* InViewportClient, HHitProxy *HitProxy, const FViewportClick &Click) override;
 	virtual bool IsCompatibleWith(FEditorModeID OtherModeID) const override { return true; }
+	virtual bool ReceivedFocus(FEditorViewportClient* ViewportClient, FViewport* Viewport);
+	virtual bool LostFocus(FEditorViewportClient* ViewportClient, FViewport* Viewport);
 
 private:
 	/** Simulation mouse forces */
@@ -76,6 +78,9 @@ private:
 
 	void OpenSelectionMenu(FEditorViewportClient* InViewportClient);
 
+	/** Returns the identifier for the constraint frame (child or parent) in which the manipulator widget should be drawn. */
+	EConstraintFrame::Type GetConstraintFrameForWidget() const;
+
 private:
 	/** Shared data */
 	FPhysicsAssetEditorSharedData* SharedData;
@@ -88,7 +93,6 @@ private:
 	const float PhysicsAssetEditor_TranslateSpeed;
 	const float PhysicsAssetEditor_RotateSpeed;
 	const float PhysicsAssetEditor_LightRotSpeed;
-	const float	SimGrabCheckDistance;
 	const float	SimHoldDistanceChangeDelta;
 	const float	SimMinHoldDistance;
 	const float SimGrabMoveSpeed;

@@ -16,12 +16,12 @@
  * - Has an upper limit of the number of items it will store.
  * - Any item that is added to the array is moved to the top.
  */
-template<typename T, typename Allocator = FDefaultAllocator>
+template<typename T, typename InAllocator = FDefaultAllocator>
 class TMRUArray
-	: public TArray<T, Allocator>
+	: public TArray<T, InAllocator>
 {
 public:
-	typedef TArray<T, Allocator> Super;
+	typedef TArray<T, InAllocator> Super;
 
 	/** The maximum number of items we can store in this array. */
 	int32 MaxItems;
@@ -81,9 +81,7 @@ public:
 	{
 		// Remove any existing copies of the item.
 		this->Remove(Item);
-
-		this->InsertUninitialized(0);
-		(*this)[0] = Item;
+		this->Insert(Item, 0);
 
 		CullArray();
 
@@ -108,11 +106,5 @@ public:
 	}
 };
 
-
-template<typename T, typename Allocator>
-struct TContainerTraits<TMRUArray<T, Allocator> > : public TContainerTraitsBase<TMRUArray<T, Allocator> >
-{
-	enum { MoveWillEmptyContainer = TContainerTraitsBase<typename TMRUArray<T, Allocator>::Super>::MoveWillEmptyContainer };
-};
 
 

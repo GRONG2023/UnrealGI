@@ -10,15 +10,11 @@
 #include "HAL/IConsoleManager.h"
 #include "Misc/CoreDelegates.h"
 
-#if USE_MALLOC_PROFILER && WITH_ENGINE && IS_MONOLITHIC
-	#include "Runtime/Engine/Public/MallocProfilerEx.h"
-#endif
-
 /*-----------------------------------------------------------------------------
 	Memory functions.
 -----------------------------------------------------------------------------*/
 
-#include "ProfilingDebugging/MallocProfiler.h"
+#include "ProfilingDebugging/MemoryTrace.h"
 #include "HAL/MallocThreadSafeProxy.h"
 #include "HAL/MallocVerify.h"
 #include "HAL/MallocLeakDetectionProxy.h"
@@ -26,6 +22,7 @@
 #include "HAL/MallocPoisonProxy.h"
 #include "HAL/MallocDoubleFreeFinder.h"
 #include "HAL/MallocFrameProfiler.h"
+#include "HAL/MallocStomp2.h"
 
 #if MALLOC_GT_HOOKS
 
@@ -178,10 +175,12 @@ public:
 		return(UsedMalloc->ValidateHeap());
 	}
 
+#if UE_ALLOW_EXEC_COMMANDS
 	virtual bool Exec(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar) override
 	{
 		return UsedMalloc->Exec(InWorld, Cmd, Ar);
 	}
+#endif // UE_ALLOW_EXEC_COMMANDS
 
 	/**
 	* If possible determine the size of the memory allocated at the given address
@@ -214,6 +213,21 @@ public:
 	virtual const TCHAR* GetDescriptiveName() override
 	{
 		return UsedMalloc->GetDescriptiveName();
+	}
+
+	virtual void OnMallocInitialized() override
+	{
+		UsedMalloc->OnMallocInitialized();
+	}
+
+	virtual void OnPreFork() override
+	{
+		UsedMalloc->OnPreFork();
+	}
+
+	virtual void OnPostFork() override
+	{
+		UsedMalloc->OnPostFork();
 	}
 };
 
@@ -320,17 +334,18 @@ FConsoleCommandDelegate::CreateStatic(&FMemory::EnablePoisonTests)
 /** Helper function called on first allocation to create and initialize GMalloc */
 static int FMemory_GCreateMalloc_ThreadUnsafe()
 {
+	GMalloc = FPlatformMemory::BaseAllocator();
+
 #if !PLATFORM_MAC
 	FPlatformMemoryStats Stats = FPlatformMemory::GetStats();
 	uint64 ProgramSize = Stats.UsedPhysical;
 #endif
 
-	GMalloc = FPlatformMemory::BaseAllocator();
 	// Setup malloc crash as soon as possible.
 	FPlatformMallocCrash::Get( GMalloc );
 
 #if PLATFORM_USES_FIXED_GMalloc_CLASS
-#if USE_MALLOC_PROFILER || MALLOC_VERIFY || MALLOC_LEAKDETECTION || UE_USE_MALLOC_FILL_BYTES
+#if MALLOC_VERIFY || MALLOC_LEAKDETECTION || UE_USE_MALLOC_FILL_BYTES
 #error "Turn off PLATFORM_USES_FIXED_GMalloc_CLASS in order to use special allocator proxies"
 #endif
 	if (!GMalloc->IsInternallyThreadSafe())
@@ -338,15 +353,18 @@ static int FMemory_GCreateMalloc_ThreadUnsafe()
 		UE_LOG(LogMemory, Fatal, TEXT("PLATFORM_USES_FIXED_GMalloc_CLASS only makes sense for allocators that are internally threadsafe."));
 	}
 #else
-// so now check to see if we are using a Mem Profiler which wraps the GMalloc
-#if USE_MALLOC_PROFILER
-	#if WITH_ENGINE && IS_MONOLITHIC
-		GMallocProfiler = new FMallocProfilerEx( GMalloc );
-	#else
-		GMallocProfiler = new FMallocProfiler( GMalloc );
-	#endif
-	GMallocProfiler->BeginProfiling();
-	GMalloc = GMallocProfiler;
+
+#if UE_MEMORY_TRACE_ENABLED
+	FMalloc* TraceMalloc = MemoryTrace_Create(GMalloc);
+	if (TraceMalloc != GMalloc)
+	{
+		GMalloc = TraceMalloc;
+		MemoryTrace_Initialize();
+	}
+#endif // UE_MEMORY_TRACE_ENABLED
+
+#if WITH_MALLOC_STOMP2
+	GMalloc = FMallocStomp2::OverrideIfEnabled(GMalloc);
 #endif
 
 	// if the allocator is already thread safe, there is no need for the thread safe proxy
@@ -381,6 +399,9 @@ static int FMemory_GCreateMalloc_ThreadUnsafe()
 
 	GMalloc = FMallocDoubleFreeFinder::OverrideIfEnabled(GMalloc);
 	GMalloc = FMallocFrameProfiler::OverrideIfEnabled(GMalloc);
+
+	GMalloc->OnMallocInitialized();
+
 	return 0;
 }
 
@@ -520,6 +541,7 @@ void FMemory::Trim(bool bTrimThreadCaches)
 		GCreateMalloc();
 		CA_ASSUME(GMalloc != NULL);	// Don't want to assert, but suppress static analysis warnings about potentially NULL GMalloc
 	}
+	TRACE_CPUPROFILER_EVENT_SCOPE(FMemory::Trim);
 	QUICK_SCOPE_CYCLE_COUNTER(STAT_FMemory_Trim);
 	{
 		QUICK_SCOPE_CYCLE_COUNTER(STAT_FMemory_Trim_Broadcast);

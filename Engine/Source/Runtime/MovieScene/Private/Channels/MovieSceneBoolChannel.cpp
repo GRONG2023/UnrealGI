@@ -7,10 +7,12 @@
 #include "MovieSceneFwd.h"
 #include "MovieSceneFrameMigration.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneBoolChannel)
+
 bool FMovieSceneBoolChannel::SerializeFromMismatchedTag(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot)
 {
 	static const FName IntegralCurveName("IntegralCurve");
-	if (Tag.Type == NAME_StructProperty && Tag.StructName == IntegralCurveName)
+	if (Tag.GetType().IsStruct(IntegralCurveName))
 	{
 		FIntegralCurve IntegralCurve;
 		FIntegralCurve::StaticStruct()->SerializeItem(Slot, &IntegralCurve, nullptr);
@@ -44,7 +46,56 @@ bool FMovieSceneBoolChannel::Evaluate(FFrameTime InTime, bool& OutValue) const
 {
 	if (Times.Num())
 	{
-		const int32 Index = FMath::Max(0, Algo::UpperBound(Times, InTime.FrameNumber)-1);
+		const FFrameNumber MinFrame = Times[0];
+		const FFrameNumber MaxFrame = Times.Last();
+		//we do None, Constant, and Linear first there is no cycling and so we just exit
+		if (InTime < FFrameTime(MinFrame))
+		{
+			if (PreInfinityExtrap == RCCE_None)
+			{
+				return false;
+			}
+
+			if (PreInfinityExtrap == RCCE_Constant || PreInfinityExtrap == RCCE_Linear)
+			{
+				OutValue = Values[0];
+				return true;
+			}
+		}
+		else if (InTime > FFrameTime(MaxFrame))
+		{
+			if (PostInfinityExtrap == RCCE_None)
+			{
+				return false;
+			}
+
+			if (PostInfinityExtrap == RCCE_Constant || PreInfinityExtrap == RCCE_Linear)
+			{
+				OutValue = Values.Last();
+				return true;
+			}
+		}
+
+		// Compute the cycled time based on extrapolation
+		UE::MovieScene::FCycleParams Params = UE::MovieScene::CycleTime(MinFrame, MaxFrame, InTime);
+
+		// Deal with cycles and oscillation
+		if (InTime < FFrameTime(MinFrame))
+		{
+			if (PreInfinityExtrap == RCCE_Oscillate)
+			{
+				Params.Oscillate(MinFrame.Value, MaxFrame.Value);
+			}
+		}
+		else if (InTime > FFrameTime(MaxFrame))
+		{
+			if (PostInfinityExtrap == RCCE_Oscillate)
+			{
+				Params.Oscillate(MinFrame.Value, MaxFrame.Value);
+			}
+		}
+		
+		const int32 Index = FMath::Max(0, Algo::UpperBound(Times, Params.Time)-1);
 		OutValue = Values[Index];
 		return true;
 	}
@@ -130,7 +181,18 @@ void FMovieSceneBoolChannel::Offset(FFrameNumber DeltaPosition)
 	GetData().Offset(DeltaPosition);
 }
 
+FKeyHandle FMovieSceneBoolChannel::GetHandle(int32 Index)
+{
+	return GetData().GetHandle(Index);
+}
+
+int32 FMovieSceneBoolChannel::GetIndex(FKeyHandle Handle)
+{
+	return GetData().GetIndex(Handle);
+}
+
 void FMovieSceneBoolChannel::ClearDefault()
 {
 	bHasDefaultValue = false;
 }
+

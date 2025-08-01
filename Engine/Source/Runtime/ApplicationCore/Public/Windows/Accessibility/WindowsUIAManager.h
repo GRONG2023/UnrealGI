@@ -2,7 +2,7 @@
 
 #pragma once
 
-#if WITH_ACCESSIBILITY
+#if WITH_ACCESSIBILITY && UE_WINDOWS_USING_UIA
 
 #include "Templates/SharedPointer.h"
 #include "GenericPlatform/Accessibility/GenericAccessibleInterfaces.h"
@@ -16,7 +16,7 @@ class IAccessibleWidget;
 class FVariant;
 
 /**
- * Manager for Windows implementation of UE4's accessibility API, utilizing Microsoft's UI Automation API. It provides a
+ * Manager for Windows implementation of UE's accessibility API, utilizing Microsoft's UI Automation API. It provides a
  * central location for message passing to/from the WindowsApplication, AccessibleMessageHandler, and Windows UIA Providers.
  *
  * This class only accepts and returns references, so callers should ensure their objects are valid before using it.
@@ -86,7 +86,7 @@ public:
 
 private:
 	/** Callback function for processing events raised from the AccessibleMessageHandler */
-	void OnEventRaised(TSharedRef<IAccessibleWidget> Widget, EAccessibleEvent Event, FVariant OldValue, FVariant NewValue);
+	void OnEventRaised(const FAccessibleEventArgs& Args);
 
 	/** Called when the first window widget provider is requested. */
 	void OnAccessibilityEnabled(); 

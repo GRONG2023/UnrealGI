@@ -44,7 +44,7 @@ UAssetViewerSettings* UAssetViewerSettings::Get()
 	return DefaultSettings;
 }
 
-void UAssetViewerSettings::Save()
+void UAssetViewerSettings::Save(bool bWarnIfFail)
 {
 	ULocalProfiles* LocalProfilesObject = GetMutableDefault<ULocalProfiles>();
 	USharedProfiles* SharedProfilesObject = GetMutableDefault<USharedProfiles>();
@@ -71,14 +71,14 @@ void UAssetViewerSettings::Save()
 	LocalProfilesObject->SaveConfig();
 
 	SharedProfilesObject->SaveConfig();
-	SharedProfilesObject->UpdateDefaultConfigFile();
+	SharedProfilesObject->TryUpdateDefaultConfigFile(FString(), bWarnIfFail);
 }
 
 void UAssetViewerSettings::PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent)
 {
 	FName PropertyName = (PropertyChangedEvent.Property != nullptr) ? PropertyChangedEvent.Property->GetFName() : NAME_None;	
 	UObject* Outer = (PropertyChangedEvent.Property != nullptr) ? PropertyChangedEvent.Property->GetOwner<UObject>() : nullptr;
-	if (Outer != nullptr && ( Outer->GetName() == "PostProcessSettings" || Outer->GetName() == "Vector" || Outer->GetName() == "Vector4" || Outer->GetName() == "LinearColor"))
+	if (Outer != nullptr && ( Outer->GetName() == "PostProcessSettings" || Outer->GetName() == "WeightedBlendable" || Outer->GetName() == "Vector" || Outer->GetName() == "Vector4" || Outer->GetName() == "LinearColor"))
 	{
 		PropertyName = GET_MEMBER_NAME_CHECKED(FPreviewSceneProfile, PostProcessingSettings);
 	}

@@ -16,8 +16,10 @@
 #include "Stats/Stats.h"
 
 
-namespace Audio
+namespace Audio::SoundFileUtils
 {
+	static void CopyOptionalWavChunks(TSharedPtr<ISoundFileReader>& InSoundDataReader, const int32 InInputFormat, TSharedPtr<ISoundFileWriter>& InSoundFileWriter, const int32 InOutputFormat);
+
 	bool AUDIOMIXER_API InitSoundFileIOManager()
 	{
 		return Audio::SoundFileIOManagerInit();
@@ -26,6 +28,26 @@ namespace Audio
 	bool AUDIOMIXER_API ShutdownSoundFileIOManager()
 	{
 		return Audio::SoundFileIOManagerShutdown();
+	}
+
+	uint32 AUDIOMIXER_API GetNumSamples(const TArray<uint8>& InAudioData)
+	{
+		FSoundFileIOManager SoundIOManager;
+		TSharedPtr<ISoundFileReader> InputSoundDataReader = SoundIOManager.CreateSoundDataReader();
+
+		ESoundFileError::Type Error = InputSoundDataReader->Init(&InAudioData);
+		if (Error != ESoundFileError::Type::NONE)
+		{
+			return 0;
+		}
+
+		TArray<ESoundFileChannelMap::Type> ChannelMap;
+
+		FSoundFileDescription InputDescription;
+		InputSoundDataReader->GetDescription(InputDescription, ChannelMap);
+		InputSoundDataReader->Release();
+
+		return InputDescription.NumFrames * InputDescription.NumChannels;
 	}
 
 	bool AUDIOMIXER_API ConvertAudioToWav(const TArray<uint8>& InAudioData, TArray<uint8>& OutWaveData)
@@ -60,6 +82,9 @@ namespace Audio
 		{
 			return false;
 		}
+
+		// Copy optional chunks before writing data chunk which libsndfile assumes will be the last chunk
+		CopyOptionalWavChunks(InputSoundDataReader, InputDescription.FormatFlags, SoundFileWriter, NewSoundFileDescription.FormatFlags);
 
 		// Create a buffer to do the processing 
 		SoundFileCount ProcessBufferSamples = static_cast<SoundFileCount>(1024) * NewSoundFileDescription.NumChannels;
@@ -106,19 +131,20 @@ namespace Audio
 		Error = InputSoundDataReader->ReadSamples(ProcessBuffer.GetData(), ProcessBufferSamples, InputSamplesRead);
 		check(Error == ESoundFileError::Type::NONE);
 
-		// ... normalize the samples if we're told to
+		// Normalize and clamp the input decoded audio
 		if (bPerformPeakNormalization)
 		{
 			for (int32 Sample = 0; Sample < InputSamplesRead; ++Sample)
 			{
-				ProcessBuffer[Sample] /= MaxValue;
+				ProcessBuffer[Sample] = FMath::Clamp(ProcessBuffer[Sample] / MaxValue, -1.0f, 1.0f);
 			}
 		}
-
-		// clamp the output
-		for (int32 Sample = 0; Sample < InputSamplesRead; ++Sample)
+		else
 		{
-			ProcessBuffer[Sample] = FMath::Clamp(ProcessBuffer[Sample], -1.0f, 1.0f);
+			for (int32 Sample = 0; Sample < InputSamplesRead; ++Sample)
+			{
+				ProcessBuffer[Sample] = FMath::Clamp(ProcessBuffer[Sample], -1.0f, 1.0f);
+			}
 		}
 
 		SoundFileCount SamplesWritten = 0;
@@ -133,19 +159,20 @@ namespace Audio
 			Error = InputSoundDataReader->ReadSamples(ProcessBuffer.GetData(), ProcessBufferSamples, InputSamplesRead);
 			check(Error == ESoundFileError::Type::NONE);
 
-			// ... normalize the samples if we're told to
+			// Normalize and clamp the samples
 			if (bPerformPeakNormalization)
 			{
 				for (int32 Sample = 0; Sample < InputSamplesRead; ++Sample)
 				{
-					ProcessBuffer[Sample] /= MaxValue;
+					ProcessBuffer[Sample] = FMath::Clamp(ProcessBuffer[Sample] / MaxValue, -1.0f, 1.0f);
 				}
 			}
-
-			// clamp the output
-			for (int32 Sample = 0; Sample < InputSamplesRead; ++Sample)
+			else
 			{
-				ProcessBuffer[Sample] = FMath::Clamp(ProcessBuffer[Sample], -1.0f, 1.0f);
+				for (int32 Sample = 0; Sample < InputSamplesRead; ++Sample)
+				{
+					ProcessBuffer[Sample] = FMath::Clamp(ProcessBuffer[Sample], -1.0f, 1.0f);
+				}
 			}
 		}
 
@@ -165,5 +192,29 @@ namespace Audio
 		FMemory::Memcpy(OutWaveData.GetData(), (const void*)&(*Data)[0], OutWaveData.Num());
 
 		return true;
+	}
+
+	void CopyOptionalWavChunks(TSharedPtr<ISoundFileReader>& InSoundDataReader, const int32 InInputFormat, TSharedPtr<ISoundFileWriter>& InSoundFileWriter, const int32 InOutputFormat)
+	{
+		// libsndfile only supports chunk operations with wave file formats
+		if ((InInputFormat & ESoundFileFormat::WAV) && (InOutputFormat & ESoundFileFormat::WAV))
+		{
+			// Get the optional chunks from the input data
+			FSoundFileChunkArray OptionalChunks;
+			ESoundFileError::Type Error = InSoundDataReader->GetOptionalChunks(OptionalChunks);
+			if (Error != ESoundFileError::Type::NONE)
+			{
+				UE_LOG(LogAudioMixer, Error, TEXT("Error encountered while reading optional chunk data...skipping"));
+			}
+			else
+			{
+				// Copy any chunks found over to the output file
+				Error = InSoundFileWriter->WriteOptionalChunks(OptionalChunks);
+				if (Error != ESoundFileError::Type::NONE)
+				{
+					UE_LOG(LogAudioMixer, Error, TEXT("Error encountered while writing optional chunk data...skipping"));
+				}
+			}
+		}
 	}
 }

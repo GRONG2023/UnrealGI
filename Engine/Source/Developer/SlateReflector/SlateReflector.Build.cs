@@ -19,10 +19,12 @@ public class SlateReflector : ModuleRules
 				"InputCore",
 				"Slate",
 				"SlateCore",
-				"EditorStyle",
+				
 				"Json",
 				"AssetRegistry",
-                "MessageLog"
+                "MessageLog",
+				"ToolWidgets",
+				"DesktopPlatform"
             }
 		);
 
@@ -39,16 +41,8 @@ public class SlateReflector : ModuleRules
 			}
 		);
 
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				"Developer/SlateReflector/Private",
-				"Developer/SlateReflector/Private/Models",
-				"Developer/SlateReflector/Private/Widgets",
-			}
-		);
-
 		// Editor builds include SessionServices to populate the remote target drop-down for remote widget snapshots
-		if (Target.Type == TargetType.Editor)
+		if (Target.bCompileAgainstEditor)
 		{
 			PublicDefinitions.Add("SLATE_REFLECTOR_HAS_SESSION_SERVICES=1");
 
@@ -77,8 +71,7 @@ public class SlateReflector : ModuleRules
 		}
 
 		// DesktopPlatform is only available for Editor and Program targets (running on a desktop platform)
-		bool IsDesktopPlatformType = Target.Platform == UnrealBuildTool.UnrealTargetPlatform.Win32
-			|| Target.Platform == UnrealBuildTool.UnrealTargetPlatform.Win64
+		bool IsDesktopPlatformType = Target.Platform == UnrealBuildTool.UnrealTargetPlatform.Win64
 			|| Target.Platform == UnrealBuildTool.UnrealTargetPlatform.Mac
 			|| Target.Platform == UnrealBuildTool.UnrealTargetPlatform.Linux;
 		if (Target.Type == TargetType.Editor || (Target.Type == TargetType.Program && IsDesktopPlatformType))
@@ -100,5 +93,7 @@ public class SlateReflector : ModuleRules
 		{
 			PrecompileForTargets = PrecompileTargetsType.Any;
 		}
+
+		UnsafeTypeCastWarningLevel = WarningLevel.Error;
 	}
 }

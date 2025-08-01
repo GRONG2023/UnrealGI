@@ -14,6 +14,8 @@ FStageProviderMessage::FStageProviderMessage()
 {
 	//Common setup of timecode for all provider messages
 	TOptional<FQualifiedFrameTime> CurrentFrameTime = FApp::GetCurrentFrameTime();
+	DateTime = FDateTime::Now();
+	
 	if (CurrentFrameTime.IsSet())
 	{
 		FrameTime = CurrentFrameTime.GetValue();
@@ -36,6 +38,22 @@ FString FCriticalStateProviderMessage::ToString() const
 		default:
 		{
 			return FString::Printf(TEXT("%s: Exited critical state"), *SourceName.ToString());
+		}
+	}
+}
+
+FString FAssetLoadingStateProviderMessage::ToString() const
+{
+	switch (LoadingState)
+	{
+		case EStageLoadingState::PreLoad:
+		{
+			return FString::Printf(TEXT("Started loading asset: %s"), *AssetName);
+		}
+		case EStageLoadingState::PostLoad:
+		default:
+		{
+			return FString::Printf(TEXT("Finished loading asset: %s"), *AssetName);
 		}
 	}
 }

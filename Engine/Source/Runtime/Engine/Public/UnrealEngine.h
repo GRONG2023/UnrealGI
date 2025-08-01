@@ -31,6 +31,7 @@ ENGINE_API DECLARE_LOG_CATEGORY_EXTERN(LogEngine, Log, All);
 //	}	
 //
 
+
 class FLocalPlayerIterator
 {
 protected:
@@ -104,7 +105,7 @@ public:
 	TBasePlayerControllerIterator(class UWorld* InWorld)
 		: Iter(InWorld->GetPlayerControllerIterator())
 	{
-		check(!LocalOnly || InWorld->GetNetMode() != NM_Client);	// You should only iterate on non local player controllers if you are the server
+		check(LocalOnly || InWorld->GetNetMode() != NM_Client);	// You should only iterate on non local player controllers if you are the server
 		AdvanceCurrent();
 	}
 
@@ -283,14 +284,15 @@ struct FScopedDetailTickStats
 
 
 private:
-	/** Object to track. 
-		Not GC safe, but we won't have anything in-flight during GC so that should be moot
-	*/
+	/** Detailed tick stats to update. */
+	FDetailedTickStats& DetailedTickStats;
+	/**
+	 * Object to track.
+	 * Not GC safe, but we won't have anything in-flight during GC so that should be moot.
+	 */
 	UObject* Object;
 	/** Tick start time. */
 	uint32 StartCycles;
-	/** Detailed tick stats to update. */
-	FDetailedTickStats& DetailedTickStats;
 	/** Whether object should be tracked. false e.g. when recursion is involved. */
 	bool bShouldTrackObject;
 	/** Whether object class should be tracked. false e.g. when recursion is involved. */
@@ -306,20 +308,20 @@ DECLARE_DELEGATE_TwoParams( FOnSwitchWorldForPIE, bool, UWorld* );
  * When created, switches global context to a PIE world
  * When destroyed, resets the GWorld back to what it was before
  */
-class ENGINE_API FScopedConditionalWorldSwitcher
+class FScopedConditionalWorldSwitcher
 {
 public:
 	/** Use the viewport to figure out what world to set temporarily */
-	FScopedConditionalWorldSwitcher( class FViewportClient* InViewportClient );
+	ENGINE_API FScopedConditionalWorldSwitcher( class FViewportClient* InViewportClient );
 
 	/** Explicitly set to the specific world */
-	FScopedConditionalWorldSwitcher( UWorld* InWorld );
+	ENGINE_API FScopedConditionalWorldSwitcher( UWorld* InWorld );
 
 	/** Resets back to initial world */
-	~FScopedConditionalWorldSwitcher();
+	ENGINE_API ~FScopedConditionalWorldSwitcher();
 
 	/** Delegate to call to switch worlds for PIE viewports.  Is not called when simulating (non-gameviewportclient) */
-	static FOnSwitchWorldForPIE SwitchWorldForPIEDelegate;
+	static ENGINE_API FOnSwitchWorldForPIE SwitchWorldForPIEDelegate;
 private:
 	/** Called by constructors to do actual switch */
 	void ConditionalSwitchWorld( class FViewportClient* InViewportClient, UWorld* InWorld );
@@ -332,7 +334,7 @@ private:
 };
 #else
 // does nothing outside of the editor
-class ENGINE_API FScopedConditionalWorldSwitcher
+class FScopedConditionalWorldSwitcher
 {
 public:
 	FScopedConditionalWorldSwitcher( class FViewportClient* InViewportClient ) {}
@@ -356,20 +358,8 @@ public:
 ENGINE_API FString appGetStartupMap(const TCHAR* CommandLine);
 
 // Calculate the average frame time by using the stats system.
-inline void CalculateFPSTimings()
-{
-	extern ENGINE_API float GAverageFPS;
-	extern ENGINE_API float GAverageMS;
-	// Calculate the average frame time via continued averaging.
-	static double LastTime	= 0;
-	double CurrentTime		= FPlatformTime::Seconds();
-	float FrameTime			= (CurrentTime - LastTime) * 1000;
-	// A 3/4, 1/4 split gets close to a simple 10 frame moving average
-	GAverageMS				= GAverageMS * 0.75f + FrameTime * 0.25f;
-	LastTime				= CurrentTime;
-	// Calculate average framerate.
-	GAverageFPS = 1000.f / GAverageMS;
-}
+ENGINE_API void CalculateFPSTimings();
+
 
 /** @return The font to use for rendering stats display. */
 extern ENGINE_API UFont* GetStatsFont();
@@ -388,12 +378,21 @@ class FFrameEndSync
 	FRenderCommandFence Fence[2];
 	/** Current index into events array. */
 	int32 EventIndex;
+	/** cleanup delegate for engine pre-exit */
+	FDelegateHandle CleanupDelegate;
+
 public:
+	ENGINE_API FFrameEndSync();
+	ENGINE_API ~FFrameEndSync();
+
 	/**
 	 * Syncs the game thread with the render thread. Depending on passed in bool this will be a total
 	 * sync or a one frame lag.
 	 */
 	ENGINE_API void Sync( bool bAllowOneFrameThreadLag );
+
+private:
+	void Cleanup();
 };
 
 
@@ -427,6 +426,7 @@ struct FCachedSystemScalabilityCVars
 	float ViewDistanceScaleSquared;
 	int32 FieldOfViewAffectsHLOD;
 	float StaticMeshLODDistanceScale;
+	float SkeletalMeshOverlayDistanceScale;
 
 	float CalculateFieldOfViewDistanceScale(const float FieldOfView) const
 	{
@@ -442,7 +442,7 @@ struct FCachedSystemScalabilityCVars
 
 	FCachedSystemScalabilityCVars();
 
-	bool operator==(const FCachedSystemScalabilityCVars& Other);
+	bool operator==(const FCachedSystemScalabilityCVars& Other) const;
 
 protected:
 	// This isn't public as it's only used to detect the change. Use ComputeAnisotropyRT()
@@ -461,7 +461,7 @@ ENGINE_API bool AllowHighQualityLightmaps(const FStaticFeatureLevel FeatureLevel
 
 ENGINE_API const FCachedSystemScalabilityCVars& GetCachedScalabilityCVars();
 
-struct ENGINE_API FSystemResolution
+struct FSystemResolution
 {
 	int32 ResX;
 	int32 ResY;
@@ -471,7 +471,7 @@ struct ENGINE_API FSystemResolution
 	// Helper function for changing system resolution via the r.setres console command
 	// This function will set r.setres, which will trigger a resolution change later on
 	// when the console variable sinks are called
-	static void RequestResolutionChange(int32 InResX, int32 InResY, EWindowMode::Type InWindowMode);
+	static ENGINE_API void RequestResolutionChange(int32 InResX, int32 InResY, EWindowMode::Type InWindowMode);
 
 	FSystemResolution()
 		: ResX(0)
@@ -492,15 +492,25 @@ struct ENGINE_API FSystemResolution
 ENGINE_API extern FSystemResolution GSystemResolution;
 ENGINE_API extern int32 GUnbuiltHLODCount;
 
+#ifndef UE_ENABLE_LOG_STACK_ON_FORCE_GC
+#define UE_ENABLE_LOG_STACK_ON_FORCE_GC 0
+#endif
+#if UE_ENABLE_LOG_STACK_ON_FORCE_GC
+ENGINE_API extern bool GLogStackOnForceGC;
+#endif
+
 // Update the debugging aid GPlayInEditorContextString based on the current world context (does nothing in WITH_EDITOR=0 builds)
 ENGINE_API void UpdatePlayInEditorWorldDebugString(const FWorldContext* WorldContext);
 
+// Returns the Debug string for a given world (Standalone, Listen Server, Client #, etc)
+ENGINE_API FString GetDebugStringForWorld(const UWorld* World);
+
 // Used to temporarily override GPlayInEditorID, correctly updating the debug string and other state as necessary
-struct ENGINE_API FTemporaryPlayInEditorIDOverride
+struct FTemporaryPlayInEditorIDOverride
 {
 public:
-	FTemporaryPlayInEditorIDOverride(int32 NewOverrideID);
-	~FTemporaryPlayInEditorIDOverride();
+	ENGINE_API FTemporaryPlayInEditorIDOverride(int32 NewOverrideID);
+	ENGINE_API ~FTemporaryPlayInEditorIDOverride();
 
 private:
 	int32 PreviousID;

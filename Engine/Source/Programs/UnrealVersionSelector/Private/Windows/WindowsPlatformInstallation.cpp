@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "WindowsPlatformInstallation.h"
-#include "Runtime/Core/Public/Misc/EngineVersion.h"
+#include "Misc/EngineVersion.h"
 #include "Windows/AllowWindowsPlatformTypes.h"
 #include "DesktopPlatformModule.h"
 #include "Misc/Paths.h"
@@ -218,7 +218,7 @@ bool FWindowsPlatformInstallation::LaunchEditor(const FString &RootDirName, cons
 	FString FileName;
 	if (ExplicitFileName.IsEmpty())
 	{
-		FileName = RootDirName / TEXT("Engine/Binaries/Win64/UE4Editor.exe");
+		FileName = RootDirName / TEXT("Engine/Binaries/Win64/UnrealEditor.exe");
 	}
 	else
 	{

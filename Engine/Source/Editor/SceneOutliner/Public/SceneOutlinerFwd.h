@@ -4,61 +4,49 @@
 
 #include "CoreMinimal.h"
 #include "Misc/CoreDelegates.h"
-#include "GameFramework/Actor.h"
 
 class ISceneOutliner;
 class ISceneOutlinerColumn;
 
-namespace SceneOutliner
-{
-	struct FTreeItemID;
+struct FSceneOutlinerTreeItemID;
 
-	struct FInitializationOptions;
-	struct FSharedOutlinerData;
-	
-	struct ITreeItem;
-	struct FActorTreeItem;
-	struct FWorldTreeItem;
-	struct FFolderTreeItem;
-	struct FComponentTreeItem;
-	struct FSubComponentTreeItem;
+struct FSceneOutlinerInitializationOptions;
+struct FSharedSceneOutlinerData;
 
-	struct ITreeItemVisitor;
-	struct IMutableTreeItemVisitor;
-	
-	typedef TSharedPtr<ITreeItem> FTreeItemPtr;
-	typedef TSharedRef<ITreeItem> FTreeItemRef;
+struct ISceneOutlinerTreeItem;
+struct FActorTreeItem;
+struct FWorldTreeItem;
+struct FFolderTreeItem;
+struct FComponentTreeItem;
 
-	typedef TMap<FTreeItemID, FTreeItemPtr> FTreeItemMap;
+typedef TSharedPtr<ISceneOutlinerTreeItem> FSceneOutlinerTreeItemPtr;
+typedef TSharedRef<ISceneOutlinerTreeItem> FSceneOutlinerTreeItemRef;
 
-	class SSceneOutliner;
+typedef TMap<FSceneOutlinerTreeItemID, FSceneOutlinerTreeItemPtr> FSceneOutlinerTreeItemMap;
 
-	class FOutlinerFilter;
-	struct FOutlinerFilters;
+class ISceneOutlinerHierarchy;
+class ISceneOutlinerMode;
 
-	struct FDragDropPayload;
-	struct FDragValidationInfo;
+class SSceneOutliner;
 
-	/** Typedef to define an array of actors, used during dragging */
-	typedef TArray<TWeakObjectPtr<AActor>> FActorArray;
+class FSceneOutlinerFilter;
+struct FSceneOutlinerFilters;
 
-	/** Typedef to define an array of folder names, used during dragging */
-	typedef TArray<FName> FFolderPaths;
+struct FSceneOutlinerDragDropPayload;
+struct FSceneOutlinerDragValidationInfo;
 
-	/** Typedef to define an array of actors, used during dragging */
-	typedef TArray<TWeakPtr<const FSubComponentTreeItem>> FSubComponentItemArray;
+DECLARE_DELEGATE_OneParam( FOnSceneOutlinerItemPicked, TSharedRef<ISceneOutlinerTreeItem> );
 
-}
-
-/** Delegate used with the Scene Outliner in 'actor picking' mode.  You'll bind a delegate when the
-    outliner widget is created, which will be fired off when an actor is selected in the list */
-DECLARE_DELEGATE_OneParam( FOnActorPicked, AActor* );
-DECLARE_DELEGATE_OneParam( FOnSceneOutlinerItemPicked, TSharedRef<SceneOutliner::ITreeItem> );
-
-DECLARE_DELEGATE_OneParam( FCustomSceneOutlinerDeleteDelegate, const TArray< TWeakObjectPtr< AActor > >&  )
+DECLARE_DELEGATE_OneParam( FCustomSceneOutlinerDeleteDelegate, const TArray<TWeakPtr<ISceneOutlinerTreeItem>>&  )
 
 /** A delegate used to factory a new column type */
-DECLARE_DELEGATE_RetVal_OneParam( TSharedRef< ISceneOutlinerColumn >, FCreateSceneOutlinerColumn, ISceneOutliner& );
+DECLARE_DELEGATE_RetVal_OneParam( TSharedRef<ISceneOutlinerColumn>, FCreateSceneOutlinerColumn, ISceneOutliner& );
 
 /** A delegate used to factory a new filter type */
-DECLARE_DELEGATE_RetVal( TSharedRef< SceneOutliner::FOutlinerFilter >, FCreateSceneOutlinerFilter );
+DECLARE_DELEGATE_RetVal( TSharedRef<FSceneOutlinerFilter>, FCreateSceneOutlinerFilter );
+
+/** A delegate used to factory a new scene outliner using the given init options */
+DECLARE_DELEGATE_RetVal_OneParam( TSharedRef<ISceneOutliner>, FSceneOutlinerFactory, FSceneOutlinerInitializationOptions);
+
+
+class FSceneOutlinerTreeItemSCC;

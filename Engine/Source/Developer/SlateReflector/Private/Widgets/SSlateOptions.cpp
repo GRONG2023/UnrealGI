@@ -24,7 +24,7 @@ void SSlateOptions::Construct( const FArguments& InArgs )
 {
 	struct Local
 	{
-		static void FillToolbar(FToolBarBuilder& ToolbarBuilder, const FSlateIcon& Icon, const FText& Label, const TCHAR* ConsoleVariable)
+		static void AddMenuEntry(FMenuBuilder& MenuBuilder, const FSlateIcon& Icon, const FText& Label, const TCHAR* ConsoleVariable, bool bCanEdit = true)
 		{
 			IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(ConsoleVariable);
 			if (CVar)
@@ -33,45 +33,133 @@ void SSlateOptions::Construct( const FArguments& InArgs )
 				TooltipText.AppendLine(FString(CVar->GetHelp()));
 				TooltipText.AppendLine(FString(ConsoleVariable));
 
-				ToolbarBuilder.AddToolBarButton(
-					FUIAction(
-						FExecuteAction::CreateLambda([CVar]() { CVar->Set(!CVar->GetBool(), EConsoleVariableFlags::ECVF_SetByCode); }),
-						FCanExecuteAction(),
-						FGetActionCheckState::CreateLambda([CVar]() { return CVar->GetBool() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
-					),
-					NAME_None,
+
+				MenuBuilder.AddMenuEntry(
 					Label,
 					TooltipText.ToText(),
 					Icon,
-					EUserInterfaceActionType::ToggleButton
-				);
+					FUIAction(
+						FExecuteAction::CreateLambda([CVar]() { CVar->Set(!CVar->GetBool(), EConsoleVariableFlags::ECVF_SetByCode); }),
+						FCanExecuteAction::CreateLambda([bCanEdit](){ return bCanEdit; }),
+						FGetActionCheckState::CreateLambda([CVar]() { return CVar->GetBool() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+					),
+					NAME_None,
+					EUserInterfaceActionType::ToggleButton);
 			}
-		}
-
-		static void FillToolbar(FToolBarBuilder& ToolbarBuilder)
-		{
-			FSlateIcon Icon(FWidgetReflectorStyle::GetStyleSetName(), "Icon.Empty");
-
-			ToolbarBuilder.BeginSection("Flags");
-			{
-#if WITH_SLATE_DEBUGGING
-				FillToolbar(ToolbarBuilder, Icon, LOCTEXT("EnableWidgetCaching", "Widget Caching"), TEXT("Slate.EnableInvalidationPanels"));
-				FillToolbar(ToolbarBuilder, Icon, LOCTEXT("InvalidationDebugging", "Invalidation Debugging"), TEXT("SlateDebugger.Invalidate.Enable"));
-				FillToolbar(ToolbarBuilder, Icon, LOCTEXT("InvalidationRootDebugging", "Invalidation Root Debugging"), TEXT("SlateDebugger.InvalidationRoot.Enable"));
-				FillToolbar(ToolbarBuilder, Icon, LOCTEXT("UpdateDebugging", "Update Debugging"), TEXT("SlateDebugger.Update.Enable"));
-				FillToolbar(ToolbarBuilder, Icon, LOCTEXT("PaintDebugging", "Paint Debugging"), TEXT("SlateDebugger.Paint.Enable"));
-				FillToolbar(ToolbarBuilder, Icon, LOCTEXT("ShowClipping", "Show Clipping"), TEXT("Slate.ShowClipping"));
-				FillToolbar(ToolbarBuilder, Icon, LOCTEXT("DebugCulling", "Debug Culling"), TEXT("Slate.DebugCulling"));
-				FillToolbar(ToolbarBuilder, Icon, LOCTEXT("EnsureAllVisibleWidgetsPaint", "Ensure All Visible Widgets Paint"), TEXT("Slate.EnsureAllVisibleWidgetsPaint"));
-#endif // WITH_SLATE_DEBUGGING
-			}
-			ToolbarBuilder.EndSection();
 		}
 	};
 
-	FToolBarBuilder ToolbarBuilder(TSharedPtr<const FUICommandList>(), FMultiBoxCustomization::None);
-	Local::FillToolbar(ToolbarBuilder);
+	struct GlobalLocal : Local
+	{
+		static TSharedRef<SWidget> FillToolbar()
+		{
+			const bool bShouldCloseWindowAfterMenuSelection = true;
+			FMenuBuilder MenuBuilder(bShouldCloseWindowAfterMenuSelection, nullptr);
 
+			FSlateIcon Icon(FWidgetReflectorStyle::GetStyleSetName(), "Icon.Empty");
+
+			AddMenuEntry(MenuBuilder, Icon, LOCTEXT("EnableFastWidgetPath", "Fast Widget Path"), TEXT("Slate.EnableFastWidgetPath"), false);
+			AddMenuEntry(MenuBuilder, Icon, LOCTEXT("EnableToolTips", "Enable Tooltips"), TEXT("Slate.EnableTooltips"));
+			AddMenuEntry(MenuBuilder, Icon, LOCTEXT("GlobalInvalidation", "Global Invalidation"), TEXT("Slate.EnableGlobalInvalidation"));
+			AddMenuEntry(MenuBuilder, Icon, LOCTEXT("DisabledEffect", "Transparent Disabled Effect"), TEXT("Slate.ApplyDisabledEffectOnWidgets"));
+
+			return MenuBuilder.MakeWidget();
+		}
+	};
+
+	struct DebugLocal : Local
+	{
+		static TSharedRef<SWidget> FillToolbar()
+		{
+			const bool bShouldCloseWindowAfterMenuSelection = true;
+			FMenuBuilder MenuBuilder(bShouldCloseWindowAfterMenuSelection, nullptr);
+
+			FSlateIcon Icon(FWidgetReflectorStyle::GetStyleSetName(), "Icon.Empty");
+#if WITH_SLATE_DEBUGGING
+			AddMenuEntry(MenuBuilder, Icon, LOCTEXT("EnableInvalidationPanels", "Enable InvalidationBox"), TEXT("Slate.EnableInvalidationPanels"));
+			AddMenuEntry(MenuBuilder, Icon, LOCTEXT("InvalidationDebugging", "Show Invalidation"), TEXT("SlateDebugger.Invalidate.Enable"));
+			AddMenuEntry(MenuBuilder, Icon, LOCTEXT("InvalidationRootDebugging", "Show Root Invalidation"), TEXT("SlateDebugger.InvalidationRoot.Enable"));
+			AddMenuEntry(MenuBuilder, Icon, LOCTEXT("UpdateDebugging", "Show Update"), TEXT("SlateDebugger.Update.Enable"));
+			AddMenuEntry(MenuBuilder, Icon, LOCTEXT("PaintDebugging", "Show Paint"), TEXT("SlateDebugger.Paint.Enable"));
+			AddMenuEntry(MenuBuilder, Icon, LOCTEXT("ShowClipping", "Show Clipping"), TEXT("Slate.ShowClipping"));
+			AddMenuEntry(MenuBuilder, Icon, LOCTEXT("DebugCulling", "Debug Culling"), TEXT("Slate.DebugCulling"));
+			AddMenuEntry(MenuBuilder, Icon, LOCTEXT("ShowHitTestGrid", "Show HitTestGrid"), TEXT("Slate.HitTestGridDebugging"));
+			AddMenuEntry(MenuBuilder, Icon, LOCTEXT("DesignerRetainedRendering", "Designer Retained Rendering"), TEXT("Slate.EnableDesignerRetainedRendering"));
+#endif // WITH_SLATE_DEBUGGING
+			AddMenuEntry(MenuBuilder, Icon, LOCTEXT("ShowBatching", "Show Batching"), TEXT("Slate.ShowBatching"));
+			AddMenuEntry(MenuBuilder, Icon, LOCTEXT("ShowOverdraw", "Show Overdraw"), TEXT("Slate.ShowOverdraw"));
+			
+			return MenuBuilder.MakeWidget();
+		}
+	};
+
+	struct ValidationLocal : Local
+	{
+		static TSharedRef<SWidget> FillToolbar()
+		{
+			const bool bShouldCloseWindowAfterMenuSelection = true;
+			FMenuBuilder MenuBuilder(bShouldCloseWindowAfterMenuSelection, nullptr);
+
+			FSlateIcon Icon(FWidgetReflectorStyle::GetStyleSetName(), "Icon.Empty");
+#if WITH_SLATE_DEBUGGING
+			AddMenuEntry(MenuBuilder, Icon, LOCTEXT("VerifyParentChildrenRelationship", "Verify Parent/Children Relationship"), TEXT("Slate.VerifyParentChildrenRelationship"));
+			AddMenuEntry(MenuBuilder, Icon, LOCTEXT("VerifyLayerId", "Verify LayerId"), TEXT("Slate.VerifyWidgetLayerId"));
+			AddMenuEntry(MenuBuilder, Icon, LOCTEXT("VerifyOutgoingLayerId", "Verify Outgoing LayerId"), TEXT("Slate.EnsureOutgoingLayerId"));
+#endif // WITH_SLATE_DEBUGGING
+
+			{
+				MenuBuilder.BeginSection("InvalidationRoot", LOCTEXT("Invalidation", "Invalidation"));
+	#if WITH_SLATE_DEBUGGING
+				AddMenuEntry(MenuBuilder, Icon, LOCTEXT("EnsureAllVisibleWidgetsPaint", "Verify Visible Widgets Paint"), TEXT("Slate.EnsureAllVisibleWidgetsPaint"));
+	#endif // WITH_SLATE_DEBUGGING
+	#if UE_SLATE_WITH_INVALIDATIONWIDGETLIST_DEBUGGING
+				AddMenuEntry(MenuBuilder, Icon, LOCTEXT("VerifyWidgetList", "Verify Widget List"), TEXT("Slate.InvalidationRoot.VerifyWidgetList"));
+				AddMenuEntry(MenuBuilder, Icon, LOCTEXT("VerifyWidgetIndex", "Verify Widget's index"), TEXT("Slate.InvalidationRoot.VerifyWidgetsIndex"));
+				AddMenuEntry(MenuBuilder, Icon, LOCTEXT("VerifyWidgetPtr", "Verify Widget Pointer"), TEXT("Slate.InvalidationRoot.VerifyValidWidgets"));
+				AddMenuEntry(MenuBuilder, Icon, LOCTEXT("VerifyHittestGrid", "Verify Hittest Grid"), TEXT("Slate.InvalidationRoot.VerifyHittestGrid"));
+				AddMenuEntry(MenuBuilder, Icon, LOCTEXT("VefiryVisibility", "Verify Visibility"), TEXT("Slate.InvalidationRoot.VerifyWidgetVisibility"));
+				AddMenuEntry(MenuBuilder, Icon, LOCTEXT("VerifyVolatility", "Verify Volatility"), TEXT("Slate.InvalidationRoot.VerifyWidgetVolatile"));
+				AddMenuEntry(MenuBuilder, Icon, LOCTEXT("VerifyUpdateList", "Verify Update List"), TEXT("Slate.InvalidationRoot.VerifyWidgetUpdateList"));
+				AddMenuEntry(MenuBuilder, Icon, LOCTEXT("VerifySlateAttributes", "Verify Attributes"), TEXT("Slate.InvalidationRoot.VerifySlateAttribute"));
+	#endif // UE_SLATE_WITH_INVALIDATIONWIDGETLIST_DEBUGGING
+				MenuBuilder.EndSection();
+			}			
+
+			return MenuBuilder.MakeWidget();
+		}
+	};
+
+
+	FToolBarBuilder ToolbarBuilder(TSharedPtr<const FUICommandList>(), FMultiBoxCustomization::None);
+	ToolbarBuilder.SetStyle(&FWidgetReflectorStyle::Get(), "BoldSlimToolbar");
+
+	ToolbarBuilder.AddComboButton(
+		FUIAction(),
+		FOnGetContent::CreateStatic(&GlobalLocal::FillToolbar),
+		LOCTEXT("FlagLabel", "Flags"),
+		FText::GetEmpty(),
+		FSlateIcon(),
+		false
+	);
+
+	ToolbarBuilder.AddComboButton(
+		FUIAction(),
+		FOnGetContent::CreateStatic(&DebugLocal::FillToolbar),
+		LOCTEXT("DebugLabel", "Debug Options"),
+		FText::GetEmpty(),
+		FSlateIcon(),
+		false
+	);
+
+	ToolbarBuilder.AddComboButton(
+		FUIAction(),
+		FOnGetContent::CreateStatic(&ValidationLocal::FillToolbar),
+		LOCTEXT("EnsureLabel", "Runtime Validation"),
+		FText::GetEmpty(),
+		FSlateIcon(),
+		false
+	);
+	
 	ChildSlot
 	[
 		SNew(SBorder)
@@ -103,15 +191,6 @@ void SSlateOptions::Construct( const FArguments& InArgs )
 					.Delta(0.01f)
 					.OnValueChanged(this, &SSlateOptions::HandleAppScaleSliderChanged)
 				]
-			]
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.VAlign(VAlign_Center)
-			.Padding(20.f, 0.f, 4.f, 0.f)
-			[
-				SNew(STextBlock)
-				.Text(LOCTEXT("Flags", "Flags: "))
 			]
 
 			+ SHorizontalBox::Slot()

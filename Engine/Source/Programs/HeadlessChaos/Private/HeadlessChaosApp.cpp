@@ -14,6 +14,7 @@
 #include "HeadlessChaosTestRaycast.h"
 #include "HeadlessChaosTestSerialization.h"
 #include "HeadlessChaosTestSpatialHashing.h"
+#include "HeadlessChaosTestTriangleMesh.h"
 #include "Modules/ModuleManager.h"
 #include "RequiredProgramMainCPPInclude.h"
 #include "Chaos/PBDRigidsEvolution.h"
@@ -27,6 +28,7 @@
 #include "HeadlessChaosTestBP.h"
 #include "HeadlessChaosTestRaycast.h"
 #include "HeadlessChaosTestSweep.h"
+#include "HeadlessChaosTestOverlap.h"
 #include "HeadlessChaosTestGJK.h"
 #include "HeadlessChaosTestEPA.h"
 #include "HeadlessChaosTestBroadphase.h"
@@ -59,9 +61,9 @@
 #include "GeometryCollection/GeometryCollectionTestSpatialHash.h"
 #include "GeometryCollection/GeometryCollectionTestVisibility.h"
 #include "GeometryCollection/GeometryCollectionTestEvents.h"
-#include "GeometryCollection/GeometryCollectionTestSkeletalMeshPhysicsProxy.h"
 #include "GeometryCollection/GeometryCollectionTestSerialization.h"
 
+#include "CompGeom/ExactPredicates.h"
 
 IMPLEMENT_APPLICATION(HeadlessChaos, "HeadlessChaos");
 
@@ -71,6 +73,7 @@ DEFINE_LOG_CATEGORY(LogHeadlessChaos);
 
 TEST(ImplicitTests, Implicit) {
 	ChaosTest::ImplicitPlane();
+	ChaosTest::ImplicitTetrahedron();
 	ChaosTest::ImplicitCube();
 	ChaosTest::ImplicitSphere();
 	ChaosTest::ImplicitCylinder();
@@ -118,12 +121,6 @@ TEST(CollisionTests, Collisions) {
 	SUCCEED();
 }
 
-TEST(CollisionTests, PGS) {
-	ChaosTest::CollisionPGS();
-	ChaosTest::CollisionPGS2();
-	SUCCEED();
-}
-
 TEST(Clustering, Clustering) {
 	ChaosTest::ImplicitCluster();
 	ChaosTest::FractureCluster();
@@ -132,6 +129,10 @@ TEST(Clustering, Clustering) {
 }
 
 TEST(SerializationTests, Serialization) {
+	// LWC-TODO : re-enable that when we have proper double serialization in LWC mode
+#if 0
+	ChaosTest::SimpleTypesSerialization();
+#endif
 	ChaosTest::SimpleObjectsSerialization();
 	ChaosTest::SharedObjectsSerialization();
 	ChaosTest::GraphSerialization();
@@ -162,14 +163,23 @@ TEST(BroadphaseTests, Broadphase) {
 //	SUCCEED();
 //}
 
+TEST(ClothTests, ClothCollection) {
+	ChaosTest::ClothCollection();
+	SUCCEED();
+}
+
 TEST(RaycastTests, Raycast) {
 	ChaosTest::SphereRaycast();
 	ChaosTest::PlaneRaycast();
 	//ChaosTest::CylinderRaycast();
 	//ChaosTest::TaperedCylinderRaycast();
 	ChaosTest::CapsuleRaycast();
+	ChaosTest::CapsuleRaycastFastLargeDistance();
+	ChaosTest::CapsuleRaycastMissWithEndPointOnBounds();
 	ChaosTest::TriangleRaycast();
+	ChaosTest::TriangleRaycastDenegerated();
 	ChaosTest::BoxRaycast();
+	ChaosTest::VectorizedAABBRaycast();
 	ChaosTest::ScaledRaycast();
 	//ChaosTest::TransformedRaycast();
 	//ChaosTest::UnionRaycast();
@@ -180,6 +190,22 @@ TEST(RaycastTests, Raycast) {
 
 TEST(SweepTests, Sweep) {
 	ChaosTest::CapsuleSweepAgainstTriMeshReal();
+	
+	SUCCEED();
+}
+
+// This test is disabled until we implement  local clipping feature
+TEST(SweepTests, DISABLED_LargeSweep)
+{
+	ChaosTest::GJKLargeDistanceCapsuleSweep();
+
+	SUCCEED();
+}
+
+TEST(OverlapTests, Overlap) {
+	ChaosTest::OverlapTriMesh();
+
+	SUCCEED();
 }
 
 TEST(MostOpposingTests, MostOpposing) {
@@ -227,10 +253,17 @@ TEST(EPA, EPATests) {
 }
 
 TEST(BP, BroadphaseTests) {
+	ChaosTest::AABBTreeDirtyGridFunctionsWithEdgeCase();
 	ChaosTest::GridBPTest();
+	ChaosTest::GridBPEarlyExitTest();
 	ChaosTest::GridBPTest2();
 	ChaosTest::AABBTreeTest();
+	ChaosTest::AABBTreeTestDynamic();
+	ChaosTest::AABBTreeDirtyTreeTest();
+	ChaosTest::AABBTreeDirtyGridTest();
 	ChaosTest::AABBTreeTimesliceTest();
+	ChaosTest::DoForSweepIntersectCellsImpTest();
+	ChaosTest::BoundingVolumeNoBoundsTest();
 	ChaosTest::BroadphaseCollectionTest();
 	SUCCEED();
 }
@@ -255,6 +288,11 @@ TEST(Handles, FrameworkTests)
 	ChaosTest::Handles::HandleArrayTest();
 	ChaosTest::Handles::HandleHeapTest();
 	ChaosTest::Handles::HandleSerializeTest();
+}
+
+TEST(TriangleMesh, TriangleMeshTests) {
+	ChaosTest::TriangleMeshProjectTest();
+	SUCCEED();
 }
 
 //TEST(Vehicle, VehicleTests) {
@@ -286,8 +324,9 @@ TEST(GeometryCollection_MatricesTest,BasicGlobalMatrices) { GeometryCollectionTe
 TEST(GeometryCollection_MatricesTest,TransformMatrixElement) { GeometryCollectionTest::TransformMatrixElement(); SUCCEED(); }
 TEST(GeometryCollection_MatricesTest,ReparentingMatrices) { GeometryCollectionTest::ReparentingMatrices(); SUCCEED(); }
 
-// Creation Tests
-TEST(GeometryCollection_CreationTest,CheckIncrementMask) { GeometryCollectionTest::CheckIncrementMask(); SUCCEED(); }
+// Creation Tests CollectionCycleTest
+TEST(GeometryCollection_CreationTest, CheckClassTypes) { GeometryCollectionTest::CheckClassTypes(); SUCCEED(); }
+TEST(GeometryCollection_CreationTest, CheckIncrementMask) { GeometryCollectionTest::CheckIncrementMask(); SUCCEED(); }
 TEST(GeometryCollection_CreationTest,Creation) { GeometryCollectionTest::Creation(); SUCCEED(); }
 TEST(GeometryCollection_CreationTest,Empty) { GeometryCollectionTest::Empty(); SUCCEED(); }
 TEST(GeometryCollection_CreationTest,AppendTransformHierarchy) { GeometryCollectionTest::AppendTransformHierarchy(); SUCCEED(); }
@@ -300,7 +339,12 @@ TEST(GeometryCollection_CreationTest,DeleteRootLeafMiddle) { GeometryCollectionT
 TEST(GeometryCollection_CreationTest,DeleteEverything) { GeometryCollectionTest::DeleteEverything(); SUCCEED(); }
 TEST(GeometryCollection_CreationTest,ReindexMaterialsTest) { GeometryCollectionTest::ReindexMaterialsTest(); SUCCEED(); }
 TEST(GeometryCollection_CreationTest,ContiguousElementsTest) { GeometryCollectionTest::ContiguousElementsTest(); SUCCEED(); }
-TEST(GeometryCollection_CreationTest,AttributeDependencyTest) { GeometryCollectionTest::AttributeDependencyTest(); SUCCEED(); }
+TEST(GeometryCollection_CreationTest, AttributeDependencyTest) { GeometryCollectionTest::AttributeDependencyTest(); SUCCEED(); }
+TEST(GeometryCollection_CreationTest, IntListReindexOnDeletionTest) { GeometryCollectionTest::IntListReindexOnDeletionTest(); SUCCEED(); }
+TEST(GeometryCollection_CreationTest, IntListSelfDependencyTest) { GeometryCollectionTest::IntListSelfDependencyTest(); SUCCEED(); }
+TEST(GeometryCollection_CreationTest, AppendManagedArrayCollectionTest) { GeometryCollectionTest::AppendManagedArrayCollectionTest(); SUCCEED(); }
+TEST(GeometryCollection_CreationTest, AppendTransformCollectionTest) { GeometryCollectionTest::AppendTransformCollectionTest(); SUCCEED(); }
+TEST(GeometryCollection_CreationTest, CollectionCycleTest) { GeometryCollectionTest::CollectionCycleTest(); SUCCEED(); }
 
 
 // Proximity Tests
@@ -358,6 +402,66 @@ TEST(GeometryCollection_FieldTest,Fields_SumScalarRightSide) { GeometryCollectio
 TEST(GeometryCollection_FieldTest,Fields_SumScalarLeftSide) { GeometryCollectionTest::Fields_SumScalarLeftSide(); SUCCEED(); }
 TEST(GeometryCollection_FieldTest,Fields_Culling) { GeometryCollectionTest::Fields_Culling(); SUCCEED(); }
 TEST(GeometryCollection_FieldTest,Fields_SerializeAPI) { GeometryCollectionTest::Fields_SerializeAPI(); SUCCEED(); }
+
+GTEST_TEST(ArrayTests, TestArrayMax)
+{
+	// The first 3 arrays without Reserve will over-allocate. We aren't testing anything
+	// useful on these - they are just here for examples...
+
+	// This allocates space for 4 elements
+	TArray<int32> Ints1;
+	Ints1.SetNum(1);
+	EXPECT_LE(Ints1.Num(), Ints1.Max());
+
+	// This allocates space for 5 elements
+	TArray<int32> Ints2;
+	Ints2.SetNum(5);
+	EXPECT_LE(Ints2.Num(), Ints2.Max());
+
+	// This allocates space for 4 elements and grows to 22 elements
+	TArray<int32> Ints3;
+	Ints3.SetNum(1);
+	Ints3.SetNum(5);
+	EXPECT_LE(Ints3.Num(), Ints3.Max());
+
+	// We rely on tight-fitting arrays for memory conservation. Make sure that the
+	// default Reserve policy still enforces tight-fitting arrays.
+	TArray<int32> Ints4;
+	Ints4.Reserve(1);
+	Ints4.SetNum(1);
+	EXPECT_EQ(Ints4.Max(), Ints4.Num());
+
+	TArray<int32> Ints5;
+	Ints5.Reserve(5);
+	Ints5.SetNum(5);
+	EXPECT_EQ(Ints5.Max(), Ints5.Num());
+
+	TArray<int32> Ints6;
+	Ints6.Reserve(1);
+	Ints6.SetNum(1);
+	Ints6.Reserve(5);
+	Ints6.SetNum(5);
+	EXPECT_EQ(Ints6.Max(), Ints6.Num());
+
+	// Reset also sets the exact buffer size and we are relying on that too
+	TArray<int32> Ints7;
+	Ints7.Reset(1);
+	Ints7.SetNum(1);
+	EXPECT_EQ(Ints7.Max(), Ints7.Num());
+
+	TArray<int32> Ints8;
+	Ints8.Reset(5);
+	Ints8.SetNum(5);
+	EXPECT_EQ(Ints8.Max(), Ints8.Num());
+
+	TArray<int32> Ints9;
+	Ints9.Reset(1);
+	Ints9.SetNum(1);
+	Ints9.Reset(5);
+	Ints9.SetNum(5);
+	EXPECT_EQ(Ints9.Max(), Ints9.Num());
+
+}
 
 //TEST(GeometryCollectionTest,RigidBodies_CollisionGroup); // fix me
 //
@@ -429,7 +533,9 @@ class UEGTestPrinter : public ::testing::EmptyTestEventListener
 
 INT32_MAIN_INT32_ARGC_TCHAR_ARGV()
 {
-    // start up the main loop
+	UE::Geometry::ExactPredicates::GlobalInit();
+
+	// start up the main loop
 	GEngineLoop.PreInit(ArgC, ArgV);
 	FModuleManager::Get().StartProcessingNewlyLoadedObjects();
 	
@@ -441,9 +547,9 @@ INT32_MAIN_INT32_ARGC_TCHAR_ARGV()
 
 	ensure(RUN_ALL_TESTS() == 0);
 
-	FCoreDelegates::OnExit.Broadcast();
+	FEngineLoop::AppPreExit();
 	FModuleManager::Get().UnloadModulesAtShutdown();
-
+	FEngineLoop::AppExit();
 	FPlatformMisc::RequestExit(false);
 
 	return 0;

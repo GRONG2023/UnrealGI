@@ -15,7 +15,6 @@
 #if SOURCE_CONTROL_WITH_SLATE
 
 #include "SSourceControlLogin.h"
-#include "EditorStyleSet.h"
 
 #define LOCTEXT_NAMESPACE "SSourceControlPicker"
 
@@ -23,33 +22,28 @@ void SSourceControlPicker::Construct(const FArguments& InArgs)
 {
 	ChildSlot
 	[
-		SNew( SBorder )
-		.BorderImage( FEditorStyle::GetBrush("DetailsView.CategoryTop") )
-		.Padding( FMargin( 0.0f, 3.0f, 1.0f, 0.0f ) )
+		SNew(SHorizontalBox)
+		+SHorizontalBox::Slot()
+		.VAlign(VAlign_Center)
+		.HAlign(HAlign_Right)
+		.FillWidth(1.0f)
+		.Padding(FMargin(0.0f, 0.0f, 16.0f, 10.0f))
 		[
-			SNew(SHorizontalBox)
-			+SHorizontalBox::Slot()
-			.VAlign(VAlign_Center)
-			.FillWidth(1.0f)
-			.Padding(2.0f)
+			SNew( STextBlock )
+			.Text( LOCTEXT("ProviderLabel", "Provider") )
+		]
+		+SHorizontalBox::Slot()
+		.VAlign(VAlign_Center)
+		.Padding(FMargin(0.0f, 0.0f, 0.0f, 10.0f))
+		.FillWidth(2.0f)
+		[
+			SNew(SComboButton)
+			.OnGetMenuContent(this, &SSourceControlPicker::OnGetMenuContent)
+			.ToolTipText( LOCTEXT("ChooseProvider", "Choose the revision control provider you want to use before you edit login settings.") )
+			.ButtonContent()
 			[
 				SNew( STextBlock )
-				.Text( LOCTEXT("ProviderLabel", "Provider") )
-				.Font( FEditorStyle::GetFontStyle(TEXT("SourceControl.LoginWindow.Font")) )
-			]
-			+SHorizontalBox::Slot()
-			.FillWidth(2.0f)
-			[
-				SNew(SComboButton)
-				.OnGetMenuContent(this, &SSourceControlPicker::OnGetMenuContent)
-				.ContentPadding(1)
-				.ToolTipText( LOCTEXT("ChooseProvider", "Choose the source control provider you want to use before you edit login settings.") )
-				.ButtonContent()
-				[
-					SNew( STextBlock )
-					.Text( this, &SSourceControlPicker::OnGetButtonText )
-					.Font( FEditorStyle::GetFontStyle(TEXT("SourceControl.LoginWindow.Font")) )
-				]
+				.Text(this, &SSourceControlPicker::OnGetButtonText)
 			]
 		]
 	];
@@ -58,6 +52,15 @@ void SSourceControlPicker::Construct(const FArguments& InArgs)
 void SSourceControlPicker::ChangeSourceControlProvider(int32 ProviderIndex) const
 {
 	FSourceControlModule& SourceControlModule = FSourceControlModule::Get();
+
+	if (CurrentProviderIndex != ProviderIndex)
+	{
+		if (ConfirmProviderChanging() == false) // The user has decided to abort the operation
+		{
+			return;
+		}
+	}
+
 	SourceControlModule.SetCurrentSourceControlProvider(ProviderIndex);
 
 	if(SourceControlModule.GetLoginWidget().IsValid())
@@ -66,7 +69,17 @@ void SSourceControlPicker::ChangeSourceControlProvider(int32 ProviderIndex) cons
 	}
 }
 
-TSharedRef<SWidget> SSourceControlPicker::OnGetMenuContent() const
+bool SSourceControlPicker::ConfirmProviderChanging() const
+{
+	FSourceControlModule& SourceControlModule = FSourceControlModule::Get();
+	if (SourceControlModule.GetSourceControlProviderChanging().IsBound())
+	{
+		return SourceControlModule.GetSourceControlProviderChanging().Execute();
+	}
+	return true;
+}
+
+TSharedRef<SWidget> SSourceControlPicker::OnGetMenuContent()
 {
 	FSourceControlModule& SourceControlModule = FSourceControlModule::Get();
 
@@ -81,6 +94,11 @@ TSharedRef<SWidget> SSourceControlPicker::OnGetMenuContent() const
 		const FName ProviderName = SourceControlModule.GetSourceControlProviderName(ProviderIndex);
 		int32 ProviderSortKey = ProviderName == FName("None") ? -1 * ProviderIndex : ProviderIndex;
 		SortedProviderNames.Emplace(ProviderName, ProviderSortKey);
+
+		if (ProviderName == FSourceControlModule::Get().GetProvider().GetName())
+		{
+			CurrentProviderIndex = ProviderIndex;
+		}
 	}
 
 	// Sort based on the provider index
@@ -98,7 +116,7 @@ TSharedRef<SWidget> SSourceControlPicker::OnGetMenuContent() const
 		Arguments.Add( TEXT("ProviderName"), ProviderText );
 		MenuBuilder.AddMenuEntry(
 			ProviderText,
-			FText::Format(LOCTEXT("SourceControlProvider_Tooltip", "Use {ProviderName} as source control provider"), Arguments),
+			FText::Format(LOCTEXT("SourceControlProvider_Tooltip", "Use {ProviderName} as revision control provider"), Arguments),
 			FSlateIcon(),
 			FUIAction(
 				FExecuteAction::CreateSP( this, &SSourceControlPicker::ChangeSourceControlProvider, FMath::Abs(ProviderIndex) ),
@@ -119,11 +137,11 @@ FText SSourceControlPicker::GetProviderText(const FName& InName) const
 {
 	if(InName == "None")
 	{
-		return LOCTEXT("NoProviderDescription", "None  (source control disabled)");
+		return LOCTEXT("NoProviderDescription", "None  (revision control disabled)");
 	}
 
 	// @todo: Remove this block after the Git plugin has been exhaustively tested (also remember to change the Git plugin's "IsBetaVersion" setting to false.)
-	if(InName == "Git" )
+	if(InName == "Git")
 	{
 		return LOCTEXT( "GitBetaProviderName", "Git  (beta version)" );
 	}

@@ -5,43 +5,44 @@
 =============================================================================*/
 
 #include "SceneView.h"
-#include "Misc/CommandLine.h"
+#include "Engine/World.h"
+#include "Materials/Material.h"
+#include "Math/InverseRotationMatrix.h"
 #include "Misc/Paths.h"
-#include "EngineGlobals.h"
-#include "PrimitiveUniformShaderParameters.h"
 #include "Engine/Engine.h"
-#include "Widgets/SWindow.h"
+#include "SceneInterface.h"
 #include "SceneManagement.h"
+#include "ShaderCore.h"
 #include "EngineModule.h"
 #include "BufferVisualizationData.h"
-#include "Interfaces/Interface_PostProcessVolume.h"
 #include "Engine/TextureCube.h"
-#include "StereoRendering.h"
-#include "StereoRenderTargetManager.h"
-#include "IHeadMountedDisplay.h"
-#include "IXRTrackingSystem.h"
 #include "Engine/RendererSettings.h"
-#include "LightPropagationVolumeSettings.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "HighResScreenshot.h"
 #include "Slate/SceneViewport.h"
 #include "RenderUtils.h"
+#include "StereoRenderUtils.h"
+#include "SceneRelativeViewMatrices.h"
+#include "Camera/CameraComponent.h"
+#include "Camera/CameraTypes.h"
+#include "UObject/Interface.h"
 
 DEFINE_LOG_CATEGORY(LogBufferVisualization);
+DEFINE_LOG_CATEGORY(LogNaniteVisualization);
+DEFINE_LOG_CATEGORY(LogLumenVisualization);
+DEFINE_LOG_CATEGORY(LogVirtualShadowMapVisualization);
 DEFINE_LOG_CATEGORY(LogMultiView);
 
 DECLARE_CYCLE_STAT(TEXT("StartFinalPostprocessSettings"), STAT_StartFinalPostprocessSettings, STATGROUP_Engine);
 DECLARE_CYCLE_STAT(TEXT("OverridePostProcessSettings"), STAT_OverridePostProcessSettings, STATGROUP_Engine);
 
-IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FPrimitiveUniformShaderParameters, "Primitive");
-IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FViewUniformShaderParameters, "View");
-IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FInstancedViewUniformShaderParameters, "InstancedView");
-IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FMobileDirectionalLightShaderParameters, "MobileDirectionalLight");
-IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FMobileMovablePointLightUniformShaderParameters, "MobileMovablePointLight0");
-IMPLEMENT_GLOBAL_SHADER_PARAMETER_ALIAS_STRUCT(FMobileMovablePointLightUniformShaderParameters, MobileMovablePointLight1);
-IMPLEMENT_GLOBAL_SHADER_PARAMETER_ALIAS_STRUCT(FMobileMovablePointLightUniformShaderParameters, MobileMovablePointLight2);
-IMPLEMENT_GLOBAL_SHADER_PARAMETER_ALIAS_STRUCT(FMobileMovablePointLightUniformShaderParameters, MobileMovablePointLight3);
+IMPLEMENT_STATIC_UNIFORM_BUFFER_SLOT(View);
+IMPLEMENT_STATIC_UNIFORM_BUFFER_SLOT(InstancedView);
 
+IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FPrimitiveUniformShaderParameters, "Primitive");
+IMPLEMENT_STATIC_AND_SHADER_UNIFORM_BUFFER_STRUCT(FViewUniformShaderParameters, "View", View);
+IMPLEMENT_STATIC_AND_SHADER_UNIFORM_BUFFER_STRUCT(FInstancedViewUniformShaderParameters, "InstancedView", InstancedView);
+IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FMobileDirectionalLightShaderParameters, "MobileDirectionalLight");
 
 static TAutoConsoleVariable<float> CVarSSRMaxRoughness(
 	TEXT("r.SSR.MaxRoughness"),
@@ -79,12 +80,6 @@ static TAutoConsoleVariable<int32> CVarShadowFreezeCamera(
 	TEXT("Debug the shadow methods by allowing to observe the system from outside.\n")
 	TEXT("0: default\n")
 	TEXT("1: freeze camera at current location"),
-	ECVF_Cheat);
-
-static TAutoConsoleVariable<float> CVarExposureOffset(
-	TEXT("r.ExposureOffset"),
-	0.0f,
-	TEXT("For adjusting the exposure on top of post process settings and eye adaptation. For developers only. 0:default"),
 	ECVF_Cheat);
 
 static TAutoConsoleVariable<int32> CVarRenderTimeFrozen(
@@ -131,6 +126,12 @@ static TAutoConsoleVariable<float> CVarSSAOFadeRadiusScale(
 	TEXT("Allows to scale the ambient occlusion fade radius (SSAO).\n")
 	TEXT(" 0.01:smallest .. 1.0:normal (default), <1:smaller, >1:larger"),
 	ECVF_Cheat | ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarExposureOffset(
+	TEXT("r.ExposureOffset"),
+	0.0f,
+	TEXT("For adjusting the exposure on top of post process settings and eye adaptation. 0: default"),
+	ECVF_Cheat);
 
 // Engine default (project settings):
 
@@ -180,8 +181,18 @@ static TAutoConsoleVariable<int32> CVarDefaultAutoExposureExtendDefaultLuminance
 	TEXT("Whether the default values for AutoExposure should support an extended range of scene luminance.\n")
 	TEXT("This also change the PostProcessSettings.Exposure.MinBrightness, MaxBrightness, HistogramLogMin and HisogramLogMax\n")
 	TEXT("to be expressed in EV100 values instead of in Luminance and Log2 Luminance.\n")
-	TEXT(" 0: Legacy range (default)\n")
-	TEXT(" 1: Extended range"));
+	TEXT(" 0: Legacy range (UE4 default)\n")
+	TEXT(" 1: Extended range (UE5 default)"));
+
+static TAutoConsoleVariable<float> CVarDefaultLocalExposureHighlightContrast(
+	TEXT("r.DefaultFeature.LocalExposure.HighlightContrastScale"),
+	1.0f,
+	TEXT("Engine default (project setting) for Local Exposure Highlight Contrast (postprocess volume/camera/game setting still can override)\n"));
+
+static TAutoConsoleVariable<float> CVarDefaultLocalExposureShadowContrast(
+	TEXT("r.DefaultFeature.LocalExposure.ShadowContrastScale"),
+	1.0f,
+	TEXT("Engine default (project setting) for Local Exposure Shadow Contrast (postprocess volume/camera/game setting still can override)\n"));
 
 static TAutoConsoleVariable<int32> CVarDefaultMotionBlur(
 	TEXT("r.DefaultFeature.MotionBlur"),
@@ -200,13 +211,14 @@ static TAutoConsoleVariable<int32> CVarDefaultLensFlare(
 
 // see EAntiAliasingMethod
 static TAutoConsoleVariable<int32> CVarDefaultAntiAliasing(
-	TEXT("r.DefaultFeature.AntiAliasing"),
-	2,
+	TEXT("r.AntiAliasingMethod"),
+	4,
 	TEXT("Engine default (project setting) for AntiAliasingMethod is (postprocess volume/camera/game setting still can override)\n")
 	TEXT(" 0: off (no anti-aliasing)\n")
-	TEXT(" 1: FXAA (faster than TemporalAA but much more shimmering for non static cases)\n")
-	TEXT(" 2: TemporalAA (default)\n")
-	TEXT(" 3: MSAA (Forward shading only)"),
+	TEXT(" 1: Fast Approximate Anti-Aliasing (FXAA)\n")
+	TEXT(" 2: Temporal Anti-Aliasing (TAA)\n")
+	TEXT(" 3: Multisample Anti-Aliasing (MSAA, Only available on the desktop forward renderer)\n")
+	TEXT(" 4: Temporal Super-Resolution (TSR, Default)"),
 	ECVF_RenderThreadSafe);
 
 // see ELightUnits
@@ -262,20 +274,12 @@ static TAutoConsoleVariable<int32> CVarTonemapperQuality(
 	TEXT("Defines the Tonemapper Quality in the range 0..5\n")
 	TEXT("Depending on the used settings we might pick a faster shader permutation\n")
 	TEXT(" 0: basic tonemapper only, lowest quality\n")
-	TEXT(" 1: + FilmContrast\n")
 	TEXT(" 2: + Vignette\n")
-	TEXT(" 3: + FilmShadowTintAmount\n")
 	TEXT(" 4: + Grain\n")
 	TEXT(" 5: + GrainJitter = full quality (default)"),
 	ECVF_Scalability | ECVF_RenderThreadSafe);
 
-static TAutoConsoleVariable<float> CVarTessellationAdaptivePixelsPerTriangle(
-	TEXT("r.TessellationAdaptivePixelsPerTriangle"),
-	48.0f,
-	TEXT("Global tessellation factor multiplier"),
-	ECVF_RenderThreadSafe);
-
-// should be changed to BaseColor and Metallic, since some time now UE4 is not using DiffuseColor and SpecularColor any more
+// should be changed to BaseColor and Metallic, since some time now UE is not using DiffuseColor and SpecularColor any more
 static TAutoConsoleVariable<float> CVarDiffuseColorMin(
 	TEXT("r.DiffuseColor.Min"),
 	0.0f,
@@ -305,49 +309,147 @@ static TAutoConsoleVariable<float> CVarRoughnessMax(
 	ECVF_Cheat | ECVF_RenderThreadSafe
 	);
 
-static TAutoConsoleVariable<int32> CVarAllowTranslucencyAfterDOF(
-	TEXT("r.SeparateTranslucency"),
-	1,
-	TEXT("Allows to disable the separate translucency feature (all translucency is rendered in separate RT and composited\n")
-	TEXT("after DOF, if not specified otherwise in the material).\n")
-	TEXT(" 0: off (translucency is affected by depth of field)\n")
-	TEXT(" 1: on costs GPU performance and memory but keeps translucency unaffected by Depth of Field. (default)"),
-	ECVF_Scalability | ECVF_RenderThreadSafe);
-
 static TAutoConsoleVariable<int32> CVarEnableTemporalUpsample(
 	TEXT("r.TemporalAA.Upsampling"),
-	0,
+	1,
 	TEXT("Whether to do primary screen percentage with temporal AA or not.\n")
-	TEXT(" 0: use spatial upscale pass independently of TAA (default);\n")
-	TEXT(" 1: TemporalAA performs spatial and temporal upscale as screen percentage method."),
+	TEXT(" 0: use spatial upscale pass independently of TAA;\n")
+	TEXT(" 1: TemporalAA performs spatial and temporal upscale as screen percentage method (default)."),
 	ECVF_Default);
 
-// Conversion factor used when "r.DefaultFeature.AutoExposure.ExtendDefaultLuminanceRange" 
-FORCEINLINE float LuminanceToEV100(float Luminance)
+static TAutoConsoleVariable<int32> CVarOrthoCalculateDepthThicknessScaling(
+	TEXT("r.Ortho.CalculateDepthThicknessScaling"),
+	1,
+	TEXT("Whether to automatically derive the depth thickness test scale from the Near/FarPlane difference.\n")
+	TEXT("0: Disabled (use scaling specified by r.Ortho.DepthThicknessScale)\n")
+	TEXT("1: Enabled (default)"),
+	ECVF_Scalability | ECVF_RenderThreadSafe);
+
+float GOrthographicDepthThicknessScale = 0.001;
+static FAutoConsoleVariableRef CVarOrthographicDepthThicknessScale(
+	TEXT("r.Ortho.DepthThicknessScale"),
+	GOrthographicDepthThicknessScale,
+	TEXT("Orthographic scene depth scales proportionally lower than perspective, typically on a scale of 1/100")
+	TEXT("Use this value to tweak the scale of depth thickness testing values simultaneously across various screen trace passes"),
+	ECVF_RenderThreadSafe);
+
+float GDefaultUpdateOrthoNearPlane = 0.0f;
+static FAutoConsoleVariableRef CVarDefaultUpdateOrthoNearPlane(
+	TEXT("r.Ortho.DefaultUpdateNearClipPlane"),
+	GDefaultUpdateOrthoNearPlane,
+	TEXT("Ortho near clip plane value to correct to when using ortho near clip correction"),
+	ECVF_RenderThreadSafe
+);
+
+static TAutoConsoleVariable<bool> CVarAllowOrthoNearPlaneCorrection(
+	TEXT("r.Ortho.AllowNearPlaneCorrection"),
+	true,
+	TEXT("Orthographic near planes can be behind the camera position, which causes some issues with Unreal resolving lighting behind the camera position ")
+	TEXT("This CVar enables the Orthographic cameras globally to automatically update the camera location to match the NearPlane location, ")
+	TEXT("and force the pseudo camera position to be the replaced near plane location for the projection matrix calculation. ")
+	TEXT("This means Unreal can resolve lighting behind the camera correctly."),
+	ECVF_Default
+);
+
+static TAutoConsoleVariable<bool> CVarOrthoCameraHeightAsViewTarget(
+	TEXT("r.Ortho.CameraHeightAsViewTarget"),
+	true,
+	TEXT("Sets whether to use the camera height as a pseudo camera to view target.\n")
+	TEXT("Primarily helps with VSM clipmap selection and avoids overcorrecting NearPlanes.\n"),
+	ECVF_Scalability | ECVF_RenderThreadSafe);
+
+int32 GVirtualTextureFeedbackFactor = 16;
+static FAutoConsoleVariableRef CVarVirtualTextureFeedbackFactor(
+	TEXT("r.vt.FeedbackFactor"),
+	GVirtualTextureFeedbackFactor,
+	TEXT("The size of the VT feedback buffer is calculated by dividing the render resolution by this factor.")
+	TEXT("The value set here is rounded up to the nearest power of two before use."),
+	ECVF_RenderThreadSafe);
+
+
+static int32 GHairStrandsComposeDOFDepth = 1;
+static FAutoConsoleVariableRef CVarHairStrandsComposeDOFDepth(
+	TEXT("r.HairStrands.DOFDepth"), 
+	GHairStrandsComposeDOFDepth, 
+	TEXT("Compose hair with DOF by lerping hair depth based on its opacity."),
+	ECVF_RenderThreadSafe);
+
+bool GetHairStrandsDepthOfFieldUseHairDepth()
 {
-	return FMath::Log2(Luminance / 1.2f);
+	return GHairStrandsComposeDOFDepth > 0 ? 1 : 0;
 }
+
+#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+
+static TAutoConsoleVariable<float> CVarOverrideTimeMaterialExpressions(
+	TEXT("r.Test.OverrideTimeMaterialExpressions"), -1.0f,
+	TEXT("Value to freeze time material expressions with."),
+	ECVF_RenderThreadSafe);
+
+#endif
 
 /** Global vertex color view mode setting when SHOW_VertexColors show flag is set */
 EVertexColorViewMode::Type GVertexColorViewMode = EVertexColorViewMode::Color;
+TWeakObjectPtr<UTexture> GVertexViewModeOverrideTexture = nullptr;
+float GVertexViewModeOverrideUVChannel = 0.0f; // Scalar parameter, so keep as float
+FString GVertexViewModeOverrideOwnerName;
+bool ShouldProxyUseVertexColorVisualization(FName OwnerName)
+{
+	bool bUsingTextureOverride = GVertexViewModeOverrideTexture.Get() != nullptr;
+	return !bUsingTextureOverride || OwnerName.ToString().Compare(GVertexViewModeOverrideOwnerName) == 0;
+}
 
 /** Global primitive uniform buffer resource containing identity transformations. */
 ENGINE_API TGlobalResource<FIdentityPrimitiveUniformBuffer> GIdentityPrimitiveUniformBuffer;
 
-/** Global primitive uniform buffer resource containing identity transformations. */
-ENGINE_API TGlobalResource<FDummyMovablePointLightUniformBuffer> GDummyMovablePointLightUniformBuffer;
-
 FSceneViewStateReference::~FSceneViewStateReference()
 {
+	checkf(ShareOriginRefCount == 0, TEXT("FSceneViewStateReference:  ShareOrigin view states must be destroyed before their target."));
+
+	if (ShareOriginTarget)
+	{
+		ShareOriginTarget->ShareOriginRefCount--;
+		ShareOriginTarget = nullptr;
+	}
+
 	Destroy();
+}
+
+void FSceneViewStateReference::AllocateInternal(ERHIFeatureLevel::Type FeatureLevel)
+{
+	FSceneViewStateInterface* ShareOriginInterface = nullptr;
+	if (ShareOriginTarget)
+	{
+		check(ShareOriginTarget->Reference);
+		ShareOriginInterface = ShareOriginTarget->Reference;
+	}
+
+	Reference = GetRendererModule().AllocateViewState(FeatureLevel, ShareOriginInterface);
+}
+
+void FSceneViewStateReference::Allocate(ERHIFeatureLevel::Type FeatureLevel)
+{
+	check(!Reference);
+
+	AllocateInternal(FeatureLevel);
+
+	GlobalListLink = TLinkedList<FSceneViewStateReference*>(this);
+	GlobalListLink.LinkHead(GetSceneViewStateList());
 }
 
 void FSceneViewStateReference::Allocate()
 {
-	check(!Reference);
-	Reference = GetRendererModule().AllocateViewState();
-	GlobalListLink = TLinkedList<FSceneViewStateReference*>(this);
-	GlobalListLink.LinkHead(GetSceneViewStateList());
+	Allocate(GMaxRHIFeatureLevel);
+}
+
+ENGINE_API void FSceneViewStateReference::ShareOrigin(FSceneViewStateReference* Target)
+{
+	checkf(ShareOriginTarget == nullptr, TEXT("FSceneViewStateReference:  Cannot call ShareOrigin twice."));
+	checkf(ShareOriginRefCount == 0 && Target->ShareOriginTarget == nullptr, TEXT("FSceneViewStateReference:  ShareOrigin references cannot nest."));
+	checkf(Reference == nullptr, TEXT("FSceneViewStateReference:  Must call ShareOrigin before calling Allocate."));
+
+	ShareOriginTarget = Target;
+	Target->ShareOriginRefCount++;
 }
 
 void FSceneViewStateReference::Destroy()
@@ -371,13 +473,30 @@ void FSceneViewStateReference::DestroyAll()
 	}
 }
 
-void FSceneViewStateReference::AllocateAll()
+void FSceneViewStateReference::AllocateAll(ERHIFeatureLevel::Type FeatureLevel)
 {
 	for(TLinkedList<FSceneViewStateReference*>::TIterator ViewStateIt(FSceneViewStateReference::GetSceneViewStateList());ViewStateIt;ViewStateIt.Next())
 	{
 		FSceneViewStateReference* ViewStateReference = *ViewStateIt;
-		ViewStateReference->Reference = GetRendererModule().AllocateViewState();
+
+		// This view state reference may already have been allocated
+		if (!ViewStateReference->Reference)
+		{
+			// If we have a shared origin target, we need to make sure its view state gets allocated first
+			// (don't want to assume the iterator processes references in the correct order).
+			if (ViewStateReference->ShareOriginTarget && !ViewStateReference->ShareOriginTarget->Reference)
+			{
+				ViewStateReference->ShareOriginTarget->AllocateInternal(FeatureLevel);
+			}
+
+			ViewStateReference->AllocateInternal(FeatureLevel);
+		}
 	}
+}
+
+void FSceneViewStateReference::AllocateAll()
+{
+	AllocateAll(GMaxRHIFeatureLevel);
 }
 
 TLinkedList<FSceneViewStateReference*>*& FSceneViewStateReference::GetSceneViewStateList()
@@ -403,7 +522,7 @@ FString LexToString(EMaterialQualityLevel::Type QualityLevel)
 		default:
 			break;
 	}
-	return TEXT("UnknownFeatureLevel");
+	return TEXT("UnknownMaterialQualityLevel");
 }
 
 /**
@@ -413,7 +532,7 @@ FString LexToString(EMaterialQualityLevel::Type QualityLevel)
  * @param InvertZ - projection calc is affected by inverted device Z
  * @return vector containing the ratios needed to convert from device Z to world Z
  */
-FVector4 CreateInvDeviceZToWorldZTransform(const FMatrix& ProjMatrix)
+FVector4f CreateInvDeviceZToWorldZTransform(const FMatrix& ProjMatrix)
 {
 	// The perspective depth projection comes from the the following projection matrix:
 	//
@@ -434,8 +553,8 @@ FVector4 CreateInvDeviceZToWorldZTransform(const FMatrix& ProjMatrix)
 	// Z = 1 / (Z' * C1 - C2)   --- Where C1 = 1/B, C2 = A/B
 	//
 
-	float DepthMul = ProjMatrix.M[2][2];
-	float DepthAdd = ProjMatrix.M[3][2];
+	float DepthMul = (float)ProjMatrix.M[2][2];
+	float DepthAdd = (float)ProjMatrix.M[3][2];
 
 	if (DepthAdd == 0.f)
 	{
@@ -474,7 +593,7 @@ FVector4 CreateInvDeviceZToWorldZTransform(const FMatrix& ProjMatrix)
 		// This fixes fog not being applied to the black background in the editor.
 		SubtractValue -= 0.00000001f;
 
-		return FVector4(
+		return FVector4f(
 			0.0f,
 			0.0f,
 			1.0f / DepthAdd,
@@ -483,23 +602,116 @@ FVector4 CreateInvDeviceZToWorldZTransform(const FMatrix& ProjMatrix)
 	}
 	else
 	{
-		return FVector4(
-			1.0f / ProjMatrix.M[2][2],
-			-ProjMatrix.M[3][2] / ProjMatrix.M[2][2] + 1.0f,
+		return FVector4f(
+			(float)(1.0f / ProjMatrix.M[2][2]),
+			(float)(-ProjMatrix.M[3][2] / ProjMatrix.M[2][2] + 1.0f),
 			0.0f,
 			1.0f
 			);
 	}
 }
 
+bool FSceneViewProjectionData::UpdateOrthoPlanes(FSceneViewProjectionData* InOutProjectionData, float& NearPlane, float& FarPlane, float HalfOrthoWidth, bool bUseCameraHeightAsViewTarget)
+{
+	if (!InOutProjectionData || !CVarAllowOrthoNearPlaneCorrection.GetValueOnAnyThread())
+	{
+		return false;
+	}
+	
+	//Get the ViewForward vector from the RotationMatrix + ensure it is normalized.
+	FVector ViewForward = InOutProjectionData->ViewRotationMatrix.GetColumn(2);
+	ViewForward.Normalize();
+
+	float PlaneDifference = FarPlane - NearPlane;
+	if(InOutProjectionData->CameraToViewTarget.Length() > 0)
+	{
+		//Store the ViewTargetLocation to correct it for the repositioned ViewOrigin.
+		FVector ViewTargetLocation = InOutProjectionData->ViewOrigin + InOutProjectionData->CameraToViewTarget;
+		//OrthoNearClipPlane is negative at this point + we are moving the theoretical camera position backwards.
+		InOutProjectionData->ViewOrigin += InOutProjectionData->CameraToViewTarget +(ViewForward * NearPlane);
+		//Save out the new CameraToViewTarget vector.
+		InOutProjectionData->CameraToViewTarget = ViewTargetLocation - InOutProjectionData->ViewOrigin;
+	}
+	else
+	{	
+		/**
+		* Use the height of the camera as a sort of pseudo CameraToViewTarget to remove camera position as much as possible so we minimise the near clip plane distance.
+		* Depends on view direction being top down as when we get to a side view, the scale grows much larger and it becomes redundant.
+		*/
+		float CameraHeightAdjustment = 0.0f;
+		if (CVarOrthoCameraHeightAsViewTarget.GetValueOnAnyThread() && bUseCameraHeightAsViewTarget)
+		{
+			CameraHeightAdjustment = FMath::Abs(FMath::Min(InOutProjectionData->ViewOrigin.Z, HalfOrthoWidth)) * FMath::Abs((ViewForward.Dot(FVector(0, 0, -1.0f))));
+		}
+		InOutProjectionData->ViewOrigin += ViewForward * (CameraHeightAdjustment + NearPlane);
+	}
+	NearPlane = GDefaultUpdateOrthoNearPlane;
+	FarPlane = NearPlane + PlaneDifference;
+
+	return true;
+}
+
+bool FSceneViewProjectionData::UpdateOrthoPlanes(FMinimalViewInfo& MinimalViewInfo)
+{
+	if(MinimalViewInfo.bUpdateOrthoPlanes)
+	{
+		return UpdateOrthoPlanes(MinimalViewInfo.OrthoNearClipPlane, MinimalViewInfo.OrthoFarClipPlane, MinimalViewInfo.OrthoWidth/2.0f, MinimalViewInfo.bUseCameraHeightAsViewTarget);
+	}
+	return false;
+}
+
+bool FSceneViewProjectionData::UpdateOrthoPlanes(bool bUseCameraHeightAsViewTarget)
+{
+	/**
+	* This function takes the existing projection matrix and moves the nearplane + view origin.
+	* Separating this step from the near plane calculation logic itself helps avoid applying the NearPlane correctiontwice /makes it easier to read.
+	*/
+	if(IsPerspectiveProjection() 
+		|| !CVarAllowOrthoNearPlaneCorrection.GetValueOnAnyThread()
+		|| ProjectionMatrix.M[2][2] == 0.0 
+		|| ProjectionMatrix.M[2][2] == ProjectionMatrix.M[2][3])
+	{ 
+		return false;	
+	}
+
+	//Get existing Near and Far plane + their difference
+	float NearPlane = static_cast<float>(ProjectionMatrix.M[3][3] - ProjectionMatrix.M[3][2]) / (ProjectionMatrix.M[2][2] - ProjectionMatrix.M[2][3]);
+	float FarPlane = NearPlane - 1.0f/static_cast<float>(ProjectionMatrix.M[2][2]);
+	float PlaneDifference = FarPlane - NearPlane;
+	if (FarPlane - NearPlane == 0.0f)
+	{
+		return false;
+	}
+
+	float HalfInvOrthoWidth = static_cast<float>(ProjectionMatrix.M[0][0]);
+	if (HalfInvOrthoWidth == 0.0f)
+	{
+		return false;
+	}
+	UpdateOrthoPlanes(NearPlane, FarPlane, 1.0f / HalfInvOrthoWidth, bUseCameraHeightAsViewTarget);
+
+	const float ZScale = 1.0f / (FarPlane - NearPlane);
+	const float ZOffset = -NearPlane;
+
+	//Only the Near/Far plane elements need correcting, OrthoWidth/Height remains the same
+	ProjectionMatrix.M[2][2] = -ZScale;
+	ProjectionMatrix.M[3][2] = 1.0f - (ZOffset * ZScale);
+
+	return true;
+}
 
 void FViewMatrices::Init(const FMinimalInitializer& Initializer)
 {
-	//check(Initializer.ViewRotationMatrix.GetOrigin().IsNearlyZero());
-	check(FVector::Distance(Initializer.ViewRotationMatrix.GetScaleVector(), FVector::OneVector) < KINDA_SMALL_NUMBER);
+	FMatrix ViewRotationMatrix = Initializer.ViewRotationMatrix;
+	const FVector ViewRotationScaling = ViewRotationMatrix.ExtractScaling();
+	ensureMsgf(FVector::Distance(ViewRotationScaling, FVector::OneVector) < UE_KINDA_SMALL_NUMBER, TEXT("ViewRotation matrix accumulated scaling (%f, %f, %f)"), ViewRotationScaling.X, ViewRotationScaling.Y, ViewRotationScaling.Z);
+
+	// Adjust the projection matrix for the current RHI.
+	ProjectionMatrix = AdjustProjectionMatrixForRHI(Initializer.ProjectionMatrix);
+	InvProjectionMatrix = InvertProjectionMatrix(ProjectionMatrix);
+	ScreenToClipMatrix = ScreenToClipProjectionMatrix();
 
 	FVector LocalViewOrigin = Initializer.ViewOrigin;
-	FMatrix ViewRotationMatrix = Initializer.ViewRotationMatrix;
 	if (!ViewRotationMatrix.GetOrigin().IsNearlyZero(0.0f))
 	{
 		LocalViewOrigin += ViewRotationMatrix.InverseTransformPosition(FVector::ZeroVector);
@@ -509,10 +721,6 @@ void FViewMatrices::Init(const FMinimalInitializer& Initializer)
 	ViewMatrix = FTranslationMatrix(-LocalViewOrigin) * ViewRotationMatrix;
 	HMDViewMatrixNoRoll = Initializer.ViewRotationMatrix;
 
-	// Adjust the projection matrix for the current RHI.
-	ProjectionMatrix = AdjustProjectionMatrixForRHI(Initializer.ProjectionMatrix);
-	InvProjectionMatrix = InvertProjectionMatrix(ProjectionMatrix);
-
 	// Compute the view projection matrix and its inverse.
 	ViewProjectionMatrix = GetViewMatrix() * GetProjectionMatrix();
 
@@ -520,73 +728,13 @@ void FViewMatrices::Init(const FMinimalInitializer& Initializer)
 	InvViewMatrix = ViewRotationMatrix.GetTransposed() * FTranslationMatrix(LocalViewOrigin);
 	InvViewProjectionMatrix = InvProjectionMatrix * InvViewMatrix;
 
-	bool bApplyPreViewTranslation = true;
-	bool bViewOriginIsFudged = false;
+	// Translate world-space so its origin is at ViewOrigin for improved precision.
+	ViewOrigin = LocalViewOrigin;
+	PreViewTranslation = -LocalViewOrigin;
+	CameraToViewTarget = Initializer.CameraToViewTarget;
 
-	// Calculate the view origin from the view/projection matrices.
-	if (IsPerspectiveProjection())
-	{
-		this->ViewOrigin = LocalViewOrigin;
-	}
-#if WITH_EDITOR
-	else if (Initializer.bUseFauxOrthoViewPos)
-	{
-		float DistanceToViewOrigin = WORLD_MAX;
-		ViewOrigin = FVector4(InvViewMatrix.TransformVector(FVector(0, 0, -1)).GetSafeNormal() * DistanceToViewOrigin, 1) + LocalViewOrigin;
-		bViewOriginIsFudged = true;
-	}
-#endif
-	else
-	{
-		this->ViewOrigin = FVector4(InvViewMatrix.TransformVector(FVector(0, 0, -1)).GetSafeNormal(), 0);
-		// to avoid issues with view dependent effect (e.g. Frensel)
-		bApplyPreViewTranslation = false;
-	}
-
-	/** The view transform, starting from world-space points translated by -ViewOrigin. */
 	FMatrix LocalTranslatedViewMatrix = ViewRotationMatrix;
 	FMatrix LocalInvTranslatedViewMatrix = LocalTranslatedViewMatrix.GetTransposed();
-
-	// Translate world-space so its origin is at ViewOrigin for improved precision.
-	// Note that this isn't exactly right for orthogonal projections (See the above special case), but we still use ViewOrigin
-	// in that case so the same value may be used in shaders for both the world-space translation and the camera's world position.
-	if (bApplyPreViewTranslation)
-	{
-		PreViewTranslation = -FVector(LocalViewOrigin);
-
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
-		{
-			// console variable override
-			static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.PreViewTranslation"));
-			int32 Value = CVar->GetValueOnAnyThread();
-
-			static FVector PreViewTranslationBackup;
-
-			if (Value)
-			{
-				PreViewTranslationBackup = PreViewTranslation;
-			}
-			else
-			{
-				PreViewTranslation = PreViewTranslationBackup;
-			}
-		}
-#endif // !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
-	}
-	else
-	{
-		// If not applying PreViewTranslation then we need to use the view matrix directly.
-		LocalTranslatedViewMatrix = ViewMatrix;
-		LocalInvTranslatedViewMatrix = InvViewMatrix;
-	}
-
-	// When the view origin is fudged for faux ortho view position the translations don't cancel out.
-	if (bViewOriginIsFudged)
-	{
-		LocalTranslatedViewMatrix = FTranslationMatrix(-PreViewTranslation)
-			* FTranslationMatrix(-LocalViewOrigin) * ViewRotationMatrix;
-		LocalInvTranslatedViewMatrix = LocalTranslatedViewMatrix.Inverse();
-	}
 
 	// Compute a transform from view origin centered world-space to clip space.
 	TranslatedViewMatrix = LocalTranslatedViewMatrix;
@@ -602,8 +750,27 @@ void FViewMatrices::Init(const FMinimalInitializer& Initializer)
 	// Stereo renders at half horizontal resolution, but compute shadow resolution based on full resolution.
 	const bool bStereo = IStereoRendering::IsStereoEyePass(Initializer.StereoPass);
 	const float ScreenXScale = bStereo ? 2.0f : 1.0f;
-	ProjectionScale.X = ScreenXScale * FMath::Abs(ProjectionMatrix.M[0][0]);
-	ProjectionScale.Y = FMath::Abs(ProjectionMatrix.M[1][1]);
+	if (IsPerspectiveProjection())
+	{
+		ProjectionScale.X = ScreenXScale * FMath::Abs(ProjectionMatrix.M[0][0]);
+		ProjectionScale.Y = FMath::Abs(ProjectionMatrix.M[1][1]);
+		PerProjectionDepthThicknessScale = 1.0f;
+	}
+	else
+	{
+		//No FOV for ortho so do not scale
+		ProjectionScale = FVector2D(ScreenXScale, 1.0f);
+
+		if (CVarOrthoCalculateDepthThicknessScaling.GetValueOnAnyThread())
+		{
+			int8 Exponent = -FMath::Clamp(FMath::LogX(10, FMath::Abs(InvProjectionMatrix.M[2][2])), 0, 9);
+			PerProjectionDepthThicknessScale = FMath::Pow(10, (float)Exponent);
+		}
+		else
+		{
+			PerProjectionDepthThicknessScale = GOrthographicDepthThicknessScale;
+		}
+	}
 	ScreenScale = FMath::Max(
 		Initializer.ConstrainedViewRect.Size().X * 0.5f * ProjectionScale.X,
 		Initializer.ConstrainedViewRect.Size().Y * 0.5f * ProjectionScale.Y
@@ -617,11 +784,9 @@ FViewMatrices::FViewMatrices(const FSceneViewInitOptions& InitOptions) : FViewMa
 	Initializer.ViewRotationMatrix   = InitOptions.ViewRotationMatrix;
 	Initializer.ProjectionMatrix     = InitOptions.ProjectionMatrix;
 	Initializer.ViewOrigin           = InitOptions.ViewOrigin;
+	Initializer.CameraToViewTarget	 = InitOptions.CameraToViewTarget;
 	Initializer.ConstrainedViewRect  = InitOptions.GetConstrainedViewRect();
 	Initializer.StereoPass           = InitOptions.StereoPass;
-#if WITH_EDITOR
-	Initializer.bUseFauxOrthoViewPos = InitOptions.bUseFauxOrthoViewPos;
-#endif
 
 	Init(Initializer);
 }
@@ -646,20 +811,46 @@ static void SetupViewFrustum(FSceneView& View)
 		GetViewFrustumBounds(View.ViewFrustum, View.ViewMatrices.GetViewProjectionMatrix(), false);
 	}
 
-	// Derive the view's near clipping distance and plane.
-	// The GetFrustumFarPlane() is the near plane because of reverse Z projection.
-	static_assert((int32)ERHIZBuffer::IsInverted != 0, "Fix Near Clip distance!");
-	View.bHasNearClippingPlane = View.ViewMatrices.GetViewProjectionMatrix().GetFrustumFarPlane(View.NearClippingPlane);
-	if (View.ViewMatrices.GetProjectionMatrix().M[2][3] > DELTA)
+	// Use a unified frustum for culling an instanced stereo pass.
+	if (IStereoRendering::IsStereoEyeView(View) && GEngine->StereoRenderingDevice.IsValid())
 	{
-		// Infinite projection with reversed Z.
-		View.NearClippingDistance = View.ViewMatrices.GetProjectionMatrix().M[3][2];
+		FVector MonoLocation = View.ViewLocation;
+		FRotator MonoRotation = View.ViewRotation;
+		GEngine->StereoRenderingDevice->CalculateStereoViewOffset(eSSE_MONOSCOPIC, MonoRotation, View.WorldToMetersScale, MonoLocation);
+		const FMatrix ViewRotationMatrix = FInverseRotationMatrix(MonoRotation) * FMatrix(
+			FPlane(0, 0, 1, 0),
+			FPlane(1, 0, 0, 0),
+			FPlane(0, 1, 0, 0),
+			FPlane(0, 0, 0, 1));
+		const FMatrix ViewMatrixForCulling = FTranslationMatrix(-MonoLocation) * ViewRotationMatrix;
+		const FMatrix ViewProjForCulling = ViewMatrixForCulling * GEngine->StereoRenderingDevice->GetStereoProjectionMatrix(eSSE_MONOSCOPIC);
+
+		if (View.SceneViewInitOptions.OverrideFarClippingPlaneDistance > 0.0f)
+		{
+			const FPlane FarPlane(View.ViewMatrices.GetViewOrigin() + View.GetViewDirection() * View.SceneViewInitOptions.OverrideFarClippingPlaneDistance, View.GetViewDirection());
+			// Derive the frustum from the view projection matrix, overriding the far plane
+			GetViewFrustumBounds(View.CullingFrustum, ViewProjForCulling, FarPlane, true, false);
+		}
+		else
+		{
+			// Derive the frustum from the view projection matrix.
+			GetViewFrustumBounds(View.CullingFrustum, ViewProjForCulling, false);
+		}
+
+		View.CullingOrigin = MonoLocation;
 	}
 	else
 	{
-		// Ortho projection with reversed Z.
-		View.NearClippingDistance = (1.0f - View.ViewMatrices.GetProjectionMatrix().M[3][2]) / View.ViewMatrices.GetProjectionMatrix().M[2][2];
+		View.CullingFrustum = View.ViewFrustum;
+		View.CullingOrigin = View.ViewMatrices.GetViewOrigin();
 	}
+
+	// Derive the view's near clipping distance and plane.
+	static_assert((int32)ERHIZBuffer::IsInverted != 0, "Fix Near Clip distance!");
+	FPlane NearClippingPlane;
+	View.bHasNearClippingPlane = View.ViewMatrices.GetViewProjectionMatrix().GetFrustumNearPlane(NearClippingPlane);
+	View.NearClippingPlane = NearClippingPlane;
+	View.NearClippingDistance = View.ViewMatrices.ComputeNearPlane();
 }
 
 FSceneView::FSceneView(const FSceneViewInitOptions& InitOptions)
@@ -674,8 +865,8 @@ FSceneView::FSceneView(const FSceneViewInitOptions& InitOptions)
 	, UnconstrainedViewRect(InitOptions.GetViewRect())
 	, MaxShadowCascades(10)
 	, ViewMatrices(InitOptions)
-	, ViewLocation(ForceInitToZero)
-	, ViewRotation(ForceInitToZero)
+	, ViewLocation(InitOptions.ViewLocation)
+	, ViewRotation(InitOptions.ViewRotation)
 	, BaseHmdOrientation(EForceInit::ForceInit)
 	, BaseHmdLocation(ForceInitToZero)
 	, WorldToMetersScale(InitOptions.WorldToMetersScale)
@@ -685,7 +876,8 @@ FSceneView::FSceneView(const FSceneViewInitOptions& InitOptions)
 	, OverlayColor(InitOptions.OverlayColor)
 	, ColorScale(InitOptions.ColorScale)
 	, StereoPass(InitOptions.StereoPass)
-	, StereoIPD(InitOptions.StereoIPD)
+	, StereoViewIndex(InitOptions.StereoViewIndex)
+	, PrimaryViewIndex(INDEX_NONE)
 	, bAllowCrossGPUTransfer(true)
 	, bOverrideGPUMask(false)
 	, GPUMask(FRHIGPUMask::GPU0())
@@ -703,42 +895,37 @@ FSceneView::FSceneView(const FSceneViewInitOptions& InitOptions)
 	, CursorPos(InitOptions.CursorPos)
 	, bIsGameView(false)
 	, bIsViewInfo(false)
-	, bIsSceneCapture(false)
-	, bSceneCaptureUsesRayTracing(false)
-	, bIsReflectionCapture(false)
-	, bIsPlanarReflection(false)
+	, bIsSceneCapture(InitOptions.bIsSceneCapture)
+	, bIsSceneCaptureCube(InitOptions.bIsSceneCaptureCube)
+	, bSceneCaptureUsesRayTracing(InitOptions.bSceneCaptureUsesRayTracing)
+	, bIsReflectionCapture(InitOptions.bIsReflectionCapture)
+	, bIsPlanarReflection(InitOptions.bIsPlanarReflection)
 	, bIsVirtualTexture(false)
 	, bIsOfflineRender(false)
 	, bRenderSceneTwoSided(false)
 	, bIsLocked(false)
 	, bStaticSceneOnly(false)
 	, bIsInstancedStereoEnabled(false)
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	, bIsMultiViewEnabled(false)
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	, bIsMultiViewportEnabled(false)
 	, bIsMobileMultiViewEnabled(false)
 	, bShouldBindInstancedViewUB(false)
 	, UnderwaterDepth(-1.0f)
 	, bForceCameraVisibilityReset(false)
 	, bForcePathTracerReset(false)
+	, bDisableDistanceBasedFadeTransitions(false)
 	, GlobalClippingPlane(FPlane(0, 0, 0, 0))
 	, LensPrincipalPointOffsetScale(0.0f, 0.0f, 1.0f, 1.0f)
 #if WITH_EDITOR
-	, OverrideLODViewOrigin(InitOptions.OverrideLODViewOrigin)
 	, bAllowTranslucentPrimitivesInHitProxy( true )
 	, bHasSelectedComponents( false )
 #endif
 	, AntiAliasingMethod(AAM_None)
 	, PrimaryScreenPercentageMethod(EPrimaryScreenPercentageMethod::SpatialUpscale)
-	, ForwardLightingResources(nullptr)
 	, FeatureLevel(InitOptions.ViewFamily ? InitOptions.ViewFamily->GetFeatureLevel() : GMaxRHIFeatureLevel)
-#if RHI_RAYTRACING
-	, IESLightProfileResource(nullptr)
-#endif
 {
-	check(UnscaledViewRect.Min.X >= 0);
-	check(UnscaledViewRect.Min.Y >= 0);
-	check(UnscaledViewRect.Width() > 0);
-	check(UnscaledViewRect.Height() > 0);
-
 	ShadowViewMatrices = ViewMatrices;
 
 	SceneViewInitOptions = FSceneViewInitOptions(InitOptions);
@@ -764,22 +951,11 @@ FSceneView::FSceneView(const FSceneViewInitOptions& InitOptions)
 	SetupViewFrustum(*this);
 
 	// Determine whether the view should reverse the cull mode due to a negative determinant.  Only do this for a valid scene
-	bReverseCulling = (Family && Family->Scene) ? FMath::IsNegativeFloat(ViewMatrices.GetViewMatrix().Determinant()) : false;
+	bReverseCulling = (Family && Family->Scene) ? ViewMatrices.GetViewMatrix().Determinant() < 0.0f : false;
 
 	// OpenGL Gamma space output in GLSL flips Y when rendering directly to the back buffer (so not needed on PC, as we never render directly into the back buffer)
 	auto ShaderPlatform = GShaderPlatformForFeatureLevel[FeatureLevel];
-	bool bUsingMobileRenderer = FSceneInterface::GetShadingPath(FeatureLevel) == EShadingPath::Mobile;
-
-	bool bPlatformRequiresReverseCulling = IsOpenGLPlatform(ShaderPlatform);
-	bPlatformRequiresReverseCulling = bPlatformRequiresReverseCulling || FDataDrivenShaderPlatformInfo::GetRequiresReverseCullingOnMobile(ShaderPlatform);
-	bPlatformRequiresReverseCulling = bPlatformRequiresReverseCulling && bUsingMobileRenderer;
-	bPlatformRequiresReverseCulling = bPlatformRequiresReverseCulling && !IsPCPlatform(ShaderPlatform);
-	bPlatformRequiresReverseCulling = bPlatformRequiresReverseCulling && !IsVulkanMobilePlatform(ShaderPlatform);
-
-	static auto* MobileHDRCvar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.MobileHDR"));
-	check(MobileHDRCvar);
-	const bool bSkipPostprocessing = MobileHDRCvar->GetValueOnAnyThread() == 0;
-	bReverseCulling = (bPlatformRequiresReverseCulling && bSkipPostprocessing) ? !bReverseCulling : bReverseCulling;
+	bool bUsingMobileRenderer = GetFeatureLevelShadingPath(FeatureLevel) == EShadingPath::Mobile;
 
 	// Setup transformation constants to be used by the graphics hardware to transform device normalized depth samples
 	// into world oriented z.
@@ -797,9 +973,18 @@ FSceneView::FSceneView(const FSceneViewInitOptions& InitOptions)
 		bIsGameView = (Family && Family->Scene && Family->Scene->GetWorld() ) ? Family->Scene->GetWorld()->IsGameWorld() : false;
 	}
 
-	bUseFieldOfViewForLOD = InitOptions.bUseFieldOfViewForLOD;
-	FOV = InitOptions.FOV;
-	DesiredFOV = InitOptions.DesiredFOV;
+	if(ViewMatrices.IsPerspectiveProjection())
+	{
+		bUseFieldOfViewForLOD = InitOptions.bUseFieldOfViewForLOD;
+		FOV = InitOptions.FOV;
+		DesiredFOV = InitOptions.DesiredFOV;
+	}
+	else
+	{
+		bUseFieldOfViewForLOD = false;
+		FOV = 0.0f;
+		DesiredFOV = 0.0f;
+	}
 
 	DrawDynamicFlags = EDrawDynamicFlags::None;
 	bAllowTemporalJitter = true;
@@ -810,48 +995,77 @@ FSceneView::FSceneView(const FSceneViewInitOptions& InitOptions)
 	EditorViewBitflag = InitOptions.EditorViewBitflag;
 
 	SelectionOutlineColor = GEngine->GetSelectionOutlineColor();
+	SubduedSelectionOutlineColor = GEngine->GetSubduedSelectionOutlineColor();
 #endif
 
 	// Query instanced stereo and multi-view state
-	static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("vr.InstancedStereo"));
-	bIsInstancedStereoEnabled = !bUsingMobileRenderer && RHISupportsInstancedStereo(ShaderPlatform) && (CVar && CVar->GetValueOnAnyThread() != 0);
-
-	// TODO: Should be renamed to multi-viewport
-	bIsMultiViewEnabled = RHISupportsMultiView(ShaderPlatform) && bIsInstancedStereoEnabled;
-
-	bIsMobileMultiViewEnabled = Family && Family->bRequireMultiView;
-	if (bIsMobileMultiViewEnabled && !RHISupportsMobileMultiView(ShaderPlatform))
 	{
-		// Native mobile multi-view is not supported, attempt to fall back to instancing on compatible RHIs
-		if (RHISupportsInstancedStereo(ShaderPlatform) && !GRHISupportsArrayIndexFromAnyShader)
-		{
-			UE_LOG(LogMultiView, Fatal, TEXT("Mobile Multi-View not supported by the RHI and no fallback is available."));
-		}
-		bIsMobileMultiViewEnabled = bIsInstancedStereoEnabled = RHISupportsInstancedStereo(ShaderPlatform);
-	}
+		// The shader variants that are compiled have ISR or MMV _enabled_ in the shader, even if the current ViewFamily doesn't
+		// require multiple views functionality.
+		const UE::StereoRenderUtils::FStereoShaderAspects Aspects(ShaderPlatform);
+		bShouldBindInstancedViewUB = Aspects.IsInstancedStereoEnabled() || Aspects.IsMobileMultiViewEnabled();
 
-	bShouldBindInstancedViewUB = bIsInstancedStereoEnabled || bIsMobileMultiViewEnabled;
+		if (Family && Family->bRequireMultiView && !Aspects.IsMobileMultiViewEnabled())
+		{
+			UE_LOG(LogMultiView, Fatal, TEXT("Family requires Mobile Multi-View, but it is not supported by the RHI and no fallback is available."));
+		}
+
+		const bool bIsSingleViewCapture = (bIsSceneCapture || bIsReflectionCapture) && !bIsPlanarReflection; // Planar reflections have bIsSceneCapture == true, but can have instanced stereo views
+		bIsInstancedStereoEnabled = !bIsSingleViewCapture && Aspects.IsInstancedStereoEnabled();
+		bIsMultiViewportEnabled = !bIsSingleViewCapture && Aspects.IsInstancedMultiViewportEnabled();
+		bIsMobileMultiViewEnabled = !bIsSingleViewCapture && Family && Family->bRequireMultiView && Aspects.IsMobileMultiViewEnabled();
+
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		bIsMultiViewEnabled = bIsMultiViewportEnabled;	// temporary, as a graceful way to support plugins/licensee mods
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+		// If instanced stereo is enabled, we should also have either multiviewport enabled, or mmv fallback enabled.
+		// Assert this since a more graceful handling is done earlier (see PostInitRHI)
+		checkf(!bIsInstancedStereoEnabled || (bIsMultiViewportEnabled || Aspects.IsMobileMultiViewEnabled()),
+			TEXT("If instanced stereo is enabled, either multi-viewport or mobile multi-view needs to be enabled as well."));
+	}
 
 	SetupAntiAliasingMethod();
 
-	if ((AntiAliasingMethod == AAM_TemporalAA) &&
-		(CVarEnableTemporalUpsample.GetValueOnAnyThread() || (Family && Family->GetTemporalUpscalerInterface() != nullptr)))
+	if (AntiAliasingMethod == AAM_TSR)
+	{
+		PrimaryScreenPercentageMethod = EPrimaryScreenPercentageMethod::TemporalUpscale;
+	}
+	else if (AntiAliasingMethod == AAM_TemporalAA && CVarEnableTemporalUpsample.GetValueOnAnyThread() != 0)
 	{
 		PrimaryScreenPercentageMethod = EPrimaryScreenPercentageMethod::TemporalUpscale;
 	}
 
-	if (Family && Family->bResolveScene && Family->EngineShowFlags.PostProcessing)
+	if (Family)
 	{
-		EyeAdaptationViewState = State;
-
-		// When rendering in stereo we want to use the same exposure for both eyes.
+		// Find the primary view in the view family, if this is the primary view itself assume it'll be added at the back of the family.
+		PrimaryViewIndex = Family->Views.Num();
 		if (IStereoRendering::IsASecondaryView(*this))
 		{
 			check(Family->Views.Num() >= 1);
-			const FSceneView* PrimaryView = Family->Views[0];
-			if (IStereoRendering::IsAPrimaryView(*PrimaryView))
+			while (--PrimaryViewIndex >= 0)
 			{
-				EyeAdaptationViewState = PrimaryView->State;
+				const FSceneView* PrimaryView = Family->Views[PrimaryViewIndex];
+				if (IStereoRendering::IsAPrimaryView(*PrimaryView))
+				{
+					break;
+				}
+			}
+		}
+
+		if (Family->bResolveScene && Family->EngineShowFlags.PostProcessing)
+		{
+			EyeAdaptationViewState = State;
+
+			// When rendering in stereo we want to use the same exposure for both eyes.
+			if (IStereoRendering::IsASecondaryView(*this))
+			{
+				check(Family->Views.Num() >= 1);
+				const FSceneView* PrimaryView = Family->Views[PrimaryViewIndex];
+				if (IStereoRendering::IsAPrimaryView(*PrimaryView))
+				{
+					EyeAdaptationViewState = PrimaryView->State;
+				}
 			}
 		}
 	}
@@ -860,15 +1074,17 @@ FSceneView::FSceneView(const FSceneViewInitOptions& InitOptions)
 }
 
 
-#if DO_CHECK
+#if DO_CHECK || USING_CODE_ANALYSIS
 bool FSceneView::VerifyMembersChecks() const
 {
+	bool bIsTemporalAccumulation = IsTemporalAccumulationBasedMethod(AntiAliasingMethod);
+
 	if (PrimaryScreenPercentageMethod == EPrimaryScreenPercentageMethod::TemporalUpscale)
 	{
-		checkf(AntiAliasingMethod == AAM_TemporalAA, TEXT("ScreenPercentageMethod == EPrimaryScreenPercentageMethod::TemporalUpscale requires AntiAliasingMethod == AAM_TemporalAA"));
+		checkf(bIsTemporalAccumulation, TEXT("ScreenPercentageMethod == EPrimaryScreenPercentageMethod::TemporalUpscale requires TAA, TSR or custom Temporal Upscaler"));
 	}
 
-	if (AntiAliasingMethod == AAM_TemporalAA)
+	if (bIsTemporalAccumulation)
 	{
 		checkf(State, TEXT("TemporalAA requires the view to have a valid state."));
 	}
@@ -881,68 +1097,43 @@ bool FSceneView::VerifyMembersChecks() const
 void FSceneView::SetupAntiAliasingMethod()
 {
 	{
-		int32 Value = CVarDefaultAntiAliasing.GetValueOnAnyThread();
+		int32 Value = GetDefaultAntiAliasingMethod(FeatureLevel);
 		if (Value >= 0 && Value < AAM_MAX)
 		{
 			AntiAliasingMethod = (EAntiAliasingMethod)Value;
 		}
 	}
 
-	static const auto CVarMobileMSAA = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.MobileMSAA"));
-	if (FeatureLevel <= ERHIFeatureLevel::ES3_1 && CVarMobileMSAA ? CVarMobileMSAA->GetValueOnAnyThread() > 1 : false)
-	{
-		// Using mobile MSAA, disable other AA methods.
-		AntiAliasingMethod = AAM_None;
-
-		// Turn off various features which won't work with mobile MSAA.
-		//FinalPostProcessSettings.DepthOfFieldScale = 0.0f;
-	}
-
 	if (Family)
 	{
-		static IConsoleVariable* CVarMSAACount = IConsoleManager::Get().FindConsoleVariable(TEXT("r.MSAACount"));
-
-		const EShaderPlatform ShaderPlatform = GetFeatureLevelShaderPlatform(FeatureLevel);
-
-		if (AntiAliasingMethod == AAM_MSAA && IsForwardShadingEnabled(ShaderPlatform) && CVarMSAACount->GetInt() <= 0)
-		{
-			// Fallback to temporal AA so we can easily toggle methods with r.MSAACount
-			AntiAliasingMethod = AAM_TemporalAA;
-		}
-
-		static const auto PostProcessAAQualityCVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.PostProcessAAQuality"));
-		static auto* MobileHDRCvar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.MobileHDR"));
-		static auto* MobileMSAACvar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.MobileMSAA"));
-		uint32 MobileMSAAValue = MobileMSAACvar->GetValueOnAnyThread();
-
-		int32 Quality = FMath::Clamp(PostProcessAAQualityCVar->GetValueOnAnyThread(), 0, 6);
 		const bool bWillApplyTemporalAA = Family->EngineShowFlags.PostProcessing || bIsPlanarReflection;
 
-		if (!bWillApplyTemporalAA || !Family->EngineShowFlags.AntiAliasing || Quality <= 0
-			// Disable antialiasing in GammaLDR mode to avoid jittering.
-			|| (FeatureLevel <= ERHIFeatureLevel::ES3_1 && MobileHDRCvar->GetValueOnAnyThread() == 0)
-			|| (FeatureLevel <= ERHIFeatureLevel::ES3_1 && (MobileMSAAValue > 1)))
+		if (!bWillApplyTemporalAA || !Family->EngineShowFlags.AntiAliasing)
 		{
 			AntiAliasingMethod = AAM_None;
 		}
 
 		if (AntiAliasingMethod == AAM_TemporalAA)
 		{
-			if (!Family->EngineShowFlags.TemporalAA || !Family->bRealtimeUpdate || Quality < 3)
+			if (!Family->EngineShowFlags.TemporalAA || !Family->bRealtimeUpdate || !SupportsGen4TAA(GetShaderPlatform()))
+			{
+				AntiAliasingMethod = AAM_FXAA;
+			}
+		}
+		else if (AntiAliasingMethod == AAM_TSR)
+		{
+			// TODO(TSR): Support TSR with bRealtimeUpdate
+			if (!Family->EngineShowFlags.TemporalAA || !Family->bRealtimeUpdate || !SupportsTSR(GetShaderPlatform()))
 			{
 				AntiAliasingMethod = AAM_FXAA;
 			}
 		}
 
-		// Overides the anti aliasing method to temporal AA when using a custom temporal upscaler.
-		if (Family->GetTemporalUpscalerInterface() != nullptr)
-		{
-			AntiAliasingMethod = AAM_TemporalAA;
-		}
+		checkf(Family->GetTemporalUpscalerInterface() == nullptr, TEXT("ITemporalUpscaler should be set up in FSceneViewExtensionBase::BeginRenderViewFamily()"));
 	}
 
-    // TemporalAA requires view state for history.
-	if (AntiAliasingMethod == AAM_TemporalAA && !State)
+	// TemporalAA requires view state for history.
+	if (IsTemporalAccumulationBasedMethod(AntiAliasingMethod) && !State)
 	{
 		AntiAliasingMethod = AAM_None;
 	}
@@ -968,6 +1159,15 @@ float FSceneView::GetTemporalLODTransition() const
 		return State->GetTemporalLODTransition();
 	}
 	return 0.0f;
+}
+
+uint32 FSceneView::GetDistanceFieldTemporalSampleIndex() const
+{
+	if (State)
+	{
+		return State->GetDistanceFieldTemporalSampleIndex();
+	}
+	return 0;
 }
 
 uint32 FSceneView::GetViewKey() const
@@ -1039,13 +1239,40 @@ void FViewMatrices::UpdateViewMatrix(const FVector& ViewLocation, const FRotator
 	InvTranslatedViewProjectionMatrix = GetInvProjectionMatrix() * GetInvTranslatedViewMatrix();
 }
 
+FMatrix FViewMatrices::ScreenToClipProjectionMatrix() const
+{
+	//Screen to clip matrix should not utilise scene depth for the w component in ortho projections, but is needed for perspective
+	if (IsPerspectiveProjection())
+	{
+		return FMatrix(
+			FPlane(1, 0, 0, 0),
+			FPlane(0, 1, 0, 0),
+			FPlane(0, 0, ProjectionMatrix.M[2][2], 1.0f),
+			FPlane(0, 0, ProjectionMatrix.M[3][2], 0.0f));
+	}
+	else
+	{
+		return FMatrix(
+			FPlane(1, 0, 0, 0),
+			FPlane(0, 1, 0, 0),
+			FPlane(0, 0, ProjectionMatrix.M[2][2], 0.0f),
+			FPlane(0, 0, ProjectionMatrix.M[3][2], 1.0f));
+	}
+}
+
+void FViewMatrices::HackOverrideViewMatrixForShadows(const FMatrix& InViewMatrix)
+{
+	OverriddenTranslatedViewMatrix = ViewMatrix = InViewMatrix;
+	OverriddenInvTranslatedViewMatrix = InvViewMatrix = InViewMatrix.Inverse();
+}
+
 void FSceneView::UpdateViewMatrix()
 {
 	FVector StereoViewLocation = ViewLocation;
 	FRotator StereoViewRotation = ViewRotation;
 	if (GEngine->StereoRenderingDevice.IsValid() && IStereoRendering::IsStereoEyePass(StereoPass))
 	{
-		GEngine->StereoRenderingDevice->CalculateStereoViewOffset(StereoPass, StereoViewRotation, WorldToMetersScale, StereoViewLocation);
+		GEngine->StereoRenderingDevice->CalculateStereoViewOffset(StereoViewIndex, StereoViewRotation, WorldToMetersScale, StereoViewLocation);
 		ViewLocation = StereoViewLocation;
 		ViewRotation = StereoViewRotation;
 	}
@@ -1143,6 +1370,17 @@ FVector4 FSceneView::PixelToScreen(float InX,float InY,float Z) const
 	}
 }
 
+// Similar to PixelToScreen, but handles cases where the viewport isn't the whole render target, such as a mouse cursor location in
+// render target space.  If outside the bounds of the viewport, will clamp to the nearest edge, so a valid result is returned.  The
+// caller can check the cursor against UnscaledViewRect if they want to reject out of bounds cursor locations.
+FVector4 FSceneView::CursorToScreen(float InX, float InY, float Z) const
+{
+	float ClampedX = FMath::Clamp(InX - UnscaledViewRect.Min.X, 0.0f, UnscaledViewRect.Width());
+	float ClampedY = FMath::Clamp(InY - UnscaledViewRect.Min.Y, 0.0f, UnscaledViewRect.Height());
+
+	return PixelToScreen(ClampedX, ClampedY, Z);
+}
+
 /** Transforms a point from the view's world-space into pixel coordinates relative to the view's X,Y. */
 bool FSceneView::WorldToPixel(const FVector& WorldPoint,FVector2D& OutPixelLocation) const
 {
@@ -1167,7 +1405,7 @@ FPlane FSceneView::Project(const FVector& WorldPoint) const
 
 	if (Result.W == 0)
 	{
-		Result.W = KINDA_SMALL_NUMBER;
+		Result.W = UE_KINDA_SMALL_NUMBER;
 	}
 
 	const float RHW = 1.0f / Result.W;
@@ -1283,35 +1521,46 @@ void FSceneView::DeprojectScreenToWorld(const FVector2D& ScreenPos, const FIntRe
 	out_WorldDirection = RayDirWorldSpace;
 }
 
-bool FSceneView::ProjectWorldToScreen(const FVector& WorldPosition, const FIntRect& ViewRect, const FMatrix& ViewProjectionMatrix, FVector2D& out_ScreenPos)
+bool FSceneView::ProjectWorldToScreen(const FVector& WorldPosition, const FIntRect& ViewRect, const FMatrix& ViewProjectionMatrix, FVector2D& out_ScreenPos, bool bShouldCalcOutsideViewPosition /*= false*/)
 {
 	FPlane Result = ViewProjectionMatrix.TransformFVector4(FVector4(WorldPosition, 1.f));
-	if ( Result.W > 0.0f )
+	bool bIsInsideView = Result.W > 0.0f;
+	double W = Result.W;
+
+	// If WorldPosition is outside the ViewProjectionMatrix and we don't force to calc the outside view position, stop the calcs.
+	if (!bIsInsideView && !bShouldCalcOutsideViewPosition)
 	{
-		// the result of this will be x and y coords in -1..1 projection space
-		const float RHW = 1.0f / Result.W;
-		FPlane PosInScreenSpace = FPlane(Result.X * RHW, Result.Y * RHW, Result.Z * RHW, Result.W);
-
-		// Move from projection space to normalized 0..1 UI space
-		const float NormalizedX = ( PosInScreenSpace.X / 2.f ) + 0.5f;
-		const float NormalizedY = 1.f - ( PosInScreenSpace.Y / 2.f ) - 0.5f;
-
-		FVector2D RayStartViewRectSpace(
-			( NormalizedX * (float)ViewRect.Width() ),
-			( NormalizedY * (float)ViewRect.Height() )
-			);
-
-		out_ScreenPos = RayStartViewRectSpace + FVector2D(static_cast<float>(ViewRect.Min.X), static_cast<float>(ViewRect.Min.Y));
-
-		return true;
+		return false;
 	}
 
-	return false;
+	// Tweak our W value to allow the outside view position calcs if the variable is enabled.
+	if (bShouldCalcOutsideViewPosition)
+	{
+		W = FMath::Abs(Result.W);
+	}
+	
+	// the result of this will be x and y coords in -1..1 projection space
+	const float RHW = 1.0f / W;
+	FPlane PosInScreenSpace = FPlane(Result.X * RHW, Result.Y * RHW, Result.Z * RHW, W);
+
+	// Move from projection space to normalized 0..1 UI space
+	const float NormalizedX = ( PosInScreenSpace.X / 2.f ) + 0.5f;
+	const float NormalizedY = 1.f - ( PosInScreenSpace.Y / 2.f ) - 0.5f;
+
+	FVector2D RayStartViewRectSpace(
+		( NormalizedX * (float)ViewRect.Width() ),
+		( NormalizedY * (float)ViewRect.Height() )
+		);
+
+	out_ScreenPos = RayStartViewRectSpace + FVector2D(static_cast<float>(ViewRect.Min.X), static_cast<float>(ViewRect.Min.Y));
+
+	return bIsInsideView;
 }
 
 
 #define LERP_PP(NAME) if(Src.bOverride_ ## NAME)	Dest . NAME = FMath::Lerp(Dest . NAME, Src . NAME, Weight);
-#define IF_PP(NAME) if(Src.bOverride_ ## NAME && Src . NAME)
+#define SET_PP(NAME)  if(Src.bOverride_ ## NAME)    Dest . NAME = Src . NAME;
+#define IF_PP(NAME)   if(Src.bOverride_ ## NAME && Src . NAME)
 
 // @param Weight 0..1
 void FSceneView::OverridePostProcessSettings(const FPostProcessSettings& Src, float Weight)
@@ -1333,10 +1582,7 @@ void FSceneView::OverridePostProcessSettings(const FPostProcessSettings& Src, fl
 		FFinalPostProcessSettings& Dest = FinalPostProcessSettings;
 
 		// The following code needs to be adjusted when settings in FPostProcessSettings change.
-		if (Src.bOverride_TemperatureType)
-		{
-			Dest.TemperatureType = Src.TemperatureType;
-		}
+		SET_PP(TemperatureType);
 		LERP_PP(WhiteTemp);
 		LERP_PP(WhiteTint);
 
@@ -1366,23 +1612,11 @@ void FSceneView::OverridePostProcessSettings(const FPostProcessSettings& Src, fl
 
 		LERP_PP(ColorCorrectionShadowsMax);
 		LERP_PP(ColorCorrectionHighlightsMin);
+		LERP_PP(ColorCorrectionHighlightsMax);
 
 		LERP_PP(BlueCorrection);
 		LERP_PP(ExpandGamut);
 		LERP_PP(ToneCurveAmount);
-
-		LERP_PP(FilmWhitePoint);
-		LERP_PP(FilmSaturation);
-		LERP_PP(FilmChannelMixerRed);
-		LERP_PP(FilmChannelMixerGreen);
-		LERP_PP(FilmChannelMixerBlue);
-		LERP_PP(FilmContrast);
-		LERP_PP(FilmDynamicRange);
-		LERP_PP(FilmHealAmount);
-		LERP_PP(FilmToeAmount);
-		LERP_PP(FilmShadowTint);
-		LERP_PP(FilmShadowTintBlend);
-		LERP_PP(FilmShadowTintAmount);
 
 		LERP_PP(FilmSlope);
 		LERP_PP(FilmToe);
@@ -1410,6 +1644,7 @@ void FSceneView::OverridePostProcessSettings(const FPostProcessSettings& Src, fl
 		LERP_PP(Bloom6Size);
 		LERP_PP(BloomDirtMaskIntensity);
 		LERP_PP(BloomDirtMaskTint);
+		LERP_PP(BloomConvolutionScatterDispersion);
 		LERP_PP(BloomConvolutionSize);
 		LERP_PP(BloomConvolutionCenterUV);
 		LERP_PP(BloomConvolutionPreFilterMin);
@@ -1428,13 +1663,29 @@ void FSceneView::OverridePostProcessSettings(const FPostProcessSettings& Src, fl
 		LERP_PP(AutoExposureBias);
 		LERP_PP(HistogramLogMin);
 		LERP_PP(HistogramLogMax);
+		LERP_PP(LocalExposureContrastScale_DEPRECATED);
+		LERP_PP(LocalExposureHighlightContrastScale);
+		LERP_PP(LocalExposureShadowContrastScale);
+		LERP_PP(LocalExposureHighlightThreshold);
+		LERP_PP(LocalExposureShadowThreshold);
+		LERP_PP(LocalExposureDetailStrength);
+		LERP_PP(LocalExposureBlurredLuminanceBlend);
+		LERP_PP(LocalExposureBlurredLuminanceKernelSizePercent);
+		LERP_PP(LocalExposureMiddleGreyBias);
 		LERP_PP(LensFlareIntensity);
 		LERP_PP(LensFlareTint);
 		LERP_PP(LensFlareBokehSize);
 		LERP_PP(LensFlareThreshold);
 		LERP_PP(VignetteIntensity);
-		LERP_PP(GrainIntensity);
-		LERP_PP(GrainJitter);
+		LERP_PP(Sharpen);
+		LERP_PP(FilmGrainIntensity);
+		LERP_PP(FilmGrainIntensityShadows);
+		LERP_PP(FilmGrainIntensityMidtones);
+		LERP_PP(FilmGrainIntensityHighlights);
+		LERP_PP(FilmGrainShadowsMax);
+		LERP_PP(FilmGrainHighlightsMin);
+		LERP_PP(FilmGrainHighlightsMax);
+		LERP_PP(FilmGrainTexelSize);
 		LERP_PP(AmbientOcclusionIntensity);
 		LERP_PP(AmbientOcclusionStaticFraction);
 		LERP_PP(AmbientOcclusionRadius);
@@ -1450,11 +1701,24 @@ void FSceneView::OverridePostProcessSettings(const FPostProcessSettings& Src, fl
 		LERP_PP(AmbientOcclusionTemporalBlendWeight);
 		LERP_PP(IndirectLightingColor);
 		LERP_PP(IndirectLightingIntensity);
-		LERP_PP(DepthOfFieldFocalDistance);
+
+		if (Src.bOverride_DepthOfFieldFocalDistance)
+		{
+			if (Dest.DepthOfFieldFocalDistance == 0.0f || Src.DepthOfFieldFocalDistance == 0.0f)
+			{
+				Dest.DepthOfFieldFocalDistance = Src.DepthOfFieldFocalDistance;
+			}
+			else
+			{
+				Dest.DepthOfFieldFocalDistance = FMath::Lerp(Dest.DepthOfFieldFocalDistance, Src.DepthOfFieldFocalDistance, Weight);
+			}
+		}
 		LERP_PP(DepthOfFieldFstop);
 		LERP_PP(DepthOfFieldMinFstop);
 		LERP_PP(DepthOfFieldSensorWidth);
+		LERP_PP(DepthOfFieldSqueezeFactor);
 		LERP_PP(DepthOfFieldDepthBlurRadius);
+		SET_PP(DepthOfFieldUseHairDepth)
 		LERP_PP(DepthOfFieldDepthBlurAmount);
 		LERP_PP(DepthOfFieldFocalRegion);
 		LERP_PP(DepthOfFieldNearTransitionRegion);
@@ -1468,141 +1732,62 @@ void FSceneView::OverridePostProcessSettings(const FPostProcessSettings& Src, fl
 		LERP_PP(MotionBlurAmount);
 		LERP_PP(MotionBlurMax);
 		LERP_PP(MotionBlurPerObjectSize);
-		LERP_PP(ScreenPercentage);
 		LERP_PP(ScreenSpaceReflectionQuality);
 		LERP_PP(ScreenSpaceReflectionIntensity);
 		LERP_PP(ScreenSpaceReflectionMaxRoughness);
 
-		// Ray Tracing
-		if (Src.bOverride_ReflectionsType)
-		{
-			Dest.ReflectionsType = Src.ReflectionsType;
-		}
+		SET_PP(TranslucencyType);
+		SET_PP(RayTracingTranslucencyMaxRoughness);
+		SET_PP(RayTracingTranslucencyRefractionRays);
+		SET_PP(RayTracingTranslucencySamplesPerPixel);
+		SET_PP(RayTracingTranslucencyShadows);
+		SET_PP(RayTracingTranslucencyRefraction);
 
-		if (Src.bOverride_RayTracingReflectionsMaxRoughness)
-		{
-			Dest.RayTracingReflectionsMaxRoughness = Src.RayTracingReflectionsMaxRoughness;
-		}
+		SET_PP(DynamicGlobalIlluminationMethod);
+		SET_PP(LumenSurfaceCacheResolution);
+		SET_PP(LumenSceneLightingQuality);
+		SET_PP(LumenSceneDetail);
+		SET_PP(LumenSceneViewDistance);
+		SET_PP(LumenSceneLightingUpdateSpeed);
+		SET_PP(LumenFinalGatherQuality);
+		SET_PP(LumenFinalGatherLightingUpdateSpeed);
+		SET_PP(LumenFinalGatherScreenTraces);
+		SET_PP(LumenMaxTraceDistance);
 
-		if (Src.bOverride_RayTracingReflectionsMaxBounces)
-		{
-			Dest.RayTracingReflectionsMaxBounces = Src.RayTracingReflectionsMaxBounces;
-		}
+		LERP_PP(LumenDiffuseColorBoost);
+		LERP_PP(LumenSkylightLeaking);
+		LERP_PP(LumenFullSkylightLeakingDistance);
 
-		if (Src.bOverride_RayTracingReflectionsSamplesPerPixel)
-		{
-			Dest.RayTracingReflectionsSamplesPerPixel = Src.RayTracingReflectionsSamplesPerPixel;
-		}
+		SET_PP(LumenRayLightingMode);
+		SET_PP(LumenReflectionsScreenTraces);
+		SET_PP(LumenFrontLayerTranslucencyReflections);
+		SET_PP(LumenMaxRoughnessToTraceReflections);
+		SET_PP(LumenMaxReflectionBounces);
+		SET_PP(LumenMaxRefractionBounces);
+		SET_PP(ReflectionMethod);
+		SET_PP(LumenReflectionQuality);
+		SET_PP(RayTracingAO);
+		SET_PP(RayTracingAOSamplesPerPixel);
+		SET_PP(RayTracingAOIntensity);
+		SET_PP(RayTracingAORadius);
 
-		if (Src.bOverride_RayTracingReflectionsShadows)
-		{
-			Dest.RayTracingReflectionsShadows = Src.RayTracingReflectionsShadows;
-		}
+		// Path Tracing related settings
+		SET_PP(PathTracingMaxBounces);
+		SET_PP(PathTracingSamplesPerPixel);
+		LERP_PP(PathTracingMaxPathExposure);
+		SET_PP(PathTracingEnableEmissiveMaterials);
+		SET_PP(PathTracingEnableReferenceDOF);
+		SET_PP(PathTracingEnableReferenceAtmosphere);
+		SET_PP(PathTracingEnableDenoiser);
+		SET_PP(PathTracingIncludeEmissive);
+		SET_PP(PathTracingIncludeDiffuse);
+		SET_PP(PathTracingIncludeIndirectDiffuse);
+		SET_PP(PathTracingIncludeSpecular);
+		SET_PP(PathTracingIncludeIndirectSpecular);
+		SET_PP(PathTracingIncludeVolume);
+		SET_PP(PathTracingIncludeIndirectVolume);
 
-		if (Src.bOverride_RayTracingReflectionsTranslucency)
-		{
-			Dest.RayTracingReflectionsTranslucency = Src.RayTracingReflectionsTranslucency;
-		}
-
-		if (Src.bOverride_TranslucencyType)
-		{
-			Dest.TranslucencyType = Src.TranslucencyType;
-		}
-
-		if (Src.bOverride_RayTracingTranslucencyMaxRoughness)
-		{
-			Dest.RayTracingTranslucencyMaxRoughness = Src.RayTracingTranslucencyMaxRoughness;
-		}
-
-		if (Src.bOverride_RayTracingTranslucencyRefractionRays)
-		{
-			Dest.RayTracingTranslucencyRefractionRays = Src.RayTracingTranslucencyRefractionRays;
-		}
-
-		if (Src.bOverride_RayTracingTranslucencySamplesPerPixel)
-		{
-			Dest.RayTracingTranslucencySamplesPerPixel = Src.RayTracingTranslucencySamplesPerPixel;
-		}
-
-		if (Src.bOverride_RayTracingTranslucencyShadows)
-		{
-			Dest.RayTracingTranslucencyShadows = Src.RayTracingTranslucencyShadows;
-		}
-
-		if (Src.bOverride_RayTracingTranslucencyRefraction)
-		{
-			Dest.RayTracingTranslucencyRefraction = Src.RayTracingTranslucencyRefraction;
-		}
-
-		if (Src.bOverride_RayTracingGI)
-		{
-			Dest.RayTracingGIType = Src.RayTracingGIType;
-		}
-
-		if (Src.bOverride_RayTracingGIMaxBounces)
-		{
-			Dest.RayTracingGIMaxBounces = Src.RayTracingGIMaxBounces;
-		}
-
-		if (Src.bOverride_RayTracingGISamplesPerPixel)
-		{
-			Dest.RayTracingGISamplesPerPixel = Src.RayTracingGISamplesPerPixel;
-		}
-
-		if (Src.bOverride_RayTracingAO)
-		{
-			Dest.RayTracingAO = Src.RayTracingAO;
-		}
-
-		if (Src.bOverride_RayTracingAOSamplesPerPixel)
-		{
-			Dest.RayTracingAOSamplesPerPixel = Src.RayTracingAOSamplesPerPixel;
-		}
-
-		if (Src.bOverride_RayTracingAOIntensity)
-		{
-			Dest.RayTracingAOIntensity = Src.RayTracingAOIntensity;
-		}
-
-		if (Src.bOverride_RayTracingAORadius)
-		{
-			Dest.RayTracingAORadius = Src.RayTracingAORadius;
-		}
-
-		if (Src.bOverride_PathTracingMaxBounces)
-		{
-			Dest.PathTracingMaxBounces = Src.PathTracingMaxBounces;
-		}
-
-		if (Src.bOverride_PathTracingSamplesPerPixel)
-		{
-			Dest.PathTracingSamplesPerPixel = Src.PathTracingSamplesPerPixel;
-		}
-
-		if (Src.bOverride_PathTracingFilterWidth)
-		{
-			Dest.PathTracingFilterWidth = Src.PathTracingFilterWidth;
-		}
-
-		if (Src.bOverride_PathTracingEnableEmissive)
-		{
-			Dest.PathTracingEnableEmissive = Src.PathTracingEnableEmissive;
-		}
-
-		if (Src.bOverride_PathTracingMaxPathExposure)
-		{
-			Dest.PathTracingMaxPathExposure = Src.PathTracingMaxPathExposure;
-		}
-
-		if (Src.bOverride_PathTracingEnableDenoiser)
-		{
-			Dest.PathTracingEnableDenoiser = Src.PathTracingEnableDenoiser;
-		}
-
-		if (Src.bOverride_DepthOfFieldBladeCount)
-		{
-			Dest.DepthOfFieldBladeCount = Src.DepthOfFieldBladeCount;
-		}
+		SET_PP(DepthOfFieldBladeCount);
 
 		// cubemaps are getting blended additively - in contrast to other properties, maybe we should make that consistent
 		if (Src.AmbientCubemap && Src.bOverride_AmbientCubemapIntensity)
@@ -1632,15 +1817,18 @@ void FSceneView::OverridePostProcessSettings(const FPostProcessSettings& Src, fl
 			Dest.BloomDirtMask = Src.BloomDirtMask;
 		}
 
-		if (Src.bOverride_BloomMethod)
-		{
-			Dest.BloomMethod = Src.BloomMethod;
-		}
+		SET_PP(BloomMethod);
 
 		// actual texture cannot be blended but the intensity can be blended
 		IF_PP(BloomConvolutionTexture)
 		{
 			Dest.BloomConvolutionTexture = Src.BloomConvolutionTexture;
+		}
+
+		// actual texture cannot be blended but the film grain intensity can be blended
+		IF_PP(FilmGrainTexture)
+		{
+			Dest.FilmGrainTexture = Src.FilmGrainTexture;
 		}
 
 		// A continuous blending of this value would result trashing the pre-convolved bloom kernel cache.
@@ -1659,6 +1847,18 @@ void FSceneView::OverridePostProcessSettings(const FPostProcessSettings& Src, fl
 		IF_PP(AutoExposureMeterMask)
 		{
 			Dest.AutoExposureMeterMask = Src.AutoExposureMeterMask;
+		}
+
+		// Curve assets cannot be blended.
+		IF_PP(LocalExposureHighlightContrastCurve)
+		{
+			Dest.LocalExposureHighlightContrastCurve = Src.LocalExposureHighlightContrastCurve;
+		}
+
+		// Curve assets cannot be blended.
+		IF_PP(LocalExposureShadowContrastCurve)
+		{
+			Dest.LocalExposureShadowContrastCurve = Src.LocalExposureShadowContrastCurve;
 		}
 
 		// actual texture cannot be blended but the intensity can be blended
@@ -1680,50 +1880,13 @@ void FSceneView::OverridePostProcessSettings(const FPostProcessSettings& Src, fl
 			Dest.bMobileHQGaussian = Src.bMobileHQGaussian;
 		}
 
-		if (Src.bOverride_AutoExposureMethod)
-		{
-			Dest.AutoExposureMethod = Src.AutoExposureMethod;
-		}
+		SET_PP(AutoExposureMethod);
 
-		if (Src.bOverride_AmbientOcclusionRadiusInWS)
-		{
-			Dest.AmbientOcclusionRadiusInWS = Src.AmbientOcclusionRadiusInWS;
-		}
+		SET_PP(AmbientOcclusionRadiusInWS);
 
-		if (Src.bOverride_MotionBlurTargetFPS)
-		{
-			Dest.MotionBlurTargetFPS = Src.MotionBlurTargetFPS;
-		}
+		SET_PP(MotionBlurTargetFPS);
 
-		if (Src.bOverride_AutoExposureApplyPhysicalCameraExposure)
-		{
-			Dest.AutoExposureApplyPhysicalCameraExposure = Src.AutoExposureApplyPhysicalCameraExposure;
-		}
-	}
-
-	// will be deprecated soon, use the new asset LightPropagationVolumeBlendable instead
-	{
-		FLightPropagationVolumeSettings& Dest = FinalPostProcessSettings.BlendableManager.GetSingleFinalData<FLightPropagationVolumeSettings>();
-
-		LERP_PP(LPVIntensity);
-		LERP_PP(LPVSecondaryOcclusionIntensity);
-		LERP_PP(LPVSecondaryBounceIntensity);
-		LERP_PP(LPVVplInjectionBias);
-		LERP_PP(LPVGeometryVolumeBias);
-		LERP_PP(LPVEmissiveInjectionIntensity);
-		LERP_PP(LPVDirectionalOcclusionIntensity);
-		LERP_PP(LPVDirectionalOcclusionRadius);
-		LERP_PP(LPVDiffuseOcclusionExponent);
-		LERP_PP(LPVSpecularOcclusionExponent);
-		LERP_PP(LPVDiffuseOcclusionIntensity);
-		LERP_PP(LPVSpecularOcclusionIntensity);
-		LERP_PP(LPVFadeRange);
-		LERP_PP(LPVDirectionalOcclusionFadeRange);
-
-		if (Src.bOverride_LPVSize)
-		{
-			Dest.LPVSize = Src.LPVSize;
-		}
+		SET_PP(AutoExposureApplyPhysicalCameraExposure);
 	}
 
 	// Blendable objects
@@ -1791,8 +1954,9 @@ void FSceneView::StartFinalPostprocessSettings(FVector InViewLocation)
 			FinalPostProcessSettings.AutoExposureMaxBrightness = 1;
 			if (CVarDefaultAutoExposureExtendDefaultLuminanceRange.GetValueOnGameThread())
 			{
-				FinalPostProcessSettings.AutoExposureMinBrightness = LuminanceToEV100(FinalPostProcessSettings.AutoExposureMinBrightness);
-				FinalPostProcessSettings.AutoExposureMaxBrightness = LuminanceToEV100(FinalPostProcessSettings.AutoExposureMaxBrightness);
+				const float MaxLuminance = 1.2f; // Should we use const LuminanceMaxFromLensAttenuation() instead?
+				FinalPostProcessSettings.AutoExposureMinBrightness = LuminanceToEV100(MaxLuminance, FinalPostProcessSettings.AutoExposureMinBrightness);
+				FinalPostProcessSettings.AutoExposureMaxBrightness = LuminanceToEV100(MaxLuminance, FinalPostProcessSettings.AutoExposureMaxBrightness);
 			}
 		}
 		else
@@ -1802,6 +1966,18 @@ void FSceneView::StartFinalPostprocessSettings(FVector InViewLocation)
 			{
 				FinalPostProcessSettings.AutoExposureMethod = (EAutoExposureMethod)Value;
 			}
+		}
+
+		{
+			const float HighlightContrast = FMath::Clamp(CVarDefaultLocalExposureHighlightContrast.GetValueOnGameThread(), 0.0f, 1.0f);
+
+			FinalPostProcessSettings.LocalExposureHighlightContrastScale = HighlightContrast;
+		}
+
+		{
+			const float ShadowContrast = FMath::Clamp(CVarDefaultLocalExposureShadowContrast.GetValueOnGameThread(), 0.0f, 1.0f);
+
+			FinalPostProcessSettings.LocalExposureShadowContrastScale = ShadowContrast;
 		}
 
 		if (!CVarDefaultMotionBlur.GetValueOnGameThread())
@@ -1821,12 +1997,29 @@ void FSceneView::StartFinalPostprocessSettings(FVector InViewLocation)
 				FinalPostProcessSettings.AmbientOcclusionStaticFraction = 0.0f;
 			}
 		}
+
+		{
+			static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.DynamicGlobalIlluminationMethod"));
+			FinalPostProcessSettings.DynamicGlobalIlluminationMethod = (EDynamicGlobalIlluminationMethod::Type)CVar->GetValueOnGameThread();
+		}
+
+		{
+			static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.ReflectionMethod"));
+			FinalPostProcessSettings.ReflectionMethod = (EReflectionMethod::Type)CVar->GetValueOnGameThread();
+		}
+
+		{
+			static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.Lumen.TranslucencyReflections.FrontLayer.EnableForProject"));
+			FinalPostProcessSettings.LumenFrontLayerTranslucencyReflections = CVar->GetValueOnGameThread() != 0;
+		}
+
+		FinalPostProcessSettings.DepthOfFieldUseHairDepth = GetHairStrandsDepthOfFieldUseHairDepth();
 	}
 
 	{
 		if (GEngine->StereoRenderingDevice.IsValid())
 		{
-			GEngine->StereoRenderingDevice->StartFinalPostprocessSettings(&FinalPostProcessSettings, StereoPass);
+			GEngine->StereoRenderingDevice->StartFinalPostprocessSettings(&FinalPostProcessSettings, StereoPass, StereoViewIndex);
 		}
 	}
 
@@ -1848,26 +2041,6 @@ void FSceneView::EndFinalPostprocessSettings(const FSceneViewInitOptions& ViewIn
 {
 	const auto SceneViewFeatureLevel = GetFeatureLevel();
 
-	// will be deprecated soon, use the new asset LightPropagationVolumeBlendable instead
-	{
-		FLightPropagationVolumeSettings& Dest = FinalPostProcessSettings.BlendableManager.GetSingleFinalData<FLightPropagationVolumeSettings>();
-
-		if(Dest.LPVDirectionalOcclusionIntensity < 0.001f)
-		{
-			Dest.LPVDirectionalOcclusionIntensity = 0.0f;
-		}
-
-		if (Dest.LPVIntensity < 0.001f)
-		{
-			Dest.LPVIntensity = 0.0f;
-		}
-
-		if(!Family->EngineShowFlags.GlobalIllumination)
-		{
-			Dest.LPVIntensity = 0.0f;
-		}
-	}
-
 	{
 		static const auto SceneColorFringeQualityCVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.SceneColorFringeQuality"));
 
@@ -1875,6 +2048,21 @@ void FSceneView::EndFinalPostprocessSettings(const FSceneViewInitOptions& ViewIn
 		if (FringeQuality <= 0)
 		{
 			FinalPostProcessSettings.SceneFringeIntensity = 0;
+		}
+	}
+
+	{
+		static const auto LocalExposureCVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.LocalExposure"));
+
+		const int LocalExposureCVarValue = LocalExposureCVar->GetValueOnGameThread();
+
+		if (LocalExposureCVarValue <= 0 || !Family->EngineShowFlags.LocalExposure)
+		{
+			FinalPostProcessSettings.LocalExposureHighlightContrastScale = 1.0f;
+			FinalPostProcessSettings.LocalExposureShadowContrastScale = 1.0f;
+			FinalPostProcessSettings.LocalExposureHighlightContrastCurve = nullptr;
+			FinalPostProcessSettings.LocalExposureShadowContrastCurve = nullptr;
+			FinalPostProcessSettings.LocalExposureDetailStrength = 1.0f;
 		}
 	}
 
@@ -1898,29 +2086,14 @@ void FSceneView::EndFinalPostprocessSettings(const FSceneViewInitOptions& ViewIn
 	{
 		int32 Quality = CVarTonemapperQuality.GetValueOnGameThread();
 
-		if(Quality < 1)
-		{
-			FinalPostProcessSettings.FilmContrast = 0;
-		}
-
 		if(Quality < 2)
 		{
 			FinalPostProcessSettings.VignetteIntensity = 0;
 		}
 
-		if(Quality < 3)
-		{
-			FinalPostProcessSettings.FilmShadowTintAmount = 0;
-		}
-
 		if(Quality < 4)
 		{
-			FinalPostProcessSettings.GrainIntensity = 0;
-		}
-
-		if(Quality < 5)
-		{
-			FinalPostProcessSettings.GrainJitter = 0;
+			FinalPostProcessSettings.FilmGrainIntensity = 0;
 		}
 	}
 
@@ -1947,8 +2120,7 @@ void FSceneView::EndFinalPostprocessSettings(const FSceneViewInitOptions& ViewIn
 
 	if(!Family->EngineShowFlags.Grain)
 	{
-		FinalPostProcessSettings.GrainIntensity = 0;
-		FinalPostProcessSettings.GrainJitter = 0;
+		FinalPostProcessSettings.FilmGrainIntensity = 0.0f;
 	}
 
 	if(!Family->EngineShowFlags.CameraImperfections)
@@ -1971,12 +2143,12 @@ void FSceneView::EndFinalPostprocessSettings(const FSceneViewInitOptions& ViewIn
 		FinalPostProcessSettings.ToneCurveAmount = 0;
 	}
 
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 	{
 		float Value = CVarExposureOffset.GetValueOnGameThread();
 		FinalPostProcessSettings.AutoExposureBias += Value;
 	}
 
+#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 	{
 		float& DepthBlurAmount = FinalPostProcessSettings.DepthOfFieldDepthBlurAmount;
 
@@ -2005,7 +2177,7 @@ void FSceneView::EndFinalPostprocessSettings(const FSceneViewInitOptions& ViewIn
 	{
 		if (GEngine->StereoRenderingDevice.IsValid())
 		{
-			GEngine->StereoRenderingDevice->EndFinalPostprocessSettings(&FinalPostProcessSettings, StereoPass);
+			GEngine->StereoRenderingDevice->EndFinalPostprocessSettings(&FinalPostProcessSettings, StereoPass, StereoViewIndex);
 		}
 	}
 
@@ -2152,15 +2324,6 @@ void FSceneView::EndFinalPostprocessSettings(const FSceneViewInitOptions& ViewIn
 	}
 #endif // WITH_EDITOR
 
-	if (Family->EngineShowFlags.ScreenPercentage)
-	{
-		FinalPostProcessSettings.ScreenPercentage = FMath::Clamp(FinalPostProcessSettings.ScreenPercentage, 1.f, 400.0f);
-	}
-	else
-	{
-		FinalPostProcessSettings.ScreenPercentage = 100;
-	}
-
 	check(VerifyMembersChecks());
 }
 
@@ -2279,6 +2442,27 @@ bool FSceneView::IsInstancedStereoPass() const
 	return bIsInstancedStereoEnabled && IStereoRendering::IsStereoEyeView(*this) && IStereoRendering::IsAPrimaryView(*this);
 }
 
+int32 FSceneView::GetStereoPassInstanceFactor() const
+{
+	return bIsInstancedStereoEnabled && IStereoRendering::IsStereoEyeView(*this) && GEngine->StereoRenderingDevice.IsValid() ?
+		GEngine->StereoRenderingDevice->GetDesiredNumberOfViews(true) : 1;
+}
+
+FVector4f FSceneView::GetScreenPositionScaleBias(const FIntPoint& BufferSize, const FIntRect& ViewRect) const
+{
+	const float InvBufferSizeX = 1.0f / BufferSize.X;
+	const float InvBufferSizeY = 1.0f / BufferSize.Y;
+
+	// to bring NDC (-1..1, 1..-1) into 0..1 UV for BufferSize textures
+	return FVector4f(
+		ViewRect.Width() * InvBufferSizeX / +2.0f,
+		ViewRect.Height() * InvBufferSizeY / (-2.0f * GProjectionSignY),
+		// Warning: note legacy flipped Y and X
+		(ViewRect.Height() / 2.0f + ViewRect.Min.Y) * InvBufferSizeY,
+		(ViewRect.Width() / 2.0f + ViewRect.Min.X) * InvBufferSizeX
+		);
+}
+
 void FSceneView::SetupViewRectUniformBufferParameters(FViewUniformShaderParameters& ViewUniformShaderParameters,
 	const FIntPoint& BufferSize,
 	const FIntRect& EffectiveViewRect,
@@ -2288,34 +2472,36 @@ void FSceneView::SetupViewRectUniformBufferParameters(FViewUniformShaderParamete
 	checkfSlow(EffectiveViewRect.Area() > 0, TEXT("Invalid-size EffectiveViewRect passed to CreateUniformBufferParameters [%d * %d]."), EffectiveViewRect.Width(), EffectiveViewRect.Height());
 	ensureMsgf((BufferSize.X > 0 && BufferSize.Y > 0), TEXT("Invalid-size BufferSize passed to CreateUniformBufferParameters [%d * %d]."), BufferSize.X, BufferSize.Y);
 
-	ViewUniformShaderParameters.ViewRectMin = FVector4(EffectiveViewRect.Min.X, EffectiveViewRect.Min.Y, 0.0f, 0.0f);
-	ViewUniformShaderParameters.ViewSizeAndInvSize = FVector4(EffectiveViewRect.Width(), EffectiveViewRect.Height(), 1.0f / float(EffectiveViewRect.Width()), 1.0f / float(EffectiveViewRect.Height()));
+	ViewUniformShaderParameters.ViewRectMin = FVector4f(EffectiveViewRect.Min.X, EffectiveViewRect.Min.Y, 0.0f, 0.0f);
+	ViewUniformShaderParameters.ViewSizeAndInvSize = FVector4f(EffectiveViewRect.Width(), EffectiveViewRect.Height(), 1.0f / float(EffectiveViewRect.Width()), 1.0f / float(EffectiveViewRect.Height()));
+	ViewUniformShaderParameters.ViewRectMinAndSize = FUintVector4(EffectiveViewRect.Min.X, EffectiveViewRect.Min.Y, EffectiveViewRect.Width(), EffectiveViewRect.Height());
 
 	// The light probe ratio is only different during separate forward translucency when r.SeparateTranslucencyScreenPercentage != 100
-	ViewUniformShaderParameters.LightProbeSizeRatioAndInvSizeRatio = FVector4(1.0f, 1.0f, 1.0f, 1.0f);
+	ViewUniformShaderParameters.LightProbeSizeRatioAndInvSizeRatio = FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
 
 	// Calculate the vector used by shaders to convert clip space coordinates to texture space.
 	const float InvBufferSizeX = 1.0f / BufferSize.X;
 	const float InvBufferSizeY = 1.0f / BufferSize.Y;
-	// to bring NDC (-1..1, 1..-1) into 0..1 UV for BufferSize textures
-	const FVector4 ScreenPositionScaleBias(
-		EffectiveViewRect.Width() * InvBufferSizeX / +2.0f,
-		EffectiveViewRect.Height() * InvBufferSizeY / (-2.0f * GProjectionSignY),
-		(EffectiveViewRect.Height() / 2.0f + EffectiveViewRect.Min.Y) * InvBufferSizeY,
-		(EffectiveViewRect.Width() / 2.0f + EffectiveViewRect.Min.X) * InvBufferSizeX);
 
-	ViewUniformShaderParameters.ScreenPositionScaleBias = ScreenPositionScaleBias;
+	ViewUniformShaderParameters.ScreenPositionScaleBias = GetScreenPositionScaleBias(BufferSize, EffectiveViewRect);
 
-	ViewUniformShaderParameters.BufferSizeAndInvSize = FVector4(BufferSize.X, BufferSize.Y, InvBufferSizeX, InvBufferSizeY);
-	ViewUniformShaderParameters.BufferBilinearUVMinMax = FVector4(
+	ViewUniformShaderParameters.BufferSizeAndInvSize = FVector4f(BufferSize.X, BufferSize.Y, InvBufferSizeX, InvBufferSizeY);
+	ViewUniformShaderParameters.BufferBilinearUVMinMax = FVector4f(
 		InvBufferSizeX * (EffectiveViewRect.Min.X + 0.5),
 		InvBufferSizeY * (EffectiveViewRect.Min.Y + 0.5),
 		InvBufferSizeX * (EffectiveViewRect.Max.X - 0.5),
 		InvBufferSizeY * (EffectiveViewRect.Max.Y - 0.5));
 
 	/* Texture Level-of-Detail Strategies for Real-Time Ray Tracing https://developer.nvidia.com/raytracinggems Equation 20 */
-	float RadFOV = (PI / 180.0f) * FOV;
-	ViewUniformShaderParameters.EyeToPixelSpreadAngle = FPlatformMath::Atan((2.0f * FPlatformMath::Tan(RadFOV * 0.5f)) / BufferSize.Y);
+	if(FOV != 0)
+	{
+		float RadFOV = (UE_PI / 180.0f) * FOV;
+		ViewUniformShaderParameters.EyeToPixelSpreadAngle = FPlatformMath::Atan((2.0f * FPlatformMath::Tan(RadFOV * 0.5f)) / BufferSize.Y);
+	}
+	else
+	{
+		ViewUniformShaderParameters.EyeToPixelSpreadAngle = 0;
+	}
 
 	ViewUniformShaderParameters.MotionBlurNormalizedToPixel = FinalPostProcessSettings.MotionBlurMax * EffectiveViewRect.Width() / 100.0f;
 
@@ -2333,36 +2519,45 @@ void FSceneView::SetupViewRectUniformBufferParameters(FViewUniformShaderParamete
 
 		// http://stackoverflow.com/questions/9010546/java-transformation-matrix-operations
 
-		ViewUniformShaderParameters.SVPositionToTranslatedWorld =
+		ViewUniformShaderParameters.SVPositionToTranslatedWorld = FMatrix44f(
 			FMatrix(FPlane(Mx, 0, 0, 0),
 				FPlane(0, My, 0, 0),
 				FPlane(0, 0, 1, 0),
-				FPlane(Ax, Ay, 0, 1)) * InViewMatrices.GetInvTranslatedViewProjectionMatrix();
+				FPlane(Ax, Ay, 0, 1)) * InViewMatrices.GetInvTranslatedViewProjectionMatrix());
 	}
-
-	// is getting clamped in the shader to a value larger than 0 (we don't want the triangles to disappear)
-	ViewUniformShaderParameters.AdaptiveTessellationFactor = 0.0f;
-
-	if(Family->EngineShowFlags.Tessellation)
+	
 	{
-		// CVar setting is pixels/tri which is nice and intuitive.  But we want pixels/tessellated edge.  So use a heuristic.
-		float TessellationAdaptivePixelsPerEdge = FMath::Sqrt(2.f * CVarTessellationAdaptivePixelsPerTriangle.GetValueOnRenderThread());
+		/**
+		* Ortho projection does not use FOV calculations, so rather than sourcing the projection matrix values in CommonViewUniformBuffer.ush,
+		* the appropriate values are uploaded in the per view uniform buffer (projection matrix values for perspective, 1.0f for ortho).
+		* Doing this here avoids unnecessarily checking for perspective vs ortho in shaders at runtime.
+		*/
+		FVector4f TanAndInvTanFOV = InViewMatrices.GetTanAndInvTanHalfFOV();
+		ViewUniformShaderParameters.TanAndInvTanHalfFOV = TanAndInvTanFOV;
+		ViewUniformShaderParameters.PrevTanAndInvTanHalfFOV = InPrevViewMatrices.GetTanAndInvTanHalfFOV();
 
-		ViewUniformShaderParameters.AdaptiveTessellationFactor = 0.5f * InViewMatrices.GetProjectionMatrix().M[1][1] * float(EffectiveViewRect.Height()) / TessellationAdaptivePixelsPerEdge;
+		if (IsPerspectiveProjection())
+		{
+			ViewUniformShaderParameters.WorldDepthToPixelWorldRadius = FVector2f(TanAndInvTanFOV.X / float(EffectiveViewRect.Width()), 0.0f);
+			ViewUniformShaderParameters.ScreenRayLengthMultiplier = FVector4f(TanAndInvTanFOV.X, TanAndInvTanFOV.Y, 0, 0);
+		}
+		else
+		{
+			ViewUniformShaderParameters.WorldDepthToPixelWorldRadius = FVector2f(0.0f, TanAndInvTanFOV.X);
+			ViewUniformShaderParameters.ScreenRayLengthMultiplier = FVector4f(0,0,TanAndInvTanFOV.X, TanAndInvTanFOV.Y);
+		}
 	}
+	
+	float FovFixX = ViewUniformShaderParameters.TanAndInvTanHalfFOV.X;
+	float FovFixY = ViewUniformShaderParameters.TanAndInvTanHalfFOV.Y;
 
-	// Compute coefficients which takes a screen UV and converts to Viewspace.xy / ViewZ
-	float InvTanHalfFov = InViewMatrices.GetProjectionMatrix().M[0][0];
-	float Ratio = UnscaledViewRect.Width() / (float)UnscaledViewRect.Height();
+	ViewUniformShaderParameters.ScreenToViewSpace.X = BufferSize.X * ViewUniformShaderParameters.ViewSizeAndInvSize.Z * 2 * FovFixX;
+	ViewUniformShaderParameters.ScreenToViewSpace.Y = BufferSize.Y * ViewUniformShaderParameters.ViewSizeAndInvSize.W  * -2 * FovFixY;
 
-	float InvFovFixX = 1.0f / (InvTanHalfFov);
-	float InvFovFixY = 1.0f / (Ratio * InvTanHalfFov);
+	ViewUniformShaderParameters.ScreenToViewSpace.Z = -((ViewUniformShaderParameters.ViewRectMin.X * ViewUniformShaderParameters.ViewSizeAndInvSize.Z * 2 * FovFixX) + FovFixX);
+	ViewUniformShaderParameters.ScreenToViewSpace.W = (ViewUniformShaderParameters.ViewRectMin.Y * ViewUniformShaderParameters.ViewSizeAndInvSize.W * 2 * FovFixY) + FovFixY;
 
-	ViewUniformShaderParameters.ScreenToViewSpace.X = BufferSize.X * ViewUniformShaderParameters.ViewSizeAndInvSize.Z * 2 * InvFovFixX;
-	ViewUniformShaderParameters.ScreenToViewSpace.Y = BufferSize.Y * ViewUniformShaderParameters.ViewSizeAndInvSize.W  * -2 * InvFovFixY;
-
-	ViewUniformShaderParameters.ScreenToViewSpace.Z = -((ViewUniformShaderParameters.ViewRectMin.X * ViewUniformShaderParameters.ViewSizeAndInvSize.Z * 2 * InvFovFixX) + InvFovFixX);
-	ViewUniformShaderParameters.ScreenToViewSpace.W = (ViewUniformShaderParameters.ViewRectMin.Y * ViewUniformShaderParameters.ViewSizeAndInvSize.W * 2 * InvFovFixY) + InvFovFixY;
+	ViewUniformShaderParameters.ViewResolutionFraction = EffectiveViewRect.Width() / (float)UnscaledViewRect.Width();
 }
 
 void FSceneView::SetupCommonViewUniformBufferParameters(
@@ -2374,7 +2569,7 @@ void FSceneView::SetupCommonViewUniformBufferParameters(
 	const FViewMatrices& InPrevViewMatrices) const
 {
 	QUICK_SCOPE_CYCLE_COUNTER(STAT_SetupCommonViewUniformBufferParameters);
-	FVector4 LocalDiffuseOverrideParameter = DiffuseOverrideParameter;
+	FVector4f LocalDiffuseOverrideParameter = DiffuseOverrideParameter;
 	FVector2D LocalRoughnessOverrideParameter = RoughnessOverrideParameter;
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
@@ -2399,115 +2594,151 @@ void FSceneView::SetupCommonViewUniformBufferParameters(
 		LocalRoughnessOverrideParameter.X = NewMinValue;
 		LocalRoughnessOverrideParameter.Y = NewMaxValue - NewMinValue;
 	}
-
 #endif
 
+	const FDFRelativeViewMatrices RelativeMatrices = FDFRelativeViewMatrices::Create(InViewMatrices, InPrevViewMatrices);
+	const FDFVector3 AbsoluteViewOrigin(InViewMatrices.GetViewOrigin());
+	const FVector ViewOriginHigh(AbsoluteViewOrigin.High);
+	const FDFVector3 AbsolutePreViewTranslation(InViewMatrices.GetPreViewTranslation()); // Usually equal to -AbsoluteViewOrigin, but there are some ortho edge cases
+	
 	ViewUniformShaderParameters.NumSceneColorMSAASamples = NumMSAASamples;
-	ViewUniformShaderParameters.ViewToTranslatedWorld = InViewMatrices.GetOverriddenInvTranslatedViewMatrix();
-	ViewUniformShaderParameters.TranslatedWorldToClip = InViewMatrices.GetTranslatedViewProjectionMatrix();
-	ViewUniformShaderParameters.WorldToClip = InViewMatrices.GetViewProjectionMatrix();
-	ViewUniformShaderParameters.ClipToWorld = InViewMatrices.GetInvViewProjectionMatrix();
-	ViewUniformShaderParameters.TranslatedWorldToView = InViewMatrices.GetOverriddenTranslatedViewMatrix();
-	ViewUniformShaderParameters.TranslatedWorldToCameraView = InViewMatrices.GetTranslatedViewMatrix();
-	ViewUniformShaderParameters.CameraViewToTranslatedWorld = InViewMatrices.GetInvTranslatedViewMatrix();
-	ViewUniformShaderParameters.ViewToClip = InViewMatrices.GetProjectionMatrix();
-	ViewUniformShaderParameters.ViewToClipNoAA = InViewMatrices.GetProjectionNoAAMatrix();
-	ViewUniformShaderParameters.ClipToView = InViewMatrices.GetInvProjectionMatrix();
-	ViewUniformShaderParameters.ClipToTranslatedWorld = InViewMatrices.GetInvTranslatedViewProjectionMatrix();
-	ViewUniformShaderParameters.ViewForward = InViewMatrices.GetOverriddenTranslatedViewMatrix().GetColumn(2);
-	ViewUniformShaderParameters.ViewUp = InViewMatrices.GetOverriddenTranslatedViewMatrix().GetColumn(1);
-	ViewUniformShaderParameters.ViewRight = InViewMatrices.GetOverriddenTranslatedViewMatrix().GetColumn(0);
-	ViewUniformShaderParameters.HMDViewNoRollUp = InViewMatrices.GetHMDViewMatrixNoRoll().GetColumn(1);
-	ViewUniformShaderParameters.HMDViewNoRollRight = InViewMatrices.GetHMDViewMatrixNoRoll().GetColumn(0);
+	ViewUniformShaderParameters.ViewToTranslatedWorld = FMatrix44f(InViewMatrices.GetOverriddenInvTranslatedViewMatrix());	// LWC_TODO: Precision - Validate all float variant casts here.
+	ViewUniformShaderParameters.TranslatedWorldToClip = FMatrix44f(InViewMatrices.GetTranslatedViewProjectionMatrix());
+	ViewUniformShaderParameters.RelativeWorldToClip = RelativeMatrices.RelativeWorldToClip;
+	ViewUniformShaderParameters.ClipToRelativeWorld = RelativeMatrices.ClipToRelativeWorld;
+	ViewUniformShaderParameters.TranslatedWorldToView = FMatrix44f(InViewMatrices.GetOverriddenTranslatedViewMatrix());
+	ViewUniformShaderParameters.TranslatedWorldToCameraView = FMatrix44f(InViewMatrices.GetTranslatedViewMatrix());
+	ViewUniformShaderParameters.CameraViewToTranslatedWorld = FMatrix44f(InViewMatrices.GetInvTranslatedViewMatrix());
+	ViewUniformShaderParameters.ViewToClip = RelativeMatrices.ViewToClip;
+	ViewUniformShaderParameters.ViewToClipNoAA = FMatrix44f(InViewMatrices.GetProjectionNoAAMatrix());
+	ViewUniformShaderParameters.ClipToView = RelativeMatrices.ClipToView;
+	ViewUniformShaderParameters.ClipToTranslatedWorld = FMatrix44f(InViewMatrices.GetInvTranslatedViewProjectionMatrix());
+	ViewUniformShaderParameters.ViewForward = (FVector3f)InViewMatrices.GetOverriddenTranslatedViewMatrix().GetColumn(2);
+	ViewUniformShaderParameters.ViewUp = (FVector3f)InViewMatrices.GetOverriddenTranslatedViewMatrix().GetColumn(1);
+	ViewUniformShaderParameters.ViewRight = (FVector3f)InViewMatrices.GetOverriddenTranslatedViewMatrix().GetColumn(0);
+	ViewUniformShaderParameters.HMDViewNoRollUp = (FVector3f)InViewMatrices.GetHMDViewMatrixNoRoll().GetColumn(1);
+	ViewUniformShaderParameters.HMDViewNoRollRight = (FVector3f)InViewMatrices.GetHMDViewMatrixNoRoll().GetColumn(0);
 	ViewUniformShaderParameters.InvDeviceZToWorldZTransform = InvDeviceZToWorldZTransform;
-	ViewUniformShaderParameters.WorldViewOrigin = InViewMatrices.GetOverriddenInvTranslatedViewMatrix().TransformPosition(FVector(0)) - InViewMatrices.GetPreViewTranslation();
-	ViewUniformShaderParameters.WorldCameraOrigin = InViewMatrices.GetViewOrigin();
-	ViewUniformShaderParameters.TranslatedWorldCameraOrigin = InViewMatrices.GetViewOrigin() + InViewMatrices.GetPreViewTranslation();
-	ViewUniformShaderParameters.PreViewTranslation = InViewMatrices.GetPreViewTranslation();
-	ViewUniformShaderParameters.PrevProjection = InPrevViewMatrices.GetProjectionMatrix();
-	ViewUniformShaderParameters.PrevViewProj = InPrevViewMatrices.GetViewProjectionMatrix();
-	ViewUniformShaderParameters.PrevViewRotationProj = InPrevViewMatrices.ComputeViewRotationProjectionMatrix();
-	ViewUniformShaderParameters.PrevViewToClip = InPrevViewMatrices.GetProjectionMatrix();
-	ViewUniformShaderParameters.PrevClipToView = InPrevViewMatrices.GetInvProjectionMatrix();
-	ViewUniformShaderParameters.PrevTranslatedWorldToClip = InPrevViewMatrices.GetTranslatedViewProjectionMatrix();
+	FDFVector4 WorldViewOriginDF { (FVector4f)(InViewMatrices.GetOverriddenInvTranslatedViewMatrix().TransformPosition(FVector(0)) - InViewMatrices.GetPreViewTranslation()) };
+	ViewUniformShaderParameters.WorldViewOriginHigh = WorldViewOriginDF.High;
+	ViewUniformShaderParameters.WorldViewOriginLow = WorldViewOriginDF.Low;
+	ViewUniformShaderParameters.ViewOriginHigh = AbsoluteViewOrigin.High;
+	ViewUniformShaderParameters.ViewOriginLow = AbsoluteViewOrigin.Low;
+	ViewUniformShaderParameters.TranslatedWorldCameraOrigin = FVector3f(InViewMatrices.GetViewOrigin() + InViewMatrices.GetPreViewTranslation());
+	ViewUniformShaderParameters.PreViewTranslationHigh = AbsolutePreViewTranslation.High;
+	ViewUniformShaderParameters.PreViewTranslationLow = AbsolutePreViewTranslation.Low;
+	ViewUniformShaderParameters.PrevViewToClip = FMatrix44f(InPrevViewMatrices.GetProjectionMatrix());
+	ViewUniformShaderParameters.PrevClipToView = RelativeMatrices.PrevClipToView;
+	ViewUniformShaderParameters.PrevTranslatedWorldToClip = FMatrix44f(InPrevViewMatrices.GetTranslatedViewProjectionMatrix());
 	// EffectiveTranslatedViewMatrix != InViewMatrices.TranslatedViewMatrix in the shadow pass
 	// and we don't have EffectiveTranslatedViewMatrix for the previous frame to set up PrevTranslatedWorldToView
 	// but that is fine to set up PrevTranslatedWorldToView as same as PrevTranslatedWorldToCameraView
 	// since the shadow pass doesn't require previous frame computation.
-	ViewUniformShaderParameters.PrevTranslatedWorldToView = InPrevViewMatrices.GetTranslatedViewMatrix();
-	ViewUniformShaderParameters.PrevViewToTranslatedWorld = InPrevViewMatrices.GetInvTranslatedViewMatrix();
-	ViewUniformShaderParameters.PrevTranslatedWorldToCameraView = InPrevViewMatrices.GetTranslatedViewMatrix();
-	ViewUniformShaderParameters.PrevCameraViewToTranslatedWorld = InPrevViewMatrices.GetInvTranslatedViewMatrix();
-	ViewUniformShaderParameters.PrevWorldCameraOrigin = InPrevViewMatrices.GetViewOrigin();
+	ViewUniformShaderParameters.PrevTranslatedWorldToView = FMatrix44f(InPrevViewMatrices.GetOverriddenTranslatedViewMatrix());
+	ViewUniformShaderParameters.PrevViewToTranslatedWorld = FMatrix44f(InPrevViewMatrices.GetOverriddenInvTranslatedViewMatrix());
+	ViewUniformShaderParameters.PrevTranslatedWorldToCameraView = FMatrix44f(InPrevViewMatrices.GetTranslatedViewMatrix());
+	ViewUniformShaderParameters.PrevCameraViewToTranslatedWorld = FMatrix44f(InPrevViewMatrices.GetInvTranslatedViewMatrix());
+	FDFVector3 PrevWorldCameraOriginDF { InPrevViewMatrices.GetViewOrigin() };
+	ViewUniformShaderParameters.PrevWorldCameraOriginHigh = PrevWorldCameraOriginDF.High;
+	ViewUniformShaderParameters.PrevWorldCameraOriginLow = PrevWorldCameraOriginDF.Low;
 	// previous view world origin is going to be needed only in the base pass or shadow pass
 	// therefore is same as previous camera world origin.
-	ViewUniformShaderParameters.PrevWorldViewOrigin = ViewUniformShaderParameters.PrevWorldCameraOrigin;
-	ViewUniformShaderParameters.PrevPreViewTranslation = InPrevViewMatrices.GetPreViewTranslation();
-	// can be optimized
-	ViewUniformShaderParameters.PrevInvViewProj = InPrevViewMatrices.GetInvViewProjectionMatrix();
-	ViewUniformShaderParameters.GlobalClippingPlane = FVector4(GlobalClippingPlane.X, GlobalClippingPlane.Y, GlobalClippingPlane.Z, -GlobalClippingPlane.W);
+	ViewUniformShaderParameters.PrevWorldViewOriginHigh = ViewUniformShaderParameters.PrevWorldCameraOriginHigh;
+	ViewUniformShaderParameters.PrevWorldViewOriginLow = ViewUniformShaderParameters.PrevWorldCameraOriginLow;
+	ViewUniformShaderParameters.PrevTranslatedWorldCameraOrigin = FVector3f(InPrevViewMatrices.GetViewOrigin() + InPrevViewMatrices.GetPreViewTranslation());
+	FDFVector3 PrevPreViewTranslationDF { InPrevViewMatrices.GetPreViewTranslation() };
+	ViewUniformShaderParameters.PrevPreViewTranslationHigh = PrevPreViewTranslationDF.High;
+	ViewUniformShaderParameters.PrevPreViewTranslationLow = PrevPreViewTranslationDF.Low;
+	ViewUniformShaderParameters.PrevClipToRelativeWorld = RelativeMatrices.PrevClipToRelativeWorld;
 
-	ViewUniformShaderParameters.FieldOfViewWideAngles = 2.f * InViewMatrices.ComputeHalfFieldOfViewPerAxis();
-	ViewUniformShaderParameters.PrevFieldOfViewWideAngles = 2.f * InPrevViewMatrices.ComputeHalfFieldOfViewPerAxis();
+	// TileOffset variables for materials. Calculating these on-GPU was too expensive for low end platforms.
+	const FLargeWorldRenderPosition AbsoluteViewOriginTO(InViewMatrices.GetViewOrigin());
+	const FVector ViewTileOffset = AbsoluteViewOriginTO.GetTileOffset();
+	ViewUniformShaderParameters.ViewTilePosition = AbsoluteViewOriginTO.GetTile();
+	ViewUniformShaderParameters.RelativeWorldCameraOriginTO = FVector3f(InViewMatrices.GetViewOrigin() - ViewTileOffset);
+	ViewUniformShaderParameters.RelativeWorldViewOriginTO = (FVector4f)(InViewMatrices.GetOverriddenInvTranslatedViewMatrix().TransformPosition(FVector(0)) - InViewMatrices.GetPreViewTranslation() - ViewTileOffset);
+	ViewUniformShaderParameters.RelativePreViewTranslationTO = FVector3f(InViewMatrices.GetPreViewTranslation() + ViewTileOffset);
+	ViewUniformShaderParameters.PrevRelativeWorldCameraOriginTO = FVector3f(InPrevViewMatrices.GetViewOrigin() - ViewTileOffset);
+	ViewUniformShaderParameters.PrevRelativeWorldViewOriginTO = ViewUniformShaderParameters.PrevRelativeWorldCameraOriginTO;
+	ViewUniformShaderParameters.RelativePrevPreViewTranslationTO = FVector3f(InPrevViewMatrices.GetPreViewTranslation() + ViewTileOffset);
+
+	// Convert global clipping plane to translated world space
+	const FPlane4f TranslatedGlobalClippingPlane(GlobalClippingPlane.TranslateBy(InViewMatrices.GetPreViewTranslation()));
+
+	ViewUniformShaderParameters.GlobalClippingPlane = FVector4f(TranslatedGlobalClippingPlane.X, TranslatedGlobalClippingPlane.Y, TranslatedGlobalClippingPlane.Z, -TranslatedGlobalClippingPlane.W);
+
+	ViewUniformShaderParameters.FieldOfViewWideAngles = FVector2f(2.f * InViewMatrices.ComputeHalfFieldOfViewPerAxis());	// LWC_TODO: Precision loss
+	ViewUniformShaderParameters.PrevFieldOfViewWideAngles = FVector2f(2.f * InPrevViewMatrices.ComputeHalfFieldOfViewPerAxis());	// LWC_TODO: Precision loss
 	ViewUniformShaderParameters.DiffuseOverrideParameter = LocalDiffuseOverrideParameter;
 	ViewUniformShaderParameters.SpecularOverrideParameter = SpecularOverrideParameter;
 	ViewUniformShaderParameters.NormalOverrideParameter = NormalOverrideParameter;
-	ViewUniformShaderParameters.RoughnessOverrideParameter = LocalRoughnessOverrideParameter;
-	ViewUniformShaderParameters.PrevFrameGameTime = Family->CurrentWorldTime - Family->DeltaWorldTime;
-	ViewUniformShaderParameters.PrevFrameRealTime = Family->CurrentRealTime  - Family->DeltaWorldTime;
-	ViewUniformShaderParameters.WorldCameraMovementSinceLastFrame = InViewMatrices.GetViewOrigin() - InPrevViewMatrices.GetViewOrigin();
+	ViewUniformShaderParameters.RoughnessOverrideParameter = FVector2f(LocalRoughnessOverrideParameter);	// LWC_TODO: Precision loss
+	ViewUniformShaderParameters.WorldCameraMovementSinceLastFrame = FVector3f(InViewMatrices.GetViewOrigin() - InPrevViewMatrices.GetViewOrigin());
 	ViewUniformShaderParameters.CullingSign = bReverseCulling ? -1.0f : 1.0f;
-	ViewUniformShaderParameters.NearPlane = GNearClippingPlane;
+	ViewUniformShaderParameters.NearPlane = InViewMatrices.ComputeNearPlane();
 	ViewUniformShaderParameters.MaterialTextureMipBias = 0.0f;
 	ViewUniformShaderParameters.MaterialTextureDerivativeMultiply = 1.0f;
+	ViewUniformShaderParameters.ResolutionFractionAndInv = FVector2f(1.0f, 1.0f);
+	ViewUniformShaderParameters.ProjectionDepthThicknessScale = InViewMatrices.GetPerProjectionDepthThicknessScale();
 
 	ViewUniformShaderParameters.bCheckerboardSubsurfaceProfileRendering = 0;
 
-	ViewUniformShaderParameters.ScreenToWorld = FMatrix(
-		FPlane(1, 0, 0, 0),
-		FPlane(0, 1, 0, 0),
-		FPlane(0, 0, ProjectionMatrixUnadjustedForRHI.M[2][2], 1),
-		FPlane(0, 0, ProjectionMatrixUnadjustedForRHI.M[3][2], 0))
-		* InViewMatrices.GetInvViewProjectionMatrix();
+	ViewUniformShaderParameters.ScreenToRelativeWorld = 
+		FMatrix44f(InViewMatrices.GetScreenToClipMatrix()) * ViewUniformShaderParameters.ClipToRelativeWorld;
 
-	ViewUniformShaderParameters.ScreenToTranslatedWorld = FMatrix(
-		FPlane(1, 0, 0, 0),
-		FPlane(0, 1, 0, 0),
-		FPlane(0, 0, ProjectionMatrixUnadjustedForRHI.M[2][2], 1),
-		FPlane(0, 0, ProjectionMatrixUnadjustedForRHI.M[3][2], 0))
-		* InViewMatrices.GetInvTranslatedViewProjectionMatrix();
+	ViewUniformShaderParameters.ScreenToTranslatedWorld = 
+		FMatrix44f(InViewMatrices.GetScreenToClipMatrix() * InViewMatrices.GetInvTranslatedViewProjectionMatrix());
 
-	ViewUniformShaderParameters.MobileMultiviewShadowTransform = FMatrix(
-		FPlane(1, 0, 0, 0),
-		FPlane(0, 1, 0, 0),
-		FPlane(0, 0, InViewMatrices.GetProjectionMatrix().M[2][2], 1),
-		FPlane(0, 0, InViewMatrices.GetProjectionMatrix().M[3][2], 0)) *
-		InViewMatrices.GetInvTranslatedViewProjectionMatrix() *
-		FTranslationMatrix(-InViewMatrices.GetPreViewTranslation());
+	ViewUniformShaderParameters.MobileMultiviewShadowTransform = 
+		FMatrix44f(InViewMatrices.GetScreenToClipMatrix() * InViewMatrices.GetInvTranslatedViewProjectionMatrix() * FTranslationMatrix(-InViewMatrices.GetPreViewTranslation()));
 
-	ViewUniformShaderParameters.PrevScreenToTranslatedWorld = FMatrix(
-		FPlane(1, 0, 0, 0),
-		FPlane(0, 1, 0, 0),
-		FPlane(0, 0, ProjectionMatrixUnadjustedForRHI.M[2][2], 1),
-		FPlane(0, 0, ProjectionMatrixUnadjustedForRHI.M[3][2], 0))
-		* InPrevViewMatrices.GetInvTranslatedViewProjectionMatrix();
+	ViewUniformShaderParameters.PrevScreenToTranslatedWorld = 
+		FMatrix44f(InPrevViewMatrices.GetScreenToClipMatrix() * InPrevViewMatrices.GetInvTranslatedViewProjectionMatrix());
 
-	FVector DeltaTranslation = InPrevViewMatrices.GetPreViewTranslation() - InViewMatrices.GetPreViewTranslation();
-	FMatrix InvViewProj = InViewMatrices.ComputeInvProjectionNoAAMatrix() * InViewMatrices.GetTranslatedViewMatrix().GetTransposed();
-	FMatrix PrevViewProj = FTranslationMatrix(DeltaTranslation) * InPrevViewMatrices.GetTranslatedViewMatrix() * InPrevViewMatrices.ComputeProjectionNoAAMatrix();
+	{
+		FVector DeltaTranslation = InPrevViewMatrices.GetPreViewTranslation() - InViewMatrices.GetPreViewTranslation();
+		FMatrix InvViewProj = InViewMatrices.ComputeInvProjectionNoAAMatrix() * InViewMatrices.GetTranslatedViewMatrix().GetTransposed();
+		FMatrix PrevViewProj = FTranslationMatrix(DeltaTranslation) * InPrevViewMatrices.GetTranslatedViewMatrix() * InPrevViewMatrices.ComputeProjectionNoAAMatrix();
 
-	ViewUniformShaderParameters.ClipToPrevClip = InvViewProj * PrevViewProj;
-	ViewUniformShaderParameters.TemporalAAJitter = FVector4(
-		InViewMatrices.GetTemporalAAJitter().X,		InViewMatrices.GetTemporalAAJitter().Y,
-		InPrevViewMatrices.GetTemporalAAJitter().X, InPrevViewMatrices.GetTemporalAAJitter().Y );
+		ViewUniformShaderParameters.ClipToPrevClip = FMatrix44f(InvViewProj * PrevViewProj);		// LWC_TODO: Precision loss?
+	}
+
+	{
+		FVector DeltaTranslation = InPrevViewMatrices.GetPreViewTranslation() - InViewMatrices.GetPreViewTranslation();
+		FMatrix InvViewProj = InViewMatrices.GetInvProjectionMatrix() * InViewMatrices.GetTranslatedViewMatrix().GetTransposed();
+		FMatrix PrevViewProj = FTranslationMatrix(DeltaTranslation) * InPrevViewMatrices.GetTranslatedViewMatrix() * InPrevViewMatrices.GetProjectionMatrix();
+
+		ViewUniformShaderParameters.ClipToPrevClipWithAA = FMatrix44f(InvViewProj * PrevViewProj);		// LWC_TODO: Precision loss?
+	}
+
+	// LWC_TODO: precision loss? These values are probably quite small and easily within float range.
+	ViewUniformShaderParameters.TemporalAAJitter = FVector4f(
+		(float)InViewMatrices.GetTemporalAAJitter().X, (float)InViewMatrices.GetTemporalAAJitter().Y,
+		(float)InPrevViewMatrices.GetTemporalAAJitter().X, (float)InPrevViewMatrices.GetTemporalAAJitter().Y );
 
 	ViewUniformShaderParameters.DebugViewModeMask = Family->UseDebugViewPS() ? 1 : 0;
 	ViewUniformShaderParameters.UnlitViewmodeMask = !Family->EngineShowFlags.Lighting || Family->EngineShowFlags.PathTracing ? 1 : 0;
 	ViewUniformShaderParameters.OutOfBoundsMask = Family->EngineShowFlags.VisualizeOutOfBoundsPixels ? 1 : 0;
 
-	ViewUniformShaderParameters.GameTime = Family->CurrentWorldTime;
-	ViewUniformShaderParameters.RealTime = Family->CurrentRealTime;
-	ViewUniformShaderParameters.DeltaTime = Family->DeltaWorldTime;
+#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+	float OverrideTimeMaterialExpression = CVarOverrideTimeMaterialExpressions.GetValueOnRenderThread();
+	if (OverrideTimeMaterialExpression >= 0.0f)
+	{
+		ViewUniformShaderParameters.PrevFrameGameTime = OverrideTimeMaterialExpression;
+		ViewUniformShaderParameters.PrevFrameRealTime = OverrideTimeMaterialExpression;
+		ViewUniformShaderParameters.GameTime = OverrideTimeMaterialExpression;
+		ViewUniformShaderParameters.RealTime = OverrideTimeMaterialExpression;
+		ViewUniformShaderParameters.DeltaTime = 0.0f;
+	}
+	else
+#endif
+	{
+		ViewUniformShaderParameters.PrevFrameGameTime = Family->Time.GetWorldTimeSeconds() - Family->Time.GetDeltaWorldTimeSeconds();
+		ViewUniformShaderParameters.PrevFrameRealTime = Family->Time.GetRealTimeSeconds() - Family->Time.GetDeltaRealTimeSeconds();
+		ViewUniformShaderParameters.GameTime = Family->Time.GetWorldTimeSeconds();
+		ViewUniformShaderParameters.RealTime = Family->Time.GetRealTimeSeconds();
+		ViewUniformShaderParameters.DeltaTime = Family->Time.GetDeltaWorldTimeSeconds();
+	}
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 	static FIntPoint LockedCursorPos = CursorPos;
@@ -2519,9 +2750,13 @@ void FSceneView::SetupCommonViewUniformBufferParameters(
 #endif
 
 	ViewUniformShaderParameters.Random = FMath::Rand();
+	// FrameNumber corresponds to how many times FRendererModule::BeginRenderingViewFamilies has been called, so multi views of the same frame have incremental values.
 	ViewUniformShaderParameters.FrameNumber = Family->FrameNumber;
-
-	ViewUniformShaderParameters.CameraCut = bCameraCut ? 1 : 0;
+	// FrameCounter is incremented once per engine tick, so multi views of the same frame have the same value.
+	ViewUniformShaderParameters.FrameCounter = Family->FrameCounter;
+	ViewUniformShaderParameters.WorldIsPaused = Family->bWorldIsPaused;
+	//Set bCameraCut if we switch projection type to ensure histories are updated.
+	ViewUniformShaderParameters.CameraCut = bCameraCut ? 1 : (InViewMatrices.IsPerspectiveProjection() != InPrevViewMatrices.IsPerspectiveProjection());
 
 	ViewUniformShaderParameters.MinRoughness = FMath::Clamp(CVarGlobalMinRoughnessOverride.GetValueOnRenderThread(), 0.02f, 1.0f);
 
@@ -2533,7 +2768,9 @@ bool FSceneView::HasValidEyeAdaptationTexture() const
 {
 	if (EyeAdaptationViewState)
 	{
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		return EyeAdaptationViewState->HasValidEyeAdaptationTexture();
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
 	return false;
 }
@@ -2549,22 +2786,101 @@ bool FSceneView::HasValidEyeAdaptationBuffer() const
 
 IPooledRenderTarget* FSceneView::GetEyeAdaptationTexture() const
 {
-	checkf(FeatureLevel > ERHIFeatureLevel::ES3_1, TEXT("SM5 and above use RenderTarget for read back"));
+	checkf(FeatureLevel > ERHIFeatureLevel::ES3_1, TEXT("EyeAdaptation Texture is only available on SM5 and above."));
 	if (EyeAdaptationViewState)
 	{
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		return EyeAdaptationViewState->GetCurrentEyeAdaptationTexture();
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
 	return nullptr;
 }
 
-const FExposureBufferData* FSceneView::GetEyeAdaptationBuffer() const
+FRDGPooledBuffer* FSceneView::GetEyeAdaptationBuffer() const
 {
-	checkf(FeatureLevel == ERHIFeatureLevel::ES3_1, TEXT("ES3_1 use RWBuffer for read back"));
 	if (EyeAdaptationViewState)
 	{
 		return EyeAdaptationViewState->GetCurrentEyeAdaptationBuffer();
 	}
 	return nullptr;
+}
+
+/** Returns the eye adaptation exposure or 0.0f if it doesn't exist. */
+float FSceneView::GetLastEyeAdaptationExposure() const
+{
+	if (EyeAdaptationViewState)
+	{
+		return EyeAdaptationViewState->GetLastEyeAdaptationExposure();
+	}
+	return 0.0f;
+}
+
+const FSceneView* FSceneView::GetPrimarySceneView() const
+{
+	// It is valid for this function to return itself if it's already the primary view.
+	if (Family && Family->Views.IsValidIndex(PrimaryViewIndex))
+	{
+		return Family->Views[PrimaryViewIndex];
+	}
+	return this;
+}
+
+const FSceneView* FSceneView::GetInstancedSceneView() const
+{
+	// if we don't have ISR (or MMV) enabled, we don't have instanced views
+	if (bIsMultiViewportEnabled || bIsMobileMultiViewEnabled)
+	{
+		// If called on the first secondary view it'll return itself.
+		if (Family && Family->Views.IsValidIndex(PrimaryViewIndex + 1))
+		{
+			const FSceneView* SecondaryView = Family->Views[PrimaryViewIndex + 1];
+			return IStereoRendering::IsASecondaryView(*SecondaryView) ? SecondaryView : nullptr;
+		}
+	}
+	return nullptr;
+}
+
+TArray<const FSceneView*> FSceneView::GetSecondaryViews() const
+{
+	// If called on a secondary view we'll return all other secondary views, including this view.
+	TArray<const FSceneView*> Views;
+	Views.Reserve(Family->Views.Num());
+	for (int32 ViewIndex = PrimaryViewIndex + 1; ViewIndex < Family->Views.Num() &&
+		IStereoRendering::IsASecondaryView(*Family->Views[ViewIndex]); ViewIndex++)
+	{
+		Views.Add(Family->Views[ViewIndex]);
+	}
+	return Views;
+}
+
+FSceneViewFamily::ConstructionValues::ConstructionValues(
+	const FRenderTarget* InRenderTarget,
+	FSceneInterface* InScene,
+	const FEngineShowFlags& InEngineShowFlags
+	)
+:	RenderTarget(InRenderTarget)
+,	Scene(InScene)
+,	EngineShowFlags(InEngineShowFlags)
+,	ViewModeParam(-1)
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+,	GammaCorrection(1.0f)
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+,	bAdditionalViewFamily(false)
+,	bRealtimeUpdate(false)
+,	bDeferClear(false)
+,	bResolveScene(true)			
+,	bTimesSet(false)
+,	bRequireMultiView(false)
+{
+	if( InScene != NULL )			
+	{
+		UWorld* World = InScene->GetWorld();
+		// Ensure the world is valid and that we are being called from a game thread (GetRealTimeSeconds requires this)
+		if( World && IsInGameThread() )
+		{	
+			SetTime(World->GetTime());
+		}
+	}
 }
 
 FSceneViewFamily::FSceneViewFamily(const ConstructionValues& CVS)
@@ -2573,9 +2889,10 @@ FSceneViewFamily::FSceneViewFamily(const ConstructionValues& CVS)
 	RenderTarget(CVS.RenderTarget),
 	Scene(CVS.Scene),
 	EngineShowFlags(CVS.EngineShowFlags),
-	CurrentWorldTime(CVS.CurrentWorldTime),
-	DeltaWorldTime(CVS.DeltaWorldTime),
-	CurrentRealTime(CVS.CurrentRealTime),
+	Time(CVS.Time),
+	CurrentWorldTime(CVS.Time.GetWorldTimeSeconds()),
+	DeltaWorldTime(CVS.Time.GetDeltaWorldTimeSeconds()),
+	CurrentRealTime(CVS.Time.GetRealTimeSeconds()),
 	FrameNumber(UINT_MAX),
 	bAdditionalViewFamily(CVS.bAdditionalViewFamily),
 	bRealtimeUpdate(CVS.bRealtimeUpdate),
@@ -2586,27 +2903,31 @@ FSceneViewFamily::FSceneViewFamily(const ConstructionValues& CVS)
 	SceneCaptureCompositeMode(SCCM_Overwrite),
 	bWorldIsPaused(false),
 	bIsHDR(false),
-	bRequireMultiView(false),
+	bRequireMultiView(CVS.bRequireMultiView),
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	GammaCorrection(CVS.GammaCorrection),
-	bLateLatchingEnabled(false),
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	SecondaryViewFraction(1.0f),
 	SecondaryScreenPercentageMethod(ESecondaryScreenPercentageMethod::LowerPixelDensitySimulation),
+	ProfileSceneRenderTime(nullptr),
+	SceneRenderer(nullptr),
 	ScreenPercentageInterface(nullptr),
 	TemporalUpscalerInterface(nullptr),
 	PrimarySpatialUpscalerInterface(nullptr),
 	SecondarySpatialUpscalerInterface(nullptr)
 {
-	// If we do not pass a valid scene pointer then SetWorldTimes must be called to initialized with valid times.
+	// If we do not pass a valid scene pointer then SetTime() must be called to initialized with valid times.
 	ensure(CVS.bTimesSet);
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 	int32 Value = CVarRenderTimeFrozen.GetValueOnAnyThread();
 	if(Value)
 	{
-		CurrentWorldTime = 0;
-		CurrentRealTime = 0;
+		Time = FGameTime::CreateDilated(0.0, Time.GetDeltaRealTimeSeconds(), 0.0, Time.GetDeltaWorldTimeSeconds());
 	}
+#endif
 
+#if WITH_DEBUG_VIEW_MODES
 	DebugViewShaderMode = ChooseDebugViewShaderMode();
 	ViewModeParam = CVS.ViewModeParam;
 	ViewModeParamName = CVS.ViewModeParamName;
@@ -2617,6 +2938,11 @@ FSceneViewFamily::FSceneViewFamily(const ConstructionValues& CVS)
 	}
 	bUsedDebugViewVSDSHS = DebugViewShaderMode != DVSM_None && AllowDebugViewVSDSHS(GetShaderPlatform());
 #endif
+
+	bCurrentlyBeingEdited = false;
+
+	bOverrideVirtualTextureThrottle = false;
+	VirtualTextureFeedbackFactor = GVirtualTextureFeedbackFactor;
 
 #if !WITH_EDITOR
 	check(!EngineShowFlags.StationaryLightOverlap);
@@ -2635,14 +2961,15 @@ FSceneViewFamily::FSceneViewFamily(const ConstructionValues& CVS)
 				EngineShowFlags.LOD = 1;
 			}
 
-			bWorldIsPaused = !World->IsCameraMoveable();
+			// If a single frame step or toggling between Play-in-Editor and Simulate-in-Editor happened this frame, then unpause for this frame.
+			bWorldIsPaused = !(World->IsCameraMoveable() || World->bDebugFrameStepExecutedThisFrame || World->bToggledBetweenPIEandSIEThisFrame);
 		}
 	}
 
-	LandscapeLODOverride = -1;
 	bDrawBaseInfo = true;
 	bNullifyWorldSpacePosition = false;
 #endif
+	LandscapeLODOverride = -1;
 
 	// ScreenPercentage is not supported in ES 3.1 with MobileHDR = false. Disable show flag so to have it respected.
 	const bool bIsMobileLDR = (GetFeatureLevel() <= ERHIFeatureLevel::ES3_1 && !IsMobileHDR());
@@ -2650,25 +2977,21 @@ FSceneViewFamily::FSceneViewFamily(const ConstructionValues& CVS)
 	{
 		EngineShowFlags.ScreenPercentage = false;
 	}
-
-	// TODO: Re-enable Mobile Multi-View on all platforms when all desktop XR plugins support it
-#if (PLATFORM_HOLOLENS || PLATFORM_ANDROID || PLATFORM_LUMIN)
-	if (GEngine && GEngine->IsStereoscopic3D())
-	{
-		static const auto MobileMultiViewCVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("vr.MobileMultiView"));
-		const bool bSkipPostprocessing = !IsMobileHDR();
-		const bool bUsingMobileRenderer = FSceneInterface::GetShadingPath(GetFeatureLevel()) == EShadingPath::Mobile;
-		bRequireMultiView = (GSupportsMobileMultiView || GRHISupportsArrayIndexFromAnyShader) && bUsingMobileRenderer && bSkipPostprocessing && (MobileMultiViewCVar && MobileMultiViewCVar->GetValueOnAnyThread() != 0);
-	}
-#endif
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS // TOptional can't be deprecated without emitting warnings in destructor
 FSceneViewFamily::~FSceneViewFamily()
 {
 	// If a screen percentage was given for the view family, delete it since any new copy of a view family will Fork it.
 	if (ScreenPercentageInterface)
 	{
 		delete ScreenPercentageInterface;
+	}
+
+	if (TemporalUpscalerInterface)
+	{
+		// ITemporalUpscaler* is only defined in renderer's private header because no backward compatibility is provided between major version.
+		delete reinterpret_cast<ISceneViewFamilyExtention*>(TemporalUpscalerInterface);
 	}
 
 	if (PrimarySpatialUpscalerInterface)
@@ -2683,6 +3006,7 @@ FSceneViewFamily::~FSceneViewFamily()
 		delete reinterpret_cast<ISceneViewFamilyExtention*>(SecondarySpatialUpscalerInterface);
 	}
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 ERHIFeatureLevel::Type FSceneViewFamily::GetFeatureLevel() const
 {
@@ -2696,56 +3020,28 @@ ERHIFeatureLevel::Type FSceneViewFamily::GetFeatureLevel() const
 	}
 }
 
-const FSceneView& FSceneViewFamily::GetStereoEyeView(const EStereoscopicPass Eye) const
-{
-	const int32 EyeIndex = static_cast<int32>(Eye);
-	check(Views.Num() > 0 && Views.Num() >= EyeIndex);
-
-	if (EyeIndex <= 1) // Mono or left eye
-	{
-		return *Views[0];
-	}
-	else if (EyeIndex == 2) // Right eye
-	{
-		return *Views[1];
-	}
-	else // For extra views
-	{
-		return *Views[EyeIndex - eSSP_RIGHT_EYE + 1];
-	}
-}
-
 bool FSceneViewFamily::SupportsScreenPercentage() const
 {
-	EShadingPath ShadingPath = Scene->GetShadingPath();
-
-	// The deferred shading renderer supports screen percentage when used normally
-	if (Scene->GetShadingPath() == EShadingPath::Deferred)
+	if (Scene != nullptr)
 	{
+		EShadingPath ShadingPath = Scene->GetShadingPath();
+
+		// The deferred shading renderer supports screen percentage when used normally
+		if (Scene->GetShadingPath() == EShadingPath::Deferred)
+		{
+			return true;
+		}
+
+		// Mobile renderer does not support screen percentage with LDR.
+		if ((GetFeatureLevel() <= ERHIFeatureLevel::ES3_1 && !IsMobileHDR()))
+		{
+			return false;
+		}
 		return true;
 	}
 
-	// Mobile renderer does not support screen percentage with LDR.
-	if ((GetFeatureLevel() <= ERHIFeatureLevel::ES3_1 && !IsMobileHDR()))
-	{
-		return false;
-	}
-	return true;
+	return false;
 }
-
-bool FSceneViewFamily::AllowTranslucencyAfterDOF() const
-{
-	static IConsoleVariable* CVarMobileMSAA = IConsoleManager::Get().FindConsoleVariable(TEXT("r.MobileMSAA"));
-	const bool bMobileMSAA = CVarMobileMSAA ? (CVarMobileMSAA->GetInt() > 1) : false;
-
-	return CVarAllowTranslucencyAfterDOF.GetValueOnRenderThread() != 0
-		&& (GetFeatureLevel() > ERHIFeatureLevel::ES3_1 || (IsMobileHDR() && !bMobileMSAA)) // on <= ES3_1 separate translucency requires HDR on and MSAA off
-	&& EngineShowFlags.PostProcessing // Used for reflection captures.
-	&& !UseDebugViewPS()
-	&& EngineShowFlags.SeparateTranslucency;
-	// If not, translucency after DOF will be rendered in standard translucency.
-}
-
 
 FSceneViewFamilyContext::~FSceneViewFamilyContext()
 {
@@ -2756,30 +3052,7 @@ FSceneViewFamilyContext::~FSceneViewFamilyContext()
 	}
 }
 
-#if RHI_RAYTRACING
-void FSceneView::SetupRayTracedRendering()
-{
-	RayTracingRenderMode = ERayTracingRenderMode::Disabled;
-
-	if (!IsRayTracingEnabled())
-	{
-		return;
-	}
-
-	const FEngineShowFlags& ShowFlags = Family->EngineShowFlags;
-
-	if (ShowFlags.PathTracing && FDataDrivenShaderPlatformInfo::GetSupportsPathTracing(GetShaderPlatform()))
-	{
-		RayTracingRenderMode = ERayTracingRenderMode::PathTracing;
-	}	
-	else if (ShowFlags.RayTracingDebug)
-	{
-		RayTracingRenderMode = ERayTracingRenderMode::RayTracingDebug;
-	}
-}
-#endif // RHI_RAYTRACING
-
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#if WITH_DEBUG_VIEW_MODES
 
 EDebugViewShaderMode FSceneViewFamily::ChooseDebugViewShaderMode() const
 {
@@ -2818,15 +3091,19 @@ EDebugViewShaderMode FSceneViewFamily::ChooseDebugViewShaderMode() const
 	{
 		return DVSM_RequiredTextureResolution;
 	}
-	else if (EngineShowFlags.RayTracingDebug)
+	else if (EngineShowFlags.VirtualTexturePendingMips)
 	{
-		return DVSM_RayTracingDebug;
+		return DVSM_VirtualTexturePendingMips;
 	}
 	else if (EngineShowFlags.LODColoration || EngineShowFlags.HLODColoration)
 	{
 		return DVSM_LODColoration;
 	}
+	else if (EngineShowFlags.VisualizeGPUSkinCache)
+	{
+		return DVSM_VisualizeGPUSkinCache;
+	}
 	return DVSM_None;
 }
 
-#endif // !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#endif // WITH_DEBUG_VIEW_MODES

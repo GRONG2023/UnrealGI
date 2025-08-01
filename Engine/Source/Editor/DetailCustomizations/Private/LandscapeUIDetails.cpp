@@ -1,19 +1,42 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "LandscapeUIDetails.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "PropertyHandle.h"
+
+#include "Containers/Array.h"
+#include "Delegates/Delegate.h"
 #include "DetailLayoutBuilder.h"
-#include "Runtime/Landscape/Classes/Landscape.h"
-#include "Settings/EditorExperimentalSettings.h"
-#include "DetailCategoryBuilder.h"
 #include "DetailWidgetRow.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMisc.h"
+#include "Input/Reply.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Landscape.h"
+#include "LandscapeInfo.h"
+#include "LandscapeProxy.h"
+#include "LandscapeSettings.h"
+#include "Layout/Visibility.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/MessageDialog.h"
+#include "Misc/Optional.h"
+#include "PropertyHandle.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/Casts.h"
+#include "Types/SlateEnums.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SCheckBox.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Input/SCheckBox.h"
-#include "Misc/MessageDialog.h"
-#include "Editor.h"
+#include "Misc/ScopedSlowTask.h"
+
+class UObject;
 
 #define LOCTEXT_NAMESPACE "FLandscapeUIDetails"
 
@@ -43,21 +66,21 @@ void FLandscapeUIDetails::CustomizeDetails( IDetailLayoutBuilder& DetailBuilder 
 			return;
 		}
 
-		if (Landscape->NumSubsections == 1)
-		{
-			TSharedRef<IPropertyHandle> ComponentScreenSizeToUseSubSectionsProp = DetailBuilder.GetProperty(GET_MEMBER_NAME_CHECKED(ALandscapeProxy, ComponentScreenSizeToUseSubSections));
-			DetailBuilder.HideProperty(ComponentScreenSizeToUseSubSectionsProp);
-		}
-							   
-		TSharedRef<IPropertyHandle> PropertyHandle = DetailBuilder.GetProperty(GET_MEMBER_NAME_CHECKED(ALandscape, bCanHaveLayersContent));
-		DetailBuilder.HideProperty(PropertyHandle);
+		TSharedRef<IPropertyHandle> CanHaveLayersPropertyHandle = DetailBuilder.GetProperty(GET_MEMBER_NAME_CHECKED(ALandscape, bCanHaveLayersContent));
+		DetailBuilder.HideProperty(CanHaveLayersPropertyHandle);
 		const FText DisplayAndFilterText(LOCTEXT("LandscapeToggleLayerName", "Enable Edit Layers"));
 		const FText ToolTipText(LOCTEXT("LandscapeToggleLayerToolTip", "Toggle whether or not to support edit layers on this Landscape. Toggling this will clear the undo stack."));
-		DetailBuilder.AddCustomRowToCategory(PropertyHandle, DisplayAndFilterText)
+		DetailBuilder.AddCustomRowToCategory(CanHaveLayersPropertyHandle, DisplayAndFilterText)
+		.RowTag(TEXT("EnableEditLayers"))
 		.NameContent()
 		[
-			PropertyHandle->CreatePropertyNameWidget(DisplayAndFilterText, ToolTipText)
+			CanHaveLayersPropertyHandle->CreatePropertyNameWidget(DisplayAndFilterText, ToolTipText)
 		]
+		.Visibility(MakeAttributeLambda([]()
+		{
+			const ULandscapeSettings* Settings = GetDefault<ULandscapeSettings>();
+			return Settings->InRestrictiveMode() ? EVisibility::Hidden : EVisibility::Visible;
+		}))
 		.ValueContent()
 		[
 			SNew(SCheckBox)
@@ -67,7 +90,7 @@ void FLandscapeUIDetails::CustomizeDetails( IDetailLayoutBuilder& DetailBuilder 
 			{
 				return Landscape.IsValid() && Landscape->CanHaveLayersContent() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
 			})
-			.OnCheckStateChanged_Lambda([=](ECheckBoxState NewState)
+			.OnCheckStateChanged_Lambda([this, Landscape](ECheckBoxState NewState)
 			{
 				bool bChecked = (NewState == ECheckBoxState::Checked);
 				if (Landscape.IsValid() && (Landscape->CanHaveLayersContent() != bChecked))

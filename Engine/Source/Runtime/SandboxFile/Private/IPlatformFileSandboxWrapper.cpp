@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "IPlatformFileSandboxWrapper.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Guid.h"
 #include "Stats/Stats.h"
@@ -19,7 +19,12 @@ DEFINE_LOG_CATEGORY(SandboxFile);
 #if PLATFORM_SUPPORTS_DEFAULT_SANDBOX && (UE_GAME || UE_SERVER)
 static FString GetCookedSandboxDir()
 {
-	return FPaths::Combine(*(FPaths::ProjectSavedDir()), TEXT("Cooked"), ANSI_TO_TCHAR(FPlatformProperties::PlatformName()));
+	TStringBuilder<512> Dir;
+	Dir << *FPaths::ProjectDir();
+	Dir << "Saved/Cooked/";
+	Dir << FPlatformProperties::PlatformName();
+	Dir << "/";
+	return Dir.ToString();
 }
 #endif
 
@@ -34,6 +39,7 @@ FSandboxPlatformFile::FSandboxPlatformFile(bool bInEntireEngineWillUseThisSandbo
 	: LowerLevel(nullptr)
 	, bEntireEngineWillUseThisSandbox(bInEntireEngineWillUseThisSandbox)
 	, bSandboxEnabled(true)
+	, bSandboxOnly(false)
 {
 }
 
@@ -44,6 +50,10 @@ FSandboxPlatformFile::~FSandboxPlatformFile()
 bool FSandboxPlatformFile::ShouldBeUsed(IPlatformFile* Inner, const TCHAR* CmdLine) const
 {
 	FString SandboxDir;
+	if (FParse::Value(CmdLine, TEXT("-InjectionSandbox="), SandboxDir))
+	{
+		return true;
+	}
 	bool bResult = FParse::Value( CmdLine, TEXT("-Sandbox="), SandboxDir );
 #if PLATFORM_SUPPORTS_DEFAULT_SANDBOX && (UE_GAME || UE_SERVER)
 	if (FPlatformProperties::RequiresCookedData() && SandboxDir.IsEmpty() && Inner == &FPlatformFileManager::Get().GetPlatformFile() && bEntireEngineWillUseThisSandbox)
@@ -58,7 +68,24 @@ bool FSandboxPlatformFile::ShouldBeUsed(IPlatformFile* Inner, const TCHAR* CmdLi
 bool FSandboxPlatformFile::Initialize(IPlatformFile* Inner, const TCHAR* CmdLine)
 {
 	FString CommandLineDirectory;
-	FParse::Value( CmdLine, TEXT("-Sandbox="), CommandLineDirectory);
+
+	if (FParse::Value(CmdLine, TEXT("-InjectionSandbox="), CommandLineDirectory))
+	{
+		int32 DividerLoc = CommandLineDirectory.Find(TEXT(";"));
+		checkf(DividerLoc > 0, TEXT("The format is -InjectionSandbox=<RelativeEngineDir>;<AdditionalDir>"));
+
+		InjectedSourceDirectory = CommandLineDirectory.Mid(0, DividerLoc);
+		InjectedTargetDirectory = CommandLineDirectory.Mid(DividerLoc + 1);
+		InjectedSourceDirectoryParent = FPaths::GetPath(InjectedSourceDirectory);
+		InjectedTargetDirectoryParent = FPaths::GetPath(InjectedTargetDirectory);
+
+		// InjectedTargetDirectory is the sandbox directory for the normal logic
+		CommandLineDirectory = InjectedTargetDirectory;
+	}
+	else
+	{
+		FParse::Value( CmdLine, TEXT("-Sandbox="), CommandLineDirectory);
+	}
 #if PLATFORM_SUPPORTS_DEFAULT_SANDBOX && (UE_GAME || UE_SERVER)
 	if (CommandLineDirectory.IsEmpty() && bEntireEngineWillUseThisSandbox)
 	{
@@ -89,7 +116,7 @@ bool FSandboxPlatformFile::Initialize(IPlatformFile* Inner, const TCHAR* CmdLine
 			if( FPaths::IsDrive(DriveCheck) == false )
 			{
 				FString Command( CommandLineDirectory.Mid( CommandIndex + 1 ) );
-				CommandLineDirectory.LeftInline( CommandIndex, false);
+				CommandLineDirectory.LeftInline( CommandIndex, EAllowShrinking::No);
 		
 				if( Command == TEXT("wipe") )
 				{
@@ -105,7 +132,7 @@ bool FSandboxPlatformFile::Initialize(IPlatformFile* Inner, const TCHAR* CmdLine
 			// Special case - platform defined user directory will be used
 			SandboxDirectory = FPlatformProcess::UserDir();
 			SandboxDirectory += TEXT("My Games/");
-			SandboxDirectory += TEXT( "UE4/" );
+			SandboxDirectory += TEXT( "UE/" );
 			bSandboxIsAbsolute = true;
 		}
 		else if( CommandLineDirectory == TEXT("Unique") )
@@ -150,9 +177,17 @@ bool FSandboxPlatformFile::Initialize(IPlatformFile* Inner, const TCHAR* CmdLine
 
 		if (bEntireEngineWillUseThisSandbox)
 		{
-			FCommandLine::AddToSubprocessCommandline( *FString::Printf( TEXT("-sandbox=%s"), *SandboxDirectory ) );
+			if (InjectedTargetDirectory.Len())
+			{
+				FCommandLine::AddToSubprocessCommandline(*FString::Printf(TEXT("-InjectedSandbox=%s;%s"), *InjectedSourceDirectory, *InjectedTargetDirectory));
+			}
+			else
+			{
+				FCommandLine::AddToSubprocessCommandline(*FString::Printf(TEXT("-Sandbox=%s"), *SandboxDirectory));
+			}
 		}
 	}
+
 	return !!LowerLevel;
 }
 
@@ -186,6 +221,24 @@ FString FSandboxPlatformFile::ConvertToSandboxPath( const TCHAR* Filename ) cons
 
 	if ((bSandboxEnabled == true) && (SandboxDirectory.Len() > 0))
 	{
+		if (InjectedTargetDirectory.Len())
+		{
+			// any path into the injected target will map to where we injected from (anyhing under the target path will StartsWith the injection target)
+			if (SandboxPath.StartsWith(InjectedSourceDirectory))
+			{
+				// replace the start with InjectedTargetDirectory
+				FString NewPath = InjectedTargetDirectory + SandboxPath.Mid(InjectedSourceDirectory.Len());
+				UE_LOG(LogInit, Verbose, TEXT("Injected %s -->  %s"), *SandboxPath, *NewPath);
+
+				// if (LowerLevel->DirectoryExists(*FPaths::GetPath(InjectedTargetDirectory)))
+				{
+					return NewPath;
+				}
+			}
+			// for injection sandbox, we don't want to use it for anything outside of the injection point, so just return the original name
+			return Filename;
+		}
+
 		// See whether Filename is relative to root directory.
 		// if it's not inside the root, then just use it
 		FString FullSandboxPath = FPaths::ConvertRelativePathToFull(SandboxPath);
@@ -341,7 +394,7 @@ void FSandboxPlatformFile::FindFiles( TArray<FString>& Result, const TCHAR* InFi
 			if( ( bIsDirectory && bDirectories ) ||
 				( !bIsDirectory && bFiles && FString( FilenameOrDirectory ).MatchesWildcard( WildCard ) ) )
 			{
-				new( Result ) FString( FPaths::GetCleanFilename( FilenameOrDirectory ) );
+				Result.Add( FPaths::GetCleanFilename( FilenameOrDirectory ) );
 			}
 			return true;
 		}
@@ -366,7 +419,7 @@ FString FSandboxPlatformFile::ConvertToAbsolutePathForExternalAppForRead( const 
 
 FString FSandboxPlatformFile::ConvertToAbsolutePathForExternalAppForWrite( const TCHAR* Filename )
 {
-	return ConvertToSandboxPath( Filename );
+	return FPaths::ConvertRelativePathToFull(ConvertToSandboxPath(Filename));
 }
 
 const FString& FSandboxPlatformFile::GetAbsolutePathToGameDirectory()
@@ -420,7 +473,7 @@ bool FSandboxPlatformFile::OkForInnerAccess(const TCHAR* InFilenameOrDirectoryNa
 			}
 		}
 	}
-	return true;
+	return !bSandboxOnly;
 }
 
 void FSandboxPlatformFile::SetSandboxEnabled(bool bInEnabled)
@@ -458,6 +511,23 @@ void FSandboxPlatformFile::AddExclusion(const TCHAR* Wildcard, bool bIsDirectory
 	{
 		FileExclusionWildcards.AddUnique(FString(Wildcard));
 	}
+}
+
+void FSandboxPlatformFile::RemoveExclusion(const TCHAR* Wildcard, bool bIsDirectory)
+{
+	if (bIsDirectory)
+	{
+		DirectoryExclusionWildcards.Remove(FString(Wildcard));
+	}
+	else
+	{
+		FileExclusionWildcards.Remove(FString(Wildcard));
+	}
+}
+
+void FSandboxPlatformFile::SetSandboxOnly(bool bInSandboxOnly)
+{
+	bSandboxOnly = bInSandboxOnly;
 }
 
 // IPlatformFile Interface
@@ -521,7 +591,7 @@ bool FSandboxPlatformFile::MoveFile(const TCHAR* To, const TCHAR* From)
 	// Only files within the sandbox dir can be moved
 	bool Result = false;
 	FString SandboxFilename(*ConvertToSandboxPath(From));
-	if (LowerLevel->FileExists(*SandboxFilename))
+	if (LowerLevel->FileExists(*SandboxFilename) || LowerLevel->DirectoryExists(*SandboxFilename))
 	{
 		Result = LowerLevel->MoveFile(*ConvertToSandboxPath(To), *SandboxFilename);
 	}
@@ -648,10 +718,12 @@ public:
 	FDirectoryVisitor& Visitor;
 	FSandboxPlatformFile& SandboxFile;
 	TSet<FString> VisitedSandboxFiles;
+	bool bIsRecursive;
 
-	FSandboxVisitor(FDirectoryVisitor& InVisitor, FSandboxPlatformFile& InSandboxFile)
+	FSandboxVisitor(FDirectoryVisitor& InVisitor, FSandboxPlatformFile& InSandboxFile, bool bInIsRecursive)
 		: Visitor(InVisitor)
 		, SandboxFile(InSandboxFile)
+		, bIsRecursive(bInIsRecursive)
 	{
 	}
 	virtual bool Visit(const TCHAR* FilenameOrDirectory, bool bIsDirectory) override
@@ -659,33 +731,67 @@ public:
 		bool CanVisit = true;
 		FString LocalFilename(FilenameOrDirectory);
 
-		if (FCString::Strnicmp(*LocalFilename, *SandboxFile.GetSandboxDirectory(), SandboxFile.GetSandboxDirectory().Len()) == 0)
+		bool bHasTranslated = false;
+		if (SandboxFile.InjectedTargetDirectory.Len())
 		{
-			// FilenameOrDirectory is already pointing to the sandbox directory so add it to the list of sanbox files.
-			// The filename is always stored with the abslute sandbox path.
-			VisitedSandboxFiles.Add(*LocalFilename);
-			// Now convert the sandbox path back to engine path because the sandbox folder should not be exposed
-			// to the engine and remain transparent.
-			LocalFilename.MidInline(SandboxFile.GetSandboxDirectory().Len(), MAX_int32, false);
-			if (LocalFilename.StartsWith(TEXT("Engine/")) || (FCString::Stricmp(*LocalFilename, TEXT("Engine")) == 0))
+			// if we visit the parent of what we are injecting, we need to force visit the injected directory - because it doesn't exist in the original
+			// location, we will never visit it to convert it to the injected location
+
+			// convert to standard filename for matching (like ConvertToSandboxPath does)
+			FString NormalizedFilename(LocalFilename);
+			FPaths::MakeStandardFilename(NormalizedFilename);
+
+			if (NormalizedFilename == SandboxFile.InjectedSourceDirectoryParent)
 			{
-				LocalFilename = SandboxFile.GetAbsoluteRootDirectory() / LocalFilename;
+				// "fake" the injected directory so everything falls into place
+				Visitor.CallShouldVisitAndVisit(*SandboxFile.InjectedSourceDirectory, true);
+
+				// for recursive visiting, we need to recurse into the forced directory
+				if (bIsRecursive)
+				{
+					SandboxFile.LowerLevel->IterateDirectoryRecursively(*SandboxFile.InjectedTargetDirectory, *this);
+				}
+			}
+
+			if (LocalFilename.StartsWith(SandboxFile.InjectedTargetDirectory))
+			{
+				LocalFilename = SandboxFile.InjectedSourceDirectory + LocalFilename.Mid(SandboxFile.InjectedTargetDirectory.Len());
+				bHasTranslated = true;
+			}
+		}
+
+
+		if (!bHasTranslated)
+		{
+			if (FCString::Strnicmp(*LocalFilename, *SandboxFile.GetSandboxDirectory(), SandboxFile.GetSandboxDirectory().Len()) == 0)
+			{
+				// FilenameOrDirectory is already pointing to the sandbox directory so add it to the list of sanbox files.
+				// The filename is always stored with the abslute sandbox path.
+				VisitedSandboxFiles.Add(*LocalFilename);
+				// Now convert the sandbox path back to engine path because the sandbox folder should not be exposed
+				// to the engine and remain transparent.
+				LocalFilename.MidInline(SandboxFile.GetSandboxDirectory().Len(), MAX_int32, EAllowShrinking::No);
+				if (LocalFilename.StartsWith(TEXT("Engine/")) || (FCString::Stricmp(*LocalFilename, TEXT("Engine")) == 0))
+				{
+					LocalFilename = SandboxFile.GetAbsoluteRootDirectory() / LocalFilename;
+				}
+				else
+				{
+					LocalFilename.MidInline(SandboxFile.GetGameSandboxDirectoryName().Len(), MAX_int32, EAllowShrinking::No);
+					LocalFilename = SandboxFile.GetAbsoluteGameDirectory() / LocalFilename;
+				}
 			}
 			else
 			{
-				LocalFilename.MidInline(SandboxFile.GetGameSandboxDirectoryName().Len(), MAX_int32, false);
-				LocalFilename = SandboxFile.GetAbsoluteGameDirectory() / LocalFilename;
+				// Favourize Sandbox files over normal path files.
+				CanVisit = !VisitedSandboxFiles.Contains(SandboxFile.ConvertToSandboxPath(*LocalFilename))
+					&& SandboxFile.OkForInnerAccess(*LocalFilename, bIsDirectory);
 			}
 		}
-		else
-		{
-			// Favourize Sandbox files over normal path files.
-			CanVisit = !VisitedSandboxFiles.Contains(SandboxFile.ConvertToSandboxPath(*LocalFilename))
-				&& SandboxFile.OkForInnerAccess(*LocalFilename, bIsDirectory);
-		}
+
 		if (CanVisit)
 		{
-			bool Result = Visitor.Visit(*LocalFilename, bIsDirectory);
+			bool Result = Visitor.CallShouldVisitAndVisit(*LocalFilename, bIsDirectory);
 			return Result;
 		}
 		else
@@ -698,19 +804,27 @@ public:
 
 bool FSandboxPlatformFile::IterateDirectory(const TCHAR* Directory, IPlatformFile::FDirectoryVisitor& Visitor)
 {
-	FSandboxVisitor SandboxVisitor(Visitor, *this);
-	bool Result = false;
-	LowerLevel->IterateDirectory(*ConvertToSandboxPath(Directory), SandboxVisitor);
-	Result = LowerLevel->IterateDirectory(Directory, SandboxVisitor);
+	FSandboxVisitor SandboxVisitor(Visitor, *this, false);
+	FString SandboxDir = ConvertToSandboxPath(Directory);
+	bool Result = LowerLevel->IterateDirectory(*SandboxDir, SandboxVisitor);
+	// don't iterate the same directory twice if the Convert didn't change the path, or if we were asked to stop iterating
+	if (Result && (SandboxDir != Directory))
+	{
+		Result = LowerLevel->IterateDirectory(Directory, SandboxVisitor);
+	}
 	return Result;
 }
 
 bool FSandboxPlatformFile::IterateDirectoryRecursively(const TCHAR* Directory, IPlatformFile::FDirectoryVisitor& Visitor)
 {
-	FSandboxVisitor SandboxVisitor(Visitor, *this);
-	bool Result = false;
-	LowerLevel->IterateDirectoryRecursively(*ConvertToSandboxPath(Directory), SandboxVisitor);
-	Result = LowerLevel->IterateDirectoryRecursively(Directory, SandboxVisitor);
+	FSandboxVisitor SandboxVisitor(Visitor, *this, true);
+	FString SandboxDir = ConvertToSandboxPath(Directory);
+	bool Result = LowerLevel->IterateDirectoryRecursively(*SandboxDir, SandboxVisitor);
+	// don't iterate the same directory twice if the Convert didn't change the path, or if we were asked to stop iterating
+	if (Result && (SandboxDir != Directory))
+	{
+		Result = LowerLevel->IterateDirectoryRecursively(Directory, SandboxVisitor);
+	}
 	return Result;
 }
 
@@ -720,10 +834,12 @@ public:
 	FDirectoryStatVisitor& Visitor;
 	FSandboxPlatformFile& SandboxFile;
 	TSet<FString> VisitedSandboxFiles;
+	bool bIsRecursive;
 
-	FSandboxStatVisitor(FDirectoryStatVisitor& InVisitor, FSandboxPlatformFile& InSandboxFile)
+	FSandboxStatVisitor(FDirectoryStatVisitor& InVisitor, FSandboxPlatformFile& InSandboxFile, bool bInIsRecursive)
 		: Visitor(InVisitor)
 		, SandboxFile(InSandboxFile)
+		, bIsRecursive(bInIsRecursive)
 	{
 	}
 	virtual bool Visit(const TCHAR* FilenameOrDirectory, const FFileStatData& StatData) override
@@ -731,32 +847,66 @@ public:
 		bool CanVisit = true;
 		FString LocalFilename(FilenameOrDirectory);
 
-		if (FCString::Strnicmp(*LocalFilename, *SandboxFile.GetSandboxDirectory(), SandboxFile.GetSandboxDirectory().Len()) == 0)
+		bool bHasTranslated = false;
+		if (SandboxFile.InjectedTargetDirectory.Len())
 		{
-			// FilenameOrDirectory is already pointing to the sandbox directory so add it to the list of sanbox files.
-			// The filename is always stored with the abslute sandbox path.
-			VisitedSandboxFiles.Add(*LocalFilename);
-			// Now convert the sandbox path back to engine path because the sandbox folder should not be exposed
-			// to the engine and remain transparent.
-			LocalFilename.MidInline(SandboxFile.GetSandboxDirectory().Len(), MAX_int32, false);
-			if (LocalFilename.StartsWith(TEXT("Engine/")))
+			// if we visit the parent of what we are injecting, we need to force visit the injected directory - because it doesn't exist in the original
+			// location, we will never visit it to convert it to the injected location
+
+			// convert to standard filename for matching (like ConvertToSandboxPath does)
+			FString NormalizedFilename(LocalFilename);
+			FPaths::MakeStandardFilename(NormalizedFilename);
+
+			if (NormalizedFilename == SandboxFile.InjectedSourceDirectoryParent)
 			{
-				LocalFilename = SandboxFile.GetAbsoluteRootDirectory() / LocalFilename;
+				// "fake" the injected directory so everything falls into place
+				FFileStatData InjectedStat = SandboxFile.LowerLevel->GetStatData(*SandboxFile.InjectedSourceDirectory);
+				Visitor.CallShouldVisitAndVisit(*SandboxFile.InjectedSourceDirectory, InjectedStat);
+
+				// for recursive visiting, we need to recurse into the forced directory
+				if (bIsRecursive)
+				{
+					SandboxFile.LowerLevel->IterateDirectoryStatRecursively(*SandboxFile.InjectedTargetDirectory, *this);
+				}
+			}
+
+			if (LocalFilename.StartsWith(SandboxFile.InjectedTargetDirectory))
+			{
+				LocalFilename = SandboxFile.InjectedSourceDirectory + LocalFilename.Mid(SandboxFile.InjectedTargetDirectory.Len());
+				bHasTranslated = true;
+			}
+		}
+
+		if (!bHasTranslated)
+		{
+			if (FCString::Strnicmp(*LocalFilename, *SandboxFile.GetSandboxDirectory(), SandboxFile.GetSandboxDirectory().Len()) == 0)
+			{
+				// FilenameOrDirectory is already pointing to the sandbox directory so add it to the list of sanbox files.
+				// The filename is always stored with the abslute sandbox path.
+				VisitedSandboxFiles.Add(*LocalFilename);
+				// Now convert the sandbox path back to engine path because the sandbox folder should not be exposed
+				// to the engine and remain transparent.
+				LocalFilename.MidInline(SandboxFile.GetSandboxDirectory().Len(), MAX_int32, EAllowShrinking::No);
+				if (LocalFilename.StartsWith(TEXT("Engine/")))
+				{
+					LocalFilename = SandboxFile.GetAbsoluteRootDirectory() / LocalFilename;
+				}
+				else
+				{
+					LocalFilename = SandboxFile.GetAbsolutePathToGameDirectory() / LocalFilename;
+				}
 			}
 			else
 			{
-				LocalFilename = SandboxFile.GetAbsolutePathToGameDirectory() / LocalFilename;
+				// Favourize Sandbox files over normal path files.
+				CanVisit = !VisitedSandboxFiles.Contains(SandboxFile.ConvertToSandboxPath(*LocalFilename))
+					&& SandboxFile.OkForInnerAccess(*LocalFilename, StatData.bIsDirectory);
 			}
 		}
-		else
-		{
-			// Favourize Sandbox files over normal path files.
-			CanVisit = !VisitedSandboxFiles.Contains(SandboxFile.ConvertToSandboxPath(*LocalFilename))
-				&& SandboxFile.OkForInnerAccess(*LocalFilename, StatData.bIsDirectory);
-		}
+
 		if (CanVisit)
 		{
-			bool Result = Visitor.Visit(*LocalFilename, StatData);
+			bool Result = Visitor.CallShouldVisitAndVisit(*LocalFilename, StatData);
 			return Result;
 		}
 		else
@@ -769,19 +919,27 @@ public:
 
 bool		FSandboxPlatformFile::IterateDirectoryStat(const TCHAR* Directory, IPlatformFile::FDirectoryStatVisitor& Visitor)
 {
-	FSandboxStatVisitor SandboxVisitor(Visitor, *this);
-	bool Result = false;
-	LowerLevel->IterateDirectoryStat(*ConvertToSandboxPath(Directory), SandboxVisitor);
-	Result = LowerLevel->IterateDirectoryStat(Directory, SandboxVisitor);
+	FSandboxStatVisitor SandboxVisitor(Visitor, *this, false);
+	FString SandboxDir = ConvertToSandboxPath(Directory);
+	bool Result = LowerLevel->IterateDirectoryStat(*SandboxDir, SandboxVisitor);
+	// don't iterate the same directory twice if the Convert didn't change the path, or if we were asked to stop iterating (which can happen with injection type)
+	if (Result && (SandboxDir != Directory))
+	{
+		Result = LowerLevel->IterateDirectoryStat(Directory, SandboxVisitor);
+	}
 	return Result;
 }
 
 bool		FSandboxPlatformFile::IterateDirectoryStatRecursively(const TCHAR* Directory, IPlatformFile::FDirectoryStatVisitor& Visitor)
 {
-	FSandboxStatVisitor SandboxVisitor(Visitor, *this);
-	bool Result = false;
-	LowerLevel->IterateDirectoryStatRecursively(*ConvertToSandboxPath(Directory), SandboxVisitor);
-	Result = LowerLevel->IterateDirectoryStatRecursively(Directory, SandboxVisitor);
+	FSandboxStatVisitor SandboxVisitor(Visitor, *this, true);
+	FString SandboxDir = ConvertToSandboxPath(Directory);
+	bool Result = LowerLevel->IterateDirectoryStatRecursively(*ConvertToSandboxPath(Directory), SandboxVisitor);
+	// don't iterate the same directory twice if the Convert didn't change the path, or if we were asked to stop iterating (which can happen with injection type)
+	if (Result && (SandboxDir != Directory))
+	{
+		Result = LowerLevel->IterateDirectoryStatRecursively(Directory, SandboxVisitor);
+	}
 	return Result;
 }
 

@@ -1,9 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "SlateWidgetLocatorByUniqueTag.h"
+#include "Locators/SlateWidgetLocatorByUniqueTag.h"
 #include "SlateWidgetElement.h"
 #include "IElementLocator.h"
-#include "DriverUniqueTagMetaData.h"
+#include "MetaData/DriverUniqueTagMetaData.h"
 #include "Framework/Application/SlateApplication.h"
 
 class FSlateWidgetLocatorByUniqueTag
@@ -54,8 +54,9 @@ public:
 			const FArrangedWidget& Candidate = State.Path.Widgets.Last();
 
 			const bool bAllow3DWidgets = true;
+			const bool bUpdateVisibilityAttributes = true;
 			FArrangedChildren ArrangedChildren(VisibilityFilter, bAllow3DWidgets);
-			Candidate.Widget->ArrangeChildren(Candidate.Geometry, ArrangedChildren);
+			Candidate.Widget->ArrangeChildren(Candidate.Geometry, ArrangedChildren, bUpdateVisibilityAttributes);
 
 			for (int32 ChildIndex = 0; ChildIndex < ArrangedChildren.Num(); ++ChildIndex)
 			{

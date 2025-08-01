@@ -2,9 +2,10 @@
 
 #include "GameFramework/PhysicsVolume.h"
 #include "Engine/World.h"
-#include "Components/PrimitiveComponent.h"
 #include "Components/BrushComponent.h"
 #include "PhysicsEngine/PhysicsSettings.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PhysicsVolume)
 
 APhysicsVolume::APhysicsVolume(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -24,7 +25,7 @@ void APhysicsVolume::LoadedFromAnotherClass(const FName& OldClassName)
 {
 	Super::LoadedFromAnotherClass(OldClassName);
 
-	if(GetLinkerUE4Version() < VER_UE4_REMOVE_DYNAMIC_VOLUME_CLASSES)
+	if(GetLinkerUEVersion() < VER_UE4_REMOVE_DYNAMIC_VOLUME_CLASSES)
 	{
 		static FName DynamicPhysicsVolume_NAME(TEXT("DynamicPhysicsVolume"));
 
@@ -122,4 +123,5 @@ float APhysicsVolume::GetGravityZ() const
 void APhysicsVolume::ActorEnteredVolume(AActor* Other) {}
 
 void APhysicsVolume::ActorLeavingVolume(AActor* Other) {}
+
 

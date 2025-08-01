@@ -7,9 +7,12 @@ Texture2DMipDataProvider_DDC.h : Implementation of FTextureMipDataProvider using
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Memory/SharedBuffer.h"
 #include "Streaming/TextureMipDataProvider.h"
+#include "UObject/WeakObjectPtr.h"
 
 #if WITH_EDITORONLY_DATA
+#include "DerivedDataRequestOwner.h"
 
 /**
 * FTexture2DMipDataProvider_DDC implements FTextureMipAllocator using DDC requests from FDerivedDataCacheInterface.
@@ -18,7 +21,7 @@ class FTexture2DMipDataProvider_DDC : public FTextureMipDataProvider
 {
 public:
 
-	FTexture2DMipDataProvider_DDC(const UTexture* Texture);
+	FTexture2DMipDataProvider_DDC(UTexture* Texture);
 	~FTexture2DMipDataProvider_DDC();
 
 
@@ -35,13 +38,15 @@ public:
 
 protected:
 
-	// Helper to route incomplete DDC requests to the FAbandonedDDCHandleManager.
-	void ReleaseDDCHandles();
+	void ReleaseDDCResources();
+
+	bool SerializeMipInfo(const FTextureUpdateContext& Context, FArchive& Ar, int32 MipIndex, int64 MipSize, const FTextureMipInfo& OutMipInfo);
 
 private:
 
-	// The list of DDC handle for each mips (0 based on the highest mip).
-	TArray<uint32, TInlineAllocator<MAX_TEXTURE_MIP_COUNT>> DDCHandles;
+	TArray<FSharedBuffer, TInlineAllocator<MAX_TEXTURE_MIP_COUNT> > DDCBuffers;
+	UE::DerivedData::FRequestOwner DDCRequestOwner;
+	TWeakObjectPtr<UTexture> Texture;
 };
 
 #endif //WITH_EDITORONLY_DATA

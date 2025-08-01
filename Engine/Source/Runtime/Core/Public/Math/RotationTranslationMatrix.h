@@ -7,11 +7,16 @@
 #include "Math/VectorRegister.h"
 #include "Math/Matrix.h"
 
+namespace UE {
+namespace Math {
+
 /** Combined rotation and translation matrix */
-class FRotationTranslationMatrix
-	: public FMatrix
+template<typename T>
+struct TRotationTranslationMatrix
+	: public TMatrix<T>
 {
 public:
+	using TMatrix<T>::M;
 
 	/**
 	 * Constructor.
@@ -19,40 +24,45 @@ public:
 	 * @param Rot rotation
 	 * @param Origin translation to apply
 	 */
-	FRotationTranslationMatrix(const FRotator& Rot, const FVector& Origin);
+	TRotationTranslationMatrix(const TRotator<T>& Rot, const TVector<T>& Origin);
 
-	/** Matrix factory. Return an FMatrix so we don't have type conversion issues in expressions. */
-	static FMatrix Make(const FRotator& Rot, const FVector& Origin)
+	// Conversion to other type.
+	template<typename FArg, TEMPLATE_REQUIRES(!std::is_same_v<T, FArg>)>
+	explicit TRotationTranslationMatrix(const TRotationTranslationMatrix<FArg>& From) : TMatrix<T>(From) {}
+	
+	/** Matrix factory. Return an TMatrix<T> so we don't have type conversion issues in expressions. */
+	static TMatrix<T> Make(const TRotator<T>& Rot, const TVector<T>& Origin)
 	{
-		return FRotationTranslationMatrix(Rot, Origin);
+		return TRotationTranslationMatrix(Rot, Origin);
 	}
 };
 
 
-FORCEINLINE FRotationTranslationMatrix::FRotationTranslationMatrix(const FRotator& Rot, const FVector& Origin)
+template<typename T>
+FORCEINLINE TRotationTranslationMatrix<T>::TRotationTranslationMatrix(const TRotator<T>& Rot, const TVector<T>& Origin)
 {
-#if PLATFORM_ENABLE_VECTORINTRINSICS
+#if PLATFORM_ENABLE_VECTORINTRINSICS && (!PLATFORM_HOLOLENS || !PLATFORM_CPU_ARM_FAMILY)
 
-	const VectorRegister Angles = MakeVectorRegister(Rot.Pitch, Rot.Yaw, Rot.Roll, 0.0f);
-	const VectorRegister HalfAngles = VectorMultiply(Angles, GlobalVectorConstants::DEG_TO_RAD);
+	const TVectorRegisterType<T> Angles = MakeVectorRegister(Rot.Pitch, Rot.Yaw, Rot.Roll, 0.0f);
+	const TVectorRegisterType<T> HalfAngles = VectorMultiply(Angles, GlobalVectorConstants::DEG_TO_RAD);
 
-	union { VectorRegister v; float f[4]; } SinAngles, CosAngles;
+	union { TVectorRegisterType<T> v; T f[4]; } SinAngles, CosAngles;
 	VectorSinCos(&SinAngles.v, &CosAngles.v, &HalfAngles);
 
-	const float	SP	= SinAngles.f[0];
-	const float	SY	= SinAngles.f[1];
-	const float	SR	= SinAngles.f[2];
-	const float	CP	= CosAngles.f[0];
-	const float	CY	= CosAngles.f[1];
-	const float	CR	= CosAngles.f[2];
+	const T SP	= SinAngles.f[0];
+	const T SY	= SinAngles.f[1];
+	const T SR	= SinAngles.f[2];
+	const T CP	= CosAngles.f[0];
+	const T CY	= CosAngles.f[1];
+	const T CR	= CosAngles.f[2];
 
 #else
-	
-	float SP, SY, SR;
-	float CP, CY, CR;
-	FMath::SinCos(&SP, &CP, FMath::DegreesToRadians(Rot.Pitch));
-	FMath::SinCos(&SY, &CY, FMath::DegreesToRadians(Rot.Yaw));
-	FMath::SinCos(&SR, &CR, FMath::DegreesToRadians(Rot.Roll));
+
+	T SP, SY, SR;
+	T CP, CY, CR;
+	FMath::SinCos(&SP, &CP, (T)FMath::DegreesToRadians(Rot.Pitch));
+	FMath::SinCos(&SY, &CY, (T)FMath::DegreesToRadians(Rot.Yaw));
+	FMath::SinCos(&SR, &CR, (T)FMath::DegreesToRadians(Rot.Roll));
 
 #endif // PLATFORM_ENABLE_VECTORINTRINSICS
 
@@ -76,3 +86,11 @@ FORCEINLINE FRotationTranslationMatrix::FRotationTranslationMatrix(const FRotato
 	M[3][2]	= Origin.Z;
 	M[3][3]	= 1.f;
 }
+
+} // namespace Math
+} // namespace UE
+
+UE_DECLARE_LWC_TYPE(RotationTranslationMatrix, 44);
+
+template<> struct TIsUECoreVariant<FRotationTranslationMatrix44f> { enum { Value = true }; };
+template<> struct TIsUECoreVariant<FRotationTranslationMatrix44d> { enum { Value = true }; };

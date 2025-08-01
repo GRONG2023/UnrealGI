@@ -24,6 +24,18 @@ enum class EFbxExportCompatibility : uint8
 	FBX_2020,
 };
 
+// Bake options for animated properties of exported objects
+UENUM(BlueprintType)
+enum class EMovieSceneBakeType : uint8
+{
+	None = 0x000,
+
+	BakeChannels = 0x001,
+	BakeTransforms = 0x002,
+
+	BakeAll = BakeChannels | BakeTransforms,
+};
+
 UCLASS(config = EditorPerProjectUserSettings, MinimalAPI, BlueprintType)
 class UFbxExportOption : public UObject
 {
@@ -50,8 +62,17 @@ public:
 	uint32 LevelOfDetail : 1;
 
 	/** If enabled, export collision */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, category = StaticMesh)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, category = StaticMesh, meta = (EditCondition = "!bExportSourceMesh"))
 	uint32 Collision : 1;
+
+	/*
+	 * If enabled, export the highest LOD source data instead of the render data.
+	 * Note:
+	 *     - No LOD will be exported for static meshes. (Level Of Detail option will be ignored)
+	 *     - No Collision will be exported for static meshes. (Collision option will be ignore)
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, category = StaticMesh)
+	uint32 bExportSourceMesh : 1;
 
 	/** If enabled, export the morph targets */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, category = SkeletalMesh)
@@ -65,9 +86,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, category = Animation)
 	uint32 MapSkeletalMotionToRoot : 1;
 
-	/** If enabled, export sequencer animation in its local time, relative to its master sequence. */
+	/** If enabled, export sequencer animation in its local time, relative to its sequence. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, config, category = Animation)
 	uint32 bExportLocalTime : 1;
+
+	/** Bake settings for camera and light animation curves. Camera Scale not exported. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, config, Category = Animation)
+	EMovieSceneBakeType BakeCameraAndLightAnimation;
+
+	/** Bake settings for exported non-camera, non-light object animation */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, config, Category = Animation)
+	EMovieSceneBakeType BakeActorAnimation;
 
 	/* Set all the FProperty to the CDO value */
 	void ResetToDefault();

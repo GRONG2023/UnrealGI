@@ -9,6 +9,8 @@ IMPLEMENT_APPLICATION(UnrealPak, "UnrealPak");
 
 INT32_MAIN_INT32_ARGC_TCHAR_ARGV()
 {
+	FTaskTagScope Scope(ETaskTag::EGameThread);
+
 	// start up the main loop
 	GEngineLoop.PreInit(ArgC, ArgV);
 
@@ -16,7 +18,12 @@ INT32_MAIN_INT32_ARGC_TCHAR_ARGV()
 
 	int32 Result = ExecuteUnrealPak(FCommandLine::Get())? 0 : 1;
 
-	UE_LOG(LogPakFile, Display, TEXT("Unreal pak executed in %f seconds"), FPlatformTime::Seconds() - StartTime );
+	UE_LOG(LogPakFile, Display, TEXT("UnrealPak executed in %f seconds"), FPlatformTime::Seconds() - StartTime);
+
+	if (FParse::Param(FCommandLine::Get(), TEXT("fastexit")))
+	{
+		FPlatformMisc::RequestExitWithStatus(true, Result);
+	}
 
 	GLog->Flush();
 

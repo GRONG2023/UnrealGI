@@ -2,17 +2,25 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "Delegates/Delegate.h"
+#include "HAL/Platform.h"
 #include "Modules/ModuleInterface.h"
 #include "Modules/ModuleManager.h"
+#include "Templates/SharedPointer.h"
 
+class FName;
+class FOutputDevice;
 struct FHistogram;
-template <class CharType> struct TPrettyJsonPrintPolicy;
-
-template <class CharType>
-struct TPrettyJsonPrintPolicy;
 template <class CharType, class PrintPolicy>
 class TJsonWriter;
+template <class CharType>
+struct TPrettyJsonPrintPolicy;
+template <class CharType> struct TPrettyJsonPrintPolicy;
+
 typedef TSharedRef< TJsonWriter<TCHAR,TPrettyJsonPrintPolicy<TCHAR> > > FPrettyJsonWriter;
 struct FHistogram;
 
@@ -36,7 +44,7 @@ DECLARE_DELEGATE_RetVal_TwoParams(bool, FPerfCounterExecCommandCallback, const F
 /**
  * A programming interface for setting/updating performance counters
  */
-class PERFCOUNTERS_API IPerfCounters
+class IPerfCounters
 {
 public:
 
@@ -58,21 +66,21 @@ public:
 	};
 
 	/** Named engine-wide histograms */
-	struct PERFCOUNTERS_API Histograms
+	struct Histograms
 	{
 		/** Frame time histogram for the duration of the match. */
-		static const FName FrameTime;
+		static PERFCOUNTERS_API const FName FrameTime;
 		/** Frame time histogram for shorter intervals. */
-		static const FName FrameTimePeriodic;
+		static PERFCOUNTERS_API const FName FrameTimePeriodic;
 		/** Frame time histogram (without sleep) for the duration of the match. */
-		static const FName FrameTimeWithoutSleep;
+		static PERFCOUNTERS_API const FName FrameTimeWithoutSleep;
 		/** ServerReplicateActors time histogram for the duration of the match. */
-		static const FName ServerReplicateActorsTime;
+		static PERFCOUNTERS_API const FName ServerReplicateActorsTime;
 		/** Sleep time histogram for the duration of the match. */
-		static const FName SleepTime;
+		static PERFCOUNTERS_API const FName SleepTime;
 
 		/** Zero load thread frame time histogram. */
-		static const FName ZeroLoadFrameTime;
+		static PERFCOUNTERS_API const FName ZeroLoadFrameTime;
 	};
 
 	/** Array used to store performance histograms. */

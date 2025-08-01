@@ -27,15 +27,19 @@ FSlateTextureAtlasRHI::~FSlateTextureAtlasRHI( )
 }
 
 
+FSlateShaderResource* FSlateTextureAtlasRHI::GetAtlasTexture() const
+{
+	return AtlasTexture;
+}
+
 /* FSlateTextureAtlasRHI interface
  *****************************************************************************/
 
-void FSlateTextureAtlasRHI::ReleaseAtlasTexture( )
+void FSlateTextureAtlasRHI::ReleaseResources()
 {
 	bNeedsUpdate = false;
 	BeginReleaseResource(AtlasTexture);
 }
-
 
 void FSlateTextureAtlasRHI::UpdateTexture_RenderThread( FSlateTextureData* RenderThreadData )
 {
@@ -43,7 +47,7 @@ void FSlateTextureAtlasRHI::UpdateTexture_RenderThread( FSlateTextureData* Rende
 
 	if (!AtlasTexture->IsInitialized())
 	{
-		AtlasTexture->InitResource();
+		AtlasTexture->InitResource(FRHICommandListImmediate::Get());
 	}
 
 	check(AtlasTexture->IsInitialized());

@@ -24,15 +24,8 @@ namespace UnrealBuildTool.Rules
                 new string[] {
                     "Messaging",
                     "MessagingCommon",
-                    "MessagingRpc",
-                    "PortalServices",
                 }
             );
-
-			PrivateIncludePaths.AddRange(
-				new string[] {
-				}
-			);
 		}
 	}
 }

@@ -25,9 +25,15 @@
 #include "ComponentReregisterContext.h"
 #include "UObject/UObjectIterator.h"
 #include "UObject/PhysicsObjectVersion.h"
+#include "UObject/FortniteMainBranchObjectVersion.h"
+#include "UObject/FortniteReleaseBranchCustomObjectVersion.h"
+#include "UObject/UE5PrivateFrostyStreamObjectVersion.h"
+#include "UObject/UE5ReleaseStreamObjectVersion.h"
 
 #include "GPUSkinPublicDefs.h"
 #include "GPUSkinVertexFactory.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ClothingAsset)
 
 DEFINE_LOG_CATEGORY(LogClothingAsset)
 #define LOCTEXT_NAMESPACE "ClothingAsset"
@@ -36,6 +42,7 @@ DEFINE_LOG_CATEGORY(LogClothingAsset)
 // ClothingAssetUtils
 //==============================================================================
 
+//Deprecated function
 void ClothingAssetUtils::GetMeshClothingAssetBindings(
 	USkeletalMesh* InSkelMesh, 
 	TArray<FClothingAssetMeshBinding>& OutBindings)
@@ -55,7 +62,9 @@ void ClothingAssetUtils::GetMeshClothingAssetBindings(
 			if (InSkelMesh->GetImportedModel()->LODModels[LODIndex].HasClothData())
 			{
 				TArray<FClothingAssetMeshBinding> LodBindings;
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 				GetMeshClothingAssetBindings(InSkelMesh, LodBindings, LODIndex);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 				OutBindings.Append(LodBindings);
 			}
 		}
@@ -74,13 +83,16 @@ void ClothingAssetUtils::GetMeshClothingAssetBindings(
 		for (int32 LodIndex = 0; LodIndex < NumLods; ++LodIndex)
 		{
 			TArray<FClothingAssetMeshBinding> LodBindings;
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 			GetMeshClothingAssetBindings(InSkelMesh, LodBindings, LodIndex);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 			OutBindings.Append(LodBindings);
 		}
 	}
 }
 
+//Deprecated function
 void ClothingAssetUtils::GetMeshClothingAssetBindings(
 	USkeletalMesh* InSkelMesh, 
 	TArray<FClothingAssetMeshBinding>& OutBindings, 
@@ -160,13 +172,72 @@ void ClothingAssetUtils::GetMeshClothingAssetBindings(
 }
 
 #if WITH_EDITOR
+void ClothingAssetUtils::GetAllMeshClothingAssetBindings(const USkeletalMesh* SkeletalMesh, TArray<FClothingAssetMeshBinding>& OutBindings)
+{
+	OutBindings.Empty();
+	if (!SkeletalMesh)
+	{
+		return;
+	}
+	if (const FSkeletalMeshModel* MeshModel = SkeletalMesh->GetImportedModel())
+	{
+		int32 LODNum = MeshModel->LODModels.Num();
+		for (int32 LODIndex = 0; LODIndex < LODNum; ++LODIndex)
+		{
+			const FSkeletalMeshLODModel& MeshLODModel = MeshModel->LODModels[LODIndex];
+			if (MeshLODModel.HasClothData())
+			{
+				TArray<FClothingAssetMeshBinding> LodBindings;
+				GetAllLodMeshClothingAssetBindings(SkeletalMesh, LodBindings, LODIndex);
+				OutBindings.Append(LodBindings);
+			}
+		}
+	}
+}
+
+void ClothingAssetUtils::GetAllLodMeshClothingAssetBindings(const USkeletalMesh* SkeletalMesh, TArray<FClothingAssetMeshBinding>& OutBindings, int32 InLodIndex)
+{
+	OutBindings.Empty();
+	if (!SkeletalMesh || !SkeletalMesh->GetImportedModel())
+	{
+		return;
+	}
+	const FSkeletalMeshModel* MeshModel = SkeletalMesh->GetImportedModel();
+	if (!MeshModel || !MeshModel->LODModels.IsValidIndex(InLodIndex))
+	{
+		return;
+	}
+	const FSkeletalMeshLODModel& MeshLODModel = MeshModel->LODModels[InLodIndex];
+
+	if (MeshLODModel.HasClothData())
+	{
+		TArray<FClothingAssetMeshBinding> LodBindings;
+		int32 SectionNum = MeshLODModel.Sections.Num();
+		for (int32 SectionIndex = 0; SectionIndex < SectionNum; ++SectionIndex)
+		{
+			const FSkelMeshSection& Section = MeshLODModel.Sections[SectionIndex];
+			if (Section.HasClothingData())
+			{
+				UClothingAssetBase* ClothingAsset = SkeletalMesh->GetClothingAsset(Section.ClothingData.AssetGuid);
+				FClothingAssetMeshBinding ClothBinding;
+				ClothBinding.Asset = Cast<UClothingAssetCommon>(ClothingAsset);
+				ClothBinding.AssetInternalLodIndex = Section.ClothingData.AssetLodIndex;// InSkelMesh->GetClothingAssetIndex(Section.ClothingData.AssetGuid);
+				check(ClothBinding.AssetInternalLodIndex == Section.ClothingData.AssetLodIndex);
+				ClothBinding.LODIndex = InLodIndex;
+				ClothBinding.SectionIndex = SectionIndex;
+				OutBindings.Add(ClothBinding);
+			}
+		}
+	}
+}
+
 void ClothingAssetUtils::ClearSectionClothingData(FSkelMeshSection& InSection)
 {
 	InSection.ClothingData.AssetGuid = FGuid();
 	InSection.ClothingData.AssetLodIndex = INDEX_NONE;
 	InSection.CorrespondClothAssetIndex = INDEX_NONE;
 
-	InSection.ClothMappingData.Empty();
+	InSection.ClothMappingDataLODs.Empty();
 }
 #endif
 
@@ -182,7 +253,7 @@ UClothingAssetCommon::UClothingAssetCommon(const FObjectInitializer& ObjectIniti
 	, ChaosClothSimConfig_DEPRECATED(nullptr)
 #endif
 	, ReferenceBoneIndex(0)
-	, CustomData(nullptr)
+	, CustomData(nullptr)  // Deprecated
 {
 }
 
@@ -190,9 +261,9 @@ UClothingAssetCommon::UClothingAssetCommon(const FObjectInitializer& ObjectIniti
 
 void Warn(const FText& Error)
 {
-	FNotificationInfo Info(Error);
-	Info.ExpireDuration = 5.0f;
-	FSlateNotificationManager::Get().AddNotification(Info);
+	FNotificationInfo* const NotificationInfo = new FNotificationInfo(Error);
+	NotificationInfo->ExpireDuration = 5.0f;
+	FSlateNotificationManager::Get().QueueNotification(NotificationInfo);
 
 	UE_LOG(LogClothingAsset, Warning, TEXT("%s"), *Error.ToString());
 }
@@ -282,7 +353,6 @@ bool UClothingAssetCommon::BindToSkeletalMesh(
 		return false;
 	}
 
-	BuildSelfCollisionData();
 	CalculateReferenceBoneIndex();
 
 	// Grab the clothing and skel lod data
@@ -293,9 +363,9 @@ bool UClothingAssetCommon::BindToSkeletalMesh(
 
 	// Data for mesh to mesh binding
 	TArray<FMeshToMeshVertData> MeshToMeshData;
-	TArray<FVector> RenderPositions;
-	TArray<FVector> RenderNormals;
-	TArray<FVector> RenderTangents;
+	TArray<FVector3f> RenderPositions;
+	TArray<FVector3f> RenderNormals;
+	TArray<FVector3f> RenderTangents;
 
 	RenderPositions.Reserve(OriginalSection.SoftVertices.Num());
 	RenderNormals.Reserve(OriginalSection.SoftVertices.Num());
@@ -310,36 +380,26 @@ bool UClothingAssetCommon::BindToSkeletalMesh(
 	}
 
 	TArrayView<uint32> IndexView(SkelLod.IndexBuffer);
-	IndexView.Slice(OriginalSection.BaseIndex, OriginalSection.NumTriangles * 3);
+	IndexView = IndexView.Slice(OriginalSection.BaseIndex, OriginalSection.NumTriangles * 3);
 
-	ClothingMeshUtils::ClothMeshDesc TargetMesh(RenderPositions, RenderNormals, IndexView);
-	ClothingMeshUtils::ClothMeshDesc SourceMesh(
-		ClothLodData.PhysicalMeshData.Vertices, 
-		ClothLodData.PhysicalMeshData.Normals, 
-		ClothLodData.PhysicalMeshData.Indices);
-
-	ClothingMeshUtils::GenerateMeshToMeshSkinningData(MeshToMeshData, TargetMesh, &RenderTangents, SourceMesh, 
-		ClothLodData.bUseMultipleInfluences, ClothLodData.SkinningKernelRadius);
-
-	if(MeshToMeshData.Num() == 0)
+	TArray<uint32> RenderIndices;
+	RenderIndices.Reserve(OriginalSection.NumTriangles * 3);
+	for (uint32 OriginalIndex : IndexView)
 	{
-		// Failed to generate skinning data, the function above will have notified
-		// with the cause of the failure, so just exit
-		return false;
-	}
-
-	// Calculate fixed verts
-	const FPointWeightMap* const MaxDistances = ClothLodData.PhysicalMeshData.FindWeightMap(EWeightMapTargetCommon::MaxDistance);
-	if (MaxDistances && MaxDistances->Num())
-	{
-		for(FMeshToMeshVertData& VertData : MeshToMeshData)
+		const int32 TempIndex = (int32)OriginalIndex - (int32)OriginalSection.BaseVertexIndex;
+		if (ensure(RenderPositions.IsValidIndex(TempIndex)))
 		{
-			if (MaxDistances->AreAllBelowThreshold(VertData.SourceMeshVertIndices[0], VertData.SourceMeshVertIndices[1], VertData.SourceMeshVertIndices[2]))
-			{
-				VertData.SourceMeshVertIndices[3] = 0xFFFF;
-			}
+			RenderIndices.Add(TempIndex);
 		}
 	}
+
+	const ClothingMeshUtils::ClothMeshDesc TargetMesh(RenderPositions, RenderNormals, RenderTangents, RenderIndices);
+	const ClothingMeshUtils::ClothMeshDesc SourceMesh(ClothLodData.PhysicalMeshData.Vertices, ClothLodData.PhysicalMeshData.Indices);  // Calculate averaged normals
+
+	const FPointWeightMap* const MaxDistances = ClothLodData.PhysicalMeshData.FindWeightMap(EWeightMapTargetCommon::MaxDistance);
+
+	ClothingMeshUtils::GenerateMeshToMeshVertData(MeshToMeshData, TargetMesh, SourceMesh, MaxDistances,
+		ClothLodData.bSmoothTransition, ClothLodData.bUseMultipleInfluences, ClothLodData.SkinningKernelRadius);
 
 	// We have to copy the bone map to verify we don't exceed the maximum while adding the clothing bones
 	TArray<FBoneIndexType> TempBoneMap = OriginalSection.BoneMap;
@@ -385,7 +445,8 @@ bool UClothingAssetCommon::BindToSkeletalMesh(
 	OriginalSection.CorrespondClothAssetIndex = AssetIndex;
 
 	// sim properties
-	OriginalSection.ClothMappingData = MeshToMeshData;
+	OriginalSection.ClothMappingDataLODs.SetNum(1);
+	OriginalSection.ClothMappingDataLODs[0] = MeshToMeshData;
 	OriginalSection.ClothingData.AssetGuid = AssetGuid;
 	OriginalSection.ClothingData.AssetLodIndex = InAssetLodIndex;
 
@@ -408,10 +469,12 @@ bool UClothingAssetCommon::BindToSkeletalMesh(
 		InSkelMesh->GetRefSkeleton().EnsureParentsExistAndSort(SkelLod.ActiveBoneIndices);
 	}
 
-	if(CustomData)
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	if(CustomData)  // Deprecated from 5.0 onward
 	{
 		CustomData->BindToSkeletalMesh(InSkelMesh, InMeshLodIndex, InSectionIndex, InAssetLodIndex);
 	}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	// Make sure the LOD map is always big enough for the asset to use.
 	// This shouldn't grow to an unwieldy size but maybe consider compacting later.
@@ -422,9 +485,259 @@ bool UClothingAssetCommon::BindToSkeletalMesh(
 
 	LodMap[InMeshLodIndex] = InAssetLodIndex;
 
+	// Update the extra cloth deformer mapping LOD bias using this cloth entry
+	if (InSkelMesh->GetSupportRayTracing())
+	{
+		check(LodMap[InMeshLodIndex] == InAssetLodIndex);  // UpdateLODBiasMappings relies on the LodMap being up to date
+		UpdateLODBiasMappings(InSkelMesh, InMeshLodIndex, InSectionIndex);
+	}
+
 	return true;
 
 	// FScopedSkeletalMeshPostEditChange goes out of scope, causing postedit change and components to be re-registered
+}
+
+void UClothingAssetCommon::UpdateAllLODBiasMappings(USkeletalMesh* SkeletalMesh)
+{
+	check(SkeletalMesh);
+
+	FSkeletalMeshModel* const SkeletalMeshModel = SkeletalMesh->GetImportedModel();
+	if (!SkeletalMeshModel)
+	{
+		return;
+	}
+
+	// Iterate through all source LODs with cloth that could lead to upper (raytraced) sections needing some additional mapping
+	TIndirectArray<FSkeletalMeshLODModel>& LODModels = SkeletalMesh->GetImportedModel()->LODModels;
+
+	for (int32 LODIndex = LODModels.Num() - 1; LODIndex >= 0; --LODIndex)  // Iterate in reverse order to allow shrinking the mapping array first
+	{
+		// Go through all sections to find the one(s?) that uses this cloth asset and clear the existing bias mappings
+		TArray<FSkelMeshSection>& Sections = LODModels[LODIndex].Sections;
+		
+		for (int32 SectionIndex = 0; SectionIndex < Sections.Num(); ++SectionIndex)
+		{
+			if (Sections[SectionIndex].ClothingData.AssetGuid == GetAssetGuid())
+			{
+				Sections[SectionIndex].ClothMappingDataLODs.SetNum(1);  // Only keep ClothMappingDataLODs[0] that is the same LOD mapping to remove LOD bias mappings
+
+				if (SkeletalMesh->GetSupportRayTracing())
+				{
+					UpdateLODBiasMappings(SkeletalMesh, LODIndex, SectionIndex);  // Updates the upper LODs mappings of the specified section from this LODIndex
+				}
+			}
+		}
+	}
+}
+
+void UClothingAssetCommon::UpdateLODBiasMappings(const USkeletalMesh* SkeletalMesh, int32 UpdatedLODIndex, int32 SectionIndex)
+{
+	check(SkeletalMesh);
+	check(UpdatedLODIndex >= 0);
+	
+	FSkeletalMeshModel* const SkeletalMeshModel = SkeletalMesh->GetImportedModel();
+	check(SkeletalMeshModel);
+
+	const bool bAddMappingsToAnyLOD = (SkeletalMesh->GetClothLODBiasMode() == EClothLODBiasMode::MappingsToAnyLOD);
+	const bool bAddMappingsToMinLOD = (SkeletalMesh->GetClothLODBiasMode() == EClothLODBiasMode::MappingsToMinLOD && SkeletalMesh->GetRayTracingMinLOD() > 0);
+
+	TIndirectArray<FSkeletalMeshLODModel>& LODModels = SkeletalMeshModel->LODModels;
+
+	TArray<FVector3f> RenderPositions;
+	TArray<FVector3f> RenderNormals;
+	TArray<FVector3f> RenderTangents;
+	TArray<uint32> RenderIndices;
+
+	auto PrepareDeformerTargetDescriptor = [&LODModels, &RenderPositions, &RenderNormals, &RenderTangents, &RenderIndices](int32 LODIndex, int32 SectionIndex)
+	{
+		FSkeletalMeshLODModel& LODModel = LODModels[LODIndex];
+		FSkelMeshSection& Section = LODModel.Sections[SectionIndex];
+
+		RenderPositions.Reset(Section.SoftVertices.Num());
+		RenderNormals.Reset(Section.SoftVertices.Num());
+		RenderTangents.Reset(Section.SoftVertices.Num());
+
+		for (const FSoftSkinVertex& SoftSkinVertex : Section.SoftVertices)
+		{
+			RenderPositions.Add(SoftSkinVertex.Position);
+			RenderNormals.Add(SoftSkinVertex.TangentZ);
+			RenderTangents.Add(SoftSkinVertex.TangentX);
+		}
+
+		const TConstArrayView<uint32> Indices = TConstArrayView<uint32>(LODModel.IndexBuffer).Slice(Section.BaseIndex, Section.NumTriangles * 3);
+
+		RenderIndices.Reset(Section.NumTriangles * 3);
+		for (uint32 VertexIndex : Indices)
+		{
+			RenderIndices.Add(VertexIndex - Section.BaseVertexIndex);
+		}
+
+		return ClothingMeshUtils::ClothMeshDesc(RenderPositions, RenderNormals, RenderTangents, RenderIndices);
+	};
+
+	// Get the min and max LODs that might be affected by LOD bias and update other sections' bias with this LOD section
+	int32 MinLOD = 0;
+	int32 MaxLOD = 0;
+	
+	if (bAddMappingsToAnyLOD)
+	{
+		MinLOD = UpdatedLODIndex + 1;
+		MaxLOD = LODModels.Num() - 1;
+	}
+	else if (bAddMappingsToMinLOD)
+	{
+		MinLOD = MaxLOD = SkeletalMesh->GetRayTracingMinLOD();
+	}
+
+	if (UpdatedLODIndex < MinLOD && MinLOD <= MaxLOD)
+	{
+		// Prepare the deformer source (simulation) mesh descriptor
+		const FClothLODDataCommon& ClothLodData = LodData[LodMap[UpdatedLODIndex]];
+		const ClothingMeshUtils::ClothMeshDesc SourceMesh(ClothLodData.PhysicalMeshData.Vertices, ClothLodData.PhysicalMeshData.Indices);  // Calculate averaged normals
+
+		// Retrieve max distance mask
+		const FPointWeightMap* const MaxDistances = ClothLodData.PhysicalMeshData.FindWeightMap(EWeightMapTargetCommon::MaxDistance);
+
+		// Iterate through all deformer target (render) mesh sections
+		for (int32 LODIndex = MinLOD; LODIndex <= MaxLOD; ++LODIndex)
+		{
+			FSkeletalMeshLODModel& LODModel = LODModels[LODIndex];  // Note that the section LOD being updated here is the biased (raytraced) section LOD, not the UpdatedLODIndex which is done in the second loop below
+
+			if (!LODModel.Sections.IsValidIndex(SectionIndex))
+			{
+				continue;
+			}
+
+			FSkelMeshSection& Section = LODModel.Sections[SectionIndex];
+
+			if (!Section.HasClothingData())
+			{
+				continue;  // This LOD section won't render clothing and therefore can be skipped as it won't ever need mappings
+			}
+
+			// Update bias mapping to the newly updated LOD index
+			const int32 LODBias = LODIndex - UpdatedLODIndex;
+			check(LODBias > 0);
+
+			Section.ClothMappingDataLODs.SetNum(FMath::Max(LODBias + 1, Section.ClothMappingDataLODs.Num()));
+
+			TArray<FMeshToMeshVertData>& MeshToMeshData = Section.ClothMappingDataLODs[LODBias];
+			MeshToMeshData.Reset();
+
+			// Prepare the deformer target (render) mesh descriptor
+			const ClothingMeshUtils::ClothMeshDesc TargetMesh = PrepareDeformerTargetDescriptor(LODIndex, SectionIndex);
+
+			// Generate the missing bias mapping data
+			ClothingMeshUtils::GenerateMeshToMeshVertData(MeshToMeshData, TargetMesh, SourceMesh, MaxDistances,
+				ClothLodData.bSmoothTransition, ClothLodData.bUseMultipleInfluences, ClothLodData.SkinningKernelRadius);
+
+			UE_LOG(LogClothingAsset, Verbose, TEXT("Added deformer data for [%s/%s], section %d, LODBias = %d, render mesh LOD = %d, sim mesh LOD = %d"),
+				*SkeletalMesh->GetName(),
+				*GetName(),
+				SectionIndex,
+				LODBias,
+				LODIndex,
+				UpdatedLODIndex);
+		}
+	}
+
+	// Update this LOD section bias mappings that didn't get setup since there weren't no cloth attached to it yet
+	if (bAddMappingsToAnyLOD || (bAddMappingsToMinLOD && UpdatedLODIndex == SkeletalMesh->GetRayTracingMinLOD()))
+	{
+		FSkeletalMeshLODModel& LODModel = LODModels[UpdatedLODIndex];  // Note that the section LOD being updated here is the UpdatedLODIndex, not the biased (raytraced) section LOD  which is done in the first loop above
+		FSkelMeshSection& Section = LODModel.Sections[SectionIndex];
+		check(Section.HasClothingData());
+
+		// Prepare the deformer target (render) mesh descriptor
+		const ClothingMeshUtils::ClothMeshDesc TargetMesh = PrepareDeformerTargetDescriptor(UpdatedLODIndex, SectionIndex);
+
+		// Iterate through all the LOD that could be rendered and need this source LOD to be raytraced
+		for (int32 LODIndex = 0; LODIndex < UpdatedLODIndex; ++LODIndex)
+		{
+			FSkeletalMeshLODModel& SourceLODModel = LODModels[LODIndex];
+
+			if (!SourceLODModel.Sections.IsValidIndex(SectionIndex))
+			{
+				continue;
+			}
+
+			FSkelMeshSection& SourceSection = SourceLODModel.Sections[SectionIndex];
+
+			// Locate the deformer's source (simulation) cloth asset, since it could be a different cloth asset.
+			const UClothingAssetCommon* const ClothingAsset = Cast<UClothingAssetCommon>(SkeletalMesh->GetClothingAsset(SourceSection.ClothingData.AssetGuid));
+
+			if (!ClothingAsset)
+			{
+				const FText Error = FText::Format(
+					LOCTEXT("Error_DifferentAsset", "Incomplete raytracing cloth LOD bias mappings generation on [{0}/{1}], section {2}, LOD {3} due to missing cloth asset at LOD {4}."),
+					FText::FromString(SkeletalMesh->GetName()),
+					FText::FromString(GetName()),
+					SectionIndex,
+					UpdatedLODIndex, 
+					LODIndex);
+				Warn(Error);
+				continue;
+			}
+
+			// Prepare the deformer source (simulation) mesh descriptor
+			const FClothLODDataCommon& ClothLodData = ClothingAsset->LodData[LodMap[LODIndex]];
+			const ClothingMeshUtils::ClothMeshDesc SourceMesh(ClothLodData.PhysicalMeshData.Vertices, ClothLodData.PhysicalMeshData.Indices);  // Calculate averaged normals
+
+			// Retrieve max distance mask
+			const FPointWeightMap* const MaxDistances = ClothLodData.PhysicalMeshData.FindWeightMap(EWeightMapTargetCommon::MaxDistance);
+
+			// Update bias mapping for the updated LOD section
+			const int32 LODBias = UpdatedLODIndex - LODIndex;
+			check(LODBias > 0);
+
+			Section.ClothMappingDataLODs.SetNum(FMath::Max(LODBias + 1, Section.ClothMappingDataLODs.Num()));
+			TArray<FMeshToMeshVertData>& MeshToMeshData = Section.ClothMappingDataLODs[LODBias];
+			MeshToMeshData.Reset();
+
+			ClothingMeshUtils::GenerateMeshToMeshVertData(MeshToMeshData, TargetMesh, SourceMesh, MaxDistances,
+				ClothLodData.bSmoothTransition, ClothLodData.bUseMultipleInfluences, ClothLodData.SkinningKernelRadius);
+
+			UE_LOG(LogClothingAsset, Verbose, TEXT("Added deformer data for [%s/%s], section %d, LODBias = %d, render mesh LOD = %d, sim mesh LOD = %d"),
+				*SkeletalMesh->GetName(),
+				*GetName(),
+				SectionIndex,
+				LODBias,
+				UpdatedLODIndex,
+				LODIndex);
+		}
+	}
+}
+
+void UClothingAssetCommon::ClearLODBiasMappings(const USkeletalMesh* SkeletalMesh, int32 UpdatedLODIndex, int32 SectionIndex)
+{
+	check(SkeletalMesh);
+	check(UpdatedLODIndex >= 0);
+
+	FSkeletalMeshModel* const SkeletalMeshModel = SkeletalMesh->GetImportedModel();
+	check(SkeletalMeshModel);
+
+	for (int32 LODIndex = UpdatedLODIndex + 1; LODIndex < SkeletalMeshModel->LODModels.Num(); ++LODIndex)
+	{
+		FSkeletalMeshLODModel& BiasLodModel = SkeletalMeshModel->LODModels[LODIndex];
+		if (BiasLodModel.Sections.IsValidIndex(SectionIndex))
+		{
+			FSkelMeshSection& BiasSection = BiasLodModel.Sections[SectionIndex];
+			const int32 LODBias = LODIndex - UpdatedLODIndex;
+
+			if (BiasSection.ClothMappingDataLODs.IsValidIndex(LODBias))
+			{
+				BiasSection.ClothMappingDataLODs[LODBias].Empty();
+
+				UE_LOG(LogClothingAsset, Verbose, TEXT("Removed deformer data for [%s/%s], section %d LODBias = %d, render mesh LOD = %d, sim mesh LOD = %d"),
+					*SkeletalMesh->GetName(),
+					*GetName(),
+					SectionIndex,
+					LODBias,
+					LODIndex,
+					UpdatedLODIndex);
+			}
+		}
+	}
 }
 
 void UClothingAssetCommon::UnbindFromSkeletalMesh(USkeletalMesh* InSkelMesh)
@@ -466,7 +779,27 @@ void UClothingAssetCommon::UnbindFromSkeletalMesh(
 			FSkelMeshSection& Section = LodModel.Sections[SectionIdx];
 			if(Section.HasClothingData() && Section.ClothingData.AssetGuid == AssetGuid)
 			{
-				InSkelMesh->PreEditChange(nullptr);
+				// Don't do this when in async task, this should have been done before initiating the build
+				if (IsInGameThread())
+				{
+					InSkelMesh->PreEditChange(nullptr);
+				}
+
+				// Log the LOD bias mapping data that will be removed through the call to ClearSectionClothingData
+				for (int32 LodIndex = 0; LodIndex < InMeshLodIndex; ++LodIndex)
+				{
+					const int32 LODBias = InMeshLodIndex - LodIndex;
+
+					UE_CLOG(Section.ClothMappingDataLODs.IsValidIndex(LODBias) && Section.ClothMappingDataLODs[LODBias].Num(),
+						LogClothingAsset, Verbose, TEXT("Removed deformer data for [%s/%s], section %d LODBias = %d, render mesh LOD = %d, sim mesh LOD = %d"),
+						*InSkelMesh->GetName(),
+						*GetName(),
+						SectionIdx,
+						LODBias,
+						InMeshLodIndex,
+						LodIndex);
+				}
+
 				ClothingAssetUtils::ClearSectionClothingData(Section);
 				if (FSkelMeshSourceSectionUserData* UserSectionData = LodModel.UserSectionsData.Find(Section.OriginalDataSectionIndex))
 				{
@@ -474,6 +807,10 @@ void UClothingAssetCommon::UnbindFromSkeletalMesh(
 					UserSectionData->ClothingData.AssetLodIndex = INDEX_NONE;
 					UserSectionData->ClothingData.AssetGuid = FGuid();
 				}
+				
+				// Clear all remaining LOD bias mapping data from other LODs that relied on this section
+				ClearLODBiasMappings(InSkelMesh, InMeshLodIndex, SectionIdx);
+
 				bChangedMesh = true;
 			}
 		}
@@ -502,7 +839,7 @@ void UClothingAssetCommon::ReregisterComponentsUsingClothing()
 		{
 			if(USkeletalMeshComponent* Component = *It)
 			{
-				if(Component->SkeletalMesh == OwnerMesh)
+				if(Component->GetSkeletalMeshAsset() == OwnerMesh)
 				{
 					FComponentReregisterContext Context(Component);
 					// Context goes out of scope, causing Component to be re-registered
@@ -520,7 +857,7 @@ void UClothingAssetCommon::ForEachInteractorUsingClothing(TFunction<void(UClothi
 		{
 			if(USkeletalMeshComponent* Component = *It)
 			{
-				if(Component->SkeletalMesh == OwnerMesh)
+				if(Component->GetSkeletalMeshAsset() == OwnerMesh)
 				{
 					if(UClothingSimulationInteractor* CurInteractor = Component->GetClothingSimulationInteractor())
 					{
@@ -532,13 +869,14 @@ void UClothingAssetCommon::ForEachInteractorUsingClothing(TFunction<void(UClothi
 	}
 }
 
-void UClothingAssetCommon::ApplyParameterMasks(bool bUpdateFixedVertData)
+void UClothingAssetCommon::ApplyParameterMasks(bool bUpdateFixedVertData, bool bInvalidateDerivedDataCache)
 {
 	for(FClothLODDataCommon& Lod : LodData)
 	{
 		Lod.PushWeightsToMesh();
 	}
-	InvalidateCachedData();
+	// Invalidate all cached data that depend on masks
+	InvalidateFlaggedCachedData(EClothingCachedDataFlagsCommon::InverseMasses | EClothingCachedDataFlagsCommon::Tethers);
 
 	// Recompute weights if needed
 	USkeletalMesh* const SkeletalMesh = Cast<USkeletalMesh>(GetOuter());
@@ -561,27 +899,16 @@ void UClothingAssetCommon::ApplyParameterMasks(bool bUpdateFixedVertData)
 				const FClothLODDataCommon& LodDatum = LodData[Section.ClothingData.AssetLodIndex];
 				const FPointWeightMap* const MaxDistances = LodDatum.PhysicalMeshData.FindWeightMap(EWeightMapTargetCommon::MaxDistance);
 
-				if (MaxDistances && MaxDistances->Num())
+				for (TArray<FMeshToMeshVertData>& ClothMappingData : Section.ClothMappingDataLODs)
 				{
-					for (FMeshToMeshVertData& VertData : Section.ClothMappingData)
-					{
-						VertData.SourceMeshVertIndices[3] = MaxDistances->AreAllBelowThreshold(
-							VertData.SourceMeshVertIndices[0],
-							VertData.SourceMeshVertIndices[1],
-							VertData.SourceMeshVertIndices[2]) ? 0xFFFF : 0;
-					}
-				}
-				else
-				{
-					for (FMeshToMeshVertData& VertData : Section.ClothMappingData)
-					{
-						VertData.SourceMeshVertIndices[3] = 0;
-					}
+					ClothingMeshUtils::ComputeVertexContributions(ClothMappingData, MaxDistances, LodDatum.bSmoothTransition, LodDatum.bUseMultipleInfluences);
 				}
 			}
 		}
-		// We must always dirty the DDC key unless previewing
-		SkeletalMesh->InvalidateDeriveDataCacheGUID();
+		if (bInvalidateDerivedDataCache)  // We must always dirty the DDC key unless previewing
+		{
+			SkeletalMesh->InvalidateDeriveDataCacheGUID();
+		}
 	}
 }
 
@@ -602,26 +929,71 @@ void UClothingAssetCommon::BuildLodTransitionData()
 		const int32 CurrentLodNumVerts = CurrentPhysMesh.Vertices.Num();
 
 		ClothingMeshUtils::ClothMeshDesc CurrentMeshDesc(CurrentPhysMesh.Vertices, CurrentPhysMesh.Normals, CurrentPhysMesh.Indices);
-		static const bool bUseMultipleInfluences = false;  // Multiple influences must not be used for LOD transitions
+
+		const FPointWeightMap* MaxDistances = nullptr; // No need to update the vertex contribution on the transition maps
+		constexpr bool bUseSmoothTransitions = false;  // Smooth transitions are only used at rendering for now and not during LOD transitions
+		constexpr bool bUseMultipleInfluences = false;  // Multiple influences must not be used for LOD transitions
+		constexpr float SkinningKernelRadius = 0.f;  // KernelRadius is only required when using multiple influences
+
 		if(PrevLod)
 		{
 			FClothPhysicalMeshData& PrevPhysMesh = PrevLod->PhysicalMeshData;
 			CurrentLod.TransitionUpSkinData.Empty(CurrentLodNumVerts);
-			ClothingMeshUtils::ClothMeshDesc PrevMeshDesc(PrevPhysMesh.Vertices, PrevPhysMesh.Normals, PrevPhysMesh.Indices);
-			ClothingMeshUtils::GenerateMeshToMeshSkinningData(CurrentLod.TransitionUpSkinData, CurrentMeshDesc, nullptr, 
-				PrevMeshDesc, bUseMultipleInfluences, CurrentLod.SkinningKernelRadius);
+			ClothingMeshUtils::ClothMeshDesc PrevMeshDesc(PrevPhysMesh.Vertices, PrevPhysMesh.Indices);  // Will calculate averaged normals
+
+			ClothingMeshUtils::GenerateMeshToMeshVertData(CurrentLod.TransitionUpSkinData, CurrentMeshDesc, PrevMeshDesc,
+				MaxDistances, bUseSmoothTransitions, bUseMultipleInfluences, SkinningKernelRadius);
 		}
 		if(NextLod)
 		{
 			FClothPhysicalMeshData& NextPhysMesh = NextLod->PhysicalMeshData;
 			CurrentLod.TransitionDownSkinData.Empty(CurrentLodNumVerts);
-			ClothingMeshUtils::ClothMeshDesc NextMeshDesc(NextPhysMesh.Vertices, NextPhysMesh.Normals, NextPhysMesh.Indices);
-			ClothingMeshUtils::GenerateMeshToMeshSkinningData(CurrentLod.TransitionDownSkinData, CurrentMeshDesc, 
-				nullptr, NextMeshDesc, bUseMultipleInfluences, CurrentLod.SkinningKernelRadius);
+			ClothingMeshUtils::ClothMeshDesc NextMeshDesc(NextPhysMesh.Vertices, NextPhysMesh.Indices);  // Will calculate averaged normals 
+			ClothingMeshUtils::GenerateMeshToMeshVertData(CurrentLod.TransitionDownSkinData, CurrentMeshDesc, NextMeshDesc,
+				MaxDistances, bUseSmoothTransitions, bUseMultipleInfluences, SkinningKernelRadius);
 		}
 	}
 }
 
+void UClothingAssetCommon::PreEditUndo()
+{
+	Super::PreEditUndo();
+
+	// Stop the simulation
+	if (const USkeletalMesh* const OwnerMesh = Cast<USkeletalMesh>(GetOuter()))
+	{
+		for (TObjectIterator<USkeletalMeshComponent> It; It; ++It)
+		{
+			if (USkeletalMeshComponent* const Component = *It)
+			{
+				if (Component->GetSkeletalMeshAsset() == OwnerMesh)
+				{
+					Component->ReleaseAllClothingResources();
+				}
+			}
+		}
+	}
+}
+
+void UClothingAssetCommon::PostEditUndo()
+{
+	Super::PostEditUndo();
+
+	// Resume the simulation
+	if (const USkeletalMesh* const OwnerMesh = Cast<USkeletalMesh>(GetOuter()))
+	{
+		for (TObjectIterator<USkeletalMeshComponent> It; It; ++It)
+		{
+			if (USkeletalMeshComponent* const Component = *It)
+			{
+				if (Component->GetSkeletalMeshAsset() == OwnerMesh)
+				{
+					Component->RecreateClothingActors();
+				}
+			}
+		}
+	}
+}
 #endif // WITH_EDITOR
 
 void UClothingAssetCommon::RefreshBoneMapping(USkeletalMesh* InSkelMesh)
@@ -641,9 +1013,8 @@ void UClothingAssetCommon::RefreshBoneMapping(USkeletalMesh* InSkelMesh)
 	// Repopulate the used indices.
 	for(int32 BoneNameIndex = 0; BoneNameIndex < UsedBoneNames.Num(); ++BoneNameIndex)
 	{
-		UsedBoneIndices[BoneNameIndex] = 
-			InSkelMesh->GetRefSkeleton().FindBoneIndex(
-				UsedBoneNames[BoneNameIndex]);
+		const int32 BoneIndex = InSkelMesh->GetRefSkeleton().FindBoneIndex(UsedBoneNames[BoneNameIndex]);
+		UsedBoneIndices[BoneNameIndex] = (BoneIndex != INDEX_NONE) ? BoneIndex : 0;  // Remap to the root bone if the two skeletons differ
 	}
 }
 
@@ -652,21 +1023,13 @@ void UClothingAssetCommon::CalculateReferenceBoneIndex()
 	// Starts at root
 	ReferenceBoneIndex = 0;
 
-#if WITH_APEX_CLOTHING
-	const TSubclassOf<class UClothingSimulationFactory> ClothingSimulationFactory = UClothingSimulationFactory::GetDefaultClothingSimulationFactoryClass();
-	if (ClothingSimulationFactory->GetName() == TEXT("ClothingSimulationFactoryNv"))
-	{
-		return;
-	}
-#endif
-
 	// Find the root bone for this clothing asset (common bone for all used bones)
 	typedef TArray<int32> BoneIndexArray;
 
 	// List of valid paths to the root bone from each weighted bone
 	TArray<BoneIndexArray> PathsToRoot;
 	
-	USkeletalMesh* OwnerMesh = Cast<USkeletalMesh>(GetOuter());
+	const USkeletalMesh* OwnerMesh = Cast<USkeletalMesh>(GetOuter());
 
 	if(OwnerMesh)
 	{
@@ -771,17 +1134,6 @@ int32 UClothingAssetCommon::GetNumLods() const
 	return LodData.Num();
 }
 
-void UClothingAssetCommon::BuildSelfCollisionData()
-{
-	if (ClothConfigs.Num())
-	{
-		for(FClothLODDataCommon& Lod : LodData)
-		{
-			Lod.PhysicalMeshData.BuildSelfCollisionData(ClothConfigs);
-		}
-	}
-}
-
 void UClothingAssetCommon::PostLoad()
 {
 	Super::PostLoad();
@@ -801,12 +1153,10 @@ void UClothingAssetCommon::PostLoad()
 		}
 	}
 	ClothLodData_DEPRECATED.Empty();
-#endif
 
 	const int32 AnimPhysCustomVersion = GetLinkerCustomVersion(FAnimPhysObjectVersion::GUID);
 	if (AnimPhysCustomVersion < FAnimPhysObjectVersion::AddedClothingMaskWorkflow)
 	{
-#if WITH_EDITORONLY_DATA
 		// Convert current parameters to masks
 		for (FClothLODDataCommon& Lod : LodData)
 		{
@@ -842,14 +1192,12 @@ void UClothingAssetCommon::PostLoad()
 				BackstopDistanceMask.Initialize(BackstopDistances, EWeightMapTargetCommon::BackstopDistance);
 			}
 		}
-#endif
 
 		// Make sure we're transactional
 		SetFlags(RF_Transactional);
 	}
 
 	const int32 ClothingCustomVersion = GetLinkerCustomVersion(FClothingAssetCustomVersion::GUID);
-#if WITH_EDITORONLY_DATA
 	// Fix content imported before we kept vertex colors
 	if (ClothingCustomVersion < FClothingAssetCustomVersion::AddVertexColorsToPhysicalMesh)
 	{
@@ -865,27 +1213,24 @@ void UClothingAssetCommon::PostLoad()
 			}
 		}
 	}
-#endif // WITH_EDITORONLY_DATA
 
-#if WITH_EDITOR
+	EClothingCachedDataFlagsCommon ClothingCachedDataFlags = EClothingCachedDataFlagsCommon::None;
 	if (AnimPhysCustomVersion < FAnimPhysObjectVersion::CacheClothMeshInfluences)
 	{
-		// Rebuild data cache
-		InvalidateCachedData();
+		ClothingCachedDataFlags |= EClothingCachedDataFlagsCommon::NumInfluences;
 	}
-#endif
 
 	// Add any missing configs for the available cloth factories, and try to migrate them from any existing one
 	// TODO: Remove all UObject PostLoad dependencies.
 	//       Even with these ConditionalPostLoad calls, the UObject PostLoads' order of execution cannot be guaranteed.
-	for (TPair<FName, UClothConfigBase*>& ClothConfig : ClothConfigs)
+	for (auto& ClothConfig : ClothConfigs)
 	{
 		if (ClothConfig.Value)
 		{
 			ClothConfig.Value->ConditionalPostLoad();  // PostLoad configs before adding new ones
 		}
 	}
-#if WITH_EDITORONLY_DATA
+
 	if (ClothSimConfig_DEPRECATED)
 	{
 		ClothSimConfig_DEPRECATED->ConditionalPostLoad();  // PostLoad old configs before replacing them
@@ -901,17 +1246,20 @@ void UClothingAssetCommon::PostLoad()
 		ClothSharedSimConfig_DEPRECATED->ConditionalPostLoad();  // PostLoad old configs before replacing them
 		ClothSharedSimConfig_DEPRECATED->Rename(nullptr, nullptr, REN_DoNotDirty | REN_DontCreateRedirectors | REN_ForceNoResetLoaders | REN_NonTransactional);  // Rename the config so that the name doesn't collide with the new config map name
 	}
-#endif
-	AddClothConfigs();
+
+	if (AddClothConfigs())
+	{
+		// With a new config added best to recache everything
+		ClothingCachedDataFlags |= EClothingCachedDataFlagsCommon::All;
+	}
 
 	// Migrate configs
 	bool bMigrateSharedConfigToConfig = true;  // Shared config to config migration can be disabled to avoid overriding the newly migrated values
 
-#if WITH_EDITORONLY_DATA
 	if (ClothingCustomVersion < FClothingAssetCustomVersion::MovePropertiesToCommonBaseClasses)
 	{
 		// Remap legacy struct FClothConfig to new config objects
-		for (TPair<FName, UClothConfigBase*>& ClothConfig : ClothConfigs)
+		for (auto& ClothConfig : ClothConfigs)
 		{
 			if (UClothConfigCommon* const ClothConfigCommon = Cast<UClothConfigCommon>(ClothConfig.Value))
 			{
@@ -932,7 +1280,7 @@ void UClothingAssetCommon::PostLoad()
 				FClothConfig_Legacy ClothConfigLegacy;
 				if (ClothSimConfigCommon->MigrateTo(ClothConfigLegacy))
 				{
-					for (TPair<FName, UClothConfigBase*>& ClothConfig : ClothConfigs)
+					for (auto& ClothConfig : ClothConfigs)
 					{
 						if (UClothConfigCommon* const ClothConfigCommon = Cast<UClothConfigCommon>(ClothConfig.Value))
 						{
@@ -943,51 +1291,100 @@ void UClothingAssetCommon::PostLoad()
 				}
 			}
 			// And keep the old config too
-			SetClothConfig(ClothSimConfig_DEPRECATED);
+			SetClothConfig(ToRawPtr(ClothSimConfig_DEPRECATED));
 			ClothSimConfig_DEPRECATED = nullptr;
 			bMigrateSharedConfigToConfig = false;
 		}
 		if (ChaosClothSimConfig_DEPRECATED)
 		{
-			SetClothConfig(ChaosClothSimConfig_DEPRECATED);
+			SetClothConfig(ToRawPtr(ChaosClothSimConfig_DEPRECATED));
 			ChaosClothSimConfig_DEPRECATED = nullptr;
 			bMigrateSharedConfigToConfig = false;
 		}
 		if (ClothSharedSimConfig_DEPRECATED)
 		{
-			SetClothConfig(ClothSharedSimConfig_DEPRECATED);
+			SetClothConfig(ToRawPtr(ClothSharedSimConfig_DEPRECATED));
 			ClothSharedSimConfig_DEPRECATED = nullptr;
 			bMigrateSharedConfigToConfig = false;
 		}
 	}
-#endif
 
 	// Propagate shared configs between cloth assets
 	PropagateSharedConfigs(bMigrateSharedConfigToConfig);
 
+	// Cache tethers and reference bone index should already have been calculated
+	const int32 FortniteReleaseBranchCustomObjectVersion = GetLinkerCustomVersion(FFortniteReleaseBranchCustomObjectVersion::GUID);
+	const int32 FrostyMainBranchObjectVersion = GetLinkerCustomVersion(FUE5PrivateFrostyStreamObjectVersion::GUID);
+	if (FrostyMainBranchObjectVersion < FUE5PrivateFrostyStreamObjectVersion::ChaosClothRemoveKinematicTethers)
+	{
+		ClothingCachedDataFlags |= EClothingCachedDataFlagsCommon::Tethers;
+	}
+
+	if (FortniteReleaseBranchCustomObjectVersion < FFortniteReleaseBranchCustomObjectVersion::ChaosClothAddTethersToCachedData &&
+		FrostyMainBranchObjectVersion < FUE5PrivateFrostyStreamObjectVersion::ChaosClothAddTethersToCachedData)
+	{
+		ClothingCachedDataFlags |= EClothingCachedDataFlagsCommon::Tethers;
+
+		// ReferenceBoneIndex is only required when rebinding the cloth.
+		USkeletalMesh* const OwnerMesh = CastChecked<USkeletalMesh>(GetOuter());
+		RefreshBoneMapping(OwnerMesh);
+		CalculateReferenceBoneIndex();
+	}
+
 	// After fixing the content, we are ready to call functions that rely on it
-	BuildSelfCollisionData();
-#if WITH_EDITORONLY_DATA
-	CalculateReferenceBoneIndex();
+	if (ClothingCachedDataFlags != EClothingCachedDataFlagsCommon::None)
+	{
+		// Rebuild data cache
+		InvalidateFlaggedCachedData(ClothingCachedDataFlags);
+	}
 
 	const int32 PhysicsObjectVersion = GetLinkerCustomVersion(FPhysicsObjectVersion::GUID);
-	if (PhysicsObjectVersion < FPhysicsObjectVersion::ChaosClothFixLODTransitionMaps)
+	const int32 FortniteMainBranchObjectVersion = GetLinkerCustomVersion(FFortniteMainBranchObjectVersion::GUID);
+	if (PhysicsObjectVersion < FPhysicsObjectVersion::ChaosClothFixLODTransitionMaps ||
+		FortniteMainBranchObjectVersion < FFortniteMainBranchObjectVersion::ChaosClothFixLODTransitionMaps)
 	{
 		BuildLodTransitionData();
 	}
-#endif
+#endif  // #if WITH_EDITORONLY_DATA
 }
+
+#if WITH_EDITORONLY_DATA
+void UClothingAssetCommon::DeclareConstructClasses(TArray<FTopLevelAssetPath>& OutConstructClasses, const UClass* SpecificSubclass)
+{
+	Super::DeclareConstructClasses(OutConstructClasses, SpecificSubclass);
+	const TArray<IClothingSimulationFactoryClassProvider*> ClassProviders =
+		IModularFeatures::Get().GetModularFeatureImplementations<IClothingSimulationFactoryClassProvider>(IClothingSimulationFactoryClassProvider::FeatureName);
+	for (IClothingSimulationFactoryClassProvider* Provider : ClassProviders)
+	{
+		check(Provider);
+		if (UClass* const ClothingSimulationFactoryClass = *TSubclassOf<class UClothingSimulationFactory>(Provider->GetClothingSimulationFactoryClass()))
+		{
+			const UClothingSimulationFactory* const ClothingSimulationFactory = ClothingSimulationFactoryClass->GetDefaultObject<UClothingSimulationFactory>();
+			for (TSubclassOf<UClothConfigBase> ClothConfigClass : ClothingSimulationFactory->GetClothConfigClasses())
+			{
+				OutConstructClasses.Add(FTopLevelAssetPath(ClothConfigClass));
+			}
+		}
+	}
+	// OutConstructClasses.Add(FTopLevelAssetPath(UChaosClothSharedSimConfig::StaticClass()));
+	//OutConstructClasses.Add(FTopLevelAssetPath(UChaosClothConfig::StaticClass()));
+}
+#endif
 
 void UClothingAssetCommon::Serialize(FArchive& Ar)
 {
 	Super::Serialize(Ar);
 	Ar.UsingCustomVersion(FAnimPhysObjectVersion::GUID);
 	Ar.UsingCustomVersion(FClothingAssetCustomVersion::GUID);
+	Ar.UsingCustomVersion(FFortniteMainBranchObjectVersion::GUID);
 	Ar.UsingCustomVersion(FPhysicsObjectVersion::GUID);
+	Ar.UsingCustomVersion(FUE5PrivateFrostyStreamObjectVersion::GUID);
 }
 
-void UClothingAssetCommon::AddClothConfigs()
+bool UClothingAssetCommon::AddClothConfigs()
 {
+	bool bNewConfigAdded = false;
+
 	const TArray<IClothingSimulationFactoryClassProvider*> ClassProviders =
 		IModularFeatures::Get().GetModularFeatureImplementations<IClothingSimulationFactoryClassProvider>(IClothingSimulationFactoryClassProvider::FeatureName);
 
@@ -1011,7 +1408,7 @@ void UClothingAssetCommon::AddClothConfigs()
 					// migration from compatible config sources
 					if (UClothConfigCommon* const ClothConfigCommon = Cast<UClothConfigCommon>(ClothConfig))
 					{
-						for (TPair<FName, UClothConfigBase*> ClothConfigPair : ClothConfigs)
+						for (auto ClothConfigPair : ClothConfigs)
 						{
 							if (const UClothConfigCommon* SourceConfig = Cast<UClothConfigCommon>(ClothConfigPair.Value))
 							{
@@ -1028,10 +1425,12 @@ void UClothingAssetCommon::AddClothConfigs()
 					// Add the new config
 					check(ClothConfig);
 					ClothConfigs.Add(ClothConfigName, ClothConfig);
+					bNewConfigAdded = true;
 				}
 			}
 		}
 	}
+	return bNewConfigAdded;
 }
 
 void UClothingAssetCommon::PropagateSharedConfigs(bool bMigrateSharedConfigToConfig)
@@ -1042,7 +1441,7 @@ void UClothingAssetCommon::PropagateSharedConfigs(bool bMigrateSharedConfigToCon
 		const TArray<UClothingAssetBase*>& ClothingAssets = SkeletalMesh->GetMeshClothingAssets();
  
 		// Collect all shared configs found in the other assets
-		TMap<FName, UClothConfigBase*> ClothSharedConfigs;
+		decltype(ClothConfigs) ClothSharedConfigs;
 
 		for (const UClothingAssetBase* ClothingAssetBase : ClothingAssets)
 		{
@@ -1059,7 +1458,7 @@ void UClothingAssetCommon::PropagateSharedConfigs(bool bMigrateSharedConfigToCon
 				ClothSharedConfigs.Reserve(Max);
 
 				// Iterate through all configs, and find the shared ones
-				for (const TPair<FName, UClothConfigBase*>& ClothSharedConfigItem : ClothingAsset->ClothConfigs)
+				for (const auto& ClothSharedConfigItem : ClothingAsset->ClothConfigs)
 				{
 					if (Cast<UClothSharedConfigCommon>(ClothSharedConfigItem.Value) &&  // Only needs shared configs
 						!ClothSharedConfigs.Find(ClothSharedConfigItem.Key))            // Only needs a single shared config per type
@@ -1071,10 +1470,10 @@ void UClothingAssetCommon::PropagateSharedConfigs(bool bMigrateSharedConfigToCon
 		}
 
 		// Propagate the found shared configs to this asset
-		for (const TPair<FName, UClothConfigBase*>& ClothSharedConfigItem : ClothSharedConfigs)
+		for (const auto& ClothSharedConfigItem : ClothSharedConfigs)
 		{
 			// Set share config
-			if (UClothConfigBase** const ClothConfigBase = ClothConfigs.Find(ClothSharedConfigItem.Key))
+			if (TObjectPtr<UClothConfigBase>* const ClothConfigBase = ClothConfigs.Find(ClothSharedConfigItem.Key))
 			{
 				// Reset this shared config
 				*ClothConfigBase = ClothSharedConfigItem.Value;
@@ -1086,16 +1485,15 @@ void UClothingAssetCommon::PropagateSharedConfigs(bool bMigrateSharedConfigToCon
 			}
 		}
 
-		// Migrate the common shared configs' deprecated parameters to all per cloth configs
-		if (bMigrateSharedConfigToConfig)
+		// Migrate the common shared configs' deprecated parameters to all per cloth configs, and fix the shared config ownership
+		for (TPair<FName, TObjectPtr<UClothConfigBase>>& ClothSharedConfigItem : ClothConfigs)
 		{
-			// Iterate through all this asset's shared configs
-			for (const TPair<FName, UClothConfigBase*>& ClothSharedConfigItem : ClothConfigs)
+			if (UClothSharedConfigCommon* const ClothSharedConfig = Cast<UClothSharedConfigCommon>(ClothSharedConfigItem.Value))
 			{
-				if (const UClothSharedConfigCommon* const ClothSharedConfig = Cast<UClothSharedConfigCommon>(ClothSharedConfigItem.Value))
+				// Migrate from this shared config to non shared configs if needed
+				if (bMigrateSharedConfigToConfig)
 				{
-					// Iterate through all this asset's configs, and migrate from the shared ones
-					for (const TPair<FName, UClothConfigBase*>& ClothConfigItem : ClothConfigs)
+					for (const TPair<FName, TObjectPtr<UClothConfigBase>>& ClothConfigItem : ClothConfigs)
 					{
 						if (Cast<UClothSharedConfigCommon>(ClothConfigItem.Value))
 						{
@@ -1107,6 +1505,17 @@ void UClothingAssetCommon::PropagateSharedConfigs(bool bMigrateSharedConfigToCon
 						}
 					}
 				}
+				// Fix the shared config outer if it is still a UClothingAssetCommon (the config must belong to the skeletal mesh, as it is shared between assets)
+				if (Cast<UClothingAssetCommon>(ClothSharedConfig->GetOuter()))
+				{
+					ClothSharedConfig->Rename(nullptr, SkeletalMesh, REN_DontCreateRedirectors | REN_ForceNoResetLoaders | REN_NonTransactional);
+				}
+
+				// Fix the shared config ownership, asset might have been copied and the shared config could still point to a different skeletal mesh
+				if (ClothSharedConfig->GetOuter() != SkeletalMesh)
+				{
+					ClothSharedConfigItem.Value = DuplicateObject<UClothSharedConfigCommon>(ClothSharedConfig, SkeletalMesh, ClothSharedConfig->GetFName());
+				}
 			}
 		}
 	}
@@ -1115,113 +1524,105 @@ void UClothingAssetCommon::PropagateSharedConfigs(bool bMigrateSharedConfigToCon
 void UClothingAssetCommon::PostUpdateAllAssets()
 {
 	// Add any missing configs for the available cloth factories, and try to migrate them from any existing one
-	AddClothConfigs();
+	const bool bInvalidateCachedData = AddClothConfigs();
 
 	// Propagate shared configs
 	PropagateSharedConfigs();
+
+#if WITH_EDITORONLY_DATA
+	// Invalidate cached data if the configs have changed
+	if (bInvalidateCachedData)
+	{
+		InvalidateAllCachedData();
+	}
+#endif
 }
 
-#if WITH_EDITOR
 
-void UClothingAssetCommon::InvalidateCachedData()
+#if WITH_EDITORONLY_DATA
+void UClothingAssetCommon::InvalidateFlaggedCachedData(EClothingCachedDataFlagsCommon Flags)
 {
-#if WITH_CHAOS_CLOTHING
-	ForEachInteractorUsingClothing([](UClothingSimulationInteractor* InInteractor)
+	const bool bNeedsInverseMasses = EnumHasAllFlags((EClothingCachedDataFlagsCommon)Flags, EClothingCachedDataFlagsCommon::InverseMasses) && AnyOfClothConfigs([](UClothConfigBase& Config) { return Config.NeedsInverseMasses(); });
+	const bool bNeedsNumInfluences = EnumHasAllFlags((EClothingCachedDataFlagsCommon)Flags, EClothingCachedDataFlagsCommon::NumInfluences) && AnyOfClothConfigs([](UClothConfigBase& Config) { return Config.NeedsNumInfluences(); });
+	const bool bNeedsSelfCollisionData = EnumHasAllFlags((EClothingCachedDataFlagsCommon)Flags, EClothingCachedDataFlagsCommon::SelfCollisionData) && AnyOfClothConfigs([](UClothConfigBase& Config) { return Config.NeedsSelfCollisionData(); });
+	const bool bNeedsTethers = EnumHasAllFlags((EClothingCachedDataFlagsCommon)Flags, EClothingCachedDataFlagsCommon::Tethers) && AnyOfClothConfigs([](UClothConfigBase& Config) { return Config.NeedsTethers(); });
+
+	float SelfCollisionRadius = 0.f;
+	if (bNeedsSelfCollisionData)
 	{
-		if (InInteractor)
+		// Note: Only PhysX based NvCloth needs to build the SelfCollisionIndices at the moment
+		for (const TPair<FName, TObjectPtr<UClothConfigBase>>& ClothConfig : ClothConfigs)
 		{
-			InInteractor->ClothConfigUpdated();
+			SelfCollisionRadius = FMath::Max(SelfCollisionRadius, ClothConfig.Value->GetSelfCollisionRadius());
 		}
-	});
-#endif  // #if WITH_CHAOS_CLOTHING
+	}
 
-	// TODO: This mass calculation isn't used by Chaos, check what can be stripped out
-	for(FClothLODDataCommon& CurrentLodData : LodData)
+	bool bThethersUseEuclideanDistance = false;
+	bool bThethersUseGeodesicDistance = false;
+	if (bNeedsTethers)
 	{
-		// Recalculate inverse masses for the physical mesh particles
-		FClothPhysicalMeshData& PhysMesh = CurrentLodData.PhysicalMeshData;
-		check(PhysMesh.Indices.Num() % 3 == 0);
-
-		TArray<float>& InvMasses = PhysMesh.InverseMasses;
-
-		const int32 NumVerts = PhysMesh.Vertices.Num();
-		InvMasses.Empty(NumVerts);
-		InvMasses.AddZeroed(NumVerts);
-
-		for(int32 TriBaseIndex = 0; TriBaseIndex < PhysMesh.Indices.Num(); TriBaseIndex += 3)
+		for (const TPair<FName, TObjectPtr<UClothConfigBase>>& ClothConfig : ClothConfigs)
 		{
-			const int32 Index0 = PhysMesh.Indices[TriBaseIndex];
-			const int32 Index1 = PhysMesh.Indices[TriBaseIndex + 1];
-			const int32 Index2 = PhysMesh.Indices[TriBaseIndex + 2];
-
-			const FVector AB = PhysMesh.Vertices[Index1] - PhysMesh.Vertices[Index0];
-			const FVector AC = PhysMesh.Vertices[Index2] - PhysMesh.Vertices[Index0];
-			const float TriArea = FVector::CrossProduct(AB, AC).Size();
-
-			InvMasses[Index0] += TriArea;
-			InvMasses[Index1] += TriArea;
-			InvMasses[Index2] += TriArea;
-		}
-
-		PhysMesh.NumFixedVerts = 0;
-
-		const FPointWeightMap* const MaxDistances = PhysMesh.FindWeightMap(EWeightMapTargetCommon::MaxDistance);
-		const TFunction<bool(int32)> IsKinematic = (!MaxDistances || !MaxDistances->Num()) ?
-			TFunction<bool(int32)>([](int32)->bool { return false; }) :
-			TFunction<bool(int32)>([&MaxDistances](int32 Index)->bool { return (*MaxDistances)[Index] < SMALL_NUMBER; });  // For consistency, the default Threshold should be 0.1, not SMALL_NUMBER. But for backward compatibility it needs to be SMALL_NUMBER for now.
-
-		float MassSum = 0.0f;
-		for (int32 CurrVertIndex = 0; CurrVertIndex < NumVerts; ++CurrVertIndex)
-		{
-			float& InvMass = InvMasses[CurrVertIndex];
-
-			if (IsKinematic(CurrVertIndex))
+			if (ClothConfig.Value->NeedsTethers())
 			{
-				InvMass = 0.0f;
-				++PhysMesh.NumFixedVerts;
-			}
-			else
-			{
-				MassSum += InvMass;
-			}
-		}
-
-		if (MassSum > 0.0f)
-		{
-			const float MassScale = (float)(NumVerts - PhysMesh.NumFixedVerts) / MassSum;
-			for (float& InvMass : InvMasses)
-			{
-				if (InvMass != 0.0f)
+				if (ClothConfig.Value->TethersUseGeodesicDistance())
 				{
-					InvMass *= MassScale;
-					InvMass = 1.0f / InvMass;
+					bThethersUseGeodesicDistance = true;
 				}
-			}
-		}
-
-		// Calculate number of influences per vertex
-		for(int32 VertIndex = 0; VertIndex < NumVerts; ++VertIndex)
-		{
-			FClothVertBoneData& BoneData = PhysMesh.BoneData[VertIndex];
-			const uint16* BoneIndices = BoneData.BoneIndices;
-			const float* BoneWeights = BoneData.BoneWeights;
-
-			BoneData.NumInfluences = MAX_TOTAL_INFLUENCES;
-
-			int32 NumInfluences = 0;
-			for(int32 InfluenceIndex = 0; InfluenceIndex < MAX_TOTAL_INFLUENCES; ++InfluenceIndex)
-			{
-				if(BoneWeights[InfluenceIndex] == 0.0f || BoneIndices[InfluenceIndex] == INDEX_NONE)
+				else
 				{
-					BoneData.NumInfluences = NumInfluences;
-					break;
+					bThethersUseEuclideanDistance = true;
 				}
-				++NumInfluences;
 			}
 		}
 	}
-}
 
+	// Recalculate cached data
+	bool bHasClothChanged = false;
+	for (FClothLODDataCommon& CurrentLodData : LodData)
+	{
+		FClothPhysicalMeshData& PhysMesh = CurrentLodData.PhysicalMeshData;
+
+		if (bNeedsInverseMasses)
+		{
+			PhysMesh.CalculateInverseMasses();
+			bHasClothChanged = true;
+		}
+
+		if (bNeedsNumInfluences)
+		{
+			PhysMesh.CalculateNumInfluences();
+			bHasClothChanged = true;
+		}
+
+		if (bNeedsSelfCollisionData)
+		{
+			PhysMesh.BuildSelfCollisionData(SelfCollisionRadius);
+			bHasClothChanged = true;
+		}
+
+		if (bNeedsTethers)
+		{
+			PhysMesh.CalculateTethers(bThethersUseEuclideanDistance, bThethersUseGeodesicDistance);
+			bHasClothChanged = true;
+		}
+	}
+
+	// Inform the simulations that the cloth has changed
+	if (bHasClothChanged)
+	{
+		ForEachInteractorUsingClothing([](UClothingSimulationInteractor* InInteractor)
+		{
+			if (InInteractor)
+			{
+				InInteractor->ClothConfigUpdated();
+			}
+		});
+	}
+}
+#endif // #if WITH_EDITORONLY_DATA
+
+#if WITH_EDITOR
 int32 UClothingAssetCommon::AddNewLod()
 {
 	return LodData.AddDefaulted();
@@ -1235,10 +1636,19 @@ void UClothingAssetCommon::PostEditChangeChainProperty(FPropertyChangedChainEven
 
 	if (ChainEvent.ChangeType != EPropertyChangeType::Interactive)
 	{
-		if (ChainEvent.Property->GetFName() == FName("SelfCollisionRadius") ||
-			ChainEvent.Property->GetFName() == FName("SelfCollisionCullScale"))
+		const FName& PropertyName = ChainEvent.PropertyChain.GetActiveMemberNode() && ChainEvent.PropertyChain.GetActiveMemberNode()->GetNextNode() ?
+			ChainEvent.PropertyChain.GetActiveMemberNode()->GetNextNode()->GetValue()->GetFName() : NAME_None;
+
+		if (PropertyName == FName("bUseSelfCollisionSpheres") ||
+			PropertyName == FName("SelfCollisionSphereRadius") ||
+			PropertyName == FName("SelfCollisionSphereRadiusCullMultiplier"))
 		{
-			BuildSelfCollisionData();
+			InvalidateFlaggedCachedData(EClothingCachedDataFlagsCommon::SelfCollisionData);
+			bReregisterComponents = true;
+		}
+		else if (PropertyName == FName("bUseGeodesicDistance"))
+		{
+			InvalidateFlaggedCachedData(EClothingCachedDataFlagsCommon::Tethers);
 			bReregisterComponents = true;
 		}
 		else if(ChainEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(UClothingAssetCommon, PhysicsAsset))
@@ -1268,3 +1678,4 @@ void UClothingAssetCommon::PostEditChangeChainProperty(FPropertyChangedChainEven
 
 
 #undef LOCTEXT_NAMESPACE
+

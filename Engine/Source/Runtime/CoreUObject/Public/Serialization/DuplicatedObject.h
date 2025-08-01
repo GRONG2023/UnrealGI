@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/WeakObjectPtr.h"
 
 /**
  * Information about a duplicated object
@@ -11,18 +12,15 @@
 struct FDuplicatedObject
 {
 	/** The duplicated object */
-	UObject* DuplicatedObject;
+	TWeakObjectPtr<UObject> DuplicatedObject;
 
 	FDuplicatedObject()
-		: DuplicatedObject(NULL)
 	{
-
 	}
 
 	FDuplicatedObject( UObject* InDuplicatedObject )
 		: DuplicatedObject( InDuplicatedObject )
 	{
-
 	}
 
 	/**
@@ -30,7 +28,7 @@ struct FDuplicatedObject
 	 */
 	FORCEINLINE bool IsDefault()
 	{
-		return DuplicatedObject == NULL;
+		return DuplicatedObject.IsExplicitlyNull();
 	}
 };
 

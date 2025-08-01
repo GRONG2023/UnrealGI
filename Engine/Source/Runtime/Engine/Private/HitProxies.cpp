@@ -5,7 +5,8 @@
 =============================================================================*/
 
 #include "HitProxies.h"
-#include "Misc/ScopeLock.h"
+#include "Elements/Framework/TypedElementHandle.h"
+#include "GenericPlatform/ICursor.h"
 
 /// @cond DOXYGEN_WARNINGS
 
@@ -124,6 +125,16 @@ bool HHitProxy::IsA(HHitProxyType* TestType) const
 		}
 	}
 	return bIsInstance;
+}
+
+EMouseCursor::Type HHitProxy::GetMouseCursor()
+{
+	return EMouseCursor::Default;
+}
+
+FTypedElementHandle HHitProxy::GetElementHandle() const
+{
+	return FTypedElementHandle();
 }
 
 HHitProxy* GetHitProxyById(FHitProxyId Id)

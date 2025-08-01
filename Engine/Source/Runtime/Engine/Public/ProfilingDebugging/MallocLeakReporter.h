@@ -6,6 +6,7 @@
 #include "HAL/MallocLeakDetection.h"
 #include "Delegates/Delegate.h"
 #include "Delegates/DelegateCombinations.h"
+#include "Containers/Ticker.h"
 
 
 /**
@@ -33,7 +34,7 @@
 	Reports are written to the profiling dir, e,g GameName/Saved/Profiling/SessionName
 
  */
-class ENGINE_API FMallocLeakReporter
+class FMallocLeakReporter
 {
 	DECLARE_MULTICAST_DELEGATE_TwoParams(FMallocLeakReportDelegate, const int32, const int32);
 
@@ -51,7 +52,7 @@ public:
 	};
 
 	/** Return singleton instance */
-	static FMallocLeakReporter& Get();
+	static ENGINE_API FMallocLeakReporter& Get();
 
 	/**
 	 * Starts tracking allocations.
@@ -59,17 +60,17 @@ public:
 	 * @param: 	FilterSize		Only track allocations >= this value in KB. Higher values affect performance less
 	 * @param: 	ReportOnTime	Write out a report every N seconds
 	 * @return: void		
-	*/void		Start(int32 FilterSize = 0, float ReportOnTime = 0.0f);
+	*/ENGINE_API void		Start(int32 FilterSize = 0, float ReportOnTime = 0.0f);
 
 	/**
 	 * Stop tracking leaks
 	*/
-	void		Stop();
+	ENGINE_API void		Stop();
 
 	/**
 	 * Clears all accumulated data
 	*/
-	void		Clear();
+	ENGINE_API void		Clear();
 
 	/**
 	* Returns our enabled state
@@ -81,12 +82,12 @@ public:
 	/**
 	 *	Writes out a set of reports according to our defaults
 	 */
-	int32		WriteReports(const uint32 ReportFlags= EReportOption::ReportAll);
+	ENGINE_API int32		WriteReports(const uint32 ReportFlags= EReportOption::ReportAll);
 
 	/**
 	 *	Writes out a report according to the passed in options
 	 */
-	int32		WriteReport(const TCHAR* ReportName, const FMallocLeakReportOptions& Options);
+	ENGINE_API int32		WriteReport(const TCHAR* ReportName, const FMallocLeakReportOptions& Options);
 
 	/**
 	 * Sets default options for what are considered memory leaks
@@ -115,17 +116,17 @@ protected:
 	/**
 	 *	Private constructor
 	 */
-	FMallocLeakReporter();
+	ENGINE_API FMallocLeakReporter();
 
 	/**
 	 *	Called internally to generate rate checkpoints
 	 */
-	void		Checkpoint();
+	ENGINE_API void		Checkpoint();
 
 	bool						Enabled;
 	int32						ReportCount;
-	FDelegateHandle				CheckpointTicker;
-	FDelegateHandle				ReportTicker;
+	FTSTicker::FDelegateHandle				CheckpointTicker;
+	FTSTicker::FDelegateHandle				ReportTicker;
 	FMallocLeakReportDelegate	ReportDelegate;
 
 	// Report vars

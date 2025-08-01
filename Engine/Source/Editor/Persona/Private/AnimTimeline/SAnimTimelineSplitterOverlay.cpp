@@ -1,13 +1,29 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "SAnimTimelineSplitterOverlay.h"
+#include "AnimTimeline/SAnimTimelineSplitterOverlay.h"
+
+#include "Delegates/Delegate.h"
+#include "HAL/PlatformCrt.h"
+#include "Layout/ArrangedChildren.h"
+#include "Layout/ArrangedWidget.h"
+#include "Layout/ChildrenBase.h"
+#include "Layout/Geometry.h"
+#include "Layout/Visibility.h"
+#include "Math/Vector2D.h"
+#include "Misc/Attribute.h"
+#include "SlotBase.h"
+#include "Types/SlateEnums.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Layout/SBox.h"
+
+struct FCaptureLostEvent;
+struct FPointerEvent;
 
 void SAnimTimelineSplitterOverlay::Construct( const FArguments& InArgs )
 {
 	SetVisibility(EVisibility::SelfHitTestInvisible);
 
-	Splitter = SNew(SSplitter) = InArgs;
+	Splitter = SArgumentNew(InArgs, SSplitter);
 	Splitter->SetVisibility(EVisibility::HitTestInvisible);
 	AddSlot()
 	[
@@ -40,9 +56,9 @@ void SAnimTimelineSplitterOverlay::OnArrangeChildren( const FGeometry& AllottedG
 		if (Splitter->GetOrientation() == EOrientation::Orient_Horizontal)
 		{
 			SlotPadding.Add(FMargin(
-				ThisGeometry.Position.X + ThisGeometry.GetLocalSize().X,
+				ThisGeometry.Position.X + static_cast<float>(ThisGeometry.GetLocalSize().X),
 				0,
-				AllottedGeometry.Size.X - NextGeometry.Position.X,
+				static_cast<float>(AllottedGeometry.Size.X) - NextGeometry.Position.X,
 				0)
 			);
 		}
@@ -50,9 +66,9 @@ void SAnimTimelineSplitterOverlay::OnArrangeChildren( const FGeometry& AllottedG
 		{
 			SlotPadding.Add(FMargin(
 				0,
-				ThisGeometry.Position.Y + ThisGeometry.GetLocalSize().Y,
+				ThisGeometry.Position.Y + static_cast<float>(ThisGeometry.GetLocalSize().Y),
 				0,
-				AllottedGeometry.Size.Y - NextGeometry.Position.Y)
+				static_cast<float>(AllottedGeometry.Size.Y) - NextGeometry.Position.Y)
 			);
 		}
 	}

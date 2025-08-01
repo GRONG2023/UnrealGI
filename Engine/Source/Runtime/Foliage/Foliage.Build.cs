@@ -12,14 +12,7 @@ public class Foliage: ModuleRules
 				"CoreUObject",
                 "Engine",
 				"RenderCore",
-				"RHI"
 			}
 		);
-
-        PrivateIncludePaths.AddRange(
-            new string[] {
-                "Runtime/Foliage/Private"
-            })
-		;
 	}
 }

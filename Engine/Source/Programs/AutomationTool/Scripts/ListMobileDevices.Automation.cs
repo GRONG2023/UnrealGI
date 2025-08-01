@@ -1,9 +1,10 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
 using System.Collections.Generic;
 using AutomationTool;
 using UnrealBuildTool;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
 
 namespace AutomationScripts.Automation
 {
@@ -11,11 +12,11 @@ namespace AutomationScripts.Automation
 	{
 		public override void ExecuteBuild()
 		{
-			LogInformation("======= ListMobileDevices - Start =======");
+			Logger.LogInformation("======= ListMobileDevices - Start =======");
 
 			var GlobalParams = new ProjectParams(
 				Command: this,
-				RawProjectPath: new FileReference(@"D:\UE-Main\UE4\Samples\Games\TappyChicken\TappyChicken.uproject")
+				RawProjectPath: new FileReference(@"D:\UE\Samples\Games\TappyChicken\TappyChicken.uproject")
 				);
 
 			if (ParseParam("android"))
@@ -28,7 +29,7 @@ namespace AutomationScripts.Automation
 				throw new AutomationException("iOS is not yet implemented.");
 			}
 
-			LogInformation("======= ListMobileDevices - Done ========");
+			Logger.LogInformation("======= ListMobileDevices - Done ========");
 		}
 
 		private static void GetConnectedDevices(ProjectParams Params, Platform TargetPlatform)
@@ -41,7 +42,7 @@ namespace AutomationScripts.Automation
 			{
 				foreach (var DeviceName in ConnectedDevices)
 				{
-					LogInformation("Device:{0}:{1}", PlatformName, DeviceName);
+					Logger.LogInformation("Device:{PlatformName}:{DeviceName}", PlatformName, DeviceName);
 				}
 			}
 			catch

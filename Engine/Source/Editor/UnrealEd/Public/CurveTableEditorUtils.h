@@ -4,8 +4,11 @@
 #include "CoreMinimal.h"
 #include "Engine/CurveTable.h"
 #include "Kismet2/ListenerManager.h"
+#include "UObject/NameTypes.h"
 
-struct UNREALED_API FCurveTableEditorUtils
+class UCurveTable;
+
+struct FCurveTableEditorUtils
 {
 	enum class ECurveTableChangeInfo
 	{
@@ -27,7 +30,7 @@ struct UNREALED_API FCurveTableEditorUtils
 	public:
 		UNREALED_API static FCurveTableEditorManager& Get();
 
-		class UNREALED_API ListenerType : public InnerListenerType<FCurveTableEditorManager>
+		class ListenerType : public InnerListenerType<FCurveTableEditorManager>
 		{
 		public:
 			virtual void SelectionChange(const UCurveTable* CurveTable, FName RowName) { }
@@ -36,6 +39,6 @@ struct UNREALED_API FCurveTableEditorUtils
 
 	typedef FCurveTableEditorManager::ListenerType INotifyOnCurveTableChanged;
 
-	static void BroadcastPreChange(UCurveTable* DataTable, ECurveTableChangeInfo Info);
-	static void BroadcastPostChange(UCurveTable* DataTable, ECurveTableChangeInfo Info);
+	static UNREALED_API void BroadcastPreChange(UCurveTable* DataTable, ECurveTableChangeInfo Info);
+	static UNREALED_API void BroadcastPostChange(UCurveTable* DataTable, ECurveTableChangeInfo Info);
 };

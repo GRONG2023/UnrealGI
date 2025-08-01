@@ -2,6 +2,7 @@
 
 #include "DesktopPlatformBase.h"
 #include "HAL/FileManager.h"
+#include "Logging/LogScopedVerbosityOverride.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/Guid.h"
@@ -9,13 +10,17 @@
 #include "Misc/FeedbackContext.h"
 #include "Misc/App.h"
 #include "Misc/EngineVersion.h"
+#include "Misc/ScopeExit.h"
 #include "Serialization/JsonTypes.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "String/LexFromString.h"
 #include "Modules/ModuleManager.h"
 #include "DesktopPlatformPrivate.h"
 #include "Misc/OutputDeviceRedirector.h"
-
+#include "Misc/ScopedSlowTask.h"
+#include "Misc/SecureHash.h"
+#include "String/RemoveFrom.h"
 
 #define LOCTEXT_NAMESPACE "DesktopPlatform"
 
@@ -151,7 +156,7 @@ bool FDesktopPlatformBase::GetEngineIdentifierFromRootDir(const FString &RootDir
 	}
 
 	// Otherwise just try to add it
-	return RegisterEngineInstallation(RootDir, OutIdentifier);
+	return RegisterEngineInstallation(NormalizedRootDir, OutIdentifier);
 }
 
 bool FDesktopPlatformBase::GetDefaultEngineIdentifier(FString &OutId)
@@ -235,7 +240,7 @@ bool FDesktopPlatformBase::TryGetEngineVersion(const FString& RootDir, FEngineVe
 				}
 
 				int EncodedChangelist = (IsLicenseeVersion == 0)? Changelist : FEngineVersionBase::EncodeLicenseeChangelist(Changelist);
-				OutVersion = FEngineVersion(MajorVersion, MinorVersion, PatchVersion, EncodedChangelist, BranchName);
+				OutVersion = FEngineVersion(IntCastChecked<uint16>(MajorVersion), IntCastChecked<uint16>(MinorVersion), IntCastChecked<uint16>(PatchVersion), EncodedChangelist, BranchName);
 				return true;
 			}
 		}
@@ -276,14 +281,14 @@ bool FDesktopPlatformBase::TryGetEngineVersion(const FString& RootDir, FEngineVe
 					// Parse an identifier. Exact C rules for an identifier don't really matter; we just need alphanumeric sequences.
 					const TCHAR* TokenStart = TextPos++;
 					while(FChar::IsIdentifier(*TextPos)) TextPos++;
-					Tokens.Add(FString(TextPos - TokenStart, TokenStart));
+					Tokens.Add(FString::ConstructFromPtrSize(TokenStart, UE_PTRDIFF_TO_INT32(TextPos - TokenStart)));
 				}
 				else if(*TextPos == '\"')
 				{
 					// Parse a string
 					const TCHAR* TokenStart = TextPos++;
 					while(*TextPos != 0 && (TextPos == TokenStart + 1 || *(TextPos - 1) != '\"')) TextPos++;
-					Tokens.Add(FString(TextPos - TokenStart, TokenStart));
+					Tokens.Add(FString::ConstructFromPtrSize(TokenStart, UE_PTRDIFF_TO_INT32(TextPos - TokenStart)));
 				}
 				else if(*TextPos == '/' && *(TextPos + 1) == '/')
 				{
@@ -300,7 +305,7 @@ bool FDesktopPlatformBase::TryGetEngineVersion(const FString& RootDir, FEngineVe
 				else
 				{
 					// Take a single symbol character
-					Tokens.Add(FString(1, TextPos));
+					Tokens.Add(FString::ConstructFromPtrSize(TextPos, 1));
 					TextPos++;
 				}
 			}
@@ -345,7 +350,7 @@ bool FDesktopPlatformBase::TryGetEngineVersion(const FString& RootDir, FEngineVe
 		if(MajorVersion != -1 && MinorVersion != -1 && PatchVersion != -1)
 		{
 			int EncodedChangelist = (IsLicenseeVersion == 0)? Changelist : FEngineVersionBase::EncodeLicenseeChangelist(Changelist);
-			OutVersion = FEngineVersion(MajorVersion, MinorVersion, PatchVersion, EncodedChangelist, BranchName);
+			OutVersion = FEngineVersion(IntCastChecked<uint16>(MajorVersion), IntCastChecked<uint16>(MinorVersion), IntCastChecked<uint16>(PatchVersion), EncodedChangelist, BranchName);
 			return true;
 		}
 	}
@@ -375,7 +380,7 @@ bool FDesktopPlatformBase::TryParseStockEngineVersion(const FString& Identifier,
 		return false;
 	}
 
-	OutVersion = FEngineVersion(Major, Minor, 0, 0, TEXT(""));
+	OutVersion = FEngineVersion(IntCastChecked<uint16>(Major), IntCastChecked<uint16>(Minor), 0, 0, TEXT(""));
 	return true;
 }
 
@@ -565,10 +570,10 @@ bool FDesktopPlatformBase::CompileGameProject(const FString& RootDir, const FStr
 	// Build the argument list
 	FString Arguments = FString::Printf(TEXT("%s %s"), ModuleManager.GetUBTConfiguration(), FPlatformMisc::GetUBTPlatform());
 
-	// Append the project name if it's a foreign project. Otherwise compile UE4Editor.
+	// Append the project name if it's a foreign project. Otherwise compile UnrealEditor.
 	if ( ProjectFileName.IsEmpty() )
 	{
-		Arguments = TEXT("UE4Editor ") + Arguments;
+		Arguments = TEXT("UnrealEditor ") + Arguments;
 	}
 	else
 	{
@@ -660,6 +665,7 @@ bool FDesktopPlatformBase::IsUnrealBuildToolAvailable()
 
 bool FDesktopPlatformBase::InvokeUnrealBuildToolSync(const FString& InCmdLineParams, FOutputDevice &Ar, bool bSkipBuildUBT, int32& OutReturnCode, FString& OutProcOutput)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FDesktopPlatformBase::InvokeUnrealBuildToolSync);
 	void* PipeRead = nullptr;
 	void* PipeWrite = nullptr;
 
@@ -717,6 +723,7 @@ FProcHandle FDesktopPlatformBase::InvokeUnrealBuildToolAsync(const FString& InCm
 			{
 				// Failed to build UBT
 				Ar.Log(TEXT("Failed to build UnrealBuildTool."));
+				UE_LOG(LogDesktopPlatform, Warning, TEXT("Failed to compile UnrealBuildTool (project file is '%s', exe path is '%s')"), *GetUnrealBuildToolProjectFileName(FPaths::RootDir()), *ExecutableFileName);
 				return FProcHandle();
 			}
 		}
@@ -728,26 +735,15 @@ FProcHandle FDesktopPlatformBase::InvokeUnrealBuildToolAsync(const FString& InCm
 
 	Ar.Logf(TEXT("Launching UnrealBuildTool... [%s %s]"), *ExecutableFileName, *CmdLineParams);
 
-#if PLATFORM_MAC
-	// On Mac we launch UBT with Mono
-	FString ScriptPath = FPaths::ConvertRelativePathToFull(FPaths::EngineDir() / TEXT("Build/BatchFiles/Mac/RunMono.sh"));
-	CmdLineParams = FString::Printf(TEXT("\"%s\" \"%s\" %s"), *ScriptPath, *ExecutableFileName, *CmdLineParams);
-	ExecutableFileName = TEXT("/bin/sh");
-#elif PLATFORM_LINUX
-	// Real men run Linux (with Mono??)
-	FString ScriptPath = FPaths::ConvertRelativePathToFull(FPaths::EngineDir() / TEXT("Build/BatchFiles/Linux/RunMono.sh"));
-	CmdLineParams = FString::Printf(TEXT("\"%s\" \"%s\" %s"), *ScriptPath, *ExecutableFileName, *CmdLineParams);
-	ExecutableFileName = TEXT("/bin/bash");
-#endif
-
 	// Run UnrealBuildTool
 	const bool bLaunchDetached = false;
 	const bool bLaunchHidden = true;
 	const bool bLaunchReallyHidden = bLaunchHidden;
 
-	FProcHandle ProcHandle = FPlatformProcess::CreateProc(*ExecutableFileName, *CmdLineParams, bLaunchDetached, bLaunchHidden, bLaunchReallyHidden, NULL, 0, NULL, OutWritePipe);
+	FProcHandle ProcHandle = FPlatformProcess::CreateProc(*ExecutableFileName, *CmdLineParams, bLaunchDetached, bLaunchHidden, bLaunchReallyHidden, NULL, 0, NULL, OutWritePipe, OutReadPipe);
 	if (!ProcHandle.IsValid())
 	{
+		UE_LOG(LogDesktopPlatform, Warning, TEXT("Failed to launch UnrealBuildTool (exe path is '%s')"), *ExecutableFileName);
 		Ar.Logf(TEXT("Failed to launch Unreal Build Tool. (%s)"), *ExecutableFileName);
 	}
 
@@ -760,41 +756,431 @@ bool FDesktopPlatformBase::RunUnrealBuildTool(const FText& Description, const FS
 	return static_cast<IDesktopPlatform*>(this)->RunUnrealBuildTool(Description, RootDir, Arguments, Warn, ExitCode);
 }
 
+bool FDesktopPlatformBase::IsUnrealBuildToolRunning()
+{
+	FString RunsDir = FPaths::Combine(FPaths::EngineIntermediateDir(), TEXT("UbtRuns"));
+	if (!FPaths::DirectoryExists(RunsDir))
+	{
+		return false;
+	}
+
+	bool bIsRunning = false;
+	IFileManager::Get().IterateDirectory(*RunsDir, [&bIsRunning](const TCHAR* Pathname, bool bIsDirectory)
+		{
+			if (!bIsDirectory)
+			{
+				bool bDeleteFile = true;
+
+				FString Filename = FPaths::GetBaseFilename(FString(Pathname));
+				const TCHAR* Delim = FCString::Strchr(*Filename, '_');
+				if (Delim != nullptr)
+				{
+					FStringView Pid(*Filename, UE_PTRDIFF_TO_INT32(Delim - *Filename));
+					int ProcessId = 0;
+					LexFromString(ProcessId, Pid);
+					FString EntryFullPath = FPlatformProcess::GetApplicationName(ProcessId);
+					if (!EntryFullPath.IsEmpty())
+					{
+						EntryFullPath.ToUpperInline();
+						const auto Utf8String = StringCast<UTF8CHAR>(*EntryFullPath);
+						FMD5Hash Hash;
+						LexFromString(Hash, Delim + 1);
+
+						FMD5 Md5Gen;
+						Md5Gen.Update(reinterpret_cast<const uint8*>(Utf8String.Get()), Utf8String.Length());
+						FMD5Hash TestHash;
+						TestHash.Set(Md5Gen);
+						if (Hash == TestHash)
+						{
+							bDeleteFile = false;
+							bIsRunning = true;
+						}
+					}
+					if (bDeleteFile)
+					{
+						IFileManager::Get().Delete(Pathname);
+					}
+				}
+			}
+			return true;
+		});
+
+	return bIsRunning;
+}
+
+bool FDesktopPlatformBase::GetOidcAccessToken(const FString& RootDir, const FString& ProjectFileName, const FString& ProviderIdentifier, bool bUnattended, FFeedbackContext* Warn, FString& OutToken, FDateTime& OutTokenExpiresAt, bool& bOutWasInteractiveLogin)
+{
+	IFileManager::Get().MakeDirectory(*FPaths::ProjectIntermediateDir(), /*bTree*/ true);
+	FString ResultFilePath = FPaths::CreateTempFilename(*FPaths::ProjectIntermediateDir(), TEXT("oidcToken.json"));
+	ON_SCOPE_EXIT
+	{
+		IFileManager::Get().Delete(*ResultFilePath, false /* RequireExists */, true /* EvenIfReadOnly */, true /* Quiet */);
+	};
+
+	FString Arguments = TEXT(" ");
+	Arguments += FString::Printf(TEXT(" --Service=\"%s\""), *ProviderIdentifier);
+	Arguments += FString::Printf(TEXT(" --OutFile=\"%s\""), *ResultFilePath);
+	if (ProjectFileName.Len() > 0)
+	{
+		Arguments += FString::Printf(TEXT(" --project=\"%s\""), *IFileManager::Get().ConvertToAbsolutePathForExternalAppForRead(*FPaths::GetPath(*ProjectFileName)));
+	}
+	FString UnattendedArguments = Arguments;
+	UnattendedArguments += TEXT(" --Unattended=true");
+
+	// first we attempt to fetch a token using cached offline tokens, thus setting unattended
+	bool bRes = true;
+	int32 ExitCode;
+	FString ProcessStdout;
+	bRes = InvokeOidcTokenToolSync(LOCTEXT("GetOidcAccessToken", "Fetching OIDC Access Token..."), RootDir, UnattendedArguments, Warn, ExitCode, ProcessStdout);
+
+	bOutWasInteractiveLogin = false;
+
+	if (ExitCode == 10)
+	{
+		bRes = GetOidcAccessTokenInteractive(RootDir, Arguments, bUnattended, Warn, ExitCode);
+
+		bOutWasInteractiveLogin = true;
+
+		if (!bRes)
+		{
+			if (bUnattended)
+			{
+				UE_LOG(LogDesktopPlatform, Warning, TEXT("Unable to allocate an access token. Unattended set so unable to complete interactive login. Make sure you start the editor and login once or log in using UGS or using the UGS cli command 'login'. Provider used: '%s'. Ran OidcToken (project file is '%s', exe path is '%s')"), *ProviderIdentifier, *ProjectFileName, *GetOidcTokenExecutableFilename(RootDir));
+			}
+			else
+			{
+				UE_LOG(LogDesktopPlatform, Error, TEXT("Unable to allocate an access token. Interactive login failed, make sure you are assigned access and are able to login in the created browser window. Provider used: '%s'. Ran OidcToken (project file is '%s', exe path is '%s')"), *ProviderIdentifier, *ProjectFileName, *GetOidcTokenExecutableFilename(RootDir));
+			}
+			return false;
+		}
+	}
+
+	if (!bRes)
+	{
+		UE_LOG(LogDesktopPlatform, Warning, TEXT("Failed to run OidcToken (project file is '%s', exe path is '%s'). ExitCode: %i"), *ProjectFileName, *GetOidcTokenExecutableFilename(RootDir), ExitCode);
+		return false;
+	}
+	
+	// Read the file to a string
+	FString TokenText;
+	if(FFileHelper::LoadFileToString(TokenText, *ResultFilePath))
+	{
+		// deserialize the json file
+		TSharedPtr< FJsonObject > Object;
+		TSharedRef< TJsonReader<> > Reader = TJsonReaderFactory<>::Create(TokenText);
+		if(FJsonSerializer::Deserialize(Reader, Object) && Object.IsValid())
+		{
+			FString Token;
+			FString ExpiresAt;
+			if(Object->TryGetStringField(TEXT("Token"), Token) && Object->TryGetStringField(TEXT("ExpiresAt"), ExpiresAt))
+			{
+				OutToken = Token;
+
+				FDateTime::ParseIso8601(*ExpiresAt, OutTokenExpiresAt);
+
+				// Remove the output file if its still around
+				IFileManager::Get().Delete(*ResultFilePath, true, false, true);
+
+				return true;
+			}
+		}
+	}
+
+	UE_LOG(LogDesktopPlatform, Warning, TEXT("Failed to run OidcToken (project file is '%s', exe path is '%s'). No result file found at '%s', closed with exit code: %d"), *ProjectFileName, *GetOidcTokenExecutableFilename(RootDir), *ResultFilePath, ExitCode);
+
+	// Remove the output file if its still around
+	IFileManager::Get().Delete(*ResultFilePath, true, false, true);
+	return false;
+}
+
+
+bool FDesktopPlatformBase::GetOidcTokenStatus(const FString& RootDir, const FString& ProjectFileName, const FString& ProviderIdentifier, FFeedbackContext* Warn, int& OutStatus)
+{
+	IFileManager::Get().MakeDirectory(*FPaths::ProjectIntermediateDir(), /*bTree*/ true);
+	FString ResultFilePath = FPaths::CreateTempFilename(*FPaths::ProjectIntermediateDir(), TEXT("oidcToken-status.json"));
+
+	FString Arguments = TEXT(" ");
+	Arguments += FString::Printf(TEXT(" --Service=\"%s\""), *ProviderIdentifier);
+	Arguments += FString::Printf(TEXT(" --OutFile=\"%s\""), *ResultFilePath);
+	Arguments += FString::Printf(TEXT(" --project=\"%s\""),  *IFileManager::Get().ConvertToAbsolutePathForExternalAppForRead(*FPaths::ProjectDir()));
+
+	bool bRes = true;
+	int32 ExitCode;
+	FString ProcessStdout;
+	bRes = InvokeOidcTokenToolSync(LOCTEXT("GetOidcAccessTokenStatus", "Fetching OIDC Access Token Status..."), RootDir, Arguments, Warn, ExitCode, ProcessStdout);
+
+	if (!bRes)
+	{
+		UE_LOG(LogDesktopPlatform, Warning, TEXT("Failed to run OidcToken to determine token status (project file is '%s', exe path is '%s')"), *ProjectFileName, *GetOidcTokenExecutableFilename(RootDir));
+		return false;
+	}
+	
+	// Read the file to a string
+	FString TokenText;
+	if(FFileHelper::LoadFileToString(TokenText, *ResultFilePath))
+	{
+		// deserialize the json file
+		TSharedPtr< FJsonObject > Object;
+		TSharedRef< TJsonReader<> > Reader = TJsonReaderFactory<>::Create(TokenText);
+		if(FJsonSerializer::Deserialize(Reader, Object) && Object.IsValid())
+		{
+			int Status;
+			if(Object->TryGetNumberField(TEXT("Status"), Status))
+			{
+				OutStatus = Status;
+
+				// Remove the output file if its still around
+				IFileManager::Get().Delete(*ResultFilePath, true, false, true);
+
+				return true;
+			}
+		}
+	}
+
+	// Remove the output file if its still around
+	IFileManager::Get().Delete(*ResultFilePath, true, false, true);
+	return false;
+}
+
+bool FDesktopPlatformBase::GetOidcAccessTokenInteractive(const FString& RootDir, const FString& Arguments, bool bUnattended, FFeedbackContext* Warn, int32& OutReturnCode)
+{
+	EAppReturnType::Type userAcknowledgedResult = EAppReturnType::Yes;
+
+	check(GConfig && GConfig->IsReadyForUse());
+	
+	bool bSkipInitialAcknowledgement = false;
+	GConfig->GetBool(TEXT("/Script/UnrealEd.EditorSettings"), TEXT("InteractiveOidcWithoutAcknowledgement"), bSkipInitialAcknowledgement, GEditorSettingsIni);
+
+	if (!bSkipInitialAcknowledgement)
+	{
+		if (bUnattended)
+		{
+			OutReturnCode = -1;
+			return false;
+		}
+
+		FText OidcInteractivePromptTitle = NSLOCTEXT("OidcToken", "OidcToken_InteractiveLaunchPromptTitle", "Unreal Engine - Authentication Required");
+		FText OidcInteractiveLaunchPromptText = NSLOCTEXT("OidcToken", "OidcToken_InteractiveLaunch", "Your team's preferred DDC (Derived Data Cache) requires you to log in.\n\nClick Yes to open the authentication page in your web browser, or Yes To All to always proceed to browser authentication without a prompt.\n\nClick No to decline authentication and work with a different shared or local DDC instead. However, this may cause delays while the editor prepares the assets you need.");
+		userAcknowledgedResult = FPlatformMisc::MessageBoxExt(EAppMsgType::YesNoYesAll, *OidcInteractiveLaunchPromptText.ToString(), *OidcInteractivePromptTitle.ToString());
+
+		if (userAcknowledgedResult == EAppReturnType::YesAll)
+		{
+			GConfig->SetBool(TEXT("/Script/UnrealEd.EditorSettings"), TEXT("InteractiveOidcWithoutAcknowledgement"), true, GEditorSettingsIni);
+			userAcknowledgedResult = EAppReturnType::Yes;
+		}
+	}
+
+	if (userAcknowledgedResult != EAppReturnType::Yes)
+	{
+		OutReturnCode = -1;
+		return false;
+	}
+
+	// user has acknowledged the login, we update the editor progress and then we run oidc token to spawn the browser and prompt the login
+
+	FScopedSlowTask WaitForOidcTokenSlowTask(0, NSLOCTEXT("OidcToken", "OidcToken_WaitingForToken", "Waiting for OidcToken to finish login"));
+
+	// run the oidc token app and wait for it to finish, prompting users if they have not logged in after a while
+	OutReturnCode = 1;
+	void* PipeRead = nullptr;
+	void* PipeWrite = nullptr;
+
+	verify(FPlatformProcess::CreatePipe(PipeRead, PipeWrite));
+
+	bool bInvoked = false;
+	FProcHandle ProcHandle = InvokeOidcTokenToolAsync(Arguments, PipeRead, PipeWrite);
+
+	if (ProcHandle.IsValid())
+	{
+		bInvoked = true;
+	}
+
+	uint64 WaitStartTime = FPlatformTime::Cycles64();
+	enum class EWaitDurationPhase
+	{
+		Initial,
+		Prompt,
+		Waiting
+	} DurationPhase = EWaitDurationPhase::Initial;
+	bool bIsFinished = false;
+	while (!bIsFinished)
+	{
+		// check if token app has finished running
+		bIsFinished = !FPlatformProcess::IsProcRunning(ProcHandle);
+
+		double WaitDuration = FPlatformTime::ToSeconds64(FPlatformTime::Cycles64() - WaitStartTime);
+		if (DurationPhase == EWaitDurationPhase::Initial)
+		{
+			// Note that the dialog may not show up when tokens are allocated early in the launch cycle, but this will at least ensure
+			// the splash screen is refreshed with the appropriate text status message.
+			WaitForOidcTokenSlowTask.MakeDialog(true, false);
+			UE_LOG(LogDesktopPlatform, Display, TEXT("Waiting for OidcToken to finish login..."));
+			DurationPhase = EWaitDurationPhase::Prompt;
+		}
+		// once we have waited for 30 seconds without success we give the user a option to abort, or if unattended, abort without prompting
+		else if (WaitDuration > 30.0 && DurationPhase == EWaitDurationPhase::Prompt)
+		{
+			if (bUnattended)
+			{
+				bIsFinished = !FPlatformProcess::IsProcRunning(ProcHandle);
+				break;
+			}
+
+			FText OidcLongWaitPromptTitle = NSLOCTEXT("OidcToken", "OidcToken_LongWaitPromptTitle", "Wait for user login?");
+			FText OidcLongWaitPromptText = NSLOCTEXT("OidcToken", "OidcToken_LongWaitPromptText", "Login is taking a long time, make sure you have entered your credentials in your browser window. It can be in a tab in an already existing window. Keep waiting?");
+			if (FPlatformMisc::MessageBoxExt(EAppMsgType::YesNo, *OidcLongWaitPromptText.ToString(), *OidcLongWaitPromptTitle.ToString()) == EAppReturnType::No)
+			{
+				bIsFinished = !FPlatformProcess::IsProcRunning(ProcHandle);
+				break;
+			}
+			// change phase so we do not prompt the user again
+			DurationPhase = EWaitDurationPhase::Waiting;
+		}
+
+		if (WaitForOidcTokenSlowTask.ShouldCancel())
+		{
+			bIsFinished = !FPlatformProcess::IsProcRunning(ProcHandle);
+			break;
+		}
+		FPlatformProcess::Sleep(0.1f);
+	}
+
+	if (!bIsFinished)
+	{
+		OutReturnCode = -1;
+		FPlatformProcess::ClosePipe(PipeRead, PipeWrite);
+		FPlatformProcess::TerminateProc(ProcHandle);
+		return false;
+	}
+
+	bool bGotReturnCode = FPlatformProcess::GetProcReturnCode(ProcHandle, &OutReturnCode);		
+	check(bGotReturnCode);
+	FPlatformProcess::ClosePipe(PipeRead, PipeWrite);
+
+	return bInvoked;
+}
+
+bool FDesktopPlatformBase::InvokeOidcTokenToolSync(const FText& Description, const FString& RootDir, const FString& Arguments, FFeedbackContext* Warn, int32& OutReturnCode, FString& OutProcOutput)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(FDesktopPlatformBase::InvokeOidcTokenToolSync);
+	OutReturnCode = 1;
+
+	void* PipeRead = nullptr;
+	void* PipeWrite = nullptr;
+
+	verify(FPlatformProcess::CreatePipe(PipeRead, PipeWrite));
+
+	bool bInvoked = false;
+	FProcHandle ProcHandle = InvokeOidcTokenToolAsync(Arguments, PipeRead, PipeWrite);
+	if (ProcHandle.IsValid())
+	{
+		// rather than waiting, we must flush the read pipe or UBT will stall if it writes out a ton of text to the console.
+		while (FPlatformProcess::IsProcRunning(ProcHandle))
+		{
+			OutProcOutput += FPlatformProcess::ReadPipe(PipeRead);
+			FPlatformProcess::Sleep(0.1f);
+		}		
+		bInvoked = true;
+		bool bGotReturnCode = FPlatformProcess::GetProcReturnCode(ProcHandle, &OutReturnCode);		
+		check(bGotReturnCode);
+	}
+	else
+	{
+		bInvoked = false;
+		OutReturnCode = -1;
+		OutProcOutput = TEXT("");
+	}
+
+
+	FPlatformProcess::ClosePipe(PipeRead, PipeWrite);
+
+	return bInvoked;
+}
+
+FProcHandle FDesktopPlatformBase::InvokeOidcTokenToolAsync(const FString& InArguments, void*& OutReadPipe, void*& OutWritePipe)
+{
+	FString CmdLineParams = InArguments;
+	FString ExecutableFileName = GetOidcTokenExecutableFilename(FPaths::RootDir());
+	UE_LOG(LogDesktopPlatform, Display, TEXT("Launching OidcToken... [%s %s]"), *ExecutableFileName, *CmdLineParams);
+
+	const bool bLaunchDetached = false;
+	const bool bLaunchHidden = true;
+	const bool bLaunchReallyHidden = bLaunchHidden;
+
+	FProcHandle ProcHandle = FPlatformProcess::CreateProc(*ExecutableFileName, *CmdLineParams, bLaunchDetached, bLaunchHidden, bLaunchReallyHidden, NULL, 0, NULL, OutWritePipe, OutReadPipe);
+	if (!ProcHandle.IsValid())
+	{
+		UE_LOG(LogDesktopPlatform, Warning, TEXT("Failed to launch OidcToken (exe path is '%s')"), *ExecutableFileName);
+	}
+
+	return ProcHandle;
+}
+
 struct FTargetFileVisitor : IPlatformFile::FDirectoryStatVisitor
 {
+	const TSet<FString>& OriginalTargetNames;
 	TSet<FString>& RemainingTargetNames;
 	FDateTime MaxDateTime;
 	TArray<FString> SubDirectories;
-	bool bSearchSubDirectories;
+	bool bSearchSubDirectories = true;
+	bool bSearchPluginForTargets = false;
+	bool bCacheInvalid = false;
 
-	FTargetFileVisitor(TSet<FString>& InRemainingTargetNames, FDateTime InMaxDateTime)
-		: RemainingTargetNames(InRemainingTargetNames)
+	FTargetFileVisitor(const TSet<FString>& InOriginalTargetNames, TSet<FString>& InRemainingTargetNames, FDateTime InMaxDateTime)
+		: OriginalTargetNames(InOriginalTargetNames)
+		, RemainingTargetNames(InRemainingTargetNames)
 		, MaxDateTime(InMaxDateTime)
-		, bSearchSubDirectories(false)
 	{
 	}
 
-	virtual bool Visit(const TCHAR* FileNameOrDirectory, const FFileStatData& StatData) override
+	virtual bool Visit(const TCHAR* InFileNameOrDirectory, const FFileStatData& StatData) override
 	{
 		if (StatData.bIsDirectory)
 		{
-			SubDirectories.Add(FileNameOrDirectory);
+			SubDirectories.Add(InFileNameOrDirectory);
 			return true;
 		}
-
-		int32 Length = FCString::Strlen(FileNameOrDirectory);
-
-		static const TCHAR TargetExt[] = TEXT(".Target.cs");
-		static const int32 TargetExtLen = UE_ARRAY_COUNT(TargetExt) - 1;
-		if (Length > TargetExtLen && FCString::Stricmp(FileNameOrDirectory + Length - TargetExtLen, TargetExt) == 0)
-		{
-			FString TargetName = FPaths::GetCleanFilename(FString(Length - TargetExtLen, FileNameOrDirectory));
-			return (StatData.ModificationTime < MaxDateTime && RemainingTargetNames.Remove(TargetName) == 1);
-		}
 		
-		static const TCHAR ModuleExt[] = TEXT(".Build.cs");
-		static const int32 ModuleExtLen = UE_ARRAY_COUNT(ModuleExt) - 1;
-		if (Length > ModuleExtLen && FCString::Stricmp(FileNameOrDirectory + Length - ModuleExtLen, ModuleExt) == 0)
+		FStringView FileNameOrDirectory(InFileNameOrDirectory);
+
+		// NOTE: This code needs to behave the same as FindAllRulesSourceFiles in Rules.cs
+		if (FStringView WithoutExtension = UE::String::RemoveFromEnd(FileNameOrDirectory, TEXTVIEW(".Target.cs"));
+			WithoutExtension.Len() != FileNameOrDirectory.Len())
+		{
+			FString TargetName = FPaths::GetCleanFilename(FString(WithoutExtension));
+
+			// skip target rules that are platform extension or platform group specializations
+			// Matches logic found in QueryTargetsMode.cs WriteTargetInfo
+			FString Start, End;
+			if (TargetName.Split(TEXT("_"), &Start, &End) && OriginalTargetNames.Contains(Start))
+			{
+				return true;
+			}
+
+			if (StatData.ModificationTime >= MaxDateTime)
+			{	
+				UE_LOG(LogDesktopPlatform, Log, TEXT("Found target file %s newer than cache"), InFileNameOrDirectory);
+				bCacheInvalid = true;
+			}
+			if (RemainingTargetNames.Remove(TargetName) != 1)
+			{
+				UE_LOG(LogDesktopPlatform, Log, TEXT("Found target file %s not present in cache"), InFileNameOrDirectory);
+				bCacheInvalid = true;
+			}
+			
+			return !bCacheInvalid;
+		}
+		else if (FileNameOrDirectory.EndsWith(TEXTVIEW(".uplugin")))
+		{
+			bSearchSubDirectories = false;
+			bSearchPluginForTargets = true;
+			return true;
+		}
+		else if (FileNameOrDirectory.EndsWith(TEXTVIEW(".Build.cs"))
+			|| FileNameOrDirectory.EndsWith(TEXTVIEW(".automation.csproj"))
+		 	|| FileNameOrDirectory.EndsWith(TEXTVIEW(".ubtplugin.csproj"))
+			|| FileNameOrDirectory.EndsWith(TEXTVIEW(".ubtignore"))
+		)
 		{
 			bSearchSubDirectories = false;
 			return true;
@@ -804,14 +1190,16 @@ struct FTargetFileVisitor : IPlatformFile::FDirectoryStatVisitor
 	}
 };
 
-bool IsTargetInfoValid(const TArray<FTargetInfo>& Targets, const FString& SourceDir, const FDateTime& LastModifiedTime)
+// Note: This function must find all target files found by CreateProjectRulesAssembly in RulesCompiler.cs
+bool IsTargetInfoValid(const TArray<FTargetInfo>& Targets, TArray<FString>& DirectoryNames, const FDateTime& LastModifiedTime)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE_STR("IsTargetInfoValid");
 	if (FApp::GetEngineIsPromotedBuild())
 	{
 		// Promoted builds may not have source code, so we will assume all supplied targets are valid since they will not appear on disk
 		return true;
 	}
-
+	
 	// Create the state 
 	TSet<FString> RemainingTargetNames;
 	for (const FTargetInfo& Target : Targets)
@@ -819,27 +1207,53 @@ bool IsTargetInfoValid(const TArray<FTargetInfo>& Targets, const FString& Source
 		RemainingTargetNames.Add(Target.Name);
 	}
 
+	TSet<FString> OriginalTargetNames = RemainingTargetNames;
+
+	IFileManager& FM = IFileManager::Get();
 	// Loop through all the directories
-	TArray<FString> DirectoryNames = { SourceDir };
 	for(int Idx = 0; Idx < DirectoryNames.Num(); Idx++)
 	{
-		FTargetFileVisitor Visitor(RemainingTargetNames, LastModifiedTime);
-		if(!IFileManager::Get().IterateDirectoryStat(*DirectoryNames[Idx], Visitor))
+		// UE_LOG(LogDesktopPlatform, Verbose, TEXT("Checking %s for target files"), *DirectoryNames[Idx]);
+		FTargetFileVisitor Visitor(OriginalTargetNames, RemainingTargetNames, LastModifiedTime);
+		FM.IterateDirectoryStat(*DirectoryNames[Idx], Visitor);
+		if (Visitor.bCacheInvalid)
 		{
 			return false;
 		}
-		if(Visitor.bSearchSubDirectories)
+		if (RemainingTargetNames.Num() == 0)
 		{
-			DirectoryNames += Visitor.SubDirectories;
+			break; 
+		}
+		if (Visitor.bSearchPluginForTargets)
+		{
+			FString SourceDir = DirectoryNames[Idx] / TEXT("Source");
+			if (FM.DirectoryExists(*SourceDir))
+			{
+				DirectoryNames.Emplace(MoveTemp(SourceDir));
+			}
+			FString TestsDir = DirectoryNames[Idx] / TEXT("Tests");
+			if (FM.DirectoryExists(*TestsDir))
+			{
+				DirectoryNames.Emplace(MoveTemp(TestsDir));				
+			}
+		}
+		if (Visitor.bSearchSubDirectories)
+		{
+			DirectoryNames.Append(MoveTemp(Visitor.SubDirectories));
 		}
 	}
 
+	for (const FString& Target : RemainingTargetNames)
+	{
+		UE_LOG(LogDesktopPlatform, Log, TEXT("Failed to find target file for %s, cache out of date."), *Target);
+	}
 	// If we found all the previous target files
 	return RemainingTargetNames.Num() == 0;
 }
 
 const TArray<FTargetInfo>& FDesktopPlatformBase::GetTargetsForProject(const FString& ProjectFile) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE_STR("FDesktopPlatfomrBase::GetTargetsForProject");
 	// Normalize the project filename
 	FString NormalizedProjectFile = ProjectFile;
 	FPaths::NormalizeFilename(NormalizedProjectFile);
@@ -873,9 +1287,18 @@ const TArray<FTargetInfo>& FDesktopPlatformBase::GetTargetsForProject(const FStr
 	{
 		// Read it in and check it's still valid
 		TArray<FTargetInfo> NewTargets;
-		if(ReadTargetInfo(InfoFileName, NewTargets) && IsTargetInfoValid(NewTargets, ProjectSourceDir, StatData.ModificationTime))
+		if(ReadTargetInfo(InfoFileName, NewTargets))
 		{
-			return ProjectFileToTargets.Emplace(MoveTemp(NormalizedProjectFile), MoveTemp(NewTargets));
+			TArray<FString> DirectoryNames = { 
+				ProjectSourceDir,
+				ProjectDir / TEXT("Plugins"),
+				ProjectDir / TEXT("Platforms"), 
+				ProjectDir / TEXT("Restricted"),
+				};
+			if(IsTargetInfoValid(NewTargets, DirectoryNames, StatData.ModificationTime))
+			{
+				return ProjectFileToTargets.Emplace(MoveTemp(NormalizedProjectFile), MoveTemp(NewTargets));
+			}
 		}
 	}
 
@@ -892,11 +1315,12 @@ const TArray<FTargetInfo>& FDesktopPlatformBase::GetTargetsForProject(const FStr
 		Arguments += FString::Printf(TEXT(" -Project=\"%s\""), *IFileManager::Get().ConvertToAbsolutePathForExternalAppForRead(*ProjectFile));
 	}
 	Arguments += FString::Printf(TEXT(" -Output=\"%s\""), *IFileManager::Get().ConvertToAbsolutePathForExternalAppForRead(*InfoFileName));
+	Arguments += TEXT(" -IncludeAllTargets");
 
 	// Run UBT to update the list of targets. Try to run it without building first.
 	FString Output;
 	int32 ReturnCode = 0;
-	if (!FPaths::FileExists(*GetUnrealBuildToolExecutableFilename(FPaths::RootDir())) || !const_cast<FDesktopPlatformBase*>(this)->InvokeUnrealBuildToolSync(Arguments, *GLog, true, ReturnCode, Output) || ReturnCode != 0)
+	if (!FPaths::FileExists(GetUnrealBuildToolExecutableFilename(FPaths::RootDir())) || !const_cast<FDesktopPlatformBase*>(this)->InvokeUnrealBuildToolSync(Arguments, *GLog, true, ReturnCode, Output) || ReturnCode != 0)
 	{
 		// If that failed, try to build and run again. Build machines should always have an up-to-date copy, and shouldn't build anything without being told to do so.
 		if (!GIsBuildMachine)
@@ -919,39 +1343,6 @@ const TArray<FTargetInfo>& FDesktopPlatformBase::GetTargetsForProject(const FStr
 const TArray<FTargetInfo>& FDesktopPlatformBase::GetTargetsForCurrentProject() const
 {
 	return GetTargetsForProject(FPaths::GetProjectFilePath());
-}
-
-bool FDesktopPlatformBase::GetSolutionPath(FString& OutSolutionPath)
-{
-	// Get the platform-specific suffix for solution files
-#if PLATFORM_MAC
-	const TCHAR* Suffix = TEXT(".xcworkspace/contents.xcworkspacedata");
-#elif PLATFORM_LINUX
-	const TCHAR* Suffix = TEXT(".workspace");	// FIXME: Should depend on PreferredAccessor setting
-#else
-	const TCHAR* Suffix = TEXT(".sln");
-#endif
-
-	// When using game specific uproject files, the solution is named after the game and in the uproject folder
-	if(FPaths::IsProjectFilePathSet())
-	{
-		FString SolutionPath = FPaths::ProjectDir() / FPaths::GetBaseFilename(FPaths::GetProjectFilePath()) + Suffix;
-		if(FPaths::FileExists(SolutionPath))
-		{
-			OutSolutionPath = SolutionPath;
-			return true;
-		}
-	}
-
-	// Otherwise, it is simply titled UE4.sln
-	FString DefaultSolutionPath = FPaths::RootDir() / FString(TEXT("UE4")) + Suffix;
-	if(FPaths::FileExists(DefaultSolutionPath))
-	{
-		OutSolutionPath = DefaultSolutionPath;
-		return true;
-	}
-
-	return false;
 }
 
 FString FDesktopPlatformBase::GetDefaultProjectCreationPath()
@@ -1020,7 +1411,7 @@ void FDesktopPlatformBase::CheckForLauncherEngineInstallation(const FString &App
 			TSharedPtr<FJsonObject> CustomFieldsObject = RootObject->GetObjectField(TEXT("CustomFields"));
 			if (CustomFieldsObject.IsValid())
 			{
-				FString InstallLocation = CustomFieldsObject->GetStringField("InstallLocation");
+				FString InstallLocation = CustomFieldsObject->GetStringField(TEXT("InstallLocation"));
 				if (InstallLocation.Len() > 0)
 				{
 					OutInstallations.Add(Identifier, InstallLocation);
@@ -1030,7 +1421,7 @@ void FDesktopPlatformBase::CheckForLauncherEngineInstallation(const FString &App
 	}
 }
 
-int32 FDesktopPlatformBase::ParseReleaseVersion(const FString &Version)
+int32 FDesktopPlatformBase::ParseReleaseVersion(const FString& Version)
 {
 	TCHAR *End;
 
@@ -1046,7 +1437,7 @@ int32 FDesktopPlatformBase::ParseReleaseVersion(const FString &Version)
 		return INDEX_NONE;
 	}
 
-	return (Major << 16) + Minor;
+	return IntCastChecked<int32>((Major << 16) + Minor);
 }
 
 TSharedPtr<FJsonObject> FDesktopPlatformBase::LoadProjectFile(const FString &FileName)
@@ -1131,26 +1522,14 @@ void FDesktopPlatformBase::GetProjectBuildProducts(const FString& ProjectDir, TA
 
 FString FDesktopPlatformBase::GetEngineSavedConfigDirectory(const FString& Identifier)
 {
-	// Get the engine root directory
-	FString RootDir;
-	if (!GetEngineRootDirFromIdentifier(Identifier, RootDir))
-	{
-		return FString();
-	}
-
-	// Get the path to the game agnostic settings
-	FString UserDir;
-	if (IsStockEngineRelease(Identifier))
-	{
-		UserDir = FPaths::Combine(FPlatformProcess::UserSettingsDir(), *FApp::GetEpicProductIdentifier(), *Identifier);
-	}
-	else
-	{
-		UserDir = FPaths::Combine(*RootDir, TEXT("Engine"));
-	}
-
 	// Get the game agnostic config dir
-	return UserDir / TEXT("Saved/Config") / ANSI_TO_TCHAR(FPlatformProperties::PlatformName());
+	const FString UserDir = GetUserDir(Identifier);
+	if (!UserDir.IsEmpty())
+	{
+		return UserDir / TEXT("Saved/Config") / ANSI_TO_TCHAR(FPlatformProperties::PlatformName());
+	}
+
+	return FString();
 }
 
 bool FDesktopPlatformBase::EnumerateProjectsKnownByEngine(const FString &Identifier, bool bIncludeNativeProjects, TArray<FString> &OutProjectFileNames)
@@ -1163,7 +1542,6 @@ bool FDesktopPlatformBase::EnumerateProjectsKnownByEngine(const FString &Identif
 	}
 
 	FString GameAgnosticConfigDir = GetEngineSavedConfigDirectory(Identifier);
-
 	if (GameAgnosticConfigDir.Len() == 0)
 	{
 		return false;
@@ -1173,27 +1551,49 @@ bool FDesktopPlatformBase::EnumerateProjectsKnownByEngine(const FString &Identif
 	TArray<FString> SearchDirectories;
 	SearchDirectories.AddUnique(GetDefaultProjectCreationPath());
 
+	UE_LOG(LogDesktopPlatform, Log, TEXT("Enumerating Projects From Engine Ver: %s"), *Identifier);
+
+	UE_LOG(LogDesktopPlatform, Log, TEXT("Looking for directories to scan from : %s"), *GameAgnosticConfigDir);
 	// Load the config file
 	FConfigFile GameAgnosticConfig;
-	FConfigCacheIni::LoadExternalIniFile(GameAgnosticConfig, TEXT("EditorSettings"), NULL, *GameAgnosticConfigDir, false);
+	if (!FConfigCacheIni::LoadExternalIniFile(GameAgnosticConfig, TEXT("EditorSettings"), NULL, *GameAgnosticConfigDir, false))
+	{
+		FString PreviousConfigDir = MoveTemp(GameAgnosticConfigDir);
+
+		// Load from the legacy path. Most likely a pre-UE5 engine install
+		GameAgnosticConfigDir = GetLegacyEngineSavedConfigDirectory(Identifier);
+
+		UE_LOG(LogDesktopPlatform, Log, TEXT("%s not found, looking for directories in %s"), *PreviousConfigDir , *GameAgnosticConfigDir);
+
+		FConfigCacheIni::LoadExternalIniFile(GameAgnosticConfig, TEXT("EditorSettings"), NULL, *GameAgnosticConfigDir, false);
+	}
 
 	// Find the editor game-agnostic settings
-	FConfigSection* Section = GameAgnosticConfig.Find(TEXT("/Script/UnrealEd.EditorSettings"));
+	const FConfigSection* Section = GameAgnosticConfig.FindSection(TEXT("/Script/UnrealEd.EditorSettings"));
 
 	if (Section == NULL)
 	{
 		FConfigCacheIni::LoadExternalIniFile(GameAgnosticConfig, TEXT("EditorGameAgnostic"), NULL, *GameAgnosticConfigDir, false);
-		Section = GameAgnosticConfig.Find(TEXT("/Script/UnrealEd.EditorGameAgnosticSettings"));
+		Section = GameAgnosticConfig.FindSection(TEXT("/Script/UnrealEd.EditorGameAgnosticSettings"));
+	}
+
+	if (GameAgnosticConfig.IsEmpty())
+	{
+		UE_LOG(LogDesktopPlatform, Log, TEXT("Config not found"));
 	}
 
 	if(Section != NULL)
 	{
+		UE_LOG(LogDesktopPlatform, Log, TEXT("Searching for previously created project directories..."));
+
 		// Add in every path that the user has ever created a project file. This is to catch new projects showing up in the user's project folders
 		TArray<FString> AdditionalDirectories;
 		Section->MultiFind(TEXT("CreatedProjectPaths"), AdditionalDirectories);
 		for(int Idx = 0; Idx < AdditionalDirectories.Num(); Idx++)
 		{
 			FPaths::NormalizeDirectoryName(AdditionalDirectories[Idx]);
+
+			UE_LOG(LogDesktopPlatform, Log, TEXT("Found directory: \"%s\""), *AdditionalDirectories[Idx]);
 			SearchDirectories.AddUnique(AdditionalDirectories[Idx]);
 		}
 
@@ -1203,6 +1603,9 @@ bool FDesktopPlatformBase::EnumerateProjectsKnownByEngine(const FString &Identif
 		for(int Idx = 0; Idx < RecentlyOpenedFiles.Num(); Idx++)
 		{
 			FPaths::NormalizeFilename(RecentlyOpenedFiles[Idx]);
+
+			UE_LOG(LogDesktopPlatform, Log, TEXT("Found project \"%s\" in recently opened files"), *RecentlyOpenedFiles[Idx]);
+
 			OutProjectFileNames.AddUnique(RecentlyOpenedFiles[Idx]);
 		}		
 	}
@@ -1220,10 +1623,16 @@ bool FDesktopPlatformBase::EnumerateProjectsKnownByEngine(const FString &Identif
 
 			for(int32 FileIdx = 0; FileIdx < ProjectFiles.Num(); FileIdx++)
 			{
-				OutProjectFileNames.AddUnique(SearchDirectories[Idx] / ProjectFolders[FolderIdx] / ProjectFiles[FileIdx]);
+				FString ProjName = SearchDirectories[Idx] / ProjectFolders[FolderIdx] / ProjectFiles[FileIdx];
+
+				UE_LOG(LogDesktopPlatform, Log, TEXT("Found project \"%s\" in previously created project directory"), *ProjName);
+
+				OutProjectFileNames.AddUnique(MoveTemp(ProjName));
 			}
 		}
 	}
+
+	UE_LOG(LogDesktopPlatform, Log, TEXT("Searcing for projects in .uprojectdirs"));
 
 	// Find all the native projects, and either add or remove them from the list depending on whether we want native projects
 	const FUProjectDictionary &Dictionary = GetCachedProjectDictionary(RootDir);
@@ -1234,6 +1643,8 @@ bool FDesktopPlatformBase::EnumerateProjectsKnownByEngine(const FString &Identif
 		{
 			if(!NativeProjectPaths[Idx].Contains(TEXT("/Templates/")))
 			{
+				UE_LOG(LogDesktopPlatform, Log, TEXT("Found project \"%s\" in .uprojectdirs"), *NativeProjectPaths[Idx]);
+
 				OutProjectFileNames.AddUnique(NativeProjectPaths[Idx]);
 			}
 		}
@@ -1252,7 +1663,6 @@ bool FDesktopPlatformBase::EnumerateProjectsKnownByEngine(const FString &Identif
 
 #if PLATFORM_WINDOWS
 
-#include "Windows/WindowsHWrapper.h"
 #include "Windows/AllowWindowsPlatformTypes.h"
 #include <ShlObj.h>
 #include "Windows/HideWindowsPlatformTypes.h"
@@ -1364,13 +1774,13 @@ bool FDesktopPlatformBase::BuildUnrealBuildTool(const FString& RootDir, FOutputD
 	}
 	else if (PLATFORM_MAC)
 	{
-		FString ScriptPath = FPaths::ConvertRelativePathToFull(RootDir / TEXT("Engine/Build/BatchFiles/Mac/RunXBuild.sh"));
+		FString ScriptPath = FPaths::ConvertRelativePathToFull(RootDir / TEXT("Engine/Build/BatchFiles/RunDotnetMSBuild.sh"));
 		CompilerExecutableFilename = TEXT("/bin/sh");
 		CmdLineParams = FString::Printf(TEXT("\"%s\" /property:Configuration=Development %s"), *ScriptPath, *CsProjLocation);
 	}
 	else if (PLATFORM_LINUX)
 	{
-		FString ScriptPath = FPaths::ConvertRelativePathToFull(RootDir / TEXT("Engine/Build/BatchFiles/Linux/RunXBuild.sh"));
+		FString ScriptPath = FPaths::ConvertRelativePathToFull(RootDir / TEXT("Engine/Build/BatchFiles/RunDotnetMSBuild.sh"));
 		CompilerExecutableFilename = TEXT("/bin/bash");
 		CmdLineParams = FString::Printf(TEXT("\"%s\" /property:Configuration=Development %s"), *ScriptPath, *CsProjLocation);
 	}
@@ -1385,7 +1795,13 @@ bool FDesktopPlatformBase::BuildUnrealBuildTool(const FString& RootDir, FOutputD
 	const bool bLaunchDetached = false;
 	const bool bLaunchHidden = true;
 	const bool bLaunchReallyHidden = bLaunchHidden;
-	FProcHandle ProcHandle = FPlatformProcess::CreateProc(*CompilerExecutableFilename, *CmdLineParams, bLaunchDetached, bLaunchHidden, bLaunchReallyHidden, NULL, 0, NULL, NULL);
+
+	void* PipeRead = nullptr;
+	void* PipeWrite = nullptr;
+
+	verify(FPlatformProcess::CreatePipe(PipeRead, PipeWrite));
+
+	FProcHandle ProcHandle = FPlatformProcess::CreateProc(*CompilerExecutableFilename, *CmdLineParams, bLaunchDetached, bLaunchHidden, bLaunchReallyHidden, NULL, 0, NULL, PipeWrite, PipeRead);
 	if (!ProcHandle.IsValid())
 	{
 		Ar.Log(TEXT("Failed to start process."));
@@ -1393,6 +1809,7 @@ bool FDesktopPlatformBase::BuildUnrealBuildTool(const FString& RootDir, FOutputD
 	}
 	FPlatformProcess::WaitForProc(ProcHandle);
 	FPlatformProcess::CloseProc(ProcHandle);
+	FPlatformProcess::ClosePipe(PipeRead, PipeWrite);
 
 	// If the executable appeared where we expect it, then we were successful
 	FString UnrealBuildToolExePath = GetUnrealBuildToolExecutableFilename(RootDir);
@@ -1433,6 +1850,7 @@ bool FDesktopPlatformBase::ReadTargetInfo(const FString& FileName, TArray<FTarge
 	Targets.SetNum(TargetArray->Num());
 
 	// Parse the entries
+	FString BaseDir = FPaths::GetPath(FileName);
 	for (int Idx = 0; Idx < TargetArray->Num(); Idx++)
 	{
 		const FJsonValue& TargetValue = *(*TargetArray)[Idx].Get();
@@ -1456,9 +1874,53 @@ bool FDesktopPlatformBase::ReadTargetInfo(const FString& FileName, TArray<FTarge
 		{
 			return false;
 		}
+		
+		if (bool bDefaultTarget; TargetObject.TryGetBoolField(TEXT("DefaultTarget"), bDefaultTarget))
+		{
+			Targets[Idx].DefaultTarget = bDefaultTarget;
+		}
+
+		FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(BaseDir, Targets[Idx].Path));
+		FPaths::MakePlatformFilename(Path);
+
+		Targets[Idx].Path = Path;
 	}
 
 	return true;
+}
+
+FString FDesktopPlatformBase::GetUserDir(const FString& Identifier)
+{
+	// Get the engine root directory
+	FString RootDir;
+	if (!GetEngineRootDirFromIdentifier(Identifier, RootDir))
+	{
+		return FString();
+	}
+
+	// Get the path to the game agnostic settings
+	FString UserDir;
+	if (IsStockEngineRelease(Identifier))
+	{
+		UserDir = FPaths::Combine(FPlatformProcess::UserSettingsDir(), *FApp::GetEpicProductIdentifier(), *Identifier);
+	}
+	else
+	{
+		UserDir = FPaths::Combine(*RootDir, TEXT("Engine"));
+	}
+
+	return UserDir;
+}
+
+FString FDesktopPlatformBase::GetLegacyEngineSavedConfigDirectory(const FString& Identifier)
+{
+	const FString UserDir = GetUserDir(Identifier);
+	if (!UserDir.IsEmpty())
+	{
+		return UserDir / TEXT("Saved/Config") / ANSI_TO_TCHAR(FPlatformProperties::IniPlatformName());
+	}
+
+	return FString();
 }
 
 FString FDesktopPlatformBase::GetUnrealBuildToolProjectFileName(const FString& RootDir) const
@@ -1468,7 +1930,19 @@ FString FDesktopPlatformBase::GetUnrealBuildToolProjectFileName(const FString& R
 
 FString FDesktopPlatformBase::GetUnrealBuildToolExecutableFilename(const FString& RootDir) const
 {
-	return FPaths::ConvertRelativePathToFull(RootDir / TEXT("Engine/Binaries/DotNET/UnrealBuildTool.exe"));
+	FConfigFile Config;
+	if (FConfigCacheIni::LoadExternalIniFile(Config, TEXT("Engine"), *FPaths::Combine(RootDir, TEXT("Engine/Config/")), *FPaths::Combine(RootDir, TEXT("Engine/Config/")), true, NULL, false, /*bWriteDestIni*/ false))
+	{
+		FString Entry;
+		if( Config.GetString( TEXT("PlatformPaths"), TEXT("UnrealBuildTool"), Entry ))
+		{
+			FString NewPath = FPaths::ConvertRelativePathToFull(RootDir / Entry);
+			return NewPath;
+		}
+	}
+	
+
+	return FPaths::ConvertRelativePathToFull(RootDir / TEXT("Engine/Binaries/DotNET/UnrealBuildTool/UnrealBuildTool.exe"));
 }
 
 #undef LOCTEXT_NAMESPACE

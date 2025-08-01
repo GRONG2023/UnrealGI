@@ -15,7 +15,7 @@
 #include "Widgets/Layout/SBox.h"
 
 #if WITH_EDITOR
-	#include "EditorStyleSet.h"
+	#include "Styling/AppStyle.h"
 #endif // WITH_EDITOR
 
 #include "Components/CanvasPanel.h"
@@ -76,14 +76,14 @@ private:
 /////////////////////////////////////////////////////
 // FCanvasSlotExtension
 
-const float SnapDistance = 7;
+const double SnapDistance = 7.0;
 
-static float DistancePointToLine2D(const FVector2D& LinePointA, const FVector2D& LinePointB, const FVector2D& PointC)
+static double DistancePointToLine2D(const FVector2D& LinePointA, const FVector2D& LinePointB, const FVector2D& PointC)
 {
 	FVector2D AB = LinePointB - LinePointA;
 	FVector2D AC = PointC - LinePointA;
 
-	float Distance = FVector2D::CrossProduct(AB, AC) / FVector2D::Distance(LinePointA, LinePointB);
+	double Distance = FVector2D::CrossProduct(AB, AC) / FVector2D::Distance(LinePointA, LinePointB);
 	return FMath::Abs(Distance);
 }
 
@@ -155,7 +155,7 @@ void FCanvasSlotExtension::ExtendSelection(const TArray< FWidgetReference >& Sel
 TSharedRef<SWidget> FCanvasSlotExtension::MakeAnchorWidget(EAnchorWidget AnchorType, float Width, float Height)
 {
 	return SNew(SBorder)
-		.BorderImage(FEditorStyle::Get().GetBrush("NoBrush"))
+		.BorderImage(FAppStyle::Get().GetBrush("NoBrush"))
 		.OnMouseButtonDown(this, &FCanvasSlotExtension::HandleAnchorBeginDrag, AnchorType)
 		.OnMouseButtonUp(this, &FCanvasSlotExtension::HandleAnchorEndDrag, AnchorType)
 		.OnMouseMove(this, &FCanvasSlotExtension::HandleAnchorDragging, AnchorType)
@@ -194,23 +194,23 @@ const FSlateBrush* FCanvasSlotExtension::GetAnchorBrush(EAnchorWidget AnchorType
 	switch ( AnchorType )
 	{
 	case EAnchorWidget::Center:
-		return AnchorWidgets[(uint8)EAnchorWidget::Center]->IsHovered() ? FEditorStyle::Get().GetBrush("UMGEditor.AnchorGizmo.Center.Hovered") : FEditorStyle::Get().GetBrush("UMGEditor.AnchorGizmo.Center");
+		return AnchorWidgets[(uint8)EAnchorWidget::Center]->IsHovered() ? FAppStyle::Get().GetBrush("UMGEditor.AnchorGizmo.Center.Hovered") : FAppStyle::Get().GetBrush("UMGEditor.AnchorGizmo.Center");
 	case EAnchorWidget::Left:
-		return AnchorWidgets[(uint8)EAnchorWidget::Left]->IsHovered() ? FEditorStyle::Get().GetBrush("UMGEditor.AnchorGizmo.Left.Hovered") : FEditorStyle::Get().GetBrush("UMGEditor.AnchorGizmo.Left");
+		return AnchorWidgets[(uint8)EAnchorWidget::Left]->IsHovered() ? FAppStyle::Get().GetBrush("UMGEditor.AnchorGizmo.Left.Hovered") : FAppStyle::Get().GetBrush("UMGEditor.AnchorGizmo.Left");
 	case EAnchorWidget::Right:
-		return AnchorWidgets[(uint8)EAnchorWidget::Right]->IsHovered() ? FEditorStyle::Get().GetBrush("UMGEditor.AnchorGizmo.Right.Hovered") : FEditorStyle::Get().GetBrush("UMGEditor.AnchorGizmo.Right");
+		return AnchorWidgets[(uint8)EAnchorWidget::Right]->IsHovered() ? FAppStyle::Get().GetBrush("UMGEditor.AnchorGizmo.Right.Hovered") : FAppStyle::Get().GetBrush("UMGEditor.AnchorGizmo.Right");
 	case EAnchorWidget::Top:
-		return AnchorWidgets[(uint8)EAnchorWidget::Top]->IsHovered() ? FEditorStyle::Get().GetBrush("UMGEditor.AnchorGizmo.Top.Hovered") : FEditorStyle::Get().GetBrush("UMGEditor.AnchorGizmo.Top");
+		return AnchorWidgets[(uint8)EAnchorWidget::Top]->IsHovered() ? FAppStyle::Get().GetBrush("UMGEditor.AnchorGizmo.Top.Hovered") : FAppStyle::Get().GetBrush("UMGEditor.AnchorGizmo.Top");
 	case EAnchorWidget::Bottom:
-		return AnchorWidgets[(uint8)EAnchorWidget::Bottom]->IsHovered() ? FEditorStyle::Get().GetBrush("UMGEditor.AnchorGizmo.Bottom.Hovered") : FEditorStyle::Get().GetBrush("UMGEditor.AnchorGizmo.Bottom");
+		return AnchorWidgets[(uint8)EAnchorWidget::Bottom]->IsHovered() ? FAppStyle::Get().GetBrush("UMGEditor.AnchorGizmo.Bottom.Hovered") : FAppStyle::Get().GetBrush("UMGEditor.AnchorGizmo.Bottom");
 	case EAnchorWidget::TopLeft:
-		return AnchorWidgets[(uint8)EAnchorWidget::TopLeft]->IsHovered() ? FEditorStyle::Get().GetBrush("UMGEditor.AnchorGizmo.TopLeft.Hovered") : FEditorStyle::Get().GetBrush("UMGEditor.AnchorGizmo.TopLeft");
+		return AnchorWidgets[(uint8)EAnchorWidget::TopLeft]->IsHovered() ? FAppStyle::Get().GetBrush("UMGEditor.AnchorGizmo.TopLeft.Hovered") : FAppStyle::Get().GetBrush("UMGEditor.AnchorGizmo.TopLeft");
 	case EAnchorWidget::BottomRight:
-		return AnchorWidgets[(uint8)EAnchorWidget::BottomRight]->IsHovered() ? FEditorStyle::Get().GetBrush("UMGEditor.AnchorGizmo.BottomRight.Hovered") : FEditorStyle::Get().GetBrush("UMGEditor.AnchorGizmo.BottomRight");
+		return AnchorWidgets[(uint8)EAnchorWidget::BottomRight]->IsHovered() ? FAppStyle::Get().GetBrush("UMGEditor.AnchorGizmo.BottomRight.Hovered") : FAppStyle::Get().GetBrush("UMGEditor.AnchorGizmo.BottomRight");
 	case EAnchorWidget::TopRight:
-		return AnchorWidgets[(uint8)EAnchorWidget::TopRight]->IsHovered() ? FEditorStyle::Get().GetBrush("UMGEditor.AnchorGizmo.TopRight.Hovered") : FEditorStyle::Get().GetBrush("UMGEditor.AnchorGizmo.TopRight");
+		return AnchorWidgets[(uint8)EAnchorWidget::TopRight]->IsHovered() ? FAppStyle::Get().GetBrush("UMGEditor.AnchorGizmo.TopRight.Hovered") : FAppStyle::Get().GetBrush("UMGEditor.AnchorGizmo.TopRight");
 	case EAnchorWidget::BottomLeft:
-		return AnchorWidgets[(uint8)EAnchorWidget::BottomLeft]->IsHovered() ? FEditorStyle::Get().GetBrush("UMGEditor.AnchorGizmo.BottomLeft.Hovered") : FEditorStyle::Get().GetBrush("UMGEditor.AnchorGizmo.BottomLeft");
+		return AnchorWidgets[(uint8)EAnchorWidget::BottomLeft]->IsHovered() ? FAppStyle::Get().GetBrush("UMGEditor.AnchorGizmo.BottomLeft.Hovered") : FAppStyle::Get().GetBrush("UMGEditor.AnchorGizmo.BottomLeft");
 	}
 
 	return FCoreStyle::Get().GetBrush("Selection");
@@ -225,16 +225,17 @@ EVisibility FCanvasSlotExtension::GetAnchorVisibility(EAnchorWidget AnchorType) 
 		{
 			if ( UCanvasPanelSlot* PreviewCanvasSlot = Cast<UCanvasPanelSlot>(PreviewWidget->Slot) )
 			{
+				FAnchorData PreviewLayout = PreviewCanvasSlot->GetLayout();
 				switch ( AnchorType )
 				{
 				case EAnchorWidget::Center:
-					return PreviewCanvasSlot->LayoutData.Anchors.Minimum == PreviewCanvasSlot->LayoutData.Anchors.Maximum ? EVisibility::Visible : EVisibility::Collapsed;
+					return PreviewLayout.Anchors.Minimum == PreviewLayout.Anchors.Maximum ? EVisibility::Visible : EVisibility::Collapsed;
 				case EAnchorWidget::Left:
 				case EAnchorWidget::Right:
-					return PreviewCanvasSlot->LayoutData.Anchors.Minimum.Y == PreviewCanvasSlot->LayoutData.Anchors.Maximum.Y ? EVisibility::Visible : EVisibility::Collapsed;
+					return PreviewLayout.Anchors.Minimum.Y == PreviewLayout.Anchors.Maximum.Y ? EVisibility::Visible : EVisibility::Collapsed;
 				case EAnchorWidget::Top:
 				case EAnchorWidget::Bottom:
-					return PreviewCanvasSlot->LayoutData.Anchors.Minimum.X == PreviewCanvasSlot->LayoutData.Anchors.Maximum.X ? EVisibility::Visible : EVisibility::Collapsed;
+					return PreviewLayout.Anchors.Minimum.X == PreviewLayout.Anchors.Maximum.X ? EVisibility::Visible : EVisibility::Collapsed;
 				}
 
 				return EVisibility::Visible;
@@ -254,8 +255,8 @@ FVector2D FCanvasSlotExtension::GetAnchorAlignment(EAnchorWidget AnchorType) con
 		{
 			if ( UCanvasPanelSlot* PreviewCanvasSlot = Cast<UCanvasPanelSlot>(PreviewWidget->Slot) )
 			{
-				FVector2D Minimum = PreviewCanvasSlot->LayoutData.Anchors.Minimum;
-				FVector2D Maximum = PreviewCanvasSlot->LayoutData.Anchors.Maximum;
+				FVector2D Minimum = PreviewCanvasSlot->GetLayout().Anchors.Minimum;
+				FVector2D Maximum = PreviewCanvasSlot->GetLayout().Anchors.Maximum;
 
 				switch ( AnchorType )
 				{
@@ -307,20 +308,20 @@ void FCanvasSlotExtension::GetCollisionSegmentsFromGeometry(FGeometry ArrangedGe
 	Segments.SetNumUninitialized(8);
 
 	// Left Side
-	Segments[0] = ArrangedGeometry.Position;
-	Segments[1] = ArrangedGeometry.Position + FVector2D(0, ArrangedGeometry.GetLocalSize().Y);
+	Segments[0] = FVector2D(ArrangedGeometry.Position);
+	Segments[1] = FVector2D(ArrangedGeometry.Position) + FVector2D(0, ArrangedGeometry.GetLocalSize().Y);
 
 	// Top Side
-	Segments[2] = ArrangedGeometry.Position;
-	Segments[3] = ArrangedGeometry.Position + FVector2D(ArrangedGeometry.GetLocalSize().X, 0);
+	Segments[2] = FVector2D(ArrangedGeometry.Position);
+	Segments[3] = FVector2D(ArrangedGeometry.Position) + FVector2D(ArrangedGeometry.GetLocalSize().X, 0);
 
 	// Right Side
-	Segments[4] = ArrangedGeometry.Position + FVector2D(ArrangedGeometry.GetLocalSize().X, 0);
-	Segments[5] = ArrangedGeometry.Position + ArrangedGeometry.GetLocalSize();
+	Segments[4] = FVector2D(ArrangedGeometry.Position) + FVector2D(ArrangedGeometry.GetLocalSize().X, 0);
+	Segments[5] = FVector2D(ArrangedGeometry.Position) + ArrangedGeometry.GetLocalSize();
 
 	// Bottom Side
-	Segments[6] = ArrangedGeometry.Position + FVector2D(0, ArrangedGeometry.GetLocalSize().Y);
-	Segments[7] = ArrangedGeometry.Position + ArrangedGeometry.GetLocalSize();
+	Segments[6] = FVector2D(ArrangedGeometry.Position) + FVector2D(0, ArrangedGeometry.GetLocalSize().Y);
+	Segments[7] = FVector2D(ArrangedGeometry.Position) + ArrangedGeometry.GetLocalSize();
 }
 
 void FCanvasSlotExtension::Paint(const TSet< FWidgetReference >& Selection, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId) const
@@ -337,7 +338,7 @@ FReply FCanvasSlotExtension::HandleAnchorBeginDrag(const FGeometry& Geometry, co
 	MouseDownPosition = Event.GetScreenSpacePosition();
 
 	UCanvasPanelSlot* PreviewCanvasSlot = Cast<UCanvasPanelSlot>(SelectionCache[0].GetPreview()->Slot);
-	BeginAnchors = PreviewCanvasSlot->LayoutData.Anchors;
+	BeginAnchors = PreviewCanvasSlot->GetLayout().Anchors;
 
 	Designer->PushDesignerMessage(LOCTEXT("CenterAnchorControls", "Hold [Ctrl] to update widget position"));
 
@@ -355,14 +356,14 @@ FReply FCanvasSlotExtension::HandleAnchorEndDrag(const FGeometry& Geometry, cons
 	return FReply::Handled().ReleaseMouseCapture();
 }
 
-void FCanvasSlotExtension::ProximitySnapValue(float SnapFrequency, float SnapProximity, float& Value)
+void FCanvasSlotExtension::ProximitySnapValue(float SnapFrequency, float SnapProximity, FVector2D::FReal& Value)
 {
-	float MajorAnchorDiv = Value / SnapFrequency;
-	float SubAnchorLinePos = MajorAnchorDiv - FMath::RoundToInt(MajorAnchorDiv);
+	double MajorAnchorDiv = Value / SnapFrequency;
+	double SubAnchorLinePos = MajorAnchorDiv - FMath::RoundToDouble(MajorAnchorDiv);
 
 	if ( FMath::Abs(SubAnchorLinePos) <= SnapProximity )
 	{
-		Value = FMath::RoundToInt(MajorAnchorDiv) * SnapFrequency;
+		Value = FMath::RoundToDouble(MajorAnchorDiv) * SnapFrequency;
 	}
 }
 
@@ -389,7 +390,7 @@ FReply FCanvasSlotExtension::HandleAnchorDragging(const FGeometry& Geometry, con
 
 					FVector2D AnchorDelta = LocalPositionDelta / CanvasGeometry.GetLocalSize();
 
-					const FAnchorData OldLayoutData = PreviewCanvasSlot->LayoutData;
+					const FAnchorData OldLayoutData = PreviewCanvasSlot->GetLayout();
 					FAnchorData LayoutData = OldLayoutData;
 					
 					switch ( AnchorType )
@@ -475,11 +476,11 @@ FReply FCanvasSlotExtension::HandleAnchorDragging(const FGeometry& Geometry, con
 					// result.
 					{
 						PreviewCanvasSlot->SaveBaseLayout();
-						PreviewCanvasSlot->LayoutData = LayoutData;
+						PreviewCanvasSlot->SetLayout(LayoutData);
 						PreviewCanvasSlot->RebaseLayout();
 
-						LayoutData = PreviewCanvasSlot->LayoutData;
-						PreviewCanvasSlot->LayoutData = OldLayoutData;
+						LayoutData = PreviewCanvasSlot->GetLayout();
+						PreviewCanvasSlot->SetLayout(OldLayoutData);
 					}
 
 					// If control is pressed reset all positional offset information
@@ -561,19 +562,17 @@ void FCanvasSlotExtension::PaintDragPercentages(const TSet< FWidgetReference >& 
 				Designer->GetWidgetGeometry(Canvas, CanvasGeometry);
 				// Ignore all widget scales and only use the designer scale (text doesn't need the designer scale, however the rendered lines do)
 				const FGeometry IgnoreScale = CanvasGeometry.MakeChild(
-					FVector2D::ZeroVector,
-					CanvasGeometry.GetLocalSize(),
-					Inverse(CanvasGeometry.GetAccumulatedLayoutTransform().GetScale()) * Designer->GetPreviewScale() * AllottedGeometry.Scale
+					CanvasGeometry.GetLocalSize(), Inverse(CanvasGeometry.GetAccumulatedLayoutTransform().GetScale()) * Designer->GetPreviewScale() * AllottedGeometry.Scale
 				);
 				CanvasGeometry = Designer->MakeGeometryWindowLocal(IgnoreScale);
 
 				FVector2D CanvasSize = CanvasGeometry.GetLocalSize();
 
-				const FAnchorData LayoutData = PreviewCanvasSlot->LayoutData;
+				const FAnchorData LayoutData = PreviewCanvasSlot->GetLayout();
 				const FVector2D AnchorMin = LayoutData.Anchors.Minimum;
 				const FVector2D AnchorMax = LayoutData.Anchors.Maximum;
 
-				auto DrawSegment =[&] (FVector2D Offset, FVector2D Start, FVector2D End, float Value, FVector2D TextTransform, bool InHorizontalLine) {
+				auto DrawSegment =[&] (FVector2D Offset, FVector2D Start, FVector2D End, double Value, FVector2D TextTransform, bool InHorizontalLine) {
 					PaintLineWithText(
 						Start + Offset,
 						End + Offset,
@@ -669,13 +668,13 @@ void FCanvasSlotExtension::PaintLineWithText(FVector2D Start, FVector2D End, FTe
 		Offset.Y += ((End - Start).Y - TextSize.Y) * TextTransform.Y;
 	}
 
-	const FGeometry ChildGeometry = AllottedGeometry.MakeChild(Start + Offset, AllottedGeometry.GetLocalSize());
+	const FGeometry ChildGeometry = AllottedGeometry.MakeChild(AllottedGeometry.GetLocalSize(), FSlateLayoutTransform(Start + Offset));
 
 	// Draw drop shadow
 	FSlateDrawElement::MakeText(
 		OutDrawElements,
 		LayerId,
-		ChildGeometry.ToPaintGeometry(FVector2D(1, 1), TextSize, InverseDesignerScale),
+		ChildGeometry.ToPaintGeometry(TextSize, FSlateLayoutTransform(InverseDesignerScale, FVector2f(1.f, 1.f))),
 		Text,
 		AnchorFont,
 		ESlateDrawEffect::None,
@@ -686,7 +685,7 @@ void FCanvasSlotExtension::PaintLineWithText(FVector2D Start, FVector2D End, FTe
 	FSlateDrawElement::MakeText(
 		OutDrawElements,
 		++LayerId,
-		ChildGeometry.ToPaintGeometry(FVector2D::ZeroVector, TextSize, InverseDesignerScale),
+		ChildGeometry.ToPaintGeometry(TextSize, FSlateLayoutTransform(InverseDesignerScale)),
 		Text,
 		AnchorFont,
 		ESlateDrawEffect::None,
@@ -749,7 +748,7 @@ void FCanvasSlotExtension::PaintCollisionLines(const TSet< FWidgetReference >& S
 										FVector2D CollisionPoint = MySegmentBase;
 
 										//TODO Collide against all sides of the arranged geometry.
-										float Distance = DistancePointToLine2D(PointA, PointB, CollisionPoint);
+										double Distance = DistancePointToLine2D(PointA, PointB, CollisionPoint);
 										if ( Distance <= SnapDistance )
 										{
 											FVector2D FarthestPoint = FVector2D::Distance(PointA, CollisionPoint) > FVector2D::Distance(PointB, CollisionPoint) ? PointA : PointB;

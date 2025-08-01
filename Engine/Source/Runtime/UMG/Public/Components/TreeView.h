@@ -16,45 +16,45 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnItemExpansionChangedDynamic, UOb
  *
  * To make a widget usable as an entry in a TreeView, it must inherit from the IUserObjectListEntry interface.
  */
-UCLASS()
-class UMG_API UTreeView : public UListView
+UCLASS(MinimalAPI)
+class UTreeView : public UListView
 {
 	GENERATED_BODY()
 
 public:
-	UTreeView(const FObjectInitializer& ObjectInitializer);
-	virtual void ReleaseSlateResources(bool bReleaseChildren) override;
+	UMG_API UTreeView(const FObjectInitializer& ObjectInitializer);
+	UMG_API virtual void ReleaseSlateResources(bool bReleaseChildren) override;
 	
 	/** Attempts to expand/collapse the given item (only relevant if the item has children) */
 	UFUNCTION(BlueprintCallable, Category = TreeView)
-	void SetItemExpansion(UObject* Item, bool bExpandItem);
+	UMG_API void SetItemExpansion(UObject* Item, bool bExpandItem);
 
 	/** Expands all items with children */
 	UFUNCTION(BlueprintCallable, Category = TreeView)
-	void ExpandAll();
+	UMG_API void ExpandAll();
 
 	/** Collapses all currently expanded items */
 	UFUNCTION(BlueprintCallable, Category = TreeView)
-	void CollapseAll();
+	UMG_API void CollapseAll();
 
 	template <typename ObjectT>
-	void SetOnGetItemChildren(ObjectT* InUserObject, typename TSlateDelegates<UObject*>::FOnGetChildren::TUObjectMethodDelegate<ObjectT>::FMethodPtr InMethodPtr)
+	void SetOnGetItemChildren(ObjectT* InUserObject, typename TSlateDelegates<UObject*>::FOnGetChildren::TMethodPtr<ObjectT> InMethodPtr)
 	{
 		static_assert(TIsDerivedFrom<ObjectT, UObject>::IsDerived, "Only UObject ptrs can be passed directly when binding to SetOnGetItemChildren. Pass a shared ref for non-UObject binders.");
 		OnGetItemChildren = TSlateDelegates<UObject*>::FOnGetChildren::CreateUObject(InUserObject, InMethodPtr);
 	}
 	template <typename ObjectT>
-	void SetOnGetItemChildren(TSharedRef<ObjectT> InUserObject, typename TSlateDelegates<UObject*>::FOnGetChildren::TUObjectMethodDelegate<ObjectT>::FMethodPtr InMethodPtr)
+	void SetOnGetItemChildren(TSharedRef<ObjectT> InUserObject, typename TSlateDelegates<UObject*>::FOnGetChildren::TMethodPtr<ObjectT> InMethodPtr)
 	{
 		OnGetItemChildren = TSlateDelegates<UObject*>::FOnGetChildren::CreateSP(InUserObject, InMethodPtr);
 	}
 
 protected:
-	virtual TSharedRef<STableViewBase> RebuildListWidget() override;
-	virtual void OnItemClickedInternal(UObject* ListItem) override;
+	UMG_API virtual TSharedRef<STableViewBase> RebuildListWidget() override;
+	UMG_API virtual void OnItemClickedInternal(UObject* ListItem) override;
 
-	virtual void OnItemExpansionChangedInternal(UObject* Item, bool bIsExpanded) override;
-	virtual void OnGetChildrenInternal(UObject* Item, TArray<UObject*>& OutChildren) const override;
+	UMG_API virtual void OnItemExpansionChangedInternal(UObject* Item, bool bIsExpanded) override;
+	UMG_API virtual void OnGetChildrenInternal(UObject* Item, TArray<UObject*>& OutChildren) const override;
 
 	/** STreeView construction helper - useful if using a custom STreeView subclass */
 	template <template<typename> class TreeViewT = STreeView>
@@ -65,6 +65,8 @@ protected:
 		Args.SelectionMode = SelectionMode;
 		Args.ConsumeMouseWheel = ConsumeMouseWheel;
 		Args.bReturnFocusToSelection = bReturnFocusToSelection;
+		Args.TreeViewStyle = &WidgetStyle;
+		Args.ScrollBarStyle = &ScrollBarStyle;
 
 		MyListView = MyTreeView = ITypedUMGListView<UObject*>::ConstructTreeView<TreeViewT>(this, ListItems, Args);
 		MyTreeView->SetOnEntryInitialized(SListView<UObject*>::FOnEntryInitialized::CreateUObject(this, &UTreeView::HandleOnEntryInitializedInternal));

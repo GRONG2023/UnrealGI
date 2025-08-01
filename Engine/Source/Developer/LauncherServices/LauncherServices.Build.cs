@@ -24,20 +24,13 @@ namespace UnrealBuildTool.Rules
 					"SourceCodeAccess",
 					"TargetPlatform",
 					"UnrealEdMessages",
-					"JSON",
+					"Json",
+					"TurnkeyIO",
 				});
 
 			PrivateIncludePathModuleNames.AddRange(
 				new string[] {
-					"Messaging",
-					"DesktopPlatform",
-				});
-
-			PrivateIncludePaths.AddRange(
-				new string[] {
-					"Developer/LauncherServices/Private",
-					"Developer/LauncherServices/Private/Launcher",
-					"Developer/LauncherServices/Private/Profiles",
+					"DerivedDataCache",
 				});
 		}
 	}

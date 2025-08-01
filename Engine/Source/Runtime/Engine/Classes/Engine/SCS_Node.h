@@ -23,11 +23,11 @@ class USCS_Node : public UObject
 
 	/** Component class */
 	UPROPERTY()
-	UClass* ComponentClass;
+	TObjectPtr<UClass> ComponentClass;
 
 	/** Template for the component to create */
 	UPROPERTY()
-	class UActorComponent* ComponentTemplate;
+	TObjectPtr<class UActorComponent> ComponentTemplate;
 
 	/** Cached data for faster runtime instancing (only used in cooked builds) */
 	UPROPERTY()
@@ -58,7 +58,7 @@ class USCS_Node : public UObject
 
 	/** Set of child nodes */
 	UPROPERTY()
-	TArray<class USCS_Node*> ChildNodes;
+	TArray<TObjectPtr<class USCS_Node>> ChildNodes;
 
 	/** Metadata information for this Node */
 	UPROPERTY(EditAnywhere, Category=BPVariableDescription)
@@ -95,7 +95,7 @@ class USCS_Node : public UObject
 	ENGINE_API void ValidateGuid();
 
 	/** Returns Valid if this object has data validation rules set up for it and the data for this object is valid. Returns Invalid if it does not pass the rules. Returns NotValidated if no rules are set for this object. */
-	virtual EDataValidationResult IsDataValid(TArray<FText>& ValidationErrors) override;
+	virtual EDataValidationResult IsDataValid(class FDataValidationContext& Context) const override;
 #endif // WITH_EDITOR
 
 	/**
@@ -108,7 +108,7 @@ class USCS_Node : public UObject
 	 * @param bIsDefaultTransform	Indicates whether or not the given transform is a "default" transform, in which case it can be overridden by template defaults.
 	 * @return The new component instance that was created, or NULL on failure.
 	 */
-	UActorComponent* ExecuteNodeOnActor(AActor* Actor, USceneComponent* ParentComponent, const FTransform* RootTransform, const struct FRotationConversionCache* RootRelativeRotationCache, bool bIsDefaultTransform);
+	ENGINE_API UActorComponent* ExecuteNodeOnActor(AActor* Actor, USceneComponent* ParentComponent, const FTransform* RootTransform, const struct FRotationConversionCache* RootRelativeRotationCache, bool bIsDefaultTransform, ESpawnActorScaleMethod TransformScaleMethod = ESpawnActorScaleMethod::OverrideRootScale);
 
 	/** Return the actual component template used in the BPGC. The template can be overridden in a child. */
 	ENGINE_API UActorComponent* GetActualComponentTemplate(class UBlueprintGeneratedClass* ActualBPGC) const;

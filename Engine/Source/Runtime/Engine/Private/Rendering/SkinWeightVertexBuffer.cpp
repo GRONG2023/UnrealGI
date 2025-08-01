@@ -1,12 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Rendering/SkinWeightVertexBuffer.h"
+#include "EngineLogs.h"
 #include "EngineUtils.h"
 #include "Rendering/SkeletalMeshLODModel.h"
-#include "RenderUtils.h"
-#include "SkeletalMeshTypes.h"
-#include "UObject/AnimObjectVersion.h"
 #include "ProfilingDebugging/LoadTimeTracker.h"
+#include "RHIResourceUpdates.h"
+#include "SkeletalMeshLegacyCustomVersions.h"
+#include "UObject/UE5MainStreamObjectVersion.h"
+#include "Rendering/RenderCommandPipes.h"
 
 /*-----------------------------------------------------------------------------
 FSkinWeightLookupVertexBuffer
@@ -82,7 +84,7 @@ FArchive& operator<<(FArchive& Ar, FSkinWeightLookupVertexBuffer& VertexBuffer)
 	}
 
 	// if Ar is counting, it still should serialize. Need to count VertexData
-	if (!StripFlags.IsDataStrippedForServer() || Ar.IsCountingMemory())
+	if (!StripFlags.IsAudioVisualDataStripped() || Ar.IsCountingMemory())
 	{
 		if (VertexBuffer.LookupData != NULL)
 		{
@@ -124,14 +126,13 @@ void FSkinWeightLookupVertexBuffer::AllocateData()
 	LookupData = new TStaticMeshVertexData<uint32>(bNeedsCPUAccess);
 }
 
-void FSkinWeightLookupVertexBuffer::InitRHI()
+void FSkinWeightLookupVertexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	// BUF_ShaderResource is needed for support of the SkinCache (we could make is dependent on GEnableGPUSkinCacheShaders or are there other users?)
-	VertexBufferRHI = CreateRHIBuffer_RenderThread();
-
+	VertexBufferRHI = CreateRHIBuffer(RHICmdList);
 	if (VertexBufferRHI)
 	{
-		bool bSRV = GSupportsResourceView && GPixelFormats[PixelFormat].Supported;
+		bool bSRV = GPixelFormats[PixelFormat].Supported;
 		// When bAllowCPUAccess is true, the meshes is likely going to be used for Niagara to spawn particles on mesh surface.
 		// And it can be the case for CPU *and* GPU access: no differenciation today. That is why we create a SRV in this case.
 		// This also avoid setting lots of states on all the members of all the different buffers used by meshes. Follow up: https://jira.it.epicgames.net/browse/UE-69376.
@@ -139,7 +140,7 @@ void FSkinWeightLookupVertexBuffer::InitRHI()
 
 		if (bSRV)
 		{
-			SRVValue = RHICreateShaderResourceView(FShaderResourceViewInitializer(LookupData ? VertexBufferRHI : nullptr, PixelFormat));
+			SRVValue = RHICmdList.CreateShaderResourceView(VertexBufferRHI, PixelFormatStride, PixelFormat);
 		}
 	}
 }
@@ -151,14 +152,31 @@ void FSkinWeightLookupVertexBuffer::ReleaseRHI()
 	FVertexBuffer::ReleaseRHI();
 }
 
-FVertexBufferRHIRef FSkinWeightLookupVertexBuffer::CreateRHIBuffer_RenderThread()
+FBufferRHIRef FSkinWeightLookupVertexBuffer::CreateRHIBuffer_RenderThread()
 {
-	return CreateRHIBuffer_Internal<true>();
+	return CreateRHIBuffer(FRHICommandListImmediate::Get());
 }
 
-FVertexBufferRHIRef FSkinWeightLookupVertexBuffer::CreateRHIBuffer_Async()
+FBufferRHIRef FSkinWeightLookupVertexBuffer::CreateRHIBuffer_Async()
 {
-	return CreateRHIBuffer_Internal<false>();
+	FRHIAsyncCommandList CommandList;
+	return CreateRHIBuffer(*CommandList);
+}
+
+void FSkinWeightLookupVertexBuffer::InitRHIForStreaming(FRHIBuffer* IntermediateBuffer, FRHIResourceUpdateBatcher& Batcher)
+{
+	if (VertexBufferRHI && IntermediateBuffer)
+	{
+		Batcher.QueueUpdateRequest(VertexBufferRHI, IntermediateBuffer);
+	}
+}
+
+void FSkinWeightLookupVertexBuffer::ReleaseRHIForStreaming(FRHIResourceUpdateBatcher& Batcher)
+{
+	if (VertexBufferRHI)
+	{
+		Batcher.QueueUpdateRequest(VertexBufferRHI, nullptr);
+	}
 }
 
 void FSkinWeightLookupVertexBuffer::GetWeightOffsetAndInfluenceCount(uint32 VertexIndex, uint32& OutWeightOffset, uint32& OutInfluenceCount) const
@@ -176,28 +194,9 @@ void FSkinWeightLookupVertexBuffer::SetWeightOffsetAndInfluenceCount(uint32 Vert
 	*DataUInt32 = (WeightOffset << 8) | InfluenceCount;
 }
 
-template <bool bRenderThread>
-FVertexBufferRHIRef FSkinWeightLookupVertexBuffer::CreateRHIBuffer_Internal()
+FBufferRHIRef FSkinWeightLookupVertexBuffer::CreateRHIBuffer(FRHICommandListBase& RHICmdList)
 {
-	if (NumVertices)
-	{
-		// Create the vertex buffer.
-		FResourceArrayInterface* ResourceArray = LookupData ? LookupData->GetResourceArray() : nullptr;
-		const uint32 SizeInBytes = ResourceArray ? ResourceArray->GetResourceDataSize() : 0;
-		const uint32 BuffFlags = BUF_Static | BUF_ShaderResource | BUF_SourceCopy;
-		FRHIResourceCreateInfo CreateInfo(ResourceArray);
-		CreateInfo.bWithoutNativeResource = !LookupData;
-
-		if (bRenderThread)
-		{
-			return RHICreateVertexBuffer(SizeInBytes, BuffFlags, CreateInfo);
-		}
-		else
-		{
-			return RHIAsyncCreateVertexBuffer(SizeInBytes, BuffFlags, CreateInfo);
-		}
-	}
-	return nullptr;
+	return FRenderResource::CreateRHIBuffer(RHICmdList, LookupData, NumVertices, BUF_Static | BUF_ShaderResource | BUF_SourceCopy, TEXT("FSkinWeightLookupVertexBuffer"));
 }
 
 /*-----------------------------------------------------------------------------
@@ -209,10 +208,11 @@ FSkinWeightDataVertexBuffer::FSkinWeightDataVertexBuffer()
 ,	bVariableBonesPerVertex(false)
 ,	MaxBoneInfluences(MAX_INFLUENCES_PER_STREAM)
 ,	bUse16BitBoneIndex(false)
+,	bUse16BitBoneWeight(false)
 ,	WeightData(nullptr)
 ,	Data(nullptr)
 ,	NumVertices(0)
-,	NumBones(0)
+,	NumBoneWeights(0)
 {
 }
 
@@ -221,10 +221,11 @@ FSkinWeightDataVertexBuffer::FSkinWeightDataVertexBuffer( const FSkinWeightDataV
 	, bVariableBonesPerVertex(Other.bVariableBonesPerVertex)
 	, MaxBoneInfluences(Other.MaxBoneInfluences)
 	, bUse16BitBoneIndex(Other.bUse16BitBoneIndex)
+	, bUse16BitBoneWeight(Other.bUse16BitBoneWeight)
 	, WeightData(nullptr)
 	, Data(nullptr)
 	, NumVertices(0)
-	, NumBones(0)
+	, NumBoneWeights(0)
 {
 	
 }
@@ -241,6 +242,7 @@ FSkinWeightDataVertexBuffer& FSkinWeightDataVertexBuffer::operator=(const FSkinW
 	bVariableBonesPerVertex = Other.bVariableBonesPerVertex;
 	MaxBoneInfluences = Other.MaxBoneInfluences;
 	bUse16BitBoneIndex = Other.bUse16BitBoneIndex;
+	bUse16BitBoneWeight = Other.bUse16BitBoneWeight;
 	return *this;
 }
 
@@ -249,23 +251,23 @@ void FSkinWeightDataVertexBuffer::CleanUp()
 	if (WeightData)
 	{
 		delete WeightData;
-		WeightData = NULL;
+		WeightData = nullptr;
 	}
 }
 
-void FSkinWeightDataVertexBuffer::Init(uint32 InNumBones, uint32 InNumVertices)
+void FSkinWeightDataVertexBuffer::Init(uint32 InNumWeights, uint32 InNumVertices)
 {
 	AllocateData();
-	ResizeBuffer(InNumBones, InNumVertices);
+	ResizeBuffer(InNumWeights, InNumVertices);
 }
 
-void FSkinWeightDataVertexBuffer::ResizeBuffer(uint32 InNumBones, uint32 InNumVertices)
+void FSkinWeightDataVertexBuffer::ResizeBuffer(uint32 InNumWeights, uint32 InNumVertices)
 {
-	NumBones = InNumBones;
+	NumBoneWeights = InNumWeights;
 	NumVertices = InNumVertices;
 	WeightData->ResizeBuffer(GetVertexDataSize());
 
-	if (NumBones > 0)
+	if (NumBoneWeights > 0)
 	{
 		Data = WeightData->GetDataPointer();
 	}
@@ -278,14 +280,14 @@ FArchive& operator<<(FArchive& Ar, FSkinWeightDataVertexBuffer& VertexBuffer)
 	Ar.UsingCustomVersion(FAnimObjectVersion::GUID);
 	VertexBuffer.SerializeMetaData(Ar);
 
-	if (Ar.IsLoading() || VertexBuffer.WeightData == NULL)
+	if (Ar.IsLoading() || VertexBuffer.WeightData == nullptr)
 	{
 		// If we're loading, or we have no valid buffer, allocate container.
 		VertexBuffer.AllocateData();
 	}
 
 	// if Ar is counting, it still should serialize. Need to count VertexData
-	if (!StripFlags.IsDataStrippedForServer() || Ar.IsCountingMemory())
+	if (!StripFlags.IsAudioVisualDataStripped() || Ar.IsCountingMemory())
 	{
 		if (VertexBuffer.WeightData != NULL)
 		{
@@ -337,7 +339,7 @@ FArchive& operator<<(FArchive& Ar, FSkinWeightDataVertexBuffer& VertexBuffer)
 			if (!Ar.IsCountingMemory())
 			{
 				// update cached buffer info
-				VertexBuffer.Data = (VertexBuffer.NumBones > 0 && VertexBuffer.WeightData->GetResourceArray()->GetResourceDataSize()) ? VertexBuffer.WeightData->GetDataPointer() : nullptr;
+				VertexBuffer.Data = (VertexBuffer.NumBoneWeights > 0 && VertexBuffer.WeightData->GetResourceArray()->GetResourceDataSize()) ? VertexBuffer.WeightData->GetDataPointer() : nullptr;
 			}
 		}
 	}
@@ -349,6 +351,7 @@ void FSkinWeightDataVertexBuffer::SerializeMetaData(FArchive& Ar)
 {
 	Ar.UsingCustomVersion(FSkeletalMeshCustomVersion::GUID);
 	Ar.UsingCustomVersion(FAnimObjectVersion::GUID);
+	Ar.UsingCustomVersion(FUE5MainStreamObjectVersion::GUID);
 
 	if (Ar.IsLoading() && Ar.CustomVer(FAnimObjectVersion::GUID) < FAnimObjectVersion::UnlimitedBoneInfluences)
 	{
@@ -363,18 +366,22 @@ void FSkinWeightDataVertexBuffer::SerializeMetaData(FArchive& Ar)
 			Ar << bExtraBoneInfluences << Stride << NumVertices;
 		}
 		MaxBoneInfluences = bExtraBoneInfluences ? EXTRA_BONE_INFLUENCES : MAX_INFLUENCES_PER_STREAM;
-		NumBones = MaxBoneInfluences * NumVertices;
+		NumBoneWeights = MaxBoneInfluences * NumVertices;
 		bVariableBonesPerVertex = false;
 	}
 	else
 	{
-		Ar << bVariableBonesPerVertex << MaxBoneInfluences << NumBones << NumVertices;
+		Ar << bVariableBonesPerVertex << MaxBoneInfluences << NumBoneWeights << NumVertices;
 	}
 	
 	// bUse16BitBoneIndex doesn't exist before version IncreaseBoneIndexLimitPerChunk
 	if (Ar.CustomVer(FAnimObjectVersion::GUID) >= FAnimObjectVersion::IncreaseBoneIndexLimitPerChunk)
 	{
 		Ar << bUse16BitBoneIndex;
+	}
+	if (Ar.CustomVer(FUE5MainStreamObjectVersion::GUID) >= FUE5MainStreamObjectVersion::IncreasedSkinWeightPrecision)
+	{
+		Ar << bUse16BitBoneWeight;
 	}
 }
 
@@ -383,42 +390,41 @@ void FSkinWeightDataVertexBuffer::CopyMetaData(const FSkinWeightDataVertexBuffer
 	bVariableBonesPerVertex = Other.bVariableBonesPerVertex;
 	MaxBoneInfluences = Other.MaxBoneInfluences;
 	bUse16BitBoneIndex = Other.bUse16BitBoneIndex;
-	NumBones = Other.NumBones;
+	bUse16BitBoneWeight = Other.bUse16BitBoneWeight;
+	NumBoneWeights = Other.NumBoneWeights;
 }
 
-template <bool bRenderThread>
-FVertexBufferRHIRef FSkinWeightDataVertexBuffer::CreateRHIBuffer_Internal()
+FBufferRHIRef FSkinWeightDataVertexBuffer::CreateRHIBuffer(FRHICommandListBase& RHICmdList)
 {
-	if (NumBones)
+	// BUF_ShaderResource is needed for support of the SkinCache (we could make is dependent on GEnableGPUSkinCacheShaders or are there other users?)
+	return FRenderResource::CreateRHIBuffer(RHICmdList, WeightData, NumBoneWeights, BUF_Static | BUF_ShaderResource | BUF_SourceCopy, TEXT("FSkinWeightDataVertexBuffer"));
+}
+
+FBufferRHIRef FSkinWeightDataVertexBuffer::CreateRHIBuffer_RenderThread()
+{
+	return CreateRHIBuffer(FRHICommandListImmediate::Get());
+}
+
+FBufferRHIRef FSkinWeightDataVertexBuffer::CreateRHIBuffer_Async()
+{
+	FRHIAsyncCommandList CommandList;
+	return CreateRHIBuffer(*CommandList);
+}
+
+void FSkinWeightDataVertexBuffer::InitRHIForStreaming(FRHIBuffer* IntermediateBuffer, FRHIResourceUpdateBatcher& Batcher)
+{
+	if (VertexBufferRHI && IntermediateBuffer)
 	{
-		// Create the vertex buffer.
-		FResourceArrayInterface* ResourceArray = WeightData ? WeightData->GetResourceArray() : nullptr;
-		const uint32 SizeInBytes = ResourceArray ? ResourceArray->GetResourceDataSize() : 0;
-		const uint32 BuffFlags = BUF_Static | BUF_ShaderResource | BUF_SourceCopy;
-		FRHIResourceCreateInfo CreateInfo(ResourceArray);
-		CreateInfo.bWithoutNativeResource = !WeightData;
-
-		// BUF_ShaderResource is needed for support of the SkinCache (we could make is dependent on GEnableGPUSkinCacheShaders or are there other users?)
-		if (bRenderThread)
-		{
-			return RHICreateVertexBuffer(SizeInBytes, BuffFlags, CreateInfo);
-		}
-		else
-		{
-			return RHIAsyncCreateVertexBuffer(SizeInBytes, BuffFlags, CreateInfo);
-		}
+		Batcher.QueueUpdateRequest(VertexBufferRHI, IntermediateBuffer);
 	}
-	return nullptr;
 }
 
-FVertexBufferRHIRef FSkinWeightDataVertexBuffer::CreateRHIBuffer_RenderThread()
+void FSkinWeightDataVertexBuffer::ReleaseRHIForStreaming(FRHIResourceUpdateBatcher& Batcher)
 {
-	return CreateRHIBuffer_Internal<true>();
-}
-
-FVertexBufferRHIRef FSkinWeightDataVertexBuffer::CreateRHIBuffer_Async()
-{
-	return CreateRHIBuffer_Internal<false>();
+	if (VertexBufferRHI)
+	{
+		Batcher.QueueUpdateRequest(VertexBufferRHI, nullptr);
+	}
 }
 
 bool FSkinWeightDataVertexBuffer::IsWeightDataValid() const
@@ -426,14 +432,14 @@ bool FSkinWeightDataVertexBuffer::IsWeightDataValid() const
 	return WeightData != nullptr;
 }
 
-void FSkinWeightDataVertexBuffer::InitRHI()
+void FSkinWeightDataVertexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	SCOPED_LOADTIMER(FSkinWeightVertexBuffer_InitRHI);
 
 	// BUF_ShaderResource is needed for support of the SkinCache (we could make is dependent on GEnableGPUSkinCacheShaders or are there other users?)
-	VertexBufferRHI = CreateRHIBuffer_RenderThread();
+	VertexBufferRHI = CreateRHIBuffer(RHICmdList);
 
-	bool bSRV = VertexBufferRHI && GSupportsResourceView && GPixelFormats[GetPixelFormat()].Supported;
+	bool bSRV = VertexBufferRHI && GPixelFormats[GetPixelFormat()].Supported;
 	// When bAllowCPUAccess is true, the meshes is likely going to be used for Niagara to spawn particles on mesh surface.
 	// And it can be the case for CPU *and* GPU access: no differenciation today. That is why we create a SRV in this case.
 	// This also avoid setting lots of states on all the members of all the different buffers used by meshes. Follow up: https://jira.it.epicgames.net/browse/UE-69376.
@@ -441,7 +447,7 @@ void FSkinWeightDataVertexBuffer::InitRHI()
 
 	if (bSRV)
 	{
-		SRVValue = RHICreateShaderResourceView(FShaderResourceViewInitializer(WeightData ? VertexBufferRHI : nullptr, GetPixelFormat()));
+		SRVValue = RHICmdList.CreateShaderResourceView(VertexBufferRHI, GetPixelFormatStride(), GetPixelFormat());
 	}
 }
 
@@ -548,13 +554,22 @@ void FSkinWeightDataVertexBuffer::SetBoneIndex(uint32 VertexWeightOffset, uint32
 	}
 }
 
-uint8 FSkinWeightDataVertexBuffer::GetBoneWeight(uint32 VertexWeightOffset, uint32 VertexInfluenceCount, uint32 InfluenceIndex) const
+uint16 FSkinWeightDataVertexBuffer::GetBoneWeight(uint32 VertexWeightOffset, uint32 VertexInfluenceCount, uint32 InfluenceIndex) const
 {
 	if (InfluenceIndex < VertexInfluenceCount)
 	{
-		uint8* BoneData = Data + VertexWeightOffset;
-		uint32 BoneWeightOffset = GetBoneIndexByteSize() * VertexInfluenceCount;
-		return BoneData[BoneWeightOffset + InfluenceIndex];
+		const uint32 BoneWeightOffset = GetBoneIndexByteSize() * VertexInfluenceCount;
+		const uint8* BoneData = Data + VertexWeightOffset + BoneWeightOffset;
+		const uint8* BoneVertexData = &BoneData[InfluenceIndex * GetBoneWeightByteSize()];  
+
+		if (Use16BitBoneWeight())
+		{
+			return *reinterpret_cast<const uint16*>(BoneVertexData);
+		}
+		else
+		{
+			return (static_cast<uint16>(*BoneVertexData) << 8) | *BoneVertexData;
+		}
 	}
 	else
 	{
@@ -562,13 +577,23 @@ uint8 FSkinWeightDataVertexBuffer::GetBoneWeight(uint32 VertexWeightOffset, uint
 	}
 }
 
-void FSkinWeightDataVertexBuffer::SetBoneWeight(uint32 VertexWeightOffset, uint32 VertexInfluenceCount, uint32 InfluenceIndex, uint8 BoneWeight)
+void FSkinWeightDataVertexBuffer::SetBoneWeight(uint32 VertexWeightOffset, uint32 VertexInfluenceCount, uint32 InfluenceIndex, uint16 BoneWeight)
 {
 	if (InfluenceIndex < VertexInfluenceCount)
 	{
-		uint8* BoneData = Data + VertexWeightOffset;
-		uint32 BoneWeightOffset = GetBoneIndexByteSize() * VertexInfluenceCount;
-		BoneData[BoneWeightOffset + InfluenceIndex] = BoneWeight;
+		const uint32 BoneWeightOffset = GetBoneIndexByteSize() * VertexInfluenceCount;
+		uint8* BoneData = Data + VertexWeightOffset + BoneWeightOffset;
+		uint8* BoneVertexData = &BoneData[InfluenceIndex * GetBoneWeightByteSize()];  
+
+		if (Use16BitBoneWeight())
+		{
+			*reinterpret_cast<uint16*>(BoneVertexData) = BoneWeight;
+		}
+		else
+		{
+			*BoneVertexData = static_cast<uint8>(BoneWeight >> 8);
+		}
+
 	}
 	else
 	{
@@ -580,25 +605,14 @@ void FSkinWeightDataVertexBuffer::ResetVertexBoneWeights(uint32 VertexWeightOffs
 {
 	if (VertexInfluenceCount > 0)
 	{
-		uint8* BoneData = Data + VertexWeightOffset;
-		if (BoneData)
-		{
-			if (Use16BitBoneIndex())
-			{
-				FMemory::Memzero(BoneData, (sizeof(FBoneIndex16) + sizeof(uint8)) * VertexInfluenceCount);
-			}
-			else
-			{
-				FMemory::Memzero(BoneData, (sizeof(FBoneIndex8) + sizeof(uint8)) * VertexInfluenceCount);
-			}
-		}
+		FMemory::Memzero(Data + VertexWeightOffset, GetBoneIndexAndWeightByteSize() * VertexInfluenceCount);
 	}
 }
 
-void FSkinWeightDataVertexBuffer::CopyDataFromBuffer(const TArrayView<const FSkinWeightInfo>& SkinWeightData)
+void FSkinWeightDataVertexBuffer::CopyDataFromBuffer(const uint8* InSkinWeightData, uint32 InNumVertices)
 {
-	Init(SkinWeightData.Num() * GetMaxBoneInfluences(), SkinWeightData.Num());
-	FMemory::Memcpy(Data, SkinWeightData.GetData(), GetVertexDataSize());
+	Init(InNumVertices * GetMaxBoneInfluences(), InNumVertices);
+	FMemory::Memcpy(Data, InSkinWeightData, GetVertexDataSize());
 }
 
 /*-----------------------------------------------------------------------------
@@ -617,6 +631,7 @@ FSkinWeightVertexBuffer::FSkinWeightVertexBuffer(const FSkinWeightVertexBuffer& 
 
 	SetMaxBoneInfluences(Other.GetMaxBoneInfluences());
 	SetUse16BitBoneIndex(Other.Use16BitBoneIndex());
+	SetUse16BitBoneWeight(Other.Use16BitBoneWeight());
 }
 
 FSkinWeightVertexBuffer::~FSkinWeightVertexBuffer()
@@ -634,6 +649,7 @@ FSkinWeightVertexBuffer& FSkinWeightVertexBuffer::operator=(const FSkinWeightVer
 
 	SetMaxBoneInfluences(Other.GetMaxBoneInfluences());
 	SetUse16BitBoneIndex(Other.Use16BitBoneIndex());
+	SetUse16BitBoneWeight(Other.Use16BitBoneWeight());
 
 	return *this;
 }
@@ -644,6 +660,20 @@ void FSkinWeightVertexBuffer::CleanUp()
 	LookupVertexBuffer.CleanUp();
 }
 
+void FSkinWeightVertexBuffer::RebuildLookupVertexBuffer()
+{
+	uint32 MaxBoneInfluences = DataVertexBuffer.GetMaxBoneInfluences();
+	uint32 NumVertices = DataVertexBuffer.GetNumBoneWeights() / DataVertexBuffer.GetMaxBoneInfluences();
+	LookupVertexBuffer.Init(NumVertices);
+
+	uint32 WeightOffset = 0;
+	for (uint32 VertIdx = 0; VertIdx < NumVertices; VertIdx++)
+	{
+		LookupVertexBuffer.SetWeightOffsetAndInfluenceCount(VertIdx, WeightOffset * GetBoneIndexAndWeightByteSize(), MaxBoneInfluences);
+		WeightOffset += MaxBoneInfluences;
+	}
+}
+
 FArchive& operator<<(FArchive& Ar, FSkinWeightVertexBuffer& VertexBuffer)
 {
 	Ar.UsingCustomVersion(FAnimObjectVersion::GUID);	
@@ -652,16 +682,7 @@ FArchive& operator<<(FArchive& Ar, FSkinWeightVertexBuffer& VertexBuffer)
 	if (Ar.IsLoading() && Ar.CustomVer(FAnimObjectVersion::GUID) < FAnimObjectVersion::UnlimitedBoneInfluences)
 	{
 		// LookupVertexBuffer doesn't exist before this version, so construct its content from scratch
-		uint32 MaxBoneInfluences = VertexBuffer.DataVertexBuffer.GetMaxBoneInfluences();
-		uint32 NumVertices = VertexBuffer.DataVertexBuffer.GetNumBones() / VertexBuffer.DataVertexBuffer.GetMaxBoneInfluences();
-		VertexBuffer.LookupVertexBuffer.Init(NumVertices);
-
-		uint32 WeightOffset = 0;
-		for (uint32 VertIdx = 0; VertIdx < NumVertices; VertIdx++)
-		{
-			VertexBuffer.LookupVertexBuffer.SetWeightOffsetAndInfluenceCount(VertIdx, WeightOffset * (VertexBuffer.GetBoneIndexByteSize() + sizeof(uint8)), MaxBoneInfluences);
-			WeightOffset += MaxBoneInfluences;
-		}
+		VertexBuffer.RebuildLookupVertexBuffer();
 	}
 	else
 	{
@@ -683,19 +704,25 @@ void FSkinWeightVertexBuffer::CopyMetaData(const FSkinWeightVertexBuffer& Other)
 	LookupVertexBuffer.CopyMetaData(Other.LookupVertexBuffer);
 }
 
-FSkinWeightRHIInfo FSkinWeightVertexBuffer::CreateRHIBuffer_RenderThread()
+FSkinWeightRHIInfo FSkinWeightVertexBuffer::CreateRHIBuffer(FRHICommandListBase& RHICmdList)
 {
 	FSkinWeightRHIInfo RHIInfo;
-	RHIInfo.DataVertexBufferRHI = DataVertexBuffer.CreateRHIBuffer_RenderThread();
-	RHIInfo.LookupVertexBufferRHI = LookupVertexBuffer.CreateRHIBuffer_RenderThread();
+	RHIInfo.DataVertexBufferRHI = DataVertexBuffer.CreateRHIBuffer(RHICmdList);
+	RHIInfo.LookupVertexBufferRHI = LookupVertexBuffer.CreateRHIBuffer(RHICmdList);
 	return RHIInfo;
+}
+
+FSkinWeightRHIInfo FSkinWeightVertexBuffer::CreateRHIBuffer_RenderThread()
+{
+	return CreateRHIBuffer(FRHICommandListImmediate::Get());
 }
 
 FSkinWeightRHIInfo FSkinWeightVertexBuffer::CreateRHIBuffer_Async()
 {
 	FSkinWeightRHIInfo RHIInfo;
-	RHIInfo.DataVertexBufferRHI = DataVertexBuffer.CreateRHIBuffer_Async();
-	RHIInfo.LookupVertexBufferRHI = LookupVertexBuffer.CreateRHIBuffer_Async();
+	FRHIAsyncCommandList CommandList;
+	RHIInfo.DataVertexBufferRHI = DataVertexBuffer.CreateRHIBuffer(*CommandList);
+	RHIInfo.LookupVertexBufferRHI = LookupVertexBuffer.CreateRHIBuffer(*CommandList);
 	return RHIInfo;
 }
 
@@ -748,7 +775,7 @@ void FSkinWeightVertexBuffer::SetBoneIndex(uint32 VertexIndex, uint32 InfluenceI
 	DataVertexBuffer.SetBoneIndex(VertexWeightOffset, VertexInfluenceCount, InfluenceIndex, BoneIndex);
 }
 
-uint8 FSkinWeightVertexBuffer::GetBoneWeight(uint32 VertexIndex, uint32 InfluenceIndex) const
+uint16 FSkinWeightVertexBuffer::GetBoneWeight(uint32 VertexIndex, uint32 InfluenceIndex) const
 {
 	uint32 VertexWeightOffset = 0;
 	uint32 VertexInfluenceCount = 0;
@@ -756,7 +783,7 @@ uint8 FSkinWeightVertexBuffer::GetBoneWeight(uint32 VertexIndex, uint32 Influenc
 	return DataVertexBuffer.GetBoneWeight(VertexWeightOffset, VertexInfluenceCount, InfluenceIndex);
 }
 
-void FSkinWeightVertexBuffer::SetBoneWeight(uint32 VertexIndex, uint32 InfluenceIndex, uint8 BoneWeight)
+void FSkinWeightVertexBuffer::SetBoneWeight(uint32 VertexIndex, uint32 InfluenceIndex, uint16 BoneWeight)
 {
 	uint32 VertexWeightOffset = 0;
 	uint32 VertexInfluenceCount = 0;
@@ -772,16 +799,22 @@ void FSkinWeightVertexBuffer::ResetVertexBoneWeights(uint32 VertexIndex)
 	DataVertexBuffer.ResetVertexBoneWeights(VertexWeightOffset, VertexInfluenceCount);
 }
 
+void FSkinWeightVertexBuffer::SetOwnerName(const FName& OwnerName)
+{
+	LookupVertexBuffer.SetOwnerName(OwnerName);
+	DataVertexBuffer.SetOwnerName(OwnerName);
+}
+
 void FSkinWeightVertexBuffer::BeginInitResources()
 {
-	BeginInitResource(&LookupVertexBuffer);
-	BeginInitResource(&DataVertexBuffer);
+	BeginInitResource(&LookupVertexBuffer, &UE::RenderCommandPipe::SkeletalMesh);
+	BeginInitResource(&DataVertexBuffer, &UE::RenderCommandPipe::SkeletalMesh);
 }
 
 void FSkinWeightVertexBuffer::BeginReleaseResources()
 {
-	BeginReleaseResource(&LookupVertexBuffer);
-	BeginReleaseResource(&DataVertexBuffer);
+	BeginReleaseResource(&LookupVertexBuffer, &UE::RenderCommandPipe::SkeletalMesh);
+	BeginReleaseResource(&DataVertexBuffer, &UE::RenderCommandPipe::SkeletalMesh);
 }
 
 void FSkinWeightVertexBuffer::ReleaseResources()
@@ -794,6 +827,9 @@ void FSkinWeightVertexBuffer::ReleaseResources()
 #if WITH_EDITOR
 void FSkinWeightVertexBuffer::Init(const TArray<FSoftSkinVertex>& InVertices)
 {
+	static_assert(sizeof(FSoftSkinVertex::InfluenceBones) == sizeof(FSkinWeightInfo::InfluenceBones));
+	static_assert(sizeof(FSoftSkinVertex::InfluenceWeights) == sizeof(FSkinWeightInfo::InfluenceWeights));
+	
 	TArray<FSkinWeightInfo> VertexWeightInfos;
 	VertexWeightInfos.AddUninitialized(InVertices.Num());
 
@@ -802,7 +838,7 @@ void FSkinWeightVertexBuffer::Init(const TArray<FSoftSkinVertex>& InVertices)
 		const FSoftSkinVertex& SrcVertex = InVertices[VertIdx];
 		FSkinWeightInfo& DstVertex = VertexWeightInfos[VertIdx];
 		FMemory::Memcpy(DstVertex.InfluenceBones, SrcVertex.InfluenceBones, MAX_TOTAL_INFLUENCES * sizeof(FBoneIndexType));
-		FMemory::Memcpy(DstVertex.InfluenceWeights, SrcVertex.InfluenceWeights, MAX_TOTAL_INFLUENCES * sizeof(uint8));
+		FMemory::Memcpy(DstVertex.InfluenceWeights, SrcVertex.InfluenceWeights, MAX_TOTAL_INFLUENCES * sizeof(uint16));
 
 	}
 
@@ -829,7 +865,7 @@ FSkinWeightVertexBuffer& FSkinWeightVertexBuffer::operator=(const TArray<FSkinWe
 				}
 			}
 
-			LookupVertexBuffer.SetWeightOffsetAndInfluenceCount(VertIdx, TotalNumUsedBones * (GetBoneIndexByteSize() + sizeof(uint8)), NumUsedBones);
+			LookupVertexBuffer.SetWeightOffsetAndInfluenceCount(VertIdx, TotalNumUsedBones * GetBoneIndexAndWeightByteSize(), NumUsedBones);
 			TotalNumUsedBones += NumUsedBones;
 		}
 	}
@@ -910,7 +946,7 @@ FSkinWeightInfo FSkinWeightVertexBuffer::GetVertexSkinWeights(uint32 VertexIndex
 	}
 	return OutVertex;
 }
-void FSkinWeightVertexBuffer::CopySkinWeightInfoData(const TArrayView<const FSkinWeightInfo>& SkinWeightData)
+void FSkinWeightVertexBuffer::CopySkinWeightRawDataFromBuffer(const uint8* InSkinWeightData, uint32 InNumVertices)
 {
-	DataVertexBuffer.CopyDataFromBuffer(SkinWeightData);
+	DataVertexBuffer.CopyDataFromBuffer(InSkinWeightData, InNumVertices);
 }

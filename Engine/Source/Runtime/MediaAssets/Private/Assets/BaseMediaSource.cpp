@@ -1,11 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BaseMediaSource.h"
+
+#include "UObject/AssetRegistryTagsContext.h"
+#include "UObject/ObjectSaveContext.h"
 #include "UObject/SequencerObjectVersion.h"
 #include "UObject/MediaFrameWorkObjectVersion.h"
 #include "IMediaModule.h"
 #include "IMediaPlayerFactory.h"
 #include "Modules/ModuleManager.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BaseMediaSource)
 
 #if WITH_EDITOR
 	#include "Interfaces/ITargetPlatform.h"
@@ -17,24 +22,36 @@
 
 void UBaseMediaSource::GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+	Super::GetAssetRegistryTags(OutTags);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void UBaseMediaSource::GetAssetRegistryTags(FAssetRegistryTagsContext Context) const
+{
 	FString Url = GetUrl();
 
 	if (!Url.IsEmpty())
 	{
-		OutTags.Add(FAssetRegistryTag("Url", Url, FAssetRegistryTag::TT_Alphabetical));
+		Context.AddTag(FAssetRegistryTag("Url", Url, FAssetRegistryTag::TT_Alphabetical));
 	}
+	
+	Context.AddTag(FAssetRegistryTag("Validate", Validate() ? TEXT("True") : TEXT("False"),
+		FAssetRegistryTag::TT_Alphabetical));
+	Super::GetAssetRegistryTags(Context);
 }
-
-
-#if WITH_EDITOR
-void UBaseMediaSource::GetAssetRegistryTagMetadata(TMap<FName, FAssetRegistryTagMetadata>& OutMetadata) const
-{
-}
-#endif
 
 void UBaseMediaSource::PreSave(const class ITargetPlatform* TargetPlatform)
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+	Super::PreSave(TargetPlatform);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void UBaseMediaSource::PreSave(FObjectPreSaveContext ObjectSaveContext)
+{
 #if WITH_EDITORONLY_DATA
+	const ITargetPlatform* TargetPlatform = ObjectSaveContext.GetTargetPlatform();
 	if (TargetPlatform)
 	{
 		// Make sure we setup the player name according to the currently selected platform on saves
@@ -42,6 +59,7 @@ void UBaseMediaSource::PreSave(const class ITargetPlatform* TargetPlatform)
 		PlayerName = (PlatformPlayerName != nullptr) ? *PlatformPlayerName : NAME_None;
 	}
 #endif
+	Super::PreSave(ObjectSaveContext);
 }
 
 void UBaseMediaSource::Serialize(FArchive& Ar)
@@ -185,3 +203,4 @@ FName UBaseMediaSource::GetDesiredPlayerName() const
 	return PlayerName;
 #endif
 }
+

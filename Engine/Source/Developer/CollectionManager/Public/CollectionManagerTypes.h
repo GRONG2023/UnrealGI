@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/SoftObjectPath.h"
 #include "ISourceControlState.h"
 
 struct ECollectionStorageMode
@@ -132,7 +133,7 @@ struct ECollectionShareType
 		switch (InType)
 		{
 		case CST_Local:
-			return NSLOCTEXT("ECollectionShareType", "CST_Local_Description", "Local. This collection is only visible to you and is not in source control.");
+			return NSLOCTEXT("ECollectionShareType", "CST_Local_Description", "Local. This collection is only visible to you and is not in revision control.");
 		case CST_Private:
 			return NSLOCTEXT("ECollectionShareType", "CST_Private_Description", "Private. This collection is only visible to you.");
 		case CST_Shared:
@@ -186,7 +187,7 @@ struct ECollectionShareType
 /** Controls how the collections manager will recurse when performing work against a given collection */
 struct ECollectionRecursionFlags
 {
-	typedef uint8 Flags;
+	typedef uint32 Flags;
 	enum Flag
 	{
 		/** Include the current collection when performing work */
@@ -260,5 +261,5 @@ public:
 	virtual ~ICollectionRedirectorFollower() {}
 
 	/** Given an object path, will see if it needs to follow any redirectors, and if so, will populate OutNewObjectPath with the new name and return true */
-	virtual bool FixupObject(const FName& InObjectPath, FName& OutNewObjectPath) = 0;
+	virtual bool FixupObject(const FSoftObjectPath& InObjectPath, FSoftObjectPath& OutNewObjectPath) = 0;
 };

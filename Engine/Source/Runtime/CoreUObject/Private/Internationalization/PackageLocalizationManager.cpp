@@ -17,33 +17,40 @@ public:
 
 protected:
 	//~ FPackageLocalizationCache interface
-	virtual void FindLocalizedPackages(const FString& InSourceRoot, const FString& InLocalizedRoot, TMap<FName, TArray<FName>>& InOutSourcePackagesToLocalizedPackages) override;
-	virtual void FindAssetGroupPackages(const FName InAssetGroupName, const FName InAssetClassName) override;
+	virtual void FindLocalizedPackages(const TMap<FString, TArray<FString>>& NewSourceToLocalizedPaths, TMap<FName, TArray<FName>>& InOutSourcePackagesToLocalizedPackages) override;
+	virtual void FindAssetGroupPackages(const FName InAssetGroupName, const FTopLevelAssetPath& InAssetClassName) override;
 };
 
-void FDefaultPackageLocalizationCache::FindLocalizedPackages(const FString& InSourceRoot, const FString& InLocalizedRoot, TMap<FName, TArray<FName>>& InOutSourcePackagesToLocalizedPackages)
+void FDefaultPackageLocalizationCache::FindLocalizedPackages(const TMap<FString, TArray<FString>>& NewSourceToLocalizedPaths, TMap<FName, TArray<FName>>& InOutSourcePackagesToLocalizedPackages)
 {
 	// Convert the package path to a filename with no extension (directory)
-	FString LocalizedPackageFilePath;
-	if (!FPackageName::TryConvertLongPackageNameToFilename(InLocalizedRoot / TEXT(""), LocalizedPackageFilePath))
+	for (const TPair<FString, TArray<FString>>& Pair : NewSourceToLocalizedPaths)
 	{
-		return;
+		const FString& SourceRoot = Pair.Key;
+		for (const FString& LocalizedRoot : Pair.Value)
+		{
+			FString LocalizedPackageFilePath;
+			if (!FPackageName::TryConvertLongPackageNameToFilename(LocalizedRoot / TEXT(""), LocalizedPackageFilePath))
+			{
+				continue;
+			}
+
+			FPackageName::IteratePackagesInDirectory(LocalizedPackageFilePath, FPackageName::FPackageNameVisitor([&](const TCHAR* InPackageFileName) -> bool
+			{
+				const FString PackageSubPath = FPaths::ChangeExtension(InPackageFileName + LocalizedPackageFilePath.Len(), FString());
+				const FName SourcePackageName = *(SourceRoot / PackageSubPath);
+				const FName LocalizedPackageName = *(LocalizedRoot / PackageSubPath);
+
+				TArray<FName>& PrioritizedLocalizedPackageNames = InOutSourcePackagesToLocalizedPackages.FindOrAdd(SourcePackageName);
+				PrioritizedLocalizedPackageNames.AddUnique(LocalizedPackageName);
+
+				return true;
+			}));
+		}
 	}
-
-	FPackageName::IteratePackagesInDirectory(LocalizedPackageFilePath, FPackageName::FPackageNameVisitor([&](const TCHAR* InPackageFileName) -> bool
-	{
-		const FString PackageSubPath = FPaths::ChangeExtension(InPackageFileName + LocalizedPackageFilePath.Len(), FString());
-		const FName SourcePackageName = *(InSourceRoot / PackageSubPath);
-		const FName LocalizedPackageName = *(InLocalizedRoot / PackageSubPath);
-
-		TArray<FName>& PrioritizedLocalizedPackageNames = InOutSourcePackagesToLocalizedPackages.FindOrAdd(SourcePackageName);
-		PrioritizedLocalizedPackageNames.AddUnique(LocalizedPackageName);
-
-		return true;
-	}));
 }
 
-void FDefaultPackageLocalizationCache::FindAssetGroupPackages(const FName InAssetGroupName, const FName InAssetClassName)
+void FDefaultPackageLocalizationCache::FindAssetGroupPackages(const FName InAssetGroupName, const FTopLevelAssetPath& InAssetClassName)
 {
 	// Not supported without the asset registry
 }
@@ -74,13 +81,14 @@ void FPackageLocalizationManager::InitializeFromCache(const TSharedRef<IPackageL
 	// Only preemptively attempt to conditionally update the cache outside of the editor where such things
 	// will happen almost immediately in a localized game, where as in the editor it's a bunch of work that
 	// likely won't be used until using some localization menus in the editor.
-#if !WITH_EDITOR
-	ActiveCache->ConditionalUpdateCache();
+	if (!GIsEditor)
+	{
+		ActiveCache->ConditionalUpdateCache();
 
-	// Allow the plugin manager to update the package localization cache by exposing access through a delegate.
-	// PluginManager is a Core class, but package localization functionality is added at the CoreUObject level.
-	IPluginManager::Get().SetUpdatePackageLocalizationCacheDelegate(IPluginManager::FUpdatePackageLocalizationCacheDelegate::CreateRaw(this, &FPackageLocalizationManager::ConditionalUpdateCache));
-#endif
+		// Allow the plugin manager to update the package localization cache by exposing access through a delegate.
+		// PluginManager is a Core class, but package localization functionality is added at the CoreUObject level.
+		IPluginManager::Get().SetUpdatePackageLocalizationCacheDelegate(IPluginManager::FUpdatePackageLocalizationCacheDelegate::CreateRaw(this, &FPackageLocalizationManager::ConditionalUpdateCache));
+	}
 }
 
 void FPackageLocalizationManager::InitializeFromDefaultCache()

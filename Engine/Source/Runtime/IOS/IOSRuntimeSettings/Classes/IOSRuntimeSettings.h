@@ -30,27 +30,25 @@ enum class EPowerUsageFrameRateLock : uint8
 UENUM()
 	enum class EIOSVersion : uint8
 {
-    /** iOS 12 */
-	IOS_12 = 12 UMETA(DisplayName = "12.0"),
-
-	/** iOS 13 */
-	IOS_13 = 13 UMETA(DisplayName = "13.0"),
-
-    /** iOS 14 */
-    IOS_14 = 14 UMETA(DisplayName = "14.0"),
+    IOS_Minimum = 15 UMETA(DisplayName = "Minimum, Currently 15.0"),
+    IOS_15 = 15 UMETA(DisplayName = "15.0"),
+    IOS_16 = 16 UMETA(DisplayName = "16.0"),
+    IOS_17 = 17 UMETA(DisplayName = "17.0"),
 };
 
+// https://support.apple.com/en-ca/HT205073
 UENUM()
 enum class EIOSMetalShaderStandard : uint8
 {
-	/** Metal Shaders Compatible With iOS 10.0/tvOS 10.0 or later (std=ios-metal1.2) */
-	IOSMetalSLStandard_1_2 = 2 UMETA(DisplayName="Metal v1.2 (iOS 10.0/tvOS 10.0)", Hidden),
-	
-    /** Metal Shaders Compatible With iOS 11.0/tvOS 11.0 or later (std=ios-metal2.0) */
-	IOSMetalSLStandard_2_0 = 3 UMETA(DisplayName="Metal v2.0 (iOS 11.0/tvOS 11.0)"),
-    
-    /** Metal Shaders Compatible With iOS 12.0/tvOS 12.0 or later (std=ios-metal2.1) */
-    IOSMetalSLStandard_2_1 = 4 UMETA(DisplayName="Metal v2.1 (iOS 12.0/tvOS 12.0)"),
+    /** Metal Shader 2.4 is the minimum as of UE5.3*/
+    IOSMetalSLStandard_Minimum = 0 UMETA(DisplayName="Minimum, Metal v2.4"),
+    /** Metal Shaders Compatible With iOS 16.0/tvOS 16.0 or later (std=metal2.4) */
+    IOSMetalSLStandard_2_4 = 7 UMETA(DisplayName="Metal v2.4 (iOS 15.0/tvOS 15.0 for older devices)"),
+    /** Metal Shaders Compatible With iOS 16.0/tvOS 16.0 or later (std=metal3.0) */
+    IOSMetalSLStandard_3_0 = 8 UMETA(DisplayName="Metal v3.0 (iOS 16.0/tvOS 16.0)"),
+    /** Metal Shaders Compatible With iOS 17.0/tvOS 17.0 or later (std=metal3.1) */
+    IOSMetalSLStandard_3_1 = 9 UMETA(DisplayName="Metal v3.1 (iOS 17.0/tvOS 17.0)"),
+
 };
 
 UENUM()
@@ -89,11 +87,6 @@ struct FIOSBuildResourceFilePath
 	 */
 	bool ExportTextItem(FString& ValueStr, FIOSBuildResourceFilePath const& DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope) const
 	{
-		if (0 != (PortFlags & EPropertyPortFlags::PPF_ExportCpp))
-		{
-			return false;
-		}
-
 		ValueStr += FilePath;
 		return true;
 	}
@@ -142,11 +135,6 @@ struct FIOSBuildResourceDirectory
 	 */
 	bool ExportTextItem(FString& ValueStr, FIOSBuildResourceDirectory const& DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope) const
 	{
-		if (0 != (PortFlags & EPropertyPortFlags::PPF_ExportCpp))
-		{
-			return false;
-		}
-
 		ValueStr += Path;
 		return true;
 	}
@@ -193,11 +181,11 @@ public:
 
 	// Should Game Center support (iOS Online Subsystem) be enabled?
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = Online, meta = (ConfigHierarchyEditable))
-	uint32 bEnableGameCenterSupport : 1;
+    bool bEnableGameCenterSupport;
 	
 	// Should Cloud Kit support (iOS Online Subsystem) be enabled?
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = Online)
-	uint32 bEnableCloudKitSupport : 1;
+	bool bEnableCloudKitSupport;
 
 	// iCloud Read stategy
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = Online, meta = (DisplayName = "iCloud save files sync strategy"), meta = (EditCondition = "bEnableCloudKitSupport"))
@@ -205,11 +193,11 @@ public:
 
     // Should push/remote notifications support (iOS Online Subsystem) be enabled?
     UPROPERTY(GlobalConfig, EditAnywhere, Category = Online)
-    uint32 bEnableRemoteNotificationsSupport : 1;
+    bool bEnableRemoteNotificationsSupport;
     
     // Should background fetch support be enabled?
     UPROPERTY(GlobalConfig, EditAnywhere, Category = Online)
-    uint32 bEnableBackgroundFetch : 1;
+    bool bEnableBackgroundFetch;
     
 	// Whether or not to compile iOS Metal shaders for the Mobile renderer (requires iOS 8+ and an A7 processor).
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = Rendering, meta = (DisplayName = "Metal Mobile Renderer"))
@@ -218,14 +206,18 @@ public:
 	// Whether or not to compile iOS Metal shaders for the desktop renderer (requires iOS 10+ and an A10 processor)
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = Rendering, meta = (DisplayName = "Metal Desktop Renderer"))
 	bool bSupportsMetalMRT;
-	
-	// Whether or not to add support for PVRTC textures
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = Rendering, meta = (DisplayName = "Cook PVRTC texture data for OpenGL ES or Metal on A7 and earlier devices"))
-	bool bCookPVRTCTextures;
-
-	// Whether or not to add support for ASTC textures
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = Rendering, meta = (DisplayName = "Cook ASTC texture data for Metal on A8 or later devices"))
-	bool bCookASTCTextures;
+    
+    // Should the app be compatible for high refresh rate (iPhone only)
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = Rendering, meta = (DisplayName = "Enable ProMotion 120Hz on supported iPhone devices"))
+    bool bSupportHighRefreshRates;
+        
+    /** Whether to enable LOD streaming for landscape visual meshes. Requires Metal support. */
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = Rendering, Meta = (DisplayName = "Stream landscape visual mesh LODs"))
+    bool bStreamLandscapeMeshLODs;
+    
+    // Minimum iOS version this game supports
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Minimum iOS Version"))
+    EIOSVersion MinimumiOSVersion;
 	
     // Whether to build the iOS project as a framework.
     UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Build project as a framework (Experimental)"))
@@ -235,11 +227,11 @@ public:
 	FIOSBuildResourceDirectory WindowsMetalToolchainOverride;
 
 	// Enable generation of dSYM file
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Generate dSYM file for code debugging and profiling"))
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Generate dSYMs for code debugging and profiling"))
 	bool bGeneratedSYMFile;
 
 	// Enable generation of dSYM bundle
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Generate dSYM bundle for third party crash tools"))
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Generate dSYMs as a bundle for third party crash tools"), meta = (EditCondition = "bGeneratedSYMFile"))
 	bool bGeneratedSYMBundle;
 
 	// Enable generation of a .udebugsymbols file, which allows offline, platform-independent symbolication for the Malloc Profiler or external crash reporting tools. Requires a dSYM file or bundle.
@@ -250,10 +242,6 @@ public:
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Generate xcode archive package"))
 	bool bGenerateXCArchive;	
 	
-	// Enable bitcode compiling?
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Support bitcode in Shipping"))
-	bool bShipForBitcode;
-
 	// Enable Advertising Identified
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Enable Advertising Identified (IDFA)"))
 	bool bEnableAdvertisingIdentifier;
@@ -265,55 +253,103 @@ public:
 	// Any additional linker flags to pass to the linker in shipping builds
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Additional Shipping Linker Flags", ConfigHierarchyEditable))
 	FString AdditionalShippingLinkerFlags;
-
-	// The name or ip address of the remote mac which will be used to build IOS
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Build", meta = (ConfigHierarchyEditable))
-	FString RemoteServerName;
-
-	// Enable the use of RSync for remote builds on a mac
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Build", meta = (DisplayName = "Use RSync for building IOS", ConfigHierarchyEditable))
-	bool bUseRSync;
-
-	// The mac users name which matches the SSH Private Key, for remote builds using RSync.
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Build", meta = (EditCondition = "bUseRSync", DisplayName = "Username on Remote Server.", ConfigHierarchyEditable))
-	FString RSyncUsername;
-
-	// Optional path on the remote mac where the build files will be copied. If blank, ~/UE4/Builds will be used.
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Build", meta = (ConfigHierarchyEditable))
-	FString RemoteServerOverrideBuildPath;
-
-	// The install directory of cwrsync.
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Build", meta = (EditCondition = "bUseRSync", ConfigHierarchyEditable))
-	FIOSBuildResourceDirectory CwRsyncInstallPath;
-
-	// The existing location of an SSH Key found by UE4.
-	UPROPERTY(VisibleAnywhere, Category = "Build", meta = (DisplayName = "Found Existing SSH permissions file"))
-	FString SSHPrivateKeyLocation;
-
-	// The path of the ssh permissions key to be used when connecting to the remote server.
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Build", meta = (EditCondition = "bUseRSync", DisplayName = "Override existing SSH permissions file", ConfigHierarchyEditable))
-	FIOSBuildResourceFilePath SSHPrivateKeyOverridePath;
     
-    // Should the app be compatible with Multi-User feature on tvOS ?　If checked, the game will will shutdown with the typical exit flow.
-    UPROPERTY(GlobalConfig, EditAnywhere, Category = "Build", meta = (DisplayName = "Support user switching on tvOS."))
-    bool bRunAsCurrentUser;
+    // Any additional plist key/value data utilizing \n for a new line
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = Build)
+    FString AdditionalPlistData;
+    
+    // Whether or not to add support for iPad devices
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Supports iPad"))
+    bool bSupportsIPad;
 
-	// If checked, the game will be able to handle multiple gamepads at the same time (the Siri Remote is a gamepad)
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = Input, meta = (DisplayName = "Can the Game have multiple gamepads connected at a single time"))
+    // Whether or not to add support for iPhone devices
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Supports iPhone"))
+    bool bSupportsIPhone;
+    
+    // Whether or not the iPad app supports Split View (also needed for StageManager support)
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Enable iPad Split View"))
+    bool bEnableSplitView;
+    
+    // Whether or not iOS Simulator support should be enabled for this project (Experimental)
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Enable iOS Simulator Support (Experimental)", ConfigRestartRequired = true))
+    bool bEnableSimulatorSupport;
+    
+    /** Set the maximum frame rate to save on power consumption */
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = PowerUsage, meta = (ConfigHierarchyEditable))
+    EPowerUsageFrameRateLock FrameRateLock;
+
+    //Whether or not to allow taking the MaxRefreshRate from the device instead of a constant (60fps) in IOSPlatformFramePacer
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = PowerUsage, meta = (ConfigHierarchyEditable))
+    bool bEnableDynamicMaxFPS;
+
+    // Enable the use of RSync for remote builds on a mac
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = "Remote Build", meta = (DisplayName = "Use RSync for building IOS", ConfigHierarchyEditable))
+    bool bUseRSync;
+
+    // The name or ip address of the remote mac which will be used to build IOS
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = "Remote Build", meta = (ConfigHierarchyEditable))
+    FString RemoteServerName;
+
+    // The mac users name which matches the SSH Private Key, for remote builds using RSync.
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = "Remote Build", meta = (EditCondition = "bUseRSync", DisplayName = "Username on Remote Server", ConfigHierarchyEditable))
+    FString RSyncUsername;
+
+    // Optional path on the remote mac where the build files will be copied. If blank, ~/UE5/Builds will be used.
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = "Remote Build", meta = (ConfigHierarchyEditable))
+    FString RemoteServerOverrideBuildPath;
+    
+    // The install directory of cwrsync.
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = "Remote Build", meta = (EditCondition = "bUseRSync", ConfigHierarchyEditable))
+    FIOSBuildResourceDirectory CwRsyncInstallPath;
+
+    // The existing location of an SSH Key found by Unreal Engine.
+    UPROPERTY(VisibleAnywhere, Category = "Remote Build", meta = (DisplayName = "Found Existing SSH permissions file"))
+    FString SSHPrivateKeyLocation;
+
+    // The path of the ssh permissions key to be used when connecting to the remote server.
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = "Remote Build", meta = (EditCondition = "bUseRSync", DisplayName = "Override existing SSH permissions file", ConfigHierarchyEditable))
+    FIOSBuildResourceFilePath SSHPrivateKeyOverridePath;
+
+    // Support a secondary remote Mac to support to facilitate iOS/tvOS debug ?
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = "Remote Build", meta = (DisplayName = "Enable Secondary remote Mac"))
+    bool bSupportSecondaryMac;
+    
+    // The name or ip address of the remote mac which will be used to build IOS
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = "Remote Build", meta = (EditCondition = "bSupportSecondaryMac", ConfigHierarchyEditable))
+    FString SecondaryRemoteServerName;
+    
+    // The secondary mac users name which matches the SSH Private Key, for remote builds using RSync.
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = "Remote Build", meta = (EditCondition = "bSupportSecondaryMac", DisplayName = "Username on Secondary Remote Server", ConfigHierarchyEditable))
+    FString SecondaryRSyncUsername;
+
+    // Optional path on the secondary remote mac where the build files will be copied. If blank, ~/UE5/Builds will be used.
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = "Remote Build", meta = (EditCondition = "bSupportSecondaryMac", ConfigHierarchyEditable))
+    FString SecondaryRemoteServerOverrideBuildPath;
+
+    // The install directory of cwrsync.
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = "Remote Build", meta = (EditCondition = "bSupportSecondaryMac", ConfigHierarchyEditable))
+    FIOSBuildResourceDirectory SecondaryCwRsyncInstallPath;
+    
+    // The existing location of an SSH Key found by Unreal Engine.
+    UPROPERTY(VisibleAnywhere, Category = "Remote Build", meta = (EditCondition = "bSupportSecondaryMac", DisplayName = "Found Existing SSH permissions file for Secondary Mac"))
+    FString SecondarySSHPrivateKeyLocation;
+
+    // The path of the ssh permissions key to be used when connecting to the remote server.
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = "Remote Build", meta = (EditCondition = "bSupportSecondaryMac", DisplayName = "Override existing SSH permissions file for Secondary Mac", ConfigHierarchyEditable))
+    FIOSBuildResourceFilePath SecondarySSHPrivateKeyOverridePath;
+
+	// Should the app be multi-users compatible on tvOS ? Requires the com.apple.developer.user-management entitlement.
+    UPROPERTY(GlobalConfig, EditAnywhere, Category = "Build", meta = (DisplayName = "Support user switching on tvOS"))
+    bool bUserSwitching;
+
+    // If checked, the game will be able to handle multiple gamepads at the same time (the Siri Remote is a gamepad)
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = Input, meta = (DisplayName = "Multiple gamepads support"))
 	bool bGameSupportsMultipleActiveControllers;
 
 	// If checked, the Siri Remote can be rotated to landscape view
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = Input, meta = (DisplayName = "Allow AppleTV Remote landscape mode"))
 	bool bAllowRemoteRotation;
-	
-	// If checked, the trackpad is a virtual joystick (acts like the left stick of a controller). If unchecked, the trackpad will send touch events
-	UPROPERTY(config, meta = (Deprecated, DeprecationMessage = "Use AppleTV trackpad as virtual joystick. Deprecated. Siri Remote shouls always behave as a joystick"))
-	bool bUseRemoteAsVirtualJoystick_DEPRECATED;
-	
-	// If checked, the center of the trackpad is 0,0 (center) for the virtual joystick. If unchecked, the location the user taps becomes 0,0
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = Input, meta = (DisplayName = "Use AppleTV Remote absolute trackpad values"))
-	bool bUseRemoteAbsoluteDpadValues;
-	
+		
 	// If checked, Bluetooth connected controllers will send input
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = Input, meta = (DisplayName = "Allow MFi (Bluetooth) controllers"))
 	bool bAllowControllers;
@@ -370,38 +406,14 @@ public:
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = BundleInformation)
 	FString VersionInfo;
 
-	/** Set the maximum frame rate to save on power consumption */
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = PowerUsage, meta = (ConfigHierarchyEditable))
-	EPowerUsageFrameRateLock FrameRateLock;
-
-	//Whether or not to allow taking the MaxRefreshRate from the device instead of a constant (60fps) in IOSPlatformFramePacer
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = PowerUsage, meta = (ConfigHierarchyEditable))
-	bool bEnableDynamicMaxFPS;
-
-	// Minimum iOS version this game supports
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = OSInfo, meta = (DisplayName = "Minimum iOS Version"))
-	EIOSVersion MinimumiOSVersion;
-
-	// Whether or not to add support for iPad devices
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = DeviceUsage)
-	uint32 bSupportsIPad : 1;
-
-	// Whether or not to add support for iPhone devices
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = DeviceUsage)
-	uint32 bSupportsIPhone : 1;
-
-	// Any additional plist key/value data utilizing \n for a new line
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = ExtraData)
-	FString AdditionalPlistData;
-
 	/**
 	 * Choose whether to use a custom LaunchScreen.Storyboard as a Launchscreen. To use this option, create a storyboard in Xcode and 
 	 * copy it named LaunchScreen.storyboard in Build/IOS/Resources/Interface under your Project folder. This will be compiled and 
 	 * copied to the bundle app and the Launch screen image above will not be included in the app.
 	 * When using assets in your custom LaunchScreen.storyboard, add them in Build/IOS/Resources/Interface/Assets and they will be included.
 	 */
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = LaunchScreen, meta = (DisplayName = "Custom Launchscreen Storyboard (experimental)"))
-	bool bCustomLaunchscreenStoryboard;
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = LaunchScreen, meta = (DisplayName = "Custom Launchscreen Storyboard (experimental)", EditCondition = "!MacTargetPlatform.XcodeProjectSettings.ShouldDisableIOSSettings"))
+    bool bCustomLaunchscreenStoryboard;
 
 	// Whether the app supports Facebook
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = Online)
@@ -411,31 +423,45 @@ public:
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = Online, meta = (EditCondition = "bEnableFacebookSupport"))
 	FString FacebookAppID;
     
-    // Mobile provision to utilize when signing
+    // Mobile provision to utilize when signing.
+	// This value is stripped out when making builds.
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build)
 	FString MobileProvision;
 
-	// Signing certificate to utilize when signing
+	// Signing certificate to utilize when signing.
+	// This value is stripped out when making builds.
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build)
 	FString SigningCertificate;
 	
 	// Whether to use automatic signing through Xcode
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build)
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (EditCondition = "!MacTargetPlatform.XcodeProjectSettings.ShouldDisableIOSSettings"))
 	bool bAutomaticSigning;
 
-	// The team ID of the apple developer account to be used to autmatically sign IOS builds
+	// The team ID of the apple developer account to be used to autmatically sign IOS builds.
+	// This can be overridden in Turnkey with "RunUAT Turnkey -command=ManageSettings"
+	// This value is stripped out when making builds.
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (ConfigHierarchyEditable))
 	FString IOSTeamID;
 
+	// The username/email to use when logging in to DevCenter with Turnkey.
+	// This can be overridden in Turnkey with "RunUAT Turnkey -command=ManageSettings"
+	// This value is stripped out when making builds.
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (ConfigHierarchyEditable))
+	FString DevCenterUsername;
+	
+	// The password to use when logging in to DevCenter with Turnkey. NOTE: This is saved in plaintext, and is meant for shared accounts!
+	// This value is stripped out when making builds.
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (ConfigHierarchyEditable))
+	FString DevCenterPassword;
+	
 	// Whether the app supports HTTPS
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = Online, meta = (DisplayName = "Allow web connections to non-HTTPS websites"))
 	bool bDisableHTTPS;
 
 
-    // The maximum supported Metal shader langauge version.
-    // This defines what features may be used and OS versions supported.
-    UPROPERTY(EditAnywhere, config, Category=Rendering, meta = (DisplayName = "Max. Metal Shader Standard To Target", ConfigRestartRequired = true))
-	uint8 MaxShaderLanguageVersion;
+    // The Metal shader language version which will be used when compiling the shaders.
+    UPROPERTY(EditAnywhere, config, Category=Rendering, meta = (DisplayName = "Metal Shader Standard To Target", ConfigRestartRequired = true))
+	uint8 MetalLanguageVersion;
 	
 	/**
 	 * Whether to use the Metal shading language's "fast" intrinsics.
@@ -467,6 +493,14 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = Rendering, Meta = (DisplayName = "Tier of Indirect Argument Buffers to use when compiling shaders", ConfigRestartRequired = true))
 	int32 IndirectArgumentTier;
 	
+    /** Supports Apple A8 devices.
+     * Disables 3d texture compression
+     * Virtual Textures are not supported on A8 devices due to missing hardware features
+     * This will disable also Base_Vertex semantics in the msl which may have negative consequences if shaders rely on it
+     */
+    UPROPERTY(config, EditAnywhere, Category = Rendering, Meta = (DisplayName = "Support Apple A8", ConfigRestartRequired = true))
+    bool bSupportAppleA8;
+    
 	// Whether or not the keyboard should be usable on it's own without a UITextField
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = Input)
 	bool bUseIntegratedKeyboard;
@@ -491,15 +525,19 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Audio", meta = (ClampMin = "0", UIMin = "0", DisplayName = "Number of Source Workers"))
 	int32 AudioNumSourceWorkers;
 
-	/** Which of the currently enabled spatialization plugins to use on Windows. */
+	/** Which of the currently enabled spatialization plugins to use. */
 	UPROPERTY(config, EditAnywhere, Category = "Audio")
 	FString SpatializationPlugin;
 
-	/** Which of the currently enabled reverb plugins to use on Windows. */
+	/** Which of the currently enabled source data override plugins to use. */
+	UPROPERTY(config, EditAnywhere, Category = "Audio")
+	FString SourceDataOverridePlugin;
+
+	/** Which of the currently enabled reverb plugins to use. */
 	UPROPERTY(config, EditAnywhere, Category = "Audio")
 	FString ReverbPlugin;
 
-	/** Which of the currently enabled occlusion plugins to use on Windows. */
+	/** Which of the currently enabled occlusion plugins to use. */
 	UPROPERTY(config, EditAnywhere, Category = "Audio")
 	FString OcclusionPlugin;
 
@@ -507,9 +545,9 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Audio")
 	FPlatformRuntimeAudioCompressionOverrides CompressionOverrides;
 
-	/** When this is enabled, Actual compressed data will be separated from the USoundWave, and loaded into a cache. */
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Audio|CookOverrides", meta = (DisplayName = "Use Stream Caching (Experimental)"))
-	bool bUseAudioStreamCaching;
+    /** Whether this app's audio can be played when using other apps or on the springboard */
+    UPROPERTY(config, EditAnywhere, Category = "Audio", meta = (DisplayName = "Enable Background Audio"))
+    bool bSupportsBackgroundAudio;
 
 	/** This determines the max amount of memory that should be used for the cache at any given time. If set low (<= 8 MB), it lowers the size of individual chunks of audio during cook. */
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Audio|CookOverrides|Stream Caching", meta = (DisplayName = "Max Cache Size (KB)"))
@@ -548,14 +586,10 @@ public:
 	float CompressionQualityModifier;
 
 	// When set to anything beyond 0, this will ensure any SoundWaves longer than this value, in seconds, to stream directly off of the disk.
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Audio|CookOverrides", meta = (DisplayName = "Stream All Soundwaves Longer Than: "))
+	UPROPERTY(GlobalConfig)
 	float AutoStreamingThreshold;
 
-	/** Whether to enable LOD streaming for landscape visual meshes. Requires Metal support. */
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Misc", Meta = (DisplayName = "Stream landscape visual mesh LODs"))
-	bool bStreamLandscapeMeshLODs;
-
-	virtual void PostReloadConfig(class FProperty* PropertyThatWasLoaded) override;
+    virtual void PostReloadConfig(class FProperty* PropertyThatWasLoaded) override;
 
 #if WITH_EDITOR
 	// UObject interface

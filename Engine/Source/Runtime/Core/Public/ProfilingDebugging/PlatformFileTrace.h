@@ -3,9 +3,10 @@
 #pragma once
 
 #include "CoreTypes.h"
+#include "Misc/Build.h"
 #include "Trace/Config.h"
 
-#if (PLATFORM_WINDOWS || PLATFORM_MAC) && !UE_BUILD_SHIPPING
+#if !UE_BUILD_SHIPPING
 #define PLATFORMFILETRACE_ENABLED 1
 #else
 #define PLATFORMFILETRACE_ENABLED 0
@@ -15,18 +16,20 @@
 
 struct FPlatformFileTrace
 {
-	static void BeginOpen(const TCHAR* Path);
-	static void EndOpen(uint64 FileHandle);
-	static void FailOpen(const TCHAR* Path);
-	static void BeginClose(uint64 FileHandle);
-	static void EndClose(uint64 FileHandle);
-	static void FailClose(uint64 FileHandle);
-	static void BeginRead(uint64 ReadHandle, uint64 FileHandle, uint64 Offset, uint64 Size);
-	static void EndRead(uint64 ReadHandle, uint64 SizeRead);
-	static void BeginWrite(uint64 WriteHandle, uint64 FileHandle, uint64 Offset, uint64 Size);
-	static void EndWrite(uint64 WriteHandle, uint64 SizeWritten);
+	static CORE_API void BeginOpen(const TCHAR* Path);
+	static CORE_API void EndOpen(uint64 FileHandle);
+	static CORE_API void FailOpen(const TCHAR* Path);
+	static CORE_API void BeginReOpen(uint64 OldFileHandle);
+	static CORE_API void EndReOpen(uint64 NewFileHandle);
+	static CORE_API void BeginClose(uint64 FileHandle);
+	static CORE_API void EndClose(uint64 FileHandle);
+	static CORE_API void FailClose(uint64 FileHandle);
+	static CORE_API void BeginRead(uint64 ReadHandle, uint64 FileHandle, uint64 Offset, uint64 Size);
+	static CORE_API void EndRead(uint64 ReadHandle, uint64 SizeRead);
+	static CORE_API void BeginWrite(uint64 WriteHandle, uint64 FileHandle, uint64 Offset, uint64 Size);
+	static CORE_API void EndWrite(uint64 WriteHandle, uint64 SizeWritten);
 
-	CORE_API static uint32 GetOpenFileHandleCount();
+	static CORE_API uint32 GetOpenFileHandleCount();
 };
 
 #define TRACE_PLATFORMFILE_BEGIN_OPEN(Path) \
@@ -37,6 +40,12 @@ struct FPlatformFileTrace
 
 #define TRACE_PLATFORMFILE_FAIL_OPEN(Path) \
 	FPlatformFileTrace::FailOpen(Path);
+
+#define TRACE_PLATFORMFILE_BEGIN_REOPEN(OldFileHandle) \
+	FPlatformFileTrace::BeginReOpen(uint64(OldFileHandle));
+
+#define TRACE_PLATFORMFILE_END_REOPEN(NewFileHandle) \
+	FPlatformFileTrace::EndReOpen(uint64(NewFileHandle));
 
 #define TRACE_PLATFORMFILE_BEGIN_CLOSE(FileHandle) \
 	FPlatformFileTrace::BeginClose(uint64(FileHandle));
@@ -63,6 +72,8 @@ struct FPlatformFileTrace
 
 #define TRACE_PLATFORMFILE_BEGIN_OPEN(Path)
 #define TRACE_PLATFORMFILE_END_OPEN(FileHandle)
+#define TRACE_PLATFORMFILE_BEGIN_REOPEN(OldFileHandle)
+#define TRACE_PLATFORMFILE_END_REOPEN(NewFileHandle)
 #define TRACE_PLATFORMFILE_FAIL_OPEN(Path)
 #define TRACE_PLATFORMFILE_BEGIN_CLOSE(FileHandle)
 #define TRACE_PLATFORMFILE_END_CLOSE(FileHandle)

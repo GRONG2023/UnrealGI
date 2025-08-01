@@ -5,9 +5,10 @@
 =============================================================================*/
 
 #include "ParticleBeamTrailVertexFactory.h"
+#include "MeshDrawShaderBindings.h"
 #include "ParticleHelper.h"
-#include "ShaderParameterUtils.h"
 #include "MeshMaterialShader.h"
+#include "Misc/DelayedAutoRegister.h"
 #include "PipelineStateCache.h"
 
 IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FParticleBeamTrailUniformParameters,"BeamTrailVF");
@@ -17,7 +18,7 @@ IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FParticleBeamTrailUniformParameters,"Be
  */
 class FParticleBeamTrailVertexFactoryShaderParameters : public FVertexFactoryShaderParameters
 {
-	DECLARE_INLINE_TYPE_LAYOUT(FParticleBeamTrailVertexFactoryShaderParameters, NonVirtual);
+	DECLARE_TYPE_LAYOUT(FParticleBeamTrailVertexFactoryShaderParameters, NonVirtual);
 public:
 	void GetElementShaderBindings(
 		const FSceneInterface* Scene,
@@ -33,10 +34,9 @@ public:
 		FParticleBeamTrailVertexFactory* BeamTrailVF = (FParticleBeamTrailVertexFactory*)VertexFactory;
 		ShaderBindings.Add(Shader->GetUniformBufferParameter<FParticleBeamTrailUniformParameters>(), BeamTrailVF->GetBeamTrailUniformBuffer() );
 	}
-
-	
-	
 };
+
+IMPLEMENT_TYPE_LAYOUT(FParticleBeamTrailVertexFactoryShaderParameters);
 
 ///////////////////////////////////////////////////////////////////////////////
 /**
@@ -73,22 +73,22 @@ public:
 		Offset += sizeof(float) * 4;
 		
 		/** Dynamic parameters come from a second stream */
-		Elements.Add(FVertexElement(1, 0, VET_Float4, 5, bUsesDynamicParameter ? sizeof(FVector4) : 0));
+		Elements.Add(FVertexElement(1, 0, VET_Float4, 5, bUsesDynamicParameter ? sizeof(FVector4f) : 0));
 	}
 
-	virtual void InitDynamicRHI()
+	virtual void InitRHI(FRHICommandListBase& RHICmdList)
 	{
 		FVertexDeclarationElementList Elements;
 		int32	Offset = 0;
 		FillDeclElements(Elements, Offset);
 
 		// Create the vertex declaration for rendering the factory normally.
-		// This is done in InitDynamicRHI instead of InitRHI to allow FParticleBeamTrailVertexFactory::InitRHI
-		// to rely on it being initialized, since InitDynamicRHI is called before InitRHI.
+		// This is done in InitRHI instead of InitRHI to allow FParticleBeamTrailVertexFactory::InitRHI
+		// to rely on it being initialized, since InitRHI is called before InitRHI.
 		VertexDeclarationRHI = PipelineStateCache::GetOrCreateVertexDeclaration(Elements);
 	}
 
-	virtual void ReleaseDynamicRHI()
+	virtual void ReleaseRHI()
 	{
 		VertexDeclarationRHI.SafeRelease();
 	}
@@ -118,9 +118,22 @@ void FParticleBeamTrailVertexFactory::ModifyCompilationEnvironment(const FVertex
 }
 
 /**
+ * Get vertex elements used when during PSO precaching materials using this vertex factory type
+ */
+void FParticleBeamTrailVertexFactory::GetPSOPrecacheVertexFetchElements(EVertexInputStreamType VertexInputStreamType, FVertexDeclarationElementList& Elements)
+{
+	GParticleBeamTrailVertexDeclaration.VertexDeclarationRHI->GetInitializer(Elements);
+}
+
+FRHIVertexDeclaration* FParticleBeamTrailVertexFactory::GetPSOPrecacheVertexDeclaration(bool bUsesDynamicParameter)
+{
+	return (bUsesDynamicParameter ? GParticleBeamTrailVertexDeclarationDynamic.VertexDeclarationRHI : GParticleBeamTrailVertexDeclaration.VertexDeclarationRHI);
+}
+
+/**
  *	Initialize the Render Hardware Interface for this vertex factory
  */
-void FParticleBeamTrailVertexFactory::InitRHI()
+void FParticleBeamTrailVertexFactory::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	SetDeclaration(bUsesDynamicParameter ? GParticleBeamTrailVertexDeclarationDynamic.VertexDeclarationRHI
 		: GParticleBeamTrailVertexDeclaration.VertexDeclarationRHI);
@@ -162,4 +175,8 @@ void FParticleBeamTrailVertexFactory::SetDynamicParameterBuffer(const FVertexBuf
 
 IMPLEMENT_VERTEX_FACTORY_PARAMETER_TYPE(FParticleBeamTrailVertexFactory, SF_Vertex, FParticleBeamTrailVertexFactoryShaderParameters);
 
-IMPLEMENT_VERTEX_FACTORY_TYPE(FParticleBeamTrailVertexFactory,"/Engine/Private/ParticleBeamTrailVertexFactory.ush",true,false,true,false,false);
+IMPLEMENT_VERTEX_FACTORY_TYPE(FParticleBeamTrailVertexFactory,"/Engine/Private/ParticleBeamTrailVertexFactory.ush",
+	  EVertexFactoryFlags::UsedWithMaterials
+	| EVertexFactoryFlags::SupportsDynamicLighting
+	| EVertexFactoryFlags::SupportsPSOPrecaching
+);

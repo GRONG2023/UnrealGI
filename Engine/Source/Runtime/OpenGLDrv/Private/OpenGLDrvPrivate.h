@@ -16,8 +16,20 @@
 
 #define GL_CHECK(x)		x; do { GLint Err = glGetError(); if (Err != 0) {FPlatformMisc::LowLevelOutputDebugStringf(TEXT("(%s:%d) GL_CHECK Failed '%s'! %d (%x)\n"), ANSI_TO_TCHAR(__FILE__), __LINE__, ANSI_TO_TCHAR( #x ), Err, Err); check(!Err);}} while (0)
 
-#if !defined(__GNUC__) && !defined(__clang__)
-	#define LOG_AND_GET_GL_INT(IntEnum, Default, Dest) \
+// 
+// #if !defined(__GNUC__) && !defined(__clang__) && !defined(__INTEL_COMPILER) && !(defined(_MSC_VER) && _MSC_VER >= 1900)
+// #define LOG_AND_GET_GL_INT_TEMP(IntEnum,Default) 
+// GLint Value_##IntEnum = Default; if (IntEnum) {glGetIntegerv(IntEnum, &Value_##IntEnum); glGetError();} else {Value_##IntEnum = Default;} 
+// UE_LOG(LogRHI, Log, TEXT("  ") ## TEXT(#IntEnum) ## TEXT(": %d"), Value_##IntEnum)
+// #else
+// #define LOG_AND_GET_GL_INT_TEMP(IntEnum,Default) GLint Value_##IntEnum = Default; if (IntEnum) {glGetIntegerv(IntEnum, &Value_##IntEnum); glGetError();} else {Value_##IntEnum = Default;} 
+// UE_LOG(LogRHI, Log, TEXT("  " #IntEnum ": %d"), Value_##IntEnum)
+// #endif
+
+
+
+#if !defined(__GNUC__) && !defined(__clang__) && !defined(__INTEL_COMPILER) && !(defined(_MSC_VER) && _MSC_VER >= 1900)
+#define LOG_AND_GET_GL_INT(IntEnum, Default, Dest) \
 		do \
 		{ \
 			Dest = Default; \
@@ -82,7 +94,7 @@ DECLARE_MEMORY_STAT_EXTERN(TEXT("Uniform buffer pool memory"),STAT_OpenGLFreeUni
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Emulated Uniform buffer time"), STAT_OpenGLEmulatedUniformBufferTime,STATGROUP_OpenGLRHI, );
 DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(TEXT("Uniform buffer pool num free"),STAT_OpenGLNumFreeUniformBuffers,STATGROUP_OpenGLRHI, );
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Time for first draw of shader programs"), STAT_OpenGLShaderFirstDrawTime,STATGROUP_OpenGLRHI, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("Program binary memory"), STAT_OpenGLProgramBinaryMemory, STATGROUP_OpenGLRHI, );
+DECLARE_MEMORY_STAT_EXTERN(TEXT("Active Program binary memory (estimate driver use)"), STAT_OpenGLProgramBinaryMemory, STATGROUP_OpenGLRHI, );
 DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(TEXT("GL Program count"), STAT_OpenGLProgramCount, STATGROUP_OpenGLRHI, );
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Program get from cache time"),STAT_OpenGLUseCachedProgramTime,STATGROUP_OpenGLRHI, );
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Program create from binary time"),STAT_OpenGLCreateProgramFromBinaryTime,STATGROUP_OpenGLRHI, );
@@ -91,10 +103,9 @@ DECLARE_CYCLE_STAT_EXTERN(TEXT("Program LRU cache eviction time"), STAT_OpenGLSh
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Program LRU cache miss time"), STAT_OpenGLShaderLRUMissTime, STATGROUP_OpenGLRHI, );
 DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(TEXT("Program LRU count"), STAT_OpenGLShaderLRUProgramCount, STATGROUP_OpenGLRHI, );
 DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(TEXT("Program LRU evicted count"), STAT_OpenGLShaderLRUEvictedProgramCount, STATGROUP_OpenGLRHI, );
-DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(TEXT("Program LRU evicted by scope"), STAT_OpenGLShaderLRUScopeEvictedProgramCount, STATGROUP_OpenGLRHI, );
 DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(TEXT("Program LRU miss count"), STAT_OpenGLShaderLRUMissCount, STATGROUP_OpenGLRHI, );
-DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(TEXT("Program LRU evictions saved by latency"), STAT_OpenGLShaderLRUEvictionDelaySavedCount, STATGROUP_OpenGLRHI, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("Program LRU binary memory"), STAT_OpenGLShaderLRUProgramMemory, STATGROUP_OpenGLRHI, );
+DECLARE_MEMORY_STAT_EXTERN(TEXT("Program LRU memory (evicted, heap)"), STAT_OpenGLShaderLRUProgramMemory, STATGROUP_OpenGLRHI, );
+DECLARE_MEMORY_STAT_EXTERN(TEXT("Program LRU mem mapped (evicted, filemapped)"), STAT_OpenGLShaderLRUProgramMemoryMapped, STATGROUP_OpenGLRHI, );
 
 #if OPENGLRHI_DETAILED_STATS
 DECLARE_CYCLE_STAT_EXTERN(TEXT("DrawPrimitive Time"),STAT_OpenGLDrawPrimitiveTime,STATGROUP_OpenGLRHI, );
@@ -245,7 +256,7 @@ void PlatformSharedContextSetup(FPlatformOpenGLDevice* Device);
 void PlatformNULLContextSetup();
 
 // Creates a platform-specific back buffer
-FRHITexture* PlatformCreateBuiltinBackBuffer(FOpenGLDynamicRHI* OpenGLRHI, uint32 SizeX, uint32 SizeY);
+class FOpenGLTexture* PlatformCreateBuiltinBackBuffer(FOpenGLDynamicRHI* OpenGLRHI, uint32 SizeX, uint32 SizeY);
 
 /**
  * Main function for transferring data to on-screen buffers.
@@ -290,26 +301,14 @@ void* PlatformGetWindow(FPlatformOpenGLContext* Context, void** AddParam);
 struct FOpenGLTextureFormat
 {
 	// [0]: without sRGB, [1]: with sRGB
-	GLenum InternalFormat[2];
-	// [0]: without sRGB, [1]: with sRGB
-	GLenum SizedInternalFormat[2];
-	GLenum Format;
-	GLenum Type;
-	bool bCompressed;
+	GLenum InternalFormat[2] = { GL_NONE, GL_NONE };
+	GLenum Format = GL_NONE;
+	GLenum Type = GL_NONE;
+	bool bCompressed = false;
 	// Reorder to B and R elements using texture swizzle
-	bool bBGRA;
+	bool bBGRA = false;
 
-	FOpenGLTextureFormat()
-	{
-		InternalFormat[0] = GL_NONE;
-		InternalFormat[1] = GL_NONE;
-		SizedInternalFormat[0] = GL_NONE;
-		SizedInternalFormat[1] = GL_NONE;
-		Format = GL_NONE;
-		Type = GL_NONE;
-		bCompressed = false;
-		bBGRA = false;
-	}
+	FOpenGLTextureFormat() = default;
 
 	FOpenGLTextureFormat(
 		GLenum InInternalFormat, GLenum InInternalFormatSRGB, GLenum InFormat,
@@ -317,30 +316,11 @@ struct FOpenGLTextureFormat
 	{
 		InternalFormat[0] = InInternalFormat;
 		InternalFormat[1] = InInternalFormatSRGB;
-		SizedInternalFormat[0] = InInternalFormat;
-		SizedInternalFormat[1] = InInternalFormatSRGB;
 		Format = InFormat;
 		Type = InType;
 		bCompressed = bInCompressed;
 		bBGRA = bInBGRA;
 	}
-
-	FOpenGLTextureFormat(
-		GLenum InInternalFormat, GLenum InInternalFormatSRGB, 
-		GLenum InSizedInternalFormat, GLenum InSizedInternalFormatSRGB,
-		GLenum InFormat,
-		GLenum InType, bool bInCompressed, bool bInBGRA)
-	{
-		InternalFormat[0] = InInternalFormat;
-		InternalFormat[1] = InInternalFormatSRGB;
-		SizedInternalFormat[0] = InSizedInternalFormat;
-		SizedInternalFormat[1] = InSizedInternalFormatSRGB;
-		Format = InFormat;
-		Type = InType;
-		bCompressed = bInCompressed;
-		bBGRA = bInBGRA;
-	}
-
 };
 
 extern FOpenGLTextureFormat OPENGLDRV_API GOpenGLTextureFormats[PF_MAX];
@@ -365,77 +345,28 @@ inline uint32 FindMaxMipmapLevel(uint32 Width, uint32 Height, uint32 Depth)
 	return FindMaxMipmapLevel((Width > Height) ? Width : Height, Depth);
 }
 
-inline void FindPrimitiveType(uint32 InPrimitiveType, bool bUsingTessellation, uint32 InNumPrimitives, GLenum &DrawMode, GLsizei &NumElements, GLint &PatchSize)
+inline void FindPrimitiveType(uint32 InPrimitiveType, uint32 InNumPrimitives, GLenum &DrawMode, GLsizei &NumElements)
 {
 	DrawMode = GL_TRIANGLES;
 	NumElements = InNumPrimitives;
-	PatchSize = 0;
 
 	switch (InPrimitiveType)
 	{
 	case PT_TriangleList:
-		if (bUsingTessellation) // see GetD3D11PrimitiveType
-		{ 
-			DrawMode = GL_PATCHES;
-			PatchSize = 3;
-			NumElements = InNumPrimitives * PatchSize;
-		}
-		else
-		{
-			DrawMode = GL_TRIANGLES;
-			NumElements = InNumPrimitives * 3;
-		}
+		DrawMode = GL_TRIANGLES;
+		NumElements = InNumPrimitives * 3;
 		break;
 	case PT_TriangleStrip:
-		check(!bUsingTessellation);
 		DrawMode = GL_TRIANGLE_STRIP;
 		NumElements = InNumPrimitives + 2;
 		break;
 	case PT_LineList:
-		check(!bUsingTessellation);
 		DrawMode = GL_LINES;
 		NumElements = InNumPrimitives * 2;
 		break;
 	case PT_PointList:
-		check(!bUsingTessellation);
 		DrawMode = GL_POINTS;
 		NumElements = InNumPrimitives;
-		break;
-	case PT_1_ControlPointPatchList:
-	case PT_2_ControlPointPatchList:
-	case PT_3_ControlPointPatchList:
-	case PT_4_ControlPointPatchList:
-	case PT_5_ControlPointPatchList:
-	case PT_6_ControlPointPatchList:
-	case PT_7_ControlPointPatchList:
-	case PT_8_ControlPointPatchList:
-	case PT_9_ControlPointPatchList:
-	case PT_10_ControlPointPatchList:
-	case PT_11_ControlPointPatchList:
-	case PT_12_ControlPointPatchList:
-	case PT_13_ControlPointPatchList:
-	case PT_14_ControlPointPatchList:
-	case PT_15_ControlPointPatchList:
-	case PT_16_ControlPointPatchList:
-	case PT_17_ControlPointPatchList:
-	case PT_18_ControlPointPatchList:
-	case PT_19_ControlPointPatchList:
-	case PT_20_ControlPointPatchList:
-	case PT_21_ControlPointPatchList:
-	case PT_22_ControlPointPatchList:
-	case PT_23_ControlPointPatchList:
-	case PT_24_ControlPointPatchList:
-	case PT_25_ControlPointPatchList:
-	case PT_26_ControlPointPatchList:
-	case PT_27_ControlPointPatchList:
-	case PT_28_ControlPointPatchList:
-	case PT_29_ControlPointPatchList:
-	case PT_30_ControlPointPatchList:
-	case PT_31_ControlPointPatchList:
-	case PT_32_ControlPointPatchList:
-		DrawMode = GL_PATCHES;
-		PatchSize = InPrimitiveType - uint32(PT_1_ControlPointPatchList) + 1;
-		NumElements = InNumPrimitives * PatchSize;
 		break;
 	default:
 		UE_LOG(LogRHI, Fatal,TEXT("Unsupported primitive type %u"), InPrimitiveType);
@@ -514,21 +445,3 @@ inline uint32 CalcDynamicBufferSize(uint32 Size)
 void InitDefaultGLContextState(void);
 
 extern bool GUseEmulatedUniformBuffers;
-
-inline bool OpenGLShaderPlatformSeparable(const EShaderPlatform InShaderPlatform)
-{
-	switch (InShaderPlatform)
-	{
-		case SP_OPENGL_PCES3_1:
-			return true;
-
-		case SP_OPENGL_ES3_1_ANDROID:
-			return false;
-		default:
-			check(IsOpenGLPlatform(InShaderPlatform));
-			checkf(false, TEXT("invalid shader platform (%d)"), int(InShaderPlatform));
-			return true;
-			break;
-	}
-}
-

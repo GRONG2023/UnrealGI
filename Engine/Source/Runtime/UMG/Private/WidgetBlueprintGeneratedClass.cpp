@@ -7,8 +7,10 @@
 #include "Animation/WidgetAnimation.h"
 #include "Serialization/TextReferenceCollector.h"
 #include "Engine/UserInterfaceSettings.h"
+#include "Extensions/WidgetBlueprintGeneratedClassExtension.h"
 #include "UMGPrivate.h"
 #include "Interfaces/ITargetPlatform.h"
+#include "UObject/AssetRegistryTagsContext.h"
 #include "UObject/EditorObjectVersion.h"
 #include "UObject/ObjectResource.h"
 #include "UObject/LinkerLoad.h"
@@ -16,6 +18,10 @@
 #include "UObject/Package.h"
 #include "UObject/UObjectHash.h"
 #include "UObject/UObjectIterator.h"
+#include "UObject/FortniteMainBranchObjectVersion.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(WidgetBlueprintGeneratedClass)
+
 
 #if WITH_EDITOR
 #include "Engine/Blueprint.h"
@@ -98,6 +104,11 @@ FAutoConsoleCommand GDumpTemplateSizesCommand(
 int32 TemplatePreviewInEditor = 0;
 static FAutoConsoleVariableRef CVarTemplatePreviewInEditor(TEXT("Widget.TemplatePreviewInEditor"), TemplatePreviewInEditor, TEXT("Should a dynamic template be generated at runtime for the editor for widgets?  Useful for debugging templates."), ECVF_Default);
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+FWidgetBlueprintGeneratedClassDelegates::FGetAssetTags FWidgetBlueprintGeneratedClassDelegates::GetAssetTags;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+FWidgetBlueprintGeneratedClassDelegates::FGetAssetTagsWithContext FWidgetBlueprintGeneratedClassDelegates::GetAssetTagsWithContext;
+
 #endif
 
 #if WITH_EDITORONLY_DATA
@@ -114,16 +125,18 @@ namespace
 /////////////////////////////////////////////////////
 // UWidgetBlueprintGeneratedClass
 
-UWidgetBlueprintGeneratedClass::UWidgetBlueprintGeneratedClass(const FObjectInitializer& ObjectInitializer)
-	: Super(ObjectInitializer)
+UWidgetBlueprintGeneratedClass::UWidgetBlueprintGeneratedClass()
 {
+	bCanCallInitializedWithoutPlayerContext = false;
 #if WITH_EDITORONLY_DATA
-	{ static const FAutoRegisterTextReferenceCollectorCallback AutomaticRegistrationOfTextReferenceCollector(UWidgetBlueprintGeneratedClass::StaticClass(), &CollectWidgetBlueprintGeneratedClassTextReferences); }
+	{
+		static const FAutoRegisterTextReferenceCollectorCallback AutomaticRegistrationOfTextReferenceCollector(UWidgetBlueprintGeneratedClass::StaticClass(), &CollectWidgetBlueprintGeneratedClassTextReferences);
+	}
 	bCanCallPreConstruct = true;
 #endif
 }
 
-void UWidgetBlueprintGeneratedClass::InitializeBindingsStatic(UUserWidget* UserWidget, const TArray< FDelegateRuntimeBinding >& InBindings)
+void UWidgetBlueprintGeneratedClass::InitializeBindingsStatic(UUserWidget* UserWidget, const TArrayView<const FDelegateRuntimeBinding> InBindings, const TMap<FName, FObjectPropertyBase*>& InPropertyMap)
 {
 	check(!UserWidget->IsTemplate());
 
@@ -133,41 +146,38 @@ void UWidgetBlueprintGeneratedClass::InitializeBindingsStatic(UUserWidget* UserW
 	// For each property binding that we're given, find the corresponding field, and setup the delegate binding on the widget.
 	for (const FDelegateRuntimeBinding& Binding : InBindings)
 	{
-		// If the binding came from a parent class, this will still find it - FindField() searches the super class hierarchy by default.
-		FObjectProperty* WidgetProperty = FindFProperty<FObjectProperty>(UserWidget->GetClass(), *Binding.ObjectName);
-		if (WidgetProperty == nullptr)
+		if (FObjectPropertyBase*const* PropPtr = InPropertyMap.Find(*Binding.ObjectName))
 		{
-			continue;
-		}
+			const FObjectPropertyBase* WidgetProperty = *PropPtr;
+			check(WidgetProperty);
 
-		UWidget* Widget = Cast<UWidget>(WidgetProperty->GetObjectPropertyValue_InContainer(UserWidget));
-
-		if (Widget)
-		{
-			FDelegateProperty* DelegateProperty = FindFProperty<FDelegateProperty>(Widget->GetClass(), FName(*(Binding.PropertyName.ToString() + TEXT("Delegate"))));
-			if (!DelegateProperty)
+			if (UWidget* Widget = Cast<UWidget>(WidgetProperty->GetObjectPropertyValue_InContainer(UserWidget)))
 			{
-				DelegateProperty = FindFProperty<FDelegateProperty>(Widget->GetClass(), Binding.PropertyName);
-			}
-
-			if (DelegateProperty)
-			{
-				bool bSourcePathBound = false;
-
-				if (Binding.SourcePath.IsValid())
+				FDelegateProperty* DelegateProperty = FindFProperty<FDelegateProperty>(Widget->GetClass(), FName(*(Binding.PropertyName.ToString() + TEXT("Delegate"))));
+				if (!DelegateProperty)
 				{
-					bSourcePathBound = Widget->AddBinding(DelegateProperty, UserWidget, Binding.SourcePath);
+					DelegateProperty = FindFProperty<FDelegateProperty>(Widget->GetClass(), Binding.PropertyName);
 				}
 
-				// If no native binder is found then the only possibility is that the binding is for
-				// a delegate that doesn't match the known native binders available and so we
-				// fallback to just attempting to bind to the function directly.
-				if (bSourcePathBound == false)
+				if (DelegateProperty)
 				{
-					FScriptDelegate* ScriptDelegate = DelegateProperty->GetPropertyValuePtr_InContainer(Widget);
-					if (ScriptDelegate)
+					bool bSourcePathBound = false;
+
+					if (Binding.SourcePath.IsValid())
 					{
-						ScriptDelegate->BindUFunction(UserWidget, Binding.FunctionName);
+						bSourcePathBound = Widget->AddBinding(DelegateProperty, UserWidget, Binding.SourcePath);
+					}
+
+					// If no native binder is found then the only possibility is that the binding is for
+					// a delegate that doesn't match the known native binders available and so we
+					// fallback to just attempting to bind to the function directly.
+					if (bSourcePathBound == false)
+					{
+						FScriptDelegate* ScriptDelegate = DelegateProperty->GetPropertyValuePtr_InContainer(Widget);
+						if (ScriptDelegate)
+						{
+							ScriptDelegate->BindUFunction(UserWidget, Binding.FunctionName);
+						}
 					}
 				}
 			}
@@ -178,60 +188,70 @@ void UWidgetBlueprintGeneratedClass::InitializeBindingsStatic(UUserWidget* UserW
 void UWidgetBlueprintGeneratedClass::InitializeWidgetStatic(UUserWidget* UserWidget
 	, const UClass* InClass
 	, UWidgetTree* InWidgetTree
-	, const TArray< UWidgetAnimation* >& InAnimations
-	, const TArray< FDelegateRuntimeBinding >& InBindings)
+	, const UClass* InWidgetTreeWidgetClass
+	, const TArrayView<UWidgetAnimation*> InAnimations
+	, const TArrayView<const FDelegateRuntimeBinding> InBindings)
 {
 	check(InClass);
-
-	// Note: It's not safe to assume here that the UserWidget class type is a UWidgetBlueprintGeneratedClass! In the case of a nativized widget
-	// blueprint class, it will be a UDynamicClass instead, and this API will be invoked by the blueprint's C++ code that's generated at cook time.
-	// - @see FBackendHelperUMG::EmitWidgetInitializationFunctions()
 
 	if ( UserWidget->IsTemplate() )
 	{
 		return;
 	}
 
-#if !UE_BUILD_SHIPPING
+#if UE_HAS_WIDGET_GENERATED_BY_CLASS
 	TWeakObjectPtr<UClass> WidgetGeneratedByClass = MakeWeakObjectPtr(const_cast<UClass*>(InClass));
 	UserWidget->WidgetGeneratedByClass = WidgetGeneratedByClass;
 #endif
 
-	UWidgetTree* ClonedTree = UserWidget->WidgetTree;
+	UWidgetTree* CreatedWidgetTree = UserWidget->WidgetTree;
 
 	// Normally the ClonedTree should be null - we do in the case of design time with the widget, actually
 	// clone the widget tree directly from the WidgetBlueprint so that the rebuilt preview matches the newest
 	// widget tree, without a full blueprint compile being required.  In that case, the WidgetTree on the UserWidget
 	// will have already been initialized to some value.  When that's the case, we'll avoid duplicating it from the class
 	// similar to how we use to use the DesignerWidgetTree.
-	if ( ClonedTree == nullptr )
+	if ( CreatedWidgetTree == nullptr )
 	{
-		UserWidget->DuplicateAndInitializeFromWidgetTree(InWidgetTree);
-		ClonedTree = UserWidget->WidgetTree;
+		TMap<FName, UWidget*> NamedSlotContentToMerge;
+		if (const UWidgetBlueprintGeneratedClass* WidgetsActualClass = Cast<UWidgetBlueprintGeneratedClass>(UserWidget->GetClass()))
+		{
+			WidgetsActualClass->GetNamedSlotArchetypeContent([&NamedSlotContentToMerge](FName SlotName, UWidget* Content)
+			{
+				NamedSlotContentToMerge.Add(SlotName, Content);
+			});
+		}
+		
+		UserWidget->DuplicateAndInitializeFromWidgetTree(InWidgetTree, NamedSlotContentToMerge);
+		CreatedWidgetTree = UserWidget->WidgetTree;
 	}
-
-#if !WITH_EDITOR && UE_BUILD_DEBUG
-	UE_LOG(LogUMG, Warning, TEXT("Widget Class %s - Slow Static Duplicate Object."), *InClass->GetName());
-#endif
 
 #if WITH_EDITOR
 	UserWidget->WidgetGeneratedBy = InClass->ClassGeneratedBy;
 #endif
 
-	if (ClonedTree)
+	if (CreatedWidgetTree)
 	{
-		BindAnimations(UserWidget, InAnimations);
-
 		UClass* WidgetBlueprintClass = UserWidget->GetClass();
 
-		ClonedTree->ForEachWidget([&](UWidget* Widget) {
+		TMap<FName, FObjectPropertyBase*> ObjectPropertiesMap;
+		for (TFieldIterator<FObjectPropertyBase>It(WidgetBlueprintClass, EFieldIterationFlags::Default); It; ++It)
+		{
+			check(*It);
+			ensureMsgf(!ObjectPropertiesMap.Contains(It->GetFName()), TEXT("There are properties with the same names: '%s'"), *It->GetName());
+			ObjectPropertiesMap.Add(It->GetFName(), *It);
+		}
+
+		BindAnimationsStatic(UserWidget, InAnimations, ObjectPropertiesMap);
+
+		CreatedWidgetTree->ForEachWidget([&](UWidget* Widget) {
 			// Not fatal if NULL, but shouldn't happen
 			if (!ensure(Widget != nullptr))
 			{
 				return;
 			}
 
-#if !UE_BUILD_SHIPPING
+#if UE_HAS_WIDGET_GENERATED_BY_CLASS
 			Widget->WidgetGeneratedByClass = WidgetGeneratedByClass;
 #endif
 
@@ -239,13 +259,11 @@ void UWidgetBlueprintGeneratedClass::InitializeWidgetStatic(UUserWidget* UserWid
 			Widget->WidgetGeneratedBy = InClass->ClassGeneratedBy;
 #endif
 
-			// TODO UMG Make this an FName
-			FString VariableName = Widget->GetName();
-
 			// Find property with the same name as the template and assign the new widget to it.
-			FObjectPropertyBase* Prop = FindFProperty<FObjectPropertyBase>(WidgetBlueprintClass, *VariableName);
-			if (Prop)
+			if (FObjectPropertyBase** PropPtr = ObjectPropertiesMap.Find(Widget->GetFName()))
 			{
+				FObjectPropertyBase* Prop = *PropPtr;
+				check(Prop);
 				Prop->SetObjectPropertyValue_InContainer(UserWidget, Widget);
 				UObject* Value = Prop->GetObjectPropertyValue_InContainer(UserWidget);
 				check(Value == Widget);
@@ -254,7 +272,7 @@ void UWidgetBlueprintGeneratedClass::InitializeWidgetStatic(UUserWidget* UserWid
 			// Initialize Navigation Data
 			if (Widget->Navigation)
 			{
-				Widget->Navigation->ResolveRules(UserWidget, ClonedTree);
+				Widget->Navigation->ResolveRules(UserWidget, CreatedWidgetTree);
 			}
 
 #if WITH_EDITOR
@@ -262,16 +280,17 @@ void UWidgetBlueprintGeneratedClass::InitializeWidgetStatic(UUserWidget* UserWid
 #endif
 		});
 
-		InitializeBindingsStatic(UserWidget, InBindings);
+		InitializeBindingsStatic(UserWidget, InBindings, ObjectPropertiesMap);
 
 		// Bind any delegates on widgets
-		UBlueprintGeneratedClass::BindDynamicDelegates(InClass, UserWidget);
-
-		//TODO UMG Add OnWidgetInitialized?
+		if (!UserWidget->IsDesignTime())
+		{
+			UBlueprintGeneratedClass::BindDynamicDelegates(InClass, UserWidget);
+		}
 	}
 }
 
-void UWidgetBlueprintGeneratedClass::BindAnimations(UUserWidget* Instance, const TArray< UWidgetAnimation* >& InAnimations)
+void UWidgetBlueprintGeneratedClass::BindAnimationsStatic(UUserWidget* Instance, const TArrayView<UWidgetAnimation*> InAnimations, const TMap<FName, FObjectPropertyBase*>& InPropertyMap)
 {
 	// Note: It's not safe to assume here that the UserWidget class type is a UWidgetBlueprintGeneratedClass!
 	// - @see InitializeWidgetStatic()
@@ -281,10 +300,10 @@ void UWidgetBlueprintGeneratedClass::BindAnimations(UUserWidget* Instance, const
 		if (Animation->GetMovieScene())
 		{
 			// Find property with the same name as the animation and assign the animation to it.
-			FObjectPropertyBase* Prop = FindFProperty<FObjectPropertyBase>(Instance->GetClass(), Animation->GetMovieScene()->GetFName());
-			if (Prop)
+			if (FObjectPropertyBase*const* PropPtr = InPropertyMap.Find(Animation->GetMovieScene()->GetFName()))
 			{
-				Prop->SetObjectPropertyValue_InContainer(Instance, Animation);
+				check(*PropPtr);
+				(*PropPtr)->SetObjectPropertyValue_InContainer(Instance, Animation);
 			}
 		}
 	}
@@ -299,17 +318,12 @@ void UWidgetBlueprintGeneratedClass::SetClassRequiresNativeTick(bool InClassRequ
 
 void UWidgetBlueprintGeneratedClass::InitializeWidget(UUserWidget* UserWidget) const
 {
-	TArray<UWidgetAnimation*> AllAnims;
-	TArray<FDelegateRuntimeBinding> AllBindings;
+	TArray<UWidgetAnimation*, FConcurrentLinearArrayAllocator> AllAnims;
+	TArray<FDelegateRuntimeBinding, FConcurrentLinearArrayAllocator> AllBindings;
 
-	// Include current class animations.
-	AllAnims.Append(Animations);
-
-	// Include current class bindings.
-	AllBindings.Append(Bindings);
-
-	// Iterate all generated classes in the widget's parent class hierarchy and include animations and bindings found on each one.
-	UClass* SuperClass = GetSuperClass();
+	// Iterate all generated classes in the widget's parent class hierarchy and include animations and bindings
+	// found on each one.
+	UClass* SuperClass = UserWidget->GetClass();
 	while (UWidgetBlueprintGeneratedClass* WBPGC = Cast<UWidgetBlueprintGeneratedClass>(SuperClass))
 	{
 		AllAnims.Append(WBPGC->Animations);
@@ -318,7 +332,14 @@ void UWidgetBlueprintGeneratedClass::InitializeWidget(UUserWidget* UserWidget) c
 		SuperClass = SuperClass->GetSuperClass();
 	}
 
-	InitializeWidgetStatic(UserWidget, this, WidgetTree, AllAnims, AllBindings);
+	UWidgetTree* PrimaryWidgetTree = WidgetTree;
+	UWidgetBlueprintGeneratedClass* PrimaryWidgetTreeClass = FindWidgetTreeOwningClass();
+	if (PrimaryWidgetTreeClass)
+	{
+		PrimaryWidgetTree = PrimaryWidgetTreeClass->WidgetTree;
+	}
+
+	InitializeWidgetStatic(UserWidget, this, PrimaryWidgetTree, PrimaryWidgetTreeClass, AllAnims, AllBindings);
 }
 
 void UWidgetBlueprintGeneratedClass::PostLoad()
@@ -336,7 +357,7 @@ void UWidgetBlueprintGeneratedClass::PostLoad()
 	}
 
 #if WITH_EDITOR
-	if ( GetLinkerUE4Version() < VER_UE4_RENAME_WIDGET_VISIBILITY )
+	if ( GetLinkerUEVersion() < VER_UE4_RENAME_WIDGET_VISIBILITY )
 	{
 		static const FName Visiblity(TEXT("Visiblity"));
 		static const FName Visibility(TEXT("Visibility"));
@@ -372,15 +393,14 @@ void UWidgetBlueprintGeneratedClass::PurgeClass(bool bRecompilingOnLoad)
 		Animation->Rename(nullptr, GetTransientPackage(), RenFlags);
 		FLinkerLoad::InvalidateExport(Animation);
 	}
-	Animations.Empty();
 
+	Animations.Empty();
 	Bindings.Empty();
 }
 
 bool UWidgetBlueprintGeneratedClass::NeedsLoadForServer() const
 {
-	const UUserInterfaceSettings* UISettings = GetDefault<UUserInterfaceSettings>(UUserInterfaceSettings::StaticClass());
-	check(UISettings);
+	const UUserInterfaceSettings* UISettings = GetDefault<UUserInterfaceSettings>();
 	return UISettings->bLoadWidgetsOnDedicatedServer;
 }
 
@@ -391,7 +411,27 @@ void UWidgetBlueprintGeneratedClass::SetWidgetTreeArchetype(UWidgetTree* InWidge
 	if (WidgetTree)
 	{
 		// We don't want any of these flags to carry over from the WidgetBlueprint
-		WidgetTree->ClearFlags(RF_Public | RF_ArchetypeObject | RF_DefaultSubObject);
+		WidgetTree->ClearFlags(RF_Public | RF_ArchetypeObject | RF_DefaultSubObject | RF_Transient);
+	}
+}
+
+void UWidgetBlueprintGeneratedClass::GetNamedSlotArchetypeContent(TFunctionRef<void(FName /*SlotName*/, UWidget* /*Content*/)> Predicate) const
+{
+	for (const FName& SlotName : NamedSlots)
+	{
+		const UWidgetBlueprintGeneratedClass* BPGClass = this;
+		while (BPGClass)
+		{
+			UWidgetTree* Tree = BPGClass->GetWidgetTreeArchetype();
+			if (UWidget* ContentInSlot = Tree->GetContentForSlot(SlotName))
+			{
+				// Report the content in the slot, and break so we can test the next slot.
+				Predicate(SlotName, ContentInSlot);
+				break;
+			}
+
+			BPGClass = Cast<UWidgetBlueprintGeneratedClass>(BPGClass->GetSuperClass());
+		}
 	}
 }
 
@@ -400,11 +440,23 @@ void UWidgetBlueprintGeneratedClass::Serialize(FArchive& Ar)
 	Super::Serialize(Ar);
 
 	Ar.UsingCustomVersion(FEditorObjectVersion::GUID);
+	Ar.UsingCustomVersion(FFortniteMainBranchObjectVersion::GUID);
+
+	if (Ar.IsLoading())
+	{
+		// We've made it so the actual set of named slots we expose is AvailableNamedSlots, we need to copy
+		// the initial set we load though to ensure we don't get compile time load errors.
+		if (Ar.CustomVer(FFortniteMainBranchObjectVersion::GUID) < FFortniteMainBranchObjectVersion::WidgetInheritedNamedSlots)
+		{
+			AvailableNamedSlots = NamedSlots;
+			InstanceNamedSlots = NamedSlots;
+		}
+	}
 }
 
-UWidgetBlueprintGeneratedClass* UWidgetBlueprintGeneratedClass::FindWidgetTreeOwningClass()
+UWidgetBlueprintGeneratedClass* UWidgetBlueprintGeneratedClass::FindWidgetTreeOwningClass() const
 {
-	UWidgetBlueprintGeneratedClass* RootBGClass = this;
+	UWidgetBlueprintGeneratedClass* RootBGClass = const_cast<UWidgetBlueprintGeneratedClass*>(this);
 	UWidgetBlueprintGeneratedClass* BGClass = RootBGClass;
 
 	while (BGClass)
@@ -436,4 +488,73 @@ UWidgetBlueprintGeneratedClass* UWidgetBlueprintGeneratedClass::FindWidgetTreeOw
 	return nullptr;
 }
 
+UWidgetBlueprintGeneratedClassExtension* UWidgetBlueprintGeneratedClass::GetExtension(TSubclassOf<UWidgetBlueprintGeneratedClassExtension> InExtensionType, bool bIncludeSuper)
+{
+	for (UWidgetBlueprintGeneratedClassExtension* Extension : Extensions)
+	{
+		if (Extension->IsA(InExtensionType))
+		{
+			return Extension;
+		}
+	}
+	if (bIncludeSuper)
+	{
+		if (UWidgetBlueprintGeneratedClass* ParentClass = Cast<UWidgetBlueprintGeneratedClass>(GetSuperClass()))
+		{
+			return ParentClass->GetExtension(InExtensionType);
+		}
+	}
+	return nullptr;
+}
+
+TArray<UWidgetBlueprintGeneratedClassExtension*> UWidgetBlueprintGeneratedClass::GetExtensions(TSubclassOf<UWidgetBlueprintGeneratedClassExtension> InExtensionType, bool bIncludeSuper)
+{
+	TArray<UWidgetBlueprintGeneratedClassExtension*> Result;
+	GetExtensions(Result, InExtensionType, bIncludeSuper);
+	return Result;
+}
+
+void UWidgetBlueprintGeneratedClass::GetExtensions(TArray<UWidgetBlueprintGeneratedClassExtension*>& OutExtensions, TSubclassOf<UWidgetBlueprintGeneratedClassExtension> InExtensionType, bool bIncludeSuper)
+{
+	for (UWidgetBlueprintGeneratedClassExtension* Extension : Extensions)
+	{
+		if (Extension->IsA(InExtensionType))
+		{
+			OutExtensions.Add(Extension);
+		}
+	}
+	if (bIncludeSuper)
+	{
+		if (UWidgetBlueprintGeneratedClass* ParentClass = Cast<UWidgetBlueprintGeneratedClass>(GetSuperClass()))
+		{
+			ParentClass->GetExtensions(OutExtensions, InExtensionType, bIncludeSuper);
+		}
+	}
+}
+
+#if WITH_EDITOR
+void UWidgetBlueprintGeneratedClass::GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const
+{
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+	Super::GetAssetRegistryTags(OutTags);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void UWidgetBlueprintGeneratedClass::GetAssetRegistryTags(FAssetRegistryTagsContext Context) const
+{
+	Super::GetAssetRegistryTags(Context);
+
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+	TArray<UObject::FAssetRegistryTag> DeprecatedFunctionTags;
+	FWidgetBlueprintGeneratedClassDelegates::GetAssetTags.Broadcast(this, DeprecatedFunctionTags);
+	for (UObject::FAssetRegistryTag& Tag : DeprecatedFunctionTags)
+	{
+		Context.AddTag(MoveTemp(Tag));
+	}
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+	FWidgetBlueprintGeneratedClassDelegates::GetAssetTagsWithContext.Broadcast(this, Context);
+}
+#endif
+
 #undef LOCTEXT_NAMESPACE
+

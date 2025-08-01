@@ -10,22 +10,25 @@
 #include "Animation/AnimTypes.h"
 #include "Animation/AnimCurveTypes.h"
 #include "BonePose.h"
-#include "Logging/TokenizedMessage.h"
 #include "Stats/StatsHierarchical.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "Animation/AnimTrace.h"
+#endif
 #include "Animation/AnimationPoseData.h"
-#include "UObject/FieldPath.h"
-#include "CustomAttributesRuntime.h"
-
-// WARNING: This should always be the last include in any file that needs it (except .generated.h)
-#include "UObject/UndefineUPropertyMacros.h"
+#include "Animation/AttributesRuntime.h"
+#include "Animation/AnimNodeMessages.h"
+#include "Animation/AnimNodeData.h"
+#include "Animation/ExposedValueHandler.h"
+#include "AnimNodeFunctionRef.h"
 
 #include "AnimNodeBase.generated.h"
 
 #define DECLARE_SCOPE_HIERARCHICAL_COUNTER_ANIMNODE(Method) \
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
 
-#define ANIM_NODE_IDS_AVAILABLE	(ANIM_TRACE_ENABLED || WITH_EDITORONLY_DATA)
+#ifndef UE_ANIM_REMOVE_DEPRECATED_ANCESTOR_TRACKER
+	#define UE_ANIM_REMOVE_DEPRECATED_ANCESTOR_TRACKER 0
+#endif
 
 class IAnimClassInterface;
 class UAnimBlueprint;
@@ -34,8 +37,10 @@ struct FAnimInstanceProxy;
 struct FAnimNode_Base;
 class UProperty;
 struct FPropertyAccessLibrary;
+struct FAnimNodeConstantData;
 
 /**
+ * DEPRECATED - This system is now supplanted by UE::Anim::FMessageStack
  * Utility container for tracking a stack of ancestor nodes by node type during graph traversal
  * This is not an exhaustive list of all visited ancestors. During Update nodes must call
  * FAnimationUpdateContext::TrackAncestor() to appear in the tracker.
@@ -99,7 +104,7 @@ struct FAnimNodeTracker
 };
 
 
-/** Helper RAII object to cleanup a node added to the node tracker */
+/** DEPRECATED - This system is now supplanted by UE::Anim::FMessageStack - Helper RAII object to cleanup a node added to the node tracker */
 class FScopedAnimNodeTracker
 {
 public:
@@ -127,11 +132,28 @@ private:
 /** Persistent state shared during animation tree update  */
 struct FAnimationUpdateSharedContext
 {
-	FAnimNodeTracker AncestorTracker;
+	FAnimationUpdateSharedContext() = default;
 
-	void CopyForCachedUpdate(const FAnimationUpdateSharedContext& Source)
+	// Non-copyable
+	FAnimationUpdateSharedContext(FAnimationUpdateSharedContext& ) = delete;
+	FAnimationUpdateSharedContext& operator=(const FAnimationUpdateSharedContext&) = delete;
+
+#if !UE_ANIM_REMOVE_DEPRECATED_ANCESTOR_TRACKER
+	UE_DEPRECATED(5.0, "Please use the message & tagging system in UE::Anim::FMessageStack")
+	FAnimNodeTracker AncestorTracker;
+#endif
+
+	// Message stack used for storing scoped messages and tags during execution
+	UE::Anim::FMessageStack MessageStack;
+
+	void CopyForCachedUpdate(FAnimationUpdateSharedContext& Source)
 	{
+#if !UE_ANIM_REMOVE_DEPRECATED_ANCESTOR_TRACKER
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		AncestorTracker.CopyTopsOnly(Source.AncestorTracker);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+#endif
+		MessageStack.CopyForCachedUpdate(Source.MessageStack);
 	}
 };
 
@@ -141,22 +163,31 @@ struct FAnimationBaseContext
 public:
 	FAnimInstanceProxy* AnimInstanceProxy;
 
+	FAnimationUpdateSharedContext* SharedContext;
+
 	FAnimationBaseContext();
 
 protected:
 	// DEPRECATED - Please use constructor that uses an FAnimInstanceProxy*
 	ENGINE_API FAnimationBaseContext(UAnimInstance* InAnimInstance);
 
-	ENGINE_API FAnimationBaseContext(FAnimInstanceProxy* InAnimInstanceProxy);
+	ENGINE_API FAnimationBaseContext(FAnimInstanceProxy* InAnimInstanceProxy, FAnimationUpdateSharedContext* InSharedContext = nullptr);
 
 public:
-	// we define a copy constructor here simply to avoid deprecation warnings with clang
-	ENGINE_API FAnimationBaseContext(const FAnimationBaseContext& InContext);
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	FAnimationBaseContext(FAnimationBaseContext&&) = default;
+	FAnimationBaseContext(const FAnimationBaseContext&) = default;
+	FAnimationBaseContext& operator=(FAnimationBaseContext&&) = default;
+	FAnimationBaseContext& operator=(const FAnimationBaseContext&) = default;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 public:
 	// Get the Blueprint IAnimClassInterface associated with this context, if there is one.
 	// Note: This can return NULL, so check the result.
 	ENGINE_API IAnimClassInterface* GetAnimClass() const;
+
+	// Get the anim instance associated with the current proxy
+	ENGINE_API UObject* GetAnimInstanceObject() const;
 
 #if WITH_EDITORONLY_DATA
 	// Get the AnimBlueprint associated with this context, if there is one.
@@ -164,25 +195,107 @@ public:
 	ENGINE_API UAnimBlueprint* GetAnimBlueprint() const;
 #endif //WITH_EDITORONLY_DATA
 
-#if ANIM_NODE_IDS_AVAILABLE
+#if !UE_ANIM_REMOVE_DEPRECATED_ANCESTOR_TRACKER
+	template<typename NodeType>
+	UE_DEPRECATED(5.0, "Please use the message & tagging system in UE::Anim::FMessageStack")
+	FScopedAnimNodeTracker TrackAncestor(NodeType* Node) const {
+		if (ensure(SharedContext != nullptr))
+		{
+			FAnimNodeTracker::FKey Key = SharedContext->AncestorTracker.Push<NodeType>(Node);
+			return FScopedAnimNodeTracker(&SharedContext->AncestorTracker, Key);
+		}
+
+		return FScopedAnimNodeTracker();
+	}
+#endif
+
+#if !UE_ANIM_REMOVE_DEPRECATED_ANCESTOR_TRACKER
+	template<typename NodeType>
+	UE_DEPRECATED(5.0, "Please use the message & tagging system in UE::Anim::FMessageStack")
+	NodeType* GetAncestor() const {
+		if (ensure(SharedContext != nullptr))
+		{
+			FAnimNode_Base* Node = SharedContext->AncestorTracker.Top<NodeType>();
+			return static_cast<NodeType*>(Node);
+		}
+		
+		return nullptr;
+	}
+#endif
+
+	// Get the innermost scoped message of the specified type
+	template<typename TGraphMessageType>
+	TGraphMessageType* GetMessage() const
+	{
+		if (ensure(SharedContext != nullptr))
+		{
+			TGraphMessageType* Message = nullptr;
+
+			SharedContext->MessageStack.TopMessage<TGraphMessageType>([&Message](TGraphMessageType& InMessage)
+			{
+				Message = &InMessage;
+			});
+
+			return Message;
+		}
+		
+		return nullptr;
+	}
+	
+	// Get the innermost scoped message of the specified type
+	template<typename TGraphMessageType>
+	TGraphMessageType& GetMessageChecked() const
+	{
+		check(SharedContext != nullptr);
+
+		TGraphMessageType* Message = nullptr;
+
+		SharedContext->MessageStack.TopMessage<TGraphMessageType>([&Message](TGraphMessageType& InMessage)
+		{
+			Message = &InMessage;
+		});
+
+		check(Message != nullptr);
+
+		return *Message;
+	}
+	
+	void SetNodeId(int32 InNodeId)
+	{ 
+		PreviousNodeId = CurrentNodeId;
+		CurrentNodeId = InNodeId;
+	}
+
+	void SetNodeIds(const FAnimationBaseContext& InContext)
+	{ 
+		CurrentNodeId = InContext.CurrentNodeId;
+		PreviousNodeId = InContext.PreviousNodeId;
+	}
+
 	// Get the current node Id, set when we recurse into graph traversal functions from pose links
-	ENGINE_API int32 GetCurrentNodeId() const { return CurrentNodeId; }
+	int32 GetCurrentNodeId() const { return CurrentNodeId; }
 
 	// Get the previous node Id, set when we recurse into graph traversal functions from pose links
-	ENGINE_API int32 GetPreviousNodeId() const { return PreviousNodeId; }
+	int32 GetPreviousNodeId() const { return PreviousNodeId; }
+
+	// Get whether the graph branch of this context is active (i.e. NOT blending out). 
+	bool IsActive() const { return bIsActive; }
 
 protected:
+	
+	// Whether this context belongs to graph branch (i.e. NOT blending out).
+	bool bIsActive = true;
+
 	// The current node ID, set when we recurse into graph traversal functions from pose links
 	int32 CurrentNodeId;
 
 	// The previous node ID, set when we recurse into graph traversal functions from pose links
 	int32 PreviousNodeId;
-#endif
 
 protected:
 
 	/** Interface for node contexts to register log messages with the proxy */
-	ENGINE_API void LogMessageInternal(FName InLogType, EMessageSeverity::Type InSeverity, FText InMessage) const;
+	ENGINE_API void LogMessageInternal(FName InLogType, const TSharedRef<FTokenizedMessage>& InMessage) const;
 };
 
 
@@ -190,8 +303,8 @@ protected:
 struct FAnimationInitializeContext : public FAnimationBaseContext
 {
 public:
-	FAnimationInitializeContext(FAnimInstanceProxy* InAnimInstanceProxy)
-		: FAnimationBaseContext(InAnimInstanceProxy)
+	FAnimationInitializeContext(FAnimInstanceProxy* InAnimInstanceProxy, FAnimationUpdateSharedContext* InSharedContext = nullptr)
+		: FAnimationBaseContext(InAnimInstanceProxy, InSharedContext)
 	{
 	}
 };
@@ -207,14 +320,19 @@ public:
 		: FAnimationBaseContext(InAnimInstanceProxy)
 	{
 	}
+
+	FAnimationCacheBonesContext WithNodeId(int32 InNodeId) const
+	{ 
+		FAnimationCacheBonesContext Result(*this);
+		Result.SetNodeId(InNodeId);
+		return Result; 
+	}
 };
 
 /** Update context passed around during animation tree update */
 struct FAnimationUpdateContext : public FAnimationBaseContext
 {
 private:
-	FAnimationUpdateSharedContext* SharedContext;
-
 	float CurrentWeight;
 	float RootMotionWeightModifier;
 
@@ -223,7 +341,6 @@ private:
 public:
 	FAnimationUpdateContext(FAnimInstanceProxy* InAnimInstanceProxy = nullptr)
 		: FAnimationBaseContext(InAnimInstanceProxy)
-		, SharedContext(nullptr)
 		, CurrentWeight(1.0f)
 		, RootMotionWeightModifier(1.0f)
 		, DeltaTime(0.0f)
@@ -231,26 +348,22 @@ public:
 	}
 
 	FAnimationUpdateContext(FAnimInstanceProxy* InAnimInstanceProxy, float InDeltaTime, FAnimationUpdateSharedContext* InSharedContext = nullptr)
-		: FAnimationUpdateContext(InAnimInstanceProxy)
+		: FAnimationBaseContext(InAnimInstanceProxy, InSharedContext)
+		, CurrentWeight(1.0f)
+		, RootMotionWeightModifier(1.0f)
+		, DeltaTime(InDeltaTime)
 	{
-		SharedContext = InSharedContext;
-		DeltaTime = InDeltaTime;
 	}
 
 
-	FAnimationUpdateContext(const FAnimationUpdateContext& Copy) = default;
-
 	FAnimationUpdateContext(const FAnimationUpdateContext& Copy, FAnimInstanceProxy* InAnimInstanceProxy)
-		: FAnimationBaseContext(InAnimInstanceProxy)
-		, SharedContext(Copy.SharedContext)
+		: FAnimationBaseContext(InAnimInstanceProxy, Copy.SharedContext)
 		, CurrentWeight(Copy.CurrentWeight)
 		, RootMotionWeightModifier(Copy.RootMotionWeightModifier)
 		, DeltaTime(Copy.DeltaTime)
 	{
-#if ANIM_TRACE_ENABLED
 		CurrentNodeId = Copy.CurrentNodeId;
 		PreviousNodeId = Copy.PreviousNodeId;
-#endif
 	}
 
 public:
@@ -264,10 +377,16 @@ public:
 		FAnimationUpdateContext Result(*this);
 		Result.SharedContext = InSharedContext;
 
-#if ANIM_TRACE_ENABLED
 		// This is currently only used in the case of cached poses, where we dont want to preserve the previous node, so clear it here
-		Result.PreviousNodeId = INDEX_NONE;
-#endif
+	//	Result.PreviousNodeId = INDEX_NONE;
+
+		return Result;
+	}
+
+	FAnimationUpdateContext AsInactive() const
+	{
+		FAnimationUpdateContext Result(*this);
+		Result.bIsActive = false;
 
 		return Result;
 	}
@@ -307,40 +426,11 @@ public:
 		return Result;
 	}
 
-#if ANIM_NODE_IDS_AVAILABLE
 	FAnimationUpdateContext WithNodeId(int32 InNodeId) const
 	{ 
 		FAnimationUpdateContext Result(*this);
-		Result.PreviousNodeId = CurrentNodeId;
-		Result.CurrentNodeId = InNodeId;
+		Result.SetNodeId(InNodeId);
 		return Result; 
-	}
-#endif
-
-	// Add a node to the list of tracked ancestors
-	template<typename NodeType>
-	FScopedAnimNodeTracker TrackAncestor(NodeType* Node) const
-	{
-		if (ensure(SharedContext != nullptr))
-		{
-			FAnimNodeTracker::FKey Key = SharedContext->AncestorTracker.Push<NodeType>(Node);
-			return FScopedAnimNodeTracker(&SharedContext->AncestorTracker, Key);
-		}
-
-		return FScopedAnimNodeTracker();
-	}
-
-	// Returns the nearest ancestor node of a particular type
-	template<typename NodeType>
-	NodeType* GetAncestor() const
-	{
-		if (ensure(SharedContext != nullptr))
-		{
-			FAnimNode_Base* Node = SharedContext->AncestorTracker.Top<NodeType>();
-			return static_cast<NodeType*>(Node);
-		}
-		
-		return nullptr;
 	}
 
 	// Returns persistent state that is tracked through animation tree update
@@ -359,7 +449,8 @@ public:
 	float GetDeltaTime() const { return DeltaTime; }
 
 	// Log update message
-	void LogMessage(EMessageSeverity::Type InSeverity, FText InMessage) const { LogMessageInternal("Update", InSeverity, InMessage); }
+	void LogMessage(const TSharedRef<FTokenizedMessage>& InMessage) const { LogMessageInternal("Update", InMessage); }
+	void LogMessage(EMessageSeverity::Type InSeverity, FText InMessage) const { LogMessage(FTokenizedMessage::Create(InSeverity, InMessage)); }
 };
 
 
@@ -370,15 +461,17 @@ public:
 	/* These Pose/Curve/Attributes are allocated using MemStack. You should not use it outside of stack. */
 	FCompactPose	Pose;
 	FBlendedCurve	Curve;
-	FStackCustomAttributes CustomAttributes;
+	UE::Anim::FStackAttributeContainer CustomAttributes;
 
 public:
+	friend class FScopedExpectsAdditiveOverride;
+	
 	// This constructor allocates a new uninitialized pose for the specified anim instance
 	FPoseContext(FAnimInstanceProxy* InAnimInstanceProxy, bool bInExpectsAdditivePose = false)
 		: FAnimationBaseContext(InAnimInstanceProxy)
 		, bExpectsAdditivePose(bInExpectsAdditivePose)
 	{
-		Initialize(InAnimInstanceProxy);
+		InitializeImpl(InAnimInstanceProxy);
 	}
 
 	// This constructor allocates a new uninitialized pose, copying non-pose state from the source context
@@ -386,32 +479,18 @@ public:
 		: FAnimationBaseContext(SourceContext.AnimInstanceProxy)
 		, bExpectsAdditivePose(SourceContext.bExpectsAdditivePose || bInOverrideExpectsAdditivePose)
 	{
-		Initialize(SourceContext.AnimInstanceProxy);
+		InitializeImpl(SourceContext.AnimInstanceProxy);
 
-#if ANIM_NODE_IDS_AVAILABLE
 		CurrentNodeId = SourceContext.CurrentNodeId;
 		PreviousNodeId = SourceContext.PreviousNodeId;
-#endif
 	}
 
-#if ANIM_NODE_IDS_AVAILABLE
-	void SetNodeId(int32 InNodeId)
-	{ 
-		PreviousNodeId = CurrentNodeId;
-		CurrentNodeId = InNodeId;
-	}
-
-	void SetNodeIds(const FAnimationBaseContext& InContext)
-	{ 
-		CurrentNodeId = InContext.GetCurrentNodeId();
-		PreviousNodeId = InContext.GetPreviousNodeId();
-	}
-#endif
-
-	ENGINE_API void Initialize(FAnimInstanceProxy* InAnimInstanceProxy);
+	UE_DEPRECATED(5.2, "This function will be made private. It should never be called externally, use the constructor instead.")
+	void Initialize(FAnimInstanceProxy* InAnimInstanceProxy) { InitializeImpl(InAnimInstanceProxy); }
 
 	// Log evaluation message
-	void LogMessage(EMessageSeverity::Type InSeverity, FText InMessage) const { LogMessageInternal("Evaluate", InSeverity, InMessage); }
+	void LogMessage(const TSharedRef<FTokenizedMessage>& InMessage) const { LogMessageInternal("Evaluate", InMessage); }
+	void LogMessage(EMessageSeverity::Type InSeverity, FText InMessage) const { LogMessage(FTokenizedMessage::Create(InSeverity, InMessage)); }
 
 	void ResetToRefPose()
 	{
@@ -444,7 +523,7 @@ public:
 	{
 		if (AnimInstanceProxy != Other.AnimInstanceProxy)
 		{
-			Initialize(AnimInstanceProxy);
+			InitializeImpl(AnimInstanceProxy);
 		}
 
 		Pose = Other.Pose;
@@ -458,10 +537,32 @@ public:
 	bool ExpectsAdditivePose() const { return bExpectsAdditivePose; }
 
 private:
+	ENGINE_API void InitializeImpl(FAnimInstanceProxy* InAnimInstanceProxy);
 
 	// Is this pose expected to be an additive pose
 	bool bExpectsAdditivePose;
 };
+
+// Helper for modifying and resetting ExpectsAdditivePose on a FPoseContext
+class FScopedExpectsAdditiveOverride
+{
+public:
+	FScopedExpectsAdditiveOverride(FPoseContext& InContext, bool bInExpectsAdditive)
+		: Context(InContext)
+	{
+		bPreviousValue = Context.ExpectsAdditivePose();
+		Context.bExpectsAdditivePose = bInExpectsAdditive;
+	}
+	
+	~FScopedExpectsAdditiveOverride()
+	{
+		Context.bExpectsAdditivePose = bPreviousValue;
+	}
+private:
+	FPoseContext& Context;
+	bool bPreviousValue;
+};
+	
 
 
 /** Evaluation context passed around during animation tree evaluation */
@@ -470,7 +571,7 @@ struct FComponentSpacePoseContext : public FAnimationBaseContext
 public:
 	FCSPose<FCompactPose>	Pose;
 	FBlendedCurve			Curve;
-	FStackCustomAttributes CustomAttributes;
+	UE::Anim::FStackAttributeContainer CustomAttributes;
 
 public:
 	// This constructor allocates a new uninitialized pose for the specified anim instance
@@ -486,25 +587,12 @@ public:
 	{
 		// No need to initialize, done through FA2CSPose::AllocateLocalPoses
 
-#if ANIM_NODE_IDS_AVAILABLE
 		CurrentNodeId = SourceContext.CurrentNodeId;
 		PreviousNodeId = SourceContext.PreviousNodeId;
-#endif
 	}
 
-#if ANIM_NODE_IDS_AVAILABLE
-	void SetNodeId(int32 InNodeId)
-	{ 
-		PreviousNodeId = CurrentNodeId;
-		CurrentNodeId = InNodeId;
-	}
-
-	void SetNodeIds(const FAnimationBaseContext& InContext)
-	{ 
-		CurrentNodeId = InContext.GetCurrentNodeId();
-		PreviousNodeId = InContext.GetPreviousNodeId();
-	}
-#endif
+	// Note: this copy assignment operator copies the whole object but the copy constructor only copies part of the object.
+	FComponentSpacePoseContext& operator=(const FComponentSpacePoseContext&) = default;
 
 	ENGINE_API void ResetToRefPose();
 
@@ -520,7 +608,7 @@ public:
 #define ANIM_NODE_DEBUG_MAX_CHILDREN 12
 #define ANIM_NODE_DEBUG_MAX_CACHEPOSE 20
 
-struct ENGINE_API FNodeDebugData
+struct FNodeDebugData
 {
 private:
 	struct DebugItem
@@ -578,9 +666,9 @@ public:
 		, AnimInstance(InAnimInstance) 
 	{}
 
-	void AddDebugItem(FString DebugData, bool bPoseSource = false);
-	FNodeDebugData& BranchFlow(float BranchWeight, FString InNodeDescription = FString());
-	FNodeDebugData* GetCachePoseDebugData(float GlobalWeight);
+	ENGINE_API void AddDebugItem(FString DebugData, bool bPoseSource = false);
+	ENGINE_API FNodeDebugData& BranchFlow(float BranchWeight, FString InNodeDescription = FString());
+	ENGINE_API FNodeDebugData* GetCachePoseDebugData(float GlobalWeight);
 
 	template<class Type>
 	FString GetNodeName(Type* Node)
@@ -590,7 +678,7 @@ public:
 		return FinalString;
 	}
 
-	void GetFlattenedDebugData(TArray<FFlattenedDebugData>& FlattenedDebugData, int32 Indent, int32& ChainID);
+	ENGINE_API void GetFlattenedDebugData(TArray<FFlattenedDebugData>& FlattenedDebugData, int32 Indent, int32& ChainID);
 
 	TArray<FFlattenedDebugData> GetFlattenedDebugData()
 	{
@@ -608,7 +696,7 @@ public:
 UENUM()
 namespace EPinHidingMode
 {
-	enum Type
+	enum Type : int
 	{
 		/** Never show this property as a pin, it is only editable in the details panel (default for everything but FPoseLink properties). */
 		NeverAsPin,
@@ -628,17 +716,22 @@ namespace EPinHidingMode
 
 /** A pose link to another node */
 USTRUCT(BlueprintInternalUseOnly)
-struct ENGINE_API FPoseLinkBase
+struct FPoseLinkBase
 {
 	GENERATED_USTRUCT_BODY()
 
+protected:
+	/** The non serialized node pointer. */
+	FAnimNode_Base* LinkedNode;
+
+public:
 	/** Serialized link ID, used to build the non-serialized pointer map. */
-	UPROPERTY()
+	UPROPERTY(meta=(BlueprintCompilerGeneratedDefaults))
 	int32 LinkID;
 
 #if WITH_EDITORONLY_DATA
 	/** The source link ID, used for debug visualization. */
-	UPROPERTY()
+	UPROPERTY(meta=(BlueprintCompilerGeneratedDefaults))
 	int32 SourceLinkID;
 #endif
 
@@ -650,51 +743,55 @@ struct ENGINE_API FPoseLinkBase
 #endif
 
 protected:
+#if DO_CHECK
 	/** Flag to prevent reentry when dealing with circular trees. */
 	bool bProcessed;
-
-	/** The non serialized node pointer. */
-	struct FAnimNode_Base* LinkedNode;
+#endif
 
 public:
 	FPoseLinkBase()
-		: LinkID(INDEX_NONE)
+		: LinkedNode(nullptr)
+		, LinkID(INDEX_NONE)
 #if WITH_EDITORONLY_DATA
 		, SourceLinkID(INDEX_NONE)
 #endif
+#if DO_CHECK
 		, bProcessed(false)
-		, LinkedNode(NULL)
+#endif
 	{
 	}
 
 	// Interface
 
-	void Initialize(const FAnimationInitializeContext& Context);
-	void CacheBones(const FAnimationCacheBonesContext& Context) ;
-	void Update(const FAnimationUpdateContext& Context);
-	void GatherDebugData(FNodeDebugData& DebugData);
+	ENGINE_API void Initialize(const FAnimationInitializeContext& Context);
+	ENGINE_API void CacheBones(const FAnimationCacheBonesContext& Context);
+	ENGINE_API void Update(const FAnimationUpdateContext& Context);
+	ENGINE_API void GatherDebugData(FNodeDebugData& DebugData);
 
 	/** Try to re-establish the linked node pointer. */
-	void AttemptRelink(const FAnimationBaseContext& Context);
+	ENGINE_API void AttemptRelink(const FAnimationBaseContext& Context);
+
 	/** This only used by custom handlers, and it is advanced feature. */
-	void SetLinkNode(struct FAnimNode_Base* NewLinkNode);
+	ENGINE_API void SetLinkNode(FAnimNode_Base* NewLinkNode);
+
 	/** This only used when dynamic linking other graphs to this one. */
-	void SetDynamicLinkNode(struct FPoseLinkBase* InPoseLink);
+	ENGINE_API void SetDynamicLinkNode(struct FPoseLinkBase* InPoseLink);
+
 	/** This only used by custom handlers, and it is advanced feature. */
-	FAnimNode_Base* GetLinkNode();
+	ENGINE_API FAnimNode_Base* GetLinkNode();
 };
 
 #define ENABLE_ANIMNODE_POSE_DEBUG 0
 
 /** A local-space pose link to another node */
 USTRUCT(BlueprintInternalUseOnly)
-struct ENGINE_API FPoseLink : public FPoseLinkBase
+struct FPoseLink : public FPoseLinkBase
 {
 	GENERATED_USTRUCT_BODY()
 
 public:
 	// Interface
-	void Evaluate(FPoseContext& Output);
+	ENGINE_API void Evaluate(FPoseContext& Output);
 
 #if ENABLE_ANIMNODE_POSE_DEBUG
 private:
@@ -705,95 +802,13 @@ private:
 
 /** A component-space pose link to another node */
 USTRUCT(BlueprintInternalUseOnly)
-struct ENGINE_API FComponentSpacePoseLink : public FPoseLinkBase
+struct FComponentSpacePoseLink : public FPoseLinkBase
 {
 	GENERATED_USTRUCT_BODY()
 
 public:
 	// Interface
-	void EvaluateComponentSpace(FComponentSpacePoseContext& Output);
-};
-
-UENUM()
-enum class EPostCopyOperation : uint8
-{
-	None,
-
-	LogicalNegateBool,
-};
-
-USTRUCT()
-struct FExposedValueCopyRecord
-{
-	GENERATED_BODY()
-
-	FExposedValueCopyRecord() = default;
-
-	FExposedValueCopyRecord(int32 InCopyIndex, EPostCopyOperation InPostCopyOperation)
-		: CopyIndex(InCopyIndex)
-		, PostCopyOperation(InPostCopyOperation)
-	{
-	}
-
-	UPROPERTY()
-	int32 CopyIndex = INDEX_NONE;
-
-	UPROPERTY()
-	EPostCopyOperation PostCopyOperation = EPostCopyOperation::None;
-};
-
-// An exposed value updater
-USTRUCT()
-struct ENGINE_API FExposedValueHandler
-{
-	GENERATED_USTRUCT_BODY()
-
-	FExposedValueHandler()
-		: BoundFunction(NAME_None)
-		, Function(nullptr)
-		, ValueHandlerNodeProperty(nullptr)
-		, PropertyAccessLibrary(nullptr)
-		, bInitialized(false)
-	{
-	}
-
-	// The function to call to update associated properties (can be NULL)
-	UPROPERTY()
-	FName BoundFunction;
-
-	// Direct data access to property in anim instance
-	UPROPERTY()
-	TArray<FExposedValueCopyRecord> CopyRecords;
-
-	// function pointer if BoundFunction != NAME_None
-	UPROPERTY()
-	UFunction* Function;
-
-	// Node property that this value handler is associated with, when the node
-	// is instantiated from this property the node's ExposedValueHandler will 
-	// point back to this FExposedValueHandler:
-	UPROPERTY()
-	TFieldPath<FStructProperty> ValueHandlerNodeProperty;
-
-	// Cached property access library ptr
-	const FPropertyAccessLibrary* PropertyAccessLibrary;
-
-	// Prevent multiple initialization
-	bool bInitialized;
-
-	// Helper function to bind an array of handlers.
-	// This is called for nativized builds to initialize against a dynamic class
-	static void DynamicClassInitialization(TArray<FExposedValueHandler>& Handlers, UDynamicClass* InDynamicClass);
-
-	// Helper function to bind an array of handlers.
-	// This is called for non-nativized builds to initialize against a UAnimBlueprintGeneratedClass
-	static void ClassInitialization(TArray<FExposedValueHandler>& Handlers, UObject* ClassDefaultObject);
-
-	// Bind copy records and cache UFunction if necessary
-	void Initialize(UClass* InClass, const FPropertyAccessLibrary& InPropertyAccessLibrary);
-
-	// Execute the function and copy records
-	void Execute(const FAnimationBaseContext& Context) const;
+	ENGINE_API void EvaluateComponentSpace(FComponentSpacePoseContext& Output);
 };
 
 /**
@@ -804,16 +819,16 @@ struct ENGINE_API FExposedValueHandler
  *   Create a class derived from UAnimGraphNode_Base, containing an instance of your runtime node as a member - this is your visual/editor-only node
  */
 USTRUCT()
-struct ENGINE_API FAnimNode_Base
+struct FAnimNode_Base
 {
-	GENERATED_USTRUCT_BODY()
+	GENERATED_BODY()
 
 	/** 
 	 * Called when the node first runs. If the node is inside a state machine or cached pose branch then this can be called multiple times. 
 	 * This can be called on any thread.
 	 * @param	Context		Context structure providing access to relevant data
 	 */
-	virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context);
+	ENGINE_API virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context);
 
 	/** 
 	 * Called to cache any bones that this node needs to track (e.g. in a FBoneReference). 
@@ -821,7 +836,7 @@ struct ENGINE_API FAnimNode_Base
 	 * This can be called on any thread.
 	 * @param	Context		Context structure providing access to relevant data
 	 */
-	virtual void CacheBones_AnyThread(const FAnimationCacheBonesContext& Context);
+	ENGINE_API virtual void CacheBones_AnyThread(const FAnimationCacheBonesContext& Context);
 
 	/** 
 	 * Called to update the state of the graph relative to this node.
@@ -830,7 +845,7 @@ struct ENGINE_API FAnimNode_Base
 	 * This can be called on any thread.
 	 * @param	Context		Context structure providing access to relevant data
 	 */
-	virtual void Update_AnyThread(const FAnimationUpdateContext& Context);
+	ENGINE_API virtual void Update_AnyThread(const FAnimationUpdateContext& Context);
 
 	/** 
 	 * Called to evaluate local-space bones transforms according to the weights set up in Update().
@@ -838,7 +853,7 @@ struct ENGINE_API FAnimNode_Base
 	 * This can be called on any thread.
 	 * @param	Output		Output structure to write pose or curve data to. Also provides access to relevant data as a context.
 	 */
-	virtual void Evaluate_AnyThread(FPoseContext& Output);
+	ENGINE_API virtual void Evaluate_AnyThread(FPoseContext& Output);
 
 	/** 
 	 * Called to evaluate component-space bone transforms according to the weights set up in Update().
@@ -846,13 +861,7 @@ struct ENGINE_API FAnimNode_Base
 	 * This can be called on any thread.
 	 * @param	Output		Output structure to write pose or curve data to. Also provides access to relevant data as a context.
 	 */	
-	virtual void EvaluateComponentSpace_AnyThread(FComponentSpacePoseContext& Output);
-	/** 
-	 * If a derived anim node should respond to asset overrides, OverrideAsset should be defined to handle changing the asset 
-	 * This is called during anim blueprint compilation to handle child anim blueprints.
-	 * @param	NewAsset	The new asset that is being set
-	 */
-	virtual void OverrideAsset(class UAnimationAsset* NewAsset) {}
+	ENGINE_API virtual void EvaluateComponentSpace_AnyThread(FComponentSpacePoseContext& Output);
 
 	/**
 	 * Called to gather on-screen debug data. 
@@ -891,26 +900,14 @@ struct ENGINE_API FAnimNode_Base
 	virtual bool NeedsDynamicReset() const { return false; }
 
 	/** Called to help dynamics-based updates to recover correctly from large movements/teleports */
-	virtual void ResetDynamics(ETeleportType InTeleportType);
-
-	/**
-	 * Override this if your node uses ancestor tracking and wants to be informed of Update() calls
-	 * that were skipped due to pose caching.
-	 */
-	virtual bool WantsSkippedUpdates() const { return false; }
-	
-	/**
-	 * Called on a tracked ancestor node when there are Update() calls that were skipped due to pose 
-	 * caching. Your node must implement WantsSkippedUpdates to receive this callback.
-	 */
-	virtual void OnUpdatesSkipped(TArrayView<const FAnimationUpdateContext*> SkippedUpdateContexts) {}
+	ENGINE_API virtual void ResetDynamics(ETeleportType InTeleportType);
 
 	/** Called after compilation */
 	virtual void PostCompile(const class USkeleton* InSkeleton) {}
 
 	/** 
 	 * For nodes that need some kind of initialization that is not dependent on node relevancy 
-	 * (i.e. it is insufficent or inefficent to use Initialize_AnyThread), return true here.
+	 * (i.e. it is insufficient or inefficient to use Initialize_AnyThread), return true here.
 	 * Note that this is called at load on the UAnimInstance CDO to avoid needing to call this at runtime.
 	 */
 	virtual bool NeedsOnInitializeAnimInstance() const { return false; }
@@ -918,46 +915,170 @@ struct ENGINE_API FAnimNode_Base
 	virtual ~FAnimNode_Base() {}
 
 	/** Deprecated functions */
-	UE_DEPRECATED(4.17, "Please use Initialize_AnyThread instead")
-	virtual void Initialize(const FAnimationInitializeContext& Context);
-	UE_DEPRECATED(4.17, "Please use CacheBones_AnyThread instead")
-	virtual void CacheBones(const FAnimationCacheBonesContext& Context) {}
-	UE_DEPRECATED(4.17, "Please use Update_AnyThread instead")
-	virtual void Update(const FAnimationUpdateContext& Context) {}
-	UE_DEPRECATED(4.17, "Please use Evaluate_AnyThread instead")
-	virtual void Evaluate(FPoseContext& Output) { check(false); }
-	UE_DEPRECATED(4.17, "Please use EvaluateComponentSpace_AnyThread instead")
-	virtual void EvaluateComponentSpace(FComponentSpacePoseContext& Output) { check(false); }
 	UE_DEPRECATED(4.20, "Please use ResetDynamics with an ETeleportPhysics flag instead")
 	virtual void ResetDynamics() {}
-
+	UE_DEPRECATED(5.0, "Please use IGraphMessage instead")
+	virtual bool WantsSkippedUpdates() const { return false; }
+	UE_DEPRECATED(5.0, "Please use IGraphMessage instead")
+	virtual void OnUpdatesSkipped(TArrayView<const FAnimationUpdateContext*> SkippedUpdateContexts) {}
+	UE_DEPRECATED(5.0, "Please use the OverrideAssets API on UAnimGraphNode_Base to opt-in to child anim BP override functionality, or per-node specific asset override calls.")
+	virtual void OverrideAsset(class UAnimationAsset* NewAsset) {}
+	
 	// The default handler for graph-exposed inputs:
-	const FExposedValueHandler& GetEvaluateGraphExposedInputs();
+	ENGINE_API const FExposedValueHandler& GetEvaluateGraphExposedInputs() const;
 
 	// Initialization function for the default handler for graph-exposed inputs, used only by instancing code:
-	void SetExposedValueHandler(const FExposedValueHandler* Handler) 
-	{ 
-		ExposedValueHandler = Handler; 
+	UE_DEPRECATED(5.0, "Exposed value handlers are now accessed via FAnimNodeConstantData")
+	void SetExposedValueHandler(const FExposedValueHandler* Handler) { }
+
+	// Get this node's index. The node index provides a unique key into its location within the class data
+	int32 GetNodeIndex() const
+	{
+		check(NodeData);
+		return NodeData->GetNodeIndex();
 	}
 
+	// Get the anim class that this node is hosted within
+	const IAnimClassInterface* GetAnimClassInterface() const
+	{
+		check(NodeData);
+		return &NodeData->GetAnimClassInterface();
+	}
+	
+protected:
+	// Get anim node constant/folded data of the specified type given the identifier. Do not use directly - use GET_ANIM_NODE_DATA
+	template<typename DataType>
+	const DataType& GetData(UE::Anim::FNodeDataId InId, const UObject* InObject = nullptr) const
+	{
+#if WITH_EDITORONLY_DATA
+		if(NodeData)
+		{
+			return *static_cast<const DataType*>(NodeData->GetData(InId, this, InObject));
+		}
+		else
+		{
+			return *InId.GetProperty()->ContainerPtrToValuePtr<const DataType>(this);
+		}
+#else
+		check(NodeData);
+		return *static_cast<const DataType*>(NodeData->GetData(InId, this, InObject));
+#endif
+	}
+
+	// Get anim node constant/folded data of the specified type given the identifier. Do not use directly - use GET_MUTABLE_ANIM_NODE_DATA
+	// Note: will assert if data is not held on the instance/dynamic. Use GetInstanceDataPtr/GET_INSTANCE_ANIM_NODE_DATA_PTR if the value
+	// might not be mutable, which will return null.
+#if WITH_EDITORONLY_DATA
+	template<typename DataType>
+	DataType& GetMutableData(UE::Anim::FNodeDataId InId, UObject* InObject = nullptr)
+	{
+		if(NodeData)
+		{
+			return *static_cast<DataType*>(NodeData->GetMutableData(InId, this, InObject));
+		}
+		else
+		{
+			return *InId.GetProperty()->ContainerPtrToValuePtr<DataType>(this);
+		}
+	}
+#endif
+
+	// Get anim node mutable data of the specified type given the identifier. Do not use directly - use GET_INSTANCE_ANIM_NODE_DATA_PTR
+	// @return nullptr if the data is not mutable/dynamic
+	template<typename DataType>
+	DataType* GetInstanceDataPtr(UE::Anim::FNodeDataId InId, UObject* InObject = nullptr)
+	{
+#if WITH_EDITORONLY_DATA	
+		if(NodeData)
+		{
+			return static_cast<DataType*>(NodeData->GetInstanceData(InId, this, InObject));
+		}
+		else
+		{
+			return InId.GetProperty()->ContainerPtrToValuePtr<DataType>(this);
+		}
+#else
+		check(NodeData);
+		return static_cast<DataType*>(NodeData->GetInstanceData(InId, this, InObject));
+#endif
+	}
+	
 protected:
 	/** return true if enabled, otherwise, return false. This is utility function that can be used per node level */
-	bool IsLODEnabled(FAnimInstanceProxy* AnimInstanceProxy);
+	ENGINE_API bool IsLODEnabled(FAnimInstanceProxy* AnimInstanceProxy);
+
+	/** Get the LOD level at which this node is enabled. Node is enabled if the current LOD is less than or equal to this threshold. */
 	virtual int32 GetLODThreshold() const { return INDEX_NONE; }
 
-	/** Deprecated function */
-	UE_DEPRECATED(4.17, "Please use OnInitializeAnimInstance instead")
-	virtual void RootInitialize(const FAnimInstanceProxy* InProxy) {}
-
 	/** Called once, from game thread as the parent anim instance is created */
-	virtual void OnInitializeAnimInstance(const FAnimInstanceProxy* InProxy, const UAnimInstance* InAnimInstance);
+	ENGINE_API virtual void OnInitializeAnimInstance(const FAnimInstanceProxy* InProxy, const UAnimInstance* InAnimInstance);
 
 	friend struct FAnimInstanceProxy;
 
-private:		
-	// Reference to the exposed value handler used by this node. Allocated on the class, rather than per instance:
-	const FExposedValueHandler* ExposedValueHandler = nullptr;
+private:
+	// Access functions
+	ENGINE_API const FAnimNodeFunctionRef& GetInitialUpdateFunction() const;
+	ENGINE_API const FAnimNodeFunctionRef& GetBecomeRelevantFunction() const;
+	ENGINE_API const FAnimNodeFunctionRef& GetUpdateFunction() const;
+	
+private:
+	friend class IAnimClassInterface;
+	friend class UAnimBlueprintGeneratedClass;
+	friend struct UE::Anim::FNodeDataId;
+	friend struct UE::Anim::FNodeFunctionCaller;
+	friend class UAnimGraphNode_Base;
+	friend struct FPoseLinkBase;
+
+	// Set the cached ptr to the constant/folded data for this node
+	void SetNodeData(const FAnimNodeData& InNodeData) { NodeData = &InNodeData; }
+
+	// Reference to the constant/folded data for this node
+	const FAnimNodeData* NodeData = nullptr;
+
+#if WITH_EDITORONLY_DATA
+	// Function called on initial update
+	UPROPERTY(meta=(FoldProperty))
+	FAnimNodeFunctionRef InitialUpdateFunction;
+
+	// Function called on become relevant
+	UPROPERTY(meta=(FoldProperty))
+	FAnimNodeFunctionRef BecomeRelevantFunction;
+
+	// Function called on update
+	UPROPERTY(meta=(FoldProperty))
+	FAnimNodeFunctionRef UpdateFunction;
+#endif
 };
 
+#if WITH_EDITORONLY_DATA
+#define VERIFY_ANIM_NODE_MEMBER_TYPE(Type, Identifier) static_assert(std::is_same_v<decltype(Identifier), Type>, "Incorrect return type used");
+#else
+#define VERIFY_ANIM_NODE_MEMBER_TYPE(Type, Identifier)
+#endif
 
-#include "UObject/DefineUPropertyMacros.h"
+#define GET_ANIM_NODE_DATA_ID_INTERNAL(Type, Identifier) \
+	[this]() -> UE::Anim::FNodeDataId \
+	{ \
+		VERIFY_ANIM_NODE_MEMBER_TYPE(Type, Identifier) \
+		static UE::Anim::FNodeDataId CachedId_##Identifier; \
+		if(!CachedId_##Identifier.IsValid()) \
+		{ \
+			static const FName AnimName_##Identifier(#Identifier); \
+			CachedId_##Identifier = UE::Anim::FNodeDataId(AnimName_##Identifier, this, StaticStruct()); \
+		} \
+		return CachedId_##Identifier; \
+	}() \
+
+// Get some (potentially folded) anim node data. Only usable from within an anim node.
+// This caches the node data ID in static contained in a local lambda for improved performance
+#define GET_ANIM_NODE_DATA(Type, Identifier) (GetData<Type>(GET_ANIM_NODE_DATA_ID_INTERNAL(Type, Identifier)))
+
+// Get some anim node data that should be held on an instance. Only usable from within an anim node.
+// @return nullptr if the data is not held on an instance (i.e. it is in constant sparse class data)
+// This caches the node data ID in static contained in a local lambda for improved performance
+#define GET_INSTANCE_ANIM_NODE_DATA_PTR(Type, Identifier) (GetInstanceDataPtr<Type>(GET_ANIM_NODE_DATA_ID_INTERNAL(Type, Identifier)))
+
+#if WITH_EDITORONLY_DATA
+// Editor-only way of accessing mutable anim node data but with internal checks
+#define GET_MUTABLE_ANIM_NODE_DATA(Type, Identifier) (GetMutableData<Type>(GET_ANIM_NODE_DATA_ID_INTERNAL(Type, Identifier)))
+#endif

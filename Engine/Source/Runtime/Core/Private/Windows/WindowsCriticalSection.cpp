@@ -4,7 +4,6 @@
 #include "Misc/AssertionMacros.h"
 #include "Math/UnrealMathUtility.h"
 #include "Containers/UnrealString.h"
-#include "Windows/WindowsHWrapper.h"
 #include "Windows/AllowWindowsPlatformTypes.h"
 
 FWindowsSystemWideCriticalSection::FWindowsSystemWideCriticalSection(const FString& InName, FTimespan InTimeout)
@@ -20,7 +19,7 @@ FWindowsSystemWideCriticalSection::FWindowsSystemWideCriticalSection(const FStri
 	FString NormalizedMutexName(InName);
 	NormalizedMutexName.ReplaceInline(TEXT("\\"), TEXT("/"));
 
-	TCHAR MutexName[MAX_PATH] = TEXT("");
+	TCHAR MutexName[MAX_PATH] = {};
 	FCString::Strcpy(MutexName, *NormalizedMutexName);
 
 	// Attempt to create and take ownership of a named mutex

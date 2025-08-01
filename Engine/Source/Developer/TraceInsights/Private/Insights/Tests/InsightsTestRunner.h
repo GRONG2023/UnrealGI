@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Logging/LogMacros.h"
+#include "Containers/Ticker.h"
 
 #if !UE_BUILD_SHIPPING && !WITH_EDITOR
 
@@ -14,21 +15,17 @@ DECLARE_LOG_CATEGORY_EXTERN(InsightsTestRunner, Log, All);
 class TRACEINSIGHTS_API FInsightsTestRunner : public TSharedFromThis<FInsightsTestRunner>, public IInsightsComponent
 {
 public:
-	void ScheduleCommand(const FString& InCmd);
 	virtual ~FInsightsTestRunner();
+
+	void ScheduleCommand(const FString& InCmd);
+
 	virtual void Initialize(IUnrealInsightsModule& InsightsModule) override;
 	virtual void Shutdown() override;
 	virtual void RegisterMajorTabs(IUnrealInsightsModule& InsightsModule) override;
 	virtual void UnregisterMajorTabs() override;
 
 	static TSharedPtr<FInsightsTestRunner> CreateInstance();
-
 	static TSharedPtr<FInsightsTestRunner> Get();
-	/** The delegate to be invoked when this manager ticks. */
-	FTickerDelegate OnTick;
-
-	/** Handle to the registered OnTick. */
-	FDelegateHandle OnTickHandle;
 
 	bool Tick(float DeltaTime);
 
@@ -37,12 +34,18 @@ public:
 
 	void SetInitAutomationModules(bool InInitAutomationModules) { bInitAutomationModules = InInitAutomationModules; }
 	bool GetInitAutomationModules() const { return bInitAutomationModules; }
-
-private:
 	void RunTests();
 
-	void OnSessionAnalysisCompleted();
+private:
 	TSharedRef<SDockTab> SpawnAutomationWindowTab(const FSpawnTabArgs& Args);
+	void OnSessionAnalysisCompleted();
+
+private:
+	/** The delegate to be invoked when this manager ticks. */
+	FTickerDelegate OnTick;
+
+	/** Handle to the registered OnTick. */
+	FTSTicker::FDelegateHandle OnTickHandle;
 
 	FDelegateHandle SessionAnalysisCompletedHandle;
 

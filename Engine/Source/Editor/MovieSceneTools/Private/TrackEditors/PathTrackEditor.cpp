@@ -100,6 +100,11 @@ bool F3DPathTrackEditor::SupportsType( TSubclassOf<UMovieSceneTrack> Type ) cons
 	return Type == UMovieScene3DPathTrack::StaticClass();
 }
 
+bool F3DPathTrackEditor::SupportsSequence(UMovieSceneSequence* InSequence) const
+{
+	ETrackSupport TrackSupported = InSequence ? InSequence->IsTrackSupported(UMovieScene3DPathTrack::StaticClass()) : ETrackSupport::NotSupported;
+	return TrackSupported == ETrackSupport::Supported;
+}
 
 TSharedRef<ISequencerSection> F3DPathTrackEditor::MakeSectionInterface( UMovieSceneSection& SectionObject, UMovieSceneTrack& Track, FGuid ObjectBinding )
 {
@@ -111,7 +116,7 @@ TSharedRef<ISequencerSection> F3DPathTrackEditor::MakeSectionInterface( UMovieSc
 
 void F3DPathTrackEditor::BuildObjectBindingTrackMenu(FMenuBuilder& MenuBuilder, const TArray<FGuid>& ObjectBindings, const UClass* ObjectClass)
 {
-	if (ObjectClass && ObjectClass->IsChildOf(AActor::StaticClass()))
+	if (ObjectClass != nullptr && (ObjectClass->IsChildOf(AActor::StaticClass()) || ObjectClass->IsChildOf(USceneComponent::StaticClass())))
 	{
 		UMovieSceneSection* DummySection = nullptr;
 
@@ -144,7 +149,7 @@ bool F3DPathTrackEditor::IsActorPickable(const AActor* const ParentActor, FGuid 
 	if (ParentActor->IsListedInSceneOutliner() &&
 		!FActorEditorUtils::IsABuilderBrush(ParentActor) &&
 		!ParentActor->IsA( AWorldSettings::StaticClass() ) &&
-		!ParentActor->IsPendingKill())
+		IsValid(ParentActor))
 	{			
 		for (UActorComponent* Component : ParentActor->GetComponents())
 		{
@@ -245,6 +250,8 @@ FKeyPropertyResult F3DPathTrackEditor::AddKeyInternal( FFrameNumber KeyTime, con
 		return KeyPropertyResult;
 	}
 
+	UMovieScene* MovieScene = GetSequencer()->GetFocusedMovieSceneSequence()->GetMovieScene();
+
 	for( int32 ObjectIndex = 0; ObjectIndex < Objects.Num(); ++ObjectIndex )
 	{
 		UObject* Object = Objects[ObjectIndex].Get();
@@ -260,8 +267,8 @@ FKeyPropertyResult F3DPathTrackEditor::AddKeyInternal( FFrameNumber KeyTime, con
 
 			if (ensure(Track))
 			{
-				// Clamp to next path section's start time or the end of the current sequencer view range
-				FFrameNumber PathEndTime = ( GetSequencer()->GetViewRange().GetUpperBoundValue() * Track->GetTypedOuter<UMovieScene>()->GetTickResolution() ).FrameNumber;
+				// Clamp to next path section's start time or the end of the current movie scene range
+				FFrameNumber PathEndTime = MovieScene->GetPlaybackRange().GetUpperBoundValue();
 	
 				for (UMovieSceneSection* Section : Track->GetAllSections())
 				{

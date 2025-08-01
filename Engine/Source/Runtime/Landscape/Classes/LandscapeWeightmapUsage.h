@@ -18,7 +18,7 @@ class ULandscapeWeightmapUsage : public UObject
 
 public:
 	UPROPERTY()
-	ULandscapeComponent* ChannelUsage[NumChannels];
+	TObjectPtr<ULandscapeComponent> ChannelUsage[NumChannels];
 
 	UPROPERTY()
 	FGuid LayerGuid;
@@ -57,5 +57,18 @@ public:
 	bool IsEmpty() const
 	{
 		return FreeChannelCount() == NumChannels;
+	}
+
+	TArray<ULandscapeComponent*, TInlineAllocator<4>> GetUniqueValidComponents() const
+	{
+		TArray<ULandscapeComponent*, TInlineAllocator<4>> UniqueComponents;
+		for (const TObjectPtr<ULandscapeComponent>& Component : ChannelUsage)
+		{
+			if (Component != nullptr)
+			{
+				UniqueComponents.AddUnique(Component);
+			}
+		}
+		return UniqueComponents;
 	}
 };

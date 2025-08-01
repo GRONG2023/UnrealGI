@@ -11,7 +11,7 @@
 #include "Widgets/Layout/SScrollBorder.h"
 
 #if WITH_EDITOR
-	#include "EditorStyleSet.h"
+	#include "Styling/AppStyle.h"
 #endif // WITH_EDITOR
 
 
@@ -21,9 +21,7 @@
 #include "Templates/WidgetTemplateClass.h"
 #include "Templates/WidgetTemplateBlueprintClass.h"
 
-#include "Developer/HotReload/Public/IHotReload.h"
-
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Widgets/Input/SSearchBox.h"
 #include "Widgets/Input/SCheckBox.h"
 
@@ -32,7 +30,6 @@
 
 
 
-#include "UMGEditorProjectSettings.h"
 
 #define LOCTEXT_NAMESPACE "UMG"
 
@@ -71,6 +68,11 @@ void SPaletteViewItem::OnFavoriteToggled(ECheckBoxState InNewState)
 	}
 }
 
+EVisibility SPaletteViewItem::GetFavoritedStateVisibility() const
+{
+	return GetFavoritedState() == ECheckBoxState::Checked || IsHovered() ? EVisibility::Visible : EVisibility::Hidden;
+}
+
 void SPaletteViewItem::Construct(const FArguments& InArgs, TSharedPtr<FWidgetTemplateViewModel> InWidgetViewModel)
 {
 	WidgetViewModel = InWidgetViewModel;
@@ -87,14 +89,15 @@ void SPaletteViewItem::Construct(const FArguments& InArgs, TSharedPtr<FWidgetTem
 				.ToolTipText(this, &SPaletteViewItem::GetFavoriteToggleToolTipText)
 				.IsChecked(this, &SPaletteViewItem::GetFavoritedState)
 				.OnCheckStateChanged(this, &SPaletteViewItem::OnFavoriteToggled)
-				.Style(FEditorStyle::Get(), "UMGEditor.Palette.FavoriteToggleStyle")
+				.Style(FAppStyle::Get(), "UMGEditor.Palette.FavoriteToggleStyle")
+				.Visibility(this, &SPaletteViewItem::GetFavoritedStateVisibility)
 			]
 			+ SHorizontalBox::Slot()
 			.AutoWidth()
 			.VAlign(VAlign_Center)
 			[
 				SNew(SImage)
-				.ColorAndOpacity(FLinearColor(1, 1, 1, 0.5))
+				.ColorAndOpacity(FSlateColor::UseForeground())
 				.Image(WidgetViewModel->Template->GetIcon())
 			]
 
@@ -136,10 +139,11 @@ void SPaletteView::Construct(const FArguments& InArgs, TSharedPtr<FWidgetBluepri
 
 	SAssignNew(WidgetTemplatesView, STreeView< TSharedPtr<FWidgetViewModel> >)
 		.ItemHeight(1.0f)
-		.SelectionMode(ESelectionMode::Single)
+		.SelectionMode(ESelectionMode::SingleToggle)
 		.OnGenerateRow(this, &SPaletteView::OnGenerateWidgetTemplateItem)
 		.OnGetChildren(FilterHandler.ToSharedRef(), &PaletteFilterHandler::OnGetFilteredChildren)
 		.OnSelectionChanged(this, &SPaletteView::WidgetPalette_OnSelectionChanged)
+		.OnMouseButtonClick(this, &SPaletteView::WidgetPalette_OnClick)
 		.TreeItemsSource(&TreeWidgetViewModels);
 		
 
@@ -154,7 +158,7 @@ void SPaletteView::Construct(const FArguments& InArgs, TSharedPtr<FWidgetBluepri
 		.AutoHeight()
 		[
 			SAssignNew(SearchBoxPtr, SSearchBox)
-			.HintText(LOCTEXT("SearchTemplates", "Search Palette"))
+			.HintText(LOCTEXT("SearchPalette", "Search Palette"))
 			.OnTextChanged(this, &SPaletteView::OnSearchChanged)
 		]
 
@@ -163,7 +167,12 @@ void SPaletteView::Construct(const FArguments& InArgs, TSharedPtr<FWidgetBluepri
 		[
 			SNew(SScrollBorder, WidgetTemplatesView.ToSharedRef())
 			[
-				WidgetTemplatesView.ToSharedRef()
+				SNew(SBorder)
+				.BorderImage(FAppStyle::Get().GetBrush("Brushes.Recessed"))
+				.Padding(0)
+				[
+					WidgetTemplatesView.ToSharedRef()
+				]
 			]
 		]
 	];
@@ -198,6 +207,27 @@ void SPaletteView::OnSearchChanged(const FText& InFilterText)
 	WidgetFilter->SetRawFilterText(InFilterText);
 	SearchBoxPtr->SetError(WidgetFilter->GetFilterErrorText());
 	PaletteViewModel->SetSearchText(InFilterText);
+}
+
+void SPaletteView::WidgetPalette_OnClick(TSharedPtr<FWidgetViewModel> SelectedItem)
+{
+	if (!SelectedItem.IsValid())
+	{
+		return;
+	}
+
+	// If it's a category, toggle it
+	if (SelectedItem->IsCategory())
+	{
+		if (TSharedPtr<FWidgetHeaderViewModel> CategoryHeader = StaticCastSharedPtr<FWidgetHeaderViewModel>(SelectedItem))
+		{
+			if (TSharedPtr<ITableRow> TableRow = WidgetTemplatesView->WidgetFromItem(CategoryHeader))
+			{
+				TableRow->ToggleExpansion();
+			}
+		}
+		return;
+	}
 }
 
 void SPaletteView::WidgetPalette_OnSelectionChanged(TSharedPtr<FWidgetViewModel> SelectedItem, ESelectInfo::Type SelectInfo)

@@ -1,49 +1,58 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "EditorModeManager.h"
+#include "Components/StaticMeshComponent.h"
 #include "Engine/Selection.h"
 #include "Misc/MessageDialog.h"
-#include "Classes/EditorStyleSettings.h"
 #include "Editor/EditorPerProjectUserSettings.h"
 #include "Misc/ConfigCacheIni.h"
 #include "GameFramework/WorldSettings.h"
 #include "LevelEditorViewport.h"
 #include "EditorModeRegistry.h"
 #include "EditorModes.h"
-#include "Engine/BookMark.h"
 #include "EditorSupportDelegates.h"
 #include "EdMode.h"
+#include "Rendering/PositionVertexBuffer.h"
+#include "SceneView.h"
+#include "StaticMeshResources.h"
 #include "Toolkits/IToolkitHost.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Framework/Notifications/NotificationManager.h"
 #include "Widgets/Notifications/SNotificationList.h"
-#include "Widgets/Input/SButton.h"
-#include "Engine/LevelStreaming.h"
-#include "EditorWorldExtension.h"
-#include "ViewportWorldInteraction.h"
 #include "Editor/EditorEngine.h"
-#include "UnrealEdGlobals.h"
 #include "Editor/UnrealEdEngine.h"
-#include "Bookmarks/IBookmarkTypeTools.h"
-#include "Widgets/Docking/SDockTab.h"
-#include "Widgets/Layout/SWidgetSwitcher.h"
-#include "EditorStyleSet.h"
 #include "Framework/Commands/UICommandList.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Toolkits/BaseToolkit.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "Subsystems/BrushEditingSubsystem.h"
 #include "Tools/UEdMode.h"
-#include "Widgets/Images/SImage.h"
 #include "InputRouter.h"
-#include "InteractiveGizmoManager.h"
+#include "EdModeInteractiveToolsContext.h"
+#include "Tools/LegacyEdModeInterfaces.h"
+#include "CanvasTypes.h"
+#include "CanvasItem.h"
+#include "Engine/StaticMeshActor.h"
+#include "Engine/Texture2D.h"
+#include "EngineUtils.h"
+#include "Tools/AssetEditorContextObject.h"
+#include "ContextObjectStore.h"
+#include "EditorInteractiveGizmoManager.h"
+#include "GizmoEdModeInterface.h"
+#include "UObject/GCObjectScopeGuard.h"
+#include "Settings/LevelEditorViewportSettings.h"
+#include "Subsystems/EditorElementSubsystem.h"
+
+#include "Elements/Interfaces/TypedElementWorldInterface.h"
+#include "TextureResource.h"
+#include "EditorGizmos/EditorGizmoStateTarget.h"
+#include "EditorGizmos/EditorTransformGizmoUtil.h"
+#include "Toolkits/ToolkitManager.h"
 
 /*------------------------------------------------------------------------------
 	FEditorModeTools.
 
 	The master class that handles tracking of the current mode.
 ------------------------------------------------------------------------------*/
-
-const FName FEditorModeTools::EditorModeToolbarTabName = TEXT("EditorModeToolbar");
 
 FEditorModeTools::FEditorModeTools()
 	: PivotShown(false)
@@ -56,8 +65,8 @@ FEditorModeTools::FEditorModeTools()
 	, TranslateRotateXAxisAngle(0.0f)
 	, TranslateRotate2DAngle(0.0f)
 	, DefaultModeIDs()
-	, WidgetMode(FWidget::WM_None)
-	, OverrideWidgetMode(FWidget::WM_None)
+	, WidgetMode(UE::Widget::WM_None)
+	, OverrideWidgetMode(UE::Widget::WM_None)
 	, bShowWidget(true)
 	, bHideViewportUI(false)
 	, bSelectionHasSceneComponent(false)
@@ -66,6 +75,10 @@ FEditorModeTools::FEditorModeTools()
 	, bIsTracking(false)
 {
 	DefaultModeIDs.Add( FBuiltinEditorModes::EM_Default );
+
+	InteractiveToolsContext = NewObject<UModeManagerInteractiveToolsContext>(GetTransientPackage(), UModeManagerInteractiveToolsContext::StaticClass(), NAME_None, RF_Transient);
+	InteractiveToolsContext->InitializeContextWithEditorModeManager(this);
+	InteractiveToolsContext->Activate();
 
 	// Load the last used settings
 	LoadConfig();
@@ -83,22 +96,32 @@ FEditorModeTools::FEditorModeTools()
 		// This binding ensures the mode is destroyed if the type is unregistered outside of normal shutdown process
 		GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->OnEditorModeUnregistered().AddRaw(this, &FEditorModeTools::OnModeUnregistered);
 	}
+
+	UE::EditorTransformGizmoUtil::RegisterTransformGizmoContextObject(this);
+
+	FWorldDelegates::OnWorldCleanup.AddRaw(this, &FEditorModeTools::OnWorldCleanup);
 }
 
 FEditorModeTools::~FEditorModeTools()
 {
-	if (GEditor)
-	{
-		GEditor->UnregisterForUndo(this);
-		GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->OnEditorModeUnregistered().RemoveAll(this);
-	}
-
+	SetDefaultMode(FBuiltinEditorModes::EM_Default);
 	DeactivateAllModes();
+
+	RemoveAllDelegateHandlers();
+
+	ExitAllModesPendingDeactivate();
 	RecycledScriptableModes.Empty();
 
-	USelection::SelectionChangedEvent.RemoveAll(this);
-	USelection::SelectNoneEvent.RemoveAll(this);
-	USelection::SelectObjectEvent.RemoveAll(this);
+	// We may be destroyed after the UObject system has already shutdown, 
+	// which would mean that this instances will be garbage
+	if (UObjectInitialized())
+	{
+		UE::EditorTransformGizmoUtil::UnregisterTransformGizmoContextObject(this);
+		InteractiveToolsContext->Deactivate();
+		InteractiveToolsContext->ShutdownContext();
+		InteractiveToolsContext = nullptr;
+		GizmoStateTarget = nullptr;
+	}
 }
 
 void FEditorModeTools::LoadConfig(void)
@@ -106,12 +129,22 @@ void FEditorModeTools::LoadConfig(void)
 	GConfig->GetBool(TEXT("FEditorModeTools"),TEXT("ShowWidget"),bShowWidget,
 		GEditorPerProjectIni);
 
-	const bool bGetRawValue = true;
-	int32 Bogus = (int32)GetCoordSystem(bGetRawValue);
-	GConfig->GetInt(TEXT("FEditorModeTools"),TEXT("CoordSystem"),Bogus,
+	static constexpr bool bGetRawValue = true;
+	int32 CoordSystemAsInt = (int32)GetCoordSystem(bGetRawValue);
+	GConfig->GetInt(TEXT("FEditorModeTools"),TEXT("CoordSystem"), CoordSystemAsInt,
 		GEditorPerProjectIni);
-	SetCoordSystem((ECoordSystem)Bogus);
 
+	if (static_cast<ECoordSystem>(CoordSystemAsInt) == COORD_Parent)
+	{
+		// parent mode is only supported with new trs gizmos for now
+		const bool bUseNewGizmo = UEditorInteractiveGizmoManager::UsesNewTRSGizmos();
+		if (!bUseNewGizmo)
+		{
+			CoordSystemAsInt = static_cast<int32>(COORD_Local);
+		}
+	}
+	
+	SetCoordSystem((ECoordSystem)CoordSystemAsInt);
 
 	LoadWidgetSettings();
 }
@@ -120,7 +153,7 @@ void FEditorModeTools::SaveConfig(void)
 {
 	GConfig->SetBool(TEXT("FEditorModeTools"), TEXT("ShowWidget"), bShowWidget, GEditorPerProjectIni);
 
-	const bool bGetRawValue = true;
+	static constexpr bool bGetRawValue = true;
 	GConfig->SetInt(TEXT("FEditorModeTools"), TEXT("CoordSystem"), (int32)GetCoordSystem(bGetRawValue), GEditorPerProjectIni);
 
 	SaveWidgetSettings();
@@ -142,6 +175,13 @@ void FEditorModeTools::SetToolkitHost(TSharedRef<class IToolkitHost> InHost)
 {
 	checkf(!ToolkitHost.IsValid(), TEXT("SetToolkitHost can only be called once"));
 	ToolkitHost = InHost;
+
+	if (HasToolkitHost())
+	{
+		UAssetEditorContextObject* AssetEditorContextObject = NewObject<UAssetEditorContextObject>(InteractiveToolsContext->ToolManager);
+		AssetEditorContextObject->SetToolkitHost(GetToolkitHost().Get());
+		InteractiveToolsContext->ContextObjectStore->AddContextObject(AssetEditorContextObject);
+	}
 }
 
 USelection* FEditorModeTools::GetSelectedActors() const
@@ -159,10 +199,43 @@ USelection* FEditorModeTools::GetSelectedComponents() const
 	return GEditor->GetSelectedComponents();
 }
 
+UTypedElementSelectionSet* FEditorModeTools::GetEditorSelectionSet() const
+{
+	if (USelection* SelectedActorsSet = GetSelectedActors())
+	{
+		return SelectedActorsSet->GetElementSelectionSet();
+	}
+	return nullptr;
+}
+
+void FEditorModeTools::StoreSelection(FName SelectionStoreKey, bool bClearSelection)
+{
+	if (UTypedElementSelectionSet* SelectionSet = GetEditorSelectionSet())
+	{
+		StoredSelectionSets.Emplace(SelectionStoreKey, SelectionSet->GetCurrentSelectionState());
+
+		if (bClearSelection)
+		{
+			SelectionSet->ClearSelection(FTypedElementSelectionOptions().SetAllowHidden(true));
+		}
+	}
+}
+
+void FEditorModeTools::RestoreSelection(FName SelectionStoreKey)
+{
+	if (UTypedElementSelectionSet* SelectionSet = GetEditorSelectionSet())
+	{
+		if (FTypedElementSelectionSetState* StoredState = StoredSelectionSets.Find(SelectionStoreKey))
+		{
+			SelectionSet->RestoreSelectionState(*StoredState);
+		}
+	}
+}
+
 UWorld* FEditorModeTools::GetWorld() const
 {
 	// When in 'Simulate' mode, the editor mode tools will actually interact with the PIE world
-	if( GEditor->bIsSimulatingInEditor )
+	if( GEditor->bIsSimulatingInEditor && GEditor->GetPIEWorldContext() )
 	{
 		return GEditor->GetPIEWorldContext()->World();
 	}
@@ -174,17 +247,13 @@ UWorld* FEditorModeTools::GetWorld() const
 
 FEditorViewportClient* FEditorModeTools::GetHoveredViewportClient() const
 {
-	// This is our best effort right now. However this is somewhat incorrect as if you Hover
-	// on other Viewports they get mouse events, but this value stays on the Focused viewport.
-	// Not sure what to do about this right now.
+	// Note: as per the comment in MouseLeave, this currently acts as LastHoveredViewportClient.
 	return HoveredViewportClient;
 }
 
 FEditorViewportClient* FEditorModeTools::GetFocusedViewportClient() const
 {
-	// This is our best effort right now. However this is somewhat incorrect as if you Hover
-	// on other Viewports they get mouse events, but this value stays on the Focused viewport.
-	// Not sure what to do about this right now.
+	// Note: as per the comment in LostFocus, this actually currently acts as LastFocusedViewportClient.
 	return FocusedViewportClient;
 }
 
@@ -193,13 +262,24 @@ bool FEditorModeTools::SelectionHasSceneComponent() const
 	return bSelectionHasSceneComponent;
 }
 
+void FEditorModeTools::SetSelectionHasSceneComponent(bool bHasSceneComponent)
+{
+	bSelectionHasSceneComponent = bHasSceneComponent;
+}
+
 bool FEditorModeTools::IsSelectionAllowed(AActor* InActor, const bool bInSelected) const
 {
 	bool bSelectionAllowed = (ActiveScriptableModes.Num() == 0);
 
 	for (const UEdMode* Mode : ActiveScriptableModes)
 	{
-		bSelectionAllowed |= Mode->IsSelectionAllowed(InActor, bInSelected);
+		// Exclusive ability for a mode to disable selection
+		if (Mode->IsSelectionDisallowed(InActor, bInSelected))
+		{
+			return false;
+		}
+				
+		bSelectionAllowed |= Mode->IsSelectionAllowed(InActor, bInSelected);		
 	}
 
 	return bSelectionAllowed;
@@ -208,10 +288,11 @@ bool FEditorModeTools::IsSelectionAllowed(AActor* InActor, const bool bInSelecte
 bool FEditorModeTools::IsSelectionHandled(AActor* InActor, const bool bInSelected) const
 {
 	bool bSelectionHandled = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		bSelectionHandled |= Mode->Select(InActor, bInSelected);
-	}
+	ForEachEdMode([&bSelectionHandled, bInSelected, InActor](UEdMode* Mode)
+		{
+			bSelectionHandled |= Mode->Select(InActor, bInSelected);
+			return true;
+		});
 
 	return bSelectionHandled;
 }
@@ -219,230 +300,256 @@ bool FEditorModeTools::IsSelectionHandled(AActor* InActor, const bool bInSelecte
 bool FEditorModeTools::ProcessEditDuplicate()
 {
 	bool bHandled = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		bHandled = Mode->ProcessEditDuplicate();
-	}
+	ForEachEdMode([&bHandled](UEdMode* Mode)
+		{
+			bHandled |= Mode->ProcessEditDuplicate();
+			return true;
+		});
 
 	return bHandled;
 }
 
 bool FEditorModeTools::ProcessEditDelete()
 {
-	bool bHandled = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		bHandled = Mode->ProcessEditDelete();
-	}
+	bool bHandled = InteractiveToolsContext->ProcessEditDelete();
+	ForEachEdMode([&bHandled](UEdMode* Mode)
+		{
+			bHandled |= Mode->ProcessEditDelete();
+			return true;
+		});
 
 	return bHandled;
 }
 
 bool FEditorModeTools::ProcessEditCut()
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		if (Mode->ProcessEditCut())
+	bool bHandled = false;
+	ForEachEdMode([&bHandled](UEdMode* Mode)
 		{
-			return true;
-		}
-	}
+			bHandled = Mode->ProcessEditCut();
+			return !bHandled;
+		});
 
-	return false;
+	return bHandled;
 }
 
 bool FEditorModeTools::ProcessEditCopy()
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		if (Mode->ProcessEditCopy())
+	bool bHandled = false;
+	ForEachEdMode([&bHandled](UEdMode* Mode)
 		{
-			return true;
-		}
-	}
+			bHandled = Mode->ProcessEditCopy();
+			return !bHandled;
+		});
 
-	return false;
+	return bHandled;
 }
 
 bool FEditorModeTools::ProcessEditPaste()
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		if (Mode->ProcessEditPaste())
+	bool bHandled = false;
+	ForEachEdMode([&bHandled](UEdMode* Mode)
 		{
-			return true;
-		}
-	}
+			bHandled = Mode->ProcessEditPaste();
+			return !bHandled;
+		});
 
-	return false;
+	return bHandled;
 }
 
 EEditAction::Type FEditorModeTools::GetActionEditDuplicate()
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		const EEditAction::Type EditAction = Mode->GetActionEditDuplicate();
-		if (EditAction == EEditAction::Process || EditAction == EEditAction::Halt)
+	EEditAction::Type ReturnedAction = EEditAction::Skip;
+	ForEachEdMode([&ReturnedAction](UEdMode* Mode)
 		{
-			return EditAction;
-		}
-	}
+			const EEditAction::Type EditAction = Mode->GetActionEditDuplicate();
+			if (EditAction == EEditAction::Process || EditAction == EEditAction::Halt)
+			{
+				ReturnedAction = EditAction;
+				return false;
+			}
 
-	return EEditAction::Skip;
+			return true;
+		});
+
+	return ReturnedAction;
 }
 
 EEditAction::Type FEditorModeTools::GetActionEditDelete()
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
+	EEditAction::Type ReturnedAction = EEditAction::Skip;
+	ForEachEdMode([&ReturnedAction](UEdMode* Mode)
 	{
 		const EEditAction::Type EditAction = Mode->GetActionEditDelete();
 		if (EditAction == EEditAction::Process || EditAction == EEditAction::Halt)
 		{
-			return EditAction;
+			ReturnedAction = EditAction;
+			return false;
 		}
-	}
 
-	return EEditAction::Skip;
+		return true;
+	});
+
+	return ReturnedAction;
 }
 
 EEditAction::Type FEditorModeTools::GetActionEditCut()
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		const EEditAction::Type EditAction = Mode->GetActionEditCut();
-		if (EditAction == EEditAction::Process || EditAction == EEditAction::Halt)
+	EEditAction::Type ReturnedAction = EEditAction::Skip;
+	ForEachEdMode([&ReturnedAction](UEdMode* Mode)
 		{
-			return EditAction;
-		}
-	}
+			const EEditAction::Type EditAction = Mode->GetActionEditCut();
+			if (EditAction == EEditAction::Process || EditAction == EEditAction::Halt)
+			{
+				ReturnedAction = EditAction;
+				return false;
+			}
 
-	return EEditAction::Skip;
+			return true;
+		});
+
+	return ReturnedAction;
 }
 
 EEditAction::Type FEditorModeTools::GetActionEditCopy()
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		const EEditAction::Type EditAction = Mode->GetActionEditCopy();
-		if (EditAction == EEditAction::Process || EditAction == EEditAction::Halt)
+	EEditAction::Type ReturnedAction = EEditAction::Skip;
+	ForEachEdMode([&ReturnedAction](UEdMode* Mode)
 		{
-			return EditAction;
-		}
-	}
+			const EEditAction::Type EditAction = Mode->GetActionEditCopy();
+			if (EditAction == EEditAction::Process || EditAction == EEditAction::Halt)
+			{
+				ReturnedAction = EditAction;
+				return false;
+			}
 
-	return EEditAction::Skip;
+			return true;
+		});
+
+	return ReturnedAction;
 }
 
 EEditAction::Type FEditorModeTools::GetActionEditPaste()
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		const EEditAction::Type EditAction = Mode->GetActionEditPaste();
-		if (EditAction == EEditAction::Process || EditAction == EEditAction::Halt)
+	EEditAction::Type ReturnedAction = EEditAction::Skip;
+	ForEachEdMode([&ReturnedAction](UEdMode* Mode)
 		{
-			return EditAction;
-		}
-	}
+			const EEditAction::Type EditAction = Mode->GetActionEditPaste();
+			if (EditAction == EEditAction::Process || EditAction == EEditAction::Halt)
+			{
+				ReturnedAction = EditAction;
+				return false;
+			}
 
-	return EEditAction::Skip;
+			return true;
+		});
+
+	return ReturnedAction;
 }
 
 void FEditorModeTools::DeactivateOtherVisibleModes(FEditorModeID InMode)
 {
-	TArray<UEdMode*> TempModes(ActiveScriptableModes);
-	for (const UEdMode* Mode : TempModes)
-	{
-		if (Mode->GetID() != InMode && Mode->GetModeInfo().bVisible)
+	ForEachEdMode([this, InMode](UEdMode* Mode)
 		{
-			DeactivateMode(Mode->GetID());
-		}
-	}
+			if (Mode->GetID() != InMode && Mode->GetModeInfo().IsVisible())
+			{
+				DeactivateMode(Mode->GetID());
+			}
+			return true;
+		});
 }
 
 bool FEditorModeTools::IsSnapRotationEnabled() const
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		if (Mode->IsSnapRotationEnabled())
+	bool bRetVal = false;
+	ForEachEdMode([&bRetVal](UEdMode* Mode)
 		{
-			return true;
-		}
-	}
+			bRetVal = Mode->IsSnapRotationEnabled();
+			return !bRetVal;
+		});
 
-	return false;
+	return bRetVal;
 }
 
 bool FEditorModeTools::SnapRotatorToGridOverride(FRotator& InRotation) const
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		if (Mode->SnapRotatorToGridOverride(InRotation))
+	bool bRetVal = false;
+	ForEachEdMode([&bRetVal, &InRotation](UEdMode* Mode)
 		{
-			return true;
-		}
-	}
+			bRetVal = Mode->SnapRotatorToGridOverride(InRotation);
+			return !bRetVal;
+		});
 
-	return false;
+	return bRetVal;
 }
 
 void FEditorModeTools::ActorsDuplicatedNotify(TArray<AActor*>& InPreDuplicateSelection, TArray<AActor*>& InPostDuplicateSelection, const bool bOffsetLocations)
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
+	ForEachEdMode([&InPreDuplicateSelection, &InPostDuplicateSelection, bOffsetLocations](UEdMode* Mode)
 	{
 		// Tell the tools about the duplication
 		Mode->ActorsDuplicatedNotify(InPreDuplicateSelection, InPostDuplicateSelection, bOffsetLocations);
-	}
+		return true;
+	});
 }
 
 void FEditorModeTools::ActorMoveNotify()
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
+	ForEachEdMode([](UEdMode* Mode)
 	{
 		// Also notify the current editing modes if they are interested.
 		Mode->ActorMoveNotify();
-	}
+		return true;
+	});
 }
 
 void FEditorModeTools::ActorSelectionChangeNotify()
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
+	ForEachEdMode([](UEdMode* Mode)
 	{
 		Mode->ActorSelectionChangeNotify();
-	}
+		return true;
+	});
 }
 
 void FEditorModeTools::ActorPropChangeNotify()
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
+	ForEachEdMode([](UEdMode* Mode)
 	{
 		Mode->ActorPropChangeNotify();
-	}
+		return true;
+	});
 }
 
 void FEditorModeTools::UpdateInternalData()
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
+	ForEachEdMode([](UEdMode* Mode)
 	{
 		Mode->UpdateInternalData();
-	}
+		return true;
+	});
 }
 
 bool FEditorModeTools::IsOnlyVisibleActiveMode(FEditorModeID InMode) const
 {
 	// Only return true if this is the *only* active mode
-	for (const UEdMode* Mode : ActiveScriptableModes)
+	bool bFoundAnotherVisibleMode = false;
+	ForEachEdMode([&bFoundAnotherVisibleMode, InMode](UEdMode* Mode)
 	{
-		if (Mode->GetModeInfo().bVisible && Mode->GetID() != InMode)
-		{
-			return false;
-		}
-	}
-	return true;
+		bFoundAnotherVisibleMode = (Mode->GetModeInfo().IsVisible() && Mode->GetID() != InMode);
+		return !bFoundAnotherVisibleMode;
+	});
+	return !bFoundAnotherVisibleMode;
+}
+
+bool FEditorModeTools::IsOnlyActiveMode(FEditorModeID InMode) const
+{
+	return ActiveScriptableModes.Num() == 1 && ActiveScriptableModes[0]->GetID() == InMode;
 }
 
 void FEditorModeTools::OnEditorSelectionChanged(UObject* NewSelection)
 {
-	if(NewSelection == GetSelectedActors())
+	if (NewSelection == GetSelectedActors())
 	{
 		// when actors are selected check if there is at least one component selected and cache that off
 		// Editor modes use this primarily to determine of transform gizmos should be drawn.  
@@ -499,6 +606,73 @@ void FEditorModeTools::OnEditorSelectNone()
 	GEditor->ActorsThatWereSelected.Empty();
 }
 
+void FEditorModeTools::DrawBrackets(FEditorViewportClient* ViewportClient, FViewport* Viewport, const FSceneView* View, FCanvas* Canvas)
+{
+	if (!ViewportClient->IsPerspective() || !GetDefault<ULevelEditorViewportSettings>()->bHighlightWithBrackets)
+	{
+		return;
+	}
+
+	if (UTypedElementSelectionSet* CurrentSelection = GetEditorSelectionSet())
+	{
+		CurrentSelection->ForEachSelectedObject<AActor>([Canvas, View, Viewport, ViewportClient](AActor* Actor)
+			{
+				const FLinearColor SelectedActorBoxColor(0.6f, 0.6f, 1.0f);
+				const bool bDrawBracket = Actor->IsA<AStaticMeshActor>();
+				ViewportClient->DrawActorScreenSpaceBoundingBox(Canvas, View, Viewport, Actor, SelectedActorBoxColor, bDrawBracket);
+				return true;
+			});
+	}
+}
+
+void FEditorModeTools::ForEachEdMode(TFunctionRef<bool(UEdMode*)> InCalllback) const
+{
+	// Copy Array in case callback deactivates a mode
+	auto ActiveModes = ActiveScriptableModes;
+	for (UEdMode* Mode : ActiveModes)
+	{
+		if (Mode)
+		{
+			if (!InCalllback(Mode))
+			{
+				break;
+			}
+		}
+	}
+}
+
+bool FEditorModeTools::TestAllModes(TFunctionRef<bool(UEdMode*)> InCalllback, bool bExpected) const
+{
+	for (UEdMode* Mode : ActiveScriptableModes)
+	{
+		if (Mode)
+		{
+			if (InCalllback(Mode) != bExpected)
+			{
+				return false;
+			}
+		}
+	}
+
+	return true;
+}
+
+void FEditorModeTools::ExitAllModesPendingDeactivate()
+{
+	bIsExitingModesDuringTick = true;
+
+	// Make a copy so we can modify the pending deactivate modes map during ExitMode
+	TMap<FEditorModeID, UEdMode*> PendingDeactivateModesCopy(ObjectPtrDecay(PendingDeactivateModes));
+	for (auto& Pair : PendingDeactivateModesCopy)
+	{
+		ExitMode(Pair.Value);
+	}
+
+	bIsExitingModesDuringTick = false;
+
+	check(PendingDeactivateModes.Num() == 0);
+}
+
 void FEditorModeTools::SetPivotLocation( const FVector& Location, const bool bIncGridBase )
 {
 	CachedLocation = PivotLocation = SnappedLocation = Location;
@@ -508,54 +682,18 @@ void FEditorModeTools::SetPivotLocation( const FVector& Location, const bool bIn
 	}
 }
 
-ECoordSystem FEditorModeTools::GetCoordSystem(bool bGetRawValue)
+ECoordSystem FEditorModeTools::GetCoordSystem(bool bGetRawValue) const
 {
-	bool bAligningToActors = false;
-	if (GEditor->GetEditorWorldExtensionsManager() != nullptr
-		&& GetWorld() != nullptr)
-	{
-		UEditorWorldExtensionCollection* WorldExtensionCollection = GEditor->GetEditorWorldExtensionsManager()->GetEditorWorldExtensions(GetWorld(), false);
-		if (WorldExtensionCollection != nullptr)
-		{
-			UViewportWorldInteraction* ViewportWorldInteraction = Cast<UViewportWorldInteraction>(WorldExtensionCollection->FindExtension(UViewportWorldInteraction::StaticClass()));
-			if (ViewportWorldInteraction != nullptr && ViewportWorldInteraction->AreAligningToActors() == true)
-			{
-				bAligningToActors = true;
-			}
-		}
-	}
-	if (!bGetRawValue && 
-		((GetWidgetMode() == FWidget::WM_Scale) || bAligningToActors))
+	if (!bGetRawValue && (GetWidgetMode() == UE::Widget::WM_Scale))
 	{
 		return COORD_Local;
 	}
-	else
-	{
-		return CoordSystem;
-	}
+	
+	return CoordSystem;
 }
 
 void FEditorModeTools::SetCoordSystem(ECoordSystem NewCoordSystem)
 {
-	// If we are trying to enter world space but are aligning to actors, turn off aligning to actors
-	if (GEditor->GetEditorWorldExtensionsManager() != nullptr
-		&& GetWorld() != nullptr
-		&& NewCoordSystem == COORD_World)
-	{
-		UEditorWorldExtensionCollection* WorldExtensionCollection = GEditor->GetEditorWorldExtensionsManager()->GetEditorWorldExtensions(GetWorld(), false);
-		if (WorldExtensionCollection != nullptr)
-		{
-			UViewportWorldInteraction* ViewportWorldInteraction = Cast<UViewportWorldInteraction>(WorldExtensionCollection->FindExtension(UViewportWorldInteraction::StaticClass()));
-			if (ViewportWorldInteraction != nullptr && ViewportWorldInteraction->AreAligningToActors() == true)
-			{
-				if (ViewportWorldInteraction->HasCandidatesSelected())
-				{
-					ViewportWorldInteraction->SetSelectionAsCandidates();
-				}
-				GUnrealEd->Exec(GetWorld(), TEXT("VI.EnableGuides 0"));
-			}
-		}
-	}
 	CoordSystem = NewCoordSystem;
 	BroadcastCoordSystemChanged(NewCoordSystem);
 }
@@ -582,29 +720,16 @@ void FEditorModeTools::ActivateDefaultMode()
 	ActivateMode( FBuiltinEditorModes::EM_Default );
 }
 
-void FEditorModeTools::DeactivateScriptableModeAtIndex(int32 InIndex)
+void FEditorModeTools::ExitMode(UEdMode* InMode)
 {
-	check(InIndex >= 0 && InIndex < ActiveScriptableModes.Num());
+	if (InMode)
+	{
+		InMode->Exit();
 
-	UEdMode* Mode = ActiveScriptableModes[InIndex];
-
-	Mode->Exit();
-
-	const bool bIsEnteringMode = false;
-	BroadcastEditorModeIDChanged(Mode->GetID(), bIsEnteringMode);
-
-	// Remove the toolbar widget
-	ActiveToolBarRows.RemoveAll(
-		[&Mode](FEdModeToolbarRow& Row)
-		{
-			return Row.ModeID == Mode->GetID();
-		}
-	);
-
-	RebuildModeToolBar();
-
-	RecycledScriptableModes.Add(Mode->GetID(), Mode);
-	ActiveScriptableModes.RemoveAt(InIndex);
+		const FEditorModeID EditorModeID = InMode->GetID();
+		PendingDeactivateModes.Remove(EditorModeID);
+		RecycledScriptableModes.Add(EditorModeID, InMode);
+	}
 }
 
 void FEditorModeTools::OnModeUnregistered(FEditorModeID ModeID)
@@ -612,149 +737,58 @@ void FEditorModeTools::OnModeUnregistered(FEditorModeID ModeID)
 	DestroyMode(ModeID);
 }
 
-void FEditorModeTools::RebuildModeToolBar()
+
+
+
+void FEditorModeTools::OnWorldCleanup(UWorld* InWorld, bool bSessionEnded, bool bCleanupResources)
 {
-	// If the tab or box is not valid the toolbar has not been opened or has been closed by the user
-	TSharedPtr<SVerticalBox> ModeToolbarBoxPinned = ModeToolbarBox.Pin();
-	if (ModeToolbarTab.IsValid() && ModeToolbarBoxPinned.IsValid())
+	UWorld* World = GetWorld();
+	if (InWorld == World)
 	{
-		ModeToolbarBoxPinned->ClearChildren();
-
-		TSharedRef< SHorizontalBox > PaletteTabBox = SNew(SHorizontalBox);
-		TSharedRef< SWidgetSwitcher > PaletteSwitcher = SNew(SWidgetSwitcher);
-
-		int32 PaletteCount = ActiveToolBarRows.Num();
-		if(PaletteCount > 0)
-		{
-			for(int32 RowIdx = 0; RowIdx < PaletteCount; ++RowIdx)
-			{
-				const FEdModeToolbarRow& Row = ActiveToolBarRows[RowIdx];
-				if (ensure(Row.ToolbarWidget.IsValid()))
-				{
-					TSharedRef<SWidget> PaletteWidget = Row.ToolbarWidget.ToSharedRef();
-
-					
-					TSharedPtr<FModeToolkit> RowToolkit;
-					if (FEdMode* Mode = GetActiveMode(Row.ModeID))
-					{
-						RowToolkit = Mode->GetToolkit();
-					}
-					else if (UEdMode* ScriptableMode = GetActiveScriptableMode(Row.ModeID))
-					{
-						RowToolkit = ScriptableMode->GetToolkit();
-					}
-
-					// Don't show Palette Tabs if there is only one
-					if (PaletteCount > 1)
-					{
-						PaletteTabBox->AddSlot()
-						.AutoWidth()
-						.Padding(FMargin(0.f, 1.0f, 1.0f, 0.0f))
-						[
-							SNew(SCheckBox)
-							.Style( FEditorStyle::Get(),  "ToolPalette.DockingTab" )
-							.OnCheckStateChanged_Lambda( [PaletteSwitcher, Row, RowToolkit] (const ECheckBoxState) { 
-									PaletteSwitcher->SetActiveWidget(Row.ToolbarWidget.ToSharedRef());
-									RowToolkit->OnToolPaletteChanged(Row.PaletteName);
-								} 
-							)
-							.IsChecked_Lambda( [PaletteSwitcher, PaletteWidget] () -> ECheckBoxState { return PaletteSwitcher->GetActiveWidget() == PaletteWidget ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
-							[
-								SNew(STextBlock)
-								.Text(Row.DisplayName)
-							]
-						];
-					}
-
-					PaletteSwitcher->AddSlot()
-					[
-						PaletteWidget
-					]; 
-				}
-			}
-
-			ModeToolbarBoxPinned->AddSlot()
-			.AutoHeight()
-			[
-				SNew(SOverlay)
-				+SOverlay::Slot()
-				[
-					SNew(SImage)
-					.Image(FEditorStyle::GetBrush("ToolPalette.DockingWell"))
-				]
-
-				+SOverlay::Slot()
-				[
-					PaletteTabBox
-				]
-			];
-
-			ModeToolbarBoxPinned->AddSlot()
-			.Padding(1.f)
-			[
-				SNew(SBox)
-				.HeightOverride(45.f)
-				[
-					PaletteSwitcher 
-				]
-			];
-
-			ModeToolbarPaletteSwitcher = PaletteSwitcher;
-		}
-		else
-		{
-			ModeToolbarTab.Pin()->RequestCloseTab();
-		}
+		ExitAllModesPendingDeactivate();
 	}
 }
 
-void FEditorModeTools::SpawnOrUpdateModeToolbar()
+void FEditorModeTools::RemoveAllDelegateHandlers()
 {
-	if(ShouldShowModeToolbar())
+	if (GEditor)
 	{
-		if (ModeToolbarTab.IsValid())
+		GEditor->UnregisterForUndo(this);
+		if (UAssetEditorSubsystem* AssetEditorSubsystem = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>())
 		{
-			RebuildModeToolBar();
-		}
-		else if (ToolkitHost.IsValid())
-		{
-			ToolkitHost.Pin()->GetTabManager()->TryInvokeTab(EditorModeToolbarTabName);
+			AssetEditorSubsystem->OnEditorModeUnregistered().RemoveAll(this);
 		}
 	}
+
+	FWorldDelegates::OnWorldCleanup.RemoveAll(this);
+	
+	// For now, check that UObjects are even valid, because the level editor has a global static mode tools
+	if (UObjectInitialized())
+	{
+		USelection::SelectionChangedEvent.RemoveAll(this);
+		USelection::SelectNoneEvent.RemoveAll(this);
+		USelection::SelectObjectEvent.RemoveAll(this);
+	}
+
+	OnEditorModeIDChanged().Clear();
+	OnWidgetModeChanged().Clear();
+	OnCoordSystemChanged().Clear();
 }
 
-void FEditorModeTools::InvokeToolPaletteTab(FEditorModeID InModeID, FName InPaletteName)
+void FEditorModeTools::DeactivateModeAtIndex(int32 Index)
 {
-	if (!ModeToolbarPaletteSwitcher.Pin()) 
+	UEdMode* Mode = ActiveScriptableModes[Index];
+	const FEditorModeID ModeID = Mode->GetID();
+	PendingDeactivateModes.Emplace(ModeID, Mode);
+	ActiveScriptableModes.RemoveAt(Index);
+		
+	if (const TSharedPtr<FModeToolkit> Toolkit = Mode->GetToolkit().Pin())
 	{
-		return;
+		FToolkitManager::Get().CloseToolkit(Toolkit.ToSharedRef());
 	}
 
-	for (auto Row: ActiveToolBarRows)
-	{
-		if (Row.ModeID == InModeID && Row.PaletteName == InPaletteName)
-		{
-			TSharedRef<SWidget> PaletteWidget = Row.ToolbarWidget.ToSharedRef();
-
-			TSharedPtr<FModeToolkit> RowToolkit;
-			if (FEdMode* Mode = GetActiveMode(InModeID))
-			{
-				RowToolkit = Mode->GetToolkit();
-			}
-			else if (UEdMode* ScriptableMode = GetActiveScriptableMode(InModeID))
-			{
-				RowToolkit = ScriptableMode->GetToolkit();
-			}
-
-			TSharedPtr<SWidget> ActiveWidget = ModeToolbarPaletteSwitcher.Pin()->GetActiveWidget();
-			if (RowToolkit && ActiveWidget.Get() != Row.ToolbarWidget.Get())
-			{
-				ModeToolbarPaletteSwitcher.Pin()->SetActiveWidget(Row.ToolbarWidget.ToSharedRef());
-				RowToolkit->OnToolPaletteChanged(Row.PaletteName);
-			}
-			break;	
-		}
-	}	
+	constexpr bool bIsEnteringMode = false;
+	BroadcastEditorModeIDChanged(ModeID, bIsEnteringMode);
 }
 
 void FEditorModeTools::DeactivateMode( FEditorModeID InID )
@@ -762,28 +796,21 @@ void FEditorModeTools::DeactivateMode( FEditorModeID InID )
 	// Find the mode from the ID and exit it.
 	for (int32 Index = ActiveScriptableModes.Num() - 1; Index >= 0; --Index)
 	{
-		auto& Mode = ActiveScriptableModes[Index];
+		UEdMode* Mode = ActiveScriptableModes[Index];
 		if (Mode->GetID() == InID)
 		{
-			DeactivateScriptableModeAtIndex(Index);
+			DeactivateModeAtIndex(Index);
 			break;
 		}
-	}
-
-
-	if ((ActiveScriptableModes.Num() == 0))
-	{
-		// Ensure the default mode is active if there are no active modes.
-		ActivateDefaultMode();
-	}
+	};
 }
 
 void FEditorModeTools::DeactivateAllModes()
 {
 	for (int32 Index = ActiveScriptableModes.Num() - 1; Index >= 0; --Index)
 	{
-		DeactivateScriptableModeAtIndex(Index);
-	}
+		DeactivateModeAtIndex(Index);
+	};
 }
 
 void FEditorModeTools::DestroyMode( FEditorModeID InID )
@@ -798,51 +825,22 @@ void FEditorModeTools::DestroyMode( FEditorModeID InID )
 	}
 
 	// Find the mode from the ID and exit it.
-	for (int32 Index = ActiveScriptableModes.Num() - 1; Index >= 0; --Index)
+	DeactivateMode(InID);
+	if (UEdMode* DeactivatedMode = PendingDeactivateModes.FindRef(InID))
 	{
-		auto& Mode = ActiveScriptableModes[Index];
-		if (Mode->GetID() == InID)
-		{
-			// Deactivate and destroy
-			DeactivateScriptableModeAtIndex(Index);
-			break;
-		}
+		ExitMode(DeactivatedMode);
 	}
 
 	RecycledScriptableModes.Remove(InID);
 }
 
-TSharedRef<SDockTab> FEditorModeTools::MakeModeToolbarTab()
-{
-	TSharedRef<SDockTab> ToolbarTabRef = 	
-		SNew(SDockTab)
-		.Label(NSLOCTEXT("EditorModes", "EditorModesToolbarTitle", "Mode Toolbar"))
-		.ShouldAutosize(true)
-		.ContentPadding(0.0f)
-		.Icon(FEditorStyle::GetBrush("ToolBar.Icon"))
-		[
-			SAssignNew(ModeToolbarBox, SVerticalBox)	
-		];
 
-	ModeToolbarTab = ToolbarTabRef;
-
-	// Rebuild the toolbar with existing mode tools that may be active
-	RebuildModeToolBar();
-
-	return ToolbarTabRef;
-
-}
-
-bool FEditorModeTools::ShouldShowModeToolbar() const
-{
-	return ActiveToolBarRows.Num() > 0;
-}
 
 bool FEditorModeTools::ShouldShowModeToolbox() const
 {
 	for (const UEdMode* Mode : ActiveScriptableModes)
 	{
-		if (Mode->GetModeInfo().bVisible && Mode->UsesToolkits())
+		if (Mode->GetModeInfo().IsVisible() && Mode->UsesToolkits())
 		{
 			return true;
 		}
@@ -889,11 +887,24 @@ void FEditorModeTools::ActivateMode(FEditorModeID InID, bool bToggle)
 
 	// Recycle a mode or factory a new one
 	UEdMode* ScriptableMode = RecycledScriptableModes.FindRef(InID);
-	if (ScriptableMode)
+	bool bNeedsEnter = true;
+	if (!ScriptableMode)
 	{
-		RecycledScriptableModes.Remove(InID);
+		ScriptableMode = PendingDeactivateModes.FindRef(InID);
+
+		if (ScriptableMode)
+		{
+			// If we are actively exiting modes, don't re-activate the mode
+			if (bIsExitingModesDuringTick)
+			{
+				return;
+			}
+
+			bNeedsEnter = false;
+		}
 	}
-	else
+
+	if (!ScriptableMode)
 	{
 		ScriptableMode = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->CreateEditorModeWithToolsOwner(InID, *this);
 	}
@@ -904,51 +915,38 @@ void FEditorModeTools::ActivateMode(FEditorModeID InID, bool bToggle)
 		// Just return and leave the mode list unmodified
 		return;
 	}
-
-	// Remove anything that isn't compatible with this mode
-	for (int32 ModeIndex = ActiveScriptableModes.Num() - 1; ModeIndex >= 0; ModeIndex--)
+	
 	{
-		const bool bModesAreCompatible = ScriptableMode->IsCompatibleWith(ActiveScriptableModes[ModeIndex]->GetID()) || ActiveScriptableModes[ModeIndex]->IsCompatibleWith(ScriptableMode->GetID());
-		if (!bModesAreCompatible)
+		// Make sure ScriptableMode doesn't get GCed while Deactivating modes
+		FGCObjectScopeGuard ScriptModeGuard(ScriptableMode);
+
+		// Remove anything that isn't compatible with this mode
+		const bool bIsVisibleMode = ScriptableMode->GetModeInfo().IsVisible();
+		for (int32 ModeIndex = ActiveScriptableModes.Num() - 1; ModeIndex >= 0; ModeIndex--)
 		{
-			DeactivateScriptableModeAtIndex(ModeIndex);
+			UEdMode* Mode = ActiveScriptableModes[ModeIndex];
+			const bool bModesAreCompatible = ScriptableMode->IsCompatibleWith(Mode->GetID()) || Mode->IsCompatibleWith(ScriptableMode->GetID());
+			if (!bModesAreCompatible || (bIsVisibleMode && Mode->GetModeInfo().IsVisible()))
+			{
+				DeactivateMode(Mode->GetID());
+			}
 		}
 	}
 
 	ActiveScriptableModes.Add(ScriptableMode);
+
 	// Enter the new mode
-	ScriptableMode->Enter();
+	if (bNeedsEnter)
+	{
+		ScriptableMode->Enter();
+	}
 
 	const bool bIsEnteringMode = true;
-	BroadcastEditorModeIDChanged(ScriptableMode->GetID(), bIsEnteringMode);
+	BroadcastEditorModeIDChanged(InID, bIsEnteringMode);
 
-	// Ask the mode to build the toolbar.
-	TSharedPtr<FUICommandList> CommandList;
-	const TSharedPtr<FModeToolkit> Toolkit = ScriptableMode->GetToolkit();
-	if (Toolkit.IsValid())
-	{
-		CommandList = Toolkit->GetToolkitCommands();
+	PendingDeactivateModes.Remove(InID);
+	RecycledScriptableModes.Remove(InID);
 
-		// Also build the toolkit here 
-		int32 PaletteCount = 0;
-		TArray<FName> PaletteNames;
-		Toolkit->GetToolPaletteNames(PaletteNames);
-		for (auto Palette : PaletteNames)
-		{
-			FUniformToolBarBuilder ModeToolbarBuilder(CommandList, FMultiBoxCustomization(ScriptableMode->GetModeInfo().ToolbarCustomizationName), TSharedPtr<FExtender>(), false);
-			ModeToolbarBuilder.SetStyle(&FEditorStyle::Get(), "PaletteToolBar");
-			Toolkit->BuildToolPalette(Palette, ModeToolbarBuilder);
-
-			ActiveToolBarRows.Emplace(ScriptableMode->GetID(), Palette, Toolkit->GetToolPaletteDisplayName(Palette), ModeToolbarBuilder.MakeWidget());
-			PaletteCount++;
-		}
-
-		if (PaletteCount > 0)
-		{
-			SpawnOrUpdateModeToolbar();
-		}
-	}
-	
 	// Update the editor UI
 	FEditorSupportDelegates::UpdateUI.Broadcast();
 }
@@ -975,31 +973,31 @@ bool FEditorModeTools::EnsureNotInMode(FEditorModeID ModeID, const FText& ErrorM
 
 UEdMode* FEditorModeTools::GetActiveScriptableMode(FEditorModeID InID) const
 {
-	for (auto& Mode : ActiveScriptableModes)
+	if (auto* FoundMode = ActiveScriptableModes.FindByPredicate([InID](UEdMode* Mode) { return (Mode->GetID() == InID); }))
 	{
-		if (Mode->GetID() == InID)
-		{
-			return Mode;
-		}
+		return *FoundMode;
 	}
 
 	return nullptr;
 }
 
-/**
- * Returns a coordinate system that should be applied on top of the worldspace system.
- */
+UTexture2D* FEditorModeTools::GetVertexTexture() const
+{
+	return GEngine->DefaultBSPVertexTexture;
+}
 
-FMatrix FEditorModeTools::GetCustomDrawingCoordinateSystem()
+FMatrix FEditorModeTools::GetCustomDrawingCoordinateSystem() const
 {
 	FMatrix Matrix = FMatrix::Identity;
 
 	switch (GetCoordSystem())
 	{
 		case COORD_Local:
-		{
 			Matrix = GetLocalCoordinateSystem();
-		}
+		break;
+		
+		case COORD_Parent:
+			Matrix = GetParentSpaceCoordinateSystem();
 		break;
 
 		case COORD_World:
@@ -1012,43 +1010,69 @@ FMatrix FEditorModeTools::GetCustomDrawingCoordinateSystem()
 	return Matrix;
 }
 
-FMatrix FEditorModeTools::GetCustomInputCoordinateSystem()
+FMatrix FEditorModeTools::GetCustomInputCoordinateSystem() const
 {
 	return GetCustomDrawingCoordinateSystem();
 }
 
-FMatrix FEditorModeTools::GetLocalCoordinateSystem()
+FMatrix FEditorModeTools::GetLocalCoordinateSystem() const
+{
+	return GetCustomCoordinateSystem([](const TTypedElement<ITypedElementWorldInterface>& InElement, FTransform& OutTransform)
+	{
+		InElement.GetWorldTransform(OutTransform);
+	});
+}
+
+FMatrix FEditorModeTools::GetParentSpaceCoordinateSystem() const
+{
+	return GetCustomCoordinateSystem([](const TTypedElement<ITypedElementWorldInterface>& InElement, FTransform& OutTransform)
+	{
+		if (InElement.GetWorldTransform(OutTransform))
+		{
+			FTransform RelativeTransform;
+			if (InElement.GetRelativeTransform(RelativeTransform))
+			{
+				const FTransform ParentWorld = RelativeTransform.Inverse() * OutTransform;
+				OutTransform.SetRotation(ParentWorld.GetRotation());
+			}
+			return true;
+		}
+		return false;
+	});
+}
+
+FMatrix FEditorModeTools::GetCustomCoordinateSystem(TUniqueFunction<void(const TTypedElement<ITypedElementWorldInterface>&, FTransform&)>&& InGetTransformFunc) const
 {
 	FMatrix Matrix = FMatrix::Identity;
 	// Let the current mode have a shot at setting the local coordinate system.
-	// If it doesn't want to, create it by looking at the currently selected actors list.
 
 	bool CustomCoordinateSystemProvided = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		FEdMode* LegacyMode = Mode->AsLegacyMode();
-		if (LegacyMode && LegacyMode->GetCustomDrawingCoordinateSystem(Matrix, nullptr))
+	ForEachEdMode<ILegacyEdModeWidgetInterface>([&Matrix, &CustomCoordinateSystemProvided](ILegacyEdModeWidgetInterface* LegacyMode)
 		{
-			CustomCoordinateSystemProvided = true;
-			break;
-		}
-	}
+			CustomCoordinateSystemProvided = LegacyMode->GetCustomDrawingCoordinateSystem(Matrix, nullptr);
+			return !CustomCoordinateSystemProvided;
+		});
 
+	// If there isn't an active mode overriding the local coordinate system, create it by looking at the current selection.
 	if (!CustomCoordinateSystemProvided)
 	{
-		if (USceneComponent* SceneComponent = GetSelectedComponents()->GetBottom<USceneComponent>())
+		TTypedElement<ITypedElementWorldInterface> LastSelected;
+		if ((this == &GLevelEditorModeTools()) && GCurrentLevelEditingViewportClient)
 		{
-			Matrix = FQuatRotationMatrix(SceneComponent->GetComponentQuat());
+			// Use the cache from the viewport when available
+			LastSelected = GCurrentLevelEditingViewportClient->GetElementsToManipulate()->GetBottomElement<ITypedElementWorldInterface>();
 		}
 		else
 		{
-			const int32 Num = GetSelectedActors()->CountSelections<AActor>();
+			LastSelected = UEditorElementSubsystem::GetLastSelectedEditorManipulableElement(UEditorElementSubsystem::GetEditorNormalizedSelectionSet(*GetEditorSelectionSet()));
+		}
 
-			// Coordinate system needs to come from the last actor selected
-			if (Num > 0)
-			{
-				Matrix = FQuatRotationMatrix(GetSelectedActors()->GetBottom<AActor>()->GetActorQuat());
-			}
+		
+		if (LastSelected)
+		{
+			FTransform CustomToWorldTransform;
+			InGetTransformFunc(LastSelected, CustomToWorldTransform);
+			Matrix = FQuatRotationMatrix(CustomToWorldTransform.GetRotation());
 		}
 	}
 
@@ -1061,12 +1085,12 @@ FMatrix FEditorModeTools::GetLocalCoordinateSystem()
 }
 
 /** Gets the widget axis to be drawn */
-EAxisList::Type FEditorModeTools::GetWidgetAxisToDraw( FWidget::EWidgetMode InWidgetMode ) const
+EAxisList::Type FEditorModeTools::GetWidgetAxisToDraw( UE::Widget::EWidgetMode InWidgetMode ) const
 {
 	EAxisList::Type OutAxis = EAxisList::All;
 	for( int Index = ActiveScriptableModes.Num() - 1; Index >= 0 ; Index-- )
 	{
-		FEdMode* Mode = ActiveScriptableModes[Index]->AsLegacyMode();
+		ILegacyEdModeWidgetInterface* Mode = Cast<ILegacyEdModeWidgetInterface>(ActiveScriptableModes[Index]);
 		if ( Mode && Mode->ShouldDrawWidget() )
 		{
 			OutAxis = Mode->GetWidgetAxisToDraw( InWidgetMode );
@@ -1081,76 +1105,91 @@ EAxisList::Type FEditorModeTools::GetWidgetAxisToDraw( FWidget::EWidgetMode InWi
 bool FEditorModeTools::StartTracking(FEditorViewportClient* InViewportClient, FViewport* InViewport)
 {
 	bIsTracking = true;
-	bool bTransactionHandled = false;
-
 	CachedLocation = PivotLocation;	// Cache the pivot location
 
-	for (UEdMode* Mode : ActiveScriptableModes)
+	bool bTrackingHandled = InteractiveToolsContext->StartTracking(InViewportClient, InViewport);
+
+	// no need to go further if bHasOngoingTransform is true
+	if (!bHasOngoingTransform)
 	{
-		bTransactionHandled |= Mode->StartTracking(InViewportClient, InViewportClient->Viewport);
+		ForEachEdMode<ILegacyEdModeViewportInterface>([&bTrackingHandled, InViewportClient, InViewport](ILegacyEdModeViewportInterface* ViewportInterface)
+		{
+			bTrackingHandled |= ViewportInterface->StartTracking(InViewportClient, InViewport);
+			return true;
+		});
 	}
 
-	return bTransactionHandled;
+	return bTrackingHandled;
 }
 
 /** Mouse tracking interface.  Passes tracking messages to all active modes */
 bool FEditorModeTools::EndTracking(FEditorViewportClient* InViewportClient, FViewport* InViewport)
 {
 	bIsTracking = false;
-	bool bTransactionHandled = false;
 
-	for (UEdMode* Mode : ActiveScriptableModes)
+	bool bTrackingHandled = InteractiveToolsContext->EndTracking(InViewportClient, InViewport);
+	// no need to go further if bHasOngoingTransform is true
+	if (!bHasOngoingTransform)
 	{
-		bTransactionHandled |= Mode->EndTracking(InViewportClient, InViewportClient->Viewport);
+		ForEachEdMode<ILegacyEdModeViewportInterface>([&bTrackingHandled, InViewportClient, InViewport](ILegacyEdModeViewportInterface* ViewportInterface)
+		   {
+			   bTrackingHandled |= ViewportInterface->EndTracking(InViewportClient, InViewport);
+			   return true;
+		   });
 	}
-
-	CachedLocation = PivotLocation;	// Clear the pivot location
 	
-	return bTransactionHandled;
+	CachedLocation = PivotLocation;	// Clear the pivot location
+	bHasOngoingTransform = false;
+	
+	return bTrackingHandled;
 }
 
 bool FEditorModeTools::AllowsViewportDragTool() const
 {
-	bool bCanUseDragTool = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
+	if (bHasOngoingTransform)
 	{
-		if (FEdMode* LegacyMode = Mode->AsLegacyMode())
+		return false;
+	}
+	
+	bool bCanUseDragTool = false;
+	ForEachEdMode<const ILegacyEdModeViewportInterface>([&bCanUseDragTool](const ILegacyEdModeViewportInterface* LegacyMode)
 		{
 			bCanUseDragTool |= LegacyMode->AllowsViewportDragTool();
-		}
-	}
+			return true;
+		});
+
 	return bCanUseDragTool;
 }
 
 /** Notifies all active modes that a map change has occured */
 void FEditorModeTools::MapChangeNotify()
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		Mode->MapChangeNotify();
-	}
+	ForEachEdMode([](UEdMode* Mode)
+		{
+			Mode->MapChangeNotify();
+			return true;
+		});
 }
 
 /** Notifies all active modes to empty their selections */
 void FEditorModeTools::SelectNone()
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		Mode->SelectNone();
-	}
+	ForEachEdMode([](UEdMode* Mode)
+		{
+			Mode->SelectNone();
+			return true;
+		});
 }
 
 /** Notifies all active modes of box selection attempts */
 bool FEditorModeTools::BoxSelect( FBox& InBox, bool InSelect )
 {
 	bool bHandled = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		if (FEdMode* LegacyMode = Mode->AsLegacyMode())
+	ForEachEdMode<ILegacyEdModeSelectInterface>([&bHandled, &InBox, InSelect](ILegacyEdModeSelectInterface* LegacyMode)
 		{
 			bHandled |= LegacyMode->BoxSelect(InBox, InSelect);
-		}
-	}
+			return true;
+		});
 	return bHandled;
 }
 
@@ -1158,13 +1197,11 @@ bool FEditorModeTools::BoxSelect( FBox& InBox, bool InSelect )
 bool FEditorModeTools::FrustumSelect( const FConvexVolume& InFrustum, FEditorViewportClient* InViewportClient, bool InSelect )
 {
 	bool bHandled = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		if (FEdMode* LegacyMode = Mode->AsLegacyMode())
+	ForEachEdMode<ILegacyEdModeSelectInterface>([&bHandled, InFrustum, InViewportClient, InSelect](ILegacyEdModeSelectInterface* LegacyMode)
 		{
 			bHandled |= LegacyMode->FrustumSelect(InFrustum, InViewportClient, InSelect);
-		}
-	}
+			return true;
+		});
 	return bHandled;
 }
 
@@ -1173,28 +1210,24 @@ bool FEditorModeTools::FrustumSelect( const FConvexVolume& InFrustum, FEditorVie
 bool FEditorModeTools::UsesTransformWidget() const
 {
 	bool bUsesTransformWidget = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		if (FEdMode* LegacyMode = Mode->AsLegacyMode())
+	ForEachEdMode<const ILegacyEdModeWidgetInterface>([&bUsesTransformWidget](const ILegacyEdModeWidgetInterface* LegacyMode)
 		{
 			bUsesTransformWidget |= LegacyMode->UsesTransformWidget();
-		}
-	}
+			return true;
+		});
 
 	return bUsesTransformWidget;
 }
 
 /** true if any active mode uses the passed in transform widget */
-bool FEditorModeTools::UsesTransformWidget( FWidget::EWidgetMode CheckMode ) const
+bool FEditorModeTools::UsesTransformWidget( UE::Widget::EWidgetMode CheckMode ) const
 {
 	bool bUsesTransformWidget = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		if (FEdMode* LegacyMode = Mode->AsLegacyMode())
+	ForEachEdMode<const ILegacyEdModeWidgetInterface>([&bUsesTransformWidget, CheckMode](const ILegacyEdModeWidgetInterface* LegacyMode)
 		{
 			bUsesTransformWidget |= LegacyMode->UsesTransformWidget(CheckMode);
-		}
-	}
+			return true;
+		});
 
 	return bUsesTransformWidget;
 }
@@ -1202,23 +1235,22 @@ bool FEditorModeTools::UsesTransformWidget( FWidget::EWidgetMode CheckMode ) con
 /** Sets the current widget axis */
 void FEditorModeTools::SetCurrentWidgetAxis( EAxisList::Type NewAxis )
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		if (FEdMode* LegacyMode = Mode->AsLegacyMode())
+	ForEachEdMode<ILegacyEdModeWidgetInterface>([NewAxis](ILegacyEdModeWidgetInterface* LegacyMode)
 		{
 			LegacyMode->SetCurrentWidgetAxis(NewAxis);
-		}
-	}
+			return true;
+		});
 }
 
 /** Notifies all active modes of mouse click messages. */
 bool FEditorModeTools::HandleClick(FEditorViewportClient* InViewportClient,  HHitProxy *HitProxy, const FViewportClick& Click )
 {
 	bool bHandled = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		bHandled |= Mode->HandleClick(InViewportClient, HitProxy, Click);
-	}
+	ForEachEdMode<ILegacyEdModeViewportInterface>([&bHandled, InViewportClient, HitProxy, Click](ILegacyEdModeViewportInterface* Mode)
+		{
+			bHandled |= Mode->HandleClick(InViewportClient, HitProxy, Click);
+			return true;
+		});
 
 	return bHandled;
 }
@@ -1269,14 +1301,7 @@ bool FEditorModeTools::ShouldDrawBrushVertices() const
 void FEditorModeTools::Tick( FEditorViewportClient* ViewportClient, float DeltaTime )
 {	
 	// Remove anything pending destruction
-	for (int32 Index = ActiveScriptableModes.Num() - 1; Index >= 0; --Index)
-	{
-		if (ActiveScriptableModes[Index]->IsPendingDeletion())
-		{
-			DeactivateScriptableModeAtIndex(Index);
-		}
-	}
-
+	ExitAllModesPendingDeactivate();
 
 	if (ActiveScriptableModes.Num() == 0)
 	{
@@ -1284,31 +1309,40 @@ void FEditorModeTools::Tick( FEditorViewportClient* ViewportClient, float DeltaT
 		ActivateDefaultMode();
 	}
 
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		Mode->Tick(ViewportClient, DeltaTime);
-	}
+	InteractiveToolsContext->Tick(ViewportClient, DeltaTime);
+	ForEachEdMode([ViewportClient, DeltaTime](UEdMode* Mode)
+		{
+			if (ILegacyEdModeViewportInterface* ViewportInterface = Cast<ILegacyEdModeViewportInterface>(Mode))
+			{
+				ViewportInterface->Tick(ViewportClient, DeltaTime);
+			}
+
+			Mode->ModeTick(DeltaTime);
+			return true;
+		});
 }
 
 /** Notifies all active modes of any change in mouse movement */
 bool FEditorModeTools::InputDelta( FEditorViewportClient* InViewportClient,FViewport* InViewport,FVector& InDrag,FRotator& InRot,FVector& InScale )
 {
 	bool bHandled = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		bHandled |= Mode->InputDelta(InViewportClient, InViewport, InDrag, InRot, InScale);
-	}
+	ForEachEdMode<ILegacyEdModeViewportInterface>([&bHandled, InViewportClient, InViewport, &InDrag, &InRot, &InScale](ILegacyEdModeViewportInterface* Mode)
+		{
+			bHandled |= Mode->InputDelta(InViewportClient, InViewport, InDrag, InRot, InScale);
+			return true;
+		});
 	return bHandled;
 }
 
 /** Notifies all active modes of captured mouse movement */	
 bool FEditorModeTools::CapturedMouseMove( FEditorViewportClient* InViewportClient, FViewport* InViewport, int32 InMouseX, int32 InMouseY )
 {
-	bool bHandled = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		bHandled |= Mode->CapturedMouseMove(InViewportClient, InViewport, InMouseX, InMouseY);
-	}
+	bool bHandled = InteractiveToolsContext->CapturedMouseMove(InViewportClient, InViewport, InMouseX, InMouseY);
+	ForEachEdMode<ILegacyEdModeViewportInterface>([&bHandled, InViewportClient, InViewport, InMouseX, InMouseY](ILegacyEdModeViewportInterface* Mode)
+		{
+			bHandled |= Mode->CapturedMouseMove(InViewportClient, InViewport, InMouseX, InMouseY);
+			return true;
+		});
 	return bHandled;
 }
 
@@ -1316,23 +1350,85 @@ bool FEditorModeTools::CapturedMouseMove( FEditorViewportClient* InViewportClien
 bool FEditorModeTools::ProcessCapturedMouseMoves( FEditorViewportClient* InViewportClient, FViewport* InViewport, const TArrayView<FIntPoint>& CapturedMouseMoves )
 {
 	bool bHandled = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		bHandled |= Mode->ProcessCapturedMouseMoves(InViewportClient, InViewport, CapturedMouseMoves);
-	}
+	ForEachEdMode<ILegacyEdModeViewportInterface>([&bHandled, InViewportClient, InViewport, &CapturedMouseMoves](ILegacyEdModeViewportInterface* Mode)
+		{
+			bHandled |= Mode->ProcessCapturedMouseMoves(InViewportClient, InViewport, CapturedMouseMoves);
+			return true;
+		});
 	return bHandled;
 }
 
-/** Notifies all active modes of keyboard input */
-bool FEditorModeTools::InputKey(FEditorViewportClient* InViewportClient, FViewport* Viewport, FKey Key, EInputEvent Event)
+/** Notifies all active modes of keyboard input via a viewport client */
+bool FEditorModeTools::InputKey(FEditorViewportClient* InViewportClient, FViewport* Viewport, FKey Key, EInputEvent Event, bool bRouteToToolsContext)
 {
-	bool bHandled = false;
-	//Copy the modes and iterate of that since a key may remove the edit mode and change CopyActiveScriptableModes
-	TArray<UEdMode*> CopyActiveScriptableModes(ActiveScriptableModes);
-	for (UEdMode* Mode : CopyActiveScriptableModes)
+	const bool bHadOngoingTransform = bHasOngoingTransform;
+
+	bool bWasHandledByToolsContext = false;
+	if (bRouteToToolsContext)
 	{
-		bHandled |= Mode->InputKey(InViewportClient, Viewport, Key, Event);
+		bWasHandledByToolsContext = InteractiveToolsContext->InputKey(InViewportClient, Viewport, Key, Event);
 	}
+	else
+	{
+		// If we're not routing to the tools context, we still need to let it look at the event so that it can update
+		// its internal memory of which mouse keys are down, to pass the correct mouse state later.
+		InteractiveToolsContext->UpdateStateWithoutRoutingInputKey(InViewportClient, Viewport, Key, Event);
+	}
+
+	if (bWasHandledByToolsContext && !bIsTracking && GetInteractiveToolsContext()->InputRouter->HasActiveMouseCapture())
+	{
+		StartTracking(InViewportClient, Viewport);
+	}
+	else if (bRouteToToolsContext && bIsTracking && !GetInteractiveToolsContext()->InputRouter->HasActiveMouseCapture())
+	{
+		EndTracking(InViewportClient, Viewport);
+	}
+
+	// no need to go further if bHasOngoingTransform state has changed 
+	// NOTE, this should probably be done comparing HasActiveMouseCapture changes instead as it means that the ITF handled the event
+	// however, as with StartTracking/EndTracking and bTrackingHandled, testing bWasHandledByToolsContext is not reliable as
+	// InteractiveToolsContext->InputKey will return false when the mouse is released, even if there was an ongoing capture before the release event ended it.
+	if (bHasOngoingTransform != bHadOngoingTransform)
+	{
+		return true;
+	}
+	
+	// If the toolkit should process the command, it should not have been handled by ITF, or be tracked elsewhere.
+	const bool bPassToToolkitCommands = bRouteToToolsContext && !bWasHandledByToolsContext;
+	bool bHandled = bWasHandledByToolsContext;
+	ForEachEdMode([&bHandled, bPassToToolkitCommands, Event, Key, InViewportClient, Viewport](UEdMode* Mode)
+	{
+		// First, always give the legacy viewport interface a chance to process they key press. This is to support any of the FModeTools that may still exist.
+		if (ILegacyEdModeViewportInterface* ViewportInterface = Cast<ILegacyEdModeViewportInterface>(Mode))
+		{
+			if (ViewportInterface->InputKey(InViewportClient, Viewport, Key, Event))
+			{
+				bHandled |= true;
+				return true;  // Skip passing to the mode's toolkit if the legacy mode interface handled the input.
+			}
+		}
+		
+		// Next, give the toolkit commands a chance to process the key press if the tools context did not handle the key press.
+		if (bPassToToolkitCommands && (Event != IE_Released) && Mode->UsesToolkits() && Mode->GetToolkit().IsValid())
+		{
+			bHandled |= Mode->GetToolkit().Pin()->GetToolkitCommands()->ProcessCommandBindings(Key, FSlateApplication::Get().GetModifierKeys(), (Event == EInputEvent::IE_Repeat));
+			return true;
+		}
+
+		return true;
+		});
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS // Begin AActor::EditorKeyPressed
+	// Finally, pass input to selected actors if nothing else handled the input (Deprecated in 5.4)
+	if (!bHandled)
+	{
+		GetEditorSelectionSet()->ForEachSelectedObject<AActor>([Key, Event](AActor* ActorPtr)
+			{
+				ActorPtr->EditorKeyPressed(Key, Event);
+				return true;
+			});
+	}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS // End AActor::EditorKeyPressed
 	return bHandled;
 }
 
@@ -1340,55 +1436,74 @@ bool FEditorModeTools::InputKey(FEditorViewportClient* InViewportClient, FViewpo
 bool FEditorModeTools::InputAxis(FEditorViewportClient* InViewportClient, FViewport* Viewport, int32 ControllerId, FKey Key, float Delta, float DeltaTime)
 {
 	bool bHandled = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		bHandled |= Mode->InputAxis(InViewportClient, Viewport, ControllerId, Key, Delta, DeltaTime);
-	}
+
+	ForEachEdMode<ILegacyEdModeViewportInterface>([&bHandled, InViewportClient, Viewport, ControllerId, Key, Delta, DeltaTime](ILegacyEdModeViewportInterface* Mode)
+		{
+			bHandled |= Mode->InputAxis(InViewportClient, Viewport, ControllerId, Key, Delta, DeltaTime);
+			return true;
+		});
+
 	return bHandled;
 }
 
 bool FEditorModeTools::GetPivotForOrbit( FVector& Pivot ) const
 {
+	bool bHandled = false;
 	// Just return the first pivot point specified by a mode
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		if (Mode->GetPivotForOrbit(Pivot))
+	ForEachEdMode([&Pivot, &bHandled](const UEdMode* Mode)
 		{
-			return true;
-		}
-	}
-	return false;
+			bHandled = Mode->GetPivotForOrbit(Pivot);
+			return !bHandled;
+		});
+		
+	return bHandled;
 }
 
 bool FEditorModeTools::MouseEnter( FEditorViewportClient* InViewportClient, FViewport* Viewport, int32 X, int32 Y )
 {
 	HoveredViewportClient = InViewportClient;
-	bool bHandled = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		bHandled |= Mode->MouseEnter(InViewportClient, Viewport, X, Y);
-	}
+	bool bHandled = InteractiveToolsContext->MouseEnter(InViewportClient, Viewport, X, Y);
+
+	ForEachEdMode<ILegacyEdModeViewportInterface>([&bHandled, InViewportClient, Viewport, X, Y](ILegacyEdModeViewportInterface* Mode)
+		{
+			bHandled |= Mode->MouseEnter(InViewportClient, Viewport, X, Y);
+			return true;
+		});
+
 	return bHandled;
 }
 
 bool FEditorModeTools::MouseLeave( FEditorViewportClient* InViewportClient, FViewport* Viewport )
 {
-	bool bHandled = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		bHandled |= Mode->MouseLeave(InViewportClient, Viewport);
-	}
+	// TODO: HoveredViewportClient should be reset here, but there is currently a bug (UE-119516) 
+	// that makes it so that flying in viewports can create mismatches between MouseEnter and MouseLeave.
+	// For this reason, we currently use HoveredViewportClient as if it were LastHoveredViewportClient,
+	// which works for the purposes that we use it for.
+	// If we never fix the bug, we should probably just rename it.
+	//HoveredViewportClient = nullptr;
+	
+	bool bHandled = InteractiveToolsContext->MouseLeave(InViewportClient, Viewport);
+
+	ForEachEdMode<ILegacyEdModeViewportInterface>([&bHandled, InViewportClient, Viewport](ILegacyEdModeViewportInterface* Mode)
+		{
+			bHandled |= Mode->MouseLeave(InViewportClient, Viewport);
+			return true;
+		});
+
 	return bHandled;
 }
 
 /** Notifies all active modes that the mouse has moved */
 bool FEditorModeTools::MouseMove( FEditorViewportClient* InViewportClient, FViewport* Viewport, int32 X, int32 Y )
 {
-	bool bHandled = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		bHandled |= Mode->MouseMove(InViewportClient, Viewport, X, Y);
-	}
+	bool bHandled = InteractiveToolsContext->MouseMove(InViewportClient, Viewport, X, Y);
+
+	ForEachEdMode<ILegacyEdModeViewportInterface>([&bHandled, InViewportClient, Viewport, X, Y](ILegacyEdModeViewportInterface* Mode)
+		{
+			bHandled |= Mode->MouseMove(InViewportClient, Viewport, X, Y);
+			return true;
+		});
+
 	return bHandled;
 }
 
@@ -1396,48 +1511,155 @@ bool FEditorModeTools::ReceivedFocus( FEditorViewportClient* InViewportClient, F
 {
 	FocusedViewportClient = InViewportClient;
 	bool bHandled = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		bHandled |= Mode->ReceivedFocus(InViewportClient, Viewport);
-	}
+	ForEachEdMode<ILegacyEdModeViewportInterface>([&bHandled, InViewportClient, Viewport](ILegacyEdModeViewportInterface* Mode)
+		{
+			bHandled |= Mode->ReceivedFocus(InViewportClient, Viewport);
+			return true;
+		});
+
 	return bHandled;
 }
 
 bool FEditorModeTools::LostFocus( FEditorViewportClient* InViewportClient, FViewport* Viewport )
 {
+	// Note that we don't reset FocusedViewportClient intentionally. EdModeInteractiveToolsContext
+	// only ticks its objects once for the focused viewport to avoid multi-ticking, so if we cleared
+	// it here, we'd stop ticking things in the level editor when clicking out of the viewport.
+	// TODO: Conceptually, we should probably clear FocusedViewportClient here, but also have a
+	// LastFocusedViewportClient property that we don't clear, to use in ticking.
+
 	bool bHandled = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		bHandled |= Mode->LostFocus(InViewportClient, Viewport);
-	}
+	ForEachEdMode<ILegacyEdModeViewportInterface>([&bHandled, InViewportClient, Viewport](ILegacyEdModeViewportInterface* Mode)
+		{
+			bHandled |= Mode->LostFocus(InViewportClient, Viewport);
+			return true;
+		});
+
 	return bHandled;
 }
 
 /** Draws all active mode components */	
 void FEditorModeTools::DrawActiveModes( const FSceneView* InView, FPrimitiveDrawInterface* PDI )
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		Mode->Draw(InView, PDI);
-	}
+	ForEachEdMode<ILegacyEdModeDrawHelperInterface>([InView, PDI](ILegacyEdModeDrawHelperInterface* DrawHelper)
+		{
+			DrawHelper->Draw(InView, PDI);
+			return true;
+		});
 }
 
 /** Renders all active modes */
 void FEditorModeTools::Render( const FSceneView* InView, FViewport* Viewport, FPrimitiveDrawInterface* PDI )
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		Mode->Render(InView, Viewport, PDI);
-	}
+	InteractiveToolsContext->Render(InView, Viewport, PDI);
+
+	ForEachEdMode<ILegacyEdModeWidgetInterface>([InView, Viewport, PDI](ILegacyEdModeWidgetInterface* Mode)
+		{
+			Mode->Render(InView, Viewport, PDI);
+			return true;
+		});
 }
 
 /** Draws the HUD for all active modes */
 void FEditorModeTools::DrawHUD( FEditorViewportClient* InViewportClient,FViewport* Viewport, const FSceneView* View, FCanvas* Canvas )
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
+	InteractiveToolsContext->DrawHUD(InViewportClient, Viewport, View, Canvas);
+
+	DrawBrackets(InViewportClient, Viewport, View, Canvas);
+
+	if (!(InViewportClient->EngineShowFlags.ModeWidgets))
 	{
-		Mode->DrawHUD(InViewportClient, Viewport, View, Canvas);
+		return;
 	}
+
+	// Clear Hit proxies
+	const bool bIsHitTesting = Canvas->IsHitTesting();
+	if (!bIsHitTesting)
+	{
+		Canvas->SetHitProxy(nullptr);
+	}
+
+	ForEachEdMode<ILegacyEdModeWidgetInterface>([InViewportClient, Viewport, View, Canvas](ILegacyEdModeWidgetInterface* Mode)
+		{
+			Mode->DrawHUD(InViewportClient, Viewport, View, Canvas);
+			return true;
+		});
+
+	// Draw vertices for selected BSP brushes and static meshes if the large vertices show flag is set.
+	if (!InViewportClient->bDrawVertices)
+	{
+		return;
+	}
+
+	const bool bLargeVertices = View->Family->EngineShowFlags.LargeVertices;
+	if (!bLargeVertices)
+	{
+		return;
+	}
+
+	// Temporaries.
+	const bool bShowBrushes = View->Family->EngineShowFlags.Brushes;
+	const bool bShowBSP = View->Family->EngineShowFlags.BSP;
+	const bool bShowBuilderBrush = View->Family->EngineShowFlags.BuilderBrush != 0;
+
+	UTexture2D* VertexTexture = GetVertexTexture();
+	const float TextureSizeX = VertexTexture->GetSizeX() * (bLargeVertices ? 1.0f : 0.5f);
+	const float TextureSizeY = VertexTexture->GetSizeY() * (bLargeVertices ? 1.0f : 0.5f);
+
+	GetEditorSelectionSet()->ForEachSelectedObject<AStaticMeshActor>([View, Canvas, VertexTexture, TextureSizeX, TextureSizeY, bIsHitTesting](AStaticMeshActor* Actor)
+		{
+			TArray<FVector> Vertices;
+			FCanvasItemTestbed::bTestState = !FCanvasItemTestbed::bTestState;
+
+			// Static mesh vertices
+			if (Actor->GetStaticMeshComponent() && Actor->GetStaticMeshComponent()->GetStaticMesh()
+				&& Actor->GetStaticMeshComponent()->GetStaticMesh()->GetRenderData())
+			{
+				FTransform ActorToWorld = Actor->ActorToWorld();
+				const FPositionVertexBuffer& VertexBuffer = Actor->GetStaticMeshComponent()->GetStaticMesh()->GetRenderData()->LODResources[0].VertexBuffers.PositionVertexBuffer;
+				for (uint32 i = 0; i < VertexBuffer.GetNumVertices(); i++)
+				{
+					Vertices.AddUnique(ActorToWorld.TransformPosition((FVector)VertexBuffer.VertexPosition(i)));
+				}
+
+				const float InvDpiScale = 1.0f / Canvas->GetDPIScale();
+
+				FCanvasTileItem TileItem(FVector2D(0.0f, 0.0f), FVector2D(0.0f, 0.0f), FLinearColor::White);
+				TileItem.BlendMode = SE_BLEND_Translucent;
+				for (int32 VertexIndex = 0; VertexIndex < Vertices.Num(); ++VertexIndex)
+				{
+					const FVector& Vertex = Vertices[VertexIndex];
+					FVector2D PixelLocation;
+					if (View->ScreenToPixel(View->WorldToScreen(Vertex), PixelLocation))
+					{
+						PixelLocation *= InvDpiScale;
+
+						const bool bOutside =
+							PixelLocation.X < 0.0f || PixelLocation.X > View->UnscaledViewRect.Width() * InvDpiScale ||
+							PixelLocation.Y < 0.0f || PixelLocation.Y > View->UnscaledViewRect.Height() * InvDpiScale;
+						if (!bOutside)
+						{
+							const double X = PixelLocation.X - (TextureSizeX / 2);
+							const double Y = PixelLocation.Y - (TextureSizeY / 2);
+							if (bIsHitTesting)
+							{
+								Canvas->SetHitProxy(new HStaticMeshVert(Actor, Vertex));
+							}
+							TileItem.Texture = VertexTexture->GetResource();
+
+							TileItem.Size = FVector2D(TextureSizeX, TextureSizeY);
+							Canvas->DrawItem(TileItem, FVector2D(X, Y));
+							if (bIsHitTesting)
+							{
+								Canvas->SetHitProxy(nullptr);
+							}
+						}
+					}
+				}
+			}
+
+			return true;
+		});
 }
 
 /** Calls PostUndo on all active modes */
@@ -1445,10 +1667,11 @@ void FEditorModeTools::PostUndo(bool bSuccess)
 {
 	if (bSuccess)
 	{
-		for (UEdMode* Mode : ActiveScriptableModes)
-		{
-			Mode->PostUndo();
-		}
+		ForEachEdMode([](UEdMode* Mode)
+			{
+				Mode->PostUndo();
+				return true;
+			});
 	}
 }
 void FEditorModeTools::PostRedo(bool bSuccess)
@@ -1460,23 +1683,24 @@ void FEditorModeTools::PostRedo(bool bSuccess)
 bool FEditorModeTools::AllowWidgetMove() const
 {
 	bool bAllow = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		if (FEdMode* LegacyMode = Mode->AsLegacyMode())
+	ForEachEdMode<ILegacyEdModeWidgetInterface>([&bAllow](ILegacyEdModeWidgetInterface* LegacyMode)
 		{
 			bAllow |= LegacyMode->AllowWidgetMove();
-		}
-	}
+			return true;
+		});
+
 	return bAllow;
 }
 
 bool FEditorModeTools::DisallowMouseDeltaTracking() const
 {
 	bool bDisallow = false;
-	for (const UEdMode* Mode : ActiveScriptableModes)
-	{
-		bDisallow |= Mode->DisallowMouseDeltaTracking();
-	}
+	ForEachEdMode<ILegacyEdModeViewportInterface>([&bDisallow](ILegacyEdModeViewportInterface* LegacyMode)
+		{
+			bDisallow |= LegacyMode->DisallowMouseDeltaTracking();
+			return true;
+		});
+
 	return bDisallow;
 }
 
@@ -1503,35 +1727,42 @@ bool FEditorModeTools::GetOverrideCursorVisibility(bool& bWantsOverride, bool& b
 bool FEditorModeTools::PreConvertMouseMovement(FEditorViewportClient* InViewportClient)
 {
 	bool bHandled = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		bHandled |= Mode->PreConvertMouseMovement(InViewportClient);
-	}
+	ForEachEdMode<ILegacyEdModeViewportInterface>([&bHandled, InViewportClient](ILegacyEdModeViewportInterface* Mode)
+		{
+			bHandled |= Mode->PreConvertMouseMovement(InViewportClient);
+			return true;
+		});
+
 	return bHandled;
 }
 
 bool FEditorModeTools::PostConvertMouseMovement(FEditorViewportClient* InViewportClient)
 {
 	bool bHandled = false;
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		bHandled |= Mode->PostConvertMouseMovement(InViewportClient);
-	}
+	ForEachEdMode<ILegacyEdModeViewportInterface>([&bHandled, InViewportClient](ILegacyEdModeViewportInterface* ViewportInterface)
+		{
+			bHandled |= ViewportInterface->PostConvertMouseMovement(InViewportClient);
+			return true;
+		});
+
 	return bHandled;
 }
 
 bool FEditorModeTools::GetShowWidget() const
 {
+	if (!bShowWidget)
+	{
+		return false;
+	}
+	
 	bool bDrawModeSupportsWidgetDrawing = false;
 	// Check to see of any active modes support widget drawing
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		if (FEdMode* LegacyMode = Mode->AsLegacyMode())
+	ForEachEdMode<ILegacyEdModeWidgetInterface>([&bDrawModeSupportsWidgetDrawing](ILegacyEdModeWidgetInterface* LegacyMode)
 		{
 			bDrawModeSupportsWidgetDrawing |= LegacyMode->ShouldDrawWidget();
-		}
-	}
-	return bDrawModeSupportsWidgetDrawing && bShowWidget;
+			return !bDrawModeSupportsWidgetDrawing;
+		});
+	return bDrawModeSupportsWidgetDrawing;
 }
 
 /**
@@ -1556,18 +1787,18 @@ void FEditorModeTools::CycleWidgetMode (void)
 		do
 		{
 			Wk++;
-			if ((Wk == FWidget::WM_TranslateRotateZ) && (!GetDefault<ULevelEditorViewportSettings>()->bAllowTranslateRotateZWidget))
+			if ((Wk == UE::Widget::WM_TranslateRotateZ) && (!GetDefault<ULevelEditorViewportSettings>()->bAllowTranslateRotateZWidget))
 			{
 				Wk++;
 			}
-			// Roll back to the start if we go past FWidget::WM_Scale
-			if( Wk >= FWidget::WM_Max)
+			// Roll back to the start if we go past UE::Widget::WM_Scale
+			if( Wk >= UE::Widget::WM_Max)
 			{
-				Wk -= FWidget::WM_Max;
+				Wk -= UE::Widget::WM_Max;
 			}
 		}
-		while (!UsesTransformWidget((FWidget::EWidgetMode)Wk) && Wk != CurrentWk);
-		SetWidgetMode( (FWidget::EWidgetMode)Wk );
+		while (!UsesTransformWidget((UE::Widget::EWidgetMode)Wk) && Wk != CurrentWk);
+		SetWidgetMode( (UE::Widget::EWidgetMode)Wk );
 		FEditorSupportDelegates::RedrawAllViewports.Broadcast();
 	}
 }
@@ -1591,7 +1822,7 @@ FVector FEditorModeTools::GetWidgetLocation() const
 {
 	for (int Index = ActiveScriptableModes.Num() - 1; Index >= 0; Index--)
 	{
-		if (FEdMode* LegacyMode = ActiveScriptableModes[Index]->AsLegacyMode())
+		if (ILegacyEdModeWidgetInterface* LegacyMode = Cast<ILegacyEdModeWidgetInterface>(ActiveScriptableModes[Index]))
 		{
 			if (LegacyMode->UsesTransformWidget())
 			{
@@ -1607,17 +1838,17 @@ FVector FEditorModeTools::GetWidgetLocation() const
  * Changes the current widget mode.
  */
 
-void FEditorModeTools::SetWidgetMode( FWidget::EWidgetMode InWidgetMode )
+void FEditorModeTools::SetWidgetMode( UE::Widget::EWidgetMode InWidgetMode )
 {
 	WidgetMode = InWidgetMode;
 }
 
 /**
  * Allows you to temporarily override the widget mode.  Call this function again
- * with FWidget::WM_None to turn off the override.
+ * with UE::Widget::WM_None to turn off the override.
  */
 
-void FEditorModeTools::SetWidgetModeOverride( FWidget::EWidgetMode InWidgetMode )
+void FEditorModeTools::SetWidgetModeOverride( UE::Widget::EWidgetMode InWidgetMode )
 {
 	OverrideWidgetMode = InWidgetMode;
 }
@@ -1626,15 +1857,16 @@ void FEditorModeTools::SetWidgetModeOverride( FWidget::EWidgetMode InWidgetMode 
  * Retrieves the current widget mode, taking overrides into account.
  */
 
-FWidget::EWidgetMode FEditorModeTools::GetWidgetMode() const
+UE::Widget::EWidgetMode FEditorModeTools::GetWidgetMode() const
 {
-	if( OverrideWidgetMode != FWidget::WM_None )
+	if( OverrideWidgetMode != UE::Widget::WM_None )
 	{
 		return OverrideWidgetMode;
 	}
 
 	return WidgetMode;
 }
+
 
 /**
 * Set Scale On The Widget
@@ -1654,66 +1886,12 @@ float FEditorModeTools::GetWidgetScale() const
 	return WidgetScale;
 }
 
-bool FEditorModeTools::GetShowFriendlyVariableNames()
-{
-	return GetDefault<UEditorStyleSettings>()->bShowFriendlyNames;
-}
-
-const uint32 FEditorModeTools::GetMaxNumberOfBookmarks(FEditorViewportClient* InViewportClient)
-{
-	return IBookmarkTypeTools::Get().GetMaxNumberOfBookmarks(InViewportClient);
-}
-
-void FEditorModeTools::CompactBookmarks(FEditorViewportClient* InViewportClient)
-{
-	IBookmarkTypeTools::Get().CompactBookmarks(InViewportClient);
-}
-
-/**
- * Sets a bookmark in the levelinfo file, allocating it if necessary.
- */
-void FEditorModeTools::SetBookmark( uint32 InIndex, FEditorViewportClient* InViewportClient )
-{
-	IBookmarkTypeTools::Get().CreateOrSetBookmark(InIndex, InViewportClient);
-}
-
-/**
- * Checks to see if a bookmark exists at a given index
- */
-
-bool FEditorModeTools::CheckBookmark( uint32 InIndex, FEditorViewportClient* InViewportClient )
-{
-	return IBookmarkTypeTools::Get().CheckBookmark(InIndex, InViewportClient);
-}
-
-/**
- * Retrieves a bookmark from the list.
- */
-void FEditorModeTools::JumpToBookmark(uint32 InIndex, TSharedPtr<FBookmarkBaseJumpToSettings> InSettings, FEditorViewportClient* InViewportClient)
-{
-	IBookmarkTypeTools::Get().JumpToBookmark(InIndex, InSettings, InViewportClient);
-}
-
-/**
- * Clears a bookmark
- */
-void FEditorModeTools::ClearBookmark( uint32 InIndex, FEditorViewportClient* InViewportClient )
-{
-	IBookmarkTypeTools::Get().ClearBookmark(InIndex, InViewportClient);
-}
-
-/**
-* Clears all book marks
-*/
-void FEditorModeTools::ClearAllBookmarks( FEditorViewportClient* InViewportClient )
-{
-	IBookmarkTypeTools::Get().ClearAllBookmarks(InViewportClient);
-}
-
 void FEditorModeTools::AddReferencedObjects( FReferenceCollector& Collector )
 {
 	Collector.AddReferencedObjects(ActiveScriptableModes);
+	Collector.AddReferencedObjects(PendingDeactivateModes);
 	Collector.AddReferencedObjects(RecycledScriptableModes);
+	Collector.AddReferencedObject(InteractiveToolsContext);
 }
 
 FEdMode* FEditorModeTools::GetActiveMode( FEditorModeID InID )
@@ -1738,7 +1916,7 @@ const FEdMode* FEditorModeTools::GetActiveMode( FEditorModeID InID ) const
 
 const FModeTool* FEditorModeTools::GetActiveTool( FEditorModeID InID ) const
 {
-	const FEdMode* ActiveMode = GetActiveMode( InID );
+	ILegacyEdModeToolInterface* ActiveMode = Cast<ILegacyEdModeToolInterface>(GetActiveScriptableMode( InID ));
 	const FModeTool* Tool = nullptr;
 	if( ActiveMode )
 	{
@@ -1749,15 +1927,7 @@ const FModeTool* FEditorModeTools::GetActiveTool( FEditorModeID InID ) const
 
 bool FEditorModeTools::IsModeActive( FEditorModeID InID ) const
 {
-	if (GetActiveMode(InID) != nullptr)
-	{
-		return true;
-	}
-	else if (GetActiveScriptableMode(InID) != nullptr)
-	{
-		return true;
-	}
-	return false;
+	return (GetActiveScriptableMode(InID) != nullptr);
 }
 
 bool FEditorModeTools::IsDefaultModeActive() const
@@ -1776,29 +1946,91 @@ bool FEditorModeTools::IsDefaultModeActive() const
 
 bool FEditorModeTools::CanCycleWidgetMode() const
 {
-	for (UEdMode* Mode : ActiveScriptableModes)
-	{
-		if (FEdMode* LegacyMode = Mode->AsLegacyMode())
+	bool bCanCycleWidget = false;
+	ForEachEdMode<ILegacyEdModeWidgetInterface>([&bCanCycleWidget](ILegacyEdModeWidgetInterface* LegacyMode)
 		{
-			if (LegacyMode->CanCycleWidgetMode())
-			{
-				return true;
-			}
-		}
-	}
-	return false;
+			bCanCycleWidget = LegacyMode->CanCycleWidgetMode();
+			return !bCanCycleWidget;
+		});
+	return bCanCycleWidget;
 }
 
 
 bool FEditorModeTools::CanAutoSave() const
 {
-	for (const UEdMode* Mode : ActiveScriptableModes)
+	return FEditorModeTools::TestAllModes([](UEdMode* Mode) { return Mode->CanAutoSave(); }, true);
+}
+
+
+bool FEditorModeTools::OnRequestClose()
+{
+	return FEditorModeTools::TestAllModes([](UEdMode* Mode) { return Mode->OnRequestClose(); }, true);
+}
+
+bool FEditorModeTools::IsOperationSupportedForCurrentAsset(EAssetOperation InOperation) const
+{
+	return FEditorModeTools::TestAllModes([InOperation](UEdMode* Mode) { return Mode->IsOperationSupportedForCurrentAsset(InOperation); }, true);
+}
+
+UModeManagerInteractiveToolsContext* FEditorModeTools::GetInteractiveToolsContext() const
+{
+	return InteractiveToolsContext;
+}
+
+IGizmoStateTarget* FEditorModeTools::GetGizmoStateTarget()
+{
+	if (!GizmoStateTarget.IsValid())
 	{
-		if (Mode->CanAutoSave() == false)
-		{
-			return false;
-		}
+		GizmoStateTarget = UEditorGizmoStateTarget::Construct(
+			this,
+			NSLOCTEXT("UTransformGizmo", "UTransformGizmoTransaction", "Transform"),
+			InteractiveToolsContext->GizmoManager);
+	}
+	return GizmoStateTarget.Get();
+}
+
+bool FEditorModeTools::BeginTransform(const FGizmoState& InState)
+{
+	bool bHandled = false;
+	ForEachEdMode<IGizmoEdModeInterface>([&bHandled, &InState](IGizmoEdModeInterface* GizmoInterface)
+	{
+		bHandled |= GizmoInterface->BeginTransform(InState);
+		return true;
+	});
+
+	// Give the focused VPC an opportunity to open the transform transacting if it has not been handled before 
+	if (!bHandled && FocusedViewportClient)
+	{
+		bHandled = FocusedViewportClient->BeginTransform(InState);
 	}
 
-	return true;
+	bHasOngoingTransform = bHandled;
+	
+	return bHandled;
+}
+
+bool FEditorModeTools::EndTransform(const FGizmoState& InState) const
+{
+	bool bHandled = false;
+	ForEachEdMode<IGizmoEdModeInterface>([&bHandled, &InState](IGizmoEdModeInterface* GizmoInterface)
+	{
+		bHandled |= GizmoInterface->EndTransform(InState);
+		return true;
+	});
+
+	// Give the focused VPC an opportunity to close the transform transacting if it has not been handled before 
+	if (!bHandled && FocusedViewportClient)
+	{
+		bHandled = FocusedViewportClient->EndTransform(InState);
+	}
+
+	// NOTE bHasOngoingTransform is not set to false here but in EndTracking as its needed there.
+	// See header file more more explanations
+	
+	return bHandled;
+}
+
+bool FEditorModeTools::HasOngoingTransform() const
+{
+	return bHasOngoingTransform;
 }

@@ -19,11 +19,6 @@
 struct FAndroidPlatformProperties
 	: public FGenericPlatformProperties
 {
-	static FORCEINLINE const char* GetPhysicsFormat( )
-	{
-		return "PhysXGeneric";		//@todo android: physx format
-	}
-
 	static FORCEINLINE bool HasEditorOnlyData( )
 	{
 		return false;
@@ -71,11 +66,7 @@ struct FAndroidPlatformProperties
 
 	static FORCEINLINE bool SupportsLowQualityLightmaps()
 	{
-#if PLATFORM_ANDROIDGL4
-		return false;
-#else
 		return true;
-#endif
 	}
 
 	static FORCEINLINE bool SupportsDistanceFieldShadows()
@@ -119,6 +110,16 @@ struct FAndroidPlatformProperties
 	}
 
 	static FORCEINLINE bool SupportsMeshLODStreaming()
+	{
+		return true;
+	}
+
+	static FORCEINLINE bool SupportsMemoryMappedFiles()
+	{
+		return true;
+	}
+
+	static FORCEINLINE bool SupportsVirtualTextureStreaming()
 	{
 		return true;
 	}

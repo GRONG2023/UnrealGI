@@ -8,6 +8,7 @@
 
 #include "CoreTypes.h"
 #include "CoreFwd.h"
+#include "Materials/MaterialRenderProxy.h"
 
 class FBatchedElements;
 class FDynamicPrimitiveResource;
@@ -27,11 +28,11 @@ struct FMeshBatchElement;
 struct TStatId;
 template<typename TTask> class TGraphTask;
 
-inline FViewElementPDI::FViewElementPDI(FViewInfo* InViewInfo,FHitProxyConsumer* InHitProxyConsumer,TArray<FPrimitiveUniformShaderParameters>* InDynamicPrimitiveShaderData):
+inline FViewElementPDI::FViewElementPDI(FViewInfo* InViewInfo,FHitProxyConsumer* InHitProxyConsumer, FGPUScenePrimitiveCollector* InDynamicPrimitiveCollector):
 	FPrimitiveDrawInterface(InViewInfo),
 	ViewInfo(InViewInfo),
 	HitProxyConsumer(InHitProxyConsumer),
-	DynamicPrimitiveShaderData(InDynamicPrimitiveShaderData)
+	DynamicPrimitiveCollector(InDynamicPrimitiveCollector)
 {}
 
 inline bool FViewElementPDI::IsHitTesting()
@@ -60,13 +61,13 @@ inline void FViewElementPDI::RegisterDynamicResource(FDynamicPrimitiveResource* 
 			[InViewInfo, DynamicResource](FRHICommandListImmediate& RHICmdList)
 			{
 				InViewInfo->DynamicResources.Add(DynamicResource);
-				DynamicResource->InitPrimitiveResource();
+				DynamicResource->InitPrimitiveResource(RHICmdList);
 			});
 	}
 	else
 	{
 		ViewInfo->DynamicResources.Add(DynamicResource);
-		DynamicResource->InitPrimitiveResource();
+		DynamicResource->InitPrimitiveResource(FRHICommandListImmediate::Get());
 	}
 }
 
@@ -86,7 +87,8 @@ inline void FViewElementPDI::DrawSprite(
 	float UL,
 	float V,
 	float VL,
-	uint8 BlendMode
+	uint8 BlendMode,
+	float OpacityMaskRefVal
 	)
 {
 	FBatchedElements &Elements = GetElements(DepthPriorityGroup);
@@ -98,8 +100,9 @@ inline void FViewElementPDI::DrawSprite(
 		Sprite,
 		Color,
 		CurrentHitProxy ? CurrentHitProxy->Id : FHitProxyId(),
-		U,UL,V,VL,
-		BlendMode
+		U, UL, V, VL,
+		BlendMode,
+		OpacityMaskRefVal
 	);
 }
 
@@ -123,6 +126,29 @@ inline void FViewElementPDI::DrawLine(
 	FBatchedElements &Elements = GetElements(DepthPriorityGroup);
 
 	Elements.AddLine(
+		Start,
+		End,
+		Color,
+		CurrentHitProxy ? CurrentHitProxy->Id : FHitProxyId(),
+		Thickness,
+		DepthBias,
+		bScreenSpace
+	);
+}
+
+inline void FViewElementPDI::DrawTranslucentLine(
+	const FVector& Start,
+	const FVector& End,
+	const FLinearColor& Color,
+	uint8 DepthPriorityGroup,
+	float Thickness,
+	float DepthBias,
+	bool bScreenSpace
+)
+{
+	FBatchedElements& Elements = GetElements(DepthPriorityGroup);
+
+	Elements.AddTranslucentLine(
 		Start,
 		End,
 		Color,
@@ -174,6 +200,7 @@ inline bool MeshBatchHasPrimitives(const FMeshBatch& Mesh)
 inline int32 FViewElementPDI::DrawMesh(const FMeshBatch& Mesh)
 {
 	// Warning: can be called from Game Thread or Rendering Thread.  Be careful what you access.
+	check(DynamicPrimitiveCollector);
 
 	if (ensure(MeshBatchHasPrimitives(Mesh)))
 	{
@@ -183,7 +210,7 @@ inline int32 FViewElementPDI::DrawMesh(const FMeshBatch& Mesh)
 		uint8 DPGIndex = Mesh.DepthPriorityGroup;
 		// Get the correct element list based on dpg index
 		// Translucent view mesh elements in the foreground dpg are not supported yet
-		TIndirectArray<FMeshBatch>& ViewMeshElementList = ( ( DPGIndex == SDPG_Foreground  ) ? ViewInfo->TopViewMeshElements : ViewInfo->ViewMeshElements );
+		TIndirectArray<FMeshBatch, SceneRenderingAllocator>& ViewMeshElementList = ( ( DPGIndex == SDPG_Foreground  ) ? ViewInfo->TopViewMeshElements : ViewInfo->ViewMeshElements );
 
 		FMeshBatch* NewMesh = new FMeshBatch(Mesh);
 		ViewMeshElementList.Add(NewMesh);
@@ -193,13 +220,12 @@ inline int32 FViewElementPDI::DrawMesh(const FMeshBatch& Mesh)
 		}
 
 		{
-			TArray<FPrimitiveUniformShaderParameters>* DynamicPrimitiveShaderDataForRT = DynamicPrimitiveShaderData;
 			ERHIFeatureLevel::Type FeatureLevel = ViewInfo->GetFeatureLevel();
 
 			ENQUEUE_RENDER_COMMAND(FCopyDynamicPrimitiveShaderData)(
-				[NewMesh, DynamicPrimitiveShaderDataForRT, FeatureLevel](FRHICommandListImmediate& RHICmdList)
+				[NewMesh, DynamicPrimitiveCollectorForRT = DynamicPrimitiveCollector, FeatureLevel](FRHICommandListImmediate& RHICmdList)
 				{
-					const bool bPrimitiveShaderDataComesFromSceneBuffer = NewMesh->VertexFactory->GetPrimitiveIdStreamIndex(EVertexInputStreamType::Default) >= 0;
+					const bool bPrimitiveShaderDataComesFromSceneBuffer = NewMesh->VertexFactory->GetPrimitiveIdStreamIndex(FeatureLevel, EVertexInputStreamType::Default) >= 0;
 
 					for (int32 ElementIndex = 0; ElementIndex < NewMesh->Elements.Num(); ElementIndex++)
 					{
@@ -220,14 +246,18 @@ inline int32 FViewElementPDI::DrawMesh(const FMeshBatch& Mesh)
 					{
 						for (int32 Index = 0; Index < NewMesh->Elements.Num(); ++Index)
 						{
-							const TUniformBuffer<FPrimitiveUniformShaderParameters>* PrimitiveUniformBufferResource = NewMesh->Elements[Index].PrimitiveUniformBufferResource;
+							FMeshBatchElement& Element = NewMesh->Elements[Index];
+							const TUniformBuffer<FPrimitiveUniformShaderParameters>* PrimitiveUniformBufferResource = Element.PrimitiveUniformBufferResource;
 
 							if (PrimitiveUniformBufferResource)
 							{
-								const int32 DataIndex = DynamicPrimitiveShaderDataForRT->AddUninitialized(1);
-								NewMesh->Elements[Index].PrimitiveIdMode = PrimID_DynamicPrimitiveShaderData;
-								NewMesh->Elements[Index].DynamicPrimitiveShaderDataIndex = DataIndex;
-								FPlatformMemory::Memcpy(&(*DynamicPrimitiveShaderDataForRT)[DataIndex], PrimitiveUniformBufferResource->GetContents(), sizeof(FPrimitiveUniformShaderParameters));
+								Element.PrimitiveIdMode = PrimID_DynamicPrimitiveShaderData;
+								DynamicPrimitiveCollectorForRT->Add(
+									Element.DynamicPrimitiveData,
+									*reinterpret_cast<const FPrimitiveUniformShaderParameters*>(PrimitiveUniformBufferResource->GetContents()),
+									Element.NumInstances,
+									Element.DynamicPrimitiveIndex,
+									Element.DynamicPrimitiveInstanceSceneDataOffset);
 							}
 						}
 					}

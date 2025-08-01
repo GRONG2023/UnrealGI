@@ -10,7 +10,7 @@
 #include "Widgets/SWidget.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/Input/SComboButton.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Presentation/PropertyEditor/PropertyEditor.h"
 #include "UserInterface/PropertyEditor/PropertyEditorConstants.h"
 #include "PropertyCustomizationHelpers.h"
@@ -23,7 +23,7 @@ class SPropertyEditorStruct : public SCompoundWidget
 {
 public:
 	SLATE_BEGIN_ARGS(SPropertyEditorStruct)
-		: _Font(FEditorStyle::GetFontStyle(PropertyEditorConstants::PropertyFontStyle)) 
+		: _Font(FAppStyle::GetFontStyle(PropertyEditorConstants::PropertyFontStyle)) 
 		, _MetaStruct(nullptr)
 		, _AllowNone(true)
 		, _ShowDisplayNames(false)
@@ -79,6 +79,8 @@ private:
 	 * Gets the active display value
 	 */
 	FText GetDisplayValue() const;
+
+	bool CanEdit() const;
 
 private:
 	/** The property editor we were constructed for, or null if we're editing using the construction arguments */

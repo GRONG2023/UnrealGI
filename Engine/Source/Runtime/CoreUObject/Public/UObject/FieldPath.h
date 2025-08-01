@@ -6,23 +6,35 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/Field.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "CoreTypes.h"
 #include "HAL/ThreadSafeCounter.h"
+#include "Misc/AssertionMacros.h"
+#include "Templates/EnableIf.h"
+#include "Templates/LosesQualifiersFromTo.h"
+#include "Templates/PointerIsConvertibleFromTo.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Field.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UObjectArray.h"
 #include "UObject/WeakObjectPtr.h"
 #include "UObject/WeakObjectPtrTemplates.h"
-#include "UObject/UObjectArray.h"
-#include "UObject/FastReferenceCollectorOptions.h"
 
-class UStruct;
-class UField;
+class FArchive;
 class FLinkerLoad;
+class UField;
+class UStruct;
+struct FUObjectItem;
+template <typename T> struct TIsPODType;
+template <typename T> struct TIsWeakPointerType;
+template <typename T> struct TIsZeroConstructType;
 
-struct COREUOBJECT_API FFieldPath
+struct FFieldPath
 {
-	// GC needs access to GetResolvedOwnerItemInternal and ClearCachedFieldInternal
-	template <typename ReferenceProcessorType, typename CollectorType, typename ArrayPoolType, EFastReferenceCollectorOptions Options>
-	friend class TFastReferenceCollector;
+	friend struct FGCInternals;
 
 	// TWeakFieldPtr needs access to ClearCachedField
 	template<class T>
@@ -88,9 +100,9 @@ private:
 
 #if WITH_EDITORONLY_DATA
 	/** Used to check if the serial number on the provided struct is identical to the one stored in this FFieldPath */
-	bool IsFieldPathSerialNumberIdentical(UStruct* InStruct) const;
+	COREUOBJECT_API bool IsFieldPathSerialNumberIdentical(UStruct* InStruct) const;
 	/** Gets the serial number stored on the provided struct */
-	int32 GetFieldPathSerialNumber(UStruct* InStruct) const;
+	COREUOBJECT_API int32 GetFieldPathSerialNumber(UStruct* InStruct) const;
 #endif
 
 	/** FOR INTERNAL USE ONLY: gets the pointer to the resolved field without trying to resolve it */
@@ -110,7 +122,7 @@ private:
 	 * @param InResolveType Type of the resolve operation
 	 * @return Resolved owner struct
 	 */
-	UStruct* TryToResolveOwnerFromStruct(UStruct* InCurrentStruct = nullptr, EPathResolveType InResolveType = FFieldPath::UseStructIfOuterNotFound) const;
+	COREUOBJECT_API UStruct* TryToResolveOwnerFromStruct(UStruct* InCurrentStruct = nullptr, EPathResolveType InResolveType = FFieldPath::UseStructIfOuterNotFound) const;
 	
 
 	/**
@@ -118,7 +130,7 @@ private:
 	 * @param InLinker the current linker load serializing this field path
 	 * @return Resolved owner struct
 	 */
-	UStruct* TryToResolveOwnerFromLinker(FLinkerLoad* InLinker) const;
+	COREUOBJECT_API UStruct* TryToResolveOwnerFromLinker(FLinkerLoad* InLinker) const;
 
 
 	/**
@@ -126,7 +138,7 @@ private:
 	 * @param InLinker the current linker load serializing this field path
 	 * @return Resulved owner struct
 	 */
-	UStruct* ConvertFromFullPath(FLinkerLoad* InLinker);
+	COREUOBJECT_API UStruct* ConvertFromFullPath(FLinkerLoad* InLinker);
 
 public:
 
@@ -138,17 +150,17 @@ public:
 	}
 
 #if WITH_EDITORONLY_DATA
-	FFieldPath(UField* InField, const FName& InPropertyTypeName);
+	COREUOBJECT_API FFieldPath(UField* InField, const FName& InPropertyTypeName);
 #endif
 
 	/** Generates path from the passed in field pointer */
-	void Generate(FField* InField);
+	COREUOBJECT_API void Generate(FField* InField);
 
 	/** Generates path from the passed in field pointer */
-	void Generate(const TCHAR* InFieldPathString);
+	COREUOBJECT_API void Generate(const TCHAR* InFieldPathString);
 
 #if WITH_EDITORONLY_DATA
-	void GenerateFromUField(UField* InField);
+	COREUOBJECT_API void GenerateFromUField(UField* InField);
 #endif
 
 	/**
@@ -157,7 +169,7 @@ public:
 	 * @param OutOwnerIndex ObjectIndex of the Owner UObject
 	 * @return Resolved field or null
 	 */
-	FField* TryToResolvePath(UStruct* InCurrentStruct, EPathResolveType InResolveType = FFieldPath::UseStructIfOuterNotFound) const;
+	COREUOBJECT_API FField* TryToResolvePath(UStruct* InCurrentStruct, EPathResolveType InResolveType = FFieldPath::UseStructIfOuterNotFound) const;
 
 	/**
 	 * Tries to resolve the path and caches the result
@@ -250,7 +262,7 @@ public:
 		return ResolvedOwner != InOther.ResolvedOwner || Path != InOther.Path;
 	}
 
-	FString ToString() const;
+	COREUOBJECT_API FString ToString() const;
 
 	COREUOBJECT_API friend FArchive& operator<<(FArchive& Ar, FFieldPath& InOutPropertyPath);
 
@@ -415,23 +427,10 @@ public:
 	template <typename OtherPropertyType>
 	FORCEINLINE bool operator==(const TFieldPath<OtherPropertyType> &Other) const
 	{
-		static_assert(TPointerIsConvertibleFromTo<OtherPropertyType, FField>::Value, "TFieldPath can only be compared with FField types");
+		static_assert(TPointerIsConvertibleFromTo<OtherPropertyType, const FField>::Value, "TFieldPath can only be compared with FField types");
 		static_assert(TPointerIsConvertibleFromTo<PropertyType, OtherPropertyType>::Value, "Unable to compare TFieldPath with raw pointer - types are incompatible");
 
 		return FFieldPath::operator==(Other);
-	}
-
-	/**
-	* Compare weak pointers for inequality
-	* @param Other weak pointer to compare to
-	**/
-	template <typename OtherPropertyType>
-	FORCEINLINE bool operator!=(const TFieldPath<OtherPropertyType> &Other) const
-	{
-		static_assert(TPointerIsConvertibleFromTo<OtherPropertyType, FField>::Value, "TFieldPath can only be compared with FField types");
-		static_assert(TPointerIsConvertibleFromTo<PropertyType, OtherPropertyType>::Value, "Unable to compare TFieldPath with raw pointer - types are incompatible");
-
-		return FFieldPath::operator!=(Other);
 	}
 
 	/**
@@ -441,10 +440,30 @@ public:
 	template <typename OtherPropertyType>
 	FORCEINLINE bool operator==(const OtherPropertyType* Other) const
 	{
-		static_assert(TPointerIsConvertibleFromTo<OtherPropertyType, FField>::Value, "TFieldPath can only be compared with FField types");
-		static_assert(TPointerIsConvertibleFromTo<PropertyType, OtherPropertyType>::Value, "Unable to compare TFieldPath with raw pointer - types are incompatible");
+		static_assert(TPointerIsConvertibleFromTo<OtherPropertyType, const FField>::Value, "TFieldPath can only be compared with FField types");
+		static_assert(TPointerIsConvertibleFromTo<PropertyType, const OtherPropertyType>::Value, "Unable to compare TFieldPath with raw pointer - types are incompatible");
 
 		return Get() == Other;
+	}
+
+	FORCENOINLINE bool operator==(TYPE_OF_NULLPTR) const
+	{
+		return !Get();
+	}
+
+#if !PLATFORM_COMPILER_HAS_GENERATED_COMPARISON_OPERATORS
+
+	/**
+	* Compare weak pointers for inequality
+	* @param Other weak pointer to compare to
+	**/
+	template <typename OtherPropertyType>
+	FORCEINLINE bool operator!=(const TFieldPath<OtherPropertyType> &Other) const
+	{
+		static_assert(TPointerIsConvertibleFromTo<OtherPropertyType, const FField>::Value, "TFieldPath can only be compared with FField types");
+		static_assert(TPointerIsConvertibleFromTo<PropertyType, const OtherPropertyType>::Value, "Unable to compare TFieldPath with raw pointer - types are incompatible");
+
+		return FFieldPath::operator!=(Other);
 	}
 
 	/**
@@ -454,11 +473,49 @@ public:
 	template <typename OtherPropertyType>
 	FORCEINLINE bool operator!=(const OtherPropertyType* Other) const
 	{
-		static_assert(TPointerIsConvertibleFromTo<OtherPropertyType, FField>::Value, "TFieldPath can only be compared with FField types");
-		static_assert(TPointerIsConvertibleFromTo<PropertyType, OtherPropertyType>::Value, "Unable to compare TFieldPath with raw pointer - types are incompatible");
+		static_assert(TPointerIsConvertibleFromTo<OtherPropertyType, const FField>::Value, "TFieldPath can only be compared with FField types");
+		static_assert(TPointerIsConvertibleFromTo<PropertyType, const OtherPropertyType>::Value, "Unable to compare TFieldPath with raw pointer - types are incompatible");
 
 		return Get() != Other;
 	}
+
+	template <typename LhsT>
+	friend FORCENOINLINE bool operator==(const LhsT* Lhs, const TFieldPath<PropertyType>& Rhs)
+	{
+		// It's also possible that these static_asserts may fail for valid conversions because
+		// one or both of the types have only been forward-declared.
+		static_assert(TPointerIsConvertibleFromTo<LhsT, const FField>::Value, "TFieldPath can only be compared with FField types");
+		static_assert(TPointerIsConvertibleFromTo<LhsT, const PropertyType>::Value || TPointerIsConvertibleFromTo<PropertyType, LhsT>::Value, "Unable to compare TFieldPath with raw pointer - types are incompatible");
+
+		return Rhs == Lhs;
+	}
+
+	friend FORCENOINLINE bool operator==(TYPE_OF_NULLPTR, const TFieldPath<PropertyType>& Rhs)
+	{
+		return !Rhs.Get();
+	}
+
+	template <typename LhsT>
+	friend FORCENOINLINE bool operator!=(const LhsT* Lhs, const TFieldPath<PropertyType>& Rhs)
+	{
+		// It's also possible that these static_asserts may fail for valid conversions because
+		// one or both of the types have only been forward-declared.
+		static_assert(TPointerIsConvertibleFromTo<LhsT, const FField>::Value, "TFieldPath can only be compared with FField types");
+		static_assert(TPointerIsConvertibleFromTo<LhsT, const PropertyType>::Value || TPointerIsConvertibleFromTo<PropertyType, LhsT>::Value, "Unable to compare TFieldPath with raw pointer - types are incompatible");
+
+		return Rhs != Lhs;
+	}
+
+	FORCENOINLINE bool operator!=(TYPE_OF_NULLPTR) const
+	{
+		return !!Get();
+	}
+
+	friend FORCENOINLINE bool operator!=(TYPE_OF_NULLPTR, const TFieldPath<PropertyType>& Rhs)
+	{
+		return !!Rhs.Get();
+	}
+#endif
 };
 
 // Helper function which deduces the type of the initializer
@@ -468,51 +525,6 @@ FORCEINLINE TFieldPath<PropertyType> MakePropertyPath(PropertyType* Ptr)
 	return TFieldPath<PropertyType>(Ptr);
 }
 
-template <typename LhsT, typename RhsT>
-FORCENOINLINE bool operator==(const LhsT* Lhs, const TFieldPath<RhsT>& Rhs)
-{
-	// It's also possible that these static_asserts may fail for valid conversions because
-	// one or both of the types have only been forward-declared.
-	static_assert(TPointerIsConvertibleFromTo<LhsT, FField>::Value, "TFieldPath can only be compared with FField types");
-	static_assert(TPointerIsConvertibleFromTo<LhsT, RhsT>::Value || TPointerIsConvertibleFromTo<RhsT, LhsT>::Value, "Unable to compare TFieldPath with raw pointer - types are incompatible");
-
-	return Rhs == Lhs;
-}
-
-template <typename LhsT>
-FORCENOINLINE bool operator==(const TFieldPath<LhsT>& Lhs, TYPE_OF_NULLPTR)
-{
-	return !Lhs.Get();
-}
-
-template <typename RhsT>
-FORCENOINLINE bool operator==(TYPE_OF_NULLPTR, const TFieldPath<RhsT>& Rhs)
-{
-	return !Rhs.Get();
-}
-
-template <typename LhsT, typename RhsT>
-FORCENOINLINE bool operator!=(const LhsT* Lhs, const TFieldPath<RhsT>& Rhs)
-{
-	// It's also possible that these static_asserts may fail for valid conversions because
-	// one or both of the types have only been forward-declared.
-	static_assert(TPointerIsConvertibleFromTo<LhsT, FField>::Value, "TFieldPath can only be compared with FField types");
-	static_assert(TPointerIsConvertibleFromTo<LhsT, RhsT>::Value || TPointerIsConvertibleFromTo<RhsT, LhsT>::Value, "Unable to compare TFieldPath with raw pointer - types are incompatible");
-
-	return Rhs != Lhs;
-}
-
-template <typename LhsT>
-FORCENOINLINE bool operator!=(const TFieldPath<LhsT>& Lhs, TYPE_OF_NULLPTR)
-{
-	return !!Lhs.Get();
-}
-
-template <typename RhsT>
-FORCENOINLINE bool operator!=(TYPE_OF_NULLPTR, const TFieldPath<RhsT>& Rhs)
-{
-	return !!Rhs.Get();
-}
 
 template<class T> struct TIsPODType<TFieldPath<T> > { enum { Value = true }; };
 template<class T> struct TIsZeroConstructType<TFieldPath<T> > { enum { Value = true }; };
@@ -538,3 +550,6 @@ struct TPropertyPathMapKeyFuncs : public TDefaultMapKeyFuncs<KeyType, ValueType,
 	}
 };
 
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
+#endif

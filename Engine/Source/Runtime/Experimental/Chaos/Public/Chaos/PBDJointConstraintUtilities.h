@@ -5,6 +5,7 @@
 
 #include "Chaos/ParticleHandleFwd.h"
 #include "Chaos/PBDJointConstraintTypes.h"
+#include "Chaos/Collision/CollisionApplyType.h"
 
 
 namespace Chaos
@@ -12,13 +13,13 @@ namespace Chaos
 	class FPBDJointUtilities
 	{
 	public:
-		static void GetSphericalAxisDelta(
+		static CHAOS_API void GetSphericalAxisDelta(
 			const FVec3& X0,
 			const FVec3& X1,
 			FVec3& Axis,
 			FReal& Delta);
 
-		static void GetCylindricalAxesDeltas(
+		static CHAOS_API void GetCylindricalAxesDeltas(
 			const FRotation3& R0,
 			const FVec3& X0,
 			const FVec3& X1,
@@ -28,7 +29,7 @@ namespace Chaos
 			FVec3& RadialAxis,
 			FReal& RadialDelta);
 
-		static void GetPlanarAxisDelta(
+		static CHAOS_API void GetPlanarAxisDelta(
 			const FRotation3& R0,
 			const FVec3& X0,
 			const FVec3& X1,
@@ -36,43 +37,43 @@ namespace Chaos
 			FVec3& Axis,
 			FReal& Delta);
 
-		static void DecomposeSwingTwistLocal(
+		static CHAOS_API void DecomposeSwingTwistLocal(
 			const FRotation3& R0, 
 			const FRotation3& R1, 
 			FRotation3& R01Swing, 
 			FRotation3& R01Twist);
 		
-		static void GetSwingTwistAngles(
+		static void CHAOS_API GetSwingTwistAngles(
 			const FRotation3& R0, 
 			const FRotation3& R1, 
 			FReal& TwistAngle, 
 			FReal& Swing1Angle, 
 			FReal& Swing2Angle);
 
-		static FReal GetTwistAngle(
+		static CHAOS_API FReal GetTwistAngle(
 			const FRotation3& InTwist);
 		
-		static void GetTwistAxisAngle(
+		static CHAOS_API void GetTwistAxisAngle(
 			const FRotation3& R0,
 			const FRotation3& R1,
 			FVec3& Axis,
 			FReal& Angle);
 
-		static void GetConeAxisAngleLocal(
+		static CHAOS_API void GetConeAxisAngleLocal(
 			const FRotation3& R0,
 			const FRotation3& R1,
 			const FReal AngleTolerance,
 			FVec3& AxisLocal,
 			FReal& Angle);
 
-		static void GetCircularConeAxisErrorLocal(
+		static CHAOS_API void GetCircularConeAxisErrorLocal(
 			const FRotation3& R0,
 			const FRotation3& R1,
 			const FReal SwingLimit,
 			FVec3& AxisLocal,
 			FReal& Error);
 
-		static void GetEllipticalConeAxisErrorLocal(
+		static CHAOS_API void GetEllipticalConeAxisErrorLocal(
 			const FRotation3& R0,
 			const FRotation3& R1,
 			const FReal SwingLimitY,
@@ -80,21 +81,21 @@ namespace Chaos
 			FVec3& AxisLocal,
 			FReal& Error);
 
-		static void GetLockedSwingAxisAngle(
+		static CHAOS_API void GetLockedSwingAxisAngle(
 			const FRotation3& R0,
 			const FRotation3& R1,
 			const EJointAngularConstraintIndex SwingConstraintIndex,
 			FVec3& Axis,
 			FReal& Angle);
 
-		static void GetDualConeSwingAxisAngle(
+		static CHAOS_API void GetDualConeSwingAxisAngle(
 			const FRotation3& R0,
 			const FRotation3& R1,
 			const EJointAngularConstraintIndex SwingConstraintIndex,
 			FVec3& Axis,
 			FReal& Angle);
 
-		static void GetSwingAxisAngle(
+		static CHAOS_API void GetSwingAxisAngle(
 			const FRotation3& R0,
 			const FRotation3& R1,
 			const FReal AngleTolerance,
@@ -102,14 +103,14 @@ namespace Chaos
 			FVec3& Axis,
 			FReal& Angle);
 
-		static void GetLockedRotationAxes(
+		static CHAOS_API void GetLockedRotationAxes(
 			const FRotation3& R0, 
 			const FRotation3& R1, 
 			FVec3& Axis0, 
 			FVec3& Axis1, 
 			FVec3& Axis2);
 
-		static FReal GetConeAngleLimit(
+		static CHAOS_API FReal GetConeAngleLimit(
 			const FPBDJointSettings& JointSettings,
 			const FVec3& SwingAxisLocal,
 			const FReal SwingAngle);
@@ -143,6 +144,18 @@ namespace Chaos
 			const FReal MParent, 
 			const FReal MChild, 
 			const FReal MinRatio);
+
+		static CHAOS_API void ConditionInverseMassAndInertia(
+			const FReal& InInvMParent,
+			const FReal& InInvMChild,
+			const FVec3& InInvIParent,
+			const FVec3& InInvIChild,
+			const FReal MinParentMassRatio,
+			const FReal MaxInertiaRatio,
+			FReal& OutInvMParent,
+			FReal& OutInvMChild,
+			FVec3& OutInvIParent,
+			FVec3& OutInvIChild);
 
 		static CHAOS_API void ConditionInverseMassAndInertia(
 			FReal& InOutInvMParent,
@@ -250,7 +263,15 @@ namespace Chaos
 			const FPBDJointSolverSettings& SolverSettings,
 			const FPBDJointSettings& JointSettings);
 
-		static bool GetDriveAccelerationMode(
+		static bool GetLinearDriveAccelerationMode(
+			const FPBDJointSolverSettings& SolverSettings,
+			const FPBDJointSettings& JointSettings);
+
+		static bool GetAngularDriveAccelerationMode(
+			const FPBDJointSolverSettings& SolverSettings,
+			const FPBDJointSettings& JointSettings);
+
+		static FReal GetShockPropagationInvMassScale(
 			const FPBDJointSolverSettings& SolverSettings,
 			const FPBDJointSettings& JointSettings);
 

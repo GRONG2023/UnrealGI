@@ -67,13 +67,14 @@ bool UNREALED_API NormalizePackageNames( TArray<FString> PackageNames, TArray<FS
  * @param	Filename	The location to save the package to
  * @param	KeepObjectFlags	Objects with any these flags will be kept when saving even if unreferenced.
  * @param	ErrorDevice	the output device to use for warning and error messages
- * @param	LinkerToConformAgainst
- * @param				optional linker to use as a base when saving Package; if specified, all common names, imports and exports
- *						in Package will be sorted in the same order as the corresponding entries in the LinkerToConformAgainst
  *
  * @return true if successful
  */
-bool UNREALED_API SavePackageHelper(UPackage* Package, FString Filename,  EObjectFlags KeepObjectFlags = RF_Standalone, FOutputDevice* ErrorDevice=GWarn, FLinkerNull* LinkerToConformAgainst=NULL, ESaveFlags SaveFlags = SAVE_None);
+bool UNREALED_API SavePackageHelper(UPackage* Package, FString Filename,  EObjectFlags KeepObjectFlags = RF_Standalone,
+	FOutputDevice* ErrorDevice=GWarn, ESaveFlags SaveFlags = SAVE_None);
+UE_DEPRECATED(5.0, "LinkerToConformAgainst is no longer implemented; call function overload that does not take LinkerToConformAgainst.")
+bool UNREALED_API SavePackageHelper(UPackage* Package, FString Filename, EObjectFlags KeepObjectFlags,
+	FOutputDevice* ErrorDevice, FLinkerNull* LinkerToConformAgainst, ESaveFlags SaveFlags = SAVE_None);
 
 
 /**
@@ -137,7 +138,7 @@ public:
 	 *
 	 *	@return	bool				true if successful, false if not.
 	 */
-	bool SetCollection(FName InCollectionName, ECollectionShareType::Type InType, const TArray<FName>& InAssetList);
+	bool SetCollection(FName InCollectionName, ECollectionShareType::Type InType, const TArray<FSoftObjectPath>& InAssetList);
 
 	/**
 	 *	Update the given collection with the lists of adds/removes
@@ -149,17 +150,20 @@ public:
 	 *
 	 *	@return	bool				true if successful, false if not.
 	 */
-	bool UpdateCollection(FName InCollectionName, ECollectionShareType::Type InType, const TArray<FName>& InAddList, const TArray<FName>& InRemoveList);
+	bool UpdateCollection(FName InCollectionName, ECollectionShareType::Type InType, const TArray<FSoftObjectPath>& InAddList, const TArray<FSoftObjectPath>& InRemoveList);
 
 	/**
 	 *	Retrieve the assets contained in the given collection.
 	 *
 	 *	@param	InCollectionName	Name of collection to query
 	 *	@param	InType				Type of collection
-	 *	@param	OutAssetPathNames	The assets contained in the collection
+	 *	@param	OutAssetPaths		The assets contained in the collection
 	 * 
 	 *	@return True if collection was created successfully
 	 */
+	UNREALED_API bool QueryAssetsInCollection(FName InCollectionName, ECollectionShareType::Type InType, TArray<FSoftObjectPath>& OutAssetPaths);
+	
+	UE_DEPRECATED(5.1, "FNames containing full asset paths are deprecated. Use FSoftObjectPath instead.")
 	UNREALED_API bool QueryAssetsInCollection(FName InCollectionName, ECollectionShareType::Type InType, TArray<FName>& OutAssetPathNames);
 
 
@@ -171,28 +175,16 @@ protected:
 	template <class AssetSetPolicy>	bool ClearAssetSet ( FName InSetName, ECollectionShareType::Type InSetType );
 	
 	/** Sets the contents of a Tag or Collection to be the InAssetList. Assets not mentioned in the list will be untagged. */
-	template <class AssetSetPolicy>	bool AssignSetContent( FName InSetName, ECollectionShareType::Type InType, const TArray<FName>& InAssetList );
+	template <class AssetSetPolicy>	bool AssignSetContent( FName InSetName, ECollectionShareType::Type InType, const TArray<FSoftObjectPath>& InAssetList );
 	
 	/** Add and remove assets for the specified Tag or Connection. Assets from InAddList are added; assets from InRemoveList are removed. */
-	template <class AssetSetPolicy>	bool UpdateSetContent( FName InSetName, ECollectionShareType::Type InType, const TArray<FName>& InAddList, const TArray<FName>& InRemoveList );
+	template <class AssetSetPolicy>	bool UpdateSetContent( FName InSetName, ECollectionShareType::Type InType, const TArray<FSoftObjectPath>& InAddList, const TArray<FSoftObjectPath>& InRemoveList );
 	
 	/** Get the list of all assets in the specified Collection or Tag */
-	template <class AssetSetPolicy>	bool QuerySetContent( FName InCollectionName, ECollectionShareType::Type InType, TArray<FName>& OutAssetFullNames );
+	template <class AssetSetPolicy>	bool QuerySetContent( FName InCollectionName, ECollectionShareType::Type InType, TArray<FSoftObjectPath>& OutAssetPaths );
 
 	bool bInitialized;
 };
-
-template< typename OBJECTYPE >
-void DoIt( UCommandlet* Commandlet, UPackage* Package, TArray<FString>& Tokens, TArray<FString>& Switches ){}
-
-/** 
- *	This will set the passed in tag name on the objects if they are not in the whitelist
- *
- *	@param	ObjectNames				The list of object names to tag
- *	@param	CollectionName			The tag to apply to the objects
- *	@param	CollectionNameWhitelist	The tag of objects that should *not* be tagged (whitelist)
- */
-void UpdateSetCollectionsForObjects(TMap<FString,bool>& ObjectNames, const FString& CollectionName, const FString& CollectionNameWhitelist);
 
 /**
  * This is our Functional "Do an Action to all Packages" Template.  Basically it handles all

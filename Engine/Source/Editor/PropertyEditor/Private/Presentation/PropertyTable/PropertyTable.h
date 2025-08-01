@@ -21,6 +21,7 @@ public:
 
 	virtual void ForceRefresh() override;
 	virtual void RequestRefresh() override;
+	virtual void RequestForceRefresh() override;
 
 	virtual class FNotifyHook* GetNotifyHook() const override;
 	virtual bool AreFavoritesEnabled() const override;
@@ -29,7 +30,7 @@ public:
 	virtual void EnqueueDeferredAction( FSimpleDelegate DeferredAction ) override;
 	virtual TSharedPtr<class FAssetThumbnailPool> GetThumbnailPool() const override;
 	virtual void NotifyFinishedChangingProperties(const FPropertyChangedEvent& PropertyChangedEvent) override {}
-	virtual TSharedPtr<FEditConditionParser> GetEditConditionParser() const override;
+	virtual const TArray<TSharedRef<class IClassViewerFilter>>& GetClassViewerFilters() const override;
 
 	virtual bool GetIsUserAllowedToChangeRoot() override;
 	virtual void SetIsUserAllowedToChangeRoot( bool InAllowUserToChangeRoot ) override;

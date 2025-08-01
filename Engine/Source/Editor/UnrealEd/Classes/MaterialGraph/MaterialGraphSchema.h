@@ -12,13 +12,13 @@ struct FToolMenuContext;
 
 /** Action to add an expression node to the graph */
 USTRUCT()
-struct UNREALED_API FMaterialGraphSchemaAction_NewNode : public FEdGraphSchemaAction
+struct FMaterialGraphSchemaAction_NewNode : public FEdGraphSchemaAction
 {
 	GENERATED_USTRUCT_BODY();
 
 	/** Class of expression we want to create */
 	UPROPERTY()
-	class UClass* MaterialExpressionClass;
+	TObjectPtr<class UClass> MaterialExpressionClass;
 
 	// Simple type info
 	static FName StaticGetTypeId() {static FName Type("FMaterialGraphSchemaAction_NewNode"); return Type;}
@@ -35,7 +35,7 @@ struct UNREALED_API FMaterialGraphSchemaAction_NewNode : public FEdGraphSchemaAc
 	{}
 
 	//~ Begin FEdGraphSchemaAction Interface
-	virtual UEdGraphNode* PerformAction(class UEdGraph* ParentGraph, UEdGraphPin* FromPin, const FVector2D Location, bool bSelectNewNode = true) override;
+	UNREALED_API virtual UEdGraphNode* PerformAction(class UEdGraph* ParentGraph, UEdGraphPin* FromPin, const FVector2D Location, bool bSelectNewNode = true) override;
 	//~ End FEdGraphSchemaAction Interface
 
 	/**
@@ -44,12 +44,12 @@ struct UNREALED_API FMaterialGraphSchemaAction_NewNode : public FEdGraphSchemaAc
 	 * @param	FunctionInput		The function input to set.
 	 * @param	MaterialValueType	Value type we want input to accept.
 	 */
-	void SetFunctionInputType(class UMaterialExpressionFunctionInput* FunctionInput, uint32 MaterialValueType) const;
+	UNREALED_API void SetFunctionInputType(class UMaterialExpressionFunctionInput* FunctionInput, uint32 MaterialValueType) const;
 };
 
 /** Action to add a Material Function call to the graph */
 USTRUCT()
-struct UNREALED_API FMaterialGraphSchemaAction_NewFunctionCall : public FEdGraphSchemaAction
+struct FMaterialGraphSchemaAction_NewFunctionCall : public FEdGraphSchemaAction
 {
 	GENERATED_USTRUCT_BODY();
 
@@ -70,13 +70,38 @@ struct UNREALED_API FMaterialGraphSchemaAction_NewFunctionCall : public FEdGraph
 	{}
 
 	//~ Begin FEdGraphSchemaAction Interface
-	virtual UEdGraphNode* PerformAction(class UEdGraph* ParentGraph, UEdGraphPin* FromPin, const FVector2D Location, bool bSelectNewNode = true) override;
+	UNREALED_API virtual UEdGraphNode* PerformAction(class UEdGraph* ParentGraph, UEdGraphPin* FromPin, const FVector2D Location, bool bSelectNewNode = true) override;
 	//~ End FEdGraphSchemaAction Interface
+};
+
+/** Action to add a composite node to the graph */
+USTRUCT()
+struct FMaterialGraphSchemaAction_NewComposite : public FEdGraphSchemaAction
+{
+	GENERATED_USTRUCT_BODY();
+
+	// Simple type info
+	static FName StaticGetTypeId() { static FName Type("FMaterialGraphSchemaAction_NewComposite"); return Type; }
+	virtual FName GetTypeId() const override { return StaticGetTypeId(); }
+
+	FMaterialGraphSchemaAction_NewComposite()
+		: FEdGraphSchemaAction()
+	{}
+
+	FMaterialGraphSchemaAction_NewComposite(FText InNodeCategory, FText InMenuDesc, FText InToolTip, const int32 InGrouping)
+		: FEdGraphSchemaAction(MoveTemp(InNodeCategory), MoveTemp(InMenuDesc), MoveTemp(InToolTip), InGrouping)
+	{}
+
+	//~ Begin FEdGraphSchemaAction Interface
+	UNREALED_API virtual UEdGraphNode* PerformAction(class UEdGraph* ParentGraph, UEdGraphPin* FromPin, const FVector2D Location, bool bSelectNewNode = true) override;
+	//~ End FEdGraphSchemaAction Interface
+
+	static UNREALED_API UEdGraphNode* SpawnNode(class UEdGraph* ParentGraph, const FVector2D Location);
 };
 
 /** Action to add a comment node to the graph */
 USTRUCT()
-struct UNREALED_API FMaterialGraphSchemaAction_NewComment : public FEdGraphSchemaAction
+struct FMaterialGraphSchemaAction_NewComment : public FEdGraphSchemaAction
 {
 	GENERATED_USTRUCT_BODY();
 
@@ -93,19 +118,19 @@ struct UNREALED_API FMaterialGraphSchemaAction_NewComment : public FEdGraphSchem
 	{}
 
 	//~ Begin FEdGraphSchemaAction Interface
-	virtual UEdGraphNode* PerformAction(class UEdGraph* ParentGraph, UEdGraphPin* FromPin, const FVector2D Location, bool bSelectNewNode = true) override;
+	UNREALED_API virtual UEdGraphNode* PerformAction(class UEdGraph* ParentGraph, UEdGraphPin* FromPin, const FVector2D Location, bool bSelectNewNode = true) override;
 	//~ End FEdGraphSchemaAction Interface
 };
 
 /** Action to add a local variable usage to the graph */
 USTRUCT()
-struct UNREALED_API FMaterialGraphSchemaAction_NewNamedRerouteUsage : public FEdGraphSchemaAction
+struct FMaterialGraphSchemaAction_NewNamedRerouteUsage : public FEdGraphSchemaAction
 {
 	GENERATED_USTRUCT_BODY();
 
 	// Declaration that we want to add an usage of
 	UPROPERTY()
-	class UMaterialExpressionNamedRerouteDeclaration* Declaration = nullptr;
+	TObjectPtr<class UMaterialExpressionNamedRerouteDeclaration> Declaration = nullptr;
 
 	// Simple type info
 	static FName StaticGetTypeId() {static FName Type("FMaterialGraphSchemaAction_NewNamedRerouteUsage"); return Type;}
@@ -120,13 +145,13 @@ struct UNREALED_API FMaterialGraphSchemaAction_NewNamedRerouteUsage : public FEd
 	{}
 
 	//~ Begin FEdGraphSchemaAction Interface
-	virtual UEdGraphNode* PerformAction(class UEdGraph* ParentGraph, UEdGraphPin* FromPin, const FVector2D Location, bool bSelectNewNode = true) override;
+	UNREALED_API virtual UEdGraphNode* PerformAction(class UEdGraph* ParentGraph, UEdGraphPin* FromPin, const FVector2D Location, bool bSelectNewNode = true) override;
 	//~ End FEdGraphSchemaAction Interface
 };
 
 /** Action to paste clipboard contents into the graph */
 USTRUCT()
-struct UNREALED_API FMaterialGraphSchemaAction_Paste : public FEdGraphSchemaAction
+struct FMaterialGraphSchemaAction_Paste : public FEdGraphSchemaAction
 {
 	GENERATED_USTRUCT_BODY();
 
@@ -143,7 +168,7 @@ struct UNREALED_API FMaterialGraphSchemaAction_Paste : public FEdGraphSchemaActi
 	{}
 
 	//~ Begin FEdGraphSchemaAction Interface
-	virtual UEdGraphNode* PerformAction(class UEdGraph* ParentGraph, UEdGraphPin* FromPin, const FVector2D Location, bool bSelectNewNode = true) override;
+	UNREALED_API virtual UEdGraphNode* PerformAction(class UEdGraph* ParentGraph, UEdGraphPin* FromPin, const FVector2D Location, bool bSelectNewNode = true) override;
 	//~ End FEdGraphSchemaAction Interface
 };
 
@@ -157,6 +182,9 @@ class UMaterialGraphSchema : public UEdGraphSchema
 	UNREALED_API static const FName PC_Required;
 	UNREALED_API static const FName PC_Optional;
 	UNREALED_API static const FName PC_MaterialInput;
+	UNREALED_API static const FName PC_Exec;
+	UNREALED_API static const FName PC_Void;
+	UNREALED_API static const FName PC_ValueType;
 
 	// Common PinType.PinSubCategory values
 	UNREALED_API static const FName PSC_Red;
@@ -164,6 +192,15 @@ class UMaterialGraphSchema : public UEdGraphSchema
 	UNREALED_API static const FName PSC_Blue;
 	UNREALED_API static const FName PSC_Alpha;
 	UNREALED_API static const FName PSC_RGBA;
+	UNREALED_API static const FName PSC_RGB;
+	UNREALED_API static const FName PSC_RG;
+	UNREALED_API static const FName PSC_Int;
+	UNREALED_API static const FName PSC_Byte;
+	UNREALED_API static const FName PSC_Bool;
+	UNREALED_API static const FName PSC_Float;
+	UNREALED_API static const FName PSC_Vector4;
+
+	UNREALED_API static const FName PN_Execute; // Category=PC_Exec, singleton, input
 
 	// Color of certain pins/connections
 	UNREALED_API static const FLinearColor ActivePinColor;
@@ -212,6 +249,15 @@ class UMaterialGraphSchema : public UEdGraphSchema
 	/** Check whether the types of pins are compatible */
 	bool ArePinsCompatible_Internal(const UEdGraphPin* InputPin, const UEdGraphPin* OutputPin, FText& ResponseMessage) const;
 
+	/** update material when the default value of a material node's pin has changed */
+	UNREALED_API void UpdateMaterialOnDefaultValueChanged(const UEdGraph* Graph) const;
+
+	/** Mark the material as dirty (because of a change that shouldn't trigger recompile or preview update) */ 
+	UNREALED_API void MarkMaterialDirty(const UEdGraph* Graph) const;
+
+	/** Update the detail view */
+	UNREALED_API void UpdateDetailView(const UEdGraph* Graph) const;
+
 	/** Gets the type of this pin (must be part of a UMaterialGraphNode_Base) */
 	UNREALED_API static uint32 GetMaterialValueType(const UEdGraphPin* MaterialPin);
 
@@ -220,11 +266,11 @@ class UMaterialGraphSchema : public UEdGraphSchema
 	virtual void GetContextMenuActions(class UToolMenu* Menu, class UGraphNodeContextMenuContext* Context) const override;
 	virtual const FPinConnectionResponse CanCreateConnection(const UEdGraphPin* A, const UEdGraphPin* B) const override;
 	virtual bool TryCreateConnection(UEdGraphPin* A, UEdGraphPin* B) const override;
-	virtual bool ShouldHidePinDefaultValue(UEdGraphPin* Pin) const override { return true; }
 	virtual FLinearColor GetPinTypeColor(const FEdGraphPinType& PinType) const override;
 	virtual void BreakNodeLinks(UEdGraphNode& TargetNode) const override;
 	virtual void BreakPinLinks(UEdGraphPin& TargetPin, bool bSendsNodeNotifcation) const override;
 	virtual void BreakSinglePinLink(UEdGraphPin* SourcePin, UEdGraphPin* TargetPin) const override;
+	virtual bool CanEncapuslateNode(UEdGraphNode const& TestNode) const override;
 	virtual void DroppedAssetsOnGraph(const TArray<struct FAssetData>& Assets, const FVector2D& GraphPosition, UEdGraph* Graph) const override;
 	virtual int32 GetNodeSelectionCount(const UEdGraph* Graph) const override;
 	virtual TSharedPtr<FEdGraphSchemaAction> GetCreateCommentAction() const override;
@@ -234,11 +280,17 @@ class UMaterialGraphSchema : public UEdGraphSchema
 	virtual void OnPinConnectionDoubleCicked(UEdGraphPin* PinA, UEdGraphPin* PinB, const FVector2D& GraphPosition) const override;
 	virtual bool SafeDeleteNodeFromGraph(UEdGraph* Graph, UEdGraphNode* NodeToDelete) const override;
 	virtual void GetAssetsGraphHoverMessage(const TArray<FAssetData>& Assets, const UEdGraph* HoverGraph, FString& OutTooltipText, bool& OutOkIcon) const;
+#if WITH_EDITORONLY_DATA
+	virtual float GetActionFilteredWeight(const FGraphActionListBuilderBase::ActionGroup& InCurrentAction, const TArray<FString>& InFilterTerms, const TArray<FString>& InSanitizedFilterTerms, const TArray<UEdGraphPin*>& DraggedFromPins) const override;
+	virtual FGraphSchemaSearchWeightModifiers GetSearchWeightModifiers() const override;
+#endif // WITH_EDITORONLY_DATA	
 	//~ End UEdGraphSchema Interface
 
 private:
 	/** Adds actions for all Material Functions */
 	void GetMaterialFunctionActions(FGraphActionMenuBuilder& ActionMenuBuilder) const;
+	/** Adds action for creating a composite */
+	void GetCompositeAction(FGraphActionMenuBuilder& ActionMenuBuilder, const UEdGraph* CurrentGraph = NULL) const;
 	/** Adds action for creating a comment */
 	void GetCommentAction(FGraphActionMenuBuilder& ActionMenuBuilder, const UEdGraph* CurrentGraph = NULL) const;
 	/** Adds actions for local variables */

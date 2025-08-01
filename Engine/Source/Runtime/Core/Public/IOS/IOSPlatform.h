@@ -45,19 +45,19 @@ typedef FIOSPlatformTypes FPlatformTypes;
 #define PLATFORM_HAS_BSD_TIME							1
 #define PLATFORM_HAS_BSD_IPV6_SOCKETS					1
 #define PLATFORM_HAS_BSD_SOCKET_FEATURE_MSG_DONTWAIT	1
+#define PLATFORM_HAS_MULTITHREADED_PREMAIN				1
 #define PLATFORM_MAX_FILEPATH_LENGTH_DEPRECATED			IOS_MAX_PATH
 #define PLATFORM_SUPPORTS_TEXTURE_STREAMING				1
 #define PLATFORM_BUILTIN_VERTEX_HALF_FLOAT				0
 #define PLATFORM_SUPPORTS_MULTIPLE_NATIVE_WINDOWS		0
 #define PLATFORM_ALLOW_NULL_RHI							1
-#define PLATFORM_ENABLE_VECTORINTRINSICS_NEON			PLATFORM_64BITS // disable vector intrinsics to make it compatible with 32-bit in Xcode 8.3
+#define PLATFORM_ENABLE_VECTORINTRINSICS				1
+#define PLATFORM_ENABLE_VECTORINTRINSICS_NEON			1
 #define PLATFORM_SUPPORTS_STACK_SYMBOLS					1
 #define PLATFORM_SUPPORTS_EARLY_MOVIE_PLAYBACK			1 // movies will start before engine is initalized
 #define PLATFORM_USE_FULL_TASK_GRAPH					0 // @todo platplug: not platplug, but should investigate soon anyway
 #define PLATFORM_IS_ANSI_MALLOC_THREADSAFE				1
 
-// on iOS we now perform offline symbolication as it's significantly faster. Requires bGenerateCrashReportSymbols=true in the ini file.
-#define	PLATFORM_RUNTIME_MALLOCPROFILER_SYMBOLICATION	0	
 #define PLATFORM_NUM_AUDIODECOMPRESSION_PRECACHE_BUFFERS		0
 #if PLATFORM_TVOS
 #define PLATFORM_USES_GLES								0
@@ -74,27 +74,18 @@ typedef FIOSPlatformTypes FPlatformTypes;
 
 #define PLATFORM_NEEDS_RHIRESOURCELIST					0
 #define PLATFORM_SUPPORTS_GEOMETRY_SHADERS				0
-#define PLATFORM_SUPPORTS_TESSELLATION_SHADERS			0
 #define PLATFORM_SUPPORTS_VIRTUAL_TEXTURE_STREAMING		1
-#define PLATFORM_SUPPORTS_LANDSCAPE_VISUAL_MESH_LOD_STREAMING 1
+#define PLATFORM_SUPPORTS_BINDLESS_RENDERING			0
 
 #define PLATFORM_GLOBAL_LOG_CATEGORY					LogIOS
 
-#define PLATFORM_BREAK()                                __builtin_trap()
+#define PLATFORM_BREAK()                                __builtin_debugtrap()
 
 #define PLATFORM_CODE_SECTION(Name)						__attribute__((section("__TEXT,__" Name ",regular,pure_instructions"))) \
 														__attribute__((aligned(4)))
 
-#if __has_feature(cxx_decltype_auto)
-	#define PLATFORM_COMPILER_HAS_DECLTYPE_AUTO 1
-#else
-	#define PLATFORM_COMPILER_HAS_DECLTYPE_AUTO 0
-#endif
-
 //mallocpoison not safe with aligned ansi allocator.  returns the larger unaligned size during Free() which causes writes off the end of the allocation.
 #define UE_USE_MALLOC_FILL_BYTES 0 
-
-#define PLATFORM_RHITHREAD_DEFAULT_BYPASS				1
 
 // Function type macros.
 #define VARARGS															/* Functions with variable arguments */

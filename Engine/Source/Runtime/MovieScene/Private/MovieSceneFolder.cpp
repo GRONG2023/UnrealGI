@@ -5,7 +5,9 @@
 #include "MovieSceneTrack.h"
 #include "Algo/Count.h"
 
-void GetMovieSceneFoldersRecursive(const TArray<UMovieSceneFolder*>& InFoldersToRecurse, TArray<UMovieSceneFolder*>& OutFolders)
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneFolder)
+
+void GetMovieSceneFoldersRecursive(TArrayView<UMovieSceneFolder* const> InFoldersToRecurse, TArray<UMovieSceneFolder*>& OutFolders)
 {
 	for (UMovieSceneFolder* Folder : InFoldersToRecurse)
 	{
@@ -40,7 +42,7 @@ void UMovieSceneFolder::SetFolderName( FName InFolderName )
 }
 
 
-const TArray<UMovieSceneFolder*>& UMovieSceneFolder::GetChildFolders() const
+TArrayView<UMovieSceneFolder* const> UMovieSceneFolder::GetChildFolders() const
 {
 	return ChildFolders;
 }
@@ -62,11 +64,19 @@ void UMovieSceneFolder::AddChildFolder( UMovieSceneFolder* InChildFolder )
 		{
 			MovieSceneFolder->RemoveChildFolder(InChildFolder);
 		}
+
+		if (OwningScene->GetRootFolders().Contains(InChildFolder))
+		{
+			OwningScene->Modify();
+			OwningScene->RemoveRootFolder(InChildFolder);
+		}
 	}
 #endif
 
 	// Now add it as a child of ourself
 	ChildFolders.Add( InChildFolder );
+
+	EventHandlers.Trigger(&UE::MovieScene::IFolderEventHandler::OnChildFolderAdded, InChildFolder);
 }
 
 
@@ -75,16 +85,18 @@ void UMovieSceneFolder::RemoveChildFolder( UMovieSceneFolder* InChildFolder )
 	Modify();
 
 	ChildFolders.Remove(InChildFolder);
+
+	EventHandlers.Trigger(&UE::MovieScene::IFolderEventHandler::OnChildFolderRemoved, InChildFolder);
 }
 
 
-const TArray<UMovieSceneTrack*>& UMovieSceneFolder::GetChildMasterTracks() const
+const TArray<UMovieSceneTrack*>& UMovieSceneFolder::GetChildTracks() const
 {
-	return ChildMasterTracks;
+	return ChildTracks;
 }
 
 
-void UMovieSceneFolder::AddChildMasterTrack( UMovieSceneTrack* InMasterTrack )
+void UMovieSceneFolder::AddChildTrack( UMovieSceneTrack* InTrack )
 {
 	Modify();
 
@@ -98,28 +110,33 @@ void UMovieSceneFolder::AddChildMasterTrack( UMovieSceneTrack* InMasterTrack )
 
 		for (UMovieSceneFolder* MovieSceneFolder : AllFolders)
 		{
-			MovieSceneFolder->RemoveChildMasterTrack(InMasterTrack);
+			MovieSceneFolder->RemoveChildTrack(InTrack);
 		}
 	}
 #endif
 
-	ChildMasterTracks.Add( InMasterTrack );
+	ChildTracks.Add( InTrack );
+
+	EventHandlers.Trigger(&UE::MovieScene::IFolderEventHandler::OnTrackAdded, InTrack);
 }
 
 
-void UMovieSceneFolder::RemoveChildMasterTrack( UMovieSceneTrack* InMasterTrack )
+void UMovieSceneFolder::RemoveChildTrack( UMovieSceneTrack* InTrack )
 {
 	Modify();
 
-	ChildMasterTracks.Remove( InMasterTrack );
+	if (ChildTracks.Remove( InTrack ) > 0)
+	{
+		EventHandlers.Trigger(&UE::MovieScene::IFolderEventHandler::OnTrackRemoved, InTrack);
+	}
 }
 
 
-void UMovieSceneFolder::ClearChildMasterTracks()
+void UMovieSceneFolder::ClearChildTracks()
 {
 	Modify();
 
-	ChildMasterTracks.Empty();
+	ChildTracks.Empty();
 }
 
 
@@ -134,7 +151,7 @@ void UMovieSceneFolder::AddChildObjectBinding(const FGuid& InObjectBinding )
 	Modify();
 
 #if WITH_EDITORONLY_DATA
-	// Ensure the added object  does not belong to any other folder in the same scene.
+	// Ensure the added object does not belong to any other folder in the same scene.
 	UMovieScene* OwningScene = GetTypedOuter<UMovieScene>();
 	if (OwningScene)
 	{
@@ -149,6 +166,8 @@ void UMovieSceneFolder::AddChildObjectBinding(const FGuid& InObjectBinding )
 #endif
 
 	ChildObjectBindings.Add( InObjectBinding );
+
+	EventHandlers.Trigger(&UE::MovieScene::IFolderEventHandler::OnObjectBindingAdded, InObjectBinding);
 }
 
 
@@ -156,7 +175,10 @@ void UMovieSceneFolder::RemoveChildObjectBinding( const FGuid& InObjectBinding )
 {
 	Modify();
 
-	ChildObjectBindings.Remove( InObjectBinding );
+	if (ChildObjectBindings.Remove( InObjectBinding ) > 0)
+	{
+		EventHandlers.Trigger(&UE::MovieScene::IFolderEventHandler::OnObjectBindingRemoved, InObjectBinding);
+	}
 }
 
 void UMovieSceneFolder::ClearChildObjectBindings()
@@ -192,16 +214,16 @@ void UMovieSceneFolder::PostLoad()
 	UMovieScene* OwningScene = GetTypedOuter<UMovieScene>();
 	if (OwningScene)
 	{
-		// Validate child Master Tracks
-		for(int32 ChildMasterTrackIndex = 0; ChildMasterTrackIndex < ChildMasterTracks.Num(); ChildMasterTrackIndex++)
+		// Validate child Tracks
+		for(int32 ChildTrackIndex = 0; ChildTrackIndex < ChildTracks.Num(); ChildTrackIndex++)
 		{
-			const UMovieSceneTrack* ChildTrack = ChildMasterTracks[ChildMasterTrackIndex];
-			if (!OwningScene->GetMasterTracks().Contains(ChildTrack))
+			const UMovieSceneTrack* ChildTrack = ChildTracks[ChildTrackIndex];
+			if (!OwningScene->GetTracks().Contains(ChildTrack))
 			{
-				ChildMasterTracks.RemoveAt(ChildMasterTrackIndex);
-				ChildMasterTrackIndex--;
+				ChildTracks.RemoveAt(ChildTrackIndex);
+				ChildTrackIndex--;
 
-				UE_LOG(LogMovieScene, Warning, TEXT("Folder (%s) in Sequence (%s) contained a reference to a Master Track (%s) that no longer exists in the sequence, removing."), *GetFolderName().ToString(), *OwningScene->GetPathName(), *GetNameSafe(ChildTrack));
+				UE_LOG(LogMovieScene, Warning, TEXT("Folder (%s) in Sequence (%s) contained a reference to a Track (%s) that no longer exists in the sequence, removing."), *GetFolderName().ToString(), *OwningScene->GetPathName(), *GetNameSafe(ChildTrack));
 			}
 		}
 
@@ -263,6 +285,25 @@ UMovieSceneFolder* UMovieSceneFolder::FindFolderContaining(const FGuid& InObject
 	return nullptr;
 }
 
+UMovieSceneFolder* UMovieSceneFolder::FindFolderContaining(const UMovieSceneTrack* InTrack)
+{
+	if (ChildTracks.Contains(InTrack))
+	{
+		return this;
+	}
+
+	for (UMovieSceneFolder* ChildFolder : GetChildFolders())
+	{
+		UMovieSceneFolder* Folder = ChildFolder->FindFolderContaining(InTrack);
+		if (Folder != nullptr)
+		{
+			return Folder;
+		}
+	}
+
+	return nullptr;
+}
+
 void
 TraverseFolder(UMovieSceneFolder* Folder, TMap<UMovieSceneFolder*, UMovieSceneFolder*>& ChildToParentMap)
 {
@@ -274,7 +315,7 @@ TraverseFolder(UMovieSceneFolder* Folder, TMap<UMovieSceneFolder*, UMovieSceneFo
 	}
 }
 
-void UMovieSceneFolder::CalculateFolderPath(UMovieSceneFolder* Folder, const TArray<UMovieSceneFolder*>& RootFolders, TArray<FName>& FolderPath)
+void UMovieSceneFolder::CalculateFolderPath(UMovieSceneFolder* Folder, TArrayView<UMovieSceneFolder* const> RootFolders, TArray<FName>& FolderPath)
 {
 	TMap<UMovieSceneFolder*, UMovieSceneFolder*> ChildToParentMap;
 	for (UMovieSceneFolder* RootFolder : RootFolders)
@@ -293,7 +334,7 @@ void UMovieSceneFolder::CalculateFolderPath(UMovieSceneFolder* Folder, const TAr
 	}
 }
 
-UMovieSceneFolder* UMovieSceneFolder::GetFolderWithPath(const TArray<FName>& InFolderPath, const TArray<UMovieSceneFolder*>& InFolders, const TArray<UMovieSceneFolder*>& RootFolders)
+UMovieSceneFolder* UMovieSceneFolder::GetFolderWithPath(const TArray<FName>& InFolderPath, const TArray<UMovieSceneFolder*>& InFolders, TArrayView<UMovieSceneFolder* const> RootFolders)
 {
 	for (UMovieSceneFolder* Folder : InFolders)
 	{
@@ -313,6 +354,15 @@ void UMovieSceneFolder::Serialize( FArchive& Archive )
 	if ( Archive.IsLoading() )
 	{
 		Super::Serialize( Archive );
+
+#if WITH_EDITOR
+		if (ChildMasterTracks_DEPRECATED.Num())
+		{
+			ChildTracks = ChildMasterTracks_DEPRECATED;
+			ChildMasterTracks_DEPRECATED.Empty();
+		}
+#endif
+
 		ChildObjectBindings.Empty();
 		for ( const FString& ChildObjectBindingString : ChildObjectBindingStrings )
 		{
@@ -331,3 +381,55 @@ void UMovieSceneFolder::Serialize( FArchive& Archive )
 		Super::Serialize( Archive );
 	}
 }
+
+FName UMovieSceneFolder::MakeUniqueChildFolderName(FName InName) const
+{
+	return MakeUniqueChildFolderName(InName, GetChildFolders());
+}
+
+FName UMovieSceneFolder::MakeUniqueChildFolderName(FName InName, TArrayView<UMovieSceneFolder* const> InFolders)
+{
+	bool bFoundExactDuplicate = false;
+
+	int32 NextNameIndex = InName.GetNumber();
+
+	// Iterate all children, finding a new unique name index for any that have the same base name
+	for (UMovieSceneFolder* Child : InFolders)
+	{
+		constexpr bool bCompareNumber = false;
+		if (InName.IsEqual(Child->GetFolderName(), ENameCase::IgnoreCase, bCompareNumber))
+		{
+			NextNameIndex = FMath::Max(NextNameIndex, Child->GetFolderName().GetNumber()) + 1;
+		}
+
+		if (InName == Child->GetFolderName())
+		{
+			bFoundExactDuplicate = true;
+		}
+	}
+
+	if (bFoundExactDuplicate)
+	{
+		InName.SetNumber(NextNameIndex);
+	}
+
+	return InName;
+}
+
+#if WITH_EDITOR
+
+void UMovieSceneFolder::PostEditUndo()
+{
+	Super::PostEditUndo();
+
+	EventHandlers.Trigger(&UE::MovieScene::IFolderEventHandler::OnPostUndo);
+}
+
+void UMovieSceneFolder::PostEditUndo(TSharedPtr<ITransactionObjectAnnotation> TransactionAnnotation)
+{
+	Super::PostEditUndo(TransactionAnnotation);
+
+	EventHandlers.Trigger(&UE::MovieScene::IFolderEventHandler::OnPostUndo);
+}
+
+#endif

@@ -2,8 +2,9 @@
 
 #pragma once
 
+#include "Math/MathFwd.h"
+
 class UWorld;
-struct FVector;
 class FString;
 struct FColor;
 

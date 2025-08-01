@@ -2,10 +2,11 @@
 
 #include "VectorFFT.h"
 #include "SignalProcessingModule.h"
-#include "CoreMinimal.h"
 
+#include "Templates/UniquePtr.h"
 #include "DSP/FFTAlgorithm.h"
-#include "DSP/BufferVectorOperations.h"
+#include "DSP/FloatArrayMath.h"
+
 
 namespace Audio
 {
@@ -52,9 +53,6 @@ namespace Audio
 			// @param OutComplex - Interleaved complex data with (2 * FFTSize) num floats.
 			void ForwardComplexToComplex(const float* RESTRICT InComplex, float* RESTRICT OutComplex)
 			{
-				checkf(IsAligned<const float*>(InComplex, AUDIO_SIMD_FLOAT_ALIGNMENT), TEXT("Memory must be aligned.")); 
-				checkf(IsAligned<float*>(OutComplex, AUDIO_SIMD_FLOAT_ALIGNMENT), TEXT("Memory must be aligned.")); 
-
 				// To perform FFT, must complete Log2FFTSize stages.  Each radix pass performs 2^m stages
 				// where 2^m is the radix number. So a radix-4 stage is radix-2^m or radix-2^2. Hence radix
 				// 4 performs two stages. Radix-8 is Radix-2^3, so it performs 3 stages.
@@ -108,9 +106,6 @@ namespace Audio
 
 			void InverseComplexToComplex(const float* RESTRICT InComplex, float* RESTRICT OutComplex)
 			{
-				checkf(IsAligned<const float*>(InComplex, AUDIO_SIMD_FLOAT_ALIGNMENT), TEXT("Memory must be aligned.")); 
-				checkf(IsAligned<float*>(OutComplex, AUDIO_SIMD_FLOAT_ALIGNMENT), TEXT("Memory must be aligned.")); 
-
 				// Perform inverse FFT by complex conjugating the input and output.
 				
 				float* WorkData = InverseWorkBuffer.GetData();
@@ -149,27 +144,27 @@ namespace Audio
 			// Structure to hold loaded inputs on final radix 4 pass
 			struct FFinalInputs
 			{
-				VectorRegister A0;
-				VectorRegister A1;
-				VectorRegister A2;
-				VectorRegister A3;
-				VectorRegister A4;
-				VectorRegister A5;
-				VectorRegister A6;
-				VectorRegister A7;
+				VectorRegister4Float A0;
+				VectorRegister4Float A1;
+				VectorRegister4Float A2;
+				VectorRegister4Float A3;
+				VectorRegister4Float A4;
+				VectorRegister4Float A5;
+				VectorRegister4Float A6;
+				VectorRegister4Float A7;
 			};
 
 			// Structure to hold loaded outputs on final radix 4 pass
 			struct FFinalOutputs
 			{
-				VectorRegister D0;
-				VectorRegister D1;
-				VectorRegister D2;
-				VectorRegister D3;
-				VectorRegister D4;
-				VectorRegister D5;
-				VectorRegister D6;
-				VectorRegister D7;
+				VectorRegister4Float D0;
+				VectorRegister4Float D1;
+				VectorRegister4Float D2;
+				VectorRegister4Float D3;
+				VectorRegister4Float D4;
+				VectorRegister4Float D5;
+				VectorRegister4Float D6;
+				VectorRegister4Float D7;
 			};
 
 			// Weight structure for final Radix4 pass
@@ -226,14 +221,14 @@ namespace Audio
 				// Complex values in a vector are [real_1, imag_1, real_2, imag_2].  
 				// By multipling this value, we flip the sign of the imaginary components, which
 				// is the equivalent of a complex conjugate.
-				const VectorRegister SignFlipImag = MakeVectorRegister(Scale, -Scale, Scale, -Scale);
+				const VectorRegister4Float SignFlipImag = MakeVectorRegisterFloat(Scale, -Scale, Scale, -Scale);
 
 				// Perform operation using SIMD
 				for (int32 i = 0; i < NumToSimd; i += 4)
 				{
-					VectorRegister Value = VectorLoadAligned(&InValues[i]);
+					VectorRegister4Float Value = VectorLoad(&InValues[i]);
 					Value = VectorMultiply(SignFlipImag, Value);
-					VectorStoreAligned(Value, &OutValues[i]);
+					VectorStore(Value, &OutValues[i]);
 				}
 
 				// Perform operation where SIMD not possible.
@@ -258,7 +253,7 @@ namespace Audio
 				// Calculate number of constant weight butterflies in this stage.
 				const int NumButterflies = 1 << (InStageIndex - 2);
 
-				const VectorRegister SignFlipImag = MakeVectorRegister(1.f, -1.f, 1.f, -1.f);
+				const VectorRegister4Float SignFlipImag = MakeVectorRegisterFloat(1.f, -1.f, 1.f, -1.f);
 
 				const int32 Offset0 = 0;
 				const int32 Offset1 = 2 * NumButterflies;
@@ -273,28 +268,28 @@ namespace Audio
 					const int32 Pos2 = Offset2 + Pos;
 					const int32 Pos3 = Offset3 + Pos;
 
-					VectorRegister A0 = VectorLoadAligned(&InValues[Pos0]);
-					VectorRegister A1 = VectorLoadAligned(&InValues[Pos1]);
-					VectorRegister A2 = VectorLoadAligned(&InValues[Pos2]);
-					VectorRegister A3 = VectorLoadAligned(&InValues[Pos3]);
+					VectorRegister4Float A0 = VectorLoad(&InValues[Pos0]);
+					VectorRegister4Float A1 = VectorLoad(&InValues[Pos1]);
+					VectorRegister4Float A2 = VectorLoad(&InValues[Pos2]);
+					VectorRegister4Float A3 = VectorLoad(&InValues[Pos3]);
 
-					VectorRegister C0 = VectorAdd(A0, A2);
-					VectorRegister C2 = VectorSubtract(A0, A2);
-					VectorRegister C1 = VectorAdd(A1, A3);
-					VectorRegister C3 = VectorSubtract(A1, A3);
+					VectorRegister4Float C0 = VectorAdd(A0, A2);
+					VectorRegister4Float C2 = VectorSubtract(A0, A2);
+					VectorRegister4Float C1 = VectorAdd(A1, A3);
+					VectorRegister4Float C3 = VectorSubtract(A1, A3);
 
-					VectorRegister C3Conj = VectorMultiply(C3, SignFlipImag);
-					VectorRegister C3ConjSwizzle = VectorSwizzle(C3Conj, 1, 0, 3, 2);
+					VectorRegister4Float C3Conj = VectorMultiply(C3, SignFlipImag);
+					VectorRegister4Float C3ConjSwizzle = VectorSwizzle(C3Conj, 1, 0, 3, 2);
 
-					VectorRegister D0 = VectorAdd(C1, C0);
-					VectorRegister D1 = VectorSubtract(C0, C1);
-					VectorRegister D2 = VectorAdd(C2, C3ConjSwizzle);
-					VectorRegister D3 = VectorSubtract(C2, C3ConjSwizzle);
+					VectorRegister4Float D0 = VectorAdd(C1, C0);
+					VectorRegister4Float D1 = VectorSubtract(C0, C1);
+					VectorRegister4Float D2 = VectorAdd(C2, C3ConjSwizzle);
+					VectorRegister4Float D3 = VectorSubtract(C2, C3ConjSwizzle);
 
-					VectorStoreAligned(D0, &OutValues[Pos0]);
-					VectorStoreAligned(D1, &OutValues[Pos1]);
-					VectorStoreAligned(D2, &OutValues[Pos2]);
-					VectorStoreAligned(D3, &OutValues[Pos3]);
+					VectorStore(D0, &OutValues[Pos0]);
+					VectorStore(D1, &OutValues[Pos1]);
+					VectorStore(D2, &OutValues[Pos2]);
+					VectorStore(D3, &OutValues[Pos3]);
 				}
 			}
 
@@ -315,9 +310,9 @@ namespace Audio
 				// Calculate number of constant weight butterflies in this stage.
 				const int32 NumButterflies = 1 << (InStageIndex - 3);
 
-				const VectorRegister SignFlipImag = MakeVectorRegister(1.f, -1.f, 1.f, -1.f);
-				const VectorRegister VectorSqrt2D2 = MakeVectorRegister(Sqrt2D2, Sqrt2D2, Sqrt2D2, Sqrt2D2);
-				const VectorRegister VectorNegSqrt2D2 = MakeVectorRegister(-Sqrt2D2, -Sqrt2D2, -Sqrt2D2, -Sqrt2D2);
+				const VectorRegister4Float SignFlipImag = MakeVectorRegisterFloat(1.f, -1.f, 1.f, -1.f);
+				const VectorRegister4Float VectorSqrt2D2 = MakeVectorRegisterFloat(Sqrt2D2, Sqrt2D2, Sqrt2D2, Sqrt2D2);
+				const VectorRegister4Float VectorNegSqrt2D2 = MakeVectorRegisterFloat(-Sqrt2D2, -Sqrt2D2, -Sqrt2D2, -Sqrt2D2);
 
 				const int32 Offset0 = 0;
 				const int32 Offset1 = 2 * NumButterflies;
@@ -340,69 +335,68 @@ namespace Audio
 					const int32 Pos6 = Offset6 + Pos;
 					const int32 Pos7 = Offset7 + Pos;
 
-					VectorRegister A0 = VectorLoadAligned(&InValues[Pos0]);
-					VectorRegister A1 = VectorLoadAligned(&InValues[Pos1]);
-					VectorRegister A2 = VectorLoadAligned(&InValues[Pos2]);
-					VectorRegister A3 = VectorLoadAligned(&InValues[Pos3]);
-					VectorRegister A4 = VectorLoadAligned(&InValues[Pos4]);
-					VectorRegister A5 = VectorLoadAligned(&InValues[Pos5]);
-					VectorRegister A6 = VectorLoadAligned(&InValues[Pos6]);
-					VectorRegister A7 = VectorLoadAligned(&InValues[Pos7]);
+					VectorRegister4Float A0 = VectorLoad(&InValues[Pos0]);
+					VectorRegister4Float A1 = VectorLoad(&InValues[Pos1]);
+					VectorRegister4Float A2 = VectorLoad(&InValues[Pos2]);
+					VectorRegister4Float A3 = VectorLoad(&InValues[Pos3]);
+					VectorRegister4Float A4 = VectorLoad(&InValues[Pos4]);
+					VectorRegister4Float A5 = VectorLoad(&InValues[Pos5]);
+					VectorRegister4Float A6 = VectorLoad(&InValues[Pos6]);
+					VectorRegister4Float A7 = VectorLoad(&InValues[Pos7]);
 
-					VectorRegister B0 = VectorAdd(A0, A4);
-					VectorRegister B1 = VectorAdd(A1, A5);
-					VectorRegister B2 = VectorAdd(A2, A6);
-					VectorRegister B3 = VectorAdd(A3, A7);
-					VectorRegister B4 = VectorSubtract(A0, A4);
-					VectorRegister B5 = VectorSubtract(A1, A5);
-					VectorRegister B6 = VectorSubtract(A2, A6);
-					VectorRegister B7 = VectorSubtract(A3, A7);
+					VectorRegister4Float B0 = VectorAdd(A0, A4);
+					VectorRegister4Float B1 = VectorAdd(A1, A5);
+					VectorRegister4Float B2 = VectorAdd(A2, A6);
+					VectorRegister4Float B3 = VectorAdd(A3, A7);
+					VectorRegister4Float B4 = VectorSubtract(A0, A4);
+					VectorRegister4Float B5 = VectorSubtract(A1, A5);
+					VectorRegister4Float B6 = VectorSubtract(A2, A6);
+					VectorRegister4Float B7 = VectorSubtract(A3, A7);
 
-					VectorRegister B6Conj = VectorMultiply(SignFlipImag, B6);
-					VectorRegister B6ConjSwizzle = VectorSwizzle(B6Conj, 1, 0, 3, 2);
+					VectorRegister4Float B6Conj = VectorMultiply(SignFlipImag, B6);
+					VectorRegister4Float B6ConjSwizzle = VectorSwizzle(B6Conj, 1, 0, 3, 2);
 
-					VectorRegister B7Conj = VectorMultiply(SignFlipImag, B7);
-					VectorRegister B7ConjSwizzle = VectorSwizzle(B7Conj, 1, 0, 3, 2);
+					VectorRegister4Float B7Conj = VectorMultiply(SignFlipImag, B7);
+					VectorRegister4Float B7ConjSwizzle = VectorSwizzle(B7Conj, 1, 0, 3, 2);
 
-					VectorRegister C0 = VectorAdd(B0, B2);
-					VectorRegister C1 = VectorAdd(B1, B3);
-					VectorRegister C2 = VectorSubtract(B0, B2);
-					VectorRegister C3 = VectorSubtract(B1, B3);
-					VectorRegister C4 = VectorAdd(B4, B6ConjSwizzle);
-					VectorRegister C5 = VectorAdd(B5, B7ConjSwizzle);
-					VectorRegister C6 = VectorSubtract(B4, B6ConjSwizzle);
-					VectorRegister C7 = VectorSubtract(B5, B7ConjSwizzle);
+					VectorRegister4Float C0 = VectorAdd(B0, B2);
+					VectorRegister4Float C1 = VectorAdd(B1, B3);
+					VectorRegister4Float C2 = VectorSubtract(B0, B2);
+					VectorRegister4Float C3 = VectorSubtract(B1, B3);
+					VectorRegister4Float C4 = VectorAdd(B4, B6ConjSwizzle);
+					VectorRegister4Float C5 = VectorAdd(B5, B7ConjSwizzle);
+					VectorRegister4Float C6 = VectorSubtract(B4, B6ConjSwizzle);
+					VectorRegister4Float C7 = VectorSubtract(B5, B7ConjSwizzle);
 
-					VectorRegister C3Conj = VectorMultiply(SignFlipImag, C3);
-					VectorRegister C3ConjSwizzle = VectorSwizzle(C3Conj, 1, 0, 3, 2);
+					VectorRegister4Float C3Conj = VectorMultiply(SignFlipImag, C3);
+					VectorRegister4Float C3ConjSwizzle = VectorSwizzle(C3Conj, 1, 0, 3, 2);
 
-					VectorRegister C5Conj = VectorMultiply(SignFlipImag, C5);
-					VectorRegister C5ConjSwizzle = VectorSwizzle(C5Conj, 1, 0, 3, 2);
-					VectorRegister T5 = VectorAdd(C5, C5ConjSwizzle);
+					VectorRegister4Float C5Conj = VectorMultiply(SignFlipImag, C5);
+					VectorRegister4Float C5ConjSwizzle = VectorSwizzle(C5Conj, 1, 0, 3, 2);
+					VectorRegister4Float T5 = VectorAdd(C5, C5ConjSwizzle);
 
-					VectorRegister C7Conj = VectorMultiply(SignFlipImag, C7);
-					VectorRegister C7Swizzle = VectorSwizzle(C7, 1, 0, 3, 2);
+					VectorRegister4Float C7Swizzle = VectorSwizzle(C7, 1, 0, 3, 2);
 
-					VectorRegister T7 = VectorAdd(C7Swizzle, C7Conj);
-					VectorRegister T7Conj = VectorMultiply(T7, SignFlipImag);
+					VectorRegister4Float T7 = VectorMultiplyAdd(SignFlipImag, C7, C7Swizzle);
+					VectorRegister4Float T7Conj = VectorMultiply(T7, SignFlipImag);
 
-					VectorRegister D0 = VectorAdd(C0, C1);
-					VectorRegister D1 = VectorSubtract(C0, C1);
-					VectorRegister D2 = VectorAdd(C2, C3ConjSwizzle);
-					VectorRegister D3 = VectorSubtract(C2, C3ConjSwizzle);
-					VectorRegister D4 = VectorMultiplyAdd(T5, VectorSqrt2D2, C4);
-					VectorRegister D5 = VectorMultiplyAdd(T5, VectorNegSqrt2D2, C4);
-					VectorRegister D6 = VectorMultiplyAdd(VectorNegSqrt2D2, T7Conj, C6);
-					VectorRegister D7 = VectorMultiplyAdd(VectorSqrt2D2, T7Conj, C6);
+					VectorRegister4Float D0 = VectorAdd(C0, C1);
+					VectorRegister4Float D1 = VectorSubtract(C0, C1);
+					VectorRegister4Float D2 = VectorAdd(C2, C3ConjSwizzle);
+					VectorRegister4Float D3 = VectorSubtract(C2, C3ConjSwizzle);
+					VectorRegister4Float D4 = VectorMultiplyAdd(T5, VectorSqrt2D2, C4);
+					VectorRegister4Float D5 = VectorMultiplyAdd(T5, VectorNegSqrt2D2, C4);
+					VectorRegister4Float D6 = VectorMultiplyAdd(VectorNegSqrt2D2, T7Conj, C6);
+					VectorRegister4Float D7 = VectorMultiplyAdd(VectorSqrt2D2, T7Conj, C6);
 
-					VectorStoreAligned(D0, &OutValues[Pos0]);
-					VectorStoreAligned(D1, &OutValues[Pos1]);
-					VectorStoreAligned(D2, &OutValues[Pos2]);
-					VectorStoreAligned(D3, &OutValues[Pos3]);
-					VectorStoreAligned(D4, &OutValues[Pos4]);
-					VectorStoreAligned(D5, &OutValues[Pos5]);
-					VectorStoreAligned(D6, &OutValues[Pos6]);
-					VectorStoreAligned(D7, &OutValues[Pos7]);
+					VectorStore(D0, &OutValues[Pos0]);
+					VectorStore(D1, &OutValues[Pos1]);
+					VectorStore(D2, &OutValues[Pos2]);
+					VectorStore(D3, &OutValues[Pos3]);
+					VectorStore(D4, &OutValues[Pos4]);
+					VectorStore(D5, &OutValues[Pos5]);
+					VectorStore(D6, &OutValues[Pos6]);
+					VectorStore(D7, &OutValues[Pos7]);
 				}
 			}
 
@@ -415,18 +409,18 @@ namespace Audio
 				const int32 NumButterflies = 1 << (InStageIndex - 2);
 
 				// Load weights for butterfly
-				const VectorRegister Weight1Real = VectorLoadAligned(Weights.W1R);
-				const VectorRegister Weight1Imag = VectorLoadAligned(Weights.W1I);
-				const VectorRegister Weight2Real = VectorLoadAligned(Weights.W2R);
-				const VectorRegister Weight2Imag = VectorLoadAligned(Weights.W2I);
-				const VectorRegister Weight3Real = VectorLoadAligned(Weights.W3R);
-				const VectorRegister Weight3Imag = VectorLoadAligned(Weights.W3I);
+				const VectorRegister4Float Weight1Real = VectorLoad(Weights.W1R);
+				const VectorRegister4Float Weight1Imag = VectorLoad(Weights.W1I);
+				const VectorRegister4Float Weight2Real = VectorLoad(Weights.W2R);
+				const VectorRegister4Float Weight2Imag = VectorLoad(Weights.W2I);
+				const VectorRegister4Float Weight3Real = VectorLoad(Weights.W3R);
+				const VectorRegister4Float Weight3Imag = VectorLoad(Weights.W3I);
 
-				const VectorRegister Weight3RealNeg = VectorLoadAligned(Weights.W3RNeg);
-				const VectorRegister Weight2RealNeg = VectorLoadAligned(Weights.W2RNeg);
-				const VectorRegister Weight1RealNeg = VectorLoadAligned(Weights.W1RNeg);
-				const VectorRegister Weight1RealD2 = VectorLoadAligned(Weights.W1RD2);
-				const VectorRegister Weight1RealD3 = VectorLoadAligned(Weights.W1RD3);
+				const VectorRegister4Float Weight3RealNeg = VectorLoad(Weights.W3RNeg);
+				const VectorRegister4Float Weight2RealNeg = VectorLoad(Weights.W2RNeg);
+				const VectorRegister4Float Weight1RealNeg = VectorLoad(Weights.W1RNeg);
+				const VectorRegister4Float Weight1RealD2 = VectorLoad(Weights.W1RD2);
+				const VectorRegister4Float Weight1RealD3 = VectorLoad(Weights.W1RD3);
 
 				// Perform butterflies.
 				for (int32 i = 0; i < NumButterflies; i += 2)
@@ -436,35 +430,35 @@ namespace Audio
 					const int32 Pos2 = 2 * (Stride * ButterflyIndex + 2 * NumButterflies + i);
 					const int32 Pos3 = 2 * (Stride * ButterflyIndex + 3 * NumButterflies + i);
 
-					VectorRegister A0 = VectorLoadAligned(&InOutValues[Pos0]);
-					VectorRegister A1 = VectorLoadAligned(&InOutValues[Pos1]);
-					VectorRegister A2 = VectorLoadAligned(&InOutValues[Pos2]);
-					VectorRegister A3 = VectorLoadAligned(&InOutValues[Pos3]);
+					VectorRegister4Float A0 = VectorLoad(&InOutValues[Pos0]);
+					VectorRegister4Float A1 = VectorLoad(&InOutValues[Pos1]);
+					VectorRegister4Float A2 = VectorLoad(&InOutValues[Pos2]);
+					VectorRegister4Float A3 = VectorLoad(&InOutValues[Pos3]);
 
-					VectorRegister A1Swizzle = VectorSwizzle(A1, 1, 0, 3, 2);
-					VectorRegister A2Swizzle = VectorSwizzle(A2, 1, 0, 3, 2);
-					VectorRegister A3Swizzle = VectorSwizzle(A3, 1, 0, 3, 2);
+					VectorRegister4Float A1Swizzle = VectorSwizzle(A1, 1, 0, 3, 2);
+					VectorRegister4Float A2Swizzle = VectorSwizzle(A2, 1, 0, 3, 2);
+					VectorRegister4Float A3Swizzle = VectorSwizzle(A3, 1, 0, 3, 2);
 
-					VectorRegister B1 = VectorMultiplyAdd(A1Swizzle, Weight1Imag, A1);
-					VectorRegister B2 = VectorMultiplyAdd(A2Swizzle, Weight2Imag, A2);
-					VectorRegister B3 = VectorMultiplyAdd(A3Swizzle, Weight3Imag, A3);
+					VectorRegister4Float B1 = VectorMultiplyAdd(A1Swizzle, Weight1Imag, A1);
+					VectorRegister4Float B2 = VectorMultiplyAdd(A2Swizzle, Weight2Imag, A2);
+					VectorRegister4Float B3 = VectorMultiplyAdd(A3Swizzle, Weight3Imag, A3);
 
-					VectorRegister C0 = VectorMultiplyAdd(B2, Weight2Real, A0);
-					VectorRegister C2 = VectorMultiplyAdd(B2, Weight2RealNeg, A0);
-					VectorRegister C1 = VectorMultiplyAdd(B3, Weight3Real, B1);
-					VectorRegister C3 = VectorMultiplyAdd(B3, Weight3RealNeg, B1);
+					VectorRegister4Float C0 = VectorMultiplyAdd(B2, Weight2Real, A0);
+					VectorRegister4Float C2 = VectorMultiplyAdd(B2, Weight2RealNeg, A0);
+					VectorRegister4Float C1 = VectorMultiplyAdd(B3, Weight3Real, B1);
+					VectorRegister4Float C3 = VectorMultiplyAdd(B3, Weight3RealNeg, B1);
 
-					VectorRegister C3Swizzle = VectorSwizzle(C3, 1, 0, 3, 2);
+					VectorRegister4Float C3Swizzle = VectorSwizzle(C3, 1, 0, 3, 2);
 
-					VectorRegister D0 = VectorMultiplyAdd(C1, Weight1Real, C0);
-					VectorRegister D1 = VectorMultiplyAdd(C1, Weight1RealNeg, C0);
-					VectorRegister D2 = VectorMultiplyAdd(C3Swizzle, Weight1RealD2, C2);
-					VectorRegister D3 = VectorMultiplyAdd(C3Swizzle, Weight1RealD3, C2);
+					VectorRegister4Float D0 = VectorMultiplyAdd(C1, Weight1Real, C0);
+					VectorRegister4Float D1 = VectorMultiplyAdd(C1, Weight1RealNeg, C0);
+					VectorRegister4Float D2 = VectorMultiplyAdd(C3Swizzle, Weight1RealD2, C2);
+					VectorRegister4Float D3 = VectorMultiplyAdd(C3Swizzle, Weight1RealD3, C2);
 
-					VectorStoreAligned(D0, &InOutValues[Pos0]);
-					VectorStoreAligned(D1, &InOutValues[Pos1]);
-					VectorStoreAligned(D2, &InOutValues[Pos2]);
-					VectorStoreAligned(D3, &InOutValues[Pos3]);
+					VectorStore(D0, &InOutValues[Pos0]);
+					VectorStore(D1, &InOutValues[Pos1]);
+					VectorStore(D2, &InOutValues[Pos2]);
+					VectorStore(D3, &InOutValues[Pos3]);
 				}
 			}
 
@@ -482,18 +476,18 @@ namespace Audio
 					// Load values for current weight.
 					const FRadix4Weight& Weights = Radix4Weights[i];
 
-					const VectorRegister Weight1Real = VectorLoadAligned(Weights.W1R);
-					const VectorRegister Weight1Imag = VectorLoadAligned(Weights.W1I);
-					const VectorRegister Weight2Real = VectorLoadAligned(Weights.W2R);
-					const VectorRegister Weight2Imag = VectorLoadAligned(Weights.W2I);
-					const VectorRegister Weight3Real = VectorLoadAligned(Weights.W3R);
-					const VectorRegister Weight3Imag = VectorLoadAligned(Weights.W3I);
+					const VectorRegister4Float Weight1Real = VectorLoad(Weights.W1R);
+					const VectorRegister4Float Weight1Imag = VectorLoad(Weights.W1I);
+					const VectorRegister4Float Weight2Real = VectorLoad(Weights.W2R);
+					const VectorRegister4Float Weight2Imag = VectorLoad(Weights.W2I);
+					const VectorRegister4Float Weight3Real = VectorLoad(Weights.W3R);
+					const VectorRegister4Float Weight3Imag = VectorLoad(Weights.W3I);
 
-					const VectorRegister Weight3RealNeg = VectorLoadAligned(Weights.W3RNeg);
-					const VectorRegister Weight2RealNeg = VectorLoadAligned(Weights.W2RNeg);
-					const VectorRegister Weight1RealNeg = VectorLoadAligned(Weights.W1RNeg);
-					const VectorRegister Weight1RealD2 = VectorLoadAligned(Weights.W1RD2);
-					const VectorRegister Weight1RealD3 = VectorLoadAligned(Weights.W1RD3);
+					const VectorRegister4Float Weight3RealNeg = VectorLoad(Weights.W3RNeg);
+					const VectorRegister4Float Weight2RealNeg = VectorLoad(Weights.W2RNeg);
+					const VectorRegister4Float Weight1RealNeg = VectorLoad(Weights.W1RNeg);
+					const VectorRegister4Float Weight1RealD2 = VectorLoad(Weights.W1RD2);
+					const VectorRegister4Float Weight1RealD3 = VectorLoad(Weights.W1RD3);
 
 					for (int32 j = 0; j < 4 ; j += 2)
 					{
@@ -502,34 +496,34 @@ namespace Audio
 						const int32 Pos2 = 2 * (Stride * i + 8 + j);
 						const int32 Pos3 = 2 * (Stride * i + 12 + j);
 
-						VectorRegister A0 = VectorLoadAligned(&InOutValues[Pos0]);
-						VectorRegister A1 = VectorLoadAligned(&InOutValues[Pos1]);
-						VectorRegister A2 = VectorLoadAligned(&InOutValues[Pos2]);
-						VectorRegister A3 = VectorLoadAligned(&InOutValues[Pos3]);
+						VectorRegister4Float A0 = VectorLoad(&InOutValues[Pos0]);
+						VectorRegister4Float A1 = VectorLoad(&InOutValues[Pos1]);
+						VectorRegister4Float A2 = VectorLoad(&InOutValues[Pos2]);
+						VectorRegister4Float A3 = VectorLoad(&InOutValues[Pos3]);
 
-						VectorRegister A1Swizzle = VectorSwizzle(A1, 1, 0, 3, 2);
-						VectorRegister A2Swizzle = VectorSwizzle(A2, 1, 0, 3, 2);
-						VectorRegister A3Swizzle = VectorSwizzle(A3, 1, 0, 3, 2);
+						VectorRegister4Float A1Swizzle = VectorSwizzle(A1, 1, 0, 3, 2);
+						VectorRegister4Float A2Swizzle = VectorSwizzle(A2, 1, 0, 3, 2);
+						VectorRegister4Float A3Swizzle = VectorSwizzle(A3, 1, 0, 3, 2);
 
-						VectorRegister B1 = VectorMultiplyAdd(A1Swizzle, Weight1Imag, A1);
-						VectorRegister B2 = VectorMultiplyAdd(A2Swizzle, Weight2Imag, A2);
-						VectorRegister B3 = VectorMultiplyAdd(A3Swizzle, Weight3Imag, A3);
+						VectorRegister4Float B1 = VectorMultiplyAdd(A1Swizzle, Weight1Imag, A1);
+						VectorRegister4Float B2 = VectorMultiplyAdd(A2Swizzle, Weight2Imag, A2);
+						VectorRegister4Float B3 = VectorMultiplyAdd(A3Swizzle, Weight3Imag, A3);
 						
-						VectorRegister C0 = VectorMultiplyAdd(B2, Weight2Real, A0);
-						VectorRegister C1 = VectorMultiplyAdd(B3, Weight3Real, B1);
-						VectorRegister C2 = VectorMultiplyAdd(B2, Weight2RealNeg, A0);
-						VectorRegister C3 = VectorMultiplyAdd(B3, Weight3RealNeg, B1);
-						VectorRegister C3Swizzle = VectorSwizzle(C3, 1, 0, 3, 2);
+						VectorRegister4Float C0 = VectorMultiplyAdd(B2, Weight2Real, A0);
+						VectorRegister4Float C1 = VectorMultiplyAdd(B3, Weight3Real, B1);
+						VectorRegister4Float C2 = VectorMultiplyAdd(B2, Weight2RealNeg, A0);
+						VectorRegister4Float C3 = VectorMultiplyAdd(B3, Weight3RealNeg, B1);
+						VectorRegister4Float C3Swizzle = VectorSwizzle(C3, 1, 0, 3, 2);
 						
-						VectorRegister D0 = VectorMultiplyAdd(C1, Weight1Real, C0);
-						VectorRegister D1 = VectorMultiplyAdd(C1, Weight1RealNeg, C0);
-						VectorRegister D2 = VectorMultiplyAdd(C3Swizzle, Weight1RealD2, C2);
-						VectorRegister D3 = VectorMultiplyAdd(C3Swizzle, Weight1RealD3, C2);
+						VectorRegister4Float D0 = VectorMultiplyAdd(C1, Weight1Real, C0);
+						VectorRegister4Float D1 = VectorMultiplyAdd(C1, Weight1RealNeg, C0);
+						VectorRegister4Float D2 = VectorMultiplyAdd(C3Swizzle, Weight1RealD2, C2);
+						VectorRegister4Float D3 = VectorMultiplyAdd(C3Swizzle, Weight1RealD3, C2);
 
-						VectorStoreAligned(D0, &InOutValues[Pos0]);
-						VectorStoreAligned(D1, &InOutValues[Pos1]);
-						VectorStoreAligned(D2, &InOutValues[Pos2]);
-						VectorStoreAligned(D3, &InOutValues[Pos3]);
+						VectorStore(D0, &InOutValues[Pos0]);
+						VectorStore(D1, &InOutValues[Pos1]);
+						VectorStore(D2, &InOutValues[Pos2]);
+						VectorStore(D3, &InOutValues[Pos3]);
 					}
 				}
 			}
@@ -547,14 +541,14 @@ namespace Audio
 				const int32 Pos6 = 2 * (3 * InNumButterflies + 4 * InReadIndex);
 				const int32 Pos7 = Pos6 + 4;
 				
-				VectorRegister T0 = VectorLoadAligned(&InValues[Pos0]);
-				VectorRegister T1 = VectorLoadAligned(&InValues[Pos1]);
-				VectorRegister T2 = VectorLoadAligned(&InValues[Pos2]);
-				VectorRegister T3 = VectorLoadAligned(&InValues[Pos3]);
-				VectorRegister T4 = VectorLoadAligned(&InValues[Pos4]);
-				VectorRegister T5 = VectorLoadAligned(&InValues[Pos5]);
-				VectorRegister T6 = VectorLoadAligned(&InValues[Pos6]);
-				VectorRegister T7 = VectorLoadAligned(&InValues[Pos7]);
+				VectorRegister4Float T0 = VectorLoad(&InValues[Pos0]);
+				VectorRegister4Float T1 = VectorLoad(&InValues[Pos1]);
+				VectorRegister4Float T2 = VectorLoad(&InValues[Pos2]);
+				VectorRegister4Float T3 = VectorLoad(&InValues[Pos3]);
+				VectorRegister4Float T4 = VectorLoad(&InValues[Pos4]);
+				VectorRegister4Float T5 = VectorLoad(&InValues[Pos5]);
+				VectorRegister4Float T6 = VectorLoad(&InValues[Pos6]);
+				VectorRegister4Float T7 = VectorLoad(&InValues[Pos7]);
 
 				OutValues.A0 = VectorShuffle(T0, T2, 0, 1, 0, 1);
 				OutValues.A1 = VectorShuffle(T4, T6, 0, 1, 0, 1);
@@ -578,14 +572,14 @@ namespace Audio
 				const int32 Pos6 = 2 * (3 * InNumButterflies + 4 * InWriteIndex);
 				const int32 Pos7 = Pos6 + 4;
 
-				VectorStoreAligned(InResult.D0, &OutValues[Pos0]);
-				VectorStoreAligned(InResult.D1, &OutValues[Pos1]);
-				VectorStoreAligned(InResult.D2, &OutValues[Pos2]);
-				VectorStoreAligned(InResult.D3, &OutValues[Pos3]);
-				VectorStoreAligned(InResult.D4, &OutValues[Pos4]);
-				VectorStoreAligned(InResult.D5, &OutValues[Pos5]);
-				VectorStoreAligned(InResult.D6, &OutValues[Pos6]);
-				VectorStoreAligned(InResult.D7, &OutValues[Pos7]);
+				VectorStore(InResult.D0, &OutValues[Pos0]);
+				VectorStore(InResult.D1, &OutValues[Pos1]);
+				VectorStore(InResult.D2, &OutValues[Pos2]);
+				VectorStore(InResult.D3, &OutValues[Pos3]);
+				VectorStore(InResult.D4, &OutValues[Pos4]);
+				VectorStore(InResult.D5, &OutValues[Pos5]);
+				VectorStore(InResult.D6, &OutValues[Pos6]);
+				VectorStore(InResult.D7, &OutValues[Pos7]);
 			}
 
 
@@ -593,56 +587,56 @@ namespace Audio
 			void Radix4ButterflyFinalIteration(const FFinalInputs& Inputs, const FFinalWeights& InWeights, FFinalOutputs& Outputs)
 			{
 				// Note: Some weights are altered to bake in sign flips to avoid an extra multiply later on.
-				const VectorRegister W2I = VectorLoadAligned(InWeights.W2I);
-				const VectorRegister W2R = VectorLoadAligned(InWeights.W2R);
-				const VectorRegister W3I = VectorLoadAligned(InWeights.W3I);
-				const VectorRegister W3R = VectorLoadAligned(InWeights.W3R);
-				const VectorRegister W4I = VectorLoadAligned(InWeights.W4I);
-				const VectorRegister W4R = VectorLoadAligned(InWeights.W4R);
-				const VectorRegister W5I = VectorLoadAligned(InWeights.W5I);
-				const VectorRegister W5R = VectorLoadAligned(InWeights.W5R);
-				const VectorRegister W6I = VectorLoadAligned(InWeights.W6I);
-				const VectorRegister W6R = VectorLoadAligned(InWeights.W6R);
-				const VectorRegister W7I = VectorLoadAligned(InWeights.W7I);
-				const VectorRegister W7R = VectorLoadAligned(InWeights.W7R);
+				const VectorRegister4Float W2I = VectorLoad(InWeights.W2I);
+				const VectorRegister4Float W2R = VectorLoad(InWeights.W2R);
+				const VectorRegister4Float W3I = VectorLoad(InWeights.W3I);
+				const VectorRegister4Float W3R = VectorLoad(InWeights.W3R);
+				const VectorRegister4Float W4I = VectorLoad(InWeights.W4I);
+				const VectorRegister4Float W4R = VectorLoad(InWeights.W4R);
+				const VectorRegister4Float W5I = VectorLoad(InWeights.W5I);
+				const VectorRegister4Float W5R = VectorLoad(InWeights.W5R);
+				const VectorRegister4Float W6I = VectorLoad(InWeights.W6I);
+				const VectorRegister4Float W6R = VectorLoad(InWeights.W6R);
+				const VectorRegister4Float W7I = VectorLoad(InWeights.W7I);
+				const VectorRegister4Float W7R = VectorLoad(InWeights.W7R);
 
-				const VectorRegister W2RNeg = VectorLoadAligned(InWeights.W2RNeg);
-				const VectorRegister W3RNeg = VectorLoadAligned(InWeights.W3RNeg);
-				const VectorRegister W4RNeg = VectorLoadAligned(InWeights.W4RNeg);
-				const VectorRegister W5RNeg = VectorLoadAligned(InWeights.W5RNeg);
-				const VectorRegister W6RNeg = VectorLoadAligned(InWeights.W6RNeg);
-				const VectorRegister W7RNeg = VectorLoadAligned(InWeights.W7RNeg);
+				const VectorRegister4Float W2RNeg = VectorLoad(InWeights.W2RNeg);
+				const VectorRegister4Float W3RNeg = VectorLoad(InWeights.W3RNeg);
+				const VectorRegister4Float W4RNeg = VectorLoad(InWeights.W4RNeg);
+				const VectorRegister4Float W5RNeg = VectorLoad(InWeights.W5RNeg);
+				const VectorRegister4Float W6RNeg = VectorLoad(InWeights.W6RNeg);
+				const VectorRegister4Float W7RNeg = VectorLoad(InWeights.W7RNeg);
 
-				const VectorRegister W2RD4 = VectorLoadAligned(InWeights.W2RD4);
-				const VectorRegister W2RD6 = VectorLoadAligned(InWeights.W2RD6);
-				const VectorRegister W3RD5 = VectorLoadAligned(InWeights.W3RD5);
-				const VectorRegister W3RD7 = VectorLoadAligned(InWeights.W3RD7);
+				const VectorRegister4Float W2RD4 = VectorLoad(InWeights.W2RD4);
+				const VectorRegister4Float W2RD6 = VectorLoad(InWeights.W2RD6);
+				const VectorRegister4Float W3RD5 = VectorLoad(InWeights.W3RD5);
+				const VectorRegister4Float W3RD7 = VectorLoad(InWeights.W3RD7);
 
-				VectorRegister A2Swizzle = VectorSwizzle(Inputs.A2, 1, 0, 3, 2);
-				VectorRegister A3Swizzle = VectorSwizzle(Inputs.A3, 1, 0, 3, 2);
-				VectorRegister A4Swizzle = VectorSwizzle(Inputs.A4, 1, 0, 3, 2);
-				VectorRegister A5Swizzle = VectorSwizzle(Inputs.A5, 1, 0, 3, 2);
-				VectorRegister A6Swizzle = VectorSwizzle(Inputs.A6, 1, 0, 3, 2);
-				VectorRegister A7Swizzle = VectorSwizzle(Inputs.A7, 1, 0, 3, 2);
+				VectorRegister4Float A2Swizzle = VectorSwizzle(Inputs.A2, 1, 0, 3, 2);
+				VectorRegister4Float A3Swizzle = VectorSwizzle(Inputs.A3, 1, 0, 3, 2);
+				VectorRegister4Float A4Swizzle = VectorSwizzle(Inputs.A4, 1, 0, 3, 2);
+				VectorRegister4Float A5Swizzle = VectorSwizzle(Inputs.A5, 1, 0, 3, 2);
+				VectorRegister4Float A6Swizzle = VectorSwizzle(Inputs.A6, 1, 0, 3, 2);
+				VectorRegister4Float A7Swizzle = VectorSwizzle(Inputs.A7, 1, 0, 3, 2);
 
-				VectorRegister B2 = VectorMultiplyAdd(A2Swizzle, W2I, Inputs.A2);
-				VectorRegister B3 = VectorMultiplyAdd(A3Swizzle, W3I, Inputs.A3);
-				VectorRegister B4 = VectorMultiplyAdd(A4Swizzle, W4I, Inputs.A4);
-				VectorRegister B5 = VectorMultiplyAdd(A5Swizzle, W5I, Inputs.A5);
-				VectorRegister B6 = VectorMultiplyAdd(A6Swizzle, W6I, Inputs.A6);
-				VectorRegister B7 = VectorMultiplyAdd(A7Swizzle, W7I, Inputs.A7);
+				VectorRegister4Float B2 = VectorMultiplyAdd(A2Swizzle, W2I, Inputs.A2);
+				VectorRegister4Float B3 = VectorMultiplyAdd(A3Swizzle, W3I, Inputs.A3);
+				VectorRegister4Float B4 = VectorMultiplyAdd(A4Swizzle, W4I, Inputs.A4);
+				VectorRegister4Float B5 = VectorMultiplyAdd(A5Swizzle, W5I, Inputs.A5);
+				VectorRegister4Float B6 = VectorMultiplyAdd(A6Swizzle, W6I, Inputs.A6);
+				VectorRegister4Float B7 = VectorMultiplyAdd(A7Swizzle, W7I, Inputs.A7);
 
-				VectorRegister C0 = VectorMultiplyAdd(B4, W4R, Inputs.A0);
-				VectorRegister C1 = VectorMultiplyAdd(B5, W5R, Inputs.A1);
-				VectorRegister C2 = VectorMultiplyAdd(B6, W6R, B2);
-				VectorRegister C3 = VectorMultiplyAdd(B7, W7R, B3);
-				VectorRegister C4 = VectorMultiplyAdd(B4, W4RNeg, Inputs.A0);
-				VectorRegister C5 = VectorMultiplyAdd(B5, W5RNeg, Inputs.A1);
-				VectorRegister C6 = VectorMultiplyAdd(B6, W6RNeg, B2);
-				VectorRegister C7 = VectorMultiplyAdd(B7, W7RNeg, B3);
+				VectorRegister4Float C0 = VectorMultiplyAdd(B4, W4R, Inputs.A0);
+				VectorRegister4Float C1 = VectorMultiplyAdd(B5, W5R, Inputs.A1);
+				VectorRegister4Float C2 = VectorMultiplyAdd(B6, W6R, B2);
+				VectorRegister4Float C3 = VectorMultiplyAdd(B7, W7R, B3);
+				VectorRegister4Float C4 = VectorMultiplyAdd(B4, W4RNeg, Inputs.A0);
+				VectorRegister4Float C5 = VectorMultiplyAdd(B5, W5RNeg, Inputs.A1);
+				VectorRegister4Float C6 = VectorMultiplyAdd(B6, W6RNeg, B2);
+				VectorRegister4Float C7 = VectorMultiplyAdd(B7, W7RNeg, B3);
 
-				VectorRegister C6Swizzle = VectorSwizzle(C6, 1, 0, 3, 2);
-				VectorRegister C7Swizzle = VectorSwizzle(C7, 1, 0, 3, 2);
+				VectorRegister4Float C6Swizzle = VectorSwizzle(C6, 1, 0, 3, 2);
+				VectorRegister4Float C7Swizzle = VectorSwizzle(C7, 1, 0, 3, 2);
 
 				Outputs.D0 = VectorMultiplyAdd(C2, W2R, C0);
 				Outputs.D1 = VectorMultiplyAdd(C3, W3R, C1);
@@ -1001,7 +995,7 @@ namespace Audio
 			TArray<FFinalIndices> FinalIndices;
 			TArray<FFinalWeights> FinalWeights;
 
-			AlignedFloatBuffer InverseWorkBuffer;
+			FAlignedFloatBuffer InverseWorkBuffer;
 	};
 
 	// Maximum log 2 size of fft
@@ -1077,44 +1071,44 @@ namespace Audio
 
 		if (FFTSize > InStartIndex)
 		{
-			VectorRegister VInRev1 = VectorLoadAligned(&InValues[FFTSize - InStartIndex]);
+			VectorRegister4Float VInRev1 = VectorLoad(&InValues[FFTSize - InStartIndex]);
 
 			for (int32 i = InStartIndex; i < FFTSize; i += 4)
 			{
-				VectorRegister VIn = VectorLoadAligned(&InValues[i]);
-				VectorRegister VInRISwap = VectorSwizzle(VIn, 1, 0, 3, 2);
+				VectorRegister4Float VIn = VectorLoad(&InValues[i]);
+				VectorRegister4Float VInRISwap = VectorSwizzle(VIn, 1, 0, 3, 2);
 
-				VectorRegister VInRev2 = VectorLoadAligned(&InValues[FFTSize - i - 4]);
-				VectorRegister VInRev = VectorShuffle(VInRev1, VInRev2, 0, 1, 2, 3);
+				VectorRegister4Float VInRev2 = VectorLoad(&InValues[FFTSize - i - 4]);
+				VectorRegister4Float VInRev = VectorShuffle(VInRev1, VInRev2, 0, 1, 2, 3);
 				VInRev1 = VInRev2;
 
-				VectorRegister VInRevRISwap = VectorSwizzle(VInRev, 1, 0, 3, 2);
+				VectorRegister4Float VInRevRISwap = VectorSwizzle(VInRev, 1, 0, 3, 2);
 
-				VectorRegister VAlphaReal = VectorLoadAligned(&AlphaRealData[i]);
-				VectorRegister VAlphaImag = VectorLoadAligned(&AlphaImagData[i]);
-				VectorRegister VBetaReal = VectorLoadAligned(&BetaRealData[i]);
-				VectorRegister VBetaImag = VectorLoadAligned(&BetaImagData[i]);
+				VectorRegister4Float VAlphaReal = VectorLoad(&AlphaRealData[i]);
+				VectorRegister4Float VAlphaImag = VectorLoad(&AlphaImagData[i]);
+				VectorRegister4Float VBetaReal = VectorLoad(&BetaRealData[i]);
+				VectorRegister4Float VBetaImag = VectorLoad(&BetaImagData[i]);
 
 				// Out1 = [ R * Ar,  I * Ar]
 				// Out2 = [ I * Ai,  R * Ai]
 				// Out3 = [NR * Br, NI * Br]
 				// Out4 = [NI * Bi, NR * Bi]
-				VectorRegister Out1 = VectorMultiply(VIn, VAlphaReal);
-				VectorRegister Out2 = VectorMultiply(VInRISwap, VAlphaImag);
-				VectorRegister Out3 = VectorMultiply(VInRev, VBetaReal);
-				VectorRegister Out4 = VectorMultiply(VInRevRISwap, VBetaImag);
+				//VectorRegister4Float Out1 = VectorMultiply(VIn, VAlphaReal);
+				VectorRegister4Float Out2 = VectorMultiply(VInRISwap, VAlphaImag);
+				//VectorRegister4Float Out3 = VectorMultiply(VInRev, VBetaReal);
+				VectorRegister4Float Out4 = VectorMultiply(VInRevRISwap, VBetaImag);
 
 				// Out12 = [(R * Ar) + (I * Ai), (I * Ar) + (R * Ai)]
-				VectorRegister Out12 = VectorAdd(Out1, Out2);
+				VectorRegister4Float Out12 = VectorMultiplyAdd(VIn, VAlphaReal, Out2);
 				// Out34 = [(NR * Br) + (NI * Bi), (NR * Bi) + (NI * Br)]
-				VectorRegister Out34 = VectorAdd(Out3, Out4);
+				VectorRegister4Float Out34 = VectorMultiplyAdd(VInRev, VBetaReal, Out4);
 
 				// Out = [
 				// 	(R * Ar) + (I * Ai) + (NR * Br) + (NI * Bi),
 				// 	(I * Ar) + (R * Ai) + (NR * Bi) + (NI * Br)
 				// ]
-				VectorRegister Out = VectorAdd(Out12, Out34);
-				VectorStoreAligned(Out, &OutValues[i]);
+				VectorRegister4Float Out = VectorAdd(Out12, Out34);
+				VectorStore(Out, &OutValues[i]);
 			}
 		}
 	}
@@ -1152,9 +1146,6 @@ namespace Audio
 
 	void FVectorRealToComplexFFT::ForwardRealToComplex(const float* RESTRICT InReal, float* RESTRICT OutComplex)
 	{
-		checkf(IsAligned<const float*>(InReal, AUDIO_SIMD_FLOAT_ALIGNMENT), TEXT("Memory must be aligned.")); 
-		checkf(IsAligned<float*>(OutComplex, AUDIO_SIMD_FLOAT_ALIGNMENT), TEXT("Memory must be aligned.")); 
-
 		// Performs a N sized real-to-complex FFT using an N/2 complex-to-complex FFT.
 		float* WorkData = WorkBuffer.GetData();
 
@@ -1197,9 +1188,6 @@ namespace Audio
 
 	void FVectorRealToComplexFFT::InverseComplexToReal(const float* RESTRICT InComplex, float* RESTRICT OutReal)
 	{
-		checkf(IsAligned<const float*>(InComplex, AUDIO_SIMD_FLOAT_ALIGNMENT), TEXT("Memory must be aligned.")); 
-		checkf(IsAligned<float*>(OutReal, AUDIO_SIMD_FLOAT_ALIGNMENT), TEXT("Memory must be aligned.")); 
-
 		// Performs a N sized complex-to-real FFT using an N/2 complex-to-complex FFT.
 
 		float* WorkData = WorkBuffer.GetData();
@@ -1276,7 +1264,7 @@ namespace Audio
 	/** If true, this implementation requires input and output arrays to be 128 bit aligned. */
 	bool FVectorFFTFactory::Expects128BitAlignedArrays() const
 	{
-		return true;
+		return false;
 	}
 
 	/** Returns true if the input settings are supported by this factory. */

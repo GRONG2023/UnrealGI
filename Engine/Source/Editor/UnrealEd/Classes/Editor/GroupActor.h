@@ -9,10 +9,12 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "GameFramework/Actor.h"
+#include "Elements/Framework/TypedElementListFwd.h"
 #include "GroupActor.generated.h"
 
 class FLevelEditorViewportClient;
 class FViewport;
+class UTypedElementSelectionSet;
 
 UCLASS(hidedropdown,MinimalAPI, notplaceable, NotBlueprintable)
 class AGroupActor : public AActor
@@ -24,10 +26,10 @@ class AGroupActor : public AActor
 	uint32 bLocked:1;
 
 	UPROPERTY()
-	TArray<class AActor*> GroupActors;
+	TArray<TObjectPtr<class AActor>> GroupActors;
 
 	UPROPERTY()
-	TArray<class AGroupActor*> SubGroups;
+	TArray<TObjectPtr<class AGroupActor>> SubGroups;
 
 #endif // WITH_EDITORONLY_DATA
 
@@ -36,27 +38,33 @@ class AGroupActor : public AActor
 	virtual void PostLoad() override;
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 	virtual void PostEditUndo() override;
-	virtual bool Modify( bool bAlwaysMarkDirty=true ) override;
+	virtual bool IsEditorOnly() const override { return true; }
 	//~ End UObject Interface
 
 	//~ Begin AActor Interface
 	virtual void PostActorCreated() override;
-	virtual void InvalidateLightingCacheDetailed(bool bTranslationOnly) override;
-	virtual void PostEditMove(bool bFinished) override;
 	virtual void SetIsTemporarilyHiddenInEditor( bool bIsHidden ) override;
+	virtual void GetActorBounds(bool bOnlyCollidingComponents, FVector& Origin, FVector& BoxExtent, bool bIncludeFromChildActors) const override;
+#if WITH_EDITOR
+	virtual FBox GetStreamingBounds() const override;
+#endif
 	//~ End AActor Interface
 
 	// @todo document
 	virtual bool IsSelected() const;
 
 	/**
-	 * Apply given deltas to all actors and subgroups for this group.
-	 * @param	Viewport		The viewport to draw to apply our deltas
-	 * @param	InDrag			Delta Transition
-	 * @param	InRot			Delta Rotation
-	 * @param	InScale			Delta Scale
+	 * Enumerate all actors and subgroups for this group (includes this).
+	 * @param InCallback		The function to call for each actor
 	 */
-	void GroupApplyDelta(FLevelEditorViewportClient* Viewport, const FVector& InDrag, const FRotator& InRot, const FVector& InScale );
+	UNREALED_API void ForEachActorInGroup(TFunctionRef<void(AActor*, AGroupActor*)> InCallback);
+
+	/**
+	 * Enumerate all actors and subgroups for this group that should be moved alongside this actor (includes this).
+	 * @param InSelectionSet	The selection set to use, or null to use the global selection set
+	 * @param InCallback		The function to call for each movable actor
+	 */
+	UNREALED_API void ForEachMovableActorInGroup(const UTypedElementSelectionSet* InSelectionSet, TFunctionRef<void(AActor*, AGroupActor*)> InCallback);
 	
 	/**
 	 * Apply given deltas to all actors and subgroups for this group.
@@ -65,7 +73,6 @@ class AGroupActor : public AActor
 	 * @param	InScale			Delta Scale
 	 */
 	UNREALED_API void GroupApplyDelta(const FVector& InDrag, const FRotator& InRot, const FVector& InScale );
-
 
 	/**
 	 * Draw brackets around all selected groups
@@ -214,7 +221,16 @@ private:
 	 * Helper function for Remove() and ClearAndRemove() - cleans up actors when grouping is no longer needed
 	 */
 	void PostRemove();
+
+public:
+	static UNREALED_API bool SelectedGroupNeedsFixup();
+	static UNREALED_API void FixupGroupActor();
 };
 
+namespace GroupActorHelpers
+{
 
+UNREALED_API bool ActorHasParentInGroup(const AActor* Actor, const AGroupActor* GroupActor);
+UNREALED_API bool ActorHasParentInSelection(const AActor* Actor, FTypedElementListConstRef SelectionSet);
 
+} // namespace GroupActorHelpers

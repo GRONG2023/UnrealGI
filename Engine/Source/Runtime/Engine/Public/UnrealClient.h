@@ -7,16 +7,25 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "InputCoreTypes.h"
+#include "InputKeyEventArgs.h"
 #include "Engine/EngineBaseTypes.h"
-#include "Input/PopupMethodReply.h"
-#include "Widgets/SWidget.h"
 #include "UObject/GCObject.h"
-#include "RHI.h"
 #include "RenderResource.h"
 #include "HitProxies.h"
+#include "RenderGraphDefinitions.h"
+#include "Elements/Framework/TypedElementListFwd.h"
+#include "DynamicRenderScaling.h"
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "InputCoreTypes.h"
+#include "Input/PopupMethodReply.h"
+#include "Widgets/SWidget.h"
+#include "RHI.h"
+#include "GenericPlatform/GenericPlatformInputDeviceMapper.h"
+#endif
 
 class FCanvas;
+class FRDGBuilder;
 class FViewport;
 class FViewportClient;
 class UModel;
@@ -28,15 +37,33 @@ class FRenderTarget
 {
 public:
 
-	// Destructor
-	virtual ~FRenderTarget(){}
+	/**
+	 * Default constructor
+	 */
+	FRenderTarget() {};
+
+	/**
+	 * Destructor
+	 */
+	virtual ~FRenderTarget() {};
 
 	/**
 	* Accessor for the surface RHI when setting this render target
 	* @return render target surface RHI resource
 	*/
-	ENGINE_API virtual const FTexture2DRHIRef& GetRenderTargetTexture() const;
+	ENGINE_API virtual const FTextureRHIRef& GetRenderTargetTexture() const;
 	ENGINE_API virtual FUnorderedAccessViewRHIRef GetRenderTargetUAV() const;
+
+	/**
+	 * Returns a valid RDG texture for this render target.
+	 */
+	ENGINE_API virtual FRDGTextureRef GetRenderTargetTexture(FRDGBuilder& GraphBuilder) const;
+
+	/**
+	* Accessor for the surface RHI to use when reading the reading target (may differ from GetRenderTargetTexture() for some implementations like cubemaps)
+	* @return surface RHI resource
+	*/
+	ENGINE_API virtual const FTextureRHIRef& GetShaderResourceTexture() const;
 
 	// Properties.
 	virtual FIntPoint GetSizeXY() const = 0;
@@ -45,6 +72,13 @@ public:
 	* @return display gamma expected for rendering to this render target
 	*/
 	ENGINE_API virtual float GetDisplayGamma() const;
+
+	// return global Engine default gamma (GetDisplayGamma returns this if not overriden)
+	static float GetEngineDisplayGamma();
+
+	virtual EDisplayColorGamut GetDisplayColorGamut() const { return EDisplayColorGamut::sRGB_D65; }
+	virtual EDisplayOutputFormat GetDisplayOutputFormat() const { return EDisplayOutputFormat::SDR_sRGB; }
+	virtual bool GetSceneHDREnabled() const { return false; }
 
 	/**
 	* Handles freezing/unfreezing of rendering
@@ -57,55 +91,92 @@ public:
 	virtual bool HasToggleFreezeCommand() { return false; };
 
 	/**
-	* Reads the viewport's displayed pixels into a preallocated color buffer.
+	* Reads the render target's displayed pixels into a preallocated color buffer.
 	* @param OutImageData - RGBA8 values will be stored in this buffer
-	* @param InRect - source rect of the image to capture
+	* @param InFlags - Additional information about how to to read the surface data (cube face, slice index, etc.)
+	* @param InSrcRect - InSrcRect not specified means the whole rect
 	* @return True if the read succeeded.
+	*
+	* This will convert whatever the pixel format is to FColor
+	* Prefer using FImageUtils::GetRenderTargetImage rather than calling this directly.
+	*
+	* The default value for InFlags specifies RCM_UNorm which will cause values to be scaled into [0,1] ; use RCM_MinMax to retrieve values without change.
+	*
+	* If the RenderTarget surface is float linear, it will converted to SRGB FColor, if InFlags.bLinearToGamma is set (which is on by default).
+	* If the RenderTarget surface is U8, then the SRGB/not state is unchanged, the U8 values are retrieved unchanged in either Linear or SRGB.
+	* Gamma is handled correctly automatically by FImageUtils::GetRenderTargetImage
 	*/
-	ENGINE_API bool ReadPixels(TArray< FColor >& OutImageData,FReadSurfaceDataFlags InFlags = FReadSurfaceDataFlags(RCM_UNorm, CubeFace_MAX), FIntRect InRect = FIntRect(0, 0, 0, 0) );
+	ENGINE_API virtual bool ReadPixels(TArray<FColor>& OutImageData, FReadSurfaceDataFlags InFlags = FReadSurfaceDataFlags(RCM_UNorm, CubeFace_MAX), FIntRect InSrcRect = FIntRect(0, 0, 0, 0));
 
 	/**
-	* Reads the viewport's displayed pixels into a preallocated color buffer.
+	* Reads the render target's displayed pixels into a preallocated color buffer.
 	* @param OutImageBytes - RGBA8 values will be stored in this buffer.  Buffer must be preallocated with the correct size!
-	* @param InSrcRect InSrcRect not specified means the whole rect
+	* @param InFlags - Additional information about how to to read the surface data (cube face, slice index, etc.)
+	* @param InSrcRect - InSrcRect not specified means the whole rect
 	* @return True if the read succeeded.
+	*
+	* Ptr variant of this API just does an extra memcpy; prefer the TArray variant.
+	* Prefer using FImageUtils::GetRenderTargetImage rather than calling this directly.
 	*/
 	ENGINE_API bool ReadPixelsPtr(FColor* OutImageBytes, FReadSurfaceDataFlags InFlags = FReadSurfaceDataFlags(RCM_UNorm, CubeFace_MAX), FIntRect InSrcRect = FIntRect(0, 0, 0, 0));
 
 	/**
-	 * Reads the viewport's displayed pixels into the given color buffer.
-	 * @param OutputBuffer - RGBA16F values will be stored in this buffer
+	 * Reads the render target's displayed pixels into the given color buffer.
+	 * @param OutImageData - RGBA16F values will be stored in this buffer
 	 * @param CubeFace - optional cube face for when reading from a cube render target
 	 * @return True if the read succeeded.
 	 */
-	ENGINE_API bool ReadFloat16Pixels(TArray<FFloat16Color>& OutputBuffer,ECubeFace CubeFace=CubeFace_PosX);
+	UE_DEPRECATED(5.4, "Use the other ReadFloat16Pixels variant (ECubeFace can be set in FReadSurfaceDataFlags)")
+	ENGINE_API bool ReadFloat16Pixels(TArray<FFloat16Color>& OutImageData, ECubeFace CubeFace);
 
 	/**
-	 * Reads the viewport's displayed pixels into the given color buffer.
-	 * @param OutputBuffer - Linear color array to store the value
-	 * @param CubeFace - optional cube face for when reading from a cube render target
+	 * Reads the render target's displayed pixels into the given color buffer.
+	 * @param OutImageData - RGBA16F values will be stored in this buffer
+	 * @param InFlags - Additional information about how to to read the surface data (cube face, slice index, etc.)
+	 * @param InSrcRect - InSrcRect not specified means the whole rect
 	 * @return True if the read succeeded.
+	 *
+	 * The default value for InFlags specifies RCM_UNorm which will cause values to be scaled into [0,1] ; use RCM_MinMax to retrieve values without change.
+	 *
+	 * Unlike other RenderTarget Read functions, this only works if surface is PF_FloatRGBA exactly ; it does not convert.
+	 * Prefer using FImageUtils::GetRenderTargetImage rather than calling this directly.
 	 */
-	ENGINE_API bool ReadLinearColorPixels(TArray<FLinearColor>& OutputBuffer, FReadSurfaceDataFlags InFlags = FReadSurfaceDataFlags(RCM_MinMax, CubeFace_MAX), FIntRect InRect = FIntRect(0, 0, 0, 0));
-
-	ENGINE_API bool ReadLinearColorPixelsPtr(FLinearColor* OutImageBytes, FReadSurfaceDataFlags InFlags = FReadSurfaceDataFlags(RCM_MinMax, CubeFace_MAX), FIntRect InRect = FIntRect(0, 0, 0, 0));
+	ENGINE_API virtual bool ReadFloat16Pixels(TArray<FFloat16Color>& OutImageData, FReadSurfaceDataFlags InFlags = FReadSurfaceDataFlags(RCM_UNorm, CubeFace_MAX), FIntRect InSrcRect = FIntRect(0, 0, 0, 0));
 
 	/**
-	 * Returns the GPU nodes on which to render this rendertarget.
+	 * Reads the render target's displayed pixels into the given color buffer.
+	 * @param OutImageData - Linear color array to store the value
+	 * @param InFlags - Additional information about how to to read the surface data (cube face, slice index, etc.)
+	 * @param InSrcRect - InSrcRect not specified means the whole rect
+	 * @return True if the read succeeded.
+	 *
+	 * The default value for InFlags specifies RCM_UNorm which will cause values to be scaled into [0,1] ; use RCM_MinMax to retrieve values without change.
+	 *
+	 * This will convert whatever the pixel format is to FLinearColor (if supported).
+	 * Prefer using FImageUtils::GetRenderTargetImage rather than calling this directly.
+	 */
+	ENGINE_API virtual bool ReadLinearColorPixels(TArray<FLinearColor>& OutImageData, FReadSurfaceDataFlags InFlags = FReadSurfaceDataFlags(RCM_MinMax, CubeFace_MAX), FIntRect InSrcRect = FIntRect(0, 0, 0, 0));
+
+	/**
+	 * Reads the render target's displayed pixels into the given color buffer.
+	 * @param OutImageBytes - Linear color array will be stored in this buffer.  Buffer must be preallocated with the correct size!
+	 * @param InFlags - Additional information about how to to read the surface data (cube face, slice index, etc.)
+	 * @param InSrcRect - InSrcRect not specified means the whole rect
+	 * @return True if the read succeeded.
+	 *
+	 * Ptr variant of this API just does an extra memcpy; prefer the TArray variant.
+	 * Prefer using FImageUtils::GetRenderTargetImage rather than calling this directly.
+	 */
+	ENGINE_API bool ReadLinearColorPixelsPtr(FLinearColor* OutImageBytes, FReadSurfaceDataFlags InFlags = FReadSurfaceDataFlags(RCM_MinMax, CubeFace_MAX), FIntRect InSrcRect = FIntRect(0, 0, 0, 0));
+
+	/**
+	 * Returns the GPU nodes on which to render this render target.
 	 **/
-	ENGINE_API virtual FRHIGPUMask GetGPUMask(FRHICommandListImmediate& RHICmdList) const { return FRHIGPUMask::GPU0(); }
+	virtual FRHIGPUMask GetGPUMask(FRHICommandListImmediate& RHICmdList) const { return FRHIGPUMask::GPU0(); }
 
 protected:
 
-	FTexture2DRHIRef RenderTargetTextureRHI;
-
-	/**
-	 * Reads the viewport's displayed pixels into a preallocated color buffer.
-	 * @param OutImageBytes - RGBA16F values will be stored in this buffer.  Buffer must be preallocated with the correct size!
-	 * @param CubeFace - optional cube face for when reading from a cube render target
-	 * @return True if the read succeeded.
-	 */
-	bool ReadFloat16Pixels(FFloat16Color* OutImageBytes,ECubeFace CubeFace=CubeFace_PosX);
+	FTextureRHIRef RenderTargetTextureRHI;
 };
 
 
@@ -118,12 +189,6 @@ public:
 
 	virtual class FViewport* GetViewport() = 0;
 	virtual void ResizeFrame(uint32 NewSizeX,uint32 NewSizeY,EWindowMode::Type NewWindowMode) = 0;
-
-	UE_DEPRECATED(4.13, "The version of FViewportFrame::ResizeFrame that takes a position is deprecated (the position was never used). Please use the version that doesn't take a position instead.")
-	void ResizeFrame(uint32 NewSizeX, uint32 NewSizeY, EWindowMode::Type NewWindowMode, int32, int32)
-	{
-		ResizeFrame(NewSizeX, NewSizeY, NewWindowMode);
-	}
 };
 
 /**
@@ -135,7 +200,7 @@ DECLARE_MULTICAST_DELEGATE(FOnScreenshotRequestProcessed);
 DECLARE_MULTICAST_DELEGATE_ThreeParams(FOnScreenshotCaptured, int32 /*Width*/, int32 /*Height*/, const TArray<FColor>& /*Colors*/);
 
 
-struct ENGINE_API FScreenshotRequest
+struct FScreenshotRequest
 {
 	/**
 	 * Requests a new screenshot.  Screenshot can be read from memory by subscribing
@@ -143,7 +208,7 @@ struct ENGINE_API FScreenshotRequest
 	 *
 	 * @param bInShowUI				Whether or not to show Slate UI
 	 */
-	static void RequestScreenshot(bool bInShowUI);
+	static ENGINE_API void RequestScreenshot(bool bInShowUI);
 
 	/**
 	 * Requests a new screenshot with a specific filename
@@ -152,12 +217,12 @@ struct ENGINE_API FScreenshotRequest
 	 * @param bInShowUI				Whether or not to show Slate UI
 	 * @param bAddFilenameSuffix	Whether an auto-generated unique suffix should be added to the supplied filename
 	 */
-	static void RequestScreenshot(const FString& InFilename, bool bInShowUI, bool bAddFilenameSuffix);
+	static ENGINE_API void RequestScreenshot(const FString& InFilename, bool bInShowUI, bool bAddFilenameSuffix, bool bHdrScreenshot=false);
 
 	/**
 	 * Resets a screenshot request
 	 */
-	static void Reset();
+	static ENGINE_API void Reset();
 
 	/**
 	 * @return The filename of the next screenshot
@@ -177,12 +242,17 @@ struct ENGINE_API FScreenshotRequest
 	/**
 	 * Creates a new screenshot filename from the passed in filename template
 	 */
-	static void CreateViewportScreenShotFilename( FString& InOutFilename );
+	static ENGINE_API void CreateViewportScreenShotFilename( FString& InOutFilename );
 
 	/**
 	 * Access a temporary color array for storing the pixel colors for the highres screenshot mask
 	 */
-	static TArray<FColor>* GetHighresScreenshotMaskColorArray();
+	static ENGINE_API TArray<FColor>* GetHighresScreenshotMaskColorArray();
+
+	/**
+	 * Extents of array returned by function above
+	 */
+	static ENGINE_API FIntPoint& GetHighresScreenshotMaskExtents();
 
 	static FOnScreenshotRequestProcessed& OnScreenshotRequestProcessed()
 	{
@@ -195,13 +265,14 @@ struct ENGINE_API FScreenshotRequest
 	}
 
 private:
-	static FOnScreenshotRequestProcessed ScreenshotProcessedDelegate;
-	static FOnScreenshotCaptured ScreenshotCapturedDelegate;
-	static bool bIsScreenshotRequested;
-	static FString NextScreenshotName;
-	static FString Filename;
-	static bool bShowUI;
-	static TArray<FColor> HighresScreenshotMaskColorArray;
+	static ENGINE_API FOnScreenshotRequestProcessed ScreenshotProcessedDelegate;
+	static ENGINE_API FOnScreenshotCaptured ScreenshotCapturedDelegate;
+	static ENGINE_API bool bIsScreenshotRequested;
+	static ENGINE_API FString NextScreenshotName;
+	static ENGINE_API FString Filename;
+	static ENGINE_API bool bShowUI;
+	static ENGINE_API TArray<FColor> HighresScreenshotMaskColorArray;
+	static ENGINE_API FIntPoint HighresScreenshotMaskExtents;
 };
 
 // @param bAutoType true: automatically choose GB/MB/KB/... false: always use MB for easier comparisons
@@ -214,6 +285,9 @@ struct FStatUnitData
 	float RenderThreadTime;
 	float GameThreadTime;
 	float GPUFrameTime[MAX_NUM_GPUS];
+	float GPUClockFraction[MAX_NUM_GPUS];
+	float GPUUsageFraction[MAX_NUM_GPUS];
+	float GPUExternalUsageFraction[MAX_NUM_GPUS];
 	float FrameTime;
 	float RHITTime;
 	float InputLatencyTime;
@@ -222,6 +296,9 @@ struct FStatUnitData
 	float RawRenderThreadTime;
 	float RawGameThreadTime;
 	float RawGPUFrameTime[MAX_NUM_GPUS];
+	float RawGPUClockFraction[MAX_NUM_GPUS];
+	float RawGPUUsageFraction[MAX_NUM_GPUS];
+	float RawGPUExternalUsageFraction[MAX_NUM_GPUS];
 	float RawFrameTime;
 	float RawRHITTime;
 	float RawInputLatencyTime;
@@ -239,19 +316,25 @@ struct FStatUnitData
 	TArray<float> FrameTimes;
 	TArray<float> RHITTimes;
 	TArray<float> InputLatencyTimes;
-	TArray<float> ResolutionFractions;
+	DynamicRenderScaling::TMap<TArray<float>> ResolutionFractions;
 #endif //!UE_BUILD_SHIPPING
 
 	FStatUnitData()
 		: RenderThreadTime(0.0f)
 		, GameThreadTime(0.0f)
 		, GPUFrameTime{ 0.0f }
+		, GPUClockFraction{ 0.0f }
+		, GPUUsageFraction{ 0.0f }
+		, GPUExternalUsageFraction{ 0.0f }
 		, FrameTime(0.0f)
 		, RHITTime(0.0f)
 		, InputLatencyTime(0.0f)
 		, RawRenderThreadTime(0.0f)
 		, RawGameThreadTime(0.0f)
 		, RawGPUFrameTime{ 0.0f }
+		, RawGPUClockFraction{ 0.0f }
+		, RawGPUUsageFraction{ 0.0f }
+		, RawGPUExternalUsageFraction{ 0.0f }
 		, RawFrameTime(0.0f)
 		, RawRHITTime(0.0f)
 		, RawInputLatencyTime(0.0f)
@@ -268,10 +351,14 @@ struct FStatUnitData
 		FrameTimes.AddZeroed(NumberOfSamples);
 		RHITTimes.AddZeroed(NumberOfSamples);
 		InputLatencyTimes.AddZeroed(NumberOfSamples);
-		ResolutionFractions.Reserve(NumberOfSamples);
-		for (int32 i = 0; i < NumberOfSamples; i++)
+		for (TLinkedList<DynamicRenderScaling::FBudget*>::TIterator BudgetIt(DynamicRenderScaling::FBudget::GetGlobalList()); BudgetIt; BudgetIt.Next())
 		{
-			ResolutionFractions.Add(-1.0f);
+			const DynamicRenderScaling::FBudget& Budget = **BudgetIt;
+			ResolutionFractions[Budget].Reserve(NumberOfSamples);
+			for (int32 i = 0; i < NumberOfSamples; i++)
+			{
+				ResolutionFractions[Budget].Add(-1.0f);
+			}
 		}
 #endif //!UE_BUILD_SHIPPING
 	}
@@ -492,6 +579,18 @@ public:
 	ENGINE_API void GetActorsAndModelsInHitProxy(FIntRect InRect, TSet<AActor*>& OutActors, TSet<UModel*>& OutModels);
 
 	/**
+	 * Returns the dominant element handle at a given point.  If X,Y are outside the client area of the viewport, returns an invalid handle.
+	 */
+	ENGINE_API FTypedElementHandle GetElementHandleAtPoint(int32 X, int32 Y);
+
+	/**
+	 * Returns all element handles found within a specified region.
+	 * InRect must be entirely within the viewport's client area.
+	 * If the hit proxies are not cached, this will call ViewportClient->Draw with a hit-testing canvas.
+	 */
+	ENGINE_API void GetElementHandlesInRect(FIntRect InRect, FTypedElementListRef OutElementHandles);
+
+	/**
 	 * Retrieves the interface to the viewport's frame, if it has one.
 	 * @return The viewport's frame interface.
 	 */
@@ -530,7 +629,7 @@ public:
 	 * Returns whether rendering is globally enabled or disabled.
 	 * @return	true if rendering is globally enabled, otherwise false.
 	 **/
-	ENGINE_API static bool IsGameRenderingEnabled() { return bIsGameRenderingEnabled; }
+	static bool IsGameRenderingEnabled() { return bIsGameRenderingEnabled; }
 
 	/**
 	 * Handles freezing/unfreezing of rendering
@@ -624,6 +723,15 @@ protected:
 	 */
 	void HighResScreenshot();
 
+private:
+
+	/**
+	 * Enumerate all valid hit proxies found within a specified region.
+	 * InRect must be entirely within the viewport's client area.
+	 * If the hit proxies are not cached, this will call ViewportClient->Draw with a hit-testing canvas.
+	 */
+	void EnumerateHitProxiesInRect(FIntRect InRect, TFunctionRef<bool(HHitProxy*)> InCallback);
+
 protected:
 
 	/** A map from 2D coordinates to cached hit proxies. */
@@ -656,7 +764,7 @@ protected:
 		virtual void AddReferencedObjects( FReferenceCollector& Collector ) override;
 		virtual FString GetReferencerName() const override;
 
-		const FTexture2DRHIRef& GetHitProxyTexture(void) const		{ return HitProxyTexture; }
+		const FTexture2DRHIRef& GetHitProxyTexture(void) const		{ return RenderTargetTextureRHI; }
 		const FTexture2DRHIRef& GetHitProxyCPUTexture(void) const		{ return HitProxyCPUTexture; }
 
 	private:
@@ -670,7 +778,6 @@ protected:
 		/** References to the hit proxies cached by the hit proxy map. */
 		TArray<TRefCountPtr<HHitProxy> > HitProxies;
 
-		FTexture2DRHIRef HitProxyTexture;
 		FTexture2DRHIRef HitProxyCPUTexture;
 	};
 
@@ -730,11 +837,10 @@ protected:
 
 	/** Triggers the taking of a high res screen shot for this viewport. */
 	bool bTakeHighResScreenShot;
+
 	//~ Begin FRenderResource Interface.
-	ENGINE_API virtual void InitDynamicRHI() override;
-	ENGINE_API virtual void ReleaseDynamicRHI() override;
-	ENGINE_API virtual void InitRHI() override;
 	ENGINE_API virtual void ReleaseRHI() override;
+	ENGINE_API virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 };
 
 // Shortcuts for checking the state of both left&right variations of control keys.
@@ -743,458 +849,8 @@ extern ENGINE_API bool IsShiftDown(FViewport* Viewport);
 extern ENGINE_API bool IsAltDown(FViewport* Viewport);
 
 extern ENGINE_API bool GetViewportScreenShot(FViewport* Viewport, TArray<FColor>& Bitmap, const FIntRect& ViewRect = FIntRect());
+extern ENGINE_API bool GetViewportScreenShotHDR(FViewport* Viewport, TArray<FLinearColor>& Bitmap, const FIntRect& ViewRect = FIntRect());
 extern ENGINE_API bool GetHighResScreenShotInput(const TCHAR* Cmd, FOutputDevice& Ar, uint32& OutXRes, uint32& OutYRes, float& OutResMult, FIntRect& OutCaptureRegion, bool& OutShouldEnableMask, bool& OutDumpBufferVisualizationTargets, bool& OutCaptureHDR, FString& OutFilenameOverride, bool& OutUseDateTimeAsFileName);
-
-struct FInputKeyEventArgs
-{
-public:
-	FInputKeyEventArgs(FViewport* InViewport, int32 InControllerId, FKey InKey, EInputEvent InEvent)
-		: Viewport(InViewport)
-		, ControllerId(InControllerId)
-		, Key(InKey)
-		, Event(InEvent)
-		, AmountDepressed(1.0f)
-		, bIsTouchEvent(false)
-	{
-	}
-
-	FInputKeyEventArgs(FViewport* InViewport, int32 InControllerId, FKey InKey, EInputEvent InEvent, float InAmountDepressed, bool bInIsTouchEvent)
-		: Viewport(InViewport)
-		, ControllerId(InControllerId)
-		, Key(InKey)
-		, Event(InEvent)
-		, AmountDepressed(InAmountDepressed)
-		, bIsTouchEvent(bInIsTouchEvent)
-	{
-	}
-
-	bool IsGamepad() const { return Key.IsGamepadKey(); }
-
-public:
-
-	// The viewport which the key event is from.
-	FViewport* Viewport;
-	// The controller which the key event is from.
-	int32 ControllerId;
-	// The type of event which occurred.
-	FKey Key;
-	// The type of event which occurred.
-	EInputEvent Event;
-	// For analog keys, the depression percent.
-	float AmountDepressed;
-	// input came from a touch surface.This may be a faked mouse button from touch.
-	bool bIsTouchEvent;
-};
-
-/**
- * An abstract interface to a viewport's client.
- * The viewport's client processes input received by the viewport, and draws the viewport.
- */
-class FViewportClient
-{
-public:
-	virtual ~FViewportClient(){}
-	virtual void Precache() {}
-	virtual void RedrawRequested(FViewport* Viewport) { Viewport->Draw(); }
-	virtual void RequestInvalidateHitProxy(FViewport* Viewport) { Viewport->InvalidateHitProxy(); }
-	virtual void Draw(FViewport* Viewport,FCanvas* Canvas) {}
-	virtual bool ProcessScreenShots(FViewport* Viewport) { return false; }
-	virtual UWorld* GetWorld() const { return NULL; }
-	virtual struct FEngineShowFlags* GetEngineShowFlags() { return NULL; }
-
-	/**
-	 * Check a key event received by the viewport.
-	 * If the viewport client uses the event, it should return true to consume it.
-	 * @param	EventArgs - The Input event args.
-	 * @return	True to consume the key event, false to pass it on.
-	 */
-	virtual bool InputKey(const FInputKeyEventArgs& EventArgs)
-	{
-		return InputKey(EventArgs.Viewport, EventArgs.ControllerId, EventArgs.Key, EventArgs.Event, EventArgs.AmountDepressed, EventArgs.Key.IsGamepadKey());
-	}
-
-	//UE_DEPRECATED(4.21, "Use the new InputKey(const FInputKeyEventArgs& EventArgs) function.")
-	virtual bool InputKey(FViewport* Viewport,int32 ControllerId,FKey Key,EInputEvent Event,float AmountDepressed = 1.f,bool bGamepad=false) { return false; }
-
-	/**
-	 * Check an axis movement received by the viewport.
-	 * If the viewport client uses the movement, it should return true to consume it.
-	 * @param	Viewport - The viewport which the axis movement is from.
-	 * @param	ControllerId - The controller which the axis movement is from.
-	 * @param	Key - The name of the axis which moved.
-	 * @param	Delta - The axis movement delta.
-	 * @param	DeltaTime - The time since the last axis update.
-	 * @param	NumSamples - The number of device samples that contributed to this Delta, useful for things like smoothing
-	 * @param	bGamepad - input came from gamepad (ie xbox controller)
-	 * @return	True to consume the axis movement, false to pass it on.
-	 */
-	virtual bool InputAxis(FViewport* Viewport,int32 ControllerId,FKey Key,float Delta,float DeltaTime,int32 NumSamples=1,bool bGamepad=false) { return false; }
-
-	/**
-	 * Check a character input received by the viewport.
-	 * If the viewport client uses the character, it should return true to consume it.
-	 * @param	Viewport - The viewport which the axis movement is from.
-	 * @param	ControllerId - The controller which the axis movement is from.
-	 * @param	Character - The character.
-	 * @return	True to consume the character, false to pass it on.
-	 */
-	virtual bool InputChar(FViewport* Viewport,int32 ControllerId,TCHAR Character) { return false; }
-
-	/**
-	 * Check a key event received by the viewport.
-	 * If the viewport client uses the event, it should return true to consume it.
-	 * @param	Viewport - The viewport which the event is from.
-	 * @param	ControllerId - The controller which the key event is from.
-	 * @param	Handle - Identifier unique to this touch event
-	 * @param	Type - What kind of touch event this is (see ETouchType)
-	 * @param	TouchLocation - Screen position of the touch
-	 * @param	Force - How hard the touch is
-	 * @param	DeviceTimestamp - Timestamp of the event
-	 * @param	TouchpadIndex - For devices with multiple touchpads, this is the index of which one
-	 * @return	True to consume the key event, false to pass it on.
-	 */
-	virtual bool InputTouch(FViewport* Viewport, int32 ControllerId, uint32 Handle, ETouchType::Type Type, const FVector2D& TouchLocation, float Force, FDateTime DeviceTimestamp, uint32 TouchpadIndex) { return false; }
-
-	UE_DEPRECATED(4.20, "InputTouch now takes a Force")
-	bool InputTouch(FViewport* Viewport, int32 ControllerId, uint32 Handle, ETouchType::Type Type, const FVector2D& TouchLocation, FDateTime DeviceTimestamp, uint32 TouchpadIndex) { return InputTouch(Viewport, ControllerId, Handle, Type, TouchLocation, 1.0f, DeviceTimestamp, TouchpadIndex); }
-
-	/**
-	 * Check a gesture event received by the viewport.
-	 * If the viewport client uses the event, it should return true to consume it.
-	 * @param	Viewport - The viewport which the event is from.
-	 * @param	GestureType - @todo desc
-	 * @param	GestureDelta - @todo desc
-	 * @return	True to consume the gesture event, false to pass it on.
-	 */
-	virtual bool InputGesture(FViewport* Viewport, EGestureEvent GestureType, const FVector2D& GestureDelta, bool bIsDirectionInvertedFromDevice) { return false; }
-
-	/**
-	 * Each frame, the input system will update the motion data.
-	 *
-	 * @param Viewport - The viewport which the key event is from.
-	 * @param ControllerId - The controller which the key event is from.
-	 * @param Tilt			The current orientation of the device
-	 * @param RotationRate	How fast the tilt is changing
-	 * @param Gravity		Describes the current gravity of the device
-	 * @param Acceleration  Describes the acceleration of the device
-	 * @return	True to consume the motion event, false to pass it on.
-	 */
-	virtual bool InputMotion(FViewport* Viewport, int32 ControllerId, const FVector& Tilt, const FVector& RotationRate, const FVector& Gravity, const FVector& Acceleration) { return false; }
-
-	virtual void SetIsSimulateInEditorViewport(bool bInIsSimulateInEditorViewport) { };
-
-	virtual bool WantsPollingMouseMovement(void) const { return true; }
-
-	virtual void MouseEnter( FViewport* Viewport,int32 x, int32 y ) {}
-
-	virtual void MouseLeave( FViewport* Viewport ) {}
-
-	virtual void MouseMove(FViewport* Viewport,int32 X,int32 Y) {}
-
-	/**
-	 * Called when the mouse is moved while a window input capture is in effect
-	 *
-	 * @param	InViewport	Viewport that captured the mouse input
-	 * @param	InMouseX	New mouse cursor X coordinate
-	 * @param	InMouseY	New mouse cursor Y coordinate
-	 */
-	virtual void CapturedMouseMove( FViewport* InViewport, int32 InMouseX, int32 InMouseY ) { }
-
-	/**
-	 * Called from slate when input is finished for this frame, and we should process any queued mouse moves.
-	 */
-	virtual void ProcessAccumulatedPointerInput(FViewport* InViewport) {};
-
-	/**
-	 * Retrieves the cursor that should be displayed by the OS
-	 *
-	 * @param	Viewport	the viewport that contains the cursor
-	 * @param	X			the x position of the cursor
-	 * @param	Y			the Y position of the cursor
-	 *
-	 * @return	the cursor that the OS should display
-	 */
-	virtual EMouseCursor::Type GetCursor(FViewport* Viewport, int32 X,int32 Y) { return EMouseCursor::Default; }
-
-	/**
-	 * Called to map a cursor reply to an actual widget to render.
-	 *
-	 * @return	the widget that should be rendered for this cursor, return TOptional<TSharedRef<SWidget>>() if no mapping.
-	 */
-	virtual TOptional<TSharedRef<SWidget>> MapCursor(FViewport* Viewport, const FCursorReply& CursorReply) { return TOptional<TSharedRef<SWidget>>(); }
-
-	/**
-	 * Called to determine if we should render the focus brush.
-	 *
-	 * @param InFocusCause	The cause of focus
-	 */
-	virtual TOptional<bool> QueryShowFocus(const EFocusCause InFocusCause) const { return TOptional<bool>(); }
-
-	virtual void LostFocus(FViewport* Viewport) {}
-	virtual void ReceivedFocus(FViewport* Viewport) {}
-	virtual bool IsFocused(FViewport* Viewport) { return true; }
-
-	virtual void Activated(FViewport* Viewport, const FWindowActivateEvent& InActivateEvent) {}
-	virtual void Deactivated(FViewport* Viewport, const FWindowActivateEvent& InActivateEvent) {}
-
-	virtual bool IsInPermanentCapture()
-	{ 
-		return  !GIsEditor && ((GetMouseCaptureMode() == EMouseCaptureMode::CapturePermanently) ||
-			(GetMouseCaptureMode() == EMouseCaptureMode::CapturePermanently_IncludingInitialMouseDown));
-	}
-
-	/**
-	 * Called when the top level window associated with the viewport has been requested to close.
-	 * At this point, the viewport has not been closed and the operation may be canceled.
-	 * This may not called from PIE, Editor Windows, on consoles, or before the game ends
-	 * from other methods.
-	 * This is only when the platform specific window is closed.
-	 *
-	 * @return True if the viewport may be closed, false otherwise.
-	 */
-	virtual bool WindowCloseRequested() { return true; }
-
-	virtual void CloseRequested(FViewport* Viewport) {}
-
-	virtual bool RequiresHitProxyStorage() { return true; }
-
-	/**
-	 * Determines whether this viewport client should receive calls to InputAxis() if the game's window is not currently capturing the mouse.
-	 * Used by the UI system to easily receive calls to InputAxis while the viewport's mouse capture is disabled.
-	 */
-	virtual bool RequiresUncapturedAxisInput() const { return false; }
-
-	/**
-	* Determine if the viewport client is going to need any keyboard input
-	* @return true if keyboard input is needed
-	*/
-	virtual bool RequiresKeyboardInput() const { return true; }
-
-	/**
-	 * Returns true if this viewport is orthogonal.
-	 * If hit proxies are ever used in-game, this will need to be
-	 * overridden correctly in GameViewportClient.
-	 */
-	virtual bool IsOrtho() const { return false; }
-
-	/**
-	 * Returns true if this viewport is excluding non-game elements from its display
-	 */
-	virtual bool IsInGameView() const { return false; }
-
-	/**
-	 * Sets GWorld to the appropriate world for this client
-	 *
-	 * @return the previous GWorld
-	 */
-	virtual class UWorld* ConditionalSetWorld() { return NULL; }
-
-	/**
-	 * Restores GWorld to InWorld
-	 *
-	 * @param InWorld	The world to restore
-	 */
-	virtual void ConditionalRestoreWorld( class UWorld* InWorld ) {}
-
-	/**
-	 * Allow viewport client to override the current capture region
-	 *
-	 * @param OutCaptureRegion    Ref to rectangle where we will write the overridden region
-	 * @return true if capture region has been overridden, false otherwise
-	 */
-	virtual bool OverrideHighResScreenshotCaptureRegion(FIntRect& OutCaptureRegion) { return false; }
-
-	/**
-	 * Get a ptr to the stat unit data for this viewport
-	 */
-	virtual FStatUnitData* GetStatUnitData() const { return NULL; }
-
-	/**
-	* Get a ptr to the stat unit data for this viewport
-	*/
-	virtual FStatHitchesData* GetStatHitchesData() const { return NULL; }
-
-	/**
-	 * Get a ptr to the enabled stats list
-	 */
-	virtual const TArray<FString>* GetEnabledStats() const { return NULL; }
-
-	/**
-	 * Sets all the stats that should be enabled for the viewport
-	 */
-	virtual void SetEnabledStats(const TArray<FString>& InEnabledStats) {}
-
-	/**
-	 * Check whether a specific stat is enabled for this viewport
-	 */
-	virtual bool IsStatEnabled(const FString& InName) const { return false; }
-
-	/**
-	* Sets whether stats should be visible for the viewport
-	*/
-	virtual void SetShowStats(bool bWantStats) { }
-
-	/**
-	 * Check whether we should ignore input.
-	 */
-	virtual bool IgnoreInput() { return false; }
-
-	/**
-	 * Gets the mouse capture behavior when the viewport is clicked
-	 */
-	virtual EMouseCaptureMode GetMouseCaptureMode() const { return EMouseCaptureMode::CapturePermanently; }
-
-	UE_DEPRECATED(4.26, "Please call GetMouseCaptureMode() instead.")
-	void CaptureMouseOnClick() { GetMouseCaptureMode(); }
-
-	/**
-	 * Gets whether or not the viewport captures the Mouse on launch of the application
-	 * Technically this controls capture on the first window activate, so in situations
-	 * where the application is launched but isn't activated the effect is delayed until
-	 * activation.
-	 */
-	virtual bool CaptureMouseOnLaunch() { return true; }
-
-	/**
-	 * Gets whether or not the cursor is locked to the viewport when the viewport captures the mouse
-	 */
-	virtual bool LockDuringCapture() { return true; }
-
-	/**
-	 * Gets whether or not the cursor should always be locked to the viewport.
-	 */
-	virtual bool ShouldAlwaysLockMouse() { return false; }
-
-	/**
-	 * Gets whether or not the cursor is hidden when the viewport captures the mouse
-	 */
-	virtual bool HideCursorDuringCapture() const { return false; }
-
-	/** 
-	 * Should we make new windows for popups or create an overlay in the current window.
-	 */
-	virtual FPopupMethodReply OnQueryPopupMethod() const { return FPopupMethodReply::Unhandled(); }
-
-	/**
-	 * Optionally do custom handling of a navigation. 
-	 */
-	virtual bool HandleNavigation(const uint32 InUserIndex, TSharedPtr<SWidget> InDestination) { return false; }
-
-	/**
-	 * @return Whether or not the scene canvas should be scaled.  Note: The debug canvas is always scaled 
-	 */
-	virtual bool ShouldDPIScaleSceneCanvas() const { return true; }
-
-	/**
-	 * @return The DPI Scale of this viewport
-	 */
-	virtual float GetDPIScale() const { return 1.0f; }
-};
 
 /** Tracks the viewport client that should process the stat command, can be NULL */
 extern ENGINE_API class FCommonViewportClient* GStatProcessingViewportClient;
-
-/**
- * Common functionality for game and editor viewport clients
- */
-
-class FCommonViewportClient : public FViewportClient
-{
-public:
-	FCommonViewportClient()
-		: CachedDPIScale(1.0f)
-		, bShouldUpdateDPIScale(true)
-	{}
-
-	virtual ~FCommonViewportClient()
-	{
-		//make to clean up the global "stat" client when we delete the active one.
-		if (GStatProcessingViewportClient == this)
-		{
-			GStatProcessingViewportClient = NULL;
-		}
-	}
-
-	/** Tells this viewport to update editor dpi scale when needed */
-	ENGINE_API void RequestUpdateDPIScale();
-
-	/** @return the current resolution fraction to be used for scene rendering in this client. */
-	ENGINE_API float GetDPIDerivedResolutionFraction() const;
-
-	/**
-	 * @return The DPI Scale of this viewport
-	 */
-	ENGINE_API virtual float GetDPIScale() const override;
-
-	ENGINE_API void DrawHighResScreenshotCaptureRegion(FCanvas& Canvas);
-
-protected:
-	/** @return the DPI scale of the window that the viewport client is in */
-	virtual float UpdateViewportClientWindowDPIScale() const { return 1.0; }
-
-private:
-	mutable float CachedDPIScale;
-	mutable bool bShouldUpdateDPIScale;
-};
-
-
-/**
- * Minimal viewport for assisting with taking screenshots (also used within a plugin)
- * @todo: This should be refactored
- */
-class ENGINE_API FDummyViewport : public FViewport
-{
-public:
-	FDummyViewport(FViewportClient* InViewportClient);
-
-	virtual ~FDummyViewport();
-
-	//~ Begin FViewport Interface
-	virtual void BeginRenderFrame(FRHICommandListImmediate& RHICmdList) override
-	{
-		check( IsInRenderingThread() );
-		//SetRenderTarget(RHICmdList,  RenderTargetTextureRHI,  FTexture2DRHIRef() );
-	};
-
-	virtual void EndRenderFrame(FRHICommandListImmediate& RHICmdList, bool bPresent, bool bLockToVsync) override
-	{
-		check( IsInRenderingThread() );
-	}
-
-	virtual void*	GetWindow() override { return 0; }
-	virtual void	MoveWindow(int32 NewPosX, int32 NewPosY, int32 NewSizeX, int32 NewSizeY) override {}
-	virtual void	Destroy() override {}
-	virtual bool SetUserFocus(bool bFocus) override { return false; }
-	virtual bool	KeyState(FKey Key) const override { return false; }
-	virtual int32	GetMouseX() const override { return 0; }
-	virtual int32	GetMouseY() const override { return 0; }
-	virtual void	GetMousePos( FIntPoint& MousePosition, const bool bLocalPosition = true) override { MousePosition = FIntPoint(0, 0); }
-	virtual void	SetMouse(int32 x, int32 y) override { }
-	virtual void	ProcessInput( float DeltaTime ) override { }
-	virtual FVector2D VirtualDesktopPixelToViewport(FIntPoint VirtualDesktopPointPx) const override { return FVector2D::ZeroVector; }
-	virtual FIntPoint ViewportToVirtualDesktopPixel(FVector2D ViewportCoordinate) const override { return FIntPoint::ZeroValue; }
-	virtual void InvalidateDisplay() override { }
-	virtual void DeferInvalidateHitProxy() override { }
-	virtual FViewportFrame* GetViewportFrame() override { return 0; }
-	virtual FCanvas* GetDebugCanvas() override { return DebugCanvas; }
-	//~ End FViewport Interface
-
-	//~ Begin FRenderResource Interface
-	virtual void InitDynamicRHI() override
-	{
-		FTexture2DRHIRef ShaderResourceTextureRHI;
-
-		FRHIResourceCreateInfo CreateInfo;
-		RHICreateTargetableShaderResource2D( SizeX, SizeY, PF_A2B10G10R10, 1, TexCreate_None, TexCreate_RenderTargetable, false, CreateInfo, RenderTargetTextureRHI, ShaderResourceTextureRHI );
-	}
-
-	// @todo UE4 DLL: Without these functions we get unresolved linker errors with FRenderResource
-	virtual void InitRHI() override{}
-	virtual void ReleaseRHI() override{}
-	virtual void InitResource() override{ FViewport::InitResource(); }
-	virtual void ReleaseResource() override { FViewport::ReleaseResource(); }
-	virtual FString GetFriendlyName() const override { return FString(TEXT("FDummyViewport"));}
-	//~ End FRenderResource Interface
-private:
-	FCanvas* DebugCanvas;
-};

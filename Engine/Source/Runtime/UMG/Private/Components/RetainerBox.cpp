@@ -6,6 +6,8 @@
 
 #include "Slate/SRetainerWidget.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(RetainerBox)
+
 #define LOCTEXT_NAMESPACE "UMG"
 
 static FName DefaultTextureParameterName("Texture");
@@ -16,14 +18,20 @@ static FName DefaultTextureParameterName("Texture");
 URetainerBox::URetainerBox(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
-	Visibility = ESlateVisibility::Visible;
+	SetVisibilityInternal(ESlateVisibility::Visible);
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	Phase = 0;
 	PhaseCount = 1;
 	RenderOnPhase = true;
 	RenderOnInvalidation = false;
 	TextureParameter = DefaultTextureParameterName;
+#if WITH_EDITOR
+	bShowEffectsInDesigner = true;
+#endif // WITH_EDITOR
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void URetainerBox::SetRenderingPhase(int32 PhaseToRenderOn, int32 TotalRenderingPhases)
 {
 	Phase = PhaseToRenderOn;
@@ -39,6 +47,7 @@ void URetainerBox::SetRenderingPhase(int32 PhaseToRenderOn, int32 TotalRendering
 		MyRetainerWidget->SetRenderingPhase(Phase, PhaseCount);
 	}
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 void URetainerBox::RequestRender()
 {
@@ -47,6 +56,13 @@ void URetainerBox::RequestRender()
 		MyRetainerWidget->RequestRender();
 	}
 }
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+const UMaterialInterface* URetainerBox::GetEffectMaterialInterface() const
+{
+	return EffectMaterial;
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 UMaterialInstanceDynamic* URetainerBox::GetEffectMaterial() const
 {
@@ -58,6 +74,7 @@ UMaterialInstanceDynamic* URetainerBox::GetEffectMaterial() const
 	return nullptr;
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void URetainerBox::SetEffectMaterial(UMaterialInterface* InEffectMaterial)
 {
 	EffectMaterial = InEffectMaterial;
@@ -76,6 +93,11 @@ void URetainerBox::SetTextureParameter(FName InTextureParameter)
 	}
 }
 
+const FName& URetainerBox::GetTextureParameter() const
+{
+	return TextureParameter;
+}
+
 void URetainerBox::SetRetainRendering(bool bInRetainRendering)
 {
 	bRetainRender = bInRetainRendering;
@@ -86,6 +108,32 @@ void URetainerBox::SetRetainRendering(bool bInRetainRendering)
 	}
 }
 
+bool URetainerBox::IsRetainRendering() const
+{
+	return bRetainRender;
+}
+
+int32 URetainerBox::GetPhase() const
+{
+	return Phase;
+}
+
+int32 URetainerBox::GetPhaseCount() const
+{
+	return PhaseCount;
+}
+
+bool URetainerBox::IsRenderOnInvalidation() const
+{
+	return RenderOnInvalidation;
+}
+
+bool URetainerBox::IsRenderOnPhase() const
+{
+	return RenderOnPhase;
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
 void URetainerBox::ReleaseSlateResources(bool bReleaseChildren)
 {
 	Super::ReleaseSlateResources(bReleaseChildren);
@@ -95,6 +143,7 @@ void URetainerBox::ReleaseSlateResources(bool bReleaseChildren)
 
 TSharedRef<SWidget> URetainerBox::RebuildWidget()
 {
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	MyRetainerWidget =
 		SNew(SRetainerWidget)
 		.RenderOnInvalidation(RenderOnInvalidation)
@@ -106,6 +155,12 @@ TSharedRef<SWidget> URetainerBox::RebuildWidget()
 #endif//STATS
 	;
 
+#if WITH_EDITOR
+	MyRetainerWidget->SetIsDesignTime(IsDesignTime());
+	MyRetainerWidget->SetShowEffectsInDesigner(bShowEffectsInDesigner);
+#endif // WITH_EDITOR
+
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	if ( GetChildrenCount() > 0 )
 	{
 		MyRetainerWidget->SetContent(GetContentSlot()->Content ? GetContentSlot()->Content->TakeWidget() : SNullWidget::NullWidget);
@@ -118,10 +173,21 @@ void URetainerBox::SynchronizeProperties()
 {
 	Super::SynchronizeProperties();
 
-	MyRetainerWidget->SetRetainedRendering(IsDesignTime() ? false : bRetainRender);
+	if (!MyRetainerWidget.IsValid())
+	{
+		return;
+	}
+	
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+#if WITH_EDITOR
+	MyRetainerWidget->SetIsDesignTime(IsDesignTime());
+	MyRetainerWidget->SetShowEffectsInDesigner(bShowEffectsInDesigner);
+#endif // WITH_EDITOR
+	MyRetainerWidget->SetRetainedRendering(bRetainRender);
 	MyRetainerWidget->SetEffectMaterial(EffectMaterial);
 	MyRetainerWidget->SetTextureParameter(TextureParameter);
 	MyRetainerWidget->SetWorld(GetWorld());
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 void URetainerBox::OnSlotAdded(UPanelSlot* InSlot)
@@ -162,6 +228,32 @@ FGeometry URetainerBox::GetCachedAllottedGeometry() const
 	return TempGeo;
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+void URetainerBox::InitRenderOnInvalidation(bool InRenderOnInvalidation)
+{
+	ensureMsgf(!MyRetainerWidget.IsValid(), TEXT("The widget is already created."));
+	RenderOnInvalidation = InRenderOnInvalidation;
+}
+
+void URetainerBox::InitRenderOnPhase(bool InRenderOnPhase)
+{
+	ensureMsgf(!MyRetainerWidget.IsValid(), TEXT("The widget is already created."));
+	RenderOnPhase = InRenderOnPhase;
+}
+
+void URetainerBox::InitPhase(int32 InPhase)
+{
+	ensureMsgf(!MyRetainerWidget.IsValid(), TEXT("The widget is already created."));
+	Phase = InPhase;
+}
+
+void URetainerBox::InitPhaseCount(int32 InPhaseCount)
+{
+	ensureMsgf(!MyRetainerWidget.IsValid(), TEXT("The widget is already created."));
+	PhaseCount = InPhaseCount;
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
 #if WITH_EDITOR
 bool URetainerBox::CanEditChange(const FProperty* InProperty) const
 {
@@ -170,10 +262,12 @@ bool URetainerBox::CanEditChange(const FProperty* InProperty) const
 		return false;
 	}
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	if (InProperty->GetFName() == GET_MEMBER_NAME_CHECKED(URetainerBox, Phase)
 		|| InProperty->GetFName() == GET_MEMBER_NAME_CHECKED(URetainerBox, PhaseCount))
 	{
 		return RenderOnPhase && bRetainRender;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
 	return true;
 }
@@ -182,3 +276,4 @@ bool URetainerBox::CanEditChange(const FProperty* InProperty) const
 /////////////////////////////////////////////////////
 
 #undef LOCTEXT_NAMESPACE
+

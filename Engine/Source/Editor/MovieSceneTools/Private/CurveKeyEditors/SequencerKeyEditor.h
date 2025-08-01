@@ -4,6 +4,7 @@
 
 #include "Templates/SharedPointer.h"
 #include "MovieSceneSection.h"
+#include "IKeyArea.h"
 #include "ISequencer.h"
 #include "MovieSceneCommonHelpers.h"
 #include "Channels/MovieSceneChannelTraits.h"
@@ -11,7 +12,8 @@
 #include "Channels/MovieSceneChannelHandle.h"
 #include "MovieSceneTimeHelpers.h"
 #include "Channels/MovieSceneFloatChannel.h"
-
+#include "MVVM/Selection/Selection.h"
+#include "MVVM/ViewModels/SequencerEditorViewModel.h"
 
 template<typename ChannelType, typename ValueType>
 struct TSequencerKeyEditor
@@ -76,7 +78,7 @@ struct TSequencerKeyEditor
 		{
 			const FFrameTime CurrentTime = UE::MovieScene::ClampToDiscreteRange(Sequencer->GetLocalTime().Time, OwningSection->GetRange());
 			//If we have no keys and no default, key with the external value if it exists
-			if (!EvaluateChannel(Channel, CurrentTime, Result))
+			if (!EvaluateChannel(OwningSection, Channel, CurrentTime, Result))
 			{
 				if (TOptional<ValueType> ExternalValue = GetExternalValue())
 				{
@@ -95,6 +97,7 @@ struct TSequencerKeyEditor
 	{
 		using namespace UE::MovieScene;
 		using namespace Sequencer;
+		using namespace UE::Sequencer;
 
 		UMovieSceneSection* OwningSection = WeakSection.Get();
 		if (!OwningSection)
@@ -112,38 +115,73 @@ struct TSequencerKeyEditor
 			return;
 		}
 
-		const FFrameNumber CurrentTime = Sequencer->GetLocalTime().Time.FloorToFrame();
 		const bool  bAutoSetTrackDefaults = Sequencer->GetAutoSetTrackDefaults();
 
-		EMovieSceneKeyInterpolation Interpolation = Sequencer->GetKeyInterpolation();
+		const FKeySelection& KeySelection = Sequencer->GetViewModel()->GetSelection()->KeySelection;
 
-		TArray<FKeyHandle> KeysAtCurrentTime;
-		Channel->GetKeys(TRange<FFrameNumber>(CurrentTime), nullptr, &KeysAtCurrentTime);
-
-		if (KeysAtCurrentTime.Num() > 0)
+		// Allow editing the key selection if the key editor's channel is one of the selected key's channels
+		bool bAllowEditingKeySelection = false;
+		for (FKeyHandle Key : KeySelection)
 		{
-			AssignValue(Channel, KeysAtCurrentTime[0], InValue);
+			// Make sure we only manipulate the values of the channel with the same channel type we're editing
+			TSharedPtr<FChannelModel> ChannelModel = KeySelection.GetModelForKey(Key);
+			if (ChannelModel && ChannelModel->GetChannel() == Channel)
+			{
+				bAllowEditingKeySelection = true;	
+				break;
+			}
+		}
+
+		if (bAllowEditingKeySelection)
+		{
+			for (FKeyHandle Key : KeySelection)
+			{
+				// Make sure we only manipulate the values of the channel with the same channel type we're editing
+				TSharedPtr<FChannelModel> ChannelModel = KeySelection.GetModelForKey(Key);
+				if (ChannelModel && ChannelModel->GetKeyArea() && ChannelModel->GetKeyArea()->GetChannel().GetChannelTypeName() == ChannelHandle.GetChannelTypeName())
+				{
+					UMovieSceneSection* Section = ChannelModel->GetSection();
+					if (Section && Section->TryModify())
+					{
+						AssignValue(reinterpret_cast<ChannelType*>(ChannelModel->GetChannel()), Key, InValue);
+					}
+				}
+			}
 		}
 		else
 		{
-			bool bHasAnyKeys = Channel->GetNumKeys() != 0;
+			const FFrameNumber CurrentTime = Sequencer->GetLocalTime().Time.FloorToFrame();
 
-			if (bHasAnyKeys || bAutoSetTrackDefaults == false)
+			EMovieSceneKeyInterpolation Interpolation = GetInterpolationMode(Channel, CurrentTime, Sequencer->GetKeyInterpolation());
+
+			TArray<FKeyHandle> KeysAtCurrentTime;
+			Channel->GetKeys(TRange<FFrameNumber>(CurrentTime), nullptr, &KeysAtCurrentTime);
+
+			if (KeysAtCurrentTime.Num() > 0)
 			{
-				// When auto setting track defaults are disabled, add a key even when it's empty so that the changed
-				// value is saved and is propagated to the property.
-				AddKeyToChannel(Channel, CurrentTime, InValue, Interpolation);
-				bHasAnyKeys = Channel->GetNumKeys() != 0;
+				AssignValue(Channel, KeysAtCurrentTime[0], InValue);
 			}
-
-			if (bHasAnyKeys)
+			else
 			{
-				TRange<FFrameNumber> KeyRange     = TRange<FFrameNumber>(CurrentTime);
-				TRange<FFrameNumber> SectionRange = OwningSection->GetRange();
+				bool bHasAnyKeys = Channel->GetNumKeys() != 0;
 
-				if (!SectionRange.Contains(KeyRange))
+				if (bHasAnyKeys || bAutoSetTrackDefaults == false)
 				{
-					OwningSection->SetRange(TRange<FFrameNumber>::Hull(KeyRange, SectionRange));
+					// When auto setting track defaults are disabled, add a key even when it's empty so that the changed
+					// value is saved and is propagated to the property.
+					AddKeyToChannel(Channel, CurrentTime, InValue, Interpolation);
+					bHasAnyKeys = Channel->GetNumKeys() != 0;
+				}
+
+				if (bHasAnyKeys)
+				{
+					TRange<FFrameNumber> KeyRange     = TRange<FFrameNumber>(CurrentTime);
+					TRange<FFrameNumber> SectionRange = OwningSection->GetRange();
+
+					if (!SectionRange.Contains(KeyRange))
+					{
+						OwningSection->SetRange(TRange<FFrameNumber>::Hull(KeyRange, SectionRange));
+					}
 				}
 			}
 		}
@@ -185,6 +223,32 @@ struct TSequencerKeyEditor
 	FTrackInstancePropertyBindings* GetPropertyBindings() const
 	{
 		return WeakPropertyBindings.Pin().Get();
+	}
+
+	FString GetMetaData(const FName& Key) const
+	{
+		ISequencer* Sequencer = GetSequencer();
+		FTrackInstancePropertyBindings* PropertyBindings = GetPropertyBindings();
+		if (Sequencer && PropertyBindings)
+		{
+			for (TWeakObjectPtr<> WeakObject : Sequencer->FindBoundObjects(ObjectBindingID, Sequencer->GetFocusedTemplateID()))
+			{
+				if (UObject* Object = WeakObject.Get())
+				{
+					if (FProperty* Property = PropertyBindings->GetProperty(*Object))
+					{
+						return Property->GetMetaData(Key);
+					}
+				}
+			}
+		}
+
+		if (const FMovieSceneChannelMetaData* MetaData = ChannelHandle.GetMetaData())
+		{
+			return MetaData->GetPropertyMetaData(Key);
+		}
+
+		return FString();
 	}
 
 private:

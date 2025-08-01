@@ -3,12 +3,12 @@
 #include "LoadingProfilerCommands.h"
 
 #include "DesktopPlatformModule.h"
-#include "EditorStyleSet.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 
 // Insights
 #include "Insights/InsightsManager.h"
+#include "Insights/InsightsStyle.h"
 #include "Insights/LoadingProfiler/LoadingProfilerManager.h"
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -37,29 +37,57 @@ void FLoadingProfilerMenuBuilder::AddMenuEntry(FMenuBuilder& MenuBuilder, const 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 FLoadingProfilerCommands::FLoadingProfilerCommands()
-	: TCommands<FLoadingProfilerCommands>(
-		TEXT("LoadingProfilerCommand"), // Context name for fast lookup
-		NSLOCTEXT("Contexts", "LoadingProfilerCommand", "Asset Loading Insights"), // Localized context name for displaying
-		NAME_None, // Parent
-		FEditorStyle::GetStyleSetName() // Icon Style Set
-	)
+: TCommands<FLoadingProfilerCommands>(
+	TEXT("LoadingProfilerCommands"),
+	NSLOCTEXT("Contexts", "LoadingProfilerCommands", "Insights - Asset Loading Insights"),
+	NAME_None,
+	FInsightsStyle::GetStyleSetName())
 {
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // UI_COMMAND takes long for the compiler to optimize
-PRAGMA_DISABLE_OPTIMIZATION
+UE_DISABLE_OPTIMIZATION_SHIP
 void FLoadingProfilerCommands::RegisterCommands()
 {
-	UI_COMMAND(ToggleTimingViewVisibility, "Timing", "Toggles the visibility of the main Timing view", EUserInterfaceActionType::ToggleButton, FInputChord(EModifierKey::Control, EKeys::T));
-	UI_COMMAND(ToggleEventAggregationTreeViewVisibility, "Event Aggregation", "Toggles the visibility of the Event Aggregation table/tree view", EUserInterfaceActionType::ToggleButton, FInputChord());
-	UI_COMMAND(ToggleObjectTypeAggregationTreeViewVisibility, "Object Type Aggregation", "Toggles the visibility of the Object Type Aggregation table/tree view", EUserInterfaceActionType::ToggleButton, FInputChord());
-	UI_COMMAND(TogglePackageDetailsTreeViewVisibility, "Package Details", "Toggles the visibility of the Package Details table/tree view", EUserInterfaceActionType::ToggleButton, FInputChord());
-	UI_COMMAND(ToggleExportDetailsTreeViewVisibility, "Export Details", "Toggles the visibility of the Export Details table/tree view", EUserInterfaceActionType::ToggleButton, FInputChord());
-	UI_COMMAND(ToggleRequestsTreeViewVisibility, "Requests", "Toggles the visibility of the Requests table/tree view", EUserInterfaceActionType::ToggleButton, FInputChord());
+	UI_COMMAND(ToggleTimingViewVisibility,
+		"Timing",
+		"Toggles the visibility of the main Timing view.",
+		EUserInterfaceActionType::ToggleButton,
+		FInputChord());
+
+	UI_COMMAND(ToggleEventAggregationTreeViewVisibility,
+		"Event Aggregation",
+		"Toggles the visibility of the Event Aggregation table/tree view.",
+		EUserInterfaceActionType::ToggleButton,
+		FInputChord());
+
+	UI_COMMAND(ToggleObjectTypeAggregationTreeViewVisibility,
+		"Object Type Aggregation",
+		"Toggles the visibility of the Object Type Aggregation table/tree view.",
+		EUserInterfaceActionType::ToggleButton,
+		FInputChord());
+
+	UI_COMMAND(TogglePackageDetailsTreeViewVisibility,
+		"Package Details",
+		"Toggles the visibility of the Package Details table/tree view.",
+		EUserInterfaceActionType::ToggleButton,
+		FInputChord());
+
+	UI_COMMAND(ToggleExportDetailsTreeViewVisibility,
+		"Export Details",
+		"Toggles the visibility of the Export Details table/tree view.",
+		EUserInterfaceActionType::ToggleButton,
+		FInputChord());
+
+	UI_COMMAND(ToggleRequestsTreeViewVisibility,
+		"Requests",
+		"Toggles the visibility of the Requests table/tree view.",
+		EUserInterfaceActionType::ToggleButton,
+		FInputChord());
 }
-PRAGMA_ENABLE_OPTIMIZATION
+UE_ENABLE_OPTIMIZATION_SHIP
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // Toggle Commands

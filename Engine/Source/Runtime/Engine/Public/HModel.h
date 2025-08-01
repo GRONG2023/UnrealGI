@@ -8,6 +8,7 @@
 
 #include "CoreMinimal.h"
 #include "UObject/UObjectGlobals.h"
+#include "UObject/ObjectPtr.h"
 #include "HitProxies.h"
 
 class FSceneView;
@@ -36,10 +37,7 @@ public:
 
 	// HHitProxy interface.
 	virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
-	virtual EMouseCursor::Type GetMouseCursor() override
-	{
-		return EMouseCursor::Crosshairs;
-	}
+	virtual EMouseCursor::Type GetMouseCursor() override;
 
 	// Accessors.
 	UModelComponent* GetModelComponent() const { return Component; }
@@ -47,7 +45,7 @@ public:
 
 private:
 	
-	UModelComponent* Component;
-	UModel* Model;
+	TObjectPtr<UModelComponent> Component;
+	TObjectPtr<UModel> Model;
 };
 

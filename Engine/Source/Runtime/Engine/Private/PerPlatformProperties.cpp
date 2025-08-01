@@ -1,11 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "PerPlatformProperties.h"
-#include "Serialization/Archive.h"
+#include "Concepts/StaticStructProvider.h"
+#include "Engine/Engine.h"
+#include "Misc/DelayedAutoRegister.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PerPlatformProperties)
 
 #if WITH_EDITOR
 #include "Interfaces/ITargetPlatform.h"
-#include "PlatformInfo.h"
 #endif
 
 IMPLEMENT_TYPE_LAYOUT(FFreezablePerPlatformFloat);
@@ -22,8 +25,7 @@ ENGINE_API FArchive& operator<<(FArchive& Ar, TPerPlatformProperty<StructType, V
 		bCooked = true;
 		Ar << bCooked;
 		// Save out platform override if it exists and Default otherwise
-		const PlatformInfo::FPlatformInfo& PlatformInfo = Ar.CookingTarget()->GetPlatformInfo();
-		ValueType Value = Property.GetValueForPlatformIdentifiers(PlatformInfo.PlatformGroupName, PlatformInfo.VanillaPlatformName);
+		ValueType Value = Property.GetValueForPlatform(*Ar.CookingTarget()->IniPlatformName());
 		Ar << Value;
 	}
 	else
@@ -35,7 +37,9 @@ ENGINE_API FArchive& operator<<(FArchive& Ar, TPerPlatformProperty<StructType, V
 #if WITH_EDITORONLY_DATA
 		if (!bCooked)
 		{
-			Ar << This->PerPlatform;
+			using MapType = decltype(This->PerPlatform);
+			using KeyFuncs = typename PerPlatformProperty::Private::KeyFuncs<MapType>;
+			KeyFuncs::SerializePerPlatformMap(Ar, This->PerPlatform);
 		}
 #endif
 	}
@@ -56,7 +60,7 @@ ENGINE_API void operator<<(FStructuredArchive::FSlot Slot, TPerPlatformProperty<
 		bCooked = true;
 		Record << SA_VALUE(TEXT("bCooked"), bCooked);
 		// Save out platform override if it exists and Default otherwise
-		ValueType Value = Property.GetValueForPlatformIdentifiers(UnderlyingArchive.CookingTarget()->GetPlatformInfo().PlatformGroupName);
+		ValueType Value = Property.GetValueForPlatform(*UnderlyingArchive.CookingTarget()->IniPlatformName());
 		Record << SA_VALUE(TEXT("Value"), Value);
 	}
 	else
@@ -68,7 +72,9 @@ ENGINE_API void operator<<(FStructuredArchive::FSlot Slot, TPerPlatformProperty<
 #if WITH_EDITORONLY_DATA
 		if (!bCooked)
 		{
-			Record << SA_VALUE(TEXT("PerPlatform"), This->PerPlatform);
+			using MapType = decltype(This->PerPlatform);
+			using KeyFuncs = typename PerPlatformProperty::Private::KeyFuncs<MapType>;
+			KeyFuncs::SerializePerPlatformMap(UnderlyingArchive, Record, This->PerPlatform);
 		}
 #endif
 	}
@@ -82,6 +88,9 @@ template ENGINE_API void operator<<(FStructuredArchive::FSlot Slot, TPerPlatform
 template ENGINE_API void operator<<(FStructuredArchive::FSlot Slot, TPerPlatformProperty<FPerPlatformFloat, float, NAME_FloatProperty>&);
 template ENGINE_API void operator<<(FStructuredArchive::FSlot Slot, TPerPlatformProperty<FPerPlatformBool, bool, NAME_BoolProperty>&);
 template ENGINE_API void operator<<(FStructuredArchive::FSlot Slot, TPerPlatformProperty<FFreezablePerPlatformFloat, float, NAME_FloatProperty>&);
+
+template ENGINE_API FArchive& operator<<(FArchive&, TPerPlatformProperty<FPerPlatformFrameRate, FFrameRate, NAME_FrameRate>&);
+template ENGINE_API void operator<<(FStructuredArchive::FSlot Slot, TPerPlatformProperty<FPerPlatformFrameRate, FFrameRate, NAME_FrameRate>&);
 
 FString FPerPlatformInt::ToString() const
 {
@@ -105,3 +114,10 @@ FString FFreezablePerPlatformInt::ToString() const
 {
 	return FPerPlatformInt(*this).ToString();
 }
+
+#if WITH_EDITORONLY_DATA && WITH_EDITOR
+bool GEngine_GetPreviewPlatformName(FName& PlatformName)
+{
+	return GEngine && GEngine->GetPreviewPlatformName(PlatformName);
+}
+#endif

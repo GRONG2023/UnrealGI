@@ -8,9 +8,9 @@
 	Includes
  ------------------------------------------------------------------------------------*/
 
-#include "../Public/AndroidLocalNotification.h"
-#include "Stats/Stats.h"
+#include "AndroidLocalNotification.h"
 #include "Async/TaskGraphInterfaces.h"
+#include "Stats/Stats.h"
 
 DEFINE_LOG_CATEGORY(LogAndroidLocalNotification);
 
@@ -33,7 +33,7 @@ public:
 
 
 #if USE_ANDROID_JNI
-JNI_METHOD void Java_com_epicgames_ue4_GameActivity_nativeAppOpenedWithLocalNotification(JNIEnv* jenv, jobject thiz, jstring jactivationEvent, int32 jFireDate)
+JNI_METHOD void Java_com_epicgames_unreal_GameActivity_nativeAppOpenedWithLocalNotification(JNIEnv* jenv, jobject thiz, jstring jactivationEvent, int32 jFireDate)
 {
 	auto ActivationEvent = FJavaHelper::FStringFromParam(jenv, jactivationEvent);
 	
@@ -86,8 +86,18 @@ void FAndroidLocalNotificationService::ClearAllLocalNotifications()
 int32 FAndroidLocalNotificationService::ScheduleLocalNotificationAtTime(const FDateTime& FireDateTime, bool LocalTime, const FText& Title, const FText& Body, const FText& Action, const FString& ActivationEvent)
 {
 #if USE_ANDROID_JNI
-	extern int32 AndroidThunkCpp_ScheduleLocalNotificationAtTime(const FDateTime& FireDateTime, bool LocalTime, const FText& Title, const FText& Body, const FText& Action, const FString& ActivationEvent);
-	return AndroidThunkCpp_ScheduleLocalNotificationAtTime(FireDateTime , LocalTime, Title, Body, Action, ActivationEvent);
+	extern int32 AndroidThunkCpp_ScheduleLocalNotificationAtTime(const FDateTime & FireDateTime, bool LocalTime, const FText & Title, const FText & Body, const FText & Action, const FString & ActivationEvent, int32 IdOverride);
+	return AndroidThunkCpp_ScheduleLocalNotificationAtTime(FireDateTime, LocalTime, Title, Body, Action, ActivationEvent, -1);
+#else
+	return -1;
+#endif
+}
+
+int32 FAndroidLocalNotificationService::ScheduleLocalNotificationAtTimeOverrideId(const FDateTime& FireDateTime, bool LocalTime, const FText& Title, const FText& Body, const FText& Action, const FString& ActivationEvent, int32 IdOverride)
+{
+#if USE_ANDROID_JNI
+	extern int32 AndroidThunkCpp_ScheduleLocalNotificationAtTime(const FDateTime & FireDateTime, bool LocalTime, const FText & Title, const FText & Body, const FText & Action, const FString & ActivationEvent, int32 IdOverride);
+	return AndroidThunkCpp_ScheduleLocalNotificationAtTime(FireDateTime, LocalTime, Title, Body, Action, ActivationEvent, IdOverride);
 #else
 	return -1;
 #endif

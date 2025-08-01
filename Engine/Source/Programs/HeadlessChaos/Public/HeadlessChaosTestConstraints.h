@@ -21,7 +21,8 @@ namespace ChaosTest
 	public:
 
 		FConstraintsTest(const int32 NumIterations, const FReal Gravity)
-			: Evolution(SOAs, PhysicalMaterials)
+			: SOAs(UniqueIndices)
+			, Evolution(SOAs, PhysicalMaterials)
 		{
 			PhysicalMaterial = MakeUnique<FChaosPhysicsMaterial>();
 			PhysicalMaterial->Friction = 0;
@@ -30,52 +31,71 @@ namespace ChaosTest
 			PhysicalMaterial->SleepingAngularThreshold = 0;
 			PhysicalMaterial->DisabledLinearThreshold = 0;
 			PhysicalMaterial->DisabledAngularThreshold = 0;
+			PhysicalMaterial->SleepCounterThreshold = std::numeric_limits<int32>::max();
 
-			Evolution.SetNumIterations(NumIterations);
-			Evolution.GetGravityForces().SetAcceleration(Gravity * FVec3(0, 0, -1));
+			Evolution.SetNumPositionIterations(NumIterations);
+			Evolution.SetNumVelocityIterations(1);
+			Evolution.SetNumProjectionIterations(1);
+			Evolution.GetGravityForces().SetAcceleration(Gravity * FVec3(0, 0, -1), 0);
 		}
 
 		virtual ~FConstraintsTest()
 		{
 		}
 
-		auto AddParticleBox(const FVec3& Position, const FRotation3& Rotation, const FVec3& Size, FReal Mass)
+		// By default the tests are set up to disable sleeping. Undo this by giving the physical material a non-zero sleep threshold
+		void EnableSleeping()
 		{
-			FGeometryParticleHandle& Particle = Mass > SMALL_NUMBER ? *AppendDynamicParticleBox(SOAs, Size) : *AppendStaticParticleBox(SOAs, Size);
+			// These are the defaults from PhysicalMaterial.cpp
+			PhysicalMaterial->SleepingLinearThreshold = 1;
+			PhysicalMaterial->SleepingAngularThreshold = 0.05;
+			PhysicalMaterial->SleepCounterThreshold = 4;
+		}
 
-			ResetParticle(&Particle, Position, Rotation, FVec3(0), FVec3(0));
+		FGeometryParticleHandle* AddParticleBox(const FVec3& Position, const FRotation3& Rotation, const FVec3& Size, FReal Mass)
+		{
+			FPBDRigidParticleHandle* Particle = AppendDynamicParticleBox(SOAs, Size);
 
-			auto PBDParticlePtr = Particle.CastToRigidParticle();
-			if(PBDParticlePtr && PBDParticlePtr->ObjectState() == EObjectStateType::Dynamic)
+			if (Mass == 0)
 			{
-				auto& PBDParticle = *PBDParticlePtr;
-				PBDParticle.M() = PBDParticle.M() * Mass;
-				PBDParticle.I() = PBDParticle.I() * Mass;
-				PBDParticle.InvM() = PBDParticle.InvM() * ((FReal)1 / Mass);
-				PBDParticle.InvI() = PBDParticle.InvI() * ((FReal)1 / Mass);
+				Evolution.SetParticleObjectState(Particle, EObjectStateType::Kinematic);
 			}
-			Evolution.SetPhysicsMaterial(&Particle, MakeSerializable(PhysicalMaterial));
 
-			return &Particle;
+			ResetParticle(Particle, Position, Rotation, FVec3(0), FVec3(0));
+
+			if(Particle->ObjectState() == EObjectStateType::Dynamic)
+			{
+				// NOTE: particle was created with unit mass
+				Particle->M() = Particle->M() * Mass;
+				Particle->I() = Particle->I() * Mass;
+				Particle->InvM() = Particle->InvM() * ((FReal)1 / Mass);
+				Particle->InvI() = Particle->InvI() * ((FReal)1 / Mass);
+			}
+			Evolution.SetPhysicsMaterial(Particle, MakeSerializable(PhysicalMaterial));
+
+			Evolution.EnableParticle(Particle);
+
+			return Particle;
 		}
 
 		void ResetParticle(FGeometryParticleHandle* Particle, const FVec3& Position, const FRotation3& Rotation, const FVec3& Velocity, const FVec3& AngularVelocity)
 		{
-			Particle->X() = Position;
-			Particle->R() = Rotation;
-			if (auto KinParticle = Particle->CastToKinematicParticle())
+			Particle->SetX(Position);
+			Particle->SetR(Rotation);
+			if (FKinematicGeometryParticleHandle* KinParticle = Particle->CastToKinematicParticle())
 			{
-				KinParticle->V() = Velocity;
-				KinParticle->W() = AngularVelocity;
+				KinParticle->SetV(Velocity);
+				KinParticle->SetW(AngularVelocity);
 			}
-			if (auto PBDParticle = Particle->CastToRigidParticle())
+			if (FPBDRigidParticleHandle* PBDParticle = Particle->CastToRigidParticle())
 			{
-				PBDParticle->P() = Position;
-				PBDParticle->Q() = Rotation;
+				PBDParticle->SetP(Position);
+				PBDParticle->SetQ(Rotation);
 			}
 		}
 
 		// Solver state
+		FParticleUniqueIndicesMultithreaded UniqueIndices;
 		FPBDRigidsSOAs SOAs;
 		TEvolution Evolution;
 		TUniquePtr<FChaosPhysicsMaterial> PhysicalMaterial;

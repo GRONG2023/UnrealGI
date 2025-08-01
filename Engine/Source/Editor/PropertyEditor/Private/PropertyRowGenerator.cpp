@@ -4,10 +4,9 @@
 #include "PropertyNode.h"
 #include "ObjectPropertyNode.h"
 #include "StructurePropertyNode.h"
-#include "Classes/EditorStyleSettings.h"
 #include "DetailLayoutBuilderImpl.h"
 #include "CategoryPropertyNode.h"
-#include "SPropertyEditorEditInline.h"
+#include "UserInterface/PropertyEditor/SPropertyEditorEditInline.h"
 #include "DetailCategoryBuilderImpl.h"
 #include "Modules/ModuleManager.h"
 #include "DetailLayoutHelpers.h"
@@ -15,13 +14,13 @@
 #include "IPropertyGenerationUtilities.h"
 #include "EditConditionParser.h"
 #include "UObject/StructOnScope.h"
+#include "ThumbnailRendering/ThumbnailManager.h"
 
 class FPropertyRowGeneratorUtilities : public IPropertyUtilities
 {
 public:
 	FPropertyRowGeneratorUtilities(FPropertyRowGenerator& InGenerator)
 		: Generator(&InGenerator)
-		, EditConditionParser(new FEditConditionParser)
 	{
 	}
 
@@ -59,7 +58,18 @@ public:
 			Generator->ForceRefresh();
 		}
 	}
-	virtual void RequestRefresh() override {}
+	virtual void RequestRefresh() override 
+	{ 
+		if (Generator != nullptr)
+		{
+			Generator->RequestRefresh();
+		}
+	}
+	virtual void RequestForceRefresh() override
+	{
+		// RequestRefresh is already a deferred ForceRefresh
+		RequestRefresh();
+	}
 
 	virtual TSharedPtr<class FAssetThumbnailPool> GetThumbnailPool() const override
 	{
@@ -70,7 +80,10 @@ public:
 
 	virtual void NotifyFinishedChangingProperties(const FPropertyChangedEvent& PropertyChangedEvent) override 
 	{
-		Generator->OnFinishedChangingProperties().Broadcast(PropertyChangedEvent);
+		if (Generator)
+		{
+			Generator->OnFinishedChangingProperties().Broadcast(PropertyChangedEvent);
+		}
 	}
 
 	virtual bool DontUpdateValueWhileEditing() const override { return false; }
@@ -93,14 +106,21 @@ public:
 		return Generator != nullptr && Generator->HasClassDefaultObject();
 	}
 
-	virtual TSharedPtr<FEditConditionParser> GetEditConditionParser() const override
+	virtual const TArray<TSharedRef<class IClassViewerFilter>>& GetClassViewerFilters() const override
 	{
-		return EditConditionParser;
+		if (Generator != nullptr)
+		{
+			return Generator->GetClassViewerFilters();
+		}
+		else
+		{
+			static TArray<TSharedRef<class IClassViewerFilter>> NullFilters;
+			return NullFilters;
+		}
 	}
 
 private:
 	FPropertyRowGenerator* Generator;
-	TSharedPtr<FEditConditionParser> EditConditionParser;
 };
 
 
@@ -134,12 +154,20 @@ private:
 	FPropertyRowGenerator* Generator;
 };
 
-FPropertyRowGenerator::FPropertyRowGenerator(const FPropertyRowGeneratorArgs& InArgs, TSharedPtr<FAssetThumbnailPool> InThumbnailPool)
+FPropertyRowGenerator::FPropertyRowGenerator(const FPropertyRowGeneratorArgs& InArgs)
 	: Args(InArgs)
-	, ThumbnailPool(InThumbnailPool)
 	, PropertyUtilities(new FPropertyRowGeneratorUtilities(*this))
 	, PropertyGenerationUtilities(new FPropertyRowGeneratorGenerationUtilities(*this))
 {
+	CurrentFilter.bShowAllAdvanced = true;
+}
+
+FPropertyRowGenerator::FPropertyRowGenerator(const FPropertyRowGeneratorArgs& InArgs, TSharedPtr<FAssetThumbnailPool> InThumbnailPool)
+	: Args(InArgs)
+	, PropertyUtilities(new FPropertyRowGeneratorUtilities(*this))
+	, PropertyGenerationUtilities(new FPropertyRowGeneratorGenerationUtilities(*this))
+{
+	CurrentFilter.bShowAllAdvanced = true;
 }
 
 FPropertyRowGenerator::~FPropertyRowGenerator()
@@ -188,6 +216,16 @@ void FPropertyRowGenerator::SetStructure(const TSharedPtr<FStructOnScope>& InStr
 	PostSetObject();
 }
 
+void FPropertyRowGenerator::SetStructure(const TSharedPtr<IStructureDataProvider>& InStructProvider)
+{
+	PreSetObject(1, /*bHasStructRoots=*/true);
+
+	check(RootPropertyNodes.Num() == 1);
+	RootPropertyNodes[0]->AsStructureNode()->SetStructure(InStructProvider);
+
+	PostSetObject();
+}
+
 const TArray<TSharedRef<IDetailTreeNode>>& FPropertyRowGenerator::GetRootTreeNodes() const
 {
 	return RootTreeNodes;
@@ -204,7 +242,7 @@ TSharedPtr<IDetailTreeNode> FPropertyRowGenerator::FindTreeNode(TSharedPtr<IProp
 		TArray<TSharedRef<IDetailTreeNode>> Children;
 		while(NodesToCheck.Num())
 		{
-			TSharedPtr<IDetailTreeNode> Node = NodesToCheck.Pop(false);
+			TSharedPtr<IDetailTreeNode> Node = NodesToCheck.Pop(EAllowShrinking::No);
 			TSharedPtr<FDetailTreeNode> TreeNodeImpl = StaticCastSharedPtr<FDetailTreeNode>(Node);
 			TSharedPtr<FPropertyNode> PropertyNode = TreeNodeImpl->GetPropertyNode();
 
@@ -242,7 +280,7 @@ TArray<TSharedPtr<IDetailTreeNode>> FPropertyRowGenerator::FindTreeNodes(const T
 	TArray<TSharedRef<IDetailTreeNode>> Children;
 	while (NodesToCheck.Num())
 	{
-		TSharedPtr<IDetailTreeNode> Node = NodesToCheck.Pop(false);
+		TSharedPtr<IDetailTreeNode> Node = NodesToCheck.Pop(EAllowShrinking::No);
 		TSharedPtr<FDetailTreeNode> TreeNodeImpl = StaticCastSharedPtr<FDetailTreeNode>(Node);
 		TSharedPtr<FPropertyNode> PropertyNode = TreeNodeImpl->GetPropertyNode();
 
@@ -315,6 +353,20 @@ void FPropertyRowGenerator::UnregisterInstancedCustomPropertyTypeLayout(FName Pr
 	}
 }
 
+void FPropertyRowGenerator::InvalidateCachedState()
+{
+	for (const TSharedPtr<FComplexPropertyNode>& ComplexRootNode : RootPropertyNodes)
+	{
+		ComplexRootNode->InvalidateCachedState();
+	}
+}
+
+void FPropertyRowGenerator::FilterNodes(const TArray<FString>& InFilterStrings)
+{
+	CurrentFilter.FilterStrings = InFilterStrings;
+	UpdateDetailRows();
+}
+
 void FPropertyRowGenerator::Tick(float DeltaTime)
 {
 	for (TSharedPtr<IDetailCustomization>& Customization : CustomizationClassInstancesPendingDelete)
@@ -345,6 +397,13 @@ void FPropertyRowGenerator::Tick(float DeltaTime)
 		DeferredActions.Empty();
 	}
 
+	if (bRefreshPending)
+	{
+		bRefreshPending = false;
+		
+		ForceRefresh();
+	}
+
 	bool bFullRefresh = ValidatePropertyNodes(RootPropertyNodes);
 
 	for (FDetailLayoutData& LayoutData : DetailLayouts)
@@ -358,7 +417,6 @@ void FPropertyRowGenerator::Tick(float DeltaTime)
 			LayoutData.DetailLayout->Tick(DeltaTime);
 		}
 	}
-
 }
 
 TStatId FPropertyRowGenerator::GetStatId() const 
@@ -384,7 +442,7 @@ bool FPropertyRowGenerator::IsPropertyEditingEnabled() const
 void FPropertyRowGenerator::ForceRefresh()
 {
 	TArray<UObject*> NewObjectList;
-	TSharedPtr<FStructOnScope> StructData = nullptr;
+	TSharedPtr<IStructureDataProvider> StructureProvider = nullptr;
 
 	for (const TSharedPtr<FComplexPropertyNode>& ComplexRootNode : RootPropertyNodes)
 	{
@@ -402,13 +460,13 @@ void FPropertyRowGenerator::ForceRefresh()
 		}
 		else if (FStructurePropertyNode* StructRootNode = ComplexRootNode->AsStructureNode())
 		{
-			StructData = StructRootNode->GetStructData();
+			StructureProvider = StructRootNode->GetStructProvider();
 		}
 	}
-	
-	if (StructData && StructData->IsValid())
+
+	if (StructureProvider)
 	{
-		SetStructure(StructData);
+		SetStructure(StructureProvider);
 	}
 	else
 	{
@@ -418,7 +476,19 @@ void FPropertyRowGenerator::ForceRefresh()
 
 TSharedPtr<class FAssetThumbnailPool> FPropertyRowGenerator::GetThumbnailPool() const
 {
-	return ThumbnailPool;
+	return UThumbnailManager::Get().GetSharedThumbnailPool();
+}
+
+const TArray<TSharedRef<class IClassViewerFilter>>& FPropertyRowGenerator::GetClassViewerFilters() const
+{
+	// not implemented
+	static TArray<TSharedRef<class IClassViewerFilter>> NotImplemented;
+	return NotImplemented;
+}
+
+void FPropertyRowGenerator::SetPropertyGenerationAllowListPaths(const TSet<FString>& InPropertyPathsToGeneratePropertyNodes)
+{
+	PropertyGenerationAllowListPaths = InPropertyPathsToGeneratePropertyNodes;
 }
 
 void FPropertyRowGenerator::PreSetObject(int32 NumNewObjects, bool bHasStructRoots)
@@ -435,7 +505,7 @@ void FPropertyRowGenerator::PreSetObject(int32 NumNewObjects, bool bHasStructRoo
 		else
 		{
 			FStructurePropertyNode* RootStructNode = RootNode->AsStructureNode();
-			RootStructNode->SetStructure(nullptr);
+			RootStructNode->RemoveStructure();
 		}
 		RootNode->ClearCachedReadAddresses(true);
 	}
@@ -511,9 +581,6 @@ void FPropertyRowGenerator::UpdateDetailRows()
 
 	//NumVisbleTopLevelObjectNodes = 0;
 
-	FDetailFilter CurrentFilter;
-	CurrentFilter.bShowAllAdvanced = true;
-
 	for (int32 RootNodeIndex = 0; RootNodeIndex < RootPropertyNodes.Num(); ++RootNodeIndex)
 	{
 		TSharedPtr<FComplexPropertyNode>& RootPropertyNode = RootPropertyNodes[RootNodeIndex];
@@ -578,7 +645,6 @@ void FPropertyRowGenerator::UpdatePropertyMaps()
 {
 	RootTreeNodes.Empty();
 
-
 	for (FDetailLayoutData& LayoutData : DetailLayouts)
 	{
 		// Check uniqueness.  It is critical that detail layouts can be destroyed
@@ -621,6 +687,7 @@ void FPropertyRowGenerator::UpdateSinglePropertyMap(TSharedPtr<FComplexPropertyN
 	TSharedPtr<FDetailLayoutBuilderImpl> DetailLayout = MakeShareable(new FDetailLayoutBuilderImpl(InRootPropertyNode, LayoutData.ClassToPropertyMap, PropertyUtilities, PropertyGenerationUtilities, nullptr, false));
 	DetailLayout->AddNodeVisibilityChangedHandler(FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FPropertyRowGenerator::LayoutNodeVisibilityChanged));
 	LayoutData.DetailLayout = DetailLayout;
+	LayoutData.DetailLayout->SetPropertyGenerationAllowListPaths(PropertyGenerationAllowListPaths);
 
 	TSharedPtr<FComplexPropertyNode> RootPropertyNode = InRootPropertyNode;
 	check(RootPropertyNode.IsValid());
@@ -629,8 +696,6 @@ void FPropertyRowGenerator::UpdateSinglePropertyMap(TSharedPtr<FComplexPropertyN
 
 	LayoutArgs.LayoutData = &LayoutData;
 	LayoutArgs.InstancedPropertyTypeToDetailLayoutMap = &InstancedTypeToLayoutMap;
-	LayoutArgs.IsPropertyReadOnly = [this](const FPropertyAndParent& PropertyAndParent) { return false; };
-	LayoutArgs.IsPropertyVisible = [this](const FPropertyAndParent& PropertyAndParent) { return true; };
 	LayoutArgs.bEnableFavoriteSystem = false;
 	LayoutArgs.bUpdateFavoriteSystemOnly = false;
 

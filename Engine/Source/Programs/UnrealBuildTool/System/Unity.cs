@@ -2,11 +2,10 @@
 
 using System;
 using System.Collections.Generic;
-using System.Text;
 using System.IO;
 using System.Linq;
-using System.Diagnostics;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using UnrealBuildBase;
 
 namespace UnrealBuildTool
 {
@@ -110,14 +109,15 @@ namespace UnrealBuildTool
 				}
 			}
 
-
 			/// <summary>
 			/// Starts a new unity file.  If the current unity file contains no files, this function has no effect, i.e. you will not get an empty unity file.
 			/// </summary>
 			public void EndCurrentUnityFile()
 			{
 				if (CurrentCollection.Files.Count == 0)
+				{
 					return;
+				}
 
 				UnityFiles.Add(CurrentCollection);
 				CurrentCollection = new FileCollection();
@@ -134,8 +134,8 @@ namespace UnrealBuildTool
 				List<FileCollection> Result = UnityFiles;
 
 				// Null everything to ensure that failure will occur if you accidentally reuse this object.
-				CurrentCollection = null;
-				UnityFiles = null;
+				CurrentCollection = null!;
+				UnityFiles = null!;
 
 				return Result;
 			}
@@ -144,31 +144,35 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// Given a set of C++ files, generates another set of C++ files that #include all the original
 		/// files, the goal being to compile the same code in fewer translation units.
-		/// The "unity" files are written to the CompileEnvironment's OutputDirectory.
+		/// The "unity" files are written to the IntermediateDirectory.
 		/// </summary>
 		/// <param name="Target">The target we're building</param>
 		/// <param name="CPPFiles">The C++ files to #include.</param>
+		/// <param name="HeaderFiles">The header files that might correspond to the C++ files.</param>
 		/// <param name="CompileEnvironment">The environment that is used to compile the C++ files.</param>
 		/// <param name="WorkingSet">Interface to query files which belong to the working set</param>
 		/// <param name="BaseName">Base name to use for the Unity files</param>
 		/// <param name="IntermediateDirectory">Intermediate directory for unity cpp files</param>
 		/// <param name="Graph">The makefile being built</param>
 		/// <param name="SourceFileToUnityFile">Receives a mapping of source file to unity file</param>
-		/// <returns>The "unity" C++ files.</returns>
-		public static List<FileItem> GenerateUnityCPPs(
+		/// <param name="NormalFiles">Receives the files to compile using the normal configuration.</param>
+		/// <param name="AdaptiveFiles">Receives the files to compile using the adaptive unity configuration.</param>
+		/// <param name="NumIncludedBytesPerUnityCPP">An approximate number of bytes of C++ code to target for inclusion in a single unified C++ file.</param>
+		public static void GenerateUnityCPPs(
 			ReadOnlyTargetRules Target,
 			List<FileItem> CPPFiles,
+			List<FileItem> HeaderFiles,
 			CppCompileEnvironment CompileEnvironment,
 			ISourceFileWorkingSet WorkingSet,
 			string BaseName,
 			DirectoryReference IntermediateDirectory,
 			IActionGraphBuilder Graph,
-			Dictionary<FileItem, FileItem> SourceFileToUnityFile
-			)
+			Dictionary<FileItem, FileItem> SourceFileToUnityFile,
+			out List<FileItem> NormalFiles,
+			out List<FileItem> AdaptiveFiles,
+			int NumIncludedBytesPerUnityCPP)
 		{
 			List<FileItem> NewCPPFiles = new List<FileItem>();
-
-			//UEBuildPlatform BuildPlatform = UEBuildPlatform.GetBuildPlatform(CompileEnvironment.Platform);
 
 			// Figure out size of all input files combined. We use this to determine whether to use larger unity threshold or not.
 			long TotalBytesInCPPFiles = CPPFiles.Sum(F => F.Length);
@@ -176,64 +180,43 @@ namespace UnrealBuildTool
 			// We have an increased threshold for unity file size if, and only if, all files fit into the same unity file. This
 			// is beneficial when dealing with PCH files. The default PCH creation limit is X unity files so if we generate < X 
 			// this could be fairly slow and we'd rather bump the limit a bit to group them all into the same unity file.
-
-
-			// When enabled, UnrealBuildTool will try to determine source files that you are actively iteratively changing, and break those files
-			// out of their unity blobs so that you can compile them as individual translation units, much faster than recompiling the entire
-			// unity blob each time.
-			bool bUseAdaptiveUnityBuild = Target.bUseAdaptiveUnityBuild && !Target.bStressTestUnity;
-
 			// Optimization only makes sense if PCH files are enabled.
-			bool bForceIntoSingleUnityFile = Target.bStressTestUnity || (TotalBytesInCPPFiles < Target.NumIncludedBytesPerUnityCPP * 2 && Target.bUsePCHFiles);
+			bool bForceIntoSingleUnityFile = Target.bStressTestUnity || (TotalBytesInCPPFiles < NumIncludedBytesPerUnityCPP * 2 && Target.bUsePCHFiles);
+
+			// Even if every single file in the module appears in the working set adaptive unity should still be used even if it's slower.
+			GetAdaptiveFiles(Target, CPPFiles, HeaderFiles, CompileEnvironment, WorkingSet, BaseName, IntermediateDirectory, Graph, out NormalFiles, out AdaptiveFiles);
 
 			// Build the list of unity files.
 			List<FileCollection> AllUnityFiles;
 			{
-				// Sort the incoming file paths alphabetically, so there will be consistency in unity blobs across multiple machines.
+				// Sort the incoming file paths lexicographically, so there will be consistency in unity blobs across multiple machines.
 				// Note that we're relying on this not only sorting files within each directory, but also the directories
 				// themselves, so the whole list of file paths is the same across computers.
-				List<FileItem> SortedCPPFiles = CPPFiles.GetRange(0, CPPFiles.Count);
+				// Case-insensitive file path compare, because you never know what is going on with local file systems.
+				List<FileItem> SortedCPPFiles = new List<FileItem>(CPPFiles);
+				SortedCPPFiles.Sort((A, B) =>
 				{
-					// Case-insensitive file path compare, because you never know what is going on with local file systems
-					Comparison<FileItem> FileItemComparer = (FileA, FileB) => { return FileA.AbsolutePath.ToLowerInvariant().CompareTo(FileB.AbsolutePath.ToLowerInvariant()); };
-					SortedCPPFiles.Sort(FileItemComparer);
-				}
-
-
-				// Figure out whether we REALLY want to use adaptive unity for this module.  If nearly every file in the module appears in the working
-				// set, we'll just go ahead and let unity build do its thing.
-				HashSet<FileItem> FilesInWorkingSet = new HashSet<FileItem>();
-				if (bUseAdaptiveUnityBuild)
-				{
-					int CandidateWorkingSetSourceFileCount = 0;
-					int WorkingSetSourceFileCount = 0;
-					foreach (FileItem CPPFile in SortedCPPFiles)
+					// Generated files from UHT need to be first in the list because they implement templated functions that aren't
+					// declared in the header but are required to link. If they are placed later in the list, you will see
+					// compile errors because the templated function is instantiated but is defined later in the same translation unit
+					// which results in 'error C2908: explicit specialization; '*****' has already been instantiated'
+					bool bAIsGenerated = A.AbsolutePath.EndsWith(".gen.cpp");
+					bool bBIsGenerated = B.AbsolutePath.EndsWith(".gen.cpp");
+					if (bAIsGenerated && !bBIsGenerated)
 					{
-						++CandidateWorkingSetSourceFileCount;
-
-						// Don't include writable source files into unity blobs
-						if (WorkingSet.Contains(CPPFile))
-						{
-							++WorkingSetSourceFileCount;
-
-							// Mark this file as part of the working set.  This will be saved into the UBT Makefile so that
-							// the assembler can automatically invalidate the Makefile when the working set changes (allowing this
-							// code to run again, to build up new unity blobs.)
-							FilesInWorkingSet.Add(CPPFile);
-							Graph.AddFileToWorkingSet(CPPFile);
-						}
+						return -1;
 					}
 
-					if (WorkingSetSourceFileCount >= CandidateWorkingSetSourceFileCount)
+					if (!bAIsGenerated && bBIsGenerated)
 					{
-						// Every single file in the module appears in the working set, so don't bother using adaptive unity for this
-						// module.  Otherwise it would make full builds really slow.
-						bUseAdaptiveUnityBuild = false;
+						return 1;
 					}
-				}
 
-				UnityFileBuilder CPPUnityFileBuilder = new UnityFileBuilder(bForceIntoSingleUnityFile ? -1 : Target.NumIncludedBytesPerUnityCPP);
-				StringBuilder AdaptiveUnityBuildInfoString = new StringBuilder();
+					return String.Compare(A.AbsolutePath, B.AbsolutePath, StringComparison.OrdinalIgnoreCase);
+				});
+
+				HashSet<FileItem> AdaptiveFileSet = new HashSet<FileItem>(AdaptiveFiles);
+				UnityFileBuilder CPPUnityFileBuilder = new UnityFileBuilder(bForceIntoSingleUnityFile ? -1 : NumIncludedBytesPerUnityCPP);
 				foreach (FileItem CPPFile in SortedCPPFiles)
 				{
 					if (!bForceIntoSingleUnityFile && CPPFile.AbsolutePath.IndexOf(".GeneratedWrapper.", StringComparison.InvariantCultureIgnoreCase) != -1)
@@ -242,61 +225,19 @@ namespace UnrealBuildTool
 					}
 
 					// When adaptive unity is enabled, go ahead and exclude any source files that we're actively working with
-					if (bUseAdaptiveUnityBuild && FilesInWorkingSet.Contains(CPPFile))
+					if (AdaptiveFileSet.Contains(CPPFile))
 					{
-						// Just compile this file normally, not as part of the unity blob
-						NewCPPFiles.Add(CPPFile);
-
 						// Let the unity file builder know about the file, so that we can retain the existing size of the unity blobs.
 						// This won't actually make the source file part of the unity blob, but it will keep track of how big the
-						// file is so that other existing unity blobs from the same module won't be invalidated.  This prevents much
+						// file is so that other existing unity blobs from the same module won't be invalidated. This prevents much
 						// longer compile times the first time you build after your working file set changes.
 						CPPUnityFileBuilder.AddVirtualFile(CPPFile);
-
-						string CPPFileName = Path.GetFileName(CPPFile.AbsolutePath);
-						if (AdaptiveUnityBuildInfoString.Length == 0)
-						{
-							AdaptiveUnityBuildInfoString.Append(String.Format("[Adaptive unity build] Excluded from {0} unity file: {1}", BaseName, CPPFileName));
-						}
-						else
-						{
-							AdaptiveUnityBuildInfoString.Append(", " + CPPFileName);
-						}
 					}
 					else
 					{
-						// If adaptive unity build is enabled for this module, add this source file to the set that will invalidate the makefile
-						if(bUseAdaptiveUnityBuild)
-						{
-							Graph.AddCandidateForWorkingSet(CPPFile);
-						}
-
 						// Compile this file as part of the unity blob
 						CPPUnityFileBuilder.AddFile(CPPFile);
 					}
-				}
-
-				if (AdaptiveUnityBuildInfoString.Length > 0)
-				{
-					if (Target.bAdaptiveUnityCreatesDedicatedPCH)
-					{
-						Graph.AddDiagnostic("[Adaptive unity build] Creating dedicated PCH for each excluded file. Set bAdaptiveUnityCreatesDedicatedPCH to false in BuildConfiguration.xml to change this behavior.");
-					}
-					else if (Target.bAdaptiveUnityDisablesPCH)
-					{
-						Graph.AddDiagnostic("[Adaptive unity build] Disabling PCH for excluded files. Set bAdaptiveUnityDisablesPCH to false in BuildConfiguration.xml to change this behavior.");
-					}
-
-					if (Target.bAdaptiveUnityDisablesOptimizations)
-					{
-						Graph.AddDiagnostic("[Adaptive unity build] Disabling optimizations for excluded files. Set bAdaptiveUnityDisablesOptimizations to false in BuildConfiguration.xml to change this behavior.");
-					}
-					if (Target.bAdaptiveUnityEnablesEditAndContinue)
-					{
-						Graph.AddDiagnostic("[Adaptive unity build] Enabling Edit & Continue for excluded files. Set bAdaptiveUnityEnablesEditAndContinue to false in BuildConfiguration.xml to change this behavior.");
-					}
-
-					Graph.AddDiagnostic(AdaptiveUnityBuildInfoString.ToString());
 				}
 
 				AllUnityFiles = CPPUnityFileBuilder.GetUnityFiles();
@@ -313,30 +254,53 @@ namespace UnrealBuildTool
 
 				OutputUnityCPPWriter.WriteLine("// This file is automatically generated at compile-time to include some subset of the user-created cpp files.");
 
-				// Add source files to the unity file
-				foreach (FileItem CPPFile in UnityFile.Files)
-				{
-					OutputUnityCPPWriter.WriteLine("#include \"{0}\"", CPPFile.AbsolutePath.Replace('\\', '/'));
-				}
-
 				// Determine unity file path name
 				string UnityCPPFileName;
 				if (AllUnityFiles.Count > 1)
 				{
-					UnityCPPFileName = string.Format("{0}{1}.{2}_of_{3}.cpp", ModulePrefix, BaseName, CurrentUnityFileCount, AllUnityFiles.Count);
+					if (Target.bDetailedUnityFiles)
+					{
+						UnityCPPFileName = String.Format("{0}{1}.{2}_of_{3}.cpp", ModulePrefix, BaseName, CurrentUnityFileCount, AllUnityFiles.Count);
+					}
+					else
+					{
+						UnityCPPFileName = String.Format("{0}{1}.{2}.cpp", ModulePrefix, BaseName, CurrentUnityFileCount);
+					}
 				}
 				else
 				{
-					UnityCPPFileName = string.Format("{0}{1}.cpp", ModulePrefix, BaseName);
+					UnityCPPFileName = String.Format("{0}{1}.cpp", ModulePrefix, BaseName);
 				}
 				FileReference UnityCPPFilePath = FileReference.Combine(IntermediateDirectory, UnityCPPFileName);
+
+				List<FileItem> InlinedGenCPPFilesInUnity = new();
+
+				// Add source files to the unity file
+				foreach (FileItem CPPFile in UnityFile.Files)
+				{
+					string CPPFileString = CPPFile.AbsolutePath;
+					if (CPPFile.Location.IsUnderDirectory(Unreal.RootDirectory))
+					{
+						CPPFileString = CPPFile.Location.MakeRelativeTo(Unreal.EngineSourceDirectory);
+					}
+					OutputUnityCPPWriter.WriteLine("#include \"{0}\"", CPPFileString.Replace('\\', '/'));
+
+					List<FileItem>? InlinedGenCPPFiles;
+					if (CompileEnvironment.FileInlineGenCPPMap.TryGetValue(CPPFile, out InlinedGenCPPFiles))
+					{
+						InlinedGenCPPFilesInUnity.AddRange(InlinedGenCPPFiles);
+					}
+				}
 
 				// Write the unity file to the intermediate folder.
 				FileItem UnityCPPFile = Graph.CreateIntermediateTextFile(UnityCPPFilePath, OutputUnityCPPWriter.ToString());
 				NewCPPFiles.Add(UnityCPPFile);
 
+				// Store all the inlined gen.cpp files
+				CompileEnvironment.FileInlineGenCPPMap[UnityCPPFile] = InlinedGenCPPFilesInUnity;
+
 				// Store the mapping of source files to unity files in the makefile
-				foreach(FileItem SourceFile in UnityFile.Files)
+				foreach (FileItem SourceFile in UnityFile.Files)
 				{
 					SourceFileToUnityFile[SourceFile] = UnityCPPFile;
 				}
@@ -346,14 +310,109 @@ namespace UnrealBuildTool
 				}
 			}
 
-			return NewCPPFiles;
+			NormalFiles = NewCPPFiles;
 		}
 
-		static void AddUniqueDiagnostic(TargetMakefile Makefile, string Message)
+		public static void GetAdaptiveFiles(
+			ReadOnlyTargetRules Target,
+			List<FileItem> CPPFiles,
+			List<FileItem> HeaderFiles,
+			CppCompileEnvironment CompileEnvironment,
+			ISourceFileWorkingSet WorkingSet,
+			string BaseName,
+			DirectoryReference IntermediateDirectory,
+			IActionGraphBuilder Graph,
+			out List<FileItem> NormalFiles,
+			out List<FileItem> AdaptiveFiles)
 		{
-			if(!Makefile.Diagnostics.Contains(Message, StringComparer.Ordinal))
+			NormalFiles = new List<FileItem>();
+			AdaptiveFiles = new List<FileItem>();
+
+			if (!Target.bUseAdaptiveUnityBuild || Target.bStressTestUnity)
 			{
-				Makefile.Diagnostics.Add(Message);
+				NormalFiles = CPPFiles;
+				return;
+			}
+
+			HashSet<FileItem> HeaderFilesInWorkingSet = new HashSet<FileItem>(HeaderFiles.Where(WorkingSet.Contains));
+
+			// Figure out which uniquely-named header files are in the working set.
+			// Unique names are important to avoid ambiguity about which header a source file includes.
+			Dictionary<string, FileItem> NameToHeaderFileInWorkingSet = new Dictionary<string, FileItem>();
+			List<string> DuplicateHeaderNames = new List<string>();
+			HashSet<string> HeaderNames = new HashSet<string>();
+			foreach (FileItem HeaderFile in HeaderFiles)
+			{
+				string HeaderFileName = HeaderFile.Location.GetFileName();
+				if (!HeaderNames.Add(HeaderFileName))
+				{
+					DuplicateHeaderNames.Add(HeaderFileName);
+				}
+				else if (HeaderFilesInWorkingSet.Contains(HeaderFile))
+				{
+					NameToHeaderFileInWorkingSet[HeaderFileName] = HeaderFile;
+				}
+			}
+			foreach (string Name in DuplicateHeaderNames)
+			{
+				NameToHeaderFileInWorkingSet.Remove(Name);
+			}
+
+			HashSet<FileItem> UnhandledHeaderFilesInWorkingSet = new(HeaderFilesInWorkingSet);
+
+			// Add source files to the adaptive set if they or their first included header are in the working set.
+			foreach (FileItem CPPFile in CPPFiles)
+			{
+				bool bHeaderInWorkingSet = false;
+				if (CompileEnvironment.MetadataCache.GetFirstInclude(CPPFile) is string FirstInclude &&
+					NameToHeaderFileInWorkingSet.TryGetValue(Path.GetFileName(FirstInclude), out FileItem? HeaderFile))
+				{
+					bHeaderInWorkingSet = true;
+					UnhandledHeaderFilesInWorkingSet.Remove(HeaderFile);
+				}
+
+				bool bAdaptive = bHeaderInWorkingSet || WorkingSet.Contains(CPPFile);
+				List<FileItem> Files = bAdaptive ? AdaptiveFiles : NormalFiles;
+				Files.Add(CPPFile);
+			}
+
+			// Add adaptive files to the working set that will invalidate the makefile if it changes.
+			foreach (FileItem File in AdaptiveFiles)
+			{
+				Graph.AddFileToWorkingSet(File);
+			}
+
+			// We also need to add the headers since we don't want to invalidate makefile if they are changing
+			foreach (FileItem File in HeaderFilesInWorkingSet)
+			{
+				Graph.AddFileToWorkingSet(File);
+			}
+
+			// Add header files in the working set to the adaptive files if they are not the first include of a source file.
+			if (Target.bAdaptiveUnityCompilesHeaderFiles)
+			{
+				foreach (FileItem HeaderFile in UnhandledHeaderFilesInWorkingSet)
+				{
+					StringWriter OutputHeaderCPPWriter = new StringWriter();
+					OutputHeaderCPPWriter.WriteLine("// This file is automatically generated at compile-time to include a modified header file.");
+					OutputHeaderCPPWriter.WriteLine($"#include \"{HeaderFile.AbsolutePath.Replace('\\', '/')}\"");
+
+					string HeaderCPPFileName = $"{ModulePrefix}{BaseName}.Header.{Path.GetFileNameWithoutExtension(HeaderFile.AbsolutePath)}.cpp";
+					FileReference HeaderCPPFilePath = FileReference.Combine(IntermediateDirectory, HeaderCPPFileName);
+
+					AdaptiveFiles.Add(Graph.CreateIntermediateTextFile(HeaderCPPFilePath, OutputHeaderCPPWriter.ToString()));
+				}
+			}
+
+			HashSet<FileItem> CandidateAdaptiveFiles = new HashSet<FileItem>();
+			CandidateAdaptiveFiles.UnionWith(CPPFiles);
+			CandidateAdaptiveFiles.UnionWith(HeaderFiles);
+			CandidateAdaptiveFiles.ExceptWith(AdaptiveFiles);
+			CandidateAdaptiveFiles.ExceptWith(HeaderFilesInWorkingSet);
+
+			foreach (FileItem File in CandidateAdaptiveFiles)
+			{
+				Graph.AddCandidateForWorkingSet(File);
 			}
 		}
 	}

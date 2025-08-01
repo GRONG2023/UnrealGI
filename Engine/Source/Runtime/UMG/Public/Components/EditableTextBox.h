@@ -22,8 +22,8 @@ class USlateWidgetStyleAsset;
  * * No Children
  * * Text Entry
  */
-UCLASS(meta=(DisplayName="Text Box"))
-class UMG_API UEditableTextBox : public UWidget
+UCLASS(meta=(DisplayName="Text Box"), MinimalAPI)
+class UEditableTextBox : public UWidget
 {
 	GENERATED_UCLASS_BODY()
 
@@ -33,8 +33,9 @@ public:
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnEditableTextBoxCommittedEvent, const FText&, Text, ETextCommit::Type, CommitMethod);
 
 public:
+	UE_DEPRECATED(5.1, "Direct access to Text is deprecated. Please use the getter or setter.")
 	/** The text content for this editable text box widget */
-	UPROPERTY(EditAnywhere, Category=Content)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, BlueprintGetter = "GetText", BlueprintSetter = "SetText", FieldNotify, Category = "Content")
 	FText Text;
 
 	/** A bindable delegate to allow logic to drive the text of the widget */
@@ -47,68 +48,53 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance, meta=(DisplayName="Style", ShowOnlyInnerProperties))
 	FEditableTextBoxStyle WidgetStyle;
 
-	/** Style used for the text box */
-	UPROPERTY()
-	USlateWidgetStyleAsset* Style_DEPRECATED;
-
+	UE_DEPRECATED(5.1, "Direct access to Hint Text is deprecated. Please use the getter or setter.")
 	/** Hint text that appears when there is no text in the text box */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Content)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, BlueprintSetter = "SetHintText", Category = Content, meta = (MultiLine = "true"))
 	FText HintText;
 
 	/** A bindable delegate to allow logic to drive the hint text of the widget */
 	UPROPERTY()
 	FGetText HintTextDelegate;
 
-	/** Font color and opacity (overrides Style) */
-	UPROPERTY()
-	FSlateFontInfo Font_DEPRECATED;
-
-	/** Text color and opacity (overrides Style) */
-	UPROPERTY()
-	FLinearColor ForegroundColor_DEPRECATED;
-
-	/** The color of the background/border around the editable text (overrides Style) */
-	UPROPERTY()
-	FLinearColor BackgroundColor_DEPRECATED;
-
-	/** Text color and opacity when read-only (overrides Style) */
-	UPROPERTY()
-	FLinearColor ReadOnlyForegroundColor_DEPRECATED;
-
-	/** Sets whether this text box can actually be modified interactively by the user */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Appearance)
+	UE_DEPRECATED(5.1, "Direct access to IsReadOnly is deprecated. Please use the getter or setter.")
+	/** Sets the Text Box as Readonly to prevent it from being modified interactively by the user */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, Category = Appearance)
 	bool IsReadOnly;
 
+	UE_DEPRECATED(5.1, "Direct access to IsPassword is deprecated. Please use the getter or setter.")
 	/** Sets whether this text box is for storing a password */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Appearance)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, BlueprintSetter = "SetIsPassword", Category = Appearance)
 	bool IsPassword;
 
-	/** Minimum width that a text block should be */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Appearance)
+	UE_DEPRECATED(5.1, "Direct access to MinimumDesiredWidth is deprecated. Please use the getter or setter.")
+	/** The minimum desired size for the text */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter=SetMinDesiredWidth, Category = "Appearance")
 	float MinimumDesiredWidth;
 
-	/** Padding between the box/border and the text widget inside (overrides Style) */
-	UPROPERTY()
-	FMargin Padding_DEPRECATED;
-
+	UE_DEPRECATED(5.1, "Direct access to IsCaretMovedWhenGainFocus is deprecated. Please use the getter or setter.")
 	/** Workaround as we lose focus when the auto completion closes. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Behavior, AdvancedDisplay)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, Category=Behavior, AdvancedDisplay)
 	bool IsCaretMovedWhenGainFocus;
 
+	UE_DEPRECATED(5.1, "Direct access to SelectAllTextWhenFocused is deprecated. Please use the getter or setter.")
 	/** Whether to select all text when the user clicks to give focus on the widget */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Behavior, AdvancedDisplay)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, Category=Behavior, AdvancedDisplay)
 	bool SelectAllTextWhenFocused;
 
+	UE_DEPRECATED(5.1, "Direct access to RevertTextOnEscape is deprecated. Please use the getter or setter.")
 	/** Whether to allow the user to back out of changes when they press the escape key */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Behavior, AdvancedDisplay)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, Category=Behavior, AdvancedDisplay)
 	bool RevertTextOnEscape;
 
+	UE_DEPRECATED(5.1, "Direct access to ClearKeyboardFocusOnCommit is deprecated. Please use the getter or setter.")
 	/** Whether to clear keyboard focus when pressing enter to commit changes */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Behavior, AdvancedDisplay)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, Category=Behavior, AdvancedDisplay)
 	bool ClearKeyboardFocusOnCommit;
 
+	UE_DEPRECATED(5.1, "Direct access to SelectAllTextOnCommit is deprecated. Please use the getter or setter.")
 	/** Whether to select all text when pressing enter to commit changes */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Behavior, AdvancedDisplay)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, Category=Behavior, AdvancedDisplay)
 	bool SelectAllTextOnCommit;
 
 	/** Whether the context menu can be opened */
@@ -131,9 +117,16 @@ public:
 	UPROPERTY(EditAnywhere, Category=Behavior, AdvancedDisplay)
 	EVirtualKeyboardDismissAction VirtualKeyboardDismissAction;
 	
+	UE_DEPRECATED(5.1, "Direct access to Justification is deprecated. Please use the getter or setter.")
 	/** How the text should be aligned with the margin. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, BlueprintSetter = SetJustification, Category=Appearance)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, BlueprintSetter = SetJustification, Category = Appearance)
 	TEnumAsByte<ETextJustify::Type> Justification;
+
+	UE_DEPRECATED(5.1, "Direct access to OverflowPolicy is deprecated. Please use the getter or setter.")
+	/** Sets what happens to text that is clipped and doesn't fit within the clip rect for this widget */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter="GetTextOverflowPolicy", Setter= "SetTextOverflowPolicy", BlueprintSetter = "SetTextOverflowPolicy", Category = "Clipping", AdvancedDisplay, meta = (DisplayName = "Overflow Policy"))
+	ETextOverflowPolicy OverflowPolicy;
+
 
 	/** Controls how the text within this widget should be shaped. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Localization, AdvancedDisplay, meta=(ShowOnlyInnerProperties))
@@ -154,61 +147,134 @@ public:
 
 public:
 
-	/**  */
+	/**
+	* Gets the widget text
+	* @return The widget text
+	*/
 	UFUNCTION(BlueprintCallable, Category="Widget", meta=(DisplayName="GetText (Text Box)"))
-	FText GetText() const;
+	UMG_API FText GetText() const;
 
-	/**  */
+	/**
+	* Directly sets the widget text.
+	* Warning: This will wipe any binding created for the Text property!
+	* @param InText The text to assign to the widget
+	*/
 	UFUNCTION(BlueprintCallable, Category="Widget", meta=(DisplayName="SetText (Text Box)"))
-	void SetText(FText InText);
+	UMG_API void SetText(FText InText);
+	
+	/** Gets the Hint text that appears when there is no text in the text box */
+	UMG_API FText GetHintText() const;
 
+	/**
+	* Sets the Hint text that appears when there is no text in the text box
+	* @param InHintText The text that appears when there is no text in the text box
+	*/
 	UFUNCTION(BlueprintCallable, Category = "Widget", meta = (DisplayName = "Set Hint Text (Text Box)"))
-	void SetHintText(FText InText);
+	UMG_API void SetHintText(FText InText);
+
+	/** @return the minimum desired width for this text box */
+	UMG_API float GetMinimumDesiredWidth() const;
+
+	/**
+	*  Set the minimum desired width for this text box
+	*
+	*  @param InMinDesiredWidth new minimum desired width
+	*/
+	UMG_API void SetMinDesiredWidth(float InMinDesiredWidth);
+	
+	/** When set to true the caret is moved when gaining focus */
+	UMG_API void SetIsCaretMovedWhenGainFocus(bool bIsCaretMovedWhenGainFocus);
+
+	/** Return true when the caret is moved when gaining focus */
+	UMG_API bool GetIsCaretMovedWhenGainFocus() const;
+
+	/** Set to true to select all text when the user clicks to give focus on the widget */
+	UMG_API void SetSelectAllTextWhenFocused(bool bSelectAllTextWhenFocused);
+
+	/** Whether to select all text when the user clicks to give focus on the widget */
+	UMG_API bool GetSelectAllTextWhenFocused() const;
+
+	/** Set to true to allow the user to back out of changes when they press the escape key */
+	UMG_API void SetRevertTextOnEscape(bool bRevertTextOnEscape);
+
+	/** Whether to allow the user to back out of changes when they press the escape key  */
+	UMG_API bool GetRevertTextOnEscape() const;
+
+	/** Set to true to clear keyboard focus when pressing enter to commit changes */
+	UMG_API void SetClearKeyboardFocusOnCommit(bool bClearKeyboardFocusOnCommit);
+
+	/** Whether to clear keyboard focus when pressing enter to commit changes */
+	UMG_API bool GetClearKeyboardFocusOnCommit() const;
+
+	/** Set to true to select all text when pressing enter to commit changes */
+	UMG_API void SetSelectAllTextOnCommit(bool bSelectAllTextOnCommit);
+
+	/** Whether to select all text when pressing enter to commit changes */
+	UMG_API bool GetSelectAllTextOnCommit() const;
 
 	UFUNCTION(BlueprintCallable, Category="Widget",  meta=(DisplayName="SetError (Text Box)"))
-	void SetError(FText InError);
+	UMG_API void SetError(FText InError);
 
-	UFUNCTION(BlueprintCallable, Category="Widget", meta=(DisplayName="SetIsReadOnly (Text Box)"))
-	void SetIsReadOnly(bool bReadOnly);
+	/** Return true when this text cannot be modified interactively by the user */
+	UMG_API bool GetIsReadOnly() const;
 
-	UFUNCTION(BlueprintCallable, Category = "Widget")
-	void SetIsPassword(bool bIsPassword);
+	/** Sets the Text as Readonly to prevent it from being modified interactively by the user */
+	UFUNCTION(BlueprintCallable, Category = "Widget", meta = (DisplayName = "SetIsReadOnly (Editable Text)"))
+	UMG_API void SetIsReadOnly(UPARAM(DisplayName = "ReadyOnly") bool bReadOnly);
+
+	UMG_API bool GetIsPassword() const;
+
+	UFUNCTION(BlueprintCallable, Category = "Widget", meta = (DisplayName = "IsPassword"))
+	UMG_API void SetIsPassword(bool bIsPassword);
 
 	UFUNCTION(BlueprintCallable, Category="Widget")
-	void ClearError();
+	UMG_API void ClearError();
 
 	UFUNCTION(BlueprintCallable, Category = "Widget")
-	bool HasError() const;
+	UMG_API bool HasError() const;
+
+	UMG_API ETextJustify::Type GetJustification() const;
 
 	UFUNCTION(BlueprintSetter)
-	void SetJustification(ETextJustify::Type InJustification);
+	UMG_API void SetJustification(ETextJustify::Type InJustification);
+
+	/** @return the text overflow policy for this text block. */
+	UMG_API ETextOverflowPolicy GetTextOverflowPolicy() const;
+
+	/**
+	 * Set the text overflow policy for this text box.
+	 *
+	 * @param InOverflowPolicy the new text overflow policy.
+	 */
+	UFUNCTION(BlueprintSetter)
+	UMG_API void SetTextOverflowPolicy(ETextOverflowPolicy InOverflowPolicy);
+
+	UFUNCTION(BlueprintCallable, Category="Widget", meta=(DisplayName="SetForegroundColor (Text Box)"))
+	UMG_API void SetForegroundColor(FLinearColor color);
 
 	//~ Begin UWidget Interface
-	virtual void SynchronizeProperties() override;
+	UMG_API virtual void SynchronizeProperties() override;
 	//~ End UWidget Interface
 
 	//~ Begin UVisual Interface
-	virtual void ReleaseSlateResources(bool bReleaseChildren) override;
+	UMG_API virtual void ReleaseSlateResources(bool bReleaseChildren) override;
 	//~ End UVisual Interface
 
-	//~ Begin UObject Interface
-	virtual void PostLoad() override;
-	//~ End UObject Interface
-
 #if WITH_EDITOR
-	virtual const FText GetPaletteCategory() override;
+	UMG_API virtual const FText GetPaletteCategory() override;
 #endif
+	UMG_API virtual void Serialize(FArchive& Ar) override;
 
 protected:
 	//~ Begin UWidget Interface
-	virtual TSharedRef<SWidget> RebuildWidget() override;
+	UMG_API virtual TSharedRef<SWidget> RebuildWidget() override;
 	// End of UWidget
 
-	virtual void HandleOnTextChanged(const FText& Text);
-	virtual void HandleOnTextCommitted(const FText& Text, ETextCommit::Type CommitMethod);
+	UMG_API virtual void HandleOnTextChanged(const FText& Text);
+	UMG_API virtual void HandleOnTextCommitted(const FText& Text, ETextCommit::Type CommitMethod);
 
 #if WITH_ACCESSIBILITY
-	virtual TSharedPtr<SWidget> GetAccessibleWidget() const override;
+	UMG_API virtual TSharedPtr<SWidget> GetAccessibleWidget() const override;
 #endif
 
 protected:
@@ -216,4 +282,13 @@ protected:
 
 	PROPERTY_BINDING_IMPLEMENTATION(FText, Text);
 	PROPERTY_BINDING_IMPLEMENTATION(FText, HintText);
+
+private:
+	/** @return true if the text was changed, or false if identical. */
+	bool SetTextInternal(const FText& InText);
+
+#if WITH_EDITORONLY_DATA
+	UPROPERTY()
+	bool bIsFontDeprecationDone;
+#endif
 };

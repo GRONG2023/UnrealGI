@@ -2,12 +2,12 @@
 
 #include "Rendering/PositionVertexBuffer.h"
 
-#include "CoreMinimal.h"
-#include "RHI.h"
 #include "Components.h"
-
+#include "DataDrivenShaderPlatformInfo.h"
+#include "RenderingThread.h"
+#include "RenderUtils.h"
+#include "RHIResourceUpdates.h"
 #include "StaticMeshVertexData.h"
-#include "GPUSkinCache.h"
 
 /*-----------------------------------------------------------------------------
 FPositionVertexBuffer
@@ -66,14 +66,18 @@ void FPositionVertexBuffer::Init(uint32 InNumVertices, bool bInNeedsCPUAccess)
 */
 void FPositionVertexBuffer::Init(const TArray<FStaticMeshBuildVertex>& InVertices, bool bInNeedsCPUAccess)
 {
-	Init(InVertices.Num(), bInNeedsCPUAccess);
+	const FConstMeshBuildVertexView VertexView = MakeConstMeshBuildVertexView(InVertices);
+	Init(VertexView, bInNeedsCPUAccess);
+}
 
-	// Copy the vertices into the buffer.
-	for(int32 VertexIndex = 0;VertexIndex < InVertices.Num();VertexIndex++)
+void FPositionVertexBuffer::Init(const FConstMeshBuildVertexView& InVertices, bool bInNeedsCPUAccess)
+{
+	Init(InVertices.Position.Num(), bInNeedsCPUAccess);
+
+	// Copy the vertex positions into the buffer.
+	for (int32 VertexIndex = 0; VertexIndex < InVertices.Position.Num(); VertexIndex++)
 	{
-		const FStaticMeshBuildVertex& SourceVertex = InVertices[VertexIndex];
-		const uint32 DestVertexIndex = VertexIndex;
-		VertexPosition(DestVertexIndex) = SourceVertex.Position;
+		VertexPosition(VertexIndex) = InVertices.Position[VertexIndex];
 	}
 }
 
@@ -95,7 +99,7 @@ void FPositionVertexBuffer::Init(const FPositionVertexBuffer& InVertexBuffer, bo
 	}
 }
 
-void FPositionVertexBuffer::Init(const TArray<FVector>& InPositions, bool bInNeedsCPUAccess)
+void FPositionVertexBuffer::Init(const TArray<FVector3f>& InPositions, bool bInNeedsCPUAccess)
 {
 	NumVertices = InPositions.Num();
 	bNeedsCPUAccess = bInNeedsCPUAccess;
@@ -109,8 +113,14 @@ void FPositionVertexBuffer::Init(const TArray<FVector>& InPositions, bool bInNee
 	}
 }
 
-void FPositionVertexBuffer::AppendVertices( const FStaticMeshBuildVertex* Vertices, const uint32 NumVerticesToAppend )
+bool FPositionVertexBuffer::AppendVertices( const FStaticMeshBuildVertex* Vertices, const uint32 NumVerticesToAppend )
 {
+	const uint64 TotalNumVertices = (uint64)NumVertices + (uint64)NumVerticesToAppend;
+	if (!ensureMsgf(TotalNumVertices < INT32_MAX, TEXT("FPositionVertexBuffer::AppendVertices adding %u to %u vertices exceeds INT32_MAX limit"), NumVerticesToAppend, NumVertices))
+	{
+		return false;
+	}
+
 	if (VertexData == nullptr && NumVerticesToAppend > 0)
 	{
 		// Allocate the vertex data storage type if the buffer was never allocated before
@@ -139,6 +149,8 @@ void FPositionVertexBuffer::AppendVertices( const FStaticMeshBuildVertex* Vertic
 			}
 		}
 	}
+
+	return true;
 }
 
 /**
@@ -179,6 +191,11 @@ void FPositionVertexBuffer::ClearMetaData()
 	Stride = NumVertices = 0;
 }
 
+bool FPositionVertexBuffer::GetAllowCPUAccess() const
+{
+	return VertexData ? VertexData->GetAllowCPUAccess() : false;
+}
+
 /**
 * Specialized assignment operator, only used when importing LOD's.  
 */
@@ -188,80 +205,47 @@ void FPositionVertexBuffer::operator=(const FPositionVertexBuffer &Other)
 	VertexData = NULL;
 }
 
-template <bool bRenderThread>
-FVertexBufferRHIRef FPositionVertexBuffer::CreateRHIBuffer_Internal()
+FBufferRHIRef FPositionVertexBuffer::CreateRHIBuffer(FRHICommandListBase& RHICmdList)
 {
-	if (NumVertices)
+	return FRenderResource::CreateRHIBuffer(RHICmdList, VertexData, NumVertices, BUF_Static | BUF_ShaderResource, TEXT("FPositionVertexBuffer"));
+}
+
+FBufferRHIRef FPositionVertexBuffer::CreateRHIBuffer_RenderThread()
+{
+	return CreateRHIBuffer(FRHICommandListExecutor::GetImmediateCommandList());
+}
+
+FBufferRHIRef FPositionVertexBuffer::CreateRHIBuffer_Async()
+{
+	FRHIAsyncCommandList CommandList;
+	return CreateRHIBuffer(*CommandList);
+}
+
+void FPositionVertexBuffer::InitRHIForStreaming(FRHIBuffer* IntermediateBuffer, FRHIResourceUpdateBatcher& Batcher)
+{
+	check(VertexBufferRHI);
+	if (IntermediateBuffer)
 	{
-		FResourceArrayInterface* RESTRICT ResourceArray = VertexData ? VertexData->GetResourceArray() : nullptr;
-		const uint32 SizeInBytes = ResourceArray ? ResourceArray->GetResourceDataSize() : 0;
-		FRHIResourceCreateInfo CreateInfo(ResourceArray);
-		CreateInfo.bWithoutNativeResource = !VertexData;
-		if (bRenderThread)
-		{
-			return RHICreateVertexBuffer(SizeInBytes, BUF_Static | BUF_ShaderResource, CreateInfo);
-		}
-		else
-		{
-			return RHIAsyncCreateVertexBuffer(SizeInBytes, BUF_Static | BUF_ShaderResource, CreateInfo);
-		}
+		Batcher.QueueUpdateRequest(VertexBufferRHI, IntermediateBuffer);
 	}
-	return nullptr;
 }
 
-FVertexBufferRHIRef FPositionVertexBuffer::CreateRHIBuffer_RenderThread()
+void FPositionVertexBuffer::ReleaseRHIForStreaming(FRHIResourceUpdateBatcher& Batcher)
 {
-	return CreateRHIBuffer_Internal<true>();
+	check(VertexBufferRHI);
+	Batcher.QueueUpdateRequest(VertexBufferRHI, nullptr);
 }
 
-FVertexBufferRHIRef FPositionVertexBuffer::CreateRHIBuffer_Async()
+void FPositionVertexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
-	return CreateRHIBuffer_Internal<false>();
-}
+	TRACE_CPUPROFILER_EVENT_SCOPE(FPositionVertexBuffer::InitRHI);
 
-/** Copy everything, keeping reference to the same RHI resources. */
-void FPositionVertexBuffer::CopyRHIForStreaming(const FPositionVertexBuffer& Other, bool InAllowCPUAccess)
-{
-	// Copy serialized properties.
-	Stride = Other.Stride;
-	NumVertices = Other.NumVertices;
+	VertexBufferRHI = CreateRHIBuffer(RHICmdList);
 
-	// Handle CPU access.
-	if (InAllowCPUAccess)
-	{
-		bNeedsCPUAccess = Other.bNeedsCPUAccess;
-		AllocateData(bNeedsCPUAccess);
-	}
-	else
-	{
-		bNeedsCPUAccess = false;
-	}
-
-	// Copy resource references.
-	VertexBufferRHI = Other.VertexBufferRHI;
-	PositionComponentSRV = Other.PositionComponentSRV;
-}
-
-void FPositionVertexBuffer::InitRHI()
-{
-	VertexBufferRHI = CreateRHIBuffer_RenderThread();
-	// we have decide to create the SRV based on GMaxRHIShaderPlatform because this is created once and shared between feature levels for editor preview.
-	// Also check to see whether cpu access has been activated on the vertex data
+	// Always create SRV if VertexBufferRHI is valid, as several systems rely on having position SRV. Memory impact has been measured to be minimal.
 	if (VertexBufferRHI)
 	{
-		// we have decide to create the SRV based on GMaxRHIShaderPlatform because this is created once and shared between feature levels for editor preview.
-		bool bSRV = RHISupportsManualVertexFetch(GMaxRHIShaderPlatform) || IsGPUSkinCacheAvailable(GMaxRHIShaderPlatform);
-
-		// When bAllowCPUAccess is true, the meshes is likely going to be used for Niagara to spawn particles on mesh surface.
-		// And it can be the case for CPU *and* GPU access: no differenciation today. That is why we create a SRV in this case.
-		// This also avoid setting lots of states on all the members of all the different buffers used by meshes. Follow up: https://jira.it.epicgames.net/browse/UE-69376.
-		bSRV |= (VertexData && VertexData->GetAllowCPUAccess());
-		if(bSRV)
-		{
-			// When VertexData is null, this buffer hasn't been streamed in yet. We still need to create a FRHIShaderResourceView which will be
-			// cached in a vertex factory uniform buffer later. The nullptr tells the RHI that the SRV doesn't view on anything yet.
-			PositionComponentSRV = RHICreateShaderResourceView(FShaderResourceViewInitializer(VertexData ? VertexBufferRHI : nullptr, PF_R32_FLOAT));
-		}
+		PositionComponentSRV = RHICmdList.CreateShaderResourceView(VertexBufferRHI, 4, PF_R32_FLOAT);
 	}
 }
 

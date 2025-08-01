@@ -6,13 +6,16 @@
 #include "UObject/ObjectMacros.h"
 #include "Misc/Guid.h"
 #include "Misc/MemStack.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "BonePose.h"
+#endif
 #include "Animation/AnimTypes.h"
 #include "Animation/AnimCurveTypes.h"
 #include "Animation/AnimationAsset.h"
 
 #include "Async/MappedFileHandle.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/ThreadSafeBool.h"
+#include "HAL/PlatformFileManager.h"
 #include "GenericPlatform/GenericPlatformFile.h"
 #include "Misc/Paths.h"
 #include "Serialization/BulkData.h"
@@ -21,6 +24,12 @@
 #include "Serialization/MemoryWriter.h"
 
 #include "ProfilingDebugging/CsvProfiler.h"
+#include "Animation/AnimationDecompression.h"
+#include "BoneContainer.h"
+
+#if WITH_EDITOR
+#include "ReferenceSkeleton.h"
+#endif
 
 #include "AnimCompressionTypes.generated.h"
 
@@ -28,7 +37,7 @@
  * Indicates animation data key format.
  */
 UENUM()
-enum AnimationKeyFormat
+enum AnimationKeyFormat : int
 {
 	AKF_ConstantKeyLerp,
 	AKF_VariableKeyLerp,
@@ -44,11 +53,11 @@ class UAnimCurveCompressionSettings;
 class UAnimBoneCompressionSettings;
 class UAnimBoneCompressionCodec;
 class USkeleton;
-
-extern FGuid GenerateGuidFromRawAnimData(const TArray<FRawAnimSequenceTrack>& RawAnimationData, const FRawCurveTracks& RawCurveData);
+struct FCompactPose;
+struct FBoneAnimationTrack;
 
 template<typename ArrayClass>
-struct ENGINE_API FCompressedOffsetDataBase
+struct FCompressedOffsetDataBase
 {
 	ArrayClass OffsetData;
 
@@ -171,6 +180,9 @@ private:
 	FThreadSafeBool Signal;
 
 public:
+	FCancelCompressionSignal() = default;
+	FCancelCompressionSignal(const FCancelCompressionSignal&) = default;
+
 	FCancelCompressionSignal& operator=(const FCancelCompressionSignal& Other)
 	{
 		Signal = (bool)Other.Signal;
@@ -188,18 +200,22 @@ public:
 	}
 };
 
-struct ENGINE_API FCompressibleAnimData
+#if WITH_EDITOR
+struct FCompressibleAnimData
 {
 public:
-	FCompressibleAnimData();
+	ENGINE_API FCompressibleAnimData();
 
-	FCompressibleAnimData(UAnimBoneCompressionSettings* InBoneCompressionSettings, UAnimCurveCompressionSettings* InCurveCompressionSettings, USkeleton* InSkeleton, EAnimInterpolationType InInterpolation, float InSequenceLength, int32 InNumFrames);
+	ENGINE_API FCompressibleAnimData(UAnimBoneCompressionSettings* InBoneCompressionSettings, UAnimCurveCompressionSettings* InCurveCompressionSettings, USkeleton* InSkeleton, EAnimInterpolationType InInterpolation, float InSequenceLength, int32 InNumberOfKeys, const ITargetPlatform* InTargetPlatform);
 
-	FCompressibleAnimData(class UAnimSequence* InSeq, const bool bPerformStripping);
+	ENGINE_API FCompressibleAnimData(class UAnimSequence* InSeq, const bool bPerformStripping, const ITargetPlatform* InTargetPlatform);
 
-	UAnimCurveCompressionSettings* CurveCompressionSettings;
+	ENGINE_API FCompressibleAnimData(const FCompressibleAnimData&);
+	ENGINE_API FCompressibleAnimData& operator=(const FCompressibleAnimData&);
 
-	UAnimBoneCompressionSettings* BoneCompressionSettings;
+	TObjectPtr<UAnimCurveCompressionSettings> CurveCompressionSettings;
+
+	TObjectPtr<UAnimBoneCompressionSettings> BoneCompressionSettings;
 
 	// Data from USkeleton
 	TArray<FTransform> RefLocalPoses;
@@ -215,12 +231,19 @@ public:
 
 	TArray<FBoneData> BoneData;
 
-	FRawCurveTracks RawCurveData;
+	TArray<FFloatCurve> RawFloatCurves;
 
-	float SequenceLength;
+	double SequenceLength;
 
-	int32 NumFrames;
+	/** Number of keys within the (non-uniform) RawAnimationData tracks */
+	
+	UE_DEPRECATED(5.0, "NumberOfFrames has been replaced with NumberOfKeys and GetNumberOfFrames")
+	int32 NumberOfFrames;
+	int32 NumberOfKeys;
 
+	int32 GetNumberOfFrames() const { return FMath::Max(NumberOfKeys - 1, 1); }
+
+	EAdditiveAnimationType AdditiveType = AAT_None;
 	bool bIsValidAdditive;
 
 	float ErrorThresholdScale;
@@ -230,7 +253,15 @@ public:
 	FString FullName;
 	FName   AnimFName;
 
+	FFrameRate SampledFrameRate;
+
 	FCancelCompressionSignal IsCancelledSignal;
+
+	bool bShouldPerformStripping = false;
+	TWeakObjectPtr<UAnimSequence> WeakSequence;
+	bool bDataFetched = false;
+
+	const ITargetPlatform* TargetPlatform = nullptr;
 
 	static int32 GetApproxRawDataArraySize(const TArray<FRawAnimSequenceTrack>& AnimData)
 	{
@@ -255,7 +286,7 @@ public:
 	int32 GetApproxRawCurveSize() const
 	{
 		int32 Total = 0;
-		for (const FFloatCurve& Curve : RawCurveData.FloatCurves)
+		for (const FFloatCurve& Curve : RawFloatCurves)
 		{
 			Total += sizeof(FFloatCurve);
 			Total += sizeof(FRichCurveKey) * Curve.FloatCurve.Keys.Num();
@@ -277,7 +308,9 @@ public:
 		return MemUsage;
 	}
 
-	void Update(struct FCompressedAnimSequence& CompressedData) const;
+	ENGINE_API void FetchData(const ITargetPlatform* InPlatform);
+	
+	ENGINE_API void Update(struct FCompressedAnimSequence& CompressedData) const;
 
 	void AddReferencedObjects(FReferenceCollector& Collector)
 	{
@@ -290,12 +323,18 @@ public:
 		return IsCancelledSignal.IsCancelled();
 	}
 
-private:
+protected:
+	ENGINE_API void BakeOutAdditiveIntoRawData(const FFrameRate& SampleRate, TArray<FBoneAnimationTrack>& ResampledTrackData, TArray<FFloatCurve>& FloatCurves);
+	ENGINE_API void ResampleAnimationTrackData(const FFrameRate& SampleRate, TArray<FBoneAnimationTrack>& ResampledTrackData) const;
 
+private:
+	ENGINE_API void WriteCompressionDataToJSON(TArrayView<FName> OriginalTrackNames, TArrayView<FRawAnimSequenceTrack> FinalRawAnimationData, TArrayView<FName> FinalTrackNames) const;
 };
 
 typedef TSharedPtr<FCompressibleAnimData, ESPMode::ThreadSafe> FCompressibleAnimPtr;
 typedef TSharedRef<FCompressibleAnimData, ESPMode::ThreadSafe> FCompressibleAnimRef;
+
+#endif // WITH_EDITOR
 
 // Wrapper Code
 template <typename T>
@@ -391,20 +430,27 @@ struct FCompressedAnimDataBase
 	}
 };
 
-struct ENGINE_API ICompressedAnimData
+struct ICompressedAnimData
 {
 	/* Common data */
-	int32 CompressedNumberOfFrames;
+	int32 CompressedNumberOfKeys;
 
 #if WITH_EDITORONLY_DATA
+	UE_DEPRECATED(5.0, "CompressedNumberOfFrames has been replaced with CompressedNumberOfKeys")
+    int32 CompressedNumberOfFrames;
+	
 	/** The error stats from the current bone compression codec. */
 	FAnimationErrorStats BoneCompressionErrorStats;
 #endif
 
+	ICompressedAnimData() = default;
+	ENGINE_API ICompressedAnimData(const ICompressedAnimData&);
+	ENGINE_API ICompressedAnimData& operator=(const ICompressedAnimData&);
+	
 	/* Virtual interface codecs must implement */
 	virtual ~ICompressedAnimData() {}
 
-	virtual void SerializeCompressedData(class FArchive& Ar);
+	ENGINE_API virtual void SerializeCompressedData(class FArchive& Ar);
 	virtual void Bind(const TArrayView<uint8> BulkData) = 0;
 
 	virtual int64 GetApproxCompressedSize() const = 0;
@@ -412,7 +458,7 @@ struct ENGINE_API ICompressedAnimData
 	virtual bool IsValid() const = 0;
 };
 
-struct ENGINE_API FCompressibleAnimDataResult
+struct FCompressibleAnimDataResult
 {
 	TArray<uint8> CompressedByteStream;
 	TUniquePtr<ICompressedAnimData> AnimData;
@@ -443,11 +489,11 @@ TArrayView<T> RebaseTArrayView(const TArrayView<T>& ArrayView, const uint8* Orig
 	return ArrayView;
 }
 
-struct ENGINE_API FUECompressedAnimDataMutable : public ICompressedAnimData, public FCompressedAnimDataBase<TArrayMaker>
+struct FUECompressedAnimDataMutable : public ICompressedAnimData, public FCompressedAnimDataBase<TArrayMaker>
 {
 	FUECompressedAnimDataMutable() = default;
 
-	void BuildFinalBuffer(TArray<uint8>& OutCompressedByteStream);
+	ENGINE_API void BuildFinalBuffer(TArray<uint8>& OutCompressedByteStream);
 
 	// ICompressedAnimData implementation
 	virtual void Bind(const TArrayView<uint8> BulkData) {}
@@ -455,7 +501,7 @@ struct ENGINE_API FUECompressedAnimDataMutable : public ICompressedAnimData, pub
 	virtual bool IsValid() const override { return CompressedByteStream.Num() > 0 || (TranslationCompressionFormat == ACF_Identity && RotationCompressionFormat == ACF_Identity && ScaleCompressionFormat == ACF_Identity); }
 };
 
-struct ENGINE_API FUECompressedAnimData : public ICompressedAnimData, public FCompressedAnimDataBase<TNonConstArrayViewMaker>
+struct FUECompressedAnimData : public ICompressedAnimData, public FCompressedAnimDataBase<TNonConstArrayViewMaker>
 {
 	FUECompressedAnimData() = default;
 
@@ -464,7 +510,7 @@ struct ENGINE_API FUECompressedAnimData : public ICompressedAnimData, public FCo
 		, FCompressedAnimDataBase(InCompressedData)
 	{}
 
-	void InitViewsFromBuffer(const TArrayView<uint8> BulkData);
+	ENGINE_API void InitViewsFromBuffer(const TArrayView<uint8> BulkData);
 
 	template<typename TArchive>
 	void ByteSwapData(TArrayView<uint8> CompresedData, TArchive& MemoryStream);
@@ -473,13 +519,18 @@ struct ENGINE_API FUECompressedAnimData : public ICompressedAnimData, public FCo
 	void ByteSwapOut(TArrayView<uint8> CompressedData, FMemoryWriter& MemoryStream) { ByteSwapData(CompressedData, MemoryStream); }
 
 	// ICompressedAnimData implementation
-	virtual void SerializeCompressedData(class FArchive& Ar) override;
+	ENGINE_API virtual void SerializeCompressedData(class FArchive& Ar) override;
 	virtual void Bind(const TArrayView<uint8> BulkData) override { InitViewsFromBuffer(BulkData); }
 
 	virtual int64 GetApproxCompressedSize() const override { return (int64)CompressedTrackOffsets.GetTypeSize() * (int64)CompressedTrackOffsets.Num() + (int64)CompressedByteStream.Num() + (int64)CompressedScaleOffsets.GetMemorySize(); }
-	virtual FString GetDebugString() const override;
+	ENGINE_API virtual FString GetDebugString() const override;
 	virtual bool IsValid() const override { return CompressedByteStream.Num() > 0 || (TranslationCompressionFormat == ACF_Identity && RotationCompressionFormat == ACF_Identity && ScaleCompressionFormat == ACF_Identity); }
 };
+
+namespace UE::Animation::Private
+{
+	[[noreturn]] ENGINE_API void OnInvalidMaybeMappedAllocatorNum(int32 NewNum, SIZE_T NumBytesPerElement);
+}
 
 template<uint32 Alignment = DEFAULT_ALIGNMENT>
 class TMaybeMappedAllocator
@@ -551,6 +602,14 @@ public:
 			}
 			else if (Data || NumElements)
 			{
+				static_assert(sizeof(int32) <= sizeof(SIZE_T), "SIZE_T is expected to be larger than int32");
+
+				// Check for under/overflow
+				if (UNLIKELY(NumElements < 0 || NumBytesPerElement < 1 || NumBytesPerElement > (SIZE_T)MAX_int32))
+				{
+				    UE::Animation::Private::OnInvalidMaybeMappedAllocatorNum(NumElements, NumBytesPerElement);
+				}
+
 				// Avoid calling FMemory::Realloc( nullptr, 0 ) as ANSI C mandates returning a valid pointer which is not what we want.
 				//checkSlow(((uint64)NumElements*(uint64)ElementTypeInfo.GetSize() < (uint64)INT_MAX));
 				Data = (FScriptContainerElement*)FMemory::Realloc(Data, NumElements*NumBytesPerElement, Alignment);
@@ -652,6 +711,9 @@ public:
 	};
 };
 
+// Define the ResizeAllocation function with the regular alignment as exported to avoid bloat
+extern template ENGINE_API FORCENOINLINE void TMaybeMappedAllocator<DEFAULT_ALIGNMENT>::ForAnyElementType::ResizeAllocation(SizeType PreviousNumElements, SizeType NumElements, SIZE_T NumBytesPerElement);
+
 template<typename T, uint32 Alignment = DEFAULT_ALIGNMENT>
 class TMaybeMappedArray : public TArray<T, TMaybeMappedAllocator<Alignment>>
 {
@@ -673,21 +735,46 @@ public:
 	}
 };
 
-template <uint32 Alignment>
-struct TAllocatorTraits<TMaybeMappedAllocator<Alignment>> : TAllocatorTraitsBase<TMaybeMappedAllocator<Alignment>>
-{
-	enum { SupportsMove = true };
-};
-
 template<typename T, uint32 Alignment>
 struct TIsContiguousContainer<TMaybeMappedArray<T, Alignment>>
 {
 	static constexpr bool Value = TIsContiguousContainer<TArray<T, TMaybeMappedAllocator<Alignment>>>::Value;
 };
 
-struct ENGINE_API FCompressedAnimSequence
+USTRUCT()
+struct FAnimCompressedCurveIndexedName
+{
+	GENERATED_BODY()
+
+	FAnimCompressedCurveIndexedName() = default;
+	
+	bool operator<(const FAnimCompressedCurveIndexedName& InOther) const
+	{
+		return InOther.CurveName.FastLess(CurveName);
+	}
+
+	friend FArchive& operator<<(FArchive& Ar, FAnimCompressedCurveIndexedName& Item)
+	{
+		Ar << Item.CurveName;
+		if(Ar.IsCountingMemory())
+		{
+			Ar << Item.CurveIndex;
+		}
+		return Ar;
+	}
+	
+	// Name of the curve, used for sorting
+	UPROPERTY()
+	FName CurveName = NAME_None;
+
+	// Index into the compressed buffer
+	int32 CurveIndex = INDEX_NONE;
+};
+
+struct FCompressedAnimSequence
 {
 public:
+	UE_NONCOPYABLE(FCompressedAnimSequence)
 
 	/**
 	 * Version of TrackToSkeletonMapTable for the compressed tracks. Due to baking additive data
@@ -696,11 +783,11 @@ public:
 	 */
 	TArray<struct FTrackToSkeletonMap> CompressedTrackToSkeletonMapTable;
 
-	/**
-	 * Much like track indices above, we need to be able to remap curve names. The FName inside FSmartName
-	 * is serialized and the UID is generated at runtime. Stored in the DDC.
-	 */
+	UE_DEPRECATED(5.3, "Please use IndexedCurveNames.")
 	TArray<struct FSmartName> CompressedCurveNames;
+
+	/** Curve names for each compressed curve track, indices sorted by FName */
+	TArray<FAnimCompressedCurveIndexedName> IndexedCurveNames;
 
 	/**
 	 * ByteStream for compressed animation data.
@@ -720,13 +807,19 @@ public:
 	TUniquePtr<ICompressedAnimData> CompressedDataStructure;
 
 	/** The codec used by the compressed data as determined by the bone compression settings. */
-	class UAnimBoneCompressionCodec* BoneCompressionCodec;
+	TObjectPtr<class UAnimBoneCompressionCodec> BoneCompressionCodec;
 
 	/** The codec used by the compressed data as determined by the curve compression settings. */
-	class UAnimCurveCompressionCodec* CurveCompressionCodec;
+	TObjectPtr<class UAnimCurveCompressionCodec> CurveCompressionCodec;
 
 	// The size of the raw data used to create the compressed data
 	int32 CompressedRawDataSize;
+
+	//Temp debug DDC issues
+#if WITH_EDITOR
+	TArray<FRawAnimSequenceTrack> CompressedRawData; //Temp debug DDC issues
+	FName OwnerName;
+#endif
 
 	FCompressedAnimSequence()
 		: BoneCompressionCodec(nullptr)
@@ -734,18 +827,28 @@ public:
 		, CompressedRawDataSize(0)
 	{}
 
-	void SerializeCompressedData(FArchive& Ar, bool bDDCData, UObject* DataOwner, USkeleton* Skeleton, UAnimBoneCompressionSettings* BoneCompressionSettings, UAnimCurveCompressionSettings* CurveCompressionSettings, bool bCanUseBulkData=true);
+	ENGINE_API void SerializeCompressedData(FArchive& Ar, bool bDDCData, UObject* DataOwner, USkeleton* Skeleton, UAnimBoneCompressionSettings* BoneCompressionSettings, UAnimCurveCompressionSettings* CurveCompressionSettings, bool bCanUseBulkData=true);
 
+	ENGINE_API void RebuildCurveIndexTable();
+	
 	int32 GetSkeletonIndexFromTrackIndex(const int32 TrackIndex) const
 	{
 		return CompressedTrackToSkeletonMapTable[TrackIndex].BoneTreeIndex;
 	}
 
-	// Return the number of bytes used
-	SIZE_T GetMemorySize() const;
+	int32 GetTrackIndexFromSkeletonIndex(const int32 BoneIndex) const
+	{
+		return CompressedTrackToSkeletonMapTable.IndexOfByPredicate([BoneIndex](const FTrackToSkeletonMap& Entry) { return Entry.BoneTreeIndex == BoneIndex; });
+	}
 
-	void ClearCompressedBoneData();
-	void ClearCompressedCurveData();
+	// Return the number of bytes used
+	ENGINE_API SIZE_T GetMemorySize() const;
+
+	ENGINE_API void Reset();
+	ENGINE_API void ClearCompressedBoneData();
+	ENGINE_API void ClearCompressedCurveData();
+
+	ENGINE_API bool IsValid(const UAnimSequence* AnimSequence, bool bLogInformation=false) const;
 };
 
 struct FRootMotionReset
@@ -770,14 +873,14 @@ struct FRootMotionReset
 
 	bool bIsValidAdditive;
 
-	void ResetRootBoneForRootMotion(FTransform& BoneTransform, const FBoneContainer& RequiredBones) const
+	void ResetRootBoneForRootMotion(FTransform& BoneTransform, const FTransform& RefPoseRootTransform) const
 	{
 		switch (RootMotionRootLock)
 		{
 		case ERootMotionRootLock::AnimFirstFrame: BoneTransform = AnimFirstFrame; break;
 		case ERootMotionRootLock::Zero: BoneTransform = FTransform::Identity; break;
 		default:
-		case ERootMotionRootLock::RefPose: BoneTransform = RequiredBones.GetRefPoseArray()[0]; break;
+		case ERootMotionRootLock::RefPose: BoneTransform = RefPoseRootTransform; break;
 		}
 
 		if (bIsValidAdditive && RootMotionRootLock != ERootMotionRootLock::AnimFirstFrame)
@@ -786,8 +889,27 @@ struct FRootMotionReset
 			BoneTransform.SetScale3D(BoneTransform.GetScale3D() - FVector(1.f));
 		}
 	}
+
+	void ResetRootBoneForRootMotion(FTransform& BoneTransform, const FBoneContainer& RequiredBones) const
+	{
+		ResetRootBoneForRootMotion(BoneTransform, RequiredBones.GetRefPoseArray()[0]);
+	}
 };
 
+#if WITH_EDITOR
+namespace UE::Anim::Compression {
+	struct FAnimDDCKeyArgs
+	{
+		ENGINE_API FAnimDDCKeyArgs(const UAnimSequenceBase& AnimSequence);
+		ENGINE_API FAnimDDCKeyArgs(const UAnimSequenceBase& AnimSequence, const ITargetPlatform* TargetPlatform);
+
+		const UAnimSequenceBase& AnimSequence;
+		const ITargetPlatform* TargetPlatform;
+	};
+}
+#endif // WITH_EDITOR
+
+UE_DEPRECATED(5.1, "Signature of DecompressPose has been deprecated, use UE::Anim::Decompression::DecompressPose instead")
 extern void DecompressPose(FCompactPose& OutPose,
 							const FCompressedAnimSequence& CompressedData,
 							const FAnimExtractContext& ExtractionContext,
@@ -799,13 +921,19 @@ extern void DecompressPose(FCompactPose& OutPose,
 							FName SourceName,
 							const FRootMotionReset& RootMotionReset);
 
+UE_DEPRECATED(5.1, "Signature of DecompressPose has been deprecated, use UE::Anim::Decompression::DecompressPose instead")
 extern void DecompressPose(	FCompactPose& OutPose,
 							const FCompressedAnimSequence& CompressedData,
 							const FAnimExtractContext& ExtractionContext,
-							USkeleton* Skeleton,
+							USkeleton* SourceSkeleton,
 							float SequenceLength,
 							EAnimInterpolationType Interpolation,
 							bool bIsBakedAdditive,
 							FName RetargetSource,
 							FName SourceName,
 							const FRootMotionReset& RootMotionReset);
+
+
+#if WITH_EDITOR
+extern FGuid GenerateGuidFromRawAnimData(const TArray<FRawAnimSequenceTrack>& RawAnimationData, const FRawCurveTracks& RawCurveData);
+#endif 

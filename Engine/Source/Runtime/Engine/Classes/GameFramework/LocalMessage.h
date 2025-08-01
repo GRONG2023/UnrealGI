@@ -24,13 +24,13 @@ class APlayerState;
 
 /** Handles the many pieces of data passed into Client Receive */
 USTRUCT()
-struct ENGINE_API FClientReceiveData
+struct FClientReceiveData
 {
 	//always need to be here
 	GENERATED_USTRUCT_BODY()
 
 	UPROPERTY()
-	APlayerController* LocalPC;
+	TObjectPtr<APlayerController> LocalPC;
 
 	UPROPERTY()
 	FName MessageType;
@@ -42,23 +42,23 @@ struct ENGINE_API FClientReceiveData
 	FString MessageString;
 
 	UPROPERTY()
-	APlayerState* RelatedPlayerState_1;
+	TObjectPtr<APlayerState> RelatedPlayerState_1;
 
 	UPROPERTY()
-	APlayerState* RelatedPlayerState_2;
+	TObjectPtr<APlayerState> RelatedPlayerState_2;
 
 	UPROPERTY()
-	UObject* OptionalObject;
+	TObjectPtr<UObject> OptionalObject;
 
-	FClientReceiveData();
+	ENGINE_API FClientReceiveData();
 };
 
-UCLASS(abstract)
-class ENGINE_API ULocalMessage : public UObject
+UCLASS(abstract, MinimalAPI)
+class ULocalMessage : public UObject
 {
 	GENERATED_UCLASS_BODY()
 	/** send message to client */
-	virtual void ClientReceive(const FClientReceiveData& ClientData) const PURE_VIRTUAL(ULocalMessage::ClientReceive,);
+	ENGINE_API virtual void ClientReceive(const FClientReceiveData& ClientData) const PURE_VIRTUAL(ULocalMessage::ClientReceive,);
 };
 
 

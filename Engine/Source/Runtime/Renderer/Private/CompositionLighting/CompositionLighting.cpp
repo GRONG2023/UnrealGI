@@ -6,26 +6,18 @@
 
 #include "CompositionLighting/CompositionLighting.h"
 #include "ScenePrivate.h"
-#include "PostProcess/RenderingCompositionGraph.h"
-#include "PostProcess/PostProcessInput.h"
 #include "PostProcess/PostProcessing.h"
-#include "CompositionLighting/PostProcessLpvIndirect.h"
 #include "CompositionLighting/PostProcessAmbientOcclusion.h"
 #include "CompositionLighting/PostProcessDeferredDecals.h"
 #include "PostProcess/PostProcessSubsurface.h"
-#include "LightPropagationVolumeSettings.h"
 #include "DecalRenderingShared.h"
 #include "VisualizeTexture.h"
 #include "RayTracing/RaytracingOptions.h"
 #include "SceneTextureParameters.h"
 #include "RenderGraphUtils.h"
 
-/** The global center for all deferred lighting activities. */
-FCompositionLighting GCompositionLighting;
-
 DECLARE_GPU_STAT_NAMED(CompositionBeforeBasePass, TEXT("Composition BeforeBasePass") );
 DECLARE_GPU_STAT_NAMED(CompositionPreLighting, TEXT("Composition PreLighting") );
-DECLARE_GPU_STAT_NAMED(CompositionLpvIndirect, TEXT("Composition LpvIndirect") );
 DECLARE_GPU_STAT_NAMED(CompositionPostLighting, TEXT("Composition PostLighting") );
 
 static TAutoConsoleVariable<int32> CVarSSAOSmoothPass(
@@ -68,36 +60,7 @@ static TAutoConsoleVariable<int32> CVarGTAOCombined(
 
 bool IsAmbientCubemapPassRequired(const FSceneView& View)
 {
-	FScene* Scene = (FScene*)View.Family->Scene;
-
 	return View.FinalPostProcessSettings.ContributingCubemaps.Num() != 0 && IsUsingGBuffers(View.GetShaderPlatform());
-}
-
-bool IsLpvIndirectPassRequired(const FViewInfo& View)
-{
-	FScene* Scene = (FScene*)View.Family->Scene;
-
-	const FSceneViewState* ViewState = (FSceneViewState*)View.State;
-
-	if(ViewState)
-	{
-		// This check should be inclusive to stereo views
-		const bool bIncludeStereoViews = true;
-
-		FLightPropagationVolume* LightPropagationVolume = ViewState->GetLightPropagationVolume(View.GetFeatureLevel(), bIncludeStereoViews);
-
-		if(LightPropagationVolume)
-		{
-			const FLightPropagationVolumeSettings& LPVSettings = View.FinalPostProcessSettings.BlendableManager.GetSingleFinalDataConst<FLightPropagationVolumeSettings>();
-
-			if(LPVSettings.LPVIntensity > 0.0f)
-			{
-				return true;
-			}
-		}
-	}
-
-	return false;
 }
 
 static bool IsReflectionEnvironmentActive(const FSceneView& View)
@@ -110,7 +73,7 @@ static bool IsReflectionEnvironmentActive(const FSceneView& View)
 	bool HasReflectionCaptures = (Scene->ReflectionSceneData.RegisteredReflectionCaptures.Num() > 0);
 	bool HasSSR = View.Family->EngineShowFlags.ScreenSpaceReflections;
 
-	return (Scene->GetFeatureLevel() == ERHIFeatureLevel::SM5 && IsReflectingEnvironment && (HasReflectionCaptures || HasSSR) && !IsAnyForwardShadingEnabled(View.GetShaderPlatform()));
+	return (Scene->GetFeatureLevel() >= ERHIFeatureLevel::SM5 && IsReflectingEnvironment && (HasReflectionCaptures || HasSSR) && !IsForwardShadingEnabled(View.GetShaderPlatform()));
 }
 
 static bool IsSkylightActive(const FViewInfo& View)
@@ -121,19 +84,15 @@ static bool IsSkylightActive(const FViewInfo& View)
 		&& View.Family->EngineShowFlags.SkyLighting;
 }
 
-bool ShouldRenderScreenSpaceAmbientOcclusion(const FViewInfo& View)
+bool ShouldRenderScreenSpaceAmbientOcclusion(const FViewInfo& View, bool bLumenWantsSSAO)
 {
 	bool bEnabled = true;
 
-	if (!IsLpvIndirectPassRequired(View))
-	{
-		bEnabled = View.FinalPostProcessSettings.AmbientOcclusionIntensity > 0
-			&& View.Family->EngineShowFlags.Lighting
-			&& View.FinalPostProcessSettings.AmbientOcclusionRadius >= 0.1f
-			&& !View.Family->UseDebugViewPS()
-			&& (FSSAOHelper::IsBasePassAmbientOcclusionRequired(View) || IsAmbientCubemapPassRequired(View) || IsReflectionEnvironmentActive(View) || IsSkylightActive(View) || View.Family->EngineShowFlags.VisualizeBuffer)
-			&& !IsSimpleForwardShadingEnabled(View.GetShaderPlatform());
-	}
+	bEnabled = View.FinalPostProcessSettings.AmbientOcclusionIntensity > 0
+		&& View.Family->EngineShowFlags.Lighting
+		&& View.FinalPostProcessSettings.AmbientOcclusionRadius >= 0.1f
+		&& !View.Family->UseDebugViewPS()
+		&& (FSSAOHelper::IsBasePassAmbientOcclusionRequired(View) || IsAmbientCubemapPassRequired(View) || IsReflectionEnvironmentActive(View) || IsSkylightActive(View) || IsForwardShadingEnabled(View.GetShaderPlatform()) || View.Family->EngineShowFlags.VisualizeBuffer || bLumenWantsSSAO);
 #if RHI_RAYTRACING
 	bEnabled &= !ShouldRenderRayTracingAmbientOcclusion(View);
 #endif
@@ -164,7 +123,6 @@ static FSSAOCommonParameters GetSSAOCommonParameters(
 	FRDGBuilder& GraphBuilder,
 	const FViewInfo& View,
 	TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBuffer,
-	TUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBufferRHI,
 	uint32 Levels,
 	bool bAllowGBufferRead)
 {
@@ -172,10 +130,9 @@ static FSSAOCommonParameters GetSSAOCommonParameters(
 
 	FSSAOCommonParameters CommonParameters;
 	CommonParameters.SceneTexturesUniformBuffer = SceneTexturesUniformBuffer;
-	CommonParameters.SceneTexturesUniformBufferRHI = SceneTexturesUniformBufferRHI;
 	CommonParameters.SceneTexturesViewport = FScreenPassTextureViewport(SceneTextureParameters.SceneDepthTexture, View.ViewRect);
 
-	CommonParameters.HZBInput = FScreenPassTexture(GraphBuilder.RegisterExternalTexture(View.HZB, TEXT("HZBInput")));
+	CommonParameters.HZBInput = FScreenPassTexture(View.HZB);
 	CommonParameters.GBufferA = bAllowGBufferRead ? FScreenPassTexture(SceneTextureParameters.GBufferATexture, View.ViewRect) : FScreenPassTexture();
 	CommonParameters.SceneDepth = FScreenPassTexture(SceneTextureParameters.SceneDepthTexture, View.ViewRect);
 
@@ -186,7 +143,7 @@ static FSSAOCommonParameters GetSSAOCommonParameters(
 
 	// If there is no temporal upsampling, we need a smooth pass to get rid of the grid pattern.
 	// Pixel shader version has relatively smooth result so no need to do extra work.
-	CommonParameters.bNeedSmoothingPass = CommonParameters.FullscreenType != ESSAOType::EPS && View.AntiAliasingMethod != AAM_TemporalAA && CVarSSAOSmoothPass.GetValueOnRenderThread();
+	CommonParameters.bNeedSmoothingPass = CommonParameters.FullscreenType != ESSAOType::EPS && !IsTemporalAccumulationBasedMethod(View.AntiAliasingMethod) && CVarSSAOSmoothPass.GetValueOnRenderThread();
 
 	return CommonParameters;
 }
@@ -195,7 +152,6 @@ FGTAOCommonParameters GetGTAOCommonParameters(
 	FRDGBuilder& GraphBuilder,
 	const FViewInfo& View,
 	TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBuffer,
-	TUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBufferRHI,
 	EGTAOType GTAOType
 	)
 {
@@ -203,10 +159,9 @@ FGTAOCommonParameters GetGTAOCommonParameters(
 
 	FGTAOCommonParameters CommonParameters;
 	CommonParameters.SceneTexturesUniformBuffer = SceneTexturesUniformBuffer;
-	CommonParameters.SceneTexturesUniformBufferRHI = SceneTexturesUniformBufferRHI;
 	CommonParameters.SceneTexturesViewport = FScreenPassTextureViewport(SceneTextureParameters.SceneDepthTexture, View.ViewRect);
 
-	CommonParameters.HZBInput = FScreenPassTexture(GraphBuilder.RegisterExternalTexture(View.HZB, TEXT("HZBInput")));
+	CommonParameters.HZBInput = FScreenPassTexture(View.HZB);
 	CommonParameters.SceneDepth = FScreenPassTexture(SceneTextureParameters.SceneDepthTexture, View.ViewRect);
 	CommonParameters.SceneVelocity = FScreenPassTexture(SceneTextureParameters.GBufferVelocityTexture, View.ViewRect);
 
@@ -301,8 +256,8 @@ static FScreenPassTexture AddPostProcessingGTAOAllPasses(
 					GraphBuilder,
 					View,
 					CommonParameters,
-					CommonParameters.SceneDepth,
-					CurrentOutput);
+					HorizonSearchOutputs.Color,
+					CommonParameters.SceneDepth);
 		}
 
 		if (bTemporalPass)
@@ -321,6 +276,7 @@ static FScreenPassTexture AddPostProcessingGTAOAllPasses(
 			else
 			{
 				HistoryColor = FScreenPassTexture(GraphBuilder.RegisterExternalTexture(GSystemTextures.WhiteDummy, TEXT("GTAODummyTexture")));
+				HistoryViewport = FScreenPassTextureViewport(HistoryColor);
 			}
 
 			FGTAOTemporalOutputs TemporalOutputs =
@@ -420,6 +376,7 @@ static FScreenPassTexture AddPostProcessingGTAOPostAsync(
 			else
 			{
 				HistoryColor = FScreenPassTexture(GraphBuilder.RegisterExternalTexture(GSystemTextures.WhiteDummy, TEXT("GTAODummyTexture")));
+				HistoryViewport = FScreenPassTextureViewport(HistoryColor);
 			}
 
 			FGTAOTemporalOutputs TemporalOutputs =
@@ -513,12 +470,21 @@ static FScreenPassTexture AddPostProcessingAmbientOcclusion(
 				CommonParameters.HZBInput);
 	}
 
+	FScreenPassTexture SetupTexture = CommonParameters.GBufferA;
+	if (Substrate::IsSubstrateEnabled())
+	{
+		// For Substrate, we invalidate the setup texture for the final pass:
+		//	- We do not need GBufferA, the Substrate TopLayer texture will fill in for that.
+		//	- Setting it to nullptr will make the AddAmbientOcclusionPass use a valid viewport from SceneTextures.
+		SetupTexture.Texture = nullptr;
+	}
+
 	FScreenPassTexture FinalOutput =
 		AddAmbientOcclusionFinalPass(
 			GraphBuilder,
 			View,
 			CommonParameters,
-			CommonParameters.GBufferA,
+			SetupTexture,
 			AmbientOcclusionInMip1,
 			AmbientOcclusionPassMip1,
 			CommonParameters.HZBInput,
@@ -527,250 +493,242 @@ static FScreenPassTexture AddPostProcessingAmbientOcclusion(
 	return FinalOutput;
 }
 
-void FCompositionLighting::Reset()
+FCompositionLighting::FCompositionLighting(TArrayView<const FViewInfo> InViews, const FSceneTextures& InSceneTextures, TUniqueFunction<bool(int32)> RequestSSAOFunction)
+	: Views(InViews)
+	, ViewFamily(*InViews[0].Family)
+	, SceneTextures(InSceneTextures)
+	, bEnableDBuffer(IsDBufferEnabled(ViewFamily, SceneTextures.Config.ShaderPlatform))
+	, bEnableDecals(AreDecalsEnabled(ViewFamily))
 {
-	DecalPassTextures = {};
+	checkf(bEnableDecals || !bEnableDBuffer, TEXT("DBuffer should only be enabled when Decals are enabled."));
+
+	const FScene& Scene = *(FScene*)ViewFamily.Scene;
+
+	ViewAOConfigs.SetNum(Views.Num());
+
+	if (bEnableDecals)
+	{
+		VisibleDecals.SetNum(Views.Num());
+	}
+
+	for (int32 Index = 0; Index < Views.Num(); ++Index)
+	{
+		ViewAOConfigs[Index].bRequested = RequestSSAOFunction(Index);
+
+		if (bEnableDecals)
+		{
+			VisibleDecals[Index] = DecalRendering::BuildVisibleDecalList(Scene.Decals, Views[Index]);
+		}
+	}
 }
 
-void FCompositionLighting::ProcessBeforeBasePass(
-	FRDGBuilder& GraphBuilder,
-	FPersistentUniformBuffers& UniformBuffers,
-	const FViewInfo& View,
-	TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBuffer,
-	bool bDBuffer,
-	uint32 SSAOLevels)
+void FCompositionLighting::TryInit()
 {
-	check(IsInRenderingThread());
-
-	const bool bNeedSSAO = SSAOLevels && FSSAOHelper::GetGTAOPassType(View, SSAOLevels) != EGTAOType::ENonAsync;
-
-	// so that the passes can register themselves to the graph
-	if (bDBuffer || bNeedSSAO)
+	if (bInitialized)
 	{
-		FSceneRenderTargets& SceneContext = FSceneRenderTargets::Get(GraphBuilder.RHICmdList);
+		return;
+	}
 
-		RDG_EVENT_SCOPE(GraphBuilder, "CompositionBeforeBasePass");
-		RDG_GPU_STAT_SCOPE(GraphBuilder, CompositionBeforeBasePass);
+	const bool bForwardShading = IsForwardShadingEnabled(SceneTextures.Config.ShaderPlatform);
 
-		AddPass(GraphBuilder, [&UniformBuffers, &View](FRHICommandList&)
+	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
+	{
+		const FViewInfo& View = Views[ViewIndex];
+
+		FAOConfig& ViewConfig = ViewAOConfigs[ViewIndex];
+
+		if (!ViewConfig.bRequested)
 		{
-			UniformBuffers.UpdateViewUniformBuffer(View);
-		});
-
-		// decals are before AmbientOcclusion so the decal can output a normal that AO is affected by
-		if (bDBuffer)
-		{
-			if (!DecalPassTextures.DecalPassUniformBuffer)
-			{
-				DecalPassTextures = GetDeferredDecalPassTextures(GraphBuilder, View);
-			}
-			AddDeferredDecalPass(GraphBuilder, View, DecalPassTextures, DRS_BeforeBasePass);
+			continue;
 		}
 
-		if (bNeedSSAO)
+		ViewConfig.Levels = FSSAOHelper::ComputeAmbientOcclusionPassCount(View);
+
+		if (!bForwardShading)
 		{
-			TUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBufferRHI = CreateSceneTextureUniformBuffer(GraphBuilder.RHICmdList, View.FeatureLevel, ESceneTextureSetupMode::SceneDepth);
-			FSSAOCommonParameters Parameters = GetSSAOCommonParameters(GraphBuilder, View, SceneTexturesUniformBuffer, SceneTexturesUniformBufferRHI, SSAOLevels, false);
-			FScreenPassRenderTarget FinalTarget = FScreenPassRenderTarget(GraphBuilder.RegisterExternalTexture(SceneContext.ScreenSpaceAO, TEXT("AmbientOcclusionDirect")), View.ViewRect, ERenderTargetLoadAction::ENoAction);
+			ViewConfig.GTAOType = FSSAOHelper::GetGTAOPassType(View, ViewConfig.Levels);
+		}
+
+		if (ViewConfig.GTAOType == EGTAOType::EOff && ViewConfig.Levels > 0)
+		{
+			ViewConfig.bSSAOAsync = FSSAOHelper::IsAmbientOcclusionAsyncCompute(View, ViewConfig.Levels);
+
+			ViewConfig.SSAOLocation = View.HZB != nullptr && (ViewConfig.bSSAOAsync || bForwardShading)
+				? ESSAOLocation::BeforeBasePass
+				: ESSAOLocation::AfterBasePass;
+		}
+	}
+
+	bInitialized = true;
+}
+
+void FCompositionLighting::ProcessBeforeBasePass(FRDGBuilder& GraphBuilder, FDBufferTextures& DBufferTextures, FInstanceCullingManager& InstanceCullingManager)
+{
+	if (HasRayTracedOverlay(ViewFamily))
+	{
+		return;
+	}
+
+	TryInit();
+
+	RDG_EVENT_SCOPE(GraphBuilder, "CompositionBeforeBasePass");
+	RDG_GPU_STAT_SCOPE(GraphBuilder, CompositionBeforeBasePass);
+
+	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
+	{
+		const FViewInfo& View = Views[ViewIndex];
+		const FAOConfig& ViewConfig = ViewAOConfigs[ViewIndex];
+
+		const bool bEnableSSAO = ViewConfig.SSAOLocation == ESSAOLocation::BeforeBasePass;
+
+		if (!bEnableDBuffer && !bEnableSSAO)
+		{
+			continue;
+		}
+
+		RDG_GPU_MASK_SCOPE(GraphBuilder, View.GPUMask);
+		RDG_EVENT_SCOPE_CONDITIONAL(GraphBuilder, Views.Num() > 1, "View%d", ViewIndex);
+
+		View.BeginRenderView();
+
+		// decals are before AmbientOcclusion so the decal can output a normal that AO is affected by
+		if (bEnableDBuffer)
+		{
+			FDeferredDecalPassTextures DecalPassTextures = GetDeferredDecalPassTextures(GraphBuilder, View, SceneTextures, &DBufferTextures);
+			AddDeferredDecalPass(GraphBuilder, View, VisibleDecals[ViewIndex], DecalPassTextures, InstanceCullingManager, EDecalRenderStage::BeforeBasePass);
+		}
+
+		if (bEnableSSAO)
+		{
+			FSSAOCommonParameters Parameters = GetSSAOCommonParameters(GraphBuilder, View, SceneTextures.UniformBuffer, ViewConfig.Levels, false);
+			FScreenPassRenderTarget FinalTarget = FScreenPassRenderTarget(SceneTextures.ScreenSpaceAO, View.ViewRect, ERenderTargetLoadAction::ENoAction);
 
 			AddPostProcessingAmbientOcclusion(
 				GraphBuilder,
 				View,
 				Parameters,
 				FinalTarget);
-			SceneContext.bScreenSpaceAOIsValid = true;
 		}
 	}
 }
 
-void FCompositionLighting::ProcessAfterBasePass(
-	FRDGBuilder& GraphBuilder,
-	FPersistentUniformBuffers& UniformBuffers,
-	const FViewInfo& View,
-	TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBuffer)
+void FCompositionLighting::ProcessAfterBasePass(FRDGBuilder& GraphBuilder, FInstanceCullingManager& InstanceCullingManager, EProcessAfterBasePassMode Mode)
 {
-	FSceneRenderTargets& SceneContext = FSceneRenderTargets::Get(GraphBuilder.RHICmdList);
-
-	if (CanOverlayRayTracingOutput(View))
+	if (HasRayTracedOverlay(ViewFamily))
 	{
-		const FSceneViewFamily& ViewFamily = *View.Family;
+		return;
+	}
+
+	check(bInitialized);
+
+	RDG_EVENT_SCOPE(GraphBuilder, "LightCompositionTasks_PreLighting");
+	RDG_GPU_STAT_SCOPE(GraphBuilder, CompositionPreLighting);
+
+	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
+	{
+		const FViewInfo& View = Views[ViewIndex];
+		const FAOConfig& ViewConfig = ViewAOConfigs[ViewIndex];
 
 		RDG_GPU_MASK_SCOPE(GraphBuilder, View.GPUMask);
-		RDG_EVENT_SCOPE(GraphBuilder, "LightCompositionTasks_PreLighting");
-		RDG_GPU_STAT_SCOPE(GraphBuilder, CompositionPreLighting);
+		RDG_EVENT_SCOPE_CONDITIONAL(GraphBuilder, Views.Num() > 1, "View%d", ViewIndex);
 
-		AddPass(GraphBuilder, [&UniformBuffers, &View](FRHICommandList&)
+		View.BeginRenderView();
+
+		FDeferredDecalPassTextures DecalPassTextures = GetDeferredDecalPassTextures(GraphBuilder, View, SceneTextures, nullptr);
+
+		if (bEnableDecals && !bEnableDBuffer && IsUsingGBuffers(SceneTextures.Config.ShaderPlatform) && Mode != EProcessAfterBasePassMode::SkipBeforeLightingDecals)
 		{
-			UniformBuffers.UpdateViewUniformBuffer(View);
-		});
-
-		// decal are distracting when looking at LightCulling.
-		const bool bDoDecal = ViewFamily.EngineShowFlags.Decals && !ViewFamily.EngineShowFlags.VisualizeLightCulling;
-
-		if (!DecalPassTextures.DecalPassUniformBuffer)
-		{
-			DecalPassTextures = GetDeferredDecalPassTextures(GraphBuilder, View);
+			// We can disable this pass if using DBuffer decals
+			// Decals are before AmbientOcclusion so the decal can output a normal that AO is affected by
+			AddDeferredDecalPass(GraphBuilder, View, VisibleDecals[ViewIndex], DecalPassTextures, InstanceCullingManager, EDecalRenderStage::BeforeLighting);
 		}
 
-		if (ViewFamily.EngineShowFlags.Decals && !ViewFamily.EngineShowFlags.ShaderComplexity)
-		{
-			AddDeferredDecalPass(GraphBuilder, View, DecalPassTextures, DRS_AfterBasePass);
-		}
-
-		if (bDoDecal && IsUsingGBuffers(View.GetShaderPlatform()))
-		{
-			// decals are before AmbientOcclusion so the decal can output a normal that AO is affected by
-			AddDeferredDecalPass(GraphBuilder, View, DecalPassTextures, DRS_BeforeLighting);
-		}
-
-		if (bDoDecal && !IsSimpleForwardShadingEnabled(View.GetShaderPlatform()))
+		if (bEnableDecals && Mode != EProcessAfterBasePassMode::OnlyBeforeLightingDecals)
 		{
 			// DBuffer decals with emissive component
-			AddDeferredDecalPass(GraphBuilder, View, DecalPassTextures, DRS_Emissive);
+			AddDeferredDecalPass(GraphBuilder, View, VisibleDecals[ViewIndex], DecalPassTextures, InstanceCullingManager, EDecalRenderStage::Emissive);
 		}
 
 		// Forward shading SSAO is applied before the base pass using only the depth buffer.
-		if (!IsForwardShadingEnabled(View.GetShaderPlatform()))
+		if (!IsForwardShadingEnabled(View.GetShaderPlatform()) && Mode != EProcessAfterBasePassMode::OnlyBeforeLightingDecals)
 		{
-			FScreenPassRenderTarget FinalTarget = FScreenPassRenderTarget(GraphBuilder.RegisterExternalTexture(SceneContext.ScreenSpaceAO, TEXT("AmbientOcclusionDirect")), View.ViewRect, ERenderTargetLoadAction::ENoAction);
-
-			FScreenPassTexture AmbientOcclusion;
-#if RHI_RAYTRACING
-			if (ShouldRenderRayTracingAmbientOcclusion(View) && SceneContext.bScreenSpaceAOIsValid)
+			if (ViewConfig.Levels > 0)
 			{
-				AmbientOcclusion = FinalTarget;
-			}
-#endif
+				const bool bScreenSpaceAOIsProduced = SceneTextures.ScreenSpaceAO->HasBeenProduced();
+				FScreenPassRenderTarget FinalTarget = FScreenPassRenderTarget(SceneTextures.ScreenSpaceAO, View.ViewRect, bScreenSpaceAOIsProduced ? ERenderTargetLoadAction::ELoad : ERenderTargetLoadAction::ENoAction);
 
-			const uint32 SSAOLevels = FSSAOHelper::ComputeAmbientOcclusionPassCount(View);
-			if (SSAOLevels)
-			{
-				const EGTAOType GTAOType = FSSAOHelper::GetGTAOPassType(View, SSAOLevels);
-
-				TUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBufferRHI = CreateSceneTextureUniformBuffer(GraphBuilder.RHICmdList, View.FeatureLevel);
+				FScreenPassTexture AmbientOcclusion = bScreenSpaceAOIsProduced ? FinalTarget : FScreenPassTexture();
 
 				// If doing the Split GTAO method then we need to do the second part here.
-				if (GTAOType == EGTAOType::EAsyncHorizonSearch || GTAOType == EGTAOType::EAsyncCombinedSpatial)
+				if (ViewConfig.GTAOType == EGTAOType::EAsyncHorizonSearch || ViewConfig.GTAOType == EGTAOType::EAsyncCombinedSpatial)
 				{
-					FGTAOCommonParameters Parameters = GetGTAOCommonParameters(GraphBuilder, View, SceneTexturesUniformBuffer, SceneTexturesUniformBufferRHI, GTAOType);
+					check(HorizonsTexture);
 
-					FScreenPassTexture GTAOHorizons(GraphBuilder.RegisterExternalTexture(SceneContext.ScreenSpaceGTAOHorizons, TEXT("GTAOHorizons")), Parameters.DownsampledViewRect);
+					FGTAOCommonParameters Parameters = GetGTAOCommonParameters(GraphBuilder, View, SceneTextures.UniformBuffer, ViewConfig.GTAOType);
+
+					FScreenPassTexture GTAOHorizons(HorizonsTexture, Parameters.DownsampledViewRect);
 					AmbientOcclusion = AddPostProcessingGTAOPostAsync(GraphBuilder, View, Parameters, GTAOHorizons, FinalTarget);
 
 					ensureMsgf(
-						FDecalRendering::BuildVisibleDecalList(*(FScene*)View.Family->Scene, View, DRS_AmbientOcclusion, nullptr) == false,
+						DecalRendering::BuildRelevantDecalList(VisibleDecals[ViewIndex], EDecalRenderStage::AmbientOcclusion, nullptr) == false,
 						TEXT("Ambient occlusion decals are not supported with Async compute SSAO."));
 				}
 				else
 				{
-					if (GTAOType == EGTAOType::ENonAsync)
+					if (ViewConfig.GTAOType == EGTAOType::ENonAsync)
 					{
-						FGTAOCommonParameters Parameters = GetGTAOCommonParameters(GraphBuilder, View, SceneTexturesUniformBuffer, SceneTexturesUniformBufferRHI, GTAOType);
+						FGTAOCommonParameters Parameters = GetGTAOCommonParameters(GraphBuilder, View, SceneTextures.UniformBuffer, ViewConfig.GTAOType);
 						AmbientOcclusion = AddPostProcessingGTAOAllPasses(GraphBuilder, View, Parameters, FinalTarget);
 					}
-					else
+					else if (ViewConfig.SSAOLocation == ESSAOLocation::AfterBasePass)
 					{
-						FSSAOCommonParameters Parameters = GetSSAOCommonParameters(GraphBuilder, View, SceneTexturesUniformBuffer, SceneTexturesUniformBufferRHI, SSAOLevels, true);
+						FSSAOCommonParameters Parameters = GetSSAOCommonParameters(GraphBuilder, View, SceneTextures.UniformBuffer, ViewConfig.Levels, true);
 						AmbientOcclusion = AddPostProcessingAmbientOcclusion(GraphBuilder, View, Parameters, FinalTarget);
 					}
 
-					if (bDoDecal)
+					if (bEnableDecals)
 					{
 						DecalPassTextures.ScreenSpaceAO = AmbientOcclusion.Texture;
-						AddDeferredDecalPass(GraphBuilder, View, DecalPassTextures, DRS_AmbientOcclusion);
+						AddDeferredDecalPass(GraphBuilder, View, VisibleDecals[ViewIndex], DecalPassTextures, InstanceCullingManager, EDecalRenderStage::AmbientOcclusion);
 					}
 				}
-
-				SceneContext.bScreenSpaceAOIsValid = true;
 			}
 		}
 	}
 }
 
-
-void FCompositionLighting::ProcessLpvIndirect(FRHICommandListImmediate& RHICmdList, FViewInfo& View)
+void FCompositionLighting::ProcessAfterOcclusion(FRDGBuilder& GraphBuilder)
 {
-	check(IsInRenderingThread());
-	
-	FMemMark Mark(FMemStack::Get());
-	FRenderingCompositePassContext CompositeContext(RHICmdList, View);
-	FPostprocessContext Context(RHICmdList, CompositeContext.Graph, View);
-
+	if (HasRayTracedOverlay(ViewFamily))
 	{
-		FSceneRenderTargets& SceneContext = FSceneRenderTargets::Get(RHICmdList);
-
-		FRenderingCompositePass* SSAO = Context.Graph.RegisterPass(new FRCPassPostProcessInput(SceneContext.ScreenSpaceAO));
-
-		FRenderingCompositePass* Pass = Context.Graph.RegisterPass(new FRCPassPostProcessLpvIndirect());
-		Pass->SetInput(ePId_Input0, Context.FinalOutput);
-		Pass->SetInput(ePId_Input1, SSAO );
-
-		Context.FinalOutput = FRenderingCompositeOutputRef(Pass);
+		return;
 	}
 
-	// The graph setup should be finished before this line ----------------------------------------
+	TryInit();
 
-	SCOPED_DRAW_EVENT(RHICmdList, CompositionLpvIndirect);
-	SCOPED_GPU_STAT(RHICmdList, CompositionLpvIndirect);
-
-	// we don't replace the final element with the scenecolor because this is what those passes should do by themself
-
-	CompositeContext.Process(Context.FinalOutput.GetPass(), TEXT("CompositionLighting"));
-}
-
-bool FCompositionLighting::CanProcessAsyncSSAO(const TArray<FViewInfo>& Views)
-{
-	bool bAnyAsyncSSAO = true;
-	for (int32 i = 0; i < Views.Num(); ++i)
-	{
-		uint32 Levels = FSSAOHelper::ComputeAmbientOcclusionPassCount(Views[i]);
-		if (!FSSAOHelper::IsAmbientOcclusionAsyncCompute(Views[i], Levels))
-		{
-			bAnyAsyncSSAO = false;
-			break;
-		}
-	}
-	return bAnyAsyncSSAO;
-}
-
-void FCompositionLighting::ProcessAsyncSSAO(
-	FRDGBuilder& GraphBuilder,
-	const TArray<FViewInfo>& Views,
-	TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBuffer)
-{
 	RDG_ASYNC_COMPUTE_BUDGET_SCOPE(GraphBuilder, FSSAOHelper::GetAmbientOcclusionAsyncComputeBudget());
 
-	for (const FViewInfo& View : Views)
+	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
 	{
-		const uint32 Levels = FSSAOHelper::ComputeAmbientOcclusionPassCount(View);
-		const EGTAOType GTAOType = FSSAOHelper::GetGTAOPassType(View, Levels);
+		const FViewInfo& View = Views[ViewIndex];
+		const FAOConfig& ViewConfig = ViewAOConfigs[ViewIndex];
 
-		if (GTAOType == EGTAOType::EAsyncCombinedSpatial || GTAOType == EGTAOType::EAsyncHorizonSearch)
+		if (ViewConfig.GTAOType == EGTAOType::EAsyncCombinedSpatial || ViewConfig.GTAOType == EGTAOType::EAsyncHorizonSearch)
 		{
 			RDG_GPU_MASK_SCOPE(GraphBuilder, View.GPUMask);
 
-			TUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBufferRHI = CreateSceneTextureUniformBuffer(GraphBuilder.RHICmdList, View.FeatureLevel, ESceneTextureSetupMode::SceneDepth);
-			FGTAOCommonParameters CommonParameters = GetGTAOCommonParameters(GraphBuilder, View, SceneTexturesUniformBuffer, SceneTexturesUniformBufferRHI, GTAOType);
+			FGTAOCommonParameters CommonParameters = GetGTAOCommonParameters(GraphBuilder, View, SceneTextures.UniformBuffer, ViewConfig.GTAOType);
 
-			FRDGTextureRef GTAOHorizonsTexture = nullptr;
+			const ERenderTargetLoadAction LoadAction = View.DecayLoadAction(ERenderTargetLoadAction::ENoAction);
 
+			if (!HorizonsTexture)
 			{
-				FSceneRenderTargets& SceneContext = FSceneRenderTargets::Get(GraphBuilder.RHICmdList);
-				FIntPoint BufferSize = SceneContext.GetBufferSizeXY();
-				FIntPoint HorizonBufferSize = FIntPoint::DivideAndRoundUp(BufferSize, CommonParameters.DownscaleFactor);
-
-				FRDGTextureDesc Desc(FRDGTextureDesc::Create2D(HorizonBufferSize, PF_R32_FLOAT, FClearValueBinding::White, TexCreate_RenderTargetable));
-				if (SceneContext.GetCurrentFeatureLevel() >= ERHIFeatureLevel::SM5)
-				{
-					Desc.Flags |= TexCreate_UAV;
-				}
-
-				Desc.Format = PF_R8G8;
-				GTAOHorizonsTexture = GraphBuilder.CreateTexture(Desc, TEXT("ScreenSpaceGTAOHorizons"));
-				ConvertToExternalTexture(GraphBuilder, GTAOHorizonsTexture, SceneContext.ScreenSpaceGTAOHorizons);
+				const FIntPoint HorizonTextureSize = FIntPoint::DivideAndRoundUp(SceneTextures.Config.Extent, CommonParameters.DownscaleFactor);
+				const FRDGTextureDesc Desc = FRDGTextureDesc::Create2D(HorizonTextureSize, PF_R8G8, FClearValueBinding::White, TexCreate_UAV | TexCreate_RenderTargetable);
+				HorizonsTexture = GraphBuilder.CreateTexture(Desc, TEXT("ScreenSpaceGTAOHorizons"));
 			}
 
-			FScreenPassRenderTarget GTAOHorizons(GTAOHorizonsTexture, CommonParameters.DownsampledViewRect, ERenderTargetLoadAction::ENoAction);
+			FScreenPassRenderTarget GTAOHorizons(HorizonsTexture, CommonParameters.DownsampledViewRect, LoadAction);
 
 			AddPostProcessingGTAOAsyncPasses(
 				GraphBuilder,

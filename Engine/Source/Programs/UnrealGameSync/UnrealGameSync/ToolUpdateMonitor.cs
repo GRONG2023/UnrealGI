@@ -6,103 +6,174 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Forms;
+using EpicGames.Core;
+using EpicGames.Horde;
+using EpicGames.Horde.Tools;
+using EpicGames.Perforce;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+
+#nullable enable
 
 namespace UnrealGameSync
 {
+	[DebuggerDisplay("{Label}")]
 	class ToolLink
 	{
-		public string Label;
-		public string FileName;
-		public string Arguments;
-		public string WorkingDir;
+		public string Label { get; set; }
+		public string FileName { get; set; }
+		public string? Arguments { get; set; }
+		public string? WorkingDir { get; set; }
+
+		public ToolLink(string label, string fileName)
+		{
+			Label = label;
+			FileName = fileName;
+		}
 	}
 
-	class ToolDefinition
+	// Settings in the UgsTool.json file in the root of a Horde tool
+	class ToolSettings
 	{
-		public Guid Id;
-		public string Name;
-		public string Description;
-		public bool Enabled;
-		public Action<TextWriter> InstallAction;
-		public Action<TextWriter> UninstallAction;
-		public List<ToolLink> StatusPanelLinks = new List<ToolLink>();
-		public string ZipPath;
-		public int ZipChange;
-		public string ConfigPath;
-		public int ConfigChange;
+		public string? InstallCommand { get; set; }
+		public string? UninstallCommand { get; set; }
+		public List<ToolLink> StatusPanelLinks { get; set; } = new List<ToolLink>();
+		public bool SafeWhenBusy { get; set; }
+	}
+
+	[DebuggerDisplay("{Name}")]
+	class ToolInfo
+	{
+		public Guid Id { get; set; }
+		public string Name { get; set; }
+		public string Description { get; set; }
+		public HashSet<Guid> DependsOnToolIds { get; set; } = new HashSet<Guid>();
+		public ToolSettings Settings { get; set; } = new ToolSettings();
+		public string Revision { get; set; }
+
+		public ToolInfo(Guid id, string name, string description, string revision)
+		{
+			Id = id;
+			Name = name;
+			Description = description;
+			Revision = revision;
+		}
+
+		public ToolInfo Clone()
+		{
+			return (ToolInfo)MemberwiseClone();
+		}
 	}
 
 	class ToolUpdateMonitor : IDisposable
 	{
-		Thread WorkerThread;
-		AutoResetEvent WakeEvent;
-		bool bQuit;
-		string LogFile;
-		public List<ToolDefinition> Tools { get; private set; } = new List<ToolDefinition>();
-		int LastChange = -1;
+#pragma warning disable CA2213 // warning CA2213: 'ToolUpdateMonitor' contains field '_cancellationSource' that is of IDisposable type 'CancellationTokenSource', but it is never disposed. Change the Dispose method on 'ToolUpdateMonitor' to call Close or Dispose on this field.
+		readonly CancellationTokenSource _cancellationSource;
+#pragma warning restore CA2213
+		readonly SynchronizationContext _synchronizationContext;
+		Task? _workerTask;
+		readonly AsyncEvent _wakeEvent;
+		readonly ILogger _logger;
+		readonly IAsyncDisposer _asyncDisposer;
+		readonly FileReference _enabledToolsFile;
+		readonly IServiceProvider _serviceProvider;
 
-		public PerforceConnection Perforce { get; }
-		string ToolsDir { get; }
+		bool _readLegacyConfig;
+
+		Dictionary<string, ToolInfo> _perforceTools = new Dictionary<string, ToolInfo>(StringComparer.Ordinal);
+		int _perforceToolsChange = -1;
+
+		IReadOnlyList<ToolInfo> _tools = Array.Empty<ToolInfo>();
+		IReadOnlyList<ToolInfo> _enabledTools = Array.Empty<ToolInfo>();
+
+		IPerforceSettings PerforceSettings { get; }
+		DirectoryReference ToolsDir { get; }
 		UserSettings Settings { get; }
 
-		public event Action OnChange;
+		public Action? OnChange;
 
-		public ToolUpdateMonitor(PerforceConnection InPerforce, string DataDir, UserSettings Settings)
+		public ToolUpdateMonitor(IPerforceSettings perforceSettings, DirectoryReference dataDir, UserSettings settings, IServiceProvider serviceProvider)
 		{
-			this.Perforce = InPerforce;
-			this.ToolsDir = Path.Combine(DataDir, "Tools");
-			this.Settings = Settings;
+			_cancellationSource = new CancellationTokenSource();
+			_synchronizationContext = SynchronizationContext.Current!;
+			ToolsDir = DirectoryReference.Combine(dataDir, "Tools");
+			PerforceSettings = perforceSettings;
+			Settings = settings;
+			_logger = serviceProvider.GetRequiredService<ILogger<ToolUpdateMonitor>>();
+			_asyncDisposer = serviceProvider.GetRequiredService<IAsyncDisposer>();
+			_serviceProvider = serviceProvider;
 
-			LogFile = Path.Combine(DataDir, "Tools.log");
+			DirectoryReference.CreateDirectory(ToolsDir);
+			_enabledToolsFile = FileReference.Combine(ToolsDir, "tools.json");
 
-			Directory.CreateDirectory(ToolsDir);
+			if (FileReference.Exists(_enabledToolsFile))
+			{
+				try
+				{
+					Load();
+				}
+				catch (Exception ex)
+				{
+					_logger.LogError(ex, "Unable to read previous tools list: {Message}", ex.Message);
+				}
+			}
+			else
+			{
+				_readLegacyConfig = true;
+			}
 
-			WakeEvent = new AutoResetEvent(false);
+			_wakeEvent = new AsyncEvent();
 		}
 
 		public void Start()
 		{
-			if (DeploymentSettings.ToolsDepotPath != null)
-			{
-				WorkerThread = new Thread(() => PollForUpdates());
-				WorkerThread.Start();
-			}
-		}
-
-		public void Close()
-		{
-			bQuit = true;
-			WakeEvent.Set();
-
-			if (WorkerThread != null)
-			{
-				if (!WorkerThread.Join(30))
-				{
-					WorkerThread.Abort();
-					WorkerThread.Join();
-				}
-				WorkerThread = null;
-			}
+			_workerTask = Task.Run(() => PollForUpdatesAsync(_cancellationSource.Token));
 		}
 
 		public void Dispose()
 		{
-			Close();
-		}
+			OnChange = null;
 
-		string GetToolPathInternal(string ToolName)
-		{
-			return Path.Combine(ToolsDir, ToolName, "Current");
-		}
-
-		public string GetToolPath(string ToolName)
-		{
-			if (GetToolChange(ToolName) != 0)
+			if (_workerTask != null)
 			{
-				return GetToolPathInternal(ToolName);
+				_cancellationSource.Cancel();
+				_asyncDisposer.Add(_workerTask.ContinueWith(_ => _cancellationSource.Dispose(), TaskScheduler.Default));
+				_workerTask = null;
+			}
+		}
+
+		public IReadOnlyList<ToolInfo> GetTools()
+			=> _tools;
+
+		public IReadOnlyList<ToolInfo> GetEnabledTools()
+			=> _enabledTools;
+
+		DirectoryReference GetToolPathInternal(string toolName)
+		{
+			return DirectoryReference.Combine(ToolsDir, toolName, "Current");
+		}
+
+		public string? GetToolName(Guid toolId)
+		{
+			foreach (ToolInfo tool in _tools)
+			{
+				if (tool.Id == toolId)
+				{
+					return tool.Name;
+				}
+			}
+			return null;
+		}
+
+		public DirectoryReference? GetToolPath(string toolName)
+		{
+			IReadOnlyList<ToolInfo> enabledTools = _enabledTools;
+			if (enabledTools.Any(x => String.Equals(x.Name, toolName, StringComparison.OrdinalIgnoreCase)))
+			{
+				return GetToolPathInternal(toolName);
 			}
 			else
 			{
@@ -112,303 +183,465 @@ namespace UnrealGameSync
 
 		public void UpdateNow()
 		{
-			WakeEvent.Set();
+			_wakeEvent.Set();
 		}
 
-		void PollForUpdates()
+		async Task PollForUpdatesAsync(CancellationToken cancellationToken)
 		{
-			using (BoundedLogWriter Log = new BoundedLogWriter(LogFile))
+			while (!cancellationToken.IsCancellationRequested)
 			{
-				while (!bQuit)
-				{
-					try
-					{
-						PollForUpdatesOnce(Log);
-					}
-					catch
-					{
-					}
+				Task wakeTask = _wakeEvent.Task;
 
-					WakeEvent.WaitOne(TimeSpan.FromMinutes(60.0));
-				}
-			}
-		}
-
-		void PollForUpdatesOnce(TextWriter Log)
-		{
-			List<PerforceChangeSummary> Changes;
-			if (!Perforce.FindChanges(DeploymentSettings.ToolsDepotPath + "/...", 1, out Changes, Log) || Changes.Count == 0 || Changes[0].Number == LastChange)
-			{
-				return;
-			}
-
-			List<PerforceFileRecord> FileRecords;
-			if (!Perforce.Stat(DeploymentSettings.ToolsDepotPath + "/...", out FileRecords, Log))
-			{
-				return;
-			}
-
-			// Update the tools list
-			List<ToolDefinition> NewTools = new List<ToolDefinition>();
-			foreach (PerforceFileRecord FileRecord in FileRecords)
-			{
-				if (FileRecord.DepotPath.EndsWith(".ini"))
-				{
-					ToolDefinition Tool = Tools.FirstOrDefault(x => x.ConfigPath.Equals(FileRecord.DepotPath, StringComparison.Ordinal));
-					if (Tool == null || Tool.ConfigChange != FileRecord.HeadChange)
-					{
-						Tool = ReadToolDefinition(FileRecord.DepotPath, FileRecord.HeadChange, Log);
-					}
-					if (Tool != null)
-					{
-						NewTools.Add(Tool);
-					}
-				}
-			}
-			Tools = NewTools;
-
-			foreach (ToolDefinition Tool in Tools)
-			{
-				Tool.Enabled = Settings.EnabledTools.Contains(Tool.Id);
-
-				if(!Tool.Enabled)
-				{
-					continue;
-				}
-
-				List<PerforceFileRecord> ToolFileRecords = FileRecords.Where(x => x.DepotPath.Equals(Tool.ZipPath, StringComparison.OrdinalIgnoreCase)).ToList();
-				if (ToolFileRecords.Count == 0)
-				{
-					continue;
-				}
-
-				int HeadChange = ToolFileRecords.Max(x => x.HeadChange);
-				if (HeadChange == GetToolChange(Tool.Name))
-				{
-					continue;
-				}
-
-				List<PerforceFileRecord> SyncFileRecords = ToolFileRecords.Where(x => x.Action != "delete").ToList();
 				try
 				{
-					UpdateTool(Tool.Name, HeadChange, SyncFileRecords, Tool.InstallAction, Log);
+					await PollForUpdatesOnce(cancellationToken);
 				}
-				catch (Exception Ex)
+				catch (Exception ex)
 				{
-					Log.WriteLine("Exception while updating tool: {0}", Ex.ToString());
+					_logger.LogError(ex, "Exception while checking for tool updates");
 				}
-			}
 
-			foreach (ToolDefinition Tool in Tools)
+				Task delayTask = Task.Delay(TimeSpan.FromMinutes(60.0), cancellationToken);
+				await Task.WhenAny(delayTask, wakeTask);
+			}
+		}
+
+		async Task PollForUpdatesOnce(CancellationToken cancellationToken)
+		{
+			IPerforceConnection? perforce = null;
+			try
 			{
-				if (!Tool.Enabled && GetToolChange(Tool.Name) != 0)
+				// Update all the available tools
+				List<ToolInfo> tools = new List<ToolInfo>();
+				if (!String.IsNullOrEmpty(DeploymentSettings.Instance.ToolsDepotPath))
 				{
 					try
 					{
-						RemoveTool(Tool.Name, Tool.UninstallAction, Log);
+						perforce = await PerforceConnection.CreateAsync(PerforceSettings, _logger);
+						await ReadPerforceToolsAsync(perforce, tools, cancellationToken);
 					}
-					catch (Exception Ex)
+					catch (Exception ex) when (ex is not OperationCanceledException)
 					{
-						Log.WriteLine("Exception while removing tool: {0}", Ex.ToString());
+						_logger.LogWarning(ex, "Error while polling Perforce for available tools: {Message}", ex.Message);
+					}
+				}
+				using (HordeHttpClient? hordeHttpClient = _serviceProvider.GetService<HordeHttpClient>())
+				{
+					if (hordeHttpClient != null)
+					{
+						try
+						{
+							await ReadHordeToolsAsync(hordeHttpClient, tools, cancellationToken);
+						}
+						catch (Exception ex) when (ex is not OperationCanceledException)
+						{
+							_logger.LogWarning(ex, "Error while polling Horde for available tools: {Message}", ex.Message);
+						}
+					}
+				}
+				_tools = tools;
+
+				// When upgrading from older UGS versions, read the legacy sync CL from plain-text config files
+				if (_readLegacyConfig)
+				{
+					await ReadLegacyConfigAsync(tools, cancellationToken);
+					_readLegacyConfig = false;
+				}
+
+				// Find all the tools which are enabled, including those enabled due to dependencies from other tools
+				HashSet<Guid> enabledToolIds = new HashSet<Guid>();
+				FindEnabledTools(Settings.EnabledTools, tools, enabledToolIds);
+
+				// Install or update any new tools
+				bool hasChanged = false;
+				foreach (ToolInfo toolInfo in _tools)
+				{
+					if (enabledToolIds.Contains(toolInfo.Id))
+					{
+						ToolInfo? existingTool = _enabledTools.FirstOrDefault(x => x.Id == toolInfo.Id);
+						if (existingTool == null || !String.Equals(existingTool.Revision, toolInfo.Revision, StringComparison.OrdinalIgnoreCase))
+						{
+							await UpdateToolAsync(perforce, toolInfo, cancellationToken);
+							hasChanged = true;
+						}
+					}
+				}
+
+				// Remove any tools which we no longer need
+				for (int idx = _enabledTools.Count - 1; idx >= 0; idx--)
+				{
+					ToolInfo tool = _enabledTools[idx];
+					if (!enabledToolIds.Contains(tool.Id))
+					{
+						await RemoveToolAsync(tool, cancellationToken);
+						hasChanged = true;
+					}
+				}
+
+				// Notify the main window if anything changed
+				if (hasChanged)
+				{
+					_synchronizationContext.Post(_ => OnChange?.Invoke(), null);
+				}
+			}
+			finally
+			{
+				perforce?.Dispose();
+			}
+		}
+
+		static void FindEnabledTools(HashSet<Guid> inputToolIds, List<ToolInfo> tools, HashSet<Guid> enabledToolIds)
+		{
+			if (inputToolIds.Count > 0)
+			{
+				foreach (ToolInfo tool in tools)
+				{
+					if (inputToolIds.Contains(tool.Id) && enabledToolIds.Add(tool.Id))
+					{
+						FindEnabledTools(tool.DependsOnToolIds, tools, enabledToolIds);
 					}
 				}
 			}
-
-			OnChange();
 		}
 
-		ToolDefinition ReadToolDefinition(string DepotPath, int Change, TextWriter Log)
+		async Task ReadPerforceToolsAsync(IPerforceConnection perforce, List<ToolInfo> tools, CancellationToken cancellationToken)
 		{
-			List<string> Lines;
-			if (!Perforce.Print(String.Format("{0}@{1}", DepotPath, Change), out Lines, Log))
+			List<ChangesRecord> changes = await perforce.GetChangesAsync(ChangesOptions.None, 1, ChangeStatus.Submitted, $"{DeploymentSettings.Instance.ToolsDepotPath}/...", cancellationToken);
+			if (changes.Count > 0 && changes[0].Number != _perforceToolsChange)
+			{
+				Dictionary<string, ToolInfo> newPerforceTools = new Dictionary<string, ToolInfo>(StringComparer.Ordinal);
+
+				List<FStatRecord> fileRecords = await perforce.FStatAsync($"{DeploymentSettings.Instance.ToolsDepotPath}/...", cancellationToken).ToListAsync(cancellationToken);
+				fileRecords.RemoveAll(x => x.Action == FileAction.Delete || x.Action == FileAction.MoveDelete);
+
+				foreach (FStatRecord fileRecord in fileRecords)
+				{
+					if (fileRecord.DepotFile != null && fileRecord.DepotFile.EndsWith(".ini", StringComparison.OrdinalIgnoreCase))
+					{
+						string zipFile = fileRecord.DepotFile.Substring(0, fileRecord.DepotFile.Length - 4) + ".zip";
+						FStatRecord? zipRecord = fileRecords.FirstOrDefault(x => String.Equals(x.DepotFile, zipFile, StringComparison.OrdinalIgnoreCase));
+
+						if (zipRecord != null)
+						{
+							string toolRevision = $"{zipFile}@{Math.Max(fileRecord.HeadChange, zipRecord.HeadChange)}";
+
+							ToolInfo? toolInfo;
+							if (!_perforceTools.TryGetValue(toolRevision, out toolInfo))
+							{
+								toolInfo = await ReadToolDefinitionAsync(perforce, $"{fileRecord.DepotFile}@{fileRecord.HeadChange}", toolRevision, cancellationToken);
+							}
+							if (toolInfo != null)
+							{
+								newPerforceTools.Add(toolRevision, toolInfo);
+							}
+						}
+					}
+				}
+
+				_perforceTools = newPerforceTools;
+				_perforceToolsChange = changes[0].Number;
+			}
+
+			tools.AddRange(_perforceTools.Values);
+		}
+
+		static async Task ReadHordeToolsAsync(HordeHttpClient hordeHttpClient, List<ToolInfo> tools, CancellationToken cancellationToken)
+		{
+			GetToolsSummaryResponse toolsResponse = await hordeHttpClient.GetToolsAsync(cancellationToken);
+			foreach (GetToolSummaryResponse toolResponse in toolsResponse.Tools)
+			{
+				if (toolResponse.ShowInUgs)
+				{
+					IoHash hash = IoHash.Compute(Encoding.UTF8.GetBytes($"horde:{toolResponse.Id}"));
+					Guid guid = new Guid(hash.ToByteArray().AsSpan(0, 16));
+					ToolInfo toolInfo = new ToolInfo(guid, toolResponse.Id.ToString(), toolResponse.Name, $"{hordeHttpClient},{toolResponse.Id},{toolResponse.DeploymentId}");
+					tools.Add(toolInfo);
+				}
+			}
+		}
+
+		static async Task<ToolInfo?> ReadToolDefinitionAsync(IPerforceConnection perforce, string iniRevision, string toolRevision, CancellationToken cancellationToken)
+		{
+			PerforceResponse<PrintRecord<string[]>> response = await perforce.TryPrintLinesAsync(iniRevision, cancellationToken);
+			if (!response.Succeeded || response.Data.Contents == null)
 			{
 				return null;
 			}
 
-			int NameIdx = DepotPath.LastIndexOf('/') + 1;
-			int ExtensionIdx = DepotPath.LastIndexOf('.');
+			int nameIdx = iniRevision.LastIndexOf('/') + 1;
+			int extensionIdx = iniRevision.LastIndexOf('.');
+			string defaultToolName = iniRevision.Substring(nameIdx, extensionIdx - nameIdx);
 
-			ConfigFile ConfigFile = new ConfigFile();
-			ConfigFile.Parse(Lines.ToArray());
+			return ParseToolInfo(response.Data.Contents, defaultToolName, toolRevision);
+		}
 
-			ToolDefinition Tool = new ToolDefinition();
+		static ToolInfo? ParseToolInfo(string[] contents, string defaultToolName, string revision)
+		{
+			ConfigFile configFile = new ConfigFile();
+			configFile.Parse(contents);
 
-			string Id = ConfigFile.GetValue("Settings.Id", null);
-			if (Id == null || !Guid.TryParse(Id, out Tool.Id))
+			string? id = configFile.GetValue("Settings.Id", null);
+			if (id == null || !Guid.TryParse(id, out Guid toolId))
 			{
 				return null;
 			}
 
-			Tool.Name = ConfigFile.GetValue("Settings.Name", DepotPath.Substring(NameIdx, ExtensionIdx - NameIdx));
-			Tool.Description = ConfigFile.GetValue("Settings.Description", Tool.Name);
-			Tool.ZipPath = DepotPath.Substring(0, ExtensionIdx) + ".zip";
-			Tool.ZipChange = GetToolChange(Tool.Name);
-			Tool.ConfigPath = DepotPath;
-			Tool.ConfigChange = Change;
+			string toolName = configFile.GetValue("Settings.Name", defaultToolName);
+			string toolDescription = configFile.GetValue("Settings.Description", toolName);
 
-			string InstallCommand = ConfigFile.GetValue("Settings.InstallCommand", null);
-			if (!String.IsNullOrEmpty(InstallCommand))
+			ToolInfo tool = new ToolInfo(toolId, toolName, toolDescription, revision);
+			tool.Settings = new ToolSettings();
+			tool.Settings.InstallCommand = configFile.GetValue("Settings.InstallCommand", null);
+			tool.Settings.UninstallCommand = configFile.GetValue("Settings.UninstallCommand", null);
+			tool.Settings.SafeWhenBusy = configFile.GetValue("Settings.SafeWhenBusy", false);
+
+			foreach (string line in configFile.GetValues("Settings.DependsOnTool", Array.Empty<string>()))
 			{
-				Tool.InstallAction = NewLog => RunCommand(Tool.Name, InstallCommand, NewLog);
-			}
-
-			string UninstallCommand = ConfigFile.GetValue("Settings.UninstallCommand", null);
-			if (!String.IsNullOrEmpty(UninstallCommand))
-			{
-				Tool.UninstallAction = NewLog => RunCommand(Tool.Name, UninstallCommand, NewLog);
-			}
-
-			string[] StatusPanelLinks = ConfigFile.GetValues("Settings.StatusPanelLinks", new string[0]);
-			foreach (string StatusPanelLink in StatusPanelLinks)
-			{
-				ConfigObject Object = new ConfigObject(StatusPanelLink);
-
-				string Label = Object.GetValue("Label", null);
-				string FileName = Object.GetValue("FileName", null);
-
-				if (Label != null && FileName != null)
+				if (Guid.TryParse(line.Trim(), out Guid requiredToolId))
 				{
-					ToolLink Link = new ToolLink();
-					Link.Label = Label;
-					Link.FileName = FileName;
-					Link.Arguments = Object.GetValue("Arguments", null);
-					Link.WorkingDir = Object.GetValue("WorkingDir", null);
-					Tool.StatusPanelLinks.Add(Link);
+					tool.DependsOnToolIds.Add(requiredToolId);
 				}
 			}
 
-			return Tool;
-		}
-
-		void RunCommand(string ToolName, string Command, TextWriter Log)
-		{
-			string ToolPath = GetToolPathInternal(ToolName);
-
-			string CommandExe = Command;
-			string CommandArgs = string.Empty;
-
-			int SpaceIdx = Command.IndexOf(' ');
-			if (SpaceIdx != -1)
+			string[] statusPanelLinks = configFile.GetValues("Settings.StatusPanelLinks", Array.Empty<string>());
+			foreach (string statusPanelLink in statusPanelLinks)
 			{
-				CommandExe = Command.Substring(0, SpaceIdx);
-				CommandArgs = Command.Substring(SpaceIdx + 1);
-			}
+				ConfigObject obj = new ConfigObject(statusPanelLink);
 
-			int ExitCode = Utility.ExecuteProcess(Path.Combine(ToolPath, CommandExe), ToolPath, CommandArgs, null, Log);
-			Log.WriteLine("(Exit: {0})", ExitCode);
-		}
+				string? label = obj.GetValue("Label", null);
+				string? fileName = obj.GetValue("FileName", null);
 
-		void RemoveTool(string ToolName, Action<TextWriter> UninstallAction, TextWriter Log)
-		{
-			Log.WriteLine("Removing {0}", ToolName);
-
-			if (UninstallAction != null)
-			{
-				Log.WriteLine("Running uninstall...");
-				UninstallAction?.Invoke(Log);
-			}
-
-			SetToolChange(ToolName, null);
-
-			string ToolPath = GetToolPath(ToolName);
-			if (ToolPath != null)
-			{
-				Log.WriteLine("Removing {0}", ToolPath);
-				TryDeleteDirectory(ToolPath);
-			}
-		}
-
-		static void ForceDeleteDirectory(string DirectoryName)
-		{
-			DirectoryInfo BaseDir = new DirectoryInfo(DirectoryName);
-			if (BaseDir.Exists)
-			{
-				foreach (FileInfo File in BaseDir.EnumerateFiles("*", SearchOption.AllDirectories))
+				if (label != null && fileName != null)
 				{
-					File.Attributes = FileAttributes.Normal;
+					ToolLink link = new ToolLink(label, fileName);
+					link.Arguments = obj.GetValue("Arguments", null);
+					link.WorkingDir = obj.GetValue("WorkingDir", null);
+					tool.Settings.StatusPanelLinks.Add(link);
 				}
-				BaseDir.Delete(true);
 			}
+
+			return tool;
 		}
 
-		static bool TryDeleteDirectory(string DirectoryName)
+		async Task RunCommandAsync(string toolName, string command, CancellationToken cancellationToken)
+		{
+			DirectoryReference toolPath = GetToolPathInternal(toolName);
+
+			string commandExe = command;
+			string commandArgs = String.Empty;
+
+			int spaceIdx = command.IndexOf(' ', StringComparison.Ordinal);
+			if (spaceIdx != -1)
+			{
+				commandExe = command.Substring(0, spaceIdx);
+				commandArgs = command.Substring(spaceIdx + 1);
+			}
+
+			int exitCode = await Utility.ExecuteProcessAsync(FileReference.Combine(toolPath, commandExe).FullName, toolPath.FullName, commandArgs, line => _logger.LogInformation("{ToolName}> {Line}", toolName, line), cancellationToken);
+			_logger.LogInformation("{ToolName}> Exit code {ExitCode})", toolName, exitCode);
+		}
+
+		async Task RemoveToolAsync(ToolInfo tool, CancellationToken cancellationToken)
 		{
 			try
 			{
-				ForceDeleteDirectory(DirectoryName);
+				_logger.LogInformation("Removing {ToolName}", tool.Name);
+				DirectoryReference? toolPath = GetToolPath(tool.Name);
+
+				if (!String.IsNullOrEmpty(tool.Settings?.UninstallCommand))
+				{
+					_logger.LogInformation("Running unininstall action: {Command}", tool.Settings.UninstallCommand);
+					await RunCommandAsync(tool.Name, tool.Settings.UninstallCommand, cancellationToken);
+				}
+
+				await SetToolRevisionAsync(tool.Name, null, cancellationToken);
+
+				if (toolPath != null)
+				{
+					_logger.LogInformation("Removing {ToolPath}", toolPath);
+					TryDeleteDirectory(toolPath);
+				}
+
+				_logger.LogInformation("{ToolName} has been removed successfully", tool.Name);
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, "Exception while removing tool {ToolId}: {Message}", tool.Id, ex.Message);
+			}
+		}
+
+		static void ForceDeleteDirectory(DirectoryReference directoryName)
+		{
+			DirectoryInfo baseDir = directoryName.ToDirectoryInfo();
+			if (baseDir.Exists)
+			{
+				foreach (FileInfo file in baseDir.EnumerateFiles("*", SearchOption.AllDirectories))
+				{
+					file.Attributes = FileAttributes.Normal;
+				}
+				baseDir.Delete(true);
+			}
+		}
+
+		bool TryDeleteDirectory(DirectoryReference directoryName)
+		{
+			try
+			{
+				ForceDeleteDirectory(directoryName);
 				return true;
 			}
-			catch
+			catch (Exception ex)
 			{
+				_logger.LogWarning(ex, "Unable to delete directory {DirectoryName}", directoryName);
 				return false;
 			}
 		}
 
-		bool UpdateTool(string ToolName, int Change, List<PerforceFileRecord> Records, Action<TextWriter> InstallAction, TextWriter Log)
-		{
-			string ToolDir = Path.Combine(ToolsDir, ToolName);
-			Directory.CreateDirectory(ToolDir);
-
-			foreach (DirectoryInfo ExistingDir in new DirectoryInfo(ToolDir).EnumerateDirectories("Prev-*"))
-			{
-				TryDeleteDirectory(ExistingDir.FullName);
-			}
-
-			string NextToolDir = Path.Combine(ToolDir, "Next");
-			ForceDeleteDirectory(NextToolDir);
-			Directory.CreateDirectory(NextToolDir);
-
-			string NextToolZipsDir = Path.Combine(NextToolDir, ".zips");
-			Directory.CreateDirectory(NextToolZipsDir);
-
-			for (int Idx = 0; Idx < Records.Count; Idx++)
-			{
-				string ZipFile = Path.Combine(NextToolZipsDir, String.Format("{0}.{1}.zip", ToolName, Idx));
-				if (!Perforce.PrintToFile(String.Format("{0}#{1}", Records[Idx].DepotPath, Records[Idx].HeadRevision), ZipFile, Log) || !File.Exists(ZipFile))
-				{
-					Log.WriteLine("Unable to print {0}", Records[Idx].DepotPath);
-					return false;
-				}
-				ArchiveUtils.ExtractFiles(ZipFile, NextToolDir, null, new ProgressValue(), Log);
-			}
-
-			SetToolChange(ToolName, null);
-
-			string CurrentToolDir = Path.Combine(ToolDir, "Current");
-			if (Directory.Exists(CurrentToolDir))
-			{
-				string PrevDirectoryName = Path.Combine(ToolDir, String.Format("Prev-{0:X16}", Stopwatch.GetTimestamp()));
-				Directory.Move(CurrentToolDir, PrevDirectoryName);
-				TryDeleteDirectory(PrevDirectoryName);
-			}
-
-			Directory.Move(NextToolDir, CurrentToolDir);
-
-			if (InstallAction != null)
-			{
-				Log.WriteLine("Running installer...");
-				InstallAction.Invoke(Log);
-			}
-
-			SetToolChange(ToolName, Change);
-			return true;
-		}
-
-		string GetConfigFilePath(string ToolName)
-		{
-			return Path.Combine(ToolsDir, ToolName, ToolName + ".ini");
-		}
-
-		int GetToolChange(string ToolName)
+		async Task<bool> UpdateToolAsync(IPerforceConnection? perforce, ToolInfo tool, CancellationToken cancellationToken)
 		{
 			try
 			{
-				string ConfigFilePath = GetConfigFilePath(ToolName);
-				if (File.Exists(ConfigFilePath))
+				DirectoryReference toolDir = DirectoryReference.Combine(ToolsDir, tool.Name);
+				DirectoryReference.CreateDirectory(toolDir);
+
+				foreach (DirectoryReference existingDir in DirectoryReference.EnumerateDirectories(toolDir, "Prev-*"))
 				{
-					ConfigFile ConfigFile = new ConfigFile();
-					ConfigFile.Load(ConfigFilePath);
-					return ConfigFile.GetValue("Settings.Change", 0);
+					TryDeleteDirectory(existingDir);
+				}
+
+				DirectoryReference nextToolDir = DirectoryReference.Combine(toolDir, "Next");
+				ForceDeleteDirectory(nextToolDir);
+				DirectoryReference.CreateDirectory(nextToolDir);
+
+				DirectoryReference nextToolZipsDir = DirectoryReference.Combine(nextToolDir, ".zips");
+				DirectoryReference.CreateDirectory(nextToolZipsDir);
+
+				FileReference zipFile = FileReference.Combine(nextToolZipsDir, $"{tool.Name}.zip");
+				if (perforce != null && tool.Revision.StartsWith("//", StringComparison.Ordinal))
+				{
+					// Read it from Perforce
+					PerforceResponseList<PrintRecord> response = await perforce.TryPrintAsync(zipFile.FullName, tool.Revision, cancellationToken);
+					if (!response.Succeeded || !FileReference.Exists(zipFile))
+					{
+						_logger.LogError("Unable to print {DepotFile}", tool.Revision);
+						return false;
+					}
+					ArchiveUtils.ExtractFiles(zipFile, nextToolDir, null, new ProgressValue(), _logger);
+				}
+				else
+				{
+					using HordeHttpClient? hordeHttpClient = _serviceProvider.GetService<HordeHttpClient>();
+					if (hordeHttpClient != null)
+					{
+						string[] fields = tool.Revision.Split(',');
+						if (fields.Length != 3)
+						{
+							_logger.LogError("Unexpected format for Horde revision ('{Revision}')", tool.Revision);
+							return false;
+						}
+
+						using (FileStream stream = FileReference.Open(zipFile, FileMode.Create, FileAccess.Write, FileShare.None))
+						{
+							await using Stream sourceStream = await hordeHttpClient.GetToolDeploymentZipAsync(new ToolId(fields[1]), new ToolDeploymentId(BinaryId.Parse(fields[2])), cancellationToken);
+							await sourceStream.CopyToAsync(stream, cancellationToken);
+						}
+
+						ArchiveUtils.ExtractFiles(zipFile, nextToolDir, null, new ProgressValue(), _logger);
+
+						FileReference settingsFile = FileReference.Combine(nextToolDir, "UgsTool.json");
+						if (FileReference.Exists(settingsFile))
+						{
+							byte[] data = await FileReference.ReadAllBytesAsync(settingsFile, cancellationToken);
+							tool.Settings = JsonSerializer.Deserialize<ToolSettings>(data, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? tool.Settings;
+						}
+					}
+					else
+					{
+						_logger.LogError("Unknown source for {Revision}", tool.Revision);
+						return false;
+					}
+				}
+
+				DirectoryReference currentToolDir = DirectoryReference.Combine(toolDir, "Current");
+				if (DirectoryReference.Exists(currentToolDir))
+				{
+					DirectoryReference prevDirectoryName = DirectoryReference.Combine(toolDir, String.Format("Prev-{0:X16}", Stopwatch.GetTimestamp()));
+					Directory.Move(currentToolDir.FullName, prevDirectoryName.FullName);
+					await SetToolRevisionAsync(tool.Name, null, cancellationToken);
+					TryDeleteDirectory(prevDirectoryName);
+				}
+
+				Directory.Move(nextToolDir.FullName, currentToolDir.FullName);
+
+				if (!String.IsNullOrEmpty(tool.Settings?.InstallCommand))
+				{
+					_logger.LogInformation("Running install action: {Command}", tool.Settings.InstallCommand);
+					await RunCommandAsync(tool.Name, tool.Settings.InstallCommand, cancellationToken);
+				}
+
+				await SetToolRevisionAsync(tool.Name, tool, cancellationToken);
+				_logger.LogInformation("Updated {ToolName} to {Revision}", tool.Name, tool.Revision);
+				return true;
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, "Exception while updating tool: {Message}", ex.Message);
+				return false;
+			}
+		}
+
+		FileReference GetConfigFilePath(string toolName)
+		{
+			return FileReference.Combine(ToolsDir, toolName, toolName + ".ini");
+		}
+
+		async Task ReadLegacyConfigAsync(IReadOnlyList<ToolInfo> tools, CancellationToken cancellationToken)
+		{
+			try
+			{
+				List<FileReference> deleteFiles = new List<FileReference>();
+
+				List<ToolInfo> enabledTools = new List<ToolInfo>();
+				foreach (ToolInfo tool in tools)
+				{
+					int change = GetToolChange(tool.Name);
+					if (change != 0)
+					{
+						int atIdx = tool.Revision.LastIndexOf('@');
+						if (atIdx != -1)
+						{
+							ToolInfo clone = tool.Clone();
+							clone.Revision = tool.Revision.Substring(0, atIdx + 1) + change.ToString();
+							enabledTools.Add(clone);
+
+							deleteFiles.Add(GetConfigFilePath(tool.Name));
+						}
+					}
+				}
+
+				await SaveAsync(enabledTools, cancellationToken);
+
+				foreach (FileReference deleteFile in deleteFiles)
+				{
+					FileReference.Delete(deleteFile);
+				}
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, "Unable to upgrade tools from legacy config format: {Message}", ex.Message);
+			}
+		}
+
+		int GetToolChange(string toolName)
+		{
+			try
+			{
+				FileReference configFilePath = GetConfigFilePath(toolName);
+				if (FileReference.Exists(configFilePath))
+				{
+					ConfigFile configFile = new ConfigFile();
+					configFile.Load(configFilePath);
+					return configFile.GetValue("Settings.Change", 0);
 				}
 			}
 			catch
@@ -417,19 +650,61 @@ namespace UnrealGameSync
 			return 0;
 		}
 
-		void SetToolChange(string ToolName, int? Change)
+		async Task SetToolRevisionAsync(string toolName, ToolInfo? toolInfo, CancellationToken cancellationToken)
 		{
-			string ConfigFilePath = GetConfigFilePath(ToolName);
-			if (Change.HasValue)
+			List<ToolInfo> enabledTools = new List<ToolInfo>(_enabledTools);
+
+			int toolIndex = enabledTools.FindIndex(x => String.Equals(x.Name, toolName, StringComparison.OrdinalIgnoreCase));
+			if (toolIndex != -1)
 			{
-				ConfigFile ConfigFile = new ConfigFile();
-				ConfigFile.SetValue("Settings.Change", Change.Value);
-				ConfigFile.Save(ConfigFilePath);
+				if (toolInfo == null)
+				{
+					enabledTools.RemoveAt(toolIndex);
+				}
 			}
 			else
 			{
-				File.Delete(ConfigFilePath);
+				if (toolInfo != null)
+				{
+					enabledTools.Add(toolInfo);
+				}
 			}
+
+			await SaveAsync(enabledTools, cancellationToken);
+			_enabledTools = enabledTools;
+		}
+
+		class State
+		{
+			public List<ToolInfo> Tools { get; set; } = new List<ToolInfo>();
+		}
+
+		void Load()
+		{
+			if (FileReference.Exists(_enabledToolsFile))
+			{
+				byte[]? data = FileTransaction.ReadAllBytes(_enabledToolsFile);
+				if (data != null)
+				{
+					State? state = JsonSerializer.Deserialize<State>(data, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+					if (state != null)
+					{
+						_enabledTools = state.Tools;
+					}
+				}
+			}
+		}
+
+		async Task SaveAsync(List<ToolInfo> enabledTools, CancellationToken cancellationToken)
+		{
+			JsonSerializerOptions options = new JsonSerializerOptions();
+			options.DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull;
+			options.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+			options.WriteIndented = true;
+
+			State state = new State { Tools = enabledTools };
+			byte[] data = JsonSerializer.SerializeToUtf8Bytes(state, options);
+			await FileTransaction.WriteAllBytesAsync(_enabledToolsFile, data, cancellationToken);
 		}
 	}
 }

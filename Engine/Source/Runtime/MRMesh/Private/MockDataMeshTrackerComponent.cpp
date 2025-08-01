@@ -9,6 +9,8 @@
 #endif
 #include "MRMeshComponent.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MockDataMeshTrackerComponent)
+
 
 
 class FMockDataMeshTrackerImpl
@@ -127,7 +129,7 @@ public:
 		
 		IMRMesh::FBrickId BrickId = 0;
 		TArray<FVector> OffsetVertices;
-		TArray<FVector> WorldVertices;
+		TArray<FVector3f> WorldVertices;
 		TArray<FVector> Normals;
 		TArray<FVector2D> UV0;
 		TArray<FColor> VertexColors;
@@ -135,9 +137,15 @@ public:
 		TArray<MRMESH_INDEX_TYPE> Triangles;
 		TArray<float> Confidence;
 
+		// Disconnect this FCachedMeshData so if it is deleted after FMockDataMeshTrackerImpl is deleted it does not try to call back in to add itself to the free list.
+		void Disconnect()
+		{
+			Owner = nullptr;
+		}
+
+		// Reset this FCachedMeshData so that it can be reused later.
 		void Recycle(SharedPtr& MeshData)
 		{
-			check(Owner);
 			FMockDataMeshTrackerImpl* TempOwner = Owner;
 			Owner = nullptr;
 	
@@ -151,7 +159,10 @@ public:
 			Tangents.Reset();
 			Confidence.Reset();
 	
-			TempOwner->FreeMeshDataCache(MeshData);
+			if (TempOwner)
+			{
+				TempOwner->FreeMeshDataCache(MeshData);
+			}
 		}
 
 		void Init(FMockDataMeshTrackerImpl* InOwner)
@@ -183,7 +194,7 @@ public:
 		if (FreeCachedMeshDatas.Num() > 0)
 		{
 			FScopeLock ScopeLock(&FreeCachedMeshDatasMutex);
-			FCachedMeshData::SharedPtr CachedMeshData(FreeCachedMeshDatas.Pop(false));
+			FCachedMeshData::SharedPtr CachedMeshData(FreeCachedMeshDatas.Pop(EAllowShrinking::No));
 			CachedMeshData->Init(this);
 			return CachedMeshData;
 		}
@@ -208,6 +219,18 @@ public:
 	bool Create(const UMockDataMeshTrackerComponent& MeshTrackerComponent)
 	{
 		return true;
+	}
+
+	void BeginDestroy()
+	{
+		// Drop all the CachedMeshDatas references so that they will be destroyed unless a receipt is still hanging onto them.
+		// Disconnect them so that they do not try to call back into this to be put in the FreeCachedMeshDatas array.
+		for (FCachedMeshData::SharedPtr& Data : CachedMeshDatas)
+		{
+			Data->Disconnect();
+		}
+		CachedMeshDatas.Empty();
+		FreeCachedMeshDatas.Empty();
 	}
 
 	void Destroy()
@@ -392,7 +415,7 @@ void UMockDataMeshTrackerComponent::RemoveBlock(int32 BlockIndex)
 	// Delete the brick and its cache entry
 	if (Impl->MeshBrickCache.Contains(BlockIndex))
 	{
-		const static TArray<FVector> EmptyVertices;
+		const static TArray<FVector3f> EmptyVertices;
 		const static TArray<FVector2D> EmptyUVs;
 		const static TArray<FPackedNormal> EmptyTangents;
 		const static TArray<FColor> EmptyVertexColors;
@@ -425,9 +448,11 @@ void UMockDataMeshTrackerComponent::RemoveBlock(int32 BlockIndex)
 void UMockDataMeshTrackerComponent::UpdateBlock(int32 BlockIndex)
 {
 	// Create a brick index for any new mesh block
+	bool bBlockIsNew = false;
 	if (!Impl->MeshBrickCache.Contains(BlockIndex))
 	{
 		Impl->MeshBrickCache.Add(BlockIndex, Impl->MeshBrickIndex++);
+		bBlockIsNew = true;
 	}
 
 	const FMockDataMeshTrackerImpl::FRawMockMeshData& RawMeshData = Impl->RawMockMeshData[BlockIndex];
@@ -438,14 +463,15 @@ void UMockDataMeshTrackerComponent::UpdateBlock(int32 BlockIndex)
 	CurrentMeshDataCache->BrickId = BrickId;
 
 	// Pull vertices
+	const FVector UpdateShiftVector = bBlockIsNew ? FVector::ZeroVector : FVector(0.0f, 0.0f, 15.0f);  // when we update we will shift the verts up a little, so we can see that something happened.
 	const FVector VertexOffset = FVector::ZeroVector; // If this was the inverse of the worldToTrackingTransform position the mesh would be located in tracker space, but we don't want a dependency on HMD here.  
 	const int32 VertexCount = RawMeshData.Vertices.Num();
 	CurrentMeshDataCache->OffsetVertices.Reserve(VertexCount);
 	CurrentMeshDataCache->WorldVertices.Reserve(VertexCount);
 	for (int32 v = 0; v < VertexCount; ++ v)
 	{
-			CurrentMeshDataCache->OffsetVertices.Add(RawMeshData.Vertices[v] - VertexOffset);
-			CurrentMeshDataCache->WorldVertices.Add(RawMeshData.Vertices[v]);
+			CurrentMeshDataCache->OffsetVertices.Add(RawMeshData.Vertices[v] - VertexOffset + UpdateShiftVector);
+			CurrentMeshDataCache->WorldVertices.Add(FVector3f(RawMeshData.Vertices[v] + UpdateShiftVector));
 	}
 
 	// Pull indices
@@ -592,7 +618,7 @@ void UMockDataMeshTrackerComponent::UpdateBlock(int32 BlockIndex)
 			// Hack because blueprints don't support uint32.
 			TArray<int32> Triangles(reinterpret_cast<const int32*>(CurrentMeshDataCache->
 				Triangles.GetData()), CurrentMeshDataCache->Triangles.Num());
-			OnMeshTrackerUpdated.Broadcast(CurrentMeshDataCache->BrickId, CurrentMeshDataCache->OffsetVertices,
+			OnMeshTrackerUpdated.Broadcast((int32)CurrentMeshDataCache->BrickId, CurrentMeshDataCache->OffsetVertices,
 				Triangles, CurrentMeshDataCache->Normals, CurrentMeshDataCache->Confidence);
 		}
 	}
@@ -600,6 +626,8 @@ void UMockDataMeshTrackerComponent::UpdateBlock(int32 BlockIndex)
 
 void UMockDataMeshTrackerComponent::BeginDestroy()
 {
+	Impl->BeginDestroy();
+
 	if (MRMesh != nullptr)
 	{
 		DisconnectMRMesh(MRMesh);
@@ -625,3 +653,4 @@ void UMockDataMeshTrackerComponent::PrePIEEnded(bool bWasSimulatingInEditor)
 	Impl->Destroy();
 }
 #endif
+

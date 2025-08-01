@@ -8,6 +8,10 @@
 #include "VisualLogger/VisualLogger.h"
 #include "EnvironmentQuery/EnvQuery.h"
 #include "EnvironmentQuery/EnvQueryManager.h"
+#include "BehaviorTree/BlackboardComponent.h"
+#include "AISystem.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BTTask_RunEQSQuery)
 
 
 UBTTask_RunEQSQuery::UBTTask_RunEQSQuery(const FObjectInitializer& ObjectInitializer) 
@@ -23,6 +27,8 @@ UBTTask_RunEQSQuery::UBTTask_RunEQSQuery(const FObjectInitializer& ObjectInitial
 	}
 
 	QueryFinishedDelegate = FQueryFinishedSignature::CreateUObject(this, &UBTTask_RunEQSQuery::OnQueryFinished);
+
+	bUpdateBBOnFail = GET_AI_CONFIG_VAR(bClearBBEntryOnBTEQSFail);
 
 	// deprecated
 	EQSQueryBlackboardKey.AddObjectFilter(this, GET_MEMBER_NAME_CHECKED(UBTTask_RunEQSQuery, EQSQueryBlackboardKey), UEnvQuery::StaticClass());
@@ -98,6 +104,16 @@ uint16 UBTTask_RunEQSQuery::GetInstanceMemorySize() const
 	return sizeof(FBTEnvQueryTaskMemory);
 }
 
+void UBTTask_RunEQSQuery::InitializeMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryInit::Type InitType) const
+{
+	InitializeNodeMemory<FBTEnvQueryTaskMemory>(NodeMemory, InitType);
+}
+
+void UBTTask_RunEQSQuery::CleanupMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryClear::Type CleanupType) const
+{
+	CleanupNodeMemory<FBTEnvQueryTaskMemory>(NodeMemory, CleanupType);
+}
+
 void UBTTask_RunEQSQuery::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 {
 	if (Result->IsAborted())
@@ -118,7 +134,7 @@ void UBTTask_RunEQSQuery::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 		return;
 	}
 
-	bool bSuccess = (Result->Items.Num() >= 1);
+	bool bSuccess = Result->IsSuccessful() && (Result->Items.Num() >= 1);
 	if (bSuccess)
 	{
 		UBlackboardComponent* MyBlackboard = MyComp->GetBlackboardComponent();
@@ -131,6 +147,12 @@ void UBTTask_RunEQSQuery::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 				*UEnvQueryTypes::GetShortTypeName(Result->ItemType).ToString(),
 				*UBehaviorTreeTypes::GetShortTypeName(BlackboardKey.SelectedKeyType));
 		}
+	}
+	else if (bUpdateBBOnFail)
+	{
+		UBlackboardComponent* MyBlackboard = MyComp->GetBlackboardComponent();
+		check(MyBlackboard);
+		MyBlackboard->ClearValue(BlackboardKey.GetSelectedKeyID());
 	}
 
 	FAIMessage::Send(MyComp, FAIMessage(UBrainComponent::AIMessage_QueryFinished, this, Result->QueryID, bSuccess));
@@ -184,3 +206,4 @@ FName UBTTask_RunEQSQuery::GetNodeIconName() const
 }
 
 #endif
+

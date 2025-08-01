@@ -15,8 +15,8 @@ public class StatsViewer : ModuleRules
 				"InputCore",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
 				"RHI",
+				"EditorFramework",
 				"UnrealEd",
 				"Landscape"
 			}
@@ -25,21 +25,12 @@ public class StatsViewer : ModuleRules
         PrivateIncludePathModuleNames.AddRange(
 			new string[] {
                 "PropertyEditor",
-				"Landscape"
 			}
 		);
 
 		DynamicallyLoadedModuleNames.AddRange(
 			new string[] {
 				"PropertyEditor"
-			}
-		);
-
-        PrivateIncludePaths.AddRange(
-            new string[] {
-                "Editor/StatsViewer/Private",
-				"Editor/StatsViewer/Private/StatsPages",
-                "Editor/StatsViewer/Private/StatsEntries"
 			}
 		);
 	}

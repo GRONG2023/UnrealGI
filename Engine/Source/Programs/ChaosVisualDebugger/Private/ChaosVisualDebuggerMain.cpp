@@ -19,8 +19,6 @@ void InitializedSlateApplication()
 	// crank up a normal Slate application using the platform's standalone renderer
 	FSlateApplication::InitializeAsStandaloneApplication(GetStandardStandaloneRenderer());
 
-	FSlateApplication::Get().EnableMenuAnimations(false);
-
 	// Set the application name.
 	const FText ApplicationTitle = NSLOCTEXT("ChaosVisualDebugger", "AppTitle", "ChaosVisualDebugger");
 	FGlobalTabmanager::Get()->SetApplicationTitle(ApplicationTitle);
@@ -127,7 +125,7 @@ int32 ChaosVisualDebuggerMain(const TCHAR* CommandLine)
 	{
 		FTaskGraphInterface::Get().ProcessThreadUntilIdle(ENamedThreads::GameThread);
 		FStats::AdvanceFrame(false);
-		FTicker::GetCoreTicker().Tick(FApp::GetDeltaTime());
+		FTSTicker::GetCoreTicker().Tick(FApp::GetDeltaTime());
 		FSlateApplication::Get().PumpMessages();
 		FSlateApplication::Get().Tick();
 		FPlatformProcess::Sleep(0);
@@ -135,7 +133,9 @@ int32 ChaosVisualDebuggerMain(const TCHAR* CommandLine)
 
 	FCoreDelegates::OnExit.Broadcast();
 	FSlateApplication::Shutdown();
+	FEngineLoop::AppPreExit();
 	FModuleManager::Get().UnloadModulesAtShutdown();
+	FEngineLoop::AppExit();
 
 	return 0;
 } 

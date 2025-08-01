@@ -9,14 +9,14 @@
 #include "Framework/Application/SlateApplication.h"
 #include "Types/InvisibleToWidgetReflectorMetaData.h"
 
-static float VectorSign(const FVector2D& Vec, const FVector2D& A, const FVector2D& B)
+static float VectorSign(const FVector2f& Vec, const FVector2f& A, const FVector2f& B)
 {
 	return FMath::Sign((B.X - A.X) * (Vec.Y - A.Y) - (B.Y - A.Y) * (Vec.X - A.X));
 }
 
 // Returns true when the point is inside the triangle
 // Should not return true when the point is on one of the edges
-static bool IsPointInTriangle(const FVector2D& TestPoint, const FVector2D& A, const FVector2D& B, const FVector2D& C)
+static bool IsPointInTriangle(const FVector2f& TestPoint, const FVector2f& A, const FVector2f& B, const FVector2f& C)
 {
 	float BA = VectorSign(B, A, TestPoint);
 	float CB = VectorSign(C, B, TestPoint);
@@ -27,8 +27,9 @@ static bool IsPointInTriangle(const FVector2D& TestPoint, const FVector2D& A, co
 	return BA == CB && CB == AC;
 }
 
-FVisualEntry::FVisualEntry(const TWeakPtr<const SWidget>& InWidget, int32 InElementIndex)
+FVisualEntry::FVisualEntry(const TWeakPtr<const SWidget>& InWidget, int32 InElementIndex, EElementType InElementType)
 	: ElementIndex(InElementIndex)
+	, ElementType(InElementType)
 	, bFromCache(false)
 	, Widget(InWidget)
 {
@@ -37,11 +38,11 @@ FVisualEntry::FVisualEntry(const TWeakPtr<const SWidget>& InWidget, int32 InElem
 FVisualEntry::FVisualEntry(const TSharedRef<const SWidget>& InWidget, const FSlateDrawElement& InElement)
 {
 	const FSlateRenderTransform& Transform = InElement.GetRenderTransform();
-	const FVector2D& LocalSize = InElement.GetLocalSize();
+	const FVector2f LocalSize = InElement.GetLocalSize();
 
-	TopLeft = Transform.TransformPoint(FVector2D(0, 0));
-	TopRight = Transform.TransformPoint(FVector2D(LocalSize.X, 0));
-	BottomLeft = Transform.TransformPoint(FVector2D(0, LocalSize.Y));
+	TopLeft = Transform.TransformPoint(FVector2f(0.0f, 0.0f));
+	TopRight = Transform.TransformPoint(FVector2f(LocalSize.X, 0.0f));
+	BottomLeft = Transform.TransformPoint(FVector2f(0.0f, LocalSize.Y));
 	BottomRight = Transform.TransformPoint(LocalSize);
 
 	LayerId = InElement.GetLayer();
@@ -58,20 +59,28 @@ void FVisualEntry::Resolve(const FSlateWindowElementList& ElementList)
 		return;
 	}
 
-	const FSlateDrawElement& Element = ElementList.GetUncachedDrawElements()[ElementIndex];
-	const FSlateRenderTransform& Transform = Element.GetRenderTransform();
-	const FVector2D& LocalSize = Element.GetLocalSize();
+	auto ResolveBounds = [&](const auto& Container, uint8 InElementType)
+	{
+		if (InElementType == (uint8)ElementType)
+		{
+			const FSlateDrawElement& Element = Container[ElementIndex];
+			const FSlateRenderTransform& Transform = Element.GetRenderTransform();
+			const FVector2f LocalSize = Element.GetLocalSize();
 
-	TopLeft = Transform.TransformPoint(FVector2D(0, 0));
-	TopRight = Transform.TransformPoint(FVector2D(LocalSize.X, 0));
-	BottomLeft = Transform.TransformPoint(FVector2D(0, LocalSize.Y));
-	BottomRight = Transform.TransformPoint(LocalSize);
+			TopLeft = Transform.TransformPoint(FVector2f(0.0f, 0.0f));
+			TopRight = Transform.TransformPoint(FVector2f(LocalSize.X, 0.0f));
+			BottomLeft = Transform.TransformPoint(FVector2f(0.0f, LocalSize.Y));
+			BottomRight = Transform.TransformPoint(LocalSize);
 
-	LayerId = Element.GetLayer();
-	ClippingIndex = Element.GetPrecachedClippingIndex();
+			LayerId = Element.GetLayer();
+			ClippingIndex = Element.GetPrecachedClippingIndex();
+		}
+	};
+
+	VisitTupleElements(ResolveBounds, ElementList.GetUncachedDrawElements(), UE::Slate::MakeTupleIndicies<uint8, (uint8)EElementType::ET_Count>());
 }
 
-bool FVisualEntry::IsPointInside(const FVector2D& Point) const
+bool FVisualEntry::IsPointInside(const FVector2f& Point) const
 {
 	if (IsPointInTriangle(Point, TopLeft, TopRight, BottomLeft) || IsPointInTriangle(Point, BottomLeft, TopRight, BottomRight))
 	{
@@ -81,7 +90,7 @@ bool FVisualEntry::IsPointInside(const FVector2D& Point) const
 	return false;
 }
 
-TSharedPtr<const SWidget> FVisualTreeSnapshot::Pick(FVector2D Point)
+TSharedPtr<const SWidget> FVisualTreeSnapshot::Pick(FVector2f Point)
 {
 	for (int Index = Entries.Num() - 1; Index >= 0; Index--)
 	{
@@ -132,7 +141,7 @@ void FVisualTreeCapture::Enable()
 		FSlateDebugging::EndWindow.AddRaw(this, &FVisualTreeCapture::EndWindow);
 		FSlateDebugging::BeginWidgetPaint.AddRaw(this, &FVisualTreeCapture::BeginWidgetPaint);
 		FSlateDebugging::EndWidgetPaint.AddRaw(this, &FVisualTreeCapture::EndWidgetPaint);
-		FSlateDebugging::ElementAdded.AddRaw(this, &FVisualTreeCapture::ElementAdded);
+		FSlateDebugging::ElementTypeAdded.AddRaw(this, &FVisualTreeCapture::ElementTypeAdded);
 		bIsEnabled = true;
 
 		WindowIsInvalidationRootCounter = 0;
@@ -155,7 +164,7 @@ void FVisualTreeCapture::Disable()
 		FSlateDebugging::EndWindow.RemoveAll(this);
 		FSlateDebugging::BeginWidgetPaint.RemoveAll(this);
 		FSlateDebugging::EndWidgetPaint.RemoveAll(this);
-		FSlateDebugging::ElementAdded.RemoveAll(this);
+		FSlateDebugging::ElementTypeAdded.RemoveAll(this);
 		bIsEnabled = false;
 	}
 #endif
@@ -178,27 +187,31 @@ void FVisualTreeCapture::AddInvalidationRootCachedEntries(TSharedRef<FVisualTree
 	const TArray<TSharedPtr<FSlateCachedElementList>>& CachedElements = Data.GetCachedElementLists();
 	for (const TSharedPtr<FSlateCachedElementList>& CachedElement : CachedElements)
 	{
-		const FSlateDrawElementArray& DrawElementArray = CachedElement->DrawElements;
-		const SWidget* Widget = CachedElement->OwningWidget;
-		// todo, should check if parents has the metadata also
-		if (Widget && !Widget->GetMetaData<FInvisibleToWidgetReflectorMetaData>())
+		auto AddTypedEntries = [&](auto& Container)
 		{
-			for (const FSlateDrawElement& Element : DrawElementArray)
+			const SWidget* Widget = CachedElement->OwningWidget;
+			// todo, should check if parents has the metadata also
+			if (Widget && !Widget->GetMetaData<FInvisibleToWidgetReflectorMetaData>())
 			{
-				const int32 EntryIndex = Tree->Entries.Emplace(Widget->AsShared(), Element);
-
-				const FSlateClippingState* ClippingState = Element.GetClippingHandle().GetCachedClipState();
-				if (ClippingState)
+				for (const FSlateDrawElement& Element : Container)
 				{
-					int32& ClippingRefIndex = Tree->Entries[EntryIndex].ClippingIndex;
-					ClippingRefIndex = Tree->CachedClippingStates.IndexOfByKey(*ClippingState);
-					if (ClippingRefIndex == INDEX_NONE)
+					const int32 EntryIndex = Tree->Entries.Emplace(Widget->AsShared(), Element);
+
+					const FSlateClippingState* ClippingState = Element.GetClippingHandle().GetCachedClipState();
+					if (ClippingState)
 					{
-						ClippingRefIndex = Tree->CachedClippingStates.Add(*ClippingState);
+						int32& ClippingRefIndex = Tree->Entries[EntryIndex].ClippingIndex;
+						ClippingRefIndex = Tree->CachedClippingStates.IndexOfByKey(*ClippingState);
+						if (ClippingRefIndex == INDEX_NONE)
+						{
+							ClippingRefIndex = Tree->CachedClippingStates.Add(*ClippingState);
+						}
 					}
 				}
 			}
-		}
+		};
+
+		VisitTupleElements(AddTypedEntries, CachedElement->DrawElements);
 	}
 }
 
@@ -290,20 +303,20 @@ void FVisualTreeCapture::EndWidgetPaint(const SWidget* Widget, const FSlateWindo
 	}
 }
 
-void FVisualTreeCapture::ElementAdded(const FSlateWindowElementList& ElementList, int32 InElementIndex)
+void FVisualTreeCapture::ElementTypeAdded(const FSlateDebuggingElementTypeAddedEventArgs& ElementTypeAddedArgs)
 {
 	if (WindowIsInvalidationRootCounter > 0 || WidgetIsInvalidationRootCounter > 0 || WidgetIsInvisibleToWidgetReflectorCounter > 0)
 	{
 		return;
 	}
 
-	TSharedPtr<FVisualTreeSnapshot> Tree = VisualTrees.FindRef(ElementList.GetPaintWindow());
+	TSharedPtr<FVisualTreeSnapshot> Tree = VisualTrees.FindRef(ElementTypeAddedArgs.ElementList.GetPaintWindow());
 	if (Tree.IsValid())
 	{
 		if (Tree->WidgetStack.Num() > 0)
 		{
 			// Ignore any element added from a widget that's invisible to the widget reflector.
-			Tree->Entries.Emplace(Tree->WidgetStack.Top(), InElementIndex);
+			Tree->Entries.Emplace(Tree->WidgetStack.Top(), ElementTypeAddedArgs.ElementIndex, ElementTypeAddedArgs.ElementType);
 		}
 	}
 }

@@ -4,28 +4,37 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Framework/Commands/UICommandInfo.h"
+#include "Framework/SlateDelegates.h"
+#include "HAL/Platform.h"
 #include "Misc/Attribute.h"
+#include "Styling/AppStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/SlateTypes.h"
+#include "Styling/SlateWidgetStyleAsset.h"
+#include "Styling/ToolBarStyle.h"
+#include "Templates/SharedPointer.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
-#include "Framework/SlateDelegates.h"
-#include "Framework/Commands/UICommandInfo.h"
-#include "Styling/SlateTypes.h"
-#include "EditorStyleSet.h"
-#include "Styling/SlateWidgetStyleAsset.h"
 
+class FName;
+class SWidget;
+struct FButtonStyle;
+struct FCheckBoxStyle;
 struct FSlateBrush;
+
 enum class ECheckBoxState : uint8;
 
 /**
  * A simple class that represents a toolbar button in an editor viewport toolbar
  */
-class UNREALED_API SEditorViewportToolBarButton : public SCompoundWidget
+class SEditorViewportToolBarButton : public SCompoundWidget
 {
 public:
-	SLATE_BEGIN_ARGS( SEditorViewportToolBarButton )
+	SLATE_BEGIN_ARGS(SEditorViewportToolBarButton)
 		: _ButtonType(EUserInterfaceActionType::Button)
-		, _ButtonStyle(&FEditorStyle::Get().GetWidgetStyle<FButtonStyle>("EditorViewportToolBar.Button"))
-		, _CheckBoxStyle(&FEditorStyle::Get().GetWidgetStyle<FCheckBoxStyle>("LevelViewportToolBar.CheckBoxButton"))
+		, _ButtonStyle(&FAppStyle::Get().GetWidgetStyle<FToolBarStyle>("EditorViewportToolBar").ButtonStyle)
+		, _CheckBoxStyle(&FAppStyle::Get().GetWidgetStyle<FToolBarStyle>("EditorViewportToolBar").ToggleButton)
 		, _IsChecked(false)
 		{}
 
@@ -50,7 +59,7 @@ public:
 		SLATE_DEFAULT_SLOT( FArguments, Content )
 	SLATE_END_ARGS()
 
-	void Construct( const FArguments& Declaration );
+	UNREALED_API void Construct( const FArguments& Declaration );
 private:
 	/** 
 	 * Called when the button check state changes

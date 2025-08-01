@@ -2,22 +2,29 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "BlueprintEditor.h"
+#include "Delegates/Delegate.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphSchema.h"
+#include "Engine/TimelineTemplate.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Math/Vector2D.h"
 #include "Misc/Attribute.h"
-#include "Widgets/SWidget.h"
-#include "Engine/Engine.h"
-#include "EngineGlobals.h"
-
-#include "Toolkits/AssetEditorToolkit.h"
+#include "Misc/Guid.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/Object.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 #include "WorkflowOrientedApp/WorkflowTabFactory.h"
 #include "WorkflowOrientedApp/WorkflowTabManager.h"
-#include "EdGraph/EdGraph.h"
-#include "GraphEditor.h"
-#include "BlueprintEditor.h"
-#include "EdGraph/EdGraphSchema.h"
 #include "WorkflowOrientedApp/WorkflowUObjectDocuments.h"
-#include "Widgets/Docking/SDockTab.h"
-#include "Engine/TimelineTemplate.h"
+
+class SDockTab;
+class SGraphEditor;
+class SWidget;
+class UBlueprint;
+struct FSlateBrush;
 
 #define LOCTEXT_NAMESPACE "BlueprintEditor"
 
@@ -31,7 +38,7 @@ struct FLocalKismetCallbacks
 		return (Object != NULL) ? FText::FromString( Object->GetName() ) : LOCTEXT("UnknownObjectName", "UNKNOWN");
 	}
 
-	static FText GetGraphDisplayName(UEdGraph* Graph)
+	static FText GetGraphDisplayName(const UEdGraph* Graph)
 	{
 		if (Graph)
 		{
@@ -56,23 +63,12 @@ struct FLocalKismetCallbacks
 };
 
 /////////////////////////////////////////////////////
-// FDebugInfoSummoner
-
-struct FDebugInfoSummoner : public FWorkflowTabFactory
-{
-public:
-	FDebugInfoSummoner(TSharedPtr<class FAssetEditorToolkit> InHostingApp);
-
-	virtual TSharedRef<SWidget> CreateTabBody(const FWorkflowTabSpawnInfo& Info) const override;
-};
-
-/////////////////////////////////////////////////////
 // FDefaultsEditorSummoner
 
 struct FDefaultsEditorSummoner : public FWorkflowTabFactory
 {
 public:
-	FDefaultsEditorSummoner(TSharedPtr<class FAssetEditorToolkit> InHostingApp);
+	FDefaultsEditorSummoner(TSharedPtr<class FBlueprintEditor> InHostingApp);
 
 	virtual TSharedRef<SWidget> CreateTabBody(const FWorkflowTabSpawnInfo& Info) const override;
 
@@ -86,6 +82,8 @@ private:
 	TSharedRef<SWidget> CreateOptionalEditableWarning() const;
 
 	void OnChangeBlueprintToNotDataOnly();
+
+	TWeakObjectPtr<UBlueprint> EditingBlueprint;
 };
 
 /////////////////////////////////////////////////////
@@ -144,7 +142,7 @@ public:
 protected:
 	virtual TAttribute<FText> ConstructTabNameForObject(UEdGraph* DocumentID) const override
 	{
-		return TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateStatic<UEdGraph*>(&FLocalKismetCallbacks::GetGraphDisplayName, DocumentID));
+		return TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateStatic(&FLocalKismetCallbacks::GetGraphDisplayName, (const UEdGraph*)DocumentID));
 	}
 
 	virtual TSharedRef<SWidget> CreateTabBodyForObject(const FWorkflowTabSpawnInfo& Info, UEdGraph* DocumentID) const override;

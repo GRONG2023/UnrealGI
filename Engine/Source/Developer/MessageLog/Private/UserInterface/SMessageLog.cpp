@@ -4,7 +4,6 @@
 #include "Widgets/Layout/SSplitter.h"
 #include "Misc/ConfigCacheIni.h"
 #include "SlateOptMacros.h"
-#include "EditorStyleSet.h"
 #include "Presentation/MessageLogViewModel.h"
 #include "UserInterface/SMessageLogListing.h"
 #include "Widgets/Views/SListView.h"
@@ -30,42 +29,50 @@ void SMessageLog::Construct( const FArguments& InArgs, const TSharedRef<FMessage
 
 	ChildSlot
 	[
-		SNew(SSplitter)
-			.Orientation(Orient_Horizontal)
+		SNew(SBorder)
+		.BorderImage(FAppStyle::Get().GetBrush("Brushes.Panel"))
+		.Padding(FMargin(20.0f, 13.97f, 16.f, 16.f))
+		[
+			SNew(SSplitter)
+				.Orientation(Orient_Horizontal)
+				.Style(FAppStyle::Get(), "SplitterPanel")
+				.PhysicalSplitterHandleSize(10.0f)
 
-		+ SSplitter::Slot()
-			.Value(0.2f)
-			[
-				SNew(SBorder)
-					.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
-					.Padding(0.0f)
-					[
-						// log categories list
-						SAssignNew(CategoriesListView, SListView<IMessageLogListingPtr>)
-							.ItemHeight(24.0f)
-							.ListItemsSource(&ViewModel->GetLogListingViewModels())
-							.OnGenerateRow(this, &SMessageLog::HandleCategoriesListGenerateRow)
-							.OnSelectionChanged(this, &SMessageLog::HandleCategoriesListSelectionChanged)
-							.SelectionMode(ESelectionMode::Single)
-							.HeaderRow
-							(
-								SNew(SHeaderRow)
-									.Visibility(EVisibility::Collapsed)
+			+ SSplitter::Slot()
+				.Value(0.28f)
+				[
+					SNew(SBorder)
+						.BorderImage(FAppStyle::Get().GetBrush("Brushes.Recessed"))
+						.Padding(FMargin(16.f, 8.f, 0, 0))
+						[
+							// log categories list
+							SAssignNew(CategoriesListView, SListView<IMessageLogListingPtr>)
+								.ItemHeight(24.0f)
+								.ListItemsSource(&ViewModel->GetLogListingViewModels())
+								.OnGenerateRow(this, &SMessageLog::HandleCategoriesListGenerateRow)
+								.OnSelectionChanged(this, &SMessageLog::HandleCategoriesListSelectionChanged)
+								.SelectionMode(ESelectionMode::Single)
+								.HeaderRow
+								(
+									SNew(SHeaderRow)
+										.Visibility(EVisibility::Collapsed)
 
-								+ SHeaderRow::Column("Name")
-									.DefaultLabel(LOCTEXT("CategoriesListNameColumnHeader", "Category"))
-									.FillWidth(1.0)
-							)
-					]
-			]
+									+ SHeaderRow::Column("Name")
+										.DefaultLabel(LOCTEXT("CategoriesListNameColumnHeader", "Category"))
+										.FillWidth(1.0)
+								)
+						]
+				]
 
-		+ SSplitter::Slot()
-			.Value(0.8f)
-			[
-				SAssignNew(CurrentListingDisplay, SBorder)
-					.BorderImage(FEditorStyle::GetBrush("NoBorder"))
-					.Padding(0.0f)
-			]
+			+ SSplitter::Slot()
+				.Value(0.72f)
+				[
+					SAssignNew(CurrentListingDisplay, SBorder)
+						.BorderImage(FAppStyle::Get().GetBrush("Brushes.Recessed"))
+						.Padding(0.0f)
+				]
+		]
+
 	];
 
 	// Default to the first available (or the last used) listing

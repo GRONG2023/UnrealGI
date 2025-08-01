@@ -3,9 +3,15 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Internationalization/Text.h"
+#include "SGraphPin.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateEnums.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SWidget.h"
-#include "SGraphPin.h"
+
+class SWidget;
+class UEdGraphPin;
 
 class GRAPHEDITOR_API SGraphPinString : public SGraphPin
 {
@@ -25,4 +31,11 @@ protected:
 
 	/** @return True if the pin default value field is read-only */
 	bool GetDefaultValueIsReadOnly() const;
+
+private:
+	TSharedRef<SWidget> GenerateComboBoxEntry(TSharedPtr<FString> Value);
+	void HandleComboBoxSelectionChanged(TSharedPtr<FString> Value, ESelectInfo::Type InSelectInfo);
+	TSharedPtr<SWidget> TryBuildComboBoxWidget();
+
+	TArray<TSharedPtr<FString>> ComboBoxOptions;
 };

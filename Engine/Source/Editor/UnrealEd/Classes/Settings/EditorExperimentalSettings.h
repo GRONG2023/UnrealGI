@@ -7,18 +7,39 @@
 #include "UObject/ObjectMacros.h"
 #include "UObject/Object.h"
 #include "InputCoreTypes.h"
+#include "InterchangePipelineBase.h"
 #include "EditorExperimentalSettings.generated.h"
 
 /**
  * Implements Editor settings for experimental features.
  */
-UCLASS(config=EditorPerProjectUserSettings)
-class UNREALED_API UEditorExperimentalSettings
+UCLASS(config=EditorPerProjectUserSettings, MinimalAPI)
+class UEditorExperimentalSettings
 	: public UObject
 {
 	GENERATED_UCLASS_BODY()
 
 public:
+	/** Enable async texture compilation to improve PIE and map load time performance when compilation is required */
+	UPROPERTY(EditAnywhere, config, Category = Performance, meta = (DisplayName = "Enable async texture compilation and loading"))
+	bool bEnableAsyncTextureCompilation;
+
+	/** Enable async static mesh compilation to improve import and map load time performance when compilation is required */
+	UPROPERTY(EditAnywhere, config, Category = Performance, meta = (DisplayName = "Enable async static mesh compilation and loading"))
+	bool bEnableAsyncStaticMeshCompilation;
+
+	/** Enable async skeletal mesh compilation to improve import and map load time performance when compilation is required */
+	UE_DEPRECATED(5.1, "Deprecated & replaced by bEnableAsyncSkinnedAssetCompilation.")
+	UPROPERTY(/*EditAnywhere - deprecated & replaced by bEnableAsyncSkinnedAssetCompilation, */config/*, Category = Performance, meta = (DisplayName = "Enable async skeletal mesh compilation and loading")*/)
+	bool bEnableAsyncSkeletalMeshCompilation;
+
+	/** Enable async skinned asset compilation to improve import and map load time performance when compilation is required */
+	UPROPERTY(EditAnywhere, config, Category = Performance, meta = (DisplayName = "Enable async skinned asset compilation and loading"))
+	bool bEnableAsyncSkinnedAssetCompilation;
+
+	/** Enable async sound compilation to improve import and map load time performance when compilation is required */
+	UPROPERTY(EditAnywhere, config, Category = Performance, meta = (DisplayName = "Enable async sound compilation and loading"))
+	bool bEnableAsyncSoundWaveCompilation;
 
 	/** Allows the editor to run on HDR monitors on Windows 10 */
 	UPROPERTY(EditAnywhere, config, Category = HDR, meta = (ConfigRestartRequired = true, DisplayName = "Enable Editor Support for HDR Monitors"))
@@ -31,20 +52,10 @@ public:
 	/** Allows usage of the procedural foliage system */
 	UPROPERTY(EditAnywhere, config, Category = Foliage, meta = (DisplayName = "Procedural Foliage"))
 	bool bProceduralFoliage;
-		
-	/** Allows usage of the Localization Dashboard */
-	UPROPERTY(EditAnywhere, config, Category = Tools, meta = (DisplayName = "Localization Dashboard"))
-	bool bEnableLocalizationDashboard;
 
 	/** Allows usage of the Translation Picker */
 	UPROPERTY(EditAnywhere, config, Category = Tools, meta = (DisplayName = "Translation Picker"))
 	bool bEnableTranslationPicker;
-
-	/** When enabled, all details panels will be able to have properties marked as favorite that show in a top most category.  
-	 * NOTE: Some customizations are not supported yet
-	 */
-	UPROPERTY(EditAnywhere, config, Category = Tools, meta = (DisplayName = "Enable Details Panel Favorites"))
-	bool bEnableFavoriteSystem;
 
 	/** Specify which console-specific nomenclature to use for gamepad label text */
 	UPROPERTY(EditAnywhere, config, Category=UserInterface, meta=(DisplayName="Console for Gamepad Labels"))
@@ -57,21 +68,6 @@ public:
 	/** Break on Exceptions allows you to trap Access Nones and other exceptional events in Blueprints. */
 	UPROPERTY(EditAnywhere, config, Category=Blueprints, meta=(DisplayName="Blueprint Break on Exceptions"))
 	bool bBreakOnExceptions;
-
-	/** Allows the One File Per Actor option for worlds */
-	UPROPERTY(EditAnywhere, config, Category = World, meta = (DisplayName = "Enable One File Per Actor Support"))
-	bool bEnableOneFilePerActorSupport;
-	
-protected:
-	/** Any blueprint deriving from one of these base classes will be allowed to recompile during Play-in-Editor */
-	UPROPERTY(EditAnywhere, config, Category = Blueprints, meta=(AllowAbstract))
-	TArray<TSoftClassPtr<UObject>> BaseClassesToAllowRecompilingDuringPlayInEditor;
-
-	UPROPERTY(Transient)
-	mutable TArray<UClass*> ResolvedBaseClassesToAllowRecompilingDuringPlayInEditor;
-
-public:
-	bool IsClassAllowedToRecompileDuringPIE(UClass* TestClass) const;
 
 	/** Should arrows indicating data/execution flow be drawn halfway along wires? */
 	UPROPERTY(/*EditAnywhere - deprecated (moved into UBlueprintEditorSettings), */config/*, Category=Blueprints, meta=(DisplayName="Draw midpoint arrows in Blueprints")*/)
@@ -87,9 +83,6 @@ public:
 
 	UPROPERTY(EditAnywhere, config, Category = Cooking, meta = (DisplayName = "Use shared cooked builds in launch on", ConfigRestartRequired = true))
 	bool bSharedCookedBuilds;
-
-	UPROPERTY(EditAnywhere, config, Category = Cooking, meta = (DisplayName = "Use multiple processes when cooking (only affects File -> Package)"))
-	int32 MultiProcessCooking;
 
 	/** Enable late joining in PIE */
 	UPROPERTY(EditAnywhere, config, Category = PIE, meta = (DisplayName = "Allow late joining"))
@@ -127,6 +120,10 @@ public:
 	UPROPERTY(EditAnywhere, config, Category = Core)
 	bool bTextAssetFormatSupport;
 
+	/** Enables in-editor support for rehydrating virtualized assets */
+	UPROPERTY(EditAnywhere, config, Category = Core)
+	bool bVirtualizedAssetRehydration;
+
 	/** When creating new Material Layers and Material Layer Blends, set up example graphs. */
 	UPROPERTY(EditAnywhere, config, Category = Materials)
 	bool bExampleLayersAndBlends;
@@ -134,6 +131,20 @@ public:
 	/** Allows creation of assets with paths longer than 260 characters. Note that this also requires the Windows 10 Anniversary Update (1607), and support for long paths to be enabled through the group policy editor. */
 	UPROPERTY(EditAnywhere, config, Category = "Content Browser", meta = (DisplayName = "Enable support for long paths (> 260 characters)"))
 	bool bEnableLongPathsSupport;
+
+	/** Allows creating APackedLevelActor blueprint actors */
+	UPROPERTY(EditAnywhere, config, Category = Level)
+	bool bPackedLevelActor;
+
+	/** Allows creating ALevelInstance actors */
+	UPROPERTY(EditAnywhere, config, Category = Level)
+	bool bLevelInstance;
+
+	UPROPERTY(EditAnywhere, config, Category = WorldPartition)
+	bool bEnableWorldPartitionActorFilters;
+
+	UPROPERTY(EditAnywhere, config, Category = WorldPartition)
+	bool bEnableWorldPartitionExternalDataLayers;
 
 	/**
 	 * Returns an event delegate that is executed when a setting has changed.
@@ -149,8 +160,8 @@ public:
 protected:
 
 	// UObject overrides
-	virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
-	virtual void PostInitProperties() override;
+	UNREALED_API virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
+	UNREALED_API virtual void PostInitProperties() override;
 
 private:
 

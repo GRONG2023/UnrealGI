@@ -9,7 +9,7 @@
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SWindow.h"
 #include "Widgets/Layout/SBorder.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Animation/Skeleton.h"
 #include "Animation/AnimSequence.h"
 #include "Editor.h"
@@ -29,7 +29,7 @@ UAnimSequenceFactory::UAnimSequenceFactory(const FObjectInitializer& ObjectIniti
 bool UAnimSequenceFactory::ConfigureProperties()
 {
 	// Null the skeleton so we can check for selection later
-	TargetSkeleton = NULL;
+	TargetSkeleton = nullptr;
 
 	// Load the content browser module to display an asset picker
 	FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser");
@@ -37,7 +37,7 @@ bool UAnimSequenceFactory::ConfigureProperties()
 	FAssetPickerConfig AssetPickerConfig;
 	
 	/** The asset picker will only show skeletons */
-	AssetPickerConfig.Filter.ClassNames.Add(USkeleton::StaticClass()->GetFName());
+	AssetPickerConfig.Filter.ClassPaths.Add(USkeleton::StaticClass()->GetClassPathName());
 	AssetPickerConfig.Filter.bRecursiveClasses = true;
 
 	/** The delegate that fires when an asset was selected */
@@ -52,7 +52,7 @@ bool UAnimSequenceFactory::ConfigureProperties()
 	.SupportsMinimize(false) .SupportsMaximize(false)
 	[
 		SNew(SBorder)
-		.BorderImage( FEditorStyle::GetBrush("Menu.Background") )
+		.BorderImage( FAppStyle::GetBrush("Menu.Background") )
 		[
 			ContentBrowserModule.Get().CreateAssetPicker(AssetPickerConfig)
 		]
@@ -61,26 +61,25 @@ bool UAnimSequenceFactory::ConfigureProperties()
 	GEditor->EditorAddModalWindow(PickerWindow.ToSharedRef());
 	PickerWindow.Reset();
 
-	return TargetSkeleton != NULL;
+	return TargetSkeleton != nullptr;
 }
 
 UObject* UAnimSequenceFactory::FactoryCreateNew(UClass* Class, UObject* InParent, FName Name, EObjectFlags Flags, UObject* Context, FFeedbackContext* Warn)
 {
-	//
 	UAnimSequence* AnimSequence = NewObject<UAnimSequence>(InParent, Class, Name, Flags);
-
-	// @todo I think this will crash, we should support differentoptions
-	AnimSequence->SequenceLength = 0.f;
-	AnimSequence->SetRawNumberOfFrame(0);
 	
 	if (TargetSkeleton)
 	{
 		AnimSequence->SetSkeleton(TargetSkeleton);
 	}
+
+	AnimSequence->GetController().InitializeModel();
+	AnimSequence->GetController().SetNumberOfFrames(1);
 	if (PreviewSkeletalMesh)
 	{
 		AnimSequence->SetPreviewMesh(PreviewSkeletalMesh);
 	}
+	AnimSequence->GetController().NotifyPopulated();
 
 	return AnimSequence;
 }

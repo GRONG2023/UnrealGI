@@ -12,6 +12,8 @@
 #include "AIController.h"
 #include "Components/PawnNoiseEmitterComponent.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PawnSensingComponent)
+
 DECLARE_CYCLE_STAT(TEXT("Sensing"),STAT_AI_Sensing,STATGROUP_AI);
 
 UPawnSensingComponent::UPawnSensingComponent(const FObjectInitializer& ObjectInitializer)
@@ -329,7 +331,7 @@ bool UPawnSensingComponent::CouldSeePawn(const APawn *Other, bool bMaySkipChecks
 	FVector const SelfToOther = OtherLoc - SensorLoc;
 
 	// check max sight distance
-	float const SelfToOtherDistSquared = SelfToOther.SizeSquared();
+	FVector::FReal const SelfToOtherDistSquared = SelfToOther.SizeSquared();
 	if (SelfToOtherDistSquared > FMath::Square(SightRadius))
 	{
 		return false;
@@ -420,7 +422,7 @@ bool UPawnSensingComponent::CanHear(const FVector& NoiseLoc, float Loudness, boo
 
 	FVector const HearingLocation = GetSensorLocation();
 
-	float const LoudnessAdjustedDistSq = (HearingLocation - NoiseLoc).SizeSquared()/(Loudness*Loudness);
+	FVector::FReal const LoudnessAdjustedDistSq = (HearingLocation - NoiseLoc).SizeSquared()/(Loudness*Loudness);
 	if (LoudnessAdjustedDistSq <= FMath::Square(HearingThreshold))
 	{
 		// Hear even occluded sounds within HearingThreshold
@@ -475,4 +477,5 @@ bool UPawnSensingComponent::ShouldCheckAudibilityOf(APawn* Pawn) const
 
 	return true;
 }
+
 

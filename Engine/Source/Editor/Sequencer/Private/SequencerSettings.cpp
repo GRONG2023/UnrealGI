@@ -3,6 +3,8 @@
 #include "SequencerSettings.h"
 #include "KeyParams.h"
 #include "ISequencer.h"
+#include "SSequencer.h"
+#include "MVVM/ViewModels/ViewDensity.h"
 
 USequencerSettings::USequencerSettings( const FObjectInitializer& ObjectInitializer )
 	: Super( ObjectInitializer )
@@ -21,14 +23,15 @@ USequencerSettings::USequencerSettings( const FObjectInitializer& ObjectInitiali
 	bSnapSectionTimesToInterval = true;
 	bSnapSectionTimesToSections = true;
 	bSnapPlayTimeToKeys = false;
+	bSnapPlayTimeToSections = false;
+	bSnapPlayTimeToMarkers = false;
 	bSnapPlayTimeToInterval = true;
 	bSnapPlayTimeToPressedKey = true;
 	bSnapPlayTimeToDraggedKey = true;
 	CurveValueSnapInterval = 0.1f;
 	GridSpacing = TOptional<float>();
-	bSnapCurveValueToInterval = true;
+	bSnapCurveValueToInterval = false;
 	bShowSelectedNodesOnly = false;
-	bRewindOnRecord = true;
 	ZoomPosition = ESequencerZoomPosition::SZP_CurrentTime;
 	bAutoScrollEnabled = false;
 	bLinkCurveEditorTimeRange = false;
@@ -36,15 +39,20 @@ USequencerSettings::USequencerSettings( const FObjectInitializer& ObjectInitiali
 	bIsolateCurveEditorToSelection = true;
 	LoopMode = ESequencerLoopMode::SLM_NoLoop;
 	bSnapKeysAndSectionsToPlayRange = false;
+	bResetPlayheadWhenNavigating = false;
 	bKeepCursorInPlayRangeWhileScrubbing = false;
 	bKeepPlayRangeInSectionBounds = true;
 	bCompileDirectorOnEvaluate = true;
+	bLeftMouseDragDoesMarquee = false;
 	ZeroPadFrames = 0;
 	JumpFrameIncrement = FFrameNumber(5);
-	bShowCombinedKeyframes = true;
+	bShowLayerBars = true;
+	bShowKeyBars = true;
 	bInfiniteKeyAreas = false;
 	bShowChannelColors = false;
+	bShowInfoButton = true;
 	ReduceKeysTolerance = KINDA_SMALL_NUMBER;
+	KeyAreaHeightWithCurves = SequencerLayoutConstants::KeyAreaHeight;
 	bDeleteKeysWhenTrimming = true;
 	bDisableSectionsAfterBaking = true;
 	bCleanPlaybackMode = true;
@@ -53,8 +61,21 @@ USequencerSettings::USequencerSettings( const FObjectInitializer& ObjectInitiali
 	bRerunConstructionScripts = true;
 	bVisualizePreAndPostRoll = true;
 	TrajectoryPathCap = 250;
-	bShowOutlinerInfoColumn = true;
 	FrameNumberDisplayFormat = EFrameNumberDisplayFormats::Seconds;
+	bAutoExpandNodesOnSelection = true;
+	bRestoreOriginalViewportOnCameraCutUnlock = true;
+	TreeViewWidth = 0.3f;
+	bShowTickLines = true;
+	bShowSequencerToolbar = true;
+	ViewDensity = "Relaxed";
+
+	SectionColorTints.Add(FColor(88, 102, 142, 255)); // blue
+	SectionColorTints.Add(FColor(99, 137, 132, 255)); // blue-green
+	SectionColorTints.Add(FColor(110, 127, 92, 255)); // green
+	SectionColorTints.Add(FColor(151, 142, 102, 255)); // yellow
+	SectionColorTints.Add(FColor(147, 119, 101, 255)); // orange
+	SectionColorTints.Add(FColor(139, 95, 108, 255)); // red 
+	SectionColorTints.Add(FColor(109, 74, 121, 255)); // purple
 }
 
 void USequencerSettings::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
@@ -204,6 +225,19 @@ void USequencerSettings::SetSnapKeyTimesToKeys(bool InbSnapKeyTimesToKeys)
 	}
 }
 
+bool USequencerSettings::GetLeftMouseDragDoesMarquee() const
+{
+	return bLeftMouseDragDoesMarquee;
+}
+void USequencerSettings::SetLeftMouseDragDoesMarque(bool bDoMarque)
+{
+	if (bLeftMouseDragDoesMarquee != bDoMarque)
+	{
+		bLeftMouseDragDoesMarquee = bDoMarque;
+		SaveConfig();
+	}
+}
+
 bool USequencerSettings::GetSnapSectionTimesToInterval() const
 {
 	return bSnapSectionTimesToInterval;
@@ -256,6 +290,34 @@ void USequencerSettings::SetSnapPlayTimeToKeys(bool InbSnapPlayTimeToKeys)
 	if ( bSnapPlayTimeToKeys != InbSnapPlayTimeToKeys )
 	{
 		bSnapPlayTimeToKeys = InbSnapPlayTimeToKeys;
+		SaveConfig();
+	}
+}
+
+bool USequencerSettings::GetSnapPlayTimeToSections() const
+{
+	return bSnapPlayTimeToSections;
+}
+
+void USequencerSettings::SetSnapPlayTimeToSections(bool InbSnapPlayTimeToSections)
+{
+	if (bSnapPlayTimeToSections != InbSnapPlayTimeToSections)
+	{
+		bSnapPlayTimeToSections = InbSnapPlayTimeToSections;
+		SaveConfig();
+	}
+}
+
+bool USequencerSettings::GetSnapPlayTimeToMarkers() const
+{
+	return bSnapPlayTimeToMarkers;
+}
+
+void USequencerSettings::SetSnapPlayTimeToMarkers(bool InbSnapPlayTimeToMarkers)
+{
+	if ( bSnapPlayTimeToMarkers != InbSnapPlayTimeToMarkers )
+	{
+		bSnapPlayTimeToMarkers = InbSnapPlayTimeToMarkers;
 		SaveConfig();
 	}
 }
@@ -360,20 +422,6 @@ void USequencerSettings::SetShowSelectedNodesOnly(bool Visible)
 	}
 }
 
-bool USequencerSettings::ShouldRewindOnRecord() const
-{
-	return bRewindOnRecord;
-}
-
-void USequencerSettings::SetRewindOnRecord(bool bInRewindOnRecord)
-{
-	if (bInRewindOnRecord != bRewindOnRecord)
-	{
-		bRewindOnRecord = bInRewindOnRecord;
-		SaveConfig();
-	}
-}
-
 ESequencerZoomPosition USequencerSettings::GetZoomPosition() const
 {
 	return ZoomPosition;
@@ -413,6 +461,20 @@ void USequencerSettings::SetLoopMode(ESequencerLoopMode InLoopMode)
 	{
 		LoopMode = InLoopMode;
 		OnLoopStateChangedEvent.Broadcast();
+		SaveConfig();
+	}
+}
+
+bool USequencerSettings::ShouldResetPlayheadWhenNavigating() const
+{
+	return bResetPlayheadWhenNavigating;
+}
+
+void USequencerSettings::SetResetPlayheadWhenNavigating(bool bInResetPlayheadWhenNavigating)
+{
+	if (bResetPlayheadWhenNavigating != bInResetPlayheadWhenNavigating)
+	{
+		bResetPlayheadWhenNavigating = bInResetPlayheadWhenNavigating;
 		SaveConfig();
 	}
 }
@@ -489,6 +551,7 @@ void USequencerSettings::SetZeroPadFrames(uint8 InZeroPadFrames)
 	{
 		ZeroPadFrames = InZeroPadFrames;
 		SaveConfig();
+		OnTimeDisplayFormatChangedEvent.Broadcast();
 	}
 }
 
@@ -506,20 +569,33 @@ void USequencerSettings::SetJumpFrameIncrement(FFrameNumber InJumpFrameIncrement
 	}
 }
 
-bool USequencerSettings::GetShowCombinedKeyframes() const
+bool USequencerSettings::GetShowLayerBars() const
 {
-	return bShowCombinedKeyframes;
+	return bShowLayerBars;
 }
 
-void USequencerSettings::SetShowCombinedKeyframes(bool InbShowCombinedKeyframes)
+void USequencerSettings::SetShowLayerBars(bool InbShowLayerBars)
 {
-	if (bShowCombinedKeyframes != InbShowCombinedKeyframes)
+	if (bShowLayerBars != InbShowLayerBars)
 	{
-		bShowCombinedKeyframes = InbShowCombinedKeyframes;
+		bShowLayerBars = InbShowLayerBars;
 		SaveConfig();
 	}
 }
 
+bool USequencerSettings::GetShowKeyBars() const
+{
+	return bShowKeyBars;
+}
+
+void USequencerSettings::SetShowKeyBars(bool InbShowKeyBars)
+{
+	if (bShowKeyBars != InbShowKeyBars)
+	{
+		bShowKeyBars = InbShowKeyBars;
+		SaveConfig();
+	}
+}
 
 bool USequencerSettings::GetInfiniteKeyAreas() const
 {
@@ -546,6 +622,134 @@ void USequencerSettings::SetShowChannelColors(bool InbShowChannelColors)
 	if (bShowChannelColors != InbShowChannelColors)
 	{
 		bShowChannelColors = InbShowChannelColors;
+		SaveConfig();
+	}
+}
+
+bool USequencerSettings::GetShowInfoButton() const
+{
+	return bShowInfoButton;
+}
+
+void USequencerSettings::SetShowInfoButton(bool InbShowInfoButton)
+{
+	if (bShowInfoButton != InbShowInfoButton)
+	{
+		bShowInfoButton = InbShowInfoButton;
+		SaveConfig();
+	}
+}
+
+bool USequencerSettings::GetShowTickLines() const
+{
+	return bShowTickLines;
+}
+
+void USequencerSettings::SetShowTickLines(bool bInDrawTickLines)
+{
+	if(bShowTickLines != bInDrawTickLines)
+	{
+		bShowTickLines = bInDrawTickLines;
+		SaveConfig();
+	}
+}
+
+bool USequencerSettings::GetShowSequencerToolbar() const
+{
+	return bShowSequencerToolbar;
+}
+
+void USequencerSettings::SetShowSequencerToolbar(bool bInShowSequencerToolbar)
+{
+	if(bShowSequencerToolbar != bInShowSequencerToolbar)
+	{
+		bShowSequencerToolbar = bInShowSequencerToolbar;
+		SaveConfig();
+	}
+}
+
+bool USequencerSettings::HasKeyAreaCurveExtents(const FString& ChannelName) const
+{
+	TArray<FString> ChannelsArray;
+	KeyAreaCurveExtents.ParseIntoArray(ChannelsArray, TEXT(":"));
+
+	for (int32 ChannelIndex = 0; ChannelIndex < ChannelsArray.Num(); ++ChannelIndex)
+	{
+		TArray<FString> ExtentsArray;
+		ChannelsArray[ChannelIndex].ParseIntoArray(ExtentsArray, TEXT(","));	
+
+		if (ExtentsArray.Num() == 3 && ExtentsArray[0] == ChannelName)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void USequencerSettings::RemoveKeyAreaCurveExtents(const FString& ChannelName)
+{
+	TArray<FString> ChannelsArray;
+	KeyAreaCurveExtents.ParseIntoArray(ChannelsArray, TEXT(":"));
+
+	FString NewKeyAreaCurveExtents;
+	for (int32 ChannelIndex = 0; ChannelIndex < ChannelsArray.Num(); ++ChannelIndex)
+	{
+		TArray<FString> ExtentsArray;
+		ChannelsArray[ChannelIndex].ParseIntoArray(ExtentsArray, TEXT(","));	
+
+		if (ExtentsArray.Num() == 3 && ExtentsArray[0] == ChannelName)
+		{
+			continue;
+		}
+
+		NewKeyAreaCurveExtents.Append(TEXT(":"));
+		NewKeyAreaCurveExtents.Append(ChannelsArray[ChannelIndex]);
+	}
+
+	KeyAreaCurveExtents = NewKeyAreaCurveExtents;
+	SaveConfig();
+}
+
+void USequencerSettings::SetKeyAreaCurveExtents(const FString& ChannelName, double InMin, double InMax)
+{
+	RemoveKeyAreaCurveExtents(ChannelName);
+
+	FString NewChannelExtents = FString::Printf(TEXT("%s,%0.3f,%0.3f"), *ChannelName, InMin, InMax);
+	KeyAreaCurveExtents.Append(TEXT(":"));
+	KeyAreaCurveExtents.Append(NewChannelExtents);
+
+	SaveConfig();
+}
+
+void USequencerSettings::GetKeyAreaCurveExtents(const FString& ChannelName, double& OutMin, double& OutMax) const
+{
+	TArray<FString> ChannelsArray;
+	KeyAreaCurveExtents.ParseIntoArray(ChannelsArray, TEXT(":"));
+
+	for (int32 ChannelIndex = 0; ChannelIndex < ChannelsArray.Num(); ++ChannelIndex)
+	{
+		TArray<FString> ExtentsArray;
+		ChannelsArray[ChannelIndex].ParseIntoArray(ExtentsArray, TEXT(","));	
+
+		if (ExtentsArray.Num() == 3 && ExtentsArray[0] == ChannelName)
+		{
+			OutMin = FCString::Atod(*ExtentsArray[1]);
+			OutMax = FCString::Atod(*ExtentsArray[2]);
+			return;
+		}
+	}
+}
+
+float USequencerSettings::GetKeyAreaHeightWithCurves() const
+{
+	return KeyAreaHeightWithCurves;
+}
+
+void USequencerSettings::SetKeyAreaHeightWithCurves(float InKeyAreaHeightWithCurves)
+{
+	if (KeyAreaHeightWithCurves != InKeyAreaHeightWithCurves)
+	{
+		KeyAreaHeightWithCurves = InKeyAreaHeightWithCurves;
 		SaveConfig();
 	}
 }
@@ -588,6 +792,20 @@ void USequencerSettings::SetDisableSectionsAfterBaking(bool bInDisableSectionsAf
 	if (bDisableSectionsAfterBaking != bInDisableSectionsAfterBaking)
 	{
 		bDisableSectionsAfterBaking = bInDisableSectionsAfterBaking;
+		SaveConfig();
+	}
+}
+
+TArray<FColor> USequencerSettings::GetSectionColorTints() const
+{
+	return SectionColorTints;
+}
+
+void USequencerSettings::SetSectionColorTints(const TArray<FColor>& InSectionColorTints)
+{
+	if (SectionColorTints != InSectionColorTints)
+	{
+		SectionColorTints = InSectionColorTints;
 		SaveConfig();
 	}
 }
@@ -707,25 +925,15 @@ void USequencerSettings::SetCompileDirectorOnEvaluate(bool bInCompileDirectorOnE
 	}
 }
 
-bool USequencerSettings::GetShowOutlinerInfoColumn() const
-{
-	return bShowOutlinerInfoColumn;
-}
-
-void USequencerSettings::SetShowOutlinerInfoColumn(bool bInShowOutlinerInfoColumn)
-{
-	if (bInShowOutlinerInfoColumn != bShowOutlinerInfoColumn)
-	{
-		bShowOutlinerInfoColumn = bInShowOutlinerInfoColumn;
-		SaveConfig();
-	}
-}
-
 USequencerSettings::FOnLoopStateChanged& USequencerSettings::GetOnLoopStateChanged()
 {
 	return OnLoopStateChangedEvent;
 }
 
+USequencerSettings::FOnTimeDisplayFormatChanged& USequencerSettings::GetOnTimeDisplayFormatChanged()
+{
+	return OnTimeDisplayFormatChangedEvent;
+}
 
 void USequencerSettings::SetTimeDisplayFormat(EFrameNumberDisplayFormats InFormat)
 {
@@ -733,6 +941,7 @@ void USequencerSettings::SetTimeDisplayFormat(EFrameNumberDisplayFormats InForma
 	{
 		FrameNumberDisplayFormat = InFormat;
 		SaveConfig();
+		OnTimeDisplayFormatChangedEvent.Broadcast();
 	}
 }
 
@@ -741,6 +950,91 @@ void USequencerSettings::SetMovieRendererName(const FString& InMovieRendererName
 	if (InMovieRendererName != MovieRendererName)
 	{
 		MovieRendererName = InMovieRendererName;
+		SaveConfig();
+	}
+}
+
+void USequencerSettings::SetAutoExpandNodesOnSelection(bool bInAutoExpandNodesOnSelection)
+{
+	if (bInAutoExpandNodesOnSelection != bAutoExpandNodesOnSelection)
+	{
+		bAutoExpandNodesOnSelection = bInAutoExpandNodesOnSelection;
+		SaveConfig();
+	}
+}
+
+void USequencerSettings::SetRestoreOriginalViewportOnCameraCutUnlock(bool bInRestoreOriginalViewportOnCameraCutUnlock)
+{
+	if (bInRestoreOriginalViewportOnCameraCutUnlock != bRestoreOriginalViewportOnCameraCutUnlock)
+	{
+		bRestoreOriginalViewportOnCameraCutUnlock = bInRestoreOriginalViewportOnCameraCutUnlock;
+		SaveConfig();
+	}
+}
+
+void USequencerSettings::SetTreeViewWidth(float InTreeViewWidth)
+{
+	if (InTreeViewWidth != TreeViewWidth)
+	{
+		TreeViewWidth = InTreeViewWidth;
+		SaveConfig();
+	}
+}
+
+UE::Sequencer::EViewDensity USequencerSettings::GetViewDensity() const
+{
+	static FName NAME_Compact("Compact");
+	static FName NAME_Relaxed("Relaxed");
+	if (ViewDensity == NAME_Compact)
+	{
+		return UE::Sequencer::EViewDensity::Compact;
+	}
+	if (ViewDensity == NAME_Relaxed)
+	{
+		return UE::Sequencer::EViewDensity::Relaxed;
+	}
+	return UE::Sequencer::EViewDensity::Variable;
+}
+
+void USequencerSettings::SetViewDensity(FName InViewDensity)
+{
+	if (InViewDensity != ViewDensity)
+	{
+		ViewDensity = InViewDensity;
+		SaveConfig();
+	}
+}
+
+bool USequencerSettings::IsTrackFilterEnabled(const FString& TrackFilter) const
+{
+	return TrackFilters.Contains(TrackFilter);
+}
+
+void USequencerSettings::SetTrackFilterEnabled(const FString & TrackFilter, bool bEnabled)
+{
+	if (bEnabled)
+	{
+		if (!TrackFilters.Contains(TrackFilter))
+		{
+			TrackFilters.Add(TrackFilter);
+			SaveConfig();
+		}
+	}
+	else
+	{
+		if (TrackFilters.Contains(TrackFilter))
+		{
+			TrackFilters.Remove(TrackFilter);
+			SaveConfig();
+		}
+	}
+}
+
+void USequencerSettings::SetOutlinerColumnVisibility(const TArray<FColumnVisibilitySetting>& InColumnVisibilitySettings)
+{
+	if (InColumnVisibilitySettings != ColumnVisibilitySettings)
+	{
+		ColumnVisibilitySettings = InColumnVisibilitySettings;
 		SaveConfig();
 	}
 }

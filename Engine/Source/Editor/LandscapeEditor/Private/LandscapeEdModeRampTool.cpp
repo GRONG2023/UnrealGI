@@ -6,7 +6,7 @@
 #include "AI/NavigationSystemBase.h"
 #include "Editor/UnrealEdEngine.h"
 #include "Engine/Texture2D.h"
-#include "UnrealWidget.h"
+#include "UnrealWidgetFwd.h"
 #include "EditorModeManager.h"
 #include "UnrealEdGlobals.h"
 #include "EditorViewportClient.h"
@@ -22,6 +22,7 @@
 #include "Landscape.h"
 #include "Misc/MessageDialog.h"
 #include "LandscapeEdModeTools.h"
+#include "TextureResource.h"
 
 #define LOCTEXT_NAMESPACE "Landscape"
 
@@ -54,11 +55,11 @@ protected:
 
 	void ProcessPixel(int32 X, int32 Y, const InterpolantType& Interpolant, bool BackFacing)
 	{
-		const float CosInterpX = (Interpolant.X >= 1 ? 1 : 0.5f - 0.5f * FMath::Cos(Interpolant.X * PI));
+		const float CosInterpX = static_cast<float>(Interpolant.X >= 1 ? 1 : 0.5 - 0.5 * FMath::Cos(Interpolant.X * PI));
 		const float Alpha = CosInterpX;
 		uint16& Dest = Data[(Y - MinY)*(1 + MaxX - MinX) + X - MinX];
-		float Value = FMath::Lerp((float)Dest, Interpolant.Y, Alpha);
-		uint16 DValue = (uint32)FMath::Clamp<float>(Value, 0, LandscapeDataAccess::MaxValue);
+		float Value = FMath::Lerp((float)Dest, (float)Interpolant.Y, Alpha);
+		uint16 DValue = static_cast<uint16>(FMath::Clamp<float>(Value, 0, LandscapeDataAccess::MaxValue));
 		if ((bRaiseTerrain && DValue > Dest) ||
 			(bLowerTerrain && DValue < Dest))
 		{
@@ -96,7 +97,7 @@ class FLandscapeToolRamp : public FLandscapeTool
 {
 protected:
 	FEdModeLandscape* EdMode;
-	UTexture2D* SpriteTexture;
+	TObjectPtr<UTexture2D> SpriteTexture;
 	FVector Points[2];
 	int8 NumPoints;
 	int8 SelectedPoint;
@@ -118,9 +119,9 @@ public:
 		Collector.AddReferencedObject(SpriteTexture);
 	}
 
-	virtual const TCHAR* GetToolName() override { return TEXT("Ramp"); }
-	virtual FText GetDisplayName() override { return NSLOCTEXT("UnrealEd", "LandscapeMode_Ramp", "Ramp"); };
-	virtual FText GetDisplayMessage() override { return NSLOCTEXT("UnrealEd", "LandscapeMode_Ramp_Message", "Create a ramp between two specified points, adding falloffs according to the settings. Note that this tool cannot use any brushes."); };
+	virtual const TCHAR* GetToolName() const override { return TEXT("Ramp"); }
+	virtual FText GetDisplayName() const override { return NSLOCTEXT("UnrealEd", "LandscapeMode_Ramp", "Ramp"); };
+	virtual FText GetDisplayMessage() const override { return NSLOCTEXT("UnrealEd", "LandscapeMode_Ramp_Message", "Create a ramp between two specified points, adding falloffs according to the settings. Note that this tool cannot use any brushes."); };
 
 	virtual void SetEditRenderType() override { GLandscapeEditRenderMode = ELandscapeEditRenderMode::None | (GLandscapeEditRenderMode & ELandscapeEditRenderMode::BitMaskForMask); }
 	virtual bool SupportsMask() override { return false; }
@@ -134,7 +135,7 @@ public:
 	{
 		NumPoints = 0;
 		SelectedPoint = INDEX_NONE;
-		GLevelEditorModeTools().SetWidgetMode(FWidget::WM_Translate);
+		GLevelEditorModeTools().SetWidgetMode(UE::Widget::WM_Translate);
 	}
 
 	virtual bool BeginTool(FEditorViewportClient* ViewportClient, const FLandscapeToolTarget& Target, const FVector& InHitLocation) override
@@ -145,7 +146,7 @@ public:
 			SelectedPoint = NumPoints;
 			NumPoints++;
 			bMovingPoint = true;
-			GLevelEditorModeTools().SetWidgetMode(FWidget::WM_Translate);
+			GLevelEditorModeTools().SetWidgetMode(UE::Widget::WM_Translate);
 		}
 		else
 		{
@@ -153,7 +154,7 @@ public:
 			{
 				Points[SelectedPoint] = InHitLocation;
 				bMovingPoint = true;
-				GLevelEditorModeTools().SetWidgetMode(FWidget::WM_Translate);
+				GLevelEditorModeTools().SetWidgetMode(UE::Widget::WM_Translate);
 			}
 		}
 
@@ -224,7 +225,7 @@ public:
 					{
 						HLandscapeRampToolPointHitProxy* PointHitProxy = (HLandscapeRampToolPointHitProxy*)HitProxy;
 						SelectedPoint = PointHitProxy->Point;
-						GLevelEditorModeTools().SetWidgetMode(FWidget::WM_Translate);
+						GLevelEditorModeTools().SetWidgetMode(UE::Widget::WM_Translate);
 						GUnrealEd->RedrawLevelEditingViewports();
 
 						bMovingPoint = true;
@@ -244,8 +245,8 @@ public:
 		{
 			if (SelectedPoint != INDEX_NONE)
 			{
-				const int32 MinX = FMath::FloorToInt(Points[SelectedPoint].X);
-				const int32 MinY = FMath::FloorToInt(Points[SelectedPoint].Y);
+				const int32 MinX = FMath::FloorToInt32(Points[SelectedPoint].X);
+				const int32 MinY = FMath::FloorToInt32(Points[SelectedPoint].Y);
 				const int32 MaxX = MinX + 1;
 				const int32 MaxY = MinY + 1;
 
@@ -341,11 +342,11 @@ public:
 			float SpriteScale = EdMode->UISettings->RampWidth / 4;
 			if (NumPoints > 1)
 			{
-				SpriteScale = FMath::Min(SpriteScale, (WorldPoints[1] - WorldPoints[0]).Size() / 2);
+				SpriteScale = FMath::Min(SpriteScale, static_cast<float>((WorldPoints[1] - WorldPoints[0]).Size() / 2));
 			}
 			SpriteScale = FMath::Clamp<float>(SpriteScale, 10, 500);
 
-			for (int32 i = 0; i < NumPoints; i++)
+			for (int8 i = 0; i < NumPoints; i++)
 			{
 				const FLinearColor SpriteColor = (i == SelectedPoint) ? SelectedSpriteColor : FLinearColor::White;
 
@@ -353,11 +354,11 @@ public:
 				PDI->DrawSprite(WorldPoints[i],
 					SpriteScale,
 					SpriteScale,
-					SpriteTexture->Resource,
+					SpriteTexture->GetResource(),
 					SpriteColor,
 					SDPG_Foreground,
-					0, SpriteTexture->Resource->GetSizeX(),
-					0, SpriteTexture->Resource->GetSizeY(),
+					0, static_cast<float>(SpriteTexture->GetResource()->GetSizeX()),
+					0, static_cast<float>(SpriteTexture->GetResource()->GetSizeY()),
 					SE_BLEND_Masked);
 			}
 			PDI->SetHitProxy(NULL);
@@ -432,11 +433,11 @@ public:
 		return false;
 	}
 
-	virtual EAxisList::Type GetWidgetAxisToDraw(FWidget::EWidgetMode CheckMode) const override
+	virtual EAxisList::Type GetWidgetAxisToDraw(UE::Widget::EWidgetMode CheckMode) const override
 	{
 		if (SelectedPoint != INDEX_NONE)
 		{
-			if (CheckMode == FWidget::WM_Translate)
+			if (CheckMode == UE::Widget::WM_Translate)
 			{
 				return EAxisList::XYZ;
 			}
@@ -490,7 +491,7 @@ public:
 
 		FScopedTransaction Transaction(LOCTEXT("Ramp_Apply", "Landscape Editing: Add ramp"));
 		ALandscape* Landscape = EdMode->GetLandscape();
-		FScopedSetLandscapeEditingLayer Scope(Landscape, EdMode->GetCurrentLayerGuid(), [&] { if (Landscape) { Landscape->RequestLayersContentUpdate(ELandscapeLayerUpdateMode::Update_Heightmap_All); } });
+		FGuid EditLayerGUID = EdMode->GetCurrentLayerGuid();
 
 		const ULandscapeInfo* LandscapeInfo = EdMode->CurrentToolTarget.LandscapeInfo.Get();
 		const ALandscapeProxy* LandscapeProxy = LandscapeInfo->GetLandscapeProxy();
@@ -512,14 +513,15 @@ public:
 		OuterVerts[1][0] = FVector2D(Points[1]) - OuterSide;
 		OuterVerts[1][1] = FVector2D(Points[1]) + OuterSide;
 
-		float Heights[2];
-		Heights[0] = Points[0].Z * LANDSCAPE_INV_ZSCALE + LandscapeDataAccess::MidValue;
-		Heights[1] = Points[1].Z * LANDSCAPE_INV_ZSCALE + LandscapeDataAccess::MidValue;
+		const double Heights[2] = {
+			Points[0].Z * LANDSCAPE_INV_ZSCALE + LandscapeDataAccess::MidValue,
+			Points[1].Z * LANDSCAPE_INV_ZSCALE + LandscapeDataAccess::MidValue
+		};
 
-		int32 MinX = FMath::CeilToInt(FMath::Min(FMath::Min(OuterVerts[0][0].X, OuterVerts[0][1].X), FMath::Min(OuterVerts[1][0].X, OuterVerts[1][1].X))) - 1; // +/- 1 to make sure we have enough data for calculating correct normals
-		int32 MinY = FMath::CeilToInt(FMath::Min(FMath::Min(OuterVerts[0][0].Y, OuterVerts[0][1].Y), FMath::Min(OuterVerts[1][0].Y, OuterVerts[1][1].Y))) - 1;
-		int32 MaxX = FMath::FloorToInt(FMath::Max(FMath::Max(OuterVerts[0][0].X, OuterVerts[0][1].X), FMath::Max(OuterVerts[1][0].X, OuterVerts[1][1].X))) + 1;
-		int32 MaxY = FMath::FloorToInt(FMath::Max(FMath::Max(OuterVerts[0][0].Y, OuterVerts[0][1].Y), FMath::Max(OuterVerts[1][0].Y, OuterVerts[1][1].Y))) + 1;
+		int32 MinX = FMath::CeilToInt32(FMath::Min(FMath::Min(OuterVerts[0][0].X, OuterVerts[0][1].X), FMath::Min(OuterVerts[1][0].X, OuterVerts[1][1].X))) - 1; // +/- 1 to make sure we have enough data for calculating correct normals
+		int32 MinY = FMath::CeilToInt32(FMath::Min(FMath::Min(OuterVerts[0][0].Y, OuterVerts[0][1].Y), FMath::Min(OuterVerts[1][0].Y, OuterVerts[1][1].Y))) - 1;
+		int32 MaxX = FMath::FloorToInt32(FMath::Max(FMath::Max(OuterVerts[0][0].X, OuterVerts[0][1].X), FMath::Max(OuterVerts[1][0].X, OuterVerts[1][1].X))) + 1;
+		int32 MaxY = FMath::FloorToInt32(FMath::Max(FMath::Max(OuterVerts[0][0].Y, OuterVerts[0][1].Y), FMath::Max(OuterVerts[1][0].Y, OuterVerts[1][1].Y))) + 1;
 
 		// I'd dearly love to use FIntRect in this code, but Landscape works with "Inclusive Max" and FIntRect is "Exclusive Max"
 		int32 LandscapeMinX, LandscapeMinY, LandscapeMaxX, LandscapeMaxY;
@@ -539,9 +541,12 @@ public:
 			return;
 		}
 
-		FLandscapeEditDataInterface LandscapeEdit(EdMode->CurrentToolTarget.LandscapeInfo.Get());
+		// construct the caches, and set them to work in the EditLayer
+		FLandscapeEditDataInterface LandscapeEdit(EdMode->CurrentToolTarget.LandscapeInfo.Get(), EditLayerGUID);
 		FLandscapeHeightCache HeightCache(EdMode->CurrentToolTarget);
 		FLandscapeLayerDataCache<FHeightmapToolTarget> LayerHeightDataCache(EdMode->CurrentToolTarget, HeightCache);
+		LayerHeightDataCache.SetCacheEditingLayer(EditLayerGUID);
+
 		const bool bCombinedLayerOperation = EdMode->UISettings->bCombinedLayersOperation && Landscape && Landscape->HasLayersContent();
 		LayerHeightDataCache.Initialize(EdMode->CurrentToolTarget.LandscapeInfo.Get(), bCombinedLayerOperation);
 
@@ -597,7 +602,7 @@ public:
 					for (ULandscapeComponent* Component : Components)
 					{
 						// Recreate collision for modified components and update the navmesh
-						ULandscapeHeightfieldCollisionComponent* CollisionComponent = Component->CollisionComponent.Get();
+						ULandscapeHeightfieldCollisionComponent* CollisionComponent = Component->GetCollisionComponent();
 						if (CollisionComponent)
 						{
 							CollisionComponent->RecreateCollision();
@@ -607,6 +612,10 @@ public:
 				}
 			}
 		}
+ 		if (Landscape)
+ 		{
+ 			Landscape->RequestLayersContentUpdate(ELandscapeLayerUpdateMode::Update_Heightmap_All);
+ 		}
 	}
 
 	bool CanApplyRamp()

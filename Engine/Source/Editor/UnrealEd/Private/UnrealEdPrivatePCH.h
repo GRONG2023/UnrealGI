@@ -23,18 +23,15 @@
 #include "Misc/VarArgs.h"
 #include "HAL/PlatformAtomics.h"
 #include "GenericPlatform/GenericPlatformAtomics.h"
-#include "Templates/AreTypesEqual.h"
 #include "Templates/UnrealTypeTraits.h"
 #include "Templates/AndOrNot.h"
 #include "Templates/IsArithmetic.h"
-#include "Templates/RemoveCV.h"
 #include "Templates/IsPODType.h"
 #include "Templates/IsTriviallyCopyConstructible.h"
 #include "Templates/UnrealTemplate.h"
 #include "Templates/EnableIf.h"
 #include "Templates/RemoveReference.h"
 #include "Templates/TypeCompatibleBytes.h"
-#include "Templates/ChooseClass.h"
 #include "Templates/IntegralConstant.h"
 #include "Templates/IsClass.h"
 #include "Traits/IsContiguousContainer.h"
@@ -209,7 +206,6 @@
 #include "Misc/Paths.h"
 #include "Misc/CoreStats.h"
 #include "Templates/ScopedCallback.h"
-#include "Misc/ITransaction.h"
 #include "Serialization/CustomVersion.h"
 #include "Misc/OutputDeviceError.h"
 #include "Misc/ObjectThumbnail.h"
@@ -272,6 +268,7 @@
 #include "UObject/UObjectMarks.h"
 #include "UObject/Class.h"
 #include "UObject/GarbageCollection.h"
+#include "UObject/GeneratedCppIncludes.h"
 #include "Serialization/ArchiveUObject.h"
 #include "UObject/CoreNative.h"
 #include "UObject/WeakObjectPtr.h"
@@ -396,7 +393,6 @@
 #include "Framework/Text/ShapedTextCacheFwd.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Application/MenuStack.h"
-#include "Runtime/Slate/Private/Framework/Application/Menu.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Input/SCheckBox.h"
 #include "Framework/Docking/TabManager.h"
@@ -434,7 +430,6 @@
 // From RenderCore:
 #include "RenderCommandFence.h"
 #include "RenderResource.h"
-#include "RenderCore.h"
 #include "RenderingThread.h"
 #include "UniformBuffer.h"
 #include "PackedNormal.h"
@@ -448,10 +443,10 @@
 #include "IMessageContext.h"
 
 // From AssetRegistry:
-#include "AssetData.h"
-#include "IAssetRegistry.h"
-#include "AssetRegistryModule.h"
-#include "ARFilter.h"
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/IAssetRegistry.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/ARFilter.h"
 
 // From Internationalization:
 #include "LocTextHelper.h"
@@ -468,7 +463,6 @@
 #include "Engine/MaterialMerging.h"
 #include "Engine/Level.h"
 #include "GameFramework/Actor.h"
-#include "ComponentInstanceDataCache.h"
 #include "Components/ActorComponent.h"
 #include "Components/SceneComponent.h"
 #include "EngineDefines.h"
@@ -476,7 +470,9 @@
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintCore.h"
 #include "AI/Navigation/NavigationTypes.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "NavFilters/NavigationQueryFilter.h"
+#endif
 #include "Engine/LatentActionManager.h"
 #include "Engine/World.h"
 #include "WorldCollision.h"
@@ -588,7 +584,6 @@
 #include "Engine/Polys.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "Animation/SkeletalMeshActor.h"
-#include "Matinee/MatineeAnimInterface.h"
 #include "Engine/LevelStreaming.h"
 #include "LatentActions.h"
 #include "PreviewScene.h"
@@ -606,9 +601,6 @@
 #include "Components/LightComponent.h"
 #include "Components/LightComponentBase.h"
 
-// From EditorStyle:
-#include "EditorStyleSet.h"
-
 // From BlueprintGraph:
 #include "BlueprintNodeSignature.h"
 #include "K2Node.h"
@@ -617,7 +609,6 @@
 
 // From UnrealEd:
 #include "Editor/UnrealEdTypes.h"
-#include "Editor/Transactor.h"
 #include "Settings/LevelEditorViewportSettings.h"
 #include "Viewports.h"
 #include "Editor/EditorEngine.h"
@@ -625,7 +616,7 @@
 #include "Editor.h"
 #include "Factories/Factory.h"
 #include "TickableEditorObject.h"
-#include "UnrealWidget.h"
+#include "UnrealWidgetFwd.h"
 #include "EditorComponents.h"
 #include "Toolkits/IToolkit.h"
 #include "AssetThumbnail.h"

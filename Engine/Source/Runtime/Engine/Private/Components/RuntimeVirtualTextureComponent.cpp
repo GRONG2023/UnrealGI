@@ -2,22 +2,59 @@
 
 #include "Components/RuntimeVirtualTextureComponent.h"
 
-#include "Components/PrimitiveComponent.h"
+#include "Async/TaskGraphInterfaces.h"
 #include "GameDelegates.h"
+#include "Engine/Texture.h"
+#include "Engine/World.h"
 #include "Logging/MessageLog.h"
+#include "GameFramework/Actor.h"
 #include "Misc/UObjectToken.h"
 #include "Misc/MapErrors.h"
 #include "SceneInterface.h"
+#include "UObject/UObjectIterator.h"
+#include "UObject/UnrealType.h"
 #include "VT/RuntimeVirtualTexture.h"
+#include "VT/VirtualTexture.h"
 #include "VT/VirtualTextureBuilder.h"
+#include "RenderUtils.h"
+#include "RHIGlobals.h"
+#include "SceneUtils.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(RuntimeVirtualTextureComponent)
 
 #define LOCTEXT_NAMESPACE "URuntimeVirtualTextureComponent"
 
 URuntimeVirtualTextureComponent::URuntimeVirtualTextureComponent(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
+	, EnableInGamePerPlatform(true)
 	, SceneProxy(nullptr)
 {
 	Mobility = EComponentMobility::Stationary;
+}
+
+void URuntimeVirtualTextureComponent::BeginDestroy()
+{
+	Super::BeginDestroy();
+	
+	// Queuing up a render fence means that we will have cleaned up the scene proxy/virtual texture producer before finishing the destroy.
+	// This means that any transcode tasks will have finished *before* we garbage collect our StreamingTexture.
+	// That's important because the transcode tasks reference the FVirtualTextureBuiltData from the StreamingTexture.
+	DestroyFence.BeginFence();
+}
+
+bool URuntimeVirtualTextureComponent::IsReadyForFinishDestroy()
+{
+	bool bResult = Super::IsReadyForFinishDestroy() && DestroyFence.IsFenceComplete();
+	return bResult;
+}
+
+bool URuntimeVirtualTextureComponent::IsActiveInWorld() const
+{
+	UWorld* World = GetWorld();
+	return ((World != nullptr) 
+		&& ((World->WorldType == EWorldType::Game) 
+			|| (World->WorldType == EWorldType::Editor) 
+			|| (World->WorldType == EWorldType::PIE)));
 }
 
 #if WITH_EDITOR
@@ -25,6 +62,7 @@ URuntimeVirtualTextureComponent::URuntimeVirtualTextureComponent(const FObjectIn
 void URuntimeVirtualTextureComponent::OnRegister()
 {
 	Super::OnRegister();
+
 	// PIE duplicate will take ownership of the URuntimeVirtualTexture, so we add a delegate to be called when PIE finishes allowing us to retake ownership.
 	PieEndDelegateHandle = FGameDelegates::Get().GetEndPlayMapDelegate().AddUObject(this, &URuntimeVirtualTextureComponent::MarkRenderStateDirty);
 }
@@ -39,6 +77,12 @@ void URuntimeVirtualTextureComponent::OnUnregister()
 
 #endif
 
+void URuntimeVirtualTextureComponent::SetVirtualTexture(URuntimeVirtualTexture* InVirtualTexture) 
+{
+	VirtualTexture = InVirtualTexture; 
+	MarkRenderStateDirty();
+}
+
 void URuntimeVirtualTextureComponent::GetHidePrimitiveSettings(bool& OutHidePrimitiveEditor, bool& OutHidePrimitiveGame) const
 {
 	OutHidePrimitiveEditor = bHidePrimitives;
@@ -47,9 +91,10 @@ void URuntimeVirtualTextureComponent::GetHidePrimitiveSettings(bool& OutHidePrim
 	HidePrimitivesDelegate.Broadcast(OutHidePrimitiveEditor, OutHidePrimitiveGame);
 }
 
-bool URuntimeVirtualTextureComponent::IsVisible() const
+bool URuntimeVirtualTextureComponent::ShouldCreateRenderState() const
 {
-	return Super::IsVisible() && UseVirtualTexturing(GetScene()->GetFeatureLevel());
+	// Make sure to have the component do nothing if VT is disabled or if the world is not compatible with RVT
+	return Super::ShouldCreateRenderState() && IsActiveInWorld() && UseVirtualTexturing(GetScene()->GetShaderPlatform());
 }
 
 void URuntimeVirtualTextureComponent::ApplyWorldOffset(const FVector& InOffset, bool bWorldShift)
@@ -61,7 +106,7 @@ void URuntimeVirtualTextureComponent::ApplyWorldOffset(const FVector& InOffset, 
 
 void URuntimeVirtualTextureComponent::CreateRenderState_Concurrent(FRegisterComponentContext* Context)
 {
-	if (ShouldRender() && VirtualTexture != nullptr)
+	if (VirtualTexture != nullptr)
 	{
 		// This will modify the URuntimeVirtualTexture and allocate its VT
 		GetScene()->AddRuntimeVirtualTexture(this);
@@ -72,7 +117,7 @@ void URuntimeVirtualTextureComponent::CreateRenderState_Concurrent(FRegisterComp
 
 void URuntimeVirtualTextureComponent::SendRenderTransform_Concurrent()
 {
-	if (ShouldRender() && VirtualTexture != nullptr)
+	if (IsRenderStateCreated())
 	{
 		// We do a full recreate of the URuntimeVirtualTexture here which can cause a visual glitch.
 		// We do this because, for an arbitrary transform, there is no way to only modify the transform and maintain the VT contents.
@@ -91,15 +136,47 @@ void URuntimeVirtualTextureComponent::DestroyRenderState_Concurrent()
 	Super::DestroyRenderState_Concurrent();
 }
 
+bool URuntimeVirtualTextureComponent::IsEnabledInScene() const
+{
+	const bool bUseNanite = UseNanite(GetScene()->GetShaderPlatform());
+	if (bEnableForNaniteOnly && !bUseNanite)
+	{
+		return false;
+	}
+
+	if (UWorld* World = GetWorld())
+	{
+		if (World->WorldType == EWorldType::Game || World->WorldType == EWorldType::PIE)
+		{
+			if (!EnableInGamePerPlatform.GetValue())
+			{
+				return false;
+			}
+		}
+	}
+
+	return true;
+}
+
 void URuntimeVirtualTextureComponent::Invalidate(FBoxSphereBounds const& InWorldBounds)
 {
-	GetScene()->InvalidateRuntimeVirtualTexture(this, InWorldBounds);
+	if (GetScene() != nullptr)
+	{
+		GetScene()->InvalidateRuntimeVirtualTexture(this, InWorldBounds);
+	}
 }
 
 FBoxSphereBounds URuntimeVirtualTextureComponent::CalcBounds(const FTransform& LocalToWorld) const
 {
 	return FBoxSphereBounds(FBox(FVector(0.f, 0.f, 0.f), FVector(1.f, 1.f, 1.f))).TransformBy(LocalToWorld);
 }
+
+#if WITH_EDITOR
+void URuntimeVirtualTextureComponent::SetBoundsAlignActor(AActor* InActor)
+{
+	BoundsAlignActor = InActor;
+}
+#endif
 
 FTransform URuntimeVirtualTextureComponent::GetTexelSnapTransform() const
 {
@@ -123,59 +200,146 @@ uint64 URuntimeVirtualTextureComponent::CalculateStreamingTextureSettingsHash() 
 		uint64 PackedValue;
 		struct
 		{
+			uint32 PackedSettingsVersion : 4;
 			uint32 MaterialType : 4;
 			uint32 TileSize : 12;
 			uint32 TileBorderSize : 4;
-			uint32 StreamLowMips : 4;
 			uint32 LODGroup : 8;
 			uint32 CompressTextures : 1;
 			uint32 SinglePhysicalSpace : 1;
-			uint32 EnableCompressCrunch : 1;
 			uint32 ContinuousUpdate : 1;
+			uint32 bUseLowQualityCompression : 1;
+			uint32 LossyCompressionAmount : 4;
 		};
 	};
 
 	FPackedSettings Settings;
 	Settings.PackedValue = 0;
+	Settings.PackedSettingsVersion = 2;
 	Settings.MaterialType = (uint32)VirtualTexture->GetMaterialType();
 	Settings.TileSize = (uint32)VirtualTexture->GetTileSize();
 	Settings.TileBorderSize = (uint32)VirtualTexture->GetTileBorderSize();
-	Settings.StreamLowMips = (uint32)StreamLowMips;
 	Settings.LODGroup = (uint32)VirtualTexture->GetLODGroup();
 	Settings.CompressTextures = (uint32)VirtualTexture->GetCompressTextures();
 	Settings.ContinuousUpdate = (uint32)VirtualTexture->GetContinuousUpdate();
 	Settings.SinglePhysicalSpace = (uint32)VirtualTexture->GetSinglePhysicalSpace();
-	Settings.EnableCompressCrunch = (uint32)bEnableCompressCrunch;
+	Settings.bUseLowQualityCompression = (uint32)VirtualTexture->GetLQCompression();
+	Settings.LossyCompressionAmount = (uint32)GetLossyCompressionAmount();
 
 	return Settings.PackedValue;
 }
 
-bool URuntimeVirtualTextureComponent::IsStreamingTextureValid() const
+bool URuntimeVirtualTextureComponent::IsStreamingLowMips(EShadingPath ShadingPath) const
 {
-	return VirtualTexture != nullptr && StreamingTexture != nullptr && StreamingTexture->Texture != nullptr && StreamingTexture->BuildHash == CalculateStreamingTextureSettingsHash();
-}
-
-bool URuntimeVirtualTextureComponent::IsStreamingLowMips() const
-{
+	checkf(IsActiveInWorld(), TEXT("This function should never be called for a world where we're inactive"));
+	
 #if WITH_EDITOR
-	if (!bUseStreamingLowMipsInEditor)
+	if (!bUseStreamingLowMipsInEditor && GIsEditor)
 	{
 		return false;
 	}
 #endif
-	return StreamLowMips > 0 && IsStreamingTextureValid();
+	return VirtualTexture != nullptr && StreamingTexture != nullptr && StreamingTexture->GetVirtualTexture(ShadingPath) != nullptr;
+}
+
+bool IsCompatibleFormat(URuntimeVirtualTexture const& RuntimeVirtualTexture, UVirtualTexture2D const& StreamingVirtualTexture)
+{
+	// During texture compilation we can't validate anything other than first layer, so restrict validation to that.
+	// This should catch any 99% of issues anyway. 
+	return (RuntimeVirtualTexture.GetLayerFormat(0) == StreamingVirtualTexture.GetPixelFormat(0));
+}
+
+bool URuntimeVirtualTextureComponent::IsStreamingTextureInvalid(EShadingPath ShadingPath) const
+{
+	checkf(IsActiveInWorld(), TEXT("This function should never be called for a world where we're inactive"));
+
+	return 
+		VirtualTexture != nullptr && 
+		StreamingTexture != nullptr && 
+		StreamingTexture->GetVirtualTexture(ShadingPath) != nullptr && 
+		(StreamingTexture->BuildHash != CalculateStreamingTextureSettingsHash() || !IsCompatibleFormat(*VirtualTexture, *StreamingTexture->GetVirtualTexture(ShadingPath)));
 }
 
 #if WITH_EDITOR
 
-void URuntimeVirtualTextureComponent::InitializeStreamingTexture(uint32 InSizeX, uint32 InSizeY, uint8* InData)
+bool URuntimeVirtualTextureComponent::IsStreamingTextureInvalid() const
+{
+	return IsStreamingTextureInvalid(EShadingPath::Mobile) || IsStreamingTextureInvalid(EShadingPath::Deferred);
+}
+
+FLinearColor URuntimeVirtualTextureComponent::GetStreamingMipsFixedColor() const 
+{
+	if (!bUseStreamingMipsFixedColor)
+	{
+		return FLinearColor::Transparent;
+	} 
+	
+	FLinearColor Color(StreamingMipsFixedColor);
+	Color.A = 1.f;
+	return Color;
+}
+
+// RAII class to release and recreate runtime virtual texture producers associated with a UVirtualTextureBuilder.
+// Required around modifications of a UVirtualTextureBuilder because virtual producers hold pointers to the internal data.
+class FScopedRuntimeVirtualTextureRecreate
+{
+public:
+	FScopedRuntimeVirtualTextureRecreate(UVirtualTextureBuilder* VirtualTextureBuilder)
+	{
+		for (TObjectIterator<URuntimeVirtualTextureComponent> It(RF_ClassDefaultObject, false, EInternalObjectFlags::Garbage); It; ++It)
+		{
+			if (It->GetStreamingTexture() == VirtualTextureBuilder)
+			{
+				URuntimeVirtualTexture* VirtualTexture = It->GetVirtualTexture();
+				if (VirtualTexture != nullptr)
+				{
+					VirtualTextures.Add(VirtualTexture);
+					VirtualTexture->Release();
+				}
+			}
+		}
+	}
+
+	~FScopedRuntimeVirtualTextureRecreate()
+	{
+		for (URuntimeVirtualTexture* VirtualTexture : VirtualTextures)
+		{
+			// PostEditChange will trigger the correct notifications and recreation of virtual texture producers.
+			VirtualTexture->PostEditChange();
+		}
+	}
+
+private:
+	TArray<URuntimeVirtualTexture*> VirtualTextures;
+};
+
+static TextureCompressionSettings GetCompressionSettingFromLayerFormat(EPixelFormat LayerFormat)
+{
+	switch (LayerFormat)
+	{
+	case PF_BC5: return TC_Normalmap;
+	case PF_BC4: return TC_Alpha;
+	case PF_G16: return TC_Grayscale;
+	}
+	return TC_Default;
+}
+
+static void GetLayerFormatSettings(FTextureFormatSettings& OutFormatSettings, EPixelFormat LayerFormat, bool IsLayerYCoCg, bool IsLayerSRGB, bool IsLayerLQCompression)
+{
+	OutFormatSettings.CompressionSettings = IsLayerLQCompression ? TC_LQ : GetCompressionSettingFromLayerFormat(LayerFormat);
+	OutFormatSettings.CompressionNone = LayerFormat == PF_B8G8R8A8 || LayerFormat == PF_G16;
+	OutFormatSettings.CompressionNoAlpha = LayerFormat == PF_DXT1 || LayerFormat == PF_BC5 || LayerFormat == PF_R5G6B5_UNORM;
+	OutFormatSettings.CompressionForceAlpha = LayerFormat == PF_DXT5;
+	OutFormatSettings.CompressionYCoCg = IsLayerYCoCg;
+	OutFormatSettings.SRGB = IsLayerSRGB;
+}
+
+void URuntimeVirtualTextureComponent::InitializeStreamingTexture(EShadingPath ShadingPath, uint32 InSizeX, uint32 InSizeY, uint8* InData)
 {
 	// We need an existing StreamingTexture object to update.
-	if (VirtualTexture != nullptr && StreamingTexture != nullptr)
+	if (IsActiveInWorld() && VirtualTexture != nullptr && StreamingTexture != nullptr)
 	{
-		// Release current runtime virtual texture producer.
-		// It may reference data inside the old StreamingTexture which could be garbage collected any time from now.
-		VirtualTexture->Release();
+		FScopedRuntimeVirtualTextureRecreate ProducerRecreate(StreamingTexture);
 
 		FVirtualTextureBuildDesc BuildDesc;
 		BuildDesc.bContinuousUpdate = VirtualTexture->GetContinuousUpdate();
@@ -184,23 +348,19 @@ void URuntimeVirtualTextureComponent::InitializeStreamingTexture(uint32 InSizeX,
 		BuildDesc.TileSize = VirtualTexture->GetTileSize();
 		BuildDesc.TileBorderSize = VirtualTexture->GetTileBorderSize();
 		BuildDesc.LODGroup = VirtualTexture->GetLODGroup();
-		BuildDesc.bCrunchCompressed = bEnableCompressCrunch;
+		BuildDesc.LossyCompressionAmount = GetLossyCompressionAmount();
 
 		BuildDesc.LayerCount = VirtualTexture->GetLayerCount();
 		check(BuildDesc.LayerCount <= RuntimeVirtualTexture::MaxTextureLayers);
 		BuildDesc.LayerFormats.AddDefaulted(BuildDesc.LayerCount);
 		BuildDesc.LayerFormatSettings.AddDefaulted(BuildDesc.LayerCount);
 
-		for (int32 Layer = 0; Layer < BuildDesc.LayerCount; Layer++)
+		for (int32 Layer = 0; Layer < BuildDesc.LayerCount; Layer++) 
 		{
 			const EPixelFormat LayerFormat = VirtualTexture->GetLayerFormat(Layer);
-			BuildDesc.LayerFormats[Layer] = LayerFormat == PF_G16 ? TSF_G16 : TSF_BGRA8;
-
-			BuildDesc.LayerFormatSettings[Layer].CompressionSettings = LayerFormat == PF_BC5 ? TC_Normalmap : TC_Default;
-			BuildDesc.LayerFormatSettings[Layer].CompressionNone = LayerFormat == PF_B8G8R8A8 || LayerFormat == PF_G16;
-			BuildDesc.LayerFormatSettings[Layer].CompressionNoAlpha = LayerFormat == PF_DXT1 || LayerFormat == PF_BC5;
-			BuildDesc.LayerFormatSettings[Layer].CompressionYCoCg = VirtualTexture->IsLayerYCoCg(Layer);
-			BuildDesc.LayerFormatSettings[Layer].SRGB = VirtualTexture->IsLayerSRGB(Layer);
+			BuildDesc.LayerFormats[Layer] = LayerFormat == PF_G16 || LayerFormat == PF_BC4 ? TSF_G16 : TSF_BGRA8;
+			bool IsLayerLQCompression = (VirtualTexture->GetMaterialType() == ERuntimeVirtualTextureMaterialType::BaseColor_Normal_Roughness && VirtualTexture->GetLQCompression() && LayerFormat != PF_B8G8R8A8);
+			GetLayerFormatSettings(BuildDesc.LayerFormatSettings[Layer], LayerFormat, VirtualTexture->IsLayerYCoCg(Layer), VirtualTexture->IsLayerSRGB(Layer), IsLayerLQCompression);
 		}
 
 		BuildDesc.BuildHash = CalculateStreamingTextureSettingsHash();
@@ -209,24 +369,17 @@ void URuntimeVirtualTextureComponent::InitializeStreamingTexture(uint32 InSizeX,
 		BuildDesc.InSizeY = InSizeY;
 		BuildDesc.InData = InData;
 
+		StreamingTexture->BuildTexture(ShadingPath, BuildDesc);
 		StreamingTexture->Modify();
-		StreamingTexture->BuildTexture(BuildDesc);
-
-		// Trigger refresh of the runtime virtual texture producer.
-		VirtualTexture->PostEditChange();
 	}
 }
 
 bool URuntimeVirtualTextureComponent::CanEditChange(const FProperty* InProperty) const
 {
 	bool bCanEdit = Super::CanEditChange(InProperty);
-	if (InProperty->GetFName() == TEXT("bEnableCompressCrunch"))
+	if (InProperty->GetFName() == TEXT("bUseStreamingLowMipsInEditor"))
 	{
-		bCanEdit &= NumStreamingMips() > 0 && GetVirtualTexture() != nullptr && GetVirtualTexture()->GetCompressTextures();
-	}
-	else if (InProperty->GetFName() == TEXT("bUseStreamingLowMipsInEditor"))
-	{
-		bCanEdit &= GetStreamingTexture() != nullptr && NumStreamingMips() > 0;
+		bCanEdit &= GetVirtualTexture() != nullptr && GetStreamingTexture() != nullptr;
 	}
 	return bCanEdit;
 }
@@ -236,7 +389,7 @@ void URuntimeVirtualTextureComponent::CheckForErrors()
 	Super::CheckForErrors();
 
 	// Check if streaming texture has been built with the latest settings. If not then it won't be used which would cause a performance regression.
-	if (VirtualTexture != nullptr && StreamingTexture != nullptr && StreamingTexture->Texture != nullptr && StreamingTexture->BuildHash != CalculateStreamingTextureSettingsHash())
+	if (IsActiveInWorld() && IsStreamingTextureInvalid())
 	{
 		FMessageLog("MapCheck").PerformanceWarning()
 			->AddToken(FUObjectToken::Create(this))
@@ -248,3 +401,4 @@ void URuntimeVirtualTextureComponent::CheckForErrors()
 #endif
 
 #undef LOCTEXT_NAMESPACE
+

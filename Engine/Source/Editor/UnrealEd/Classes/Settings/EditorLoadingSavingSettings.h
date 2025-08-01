@@ -11,7 +11,7 @@
 UENUM()
 namespace ELoadLevelAtStartup
 {
-	enum Type
+	enum Type : int
 	{
 		None,
 		ProjectDefault,
@@ -19,6 +19,28 @@ namespace ELoadLevelAtStartup
 	};
 }
 
+
+UENUM()
+enum class EAutoSaveMethod : uint8
+{
+	/** Autosave to a backup location and offer to restore after an editor crash */
+	BackupAndRestore,
+	/** Autosave in-place, overwriting your existing content after backing up the current file (BETA) */
+	BackupAndOverwrite,
+};
+
+UENUM()
+enum class ERestoreOpenAssetTabsMethod : uint8
+{
+	/** Always prompt the user if they want to restore previously opened asset tabs on launch */
+	AlwaysPrompt = 0,
+	
+	/** Always automatically restore any previously opened asset tabs on launch */
+	AlwaysRestore = 1,
+
+	/** Never restore previously opened asset tabs on launch */
+	NeverRestore = 2
+};
 
 /** A filter used by the auto reimport manager to explicitly include/exclude files matching the specified wildcard */
 USTRUCT()
@@ -32,7 +54,7 @@ struct FAutoReimportWildcard
 	
 	/** When true, files that match this wildcard will be included (if it doesn't fail any other filters), when false, matches will be excluded from the reimporter */
 	UPROPERTY(EditAnywhere, config, Category=AutoReimport)
-	bool bInclude=false;
+	bool bInclude = false;
 };
 
 
@@ -54,11 +76,11 @@ struct FAutoReimportDirectoryConfig
 	UPROPERTY(EditAnywhere, config, Category=AutoReimport, meta=(DisplayName="Include/Exclude Wildcards", ToolTip="(Optional) Specify a set of wildcards to include or exclude files from this auto-reimporter."))
 	TArray<FAutoReimportWildcard> Wildcards;
 
-	struct UNREALED_API FParseContext
+	struct FParseContext
 	{
 		TArray<TPair<FString, FString>> MountedPaths;
 		bool bEnableLogging;
-		FParseContext(bool bInEnableLogging = true);
+		UNREALED_API FParseContext(bool bInEnableLogging = true);
 	};
 
 	/** Parse and validate the specified source directory / mount point combination */
@@ -69,8 +91,8 @@ struct FAutoReimportDirectoryConfig
 /**
  * Implements the Level Editor's loading and saving settings.
  */
-UCLASS(config=EditorPerProjectUserSettings, autoexpandcategories=(AutoSave, AutoReimport, Blueprints))
-class UNREALED_API UEditorLoadingSavingSettings
+UCLASS(config=EditorPerProjectUserSettings, autoexpandcategories=(AutoSave, AutoReimport, Blueprints), MinimalAPI)
+class UEditorLoadingSavingSettings
 	: public UObject
 {
 	GENERATED_UCLASS_BODY()
@@ -85,9 +107,15 @@ public:
 	UPROPERTY(EditAnywhere, config, Category=Startup)
 	uint32 bForceCompilationAtStartup:1;
 
-	/** Whether to restore previously open assets at startup */
+	/** Whether to restore previously open assets at startup after a clean shutdown */
 	UPROPERTY(EditAnywhere, config, Category=Startup)
-	uint32 bRestoreOpenAssetTabsOnRestart:1;
+	ERestoreOpenAssetTabsMethod RestoreOpenAssetTabsOnRestart = ERestoreOpenAssetTabsMethod::AlwaysPrompt;
+
+#if WITH_EDITOR
+	/** Whether to restore previously open assets at startup */
+	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "Use RestoreOpenAssetTabsOnRestart instead"))
+	uint32 bRestoreOpenAssetTabsOnRestart_DEPRECATED:1;
+#endif
 
 private:
 
@@ -113,7 +141,7 @@ public:
 	bool bAutoCreateAssets;
 	UPROPERTY(EditAnywhere, config, AdvancedDisplay, Category=AutoReimport, meta=(DisplayName="Auto Delete Assets", ToolTip="When enabled, deleting a source content file will automatically prompt the deletion of any related assets."))
 	bool bAutoDeleteAssets;
-	UPROPERTY(EditAnywhere, config, AdvancedDisplay, Category=AutoReimport, meta=(DisplayName="Detect Changes On Startup", ToolTip="When enabled, changes to monitored directories since UE4 was closed will be detected on restart.\n(Not recommended when working in collaboration with others using source control)."))
+	UPROPERTY(EditAnywhere, config, AdvancedDisplay, Category=AutoReimport, meta=(DisplayName="Detect Changes On Startup", ToolTip="When enabled, changes to monitored directories since UE was closed will be detected on restart.\n(Not recommended when working in collaboration with others using revision control)."))
 	bool bDetectChangesOnStartup;
 	UPROPERTY(EditAnywhere, config, AdvancedDisplay, Category=AutoReimport, meta=(DisplayName="Prompt Before Action", ToolTip="Whether to prompt the user to import detected changes."))
 	bool bPromptBeforeAutoImporting;
@@ -150,6 +178,10 @@ public:
 	UPROPERTY(EditAnywhere, config, Category=AutoSave, meta=(DisplayName="Save Content"))
 	uint32 bAutoSaveContent:1;
 
+	/** What method should be used when performing an autosave? */
+	UPROPERTY(EditAnywhere, config, Category=AutoSave, meta=(DisplayName="Save Method"), AdvancedDisplay)
+	EAutoSaveMethod AutoSaveMethod = EAutoSaveMethod::BackupAndRestore;
+
 	/** The time interval after which to auto save */
 	UPROPERTY(EditAnywhere, config, Category=AutoSave, meta=(DisplayName="Frequency in Minutes", ClampMin = "1"))
 	int32 AutoSaveTimeMinutes;
@@ -161,6 +193,10 @@ public:
 	/** The number of seconds warning before an autosave*/
 	UPROPERTY(EditAnywhere, config, Category=AutoSave, meta=(DisplayName="Warning in seconds", ClampMin = "0", UIMin = "0", UIMax = "20"))
 	int32 AutoSaveWarningInSeconds;
+
+	/** How many auto save files to keep around*/
+	UPROPERTY(EditAnywhere, config, Category = AutoSave, meta = (DisplayName = "Maximum number of AutoSaves", ClampMin = "1", UIMin = "1", UIMax = "100"))
+	int32 AutoSaveMaxBackups = 10;
 
 public:
 
@@ -187,7 +223,13 @@ public:
 public:
 
 	// @todo thomass: proper settings support for source control module
-	void SccHackInitialize( );
+	UNREALED_API void SccHackInitialize( );
+
+	UNREALED_API bool GetAutomaticallyCheckoutOnAssetModification() const;
+
+	UNREALED_API void SetAutomaticallyCheckoutOnAssetModificationOverride(bool InValue);
+
+	UNREALED_API void ResetAutomaticallyCheckoutOnAssetModificationOverride();
 
 public:
 
@@ -203,11 +245,14 @@ protected:
 
 	// UObject overrides
 
-	virtual void PostEditChangeProperty( struct FPropertyChangedEvent& PropertyChangedEvent ) override;
-	virtual void PostInitProperties() override;
+	UNREALED_API virtual void PostEditChangeProperty( struct FPropertyChangedEvent& PropertyChangedEvent ) override;
+	UNREALED_API virtual void PostInitProperties() override;
 
 private:
 
 	// Holds an event delegate that is executed when a setting has changed.
 	FSettingChangedEvent SettingChangedEvent;
+
+	// Holds the potentially overridden value of bAutomaticallyCheckoutOnAssetModification at runtime only.
+	TOptional<bool> bAutomaticallyCheckoutOnAssetModificationOverride;
 };

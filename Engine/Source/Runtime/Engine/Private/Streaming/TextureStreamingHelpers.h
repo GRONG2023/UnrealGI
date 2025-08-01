@@ -12,6 +12,11 @@ TextureStreamingHelpers.h: Definitions of classes used for texture streaming.
 #include "Misc/MemStack.h"
 #include "Engine/TextureDefines.h"
 
+#ifndef STREAMING_RETRY_ON_DESERIALIZATION_ERROR
+#define STREAMING_RETRY_ON_DESERIALIZATION_ERROR UE_BUILD_SHIPPING
+#endif
+
+class AActor;
 class UStreamableRenderAsset;
 
 /**
@@ -28,6 +33,7 @@ DECLARE_CYCLE_STAT_EXTERN(TEXT("RemoveFromWorld Time"),STAT_RemoveFromWorldTime,
 DECLARE_CYCLE_STAT_EXTERN(TEXT("UpdateLevelStreaming Time"),STAT_UpdateLevelStreamingTime,STATGROUP_StreamingDetails, );
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Manage LevelsToConsider"), STAT_ManageLevelsToConsider, STATGROUP_StreamingDetails, );
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Volume Streaming Tick"),STAT_VolumeStreamingTickTime,STATGROUP_StreamingDetails, );
+DECLARE_CYCLE_STAT_EXTERN(TEXT("UpdateStreamingState Time"), STAT_UpdateStreamingState, STATGROUP_StreamingDetails, );
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Streaming Volumes"),STAT_VolumeStreamingChecks,STATGROUP_StreamingDetails, );
 
 
@@ -60,9 +66,18 @@ extern TAutoConsoleVariable<int32> CVarStreamingUseMaterialData;
 extern TAutoConsoleVariable<int32> CVarStreamingNumStaticComponentsProcessedPerFrame;
 extern TAutoConsoleVariable<int32> CVarStreamingDefragDynamicBounds;
 extern TAutoConsoleVariable<float> CVarStreamingMaxTextureUVDensity;
+extern TAutoConsoleVariable<int32> CVarStreamingLowResHandlingMode;
 
 struct FRenderAssetStreamingSettings
 {
+	// How to handle assets with too many missing MIPs or LODs
+	enum ELowResHandlingMode
+	{
+		LRHM_DoNothing,
+		LRHM_LoadBeforeRegular,			// Use higher IO priority than regular streaming requests
+		LRHM_LoadBeforeAsyncPrecache,	// Also ensure that priority is higher than async loading precache requests
+	};
+
 	FRenderAssetStreamingSettings()
 	{
 		// Make sure padding bytes don't have random values
@@ -89,6 +104,7 @@ struct FRenderAssetStreamingSettings
 	bool bLimitPoolSizeToVRAM;
 	bool bUseNewMetrics;
 	bool bFullyLoadUsedTextures;
+	bool bFullyLoadMeshes;
 	bool bUseAllMips;
 	bool bUsePerTextureBias;
 	bool bUseMaterialData;
@@ -97,6 +113,7 @@ struct FRenderAssetStreamingSettings
 	float MaxTextureUVDensity;
 	int32 MaterialQualityLevel;
 	int32 FramesForFullUpdate;
+	ELowResHandlingMode LowResHandlingMode;
 	bool bMipCalculationEnablePerLevelList;
 	bool bPrioritizeMeshLODRetention;
 	int32 VRAMPercentageClamp;
@@ -181,3 +198,6 @@ struct FRenderAssetStreamingStats
 	int64 ResidentMeshMem;		// Total memory in bytes of resident mesh LODs
 	int64 EvictedMeshMem;		// Total memory in bytes of evicted mesh LODs
 };
+
+// Helper to access the level bStaticComponentsRegisteredInStreamingManager flag.
+extern bool OwnerLevelHasRegisteredStaticComponentsInStreamingManager(const class AActor* Owner);

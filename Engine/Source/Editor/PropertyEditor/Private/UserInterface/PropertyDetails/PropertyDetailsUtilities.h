@@ -21,12 +21,13 @@ public:
 	virtual bool IsPropertyEditingEnabled() const override;
 	virtual void ForceRefresh() override;
 	virtual void RequestRefresh() override;
+	virtual void RequestForceRefresh() override;
 	virtual TSharedPtr<class FAssetThumbnailPool> GetThumbnailPool() const override;
 	virtual void NotifyFinishedChangingProperties(const FPropertyChangedEvent& PropertyChangedEvent) override;
 	virtual bool DontUpdateValueWhileEditing() const override;
 	const TArray<TWeakObjectPtr<UObject>>& GetSelectedObjects() const override;
 	virtual bool HasClassDefaultObject() const override;
-	virtual TSharedPtr<FEditConditionParser> GetEditConditionParser() const override;
+	virtual const TArray<TSharedRef<class IClassViewerFilter>>& GetClassViewerFilters() const override;
 
 private:
 	IDetailsViewPrivate& DetailsView;

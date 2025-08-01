@@ -1,16 +1,27 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 /*=============================================================================
-DiffPackagesCommandlet.cpp: Commandlet used for comparing two packages.
+DiffFilesCommandlet.cpp: Commandlet used for comparing two packages.
 
 =============================================================================*/
 
 #include "Commandlets/DiffFilesCommandlet.h"
+
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
+#include "CoreGlobals.h"
 #include "HAL/FileManager.h"
-#include "Misc/Paths.h"
+#include "HAL/PlatformCrt.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Misc/AssertionMacros.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Misc/OutputDevice.h"
+#include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
-#include "AssetRegistryModule.h"
+#include "Trace/Detail/Channel.h"
+#include "UObject/LinkerLoad.h"
+#include "UObject/Package.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogDiffFilesCommandlet, Log, All);
 
@@ -142,7 +153,7 @@ void UDiffFilesCommandlet::LoadAndDiff()
 
 	Package = LoadPackage(Package, *FString::Printf(TEXT("%s;%s"), *PackageInfos[0].FullPath, *PackageInfos[1].FullPath), LOAD_ForDiff | LOAD_ForFileDiff);
 
-	if (Package->LinkerLoad->IsTextFormat())
+	if (Package->GetLinker()->IsTextFormat())
 	{
 		UE_LOG(LogDiffFilesCommandlet, Warning, TEXT("FileDiffs are not currently supported for text based assets"));
 	}
@@ -150,7 +161,7 @@ void UDiffFilesCommandlet::LoadAndDiff()
 	{
 		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 		IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
-		TArray<FAssetData*> AssetData;
-		AssetRegistry.LoadPackageRegistryData(*Package->LinkerLoad->GetLoader_Unsafe(), AssetData);
+		IAssetRegistry::FLoadPackageRegistryData AssetData;
+		AssetRegistry.LoadPackageRegistryData(*Package->GetLinker()->GetLoader_Unsafe(), AssetData);
 	}
 }

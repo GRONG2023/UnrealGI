@@ -6,8 +6,12 @@
 
 #pragma once
 
+#include "LightSceneProxy.h"
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "CoreMinimal.h"
 #include "SceneManagement.h"
+#endif
 
 class ULocalLightComponent;
 
@@ -47,11 +51,14 @@ public:
 
 	virtual FSphere GetBoundingSphere() const;
 
+	virtual float GetEffectiveScreenRadius(const FViewMatrices& ShadowViewMatrices, const FIntPoint& CameraViewRectSize) const override;
 	virtual float GetEffectiveScreenRadius(const FViewMatrices& ShadowViewMatrices) const override;
 
 	virtual FVector GetPerObjectProjectedShadowProjectionPoint(const FBoxSphereBounds& SubjectBounds) const;
 
 	virtual bool GetPerObjectProjectedShadowInitializer(const FBoxSphereBounds& SubjectBounds, class FPerObjectProjectedShadowInitializer& OutInitializer) const override;
+
+	virtual bool IsLocalLight() const override;
 
 protected:
 
@@ -60,4 +67,5 @@ protected:
 
 	float MaxDrawDistance;
 	float FadeRange;
+	float InverseExposureBlend;
 };

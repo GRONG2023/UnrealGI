@@ -119,7 +119,6 @@ private:
 	 */
 	const FSlateBrush* GetVisibilityBrushForLayer() const;
 
-
 private:
 
 	/** The layer associated with this row of data */

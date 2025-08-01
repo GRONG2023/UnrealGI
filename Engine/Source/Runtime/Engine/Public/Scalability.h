@@ -8,6 +8,8 @@
 
 #include "CoreMinimal.h"
 
+enum EShaderPlatform : uint16;
+
 namespace Scalability
 { 
 	enum class EQualityLevelBehavior
@@ -16,34 +18,41 @@ namespace Scalability
 		ERelativeToMax,
 	};
 
-	const int32 DefaultQualityLevel = 3;
+	inline const int32 DefaultQualityLevel = 3;
 
 	/**
 	 * Structure for holding the state of the engine scalability groups
 	 * Actual engine state you can get though GetQualityLevels().
 	**/
-	struct ENGINE_API FQualityLevels
+	struct FQualityLevels
 	{
 		float ResolutionQuality;
 		int32 ViewDistanceQuality;
 		int32 AntiAliasingQuality;
 		int32 ShadowQuality;
+		int32 GlobalIlluminationQuality;
+		int32 ReflectionQuality;
 		int32 PostProcessQuality;
 		int32 TextureQuality;
 		int32 EffectsQuality;
 		int32 FoliageQuality;
 		int32 ShadingQuality;
+		int32 LandscapeQuality;
 
 		float CPUBenchmarkResults;
 		float GPUBenchmarkResults;
 		TArray<float> CPUBenchmarkSteps;
 		TArray<float> GPUBenchmarkSteps;
 
-		FQualityLevels()
+		// Allows us to avoid SetDefaults for static init variables, as SetDefaults is not defined to call during static int
+		FQualityLevels(bool bSetDefaults = true)
 			: CPUBenchmarkResults(-1.0f)
 			, GPUBenchmarkResults(-1.0f)
 		{
-			SetDefaults();
+			if (bSetDefaults)
+			{
+				SetDefaults();
+			}
 		}
 		
 		bool operator==(const FQualityLevels& Other ) const
@@ -52,11 +61,14 @@ namespace Scalability
 				ViewDistanceQuality == Other.ViewDistanceQuality &&
 				AntiAliasingQuality == Other.AntiAliasingQuality &&
 				ShadowQuality == Other.ShadowQuality &&
+				GlobalIlluminationQuality == Other.GlobalIlluminationQuality &&
+				ReflectionQuality == Other.ReflectionQuality &&
 				PostProcessQuality == Other.PostProcessQuality &&
 				TextureQuality == Other.TextureQuality &&
 				EffectsQuality == Other.EffectsQuality &&
 				FoliageQuality == Other.FoliageQuality &&
-				ShadingQuality == Other.ShadingQuality;
+				ShadingQuality == Other.ShadingQuality &&
+				LandscapeQuality == Other.LandscapeQuality;
 		}
 
 		bool operator!=(const FQualityLevels& Other ) const
@@ -71,71 +83,100 @@ namespace Scalability
 				FCrc::TypeCrc32<int32>(ViewDistanceQuality) ^
 				FCrc::TypeCrc32<int32>(AntiAliasingQuality) ^
 				FCrc::TypeCrc32<int32>(ShadowQuality) ^
+				FCrc::TypeCrc32<int32>(GlobalIlluminationQuality) ^
+				FCrc::TypeCrc32<int32>(ReflectionQuality) ^
 				FCrc::TypeCrc32<int32>(PostProcessQuality) ^
 				FCrc::TypeCrc32<int32>(TextureQuality) ^
 				FCrc::TypeCrc32<int32>(EffectsQuality) ^
 				FCrc::TypeCrc32<int32>(FoliageQuality) ^
-				FCrc::TypeCrc32<int32>(ShadingQuality);
+				FCrc::TypeCrc32<int32>(ShadingQuality) ^
+				FCrc::TypeCrc32<int32>(LandscapeQuality);
 		}
 
 		// Sets all other settings based on an overall value
 		// @param Value 0:low, 1:medium, 2:high, 3:epic, 4:cinematic (gets clamped if needed)
-		void SetFromSingleQualityLevel(int32 Value);
+		ENGINE_API void SetFromSingleQualityLevel(int32 Value);
 
 		// Sets all other settings based on an overall value, but relative to the maximum.
 		// @param Value 0: maximum level, 1: maximumlevel -1, etc
-		void SetFromSingleQualityLevelRelativeToMax(int32 Value);
+		ENGINE_API void SetFromSingleQualityLevelRelativeToMax(int32 Value);
 
 		// Returns the overall value if all settings are set to the same thing
 		// @param Value -1:custom, 0:low, 1:medium, 2:high, 3:epic, 4:cinematic
-		int32 GetSingleQualityLevel() const;
+		ENGINE_API int32 GetSingleQualityLevel() const;
 
 		// Returns the minimum set quality level from all settings
 		// @param Value -1:custom, 0:low, 1:medium, 2:high, 3:epic, 4:cinematic
-		int32 GetMinQualityLevel() const;
+		ENGINE_API int32 GetMinQualityLevel() const;
 
 		// Sets view distance quality
 		// @param Value 0:low, 1:medium, 2:high, 3:epic, 4:cinematic (gets clamped if needed)
-		void SetViewDistanceQuality(int32 Value);
+		ENGINE_API void SetViewDistanceQuality(int32 Value);
 
 		// Sets anti-aliasing quality
 		// @param Value 0:low, 1:medium, 2:high, 3:epic, 4:cinematic (gets clamped if needed)
-		void SetAntiAliasingQuality(int32 Value);
+		ENGINE_API void SetAntiAliasingQuality(int32 Value);
 
 		// Sets shadow quality
 		// @param Value 0:low, 1:medium, 2:high, 3:epic, 4:cinematic (gets clamped if needed)
-		void SetShadowQuality(int32 Value);
+		ENGINE_API void SetShadowQuality(int32 Value);
+
+		// Sets shadow quality
+		// @param Value 0:low, 1:medium, 2:high, 3:epic, 4:cinematic (gets clamped if needed)
+		ENGINE_API void SetGlobalIlluminationQuality(int32 Value);
+
+		// Sets shadow quality
+		// @param Value 0:low, 1:medium, 2:high, 3:epic, 4:cinematic (gets clamped if needed)
+		ENGINE_API void SetReflectionQuality(int32 Value);
 
 		// Sets the post-processing quality
 		// @param Value 0:low, 1:medium, 2:high, 3:epic, 4:cinematic (gets clamped if needed)
-		void SetPostProcessQuality(int32 Value);
+		ENGINE_API void SetPostProcessQuality(int32 Value);
 
 		// Sets the texture quality
 		// @param Value 0:low, 1:medium, 2:high, 3:epic, 4:cinematic (gets clamped if needed)
-		void SetTextureQuality(int32 Value);
+		ENGINE_API void SetTextureQuality(int32 Value);
 
 		// Sets the visual effects quality
 		// @param Value 0:low, 1:medium, 2:high, 3:epic, 4:cinematic (gets clamped if needed)
-		void SetEffectsQuality(int32 Value);
+		ENGINE_API void SetEffectsQuality(int32 Value);
 
 		// Sets the foliage quality
 		// @param Value 0:low, 1:medium, 2:high, 3:epic, 4:cinematic (gets clamped if needed)
-		void SetFoliageQuality(int32 Value);
+		ENGINE_API void SetFoliageQuality(int32 Value);
 
-		// Sets the sharing quality
+		// Sets the shading quality
 		// @param Value 0:low, 1:medium, 2:high, 3:epic, 4:cinematic (gets clamped if needed)
-		void SetShadingQuality(int32 Value);
+		ENGINE_API void SetShadingQuality(int32 Value);
 
-		void SetBenchmarkFallback();
+		// Sets the landscape quality
+		// @param Value 0:low, 1:medium, 2:high, 3:epic, 4:cinematic (gets clamped if needed)
+		ENGINE_API void SetLandscapeQuality(int32 Value);
 
-		void SetDefaults();
+		ENGINE_API void SetBenchmarkFallback();
+
+		ENGINE_API void SetDefaults();
 	};
 
 	DECLARE_MULTICAST_DELEGATE_OneParam(FOnScalabilitySettingsChanged, const Scalability::FQualityLevels&);
-	static FOnScalabilitySettingsChanged OnScalabilitySettingsChanged;
+	ENGINE_API extern FOnScalabilitySettingsChanged OnScalabilitySettingsChanged;
+
+	/** Structure holding the details of a preset. */
+	struct FResolutionPreset
+	{
+		FString Name;
+		int32 Id = 0;
+		float ResolutionQuality = 100.0f;
+	};
+
+	ENGINE_API TArray<FResolutionPreset> GetResolutionPresets();
 
 	/** This is the only suggested way to set the current state - don't set CVars directly **/
 	ENGINE_API void SetQualityLevels(const FQualityLevels& QualityLevels, bool bForce = false);
+
+#if WITH_EDITOR
+	ENGINE_API void ApplyCachedQualityLevelForShaderPlatform(const EShaderPlatform& ShaderPlatform);
+#endif
 
 	/** This is the only suggested way to get the current state - don't get CVars directly */
 	ENGINE_API FQualityLevels GetQualityLevels();
@@ -179,12 +220,12 @@ namespace Scalability
 	ENGINE_API FQualityLevels GetQualityLevelCounts();
 
 	/** Minimum single axis scale for render resolution */
-	static const float MinResolutionScale = 10.0f;
+	static const float MinResolutionScale = 0.0f;
 
 	/** Maximum single axis scale for render resolution */
 	static const float MaxResolutionScale = 100.0f;
 
-	/** Returns the current screen percentage */
+	UE_DEPRECATED(5.3, "Uses FLegacyScreenPercentageDriver::GetCVarResolutionFraction() instead")
 	ENGINE_API float GetResolutionScreenPercentage();
 
 	/** Returns a human readable name for a scalability quality level */
@@ -192,7 +233,7 @@ namespace Scalability
 
 #if WITH_EDITOR
 	/** Set an Editor preview scalability platform */
-	void ENGINE_API ChangeScalabilityPreviewPlatform(FName NewPlatformScalabilityName);
+	void ENGINE_API ChangeScalabilityPreviewPlatform(FName NewPlatformScalabilityName, const EShaderPlatform& ShaderPlatform);
 #endif
 
 	ENGINE_API FText GetQualityLevelText(int32 Value, int32 NumLevels);

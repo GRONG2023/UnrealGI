@@ -2,8 +2,10 @@
 
 #include "CoreTypes.h"
 #include "Misc/AssertionMacros.h"
+#include "Concepts/EqualityComparable.h"
 #include "Containers/Array.h"
 #include "Containers/Map.h"
+#include "Containers/Set.h"
 #include "Containers/SortedMap.h"
 #include "Containers/ArrayView.h"
 #include "Misc/AutomationTest.h"
@@ -230,8 +232,24 @@ namespace
 			check(*It  == E);
 			check(*CIt == E);
 
+			FSetElementId Id = It.GetId();
+			FSetElementId CId = It.GetId();
+			check(Cont.IsValidId(Id));
+			check(Cont.IsValidId(CId));
+			check(Cont.Get(Id) == E);
+			check(Cont.Get(CId) == E);
+
 			++It;
 			++CIt;
+		}
+	}
+
+	template <typename Container>
+	void CheckContainerSelfEquality(Container& Cont)
+	{
+		if constexpr (TModels_V<CEqualityComparable, Container>)
+		{
+			check(Cont == Cont);
 		}
 	}
 
@@ -301,42 +319,200 @@ namespace
 	{
 		ContainerType Cont;
 
+		int32 MaxNum = 0;
+		SIZE_T MaxAllocatedSize = 0;
+		const SIZE_T InitialAllocatedSize = Cont.GetAllocatedSize();
+
 		ContainerTestStats.Reset();
+
+		auto CheckContainer = [&Cont]()
+		{
+			CheckContainerNum(Cont);
+			CheckContainerEnds(Cont);
+			CheckContainerElements(Cont);
+			CheckContainerSelfEquality(Cont);
+		};
+
+		// Test Add and Remove
 		// Subtract one to account for temporaries that will be created during an Add
 		for (int32 Count = 0; Count < MAX_TEST_OBJECTS - 1; Count += MAX_TEST_OBJECTS_STEP)
 		{
 			for (int32 N = 0; N != Count; ++N)
 			{
 				Cont.Add(GenerateTestKey<KeyType>(N), FContainerTestValueType(TEXT("New Value")));
-				CheckContainerNum(Cont);
-				CheckContainerEnds(Cont);
-				CheckContainerElements(Cont);
+				CheckContainer();
 			}
+			MaxNum = Cont.Num();
+			MaxAllocatedSize = Cont.GetAllocatedSize();
 
 			for (int32 N = 0; N != Count; ++N)
 			{
 				Cont.Remove(GenerateTestKey<KeyType>(N));
-				CheckContainerNum(Cont);
-				CheckContainerEnds(Cont);
-				CheckContainerElements(Cont);
+				CheckContainer();
 			}
+
+			check(Cont.IsEmpty());
 
 			for (int32 N = 0; N != Count; ++N)
 			{
 				Cont.Add(GenerateTestKey<KeyType>((Count - 1) - N), FContainerTestValueType(TEXT("New Value")));
-				CheckContainerNum(Cont);
-				CheckContainerEnds(Cont);
-				CheckContainerElements(Cont);
+				CheckContainer();
 			}
 
 			for (int32 N = 0; N != Count; ++N)
 			{
 				Cont.Remove(GenerateTestKey<KeyType>(N));
-				CheckContainerNum(Cont);
-				CheckContainerEnds(Cont);
-				CheckContainerElements(Cont);
+				CheckContainer();
+			}
+
+			check(Cont.IsEmpty());
+		}
+
+		// Test Empty and Shrink 
+		{
+			// Test releasing memory allocations
+			Cont.Empty();
+			CheckContainer();
+			check(Cont.GetAllocatedSize() == InitialAllocatedSize);
+
+			// Test integrity after re-growing container to MaxNum elements again
+			for (int32 N = 0; N < MaxNum; ++N)
+			{
+				Cont.Add(GenerateTestKey<KeyType>(N), FContainerTestValueType(TEXT("New Value")));
+			}
+			CheckContainer();
+			check(Cont.GetAllocatedSize() == MaxAllocatedSize);
+
+			// Test data integrity while removing and shrinking continously
+			{
+				SIZE_T PrevAllocatedSize = Cont.GetAllocatedSize();
+				for (int32 N = MaxNum - 1; N >= MaxNum / 4; --N)
+				{
+					Cont.Remove(GenerateTestKey<KeyType>(N));
+					Cont.Shrink();
+					CheckContainer();
+					check(Cont.GetAllocatedSize() <= PrevAllocatedSize);
+					PrevAllocatedSize = Cont.GetAllocatedSize();
+				}
+			}
+
+			// Test removing and releasing remaining elements
+			Cont.Empty();
+			check(Cont.IsEmpty());
+			check(Cont.GetAllocatedSize() == InitialAllocatedSize);
+		}
+
+		// Test key iterators
+		{
+			static_assert(std::is_same_v<decltype((Cont.CreateKeyIterator     (DeclVal<KeyType&>())->Key)),         KeyType&>);
+			static_assert(std::is_same_v<decltype((Cont.CreateKeyIterator     (DeclVal<KeyType&>())->Value)),       FContainerTestValueType&>);
+			static_assert(std::is_same_v<decltype((Cont.CreateConstKeyIterator(DeclVal<KeyType&>())->Key)),   const KeyType&>);
+			static_assert(std::is_same_v<decltype((Cont.CreateConstKeyIterator(DeclVal<KeyType&>())->Value)), const FContainerTestValueType&>);
+
+			const TCHAR* RegularValue  = TEXT("Regular");
+			const TCHAR* ReplacedValue = TEXT("Replaced");
+
+			for (int32 Count = 0; Count < MAX_TEST_OBJECTS - 1; Count += MAX_TEST_OBJECTS_STEP)
+			{
+				Cont.Empty();
+				CheckContainer();
+
+				for (int32 N = 0; N != Count; ++N)
+				{
+					Cont.Add(GenerateTestKey<KeyType>(N), FContainerTestValueType(RegularValue));
+					CheckContainer();
+				}
+
+				// Iterate over all possible keys, and some before/after the range [0, Count) that won't exist
+				for (int32 KeyValue = -2; KeyValue < Count + 2; ++KeyValue)
+				{
+					KeyType Key = GenerateTestKey<KeyType>(KeyValue);
+
+					// Check that at most one key is found by the const key iterator
+					const KeyType* FoundConstKey = nullptr;
+					for (auto It = Cont.CreateConstKeyIterator(Key); It; ++It)
+					{
+						check(!FoundConstKey);
+						check(It->Key == Key);
+						check(Cont.Get(It.GetId()) == *It);
+						FoundConstKey = &It->Key;
+					}
+
+					// Check that at most one key is found by the key iterator, and that we can mutate the value via one
+					KeyType* FoundKey = nullptr;
+					for (auto It = Cont.CreateKeyIterator(Key); It; ++It)
+					{
+						check(!FoundKey);
+						check(It->Key == Key);
+						check(Cont.Get(It.GetId()) == *It);
+						FoundKey = &It->Key;
+						It->Value.Str = ReplacedValue;
+					}
+
+					// Check that the key iterators found the right element, if any
+					check(FoundKey == FoundConstKey);
+					if (FoundConstKey)
+					{
+						check(KeyValue >= 0 && KeyValue < Count);
+						check(Cont[Key].Str == ReplacedValue);
+					}
+					else
+					{
+						check(KeyValue < 0 || KeyValue >= Count);
+					}
+				}
 			}
 		}
+	}
+
+	// Test container element address consistency when using SortFreeList 
+	// (see TSparseArray::SortFreeList for comments)
+	template <typename ContainerType, typename KeyType>
+	void RunContainerConsistencyTests()
+	{
+		ContainerType Cont;
+
+		{
+			// Add 3 elements, then remove 2 in the same order they were added
+			const KeyType Key0 = GenerateTestKey<KeyType>(0);
+			const KeyType Key1 = GenerateTestKey<KeyType>(1);
+			const KeyType Key2 = GenerateTestKey<KeyType>(2);
+			const FContainerTestValueType Value = FContainerTestValueType(TEXT("New Value"));
+			Cont.Add(Key0, Value);
+			Cont.Add(Key1, Value);
+			Cont.Add(Key2, Value);
+			const FContainerTestValueType* ValuePtr0 = Cont.Find(Key0);
+			const FContainerTestValueType* ValuePtr1 = Cont.Find(Key1);
+			const FContainerTestValueType* ValuePtr2 = Cont.Find(Key2);
+			check(ValuePtr0 != nullptr);
+			check(ValuePtr1 != nullptr);
+			check(ValuePtr2 != nullptr);
+			Cont.Remove(Key1);
+			Cont.Remove(Key2);
+
+			// Re-add the 2 elements in the same order. Without the call to SortFreeList() 
+			// the elements would end up in a different locations/order compared to the 
+			// original insertions. SortFreeList() should ensure that re-adding the elements 
+			// gives use the same container layout as long as we perform the same operations 
+			// in the same order as before.
+			Cont.SortFreeList();
+			Cont.Add(Key1, Value);
+			Cont.Add(Key2, Value);
+			const FContainerTestValueType* NewValuePtr0 = Cont.Find(Key0);
+			const FContainerTestValueType* NewValuePtr1 = Cont.Find(Key1);
+			const FContainerTestValueType* NewValuePtr2 = Cont.Find(Key2);
+
+			check(ValuePtr0 == NewValuePtr0);
+			check(ValuePtr1 == NewValuePtr1);
+			check(ValuePtr2 == NewValuePtr2);
+		}
+	}
+
+	template <typename Container>
+	void RunEmptyContainerSelfEqualityTest()
+	{
+		Container Cont;
+		CheckContainerSelfEquality(Cont);
 	}
 
 	template <typename ContainerType, typename KeyType>
@@ -489,6 +665,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FContainersSmokeTest, "System.Core.Containers.S
 bool FContainersSmokeTest::RunTest( const FString& Parameters )
 {
 	RunContainerTests<TMap<int32, FContainerTestValueType>, int32>();
+	RunContainerTests<TMap<int32, FContainerTestValueType, TInlineSetAllocator<32>>, int32>();
+	RunContainerTests<TMap<int32, FContainerTestValueType, TFixedSetAllocator<64>>, int32>();
 
 	return true;
 }
@@ -499,13 +677,19 @@ bool FContainersFullTest::RunTest(const FString& Parameters)
 	RunContainerTests<TMap<int32, FContainerTestValueType>, int32>();
 	RunContainerTests<TMap<FName, FContainerTestValueType>, FName>();
 	RunContainerTests<TMap<FString, FContainerTestValueType>, FString>();
+	RunContainerTests<TMap<int32, FContainerTestValueType, TInlineSetAllocator<32>>, int32>();
 	RunContainerTests<TMap<int32, FContainerTestValueType, TInlineSetAllocator<64>>, int32>();
+	RunContainerTests<TMap<int32, FContainerTestValueType, TFixedSetAllocator<64>>, int32>();
 	RunContainerTests<TMap<FString, FContainerTestValueType, FDefaultSetAllocator, FCaseSensitiveLookupKeyFuncs<FContainerTestValueType>>, FString>();
+
+	RunContainerConsistencyTests<TMap<int32, FContainerTestValueType>, int32>();
 
 	RunContainerTests<TSortedMap<int32, FContainerTestValueType>, int32>();
 	RunContainerTests<TSortedMap<FName, FContainerTestValueType, FDefaultAllocator, FNameLexicalLess>, FName>();
 	RunContainerTests<TSortedMap<FString, FContainerTestValueType>, FString>();
 	RunContainerTests<TSortedMap<FString, FContainerTestValueType, TInlineAllocator<64>>, FString>();
+
+	RunEmptyContainerSelfEqualityTest<TArray<int32>>();
 
 	// Verify use of FName index sorter with SortedMap
 
@@ -577,6 +761,179 @@ bool FContainerPerformanceTest::RunTest(const FString& Parameters)
 
 	return true;
 }
+
+namespace
+{
+	struct FRecorder
+	{
+		FRecorder(uint32 InKey = 0, uint32 InPayload=0)
+			: Id(NextId++)
+			, Key(InKey)
+			, Payload(InPayload)
+		{
+		}
+		FRecorder(const FRecorder& Other)
+			: Id(NextId++)
+			, Key(Other.Key)
+			, Payload(Other.Payload)
+			, NumCopies(Other.NumCopies+1)
+			, NumMoves(Other.NumMoves)
+		{
+		}
+		FRecorder(FRecorder&& Other)
+			: Id(NextId++)
+			, Key(Other.Key)
+			, Payload(Other.Payload)
+			, NumCopies(Other.NumCopies)
+			, NumMoves(Other.NumMoves+1)
+		{
+		}
+
+		bool operator==(const FRecorder& Other) const
+		{
+			return Key == Other.Key;
+		}
+
+		uint32 Id;
+		uint32 Key;
+		uint32 Payload;
+		uint32 NumCopies = 0;
+		uint32 NumMoves = 0;
+
+		static uint32 NextId;
+	};
+	uint32 FRecorder::NextId = 0;
+
+	uint32 GetTypeHash(const FRecorder& Recorder)
+	{
+		return Recorder.Payload;
+	}
+
+}
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FContainersTSetTest, "System.Core.Containers.TSet", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+bool FContainersTSetTest::RunTest(const FString& Parameters)
+{
+	enum class EArgType
+	{
+		Copy,
+		Move
+	};
+	enum class EHashType
+	{
+		Internal,
+		PassedIn
+	};
+
+	for (EHashType HashType : { EHashType::Internal, EHashType::PassedIn})
+	{
+		for (EArgType ArgType : {EArgType::Copy, EArgType::Move})
+		{
+			FString FuncName;
+			auto FullText = [HashType,ArgType,&FuncName](const TCHAR* Message)
+			{
+				const TCHAR* HashText = HashType == EHashType::Internal ? TEXT("") : TEXT("ByHash");
+				const TCHAR* ArgText = ArgType == EArgType::Copy ? TEXT("const&") : TEXT("&&");
+				return FString::Printf(TEXT("TSet::%s%s(%s) %s"), *FuncName, HashText, ArgText, Message);
+			};
+
+			// Test TSet::Add(const&), Add(&&), AddByHash(const&), AddByHash(&&)
+			FuncName = TEXT("Add");
+			{
+				TSet<FRecorder> Set;
+				FRecorder First(37, 43);
+				bool bAlreadyInSet = true;
+
+				if (HashType == EHashType::Internal)
+					if (ArgType == EArgType::Copy)
+						Set.Add(First, &bAlreadyInSet);
+					else
+						Set.Add(MoveTemp(First), &bAlreadyInSet);
+				else
+					if (ArgType == EArgType::Copy)
+						Set.AddByHash(GetTypeHash(First), First, &bAlreadyInSet);
+					else
+						Set.AddByHash(GetTypeHash(First), MoveTemp(First), &bAlreadyInSet);
+				TestFalse(FullText(TEXT("returns bAlreadyInSet==false for first add")), bAlreadyInSet);
+
+				FRecorder* Found = Set.Find(First);
+				if (ArgType == EArgType::Copy)
+					TestTrue(FullText(TEXT("constructs a copy")), Found && Found->Id > First.Id && Found->NumCopies > 0 && Found->Payload == First.Payload);
+				else
+					TestTrue(FullText(TEXT("constructs a move")), Found && Found->Id > First.Id && Found->NumCopies == 0 && Found->NumMoves >= 1 && Found->Payload == First.Payload);
+
+				uint32 FoundId = Found ? Found->Id : 0;
+				Found = Set.Find(First);
+				TestTrue(TEXT("Finding an element returns a reference, no copies"), Found && Found->Id == FoundId);
+
+				FRecorder Second(37, 56);
+				if (HashType == EHashType::Internal)
+					if (ArgType == EArgType::Copy)
+						Set.Add(Second, &bAlreadyInSet);
+					else
+						Set.Add(MoveTemp(Second), &bAlreadyInSet);
+				else
+					if (ArgType == EArgType::Copy)
+						Set.AddByHash(GetTypeHash(Second), Second, &bAlreadyInSet);
+					else
+						Set.AddByHash(GetTypeHash(Second), MoveTemp(Second), &bAlreadyInSet);
+				TestTrue(FullText(TEXT("returns bAlreadyInSet==true for second add")), bAlreadyInSet);
+				Found = Set.Find(First);
+				TestTrue(FullText(TEXT("with a duplicate key constructs a copy of the new key")), Found && Found->Id > Second.Id && Found->Payload == Second.Payload);
+			}
+
+			// Test TSet::FindOrAdd(const&), FindOrAdd(&&), FindOrAddByHash(const&), FindOrAddByHash(&&)
+			FuncName = TEXT("FindOrAdd");
+			{
+				TSet<FRecorder> Set;
+				FRecorder First(37, 43);
+				bool bAlreadyInSet = true;
+
+				FRecorder* FindOrAddResult;
+				if (HashType == EHashType::Internal)
+					if (ArgType == EArgType::Copy)
+						FindOrAddResult = &Set.FindOrAdd(First, &bAlreadyInSet);
+					else
+						FindOrAddResult = &Set.FindOrAdd(MoveTemp(First), &bAlreadyInSet);
+				else
+					if (ArgType == EArgType::Copy)
+						FindOrAddResult = &Set.FindOrAddByHash(GetTypeHash(First), First, &bAlreadyInSet);
+					else
+						FindOrAddResult = &Set.FindOrAddByHash(GetTypeHash(First), MoveTemp(First), &bAlreadyInSet);
+				TestFalse(FullText(TEXT("returns bAlreadyInSet==false for first add")), bAlreadyInSet);
+				if (ArgType == EArgType::Copy)
+					TestTrue(FullText(TEXT("on the first constructs a copy")), FindOrAddResult->Id > First.Id && FindOrAddResult->NumCopies > 0 && FindOrAddResult->Payload == First.Payload);
+				else
+					TestTrue(FullText(TEXT("on the first constructs a move")), FindOrAddResult->Id > First.Id && FindOrAddResult->NumCopies == 0 && FindOrAddResult->NumMoves >= 1 && FindOrAddResult->Payload == First.Payload);
+				uint32 FoundId = FindOrAddResult->Id;
+
+				FRecorder* Found = Set.Find(First);
+				TestTrue(FullText(TEXT("returns same value as future find")), Found&& Found->Id == FindOrAddResult->Id);
+				Found = Set.Find(First);
+				TestTrue(TEXT("Finding an element returns a reference, no copies"), Found && Found->Id == FoundId);
+
+				FRecorder Second(37, 56);
+				if (HashType == EHashType::Internal)
+					if (ArgType == EArgType::Copy)
+						FindOrAddResult = &Set.FindOrAdd(Second, &bAlreadyInSet);
+					else
+						FindOrAddResult = &Set.FindOrAdd(MoveTemp(Second), &bAlreadyInSet);
+				else
+					if (ArgType == EArgType::Copy)
+						FindOrAddResult = &Set.FindOrAddByHash(GetTypeHash(Second), Second, &bAlreadyInSet);
+					else
+						FindOrAddResult = &Set.FindOrAddByHash(GetTypeHash(Second), MoveTemp(Second), &bAlreadyInSet);
+				TestTrue(FullText(TEXT("returns bAlreadyInSet==true for second add")), bAlreadyInSet);
+				TestTrue(FullText(TEXT("with a duplicate key keeps the original key, returned from FindOrAdd")), FindOrAddResult->Id == FoundId && FindOrAddResult->Payload == First.Payload);
+				Found = Set.Find(First);
+				TestTrue(FullText(TEXT("with a duplicate key keeps the original key, returned from future Finds")), Found->Id == FoundId && Found->Payload == First.Payload);
+			}
+		}
+	}
+
+
+	return !HasAnyErrors();
+}
+
 
 namespace ArrayViewTests
 {

@@ -5,6 +5,7 @@
 #include "Serialization/ArchiveUObject.h"
 #include "UObject/Class.h"
 #include "Misc/PackageName.h"
+#include "Misc/PathViews.h"
 #include "Misc/MessageDialog.h"
 #include "HAL/FileManager.h"
 #include "Misc/FeedbackContext.h"
@@ -27,13 +28,15 @@
 #include "Widgets/Views/STableViewBase.h"
 #include "Widgets/Views/STableRow.h"
 #include "Widgets/Views/SListView.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "SourceControlOperations.h"
 #include "ISourceControlModule.h"
+#include "ISourceControlProvider.h"
+#include "ISourceControlState.h"
 #include "SourceControlHelpers.h"
 #include "FileHelpers.h"
 #include "SDiscoveringAssetsDialog.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "CollectionManagerTypes.h"
 #include "ICollectionManager.h"
 #include "CollectionManagerModule.h"
@@ -42,11 +45,14 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Misc/RedirectCollector.h"
-#include "Settings/EditorProjectSettings.h"
+#include "Settings/BlueprintEditorProjectSettings.h"
 #include "AssetToolsLog.h"
-#include "Settings/EditorProjectSettings.h"
+#include "Engine/Level.h"
 #include "Engine/World.h"
 #include "Engine/MapBuildDataRegistry.h"
+#include "GameMapsSettings.h"
+#include "AssetToolsModule.h"
+#include "IAssetTools.h"
 
 #define LOCTEXT_NAMESPACE "AssetRenameManager"
 
@@ -86,7 +92,8 @@ namespace AssetRenameManagerImpl
 
 struct FAssetRenameDataWithReferencers : public FAssetRenameData
 {
-	TArray<FName> ReferencingPackageNames;
+	TSet<FName> NotRenamedReferencingPackageNames;
+	TMap<FName, FName> RenamedReferencingPackageNames;
 	FText FailureReason;
 	bool bCreateRedirector;
 	bool bRenameFailed;
@@ -137,7 +144,7 @@ public:
 		ChildSlot
 		[
 			SNew(SBorder)
-			.BorderImage( FEditorStyle::GetBrush("Docking.Tab.ContentAreaBrush") )
+			.BorderImage( FAppStyle::GetBrush("Docking.Tab.ContentAreaBrush") )
 			.Padding(FMargin(4, 8, 4, 4))
 			[
 				SNew(SVerticalBox)
@@ -155,7 +162,7 @@ public:
 				.FillHeight(1.f)
 				[
 					SNew(SBorder)
-					.BorderImage( FEditorStyle::GetBrush("ToolPanel.GroupBorder") )
+					.BorderImage( FAppStyle::GetBrush("ToolPanel.GroupBorder") )
 					[
 						SNew(SListView<TSharedRef<FText>>)
 						.ListItemsSource(&FailedRenames)
@@ -273,6 +280,8 @@ EAssetRenameResult FAssetRenameManager::RenameAssetsWithDialog(const TArray<FAss
 
 void FAssetRenameManager::FindSoftReferencesToObject(FSoftObjectPath TargetObject, TArray<UObject*>& ReferencingObjects) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FAssetRenameManager::FindSoftReferencesToObject);
+
 	TArray<FAssetRenameDataWithReferencers> AssetsToRename;
 	AssetsToRename.Emplace(FAssetRenameDataWithReferencers(FAssetRenameData(TargetObject, TargetObject, true)));
 
@@ -296,6 +305,8 @@ void FAssetRenameManager::FindSoftReferencesToObject(FSoftObjectPath TargetObjec
 
 void FAssetRenameManager::FindSoftReferencesToObjects(const TArray<FSoftObjectPath>& TargetObjects, TMap<FSoftObjectPath, TArray<UObject*>>& ReferencingObjects) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FAssetRenameManager::FindSoftReferencesToObjects);
+
 	TArray<FAssetRenameDataWithReferencers> AssetsToRename;
 	for (const FSoftObjectPath& TargetObject : TargetObjects)
 	{
@@ -364,23 +375,33 @@ bool FAssetRenameManager::FixReferencesAndRename(const TArray<FAssetRenameData>&
 	}
 
 	// Warn the user if they are about to rename an asset that is referenced by a CDO
-	TArray<TWeakObjectPtr<UObject>> CDOAssets = FindCDOReferencedAssets(AssetsToRename);
+	TArray<FAssetRenameDataWithReferencers*> CDOHardReferencedAssets, CDOSoftReferenceRenames;
+	FindCDOReferences(AssetsToRename, CDOHardReferencedAssets, CDOSoftReferenceRenames, true);
 
 	// Warn the user if there were any references
-	if (CDOAssets.Num())
+	if (CDOHardReferencedAssets.Num() || CDOSoftReferenceRenames.Num())
 	{
 		FString AssetNames;
-		for (auto AssetIt = CDOAssets.CreateConstIterator(); AssetIt; ++AssetIt)
+		for (auto HardAssetIt = CDOHardReferencedAssets.CreateConstIterator(); HardAssetIt; ++HardAssetIt)
 		{
-			UObject* Asset = (*AssetIt).Get();
+			UObject* Asset = (*HardAssetIt)->Asset.Get();
 			if (Asset)
 			{
 				AssetNames += FString("\n") + Asset->GetName();
 			}
 		}
 
-		const FText MessageText = FText::Format(LOCTEXT("RenameCDOReferences", "The following assets are referenced by one or more Class Default Objects: \n{0}\n\nContinuing with the rename may require code changes to fix these references. Do you wish to continue?"), FText::FromString(AssetNames));
-		if (FMessageDialog::Open(EAppMsgType::YesNo, EAppReturnType::No, MessageText) == EAppReturnType::No)
+		for (auto SoftRefIt = CDOSoftReferenceRenames.CreateConstIterator(); SoftRefIt; ++SoftRefIt)
+		{
+			UObject* Asset = (*SoftRefIt)->Asset.Get();
+			if (Asset)
+			{
+				AssetNames += FString("\n") + Asset->GetName();
+			}
+		}
+
+		const FText MessageText = FText::Format(LOCTEXT("RenameCDOReferences", "Source code, config INI, and text files may need Find/Replace for:\n\n{0}\n\nOtherwise assets can be missing from cooked builds. Continue with rename?"), FText::FromString(AssetNames));
+		if (FMessageDialog::Open(EAppMsgType::OkCancel, EAppReturnType::Cancel, MessageText) == EAppReturnType::Cancel)
 		{
 			return false;
 		}
@@ -407,6 +428,12 @@ bool FAssetRenameManager::FixReferencesAndRename(const TArray<FAssetRenameData>&
 		{
 			// If any referencing packages are left read-only, the checkout failed or SCC was not enabled. Trim them from the save list and leave redirectors.
 			DetectReadOnlyPackages(AssetsToRename, ReferencingPackagesToSave);
+
+
+			// Make public any asset that will be referenced from another plugin after the rename.
+			// If the asset cannot be made public or if moving it requires a referenced asset that's not being modified to become public,
+			// its rename will fail and other assets that have dependencies between them will also fail to be renamed.
+			SetupPublicAssets(AssetsToRename);
 
 			if (bSoftReferencesOnly)
 			{
@@ -448,10 +475,8 @@ bool FAssetRenameManager::FixReferencesAndRename(const TArray<FAssetRenameData>&
 			else
 			{
 				// Perform the rename, leaving redirectors only for assets which need them
-				PerformAssetRename(AssetsToRename);
-
-				// Save all packages that were referencing any of the assets that were moved without redirectors
-				SaveReferencingPackages(ReferencingPackagesToSave);
+				// Also save all packages that were referencing any of the assets that were moved without redirectors
+				PerformAssetRename(AssetsToRename, ReferencingPackagesToSave);
 
 				// Issue post rename event
 				AssetPostRenameEvent.Broadcast(AssetsAndNames);
@@ -463,14 +488,170 @@ bool FAssetRenameManager::FixReferencesAndRename(const TArray<FAssetRenameData>&
 	return ReportFailures(AssetsToRename, bWithDialog) == 0;
 }
 
-TArray<TWeakObjectPtr<UObject>> FAssetRenameManager::FindCDOReferencedAssets(const TArray<FAssetRenameDataWithReferencers>& AssetsToRename) const
+
+struct FSoftObjectPathRenameSerializer : public FArchiveUObject
 {
-	TArray<TWeakObjectPtr<UObject>> CDOAssets, LocalAssetsToRename;
-	for (const FAssetRenameDataWithReferencers& AssetToRename : AssetsToRename)
+	void StartSerializingObject(UObject* InCurrentObject)
+	{
+		CurrentObject = InCurrentObject;
+		bFoundReference = false;
+	}
+	bool HasFoundReference() const
+	{
+		return bFoundReference;
+	}
+
+	FSoftObjectPathRenameSerializer(const TMap<FSoftObjectPath, FSoftObjectPath>& InRedirectorMap,
+		bool bInCheckOnly,
+		TMap<FSoftObjectPath, TSet<FWeakObjectPtr>>* InCachedObjectPaths,
+		const FName InPackageName = NAME_None)
+		: RedirectorMap(InRedirectorMap)
+		, CachedObjectPaths(InCachedObjectPaths)
+		, CurrentObject(nullptr)
+		, PackageName(InPackageName)
+		, bSearchOnly(bInCheckOnly)
+		, bFoundReference(false)
+	{
+		if (InCachedObjectPaths)
+		{
+			DirtyDelegateHandle = UPackage::PackageMarkedDirtyEvent.AddRaw(this, &FSoftObjectPathRenameSerializer::OnMarkPackageDirty);
+		}
+
+		this->ArIsObjectReferenceCollector = true;
+		this->ArIsModifyingWeakAndStrongReferences = true;
+
+		// Mark it as saving to correctly process all references
+		this->SetIsSaving(true);
+	}
+
+	virtual ~FSoftObjectPathRenameSerializer()
+	{
+		UPackage::PackageMarkedDirtyEvent.Remove(DirtyDelegateHandle);
+	}
+
+	virtual bool ShouldSkipProperty(const FProperty* InProperty) const override
+	{
+		if (InProperty->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated | CPF_IsPlainOldData))
+		{
+			return true;
+		}
+
+		FFieldClass* PropertyClass = InProperty->GetClass();
+		if (PropertyClass->GetCastFlags() & (CASTCLASS_FBoolProperty | CASTCLASS_FNameProperty | CASTCLASS_FStrProperty | CASTCLASS_FMulticastDelegateProperty))
+		{
+			return true;
+		}
+
+		if (PropertyClass->GetCastFlags() & (CASTCLASS_FArrayProperty | CASTCLASS_FMapProperty | CASTCLASS_FSetProperty))
+		{
+			if (const FArrayProperty* ArrayProperty = CastField<FArrayProperty>(InProperty))
+			{
+				return ShouldSkipProperty(ArrayProperty->Inner);
+			}
+			else if (const FMapProperty* MapProperty = CastField<FMapProperty>(InProperty))
+			{
+				return ShouldSkipProperty(MapProperty->KeyProp) && ShouldSkipProperty(MapProperty->ValueProp);
+			}
+			else if (const FSetProperty* SetProperty = CastField<FSetProperty>(InProperty))
+			{
+				return ShouldSkipProperty(SetProperty->ElementProp);
+			}
+		}
+
+		return false;
+	}
+
+	FArchive& operator<<(FSoftObjectPath& Value)
+	{
+		using namespace AssetRenameManagerImpl;
+
+		// Ignore untracked references if just doing a search only. We still want to fix them up if they happen to be there
+		if (bSearchOnly)
+		{
+			FSoftObjectPathThreadContext& ThreadContext = FSoftObjectPathThreadContext::Get();
+			FName ReferencingPackageName, ReferencingPropertyName;
+			ESoftObjectPathCollectType CollectType = ESoftObjectPathCollectType::AlwaysCollect;
+			ESoftObjectPathSerializeType SerializeType = ESoftObjectPathSerializeType::AlwaysSerialize;
+
+			ThreadContext.GetSerializationOptions(ReferencingPackageName, ReferencingPropertyName, CollectType, SerializeType, this);
+
+			if (CollectType == ESoftObjectPathCollectType::NeverCollect || CollectType == ESoftObjectPathCollectType::NonPackage)
+			{
+				return *this;
+			}
+		}
+
+		if (CachedObjectPaths)
+		{
+			TSet<FWeakObjectPtr>* ObjectSet = &CachedObjectPaths->FindOrAdd(Value);
+			ObjectSet->Add(CurrentObject);
+		}
+
+		const FString& SubPath = Value.GetSubPathString();
+		for (const TPair<FSoftObjectPath, FSoftObjectPath>& Pair : RedirectorMap)
+		{
+			if (Pair.Key.GetAssetPath() == Value.GetAssetPath())
+			{
+				// Same asset, fix sub path. Asset will be fixed by normal serializePath call below
+				const FString& CheckSubPath = Pair.Key.GetSubPathString();
+
+				if (IsSubPath(SubPath, CheckSubPath))
+				{
+					bFoundReference = true;
+
+					if (!bSearchOnly)
+					{
+						if (CurrentObject)
+						{
+							check(!CachedObjectPaths); // Modify can invalidate the object paths map, not allowed to be modifying and using the cache at the same time
+							CurrentObject->Modify(true);
+						}
+
+						FString NewSubPath(SubPath);
+						NewSubPath.ReplaceInline(*CheckSubPath, *Pair.Value.GetSubPathString());
+						Value = FSoftObjectPath(Pair.Value.GetAssetPath(), NewSubPath);
+					}
+					break;
+				}
+			}
+		}
+
+		return *this;
+	}
+
+	void OnMarkPackageDirty(UPackage* Pkg, bool bWasDirty)
+	{
+		UPackage::PackageMarkedDirtyEvent.Remove(DirtyDelegateHandle);
+
+		if (CachedObjectPaths && Pkg && Pkg->GetFName() == PackageName)
+		{
+			UE_LOG(LogAssetTools, VeryVerbose, TEXT("Performance: Package unexpectedly modified during serialization by FSoftObjectPathRenameSerializer: %s"), *Pkg->GetFullName());
+		}
+	}
+
+private:
+	const TMap<FSoftObjectPath, FSoftObjectPath>& RedirectorMap;
+	TMap<FSoftObjectPath, TSet<FWeakObjectPtr>>* CachedObjectPaths;
+	FDelegateHandle DirtyDelegateHandle;
+	UObject* CurrentObject;
+	FName PackageName;
+	bool bSearchOnly;
+	bool bFoundReference;
+
+};
+
+void FAssetRenameManager::FindCDOReferences(const TArrayView<FAssetRenameDataWithReferencers>& AssetsToRename, TArray<FAssetRenameDataWithReferencers*>& OutHardReferences, TArray<FAssetRenameDataWithReferencers*>& OutSoftReferences, bool bSetRedirectorFlags) const
+{
+	// Checking reference candidates off as we find them to reduce workload
+	TArray<FAssetRenameDataWithReferencers*> RemainingHardRefAssetChecklist;
+	TArray<FAssetRenameDataWithReferencers*> RemainingSoftRefAssetChecklist;
+
+	for (FAssetRenameDataWithReferencers& AssetToRename : AssetsToRename)
 	{
 		if (AssetToRename.Asset.IsValid())
 		{
-			LocalAssetsToRename.Push(AssetToRename.Asset);
+			RemainingHardRefAssetChecklist.Push(&AssetToRename);
+			RemainingSoftRefAssetChecklist.Push(&AssetToRename);
 		}
 	}
 
@@ -480,7 +661,7 @@ TArray<TWeakObjectPtr<UObject>> FAssetRenameManager::FindCDOReferencedAssets(con
 		UClass* Cls = (*ClassDefaultObjectIt);
 		UObject* CDO = Cls->ClassDefaultObject;
 
-		if (!CDO || !CDO->HasAllFlags(RF_ClassDefaultObject) || Cls->ClassGeneratedBy != nullptr)
+		if (!CDO || !CDO->HasAllFlags(RF_ClassDefaultObject) || !IsValidChecked(CDO) || Cls->ClassGeneratedBy != nullptr)
 		{
 			continue;
 		}
@@ -491,37 +672,79 @@ TArray<TWeakObjectPtr<UObject>> FAssetRenameManager::FindCDOReferencedAssets(con
 			continue;
 		}
 
-		for (TFieldIterator<FObjectProperty> PropertyIt(Cls); PropertyIt; ++PropertyIt)
+		// Search this CDO for hard references
+		for (TFieldIterator<FObjectProperty> PropertyIt(Cls); PropertyIt && RemainingHardRefAssetChecklist.Num(); ++PropertyIt)
 		{
 			const UObject* Object = PropertyIt->GetPropertyValue(PropertyIt->ContainerPtrToValuePtr<UObject>(CDO));
-			for (const TWeakObjectPtr<UObject>& Asset : LocalAssetsToRename)
-			{
-				if (Object == Asset.Get())
-				{
-					CDOAssets.Push(Asset);
-					LocalAssetsToRename.Remove(Asset);
 
-					if (LocalAssetsToRename.Num() == 0)
+			for (FAssetRenameDataWithReferencers* AssetToRename : RemainingHardRefAssetChecklist)
+			{
+				if (Object == AssetToRename->Asset.Get())
+				{
+					OutHardReferences.Push(AssetToRename);
+					RemainingHardRefAssetChecklist.Remove(AssetToRename);
+					break;
+				}
+			}
+		}
+
+		//Search this CDO for soft references
+		TMap<FSoftObjectPath, FSoftObjectPath> DummyEmptyRedirectorMap;
+		TMap<FSoftObjectPath, TSet<FWeakObjectPtr>> SoftReferenceMap;
+		FSoftObjectPathRenameSerializer SoftRefCheckSerializer(DummyEmptyRedirectorMap, true, &SoftReferenceMap);
+
+		// Gather all soft references
+		SoftRefCheckSerializer.StartSerializingObject(CDO);
+		CDO->Serialize(SoftRefCheckSerializer);
+
+		// Check all soft references in the CDO for matching items that are to be renamed, with special handling for UBlueprint assets
+		for (auto Iter = SoftReferenceMap.CreateIterator(); Iter && RemainingSoftRefAssetChecklist.Num(); ++Iter)
+		{
+			FSoftObjectPath SoftRefObjPath = Iter.Key();
+
+			if (SoftRefObjPath.IsValid())
+			{
+				TWeakObjectPtr<UObject> Object = SoftRefObjPath.ResolveObject();
+				TWeakObjectPtr<UBlueprint> ObjectAsBP = UBlueprint::GetBlueprintFromClass(Cast<UBlueprintGeneratedClass>(Object));
+
+				// Resolve to the redirected asset path if necessary
+				FSoftObjectPath FinalSoftObjPath = SoftRefObjPath.GetWithoutSubPath();
+			
+				if (!Object.IsValid() && SoftRefObjPath.IsValid())
+				{
+					FSoftObjectPath RedirObjectPath = GRedirectCollector.GetAssetPathRedirection(SoftRefObjPath.GetWithoutSubPath());
+
+					if (!RedirObjectPath.IsNull() && RedirObjectPath != FinalSoftObjPath)
 					{
-						// No more assets to check
-						return MoveTemp(CDOAssets);
+						FinalSoftObjPath = RedirObjectPath;
 					}
-					else
+				}
+
+				// Check for any matching rename requests
+				for (FAssetRenameDataWithReferencers* AssetToRename : RemainingSoftRefAssetChecklist)
+				{
+					// Look for loaded references, indirect blueprint refs to their generated class counterparts, or path name matching
+					if ((Object == AssetToRename->Asset) ||
+						(ObjectAsBP != nullptr && ObjectAsBP == AssetToRename->Asset) ||
+						(!FinalSoftObjPath.IsNull() && FinalSoftObjPath == AssetToRename->OldObjectPath.GetWithoutSubPath()))
 					{
+						AssetToRename->bCreateRedirector |= bSetRedirectorFlags;
+
+						OutSoftReferences.Push(AssetToRename);
+						RemainingSoftRefAssetChecklist.Remove(AssetToRename);
+
 						break;
 					}
 				}
 			}
 		}
 	}
-
-	return MoveTemp(CDOAssets);
 }
 
 void FAssetRenameManager::PopulateAssetReferencers(TArray<FAssetRenameDataWithReferencers>& AssetsToPopulate) const
 {
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-	TSet<FName> RenamingAssetPackageNames;
+	TMap<FName, FName> PackageNamesToRename;
 
 	// Get the names of all the packages containing the assets we are renaming so they arent added to the referencing packages list
 	for (FAssetRenameDataWithReferencers& AssetToRename : AssetsToPopulate)
@@ -529,7 +752,7 @@ void FAssetRenameManager::PopulateAssetReferencers(TArray<FAssetRenameDataWithRe
 		// If we're only fixing soft references we want to check for references inside the original package as we don't save the original package automatically
 		if (!AssetToRename.bOnlyFixSoftReferences)
 		{
-			RenamingAssetPackageNames.Add(FName(*AssetToRename.OldObjectPath.GetLongPackageName()));
+			PackageNamesToRename.Add(AssetToRename.OldObjectPath.GetLongPackageFName(), AssetToRename.NewObjectPath.GetLongPackageFName());
 		}
 	}
 
@@ -543,9 +766,10 @@ void FAssetRenameManager::PopulateAssetReferencers(TArray<FAssetRenameDataWithRe
 	// Gather all referencing packages for all assets that are being renamed
 	for (FAssetRenameDataWithReferencers& AssetToRename : AssetsToPopulate)
 	{
-		AssetToRename.ReferencingPackageNames.Empty();
+		AssetToRename.NotRenamedReferencingPackageNames.Empty();
+		AssetToRename.RenamedReferencingPackageNames.Empty();
 
-		FName OldPackageName = FName(*AssetToRename.OldObjectPath.GetLongPackageName());
+		FName OldPackageName = AssetToRename.OldObjectPath.GetLongPackageFName();
 
 		TMap<FName, TArray<FName>>& ReferencersMap = AssetToRename.bOnlyFixSoftReferences ? SoftReferencers : PackageReferencers;
 		if (!ReferencersMap.Contains(OldPackageName))
@@ -556,21 +780,25 @@ void FAssetRenameManager::PopulateAssetReferencers(TArray<FAssetRenameDataWithRe
 
 		for (const FName& ReferencingPackageName : ReferencersMap.FindChecked(OldPackageName))
 		{
-			if (!RenamingAssetPackageNames.Contains(ReferencingPackageName))
+			if (FName* NewPackageName = PackageNamesToRename.Find(ReferencingPackageName))
 			{
-				AssetToRename.ReferencingPackageNames.AddUnique(ReferencingPackageName);
+				AssetToRename.RenamedReferencingPackageNames.Add(ReferencingPackageName, *NewPackageName);
+			}
+			else
+			{
+				AssetToRename.NotRenamedReferencingPackageNames.Add(ReferencingPackageName);
 			}
 		}
 
 		if (AssetToRename.bOnlyFixSoftReferences)
 		{
-			AssetToRename.ReferencingPackageNames.AddUnique(FName(*AssetToRename.OldObjectPath.GetLongPackageName()));
-			AssetToRename.ReferencingPackageNames.AddUnique(FName(*AssetToRename.NewObjectPath.GetLongPackageName()));
+			AssetToRename.NotRenamedReferencingPackageNames.Add(OldPackageName);
+			AssetToRename.NotRenamedReferencingPackageNames.Add(AssetToRename.NewObjectPath.GetLongPackageFName());
 
 			// Add dirty packages and the package that owns the reference. They will get filtered out in LoadReferencingPackages if they aren't valid
 			for (UPackage* Package : ExtraPackagesToCheckForSoftReferences)
 			{
-				AssetToRename.ReferencingPackageNames.AddUnique(Package->GetFName());
+				AssetToRename.NotRenamedReferencingPackageNames.Add(Package->GetFName());
 			}
 		}
 	}
@@ -586,7 +814,7 @@ bool FAssetRenameManager::UpdatePackageStatus(const TArray<FAssetRenameDataWithR
 		SourceControlProvider.Login();
 		if (!SourceControlProvider.IsAvailable())
 		{
-			FMessageDialog::Open(EAppMsgType::Ok, NSLOCTEXT("UnrealEd", "SourceControl_ServerUnresponsive", "Source Control is unresponsive. Please check your connection and try again."));
+			FMessageDialog::Open(EAppMsgType::Ok, NSLOCTEXT("UnrealEd", "SourceControl_ServerUnresponsive", "Revision Control is unresponsive. Please check your connection and try again."));
 			return false;
 		}
 
@@ -644,9 +872,19 @@ void FAssetRenameManager::LoadReferencingPackages(TArray<FAssetRenameDataWithRef
 		
 		FAssetRenameDataWithReferencers& RenameData = AssetsToRename[AssetIdx];
 
+		TSet<FName> ReferencingExternalPackageNames;
+
 		UObject* Asset = RenameData.Asset.Get();
 		if (Asset)
 		{
+			// External packages must always be resaved
+			for (UPackage* ExternalPackage : Asset->GetPackage()->GetExternalPackages())
+			{
+				FName ExternalPackageName = ExternalPackage->GetFName();
+				ReferencingExternalPackageNames.Add(ExternalPackageName);
+				OutReferencingPackagesToSave.Add(ExternalPackage);
+			}
+
 			// Make sure this asset is local. Only local assets should be renamed without a redirector
 			if (bCheckStatus)
 			{
@@ -692,9 +930,17 @@ void FAssetRenameManager::LoadReferencingPackages(TArray<FAssetRenameDataWithRef
 
 		TArray<UPackage*> PackagesToSaveForThisAsset;
 		bool bAllPackagesLoadedForThisAsset = true;
-		for (int32 i = 0; i < RenameData.ReferencingPackageNames.Num(); i++)
+
+		for (auto It = RenameData.NotRenamedReferencingPackageNames.CreateIterator(); It; ++It)
 		{
-			FName PackageName = RenameData.ReferencingPackageNames[i];
+			FName PackageName = *It;
+
+			// Ignore external packages of this asset, those are already added to the list of packages to save
+			if (ReferencingExternalPackageNames.Contains(PackageName))
+			{
+				continue;
+			}
+
 			// Check if the package is a map before loading it!
 			if (!bLoadAllPackages && FEditorFileUtils::IsMapPackageAsset(PackageName.ToString()))
 			{
@@ -731,8 +977,7 @@ void FAssetRenameManager::LoadReferencingPackages(TArray<FAssetRenameDataWithRef
 				else
 				{
 					// This package does not actually reference the asset, so remove it
-					RenameData.ReferencingPackageNames.RemoveAt(i);
-					i--;
+					It.RemoveCurrent();
 				}
 			}
 			else
@@ -779,7 +1024,7 @@ void FAssetRenameManager::GatherReferencingObjects(TArray<FAssetRenameDataWithRe
 			continue;
 		}
 
-		for (FName PackageName : RenameData.ReferencingPackageNames)
+		for (FName PackageName : RenameData.NotRenamedReferencingPackageNames)
 		{
 			UPackage* Package = FindPackage(nullptr, *PackageName.ToString());
 
@@ -949,7 +1194,7 @@ void FAssetRenameManager::DetectReferencingCollections(TArray<FAssetRenameDataWi
 		if (AssetToRename.Asset.IsValid())
 		{
 			TArray<FCollectionNameType> ReferencingCollections;
-			CollectionManagerModule.Get().GetCollectionsContainingObject(*AssetToRename.Asset->GetPathName(), ReferencingCollections);
+			CollectionManagerModule.Get().GetCollectionsContainingObject(FSoftObjectPath(AssetToRename.Asset.Get()), ReferencingCollections);
 
 			if (ReferencingCollections.Num() > 0)
 			{
@@ -970,7 +1215,7 @@ void FAssetRenameManager::DetectReadOnlyPackages(TArray<FAssetRenameDataWithRefe
 		{
 			// Find the package filename
 			FString Filename;
-			if (FPackageName::DoesPackageExist(Package->GetName(), nullptr, &Filename))
+			if (FPackageName::DoesPackageExist(Package->GetName(), &Filename))
 			{
 				// If the file is read only
 				if (IFileManager::Get().IsReadOnly(*Filename))
@@ -980,7 +1225,7 @@ void FAssetRenameManager::DetectReadOnlyPackages(TArray<FAssetRenameDataWithRefe
 					// Find all assets that were referenced by this package to create a redirector when named
 					for (FAssetRenameDataWithReferencers& RenameData : AssetsToRename)
 					{
-						if (RenameData.ReferencingPackageNames.Contains(PackageName))
+						if (RenameData.NotRenamedReferencingPackageNames.Contains(PackageName))
 						{
 							RenameData.bCreateRedirector = true;
 						}
@@ -994,157 +1239,246 @@ void FAssetRenameManager::DetectReadOnlyPackages(TArray<FAssetRenameDataWithRefe
 	}
 }
 
-struct FSoftObjectPathRenameSerializer : public FArchiveUObject
+void FAssetRenameManager::SetupPublicAssets(TArray<FAssetRenameDataWithReferencers>& AssetsToRename) const
 {
-	void StartSerializingObject(UObject* InCurrentObject)
-	{ 
-		CurrentObject = InCurrentObject;
-		bFoundReference = false; 
-	}
-	bool HasFoundReference() const 
-	{ 
-		return bFoundReference; 
-	}
-
-	FSoftObjectPathRenameSerializer(const TMap<FSoftObjectPath, FSoftObjectPath>& InRedirectorMap, bool bInCheckOnly, TMap<FSoftObjectPath, TSet<FWeakObjectPtr>>* InCachedObjectPaths, const FName InPackageName = NAME_None)
-		: RedirectorMap(InRedirectorMap)
-		, CachedObjectPaths(InCachedObjectPaths)
-		, CurrentObject(nullptr)
-		, PackageName(InPackageName)
-		, bSearchOnly(bInCheckOnly)
-		, bFoundReference(false)
+	static const IConsoleVariable* EnablePublicAssetFeatureCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("AssetTools.EnablePublicAssetFeature"));
+	if (!EnablePublicAssetFeatureCVar || !EnablePublicAssetFeatureCVar->GetBool())
 	{
-		if (InCachedObjectPaths)
-		{
-			DirtyDelegateHandle = UPackage::PackageMarkedDirtyEvent.AddRaw(this, &FSoftObjectPathRenameSerializer::OnMarkPackageDirty);
-		}
-
-		this->ArIsObjectReferenceCollector = true;
-		this->ArIsModifyingWeakAndStrongReferences = true;
-
-		// Mark it as saving to correctly process all references
-		this->SetIsSaving(true);
+		return;
 	}
 
-	virtual ~FSoftObjectPathRenameSerializer()
+	FScopedSlowTask SlowTask((float)AssetsToRename.Num(), LOCTEXT("SetupPublicAssets", "Setting up public assets..."));
+	SlowTask.MakeDialog();
+
+	IAssetTools& AssetTools = IAssetTools::Get();
+	IAssetRegistry& AssetRegistry = IAssetRegistry::GetChecked();
+
+	// Build a map of old package name to rename data
+	TMap<FName, FAssetRenameDataWithReferencers*> OldPackageNameToRenameData;
+	for (FAssetRenameDataWithReferencers& RenameData : AssetsToRename)
 	{
-		UPackage::PackageMarkedDirtyEvent.Remove(DirtyDelegateHandle);
+		OldPackageNameToRenameData.Add(RenameData.OldObjectPath.GetLongPackageFName(), &RenameData);
 	}
 
-	virtual bool ShouldSkipProperty(const FProperty* InProperty) const override
+	TArray<UPackage*> PackagesToMakePublic;
+	TSet<FName> RenamedReferencedPackageNames;
+	bool bSomeAssetCannotBeMovedToAnotherPlugin = false;
+	
+	// Determine which moved asset need to become public
+	for (FAssetRenameDataWithReferencers& RenameData : AssetsToRename)
 	{
-		if (InProperty->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated | CPF_IsPlainOldData))
+		SlowTask.EnterProgressFrame();
+
+		// Nothing to do if it won't be moved
+		if (RenameData.bRenameFailed || RenameData.bOnlyFixSoftReferences)
 		{
-			return true;
+			continue;
 		}
 
-		FFieldClass* PropertyClass = InProperty->GetClass();
-		if (PropertyClass->GetCastFlags() & (CASTCLASS_FBoolProperty | CASTCLASS_FNameProperty | CASTCLASS_FStrProperty | CASTCLASS_FMulticastDelegateProperty))
+		UObject* Asset = RenameData.Asset.Get();
+		UPackage* Package = Asset ? Asset->GetPackage() : nullptr;
+		if (!ensure(Package))
 		{
-			return true;
+			continue;
 		}
 
-		if (PropertyClass->GetCastFlags() & (CASTCLASS_FArrayProperty | CASTCLASS_FMapProperty | CASTCLASS_FSetProperty))
+		// Nothing to do if the renamed package mount point doesn't change
+		const FNameBuilder OldPackageName(RenameData.OldObjectPath.GetLongPackageFName());
+		const FNameBuilder NewPackageName(RenameData.NewObjectPath.GetLongPackageFName());
+		const FStringView OldPackageMountPoint = FPathViews::GetMountPointNameFromPath(OldPackageName);
+		const FStringView NewPackageMountPoint = FPathViews::GetMountPointNameFromPath(NewPackageName);
+		if (NewPackageMountPoint.Equals(OldPackageMountPoint, ESearchCase::IgnoreCase))
 		{
-			if (const FArrayProperty* ArrayProperty = CastField<FArrayProperty>(InProperty))
-			{
-				return ShouldSkipProperty(ArrayProperty->Inner);
-			}
-			else if (const FMapProperty* MapProperty = CastField<FMapProperty>(InProperty))
-			{
-				return ShouldSkipProperty(MapProperty->KeyProp) && ShouldSkipProperty(MapProperty->ValueProp);
-			}
-			else if (const FSetProperty* SetProperty = CastField<FSetProperty>(InProperty))
-			{
-				return ShouldSkipProperty(SetProperty->ElementProp);
-			}
+			continue;
 		}
 
-		return false;
-	}
-
-	FArchive& operator<<(FSoftObjectPath& Value)
-	{
-		using namespace AssetRenameManagerImpl;
-
-		// Ignore untracked references if just doing a search only. We still want to fix them up if they happen to be there
-		if (bSearchOnly)
+		// Make sure the asset won't be referencing a private asset in a different mount point after the move
 		{
-			FSoftObjectPathThreadContext& ThreadContext = FSoftObjectPathThreadContext::Get();
-			FName ReferencingPackageName, ReferencingPropertyName;
-			ESoftObjectPathCollectType CollectType = ESoftObjectPathCollectType::AlwaysCollect;
-			ESoftObjectPathSerializeType SerializeType = ESoftObjectPathSerializeType::AlwaysSerialize;
-
-			ThreadContext.GetSerializationOptions(ReferencingPackageName, ReferencingPropertyName, CollectType, SerializeType, this);
-
-			if (CollectType == ESoftObjectPathCollectType::NeverCollect)
+			TArray<FName> DependencyPackageNames;
+			AssetRegistry.GetDependencies(Package->GetFName(), DependencyPackageNames);
+			for (FName DependencyPackageName : DependencyPackageNames)
 			{
-				return *this;
-			}
-		}
-
-		if (CachedObjectPaths)
-		{
-			TSet<FWeakObjectPtr>* ObjectSet = CachedObjectPaths->Find(Value);
-			if (ObjectSet == nullptr)
-			{
-				ObjectSet = &CachedObjectPaths->Add(Value);
-			}
-			ObjectSet->Add(CurrentObject);
-		}
-
-		const FString& SubPath = Value.GetSubPathString();
-		for (const TPair<FSoftObjectPath, FSoftObjectPath>& Pair : RedirectorMap)
-		{
-			if (Pair.Key.GetAssetPathName() == Value.GetAssetPathName())
-			{
-				// Same asset, fix sub path. Asset will be fixed by normal serializePath call below
-				const FString& CheckSubPath = Pair.Key.GetSubPathString();
-
-				if (IsSubPath(SubPath, CheckSubPath))
+				if (OldPackageNameToRenameData.Find(DependencyPackageName))
 				{
-					bFoundReference = true;
+					RenamedReferencedPackageNames.Add(DependencyPackageName);
 
-					if (!bSearchOnly)
+					// Dependency is being renamed as well so it'll be handled later
+					continue;
+				}
+
+				{
+					const FNameBuilder DepPackageNameBuilder(DependencyPackageName);
+					const FStringView DependencyMountPoint = FPathViews::GetMountPointNameFromPath(DepPackageNameBuilder);
+					if (DependencyMountPoint.Equals(NewPackageMountPoint, ESearchCase::IgnoreCase))
 					{
-						if (CurrentObject)
-						{
-							check(!CachedObjectPaths); // Modify can invalidate the object paths map, not allowed to be modifying and using the cache at the same time
-							CurrentObject->Modify(true);
-						}
-
-						FString NewSubPath(SubPath);
-						NewSubPath.ReplaceInline(*CheckSubPath, *Pair.Value.GetSubPathString());
-						Value = FSoftObjectPath(Pair.Value.GetAssetPathName(), NewSubPath);
+						// Dependency is under the same mount point as the new asset location
+						continue;
 					}
+				}
+
+				{
+					TArray<FAssetData> DependencyAssetDatas;
+					if (AssetRegistry.GetAssetsByPackageName(DependencyPackageName, DependencyAssetDatas) && !DependencyAssetDatas.IsEmpty())
+					{
+						if (DependencyAssetDatas[0].HasAnyPackageFlags(PKG_NotExternallyReferenceable))
+						{
+							RenameData.bRenameFailed = true;
+							RenameData.FailureReason = FText::Format(
+								LOCTEXT("MovedAssetReferencingPrivateAsset", "Cannot move asset to {0} because it would be referencing a private asset in a different plugin: {1}"),
+								FText::FromStringView(NewPackageMountPoint),
+								FText::FromName(DependencyPackageName));
+							break;
+						}
+					}
+				}
+			}
+
+			if (RenameData.bRenameFailed)
+			{
+				bSomeAssetCannotBeMovedToAnotherPlugin = true;
+				continue;
+			}
+		}
+
+		// If the asset is already public, it can be referenced from anywhere so we're good
+		if (Package->IsExternallyReferenceable())
+		{
+			continue;
+		}
+
+		// The asset doesn't have to become public if it's not referenced at all
+		if (!RenameData.bCreateRedirector && RenameData.NotRenamedReferencingPackageNames.IsEmpty() && RenameData.RenamedReferencingPackageNames.IsEmpty())
+		{
+			continue;
+		}
+
+		// Figure out if it's gonna be referenced from another mount point after the move
+		FString ReferencingAssetInDifferentMountPoint;
+		if (RenameData.bCreateRedirector)
+		{
+			ReferencingAssetInDifferentMountPoint = OldPackageName.ToString();
+		}
+		if (ReferencingAssetInDifferentMountPoint.IsEmpty())
+		{
+			for (FName It : RenameData.NotRenamedReferencingPackageNames)
+			{
+				const FNameBuilder ReferencingPackageName(It);
+				const FStringView ReferencingPackagMountPoint = FPathViews::GetMountPointNameFromPath(ReferencingPackageName);
+				if (!ReferencingPackagMountPoint.Equals(NewPackageMountPoint, ESearchCase::IgnoreCase))
+				{
+					ReferencingAssetInDifferentMountPoint = ReferencingPackageName.ToString();
+					break;
+				}
+			}
+		}
+		if (ReferencingAssetInDifferentMountPoint.IsEmpty())
+		{
+			for (const TPair<FName, FName>& It : RenameData.RenamedReferencingPackageNames)
+			{
+				const FName OldReferencingPackageName = It.Key;
+				const FName NewReferencingPackageName = It.Value;
+
+				FAssetRenameDataWithReferencers** FoundReferencingRenameData = OldPackageNameToRenameData.Find(OldReferencingPackageName);
+				if (!ensureAlways(FoundReferencingRenameData))
+				{
+					continue;
+				}
+				FAssetRenameDataWithReferencers& ReferencingRenameData = **FoundReferencingRenameData;
+
+				FNameBuilder ReferencingPackageName;
+				if (ReferencingRenameData.bRenameFailed || ReferencingRenameData.bOnlyFixSoftReferences)
+				{
+					OldReferencingPackageName.AppendString(ReferencingPackageName);
+				}
+				else
+				{
+					NewReferencingPackageName.AppendString(ReferencingPackageName);
+				}
+
+				const FStringView ReferencingPackagMountPoint = FPathViews::GetMountPointNameFromPath(ReferencingPackageName);
+				if (!NewPackageMountPoint.Equals(ReferencingPackagMountPoint, ESearchCase::IgnoreCase))
+				{
+					ReferencingAssetInDifferentMountPoint = ReferencingPackageName.ToString();
 					break;
 				}
 			}
 		}
 
-		return *this;
-	}
-
-	void OnMarkPackageDirty(UPackage* Pkg, bool bWasDirty)
-	{
-		UPackage::PackageMarkedDirtyEvent.Remove(DirtyDelegateHandle);
-
-		if (CachedObjectPaths && Pkg && Pkg->GetFName() == PackageName)
+		// Check if the asset can be made public
+		if (!ReferencingAssetInDifferentMountPoint.IsEmpty())
 		{
-			UE_LOG(LogAssetTools, VeryVerbose, TEXT("Performance: Package unexpectedly modified during serialization by FSoftObjectPathRenameSerializer: %s"), *Pkg->GetFullName());
+			const FString OldAssetPath = RenameData.OldObjectPath.GetAssetPathString();
+			if (AssetTools.CanAssetBePublic(OldAssetPath))
+			{
+				PackagesToMakePublic.Add(Package);
+			}
+			else
+			{
+				bSomeAssetCannotBeMovedToAnotherPlugin = true;
+				RenameData.bRenameFailed = true;
+				if (RenameData.bCreateRedirector)
+				{
+					RenameData.FailureReason = FText::Format(
+						LOCTEXT("AssetCannotBePublicForRedirector", "Cannot move asset to {0} because it cannot be made public in order to be referenced from a different plugin by its redirector"),
+						FText::FromStringView(NewPackageMountPoint));
+				}
+				else
+				{
+					RenameData.FailureReason = FText::Format(
+						LOCTEXT("AssetCannotBePublic", "Cannot move asset to {0} because it cannot be made public in order to be referenced from a different plugin by {1}"), 
+						FText::FromStringView(NewPackageMountPoint),
+						FText::FromString(ReferencingAssetInDifferentMountPoint));
+				}
+			}
 		}
 	}
 
-private:
-	const TMap<FSoftObjectPath, FSoftObjectPath>& RedirectorMap;
-	TMap<FSoftObjectPath, TSet<FWeakObjectPtr>>* CachedObjectPaths;
-	FDelegateHandle DirtyDelegateHandle;
-	UObject* CurrentObject;
-	FName PackageName;
-	bool bSearchOnly;
-	bool bFoundReference;
+	if (bSomeAssetCannotBeMovedToAnotherPlugin)
+	{
+		// When an asset cannot be moved to another plugin, it changes the set of inter-plugin dependencies and it can require other assets 
+		// to become public as a result, which might not be intended by the user and those cascading effects would be difficult to grok.
+		// In this case, only rename assets that have no dependency against each other.
+		// @fixme: This is a little too aggressive. Ideally we'd check whether each asset actually has a direct or indirect
+		//         dependency with an asset that failed to be moved to another plugin but that could be expensive.
+		const FText FailureReason = LOCTEXT("DependentAssetCannotBeMoved", "Cannot rename asset because dependent assets could not be moved to a different plugin");
+		TSet<FName> RenamedReferencingPackageNames;
 
-};
+		for (FAssetRenameDataWithReferencers& RenameData : AssetsToRename)
+		{
+			for (const TPair<FName, FName>& It : RenameData.RenamedReferencingPackageNames)
+			{
+				RenamedReferencingPackageNames.Add(It.Key);
+			}
+
+			if (!RenameData.bRenameFailed && !RenameData.bOnlyFixSoftReferences && !RenameData.RenamedReferencingPackageNames.IsEmpty())
+			{
+				RenameData.bRenameFailed = true;
+				RenameData.FailureReason = FailureReason;
+			}
+		}
+
+		for (FAssetRenameDataWithReferencers& RenameData : AssetsToRename)
+		{
+			if (!RenameData.bRenameFailed && !RenameData.bOnlyFixSoftReferences)
+			{
+				const FName PackageName = RenameData.OldObjectPath.GetLongPackageFName();
+				if (RenamedReferencingPackageNames.Contains(PackageName) || RenamedReferencedPackageNames.Contains(PackageName))
+				{
+					RenameData.bRenameFailed = true;
+					RenameData.FailureReason = FailureReason;
+				}
+			}
+		}
+	}
+	else
+	{
+		// Make assets public
+		for (UPackage* Package : PackagesToMakePublic)
+		{
+			Package->SetIsExternallyReferenceable(true);
+		}
+	}
+}
 
 void FAssetRenameManager::RenameReferencingSoftObjectPaths(const TArray<UPackage *> PackagesToCheck, const TMap<FSoftObjectPath, FSoftObjectPath>& AssetRedirectorMap) const
 {
@@ -1153,7 +1487,7 @@ void FAssetRenameManager::RenameReferencingSoftObjectPaths(const TArray<UPackage
 	{
 		if (Pair.Key.IsAsset())
 		{
-			GRedirectCollector.AddAssetPathRedirection(Pair.Key.GetAssetPathName(), Pair.Value.GetAssetPathName());
+			GRedirectCollector.AddAssetPathRedirection(Pair.Key.GetWithoutSubPath(), Pair.Value.GetWithoutSubPath());
 		}
 	}
 
@@ -1166,7 +1500,7 @@ void FAssetRenameManager::RenameReferencingSoftObjectPaths(const TArray<UPackage
 
 		for (UObject* Object : ObjectsInPackage)
 		{
-			if (Object->IsPendingKill())
+			if (!IsValid(Object))
 			{
 				continue;
 			}
@@ -1181,9 +1515,6 @@ void FAssetRenameManager::RenameReferencingSoftObjectPaths(const TArray<UPackage
 			}
 		}
 	}
-
-	// Invalidate the soft object tag as we have created new valid paths
-	FSoftObjectPath::InvalidateTag();
 }
 
 void FAssetRenameManager::OnMarkPackageDirty(UPackage* Pkg, bool bWasDirty)
@@ -1236,7 +1567,7 @@ bool FAssetRenameManager::CheckPackageForSoftObjectReferences(UPackage* Package,
 
 		for (UObject* Object : ObjectsInPackage)
 		{
-			if (Object->IsPendingKill())
+			if (!IsValid(Object))
 			{
 				continue;
 			}
@@ -1266,7 +1597,7 @@ bool FAssetRenameManager::CheckPackageForSoftObjectReferences(UPackage* Package,
 			const FString& SubPath = CachedKey.GetSubPathString();
 
 			// Stop as soon as we're not anymore in the range we're searching
-			if (Pair.Key.GetAssetPathName() != CachedKey.GetAssetPathName())
+			if (Pair.Key.GetWithoutSubPath() != CachedKey.GetWithoutSubPath())
 			{
 				break;
 			}
@@ -1302,6 +1633,11 @@ bool FAssetRenameManager::CheckPackageForSoftObjectReferences(UPackage* Package,
 
 void FAssetRenameManager::PerformAssetRename(TArray<FAssetRenameDataWithReferencers>& AssetsToRename) const
 {
+	PerformAssetRename(AssetsToRename, TArray<UPackage*>());
+}
+
+void FAssetRenameManager::PerformAssetRename(TArray<FAssetRenameDataWithReferencers>& AssetsToRename, const TArray<UPackage*>& ReferencingPackagesToSave) const
+{
 	const FText AssetRenameSlowTask = LOCTEXT("AssetRenameSlowTask", "Renaming Assets");
 	GWarn->BeginSlowTask(AssetRenameSlowTask, true);
 
@@ -1316,7 +1652,7 @@ void FAssetRenameManager::PerformAssetRename(TArray<FAssetRenameDataWithReferenc
 	FEditorFileUtils::GetDirtyWorldPackages(DirtyPackagesToCheckForSoftReferences);
 	FEditorFileUtils::GetDirtyContentPackages(DirtyPackagesToCheckForSoftReferences);
 
-	TArray<UPackage*> PackagesToSave;
+	TArray<UPackage*> PackagesToSave = ReferencingPackagesToSave;
 	TArray<UPackage*> PotentialPackagesToDelete;
 	for (int32 AssetIdx = 0; AssetIdx < AssetsToRename.Num(); ++AssetIdx)
 	{
@@ -1333,6 +1669,7 @@ void FAssetRenameManager::PerformAssetRename(TArray<FAssetRenameDataWithReferenc
 		UObject* Asset = RenameData.Asset.Get();
 		TArray<UPackage *> PackagesToCheckForSoftReferences;
 
+		bool bIsCaseChangeOnly = false;
 		if (!RenameData.bOnlyFixSoftReferences)
 		{
 			// If bOnlyFixSoftReferences was set these got appended in find references
@@ -1349,11 +1686,65 @@ void FAssetRenameManager::PerformAssetRename(TArray<FAssetRenameDataWithReferenc
 			PGN.ObjectName = RenameData.NewName;
 			PGN.GroupName = TEXT("");
 			PGN.PackageName = RenameData.NewPackagePath / PGN.ObjectName;
-			const bool bLeaveRedirector = RenameData.bCreateRedirector;
+			bool bLeaveRedirector = RenameData.bCreateRedirector;
 
 			UPackage* OldPackage = Asset->GetOutermost();
+
+			if (OldPackage->GetFName() == FName(PGN.PackageName) && !OldPackage->IsRooted())
+			{
+				// Handle case change only.
+				bLeaveRedirector = false;
+
+				FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
+				FString PackageName;
+				FString AssetName;
+				FString BasePath = RenameData.NewPackagePath + TEXT("/RenameTmp") ;
+				AssetToolsModule.Get().CreateUniqueAssetName(BasePath, TEXT(""), PackageName, AssetName);
+
+				ObjectTools::FPackageGroupName TempPGN;
+				TempPGN.ObjectName = AssetName;
+				TempPGN.GroupName = TEXT("");
+				TempPGN.PackageName = RenameData.NewPackagePath / TempPGN.ObjectName;
+
+				TSet<UPackage*> ObjectsUserRefusedToFullyLoad;
+				FText ErrorMessage;
+
+				// Case insensitive file systems and source control providers clients often handle poorly a case change.
+				bool bIsLocal = true;
+				if (ISourceControlModule::Get().IsEnabled())
+				{
+					ISourceControlProvider& Provider = ISourceControlModule::Get().GetProvider();
+					if (FSourceControlStatePtr StatePtr = Provider.GetState(Asset->GetPackage(), EStateCacheUsage::ForceUpdate))
+					{
+						if (StatePtr->IsSourceControlled())
+						{
+							bIsLocal = false;
+							ErrorMessage = LOCTEXT("ErrorCaseChangeRenameWithSourceControl", "Couldn't perform a case-only rename on a revision controlled asset, as this is not supported.");
+						}
+					}
+				}
+
+				if (bIsLocal && ObjectTools::RenameSingleObject(Asset, TempPGN, ObjectsUserRefusedToFullyLoad, ErrorMessage, nullptr, bLeaveRedirector))
+				{
+					TArray<UPackage*> OldPackageToClean;
+					OldPackageToClean.Add(OldPackage);
+					OldPackage = Asset->GetPackage();
+					OldPackage->AddToRoot();
+					ObjectTools::CleanupAfterSuccessfulDelete(OldPackageToClean);
+					OldPackage->RemoveFromRoot();
+					bIsCaseChangeOnly = true;
+				}
+				else
+				{
+					RenameData.bRenameFailed = true;
+					RenameData.FailureReason = ErrorMessage;
+					continue;
+				}
+			}
+
+
 			bool bOldPackageAddedToRootSet = false;
-			if (!bLeaveRedirector && !OldPackage->IsRooted())
+			if (!bLeaveRedirector && OldPackage && !OldPackage->IsRooted())
 			{
 				bOldPackageAddedToRootSet = true;
 				OldPackage->AddToRoot();
@@ -1363,7 +1754,13 @@ void FAssetRenameManager::PerformAssetRename(TArray<FAssetRenameDataWithReferenc
 			FText ErrorMessage;
 			if (ObjectTools::RenameSingleObject(Asset, PGN, ObjectsUserRefusedToFullyLoad, ErrorMessage, nullptr, bLeaveRedirector))
 			{
-				PackagesToSave.AddUnique(Asset->GetOutermost());
+				/**
+				 * Do not save the package when the user simply changing a case and there is no referencer to it
+				 */
+				if (!(bIsCaseChangeOnly && RenameData.NotRenamedReferencingPackageNames.IsEmpty()))
+				{
+					PackagesToSave.AddUnique(Asset->GetOutermost());
+				}
 
 				// Automatically save renamed assets
 				if (bLeaveRedirector)
@@ -1372,7 +1769,7 @@ void FAssetRenameManager::PerformAssetRename(TArray<FAssetRenameDataWithReferenc
 				}
 				else if (bOldPackageAddedToRootSet)
 				{
-					// Since we did not leave a redirector and the old package wasnt already rooted, attempt to delete it when we are done. 
+					// Since we did not leave a redirector and the old package wasn't already rooted, attempt to delete it when we are done. 
 					PotentialPackagesToDelete.AddUnique(OldPackage);
 				}
 			}
@@ -1390,26 +1787,29 @@ void FAssetRenameManager::PerformAssetRename(TArray<FAssetRenameDataWithReferenc
 			}
 		}
 
-		for (FName PackageName : RenameData.ReferencingPackageNames)
+		if (!RenameData.bRenameFailed && !bIsCaseChangeOnly)
 		{
-			UPackage* PackageToCheck = FindPackage(nullptr, *PackageName.ToString());
-			if (PackageToCheck)
+			for (FName PackageName : RenameData.NotRenamedReferencingPackageNames)
 			{
-				PackagesToCheckForSoftReferences.Add(PackageToCheck);
+				UPackage* PackageToCheck = FindPackage(nullptr, *PackageName.ToString());
+				if (PackageToCheck)
+				{
+					PackagesToCheckForSoftReferences.Add(PackageToCheck);
+				}
 			}
+
+			TMap<FSoftObjectPath, FSoftObjectPath> RedirectorMap;
+			RedirectorMap.Add(RenameData.OldObjectPath, RenameData.NewObjectPath);
+
+			if (UBlueprint* Blueprint = Cast<UBlueprint>(Asset))
+			{
+				// Add redirect for class and default as well
+				RedirectorMap.Add(FString::Printf(TEXT("%s_C"), *RenameData.OldObjectPath.ToString()), FString::Printf(TEXT("%s_C"), *RenameData.NewObjectPath.ToString()));
+				RedirectorMap.Add(FString::Printf(TEXT("%s.Default__%s_C"), *RenameData.OldObjectPath.GetLongPackageName(), *RenameData.OldObjectPath.GetAssetName()), FString::Printf(TEXT("%s.Default__%s_C"), *RenameData.NewObjectPath.GetLongPackageName(), *RenameData.NewObjectPath.GetAssetName()));
+			}
+
+			RenameReferencingSoftObjectPaths(PackagesToCheckForSoftReferences, RedirectorMap);
 		}
-
-		TMap<FSoftObjectPath, FSoftObjectPath> RedirectorMap;
-		RedirectorMap.Add(RenameData.OldObjectPath, RenameData.NewObjectPath);
-
-		if (UBlueprint* Blueprint = Cast<UBlueprint>(Asset))
-		{
-			// Add redirect for class and default as well
-			RedirectorMap.Add(FString::Printf(TEXT("%s_C"), *RenameData.OldObjectPath.ToString()), FString::Printf(TEXT("%s_C"), *RenameData.NewObjectPath.ToString()));
-			RedirectorMap.Add(FString::Printf(TEXT("%s.Default__%s_C"), *RenameData.OldObjectPath.GetLongPackageName(), *RenameData.OldObjectPath.GetAssetName()), FString::Printf(TEXT("%s.Default__%s_C"), *RenameData.NewObjectPath.GetLongPackageName(), *RenameData.NewObjectPath.GetAssetName()));
-		}
-
-		RenameReferencingSoftObjectPaths(PackagesToCheckForSoftReferences, RedirectorMap);
 	}
 
 	GWarn->EndSlowTask();
@@ -1420,9 +1820,13 @@ void FAssetRenameManager::PerformAssetRename(TArray<FAssetRenameDataWithReferenc
 		const bool bCheckDirty = false;
 		const bool bPromptToSave = false;
 		const bool bAlreadyCheckedOut = true;
+
+		// Get the list of filenames before calling save because some of the saved packages can get GCed if they are empty packages
+		const TArray<FString> Filenames = USourceControlHelpers::PackageFilenames(PackagesToSave);
+
 		FEditorFileUtils::PromptForCheckoutAndSave(PackagesToSave, bCheckDirty, bPromptToSave, nullptr, bAlreadyCheckedOut);
 
-		ISourceControlModule::Get().QueueStatusUpdate(PackagesToSave);
+		ISourceControlModule::Get().QueueStatusUpdate(Filenames);
 	}
 
 	// Bulk update SCC status for old packages since it is faster than doing it one by one below
@@ -1495,11 +1899,14 @@ void FAssetRenameManager::SaveReferencingPackages(const TArray<UPackage*>& Refer
 {
 	if (ReferencingPackagesToSave.Num() > 0)
 	{
+		// Get the list of filenames before calling save because some of the saved packages can get GCed if they are empty packages
+		const TArray<FString> Filenames = USourceControlHelpers::PackageFilenames(ReferencingPackagesToSave);
+
 		const bool bCheckDirty = false;
 		const bool bPromptToSave = false;
 		FEditorFileUtils::PromptForCheckoutAndSave(ReferencingPackagesToSave, bCheckDirty, bPromptToSave);
 
-		ISourceControlModule::Get().QueueStatusUpdate(ReferencingPackagesToSave);
+		ISourceControlModule::Get().QueueStatusUpdate(Filenames);
 	}
 }
 

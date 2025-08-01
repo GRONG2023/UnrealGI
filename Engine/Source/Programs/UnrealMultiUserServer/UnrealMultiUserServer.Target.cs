@@ -11,6 +11,7 @@ public class UnrealMultiUserServerTarget : TargetRules
 		LinkType = TargetLinkType.Modular;
 		LaunchModuleName = "UnrealMultiUserServer";
 		AdditionalPlugins.Add("UdpMessaging");
+		AdditionalPlugins.Add("QuicMessaging");
 		AdditionalPlugins.Add("ConcertSyncServer");
 
 		// This app compiles against Core/CoreUObject, but not the Engine or Editor, so compile out Engine and Editor references from Core/CoreUObject
@@ -26,6 +27,6 @@ public class UnrealMultiUserServerTarget : TargetRules
 		bIsBuildingConsoleApplication = Target.Platform != UnrealTargetPlatform.Mac;
 
 		GlobalDefinitions.Add("UE_LOG_CONCERT_DEBUG_VERBOSITY_LEVEL=Log");
-		GlobalDefinitions.Add("UE_TRACE_ENABLED=1");
+		bEnableTrace = true;
 	}
 }

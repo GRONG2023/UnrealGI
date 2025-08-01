@@ -17,11 +17,7 @@ namespace UnrealBuildTool.Rules
 				new string[] {
 					"CoreUObject",
 				});
-
-			PrivateIncludePaths.AddRange(
-				new string[] {
-					"Runtime/Serialization/Private",
-				});
+			UnsafeTypeCastWarningLevel = WarningLevel.Error;
 		}
 	}
 }

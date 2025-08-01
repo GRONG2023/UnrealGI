@@ -12,6 +12,7 @@
 #include "PropertyHandle.h"
 #include "IDetailCustomNodeBuilder.h"
 #include "IDetailCustomization.h"
+#include "SkeletalMeshReductionSettings.h"
 #include "Widgets/Input/SComboBox.h"
 
 DECLARE_LOG_CATEGORY_EXTERN(LogSkeletalMeshPersonaMeshDetail, Log, All);
@@ -123,16 +124,16 @@ private:
 	virtual void GenerateChildContent(IDetailChildrenBuilder& ChildrenBuilder) override;
 	virtual void Tick(float DeltaTime) override {}
 	virtual bool RequiresTick() const override { return false; }
-	virtual FName GetName() const override { static FName MeshBuildSettings("MeshBuildSettings"); return MeshBuildSettings; }
+	virtual FName GetName() const override { static FName MeshReductionSettings("SkeletalMeshOptimizationSettings"); return MeshReductionSettings; }
 	virtual bool InitiallyCollapsed() const override { return true; }
 
 	bool IsReductionEnabled() const;
 
 	//Custom Row Add utilities
-	FDetailWidgetRow& AddFloatRow(IDetailChildrenBuilder& ChildrenBuilder, const FText RowTitleText, const FText RowNameContentText, const FText RowNameContentTootlipText, const float MinSliderValue, const float MaxSliderValue, FGetFloatDelegate GetterDelegate, FSetFloatDelegate SetterDelegate);
-	FDetailWidgetRow& AddBoolRow(IDetailChildrenBuilder& ChildrenBuilder, const FText RowTitleText, const FText RowNameContentText, const FText RowNameContentToolitipText, FGetCheckBoxStateDelegate GetterDelegate, FSetCheckBoxStateDelegate SetterDelegate);
-	FDetailWidgetRow& AddIntegerRow(IDetailChildrenBuilder& ChildrenBuilder, const FText RowTitleText, const FText RowNameContentText, const FText RowNameContentTootlipText, const int32 MinSliderValue, const int32 MaxSliderValue, FGetIntegerDelegate GetterDelegate, FSetIntegerDelegate SetterDelegate);
-	FDetailWidgetRow& AddUnsignedIntegerRow(IDetailChildrenBuilder& ChildrenBuilder, const FText RowTitleText, const FText RowNameContentText, const FText RowNameContentTootlipText, const uint32 MinSliderValue, const uint32 MaxSliderValue, FGetUnsignedIntegerDelegate GetterDelegate, FSetUnsignedIntegerDelegate SetterDelegate);
+	FDetailWidgetRow& AddFloatRow(IDetailChildrenBuilder& ChildrenBuilder, const FText RowTitleText, const FText RowNameContentText, const FText RowNameContentTootlipText, FName RowTag, const float MinSliderValue, const float MaxSliderValue, FGetFloatDelegate GetterDelegate, FSetFloatDelegate SetterDelegate);
+	FDetailWidgetRow& AddBoolRow(IDetailChildrenBuilder& ChildrenBuilder, const FText RowTitleText, const FText RowNameContentText, const FText RowNameContentToolitipText, FName RowTag, FGetCheckBoxStateDelegate GetterDelegate, FSetCheckBoxStateDelegate SetterDelegate);
+	FDetailWidgetRow& AddIntegerRow(IDetailChildrenBuilder& ChildrenBuilder, const FText RowTitleText, const FText RowNameContentText, const FText RowNameContentTootlipText, FName RowTag, const int32 MinSliderValue, const int32 MaxSliderValue, FGetIntegerDelegate GetterDelegate, FSetIntegerDelegate SetterDelegate);
+	FDetailWidgetRow& AddUnsignedIntegerRow(IDetailChildrenBuilder& ChildrenBuilder, const FText RowTitleText, const FText RowNameContentText, const FText RowNameContentTootlipText, FName RowTag, const uint32 MinSliderValue, const uint32 MaxSliderValue, FGetUnsignedIntegerDelegate GetterDelegate, FSetUnsignedIntegerDelegate SetterDelegate);
 	void AddBaseLODRow(IDetailChildrenBuilder& ChildrenBuilder);
 
 	void SetPercentAndAbsoluteVisibility(FDetailWidgetRow& Row, SkeletalMeshTerminationCriterion FirstCriterion, SkeletalMeshTerminationCriterion SecondCriterion);
@@ -190,8 +191,14 @@ private:
 	ECheckBoxState GetLockColorBounaries() const;
 	void SetLockColorBounaries(ECheckBoxState NewState);
 
+	ECheckBoxState GetImproveTrianglesForCloth() const;
+	void SetImproveTrianglesForCloth(ECheckBoxState NewState);
+
 	ECheckBoxState GetEnforceBoneBoundaries() const;
 	void SetEnforceBoneBoundaries(ECheckBoxState NewState);
+
+	ECheckBoxState GetMergeCoincidentVertBones() const;
+	void SetMergeCoincidentVertBones(ECheckBoxState NewState);
 
 	float GetVolumeImportance() const;
 	void SetVolumeImportance(float Value);
@@ -251,6 +258,9 @@ public:
 	DECLARE_DELEGATE_RetVal(float, FGetFloatDelegate);
 	DECLARE_DELEGATE_OneParam(FSetFloatDelegate, float);
 
+	DECLARE_DELEGATE_RetVal(int32, FGetIntegerDelegate);
+	DECLARE_DELEGATE_OneParam(FSetIntegerDelegate, int32);
+
 	void UnbindBuildSettings()
 	{
 		IsBuildSettingsEnabledDelegate.Unbind();
@@ -268,8 +278,18 @@ private:
 
 	bool IsBuildEnabled() const;
 
-		//Custom Row Add utilities
+	//Custom Row Add utilities
 	FDetailWidgetRow& AddFloatRow(IDetailChildrenBuilder& ChildrenBuilder, const FText RowTitleText, const FText RowNameContentText, const FText RowNameContentTootlipText, const float MinSliderValue, const float MaxSliderValue, FGetFloatDelegate GetterDelegate, FSetFloatDelegate SetterDelegate);
+	FDetailWidgetRow& AddIntegerRow(
+		IDetailChildrenBuilder& ChildrenBuilder,
+		const FText& RowTitleText,
+		const FText& RowNameContentText,
+		const FText& RowNameContentTooltipText,
+		FName RowTag,
+		const int32 MinSliderValue,
+		const int32 MaxSliderValue,
+		const FGetIntegerDelegate& GetterDelegate,
+		const FSetIntegerDelegate& SetterDelegate);
 
 	float GetThresholdPosition() const;
 	void SetThresholdPosition(float Value);
@@ -283,14 +303,18 @@ private:
 	float GetMorphThresholdPosition() const;
 	void SetMorphThresholdPosition(float Value);
 
+	int32 GetBoneInfluenceLimit() const;
+	void SetBoneInfluenceLimit(int32 Value);
+
 	ECheckBoxState ShouldRecomputeNormals() const;
 	ECheckBoxState ShouldRecomputeTangents() const;
 	ECheckBoxState ShouldUseMikkTSpace() const;
 	ECheckBoxState ShouldComputeWeightedNormals() const;
 	ECheckBoxState ShouldRemoveDegenerates() const;
 	ECheckBoxState ShouldUseHighPrecisionTangentBasis() const;
+	ECheckBoxState ShouldUseHighPrecisionSkinWeights() const;
 	ECheckBoxState ShouldUseFullPrecisionUVs() const;
-	ECheckBoxState ShouldBuildAdjacencyBuffer() const;
+	ECheckBoxState ShouldUseBackwardsCompatibleF16TruncUVs() const;
 
 	void OnRecomputeNormalsChanged(ECheckBoxState NewState);
 	void OnRecomputeTangentsChanged(ECheckBoxState NewState);
@@ -298,8 +322,9 @@ private:
 	void OnComputeWeightedNormalsChanged(ECheckBoxState NewState);
 	void OnRemoveDegeneratesChanged(ECheckBoxState NewState);
 	void OnUseHighPrecisionTangentBasisChanged(ECheckBoxState NewState);
+	void OnUseHighPrecisionSkinWeightsChanged(ECheckBoxState NewState);
 	void OnUseFullPrecisionUVsChanged(ECheckBoxState NewState);
-	void OnBuildAdjacencyBufferChanged(ECheckBoxState NewState);
+	void OnUseBackwardsCompatibleF16TruncUVsChanged(ECheckBoxState NewState);
 
 private:
 	FSkeletalMeshBuildSettings& BuildSettings;
@@ -317,6 +342,7 @@ private:
 	};
 	TArray<FSliderStateData> SliderStateDataArray;
 };
+
 
 class FPersonaMeshDetails : public IDetailCustomization
 {
@@ -514,7 +540,7 @@ private:
 	* Handler for check box display based on whether the material has shadow casting enabled
 	*
 	* @param LODIndex	The LODIndex we want to change
-	* @param SectionIndex	The SectionIndex we change the RecomputeTangent
+	* @param SectionIndex	The SectionIndex we change the ShadowCasting flag
 	*/
 	ECheckBoxState IsSectionShadowCastingEnabled(int32 LODIndex, int32 SectionIndex) const;
 
@@ -522,25 +548,25 @@ private:
 	* Handler for changing shadow casting status on a section
 	*
 	* @param LODIndex	The LODIndex we want to change
-	* @param SectionIndex	The SectionIndex we change the RecomputeTangent
+	* @param SectionIndex	The SectionIndex we change the ShadowCasting flag
 	*/
 	void OnSectionShadowCastingChanged(ECheckBoxState NewState, int32 LODIndex, int32 SectionIndex);
 
 	/**
-	* Handler for check box display based on whether this section does recalculate normal or not
+	* Handler for check box display based on whether the material has VisibleInRayTracing enabled
 	*
 	* @param LODIndex	The LODIndex we want to change
-	* @param SectionIndex	The SectionIndex we change the RecomputeTangent
+	* @param SectionIndex	The SectionIndex we change the VisibleInRayTracing flag
 	*/
-	ECheckBoxState IsSectionRecomputeTangentEnabled(int32 LODIndex, int32 SectionIndex) const;
+	ECheckBoxState IsSectionVisibleInRayTracingEnabled(int32 LODIndex, int32 SectionIndex) const;
 
 	/**
-	* Handler for changing recalulate normal status on a section
+	* Handler for changing VisibleInRayTracing status on a section
 	*
 	* @param LODIndex	The LODIndex we want to change
-	* @param SectionIndex	The SectionIndex we change the RecomputeTangent
+	* @param SectionIndex	The SectionIndex we change the VisibleInRayTracing flag
 	*/
-	void OnSectionRecomputeTangentChanged(ECheckBoxState NewState, int32 LODIndex, int32 SectionIndex);
+	void OnSectionVisibleInRayTracingChanged(ECheckBoxState NewState, int32 LODIndex, int32 SectionIndex);
 
 	/**
 	* Handler for selecting which vertex color to mask the blending of recomputing tangents
@@ -548,10 +574,9 @@ private:
 	* @param LODIndex	The LODIndex we want to change
 	* @param SectionIndex	The SectionIndex we change the RecomputeTangent
 	*/
-	TSharedRef<class SWidget> OnGenerateRecomputeTangentsVertexChannelMaskPicker(int32 LODIndex, int32 SectionIndex);
-	bool IsGenerateRecomputeTangentsVertexChannelMaskPicker(int32 LODIndex, int32 SectionIndex) const;
-	FText GetCurrentRecomputeTangentsVertexChannelMaskName(int32 LODIndex, int32 SectionIndex) const;
-	void SetCurrentRecomputeTangentsVertexChannel(int32 LODIndex, int32 SectionIndex, int32 Index);
+	TSharedRef<class SWidget> OnGenerateRecomputeTangentsSetting(int32 LODIndex, int32 SectionIndex);
+	FText GetCurrentRecomputeTangentsSetting(int32 LODIndex, int32 SectionIndex) const;
+	void SetCurrentRecomputeTangentsSetting(int32 LODIndex, int32 SectionIndex, int32 Index);
 
 	/**
 	 * Handler for enabling delete button on materials
@@ -571,6 +596,7 @@ private:
 
 	/** Called when a LOD is imported. Refreshes the UI. */
 	void OnAssetPostLODImported(UObject* InObject, int32 InLODIndex);
+	void OnAssetReimport(UObject* InObject);
 	/** Called from the PersonalMeshDetails UI to import a LOD. */
 	void OnImportLOD(TSharedPtr<FString> NewValue, ESelectInfo::Type SelectInfo, IDetailLayoutBuilder* DetailLayout);
 	void UpdateLODNames();
@@ -582,7 +608,27 @@ private:
 
 	FText GetMaterialSlotNameText(int32 MaterialIndex) const;
 
-	void RefreshMeshDetailLayout();
+	void ForceLayoutRebuild();
+	void RequestLayoutUpdate();
+
+	void OnNoRefStreamingLODBiasChanged(int32 NewValue, FName QualityLevel);
+	void OnNoRefStreamingLODBiasCommitted(int32 InValue, ETextCommit::Type CommitInfo, FName QualityLevel);
+	int32 GetNoRefStreamingLODBias(FName QualityLevel) const;
+	TSharedRef<SWidget> GetNoRefStreamingLODBiasWidget(FName QualityLevelName) const;
+	bool AddNoRefStreamingLODBiasOverride(FName QualityLevelName);
+	bool RemoveNoRefStreamingLODBiasOverride(FName QualityLevelName);
+	TArray<FName> GetNoRefStreamingLODBiasOverrideNames() const;
+	FText GetNoRefStreamingLODBiasTooltip() const;
+
+	void OnMinQualityLevelLodChanged(int32 NewValue, FName QualityLevel);
+	void OnMinQualityLevelLodCommitted(int32 InValue, ETextCommit::Type CommitInfo, FName QualityLevel);
+	int32 GetMinQualityLevelLod(FName QualityLevel) const;
+	TSharedRef<SWidget> GetMinQualityLevelLodWidget(FName QualityLevelName) const;
+	bool AddMinLodQualityLevelOverride(FName QualityLevelName);
+	bool RemoveMinLodQualityLevelOverride(FName QualityLevelName);
+	TArray<FName> GetMinQualityLevelLodOverrideNames() const;
+	FReply ResetToDefault();
+	FPerPlatformInt GetMinLod();
 
 	/** apply LOD changes if the user modified LOD reduction settings */
 	FReply OnApplyChanges();
@@ -650,6 +696,7 @@ private:
 	void OnPreviewMeshChanged(USkeletalMesh* OldSkeletalMesh, USkeletalMesh* NewMesh);
 	
 	bool FilterOutBakePose(const struct FAssetData& AssetData, USkeleton* Skeleton) const;
+	bool FilterOutBakePose(const struct FAssetData& AssetData, TObjectPtr<USkeleton> Skeleton) const { return FilterOutBakePose(AssetData, Skeleton.Get()); }
 
 	FText GetLODCustomModeNameContent(int32 LODIndex) const;
 	ECheckBoxState IsLODCustomModeCheck(int32 LODIndex) const;
@@ -766,14 +813,6 @@ private:
 	/* Make uniform grid widget for Apex details */
 	TSharedRef<SUniformGridPanel> MakeClothingDetailsWidget(int32 AssetIndex) const;
 
-#if WITH_APEX_CLOTHING
-	/* Opens dialog to add a new clothing asset */
-	FReply OnOpenClothingFileClicked(IDetailLayoutBuilder* DetailLayout);
-
-	/* Reimports a clothing asset */ 
-	FReply OnReimportApexFileClicked(int32 AssetIndex, IDetailLayoutBuilder* DetailLayout);
-#endif
-
 	/* Removes a clothing asset */ 
 	FReply OnRemoveClothingAssetClicked(int32 AssetIndex, IDetailLayoutBuilder* DetailLayout);
 
@@ -785,6 +824,8 @@ private:
 
 	/** LOD Info editing is enabled? LODIndex == -1, then it just verifies if the asset exists */
 	bool IsLODInfoEditingEnabled(int32 LODIndex) const;
+	bool IsMinLodEnable() const;
+	bool IsQualityLevelMinLodEnable() const;
 	void ModifyMeshLODSettings(int32 LODIndex);
 
 	TMap<int32, TSharedPtr<FSkeletalMeshBuildSettingsLayout>> BuildSettingsWidgetsPerLOD;
@@ -801,4 +842,7 @@ private:
 
 	// Delegate used at runtime to determine the state of the VertexOverrideColor property
 	bool GetVertexOverrideColorEnabledState() const;
+
+	// Called when the skeletal mesh has finished rebuilding. This may affect some settings, such as vertex attributes.
+	void OnMeshRebuildCompleted(USkeletalMesh* InMesh);
 };

@@ -6,32 +6,60 @@ Field.h: Declares FField property system fundamentals
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/Script.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/UObjectGlobals.h"
-#include "UObject/Object.h"
-#include "Misc/Guid.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/StringFwd.h"
+#include "Containers/UnrealString.h"
+#include "CoreTypes.h"
+#include "Delegates/Delegate.h"
+#include "HAL/PlatformMath.h"
+#include "HAL/ThreadSafeCounter.h"
+#include "HAL/UnrealMemory.h"
+#include "Internationalization/Text.h"
 #include "Math/RandomStream.h"
-#include "UObject/GarbageCollection.h"
-#include "UObject/CoreNative.h"
-#include "Templates/HasGetTypeHash.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/CString.h"
+#include "Misc/EnumClassFlags.h"
+#include "Misc/Guid.h"
+#include "Misc/Optional.h"
+#include "Serialization/Archive.h"
+#include "Serialization/StructuredArchive.h"
+#include "Serialization/StructuredArchiveAdapters.h"
+#include "Serialization/StructuredArchiveSlots.h"
+#include "Templates/EnableIf.h"
 #include "Templates/IsAbstract.h"
 #include "Templates/IsEnum.h"
-#include "Misc/Optional.h"
-#include "Misc/EnumClassFlags.h"
-#include "Misc/CoreMiscDefines.h"
-#include "HAL/ThreadSafeCounter.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UnrealTemplate.h"
+#include "Templates/UnrealTypeTraits.h"
+#include "UObject/CoreNative.h"
+#include "UObject/GarbageCollection.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/PersistentObjectPtr.h"
+#include "UObject/Script.h"
+#include "UObject/SparseDelegate.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/WeakObjectPtr.h"
 
-class FProperty;
+#include <type_traits>
+
 class FField;
 class FFieldVariant;
+class FProperty;
+class FReferenceCollector;
+class UClass;
+class UField;
+class UPackage;
+class UStruct;
 
 /**
   * Object representing a type of an FField struct. 
   * Mimics a subset of UObject reflection functions.
   */
-class COREUOBJECT_API FFieldClass
+class FFieldClass
 {
 	UE_NONCOPYABLE(FFieldClass);
 
@@ -53,17 +81,17 @@ class COREUOBJECT_API FFieldClass
 	FThreadSafeCounter UnqiueNameIndexCounter;
 
 	/** Creates a default object instance of this class */
-	FField* ConstructDefaultObject();
+	COREUOBJECT_API FField* ConstructDefaultObject();
 
 public:
 
 	/** Gets the list of all field classes in existance */
-	static TArray<FFieldClass*>& GetAllFieldClasses();
+	static COREUOBJECT_API TArray<FFieldClass*>& GetAllFieldClasses();
 	/** Gets a mapping of all field class names to the actuall class objects */
-	static TMap<FName, FFieldClass*>& GetNameToFieldClassMap();
+	static COREUOBJECT_API TMap<FName, FFieldClass*>& GetNameToFieldClassMap();
 
-	explicit FFieldClass(const TCHAR* InCPPName, uint64 InId, uint64 InCastFlags, FFieldClass* InSuperClass, FField* (*ConstructFnPtr)(const FFieldVariant&, const FName&, EObjectFlags));
-	~FFieldClass();
+	COREUOBJECT_API explicit FFieldClass(const TCHAR* InCPPName, uint64 InId, uint64 InCastFlags, FFieldClass* InSuperClass, FField* (*ConstructFnPtr)(const FFieldVariant&, const FName&, EObjectFlags));
+	COREUOBJECT_API ~FFieldClass();
 
 	inline FString GetName() const
 	{
@@ -91,16 +119,17 @@ public:
 	}
 	inline bool IsChildOf(const FFieldClass* InClass) const
 	{
-		return !!(CastFlags & InClass->GetId());
+		const uint64 OtherClassId = InClass->GetId();
+		return OtherClassId ? !!(CastFlags & OtherClassId) : IsChildOf_Walk(InClass);
 	}
-	FString GetDescription() const;
-	FText GetDisplayNameText() const;
+	COREUOBJECT_API FString GetDescription() const;
+	COREUOBJECT_API FText GetDisplayNameText() const;
 	FField* Construct(const FFieldVariant& InOwner, const FName& InName, EObjectFlags InFlags = RF_NoFlags) const
 	{
 		return ConstructFn(InOwner, InName, InFlags);
 	}
 
-	FFieldClass* GetSuperClass()
+	FFieldClass* GetSuperClass() const
 	{
 		return SuperClass;
 	}
@@ -131,6 +160,19 @@ public:
 		return Ar;
 	}
 	COREUOBJECT_API friend FArchive& operator << (FArchive& Ar, FFieldClass*& InOutFieldClass);
+
+private:
+	bool IsChildOf_Walk(const FFieldClass* InBaseClass) const
+	{
+		for (const FFieldClass* TempField = this; TempField; TempField = TempField->GetSuperClass())
+		{
+			if (TempField == InBaseClass)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
 };
 
 #if !CHECK_PUREVIRTUALS
@@ -145,6 +187,9 @@ public:
 #endif
 
 #define DECLARE_FIELD(TClass, TSuperClass, TStaticFlags) \
+	DECLARE_FIELD_API(TClass, TSuperClass, TStaticFlags, NO_API)
+
+#define DECLARE_FIELD_API(TClass, TSuperClass, TStaticFlags, TRequiredAPI) \
 private: \
 	TClass& operator=(TClass&&);   \
 	TClass& operator=(const TClass&);   \
@@ -155,13 +200,13 @@ public: \
 		: Super(EC_InternalUseOnlyConstructor, InClass) \
 	{ \
 	} \
-	static FFieldClass* StaticClass(); \
+	static TRequiredAPI FFieldClass* StaticClass(); \
 	static FField* Construct(const FFieldVariant& InOwner, const FName& InName, EObjectFlags InObjectFlags); \
-	inline static uint64 StaticClassCastFlagsPrivate() \
+	inline static constexpr uint64 StaticClassCastFlagsPrivate() \
 	{ \
 		return uint64(TStaticFlags); \
 	} \
-	inline static uint64 StaticClassCastFlags() \
+	inline static constexpr uint64 StaticClassCastFlags() \
 	{ \
 		return uint64(TStaticFlags) | Super::StaticClassCastFlags(); \
 	} \
@@ -206,17 +251,17 @@ FFieldClass* TClass::StaticClass() \
 	return &StaticFieldClass; \
 } \
 
-class FProperty;
 class FField;
-class UObject;
 class FLinkerLoad;
+class FProperty;
+class UObject;
 
 /**
  * Special container that can hold either UObject or FField.
  * Exposes common interface of FFields and UObjects for easier transition from UProperties to FProperties.
  * DO NOT ABUSE. IDEALLY THIS SHOULD ONLY BE FFIELD INTERNAL STRUCTURE FOR HOLDING A POINTER TO THE OWNER OF AN FFIELD.
  */
-class COREUOBJECT_API FFieldVariant
+class FFieldVariant
 {
 	union FFieldObjectUnion
 	{
@@ -224,25 +269,38 @@ class COREUOBJECT_API FFieldVariant
 		UObject* Object;
 	} Container;
 
-	bool bIsUObject;
+	static constexpr uintptr_t UObjectMask = 0x1;
 
+	void ConditionallyMarkAsReachable()
+	{
+		if (IsUObject() && ToUObjectUnsafe() && UE::GC::GIsIncrementalReachabilityPending)
+		{
+			UE::GC::MarkAsReachable(ToUObjectUnsafe());
+		}
+	}
+	
 public:
 
 	FFieldVariant()
-		: bIsUObject(false)
 	{
 		Container.Field = nullptr;
 	}
 
 	FFieldVariant(const FField* InField)
-		: bIsUObject(false)
 	{
 		Container.Field = const_cast<FField*>(InField);
+		check(!IsUObject());
 	}
-	FFieldVariant(const UObject* InObject)
-		: bIsUObject(true)
+
+	template <
+		typename T,
+		decltype(ImplicitConv<const UObject*>(std::declval<T>()))* = nullptr
+	>
+	FFieldVariant(T&& InObject)
 	{
-		Container.Object = const_cast<UObject*>(InObject);
+		Container.Object = const_cast<UObject*>(ImplicitConv<const UObject*>(InObject));
+		Container.Object = (UObject*)((uintptr_t)Container.Object | UObjectMask);
+		ConditionallyMarkAsReachable();
 	}
 
 	FFieldVariant(TYPE_OF_NULLPTR)
@@ -250,21 +308,47 @@ public:
 	{
 	}
 
+	FFieldVariant(const FFieldVariant& Other)
+		: Container(Other.Container)
+	{
+		ConditionallyMarkAsReachable();
+	}
+	
+	FFieldVariant& operator=(const FFieldVariant& Other)
+	{
+		Container = Other.Container;
+		ConditionallyMarkAsReachable();
+		return *this;
+	}
+	
+	FFieldVariant(FFieldVariant&& Other)
+		: Container(Other.Container)
+	{
+		ConditionallyMarkAsReachable();
+	}
+	
+	FFieldVariant& operator=(FFieldVariant&& Other)
+	{
+		Container = Other.Container;
+		ConditionallyMarkAsReachable();
+		return *this;
+	}
+
 	inline bool IsUObject() const
 	{
-		return bIsUObject;
+		return (uintptr_t)Container.Object & UObjectMask;
 	}
 	inline bool IsValid() const
 	{
-		return !!Container.Object;
+		return !!ToUObjectUnsafe();
 	}
-	bool IsValidLowLevel() const;
+	COREUOBJECT_API bool IsValidLowLevel() const;
 	inline operator bool() const
 	{
 		return IsValid();
 	}
-	bool IsA(const UClass* InClass) const;
-	bool IsA(const FFieldClass* InClass) const;
+	COREUOBJECT_API bool IsA(const UClass* InClass) const;
+	COREUOBJECT_API bool IsA(const FFieldClass* InClass) const;
 	template <typename T>
 	bool IsA() const
 	{
@@ -273,31 +357,28 @@ public:
 	}
 
 	template <typename T>
-	typename TEnableIf<TIsDerivedFrom<T, UObject>::IsDerived, T*>::Type Get() const
+	T* Get() const
 	{
 		static_assert(sizeof(T) > 0, "T must not be an incomplete type");
 		if (IsA(T::StaticClass()))
 		{
-			return static_cast<T*>(Container.Object);
+			if constexpr (std::is_base_of_v<UObject, T>)
+			{
+				return static_cast<T*>(ToUObjectUnsafe());
+			}
+			else
+			{
+				return static_cast<T*>(Container.Field);
+			}
 		}
 		return nullptr;
 	}
 
-	template <typename T>
-	typename TEnableIf<!TIsDerivedFrom<T, UObject>::IsDerived, T*>::Type Get() const
-	{
-		static_assert(sizeof(T) > 0, "T must not be an incomplete type");
-		if (IsA(T::StaticClass()))
-		{
-			return static_cast<T*>(Container.Field);
-		}
-		return nullptr;
-	}
 	UObject* ToUObject() const
 	{
-		if (bIsUObject)
+		if (IsUObject())
 		{
-			return Container.Object;
+			return ToUObjectUnsafe();
 		}
 		else
 		{
@@ -306,7 +387,7 @@ public:
 	}
 	FField* ToField() const
 	{
-		if (!bIsUObject)
+		if (!IsUObject())
 		{
 			return Container.Field;
 		}
@@ -323,22 +404,22 @@ public:
 	/** FOR INTERNAL USE ONLY: Function that returns the owner as UObject without checking if it's actually a UObject */
 	FORCEINLINE UObject* ToUObjectUnsafe() const
 	{
-		return Container.Object;
+		return (UObject*)((uintptr_t)Container.Object & ~UObjectMask);
 	}
 
 	void* GetRawPointer() const
 	{
 		return Container.Field;
 	}
-	FFieldVariant GetOwnerVariant() const;
-	UClass* GetOwnerClass() const;
-	FString GetFullName() const;
-	FString GetPathName() const;
-	FString GetName() const;
-	FString GetClassName() const;
-	FName GetFName() const;
-	bool IsNative() const;
-	UPackage* GetOutermost() const;
+	COREUOBJECT_API FFieldVariant GetOwnerVariant() const;
+	COREUOBJECT_API UClass* GetOwnerClass() const;
+	COREUOBJECT_API FString GetFullName() const;
+	COREUOBJECT_API FString GetPathName() const;
+	COREUOBJECT_API FString GetName() const;
+	COREUOBJECT_API FString GetClassName() const;
+	COREUOBJECT_API FName GetFName() const;
+	COREUOBJECT_API bool IsNative() const;
+	COREUOBJECT_API UPackage* GetOutermost() const;
 
 	bool operator==(const FFieldVariant& Other) const
 	{
@@ -350,7 +431,7 @@ public:
 	}
 
 #if WITH_EDITORONLY_DATA
-	bool HasMetaData(const FName& Key) const;
+	COREUOBJECT_API bool HasMetaData(const FName& Key) const;
 #endif
 
 	/** Support comparison functions that make this usable as a KeyValue for a TSet<> */
@@ -358,14 +439,12 @@ public:
 	{
 		return GetTypeHash(InFieldVariant.GetRawPointer());
 	}
-
-	COREUOBJECT_API friend FArchive& operator << (FArchive& Ar, FFieldVariant& InOutField);
 };
 
 /**
  * Base class of reflection data objects.
  */
-class COREUOBJECT_API FField
+class FField
 {
 	UE_NONCOPYABLE(FField);
 
@@ -378,13 +457,13 @@ public:
 	typedef FField BaseFieldClass;	
 	typedef FFieldClass FieldTypeClass;
 
-	static FFieldClass* StaticClass();
+	static COREUOBJECT_API FFieldClass* StaticClass();
 
-	inline static uint64 StaticClassCastFlagsPrivate()
+	inline static constexpr uint64 StaticClassCastFlagsPrivate()
 	{
 		return uint64(CASTCLASS_UField);
 	}
-	inline static uint64 StaticClassCastFlags()
+	inline static constexpr uint64 StaticClassCastFlags()
 	{
 		return uint64(CASTCLASS_UField);
 	}
@@ -402,39 +481,41 @@ public:
 	EObjectFlags FlagsPrivate;
 
 	// Constructors.
-	FField(EInternal InInernal, FFieldClass* InClass);
-	FField(FFieldVariant InOwner, const FName& InName, EObjectFlags InObjectFlags);
+	COREUOBJECT_API FField(EInternal InInernal, FFieldClass* InClass);
+	COREUOBJECT_API FField(FFieldVariant InOwner, const FName& InName, EObjectFlags InObjectFlags);
 #if WITH_EDITORONLY_DATA
-	explicit FField(UField* InField);
+	COREUOBJECT_API explicit FField(UField* InField);
 #endif // WITH_EDITORONLY_DATA
-	virtual ~FField();
+	COREUOBJECT_API virtual ~FField();
 
 	// Begin UObject interface: the following functions mimic UObject interface for easier transition from UProperties to FProperties
-	virtual void Serialize(FArchive& Ar);
-	virtual void PostLoad();
-	virtual void GetPreloadDependencies(TArray<UObject*>& OutDeps);
-	virtual void BeginDestroy();	
-	virtual void AddReferencedObjects(FReferenceCollector& Collector);
-	bool IsRooted() const;
-	bool IsNative() const;
-	bool IsValidLowLevel() const;
-	bool IsIn(const UObject* InOwner) const;
-	bool IsIn(const FField* InOwner) const;
-	FLinkerLoad* GetLinker() const;	
+	COREUOBJECT_API virtual void Serialize(FArchive& Ar);
+	COREUOBJECT_API virtual void PostLoad();
+	COREUOBJECT_API virtual void GetPreloadDependencies(TArray<UObject*>& OutDeps);
+	COREUOBJECT_API virtual void BeginDestroy();	
+	COREUOBJECT_API virtual void AddReferencedObjects(FReferenceCollector& Collector);
+	COREUOBJECT_API bool IsRooted() const;
+	COREUOBJECT_API bool IsNative() const;
+	COREUOBJECT_API bool IsValidLowLevel() const;
+	COREUOBJECT_API bool IsIn(const UObject* InOwner) const;
+	COREUOBJECT_API bool IsIn(const FField* InOwner) const;
+	COREUOBJECT_API FLinkerLoad* GetLinker() const;	
 	// End UObject interface
 
 	// Begin UField interface.
-	virtual void AddCppProperty(FProperty* Property);
-	virtual void Bind();
+	COREUOBJECT_API virtual void AddCppProperty(FProperty* Property);
+	COREUOBJECT_API virtual void Bind();
 	// End UField interface
 
 	/** Constructs a new field given its class */
-	static FField* Construct(const FFieldVariant& InOwner, const FName& InName, EObjectFlags InFlags);
+	static COREUOBJECT_API FField* Construct(const FFieldVariant& InOwner, const FName& InName, EObjectFlags InFlags);
 	/** Constructs a new field given the name of its class */
-	static FField* Construct(const FName& FieldTypeName, const FFieldVariant& InOwner, const FName& InName, EObjectFlags InFlags);
+	static COREUOBJECT_API FField* Construct(const FName& FieldTypeName, const FFieldVariant& InOwner, const FName& InName, EObjectFlags InFlags);
+	/** Tries to construct a new field given the name of its class. Returns null if the type does not exist. */
+	static COREUOBJECT_API FField* TryConstruct(const FName& FieldTypeName, const FFieldVariant& InOwner, const FName& InName, EObjectFlags InFlags);
 
 	/** Fixups after duplicating a Field */
-	virtual void PostDuplicate(const FField& InField);
+	COREUOBJECT_API virtual void PostDuplicate(const FField& InField);
 
 protected:
 	/**
@@ -502,20 +583,29 @@ public:
 	inline bool IsA(const FFieldClass* FieldType) const
 	{
 		check(FieldType);
-		return !!(GetCastFlags() & FieldType->GetId());
+		return GetClass()->IsChildOf(FieldType);
 	}
 
 	template<typename T>
 	bool IsA() const
 	{
-		return !!(GetCastFlags() & T::StaticClassCastFlagsPrivate());
+		if constexpr (!!(T::StaticClassCastFlagsPrivate()))
+		{
+			return !!(GetCastFlags() & T::StaticClassCastFlagsPrivate());
+		}
+		else
+		{
+			return GetClass()->IsChildOf(T::StaticClass());
+		}
 	}
 
+	UE_DEPRECATED(5.0, "HasAnyCastFlags is deprecated. Not all FField has CastFlag. Use IsA instead.")
 	inline bool HasAnyCastFlags(const uint64 InCastFlags) const
 	{
 		return !!(GetCastFlags() & InCastFlags);
 	}
 
+	UE_DEPRECATED(5.0, "HasAllCastFlags is deprecated. Not all FField has CastFlag. Use IsA instead.")
 	inline bool HasAllCastFlags(const uint64 InCastFlags) const
 	{
 		return (GetCastFlags() & InCastFlags) == InCastFlags;
@@ -551,22 +641,22 @@ public:
 	}
 
 	/** Goes up the outer chain to look for a UClass */
-	UClass* GetOwnerClass() const;
+	COREUOBJECT_API UClass* GetOwnerClass() const;
 
 	/** Goes up the outer chain to look for a UStruct */
-	UStruct* GetOwnerStruct() const;
+	COREUOBJECT_API UStruct* GetOwnerStruct() const;
 
 	/** Goes up the outer chain to look for a UField */
-	UField* GetOwnerUField() const;
+	COREUOBJECT_API UField* GetOwnerUField() const;
 
 	/** Goes up the outer chain to look for the outermost package */
-	UPackage* GetOutermost() const;
+	COREUOBJECT_API UPackage* GetOutermost() const;
 
 	/** Goes up the outer chain to look for the outer of the specified type */
-	UObject* GetTypedOwner(UClass* Target) const;
+	COREUOBJECT_API UObject* GetTypedOwner(UClass* Target) const;
 
 	/** Goes up the outer chain to look for the outer of the specified type */
-	FField* GetTypedOwner(FFieldClass* Target) const;
+	COREUOBJECT_API FField* GetTypedOwner(FFieldClass* Target) const;
 
 	template <typename T>
 	T* GetOwner() const
@@ -629,18 +719,18 @@ public:
 		}
 	}
 
-	void Rename(const FName& NewName);
+	COREUOBJECT_API void Rename(const FName& NewName);
 
-	FString GetPathName(const UObject* StopOuter = nullptr) const;
-	void GetPathName(const UObject* StopOuter, FStringBuilderBase& ResultString) const;
-	FString GetFullName() const;
+	COREUOBJECT_API FString GetPathName(const UObject* StopOuter = nullptr) const;
+	COREUOBJECT_API void GetPathName(const UObject* StopOuter, FStringBuilderBase& ResultString) const;
+	COREUOBJECT_API FString GetFullName() const;
 
 	/**
 	 * Returns a human readable string that was assigned to this field at creation.
 	 * By default this is the same as GetName() but it can be overridden if that is an internal-only name.
 	 * This name is consistent in editor/cooked builds, is not localized, and is useful for data import/export.
 	 */
-	FString GetAuthoredName() const;
+	COREUOBJECT_API FString GetAuthoredName() const;
 
 	/** Returns an inner field by name if the field has any */
 	virtual FField* GetInnerFieldByName(const FName& InName)
@@ -667,14 +757,14 @@ public:
 	* @param	bStartWithOuter		whether to include this object's name in the returned string
 	* @return	string containing the path name for this object, minus the outermost-package's name
 	*/
-	FString GetFullGroupName(bool bStartWithOuter) const;
+	COREUOBJECT_API FString GetFullGroupName(bool bStartWithOuter) const;
 
 	/**
 	* Finds the localized display name or native display name as a fallback.
 	*
 	* @return The display name for this object.
 	*/
-	FText GetDisplayNameText() const;
+	COREUOBJECT_API FText GetDisplayNameText() const;
 
 	/**
 	* Finds the localized tooltip or native tooltip as a fallback.
@@ -683,7 +773,7 @@ public:
 	*
 	* @return The tooltip for this object.
 	*/
-	FText GetToolTipText(bool bShortTooltip = false) const;
+	COREUOBJECT_API FText GetToolTipText(bool bShortTooltip = false) const;
 
 	/**
 	* Determines if the property has any metadata associated with the key
@@ -700,8 +790,8 @@ public:
 	* @param Key The key to lookup in the metadata
 	* @return The value associated with the key if it exists, null otherwise
 	*/
-	const FString* FindMetaData(const TCHAR* Key) const;
-	const FString* FindMetaData(const FName& Key) const;
+	COREUOBJECT_API const FString* FindMetaData(const TCHAR* Key) const;
+	COREUOBJECT_API const FString* FindMetaData(const FName& Key) const;
 
 	/**
 	* Find the metadata value associated with the key
@@ -709,8 +799,8 @@ public:
 	* @param Key The key to lookup in the metadata
 	* @return The value associated with the key
 	*/
-	const FString& GetMetaData(const TCHAR* Key) const;
-	const FString& GetMetaData(const FName& Key) const;
+	COREUOBJECT_API const FString& GetMetaData(const TCHAR* Key) const;
+	COREUOBJECT_API const FString& GetMetaData(const FName& Key) const;
 
 	/**
 	* Find the metadata value associated with the key and localization namespace and key
@@ -720,8 +810,8 @@ public:
 	* @param LocalizationKey			Key to lookup in the localization manager
 	* @return							Localized metadata if available, defaults to whatever is provided via GetMetaData
 	*/
-	const FText GetMetaDataText(const TCHAR* MetaDataKey, const FString LocalizationNamespace = FString(), const FString LocalizationKey = FString()) const;
-	const FText GetMetaDataText(const FName& MetaDataKey, const FString LocalizationNamespace = FString(), const FString LocalizationKey = FString()) const;
+	COREUOBJECT_API const FText GetMetaDataText(const TCHAR* MetaDataKey, const FString LocalizationNamespace = FString(), const FString LocalizationKey = FString()) const;
+	COREUOBJECT_API const FText GetMetaDataText(const FName& MetaDataKey, const FString LocalizationNamespace = FString(), const FString LocalizationKey = FString()) const;
 
 	/**
 	* Sets the metadata value associated with the key
@@ -729,11 +819,11 @@ public:
 	* @param Key The key to lookup in the metadata
 	* @return The value associated with the key
 	*/
-	void SetMetaData(const TCHAR* Key, const TCHAR* InValue);
-	void SetMetaData(const FName& Key, const TCHAR* InValue);
+	COREUOBJECT_API void SetMetaData(const TCHAR* Key, const TCHAR* InValue);
+	COREUOBJECT_API void SetMetaData(const FName& Key, const TCHAR* InValue);
 
-	void SetMetaData(const TCHAR* Key, FString&& InValue);
-	void SetMetaData(const FName& Key, FString&& InValue);
+	COREUOBJECT_API void SetMetaData(const TCHAR* Key, FString&& InValue);
+	COREUOBJECT_API void SetMetaData(const FName& Key, FString&& InValue);
 
 	/**
 	* Find the metadata value associated with the key
@@ -796,37 +886,61 @@ public:
 
 	/**
 	* Find the metadata value associated with the key
+	* and return double
+	* @param Key The key to lookup in the metadata
+	* @return the float value stored in the metadata.
+	*/
+	double GetDoubleMetaData(const TCHAR* Key) const
+	{
+		const FString& DOUBLEString = GetMetaData(Key);
+		// FString == operator does case insensitive comparison
+		double Value = FCString::Atod(*DOUBLEString);
+		return Value;
+	}
+	double GetDoubleMetaData(const FName& Key) const
+	{
+		const FString& DOUBLEString = GetMetaData(Key);
+		// FString == operator does case insensitive comparison
+		double Value = FCString::Atod(*DOUBLEString);
+		return Value;
+	}
+
+	/**
+	* Find the metadata value associated with the key
 	* and return Class
 	* @param Key The key to lookup in the metadata
 	* @return the class value stored in the metadata.
 	*/
-	UClass* GetClassMetaData(const TCHAR* Key) const;
-	UClass* GetClassMetaData(const FName& Key) const;
+	COREUOBJECT_API UClass* GetClassMetaData(const TCHAR* Key) const;
+	COREUOBJECT_API UClass* GetClassMetaData(const FName& Key) const;
 
 	/** Clear any metadata associated with the key */
-	void RemoveMetaData(const TCHAR* Key);
-	void RemoveMetaData(const FName& Key);
+	COREUOBJECT_API void RemoveMetaData(const TCHAR* Key);
+	COREUOBJECT_API void RemoveMetaData(const FName& Key);
 
 	/** Gets all metadata associated with this field */
-	const TMap<FName, FString>* GetMetaDataMap() const;
+	COREUOBJECT_API const TMap<FName, FString>* GetMetaDataMap() const;
+
+	/** Append the given metadata to this field */
+	COREUOBJECT_API void AppendMetaData(const TMap<FName, FString>& MetaDataMapToAppend);
 
 	/** Copies all metadata from Source Field to Dest Field */
-	static void CopyMetaData(const FField* InSourceField, FField* InDestField);
+	static COREUOBJECT_API void CopyMetaData(const FField* InSourceField, FField* InDestField);
 
 	/** Creates a new FField from existing UField */
-	static FField* CreateFromUField(UField* InField);
+	static COREUOBJECT_API FField* CreateFromUField(UField* InField);
 	
 	DECLARE_MULTICAST_DELEGATE_ThreeParams(FOnConvertCustomUFieldToFField, FFieldClass*, UField*, FField*&);
 	/** Gets a delegate to convert custom UField types to FFields */
-	static FOnConvertCustomUFieldToFField& GetConvertCustomUFieldToFFieldDelegate();
+	static COREUOBJECT_API FOnConvertCustomUFieldToFField& GetConvertCustomUFieldToFFieldDelegate();
 
 #endif // WITH_EDITORONLY_DATA
 
 	/** Duplicates an FField */
-	static FField* Duplicate(const FField* InField, FFieldVariant DestOwner, const FName DestName = NAME_None, EObjectFlags FlagMask = RF_AllFlags, EInternalObjectFlags InternalFlagsMask = EInternalObjectFlags::AllFlags);
+	static COREUOBJECT_API FField* Duplicate(const FField* InField, FFieldVariant DestOwner, const FName DestName = NAME_None, EObjectFlags FlagMask = RF_AllFlags, EInternalObjectFlags InternalFlagsMask = EInternalObjectFlags_AllFlags);
 
 	/** Generates a name for a Field of a given type. Each generated name is unique in the current runtime */
-	static FName GenerateFFieldName(FFieldVariant InOwner, FFieldClass* InClass);
+	static COREUOBJECT_API FName GenerateFFieldName(FFieldVariant InOwner, FFieldClass* InClass);
 };
 
 // Support for casting between different FFIeld types
@@ -834,19 +948,25 @@ public:
 template<typename FieldType>
 FORCEINLINE FieldType* CastField(FField* Src)
 {
-	return Src && Src->HasAnyCastFlags(FieldType::StaticClassCastFlagsPrivate()) ? static_cast<FieldType*>(Src) : nullptr;
+	return Src && Src->IsA<FieldType>() ? static_cast<FieldType*>(Src) : nullptr;
 }
 
 template<typename FieldType>
 FORCEINLINE const FieldType* CastField(const FField* Src)
 {
-	return Src && Src->HasAnyCastFlags(FieldType::StaticClassCastFlagsPrivate()) ? static_cast<const FieldType*>(Src) : nullptr;
+	return Src && Src->IsA<FieldType>() ? static_cast<const FieldType*>(Src) : nullptr;
 }
 
 template<typename FieldType>
 FORCEINLINE FieldType* ExactCastField(FField* Src)
 {
 	return (Src && (Src->GetClass() == FieldType::StaticClass())) ? static_cast<FieldType*>(Src) : nullptr;
+}
+
+template<typename FieldType>
+FORCEINLINE FieldType* ExactCastField(const FField* Src)
+{
+	return (Src && (Src->GetClass() == FieldType::StaticClass())) ? static_cast<const FieldType*>(Src) : nullptr;
 }
 
 template<typename FieldType>
@@ -857,7 +977,7 @@ FUNCTION_NON_NULL_RETURN_END
 #if !DO_CHECK
 	return (FieldType*)Src;
 #else
-	FieldType* CastResult = Src && Src->HasAnyCastFlags(FieldType::StaticClassCastFlagsPrivate()) ? (FieldType*)Src : nullptr;
+	FieldType* CastResult = Src && Src->IsA<FieldType>() ? static_cast<FieldType*>(Src) : nullptr;
 	checkf(CastResult, TEXT("CastFieldChecked failed with 0x%016llx"), (int64)(PTRINT)Src);
 	return CastResult;
 #endif // !DO_CHECK
@@ -871,7 +991,7 @@ FUNCTION_NON_NULL_RETURN_END
 #if !DO_CHECK
 	return (const FieldType*)Src;
 #else
-	const FieldType* CastResult = Src && Src->HasAnyCastFlags(FieldType::StaticClassCastFlagsPrivate()) ? (const FieldType*)Src : nullptr;
+	const FieldType* CastResult = Src && Src->IsA<FieldType>() ? static_cast<const FieldType*>(Src) : nullptr;
 	checkf(CastResult, TEXT("CastFieldChecked failed with 0x%016llx"), (int64)(PTRINT)Src);
 	return CastResult;
 #endif // !DO_CHECK
@@ -883,7 +1003,7 @@ FORCEINLINE FieldType* CastFieldCheckedNullAllowed(FField* Src)
 #if !DO_CHECK
 	return (FieldType*)Src;
 #else
-	FieldType* CastResult = Src && Src->HasAnyCastFlags(FieldType::StaticClassCastFlagsPrivate()) ? (FieldType*)Src : nullptr;
+	FieldType* CastResult = Src && Src->IsA<FieldType>() ? static_cast<FieldType*>(Src) : nullptr;
 	checkf(CastResult || !Src, TEXT("CastFieldCheckedNullAllowed failed with 0x%016llx"), (int64)(PTRINT)Src);
 	return CastResult;
 #endif // !DO_CHECK
@@ -895,7 +1015,7 @@ FORCEINLINE const FieldType* CastFieldCheckedNullAllowed(const FField* Src)
 #if !DO_CHECK
 	return (const FieldType*)Src;
 #else
-	const FieldType* CastResult = Src && Src->HasAnyCastFlags(FieldType::StaticClassCastFlagsPrivate()) ? (const FieldType*)Src : nullptr;
+	const FieldType* CastResult = Src && Src->IsA<FieldType>() ? static_cast<const FieldType*>(Src) : nullptr;
 	checkf(CastResult || !Src, TEXT("CastFieldCheckedNullAllowed failed with 0x%016llx"), (int64)(PTRINT)Src);
 	return CastResult;
 #endif // !DO_CHECK
@@ -936,6 +1056,20 @@ inline void SerializeSingleField(FArchive& Ar, FieldType*& Field, FFieldVariant 
 /**
  * Gets the name of the provided field. If the field pointer is null, the result is "none"
  */
+inline FName GetFNameSafe(const FField* InField)
+{
+	if (InField)
+	{
+		return InField->GetFName();
+	}
+	else
+	{
+		return NAME_None;
+	}
+}
+/**
+ * Gets the name of the provided field. If the field pointer is null, the result is "none"
+ */
 inline FString GetNameSafe(const FField* InField)
 {
 	if (InField)
@@ -968,3 +1102,7 @@ inline FieldType* FindFProperty(const TCHAR* InFieldPath)
 	FField* FoundField = FindFPropertyByPath(InFieldPath);
 	return CastField<FieldType>(FoundField);
 }
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
+#endif

@@ -4,6 +4,13 @@ using UnrealBuildTool;
 
 public class AudioFormatOgg : ModuleRules
 {
+	protected virtual bool bWithOggVorbis { get => (
+			(Target.Platform == UnrealTargetPlatform.Win64) ||
+			(Target.Platform == UnrealTargetPlatform.Mac) ||
+			Target.IsInPlatformGroup(UnrealPlatformGroup.Linux)
+		);
+	}
+
 	public AudioFormatOgg(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PrivateIncludePathModuleNames.Add("TargetPlatform");
@@ -11,16 +18,12 @@ public class AudioFormatOgg : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
-				"Engine"
+				"Engine",
+				"VorbisAudioDecoder"
 			}
 		);
 
-		if ((Target.Platform == UnrealTargetPlatform.Win64) ||
-			(Target.Platform == UnrealTargetPlatform.Win32) ||
-			(Target.Platform == UnrealTargetPlatform.HoloLens) ||
-			(Target.Platform == UnrealTargetPlatform.Mac) ||
-			Target.IsInPlatformGroup(UnrealPlatformGroup.Linux)
-		)
+		if (bWithOggVorbis)
 		{
 			AddEngineThirdPartyPrivateStaticDependencies(Target,
 				"UEOgg",

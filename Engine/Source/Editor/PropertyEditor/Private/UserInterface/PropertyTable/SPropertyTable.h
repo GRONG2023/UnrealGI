@@ -8,9 +8,10 @@
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SBoxPanel.h"
 #include "Textures/SlateIcon.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Widgets/Layout/SBorder.h"
 #include "PropertyPath.h"
+#include "PropertyPermissionList.h"
 #include "Framework/Commands/UIAction.h"
 #include "Widgets/Views/STableViewBase.h"
 #include "Widgets/Views/STableRow.h"
@@ -82,15 +83,15 @@ public:
 			[
 				SNew( SVerticalBox )
 				+SVerticalBox::Slot()
-				.Padding(0.0f, 0.0f, 0.0f, 4.0f)
+				.Padding(0.0f, 0.0f, 0.0f, 1.0f)
 				.AutoHeight()
 				[
 					SNew(SBorder)
-					.BorderImage( FEditorStyle::GetBrush( "ToolPanel.GroupBorder" ) )
+					.BorderImage( FAppStyle::GetBrush( "Brushes.Header" ) )
 					[
 						SAssignNew( BreadcrumbTrail, SBreadcrumbTrail< int32 > )
-						.DelimiterImage(FEditorStyle::GetBrush("ContentBrowser.PathDelimiter"))
 						.PersistentBreadcrumbs( true )
+						.DelimiterImage(FAppStyle::Get().GetBrush("Icons.ChevronRight"))
 						.OnCrumbClicked( this, &SPropertyTable::OnCrumbClicked )
 						.GetCrumbMenuContent( this, &SPropertyTable::GetCrumbMenuContent )
 					]
@@ -100,7 +101,7 @@ public:
 				.FillHeight( 1.0f )
 				[
 					SNew(SBorder)
-					.BorderImage( FEditorStyle::GetBrush( "ToolPanel.GroupBorder" ) )
+					.BorderImage( FAppStyle::GetBrush( "ToolPanel.GroupBorder" ) )
 					[
 						TreeContent
 					]
@@ -684,6 +685,8 @@ private:
 
 	void OnCrumbClicked( const int32& Item )
 	{
+		ClearSelection();
+		
 		const TSharedRef< FPropertyPath > RootPath = Table->GetRootPath();
 		const int32 AmountToTrimRoot = ( RootPath->GetNumProperties() - 1 ) - Item;
 
@@ -716,7 +719,10 @@ private:
 		for( auto ExtensionIter = PathExtensions.CreateIterator(); ExtensionIter; ++ExtensionIter )
 		{
 			const FPropertyInfo& Extension = *ExtensionIter;
-			TypeToProperties.Add( Extension.Property->GetOwnerStruct(), Extension );
+			if(FPropertyEditorPermissionList::Get().DoesPropertyPassFilter(Extension.Property->GetOwnerStruct(), Extension.Property->GetFName()))
+			{
+				TypeToProperties.Add( Extension.Property->GetOwnerStruct(), Extension );
+			}
 		}
 
 		FMenuBuilder MenuBuilder( true, NULL );

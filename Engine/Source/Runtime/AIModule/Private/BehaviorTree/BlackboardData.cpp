@@ -8,6 +8,8 @@
 #include "UObject/UObjectIterator.h"
 #include "AISystem.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BlackboardData)
+
 UBlackboardData::FKeyUpdate UBlackboardData::OnUpdateKeys;
 
 #if WITH_EDITOR
@@ -50,7 +52,7 @@ bool FBlackboardEntry::operator==(const FBlackboardEntry& Other) const
 		((KeyType && Other.KeyType && KeyType->GetClass() == Other.KeyType->GetClass()) || (KeyType == NULL && Other.KeyType == NULL));
 }
 
-UBlackboardData::UBlackboardData(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
+UBlackboardData::UBlackboardData(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer), FirstKeyID(0)
 {
 }
 
@@ -81,9 +83,9 @@ const FBlackboardEntry* UBlackboardData::GetKey(FBlackboard::FKey KeyID) const
 {
 	if (KeyID != FBlackboard::InvalidKey)
 	{
-		if (KeyID >= FirstKeyID)
+		if ((int32)KeyID >= (int32)FirstKeyID)
 		{
-			return &Keys[KeyID - FirstKeyID];
+			return &Keys[(int32)KeyID - (int32)FirstKeyID];
 		}
 		else if (Parent)
 		{
@@ -96,7 +98,7 @@ const FBlackboardEntry* UBlackboardData::GetKey(FBlackboard::FKey KeyID) const
 
 int32 UBlackboardData::GetNumKeys() const
 {
-	return FirstKeyID + Keys.Num();
+	return (int32)FirstKeyID + Keys.Num();
 }
 
 FBlackboard::FKey UBlackboardData::InternalGetKeyID(const FName& KeyName, EKeyLookupMode LookupMode) const
@@ -105,7 +107,10 @@ FBlackboard::FKey UBlackboardData::InternalGetKeyID(const FName& KeyName, EKeyLo
 	{
 		if (Keys[KeyIndex].EntryName == KeyName)
 		{
-			return KeyIndex + FirstKeyID;
+			const int32 OffsetKey = KeyIndex + (int32)FirstKeyID;
+			check(FBlackboard::FKey(OffsetKey) != FBlackboard::InvalidKey);
+
+			return FBlackboard::FKey(OffsetKey);
 		}
 	}
 
@@ -155,7 +160,7 @@ void UBlackboardData::PostLoad()
 	Super::PostLoad();
 
 	// we cache some information based on Parent asset
-	// but while UE4 guarantees the Parent is already loaded
+	// but while UnrealEngine guarantees the Parent is already loaded
 	// it does not guarantee that it's PostLoad has been called
 	// Following is a little hack that's widely used in the
 	// engine to address this
@@ -252,7 +257,12 @@ void UBlackboardData::UpdateParentKeys()
 		Parent = NULL;
 	}
 
+	UpdateKeyIDs();
+	UpdatePersistentKeys(*this);
+
 #if WITH_EDITORONLY_DATA
+	// note that we need to gather ParentKeys only once UpdatePersistentKeys was called since that will remove 
+	// this BB asset's persistent keys that double the ones already present in the parent asset.
 	ParentKeys.Reset();
 
 	for (UBlackboardData* It = Parent; It; It = It->Parent)
@@ -268,14 +278,15 @@ void UBlackboardData::UpdateParentKeys()
 	}
 #endif // WITH_EDITORONLY_DATA
 
-	UpdateKeyIDs();
-	UpdatePersistentKeys(*this);
 	OnUpdateKeys.Broadcast(this);
 }
 
 void UBlackboardData::UpdateKeyIDs()
 {
-	FirstKeyID = Parent ? Parent->GetNumKeys() : 0;
+	const int32 FirstKeyIDInt = Parent ? Parent->GetNumKeys() : 0;
+	check(FBlackboard::FKey(FirstKeyIDInt) != FBlackboard::InvalidKey);
+
+	FirstKeyID = FBlackboard::FKey(FirstKeyIDInt);
 }
 
 void UBlackboardData::UpdateDeprecatedKeys()
@@ -307,15 +318,4 @@ bool UBlackboardData::IsChildOf(const UBlackboardData& OtherAsset) const
 	return (TmpParent == &OtherAsset);
 }
 
-//----------------------------------------------------------------------//
-// DEPRECATED
-//----------------------------------------------------------------------//
-bool UBlackboardData::HasParent(const UBlackboardData* TestParent) const
-{
-	if (Parent == TestParent)
-	{
-		return true;
-	}
 
-	return Parent ? Parent->HasParent(TestParent) : false;
-}

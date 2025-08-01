@@ -10,7 +10,7 @@
 /**
  * Windows implementation of the Atomics OS functions
  */
-struct CORE_API FWindowsPlatformAtomics
+struct FWindowsPlatformAtomics
 	: public FGenericPlatformAtomics
 {
 	static_assert(sizeof(int8)  == sizeof(char)      && alignof(int8)  == alignof(char),      "int8 must be compatible with char");
@@ -20,17 +20,17 @@ struct CORE_API FWindowsPlatformAtomics
 
 	static FORCEINLINE int8 InterlockedIncrement( volatile int8* Value )
 	{
-		return (int8)_InterlockedExchangeAdd8((char*)Value, 1) + 1;
+		return (int8)::_InterlockedExchangeAdd8((char*)Value, 1) + 1;
 	}
 
 	static FORCEINLINE int16 InterlockedIncrement( volatile int16* Value )
 	{
-		return (int16)_InterlockedIncrement16((short*)Value);
+		return (int16)::_InterlockedIncrement16((short*)Value);
 	}
 
 	static FORCEINLINE int32 InterlockedIncrement( volatile int32* Value )
 	{
-		return (int32)_InterlockedIncrement((long*)Value);
+		return (int32)::_InterlockedIncrement((long*)Value);
 	}
 
 	static FORCEINLINE int64 InterlockedIncrement( volatile int64* Value )
@@ -444,7 +444,7 @@ protected:
 	 *
 	 * @param InFormat - The string format string.
 	 */
-	static void HandleAtomicsFailure( const TCHAR* InFormat, ... );
+	static CORE_API void HandleAtomicsFailure( const TCHAR* InFormat, ... );
 };
 
 

@@ -10,10 +10,44 @@
 #include "IImageWrapperModule.h"
 #include "Styling/SlateStyle.h"
 #include "Styling/SlateStyleRegistry.h"
+#include "Rendering/SlateVectorGraphicsCache.h"
+#include "Textures/SlateShaderResource.h"
 
 
 DEFINE_LOG_CATEGORY_STATIC(LogSlateD3D, Log, All);
 
+class FSlateD3DTextureAtlasFactory : public ISlateTextureAtlasFactory
+{
+public:
+	virtual TUniquePtr<FSlateTextureAtlas> CreateTextureAtlas(int32 AtlasSize, int32 AtlasStride, ESlateTextureAtlasPaddingStyle PaddingStyle, bool bUpdatesAfterInitialization) const
+	{
+		return CreateTextureAtlasInternal(AtlasSize, AtlasStride, PaddingStyle, bUpdatesAfterInitialization);
+	}
+
+	virtual TUniquePtr<FSlateShaderResource> CreateNonAtlasedTexture(const uint32 InWidth, const uint32 InHeight, const TArray<uint8>& InRawData) const
+	{
+		// Keep track of non-atlased textures so we can free their resources later
+		TUniquePtr<FSlateD3DTexture> Texture = MakeUnique<FSlateD3DTexture>(InWidth, InHeight);
+
+		D3D11_SUBRESOURCE_DATA InitData;
+		InitData.pSysMem = InRawData.GetData();
+		InitData.SysMemPitch = InWidth * 4;
+
+		Texture->Init(DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, &InitData);
+
+		return Texture;
+	}
+
+	virtual void ReleaseTextureAtlases(const TArray<TUniquePtr<FSlateTextureAtlas>>& InTextureAtlases, const TArray<TUniquePtr<FSlateShaderResource>>& InNonAtlasedTextures, const bool bWaitForRelease) const
+	{
+		// nothing to do
+	}
+
+	static TUniquePtr<FSlateTextureAtlasD3D> CreateTextureAtlasInternal(int32 AtlasSize, int32 AtlasStride, ESlateTextureAtlasPaddingStyle PaddingStyle, bool bUpdatesAfterInitialization)
+	{
+		return MakeUnique<FSlateTextureAtlasD3D>(AtlasSize, AtlasSize, AtlasStride, PaddingStyle);
+	}
+};
 
 FSlateD3DTextureManager::FDynamicTextureResource::FDynamicTextureResource( FSlateD3DTexture* ExistingTexture )
 	: Proxy( new FSlateShaderResourceProxy )
@@ -36,31 +70,23 @@ FSlateD3DTextureManager::FDynamicTextureResource::~FDynamicTextureResource()
 
 FSlateD3DTextureManager::FSlateD3DTextureManager()
 {
-	
+	VectorGraphicsCache = MakeUnique<FSlateVectorGraphicsCache>(MakeShared<FSlateD3DTextureAtlasFactory>());
 }
 
 FSlateD3DTextureManager::~FSlateD3DTextureManager()
 {
-	for( int32 AtlasIndex = 0; AtlasIndex < TextureAtlases.Num(); ++AtlasIndex )
-	{
-		delete TextureAtlases[AtlasIndex];
-	}
-
-	for( int32 ResourceIndex = 0; ResourceIndex < NonAtlasedTextures.Num(); ++ResourceIndex )
-	{
-		delete NonAtlasedTextures[ResourceIndex];
-	}
 }
 
 int32 FSlateD3DTextureManager::GetNumAtlasPages() const
 {
-	return TextureAtlases.Num();
+	return PrecachedTextureAtlases.Num() + VectorGraphicsCache->GetNumAtlasPages();
 }
 
 FSlateShaderResource* FSlateD3DTextureManager::GetAtlasPageResource(const int32 InIndex) const
 {
-	return TextureAtlases[InIndex]->GetAtlasTexture();
+	return InIndex < PrecachedTextureAtlases.Num() ? PrecachedTextureAtlases[InIndex]->GetAtlasTexture() : VectorGraphicsCache->GetAtlasPageResource(InIndex - PrecachedTextureAtlases.Num());
 }
+
 
 bool FSlateD3DTextureManager::IsAtlasPageResourceAlphaOnly(const int32 InIndex) const
 {
@@ -70,22 +96,30 @@ bool FSlateD3DTextureManager::IsAtlasPageResourceAlphaOnly(const int32 InIndex) 
 #if WITH_ATLAS_DEBUGGING
 FAtlasSlotInfo FSlateD3DTextureManager::GetAtlasSlotInfoAtPosition(FIntPoint InPosition, int32 AtlasIndex) const
 {
-	if (TextureAtlases.IsValidIndex(AtlasIndex))
-	{
-		FAtlasSlotInfo NewInfo;
+	const FSlateTextureAtlas* Atlas = nullptr;
 
-		const FAtlasedTextureSlot* Slot = TextureAtlases[AtlasIndex]->GetSlotAtPosition(InPosition);
+	bool bIsPrecachedTextureAtlases = PrecachedTextureAtlases.IsValidIndex(AtlasIndex);
+	if (bIsPrecachedTextureAtlases)
+	{
+		Atlas = PrecachedTextureAtlases[AtlasIndex].Get();
+	}
+	else
+	{
+		Atlas = VectorGraphicsCache->GetAtlas(AtlasIndex - PrecachedTextureAtlases.Num());
+	}
+
+	FAtlasSlotInfo NewInfo;
+	if(Atlas)
+	{
+		const FAtlasedTextureSlot* Slot = Atlas->GetSlotAtPosition(InPosition);
 		if (Slot)
 		{
-			NewInfo.AtlasSlotRect = FSlateRect(FVector2D(Slot->X, Slot->Y), FVector2D(Slot->X + Slot->Width, Slot->Y + Slot->Height));
-
-			NewInfo.TextureName = AtlasDebugData.FindRef(Slot);
-
-			return NewInfo;
+			NewInfo.AtlasSlotRect = FSlateRect(FVector2f(Slot->X, Slot->Y), FVector2f(Slot->X + Slot->Width, Slot->Y + Slot->Height));
+			NewInfo.TextureName = bIsPrecachedTextureAtlases ? AtlasDebugData.FindRef(Slot) : VectorGraphicsCache->GetAtlasDebugData(Slot);
 		}
 	}
 
-	return FAtlasSlotInfo();
+	return NewInfo;
 }
 #endif
 
@@ -95,11 +129,6 @@ void FSlateD3DTextureManager::LoadUsedTextures()
 	FSlateStyleRegistry::GetAllResources( Resources );
 
 	CreateTextures( Resources );
-
-	for( int32 AtlasIndex = 0; AtlasIndex < TextureAtlases.Num(); ++AtlasIndex )
-	{
-		TextureAtlases[AtlasIndex]->InitAtlasTexture( AtlasIndex );
-	}
 }
 
 void FSlateD3DTextureManager::LoadStyleResources( const ISlateStyle& Style )
@@ -108,11 +137,6 @@ void FSlateD3DTextureManager::LoadStyleResources( const ISlateStyle& Style )
 	Style.GetResources( Resources );
 
 	CreateTextures( Resources );
-
-	for( int32 AtlasIndex = 0; AtlasIndex < TextureAtlases.Num(); ++AtlasIndex )
-	{
-		TextureAtlases[AtlasIndex]->InitAtlasTexture( AtlasIndex );
-	}
 }
 
 
@@ -125,7 +149,7 @@ void FSlateD3DTextureManager::CreateTextures( const TArray< const FSlateBrush* >
 		const FSlateBrush& Brush = *Resources[ResourceIndex];
 		const FName TextureName = Brush.GetResourceName();
 
-		if( TextureName != NAME_None && !ResourceMap.Contains(TextureName) )
+		if(Brush.GetImageType() != ESlateBrushImageType::Vector && TextureName != NAME_None && !ResourceMap.Contains(TextureName) )
 		{
 			// Find the texture or add it if it doesn't exist (only load the texture once)
 			FNewTextureInfo& Info = TextureInfoMap.FindOrAdd( TextureName );
@@ -173,44 +197,23 @@ void FSlateD3DTextureManager::CreateTextures( const TArray< const FSlateBrush* >
 	}
 }
 
-void FSlateD3DTextureManager::CreateTextureNoAtlas( const FSlateBrush& InBrush )
-{
-	const FName TextureName = InBrush.GetResourceName();
-	if( TextureName != NAME_None && GetShaderResource( InBrush ) == NULL )
-	{
-		FNewTextureInfo Info;
-		Info.bShouldAtlas = false;
-
-		uint32 Width = 0;
-		uint32 Height = 0;
-		TArray<uint8> RawData;
-		const uint32 Stride = 4; // RGBA
-
-		bool bSucceeded = LoadTexture( InBrush, Width, Height, RawData );
-
-		if( bSucceeded )
-		{
-			Info.TextureData = MakeShareable( new FSlateTextureData( Width, Height, Stride, RawData ) );
-
-			FSlateShaderResourceProxy* NewTexture = GenerateTextureResource( Info, NAME_None );
-
-			ResourceMap.Add( TextureName, NewTexture );
-		}
-	}
-}
 /**
  * Returns a texture with the passed in name or NULL if it cannot be found.
  */
-FSlateShaderResourceProxy* FSlateD3DTextureManager::GetShaderResource( const FSlateBrush& InBrush )
+FSlateShaderResourceProxy* FSlateD3DTextureManager::GetShaderResource(const FSlateBrush& Brush, FVector2f LocalSize, float DrawScale)
 {
 	FSlateShaderResourceProxy* Texture = NULL;
-	if( InBrush.IsDynamicallyLoaded() )
+	if (Brush.GetImageType() == ESlateBrushImageType::Vector)
 	{
-		Texture = GetDynamicTextureResource( InBrush );
+		Texture = GetVectorResource(Brush, LocalSize, DrawScale);
+	}
+	else if( Brush.IsDynamicallyLoaded() )
+	{
+		Texture = GetDynamicTextureResource( Brush );
 	}
 	else
 	{
-		Texture = ResourceMap.FindRef( InBrush.GetResourceName() );
+		Texture = ResourceMap.FindRef( Brush.GetResourceName() );
 	}
 
 	return Texture;
@@ -245,13 +248,13 @@ bool FSlateD3DTextureManager::LoadTexture( const FSlateBrush& InBrush, uint32& O
 			OutWidth = ImageWrapper->GetWidth();
 			OutHeight = ImageWrapper->GetHeight();
 
-			if (ImageWrapper->GetRaw(ERGBFormat::RGBA, 8, OutDecodedImage))
+			if (ImageWrapper->GetRaw(ERGBFormat::BGRA, 8, OutDecodedImage))
 			{
 				bSucceeded = true;
 			}
 			else
 			{
-				UE_LOG(LogSlateD3D, Warning, TEXT("Invalid texture format %d for Slate resource only RGBA and RGB pngs are supported: %s"), ImageFormat, *InBrush.GetResourceName().ToString() );
+				UE_LOG(LogSlateD3D, Warning, TEXT("Invalid texture format %d for Slate resource only RGBA and RGB pngs are supported: %s"), int(ImageFormat), *InBrush.GetResourceName().ToString() );
 			}
 		}
 		else
@@ -332,6 +335,11 @@ FSlateShaderResourceProxy* FSlateD3DTextureManager::GetDynamicTextureResource( c
 	return  NULL;
 }
 
+FSlateShaderResourceProxy* FSlateD3DTextureManager::GetVectorResource(const FSlateBrush& Brush, FVector2f LocalSize, float DrawScale)
+{
+	return VectorGraphicsCache->GetShaderResource(Brush, LocalSize, DrawScale);
+}
+
 FSlateShaderResourceProxy* FSlateD3DTextureManager::CreateDynamicTextureResource(FName ResourceName, uint32 Width, uint32 Height, const TArray< uint8 >& RawData)
 {
 	// Bail out if we already have this texture loaded
@@ -352,7 +360,7 @@ FSlateShaderResourceProxy* FSlateD3DTextureManager::CreateDynamicTextureResource
 
 	FNewTextureInfo Info;
 	Info.bShouldAtlas = false;
-	LoadedTexture->Init(Info.bSrgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM, &InitData);
+	LoadedTexture->Init(Info.bSrgb ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM, &InitData);
 
 	TextureResource->Proxy->ActualSize = FIntPoint(Width, Height);
 	TextureResource->Proxy->Resource = TextureResource->D3DTexture;
@@ -380,6 +388,21 @@ void FSlateD3DTextureManager::ReleaseDynamicTextureResource( const FSlateBrush& 
 	}
 }
 
+void FSlateD3DTextureManager::UpdateCache()
+{
+	for (TUniquePtr<FSlateTextureAtlasD3D>& Atlas : PrecachedTextureAtlases)
+	{
+		Atlas->ConditionalUpdateTexture();
+	}
+
+	VectorGraphicsCache->UpdateCache();
+}
+
+void FSlateD3DTextureManager::ConditionalFlushCache()
+{
+	VectorGraphicsCache->ConditionalFlushCache();
+}
+
 FSlateShaderResourceProxy* FSlateD3DTextureManager::GenerateTextureResource( const FNewTextureInfo& Info, FName TextureName )
 {
 	FSlateShaderResourceProxy* NewProxy = NULL;
@@ -391,17 +414,16 @@ FSlateShaderResourceProxy* FSlateD3DTextureManager::GenerateTextureResource( con
 	{
 		const uint32 AtlasSize = 1024;
 		// 4 bytes per pixel
-		const uint32 AtlasStride = sizeof(uint8)*4; 
+		const uint32 AtlasStride = 4; 
 		// always use one pixel padding.
 		const uint8 Padding = 1;
-		const FAtlasedTextureSlot* NewSlot = NULL;
+		const FAtlasedTextureSlot* NewSlot = nullptr;
 
-		FSlateTextureAtlasD3D* Atlas = NULL;
-
+		FSlateTextureAtlasD3D* Atlas = nullptr;
 		// Get the last atlas and find a slot for the texture
-		for( int32 AtlasIndex = 0; AtlasIndex < TextureAtlases.Num(); ++AtlasIndex )
+		for( int32 AtlasIndex = 0; AtlasIndex < PrecachedTextureAtlases.Num(); ++AtlasIndex )
 		{
-			Atlas = TextureAtlases[AtlasIndex];
+			Atlas = PrecachedTextureAtlases[AtlasIndex].Get();
 			NewSlot = Atlas->AddTexture( Width, Height, Info.TextureData->GetRawBytes() );
 			if( NewSlot )
 			{
@@ -413,12 +435,15 @@ FSlateShaderResourceProxy* FSlateD3DTextureManager::GenerateTextureResource( con
 		if( !NewSlot )
 		{
 			// A new slot in the atlas could not be found, make a new atlas and add the texture to it
-			Atlas = new FSlateTextureAtlasD3D( AtlasSize, AtlasSize, AtlasStride, ESlateTextureAtlasPaddingStyle::DilateBorder );
-			TextureAtlases.Add( Atlas );
-			NewSlot = TextureAtlases.Last()->AddTexture( Width, Height, Info.TextureData->GetRawBytes() );
+			TUniquePtr<FSlateTextureAtlasD3D> NewAtlas = FSlateD3DTextureAtlasFactory::CreateTextureAtlasInternal(AtlasSize, AtlasStride, ESlateTextureAtlasPaddingStyle::DilateBorder, true);
+			NewSlot = NewAtlas->AddTexture( Width, Height, Info.TextureData->GetRawBytes() );
+		
+			Atlas = NewAtlas.Get();
+
+			PrecachedTextureAtlases.Emplace(MoveTemp(NewAtlas));
 		}
 
-		check( Atlas && NewSlot );
+		check(Atlas && NewSlot);
 
 #if WITH_ATLAS_DEBUGGING
 		AtlasDebugData.Add(NewSlot, TextureName);
@@ -427,8 +452,8 @@ FSlateShaderResourceProxy* FSlateD3DTextureManager::GenerateTextureResource( con
 		NewProxy = new FSlateShaderResourceProxy;
 		NewProxy->Resource = Atlas->GetAtlasTexture();
 		// Compute the sub-uvs for the location of this texture in the atlas, accounting for padding
-		NewProxy->StartUV = FVector2D( (float)(NewSlot->X+Padding) / Atlas->GetWidth(), (float)(NewSlot->Y+Padding) / Atlas->GetHeight() );
-		NewProxy->SizeUV = FVector2D( (float)(NewSlot->Width-Padding*2) / Atlas->GetWidth(), (float)(NewSlot->Height-Padding*2) / Atlas->GetHeight() );
+		NewProxy->StartUV = FVector2f( (float)(NewSlot->X+Padding) / Atlas->GetWidth(), (float)(NewSlot->Y+Padding) / Atlas->GetHeight() );
+		NewProxy->SizeUV = FVector2f( (float)(NewSlot->Width-Padding*2) / Atlas->GetWidth(), (float)(NewSlot->Height-Padding*2) / Atlas->GetHeight() );
 		NewProxy->ActualSize = FIntPoint( Width, Height );
 	}
 	else
@@ -437,19 +462,20 @@ FSlateShaderResourceProxy* FSlateD3DTextureManager::GenerateTextureResource( con
 		NewProxy = new FSlateShaderResourceProxy;
 
 		// Keep track of non-atlased textures so we can free their resources later
-		FSlateD3DTexture* Texture = new FSlateD3DTexture( Width, Height );
-		NonAtlasedTextures.Add( Texture );
-
-		NewProxy->Resource = Texture;
-		NewProxy->StartUV = FVector2D(0.0f,0.0f);
-		NewProxy->SizeUV = FVector2D(1.0f, 1.0f);
+		TUniquePtr<FSlateD3DTexture> Texture = MakeUnique<FSlateD3DTexture>( Width, Height );
+	
+		NewProxy->Resource = Texture.Get();
+		NewProxy->StartUV = FVector2f(0.0f,0.0f);
+		NewProxy->SizeUV = FVector2f(1.0f, 1.0f);
 		NewProxy->ActualSize = FIntPoint( Width, Height );
 
 		D3D11_SUBRESOURCE_DATA InitData;
 		InitData.pSysMem = Info.TextureData->GetRawBytes().GetData();
 		InitData.SysMemPitch = Width * 4;
 
-		Texture->Init( Info.bSrgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM, &InitData );
+		Texture->Init( Info.bSrgb ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM, &InitData );
+
+		NonAtlasedTextures.Add(MoveTemp(Texture));
 	}
 
 	return NewProxy;

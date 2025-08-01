@@ -1,13 +1,21 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BoneControllers/AnimNode_HandIKRetargeting.h"
+#include "Animation/AnimStats.h"
 #include "Animation/AnimTrace.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNode_HandIKRetargeting)
+
+#if ENABLE_ANIM_DEBUG
+static TAutoConsoleVariable<bool> CVarAnimHandIKRetargetingEnable(TEXT("a.AnimNode.HandIKRetargeting.Enable"), true, TEXT("Enable / Disable Hand IK retargeting"));
+#endif
 
 /////////////////////////////////////////////////////
 // FAnimNode_HandIKRetargeting
 
 FAnimNode_HandIKRetargeting::FAnimNode_HandIKRetargeting()
-: HandFKWeight(0.5f)
+: PerAxisAlpha(1.f,1.f,1.f)
+, HandFKWeight(0.5f)
 {
 }
 
@@ -32,6 +40,20 @@ void FAnimNode_HandIKRetargeting::GatherDebugData(FNodeDebugData& DebugData)
 void FAnimNode_HandIKRetargeting::EvaluateSkeletalControl_AnyThread(FComponentSpacePoseContext& Output, TArray<FBoneTransform>& OutBoneTransforms)
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_ANIMNODE(EvaluateSkeletalControl_AnyThread)
+	ANIM_MT_SCOPE_CYCLE_COUNTER_VERBOSE(HandIKRetargeting, !IsInGameThread());
+
+#if ENABLE_ANIM_DEBUG
+	if (!CVarAnimHandIKRetargetingEnable.GetValueOnAnyThread())
+	{
+		return;
+	}
+#endif 
+	// Early exit if alpha is zero
+	if (PerAxisAlpha.IsNearlyZero())
+	{
+		return;
+	}
+
 	checkSlow(OutBoneTransforms.Num() == 0);
 
 	const FBoneContainer& BoneContainer = Output.Pose.GetPose().GetBoneContainer();
@@ -72,7 +94,7 @@ void FAnimNode_HandIKRetargeting::EvaluateSkeletalControl_AnyThread(FComponentSp
 		IKLocation = FMath::Lerp<FVector>(LeftHandIKLocation, RightHandIKLocation, HandFKWeight);
 	}
 	
-	const FVector IK_To_FK_Translation = FKLocation - IKLocation;
+	const FVector IK_To_FK_Translation = (FKLocation - IKLocation) * PerAxisAlpha;
 
 	// If we're not translating, don't send any bones to update.
 	if (!IK_To_FK_Translation.IsNearlyZero())
@@ -134,3 +156,4 @@ void FAnimNode_HandIKRetargeting::InitializeBoneReferences(const FBoneContainer&
 		IKBonesToMove[BoneIndex].Initialize(RequiredBones);
 	}
 }
+

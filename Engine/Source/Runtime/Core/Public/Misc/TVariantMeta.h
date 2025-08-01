@@ -7,32 +7,63 @@
 #include "Templates/UnrealTemplate.h"
 #include "Templates/UnrealTypeTraits.h"
 #include "Delegates/IntegerSequence.h"
-#include "Templates/AndOrNot.h"
+#include "Concepts/Insertable.h"
 
 #include "Misc/AssertionMacros.h"
-
-// Due to a bug in Visual Studio, we must use a recursive template to determine max sizeof() and alignof() of types in a template parameter pack.
-// On other compilers, we use a constexpr array and pluck out the largest
-// Bug reported to Microsoft https://developercommunity.visualstudio.com/content/problem/528990/constexpr-expansion-inside-a-lambda-fails-to-be-ev.html
-// 
-// Bug has since been fixed in Visual Studio 2019 Update 1: _MSC_VER 1921
-#if defined(_MSC_VER) && _MSC_VER < 1921 && !defined(__clang__)
-#define TVARIANT_STORAGE_USE_RECURSIVE_TEMPLATE 1
-#else
-#define TVARIANT_STORAGE_USE_RECURSIVE_TEMPLATE 0
-#endif
 
 template <typename T, typename... Ts>
 class TVariant;
 
+/** Determine if a type is a variant */
 template <typename T>
-struct TIsVariant;
+constexpr bool TIsVariant_V = false;
+
+template <typename... Ts>
+constexpr bool TIsVariant_V<TVariant<Ts...>> = true;
+
+template <typename T> constexpr bool TIsVariant_V<const          T> = TIsVariant_V<T>;
+template <typename T> constexpr bool TIsVariant_V<      volatile T> = TIsVariant_V<T>;
+template <typename T> constexpr bool TIsVariant_V<const volatile T> = TIsVariant_V<T>;
+
+/** Determine the number of types in a TVariant */
+template <typename>
+constexpr SIZE_T TVariantSize_V = 0;
+
+template <typename... Ts>
+constexpr SIZE_T TVariantSize_V<TVariant<Ts...>> = sizeof...(Ts);
+
+template <typename T> constexpr SIZE_T TVariantSize_V<const          T> = TVariantSize_V<T>;
+template <typename T> constexpr SIZE_T TVariantSize_V<      volatile T> = TVariantSize_V<T>;
+template <typename T> constexpr SIZE_T TVariantSize_V<const volatile T> = TVariantSize_V<T>;
 
 template <typename T>
-struct TVariantSize;
-
-namespace UE4Variant_Details
+struct UE_DEPRECATED(5.4, "TIsVariant<T> has been deprecated, please use TIsVariant_V<std::remove_reference_t<T>> instead") TIsVariant
 {
+	static constexpr inline bool Value = TIsVariant_V<T>;
+};
+
+/** Determine the number of types in a TVariant */
+template <typename> struct TVariantSize;
+
+template <typename T>
+struct UE_DEPRECATED(5.4, "TVariantSize<T> has been deprecated, please use TVariantSize_V<std::remove_reference_t<T>> instead") TVariantSize
+{
+	static constexpr inline SIZE_T Value = TVariantSize_V<std::remove_reference_t<T>>;
+};
+
+namespace UE
+{
+namespace Core
+{
+namespace Private
+{
+	/** A shim to get at FArchive through a dependent name, allowing TVariant.h to not include Archive.h. Only calling code that needs serialization has to include it. */
+	template <typename T>
+	struct TAlwaysFArchive
+	{
+		using Type = FArchive;
+	};
+
 	/** Determine if all the types in a template parameter pack has duplicate types */
 	template <typename...>
 	struct TTypePackContainsDuplicates;
@@ -41,7 +72,7 @@ namespace UE4Variant_Details
 	template <typename T>
 	struct TTypePackContainsDuplicates<T>
 	{
-		static constexpr bool Value = false;
+		static constexpr inline bool Value = false;
 	};
 
 	/**
@@ -51,92 +82,31 @@ namespace UE4Variant_Details
 	template <typename T, typename... Ts>
 	struct TTypePackContainsDuplicates<T, T, Ts...>
 	{
-		static constexpr bool Value = true;
+		static constexpr inline bool Value = true;
 	};
 
 	/** Check all pairs of types in a template parameter pack to determine if any type is duplicated */
 	template <typename T, typename U, typename... Rest>
 	struct TTypePackContainsDuplicates<T, U, Rest...>
 	{
-		static constexpr bool Value = TTypePackContainsDuplicates<T, Rest...>::Value || TTypePackContainsDuplicates<U, Rest...>::Value;
+		static constexpr inline bool Value = TTypePackContainsDuplicates<T, Rest...>::Value || TTypePackContainsDuplicates<U, Rest...>::Value;
 	};
 
 	/** Determine if any of the types in a template parameter pack are references */
 	template <typename... Ts>
 	struct TContainsReferenceType
 	{
-		static constexpr bool Value = TOr<TIsReferenceType<Ts>...>::Value;
+		static constexpr inline bool Value = (std::is_reference_v<Ts> || ...);
 	};
 
-#if TVARIANT_STORAGE_USE_RECURSIVE_TEMPLATE
-	/** Determine the max alignof and sizeof of all types in a template parameter pack */
-	template <typename... Ts>
-	struct TVariantStorageTraits;
-
-	template <typename T, typename... Ts>
-	struct TVariantStorageTraits<T, Ts...>
-	{
-		static constexpr SIZE_T MaxSizeof(SIZE_T CurrentSize)
-		{
-			return TVariantStorageTraits<Ts...>::MaxSizeof(TVariantStorageTraits<T>::MaxSizeof(CurrentSize));
-		}
-
-		static constexpr SIZE_T MaxAlignof(SIZE_T CurrentSize)
-		{
-			return TVariantStorageTraits<Ts...>::MaxAlignof(TVariantStorageTraits<T>::MaxAlignof(CurrentSize));
-		}
-	};
-
-	template <typename T>
-	struct TVariantStorageTraits<T>
-	{
-		static constexpr SIZE_T MaxSizeof(SIZE_T CurrentSize)
-		{
-			return CurrentSize > sizeof(T) ? CurrentSize : sizeof(T);
-		}
-
-		static constexpr SIZE_T MaxAlignof(SIZE_T CurrentSize)
-		{
-			return CurrentSize > alignof(T) ? CurrentSize : alignof(T);
-		}
-	};
-
-	/** Expose a type that is suitable for storing any of the types in a template parameter pack */
-	template <typename T, typename... Ts>
-	struct TVariantStorage
-	{
-		static constexpr SIZE_T SizeofValue = TVariantStorageTraits<T, Ts...>::MaxSizeof(0);
-		static constexpr SIZE_T AlignofValue = TVariantStorageTraits<T, Ts...>::MaxAlignof(0);
-		static_assert(SizeofValue > 0, "MaxSizeof must be greater than 0");
-		static_assert(AlignofValue > 0, "MaxAlignof must be greater than 0");
-
-		/** Interpret the underlying data as the type in the variant parameter pack at the compile-time index. This function is used to implement Visit and should not be used directly */
-		template <SIZE_T N>
-		auto& GetValueAsIndexedType()
-		{
-			using ReturnType = typename TNthTypeFromParameterPack<N, T, Ts...>::Type;
-			return *reinterpret_cast<ReturnType*>(&Storage);
-		}
-
-		/** Interpret the underlying data as the type in the variant parameter pack at the compile-time index. This function is used to implement Visit and should not be used directly */
-		template <SIZE_T N>
-		const auto& GetValueAsIndexedType() const
-		{
-			// Temporarily remove the const qualifier so we can implement GetValueAsIndexedType in one location.
-			return const_cast<TVariantStorage*>(this)->template GetValueAsIndexedType<N>();
-		}
-
-		TAlignedBytes<SizeofValue, AlignofValue> Storage;
-	};
-#else
 	/** Determine the max alignof and sizeof of all types in a template parameter pack and provide a type that is compatible with those sizes */
 	template <typename... Ts>
 	struct TVariantStorage
 	{
 		static constexpr SIZE_T MaxOf(const SIZE_T Sizes[])
 		{
-			SIZE_T MaxSize = Sizes[0];
-			for (int32 Itr = 1; Itr < sizeof...(Ts); ++Itr)
+			SIZE_T MaxSize = 0;
+			for (SIZE_T Itr = 0; Itr < sizeof...(Ts); ++Itr)
 			{
 				if (Sizes[Itr] > MaxSize)
 				{
@@ -156,14 +126,14 @@ namespace UE4Variant_Details
 			return MaxOf(Sizes);
 		}
 
-		static constexpr SIZE_T SizeofValue = MaxSizeof();
-		static constexpr SIZE_T AlignofValue = MaxAlignof();
+		static constexpr inline SIZE_T SizeofValue = MaxSizeof();
+		static constexpr inline SIZE_T AlignofValue = MaxAlignof();
 		static_assert(SizeofValue > 0, "MaxSizeof must be greater than 0");
 		static_assert(AlignofValue > 0, "MaxAlignof must be greater than 0");
 
 		/** Interpret the underlying data as the type in the variant parameter pack at the compile-time index. This function is used to implement Visit and should not be used directly */
 		template <SIZE_T N>
-		auto& GetValueAsIndexedType()
+		auto& GetValueAsIndexedType() &
 		{
 			using ReturnType = typename TNthTypeFromParameterPack<N, Ts...>::Type;
 			return *reinterpret_cast<ReturnType*>(&Storage);
@@ -171,7 +141,15 @@ namespace UE4Variant_Details
 
 		/** Interpret the underlying data as the type in the variant parameter pack at the compile-time index. This function is used to implement Visit and should not be used directly */
 		template <SIZE_T N>
-		const auto& GetValueAsIndexedType() const
+		auto&& GetValueAsIndexedType() &&
+		{
+			using ReturnType = typename TNthTypeFromParameterPack<N, Ts...>::Type;
+			return (ReturnType&&)GetValueAsIndexedType<N>();
+		}
+
+		/** Interpret the underlying data as the type in the variant parameter pack at the compile-time index. This function is used to implement Visit and should not be used directly */
+		template <SIZE_T N>
+		const auto& GetValueAsIndexedType() const&
 		{
 			// Temporarily remove the const qualifier so we can implement GetValueAsIndexedType in one location.
 			return const_cast<TVariantStorage*>(this)->template GetValueAsIndexedType<N>();
@@ -179,34 +157,33 @@ namespace UE4Variant_Details
 
 		TAlignedBytes<SizeofValue, AlignofValue> Storage;
 	};
-#endif
 
 	/** Helper to lookup indices of each type in a template parameter pack */
 	template <SIZE_T N, typename LookupType, typename... Ts>
 	struct TParameterPackTypeIndexHelper
 	{
-		static constexpr SIZE_T Value = (SIZE_T)-1;
+		static constexpr inline SIZE_T Value = (SIZE_T)-1;
 	};
 
 	/** When the type we're looking up bubbles up to the top, we return the current index */
 	template <SIZE_T N, typename T, typename... Ts>
 	struct TParameterPackTypeIndexHelper<N, T, T, Ts...>
 	{
-		static constexpr SIZE_T Value = N;
+		static constexpr inline SIZE_T Value = N;
 	};
 
 	/** When different type than the lookup is at the front of the parameter pack, we increase the index and move to the next type */
 	template <SIZE_T N, typename LookupType, typename T, typename... Ts>
 	struct TParameterPackTypeIndexHelper<N, LookupType, T, Ts...>
 	{
-		static constexpr SIZE_T Value = TParameterPackTypeIndexHelper<N + 1, LookupType, Ts...>::Value;
+		static constexpr inline SIZE_T Value = TParameterPackTypeIndexHelper<N + 1, LookupType, Ts...>::Value;
 	};
 
 	/** Entry-point for looking up the index of a type in a template parameter pack */
 	template <typename LookupType, typename... Ts>
 	struct TParameterPackTypeIndex
 	{
-		static constexpr SIZE_T Value = TParameterPackTypeIndexHelper<0, LookupType, Ts...>::Value;
+		static constexpr inline SIZE_T Value = TParameterPackTypeIndexHelper<0, LookupType, Ts...>::Value;
 	};
 
 	/** An adapter for calling DestructItem */
@@ -281,6 +258,35 @@ namespace UE4Variant_Details
 		}
 	};
 
+	/** A utility for loading a specific type from FArchive into a TVariant */
+	template <typename T, typename VariantType>
+	struct TVariantLoadFromArchiveCaller
+	{
+		/** Default construct the type and load it from the FArchive */
+		static void Load(FArchive& Ar, VariantType& OutVariant)
+		{
+			OutVariant.template Emplace<T>();
+			Ar << OutVariant.template Get<T>();
+		}
+	};
+
+	/** A utility for loading a type from FArchive based on an index into a template parameter pack. */
+	template <typename... Ts>
+	struct TVariantLoadFromArchiveLookup
+	{
+		using VariantType = TVariant<Ts...>;
+		static_assert((std::is_default_constructible_v<Ts> && ...), "Each type in TVariant template parameter pack must be default constructible in order to use FArchive serialization");
+		static_assert((TModels_V<CInsertable<FArchive&>, Ts> && ...), "Each type in TVariant template parameter pack must be able to use operator<< with an FArchive");
+
+		/** Load the type at the specified index from the FArchive and emplace it into the TVariant */
+		static void Load(SIZE_T TypeIndex, FArchive& Ar, VariantType& OutVariant)
+		{
+			static constexpr void(*Loaders[])(FArchive&, VariantType&) = { &TVariantLoadFromArchiveCaller<Ts, VariantType>::Load... };
+			check(TypeIndex < UE_ARRAY_COUNT(Loaders));
+			Loaders[TypeIndex](Ar, OutVariant);
+		}
+	};
+
 	/** Determine if the type with the provided index in the template parameter pack is the same */
 	template <typename LookupType, typename... Ts>
 	struct TIsType
@@ -288,15 +294,11 @@ namespace UE4Variant_Details
 		/** Check if the type at the provided index is the lookup type */
 		static bool IsSame(SIZE_T TypeIndex)
 		{
-			static constexpr bool bIsSameType[] = { TIsSame<Ts, LookupType>::Value... };
+			static constexpr bool bIsSameType[] = { std::is_same_v<Ts, LookupType>... };
 			check(TypeIndex < UE_ARRAY_COUNT(bIsSameType));
 			return bIsSameType[TypeIndex];
 		}
 	};
-
-	/** Determine if all the types are TVariant<...> */
-	template <typename... Ts>
-	using TIsAllVariant = TAnd<TIsVariant<Ts>...>;
 
 	/** Encode the stored index of a bunch of variants into a single value used to lookup a Visit invocation function */
 	template <typename T>
@@ -308,7 +310,7 @@ namespace UE4Variant_Details
 	template <typename Variant0, typename... Variants>
 	inline SIZE_T EncodeIndices(const Variant0& First, const Variants&... Rest)
 	{
-		return First.GetIndex() + TVariantSize<Variant0>::Value * EncodeIndices(Rest...);
+		return First.GetIndex() + TVariantSize_V<Variant0> * EncodeIndices(Rest...);
 	}
 
 	/** Inverse operation of EncodeIndices. Decodes an encoded index into the individual index for the specified variant index. */
@@ -323,25 +325,17 @@ namespace UE4Variant_Details
 		return EncodedIndex % *VariantSizes;
 	}
 
-#if !PLATFORM_COMPILER_HAS_FOLD_EXPRESSIONS
-	/** Used to determine the total number of possible Visit invocations when fold expressions are not available. */
-	constexpr SIZE_T Multiply(const SIZE_T* Args, SIZE_T Num)
-	{
-		SIZE_T Result = 1;
-		while (Num)
-		{
-			Result *= *Args++;
-			--Num;
-		}
-		return Result;
-	}
-#endif
-
 	/** Cast a TVariant to its private base */
 	template <typename... Ts>
 	FORCEINLINE TVariantStorage<Ts...>& CastToStorage(TVariant<Ts...>& Variant)
 	{
 		return *(TVariantStorage<Ts...>*)(&Variant);
+	}
+
+	template <typename... Ts>
+	FORCEINLINE TVariantStorage<Ts...>&& CastToStorage(TVariant<Ts...>&& Variant)
+	{
+		return (TVariantStorage<Ts...>&&)(*(TVariantStorage<Ts...>*)(&Variant));
 	}
 
 	template <typename... Ts>
@@ -354,8 +348,8 @@ namespace UE4Variant_Details
 	template <SIZE_T EncodedIndex, SIZE_T... VariantIndices, typename Func, typename... Variants>
 	inline decltype(auto) VisitApplyEncoded(Func&& Callable, Variants&&... Args)
 	{
-		constexpr SIZE_T VariantSizes[] = { TVariantSize<Variants>::Value... };
-		return Callable(CastToStorage(Args).template GetValueAsIndexedType<DecodeIndex(EncodedIndex, VariantIndices, VariantSizes)>()...);
+		constexpr SIZE_T VariantSizes[] = { TVariantSize_V<std::decay_t<Variants>>... };
+		return Callable(CastToStorage(Forward<Variants>(Args)).template GetValueAsIndexedType<DecodeIndex(EncodedIndex, VariantIndices, VariantSizes)>()...);
 	}
 
 	/**
@@ -383,6 +377,6 @@ namespace UE4Variant_Details
 		static constexpr InvokeFn Invokers[] = { WrapperType::template FuncPtr<EncodedIndices>... };
 		return Invokers[EncodedIndex](Forward<Func>(Callable), Forward<Variants>(Args)...);
 	}
-}
-
-#undef TVARIANT_STORAGE_USE_RECURSIVE_TEMPLATE
+} // namespace Private
+} // namespace Core
+} // namespace UE

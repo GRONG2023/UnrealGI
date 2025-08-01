@@ -4,35 +4,32 @@ namespace UnrealBuildTool.Rules
 {
 	public class InternationalizationSettings : ModuleRules
 	{
-        public InternationalizationSettings(ReadOnlyTargetRules Target) : base(Target)
+		public InternationalizationSettings(ReadOnlyTargetRules Target) : base(Target)
 		{
-            PrivateDependencyModuleNames.AddRange(
-                new string[] {
-				    "Core",
-				    "CoreUObject",
-				    "InputCore",
-				    "Engine",
-				    "Slate",
-					"SlateCore",
-				    "EditorStyle",
-				    "PropertyEditor",
-				    "SharedSettingsWidgets",
-                    "Localization",
-                }
-            );
-
-			PrivateIncludePathModuleNames.AddRange(
+			PrivateDependencyModuleNames.AddRange(
 				new string[] {
-					"Settings",
-                    "SettingsEditor"
+					"Core",
+					"CoreUObject",
+					"InputCore",
+					"Engine",
+					"Slate",
+					"SlateCore",
+					"AppFramework",
+					"PropertyEditor",
+					"Localization",
 				}
 			);
 
-            DynamicallyLoadedModuleNames.AddRange(
-                new string[] {
-				    "SettingsEditor"
-                }
-            );
+			PrivateIncludePathModuleNames.AddRange(
+				new string[] {
+				}
+			);
+
+			DynamicallyLoadedModuleNames.AddRange(
+				new string[] {
+					"SettingsEditor"
+				}
+			);
 		}
 	}
 }

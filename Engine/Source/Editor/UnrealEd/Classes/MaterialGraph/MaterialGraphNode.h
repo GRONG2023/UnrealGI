@@ -17,7 +17,7 @@ class UMaterialGraphNode : public UMaterialGraphNode_Base
 
 	/** Material Expression this node is representing */
 	UPROPERTY()
-	class UMaterialExpression* MaterialExpression;
+	TObjectPtr<class UMaterialExpression> MaterialExpression;
 
 	/** Set to true when Expression Preview compiles, so we can update SGraphNode */
 	bool bPreviewNeedsUpdate;
@@ -39,7 +39,7 @@ class UMaterialGraphNode : public UMaterialGraphNode_Base
 
 public:
 	/** Fix up the node's owner after being copied */
-	UNREALED_API void PostCopyNode();
+	UNREALED_API virtual void PostCopyNode();
 
 	/** Get the expression preview for this node */
 	UNREALED_API FMaterialRenderProxy* GetExpressionPreview();
@@ -47,10 +47,8 @@ public:
 	/** Recreate this node's pins and relink the Graph from the Material */
 	UNREALED_API void RecreateAndLinkNode();
 
-	/** Get the Material Expression output index from an output pin */
-	UNREALED_API int32 GetOutputIndex(const UEdGraphPin* OutputPin);
 	/** Get the Material value type of an output pin */
-	uint32 GetOutputType(const UEdGraphPin* OutputPin);
+	//virtual uint32 GetOutputType(const UEdGraphPin* OutputPin) const override;
 
 	//~ Begin UObject Interface
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
@@ -72,18 +70,22 @@ public:
 	virtual void OnCommentBubbleToggled( bool bInCommentBubbleVisible ) override;
 	virtual void GetPinHoverText(const UEdGraphPin& Pin, FString& HoverTextOut) const override;
 	virtual FString GetDocumentationExcerptName() const override;
-	virtual bool CanUserDeleteNode() const override; 
+	virtual bool CanUserDeleteNode() const override;
+	virtual uint32 GetPinMaterialType(const UEdGraphPin* Pin) const override;
+	virtual void PinDefaultValueChanged(UEdGraphPin* Pin) override;
+	virtual TSharedPtr<SGraphNode> CreateVisualWidget() override;
 	//~ End UEdGraphNode Interface.
 
 	//~ Begin UMaterialGraphNode_Base Interface
+	virtual UObject* GetMaterialNodeOwner() const override { return MaterialExpression; }
 	virtual void CreateInputPins() override;
 	virtual void CreateOutputPins() override;
-	virtual UNREALED_API int32 GetInputIndex(const UEdGraphPin* InputPin) const override;
-	virtual uint32 GetInputType(const UEdGraphPin* InputPin) const override;
 	//~ End UMaterialGraphNode_Base Interface
 
 	/** Will return the shorten pin name to use based on long pin name */
 	static FName UNREALED_API GetShortenPinName(const FName PinName);
+
+	virtual void PropagatePropertyChange() override;
 
 private:
 	/** Make sure the MaterialExpression is owned by the Material */

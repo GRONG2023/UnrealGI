@@ -10,46 +10,36 @@ class FIOSDeviceOutputReaderRunnable;
 class FIOSTargetDevice;
 class FIOSTargetDeviceOutput;
 
-
-
-
-inline FIOSDeviceOutputReaderRunnable::FIOSDeviceOutputReaderRunnable(const FTargetDeviceId InDeviceId, FOutputDevice* InOutput)
+inline FIOSDeviceOutputReaderRunnable::FIOSDeviceOutputReaderRunnable(const FString& InDeviceUDID, FOutputDevice* InOutput)
 	: StopTaskCounter(0)
-	, DeviceId(InDeviceId)
+	, DeviceUDID(InDeviceUDID)
 	, Output(InOutput)
-	, DSCommander(nullptr)
+	, SyslogReadPipe(nullptr)
+	, SyslogWritePipe(nullptr)
 {
 }
 
-inline bool FIOSDeviceOutputReaderRunnable::StartDSCommander()
+inline bool FIOSDeviceOutputReaderRunnable::StartSyslogProcess(void)
 {
-	if (DSCommander)
+	FString Exe = GetLibImobileDeviceExe("idevicesyslog");
+	FString Params = FString::Printf(TEXT(" -u %s -m [UE]"), *DeviceUDID);
+	SyslogProcHandle = FPlatformProcess::CreateProc(*Exe, *Params, true, false, false, NULL, 0, NULL, SyslogWritePipe);
+	return SyslogProcHandle.IsValid();
+}
+
+inline bool FIOSDeviceOutputReaderRunnable::Init(void)
+{
+	FPlatformProcess::CreatePipe(SyslogReadPipe, SyslogWritePipe);
+	return StartSyslogProcess();
+}
+
+inline void FIOSDeviceOutputReaderRunnable::Exit(void)
+{
+	if (SyslogProcHandle.IsValid())
 	{
-		DSCommander->Stop();
-		delete DSCommander;
+		FPlatformProcess::TerminateProc(SyslogProcHandle);
 	}
-	Output->Serialize(TEXT("Starting listening ....."), ELogVerbosity::Log, NAME_None);
-	Output->Serialize(*DeviceId.GetDeviceName(), ELogVerbosity::Log, NAME_None);
-	FString Command = FString::Printf(TEXT("listentodevice -device %s"), *DeviceId.GetDeviceName());
-	uint8* DSCommand = (uint8*)TCHAR_TO_UTF8(*Command);
-	DSCommander = new FTcpDSCommander(DSCommand, strlen((const char*)DSCommand), OutputQueue);
-	return DSCommander->IsValid();
-}
-
-inline bool FIOSDeviceOutputReaderRunnable::Init(void) 
-{ 
-	return StartDSCommander();
-}
-
-inline void FIOSDeviceOutputReaderRunnable::Exit(void) 
-{
-	StopTaskCounter.Increment();
-	if (DSCommander)
-	{
-		DSCommander->Stop();
-		delete DSCommander;
-		DSCommander = nullptr;
-	}
+	FPlatformProcess::ClosePipe(SyslogReadPipe, SyslogWritePipe);
 }
 
 inline void FIOSDeviceOutputReaderRunnable::Stop(void)
@@ -59,37 +49,53 @@ inline void FIOSDeviceOutputReaderRunnable::Stop(void)
 
 inline uint32 FIOSDeviceOutputReaderRunnable::Run(void)
 {
-	Output->Serialize(TEXT("Starting Output"), ELogVerbosity::Log, NAME_None);
-	while (StopTaskCounter.GetValue() == 0 && DSCommander->IsValid())
+	FString SyslogOutput;
+
+	while (StopTaskCounter.GetValue() == 0 && SyslogProcHandle.IsValid())
 	{
-		if (DSCommander->IsStopped() || !DSCommander->IsValid())
+		if (!FPlatformProcess::IsProcRunning(SyslogProcHandle))
 		{
-			// When user plugs out USB cable DS process stops
-			// Keep trying to restore DS connection until code that uses this object will not kill us
+			// When user plugs out USB cable idevicesyslog process stops
+			// Keep trying to restore idevicesyslog connection until code that uses this object will not kill us
 			Output->Serialize(TEXT("Trying to restore connection to device..."), ELogVerbosity::Log, NAME_None);
-			if (StartDSCommander())
+			FPlatformProcess::CloseProc(SyslogProcHandle);
+			if (StartSyslogProcess())
 			{
-				FPlatformProcess::Sleep(5.0f);
+				FPlatformProcess::Sleep(1.0f);
 			}
 			else
 			{
-				Output->Serialize(TEXT("Failed to start DS commander"), ELogVerbosity::Log, NAME_None);
+				Output->Serialize(TEXT("Failed to start idevicesyslog proccess"), ELogVerbosity::Log, NAME_None);
+				Stop();
 			}
 		}
 		else
 		{
-			FString Text;
-			if (OutputQueue.Dequeue(Text))
+			SyslogOutput.Append(FPlatformProcess::ReadPipe(SyslogReadPipe));
+
+			if (SyslogOutput.Len() > 0)
 			{
-				if (Text.Contains(TEXT("[UE4]"), ESearchCase::CaseSensitive))
+				TArray<FString> OutputLines;
+				SyslogOutput.ParseIntoArray(OutputLines, TEXT("\n"), false);
+
+				if (!SyslogOutput.EndsWith(TEXT("\n")))
 				{
-					Output->Serialize(*Text, ELogVerbosity::Log, NAME_None);
+					// partial line at the end, do not serialize it until we receive remainder
+					SyslogOutput = OutputLines.Last();
+					OutputLines.RemoveAt(OutputLines.Num() - 1);
+				}
+				else
+				{
+					SyslogOutput.Reset();
+				}
+
+				for (int32 i = 0; i < OutputLines.Num(); ++i)
+				{
+					Output->Serialize(*OutputLines[i], ELogVerbosity::Log, NAME_None);
 				}
 			}
-			else
-			{
-				FPlatformProcess::Sleep(0.1f);
-			}
+
+			FPlatformProcess::Sleep(0.1f);
 		}
 	}
 
@@ -101,13 +107,9 @@ inline bool FIOSTargetDeviceOutput::Init(const FIOSTargetDevice& TargetDevice, F
 	check(Output);
 	// Output will be produced by background thread
 	check(Output->CanBeUsedOnAnyThread());
-	
-	DeviceId = TargetDevice.GetId();
 	DeviceName = TargetDevice.GetName();
-
-	Output->Serialize(TEXT("Creating FIOSTargetDeviceOutput ....."), ELogVerbosity::Log, NAME_None);
-		
-	auto* Runnable = new FIOSDeviceOutputReaderRunnable(DeviceId, Output);
+	auto* Runnable = new FIOSDeviceOutputReaderRunnable(TargetDevice.GetId().GetDeviceName(), Output);
 	DeviceOutputThread = TUniquePtr<FRunnableThread>(FRunnableThread::Create(Runnable, TEXT("FIOSDeviceOutputReaderRunnable")));
 	return true;
 }
+

@@ -4,32 +4,51 @@ using UnrealBuildTool;
 
 public class ImageWrapper : ModuleRules
 {
+	protected virtual bool bEnableMinimalEXR { get => false; }
+
 	public ImageWrapper(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				"Runtime/ImageWrapper/Private",
-				"Runtime/ImageWrapper/Private/Formats",
-			});
+		PublicIncludePathModuleNames.AddRange(new string[] {
+			"ImageCore"
+			}
+		);
+
+		// include only, no link :
+		// for TextureDefines.h :
+		PrivateIncludePathModuleNames.AddRange(new string[]
+		{
+			"Engine",
+		});
 
 		PublicDefinitions.Add("WITH_UNREALPNG=1");
 		PublicDefinitions.Add("WITH_UNREALJPEG=1");
 
-		PrivateDependencyModuleNames.Add("Core");
-		PublicDependencyModuleNames.Add("CoreUObject");
+		PrivateDependencyModuleNames.AddRange(
+			new string[] {
+				"Core",
+				"ColorManagement"
+			}
+		);
+
+		PublicDependencyModuleNames.Add("LibTiff");
+		PublicDependencyModuleNames.Add("ImageCore");
 
 		AddEngineThirdPartyPrivateStaticDependencies(Target,
 			"zlib",
 			"UElibPNG",
-			"UElibJPG"
+			"LibTiff",
+			"OodleDataCompression",
+			"UEJpegComp"
 		);
 
-		// Add LibJpegTurbo for supported platforms
-		// **** NOTE - Only Win64 has been tested - other platforms are usable at your own risk, but have not been tested
-		if ((Target.Platform == UnrealTargetPlatform.Win64))/* ||
-			(Target.Platform == UnrealTargetPlatform.Win32) ||
-			(Target.Platform == UnrealTargetPlatform.Mac) ||
-			(Target.IsInPlatformGroup(UnrealPlatformGroup.Unix) && Target.Architecture.StartsWith("x86_64")))*/
+		// Jpeg Decoding
+		// LibJpegTurbo is much faster than UElibJPG but has not been compiled or tested for all platforms
+		// Note that currently this module is included at runtime, so consider the increase in exe size before
+		// enabling for any of the console/phone platforms!
+
+		if ((Target.Platform.IsInGroup(UnrealPlatformGroup.Windows) && Target.WindowsPlatform.Architecture != UnrealArch.Arm64)
+			|| Target.Platform == UnrealTargetPlatform.Mac
+			|| Target.IsInPlatformGroup(UnrealPlatformGroup.Unix))
 		{
 			PublicDefinitions.Add("WITH_LIBJPEGTURBO=1");
 			AddEngineThirdPartyPrivateStaticDependencies(Target, "LibJpegTurbo");
@@ -37,27 +56,28 @@ public class ImageWrapper : ModuleRules
 		else
 		{
 			PublicDefinitions.Add("WITH_LIBJPEGTURBO=0");
+			AddEngineThirdPartyPrivateStaticDependencies(Target, "UElibJPG");
 		}
 
+		bool bUseMinimalEXR = bEnableMinimalEXR;
 		// Add openEXR lib for windows builds.
-		if ((Target.Platform == UnrealTargetPlatform.Win64) ||
-			(Target.Platform == UnrealTargetPlatform.Win32) ||
+		if ((Target.Platform.IsInGroup(UnrealPlatformGroup.Windows)) ||
 			(Target.Platform == UnrealTargetPlatform.Mac) ||
-			(Target.IsInPlatformGroup(UnrealPlatformGroup.Unix) && Target.Architecture.StartsWith("x86_64")))
+			(Target.IsInPlatformGroup(UnrealPlatformGroup.Unix) && Target.Architecture == UnrealArch.X64))
 		{
 			PublicDefinitions.Add("WITH_UNREALEXR=1");
+			AddEngineThirdPartyPrivateStaticDependencies(Target, "Imath");
 			AddEngineThirdPartyPrivateStaticDependencies(Target, "UEOpenExr");
+			bUseMinimalEXR = false;
 		}
 		else
 		{
 			PublicDefinitions.Add("WITH_UNREALEXR=0");
 		}
 
+		PublicDefinitions.Add("WITH_UNREALEXR_MINIMAL=" + (bUseMinimalEXR ? "1" : "0"));
+
 		// Enable exceptions to allow error handling
 		bEnableExceptions = true;
-
-		// Disable shared PCHs to handle warning C4652
-		PCHUsage = ModuleRules.PCHUsageMode.NoSharedPCHs;
-		PrivatePCHHeaderFile = "Private/ImageWrapperPrivate.h";
 	}
 }

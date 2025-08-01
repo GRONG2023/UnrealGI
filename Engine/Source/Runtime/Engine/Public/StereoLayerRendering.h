@@ -32,34 +32,40 @@ public:
 	}
 	FStereoLayerVS() {}
 
-	void SetParameters(FRHICommandList& RHICmdList, FVector2D QuadSize, FBox2D UVRect, const FMatrix& ViewProjection, const FMatrix& World)
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, FVector2D QuadSize, FBox2D UVRect, const FMatrix& ViewProjection, const FMatrix& World)
 	{
-		FRHIVertexShader* VS = RHICmdList.GetBoundVertexShader();
-
 		if (InQuadAdjust.IsBound())
 		{
-			SetShaderValue(RHICmdList, VS, InQuadAdjust, QuadSize);
+			SetShaderValue(BatchedParameters, InQuadAdjust, FVector2f(QuadSize));
 		}
 
 		if (InUVAdjust.IsBound())
 		{
-			FVector4 UVAdjust;
-			UVAdjust.X = UVRect.Min.X;
-			UVAdjust.Y = UVRect.Min.Y;
-			UVAdjust.Z = UVRect.Max.X - UVRect.Min.X;
-			UVAdjust.W = UVRect.Max.Y - UVRect.Min.Y;
-			SetShaderValue(RHICmdList, VS, InUVAdjust, UVAdjust);
+			FVector4f UVAdjust;
+			UVAdjust.X = static_cast<float>(UVRect.Min.X);
+			UVAdjust.Y = static_cast<float>(UVRect.Min.Y);
+			UVAdjust.Z = static_cast<float>(UVRect.Max.X - UVRect.Min.X);
+			UVAdjust.W = static_cast<float>(UVRect.Max.Y - UVRect.Min.Y);
+			SetShaderValue(BatchedParameters, InUVAdjust, UVAdjust);
 		}
 
 		if (InViewProjection.IsBound())
 		{
-			SetShaderValue(RHICmdList, VS, InViewProjection, ViewProjection);
+			SetShaderValue(BatchedParameters, InViewProjection, (FMatrix44f)ViewProjection);
 		}
 
 		if (InWorld.IsBound())
 		{
-			SetShaderValue(RHICmdList, VS, InWorld, World);
+			SetShaderValue(BatchedParameters, InWorld, (FMatrix44f)World);
 		}
+	}
+
+	UE_DEPRECATED(5.3, "SetParameters with FRHIBatchedShaderParameters should be used.")
+	void SetParameters(FRHICommandList& RHICmdList, FVector2D QuadSize, FBox2D UVRect, const FMatrix& ViewProjection, const FMatrix& World)
+	{
+		FRHIBatchedShaderParameters& BatchedParameters = RHICmdList.GetScratchShaderParameters();
+		SetParameters(BatchedParameters, QuadSize, UVRect, ViewProjection, World);
+		RHICmdList.SetBatchedShaderParameters(RHICmdList.GetBoundVertexShader(), BatchedParameters);
 	}
 
 private:
@@ -76,11 +82,23 @@ public:
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters) { return true; }
 
-	void SetParameters(FRHICommandList& RHICmdList, FRHISamplerState* SamplerStateRHI, FRHITexture* TextureRHI)
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, FRHISamplerState* SamplerStateRHI, FRHITexture* TextureRHI, bool bIsOpaque)
 	{
-		FRHIPixelShader* PS = RHICmdList.GetBoundPixelShader();
+		SetTextureParameter(BatchedParameters, InTexture, InTextureSampler, SamplerStateRHI, TextureRHI);
 
-		SetTextureParameter(RHICmdList, PS, InTexture, InTextureSampler, SamplerStateRHI, TextureRHI);
+		if (InIsOpaque.IsBound())
+		{
+			const float OpaqueVal = bIsOpaque ? 1.0 : 0.0;
+			SetShaderValue(BatchedParameters, InIsOpaque, OpaqueVal);
+		}
+	}
+
+	UE_DEPRECATED(5.3, "SetParameters with FRHIBatchedShaderParameters should be used.")
+	void SetParameters(FRHICommandList& RHICmdList, FRHISamplerState* SamplerStateRHI, FRHITexture* TextureRHI, bool bIsOpaque)
+	{
+		FRHIBatchedShaderParameters& BatchedParameters = RHICmdList.GetScratchShaderParameters();
+		SetParameters(BatchedParameters, SamplerStateRHI, TextureRHI, bIsOpaque);
+		RHICmdList.SetBatchedShaderParameters(RHICmdList.GetBoundPixelShader(), BatchedParameters);
 	}
 
 protected:
@@ -89,11 +107,13 @@ protected:
 	{
 		InTexture.Bind(Initializer.ParameterMap, TextureParamName, SPF_Mandatory);
 		InTextureSampler.Bind(Initializer.ParameterMap, TEXT("InTextureSampler"));
+		InIsOpaque.Bind(Initializer.ParameterMap, TEXT("InIsOpaque"));
 	}
 	FStereoLayerPS_Base() {}
 
 	LAYOUT_FIELD(FShaderResourceParameter, InTexture);
 	LAYOUT_FIELD(FShaderResourceParameter, InTextureSampler);
+	LAYOUT_FIELD(FShaderParameter, InIsOpaque);
 };
 
 /**

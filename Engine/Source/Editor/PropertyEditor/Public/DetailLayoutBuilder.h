@@ -4,12 +4,14 @@
 
 #include "CoreMinimal.h"
 #include "Fonts/SlateFontInfo.h"
-#include "EditorStyleSet.h"
-#include "AssetThumbnail.h"
+#include "Styling/AppStyle.h"
 #include "PropertyHandle.h"
 #include "IDetailPropertyRow.h"
+#include "Styling/AppStyle.h"
 
 class IDetailCategoryBuilder;
+class IDetailsView;
+class IPropertyUtilities;
 
 namespace ECategoryPriority
 {
@@ -41,22 +43,27 @@ public:
 	/**
 	 * @return the font used for properties and details
 	 */ 
-	static FSlateFontInfo GetDetailFont() { return FEditorStyle::GetFontStyle( TEXT("PropertyWindow.NormalFont") ); }
+	static FSlateFontInfo GetDetailFont() { return FAppStyle::GetFontStyle( TEXT("PropertyWindow.NormalFont") ); }
 
 	/**
 	 * @return the bold font used for properties and details
 	 */ 
-	static FSlateFontInfo GetDetailFontBold() { return FEditorStyle::GetFontStyle( TEXT("PropertyWindow.BoldFont") ); }
+	static FSlateFontInfo GetDetailFontBold() { return FAppStyle::GetFontStyle( TEXT("PropertyWindow.BoldFont") ); }
 	
 	/**
 	 * @return the italic font used for properties and details
 	 */ 
-	static FSlateFontInfo GetDetailFontItalic() { return FEditorStyle::GetFontStyle( TEXT("PropertyWindow.ItalicFont") ); }
+	static FSlateFontInfo GetDetailFontItalic() { return FAppStyle::GetFontStyle( TEXT("PropertyWindow.ItalicFont") ); }
 	
 	/**
 	 * @return the parent detail view for this layout builder
 	 */
-	virtual const class IDetailsView* GetDetailsView() const = 0;
+	virtual const IDetailsView* GetDetailsView() const = 0;
+
+	/**
+	 * @return the parent detail view for this layout builder
+	 */
+	virtual IDetailsView* GetDetailsView() = 0;
 
 	/**
 	 * @return The base class of the objects being customized in this detail layout
@@ -70,11 +77,27 @@ public:
 	virtual const TArray< TWeakObjectPtr<UObject> >& GetSelectedObjects() const = 0;
 
 	/**
+	 * Get the root objects (of ObjectType) observed by this layout.  
+	 * This is not guaranteed to be the same as the objects customized by this builder.  See GetObjectsBeingCustomized for that.
+	 */
+	template <typename ObjectType = UObject>
+	TArray< TWeakObjectPtr<ObjectType> > GetSelectedObjectsOfType() const;
+
+	/**
 	 * Gets the current object(s) being customized by this builder
 	 *
 	 * If this is a sub-object customization it will return those sub objects.  Otherwise the root objects will be returned.
 	 */
 	virtual void GetObjectsBeingCustomized( TArray< TWeakObjectPtr<UObject> >& OutObjects ) const = 0;
+
+	/**
+	 * Gets the current object(s) being customized by this builder of ObjectType 
+	 *
+	 * If this is a sub-object customization it will return those sub objects.  Otherwise the root objects will be returned.
+	 * @return true if one or more objects of ObjectType were found.
+	 */
+	template <typename ObjectType = UObject>
+	TArray< TWeakObjectPtr<ObjectType> > GetObjectsOfTypeBeingCustomized() const;
 
 	/**
 	 * Gets the current struct(s) being customized by this builder
@@ -86,7 +109,7 @@ public:
 	/**
 	 *	@return the utilities various widgets need access to certain features of PropertyDetails
 	 */
-	virtual const TSharedRef< class IPropertyUtilities > GetPropertyUtilities() const = 0; 
+	virtual TSharedRef<IPropertyUtilities> GetPropertyUtilities() const = 0; 
 
 
 	/**
@@ -97,6 +120,16 @@ public:
 	 * @param CategoryType				Category type to define sort order.  Category display order is sorted by this type (optional)
 	 */
 	virtual IDetailCategoryBuilder& EditCategory(FName CategoryName, const FText& NewLocalizedDisplayName = FText::GetEmpty(), ECategoryPriority::Type CategoryType = ECategoryPriority::Default) = 0;
+
+	/**
+	* Edits an existing category or creates a new one
+	* If CategoryName is NAME_None, will enable access to properties without categories
+	* 
+	* @param CategoryName				The name of the category
+	* @param NewLocalizedDisplayName	The new display name of the category (optional)
+	* @param CategoryType				Category type to define sort order.  Category display order is sorted by this type (optional)
+	*/
+	virtual IDetailCategoryBuilder& EditCategoryAllowNone(FName CategoryName, const FText& NewLocalizedDisplayName = FText::GetEmpty(), ECategoryPriority::Type CategoryType = ECategoryPriority::Default) = 0;
 
 	/**
 	 * Gets the current set of existing category names. This includes both categories derived from properties and categories added via EditCategory.
@@ -152,10 +185,24 @@ public:
 	 * The property will remain in the default location but the widget or other attributes for the property can be changed 
 	 * Note This cannot be used to customize other customizations
 
-	 * @param InPropertyHandle	The handle to the property that you want to add to its own category.
+	 * @param InPropertyHandle	The handle to the property that you want to edit
 	 * @return					The property row to edit or nullptr if the property row does not exist
 	 */
 	virtual IDetailPropertyRow* EditDefaultProperty(TSharedPtr<IPropertyHandle> InPropertyHandle) = 0;
+
+	/**
+	 * Get the property row from the root of the details panel after it's been constructed, so this will work with default or custom 
+	 * properties
+	 * @param InPropertyHandle	The handle to the property that you want to edit
+	 * @return					The property row to edit or nullptr if the property row does not exist, which may happen if not 
+	 * constructed yet
+	 */
+	virtual IDetailPropertyRow* EditPropertyFromRoot(TSharedPtr<IPropertyHandle> InPropertyHandle) = 0;
+
+	/**
+	 * @return true if the category contains child rows. 
+	 */
+	virtual bool DoesCategoryHaveGeneratedChildren(FName CategoryName) = 0;
 
 	/**
 	 * Hides an entire category
@@ -250,4 +297,59 @@ public:
 	 * @param DetailLayoutDelegate	The delegate to call when querying for custom detail layouts for the classes properties
 	 */
 	virtual void RegisterInstancedCustomPropertyTypeLayout(FName PropertyTypeName, FOnGetPropertyTypeCustomizationInstance PropertyTypeLayoutDelegate, TSharedPtr<IPropertyTypeIdentifier> Identifier = nullptr) = 0;
+
+	/**
+	 * This function sets property paths to generate PropertyNodes.This improves the performance for cases where PropertyView is only showing a few properties of the object by not generating all other PropertyNodes
+	 *
+	 * @param InPropertyGenerationAllowListPaths Set of the property paths
+	 */
+	virtual void SetPropertyGenerationAllowListPaths(const TSet<FString>& InPropertyGenerationAllowListPaths) = 0;
+
+	/**
+	 * @return True if the property path is contained within our allowed paths
+	 */
+	virtual bool IsPropertyPathAllowed(const FString& InPath) const = 0;
 };
+
+template <typename ObjectType>
+TArray<TWeakObjectPtr<ObjectType>> IDetailLayoutBuilder::GetSelectedObjectsOfType() const
+{
+	TArray<TWeakObjectPtr<UObject>> SelectedObjects = GetSelectedObjects();
+	TArray<TWeakObjectPtr<ObjectType>> SelectedObjectsOfType;
+	Algo::TransformIf(
+		SelectedObjects,
+		SelectedObjectsOfType,
+		[](const TWeakObjectPtr<UObject>& InObj)
+		{
+			return InObj.IsValid() && InObj->IsA(ObjectType::StaticClass());			
+		},
+		[](const TWeakObjectPtr<UObject>& InObj)
+		{
+			return Cast<ObjectType>(InObj);			
+		});
+	
+	return SelectedObjectsOfType;
+}
+
+template <typename ObjectType>
+TArray<TWeakObjectPtr<ObjectType>> IDetailLayoutBuilder::GetObjectsOfTypeBeingCustomized() const
+{
+	TArray<TWeakObjectPtr<UObject>> ObjectsBeingCustomized;
+	GetObjectsBeingCustomized(ObjectsBeingCustomized);
+
+	TArray<TWeakObjectPtr<ObjectType>> ObjectsOfTypeBeingCustomized;
+
+	Algo::TransformIf(
+		ObjectsBeingCustomized,
+		ObjectsOfTypeBeingCustomized,
+		[](const TWeakObjectPtr<UObject>& InObj)
+		{
+			return InObj.IsValid() && InObj->IsA(ObjectType::StaticClass());			
+		},
+		[](const TWeakObjectPtr<UObject>& InObj)
+		{
+			return Cast<ObjectType>(InObj);			
+		});
+
+	return ObjectsOfTypeBeingCustomized;
+}

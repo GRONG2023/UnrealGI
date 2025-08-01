@@ -13,38 +13,36 @@ class AAIController;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FMoveTaskCompletedSignature, TEnumAsByte<EPathFollowingResult::Type>, Result, AAIController*, AIController);
 
-UCLASS()
-class AIMODULE_API UAITask_MoveTo : public UAITask
+UCLASS(MinimalAPI)
+class UAITask_MoveTo : public UAITask
 {
 	GENERATED_BODY()
 
 public:
-	UAITask_MoveTo(const FObjectInitializer& ObjectInitializer);
+	AIMODULE_API UAITask_MoveTo(const FObjectInitializer& ObjectInitializer);
 
 	/** tries to start move request and handles retry timer */
-	void ConditionalPerformMove();
+	AIMODULE_API void ConditionalPerformMove();
 
 	/** prepare move task for activation */
-	void SetUp(AAIController* Controller, const FAIMoveRequest& InMoveRequest);
+	AIMODULE_API void SetUp(AAIController* Controller, const FAIMoveRequest& InMoveRequest);
 
 	EPathFollowingResult::Type GetMoveResult() const { return MoveResult; }
 	bool WasMoveSuccessful() const { return MoveResult == EPathFollowingResult::Success; }
 	bool WasMovePartial() const { return Path.IsValid() && Path->IsPartial(); }
 
-	UFUNCTION(BlueprintCallable, Category = "AI|Tasks", meta = (AdvancedDisplay = "AcceptanceRadius,StopOnOverlap,AcceptPartialPath,bUsePathfinding,bUseContinuosGoalTracking,ProjectGoalOnNavigation", DefaultToSelf = "Controller", BlueprintInternalUseOnly = "TRUE", DisplayName = "Move To Location or Actor"))
-	static UAITask_MoveTo* AIMoveTo(AAIController* Controller, FVector GoalLocation, AActor* GoalActor = nullptr,
+	UFUNCTION(BlueprintCallable, Category = "AI|Tasks", meta = (AdvancedDisplay = "AcceptanceRadius,StopOnOverlap,AcceptPartialPath,bUsePathfinding,bUseContinuousGoalTracking,ProjectGoalOnNavigation,RequireNavigableEndLocation", DefaultToSelf = "Controller", BlueprintInternalUseOnly = "TRUE", DisplayName = "Move To Location or Actor"))
+	static AIMODULE_API UAITask_MoveTo* AIMoveTo(AAIController* Controller, FVector GoalLocation, AActor* GoalActor = nullptr,
 		float AcceptanceRadius = -1.f, EAIOptionFlag::Type StopOnOverlap = EAIOptionFlag::Default, EAIOptionFlag::Type AcceptPartialPath = EAIOptionFlag::Default,
-		bool bUsePathfinding = true, bool bLockAILogic = true, bool bUseContinuosGoalTracking = false, EAIOptionFlag::Type ProjectGoalOnNavigation = EAIOptionFlag::Default);
-
-	UE_DEPRECATED(4.12, "This function is now depreacted, please use version with FAIMoveRequest parameter")
-	void SetUp(AAIController* Controller, FVector GoalLocation, AActor* GoalActor = nullptr, float AcceptanceRadius = -1.f, bool bUsePathfinding = true, EAIOptionFlag::Type StopOnOverlap = EAIOptionFlag::Default, EAIOptionFlag::Type AcceptPartialPath = EAIOptionFlag::Default);
+		bool bUsePathfinding = true, bool bLockAILogic = true, bool bUseContinuousGoalTracking = false, EAIOptionFlag::Type ProjectGoalOnNavigation = EAIOptionFlag::Default,
+		EAIOptionFlag::Type RequireNavigableEndLocation = EAIOptionFlag::Default);
 
 	/** Allows custom move request tweaking. Note that all MoveRequest need to 
 	 *	be performed before PerformMove is called. */
 	FAIMoveRequest& GetMoveRequestRef() { return MoveRequest; }
 
 	/** Switch task into continuous tracking mode: keep restarting move toward goal actor. Only pathfinding failure or external cancel will be able to stop this task. */
-	void SetContinuousGoalTracking(bool bEnable);
+	AIMODULE_API void SetContinuousGoalTracking(bool bEnable);
 
 protected:
 	UPROPERTY(BlueprintAssignable)
@@ -78,33 +76,33 @@ protected:
 	TEnumAsByte<EPathFollowingResult::Type> MoveResult;
 	uint8 bUseContinuousTracking : 1;
 
-	virtual void Activate() override;
-	virtual void OnDestroy(bool bOwnerFinished) override;
+	AIMODULE_API virtual void Activate() override;
+	AIMODULE_API virtual void OnDestroy(bool bOwnerFinished) override;
 
-	virtual void Pause() override;
-	virtual void Resume() override;
+	AIMODULE_API virtual void Pause() override;
+	AIMODULE_API virtual void Resume() override;
 
 	/** finish task */
-	void FinishMoveTask(EPathFollowingResult::Type InResult);
+	AIMODULE_API void FinishMoveTask(EPathFollowingResult::Type InResult);
 
 	/** stores path and starts observing its events */
-	void SetObservedPath(FNavPathSharedPtr InPath);
+	AIMODULE_API void SetObservedPath(FNavPathSharedPtr InPath);
 
 	/** remove all delegates */
-	virtual void ResetObservers();
+	AIMODULE_API virtual void ResetObservers();
 
 	/** remove all timers */
-	virtual void ResetTimers();
+	AIMODULE_API virtual void ResetTimers();
 
 	/** tries to update invalidated path and handles retry timer */
-	void ConditionalUpdatePath();
+	AIMODULE_API void ConditionalUpdatePath();
 
 	/** start move request */
-	virtual void PerformMove();
+	AIMODULE_API virtual void PerformMove();
 
 	/** event from followed path */
-	virtual void OnPathEvent(FNavigationPath* InPath, ENavPathEvent::Type Event);
+	AIMODULE_API virtual void OnPathEvent(FNavigationPath* InPath, ENavPathEvent::Type Event);
 
 	/** event from path following */
-	virtual void OnRequestFinished(FAIRequestID RequestID, const FPathFollowingResult& Result);
+	AIMODULE_API virtual void OnRequestFinished(FAIRequestID RequestID, const FPathFollowingResult& Result);
 };

@@ -1,22 +1,52 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SBlueprintEditorSelectedDebugObjectWidget.h"
-#include "Framework/MultiBox/MultiBoxDefs.h"
-#include "Widgets/Text/STextBlock.h"
-#include "EngineGlobals.h"
+
+#include "Components/Widget.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/IndirectArray.h"
+#include "CoreTypes.h"
 #include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Editor/UnrealEdEngine.h"
+#include "Engine/Blueprint.h"
+#include "Engine/Engine.h"
+#include "Engine/EngineBaseTypes.h"
+#include "Engine/EngineTypes.h"
+#include "Engine/GameInstance.h"
+#include "Engine/Level.h"
+#include "Engine/World.h"
+#include "Framework/MultiBox/MultiBoxDefs.h"
+#include "GameFramework/Actor.h"
+#include "HAL/IConsoleManager.h"
+#include "IDocumentation.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "PreviewScene.h"
+#include "PropertyCustomizationHelpers.h"
+#include "SLevelOfDetailBranchNode.h"
+#include "SlotBase.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
 #include "UObject/UObjectHash.h"
 #include "UObject/UObjectIterator.h"
-#include "EditorStyleSet.h"
-#include "Editor/UnrealEdEngine.h"
 #include "UnrealEdGlobals.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "PropertyCustomizationHelpers.h"
-#include "Widgets/SToolTip.h"
-#include "IDocumentation.h"
-#include "SLevelOfDetailBranchNode.h"
 #include "Widgets/Input/STextComboBox.h"
-#include "Components/Widget.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SToolTip.h"
+#include "Widgets/SWidget.h"
+#include "Widgets/Text/STextBlock.h"
+
+class FTagMetaData;
+struct FGeometry;
 
 #define LOCTEXT_NAMESPACE "KismetToolbar"
 
@@ -35,7 +65,6 @@ void SBlueprintEditorSelectedDebugObjectWidget::Construct(const FArguments& InAr
 	LastObjectObserved = nullptr;
 
 	DebugWorldsComboBox = SNew(STextComboBox)
-		.ButtonStyle(FEditorStyle::Get(), "FlatButton.Light")
 		.ToolTip(IDocumentation::Get()->CreateToolTip(
 		LOCTEXT("BlueprintDebugWorldTooltip", "Select a world to debug, will filter what to debug if no specific object selected"),
 		nullptr,
@@ -45,10 +74,10 @@ void SBlueprintEditorSelectedDebugObjectWidget::Construct(const FArguments& InAr
 		.InitiallySelectedItem(GetDebugWorldName())
 		.Visibility(this, &SBlueprintEditorSelectedDebugObjectWidget::IsDebugWorldComboVisible)
 		.OnComboBoxOpening(this, &SBlueprintEditorSelectedDebugObjectWidget::GenerateDebugWorldNames, true)
-		.OnSelectionChanged(this, &SBlueprintEditorSelectedDebugObjectWidget::DebugWorldSelectionChanged);
+		.OnSelectionChanged(this, &SBlueprintEditorSelectedDebugObjectWidget::DebugWorldSelectionChanged)
+		.ContentPadding(FMargin(0.f, 4.f));
 
 	DebugObjectsComboBox = SNew(SComboBox<TSharedPtr<FBlueprintDebugObjectInstance>>)
-		.ButtonStyle(FEditorStyle::Get(), "FlatButton.Light")
 		.ToolTip(IDocumentation::Get()->CreateToolTip(
 		LOCTEXT("BlueprintDebugObjectTooltip", "Select an object to debug, if set to none will debug any object"),
 		nullptr,
@@ -59,6 +88,7 @@ void SBlueprintEditorSelectedDebugObjectWidget::Construct(const FArguments& InAr
 		.OnComboBoxOpening(this, &SBlueprintEditorSelectedDebugObjectWidget::GenerateDebugObjectInstances, true)
 		.OnSelectionChanged(this, &SBlueprintEditorSelectedDebugObjectWidget::DebugObjectSelectionChanged)
 		.OnGenerateWidget(this, &SBlueprintEditorSelectedDebugObjectWidget::CreateDebugObjectItemWidget)
+		.ContentPadding(FMargin(0.f, 4.f))
 		.AddMetaData<FTagMetaData>(TEXT("SelectDebugObjectCobmo"))
 		[
 			SNew(STextBlock)
@@ -116,15 +146,18 @@ const FString& SBlueprintEditorSelectedDebugObjectWidget::GetDebugAllWorldsStrin
 
 TSharedRef<SWidget> SBlueprintEditorSelectedDebugObjectWidget::OnGetActiveDetailSlotContent(bool bChangedToHighDetail)
 {
+	const TSharedRef<SWidget> BrowseButton = PropertyCustomizationHelpers::MakeBrowseButton(
+		FSimpleDelegate::CreateSP(this, &SBlueprintEditorSelectedDebugObjectWidget::SelectedDebugObject_OnClicked),
+		LOCTEXT("DebugSelectActor", "Select and frame the debug actor in the Level Editor."),
+		TAttribute<bool>::Create(TAttribute<bool>::FGetter::CreateSP(this, &SBlueprintEditorSelectedDebugObjectWidget::IsDebugObjectSelected))
+	);
 
-	const TSharedRef<SWidget> BrowseButton = PropertyCustomizationHelpers::MakeBrowseButton(FSimpleDelegate::CreateSP(this, &SBlueprintEditorSelectedDebugObjectWidget::SelectedDebugObject_OnClicked));
-	BrowseButton->SetVisibility(TAttribute<EVisibility>::Create(TAttribute<EVisibility>::FGetter::CreateSP(this, &SBlueprintEditorSelectedDebugObjectWidget::IsSelectDebugObjectButtonVisible)));
-	BrowseButton->SetToolTipText(LOCTEXT("DebugSelectActor", "Select this Actor in level"));
 
 	TSharedRef<SWidget> DebugObjectSelectionWidget =
 		SNew(SHorizontalBox)
 		+ SHorizontalBox::Slot()
 		.AutoWidth()
+		.Padding(FMargin(8.0f, 0.0f, 0.0f, 0.0f))
 		[
 			DebugObjectsComboBox.ToSharedRef()
 		]
@@ -132,56 +165,28 @@ TSharedRef<SWidget> SBlueprintEditorSelectedDebugObjectWidget::OnGetActiveDetail
 		.AutoWidth()
 		.HAlign(HAlign_Right)
 		.VAlign(VAlign_Center)
-		.Padding(2.0f)
+		.Padding(4.0f)
 		[
 			BrowseButton
 		];
 
-	if (!bChangedToHighDetail)
-	{
+
 		return
 			SNew(SHorizontalBox)
 			+ SHorizontalBox::Slot()
+			.VAlign(VAlign_Center)
+			.Padding(0.0f)
 			.AutoWidth()
 			[
 				DebugWorldsComboBox.ToSharedRef()
 			]
 			+ SHorizontalBox::Slot()
+			.VAlign(VAlign_Center)
+			.Padding(0.0f)
 			.AutoWidth()
 			[
 				DebugObjectSelectionWidget
 			];
-	}
-	else
-	{
-		return
-			SNew(SVerticalBox)
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.VAlign(VAlign_Bottom)
-			[
-				// Vertical Layout when using normal size icons
-				SNew(SVerticalBox)
-				+ SVerticalBox::Slot()
-				.AutoHeight()
-				[
-					DebugWorldsComboBox.ToSharedRef()
-				]
-				+ SVerticalBox::Slot()
-				.AutoHeight()
-				[
-					DebugObjectSelectionWidget
-				]
-			]
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.HAlign(HAlign_Center)
-			.Padding(2.0f)
-			[
-				SNew(STextBlock)
-				.Text(LOCTEXT("DebugSelectTitle", "Debug Filter"))
-			];
-	}
 }
 
 void SBlueprintEditorSelectedDebugObjectWidget::OnRefresh()
@@ -365,7 +370,7 @@ void SBlueprintEditorSelectedDebugObjectWidget::GenerateDebugObjectInstances(boo
 				UObject* ObjOuter = TestObject;
 				do
 				{
-					bPendingKill = ObjOuter->IsPendingKill();
+					bPendingKill = !IsValid(ObjOuter);
 					ObjOuter = ObjOuter->GetOuter();
 				} while (!bPendingKill && ObjOuter != nullptr);
 
@@ -420,7 +425,7 @@ void SBlueprintEditorSelectedDebugObjectWidget::GenerateDebugObjectInstances(boo
 					continue;
 				}
 
-				const bool bPassesFlags = !TestObject->HasAnyFlags(RF_ClassDefaultObject) && !TestObject->IsPendingKill();
+				const bool bPassesFlags = !TestObject->HasAnyFlags(RF_ClassDefaultObject) && IsValid(TestObject);
 				const bool bGeneratedByAnyBlueprint = TestObject->GetClass()->ClassGeneratedBy != nullptr;
 				const bool bGeneratedByThisBlueprint = bGeneratedByAnyBlueprint && GetBlueprintObj()->GeneratedClass && TestObject->IsA(GetBlueprintObj()->GeneratedClass);
 
@@ -577,22 +582,27 @@ void SBlueprintEditorSelectedDebugObjectWidget::DebugObjectSelectionChanged(TSha
 	{
 		UObject* DebugObj = NewSelection->ObjectPtr.Get();
 		GetBlueprintObj()->SetObjectBeingDebugged(DebugObj);
+
+		if (TSharedPtr<FBlueprintEditor> SharedBlueprintEditor = BlueprintEditor.Pin())
+		{
+			SharedBlueprintEditor->RefreshMyBlueprint();
+		}
 		
 		LastObjectObserved = DebugObj;
 	}
 }
 
-EVisibility SBlueprintEditorSelectedDebugObjectWidget::IsSelectDebugObjectButtonVisible() const
+bool SBlueprintEditorSelectedDebugObjectWidget::IsDebugObjectSelected() const
 {
 	check(GetBlueprintObj());
 	if (UObject* DebugObj = GetBlueprintObj()->GetObjectBeingDebugged())
 	{
 		if (AActor* Actor = Cast<AActor>(DebugObj))
 		{
-			return EVisibility::Visible;
+			return true;
 		}
 	}
-	return EVisibility::Collapsed;
+	return false;
 }
 
 void SBlueprintEditorSelectedDebugObjectWidget::SelectedDebugObject_OnClicked()

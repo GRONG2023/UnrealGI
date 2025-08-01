@@ -1,179 +1,96 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SceneOutlinerActorInfoColumn.h"
+#include "Engine/Blueprint.h"
 #include "Modules/ModuleManager.h"
 #include "UObject/Package.h"
 #include "Misc/PackageName.h"
+#include "Misc/StringBuilder.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Views/SListView.h"
-#include "EditorStyleSet.h"
-#include "ISceneOutliner.h"
-
-
+#include "Styling/AppStyle.h"
 #include "EditorClassUtils.h"
 #include "SortHelper.h"
+#include "ISceneOutliner.h"
+#include "ActorTreeItem.h"
+#include "ActorDescTreeItem.h"
+#include "ComponentTreeItem.h"
+#include "FolderTreeItem.h"
+#include "LevelTreeItem.h"
+#include "SceneOutlinerHelpers.h"
+#include "WorldTreeItem.h"
+#include "WorldPartition/DataLayer/DataLayerInstance.h"
+#include "WorldPartition/DataLayer/WorldDataLayers.h"
+#include "WorldPartition/WorldPartitionActorDescInstance.h"
+#include "Styling/StyleColors.h"
 
 #define LOCTEXT_NAMESPACE "SceneOutlinerActorInfoColumn"
 
-namespace SceneOutliner
+struct FGetInfo
 {
 
-struct FGetInfo : TTreeItemGetter<FString>
-{
-	ECustomColumnMode::Type CurrentMode;
-
-	FGetInfo(ECustomColumnMode::Type InCurrentMode) : CurrentMode(InCurrentMode) {}
-
-	virtual FString Get(const FActorTreeItem& ActorItem) const override
+	FString operator()(const ISceneOutlinerTreeItem& Item) const
 	{
-		AActor* Actor = ActorItem.Actor.Get();
-		if (!Actor)
+		if (const FActorTreeItem* ActorItem = Item.CastTo<FActorTreeItem>())
 		{
-			return FString();
-		}
-
-		switch(CurrentMode)
-		{
-		case ECustomColumnMode::Class:
-			return Actor->GetClass()->GetName();
-
-		case ECustomColumnMode::Level:
-			return FPackageName::GetShortName(Actor->GetOutermost()->GetName());
-
-		case ECustomColumnMode::Socket:
-			return Actor->GetAttachParentSocketName().ToString();
-
-		case ECustomColumnMode::InternalName:
-			return Actor->GetFName().ToString();
-
-		case ECustomColumnMode::UncachedLights:
-			return FString::Printf(TEXT("%7d"), Actor->GetNumUncachedStaticLightingInteractions());
-
-		case ECustomColumnMode::Layer:
+			AActor* Actor = ActorItem->Actor.Get();
+			if (!Actor)
 			{
-				FString Result;
-				for (const auto& Layer : Actor->Layers)
-				{
-					if (Result.Len())
-					{
-						Result += TEXT(", ");
-					}
-
-					Result += Layer.ToString();
-				}
-				return Result;
+				return FString();
 			}
 
-		default:
-			return FString();
+			return Actor->GetClass()->GetName();
 		}
-	}
-
-	virtual FString Get(const FFolderTreeItem&) const override
-	{
-		switch(CurrentMode)
+		else if (Item.IsA<FFolderTreeItem>())
 		{
-		case ECustomColumnMode::Class:
 			return LOCTEXT("FolderTypeName", "Folder").ToString();
-
-		default:
-			return FString();
 		}
-	}
-
-	virtual FString Get(const FWorldTreeItem&) const override
-	{
-		switch(CurrentMode)
+		else if (Item.IsA<FWorldTreeItem>())
 		{
-		case ECustomColumnMode::Class:
 			return LOCTEXT("WorldTypeName", "World").ToString();
-
-		default:
-			return FString();
 		}
-	}
-
-	virtual FString Get(const FComponentTreeItem& ComponentItem) const override
-	{
-		UActorComponent* Component = ComponentItem.Component.Get();
-		if (!Component)
+		else if (Item.IsA<FLevelTreeItem>())
 		{
-			return FString();
+			return LOCTEXT("LevelTypeName", "Level").ToString();
 		}
-
-		switch (CurrentMode)
+		else if (const FComponentTreeItem* ComponentItem = Item.CastTo<FComponentTreeItem>())
 		{
-		case ECustomColumnMode::Class:
 			return LOCTEXT("ComponentTypeName", "Component").ToString();
-
-		case ECustomColumnMode::InternalName:
-			return Component->GetFName().ToString();
-
-		default:
-			return FString();
 		}
-	}
-
-	virtual FString Get(const FSubComponentTreeItem& Item) const override
-	{
-		switch (CurrentMode)
+		else if (const FActorDescTreeItem* ActorDescItem = Item.CastTo<FActorDescTreeItem>())
 		{
-		case ECustomColumnMode::Class:
-		case ECustomColumnMode::InternalName:
-			return Item.GetTypeName();
-
-		default:
-			return FString();
+			if (const FWorldPartitionActorDescInstance* ActorDescInstance = *ActorDescItem->ActorDescHandle)
+			{
+				return ActorDescInstance->GetDisplayClassName().ToString();
+			}
 		}
-	}
 
+		return FString();
+	}
 };
 
-
-TArray< TSharedPtr< ECustomColumnMode::Type > > FActorInfoColumn::ModeOptions;
-
-FActorInfoColumn::FActorInfoColumn( ISceneOutliner& Outliner, ECustomColumnMode::Type InDefaultCustomColumnMode )
-	: CurrentMode( InDefaultCustomColumnMode )
-	, SceneOutlinerWeak( StaticCastSharedRef<ISceneOutliner>(Outliner.AsShared()) )
+FTypeInfoColumn::FTypeInfoColumn( ISceneOutliner& Outliner)
+	: SceneOutlinerWeak( StaticCastSharedRef<ISceneOutliner>(Outliner.AsShared()) )
 {
 
 }
 
 
-FName FActorInfoColumn::GetColumnID()
+FName FTypeInfoColumn::GetColumnID()
 {
 	return GetID();
 }
 
 
-SHeaderRow::FColumn::FArguments FActorInfoColumn::ConstructHeaderRowColumn()
+SHeaderRow::FColumn::FArguments FTypeInfoColumn::ConstructHeaderRowColumn()
 {
-	if( ModeOptions.Num() == 0 )
-	{
-		for( ECustomColumnMode::Type CurMode : TEnumRange<ECustomColumnMode::Type>() )
-		{
-			ModeOptions.Add( MakeShareable( new ECustomColumnMode::Type( CurMode ) ) );
-		}
-	}
-
 	/** Customizable actor data column */
 	return SHeaderRow::Column( GetColumnID() )
 		.FillWidth(2)
-		.HeaderComboVisibility(EHeaderComboVisibility::Ghosted)
-		.MenuContent()
-		[
-			SNew(SBorder)
-			.Padding(FMargin(5))
-			.BorderImage(FEditorStyle::GetBrush("Menu.Background"))
-			[
-				SNew(SListView<TSharedPtr<ECustomColumnMode::Type>>)
-				.ListItemsSource(&ModeOptions)
-				.SelectionMode(ESelectionMode::Single)
-				.OnGenerateRow( this, &FActorInfoColumn::MakeComboButtonItemWidget )
-				.OnSelectionChanged( this, &FActorInfoColumn::OnModeChanged )
-			]
-		]
+		.HeaderComboVisibility(EHeaderComboVisibility::OnHover)
+		.DefaultTooltip(MakeComboToolTipText())
 		.HeaderContent()
 		[
 			SNew( SHorizontalBox )
@@ -182,12 +99,12 @@ SHeaderRow::FColumn::FArguments FActorInfoColumn::ConstructHeaderRowColumn()
 			.VAlign(VAlign_Center)
 			[
 				SNew(STextBlock)
-				.Text( this, &FActorInfoColumn::GetSelectedMode )
+				.Text( this, &FTypeInfoColumn::GetSelectedMode )
 			]
 		];
 }
 
-const TSharedRef< SWidget > FActorInfoColumn::ConstructRowWidget( FTreeItemRef TreeItem, const STableRow<FTreeItemPtr>& Row )
+const TSharedRef< SWidget > FTypeInfoColumn::ConstructRowWidget( FSceneOutlinerTreeItemRef TreeItem, const STableRow<FSceneOutlinerTreeItemPtr>& Row )
 {
 	auto SceneOutliner = SceneOutlinerWeak.Pin();
 	check(SceneOutliner.IsValid());
@@ -195,35 +112,37 @@ const TSharedRef< SWidget > FActorInfoColumn::ConstructRowWidget( FTreeItemRef T
 	TSharedRef<SHorizontalBox> HorizontalBox = SNew(SHorizontalBox);
 
 	TSharedRef<STextBlock> MainText = SNew( STextBlock )
-		.Text( this, &FActorInfoColumn::GetTextForItem, TWeakPtr<ITreeItem>(TreeItem) ) 
+		.Text( this, &FTypeInfoColumn::GetTextForItem, TWeakPtr<ISceneOutlinerTreeItem>(TreeItem) )
 		.HighlightText( SceneOutliner->GetFilterHighlightText() )
 		.ColorAndOpacity( FSlateColor::UseSubduedForeground() );
 
 	HorizontalBox->AddSlot()
 	.AutoWidth()
 	.VAlign(VAlign_Center)
+	.Padding(8, 0, 0, 0)
 	[
 		MainText
 	];
 
-	auto Hyperlink = ConstructClassHyperlink(*TreeItem);
+	TSharedPtr<SWidget> Hyperlink = ConstructClassHyperlink(*TreeItem);
 	if (Hyperlink.IsValid())
 	{
 		// If we got a hyperlink, disable hide default text, and show the hyperlink
-		MainText->SetVisibility(TAttribute<EVisibility>::Create(TAttribute<EVisibility>::FGetter::CreateSP(this, &FActorInfoColumn::GetColumnDataVisibility, false)));
-		Hyperlink->SetVisibility(TAttribute<EVisibility>::Create(TAttribute<EVisibility>::FGetter::CreateSP(this, &FActorInfoColumn::GetColumnDataVisibility, true)));
+		MainText->SetVisibility(TAttribute<EVisibility>::Create(TAttribute<EVisibility>::FGetter::CreateSP(this, &FTypeInfoColumn::GetColumnDataVisibility, false)));
+		Hyperlink->SetVisibility(TAttribute<EVisibility>::Create(TAttribute<EVisibility>::FGetter::CreateSP(this, &FTypeInfoColumn::GetColumnDataVisibility, true)));
 
 		HorizontalBox->AddSlot()
 		.VAlign(VAlign_Center)
 		.AutoWidth()
+		.Padding(8, 0, 0, 0)
 		[
 			// Make sure that the hyperlink shows as black (by multiplying black * desired color) when selected so it is readable against the orange background even if blue/green/etc... normally
 			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("NoBorder"))
-			.ColorAndOpacity_Static([](TWeakPtr<const STableRow<FTreeItemPtr>> WeakRow)->FLinearColor{
+			.BorderImage(FAppStyle::GetBrush("NoBorder"))
+			.ForegroundColor_Static([](TWeakPtr<const STableRow<FSceneOutlinerTreeItemPtr>> WeakRow)->FSlateColor{
 				auto TableRow = WeakRow.Pin();
-				return TableRow.IsValid() && TableRow->IsSelected() ? FLinearColor::Black : FLinearColor::White;
-			}, TWeakPtr<const STableRow<FTreeItemPtr>>(StaticCastSharedRef<const STableRow<FTreeItemPtr>>(Row.AsShared())))
+				return TableRow.IsValid() && TableRow->IsSelected() ? FStyleColors::ForegroundHover : FSlateColor::UseStyle();
+			}, TWeakPtr<const STableRow<FSceneOutlinerTreeItemPtr>>(StaticCastSharedRef<const STableRow<FSceneOutlinerTreeItemPtr>>(Row.AsShared())))
 			[
 				Hyperlink.ToSharedRef()
 			]
@@ -233,61 +152,23 @@ const TSharedRef< SWidget > FActorInfoColumn::ConstructRowWidget( FTreeItemRef T
 	return HorizontalBox;
 }
 
-TSharedPtr<SWidget> FActorInfoColumn::ConstructClassHyperlink( ITreeItem& TreeItem )
+TSharedPtr<SWidget> FTypeInfoColumn::ConstructClassHyperlink( ISceneOutlinerTreeItem& TreeItem )
 {
-	struct FConstructHyperlink : TTreeItemGetter<TSharedPtr<SWidget>>
+	if (const FActorTreeItem* ActorItem = TreeItem.CastTo<FActorTreeItem>())
 	{
-		TSharedPtr<SWidget> Get(const FActorTreeItem& ActorItem) const override
+		if (AActor* Actor = ActorItem->Actor.Get())
 		{
-			if (AActor* Actor = ActorItem.Actor.Get())
-			{
-				if (UClass* ActorClass = Actor->GetClass())
-				{
-					// Always show blueprints
-					const bool bIsBlueprintClass = UBlueprint::GetBlueprintFromClass(ActorClass) != nullptr;
-
-					// Also show game or game plugin native classes (but not engine classes as that makes the scene outliner pretty noisy)
-					bool bIsGameClass = false;
-					if (!bIsBlueprintClass)
-					{
-						UPackage* Package = ActorClass->GetOutermost();
-						const FString ModuleName = FPackageName::GetShortName(Package->GetFName());
-
-						FModuleStatus PackageModuleStatus;
-						if (FModuleManager::Get().QueryModule(*ModuleName, /*out*/ PackageModuleStatus))
-						{
-							bIsGameClass = PackageModuleStatus.bIsGameModule;
-						}
-					}
-
-					if (bIsBlueprintClass || bIsGameClass)
-					{
-						return FEditorClassUtils::GetSourceLink(ActorClass, Actor);
-					}
-				}
-			}
-
-			return nullptr;
-		}
-	};
-
-	return TreeItem.Get(FConstructHyperlink());
-}
-
-void FActorInfoColumn::PopulateSearchStrings( const ITreeItem& Item, TArray< FString >& OutSearchStrings ) const
-{
-	{
-		FString String = Item.Get(FGetInfo(CurrentMode));
-		if (String.Len())
-		{
-			OutSearchStrings.Add(String);
+			return SceneOutliner::FSceneOutlinerHelpers::GetClassHyperlink(Actor);
 		}
 	}
 
-	// We always add the class
-	if (CurrentMode != ECustomColumnMode::Class)
+	return nullptr;
+}
+
+void FTypeInfoColumn::PopulateSearchStrings( const ISceneOutlinerTreeItem& Item, TArray< FString >& OutSearchStrings ) const
+{
 	{
-		FString String = Item.Get(FGetInfo(ECustomColumnMode::Class));
+		FString String = FGetInfo()(Item);
 		if (String.Len())
 		{
 			OutSearchStrings.Add(String);
@@ -295,152 +176,46 @@ void FActorInfoColumn::PopulateSearchStrings( const ITreeItem& Item, TArray< FSt
 	}
 }
 
-bool FActorInfoColumn::SupportsSorting() const
+bool FTypeInfoColumn::SupportsSorting() const
 {
-	return CurrentMode != ECustomColumnMode::None;
+	return true;
 }
 
-void FActorInfoColumn::SortItems(TArray<FTreeItemPtr>& RootItems, const EColumnSortMode::Type SortMode) const
+void FTypeInfoColumn::SortItems(TArray<FSceneOutlinerTreeItemPtr>& RootItems, const EColumnSortMode::Type SortMode) const
 {
-	FSortHelper<FString>()
-		.Primary(FGetInfo(CurrentMode), SortMode)
+	FSceneOutlinerSortHelper<FString>()
+		.Primary(FGetInfo(), SortMode)
 		.Sort(RootItems);
 }
 
-void FActorInfoColumn::OnModeChanged( TSharedPtr< ECustomColumnMode::Type > NewSelection, ESelectInfo::Type /*SelectInfo*/ )
+EVisibility FTypeInfoColumn::GetColumnDataVisibility( bool bIsClassHyperlink ) const
 {
-	CurrentMode = *NewSelection;
-
-	// Refresh and refilter the list
-	SceneOutlinerWeak.Pin()->Refresh();
-	FSlateApplication::Get().DismissAllMenus();
+	return bIsClassHyperlink ? EVisibility::Visible : EVisibility::Collapsed;
 }
 
-EVisibility FActorInfoColumn::GetColumnDataVisibility( bool bIsClassHyperlink ) const
-{
-	if ( CurrentMode == ECustomColumnMode::Class )
-	{
-		return bIsClassHyperlink ? EVisibility::Visible : EVisibility::Collapsed;
-	}
-	else
-	{
-		return bIsClassHyperlink ? EVisibility::Collapsed : EVisibility::Visible;
-	}
-}
-
-FText FActorInfoColumn::GetTextForItem( TWeakPtr<ITreeItem> TreeItem ) const
+FText FTypeInfoColumn::GetTextForItem( TWeakPtr<ISceneOutlinerTreeItem> TreeItem ) const
 {
 	auto Item = TreeItem.Pin();
-	return Item.IsValid() ? FText::FromString(Item->Get(FGetInfo(CurrentMode))) : FText::GetEmpty();
+	return Item.IsValid() ? FText::FromString(FGetInfo()(*Item)) : FText::GetEmpty();
 }
 
-FText FActorInfoColumn::GetSelectedMode() const
+FText FTypeInfoColumn::GetSelectedMode() const
 {
-	if (CurrentMode == ECustomColumnMode::None)
-	{
-		return FText();
-	}
-
-	return MakeComboText(CurrentMode);
+	return MakeComboText();
 }
 
-FText FActorInfoColumn::MakeComboText( const ECustomColumnMode::Type& Mode ) const
+FText FTypeInfoColumn::MakeComboText() const
 {
-	FText ModeName;
-
-	switch( Mode )
-	{
-	case ECustomColumnMode::None:
-		ModeName = LOCTEXT("CustomColumnMode_None", "None");
-		break;
-
-	case ECustomColumnMode::Class:
-		ModeName = LOCTEXT("CustomColumnMode_Class", "Type");
-		break;
-
-	case ECustomColumnMode::Level:
-		ModeName = LOCTEXT("CustomColumnMode_Level", "Level");
-		break;
-
-	case ECustomColumnMode::Layer:
-		ModeName = LOCTEXT("CustomColumnMode_Layer", "Layer");
-		break;
-
-	case ECustomColumnMode::Socket:
-		ModeName = LOCTEXT("CustomColumnMode_Socket", "Socket");
-		break;
-
-	case ECustomColumnMode::InternalName:
-		ModeName = LOCTEXT("CustomColumnMode_InternalName", "ID Name");
-		break;
-
-	case ECustomColumnMode::UncachedLights:
-		ModeName = LOCTEXT("CustomColumnMode_UncachedLights", "# Uncached Lights");
-		break;
-
-	default:
-		ensure(0);
-		break;
-	}
+	FText ModeName = LOCTEXT("CustomColumnMode_Class", "Type");
 
 	return ModeName;
 }
 
 
-FText FActorInfoColumn::MakeComboToolTipText( const ECustomColumnMode::Type& Mode )
+FText FTypeInfoColumn::MakeComboToolTipText() const
 {
-	FText ToolTipText;
-
-	switch( Mode )
-	{
-	case ECustomColumnMode::None:
-		ToolTipText = LOCTEXT("CustomColumnModeToolTip_None", "Hides all extra actor info");
-		break;
-
-	case ECustomColumnMode::Class:
-		ToolTipText = LOCTEXT("CustomColumnModeToolTip_Class", "Displays the name of each actor's type");
-		break;
-
-	case ECustomColumnMode::Level:
-		ToolTipText = LOCTEXT("CustomColumnModeToolTip_Level", "Displays the level each actor is in, and allows you to search by level name");
-		break;
-
-	case ECustomColumnMode::Layer:
-		ToolTipText = LOCTEXT("CustomColumnModeToolTip_Layer", "Displays the layer each actor is in, and allows you to search by layer name");
-		break;
-
-	case ECustomColumnMode::Socket:
-		ToolTipText = LOCTEXT("CustomColumnModeToolTip_Socket", "Shows the socket the actor is attached to, and allows you to search by socket name");
-		break;
-
-	case ECustomColumnMode::InternalName:
-		ToolTipText = LOCTEXT("CustomColumnModeToolTip_InternalName", "Shows the internal name of the actor (for diagnostics)");
-		break;
-
-	case ECustomColumnMode::UncachedLights:
-		ToolTipText = LOCTEXT("CustomColumnModeToolTip_UncachedLights", "Shows the number of uncached static lights (missing in lightmap)");
-		break;
-
-	default:
-		ensure(0);
-		break;
-	}
-
+	FText ToolTipText = LOCTEXT("CustomColumnModeToolTip_Class", "Displays the name of each actor's type");
 	return ToolTipText;
 }
-
-
-TSharedRef< ITableRow > FActorInfoColumn::MakeComboButtonItemWidget( TSharedPtr< ECustomColumnMode::Type > Mode, const TSharedRef<STableViewBase>& Owner )
-{
-	return
-		SNew( STableRow< TSharedPtr<ECustomColumnMode::Type> >, Owner )
-		[
-			SNew( STextBlock )
-			.Text( MakeComboText( *Mode ) )
-			.ToolTipText( MakeComboToolTipText( *Mode ) )
-		];
-}
-
-}		// namespace SceneOutliner
 
 #undef LOCTEXT_NAMESPACE

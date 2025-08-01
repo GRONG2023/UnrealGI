@@ -1,19 +1,34 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SVerbChoiceDialog.h"
+
+#include "Containers/UnrealString.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
 #include "Fonts/SlateFontInfo.h"
+#include "HAL/PlatformApplicationMisc.h"
+#include "HAL/PlatformMisc.h"
+#include "Input/Events.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/BasicLayoutWidgetSlot.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "SlateOptMacros.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Types/SlateEnums.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SHyperlink.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SScrollBox.h"
+#include "Widgets/Layout/SUniformGridPanel.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SWindow.h"
-#include "SlateOptMacros.h"
-#include "Widgets/Layout/SBorder.h"
 #include "Widgets/Text/STextBlock.h"
-#include "Widgets/Layout/SUniformGridPanel.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Layout/SScrollBox.h"
-#include "EditorStyleSet.h"
-#include "Editor.h"
-#include "Widgets/Input/SHyperlink.h"
-#include "HAL/PlatformApplicationMisc.h"
+
+struct FGeometry;
 
 int32 SVerbChoiceDialog::ShowModal(const FText& InTitle, const FText& InText, const TArray<FText>& InButtons)
 {
@@ -52,18 +67,18 @@ void SVerbChoiceDialog::Construct( const FArguments& InArgs )
 	ParentWindow->SetWidgetToFocusOnActivate(SharedThis(this));
 	Response = EAppReturnType::Cancel;
 
-	FSlateFontInfo MessageFont( FEditorStyle::GetFontStyle("StandardDialog.LargeFont"));
+	FSlateFontInfo MessageFont( FAppStyle::GetFontStyle("StandardDialog.LargeFont"));
 	Message = InArgs._Message;
 	Hyperlinks = InArgs._Hyperlinks;
 	Buttons = InArgs._Buttons;
 	
 	TSharedPtr<SUniformGridPanel> ButtonBox;
-	TSharedPtr<SUniformGridPanel> HyperlinksBox;
+	TSharedPtr<SHorizontalBox> HyperlinksBox;
 
 	this->ChildSlot
 		[	
 			SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 				[
 					SNew(SVerticalBox)
 
@@ -91,16 +106,31 @@ void SVerbChoiceDialog::Construct( const FArguments& InArgs )
 						[
 							SNew(SHorizontalBox)
 
+							+SHorizontalBox::Slot()
+								.AutoWidth()
+								.HAlign(HAlign_Left)
+								.VAlign(VAlign_Center)
+								.Padding(FMargin(12.0f, 0.f, 9.0f, 0.f))
+								[
+									SNew(SButton)
+									.ButtonStyle(FAppStyle::Get(), "SimpleButton")
+									.OnClicked(this, &SVerbChoiceDialog::HandleCopyMessageButtonClicked)
+									.ToolTipText(NSLOCTEXT("SVerbChoiceDialog", "CopyMessageTooltip", "Copy the text in this message to the clipboard (CTRL+C)"))
+									.ContentPadding(2.f)
+									.Content()
+									[
+										SNew(SImage)
+										.Image(FAppStyle::Get().GetBrush("Icons.Clipboard"))
+										.ColorAndOpacity(FSlateColor::UseForeground())
+									]
+								]
+
 							+ SHorizontalBox::Slot()
 								.FillWidth(1.0f)
 								.HAlign(HAlign_Left)
 								.VAlign(VAlign_Center)
-								.Padding(5.0f)
 								[
-									SAssignNew( HyperlinksBox, SUniformGridPanel )
-										.SlotPadding(FEditorStyle::GetMargin("StandardDialog.SlotPadding"))
-										.MinDesiredSlotWidth(FEditorStyle::GetFloat("StandardDialog.MinDesiredSlotWidth"))
-										.MinDesiredSlotHeight(FEditorStyle::GetFloat("StandardDialog.MinDesiredSlotHeight"))
+									SAssignNew( HyperlinksBox, SHorizontalBox )
 								]
 
 							+ SHorizontalBox::Slot()
@@ -110,25 +140,20 @@ void SVerbChoiceDialog::Construct( const FArguments& InArgs )
 								.Padding(5.0f)
 								[
 									SAssignNew( ButtonBox, SUniformGridPanel )
-										.SlotPadding(FEditorStyle::GetMargin("StandardDialog.SlotPadding"))
-										.MinDesiredSlotWidth(FEditorStyle::GetFloat("StandardDialog.MinDesiredSlotWidth"))
-										.MinDesiredSlotHeight(FEditorStyle::GetFloat("StandardDialog.MinDesiredSlotHeight"))
+										.SlotPadding(FAppStyle::GetMargin("StandardDialog.SlotPadding"))
+										.MinDesiredSlotWidth(FAppStyle::GetFloat("StandardDialog.MinDesiredSlotWidth"))
+										.MinDesiredSlotHeight(FAppStyle::GetFloat("StandardDialog.MinDesiredSlotHeight"))
 								]
 						]
 				]
 		];
 
-	HyperlinksBox->AddSlot(0, 0)
-		[
-			SNew(SHyperlink)
-				.OnNavigate(this, &SVerbChoiceDialog::HandleCopyMessageHyperlinkNavigate)
-				.Text( NSLOCTEXT("SVerbChoiceDialog", "CopyMessageHyperlink", "Copy Message") )
-				.ToolTipText( NSLOCTEXT("SVerbChoiceDialog", "CopyMessageTooltip", "Copy the text in this message to the clipboard (CTRL+C)") )
-		];
-
 	for(int32 Idx = 0; Idx < Hyperlinks.Get().Num(); Idx++)
 	{
-		HyperlinksBox->AddSlot(Idx + 1, 0)
+		HyperlinksBox->AddSlot()
+			.AutoWidth()
+			.HAlign(HAlign_Left)
+			.Padding(FAppStyle::GetMargin("StandardDialog.SlotPadding"))
 			[
 				SNew(SHyperlink)
 					.Text( Hyperlinks.Get()[Idx] )
@@ -143,7 +168,7 @@ void SVerbChoiceDialog::Construct( const FArguments& InArgs )
 				SNew( SButton )
 				.Text( Buttons.Get()[Idx] )
 				.OnClicked( this, &SVerbChoiceDialog::HandleButtonClicked, Idx )
-				.ContentPadding(FEditorStyle::GetMargin("StandardDialog.ContentPadding"))
+				.ContentPadding(FAppStyle::GetMargin("StandardDialog.ContentPadding"))
 				.HAlign(HAlign_Center)
 			];
 	}
@@ -179,9 +204,10 @@ void SVerbChoiceDialog::CopyMessageToClipboard( )
 	FPlatformApplicationMisc::ClipboardCopy( *Message.Get().ToString() );
 }
 
-void SVerbChoiceDialog::HandleCopyMessageHyperlinkNavigate( )
+FReply SVerbChoiceDialog::HandleCopyMessageButtonClicked( )
 {
 	CopyMessageToClipboard();
+	return FReply::Handled();
 }
 
 void SVerbChoiceDialog::HandleHyperlinkClicked( int32 InResponse )

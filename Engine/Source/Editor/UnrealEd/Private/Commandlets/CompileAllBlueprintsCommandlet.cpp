@@ -2,7 +2,7 @@
 
 #include "Commandlets/CompileAllBlueprintsCommandlet.h"
 
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Kismet2/CompilerResultsLog.h"
 #include "EngineUtils.h"
 #include "ISourceControlModule.h"
@@ -22,7 +22,7 @@ UCompileAllBlueprintsCommandlet::UCompileAllBlueprintsCommandlet(const FObjectIn
 	bCookedOnly = false;
 	bDirtyOnly = false;
 	bSimpleAssetList = false;
-	BlueprintBaseClassName = UBlueprint::StaticClass()->GetFName();
+	BlueprintBaseClassName = UBlueprint::StaticClass()->GetClassPathName();
 
 	TotalNumFailedLoads = 0;
 	TotalNumFatalIssues = 0;
@@ -75,16 +75,18 @@ void UCompileAllBlueprintsCommandlet::InitCommandLine(const FString& Params)
 		ParseIgnoreFolders(AllIgnoreFolders);
 	}
 
-	WhitelistFiles.Empty();
-	if (SwitchParams.Contains(TEXT("WhitelistFile")))
+	FileAllowList.Empty();
+	if (SwitchParams.Contains(TEXT("AllowListFile")))
 	{
-		const FString& WhitelistFullPath = SwitchParams[TEXT("WhitelistFile")];
-		ParseWhitelist(WhitelistFullPath);
+		const FString& ListFullPath = SwitchParams[TEXT("AllowListFile")];
+		ParseAllowList(ListFullPath);
 	}
 
 	if (SwitchParams.Contains(TEXT("BlueprintBaseClass")))
 	{
-		BlueprintBaseClassName = *SwitchParams[TEXT("BlueprintBaseClass")];
+		FString BlueprintBaseClassParam = *SwitchParams[TEXT("BlueprintBaseClass")];
+		BlueprintBaseClassName = UClass::TryConvertShortTypeNameToPathName<UClass>(BlueprintBaseClassParam, ELogVerbosity::Warning, TEXT("UCompileAllBlueprintsCommandlet::InitCommandLine"));
+		UE_CLOG(BlueprintBaseClassName.IsNull(), LogCompileAllBlueprintsCommandlet, Error, TEXT("Failed to convert short class name -BlueprintBaseClass=\"%s\" to path name"), *BlueprintBaseClassParam);
 	}
 }
 
@@ -126,12 +128,12 @@ void UCompileAllBlueprintsCommandlet::ParseIgnoreFolders(const FString& FullIgno
 	}
 }
 
-void UCompileAllBlueprintsCommandlet::ParseWhitelist(const FString& WhitelistFilePath)
+void UCompileAllBlueprintsCommandlet::ParseAllowList(const FString& ListFilePath)
 {
-	const FString FilePath = FPaths::ProjectDir() + WhitelistFilePath;
-	if (!FFileHelper::LoadANSITextFileToStrings(*FilePath, &IFileManager::Get(), WhitelistFiles))
+	const FString FilePath = FPaths::ProjectDir() + ListFilePath;
+	if (!FFileHelper::LoadANSITextFileToStrings(*FilePath, &IFileManager::Get(), FileAllowList))
 	{
-		UE_LOG(LogCompileAllBlueprintsCommandlet, Error, TEXT("Failed to Load Whitelist File! : %s"), *FilePath);
+		UE_LOG(LogCompileAllBlueprintsCommandlet, Error, TEXT("Failed to Load AllowList File! : %s"), *FilePath);
 	}
 }
 
@@ -143,7 +145,7 @@ void UCompileAllBlueprintsCommandlet::BuildBlueprints()
 	{
 		if (ShouldBuildAsset(Asset))
 		{
-			FString const AssetPath = Asset.ObjectPath.ToString();
+			FString const AssetPath = Asset.GetObjectPathString();
 			UE_LOG(LogCompileAllBlueprintsCommandlet, Display, TEXT("Loading and Compiling: '%s'..."), *AssetPath);
 
 			//Load with LOAD_NoWarn and LOAD_DisableCompileOnLoad as we are covering those explicitly with CompileBlueprint errors.
@@ -189,7 +191,7 @@ bool UCompileAllBlueprintsCommandlet::ShouldBuildAsset(FAssetData const& Asset) 
 
 	if (bCookedOnly && Asset.GetClass() && !Asset.GetClass()->bCooked)
 	{
-		FString const AssetPath = Asset.ObjectPath.ToString();
+		FString const AssetPath = Asset.GetObjectPathString();
 		UE_LOG(LogCompileAllBlueprintsCommandlet, Verbose, TEXT("Skipping Building %s: As is not cooked"), *AssetPath);
 		bShouldBuild = false;
 	}
@@ -198,9 +200,9 @@ bool UCompileAllBlueprintsCommandlet::ShouldBuildAsset(FAssetData const& Asset) 
 	{
 		for (const FString& IgnoreFolder : IgnoreFolders)
 		{
-			if (Asset.ObjectPath.ToString().StartsWith(IgnoreFolder))
+			if (Asset.GetObjectPathString().StartsWith(IgnoreFolder))
 			{
-				FString const AssetPath = Asset.ObjectPath.ToString();
+				FString const AssetPath = Asset.GetObjectPathString();
 				UE_LOG(LogCompileAllBlueprintsCommandlet, Verbose, TEXT("Skipping Building %s: As Object is in an Ignored Folder"), *AssetPath);
 				bShouldBuild = false;
 			}
@@ -209,22 +211,22 @@ bool UCompileAllBlueprintsCommandlet::ShouldBuildAsset(FAssetData const& Asset) 
 
 	if ((ExcludeAssetTags.Num() > 0) && (CheckHasTagInList(Asset, ExcludeAssetTags)))
 	{
-		FString const AssetPath = Asset.ObjectPath.ToString();
+		FString const AssetPath = Asset.GetObjectPathString();
 		UE_LOG(LogCompileAllBlueprintsCommandlet, Verbose, TEXT("Skipping Building %s: As has an excluded tag"), *AssetPath);
 		bShouldBuild = false;
 	}
 
 	if ((RequireAssetTags.Num() > 0) && (!CheckHasTagInList(Asset, RequireAssetTags)))
 	{
-		FString const AssetPath = Asset.ObjectPath.ToString();
+		FString const AssetPath = Asset.GetObjectPathString();
 		UE_LOG(LogCompileAllBlueprintsCommandlet, Verbose, TEXT("Skipping Building %s: As the asset is missing a required tag"), *AssetPath);
 		bShouldBuild = false;
 	}
 
-	if ((WhitelistFiles.Num() > 0) && (!CheckInWhitelist(Asset)))
+	if ((FileAllowList.Num() > 0) && (!IsAssetAllowed(Asset)))
 	{
-		FString const AssetPath = Asset.ObjectPath.ToString();
-		UE_LOG(LogCompileAllBlueprintsCommandlet, Verbose, TEXT("Skipping Building %s: As the asset is not part of the whitelist"), *AssetPath);
+		FString const AssetPath = Asset.GetObjectPathString();
+		UE_LOG(LogCompileAllBlueprintsCommandlet, Verbose, TEXT("Skipping Building %s: As the asset is not part of the allow list"), *AssetPath);
 		bShouldBuild = false;
 	}
 
@@ -233,7 +235,7 @@ bool UCompileAllBlueprintsCommandlet::ShouldBuildAsset(FAssetData const& Asset) 
 		const UPackage* AssetPackage = Asset.GetPackage();
 		if ((AssetPackage == nullptr) || !AssetPackage->IsDirty())
 		{
-			FString const AssetPath = Asset.ObjectPath.ToString();
+			FString const AssetPath = Asset.GetObjectPathString();
 			UE_LOG(LogCompileAllBlueprintsCommandlet, Verbose, TEXT("Skipping Building %s: As Package is not dirty"), *AssetPath);
 			bShouldBuild = false;
 		}
@@ -275,21 +277,21 @@ bool UCompileAllBlueprintsCommandlet::CheckHasTagInList(FAssetData const& Asset,
 	return bContainedTag;
 }
 
-bool UCompileAllBlueprintsCommandlet::CheckInWhitelist(FAssetData const& Asset) const
+bool UCompileAllBlueprintsCommandlet::IsAssetAllowed(FAssetData const& Asset) const
 {
-	bool bIsInWhitelist = false;
+	bool bIsInList = false;
 
-	const FString& AssetFilePath = Asset.ObjectPath.ToString();
-	for (const FString& WhiteList : WhitelistFiles)
+	const FString& AssetFilePath = Asset.GetObjectPathString();
+	for (const FString& Entry : FileAllowList)
 	{
-		if (AssetFilePath == WhiteList)
+		if (AssetFilePath == Entry)
 		{
-			bIsInWhitelist = true;
+			bIsInList = true;
 			break;
 		}
 	}
 
-	return bIsInWhitelist;
+	return bIsInList;
 }
 
 void UCompileAllBlueprintsCommandlet::CompileBlueprint(UBlueprint* Blueprint)

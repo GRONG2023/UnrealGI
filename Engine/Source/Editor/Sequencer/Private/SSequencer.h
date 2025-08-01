@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "AnimatedRange.h"
 #include "Layout/Visibility.h"
 #include "Input/Reply.h"
 #include "Widgets/SWidget.h"
@@ -12,25 +13,25 @@
 #include "Widgets/SCompoundWidget.h"
 #include "MovieSceneSequenceID.h"
 #include "ITimeSlider.h"
+#include "ISequencerModule.h"
+#include "ToolMenu.h"
 #include "Framework/Commands/UICommandList.h"
 #include "Widgets/Input/NumericTypeInterface.h"
 #include "Widgets/Input/SSpinBox.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Sequencer.h"
+#include "SequencerWidgetsDelegates.h"
+#include "STemporarilyFocusedSpinBox.h"
 
-class FActorDragDropGraphEdOp;
+class FActorDragDropOp;
+class FFolderDragDropOp;
 class FAssetDragDropOp;
 class FClassDragDropOp;
 class FMovieSceneClipboard;
 class FSequencerTimeSliderController;
-class FVirtualTrackArea;
-class ISequencerEditTool;
 class SCurveEditorTree;
-class SSequencerTrackArea;
-class SSequencerTrackOutliner;
 class SSequencerTransformBox;
 class SSequencerStretchBox;
-class SSequencerTreeView;
 class SCurveEditorPanel;
 class SDockTab;
 class SWindow;
@@ -40,12 +41,25 @@ class SSequencerGroupManager;
 class SSequencerTreeFilterStatusBar;
 struct FPaintPlaybackRangeArgs;
 struct FSequencerCustomizationInfo;
-struct FSequencerSelectionCurveFilter;
+
+namespace UE
+{
+namespace Sequencer
+{
+
+	class SOutlinerView;
+	class STrackAreaView;
+	class FVirtualTrackArea;
+	class IOutlinerColumn;
+	struct FSequencerSelectionCurveFilter;
+
+} // namespace Sequencer
+} // namespace UE
 
 namespace SequencerLayoutConstants
 {
 	/** The amount to indent child nodes of the layout tree */
-	const float IndentAmount = 10.0f;
+	const float IndentAmount = 12.0f;
 
 	/** Height of each folder node */
 	const float FolderNodeHeight = 20.0f;
@@ -54,7 +68,7 @@ namespace SequencerLayoutConstants
 	const float ObjectNodeHeight = 20.0f;
 
 	/** Height of each section area if there are no sections (note: section areas may be larger than this if they have children. This is the height of a section area with no children or all children hidden) */
-	const float SectionAreaDefaultHeight = 15.0f;
+	const float SectionAreaDefaultHeight = 27.0f;
 
 	/** Height of each key area */
 	const float KeyAreaHeight = 15.0f;
@@ -98,28 +112,17 @@ struct FSequencerBreadcrumb
 
 
 /**
- * A widget that holds a widget that is to be refocused on completion
+ * Holds an outliner column and its visibility state
  */
-template<typename T>
-struct STemporarilyFocusedSpinBox : SSpinBox<T>
+struct FSequencerOutlinerColumnVisibility
 {
-public:
-	void Setup()
-	{
-		PreviousFocusedWidget = FSlateApplication::Get().GetKeyboardFocusedWidget();
-	}
+	TSharedPtr<UE::Sequencer::IOutlinerColumn> Column;
+	bool bIsColumnVisible = false;
 
-	void Refocus()
-	{
-		if (PreviousFocusedWidget.IsValid())
-		{
-			FSlateApplication::Get().SetKeyboardFocus(PreviousFocusedWidget.Pin());
-		}
-	}
-
-private:
-	TWeakPtr<SWidget> PreviousFocusedWidget;
+	FSequencerOutlinerColumnVisibility(TSharedPtr<UE::Sequencer::IOutlinerColumn> InColumn);
+	FSequencerOutlinerColumnVisibility(TSharedPtr<UE::Sequencer::IOutlinerColumn> InColumn, bool bInIsColumnVisible);
 };
+
 
 /**
  * Main sequencer UI widget
@@ -142,6 +145,9 @@ public:
 
 		/** The playback range */
 		SLATE_ATTRIBUTE( TRange<FFrameNumber>, PlaybackRange )
+
+		/** The time bounds */
+		SLATE_ATTRIBUTE(TRange<FFrameNumber>, TimeBounds)
 
 		/** The selection range */
 		SLATE_ATTRIBUTE( TRange<FFrameNumber>, SelectionRange)
@@ -224,6 +230,12 @@ public:
 		/** Called when all marked frames should be deleted */
 		SLATE_EVENT( FSimpleDelegate, OnDeleteAllMarkedFrames)
 
+		/** Whether marked frames are locked */
+		SLATE_ATTRIBUTE( bool, AreMarkedFramesLocked )
+
+		/** Called when the user toggles the marked frames lock */
+		SLATE_EVENT( FSimpleDelegate, OnToggleMarkedFramesLocked )
+
 		/** Called when the user changes the clamp range */
 		SLATE_EVENT( FOnTimeRangeChanged, OnClampRangeChanged )
 
@@ -239,14 +251,11 @@ public:
 		/** Called when the user changes the scrub position */
 		SLATE_EVENT( FOnScrubPositionChanged, OnScrubPositionChanged )
 
-		/** Called to populate the add combo button in the toolbar. */
-		SLATE_EVENT( FOnGetAddMenuContent, OnGetAddMenuContent )
-
-		/** Called when object is clicked. */
-		SLATE_EVENT(FOnBuildCustomContextMenuForGuid, OnBuildCustomContextMenuForGuid)
-			
 		/** Called when any widget contained within sequencer has received focus */
 		SLATE_EVENT( FSimpleDelegate, OnReceivedFocus )
+
+		/** Called when initializing tool menu context */
+		SLATE_EVENT(FOnInitToolMenuContext, OnInitToolMenuContext)
 
 		/** Called when something is dragged over the sequencer. */
 		SLATE_EVENT( FOptionalOnDragDrop, OnReceivedDragOver )
@@ -263,22 +272,32 @@ public:
 		/** Called when an actor is dropped on the sequencer. Not called if OnReceivedDrop is bound and returned true. */
 		SLATE_EVENT( FOnActorsDrop, OnActorsDrop )
 
+		/** Called when a folder is dropped onto the sequencer. Not called if OnReceivedDrop is bound and returned true. */
+		SLATE_EVENT(FOnFoldersDrop, OnFoldersDrop)
+
 		/** Extender to use for the add menu. */
 		SLATE_ARGUMENT( TSharedPtr<FExtender>, AddMenuExtender )
 
 		/** Extender to use for the toolbar. */
-		SLATE_ARGUMENT(TSharedPtr<FExtender>, ToolbarExtender)
+		SLATE_ARGUMENT( TSharedPtr<FExtender>, ToolbarExtender )
+
+		/** Whether to display the playback range spin box in time range slider */
+		SLATE_ARGUMENT( bool, ShowPlaybackRangeInTimeSlider )
 
 	SLATE_END_ARGS()
 
 
 	void Construct(const FArguments& InArgs, TSharedRef<FSequencer> InSequencer);
 
-	void BindCommands(TSharedRef<FUICommandList> SequencerCommandBindings);
+	void BindCommands(TSharedRef<FUICommandList> SequencerCommandBindings, TSharedRef<FUICommandList> CurveEditorSharedBindings);
 	
 	~SSequencer();
 	
 	virtual void AddReferencedObjects( FReferenceCollector& Collector ) { }
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("SSequencer");
+	}
 
 	virtual bool SupportsKeyboardFocus() const override
 	{
@@ -296,43 +315,32 @@ public:
 	void ResetBreadcrumbs();
 	void PopBreadcrumb();
 
-	/** Step to next and previous keyframes */
-	void StepToNextKey();
-	void StepToPreviousKey();
-	void StepToNextCameraKey();
-	void StepToPreviousCameraKey();
-	void StepToKey(bool bStepToNextKey, bool bCameraOnly);
-
 	/** Called when the save button is clicked */
 	void OnSaveMovieSceneClicked();
-
-	/** Called when the save-as button is clicked */
-	void OnSaveMovieSceneAsClicked();
 
 	/** Called when the curve editor is shown or hidden */
 	void OnCurveEditorVisibilityChanged(bool bShouldBeVisible);
 
 	/** Access the tree view for this sequencer */
-	TSharedPtr<SSequencerTreeView> GetTreeView() const;
+	TSharedPtr<UE::Sequencer::SOutlinerView> GetTreeView() const;
+
+	/** Access the pinned tree view for this sequencer */
+	TSharedPtr<UE::Sequencer::SOutlinerView> GetPinnedTreeView() const;
 
 	/** 
 	 * Generate a helper structure that can be used to transform between phsyical space and virtual space in the track area
 	 *
 	 * @param InTrackArea	(optional) The track area to generate helper structure for, if not specified the main track area will be used.
 	 */
-	FVirtualTrackArea GetVirtualTrackArea(const SSequencerTrackArea* InTrackArea = nullptr) const;
+	UE::Sequencer::FVirtualTrackArea GetVirtualTrackArea(const UE::Sequencer::STrackAreaView* InTrackArea = nullptr) const;
 
 	/** Access this widget's track area widget */
-	TSharedPtr<SSequencerTrackArea> GetTrackAreaWidget() const { return TrackArea; }
+	TSharedPtr<UE::Sequencer::STrackAreaView> GetTrackAreaWidget() const { return TrackArea; }
 
 	/** @return a numeric type interface that will parse and display numbers as frames and times correctly */
 	TSharedRef<INumericTypeInterface<double>> GetNumericTypeInterface() const;
-	
-	/** Access the currently active track area edit tool */
-	const ISequencerEditTool* GetEditTool() const;
 
-	void ShowTickResolutionOverlay();
-	void HideTickResolutionOverlay();
+	void OpenTickResolutionOptions();
 
 	/** Sets the play time for the sequence but clamped by the working range. This is useful for cases where we can't clamp via the UI control. */
 	void SetPlayTimeClampedByWorkingRange(double Frame);
@@ -340,8 +348,17 @@ public:
 	/** Sets the play time for the sequence. Will extend the working range if out of bounds. */
 	void SetPlayTime(double Frame);
 
-	/** Sets the specified filter to be on or off*/
-	void SetFilterOn(const FText& InName, bool bOn);
+	/** Sets the specified track filter to be on or off */
+	void SetTrackFilterEnabled(const FText& InTrackFilterName, bool bEnabled);
+
+	/** Gets whether the specified track filter is on/off */
+	bool IsTrackFilterEnabled(const FText& InTrackFilterName) const;
+
+	/** Reset all enabled filters */
+	void ResetFilters();
+
+	/** Gets all the available track filter names */
+	TArray<FText> GetTrackFilterNames() const;
 
 	/** Sets the text to search by */
 	void SetSearchText(const FText& InSearchText);
@@ -369,17 +386,15 @@ private:
 	/** Initalizes a list of all track filter objects */
 	void InitializeTrackFilters();
 
+
+	/** Initializes outliner column list from settings and SequencerCore */
+	void InitializeOutlinerColumns();
+
 	/** Handles key selection changes. */
 	void HandleKeySelectionChanged();
 
-	/** Handles section selection changes. */
-	void HandleSectionSelectionChanged();
-
 	/** Handles changes to the selected outliner nodes. */
 	void HandleOutlinerNodeSelectionChanged();
-
-	/** Syncs the current node selection to the curve editor. */
-	void SyncCurveEditorToSelection();
 
 	/** Empty active timer to ensure Slate ticks during Sequencer playback */
 	EActiveTimerReturnType EnsureSlateTickDuringPlayback(double InCurrentTime, float InDeltaTime);	
@@ -387,12 +402,17 @@ private:
 	/** Get context menu contents. */
 	void GetContextMenuContent(FMenuBuilder& MenuBuilder);
 
+	TWeakPtr<FSequencer> GetSequencer() { return SequencerPtr; }
+
+	static void PopulateToolBar(UToolMenu* InMenu);
+
 	/** Makes the toolbar. */
 	TSharedRef<SWidget> MakeToolBar();
 
 	/** Makes add button. */
 	TSharedRef<SWidget> MakeAddButton();
 
+	/** Makes filter button */
 	TSharedRef<SWidget> MakeFilterButton();
 
 	/** Makes the add menu for the toolbar. */
@@ -432,6 +452,12 @@ private:
 	/** Makes the playback speed menu for the toolbar. */
 	void FillPlaybackSpeedMenu(FMenuBuilder& InMenuBuilder);
 
+	/** Makes the view density menu for the toolbar. */
+	void FillViewDensityMenu(FMenuBuilder& InMenuBuilder);
+
+	/** Makes the column visibility menu for the toolbar. */
+	void FillColumnVisibilityMenu(FMenuBuilder& InMenuBuilder);
+
 	/** Return the current sequencer settings */ 
 	USequencerSettings* GetSequencerSettings() const;
 
@@ -452,7 +478,6 @@ public:
 
 private:
 
-	void OnResetFilters();
 	void OnEnableAllFilters();
 	void OnTrackFilterClicked(TSharedRef<FSequencerTrackFilter> TrackFilter);
 	bool IsTrackFilterActive(TSharedRef<FSequencerTrackFilter> TrackFilter) const;
@@ -466,6 +491,12 @@ private:
 
 	void OnEnableAllNodeGroupFilters(bool bEnableAll);
 	void OnNodeGroupFilterClicked(UMovieSceneNodeGroup* NodeGroup);
+
+	/**
+	 * Called when any outliner column's visibily is modified.
+	 * Updates SequencerSettings and visible outliner columns in Outliner View.
+	 */
+	void UpdateOutlinerViewColumns();
 
 	/**
 	* Called when the time snap interval changes.
@@ -496,6 +527,7 @@ private:
 	 */
 	float GetColumnFillCoefficient(int32 ColumnIndex) const
 	{
+		ensure(ColumnIndex == 0 || ColumnIndex == 1);
 		return ColumnFillCoefficients[ColumnIndex];
 	}
 
@@ -518,7 +550,14 @@ private:
 	 *
 	 * @param	DragDropOp	Information about the actor(s) that was dropped
 	 */
-	void OnActorsDropped(FActorDragDropGraphEdOp& DragDropOp); 
+	void OnActorsDropped(FActorDragDropOp& DragDropOp); 
+
+	/**
+	 * Called when one or more folders are dropped into the widget
+	 *
+	 * @param	DragDropOp	Information about the objects(s) that was dropped
+	 */
+	void OnFolderDropped(FFolderDragDropOp& DragDropOp); 
 
 	/** Called when a breadcrumb is clicked on in the sequencer */
 	void OnCrumbClicked(const FSequencerBreadcrumb& Item);
@@ -547,11 +586,22 @@ private:
 	/** Gets whether or not the time range should be visible. */
 	EVisibility GetTimeRangeVisibility() const;
 
+	/** Gets whether the info button in the playback controls should be visible. */
+	EVisibility GetInfoButtonVisibility() const;
+
+	/** Gets whether the tick lines should be drawn. */
+	EVisibility GetShowTickLines() const;
+
+	/** Gets whether the sequencer toolbar should be displayed */
+	EVisibility GetShowSequencerToolbar() const;
+
 	/** What is the preferred display format for time values. */
 	EFrameNumberDisplayFormats GetTimeDisplayFormat() const;
 
 	/** Called when a column fill percentage is changed by a splitter slot. */
 	void OnColumnFillCoefficientChanged(float FillCoefficient, int32 ColumnIndex);
+
+	void OnSplitterFinishedResizing();
 
 	/** Gets paint options for painting the playback range on sequencer */
 	FPaintPlaybackRangeArgs GetSectionPlaybackRangeArgs() const;
@@ -563,9 +613,6 @@ private:
 
 	/** Controls how fast Spinboxes change values. */
 	double GetSpinboxDelta() const;
-
-	/** Get minimum desired width of the current time spin box */
-	float GetPlayTimeMinDesiredWidth() const;
 
 	bool GetIsSequenceReadOnly() const;
 	void OnSetSequenceReadOnly(ECheckBoxState CheckBoxState);
@@ -593,14 +640,14 @@ public:
 	/** Generate a paste menu args structure */
 	struct FPasteContextMenuArgs GeneratePasteArgs(FFrameNumber PasteAtTime, TSharedPtr<FMovieSceneClipboard> Clipboard = nullptr);
 
-	/** Execute custom context menu if passed in the FSequencerViewParams  */
-	void BuildCustomContextMenuForGuid(FMenuBuilder& MenuBuilder, FGuid ObjectBinding);
-
 	/** This adds the specified path to the selection set to be restored the next time the tree view is refreshed. */
 	void AddAdditionalPathToSelectionSet(const FString& Path) { AdditionalSelectionsToAdd.Add(Path); }
 
+	/** Request to rename the given node path. */
+	void RequestRenameNode(const FString& Path) { NodePathToRename = Path; }
+
 	/** Applies dynamic sequencer customizations to this editor. */
-	void ApplySequencerCustomizations(const TArray<FSequencerCustomizationInfo>& Customizations);
+	void ApplySequencerCustomizations(const TArrayView<const FSequencerCustomizationInfo> Customizations);
 
 private:
 	/** Applies a single customization. */
@@ -619,30 +666,21 @@ private:
 
 	/** Filter Status Bar */
 	TSharedPtr<SSequencerTreeFilterStatusBar> SequencerTreeFilterStatusBar;
-	
+
 	/** Section area widget */
-	TSharedPtr<SSequencerTrackArea> TrackArea;
+	TSharedPtr<UE::Sequencer::STrackAreaView> TrackArea;
 
 	/** Section area widget for pinned tracks*/
-	TSharedPtr<SSequencerTrackArea> PinnedTrackArea;
-
-	/** Outliner widget */
-	TSharedPtr<SSequencerTrackOutliner> TrackOutliner;
-
-	/** Curve editor tree widget */
-	TSharedPtr<SCurveEditorTree> CurveEditorTree;
+	TSharedPtr<UE::Sequencer::STrackAreaView> PinnedTrackArea;
 
 	/** Curve editor filter that shows only the selected nodes */
-	TSharedPtr<FSequencerSelectionCurveFilter> SequencerSelectionCurveEditorFilter;
+	TSharedPtr<UE::Sequencer::FSequencerSelectionCurveFilter> SequencerSelectionCurveEditorFilter;
 
 	/** The breadcrumb trail widget for this sequencer */
 	TSharedPtr<SBreadcrumbTrail<FSequencerBreadcrumb>> BreadcrumbTrail;
 
 	/** The search box for filtering tracks. */
 	TSharedPtr<SSearchBox> SearchBox;
-
-	/** The search widget for filtering curves in the Curve Editor tree. */
-	TSharedPtr<SWidget> CurveEditorSearchBox;
 
 	/** The current playback time display. */
 	TSharedPtr<STemporarilyFocusedSpinBox<double>> PlayTimeDisplay;
@@ -651,10 +689,10 @@ private:
 	TSharedPtr<STextBlock> LoopIndexDisplay;
 
 	/** The sequencer tree view responsible for the outliner and track areas */
-	TSharedPtr<SSequencerTreeView> TreeView;
+	TSharedPtr<UE::Sequencer::SOutlinerView> TreeView;
 
 	/** The sequencer tree view for pinned tracks */
-	TSharedPtr<SSequencerTreeView> PinnedTreeView;
+	TSharedPtr<UE::Sequencer::SOutlinerView> PinnedTreeView;
 
 	/** Dropdown for selecting breadcrumbs */
 	TSharedPtr<class SComboButton> BreadcrumbPickerButton;
@@ -665,14 +703,16 @@ private:
 	/** The top time slider widget */
 	TSharedPtr<ITimeSlider> TopTimeSlider;
 
-	/** The curve editor panel. This is created and updated even if it is not currently visible. */
-	TSharedPtr<SWidget> CurveEditorPanel;
-
 	/** Container for the toolbar, so that we can re-create it as needed. */
 	TSharedPtr<SBox> ToolbarContainer;
 
 	/** The fill coefficients of each column in the grid. */
 	float ColumnFillCoefficients[2];
+
+	/** List of registered outliner columns with their visibility states */
+	TArray<FSequencerOutlinerColumnVisibility> OutlinerColumnVisibilities;
+
+	TSharedPtr<class SSequencerSplitterOverlay> TreeViewSplitter;
 
 	/** Whether the active timer is currently registered */
 	bool bIsActiveTimerRegistered;
@@ -695,11 +735,6 @@ private:
 	/** Time slider controller for this sequencer */
 	TSharedPtr<FSequencerTimeSliderController> TimeSliderController;
 
-	FOnGetAddMenuContent OnGetAddMenuContent;
-
-	/** Called when object is clicked in track list */
-	FOnBuildCustomContextMenuForGuid OnBuildCustomContextMenuForGuid;
-
 	/** Called when the user has begun dragging the selection selection range */
 	FSimpleDelegate OnSelectionRangeBeginDrag;
 
@@ -721,6 +756,9 @@ private:
 	/** Called when any widget contained within sequencer has received focus */
 	FSimpleDelegate OnReceivedFocus;
 
+	/** Called when initializing tool menu context */
+	FOnInitToolMenuContext OnInitToolMenuContext;
+
 	/** Called when something is dragged over the sequencer. */
 	TArray<FOptionalOnDragDrop> OnReceivedDragOver;
 
@@ -736,6 +774,9 @@ private:
 	/** Called when an actor is dropped on the sequencer. */
 	TArray<FOnActorsDrop> OnActorsDrop;
 
+	/** Called when a folder is dropped on the sequencer. */
+	TArray<FOnFoldersDrop> OnFoldersDrop;
+
 	/** Stores the callbacks and extenders provided to the constructor. */
 	FSequencerCustomizationInfo RootCustomization;
 
@@ -750,7 +791,9 @@ private:
 	*/
 	TArray<FString> AdditionalSelectionsToAdd;
 
-	TSharedPtr<SWidget> TickResolutionOverlay;
+	FString NodePathToRename;
+
+	TWeakPtr<SWindow> WeakTickResolutionOptionsWindow;
 
 	/** All possible track filter objects */
 	TArray< TSharedRef<FSequencerTrackFilter> > AllTrackFilters;
@@ -760,8 +803,4 @@ private:
 	TWeakPtr<SWindow> WeakNodeGroupWindow;
 
 	TSharedPtr<SSequencerGroupManager> NodeGroupManager;
-
-public:
-	static const FName CurveEditorTabName;
-
 };

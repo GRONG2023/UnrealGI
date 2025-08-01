@@ -37,6 +37,13 @@ void UAnimationStateGraphSchema::GetGraphDisplayInformation(const UEdGraph& Grap
 	}
 
 	DisplayInfo.DisplayName = DisplayInfo.PlainName;
+	DisplayInfo.Tooltip = LOCTEXT("GraphTooltip_StateSchema", "States contain animation graphs that contribute to the state machine's output pose when the state is active");
 }
+
+bool UAnimationStateGraphSchema::CanDuplicateGraph(UEdGraph* InSourceGraph) const
+{
+	return false;
+}
+
 
 #undef LOCTEXT_NAMESPACE

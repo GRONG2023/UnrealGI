@@ -127,7 +127,7 @@ public:
 	/**
 	 * Initialize RHI resources for the curve texture.
 	 */
-	virtual void InitRHI() override;
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 
 	/**
 	 * Releases RHI resources.
@@ -153,7 +153,7 @@ public:
 	 * @param TexelAllocation - The texel allocation in the texture.
 	 * @returns the scale and bias needed to sample the curve.
 	 */
-	FVector4 ComputeCurveScaleBias( FTexelAllocation TexelAllocation );
+	FVector4f ComputeCurveScaleBias( FTexelAllocation TexelAllocation );
 
 	/**
 	 * Retrieves the curve texture from which shaders can sample.
@@ -166,11 +166,8 @@ public:
 	void SubmitPendingCurves();
 
 private:
-
-	/** Targetable texture for uploading curve samples. */
-	FTexture2DRHIRef CurveTextureTargetRHI;
 	/** Texture for sampling curves on the GPU. */
-	FTexture2DRHIRef CurveTextureRHI;
+	FTextureRHIRef CurveTextureRHI;
 	/** The texel allocator for this texture. */
 	FTexelAllocator TexelAllocator;
 	/** A list of pending curves that need to be uploaded. */

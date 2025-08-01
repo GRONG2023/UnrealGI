@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "GenericPlatform/Accessibility/GenericAccessibleInterfaces.h"
 #include "GenericPlatform/GenericApplication.h"
 
 class FIOSWindow;
@@ -49,7 +50,7 @@ private:
 
 	FIOSApplication();
 #if WITH_ACCESSIBILITY
-	void OnAccessibleEventRaised(TSharedRef<IAccessibleWidget> Widget, EAccessibleEvent Event, FVariant OldValue, FVariant NewValue);
+	void OnAccessibleEventRaised(const FAccessibleEventArgs& Args);
 #endif
 
 private:

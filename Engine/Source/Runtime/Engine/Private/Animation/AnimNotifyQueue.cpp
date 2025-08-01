@@ -1,8 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Animation/AnimNotifyQueue.h"
+
+#include "Animation/AnimEventsFilterScope.h"
 #include "Animation/AnimInstanceProxy.h"
-#include "Animation/AnimTypes.h"
+#include "Components/SkeletalMeshComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNotifyQueue)
 
 bool operator==(const FAnimNotifyEventReference& Lhs, const FAnimNotifyEvent& Rhs)
 {
@@ -11,6 +15,12 @@ bool operator==(const FAnimNotifyEventReference& Lhs, const FAnimNotifyEvent& Rh
 		return (*(Lhs.Notify)) == Rhs;
 	}
 	return false;
+}
+
+void FAnimNotifyEventReference::GatherTickRecordData(const FAnimTickRecord& InTickRecord)
+{
+	ContextData = InTickRecord.ContextData;
+	CurrentAnimTime = InTickRecord.TimeAccumulator != nullptr ? *InTickRecord.TimeAccumulator : 0.0f;
 }
 
 bool FAnimNotifyQueue::PassesFiltering(const FAnimNotifyEvent* Notify) const
@@ -50,9 +60,15 @@ void FAnimNotifyQueue::AddAnimNotifiesToDest(bool bSrcIsLeader, const TArray<FAn
 			const bool bPassesDedicatedServerCheck = Notify->bTriggerOnDedicatedServer || !IsRunningDedicatedServer();
 			if (bPassesDedicatedServerCheck && Notify->TriggerWeightThreshold <= InstanceWeight && PassesFiltering(Notify) && PassesChanceOfTriggering(Notify))
 			{
-				// Only add unique AnimNotifyState instances just once. We can get multiple triggers if looping over an animation.
-				// It is the same state, so just report it once.
-				Notify->NotifyStateClass ? DestArray.AddUnique(NotifyRef) : DestArray.Add(NotifyRef);
+				const UE::Anim::IAnimEventsFilterContext* ContextData = Notify->bCanBeFilteredViaRequest ? NotifyRef.GetContextData<UE::Anim::IAnimEventsFilterContext>() : nullptr;
+				const bool bPassedScopeFilter = ContextData ? !ContextData->ShouldFilterNotify(NotifyRef) : true;
+
+				if (bPassedScopeFilter)
+				{
+					// Only add unique AnimNotifyState instances just once. We can get multiple triggers if looping over an animation.
+					// It is the same state, so just report it once.
+					Notify->NotifyStateClass ? DestArray.AddUnique(NotifyRef) : DestArray.Add(NotifyRef);	
+				}
 			}
 		}
 	}
@@ -118,3 +134,4 @@ void FAnimNotifyQueue::ApplyMontageNotifies(const FAnimInstanceProxy& Proxy)
 	}
 	UnfilteredMontageAnimNotifies.Reset();
 }
+

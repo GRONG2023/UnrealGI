@@ -4,10 +4,18 @@
 #include "Fonts/FontCacheCompositeFont.h"
 #include "Fonts/SlateTextShaper.h"
 #include "Fonts/LegacySlateFontInfoCache.h"
+#include "Fonts/CompositeFont.h"
+#include "Fonts/FontProviderInterface.h"
 #include "HAL/IConsoleManager.h"
 #include "SlateGlobals.h"
 
+#include <limits>
+#include "Fonts/FontUtils.h"
+
 DECLARE_CYCLE_STAT(TEXT("Freetype Render Glyph"), STAT_FreetypeRenderGlyph, STATGROUP_Slate);
+
+/** The default miter limit for mitered outlines. The maximum size of a miter spike is this multiplied by the outline size. */
+static const float DEFAULT_MITER_LIMIT = 2.f;
 
 /**
  * Method for rendering fonts with the possibility of an outline.
@@ -92,17 +100,19 @@ void ResizeFontBitmap_StoreAverageOutputPixel(TArray<uint8>& DstData, const int3
 template <>
 void ResizeFontBitmap_StoreAverageOutputPixel<1>(TArray<uint8>& DstData, const int32 PixelIndex, const FVector4& StepColor, const int32 PixelCount)
 {
-	DstData[PixelIndex] = FMath::Clamp(FMath::TruncToInt(StepColor.X / (float)PixelCount), 0, 255);
+	ensure(PixelCount > 0);
+	DstData[PixelIndex] = FMath::Clamp<uint8>((uint8)(StepColor.X / (float)PixelCount), 0, 255);
 }
 
 template <>
 void ResizeFontBitmap_StoreAverageOutputPixel<4>(TArray<uint8>& DstData, const int32 PixelIndex, const FVector4& StepColor, const int32 PixelCount)
 {
+	ensure(PixelCount > 0);
 	const int32 DstDataIndex = PixelIndex * 4;
-	DstData[DstDataIndex+0] = FMath::Clamp(FMath::TruncToInt(StepColor.X / (float)PixelCount), 0, 255);
-	DstData[DstDataIndex+1] = FMath::Clamp(FMath::TruncToInt(StepColor.Y / (float)PixelCount), 0, 255);
-	DstData[DstDataIndex+2] = FMath::Clamp(FMath::TruncToInt(StepColor.Z / (float)PixelCount), 0, 255);
-	DstData[DstDataIndex+3] = FMath::Clamp(FMath::TruncToInt(StepColor.W / (float)PixelCount), 0, 255);
+	DstData[DstDataIndex + 0] = FMath::Clamp<uint8>((uint8)(StepColor.X / (float)PixelCount), 0, 255);
+	DstData[DstDataIndex + 1] = FMath::Clamp<uint8>((uint8)(StepColor.Y / (float)PixelCount), 0, 255);
+	DstData[DstDataIndex + 2] = FMath::Clamp<uint8>((uint8)(StepColor.Z / (float)PixelCount), 0, 255);
+	DstData[DstDataIndex + 3] = FMath::Clamp<uint8>((uint8)(StepColor.W / (float)PixelCount), 0, 255);
 }
 
 // Note: Copied from FImageUtils and updated to work efficiently with 1 or 4-bytes per-pixel, and include the alpha channel (which the FImageUtils version just clobbers)
@@ -193,7 +203,7 @@ uint16 FSlateFontRenderer::GetMaxHeight(const FSlateFontInfo& InFontInfo, const 
 
 		// Adjust the height by the size of the outline that was applied.  
 		const float HeightAdjustment = InFontInfo.OutlineSettings.OutlineSize * InScale;
-		return static_cast<uint16>(FreeTypeUtils::Convert26Dot6ToRoundedPixel<int32>(FaceGlyphData.FaceAndMemory->GetScaledHeight()) + HeightAdjustment);
+		return static_cast<uint16>(FreeTypeUtils::Convert26Dot6ToRoundedPixel<int32>(FaceGlyphData.FaceAndMemory->GetScaledHeight(UE::Slate::FontUtils::IsAscentDescentOverrideEnabled(InFontInfo.FontObject))) + HeightAdjustment); 
 	}
 
 	return 0;
@@ -214,7 +224,7 @@ int16 FSlateFontRenderer::GetBaseline(const FSlateFontInfo& InFontInfo, const fl
 	{
 		FreeTypeUtils::ApplySizeAndScale(FaceGlyphData.FaceAndMemory->GetFace(), InFontInfo.Size, InScale);
 
-		return FreeTypeUtils::Convert26Dot6ToRoundedPixel<int16>(FaceGlyphData.FaceAndMemory->GetDescender());
+		return FreeTypeUtils::Convert26Dot6ToRoundedPixel<int16>(FaceGlyphData.FaceAndMemory->GetDescender(UE::Slate::FontUtils::IsAscentDescentOverrideEnabled(InFontInfo.FontObject)));
 	}
 
 	return 0;
@@ -282,7 +292,7 @@ bool FSlateFontRenderer::HasKerning(const FFontData& InFontData) const
 #endif // WITH_FREETYPE
 }
 
-int8 FSlateFontRenderer::GetKerning(const FFontData& InFontData, const int32 InSize, TCHAR First, TCHAR Second, const float InScale) const
+int8 FSlateFontRenderer::GetKerning(const FFontData& InFontData, const float InSize, TCHAR First, TCHAR Second, const float InScale) const
 {
 #if WITH_FREETYPE
 	FT_Face FontFace = GetFontFace(InFontData);
@@ -308,7 +318,7 @@ int8 FSlateFontRenderer::GetKerning(const FFontData& InFontData, const int32 InS
 	return 0;
 }
 
-TSharedPtr<FFreeTypeKerningCache> FSlateFontRenderer::GetKerningCache(const FFontData& InFontData, const int32 InSize, const float InScale) const
+TSharedPtr<FFreeTypeKerningCache> FSlateFontRenderer::GetKerningCache(const FFontData& InFontData, const float InSize, const float InScale) const
 {
 #if WITH_FREETYPE
 	FT_Face FontFace = GetFontFace(InFontData);
@@ -338,25 +348,25 @@ FFreeTypeFaceGlyphData FSlateFontRenderer::GetFontFaceForCodepoint(const FFontDa
 	const bool bOverrideFallback = InCodepoint == SlateFontRendererUtils::InvalidSubChar;
 
 	// Try the requested font first
-	{
-		ReturnVal.FaceAndMemory = CompositeFontCache->GetFontFace(InFontData);
+	ReturnVal.FaceAndMemory = CompositeFontCache->GetFontFace(InFontData);
 
-		if (ReturnVal.FaceAndMemory.IsValid())
+	if (ReturnVal.FaceAndMemory.IsValid())
+	{
+		// If we have valid face and memory but it just hasn't finished loading,
+		// return like we found it, so that we don't immediately trigger falling back to yet another font
+		// when it may have the glyph once it's actually done loading.
+		if (ReturnVal.FaceAndMemory->IsFaceLoading())
+		{
+			ReturnVal.FaceAndMemory.Reset();
+			ReturnVal.GlyphIndex = 0;
+			ReturnVal.CharFallbackLevel = EFontFallback::FF_NoFallback;
+			return ReturnVal;
+		}
+		else
 		{
 			ReturnVal.GlyphIndex = FT_Get_Char_Index(ReturnVal.FaceAndMemory->GetFace(), InCodepoint);
 			ReturnVal.CharFallbackLevel = EFontFallback::FF_NoFallback;
 		}
-	}
-
-	// If we have valid face and memory but it just hasn't finished loading,
-	// return like we found it, so that we don't immediately trigger falling back to yet another font
-	// when it may have the glyph once it's actually done loading.
-	if (ReturnVal.FaceAndMemory.IsValid() && ReturnVal.FaceAndMemory->IsFaceLoading())
-	{
-		ReturnVal.FaceAndMemory.Reset();
-		ReturnVal.GlyphIndex = 0;
-		ReturnVal.CharFallbackLevel = EFontFallback::FF_NoFallback;
-		return ReturnVal;
 	}
 
 	// If the requested glyph doesn't exist, use the last resort fallback font
@@ -411,6 +421,20 @@ bool FSlateFontRenderer::GetRenderData(const FShapedGlyphEntry& InShapedGlyph, c
 
 		if (FaceGlyphData.FaceAndMemory->IsFaceValid())
 		{
+			if (FMath::IsNearlyEqual(InShapedGlyph.FontFaceData->FontSkew, 0.f)) 
+			{
+				FT_Set_Transform(FaceGlyphData.FaceAndMemory->GetFace(), nullptr, nullptr);
+			}
+			else 
+			{
+				// Skewing / Fake Italics (could do character rotation in future?).
+				FT_Matrix TransformMatrix;
+				TransformMatrix.xx = 0x10000L;
+				TransformMatrix.xy = InShapedGlyph.FontFaceData->FontSkew * 0x10000L;
+				TransformMatrix.yx = 0;
+				TransformMatrix.yy = 0x10000L;
+				FT_Set_Transform(FaceGlyphData.FaceAndMemory->GetFace(), &TransformMatrix, nullptr);
+			}
 			FT_Error Error = FreeTypeUtils::LoadGlyph(FaceGlyphData.FaceAndMemory->GetFace(), FaceGlyphData.GlyphIndex, FaceGlyphData.GlyphFlags, InShapedGlyph.FontFaceData->FontSize, InShapedGlyph.FontFaceData->FontScale);
 			if (Error == 0)
 			{
@@ -469,7 +493,7 @@ struct FRasterizerSpanList
  */
 void RenderOutlineRows(FT_Library Library, FT_Outline* Outline, FRasterizerSpanList& OutSpansList)
 {
-	auto RasterizerCallback = [](const int32 Y, const int32 Count, const FT_Span* const Spans, void* const UserData)
+	auto RasterizerCallback = [](const int Y, const int Count, const FT_Span* const Spans, void* const UserData)
 	{
 		FRasterizerSpanList& UserDataSpanList = *static_cast<FRasterizerSpanList*>(UserData);
 
@@ -481,8 +505,8 @@ void RenderOutlineRows(FT_Library Library, FT_Outline* Outline, FRasterizerSpanL
 		{
 			const FT_Span& Span = Spans[SpanIndex];
 
-			BoundingBox += FVector2D(Span.x, Y);
-			BoundingBox += FVector2D(Span.x + Span.len - 1, Y);
+			BoundingBox += FVector2D((float)Span.x, (float)Y);
+			BoundingBox += FVector2D((float)(Span.x + Span.len - 1), (float)Y);
 
 			UserDataSpans.Add(FRasterizerSpan(Span.x, Y, Span.len, Span.coverage));
 		}
@@ -507,6 +531,9 @@ void RenderOutlineRows(FT_Library Library, FT_Outline* Outline, FRasterizerSpanL
 bool FSlateFontRenderer::GetRenderDataInternal(const FFreeTypeFaceGlyphData& InFaceGlyphData, const float InScale, const FFontOutlineSettings& InOutlineSettings, FCharacterRenderData& OutRenderData) const
 {
 	SCOPE_CYCLE_COUNTER(STAT_FreetypeRenderGlyph);
+
+	bool bIsMonochromeRendered = !EnableFontAntiAliasing;
+
 	FT_Face Face = InFaceGlyphData.FaceAndMemory->GetFace();
 
 	// Get the lot for the glyph.  This contains measurement info
@@ -515,8 +542,11 @@ bool FSlateFontRenderer::GetRenderDataInternal(const FFreeTypeFaceGlyphData& InF
 	const float BitmapAtlasScale = FreeTypeUtils::GetBitmapAtlasScale(Face);
 	float ScaledOutlineSize = FMath::RoundToFloat(InOutlineSettings.OutlineSize * InScale);
 
-	OutRenderData.bIsGrayscale = true;
+	OutRenderData.ContentType = ESlateFontAtlasContentType::Alpha;
 	OutRenderData.bSupportsOutline = FT_IS_SCALABLE(Face);
+
+	int32 OutlineXOffset = 0;
+	int32 OutlineYOffset = 0;
 
 	if((ScaledOutlineSize > 0.0f || OutlineFontRenderMethod == 1) && Slot->format == FT_GLYPH_FORMAT_OUTLINE)
 	{
@@ -529,9 +559,13 @@ bool FSlateFontRenderer::GetRenderDataInternal(const FFreeTypeFaceGlyphData& InF
 		// If there is an outline, render it second after applying a border stroke to the font to produce an outline
 		if(ScaledOutlineSize > 0)
 		{
+			const FT_Stroker_LineCap LineCap = InOutlineSettings.bMiteredCorners ? FT_STROKER_LINECAP_SQUARE : FT_STROKER_LINECAP_ROUND;
+			const FT_Stroker_LineJoin LineJoin = InOutlineSettings.bMiteredCorners ? FT_STROKER_LINEJOIN_MITER : FT_STROKER_LINEJOIN_ROUND;
+			const FT_Fixed MiterLimit = InOutlineSettings.bMiteredCorners ? FMath::TruncToInt(FreeTypeUtils::ConvertPixelTo16Dot16<float>(DEFAULT_MITER_LIMIT)) : 0;
+
 			FT_Stroker Stroker = nullptr;
 			FT_Stroker_New(FTLibrary->GetLibrary(), &Stroker);
-			FT_Stroker_Set(Stroker, FMath::TruncToInt(FreeTypeUtils::ConvertPixelTo26Dot6<float>(ScaledOutlineSize)), FT_STROKER_LINECAP_ROUND, FT_STROKER_LINEJOIN_ROUND, 0);
+			FT_Stroker_Set(Stroker, FMath::TruncToInt(FreeTypeUtils::ConvertPixelTo26Dot6<float>(ScaledOutlineSize)), LineCap, LineJoin, MiterLimit);
 
 			FT_Glyph Glyph = nullptr;
 			FT_Get_Glyph(Slot, &Glyph);
@@ -553,18 +587,20 @@ bool FSlateFontRenderer::GetRenderDataInternal(const FFreeTypeFaceGlyphData& InF
 		FVector2D Size = BoundingBox.GetSize();
 
 		//Note: we add 1 to width and height because the size of the rect is inclusive
-		int32 Width = FMath::TruncToInt(Size.X)+1;
-		int32 Height = FMath::TruncToInt(Size.Y)+1;
+		const int32 Width = FMath::TruncToInt(Size.X)+1;
+		const int32 Height = FMath::TruncToInt(Size.Y)+1;
+		ensure(Width <= std::numeric_limits<int16>::max());
+		ensure(Height <= std::numeric_limits<int16>::max());
+		OutRenderData.SizeX = (int16)Width;
+		OutRenderData.SizeY = (int16)Height;
 
 		OutRenderData.RawPixels.Reset();
-
-		OutRenderData.SizeX = Width;
-		OutRenderData.SizeY = Height;
-
 		OutRenderData.RawPixels.AddZeroed(Width*Height);
 
-		int32 XMin = BoundingBox.Min.X;
-		int32 YMin = BoundingBox.Min.Y;
+		const int32 XMin = FMath::TruncToInt(BoundingBox.Min.X);
+		const int32 YMin = FMath::TruncToInt(BoundingBox.Min.Y);
+		OutlineXOffset = FMath::RoundToInt32(BoundingBox.Min.X-FillSpans.BoundingBox.Min.X);
+		OutlineYOffset = FMath::RoundToInt32(BoundingBox.Max.Y-FillSpans.BoundingBox.Max.Y);
 
 		// Compute and copy the pixels for the total filled area of the glyph. 
 
@@ -596,7 +632,7 @@ bool FSlateFontRenderer::GetRenderDataInternal(const FFreeTypeFaceGlyphData& InF
 						if(InOutlineSettings.bSeparateFillAlpha)
 						{
 							// this method is better for transparent fill areas
-							Src = Span.Coverage ? FMath::Abs(Src - Span.Coverage) : 0;
+							Src = Span.Coverage ? FMath::Abs<uint8>(Src - Span.Coverage) : 0;
 						}
 						else
 						{
@@ -619,19 +655,19 @@ bool FSlateFontRenderer::GetRenderDataInternal(const FFreeTypeFaceGlyphData& InF
 		}
 
 		// Note: in order to render the stroke properly AND to get proper measurements this must be done after rendering the stroke
-		FT_Render_Glyph(Slot, EnableFontAntiAliasing ? FT_RENDER_MODE_NORMAL : FT_RENDER_MODE_MONO);
+		FT_Render_Glyph(Slot, bIsMonochromeRendered ? FT_RENDER_MODE_MONO : FT_RENDER_MODE_NORMAL);
 	}
 	else
 	{
 		// This path renders a standard font with no outline.  This may occur if the outline failed to generate
-		FT_Render_Glyph(Slot, EnableFontAntiAliasing ? FT_RENDER_MODE_NORMAL : FT_RENDER_MODE_MONO);
+		FT_Render_Glyph(Slot, bIsMonochromeRendered ? FT_RENDER_MODE_MONO : FT_RENDER_MODE_NORMAL);
 
 		FT_Bitmap* Bitmap = nullptr;
 		FT_Bitmap TmpBitmap;
 #if WITH_FREETYPE_V210
 		if (Slot->bitmap.pixel_mode == FT_PIXEL_MODE_BGRA)
 		{
-			OutRenderData.bIsGrayscale = false;
+			OutRenderData.ContentType = ESlateFontAtlasContentType::Color;
 			Bitmap = &Slot->bitmap;
 		}
 		else
@@ -648,12 +684,12 @@ bool FSlateFontRenderer::GetRenderDataInternal(const FFreeTypeFaceGlyphData& InF
 			Bitmap = &Slot->bitmap;
 		}
 #if WITH_FREETYPE_V210
-		check(Bitmap && ((Bitmap->pixel_mode == FT_PIXEL_MODE_GRAY && OutRenderData.bIsGrayscale) || (Slot->bitmap.pixel_mode == FT_PIXEL_MODE_BGRA && !OutRenderData.bIsGrayscale)));
+		check(Bitmap && ((Bitmap->pixel_mode == FT_PIXEL_MODE_GRAY && OutRenderData.ContentType == ESlateFontAtlasContentType::Alpha) || (Slot->bitmap.pixel_mode == FT_PIXEL_MODE_BGRA && OutRenderData.ContentType == ESlateFontAtlasContentType::Color)));
 #else	// WITH_FREETYPE_V210
-		check(Bitmap && Bitmap->pixel_mode == FT_PIXEL_MODE_GRAY && OutRenderData.bIsGrayscale);
+		check(Bitmap && Bitmap->pixel_mode == FT_PIXEL_MODE_GRAY && OutRenderData.ContentType == ESlateFontAtlasContentType::Alpha);
 #endif	// WITH_FREETYPE_V210
 
-		const uint32 BytesPerPixel = OutRenderData.bIsGrayscale ? 1 : 4;
+		const uint32 BytesPerPixel = GetSlateFontAtlasContentBytesPerPixel(OutRenderData.ContentType);
 		OutRenderData.RawPixels.Reset();
 		OutRenderData.RawPixels.AddUninitialized(Bitmap->rows * Bitmap->width * BytesPerPixel);
 
@@ -668,7 +704,7 @@ bool FSlateFontRenderer::GetRenderDataInternal(const FFreeTypeFaceGlyphData& InF
 			}
 
 			// Grayscale images not using 256 colors need to convert their gray range to a 0-255 range
-			if(OutRenderData.bIsGrayscale && Bitmap->num_grays != 256)
+			if(OutRenderData.ContentType == ESlateFontAtlasContentType::Alpha && Bitmap->num_grays != 256)
 			{
 				const int32 GrayBoost = 255 / (Bitmap->num_grays - 1);
 				for(uint8& RawPixel : OutRenderData.RawPixels)
@@ -678,8 +714,8 @@ bool FSlateFontRenderer::GetRenderDataInternal(const FFreeTypeFaceGlyphData& InF
 			}
 		}
 
-		OutRenderData.SizeX = Bitmap->width;
-		OutRenderData.SizeY = Bitmap->rows;
+		OutRenderData.SizeX = (int16)Bitmap->width;
+		OutRenderData.SizeY = (int16)Bitmap->rows;
 
 		if(Bitmap == &TmpBitmap)
 		{
@@ -692,9 +728,11 @@ bool FSlateFontRenderer::GetRenderDataInternal(const FFreeTypeFaceGlyphData& InF
 		{
 			const int32 ScaledWidth = FMath::TruncToInt(OutRenderData.SizeX * BitmapAtlasScale);
 			const int32 ScaledHeight = FMath::TruncToInt(OutRenderData.SizeY * BitmapAtlasScale);
-			TArray<uint8> ScaledRawPixels;
+			ensure(ScaledWidth <= std::numeric_limits<int16>::max());
+			ensure(ScaledHeight <= std::numeric_limits<int16>::max());
 
-			if (OutRenderData.bIsGrayscale)
+			TArray<uint8> ScaledRawPixels;
+			if (OutRenderData.ContentType == ESlateFontAtlasContentType::Alpha)
 			{
 				check(BytesPerPixel == 1);
 				SlateFontRendererUtils::ResizeFontBitmap<1>(OutRenderData.SizeX, OutRenderData.SizeY, OutRenderData.RawPixels, ScaledWidth, ScaledHeight, ScaledRawPixels);
@@ -705,18 +743,24 @@ bool FSlateFontRenderer::GetRenderDataInternal(const FFreeTypeFaceGlyphData& InF
 				SlateFontRendererUtils::ResizeFontBitmap<4>(OutRenderData.SizeX, OutRenderData.SizeY, OutRenderData.RawPixels, ScaledWidth, ScaledHeight, ScaledRawPixels);
 			}
 
-			OutRenderData.SizeX = ScaledWidth;
-			OutRenderData.SizeY = ScaledHeight;
+			OutRenderData.SizeX = (int16)ScaledWidth;
+			OutRenderData.SizeY = (int16)ScaledHeight;
 			OutRenderData.RawPixels = MoveTemp(ScaledRawPixels);
 		}
 
 		// Reset the outline to zero.  If we are in this path, either the outline failed to generate because the font supported or there is no outline
 		// We do not want to take it into account if it failed to generate
 		ScaledOutlineSize = 0.0f;
+		OutlineXOffset = 0;
+		OutlineYOffset = 0;
 	}
 
-	OutRenderData.HorizontalOffset = FMath::RoundToInt(Slot->bitmap_left * BitmapAtlasScale);
-	OutRenderData.VerticalOffset = FMath::RoundToInt(Slot->bitmap_top + ScaledOutlineSize) * BitmapAtlasScale;
+	const int32 HorizontalOffset = FMath::RoundToInt((Slot->bitmap_left + OutlineXOffset) * BitmapAtlasScale);
+	const int32 VerticalOffset = FMath::TruncToInt((Slot->bitmap_top + OutlineYOffset) * BitmapAtlasScale);
+	ensure(HorizontalOffset <= std::numeric_limits<int16>::max());
+	ensure(VerticalOffset <= std::numeric_limits<int16>::max());
+	OutRenderData.HorizontalOffset = (int16)HorizontalOffset;
+	OutRenderData.VerticalOffset = (int16)VerticalOffset;
 
 	return true;
 }

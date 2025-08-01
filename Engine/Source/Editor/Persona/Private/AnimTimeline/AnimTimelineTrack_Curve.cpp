@@ -1,12 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "AnimTimelineTrack_Curve.h"
+#include "AnimTimeline/AnimTimelineTrack_Curve.h"
 #include "CurveEditor.h"
 #include "SCurveViewerPanel.h"
 #include "RichCurveEditorModel.h"
 #include "Animation/AnimSequenceBase.h"
 #include "Widgets/Layout/SBorder.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "AnimSequenceTimelineCommands.h"
 #include "ScopedTransaction.h"
@@ -15,12 +15,14 @@
 #include "Animation/AnimMontage.h"
 #include "Fonts/FontMeasure.h"
 #include "Animation/AnimSequence.h"
-#include "AnimModel_AnimSequenceBase.h"
+#include "AnimTimeline/AnimModel_AnimSequenceBase.h"
 #include "Preferences/PersonaOptions.h"
 #include "IPersonaPreviewScene.h"
 #include "Animation/DebugSkelMeshComponent.h"
 #include "AnimPreviewInstance.h"
+#include "AnimTimelineClipboard.h"
 #include "SAnimSequenceCurveEditor.h"
+#include "Framework/Commands/GenericCommands.h"
 
 #define LOCTEXT_NAMESPACE "FAnimTimelineTrack_Curve"
 
@@ -72,9 +74,9 @@ public:
 	virtual int32 OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override
 	{
 		// Rendering info
-		const float LabelOffsetPx = 2.0f;
-		const float Width = AllottedGeometry.GetLocalSize().X;
-		const float Height = AllottedGeometry.GetLocalSize().Y;
+		constexpr float LabelOffsetPx = 2.0f;
+		const float Width = static_cast<float>(AllottedGeometry.GetLocalSize().X);
+		const float Height = static_cast<float>(AllottedGeometry.GetLocalSize().Y);
 		const FPaintGeometry PaintGeometry  = AllottedGeometry.ToPaintGeometry();
 		const FSlateFontInfo FontInfo = FCoreStyle::GetDefaultFontStyle("Regular", 8);
 		TSharedRef<FSlateFontMeasure> FontMeasureService = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
@@ -159,7 +161,20 @@ FAnimTimelineTrack_Curve::FAnimTimelineTrack_Curve(const FText& InCurveName, con
 	SetHeight(32.0f);
 }
 
-FAnimTimelineTrack_Curve::FAnimTimelineTrack_Curve(FRichCurve& InCurve, const FSmartName& InName, int32 InCurveIndex, ERawCurveTrackTypes InType, const FText& InCurveName, const FText& InFullCurveName, const FLinearColor& InColor, const FLinearColor& InBackgroundColor, const TSharedRef<FAnimModel>& InModel)
+FAnimTimelineTrack_Curve::FAnimTimelineTrack_Curve(const FRichCurve* InCurve, const FSmartName& InName, int32 InCurveIndex, ERawCurveTrackTypes InType, const FText& InCurveName, const FText& InFullCurveName, const FLinearColor& InColor, const FLinearColor& InBackgroundColor, const TSharedRef<FAnimModel>& InModel)
+	: FAnimTimelineTrack(InCurveName, InCurveName, InModel)
+	, Color(InColor)
+	, BackgroundColor(InBackgroundColor)
+	, FullCurveName(InFullCurveName)
+	, OuterCurveName(InName.DisplayName)
+	, OuterCurveIndex(InCurveIndex)
+	, OuterType(InType)
+{
+	Curves.Add(InCurve);
+	SetHeight(32.0f);
+}
+
+FAnimTimelineTrack_Curve::FAnimTimelineTrack_Curve(const FRichCurve* InCurve, const FName& InName, int32 InCurveIndex, ERawCurveTrackTypes InType, const FText& InCurveName, const FText& InFullCurveName, const FLinearColor& InColor, const FLinearColor& InBackgroundColor, const TSharedRef<FAnimModel>& InModel)
 	: FAnimTimelineTrack(InCurveName, InCurveName, InModel)
 	, Color(InColor)
 	, BackgroundColor(InBackgroundColor)
@@ -168,11 +183,11 @@ FAnimTimelineTrack_Curve::FAnimTimelineTrack_Curve(FRichCurve& InCurve, const FS
 	, OuterCurveIndex(InCurveIndex)
 	, OuterType(InType)
 {
-	Curves.Add(&InCurve);
+	Curves.Add(InCurve);
 	SetHeight(32.0f);
 }
 
-FAnimTimelineTrack_Curve::FAnimTimelineTrack_Curve(const TArray<FRichCurve*>& InCurves, const FText& InCurveName, const FText& InFullCurveName, const FLinearColor& InColor, const FLinearColor& InBackgroundColor, const TSharedRef<FAnimModel>& InModel)
+FAnimTimelineTrack_Curve::FAnimTimelineTrack_Curve(const TArray<const FRichCurve*>& InCurves, const FText& InCurveName, const FText& InFullCurveName, const FLinearColor& InColor, const FLinearColor& InBackgroundColor, const TSharedRef<FAnimModel>& InModel)
 	: FAnimTimelineTrack(InCurveName, InCurveName, InModel)
 	, Curves(InCurves)
 	, Color(InColor)
@@ -193,15 +208,15 @@ TSharedRef<SWidget> FAnimTimelineTrack_Curve::GenerateContainerWidgetForTimeline
 
 	for(int32 CurveIndex = 0; CurveIndex < Curves.Num(); ++CurveIndex)
 	{
-		FRichCurve* Curve = Curves[CurveIndex];
+		const FRichCurve* Curve = Curves[CurveIndex];
 
-		FSmartName Name;
+		FName Name;
 		ERawCurveTrackTypes Type;
 		int32 EditIndex;
 		GetCurveEditInfo(CurveIndex, Name, Type, EditIndex);
 
 		TUniquePtr<FRichCurveEditorModelNamed> NewCurveModel = MakeUnique<FRichCurveEditorModelNamed>(Name, Type, EditIndex, GetModel()->GetAnimSequenceBase());
-		NewCurveModel->SetColor(GetCurveColor(CurveIndex));
+		NewCurveModel->SetColor(GetCurveColor(CurveIndex), false);
 		NewCurveModel->SetIsKeyDrawEnabled(MakeAttributeLambda([](){ return GetDefault<UPersonaOptions>()->bTimelineDisplayCurveKeys; }));
 		CurveEditor->AddCurve(MoveTemp(NewCurveModel));
 	}
@@ -235,8 +250,8 @@ TSharedRef<SWidget> FAnimTimelineTrack_Curve::MakeTimelineWidgetContainer()
 	return 
 		SAssignNew(TimelineWidgetContainer, SBorder)
 		.Padding(0.0f)
-		.BorderImage(FEditorStyle::GetBrush("AnimTimeline.Outliner.DefaultBorder"))
-		.BorderBackgroundColor_Lambda([this](){ return GetModel()->IsTrackSelected(AsShared()) ? FEditorStyle::GetSlateColor("SelectionColor").GetSpecifiedColor().CopyWithNewOpacity(0.75f) : BackgroundColor.Desaturate(0.75f); })
+		.BorderImage(FAppStyle::GetBrush("AnimTimeline.Outliner.DefaultBorder"))
+		.BorderBackgroundColor_Lambda([this](){ return GetModel()->IsTrackSelected(AsShared()) ? FAppStyle::GetSlateColor("SelectionColor").GetSpecifiedColor().CopyWithNewOpacity(0.75f) : BackgroundColor.Desaturate(0.75f); })
 		[
 			CurveWidget
 		];
@@ -252,7 +267,7 @@ TSharedRef<SWidget> FAnimTimelineTrack_Curve::MakeCurveWidget()
 			.Visibility_Lambda([this]()
 			{  
 				// Dont show curves in parent tracks when children are expanded
-				return !IsExpanded() || GetChildren().Num() == 0 ? EVisibility::Visible : EVisibility::Hidden;
+				return ShowCurves() ? EVisibility::Visible : EVisibility::Hidden;
 			})
 			.CurveThickness_Lambda([this]()
 			{
@@ -266,7 +281,7 @@ TSharedRef<SWidget> FAnimTimelineTrack_Curve::MakeCurveWidget()
 			.Visibility_Lambda([this]()
 			{  
 				// Dont show curves in parent tracks when children are expanded
-				return (!IsExpanded() || GetChildren().Num() == 0) && IsHovered() ? EVisibility::Visible : EVisibility::Hidden;
+				return ShowCurves() && IsHovered() ? EVisibility::Visible : EVisibility::Hidden;
 			})
 		];
 }
@@ -299,6 +314,12 @@ void FAnimTimelineTrack_Curve::AddCurveTrackButton(TSharedPtr<SHorizontalBox> In
 	];
 }
 
+bool FAnimTimelineTrack_Curve::ShowCurves() const
+{
+	// Dont show curves in parent tracks when children are expanded
+	return !IsExpanded() || Children.Num() == 0;
+}
+
 TSharedRef<SWidget> FAnimTimelineTrack_Curve::BuildCurveTrackMenu()
 {
 	FMenuBuilder MenuBuilder(true, GetModel()->GetCommandList());
@@ -320,14 +341,56 @@ void FAnimTimelineTrack_Curve::AddToContextMenu(FMenuBuilder& InMenuBuilder, TSe
 {
 	if(!InOutExistingMenuTypes.Contains(FAnimTimelineTrack_Curve::GetTypeName()))
 	{
-		InMenuBuilder.BeginSection("Curve", LOCTEXT("CurveMenuSection", "Curve"));
+		InMenuBuilder.BeginSection("EditCurve", LOCTEXT("CurveEditMenuSection", "Curve Edit"));
 		{
-			InMenuBuilder.AddMenuEntry(FAnimSequenceTimelineCommands::Get().EditSelectedCurves);
-			InMenuBuilder.AddMenuEntry(FAnimSequenceTimelineCommands::Get().RemoveSelectedCurves);
+			InMenuBuilder.AddMenuEntry(FAnimSequenceTimelineCommands::Get().PasteDataIntoCurve);
 		}
 		InMenuBuilder.EndSection();
+		
+		InMenuBuilder.BeginSection("EditSelection", LOCTEXT("CurveSelectionEditMenuSection", "Selection Edit"));
+		{
+			InMenuBuilder.AddMenuEntry(FGenericCommands::Get().Cut);
+			InMenuBuilder.AddMenuEntry(FGenericCommands::Get().Copy);
+			InMenuBuilder.AddMenuEntry(FGenericCommands::Get().Paste);
+			InMenuBuilder.AddMenuEntry(FGenericCommands::Get().Delete);
 
+			InMenuBuilder.AddSeparator();
+			
+			InMenuBuilder.AddMenuEntry(FAnimSequenceTimelineCommands::Get().EditSelectedCurves);
+			InMenuBuilder.AddMenuEntry(FAnimSequenceTimelineCommands::Get().CopySelectedCurveNames);
+		}
+		InMenuBuilder.EndSection();
+		
 		InOutExistingMenuTypes.Add(FAnimTimelineTrack_Curve::GetTypeName());
+	}
+}
+
+void FAnimTimelineTrack_Curve::Copy(UAnimTimelineClipboardContent* InOutClipboard) const
+{
+	check(InOutClipboard != nullptr)
+	
+	if (Curves.Num() == 1)
+	{
+		UFloatCurveCopyObject * CopyableCurve = UAnimCurveBaseCopyObject::Create<UFloatCurveCopyObject>();
+		const FRichCurve* InCurve = Curves[0];
+
+		// Copy raw curve data
+		CopyableCurve->Curve.SetName(FName(FullCurveName.ToString()));
+		CopyableCurve->Curve.FloatCurve = *InCurve;
+		CopyableCurve->Curve.SetCurveTypeFlags(AACF_Editable);
+
+		// Copy curve identifier data
+		CopyableCurve->CurveName = CopyableCurve->Curve.GetName();
+		CopyableCurve->CurveType = ERawCurveTrackTypes::RCT_Float;
+
+		// Origin data
+		CopyableCurve->OriginName = GetModel()->GetAnimSequenceBase()->GetFName();
+			
+		InOutClipboard->Curves.Add(CopyableCurve);
+	}
+	else
+	{
+		UE_LOG(LogAnimation, Warning, TEXT("Copying multiple curves from a FAnimTimelineTrack_Curve not supported. Curve: %s"), *FullCurveName.ToString())
 	}
 }
 
@@ -363,13 +426,6 @@ FReply FAnimTimelineTrack_Curve::HandleDoubleClicked(const FGeometry& InGeometry
 void FAnimTimelineTrack_Curve::HandleCurveChanged()
 {
 	ZoomToFit();
-
-	GetModel()->GetAnimSequenceBase()->MarkRawDataAsModified();
-
-	if(UAnimSequence* AnimSequence = Cast<UAnimSequence>(GetModel()->GetAnimSequenceBase()))
-	{
-		AnimSequence->bNeedsRebake = true;
-	}
 }
 
 void FAnimTimelineTrack_Curve::PostUndoRedo()
@@ -382,7 +438,7 @@ void FAnimTimelineTrack_Curve::HendleEditCurve()
 	TArray<IAnimationEditor::FCurveEditInfo> EditCurveInfo;
 	for(int32 CurveIndex = 0; CurveIndex < Curves.Num(); ++CurveIndex)
 	{
-		FSmartName Name;
+		FName Name;
 		ERawCurveTrackTypes Type;
 		int32 EditCurveIndex;
 		GetCurveEditInfo(CurveIndex, Name, Type, EditCurveIndex);
@@ -392,7 +448,7 @@ void FAnimTimelineTrack_Curve::HendleEditCurve()
 	StaticCastSharedRef<FAnimModel_AnimSequenceBase>(GetModel())->OnEditCurves.ExecuteIfBound(GetModel()->GetAnimSequenceBase(), EditCurveInfo, nullptr);
 }
 
-void FAnimTimelineTrack_Curve::GetCurveEditInfo(int32 InCurveIndex, FSmartName& OutName, ERawCurveTrackTypes& OutType, int32& OutCurveIndex) const
+void FAnimTimelineTrack_Curve::GetCurveEditInfo(int32 InCurveIndex, FName& OutName, ERawCurveTrackTypes& OutType, int32& OutCurveIndex) const
 {
 	OutName = OuterCurveName;
 	OutType = OuterType;

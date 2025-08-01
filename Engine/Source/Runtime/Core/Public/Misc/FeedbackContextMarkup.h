@@ -2,8 +2,12 @@
 
 #pragma once
 
-#include "CoreTypes.h"
+#include "Containers/UnrealString.h"
 #include "CoreFwd.h"
+#include "CoreTypes.h"
+
+class FFeedbackContext;
+class FText;
 
 /**
  * A text-based markup language can be used to allow external processes to control the state 
@@ -18,15 +22,15 @@
  * Update the progress and set a status message for the current operation:
  *		@progress 'Compiling source code...' 50%
  */
-class CORE_API FFeedbackContextMarkup
+class FFeedbackContextMarkup
 {
 public:
 
 	/** Markup stack manipulation. */
-	static bool ParseCommand(const FString& Line, FFeedbackContext* Warn);
+	static CORE_API bool ParseCommand(const FString& Line, FFeedbackContext* Warn);
 
 	/** Utility functions for dealing with external processes. */
-	static bool PipeProcessOutput(const FText& Description, const FString& URL, const FString& Params, FFeedbackContext* Warn, int32* OutExitCode);
+	static CORE_API bool PipeProcessOutput(const FText& Description, const FString& URL, const FString& Params, FFeedbackContext* Warn, int32* OutExitCode);
 
 private:
 

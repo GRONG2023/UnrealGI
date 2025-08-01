@@ -1,14 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "Engine/LatentActionManager.h"
-#include "Kismet/BlueprintFunctionLibrary.h"
 #include "AutomationScreenshotOptions.h"
+#include "CoreMinimal.h"
+#include "Engine/EngineBaseTypes.h"
+#include "Engine/LatentActionManager.h"
 #include "HAL/IConsoleManager.h"
-#include "Templates/UniquePtr.h"
+#include "Kismet/BlueprintFunctionLibrary.h"
 #include "Misc/AutomationTest.h"
+#include "Templates/UniquePtr.h"
+#include "UObject/ObjectMacros.h"
 #include "AutomationBlueprintFunctionLibrary.generated.h"
 
 class ACameraActor;
@@ -25,7 +26,7 @@ public:
 	virtual void SetDone() { Done = true; };
 
 protected:
-	bool Done;
+	bool Done = false;
 };
 
 /**
@@ -73,11 +74,13 @@ class FUNCTIONALTESTING_API UAutomationBlueprintFunctionLibrary : public UBluepr
 	GENERATED_UCLASS_BODY()
 	
 public:
+	UFUNCTION(BlueprintCallable, Category = "Automation")
 	static void FinishLoadingBeforeScreenshot();
 
 	static bool TakeAutomationScreenshotInternal(UObject* WorldContextObject, const FString& ScreenShotName, const FString& Notes, FAutomationScreenshotOptions Options);
 
 	static FAutomationScreenshotData BuildScreenshotData(const FString& MapOrContext, const FString& ScreenShotName, int32 Width, int32 Height);
+	static FAutomationScreenshotData BuildScreenshotData(UWorld* InWorld, const FString& ScreenShotName, int32 Width, int32 Height);
 
 	static FIntPoint GetAutomationScreenshotSize(const FAutomationScreenshotOptions& Options);
 
@@ -134,8 +137,29 @@ public:
 	/**
 	* take high res screenshot in editor.
 	*/
-	UFUNCTION(BlueprintCallable, Category = "Automation", meta = (AdvancedDisplay="Camera, bMaskEnabled, bCaptureHDR, ComparisonTolerance, ComparisonNotes"))
-	static UAutomationEditorTask* TakeHighResScreenshot(int32 ResX, int32 ResY, FString Filename, ACameraActor* Camera = nullptr, bool bMaskEnabled = false, bool bCaptureHDR = false, EComparisonTolerance ComparisonTolerance = EComparisonTolerance::Low, FString ComparisonNotes = TEXT(""), float Delay = 0.0);
+	UFUNCTION(BlueprintCallable, Category = "Automation", meta = (AdvancedDisplay="Camera, bMaskEnabled, bCaptureHDR, ComparisonTolerance, ComparisonNotes, bForceGameView"))
+	static UAutomationEditorTask* TakeHighResScreenshot(int32 ResX, int32 ResY, FString Filename, ACameraActor* Camera = nullptr, bool bMaskEnabled = false, bool bCaptureHDR = false, EComparisonTolerance ComparisonTolerance = EComparisonTolerance::Low, FString ComparisonNotes = TEXT(""), float Delay = 0.0, bool bForceGameView = true);
+
+	/**
+	* request image comparison.
+	* @param ImageFilePath	Absolute path to the image location. All 8bit RGBA channels supported formats by the engine are accepted.
+	* @param ComparisonName	Optional name for the comparison, by default the basename of ImageFilePath is used
+	* @return				True if comparison was successfully enqueued
+	*/
+	UFUNCTION(BlueprintCallable, Category = "Automation", meta = (AdvancedDisplay = "ComparisonName, ComparisonTolerance, ComparisonNotes", HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"))
+	static bool CompareImageAgainstReference(FString ImageFilePath, FString ComparisonName = TEXT(""), EComparisonTolerance ComparisonTolerance = EComparisonTolerance::Low, FString ComparisonNotes = TEXT(""), UObject* WorldContextObject = nullptr);
+
+	/**
+	* Add Telemetry data to currently running automated test.
+	*/
+	UFUNCTION(BlueprintCallable, Category = "Automation", meta = (AdvancedDisplay = "Context"))
+	static void AddTestTelemetryData(FString DataPoint, float Measurement, FString Context = TEXT(""));
+
+	/**
+	* Set Telemetry data storage name of currently running automated test.
+	*/
+	UFUNCTION(BlueprintCallable, Category = "Automation")
+	static void SetTestTelemetryStorage(FString StorageName);
 
 	/**
 	 * 
@@ -150,10 +174,29 @@ public:
 	static FAutomationScreenshotOptions GetDefaultScreenshotOptionsForRendering(EComparisonTolerance Tolerance = EComparisonTolerance::Low, float Delay = 0.2);
 
 	/**
-	 * Mute the report of log error and warning matching a pattern during an automated test
+	 * Mute the report of log error and warning matching a pattern during an automated test. Treat the pattern as regex by default.
+	 * @param ExpectedPatternString	Expects a Regex pattern.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Automation", meta = (AdvancedDisplay = "Occurrences, ExactMatch, IsRegex"))
+	static void AddExpectedLogError(FString ExpectedPatternString, int32 Occurrences = 1, bool ExactMatch = false, bool IsRegex = true);
+
+	/**
+	 * Mute the report of log error and warning matching a plain string during an automated test
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Automation", meta = (AdvancedDisplay = "Occurrences, ExactMatch"))
-	static void AddExpectedLogError(FString ExpectedPatternString, int32 Occurrences = 1, bool ExactMatch = false);
+	static void AddExpectedPlainLogError(FString ExpectedString, int32 Occurrences = 1, bool ExactMatch = false);
+
+	/**
+	 * Expect a specific log message to match a pattern during an automated test regardless of its verbosity. Treat the pattern as regex by default.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Automation", meta = (AdvancedDisplay = "Occurrences, ExactMatch, IsRegex"))
+	static void AddExpectedLogMessage(FString ExpectedPatternString, int32 Occurrences = 1, bool ExactMatch = false, bool IsRegex = true);
+
+	/**
+	 * Expect a specific log message to match a plain string during an automated test regardless of its verbosity
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Automation", meta = (AdvancedDisplay = "Occurrences, ExactMatch"))
+	static void AddExpectedPlainLogMessage(FString ExpectedString, int32 Occurrences = 1, bool ExactMatch = false);
 
 	/**
 	 * Sets all other settings based on an overall value
@@ -167,6 +210,32 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Automation", meta = (HidePin = "WorldContextObject", DefaultToSelf = "WorldContextObject"))
 	static void SetScalabilityQualityToLow(UObject* WorldContextObject);
+
+	/** Sets all viewports of the first found level editor to have the given ViewMode (Lit/Unlit/etc.) **/
+	UFUNCTION(BlueprintCallable, Category = "Automation")
+	static void SetEditorViewportViewMode(EViewModeIndex Index);
+
+	/** Sets all viewports of the first found level editor to have the VisualizeBuffer ViewMode and also display a given buffer (BaseColor/Metallic/Roughness/etc.) **/
+	UFUNCTION(BlueprintCallable, Category = "Automation")
+	static void SetEditorViewportVisualizeBuffer(FName BufferName);
+
+	/**
+	 * Add info to currently running automated test.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Automation")
+	static void AddTestInfo(const FString& InLogItem);
+
+	/**
+	 * Add warning to currently running automated test.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Automation")
+	static void AddTestWarning(const FString& InLogItem);
+
+	/**
+	 * Add error to currently running automated test.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Automation")
+	static void AddTestError(const FString& InLogItem);
 };
 
 #if WITH_AUTOMATION_TESTS
@@ -206,13 +275,15 @@ private:
 	FConsoleVariableSwapperTempl<int32> DefaultFeature_AntiAliasing;
 	FConsoleVariableSwapperTempl<int32> DefaultFeature_AutoExposure;
 	FConsoleVariableSwapperTempl<int32> DefaultFeature_MotionBlur;
-	FConsoleVariableSwapperTempl<int32> PostProcessAAQuality;
 	FConsoleVariableSwapperTempl<int32> MotionBlurQuality;
 	FConsoleVariableSwapperTempl<int32> ScreenSpaceReflectionQuality;
 	FConsoleVariableSwapperTempl<int32> EyeAdaptationQuality;
 	FConsoleVariableSwapperTempl<int32> ContactShadows;
 	FConsoleVariableSwapperTempl<float> TonemapperGamma;
 	FConsoleVariableSwapperTempl<float> TonemapperSharpen;
+	FConsoleVariableSwapperTempl<float> ScreenPercentage;
+	FConsoleVariableSwapperTempl<int32> DynamicResTestScreenPercentage;
+	FConsoleVariableSwapperTempl<int32> DynamicResOperationMode;
 	FConsoleVariableSwapperTempl<float> SecondaryScreenPercentage;
 
 	TWeakObjectPtr<UWorld> WorldPtr;

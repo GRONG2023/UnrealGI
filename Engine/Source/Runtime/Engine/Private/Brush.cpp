@@ -5,18 +5,24 @@
 =============================================================================*/
 
 #include "Engine/Brush.h"
-#include "EngineGlobals.h"
 #include "Engine/Polys.h"
-#include "Engine/Engine.h"
+#include "Engine/Level.h"
+#include "EngineLogs.h"
 #include "Model.h"
 #include "Materials/Material.h"
+#include "MaterialDomain.h"
 #include "Engine/BrushBuilder.h"
 #include "Components/BrushComponent.h"
 #include "ActorEditorUtils.h"
+#include "UObject/UnrealType.h"
 
 #if WITH_EDITOR
 #include "Editor.h"
+#else
+#include "Engine/Engine.h"
+#endif
 
+#if WITH_EDITOR
 /** Define static delegate */
 ABrush::FOnBrushRegistered ABrush::OnBrushRegistered;
 
@@ -143,6 +149,26 @@ void ABrush::CopyPosRotScaleFrom( ABrush* Other )
 	ReregisterAllComponents();
 }
 
+bool ABrush::NeedsRebuild(TArray< TWeakObjectPtr< ULevel > >* OutLevels)
+{
+	LevelsToRebuild.RemoveAllSwap([](const TWeakObjectPtr<ULevel>& Level) { return !Level.IsValid(); });
+
+	if (OutLevels)
+	{
+		*OutLevels = LevelsToRebuild;
+	}
+
+	return(LevelsToRebuild.Num() > 0);
+}
+
+void ABrush::SetNeedRebuild(ULevel* InLevel)
+{
+	if (InLevel)
+	{
+		LevelsToRebuild.AddUnique(InLevel);
+	}
+}
+
 void ABrush::InitPosRotScale()
 {
 	check(BrushComponent);
@@ -158,7 +184,7 @@ void ABrush::SetIsTemporarilyHiddenInEditor( bool bIsHidden )
 		Super::SetIsTemporarilyHiddenInEditor(bIsHidden);
 		
 		ULevel* Level = GetLevel();
-		UModel* Model = Level ? Level->Model : nullptr;
+		UModel* Model = Level ? ToRawPtr(Level->Model) : nullptr;
 
 		if (Level && Model)
 		{
@@ -182,6 +208,46 @@ void ABrush::SetIsTemporarilyHiddenInEditor( bool bIsHidden )
 			}
 		}
 	}
+}
+
+bool ABrush::SetIsHiddenEdLayer(bool bIsHiddenEdLayer)
+{
+	if (Super::SetIsHiddenEdLayer(bIsHiddenEdLayer))
+	{
+		ULevel* Level = GetLevel();
+		UModel* Model = Level ? ToRawPtr(Level->Model) : nullptr;
+		if (Level && Model)
+		{
+			bool bAnySurfaceWasFound = false;
+			for (FBspSurf& Surf : Model->Surfs)
+			{
+				if (Surf.Actor == this)
+				{
+					Surf.bHiddenEdLayer = bIsHiddenEdLayer;
+					bAnySurfaceWasFound = true;
+				}
+			}
+
+			if (bAnySurfaceWasFound)
+			{
+				Level->UpdateModelComponents();
+				Model->InvalidSurfaces = true;
+			}
+		}
+		return true;
+	}
+	return false;
+}
+
+bool ABrush::SupportsLayers() const
+{
+	return !FActorEditorUtils::IsABuilderBrush(this) && Super::SupportsLayers();
+}
+
+bool ABrush::SupportsExternalPackaging() const
+{
+	// Base class ABrush actors do not support OFPA
+	return GetClass() != ABrush::StaticClass() && Super::SupportsExternalPackaging();
 }
 
 void ABrush::PostLoad()
@@ -213,7 +279,7 @@ void ABrush::PostLoad()
 		// They have not been getting fixed up after vertex editing since at least UE2!
 		for(FPoly& Poly : Brush->Polys->Element)
 		{
-			FVector Normal = Poly.Normal;
+			FVector3f Normal = Poly.Normal;
 			if(!Poly.CalcNormal())
 			{
 				if(!Poly.Normal.Equals(Normal))
@@ -271,7 +337,7 @@ bool ABrush::IsLevelBoundsRelevant() const
 {
 	// exclude default brush
 	ULevel* Level = GetLevel();
-	return (Level && this != Level->Actors[1]);
+	return (Level && this != Level->Actors[1].Get());
 }
 
 void ABrush::RebuildNavigationData()

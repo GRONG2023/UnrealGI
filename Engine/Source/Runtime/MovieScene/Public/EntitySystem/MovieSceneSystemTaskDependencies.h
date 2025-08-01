@@ -4,9 +4,15 @@
 
 #include "Async/TaskGraphInterfaces.h"
 #include "Containers/Array.h"
-
-#include "EntitySystem/MovieSceneEntitySystemTypes.h"
+#include "Containers/ContainerAllocationPolicies.h"
 #include "EntitySystem/MovieSceneEntityIDs.h"
+#include "EntitySystem/MovieSceneEntitySystemTypes.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Stats/Stats2.h"
+#include "Templates/SharedPointer.h"
+
+#include <initializer_list>
 
 struct FMovieSceneEntitySystemGraph;
 
@@ -17,6 +23,7 @@ namespace UE
 namespace MovieScene
 {
 
+enum class EEntityThreadingModel : uint8;
 
 struct FSystemTaskPrerequisites
 {
@@ -59,7 +66,7 @@ struct FSystemTaskPrerequisites
 
 	MOVIESCENE_API void FilterByComponent(FGraphEventArray& OutArray, std::initializer_list<FComponentTypeID> ComponentTypes) const;
 
-	void AddMasterTask(const FGraphEventRef& InNewTask)
+	void AddRootTask(const FGraphEventRef& InNewTask)
 	{
 		AddComponentTask(FComponentTypeID::Invalid(), InNewTask);
 	}
@@ -87,26 +94,27 @@ private:
 
 
 
-struct MOVIESCENE_API FSystemSubsequentTasks
+struct FSystemSubsequentTasks
 {
 	using FComponentTypeID = UE::MovieScene::FComponentTypeID;
 
-	void AddMasterTask(FGraphEventRef MasterTask);
+	MOVIESCENE_API void AddRootTask(FGraphEventRef RootTask);
 
-	void AddComponentTask(FComponentTypeID ComponentType, FGraphEventRef ComponentTask);
+	MOVIESCENE_API void AddComponentTask(FComponentTypeID ComponentType, FGraphEventRef ComponentTask);
 
 private:
 
 	friend FMovieSceneEntitySystemGraph;
 
-	FSystemSubsequentTasks(FMovieSceneEntitySystemGraph* InGraph, FGraphEventArray* InAllTasks);
+	MOVIESCENE_API FSystemSubsequentTasks(FMovieSceneEntitySystemGraph* InGraph, FGraphEventArray* InAllTasks, EEntityThreadingModel InThreadingModel);
 
-	void ResetNode(uint16 InNodeID);
+	MOVIESCENE_API void ResetNode(uint16 InNodeID);
 
 	TSharedPtr<UE::MovieScene::FSystemTaskPrerequisites> Subsequents;
 	FMovieSceneEntitySystemGraph* Graph;
 	FGraphEventArray* AllTasks;
 	uint16 NodeID;
+	EEntityThreadingModel ThreadingModel;
 };
 
 

@@ -1,25 +1,26 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ScopedSourceControlProgress.h"
-#include "Misc/App.h"
-#include "ISourceControlProvider.h"
+
 #if SOURCE_CONTROL_WITH_SLATE
-#include "Layout/Visibility.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Docking/TabManager.h"
+#include "ISourceControlProvider.h"
 #include "Input/Reply.h"
+#include "Layout/Visibility.h"
+#include "Misc/App.h"
+#include "RHI.h"
+#include "RenderingThread.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Images/SImage.h"
 #include "Widgets/Images/SThrobber.h"
-#include "Widgets/SBoxPanel.h"
-#include "Widgets/SWindow.h"
-#include "Widgets/Layout/SBorder.h"
 #include "Widgets/Input/SButton.h"
+#include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SUniformGridPanel.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SWindow.h"
 #include "Widgets/Text/STextBlock.h"
-#include "Widgets/Images/SImage.h"
-#include "Framework/Docking/TabManager.h"
-#include "Framework/Application/SlateApplication.h"
-
-#include "EditorStyleSet.h"
 
 #define LOCTEXT_NAMESPACE "SourceControlProgress"
 
@@ -50,7 +51,7 @@ public:
 		TimeStamp = FPlatformTime::Seconds();
 
 		SBorder::Construct( SBorder::FArguments()
-		.BorderImage( FEditorStyle::GetBrush("ChildWindow.Background") )
+		.BorderImage( FAppStyle::Get().GetBrush("ChildWindow.Background") )
 		.Padding(16.0f)
 		.VAlign(VAlign_Center)
 		[
@@ -77,7 +78,7 @@ public:
 					.HAlign(HAlign_Center)
 					[
 						SNew(SImage)
-						.Image(FEditorStyle::GetBrush("SourceControl.ProgressWindow.Warning"))
+						.Image(FAppStyle::Get().GetBrush("SourceControl.ProgressWindow.Warning"))
 					]
 					+SHorizontalBox::Slot()
 					.VAlign(VAlign_Center)
@@ -106,9 +107,9 @@ public:
 					[
 						// buttons
 						SNew(SUniformGridPanel)
-						.SlotPadding(FEditorStyle::GetMargin("StandardDialog.SlotPadding"))
-						.MinDesiredSlotWidth(FEditorStyle::GetFloat("StandardDialog.MinDesiredSlotWidth"))
-						.MinDesiredSlotHeight(FEditorStyle::GetFloat("StandardDialog.MinDesiredSlotHeight"))
+						.SlotPadding(FAppStyle::Get().GetMargin("StandardDialog.SlotPadding"))
+						.MinDesiredSlotWidth(FAppStyle::Get().GetFloat("StandardDialog.MinDesiredSlotWidth"))
+						.MinDesiredSlotHeight(FAppStyle::Get().GetFloat("StandardDialog.MinDesiredSlotHeight"))
 						+SUniformGridPanel::Slot(0, 0)
 						[
 							SNew(SButton)
@@ -182,14 +183,17 @@ private:
 	bool bCancelClicked;
 
 	/** The timer we use to determine when to display the 'long task' message */
-	float TimeStamp;
+	double TimeStamp;
 
 	/** The delegate to call when the cancel button is clicked */
 	FSimpleDelegate OnCancelled;
 };
 
+#endif // SOURCE_CONTROL_WITH_SLATE
+
 FScopedSourceControlProgress::FScopedSourceControlProgress(const FText& InText, const FSimpleDelegate& InOnCancelled)
 {
+#if SOURCE_CONTROL_WITH_SLATE
 	if(!(FApp::IsUnattended() || IsRunningCommandlet()) && !InText.IsEmpty())
 	{
 		TSharedRef<SWindow> Window = SNew(SWindow)
@@ -210,32 +214,50 @@ FScopedSourceControlProgress::FScopedSourceControlProgress(const FText& InText, 
 		TSharedPtr<SWindow> RootWindow = FGlobalTabmanager::Get()->GetRootWindow();
 		FSlateApplication::Get().AddModalWindow(Window, RootWindow, true);
 
-		Window->ShowWindow();	
+		Window->ShowWindow();
 	
 		Tick();
 	}
+#endif //SOURCE_CONTROL_WITH_SLATE
 }
 
 FScopedSourceControlProgress::~FScopedSourceControlProgress()
 {
+#if SOURCE_CONTROL_WITH_SLATE
 	if(WindowPtr.IsValid())
 	{
 		WindowPtr.Pin()->RequestDestroyWindow();
 	}
+#endif
 }
 
 void FScopedSourceControlProgress::Tick()
 {
+#if SOURCE_CONTROL_WITH_SLATE
 	if (!(FApp::IsUnattended() || IsRunningCommandlet()) && WindowPtr.IsValid() && FSlateApplication::Get().CanDisplayWindows())
 	{
+		// Testing if we are already ticking the rendering. That is to prevent a double "BeginFrame" in case the user wrongly uses the FSlateApplication::OnPreTick to start a slow task.
+		bool bIsTicking = FSlateApplication::Get().IsTicking();
+
+		// Mark begin frame.
+		if (!bIsTicking && GIsRHIInitialized)
+		{
+			ENQUEUE_RENDER_COMMAND(BeginFrameCmd)([](FRHICommandListImmediate& RHICmdList) { RHICmdList.BeginFrame(); });
+		}
+
 		// Tick Slate application
 		FSlateApplication::Get().Tick();
 
-		// Sync the game thread and the render thread
+		// End frame so frame fence number gets incremented
+		if (!bIsTicking && GIsRHIInitialized)
+		{
+			ENQUEUE_RENDER_COMMAND(EndFrameCmd)([](FRHICommandListImmediate& RHICmdList) { RHICmdList.EndFrame(); });
+		}
+
+		// Sync the game thread and the render thread. This is needed if many StatusUpdate are called.
 		FSlateApplication::Get().GetRenderer()->Sync();
 	}
+#endif
 }
-
-#endif // SOURCE_CONTROL_WITH_SLATE
 
 #undef LOCTEXT_NAMESPACE

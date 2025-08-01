@@ -3,22 +3,46 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "CoreTypes.h"
+#include "Math/Quat.h"
+#include "Math/Rotator.h"
+#include "Math/Transform.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector.h"
+#include "UObject/ObjectMacros.h"
+
 #include "EulerTransform.generated.h"
 
+class UScriptStruct;
+template <class T> struct TBaseStructure;
+
+UENUM()
+enum class EEulerRotationOrder : uint8
+{
+	XYZ,
+	XZY,
+	YXZ,
+	YZX,
+	ZXY,
+	ZYX
+};
+
 USTRUCT(BlueprintType)
-struct ANIMATIONCORE_API FEulerTransform
+struct FEulerTransform
 {
 	GENERATED_BODY()
+
+	typedef FVector::FReal FReal;
 
 	/**
 	 * The identity transformation (Rotation = FRotator::ZeroRotator, Translation = FVector::ZeroVector, Scale = (1,1,1)).
 	 */
-	static const FEulerTransform Identity;
+	static ANIMATIONCORE_API const FEulerTransform Identity;
 
 	FORCEINLINE FEulerTransform()
 		: Location(ForceInitToZero)
 		, Rotation(ForceInitToZero)
-		, Scale(ForceInitToZero)
+		, Scale(FVector::OneVector)
 	{
 	}
 
@@ -29,23 +53,19 @@ struct ANIMATIONCORE_API FEulerTransform
 	{
 	}
 
-	FORCEINLINE FEulerTransform(const FTransform& InTransform)
+	FORCEINLINE FEulerTransform(const FRotator& InRotation, const FVector& InLocation, const FVector& InScale)
+		: Location(InLocation)
+		, Rotation(InRotation)
+		, Scale(InScale)
+	{
+	}
+
+	FORCEINLINE explicit FEulerTransform(const FTransform& InTransform)
 		: Location(InTransform.GetLocation())
 		, Rotation(InTransform.GetRotation().Rotator())
 		, Scale(InTransform.GetScale3D())
 	{
 
-	}
-
-	FORCEINLINE FEulerTransform& operator =(const FTransform& InTransform)
-	{
-		FromFTransform(InTransform);
-		return *this;
-	}
-
-	FORCEINLINE operator FTransform() const
-	{
-		return ToFTransform();
 	}
 
 	/** The translation of this transform */
@@ -73,4 +93,27 @@ struct ANIMATIONCORE_API FEulerTransform
 		Rotation = InTransform.GetRotation().Rotator();
 		Scale = InTransform.GetScale3D();
 	}
+
+	// Test if all components of the transforms are equal, within a tolerance.
+	FORCEINLINE bool Equals(const FEulerTransform& Other, FReal Tolerance = KINDA_SMALL_NUMBER) const
+	{
+		return Location.Equals(Other.Location, Tolerance) &&
+			Rotation.Equals(Other.Rotation, Tolerance) &&
+			Scale.Equals(Other.Scale, Tolerance);
+	}
+
+	FORCEINLINE const FVector& GetLocation() const { return Location; }
+	FORCEINLINE FQuat GetRotation() const { return Rotation.Quaternion(); }
+	FORCEINLINE const FRotator& Rotator() const { return Rotation; }
+	FORCEINLINE const FVector& GetScale3D() const { return Scale; }
+	FORCEINLINE void SetLocation(const FVector& InValue) { Location = InValue; }
+	FORCEINLINE void SetRotation(const FQuat& InValue) { Rotation = InValue.Rotator(); }
+	FORCEINLINE void SetRotator(const FRotator& InValue) { Rotation = InValue; }
+	FORCEINLINE void SetScale3D(const FVector& InValue) { Scale = InValue; }
+	FORCEINLINE void NormalizeRotation() {}
+};
+
+template<> struct TBaseStructure<FEulerTransform>
+{
+	static UScriptStruct* Get() { return FEulerTransform::StaticStruct(); }
 };

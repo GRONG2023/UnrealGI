@@ -1,9 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "AnimModel_AnimComposite.h"
+#include "AnimTimeline/AnimModel_AnimComposite.h"
 #include "Animation/AnimComposite.h"
-#include "AnimTimelineTrack.h"
-#include "AnimTimelineTrack_CompositePanel.h"
+#include "AnimTimeline/AnimTimelineTrack.h"
+#include "AnimTimeline/AnimTimelineTrack_CompositePanel.h"
 #include "Animation/DebugSkelMeshComponent.h"
 #include "AnimPreviewInstance.h"
 #include "IPersonaPreviewScene.h"
@@ -22,16 +22,16 @@ void FAnimModel_AnimComposite::RefreshTracks()
 	ClearTrackSelection();
 
 	// Clear all tracks
-	RootTracks.Empty();
+	ClearRootTracks();
 
 	// Add the composite root track
 	if(!CompositeRoot.IsValid())
 	{
-		CompositeRoot = MakeShared<FAnimTimelineTrack>(LOCTEXT("CompositeTitle", "Composite"), LOCTEXT("CompositeTooltip", "Composite animation track"), SharedThis(this), true);
+		CompositeRoot = MakeShared<FAnimTimelineTrack_CompositeRoot>(SharedThis(this));
 	}
 
 	CompositeRoot->ClearChildren();
-	RootTracks.Add(CompositeRoot.ToSharedRef());
+	AddRootTrack(CompositeRoot.ToSharedRef());
 
 	TSharedRef<FAnimTimelineTrack_CompositePanel> CompositePanel = MakeShared<FAnimTimelineTrack_CompositePanel>(SharedThis(this));
 	CompositeRoot->AddChild(CompositePanel);
@@ -75,16 +75,16 @@ void FAnimModel_AnimComposite::RecalculateSequenceLength()
 		AnimComposite->InvalidateRecursiveAsset();
 
 		float NewSequenceLength = CalculateSequenceLengthOfEditorObject();
-		if (NewSequenceLength != AnimComposite->SequenceLength)
+		if (NewSequenceLength != AnimComposite->GetPlayLength())
 		{
 			ClampToEndTime(NewSequenceLength);
 
-			AnimComposite->SetSequenceLength(NewSequenceLength);
+			AnimComposite->SetCompositeLength(NewSequenceLength);
 
-			// Reset view if we changed length (note: has to be done after ->SetSequenceLength)!
+			// Reset view if we changed length (note: has to be done after ->SetCompositeLength)!
 			UpdateRange();
 
-			UAnimPreviewInstance* PreviewInstance = (GetPreviewScene()->GetPreviewMeshComponent()) ? GetPreviewScene()->GetPreviewMeshComponent()->PreviewInstance : nullptr;
+			UAnimPreviewInstance* PreviewInstance = (GetPreviewScene()->GetPreviewMeshComponent()) ? ToRawPtr(GetPreviewScene()->GetPreviewMeshComponent()->PreviewInstance) : nullptr;
 			if (PreviewInstance)
 			{
 				// Re-set the position, so instance is clamped properly

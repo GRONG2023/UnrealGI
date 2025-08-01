@@ -1,13 +1,19 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 using AutomationTool;
+using EpicGames.BuildGraph;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Xml;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using UnrealBuildBase;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 
-namespace BuildGraph.Tasks
+using static AutomationTool.CommandUtils;
+
+namespace AutomationTool.Tasks
 {
 	/// <summary>
 	/// Parameters for a <see cref="WriteTextFileTask"/>.
@@ -49,7 +55,7 @@ namespace BuildGraph.Tasks
 	/// Writes text to a file.
 	/// </summary>
 	[TaskElement("WriteTextFile", typeof(WriteTextFileTaskParameters))]
-	public class WriteTextFileTask : CustomTask
+	public class WriteTextFileTask : BgTaskImpl
 	{
 		/// <summary>
 		/// Parameters for this task.
@@ -71,7 +77,7 @@ namespace BuildGraph.Tasks
 		/// <param name="Job">Information about the current job.</param>
 		/// <param name="BuildProducts">Set of build products produced by this node.</param>
 		/// <param name="TagNameToFileSet">Mapping from tag names to the set of files they include.</param>
-		public override void Execute(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
+		public override async Task ExecuteAsync(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
 		{
 			string FileText = Parameters.Text;
 
@@ -83,7 +89,7 @@ namespace BuildGraph.Tasks
 					FileText += Environment.NewLine;
 				}
 
-				HashSet<FileReference> Files = ResolveFilespec(CommandUtils.RootDirectory, Parameters.Files, TagNameToFileSet);
+				HashSet<FileReference> Files = ResolveFilespec(Unreal.RootDirectory, Parameters.Files, TagNameToFileSet);
 				if (Files.Any())
 				{
 					FileText += string.Join(Environment.NewLine, Files.Select(f => f.FullName));
@@ -98,14 +104,23 @@ namespace BuildGraph.Tasks
 
 			if (Parameters.Append)
 			{
-				CommandUtils.LogInformation(string.Format("Appending text to file '{0}': {1}", Parameters.File, FileText));
-				FileReference.AppendAllText(Parameters.File, Environment.NewLine + FileText);
+				Logger.LogInformation("{Text}", string.Format("Appending text to file '{0}': {1}", Parameters.File, FileText));
+				await FileReference.AppendAllTextAsync(Parameters.File, Environment.NewLine + FileText);
 			}
 			else
 			{
-				CommandUtils.LogInformation(string.Format("Writing text to file '{0}': {1}", Parameters.File, FileText));
-				FileReference.WriteAllText(Parameters.File, FileText);
+				Logger.LogInformation("{Text}", string.Format("Writing text to file '{0}': {1}", Parameters.File, FileText));
+				await FileReference.WriteAllTextAsync(Parameters.File, FileText);
 			}
+
+			// Apply the optional tag to the build products
+			foreach (string TagName in FindTagNamesFromList(Parameters.Tag))
+			{
+				FindOrAddTagSet(TagNameToFileSet, TagName).Add(Parameters.File);
+			}
+
+			// Add them to the set of build products
+			BuildProducts.Add(Parameters.File);
 		}
 
 		/// <summary>

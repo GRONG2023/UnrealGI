@@ -2,21 +2,50 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/ContainerAllocationPolicies.h"
+#include "UniversalObjectLocatorFwd.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "CoreTypes.h"
+#include "Evaluation/MovieSceneCompletionMode.h"
+#include "Internationalization/Text.h"
+#include "Misc/AssertionMacros.h"
 #include "Misc/Guid.h"
-#include "MovieSceneSignedObject.h"
-#include "MovieSceneTrack.h"
+#include "MovieSceneFwd.h"
+#include "MovieSceneObjectBindingID.h" // only for FMovieSceneObjectBindingID in .gen.cpp
+#include "MovieSceneSection.h" // only for FMovieSceneTimecodeSource in .gen.cpp
 #include "MovieSceneSequenceID.h"
+#include "MovieSceneSignedObject.h"
+#include "UniversalObjectLocatorResolveParams.h"
+#include "MovieSceneTrack.h"
+#include "Templates/SubclassOf.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "MovieSceneSequence.generated.h"
 
+class FArchive;
+class FObjectPreSaveContext;
+class IMovieScenePlayer;
 class ITargetPlatform;
 class UMovieScene;
 class UMovieSceneCompiledData;
 class UMovieSceneEntitySystemLinker;
-
-struct FMovieScenePossessable;
+class UMovieSceneTrack;
+class UObject;
+struct FFrame;
 struct FMovieSceneObjectCache;
+struct FMovieScenePossessable;
+struct FMovieSceneTimecodeSource;
+struct FUniversalObjectLocator;
+struct FMovieSceneBindingReferences;
+
+namespace UE::MovieScene
+{
+	struct FSharedPlaybackState;
+}
 
 enum class ETrackSupport
 {
@@ -38,6 +67,8 @@ class UMovieSceneSequence
 {
 public:
 
+	using FSharedPlaybackState = UE::MovieScene::FSharedPlaybackState;
+
 	GENERATED_BODY()
 
 	MOVIESCENE_API UMovieSceneSequence(const FObjectInitializer& Init);
@@ -52,8 +83,33 @@ public:
 	 * @param Context Optional context required to bind the specified object (for instance, a parent spawnable object)
 	 * @see UnbindPossessableObjects
 	 */
+	MOVIESCENE_API virtual bool MakeLocatorForObject(UObject* Object, UObject* Context, FUniversalObjectLocator& OutLocator) const;
+
+	/**
+	 * Retrieve core UOL-based binding references for this sequence type.
+	 */
+	MOVIESCENE_API FMovieSceneBindingReferences* GetBindingReferences();
+
+	/**
+	 * (Optional) Retrieve core UOL-based binding references for this sequence type.
+	 */
+	MOVIESCENE_API virtual const FMovieSceneBindingReferences* GetBindingReferences() const;
+
+	/**
+	 * Unloads an object that has been loaded via a locator.
+	 */
+	MOVIESCENE_API void UnloadBoundObject(const UE::UniversalObjectLocator::FResolveParams& ResolveParams, const FGuid& ObjectId, int32 BindingIndex);
+
+	/**
+	 * Called when Sequencer has created an object binding for a possessable object
+	 * 
+	 * @param ObjectId The guid used to map to the possessable object.  Note the guid can be bound to multiple objects at once
+	 * @param PossessedObject The runtime object which was possessed.
+	 * @param Context Optional context required to bind the specified object (for instance, a parent spawnable object)
+	 * @see UnbindPossessableObjects
+	 */
 	virtual void BindPossessableObject(const FGuid& ObjectId, UObject& PossessedObject, UObject* Context) PURE_VIRTUAL(UMovieSceneSequence::BindPossessableObject,);
-	
+
 	/**
 	 * Check whether the given object can be possessed by this animation.
 	 *
@@ -64,13 +120,23 @@ public:
 	virtual bool CanPossessObject(UObject& Object, UObject* InPlaybackContext) const PURE_VIRTUAL(UMovieSceneSequence::CanPossessObject, return false;);
 
 	/**
-	 * Locate all the objects that correspond to the specified object ID, using the specified context
+	 * Locate all the objects that correspond to the specified object ID, using the specified context. Called when GetBindingReferences() is null.
 	 *
 	 * @param ObjectId				The unique identifier of the object.
 	 * @param Context				Optional context to use to find the required object (for instance, a parent spawnable object)
 	 * @param OutObjects			Destination array to add found objects to
 	 */
-	virtual void LocateBoundObjects(const FGuid& ObjectId, UObject* Context, TArray<UObject*, TInlineAllocator<1>>& OutObjects) const PURE_VIRTUAL(UMovieSceneSequence::LocateBoundObjects, );
+	UE_DEPRECATED(5.4, "Please call the FResolveParams overload")
+	virtual void LocateBoundObjects(const FGuid& ObjectId, UObject* Context, TArray<UObject*, TInlineAllocator<1>>& OutObjects) const {}
+
+	/**
+	 * Locate all the objects that correspond to the specified object ID, using the specified parameters
+	 *
+	 * @param ObjectId				The unique identifier of the object.
+	 * @param Params				Resolve parameters specifying the context and fragment-specific parameters
+	 * @param OutObjects			Destination array to add found objects to
+	 */
+	MOVIESCENE_API void LocateBoundObjects(const FGuid& ObjectId, const UE::UniversalObjectLocator::FResolveParams& ResolveParams, TArray<UObject*, TInlineAllocator<1>>& OutObjects) const;
 
 	/**
 	 * Locate all the objects that correspond to the specified object ID, using the specified context
@@ -79,7 +145,7 @@ public:
 	 * @param Context				Optional context to use to find the required object (for instance, a parent spawnable object)
 	 * @return An array of all bound objects
 	 */
-	TArray<UObject*, TInlineAllocator<1>> LocateBoundObjects(const FGuid& ObjectId, UObject* Context) const
+	TArray<UObject*, TInlineAllocator<1>> LocateBoundObjects(const FGuid& ObjectId, const UE::UniversalObjectLocator::FResolveParams& Context) const
 	{
 		TArray<UObject*, TInlineAllocator<1>> OutObjects;
 		LocateBoundObjects(ObjectId, Context, OutObjects);
@@ -94,6 +160,15 @@ public:
 	 * @return The object's guid, or zero guid if the object is not a valid possessable in the current context
 	 */
 	MOVIESCENE_API FGuid FindPossessableObjectId(UObject& Object, UObject* Context) const;
+
+	/**
+	 * Optional method for efficient lookup of an object binding from an actual object in the world
+	 *
+	 * @param ObjectId				The unique identifier of the object.
+	 * @param Context				Optional context to use to find the required object (for instance, a parent spawnable object or its world)
+	 * @return The object's guid, or zero guid if the object is not a valid possessable in the current context
+	 */
+	virtual FGuid FindBindingFromObject(UObject* InObject, UObject* Context) const { return FGuid(); }
 
 	/**
 	 * Called to validate the specified object cache by removing anything that should be deemed out of date
@@ -191,7 +266,10 @@ public:
 	/**
 	 * Called to retrieve or construct a director instance to be used for the specified player
 	 */
-	virtual UObject* CreateDirectorInstance(IMovieScenePlayer& Player, FMovieSceneSequenceID SequenceID) { return nullptr; }
+	virtual UObject* CreateDirectorInstance(TSharedRef<const FSharedPlaybackState> SharedPlaybackState, FMovieSceneSequenceID SequenceID) { return nullptr; }
+
+	UE_DEPRECATED(5.4, "Please use the version that takes a SharedPlaybackState")
+	UObject* CreateDirectorInstance(IMovieScenePlayer& Player, FMovieSceneSequenceID SequenceID);
 
 	MOVIESCENE_API virtual EMovieSceneServerClientMask OverrideNetworkMask(EMovieSceneServerClientMask InDefaultMask) const;
 
@@ -207,10 +285,16 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Sequencer|Sequence")
 	MOVIESCENE_API const TArray<FMovieSceneObjectBindingID>& FindBindingsByTag(FName InBindingName) const;
 
+	/**
+	 * Get the earliest timecode source out of all of the movie scene sections contained within this sequence's movie scene.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Sequencer|Sequence")
+	MOVIESCENE_API FMovieSceneTimecodeSource GetEarliestTimecodeSource() const;
+
 public:
 
 	MOVIESCENE_API virtual void PostLoad() override;
-	MOVIESCENE_API virtual void PreSave(const ITargetPlatform* TargetPlatform) override;
+	MOVIESCENE_API virtual void PreSave(FObjectPreSaveContext ObjectSaveContext) override;
 	MOVIESCENE_API virtual void BeginDestroy() override;
 	MOVIESCENE_API virtual void PostDuplicate(bool bDuplicateForPIE) override;
 
@@ -227,7 +311,7 @@ public:
 	}
 
 	/**
-	 * Check whether this sequence is playable directly outside of a master sub sequence or not
+	 * Check whether this sequence is playable directly outside of a root sub sequence or not
 	 *
 	 * @return True if this sequences cooked data will include all the necessary information to be played back on its own, false if this data is not present in cooked builds
 	 */
@@ -237,7 +321,7 @@ public:
 	}
 
 	/**
-	 * Assign whether this sequence is playable directly outside of a master sub sequence or not
+	 * Assign whether this sequence is playable directly outside of a root sub sequence or not
 	 *
 	 * @param bInPlayableDirectly   When true, this sequence's cooked data will include all the necessary information to be played back on its own. When false this data will be culled resulting in less memory usage.
 	 */
@@ -265,9 +349,13 @@ public:
 
 private:
 
+#if WITH_EDITOR
+	bool OptimizeForCook();
+#endif
+
 	/** Serialized compiled data - should only be used through UMovieSceneCompiledDataManager */
 	UPROPERTY(Instanced)
-	UMovieSceneCompiledData* CompiledData;
+	TObjectPtr<UMovieSceneCompiledData> CompiledData;
 
 public:
 
@@ -286,7 +374,7 @@ protected:
 	bool bParentContextsAreSignificant;
 
 	/**
-	 * When true, this sequence should be compiled as if it is playable directly (outside of a master sequence). When false, various compiled data will be omitted, preventing direct playback at runtime (although will still play as a sub sequence)
+	 * When true, this sequence should be compiled as if it is playable directly (outside of a root sequence). When false, various compiled data will be omitted, preventing direct playback at runtime (although will still play as a sub sequence)
 	 */
 	UPROPERTY()
 	bool bPlayableDirectly;
@@ -307,6 +395,6 @@ public:
 	/*
 	 * Sequences can determine whether they support a particular track type
 	 */
-	virtual ETrackSupport IsTrackSupported(TSubclassOf<class UMovieSceneTrack> InTrackClass) const { return ETrackSupport::Default; }
+	virtual ETrackSupport IsTrackSupported(TSubclassOf<UMovieSceneTrack> InTrackClass) const { return ETrackSupport::Default; }
 #endif
 };

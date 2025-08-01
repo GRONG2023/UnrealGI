@@ -2,17 +2,18 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
 #include "CoreTypes.h"
 #include "Templates/UniquePtr.h"
-#include "Containers/ArrayView.h"
-#include "Containers/Array.h"
 #include "UObject/NameTypes.h"
+#include "UObject/TopLevelAssetPath.h"
 
-struct FAssetData;
-
+class FText;
 class UBlueprint;
-class UObject;
 class UClass;
+class UObject;
+struct FAssetData;
 
 /**
  * Interface used to define how to interact with a blueprint within an asset
@@ -48,7 +49,8 @@ public:
 	 *@param OutReason       (Optional) An optional failure text to set
 	 *@return true if the specified asset supports nativization, false otherwise
 	 */
-	virtual bool SupportsNativization(const UObject* InAsset, const UBlueprint* InBlueprint, FText* OutReason) const { return true; }
+	UE_DEPRECATED(5.0, "Blueprint Nativization has been removed as a supported feature. This API will eventually be removed.")
+	virtual bool SupportsNativization(const UObject* InAsset, const UBlueprint* InBlueprint, FText* OutReason) const { return false; }
 };
 
 
@@ -68,7 +70,7 @@ public:
 	/**
 	 * Get all the currently registered class names
 	 */
-	TArrayView<const FName> GetRegisteredClassNames() const
+	TArrayView<const FTopLevelAssetPath> GetRegisteredClassNames() const
 	{
 		return ClassNames;
 	}
@@ -81,9 +83,9 @@ public:
 	 * @param ClassName      The name of the class this handler relates to.
 	 */
 	template<typename HandlerType>
-	void RegisterHandler(FName ClassName)
+	void RegisterHandler(FTopLevelAssetPath ClassPathName)
 	{
-		RegisterHandler(ClassName, MakeUnique<HandlerType>());
+		RegisterHandler(ClassPathName, MakeUnique<HandlerType>());
 	}
 
 
@@ -91,10 +93,10 @@ public:
 	 * Register an asset for the specified class name
 	 * @note: Any assets whose class is a child of the specified class will use this handler (unless there is a more specific handler registered)
 	 *
-	 * @param ClassName      The name of the class this handler relates to.
+	 * @param ClassPathName  The path name of the class this handler relates to.
 	 * @param InHandler      The implementation of the handler to use
 	 */
-	KISMET_API void RegisterHandler(FName ClassName, TUniquePtr<IBlueprintAssetHandler>&& InHandler);
+	KISMET_API void RegisterHandler(FTopLevelAssetPath ClassPathName, TUniquePtr<IBlueprintAssetHandler>&& InHandler);
 
 
 	/**
@@ -112,7 +114,7 @@ private:
 	FBlueprintAssetHandler();
 
 	/** Unsorted array of class names, one per-handler below */
-	TArray<FName> ClassNames;
+	TArray<FTopLevelAssetPath> ClassNames;
 
 	/** Array of handlers that relate to the class names above */
 	TArray<TUniquePtr<IBlueprintAssetHandler>> Handlers;

@@ -1,15 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/InputTouchDelegateBinding.h"
-#include "GameFramework/Actor.h"
 #include "Components/InputComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(InputTouchDelegateBinding)
 
 UInputTouchDelegateBinding::UInputTouchDelegateBinding(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
 }
 
-void UInputTouchDelegateBinding::BindToInputComponent(UInputComponent* InputComponent) const
+void UInputTouchDelegateBinding::BindToInputComponent(UInputComponent* InputComponent, UObject* ObjectToBindTo) const
 {
 	TArray<FInputTouchBinding> BindsToAdd;
 
@@ -20,7 +21,7 @@ void UInputTouchDelegateBinding::BindToInputComponent(UInputComponent* InputComp
 		FInputTouchBinding TB( Binding.InputKeyEvent );
 		TB.bConsumeInput = Binding.bConsumeInput;
 		TB.bExecuteWhenPaused = Binding.bExecuteWhenPaused;
-		TB.TouchDelegate.BindDelegate(InputComponent->GetOwner(), Binding.FunctionNameToBind);
+		TB.TouchDelegate.BindDelegate(ObjectToBindTo, Binding.FunctionNameToBind);
 
 		if (Binding.bOverrideParentBinding)
 		{
@@ -42,3 +43,4 @@ void UInputTouchDelegateBinding::BindToInputComponent(UInputComponent* InputComp
 		InputComponent->TouchBindings.Add(BindsToAdd[Index]);
 	}
 }
+

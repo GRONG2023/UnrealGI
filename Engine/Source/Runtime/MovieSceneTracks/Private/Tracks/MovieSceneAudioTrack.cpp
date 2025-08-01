@@ -5,12 +5,13 @@
 #include "Sound/SoundWave.h"
 #include "MovieScene.h"
 #include "Sections/MovieSceneAudioSection.h"
-#include "Evaluation/MovieSceneAudioTemplate.h"
 #include "Kismet/GameplayStatics.h"
 #include "AudioDecompress.h"
 #include "Evaluation/MovieSceneSegment.h"
 #include "Compilation/MovieSceneSegmentCompiler.h"
 #include "MovieSceneCommonHelpers.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneAudioTrack)
 
 #define LOCTEXT_NAMESPACE "MovieSceneAudioTrack"
 
@@ -23,11 +24,6 @@ UMovieSceneAudioTrack::UMovieSceneAudioTrack( const FObjectInitializer& ObjectIn
 	TrackTint = FColor(93, 95, 136);
 	RowHeight = 50;
 #endif
-}
-
-FMovieSceneEvalTemplatePtr UMovieSceneAudioTrack::CreateTemplateForSection(const UMovieSceneSection& InSection) const
-{
-	return FMovieSceneAudioSectionTemplate(*CastChecked<UMovieSceneAudioSection>(&InSection));
 }
 
 const TArray<UMovieSceneSection*>& UMovieSceneAudioTrack::GetAllSections() const
@@ -93,33 +89,74 @@ UMovieSceneSection* UMovieSceneAudioTrack::AddNewSoundOnRow(USoundBase* Sound, F
 	// @todo ^^ Why? Infinte sections would mean there's no starting time?
 	FFrameTime DurationToUse = 1.f * FrameRate; // if all else fails, use 1 second duration
 
-	float SoundDuration = MovieSceneHelpers::GetSoundDuration(Sound);
-	if (SoundDuration != INDEFINITELY_LOOPING_DURATION)
+	const float SoundDuration = MovieSceneHelpers::GetSoundDuration(Sound);
+	if (SoundDuration != INDEFINITELY_LOOPING_DURATION && SoundDuration > 0)
 	{
 		DurationToUse = SoundDuration * FrameRate;
 	}
 
 	// add the section
-	UMovieSceneAudioSection* NewSection = NewObject<UMovieSceneAudioSection>(this, NAME_None, RF_Transactional);
+	UMovieSceneAudioSection* NewSection = Cast<UMovieSceneAudioSection>(CreateNewSection());
 	NewSection->InitialPlacementOnRow( AudioSections, Time, DurationToUse.FrameNumber.Value, RowIndex );
 	NewSection->SetSound(Sound);
+
+#if WITH_EDITORONLY_DATA
+	// Use the timecode info from the sound wave if it's available to populate
+	// the section's TimecodeSource property. Otherwise try the base sound's
+	// timecode offset.
+	TOptional<FSoundWaveTimecodeInfo> TimecodeInfo;
+	if (const USoundWave* SoundWave = Cast<USoundWave>(Sound))
+	{
+		TimecodeInfo = SoundWave->GetTimecodeInfo();
+	}
+
+	if (TimecodeInfo.IsSet())
+	{
+		const double NumSecondsSinceMidnight = TimecodeInfo->GetNumSecondsSinceMidnight();
+		const FTimecode Timecode(NumSecondsSinceMidnight, TimecodeInfo->TimecodeRate, TimecodeInfo->bTimecodeIsDropFrame, /* InbRollover = */ true);
+
+		NewSection->TimecodeSource = FMovieSceneTimecodeSource(Timecode);
+	}
+	else
+	{
+		const TOptional<FSoundTimecodeOffset> TimecodeOffset = Sound->GetTimecodeOffset();
+		if (TimecodeOffset.IsSet())
+		{
+			const double NumSecondsSinceMidnight = TimecodeOffset->NumOfSecondsSinceMidnight;
+
+			// The timecode offset does not carry a rate with it, so just use the
+			// display rate for this movie scene.
+			const FFrameRate DisplayRate = GetTypedOuter<UMovieScene>()->GetDisplayRate();
+			const FTimecode Timecode(NumSecondsSinceMidnight, DisplayRate, /* InbRollover = */ true);
+
+			NewSection->TimecodeSource = FMovieSceneTimecodeSource(Timecode);
+		}
+	}
+#endif
 
 	AudioSections.Add(NewSection);
 
 	return NewSection;
 }
 
-
-bool UMovieSceneAudioTrack::IsAMasterTrack() const
-{
-	UMovieScene* MovieScene = Cast<UMovieScene>(GetOuter());
-	return MovieScene ? MovieScene->IsAMasterTrack(*this) : false;
-}
-
-
 UMovieSceneSection* UMovieSceneAudioTrack::CreateNewSection()
 {
 	return NewObject<UMovieSceneAudioSection>(this, NAME_None, RF_Transactional);
 }
 
+void UMovieSceneAudioTrack::PostRename(UObject* OldOuter, const FName OldName)
+{
+	Super::PostRename(OldOuter, OldName);
+
+	// Recache the channel proxy because attach in FAudioChannelEditorData is dependent upon the outer chain
+	for (TObjectPtr<UMovieSceneSection>& Section : AudioSections)
+	{
+		if (UMovieSceneAudioSection* AudioSection = Cast<UMovieSceneAudioSection>(Section.Get()))
+		{
+			AudioSection->CacheChannelProxy();
+		}
+	}
+}
+
 #undef LOCTEXT_NAMESPACE
+

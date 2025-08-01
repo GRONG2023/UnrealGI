@@ -13,6 +13,8 @@
 
 #include "Evaluation/MovieSceneEvaluationField.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneEventRepeaterSection)
+
 
 void UMovieSceneEventRepeaterSection::ImportEntityImpl(UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity)
 {
@@ -63,7 +65,7 @@ void UMovieSceneEventRepeaterSection::ImportEntityImpl(UMovieSceneEntitySystemLi
 		Event.Ptrs,
 		Params.GetObjectBindingID(),
 		ThisInstance.GetSequenceID(),
-		Context.GetTime() * Context.GetSequenceToRootTransform()
+		Context.GetTime() * Context.GetSequenceToRootSequenceTransform()
 	};
 
 	EventSystem->AddEvent(ThisInstance.GetRootInstanceHandle(), TriggerData);
@@ -77,3 +79,4 @@ bool UMovieSceneEventRepeaterSection::PopulateEvaluationFieldImpl(const TRange<F
 	OutFieldBuilder->AddOneShotEntity(EffectiveRange, this, 0, OutFieldBuilder->AddMetaData(InMetaData));
 	return true;
 }
+

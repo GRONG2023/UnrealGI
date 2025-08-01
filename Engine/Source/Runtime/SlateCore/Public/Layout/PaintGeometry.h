@@ -2,9 +2,10 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "CoreTypes.h"
 #include "Rendering/SlateLayoutTransform.h"
 #include "Rendering/SlateRenderTransform.h"
+#include "Types/SlateVector2.h"
 
 /**
  * A Paint geometry contains the window-space (draw-space) info to draw an element on the screen.
@@ -19,7 +20,7 @@
  *
  *		The DrawScale is only applied to the internal aspects of the draw primitives. e.g. Line thickness, 3x3 grid margins, etc.
  */
-struct SLATECORE_API FPaintGeometry
+struct FPaintGeometry
 {
 	/** 
 	 * !!! DEPRECATED!!! Drawing should only happen in local space to ensure render transforms work.
@@ -29,7 +30,7 @@ struct SLATECORE_API FPaintGeometry
 	 *
 	 * 
 	 */
-	FVector2D DrawPosition;
+	FVector2f DrawPosition;
 
 	/**
 	 * !!! DEPRECATED!!! Drawing should only happen in local space to ensure render transforms work.
@@ -40,7 +41,7 @@ struct SLATECORE_API FPaintGeometry
 	float DrawScale;
 
 	/** Get the Size of the geometry in local space. Must call CommitTransformsIfUsingLegacyConstructor() first if legacy ctor is used. */
-	const FVector2D& GetLocalSize() const { return LocalSize; }
+	UE::Slate::FDeprecateVector2DResult GetLocalSize() const { return UE::Slate::FDeprecateVector2DResult(LocalSize); }
 
 	/** Access the final render transform. Must call CommitTransformsIfUsingLegacyConstructor() first if legacy ctor is used. */
 	const FSlateRenderTransform& GetAccumulatedRenderTransform() const { return AccumulatedRenderTransform; }
@@ -63,10 +64,10 @@ struct SLATECORE_API FPaintGeometry
 
 private:
 	// Mutable to support legacy constructors. Doesn't account for render transforms.
-	mutable FVector2D DrawSize;
+	mutable FVector2f DrawSize;
 
 	// Mutable to support legacy constructors.
-	mutable FVector2D LocalSize;
+	mutable FVector2f LocalSize;
 
 	// final render transform for drawing. Transforms from local space to window space for the draw element.
 	// Mutable to support legacy constructors.
@@ -96,7 +97,7 @@ public:
 	 * @param InAccumulatedLayoutTransform	The accumulated layout transform (from an FGeometry)
 	 * @param InAccumulatedRenderTransform	The accumulated render transform (from an FGeometry)
 	 */
-	FPaintGeometry( const FSlateLayoutTransform& InAccumulatedLayoutTransform, const FSlateRenderTransform& InAccumulatedRenderTransform, const FVector2D& InLocalSize, bool bInHasRenderTransform)
+	FPaintGeometry( const FSlateLayoutTransform& InAccumulatedLayoutTransform, const FSlateRenderTransform& InAccumulatedRenderTransform, const UE::Slate::FDeprecateVector2DParameter& InLocalSize, bool bInHasRenderTransform)
 		: DrawPosition(InAccumulatedLayoutTransform.GetTranslation())
 		, DrawScale(InAccumulatedLayoutTransform.GetScale())
 		, DrawSize(0.0f, 0.0f)
@@ -108,7 +109,7 @@ public:
 	}
 
 	// !!! DEPRECATED!!! This is legacy and should be removed!
-	FPaintGeometry( FVector2D InDrawPosition, FVector2D InDrawSize, float InDrawScale )
+	FPaintGeometry( UE::Slate::FDeprecateVector2DParameter InDrawPosition, UE::Slate::FDeprecateVector2DParameter InDrawSize, float InDrawScale )
 		: DrawPosition(InDrawPosition)
 		, DrawScale(InDrawScale)
 		, DrawSize(InDrawSize)

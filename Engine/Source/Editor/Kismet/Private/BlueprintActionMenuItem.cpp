@@ -1,16 +1,34 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BlueprintActionMenuItem.h"
-#include "EdGraph/EdGraph.h"
-#include "Kismet2/KismetEditorUtilities.h"
-#include "EdGraphSchema_K2.h"
-#include "K2Node.h"
+
 #include "BlueprintNodeSpawner.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "ScopedTransaction.h"
-#include "SNodePanel.h"
-#include "IDocumentationPage.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/Set.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraphSchema_K2.h"
+#include "HAL/PlatformCrt.h"
 #include "IDocumentation.h"
+#include "IDocumentationPage.h"
+#include "Internationalization/Internationalization.h"
+#include "K2Node.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/AssertionMacros.h"
+#include "SNodePanel.h"
+#include "ScopedTransaction.h"
+#include "Templates/Casts.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UnrealTemplate.h"
+#include "Textures/SlateIcon.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+
+class UBlueprint;
+struct FSlateBrush;
 
 #define LOCTEXT_NAMESPACE "BlueprintActionMenuItem"
 
@@ -56,7 +74,7 @@ namespace FBlueprintMenuActionItemImpl
 	 * @param  SpawnedNodesBeginIndex    
 	 * @return 
 	 */
-	static UEdGraphNode* AutowireSpawnedNodes(UEdGraphPin* FromPin, const TArray<UEdGraphNode*>& GraphNodes, int32 const NodesBeginIndex);
+	static UEdGraphNode* AutowireSpawnedNodes(UEdGraphPin* FromPin, const TArray<UEdGraphNode*>& GraphNodes, TArray<UEdGraphNode*>& NewNodes);
 }
 
 //------------------------------------------------------------------------------
@@ -144,19 +162,8 @@ static bool FBlueprintMenuActionItemImpl::IsNodeLinked(UEdGraphPin* LeadingPin, 
 }
 
 //------------------------------------------------------------------------------
-static UEdGraphNode* FBlueprintMenuActionItemImpl::AutowireSpawnedNodes(UEdGraphPin* FromPin, const TArray<UEdGraphNode*>& GraphNodes, int32 const NodesBeginIndex)
+static UEdGraphNode* FBlueprintMenuActionItemImpl::AutowireSpawnedNodes(UEdGraphPin* FromPin, const TArray<UEdGraphNode*>& GraphNodes, TArray<UEdGraphNode*>& OrderedNewNodes)
 {
-	int32 const CurrentGraphNodeCount = GraphNodes.Num();
-	int32 const NewNodeCount = CurrentGraphNodeCount - NodesBeginIndex;
-
-	TArray<UEdGraphNode*> OrderedNewNodes;
-	OrderedNewNodes.Reserve(NewNodeCount);
-	// @TODO: there's gotta be a better way to blit these in
-	for (int32 NodexIndex = NodesBeginIndex; NodexIndex < CurrentGraphNodeCount; ++NodexIndex)
-	{
-		OrderedNewNodes.Add(GraphNodes[NodexIndex]);
-	}
-
 	const EEdGraphPinDirection PinDirection = FromPin->Direction;
 	// should lhs come before rhs?
 	OrderedNewNodes.Sort([PinDirection](UEdGraphNode& Lhs, UEdGraphNode& Rhs)->bool
@@ -239,9 +246,9 @@ UEdGraphNode* FBlueprintActionMenuItem::PerformAction(UEdGraph* ParentGraph, UEd
 		{
 			UEdGraphNode* FromNode = FromPin->GetOwningNode();
 			check(FromNode != nullptr);
-			float const FromNodeX = FromNode->NodePosX;
+			const double FromNodeX = FromNode->NodePosX;
 
-			static const float MinNodeDistance = 60.f; // min distance between spawned nodes (to keep them from overlapping)
+			static const double MinNodeDistance = 60.0; // min distance between spawned nodes (to keep them from overlapping)
 			if (MinNodeDistance > FMath::Abs(FromNodeX - Location.X))
 			{
 				ModifiedLocation.X = FromNodeX - MinNodeDistance;
@@ -253,7 +260,7 @@ UEdGraphNode* FBlueprintActionMenuItem::PerformAction(UEdGraph* ParentGraph, UEd
 	}
 
 	TSet<const UEdGraphNode*> NodesToFocus;
-	int32 const PreSpawnNodeCount = ParentGraph->Nodes.Num();
+	const int32 PreSpawnNodeCount = ParentGraph->Nodes.Num();
 
 	UEdGraphNode* LastSpawnedNode = nullptr;
 	auto BoundObjIt = Bindings.CreateConstIterator();
@@ -268,10 +275,12 @@ UEdGraphNode* FBlueprintActionMenuItem::PerformAction(UEdGraph* ParentGraph, UEd
 			}
 		}
 
-		int32 const PreInvokeNodeCount = ParentGraph->Nodes.Num();
+		const TSet<UEdGraphNode*> OldNodes(ParentGraph->Nodes);
 
 		bool bNewNode = false;
 		LastSpawnedNode = InvokeAction(Action, ParentGraph, ModifiedLocation, BindingsSubset, /*out*/ bNewNode);
+
+		TArray<UEdGraphNode*> NewNodes = TSet<UEdGraphNode*>(ParentGraph->Nodes).Difference(OldNodes).Array();
 		// could already be an existent node, so we have to add here (can't 
 		// catch it as we go through all new nodes)
 		NodesToFocus.Add(LastSpawnedNode);
@@ -282,7 +291,7 @@ UEdGraphNode* FBlueprintActionMenuItem::PerformAction(UEdGraph* ParentGraph, UEd
 		{
 			// make sure to auto-wire after we position the new node (in case
 			// the auto-wire creates a conversion node to put between them)
-			FBlueprintMenuActionItemImpl::AutowireSpawnedNodes(FromPin, ParentGraph->Nodes, PreInvokeNodeCount);
+			FBlueprintMenuActionItemImpl::AutowireSpawnedNodes(FromPin, ParentGraph->Nodes, NewNodes);
 		}
 
 		if (bNewNode)
@@ -297,7 +306,7 @@ UEdGraphNode* FBlueprintActionMenuItem::PerformAction(UEdGraph* ParentGraph, UEd
 
 	if (bSelectNewNode)
 	{
-		int32 const PostSpawnCount = ParentGraph->Nodes.Num();
+		const int32 PostSpawnCount = ParentGraph->Nodes.Num();
 		for (int32 NodeIndex = PreSpawnNodeCount; NodeIndex < PostSpawnCount; ++NodeIndex)
 		{
 			NodesToFocus.Add(ParentGraph->Nodes[NodeIndex]);

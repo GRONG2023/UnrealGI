@@ -1,10 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/TriggerBase.h"
+#include "Async/TaskGraphInterfaces.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Components/BillboardComponent.h"
 #include "Components/ShapeComponent.h"
 #include "Engine/Texture2D.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(TriggerBase)
 
 ATriggerBase::ATriggerBase(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -49,3 +52,4 @@ ATriggerBase::ATriggerBase(const FObjectInitializer& ObjectInitializer)
 	}
 #endif
 }
+

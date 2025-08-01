@@ -26,9 +26,15 @@
 #include "MediaSource.h"
 #include "StreamMediaSource.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MediaPlayer)
+
 #if WITH_EDITOR
 #include "EngineAnalytics.h"
 #endif
+
+
+FLazyName UMediaPlayer::MediaInfoNameSourceNumMips(TEXT("SourceNumMips"));
+FLazyName UMediaPlayer::MediaInfoNameSourceNumTiles(TEXT("SourceNumTiles"));
 
 /* UMediaPlayer structors
  *****************************************************************************/
@@ -41,6 +47,7 @@ UMediaPlayer::UMediaPlayer(const FObjectInitializer& ObjectInitializer)
 	, PlayOnOpen(true)
 	, Shuffle(false)
 	, Loop(false)
+	, Playlist(nullptr)
 	, PlaylistIndex(INDEX_NONE)
 	, TimeDelay(FTimespan::Zero())
 	, HorizontalFieldOfView(90.0f)
@@ -56,9 +63,8 @@ UMediaPlayer::UMediaPlayer(const FObjectInitializer& ObjectInitializer)
 {
 	if (!HasAnyFlags(RF_ClassDefaultObject))
 	{
-		PlayerFacade = MakeShareable(new FMediaPlayerFacade());
+		PlayerFacade = MakeShareable(new FMediaPlayerFacade(this));
 		PlayerFacade->OnMediaEvent().AddUObject(this, &UMediaPlayer::HandlePlayerMediaEvent);
-		Playlist = NewObject<UMediaPlaylist>(GetTransientPackage(), NAME_None, RF_Transactional | RF_Transient);
 	}
 }
 
@@ -97,11 +103,21 @@ bool UMediaPlayer::CanPlayUrl(const FString& Url)
 	return PlayerFacade->CanPlayUrl(Url, GetDefault<UMediaSource>());
 }
 
-void UMediaPlayer::SetPlaylistInternal(UMediaPlaylist* InPlaylist)
+
+void UMediaPlayer::EnsurePlaylist() const
+{
+	if (!Playlist)
+	{
+		SetPlaylistInternal(NewObject<UMediaPlaylist>(GetTransientPackage(), NAME_None, RF_Transactional | RF_Transient));
+	}
+}
+
+
+void UMediaPlayer::SetPlaylistInternal(UMediaPlaylist* InPlaylist) const
 {
 	if (Playlist && Playlist != InPlaylist && Playlist->IsRooted())
 	{
-		// To avoid leaking UObjects we need to remove the old playlist from root set 
+		// To avoid leaking UObjects we need to remove the old playlist from root set
 		// (which has been most likely rooted because this MediaPlayer is in disregard for GC set)
 		Playlist->RemoveFromRoot();
 	}
@@ -121,14 +137,27 @@ void UMediaPlayer::Close()
 
 	PlayerFacade->Close();
 
-	Playlist = nullptr;
-	if (!HasAnyFlags(RF_ClassDefaultObject) && !GExitPurge)
-	{
-		SetPlaylistInternal(NewObject<UMediaPlaylist>(GetTransientPackage(), NAME_None, RF_Transactional | RF_Transient));
-	}
+	SetPlaylistInternal(nullptr);
 
 	PlaylistIndex = INDEX_NONE;
 	PlayOnNext = false;
+}
+
+static const FName MediaModuleName("Media");
+void UMediaPlayer::CleanUpBeforeDestroy()
+{
+	if (!HasAnyFlags(RF_ClassDefaultObject))
+	{
+		IMediaModule* MediaModule = FModuleManager::LoadModulePtr<IMediaModule>(MediaModuleName);
+
+		if (MediaModule != nullptr)
+		{
+			UnregisterWithMediaModule();
+			MediaModule->GetTicker().RemoveTickable(PlayerFacade.ToSharedRef());
+		}
+
+		PlayerFacade->Close();
+	}
 }
 
 
@@ -194,6 +223,114 @@ int32 UMediaPlayer::GetNumTrackFormats(EMediaPlayerTrack TrackType, int32 TrackI
 }
 
 
+FVariant UMediaPlayer::GetMediaInfo(FName InfoName) const
+{
+	return PlayerFacade->GetMediaInfo(InfoName);
+}
+
+TSharedPtr<TMap<FString, TArray<TUniquePtr<IMediaMetadataItem>>>, ESPMode::ThreadSafe> UMediaPlayer::GetMediaMetadata() const
+{
+	return PlayerFacade->GetMediaMetadata();
+}
+
+TMap<FString, FMediaMetadataItemsBPT> UMediaPlayer::GetMediaMetadataItems() const
+{
+	TMap<FString, FMediaMetadataItemsBPT> OutMetadata;
+	if(const TMap<FString, TArray<TUniquePtr<IMediaMetadataItem>>>* MetadataPtr = GetMediaMetadata().Get())
+	{
+		for(const TPair<FString, TArray<TUniquePtr<IMediaMetadataItem>>>& Data : *MetadataPtr)
+		{
+			FMediaMetadataItemsBPT OutItems;
+			for(const TUniquePtr<IMediaMetadataItem>& Item : Data.Value)
+			{
+				if(const IMediaMetadataItem* ItemPtr = Item.Get())
+				{
+					FMediaMetadataItemBPT OutItem;
+					OutItem.LanguageCode = ItemPtr->GetLanguageCode();
+					OutItem.MimeType = ItemPtr->GetMimeType();
+					FVariant TempItem = ItemPtr->GetValue();
+
+					switch (TempItem.GetType())
+					{
+					case EVariantTypes::String:
+						{
+							OutItem.StringData = TempItem.GetValue<FString>();
+							break;
+						}
+					case EVariantTypes::Ansichar:
+					case EVariantTypes::ByteArray:
+						{
+							OutItem.BinaryData = TempItem.GetValue<TArray<uint8>>();
+							break;
+						}
+
+					case EVariantTypes::Bool:
+						{
+							OutItem.StringData = TempItem.GetValue<bool>() ? TEXT("true") : TEXT("false");
+							break;
+						}
+					case EVariantTypes::Double:
+						{
+							OutItem.StringData = FString::SanitizeFloat(TempItem.GetValue<double>());
+							break;
+						}
+					case EVariantTypes::Float:
+						{
+							OutItem.StringData = FString::SanitizeFloat(TempItem.GetValue<float>());
+							break;
+						}
+					case EVariantTypes::UInt8:
+						{
+							OutItem.StringData = FString::Printf(TEXT("%d"), TempItem.GetValue<uint8>());
+							break;
+						}
+					case EVariantTypes::Int8:
+						{
+							OutItem.StringData = FString::Printf(TEXT("%d"), TempItem.GetValue<int8>());
+							break;
+						}
+					case EVariantTypes::UInt16:
+						{
+							OutItem.StringData = FString::Printf(TEXT("%d"), TempItem.GetValue<uint16>());
+							break;
+						}
+					case EVariantTypes::Int16:
+						{
+							OutItem.StringData = FString::Printf(TEXT("%d"), TempItem.GetValue<int16>());
+							break;
+						}
+					case EVariantTypes::UInt32:
+						{
+							OutItem.StringData = FString::Printf(TEXT("%d"), TempItem.GetValue<int32>());
+							break;
+						}
+					case EVariantTypes::Int32:
+						{
+							OutItem.StringData = FString::Printf(TEXT("%d"), TempItem.GetValue<uint32>());
+							break;
+						}
+					case EVariantTypes::UInt64:
+						{
+							OutItem.StringData = FString::Printf(TEXT("%llu"), TempItem.GetValue<uint64>());
+							break;
+						}
+					case EVariantTypes::Int64:
+						{
+							OutItem.StringData = FString::Printf(TEXT("%lld"), TempItem.GetValue<int64>());
+							break;
+						}
+					default:
+						UE_LOG(LogMediaAssets, Warning, TEXT("GetMediaMetadataItems() unhandled FVariant type!"));
+					}
+					OutItems.Items.Add(OutItem);
+				}
+			}
+			OutMetadata.Add(Data.Key, OutItems);
+		}
+	}
+	return OutMetadata;
+}
+
 TSharedRef<FMediaPlayerFacade, ESPMode::ThreadSafe> UMediaPlayer::GetPlayerFacade() const
 {
 	return PlayerFacade.ToSharedRef();
@@ -224,10 +361,15 @@ void UMediaPlayer::GetSupportedRates(TArray<FFloatRange>& OutRates, bool Unthinn
 	Rates.GetRanges((TArray<TRange<float>>&)OutRates);
 }
 
-
 FTimespan UMediaPlayer::GetTime() const
 {
 	return PlayerFacade->GetTime();
+}
+
+FTimespan UMediaPlayer::GetDisplayTime() const
+{
+	auto TimeStamp = PlayerFacade->GetDisplayTimeStamp();
+	return TimeStamp.IsValid() ? TimeStamp.Time : FTimespan::Zero();
 }
 
 UMediaTimeStampInfo* UMediaPlayer::GetTimeStamp() const
@@ -236,6 +378,18 @@ UMediaTimeStampInfo* UMediaPlayer::GetTimeStamp() const
 	if (TimeStampInfo)
 	{
 		FMediaTimeStamp TimeStamp = PlayerFacade->GetTimeStamp();
+		TimeStampInfo->Time = TimeStamp.Time;
+		TimeStampInfo->SequenceIndex = TimeStamp.SequenceIndex;
+	}
+	return TimeStampInfo;
+}
+
+UMediaTimeStampInfo* UMediaPlayer::GetDisplayTimeStamp() const
+{
+	UMediaTimeStampInfo* TimeStampInfo = NewObject<UMediaTimeStampInfo>();
+	if (TimeStampInfo)
+	{
+		FMediaTimeStamp TimeStamp = PlayerFacade->GetDisplayTimeStamp();
 		TimeStampInfo->Time = TimeStamp.Time;
 		TimeStampInfo->SequenceIndex = TimeStamp.SequenceIndex;
 	}
@@ -387,7 +541,11 @@ bool UMediaPlayer::Next()
 {
 	UE_LOG(LogMediaAssets, Verbose, TEXT("%s.Next"), *GetFName().ToString());
 
-	check(Playlist != nullptr);
+	if (Playlist == nullptr)
+	{
+		return false;
+	}
+
 	int32 RemainingAttempts = Playlist->Num();
 
 	if (RemainingAttempts == 0)
@@ -420,9 +578,9 @@ bool UMediaPlayer::OpenFile(const FString& FilePath)
 
 	UE_LOG(LogMediaAssets, Verbose, TEXT("%s.OpenFile %s"), *GetFName().ToString(), *FilePath);
 
-	check(Playlist != nullptr);
+	EnsurePlaylist();
 
-	if (!Playlist->AddFile(FilePath))
+	if (Playlist == nullptr || !Playlist->AddFile(FilePath))
 	{
 		return false;
 	}
@@ -444,7 +602,7 @@ bool UMediaPlayer::OpenPlaylistIndex(UMediaPlaylist* InPlaylist, int32 Index)
 	UE_LOG(LogMediaAssets, Verbose, TEXT("%s.OpenSource %s %i"), *GetFName().ToString(), *InPlaylist->GetFName().ToString(), Index);
 
 	SetPlaylistInternal(InPlaylist);
-	
+
 	if (Index == INDEX_NONE)
 	{
 		return true;
@@ -494,7 +652,14 @@ bool UMediaPlayer::OpenSourceInternal(UMediaSource* MediaSource, const FMediaPla
 		return false;
 	}
 
-	check(Playlist != nullptr);
+	EnsurePlaylist();
+
+	if (Playlist == nullptr)
+	{
+		UE_LOG(LogMediaAssets, Error, TEXT("Failed to create playlist on opening media source %s (%s)"), *MediaSource->GetName(), *MediaSource->GetUrl());
+		return false;
+	}
+
 	Playlist->Add(MediaSource);
 	PlayOnNext |= PlayerFacade->IsPlaying();
 	Playlist->GetNext(PlaylistIndex);
@@ -504,10 +669,10 @@ bool UMediaPlayer::OpenSourceInternal(UMediaSource* MediaSource, const FMediaPla
 	{
 		TArray<FAnalyticsEventAttribute> EventAttributes;
 		EventAttributes.Add(FAnalyticsEventAttribute(TEXT("MediaSourceType"), MediaSource->GetClass()->GetName()));
-		FEngineAnalytics::GetProvider().RecordEvent(TEXT("MediaFramework.MediaSourceOpened"), EventAttributes);	
+		FEngineAnalytics::GetProvider().RecordEvent(TEXT("MediaFramework.MediaSourceOpened"), EventAttributes);
 	}
 #endif
-	
+
 	RegisterWithMediaModule();
 	return PlayerFacade->Open(MediaSource->GetUrl(), MediaSource, PlayerOptions);
 }
@@ -528,9 +693,9 @@ bool UMediaPlayer::OpenUrl(const FString& Url)
 
 	UE_LOG(LogMediaAssets, Verbose, TEXT("%s.OpenUrl %s"), *GetFName().ToString(), *Url);
 
-	check(Playlist != nullptr);
+	EnsurePlaylist();
 
-	if (!Playlist->AddUrl(Url))
+	if (Playlist == nullptr || !Playlist->AddUrl(Url))
 	{
 		return false;
 	}
@@ -557,7 +722,7 @@ void UMediaPlayer::PlayAndSeek()
 	PlayOnNext = false;
 	if (Play())
 	{
-		if (PlayerFacade->ActivePlayerOptions.IsSet() && !PlayerFacade->ActivePlayerOptions->SeekTime.IsZero() && SupportsSeeking())
+		if (PlayerFacade->ActivePlayerOptions.IsSet() && !PlayerFacade->ActivePlayerOptions->SeekTime.IsZero() && SupportsSeeking() && PlayerFacade->ActivePlayerOptions->SeekTimeType == EMediaPlayerOptionSeekTimeType::RelativeToStartTime)
 		{
 			Seek(PlayerFacade->ActivePlayerOptions->SeekTime);
 		}
@@ -569,7 +734,11 @@ bool UMediaPlayer::Previous()
 {
 	UE_LOG(LogMediaAssets, Verbose, TEXT("%s.Previous"), *GetFName().ToString());
 
-	check(Playlist != nullptr);
+	if (Playlist == nullptr)
+	{
+		return false;
+	}
+
 	int32 RemainingAttempts = Playlist->Num();
 
 	if (RemainingAttempts == 0)
@@ -599,6 +768,10 @@ bool UMediaPlayer::Previous()
 bool UMediaPlayer::Reopen()
 {
 	UE_LOG(LogMediaAssets, Verbose, TEXT("%s.Reopen"), *GetFName().ToString());
+	if (Playlist == nullptr)
+	{
+		return false;
+	}
 	return OpenPlaylistIndex(Playlist, PlaylistIndex);
 }
 
@@ -653,7 +826,7 @@ bool UMediaPlayer::SetLooping(bool Looping)
 
 	Loop = Looping;
 
-	return PlayerFacade->SetLooping(Looping);
+	return PlayerFacade->SetLooping(Loop && (!Playlist || Playlist->Num() == 1));
 }
 
 
@@ -732,6 +905,38 @@ bool UMediaPlayer::SupportsSeeking() const
 	return PlayerFacade->CanSeek();
 }
 
+bool UMediaPlayer::SupportsPlaybackTimeRange() const
+{
+	return PlayerFacade->SupportsPlaybackTimeRange();
+}
+
+TRange<FTimespan> UMediaPlayer::GetPlaybackTimeRange(EMediaTimeRangeType InRangeToGet)
+{
+	return PlayerFacade->GetPlaybackTimeRange(InRangeToGet);
+}
+
+bool UMediaPlayer::SetPlaybackTimeRange(const TRange<FTimespan>& InTimeRange)
+{
+	return PlayerFacade->SetPlaybackTimeRange(InTimeRange);
+}
+
+FFloatInterval UMediaPlayer::GetPlaybackTimeRange(EMediaTimeRangeBPType InRangeToGet)
+{
+	TRange<FTimespan> r = GetPlaybackTimeRange(static_cast<EMediaTimeRangeType>(InRangeToGet));
+	FDoubleInterval i;
+	i.Min = !r.IsEmpty() ? r.GetLowerBoundValue().GetTotalSeconds() : -1.0;
+	i.Max = !r.IsEmpty() ? r.GetUpperBoundValue().GetTotalSeconds() : -1.0;
+	FFloatInterval Imprecise;
+	Imprecise.Min = (float) i.Min;
+	Imprecise.Max = (float) i.Max;
+	return Imprecise;
+}
+
+bool UMediaPlayer::SetPlaybackTimeRange(FFloatInterval InTimeRange)
+{
+	return SetPlaybackTimeRange(TRange<FTimespan>(FTimespan::FromSeconds(InTimeRange.Min), FTimespan::FromSeconds(InTimeRange.Max)));
+}
+
 
 #if WITH_EDITOR
 
@@ -766,22 +971,10 @@ void UMediaPlayer::ResumePIE()
 
 void UMediaPlayer::BeginDestroy()
 {
-	if (!HasAnyFlags(RF_ClassDefaultObject))
-	{
-		IMediaModule* MediaModule = FModuleManager::LoadModulePtr<IMediaModule>("Media");
-
-		if (MediaModule != nullptr)
-		{
-			MediaModule->GetClock().RemoveSink(PlayerFacade.ToSharedRef());
-			MediaModule->GetTicker().RemoveTickable(PlayerFacade.ToSharedRef());
-		}
-
-		PlayerFacade->Close();
-	}
+	CleanUpBeforeDestroy();
 
 	Super::BeginDestroy();
 }
-
 
 FString UMediaPlayer::GetDesc()
 {
@@ -827,7 +1020,6 @@ void UMediaPlayer::RegisterWithMediaModule()
 		return;
 	}
 
-	static const FName MediaModuleName("Media");
 	IMediaModule* MediaModule = nullptr;
 	if (IsInGameThread())
 	{
@@ -852,6 +1044,14 @@ void UMediaPlayer::RegisterWithMediaModule()
 	}
 }
 
+void UMediaPlayer::UnregisterWithMediaModule()
+{
+	if (IMediaModule* MediaModule = FModuleManager::GetModulePtr<IMediaModule>(MediaModuleName))
+	{
+		MediaModule->GetClock().RemoveSink(PlayerFacade.ToSharedRef());
+		RegisteredWithMediaModule = false;
+	}
+}
 
 void UMediaPlayer::PostLoad()
 {
@@ -886,6 +1086,19 @@ void UMediaPlayer::PostEditChangeProperty(FPropertyChangedEvent& PropertyChanged
 
 #endif
 
+/* IAudioProxyDataFactory overrides
+ *****************************************************************************/
+
+TSharedPtr<Audio::IProxyData> UMediaPlayer::CreateProxyData(const Audio::FProxyDataInitParams& InitParams)
+{
+//WE GET HERE WHEN STARTING THE GRAPH CREATION ON PLAY (well, at least with the editor) - GAMETHREAD
+	if (!Proxy.IsValid())
+	{
+		Proxy = MakeShared<FMediaPlayerProxy, ESPMode::ThreadSafe>(this);
+	}
+	return Proxy;
+}
+
 
 /* UMediaPlayer callbacks
  *****************************************************************************/
@@ -910,7 +1123,7 @@ void UMediaPlayer::HandlePlayerMediaEvent(EMediaEvent Event)
 		}
 		else
 		{
-			PlayerFacade->SetLooping(Loop && (Playlist->Num() == 1));
+			PlayerFacade->SetLooping(Loop && (!Playlist || Playlist->Num() == 1));
 		}
 		PlayerFacade->SetViewField(HorizontalFieldOfView, VerticalFieldOfView, true);
 		PlayerFacade->SetViewOrientation(FQuat(ViewRotation), true);
@@ -936,21 +1149,25 @@ void UMediaPlayer::HandlePlayerMediaEvent(EMediaEvent Event)
 	case EMediaEvent::MediaOpenFailed:
 		OnMediaOpenFailed.Broadcast(PlayerFacade->GetUrl());
 
-		if ((Loop && (Playlist->Num() != 1)) || (PlaylistIndex + 1 < Playlist->Num()))
+		if (Playlist)
 		{
-			Next();
+			if ((Loop && (Playlist->Num() != 1)) || (PlaylistIndex + 1 < Playlist->Num()))
+			{
+				Next();
+			}
 		}
 		break;
 
 	case EMediaEvent::PlaybackEndReached:
 		OnEndReached.Broadcast();
 
-		check(Playlist != nullptr);
-
-		if ((Loop && (Playlist->Num() != 1)) || (PlaylistIndex + 1 < Playlist->Num()))
+		if (Playlist)
 		{
-			PlayOnNext = true;
-			Next();
+			if ((Loop && (Playlist->Num() != 1)) || (PlaylistIndex + 1 < Playlist->Num()))
+			{
+				PlayOnNext = true;
+				Next();
+			}
 		}
 		break;
 
@@ -968,6 +1185,10 @@ void UMediaPlayer::HandlePlayerMediaEvent(EMediaEvent Event)
 
 	case EMediaEvent::TracksChanged:
 		OnTracksChanged.Broadcast();
+		break;
+
+	case EMediaEvent::MetadataChanged:
+		OnMetadataChanged.Broadcast();
 		break;
 	}
 }
@@ -1110,7 +1331,7 @@ public:
 					{
 						if (Options.SeekTime < FTimespan::FromSeconds(0) || Options.SeekTime > MediaPlayer->GetDuration())
 						{
-							UE_LOG(LogMediaAssets, Warning, TEXT("Open Media Latent: Media player seeking to time out of bounds. Seek: %s, Duration: %s, URL: %s"), 
+							UE_LOG(LogMediaAssets, Warning, TEXT("Open Media Latent: Media player seeking to time out of bounds. Seek: %s, Duration: %s, URL: %s"),
 								*Options.SeekTime.ToString(), *MediaPlayer->GetDuration().ToString(), *URL);
 							FailedOperation(Response);
 							return;
@@ -1170,3 +1391,14 @@ void UMediaPlayer::OpenSourceLatent(const UObject* WorldContextObject, FLatentAc
 	}
 }
 
+// --------------------------------------------------------------------------------------------------------------------------------------------------------------
+// --------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+FMediaPlayerProxy::FMediaPlayerProxy(UMediaPlayer* Player)
+{
+	PlayerFacade = Player->GetPlayerFacade();
+}
+
+FMediaPlayerProxy::~FMediaPlayerProxy()
+{
+}

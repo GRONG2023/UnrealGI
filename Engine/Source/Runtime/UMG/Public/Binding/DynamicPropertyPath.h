@@ -2,27 +2,33 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
 #include "PropertyPathHelpers.h"
+#include "UObject/ObjectMacros.h"
+
 #include "DynamicPropertyPath.generated.h"
+
+class FProperty;
+class UObject;
 
 /** */
 USTRUCT()
-struct UMG_API FDynamicPropertyPath : public FCachedPropertyPath
+struct FDynamicPropertyPath : public FCachedPropertyPath
 {
 	GENERATED_USTRUCT_BODY()
 
 public:
 
 	/** */
-	FDynamicPropertyPath();
+	UMG_API FDynamicPropertyPath();
 
 	/** */
-	FDynamicPropertyPath(const FString& Path);
+	UMG_API FDynamicPropertyPath(const FString& Path);
 
 	/** */
-	FDynamicPropertyPath(const TArray<FString>& PropertyChain);
+	UMG_API FDynamicPropertyPath(const TArray<FString>& PropertyChain);
 
 	/** Get the value represented by this property path */
 	template<typename T>

@@ -2,14 +2,16 @@
 
 
 #include "Slate/SlateTextures.h"
-#include "RenderUtils.h"
-#include "ClearQuad.h"
+#include "Engine/Texture.h"
 #include "ProfilingDebugging/LoadTimeTracker.h"
+#include "RenderingThread.h"
+#include "RHIUtilities.h"
 
 FSlateTexture2DRHIRef::FSlateTexture2DRHIRef( FTexture2DRHIRef InRef, uint32 InWidth, uint32 InHeight )
 	: TSlateTexture( InRef )
 	, Width( InWidth )
 	, Height( InHeight )
+	, TexCreateFlags( TexCreate_None )
 	, PixelFormat( PF_Unknown )
 	, bCreateEmptyTexture( false )
 {
@@ -38,7 +40,7 @@ void FSlateTexture2DRHIRef::Cleanup()
 	BeginCleanup(this);
 }
 
-void FSlateTexture2DRHIRef::InitDynamicRHI()
+void FSlateTexture2DRHIRef::InitRHI(FRHICommandListBase&)
 {
 	SCOPED_LOADTIMER(FSlateTexture2DRHIRef_InitDynamicRHI);
 
@@ -49,8 +51,13 @@ void FSlateTexture2DRHIRef::InitDynamicRHI()
 		if( TextureData.IsValid() || bCreateEmptyTexture )
 		{
 			check( !IsValidRef( ShaderResource) );
-			FRHIResourceCreateInfo CreateInfo;
-			ShaderResource = RHICreateTexture2D( Width, Height, PixelFormat, 1, 1, TexCreateFlags, CreateInfo );
+
+			const FRHITextureCreateDesc Desc =
+				FRHITextureCreateDesc::Create2D(TEXT("FSlateTexture2DRHIRef"), Width, Height, PixelFormat)
+				.SetFlags(TexCreateFlags)
+				.SetClassName(TEXT("FSlateTexture2DRHIRef"));
+
+			ShaderResource = RHICreateTexture(Desc);
 			check( IsValidRef( ShaderResource ) );
 
 			INC_MEMORY_STAT_BY(STAT_SlateTextureGPUMemory, Width*Height*GPixelFormats[PixelFormat].BlockBytes);
@@ -64,18 +71,21 @@ void FSlateTexture2DRHIRef::InitDynamicRHI()
 			uint32 Stride;
 			uint8* DestTextureData = (uint8*)RHILockTexture2D(ShaderResource, 0, RLM_WriteOnly, Stride, false);
 			const uint8* SourceTextureData = TextureData->GetRawBytes().GetData();
-			const uint32 DataStride = Width * GPixelFormats[PixelFormat].BlockBytes;
+
+			const uint32 BlocksX = GPixelFormats[PixelFormat].GetBlockCountForWidth(Width);
+			const uint32 BlocksY = GPixelFormats[PixelFormat].GetBlockCountForHeight(Height);
+			const uint32 DataStride = BlocksX * GPixelFormats[PixelFormat].BlockBytes;
+
+			checkf((uint32)TextureData->GetRawBytes().Num() >= DataStride * BlocksY, TEXT("Not enough bytes in source TextureData to complete copy operation"));
+
 			if (Stride == DataStride)
 			{
-				FMemory::Memcpy(DestTextureData, SourceTextureData, DataStride * Height);
+				FMemory::Memcpy(DestTextureData, SourceTextureData, Stride * BlocksY);
 			}
 			else
 			{
-				checkf(GPixelFormats[PixelFormat].BlockSizeX == 1 
-					&& GPixelFormats[PixelFormat].BlockSizeY == 1 
-					&& GPixelFormats[PixelFormat].BlockSizeZ == 1,
-					TEXT("Tried to use compressed format?"));
-				for (uint32 i = 0; i < Height; i++)
+				checkf(DataStride < Stride, TEXT("Texture stride of %u is smaller than source data stride of %u, PixelFormat=%s (%d)"), Stride, DataStride, GPixelFormats[PixelFormat].Name, (int32)PixelFormat);
+				for (uint32 i = 0; i < BlocksY; i++)
 				{
 					FMemory::Memcpy(DestTextureData, SourceTextureData, DataStride);
 					DestTextureData += Stride;
@@ -88,7 +98,7 @@ void FSlateTexture2DRHIRef::InitDynamicRHI()
 	}
 }
 
-void FSlateTexture2DRHIRef::ReleaseDynamicRHI()
+void FSlateTexture2DRHIRef::ReleaseRHI()
 {
 	check( IsInRenderingThread() );
 
@@ -103,10 +113,9 @@ void FSlateTexture2DRHIRef::ReleaseDynamicRHI()
 
 void FSlateTexture2DRHIRef::Resize( uint32 InWidth, uint32 InHeight )
 {
-	check( IsInRenderingThread() );
 	Width = InWidth;
 	Height = InHeight;
-	UpdateRHI();
+	UpdateRHI(FRHICommandListImmediate::Get());
 }
 
 void FSlateTexture2DRHIRef::SetRHIRef( FTexture2DRHIRef InRHIRef, uint32 InWidth, uint32 InHeight )
@@ -279,21 +288,17 @@ FSlateTextureRenderTarget2DResource::FSlateTextureRenderTarget2DResource(const F
 
 void FSlateTextureRenderTarget2DResource::SetSize(int32 InSizeX,int32 InSizeY)
 {
-	check(IsInRenderingThread());
-
 	if (InSizeX != TargetSizeX || InSizeY != TargetSizeY)
 	{
 		TargetSizeX = InSizeX;
 		TargetSizeY = InSizeY;
 		// reinit the resource with new TargetSizeX,TargetSizeY
-		UpdateRHI();
+		UpdateRHI(FRHICommandListImmediate::Get());
 	}	
 }
 
 void FSlateTextureRenderTarget2DResource::ClampSize(int32 MaxSizeX,int32 MaxSizeY)
 {
-	check(IsInRenderingThread());
-
 	// upsize to go back to original or downsize to clamp to max
 	int32 NewSizeX = FMath::Min<int32>(TargetSizeX,MaxSizeX);
 	int32 NewSizeY = FMath::Min<int32>(TargetSizeY,MaxSizeY);
@@ -302,11 +307,11 @@ void FSlateTextureRenderTarget2DResource::ClampSize(int32 MaxSizeX,int32 MaxSize
 		TargetSizeX = NewSizeX;
 		TargetSizeY = NewSizeY;
 		// reinit the resource with new TargetSizeX,TargetSizeY
-		UpdateRHI();
+		UpdateRHI(FRHICommandListImmediate::Get());
 	}	
 }
 
-void FSlateTextureRenderTarget2DResource::InitDynamicRHI()
+void FSlateTextureRenderTarget2DResource::InitRHI(FRHICommandListBase&)
 {
 	SCOPED_LOADTIMER(FSlateTextureRenderTarget2DResource_InitDynamicRHI);
 
@@ -314,21 +319,19 @@ void FSlateTextureRenderTarget2DResource::InitDynamicRHI()
 
 	if( TargetSizeX > 0 && TargetSizeY > 0 )
 	{
+		const static FLazyName ClassName(TEXT("FSlateTextureRenderTarget2DResource"));
+
 		// Create the RHI texture. Only one mip is used and the texture is targetable for resolve.
-		FRHIResourceCreateInfo CreateInfo = { FClearValueBinding(ClearColor) };
-		RHICreateTargetableShaderResource2D(
-			TargetSizeX, 
-			TargetSizeY, 
-			Format, 
-			1,
-			/*TexCreateFlags=*/TexCreate_None,
-			TexCreate_RenderTargetable,
-			/*bNeedsTwoCopies=*/false,
-			CreateInfo,
-			RenderTargetTextureRHI,
-			Texture2DRHI
-			);
-		TextureRHI = (FTextureRHIRef&)Texture2DRHI;
+		const FRHITextureCreateDesc Desc =
+			FRHITextureCreateDesc::Create2D(TEXT("FSlateTextureRenderTarget2DResource"))
+			.SetExtent(TargetSizeX, TargetSizeY)
+			.SetFormat((EPixelFormat)Format)
+			.SetClearValue(FClearValueBinding(ClearColor))
+			.SetFlags(ETextureCreateFlags::RenderTargetable | ETextureCreateFlags::ShaderResource)
+			.SetInitialState(ERHIAccess::SRVMask)
+			.SetClassName(ClassName);
+
+		RenderTargetTextureRHI = TextureRHI = RHICreateTexture(Desc);
 	}
 
 	// Create the sampler state RHI resource.
@@ -342,15 +345,14 @@ void FSlateTextureRenderTarget2DResource::InitDynamicRHI()
 	SamplerStateRHI = GetOrCreateSamplerState( SamplerStateInitializer );
 }
 
-void FSlateTextureRenderTarget2DResource::ReleaseDynamicRHI()
+void FSlateTextureRenderTarget2DResource::ReleaseRHI()
 {
 	check(IsInRenderingThread());
 
 	// Release the FTexture RHI resources here as well
-	ReleaseRHI();
+	FTexture::ReleaseRHI();
 
-	Texture2DRHI.SafeRelease();
-	RenderTargetTextureRHI.SafeRelease();	
+	RenderTargetTextureRHI.SafeRelease();
 
 	// Remove from global list of deferred clears
 	RemoveFromDeferredUpdateList();
@@ -363,13 +365,10 @@ void FSlateTextureRenderTarget2DResource::UpdateDeferredResource(FRHICommandList
 	// Clear the target surface to green
 	if (bClearRenderTarget)
 	{
-		FRHIRenderPassInfo RPInfo(RenderTargetTextureRHI, ERenderTargetActions::Clear_Store);
-		RHICmdList.BeginRenderPass(RPInfo, TEXT("Slate2DUpdateDeferred_Clear"));
-		RHICmdList.EndRenderPass();
+		RHICmdList.Transition(FRHITransitionInfo(RenderTargetTextureRHI, ERHIAccess::Unknown, ERHIAccess::RTV));
+		ClearRenderTarget(RHICmdList, RenderTargetTextureRHI);
+		RHICmdList.Transition(FRHITransitionInfo(RenderTargetTextureRHI, ERHIAccess::RTV, ERHIAccess::SRVGraphics));
 	}
-
-	// Copy surface to the texture for use
-	RHICmdList.CopyToResolveTarget(RenderTargetTextureRHI, TextureRHI, FResolveParams());
 }
 
 uint32 FSlateTextureRenderTarget2DResource::GetSizeX() const
@@ -389,7 +388,10 @@ FIntPoint FSlateTextureRenderTarget2DResource::GetSizeXY() const
 
 float FSlateTextureRenderTarget2DResource::GetDisplayGamma() const
 {
-	if (TargetGamma > KINDA_SMALL_NUMBER * 10.0f)
+	// FSlateTextureRenderTarget2DResource doesn't have Owner
+	//return Owner->GetDisplayGamma();
+
+	if (TargetGamma > UE_KINDA_SMALL_NUMBER * 10.0f)
 	{
 		return TargetGamma;
 	}

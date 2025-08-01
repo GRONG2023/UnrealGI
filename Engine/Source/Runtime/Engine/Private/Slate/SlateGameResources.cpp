@@ -1,18 +1,18 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Slate/SlateGameResources.h"
-#include "Curves/CurveBase.h"
-#include "Curves/CurveFloat.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
+#include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
+#include "Styling/SlateWidgetStyle.h"
 #include "Styling/SlateWidgetStyleAsset.h"
 #include "EngineUtils.h"
 #include "Slate/SlateBrushAsset.h"
-#include "AssetRegistryModule.h"
-#include "Logging/TokenizedMessage.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Logging/MessageLog.h"
 #include "Curves/CurveVector.h"
 #include "Curves/CurveLinearColor.h"
+#include "Styling/SlateWidgetStyleContainerBase.h"
 
 TSharedRef<FSlateGameResources> FSlateGameResources::New( const FName& InStyleSetName, const FString& ScopeToDirectory, const FString& InBasePath )
 {
@@ -34,10 +34,12 @@ FSlateGameResources::~FSlateGameResources()
 	if ( GIsEditor && FModuleManager::Get().IsModuleLoaded( TEXT("AssetRegistry") ) )
 	{
 		FAssetRegistryModule& AssetRegistryModule = FModuleManager::GetModuleChecked<FAssetRegistryModule>( TEXT("AssetRegistry") );
-		IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
-
-		AssetRegistry.OnAssetAdded().RemoveAll( this );
-		AssetRegistry.OnAssetRemoved().RemoveAll( this );
+		IAssetRegistry* AssetRegistry = AssetRegistryModule.TryGet();
+		if (AssetRegistry)
+		{
+			AssetRegistry->OnAssetAdded().RemoveAll(this);
+			AssetRegistry->OnAssetRemoved().RemoveAll(this);
+		}
 	}
 }
 
@@ -47,25 +49,25 @@ void FSlateGameResources::SetContentRoot( const FString& InContentRootDir )
 	ContentRootDir = InContentRootDir;
 }
 
-const FSlateBrush* FSlateGameResources::GetBrush( const FName PropertyName, const ANSICHAR* Specifier ) const
+const FSlateBrush* FSlateGameResources::GetBrush( const FName PropertyName, const ANSICHAR* Specifier, const ISlateStyle* RequestingStyle ) const
 {
-	ensureMsgf(Specifier == NULL, TEXT("Attempting to look up resource (%s, %s). \n Specifiers not supported by Slate Resource Sets loaded from content browser."), *PropertyName.ToString(), Specifier);
+	ensureMsgf(Specifier == NULL, TEXT("Attempting to look up resource (%s, %s). \n Specifiers not supported by Slate Resource Sets loaded from content browser."), *PropertyName.ToString(), ANSI_TO_TCHAR(Specifier));
 	FName CleanName = GetCleanName(PropertyName);
-	UObject* const * Resource = UIResources.Find(CleanName);
+	auto* Resource = UIResources.Find(CleanName);
 	if(Resource)
 	{
 		const USlateBrushAsset* BrushAsset = Cast<USlateBrushAsset>(*Resource);
 		ensureMsgf(BrushAsset, TEXT("Could not find resource '%s'"), *CleanName.ToString());
 		return BrushAsset ? &BrushAsset->Brush : GetDefaultBrush();
 	}
-	return FSlateStyleSet::GetBrush(PropertyName, Specifier);
+	return FSlateStyleSet::GetBrush(PropertyName, Specifier, RequestingStyle);
 }
 
 const FSlateBrush* FSlateGameResources::GetOptionalBrush(const FName PropertyName, const ANSICHAR* Specifier, const FSlateBrush* const InDefaultBrush) const
 {
-	ensureMsgf(Specifier == NULL, TEXT("Attempting to look up resource (%s, %s). \n Specifiers not supported by Slate Resource Sets loaded from content browser."), *PropertyName.ToString(), Specifier);
+	ensureMsgf(Specifier == NULL, TEXT("Attempting to look up resource (%s, %s). \n Specifiers not supported by Slate Resource Sets loaded from content browser."), *PropertyName.ToString(), ANSI_TO_TCHAR(Specifier));
 	FName CleanName = GetCleanName(PropertyName);
-	UObject* const * Resource = UIResources.Find(CleanName);
+	auto* Resource = UIResources.Find(CleanName);
 	if(Resource)
 	{
 		const USlateBrushAsset* BrushAsset = Cast<USlateBrushAsset>(*Resource);
@@ -78,7 +80,7 @@ const FSlateBrush* FSlateGameResources::GetOptionalBrush(const FName PropertyNam
 UCurveFloat* FSlateGameResources::GetCurveFloat( const FName AssetName ) const
 {
 	FName CleanName = GetCleanName(AssetName);
-	UObject* const* Resource = UIResources.Find(CleanName);
+	auto* Resource = UIResources.Find(CleanName);
 	UCurveFloat* Curve = Resource ? Cast<UCurveFloat>(*Resource) : NULL;
 	ensureMsgf(Curve, TEXT("Could not find resource '%s'"), *CleanName.ToString());
 	return Curve;
@@ -87,7 +89,7 @@ UCurveFloat* FSlateGameResources::GetCurveFloat( const FName AssetName ) const
 UCurveVector* FSlateGameResources::GetCurveVector( const FName AssetName ) const
 {
 	FName CleanName = GetCleanName(AssetName);
-	UObject* const* Resource = UIResources.Find(CleanName);
+	auto* Resource = UIResources.Find(CleanName);
 	UCurveVector* Curve = Resource ? Cast<UCurveVector>(*Resource) : NULL;
 	ensureMsgf(Curve, TEXT("Could not find resource '%s'"), *CleanName.ToString());
 	return Curve;
@@ -96,7 +98,7 @@ UCurveVector* FSlateGameResources::GetCurveVector( const FName AssetName ) const
 UCurveLinearColor* FSlateGameResources::GetCurveLinearColor( const FName AssetName ) const
 {
 	FName CleanName = GetCleanName(AssetName);
-	UObject* const* Resource = UIResources.Find(CleanName);
+	auto* Resource = UIResources.Find(CleanName);
 	UCurveLinearColor* Curve = Resource ? Cast<UCurveLinearColor>(*Resource) : NULL;
 	ensureMsgf(Curve, TEXT("Could not find resource '%s'"), *CleanName.ToString());
 	return Curve;
@@ -125,14 +127,14 @@ void FSlateGameResources::GetResources( TArray< const FSlateBrush* >& OutResourc
 	}
 }
 
-const FSlateWidgetStyle* FSlateGameResources::GetWidgetStyleInternal( const FName DesiredTypeName, const FName StyleName ) const
+const FSlateWidgetStyle* FSlateGameResources::GetWidgetStyleInternal(const FName DesiredTypeName, const FName StyleName, const FSlateWidgetStyle* DefaultStyle, bool bWarnIfNotFound) const
 {
-	UObject* const* UIResourcePtr = UIResources.Find( StyleName );
+	auto* UIResourcePtr = UIResources.Find( StyleName );
 	USlateWidgetStyleAsset* StyleAsset = UIResourcePtr ? Cast<USlateWidgetStyleAsset>(*UIResourcePtr) : NULL;
 
 	if ( StyleAsset == NULL )
 	{
-		return FSlateStyleSet::GetWidgetStyleInternal( DesiredTypeName, StyleName );
+		return FSlateStyleSet::GetWidgetStyleInternal( DesiredTypeName, StyleName, DefaultStyle, bWarnIfNotFound);
 	}
 
 	const FSlateWidgetStyle* Style = StyleAsset->GetStyleChecked( DesiredTypeName );
@@ -141,7 +143,8 @@ const FSlateWidgetStyle* FSlateGameResources::GetWidgetStyleInternal( const FNam
 	{
 		TSharedRef< FTokenizedMessage > Message = FTokenizedMessage::Create( EMessageSeverity::Error, FText::Format( NSLOCTEXT("SlateStyleSet", "WrongWidgetStyleType", "The Slate Widget Style '{0}' is not of the desired type. Desired: '{1}', Actual: '{2}'"), FText::FromName( StyleName ), FText::FromName( DesiredTypeName ), FText::FromName( StyleAsset->CustomStyle->GetStyle()->GetTypeName() ) ) );
 		Message->AddToken( FAssetNameToken::Create( StyleAsset->GetPathName(), FText::FromString( StyleAsset->GetName() ) ) );
-		Log( Message );
+	
+		Log(Message);
 	}
 
 	return Style;
@@ -149,18 +152,20 @@ const FSlateWidgetStyle* FSlateGameResources::GetWidgetStyleInternal( const FNam
 
 void FSlateGameResources::Log( ISlateStyle::EStyleMessageSeverity Severity, const FText& Message ) const
 {
-	EMessageSeverity::Type EngineMessageSeverity = EMessageSeverity::CriticalError;
-	switch( Severity )
+	if (GIsEditor)
 	{
-	case ISlateStyle::EStyleMessageSeverity::CriticalError: EngineMessageSeverity = EMessageSeverity::CriticalError; break;
-	case ISlateStyle::EStyleMessageSeverity::Error: EngineMessageSeverity = EMessageSeverity::Error; break;
-	case ISlateStyle::EStyleMessageSeverity::PerformanceWarning: EngineMessageSeverity = EMessageSeverity::PerformanceWarning; break;
-	case ISlateStyle::EStyleMessageSeverity::Warning: EngineMessageSeverity = EMessageSeverity::Warning; break;
-	case ISlateStyle::EStyleMessageSeverity::Info: EngineMessageSeverity = EMessageSeverity::Info; break;
-	}
+		const EMessageSeverity::Type EngineMessageSeverity = [Severity]()
+		{
+			switch (Severity)
+			{
+			default:
+			case ISlateStyle::EStyleMessageSeverity::Error:					return EMessageSeverity::Error;
+			case ISlateStyle::EStyleMessageSeverity::PerformanceWarning:	return EMessageSeverity::PerformanceWarning;
+			case ISlateStyle::EStyleMessageSeverity::Warning:				return EMessageSeverity::Warning;
+			case ISlateStyle::EStyleMessageSeverity::Info:					return EMessageSeverity::Info;
+			}
+		}();
 
-	if( GIsEditor )
-	{
 		FMessageLog SlateStyleLog("SlateStyleLog");
 		SlateStyleLog.AddMessage(FTokenizedMessage::Create(EngineMessageSeverity, Message));
 
@@ -227,8 +232,8 @@ void FSlateGameResources::RemoveAsset(const FAssetData& InRemovedAssetData)
 
 bool FSlateGameResources::ShouldCache( const FAssetData& InAssetData )
 {
-	return InAssetData.ObjectPath.ToString().StartsWith( ContentRootDir, ESearchCase::CaseSensitive )
-		&& InAssetData.AssetClass == USlateWidgetStyleAsset::StaticClass()->GetFName();
+	return InAssetData.PackageName.ToString().StartsWith( ContentRootDir, ESearchCase::CaseSensitive )
+		&& InAssetData.AssetClassPath == USlateWidgetStyleAsset::StaticClass()->GetClassPathName();
 }
 
 void FSlateGameResources::AddAssetToCache( UObject* InStyleObject, bool bEnsureUniqueness )
@@ -240,7 +245,7 @@ void FSlateGameResources::AddAssetToCache( UObject* InStyleObject, bool bEnsureU
 	if ( bSupportedAssetType )
 	{
 		const FName StyleName = GenerateMapName( InStyleObject );
-		UObject* const * ExistingAsset = NULL;
+		TObjectPtr<UObject>* ExistingAsset = NULL;
 		if ( bEnsureUniqueness )
 		{
 			ExistingAsset = UIResources.Find( StyleName );
@@ -248,7 +253,7 @@ void FSlateGameResources::AddAssetToCache( UObject* InStyleObject, bool bEnsureU
 
 		if ( ExistingAsset != NULL )
 		{
-			Log( ISlateStyle::Error, FText::Format( NSLOCTEXT("SlateWidgetStyleSet", "LoadingError", "Encountered multiple Slate Widget Styles with the same name. Name: '{0}', First Asset: '{1}',  Second Asset: '{2}'."),
+			Log(EStyleMessageSeverity::Error, FText::Format( NSLOCTEXT("SlateWidgetStyleSet", "LoadingError", "Encountered multiple Slate Widget Styles with the same name. Name: '{0}', First Asset: '{1}',  Second Asset: '{2}'."),
 				FText::FromName( StyleName ),
 				FText::FromString( InStyleObject->GetPathName() ),
 				FText::FromString( InStyleObject->GetPathName() ) ) );

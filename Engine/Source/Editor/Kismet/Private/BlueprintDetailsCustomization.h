@@ -2,37 +2,74 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "BlueprintEditor.h"
+#include "BlueprintManagedListDetails.h"
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
 #include "EdGraph/EdGraphPin.h"
-#include "Layout/Visibility.h"
-#include "Input/Reply.h"
-#include "Widgets/SWidget.h"
-#include "K2Node_EditablePinBase.h"
-#include "IDetailCustomization.h"
-#include "Widgets/Input/SComboButton.h"
-#include "Widgets/Colors/SColorBlock.h"
+#include "Engine/Blueprint.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
 #include "IDetailCustomNodeBuilder.h"
-#include "Widgets/Views/STableViewBase.h"
-#include "Widgets/Views/STableRow.h"
+#include "IDetailCustomization.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "K2Node_EditablePinBase.h"
+#include "Layout/Visibility.h"
+#include "Math/Color.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Optional.h"
 #include "SMyBlueprint.h"
-#include "SGraphPin.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Script.h"
+#include "UObject/UnrealNames.h"
 #include "UObject/WeakFieldPtr.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/Views/SListView.h"
 
-class Error;
-class FBlueprintGlobalOptionsDetails;
 class FDetailWidgetRow;
-class FSCSEditorTreeNode;
+class FMulticastDelegateProperty;
+class FProperty;
 class FStructOnScope;
+class FSubobjectEditorTreeNode;
 class IDetailChildrenBuilder;
 class IDetailLayoutBuilder;
+class IPropertyHandle;
+class ITableRow;
+class SBlueprintNamespaceEntry;
+class SComboButton;
 class SEditableTextBox;
+class SGraphPin;
 class SMultiLineEditableTextBox;
+class STableViewBase;
+class STextComboBox;
+class SWidget;
+class UClass;
+class UEdGraph;
+class UEdGraphNode;
 class UEdGraphNode_Documentation;
+class UFunction;
 class UK2Node_Variable;
+class UObject;
+class UStruct;
+struct FGeometry;
+struct FPointerEvent;
+struct FPropertyChangedEvent;
+struct FTopLevelAssetPath;
 
 /**
  * Variable network replication options.
- * @see https://docs.unrealengine.com/latest/INT/Gameplay/Networking/Replication/
+ * @see https://docs.unrealengine.com/InteractiveExperiences/Networking/Blueprints
  */
 namespace EVariableReplication
 {
@@ -120,10 +157,7 @@ public:
 
 private:
 	/** Accessors passed to parent */
-	FEdGraphSchemaAction_K2Var* MyBlueprintSelectionAsVar() const {return MyBlueprint.Pin()->SelectionAsVar();}
-	FEdGraphSchemaAction_K2LocalVar* MyBlueprintSelectionAsLocalVar() const {return MyBlueprint.Pin()->SelectionAsLocalVar();}
 	UK2Node_Variable* EdGraphSelectionAsVar() const;
-	FProperty* CustomizedObjectAsProperty() const;
 	FProperty* SelectionAsProperty() const;
 	FName GetVariableName() const;
 
@@ -144,6 +178,16 @@ private:
 	void OnVarTypeChanged(const FEdGraphPinType& NewPinType);
 	EVisibility IsTooltipEditVisible() const;
 
+	void OnBrowseToVarType() const;
+	bool CanBrowseToVarType() const;
+
+	/**
+	 * Callback when changing a variable property
+	 *
+	 * @param InPropertyChangedEvent	Information on the property changed
+	 */
+	void OnFinishedChangingVariable(const FPropertyChangedEvent& InPropertyChangedEvent);
+
 	/**
 	 * Callback when changing a local variable property
 	 *
@@ -151,7 +195,15 @@ private:
 	 * @param InStructData				The struct data where the value of the properties are stored
 	 * @param InEntryNode				Entry node where the default values of local variables are stored
 	 */
-	void OnFinishedChangingProperties(const FPropertyChangedEvent& InPropertyChangedEvent, TSharedPtr<FStructOnScope> InStructData, TWeakObjectPtr<UK2Node_EditablePinBase> InEntryNode);
+	void OnFinishedChangingLocalVariable(const FPropertyChangedEvent& InPropertyChangedEvent, TSharedPtr<FStructOnScope> InStructData, TWeakObjectPtr<UK2Node_EditablePinBase> InEntryNode);
+
+	/**
+	 * Auto-import any namespaces associated with a variable's value into the current editor context
+	 *
+	 * @param InProperty				A reference to the variable property
+	 * @param InContainer				A pointer to the data container (e.g. struct or object) where the property's value is stored
+	 */
+	void ImportNamespacesForPropertyValue(const FProperty* InProperty, const void* InContainer);
 
 	/** Callback to decide if the category drop down menu should be enabled */
 	bool GetVariableCategoryChangeEnabled() const;
@@ -164,13 +216,21 @@ private:
 	TSharedRef< ITableRow > MakeCategoryViewWidget( TSharedPtr<FText> Item, const TSharedRef< STableViewBase >& OwnerTable );
 	void OnCategorySelectionChanged( TSharedPtr<FText> ProposedSelection, ESelectInfo::Type /*SelectInfo*/ );
 	
-	EVisibility ShowEditableCheckboxVisibilty() const;
+	EVisibility ShowEditableCheckboxVisibility() const;
 	ECheckBoxState OnEditableCheckboxState() const;
 	void OnEditableChanged(ECheckBoxState InNewState);
 
-	EVisibility ShowReadOnlyCheckboxVisibilty() const;
+	EVisibility ShowReadOnlyCheckboxVisibility() const;
 	ECheckBoxState OnReadyOnlyCheckboxState() const;
 	void OnReadyOnlyChanged(ECheckBoxState InNewState);
+
+	EVisibility GetVariableUnitsVisibility() const;
+	TSharedPtr<FString> GetVariableUnits() const;
+	void OnVariableUnitsChanged(TSharedPtr<FString> ItemSelected, ESelectInfo::Type SelectInfo);
+	
+	ECheckBoxState OnFieldNotifyCheckboxState() const;
+	void OnFieldNotifyChanged(ECheckBoxState InNewState);
+	EVisibility GetFieldNotifyCheckboxListVisibility() const;
 
 	ECheckBoxState OnCreateWidgetCheckboxState() const;
 	void OnCreateWidgetChanged(ECheckBoxState InNewState);
@@ -202,8 +262,10 @@ private:
 	EVisibility BitmaskVisibility() const;
 	void OnBitmaskChanged(ECheckBoxState InNewState);
 
-	TSharedPtr<FString> GetBitmaskEnumTypeName() const;
-	void OnBitmaskEnumTypeChanged(TSharedPtr<FString> ItemSelected, ESelectInfo::Type SelectInfo);
+	TSharedPtr<FTopLevelAssetPath> GetBitmaskEnumTypePath() const;
+	void OnBitmaskEnumTypeChanged(TSharedPtr<FTopLevelAssetPath> ItemSelected, ESelectInfo::Type SelectInfo);
+	TSharedRef<SWidget> GenerateBitmaskEnumTypeWidget(TSharedPtr<FTopLevelAssetPath> Item);
+	FText GetBitmaskEnumTypeName() const;
 	
 	TSharedPtr<FString> GetVariableReplicationType() const;
 	void OnChangeReplication(TSharedPtr<FString> ItemSelected, ESelectInfo::Type SelectInfo);
@@ -271,8 +333,11 @@ private:
 	/** Array of replication options for our combo text box */
 	TArray<TSharedPtr<FString>> ReplicationOptions;
 
+	/** Array of units options for our combo text box */
+	TArray<TSharedPtr<FString>> UnitsOptions;
+
 	/** Array of enum type names for integers used as bitmasks */
-	TArray<TSharedPtr<FString>> BitmaskEnumTypeNames;
+	TArray<TSharedPtr<FTopLevelAssetPath>> BitmaskEnumTypePaths;
 
 	/** The widget used when in variable name editing mode */ 
 	TSharedPtr<SEditableTextBox> VarNameEditableTextBox;
@@ -303,9 +368,6 @@ private:
 
 	/** External detail customizations */
 	TArray<TSharedPtr<IDetailCustomization>> ExternalDetailCustomizations;
-
-	/** Array of nodes were were constructed to represent */
-	TArray< TWeakObjectPtr<UObject> > ObjectsBeingEdited;
 };
 
 class FBaseBlueprintGraphActionDetails : public IDetailCustomization
@@ -472,8 +534,6 @@ private:
 
 	/** Callbacks for all the functionality for modifying arguments */
 	void OnRemoveClicked();
-	FReply OnArgMoveUp();
-	FReply OnArgMoveDown();
 
 	FText OnGetArgNameText() const;
 	FText OnGetArgToolTipText() const;
@@ -516,18 +576,131 @@ private:
 	TSharedPtr<SGraphPin> DefaultValuePinWidget;
 };
 
+// local variables in the details view only support read-only mode at the moment.
+// the incomplete read/write functionality can be turned on by setting this to true but you'll have to write some more code to make it compile/work
+#define UE_BP_LOCAL_VAR_LAYOUT_SETTERS_IMPLEMENTED false
+
+/** Custom struct for each group of local variables in the function editing details */
+class FBlueprintGraphLocalVariableGroupLayout : public IDetailCustomNodeBuilder, public TSharedFromThis<FBlueprintGraphLocalVariableGroupLayout>
+{
+public:
+	FBlueprintGraphLocalVariableGroupLayout(TWeakPtr<class FBaseBlueprintGraphActionDetails> InGraphActionDetails, TWeakObjectPtr<UEdGraph> InTargetGraph,
+		TWeakObjectPtr<UBlueprint> InBlueprintObj, TWeakObjectPtr<UFunction> InOwningFunction, TSharedPtr<IPropertyHandle> Property = nullptr)
+		: GraphActionDetailsPtr(InGraphActionDetails)
+		, TargetGraph(InTargetGraph)
+		, BlueprintObj(InBlueprintObj)
+		, PropertyHandle(Property)
+		, OwningFunction(InOwningFunction) {}
+	
+	virtual TSharedPtr<IPropertyHandle> GetPropertyHandle() const override {return PropertyHandle;}
+
+private:
+	/** IDetailCustomNodeBuilder Interface*/
+	virtual void GenerateHeaderRowContent( FDetailWidgetRow& NodeRow ) override {}
+	virtual void GenerateChildContent( IDetailChildrenBuilder& ChildrenBuilder ) override;
+	virtual void Tick( float DeltaTime ) override {}
+	virtual bool RequiresTick() const override { return false; }
+	virtual FName GetName() const override { return NAME_None; }
+	virtual bool InitiallyCollapsed() const override { return false; }
+	
+private:
+	/** The parent graph action details customization */
+	TWeakPtr<class FBaseBlueprintGraphActionDetails> GraphActionDetailsPtr;
+
+	/** The target graph that the local variable's are on */
+	TWeakObjectPtr<UEdGraph> TargetGraph;
+
+	/** The blueprint object that the target graph is in */
+	TWeakObjectPtr<UBlueprint> BlueprintObj;
+
+	/** handle to property for array of FBPVariableDescription's */
+	TSharedPtr<IPropertyHandle> PropertyHandle;
+
+	/** function that owns the local variable's being displayed */
+	TWeakObjectPtr<UFunction> OwningFunction;
+};
+
+/** Custom struct for each local variable in the function editing details */
+class FBlueprintGraphLocalVariableLayout : public IDetailCustomNodeBuilder, public TSharedFromThis<FBlueprintGraphLocalVariableLayout>
+{
+public:
+	FBlueprintGraphLocalVariableLayout(TWeakObjectPtr<UFunction> InOwningFunction, const FBPVariableDescription& VariableDescription)
+		: OwningFunction(InOwningFunction)
+	{
+		Data.Set<FBPVariableDescription>(VariableDescription);
+	}
+	
+	FBlueprintGraphLocalVariableLayout(TWeakObjectPtr<UFunction> InOwningFunction, TSharedPtr<IPropertyHandle> Property = nullptr)
+		: OwningFunction(InOwningFunction)
+	{
+		Data.Set<TSharedPtr<IPropertyHandle>>(Property);
+	}
+	
+	virtual TSharedPtr<IPropertyHandle> GetPropertyHandle() const override;
+
+	const FBPVariableDescription& GetVariable() const;
+	void SetVariable(const FBPVariableDescription&);
+
+private:
+	/** IDetailCustomNodeBuilder Interface*/
+	virtual void SetOnRebuildChildren( FSimpleDelegate InOnRegenerateChildren ) override {}
+	virtual void GenerateHeaderRowContent( FDetailWidgetRow& NodeRow ) override;
+	virtual void GenerateChildContent( IDetailChildrenBuilder& ChildrenBuilder ) override;
+	virtual void Tick( float DeltaTime ) override {}
+	virtual bool RequiresTick() const override { return false; }
+	virtual FName GetName() const override { return GetVariable().VarName; }
+	virtual bool InitiallyCollapsed() const override { return true; }
+private:
+	
+	/** Determines if this pin should not be editable */
+	bool ShouldVarBeReadOnly(bool bIsEditingPinType = false) const;
+	
+	/** Determines if editing the pins on the node should be read only */
+	bool IsVariableEditingReadOnly(bool bIsEditingPinType = false) const;
+	
+
+	/** Callbacks for all the functionality for modifying local variables */
+	FText OnGetVarNameText() const;
+	FText OnGetVarToolTipText() const;
+	FEdGraphPinType OnGetVariableType() const;
+
+// currently this layout is for read only data. If you need to use it for read/write, you can implement the following methods.
+#if UE_BP_LOCAL_VAR_LAYOUT_SETTERS_IMPLEMENTED
+	void OnRemoveClicked();
+	void OnVarNameChange(const FText& InNewText);
+	void OnVarNameTextCommitted(const FText& NewText, ETextCommit::Type InTextCommit);
+	void VariableTypeChanged(const FEdGraphPinType& PinType);
+	void OnPreVariableTypeChange(const FEdGraphPinType& PinType);
+#endif
+
+private:
+
+	/** Holds a weak pointer to the argument name widget, used for error notifications */
+	TWeakPtr<SEditableTextBox> VariableNameWidget;
+
+	/** The SGraphPin widget created to show/edit default value */
+	TSharedPtr<SGraphPin> DefaultValueWidget;
+
+	/** either the read only copy of FBPVariableDescription or the property handle to the original variable description */
+	TVariant<TSharedPtr<IPropertyHandle>, FBPVariableDescription> Data;
+
+	/** function that owns this local variable */
+	TWeakObjectPtr<UFunction> OwningFunction;
+};
+
 /** Details customization for functions and graphs selected in the MyBlueprint panel */
 class FBlueprintGraphActionDetails : public FBaseBlueprintGraphActionDetails
 {
 public:
 	/** Makes a new instance of this detail layout class for a specific detail view requesting it */
-	static TSharedRef<class IDetailCustomization> MakeInstance(TWeakPtr<SMyBlueprint> InMyBlueprint)
+	static TSharedRef<class IDetailCustomization> MakeInstance(TWeakPtr<SMyBlueprint> InMyBlueprint, bool bInShowLocalVariables = false)
 	{
-		return MakeShareable(new FBlueprintGraphActionDetails(InMyBlueprint));
+		return MakeShareable(new FBlueprintGraphActionDetails(InMyBlueprint, bInShowLocalVariables));
 	}
 
-	FBlueprintGraphActionDetails(TWeakPtr<SMyBlueprint> InMyBlueprint)
+	FBlueprintGraphActionDetails(TWeakPtr<SMyBlueprint> InMyBlueprint, bool bInShowLocalVariables = false)
 		: FBaseBlueprintGraphActionDetails(InMyBlueprint)
+		, bShowLocalVariables(bInShowLocalVariables)
 	{
 	}
 	
@@ -613,6 +786,19 @@ private:
 	void OnIsExecFunctionModified(const ECheckBoxState NewCheckedState);
 	ECheckBoxState GetIsExecFunction() const;
 
+	bool IsThreadSafeFunctionVisible() const;
+	void OnIsThreadSafeFunctionModified(const ECheckBoxState NewCheckedState);
+	ECheckBoxState GetIsThreadSafeFunction() const;
+	
+	bool IsUnsafeDuringActorConstructionVisible() const;
+	void OnIsUnsafeDuringActorConstructionModified(const ECheckBoxState NewCheckedState);
+	ECheckBoxState GetIsUnsafeDuringActorConstruction() const;
+
+	bool IsFieldNotifyCheckVisible() const;
+	bool GetIsFieldNotfyEnabled() const;
+	ECheckBoxState OnFieldNotifyCheckboxState() const;
+	void OnFieldNotifyChanged(ECheckBoxState InNewState);
+
 	/** Determines if the selected event is identified as editor callable */
 	ECheckBoxState GetIsEditorCallableEvent() const;
 
@@ -665,50 +851,21 @@ private:
 
 	/** External detail customizations */
 	TArray<TSharedPtr<IDetailCustomization>> ExternalDetailCustomizations;
+
+	bool bShowLocalVariables = false;
 };
 
-/** Blueprint Interface List Details */
-class FBlueprintInterfaceLayout : public IDetailCustomNodeBuilder, public TSharedFromThis<FBlueprintInterfaceLayout>
+/** Blueprint global options - managed list details customization base */
+class FBlueprintGlobalOptionsManagedListDetails : public FBlueprintManagedListDetails
 {
 public:
-	FBlueprintInterfaceLayout(TWeakPtr<class FBlueprintGlobalOptionsDetails> InGlobalOptionsDetails, bool bInShowsInheritedInterfaces)
-		: GlobalOptionsDetailsPtr(InGlobalOptionsDetails)
-		, bShowsInheritedInterfaces(bInShowsInheritedInterfaces) {}
+	/** Constructor method */
+	FBlueprintGlobalOptionsManagedListDetails(TWeakPtr<class FBlueprintGlobalOptionsDetails> InGlobalOptionsDetailsPtr);
 
-	struct FInterfaceName
-	{
-		FName Name;
-		FText DisplayText;
-
-		FInterfaceName() {}
-		FInterfaceName(FName InName, const FText& InDisplayText) 
-			: Name(InName), DisplayText(InDisplayText) {}
-
-		bool operator==(const FInterfaceName& Other) const
-		{
-			return Name == Other.Name;
-		}
-	};
-
-private:
-	/** IDetailCustomNodeBuilder Interface*/
-	virtual void SetOnRebuildChildren( FSimpleDelegate InOnRegenerateChildren ) override {RegenerateChildrenDelegate = InOnRegenerateChildren;}
-	virtual void GenerateHeaderRowContent( FDetailWidgetRow& NodeRow ) override;
-	virtual void GenerateChildContent( IDetailChildrenBuilder& ChildrenBuilder ) override;
-	virtual void Tick( float DeltaTime ) override {}
-	virtual bool RequiresTick() const override { return false; }
-	virtual FName GetName() const override { return NAME_None; }
-	virtual bool InitiallyCollapsed() const override { return false; }
-	
-private:
-	/** Callbacks for details UI */
-	void OnBrowseToInterface(TWeakObjectPtr<UObject> Asset);
-	void OnRemoveInterface(FInterfaceName InterfaceName);
-
-	TSharedRef<SWidget> OnGetAddInterfaceMenuContent();
-
-	/** Callback function when an interface class is picked */
-	void OnClassPicked(UClass* PickedClass);
+protected:
+	/** Access to external resources */
+	UBlueprint* GetBlueprintObjectChecked() const;
+	TSharedPtr<FBlueprintEditor> GetPinnedBlueprintEditorPtr() const;
 
 	/** Helper function to set the Blueprint back into the KismetInspector's details view */
 	void OnRefreshInDetailsView();
@@ -716,18 +873,58 @@ private:
 private:
 	/** The parent graph action details customization */
 	TWeakPtr<class FBlueprintGlobalOptionsDetails> GlobalOptionsDetailsPtr;
+};
 
-	/** Whether we show inherited interfaces versus implemented interfaces */
-	bool bShowsInheritedInterfaces;
+/** Blueprint Imports List Details */
+class FBlueprintImportsLayout : public FBlueprintGlobalOptionsManagedListDetails, public TSharedFromThis<FBlueprintImportsLayout>
+{
+public:
+	FBlueprintImportsLayout(TWeakPtr<class FBlueprintGlobalOptionsDetails> InGlobalOptionsDetails, bool bInShowDefaultImports);
 
-	/** List of unimplemented interfaces, for source for a list view */
-	TArray<TSharedPtr<FInterfaceName>> UnimplementedInterfaces;
+protected:
+	/** FBlueprintManagedListDetails interface*/
+	virtual TSharedPtr<SWidget> MakeAddItemWidget() override;
+	virtual void GetManagedListItems(TArray<FManagedListItem>& OutListItems) const override;
+	virtual void OnRemoveItem(const FManagedListItem& Item) override;
+	/** END FBlueprintManagedListDetails interface */
 
+	void OnNamespaceSelected(const FString& InNamespace);
+	void OnGetNamespacesToExclude(TSet<FString>& OutNamespacesToExclude) const;
+
+private:
+	/** Whether we should show default (i.e. global) imports versus custom (i.e. local) imports */
+	bool bShouldShowDefaultImports;
+};
+
+/** Blueprint Interface List Details */
+class FBlueprintInterfaceLayout : public FBlueprintGlobalOptionsManagedListDetails, public TSharedFromThis<FBlueprintInterfaceLayout>
+{
+public:
+	FBlueprintInterfaceLayout(TWeakPtr<class FBlueprintGlobalOptionsDetails> InGlobalOptionsDetails, TSharedPtr<IPropertyHandle> InInterfacesProperty = nullptr);
+
+	/** IDetailCustomNodeBuilder interface */
+	virtual TSharedPtr<IPropertyHandle> GetPropertyHandle() const override;
+	/** END IDetailCustomNodeBuilder interface */
+protected:
+	/** FBlueprintManagedListDetails interface */
+	virtual TSharedPtr<SWidget> MakeAddItemWidget() override;
+	virtual void GetManagedListItems(TArray<FManagedListItem>& OutListItems) const override;
+	virtual void OnRemoveItem(const FManagedListItem& Item) override;
+	/** END FBlueprintManagedListDetails interface */
+	
+private:
+	/** Callbacks for details UI */
+	TSharedRef<SWidget> OnGetAddInterfaceMenuContent();
+
+	/** Callback function when an interface class is picked */
+	void OnClassPicked(UClass* PickedClass);
+
+private:
 	/** The add interface combo button */
 	TSharedPtr<SComboButton> AddInterfaceComboButton;
 
-	/** A delegate to regenerate this list of children */
-	FSimpleDelegate RegenerateChildrenDelegate;
+	/** Property that stores interfaces */
+	TSharedPtr<IPropertyHandle> InterfacesProperty;
 };
 
 /** Details customization for Blueprint settings */
@@ -737,6 +934,13 @@ public:
 	/** Constructor */
 	FBlueprintGlobalOptionsDetails(TWeakPtr<FBlueprintEditor> InBlueprintEditorPtr)
 		:BlueprintEditorPtr(InBlueprintEditorPtr)
+		,BlueprintObjOverride(nullptr)
+	{
+
+	}
+	
+	FBlueprintGlobalOptionsDetails(UBlueprint* InBlueprintPtr)
+		:BlueprintObjOverride(InBlueprintPtr)
 	{
 
 	}
@@ -745,6 +949,13 @@ public:
 	static TSharedRef<class IDetailCustomization> MakeInstance(TWeakPtr<FBlueprintEditor> InBlueprintEditorPtr)
 	{
 		return MakeShareable(new FBlueprintGlobalOptionsDetails(InBlueprintEditorPtr));
+	}
+
+	/** Diff functionality doesn't need access to the FBlueprintEditor so this allows creation without editor access
+	 *  but with limited functionality */
+	static TSharedRef<IDetailCustomization> MakeInstanceForDiff(UBlueprint* InBlueprintPtr)
+	{
+		return MakeShareable(new FBlueprintGlobalOptionsDetails(InBlueprintPtr));
 	}
 
 	/** IDetailCustomization interface */
@@ -781,24 +992,36 @@ protected:
 	/** Returns the tooltip explaining deprecation */
 	FText GetDeprecatedTooltip() const;
 
-	/** Disabled in level and macro Blueprints */
-	bool IsNativizeEnabled() const;
+	/** Callback for when a new Blueprint namespace value is entered */
+	void OnNamespaceValueCommitted(const FString& InNamespace);
 
-	/** Returns the check box state (undefined if the Blueprint is a dependency that will get added as part of another Blueprint) */
-	ECheckBoxState GetNativizeState() const;
+	/** Determine Blueprint namespace "reset to default" button visibility */
+	bool ShouldShowNamespaceResetToDefault() const;
 
-	/** Depending on the property's state, returns a tooltip describing the Blueprint nativize setting */
-	FText GetNativizeTooltip() const;
+	/** Invoked when the Blueprint namespace "reset to default" button is clicked */
+	void OnNamespaceResetToDefaultValue();
 
-	/** Flags the current Blueprint for nativization (as well as any dependencies that are required) */
-	void OnNativizeToggled(ECheckBoxState NewState) const;
+	/** Called when the assigned Blueprint namespace value is changed */
+	void HandleNamespaceValueChange(const FString& InOldValue, const FString& InNewValue);
 
 private:
 	/** Weak reference to the Blueprint editor */
 	TWeakPtr<FBlueprintEditor> BlueprintEditorPtr;
+	
+	/** Weak reference to the Blueprint editor */
+	TObjectPtr<UBlueprint> BlueprintObjOverride;
 
 	/** Combo button used to choose a parent class */
 	TSharedPtr<SComboButton> ParentClassComboButton;
+
+	/** Handle to the customized namespace property */
+	TSharedPtr<IPropertyHandle> NamespacePropertyHandle;
+
+	/** Widget used for namespace value customization */
+	TSharedPtr<SBlueprintNamespaceEntry> NamespaceValueWidget;
+
+	/** Desired width for namespace value customization */
+	static float NamespacePropertyValueCustomization_MinDesiredWidth;
 };
 
 
@@ -854,7 +1077,7 @@ private:
 	TWeakPtr<FBlueprintEditor> BlueprintEditorPtr;
 
 	/** The cached tree Node we're editing */
-	TSharedPtr<class FSCSEditorTreeNode> CachedNodePtr;
+	TSharedPtr<FSubobjectEditorTreeNode> CachedNodePtr;
 
 	/** The widget used when in variable name editing mode */ 
 	TSharedPtr<SEditableTextBox> VariableNameEditableTextBox;

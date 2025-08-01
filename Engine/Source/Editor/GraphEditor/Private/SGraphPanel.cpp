@@ -2,36 +2,85 @@
 
 
 #include "SGraphPanel.h"
-#include "Rendering/DrawElements.h"
-#include "EdGraph/EdGraph.h"
-#include "Layout/WidgetPath.h"
-#include "Framework/Application/MenuStack.h"
-#include "Framework/Application/SlateApplication.h"
-#include "EdGraphNode_Comment.h"
-#include "Settings/EditorExperimentalSettings.h"
-#include "Editor.h"
-#include "GraphEditorSettings.h"
-#include "GraphEditorDragDropAction.h"
-#include "NodeFactory.h"
-#include "Classes/EditorStyleSettings.h"
 
-#include "DragAndDrop/DecoratedDragDropOp.h"
+#include "AssetRegistry/AssetData.h"
+#include "AssetSelection.h"
+#include "ConnectionDrawingPolicy.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/SparseArray.h"
+#include "DiffResults.h"
 #include "DragAndDrop/ActorDragDropGraphEdOp.h"
 #include "DragAndDrop/AssetDragDropOp.h"
-#include "DragAndDrop/LevelDragDropOp.h"
+#include "DragAndDrop/DecoratedDragDropOp.h"
 #include "DragAndDrop/GraphNodeDragDropOp.h"
-
+#include "DragAndDrop/LevelDragDropOp.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphSchema.h"
+#include "EdGraphNode_Comment.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Engine/World.h"
+#include "Framework/Application/IMenu.h"
+#include "Framework/Application/MenuStack.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/InputChord.h"
+#include "Framework/Commands/UICommandInfo.h"
+#include "GraphEditAction.h"
 #include "GraphEditorActions.h"
-
-#include "ConnectionDrawingPolicy.h"
-
-#include "AssetSelection.h"
-
+#include "GraphEditorDragDropAction.h"
+#include "GraphEditorSettings.h"
+#include "HAL/PlatformCrt.h"
+#include "Input/DragAndDrop.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
 #include "KismetNodes/KismetNodeInfoContext.h"
-#include "GraphDiffControl.h"
-
-#include "Editor/UnrealEdEngine.h"
-#include "UnrealEdGlobals.h"
+#include "Layout/ArrangedChildren.h"
+#include "Layout/ArrangedWidget.h"
+#include "Layout/Children.h"
+#include "Layout/PaintGeometry.h"
+#include "Layout/SlateRect.h"
+#include "Layout/Visibility.h"
+#include "Layout/WidgetPath.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "MarqueeOperation.h"
+#include "Math/Color.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Guid.h"
+#include "Misc/Optional.h"
+#include "NodeFactory.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "Rendering/DrawElements.h"
+#include "Rendering/RenderingCommon.h"
+#include "Rendering/SlateLayoutTransform.h"
+#include "SGraphNode.h"
+#include "ScopedTransaction.h"
+#include "Settings/EditorExperimentalSettings.h"
+#include "Settings/EditorStyleSettings.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateBrush.h"
+#include "Styling/WidgetStyle.h"
+#include "Templates/Casts.h"
+#include "Templates/Tuple.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UnrealTemplate.h"
+#include "Trace/Detail/Channel.h"
+#include "Types/PaintArgs.h"
+#include "Types/SlateAttributeMetaData.h"
+#include "Types/WidgetActiveTimerDelegate.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/Package.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/InvalidateWidgetReason.h"
+#include "Widgets/SWidget.h"
+#include "Widgets/SWindow.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogGraphPanel, Log, All);
 
@@ -44,7 +93,8 @@ void SGraphPanel::Construct( const SGraphPanel::FArguments& InArgs )
 
 	this->OnGetContextMenuFor = InArgs._OnGetContextMenuFor;
 	this->GraphObj = InArgs._GraphObj;
-	this->GraphObjToDiff = InArgs._GraphObjToDiff;
+	this->DiffResults = InArgs._DiffResults;
+	this->FocusedDiffResult = InArgs._FocusedDiffResult;
 	this->SelectionManager.OnSelectionChanged = InArgs._OnSelectionChanged;
 	this->IsEditable = InArgs._IsEditable;
 	this->DisplayAsReadOnly = InArgs._DisplayAsReadOnly;
@@ -56,6 +106,9 @@ void SGraphPanel::Construct( const SGraphPanel::FArguments& InArgs )
 	this->OnSpawnNodeByShortcut = InArgs._OnSpawnNodeByShortcut;
 	this->OnUpdateGraphPanel = InArgs._OnUpdateGraphPanel;
 	this->OnDisallowedPinConnection = InArgs._OnDisallowedPinConnection;
+	this->OnDoubleClicked = InArgs._OnDoubleClicked;
+	this->OnClicked = InArgs._OnMouseButtonDown;
+	this->OnNodeSingleClicked = InArgs._OnNodeSingleClicked;
 
 	this->bPreservePinPreviewConnection = false;
 	this->PinVisibility = SGraphEditor::Pin_Show;
@@ -100,12 +153,12 @@ int32 SGraphPanel::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeo
 
 	//Style used for objects that are the same between revisions
 	FWidgetStyle FadedStyle = InWidgetStyle;
-	FadedStyle.BlendColorAndOpacityTint(FLinearColor(0.45f,0.45f,0.45f,0.45f));
+	FadedStyle.BlendColorAndOpacityTint(FLinearColor(0.45f,0.45f,0.45f,0.30f));
 
 	// First paint the background
 	const UEditorExperimentalSettings& Options = *GetDefault<UEditorExperimentalSettings>();
 
-	const FSlateBrush* DefaultBackground = FEditorStyle::GetBrush(TEXT("Graph.Panel.SolidBackground"));
+	const FSlateBrush* DefaultBackground = FAppStyle::GetBrush(TEXT("Graph.Panel.SolidBackground"));
 	const FSlateBrush* CustomBackground = &GetDefault<UEditorStyleSettings>()->GraphBackgroundBrush;
 	const FSlateBrush* BackgroundImage = CustomBackground->HasUObject() ? CustomBackground : DefaultBackground;
 	PaintBackgroundAsLines(BackgroundImage, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId);
@@ -125,6 +178,8 @@ int32 SGraphPanel::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeo
 	const int32 CommentNodeShadowLayerId = LayerId++;
 	const int32 CommentNodeLayerId = LayerId++;
 
+	const int32 NodeDiffHighlightLayerID = LayerId++;
+
 	// Save a LayerId for wires, which appear below nodes but above comments
 	// We will draw them later, along with the arrows which appear above nodes.
 	const int32 WireLayerId = LayerId++;
@@ -138,21 +193,65 @@ int32 SGraphPanel::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeo
 	const FVector2D NodeShadowSize = GetDefault<UGraphEditorSettings>()->GetShadowDeltaSize();
 	const UEdGraphSchema* Schema = GraphObj->GetSchema();
 
+	
+	// If we were provided diff results, organize those by owner
+	TMap<UEdGraphNode*, FDiffSingleResult> NodeDiffResults;
+	TMap<UEdGraphPin*, FDiffSingleResult> PinDiffResults;
+	if (DiffResults.IsValid())
+	{
+		// diffs with Node1/Pin1 get precedence so set those first
+		for (const FDiffSingleResult& Result : *DiffResults)
+		{
+			if (Result.Pin1)
+			{
+				PinDiffResults.FindOrAdd(Result.Pin1, Result);
+
+				// when zoomed out, make it easier to see diffed pins by also highlighting the node
+				if(ZoomLevel <= 6)
+				{
+					NodeDiffResults.FindOrAdd(Result.Pin1->GetOwningNode(), Result);
+				}
+			}
+			else if (Result.Node1)
+			{
+				NodeDiffResults.FindOrAdd(Result.Node1, Result);
+			}
+		}
+
+		// only diffs with Node2/Pin2 if those nodes don't already have a diff result
+		for (const FDiffSingleResult& Result : *DiffResults)
+		{
+			if (Result.Pin2)
+			{
+				PinDiffResults.FindOrAdd(Result.Pin2, Result);
+
+				// when zoomed out, make it easier to see diffed pins by also highlighting the node
+				if(ZoomLevel <= 6)
+				{
+					NodeDiffResults.FindOrAdd(Result.Pin2->GetOwningNode(), Result);
+				}
+			}
+			else if (!Result.Pin1 && Result.Node2)
+			{
+				NodeDiffResults.FindOrAdd(Result.Node2, Result);
+			}
+		}
+	}
+
 	// Draw the child nodes
 	{
 		// When drawing a marquee, need a preview of what the selection will be.
-		const FGraphPanelSelectionSet* SelectionToVisualize = &(SelectionManager.SelectedNodes);
-		FGraphPanelSelectionSet SelectionPreview;
+		const FGraphPanelSelectionSet* SelectionToVisualize = &ObjectPtrDecay(SelectionManager.SelectedNodes);
+		decltype(SelectionManager.SelectedNodes) SelectionPreview;
 		if ( Marquee.IsValid() )
 		{			
-			ApplyMarqueeSelection(Marquee, SelectionManager.SelectedNodes, SelectionPreview);
-			SelectionToVisualize = &SelectionPreview;
+			ApplyMarqueeSelection(Marquee, ObjectPtrDecay(SelectionManager.SelectedNodes), SelectionPreview);
+			SelectionToVisualize = &ObjectPtrDecay(SelectionPreview);
 		}
 
 		// Context for rendering node infos
 		FKismetNodeInfoContext Context(GraphObj);
 
-		TArray<FGraphDiffControl::FNodeMatch> NodeMatches;
 		for (int32 ChildIndex = 0; ChildIndex < ArrangedChildren.Num(); ++ChildIndex)
 		{
 			FArrangedWidget& CurWidget = ArrangedChildren[ChildIndex];
@@ -193,6 +292,61 @@ int32 SGraphPanel::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeo
 					}
 				}
 
+				/** if this graph is being diffed, highlight the changes in the graph */
+				if(DiffResults.IsValid())
+				{
+					/** When diffing nodes, color code shadow based on diff result */
+					if (NodeDiffResults.Contains(NodeObj))
+					{
+						const FDiffSingleResult& DiffResult = NodeDiffResults[NodeObj];
+						for (const SNode::DiffHighlightInfo& Highlight : ChildNode->GetDiffHighlights(DiffResult))
+						{
+							FSlateDrawElement::MakeBox(
+								OutDrawElements,
+								NodeDiffHighlightLayerID,
+								CurWidget.Geometry.ToInflatedPaintGeometry(NodeShadowSize),
+								Highlight.Brush,
+								ESlateDrawEffect::None,
+								Highlight.Tint
+								);
+						}
+					}
+				}
+				
+				/** When diffing, set the backround of the differing pins to their diff colors */
+				for (UEdGraphPin* Pin : NodeObj->Pins)
+				{
+					if (TSharedPtr<SGraphPin> PinWidget = ChildNode->FindWidgetForPin(Pin))
+					{
+						if (FDiffSingleResult* DiffResult = PinDiffResults.Find(Pin))
+						{
+							// if the diff result associated with this pin is focused, highlight the pin
+							if (DiffResults.IsValid() && FocusedDiffResult.IsSet())
+							{
+								const int32 Index = FocusedDiffResult.Get();
+								if (DiffResults->IsValidIndex(Index))
+								{
+									const FDiffSingleResult& Focused = (*DiffResults)[Index];
+									PinWidget->SetDiffHighlighted(*DiffResult == Focused);
+								}
+							}
+						
+							FLinearColor PinDiffColor = DiffResult->GetDisplayColor();
+							PinDiffColor.A = 0.7f;
+							PinWidget->SetPinDiffColor(PinDiffColor);
+							PinWidget->SetFadeConnections(false);
+						}
+						else
+						{
+							PinWidget->SetDiffHighlighted(false);
+							PinWidget->SetPinDiffColor(TOptional<FLinearColor>());
+
+							// when zoomed out, fade out pin connections that aren't involved in a diff
+							PinWidget->SetFadeConnections(ZoomLevel <= 6 && (!NodeDiffResults.Contains(NodeObj) || NodeDiffResults[NodeObj].Pin1));
+						}
+					}
+				}
+
 				// Draw the node's shadow.
 				if (bDrawShadowsThisFrame || bSelected)
 				{
@@ -210,7 +364,7 @@ int32 SGraphPanel::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeo
 				// Draw the comments and information popups for this node, if it has any.
 				{
 					const SNodePanel::SNode::FNodeSlot* CommentSlot = ChildNode->GetSlot( ENodeZone::TopCenter );
-					float CommentBubbleY = CommentSlot ? -CommentSlot->Offset.Get().Y : 0.f;
+					float CommentBubbleY = CommentSlot ? -CommentSlot->GetSlotOffset().Y : 0.f;
 					Context.bSelected = bSelected;
 					TArray<FGraphInformationPopupInfo> Popups;
 
@@ -227,23 +381,24 @@ int32 SGraphPanel::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeo
 
 				int32 CurWidgetsMaxLayerId;
 				{
-					/** When diffing nodes, nodes that are different between revisions are opaque, nodes that have not changed are faded */
-					FGraphDiffControl::FNodeMatch NodeMatch = FGraphDiffControl::FindNodeMatch(GraphObjToDiff, NodeObj, NodeMatches);
-					if (NodeMatch.IsValid())
-					{
-						NodeMatches.Add(NodeMatch);
-					}
-					const bool bNodeIsDifferent = (!GraphObjToDiff || NodeMatch.Diff(FGraphDiffControl::FNodeDiffContext()));
-
 					/* When dragging off a pin, we want to duck the alpha of some nodes */
 					TSharedPtr< SGraphPin > OnlyStartPin = (1 == PreviewConnectorFromPins.Num()) ? PreviewConnectorFromPins[0].FindInGraphPanel(*this) : TSharedPtr< SGraphPin >();
 					const bool bNodeIsNotUsableInCurrentContext = Schema->FadeNodeWhenDraggingOffPin(NodeObj, OnlyStartPin.IsValid() ? OnlyStartPin.Get()->GetPinObj() : nullptr);
 					
-					const FWidgetStyle& NodeStyle = (bNodeIsDifferent && !bNodeIsNotUsableInCurrentContext)? InWidgetStyle : FadedStyle;
-					FWidgetStyle NodeStyleToUse = NodeStyle;
+					const bool bCleanDiff = DiffResults.IsValid() && !NodeDiffResults.Contains(NodeObj);
+					
+					FWidgetStyle NodeStyleToUse = InWidgetStyle;
+					if (bNodeIsNotUsableInCurrentContext)
+					{
+						NodeStyleToUse = FadedStyle;
+					}
+					else if (ZoomLevel <= 6 && bCleanDiff)
+					{
+						NodeStyleToUse = FadedStyle;
+					}
 					NodeStyleToUse.BlendColorAndOpacityTint(FLinearColor(1.0f, 1.0f, 1.0f, Alpha));
 
-					// Draw the node.O
+					// Draw the node.
 					CurWidgetsMaxLayerId = CurWidget.Widget->Paint(NewArgs, CurWidget.Geometry, MyCullingRect, OutDrawElements, ChildLayerId, NodeStyleToUse, !DisplayAsReadOnly.Get() && ShouldBeEnabled( bParentEnabled ) );
 				}
 
@@ -262,11 +417,14 @@ int32 SGraphPanel::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeo
 							const FSlateBrush* OverlayBrush = OverlayInfo.Brush;
 							if (OverlayBrush != nullptr)
 							{
-								FPaintGeometry BouncedGeometry = CurWidget.Geometry.ToPaintGeometry(OverlayInfo.OverlayOffset, OverlayBrush->ImageSize, 1.f);
+								FPaintGeometry BouncedGeometry = CurWidget.Geometry.ToPaintGeometry(OverlayBrush->ImageSize, FSlateLayoutTransform(OverlayInfo.OverlayOffset));
 
 								// Handle bouncing during PIE
 								const float BounceValue = FMath::Sin(2.0f * PI * BounceCurve.GetLerp());
-								BouncedGeometry.DrawPosition += (OverlayInfo.AnimationEnvelope * BounceValue * ZoomFactor);
+								BouncedGeometry.DrawPosition += FVector2f(OverlayInfo.AnimationEnvelope * BounceValue * ZoomFactor);
+
+								FLinearColor FinalColorAndOpacity(InWidgetStyle.GetColorAndOpacityTint()* OverlayBrush->GetTint(InWidgetStyle));
+								//FinalColorAndOpacity.A = Alpha;
 
 								CurWidgetsMaxLayerId++;
 								FSlateDrawElement::MakeBox(
@@ -275,7 +433,7 @@ int32 SGraphPanel::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeo
 									BouncedGeometry,
 									OverlayBrush,
 									ESlateDrawEffect::None,
-									FLinearColor(1.0f, 1.0f, 1.0f, Alpha)
+									FinalColorAndOpacity
 									);
 							}
 
@@ -288,14 +446,18 @@ int32 SGraphPanel::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeo
 						for (int32 WidgetIndex = 0; WidgetIndex < OverlayWidgets.Num(); ++WidgetIndex)
 						{
 							FOverlayWidgetInfo& OverlayInfo = OverlayWidgets[WidgetIndex];
-							if(OverlayInfo.Widget->GetVisibility() == EVisibility::Visible)
+							if (SWidget* Widget = OverlayInfo.Widget.Get())
 							{
-								// call SlatePrepass as these widgets are not in the 'normal' child hierarchy
-								OverlayInfo.Widget->SlatePrepass(AllottedGeometry.GetAccumulatedLayoutTransform().GetScale());
+								FSlateAttributeMetaData::UpdateOnlyVisibilityAttributes(*Widget, FSlateAttributeMetaData::EInvalidationPermission::AllowInvalidationIfConstructed);
+								if (Widget->GetVisibility() == EVisibility::Visible)
+								{
+									// call SlatePrepass as these widgets are not in the 'normal' child hierarchy
+									Widget->SlatePrepass(AllottedGeometry.GetAccumulatedLayoutTransform().GetScale());
 
-								const FGeometry WidgetGeometry = CurWidget.Geometry.MakeChild(OverlayInfo.OverlayOffset, OverlayInfo.Widget->GetDesiredSize());
+									const FGeometry WidgetGeometry = CurWidget.Geometry.MakeChild(Widget->GetDesiredSize(), FSlateLayoutTransform(OverlayInfo.OverlayOffset));
 
-								OverlayInfo.Widget->Paint(NewArgs, WidgetGeometry, MyCullingRect, OutDrawElements, CurWidgetsMaxLayerId, InWidgetStyle, bParentEnabled);
+									Widget->Paint(NewArgs, WidgetGeometry, MyCullingRect, OutDrawElements, CurWidgetsMaxLayerId, InWidgetStyle, bParentEnabled);
+								}
 							}
 						}
 					}
@@ -307,7 +469,6 @@ int32 SGraphPanel::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeo
 	}
 
 	MaxLayerId += 1;
-
 
 	// Draw connections between pins 
 	if (Children.Num() > 0 )
@@ -322,6 +483,8 @@ int32 SGraphPanel::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeo
 			ConnectionDrawingPolicy = FNodeFactory::CreateConnectionPolicy(Schema, WireLayerId, MaxLayerId, ZoomFactor, MyCullingRect, OutDrawElements, GraphObj);
 		}
 
+		const bool bUseDrawStateCaching = ConnectionDrawingPolicy->UseDrawStateCaching();
+		
 		TArray<TSharedPtr<SGraphPin>> OverridePins;
 		for (const FGraphPinHandle& Handle : PreviewConnectorFromPins)
 		{
@@ -335,6 +498,12 @@ int32 SGraphPanel::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeo
 		ConnectionDrawingPolicy->SetMarkedPin(MarkedPin);
 		ConnectionDrawingPolicy->SetMousePosition(AllottedGeometry.LocalToAbsolute(SavedMousePosForOnPaintEventLocalSpace));
 
+		if (IsRelinkingConnection())
+		{
+			ConnectionDrawingPolicy->SetRelinkConnections(RelinkConnections);
+			ConnectionDrawingPolicy->SetSelectedNodes(GetSelectedGraphNodes());
+		}
+
 		// Get the set of pins for all children and synthesize geometry for culled out pins so lines can be drawn to them.
 		TMap<TSharedRef<SWidget>, FArrangedWidget> PinGeometries;
 		TSet< TSharedRef<SWidget> > VisiblePins;
@@ -343,13 +512,13 @@ int32 SGraphPanel::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeo
 			TSharedRef<SGraphNode> ChildNode = StaticCastSharedRef<SGraphNode>(Children[ChildIndex]);
 
 			// If this is a culled node, approximate the pin geometry to the corner of the node it is within
-			if (IsNodeCulled(ChildNode, AllottedGeometry))
+			if (IsNodeCulled(ChildNode, AllottedGeometry) || ChildNode->IsHidingPinWidgets())
 			{
 				TArray< TSharedRef<SWidget> > NodePins;
 				ChildNode->GetPins(NodePins);
 
 				const FVector2D NodeLoc = ChildNode->GetPosition();
-				const FGeometry SynthesizedNodeGeometry(GraphCoordToPanelCoord(NodeLoc) * AllottedGeometry.Scale, AllottedGeometry.AbsolutePosition, FVector2D::ZeroVector, 1.f);
+				const FGeometry SynthesizedNodeGeometry(GraphCoordToPanelCoord(NodeLoc) * AllottedGeometry.Scale, FVector2D(AllottedGeometry.AbsolutePosition), FVector2D::ZeroVector, 1.f);
 
 				for (TArray< TSharedRef<SWidget> >::TConstIterator NodePinIterator(NodePins); NodePinIterator; ++NodePinIterator)
 				{
@@ -358,7 +527,7 @@ int32 SGraphPanel::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeo
 					{
 						FVector2D PinLoc = NodeLoc + PinWidget.GetNodeOffset();
 
-						const FGeometry SynthesizedPinGeometry(GraphCoordToPanelCoord(PinLoc) * AllottedGeometry.Scale, AllottedGeometry.AbsolutePosition, FVector2D::ZeroVector, 1.f);
+						const FGeometry SynthesizedPinGeometry(GraphCoordToPanelCoord(PinLoc) * AllottedGeometry.Scale, FVector2D(AllottedGeometry.AbsolutePosition), FVector2D::ZeroVector, 1.f);
 						PinGeometries.Add(*NodePinIterator, FArrangedWidget(*NodePinIterator, SynthesizedPinGeometry));
 					}
 				}
@@ -410,9 +579,13 @@ int32 SGraphPanel::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeo
 					ConnectionDrawingPolicy->DrawPreviewConnector(PinGeometry->Geometry, StartPoint, EndPoint, CurrentStartPin.Get()->GetPinObj());
 				}
 
-				//@TODO: Re-evaluate this incompatible mojo; it's mutating every pin state every frame to accomplish a visual effect
-				ConnectionDrawingPolicy->SetIncompatiblePinDrawState(CurrentStartPin, VisiblePins);
+				if (!bUseDrawStateCaching || !bIsDrawStateCached)
+				{
+					//@TODO: Re-evaluate this incompatible mojo; it's mutating every pin state every frame to accomplish a visual effect
+					ConnectionDrawingPolicy->SetIncompatiblePinDrawState(CurrentStartPin, VisiblePins);
+				}
 			}
+			bIsDrawStateCached = true;
 		}
 		else
 		{
@@ -441,13 +614,18 @@ int32 SGraphPanel::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeo
 					if (CommentNode == nullptr)
 					{
 						// Wasn't a comment node, disallow the spline interaction
-						OverlapData = FGraphSplineOverlapResult();
+						OverlapData = FGraphSplineOverlapResult(OverlapData.GetCloseToSpline());
 					}
 				}
 			}
 
 			// Update the spline hover state
-			const_cast<SGraphPanel*>(this)->OnSplineHoverStateChanged(OverlapData);
+			if (const_cast<SGraphPanel*>(this)->OnSplineHoverStateChanged(OverlapData))
+			{
+				
+				// if hover state changed, we update the tooltip text based on the connection drawing policy
+				const_cast<SGraphPanel*>(this)->SetToolTip(ConnectionDrawingPolicy->GetConnectionToolTip(*this, OverlapData));
+			}
 		}
 
 		delete ConnectionDrawingPolicy;
@@ -455,7 +633,7 @@ int32 SGraphPanel::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeo
 
 	// Draw a shadow overlay around the edges of the graph
 	++MaxLayerId;
-	PaintSurroundSunkenShadow(FEditorStyle::GetBrush(TEXT("Graph.Shadow")), AllottedGeometry, MyCullingRect, OutDrawElements, MaxLayerId);
+	PaintSurroundSunkenShadow(FAppStyle::GetBrush(TEXT("Graph.Shadow")), AllottedGeometry, MyCullingRect, OutDrawElements, MaxLayerId);
 
 	if (ShowGraphStateOverlay.Get())
 	{
@@ -463,12 +641,12 @@ int32 SGraphPanel::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeo
 		if ((GEditor->bIsSimulatingInEditor || GEditor->PlayWorld != nullptr))
 		{
 			// Draw a surrounding indicator when PIE is active, to make it clear that the graph is read-only, etc...
-			BorderBrush = FEditorStyle::GetBrush(TEXT("Graph.PlayInEditor"));
+			BorderBrush = FAppStyle::GetBrush(TEXT("Graph.PlayInEditor"));
 		}
 		else if (!IsEditable.Get())
 		{
 			// Draw a different border when we're not simulating but the graph is read-only
-			BorderBrush = FEditorStyle::GetBrush(TEXT("Graph.ReadOnlyBorder"));
+			BorderBrush = FAppStyle::GetBrush(TEXT("Graph.ReadOnlyBorder"));
 		}
 
 		if (BorderBrush != nullptr)
@@ -493,31 +671,56 @@ int32 SGraphPanel::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeo
 	return MaxLayerId;
 }
 
-void SGraphPanel::OnSplineHoverStateChanged(const FGraphSplineOverlapResult& NewSplineHoverState)
+bool SGraphPanel::OnSplineHoverStateChanged(const FGraphSplineOverlapResult& NewSplineHoverState)
 {
-	TSharedPtr<SGraphPin> OldPinWidget = PreviousFrameSplineOverlap.GetBestPinWidget(*this);
+	TSharedPtr<SGraphPin> OldPin1Widget;
+	TSharedPtr<SGraphPin> OldPin2Widget;
+	PreviousFrameSplineOverlap.GetPinWidgets(*this, OldPin1Widget, OldPin2Widget);
+
 	PreviousFrameSplineOverlap = NewSplineHoverState;
-	TSharedPtr<SGraphPin> NewPinWidget = PreviousFrameSplineOverlap.GetBestPinWidget(*this);
+
+	TSharedPtr<SGraphPin> NewPin1Widget;
+	TSharedPtr<SGraphPin> NewPin2Widget;
+	PreviousFrameSplineOverlap.GetPinWidgets(*this, NewPin1Widget, NewPin2Widget);
 
 	PreviousFrameSavedMousePosForSplineOverlap = SavedMousePosForOnPaintEventLocalSpace;
 
-	// Handle mouse enter/leaves on the associated pin
-	if (OldPinWidget != NewPinWidget)
+	// Handle exiting hovering on the pins
+	if (OldPin1Widget.IsValid() && OldPin1Widget != NewPin1Widget && OldPin1Widget != NewPin2Widget)
 	{
-		if (OldPinWidget.IsValid())
-		{
-			OldPinWidget->OnMouseLeave(LastPointerEvent);
-		}
-
-		if (NewPinWidget.IsValid())
-		{
-			NewPinWidget->OnMouseEnter(LastPointerGeometry, LastPointerEvent);
-
-			// Get the pin/wire glowing quicker, since it's a direct selection (this time was already set to 'now' as part of entering the pin)
-			//@TODO: Source this parameter from the graph rendering settings once it is there (see code in ApplyHoverDeemphasis)
-			TimeWhenMouseEnteredPin -= 0.75f;
-		}
+		OldPin1Widget->OnMouseLeave(LastPointerEvent);
+		// reset connection tooltip if hover outside spline
+		SetToolTipText(FText());
 	}
+
+	if (OldPin2Widget.IsValid() && OldPin2Widget != NewPin1Widget && OldPin2Widget != NewPin2Widget)
+	{
+		OldPin2Widget->OnMouseLeave(LastPointerEvent);
+		// reset connection tooltip if hover outside spline
+		SetToolTipText(FText());
+	}
+
+	// Handle enter hovering on the pins
+	bool bChangedHover = false;
+	if (NewPin1Widget.IsValid() && NewPin1Widget != OldPin1Widget && NewPin1Widget != OldPin2Widget)
+	{
+		NewPin1Widget->OnMouseEnter(LastPointerGeometry, LastPointerEvent);
+		bChangedHover = true;
+	}
+
+	if (NewPin2Widget.IsValid() && NewPin2Widget != OldPin1Widget && NewPin2Widget != OldPin2Widget)
+	{
+		NewPin2Widget->OnMouseEnter(LastPointerGeometry, LastPointerEvent);
+		bChangedHover = true;
+	}
+
+	if (bChangedHover)
+	{
+		// Get the pin/wire glowing quicker, since it's a direct selection (this time was already set to 'now' as part of entering the pin)
+		//@TODO: Source this parameter from the graph rendering settings once it is there (see code in ApplyHoverDeemphasis)
+		TimeWhenMouseEnteredPin -= 0.75f;
+	}
+	return bChangedHover;
 }
 
 bool SGraphPanel::SupportsKeyboardFocus() const
@@ -541,28 +744,19 @@ void SGraphPanel::OnArrangeChildren( const FGeometry& AllottedGeometry, FArrange
 		{
 			FOverlayWidgetInfo& OverlayInfo = OverlayWidgets[WidgetIndex];
 
-			MyArrangedChildren.AddWidget(AllottedGeometry.MakeChild( OverlayInfo.Widget.ToSharedRef(), CurWidget.Geometry.Position + OverlayInfo.OverlayOffset, OverlayInfo.Widget->GetDesiredSize(), GetZoomAmount() ));
+			MyArrangedChildren.AddWidget(AllottedGeometry.MakeChild( OverlayInfo.Widget.ToSharedRef(), FVector2D(CurWidget.Geometry.Position) + OverlayInfo.OverlayOffset, OverlayInfo.Widget->GetDesiredSize(), GetZoomAmount() ));
 		}
 	}
 
 	ArrangedChildren.Append(MyArrangedChildren);
 }
 
-TSharedPtr<IToolTip> SGraphPanel::GetToolTip()
-{
-	if (SGraphPin* BestPinFromHoveredSpline = GetBestPinFromHoveredSpline())
-	{
-		return BestPinFromHoveredSpline->GetToolTip();
-	}
-
-	return SNodePanel::GetToolTip();
-}
-
 void SGraphPanel::UpdateSelectedNodesPositions(FVector2D PositionIncrement)
 {
-	for (FGraphPanelSelectionSet::TIterator NodeIt(SelectionManager.SelectedNodes); NodeIt; ++NodeIt)
+	FScopedTransaction Transaction(NSLOCTEXT("GraphEditor", "NudgeNodeAction", "Nudge Node"));
+	for (auto& NodeIt : SelectionManager.SelectedNodes)
 	{
-		TSharedRef<SNode>* pWidget = NodeToWidgetLookup.Find(*NodeIt);
+		TSharedRef<SNode>* pWidget = NodeToWidgetLookup.Find(NodeIt);
 		if (pWidget != nullptr)
 		{
 			SNode& Widget = pWidget->Get();
@@ -579,24 +773,24 @@ FReply SGraphPanel::OnKeyDown( const FGeometry& MyGeometry, const FKeyEvent& InK
 		const bool bIsModifierActive = InKeyEvent.IsCommandDown() || InKeyEvent.IsAltDown() || InKeyEvent.IsShiftDown() || InKeyEvent.IsControlDown();
 		if (!bIsModifierActive)
 		{
-			if( InKeyEvent.GetKey() == EKeys::Up  ||InKeyEvent.GetKey() ==  EKeys::NumPadEight )
+			if( InKeyEvent.GetKey() == EKeys::Up || InKeyEvent.GetKey() == EKeys::NumPadEight )
 			{
-				UpdateSelectedNodesPositions(FVector2D(0.0f,-GetSnapGridSize()));
+				UpdateSelectedNodesPositions(FVector2D(0.0f,-1.0f * GetSnapGridSize()));
 				return FReply::Handled();
 			}
-			if( InKeyEvent.GetKey() ==  EKeys::Down || InKeyEvent.GetKey() ==  EKeys::NumPadTwo )
+			if( InKeyEvent.GetKey() == EKeys::Down || InKeyEvent.GetKey() == EKeys::NumPadTwo )
 			{
 				UpdateSelectedNodesPositions(FVector2D(0.0f,GetSnapGridSize()));
 				return FReply::Handled();
 			}
-			if( InKeyEvent.GetKey() ==  EKeys::Right || InKeyEvent.GetKey() ==  EKeys::NumPadSix )
+			if( InKeyEvent.GetKey() == EKeys::Right || InKeyEvent.GetKey() == EKeys::NumPadSix )
 			{
 				UpdateSelectedNodesPositions(FVector2D(GetSnapGridSize(),0.0f));
 				return FReply::Handled();
 			}
-			if( InKeyEvent.GetKey() ==  EKeys::Left || InKeyEvent.GetKey() ==  EKeys::NumPadFour )
+			if( InKeyEvent.GetKey() == EKeys::Left || InKeyEvent.GetKey() == EKeys::NumPadFour )
 			{
-				UpdateSelectedNodesPositions(FVector2D(-GetSnapGridSize(),0.0f));
+				UpdateSelectedNodesPositions(FVector2D(-1.0f * GetSnapGridSize(),0.0f));
 				return FReply::Handled();
 			}
 		}
@@ -622,6 +816,130 @@ FReply SGraphPanel::OnKeyDown( const FGeometry& MyGeometry, const FKeyEvent& InK
 			ChangeZoomLevel(+1, CachedAllottedGeometryScaledSize / 2.f, InKeyEvent.IsControlDown());
 			return FReply::Handled();
 		}
+
+		// If we're only dragging out from a single pin then we can process the node spawn keyboard shortcuts
+		// If you're dragging multiple connections then it's probably a Ctrl + Drag to move wires around, which
+		// wouldn't make as much sense to do node creation during
+		UEdGraphPin* PreviewConnectionPin = PreviewConnectorFromPins.Num() == 1 ? PreviewConnectorFromPins[0].GetPinObj(*this) : nullptr;
+		if (OnSpawnNodeByShortcut.IsBound() && PreviewConnectionPin)
+		{
+			// Note: We can't use SavedMousePosForOnPaintEventLocalSpace since it isn't updated while dragging,
+			// and so would just be the mouse position of the connection origin. So instead we'll just use the current cursor pos
+			FVector2D NewNodePosition = PanelCoordToGraphCoord(MyGeometry.AbsoluteToLocal(FSlateApplication::Get().GetCursorPos()));
+			FInputChord KeyChord = FInputChord(InKeyEvent.GetKey(), EModifierKey::FromBools(InKeyEvent.IsControlDown(), InKeyEvent.IsAltDown(), InKeyEvent.IsShiftDown(), InKeyEvent.IsCommandDown()));
+
+			int32 NodeCountBefore = GraphObj->Nodes.Num();
+			FReply SpawnNodeReply = OnSpawnNodeByShortcut.Execute(KeyChord, NewNodePosition);
+			int32 NodeCountAfter = GraphObj->Nodes.Num();
+
+			// If we spawned a node then we won't call down into super and instead do some extra handling
+			int32 NumSpawnedNodes = NodeCountAfter - NodeCountBefore;
+			if (NumSpawnedNodes > 0)
+			{
+				TArrayView<UEdGraphNode* const> SpawnedNodes = MakeArrayView(&GraphObj->Nodes[NodeCountBefore], NumSpawnedNodes);
+
+				// Try to auto-wire the newly spawned node
+				// Note: Usually the auto-wiring is handled by a schema action or something like FBlueprintMenuActionItemImpl::AutowireSpawnedNodes,
+				// but since we're not going through the regular action menu codepath we'll try to just do it here ourselves
+				// with slightly fewer heuristics. Could be good to expose that more publicly/centrally though
+				if (NumSpawnedNodes == 1)
+				{
+					bool bWasAutoWired = false;
+					for (const UEdGraphPin* Pin : SpawnedNodes[0]->Pins)
+					{
+						if (Pin->LinkedTo.Num() > 0)
+						{
+							bWasAutoWired = true;
+							break;
+						}
+					}
+
+					if (!bWasAutoWired)
+					{
+						SpawnedNodes[0]->AutowireNewNode(PreviewConnectionPin);
+					}
+				}
+
+				// The parent SNodePanel won't get a chance to set its LastKeyChordDetected, so we'll
+				// clear it out here so this key press is sort of "consumed"
+				LastKeyChordDetected = FInputChord();
+
+				// We spawned a new node through hotkey instead of letting go of the mouse,
+				// so we should cancel the drag to avoid the mouse up summoning the add node context menu
+				FSlateApplication::Get().CancelDragDrop();
+
+				OnStopMakingConnection(/*bForceStop=*/ true);
+
+				// Try to make the newly spawned node's connected pin end up underneath the mouse
+				TArrayView<UEdGraphPin*> DraggedFromPins = MakeArrayView(&PreviewConnectionPin, 1);
+				AdjustNewlySpawnedNodePositions(SpawnedNodes, DraggedFromPins, NewNodePosition);
+
+				UEdGraphPin* ResumeDraggingFromPin = nullptr;
+
+				// For now we don't let the spawn node shortcut provide an explicit pin that should be
+				// used when resuming dragging, but instead we'll just see if we spawned a 'control point only' (reroute) node,
+				// and if so then automatically use its appropriate in/out pin to continue the drag connection from
+				if (SpawnedNodes.Num() == 1)
+				{
+					UEdGraphNode* SpawnedNode = SpawnedNodes[0];
+					int32 OutPinIndex, InPinIndex;
+					if (SpawnedNode && SpawnedNode->ShouldDrawNodeAsControlPointOnly(OutPinIndex, InPinIndex))
+					{
+						ResumeDraggingFromPin = PreviewConnectionPin->Direction == EGPD_Input ? SpawnedNode->Pins[OutPinIndex] : SpawnedNode->Pins[InPinIndex];
+					}
+				}
+
+				// If we found a pin then need to start a new drag operation from it
+				if (ResumeDraggingFromPin)
+				{
+					// We need to do this one frame later since node widgets aren't created synchronously.
+					// Luckily the 'create widget' timer is scheduled synchronously within the actual spawning above,
+					// so this should always run after the new widget exists, though before it's been painted
+					static auto ResumeDragDelegate = [](double, float, TSharedRef<SGraphPanel> Panel, FGraphPinHandle DragFromPinHandle) -> EActiveTimerReturnType
+					{
+						TSharedPtr<SGraphPin> DragFromPinWidget = DragFromPinHandle.FindInGraphPanel(*Panel);
+						if (DragFromPinWidget.IsValid())
+						{
+							FPointerEvent MouseEvent = FPointerEvent(
+								Panel->LastPointerEvent.GetUserIndex(),
+								Panel->LastPointerEvent.GetPointerIndex(),
+								FSlateApplication::Get().GetCursorPos(),
+								FSlateApplication::Get().GetLastCursorPos(),
+								FSlateApplication::Get().GetPressedMouseButtons(),
+								EKeys::LeftMouseButton, /* EffectingButton */
+								0.f,                    /* WheelDelta */
+								FModifierKeysState()    /* InModifierKeys */
+							);
+
+							// This will technically be a frame behind but it shouldn't matter too much for this case
+							FGeometry PinGeometry = DragFromPinWidget->GetTickSpaceGeometry();
+
+							// This is far from ideal, but SGraphPin doesn't expose its SpawnPinDragEvent method, and even if we made a public equivalent
+							// there's still some extra validation and bookkeeping that we'd probably want to ensure gets run,
+							// so emulating a mousedown to keep things to a single code-path might actually be an okay option for now
+							// If the pin is editable and able to be dragged from, then it should return a reply that wants to begin an FDragConnection
+							FReply ResumeDragReply = DragFromPinWidget->OnPinMouseDown(PinGeometry, MouseEvent);
+							if (ResumeDragReply.GetDragDropContent().IsValid())
+							{
+								// Then to start a drag event outside of a Slate event reply, we'll sneakily pretend an external drag started
+								TSharedPtr<SWindow> WidgetWindow = FSlateApplication::Get().FindWidgetWindow(DragFromPinWidget.ToSharedRef());
+								if (WidgetWindow)
+								{
+									FDragDropEvent DragDropEvent(MouseEvent, ResumeDragReply.GetDragDropContent());
+									FSlateApplication::Get().ProcessDragEnterEvent(WidgetWindow.ToSharedRef(), DragDropEvent);
+								}
+							}
+						}
+
+						return EActiveTimerReturnType::Stop;
+					};
+
+					RegisterActiveTimer(0.f, FWidgetActiveTimerDelegate::CreateStatic(ResumeDragDelegate, SharedThis(this), FGraphPinHandle(ResumeDraggingFromPin)));
+				}
+
+				return FReply::Handled();
+			}
+		}
 	}
 
 	return SNodePanel::OnKeyDown(MyGeometry, InKeyEvent);
@@ -631,13 +949,67 @@ FReply SGraphPanel::OnMouseButtonDown(const FGeometry& MyGeometry, const FPointe
 {
 	if ((MouseEvent.GetEffectingButton() == EKeys::LeftMouseButton) && (MouseEvent.IsAltDown() || MouseEvent.IsControlDown()))
 	{
-		if (SGraphPin* BestPinFromHoveredSpline = GetBestPinFromHoveredSpline())
+		// Intercept alt-left clicking on the hovered spline for targeted break link
+		UEdGraphPin* Pin1;
+		UEdGraphPin* Pin2;
+		if (MouseEvent.IsAltDown() && PreviousFrameSplineOverlap.GetPins(*this, Pin1, Pin2))
+		{
+			const UEdGraphSchema* Schema = GraphObj->GetSchema();
+			Schema->BreakSinglePinLink(Pin1, Pin2);
+		}
+		else if (SGraphPin* BestPinFromHoveredSpline = GetBestPinFromHoveredSpline())
 		{
 			return BestPinFromHoveredSpline->OnPinMouseDown(MyGeometry, MouseEvent);
 		}
 	}
 
+	if (MouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
+	{
+		FGraphPinHandle Pin1Handle = PreviousFrameSplineOverlap.GetPin1Handle();
+		if (Pin1Handle.IsValid())
+		{
+			TSharedPtr<class SGraphPin> SourcePin = Pin1Handle.FindInGraphPanel(*this);
+			if (SourcePin.IsValid())
+			{
+				const UEdGraphSchema* Schema = GraphObj->GetSchema();
+				if (Schema->IsConnectionRelinkingAllowed(SourcePin->GetPinObj()))
+				{
+					return SourcePin->OnPinMouseDown(MyGeometry, MouseEvent);
+				}
+			}
+		}
+	}
+
+	if (OnClicked.IsBound())
+	{
+		if (const FReply Reply = OnClicked.Execute(MyGeometry, MouseEvent); Reply.IsEventHandled())
+		{
+			return FReply::Handled();
+		}
+	}
+	
 	return SNodePanel::OnMouseButtonDown(MyGeometry, MouseEvent);
+}
+
+TArray<UEdGraphNode*> SGraphPanel::GetSelectedGraphNodes() const
+{
+	TArray<UEdGraphNode*> SelectedGraphNodes;
+	SelectedGraphNodes.Reserve(SelectionManager.SelectedNodes.Num());
+
+	for (auto NodeIt = SelectionManager.SelectedNodes.CreateConstIterator(); NodeIt; ++NodeIt)
+	{
+		const TSharedRef<SNode>* SelectedNode = NodeToWidgetLookup.Find(*NodeIt);
+		if (SelectedNode)
+		{
+			UEdGraphNode* SelectedGraphNode = Cast<UEdGraphNode>(SelectedNode->Get().GetObjectBeingDisplayed());
+			if (SelectedGraphNode)
+			{
+				SelectedGraphNodes.Add(SelectedGraphNode);
+			}
+		}
+	}
+
+	return SelectedGraphNodes;
 }
 
 FReply SGraphPanel::OnMouseButtonUp(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
@@ -664,6 +1036,10 @@ FReply SGraphPanel::OnMouseButtonDoubleClick(const FGeometry& MyGeometry, const 
 
 		const UEdGraphSchema* Schema = GraphObj->GetSchema();
 		Schema->OnPinConnectionDoubleCicked(Pin1, Pin2, DoubleClickPositionInGraphSpace);
+	}
+	else if (!PreviousFrameSplineOverlap.GetCloseToSpline())
+	{
+		OnDoubleClicked.ExecuteIfBound();
 	}
 
 	return SNodePanel::OnMouseButtonDoubleClick(MyGeometry, MouseEvent);
@@ -766,11 +1142,17 @@ bool SGraphPanel::OnHandleLeftMouseRelease(const FGeometry& MyGeometry, const FP
 			if( PinWidgetGeometry.Geometry.IsUnderLocation( MouseEvent.GetScreenSpacePosition() ) )
 			{
 				SGraphPin& TargetPin = static_cast<SGraphPin&>( PinWidgetGeometry.Widget.Get() );
-
+				
 				if (PreviewConnectionPin->TryHandlePinConnection(TargetPin))
 				{
-					NodeList.Add(TargetPin.GetPinObj()->GetOwningNode());
-					NodeList.Add(PreviewConnectionPin->GetPinObj()->GetOwningNode());
+					// We have to do a second check on PinObjs here since TryHandlePinConnection, may invalidate them.
+					UEdGraphPin* PreviewConnectionPinObj = PreviewConnectionPin->GetPinObj();
+					UEdGraphPin* TargetPinObj = TargetPin.GetPinObj();
+					if (TargetPinObj && PreviewConnectionPinObj)
+					{
+						NodeList.Add(TargetPinObj->GetOwningNode());
+						NodeList.Add(PreviewConnectionPinObj->GetOwningNode());
+					}
 				}
 				bHandledDrop = true;
 			}
@@ -863,7 +1245,7 @@ FReply SGraphPanel::OnDragOver( const FGeometry& MyGeometry, const FDragDropEven
 				{
 					Tooltip = NSLOCTEXT( "GraphPanel", "DragDropOperation", "Graph is Read-Only" );
 				}
-				AssetOp->SetToolTip(Tooltip, FEditorStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Error")));
+				AssetOp->SetToolTip(Tooltip, FAppStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Error")));
 			}
 		}
 		return FReply::Handled();
@@ -901,7 +1283,7 @@ FReply SGraphPanel::OnDragOver( const FGeometry& MyGeometry, const FDragDropEven
 					bOkIcon = false;
 				}
 			}
-			const FSlateBrush* TooltipIcon = bOkIcon ? FEditorStyle::GetBrush(TEXT("Graph.ConnectorFeedback.OK")) : FEditorStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Error"));
+			const FSlateBrush* TooltipIcon = bOkIcon ? FAppStyle::GetBrush(TEXT("Graph.ConnectorFeedback.OK")) : FAppStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Error"));
 			AssetOp->SetToolTip(TooltipText, TooltipIcon);
 		}
 		return FReply::Handled();
@@ -1041,6 +1423,179 @@ UEdGraphPin* SGraphPanel::GetPinUnderMouse(const FGeometry& MyGeometry, const FP
 	return PinUnderCursor;
 }
 
+void SGraphPanel::AdjustNewlySpawnedNodePositions(TArrayView<UEdGraphNode* const> SpawnedNodes, TArrayView<UEdGraphPin*> DraggedFromPins, FVector2D AnchorPosition)
+{
+	static auto FindFirstLinkedAutoWiredPin = [](TArrayView<UEdGraphNode* const> SpawnedNodes, TArrayView<UEdGraphPin*> DraggedFromPins) -> UEdGraphPin*
+	{
+		for (UEdGraphPin* DraggedPin : DraggedFromPins)
+		{
+			for (UEdGraphPin* LinkedToPin : DraggedPin->LinkedTo)
+			{
+				if (SpawnedNodes.Contains(LinkedToPin->GetOwningNode()))
+				{
+					return LinkedToPin;
+				}
+			}
+		}
+
+		return nullptr;
+	};
+
+	if (UEdGraphPin* DraggedConnectionWasAutoWiredToNewPin = FindFirstLinkedAutoWiredPin(SpawnedNodes, DraggedFromPins))
+	{
+		MoveNodesToAnchorPinAtGraphPosition(SpawnedNodes, FGraphPinHandle(DraggedConnectionWasAutoWiredToNewPin), AnchorPosition);
+	}
+}
+
+void SGraphPanel::MoveNodesToAnchorPinAtGraphPosition(TArrayView<UEdGraphNode* const> NodesToMove, FGraphPinHandle PinToAnchor, FVector2D DesiredPinGraphPosition)
+{
+	struct FAnchorUtils
+	{
+		static int32 RoundToGrid(int32 Value, int32 GridSize)
+		{
+			return FMath::RoundToInt(static_cast<float>(Value) / GridSize) * GridSize;
+		}
+
+		// The standard SnapToGrid() will floor values, but this will round them instead
+		static void SnapToGridRounded(UEdGraphNode* Node, uint32 GridSnapSize)
+		{
+			Node->NodePosX = RoundToGrid(Node->NodePosX, GridSnapSize);
+			Node->NodePosY = RoundToGrid(Node->NodePosY, GridSnapSize);
+		}
+
+		static EActiveTimerReturnType AlignPinToPositionDelayed(double, float, TSharedRef<SGraphPanel> Panel, FGraphPinHandle DragFromPinHandle, FVector2D DesiredPinImageCenterGraph, TArray<UEdGraphNode*> SpawnedNodes)
+		{
+			AlignPinToPosition(Panel, DragFromPinHandle, DesiredPinImageCenterGraph, SpawnedNodes);
+			return EActiveTimerReturnType::Stop;
+		}
+
+		static void AlignPinToPosition(TSharedRef<SGraphPanel> Panel, FGraphPinHandle DragFromPinHandle, FVector2D DesiredPinImageCenterGraph, TArrayView<UEdGraphNode* const> SpawnedNodes)
+		{
+			TSharedPtr<SGraphPin> DragFromPinWidget = DragFromPinHandle.FindInGraphPanel(*Panel);
+			if (!DragFromPinWidget.IsValid())
+			{
+				return;
+			}
+
+			// Normally, the new node's widgets haven't been painted yet, so can't use GetTickSpaceGeometry(),
+			// but we want to avoid them painting in the wrong position for a frame anyway, so will just
+			// arrange all nodes synchronously as part of FindChildGeometry so we know where they'd be without actually
+			// painting to screen. We could theoretically set the node's visibility to hidden until we've done this,
+			// but then would also need the connections and overlays etc. to also be hidden
+			// TODO: Theoretically we only need to arrange the single node and its descendants, not the whole graph
+			// (like ArrangeChildrenForContextMenuSummon but even more reduced), but if it requires SecondPassLayout
+			// then would need to do the whole graph anyway, so might be better to just make both types have the same cost
+			// for now now to avoid the extra complexity, given certain schemas purge all nodes on any graph change anyway
+
+			// Note: If this schema return true for `ShouldAlwaysPurgeOnModification` then new nodes might have been created,
+			// but this timer will be executed before the SNodePanel's Paint, and thus Tick have been called, which is where
+			// it populates the VisibleChildren list. And since ArrangeChildren uses this list to know which nodes to arrange,
+			// if we don't force it to be populated here then we won't be able to arrange and find the new node's pin
+			if (Panel->VisibleChildren.Num() == 0)
+			{
+				Panel->PopulateVisibleChildren(Panel->GetTickSpaceGeometry());
+			}
+
+			UEdGraphPin* PinObj = DragFromPinWidget->GetPinObj();
+			UEdGraphNode* OwningNode = PinObj ? PinObj->GetOwningNode() : nullptr;
+			TSharedPtr<SGraphNode> OwningNodeWidget = OwningNode ? Panel->GetNodeWidgetFromGuid(OwningNode->NodeGuid) : nullptr;
+			if (OwningNodeWidget)
+			{
+				bool bNodeNeedsPrepass = OwningNodeWidget->NeedsPrepass();
+				bool bNoDesiredSize = OwningNodeWidget->GetDesiredSize().GetMax() <= 0.001f;
+				if (bNodeNeedsPrepass || bNoDesiredSize)
+				{
+					const int32 ChildIndex = Panel->Children.Find(OwningNodeWidget.ToSharedRef());
+					const float SelfLayoutScaleMultiplier = Panel->PrepassLayoutScaleMultiplier.Get(1.f);
+					const float ChildLayoutScaleMultiplier = Panel->bHasRelativeLayoutScale
+								? SelfLayoutScaleMultiplier * Panel->GetRelativeLayoutScale(ChildIndex, SelfLayoutScaleMultiplier)
+								: SelfLayoutScaleMultiplier;
+
+					OwningNodeWidget->MarkPrepassAsDirty();
+					OwningNodeWidget->SlatePrepass(ChildLayoutScaleMultiplier);
+				}
+			}
+
+			TSharedPtr<SWidget> PinImageWidget = DragFromPinWidget->GetPinImageWidget();
+			TSet<TSharedRef<SWidget>> WidgetsToFind = { DragFromPinWidget.ToSharedRef() };
+
+			// If this pin had an image, then may as well look for that too since it can be
+			// more accurate than the center of the overall pin if it has any text wrapping etc.
+			if (PinImageWidget.IsValid())
+			{
+				WidgetsToFind.Add(PinImageWidget.ToSharedRef());
+			}
+
+			// Purposefully not using FindChildGeometry() since that's actually checked,
+			// and we don't want to panic if the node doesn't happen to exist yet. This util will both
+			// force layout to be computed, and if we had an image widget, give us that widget's geometry too
+			TMap<TSharedRef<SWidget>, FArrangedWidget> Result;
+			Panel->FindChildGeometries(Panel->GetTickSpaceGeometry(), WidgetsToFind, Result);
+
+			// Check if we found anything
+			FArrangedWidget* ArrangedDragFromPinWidget = Result.Find(DragFromPinWidget.ToSharedRef());
+			FArrangedWidget* ArrangedPinImageWidget = PinImageWidget.IsValid() ? Result.Find(PinImageWidget.ToSharedRef()) : nullptr;
+
+			// If we couldn't even find the pin widget we dragged from then we can't do much else
+			if (!ArrangedDragFromPinWidget)
+			{
+				return;
+			}
+
+			// Default to a similar calculation to Paint(), though we don't have access to the drawing policy so can't add the arrow offset
+			FVector2D PinImageCenterAbsolute = DragFromPinWidget->GetDirection() == EGPD_Input ? FGeometryHelper::VerticalMiddleLeftOf(ArrangedDragFromPinWidget->Geometry) : FGeometryHelper::VerticalMiddleRightOf(ArrangedDragFromPinWidget->Geometry);
+
+			// Though if we found the actual pin image widget, then we can use its exact center instead, which will probably be more accurate
+			// Either should be close enough given we'll be snapping to the grid afterwards anyway
+			if (ArrangedPinImageWidget)
+			{
+				PinImageCenterAbsolute = ArrangedPinImageWidget->Geometry.GetAbsolutePositionAtCoordinates(FVector2D(0.5f, 0.5f));
+			}
+
+			FVector2D PinImageCenterPanel = Panel->GetTickSpaceGeometry().AbsoluteToLocal(PinImageCenterAbsolute);
+			FVector2D PinImageCenterGraph = Panel->PanelCoordToGraphCoord(PinImageCenterPanel);
+			FVector2D Delta = DesiredPinImageCenterGraph - PinImageCenterGraph;
+
+			// Offset all nodes that were spawned by this same delta so that their relative
+			// positioning is maintained (re-snapping them each individually though)
+			for (UEdGraphNode* SpawnedNode : SpawnedNodes)
+			{
+				// Extra safety in case this was called from within a timer
+				if (IsValid(SpawnedNode))
+				{
+					SpawnedNode->NodePosX += Delta.X;
+					SpawnedNode->NodePosY += Delta.Y;
+
+					// Note: Not using the standard SnapToGrid() on purpose since we actually want to be as close
+					// to the user's dragged location as possible, and flooring ends up with noticeably more error
+					// when you eg. drop just a few px above the previous node
+					SnapToGridRounded(SpawnedNode, Panel->GetSnapGridSize());
+				}
+			}
+		}
+	};
+
+	if (NodesToMove.Num() == 0)
+	{
+		return;
+	}
+
+	// If the widget already exists then we can just align it synchronously,
+	// but if it doesn't (as this is usually used for newly spawned nodes before
+	// their deferred construction has run) then we'll try again next frame
+	TSharedPtr<SGraphPin> DragFromPinWidget = PinToAnchor.FindInGraphPanel(*this);
+	if (DragFromPinWidget.IsValid())
+	{
+		FAnchorUtils::AlignPinToPosition(SharedThis(this), PinToAnchor, DesiredPinGraphPosition, NodesToMove);
+	}
+	else
+	{
+		TArray<UEdGraphNode*> NodesToMoveCopy;
+		NodesToMoveCopy.Append(NodesToMove);
+		RegisterActiveTimer(0.f, FWidgetActiveTimerDelegate::CreateStatic(FAnchorUtils::AlignPinToPositionDelayed, SharedThis(this), PinToAnchor, DesiredPinGraphPosition, NodesToMoveCopy));
+	}
+}
+
 void SGraphPanel::OnBeginMakingConnection(UEdGraphPin* InOriginatingPin)
 {
 	OnBeginMakingConnection(FGraphPinHandle(InOriginatingPin));
@@ -1050,7 +1605,10 @@ void SGraphPanel::OnBeginMakingConnection(FGraphPinHandle PinHandle)
 {
 	if (PinHandle.IsValid())
 	{
+		DismissContextMenu();
+
 		PreviewConnectorFromPins.Add(PinHandle);
+		bIsDrawStateCached = false;
 	}
 }
 
@@ -1060,7 +1618,25 @@ void SGraphPanel::OnStopMakingConnection(bool bForceStop)
 	{
 		PreviewConnectorFromPins.Reset();
 		bPreservePinPreviewConnection = false;
+		bIsDrawStateCached = false;
 	}
+}
+
+void SGraphPanel::OnBeginRelinkConnection(const FGraphPinHandle& InSourcePinHandle, const FGraphPinHandle& InTargetPinHandle)
+{
+	RelinkConnections.Add({ InSourcePinHandle.GetPinObj(*this), InTargetPinHandle.GetPinObj(*this) });
+	OnBeginMakingConnection(InSourcePinHandle);
+}
+
+void SGraphPanel::OnEndRelinkConnection(bool bForceStop)
+{
+	OnStopMakingConnection(bForceStop);
+	RelinkConnections.Empty();
+}
+
+bool SGraphPanel::IsRelinkingConnection() const
+{
+	return (RelinkConnections.IsEmpty() == false);
 }
 
 void SGraphPanel::PreservePinPreviewUntilForced()
@@ -1098,6 +1674,8 @@ void SGraphPanel::RemoveAllNodes()
 
 TSharedPtr<SWidget> SGraphPanel::SummonContextMenu(const FVector2D& WhereToSummon, const FVector2D& WhereToAddNode, UEdGraphNode* ForNode, UEdGraphPin* ForPin, const TArray<UEdGraphPin*>& DragFromPins)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(SGraphPanel::SummonContextMenu);
+
 	if (OnGetContextMenuFor.IsBound())
 	{
 		FGraphContextMenuArguments SpawnInfo;
@@ -1132,6 +1710,8 @@ TSharedPtr<SWidget> SGraphPanel::SummonContextMenu(const FVector2D& WhereToSummo
 			FocusedContent.OnMenuDismissed.Broadcast();
 		}
 
+		ContextMenu = Menu;
+
 		return FocusedContent.WidgetToFocus;
 	}
 
@@ -1160,6 +1740,16 @@ void SGraphPanel::SummonCreateNodeMenuFromUICommand(uint32 NumNodesAdded)
 		FSlateApplication::Get().SetKeyboardFocus(CreateNodeMenuWidget);
 		return;
 	}
+}
+
+void SGraphPanel::DismissContextMenu()
+{
+	if (TSharedPtr<IMenu> ContextMenuPinned = ContextMenu.Pin())
+	{
+		ContextMenuPinned->Dismiss();
+	}
+
+	ContextMenu.Reset();
 }
 
 void SGraphPanel::AttachGraphEvents(TSharedPtr<SGraphNode> CreatedSubNode)
@@ -1258,9 +1848,15 @@ private:
 				AlignmentDelta += (Node->NodePosY + Pins.SrcPin->GetNodeOffset().Y) - (NodeToPins.Key->NodePosY + Pins.DstPin->GetNodeOffset().Y);
 			}
 
-			NodeToPins.Key->Modify();
-			NodeToPins.Key->NodePosY += AlignmentDelta / NodeToPins.Value.Num();
+			UEdGraph* GraphObj = NodeToPins.Key->GetGraph();
 
+			check(GraphObj);
+
+			const UEdGraphSchema* Schema = GraphObj->GetSchema();
+
+			float NewNodePosY = NodeToPins.Key->NodePosY + (AlignmentDelta / NodeToPins.Value.Num());
+			Schema->SetNodePosition(NodeToPins.Key, FVector2D(NodeToPins.Key->NodePosX, NewNodePosY));
+	
 			VisitedNodes.Add(Node);
 			VisitedNodes.Add(NodeToPins.Key);
 			
@@ -1345,8 +1941,10 @@ private:
 
 void SGraphPanel::StraightenConnections()
 {
+	bool bHasAlignedNodes = false;
+	
 	FConnectionAligner Aligner;
-	for (auto* It : SelectionManager.SelectedNodes)
+	for (auto& It : SelectionManager.SelectedNodes)
 	{
 		UEdGraphNode* SourceNode = Cast<UEdGraphNode>(It);
 		if (!SourceNode)
@@ -1378,7 +1976,54 @@ void SGraphPanel::StraightenConnections()
 					
 					if (PinWidget.IsValid() && LinkedPinWidget.IsValid())
 					{
+						bHasAlignedNodes = true;
 						Aligner.DefineConnection(SourceNode, PinWidget, DestNode, LinkedPinWidget);
+					}
+				}
+			}
+		}
+	}
+	
+	// If we aren't aligning selected nodes, try to align a hovered Single Pin (non-knot) connected nodes.
+	if (!bHasAlignedNodes && CurrentHoveredPins.Num() > 0)
+	{
+		UEdGraphPin* SourcePin = nullptr;
+		for (const FEdGraphPinReference& CurrentHoverPin : CurrentHoveredPins)
+		{
+			int32 InputPinIndex = INDEX_NONE;
+			int32 OutputPinIndex = INDEX_NONE;
+			UEdGraphNode* InKnot = CurrentHoverPin.Get()->GetOwningNodeUnchecked();
+			bool bIsKnot = (InKnot != nullptr && InKnot->ShouldDrawNodeAsControlPointOnly(InputPinIndex, OutputPinIndex) == true &&
+				InputPinIndex >= 0 && OutputPinIndex >= 0);
+	
+			//only use the actual node pins and not knot pins
+			if (!bIsKnot)
+			{
+				SourcePin = CurrentHoverPin.Get();
+			}
+		}
+
+		if (SourcePin)
+		{
+			UEdGraphNode* SourceNode = SourcePin->GetOwningNode();
+			if (SourceNode)
+			{
+				UEdGraphPin* DestPin = (SourcePin->LinkedTo.Num() == 1) ? SourcePin->LinkedTo[0] : nullptr;
+				UEdGraphNode* DestNode = DestPin ? DestPin->GetOwningNode() : nullptr;
+				if (DestPin && DestNode)
+				{
+					TSharedRef<SNode>* SrcNodePtr = NodeToWidgetLookup.Find(SourceNode);
+					TSharedRef<SNode>* DstNodePtr = NodeToWidgetLookup.Find(DestNode);
+
+					if (SrcNodePtr && DstNodePtr)
+					{
+						TSharedPtr<SGraphPin> PinWidget = StaticCastSharedRef<SGraphNode>(*SrcNodePtr)->FindWidgetForPin(SourcePin);
+						TSharedPtr<SGraphPin> LinkedPinWidget = StaticCastSharedRef<SGraphNode>(*DstNodePtr)->FindWidgetForPin(DestPin);
+			
+						if (PinWidget.IsValid() && LinkedPinWidget.IsValid())
+						{
+							Aligner.DefineConnection(SourceNode, PinWidget, DestNode, LinkedPinWidget);
+						}
 					}
 				}
 			}
@@ -1490,6 +2135,26 @@ void SGraphPanel::AddNode(UEdGraphNode* Node, AddNodeBehavior Behavior)
 		NewNode->PlaySpawnEffect();
 		NewNode->RequestRenameOnSpawn();
 	}
+
+	// Note: We delay the creation of widgets for new nodes by a frame in `OnGraphChanged()`, using a Slate timer per node that later
+	// calls into this method. Slate timers are executed from within the Paint event, but before the actual OnPaint is called. This means we've
+	// just inserted the new node widget after this panel has already pre-passed the existing node widgets, and because it's now a child of the panel
+	// it'll also be painted this frame, despite not having been pre-passed (meaning it'll be stuck with a desired size of zero).
+	// Because the new node widget(s) get painted with zero size, pin connection wires are then be drawn based on the layout of these zero-sized node(s),
+	// resulting in a pretty obvious one-frame flash whenever you insert new nodes. It's particularly visible when using undo/redo,
+	// since a lot of nodes can be inserted at once. To avoid this flash of 'painting without pre-pass', we'll just manually pre-pass
+	// the new widget here so that when we go to paint it after this function returns it'll at least have some sizing information when we arrange it in our OnPaint().
+	// This is safe since graph widgets don't rely on any outer layout information for their metrics, and we don't size ourselves based on node widgets either.
+	// We also need to take a bit of care to pass through the same layout scale multiplier as Prepass_ChildLoop() would have so that the zoom level
+	// scale is used, otherwise you'd still get a single frame of jitter while the graph is zoomed out.
+	const int32 ChildIndex = Children.Num() - 1;
+	const float SelfLayoutScaleMultiplier = PrepassLayoutScaleMultiplier.Get(1.f);
+	const float ChildLayoutScaleMultiplier = bHasRelativeLayoutScale
+		? SelfLayoutScaleMultiplier * GetRelativeLayoutScale(ChildIndex, SelfLayoutScaleMultiplier)
+		: SelfLayoutScaleMultiplier;
+
+	NewNode->MarkPrepassAsDirty();
+	NewNode->SlatePrepass(ChildLayoutScaleMultiplier);
 }
 
 void SGraphPanel::RemoveNode(const UEdGraphNode* Node)
@@ -1565,17 +2230,17 @@ void SGraphPanel::Update()
 			}
 		}
 
-		// find the last selection action, and execute it
-		for (int32 ActionIndex = UserActions.Num() - 1; ActionIndex >= 0; --ActionIndex)
+		// check the last selection action, and execute it
+		if (!UserSelectedNodes.IsEmpty())
 		{
-			if (UserActions[ActionIndex].Action & GRAPHACTION_SelectNode)
+			DeferredSelectionTargetObjects.Empty();
+			for (TWeakObjectPtr<UEdGraphNode>& NodePtr : UserSelectedNodes)
 			{
-				DeferredSelectionTargetObjects.Empty();
-				for (const UEdGraphNode* Node : UserActions[ActionIndex].Nodes)
+				if (NodePtr.IsValid())
 				{
+					UEdGraphNode* Node = NodePtr.Get();
 					DeferredSelectionTargetObjects.Add(Node);
 				}
-				break;
 			}
 		}
 	}
@@ -1585,8 +2250,8 @@ void SGraphPanel::Update()
 	}
 
 	// Clean out set of added nodes
-	UserAddedNodes.Empty();
-	UserActions.Empty();
+	UserAddedNodes.Reset();
+	UserSelectedNodes.Reset();
 
 	// Invoke any delegate methods
 	OnUpdateGraphPanel.ExecuteIfBound();
@@ -1643,7 +2308,8 @@ bool SGraphPanel::IsNodeTitleVisible(const class UEdGraphNode* Node, bool bReque
 
 bool SGraphPanel::IsRectVisible(const FVector2D &TopLeft, const FVector2D &BottomRight)
 {
-	return TopLeft >= PanelCoordToGraphCoord( FVector2D::ZeroVector ) && BottomRight <= PanelCoordToGraphCoord( CachedAllottedGeometryScaledSize );
+	return TopLeft.ComponentwiseAllGreaterOrEqual( PanelCoordToGraphCoord( FVector2D::ZeroVector )) && 
+		BottomRight.ComponentwiseAllLessOrEqual( PanelCoordToGraphCoord( CachedAllottedGeometryScaledSize ) );
 }
 
 bool SGraphPanel::JumpToRect(const FVector2D &TopLeft, const FVector2D &BottomRight)
@@ -1702,28 +2368,55 @@ void SGraphPanel::OnEndPIE( const bool bIsSimulating )
 
 void SGraphPanel::OnGraphChanged(const FEdGraphEditAction& EditAction)
 {
-	const bool bWillPurge = GraphObj->GetSchema()->ShouldAlwaysPurgeOnModification();
-	if (bWillPurge)
+	const bool bShouldPurge = GraphObj->GetSchema()->ShouldAlwaysPurgeOnModification();
+	if (bShouldPurge || EditAction.Action == GRAPHACTION_Default)
 	{
+		if (!bVisualUpdatePending)
+		{
+			PurgeVisualRepresentation();
+
+			const auto RefreshPanelDelegateWrapper = [](double, float, TWeakPtr<SGraphPanel> WeakParent) -> EActiveTimerReturnType
+			{
+				TSharedPtr<SGraphPanel> Parent = WeakParent.Pin();
+				if (Parent.IsValid())
+				{
+					Parent->Update();
+				}
+				return EActiveTimerReturnType::Stop;
+			};
+
+			// Trigger the refresh
+			RegisterActiveTimer(0.f, FWidgetActiveTimerDelegate::CreateLambda(RefreshPanelDelegateWrapper, StaticCastWeakPtr<SGraphPanel>(AsWeak())));
+		}
+
 		if ((EditAction.Graph == GraphObj) &&
 			(EditAction.Nodes.Num() > 0) &&
 			EditAction.bUserInvoked)
 		{
-			int32 ActionIndex = UserActions.Num();
 			if (EditAction.Action & GRAPHACTION_AddNode)
 			{
+				UserAddedNodes.Append(EditAction.Nodes);
+			}
+			if (EditAction.Action & GRAPHACTION_SelectNode)
+			{
+				UserSelectedNodes.Reset();
 				for (const UEdGraphNode* Node : EditAction.Nodes)
 				{
-					UserAddedNodes.Add(Node, ActionIndex);
+					TWeakObjectPtr<UEdGraphNode> NodePtr = MakeWeakObjectPtr(const_cast<UEdGraphNode*>(Node));
+					UserSelectedNodes.Add(NodePtr);
 				}
 			}
-			UserActions.Add(EditAction);
 		}
 	}
 	else if ((EditAction.Graph == GraphObj) && (EditAction.Nodes.Num() > 0) )
 	{
+		// Ensure that any new non-default action(s) get handled here
+		constexpr int32 HandledActionsMask = (GRAPHACTION_AddNode | GRAPHACTION_EditNode | GRAPHACTION_SelectNode | GRAPHACTION_RemoveNode);
+		ensureMsgf((EditAction.Action & ~HandledActionsMask) == 0, TEXT("Unhandled actions: %08x"), EditAction.Action & ~HandledActionsMask);
+
 		// Remove action handled immediately by SGraphPanel::OnGraphChanged
 		const bool bWasAddAction = (EditAction.Action & GRAPHACTION_AddNode) != 0;
+		const bool bWasEditAction = (EditAction.Action & GRAPHACTION_EditNode) != 0;
 		const bool bWasSelectAction = (EditAction.Action & GRAPHACTION_SelectNode) != 0;
 		const bool bWasRemoveAction = (EditAction.Action & GRAPHACTION_RemoveNode) != 0;
 
@@ -1737,52 +2430,18 @@ void SGraphPanel::OnGraphChanged(const FEdGraphEditAction& EditAction)
 		// that the timer system requires (and we don't leverage):
 		if (bWasRemoveAction)
 		{
-			const auto RemoveNodeDelegateWrapper = [](double, float, SGraphPanel* Parent, TWeakObjectPtr<UEdGraphNode> NodePtr) -> EActiveTimerReturnType
+			const auto RemoveNodesDelegateWrapper = [](double, float, TWeakPtr<SGraphPanel> WeakParent, TSet< TWeakObjectPtr<UEdGraphNode> > NodePtrs) -> EActiveTimerReturnType
 			{
-				if (NodePtr.IsValid())
+				TSharedPtr<SGraphPanel> Parent = WeakParent.Pin();
+				if (Parent.IsValid())
 				{
-					UEdGraphNode* Node = NodePtr.Get();
-					Parent->RemoveNode(Node);
-				}
-				return EActiveTimerReturnType::Stop;
-			};
-
-			for (const UEdGraphNode* Node : EditAction.Nodes)
-			{
-				TWeakObjectPtr<UEdGraphNode> NodePtr = MakeWeakObjectPtr(const_cast<UEdGraphNode*>(Node));
-				RegisterActiveTimer(0.f, FWidgetActiveTimerDelegate::CreateStatic(RemoveNodeDelegateWrapper, this, NodePtr));
-			}
-		}
-		if (bWasAddAction)
-		{
-			const auto AddNodeDelegateWrapper = [](double, float, SGraphPanel* Parent, TWeakObjectPtr<UEdGraphNode> NodePtr, bool bForceUserAdded) -> EActiveTimerReturnType
-			{
-				if (NodePtr.IsValid())
-				{
-					UEdGraphNode* Node = NodePtr.Get();
-					Parent->RemoveNode(Node);
-					Parent->AddNode(Node, bForceUserAdded ? WasUserAdded : NotUserAdded);
-				}
-				return EActiveTimerReturnType::Stop;
-			};
-
-			for (const UEdGraphNode* Node : EditAction.Nodes)
-			{
-				TWeakObjectPtr<UEdGraphNode> NodePtr = MakeWeakObjectPtr(const_cast<UEdGraphNode*>(Node));
-				RegisterActiveTimer(0.f, FWidgetActiveTimerDelegate::CreateStatic(AddNodeDelegateWrapper, this, NodePtr, EditAction.bUserInvoked));
-			}
-		}
-		if (bWasSelectAction)
-		{
-			const auto SelectNodeDelegateWrapper = [](double, float, SGraphPanel* Parent, TSet< TWeakObjectPtr<UEdGraphNode> > NodePtrs) -> EActiveTimerReturnType
-			{
-				Parent->DeferredSelectionTargetObjects.Empty();
-				for (TWeakObjectPtr<UEdGraphNode>& NodePtr : NodePtrs)
-				{
-					if (NodePtr.IsValid())
+					for (TWeakObjectPtr<UEdGraphNode>& NodePtr : NodePtrs)
 					{
-						UEdGraphNode* Node = NodePtr.Get();
-						Parent->DeferredSelectionTargetObjects.Add(Node);
+						if (NodePtr.IsValid())
+						{
+							UEdGraphNode* Node = NodePtr.Get();
+							Parent->RemoveNode(Node);
+						}
 					}
 				}
 				return EActiveTimerReturnType::Stop;
@@ -1795,7 +2454,96 @@ void SGraphPanel::OnGraphChanged(const FEdGraphEditAction& EditAction)
 				NodePtrSet.Add(NodePtr);
 			}
 
-			RegisterActiveTimer(0.f, FWidgetActiveTimerDelegate::CreateStatic(SelectNodeDelegateWrapper, this, NodePtrSet));
+			RegisterActiveTimer(0.f, FWidgetActiveTimerDelegate::CreateLambda(RemoveNodesDelegateWrapper, StaticCastWeakPtr<SGraphPanel>(AsWeak()), NodePtrSet));
+		}
+		if (bWasAddAction)
+		{
+			const auto AddNodesDelegateWrapper = [](double, float, TWeakPtr<SGraphPanel> WeakParent, TSet< TWeakObjectPtr<UEdGraphNode> > NodePtrs, bool bForceUserAdded) -> EActiveTimerReturnType
+			{
+				TSharedPtr<SGraphPanel> Parent = WeakParent.Pin();
+				if (Parent.IsValid())
+				{
+					for (TWeakObjectPtr<UEdGraphNode>& NodePtr : NodePtrs)
+					{
+						if (NodePtr.IsValid())
+						{
+							UEdGraphNode* Node = NodePtr.Get();
+							if (IsValid(Node))
+							{
+								if (Parent->bVisualUpdatePending)
+								{
+									if (bForceUserAdded)
+									{
+										Parent->UserAddedNodes.Add(Node);
+									}
+								}
+								else
+								{
+									Parent->RemoveNode(Node);
+									Parent->AddNode(Node, bForceUserAdded ? WasUserAdded : NotUserAdded);
+								}
+							}
+						}
+					}
+				}
+				return EActiveTimerReturnType::Stop;
+			};
+
+			TSet< TWeakObjectPtr<UEdGraphNode> > NodePtrSet;
+			for (const UEdGraphNode* Node : EditAction.Nodes)
+			{
+				TWeakObjectPtr<UEdGraphNode> NodePtr = MakeWeakObjectPtr(const_cast<UEdGraphNode*>(Node));
+				NodePtrSet.Add(NodePtr);
+			}
+
+			RegisterActiveTimer(0.f, FWidgetActiveTimerDelegate::CreateLambda(AddNodesDelegateWrapper, StaticCastWeakPtr<SGraphPanel>(AsWeak()), NodePtrSet, EditAction.bUserInvoked));
+		}
+		if (bWasSelectAction)
+		{
+			const auto SelectNodeDelegateWrapper = [](double, float, TWeakPtr<SGraphPanel> WeakParent, TSet< TWeakObjectPtr<UEdGraphNode> > NodePtrs, bool bForceUserAdded) -> EActiveTimerReturnType
+			{
+				TSharedPtr<SGraphPanel> Parent = WeakParent.Pin();
+				if (Parent.IsValid())
+				{
+					if (Parent->bVisualUpdatePending)
+					{
+						if (bForceUserAdded)
+						{
+							Parent->UserSelectedNodes = NodePtrs;
+						}
+					}
+					else
+					{
+						Parent->DeferredSelectionTargetObjects.Empty();
+						for (TWeakObjectPtr<UEdGraphNode>& NodePtr : NodePtrs)
+						{
+							if (NodePtr.IsValid())
+							{
+								UEdGraphNode* Node = NodePtr.Get();
+								Parent->DeferredSelectionTargetObjects.Add(Node);
+							}
+						}
+					}
+				}
+				
+				return EActiveTimerReturnType::Stop;
+			};
+
+			TSet< TWeakObjectPtr<UEdGraphNode> > NodePtrSet;
+			for (const UEdGraphNode* Node : EditAction.Nodes)
+			{
+				TWeakObjectPtr<UEdGraphNode> NodePtr = MakeWeakObjectPtr(const_cast<UEdGraphNode*>(Node));
+				NodePtrSet.Add(NodePtr);
+			}
+
+			RegisterActiveTimer(0.f, FWidgetActiveTimerDelegate::CreateLambda(SelectNodeDelegateWrapper, StaticCastWeakPtr<SGraphPanel>(AsWeak()), NodePtrSet, EditAction.bUserInvoked));
+		}
+		if (bWasEditAction)
+		{
+			for (const UEdGraphNode* Node : EditAction.Nodes)
+			{
+				RefreshNode(const_cast<UEdGraphNode&>(*Node));
+			}
 		}
 	}
 }
@@ -1809,7 +2557,6 @@ void SGraphPanel::NotifyGraphChanged(const FEdGraphEditAction& EditAction)
 void SGraphPanel::AddReferencedObjects(FReferenceCollector& Collector)
 {
 	Collector.AddReferencedObject( GraphObj );
-	Collector.AddReferencedObject( GraphObjToDiff );
 }
 
 FString SGraphPanel::GetReferencerName() const

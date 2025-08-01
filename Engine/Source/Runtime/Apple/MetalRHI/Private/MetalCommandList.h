@@ -3,6 +3,7 @@
 #pragma once
 
 #include <Metal/Metal.h>
+#include "MetalProfiler.h"
 
 class FMetalCommandQueue;
 
@@ -22,7 +23,7 @@ public:
 	 * Constructor
 	 * @param InCommandQueue The command-queue to which the command-list's buffers will be submitted.
 	 */
-	FMetalCommandList(FMetalCommandQueue& InCommandQueue, bool const bInImmediate);
+	FMetalCommandList(FMetalCommandQueue& InCommandQueue);
 	
 	/** Destructor */
 	~FMetalCommandList(void);
@@ -31,16 +32,9 @@ public:
 	 * Command buffer failure reporting function.
 	 * @param CompletedBuffer The buffer to check for failure.
 	 */
-	static void HandleMetalCommandBufferFailure(mtlpp::CommandBuffer const& CompletedBuffer);
+	static void HandleMetalCommandBufferFailure(MTL::CommandBuffer* CompletedBuffer);
 	
 #pragma mark - Public Command List Mutators -
-	
-	/** 
-	 * Set the number of parallel command-lists and the index of this command-list within the pass.
-	 * @param Index The index of this command-list within the parallel pass.
-	 * @param Num The number of command-lists within the parallel pass.
-	 */
-	void SetParallelIndex(uint32 Index, uint32 Num);
 
 	/** 
 	 * Commits the provided buffer to the command-list for execution. When parallel encoding this will be submitted later.
@@ -49,7 +43,7 @@ public:
 	 * @param bWait Whether to wait for the command buffer to complete - it is an error to set this to true on a deferred command-list.
 	 * @param bIsLastCommandBuffer True if this is the final command buffer in a frame.
 	 */
-	void Commit(mtlpp::CommandBuffer& Buffer, TArray<ns::Object<mtlpp::CommandBufferHandler>> CompletionHandlers, bool const bWait, bool const bIsLastCommandBuffer);
+	void Commit(FMetalCommandBuffer* Buffer, TArray<FMetalCommandBufferCompletionHandler> CompletionHandlers, bool const bWait, bool const bIsLastCommandBuffer);
 	
 	/**
 	 * Submits all outstanding command-buffers in the proper commit order to the command-queue.
@@ -62,29 +56,10 @@ public:
 #pragma mark - Public Command List Accessors -
 	
 	/**
-	 * True iff the command-list submits immediately to the command-queue, false if it performs any buffering.
-	 * @returns True iff the command-list submits immediately to the command-queue, false if it performs any buffering.
-	 */
-	bool IsImmediate(void) const { return bImmediate; }
-	
-	/**
-	 * True iff the command-list is part of an MTLParallelRenderCommandEncoder pass.
-	 * @returns True iff the command-list is part of an MTLParallelRenderCommandEncoder pass, false for immediate and parallel-command-buffer contexts.
-	 */
-	bool IsParallel(void) const { return !bImmediate && Num > 0 && FMetalCommandQueue::SupportsFeature(EMetalFeaturesParallelRenderEncoders); }
-	
-
-	/**
 	 * The index of this command-list within the parallel pass.
 	 * @returns The index of this command-list within the parallel pass, 0 when IsImmediate() is true.
 	 */
-	uint32 GetParallelIndex(void) const { return Index; }
-	
-	/**
-	 * The number of command-lists within the parallel pass.
-	 * @returns The number of command-lists within the parallel pass, 0 when IsImmediate() is true.
-	 */
-	uint32 GetParallelNum(void) const { return Num; }
+	uint32 GetParallelIndex(void) const { return 0; }
 
 	/** @returns The command queue to which this command-list submits command-buffers. */
 	FMetalCommandQueue& GetCommandQueue(void) const { return CommandQueue; }
@@ -94,8 +69,4 @@ private:
 	FMetalCommandQueue& CommandQueue;
 	TSharedPtr<TArray<FMetalCommandBufferTiming>, ESPMode::ThreadSafe> FrameCommitedBufferTimings;
 	TSharedPtr<FMetalCommandBufferTiming, ESPMode::ThreadSafe> LastCompletedBufferTiming;
-	TArray<mtlpp::CommandBuffer> SubmittedBuffers;
-	uint32 Index;
-	uint32 Num;
-	bool bImmediate;
 };

@@ -25,19 +25,22 @@ public:
 		const TSharedPtr<IDetailsViewPrivate>& InDetailsView,
 		bool bIsExternal);
 
-	~FDetailLayoutBuilderImpl();
+	virtual ~FDetailLayoutBuilderImpl() override;
 
 	/** IDetailLayoutBuilder Interface */
 	virtual const IDetailsView* GetDetailsView() const override;
 	virtual void GetObjectsBeingCustomized(TArray< TWeakObjectPtr<UObject> >& OutObjects) const override;
 	virtual void GetStructsBeingCustomized(TArray< TSharedPtr<FStructOnScope> >& OutStructs) const override;
 	virtual IDetailCategoryBuilder& EditCategory(FName CategoryName, const FText& NewLocalizedDisplayName = FText::GetEmpty(), ECategoryPriority::Type CategoryType = ECategoryPriority::Default) override;
+	virtual IDetailCategoryBuilder& EditCategoryAllowNone(FName CategoryName, const FText& NewLocalizedDisplayName = FText::GetEmpty(), ECategoryPriority::Type CategoryType = ECategoryPriority::Default) override;
 	virtual void GetCategoryNames(TArray<FName>& OutCategoryNames) const override;
 	virtual IDetailPropertyRow& AddPropertyToCategory(TSharedPtr<IPropertyHandle> InPropertyHandle) override;
 	virtual FDetailWidgetRow& AddCustomRowToCategory(TSharedPtr<IPropertyHandle> InPropertyHandle, const FText& InCustomSearchString, bool bForAdvanced = false) override;
 	virtual TSharedPtr<IPropertyHandle> AddObjectPropertyData(TConstArrayView<UObject*> Objects, FName PropertyName) override;
 	virtual TSharedPtr<IPropertyHandle> AddStructurePropertyData(const TSharedPtr<FStructOnScope>& StructData, FName PropertyName) override;
 	virtual IDetailPropertyRow* EditDefaultProperty(TSharedPtr<IPropertyHandle> InPropertyHandle) override;
+	virtual IDetailPropertyRow* EditPropertyFromRoot(TSharedPtr<IPropertyHandle> InPropertyHandle) override;
+	virtual bool DoesCategoryHaveGeneratedChildren(FName CategoryName) override;
 	virtual TSharedRef<IPropertyHandle> GetProperty(const FName PropertyPath, const UStruct* ClassOutermost, FName InInstanceName) const override;
 	virtual FName GetTopLevelProperty() override;
 	virtual void HideProperty(const TSharedPtr<IPropertyHandle> Property) override;
@@ -47,12 +50,25 @@ public:
 	virtual bool IsPropertyVisible(TSharedRef<IPropertyHandle> PropertyHandle) const override;
 	virtual bool IsPropertyVisible(const struct FPropertyAndParent& PropertyAndParent) const override;
 	virtual void HideCategory(FName CategoryName) override;
-	virtual const TSharedRef<IPropertyUtilities> GetPropertyUtilities() const override;
+	virtual TSharedRef<IPropertyUtilities> GetPropertyUtilities() const override;
 	virtual UClass* GetBaseClass() const override;
 	virtual const TArray<TWeakObjectPtr<UObject>>& GetSelectedObjects() const override;
 	virtual bool HasClassDefaultObject() const override;
 	virtual void RegisterInstancedCustomPropertyTypeLayout(FName PropertyTypeName, FOnGetPropertyTypeCustomizationInstance PropertyTypeLayoutDelegate, TSharedPtr<IPropertyTypeIdentifier> Identifier = nullptr) override;
 	virtual void SortCategories(const FOnCategorySortOrderFunction& SortFunction) override;
+	virtual void SetPropertyGenerationAllowListPaths(const TSet<FString>& InPropertyGenerationAllowListPaths) override;
+	virtual bool IsPropertyPathAllowed(const FString& InPath) const override;
+
+	/**
+	 * Creates an empty category row if there currently are no categories and one is required for the
+	 * @code TSharedPtr<FComplexPropertyNode> @endcode Node
+	 *
+	 * @param Node The @code TSharedPtr<FComplexPropertyNode> @endcode that we will add an empty category for, if needed
+	 *
+	 * @return true if an empty/stub category was added, else it returns false 
+	 */
+	bool AddEmptyCategoryIfNeeded(TSharedPtr<FComplexPropertyNode> Node);
+
 	/**
 	 * Creates a default category. The SDetails view will generate widgets in default categories
 	 *
@@ -120,6 +136,9 @@ public:
 	 */
 	FDetailNodeList& GetFilteredRootTreeNodes() { return FilteredRootTreeNodes; }
 
+	/**
+	 * @return All root tree nodes, regardless of visibility.
+	 */
 	FDetailNodeList& GetAllRootTreeNodes() { return AllRootTreeNodes; }
 
 	/**
@@ -188,6 +207,8 @@ public:
 	*/
 	void RemoveExternalRootPropertyNode(TSharedRef<FComplexPropertyNode> InExternalRootNode);
 
+	void ClearExternalRootPropertyNodes();
+
 	/** @return The details view that owns this layout */
 	IDetailsViewPrivate* GetDetailsView() { return DetailsView; }
 	/** @return The root node for this customization */
@@ -213,6 +234,8 @@ public:
 	/** Combines the type layout map from our PropertyGenerationUtilities object, with the local InstancePropertyTypeExtensions map - which provides instance based customizations/overrides. */
 	FCustomPropertyTypeLayoutMap GetInstancedPropertyTypeLayoutMap() const;
 
+	void RefreshNodeVisbility();
+	
 private:
 	/**
 	 * Finds a property node for the current property by searching in a fast lookup map or a path search if required
@@ -244,6 +267,8 @@ private:
 	FClassToPropertyMap& PropertyMap;
 	/** Force hidden categories set by the user */
 	TSet<FName> ForceHiddenCategories;
+	/** If not empty only nodes for property specified paths will be generated */
+	TSet<FString> PropertyGenerationAllowListPaths;
 	/** Nodes that require ticking */
 	TSet<FDetailTreeNode*> TickableNodes;
 	/** Current filter applied to the view */

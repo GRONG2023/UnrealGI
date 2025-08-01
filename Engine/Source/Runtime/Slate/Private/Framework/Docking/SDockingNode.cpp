@@ -27,11 +27,13 @@ float SDockingNode::GetSizeCoefficient() const
 void SDockingNode::SetSizeCoefficient( float InSizeCoefficient )
 {
 	SizeCoefficient = InSizeCoefficient;
+
+	OnResized();
 }
 
 void SDockingNode::OnLiveTabAdded()
 {
-	this->Visibility = EVisibility::Visible;
+	SetVisibility(EVisibility::Visible);
 
 	TSharedPtr<SDockingNode> ParentNode = ParentNodePtr.Pin();
 	if (ParentNode.IsValid())
@@ -41,7 +43,6 @@ void SDockingNode::OnLiveTabAdded()
 }
 
 SDockingNode::SDockingNode()
-: SizeCoefficient(1.0f)
 {
 
 

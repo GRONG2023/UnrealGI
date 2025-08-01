@@ -49,7 +49,7 @@ namespace Audio
 		}
 	}
 
-	void FInterpolatedLPF::ProcessAudioFrame(float* RESTRICT InputFrame, float* RESTRICT OutputFrame)
+	void FInterpolatedLPF::ProcessAudioFrame(const float* RESTRICT InputFrame, float* RESTRICT OutputFrame)
 	{
 		B1Curr += B1Delta; // step forward coefficient
 
@@ -75,7 +75,7 @@ namespace Audio
 		}
 	}
 
-	void FInterpolatedLPF::ProcessAudioBuffer(float *RESTRICT InputBuffer, float *RESTRICT OutputBuffer, const int32 NumSamples)
+	void FInterpolatedLPF::ProcessAudioBuffer(const float *RESTRICT InputBuffer, float *RESTRICT OutputBuffer, const int32 NumSamples)
 	{
 		for (int SampleIndex = 0; SampleIndex < NumSamples; ++SampleIndex)
 		{
@@ -91,6 +91,25 @@ namespace Audio
 			Yn = UnderflowClamp(Yn);
 			Z1Data[ChannelIndex] = Yn;
 			OutputBuffer[SampleIndex] = Yn;
+		}
+	}
+
+	void FInterpolatedLPF::ProcessBufferInPlace(float* InOutBuffer, const int32 NumSamples)
+	{
+		for (int32 SampleIndex = 0; SampleIndex < NumSamples; ++SampleIndex)
+		{
+			// cache which delay term we should be using
+			const int32 ChannelIndex = SampleIndex % NumChannels;
+
+			// step forward coefficient
+			// Multiply delta by !ChannelIndex so the coefficient only accumulates at the beginning of each frame (on channel 0)
+			B1Curr += B1Delta * !ChannelIndex;
+
+			const float InputSample = InOutBuffer[SampleIndex];
+			float Yn = InputSample + B1Curr * (Z1Data[ChannelIndex] - InputSample); // LPF
+			Yn = UnderflowClamp(Yn);
+			Z1Data[ChannelIndex] = Yn;
+			InOutBuffer[SampleIndex] = Yn;
 		}
 	}
 
@@ -141,7 +160,7 @@ namespace Audio
 
 		if (!FMath::IsNearlyEqual(InTargetFrequency, CutoffFrequency))
 		{
-			CutoffFrequency = FMath::Min(InTargetFrequency, NyquistLimit);
+			CutoffFrequency = FMath::Clamp(InTargetFrequency, 0.f, NyquistLimit);
 
 			// G computation is a reduced form of the following set of equations:
 			// OmegaDigital = 2.0f * PI * CutoffFrequency;
@@ -159,7 +178,7 @@ namespace Audio
 		}
 	}
 
-	void FInterpolatedHPF::ProcessAudioFrame(float* RESTRICT InputFrame, float* RESTRICT OutputFrame)
+	void FInterpolatedHPF::ProcessAudioFrame(const float* RESTRICT InputFrame, float* RESTRICT OutputFrame)
 	{
 		A0Curr += A0Delta; // step forward coefficient
 
@@ -174,7 +193,7 @@ namespace Audio
 		}
 	}
 
-	void FInterpolatedHPF::ProcessAudioBuffer(float *RESTRICT InputBuffer, float *RESTRICT OutputBuffer, const int32 NumSamples)
+	void FInterpolatedHPF::ProcessAudioBuffer(const float *RESTRICT InputBuffer, float *RESTRICT OutputBuffer, const int32 NumSamples)
 	{
 		for (int SampleIndex = 0; SampleIndex < NumSamples; ++SampleIndex)
 		{

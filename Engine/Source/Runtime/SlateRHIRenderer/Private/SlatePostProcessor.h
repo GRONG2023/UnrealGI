@@ -8,15 +8,29 @@
 
 class FSlatePostProcessResource;
 class IRendererModule;
+struct IPooledRenderTarget;
+
+enum class EPostProcessDestination : uint8
+{
+	// Output postprocess to the default UI render target
+	UITarget,
+	// Output postprocess to the provided destination texture
+	DestTexture
+};
 
 struct FPostProcessRectParams
 {
-	FTexture2DRHIRef SourceTexture;
+	FTextureRHIRef SourceTexture;
+	FTextureRHIRef DestTexture; // Only used when 'PostProcessDest' is 'DestTexture'
 	FSlateRect SourceRect;
 	FSlateRect DestRect;
+	FVector4f CornerRadius;
 	FIntPoint SourceTextureSize;
-	TFunction<void(FRHICommandListImmediate&, FGraphicsPipelineStateInitializer&)> RestoreStateFunc;
-	TFunction<void()> RestoreStateFuncPostPipelineState;
+	TFunction<void(FRHICommandListImmediate&, FGraphicsPipelineStateInitializer&, FRHIRenderPassInfo&)> RestoreStateFunc;
+	TRefCountPtr<IPooledRenderTarget> UITarget; // not using FTextureRHIRef because we want to be able to use FRenderTargetWriteMask::Decode
+	uint32 StencilRef{};
+	EDisplayColorGamut HDRDisplayColorGamut;
+	EPostProcessDestination PostProcessDest = EPostProcessDestination::UITarget;
 };
 
 struct FBlurRectParams
@@ -37,11 +51,12 @@ public:
 	void ColorDeficiency(FRHICommandListImmediate& RHICmdList, IRendererModule& RendererModule, const FPostProcessRectParams& RectParams);
 	
 	void ReleaseRenderTargets();
+	void TickPostProcessResources();
 
 private:
-	void DownsampleRect(FRHICommandListImmediate& RHICmdList, IRendererModule& RendererModule, const FPostProcessRectParams& Params, const FIntPoint& DownsampleSize);
-	void UpsampleRect(FRHICommandListImmediate& RHICmdList, IRendererModule& RendererModule, const FPostProcessRectParams& Params, const FIntPoint& DownsampleSize, FSamplerStateRHIRef& Sampler);
-	int32 ComputeBlurWeights(int32 KernelSize, float StdDev, TArray<FVector4>& OutWeightsAndOffsets);
+	void DownsampleRect(FRHICommandListImmediate& RHICmdList, IRendererModule& RendererModule, const FPostProcessRectParams& Params, const FIntPoint& DownsampleSize, FSlatePostProcessResource* IntermediateTargets);
+	void UpsampleRect(FRHICommandListImmediate& RHICmdList, IRendererModule& RendererModule, const FPostProcessRectParams& Params, const FIntPoint& DownsampleSize, FSamplerStateRHIRef& Sampler, FSlatePostProcessResource* IntermediateTargets);
+	int32 ComputeBlurWeights(int32 KernelSize, float StdDev, TArray<FVector4f>& OutWeightsAndOffsets);
 private:
-	FSlatePostProcessResource* IntermediateTargets;
+	TArray<FSlatePostProcessResource*> IntermediateTargetsArray;
 };

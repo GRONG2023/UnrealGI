@@ -2,13 +2,19 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "Misc/Attribute.h"
+#include "Delegates/Delegate.h"
+#include "Framework/SlateDelegates.h"
+#include "HAL/Platform.h"
+#include "ITransportControl.h"
 #include "Layout/Visibility.h"
+#include "Misc/Attribute.h"
+#include "SCurveEditor.h"
+#include "SScrubWidget.h"
+#include "Templates/SharedPointer.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
-#include "SScrubWidget.h"
-#include "Editor/EditorWidgets/Public/ITransportControl.h"
 
 class KISMETWIDGETS_API SScrubControlPanel : public SCompoundWidget
 {
@@ -37,11 +43,13 @@ public:
 		, _OnSetInputViewRange()
 		, _OnCropAnimSequence()
 		, _OnTickPlayback()
+		, _TransportControlWidgetsToCreate()
 	{}
 		SLATE_ATTRIBUTE( float, Value )
 		SLATE_ATTRIBUTE( uint32, NumOfKeys )
 		SLATE_ATTRIBUTE( float, SequenceLength )
 		SLATE_ARGUMENT( bool, bAllowZoom )
+		SLATE_ARGUMENT( bool, bDisplayAnimScrubBarEditing )
 		SLATE_ATTRIBUTE(bool, DisplayDrag)
 		/** Called when the value is changed by slider or typing */
 		SLATE_EVENT( FOnFloatValueChanged, OnValueChanged )
@@ -79,8 +87,15 @@ public:
 		/** Optional, additional values to draw on the timeline **/
 		SLATE_ATTRIBUTE( TArray<float>, DraggableBars )
 		SLATE_EVENT( FOnScrubBarDrag, OnBarDrag )
+		SLATE_EVENT( FOnScrubBarCommit, OnBarCommit )
 		/** Called each frame during playback */
 		SLATE_EVENT( FOnTickPlayback, OnTickPlayback )
+		/**
+		 * Array of custom widgets to create in the Transport Control widget. If this array is used the default widget ordering will be
+		 * ignored in favor of this set of widgets.
+		 */
+		SLATE_ARGUMENT(TOptional<TArray<FTransportControlWidget>>, TransportControlWidgetsToCreate);
+
 	SLATE_END_ARGS()
 
 	/**

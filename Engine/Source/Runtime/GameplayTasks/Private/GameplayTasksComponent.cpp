@@ -11,6 +11,8 @@
 #include "Logging/MessageLog.h"
 #include "Net/Core/PushModel/PushModel.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(GameplayTasksComponent)
+
 #define LOCTEXT_NAMESPACE "GameplayTasksComponent"
 
 namespace
@@ -56,6 +58,24 @@ UGameplayTasksComponent::UGameplayTasksComponent(const FObjectInitializer& Objec
 	bInEventProcessingInProgress = false;
 	TopActivePriority = 0;
 }
+
+void UGameplayTasksComponent::ReadyForReplication()
+{
+	Super::ReadyForReplication();
+
+	REDIRECT_TO_VLOG(GetOwner());
+	
+	if (IsUsingRegisteredSubObjectList())
+	{
+		for (UGameplayTask* SimulatedTask : SimulatedTasks)
+		{
+			if (SimulatedTask)
+			{
+				AddReplicatedSubObject(SimulatedTask, COND_SkipOwner);
+			}
+		}
+	}	
+}
 	
 void UGameplayTasksComponent::OnGameplayTaskActivated(UGameplayTask& Task)
 {
@@ -77,10 +97,8 @@ void UGameplayTasksComponent::OnGameplayTaskActivated(UGameplayTask& Task)
 	
 	if (Task.IsSimulatedTask())
 	{
-		TArray<UGameplayTask*>& MutableSimulatedTasks = GetSimulatedTasks_Mutable();
-		check(MutableSimulatedTasks.Contains(&Task) == false);
-		MutableSimulatedTasks.Add(&Task);
-		bIsNetDirty = true;
+		const bool bWasAdded = AddSimulatedTask(&Task);
+		check(bWasAdded == true);
 	}
 
 	IGameplayTaskOwnerInterface* TaskOwner = Task.GetTaskOwner();
@@ -124,8 +142,7 @@ void UGameplayTasksComponent::OnGameplayTaskDeactivated(UGameplayTask& Task)
 
 	if (Task.IsSimulatedTask())
 	{
-		GetSimulatedTasks_Mutable().RemoveSingleSwap(&Task);
-		bIsNetDirty = true;
+		RemoveSimulatedTask(&Task);
 	}
 
 	// Resource-using task
@@ -152,24 +169,30 @@ void UGameplayTasksComponent::OnTaskEnded(UGameplayTask& Task)
 void UGameplayTasksComponent::GetLifetimeReplicatedProps(TArray< FLifetimeProperty >& OutLifetimeProps) const
 {
 	// Intentionally not calling super: We do not want to replicate bActive which controls ticking. We sometimes need to tick on client predictively.
-	DISABLE_ALL_CLASS_REPLICATED_PROPERTIES(Super, EFieldIteratorFlags::IncludeSuper);
+	DISABLE_ALL_CLASS_REPLICATED_PROPERTIES_FAST(Super, EFieldIteratorFlags::IncludeSuper);
 
-	FDoRepLifetimeParams Params;
-	Params.bIsPushBased = true;
-	Params.Condition = COND_SkipOwner;
-
+	const FDoRepLifetimeParams Params{ COND_SkipOwner, REPNOTIFY_Always, true };
 	DOREPLIFETIME_WITH_PARAMS_FAST(UGameplayTasksComponent, SimulatedTasks, Params);
 }
 
 bool UGameplayTasksComponent::ReplicateSubobjects(UActorChannel* Channel, class FOutBunch *Bunch, FReplicationFlags *RepFlags)
 {
+#if SUBOBJECT_TRANSITION_VALIDATION
+	// When true it means we are calling this function to find any leftover replicated subobjects in classes that transitioned to the new registry list.
+	// This shared class needs to keep supporting the old ways until we fully deprecate the API, so by only returning false we prevent the ensures to trigger
+	if (UActorChannel::CanIgnoreDeprecatedReplicateSubObjects())
+	{
+		return false;
+	}
+#endif
+
 	bool WroteSomething = Super::ReplicateSubobjects(Channel, Bunch, RepFlags);
 	
 	if (!RepFlags->bNetOwner)
 	{
 		for (UGameplayTask* SimulatedTask : GetSimulatedTasks())
 		{
-			if (SimulatedTask && !SimulatedTask->IsPendingKill())
+			if (IsValid(SimulatedTask))
 			{
 				WroteSomething |= Channel->ReplicateSubobject(SimulatedTask, *Bunch, *RepFlags);
 			}
@@ -179,21 +202,50 @@ bool UGameplayTasksComponent::ReplicateSubobjects(UActorChannel* Channel, class 
 	return WroteSomething;
 }
 
-void UGameplayTasksComponent::OnRep_SimulatedTasks()
+void UGameplayTasksComponent::OnRep_SimulatedTasks(const TArray<UGameplayTask*>& PreviousSimulatedTasks)
 {
+	if (IsUsingRegisteredSubObjectList())
+	{
+		// Find if any tasks got removed
+		for (UGameplayTask* OldSimulatedTask : PreviousSimulatedTasks)
+		{
+			if (OldSimulatedTask)
+			{
+				const bool bIsRemoved = SimulatedTasks.Find(OldSimulatedTask) == INDEX_NONE;
+				if (bIsRemoved)
+				{
+					RemoveReplicatedSubObject(OldSimulatedTask);
+				}
+			}
+		}
+	}
+
 	for (UGameplayTask* SimulatedTask : GetSimulatedTasks())
 	{
-		// Temp check 
-		if (SimulatedTask && SimulatedTask->IsTickingTask() && TickingTasks.Contains(SimulatedTask) == false)
+		if (SimulatedTask)
 		{
-			SimulatedTask->InitSimulatedTask(*this);
-
-			TickingTasks.Add(SimulatedTask);
-
-			// If this is our first ticking task, set this component as active so it begins ticking
-			if (TickingTasks.Num() == 1)
+			// If the task needs to be ticked and isn't yet.
+			if (SimulatedTask->IsTickingTask() && TickingTasks.Contains(SimulatedTask) == false)
 			{
-				UpdateShouldTick();
+				SimulatedTask->InitSimulatedTask(*this);
+
+				TickingTasks.Add(SimulatedTask);
+
+				// If this is our first ticking task, set this component as active so it begins ticking
+				if (TickingTasks.Num() == 1)
+				{
+					UpdateShouldTick();
+				}
+			}
+
+			// See if it's a new task that needs to be registered
+			if (IsUsingRegisteredSubObjectList())
+			{
+				const bool bIsNew = PreviousSimulatedTasks.Find(SimulatedTask) == INDEX_NONE;
+				if (bIsNew)
+				{
+					AddReplicatedSubObject(SimulatedTask, COND_SkipOwner);
+				}
 			}
 		}
 	}
@@ -217,34 +269,36 @@ void UGameplayTasksComponent::TickComponent(float DeltaTime, enum ELevelTick Tic
 	case 0:
 		break;
 	case 1:
-		if (TickingTasks[0])
 		{
-			TickingTasks[0]->TickTask(DeltaTime);
-			NumActuallyTicked++;
-		}
-		break;
-	default:
-	{
-
-		static TArray<UGameplayTask*> LocalTickingTasks;
-		LocalTickingTasks.Reset();
-		LocalTickingTasks.Append(TickingTasks);
-		for (UGameplayTask* TickingTask : LocalTickingTasks)
-		{
-			if (TickingTask)
+			UGameplayTask* TickingTask = TickingTasks[0];
+			if (IsValid(TickingTask))
 			{
 				TickingTask->TickTask(DeltaTime);
 				NumActuallyTicked++;
 			}
 		}
-	}
+		break;
+	default:
+		{
+			static TArray<UGameplayTask*> LocalTickingTasks;
+			LocalTickingTasks.Reset();
+			LocalTickingTasks.Append(TickingTasks);
+			for (UGameplayTask* TickingTask : LocalTickingTasks)
+			{
+				if (IsValid(TickingTask))
+				{
+					TickingTask->TickTask(DeltaTime);
+					NumActuallyTicked++;
+				}
+			}
+		}
 		break;
 	};
 
 	// Stop ticking if no more active tasks
 	if (NumActuallyTicked == 0)
 	{
-		TickingTasks.SetNum(0, false);
+		TickingTasks.SetNum(0, EAllowShrinking::No);
 		UpdateShouldTick();
 	}
 }
@@ -376,9 +430,9 @@ void UGameplayTasksComponent::ProcessTaskEvents()
 			UE_VLOG(this, LogGameplayTasks, Verbose, TEXT("UGameplayTasksComponent::ProcessTaskEvents: %s event %s")
 				, *TaskEvents[EventIndex].RelatedTask.GetName(), GetGameplayTaskEventName(TaskEvents[EventIndex].Event));
 
-			if (TaskEvents[EventIndex].RelatedTask.IsPendingKill())
+			if (!IsValid(&TaskEvents[EventIndex].RelatedTask))
 			{
-				UE_VLOG(this, LogGameplayTasks, Verbose, TEXT("%s is PendingKill"), *TaskEvents[EventIndex].RelatedTask.GetName());
+				UE_VLOG(this, LogGameplayTasks, Verbose, TEXT("%s is invalid"), *TaskEvents[EventIndex].RelatedTask.GetName());
 				// we should ignore it, but just in case run the removal code.
 				RemoveTaskFromPriorityQueue(TaskEvents[EventIndex].RelatedTask);
 				continue;
@@ -416,7 +470,31 @@ void UGameplayTasksComponent::ProcessTaskEvents()
 
 void UGameplayTasksComponent::AddTaskToPriorityQueue(UGameplayTask& NewTask)
 {
-	const bool bStartOnTopOfSamePriority = (NewTask.GetResourceOverlapPolicy() == ETaskResourceOverlapPolicy::StartOnTop);
+	if ((NewTask.GetResourceOverlapPolicy() == ETaskResourceOverlapPolicy::RequestCancelAndStartOnTop)
+		|| (NewTask.GetResourceOverlapPolicy() == ETaskResourceOverlapPolicy::RequestCancelAndStartAtEnd))
+	{
+		const FGameplayResourceSet NewClaimedResources = NewTask.GetClaimedResources();
+		TArray<UGameplayTask*, TInlineAllocator<2>> CancelList;
+
+		for (UGameplayTask* Task : TaskPriorityQueue)
+		{
+			if (Task != nullptr
+				&& Task->GetPriority() <= NewTask.GetPriority()
+				&& Task->GetClaimedResources().HasAnyID(NewClaimedResources))
+			{
+				// Postpone cancelling, as cancel can call EndTask() and may alter the TaskPriorityQueue.  
+				CancelList.Add(Task);
+			}
+		}
+
+		for (UGameplayTask* Task : CancelList)
+		{
+			Task->ExternalCancel();
+		}
+	}
+	
+	const bool bStartOnTopOfSamePriority = (NewTask.GetResourceOverlapPolicy() == ETaskResourceOverlapPolicy::StartOnTop)
+										|| (NewTask.GetResourceOverlapPolicy() == ETaskResourceOverlapPolicy::RequestCancelAndStartOnTop);
 	int32 InsertionPoint = INDEX_NONE;
 	
 	for (int32 Idx = 0; Idx < TaskPriorityQueue.Num(); ++Idx)
@@ -446,7 +524,7 @@ void UGameplayTasksComponent::RemoveTaskFromPriorityQueue(UGameplayTask& Task)
 	const int32 RemovedTaskIndex = TaskPriorityQueue.Find(&Task);
 	if (RemovedTaskIndex != INDEX_NONE)
 	{
-		TaskPriorityQueue.RemoveAt(RemovedTaskIndex, 1, /*bAllowShrinking=*/false);
+		TaskPriorityQueue.RemoveAt(RemovedTaskIndex, 1, EAllowShrinking::No);
 	}
 	else
 	{
@@ -496,9 +574,8 @@ void UGameplayTasksComponent::UpdateTaskActivations()
 		for (int32 Idx = 0; Idx < ActivationList.Num(); Idx++)
 		{
 			// check if task wasn't already finished as a result of activating previous elements of this list
-			if (ActivationList[Idx] != nullptr
-				&& ActivationList[Idx]->IsFinished() == false
-				&& ActivationList[Idx]->IsPendingKill() == false)
+			if (IsValid(ActivationList[Idx])
+				&& ActivationList[Idx]->IsFinished() == false)
 			{
 				ActivationList[Idx]->ActivateInTaskQueue();
 			}
@@ -603,14 +680,25 @@ FConstGameplayTaskIterator UGameplayTasksComponent::GetPriorityQueueIterator() c
 	return TaskPriorityQueue.CreateConstIterator();
 }
 
+FConstGameplayTaskIterator UGameplayTasksComponent::GetSimulatedTaskIterator() const
+{
+	return SimulatedTasks.CreateConstIterator();
+}
+
 #if ENABLE_VISUAL_LOG
+
+void UGameplayTasksComponent::GrabDebugSnapshot(FVisualLogEntry* Snapshot) const
+{
+	DescribeSelfToVisLog(Snapshot);
+}
+
 void UGameplayTasksComponent::DescribeSelfToVisLog(FVisualLogEntry* Snapshot) const
 {
 	static const FString CategoryName = TEXT("GameplayTasks");
 	static const FString PriorityQueueName = TEXT("Priority Queue");
 	static const FString OtherTasksName = TEXT("Other tasks");
 
-	if (IsPendingKill())
+	if (!IsValid(this))
 	{
 		return;
 	}
@@ -631,6 +719,17 @@ void UGameplayTasksComponent::DescribeSelfToVisLog(FVisualLogEntry* Snapshot) co
 		else
 		{
 			NotInQueueDesc += TEXT("\nNULL");
+		}
+	}
+
+	for (const TObjectPtr<UGameplayTask>& Task : SimulatedTasks)
+	{
+		if (Task && !KnownTasks.Contains(Task))
+		{
+			NotInQueueDesc += FString::Printf(TEXT("\n%s %s %s %s"),
+					*GetTaskStateName(Task->GetState()), *Task->GetDebugDescription(),
+					Task->IsTickingTask() ? TEXT("[TICK]") : TEXT(""),
+					Task->IsSimulatedTask() ? TEXT("[REP]") : TEXT(""));
 		}
 	}
 
@@ -681,17 +780,84 @@ EGameplayTaskRunResult UGameplayTasksComponent::RunGameplayTask(IGameplayTaskOwn
 	return EGameplayTaskRunResult::Error;
 }
 
-PRAGMA_DISABLE_DEPRECATION_WARNINGS
-TArray<UGameplayTask*>& UGameplayTasksComponent::GetSimulatedTasks_Mutable()
+TArray<TObjectPtr<UGameplayTask>>& UGameplayTasksComponent::GetSimulatedTasks_Mutable()
 {
 	MARK_PROPERTY_DIRTY_FROM_NAME(UGameplayTasksComponent, SimulatedTasks, this);
 	return SimulatedTasks;
 }
-PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+bool UGameplayTasksComponent::AddSimulatedTask(UGameplayTask* NewTask)
+{
+	if (NewTask == nullptr)
+	{
+		return false;
+	}
+
+	if (SimulatedTasks.Find(NewTask) == INDEX_NONE)
+	{
+		SimulatedTasks.Add(NewTask);
+		SetSimulatedTasksNetDirty();
+
+		if (IsUsingRegisteredSubObjectList() && IsReadyForReplication())
+		{
+			AddReplicatedSubObject(NewTask, COND_SkipOwner);
+		}
+
+		return true;
+	}
+
+	return false;
+}
+
+void UGameplayTasksComponent::RemoveSimulatedTask(UGameplayTask* NewTask)
+{
+	if (SimulatedTasks.RemoveSingle(NewTask) > 0)
+	{
+		SetSimulatedTasksNetDirty();
+
+		if (IsUsingRegisteredSubObjectList())
+		{
+			RemoveReplicatedSubObject(NewTask);
+		}
+	}
+}
 
 void UGameplayTasksComponent::SetSimulatedTasks(const TArray<UGameplayTask*>& NewSimulatedTasks)
 {
-	GetSimulatedTasks_Mutable() = NewSimulatedTasks;
+	if (IsUsingRegisteredSubObjectList() && IsReadyForReplication())
+	{
+		// Unregister all current tasks
+		for (UGameplayTask* OldGameplayTask : SimulatedTasks)
+		{
+			if (OldGameplayTask)
+			{
+				RemoveReplicatedSubObject(OldGameplayTask);
+			}
+		}
+
+		SimulatedTasks.Reset(NewSimulatedTasks.Num());
+
+		// Register the new tasks
+		for (UGameplayTask* NewGameplayTask : NewSimulatedTasks)
+		{
+			if (NewGameplayTask)
+			{
+				AddReplicatedSubObject(NewGameplayTask, COND_SkipOwner);
+				SimulatedTasks.Add(NewGameplayTask);
+			}
+		}
+	}
+	else
+	{
+		SimulatedTasks = NewSimulatedTasks;
+	}
+
+	SetSimulatedTasksNetDirty();
+}
+
+void UGameplayTasksComponent::SetSimulatedTasksNetDirty()
+{
+	MARK_PROPERTY_DIRTY_FROM_NAME(UGameplayTasksComponent, SimulatedTasks, this);
 }
 
 //----------------------------------------------------------------------//
@@ -769,12 +935,13 @@ FString FGameplayResourceSet::GetDebugDescription() const
 	int32 FlagIndex = 0;
 
 #if WITH_GAMEPLAYTASK_DEBUG
+	static_assert(FlagsCount < TNumericLimits<uint8>::Max());
 	FString Description;
 	for (; FlagIndex < FlagsCount && FlagsCopy != 0; ++FlagIndex)
 	{
 		if (FlagsCopy & (1 << FlagIndex))
 		{
-			Description += UGameplayTaskResource::GetDebugDescription(FlagIndex);
+			Description += UGameplayTaskResource::GetDebugDescription( IntCastChecked<uint8>(FlagIndex) );
 			Description += TEXT(' ');
 		}
 
@@ -794,3 +961,4 @@ FString FGameplayResourceSet::GetDebugDescription() const
 }
 
 #undef LOCTEXT_NAMESPACE
+

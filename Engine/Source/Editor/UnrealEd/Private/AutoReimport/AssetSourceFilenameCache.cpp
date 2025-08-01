@@ -1,11 +1,25 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AutoReimport/AssetSourceFilenameCache.h"
+
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/AssetDataTagMap.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
+#include "Async/ParallelFor.h"
+#include "CoreGlobals.h"
+#include "EditorFramework/AssetImportData.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
-#include "AssetRegistryModule.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
 
 FAssetSourceFilenameCache::FAssetSourceFilenameCache()
+	: CachePipe(UE_SOURCE_LOCATION)
 {
 	if (IsEngineExitRequested())
 	{
@@ -15,8 +29,8 @@ FAssetSourceFilenameCache::FAssetSourceFilenameCache()
 
 	IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
 
-	AssetRegistry.OnAssetAdded().AddRaw(this, &FAssetSourceFilenameCache::HandleOnAssetAdded);
-	AssetRegistry.OnAssetRemoved().AddRaw(this, &FAssetSourceFilenameCache::HandleOnAssetRemoved);
+	AssetRegistry.OnAssetsAdded().AddRaw(this, &FAssetSourceFilenameCache::HandleOnAssetsAdded);
+	AssetRegistry.OnAssetsRemoved().AddRaw(this, &FAssetSourceFilenameCache::HandleOnAssetsRemoved);
 	AssetRegistry.OnAssetRenamed().AddRaw(this, &FAssetSourceFilenameCache::HandleOnAssetRenamed);
 
 	UAssetImportData::OnImportDataChanged.AddRaw(this, &FAssetSourceFilenameCache::HandleOnAssetUpdated);
@@ -24,10 +38,7 @@ FAssetSourceFilenameCache::FAssetSourceFilenameCache()
 	TArray<FAssetData> Assets;
 	if (AssetRegistry.GetAllAssets(Assets))
 	{
-		for (auto& Asset : Assets)
-		{
-			HandleOnAssetAdded(Asset);
-		}
+		HandleOnAssetsAdded(Assets);
 	}
 }
 
@@ -39,12 +50,16 @@ FAssetSourceFilenameCache& FAssetSourceFilenameCache::Get()
 
 void FAssetSourceFilenameCache::Shutdown()
 {
-	auto* ModulePtr = FModuleManager::GetModulePtr<FAssetRegistryModule>("AssetRegistry");
-	if (ModulePtr)
+	FAssetRegistryModule* AssetRegistryModule = FModuleManager::GetModulePtr<FAssetRegistryModule>("AssetRegistry");
+	if (AssetRegistryModule)
 	{
-		ModulePtr->Get().OnAssetAdded().RemoveAll(this);
-		ModulePtr->Get().OnAssetRemoved().RemoveAll(this);
-		ModulePtr->Get().OnAssetRenamed().RemoveAll(this);
+		IAssetRegistry* AssetRegistry = AssetRegistryModule->TryGet();
+		if (AssetRegistry)
+		{
+			AssetRegistry->OnAssetsAdded().RemoveAll(this);
+			AssetRegistry->OnAssetsRemoved().RemoveAll(this);
+			AssetRegistry->OnAssetRenamed().RemoveAll(this);
+		}
 	}
 	
 	AssetRenamedEvent.Clear();
@@ -77,122 +92,149 @@ TOptional<FAssetImportInfo> FAssetSourceFilenameCache::ExtractAssetImportInfo(co
 	}
 }
 
-void FAssetSourceFilenameCache::HandleOnAssetAdded(const FAssetData& AssetData)
+void FAssetSourceFilenameCache::HandleOnAssetsAdded(TConstArrayView<FAssetData> Assets)
 {
-	TOptional<FAssetImportInfo> ImportData = ExtractAssetImportInfo(AssetData);
-	if (ImportData.IsSet())
-	{
-		for (const auto& SourceFile : ImportData->SourceFiles)
-		{
-			SourceFileToObjectPathCache.FindOrAdd(FPaths::GetCleanFilename(SourceFile.RelativeFilename)).Add(AssetData.ObjectPath);
-		}
-	}
-}
-
-void FAssetSourceFilenameCache::HandleOnAssetRemoved(const FAssetData& AssetData)
-{
-	TOptional<FAssetImportInfo> ImportData = ExtractAssetImportInfo(AssetData);
-	if (ImportData.IsSet())
-	{
-		for (auto& SourceFile : ImportData->SourceFiles)
-		{
-			FString CleanFilename = FPaths::GetCleanFilename(SourceFile.RelativeFilename);
-			if (auto* Objects = SourceFileToObjectPathCache.Find(CleanFilename))
+	CachePipe.Launch(UE_SOURCE_LOCATION, [this, Assets=TArray<FAssetData>(Assets)](){
+		TRACE_CPUPROFILER_EVENT_SCOPE(FAssetSourceFilenameCache::HandleOnAssetsAdded);
+		const uint32 AssetCount = Assets.Num();
+		TArray<TOptional<FAssetImportInfo>> ImportDataList;
+		ImportDataList.SetNum(AssetCount);
+		ParallelFor(Assets.Num(), [&Assets, &ImportDataList](int32 Index)
 			{
-				Objects->Remove(AssetData.ObjectPath);
-				if (Objects->Num() == 0)
+				ImportDataList[Index] = ExtractAssetImportInfo(Assets[Index]);
+			});
+
+		SourceFileToObjectPathCache.Reserve(SourceFileToObjectPathCache.Num() + Assets.Num());
+		for (uint32 Index = 0; Index < AssetCount; Index++)
+		{
+			const TOptional<FAssetImportInfo>& ImportData = ImportDataList[Index];
+			if (ImportData.IsSet())
+			{
+				for (const auto& SourceFile : ImportData->SourceFiles)
 				{
-					SourceFileToObjectPathCache.Remove(CleanFilename);
+					SourceFileToObjectPathCache.FindOrAdd(FPaths::GetCleanFilename(SourceFile.RelativeFilename)).Add(Assets[Index].GetSoftObjectPath());
 				}
 			}
 		}
-	}
+	}, LowLevelTasks::ETaskPriority::BackgroundNormal);
+}
+
+void FAssetSourceFilenameCache::HandleOnAssetsRemoved(TConstArrayView<FAssetData> Assets)
+{
+	CachePipe.Launch(UE_SOURCE_LOCATION, [this, Assets=TArray<FAssetData>(Assets)](){
+		TRACE_CPUPROFILER_EVENT_SCOPE(FAssetSourceFilenameCache::HandleOnAssetsRemoved);
+		for (const FAssetData& AssetData : Assets)
+		{
+			TOptional<FAssetImportInfo> ImportData = ExtractAssetImportInfo(AssetData);
+			if (ImportData.IsSet())
+			{
+				for (auto& SourceFile : ImportData->SourceFiles)
+				{
+					FString CleanFilename = FPaths::GetCleanFilename(SourceFile.RelativeFilename);
+					if (auto* Objects = SourceFileToObjectPathCache.Find(CleanFilename))
+					{
+						Objects->Remove(AssetData.GetSoftObjectPath());
+						if (Objects->Num() == 0)
+						{
+							SourceFileToObjectPathCache.Remove(CleanFilename);
+						}
+					}
+				}
+			}
+		}
+	}, LowLevelTasks::ETaskPriority::BackgroundNormal);
 }
 
 void FAssetSourceFilenameCache::HandleOnAssetRenamed(const FAssetData& AssetData, const FString& OldPath)
 {
-	TOptional<FAssetImportInfo> ImportData = ExtractAssetImportInfo(AssetData);
-	if (ImportData.IsSet())
-	{
-		FName OldPathName = *OldPath;
-
-		for (auto& SourceFile : ImportData->SourceFiles)
+	// Capture by ref as we wait inline
+	CachePipe.Launch(UE_SOURCE_LOCATION, [this, &AssetData, &OldPath]() {
+		TOptional<FAssetImportInfo> ImportData = ExtractAssetImportInfo(AssetData);
+		if (ImportData.IsSet())
 		{
-			FString CleanFilename = FPaths::GetCleanFilename(SourceFile.RelativeFilename);
-
-			if (auto* Objects = SourceFileToObjectPathCache.Find(CleanFilename))
+			for (auto& SourceFile : ImportData->SourceFiles)
 			{
-				Objects->Remove(OldPathName);
-				if (Objects->Num() == 0)
-				{
-					SourceFileToObjectPathCache.Remove(CleanFilename);
-				}
-			}
+				FString CleanFilename = FPaths::GetCleanFilename(SourceFile.RelativeFilename);
 
-			SourceFileToObjectPathCache.FindOrAdd(CleanFilename).Add(AssetData.ObjectPath);
+				if (auto* Objects = SourceFileToObjectPathCache.Find(CleanFilename))
+				{
+					Objects->Remove(FSoftObjectPath(OldPath));
+					if (Objects->Num() == 0)
+					{
+						SourceFileToObjectPathCache.Remove(CleanFilename);
+					}
+				}
+
+				SourceFileToObjectPathCache.FindOrAdd(CleanFilename).Add(AssetData.GetSoftObjectPath());
+			}
 		}
-	}
+	}, LowLevelTasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::Inline).Wait();
 
 	AssetRenamedEvent.Broadcast(AssetData, OldPath);
 }
 
 void FAssetSourceFilenameCache::HandleOnAssetUpdated(const FAssetImportInfo& OldData, const UAssetImportData* ImportData)
 {
-	FName ObjectPath = FName(*ImportData->GetOuter()->GetPathName());
+	// Run inline on pipe to safely use ImportData
+	CachePipe.Launch(UE_SOURCE_LOCATION, [this, &OldData, ImportData]() {
+		FSoftObjectPath ObjectPath = FSoftObjectPath(ImportData->GetOuter());
 
-	for (const auto& SourceFile : OldData.SourceFiles)
-	{
-		FString CleanFilename = FPaths::GetCleanFilename(SourceFile.RelativeFilename);
-		if (auto* Objects = SourceFileToObjectPathCache.Find(CleanFilename))
+		for (const auto& SourceFile : OldData.SourceFiles)
 		{
-			Objects->Remove(ObjectPath);
-			if (Objects->Num() == 0)
+			FString CleanFilename = FPaths::GetCleanFilename(SourceFile.RelativeFilename);
+			if (auto* Objects = SourceFileToObjectPathCache.Find(CleanFilename))
 			{
-				SourceFileToObjectPathCache.Remove(CleanFilename);
+				Objects->Remove(ObjectPath);
+				if (Objects->Num() == 0)
+				{
+					SourceFileToObjectPathCache.Remove(CleanFilename);
+				}
 			}
 		}
-	}
 
-	for (const auto& SourceFile : ImportData->SourceData.SourceFiles)
-	{
-		SourceFileToObjectPathCache.FindOrAdd(FPaths::GetCleanFilename(SourceFile.RelativeFilename)).Add(ObjectPath);
-	}
+		for (const auto& SourceFile : ImportData->SourceData.SourceFiles)
+		{
+			SourceFileToObjectPathCache.FindOrAdd(FPaths::GetCleanFilename(SourceFile.RelativeFilename)).Add(ObjectPath);
+		}
+	}, LowLevelTasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::Inline).Wait();
 }
 
 TArray<FAssetData> FAssetSourceFilenameCache::GetAssetsPertainingToFile(const IAssetRegistry& Registry, const FString& AbsoluteFilename) const
 {
-	TArray<FAssetData> Assets;
-	
-	if (const auto* ObjectPaths = SourceFileToObjectPathCache.Find(FPaths::GetCleanFilename(AbsoluteFilename)))
+	return CachePipe.Launch(UE_SOURCE_LOCATION, [this, &Registry, &AbsoluteFilename]()
 	{
-		for (const FName& Path : *ObjectPaths)
+		TArray<FAssetData> Assets;
+		if (const auto* ObjectPaths = SourceFileToObjectPathCache.Find(FPaths::GetCleanFilename(AbsoluteFilename)))
 		{
-			FAssetData Asset = Registry.GetAssetByObjectPath(Path);
-			TOptional<FAssetImportInfo> ImportInfo = ExtractAssetImportInfo(Asset);
-			if (ImportInfo.IsSet())
+			for (const FSoftObjectPath& Path : *ObjectPaths)
 			{
-				auto AssetPackagePath = FPackageName::LongPackageNameToFilename(Asset.PackagePath.ToString() / TEXT(""));
-
-				// Attempt to find the matching source filename in the list of imported sorce files (generally there are only one of these)
-				const bool bWasImportedFromFile = ImportInfo->SourceFiles.ContainsByPredicate([&](const FAssetImportInfo::FSourceFile& File){
-
-					if (AbsoluteFilename == FPaths::ConvertRelativePathToFull(AssetPackagePath / File.RelativeFilename) ||
-						AbsoluteFilename == FPaths::ConvertRelativePathToFull(File.RelativeFilename))
-					{
-						return true;
-					}
-
-					return false;
-				});
-
-				if (bWasImportedFromFile)
+				FAssetData Asset = Registry.GetAssetByObjectPath(Path);
+				TOptional<FAssetImportInfo> ImportInfo = ExtractAssetImportInfo(Asset);
+				if (ImportInfo.IsSet())
 				{
-					Assets.Emplace();
-					Swap(Asset, Assets[Assets.Num() - 1]);
+					auto AssetPackagePath = FPackageName::LongPackageNameToFilename(Asset.PackagePath.ToString() / TEXT(""));
+
+					// Attempt to find the matching source filename in the list of imported sorce files (generally there are only one of these)
+					const bool bWasImportedFromFile = ImportInfo->SourceFiles.ContainsByPredicate([&](const FAssetImportInfo::FSourceFile& File){
+
+						if (AbsoluteFilename == FPaths::ConvertRelativePathToFull(AssetPackagePath / File.RelativeFilename) ||
+							AbsoluteFilename == FPaths::ConvertRelativePathToFull(File.RelativeFilename))
+						{
+							return true;
+						}
+
+						return false;
+					});
+
+					if (bWasImportedFromFile)
+					{
+						Assets.Emplace();
+						Swap(Asset, Assets[Assets.Num() - 1]);
+					}
 				}
 			}
 		}
-	}
 
-	return Assets;
+		return Assets;
+	}, LowLevelTasks::ETaskPriority::Normal, UE::Tasks::EExtendedTaskPriority::Inline).GetResult();
 }

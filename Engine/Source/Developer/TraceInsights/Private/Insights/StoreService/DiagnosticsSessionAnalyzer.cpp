@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "DiagnosticsSessionAnalyzer.h"
+
+#include "HAL/LowLevelMemTracker.h"
 #include "TraceServices/Model/Diagnostics.h"
 
 namespace Insights
@@ -16,6 +18,8 @@ void FDiagnosticsSessionAnalyzer::OnAnalysisBegin(const FOnAnalysisContext& Cont
 
 bool FDiagnosticsSessionAnalyzer::OnEvent(uint16 RouteId, EStyle, const FOnEventContext& Context)
 {
+	LLM_SCOPE_BYNAME(TEXT("Insights/FDiagnosticsSessionAnalyzer"));
+
 	const FEventData& EventData = Context.EventData;
 
 	switch (RouteId)
@@ -48,12 +52,13 @@ bool FDiagnosticsSessionAnalyzer::OnEvent(uint16 RouteId, EStyle, const FOnEvent
 	}
 	case RouteId_Session2:
 	{
-		Trace::FSessionInfo SessionInfo;
-
 		EventData.GetString("Platform", Platform);
 		EventData.GetString("AppName", AppName);
+		EventData.GetString("ProjectName", ProjectName);
 		EventData.GetString("CommandLine", CommandLine);
-
+		EventData.GetString("Branch", Branch);
+		EventData.GetString("BuildVersion", BuildVersion);
+		Changelist = EventData.GetValue<uint32>("Changelist", 0);
 		ConfigurationType = (EBuildConfiguration) EventData.GetValue<uint8>("ConfigurationType");
 		TargetType = (EBuildTargetType) EventData.GetValue<uint8>("TargetType");
 

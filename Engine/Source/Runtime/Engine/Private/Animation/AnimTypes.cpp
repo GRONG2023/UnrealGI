@@ -5,9 +5,10 @@
 #include "AnimationUtils.h"
 #include "Animation/AnimNotifies/AnimNotify.h"
 #include "Animation/AnimNotifies/AnimNotifyState.h"
+#include "Animation/MirrorDataTable.h"
 #include "UObject/AnimObjectVersion.h"
 
-#define NOTIFY_TRIGGER_OFFSET KINDA_SMALL_NUMBER;
+#define NOTIFY_TRIGGER_OFFSET UE_KINDA_SMALL_NUMBER
 
 float GetTriggerTimeOffsetForType(EAnimEventTriggerOffsets::Type OffsetType)
 {
@@ -109,7 +110,6 @@ bool FAnimNotifyEvent::IsBranchingPoint() const
 	return GetLinkedMontage() && ((MontageTickType == EMontageNotifyTickType::BranchingPoint) || (Notify && Notify->bIsNativeBranchingPoint) || (NotifyStateClass && NotifyStateClass->bIsNativeBranchingPoint));
 }
 
-
 void FAnimNotifyEvent::SetTime(float NewTime, EAnimLinkMethod::Type ReferenceFrame /*= EAnimLinkMethod::Absolute*/)
 {
 	FAnimLinkableElement::SetTime(NewTime, ReferenceFrame);
@@ -131,6 +131,24 @@ FName FAnimNotifyEvent::GetNotifyEventName() const
 	}
 
 	return NAME_None;
+}
+
+FName FAnimNotifyEvent::GetNotifyEventName(const UMirrorDataTable* MirrorDataTable) const
+{
+	if (MirrorDataTable)
+	{
+		if(NotifyName == NAME_None)
+		{
+			return NAME_None;
+		}
+		const FName* MirroredName = MirrorDataTable->AnimNotifyToMirrorAnimNotifyMap.Find(NotifyName);
+		if (MirroredName)
+		{
+			const FString EventName = FString::Printf(TEXT("AnimNotify_%s"), *MirroredName->ToString());
+			return FName(*EventName);
+		}
+	}
+	return GetNotifyEventName(); 
 }
 
 ////////////////////////////
@@ -174,10 +192,10 @@ void FMarkerSyncData::GetMarkerIndicesForTime(float CurrentTime, bool bLooping, 
 {
 	const int LoopModStart = bLooping ? -1 : 0;
 	const int LoopModEnd = bLooping ? 2 : 1;
-
-	OutPrevMarker.MarkerIndex = -1;
+	
+	OutPrevMarker.MarkerIndex = MarkerIndexSpecialValues::AnimationBoundary;
 	OutPrevMarker.TimeToMarker = -CurrentTime;
-	OutNextMarker.MarkerIndex = -1;
+	OutNextMarker.MarkerIndex = MarkerIndexSpecialValues::AnimationBoundary;
 	OutNextMarker.TimeToMarker = SequenceLength - CurrentTime;
 
 	for (int32 LoopMod = LoopModStart; LoopMod < LoopModEnd; ++LoopMod)
@@ -202,7 +220,9 @@ void FMarkerSyncData::GetMarkerIndicesForTime(float CurrentTime, bool bLooping, 
 				}
 			}
 		}
-		if (OutNextMarker.MarkerIndex != -1)
+
+		// Continue looking for an authored next sync marker.
+		if (OutNextMarker.MarkerIndex != MarkerIndexSpecialValues::AnimationBoundary)
 		{
 			break; // Done
 		}
@@ -211,23 +231,46 @@ void FMarkerSyncData::GetMarkerIndicesForTime(float CurrentTime, bool bLooping, 
 
 FMarkerSyncAnimPosition FMarkerSyncData::GetMarkerSyncPositionfromMarkerIndicies(int32 PrevMarker, int32 NextMarker, float CurrentTime, float SequenceLength) const
 {
+	return GetMarkerSyncPositionFromMarkerIndicies(PrevMarker, NextMarker, CurrentTime, SequenceLength, nullptr);
+}
+
+FMarkerSyncAnimPosition FMarkerSyncData::GetMarkerSyncPositionFromMarkerIndicies(int32 PrevMarker, int32 NextMarker, float CurrentTime, float SequenceLength, const UMirrorDataTable* MirrorTable) const
+{
 	FMarkerSyncAnimPosition SyncPosition;
 	float PrevTime, NextTime;
 
-	if (PrevMarker != -1)
+	// Get previous marker's time and name.
+	if (PrevMarker != MarkerIndexSpecialValues::AnimationBoundary && AuthoredSyncMarkers.IsValidIndex(PrevMarker))
 	{
 		PrevTime = AuthoredSyncMarkers[PrevMarker].Time;
 		SyncPosition.PreviousMarkerName = AuthoredSyncMarkers[PrevMarker].MarkerName;
+		if (MirrorTable)
+		{
+			const FName* MirroredName = MirrorTable->SyncToMirrorSyncMap.Find(SyncPosition.PreviousMarkerName);
+			if (MirroredName)
+			{
+				SyncPosition.PreviousMarkerName = *MirroredName;
+			}
+		}
 	}
 	else
 	{
 		PrevTime = 0.f;
 	}
 
-	if (NextMarker != -1)
+	// Get next marker's time and name.
+	if (NextMarker != MarkerIndexSpecialValues::AnimationBoundary && AuthoredSyncMarkers.IsValidIndex(NextMarker))
 	{
 		NextTime = AuthoredSyncMarkers[NextMarker].Time;
 		SyncPosition.NextMarkerName = AuthoredSyncMarkers[NextMarker].MarkerName;
+		if (MirrorTable)
+		{
+			const FName* MirroredName = MirrorTable->SyncToMirrorSyncMap.Find(SyncPosition.NextMarkerName);
+			if (MirroredName)
+			{
+				SyncPosition.NextMarkerName = *MirroredName;
+			}
+		}
 	}
 	else
 	{
@@ -235,9 +278,16 @@ FMarkerSyncAnimPosition FMarkerSyncData::GetMarkerSyncPositionfromMarkerIndicies
 	}
 
 	// Account for looping
-	PrevTime = (PrevTime > CurrentTime) ? PrevTime - SequenceLength : PrevTime;
-	NextTime = (NextTime < CurrentTime) ? NextTime + SequenceLength : NextTime;
-
+	if (PrevTime > NextTime)
+	{
+		PrevTime = (PrevTime > CurrentTime) ? PrevTime - SequenceLength : PrevTime;
+		NextTime = (NextTime < CurrentTime) ? NextTime + SequenceLength : NextTime;
+	}
+	else if (PrevTime > CurrentTime)
+	{
+		CurrentTime += SequenceLength;
+	}
+	
 	if (PrevTime == NextTime)
 	{
 		PrevTime -= SequenceLength;
@@ -245,6 +295,7 @@ FMarkerSyncAnimPosition FMarkerSyncData::GetMarkerSyncPositionfromMarkerIndicies
 
 	check(NextTime > PrevTime);
 
+	// Store the encoded current time position as a ratio between markers.
 	SyncPosition.PositionBetweenMarkers = (CurrentTime - PrevTime) / (NextTime - PrevTime);
 	return SyncPosition;
 }

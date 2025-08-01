@@ -4,7 +4,7 @@
 #include "HAL/PlatformTime.h"
 
 #if VEHICLE_DEBUGGING_ENABLED
-PRAGMA_DISABLE_OPTIMIZATION
+UE_DISABLE_OPTIMIZATION
 #endif
 
 namespace Chaos
@@ -166,8 +166,64 @@ namespace Chaos
 		return Radius;
 	}
 
+	void FGraph::Add(const FVec2& Value)
+	{
+		Graph.Add(Value);
+
+		if (Value.X < BoundsX.X)
+		{
+			BoundsX.X = Value.X;
+		}
+		if (Value.X > BoundsX.Y)
+		{
+			BoundsX.Y = Value.X;
+		}
+		if (Value.X < BoundsY.X)
+		{
+			BoundsY.X = Value.X;
+		}
+		if (Value.X > BoundsY.Y)
+		{
+			BoundsY.Y = Value.X;
+		}
+	}
+
+	float FGraph::EvaluateY(float InX) const
+	{
+		float Result = 0.0f;
+
+		if (!Graph.IsEmpty())
+		{
+			float RangeX = BoundsX.Y - BoundsX.X;
+			float Step = (RangeX) / (Graph.Num() - 1);
+			float Start = (InX - BoundsX.X) / Step;
+
+			if (InX <= BoundsX.X || Start < 0.f)
+			{
+				return Graph[0].Y;
+			}
+			else if (InX >= BoundsX.Y)
+			{
+				return Graph[Graph.Num() - 1].Y;
+			}
+			
+			int StartIndex = (int)Start;
+
+			if (StartIndex >= Graph.Num() - 1)
+			{
+				return Graph[Graph.Num() - 1].Y;
+			}
+
+			float NormalisedRamp = (InX - Graph[StartIndex].X) / Step;
+
+			Result = Graph[StartIndex].Y * (1.f - NormalisedRamp) + Graph[StartIndex + 1].Y * NormalisedRamp;
+		}
+
+		return Result;
+	}
+
 } // namespace Chaos
 
 #if VEHICLE_DEBUGGING_ENABLED
-PRAGMA_ENABLE_OPTIMIZATION
+UE_ENABLE_OPTIMIZATION
 #endif

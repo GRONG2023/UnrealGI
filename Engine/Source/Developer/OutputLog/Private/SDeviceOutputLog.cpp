@@ -3,17 +3,18 @@
 #include "SDeviceOutputLog.h"
 #include "Framework/Text/TextLayout.h"
 #include "Widgets/Text/STextBlock.h"
-#include "Widgets/Input/SComboButton.h"
 #include "Misc/ScopeLock.h"
 #include "Modules/ModuleManager.h"
 #include "Widgets/Images/SImage.h"
 #include "Framework/Commands/UIAction.h"
 #include "Widgets/Input/SMultiLineEditableTextBox.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "EditorStyleSet.h"
 #include "Interfaces/ITargetPlatform.h"
 #include "Interfaces/ITargetPlatformManagerModule.h"
 #include "PlatformInfo.h"
+#include "OutputLogModule.h"
+#include "OutputLogStyle.h"
+#include "SSimpleComboButton.h"
 
 static bool IsSupportedPlatform(ITargetPlatform* Platform)
 {
@@ -29,8 +30,7 @@ void SDeviceOutputLog::Construct( const FArguments& InArgs )
 	MessagesTextMarshaller = FOutputLogTextLayoutMarshaller::Create(TArray<TSharedPtr<FOutputLogMessage>>(), &Filter);
 
 	MessagesTextBox = SNew(SMultiLineEditableTextBox)
-		.Style(FEditorStyle::Get(), "Log.TextBox")
-		.TextStyle(FEditorStyle::Get(), "Log.Normal")
+		.Style(FOutputLogStyle::Get(), "Log.TextBox")
 		.ForegroundColor(FLinearColor::Gray)
 		.Marshaller(MessagesTextMarshaller)
 		.IsReadOnly(true)
@@ -59,8 +59,7 @@ void SDeviceOutputLog::Construct( const FArguments& InArgs )
 				.AutoWidth()
 				[
 					SAssignNew(TargetDeviceComboButton, SComboButton)
-					.ComboButtonStyle(FEditorStyle::Get(), "GenericFilters.ComboButtonStyle")
-					.ForegroundColor(FLinearColor::White)
+					.ForegroundColor(FSlateColor::UseForeground())
 					.OnGetMenuContent(this, &SDeviceOutputLog::MakeDeviceComboButtonMenu)
 					.ContentPadding(FMargin(4.0f, 0.0f))
 					.ButtonContent()
@@ -70,8 +69,8 @@ void SDeviceOutputLog::Construct( const FArguments& InArgs )
 						.AutoWidth()
 						[
 							SNew(SBox)
-							.WidthOverride(16)
-							.HeightOverride(16)
+							.WidthOverride(16.f)
+							.HeightOverride(16.f)
 							[
 								SNew(SImage).Image(this, &SDeviceOutputLog::GetSelectedTargetDeviceBrush)
 							]
@@ -81,7 +80,7 @@ void SDeviceOutputLog::Construct( const FArguments& InArgs )
 						.VAlign(VAlign_Center)
 						[
 							SNew(STextBlock)
-							.TextStyle(FEditorStyle::Get(), "GenericFilters.TextStyle")
+							.Font(FOutputLogStyle::Get().GetFontStyle("NormalFontBold"))
 							.Text(this, &SDeviceOutputLog::GetSelectedTargetDeviceText)
 						]
 					]
@@ -93,6 +92,7 @@ void SDeviceOutputLog::Construct( const FArguments& InArgs )
 				.VAlign(VAlign_Center)
 				[
 					SNew(SConsoleInputBox)
+					.Visibility(MakeAttributeLambda([]() { return FOutputLogModule::Get().ShouldHideConsole() ? EVisibility::Collapsed : EVisibility::Visible; }))
 					.ConsoleCommandCustomExec(this, &SDeviceOutputLog::ExecuteConsoleCommand)
 					.OnConsoleCommandExecuted(this, &SDeviceOutputLog::OnConsoleCommandExecuted)
 					// Always place suggestions above the input line for the output log widget
@@ -104,19 +104,11 @@ void SDeviceOutputLog::Construct( const FArguments& InArgs )
 	bIsUserScrolled = false;
 	RequestForceScroll();
 	
-	//
-	TArray<ITargetPlatform*> Platforms = GetTargetPlatformManager()->GetTargetPlatforms();
-	for (ITargetPlatform* Platform : Platforms)
-	{
-		if (IsSupportedPlatform(Platform))
-		{
-			Platform->OnDeviceDiscovered().AddRaw(this, &SDeviceOutputLog::HandleTargetPlatformDeviceDiscovered);
-			Platform->OnDeviceLost().AddRaw(this, &SDeviceOutputLog::HandleTargetPlatformDeviceLost);
-		}
-	}
+	ITargetPlatformControls::OnDeviceDiscovered().AddRaw(this, &SDeviceOutputLog::HandleTargetPlatformDeviceDiscovered);
+	ITargetPlatformControls::OnDeviceLost().AddRaw(this, &SDeviceOutputLog::HandleTargetPlatformDeviceLost);
 		
 	// Get list of available devices
-	for (ITargetPlatform* Platform : Platforms)
+	for (ITargetPlatform* Platform : GetTargetPlatformManager()->GetTargetPlatforms())
 	{
 		if (IsSupportedPlatform(Platform))
 		{
@@ -136,16 +128,11 @@ void SDeviceOutputLog::Construct( const FArguments& InArgs )
 
 SDeviceOutputLog::~SDeviceOutputLog()
 {
-	ITargetPlatformManagerModule* Module = FModuleManager::GetModulePtr<ITargetPlatformManagerModule>("TargetPlatform");
-	if (Module)
-	{
-		TArray<ITargetPlatform*> Platforms = Module->GetTargetPlatforms();
-		for (ITargetPlatform* Platform : Platforms)
-		{
-			Platform->OnDeviceDiscovered().RemoveAll(this);
-			Platform->OnDeviceLost().RemoveAll(this);
-		}
-	}
+	ITargetPlatformControls::OnDeviceDiscovered().RemoveAll(this);
+	ITargetPlatformControls::OnDeviceLost().RemoveAll(this);
+
+	// Clearing the pointer manually to ensure that when the pointed device output object is destroyed
+	// SDeviceOutputLog is still in a valid state in case CurrentDeviceOutputPtr wanted to dereference it.
 	CurrentDeviceOutputPtr.Reset();
 }
 
@@ -183,7 +170,7 @@ void SDeviceOutputLog::Tick(const FGeometry& AllottedGeometry, const double InCu
 	{
 		for (const FBufferedLine& Line : BufferedLines)
 		{
-			MessagesTextMarshaller->AppendPendingMessage(Line.Data, Line.Verbosity, Line.Category);
+			MessagesTextMarshaller->AppendPendingMessage(Line.Data.Get(), Line.Verbosity, Line.Category);
 		}
 		BufferedLines.Empty(32);
 	}
@@ -290,12 +277,12 @@ void SDeviceOutputLog::AddDeviceEntry(ITargetDeviceRef TargetDevice)
 		return;
 	}
 	using namespace PlatformInfo;
-	FName DeviceIconStyleName = TargetDevice->GetTargetPlatform().GetPlatformInfo().GetIconStyleName(EPlatformIconSize::Normal);
+	FName DeviceIconStyleName = TargetDevice->GetPlatformControls().GetPlatformInfo().GetIconStyleName(EPlatformIconSize::Normal);
 	
 	TSharedPtr<FTargetDeviceEntry> DeviceEntry = MakeShareable(new FTargetDeviceEntry());
 	
 	DeviceEntry->DeviceId = TargetDevice->GetId();
-	DeviceEntry->DeviceIconBrush = FEditorStyle::GetBrush(DeviceIconStyleName);
+	DeviceEntry->DeviceIconBrush = FOutputLogStyle::Get().GetBrush(DeviceIconStyleName);
 	DeviceEntry->DeviceWeakPtr = TargetDevice;
 	
 	DeviceList.Add(DeviceEntry);
@@ -357,8 +344,8 @@ TSharedRef<SWidget> SDeviceOutputLog::GenerateWidgetForDeviceComboBox(const FTar
 			.AutoWidth()
 			[
 				SNew(SBox)
-				.WidthOverride(24)
-				.HeightOverride(24)
+				.WidthOverride(24.f)
+				.HeightOverride(24.f)
 				[
 					SNew(SImage).Image(GetTargetDeviceBrush(DeviceEntry))
 				]
@@ -381,7 +368,7 @@ const FSlateBrush* SDeviceOutputLog::GetTargetDeviceBrush(FTargetDeviceEntryPtr 
 	}
 	else
 	{
-		return FEditorStyle::GetBrush("Launcher.Instance_Unknown");
+		return FOutputLogStyle::Get().GetBrush("Launcher.Instance_Unknown");
 	}
 }
 

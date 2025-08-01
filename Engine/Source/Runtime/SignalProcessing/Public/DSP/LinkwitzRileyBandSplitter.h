@@ -11,8 +11,6 @@
 
 namespace Audio
 {
-	typedef TArray<float, TInlineAllocator<MAX_BUFFER_SIZE>> FStackSampleBuffer;
-
 	struct FLinkwitzRileyBandFilter
 	{
 		TArray<FVariablePoleFilter> Filters;
@@ -22,7 +20,7 @@ namespace Audio
 
 	struct FMultibandBuffer
 	{
-		Audio::AlignedFloatBuffer Buffer;
+		Audio::FAlignedFloatBuffer Buffer;
 
 		int32 NumBands = 0;
 		int32 NumSamples = 0;
@@ -70,7 +68,7 @@ namespace Audio
 	 * Helper for Multi-Band processing to generate Linwitz-Riley filtered outputs from input
 	 * https://en.wikipedia.org/wiki/Linkwitz%E2%80%93Riley_filter
 	 */
-	class SIGNALPROCESSING_API FLinkwitzRileyBandSplitter
+	class FLinkwitzRileyBandSplitter
 	{
 	public:
 		struct FCrossoverBandwidthPair
@@ -82,15 +80,16 @@ namespace Audio
 		FLinkwitzRileyBandSplitter() {};
 
 		// initalize filters
-		void Init(const int32 InChannels,
+		SIGNALPROCESSING_API void Init(const int32 InChannels,
 				  const float InSampleRate,
-				  const EFilterOrder FilterOrder,
+				  const EFilterOrder FilterOrder, 
+				  const bool bInPhaseCompensate,
 				  const TArray<float>& InCrossovers); // Always InBands - 1 Crossovers
 
-		void ProcessAudioFrame(const float* InBuffer, FMultibandBuffer& OutBuffer);
-		void ProcessAudioBuffer(const float* InBuffer, FMultibandBuffer& OutBuffer, const int32 NumFrames);
+		SIGNALPROCESSING_API void ProcessAudioFrame(const float* InBuffer, FMultibandBuffer& OutBuffer);
+		SIGNALPROCESSING_API void ProcessAudioBuffer(const float* InBuffer, FMultibandBuffer& OutBuffer, const int32 NumFrames);
 
-		void SetCrossovers(const TArray<float>& InCrossoverFrequencies);
+		SIGNALPROCESSING_API void SetCrossovers(const TArray<float>& InCrossoverFrequencies);
 
 	private:
 		EFilterOrder FilterOrder = EFilterOrder::FourPole;
@@ -101,12 +100,14 @@ namespace Audio
 
 		TArray<float> SharedBuffer;
 		TArray<float> BandWorkBuffer;
+		FAlignedFloatBuffer SharedAlignedBuffer;
+		FAlignedFloatBuffer BandAlignedBuffer;
 
 		TArray<FLinkwitzRileyBandFilter> BandFilters;
 		TArray<FCrossoverBandwidthPair> Crossovers;
 
-		void CopyToBuffer(float* Destination, const float* Origin, const int32 NumSamples);
-		void InvertBuffer(float* Buffer, const int32 NumSamples);
-		float GetQ(EFilterOrder InFilterOrder);
+		SIGNALPROCESSING_API void CopyToBuffer(float* Destination, const float* Origin, const int32 NumSamples);
+		SIGNALPROCESSING_API void InvertBuffer(float* Buffer, const int32 NumSamples);
+		SIGNALPROCESSING_API float GetQ(EFilterOrder InFilterOrder);
 	};
 }

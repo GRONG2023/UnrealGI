@@ -1,31 +1,37 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Windows/WindowsPlatformFile.h"
-#include "CoreTypes.h"
-#include "Misc/DateTime.h"
-#include "Misc/AssertionMacros.h"
-#include "Logging/LogMacros.h"
-#include "Math/UnrealMathUtility.h"
-#include "HAL/UnrealMemory.h"
-#include "GenericPlatform/GenericPlatformFile.h"
-#include "Containers/UnrealString.h"
+
+#include "Windows/WindowsPlatformFilePrivate.h"
+
 #include "Algo/Replace.h"
-#include "Templates/Function.h"
-#include "Misc/Paths.h"
-#include "CoreGlobals.h"
-#include "Windows/WindowsHWrapper.h"
-#include <sys/utime.h>
-#include "Containers/LockFreeList.h"
 #include "Async/AsyncFileHandle.h"
 #include "Async/AsyncWork.h"
-#include "Misc/ScopeLock.h"
-#include "HAL/IConsoleManager.h"
-#include "ProfilingDebugging/PlatformFileTrace.h"
-
-#include "Windows/AllowWindowsPlatformTypes.h"
-
-#include "Microsoft/MicrosoftAsyncIO.h"
 #include "Async/MappedFileHandle.h"
+#include "Containers/LockFreeList.h"
+#include "Containers/UnrealString.h"
+#include "CoreGlobals.h"
+#include "CoreTypes.h"
+#include "HAL/IConsoleManager.h"
+#include "HAL/IPlatformFileManagedStorageWrapper.h"
+#include "HAL/UnrealMemory.h"
+#include "Logging/LogMacros.h"
+#include "Math/UnrealMathUtility.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Paths.h"
+#include "Misc/PathViews.h"
+#include "Misc/ScopeLock.h"
+#include "ProfilingDebugging/PlatformFileTrace.h"
+#include "Templates/Function.h"
+#include <sys/utime.h>
+
+#include "Windows/AllowWindowsPlatformTypes.h" // Required immediately before MicrosoftAsyncIO.h and the block below it
+#include "Microsoft/MicrosoftAsyncIO.h"
+namespace FileConstants
+{
+uint32 WIN_INVALID_SET_FILE_POINTER = INVALID_SET_FILE_POINTER;
+} // namespace FileConstants
+#include "Windows/HideWindowsPlatformTypes.h"
 
 TLockFreePointerListUnordered<void, PLATFORM_CACHE_LINE_SIZE> MicrosoftAsyncIOEventPool;
 bool GTriggerFailedMicrosoftRead = false;
@@ -43,74 +49,77 @@ static FAutoConsoleCommand TriggerFailedMicrosoftReadCmd(
 );
 #endif
 
-
-	namespace FileConstants
-	{
-		uint32 WIN_INVALID_SET_FILE_POINTER = INVALID_SET_FILE_POINTER;
-	}
-#include "Windows/HideWindowsPlatformTypes.h"
-
-namespace
+namespace FileConstants
 {
-	FORCEINLINE int32 UEDayOfWeekToWindowsSystemTimeDayOfWeek(const EDayOfWeek InDayOfWeek)
-	{
-		switch (InDayOfWeek)
-		{
-			case EDayOfWeek::Monday:
-				return 1;
-			case EDayOfWeek::Tuesday:
-				return 2;
-			case EDayOfWeek::Wednesday:
-				return 3;
-			case EDayOfWeek::Thursday:
-				return 4;
-			case EDayOfWeek::Friday:
-				return 5;
-			case EDayOfWeek::Saturday:
-				return 6;
-			case EDayOfWeek::Sunday:
-				return 0;
-			default:
-				break;
-		}
 
-		return 0;
+/** Special suffix to access Alternate Data Stream "Zone.Identifier" for NTFS files */
+constexpr FStringView ZoneIdentifierStreamSuffix(TEXTVIEW(":Zone.Identifier"));
+
+} // namespace FileConstants
+
+namespace UE::WindowsPlatformFile::Private
+{
+
+int32 UEDayOfWeekToWindowsSystemTimeDayOfWeek(const EDayOfWeek InDayOfWeek)
+{
+	switch (InDayOfWeek)
+	{
+		case EDayOfWeek::Monday:
+			return 1;
+		case EDayOfWeek::Tuesday:
+			return 2;
+		case EDayOfWeek::Wednesday:
+			return 3;
+		case EDayOfWeek::Thursday:
+			return 4;
+		case EDayOfWeek::Friday:
+			return 5;
+		case EDayOfWeek::Saturday:
+			return 6;
+		case EDayOfWeek::Sunday:
+			return 0;
+		default:
+			break;
 	}
 
-	FORCEINLINE FDateTime WindowsFileTimeToUEDateTime(const FILETIME& InFileTime)
-	{
-		// This roundabout conversion clamps the precision of the returned time value to match that of time_t (1 second precision)
-		// This avoids issues when sending files over the network via cook-on-the-fly
-		SYSTEMTIME SysTime;
-		if (FileTimeToSystemTime(&InFileTime, &SysTime))
-		{
-			return FDateTime(SysTime.wYear, SysTime.wMonth, SysTime.wDay, SysTime.wHour, SysTime.wMinute, SysTime.wSecond);
-		}
-
-		// Failed to convert
-		return FDateTime::MinValue();
-	}
-
-	FORCEINLINE FILETIME UEDateTimeToWindowsFileTime(const FDateTime& InDateTime)
-	{
-		// This roundabout conversion clamps the precision of the returned time value to match that of time_t (1 second precision)
-		// This avoids issues when sending files over the network via cook-on-the-fly
-		SYSTEMTIME SysTime;
-		SysTime.wYear = (WORD)InDateTime.GetYear();
-		SysTime.wMonth = (WORD)InDateTime.GetMonth();
-		SysTime.wDay = (WORD)InDateTime.GetDay();
-		SysTime.wDayOfWeek = (WORD)UEDayOfWeekToWindowsSystemTimeDayOfWeek(InDateTime.GetDayOfWeek());
-		SysTime.wHour = (WORD)InDateTime.GetHour();
-		SysTime.wMinute = (WORD)InDateTime.GetMinute();
-		SysTime.wSecond = (WORD)InDateTime.GetSecond();
-		SysTime.wMilliseconds = 0;
-
-		FILETIME FileTime;
-		SystemTimeToFileTime(&SysTime, &FileTime);
-
-		return FileTime;
-	}
+	return 0;
 }
+
+FDateTime WindowsFileTimeToUEDateTime(const FILETIME& InFileTime)
+{
+	// This roundabout conversion clamps the precision of the returned time value to match that of time_t (1 second precision)
+	// This avoids issues when sending files over the network via cook-on-the-fly
+	SYSTEMTIME SysTime;
+	if (FileTimeToSystemTime(&InFileTime, &SysTime))
+	{
+		return FDateTime(SysTime.wYear, SysTime.wMonth, SysTime.wDay, SysTime.wHour, SysTime.wMinute, SysTime.wSecond);
+	}
+
+	// Failed to convert
+	return FDateTime::MinValue();
+}
+
+FILETIME UEDateTimeToWindowsFileTime(const FDateTime& InDateTime)
+{
+	// This roundabout conversion clamps the precision of the returned time value to match that of time_t (1 second precision)
+	// This avoids issues when sending files over the network via cook-on-the-fly
+	SYSTEMTIME SysTime;
+	SysTime.wYear = (WORD)InDateTime.GetYear();
+	SysTime.wMonth = (WORD)InDateTime.GetMonth();
+	SysTime.wDay = (WORD)InDateTime.GetDay();
+	SysTime.wDayOfWeek = (WORD)UE::WindowsPlatformFile::Private::UEDayOfWeekToWindowsSystemTimeDayOfWeek(InDateTime.GetDayOfWeek());
+	SysTime.wHour = (WORD)InDateTime.GetHour();
+	SysTime.wMinute = (WORD)InDateTime.GetMinute();
+	SysTime.wSecond = (WORD)InDateTime.GetSecond();
+	SysTime.wMilliseconds = 0;
+
+	FILETIME FileTime;
+	SystemTimeToFileTime(&SysTime, &FileTime);
+
+	return FileTime;
+}
+
+} // namespace UE::WindowsPlatformFile::Private
 
 /**
  * This file reader uses overlapped i/o and double buffering to asynchronously read from files
@@ -496,9 +505,34 @@ public:
 	{
 		if (IsValid())
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(ShrinkBuffers);
+
+			TRACE_PLATFORMFILE_BEGIN_REOPEN(Handle);
 			HANDLE NewFileHandle = ReOpenFile(Handle, DesiredAccess, ShareMode, Flags);
-			CloseHandle(Handle);
+			TRACE_PLATFORMFILE_END_REOPEN(NewFileHandle);
+			if (NewFileHandle == INVALID_HANDLE_VALUE)
+			{
+				// We are not allowed to change this->IsValid() from true to false.
+				// If the Reopen fails, keep the old FileHandle
+				return;
+			}
+
+			TRACE_PLATFORMFILE_BEGIN_CLOSE(Handle);
+			BOOL CloseResult = CloseHandle(Handle);
+#if PLATFORMFILETRACE_ENABLED
+			if (CloseResult)
+			{
+				TRACE_PLATFORMFILE_END_CLOSE(Handle);
+			}
+			else
+			{
+				TRACE_PLATFORMFILE_FAIL_CLOSE(Handle);
+			}
+#else
+			(void)CloseResult;
+#endif
 			Handle = NewFileHandle;
+			check(IsValid());
 		}
 	}
 };
@@ -527,11 +561,6 @@ class FFileHandleWindows : public IFileHandle
 	 */
 	uint32 Flags;
 
-	FORCEINLINE bool IsValid()
-	{
-		return FileHandle != NULL && FileHandle != INVALID_HANDLE_VALUE;
-	}
-
 	FORCEINLINE void UpdateOverlappedPos()
 	{
 		ULARGE_INTEGER LI;
@@ -547,11 +576,23 @@ class FFileHandleWindows : public IFileHandle
 		return SetFilePointer(FileHandle, LI.LowPart, &LI.HighPart, FILE_BEGIN) != INVALID_SET_FILE_POINTER;
 	}
 
-	FORCEINLINE void UpdateFileSize()
+	void UpdateFileSize()
 	{
 		LARGE_INTEGER LI;
-		GetFileSizeEx(FileHandle, &LI);
-		FileSize = LI.QuadPart;
+		BOOL Success = GetFileSizeEx(FileHandle, &LI);
+		if (Success)
+		{
+			FileSize = LI.QuadPart;
+		}
+		else
+		{
+			// This is a rare condition but it has been observed in the wild
+			// for SMB file shares. Since it's important to know the file size
+			// we render the file handle unusable if this condition occurs
+			FileSize = -1;
+
+			UE_LOG(LogTemp, Warning, TEXT("GetFileSizeEx: Failed to get file size for handle!"));
+		}
 	}
 
 public:
@@ -586,6 +627,10 @@ public:
 		(void)CloseResult;
 #endif
 		FileHandle = NULL;
+	}
+	bool IsValid()
+	{
+		return FileHandle != NULL && FileHandle != INVALID_HANDLE_VALUE && FileSize != -1;
 	}
 	virtual int64 Tell(void) override
 	{
@@ -726,6 +771,7 @@ public:
 		if (Seek(NewSize) && UpdatedNonOverlappedPos() && SetEndOfFile(FileHandle) != 0)
 		{
 			UpdateFileSize();
+			check(IsValid());
 			return true;
 		}
 		return false;
@@ -734,9 +780,32 @@ public:
 	{
 		if (IsValid())
 		{
+			TRACE_PLATFORMFILE_BEGIN_REOPEN(FileHandle);
 			HANDLE NewFileHandle = ReOpenFile(FileHandle, DesiredAccess, ShareMode, Flags);
-			CloseHandle(FileHandle);
+			TRACE_PLATFORMFILE_END_REOPEN(NewFileHandle);
+			if (NewFileHandle == INVALID_HANDLE_VALUE)
+			{
+				// We are not allowed to change this->IsValid() from true to false.
+				// If the Reopen fails, keep the old FileHandle
+				return;
+			}
+
+			TRACE_PLATFORMFILE_BEGIN_CLOSE(FileHandle);
+			BOOL CloseResult = CloseHandle(FileHandle);
+#if PLATFORMFILETRACE_ENABLED
+			if (CloseResult)
+			{
+				TRACE_PLATFORMFILE_END_CLOSE(FileHandle);
+			}
+			else
+			{
+				TRACE_PLATFORMFILE_FAIL_CLOSE(FileHandle);
+			}
+#else
+			(void)CloseResult;
+#endif
 			FileHandle = NewFileHandle;
+			check(IsValid());
 		}
 	}
 };
@@ -759,19 +828,20 @@ public:
 
 	virtual void PreloadHint(int64 PreloadOffset = 0, int64 BytesToPreload = MAX_int64) override
 	{
-		// perhaps this could be done with a commit instead
-		int64 Size = GetMappedSize();
-		const uint8* Ptr = GetMappedPtr();
-		int32 FoolTheOptimizer = 0;
-		while (Size > 0)
+		if (PreloadOffset < GetMappedSize())
 		{
-			FoolTheOptimizer += Ptr[0];
-			Size -= 4096;
-			Ptr += 4096;
-		}
-		if (FoolTheOptimizer == 0xbadf00d)
-		{
-			FPlatformProcess::Sleep(0.0f); // this will more or less never happen, but we can't let the optimizer strip these reads
+			SIZE_T PageSize = FWindowsPlatformMemory::GetConstants().PageSize;
+			int64 SizeAfterOffset = GetMappedSize() - PreloadOffset;
+			int64 PreloadSize = FMath::Min(SizeAfterOffset, BytesToPreload);
+
+			for (const uint8* It = GetMappedPtr() + PreloadOffset, *End = It + PreloadSize; It < End; It += PageSize)
+			{
+				volatile uint8 Foo = *It;
+			}
+
+			// Once we drop Win7 support we can try this Win8 API instead
+			// WIN32_MEMORY_RANGE_ENTRY Range = { GetMappedPtr() + PreloadOffset, PreloadSize };
+			// PrefetchVirtualMemory(GetCurrentProcess(), 1, &Range, 0);
 		}
 	}
 };
@@ -820,8 +890,9 @@ public:
 
 		DWORD OpenMappingAccess = FILE_MAP_READ;
 
-		int64 AlignedOffset = AlignDown(Offset, 65536);
-		int64 AlignedSize = Align(BytesToMap + Offset - AlignedOffset, 65536);
+		SIZE_T VirtualMemoryGranularity = FWindowsPlatformMemory::GetConstants().OsAllocationGranularity;
+		int64 AlignedOffset = AlignDown(Offset, VirtualMemoryGranularity);
+		int64 AlignedSize = Align(BytesToMap + Offset - AlignedOffset, VirtualMemoryGranularity);
 
 		ULARGE_INTEGER LI;
 		LI.QuadPart = AlignedOffset;
@@ -850,338 +921,435 @@ FMappedFileRegionWindows::~FMappedFileRegionWindows()
 	Parent->UnMap(this);
 }
 
-/**
- * Windows File I/O implementation
-**/
-class CORE_API FWindowsPlatformFile : public IPhysicalPlatformFile
+void FWindowsPlatformFile::NormalizeWindowsPath(FStringBuilderBase& Path, bool bIsFilename)
 {
-private:
-	FString WindowsNormalizedFilename(const TCHAR* Filename)
+	FPathViews::ToAbsolutePathInline(Path);
+
+	// NormalizeFilename was already called by ConvertRelativePathToFull, but we still need to do the extra steps in NormalizeDirectoryName if it is a directory
+	if (!bIsFilename)
 	{
-		const bool bIsFilename = true; // TODO: Create a platform-independent EPathType enum and use that here
-		return WindowsNormalizedPath(Filename, bIsFilename);
+		FPathViews::NormalizeDirectoryName(Path);
 	}
 
-	FString WindowsNormalizedDirname(const TCHAR* Directory)
+	// Remove duplicate slashes
+	const bool bIsUNCPath = Path.ToView().StartsWith(TEXTVIEW("//"));
+		
+	FPathViews::RemoveDuplicateSlashes(Path);
+
+	if (bIsUNCPath)
 	{
-		const bool bIsFilename = false;
-		return WindowsNormalizedPath(Directory, bIsFilename);
+		// Keep // at the beginning.  If There are more than two / at the beginning, replace them with just //.
+		Path.Prepend(TEXTVIEW("/"));
 	}
 
-	/**
-	  * Convert from a valid Unreal Path to a canonical and strict-valid Windows Path.
-	  * An Unreal Path may have either \ or / and may have empty directories (two / in a row), and may have .. and may be relative
-	  * A canonical and strict-valid Windows Path has only \, does not have .., does not have empty directories, and is an absolute path, either \\UNC or D:\
-	  * We need to use strict-valid Windows Paths when calling Windows API calls so that we can support the long-path prefix \\?\
-	  */
-	FString WindowsNormalizedPath(const TCHAR* PathString, bool bIsFilename)
+	// We now have a canonical, strict-valid, absolute Unreal Path.  Convert it to a Windows Path.
+	for (TCHAR& Char : TArrayView<TCHAR>(Path.GetData(), Path.Len()))
 	{
-		FString Result = FPaths::ConvertRelativePathToFull(FString(PathString));
-		// NormalizeFilename was already called by ConvertRelativePathToFull, but we still need to do the extra steps in NormalizeDirectoryName if it is a directory
-		if (!bIsFilename)
+		if (Char == TEXT('/'))
 		{
-			FPaths::NormalizeDirectoryName(Result);
+			Char = TEXT('\\');
 		}
+	}
 
-		// Remove duplicate slashes
-		const bool bIsUNCPath = Result.StartsWith(TEXT("//"));
+	// Handle Windows paths with null-terminated length over MAX_PATH
+	if (Path.Len() >= MAX_PATH)
+	{
 		if (bIsUNCPath)
 		{
-			// Keep // at the beginning.  If There are more than two / at the beginning, replace them with just //.
-			FPaths::RemoveDuplicateSlashes(Result);
-			Result = TEXT("/") + Result;
+			Path.ReplaceAt(0, 1, TEXTVIEW("\\\\?\\UNC"));
 		}
 		else
 		{
-			FPaths::RemoveDuplicateSlashes(Result);
+			Path.Prepend(TEXTVIEW("\\\\?\\"));
 		}
+	}
+}
+	
+FWindowsPlatformFile::FNormalizedFilename::FNormalizedFilename(const TCHAR* Filename)
+{
+	Append(Filename);
+	NormalizeWindowsPath(*this, /* bIsFilename */ true);
+}
 
-		// We now have a canonical, strict-valid, absolute Unreal Path.  Convert it to a Windows Path.
-		Result.ReplaceCharInline(TEXT('/'), TEXT('\\'), ESearchCase::CaseSensitive);
+FWindowsPlatformFile::FNormalizedFilename::FNormalizedFilename(FStringView Filename)
+{
+	Append(Filename);
+	NormalizeWindowsPath(*this, /* bIsFilename */ true);
+}
 
-		// Handle Windows Path length over MAX_PATH
-		if (Result.Len() > MAX_PATH)
+FWindowsPlatformFile::FNormalizedFilename::FNormalizedFilename(FStringView Dir, FStringView Filename)
+{
+	Append(Dir);
+	FPathViews::Append(*this, Filename);
+	NormalizeWindowsPath(*this, /* bIsFilename */ true);
+}
+
+FWindowsPlatformFile::FNormalizedDirectory::FNormalizedDirectory(const TCHAR* Directory)
+{
+	Append(Directory);
+	NormalizeWindowsPath(*this, /* bIsFilename */ false);
+}
+
+bool FWindowsPlatformFile::FileExists(const TCHAR* Filename)
+{
+	uint32 Result = GetFileAttributesW(*FNormalizedFilename(Filename));
+	if (Result != 0xFFFFFFFF && !(Result & FILE_ATTRIBUTE_DIRECTORY))
+	{
+		return true;
+	}
+	return false;
+}
+
+int64 FWindowsPlatformFile::FileSize(const TCHAR* Filename)
+{
+	WIN32_FILE_ATTRIBUTE_DATA Info;
+	if (!!GetFileAttributesExW(*FNormalizedFilename(Filename), GetFileExInfoStandard, &Info))
+	{
+		if ((Info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
 		{
-			if (bIsUNCPath)
-			{
-				Result = TEXT("\\\\?\\UNC") + Result.RightChop(1);
-			}
-			else
-			{
-				Result = TEXT("\\\\?\\") + Result;
-			}
+			LARGE_INTEGER li;
+			li.HighPart = Info.nFileSizeHigh;
+			li.LowPart = Info.nFileSizeLow;
+			return li.QuadPart;
 		}
+	}
+	return -1;
+}
 
-		return Result;
+bool FWindowsPlatformFile::DeleteFile(const TCHAR* Filename)
+{
+	FNormalizedFilename NormalizedFilename(Filename);
+	return !!DeleteFileW(*NormalizedFilename);
+}
+
+bool FWindowsPlatformFile::IsReadOnly(const TCHAR* Filename)
+{
+	uint32 Result = GetFileAttributesW(*FNormalizedFilename(Filename));
+	if (Result != 0xFFFFFFFF)
+	{
+		return !!(Result & FILE_ATTRIBUTE_READONLY);
+	}
+	return false;
+}
+
+bool FWindowsPlatformFile::MoveFile(const TCHAR* To, const TCHAR* From)
+{
+	return !!MoveFileW(*FNormalizedFilename(From), *FNormalizedFilename(To));
+}
+
+bool FWindowsPlatformFile::SetReadOnly(const TCHAR* Filename, bool bNewReadOnlyValue)
+{
+	return !!SetFileAttributesW(*FNormalizedFilename(Filename), bNewReadOnlyValue ? FILE_ATTRIBUTE_READONLY : FILE_ATTRIBUTE_NORMAL);
+}
+
+FDateTime FWindowsPlatformFile::GetTimeStamp(const TCHAR* Filename)
+{
+	WIN32_FILE_ATTRIBUTE_DATA Info;
+	if (GetFileAttributesExW(*FNormalizedFilename(Filename), GetFileExInfoStandard, &Info))
+	{
+		return UE::WindowsPlatformFile::Private::WindowsFileTimeToUEDateTime(Info.ftLastWriteTime);
 	}
 
-public:
-	//~ For visibility of overloads we don't override
-	using IPhysicalPlatformFile::IterateDirectory;
-	using IPhysicalPlatformFile::IterateDirectoryStat;
+	return FDateTime::MinValue();
+}
 
-	virtual bool FileExists(const TCHAR* Filename) override
+void FWindowsPlatformFile::SetTimeStamp(const TCHAR* Filename, FDateTime DateTime)
+{
+	TRACE_PLATFORMFILE_BEGIN_OPEN(Filename);
+	HANDLE Handle = CreateFileW(*FNormalizedFilename(Filename), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, nullptr);
+	if (Handle != INVALID_HANDLE_VALUE)
 	{
-		uint32 Result = GetFileAttributesW(*WindowsNormalizedFilename(Filename));
-		if (Result != 0xFFFFFFFF && !(Result & FILE_ATTRIBUTE_DIRECTORY))
+		TRACE_PLATFORMFILE_END_OPEN(Handle);
+		const FILETIME ModificationFileTime = UE::WindowsPlatformFile::Private::UEDateTimeToWindowsFileTime(DateTime);
+		SetFileTime(Handle, nullptr, nullptr, &ModificationFileTime);
+		TRACE_PLATFORMFILE_BEGIN_CLOSE(Handle);
+#if PLATFORMFILETRACE_ENABLED
+		// MSVC static analysis has a rule that reports the argument to CloseHandle as uninitialized memory after the call to CloseHandle, so we have to save it ahead of time
+		uint64 SavedHandle = uint64(Handle);
+#endif
+		BOOL CloseResult = CloseHandle(Handle);
+#if PLATFORMFILETRACE_ENABLED
+		if (CloseResult)
 		{
-			return true;
+			TRACE_PLATFORMFILE_END_CLOSE(SavedHandle);
 		}
+		else
+		{
+			TRACE_PLATFORMFILE_FAIL_CLOSE(SavedHandle);
+		}
+#else
+		(void)CloseResult;
+#endif
+	}
+	else
+	{
+		TRACE_PLATFORMFILE_FAIL_OPEN(Filename);
+	}
+}
+
+FDateTime FWindowsPlatformFile::GetAccessTimeStamp(const TCHAR* Filename)
+{
+	WIN32_FILE_ATTRIBUTE_DATA Info;
+	if (GetFileAttributesExW(*FNormalizedFilename(Filename), GetFileExInfoStandard, &Info))
+	{
+		return UE::WindowsPlatformFile::Private::WindowsFileTimeToUEDateTime(Info.ftLastAccessTime);
+	}
+
+	return FDateTime::MinValue();
+}
+
+FString FWindowsPlatformFile::GetFilenameOnDisk(const TCHAR* Filename)
+{
+	FString NormalizedFileName = *FNormalizedFilename(Filename);
+	TRACE_PLATFORMFILE_BEGIN_OPEN(Filename);
+	HANDLE hFile = CreateFile(*NormalizedFileName,
+		FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		NULL, OPEN_EXISTING,
+		FILE_FLAG_BACKUP_SEMANTICS, // Required for opening a directory, which Filename might be
+		NULL);
+	// If the file exists on disk, read the capitalization from the path on disk, otherwise just return the (normalized) input filename
+	if (hFile != INVALID_HANDLE_VALUE)
+	{
+		TRACE_PLATFORMFILE_END_OPEN(hFile);
+		for (uint32 Length = NormalizedFileName.Len() + 10;;)
+		{
+			TArray<TCHAR, FString::AllocatorType>& CharArray = NormalizedFileName.GetCharArray();
+			CharArray.SetNum(Length);
+
+			Length = GetFinalPathNameByHandle(hFile, CharArray.GetData(), CharArray.Num(), FILE_NAME_NORMALIZED);
+			if (Length == 0)
+			{
+				NormalizedFileName = *FNormalizedFilename(Filename);
+				break;
+			}
+			if (Length < (uint32)CharArray.Num())
+			{
+				CharArray.SetNum(Length + 1);
+				break;
+			}
+		}
+		TRACE_PLATFORMFILE_BEGIN_CLOSE(hFile);
+#if PLATFORMFILETRACE_ENABLED
+		// MSVC static analysis has a rule that reports the argument to CloseHandle as uninitialized memory after the call to CloseHandle, so we have to save it ahead of time
+		uint64 SavedHFile = uint64(hFile);
+#endif
+		BOOL CloseResult = CloseHandle(hFile);
+#if PLATFORMFILETRACE_ENABLED
+		if (CloseResult)
+		{
+			TRACE_PLATFORMFILE_END_CLOSE(SavedHFile);
+		}
+		else
+		{
+			TRACE_PLATFORMFILE_FAIL_CLOSE(SavedHFile);
+		}
+#else
+		(void)CloseResult;
+#endif
+	}
+	else
+	{
+		TRACE_PLATFORMFILE_FAIL_OPEN(Filename);
+	}
+
+	// Remove the Windows device path prefix.
+	if (NormalizedFileName.StartsWith(TEXT("\\\\?\\UNC\\"), ESearchCase::CaseSensitive))
+	{
+		NormalizedFileName.RemoveAt(2, 6); // remove ?\UNC\ to convert \\?\UNC\Path\... to \\Path\...
+	}
+	else
+	{
+		NormalizedFileName.RemoveFromStart(TEXT("\\\\?\\"), ESearchCase::CaseSensitive);
+	}
+
+	// Convert the result back into an UnrealPath (\\ -> /)
+	NormalizedFileName.ReplaceCharInline(TEXT('\\'), TEXT('/'), ESearchCase::CaseSensitive);
+
+	return NormalizedFileName;
+}
+
+ESymlinkResult FWindowsPlatformFile::IsSymlink(const TCHAR* Filename)
+{
+	const uint32 Result = GetFileAttributesW(Filename);
+	if (Result != 0xFFFFFFFF && (Result & FILE_ATTRIBUTE_REPARSE_POINT))
+	{
+		return ESymlinkResult::Symlink;
+	}
+	return ESymlinkResult::NonSymlink;
+}
+
+bool FWindowsPlatformFile::HasMarkOfTheWeb(FStringView Filename, FString* OutSourceURL)
+{
+	FNormalizedFilename StreamPath(Filename);
+	StreamPath.Append(FileConstants::ZoneIdentifierStreamSuffix);
+
+	const uint32 ZoneId = GetPrivateProfileIntW(TEXT("ZoneTransfer"), TEXT("ZoneId"), -1 /* URLZONE_INVALID */, *StreamPath);
+	if (ZoneId != 2 /* URLZONE_TRUSTED */ && ZoneId != 3 /* URLZONE_INTERNET */ && ZoneId != 4 /* URLZONE_UNTRUSTED */)
+	{
 		return false;
 	}
-	virtual int64 FileSize(const TCHAR* Filename) override
+
+	if (OutSourceURL != nullptr)
 	{
-		WIN32_FILE_ATTRIBUTE_DATA Info;
-		if (!!GetFileAttributesExW(*WindowsNormalizedFilename(Filename), GetFileExInfoStandard, &Info))
+		// Can't use FConfigFile to parse ini because it treats double slashes in the url (e.g. HostUrl=http://...) as the beginning of a comment.
+		TCHAR HostUrl[2048]; // @todo: remove hardcoded url length limit by using a simple standalone ini parser
+		const int32 HostUrlLen = static_cast<int32>(GetPrivateProfileStringW(TEXT("ZoneTransfer"), TEXT("HostUrl"), nullptr, HostUrl, static_cast<DWORD>(GetNum(HostUrl)), *StreamPath));
+		if (0 < HostUrlLen && HostUrlLen <= GetNum(HostUrl))
 		{
-			if ((Info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
-			{
-				LARGE_INTEGER li;
-				li.HighPart = Info.nFileSizeHigh;
-				li.LowPart = Info.nFileSizeLow;
-				return li.QuadPart;
-			}
+			*OutSourceURL = FString::ConstructFromPtrSize(HostUrl, HostUrlLen);
 		}
-		return -1;
 	}
-	virtual bool DeleteFile(const TCHAR* Filename) override
+
+	return true;
+}
+
+bool FWindowsPlatformFile::SetMarkOfTheWeb(FStringView Filename, bool bNewStatus, const FString* InSourceURL)
+{
+	FNormalizedFilename StreamPath(Filename);
+	StreamPath.Append(FileConstants::ZoneIdentifierStreamSuffix);
+
+	if (!bNewStatus)
 	{
-		const FString NormalizedFilename = WindowsNormalizedFilename(Filename);
-		return !!DeleteFileW(*NormalizedFilename);
+		return !!DeleteFileW(*StreamPath) || GetLastError() == ERROR_FILE_NOT_FOUND;
 	}
-	virtual bool IsReadOnly(const TCHAR* Filename) override
+
+	if (!WritePrivateProfileStringW(TEXT("ZoneTransfer"), TEXT("ZoneId"), TEXT("3") /* URLZONE_INTERNET */, *StreamPath))
 	{
-		uint32 Result = GetFileAttributesW(*WindowsNormalizedFilename(Filename));
-		if (Result != 0xFFFFFFFF)
-		{
-			return !!(Result & FILE_ATTRIBUTE_READONLY);
-		}
 		return false;
 	}
-	virtual bool MoveFile(const TCHAR* To, const TCHAR* From) override
-	{
-		return !!MoveFileW(*WindowsNormalizedFilename(From), *WindowsNormalizedFilename(To));
-	}
-	virtual bool SetReadOnly(const TCHAR* Filename, bool bNewReadOnlyValue) override
-	{
-		return !!SetFileAttributesW(*WindowsNormalizedFilename(Filename), bNewReadOnlyValue ? FILE_ATTRIBUTE_READONLY : FILE_ATTRIBUTE_NORMAL);
-	}
 
-	virtual FDateTime GetTimeStamp(const TCHAR* Filename) override
+	if (InSourceURL != nullptr)
 	{
-		WIN32_FILE_ATTRIBUTE_DATA Info;
-		if (GetFileAttributesExW(*WindowsNormalizedFilename(Filename), GetFileExInfoStandard, &Info))
+		if (!WritePrivateProfileStringW(TEXT("ZoneTransfer"), TEXT("HostUrl"), **InSourceURL, *StreamPath))
 		{
-			return WindowsFileTimeToUEDateTime(Info.ftLastWriteTime);
-		}
-
-		return FDateTime::MinValue();
-	}
-
-	virtual void SetTimeStamp(const TCHAR* Filename, FDateTime DateTime) override
-	{
-		TRACE_PLATFORMFILE_BEGIN_OPEN(Filename);
-		HANDLE Handle = CreateFileW(*WindowsNormalizedFilename(Filename), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, nullptr);
-		if (Handle != INVALID_HANDLE_VALUE)
-		{
-			TRACE_PLATFORMFILE_END_OPEN(Handle);
-			const FILETIME ModificationFileTime = UEDateTimeToWindowsFileTime(DateTime);
-			if (!SetFileTime(Handle, nullptr, nullptr, &ModificationFileTime))
-			{
-				UE_LOG(LogTemp, Warning, TEXT("SetTimeStamp: Failed to SetFileTime on %s"), Filename);
-			}
-			TRACE_PLATFORMFILE_BEGIN_CLOSE(Handle);
-#if PLATFORMFILETRACE_ENABLED
-			// MSVC static analysis has a rule that reports the argument to CloseHandle as uninitialized memory after the call to CloseHandle, so we have to save it ahead of time
-			uint64 SavedHandle = uint64(Handle);
-#endif
-			BOOL CloseResult = CloseHandle(Handle);
-#if PLATFORMFILETRACE_ENABLED
-			if (CloseResult)
-			{
-				TRACE_PLATFORMFILE_END_CLOSE(SavedHandle);
-			}
-			else
-			{
-				TRACE_PLATFORMFILE_FAIL_CLOSE(SavedHandle);
-			}
-#else
-			(void)CloseResult;
-#endif
-		}
-		else
-		{
-			TRACE_PLATFORMFILE_FAIL_OPEN(Filename);
-			UE_LOG(LogTemp, Warning, TEXT("SetTimeStamp: Failed to open file %s"), Filename);
+			return false;
 		}
 	}
 
-	virtual FDateTime GetAccessTimeStamp(const TCHAR* Filename) override
-	{
-		WIN32_FILE_ATTRIBUTE_DATA Info;
-		if (GetFileAttributesExW(*WindowsNormalizedFilename(Filename), GetFileExInfoStandard, &Info))
-		{
-			return WindowsFileTimeToUEDateTime(Info.ftLastAccessTime);
-		}
+	return true;
+}
 
-		return FDateTime::MinValue();
-	}
-
-	virtual FString GetFilenameOnDisk(const TCHAR* Filename) override
-	{
-		FString NormalizedFileName = WindowsNormalizedFilename(Filename);
-		TRACE_PLATFORMFILE_BEGIN_OPEN(Filename);
-		HANDLE hFile = CreateFile(*NormalizedFileName, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
-		// If the file exists on disk, read the capitalization from the path on disk, otherwise just return the (normalized) input filename
-		if (hFile != INVALID_HANDLE_VALUE)
-		{
-			TRACE_PLATFORMFILE_END_OPEN(hFile);
-			for (uint32 Length = NormalizedFileName.Len() + 10;;)
-			{
-				TArray<TCHAR>& CharArray = NormalizedFileName.GetCharArray();
-				CharArray.SetNum(Length);
-
-				Length = GetFinalPathNameByHandle(hFile, CharArray.GetData(), CharArray.Num(), FILE_NAME_NORMALIZED);
-				if (Length == 0)
-				{
-					NormalizedFileName = WindowsNormalizedFilename(Filename);
-					break;
-				}
-				if (Length < (uint32)CharArray.Num())
-				{
-					CharArray.SetNum(Length + 1);
-					break;
-				}
-			}
-			TRACE_PLATFORMFILE_BEGIN_CLOSE(hFile);
-#if PLATFORMFILETRACE_ENABLED
-			// MSVC static analysis has a rule that reports the argument to CloseHandle as uninitialized memory after the call to CloseHandle, so we have to save it ahead of time
-			uint64 SavedHFile = uint64(hFile);
-#endif
-			BOOL CloseResult = CloseHandle(hFile);
-#if PLATFORMFILETRACE_ENABLED
-			if (CloseResult)
-			{
-				TRACE_PLATFORMFILE_END_CLOSE(SavedHFile);
-			}
-			else
-			{
-				TRACE_PLATFORMFILE_FAIL_CLOSE(SavedHFile);
-			}
-#else
-			(void)CloseResult;
-#endif
-		}
-		else
-		{
-			TRACE_PLATFORMFILE_FAIL_OPEN(Filename);
-		}
-
-		// Remove the Windows device path prefix.
-		if (NormalizedFileName.StartsWith(TEXT("\\\\?\\UNC\\"), ESearchCase::CaseSensitive))
-		{
-			NormalizedFileName.RemoveAt(2, 6); // remove ?\UNC\ to convert \\?\UNC\Path\... to \\Path\...
-		}
-		else
-		{
-			NormalizedFileName.RemoveFromStart(TEXT("\\\\?\\"), ESearchCase::CaseSensitive);
-		}
-
-		// Convert the result back into an UnrealPath (\\ -> /)
-		NormalizedFileName.ReplaceCharInline(TEXT('\\'), TEXT('/'), ESearchCase::CaseSensitive);
-
-		return NormalizedFileName;
-	}
-
-#define USE_WINDOWS_ASYNC_IMPL 0
 #if USE_WINDOWS_ASYNC_IMPL
-	virtual IAsyncReadFileHandle* OpenAsyncRead(const TCHAR* Filename) override
-	{
-		uint32  Access = GENERIC_READ;
-		uint32  WinFlags = FILE_SHARE_READ;
-		uint32  Create = OPEN_EXISTING;
+IAsyncReadFileHandle* FWindowsPlatformFile::OpenAsyncRead(const TCHAR* Filename)
+{
+	uint32  Access = GENERIC_READ;
+	uint32  WinFlags = FILE_SHARE_READ;
+	uint32  Create = OPEN_EXISTING;
 
 
-		FString NormalizedFilename = WindowsNormalizedFilename(Filename);
-		TRACE_PLATFORMFILE_BEGIN_OPEN(Filename);
-		HANDLE Handle = CreateFileW(*NormalizedFilename, Access, WinFlags, NULL, Create, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, NULL);
+	FString NormalizedFilename = WindowsNormalizedFilename(Filename);
+	TRACE_PLATFORMFILE_BEGIN_OPEN(Filename);
+	HANDLE Handle = CreateFileW(*NormalizedFilename, Access, WinFlags, NULL, Create, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, NULL);
 #if PLATFORMFILETRACE_ENABLED
-		if (Handle != INVALID_HANDLE_VALUE)
-		{
-			TRACE_PLATFORMFILE_END_OPEN(Handle);
-		}
-		else
-		{
-			TRACE_PLATFORMFILE_FAIL_OPEN(Filename);
-		}
-#endif
-
-		// we can't really fail here because this is intended to be an async open
-		return new FMicrosoftAsyncReadFileHandle(Handle, *NormalizedFilename);
-
+	if (Handle != INVALID_HANDLE_VALUE)
+	{
+		TRACE_PLATFORMFILE_END_OPEN(Handle);
+	}
+	else
+	{
+		TRACE_PLATFORMFILE_FAIL_OPEN(Filename);
 	}
 #endif
 
-	virtual IFileHandle* OpenRead(const TCHAR* Filename, bool bAllowWrite = false) override
-	{
-		uint32  Access    = GENERIC_READ;
-		uint32  WinFlags  = FILE_SHARE_READ | (bAllowWrite ? FILE_SHARE_WRITE : 0);
-		uint32  Create    = OPEN_EXISTING;
+	// we can't really fail here because this is intended to be an async open
+	return new FMicrosoftAsyncReadFileHandle(Handle, *NormalizedFilename);
+
+}
+#endif
+
+IFileHandle* FWindowsPlatformFile::OpenRead(const TCHAR* Filename, bool bAllowWrite)
+{
+	uint32  Access    = GENERIC_READ;
+	uint32  WinFlags  = FILE_SHARE_READ | (bAllowWrite ? FILE_SHARE_WRITE : 0);
+	uint32  Create    = OPEN_EXISTING;
 #define USE_OVERLAPPED_IO (!IS_PROGRAM && !WITH_EDITOR)		// Use straightforward synchronous I/O in cooker/editor
 
-		TRACE_PLATFORMFILE_BEGIN_OPEN(Filename);
+	TRACE_PLATFORMFILE_BEGIN_OPEN(Filename);
 #if USE_OVERLAPPED_IO
-		HANDLE Handle    = CreateFileW(*WindowsNormalizedFilename(Filename), Access, WinFlags, NULL, Create, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, NULL);
-		if (Handle != INVALID_HANDLE_VALUE)
-		{
-			TRACE_PLATFORMFILE_END_OPEN(Handle);
-			return new FAsyncBufferedFileReaderWindows(Handle, Access, WinFlags, FILE_FLAG_OVERLAPPED);
-		}
+	HANDLE Handle    = CreateFileW(*FNormalizedFilename(Filename), Access, WinFlags, NULL, Create, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, NULL);
+	if (Handle != INVALID_HANDLE_VALUE)
+	{
+		TRACE_PLATFORMFILE_END_OPEN(Handle);
+		return new FAsyncBufferedFileReaderWindows(Handle, Access, WinFlags, FILE_FLAG_OVERLAPPED);
+	}
 #else
-		HANDLE Handle = CreateFileW(*WindowsNormalizedFilename(Filename), Access, WinFlags, NULL, Create, FILE_ATTRIBUTE_NORMAL, NULL);
-		if (Handle != INVALID_HANDLE_VALUE)
+	HANDLE Handle = CreateFileW(*FNormalizedFilename(Filename), Access, WinFlags, NULL, Create, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (Handle != INVALID_HANDLE_VALUE)
+	{
+		TRACE_PLATFORMFILE_END_OPEN(Handle);
+
+		FFileHandleWindows* FileHandle = new FFileHandleWindows(Handle, Access, WinFlags, 0);
+
+		// Some operations can fail during the handle initialization, so we
+		// double check that the handle is valid before returning it
+		if (FileHandle->IsValid())
 		{
-			TRACE_PLATFORMFILE_END_OPEN(Handle);
-			return new FFileHandleWindows(Handle, Access, WinFlags, 0);
+			return FileHandle;
 		}
+		else
+		{
+			delete FileHandle;
+
+			return nullptr;
+		}
+	}
 #endif
+	else
+	{
+		TRACE_PLATFORMFILE_FAIL_OPEN(Filename);
+		return nullptr;
+	}
+}
+
+IFileHandle* FWindowsPlatformFile::OpenReadNoBuffering(const TCHAR* Filename, bool bAllowWrite)
+{
+	uint32  Access = GENERIC_READ;
+	uint32  WinFlags = FILE_SHARE_READ | (bAllowWrite ? FILE_SHARE_WRITE : 0);
+	uint32  Create = OPEN_EXISTING;
+	TRACE_PLATFORMFILE_BEGIN_OPEN(Filename);
+	HANDLE Handle = CreateFileW(*FNormalizedFilename(Filename), Access, WinFlags, NULL, Create, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, NULL);
+	if (Handle != INVALID_HANDLE_VALUE)
+	{
+		TRACE_PLATFORMFILE_END_OPEN(Handle);
+
+		FFileHandleWindows* FileHandle = new FFileHandleWindows(Handle, Access, WinFlags, FILE_FLAG_OVERLAPPED);
+
+		// Some operations can fail during the handle initialization, so we
+		// double check that the handle is valid before returning it
+		if (FileHandle->IsValid())
+		{
+			return FileHandle;
+		}
 		else
 		{
-			TRACE_PLATFORMFILE_FAIL_OPEN(Filename);
+			delete FileHandle;
+
 			return nullptr;
 		}
 	}
-
-	virtual IFileHandle* OpenReadNoBuffering(const TCHAR* Filename, bool bAllowWrite = false) override
+	else
 	{
-		uint32  Access = GENERIC_READ;
-		uint32  WinFlags = FILE_SHARE_READ | (bAllowWrite ? FILE_SHARE_WRITE : 0);
-		uint32  Create = OPEN_EXISTING;
-		TRACE_PLATFORMFILE_BEGIN_OPEN(Filename);
-		HANDLE Handle = CreateFileW(*WindowsNormalizedFilename(Filename), Access, WinFlags, NULL, Create, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, NULL);
-		if (Handle != INVALID_HANDLE_VALUE)
-		{
-			TRACE_PLATFORMFILE_END_OPEN(Handle);
-			return new FFileHandleWindows(Handle, Access, WinFlags, FILE_FLAG_OVERLAPPED);
-		}
-		else
-		{
-			TRACE_PLATFORMFILE_FAIL_OPEN(Filename);
-			return nullptr;
-		}
+		TRACE_PLATFORMFILE_FAIL_OPEN(Filename);
+		return nullptr;
 	}
+}
 
-	virtual IFileHandle* OpenWrite(const TCHAR* Filename, bool bAppend = false, bool bAllowRead = false) override
+IFileHandle* FWindowsPlatformFile::OpenWrite(const TCHAR* Filename, bool bAppend, bool bAllowRead)
+{
+	uint32  Access    = GENERIC_WRITE | (bAllowRead ? GENERIC_READ : 0);
+	uint32  WinFlags  = bAllowRead ? FILE_SHARE_READ : 0;
+	uint32  Create    = bAppend ? OPEN_ALWAYS : CREATE_ALWAYS;
+	TRACE_PLATFORMFILE_BEGIN_OPEN(Filename);
+	HANDLE Handle    = CreateFileW(*FNormalizedFilename(Filename), Access, WinFlags, NULL, Create, FILE_ATTRIBUTE_NORMAL, NULL);
+	if(Handle != INVALID_HANDLE_VALUE)
 	{
-		uint32  Access    = GENERIC_WRITE | (bAllowRead ? GENERIC_READ : 0);
-		uint32  WinFlags  = bAllowRead ? FILE_SHARE_READ : 0;
-		uint32  Create    = bAppend ? OPEN_ALWAYS : CREATE_ALWAYS;
-		TRACE_PLATFORMFILE_BEGIN_OPEN(Filename);
-		HANDLE Handle    = CreateFileW(*WindowsNormalizedFilename(Filename), Access, WinFlags, NULL, Create, FILE_ATTRIBUTE_NORMAL, NULL);
-		if(Handle != INVALID_HANDLE_VALUE)
+		TRACE_PLATFORMFILE_END_OPEN(Handle);
+		FFileHandleWindows* PlatformFileHandle = new FFileHandleWindows(Handle, Access, WinFlags, 0);
+
+		// Some operations can fail during the handle initialization, so we
+		// double check that the handle is valid before returning it
+		if (PlatformFileHandle->IsValid())
 		{
-			TRACE_PLATFORMFILE_END_OPEN(Handle);
-			FFileHandleWindows *PlatformFileHandle = new FFileHandleWindows(Handle, Access, WinFlags, 0);
 			if (bAppend)
 			{
 				PlatformFileHandle->SeekFromEnd(0);
@@ -1190,173 +1358,198 @@ public:
 		}
 		else
 		{
-			TRACE_PLATFORMFILE_FAIL_OPEN(Filename);
+			delete PlatformFileHandle;
+
 			return nullptr;
 		}
 	}
-
-
-	virtual IMappedFileHandle* OpenMapped(const TCHAR* Filename) override
+	else
 	{
-		int64 Size = FileSize(Filename);
-		if (Size < 1)
+		TRACE_PLATFORMFILE_FAIL_OPEN(Filename);
+		return nullptr;
+	}
+}
+
+IMappedFileHandle* FWindowsPlatformFile::OpenMapped(const TCHAR* Filename)
+{
+	int64 Size = FileSize(Filename);
+	if (Size < 1)
+	{
+		return nullptr;
+	}
+	uint32  Access = GENERIC_READ;
+	uint32  WinFlags = FILE_SHARE_READ;
+	uint32  Create = OPEN_EXISTING;
+	TRACE_PLATFORMFILE_BEGIN_OPEN(Filename);
+	HANDLE Handle = CreateFileW(*FNormalizedFilename(Filename), Access, WinFlags, NULL, Create, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (Handle != INVALID_HANDLE_VALUE)
+	{
+		TRACE_PLATFORMFILE_END_OPEN(Handle);
+	}
+	else
+	{
+		TRACE_PLATFORMFILE_FAIL_OPEN(Filename);
+		return nullptr;
+	}
+	HANDLE MappingHandle = CreateFileMapping(Handle, NULL, PAGE_READONLY, 0, 0, NULL);
+	if (MappingHandle == NULL)
+	{
+		TRACE_PLATFORMFILE_BEGIN_CLOSE(Handle);
+#if PLATFORMFILETRACE_ENABLED
+		// MSVC static analysis has a rule that reports the argument to CloseHandle as uninitialized memory after the call to CloseHandle, so we have to save it ahead of time
+		uint64 SavedHandle = uint64(Handle);
+#endif
+		BOOL CloseResult = CloseHandle(Handle);
+#if PLATFORMFILETRACE_ENABLED
+		if (CloseResult)
 		{
-			return nullptr;
-		}
-		uint32  Access = GENERIC_READ;
-		uint32  WinFlags = FILE_SHARE_READ;
-		uint32  Create = OPEN_EXISTING;
-		TRACE_PLATFORMFILE_BEGIN_OPEN(Filename);
-		HANDLE Handle = CreateFileW(*WindowsNormalizedFilename(Filename), Access, WinFlags, NULL, Create, FILE_ATTRIBUTE_NORMAL, NULL);
-		if (Handle != INVALID_HANDLE_VALUE)
-		{
-			TRACE_PLATFORMFILE_END_OPEN(Handle);
+			TRACE_PLATFORMFILE_END_CLOSE(SavedHandle);
 		}
 		else
 		{
-			TRACE_PLATFORMFILE_FAIL_OPEN(Filename);
-			return nullptr;
+			TRACE_PLATFORMFILE_FAIL_CLOSE(SavedHandle);
 		}
-		HANDLE MappingHandle = CreateFileMapping(Handle, NULL, PAGE_READONLY, 0, 0, NULL);
-		if (MappingHandle == INVALID_HANDLE_VALUE)
-		{
-			TRACE_PLATFORMFILE_BEGIN_CLOSE(Handle);
-#if PLATFORMFILETRACE_ENABLED
-			// MSVC static analysis has a rule that reports the argument to CloseHandle as uninitialized memory after the call to CloseHandle, so we have to save it ahead of time
-			uint64 SavedHandle = uint64(Handle);
-#endif
-			BOOL CloseResult = CloseHandle(Handle);
-#if PLATFORMFILETRACE_ENABLED
-			if (CloseResult)
-			{
-				TRACE_PLATFORMFILE_END_CLOSE(SavedHandle);
-			}
-			else
-			{
-				TRACE_PLATFORMFILE_FAIL_CLOSE(SavedHandle);
-			}
 #else
-			(void)CloseResult;
+		(void)CloseResult;
 #endif
-			return nullptr;
-		}
-		return new FMappedFileHandleWindows(Handle, MappingHandle, Size, Filename);
+		return nullptr;
 	}
-	virtual bool DirectoryExists(const TCHAR* Directory) override
-	{
-		// Empty Directory is the current directory so assume it always exists.
-		bool bExists = !FCString::Strlen(Directory);
-		if (!bExists) 
-		{
-			uint32 Result = GetFileAttributesW(*WindowsNormalizedDirname(Directory));
-			bExists = (Result != 0xFFFFFFFF && (Result & FILE_ATTRIBUTE_DIRECTORY));
-		}
-		return bExists;
-	}
-	virtual bool CreateDirectory(const TCHAR* Directory) override
-	{
-		return CreateDirectoryW(*WindowsNormalizedDirname(Directory), NULL) || GetLastError() == ERROR_ALREADY_EXISTS;
-	}
-	virtual bool DeleteDirectory(const TCHAR* Directory) override
-	{
-		RemoveDirectoryW(*WindowsNormalizedDirname(Directory));
-		uint32 LastError = GetLastError();
-		const bool bSucceeded = !DirectoryExists(Directory);
-		if (!bSucceeded)
-		{
-			SetLastError(LastError);
-		}
-		return bSucceeded;
-	}
-	virtual FFileStatData GetStatData(const TCHAR* FilenameOrDirectory) override
-	{
-		WIN32_FILE_ATTRIBUTE_DATA Info;
-		if (GetFileAttributesExW(*WindowsNormalizedFilename(FilenameOrDirectory), GetFileExInfoStandard, &Info))
-		{
-			const bool bIsDirectory = !!(Info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+	return new FMappedFileHandleWindows(Handle, MappingHandle, Size, Filename);
+}
 
-			int64 FileSize = -1;
-			if (!bIsDirectory)
-			{
-				LARGE_INTEGER li;
-				li.HighPart = Info.nFileSizeHigh;
-				li.LowPart = Info.nFileSizeLow;
-				FileSize = static_cast<int64>(li.QuadPart);
-			}
+bool FWindowsPlatformFile::DirectoryExists(const TCHAR* Directory)
+{
+	// Empty Directory is the current directory so assume it always exists.
+	bool bExists = !FCString::Strlen(Directory);
+	if (!bExists) 
+	{
+		uint32 Result = GetFileAttributesW(*FNormalizedDirectory(Directory));
+		bExists = (Result != 0xFFFFFFFF && (Result & FILE_ATTRIBUTE_DIRECTORY));
+	}
+	return bExists;
+}
 
-			return FFileStatData(
-				WindowsFileTimeToUEDateTime(Info.ftCreationTime),
-				WindowsFileTimeToUEDateTime(Info.ftLastAccessTime),
-				WindowsFileTimeToUEDateTime(Info.ftLastWriteTime),
+bool FWindowsPlatformFile::CreateDirectory(const TCHAR* Directory)
+{
+	return CreateDirectoryW(*FNormalizedDirectory(Directory), NULL) || GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+bool FWindowsPlatformFile::DeleteDirectory(const TCHAR* Directory)
+{
+	RemoveDirectoryW(*FNormalizedDirectory(Directory));
+	uint32 LastError = GetLastError();
+	const bool bSucceeded = !DirectoryExists(Directory);
+	if (!bSucceeded)
+	{
+		SetLastError(LastError);
+	}
+	return bSucceeded;
+}
+
+FFileStatData FWindowsPlatformFile::GetStatData(const TCHAR* FilenameOrDirectory)
+{
+	WIN32_FILE_ATTRIBUTE_DATA Info;
+	if (GetFileAttributesExW(*FNormalizedFilename(FilenameOrDirectory), GetFileExInfoStandard, &Info))
+	{
+		const bool bIsDirectory = !!(Info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+
+		int64 FileSize = -1;
+		if (!bIsDirectory)
+		{
+			LARGE_INTEGER li;
+			li.HighPart = Info.nFileSizeHigh;
+			li.LowPart = Info.nFileSizeLow;
+			FileSize = static_cast<int64>(li.QuadPart);
+		}
+
+		return FFileStatData(
+			UE::WindowsPlatformFile::Private::WindowsFileTimeToUEDateTime(Info.ftCreationTime),
+			UE::WindowsPlatformFile::Private::WindowsFileTimeToUEDateTime(Info.ftLastAccessTime),
+			UE::WindowsPlatformFile::Private::WindowsFileTimeToUEDateTime(Info.ftLastWriteTime),
+			FileSize, 
+			bIsDirectory,
+			!!(Info.dwFileAttributes & FILE_ATTRIBUTE_READONLY)
+			);
+	}
+
+	return FFileStatData();
+}
+
+bool FWindowsPlatformFile::IterateDirectory(const TCHAR* Directory, FDirectoryVisitor& Visitor)
+{
+	TStringBuilder<256> DirTemp;
+	DirTemp << Directory;
+	const int32 DirLen = DirTemp.Len();
+	return IterateDirectoryCommon(Directory, [&](const WIN32_FIND_DATAW& InData) -> bool
+	{
+		DirTemp.RemoveSuffix(DirTemp.Len() - DirLen);
+		FPathViews::Append(DirTemp, InData.cFileName);
+		const bool bIsDirectory = !!(InData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+		return Visitor.CallShouldVisitAndVisit(*DirTemp, bIsDirectory);
+	});
+}
+
+bool FWindowsPlatformFile::IterateDirectoryStat(const TCHAR* Directory, FDirectoryStatVisitor& Visitor)
+{
+	const FString DirectoryStr = Directory;
+	return IterateDirectoryCommon(Directory, [&](const WIN32_FIND_DATAW& InData) -> bool
+	{
+		const bool bIsDirectory = !!(InData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+
+		int64 FileSize = -1;
+		if (!bIsDirectory)
+		{
+			LARGE_INTEGER li;
+			li.HighPart = InData.nFileSizeHigh;
+			li.LowPart = InData.nFileSizeLow;
+			FileSize = static_cast<int64>(li.QuadPart);
+		}
+
+		return Visitor.CallShouldVisitAndVisit(
+			*(DirectoryStr / InData.cFileName), 
+			FFileStatData(
+				UE::WindowsPlatformFile::Private::WindowsFileTimeToUEDateTime(InData.ftCreationTime),
+				UE::WindowsPlatformFile::Private::WindowsFileTimeToUEDateTime(InData.ftLastAccessTime),
+				UE::WindowsPlatformFile::Private::WindowsFileTimeToUEDateTime(InData.ftLastWriteTime),
 				FileSize, 
 				bIsDirectory,
-				!!(Info.dwFileAttributes & FILE_ATTRIBUTE_READONLY)
-				);
-		}
+				!!(InData.dwFileAttributes & FILE_ATTRIBUTE_READONLY)
+				)
+			);
+	});
+}
+	
+// Forced not inline to reduce stack space usage since IterateDirectoryCommon might be recursive
+FORCENOINLINE HANDLE FWindowsPlatformFile::FindFirstFileWithWildcard(const TCHAR* Directory, WIN32_FIND_DATAW& OutData)
+{
+	return FindFirstFileW(*(FNormalizedFilename(Directory, TEXTVIEW("*.*"))), &OutData);
+}
 
-		return FFileStatData();
-	}
-	virtual bool IterateDirectory(const TCHAR* Directory, FDirectoryVisitor& Visitor) override
+bool FWindowsPlatformFile::IterateDirectoryCommon(const TCHAR* Directory, const TFunctionRef<bool(const WIN32_FIND_DATAW&)>& Visitor)
+{
+	bool bResult = true;
+	WIN32_FIND_DATAW Data;
+	HANDLE Handle = FindFirstFileWithWildcard(Directory, /* Out */ Data);
+	if (Handle != INVALID_HANDLE_VALUE)
 	{
-		const FString DirectoryStr = Directory;
-		return IterateDirectoryCommon(Directory, [&](const WIN32_FIND_DATAW& InData) -> bool
+		do
 		{
-			const bool bIsDirectory = !!(InData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
-			return Visitor.Visit(*(DirectoryStr / InData.cFileName), bIsDirectory);
-		});
-	}
-	virtual bool IterateDirectoryStat(const TCHAR* Directory, FDirectoryStatVisitor& Visitor) override
-	{
-		const FString DirectoryStr = Directory;
-		return IterateDirectoryCommon(Directory, [&](const WIN32_FIND_DATAW& InData) -> bool
-		{
-			const bool bIsDirectory = !!(InData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
-
-			int64 FileSize = -1;
-			if (!bIsDirectory)
+			if (FCString::Strcmp(Data.cFileName, TEXT(".")) && FCString::Strcmp(Data.cFileName, TEXT("..")))
 			{
-				LARGE_INTEGER li;
-				li.HighPart = InData.nFileSizeHigh;
-				li.LowPart = InData.nFileSizeLow;
-				FileSize = static_cast<int64>(li.QuadPart);
+				bResult = Visitor(Data);
 			}
-
-			return Visitor.Visit(
-				*(DirectoryStr / InData.cFileName), 
-				FFileStatData(
-					WindowsFileTimeToUEDateTime(InData.ftCreationTime),
-					WindowsFileTimeToUEDateTime(InData.ftLastAccessTime),
-					WindowsFileTimeToUEDateTime(InData.ftLastWriteTime),
-					FileSize, 
-					bIsDirectory,
-					!!(InData.dwFileAttributes & FILE_ATTRIBUTE_READONLY)
-					)
-				);
-		});
+		} while (bResult && FindNextFileW(Handle, &Data));
+		FindClose(Handle);
 	}
-	bool IterateDirectoryCommon(const TCHAR* Directory, const TFunctionRef<bool(const WIN32_FIND_DATAW&)>& Visitor)
-	{
-		bool bResult = true;
-		WIN32_FIND_DATAW Data;
-		FString SearchWildcard = FString(Directory) / TEXT("*.*");
-		HANDLE Handle = FindFirstFileW(*(WindowsNormalizedFilename(*SearchWildcard)), &Data);
-		if (Handle != INVALID_HANDLE_VALUE)
-		{
-			do
-			{
-				if (FCString::Strcmp(Data.cFileName, TEXT(".")) && FCString::Strcmp(Data.cFileName, TEXT("..")))
-				{
-					bResult = Visitor(Data);
-				}
-			} while (bResult && FindNextFileW(Handle, &Data));
-			FindClose(Handle);
-		}
-		return bResult;
-	}
-};
+	return bResult;
+}
 
 IPlatformFile& IPlatformFile::GetPlatformPhysical()
 {
-	static FWindowsPlatformFile Singleton;
+#if PLATFORM_USE_PLATFORM_FILE_MANAGED_STORAGE_WRAPPER
+	static TManagedStoragePlatformFile<FWindowsPlatformFile> Singleton;
+#else
+	static FWindowsPlatformFile Singleton;	
+#endif
 	return Singleton;
 }

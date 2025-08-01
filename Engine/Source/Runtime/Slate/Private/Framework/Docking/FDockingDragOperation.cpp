@@ -4,6 +4,24 @@
 #include "Framework/Application/SlateApplication.h"
 #include "HAL/PlatformApplicationMisc.h"
 
+/** 
+  * Check if the given PotentialParent is a parent of PotentialChild. 
+  */
+static bool IsParentWidgetOf(const TSharedPtr<SWidget>& PotentialParent, const TSharedPtr<SWidget>& PotentialChild)
+{
+	const SWidget* Parent = PotentialChild->GetParentWidget().Get();
+	while (Parent != nullptr)
+	{
+		if (PotentialParent.Get() == Parent)
+		{
+			return true;
+		}
+		Parent = Parent->GetParentWidget().Get();
+	}
+
+	return false;
+}
+
 /**
  * Invoked when the drag and drop operation has ended.
  * 
@@ -59,6 +77,11 @@ void FDockingDragOperation::OnDragged( const FDragDropEvent& DragDropEvent )
  */
 void FDockingDragOperation::OnTabWellEntered( const TSharedRef<class SDockingTabWell>& ThePanel )
 {
+	if (IsParentWidgetOf(this->TabOwnerAreaOfOrigin, ThePanel->GetDockArea()))
+	{
+		return;
+	}
+
 	// We just pulled the tab into some TabWell (in some DockNode).
 	// Hide our decorator window and let the DockNode handle previewing what will happen if we drop the node.
 	HoveredTabPanelPtr = ThePanel;
@@ -101,16 +124,16 @@ FSlateRect FDockingDragOperation::GetPreviewAreaForDirection ( const FSlateRect&
 	switch( DockingDirection )
 	{
 		case SDockingNode::LeftOf:
-			TargetRect.Right = TargetRect.Left + Size.X * 0.5;
+			TargetRect.Right = TargetRect.Left + Size.X * 0.5f;
 		break;
 		case SDockingNode::Above:
-			TargetRect.Bottom = TargetRect.Top + Size.Y * 0.5;
+			TargetRect.Bottom = TargetRect.Top + Size.Y * 0.5f;
 		break;
 		case SDockingNode::RightOf:
-			TargetRect.Left = TargetRect.Left + Size.X * 0.5;
+			TargetRect.Left = TargetRect.Left + Size.X * 0.5f;
 		break;
 		case SDockingNode::Below:
-			TargetRect.Top = TargetRect.Top + Size.Y * 0.5;
+			TargetRect.Top = TargetRect.Top + Size.Y * 0.5f;
 		break;
 		case SDockingNode::Center:
 		break;
@@ -179,6 +202,11 @@ bool FDockingDragOperation::CanDockInNode(const TSharedRef<SDockingNode>& DockNo
 	const TSharedRef<FTabManager> TargetTabManager = DockNode->GetDockArea()->GetTabManager();
 	const TSharedRef<FTabManager> TabManagerOfOrigin = this->TabOwnerAreaOfOrigin->GetTabManager();
 
+	if (IsParentWidgetOf(TabBeingDragged->GetContent(), DockNode))
+	{
+		return false;
+	}
+
 	if (TabBeingDragged->GetTabRole() == ETabRole::NomadTab)
 	{
 		if ( IsDockingViaTabwell == FDockingDragOperation::DockingViaTabWell )
@@ -245,7 +273,7 @@ FDockingDragOperation::FDockingDragOperation( const TSharedRef<SDockTab>& InTabT
 		SNew(SBorder)
 		. BorderImage(FCoreStyle::Get().GetBrush("Docking.Background"))
 		[
-			SNew(SDockingArea, TabBeingDragged->GetTabManager(), FTabManager::NewPrimaryArea())
+			SNew(SDockingArea, TabBeingDragged->GetTabManagerPtr().ToSharedRef(), FTabManager::NewPrimaryArea())
 			//. OriginalDockArea(OriginalDockArea)
 			. InitialContent
 			( 
@@ -286,15 +314,17 @@ void FDockingDragOperation::DroppedOntoNothing()
 {
 	// If we dropped the tab into an existing DockNode then it would have handled the DropEvent.
 	// We are here because that didn't happen, so make a new window with a new DockNode and drop the tab into that.
+	TSharedPtr<FTabManager> MyTabManager = TabBeingDragged->GetTabManagerPtr();
+	if (!MyTabManager.IsValid())
+	{
+		return;
+	}
 
 	const FVector2D PositionToDrop = CursorDecoratorWindow->GetPositionInScreen();
 
 	const float DPIScale = FPlatformApplicationMisc::GetDPIScaleFactorAtPoint(PositionToDrop.X, PositionToDrop.Y);
 
-	TSharedRef<FTabManager> MyTabManager = TabBeingDragged->GetTabManager();
-
 	TSharedPtr<SWindow> NewWindowParent = MyTabManager->GetPrivateApi().GetParentWindow();
-
 
 	TSharedRef<SWindow> NewWindow = SNew(SWindow)
 		.Title(FGlobalTabmanager::Get()->GetApplicationTitle())
@@ -314,7 +344,7 @@ void FDockingDragOperation::DroppedOntoNothing()
 
 	// Create a new dockarea
 	TSharedRef<SDockingArea> NewDockArea =
-		SNew(SDockingArea, TabBeingDragged->GetTabManager(), FTabManager::NewPrimaryArea())
+		SNew(SDockingArea, MyTabManager.ToSharedRef(), FTabManager::NewPrimaryArea())
 		.ParentWindow(NewWindow)
 		.InitialContent
 		(

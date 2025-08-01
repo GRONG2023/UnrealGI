@@ -1,19 +1,29 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #include "UserInterface/PropertyEditor/SPropertyEditorInteractiveActorPicker.h"
+
+#include "Delegates/Delegate.h"
+#include "Input/Events.h"
+#include "InputCoreTypes.h"
+#include "Layout/Margin.h"
+#include "Misc/Attribute.h"
 #include "Modules/ModuleManager.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateColor.h"
 #include "Widgets/Images/SImage.h"
-#include "EditorStyleSet.h"
+
+struct FGeometry;
 
 #define LOCTEXT_NAMESPACE "PropertyPicker"
 
 SPropertyEditorInteractiveActorPicker::~SPropertyEditorInteractiveActorPicker()
 {
-	FActorPickerModeModule& ActorPickerMode = FModuleManager::Get().GetModuleChecked<FActorPickerModeModule>("ActorPickerMode");
-
-	// make sure we are unregistered when this widget goes away
-	if (ActorPickerMode.IsInActorPickingMode())
+	if (FActorPickerModeModule* ActorPickerMode = FModuleManager::Get().GetModulePtr<FActorPickerModeModule>("ActorPickerMode"))
 	{
-		ActorPickerMode.EndActorPickingMode();
+		// make sure we are unregistered when this widget goes away
+		if (ActorPickerMode->IsInActorPickingMode())
+		{
+			ActorPickerMode->EndActorPickingMode();
+		}
 	}
 }
 
@@ -25,14 +35,14 @@ void SPropertyEditorInteractiveActorPicker::Construct( const FArguments& InArgs 
 
 	SButton::Construct(
 		SButton::FArguments()
-		.ButtonStyle( FEditorStyle::Get(), "HoverHintOnly" )
+		.ButtonStyle( FAppStyle::Get(), "HoverHintOnly" )
 		.OnClicked( this, &SPropertyEditorInteractiveActorPicker::OnClicked )
 		.ContentPadding(4.0f)
 		.ForegroundColor( FSlateColor::UseForeground() )
 		.IsFocusable(false)
 		[ 
 			SNew( SImage )
-			.Image( FEditorStyle::GetBrush("PropertyWindow.Button_PickActorInteractive") )
+			.Image( FAppStyle::GetBrush("Icons.EyeDropper") )
 			.ColorAndOpacity( FSlateColor::UseForeground() )
 		]
 	);

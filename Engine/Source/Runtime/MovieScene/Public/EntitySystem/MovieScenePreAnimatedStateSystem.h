@@ -2,38 +2,23 @@
 
 #pragma once
 
+#include "CoreTypes.h"
 #include "EntitySystem/MovieSceneEntityInstantiatorSystem.h"
+#include "EntitySystem/MovieSceneEntitySystem.h"
 #include "Evaluation/PreAnimatedState/MovieScenePreAnimatedStateStorage.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/Interface.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
 
 #include "MovieScenePreAnimatedStateSystem.generated.h"
 
-namespace UE
-{
-namespace MovieScene
-{
+class UMovieSceneEntitySystemLinker;
+class UObject;
+namespace UE { namespace MovieScene { struct FPreAnimatedStateExtension; } }
+namespace UE { namespace MovieScene { struct FSystemSubsequentTasks; } }
+namespace UE { namespace MovieScene { struct FSystemTaskPrerequisites; } }
 
-/** Structure that manages the lifetime of the pre-animated state extension while entities exist with the restore state tag */
-struct FPreAnimatedStateExtensionReference
-{
-	FPreAnimatedStateExtensionReference() = default;
-	FPreAnimatedStateExtensionReference(UMovieSceneEntitySystemLinker* Linker)
-	{
-		Update(Linker);
-	}
-
-	TSharedPtr<FPreAnimatedStateExtension> Get() const;
-
-	TSharedPtr<FPreAnimatedStateExtension> Update(UMovieSceneEntitySystemLinker* Linker);
-
-private:
-	/** Weak ref to the extension - this is always used for access, and will remain valid as long as there are any global state captures, or RestoreState entities */
-	TWeakPtr<FPreAnimatedStateExtension>   WeakPreAnimatedStateExtension;
-	/** Strong ref to the extension that keeps the extension alive if there are RestoreState entities in the entity manager */
-	TSharedPtr<FPreAnimatedStateExtension> PreAnimatedStateExtensionRef;
-};
-
-} // namespace MovieScene
-} // namespace UE
 
 UINTERFACE()
 class UMovieScenePreAnimatedStateSystemInterface : public UInterface
@@ -60,17 +45,6 @@ public:
 
 	virtual void SavePreAnimatedState(const FPreAnimationParameters& InParameters) {}
 	virtual void RestorePreAnimatedState(const FPreAnimationParameters& InParameters) {}
-
-private:
-
-	UE_DEPRECATED(4.26, "Please override the method that takes a FPreAnimationParameters")
-	virtual void SavePreAnimatedState(UE::MovieScene::FSystemTaskPrerequisites& InPrerequisites, UE::MovieScene::FSystemSubsequentTasks& Subsequents) final {}
-
-	UE_DEPRECATED(4.26, "Please override the method that takes a FPreAnimationParameters")
-	virtual void SaveGlobalPreAnimatedState(UE::MovieScene::FSystemTaskPrerequisites& InPrerequisites, UE::MovieScene::FSystemSubsequentTasks& Subsequents) final {}
-
-	UE_DEPRECATED(4.26, "Please override the method that takes a FPreAnimationParameters")
-	virtual void RestorePreAnimatedState(UE::MovieScene::FSystemTaskPrerequisites& InPrerequisites, UE::MovieScene::FSystemSubsequentTasks& Subsequents) final {}
 };
 
 
@@ -97,8 +71,6 @@ private:
 	virtual void OnLink() override;
 	virtual void OnUnlink() override;
 	virtual void OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents) override final;
-
-	UE::MovieScene::FPreAnimatedStateExtensionReference PreAnimatedStateRef;
 };
 
 

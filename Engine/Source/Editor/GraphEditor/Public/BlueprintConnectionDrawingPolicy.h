@@ -2,15 +2,29 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "EdGraph/EdGraphPin.h"
-#include "Layout/ArrangedWidget.h"
-#include "Widgets/SWidget.h"
 #include "ConnectionDrawingPolicy.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "CoreMinimal.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
+#include "HAL/Platform.h"
+#include "Layout/ArrangedWidget.h"
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
+#include "Templates/SharedPointer.h"
+#include "Widgets/SWidget.h"
 
+class FArrangedChildren;
+class FArrangedWidget;
+class FSlateRect;
 class FSlateWindowElementList;
+class SGraphPin;
+class SWidget;
 class UBlueprint;
 class UEdGraph;
+class UEdGraphPin;
 
 /////////////////////////////////////////////////////
 // FKismetConnectionDrawingPolicy
@@ -126,4 +140,5 @@ protected:
 	bool ShouldChangeTangentForKnot(class UK2Node_Knot* Knot);
 	bool GetAverageConnectedPosition(class UK2Node_Knot* Knot, EEdGraphPinDirection Direction, FVector2D& OutPos) const;
 	bool FindPinCenter(UEdGraphPin* Pin, FVector2D& OutCenter) const;
+	static UObject* GetObjectBeingDebugged(UBlueprint* TargetBP);
 };

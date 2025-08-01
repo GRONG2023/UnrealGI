@@ -1,11 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using UnrealBuildBase;
 
 namespace UnrealBuildTool
 {
@@ -17,7 +13,7 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// The max length of the deploy folder name.
 		/// </summary>
-		public const int DeployFolderMaxLength = 50; 
+		public const int DeployFolderMaxLength = 50;
 
 		/// <summary>
 		/// Gets the default deploy folder name on the format ShortProjectName-RootDirectoryName-UserName,
@@ -27,9 +23,9 @@ namespace UnrealBuildTool
 		/// <returns>The default deploy folder name.</returns>
 		public static string GetDefaultDeployFolder(string ShortProjectName)
 		{
-			string DeployFolder = string.Format("{0}-{1}-{2}",
+			string DeployFolder = String.Format("{0}-{1}-{2}",
 				ShortProjectName,
-				UnrealBuildTool.RootDirectory.GetDirectoryName(),
+				Unreal.RootDirectory.GetDirectoryName(),
 				Environment.UserName);
 
 			DeployFolder = DeployFolder.Replace(" ", "");
@@ -38,7 +34,7 @@ namespace UnrealBuildTool
 			if (DeployFolder.Length > DeployFolderMaxLength)
 			{
 				DeployFolder = DeployFolder.Substring(0, DeployFolderMaxLength);
-				char[] CharsToTrim = {'-'};
+				char[] CharsToTrim = { '-' };
 				DeployFolder = DeployFolder.Trim(CharsToTrim);
 			}
 

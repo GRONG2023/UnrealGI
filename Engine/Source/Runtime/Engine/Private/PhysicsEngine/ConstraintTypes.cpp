@@ -2,37 +2,14 @@
 
 #include "PhysicsEngine/ConstraintTypes.h"
 #include "HAL/IConsoleManager.h"
-#include "PhysicsPublic.h"
-#include "PhysXIncludes.h"
-#include "Physics/PhysicsInterfaceCore.h"
+#include "Physics/Experimental/PhysInterface_Chaos.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ConstraintTypes)
 
 extern TAutoConsoleVariable<float> CVarConstraintLinearDampingScale;
 extern TAutoConsoleVariable<float> CVarConstraintLinearStiffnessScale;
 extern TAutoConsoleVariable<float> CVarConstraintAngularDampingScale;
 extern TAutoConsoleVariable<float> CVarConstraintAngularStiffnessScale;
-
-#if PHYSICS_INTERFACE_PHYSX
-
-enum class ESoftLimitTypeHelper
-{
-	Linear,
-	Angular
-};
-
-/** Util for setting soft limit params */
-template <ESoftLimitTypeHelper Type>
-void SetSoftLimitParams_AssumesLocked(PxJointLimitParameters* PLimit, bool bSoft, float Spring, float Damping)
-{
-	if(bSoft)
-	{
-		const float SpringCoeff = Type == ESoftLimitTypeHelper::Angular ? CVarConstraintAngularStiffnessScale.GetValueOnGameThread() : CVarConstraintLinearStiffnessScale.GetValueOnGameThread();
-		const float DampingCoeff = Type == ESoftLimitTypeHelper::Angular ? CVarConstraintAngularDampingScale.GetValueOnGameThread() : CVarConstraintLinearDampingScale.GetValueOnGameThread();
-		PLimit->stiffness = Spring * SpringCoeff;
-		PLimit->damping = Damping * DampingCoeff;
-	}
-}
-
-#endif //WITH_PHYSX
 
 /** Util for setting linear movement for an axis */
 void SetLinearMovement_AssumesLocked(const FPhysicsConstraintHandle& InConstraintRef, PhysicsInterfaceTypes::ELimitAxis InAxis, ELinearConstraintMotion Motion, bool bLockLimitSize, bool bSkipSoftLimit)
@@ -99,7 +76,7 @@ bool ShouldSkipSoftLimits(float Stiffness, float Damping, float AverageMass)
 
 void FLinearConstraint::UpdateLinearLimit_AssumesLocked(const FPhysicsConstraintHandle& InConstraintRef, float AverageMass, float Scale) const
 {
-	const float UseLimit = FMath::Max(Limit * Scale, KINDA_SMALL_NUMBER);	//physx doesn't ever want limit of 0
+	const float UseLimit = FMath::Max(Limit * Scale, UE_KINDA_SMALL_NUMBER);	//physx doesn't ever want limit of 0
 	const bool bLockLimitSize = (UseLimit < RB_MinSizeToLockDOF);
 	
 	const bool bSkipSoft = bSoftConstraint && ShouldSkipSoftLimits(Stiffness, Damping, AverageMass);
@@ -124,8 +101,8 @@ void FConeConstraint::UpdateConeLimit_AssumesLocked(const FPhysicsConstraintHand
 
 	const bool bSkipSoftLimits = bSoftConstraint && ShouldSkipSoftLimits(Stiffness, Damping, AverageMass);
 
-	FPhysicsInterface::SetAngularMotionLimitType_AssumesLocked(InConstraintRef, PhysicsInterfaceTypes::ELimitAxis::Swing2, (bSkipSoftLimits && Swing1Motion == ACM_Limited) ? EAngularConstraintMotion::ACM_Free : Swing1Motion.GetValue());
-	FPhysicsInterface::SetAngularMotionLimitType_AssumesLocked(InConstraintRef, PhysicsInterfaceTypes::ELimitAxis::Swing1, (bSkipSoftLimits && Swing1Motion == ACM_Limited) ? EAngularConstraintMotion::ACM_Free : Swing2Motion.GetValue());
+	FPhysicsInterface::SetAngularMotionLimitType_AssumesLocked(InConstraintRef, PhysicsInterfaceTypes::ELimitAxis::Swing1, (bSkipSoftLimits && Swing1Motion == ACM_Limited) ? EAngularConstraintMotion::ACM_Free : Swing1Motion.GetValue());
+	FPhysicsInterface::SetAngularMotionLimitType_AssumesLocked(InConstraintRef, PhysicsInterfaceTypes::ELimitAxis::Swing2, (bSkipSoftLimits && Swing2Motion == ACM_Limited) ? EAngularConstraintMotion::ACM_Free : Swing2Motion.GetValue());
 }
 
 void FTwistConstraint::UpdateTwistLimit_AssumesLocked(const FPhysicsConstraintHandle& InConstraintRef, float AverageMass) const
@@ -138,3 +115,4 @@ void FTwistConstraint::UpdateTwistLimit_AssumesLocked(const FPhysicsConstraintHa
 	const bool bSkipSoftLimits = bSoftConstraint && ShouldSkipSoftLimits(Stiffness, Damping, AverageMass);
 	FPhysicsInterface::SetAngularMotionLimitType_AssumesLocked(InConstraintRef, PhysicsInterfaceTypes::ELimitAxis::Twist, (bSkipSoftLimits && TwistMotion == ACM_Limited) ? EAngularConstraintMotion::ACM_Free : TwistMotion.GetValue());
 }
+

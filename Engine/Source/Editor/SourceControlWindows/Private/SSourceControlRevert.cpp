@@ -27,12 +27,13 @@
 #include "Widgets/Views/STableRow.h"
 #include "Widgets/Views/SListView.h"
 #include "Widgets/Input/SCheckBox.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "PackageTools.h"
 #include "Settings/EditorExperimentalSettings.h"
 #include "Framework/Notifications/NotificationManager.h"
 #include "Widgets/Notifications/SNotificationList.h"
 #include "UObject/Linker.h"
+#include "FileHelpers.h"
 
 #define LOCTEXT_NAMESPACE "SSourceControlRevert"
 
@@ -59,7 +60,7 @@ struct FRevertCheckBoxListViewItem
 	FRevertCheckBoxListViewItem( FString InText )
 	{
 		Text = InText;
-		IsSelected = false;
+		IsSelected = true;
 		IsModified = false;
 	}
 
@@ -82,6 +83,19 @@ struct FRevertCheckBoxListViewItem
 	bool IsModified;
 	FString Text;
 };
+
+/** Returns whether revert unsaved is enabled */
+static bool IsRevertUnsavedEnabled()
+{
+	if (IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("SourceControl.RevertUnsaved.Enable")))
+	{
+		return CVar->GetBool();
+	}
+	else
+	{
+		return false;
+	}
+}
 
 /**
  * Source control panel for reverting files. Allows the user to select which files should be reverted, as well as
@@ -124,7 +138,7 @@ public:
 		ChildSlot
 		[
 			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 			[
 
 				SNew(SVerticalBox)
@@ -140,7 +154,7 @@ public:
 				.Padding(10,0)
 				[
 					SNew(SBorder)
-					.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+					.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 					.Padding(5)
 					[
 						SNew(SCheckBox)
@@ -191,14 +205,14 @@ public:
 					.Padding(5)
 					[
 						SNew(SUniformGridPanel)
-						.SlotPadding(FEditorStyle::GetMargin("StandardDialog.SlotPadding"))
-						.MinDesiredSlotWidth(FEditorStyle::GetFloat("StandardDialog.MinDesiredSlotWidth"))
-						.MinDesiredSlotHeight(FEditorStyle::GetFloat("StandardDialog.MinDesiredSlotHeight"))
+						.SlotPadding(FAppStyle::GetMargin("StandardDialog.SlotPadding"))
+						.MinDesiredSlotWidth(FAppStyle::GetFloat("StandardDialog.MinDesiredSlotWidth"))
+						.MinDesiredSlotHeight(FAppStyle::GetFloat("StandardDialog.MinDesiredSlotHeight"))
 						+SUniformGridPanel::Slot(0,0)
 						[
 							SNew(SButton) 
 							.HAlign(HAlign_Center)
-							.ContentPadding(FEditorStyle::GetMargin("StandardDialog.ContentPadding"))
+							.ContentPadding(FAppStyle::GetMargin("StandardDialog.ContentPadding"))
 							.OnClicked(this, &SSourceControlRevertWidget::OKClicked)
 							.IsEnabled(this, &SSourceControlRevertWidget::IsOKEnabled)
 							.Text(LOCTEXT("RevertButton", "Revert"))
@@ -207,7 +221,7 @@ public:
 						[
 							SNew(SButton) 
 							.HAlign(HAlign_Center)
-							.ContentPadding(FEditorStyle::GetMargin("StandardDialog.ContentPadding"))
+							.ContentPadding(FAppStyle::GetMargin("StandardDialog.ContentPadding"))
 							.OnClicked(this, &SSourceControlRevertWidget::CancelClicked)
 							.Text(LOCTEXT("CancelButton", "Cancel"))
 						]
@@ -273,7 +287,7 @@ private:
 				.HAlign(HAlign_Right)
 				[
 					SNew(SImage)
-					.Image(FEditorStyle::GetBrush(TEXT("ContentBrowser.ContentDirty")))
+					.Image(FAppStyle::GetBrush(TEXT("ContentBrowser.ContentDirty")))
 					.Visibility(ListItemPtr.ToSharedRef(), &FRevertCheckBoxListViewItem::OnGetModifiedStateVisibility)
 					.ToolTipText(LOCTEXT("ModifiedFileToolTip","This file has been modified from the source version"))
 				]
@@ -360,6 +374,7 @@ private:
 
 		ModifiedPackages.Empty();
 
+		const bool bRevertUnsaved = IsRevertUnsavedEnabled();
 		for( const auto& ControlState : SourceControlStates )
 		{
 			FString PackageName;
@@ -369,6 +384,15 @@ private:
 				if (CurItem->Text == PackageName)
 				{
 					CurItem->IsModified = ControlState->IsModified();
+
+					if (bRevertUnsaved)
+					{
+						if (UPackage* Package = FindPackage(NULL, *PackageName))
+						{
+							// If the package contains unsaved changes, it's considered modified as well.
+							CurItem->IsModified |= Package->IsDirty();
+						}
+					}
 				}
 			}
 		}
@@ -397,7 +421,7 @@ private:
 	bool bRevertUnchangedFilesOnly;
 };
 
-bool FSourceControlWindows::PromptForRevert( const TArray<FString>& InPackageNames )
+bool FSourceControlWindows::PromptForRevert( const TArray<FString>& InPackageNames, bool bInReloadWorld)
 {
 	bool bReverted = false;
 
@@ -412,10 +436,20 @@ bool FSourceControlWindows::PromptForRevert( const TArray<FString>& InPackageNam
 		{
 			InitialPackagesToRevert.Add( *PackageIter );
 		}
+		else if ( IsRevertUnsavedEnabled() )
+		{
+			if (UPackage* Package = FindPackage(NULL, **PackageIter))
+			{
+				if (Package->IsDirty())
+				{
+					InitialPackagesToRevert.Add(*PackageIter);
+				}
+			}
+		}
 	}
 
 	// If any of the packages can be reverted, provide the revert prompt
-	if (InitialPackagesToRevert.Num() > 0 )
+	if (InitialPackagesToRevert.Num() > 0)
 	{
 		TSharedRef<SWindow> NewWindow = SNew(SWindow)
 			.Title( NSLOCTEXT("SourceControl.RevertWindow", "Title", "Revert Files") )
@@ -437,58 +471,32 @@ bool FSourceControlWindows::PromptForRevert( const TArray<FString>& InPackageNam
 		{
 			TArray<FString> FinalPackagesToRevert;
 			SourceControlWidget->GetPackagesToRevert(FinalPackagesToRevert);
+			
+			if ( IsRevertUnsavedEnabled() )
+			{
+				// Unsaved changes need to be saved to disk so SourceControl realizes that there's something to revert.
+
+				TArray<UPackage*> FinalPackagesToSave;
+				for (const FString& PackageName : FinalPackagesToRevert)
+				{
+					if (UPackage* Package = FindPackage(NULL, *PackageName))
+					{
+						if (Package->IsDirty())
+						{
+							FinalPackagesToSave.Add(Package);
+						}
+					}
+				}
+
+				if (FinalPackagesToSave.Num() > 0)
+				{
+					UEditorLoadingAndSavingUtils::SavePackages(FinalPackagesToSave, /*bOnlyDirty=*/false);
+				}
+			}
+
 			if (FinalPackagesToRevert.Num() > 0)
 			{
-				// attempt to unload the packages we are about to revert
-				TArray<UPackage*> LoadedPackages;
-				for (TArray<FString>::TConstIterator PackageIter(InPackageNames); PackageIter; ++PackageIter)
-				{
-					UPackage* Package = FindPackage(NULL, **PackageIter);
-					if (Package != NULL)
-					{
-						LoadedPackages.Add(Package);
-					}
-				}
-
-				const TArray<FString> RevertPackageFilenames = SourceControlHelpers::PackageFilenames(FinalPackagesToRevert);
-
-				// Prepare the packages to be reverted...
-				for (UPackage* Package : LoadedPackages)
-				{
-					// Detach the linkers of any loaded packages so that SCC can overwrite the files...
-					if (!Package->IsFullyLoaded())
-					{
-						FlushAsyncLoading();
-						Package->FullyLoad();
-					}
-					ResetLoaders(Package);
-				}
-
-				// Revert everything...
-				SourceControlProvider.Execute(ISourceControlOperation::Create<FRevert>(), RevertPackageFilenames);
-
-				// Reverting may have deleted some packages, so we need to unload those rather than re-load them...
-				TArray<UPackage*> PackagesToUnload;
-				LoadedPackages.RemoveAll([&](UPackage* InPackage) -> bool
-				{
-					const FString PackageExtension = InPackage->ContainsMap() ? FPackageName::GetMapPackageExtension() : FPackageName::GetAssetPackageExtension();
-					const FString PackageFilename = FPackageName::LongPackageNameToFilename(InPackage->GetName(), PackageExtension);
-					if (!FPaths::FileExists(PackageFilename))
-					{
-						PackagesToUnload.Emplace(InPackage);
-						return true; // remove package
-					}
-					return false; // keep package
-				});
-
-				// Hot-reload the new packages...
-				UPackageTools::ReloadPackages(LoadedPackages);
-
-				// Unload any deleted packages...
-				UPackageTools::UnloadPackages(PackagesToUnload);
-
-				// Re-cache the SCC state...
-				SourceControlProvider.Execute(ISourceControlOperation::Create<FUpdateStatus>(), RevertPackageFilenames, EConcurrency::Asynchronous);
+				SourceControlHelpers::RevertAndReloadPackages(FinalPackagesToRevert, /*bRevertAll=*/false, /*bReloadWorld=*/bInReloadWorld);
 
 				bReverted = true;
 			}
@@ -496,6 +504,11 @@ bool FSourceControlWindows::PromptForRevert( const TArray<FString>& InPackageNam
 	}
 
 	return bReverted;
+}
+
+bool FSourceControlWindows::RevertAllChangesAndReloadWorld()
+{	
+	return SourceControlHelpers::RevertAllChangesAndReloadWorld();
 }
 
 #undef LOCTEXT_NAMESPACE

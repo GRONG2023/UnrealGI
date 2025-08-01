@@ -2,9 +2,13 @@
 
 #include "BoneControllers/AnimNode_CCDIK.h"
 #include "Animation/AnimTypes.h"
+#include "Animation/AnimStats.h"
 #include "AnimationRuntime.h"
 #include "DrawDebugHelpers.h"
+#include "EngineDefines.h"
 #include "Animation/AnimInstanceProxy.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNode_CCDIK)
 
 /////////////////////////////////////////////////////
 // AnimNode_CCDIK
@@ -46,6 +50,8 @@ FTransform FAnimNode_CCDIK::GetTargetTransform(const FTransform& InComponentTran
 void FAnimNode_CCDIK::EvaluateSkeletalControl_AnyThread(FComponentSpacePoseContext& Output, TArray<FBoneTransform>& OutBoneTransforms)
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_ANIMNODE(EvaluateSkeletalControl_AnyThread)
+	ANIM_MT_SCOPE_CYCLE_COUNTER_VERBOSE(CCDIK, !IsInGameThread());
+
 	const FBoneContainer& BoneContainer = Output.Pose.GetPose().GetBoneContainer();
 
 	// Update EffectorLocation if it is based off a bone position
@@ -95,7 +101,7 @@ void FAnimNode_CCDIK::EvaluateSkeletalControl_AnyThread(FComponentSpacePoseConte
 		OutBoneTransforms[TransformIndex] = FBoneTransform(BoneIndex, BoneCSTransform);
 
 		// Calculate the combined length of this segment of skeleton
-		float const BoneLength = FVector::Dist(BoneCSPosition, OutBoneTransforms[TransformIndex - 1].Transform.GetLocation());
+		double const BoneLength = FVector::Dist(BoneCSPosition, OutBoneTransforms[TransformIndex - 1].Transform.GetLocation());
 
 		if (!FMath::IsNearlyZero(BoneLength))
 		{
@@ -132,7 +138,7 @@ void FAnimNode_CCDIK::EvaluateSkeletalControl_AnyThread(FComponentSpacePoseConte
 			}
 		}
 
-#if WITH_EDITOR
+#if WITH_EDITOR && UE_ENABLE_DEBUG_DRAWING
 		DebugLines.Reset(OutBoneTransforms.Num());
 		DebugLines.AddUninitialized(OutBoneTransforms.Num());
 		for (int32 Index = 0; Index < OutBoneTransforms.Num(); ++Index)
@@ -199,4 +205,5 @@ void FAnimNode_CCDIK::GatherDebugData(FNodeDebugData& DebugData)
 	DebugData.AddDebugItem(DebugLine);
 	ComponentPose.GatherDebugData(DebugData);
 }
+
 

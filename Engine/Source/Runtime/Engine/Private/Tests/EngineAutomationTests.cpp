@@ -1,28 +1,19 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 
-#include "CoreMinimal.h"
-#include "Misc/CommandLine.h"
-#include "Misc/Paths.h"
+#include "Engine/Level.h"
 #include "Serialization/MemoryWriter.h"
-#include "Misc/AutomationTest.h"
 #include "Misc/PackageName.h"
 #include "GameMapsSettings.h"
-#include "Engine/EngineBaseTypes.h"
-#include "Engine/EngineTypes.h"
 #include "UnrealClient.h"
-#include "Engine/GameViewportClient.h"
 #include "UnrealEngine.h"
 #include "Serialization/MemoryReader.h"
-#include "UObject/UObjectIterator.h"
-#include "EngineUtils.h"
 #include "Tests/AutomationTestSettings.h"
 
 #if WITH_EDITOR
 #include "FileHelpers.h"
 #endif
 
-#include "EngineGlobals.h"
 #include "Tests/AutomationCommon.h"
 #include "PlatformFeatures.h"
 #include "SaveGameSystem.h"
@@ -161,30 +152,6 @@ bool FStatsVerificationMapTest::RunTest(const FString& Parameters)
 }
 
 /**
- * LoadAutomationMap
- * Verification automation test to make sure features of map loading work (load, screen capture, performance capture)
- */
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPerformanceCaptureTest, "System.Maps.Performance Capture", EAutomationTestFlags::ClientContext | EAutomationTestFlags::EngineFilter)
-
-/** 
- * Execute the loading of one map to verify screen captures and performance captures work
- *
- * @param Parameters - Unused for this test
- * @return	TRUE if the test was successful, FALSE otherwise
- */
-bool FPerformanceCaptureTest::RunTest(const FString& Parameters)
-{
-	UAutomationTestSettings const* AutomationTestSettings = GetDefault<UAutomationTestSettings>();
-	check(AutomationTestSettings);
-	FString MapName = AutomationTestSettings->AutomationTestmap.GetLongPackageName();
-
-	GEngine->Exec(GetSimpleEngineAutomationTestGameWorld(GetTestFlags()), *FString::Printf(TEXT("Open %s"), *MapName));
-	ADD_LATENT_AUTOMATION_COMMAND(FEnqueuePerformanceCaptureCommands());
-
-	return true;
-}
-
-/**
  * Latent command to take a screenshot of the viewport
  */
 DEFINE_LATENT_AUTOMATION_COMMAND_ONE_PARAMETER(FTakeViewportScreenshotCommand, FString, ScreenshotFileName);
@@ -194,54 +161,6 @@ bool FTakeViewportScreenshotCommand::Update()
 	const bool bShowUI = false;
 	const bool bAddFilenameSuffix = false;
 	FScreenshotRequest::RequestScreenshot( ScreenshotFileName, bShowUI, bAddFilenameSuffix );
-	return true;
-}
-
-/**
- * LoadAllMapsInGame
- * Verification automation test to make sure loading all maps succeed without crashing AND does performance captures
- */
-IMPLEMENT_COMPLEX_AUTOMATION_TEST(FLoadAllMapsInGameTest, "Project.Maps.Load All In Game", EAutomationTestFlags::ClientContext | EAutomationTestFlags::StressFilter)
-
-/** 
- * Requests a enumeration of all maps to be loaded
- */
-void FLoadAllMapsInGameTest::GetTests(TArray<FString>& OutBeautifiedNames, TArray <FString>& OutTestCommands) const
-{
-	PopulateTestsForAllAvailableMaps(OutBeautifiedNames, OutTestCommands);
-}
-
-/** 
- * Execute the loading of each map and performance captures
- *
- * @param Parameters - Should specify which map name to load
- * @return	TRUE if the test was successful, FALSE otherwise
- */
-bool FLoadAllMapsInGameTest::RunTest(const FString& Parameters)
-{
-	FString MapName = Parameters;
-
-	//Open the map
-	GEngine->Exec(GetSimpleEngineAutomationTestGameWorld(GetTestFlags()), *FString::Printf(TEXT("Open %s"), *MapName));
-
-	//if( FAutomationTestFramework::Get().IsScreenshotAllowed() )
-	{
-		//Generate the screen shot name and path
-		FString ScreenshotFileName;
-		const FString LoadAllMapsTestName = FString::Printf(TEXT("LoadAllMaps_Game/%s"), *FPaths::GetBaseFilename(MapName));
-		ScreenshotFileName = AutomationCommon::GetLocalPathForScreenshot(AutomationCommon::GetScreenshotName(LoadAllMapsTestName));
-
-		//Give the map some time to load
-		ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(1.5f));
-		//Take the screen shot
-		ADD_LATENT_AUTOMATION_COMMAND(FTakeViewportScreenshotCommand(ScreenshotFileName));
-		//Give the screen shot a chance to capture the scene
-		ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.5f));
-	}
-
-	//Kick off any Automation matinees that are in this map
-	ADD_LATENT_AUTOMATION_COMMAND(FEnqueuePerformanceCaptureCommands());
-
 	return true;
 }
 
@@ -308,99 +227,7 @@ bool FSaveGameTest::RunTest(const FString& Parameters)
 	return LoadedData == SavedData;
 }
 
-/**
- * Automation test to load a map and capture FPS performance charts
- */
-IMPLEMENT_COMPLEX_AUTOMATION_TEST(FCinematicFPSPerfTest, "Project.Maps.Cinematic FPS Perf Capture", (EAutomationTestFlags::ClientContext | EAutomationTestFlags::NonNullRHI | EAutomationTestFlags::StressFilter));
-
-void FCinematicFPSPerfTest::GetTests(TArray<FString>& OutBeautifiedNames, TArray <FString>& OutTestCommands) const
-{
-	PopulateTestsForAllAvailableMaps(OutBeautifiedNames, OutTestCommands);
-}
-
-bool FCinematicFPSPerfTest::RunTest(const FString& Parameters)
-{
-	//Map to use for this test.
-	const FString MapName = Parameters;
-
-	//The name of the matinee actor that will be triggered.
-	FString MatineeActorName;
-
-	//Check we are running from commandline
-	const FString CommandLine(FCommandLine::Get());
-	if (CommandLine.Contains(TEXT("Automation")))
-	{
-		//Get the name of the matinee to be used.
-		//If the game was not launched with the -MatineeName argument then this test will be ran based on time.
-		if (FParse::Value(*CommandLine, TEXT("MatineeName="), MatineeActorName))
-		{
-			//Load map
-			ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(1.0f));
-			ADD_LATENT_AUTOMATION_COMMAND(FLoadGameMapCommand(MapName));
-			ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(1.0f));
-
-			//Start the matinee and perform the FPS Chart
-			ADD_LATENT_AUTOMATION_COMMAND(FMatineePerformanceCaptureCommand(MatineeActorName));
-			ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(1.0f));
-
-			return true;
-		}
-		else
-		{
-			UE_LOG(LogEngineAutomationTests, Log, TEXT("The matinee name was not specified.  Run the game with -MatineeName=\"Name of the matinee actor\"."));
-
-			//Get the name of the console event to trigger the cinematic
-			FString CinematicEventCommand;
-			if (!FParse::Value(*CommandLine, TEXT("CE="), CinematicEventCommand))
-			{
-				UE_LOG(LogEngineAutomationTests, Log, TEXT("A console event command was not specified. Defaults to CE START.  Run the game with -CE=\"Command\"."));
-				CinematicEventCommand = TEXT("CE Start");
-			}
-
-			//Get the length of time the cinematic will run
-			float RunTime;
-			if (!FParse::Value(*CommandLine, TEXT("RunTime="), RunTime))
-			{
-				UE_LOG(LogEngineAutomationTests, Log, TEXT("A run time length in seconds was not specified. Defaults to 60 seconds. Run the game with -RunTime=###."));
-				RunTime = 60.f;
-			}
-
-			//Load map
-			ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(1.0f));
-			ADD_LATENT_AUTOMATION_COMMAND(FLoadGameMapCommand(MapName));
-			ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(1.0f));
-
-			//Start the matinee and perform the FPS Chart
-			ADD_LATENT_AUTOMATION_COMMAND(FExecWorldStringLatentCommand(CinematicEventCommand));
-			ADD_LATENT_AUTOMATION_COMMAND(FExecWorldStringLatentCommand(TEXT("StartFPSChart")));
-			ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(RunTime));
-			ADD_LATENT_AUTOMATION_COMMAND(FExecWorldStringLatentCommand(TEXT("StopFPSChart")));
-			ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(1.0f));
-
-			return true;
-
-		}
-	}
-	//If the user is running from the UFE then we'll use the default values.
-	//@todo Give the end user a way to specify the values for this test.
-
-	UE_LOG(LogEngineAutomationTests, Log, TEXT("Running the FPS chart performance capturing for 60 seconds while in '%s'.\nThe default CE command won't be used at this time."), *MapName);
-
-	//Load map
-	ADD_LATENT_AUTOMATION_COMMAND(FLoadGameMapCommand(MapName));
-	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(1.0f));
-
-	//Start the matinee and perform the FPS Chart
-	ADD_LATENT_AUTOMATION_COMMAND(FExecWorldStringLatentCommand(TEXT("StartFPSChart")));
-	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(60.0f));
-	ADD_LATENT_AUTOMATION_COMMAND(FExecWorldStringLatentCommand(TEXT("StopFPSChart")));
-	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(1.0f));
-
-	return true;
-}
-
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAutomationLogAddMessage, "System.Automation.Log.Add Log Message", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAutomationLogAddMessage, "TestFramework.Log.Add Log Message", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
 bool FAutomationLogAddMessage::RunTest(const FString& Parameters)
 {
@@ -417,7 +244,7 @@ bool FAutomationLogAddMessage::RunTest(const FString& Parameters)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAutomationLogAddWarning, "System.Automation.Log.Add Warning Message", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAutomationLogAddWarning, "TestFramework.Log.Add Warning Message", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
 bool FAutomationLogAddWarning::RunTest(const FString& Parameters)
 {
@@ -434,7 +261,7 @@ bool FAutomationLogAddWarning::RunTest(const FString& Parameters)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAutomationLogAddError, "System.Automation.Log.Add Error Message", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAutomationLogAddError, "TestFramework.Log.Add Error Message", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter)
 
 bool FAutomationLogAddError::RunTest(const FString& Parameters)
 {
@@ -448,6 +275,670 @@ bool FAutomationLogAddError::RunTest(const FString& Parameters)
 
 	TestEqual<FString>(TEXT("Test error message was not added to the ExecutionInfo.Error array."), CurrentErrorMessage, TEXT("Test error message"));
 	
+	return true;
+}
+
+class FAutomationNearlyEqualTest : public FAutomationTestBase
+{
+public:
+	FAutomationNearlyEqualTest(const FString& InName, const bool bInComplexTask)
+		: FAutomationTestBase(InName, bInComplexTask)
+	{
+	}
+
+protected:
+	template<typename T>
+	int32 RunSimpleTest(const FString& What, const T ActualValue, const T ExpectedValue, float Tolerance)
+	{
+		int32 CasesCheckedTotal = 0;
+
+		TestNearlyEqual(What, ActualValue, ExpectedValue, Tolerance);
+		++CasesCheckedTotal;
+
+		return CasesCheckedTotal;
+	}
+
+	// Note: this method is used to avoid rising of error C2666 2 overloads have similar conversions
+	template<>
+	int32 RunSimpleTest<double>(const FString& What, double ActualValue, double ExpectedValue, float Tolerance)
+	{
+		int32 CasesCheckedTotal = 0;
+
+		TestNearlyEqual(What, ActualValue, ExpectedValue, static_cast<double>(Tolerance));
+		++CasesCheckedTotal;
+
+		return CasesCheckedTotal;
+	}
+
+	int32 RunFloatMutationTest(const FString& WhatPrefix, float BaseValue, float Difference, float Tolerance)
+	{
+		check(Difference != 0.f);
+		check(Tolerance > 0.f);
+
+		int32 CasesCheckedTotal = 0;
+
+		// Perform tests with mutated values
+		TestNearlyEqual(FString::Format(*ActualValueIsIncreasedByFormatString, { *WhatPrefix, Difference }),
+			BaseValue + Difference, BaseValue, Tolerance);
+		++CasesCheckedTotal;
+
+		TestNearlyEqual(FString::Format(*ExpectedValueIsIncreasedByFormatString, { *WhatPrefix, Difference }),
+			BaseValue, BaseValue + Difference, Tolerance);
+		++CasesCheckedTotal;
+
+		return CasesCheckedTotal;
+	}
+
+	int32 RunDoubleMutationTest(const FString& WhatPrefix, double BaseValue, double Difference, float Tolerance)
+	{
+		check(Difference != 0.f);
+		check(Tolerance > 0.f);
+
+		int32 CasesCheckedTotal = 0;
+
+		// Perform tests with mutated values
+		TestNearlyEqual(FString::Format(*ActualValueIsIncreasedByFormatString, { *WhatPrefix, Difference }),
+			BaseValue + Difference, BaseValue, static_cast<double>(Tolerance));
+		++CasesCheckedTotal;
+		TestNearlyEqual(FString::Format(*ExpectedValueIsIncreasedByFormatString, { *WhatPrefix, Difference }),
+			BaseValue, BaseValue + Difference, static_cast<double>(Tolerance));
+		++CasesCheckedTotal;
+
+		return CasesCheckedTotal;
+	}
+
+	using GetWhatCallable = TFunction<FString(const FString& WhatPrefix, uint32 ActualValueMutationBitMask, 
+		uint32 ExpectedValueMutationBitMask, double Difference)>;
+
+	template<typename T>
+	using GetMutatedValueCallable = TFunction<T(const T& BaseValue, uint32 MutationBitMask, double Difference)>;
+
+	int32 RunFVectorMutationTest(const FString& WhatPrefix, const FVector& BaseValue, double Difference, float Tolerance)
+	{
+		GetWhatCallable GetWhatCallableImpl = [](const FString& WhatPrefix, uint32 ActualValueMutationBitMask, uint32 ExpectedValueMutationBitMask, double Difference)
+		{
+			return FString::Printf(
+				TEXT(
+					"%s: the actual FVector value is not nearly equal to the expected FVector value\n"
+					"(mutation mask for actual value is (%c, %c, %c), mutation mask for expected value is (%c, %c, %c), values were increased by %f)"
+				),
+				*WhatPrefix,
+				GetNthBitAsChar(ActualValueMutationBitMask, 2),
+				GetNthBitAsChar(ActualValueMutationBitMask, 1),
+				GetNthBitAsChar(ActualValueMutationBitMask, 0),
+				GetNthBitAsChar(ExpectedValueMutationBitMask, 2),
+				GetNthBitAsChar(ExpectedValueMutationBitMask, 1),
+				GetNthBitAsChar(ExpectedValueMutationBitMask, 0),
+				Difference);
+		};
+
+		GetMutatedValueCallable<FVector> GetMutatedValueCallableImpl = [](const FVector& BaseValue, uint32 MutationBitMask, double Difference)
+		{
+			return FVector(
+				BaseValue.X + GetNthBitAsUInt32(MutationBitMask, 2) * Difference,
+				BaseValue.Y + GetNthBitAsUInt32(MutationBitMask, 1) * Difference,
+				BaseValue.Z + GetNthBitAsUInt32(MutationBitMask, 0) * Difference
+			);
+		};
+
+		return RunMutationTestImpl<FVector>(WhatPrefix, BaseValue, MaxFVectorMutationBitMask, Difference, Tolerance,
+			GetWhatCallableImpl, GetMutatedValueCallableImpl);
+	}
+
+	int32 RunFRotatorMutationTest(const FString& WhatPrefix, const FRotator& BaseValue, double Difference, float Tolerance)
+	{
+		GetWhatCallable GetWhatCallableImpl = [](const FString& WhatPrefix, uint32 ActualValueMutationBitMask, uint32 ExpectedValueMutationBitMask, double Difference)
+		{
+			return FString::Printf(
+				TEXT(
+					"%s: the actual FRotator value is not nearly equal to the expected FRotator value\n"
+					"(mutation mask for actual value is (%c, %c, %c), mutation mask for expected value is (%c, %c, %c), values were increased by %f)"
+				),
+				*WhatPrefix,
+				GetNthBitAsChar(ActualValueMutationBitMask, 2),
+				GetNthBitAsChar(ActualValueMutationBitMask, 1),
+				GetNthBitAsChar(ActualValueMutationBitMask, 0),
+				GetNthBitAsChar(ExpectedValueMutationBitMask, 2),
+				GetNthBitAsChar(ExpectedValueMutationBitMask, 1),
+				GetNthBitAsChar(ExpectedValueMutationBitMask, 0),
+				Difference);
+		};
+
+		GetMutatedValueCallable<FRotator> GetMutatedValueCallableImpl = [](const FRotator& BaseValue, uint32 MutationBitMask, double Difference)
+		{
+			return FRotator(
+				BaseValue.Pitch + GetNthBitAsUInt32(MutationBitMask, 2) * Difference,
+				BaseValue.Yaw + GetNthBitAsUInt32(MutationBitMask, 1) * Difference,
+				BaseValue.Roll + GetNthBitAsUInt32(MutationBitMask, 0) * Difference
+			);
+		};
+
+		return RunMutationTestImpl<FRotator>(WhatPrefix, BaseValue, MaxFRotatorMutationBitMask, Difference, Tolerance,
+			GetWhatCallableImpl, GetMutatedValueCallableImpl);
+	}
+
+	int32 RunFTransformMutationTest(const FString& WhatPrefix, const FTransform& BaseValue, double Difference, float Tolerance)
+	{
+		GetWhatCallable GetWhatCallableImpl = [](const FString& WhatPrefix, uint32 ActualValueMutationBitMask, uint32 ExpectedValueMutationBitMask, double Difference)
+		{
+			return FString::Printf(
+				TEXT(
+					"%s: the actual FTransform value is not nearly equal to the expected FTransform value\n"
+					"(mutation mask for actual value is (%c, %c, %c, %c, %c, %c, %c, %c, %c), "
+					"mutation mask for expected value is (%c, %c, %c, %c, %c, %c, %c, %c, %c), values were increased by %f)"
+				),
+				*WhatPrefix,
+				GetNthBitAsChar(ActualValueMutationBitMask, 8),
+				GetNthBitAsChar(ActualValueMutationBitMask, 7),
+				GetNthBitAsChar(ActualValueMutationBitMask, 6),
+				GetNthBitAsChar(ActualValueMutationBitMask, 5),
+				GetNthBitAsChar(ActualValueMutationBitMask, 4),
+				GetNthBitAsChar(ActualValueMutationBitMask, 3),
+				GetNthBitAsChar(ActualValueMutationBitMask, 2),
+				GetNthBitAsChar(ActualValueMutationBitMask, 1),
+				GetNthBitAsChar(ActualValueMutationBitMask, 0),
+				GetNthBitAsChar(ExpectedValueMutationBitMask, 8),
+				GetNthBitAsChar(ExpectedValueMutationBitMask, 7),
+				GetNthBitAsChar(ExpectedValueMutationBitMask, 6),
+				GetNthBitAsChar(ExpectedValueMutationBitMask, 5),
+				GetNthBitAsChar(ExpectedValueMutationBitMask, 4),
+				GetNthBitAsChar(ExpectedValueMutationBitMask, 3),
+				GetNthBitAsChar(ExpectedValueMutationBitMask, 2),
+				GetNthBitAsChar(ExpectedValueMutationBitMask, 1),
+				GetNthBitAsChar(ExpectedValueMutationBitMask, 0),
+				Difference);
+		};
+
+		GetMutatedValueCallable<FTransform> GetMutatedValueCallableImpl = [](const FTransform& BaseValue, uint32 MutationBitMask, double Difference)
+		{
+			return FTransform(
+				FRotator(
+					BaseValue.Rotator().Pitch + GetNthBitAsUInt32(MutationBitMask, 8) * Difference,
+					BaseValue.Rotator().Yaw + GetNthBitAsUInt32(MutationBitMask, 7) * Difference,
+					BaseValue.Rotator().Roll + GetNthBitAsUInt32(MutationBitMask, 6) * Difference
+				),
+				FVector(
+					BaseValue.GetTranslation().X + GetNthBitAsUInt32(MutationBitMask, 5) * Difference,
+					BaseValue.GetTranslation().Y + GetNthBitAsUInt32(MutationBitMask, 4) * Difference,
+					BaseValue.GetTranslation().Z + GetNthBitAsUInt32(MutationBitMask, 3) * Difference
+				),
+				FVector(
+					BaseValue.GetScale3D().X + GetNthBitAsUInt32(MutationBitMask, 2) * Difference,
+					BaseValue.GetScale3D().Y + GetNthBitAsUInt32(MutationBitMask, 1) * Difference,
+					BaseValue.GetScale3D().Z + GetNthBitAsUInt32(MutationBitMask, 0) * Difference
+				)
+			);
+		};
+
+		return RunMutationTestImpl<FTransform>(WhatPrefix, BaseValue, MaxFTransformMutationBitMask, Difference, Tolerance,
+			GetWhatCallableImpl, GetMutatedValueCallableImpl);
+	}
+
+	static const float NullTolerance;
+	static const float PositiveTolerance;
+	static const float PositiveDifference;
+	static const float PositiveHalfDifference;
+
+	// Max mutation masks for complex classes/structs
+	// Each bit represents whether (value 1) or not (value 0) mutation will be applied to the object's constructor paramter
+	static const uint32 MaxFVectorMutationBitMask;
+	static const uint32 MaxFRotatorMutationBitMask;
+	static const uint32 MaxFTransformMutationBitMask;
+
+	static const FString TestFailMessage;
+
+	static const float BaseFloatValue;
+	static const float ActualFloatValue;
+	static const float ExpectedFloatValue;
+	static const float ExpectedFloatValueForNullTolerance;
+	static const float FloatDifferenceToGetOutOfTolerance;
+	static const float ExpectedFloatValueOutOfTolerance;
+
+	static const double BaseDoubleValue;
+	static const double ActualDoubleValue;
+	static const double ExpectedDoubleValue;
+	static const double ExpectedDoubleValueForNullTolerance;
+	static const double DoubleDifferenceToGetOutOfTolerance;
+	static const double ExpectedDoubleValueOutOfTolerance;
+
+	static const FVector ActualFVectorValue;
+	static const FVector& ExpectedFVectorValue;
+	static const FVector& BaseFVectorValue;
+
+	static const FRotator ActualFRotatorValue;
+	static const FRotator& ExpectedFRotatorValue;
+	static const FRotator& BaseFRotatorValue;
+
+	static const FTransform ActualFTransformValue;
+	static const FTransform& ExpectedFTransformValue;
+	static const FTransform& BaseFTransformValue;
+
+private:
+	template<typename T>
+	int32 RunMutationTestImpl(const FString& WhatPrefix, const T& BaseValue, uint32 MaxMutationBitMask, float Difference, float Tolerance,
+		GetWhatCallable GetWhatCallableImpl, GetMutatedValueCallable<T> GetMutatedValueCallableImpl)
+	{
+		check(Difference != 0.f);
+		check(Tolerance > 0.f);
+
+		int32 CasesCheckedTotal = 0;
+
+		for (uint32 ActualValueMutationBitMask = 0; ActualValueMutationBitMask <= MaxMutationBitMask; ++ActualValueMutationBitMask)
+		{
+			for (uint32 ExpectedValueMutationBitMask = 0; ExpectedValueMutationBitMask <= MaxMutationBitMask; ++ExpectedValueMutationBitMask)
+			{
+				if (ActualValueMutationBitMask == ExpectedValueMutationBitMask)
+				{
+					// The values' mutation submasks are the same, we should skip this combination
+					continue;
+				}
+
+				// Perform test with mutated values in accordance to the current MutationBitMask
+				const FString WhatMessage(GetWhatCallableImpl(WhatPrefix, ActualValueMutationBitMask, ExpectedValueMutationBitMask, Difference));
+				const T ActualValue(GetMutatedValueCallableImpl(BaseValue, ActualValueMutationBitMask, Difference));
+				const T ExpectedValue(GetMutatedValueCallableImpl(BaseValue, ExpectedValueMutationBitMask, Difference));
+
+				TestNearlyEqual(WhatMessage, ActualValue, ExpectedValue, Tolerance);
+				++CasesCheckedTotal;
+			}
+		}
+
+		return CasesCheckedTotal;
+	}
+
+	static uint32 GetNthBitAsUInt32(uint32 Value, uint32 BitIndex)
+	{
+		return ((Value & (1 << BitIndex)) == 0 ? 0 : 1);
+	}
+
+	static char GetNthBitAsChar(uint32 Value, uint32 BitIndex)
+	{
+		return (GetNthBitAsUInt32(Value, BitIndex) == 1 ? '1' : '0');
+	}
+
+	static const FString ActualValueIsIncreasedByFormatString;
+	static const FString ExpectedValueIsIncreasedByFormatString;
+	static const FString DifferenceAndOrToleranceAreNotValidFormatString;
+};
+
+const float FAutomationNearlyEqualTest::NullTolerance(0.f);
+const float FAutomationNearlyEqualTest::PositiveTolerance(1.e-4f);
+const float FAutomationNearlyEqualTest::PositiveDifference(1.e-4f);
+const float FAutomationNearlyEqualTest::PositiveHalfDifference((1.e-4f) / 2.f);
+const FString FAutomationNearlyEqualTest::TestFailMessage(TEXT("Total amount of errors is not equal to the expected amount"));
+const uint32 FAutomationNearlyEqualTest::MaxFVectorMutationBitMask(0b111);
+const uint32 FAutomationNearlyEqualTest::MaxFRotatorMutationBitMask(0b111);
+const uint32 FAutomationNearlyEqualTest::MaxFTransformMutationBitMask(0b111);
+
+const float FAutomationNearlyEqualTest::BaseFloatValue(0.f);
+const float FAutomationNearlyEqualTest::ActualFloatValue(BaseFloatValue);
+const float FAutomationNearlyEqualTest::ExpectedFloatValue(BaseFloatValue);
+const float FAutomationNearlyEqualTest::ExpectedFloatValueForNullTolerance(0.1f);
+const float FAutomationNearlyEqualTest::FloatDifferenceToGetOutOfTolerance(PositiveTolerance + 0.1f);
+const float FAutomationNearlyEqualTest::ExpectedFloatValueOutOfTolerance(ActualFloatValue + FloatDifferenceToGetOutOfTolerance + 0.1f);
+
+const double FAutomationNearlyEqualTest::BaseDoubleValue(0.0);
+const double FAutomationNearlyEqualTest::ActualDoubleValue(BaseDoubleValue);
+const double FAutomationNearlyEqualTest::ExpectedDoubleValue(BaseDoubleValue);
+const double FAutomationNearlyEqualTest::ExpectedDoubleValueForNullTolerance(0.1);
+const double FAutomationNearlyEqualTest::DoubleDifferenceToGetOutOfTolerance(PositiveTolerance + 0.1);
+const double FAutomationNearlyEqualTest::ExpectedDoubleValueOutOfTolerance(ActualDoubleValue + DoubleDifferenceToGetOutOfTolerance);
+
+const FVector FAutomationNearlyEqualTest::ActualFVectorValue(0.f, -1.f, 1.f);
+const FVector& FAutomationNearlyEqualTest::ExpectedFVectorValue(ActualFVectorValue);
+const FVector& FAutomationNearlyEqualTest::BaseFVectorValue(ActualFVectorValue);
+
+const FRotator FAutomationNearlyEqualTest::ActualFRotatorValue(0.001f, -1.002f, 1.003f);
+const FRotator& FAutomationNearlyEqualTest::ExpectedFRotatorValue(ActualFRotatorValue);
+const FRotator& FAutomationNearlyEqualTest::BaseFRotatorValue(ActualFRotatorValue);
+
+const FTransform FAutomationNearlyEqualTest::ActualFTransformValue(FRotator(0.f, -1.f, 1.f), FVector(0.1f, -1.2f, 1.3f), FVector(0.01f, -1.02f, 1.03f));
+const FTransform& FAutomationNearlyEqualTest::ExpectedFTransformValue(ActualFTransformValue);
+const FTransform& FAutomationNearlyEqualTest::BaseFTransformValue(ActualFTransformValue);
+
+const FString FAutomationNearlyEqualTest::ActualValueIsIncreasedByFormatString(TEXT("{0} (actual value is increased by {1})"));
+const FString FAutomationNearlyEqualTest::ExpectedValueIsIncreasedByFormatString(TEXT("{0} (expected value is increased by {1})"));
+const FString FAutomationNearlyEqualTest::DifferenceAndOrToleranceAreNotValidFormatString(TEXT("Difference and/or Tolerance are not valid. Difference: {0}, Tolerance: {1}"));
+
+IMPLEMENT_CUSTOM_SIMPLE_AUTOMATION_TEST(FAutomationTestNearlyEqualFloatPositive, FAutomationNearlyEqualTest, "TestFramework.Validation.TestNearlyEqualFloatPositive", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter);
+bool FAutomationTestNearlyEqualFloatPositive::RunTest(const FString& Parameters)
+{
+	//** TEST **//
+	RunSimpleTest<float>(TEXT("The same float values with null tolerance"),
+		ActualFloatValue, ExpectedFloatValue, NullTolerance);
+	RunSimpleTest<float>(TEXT("The same float values with positive tolerance"),
+		ActualFloatValue, ExpectedFloatValue, PositiveTolerance);
+	RunFloatMutationTest(TEXT("Mutation of base float value with the same positive difference and tolerance (edge case)"),
+		BaseFloatValue, PositiveDifference, PositiveTolerance);
+	RunFloatMutationTest(TEXT("Mutation of base float value with negative difference and positive tolerance that are equal after being placed in Abs"),
+		BaseFloatValue, -PositiveDifference, PositiveTolerance);
+	RunFloatMutationTest(TEXT("Mutation of base float value with positive half difference and positive tolerance"),
+		BaseFloatValue, PositiveHalfDifference, PositiveTolerance);
+	RunFloatMutationTest(TEXT("Mutation of base float value with negative half difference and positive tolerance"),
+		BaseFloatValue, -PositiveHalfDifference, PositiveTolerance);
+
+	//** VERIFY **//
+	const int32 ErrorTotal = ExecutionInfo.GetErrorTotal();
+	const int32 ExpectedErrorTotal = 0;
+
+	ExecutionInfo.RemoveAllEvents(EAutomationEventType::Error);
+	TestEqual(TestFailMessage, ErrorTotal, ExpectedErrorTotal);
+
+	return true;
+}
+
+IMPLEMENT_CUSTOM_SIMPLE_AUTOMATION_TEST(FAutomationTestNearlyEqualFloatNegative, FAutomationNearlyEqualTest, "TestFramework.Validation.TestNearlyEqualFloatNegative", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter);
+bool FAutomationTestNearlyEqualFloatNegative::RunTest(const FString& Parameters)
+{
+	int32 CasesCheckedTotal = 0;
+
+	//** TEST **//
+	CasesCheckedTotal += RunSimpleTest<float>(TEXT("Different float values with null tolerance"),
+		ActualFloatValue, ExpectedFloatValueForNullTolerance, NullTolerance);
+	CasesCheckedTotal += RunSimpleTest<float>(TEXT("Different float values with positive tolerance"),
+		ActualFloatValue, ExpectedFloatValueOutOfTolerance, PositiveTolerance);
+	CasesCheckedTotal += RunFloatMutationTest(TEXT("Mutation of base float value with positive difference that is greater than positive tolerance"),
+		BaseFloatValue, FloatDifferenceToGetOutOfTolerance, PositiveTolerance);
+	CasesCheckedTotal += RunFloatMutationTest(TEXT("Mutation of base float value with negative difference which absolute value is greater than positive tolerance"),
+		BaseFloatValue, -FloatDifferenceToGetOutOfTolerance, PositiveTolerance);
+
+	//** VERIFY **//
+	const int32 ErrorTotal = ExecutionInfo.GetErrorTotal();
+	ExecutionInfo.RemoveAllEvents(EAutomationEventType::Error);
+	TestEqual(TestFailMessage, ErrorTotal, CasesCheckedTotal);
+
+	return true;
+}
+
+IMPLEMENT_CUSTOM_SIMPLE_AUTOMATION_TEST(FAutomationTestNearlyEqualDoublePositive, FAutomationNearlyEqualTest, "TestFramework.Validation.TestNearlyEqualDoublePositive", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter);
+bool FAutomationTestNearlyEqualDoublePositive::RunTest(const FString& Parameters)
+{
+	//** TEST **//
+	RunSimpleTest<double>(TEXT("The same double values with null tolerance"),
+		ActualDoubleValue, ExpectedDoubleValue, NullTolerance);
+	RunSimpleTest<double>(TEXT("The same double values with positive tolerance"),
+		ActualDoubleValue, ExpectedDoubleValue, PositiveTolerance);
+	RunDoubleMutationTest(TEXT("Mutation of base double value with the same positive difference and tolerance (edge case)"),
+		BaseDoubleValue, PositiveDifference, PositiveTolerance);
+	RunDoubleMutationTest(TEXT("Mutation of base double value with negative difference and positive tolerance that are equal after being placed in Abs"),
+		BaseDoubleValue, -PositiveDifference, PositiveTolerance);
+	RunDoubleMutationTest(TEXT("Mutation of base double value with positive half difference and positive tolerance"),
+		BaseDoubleValue, PositiveHalfDifference, PositiveTolerance);
+	RunDoubleMutationTest(TEXT("Mutation of base double value with negative half difference and positive tolerance"),
+		BaseDoubleValue, -PositiveHalfDifference, PositiveTolerance);
+
+	//** VERIFY **//
+	const int32 ErrorTotal = ExecutionInfo.GetErrorTotal();
+	const int32 ExpectedErrorTotal = 0;
+
+	TestEqual(TestFailMessage, ErrorTotal, ExpectedErrorTotal);
+
+	return true;
+}
+
+IMPLEMENT_CUSTOM_SIMPLE_AUTOMATION_TEST(FAutomationTestNearlyEqualDoubleNegative, FAutomationNearlyEqualTest, "TestFramework.Validation.TestNearlyEqualDoubleNegative", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter);
+bool FAutomationTestNearlyEqualDoubleNegative::RunTest(const FString& Parameters)
+{
+	int32 CasesCheckedTotal = 0;
+
+	//** TEST **//
+	CasesCheckedTotal += RunSimpleTest<double>(TEXT("Different double values with null tolerance"),
+		ActualDoubleValue, ExpectedDoubleValueForNullTolerance, NullTolerance);
+	CasesCheckedTotal += RunSimpleTest<double>(TEXT("Different double values with positive tolerance"),
+		ActualDoubleValue, ExpectedDoubleValueOutOfTolerance, PositiveTolerance);
+	CasesCheckedTotal += RunDoubleMutationTest(TEXT("Mutation of base double value with positive difference that is greater than positive tolerance"),
+		BaseDoubleValue, DoubleDifferenceToGetOutOfTolerance, PositiveTolerance);
+	CasesCheckedTotal += RunDoubleMutationTest(TEXT("Mutation of base double value with negative difference which absolute value is greater than positive tolerance"),
+		BaseDoubleValue, -DoubleDifferenceToGetOutOfTolerance, PositiveTolerance);
+
+	//** VERIFY **//
+	const int32 ErrorTotal = ExecutionInfo.GetErrorTotal();
+	ExecutionInfo.RemoveAllEvents(EAutomationEventType::Error);
+	TestEqual(TestFailMessage, ErrorTotal, CasesCheckedTotal);
+
+	return true;
+}
+
+IMPLEMENT_CUSTOM_SIMPLE_AUTOMATION_TEST(FAutomationTestNearlyEqualFVectorPositive, FAutomationNearlyEqualTest, "TestFramework.Validation.TestNearlyEqualFVectorPositive", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter);
+bool FAutomationTestNearlyEqualFVectorPositive::RunTest(const FString& Parameters)
+{
+	//** TEST **//
+	RunSimpleTest<FVector>(TEXT("The same FVector values with null tolerance"),
+		ActualFVectorValue, ExpectedFVectorValue, NullTolerance);
+	RunSimpleTest<FVector>(TEXT("The same FVector values with positive tolerance"),
+		ActualFVectorValue, ExpectedFVectorValue, PositiveTolerance);
+	RunFVectorMutationTest(TEXT("Mutation of base FVector value with the same positive difference and tolerance (edge case)"),
+		BaseFVectorValue, PositiveDifference, PositiveTolerance);
+	RunFVectorMutationTest(TEXT("Mutation of base FVector value with negative difference and positive tolerance that are equal after being placed in Abs"),
+		BaseFVectorValue, -PositiveDifference, PositiveTolerance);
+	RunFVectorMutationTest(TEXT("Mutation of base FVector value with positive half difference and positive tolerance"),
+		BaseFVectorValue, PositiveHalfDifference, PositiveTolerance);
+	RunFVectorMutationTest(TEXT("Mutation of base FVector value with negative half difference and positive tolerance"),
+		BaseFVectorValue, -PositiveHalfDifference, PositiveTolerance);
+
+	//** VERIFY **//
+	const int32 ErrorTotal = ExecutionInfo.GetErrorTotal();
+	const int32 ExpectedErrorTotal = 0;
+
+	TestEqual(TestFailMessage, ErrorTotal, ExpectedErrorTotal);
+
+	return true;
+}
+
+IMPLEMENT_CUSTOM_SIMPLE_AUTOMATION_TEST(FAutomationTestNearlyEqualFVectorNegative, FAutomationNearlyEqualTest, "TestFramework.Validation.TestNearlyEqualFVectorNegative", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter);
+bool FAutomationTestNearlyEqualFVectorNegative::RunTest(const FString& Parameters)
+{
+	int32 CasesCheckedTotal = 0;
+
+	//** TEST **//
+	CasesCheckedTotal += RunFVectorMutationTest(TEXT("Mutation of base FVector value with positive difference that is greater than positive tolerance"),
+		BaseFVectorValue, PositiveDifference + 0.1f, PositiveTolerance);
+	CasesCheckedTotal += RunFVectorMutationTest(TEXT("Mutation of base FVector value with negative difference which absolute value is greater than positive tolerance"),
+		BaseFVectorValue, -PositiveDifference - 0.1f, PositiveTolerance);
+
+	//** VERIFY **//
+	const int32 ErrorTotal = ExecutionInfo.GetErrorTotal();
+	ExecutionInfo.RemoveAllEvents(EAutomationEventType::Error);
+	TestEqual(TestFailMessage, ErrorTotal, CasesCheckedTotal);
+
+	return true;
+}
+
+IMPLEMENT_CUSTOM_SIMPLE_AUTOMATION_TEST(FAutomationTestNearlyEqualFRotatorPositive, FAutomationNearlyEqualTest, "TestFramework.Validation.TestNearlyEqualFRotatorPositive", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter);
+bool FAutomationTestNearlyEqualFRotatorPositive::RunTest(const FString& Parameters)
+{
+	//** TEST **//
+	RunSimpleTest<FRotator>(TEXT("The same FRotator values with null tolerance"),
+		ActualFRotatorValue, ExpectedFRotatorValue, NullTolerance);
+	RunSimpleTest<FRotator>(TEXT("The same FRotator values with positive tolerance"),
+		ActualFRotatorValue, ExpectedFRotatorValue, PositiveTolerance);
+	RunFRotatorMutationTest(TEXT("Mutation of base FRotator value with the same positive difference and tolerance (edge case)"),
+		BaseFRotatorValue, PositiveDifference, PositiveTolerance);
+	RunFRotatorMutationTest(TEXT("Mutation of base FRotator value with negative difference and positive tolerance that are equal after being placed in Abs"),
+		BaseFRotatorValue, -PositiveDifference, PositiveTolerance);
+	RunFRotatorMutationTest(TEXT("Mutation of base FRotator value with positive half difference and positive tolerance"),
+		BaseFRotatorValue, PositiveHalfDifference, PositiveTolerance);
+	RunFRotatorMutationTest(TEXT("Mutation of base FRotator value with negative half difference and positive tolerance"),
+		BaseFRotatorValue, -PositiveHalfDifference, PositiveTolerance);
+
+	//** VERIFY **//
+	const int32 ErrorTotal = ExecutionInfo.GetErrorTotal();
+	const int32 ExpectedErrorTotal = 0;
+
+	TestEqual(TestFailMessage, ErrorTotal, ExpectedErrorTotal);
+
+	return true;
+}
+
+IMPLEMENT_CUSTOM_SIMPLE_AUTOMATION_TEST(FAutomationTestNearlyEqualFRotatorNegative, FAutomationNearlyEqualTest, "TestFramework.Validation.TestNearlyEqualFRotatorNegative", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter);
+bool FAutomationTestNearlyEqualFRotatorNegative::RunTest(const FString& Parameters)
+{
+	int32 CasesCheckedTotal = 0;
+
+	//** TEST **//
+	CasesCheckedTotal += RunFRotatorMutationTest(TEXT("Mutation of base FRotator value with positive difference that is greater than positive tolerance"),
+		BaseFRotatorValue, PositiveDifference + 1, PositiveTolerance);
+	CasesCheckedTotal += RunFRotatorMutationTest(TEXT("Mutation of base FRotator value with negative difference which absolute value is greater than positive tolerance"),
+		BaseFRotatorValue, -PositiveDifference - 1, PositiveTolerance);
+
+	//** VERIFY **//
+	const int32 ErrorTotal = ExecutionInfo.GetErrorTotal();
+	ExecutionInfo.RemoveAllEvents(EAutomationEventType::Error);
+	TestEqual(TestFailMessage, ErrorTotal, CasesCheckedTotal);
+
+	return true;
+}
+
+IMPLEMENT_CUSTOM_SIMPLE_AUTOMATION_TEST(FAutomationTestNearlyEqualFTransformPositive, FAutomationNearlyEqualTest, "TestFramework.Validation.TestNearlyEqualFTransformPositive", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter);
+bool FAutomationTestNearlyEqualFTransformPositive::RunTest(const FString& Parameters)
+{
+	//** TEST **//
+	RunSimpleTest<FTransform>(TEXT("The same FTransform values with null tolerance"),
+		ActualFTransformValue, ExpectedFTransformValue, NullTolerance);
+	RunSimpleTest<FTransform>(TEXT("The same FTransform values with positive tolerance"),
+		ActualFTransformValue, ExpectedFTransformValue, PositiveTolerance);
+	RunFTransformMutationTest(TEXT("Mutation of base FTransform value with the same positive difference and tolerance (edge case)"),
+		BaseFTransformValue, PositiveDifference, PositiveTolerance);
+	RunFTransformMutationTest(TEXT("Mutation of base FTransform value with negative difference and positive tolerance that are equal after being placed in Abs"),
+		BaseFTransformValue, -PositiveDifference, PositiveTolerance);
+	RunFTransformMutationTest(TEXT("Mutation of base FTransform value with positive half difference and positive tolerance"),
+		BaseFTransformValue, PositiveHalfDifference, PositiveTolerance);
+	RunFTransformMutationTest(TEXT("Mutation of base FTransform value with negative half difference and positive tolerance"),
+		BaseFTransformValue, -PositiveHalfDifference, PositiveTolerance);
+
+	//** VERIFY **//
+	const int32 ErrorTotal = ExecutionInfo.GetErrorTotal();
+	const int32 ExpectedErrorTotal = 0;
+
+	TestEqual(TestFailMessage, ErrorTotal, ExpectedErrorTotal);
+
+	return true;
+}
+
+IMPLEMENT_CUSTOM_SIMPLE_AUTOMATION_TEST(FAutomationTestNearlyEqualFTransformNegative, FAutomationNearlyEqualTest, "TestFramework.Validation.TestNearlyEqualFTransformNegative", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter);
+bool FAutomationTestNearlyEqualFTransformNegative::RunTest(const FString& Parameters)
+{
+	int32 CasesCheckedTotal = 0;
+
+	//** TEST **//
+	CasesCheckedTotal += RunFTransformMutationTest(TEXT("Mutation of base FTransform value with positive difference that is greater than positive tolerance"),
+		BaseFTransformValue, PositiveDifference + 0.1f, PositiveTolerance);
+	CasesCheckedTotal += RunFTransformMutationTest(TEXT("Mutation of base FTransform value with negative difference which absolute value is greater than positive tolerance"),
+		BaseFTransformValue, -PositiveDifference - 0.1f, PositiveTolerance);
+
+	//** VERIFY **//
+	const int32 ErrorTotal = ExecutionInfo.GetErrorTotal();
+	ExecutionInfo.RemoveAllEvents(EAutomationEventType::Error);
+	TestEqual(TestFailMessage, ErrorTotal, CasesCheckedTotal);
+
+	return true;
+}
+
+class FAutomationUTestMacrosExpr : public FAutomationTestBase
+{
+public:
+	FAutomationUTestMacrosExpr(const FString& InName, const bool bInComplexTask)
+		: FAutomationTestBase(InName, bInComplexTask)
+	{
+	}
+
+protected:
+
+	static const float PositiveToleranceFloat;
+	static const float ActualFloatValue;
+	static const float ExpectedFloatValue;
+	static const float WrongFloatValue;
+	static const float ExpectedFloatValueOutOfTolerance;
+	static const FString ActualFStringValue;
+	static const FString ExpectedFStringValueLowerCase;
+	static const FString UnexpectedFStringValueLowerCase;
+};
+
+const float FAutomationUTestMacrosExpr::PositiveToleranceFloat(1.e-4f);
+const float FAutomationUTestMacrosExpr::ActualFloatValue(0.f);
+const float FAutomationUTestMacrosExpr::ExpectedFloatValue(ActualFloatValue);
+const float FAutomationUTestMacrosExpr::WrongFloatValue(ActualFloatValue + 1.f);
+const float FAutomationUTestMacrosExpr::ExpectedFloatValueOutOfTolerance(ActualFloatValue + PositiveToleranceFloat);
+const FString FAutomationUTestMacrosExpr::ActualFStringValue(TEXT("EQUALS"));
+const FString FAutomationUTestMacrosExpr::ExpectedFStringValueLowerCase(TEXT("equals"));
+const FString FAutomationUTestMacrosExpr::UnexpectedFStringValueLowerCase(TEXT("not-equals"));
+
+IMPLEMENT_CUSTOM_SIMPLE_AUTOMATION_TEST(FAutomationEqualEXPR, FAutomationUTestMacrosExpr, "TestFramework.Validation.UTestEqual", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter);
+bool FAutomationEqualEXPR::RunTest(const FString& Parameters)
+{
+
+	UTEST_EQUAL_EXPR(ActualFloatValue, ExpectedFloatValue);
+	UTEST_NEARLY_EQUAL_EXPR(ActualFloatValue, ExpectedFloatValueOutOfTolerance, PositiveToleranceFloat);
+	UTEST_EQUAL_TOLERANCE_EXPR(ActualFloatValue, ExpectedFloatValueOutOfTolerance, PositiveToleranceFloat);
+	UTEST_NOT_EQUAL_EXPR(ActualFloatValue, WrongFloatValue);
+	UTEST_EQUAL_INSENSITIVE_EXPR(*ActualFStringValue, *ExpectedFStringValueLowerCase);
+	UTEST_NOT_EQUAL_INSENSITIVE_EXPR(*ActualFStringValue, *UnexpectedFStringValueLowerCase);
+
+	return true;
+}
+
+IMPLEMENT_CUSTOM_SIMPLE_AUTOMATION_TEST(FAutomationSameNotSameEXPR, FAutomationUTestMacrosExpr, "TestFramework.Validation.UTestSameNotSame", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter);
+bool FAutomationSameNotSameEXPR::RunTest(const FString& Parameters)
+{
+
+	UTEST_SAME_EXPR(ActualFStringValue, ActualFStringValue);
+	UTEST_NOT_SAME_EXPR(ActualFStringValue, ExpectedFStringValueLowerCase);
+
+	return true;
+}
+
+IMPLEMENT_CUSTOM_SIMPLE_AUTOMATION_TEST(FAutomationTrueFalseEXPR, FAutomationUTestMacrosExpr, "TestFramework.Validation.UTestTrueFalse", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter);
+bool FAutomationTrueFalseEXPR::RunTest(const FString& Parameters)
+{
+
+	UTEST_TRUE_EXPR(ActualFloatValue == ExpectedFloatValue);
+	UTEST_FALSE_EXPR(ActualFloatValue > ExpectedFloatValue);
+
+	return true;
+}
+
+IMPLEMENT_CUSTOM_SIMPLE_AUTOMATION_TEST(FAutomationValidInvalidEXPR, FAutomationUTestMacrosExpr, "TestFramework.Validation.UTestValidInvalid", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter);
+bool FAutomationValidInvalidEXPR::RunTest(const FString& Parameters)
+{
+	struct FHasIsValid
+	{
+		explicit FHasIsValid(bool bInIsValid)
+			: bIsValid(bInIsValid)
+		{  }
+		
+		bool IsValid() const { return bIsValid; }
+
+	private:
+		bool bIsValid;
+	};
+	
+	//** TEST **//
+	TSharedPtr<FVector> ValidSharedPtr = MakeShared<FVector>();
+	TSharedPtr<UObject> InvalidSharedPtr = nullptr;
+
+	FHasIsValid ValidObject(true);
+	FHasIsValid InvalidObject(false);
+
+	//** VERIFY **//
+	UTEST_VALID_EXPR(ValidSharedPtr);
+	UTEST_INVALID_EXPR(InvalidSharedPtr);
+
+	UTEST_VALID_EXPR(ValidObject);
+	UTEST_INVALID_EXPR(InvalidObject);
+
+	return true;
+}
+
+IMPLEMENT_CUSTOM_SIMPLE_AUTOMATION_TEST(FAutomationNullNotNullPtrEXPR, FAutomationUTestMacrosExpr, "TestFramework.Validation.UTestNullNotNull", EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::EngineFilter);
+bool FAutomationNullNotNullPtrEXPR::RunTest(const FString& Parameters)
+{
+	UWorld* World = UWorld::CreateWorld(EWorldType::Game, false);
+
+	UTEST_NULL_EXPR(nullptr);
+	UTEST_NOT_NULL_EXPR(World);
+
+	World->DestroyWorld(false);
+
 	return true;
 }
 
@@ -971,9 +1462,9 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 				UE_LOG(LogTemp, Log, TEXT("\t\t\t),"));
 #endif
 
-				Test->TestTrue(FString::Printf(TEXT("Child world location was incorrect after attachment (was %s, should be %s)"), *ChildActor->GetActorLocation().ToString(), *ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][0].GetLocation().ToString()), ChildActor->GetActorLocation().Equals(ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][0].GetLocation(), KINDA_SMALL_NUMBER));
-				Test->TestTrue(FString::Printf(TEXT("Child world rotation was incorrect after attachment (was %s, should be %s)"), *ChildActor->GetActorQuat().ToString(), *ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][0].GetRotation().ToString()), ChildActor->GetActorQuat().Equals(ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][0].GetRotation(), KINDA_SMALL_NUMBER));
-				Test->TestTrue(FString::Printf(TEXT("Child world scale was incorrect after attachment (was %s, should be %s)"), *ChildActor->GetActorScale3D().ToString(), *ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][0].GetScale3D().ToString()), ChildActor->GetActorScale3D().Equals(ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][0].GetScale3D(), KINDA_SMALL_NUMBER));
+				Test->TestTrue(FString::Printf(TEXT("Child world location was incorrect after attachment (was %s, should be %s)"), *ChildActor->GetActorLocation().ToString(), *ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][0].GetLocation().ToString()), ChildActor->GetActorLocation().Equals(ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][0].GetLocation(), UE_KINDA_SMALL_NUMBER));
+				Test->TestTrue(FString::Printf(TEXT("Child world rotation was incorrect after attachment (was %s, should be %s)"), *ChildActor->GetActorQuat().ToString(), *ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][0].GetRotation().ToString()), ChildActor->GetActorQuat().Equals(ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][0].GetRotation(), UE_KINDA_SMALL_NUMBER));
+				Test->TestTrue(FString::Printf(TEXT("Child world scale was incorrect after attachment (was %s, should be %s)"), *ChildActor->GetActorScale3D().ToString(), *ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][0].GetScale3D().ToString()), ChildActor->GetActorScale3D().Equals(ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][0].GetScale3D(), UE_KINDA_SMALL_NUMBER));
 
 				ChildActor->DetachFromActor(FDetachmentTransformRules(Rules, true));
 
@@ -991,9 +1482,9 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 				UE_LOG(LogTemp, Log, TEXT("\t\t\t),"));
 #endif
 
-				Test->TestTrue(FString::Printf(TEXT("Child relative location was incorrect after detachment (was %s, should be %s)"), *ChildActor->GetActorLocation().ToString(), *ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][1].GetLocation().ToString()), ChildActor->GetActorLocation().Equals(ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][1].GetLocation(), KINDA_SMALL_NUMBER));
-				Test->TestTrue(FString::Printf(TEXT("Child relative rotation was incorrect after detachment (was %s, should be %s)"), *ChildActor->GetActorQuat().ToString(), *ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][1].GetRotation().ToString()), ChildActor->GetActorQuat().Equals(ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][1].GetRotation(), KINDA_SMALL_NUMBER));
-				Test->TestTrue(FString::Printf(TEXT("Child relative scale was incorrect after detachment (was %s, should be %s)"), *ChildActor->GetActorScale3D().ToString(), *ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][1].GetScale3D().ToString()), ChildActor->GetActorScale3D().Equals(ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][1].GetScale3D(), KINDA_SMALL_NUMBER));
+				Test->TestTrue(FString::Printf(TEXT("Child relative location was incorrect after detachment (was %s, should be %s)"), *ChildActor->GetActorLocation().ToString(), *ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][1].GetLocation().ToString()), ChildActor->GetActorLocation().Equals(ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][1].GetLocation(), UE_KINDA_SMALL_NUMBER));
+				Test->TestTrue(FString::Printf(TEXT("Child relative rotation was incorrect after detachment (was %s, should be %s)"), *ChildActor->GetActorQuat().ToString(), *ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][1].GetRotation().ToString()), ChildActor->GetActorQuat().Equals(ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][1].GetRotation(), UE_KINDA_SMALL_NUMBER));
+				Test->TestTrue(FString::Printf(TEXT("Child relative scale was incorrect after detachment (was %s, should be %s)"), *ChildActor->GetActorScale3D().ToString(), *ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][1].GetScale3D().ToString()), ChildActor->GetActorScale3D().Equals(ExpectedChildTransforms[RuleInteger0][RuleInteger1][RuleInteger2][1].GetScale3D(), UE_KINDA_SMALL_NUMBER));
 #if DUMP_EXPECTED_TRANSFORMS
 				UE_LOG(LogTemp, Log, TEXT("\t\t},"));
 #endif
@@ -1075,119 +1566,5 @@ bool FAutomationAttachment::RunTest(const FString& Parameters)
 
 	return true;
 }
-
-// ----------------------------------------------------------------------------------------------------------------
-
-#include "Matinee/MatineeActor.h"
-
-DEFINE_LATENT_AUTOMATION_COMMAND_ONE_PARAMETER(FWaitForMatineeToCompleteAndDoScreenshotsLatentCommand, AMatineeActor*, MatineeActor);
-
-bool FWaitForMatineeToCompleteAndDoScreenshotsLatentCommand::Update()
-{
-	bool bTestComplete = true;
-	if (MatineeActor)
-	{
-		bTestComplete = !MatineeActor->bIsPlaying;
-	}
-	return bTestComplete;
-}
-
-///**
-// * FRenderOutputValidation - render deterministic and compare results of multiple runs
-// */
-//IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRenderOutputValidation, "Rendering.RenderOutputValidation", EAutomationTestFlags::ClientContext | EAutomationTestFlags::EngineFilter)
-//
-///** 
-// * render deterministic and compare results of multiple runs
-// *
-// * @param Parameters - Unused for this test
-// * @return	TRUE if the test was successful, FALSE otherwise
-// */
-//bool FRenderOutputValidation::RunTest(const FString& Parameters)
-//{
-//	const bool bChangeResolution = false;
-//	const bool bLoadMap = false;			// true doesn't work at the moment (iterate matinees needs to happen after loading the map)
-//
-//	//Gets the default map that the game uses.
-//	const UGameMapsSettings* GameMapsSettings = GetDefault<UGameMapsSettings>();
-////	const FString& MapName = GameMapsSettings->GetGameDefaultMap();
-//	const FString MapName = TEXT("ScreenshotsTest");
-//
-//	// request full res screenshots
-//	//FAutomationTestFramework::Get().SetScreenshotOptions(true);
-//
-//	if(bLoadMap)
-//	{
-//		// Opens the actual default map in game.
-//		GEngine->Exec(GetSimpleEngineAutomationTestGameWorld(GetTestFlags()), *FString::Printf(TEXT("Open %s"), *MapName));
-//		ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(2.0f));
-//	}
-//
-//	{
-//		UConsole* ViewportConsole = (GEngine->GameViewport != nullptr) ? GEngine->GameViewport->ViewportConsole : nullptr;
-//		FConsoleOutputDevice StrOut(ViewportConsole);
-//
-//		StrOut.Logf(TEXT("FRenderOutputValidation:Runtest()"));
-//	}
-//
-//	// Gets the current resolution.
-//	FString RestoreResolutionString = FString::Printf(TEXT("setres %dx%d"), GSystemResolution.ResX, GSystemResolution.ResY);
-//
-//	if(bChangeResolution)
-//	{
-//		// Change the resolution
-//		ADD_LATENT_AUTOMATION_COMMAND(FExecStringLatentCommand(TEXT("setres 640x480")));
-//		ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(2.0f));
-//	}
-//	// 5 sec should be enough, if more is needed - we should investigate
-//	ADD_LATENT_AUTOMATION_COMMAND(FStreamAllResourcesLatentCommand(5.0f));
-//
-////later	ADD_LATENT_AUTOMATION_COMMAND(FBuildLightingCommand);
-//
-//	// streaming should not be distributing it's work over multiple frames - to be more deterministic
-//	ADD_LATENT_AUTOMATION_COMMAND(FExecWorldStringLatentCommand(TEXT("r.Streaming.FramesForFullUpdate 0")));
-//
-//	// reset all data in the ViewState e.g. TemporalAA, SSR cyclic counter, TemporalAA images
-//	ADD_LATENT_AUTOMATION_COMMAND(FExecWorldStringLatentCommand(TEXT("r.ResetViewState")));
-//
-//	// this needs to be improved: better thank hanging would be to render frames (showing the user that it waits on something)
-//	ADD_LATENT_AUTOMATION_COMMAND(FWaitForShadersToFinishCompilingInGame);
-//
-//	//if( FAutomationTestFramework::Get().IsScreenshotAllowed() )
-//	{
-//		for (TObjectIterator<AMatineeActor> It; It; ++It)
-//		{
-//			AMatineeActor* MatineeActor = *It;
-//
-//			FString Name;
-//			MatineeActor->GetName(Name);
-//
-//			if(Name.Contains(TEXT("Automation")))
-//			{
-//				UE_LOG(LogEngineAutomationTests, Log, TEXT("Iterated matinee: %p '%s'"), MatineeActor, *MatineeActor->GetName())
-//
-//				//add latent action to execute this matinee
-//				ADD_LATENT_AUTOMATION_COMMAND(FPlayMatineeLatentCommand(MatineeActor));
-//
-//				//Run the Stat FPS Chart command
-//		//			ADD_LATENT_AUTOMATION_COMMAND(FExecWorldStringLatentCommand(TEXT("StartFPSChart")));
-//
-//				//add action to wait until matinee is complete
-//				ADD_LATENT_AUTOMATION_COMMAND(FWaitForMatineeToCompleteAndDoScreenshotsLatentCommand(MatineeActor));
-//
-//				//Stop the Stat FPS Chart command
-//		//			ADD_LATENT_AUTOMATION_COMMAND(FExecWorldStringLatentCommand(TEXT("StopFPSChart")));
-//			}
-//		}
-//	}
-//
-//	if(bChangeResolution)
-//	{
-//		// restore the resolution
-//		ADD_LATENT_AUTOMATION_COMMAND(FExecStringLatentCommand(RestoreResolutionString));
-//	}
-//
-//	return true;
-//}
 
 #endif //WITH_DEV_AUTOMATION_TESTS

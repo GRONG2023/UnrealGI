@@ -2,80 +2,58 @@
 
 using UnrealBuildTool;
 
-[SupportedPlatformsAttribute(new string[] {"Win32", "Win64", "Linux", "Android", "LinuxAArch64"})]
+[SupportedPlatforms("Linux", "Android", "LinuxArm64")]
+[SupportedPlatformGroups("Windows")]
 public class OpenGLDrv : ModuleRules
 {
 	public OpenGLDrv(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateIncludePaths.Add("Runtime/OpenGLDrv/Private");
+		IWYUSupport = IWYUSupport.None;
 
-		PrivateDependencyModuleNames.AddRange(
-			new string[] {
-				"Core",
-				"CoreUObject",
-				"ApplicationCore",
-				"Engine",
-				"RHI",
-				"RenderCore",
-				"PreLoadScreen"
-			}
-			);
+		PublicDependencyModuleNames.AddRange(new string[] {
+			"Core",
+			"RHI",
+		});
+
+		PrivateDependencyModuleNames.AddRange(new string[] {
+			"CoreUObject",
+			"ApplicationCore",
+			"Engine",
+			"RHICore",
+			"RenderCore",
+			"PreLoadScreen"
+		});
 
 		PrivateIncludePathModuleNames.Add("ImageWrapper");
 		DynamicallyLoadedModuleNames.Add("ImageWrapper");
 
+		PublicIncludePathModuleNames.Add("OpenGL");
 		AddEngineThirdPartyPrivateStaticDependencies(Target, "OpenGL");
-
-		if (Target.IsInPlatformGroup(UnrealPlatformGroup.Linux))
-		{
-			string GLPath = Target.UEThirdPartySourceDirectory + "OpenGL/";
-			PublicIncludePaths.Add(GLPath);
-		}
 
 		if (Target.IsInPlatformGroup(UnrealPlatformGroup.Linux))
 		{
 			AddEngineThirdPartyPrivateStaticDependencies(Target, "SDL2");
 		}
 
-		if (Target.Configuration != UnrealTargetConfiguration.Shipping)
-		{
-			PrivateIncludePathModuleNames.AddRange(
-				new string[]
-				{
-					"TaskGraph"
-				}
-			);
-		}
-
-		if ((Target.Platform == UnrealTargetPlatform.Android) || (Target.Platform == UnrealTargetPlatform.Lumin))
+		if (Target.Platform == UnrealTargetPlatform.Android)
 		{
 			PrivateDependencyModuleNames.Add("detex");
+			PrivateDependencyModuleNames.Add("ArmlibGPUInfo");
 		}
 
-        if (Target.Platform == UnrealTargetPlatform.Android)
+		if (Target.Platform == UnrealTargetPlatform.Android)
         {
             // for Swappy
             PublicDefinitions.Add("USE_ANDROID_OPENGL_SWAPPY=1");
 
-            PrivateDependencyModuleNames.AddRange(
-                new string[]
-                {
-					"GoogleGameSDK"
-                }
-            );
-
-			PrivateIncludePathModuleNames.AddRange(
-				new string[]
-				{
-					"Launch"
-				}
-			);
+            PrivateDependencyModuleNames.Add("GoogleGameSDK");
+			PrivateIncludePathModuleNames.Add("Launch");
 		}
 
-        if (Target.Platform != UnrealTargetPlatform.Win32 && Target.Platform != UnrealTargetPlatform.Win64
-			&& Target.Platform != UnrealTargetPlatform.IOS && Target.Platform != UnrealTargetPlatform.Android
-			&& !Target.IsInPlatformGroup(UnrealPlatformGroup.Linux)
-			&& Target.Platform != UnrealTargetPlatform.TVOS && Target.Platform != UnrealTargetPlatform.Lumin)
+        if (!Target.IsInPlatformGroup(UnrealPlatformGroup.Windows)
+			&& !Target.IsInPlatformGroup(UnrealPlatformGroup.IOS)
+			&& Target.Platform != UnrealTargetPlatform.Android
+			&& !Target.IsInPlatformGroup(UnrealPlatformGroup.Linux))
 		{
 			PrecompileForTargets = PrecompileTargetsType.None;
 		}

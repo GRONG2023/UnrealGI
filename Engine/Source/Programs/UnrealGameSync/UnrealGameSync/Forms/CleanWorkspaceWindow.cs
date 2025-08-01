@@ -2,18 +2,17 @@
 
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Data;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Windows.Forms.VisualStyles;
+using EpicGames.Core;
+using EpicGames.Perforce;
+using Microsoft.Extensions.Logging;
 
 namespace UnrealGameSync
 {
@@ -27,14 +26,14 @@ namespace UnrealGameSync
 
 		class TreeNodeData
 		{
-			public TreeNodeAction Action;
-			public FileInfo File;
-			public FolderToClean Folder;
-			public int NumFiles;
-			public int NumSelectedFiles;
-			public int NumEmptySelectedFiles;
-			public int NumMissingSelectedFiles;
-			public int NumDefaultSelectedFiles;
+			public TreeNodeAction _action;
+			public FileInfo? _file;
+			public FolderToClean? _folder;
+			public int _numFiles;
+			public int _numSelectedFiles;
+			public int _numEmptySelectedFiles;
+			public int _numMissingSelectedFiles;
+			public int _numDefaultSelectedFiles;
 		}
 
 		enum SelectionType
@@ -46,17 +45,17 @@ namespace UnrealGameSync
 			None,
 		}
 
-		static readonly CheckBoxState[] CheckBoxStates = 
-		{ 
-			CheckBoxState.UncheckedNormal, 
-			CheckBoxState.MixedNormal, 
-			CheckBoxState.CheckedNormal 
+		static readonly CheckBoxState[] s_checkBoxStates =
+		{
+			CheckBoxState.UncheckedNormal,
+			CheckBoxState.MixedNormal,
+			CheckBoxState.CheckedNormal
 		};
 
-		PerforceConnection PerforceClient;
-		FolderToClean RootFolderToClean;
+		readonly IPerforceSettings _perforceSettings;
+		readonly FolderToClean _rootFolderToClean;
 
-		static readonly string[] SafeToDeleteFolders =
+		static readonly string[] s_safeToDeleteFolders =
 		{
 			"/binaries/",
 			"/intermediate/",
@@ -64,7 +63,7 @@ namespace UnrealGameSync
 			"/.vs/",
 			"/automationtool/saved/rules/",
 			"/saved/logs/",
-	
+
 			"/bin/debug/",
 			"/bin/development/",
 			"/bin/release/",
@@ -87,7 +86,7 @@ namespace UnrealGameSync
 			"/obj/x64/release/",
 		};
 
-		static readonly string[] SafeToDeleteExtensions =
+		static readonly string[] s_safeToDeleteExtensions =
 		{
 			".pdb",
 			".obj",
@@ -98,216 +97,217 @@ namespace UnrealGameSync
 			".csproj.references",
 		};
 
-		IReadOnlyList<string> ExtraSafeToDeleteFolders;
-		IReadOnlyList<string> ExtraSafeToDeleteExtensions;
+		readonly IReadOnlyList<string> _extraSafeToDeleteFolders;
+		readonly IReadOnlyList<string> _extraSafeToDeleteExtensions;
+		readonly ILogger _logger;
 
 		[DllImport("Shell32.dll", EntryPoint = "ExtractIconExW", CharSet = CharSet.Unicode, ExactSpelling = true, CallingConvention = CallingConvention.StdCall)]
 		private static extern int ExtractIconEx(string sFile, int iIndex, IntPtr piLargeVersion, out IntPtr piSmallVersion, int amountIcons);
 
-		private CleanWorkspaceWindow(PerforceConnection PerforceClient, FolderToClean RootFolderToClean, string[] ExtraSafeToDeleteFolders, string[] ExtraSafeToDeleteExtensions)
+		private CleanWorkspaceWindow(IPerforceSettings perforceSettings, FolderToClean rootFolderToClean, string[] extraSafeToDeleteFolders, string[] extraSafeToDeleteExtensions, ILogger<CleanWorkspaceWindow> logger)
 		{
-			this.PerforceClient = PerforceClient;
-			this.RootFolderToClean = RootFolderToClean;
-			this.ExtraSafeToDeleteFolders = ExtraSafeToDeleteFolders.Select(x => x.Trim().Replace('\\', '/').Trim('/')).Where(x => x.Length > 0).Select(x => String.Format("/{0}/", x.ToLowerInvariant())).ToArray();
-			this.ExtraSafeToDeleteExtensions = ExtraSafeToDeleteExtensions.Select(x => x.Trim().ToLowerInvariant()).Where(x => x.Length > 0).ToArray();
+			_perforceSettings = perforceSettings;
+			_rootFolderToClean = rootFolderToClean;
+			_extraSafeToDeleteFolders = extraSafeToDeleteFolders.Select(x => x.Trim().Replace('\\', '/').Trim('/')).Where(x => x.Length > 0).Select(x => String.Format("/{0}/", x.ToLowerInvariant())).ToArray();
+			_extraSafeToDeleteExtensions = extraSafeToDeleteExtensions.Select(x => x.Trim().ToLowerInvariant()).Where(x => x.Length > 0).ToArray();
+			_logger = logger;
 
 			InitializeComponent();
+			Font = new System.Drawing.Font("Segoe UI", 8.25F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
 		}
 
-		public static void DoClean(IWin32Window Owner, PerforceConnection PerforceClient, string LocalRootPath, string ClientRootPath, IReadOnlyList<string> SyncPaths, string[] ExtraSafeToDeleteFolders, string[] ExtraSafeToDeleteExtensions, TextWriter Log)
+		public static bool DoClean(IWin32Window owner, IPerforceSettings perforceSettings, DirectoryReference localRootPath, string clientRootPath, IReadOnlyList<string> syncPaths, string[] extraSafeToDeleteFolders, string[] extraSafeToDeleteExtensions, ILogger<CleanWorkspaceWindow> logger)
 		{
 			// Figure out which folders to clean
-			FolderToClean RootFolderToClean = new FolderToClean(new DirectoryInfo(LocalRootPath));
-			using(FindFoldersToCleanTask QueryWorkspace = new FindFoldersToCleanTask(PerforceClient, RootFolderToClean, ClientRootPath, SyncPaths, Log))
+			FolderToClean rootFolderToClean = new FolderToClean(localRootPath.ToDirectoryInfo());
+			using (FindFoldersToCleanTask queryWorkspace = new FindFoldersToCleanTask(perforceSettings, rootFolderToClean, clientRootPath, syncPaths, logger))
 			{
-				string ErrorMessage;
-				if(ModalTask.Execute(Owner, QueryWorkspace, "Clean Workspace", "Querying files in Perforce, please wait...", out ErrorMessage) != ModalTaskResult.Succeeded)
+				ModalTask? result = ModalTask.Execute(owner, "Clean Workspace", "Querying files in Perforce, please wait...", x => queryWorkspace.RunAsync(x), ModalTaskFlags.None);
+				if (result == null || !result.Succeeded)
 				{
-					if(!String.IsNullOrEmpty(ErrorMessage))
-					{
-						MessageBox.Show(ErrorMessage);
-					}
-					return;
+					return false;
 				}
 			}
 
 			// If there's nothing to delete, don't bother displaying the dialog at all
-			if(RootFolderToClean.FilesToDelete.Count == 0 && RootFolderToClean.NameToSubFolder.Count == 0)
+			if (rootFolderToClean._filesToDelete.Count == 0 && rootFolderToClean._nameToSubFolder.Count == 0)
 			{
-				MessageBox.Show("You have no local files which are not in Perforce.", "Workspace Clean", MessageBoxButtons.OK);
-				return;
+				MessageBox.Show("You have no local files which are not in Perforce.", "Clean Workspace", MessageBoxButtons.OK);
+				return false;
 			}
 
 			// Populate the tree
-			CleanWorkspaceWindow CleanWorkspace = new CleanWorkspaceWindow(PerforceClient, RootFolderToClean, ExtraSafeToDeleteFolders, ExtraSafeToDeleteExtensions);
-			CleanWorkspace.ShowDialog();
+			using CleanWorkspaceWindow cleanWorkspace = new CleanWorkspaceWindow(perforceSettings, rootFolderToClean, extraSafeToDeleteFolders, extraSafeToDeleteExtensions, logger);
+			DialogResult dialogResult = cleanWorkspace.ShowDialog();
+
+			return (dialogResult == DialogResult.OK);
 		}
 
 		private void CleanWorkspaceWindow_Load(object sender, EventArgs e)
 		{
-			IntPtr FolderIconPtr;
-			ExtractIconEx("imageres.dll", 3, IntPtr.Zero, out FolderIconPtr, 1);
+			IntPtr folderIconPtr;
+			ExtractIconEx("imageres.dll", 3, IntPtr.Zero, out folderIconPtr, 1);
 
-			IntPtr FileIconPtr;
-			ExtractIconEx("imageres.dll", 2, IntPtr.Zero, out FileIconPtr, 1);
+			IntPtr fileIconPtr;
+			ExtractIconEx("imageres.dll", 2, IntPtr.Zero, out fileIconPtr, 1);
 
-			Icon[] Icons = new Icon[]{ Icon.FromHandle(FolderIconPtr), Icon.FromHandle(FileIconPtr) };
+			Icon[] icons = new Icon[] { Icon.FromHandle(folderIconPtr), Icon.FromHandle(fileIconPtr) };
 
-			Size LargestIconSize = Size.Empty;
-			foreach(Icon Icon in Icons)
+			Size largestIconSize = Size.Empty;
+			foreach (Icon icon in icons)
 			{
-				LargestIconSize = new Size(Math.Max(LargestIconSize.Width, Icon.Width), Math.Max(LargestIconSize.Height, Icon.Height));
+				largestIconSize = new Size(Math.Max(largestIconSize.Width, icon.Width), Math.Max(largestIconSize.Height, icon.Height));
 			}
 
-			Size LargestCheckBoxSize = Size.Empty;
-			using(Graphics Graphics = Graphics.FromHwnd(IntPtr.Zero))
+			Size largestCheckBoxSize = Size.Empty;
+			using (Graphics graphics = Graphics.FromHwnd(IntPtr.Zero))
 			{
-				foreach(CheckBoxState State in CheckBoxStates)
+				foreach (CheckBoxState state in s_checkBoxStates)
 				{
-					Size CheckBoxSize = CheckBoxRenderer.GetGlyphSize(Graphics, State);
-					LargestCheckBoxSize = new Size(Math.Max(LargestCheckBoxSize.Width, CheckBoxSize.Width), Math.Max(LargestCheckBoxSize.Height, CheckBoxSize.Height));
+					Size checkBoxSize = CheckBoxRenderer.GetGlyphSize(graphics, state);
+					largestCheckBoxSize = new Size(Math.Max(largestCheckBoxSize.Width, checkBoxSize.Width), Math.Max(largestCheckBoxSize.Height, checkBoxSize.Height));
 				}
 			}
 
-			Size ImageSize = new Size(LargestCheckBoxSize.Width + LargestIconSize.Width, Math.Max(LargestIconSize.Height, LargestCheckBoxSize.Height));
+			Size imageSize = new Size(largestCheckBoxSize.Width + largestIconSize.Width, Math.Max(largestIconSize.Height, largestCheckBoxSize.Height));
 
-			Bitmap TypeImageListBitmap = new Bitmap(Icons.Length * 3 * ImageSize.Width, ImageSize.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-			using(Graphics Graphics = Graphics.FromImage(TypeImageListBitmap))
+			Bitmap typeImageListBitmap = new Bitmap(icons.Length * 3 * imageSize.Width, imageSize.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+			using (Graphics graphics = Graphics.FromImage(typeImageListBitmap))
 			{
-				int MinX = 0;
-				for(int IconIdx = 0; IconIdx < Icons.Length; IconIdx++)
+				int minX = 0;
+				for (int iconIdx = 0; iconIdx < icons.Length; iconIdx++)
 				{
-					for(int StateIdx = 0; StateIdx < 3; StateIdx++)
+					for (int stateIdx = 0; stateIdx < 3; stateIdx++)
 					{
-						Size CheckBoxSize = CheckBoxRenderer.GetGlyphSize(Graphics, CheckBoxStates[StateIdx]);
-						CheckBoxRenderer.DrawCheckBox(Graphics, new Point(MinX + (LargestCheckBoxSize.Width - CheckBoxSize.Width) / 2, (LargestCheckBoxSize.Height - CheckBoxSize.Height) / 2), CheckBoxStates[StateIdx]);
+						Size checkBoxSize = CheckBoxRenderer.GetGlyphSize(graphics, s_checkBoxStates[stateIdx]);
+						CheckBoxRenderer.DrawCheckBox(graphics, new Point(minX + (largestCheckBoxSize.Width - checkBoxSize.Width) / 2, (largestCheckBoxSize.Height - checkBoxSize.Height) / 2), s_checkBoxStates[stateIdx]);
 
-						Size IconSize = Icons[IconIdx].Size;
-						Graphics.DrawIcon(Icons[IconIdx], MinX + LargestCheckBoxSize.Width + (LargestIconSize.Width - IconSize.Width) / 2, (LargestIconSize.Height - IconSize.Height) / 2);
+						Size iconSize = icons[iconIdx].Size;
+						graphics.DrawIcon(icons[iconIdx], minX + largestCheckBoxSize.Width + (largestIconSize.Width - iconSize.Width) / 2, (largestIconSize.Height - iconSize.Height) / 2);
 
-						MinX += ImageSize.Width;
+						minX += imageSize.Width;
 					}
 				}
 			}
 
-			ImageList TypeImageList = new ImageList();
-			TypeImageList.ImageSize = ImageSize;
-			TypeImageList.ColorDepth = ColorDepth.Depth32Bit;
-			TypeImageList.Images.AddStrip(TypeImageListBitmap);
-			TreeView.ImageList = TypeImageList;
+			ImageList typeImageList = new ImageList();
+			typeImageList.ImageSize = imageSize;
+			typeImageList.ColorDepth = ColorDepth.Depth32Bit;
+			typeImageList.Images.AddStrip(typeImageListBitmap);
+			TreeView.ImageList = typeImageList;
 
-			TreeNode Node = BuildTreeViewStructure(RootFolderToClean, "/", false, 0);
-			Node.Text = RootFolderToClean.Directory.FullName;
-			TreeView.Nodes.Add(Node);
+			TreeNode node = BuildTreeViewStructure(_rootFolderToClean, "/", false, 0);
+			node.Text = _rootFolderToClean._directory.FullName;
+			TreeView.Nodes.Add(node);
 		}
 
-		private TreeNode BuildTreeViewStructure(FolderToClean Folder, string FolderPath, bool bParentFolderSelected, int Depth)
+		private TreeNode BuildTreeViewStructure(FolderToClean folder, string folderPath, bool parentFolderSelected, int depth)
 		{
-			bool bSelectFolder = bParentFolderSelected || IsSafeToDeleteFolder(FolderPath) || Folder.bEmptyLeaf;
+			bool selectFolder = parentFolderSelected || IsSafeToDeleteFolder(folderPath) || folder._emptyLeaf;
 
-			TreeNodeData FolderNodeData = new TreeNodeData();
-			FolderNodeData.Folder = Folder;
+			TreeNodeData folderNodeData = new TreeNodeData();
+			folderNodeData._folder = folder;
 
-			TreeNode FolderNode = new TreeNode();
-			FolderNode.Text = Folder.Name;
-			FolderNode.Tag = FolderNodeData;
+			TreeNode folderNode = new TreeNode();
+			folderNode.Text = folder.Name;
+			folderNode.Tag = folderNodeData;
 
-			foreach(FolderToClean SubFolder in Folder.NameToSubFolder.OrderBy(x => x.Key).Select(x => x.Value))
+			foreach (FolderToClean subFolder in folder._nameToSubFolder.OrderBy(x => x.Key).Select(x => x.Value))
 			{
-				TreeNode ChildNode = BuildTreeViewStructure(SubFolder, FolderPath + SubFolder.Name.ToLowerInvariant() + "/", bSelectFolder, Depth + 1);
-				FolderNode.Nodes.Add(ChildNode);
+				TreeNode childNode = BuildTreeViewStructure(subFolder, folderPath + subFolder.Name.ToLowerInvariant() + "/", selectFolder, depth + 1);
+				folderNode.Nodes.Add(childNode);
 
-				TreeNodeData ChildNodeData = (TreeNodeData)ChildNode.Tag;
-				FolderNodeData.NumFiles += ChildNodeData.NumFiles;
-				FolderNodeData.NumSelectedFiles += ChildNodeData.NumSelectedFiles;
-				FolderNodeData.NumEmptySelectedFiles += ChildNodeData.NumEmptySelectedFiles;
-				FolderNodeData.NumMissingSelectedFiles += ChildNodeData.NumMissingSelectedFiles;
-				FolderNodeData.NumDefaultSelectedFiles += ChildNodeData.NumDefaultSelectedFiles;
+				TreeNodeData childNodeData = (TreeNodeData)childNode.Tag;
+				folderNodeData._numFiles += childNodeData._numFiles;
+				folderNodeData._numSelectedFiles += childNodeData._numSelectedFiles;
+				folderNodeData._numEmptySelectedFiles += childNodeData._numEmptySelectedFiles;
+				folderNodeData._numMissingSelectedFiles += childNodeData._numMissingSelectedFiles;
+				folderNodeData._numDefaultSelectedFiles += childNodeData._numDefaultSelectedFiles;
 			}
 
-			foreach(FileInfo File in Folder.FilesToSync.OrderBy(x => x.Name))
+			foreach (FileInfo file in folder._filesToSync.OrderBy(x => x.Name))
 			{
-				TreeNodeData FileNodeData = new TreeNodeData();
-				FileNodeData.Action = TreeNodeAction.Sync;
-				FileNodeData.File = File;
-				FileNodeData.NumFiles = 1;
-				FileNodeData.NumSelectedFiles = 1;
-				FileNodeData.NumEmptySelectedFiles = 0;
-				FileNodeData.NumMissingSelectedFiles = 1;
-				FileNodeData.NumDefaultSelectedFiles = FileNodeData.NumSelectedFiles;
+				TreeNodeData fileNodeData = new TreeNodeData();
+				fileNodeData._action = TreeNodeAction.Sync;
+				fileNodeData._file = file;
+				fileNodeData._numFiles = 1;
+				fileNodeData._numSelectedFiles = 1;
+				fileNodeData._numEmptySelectedFiles = 0;
+				fileNodeData._numMissingSelectedFiles = 1;
+				fileNodeData._numDefaultSelectedFiles = fileNodeData._numSelectedFiles;
 
-				TreeNode FileNode = new TreeNode();
-				FileNode.Text = File.Name + " (sync)";
-				FileNode.Tag = FileNodeData;
-				FolderNode.Nodes.Add(FileNode);
+				TreeNode fileNode = new TreeNode();
+				fileNode.Text = file.Name + " (sync)";
+				fileNode.Tag = fileNodeData;
+				folderNode.Nodes.Add(fileNode);
 
-				UpdateImage(FileNode);
+				UpdateImage(fileNode);
 
-				FolderNodeData.NumFiles++;
-				FolderNodeData.NumSelectedFiles += FileNodeData.NumSelectedFiles;
-				FolderNodeData.NumEmptySelectedFiles += FileNodeData.NumEmptySelectedFiles;
-				FolderNodeData.NumMissingSelectedFiles += FileNodeData.NumMissingSelectedFiles;
-				FolderNodeData.NumDefaultSelectedFiles += FileNodeData.NumDefaultSelectedFiles;
+				folderNodeData._numFiles++;
+				folderNodeData._numSelectedFiles += fileNodeData._numSelectedFiles;
+				folderNodeData._numEmptySelectedFiles += fileNodeData._numEmptySelectedFiles;
+				folderNodeData._numMissingSelectedFiles += fileNodeData._numMissingSelectedFiles;
+				folderNodeData._numDefaultSelectedFiles += fileNodeData._numDefaultSelectedFiles;
 			}
 
-			foreach(FileInfo File in Folder.FilesToDelete.OrderBy(x => x.Name))
+			foreach (FileInfo file in folder._filesToDelete.OrderBy(x => x.Name))
 			{
-				string Name = File.Name.ToLowerInvariant();
+				string name = file.Name.ToLowerInvariant();
 
-				bool bSelectFile = bSelectFolder || IsSafeToDeleteFile(FolderPath, File.Name.ToLowerInvariant());
+				bool selectFile = selectFolder || IsSafeToDeleteFile(file.Name.ToLowerInvariant());
 
-				TreeNodeData FileNodeData = new TreeNodeData();
-				FileNodeData.Action = TreeNodeAction.Delete;
-				FileNodeData.File = File;
-				FileNodeData.NumFiles = 1;
-				FileNodeData.NumSelectedFiles = bSelectFile? 1 : 0;
-				FileNodeData.NumEmptySelectedFiles = 0;
-				FileNodeData.NumMissingSelectedFiles = 0;
-				FileNodeData.NumDefaultSelectedFiles = FileNodeData.NumSelectedFiles;
+				TreeNodeData fileNodeData = new TreeNodeData();
+				fileNodeData._action = TreeNodeAction.Delete;
+				fileNodeData._file = file;
+				fileNodeData._numFiles = 1;
+				fileNodeData._numSelectedFiles = selectFile ? 1 : 0;
+				fileNodeData._numEmptySelectedFiles = 0;
+				fileNodeData._numMissingSelectedFiles = 0;
+				fileNodeData._numDefaultSelectedFiles = fileNodeData._numSelectedFiles;
 
-				TreeNode FileNode = new TreeNode();
-				FileNode.Text = File.Name;
-				FileNode.Tag = FileNodeData;
-				FolderNode.Nodes.Add(FileNode);
+				TreeNode fileNode = new TreeNode();
+				fileNode.Text = file.Name;
+				fileNode.Tag = fileNodeData;
+				folderNode.Nodes.Add(fileNode);
 
-				UpdateImage(FileNode);
+				UpdateImage(fileNode);
 
-				FolderNodeData.NumFiles++;
-				FolderNodeData.NumSelectedFiles += FileNodeData.NumSelectedFiles;
-				FolderNodeData.NumEmptySelectedFiles += FileNodeData.NumEmptySelectedFiles;
-				FolderNodeData.NumMissingSelectedFiles += FileNodeData.NumMissingSelectedFiles;
-				FolderNodeData.NumDefaultSelectedFiles += FileNodeData.NumDefaultSelectedFiles;
+				folderNodeData._numFiles++;
+				folderNodeData._numSelectedFiles += fileNodeData._numSelectedFiles;
+				folderNodeData._numEmptySelectedFiles += fileNodeData._numEmptySelectedFiles;
+				folderNodeData._numMissingSelectedFiles += fileNodeData._numMissingSelectedFiles;
+				folderNodeData._numDefaultSelectedFiles += fileNodeData._numDefaultSelectedFiles;
 			}
 
-			if(FolderNodeData.Folder.bEmptyLeaf)
+			if (folderNodeData._folder._emptyLeaf)
 			{
-				FolderNodeData.NumFiles++;
-				FolderNodeData.NumSelectedFiles++;
-				FolderNodeData.NumEmptySelectedFiles++;
-				FolderNodeData.NumDefaultSelectedFiles++;
+				folderNodeData._numFiles++;
+				folderNodeData._numSelectedFiles++;
+				folderNodeData._numEmptySelectedFiles++;
+				folderNodeData._numDefaultSelectedFiles++;
 			}
 
-			if(FolderNodeData.NumSelectedFiles > 0 && !FolderNodeData.Folder.bEmptyAfterClean && Depth < 2)
+			if (folderNodeData._numSelectedFiles > 0 && !folderNodeData._folder._emptyAfterClean && depth < 2)
 			{
-				FolderNode.Expand();
+				folderNode.Expand();
 			}
 			else
 			{
-				FolderNode.Collapse();
+				folderNode.Collapse();
 			}
 
-			UpdateImage(FolderNode);
-			return FolderNode;
+			UpdateImage(folderNode);
+			return folderNode;
 		}
 
-		private bool IsSafeToDeleteFolder(string FolderPath)
+		private bool IsSafeToDeleteFolder(string folderPath)
 		{
-			return SafeToDeleteFolders.Any(x => FolderPath.EndsWith(x)) || ExtraSafeToDeleteFolders.Any(x => FolderPath.EndsWith(x));
+			return s_safeToDeleteFolders.Any(x => folderPath.EndsWith(x, StringComparison.OrdinalIgnoreCase)) || _extraSafeToDeleteFolders.Any(x => folderPath.EndsWith(x, StringComparison.OrdinalIgnoreCase));
 		}
 
-		private bool IsSafeToDeleteFile(string FolderPath, string Name)
+		private bool IsSafeToDeleteFile(string name)
 		{
-			return SafeToDeleteExtensions.Any(x => Name.EndsWith(x)) || ExtraSafeToDeleteExtensions.Any(x => Name.EndsWith(x));
+			return s_safeToDeleteExtensions.Any(x => name.EndsWith(x, StringComparison.OrdinalIgnoreCase)) || _extraSafeToDeleteExtensions.Any(x => name.EndsWith(x, StringComparison.OrdinalIgnoreCase));
 		}
 
 		private void TreeView_DrawNode(object sender, DrawTreeNodeEventArgs e)
@@ -317,186 +317,201 @@ namespace UnrealGameSync
 
 		private void TreeView_NodeMouseClick(object sender, TreeNodeMouseClickEventArgs e)
 		{
-			TreeNode Node = e.Node;
-			if(e.Button == System.Windows.Forms.MouseButtons.Right)
+			TreeNode node = e.Node;
+			if (e.Button == System.Windows.Forms.MouseButtons.Right)
 			{
 				TreeView.SelectedNode = e.Node;
 				FolderContextMenu.Tag = e.Node;
 				FolderContextMenu.Show(TreeView.PointToScreen(e.Location));
 			}
-			else if(e.X >= e.Node.Bounds.Left - 32 && e.X < e.Node.Bounds.Left - 16)
+			else if (e.X >= e.Node.Bounds.Left - 32 && e.X < e.Node.Bounds.Left - 16)
 			{
-				TreeNodeData NodeData = (TreeNodeData)Node.Tag;
-				SetSelected(Node, (NodeData.NumSelectedFiles == 0)? SelectionType.All : SelectionType.None);
+				TreeNodeData nodeData = (TreeNodeData)node.Tag;
+				SetSelected(node, (nodeData._numSelectedFiles == 0) ? SelectionType.All : SelectionType.None);
 			}
 		}
 
-		private void SetSelected(TreeNode ParentNode, SelectionType Type)
+		private static void SetSelected(TreeNode parentNode, SelectionType type)
 		{
-			TreeNodeData ParentNodeData = (TreeNodeData)ParentNode.Tag;
+			TreeNodeData parentNodeData = (TreeNodeData)parentNode.Tag;
 
-			int PrevNumSelectedFiles = ParentNodeData.NumSelectedFiles;
-			SetSelectedOnChildren(ParentNode, Type);
+			int prevNumSelectedFiles = parentNodeData._numSelectedFiles;
+			SetSelectedOnChildren(parentNode, type);
 
-			int DeltaNumSelectedFiles = ParentNodeData.NumSelectedFiles - PrevNumSelectedFiles;
-			if(DeltaNumSelectedFiles != 0)
+			int deltaNumSelectedFiles = parentNodeData._numSelectedFiles - prevNumSelectedFiles;
+			if (deltaNumSelectedFiles != 0)
 			{
-				for(TreeNode NextParentNode = ParentNode.Parent; NextParentNode != null; NextParentNode = NextParentNode.Parent)
+				for (TreeNode nextParentNode = parentNode.Parent; nextParentNode != null; nextParentNode = nextParentNode.Parent)
 				{
-					TreeNodeData NextParentNodeData = (TreeNodeData)NextParentNode.Tag;
-					NextParentNodeData.NumSelectedFiles += DeltaNumSelectedFiles;
-					UpdateImage(NextParentNode);
+					TreeNodeData nextParentNodeData = (TreeNodeData)nextParentNode.Tag;
+					nextParentNodeData._numSelectedFiles += deltaNumSelectedFiles;
+					UpdateImage(nextParentNode);
 				}
 			}
 		}
 
-		private void SetSelectedOnChildren(TreeNode ParentNode, SelectionType Type)
+		private static void SetSelectedOnChildren(TreeNode parentNode, SelectionType type)
 		{
-			TreeNodeData ParentNodeData = (TreeNodeData)ParentNode.Tag;
+			TreeNodeData parentNodeData = (TreeNodeData)parentNode.Tag;
 
-			int NewNumSelectedFiles = 0;
-			switch(Type)
+			int newNumSelectedFiles = 0;
+			switch (type)
 			{
 				case SelectionType.All:
-					NewNumSelectedFiles = ParentNodeData.NumFiles;
+					newNumSelectedFiles = parentNodeData._numFiles;
 					break;
 				case SelectionType.Empty:
-					NewNumSelectedFiles = ParentNodeData.NumEmptySelectedFiles;
+					newNumSelectedFiles = parentNodeData._numEmptySelectedFiles;
 					break;
 				case SelectionType.Missing:
-					NewNumSelectedFiles = ParentNodeData.NumMissingSelectedFiles;
+					newNumSelectedFiles = parentNodeData._numMissingSelectedFiles;
 					break;
 				case SelectionType.SafeToDelete:
-					NewNumSelectedFiles = ParentNodeData.NumDefaultSelectedFiles;
+					newNumSelectedFiles = parentNodeData._numDefaultSelectedFiles;
 					break;
 				case SelectionType.None:
-					NewNumSelectedFiles = 0;
+					newNumSelectedFiles = 0;
 					break;
 			}
 
-			if(NewNumSelectedFiles != ParentNodeData.NumSelectedFiles)
+			if (newNumSelectedFiles != parentNodeData._numSelectedFiles)
 			{
-				foreach(TreeNode ChildNode in ParentNode.Nodes)
+				foreach (TreeNode? childNode in parentNode.Nodes)
 				{
-					SetSelectedOnChildren(ChildNode, Type);
+					if (childNode != null)
+					{
+						SetSelectedOnChildren(childNode, type);
+					}
 				}
-				ParentNodeData.NumSelectedFiles = NewNumSelectedFiles;
-				UpdateImage(ParentNode);
+				parentNodeData._numSelectedFiles = newNumSelectedFiles;
+				UpdateImage(parentNode);
 			}
 		}
 
-		private void UpdateImage(TreeNode Node)
+		private static void UpdateImage(TreeNode node)
 		{
-			TreeNodeData NodeData = (TreeNodeData)Node.Tag;
-			int ImageIndex = (NodeData.Folder != null)? 0 : 3;
-			ImageIndex += (NodeData.NumSelectedFiles == 0)? 0 : (NodeData.NumSelectedFiles < NodeData.NumFiles || (NodeData.Folder != null && !NodeData.Folder.bEmptyAfterClean))? 1 : 2;
-			Node.ImageIndex = ImageIndex;
-			Node.SelectedImageIndex = ImageIndex;
+			TreeNodeData nodeData = (TreeNodeData)node.Tag;
+			int imageIndex = (nodeData._folder != null) ? 0 : 3;
+			imageIndex += (nodeData._numSelectedFiles == 0) ? 0 : (nodeData._numSelectedFiles < nodeData._numFiles || (nodeData._folder != null && !nodeData._folder._emptyAfterClean)) ? 1 : 2;
+			node.ImageIndex = imageIndex;
+			node.SelectedImageIndex = imageIndex;
 		}
 
 		private void CleanBtn_Click(object sender, EventArgs e)
 		{
-			List<FileInfo> FilesToSync = new List<FileInfo>();
-			List<FileInfo> FilesToDelete = new List<FileInfo>();
-			List<DirectoryInfo> DirectoriesToDelete = new List<DirectoryInfo>();
-			foreach(TreeNode RootNode in TreeView.Nodes)
+			List<FileInfo> filesToSync = new List<FileInfo>();
+			List<FileInfo> filesToDelete = new List<FileInfo>();
+			List<DirectoryInfo> directoriesToDelete = new List<DirectoryInfo>();
+			foreach (TreeNode? rootNode in TreeView.Nodes)
 			{
-				FindSelection(RootNode, FilesToSync, FilesToDelete, DirectoriesToDelete);
+				if (rootNode != null)
+				{
+					FindSelection(rootNode, filesToSync, filesToDelete, directoriesToDelete);
+				}
 			}
 
-			string ErrorMessage;
-			if(ModalTask.Execute(this, new DeleteFilesTask(PerforceClient, FilesToSync, FilesToDelete, DirectoriesToDelete), "Clean Workspace", "Cleaning files, please wait...", out ErrorMessage) != ModalTaskResult.Succeeded && !String.IsNullOrEmpty(ErrorMessage))
+			ModalTask? result = ModalTask.Execute(this, "Clean Workspace", "Cleaning files, please wait...", x => DeleteFilesTask.RunAsync(_perforceSettings, filesToSync, filesToDelete, directoriesToDelete, _logger, x), ModalTaskFlags.Quiet);
+			if (result != null && result.Failed)
 			{
-				FailedToDeleteWindow FailedToDelete = new FailedToDeleteWindow();
-				FailedToDelete.FileList.Text = ErrorMessage;
-				FailedToDelete.FileList.SelectionStart = 0;
-				FailedToDelete.FileList.SelectionLength = 0;
-				FailedToDelete.ShowDialog();
+				using FailedToDeleteWindow failedToDelete = new FailedToDeleteWindow();
+				failedToDelete.FileList.Text = result.Error;
+				failedToDelete.FileList.SelectionStart = 0;
+				failedToDelete.FileList.SelectionLength = 0;
+				failedToDelete.ShowDialog();
 			}
 		}
 
-		private void FindSelection(TreeNode Node, List<FileInfo> FilesToSync, List<FileInfo> FilesToDelete, List<DirectoryInfo> DirectoriesToDelete)
+		private static void FindSelection(TreeNode node, List<FileInfo> filesToSync, List<FileInfo> filesToDelete, List<DirectoryInfo> directoriesToDelete)
 		{
-			TreeNodeData NodeData = (TreeNodeData)Node.Tag;
-			if(NodeData.File != null)
+			TreeNodeData nodeData = (TreeNodeData)node.Tag;
+			if (nodeData._file != null)
 			{
-				if(NodeData.NumSelectedFiles > 0)
+				if (nodeData._numSelectedFiles > 0)
 				{
-					if(NodeData.Action == TreeNodeAction.Delete)
+					if (nodeData._action == TreeNodeAction.Delete)
 					{
-						FilesToDelete.Add(NodeData.File);
+						filesToDelete.Add(nodeData._file);
 					}
 					else
 					{
-						FilesToSync.Add(NodeData.File);
+						filesToSync.Add(nodeData._file);
 					}
 				}
 			}
 			else
 			{
-				foreach(TreeNode ChildNode in Node.Nodes)
+				foreach (TreeNode? childNode in node.Nodes)
 				{
-					FindSelection(ChildNode, FilesToSync, FilesToDelete, DirectoriesToDelete);
+					if (childNode != null)
+					{
+						FindSelection(childNode, filesToSync, filesToDelete, directoriesToDelete);
+					}
 				}
-				if(NodeData.Folder != null && NodeData.Folder.bEmptyAfterClean && NodeData.NumSelectedFiles == NodeData.NumFiles)
+				if (nodeData._folder != null && nodeData._folder._emptyAfterClean && nodeData._numSelectedFiles == nodeData._numFiles)
 				{
-					DirectoriesToDelete.Add(NodeData.Folder.Directory);
+					directoriesToDelete.Add(nodeData._folder._directory);
 				}
 			}
 		}
 
 		private void SelectAllBtn_Click(object sender, EventArgs e)
 		{
-			foreach(TreeNode Node in TreeView.Nodes)
+			foreach (TreeNode? node in TreeView.Nodes)
 			{
-				SetSelected(Node, SelectionType.All);
+				if (node != null)
+				{
+					SetSelected(node, SelectionType.All);
+				}
 			}
 		}
 
 		private void SelectMissingBtn_Click(object sender, EventArgs e)
 		{
-			foreach(TreeNode Node in TreeView.Nodes)
+			foreach (TreeNode? node in TreeView.Nodes)
 			{
-				SetSelected(Node, SelectionType.Missing);
+				if (node != null)
+				{
+					SetSelected(node, SelectionType.Missing);
+				}
 			}
 		}
 
 		private void FolderContextMenu_SelectAll_Click(object sender, EventArgs e)
 		{
-			TreeNode Node = (TreeNode)FolderContextMenu.Tag;
-			SetSelected(Node, SelectionType.All);
+			TreeNode node = (TreeNode)FolderContextMenu.Tag;
+			SetSelected(node, SelectionType.All);
 		}
 
 		private void FolderContextMenu_SelectSafeToDelete_Click(object sender, EventArgs e)
 		{
-			TreeNode Node = (TreeNode)FolderContextMenu.Tag;
-			SetSelected(Node, SelectionType.SafeToDelete);
+			TreeNode node = (TreeNode)FolderContextMenu.Tag;
+			SetSelected(node, SelectionType.SafeToDelete);
 		}
 
 		private void FolderContextMenu_SelectEmptyFolder_Click(object sender, EventArgs e)
 		{
-			TreeNode Node = (TreeNode)FolderContextMenu.Tag;
-			SetSelected(Node, SelectionType.Empty);
+			TreeNode node = (TreeNode)FolderContextMenu.Tag;
+			SetSelected(node, SelectionType.Empty);
 		}
 
 		private void FolderContextMenu_SelectNone_Click(object sender, EventArgs e)
 		{
-			TreeNode Node = (TreeNode)FolderContextMenu.Tag;
-			SetSelected(Node, SelectionType.None);
+			TreeNode node = (TreeNode)FolderContextMenu.Tag;
+			SetSelected(node, SelectionType.None);
 		}
 
 		private void FolderContextMenu_OpenWithExplorer_Click(object sender, EventArgs e)
 		{
-			TreeNode Node = (TreeNode)FolderContextMenu.Tag;
-			TreeNodeData NodeData = (TreeNodeData)Node.Tag;
+			TreeNode node = (TreeNode)FolderContextMenu.Tag;
+			TreeNodeData nodeData = (TreeNodeData)node.Tag;
 
-			if (NodeData.Folder != null)
+			if (nodeData._folder != null)
 			{
-				Process.Start("explorer.exe", String.Format("\"{0}\"", NodeData.Folder.Directory.FullName));
+				Process.Start("explorer.exe", String.Format("\"{0}\"", nodeData._folder._directory.FullName));
 			}
-			else if (NodeData.File != null)
+			else if (nodeData._file != null)
 			{
-				Process.Start("explorer.exe", String.Format("\"{0}\"", NodeData.File.Directory.FullName));
+				Process.Start("explorer.exe", String.Format("\"{0}\"", nodeData._file.Directory!.FullName));
 			}
 		}
 	}

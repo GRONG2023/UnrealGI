@@ -2,6 +2,8 @@
 
 #include "AbstractNavData.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AbstractNavData)
+
 const FNavPathType FAbstractNavigationPath::Type;
 
 FAbstractNavigationPath::FAbstractNavigationPath()
@@ -46,7 +48,7 @@ void AAbstractNavData::PostLoad()
 	// marking as pending kill might seem an overkill, but one of the things 
 	// this changes aims to achieve is to get rig of the excess number of 
 	// AAbstractNavData instances. "There should be only one!"
-	MarkPendingKill();
+	MarkAsGarbage();
 }
 
 FPathFindingResult AAbstractNavData::FindPathAbstract(const FNavAgentProperties& AgentProperties, const FPathFindingQuery& Query)
@@ -86,3 +88,4 @@ bool AAbstractNavData::RaycastAbstract(const ANavigationData* NavDataInstance, c
 {
 	return false;
 }
+

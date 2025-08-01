@@ -5,8 +5,10 @@
 #include "CoreMinimal.h"
 #include "ISettingsCategory.h"
 #include "ISettingsSection.h"
+#include "Misc/NamePermissionList.h"
 
 class FSettingsSection;
+class IReload;
 class SWidget;
 
 /**
@@ -70,6 +72,15 @@ public:
 	 */
 	void RemoveSection( const FName& SectionName );
 
+#if WITH_RELOAD
+	/**
+	 * Invoked when reinstancing is complete.  Allows for settings objects to update their settings object pointers.
+	 * 
+	 * @param Reload The active reload
+	 */
+	void ReinstancingComplete( IReload* Reload );
+#endif
+
 public:
 
 	// ISettingsCategory interface
@@ -89,9 +100,16 @@ public:
 		return Name;
 	}
 
-	virtual ISettingsSectionPtr GetSection( const FName& SectionName ) const override;
+	/** Gets a section if it's visible according to IsSectionVisiblePermissionList. bIgnoreVisibility=true will return the section even if it's filtered */
+	virtual ISettingsSectionPtr GetSection( const FName& SectionName, bool bIgnoreVisibility = false ) const override;
 
-	virtual int32 GetSections( TArray<ISettingsSectionPtr>& OutSections ) const override;
+	/** Gets all visible sections according to IsSectionVisiblePermissionList. bIgnoreVisibility=true will return sections even if they're filtered */
+	virtual int32 GetSections( TArray<ISettingsSectionPtr>& OutSections, bool bIgnoreVisibility = false ) const override;
+	
+	virtual FNamePermissionList* GetSectionVisibilityPermissionList() override
+	{
+		return &SectionVisibilityPermissionList;
+	}
 
 private:
 
@@ -106,4 +124,7 @@ private:
 
 	/** Holds the category's name. */
 	FName Name;
+
+	/** Determines which sections are returned with GetSection and GetSections */
+	FNamePermissionList SectionVisibilityPermissionList;
 };

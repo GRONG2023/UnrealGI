@@ -2,12 +2,14 @@
 
 #pragma once
 
+#include "HAL/Platform.h"
+#include "Math/Vector2D.h"
+#include "SteeringUtility.h"
 #include "VehicleSystemTemplate.h"
 #include "VehicleUtility.h"
-#include "SteeringUtility.h"
 
 #if VEHICLE_DEBUGGING_ENABLED
-PRAGMA_DISABLE_OPTIMIZATION
+UE_DISABLE_OPTIMIZATION
 #endif
 
 namespace Chaos
@@ -37,7 +39,7 @@ namespace Chaos
 
 		float MaxSteeringAngle;
 
-		FNormalisedGraph SpeedVsSteeringCurve;
+		FGraph SpeedVsSteeringCurve;
 	};
 
 	class CHAOSVEHICLESCORE_API FAckermannSim : public TVehicleSystem<FSimpleSteeringConfig>
@@ -82,6 +84,11 @@ namespace Chaos
 		{
 		}
 
+		float GetSteeringFromVelocity(float VelocityMPH)
+		{
+			return Setup().SpeedVsSteeringCurve.EvaluateY(VelocityMPH);
+		}
+
 		float GetSteeringAngle(float InNormSteering, float MaxSteeringAngle, float WheelSide)
 		{
 			float OutSteeringAngle = 0.f;
@@ -118,12 +125,11 @@ namespace Chaos
 
 			return OutSteeringAngle;
 		}
-
 		FAckermannSim Ackermann;
 	};
 
 } // namespace Chaos
 
 #if VEHICLE_DEBUGGING_ENABLED
-PRAGMA_ENABLE_OPTIMIZATION
+UE_ENABLE_OPTIMIZATION
 #endif

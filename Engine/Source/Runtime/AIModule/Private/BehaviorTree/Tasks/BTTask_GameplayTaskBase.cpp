@@ -4,11 +4,13 @@
 #include "GameFramework/Actor.h"
 #include "VisualLogger/VisualLogger.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BTTask_GameplayTaskBase)
+
 UBTTask_GameplayTaskBase::UBTTask_GameplayTaskBase(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
 	NodeName = "GameplayTask Base";
+	INIT_TASK_NODE_NOTIFY_FLAGS();
 	bWaitForGameplayTask = true;
-	bNotifyTaskFinished = true;
 }
 
 EBTNodeResult::Type UBTTask_GameplayTaskBase::StartGameplayTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, UAITask& Task)
@@ -33,15 +35,20 @@ EBTNodeResult::Type UBTTask_GameplayTaskBase::StartGameplayTask(UBehaviorTreeCom
 
 EBTNodeResult::Type UBTTask_GameplayTaskBase::AbortTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
 {
-	if (bWaitForGameplayTask)
-	{
-		FBTGameplayTaskMemory* MyMemory = CastInstanceNodeMemory<FBTGameplayTaskMemory>(NodeMemory);
-		MyMemory->bObserverCanFinishTask = false;
+	FBTGameplayTaskMemory* MyMemory = CastInstanceNodeMemory<FBTGameplayTaskMemory>(NodeMemory);
+	MyMemory->bObserverCanFinishTask = false;
 
-		UAITask* TaskOb = MyMemory->Task.Get();
-		if (TaskOb && !TaskOb->IsFinished())
+	UAITask* TaskOb = MyMemory->Task.Get();
+	if (TaskOb && !TaskOb->IsFinished())
+	{
+		if (bWaitForGameplayTask)
 		{
 			TaskOb->ExternalCancel();
+		}
+		else
+		{
+			// Inform the task that we're done and no longer want to receive OnGameplayTaskDeactivated callback
+			TaskOb->MarkOwnerFinished();
 		}
 	}
 
@@ -70,12 +77,15 @@ void UBTTask_GameplayTaskBase::OnGameplayTaskDeactivated(UGameplayTask& Task)
 		if (BehaviorComp)
 		{
 			uint8* RawMemory = BehaviorComp->GetNodeMemory(this, BehaviorComp->FindInstanceContainingNode(this));
-			FBTGameplayTaskMemory* MyMemory = CastInstanceNodeMemory<FBTGameplayTaskMemory>(RawMemory);
-
-			if (MyMemory->bObserverCanFinishTask && (AITask == MyMemory->Task))
+			const FBTGameplayTaskMemory* MyMemory = CastInstanceNodeMemory<FBTGameplayTaskMemory>(RawMemory);
+			if (ensureMsgf(MyMemory, TEXT("OnGameplayTaskDeactivated called after behavior tree instance was shutdown."
+				" Make sure that AITask was cancelled ('ExternalCancel'), ended ('TaskOwnerEnded') or informed that owner is done ('MarkOwnerFinished')")))
 			{
-				const EBTNodeResult::Type FinishResult = DetermineGameplayTaskResult(*AITask);
-				FinishLatentTask(*BehaviorComp, FinishResult);
+				if (MyMemory->bObserverCanFinishTask && (AITask == MyMemory->Task))
+				{
+					const EBTNodeResult::Type FinishResult = DetermineGameplayTaskResult(*AITask);
+					FinishLatentTask(*BehaviorComp, FinishResult);
+				}
 			}
 		}
 	}
@@ -84,4 +94,14 @@ void UBTTask_GameplayTaskBase::OnGameplayTaskDeactivated(UGameplayTask& Task)
 uint16 UBTTask_GameplayTaskBase::GetInstanceMemorySize() const
 {
 	return sizeof(FBTGameplayTaskMemory);
+}
+
+void UBTTask_GameplayTaskBase::InitializeMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryInit::Type InitType) const
+{
+	InitializeNodeMemory<FBTGameplayTaskMemory>(NodeMemory, InitType);
+}
+
+void UBTTask_GameplayTaskBase::CleanupMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryClear::Type CleanupType) const
+{
+	CleanupNodeMemory<FBTGameplayTaskMemory>(NodeMemory, CleanupType);
 }

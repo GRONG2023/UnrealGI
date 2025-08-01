@@ -4,33 +4,39 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "AssetSelection.h" // FExtraPlaceAssetOptions
 #include "InputCoreTypes.h"
 #include "GameFramework/Actor.h"
 #include "Camera/CameraComponent.h"
-#include "UnrealWidget.h"
+#include "UnrealWidgetFwd.h"
 #include "EditorViewportClient.h"
 #include "UObject/ObjectKey.h"
 #include "UnrealEdMisc.h"
+#include "Elements/Framework/TypedElementListFwd.h"
 
 struct FAssetData;
 struct FMinimalViewInfo;
 class FCanvas;
 class FDragTool;
 class HModel;
+class IAssetFactoryInterface;
 class ILevelEditor;
 class SLevelViewport;
 class UActorFactory;
 class UModel;
+class UTypedElementSelectionSet;
 struct FWorldContext;
+struct FTypedElementHandle;
+struct FGizmoState;
 
 /** Describes an object that's currently hovered over in the level viewport */
 struct FViewportHoverTarget
 {
 	/** The actor we're drawing the hover effect for, or NULL */
-	AActor* HoveredActor;
+	TObjectPtr<AActor> HoveredActor;
 
 	/** The BSP model we're drawing the hover effect for, or NULL */
-	UModel* HoveredModel;
+	TObjectPtr<UModel> HoveredModel;
 
 	/** Surface index on the BSP model that currently has a hover effect */
 	uint32 ModelSurfaceIndex;
@@ -39,14 +45,14 @@ struct FViewportHoverTarget
 	/** Construct from an actor */
 	FViewportHoverTarget( AActor* InActor )
 		: HoveredActor( InActor ),
-			HoveredModel( NULL ),
+			HoveredModel( nullptr ),
 			ModelSurfaceIndex( INDEX_NONE )
 	{
 	}
 
 	/** Construct from an BSP model and surface index */
 	FViewportHoverTarget( UModel* InModel, int32 InSurfaceIndex )
-		: HoveredActor( NULL ),
+		: HoveredActor( nullptr ),
 			HoveredModel( InModel ),
 			ModelSurfaceIndex( InSurfaceIndex )
 	{
@@ -66,7 +72,7 @@ struct FViewportHoverTarget
 	}
 };
 
-struct UNREALED_API FTrackingTransaction
+struct FTrackingTransaction
 {
 	/** State of this transaction */
 	struct ETransactionState
@@ -79,40 +85,43 @@ struct UNREALED_API FTrackingTransaction
 		};
 	};
 
-	FTrackingTransaction();
-	~FTrackingTransaction();
+	UNREALED_API FTrackingTransaction();
+	UNREALED_API ~FTrackingTransaction();
 
 	/**
 	 * Initiates a transaction.
 	 */
-	void Begin(const FText& Description, AActor* AdditionalActor = nullptr);
+	UNREALED_API void Begin(const FText& Description, AActor* AdditionalActor = nullptr);
 
-	void End();
+	UNREALED_API void End();
 
-	void Cancel();
+	UNREALED_API void Cancel();
 
 	/** Begin a pending transaction, which won't become a real transaction until PromotePendingToActive is called */
-	void BeginPending(const FText& Description);
+	UNREALED_API void BeginPending(const FText& Description);
 
 	/** Promote a pending transaction (if any) to an active transaction */
-	void PromotePendingToActive();
+	UNREALED_API void PromotePendingToActive();
 
 	bool IsActive() const { return TrackingTransactionState == ETransactionState::Active; }
 
 	bool IsPending() const { return TrackingTransactionState == ETransactionState::Pending; }
 	
-	int32 TransCount;
+	int32 TransCount = 0;
 
 private:
 
+	UNREALED_API const UTypedElementSelectionSet* GetSelectionSet() const;
+	UNREALED_API UTypedElementSelectionSet* GetMutableSelectionSet() const;
+
 	/** Editor selection changed delegate handler */	
-	void OnEditorSelectionChanged(UObject* NewSelection);
+	UNREALED_API void OnEditorSelectionChanged(const UTypedElementSelectionSet* InSelectionSet);
 
 	/** The current transaction. */
-	class FScopedTransaction*	ScopedTransaction;
+	class FScopedTransaction* ScopedTransaction = nullptr;
 
 	/** This is set to Active if TrackingStarted() has initiated a transaction, Pending if a transaction will begin before the next delta change */
-	ETransactionState::Enum TrackingTransactionState;
+	ETransactionState::Enum TrackingTransactionState = ETransactionState::Inactive;
 
 	/** The description to use if a pending transaction turns into a real transaction */
 	FText PendingDescription;
@@ -123,10 +132,10 @@ private:
 };
 
 /** Interface for objects who want to lock the viewport to an actor. */
-struct UNREALED_API FLevelViewportActorLock
+struct FLevelViewportActorLock
 {
 	/** Represents no lock. */
-	static const FLevelViewportActorLock None;
+	static UNREALED_API const FLevelViewportActorLock None;
 
 	/** Creates a new instance of FLevelViewportActorLock. */
 	FLevelViewportActorLock() 
@@ -154,10 +163,14 @@ struct UNREALED_API FLevelViewportActorLock
 };
 
 /** */
-class UNREALED_API FLevelEditorViewportClient : public FEditorViewportClient
+class FLevelEditorViewportClient : public FEditorViewportClient
 {
+	friend class FActorElementLevelEditorViewportInteractionCustomization;
+	friend class FComponentElementLevelEditorViewportInteractionCustomization;
+
 public:
 
+	//~ TODO: UE_DEPRECATED(5.4, "Use GetDropPreviewElements instead.")
 	/** @return Returns the current global drop preview actor, or a NULL pointer if we don't currently have one */
 	static const TArray< TWeakObjectPtr<AActor> >& GetDropPreviewActors()
 	{
@@ -169,55 +182,59 @@ public:
 	/**
 	 * Constructor
 	 */
-	FLevelEditorViewportClient(const TSharedPtr<class SLevelViewport>& InLevelViewport);
+	UNREALED_API FLevelEditorViewportClient(const TSharedPtr<class SLevelViewport>& InLevelViewport);
 
 	/**
 	 * Destructor
 	 */
-	virtual ~FLevelEditorViewportClient();
+	UNREALED_API virtual ~FLevelEditorViewportClient();
 
 	////////////////////////////
 	// FViewElementDrawer interface
-	virtual void Draw(const FSceneView* View,FPrimitiveDrawInterface* PDI) override;
+	UNREALED_API virtual void Draw(const FSceneView* View,FPrimitiveDrawInterface* PDI) override;
 	// End of FViewElementDrawer interface
 	
-	virtual FSceneView* CalcSceneView(FSceneViewFamily* ViewFamily, const EStereoscopicPass StereoPass = eSSP_FULL) override;
+	UNREALED_API virtual FSceneView* CalcSceneView(FSceneViewFamily* ViewFamily, const int32 StereoViewIndex = INDEX_NONE) override;
 
 	////////////////////////////
 	// FEditorViewportClient interface
-	virtual void DrawCanvas( FViewport& InViewport, FSceneView& View, FCanvas& Canvas ) override;
-	virtual bool InputKey(FViewport* Viewport, int32 ControllerId, FKey Key, EInputEvent Event, float AmountDepressed = 1.f, bool bGamepad=false) override;
-	virtual bool InputAxis(FViewport* Viewport, int32 ControllerId, FKey Key, float Delta, float DeltaTime, int32 NumSamples=1, bool bGamepad=false) override;
-	virtual EMouseCursor::Type GetCursor(FViewport* Viewport,int32 X,int32 Y) override;
-	virtual void CapturedMouseMove(FViewport* InViewport, int32 InMouseX, int32 InMouseY) override;
-	virtual void MouseMove(FViewport* InViewport, int32 x, int32 y) override;
-	virtual void Tick(float DeltaSeconds) override;
-	virtual bool InputWidgetDelta( FViewport* Viewport, EAxisList::Type CurrentAxis, FVector& Drag, FRotator& Rot, FVector& Scale ) override;
-	virtual TSharedPtr<FDragTool> MakeDragTool( EDragTool::Type DragToolType ) override;
+	UNREALED_API virtual void DrawCanvas( FViewport& InViewport, FSceneView& View, FCanvas& Canvas ) override;
+	UNREALED_API virtual bool InputKey(const FInputKeyEventArgs& InEventArgs) override;
+	UNREALED_API virtual bool InputAxis(FViewport* Viewport, FInputDeviceId DeviceId, FKey Key, float Delta, float DeltaTime, int32 NumSamples=1, bool bGamepad=false) override;
+	UNREALED_API virtual EMouseCursor::Type GetCursor(FViewport* Viewport,int32 X,int32 Y) override;
+	UNREALED_API virtual void CapturedMouseMove(FViewport* InViewport, int32 InMouseX, int32 InMouseY) override;
+	UNREALED_API virtual void MouseMove(FViewport* InViewport, int32 x, int32 y) override;
+	UNREALED_API virtual void Tick(float DeltaSeconds) override;
+	UNREALED_API virtual bool InputWidgetDelta( FViewport* Viewport, EAxisList::Type CurrentAxis, FVector& Drag, FRotator& Rot, FVector& Scale ) override;
+	UNREALED_API virtual TSharedPtr<FDragTool> MakeDragTool( EDragTool::Type DragToolType ) override;
 	virtual bool IsLevelEditorClient() const override { return ParentLevelEditor.IsValid(); }
-	virtual void TrackingStarted( const struct FInputEventState& InInputState, bool bIsDraggingWidget, bool bNudge ) override;
-	virtual void TrackingStopped() override;
-	virtual void AbortTracking() override;
-	virtual FWidget::EWidgetMode GetWidgetMode() const override;
-	virtual FVector GetWidgetLocation() const override;
-	virtual FMatrix GetWidgetCoordSystem() const override;
-	virtual void SetupViewForRendering( FSceneViewFamily& ViewFamily, FSceneView& View ) override;
-	virtual FLinearColor GetBackgroundColor() const override;
-	virtual int32 GetCameraSpeedSetting() const override;
-	virtual void SetCameraSpeedSetting(int32 SpeedSetting) override;
-	virtual float GetCameraSpeedScalar() const override;
-	virtual void SetCameraSpeedScalar(float SpeedScalar) override;
-	virtual void ReceivedFocus(FViewport* InViewport) override;
-	virtual void LostFocus(FViewport* InViewport) override;
-	virtual void ProcessClick(FSceneView& View, HHitProxy* HitProxy, FKey Key, EInputEvent Event, uint32 HitX, uint32 HitY) override;
-	virtual UWorld* GetWorld() const override;
-	virtual void BeginCameraMovement(bool bHasMovement) override;
-	virtual void EndCameraMovement() override;
-	virtual void SetVREditView(bool bGameViewEnable) override;
-	virtual bool GetPivotForOrbit(FVector& Pivot) const override;
-	virtual bool ShouldScaleCameraSpeedByDistance() const override;
+	UNREALED_API virtual void TrackingStarted( const struct FInputEventState& InInputState, bool bIsDraggingWidget, bool bNudge ) override;
+	UNREALED_API virtual void TrackingStopped() override;
+	UNREALED_API virtual void AbortTracking() override;
+	UNREALED_API virtual UE::Widget::EWidgetMode GetWidgetMode() const override;
+	UNREALED_API virtual FVector GetWidgetLocation() const override;
+	UNREALED_API virtual FMatrix GetWidgetCoordSystem() const override;
+	UNREALED_API virtual void SetupViewForRendering( FSceneViewFamily& ViewFamily, FSceneView& View ) override;
+	UNREALED_API virtual FLinearColor GetBackgroundColor() const override;
+	UNREALED_API virtual int32 GetCameraSpeedSetting() const override;
+	UNREALED_API virtual void SetCameraSpeedSetting(int32 SpeedSetting) override;
+	UNREALED_API virtual float GetCameraSpeedScalar() const override;
+	UNREALED_API virtual void SetCameraSpeedScalar(float SpeedScalar) override;
+	UNREALED_API virtual void ReceivedFocus(FViewport* InViewport) override;
+	UNREALED_API virtual void LostFocus(FViewport* InViewport) override;
+	UNREALED_API virtual void ProcessClick(FSceneView& View, HHitProxy* HitProxy, FKey Key, EInputEvent Event, uint32 HitX, uint32 HitY) override;
+	UNREALED_API virtual UWorld* GetWorld() const override;
+	UNREALED_API virtual void BeginCameraMovement(bool bHasMovement) override;
+	UNREALED_API virtual void EndCameraMovement() override;
+	UNREALED_API virtual void SetVREditView(bool bGameViewEnable) override;
+	UNREALED_API virtual bool GetPivotForOrbit(FVector& Pivot) const override;
+	UNREALED_API virtual bool ShouldScaleCameraSpeedByDistance() const override;
 
-	virtual bool OverrideHighResScreenshotCaptureRegion(FIntRect& OutCaptureRegion) override;
+	UNREALED_API virtual bool OverrideHighResScreenshotCaptureRegion(FIntRect& OutCaptureRegion) override;
+
+	UNREALED_API virtual bool BeginTransform(const FGizmoState& InState) override;
+	UNREALED_API virtual bool EndTransform(const FGizmoState& InState) override;
+	
 
 	/** Sets a flag for this frame indicating that the camera has been cut, and temporal effects (such as motion blur) should be reset */
 	void SetIsCameraCut()
@@ -233,97 +250,115 @@ public:
 	/** 
 	 * Initialize visibility flags
 	 */
-	void InitializeVisibilityFlags();
+	UNREALED_API void InitializeVisibilityFlags();
+
+	/**
+	 * Initialize viewport interaction
+	 */
+	UNREALED_API void InitializeViewportInteraction();
 
 	/**
 	 * Reset the camera position and rotation.  Used when creating a new level.
 	 */
-	void ResetCamera();
+	UNREALED_API void ResetCamera();
 
 	/**
 	 * Reset the view for a new map 
 	 */
-	void ResetViewForNewMap();
+	UNREALED_API void ResetViewForNewMap();
 
 	/**
 	 * Stores camera settings that may be adversely affected by PIE, so that they may be restored later
 	 */
-	void PrepareCameraForPIE();
+	UNREALED_API void PrepareCameraForPIE();
 
 	/**
 	 * Restores camera settings that may be adversely affected by PIE
 	 */
-	void RestoreCameraFromPIE();
+	UNREALED_API void RestoreCameraFromPIE();
 
 	/**
 	 * Updates the audio listener for this viewport 
 	 *
 	 * @param View	The scene view to use when calculate the listener position
 	 */
-	void UpdateAudioListener( const FSceneView& View );
+	UNREALED_API void UpdateAudioListener( const FSceneView& View );
 
 	/** Determines if the new MoveCanvas movement should be used */
-	bool ShouldUseMoveCanvasMovement (void);
+	UNREALED_API bool ShouldUseMoveCanvasMovement (void);
 
 	/** 
 	 * Returns true if the passed in volume is visible in the viewport (due to volume actor visibility flags)
 	 *
 	 * @param VolumeActor	The volume to check
 	 */
-	bool IsVolumeVisibleInViewport( const AActor& VolumeActor ) const;
+	UNREALED_API bool IsVolumeVisibleInViewport( const AActor& VolumeActor ) const;
 
 	/**
 	 * Updates or resets view properties such as aspect ratio, FOV, location etc to match that of any actor we are locked to
 	 */
-	void UpdateViewForLockedActor(float DeltaTime=0.f);
+	UNREALED_API void UpdateViewForLockedActor(float DeltaTime=0.f);
 
 	/**
 	 * Returns the horizontal axis for this viewport.
 	 */
-	EAxisList::Type GetHorizAxis() const;
+	UNREALED_API EAxisList::Type GetHorizAxis() const;
 
 	/**
 	 * Returns the vertical axis for this viewport.
 	 */
-	EAxisList::Type GetVertAxis() const;
+	UNREALED_API EAxisList::Type GetVertAxis() const;
 
-	virtual void NudgeSelectedObjects( const struct FInputEventState& InputState ) override;
+	UNREALED_API virtual void NudgeSelectedObjects( const struct FInputEventState& InputState ) override;
 
 	/**
 	 * Moves the viewport camera according to the locked actors location and rotation
 	 */
-	void MoveCameraToLockedActor();
+	UNREALED_API void MoveCameraToLockedActor();
 
 	/**
 	 * Check to see if this actor is locked by the viewport
 	 */
-	bool IsActorLocked(const TWeakObjectPtr<const AActor> InActor) const;
+	UNREALED_API bool IsActorLocked(const TWeakObjectPtr<const AActor> InActor) const;
 
 	/**
 	 * Check to see if any actor is locked by the viewport
 	 */
-	bool IsAnyActorLocked() const;
+	UNREALED_API bool IsAnyActorLocked() const;
 
-	void ApplyDeltaToActors( const FVector& InDrag, const FRotator& InRot, const FVector& InScale );
-	void ApplyDeltaToActor( AActor* InActor, const FVector& InDeltaDrag, const FRotator& InDeltaRot, const FVector& InDeltaScale );
-	void ApplyDeltaToComponent(USceneComponent* InComponent, const FVector& InDeltaDrag, const FRotator& InDeltaRot, const FVector& InDeltaScale);
+	UNREALED_API void ApplyDeltaToActors( const FVector& InDrag, const FRotator& InRot, const FVector& InScale );
+	UNREALED_API void ApplyDeltaToActor( AActor* InActor, const FVector& InDeltaDrag, const FRotator& InDeltaRot, const FVector& InDeltaScale );
+	UNREALED_API void ApplyDeltaToComponent(USceneComponent* InComponent, const FVector& InDeltaDrag, const FRotator& InDeltaRot, const FVector& InDeltaScale);
+	
+	UNREALED_API void ApplyDeltaToSelectedElements(const FTransform& InDeltaTransform);
+	UNREALED_API void ApplyDeltaToElement(const FTypedElementHandle& InElementHandle, const FTransform& InDeltaTransform);
 
-	virtual void SetIsSimulateInEditorViewport( bool bInIsSimulateInEditorViewport ) override;
+	UNREALED_API void MirrorSelectedActors(const FVector& InMirrorScale);
+	UNREALED_API void MirrorSelectedElements(const FVector& InMirrorScale);
+
+	UNREALED_API bool GetFocusBounds(FTypedElementListConstRef InElements, FBoxSphereBounds& OutBounds);
+
+	/**
+	 * Get the elements (from the current selection set) that this viewport can manipulate (eg, via the transform gizmo).
+	 */
+	UNREALED_API FTypedElementListConstRef GetElementsToManipulate(const bool bForceRefresh = false);
+
+	UNREALED_API virtual void SetIsSimulateInEditorViewport( bool bInIsSimulateInEditorViewport ) override;
 
 	/**
 	 *	Draw the texture streaming bounds.
 	 */
-	void DrawTextureStreamingBounds(const FSceneView* View,FPrimitiveDrawInterface* PDI);
+	UNREALED_API void DrawTextureStreamingBounds(const FSceneView* View,FPrimitiveDrawInterface* PDI);
 
 	/** GC references. */
-	void AddReferencedObjects( FReferenceCollector& Collector ) override;
+	UNREALED_API void AddReferencedObjects( FReferenceCollector& Collector ) override;
 	
 	/**
 	 * Copies layout and camera settings from the specified viewport
 	 *
 	 * @param InViewport The viewport to copy settings from
 	 */
-	void CopyLayoutFromViewport( const FLevelEditorViewportClient& InViewport );
+	UNREALED_API void CopyLayoutFromViewport( const FLevelEditorViewportClient& InViewport );
 
 	/**
 	 * Returns whether the provided unlocalized sprite category is visible in the viewport or not
@@ -332,7 +367,7 @@ public:
 	 *
 	 * @return	true if the specified category is visible in the viewport; false if it is not
 	 */
-	bool GetSpriteCategoryVisibility( const FName& InSpriteCategory ) const;
+	UNREALED_API bool GetSpriteCategoryVisibility( const FName& InSpriteCategory ) const;
 
 	/**
 	 * Returns whether the sprite category specified by the provided index is visible in the viewport or not
@@ -341,7 +376,7 @@ public:
 	 *
 	 * @return	true if the category specified by the index is visible in the viewport; false if it is not
 	 */
-	bool GetSpriteCategoryVisibility( int32 Index ) const;
+	UNREALED_API bool GetSpriteCategoryVisibility( int32 Index ) const;
 
 	/**
 	 * Sets the visibility of the provided unlocalized category to the provided value
@@ -349,7 +384,7 @@ public:
 	 * @param	InSpriteCategory	Sprite category to get the index of
 	 * @param	bVisible			true if the category should be made visible, false if it should be hidden
 	 */
-	void SetSpriteCategoryVisibility( const FName& InSpriteCategory, bool bVisible );
+	UNREALED_API void SetSpriteCategoryVisibility( const FName& InSpriteCategory, bool bVisible );
 
 	/**
 	 * Sets the visibility of the category specified by the provided index to the provided value
@@ -357,22 +392,24 @@ public:
 	 * @param	Index		Index of the sprite category to set the visibility of
 	 * @param	bVisible	true if the category should be made visible, false if it should be hidden
 	 */
-	void SetSpriteCategoryVisibility( int32 Index, bool bVisible );
+	UNREALED_API void SetSpriteCategoryVisibility( int32 Index, bool bVisible );
 
 	/**
 	 * Sets the visibility of all sprite categories to the provided value
 	 *
 	 * @param	bVisible	true if all the categories should be made visible, false if they should be hidden
 	 */
-	void SetAllSpriteCategoryVisibility( bool bVisible );
+	UNREALED_API void SetAllSpriteCategoryVisibility( bool bVisible );
 
-	void SetReferenceToWorldContext(FWorldContext& WorldContext);
+	UNREALED_API void SetReferenceToWorldContext(FWorldContext& WorldContext);
 
-	void RemoveReferenceToWorldContext(FWorldContext& WorldContext);
+	UNREALED_API void RemoveReferenceToWorldContext(FWorldContext& WorldContext);
 
+	//~ TODO: UE_DEPRECATED(5.4, "Use HasDropPreviewElements instead.")
 	/** Returns true if a placement dragging actor exists */
-	virtual bool HasDropPreviewActors() const override;
+	UNREALED_API virtual bool HasDropPreviewActors() const override;
 
+	//~ TODO: UE_DEPRECATED(5.4, "Use UpdateDropPreviewElements instead.")
 	/**
 	 * If dragging an actor for placement, this function updates its position.
 	 *
@@ -383,12 +420,19 @@ public:
 	 *
 	 * Returns true if preview actors were updated
 	 */
-	virtual bool UpdateDropPreviewActors(int32 MouseX, int32 MouseY, const TArray<UObject*>& DroppedObjects, bool& out_bDroppedObjectsVisible, class UActorFactory* FactoryToUse = NULL) override;
+	UNREALED_API virtual bool UpdateDropPreviewActors(int32 MouseX, int32 MouseY, const TArray<UObject*>& DroppedObjects, bool& out_bDroppedObjectsVisible, class UActorFactory* FactoryToUse = NULL) override;
 
+	//~ TODO: UE_DEPRECATED(5.4, "Use DestroyDropPreviewElements instead.")
 	/**
 	 * If dragging an actor for placement, this function destroys the actor.
 	 */
-	virtual void DestroyDropPreviewActors() override;
+	UNREALED_API virtual void DestroyDropPreviewActors() override;
+
+	UNREALED_API virtual bool HasDropPreviewElements() const override;
+	UNREALED_API virtual bool UpdateDropPreviewElements(int32 MouseX, int32 MouseY, 
+		const TArray<UObject*>& DroppedObjects, bool& out_bDroppedObjectsVisible, 
+		TScriptInterface<IAssetFactoryInterface> Factory = nullptr) override;
+	UNREALED_API virtual void DestroyDropPreviewElements() override;
 
 	/**
 	 * Checks the viewport to see if the given object can be dropped using the given mouse coordinates local to this viewport
@@ -397,72 +441,67 @@ public:
 	 * @param MouseY			The position of the mouse's Y coordinate
 	 * @param AssetInfo			Asset in question to be dropped
 	 */
-	virtual FDropQuery CanDropObjectsAtCoordinates(int32 MouseX, int32 MouseY, const FAssetData& AssetInfo) override;
+	UNREALED_API virtual FDropQuery CanDropObjectsAtCoordinates(int32 MouseX, int32 MouseY, const FAssetData& AssetInfo) override;
 
 	/**
 	 * Attempts to intelligently drop the given objects in the viewport, using the given mouse coordinates local to this viewport
 	 *
-	 * @param MouseX			 The position of the mouse's X coordinate
-	 * @param MouseY			 The position of the mouse's Y coordinate
-	 * @param DroppedObjects	 The Objects to be placed into the editor via this viewport
-	 * @param OutNewActors		 The new actor objects that were created
-	 * @param bOnlyDropOnTarget  Flag that when True, will only attempt a drop on the actor targeted by the Mouse position. Defaults to false.
-	 * @param bCreateDropPreview If true, a drop preview actor will be spawned instead of a normal actor.
-	 * @param bSelectActors		 If true, select the newly dropped actors (defaults: true)
-	 * @param FactoryToUse		 The preferred actor factory to use (optional)
+	 * @param MouseX			The position of the mouse's X coordinate
+	 * @param MouseY			The position of the mouse's Y coordinate
+	 * @param DroppedObjects	The asset objects to be placed into the editor via this viewport
+	 * @param OutNewItems		The new items that were created
+	 * @param Options			Additional options
 	 */
-	virtual bool DropObjectsAtCoordinates(int32 MouseX, int32 MouseY, const TArray<UObject*>& DroppedObjects, TArray<AActor*>& OutNewActors, bool bOnlyDropOnTarget = false, bool bCreateDropPreview = false, bool bSelectActors = true, UActorFactory* FactoryToUse = NULL ) override;
+	UNREALED_API virtual bool DropObjectsAtCoordinates(int32 MouseX, int32 MouseY, const TArray<UObject*>& DroppedObjects, 
+		TArray<FTypedElementHandle>& OutNewItems, const FDropObjectOptions& Options = FDropObjectOptions()) override;
+
+	//~ TODO: UE_DEPRECATED(5.4, "Use the overload that uses FDropObjectOptions instead.")
+	UNREALED_API virtual bool DropObjectsAtCoordinates(int32 MouseX, int32 MouseY, const TArray<UObject*>& DroppedObjects, TArray<AActor*>& OutNewActors, bool bOnlyDropOnTarget = false, bool bCreateDropPreview = false, bool bSelectActors = true, UActorFactory* FactoryToUse = NULL) override;
+
 
 	/**
 	 * Sets GWorld to the appropriate world for this client
 	 * 
 	 * @return the previous GWorld
 	 */
-	virtual UWorld* ConditionalSetWorld() override;
+	UNREALED_API virtual UWorld* ConditionalSetWorld() override;
 
 	/**
 	 * Restores GWorld to InWorld
 	 *
 	 * @param InWorld	The world to restore
 	 */
-	virtual void ConditionalRestoreWorld( UWorld* InWorld  ) override;
+	UNREALED_API virtual void ConditionalRestoreWorld( UWorld* InWorld  ) override;
 
 	/**
 	 *	Called to check if a material can be applied to an object, given the hit proxy
 	 */
-	bool CanApplyMaterialToHitProxy( const HHitProxy* HitProxy ) const;
+	UNREALED_API bool CanApplyMaterialToHitProxy( const HHitProxy* HitProxy ) const;
 
 	/**
 	 * Static: Adds a hover effect to the specified object
 	 *
 	 * @param	InHoverTarget	The hoverable object to add the effect to
 	 */
-	static void AddHoverEffect( const struct FViewportHoverTarget& InHoverTarget );
+	static UNREALED_API void AddHoverEffect( const struct FViewportHoverTarget& InHoverTarget );
 
 	/**
 	 * Static: Removes a hover effect to the specified object
 	 *
 	 * @param	InHoverTarget	The hoverable object to remove the effect from
 	 */
-	static void RemoveHoverEffect( const struct FViewportHoverTarget& InHoverTarget );
+	static UNREALED_API void RemoveHoverEffect( const struct FViewportHoverTarget& InHoverTarget );
 
 	/**
 	 * Static: Clears viewport hover effects from any objects that currently have that
 	 */
-	static void ClearHoverFromObjects();
-
-
-	/**
-	 * Helper function for ApplyDeltaTo* functions - modifies scale based on grid settings.
-	 * Currently public so it can be re-used in FEdModeBlueprint.
-	 */
-	void ModifyScale( USceneComponent* InComponent, FVector& ScaleDelta ) const;
+	static UNREALED_API void ClearHoverFromObjects();
 
 	/** Set the global ptr to the current viewport */
-	void SetCurrentViewport();
+	UNREALED_API void SetCurrentViewport();
 
 	/** Set the global ptr to the last viewport to receive a key press */
-	void SetLastKeyViewport();
+	UNREALED_API void SetLastKeyViewport();
 
 	/** 
 	 * Access the 'active' actor lock.
@@ -486,7 +525,7 @@ public:
 	 * Find a view component to use for the specified actor. Prioritizes selected 
 	 * components first, followed by camera components (then falls through to the first component that implements GetEditorPreviewInfo)
 	 */
-	static UActorComponent* FindViewComponentForActor(AActor const* Actor);
+	static UNREALED_API UActorComponent* FindViewComponentForActor(AActor const* Actor);
 
 	/** 
 	 * Find the camera component that is driving this viewport, in the following order of preference:
@@ -520,12 +559,12 @@ public:
 	/** 
 	 * Set the actor lock. This is the actor locked to the viewport via the viewport menus.
 	 */
-	void SetActorLock(AActor* Actor);
+	UNREALED_API void SetActorLock(AActor* Actor);
 
 	/** 
 	 * Set the actor lock. This is the actor locked to the viewport via the viewport menus.
 	 */
-	void SetActorLock(const FLevelViewportActorLock& InActorLock);
+	UNREALED_API void SetActorLock(const FLevelViewportActorLock& InActorLock);
 
 	/**
 	 * Get the actor locked to the viewport by cinematic tools like Sequencer.
@@ -546,12 +585,12 @@ public:
 	/**
 	 * Set the actor locked to the viewport by cinematic tools like Sequencer.
 	 */
-	void SetCinematicActorLock(AActor* Actor);
+	UNREALED_API void SetCinematicActorLock(AActor* Actor);
 
 	/**
 	 * Set the actor locked to the viewport by cinematic tools like Sequencer.
 	 */
-	void SetCinematicActorLock(const FLevelViewportActorLock& InActorLock);
+	UNREALED_API void SetCinematicActorLock(const FLevelViewportActorLock& InActorLock);
 
 	/**
 	 * Gets the previous actor lock. This is the actor locked to the viewport via the viewport menus.
@@ -570,29 +609,11 @@ public:
 	}
 
 	/** 
-	 * Set the actor locked to the viewport by Matinee.
-	 */
-	UE_DEPRECATED(4.27, "Matinee is being deprecated, use SetCinematicActorLock instead.")
-	void SetMatineeActorLock(AActor* Actor)
-	{
-		SetCinematicActorLock(Actor);
-	}
-
-	/** 
 	 * Check whether this viewport is locked to the specified actor
 	 */
 	bool IsLockedToActor(AActor* Actor) const
 	{
 		return ActorLocks.HasActorLocked(Actor);
-	}
-
-	/** 
-	 * Check whether this viewport is locked to display the matinee view
-	 */
-	UE_DEPRECATED(4.27, "Matinee is being deprecated, use IsLockedToCinematic instead.")
-	bool IsLockedToMatinee() const
-	{
-		return IsLockedToCinematic();
 	}
 
 	/**
@@ -603,13 +624,22 @@ public:
 		return ActorLocks.CinematicActorLock.HasValidLockedActor();
 	}
 
-	void UpdateHoveredObjects( const TSet<FViewportHoverTarget>& NewHoveredObjects );
+	UNREALED_API void UpdateHoveredObjects( const TSet<FViewportHoverTarget>& NewHoveredObjects );
 
 	/**
 	 * Calling SetViewportType from Dragtool_ViewportChange
 	 */
-	void SetViewportTypeFromTool(ELevelViewportType InViewportType);
+	UNREALED_API void SetViewportTypeFromTool(ELevelViewportType InViewportType);
 
+	/**
+	 * Static: Attempts to place the specified asset object in the level, returning one or more 
+	 * newly-created objects by their FTypedElementHandles if successful.
+	 */
+	static UNREALED_API TArray<FTypedElementHandle> TryPlacingAssetObject(ULevel* InLevel, UObject* AssetObject,
+		const UE::AssetPlacementUtil::FExtraPlaceAssetOptions& AdditionalParams,
+		const FViewportCursorLocation* CursorInformation = nullptr);
+
+	//~TODO: UE_DEPRECATED(5.4, "Use TryPlacingAssetObject instead")
 	/**
 	 * Static: Attempts to place the specified object in the level, returning one or more newly-created actors if successful.
 	 * IMPORTANT: The placed actor's location must be first set using GEditor->ClickLocation and GEditor->ClickPlane.
@@ -624,7 +654,9 @@ public:
 	 *
 	 * @return	true if the object was successfully used to place an actor; false otherwise
 	 */
-	static TArray<AActor*> TryPlacingActorFromObject( ULevel* InLevel, UObject* ObjToUse, bool bSelectActors, EObjectFlags ObjectFlags, UActorFactory* FactoryToUse, const FName Name = NAME_None, const FViewportCursorLocation* Cursor = nullptr);
+	static UNREALED_API TArray<AActor*> TryPlacingActorFromObject( ULevel* InLevel, UObject* ObjToUse, bool bSelectActors,
+		EObjectFlags ObjectFlags, UActorFactory* FactoryToUse, 
+		const FName Name = NAME_None, const FViewportCursorLocation* Cursor = nullptr);
 
 	/** 
 	 * Returns true if creating a preview actor in the viewport. 
@@ -642,9 +674,15 @@ public:
 	 *
 	 * @return	The material that uses this texture, or null if we couldn't find or create one
 	 */
-	static UObject* GetOrCreateMaterialFromTexture( UTexture* UnrealTexture );
+	static UNREALED_API UObject* GetOrCreateMaterialFromTexture( UTexture* UnrealTexture );
 
 	virtual bool UseAppTime() const override { return false; }
+
+	/**
+	 * Informs the renderer that the view is being interactively edited. (ex. rotation/translation gizmo).
+	 * This state is reset on tick.
+	 */
+	UNREALED_API void SetEditingThroughMovementWidget();
 
 protected:
 	/**
@@ -662,76 +700,74 @@ protected:
 	 *
 	 * @return true if asset can be dropped, false otherwise
 	 */
-	bool CanDropBlueprintAsset ( const struct FSelectedAssetInfo& );
+	UNREALED_API bool CanDropBlueprintAsset ( const struct FSelectedAssetInfo& );
+
+	/** Called when the widget mode changes. */
+	void OnWidgetModeChanged(UE::Widget::EWidgetMode NewMode);
 
 	/** Called when editor cleanse event is triggered */
-	void OnEditorCleanse();
+	UNREALED_API void OnEditorCleanse();
 
 	/** Called before the editor tries to begin PIE */
-	void OnPreBeginPIE(const bool bIsSimulating);
+	UNREALED_API void OnPreBeginPIE(const bool bIsSimulating);
 
 	/** Callback for when an editor user setting has changed */
-	void HandleViewportSettingChanged(FName PropertyName);
+	UNREALED_API void HandleViewportSettingChanged(FName PropertyName);
 
 	/** Callback for when a map is created or destroyed */
-	void OnMapChanged(UWorld* InWorld, EMapChangeType MapChangeType);
+	UNREALED_API void OnMapChanged(UWorld* InWorld, EMapChangeType MapChangeType);
 
 	/** Delegate handler for ActorMoved events */
-	void OnActorMoved(AActor* InActor);
-
-	/** FEditorViewportClient Interface*/
-
-	/**
-	 * Collects the set of components and actors on which to apply move operations during or after drag operations.
-	 */
-	void GetSelectedActorsAndComponentsForMove(TArray<AActor*>& OutActorsToMove, TArray<USceneComponent*>& OutComponentsToMove) const;
-
-	/**
-	 * Determines if it is valid to move an actor in this viewport.
-	 *
-	 * @param InActor - the actor that the viewport may be interested in moving.
-	 * @returns true if it is valid for this viewport to update the given actor's transform.
-	 */
-	bool CanMoveActorInViewport(const AActor* InActor) const;
-
-	/** Performs the legacy behavior for calling post edit move and updating transforms from ApplyDeltaToActors function. */
-	UE_DEPRECATED(4.26, "This functions is meant to be used for ease of rollback if too many post edit move calls degrade performance during drag operations. See ULevelEditorSettings::bUseLegacyPostEditBehavior to toggle legacy behavior.")
-	bool LegacyApplyDeltasForSelectedComponentsAndActors(const FVector& InDrag, const FRotator& InRot, const FVector& ModifiedScale);
-
-	/** Performs the legacy behavior for applying transforms and calling post edit move and property changed events from TrackingStopped function. */
-	UE_DEPRECATED(4.26, "This functions is meant to be used for ease of rollback if too many post edit move calls degrade performance during drag operations. See ULevelEditorSettings::bUseLegacyPostEditBehavior to toggle legacy behavior.")
-	bool LegacyTrackingStoppedForSelectedComponentsAndActors(FPropertyChangedEvent& PropertyChangedEvent);
+	UNREALED_API void OnActorMoved(AActor* InActor);
 
 public:
-
-	virtual void UpdateLinkedOrthoViewports(bool bInvalidate = false) override;
-	virtual ELevelViewportType GetViewportType() const override;
-	virtual void SetViewportType(ELevelViewportType InViewportType) override;
-	virtual void RotateViewportType() override;
-	virtual void OverridePostProcessSettings(FSceneView& View) override;
-	virtual bool ShouldLockPitch() const override;
-	virtual void CheckHoveredHitProxy(HHitProxy* HoveredHitProxy) override;
+	/** FEditorViewportClient Interface*/
+	UNREALED_API virtual void UpdateLinkedOrthoViewports(bool bInvalidate = false) override;
+	UNREALED_API virtual ELevelViewportType GetViewportType() const override;
+	UNREALED_API virtual void SetViewportType(ELevelViewportType InViewportType) override;
+	UNREALED_API virtual void RotateViewportType() override;
+	UNREALED_API virtual void OverridePostProcessSettings(FSceneView& View) override;
+	UNREALED_API virtual bool ShouldLockPitch() const override;
+	UNREALED_API virtual void CheckHoveredHitProxy(HHitProxy* HoveredHitProxy) override;
 
 protected:
 
-	virtual void PerspectiveCameraMoved() override;
-	virtual bool GetActiveSafeFrame(float& OutAspectRatio) const override;
-	virtual void RedrawAllViewportsIntoThisScene() override;
+	UNREALED_API virtual void PerspectiveCameraMoved() override;
+	UNREALED_API virtual bool GetActiveSafeFrame(float& OutAspectRatio) const override;
+	UNREALED_API virtual void RedrawAllViewportsIntoThisScene() override;
 
 private:
+	UNREALED_API FTransform CachePreDragActorTransform(const AActor* InActor);
+
 	/**
 	 * Checks to see the viewports locked actor need updating
 	 */
-	void UpdateLockedActorViewports(const AActor* InActor, const bool bCheckRealtime);
-	void UpdateLockedActorViewport(const AActor* InActor, const bool bCheckRealtime);
+	UNREALED_API void UpdateLockedActorViewports(const AActor* InActor, const bool bCheckRealtime);
+	UNREALED_API void UpdateLockedActorViewport(const AActor* InActor, const bool bCheckRealtime);
 
 	/**
 	 * Moves the locked actor according to the viewport cameras location and rotation
 	 */
-	void MoveLockedActorToCamera();
+	UNREALED_API void MoveLockedActorToCamera();
 	
 	/** @return	Returns true if the delta tracker was used to modify any selected actors or BSP.  Must be called before EndTracking(). */
-	bool HaveSelectedObjectsBeenChanged() const;
+	UNREALED_API bool HaveSelectedObjectsBeenChanged() const;
+
+	/** Cache the list of elements to manipulate based on the current selection set. */
+	UNREALED_API void CacheElementsToManipulate(const bool bForceRefresh = false);
+
+	/** Reset the list of elements to manipulate */
+	UNREALED_API void ResetElementsToManipulate(const bool bClearList = true);
+
+	/** Reset the list of elements to manipulate, because the selection set they were cached from has changed */
+	UNREALED_API void ResetElementsToManipulateFromSelectionChange(const UTypedElementSelectionSet* InSelectionSet);
+
+	/** Reset the list of elements to manipulate, because the typed element registry is about to process deferred deletion */
+	UNREALED_API void ResetElementsToManipulateFromProcessingDeferredElementsToDestroy();
+
+	/** Get the selection set that associated with our level editor. */
+	UNREALED_API const UTypedElementSelectionSet* GetSelectionSet() const;
+	UNREALED_API UTypedElementSelectionSet* GetMutableSelectionSet() const;
 
 	/**
 	 * Called when to attempt to apply an object to a BSP surface
@@ -742,22 +778,24 @@ private:
 	 *
 	 * @return	true if the object was applied to the object
 	 */
-	bool AttemptApplyObjAsMaterialToSurface( UObject* ObjToUse, class HModel* ModelHitProxy, FViewportCursorLocation& Cursor );
+	UNREALED_API bool AttemptApplyObjAsMaterialToSurface( UObject* ObjToUse, class HModel* ModelHitProxy, FViewportCursorLocation& Cursor );
 
 	/**
 	 * Called when an asset is dropped onto the blank area of a viewport.
 	 *
-	 * @param	Cursor				Mouse cursor location
-	 * @param	DroppedObjects		Array of objects dropped into the viewport
-	 * @param	ObjectFlags			The object flags to place on the actors that this function spawns.
-	 * @param	OutNewActors		The list of actors created while dropping
-	 * @param	bCreateDropPreview	If true, the actor being dropped is a preview actor (defaults: false)
-	 * @param	bSelectActors		If true, select the newly dropped actors (defaults: true)
-	 * @param	FactoryToUse		The preferred actor factory to use (optional)
+	 * @param	Cursor			Mouse cursor location
+	 * @param	DroppedObjects	Array of objects dropped into the viewport
+	 * @param	ObjectFlags		The object flags to place on the actors that this function spawns.
+	 * @param	OutNewItems		The list of actors created while dropping
+	 * @param	Options			Additional options
 	 *
 	 * @return	true if the drop operation was successfully handled; false otherwise
 	 */
-	bool DropObjectsOnBackground( struct FViewportCursorLocation& Cursor, const TArray<UObject*>& DroppedObjects, EObjectFlags ObjectFlags, TArray<AActor*>& OutNewActors, bool bCreateDropPreview = false, bool bSelectActors = true, class UActorFactory* FactoryToUse = NULL );
+	UNREALED_API bool DropObjectsOnBackground(struct FViewportCursorLocation& Cursor, const TArray<UObject*>& DroppedObjects, 
+		EObjectFlags ObjectFlags, TArray<FTypedElementHandle>& OutNewItems, const FDropObjectOptions& Options);
+	
+	//~ TODO: UE_DEPRECATED(5.4, "Use the overload that uses FDropObjectOptions instead.")
+	UNREALED_API bool DropObjectsOnBackground(struct FViewportCursorLocation& Cursor, const TArray<UObject*>& DroppedObjects, EObjectFlags ObjectFlags, TArray<AActor*>& OutNewActors, bool bCreateDropPreview = false, bool bSelectActors = true, class UActorFactory* FactoryToUse = NULL);
 
 	/**
 	* Called when an asset is dropped upon an existing actor.
@@ -767,14 +805,20 @@ private:
 	* @param	DroppedUponActor	The actor that we are dropping upon
 	* @param    DroppedUponSlot     The material slot/submesh that was identified as the drop location.  If unknown use -1.
 	* @param	ObjectFlags			The object flags to place on the actors that this function spawns.
-	* @param	OutNewActors		The list of actors created while dropping
-	* @param	bCreateDropPreview	If true, the actor being dropped is a preview actor (defaults: false)
-	* @param	bSelectActors		If true, select the newly dropped actors (defaults: true)
-	* @param	FactoryToUse		The preferred actor factory to use (optional)
+	* @param	OutNewItems			The list of items created while dropping
+	* @param	Options				Additional options. Note that bOnlyDropOnTarget is ignored, since this function only drops on the actor
 	*
 	* @return	true if the drop operation was successfully handled; false otherwise
 	*/
-	bool DropObjectsOnActor(struct FViewportCursorLocation& Cursor, const TArray<UObject*>& DroppedObjects, AActor* DroppedUponActor, int32 DroppedUponSlot, EObjectFlags ObjectFlags, TArray<AActor*>& OutNewActors, bool bCreateDropPreview = false, bool bSelectActors = true, class UActorFactory* FactoryToUse = NULL);
+	UNREALED_API bool DropObjectsOnActor(struct FViewportCursorLocation& Cursor, const TArray<UObject*>& DroppedObjects,
+		AActor* DroppedUponActor, int32 DroppedUponSlot, EObjectFlags ObjectFlags,
+		TArray<FTypedElementHandle>& OutNewItems, const FDropObjectOptions& Options);
+
+	//~ TODO: UE_DEPRECATED(5.4, "Use the overload that uses FDropObjectOptions instead.")
+	UNREALED_API bool DropObjectsOnActor(struct FViewportCursorLocation& Cursor, const TArray<UObject*>& DroppedObjects, 
+		AActor* DroppedUponActor, int32 DroppedUponSlot, EObjectFlags ObjectFlags, 
+		TArray<AActor*>& OutNewActors, bool bCreateDropPreview = false, 
+		bool bSelectActors = true, class UActorFactory* FactoryToUse = NULL);
 
 	/**
 	 * Called when an asset is dropped upon a BSP surface.
@@ -791,7 +835,12 @@ private:
 	 *
 	 * @return	true if the drop operation was successfully handled; false otherwise
 	 */
-	bool DropObjectsOnBSPSurface(FSceneView* View, struct FViewportCursorLocation& Cursor, const TArray<UObject*>& DroppedObjects, HModel* TargetProxy, EObjectFlags ObjectFlags, TArray<AActor*>& OutNewActors, bool bCreateDropPreview = false, bool bSelectActors = true, UActorFactory* FactoryToUse = NULL);
+	UNREALED_API bool DropObjectsOnBSPSurface(FSceneView* View, struct FViewportCursorLocation& Cursor, 
+		const TArray<UObject*>& DroppedObjects, HModel* TargetProxy, EObjectFlags ObjectFlags,
+		TArray<FTypedElementHandle>& OutNewItems, const FDropObjectOptions& Options);
+
+	//UE_DEPRECATED(5.4, "Use the overload that uses FDropObjectOptions instead.")
+	UNREALED_API bool DropObjectsOnBSPSurface(FSceneView* View, struct FViewportCursorLocation& Cursor, const TArray<UObject*>& DroppedObjects, HModel* TargetProxy, EObjectFlags ObjectFlags, TArray<AActor*>& OutNewActors, bool bCreateDropPreview = false, bool bSelectActors = true, UActorFactory* FactoryToUse = NULL);
 
 	/**
 	 * Called when an asset is dropped upon a manipulation widget.
@@ -803,24 +852,20 @@ private:
 	 *
 	 * @return	true if the drop operation was successfully handled; false otherwise
 	 */
-	bool DropObjectsOnWidget(FSceneView* View, struct FViewportCursorLocation& Cursor, const TArray<UObject*>& DroppedObjects, bool bCreateDropPreview = false);
-
-	/** Helper functions for ApplyDeltaTo* functions - modifies scale based on grid settings */
-	void ModifyScale( AActor* InActor, FVector& ScaleDelta, bool bCheckSmallExtent = false ) const;
-	void ValidateScale( const FVector& InOriginalPreDragScale, const FVector& CurrentScale, const FVector& BoxExtent, FVector& ScaleDelta, bool bCheckSmallExtent = false ) const;
+	UNREALED_API bool DropObjectsOnWidget(FSceneView* View, struct FViewportCursorLocation& Cursor, const TArray<UObject*>& DroppedObjects, bool bCreateDropPreview = false);
 
 	/** Project the specified actors into the world according to the current drag parameters */
-	void ProjectActorsIntoWorld(const TArray<AActor*>& Actors, FViewport* Viewport, const FVector& Drag, const FRotator& Rot);
+	UNREALED_API void ProjectActorsIntoWorld(const TArray<AActor*>& Actors, FViewport* Viewport, const FVector& Drag, const FRotator& Rot);
 
 	/** Draw additional details for brushes in the world */
-	void DrawBrushDetails(const FSceneView* View, FPrimitiveDrawInterface* PDI);
+	UNREALED_API void DrawBrushDetails(const FSceneView* View, FPrimitiveDrawInterface* PDI);
 
 	/** Internal function for public FindViewComponentForActor, which finds a view component to use for the specified actor. */
-	static UActorComponent* FindViewComponentForActor(AActor const* Actor, TSet<AActor const*>& CheckedActors);
+	static UNREALED_API UActorComponent* FindViewComponentForActor(AActor const* Actor, TSet<AActor const*>& CheckedActors);
 
 public:
 	/** Static: List of objects we're hovering over */
-	static TSet< FViewportHoverTarget > HoveredObjects;
+	static UNREALED_API TSet< FViewportHoverTarget > HoveredObjects;
 	
 	/** Parent level editor that owns this viewport.  Currently, this may be null if the parent doesn't happen to be a level editor. */
 	TWeakPtr< class ILevelEditor > ParentLevelEditor;
@@ -838,7 +883,7 @@ public:
 
 	FVector					ColorScale;
 
-	FColor					FadeColor;
+	FLinearColor			FadeColor;
 
 	float					FadeAmount;
 
@@ -874,6 +919,12 @@ public:
 	/** True if this viewport is to change its view (aspect ratio, post processing, FOV etc) to match that of the currently locked camera, if applicable */
 	bool					bLockedCameraView;
 
+	/** true if the viewport needs to restore the flag when tracking ends */
+	bool					bNeedToRestoreComponentBeingMovedFlag;
+
+	/** true if gizmo manipulation was started from a tracking event */
+	bool					bHasBegunGizmoManipulation;
+
 	/** Whether this viewport recently received focus. Used to determine whether component selection is permissible. */
 	bool bReceivedFocusRecently;
 
@@ -881,21 +932,40 @@ public:
 	bool bAlwaysShowModeWidgetAfterSelectionChanges;
 
 private:
-	/** The actors that are currently being placed in the viewport via dragging */
-	static TArray< TWeakObjectPtr< AActor > > DropPreviewActors;
+	//TODO: UE_DEPRECATED(5.4, TEXT("Use DropPreviewElements instead"))
+	static UNREALED_API TArray< TWeakObjectPtr< AActor > > DropPreviewActors;
+		
+	/** The viewport clients share a list of drop preview elements.However we still want the elements
+	  to be destroyed if all the viewports are destroyed, hence a static weak pointer and private shared
+	  pointers. */
+	static UNREALED_API TWeakPtr<FTypedElementList> StaticDropPreviewElements;
+	TSharedPtr<FTypedElementList> DropPreviewElements;
 
 	/** If currently creating a preview actor. */
-	static bool bIsDroppingPreviewActor;
+	static UNREALED_API bool bIsDroppingPreviewActor;
 
+	// TODO: Remove this to always use PreDragElementTransforms. That requires modifications to ProjectActorsIntoWorld
 	/** A map of actor locations before a drag operation */
-	mutable TMap<TWeakObjectPtr<AActor>, FTransform> PreDragActorTransforms;
+	mutable TMap<TWeakObjectPtr<const AActor>, FTransform> PreDragActorTransforms;
+
+	/** Map of element locations keyed by their handle. Currently used for the preview drop elements. Should
+	 eventually replace PreDragActorTransforms entirely. */
+	TMap<FTypedElementHandle, FTransform> PreDragElementTransforms;
+
+	/** The elements (from the current selection set) that this viewport can manipulate (eg, via the transform gizmo) */
+	bool bHasCachedElementsToManipulate = false;
+	FTypedElementListRef CachedElementsToManipulate;
 
 	/** Bit array representing the visibility of every sprite category in the current viewport */
 	TBitArray<>	SpriteCategoryVisibility;
 
 	UWorld* World;
 
+	/** Global shared transaction for all mouse interactions. */
 	FTrackingTransaction TrackingTransaction;
+
+	/** Cached transform of pilot actor before transaction, used to allow other transactions while piloting by performing a single end-transaction */
+	TOptional<FTransform> CachedPilotTransform;
 
 	/** Represents the last known drop preview mouse position. */
 	int32 DropPreviewMouseX;
@@ -903,6 +973,9 @@ private:
 
 	/** If this view was controlled by another view this/last frame, don't update itself */
 	bool bWasControlledByOtherViewport;
+
+	/** Whether the user is currently using the rotation / translation widget */
+	bool bCurrentlyEditingThroughMovementWidget;
 
 	/**
 	 * When locked to an actor this view will be positioned in the same location and rotation as the actor.
@@ -938,9 +1011,9 @@ private:
 	FActorLockStack PreviousActorLocks;
 
 	/** Caching for expensive FindViewComponentForActor. Invalidated once per Tick. */
-	static TMap<TObjectKey<AActor>, TWeakObjectPtr<UActorComponent>> ViewComponentForActorCache;
+	static UNREALED_API TMap<TObjectKey<AActor>, TWeakObjectPtr<UActorComponent>> ViewComponentForActorCache;
 
-	/** If true, we switched between two different cameras. Set by matinee, used by the motion blur to invalidate this frames motion vectors */
+	/** If true, we switched between two different cameras. Set by cinematics, used by the motion blur to invalidate this frames motion vectors */
 	bool					bEditorCameraCut;
 
 	/** Stores the previous frame's value of bEditorCameraCut in order to reset it back to false on the next frame */

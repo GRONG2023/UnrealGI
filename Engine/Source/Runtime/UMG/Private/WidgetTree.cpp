@@ -1,10 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Blueprint/WidgetTree.h"
+
 #include "Components/Visual.h"
 #include "Components/Widget.h"
 #include "Blueprint/UserWidget.h"
 #include "UMGPrivate.h"
+#include "UObject/ObjectSaveContext.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(WidgetTree)
 
 /////////////////////////////////////////////////////
 // UWidgetTree
@@ -136,8 +140,20 @@ bool UWidgetTree::RemoveWidget(UWidget* InRemovedWidget)
 	// If the widget being removed is the root, null it out.
 	else if ( InRemovedWidget == RootWidget )
 	{
-		RootWidget = NULL;
+		RootWidget = nullptr;
 		bRemoved = true;
+	}
+	else
+	{
+		for (const auto& KVP : NamedSlotBindings)
+		{
+			if (KVP.Value == InRemovedWidget)
+			{
+				bRemoved = true;
+				SetContentForSlot(KVP.Key, nullptr);
+				break;
+			}
+		}
 	}
 
 	return bRemoved;
@@ -174,34 +190,45 @@ void UWidgetTree::GetChildWidgets(UWidget* Parent, TArray<UWidget*>& Widgets)
 
 void UWidgetTree::ForEachWidget(TFunctionRef<void(UWidget*)> Predicate) const
 {
+	// Start with the root widget.
 	if ( RootWidget )
 	{
 		Predicate(RootWidget);
 
 		ForWidgetAndChildren(RootWidget, Predicate);
 	}
+
+	// Next, check the top level named slots.  Once the UserWidget that owns this widget tree is initialized, these
+	// named slot bindings will all be emptied out, and their relevant named slot content will be inserted into the
+	// hierarchy, but before that happens, or during the design time template, we need to treat them as separate
+	// top level widgets because they're not yet in the hierarchy.
+	for (const auto& NamedSlotsEntry : NamedSlotBindings)
+	{
+		if (UWidget* NamedSlotContent = NamedSlotsEntry.Value)
+		{
+			Predicate(NamedSlotContent);
+			ForWidgetAndChildren(NamedSlotContent, Predicate);
+		}
+	}
 }
 
 void UWidgetTree::ForEachWidgetAndDescendants(TFunctionRef<void(UWidget*)> Predicate) const
 {
-	if ( RootWidget )
-	{
-		Predicate(RootWidget);
-
-		ForWidgetAndChildren(RootWidget, [&Predicate] (UWidget* Child) {
-			if ( UUserWidget* UserWidgetChild = Cast<UUserWidget>(Child) )
+	ForEachWidget([this, &Predicate] (UWidget* Widget) {
+		if ( Widget != RootWidget )
+		{
+			if (const UUserWidget* UserWidgetChild = Cast<UUserWidget>(Widget))
 			{
 				if ( UserWidgetChild->WidgetTree )
 				{
 					UserWidgetChild->WidgetTree->ForEachWidgetAndDescendants(Predicate);
+					return;
 				}
 			}
-			else
-			{
-				Predicate(Child);
-			}
-		});
-	}
+		}
+
+		Predicate(Widget);
+	});
 }
 
 void UWidgetTree::ForWidgetAndChildren(UWidget* Widget, TFunctionRef<void(UWidget*)> Predicate)
@@ -238,14 +265,43 @@ void UWidgetTree::ForWidgetAndChildren(UWidget* Widget, TFunctionRef<void(UWidge
 	}
 }
 
-void UWidgetTree::PreSave(const class ITargetPlatform* TargetPlatform)
+// INamedSlotInterface
+//----------------------------------------------------------------------------------------
+
+void UWidgetTree::GetSlotNames(TArray<FName>& SlotNames) const
 {
-	if (TargetPlatform == nullptr)
+	// Widget trees don't know for sure how many slots the real widget tree has, they can only tell you about the
+	// slots that have content in them.
+	NamedSlotBindings.GetKeys(SlotNames);
+}
+
+UWidget* UWidgetTree::GetContentForSlot(FName SlotName) const
+{
+	return NamedSlotBindings.FindRef(SlotName);
+}
+
+void UWidgetTree::SetContentForSlot(FName SlotName, UWidget* Content)
+{
+	if (Content)
+	{
+		NamedSlotBindings.Add(SlotName, Content);	
+	}
+	else
+	{
+		NamedSlotBindings.Remove(SlotName);	
+	}
+}
+
+//----------------------------------------------------------------------------------------
+
+void UWidgetTree::PreSave(FObjectPreSaveContext ObjectSaveContext)
+{
+	if (!ObjectSaveContext.IsCooking()) // AllWidgets is not used in cooked builds
 	{
 #if WITH_EDITORONLY_DATA
+		// Update AllWidgets array used during serialization to match the current state of the WidgetTree
 		AllWidgets.Empty();
-
-		GetAllWidgets(AllWidgets);
+		GetAllWidgets(MutableView(AllWidgets));
 #endif
 	}
 
@@ -262,7 +318,7 @@ void UWidgetTree::PreSave(const class ITargetPlatform* TargetPlatform)
 	});
 #endif
 
-	Super::PreSave(TargetPlatform);
+	Super::PreSave(ObjectSaveContext);
 }
 
 void UWidgetTree::PostLoad()
@@ -273,3 +329,4 @@ void UWidgetTree::PostLoad()
 	AllWidgets.Empty();
 #endif
 }
+

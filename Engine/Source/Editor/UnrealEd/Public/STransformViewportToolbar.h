@@ -15,6 +15,7 @@ class FExtender;
 class FUICommandList;
 class SEditorViewport;
 class SSlider;
+class SEditorViewportToolbarMenu;
 enum class ECheckBoxState : uint8;
 
 /** A delegate that is executed when adding menu content. */
@@ -24,7 +25,7 @@ DECLARE_DELEGATE_OneParam(FOnCamSpeedScalarChanged, float);
 /**
  * Viewport toolbar containing transform, grid snapping, local to world and camera speed controls.
  */
-class UNREALED_API STransformViewportToolBar  : public SViewportToolBar
+class STransformViewportToolBar  : public SViewportToolBar
 {
 
 public:
@@ -37,16 +38,20 @@ public:
 		SLATE_EVENT( FOnCamSpeedScalarChanged, OnCamSpeedScalarChanged )
 	SLATE_END_ARGS()
 
-	void Construct( const FArguments& InArgs );
+	UNREALED_API void Construct( const FArguments& InArgs );
 	/**
 	 * Static: Creates a widget for the main tool bar
 	 *
 	 * @return	New widget
 	 */
-	TSharedRef< SWidget > MakeTransformToolBar( const TSharedPtr< FExtender > InExtenders );
+	UNREALED_API TSharedRef<SWidget> MakeTransformToolBar(const TSharedPtr< FExtender > InExtenders);
 
 private:
 	FSlateIcon GetLocalToWorldIcon() const;
+	FSlateIcon GetSurfaceSnappingIcon() const;
+
+	/** Callback to toggle between local and world space */
+	FReply OnCycleCoordinateSystem();
 
 	/** Camera speed menu construction callback */
 	TSharedRef<SWidget> FillCameraSpeedMenu();
@@ -114,7 +119,9 @@ private:
 	TSharedRef<SWidget> BuildRotationGridCheckBoxList(FName InExtentionHook, const FText& InHeading, const TArray<float>& InGridSizes, ERotationGridMode InGridMode) const;
 
 	/** Make the surface snapping toolbar checkbox button */
-	TSharedRef< SWidget > MakeSurfaceSnappingButton( FName ToolBarStyle );
+	TSharedRef< SWidget > MakeSurfaceSnappingButton();
+	TSharedRef<SWidget> GenerateSurfaceSnappingMenu();
+	FSlateColor GetSurfaceSnappingForegroundColor() const;
 
 	/** Grid Snap checked state callbacks */
 	ECheckBoxState IsLocationGridSnapChecked() const;
@@ -131,12 +138,13 @@ private:
 	void HandleToggleScaleGridSnap(ECheckBoxState InState);
 
 private:
+	TSharedPtr<SEditorViewportToolbarMenu> SurfaceSnappingMenu;
 
 	/** Reference to the camera slider used to display current camera speed */
-	mutable TSharedPtr< SSlider > CamSpeedSlider;
+	TSharedPtr<SSlider> CamSpeedSlider;
 
 	/** Reference to the camera spinbox used to display current camera speed scalar */
-	mutable TSharedPtr< SSpinBox<float> > CamSpeedScalarBox;
+	mutable TSharedPtr<SSpinBox<float>> CamSpeedScalarBox;
 
 	/** The editor viewport that we are in */
 	TWeakPtr<class SEditorViewport> Viewport;

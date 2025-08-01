@@ -12,12 +12,12 @@ class UAIPerceptionComponent;
 class UAISense;
 
 //////////////////////////////////////////////////////////////////////////
-struct AIMODULE_API FAISenseCounter : FAIBasicCounter<uint8>
+struct FAISenseCounter : FAIBasicCounter<uint8>
 {};
 typedef FAINamedID<FAISenseCounter> FAISenseID;
 
 //////////////////////////////////////////////////////////////////////////
-struct AIMODULE_API FPerceptionListenerCounter : FAIBasicCounter<uint32>
+struct FPerceptionListenerCounter : FAIBasicCounter<uint32>
 {};
 typedef FAIGenericID<FPerceptionListenerCounter> FPerceptionListenerID;
 
@@ -32,14 +32,14 @@ enum class EAISenseNotifyType : uint8
 	OnPerceptionChange,
 };
 
-struct FPerceptionChannelWhitelist
+struct FPerceptionChannelAllowList
 {
 	typedef int32 FFlagsContainer;
 
 	FFlagsContainer AcceptedChannelsMask;
 
 	// by default accept all
-	FPerceptionChannelWhitelist() : AcceptedChannelsMask()
+	FPerceptionChannelAllowList() : AcceptedChannelsMask()
 	{}
 
 	void Clear()
@@ -52,13 +52,13 @@ struct FPerceptionChannelWhitelist
 		return (AcceptedChannelsMask == 0);
 	}
 
-	FORCEINLINE FPerceptionChannelWhitelist& FilterOutChannel(FAISenseID Channel)
+	FORCEINLINE FPerceptionChannelAllowList& FilterOutChannel(FAISenseID Channel)
 	{
 		AcceptedChannelsMask &= ~(1 << Channel);
 		return *this;
 	}
 
-	FORCEINLINE_DEBUGGABLE FPerceptionChannelWhitelist& AcceptChannel(FAISenseID Channel)
+	FORCEINLINE_DEBUGGABLE FPerceptionChannelAllowList& AcceptChannel(FAISenseID Channel)
 	{
 		AcceptedChannelsMask |= (1 << Channel);
 		return *this;
@@ -69,7 +69,7 @@ struct FPerceptionChannelWhitelist
 		return (AcceptedChannelsMask & (1 << Channel)) != 0;
 	}
 
-	FORCEINLINE FPerceptionChannelWhitelist& MergeFilterIn(const FPerceptionChannelWhitelist& OtherFilter)
+	FORCEINLINE FPerceptionChannelAllowList& MergeFilterIn(const FPerceptionChannelAllowList& OtherFilter)
 	{
 		AcceptedChannelsMask |= OtherFilter.AcceptedChannelsMask;
 		return *this;
@@ -84,12 +84,13 @@ struct FPerceptionChannelWhitelist
 	{
 	private:
 		FFlagsContainer RemainingChannelsToTest;
-		const FPerceptionChannelWhitelist& Whitelist;
+		const FPerceptionChannelAllowList& AllowList;
 		int32 CurrentIndex;
 
 	public:
-		FConstIterator(const FPerceptionChannelWhitelist& InWhitelist)
-			: RemainingChannelsToTest((FFlagsContainer)-1), Whitelist(InWhitelist)
+		FConstIterator(const FPerceptionChannelAllowList& InAllowList)
+			: RemainingChannelsToTest((FFlagsContainer)-1)
+			, AllowList(InAllowList)
 			, CurrentIndex(INDEX_NONE)
 		{
 			FindNextAcceptedChannel();
@@ -97,7 +98,7 @@ struct FPerceptionChannelWhitelist
 
 		FORCEINLINE void FindNextAcceptedChannel()
 		{
-			const FFlagsContainer& Flags = Whitelist.GetAcceptedChannelsMask();
+			const FFlagsContainer& Flags = AllowList.GetAcceptedChannelsMask();
 
 			while ((RemainingChannelsToTest & Flags) != 0 && ((1 << ++CurrentIndex) | Flags) == 0)
 			{
@@ -107,7 +108,7 @@ struct FPerceptionChannelWhitelist
 
 		FORCEINLINE explicit operator bool() const
 		{
-			return (RemainingChannelsToTest & Whitelist.GetAcceptedChannelsMask()) != 0;
+			return (RemainingChannelsToTest & AllowList.GetAcceptedChannelsMask()) != 0;
 		}
 
 		FORCEINLINE int32 operator*() const
@@ -125,11 +126,11 @@ struct FPerceptionChannelWhitelist
 };
 
 USTRUCT(BlueprintType)
-struct AIMODULE_API FAIStimulus
+struct FAIStimulus
 {
 	GENERATED_USTRUCT_BODY()
 
-	static const float NeverHappenedAge;
+	static AIMODULE_API const float NeverHappenedAge;
 
 	enum FResult
 	{
@@ -168,7 +169,7 @@ protected:
 public:
 	
 	/** this is the recommended constructor. Use others if you know what you're doing. */
-	FAIStimulus(const UAISense& Sense, float StimulusStrength, const FVector& InStimulusLocation, const FVector& InReceiverLocation, FResult Result = SensingSucceeded, FName InStimulusTag = NAME_None);
+	AIMODULE_API FAIStimulus(const UAISense& Sense, float StimulusStrength, const FVector& InStimulusLocation, const FVector& InReceiverLocation, FResult Result = SensingSucceeded, FName InStimulusTag = NAME_None);
 
 	// default constructor
 	FAIStimulus()
@@ -197,30 +198,32 @@ public:
 	FORCEINLINE bool IsValid() const { return Type != FAISenseID::InvalidID() && GetAge() < NeverHappenedAge; }
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
-	FString GetDebugDescription() const;
+	AIMODULE_API FString GetDebugDescription() const;
 #endif // !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 };
 
 USTRUCT(BlueprintType)
-struct AIMODULE_API FAISenseAffiliationFilter
+struct FAISenseAffiliationFilter
 {
 	GENERATED_USTRUCT_BODY()
 
-	FAISenseAffiliationFilter()
-		: bDetectEnemies(false)
-		, bDetectNeutrals(false)
-		, bDetectFriendlies(false) {}
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sense")
-	uint32 bDetectEnemies : 1;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sense")
-	uint32 bDetectNeutrals : 1;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sense")
-	uint32 bDetectFriendlies : 1;
+	FAISenseAffiliationFilter() = default;
 	
-	uint8 GetAsFlags() const { return (bDetectEnemies << ETeamAttitude::Hostile) | (bDetectNeutrals << ETeamAttitude::Neutral) | (bDetectFriendlies << ETeamAttitude::Friendly); }
+	FAISenseAffiliationFilter(bool bInDetectEnemies, bool bInDetectNeutrals, bool bInDetectFriendlies)
+		: bDetectEnemies(bInDetectEnemies)
+		, bDetectNeutrals(bInDetectNeutrals)
+		, bDetectFriendlies(bInDetectFriendlies) {}
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sense")
+	uint32 bDetectEnemies : 1 = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sense")
+	uint32 bDetectNeutrals : 1 = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sense")
+	uint32 bDetectFriendlies : 1 = false;
+	
+	uint8 GetAsFlags() const { return IntCastChecked<uint8>((bDetectEnemies << ETeamAttitude::Hostile) | (bDetectNeutrals << ETeamAttitude::Neutral) | (bDetectFriendlies << ETeamAttitude::Friendly)); }
 	FORCEINLINE bool ShouldDetectAll() const { return (bDetectEnemies && bDetectNeutrals && bDetectFriendlies); }
 
 	static FORCEINLINE uint8 DetectAllFlags() { return (1 << ETeamAttitude::Hostile) | (1 << ETeamAttitude::Neutral) | (1 << ETeamAttitude::Friendly); }
@@ -240,11 +243,11 @@ struct AIMODULE_API FAISenseAffiliationFilter
 };
 
 /** Should contain only cached information common to all senses. Sense-specific data needs to be stored by senses themselves */
-struct AIMODULE_API FPerceptionListener
+struct FPerceptionListener
 {
 	TWeakObjectPtr<UAIPerceptionComponent> Listener;
 
-	FPerceptionChannelWhitelist Filter;
+	FPerceptionChannelAllowList Filter;
 
 	FVector CachedLocation;
 	FVector CachedDirection;
@@ -256,36 +259,36 @@ private:
 
 	FPerceptionListenerID ListenerID;
 
-	FPerceptionListener();
+	AIMODULE_API FPerceptionListener();
 public:
-	FPerceptionListener(UAIPerceptionComponent& InListener);
+	AIMODULE_API FPerceptionListener(UAIPerceptionComponent& InListener);
 
-	void UpdateListenerProperties(UAIPerceptionComponent& Listener);
+	AIMODULE_API void UpdateListenerProperties(UAIPerceptionComponent& Listener);
 
 	bool operator==(const UAIPerceptionComponent* Other) const { return Listener.Get() == Other; }
 	bool operator==(const FPerceptionListener& Other) const { return Listener == Other.Listener; }
 
-	void CacheLocation();
+	AIMODULE_API void CacheLocation();
 
-	void RegisterStimulus(AActor* Source, const FAIStimulus& Stimulus);
+	AIMODULE_API void RegisterStimulus(AActor* Source, const FAIStimulus& Stimulus);
 
 	FORCEINLINE bool HasAnyNewStimuli() const { return bHasStimulusToProcess; }
-	void ProcessStimuli();
+	AIMODULE_API void ProcessStimuli();
 
 	FORCEINLINE bool HasSense(FAISenseID SenseID) const { return Filter.ShouldRespondToChannel(SenseID); }
 
 	// used to remove "dead" listeners
-	static const FPerceptionListener NullListener;
+	static AIMODULE_API const FPerceptionListener NullListener;
 
 	FORCEINLINE FPerceptionListenerID GetListenerID() const { return ListenerID; }
 
-	FName GetBodyActorName() const;
-	uint32 GetBodyActorUniqueID() const;
+	AIMODULE_API FName GetBodyActorName() const;
+	AIMODULE_API uint32 GetBodyActorUniqueID() const;
 
 	/** Returns pointer to the actor representing this listener's physical body */
-	const AActor* GetBodyActor() const;
+	AIMODULE_API const AActor* GetBodyActor() const;
 
-	const IGenericTeamAgentInterface* GetTeamAgent() const;
+	AIMODULE_API const IGenericTeamAgentInterface* GetTeamAgent() const;
 
 private:
 	friend class UAIPerceptionSystem;
@@ -293,10 +296,10 @@ private:
 	FORCEINLINE void MarkForStimulusProcessing() { bHasStimulusToProcess = true; }
 };
 
-struct AIMODULE_API FPerceptionStimuliSource
+struct FPerceptionStimuliSource
 {
 	TWeakObjectPtr<AActor> SourceActor;
-	FPerceptionChannelWhitelist RelevantSenses;
+	FPerceptionChannelAllowList RelevantSenses;
 };
 
 namespace AIPerception

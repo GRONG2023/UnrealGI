@@ -32,7 +32,7 @@ public:
 	 *
 	 * @param InSynchObject The synchronization object to manage
 	 */
-	FScopeLock( FCriticalSection* InSynchObject )
+	UE_NODISCARD_CTOR FScopeLock( FCriticalSection* InSynchObject )
 		: SynchObject(InSynchObject)
 	{
 		check(SynchObject);
@@ -99,7 +99,7 @@ public:
 	 *
 	 * @param InSynchObject The synchronization object to manage, can be null.
 	 */
-	FScopeUnlock(FCriticalSection* InSynchObject)
+	UE_NODISCARD_CTOR FScopeUnlock(FCriticalSection* InSynchObject)
 		: SynchObject(InSynchObject)
 	{
 		if (InSynchObject)
@@ -136,4 +136,76 @@ private:
 	FCriticalSection* SynchObject;
 };
 
+namespace UE
+{
+	// RAII-style scope locking of a synchronisation primitive
+	// `MutexType` is required to implement `Lock` and `Unlock` methods
+	// Example:
+	//	{
+	//		TScopeLock<FCriticalSection> ScopeLock(CriticalSection);
+	//		...
+	//	}
+	template<typename MutexType>
+	class TScopeLock
+	{
+	public:
+		UE_NONCOPYABLE(TScopeLock);
 
+		UE_NODISCARD_CTOR TScopeLock(MutexType& InMutex)
+			: Mutex(&InMutex)
+		{
+			check(Mutex);
+			Mutex->Lock();
+		}
+
+		~TScopeLock()
+		{
+			Unlock();
+		}
+
+		void Unlock()
+		{
+			if (Mutex)
+			{
+				Mutex->Unlock();
+				Mutex = nullptr;
+			}
+		}
+
+	private:
+		MutexType* Mutex;
+	};
+
+	// RAII-style scope unlocking of a synchronisation primitive
+	// `MutexType` is required to implement `Lock` and `Unlock` methods
+	// Example:
+	//	{
+	//		TScopeLock<FCriticalSection> ScopeLock(CriticalSection);
+	//		for (FElementType& Element : ThreadUnsafeContainer)
+	//		{
+	//			TScopeUnlock<FCriticalSection> ScopeUnlock(CriticalSection);
+	//			Process(Element);
+	//		}
+	//	}
+	template<typename MutexType>
+	class TScopeUnlock
+	{
+	public:
+		UE_NONCOPYABLE(TScopeUnlock);
+
+		UE_NODISCARD_CTOR TScopeUnlock(MutexType& InMutex)
+			: Mutex(&InMutex)
+		{
+			check(Mutex);
+			Mutex->Unlock();
+		}
+
+		~TScopeUnlock()
+		{
+			Mutex->Lock();
+		}
+
+	private:
+		MutexType* Mutex;
+	};
+}

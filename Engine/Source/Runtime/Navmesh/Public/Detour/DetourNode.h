@@ -23,6 +23,7 @@
 #define DETOURNODE_H
 
 #include "CoreMinimal.h"
+#include "Detour/DetourLargeWorldCoordinates.h"
 #include "Detour/DetourNavMesh.h"
 
 enum dtNodeFlags
@@ -36,9 +37,9 @@ static const dtNodeIndex DT_NULL_IDX = (dtNodeIndex)~0;
 
 struct dtNode
 {
-	float pos[3];				///< Position of the node.
-	float cost;					///< Cost from previous node to current node.
-	float total;				///< Cost up to the node.
+	dtReal pos[3];				///< Position of the node.
+	dtReal cost;				///< Cost from previous node to current node.
+	dtReal total;				///< Cost up to the node.
 	unsigned int pidx : 30;		///< Index to parent node.
 	unsigned int flags : 2;		///< Node flags 0/open/closed.
 	dtPolyRef id;				///< Polygon ref the node corresponds to.
@@ -82,22 +83,22 @@ public:
 	}
 	
 	inline int getMaxNodes() const { return m_maxNodes; }
-	//@UE4 BEGIN
+	//@UE BEGIN
 	// If using a shared query instance it's possible that m_maxNodes is greater
 	// than pool size requested by callee. There's no point in reallocating the
 	// pool so we artificially limit the number of available nodes
 	inline int getMaxRuntimeNodes() const { return m_maxRuntimeNodes; }
-	//@UE4 END
+	//@UE END
 	inline int getNodeCount() const { return m_nodeCount; }
 	
 	inline int getHashSize() const { return m_hashSize; }
 	inline dtNodeIndex getFirst(int bucket) const { return m_first[bucket]; }
 	inline dtNodeIndex getNext(int i) const { return m_next[i]; }
 
-	//@UE4 BEGIN
+	//@UE BEGIN
 	// overrides m_maxNodes for runtime purposes
 	inline void setMaxRuntimeNodes(const int newMaxRuntimeNodes) { m_maxRuntimeNodes = newMaxRuntimeNodes; }
-	//@UE4 END
+	//@UE END
 
 private:
 	
@@ -106,9 +107,9 @@ private:
 	dtNodeIndex* m_next;
 	const int m_maxNodes;
 	const int m_hashSize;
-	//@UE4 BEGIN
+	//@UE BEGIN
 	int m_maxRuntimeNodes;
-	//@UE4 END
+	//@UE END
 	int m_nodeCount;
 };
 

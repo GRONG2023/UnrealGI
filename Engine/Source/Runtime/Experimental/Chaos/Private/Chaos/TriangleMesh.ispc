@@ -4,8 +4,8 @@
 
 #include "Math/Vector.isph"
 
-export void GetFaceNormals(uniform FVector Normals[],
-							const uniform FVector Points[],
+export void GetFaceNormals(uniform FVector3f Normals[],
+							const uniform FVector3f Points[],
 							const uniform FIntVector Elements[],
 							const uniform int32 NumElements)
 {
@@ -13,14 +13,14 @@ export void GetFaceNormals(uniform FVector Normals[],
 	{
 		const varying FIntVector Tri = VectorLoad(&Elements[extract(i, 0)]);
 
-		const varying FVector p0 = VectorGather(&Points[Tri.V[0]]);
-		const varying FVector p1 = VectorGather(&Points[Tri.V[1]]);
-		const varying FVector p2 = VectorGather(&Points[Tri.V[2]]);
+		const varying FVector3f p0 = VectorGather(&Points[Tri.V[0]]);
+		const varying FVector3f p1 = VectorGather(&Points[Tri.V[1]]);
+		const varying FVector3f p2 = VectorGather(&Points[Tri.V[2]]);
 
-		const varying FVector p10 = p1 - p0;
-		const varying FVector p20 = p2 - p0;
-		const varying FVector Cross = VectorCross(p20, p10);
-		const varying FVector CrossNormalized = VectorGetSafeNormal(Cross);
+		const varying FVector3f p10 = p1 - p0;
+		const varying FVector3f p20 = p2 - p0;
+		const varying FVector3f Cross = VectorCross(p20, p10);
+		const varying FVector3f CrossNormalized = VectorGetSafeNormal(Cross);
 
 		VectorStore(&Normals[extract(i, 0)], CrossNormalized);
 	}
@@ -32,31 +32,34 @@ struct TArrayInt
 	int32 ArrayNum;
 };
 
-export void GetPointNormals(uniform FVector PointNormals[],
-							const uniform FVector FaceNormals[],
+export void GetPointNormals(uniform FVector3f PointNormals[],
+							const uniform FVector3f FaceNormals[],
 							const uniform TArrayInt PointToTriangleMap[],
 							const uniform int32 StartIndex,
 							const uniform int32 NumFaceNormals,
 							const uniform int32 NumIndices)
 {
-	foreach(Element = 0 ... NumIndices)
+	#pragma unroll 4
+	for(uniform int32 Element = 0; Element < NumIndices; Element++)
 	{
-		varying FVector Normal = ZeroVector;
+		uniform FVector4f Normal = FloatZero;
 
-		#pragma ignore warning(perf)
-		const varying TArrayInt TriangleMap = PointToTriangleMap[Element];  // Access MPointToTriangleMap with local index
+		const uniform TArrayInt TriangleMap = PointToTriangleMap[Element];  // Access MPointToTriangleMap with local index
 
-		for (int32 k = 0; k < TriangleMap.ArrayNum; ++k)
+		#pragma unroll 2
+		for (uniform int32 k = 0; k < TriangleMap.ArrayNum; ++k)
 		{
-			#pragma ignore warning(perf)
-			const int32 Index = TriangleMap.Data[k];
+			const uniform int32 Index = TriangleMap.Data[k];
 
 			if (Index >= 0 && Index < NumFaceNormals)
 			{
-				Normal = Normal + VectorGather(&FaceNormals[Index]);
+				const uniform FVector3f FaceNormal = FaceNormals[Index];
+
+				Normal = Normal + SetVector4(FaceNormal, FLOAT_ZERO);
 			}
 		}
 
-		VectorStore(&PointNormals[extract(Element, 0) + StartIndex], VectorGetSafeNormal(Normal));
+		uniform FVector3f SafeNormal = VectorGetSafeNormal(SetVector(Normal));
+		PointNormals[Element + StartIndex] = SafeNormal;
 	}
 }

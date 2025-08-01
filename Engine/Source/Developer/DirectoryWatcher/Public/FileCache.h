@@ -2,13 +2,31 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Map.h"
+#include "Containers/SparseArray.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "HAL/ThreadSafeCounter.h"
-#include "Misc/Guid.h"
-#include "Misc/SecureHash.h"
-#include "HAL/ThreadSafeBool.h"
-#include "IDirectoryWatcher.h"
+#include "Delegates/IDelegateInstance.h"
 #include "FileCacheUtilities.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformTime.h"
+#include "HAL/ThreadSafeBool.h"
+#include "HAL/ThreadSafeCounter.h"
+#include "IDirectoryWatcher.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/DateTime.h"
+#include "Misc/Guid.h"
+#include "Misc/Optional.h"
+#include "Misc/SecureHash.h"
+#include "Serialization/Archive.h"
+#include "Templates/Function.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UnrealTemplate.h"
+
+struct FFileChangeData;
+struct FGuid;
 
 namespace DirectoryWatcher
 {
@@ -277,8 +295,14 @@ private:
 	/** Non-recursively scan a single directory for its contents. Adds results to Pending arrays. */
 	void ScanDirectory(const FString& InDirectory);
 
+	/** Returns version of path to store */
+	FString GetPathToStore(const FString& InPath) const;
+
 	/** Path to the root directory we want to scan */
 	FString RootPath;
+
+	/** Standardized path to the root directory we want to scan */
+	FString StandardRootPath;
 
 	/** Whether we should return relative or absolute paths */
 	EPathType PathType;
@@ -488,6 +512,9 @@ private:
 	/** Update our cache of pending transactions (to prevent diffing against the directory unnecessarily) */
 	void UpdatePendingTransactions();
 
+	/** Returns version of path to store */
+	FString GetPathToStore(const FFilenameAndHash& InData) const;
+
 private:
 
 	/** Configuration settings applied on construction */
@@ -518,6 +545,8 @@ private:
 	/** List of cached pending transactions */
 	bool bPendingTransactionsDirty;
 	TArray<FUpdateCacheTransaction> PendingTransactions;
+
+	FString ConfigDirectoryStandardized;
 };
 
 } // namespace DirectoryWatcher

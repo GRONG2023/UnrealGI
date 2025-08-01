@@ -1,14 +1,20 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
+#include "Containers/Map.h"
+#include "Containers/Ticker.h"
 #include "CoreMinimal.h"
+#include "HAL/Platform.h"
+#include "Logging/LogMacros.h"
 #include "Misc/CoreMisc.h"
 #include "Modules/ModuleInterface.h"
 #include "Modules/ModuleManager.h"
-#include "Containers/Ticker.h" 
+#include "Templates/SharedPointer.h"
+#include "Templates/UniquePtr.h"
 
 class FHttpListener;
 class IHttpRouter;
+class FHttpServerModuleImpl;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogHttpServerModule, Log, All);
 
@@ -17,10 +23,12 @@ DECLARE_LOG_CATEGORY_EXTERN(LogHttpServerModule, Log, All);
  */
 class FHttpServerModule : 
 	public IModuleInterface
-	,public FTickerObjectBase
+	,public FTSTickerObjectBase
 {
 
 public:
+	FHttpServerModule();
+	~FHttpServerModule();
 
 	/**
 	 * Checks to see if this module is loaded and ready.  It is only valid to call Get() if IsAvailable() returns true.
@@ -40,13 +48,14 @@ public:
 	/**
 	 * Per-port-binding access to an http router
 	 *
-	 * @param  Port The listener's bound port 
+	 * @param  Port The listener's bound port
+	 * @param  bFailOnBindFailure if true, return nullptr if we fail to bind/listen on the given port
 	 * @return An IHttpRouter instance that can be leveraged to respond to HTTP requests
 	 */
-	HTTPSERVER_API TSharedPtr<IHttpRouter> GetHttpRouter(uint32 Port);
+	HTTPSERVER_API TSharedPtr<IHttpRouter> GetHttpRouter(uint32 Port, bool bFailOnBindFailure = false);
 
 	/**
-	 * FTicker callback
+	 * FTSTicker callback
 	 * 
 	 * @param DeltaTime  The time in seconds since the last tick
 	 * @return           false if no longer needs ticking, true otherwise
@@ -91,10 +100,6 @@ private:
 	/** Singleton Instance */
 	static FHttpServerModule* Singleton;
 
-	/** The association of port bindings and respective HTTP listeners */
-	TMap<uint32, TUniquePtr<FHttpListener>> Listeners;
-
-	/** Whether listeners can be started */
-	bool bHttpListenersEnabled = false;
+	FHttpServerModuleImpl* Impl;
 };
 

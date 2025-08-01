@@ -14,11 +14,12 @@ struct TDefaultManagerInstanceTracker
 	TMap<UWorld*, FManager*> WorldToInstanceMap;
 	bool bCreateIfMissing = false;
 
+	UE_DEPRECATED(5.1, "TDefaultManagerInstanceTracker is deprecated and will be removed. Consider inheriting from a subsystem instead.")
 	TDefaultManagerInstanceTracker()
 	{
-		FWorldDelegates::OnWorldCleanup.AddRaw(this, &TDefaultManagerInstanceTracker::OnWorldCleanup);
 	}
 
+	UE_DEPRECATED(5.1, "TDefaultManagerInstanceTracker is deprecated and will be removed. Consider inheriting from a subsystem instead.")
 	FManager* GetManagerInstance(UWorld& World)
 	{
 		FManager** FoundInstance = WorldToInstanceMap.Find(&World);
@@ -37,6 +38,10 @@ struct TDefaultManagerInstanceTracker
 			NewInstance = NewObject<FManager>(&World);
 			NewInstance->AddToRoot();
 			WorldToInstanceMap.Add(&World, NewInstance);
+			if (!FWorldDelegates::OnPostWorldCleanup.IsBoundToObject(this))
+			{
+				FWorldDelegates::OnPostWorldCleanup.AddRaw(this, &TDefaultManagerInstanceTracker::OnPostWorldCleanup);
+			}
 		}
 		else
 		{
@@ -48,7 +53,7 @@ struct TDefaultManagerInstanceTracker
 		return NewInstance;
 	}
 
-	void OnWorldCleanup(UWorld* World, bool /*bSessionEnded*/, bool /*bCleanupResources*/)
+	void OnPostWorldCleanup(UWorld* World, bool /*bSessionEnded*/, bool /*bCleanupResources*/)
 	{
 		FManager** FoundInstance = WorldToInstanceMap.Find(World);
 		if (FoundInstance)

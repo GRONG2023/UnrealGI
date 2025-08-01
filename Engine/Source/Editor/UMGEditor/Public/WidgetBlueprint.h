@@ -10,12 +10,14 @@
 #include "Binding/DynamicPropertyPath.h"
 #include "Blueprint/WidgetBlueprintGeneratedClass.h"
 #include "Animation/WidgetAnimationBinding.h"
+#include "Templates/ValueOrError.h"
 
 #include "WidgetBlueprint.generated.h"
 
 class FCompilerResultsLog;
 class UEdGraph;
 class UMovieScene;
+class UTexture2D;
 class UUserWidget;
 class UWidget;
 class UWidgetAnimation;
@@ -23,6 +25,7 @@ class FKismetCompilerContext;
 class UWidgetBlueprint;
 enum class EWidgetTickFrequency : uint8;
 enum class EWidgetCompileTimeTickPrediction : uint8;
+class UWidgetEditingProjectSettings;
 
 
 /** Widget Delegates */
@@ -30,9 +33,12 @@ class UMGEDITOR_API FWidgetBlueprintDelegates
 {
 public:
 	// delegate for generating widget asset registry tags.
+	DECLARE_MULTICAST_DELEGATE_TwoParams(FGetAssetTagsWithContext, const UWidgetBlueprint*, FAssetRegistryTagsContext);
 	DECLARE_MULTICAST_DELEGATE_TwoParams(FGetAssetTags, const UWidgetBlueprint*, TArray<UObject::FAssetRegistryTag>&);
 
 	// called by UWdgetBlueprint::GetAssetRegistryTags()
+	static FGetAssetTagsWithContext GetAssetTagsWithContext;
+	UE_DEPRECATED(5.4, "Subscribe to GetAssetTagsWithContext instead.")
 	static FGetAssetTags GetAssetTags;
 };
 
@@ -63,7 +69,7 @@ private:
 
 	/** The owner of the path segment (ie. What class or structure was this property from) */
 	UPROPERTY()
-	UStruct* Struct;
+	TObjectPtr<UStruct> Struct;
 
 	/** The member name in the structure this segment represents. */
 	UPROPERTY()
@@ -175,7 +181,7 @@ struct FWidgetAnimation_DEPRECATED
 	GENERATED_USTRUCT_BODY()
 
 	UPROPERTY()
-	UMovieScene* MovieScene = nullptr;
+	TObjectPtr<UMovieScene> MovieScene = nullptr;
 
 	UPROPERTY()
 	TArray<FWidgetAnimationBinding> AnimationBindings;
@@ -200,6 +206,18 @@ enum class EWidgetSupportsDynamicCreation : uint8
 	Yes,
 	No,
 };
+
+
+UENUM()
+enum class EThumbnailPreviewSizeMode : uint8
+{
+	MatchDesignerMode,
+	FillScreen,
+	Custom,
+	Desired
+};
+
+
 
 /**
  * This represents the tickability of a widget computed at compile time
@@ -238,16 +256,19 @@ public:
 	TArray<FWidgetAnimation_DEPRECATED> AnimationData_DEPRECATED;
 
 	UPROPERTY()
-	TArray<UWidgetAnimation*> Animations;
+	TArray<TObjectPtr<UWidgetAnimation>> Animations;
 
 	/**
 	 * Don't directly modify this property to change the palette category.  The actual value is stored 
 	 * in the CDO of the UUserWidget, but a copy is stored here so that it's available in the serialized 
 	 * Tag data in the asset header for access in the FAssetData.
 	 */
-	UPROPERTY(AssetRegistrySearchable, AssetRegistrySearchable)
+	UPROPERTY(AssetRegistrySearchable)
 	FString PaletteCategory;
 
+	/** Run the initialize event on widget that doesn't have a player context. */
+	UPROPERTY(EditAnywhere, Category="Widget")
+	bool bCanCallInitializedWithoutPlayerContext;
 #endif
 
 public:
@@ -257,14 +278,20 @@ public:
 	virtual void PostDuplicate(bool bDuplicateForPIE) override;
 
 #if WITH_EDITORONLY_DATA
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS // Suppress compiler warning on override of deprecated function
+	UE_DEPRECATED(5.0, "Use version that takes FObjectPreSaveContext instead.")
 	virtual void PreSave(const class ITargetPlatform* TargetPlatform) override;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	virtual void PreSave(FObjectPreSaveContext ObjectSaveContext) override;
 #endif // WITH_EDITORONLY_DATA
 
 #if WITH_EDITOR
+	virtual void GetAssetRegistryTags(FAssetRegistryTagsContext Context) const override;
+	UE_DEPRECATED(5.4, "Implement the version that takes FAssetRegistryTagsContext instead.")
 	virtual void GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const override;
 	virtual void NotifyGraphRenamed(class UEdGraph* Graph, FName OldName, FName NewName) override;
-	virtual EDataValidationResult IsDataValid(TArray<FText>& ValidationErrors) override;
-	bool DetectSlateWidgetLeaks(TArray<FText>& ValidationErrors);
+	virtual EDataValidationResult IsDataValid(class FDataValidationContext& Context) const override;
+	bool DetectSlateWidgetLeaks(class FDataValidationContext& Context) const;
 	virtual bool FindDiffs(const UBlueprint* OtherBlueprint, FDiffResults& Results) const override;
 #endif
 
@@ -278,6 +305,8 @@ public:
 	virtual UClass* GetBlueprintClass() const override;
 
 	virtual bool AllowsDynamicBinding() const override;
+
+	virtual bool SupportsInputEvents() const override;
 
 	virtual bool SupportedByDefaultBlueprintFactory() const override
 	{
@@ -294,6 +323,9 @@ public:
 
 	/** Returns true if the supplied user widget will not create a circular reference when added to this blueprint */
 	bool IsWidgetFreeFromCircularReferences(UUserWidget* UserWidget) const;
+	
+	/**  */
+	TValueOrError<void, UWidget*> HasCircularReferences() const;
 
 	static bool ValidateGeneratedClass(const UClass* InClass);
 	
@@ -303,11 +335,13 @@ public:
 
 	bool ArePropertyBindingsAllowed() const;
 
-	/** Does the editor support widget from an editor package. */
-	virtual bool AllowEditorWidget() const { return false; }
+	/** Gets any named slots exposed by the parent generated class that can be slotted into by the subclass. */
+	TArray<FName> GetInheritedAvailableNamedSlots() const;
+
+	virtual UWidgetEditingProjectSettings* GetRelevantSettings();
+	virtual const UWidgetEditingProjectSettings* GetRelevantSettings() const;
 
 protected:
-#if WITH_EDITOR
 	virtual void LoadModulesRequiredForCompilation() override;
 
 private:
@@ -337,5 +371,14 @@ public:
 	 */
 	UPROPERTY(AssetRegistrySearchable)
 	int32 PropertyBindings;
-#endif
+
+	UPROPERTY(EditDefaultsOnly, Category = ThumbnailSettings)
+	EThumbnailPreviewSizeMode ThumbnailSizeMode;
+
+	UPROPERTY(EditDefaultsOnly, Category = ThumbnailSettings)
+	FVector2D ThumbnailCustomSize;
+
+	UPROPERTY(EditDefaultsOnly, Category = ThumbnailSettings)
+	TObjectPtr<UTexture2D> ThumbnailImage;
+
 };

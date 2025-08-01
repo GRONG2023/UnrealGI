@@ -5,14 +5,14 @@
 =============================================================================*/
 
 #include "Model.h"
-#include "Materials/MaterialInterface.h"
-#include "RenderUtils.h"
-#include "Misc/App.h"
-#include "Engine/Brush.h"
+
 #include "Containers/TransArray.h"
 #include "EngineUtils.h"
 #include "Engine/Polys.h"
-#include "DynamicMeshBuilder.h"
+#include "Hash/Blake3.h"
+#include "StaticLighting.h"
+#include "UObject/GarbageCollectionSchema.h"
+#include "UObject/ObjectSaveContext.h"
 
 float UModel::BSPTexelScale = 100.0f;
 
@@ -46,6 +46,37 @@ bool FBspSurf::IsHiddenEdAtStartup() const
 /*-----------------------------------------------------------------------------
 	Struct serializers.
 -----------------------------------------------------------------------------*/
+#if WITH_EDITOR
+template <typename T>
+static void ModelUpdateHash(FBlake3& Builder, const TObjectPtr<T>& Object)
+{
+	// We don't merge other UObject data into the lighting guid, the lighting guid only handles properties of the UModel changing
+	// just record the path for each UObject
+	FString PathName = Object.GetPathName();
+	if (PathName.IsEmpty())
+	{
+		Builder.Update(TEXT(""), 0);
+	}
+	else
+	{
+		Builder.Update(*PathName, PathName.Len() * sizeof(PathName[0]));
+	}
+};
+static void ModelUpdateHash(FBlake3& Builder, UObject* Object)
+{
+	// We don't merge other UObject data into the lighting guid, the lighting guid only handles properties of the UModel changing
+	// just record the path for each UObject
+	FString PathName = Object ? Object->GetPathName() : TEXT("");
+	if (PathName.IsEmpty())
+	{
+		Builder.Update(TEXT(""), 0);
+	}
+	else
+	{
+		Builder.Update(*PathName, PathName.Len() * sizeof(PathName[0]));
+	}
+};
+#endif
 
 FArchive& operator<<( FArchive& Ar, FBspSurf& Surf )
 {
@@ -70,6 +101,23 @@ FArchive& operator<<( FArchive& Ar, FBspSurf& Surf )
 
 	return Ar;
 }
+
+#if WITH_EDITOR
+void UpdateHash(FBlake3& Builder, const FBspSurf& Surf)
+{
+	ModelUpdateHash(Builder, Surf.Material);
+	Builder.Update(&Surf.PolyFlags, sizeof(Surf.PolyFlags));
+	Builder.Update(&Surf.pBase, sizeof(Surf.pBase));
+	Builder.Update(&Surf.vNormal, sizeof(Surf.vNormal));
+	Builder.Update(&Surf.vTextureU, sizeof(Surf.vTextureU));
+	Builder.Update(&Surf.vTextureV, sizeof(Surf.vTextureV));
+	Builder.Update(&Surf.iBrushPoly, sizeof(Surf.iBrushPoly));
+	ModelUpdateHash(Builder, Surf.Actor);
+	Builder.Update(&Surf.Plane, sizeof(Surf.Plane));
+	Builder.Update(&Surf.LightMapScale, sizeof(Surf.LightMapScale));
+	Builder.Update(&Surf.iLightmassIndex, sizeof(Surf.iLightmassIndex));
+}
+#endif
 
 void FBspSurf::AddReferencedObjects( FReferenceCollector& Collector )
 {
@@ -178,6 +226,8 @@ FArchive& operator<<(FArchive& Ar, FDepecatedModelVertex& V)
 	return Ar;
 }
 
+FNodeGroup::~FNodeGroup() = default;
+
 /*---------------------------------------------------------------------------------------
 	UModel object implementation.
 ---------------------------------------------------------------------------------------*/
@@ -187,14 +237,14 @@ void UModel::Serialize( FArchive& Ar )
 	Super::Serialize( Ar );
 
 	const int32 StripVertexBufferFlag = 1;
-	FStripDataFlags StripFlags( Ar, GetOuter() && GetOuter()->IsA(ABrush::StaticClass()) ? StripVertexBufferFlag : FStripDataFlags::None );
+	FStripDataFlags StripFlags( Ar, GetOuter() && GetOuter()->IsA(ABrush::StaticClass()) ? StripVertexBufferFlag : static_cast<int32>(FStripDataFlags::EStrippedData::None) );
 
 	Ar << Bounds;
 
-	if (Ar.IsLoading() && Ar.UE4Ver() < VER_UE4_BSP_UNDO_FIX )
+	if (Ar.IsLoading() && Ar.UEVer() < VER_UE4_BSP_UNDO_FIX )
 	{
-		TTransArray<FVector> OldVectors(this);
-		TTransArray<FVector> OldPoints(this);
+		TTransArray<FVector3f> OldVectors(this);
+		TTransArray<FVector3f> OldPoints(this);
 		TTransArray<FBspNode> OldNodes(this);
 		OldVectors.BulkSerialize(Ar);
 		OldPoints.BulkSerialize(Ar);
@@ -218,7 +268,7 @@ void UModel::Serialize( FArchive& Ar )
 		}
 	}
 	
-	if (Ar.IsLoading() && Ar.UE4Ver() < VER_UE4_BSP_UNDO_FIX )
+	if (Ar.IsLoading() && Ar.UEVer() < VER_UE4_BSP_UNDO_FIX )
 	{
 		TTransArray<FBspSurf> OldSurfs(this);
 		TTransArray<FVert> OldVerts(this);
@@ -235,7 +285,7 @@ void UModel::Serialize( FArchive& Ar )
 		Verts.BulkSerialize(Ar);
 	}
 
-	if( Ar.IsLoading() && Ar.UE4Ver() < VER_UE4_REMOVE_ZONES_FROM_MODEL)
+	if( Ar.IsLoading() && Ar.UEVer() < VER_UE4_REMOVE_ZONES_FROM_MODEL)
 	{
 		int32 NumZones;
 		Ar << NumSharedSides << NumZones;
@@ -254,7 +304,7 @@ void UModel::Serialize( FArchive& Ar )
 #if WITH_EDITOR
 	bool bHasEditorOnlyData = !Ar.IsFilterEditorOnly();
 	
-	if ( Ar.UE4Ver() < VER_UE4_REMOVE_UNUSED_UPOLYS_FROM_UMODEL )
+	if ( Ar.UEVer() < VER_UE4_REMOVE_UNUSED_UPOLYS_FROM_UMODEL )
 	{
 		bHasEditorOnlyData = true;
 	}
@@ -269,7 +319,7 @@ void UModel::Serialize( FArchive& Ar )
 #else
 	bool bHasEditorOnlyData = !Ar.IsFilterEditorOnly();
 	
-	if ( Ar.UE4Ver() < VER_UE4_REMOVE_UNUSED_UPOLYS_FROM_UMODEL )
+	if ( Ar.UEVer() < VER_UE4_REMOVE_UNUSED_UPOLYS_FROM_UMODEL )
 	{
 		bHasEditorOnlyData = true;
 	}
@@ -289,7 +339,7 @@ void UModel::Serialize( FArchive& Ar )
 
 	Ar << RootOutside << Linked;
 
-	if(Ar.IsLoading() && Ar.UE4Ver() < VER_UE4_REMOVE_ZONES_FROM_MODEL)
+	if(Ar.IsLoading() && Ar.UEVer() < VER_UE4_REMOVE_ZONES_FROM_MODEL)
 	{
 		TArray<int32> DummyPortalNodes;
 		DummyPortalNodes.BulkSerialize( Ar );
@@ -345,7 +395,7 @@ void UModel::CalculateUniqueVertCount()
 				bool bAlreadyAdded(false);
 				for(int32 UniqueIndex(0); UniqueIndex < UniquePoints.Num(); ++UniqueIndex)
 				{
-					if(Polys->Element[PolyIndex].Vertices[VertIndex] == UniquePoints[UniqueIndex])
+					if((FVector)Polys->Element[PolyIndex].Vertices[VertIndex] == UniquePoints[UniqueIndex])
 					{
 						bAlreadyAdded = true;
 						break;
@@ -354,7 +404,7 @@ void UModel::CalculateUniqueVertCount()
 
 				if(!bAlreadyAdded)
 				{
-					UniquePoints.Push(Polys->Element[PolyIndex].Vertices[VertIndex]);
+					UniquePoints.Push((FVector)Polys->Element[PolyIndex].Vertices[VertIndex]);
 				}
 			}
 		}
@@ -392,13 +442,26 @@ void UModel::PostLoad()
 #if WITH_EDITOR
 		if (ABrush* Owner = Cast<ABrush>(GetOuter()))
 		{
-			OwnerLocationWhenLastBuilt = Owner->GetActorLocation();
-			OwnerScaleWhenLastBuilt = Owner->GetActorScale();
+			OwnerLocationWhenLastBuilt = (FVector3f)Owner->GetActorLocation();
+			OwnerScaleWhenLastBuilt = (FVector3f)Owner->GetActorScale();
 			OwnerRotationWhenLastBuilt = Owner->GetActorRotation();
 			bCachedOwnerTransformValid = true;
 		}
 #endif
 	}
+}
+
+void UModel::PreSave(FObjectPreSaveContext SaveContext)
+{
+	Super::PreSave(SaveContext);
+#if WITH_EDITOR
+	if (!SaveContext.IsProceduralSave())
+	{
+		// Reconstruct the lighting guid every time the model is saved by the user in editor.
+		// ConstructLightingGuid is deterministic so this will not cause spurious changes.
+		LightingGuid = ConstructLightingGuid();
+	}
+#endif
 }
 
 #if WITH_EDITOR
@@ -409,63 +472,63 @@ void UModel::PostEditUndo()
 	Super::PostEditUndo();
 }
 
-void UModel::ModifySurf( int32 InIndex, bool UpdateMaster )
+void UModel::ModifySurf( int32 InIndex, bool UpdateBrushes )
 {
-	Modify();
+	Modify(false);
 
 	FBspSurf& Surf = Surfs[InIndex];
-	if( UpdateMaster && Surf.Actor )
+	if( UpdateBrushes && Surf.Actor )
 	{
-		Surf.Actor->Brush->Modify();
+		Surf.Actor->Brush->Modify(false);
 	}
 }
 
-void UModel::ModifyAllSurfs( bool UpdateMaster )
+void UModel::ModifyAllSurfs( bool UpdateBrushes )
 {
-	Modify();
+	Modify(false);
 
-	if (UpdateMaster)
+	if (UpdateBrushes)
 	{
-		TArray<UModel*> MasterModels;
-		MasterModels.Reset(Surfs.Num());
+		TArray<UModel*> Brushes;
+		Brushes.Reset(Surfs.Num());
 
 		for (const FBspSurf& Surf : Surfs)
 		{
 			if (Surf.Actor)
 			{
 				check(Surf.Actor->Brush);
-				MasterModels.AddUnique(Surf.Actor->Brush);
+				Brushes.AddUnique(Surf.Actor->Brush);
 			}
 		}
 
-		for (UModel* MasterModel : MasterModels)
+		for (UModel* Brush: Brushes)
 		{
-			MasterModel->Modify();
+			Brush->Modify(false);
 		}
 	}
 }
 
-void UModel::ModifySelectedSurfs( bool UpdateMaster )
+void UModel::ModifySelectedSurfs( bool UpdateBrushes )
 {
-	Modify();
+	Modify(false);
 
-	if (UpdateMaster)
+	if (UpdateBrushes)
 	{
-		TArray<UModel*> MasterModels;
-		MasterModels.Reset(Surfs.Num());
+		TArray<UModel*> Brushes;
+		Brushes.Reset(Surfs.Num());
 
 		for (const FBspSurf& Surf : Surfs)
 		{
 			if (Surf.Actor && (Surf.PolyFlags & PF_Selected))
 			{
 				check(Surf.Actor->Brush);
-				MasterModels.AddUnique(Surf.Actor->Brush);
+				Brushes.AddUnique(Surf.Actor->Brush);
 			}
 		}
 
-		for (UModel* MasterModel : MasterModels)
+		for (UModel* Brush : Brushes)
 		{
-			MasterModel->Modify();
+			Brush->Modify(false);
 		}
 	}
 }
@@ -539,43 +602,30 @@ void UModel::GetResourceSizeEx(FResourceSizeEx& CumulativeResourceSize)
 }
 
 #if WITH_EDITOR
-
-IMPLEMENT_INTRINSIC_CLASS(UModel, ENGINE_API, UObject, CORE_API, "/Script/Engine",
-	{
-		Class->ClassAddReferencedObjects = &UModel::AddReferencedObjects;
-		Class->EmitObjectReference(STRUCT_OFFSET(UModel, Polys), TEXT("Polys"));
-		const uint32 SkipIndexIndex = Class->EmitStructArrayBegin(STRUCT_OFFSET(UModel, Surfs), TEXT("Surfs"), sizeof(FBspSurf));
-		Class->EmitObjectReference(STRUCT_OFFSET(FBspSurf, Material), TEXT("Material"));
-		Class->EmitObjectReference(STRUCT_OFFSET(FBspSurf, Actor), TEXT("Actor"));
-		Class->EmitStructArrayEnd( SkipIndexIndex );
-	}
-);
-
+#define UMODEL_EDITOR_GC_MEMBERS UE_GC_MEMBER(UModel, Polys), 
 #else
+#define UMODEL_EDITOR_GC_MEMBERS
+#endif
 
 IMPLEMENT_INTRINSIC_CLASS(UModel, ENGINE_API, UObject, CORE_API, "/Script/Engine",
 	{
-		Class->ClassAddReferencedObjects = &UModel::AddReferencedObjects;
-		const uint32 SkipIndexIndex = Class->EmitStructArrayBegin(STRUCT_OFFSET(UModel, Surfs), TEXT("Surfs"), sizeof(FBspSurf));
-		Class->EmitObjectReference(STRUCT_OFFSET(FBspSurf, Material), TEXT("Material"));
-		Class->EmitObjectReference(STRUCT_OFFSET(FBspSurf, Actor), TEXT("Actor"));
-		Class->EmitStructArrayEnd( SkipIndexIndex );
+		Class->CppClassStaticFunctions = UOBJECT_CPPCLASS_STATICFUNCTIONS_FORCLASS(UModel);
+
+		UE::GC::TSchemaBuilder<FBspSurf> SurfSchema({ UE_GC_MEMBER(FBspSurf, Material), UE_GC_MEMBER(FBspSurf, Actor) });
+		UE::GC::DeclareIntrinsicMembers(Class, { UMODEL_EDITOR_GC_MEMBERS UE_GC_MEMBER(UModel, Surfs, SurfSchema) });
 	}
 );
-
-#endif // WITH_EDITOR
 
 /*---------------------------------------------------------------------------------------
 	UModel implementation.
 ---------------------------------------------------------------------------------------*/
 
 #if WITH_EDITOR
-bool UModel::Modify( bool bAlwaysMarkDirty/*=false*/ )
+bool UModel::Modify( bool bAlwaysMarkDirty/*=true*/ )
 {
 	bool bSavedToTransactionBuffer = Super::Modify(bAlwaysMarkDirty);
 
-	// make a new guid whenever this model changes
-	LightingGuid = FGuid::NewGuid();
+	// We do not reconstruct the LightingGuid on every change, we reconstruct it (deterministically) when saved
 
 	// Modify all child objects.
 	if( Polys )
@@ -586,12 +636,96 @@ bool UModel::Modify( bool bAlwaysMarkDirty/*=false*/ )
 	return bSavedToTransactionBuffer;
 }
 
-void UModel::PreEditChange(FProperty*)
+FGuid UModel::ConstructLightingGuid() const
 {
-	// Do not call Super! Override PreEditChange to keep the same behavior as the Modify which change the default of `bAlwaysMarkDirty`...
-	Modify(false);
+	TRACE_CPUPROFILER_EVENT_SCOPE(UModel::ConstructLightingGuid);
+	FBlake3 Builder;
+
+	// Add in all variables but only variables that could affect lighting. This includes all of the geometry and materials.
+	// It does not include properties in other UObjects (we copy their path only) because the LightingGuid only
+	// needs to cover data on *this.
+	// It does not include cached data that only optimizes operations that is redundant with other geometry data.
+	// It does not include transient data.
+
+	ModelUpdateHash(Builder, Polys);
+	if (!Nodes.IsEmpty())
+	{
+		static_assert(alignof(FBspNode) <= 1 || sizeof(FBspNode) % alignof(FBspNode) == 0, "We rely on zero padding in arrays");
+		checkf(Nodes.Num() < 2 || (int64)&Nodes[1] - (int64)&Nodes[0] == sizeof(Nodes[0]), TEXT("We rely on zero padding in arrays"));
+		Builder.Update(Nodes.GetData(), Nodes.Num() * sizeof(Nodes[0]));
+	}
+	if (!Verts.IsEmpty())
+	{
+		static_assert(alignof(FVert) <= 1 || sizeof(FVert) % alignof(FVert) == 0, "We rely on zero padding in arrays");
+		checkf(Verts.Num() < 2 || (int64)&Verts[1] - (int64)&Verts[0] == sizeof(Verts[0]), TEXT("We rely on zero padding in arrays"));
+		Builder.Update(Verts.GetData(), Verts.Num() * sizeof(Verts[0]));
+	}
+	if (!Vectors.IsEmpty())
+	{
+		static_assert(alignof(FVector3f) <= 1 || sizeof(FVector3f) % alignof(FVector3f) == 0, "We rely on zero padding in arrays");
+		checkf(Vectors.Num() < 2 || (int64)&Vectors[1] - (int64)&Vectors[0] == sizeof(Vectors[0]), TEXT("We rely on zero padding in arrays"));
+		Builder.Update(Vectors.GetData(), Vectors.Num() * sizeof(Vectors[0]));
+	}
+	if (!Points.IsEmpty())
+	{
+		static_assert(alignof(FVector3f) <= 1 || sizeof(FVector3f) % alignof(FVector3f) == 0, "We rely on zero padding in arrays");
+		checkf(Points.Num() < 2 || (int64)&Points[1] - (int64)&Points[0] == sizeof(Points[0]), TEXT("We rely on zero padding in arrays"));
+		Builder.Update(Points.GetData(), Points.Num() * sizeof(Points[0]));
+	}
+	for (const FBspSurf& Value : Surfs)
+	{
+		UpdateHash(Builder, Value);
+	}
+	if (!LeafHulls.IsEmpty())
+	{
+		static_assert(alignof(int32) <= 1 || sizeof(int32) % alignof(int32) == 0, "We rely on zero padding in arrays");
+		checkf(LeafHulls.Num() < 2 || (int64)&LeafHulls[1] - (int64)&LeafHulls[0] == sizeof(LeafHulls[0]), TEXT("We rely on zero padding in arrays"));
+		Builder.Update(LeafHulls.GetData(), LeafHulls.Num() * sizeof(LeafHulls[0]));
+	}
+	for (const FLeaf& Value : Leaves)
+	{
+		Builder.Update(&Value, sizeof(Value));
+	}
+	for (const FLightmassPrimitiveSettings& Value : LightmassSettings)
+	{
+		Builder.Update(&Value, sizeof(Value));
+	}
+	for (const TPair<UMaterialInterface*, TUniquePtr<FRawIndexBuffer16or32>>& Pair : MaterialIndexBuffers)
+	{
+		ModelUpdateHash(Builder, Pair.Key);
+		if (Pair.Value)
+		{
+			for (const uint32& Value : Pair.Value->Indices)
+			{
+				Builder.Update(&Value, sizeof(Value));
+			}
+		}
+	}
+	UpdateHash(Builder, VertexBuffer);
+	// ReleaseResourcesFence - Not needed, transient runtime rendering 
+	// InvalidSurfaces - Not needed, editor operations support 
+	// bOnlyRebuildMaterialIndexBuffers - Not needed, does not impact lighting results
+	// bInvalidForStaticLighting - Not needed, does not impact lighting results
+	// NumUniqueVertices - Not needed, redundant with this->Verts
+	// LightingGuid - Not needed, it's the thing we're calculated and is redundant with all the other data
+	// NodeGroups - Not needed, redundant with this->Nodes
+	// CachedMappings - Not needed, redundant with this->Surfs
+	// NumIncompleteNodeGroups - Not needed, editor operations support
+	// LightingLevel - Not needed, redundant with this->Nodes
+	// OwnerLocationWhenLastBuilt - Not needed, redundant with this->Verts
+	// OwnerRotationWhenLastBuilt - Not needed, redundant with this->Verts
+	// OwnerScaleWhenLastBuilt - Not needed, redundant with this->Verts
+	// bCachedOwnerTransformValid - Not needed, editor operations support
+	// RootOutside  - Not needed, editor operations support
+	// Linked - Not needed, editor operations support
+	// NumSharedSides - Not needed, editor operations support
+	// Bounds - Not needed, redundant with this->Verts
+
+	FBlake3Hash Hash = Builder.Finalize();
+	uint32* HashBytes = (uint32*)Hash.GetBytes();
+	return FGuid(HashBytes[0], HashBytes[1], HashBytes[2], HashBytes[3]);
 }
-#endif
+#endif // WITH_EDITOR
 
 //
 // Empty the contents of a model.
@@ -706,7 +840,7 @@ void UModel::BuildBound()
 		TArray<FVector> NewPoints;
 		for( int32 i=0; i<Polys->Element.Num(); i++ )
 			for( int32 j=0; j<Polys->Element[i].Vertices.Num(); j++ )
-				NewPoints.Add(Polys->Element[i].Vertices[j]);
+				NewPoints.Add((FVector)Polys->Element[i].Vertices[j]);
 		Bounds = FBoxSphereBounds( NewPoints.GetData(), NewPoints.Num() );
 	}
 }
@@ -716,7 +850,7 @@ void UModel::Transform( ABrush* Owner )
 	check(Owner);
 
 	for( int32 i=0; i<Polys->Element.Num(); i++ )
-		Polys->Element[i].Transform(Owner->GetActorLocation());
+		Polys->Element[i].Transform((FVector3f)Owner->GetActorLocation());
 
 }
 
@@ -798,8 +932,8 @@ FVector UModel::GetCenter()
 		for(uint32 VertexIndex = 0;VertexIndex < NumVerts;VertexIndex++)
 		{
 			const FVert& Vert = Verts[Node.iVertPool + VertexIndex];
-			const FVector& Position = Points[Vert.pVertex];
-			Center += Position;
+			const FVector3f& Position = Points[Vert.pVertex];
+			Center += (FVector)Position;
 			Cnt++;
 		}
 	}
@@ -841,20 +975,20 @@ int32 UModel::BuildVertexBuffers()
 		{
 			FBspNode& Node = Nodes[NodeIndex];
 			FBspSurf& Surf = Surfs[Node.iSurf];
-			const FVector& TextureBase = Points[Surf.pBase];
-			const FVector& TextureX = Vectors[Surf.vTextureU];
-			const FVector& TextureY = Vectors[Surf.vTextureV];
+			const FVector3f& TextureBase = Points[Surf.pBase];
+			const FVector3f& TextureX = Vectors[Surf.vTextureU];
+			const FVector3f& TextureY = Vectors[Surf.vTextureV];
 
 			// Use the texture coordinates and normal to create an orthonormal tangent basis.
-			FVector TangentX = TextureX;
-			FVector TangentY = TextureY;
-			FVector TangentZ = Vectors[Surf.vNormal];
-			FVector::CreateOrthonormalBasis(TangentX,TangentY,TangentZ);
+			FVector3f TangentX = TextureX;
+			FVector3f TangentY = TextureY;
+			FVector3f TangentZ = Vectors[Surf.vNormal];
+			FVector3f::CreateOrthonormalBasis(TangentX,TangentY,TangentZ);
 
 			for(uint32 VertexIndex = 0;VertexIndex < Node.NumVertices;VertexIndex++)
 			{
 				const FVert& Vert = Verts[Node.iVertPool + VertexIndex];
-				const FVector& Position = Points[Vert.pVertex];
+				const FVector3f& Position = Points[Vert.pVertex];
 				DestVertex->Position = Position;
 				DestVertex->TexCoord.X = ((Position - TextureBase) | TextureX) / UModel::GetGlobalBSPTexelScale();
 				DestVertex->TexCoord.Y = ((Position - TextureBase) | TextureY) / UModel::GetGlobalBSPTexelScale();
@@ -863,7 +997,7 @@ int32 UModel::BuildVertexBuffers()
 				DestVertex->TangentZ = TangentZ;
 
 				// store the sign of the determinant in TangentZ.W
-				DestVertex->TangentZ.W = GetBasisDeterminantSign( TangentX, TangentY, TangentZ );
+				DestVertex->TangentZ.W = GetBasisDeterminantSign((FVector)TangentX, (FVector)TangentY, (FVector)TangentZ );
 
 				DestVertex++;
 			}
@@ -873,7 +1007,7 @@ int32 UModel::BuildVertexBuffers()
 				for(int32 VertexIndex = Node.NumVertices - 1;VertexIndex >= 0;VertexIndex--)
 				{
 					const FVert& Vert = Verts[Node.iVertPool + VertexIndex];
-					const FVector& Position = Points[Vert.pVertex];
+					const FVector3f& Position = Points[Vert.pVertex];
 					DestVertex->Position = Position;
 					DestVertex->TexCoord.X = ((Position - TextureBase) | TextureX) / UModel::GetGlobalBSPTexelScale();
 					DestVertex->TexCoord.Y = ((Position - TextureBase) | TextureY) / UModel::GetGlobalBSPTexelScale();
@@ -882,7 +1016,7 @@ int32 UModel::BuildVertexBuffers()
 					DestVertex->TangentZ = -TangentZ;
 
 					// store the sign of the determinant in TangentZ.W
-					DestVertex->TangentZ.W = GetBasisDeterminantSign( TangentX, TangentY, -TangentZ );
+					DestVertex->TangentZ.W = GetBasisDeterminantSign((FVector)TangentX, (FVector)TangentY, (FVector)-TangentZ );
 
 					DestVertex++;
 				}

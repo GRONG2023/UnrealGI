@@ -2,23 +2,37 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Misc/FrameRate.h"
-#include "UObject/ObjectMacros.h"
-#include "Evaluation/MovieSceneSequenceTransform.h"
-#include "Evaluation/MovieSceneSectionParameters.h"
-#include "UObject/SoftObjectPath.h"
-#include "MovieSceneSequenceID.h"
-#include "Evaluation/MovieSceneSequenceInstanceData.h"
+#include "Containers/Array.h"
 #include "Containers/ArrayView.h"
-#include "MovieSceneFrameMigration.h"
-#include "Evaluation/MovieSceneSegment.h"
+#include "Containers/Map.h"
+#include "CoreMinimal.h"
+#include "CoreTypes.h"
 #include "Evaluation/MovieSceneEvaluationTree.h"
+#include "Evaluation/MovieSceneSectionParameters.h"
+#include "Evaluation/MovieSceneSegment.h"
+#include "Evaluation/MovieSceneSequenceInstanceData.h"
+#include "Evaluation/MovieSceneSequenceTransform.h"
+#include "HAL/PlatformCrt.h"
+#include "Misc/FrameNumber.h"
+#include "Misc/FrameRate.h"
+#include "Misc/Guid.h"
+#include "MovieSceneFrameMigration.h"
+#include "MovieSceneSequenceID.h"
+#include "Serialization/Archive.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/SoftObjectPath.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+
 #include "MovieSceneSequenceHierarchy.generated.h"
 
 class UMovieSceneSequence;
 class UMovieSceneSubSection;
 struct FMovieSceneSequenceID;
+template <typename ElementType> class TRange;
 
 /**
  * Sub sequence data that is stored within an evaluation template as a backreference to the originating sequence, and section
@@ -56,7 +70,7 @@ struct FMovieSceneSubSequenceData
 	/**
 	* Gets the signature of the sub-section this points to. 
 	*/
-	MOVIESCENE_API FGuid GetSubSectionSignature() const { return SubSectionSignature; }
+	FGuid GetSubSectionSignature() const { return SubSectionSignature; }
 
 	/**
 	 * Re-creates a sub-section parameter struct.
@@ -64,7 +78,7 @@ struct FMovieSceneSubSequenceData
 	MOVIESCENE_API FMovieSceneSectionParameters ToSubSectionParameters() const;
 
 	/** The sequence that the sub section references */
-	UPROPERTY(meta=(AllowedClasses="MovieSceneSequence"))
+	UPROPERTY(meta=(AllowedClasses="/Script/MovieScene.MovieSceneSequence"))
 	FSoftObjectPath Sequence;
 
 	/** The transform from this sub sequence's parent to its own play space. */
@@ -132,9 +146,9 @@ struct FMovieSceneSubSequenceData
 	UPROPERTY()
 	int16 HierarchicalBias;
 
-	/** Whether this sub-sequence has hierarchical easing. */
+	/** Flags accumulated from parent->child for each sub-section that led to the inclusion of this sub-sequence */
 	UPROPERTY()
-	bool bHasHierarchicalEasing;
+	EMovieSceneSubSectionFlags AccumulatedFlags;
 
 	/** Instance data that should be used for any tracks contained immediately within this sub sequence */
 	UPROPERTY()
@@ -222,7 +236,7 @@ struct FMovieSceneSubSequenceTree
 template<> struct TStructOpsTypeTraits<FMovieSceneSubSequenceTree> : public TStructOpsTypeTraitsBase2<FMovieSceneSubSequenceTree> { enum { WithSerializer = true, WithIdenticalViaEquality = true }; };
 
 /**
- * Structure that stores hierarchical information pertaining to all sequences contained within a master sequence
+ * Structure that stores hierarchical information pertaining to all sequences contained within a root sequence
  */
 USTRUCT()
 struct FMovieSceneSequenceHierarchy
@@ -330,6 +344,16 @@ struct FMovieSceneSequenceHierarchy
 		return Tree.Data;
 	}
 
+	EMovieSceneServerClientMask GetAccumulatedNetworkMask() const
+	{
+		return AccumulatedNetworkMask;
+	}
+
+	void AccumulateNetworkMask(EMovieSceneServerClientMask Mask)
+	{
+		AccumulatedNetworkMask &= Mask;
+	}
+
 #if !NO_LOGGING
 	void LogHierarchy() const;
 	void LogSubSequenceTree() const;
@@ -351,4 +375,13 @@ private:
 	/** Structural information describing the structure of the sequence */
 	UPROPERTY()
 	TMap<FMovieSceneSequenceID, FMovieSceneSequenceHierarchyNode> Hierarchy;
+
+	/** Holds the accumulated network mask from all included sub-sections. 
+	* If client or server-only subsections are found and included based on the gather params network mask, other bits will be excluded.
+	* If the gather param network mask excludes client or server-only sub-sections, these will be skipped, and so not accumulated.
+	* If no client or server-only subsections are found and included, the mask will be All.
+	* If both client and server-only subsections are found and included, the mask will be None as each would exclude the other.
+	*/
+	UPROPERTY()
+	EMovieSceneServerClientMask AccumulatedNetworkMask = EMovieSceneServerClientMask::All;
 };

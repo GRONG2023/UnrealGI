@@ -1,4 +1,5 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
+
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -12,8 +13,9 @@ using System.Text;
 using System.Threading;
 using System.ComponentModel;
 using System.Reflection;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 using System.Linq;
+using Microsoft.Extensions.Logging;
 
 namespace AutomationTool
 {
@@ -73,9 +75,192 @@ namespace AutomationTool
 		}
 	}
 
-	/// <summary>
-	/// Base utility function for script commands.
-	/// </summary>
+	[AttributeUsage(AttributeTargets.Class | AttributeTargets.Interface, AllowMultiple = true)]
+	public class ParamHelpAttribute : HelpAttribute
+	{
+		public enum ParamAction
+		{
+			Store,
+			Store_True,
+			Store_False,
+			Append,
+			Override
+		}
+
+		private ParamHelpAttribute(string Description) : base(Description)
+		{
+		}
+
+		public ParamHelpAttribute() : this("", "")
+		{
+			// Needed for de-serialization
+		}
+
+		public ParamHelpAttribute(string Name, string Description) : base(Name, Description)
+		{
+			ParamName = Name.TrimStart('-');
+			int EqualsInParamNameIndex = ParamName.IndexOf("=");
+			if (EqualsInParamNameIndex > 0)
+			{
+				ParamName = ParamName.Substring(0, EqualsInParamNameIndex);
+			}
+			_Action = ParamAction.Store;
+			Required = false;
+			ParamType = typeof(string);
+			DefaultValue = null;
+			_Choices = null;
+			MultiSelectSeparator = null;
+			Deprecated = false;
+		}
+
+		public string ParamName
+		{
+			get;
+			set;
+		}
+		
+		private string _ParamDescription = string.Empty;
+		public string ParamDescription
+		{
+			get
+			{
+				if (!string.IsNullOrEmpty(_ParamDescription))
+				{
+					return _ParamDescription;
+				}
+
+				string RequiredStr = Required ? ". Required" : ". Optional";
+				string ChoicesStr = "";
+				var ValidChoices = Choices as IEnumerable<object>;
+				if (ValidChoices != null)
+				{
+					ChoicesStr += ". Choices=[";
+					foreach (var Value in ValidChoices)
+					{
+						if (Value != null)
+						{
+							ChoicesStr += Value.ToString() + (MultiSelectSeparator != null ? MultiSelectSeparator : "|");
+						}
+					}
+					ChoicesStr = ChoicesStr.Remove(ChoicesStr.Length - 1);
+					ChoicesStr += "]";
+				}
+				string DefaultStr = DefaultValue != null ? ". DefaultValue=" + DefaultValue.ToString() : "";
+				return base.Description + string.Format("{0}{1}{2}",
+						RequiredStr,
+						DefaultStr,
+						ChoicesStr
+					);
+			}
+			set
+			{
+				_ParamDescription = value;
+			}
+		}
+
+		private ParamAction _Action = ParamAction.Store;
+		public ParamAction Action
+		{
+			get
+			{
+				return _Action;
+			}
+			set
+			{
+				if (value == ParamAction.Store_True || value == ParamAction.Store_False)
+				{
+					ParamType = typeof(bool);
+				}
+				_Action = value;
+			}
+		}
+
+		public object DefaultValue
+		{
+			get;
+			set;
+		}
+
+		public Type ParamType
+		{
+			get;
+			set;
+		}
+
+		object _Choices;
+		public object Choices
+		{
+			get
+			{
+				return _Choices;
+			}
+			set
+			{
+				var Enumerable = value as System.Collections.IEnumerable;
+				if (Enumerable != null)
+				{
+					_Choices = Enumerable;
+				}
+			}
+		}
+
+		public bool Required
+		{
+			get;
+			set;
+		}
+
+		public bool IsArgument
+		{
+			get;
+			set;
+		}
+
+		public string MultiSelectSeparator
+		{
+			get;
+			set;
+		}
+
+		public bool Deprecated
+		{
+			get;
+			set;
+		}
+
+		private string _Flag = null;
+		public string Flag
+		{
+			get
+			{
+				if (_Flag == null)
+				{
+					return "-" + ParamName;
+				}
+				return _Flag;
+			}
+			set
+			{
+				if (!string.IsNullOrEmpty(value))
+				{
+					_Flag = value;
+				}
+			}
+		}
+
+		/// <summary>
+		/// This string/character separates the flag from the value; ex. -foo=bar
+		/// </summary>
+		public string ParamKeyValueDelimiter
+		{
+			get;
+			set;
+		} = "=";
+	}
+
+/// <summary>
+/// Base utility function for script commands.
+/// </summary>
 	public partial class CommandUtils
 	{
 		/// <summary>
@@ -140,12 +325,12 @@ namespace AutomationTool
 					}
 					else
 					{
-						LogWarning("Duplicated help parameter \"{0}\"", ParamName);
+						Logger.LogWarning("Duplicated help parameter \"{ParamName}\"", ParamName);
 					}
 				}
 			}
 
-			Log.TraceInformation("");
+			Logger.LogInformation("");
 			HelpUtils.PrintHelp(String.Format("{0} Help:", Command.Name), Description, ParamDict.ToList());
 		}
 

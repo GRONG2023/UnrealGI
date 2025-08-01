@@ -6,26 +6,26 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+// IWYU pragma: begin_keep
 #include "Misc/EnumClassFlags.h"
 #include "UObject/Script.h"
+// IWYU pragma: end_keep
 
 class FObjectInitializer;
-struct FCompiledInDefer;
+class FReferenceCollector;
+struct FAppendToClassSchemaContext;
 struct FFrame;
-template <typename TClass> struct TClassCompiledInDefer;
+struct FClassReloadVersionInfo;
+struct FTopLevelAssetPath;
 
 /** Represents a serializable object pointer in blueprint bytecode. This is always 64-bits, even on 32-bit platforms. */
 typedef	uint64 ScriptPointerType;
 
-
 #if PLATFORM_VTABLE_AT_END_OF_CLASS
-#error "not supported in UE4"
+#error "not supported in UE"
 #endif
 
-#if HACK_HEADER_GENERATOR 
-#define USE_COMPILED_IN_NATIVES	0
-#else
+#ifndef USE_COMPILED_IN_NATIVES
 #define USE_COMPILED_IN_NATIVES	1
 #endif
 
@@ -37,7 +37,7 @@ typedef	uint64 ScriptPointerType;
 #define USTRUCT_ISCHILDOF_STRUCTARRAY 2 // stores an array of parents per struct and uses this to compare - faster than 1 and thread-safe but can have issues with BP reinstancing and hot reload
 
 // USTRUCT_FAST_ISCHILDOF_IMPL sets which implementation of IsChildOf to use.
-#if UE_EDITOR || HACK_HEADER_GENERATOR
+#if UE_EDITOR
 	// On editor, we use the outerwalk implementation because BP reinstancing and hot reload
 	// mess up the struct array
 	#define USTRUCT_FAST_ISCHILDOF_IMPL USTRUCT_ISCHILDOF_OUTERWALK
@@ -61,45 +61,58 @@ enum ELoadFlags
 	LOAD_EditorOnly					= 0x00000004,	///< Load for editor-only purposes and by editor-only code
 	LOAD_ResolvingDeferredExports	= 0x00000008,	///< Denotes that we should not defer export loading (as we're resolving them)
 	LOAD_Verify						= 0x00000010,	///< Only verify existance; don't actually load.
-	LOAD_AllowDll					= 0x00000020,	///< Allow plain DLLs.
+//	LOAD_Unused						= 0x00000020,	///< Allow plain DLLs.
 //	LOAD_Unused						= 0x00000040
-	LOAD_NoVerify					= 0x00000080,   ///< Don't verify imports yet.
+	LOAD_NoVerify					= 0x00000080,	///< Don't verify imports yet.
 	LOAD_IsVerifying				= 0x00000100,	///< Is verifying imports
-//	LOAD_Unused						= 0x00000200,
-//	LOAD_Unused						= 0x00000400,
+	LOAD_SkipLoadImportedPackages	= 0x00000200,	///< Assume that all import packages are already loaded and don't call LoadPackage when creating imports 
+	LOAD_RegenerateBulkDataGuids	= 0x00000400,	///< BulkData identifiers should be regenerated as they are loaded 
 //	LOAD_Unused						= 0x00000800,
 	LOAD_DisableDependencyPreloading = 0x00001000,	///< Bypass dependency preloading system
-	LOAD_Quiet						= 0x00002000,   ///< No log warnings.
+	LOAD_Quiet						= 0x00002000,	///< No log warnings.
 	LOAD_FindIfFail					= 0x00004000,	///< Tries FindObject if a linker cannot be obtained (e.g. package is currently being compiled)
 	LOAD_MemoryReader				= 0x00008000,	///< Loads the file into memory and serializes from there.
 	LOAD_NoRedirects				= 0x00010000,	///< Never follow redirects when loading objects; redirected loads will fail
 	LOAD_ForDiff					= 0x00020000,	///< Loading for diffing in the editor
-	LOAD_PackageForPIE				= 0x00080000,   ///< This package is being loaded for PIE, it must be flagged as such immediately
-	LOAD_DeferDependencyLoads       = 0x00100000,   ///< Do not load external (blueprint) dependencies (instead, track them for deferred loading)
+	LOAD_PackageForPIE				= 0x00080000,	///< This package is being loaded for PIE, it must be flagged as such immediately
+	LOAD_DeferDependencyLoads       = 0x00100000,	///< Do not load external (blueprint) dependencies (instead, track them for deferred loading)
 	LOAD_ForFileDiff				= 0x00200000,	///< Load the package (not for diffing in the editor), instead verify at the two packages serialized output are the same, if they are not then debug break so that you can get the callstack and object information
 	LOAD_DisableCompileOnLoad		= 0x00400000,	///< Prevent this load call from running compile on load for the loaded blueprint (intentionally not recursive, dependencies will still compile on load)
+	LOAD_DisableEngineVersionChecks = 0x00800000,	///< Prevent this load call from running engine version checks
 };
 
 /** Flags for saving objects/packages, passed into UPackage::SavePackage() as a uint32 */
 enum ESaveFlags
 {
-	SAVE_None			= 0x00000000,	///< No flags
-	SAVE_NoError		= 0x00000001,	///< Don't generate errors on save
-	SAVE_FromAutosave	= 0x00000002,   ///< Used to indicate this save was initiated automatically
-	SAVE_KeepDirty		= 0x00000004,	///< Do not clear the dirty flag when saving
-	SAVE_KeepGUID		= 0x00000008,	///< Keep the same guid, used to save cooked packages
-	SAVE_Async			= 0x00000010,	///< Save to a memory writer, then actually write to disk async
-	SAVE_Unversioned	= 0x00000020,	///< Save all versions as zero. Upon load this is changed to the current version. This is only reasonable to use with full cooked builds for distribution.
-	SAVE_CutdownPackage	= 0x00000040,	///< Saving cutdown packages in a temp location WITHOUT renaming the package.
+	SAVE_None						= 0x00000000,	///< No flags
+	SAVE_NoError					= 0x00000001,	///< Don't generate errors on save
+	SAVE_FromAutosave				= 0x00000002,   ///< Used to indicate this save was initiated automatically
+	SAVE_KeepDirty					= 0x00000004,	///< Do not clear the dirty flag when saving
+	SAVE_KeepGUID					= 0x00000008,	///< Keep the same guid, used to save cooked packages
+	SAVE_Async						= 0x00000010,	///< Save to a memory writer, then actually write to disk async
+	SAVE_Unversioned_Native			= 0x00000020,	///< Save all versions as zero. Upon load this is changed to the current version. This is only reasonable to use with full cooked builds for distribution.
+	SAVE_CutdownPackage				= 0x00000040,	///< Saving cutdown packages in a temp location WITHOUT renaming the package.
 	SAVE_KeepEditorOnlyCookedPackages = 0x00000080,  ///< Keep packages which are marked as editor only even though we are cooking
-	SAVE_Concurrent		= 0x00000100,	///< We are save packages in multiple threads at once and should not call non-threadsafe functions or rely on globals. GIsSavingPackage should be set and PreSave/Postsave functions should be called before/after the entire concurrent save.
-	SAVE_DiffOnly       = 0x00000200,	///< Serializes the package to a special memory archive that performs a diff with an existing file on disk
-	SAVE_DiffCallstack  = 0x00000400,	///< Serializes the package to a special memory archive that compares all differences against a file on disk and dumps relevant callstacks
-	SAVE_ComputeHash    = 0x00000800,	///< Compute the MD5 hash of the cooked data
-	SAVE_CompareLinker	= 0x00001000,	///< Return the linker save to compare against another
+	SAVE_Concurrent					= 0x00000100,	///< We are save packages in multiple threads at once and should not call non-threadsafe functions or rely on globals. GIsSavingPackage should be set and PreSave/Postsave functions should be called before/after the entire concurrent save.
+	SAVE_DiffOnly UE_DEPRECATED(5.0, "Diffing is now done using FDiffPackageWriter.") = 0x00000200,	
+	SAVE_DiffCallstack UE_DEPRECATED(5.0, "Diffing is now done using FDiffPackageWriter.") = 0x00000400,
+	SAVE_ComputeHash UE_DEPRECATED(5.1, "Add EWriteOptions::ComputeHash directly to CommitPackage options") = 0x00000800,	///< Compute the MD5 hash of the cooked data, as well as the per iostore chunk FIoHash.
+	SAVE_CompareLinker				= 0x00001000,	///< Return the linker save to compare against another
+	SAVE_BulkDataByReference		= 0x00002000,	///< When saving to a different file than the package's LoadedPath, point bulkdata in the new file to be loaded from the original file.
+	SAVE_Unversioned_Properties		= 0x00004000,	///< Properties are saved without property name information, and are saved/loaded in the order of the current binary.
+													///This is only reasonable to use with full cooked builds for distribution, or with a domain that selects the payload matching a given version externally.
+	SAVE_Optional					= 0x00008000,	///< Indicate that we to save optional exports. This flag is only valid while cooking. Optional exports are filtered if not specified during cooking. 
+	SAVE_AllowTimeout				= 0x00010000,   ///< If present, if SavePackage is blocked by an asynchronous operation, it will quickly fail with ESavePackageResult::Timeout, otherwise it will wait for a while and then fail with ESavePackageResult::Error.
+	SAVE_RehydratePayloads			= 0x00020000,   ///< Any virtualized payloads in the package should be pulled and stored locally in the package file during the save
+	SAVE_Unversioned = SAVE_Unversioned_Native | SAVE_Unversioned_Properties,
 };
 
-/** Package flags, passed into UPackage::SetPackageFlags and related functions */
+/** 
+ * Package flags, passed into UPackage::SetPackageFlags and related functions
+ *
+ * This MUST be kept in sync with EPackageFlags defined in
+ * Engine\Source\Programs\Shared\EpicGames.Core\UnrealEngineTypes.cs
+ */
 enum EPackageFlags
 {
 	PKG_None						= 0x00000000,	///< No flags
@@ -113,11 +126,11 @@ enum EPackageFlags
 	PKG_UncookedOnly				= 0x00000100,	///< Loaded only in uncooked builds (i.e. runtime in editor)
 	PKG_Cooked						= 0x00000200,	///< Package is cooked
 	PKG_ContainsNoAsset				= 0x00000400,	///< Package doesn't contain any asset object (although asset tags can be present)
-//	PKG_Unused						= 0x00000800,
+	PKG_NotExternallyReferenceable  = 0x00000800,   ///< Objects in this package cannot be referenced in a different plugin or mount point (i.e /Game -> /Engine)
 //	PKG_Unused						= 0x00001000,
 	PKG_UnversionedProperties		= 0x00002000,   ///< Uses unversioned property serialization instead of versioned tagged property serialization
 	PKG_ContainsMapData				= 0x00004000,   ///< Contains map data (UObjects only referenced by a single ULevel) but is stored in a different package
-//	PKG_Unused						= 0x00008000,
+	PKG_IsSaving					= 0x00008000,	///< Temporarily set on a package while it is being saved.
 	PKG_Compiling					= 0x00010000,	///< package is currently being compiled
 	PKG_ContainsMap					= 0x00020000,	///< Set if the package contains a ULevel/ UWorld object
 	PKG_RequiresLocalizationGather	= 0x00040000,	///< Set if the package contains any data to be gathered by localization
@@ -129,11 +142,14 @@ enum EPackageFlags
 //	PKG_Unused						= 0x01000000,	
 //	PKG_Unused						= 0x02000000,	
 //	PKG_Unused						= 0x04000000,
-//	PKG_Unused						= 0x08000000,	
+	PKG_CookGenerated				= 0x08000000,	///< This package was generated by the cooker and does not exist in the WorkspaceDomain
 	PKG_DynamicImports				= 0x10000000,	///< This package should resolve dynamic imports from its export at runtime.
 	PKG_RuntimeGenerated			= 0x20000000,	///< This package contains elements that are runtime generated, and may not follow standard loading order rules
 	PKG_ReloadingForCooker			= 0x40000000,   ///< This package is reloading in the cooker, try to avoid getting data we will never need. We won't save this package.
 	PKG_FilterEditorOnly			= 0x80000000,	///< Package has editor-only data filtered out
+
+	// Transient Flags are cleared when serializing to or from PackageFileSummary
+	PKG_TransientFlags				= PKG_NewlyCreated | PKG_IsSaving | PKG_ReloadingForCooker,
 };
 
 /** Flag mask that indicates if this package is a package that exists in memory only. */
@@ -152,7 +168,7 @@ class FVTableHelper
 {
 public:
 	/** DO NOT USE. This constructor is for internal usage only for hot-reload purposes. */
-	COREUOBJECT_API FVTableHelper()
+	FVTableHelper()
 	{
 		EnsureRetrievingVTablePtrDuringCtor(TEXT("FVTableHelper()"));
 	}
@@ -163,6 +179,9 @@ public:
 
 /**
  * Flags describing a class.
+ *
+ * This MUST be kept in sync with EClassFlags defined in
+ * Engine\Source\Programs\Shared\EpicGames.Core\UnrealEngineTypes.cs
  */
 enum EClassFlags
 {
@@ -176,8 +195,8 @@ enum EClassFlags
 	CLASS_Config			  = 0x00000004u,
 	/** This object type can't be saved; null it out at save time. */
 	CLASS_Transient			  = 0x00000008u,
-	/** Successfully parsed. */
-	CLASS_Parsed              = 0x00000010u,
+	/** This object type may not be available in certain context. (i.e. game runtime or in certain configuration). Optional class data is saved separately to other object types. (i.e. might use sidecar files) */
+	CLASS_Optional            = 0x00000010u,
 	/** */
 	CLASS_MatchedSerializers  = 0x00000020u,
 	/** Indicates that the config settings for this class will be saved to Project/User*.ini (similar to CLASS_GlobalUserConfig) */
@@ -185,7 +204,7 @@ enum EClassFlags
 	/** Class is a native class - native interfaces will have CLASS_Native set, but not RF_MarkAsNative */
 	CLASS_Native			  = 0x00000080u,
 	/** Don't export to C++ header. */
-	CLASS_NoExport            = 0x00000100u,
+	CLASS_NoExport UE_DEPRECATED(5.1, "CLASS_NoExport should no longer be used. It is no longer being set by engine code.") = 0x00000100u,
 	/** Do not allow users to create in the editor. */
 	CLASS_NotPlaceable        = 0x00000200u,
 	/** Handle object configuration on a per-object basis, rather than per-class. */
@@ -200,13 +219,13 @@ enum EClassFlags
 	CLASS_CollapseCategories  = 0x00002000u,
 	/** Class is an interface **/
 	CLASS_Interface           = 0x00004000u,
-	/**  Do not export a constructor for this class, assuming it is in the cpptext **/
-	CLASS_CustomConstructor   = 0x00008000u,
+	/**  Config for this class is overridden in platform inis, reload when previewing platforms **/
+	CLASS_PerPlatformConfig   = 0x00008000u,
 	/** all properties and functions in this class are const and should be exported as const */
 	CLASS_Const			      = 0x00010000u,
 
-	/** Class flag indicating the class is having its layout changed, and therefore is not ready for a CDO to be created */
-	CLASS_LayoutChanging	  = 0x00020000u,
+	/** Class flag indicating objects of this class need deferred dependency loading */
+	CLASS_NeedsDeferredDependencyLoading = 0x00020000u,
 	
 	/** Indicates that the class was created from blueprint source material */
 	CLASS_CompiledFromBlueprint  = 0x00040000u,
@@ -246,14 +265,14 @@ enum EClassFlags
 ENUM_CLASS_FLAGS(EClassFlags);
 
 /** Flags to inherit from base class */
-#define CLASS_Inherit ((EClassFlags)(CLASS_Transient | CLASS_DefaultConfig | CLASS_Config | CLASS_PerObjectConfig | CLASS_ConfigDoNotCheckDefaults | CLASS_NotPlaceable \
-						| CLASS_Const | CLASS_HasInstancedReference | CLASS_Deprecated | CLASS_DefaultToInstanced | CLASS_GlobalUserConfig | CLASS_ProjectUserConfig))
+#define CLASS_Inherit ((EClassFlags)(CLASS_Transient | CLASS_Optional | CLASS_DefaultConfig | CLASS_Config | CLASS_PerObjectConfig | CLASS_ConfigDoNotCheckDefaults | CLASS_NotPlaceable \
+						| CLASS_Const | CLASS_HasInstancedReference | CLASS_Deprecated | CLASS_DefaultToInstanced | CLASS_GlobalUserConfig | CLASS_ProjectUserConfig | CLASS_PerPlatformConfig | CLASS_NeedsDeferredDependencyLoading))
 
 /** These flags will be cleared by the compiler when the class is parsed during script compilation */
-#define CLASS_RecompilerClear ((EClassFlags)(CLASS_Inherit | CLASS_Abstract | CLASS_NoExport | CLASS_Native | CLASS_Intrinsic | CLASS_TokenStreamAssembled))
+#define CLASS_RecompilerClear ((EClassFlags)(CLASS_Inherit | CLASS_Abstract | CLASS_Native | CLASS_Intrinsic | CLASS_TokenStreamAssembled))
 
 /** These flags will be cleared by the compiler when the class is parsed during script compilation */
-#define CLASS_ShouldNeverBeLoaded ((EClassFlags)(CLASS_Native | CLASS_Intrinsic | CLASS_TokenStreamAssembled))
+#define CLASS_ShouldNeverBeLoaded ((EClassFlags)(CLASS_Native | CLASS_Optional | CLASS_Intrinsic | CLASS_TokenStreamAssembled))
 
 /** These flags will be inherited from the base class only for non-intrinsic classes */
 #define CLASS_ScriptInherit ((EClassFlags)(CLASS_Inherit | CLASS_EditInlineNew | CLASS_CollapseCategories))
@@ -264,11 +283,14 @@ ENUM_CLASS_FLAGS(EClassFlags);
 	CLASS_DefaultConfig | \
 	CLASS_GlobalUserConfig | \
 	CLASS_ProjectUserConfig | \
+	CLASS_PerPlatformConfig | \
 	CLASS_Config | \
 	CLASS_Transient | \
+	CLASS_Optional | \
 	CLASS_Native | \
 	CLASS_NotPlaceable | \
 	CLASS_PerObjectConfig | \
+	CLASS_PerPlatformConfig | \
 	CLASS_ConfigDoNotCheckDefaults | \
 	CLASS_EditInlineNew | \
 	CLASS_CollapseCategories | \
@@ -282,13 +304,17 @@ ENUM_CLASS_FLAGS(EClassFlags);
 	CLASS_Const | \
 	CLASS_MinimalAPI | \
 	CLASS_RequiredAPI | \
-	CLASS_MatchedSerializers))
+	CLASS_MatchedSerializers | \
+	CLASS_NeedsDeferredDependencyLoading))
 
 #define CLASS_AllFlags ((EClassFlags)0xFFFFFFFFu)
 
 
 /**
  * Flags used for quickly casting classes of certain types; all class cast flags are inherited
+ *
+ * This MUST be kept in sync with EClassCastFlags defined in
+ * Engine\Source\Programs\Shared\EpicGames.Core\UnrealEngineTypes.cs
  */
 enum EClassCastFlags : uint64
 {
@@ -347,6 +373,10 @@ enum EClassCastFlags : uint64
 	CASTCLASS_FMulticastInlineDelegateProperty	= 0x0004000000000000,
 	CASTCLASS_FMulticastSparseDelegateProperty	= 0x0008000000000000,
 	CASTCLASS_FFieldPathProperty			= 0x0010000000000000,
+	CASTCLASS_FLargeWorldCoordinatesRealProperty = 0x0080000000000000,
+	CASTCLASS_FOptionalProperty				= 0x0100000000000000,
+	CASTCLASS_FVerseValueProperty			= 0x0200000000000000,
+	CASTCLASS_UVerseVMClass					= 0x0400000000000000,
 };
 
 #define CASTCLASS_AllFlags ((EClassCastFlags)0xFFFFFFFFFFFFFFFF)
@@ -358,6 +388,9 @@ ENUM_CLASS_FLAGS(EClassCastFlags)
  * Flags associated with each property in a class, overriding the
  * property's default behavior.
  * @warning When adding one here, please update ParsePropertyFlags()
+ * 
+ * This MUST be kept in sync with EPackageFlags defined in
+ * Engine\Source\Programs\Shared\EpicGames.Core\UnrealEngineTypes.cs
  */
 enum EPropertyFlags : uint64
 {
@@ -375,10 +408,10 @@ enum EPropertyFlags : uint64
 	CPF_ZeroConstructor					= 0x0000000000000200,	///< memset is fine for construction
 	CPF_ReturnParm						= 0x0000000000000400,	///< Return value.
 	CPF_DisableEditOnTemplate			= 0x0000000000000800,	///< Disable editing of this property on an archetype/sub-blueprint
-	//CPF_      						= 0x0000000000001000,	///< 
+	CPF_NonNullable						= 0x0000000000001000,	///< Object property can never be null
 	CPF_Transient   					= 0x0000000000002000,	///< Property is transient: shouldn't be saved or loaded, except for Blueprint CDOs.
 	CPF_Config      					= 0x0000000000004000,	///< Property should be loaded/saved as permanent profile.
-	//CPF_								= 0x0000000000008000,	///< 
+	CPF_RequiredParm					= 0x0000000000008000,	///< Parameter must be linked explicitly in blueprint. Leaving the parameter out results in a compile error. 
 	CPF_DisableEditOnInstance			= 0x0000000000010000,	///< Disable editing on an instance of this class
 	CPF_EditConst   					= 0x0000000000020000,	///< Property is uneditable in the editor.
 	CPF_GlobalConfig					= 0x0000000000040000,	///< Load config from base class, not subclass.
@@ -388,7 +421,7 @@ enum EPropertyFlags : uint64
 	//CPF_								= 0x0000000000400000,	///< 
 	//CPF_    							= 0x0000000000800000,	///< 
 	CPF_SaveGame						= 0x0000000001000000,	///< Property should be serialized for save games, this is only checked for game-specific archives with ArIsSaveGame
-	CPF_NoClear							= 0x0000000002000000,	///< Hide clear (and browse) button.
+	CPF_NoClear							= 0x0000000002000000,	///< Hide clear button.
 	//CPF_  							= 0x0000000004000000,	///<
 	CPF_ReferenceParm					= 0x0000000008000000,	///< Value is passed by reference; CPF_OutParam and CPF_Param should also be set.
 	CPF_BlueprintAssignable				= 0x0000000010000000,	///< MC Delegates only.  Property should be exposed for assigning in blueprint code
@@ -396,7 +429,7 @@ enum EPropertyFlags : uint64
 	CPF_IsPlainOldData					= 0x0000000040000000,	///< If this is set, then the property can be memcopied instead of CopyCompleteValue / CopySingleValue
 	CPF_RepSkip							= 0x0000000080000000,	///< Not replicated. For non replicated properties in replicated structs 
 	CPF_RepNotify						= 0x0000000100000000,	///< Notify actors when a property is replicated
-	CPF_Interp							= 0x0000000200000000,	///< interpolatable property for use with matinee
+	CPF_Interp							= 0x0000000200000000,	///< interpolatable property for use with cinematics
 	CPF_NonTransactional				= 0x0000000400000000,	///< Property isn't transacted
 	CPF_EditorOnly						= 0x0000000800000000,	///< Property should only be loaded in the editor
 	CPF_NoDestructor					= 0x0000001000000000,	///< No destructor
@@ -419,19 +452,23 @@ enum EPropertyFlags : uint64
 	CPF_NativeAccessSpecifierProtected	= 0x0020000000000000,	///< Protected native access specifier
 	CPF_NativeAccessSpecifierPrivate	= 0x0040000000000000,	///< Private native access specifier
 	CPF_SkipSerialization				= 0x0080000000000000,	///< Property shouldn't be serialized, can still be exported to text
+	CPF_TObjectPtr						= 0x0100000000000000,	///< Property is a TObjectPtr<T> instead of a USomething*. Need to differentiate between TObjectclassOf and TObjectPtr
+	CPF_ExperimentalOverridableLogic	= 0x0200000000000000,	///< ****Experimental*** Property will use different logic to serialize knowing what changes are done against its default use the overridable information provided by the overridable manager on the object
+	CPF_ExperimentalAlwaysOverriden		= 0x0400000000000000,	///< ****Experimental*** Property should never inherit from the parent when using overridable serialization
 };
 
 /** All Native Access Specifier flags */
 #define CPF_NativeAccessSpecifiers	(CPF_NativeAccessSpecifierPublic | CPF_NativeAccessSpecifierProtected | CPF_NativeAccessSpecifierPrivate)
 
 /** All parameter flags */
-#define CPF_ParmFlags				(CPF_Parm | CPF_OutParm | CPF_ReturnParm | CPF_ReferenceParm | CPF_ConstParm)
+#define CPF_ParmFlags				(CPF_Parm | CPF_OutParm | CPF_ReturnParm | CPF_RequiredParm | CPF_ReferenceParm | CPF_ConstParm )
 
 /** Flags that are propagated to properties inside containers */
-#define CPF_PropagateToArrayInner	(CPF_ExportObject | CPF_PersistentInstance | CPF_InstancedReference | CPF_ContainsInstancedReference | CPF_Config | CPF_EditConst | CPF_Deprecated | CPF_EditorOnly | CPF_AutoWeak | CPF_UObjectWrapper )
-#define CPF_PropagateToMapValue		(CPF_ExportObject | CPF_PersistentInstance | CPF_InstancedReference | CPF_ContainsInstancedReference | CPF_Config | CPF_EditConst | CPF_Deprecated | CPF_EditorOnly | CPF_AutoWeak | CPF_UObjectWrapper | CPF_Edit )
-#define CPF_PropagateToMapKey		(CPF_ExportObject | CPF_PersistentInstance | CPF_InstancedReference | CPF_ContainsInstancedReference | CPF_Config | CPF_EditConst | CPF_Deprecated | CPF_EditorOnly | CPF_AutoWeak | CPF_UObjectWrapper | CPF_Edit )
-#define CPF_PropagateToSetElement	(CPF_ExportObject | CPF_PersistentInstance | CPF_InstancedReference | CPF_ContainsInstancedReference | CPF_Config | CPF_EditConst | CPF_Deprecated | CPF_EditorOnly | CPF_AutoWeak | CPF_UObjectWrapper | CPF_Edit )
+#define CPF_PropagateToArrayInner    (CPF_ExportObject | CPF_PersistentInstance | CPF_InstancedReference | CPF_ContainsInstancedReference | CPF_Config | CPF_EditConst | CPF_Deprecated | CPF_EditorOnly | CPF_AutoWeak | CPF_UObjectWrapper )
+#define CPF_PropagateToOptionalInner (CPF_ExportObject | CPF_PersistentInstance | CPF_InstancedReference | CPF_ContainsInstancedReference | CPF_Config | CPF_EditConst | CPF_Deprecated | CPF_EditorOnly | CPF_AutoWeak | CPF_UObjectWrapper | CPF_Edit )
+#define CPF_PropagateToMapValue      (CPF_ExportObject | CPF_PersistentInstance | CPF_InstancedReference | CPF_ContainsInstancedReference | CPF_Config | CPF_EditConst | CPF_Deprecated | CPF_EditorOnly | CPF_AutoWeak | CPF_UObjectWrapper | CPF_Edit )
+#define CPF_PropagateToMapKey        (CPF_ExportObject | CPF_PersistentInstance | CPF_InstancedReference | CPF_ContainsInstancedReference | CPF_Config | CPF_EditConst | CPF_Deprecated | CPF_EditorOnly | CPF_AutoWeak | CPF_UObjectWrapper | CPF_Edit )
+#define CPF_PropagateToSetElement    (CPF_ExportObject | CPF_PersistentInstance | CPF_InstancedReference | CPF_ContainsInstancedReference | CPF_Config | CPF_EditConst | CPF_Deprecated | CPF_EditorOnly | CPF_AutoWeak | CPF_UObjectWrapper | CPF_Edit )
 
 /** The flags that should never be set on interface properties */
 #define CPF_InterfaceClearMask		(CPF_ExportObject|CPF_InstancedReference|CPF_ContainsInstancedReference)
@@ -442,6 +479,7 @@ enum EPropertyFlags : uint64
 /** All the properties that should never be loaded or saved */
 #define CPF_ComputedFlags			(CPF_IsPlainOldData | CPF_NoDestructor | CPF_ZeroConstructor | CPF_HasGetValueTypeHash)
 
+#define CPF_TObjectPtrWrapper 		(CPF_UObjectWrapper | CPF_TObjectPtr)
 /** Mask of all property flags */
 #define CPF_AllFlags				((EPropertyFlags)0xFFFFFFFFFFFFFFFF)
 
@@ -450,7 +488,7 @@ ENUM_CLASS_FLAGS(EPropertyFlags)
 /**
  * Extra flags for array properties.
  */
-enum class EArrayPropertyFlags
+enum class EArrayPropertyFlags : uint8
 {
 	None,
 	UsesMemoryImageAllocator
@@ -461,7 +499,7 @@ ENUM_CLASS_FLAGS(EArrayPropertyFlags)
 /**
  * Extra flags for map properties.
  */
-enum class EMapPropertyFlags
+enum class EMapPropertyFlags : uint8
 {
 	None,
 	UsesMemoryImageAllocator
@@ -469,27 +507,43 @@ enum class EMapPropertyFlags
 
 ENUM_CLASS_FLAGS(EMapPropertyFlags)
 
+enum class EPropertyObjectReferenceType : uint32
+{
+	None = 0,
+	Strong = 1 << 0, // Hard reference to a UObject, keeps the object from being garbage collected
+	Weak = 1 << 1,   // Weak reference to a UObject, does not keep the object from being garbage collected, does not become valid again after object is unloaded and reloaded.
+	Soft = 1 << 2,	 // Soft path/identity-based reference to a UObject, does not keep the object from being garbage collected, does become valid again after object is unloaded and reloaded.
+	Conservative = 1 << 3,	 // Not a real reference type, used to mark native struct serializers which may serialize unknown reference types and to conservatively populate RefLink with such struct properties.
+	
+	MAX = Conservative << 1, // Marker for iterating over all flags
+	Any = Strong | Weak | Soft | Conservative,
+};
+ENUM_CLASS_FLAGS(EPropertyObjectReferenceType);
+
+COREUOBJECT_API const TCHAR* LexToString(EPropertyObjectReferenceType Type);
+
 /**
  * Flags describing an object instance
+ * When modifying this enum, update the LexToString implementation! 
  */
 enum EObjectFlags
 {
 	// Do not add new flags unless they truly belong here. There are alternatives.
 	// if you change any the bit of any of the RF_Load flags, then you will need legacy serialization
-	RF_NoFlags						= 0x00000000,	///< No flags, used to avoid a cast
+	RF_NoFlags					= 0x00000000,	///< No flags, used to avoid a cast
 
 	// This first group of flags mostly has to do with what kind of object it is. Other than transient, these are the persistent object flags.
 	// The garbage collector also tends to look at these.
 	RF_Public					=0x00000001,	///< Object is visible outside its package.
 	RF_Standalone				=0x00000002,	///< Keep object around for editing even if unreferenced.
-	RF_MarkAsNative					=0x00000004,	///< Object (UField) will be marked as native on construction (DO NOT USE THIS FLAG in HasAnyFlags() etc)
+	RF_MarkAsNative				=0x00000004,	///< Object (UField) will be marked as native on construction (DO NOT USE THIS FLAG in HasAnyFlags() etc)
 	RF_Transactional			=0x00000008,	///< Object is transactional.
-	RF_ClassDefaultObject		=0x00000010,	///< This object is its class's default object
-	RF_ArchetypeObject			=0x00000020,	///< This object is a template for another object - treat like a class default object
+	RF_ClassDefaultObject		=0x00000010,	///< This object is used as the default template for all instances of a class. One object is created for each class
+	RF_ArchetypeObject			=0x00000020,	///< This object can be used as a template for instancing objects. This is set on all types of object templates
 	RF_Transient				=0x00000040,	///< Don't save object.
 
 	// This group of flags is primarily concerned with garbage collection.
-	RF_MarkAsRootSet					=0x00000080,	///< Object will be marked as root set on construction and not be garbage collected, even if unreferenced (DO NOT USE THIS FLAG in HasAnyFlags() etc)
+	RF_MarkAsRootSet			=0x00000080,	///< Object will be marked as root set on construction and not be garbage collected, even if unreferenced (DO NOT USE THIS FLAG in HasAnyFlags() etc)
 	RF_TagGarbageTemp			=0x00000100,	///< This is a temp user flag for various utilities that need to use the garbage collector. The garbage collector itself does not interpret it.
 
 	// The group of flags tracks the stages of the lifetime of a uobject
@@ -504,21 +558,34 @@ enum EObjectFlags
 
 	// Misc. Flags
 	RF_BeingRegenerated			=0x00020000,	///< Flagged on UObjects that are used to create UClasses (e.g. Blueprints) while they are regenerating their UClass on load (See FLinkerLoad::CreateExport()), as well as UClass objects in the midst of being created
-	RF_DefaultSubObject			=0x00040000,	///< Flagged on subobjects that are defaults
+	RF_DefaultSubObject			=0x00040000,	///< Flagged on subobject templates that were created in a class constructor, and all instances created from those templates
 	RF_WasLoaded				=0x00080000,	///< Flagged on UObjects that were loaded
 	RF_TextExportTransient		=0x00100000,	///< Do not export object to text form (e.g. copy/paste). Generally used for sub-objects that can be regenerated from data in their parent object.
 	RF_LoadCompleted			=0x00200000,	///< Object has been completely serialized by linkerload at least once. DO NOT USE THIS FLAG, It should be replaced with RF_WasLoaded.
-	RF_InheritableComponentTemplate = 0x00400000, ///< Archetype of the object can be in its super class
+	RF_InheritableComponentTemplate = 0x00400000, ///< Flagged on subobject templates stored inside a class instead of the class default object, they are instanced after default subobjects
 	RF_DuplicateTransient		=0x00800000,	///< Object should not be included in any type of duplication (copy/paste, binary duplication, etc.)
 	RF_StrongRefOnFrame			=0x01000000,	///< References to this object from persistent function frame are handled as strong ones.
 	RF_NonPIEDuplicateTransient	=0x02000000,	///< Object should not be included for duplication unless it's being duplicated for a PIE session
-	RF_Dynamic					=0x04000000,	///< Field Only. Dynamic field - doesn't get constructed during static initialization, can be constructed multiple times
+	// RF_Dynamic				=0x04000000,	///< Was removed along with bp nativization
 	RF_WillBeLoaded				=0x08000000,	///< This object was constructed during load and will be loaded shortly
 	RF_HasExternalPackage		=0x10000000,	///< This object has an external package assigned and should look it up when getting the outermost package
+	RF_HasPlaceholderType		=0x20000000,	///< This object was instanced from a placeholder type (e.g. on load). References to it are serialized but externally resolve to NULL from a logical point of view (for type safety).
+
+	// RF_MirroredGarbage is mirrored in EInternalObjectFlags::Garbage because checking the internal flags is much faster for the Garbage Collector
+	// while checking the object flags is much faster outside of it where the Object pointer is already available and most likely cached.
+	RF_MirroredGarbage			=0x40000000,	///< Garbage from logical point of view and should not be referenced. This flag is mirrored in EInternalObjectFlags as Garbage for performance
+	RF_AllocatedInSharedPage	=0x80000000,	///< Allocated from a ref-counted page shared with other UObjects
 };
 
+UE_DEPRECATED(5.4, "RF_InternalPendingKill should no longer be used. Use IsValid(Object) instead.")
+inline constexpr EObjectFlags RF_InternalPendingKill = RF_MirroredGarbage;
+UE_DEPRECATED(5.4, "RF_InternalGarbage should no longer be used. Use IsValid(Object) instead.")
+inline constexpr EObjectFlags RF_InternalGarbage = RF_MirroredGarbage;
+UE_DEPRECATED(5.4, "RF_InternalMirroredFlags should no longer be used. Use IsValid(Object) instead.")
+inline constexpr EObjectFlags RF_InternalMirroredFlags = RF_MirroredGarbage;
+
 /** Mask for all object flags */
-#define RF_AllFlags				(EObjectFlags)0x1fffffff	///< All flags, used mainly for error checking
+#define RF_AllFlags				(EObjectFlags)0xffffffff	///< All flags, used mainly for error checking
 
 /** Flags to load from unreal asset files */
 #define RF_Load						((EObjectFlags)(RF_Public | RF_Standalone | RF_Transactional | RF_ClassDefaultObject | RF_ArchetypeObject | RF_DefaultSubObject | RF_TextExportTransient | RF_InheritableComponentTemplate | RF_DuplicateTransient | RF_NonPIEDuplicateTransient)) 
@@ -528,35 +595,66 @@ enum EObjectFlags
 
 ENUM_CLASS_FLAGS(EObjectFlags);
 
-/** Objects flags for internal use (GC, low level UObject code) */
+COREUOBJECT_API FString LexToString(EObjectFlags Flags);
+
+/** 
+ * Objects flags for internal use (GC, low level UObject code)
+ *
+ * This MUST be kept in sync with EInternalObjectFlags defined in
+ * Engine\Source\Programs\Shared\EpicGames.Core\UnrealEngineTypes.cs
+ */
 enum class EInternalObjectFlags : int32
 {
 	None = 0,
-	//~ All the other bits are reserved, DO NOT ADD NEW FLAGS HERE!
 
+	ReachabilityFlag0 = 1 << 0, ///< One of the flags used by Garbage Collector to determine UObject's reachability state
+	ReachabilityFlag1 = 1 << 1, ///< One of the flags used by Garbage Collector to determine UObject's reachability state
+	ReachabilityFlag2 = 1 << 2, ///< One of the flags used by Garbage Collector to determine UObject's reachability state
+
+	MaybeUnreachable UE_DEPRECATED(5.4, "MaybeUnreachable flag should no longer be used. Use FUObjectItem::IsMaybeUnreachable() or UE::GC::GMaybeUnreachableObjectFlag flag instead.") = 1 << 19, ///< Flag set on all non-root objects at the beginning of Reachability Analysis
+	LoaderImport = 1 << 20, ///< Object is ready to be imported by another package during loading
+	Garbage = 1 << 21, ///< Garbage from logical point of view and should not be referenced. This flag is mirrored in EObjectFlags as RF_Garbage for performance
 	ReachableInCluster = 1 << 23, ///< External reference to object in cluster exists
 	ClusterRoot = 1 << 24, ///< Root of a cluster
 	Native = 1 << 25, ///< Native (UClass only). 
 	Async = 1 << 26, ///< Object exists only on a different thread than the game thread.
 	AsyncLoading = 1 << 27, ///< Object is being asynchronously loaded.
-	Unreachable = 1 << 28, ///< Object is not reachable on the object graph.
-	PendingKill = 1 << 29, ///< Objects that are pending destruction (invalid for gameplay but valid objects)
+	Unreachable UE_DEPRECATED(5.4, "Unreachable flag should no longer be used. Use UObjectBaseUtility::IsUnreachable() or UE::GC::GUnreachableObjectFlag flag instead.") = 1 << 28, ///< Object is not reachable on the object graph.
+	// Unused = 1 << 29,
 	RootSet = 1 << 30, ///< Object will not be garbage collected, even if unreferenced.
 	PendingConstruction = 1 << 31, ///< Object didn't have its class constructor called yet (only the UObjectBase one to initialize its most basic members)
 
-	GarbageCollectionKeepFlags = Native | Async | AsyncLoading,
+	// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	// DO NOT ADD new compound flags to EInternalObjectFlags. The below flags are deprecated so that one day we can remove them.
+	// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+	GarbageCollectionKeepFlags UE_DEPRECATED(5.4, "GarbageCollectionKeepFlags should no longer be used. Use EInternalObjectFlags_GarbageCollectionKeepFlags instead.") = Native | Async | AsyncLoading | LoaderImport,
+	MirroredFlags UE_DEPRECATED(5.4, "MirroredFlags should no longer be used. Use Garbage instead.") = Garbage,
 
 	//~ Make sure this is up to date!
-	AllFlags = ReachableInCluster | ClusterRoot | Native | Async | AsyncLoading | Unreachable | PendingKill | RootSet | PendingConstruction
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	AllFlags UE_DEPRECATED(5.4, "AllFlags should no longer be used. Use EInternalObjectFlags_AllFlags instead.") = ReachabilityFlag0 | ReachabilityFlag1 | MaybeUnreachable | LoaderImport | Garbage | ReachableInCluster | ClusterRoot | Native | Async | AsyncLoading | Unreachable | RootSet | PendingConstruction
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 };
 ENUM_CLASS_FLAGS(EInternalObjectFlags);
 
-/** Flags describing a UEnum */
-enum class EEnumFlags
+//~ Make sure these macros are up to date!
+#define EInternalObjectFlags_GarbageCollectionKeepFlags (EInternalObjectFlags::Native | EInternalObjectFlags::Async | EInternalObjectFlags::AsyncLoading | EInternalObjectFlags::LoaderImport)
+#define EInternalObjectFlags_AllFlags (EInternalObjectFlags::ReachabilityFlag0 | EInternalObjectFlags::ReachabilityFlag1 | EInternalObjectFlags::ReachabilityFlag2 | EInternalObjectFlags::LoaderImport | EInternalObjectFlags::Garbage | EInternalObjectFlags::ReachableInCluster | EInternalObjectFlags::ClusterRoot | EInternalObjectFlags::Native | EInternalObjectFlags::Async | EInternalObjectFlags::AsyncLoading | EInternalObjectFlags::RootSet | EInternalObjectFlags::PendingConstruction | (EInternalObjectFlags)(1 << 19 /*MaybeUnreachable*/) | (EInternalObjectFlags)(1 << 28 /*Unreachable*/))
+#define EInternalObjectFlags_RootFlags (EInternalObjectFlags::RootSet | EInternalObjectFlags_GarbageCollectionKeepFlags)
+
+/**
+ * Flags describing a UEnum 
+ * 
+ * This MUST be kept in sync with EEnumFlags defined in
+ * Engine\Source\Programs\Shared\EpicGames.Core\UnrealEngineTypes.cs
+ */
+enum class EEnumFlags : uint8
 {
 	None,
 
-	Flags = 0x00000001 // Whether the UEnum represents a set of flags
+	Flags = 0x00000001, // Whether the UEnum represents a set of flags
+	NewerVersionExists = 0x00000002, // If set, this UEnum has been replaced by a newer version
 };
 
 ENUM_CLASS_FLAGS(EEnumFlags)
@@ -569,7 +667,7 @@ class UObject;
 class FProperty;
 class FObjectInitializer; 
 
-struct COREUOBJECT_API FReferencerInformation 
+struct FReferencerInformation 
 {
 	/** the object that is referencing the target */
 	UObject*				Referencer;
@@ -580,17 +678,17 @@ struct COREUOBJECT_API FReferencerInformation
 	/** the array of UProperties in Referencer which hold references to target */
 	TArray<const FProperty*>		ReferencingProperties;
 
-	FReferencerInformation( UObject* inReferencer );
-	FReferencerInformation( UObject* inReferencer, int32 InReferences, const TArray<const FProperty*>& InProperties );
+	COREUOBJECT_API FReferencerInformation( UObject* inReferencer );
+	COREUOBJECT_API FReferencerInformation( UObject* inReferencer, int32 InReferences, const TArray<const FProperty*>& InProperties );
 };
 
-struct COREUOBJECT_API FReferencerInformationList
+struct FReferencerInformationList
 {
 	TArray<FReferencerInformation>		InternalReferences;
 	TArray<FReferencerInformation>		ExternalReferences;
 
-	FReferencerInformationList();
-	FReferencerInformationList( const TArray<FReferencerInformation>& InternalRefs, const TArray<FReferencerInformation>& ExternalRefs );
+	COREUOBJECT_API FReferencerInformationList();
+	COREUOBJECT_API FReferencerInformationList( const TArray<FReferencerInformation>& InternalRefs, const TArray<FReferencerInformation>& ExternalRefs );
 };
 
 /*----------------------------------------------------------------------------
@@ -598,7 +696,7 @@ struct COREUOBJECT_API FReferencerInformationList
 ----------------------------------------------------------------------------*/
 
 // Special canonical package for FindObject, ParseObject.
-#define ANY_PACKAGE ((UPackage*)-1)
+#define ANY_PACKAGE UE_DEPRECATED_MACRO(5.1, "ANY_PACKAGE has been deprecated. Either use full path name of objects (including classes) or provide a valid Outer for *FindObject* functions") ((UPackage*)-1)
 
 // Special prefix for default objects (the UObject in a UClass containing the default values, etc)
 #define DEFAULT_OBJECT_PREFIX TEXT("Default__")
@@ -617,6 +715,10 @@ struct COREUOBJECT_API FReferencerInformationList
 #define UENUM(...)
 #define UDELEGATE(...)
 #define RIGVM_METHOD(...)
+
+// Used to inline generated cpp files from UObject headers
+#define UE_INLINE_STRINGIFY(name) #name
+#define UE_INLINE_GENERATED_CPP_BY_NAME(name) UE_INLINE_STRINGIFY(name.gen.cpp)
 
 // This pair of macros is used to help implement GENERATED_BODY() and GENERATED_USTRUCT_BODY()
 #define BODY_MACRO_COMBINE_INNER(A,B,C,D) A##B##C##D
@@ -659,10 +761,10 @@ namespace UC
 		/// Declares that instances of this class should always have an outer of the specified class.  This is inherited by subclasses unless overridden.
 		Within, /* =OuterClassName */
 
-		/// Exposes this class as a type that can be used for variables in blueprints
+		/// Exposes this class as a type that can be used for variables in blueprints. This is inherited by subclasses unless overridden.
 		BlueprintType,
 
-		/// Prevents this class from being used for variables in blueprints
+		/// Prevents this class from being used for variables in blueprints. This is inherited by subclasses unless overridden.
 		NotBlueprintType,
 
 		/// Exposes this class as an acceptable base class for creating blueprints. The default is NotBlueprintable, unless inherited otherwise. This is inherited by subclasses.
@@ -677,6 +779,9 @@ namespace UC
 
 		/// Prevents automatic generation of the constructor declaration.
 		customConstructor,
+
+		/// Prevents automatic generation of the FieldNotify declaration.
+		CustomFieldNotify,
 
 		/// Class was declared directly in C++ and has no boilerplate generated by UnrealHeaderTool.
 		/// DO NOT USE THIS FLAG ON NEW CLASSES.
@@ -710,6 +815,9 @@ namespace UC
 		/// This class should be saved normally (it cancels out an inherited transient flag).
 		nonTransient,
 
+		/// This class is optional and might not be available in certain context. reference from non optional data type is not allowed.
+		Optional,
+
 		/// Load object configuration at construction time.  These flags are inherited by subclasses.
 		/// Class containing config properties. Usage config=ConfigName or config=inherit (inherits config name from base class).
 		config,
@@ -720,6 +828,9 @@ namespace UC
 
 		/// Save object config only to Default INIs, never to local INIs.
 		defaultconfig,
+
+		/// Mark the editor config file to load from if loading into this object.
+		EditorConfig,
 
 		/// These affect the behavior of the property editor.
 		/// Class can be constructed from editinline New button.
@@ -749,6 +860,8 @@ namespace UC
 		collapseCategories,
 		/// Display properties in the editor using categories (default behaviour).
 		dontCollapseCategories,
+		/// Specifies category display order, unspecified will follow default display order.
+		prioritizeCategories,
 
 		/// All the properties of the class are hidden in the main display by default, and are only shown in the advanced details section.
 		AdvancedClassDisplay,
@@ -779,10 +892,10 @@ namespace UI
 		/// It exports only the autogenerated methods required for dynamic_cast<>, etc... to work.
 		MinimalAPI,
 
-		/// Exposes this interface as an acceptable base class for creating blueprints.  The default is NotBlueprintable, unless inherited otherwise. This is inherited by subclasses.
+		/// Specifies that this interface can be directly implemented by blueprints, this is implied if the interface has any blueprint events.
 		Blueprintable,
 
-		/// Specifies that this interface is *NOT* an acceptable base class for creating blueprints.  The default is NotBlueprintable, unless inherited otherwise. This is inherited by subclasses.
+		/// Specifies that this interface cannot be implemented by blueprints, equivalent to CannotImplementInterfaceInBlueprint metadata.
 		NotBlueprintable,
 
 		/// Sets IsConversionRoot metadata flag for this interface.
@@ -823,11 +936,11 @@ namespace UF
 		NetMulticast,
 
 		/// Replication of calls to this function should be done on a reliable channel.
-		/// Only valid when used in conjunction with Client or Server
+		/// Only valid when used in conjunction with Client, Server, or NetMulticast
 		Reliable,
 
 		/// Replication of calls to this function can be done on an unreliable channel.
-		/// Only valid when used in conjunction with Client or Server
+		/// Only valid when used in conjunction with Client, Server, or NetMulticast
 		Unreliable,
 
 		/// This function fulfills a contract of producing no side effects, and additionally implies BlueprintCallable.
@@ -861,6 +974,9 @@ namespace UF
 		/// Usage: Category=CategoryName or Category="MajorCategory,SubCategory"
 		Category,
 
+		/// Generate a field entry for the NotifyFieldValueChanged interface.
+		FieldNotify,
+
 		/// This function must supply a _Validate implementation
 		WithValidation,
 
@@ -879,6 +995,12 @@ namespace UF
 
 		/// [FunctionMetadata] Indicates that a particular function parameter is for internal use only, which means it will be both hidden and not connectible.
 		InternalUseParam, 
+
+		// [FunctionMetadata] Indicates that the function should appear as blueprint function even if it doesn't return a value.
+		ForceAsFunction, 
+
+		/// [FunctionMetadata] Indicates that the function should be ignored when considered for blueprint type promotion
+		IgnoreTypePromotion,
 	};
 }
 
@@ -917,7 +1039,7 @@ namespace UP
 		/// Object property can be exported with it's owner.
 		Export,
 
-		/// Hide clear (and browse) button in the editor.
+		/// Hide clear button in the editor.
 		NoClear,
 
 		/// Indicates that elements of an array can be modified, but its size cannot be changed.
@@ -932,7 +1054,7 @@ namespace UP
 		/// Skip replication (only for struct members and parameters in service request functions).
 		NotReplicated,
 
-		/// Interpolatable property for use with matinee. Always user-settable in the editor.
+		/// Interpolatable property for use with cinematics. Always user-settable in the editor.
 		Interp,
 
 		/// Property isn't transacted.
@@ -1006,6 +1128,9 @@ namespace UP
 
 		/// If true, the self pin should not be shown or connectable regardless of purity, const, etc. similar to InternalUseParam
 		HideSelfPin, 
+
+		/// Generate a field entry for the NotifyFieldValueChanged interface.
+		FieldNotify,
 	};
 }
 
@@ -1027,7 +1152,10 @@ namespace US
 		BlueprintType,
 
 		/// Indicates that a BlueprintType struct should not be exposed to the end user
-		BlueprintInternalUseOnly
+		BlueprintInternalUseOnly,
+
+		/// Indicates that a BlueprintType struct and its derived structs should not be exposed to the end user
+		BlueprintInternalUseOnlyHierarchical,
 	};
 }
 
@@ -1058,6 +1186,9 @@ namespace UM
 
 		/// [ClassMetadata] Used for Actor and Component classes. If the native class cannot tick, Blueprint generated classes based this Actor or Component can never tick even if bCanBlueprintsTickByDefault is true.
 		ChildCannotTick,
+		
+		/// [ClassMetadata] Used for objects with hundreds of nested properties like animation data to stop the editor from hanging to build debug data.
+		DebugTreeLeaf,
 
 		/// [ClassMetadata] Used to make the first subclass of a class ignore all inherited showCategories and hideCategories commands
 		IgnoreCategoryKeywordsInSubclasses,
@@ -1079,6 +1210,9 @@ namespace UM
 
 		/// [ClassMetadata] Comma delimited list of blueprint events that are not be allowed to be overridden in classes of this type
 		KismetHideOverrides,
+
+		/// [ClassMetadata] [PropertyMetadata] Used by TObjectPtr properties.  Specifies that references to objects of this class should be eager/lazy/background loaded in editor by default.  Can be overridden by LoadBehavior specified on the referencing property field.
+		LoadBehavior,
 
 		/// [ClassMetadata] Specifies interfaces that are not compatible with the class.
 		ProhibitedInterfaces,
@@ -1161,6 +1295,9 @@ namespace UM
 		/// [PropertyMetadata] Used by FDirectoryPath properties. Indicates that the path will be picked using the Slate-style directory picker inside the game Content dir.
 		ContentDir,
 
+		/// [PropertyMetadata] Used for float and integer properties.  Specifies the step size when the slider is used (e.g. for Delta = 10, the value will scroll among steps of 10).
+		Delta,
+
 		/// [PropertyMetadata] This property is deprecated, any blueprint references to it cause a compilation warning.
 		DeprecatedProperty,
 
@@ -1172,6 +1309,9 @@ namespace UM
 
 		/// [ClassMetadata] [PropertyMetadata] [FunctionMetadata] The name to use for this class, property, or function when exporting it to a scripting language. May include deprecated names as additional semi-colon separated entries.
 		//ScriptName, (Commented out so as to avoid duplicate name with version in the Class section, but still show in the property section)
+
+		/// [PropertyMetadata] Used by asset properties. Filters out assets containing the specified asset registry tags.
+		DisallowedAssetDataTags,
 
 		/// [PropertyMetadata] Used for FSoftObjectPath, ActorComponentReference and UClass properties.  Comma delimited list that indicates the class type(s) of assets that will NOT be displayed in the asset picker (FSoftObjectPath) or component picker or class viewer (UClass).
 		DisallowedClasses,
@@ -1189,7 +1329,7 @@ namespace UM
 		/// [PropertyMetadata] Specifies a boolean property that is used to indicate whether editing of this property is disabled.
 		EditCondition,
 
-		/// [PropertyMetadata] This property derives its visibility from its EditCondition.
+		/// [PropertyMetadata] Specifies a boolean property that is used to indicate whether this property should be hidden when the EditCondition evaluates to false. Requires an EditCondition to be set.
 		EditConditionHides,
 
 		/// [PropertyMetadata] Keeps the elements of an array from being reordered by dragging 
@@ -1213,6 +1353,9 @@ namespace UM
 		/// [PropertyMetadata] Deprecated.
 		FixedIncrement,
 
+		/// [PropertyMetaData] Force the specified sibling Editor PropertyNode to refresh itself when this property changes.  Useful to trigger an Editor refresh of an unrelated Property when this one is modified in PostEditChangeProperty or similar.
+		ForceRebuildProperty,
+
 		/// [PropertyMetadata] Used by asset properties. Indicates that the asset pickers should always show engine content
 		ForceShowEngineContent,
 
@@ -1234,6 +1377,16 @@ namespace UM
 		/// [PropertyMetadata] Signifies that the bool property is only displayed inline as an edit condition toggle in other properties, and should not be shown on its own row.
 		InlineEditConditionToggle,
 
+		/// [PropertyMetadata] Somewhat misleading name (because a higher value is less sensitive), but maps directly to the LinearDeltaSensitivity 
+		/// parameter in sliders created for float and integer properties. When the property does not have both a UIMin and UIMax to bound it, this
+		/// parameter prevents the slider sensitivity from always behaving exponentially (ie slower around 0 and faster elsewhere). Instead, the mouse 
+		/// displacement is simply divided by this value before being multiplied by Delta (which defaults to 1 when LinearDeltaSensitivity is specified,
+		/// and is still raised to SliderExponent). The value should be a positive int (0 does nothing, negative sign ignored if present).
+		LinearDeltaSensitivity,
+
+		/// [ClassMetadata] [PropertyMetadata] Used by TObjectPtr properties.  Allows the referenced object to be eager/lazy/background loaded in editor.
+		// LoadBehavior, (Commented out so as to avoid duplicate name with version in the Class section, but still show in the property section)
+
 		/// [PropertyMetadata] Used by FDirectoryPath properties.  Converts the path to a long package name
 		LongPackageName,
 
@@ -1252,6 +1405,9 @@ namespace UM
 		/// [PropertyMetadata] Used for numeric properties. Stipulates that the value must be a multiple of the metadata value.
 		Multiple,
 
+		/// [PropertyMetadata] Used for FString and FText properties.  Indicates the maximum length of the value that can be edited, or <=0 for unlimited.
+		MaxLength,
+
 		/// [PropertyMetadata] Used for FString and FText properties.  Indicates that the edit field should be multi-line, allowing entry of newlines.
 		MultiLine,
 
@@ -1264,6 +1420,9 @@ namespace UM
 		/// [PropertyMetadata] Property wont have a 'reset to default' button when displayed in property windows
 		NoResetToDefault,
 
+		/// [PropertyMetadata] Object properties pointing to an UObject instance whos class is marked editinline will not show their properties inline in property windows. Useful for getting actor components to appear in the component tree but not inline in the root actor details panel.
+		NoEditInline,
+
 		/// [PropertyMetadata] Used for integer and float properties. Indicates that the spin box element of the number editing widget should not be displayed.
 		NoSpinbox,
 
@@ -1275,6 +1434,9 @@ namespace UM
 
 		/// [PropertyMetadata] Used by FDirectoryPath properties. Indicates that the directory dialog will output a path relative to the game content directory when setting the property.
 		RelativeToGameContentDir,
+
+		/// [PropertyMetadata] Used by asset properties. Filters out asset that do not have matching data registry tags, RowStructure=NameOfDataTableRow could be used to restrict data tables.
+		RequiredAssetDataTags,
 
 		/// [PropertyMetadata] [FunctionMetadata] Flag set on a property or function to prevent it being exported to a scripting language.
 		ScriptNoExport,
@@ -1297,6 +1459,14 @@ namespace UM
 		/// [PropertyMetadata] Used for float and integer properties.  Specifies the highest that the value slider should represent.
 		UIMax,
 
+		/// [PropertyMetadata] Used on any numeric property to declare the internal units for a property. See UnitConversion.h/cpp for details.
+		///                    If editor preferances allow, properties marked up with Units= will be displayed in the user's locale preference,
+		///                    and/or in the most appropriate unit for the value's magnitude (ie, showing cm as km, or bytes as megabytes etc).
+		Units,
+
+		/// [PropertyMetadata] Used instead of 'Units' metadata to forcibly show a property in a fixed unit, without locale or other conversion
+		ForceUnits,
+
 		/// [PropertyMetadata] Used for SoftObjectPtr/SoftObjectPath properties to specify a reference should not be tracked. This reference will not be automatically cooked or saved into the asset registry for redirector/delete fixup.
 		Untracked,
 
@@ -1312,8 +1482,42 @@ namespace UM
 		/// [PropertyMetadata] Causes FString and FName properties to have a limited set of options generated dynamically, e.g. meta=(GetOptions="FuncName"). Supports external static function references via "Module.Class.Function" syntax.
 		///
 		/// UFUNCTION()
-		/// TArray<FString> FuncName() const; // Always return string array even if FName property.
+		/// static TArray<FName> FuncName() const; // If the field wants an FName value
+		/// static TArray<FString> FuncName() const; // If the field wants an FString value
 		GetOptions,
+
+		/// [PropertyMetadata] The property can be exposed as a data pin, but is hidden by default.
+		PinHiddenByDefault,
+
+		/// [PropertyMetadata] Used for enum properties to define the subset of valid values as a comma-separated string; values outside of this subset are not made available.
+		ValidEnumValues,
+
+		/// [PropertyMetadata] Used for enum properties to define the subset of invalid values as a comma-separated string; values within this subset are not made available.
+		InvalidEnumValues,
+
+		/// [PropertyMetadata] Used for enum properties to define the subset of restricted values through a UFunction, e.g. meta=(GetRestrictedEnumValues="FuncName"). 
+		///
+		/// UFUNCTION()
+		/// TArray<FString> FuncName() const;
+		GetRestrictedEnumValues,
+		
+		/// [PropertyMetadata] Causes assets to be filtered through a UFunction, e.g. meta=(GetAssetFilter="FuncName"). The UFunction should return true to exclude the asset.
+		///
+		/// UFUNCTION()
+		/// bool FuncName(const FAssetData& AssetData) const;
+		GetAssetFilter,
+		
+		/// [PropertyMetadata] Get allowed classes through a UFunction, e.g. meta=(GetAllowedClasses="FuncName").
+		///
+		/// UFUNCTION()
+		/// TArray<UClass*> FuncName() const;
+		GetAllowedClasses,
+		
+		/// [PropertyMetadata] Get disallowed classes through a UFunction, e.g. meta=(GetDisallowedClasses="FuncName").
+		///
+		/// UFUNCTION()
+		/// TArray<UClass*> FuncName() const;
+		GetDisallowedClasses
 	};
 
 	// Metadata usable in UPROPERTY for customizing the behavior of Persona and UMG
@@ -1323,16 +1527,13 @@ namespace UM
 		/// [PropertyMetadata] The property is not exposed as a data pin and is only be editable in the details panel. Applicable only to properties that will be displayed in Persona and UMG.
 		NeverAsPin, 
 
-		/// [PropertyMetadata] The property can be exposed as a data pin, but is hidden by default. Applicable only to properties that will be displayed in Persona and UMG.
-		PinHiddenByDefault, 
-
 		/// [PropertyMetadata] The property can be exposed as a data pin and is visible by default. Applicable only to properties that will be displayed in Persona and UMG.
 		PinShownByDefault, 
 
 		/// [PropertyMetadata] The property is always exposed as a data pin. Applicable only to properties that will be displayed in Persona and UMG.
 		AlwaysAsPin, 
 
-		/// [PropertyMetadata] Indicates that the property has custom code to display and should not generate a standard property widget int he details panel. Applicable only to properties that will be displayed in Persona.
+		/// [PropertyMetadata] Indicates that the property has custom code to display and should not generate a standard property widget in the details panel. Applicable only to properties that will be displayed in Persona.
 		CustomizeProperty,
 	};
 
@@ -1364,6 +1565,9 @@ namespace UM
 		/// [FunctionMetadata] For reference parameters, indicates that a value should be created to be used for the input if none is linked via BP.
 		/// This also allows for inline editing of the default value on some types (take FRotator for instance). Only valid for inputs.
 		AutoCreateRefTerm,
+
+		/// [FunctionMetadata] Forcibly hide the asset picker for pins matching any parameter names in this piece of metadata.
+		HideAssetPicker,
 
 		/// [FunctionMetadata] This function is an internal implementation detail, used to implement another function or node.  It is never directly exposed in a graph.
 		BlueprintInternalUseOnly,
@@ -1412,8 +1616,11 @@ namespace UM
 		/// The value is optional, and may specify a name override for the method. May include deprecated names as additional semi-colon separated entries.
 		ScriptMethod,
 
-		/// [FunctionMetadata] Used with ScriptMethod to denote that the return value of the function should overwrite the value of the instance that made the call (structs only, equivalent to using UPARAM(self) on the struct argument).
+		/// [FunctionMetadata] Used with ScriptMethod to denote that the return value of the function should overwrite the value of the instance that made the call (structs only, equivalent to using UPARAM(ref) on the struct argument).
 		ScriptMethodSelfReturn,
+
+		/// [FunctionMetadata] Used with ScriptMethod to denote that the first argument of the function should be considered mutable even if passed as a const reference (structs only, equivalent to using UPARAM(ref) on the struct argument).
+		ScriptMethodMutable,
 
 		/// [FunctionMetadata] Flags a static function taking a struct as its first argument so that it "hoists" the function to be an operator of the struct when exporting it to a scripting language.
 		/// The value describes the kind of operator using C++ operator syntax (see below), and may contain multiple semi-colon separated values.
@@ -1517,7 +1724,7 @@ namespace UM
 	// Metadata usable in UINTERFACE
 	enum
 	{
-		/// [InterfaceMetadata] This interface cannot be implemented by a blueprint (e.g., it has only non-exposed C++ member methods)
+		/// [InterfaceMetadata] This interface cannot be implemented by a blueprint (e.g., it has only non-exposed C++ member methods), equivalent to NotBlueprintable
 		CannotImplementInterfaceInBlueprint,
 	};
 }
@@ -1541,9 +1748,15 @@ namespace UM
 	}
 
 #define IMPLEMENT_FARCHIVE_SERIALIZER( TClass ) void TClass::Serialize(FArchive& Ar) { TClass::Serialize(FStructuredArchiveFromArchive(Ar).GetSlot().EnterRecord()); }
-#define IMPLEMENT_FSTRUCTUREDARCHIVE_SERIALIZER( TClass ) void TClass::Serialize(FStructuredArchive::FRecord Record) { FArchiveUObjectFromStructuredArchive Ar(Record.EnterField(SA_FIELD_NAME(TEXT("BaseClassAutoGen")))); TClass::Serialize(Ar.GetArchive()); Ar.Close(); }
+#define IMPLEMENT_FSTRUCTUREDARCHIVE_SERIALIZER( TClass ) void TClass::Serialize(FStructuredArchive::FRecord Record) { FArchiveUObjectFromStructuredArchive Ar(Record.EnterField(TEXT("BaseClassAutoGen"))); TClass::Serialize(Ar.GetArchive()); Ar.Close(); }
 #define DECLARE_FARCHIVE_SERIALIZER( TClass, API ) virtual API void Serialize(FArchive& Ar) override;
 #define DECLARE_FSTRUCTUREDARCHIVE_SERIALIZER( TClass, API ) virtual API void Serialize(FStructuredArchive::FRecord Record) override;
+
+#if WITH_RELOAD
+#define CONSTRUCT_RELOAD_VERSION_INFO(VersionInfo, ...) VersionInfo { __VA_ARGS__ }
+#else
+#define CONSTRUCT_RELOAD_VERSION_INFO(VersionInfo, ...) VersionInfo()
+#endif
 
 /*-----------------------------------------------------------------------------
 	Class declaration macros.
@@ -1556,7 +1769,7 @@ private: \
 	TRequiredAPI static UClass* GetPrivateStaticClass(); \
 public: \
 	/** Bitwise union of #EClassFlags pertaining to this class.*/ \
-	enum {StaticClassFlags=TStaticFlags}; \
+	static constexpr EClassFlags StaticClassFlags=EClassFlags(TStaticFlags); \
 	/** Typedef for the base class ({{ typedef-type }}) */ \
 	typedef TSuperClass Super;\
 	/** Typedef for {{ typedef-type }}. */ \
@@ -1585,6 +1798,11 @@ public: \
 	inline void* operator new( const size_t InSize, EInternal* InMem ) \
 	{ \
 		return (void*)InMem; \
+	} \
+	/* Eliminate V1062 warning from PVS-Studio while keeping MSVC and Clang happy. */ \
+	inline void operator delete(void* InMem) \
+	{ \
+		::operator delete(InMem); \
 	}
 
 #define DEFINE_FORBIDDEN_DEFAULT_CONSTRUCTOR_CALL(TClass) \
@@ -1623,16 +1841,16 @@ public: \
 		return nullptr; \
 	}
 
-#if WITH_HOT_RELOAD && !CHECK_PUREVIRTUALS
+#if WITH_RELOAD && !CHECK_PUREVIRTUALS
 	#define DEFINE_VTABLE_PTR_HELPER_CTOR_CALLER(TClass) \
 		static UObject* __VTableCtorCaller(FVTableHelper& Helper) \
 		{ \
 			return new (EC_InternalUseOnlyConstructor, (UObject*)GetTransientPackage(), NAME_None, RF_NeedLoad | RF_ClassDefaultObject | RF_TagGarbageTemp) TClass(Helper); \
 		}
-#else // WITH_HOT_RELOAD && !CHECK_PUREVIRTUALS
+#else // WITH_RELOAD && !CHECK_PUREVIRTUALS
 	#define DEFINE_VTABLE_PTR_HELPER_CTOR_CALLER(TClass) \
 		DEFINE_VTABLE_PTR_HELPER_CTOR_CALLER_DUMMY()
-#endif // WITH_HOT_RELOAD && !CHECK_PUREVIRTUALS
+#endif // WITH_RELOAD && !CHECK_PUREVIRTUALS
 
 #define DECLARE_CLASS_INTRINSIC_NO_CTOR(TClass,TSuperClass,TStaticFlags,TPackage) \
 	DECLARE_CLASS(TClass, TSuperClass, TStaticFlags | CLASS_Intrinsic, CASTCLASS_None, TPackage, NO_API) \
@@ -1671,7 +1889,7 @@ public: \
 	DECLARE_CLASS(TClass,TSuperClass,TStaticFlags|CLASS_Intrinsic,TStaticCastFlags,TPackage,TRequiredAPI ) \
 	RELAY_CONSTRUCTOR(TClass, TSuperClass) \
 	/** DO NOT USE. This constructor is for internal usage only for hot-reload purposes. */ \
-	TClass(FVTableHelper& Helper) : Super(Helper) {}; \
+	TRequiredAPI TClass(FVTableHelper& Helper) : Super(Helper) {}; \
 	static void StaticRegisterNatives##TClass() {} \
 	DECLARE_SERIALIZER(TClass) \
 	DEFINE_DEFAULT_OBJECT_INITIALIZER_CONSTRUCTOR_CALL(TClass) \
@@ -1693,7 +1911,7 @@ public: \
 #define DECLARE_CASTED_CLASS_INTRINSIC_NO_CTOR( TClass, TSuperClass, TStaticFlags, TPackage, TStaticCastFlags, TRequiredAPI ) \
 	DECLARE_CASTED_CLASS_INTRINSIC_NO_CTOR_NO_VTABLE_CTOR( TClass, TSuperClass, TStaticFlags, TPackage, TStaticCastFlags, TRequiredAPI ) \
 	/** DO NOT USE. This constructor is for internal usage only for hot-reload purposes. */ \
-	TClass(FVTableHelper& Helper) : Super(Helper) {}; \
+	TRequiredAPI TClass(FVTableHelper& Helper) : Super(Helper) {}; \
 
 
 #define DECLARE_CASTED_CLASS_INTRINSIC( TClass, TSuperClass, TStaticFlags, TPackage, TStaticCastFlags ) \
@@ -1711,39 +1929,179 @@ public: \
 #define DECLARE_WITHIN_UPACKAGE() \
 	DECLARE_WITHIN_INTERNAL( UPackage, true )
 
-// Register a class at startup time.
-#define IMPLEMENT_CLASS(TClass, TClassCrc) \
-	static TClassCompiledInDefer<TClass> AutoInitialize##TClass(TEXT(#TClass), sizeof(TClass), TClassCrc); \
+#define UOBJECT_CPPCLASS_STATICFUNCTIONS_ALLCONFIGS(TClass) \
+	FUObjectCppClassStaticFunctions::AddReferencedObjectsType(&TClass::AddReferencedObjects)
+	/* UObjectCppClassStaticFunctions: Extend this macro with the address of your new static function, if it applies to all configs. */
+	/* Order must match the order in the FUObjectCppClassStaticFunctions constructor. */
+
+#if WITH_EDITORONLY_DATA
+	#define UOBJECT_CPPCLASS_STATICFUNCTIONS_WITHEDITORONLYDATA(TClass) \
+		, FUObjectCppClassStaticFunctions::DeclareCustomVersionsType(&TClass::DeclareCustomVersions) \
+		, FUObjectCppClassStaticFunctions::AppendToClassSchemaType(&TClass::AppendToClassSchema) \
+		, FUObjectCppClassStaticFunctions::DeclareConstructClassesType(&TClass::DeclareConstructClasses)
+		/* UObjectCppClassStaticFunctions: Extend this macro with the address of your new static function, if it is editor-only. */
+		/* Order must match the order in the FUObjectCppClassStaticFunctions constructor. */
+
+#else
+	#define UOBJECT_CPPCLASS_STATICFUNCTIONS_WITHEDITORONLYDATA(TClass)
+#endif
+
+/**
+ * A macro called from the IMPLEMENT_CLASS macro that allows the compiler to report to the UClass constructor
+ * the class-specific overrides of UnrealEngine's list of reflected UObject static functions.
+ */
+#define UOBJECT_CPPCLASS_STATICFUNCTIONS_FORCLASS(TClass) \
+	FUObjectCppClassStaticFunctions \
+	( \
+		UOBJECT_CPPCLASS_STATICFUNCTIONS_ALLCONFIGS(TClass) \
+		UOBJECT_CPPCLASS_STATICFUNCTIONS_WITHEDITORONLYDATA(TClass) \
+	)
+
+/**
+ * Collection of the pointers to our specified list of static functions that are defined on a specific c++ class,
+ * for reference by the corresponding UClass. The pointers in this structure point to the class's version of that
+ * function, if it exists, or to the version on the nearest parent class where it does exist, similar to a virtual
+ * function table in c++.
+ */
+struct FUObjectCppClassStaticFunctions
+{
+public:
+	typedef void (*AddReferencedObjectsType)	(UObject* ThisObject, FReferenceCollector& Ar);
+#if WITH_EDITORONLY_DATA
+	typedef void (*DeclareCustomVersionsType)   (FArchive& Ar, const UClass* SpecificSubclass);
+	typedef void (*AppendToClassSchemaType)   (FAppendToClassSchemaContext& Context);
+	typedef void (*DeclareConstructClassesType)   (TArray<FTopLevelAssetPath>& OutConstructClasses, const UClass* SpecificSubclass);
+#endif
+	// UObjectCppClassStaticFunctions: Extend this list of types with the type of your new static function.
+
+	FUObjectCppClassStaticFunctions(AddReferencedObjectsType InAddReferencedObjects
+#if WITH_EDITORONLY_DATA
+		, DeclareCustomVersionsType InDeclareCustomVersions
+		, AppendToClassSchemaType InAppendToClassSchema
+		, DeclareConstructClassesType InDeclareConstructClasses
+#endif
+	)
+		: AddReferencedObjects(InAddReferencedObjects)
+#if WITH_EDITORONLY_DATA
+		, DeclareCustomVersions(InDeclareCustomVersions)
+		, AppendToClassSchema(InAppendToClassSchema)
+		, DeclareConstructClasses(InDeclareConstructClasses)
+#endif
+	{
+		// Null elements are not valid in this constructor
+		check(InAddReferencedObjects);
+#if WITH_EDITORONLY_DATA
+		check(InDeclareCustomVersions);
+		check(InAppendToClassSchema);
+		check(InDeclareConstructClasses);
+#endif
+		// UObjectCppClassStaticFunctions: Extend the constructor with initializers for your new static function member.
+		// Order must match the order in UOBJECT_CPPCLASS_STATICFUNCTIONS_FORCLASS.
+	}
+public:
+	FUObjectCppClassStaticFunctions() = default;
+	bool IsInitialized() const
+	{
+		// All methods that set the functions in this class guarantee that if any function is non-null, they all are.
+		// So we only need to check the first one to know whether we are completely initialized.
+		return AddReferencedObjects != nullptr;
+	}
+	void Reset()
+	{
+		*this = FUObjectCppClassStaticFunctions();
+	}
+
+public:
+	AddReferencedObjectsType GetAddReferencedObjects() const
+	{
+		return AddReferencedObjects;
+	}
+	void SetAddReferencedObjects(AddReferencedObjectsType InAddReferencedObjects)
+	{
+		check(InAddReferencedObjects != nullptr); // It is not valid to clear single elements (see IsInitialized). Call Reset to clear all elements.
+		AddReferencedObjects = InAddReferencedObjects;
+	}
+#if WITH_EDITORONLY_DATA
+	DeclareCustomVersionsType GetDeclareCustomVersions() const
+	{
+		return DeclareCustomVersions;
+	}
+	void SetDeclareCustomVersions(DeclareCustomVersionsType InDeclareCustomVersions)
+	{
+		check(InDeclareCustomVersions != nullptr); // It is not valid to clear single elements (see IsInitialized). Call Reset to clear all elements.
+		DeclareCustomVersions = InDeclareCustomVersions;
+	}
+	AppendToClassSchemaType GetAppendToClassSchema() const
+	{
+		return AppendToClassSchema;
+	}
+	void SetAppendToClassSchema(AppendToClassSchemaType InAppendToClassSchema)
+	{
+		check(InAppendToClassSchema != nullptr); // It is not valid to clear single elements (see IsInitialized). Call Reset to clear all elements.
+		AppendToClassSchema = InAppendToClassSchema;
+	}
+	DeclareConstructClassesType GetDeclareConstructClasses() const
+	{
+		return DeclareConstructClasses;
+	}
+	void SetDeclareConstructClasses(DeclareConstructClassesType InDeclareConstructClasses)
+	{
+		check(InDeclareConstructClasses != nullptr); // It is not valid to clear single elements (see IsInitialized). Call Reset to clear all elements.
+		DeclareConstructClasses = InDeclareConstructClasses;
+	}
+#endif
+	// UObjectCppClassStaticFunctions: Extend the list of accessors for your new static function.
+
+private:
+	AddReferencedObjectsType AddReferencedObjects = nullptr;
+#if WITH_EDITORONLY_DATA
+	DeclareCustomVersionsType DeclareCustomVersions = nullptr;
+	AppendToClassSchemaType AppendToClassSchema = nullptr;
+	DeclareConstructClassesType DeclareConstructClasses = nullptr;
+#endif
+	// UObjectCppClassStaticFunctions: Extend this list of members with the member for your new static function.
+
+};
+
+// Implement the GetPrivateStaticClass and the registration info but do not auto register the class.  
+// This is primarily used by UnrealHeaderTool
+#define IMPLEMENT_CLASS_NO_AUTO_REGISTRATION(TClass) \
+	FClassRegistrationInfo Z_Registration_Info_UClass_##TClass; \
 	UClass* TClass::GetPrivateStaticClass() \
 	{ \
-		static UClass* PrivateStaticClass = NULL; \
-		if (!PrivateStaticClass) \
+		if (!Z_Registration_Info_UClass_##TClass.InnerSingleton) \
 		{ \
 			/* this could be handled with templates, but we want it external to avoid code bloat */ \
 			GetPrivateStaticClassBody( \
 				StaticPackage(), \
 				(TCHAR*)TEXT(#TClass) + 1 + ((StaticClassFlags & CLASS_Deprecated) ? 11 : 0), \
-				PrivateStaticClass, \
+				Z_Registration_Info_UClass_##TClass.InnerSingleton, \
 				StaticRegisterNatives##TClass, \
 				sizeof(TClass), \
 				alignof(TClass), \
-				(EClassFlags)TClass::StaticClassFlags, \
+				TClass::StaticClassFlags, \
 				TClass::StaticClassCastFlags(), \
 				TClass::StaticConfigName(), \
 				(UClass::ClassConstructorType)InternalConstructor<TClass>, \
 				(UClass::ClassVTableHelperCtorCallerType)InternalVTableHelperCtorCaller<TClass>, \
-				&TClass::AddReferencedObjects, \
+				UOBJECT_CPPCLASS_STATICFUNCTIONS_FORCLASS(TClass), \
 				&TClass::Super::StaticClass, \
 				&TClass::WithinClass::StaticClass \
 			); \
 		} \
-		return PrivateStaticClass; \
+		return Z_Registration_Info_UClass_##TClass.InnerSingleton; \
 	}
+
+// Register a class at startup time.
+#define IMPLEMENT_CLASS(TClass, TClassCrc) \
+	IMPLEMENT_CLASS_NO_AUTO_REGISTRATION(TClass) \
+	/* Do not change the AutoInitialize_ without changing LC_SymbolPatterns */ \
+	static FRegisterCompiledInInfo AutoInitialize_##TClass(&Z_Construct_UClass_##TClass, TClass::StaticClass, TClass::StaticPackage(), TEXT(#TClass), Z_Registration_Info_UClass_##TClass, CONSTRUCT_RELOAD_VERSION_INFO(FClassReloadVersionInfo, sizeof(TClass), TClassCrc));
 
 // Used for intrinsics, this sets up the boiler plate, plus an initialization singleton, which can create properties and GC tokens
 #define IMPLEMENT_INTRINSIC_CLASS(TClass, TRequiredAPI, TSuperClass, TSuperRequiredAPI, TPackage, InitCode) \
-	IMPLEMENT_CLASS(TClass, 0) \
 	TRequiredAPI UClass* Z_Construct_UClass_##TClass(); \
+	extern FClassRegistrationInfo Z_Registration_Info_UClass_##TClass; \
 	struct Z_Construct_UClass_##TClass##_Statics \
 	{ \
 		static UClass* Construct() \
@@ -1760,62 +2118,23 @@ public: \
 	}; \
 	UClass* Z_Construct_UClass_##TClass() \
 	{ \
-		static UClass* Class = NULL; \
-		if (!Class) \
+		if (!Z_Registration_Info_UClass_##TClass.OuterSingleton) \
 		{ \
-			Class = Z_Construct_UClass_##TClass##_Statics::Construct();\
+			Z_Registration_Info_UClass_##TClass.OuterSingleton = Z_Construct_UClass_##TClass##_Statics::Construct();\
 		} \
-		check(Class->GetClass()); \
-		return Class; \
+		check(Z_Registration_Info_UClass_##TClass.OuterSingleton->GetClass()); \
+		return Z_Registration_Info_UClass_##TClass.OuterSingleton; \
 	} \
-	static FCompiledInDefer Z_CompiledInDefer_UClass_##TClass(Z_Construct_UClass_##TClass, &TClass::StaticClass, TEXT(TPackage), TEXT(#TClass), false);
+	IMPLEMENT_CLASS(TClass, 0)
 
 #define IMPLEMENT_CORE_INTRINSIC_CLASS(TClass, TSuperClass, InitCode) \
 	IMPLEMENT_INTRINSIC_CLASS(TClass, COREUOBJECT_API, TSuperClass, COREUOBJECT_API, "/Script/CoreUObject" ,InitCode)
-
-// Register a dynamic class (created at runtime, not startup). Explicit ClassName parameter because Blueprint types can have names that can't be used natively:
-#define IMPLEMENT_DYNAMIC_CLASS(TClass, ClassName, TClassCrc) \
-	UClass* TClass::GetPrivateStaticClass() \
-	{ \
-		UPackage* PrivateStaticClassOuter = FindOrConstructDynamicTypePackage(StaticPackage()); \
-		UClass* PrivateStaticClass = Cast<UClass>(StaticFindObjectFast(UClass::StaticClass(), PrivateStaticClassOuter, (TCHAR*)ClassName)); \
-		if (!PrivateStaticClass) \
-		{ \
-			/* the class could be created while its parent creation, so make sure, the parent is already created.*/ \
-			TClass::Super::StaticClass(); \
-			TClass::WithinClass::StaticClass(); \
-			PrivateStaticClass = Cast<UClass>(StaticFindObjectFast(UClass::StaticClass(), PrivateStaticClassOuter, (TCHAR*)ClassName)); \
-		} \
-		if (!PrivateStaticClass) \
-		{ \
-			/* this could be handled with templates, but we want it external to avoid code bloat */ \
-			GetPrivateStaticClassBody( \
-			StaticPackage(), \
-			(TCHAR*)ClassName, \
-			PrivateStaticClass, \
-			StaticRegisterNatives##TClass, \
-			sizeof(TClass), \
-			alignof(TClass), \
-			(EClassFlags)TClass::StaticClassFlags, \
-			TClass::StaticClassCastFlags(), \
-			TClass::StaticConfigName(), \
-			(UClass::ClassConstructorType)InternalConstructor<TClass>, \
-			(UClass::ClassVTableHelperCtorCallerType)InternalVTableHelperCtorCaller<TClass>, \
-			&TClass::AddReferencedObjects, \
-			&TClass::Super::StaticClass, \
-			&TClass::WithinClass::StaticClass, \
-			true, \
-			&TClass::__CustomDynamicClassInitialization \
-			); \
-		} \
-		return PrivateStaticClass; \
-	}
 
 /** Options to the UObject::Rename() function, bit flag */
 typedef uint32 ERenameFlags;
 
 /** Default rename behavior */
-#define REN_None				(0x0000)
+#define REN_None					(0x0000)
 /** Rename won't call ResetLoaders or flush async loading. You should pass this if you are renaming a deep subobject and do not need to reset loading for the outer package */
 #define REN_ForceNoResetLoaders		(0x0001) 
 /** Just test to make sure that the rename is guaranteed to succeed if an non test rename immediately follows */
@@ -1830,6 +2149,8 @@ typedef uint32 ERenameFlags;
 #define REN_ForceGlobalUnique		(0x0040) 
 /** Prevent renaming of any child generated classes and CDO's in blueprints */
 #define REN_SkipGeneratedClasses	(0x0080) 
+/** Prevents renaming from unregistering/registering all components */
+#define REN_SkipComponentRegWork	(0x0100) 
 
 /*-----------------------------------------------------------------------------
 	Misc.
@@ -1853,7 +2174,7 @@ namespace GameplayTagsManager
 	UObject.
 -----------------------------------------------------------------------------*/
 
-namespace UE4
+namespace UE
 {
 	/**
 	 * Controls how calls to LoadConfig() should be propagated
@@ -1890,6 +2211,18 @@ namespace UE4
 	};
 }
 
+namespace UE4
+{
+	using ELoadConfigPropagationFlags UE_DEPRECATED(5.0, "Use UE namespace instead of UE4") = UE::ELoadConfigPropagationFlags;
+
+	UE_DEPRECATED(5.0, "Use UE namespace instead of UE4") inline constexpr UE::ELoadConfigPropagationFlags LCPF_None							= UE::ELoadConfigPropagationFlags::LCPF_None;
+	UE_DEPRECATED(5.0, "Use UE namespace instead of UE4") inline constexpr UE::ELoadConfigPropagationFlags LCPF_ReadParentSections				= UE::ELoadConfigPropagationFlags::LCPF_ReadParentSections;
+	UE_DEPRECATED(5.0, "Use UE namespace instead of UE4") inline constexpr UE::ELoadConfigPropagationFlags LCPF_PropagateToChildDefaultObjects	= UE::ELoadConfigPropagationFlags::LCPF_PropagateToChildDefaultObjects;
+	UE_DEPRECATED(5.0, "Use UE namespace instead of UE4") inline constexpr UE::ELoadConfigPropagationFlags LCPF_PropagateToInstances			= UE::ELoadConfigPropagationFlags::LCPF_PropagateToInstances;
+	UE_DEPRECATED(5.0, "Use UE namespace instead of UE4") inline constexpr UE::ELoadConfigPropagationFlags LCPF_ReloadingConfigData				= UE::ELoadConfigPropagationFlags::LCPF_ReloadingConfigData;
+	UE_DEPRECATED(5.0, "Use UE namespace instead of UE4") inline constexpr UE::ELoadConfigPropagationFlags LCPF_PersistentFlags					= UE::ELoadConfigPropagationFlags::LCPF_PersistentFlags;
+}
+
 
 /**
  * Helper class used to save and restore information across a StaticAllocateObject over the top of an existing object.
@@ -1904,3 +2237,7 @@ public:
 	**/
 	virtual void Restore() const=0;
 };
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
+#endif

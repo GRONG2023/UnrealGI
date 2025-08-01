@@ -5,14 +5,17 @@
 =============================================================================*/
 
 #include "Factories/PackFactory.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
+#include "Math/GuardedInt.h"
 #include "Misc/MessageDialog.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Serialization/MemoryWriter.h"
 #include "Serialization/MemoryReader.h"
+#include "Misc/Compression.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Misc/ConfigContext.h"
 #include "Misc/FeedbackContext.h"
 #include "Misc/App.h"
 #include "Modules/ModuleManager.h"
@@ -75,7 +78,7 @@ namespace PackFactoryHelper
 				FAES::FAESKey Key;
 				FPakPlatformFile::GetPakEncryptionKey(Key, PakFile.GetInfo().EncryptionKeyGuid);
 				checkf(Key.IsValid(), TEXT("Trying to copy an encrypted file between pak files, but no decryption key is available"));
-				FAES::DecryptData(Buffer.GetData(), SizeToRead, Key);
+				FAES::DecryptData(Buffer.GetData(), IntCastChecked<uint32>(SizeToRead), Key);
 			}
 			DestAr.Serialize(Buffer.GetData(), SizeToCopy);
 			RemainingSizeToCopy -= SizeToRead;
@@ -86,27 +89,79 @@ namespace PackFactoryHelper
 	// Utility function to uncompress and copy a single pak entry out of the Source archive and in to the Destination archive using PersistentBuffer as temporary space
 	bool UncompressCopyFile(FArchive& DestAr, FArchive& Source, const FPakEntry& Entry, TArray<uint8>& PersistentBuffer, const FPakFile& PakFile)
 	{
-		if (Entry.UncompressedSize == 0)
+		// Entry is untrusted data.
+		if (Entry.UncompressedSize <= 0)
 		{
 			return false;
 		}
 
-		int64 WorkingSize = Entry.CompressionBlockSize;
-		int32 MaxCompressionBlockSize = FCompression::CompressMemoryBound(PakFile.GetInfo().GetCompressionMethod(Entry.CompressionMethodIndex), WorkingSize);
-		WorkingSize += MaxCompressionBlockSize;
+		TOptional<FName> CompressionMethod = PakFile.GetInfo().TryGetCompressionMethod(Entry.CompressionMethodIndex);
+		if (CompressionMethod.IsSet() == false)
+		{
+			return false;
+		}
+
+		FGuardedInt32 GuardedWorkingSize = FGuardedInt32(Entry.CompressionBlockSize);
+		int32 MaxCompressionBlockSize = FCompression::GetMaximumCompressedSize(CompressionMethod.GetValue(), GuardedWorkingSize.Get(0));
+		if (MaxCompressionBlockSize < 0)
+		{
+			return false;
+		}
+
+		GuardedWorkingSize += MaxCompressionBlockSize;
+		int32 WorkingSize = GuardedWorkingSize.Get(0);
+		if (WorkingSize <= 0)
+		{
+			return false;
+		}
+
+		// WorkingSize is now a sanitized int32 value.
 		if (PersistentBuffer.Num() < WorkingSize)
 		{
 			PersistentBuffer.SetNumUninitialized(WorkingSize);
 		}
 
-		uint8* UncompressedBuffer = PersistentBuffer.GetData() + MaxCompressionBlockSize;
-
 		for (uint32 BlockIndex = 0, BlockIndexNum = Entry.CompressionBlocks.Num(); BlockIndex < BlockIndexNum; ++BlockIndex)
 		{
-			uint32 CompressedBlockSize = Entry.CompressionBlocks[BlockIndex].CompressedEnd - Entry.CompressionBlocks[BlockIndex].CompressedStart;
-			uint32 UncompressedBlockSize = (uint32)FMath::Min<int64>(Entry.UncompressedSize - Entry.CompressionBlockSize*BlockIndex, Entry.CompressionBlockSize);
-			Source.Seek(Entry.CompressionBlocks[BlockIndex].CompressedStart + (PakFile.GetInfo().HasRelativeCompressedChunkOffsets() ? Entry.Offset : 0));
-			uint32 SizeToRead = Entry.IsEncrypted() ? Align(CompressedBlockSize, FAES::AESBlockSize) : CompressedBlockSize;
+			FGuardedInt64 CompressedBlockSize64 = FGuardedInt64(Entry.CompressionBlocks[BlockIndex].CompressedEnd) - Entry.CompressionBlocks[BlockIndex].CompressedStart;
+			if (CompressedBlockSize64.ValidAndGreaterThan(0) == false ||
+				IntFitsIn<int32>(CompressedBlockSize64.Get(0)) == false)
+			{
+				return false;
+			}
+
+			int32 CompressedBlockSize = static_cast<int32>(CompressedBlockSize64.Get(0));
+			// CompressedBlockSize now sanitized
+
+
+			FGuardedInt64 UncompressedBlockSize64 = FGuardedInt64(Entry.UncompressedSize) - FGuardedInt64(Entry.CompressionBlockSize) * BlockIndex;
+			if (UncompressedBlockSize64.ValidAndGreaterThan(0) == false ||
+				IntFitsIn<uint32>(UncompressedBlockSize64.Get(0)) == false)
+			{
+				return false;
+			}
+
+			// CompressionBlockSize is guaranteed to fit in int32 from earlier, so we know after the Min() we can fit in uint32
+			uint32 UncompressedBlockSize = (uint32)FMath::Min<int64>(UncompressedBlockSize64.Get(0), Entry.CompressionBlockSize);
+
+			if (Entry.Offset < 0)
+			{
+				return false;
+			}
+
+			FGuardedInt64 OffsetInPak = FGuardedInt64(Entry.CompressionBlocks[BlockIndex].CompressedStart) + (PakFile.GetInfo().HasRelativeCompressedChunkOffsets() ? Entry.Offset : 0);
+			if (OffsetInPak.IsValid() == false)
+			{
+				return false;
+			}
+
+			Source.Seek(OffsetInPak.Get(0));
+			int32 SizeToRead = Entry.IsEncrypted() ? Align(CompressedBlockSize, FAES::AESBlockSize) : CompressedBlockSize;
+			if (SizeToRead > PersistentBuffer.Num())
+			{
+				// Shouldn't ever happen but I think this is possible if we are uncompressed and for some reason the block size isn't aligned to AESBlockSize.
+				return false;
+			}
 			Source.Serialize(PersistentBuffer.GetData(), SizeToRead);
 
 			if (Entry.IsEncrypted())
@@ -117,7 +172,8 @@ namespace PackFactoryHelper
 				FAES::DecryptData(PersistentBuffer.GetData(), SizeToRead, Key);
 			}
 
-			if (!FCompression::UncompressMemory(PakFile.GetInfo().GetCompressionMethod(Entry.CompressionMethodIndex), UncompressedBuffer, UncompressedBlockSize, PersistentBuffer.GetData(), CompressedBlockSize))
+			uint8* UncompressedBuffer = PersistentBuffer.GetData() + MaxCompressionBlockSize;
+			if (!FCompression::UncompressMemory(CompressionMethod.GetValue(), UncompressedBuffer, UncompressedBlockSize, PersistentBuffer.GetData(), CompressedBlockSize))
 			{
 				return false;
 			}
@@ -183,7 +239,7 @@ namespace PackFactoryHelper
 	void ProcessPackConfig(const FString& ConfigString, FPackConfigParameters& ConfigParameters)
 	{
 		FConfigFile PackConfig;
-		PackConfig.ProcessInputFileContents(ConfigString);
+		PackConfig.ProcessInputFileContents(ConfigString, TEXT("Unknown (see PackFactoryHelper::ProcessPackConfig)"));
 
 		// Input Settings
 		static FArrayProperty* ActionMappingsProp = FindFieldChecked<FArrayProperty>(UInputSettings::StaticClass(), UInputSettings::GetActionMappingsPropertyName());
@@ -192,7 +248,7 @@ namespace PackFactoryHelper
 		UInputSettings* InputSettingsCDO = GetMutableDefault<UInputSettings>();
 		bool bCheckedOut = false;
 
-		FConfigSection* InputSettingsSection = PackConfig.Find("InputSettings");
+		const FConfigSection* InputSettingsSection = PackConfig.FindSection("InputSettings");
 		if (InputSettingsSection)
 		{
 			TArray<FInputActionKeyMapping> ActionMappingsToAdd;
@@ -205,7 +261,7 @@ namespace PackFactoryHelper
 				if (SettingPair.Key.ToString().Contains("ActionMappings"))
 				{
 					FInputActionKeyMapping ActionKeyMapping;
-					ActionMappingsProp->Inner->ImportText(*SettingPair.Value.GetValue(), &ActionKeyMapping, PPF_None, nullptr);
+					ActionMappingsProp->Inner->ImportText_Direct(*SettingPair.Value.GetValue(), &ActionKeyMapping, nullptr, PPF_None);
 
 					if (!InputSettingsCDO->DoesActionExist(ActionKeyMapping.ActionName))
 					{
@@ -215,7 +271,7 @@ namespace PackFactoryHelper
 				else if (SettingPair.Key.ToString().Contains("AxisMappings"))
 				{
 					FInputAxisKeyMapping AxisKeyMapping;
-					AxisMappingsProp->Inner->ImportText(*SettingPair.Value.GetValue(), &AxisKeyMapping, PPF_None, nullptr);
+					AxisMappingsProp->Inner->ImportText_Direct(*SettingPair.Value.GetValue(), &AxisKeyMapping, nullptr, PPF_None);
 
 					if (!InputSettingsCDO->DoesAxisExist(AxisKeyMapping.AxisName))
 					{
@@ -247,20 +303,20 @@ namespace PackFactoryHelper
 				}
 					
 				InputSettingsCDO->SaveKeyMappings();
-				InputSettingsCDO->UpdateDefaultConfigFile();
+				InputSettingsCDO->TryUpdateDefaultConfigFile();
 			}
 		}
 
-		FConfigSection* RedirectsSection = PackConfig.Find("Redirects");
+		const FConfigSection* RedirectsSection = PackConfig.FindSection("Redirects");
 		if (RedirectsSection)
 		{	
-			if (FConfigValue* GameName = RedirectsSection->Find("GameName"))
+			if (const FConfigValue* GameName = RedirectsSection->Find("GameName"))
 			{
 				ConfigParameters.GameName = GameName->GetValue();
 			}
 		}
 
-		FConfigSection* AdditionalFilesSection = PackConfig.Find("AdditionalFilesToAdd");
+		const FConfigSection* AdditionalFilesSection = PackConfig.FindSection("AdditionalFilesToAdd");
 		if (AdditionalFilesSection)
 		{
 			for (auto FilePair : *AdditionalFilesSection)
@@ -301,14 +357,14 @@ namespace PackFactoryHelper
 			}
 		}
 
-		FConfigSection* FeaturePackSettingsSection = PackConfig.Find("FeaturePackSettings");
+		const FConfigSection* FeaturePackSettingsSection = PackConfig.FindSection("FeaturePackSettings");
 		if (FeaturePackSettingsSection)
 		{
-			if (FConfigValue* CompileSource = FeaturePackSettingsSection->Find("CompileSource"))
+			if (const FConfigValue* CompileSource = FeaturePackSettingsSection->Find("CompileSource"))
 			{
 				ConfigParameters.bCompileSource = FCString::ToBool(*CompileSource->GetValue());
 			}
-			if (FConfigValue* InstallMessage = FeaturePackSettingsSection->Find("InstallMessage"))
+			if (const FConfigValue* InstallMessage = FeaturePackSettingsSection->Find("InstallMessage"))
 			{
 				ConfigParameters.InstallMessage = InstallMessage->GetValue();
 			}
@@ -441,15 +497,13 @@ UObject* UPackFactory::FactoryCreateBinary
 						FConfigCacheIni Config(EConfigCacheType::Temporary);
 						FConfigFile& NewFile = Config.Add(EngineIniFilename, FConfigFile());
 						FConfigCacheIni::LoadLocalIniFile(NewFile, TEXT("DefaultEngine"), false);
-						FConfigSection* PackageRedirects = Config.GetSectionPrivate(*RedirectsSection, true, false, EngineIniFilename);
 
-						PackageRedirects->Add(TEXT("+ActiveGameNameRedirects"), FString::Printf(TEXT("(OldGameName=\"%s\",NewGameName=\"%s\")"), *LongOldGameName, *LongNewGameName));
-						PackageRedirects->Add(TEXT("+ActiveGameNameRedirects"), FString::Printf(TEXT("(OldGameName=\"%s\",NewGameName=\"%s\")"), *ConfigParameters.GameName, *LongNewGameName));
+						NewFile.AddToSection(*RedirectsSection, TEXT("+ActiveGameNameRedirects"), FString::Printf(TEXT("(OldGameName=\"%s\",NewGameName=\"%s\")"), *LongOldGameName, *LongNewGameName));
+						NewFile.AddToSection(*RedirectsSection, TEXT("+ActiveGameNameRedirects"), FString::Printf(TEXT("(OldGameName=\"%s\",NewGameName=\"%s\")"), *ConfigParameters.GameName, *LongNewGameName));
 
 						NewFile.UpdateSections(*EngineIniFilename, *RedirectsSection);
 
-						FString FinalIniFileName;
-						GConfig->LoadGlobalIniFile(FinalIniFileName, *RedirectsSection, NULL, true);
+						FConfigContext::ForceReloadIntoGConfig().Load(*RedirectsSection);
 
 						FLinkerLoad::AddGameNameRedirect(*LongOldGameName, *LongNewGameName);
 						FLinkerLoad::AddGameNameRedirect(*ConfigParameters.GameName, *LongNewGameName);
@@ -488,14 +542,14 @@ UObject* UPackFactory::FactoryCreateBinary
 					FString DestFilename = *EntryFilename;
 					if (DestFilename.StartsWith(TEXT("Source/")))
 					{
-						DestFilename.RightChopInline(7, false);
+						DestFilename.RightChopInline(7, EAllowShrinking::No);
 					}
 					else 
 					{
 						const int32 SourceIndex = DestFilename.Find(TEXT("/Source/"));
 						if (SourceIndex != INDEX_NONE)
 						{
-							DestFilename.RightChopInline(SourceIndex + 8, false);
+							DestFilename.RightChopInline(SourceIndex + 8, EAllowShrinking::No);
 						}
 					}
 
@@ -530,14 +584,14 @@ UObject* UPackFactory::FactoryCreateBinary
 					FString DestFilename = *EntryFilename;
 					if (DestFilename.StartsWith(TEXT("Content/")))
 					{
-						DestFilename.RightChopInline(8, false);
+						DestFilename.RightChopInline(8, EAllowShrinking::No);
 					}
 					else
 					{
 						const int32 ContentIndex = DestFilename.Find(ContentFolder);
 						if (ContentIndex != INDEX_NONE)
 						{
-							DestFilename.RightChopInline(ContentIndex + 9, false);
+							DestFilename.RightChopInline(ContentIndex + 9, EAllowShrinking::No);
 						}
 					}
 					DestFilename = ContentDestinationRoot / DestFilename;
@@ -577,14 +631,14 @@ UObject* UPackFactory::FactoryCreateBinary
 					FString DestFilename = FileToCopy;
 					if (DestFilename.StartsWith(TEXT("Source/")))
 					{
-						DestFilename.RightChopInline(7, false);
+						DestFilename.RightChopInline(7, EAllowShrinking::No);
 					}
 					else 
 					{
 						const int32 SourceIndex = DestFilename.Find(TEXT("/Source/"));
 						if (SourceIndex != INDEX_NONE)
 						{
-							DestFilename.RightChopInline(SourceIndex + 8, false);
+							DestFilename.RightChopInline(SourceIndex + 8, EAllowShrinking::No);
 						}
 					}
 					DestFilename = SourceModuleInfo.ModuleSourcePath / DestFilename;
@@ -629,14 +683,14 @@ UObject* UPackFactory::FactoryCreateBinary
 					FString DestFilename = FileToCopy;
 					if (DestFilename.StartsWith(TEXT("Content/")))
 					{
-						DestFilename.RightChopInline(8, false);
+						DestFilename.RightChopInline(8, EAllowShrinking::No);
 					}
 					else
 					{
 						const int32 ContentIndex = DestFilename.Find(ContentFolder);
 						if (ContentIndex != INDEX_NONE)
 						{
-							DestFilename.RightChopInline(ContentIndex + 9, false);
+							DestFilename.RightChopInline(ContentIndex + 9, EAllowShrinking::No);
 						}
 					}
 					DestFilename = ContentDestinationRoot / DestFilename;
@@ -683,7 +737,19 @@ UObject* UPackFactory::FactoryCreateBinary
 					ILiveCodingModule* LiveCoding = FModuleManager::GetModulePtr<ILiveCodingModule>(LIVE_CODING_MODULE_NAME);
 					if (LiveCoding != nullptr && LiveCoding->IsEnabledForSession())
 					{
-						FMessageDialog::Open(EAppMsgType::Ok, NSLOCTEXT("PackFactory", "CannotCompileWithLiveCoding", "Unable to compile source code while Live Coding is enabled. Please close the editor and build from your IDE."));
+						if (bProjectHadSourceFiles)
+						{
+							if (!LiveCoding->Compile(ELiveCodingCompileFlags::WaitForCompletion, nullptr))
+							{
+								FMessageDialog::Open(EAppMsgType::Ok, NSLOCTEXT("PackFactory", "LiveCodingFailedToCompile", "Failed to compile sources, please close the editor and build from your IDE."));
+							}
+						}
+						else
+						{
+							FMessageDialog::Open(EAppMsgType::Ok, NSLOCTEXT("PackFactory", "LiveCodingNoSources", "Project now includes sources, please close the editor and build from your IDE."));
+						}
+
+						// Don't allow hot-reload to try to compile
 						bCompileSource = false;
 					}
 				}
@@ -702,7 +768,7 @@ UObject* UPackFactory::FactoryCreateBinary
 					}
 					else
 					{
-						// We didn't previously have source, so the UBT target name will be UE4Editor, and attempts to recompile will end up building the wrong target. Now that we have source,
+						// We didn't previously have source, so the UBT target name will be UnrealEditor, and attempts to recompile will end up building the wrong target. Now that we have source,
 						// we need to change the UBT target to be the newly created editor module
 						FPlatformMisc::SetUBTTargetName(*(FString(FApp::GetProjectName()) + TEXT("Editor")));
 

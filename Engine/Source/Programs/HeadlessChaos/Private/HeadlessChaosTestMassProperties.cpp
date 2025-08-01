@@ -145,7 +145,7 @@ namespace ChaosTest {
 						for (int InputInertiaAxisIndex = 0; InputInertiaAxisIndex < 3; ++InputInertiaAxisIndex)
 						{
 							FReal Dot = FVector::DotProduct(InputInertiaAxes[InputInertiaAxisIndex], OutputInertiaAxes[OutputInertiaAxisIndex]);
-							if (FMath::IsNearlyEqual(FMath::Abs(Dot), 1.0f, KINDA_SMALL_NUMBER))
+							if (FMath::IsNearlyEqual((FReal)FMath::Abs(Dot), (FReal)1., (FReal)KINDA_SMALL_NUMBER))
 							{
 								// We should only find each axis zero or one times
 								EXPECT_TRUE(MatchedInertiaAxis[InputInertiaAxisIndex] == INDEX_NONE);
@@ -174,14 +174,14 @@ namespace ChaosTest {
 	{
 		Chaos::FParticles Particles;
 		Particles.AddParticles(8);
-		Particles.X(0) = FVec3(-1, -1, -1);
-		Particles.X(1) = FVec3(-1, -1, 1);
-		Particles.X(2) = FVec3(-1, 1, -1);
-		Particles.X(3) = FVec3(-1, 1, 1);
-		Particles.X(4) = FVec3(1, -1, -1);
-		Particles.X(5) = FVec3(1, -1, 1);
-		Particles.X(6) = FVec3(1, 1, -1);
-		Particles.X(7) = FVec3(1, 1, 1);
+		Particles.SetX(0, FVec3(-1, -1, -1));
+		Particles.SetX(1, FVec3(-1, -1, 1));
+		Particles.SetX(2, FVec3(-1, 1, -1));
+		Particles.SetX(3, FVec3(-1, 1, 1));
+		Particles.SetX(4, FVec3(1, -1, -1));
+		Particles.SetX(5, FVec3(1, -1, 1));
+		Particles.SetX(6, FVec3(1, 1, -1));
+		Particles.SetX(7, FVec3(1, 1, 1));
 		TArray<Chaos::TVec3<int32>> Faces;
 		Faces.SetNum(12);
 		Faces[0] = TVec3<int32>(0, 4, 5);

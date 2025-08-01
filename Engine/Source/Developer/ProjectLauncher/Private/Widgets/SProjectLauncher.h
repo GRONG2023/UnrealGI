@@ -94,10 +94,7 @@ private:
 	void OnProfileDelete(const ILauncherProfileRef& Profile);
 
 	/** Callback for clicking the Add New Launch Profile. */
-	FReply OnAddCustomLaunchProfileClicked();
-
-	/** Profile wizard menu visibility (hidden if there are no registered wizards). */
-	EVisibility GetProfileWizardsMenuVisibility() const;
+	void OnAddCustomLaunchProfileClicked();
 
 	/** Callback for filling profile wizard menu. */
 	TSharedRef<SWidget> MakeProfileWizardsMenu();

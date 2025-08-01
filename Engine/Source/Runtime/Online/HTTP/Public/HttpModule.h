@@ -2,12 +2,21 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "Misc/CoreMisc.h"
+#include "HAL/PlatformMath.h"
 #include "Interfaces/IHttpRequest.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/CoreMisc.h"
 #include "Modules/ModuleInterface.h"
+#include "Templates/SharedPointer.h"
 
 class FHttpManager;
+class FOutputDevice;
+class IHttpRequest;
+class UWorld;
 
 /**
  * Module for Http request implementations
@@ -17,7 +26,7 @@ class FHttpModule :
 	public IModuleInterface, public FSelfRegisteringExec
 {
 
-public:
+protected:
 
 	// FSelfRegisteringExec
 
@@ -30,7 +39,9 @@ public:
 	 *
 	 * @return true if the handler consumed the input, false to continue searching handlers
 	 */
-	virtual bool Exec(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar) override;
+	virtual bool Exec_Runtime(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar) override;
+
+public:
 
 	/** 
 	 * Exec command handlers
@@ -73,17 +84,27 @@ public:
 	/**
 	 * @return timeout in seconds for the entire http request to complete
 	 */
+	UE_DEPRECATED(5.4, "GetHttpTimeout has been deprecated, use GetHttpActivityTimeout or GetHttpTotalTimeout instead")
 	inline float GetHttpTimeout() const
 	{
-		return HttpTimeout;
+		return HttpTotalTimeout;
+	}
+
+	/**
+	 * @return total timeout in seconds for the entire http request to complete
+	 */
+	inline float GetHttpTotalTimeout() const
+	{
+		return HttpTotalTimeout;
 	}
 
 	/**
 	 * Sets timeout in seconds for the entire http request to complete
 	 */
+	UE_DEPRECATED(5.4, "SetHttpTimeout has been deprecated, config it through HttpActivityTimeout or HttpTotalTimeout instead")
 	inline void SetHttpTimeout(float TimeOutInSec)
 	{
-		HttpTimeout = TimeOutInSec;
+		HttpTotalTimeout = TimeOutInSec;
 	}
 
 	/**
@@ -97,6 +118,7 @@ public:
 	/**
 	 * @return timeout in seconds to receive a response on the connection 
 	 */
+	UE_DEPRECATED(5.4, "GetHttpReceiveTimeout has been deprecated, Use GetHttpActivityTimeout instead to decide if there is still any ongoing activity.")
 	inline float GetHttpReceiveTimeout() const
 	{
 		return HttpReceiveTimeout;
@@ -105,9 +127,18 @@ public:
 	/**
 	 * @return timeout in seconds to send a request on the connection
 	 */
+	UE_DEPRECATED(5.4, "GetHttpSendTimeout has been deprecated, The legacy behavior doesn't make use of HttpSendTimeout at all, and there is no such support on some platforms. Use GetHttpActivityTimeout instead to decide if there is still any ongoing activity.")
 	inline float GetHttpSendTimeout() const
 	{
 		return HttpSendTimeout;
+	}
+
+	/**
+	 * @return timeout in seconds to check there is any ongoing activity on the established connection
+	 */
+	inline float GetHttpActivityTimeout() const
+	{
+		return HttpActivityTimeout;
 	}
 
 	/**
@@ -240,6 +271,14 @@ public:
 	}
 
 	/**
+	 * @return Duration between explicit tick calls when running an event loop http thread.
+	 */
+	inline float GetHttpEventLoopThreadTickIntervalInSeconds() const
+	{
+		return HttpEventLoopThreadTickIntervalInSeconds;
+	}
+
+	/**
 	 * Get the default headers that are appended to every request
 	 * @return the default headers
 	 */
@@ -271,6 +310,14 @@ public:
 	}
 
 	/**
+	 * @returns the domains which won't use proxy even if ProxyAddress is set
+	 */
+	inline const FString& GetHttpNoProxy() const
+	{
+		return HttpNoProxy;
+	}
+
+	/**
 	 * Method to check dynamic proxy setting support.
 	 * @returns Whether this http implementation supports dynamic proxy setting.
 	 */
@@ -280,12 +327,21 @@ public:
 	}
 
 	/**
-	 * @returns the list of allowed domains for applying whitelist
+	 * @returns the list of domains allowed to be visited in a shipping build
 	 */
+	UE_DEPRECATED(5.3, "GetAllowedDomains has been deprecated. URLRequestFilter should be used instead.")
 	inline const TArray<FString>& GetAllowedDomains() const
 	{
 		return AllowedDomains;
 	}
+
+protected:
+	/** timeout in seconds to establish the connection */
+	float HttpConnectionTimeout;
+	/** timeout in seconds for the entire http request to complete. 0 is no timeout */
+	float HttpTotalTimeout;
+	/**  timeout in seconds to check there is any ongoing activity on the established connection */
+	float HttpActivityTimeout;
 
 private:
 
@@ -314,16 +370,16 @@ private:
 	 */
 	virtual void ShutdownModule() override;
 
+	/**
+	 * Delegate for config file changes.
+	 */
+	void OnConfigSectionsChanged(const FString& IniFilename, const TSet<FString>& SectionNames);
 
 	/** Keeps track of Http requests while they are being processed */
-	FHttpManager* HttpManager;
-	/** timeout in seconds for the entire http request to complete. 0 is no timeout */
-	float HttpTimeout;
-	/** timeout in seconds to establish the connection. -1 for system defaults, 0 is no timeout */
-	float HttpConnectionTimeout;
-	/** timeout in seconds to receive a response on the connection. -1 for system defaults */
+	FHttpManager* HttpManager = nullptr;
+	/** timeout in seconds to receive a response on the connection */
 	float HttpReceiveTimeout;
-	/** timeout in seconds to send a request on the connection. -1 for system defaults */
+	/** timeout in seconds to send a request on the connection */
 	float HttpSendTimeout;
 	/** total time to delay the request */
 	float HttpDelayTime;
@@ -335,6 +391,8 @@ private:
 	float HttpThreadIdleFrameTimeInSeconds;
 	/** Time in seconds to sleep minimally when idle, waiting for requests. */
 	float HttpThreadIdleMinimumSleepTimeInSeconds;
+	/** Time in seconds between explicit calls to tick requests when using an event loop to run http requests. */
+	float HttpEventLoopThreadTickIntervalInSeconds;
 	/** Max number of simultaneous connections to a specific server */
 	int32 HttpMaxConnectionsPerServer;
 	/** Max buffer size for individual http reads */
@@ -349,8 +407,10 @@ private:
 	static FHttpModule* Singleton;
 	/** The address to use for proxy, in format IPADDRESS:PORT */
 	FString ProxyAddress;
+	/** The domains which won't use proxy even if the ProxyAddress is set, in format "127.0.0.1,localhost,example.com" */
+	FString HttpNoProxy;
 	/** Whether or not the http implementation we are using supports dynamic proxy setting. */
 	bool bSupportsDynamicProxy;
-	/** Whitelist for domains that can be accessed. If Empty then no whitelist is applied */
+	/** List of domains that can be accessed. If Empty then no filtering is applied */
 	TArray<FString> AllowedDomains;
 };

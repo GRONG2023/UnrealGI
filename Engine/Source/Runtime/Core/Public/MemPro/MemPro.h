@@ -1,40 +1,42 @@
 /*
-	This software is provided 'as-is', without any express or implied warranty.
-	In no event will the author(s) be held liable for any damages arising from
-	the use of this software.
+Copyright 2019 PureDev Software Limited
 
-	Permission is granted to anyone to use this software for any purpose, including
-	commercial applications, and to alter it and redistribute it freely, subject to
-	the following restrictions:
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
 
-	1. The origin of this software must not be misrepresented; you must not
-	claim that you wrote the original software. If you use this software
-	in a product, an acknowledgment in the product documentation would be
-	appreciated but is not required.
-	2. Altered source versions must be plainly marked as such, and must not be
-	misrepresented as being the original software.
-	3. This notice may not be removed or altered from any source distribution.
-
-	Author: Stewart Lynch
-	www.puredevsoftware.com
-	slynch@puredevsoftware.com
-
-	This code is released to the public domain, as explained at
-	http://creativecommons.org/publicdomain/zero/1.0/
-
-	MemProLib is the library that allows the MemPro application to communicate
-	with your application.
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 */
 
 
 //------------------------------------------------------------------------
 //
-// MemPro.hpp
+// MemPro.h
 //
+/*
+	MemProLib is the library that allows the MemPro application to communicate
+	with your application.
+
+	===========================================================
+                             SETUP
+	===========================================================
+
+	* include MemPro.cpp and MemPro.h in your project.
+
+	* Link with Dbghelp.lib and Ws2_32.lib - these are needed for the callstack trace and the network connection
+
+	* Connect to your app with the MemPro
+*/
 //------------------------------------------------------------------------
 /*
 	MemPro
-	Version:	1.4.14.0
+	Version:	1.6.3.0
 */
 //------------------------------------------------------------------------
 #ifndef MEMPRO_MEMPRO_H_INCLUDED
@@ -65,8 +67,13 @@
 // **** The Target Platform ****
 
 // define ONE of these
-#if (defined(_WIN32) || defined(_WIN64) || defined(WIN32) || defined(WIN64) || defined(__WIN32__) || defined(__WINDOWS__)) && !defined(MEMPRO_PLATFORM_XBOXONE) //@EPIC: allow external definition
-	#if defined(_XBOX_ONE) //@EPIC:  allow external definition
+//@EPIC BEGIN external definition of platforms
+#if defined(MEMPRO_PLATFORM_XBOXONE)
+#elif defined(MEMPRO_PLATFORM_PS4)
+#elif defined(MEMPRO_PLATFORM_EXTENSION)
+#elif defined(_WIN32) || defined(_WIN64) || defined(WIN32) || defined(WIN64) || defined(__WIN32__)
+//@EPIC END
+	#if defined(_XBOX_ONE)
 		#define MEMPRO_PLATFORM_XBOXONE
 	#elif defined(_XBOX)
 		#define MEMPRO_PLATFORM_XBOX360
@@ -75,12 +82,6 @@
 	#endif
 #elif defined(__APPLE__)
 	#define MEMPRO_PLATFORM_APPLE
-#elif defined(PS4) || (defined(__UNREAL__) && PLATFORM_PS4)
-	#define MEMPRO_PLATFORM_PS4
-//@EPIC BEGIN: other platforms
-#elif defined(__UNREAL__) && PLATFORM_SWITCH
-	#define MEMPRO_PLATFORM_SWITCH
-//@EPIC END
 #else
 	#define MEMPRO_PLATFORM_UNIX
 #endif
@@ -195,6 +196,8 @@ namespace MemPro
 
 	void TakeSnapshot(bool send_memory=false);
 
+	void FlushDumpFile();
+
 	// ignore these, for internal use only
 	void IncRef();
 	void DecRef();
@@ -233,9 +236,9 @@ namespace
 	#define MEMPRO_INTERLOCKED_ALIGN __declspec(align(8))
 	#define MEMPRO_INSTRUCTION_BARRIER
 	#define MEMPRO_ENABLE_WARNING_PRAGMAS
-	#define MEMPRO_PUSH_WARNING_DISABLE warning(push)
-	#define MEMPRO_DISABLE_WARNING(w) warning(disable : w)
-	#define MEMPRO_POP_WARNING_DISABLE warning(pop)
+	#define MEMPRO_PUSH_WARNING_DISABLE __pragma(warning(push))
+	#define MEMPRO_DISABLE_WARNING(w) __pragma(warning(disable : w))
+	#define MEMPRO_POP_WARNING_DISABLE __pragma(warning(pop))
 	#define MEMPRO_FORCEINLINE FORCEINLINE
 	#define ENUMERATE_ALL_MODULES // if you are having problems compiling this on your platform undefine ENUMERATE_ALL_MODULES and it send info for just the main module
 	#define THREAD_LOCAL_STORAGE __declspec(thread)
@@ -294,6 +297,13 @@ namespace
 		#include "Windows/HideWindowsPlatformTypes.h"
 	#endif
 
+//@EPIC BEGIN: other platforms
+#elif defined(MEMPRO_PLATFORM_EXTENSION) && defined(__UNREAL__)
+
+	#include COMPILED_PLATFORM_HEADER_WITH_PREFIX(MemPro,MemProExt.h)
+
+//@EPIC END
+
 #elif defined(MEMPRO_PLATFORM_XBOXONE)
 
 	#ifdef __UNREAL__
@@ -313,13 +323,6 @@ namespace
 	#else
 		#include "MemProPS4.hpp"			// contact slynch@puredevsoftware.com for this platform
 	#endif
-
-//@EPIC BEGIN: other platforms
-#elif defined(MEMPRO_PLATFORM_SWITCH)
-
-	#include "MemPro/MemProSwitch.h"
-
-//@EPIC END
 
 #elif defined(MEMPRO_PLATFORM_UNIX)
 

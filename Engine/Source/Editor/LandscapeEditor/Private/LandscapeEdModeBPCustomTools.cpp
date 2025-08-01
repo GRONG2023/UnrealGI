@@ -5,7 +5,7 @@
 #include "Materials/MaterialInterface.h"
 #include "AI/NavigationSystemBase.h"
 #include "Materials/MaterialInstanceDynamic.h"
-#include "UnrealWidget.h"
+#include "UnrealWidgetFwd.h"
 #include "EditorModeManager.h"
 #include "EditorViewportClient.h"
 #include "LandscapeToolInterface.h"
@@ -47,9 +47,9 @@ public:
 	{
 	}
 
-	virtual const TCHAR* GetToolName() override { return TEXT("BlueprintBrush"); }
-	virtual FText GetDisplayName() override { return FText(); };
-	virtual FText GetDisplayMessage() override { return FText(); };
+	virtual const TCHAR* GetToolName() const override { return TEXT("BlueprintBrush"); }
+	virtual FText GetDisplayName() const override { return FText(); };
+	virtual FText GetDisplayMessage() const override { return FText(); };
 
 	virtual void SetEditRenderType() override { GLandscapeEditRenderMode = ELandscapeEditRenderMode::None | (GLandscapeEditRenderMode & ELandscapeEditRenderMode::BitMaskForMask); }
 	virtual bool SupportsMask() override { return false; }
@@ -88,7 +88,9 @@ public:
 		}
 
 		// Only allow placing brushes that would affect our target type
-		if ((DefaultObject->IsAffectingHeightmap() && Target.TargetType == ELandscapeToolTargetType::Heightmap) || (DefaultObject->IsAffectingWeightmap() && Target.TargetType == ELandscapeToolTargetType::Weightmap))
+		if ((DefaultObject->CanAffectHeightmap() && Target.TargetType == ELandscapeToolTargetType::Heightmap) 
+			|| (DefaultObject->CanAffectWeightmap() && Target.TargetType == ELandscapeToolTargetType::Weightmap)
+			|| (DefaultObject->CanAffectVisibilityLayer() && Target.TargetType == ELandscapeToolTargetType::Visibility))
 		{
 			ULandscapeInfo* Info = EdMode->CurrentToolTarget.LandscapeInfo.Get();
 			check(Info);
@@ -165,48 +167,7 @@ public:
 			}
 		}
 	}
-
-	
-protected:
-/*	float GetLocalZAtPoint(const ULandscapeInfo* LandscapeInfo, int32 x, int32 y) const
-	{
-		// try to find Z location
-		TSet<ULandscapeComponent*> Components;
-		LandscapeInfo->GetComponentsInRegion(x, y, x, y, Components);
-		for (ULandscapeComponent* Component : Components)
-		{
-			FLandscapeComponentDataInterface DataInterface(Component);
-			return LandscapeDataAccess::GetLocalHeight(DataInterface.GetHeight(x - Component->SectionBaseX, y - Component->SectionBaseY));
-		}
-		return 0.0f;
-	}
-*/
-
-public:
 };
-/*
-void FEdModeLandscape::ApplyMirrorTool()
-{
-	if (CurrentTool->GetToolName() == FName("Mirror"))
-	{
-		FLandscapeToolMirror* MirrorTool = (FLandscapeToolMirror*)CurrentTool;
-		MirrorTool->ApplyMirror();
-		GEditor->RedrawLevelEditingViewports();
-	}
-}
-
-void FEdModeLandscape::CenterMirrorTool()
-{
-	if (CurrentTool->GetToolName() == FName("Mirror"))
-	{
-		FLandscapeToolMirror* MirrorTool = (FLandscapeToolMirror*)CurrentTool;
-		MirrorTool->CenterMirrorPoint();
-		GEditor->RedrawLevelEditingViewports();
-	}
-}
-*/
-
-
 
 //
 // Toolset initialization

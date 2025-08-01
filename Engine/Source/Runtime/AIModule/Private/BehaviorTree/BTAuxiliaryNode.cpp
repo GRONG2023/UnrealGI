@@ -2,6 +2,10 @@
 
 #include "BehaviorTree/BTAuxiliaryNode.h"
 #include "BehaviorTree/BTCompositeNode.h"
+#include "VisualLogger/VisualLogger.h"
+#include "GameFramework/Actor.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BTAuxiliaryNode)
 
 UBTAuxiliaryNode::UBTAuxiliaryNode(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
@@ -19,6 +23,7 @@ void UBTAuxiliaryNode::WrappedOnBecomeRelevant(UBehaviorTreeComponent& OwnerComp
 		const UBTNode* NodeOb = HasInstance() ? GetNodeInstance(OwnerComp, NodeMemory) : this;
 		if (NodeOb)
 		{
+			UE_VLOG(&OwnerComp, LogBehaviorTree, Verbose, TEXT("OnBecomeRelevant: %s"), *UBehaviorTreeTypes::DescribeNodeHelper(NodeOb));
 			((UBTAuxiliaryNode*)NodeOb)->OnBecomeRelevant(OwnerComp, NodeMemory);
 		}
 	}
@@ -31,6 +36,7 @@ void UBTAuxiliaryNode::WrappedOnCeaseRelevant(UBehaviorTreeComponent& OwnerComp,
 		const UBTNode* NodeOb = HasInstance() ? GetNodeInstance(OwnerComp, NodeMemory) : this;
 		if (NodeOb)
 		{
+			UE_VLOG(&OwnerComp, LogBehaviorTree, Verbose, TEXT("OnCeaseRelevant: %s"), *UBehaviorTreeTypes::DescribeNodeHelper(NodeOb));
 			((UBTAuxiliaryNode*)NodeOb)->OnCeaseRelevant(OwnerComp, NodeMemory);
 		}
 	}
@@ -47,7 +53,7 @@ bool UBTAuxiliaryNode::WrappedTickNode(UBehaviorTreeComponent& OwnerComp, uint8*
 		if (NodeOb != nullptr && NodeOb->bNotifyTick)
 		{
 			float UseDeltaTime = DeltaSeconds;
-
+ 
 			if (NodeOb->bTickIntervals)
 			{
 				FBTAuxiliaryMemory* AuxMemory = GetSpecialNodeMemory<FBTAuxiliaryMemory>(NodeMemory);
@@ -58,8 +64,11 @@ bool UBTAuxiliaryNode::WrappedTickNode(UBehaviorTreeComponent& OwnerComp, uint8*
 				if (bTick)
 				{
 				    UseDeltaTime = AuxMemory->AccumulatedDeltaTime;
-				    AuxMemory->AccumulatedDeltaTime = 0.0f;
-    
+					AuxMemory->AccumulatedDeltaTime = 0.0f;
+					// Clamp next tick remaining time to 0 (i.e. tick on next frame) but node will usually set a new tick time in the call to TickNode
+					AuxMemory->NextTickRemainingTime = 0.0f;
+
+					UE_VLOG(OwnerComp.GetOwner(), LogBehaviorTree, Verbose, TEXT("Ticking aux node: %s"), *UBehaviorTreeTypes::DescribeNodeHelper(this));
 				    const_cast<UBTAuxiliaryNode*>(NodeOb)->TickNode(OwnerComp, NodeMemory, UseDeltaTime);
 				}
 
@@ -71,6 +80,8 @@ bool UBTAuxiliaryNode::WrappedTickNode(UBehaviorTreeComponent& OwnerComp, uint8*
 			}
 			else
 			{
+				UE_VLOG(OwnerComp.GetOwner(), LogBehaviorTree, Verbose, TEXT("Ticking aux node: %s"), *UBehaviorTreeTypes::DescribeNodeHelper(this));
+
 				const_cast<UBTAuxiliaryNode*>(NodeOb)->TickNode(OwnerComp, NodeMemory, UseDeltaTime);
 				NextNeededDeltaTime = 0.0f;
 				return true;
@@ -167,3 +178,4 @@ float UBTAuxiliaryNode::GetNextNeededDeltaTime(UBehaviorTreeComponent& OwnerComp
 //----------------------------------------------------------------------//
 // DEPRECATED
 //----------------------------------------------------------------------//
+

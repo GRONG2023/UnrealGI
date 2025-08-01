@@ -8,6 +8,7 @@
 #include "UObject/SoftObjectPath.h"
 #include "Engine/EngineTypes.h"
 #include "Engine/EngineBaseTypes.h"
+#include "Engine/World.h"
 #include "Viewports.h"
 #include "Editor/UnrealEdTypes.h"
 #include "LevelEditorViewportSettings.generated.h"
@@ -16,7 +17,7 @@
  * Enumerates modes for the viewport's rotation grid.
  */
 UENUM()
-enum ERotationGridMode
+enum ERotationGridMode : int
 {
 	/** Using Divisions of 360 degrees (e.g 360/2. 360/3, 360/4, ... ). */
 	GridMode_DivisionsOf360,
@@ -30,7 +31,7 @@ enum ERotationGridMode
  * Enumerates camera control types for the W, A, S and D keys.
  */
 UENUM()
-enum EWASDType
+enum EWASDType : int
 {
 	WASD_Always  UMETA(DisplayName="Use WASD for Camera Controls"),
 	WASD_RMBOnly UMETA(DisplayName="Use WASD only when a Mouse Button is Pressed"),
@@ -53,7 +54,7 @@ enum class ELandscapeFoliageEditorControlType : uint8
  * Units used by measuring tool
  */
 UENUM()
-enum EMeasuringToolUnits
+enum EMeasuringToolUnits : int
 {
 	MeasureUnits_Centimeters UMETA(DisplayName="Centimeters"),
 	MeasureUnits_Meters      UMETA(DisplayName="Meters"),
@@ -71,11 +72,21 @@ enum class EScrollGestureDirection : uint8
 	Natural				UMETA(DisplayName = "Natural"),
 };
 
+UENUM()
+enum class EMaterialKind : uint8
+{
+	Unknown,
+	Base,
+	Normal,
+	Specular,
+	Emissive,
+};
+
 /**
  * Implements the Level Editor's per-instance view port settings.
  */
 USTRUCT()
-struct UNREALED_API FLevelEditorViewportInstanceSettings
+struct FLevelEditorViewportInstanceSettings
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -86,6 +97,12 @@ struct UNREALED_API FLevelEditorViewportInstanceSettings
 		, EditorShowFlagsString()
 		, GameShowFlagsString()
 		, BufferVisualizationMode()
+		, NaniteVisualizationMode()
+		, LumenVisualizationMode()
+		, SubstrateVisualizationMode()
+		, GroomVisualizationMode()
+		, VirtualShadowMapVisualizationMode()
+		, GPUSkinCacheVisualizationMode()
 		, ExposureSettings()
 		, FOVAngle(EditorViewportDefs::DefaultPerspectiveFOVAngle)
 		, FarViewPlane(0)
@@ -94,6 +111,7 @@ struct UNREALED_API FLevelEditorViewportInstanceSettings
 		// Show 'lighting needs to be rebuilt' message by default, avoids confusion when artists think lighting is built until they PIE
 		, bShowOnScreenStats(true)
 		, bShowFullToolbar(true)
+		, bAllowCinematicControl(true)
 	{ }
 
 	/** The viewport type */
@@ -126,9 +144,33 @@ struct UNREALED_API FLevelEditorViewportInstanceSettings
 	UPROPERTY(config)
 	FName BufferVisualizationMode;
 
+	/** The Nanite visualization mode for the viewport. */
+	UPROPERTY(config)
+	FName NaniteVisualizationMode;
+
+	/** The Lumen visualization mode for the viewport. */
+	UPROPERTY(config)
+	FName LumenVisualizationMode;
+
+	/** The Substrate visualization mode for the viewport. */
+	UPROPERTY(config)
+	FName SubstrateVisualizationMode;
+
+	/** The Groom visualization mode for the viewport. */
+	UPROPERTY(config)
+	FName GroomVisualizationMode;
+
+	/** The virtual shadow map visualization mode for the viewport. */
+	UPROPERTY(config)
+	FName VirtualShadowMapVisualizationMode;
+
 	/** The buffer visualization mode for the viewport. */
 	UPROPERTY(config)
 	FName RayTracingDebugVisualizationMode;
+
+	/** The GPU Skin Cache visualization mode for the viewport. */
+	UPROPERTY(config)
+	FName GPUSkinCacheVisualizationMode;
 
 	/** Setting to allow designers to override the automatic expose. */
 	UPROPERTY(config)
@@ -161,6 +203,10 @@ struct UNREALED_API FLevelEditorViewportInstanceSettings
 	/** When enabled, the full viewport toolbar will be shown. When disabled, a compact toolbar is used. */
 	UPROPERTY(EditAnywhere, config, Category=LookAndFeel)
 	bool bShowFullToolbar;
+
+	/** Whether or not this viewport is allowed to be possessed by cinematic/scrubbing tools. */
+	UPROPERTY(config)
+	bool bAllowCinematicControl;
 };
 
 
@@ -168,7 +214,7 @@ struct UNREALED_API FLevelEditorViewportInstanceSettings
  * Implements a key -> value pair for the per-instance view port settings
  */
 USTRUCT()
-struct UNREALED_API FLevelEditorViewportInstanceSettingsKeyValuePair
+struct FLevelEditorViewportInstanceSettingsKeyValuePair
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -186,7 +232,7 @@ struct UNREALED_API FLevelEditorViewportInstanceSettingsKeyValuePair
  * Settings that control the behavior of the "snap to surface" feature
  */
 USTRUCT()
-struct UNREALED_API FSnapToSurfaceSettings
+struct FSnapToSurfaceSettings
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -209,11 +255,20 @@ struct UNREALED_API FSnapToSurfaceSettings
 	bool bSnapRotation;
 };
 
+USTRUCT()
+struct FLevelEditorViewporEditorViews
+{
+	GENERATED_USTRUCT_BODY()
+
+	UPROPERTY()
+	TArray<FLevelViewportInfo> LevelViewportsInfo;
+};
+
 /**
  * Implements the Level Editor's view port settings.
  */
-UCLASS(config=EditorPerProjectUserSettings)
-class UNREALED_API ULevelEditorViewportSettings
+UCLASS(config=EditorPerProjectUserSettings, MinimalAPI)
+class ULevelEditorViewportSettings
 	: public UObject
 {
 	GENERATED_UCLASS_BODY()
@@ -262,6 +317,14 @@ class UNREALED_API ULevelEditorViewportSettings
 	UPROPERTY(EditAnywhere, config, Category=LookAndFeel, meta=( DisplayName = "Clicking BSP Enables Brush" ), AdvancedDisplay)
 	uint32 bClickBSPSelectsBrush:1;
 
+	/** If true, viewport will show actor editor context (current level, current data layer(s), current folder) */
+	UPROPERTY(EditAnywhere, config, Category = LookAndFeel, meta=(AdvancedDisplay))
+	uint32 bShowActorEditorContext : 1;
+
+	/** If true, the Edit widget of a transform will display the axis */
+	UPROPERTY(EditAnywhere, config, Category=LookAndFeel, meta=( DisplayName = "Enable Axis drawing for transform Edit Widget" ))
+	uint32 bAllowEditWidgetAxisDisplay:1;
+
 	/** How fast the perspective camera moves when flying through the world. */
 	UPROPERTY(config, meta=(UIMin = "1", UIMax = "8", ClampMin="1", ClampMax="8"))
 	int32 CameraSpeed;
@@ -275,8 +338,12 @@ class UNREALED_API ULevelEditorViewportSettings
 	int32 MouseScrollCameraSpeed;
 
 	/** The sensitivity of mouse movement when rotating the camera. */
-	UPROPERTY(EditAnywhere, config, Category=Controls, meta=(DisplayName="Mouse Sensitivity", ClampMin="0.0",ClampMax="1.0") )
+	UPROPERTY(EditAnywhere, config, Category=Controls, meta=(DisplayName="Mouse Sensitivity", ClampMin="0.01",ClampMax="1.0") )
 	float MouseSensitivty;
+
+	/** Camera movement notification toggle to switch back to the behavior that caused camera notifications to be sent during gizmo movement. */
+	UPROPERTY(EditAnywhere, config, Category = Controls)
+	uint32 bUseLegacyCameraMovementNotifications : 1;
 	
 	/** Whether or not to invert mouse on the y axis in free look mode */
 	UPROPERTY(EditAnywhere, config, Category = Controls, meta = (DisplayName = "Invert Mouse Look Y Axis"))
@@ -384,11 +451,11 @@ private:
 
 public:
 
-	/** If enabled, actor rotations will snap to the grid. */
+	/** If enabled, new Actors that you drag into the viewport snap to the active 2D layer. */
 	UPROPERTY(EditAnywhere, config, Category=GridSnapping, meta=(DisplayName = "Enable 2D Layer Snapping"))
 	uint32 bEnableLayerSnap:1;
 
-	/** The index of the snap plane to use when bEnableLayerSnap is true (from the project SnapLayers array) */
+	/** The index of the snap plane to use when 2D Layer Snapping is enabled, from the array of Snap Layers set for the project. */
 	UPROPERTY(config)
 	int32 ActiveSnapLayerIndex;
 
@@ -425,11 +492,6 @@ public:
 	/** Controls which array of rotation grid values we are using */
 	UPROPERTY(config)
 	TEnumAsByte<ERotationGridMode> CurrentRotGridMode;
-
-	/** Toggles legacy behavior for updating components and actors during drag operations. This could be useful if you're seeing a degradation in performance due to too many PostEditMove calls */
-	UE_DEPRECATED(4.26, "This property is meant to be a temporary toggle for a rollback if too many post edit move calls degrade performance during drag operations.")
-	UPROPERTY(EditAnywhere, config, Category=Controls, AdvancedDisplay, meta = (DisplayName = "Use Legacy Behavior for actor and component updates while dragging"))
-	bool bUseLegacyPostEditBehavior = false;
 
 public:
 
@@ -486,7 +548,7 @@ public:
 	float BackgroundDropDistance;
 
 	/** A list of meshes that can be used as preview mesh in the editor view port by holding down the backslash key */
-	UPROPERTY(EditAnywhere, config, Category=Preview, meta=(AllowedClasses = "StaticMesh"))
+	UPROPERTY(EditAnywhere, config, Category=Preview, meta=(AllowedClasses = "/Script/Engine.StaticMesh"))
 	TArray<FSoftObjectPath> PreviewMeshes;
 
 	UPROPERTY(EditAnywhere, config, AdvancedDisplay, Category=LookAndFeel, meta=(ClampMin = "0.01", UIMin = "0.01", UIMax = "5"))
@@ -506,19 +568,34 @@ public:
 
 	/** The size adjustment to apply to selected spline points (in screen space units). */
 	UPROPERTY(EditAnywhere, config, Category = LookAndFeel, AdvancedDisplay, meta = (ClampMin = "-5.00", ClampMax = "20.00"))
-	float SelectedSplinePointSizeAdjustment;
+	float SelectedSplinePointSizeAdjustment = 0.0f;
 
 	/** The size adjustment to apply to spline line thickness which increases the spline's hit tolerance. */
 	UPROPERTY(EditAnywhere, config, Category = LookAndFeel, AdvancedDisplay, meta = (ClampMin = "0.00"))
-	float SplineLineThicknessAdjustment;
+	float SplineLineThicknessAdjustment = 0.0f;
 
 	/** The size adjustment to apply to spline tangent handle (in screen space units). */
 	UPROPERTY(EditAnywhere, config, Category = LookAndFeel, AdvancedDisplay, meta = (ClampMin = "-5.00", ClampMax = "20.00"))
-	float SplineTangentHandleSizeAdjustment;
+	float SplineTangentHandleSizeAdjustment = 0.0f;
 
 	/** The scale to apply to spline tangent lengths */
 	UPROPERTY(EditAnywhere, config, Category = LookAndFeel, AdvancedDisplay, meta = (ClampMin = "0.00"))
-	float SplineTangentScale;
+	float SplineTangentScale = 0.5f;
+
+	UPROPERTY(config)
+	FVector2D LastInViewportMenuLocation;
+
+	/** When dropping a texture in the viewport, create an instance of this material instead of creating a new material. Populate MaterialParamsForDroppedTextures to specify the parameter names. */
+	UPROPERTY(EditAnywhere, config, Category = Behavior)
+	TSoftObjectPtr<class UMaterialInterface> MaterialForDroppedTextures;
+
+	/** When dropping a texture in the viewport, determines which material parameter to assign for each found texture type. Only relevant if MaterialForDroppedTextures is assigned. */
+	UPROPERTY(EditAnywhere, config, Category = Behavior)
+	TMap<EMaterialKind, FName> MaterialParamsForDroppedTextures;
+
+	/** Store the last camera settings for all the viewport of each world loaded in the editor. */
+	UPROPERTY(config)
+	TMap<TSoftObjectPtr<UWorld>, FLevelEditorViewporEditorViews> EditorViews;
 
 private:
 
@@ -599,8 +676,8 @@ protected:
 
 	// UObject overrides
 
-	virtual void PostInitProperties() override;
-	virtual void PostEditChangeProperty( struct FPropertyChangedEvent& PropertyChangedEvent ) override;
+	UNREALED_API virtual void PostInitProperties() override;
+	UNREALED_API virtual void PostEditChangeProperty( struct FPropertyChangedEvent& PropertyChangedEvent ) override;
 
 private:
 

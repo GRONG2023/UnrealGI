@@ -1,18 +1,40 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RangeStructCustomization.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Engine/GameViewportClient.h"
-#include "Widgets/SBoxPanel.h"
-#include "Widgets/Layout/SSpacer.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Input/SComboBox.h"
+
+#include "Containers/BitArray.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "DetailLayoutBuilder.h"
 #include "DetailWidgetRow.h"
 #include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Margin.h"
+#include "Math/RangeBound.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "PropertyEditorModule.h"
 #include "PropertyHandle.h"
-#include "DetailLayoutBuilder.h"
+#include "Serialization/Archive.h"
+#include "SlotBase.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/SlateStructs.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SComboBox.h"
 #include "Widgets/Input/SNumericEntryBox.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SSpacer.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
+
+class SWidget;
 
 
 #define LOCTEXT_NAMESPACE "RangeStructCustomization"
@@ -30,16 +52,25 @@ namespace
 	template <>
 	struct FGetMetaDataHelper<float>
 	{
-		static float GetMetaData(const FProperty* Property, const TCHAR* Key)
+		static float GetMetaData(const TSharedRef<IPropertyHandle>& Property, const TCHAR* Key)
 		{
 			return Property->GetFloatMetaData(Key);
 		}
 	};
 
 	template <>
+	struct FGetMetaDataHelper<double>
+	{
+		static double GetMetaData(const TSharedRef<IPropertyHandle>& Property, const TCHAR* Key)
+		{
+			return Property->GetDoubleMetaData(Key);
+		}
+	};
+
+	template <>
 	struct FGetMetaDataHelper<int32>
 	{
-		static int32 GetMetaData(const FProperty* Property, const TCHAR* Key)
+		static int32 GetMetaData(const TSharedRef<IPropertyHandle>& Property, const TCHAR* Key)
 		{
 			return Property->GetIntMetaData(Key);
 		}
@@ -79,18 +110,14 @@ void FRangeStructCustomization<NumericType>::CustomizeHeader(TSharedRef<IPropert
 	check(UpperBoundTypeHandle.IsValid());
 
 	// Get min/max metadata values if defined
-	auto Property = StructPropertyHandle->GetProperty();
-	if (Property != nullptr)
+	if (StructPropertyHandle->HasMetaData(TEXT("UIMin")))
 	{
-		if (Property->HasMetaData(TEXT("UIMin")))
-		{
-			MinAllowedValue = TOptional<NumericType>(FGetMetaDataHelper<NumericType>::GetMetaData(Property, TEXT("UIMin")));
-		}
+		MinAllowedValue = TOptional<NumericType>(FGetMetaDataHelper<NumericType>::GetMetaData(StructPropertyHandle, TEXT("UIMin")));
+	}
 
-		if (Property->HasMetaData(TEXT("UIMax")))
-		{
-			MaxAllowedValue = TOptional<NumericType>(FGetMetaDataHelper<NumericType>::GetMetaData(Property, TEXT("UIMax")));
-		}
+	if (StructPropertyHandle->HasMetaData(TEXT("UIMax")))
+	{
+		MaxAllowedValue = TOptional<NumericType>(FGetMetaDataHelper<NumericType>::GetMetaData(StructPropertyHandle, TEXT("UIMax")));
 	}
 
 	// Make weak pointers to be passed as payloads to the widgets
@@ -130,14 +157,21 @@ void FRangeStructCustomization<NumericType>::CustomizeHeader(TSharedRef<IPropert
 	.MaxDesiredWidth(200.0f)
 	[
 		SNew(SVerticalBox)
-
 		+SVerticalBox::Slot()
 		.Padding(FMargin(0.0f, 3.0f, 0.0f, 2.0f))
 		[
 			SNew(SHorizontalBox)
-
 			+SHorizontalBox::Slot()
-			.Padding(FMargin(0.0f, 0.0f, 5.0f, 0.0f))
+			.Padding(FMargin(0.0f, 0.0f, 6.0f, 0.0f))
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(STextBlock)
+				.Font(IDetailLayoutBuilder::GetDetailFont())
+				.Text(LOCTEXT("MinimumBoundLabel", "Min"))
+			]
+			+SHorizontalBox::Slot()
+			.Padding(FMargin(0.0f, 0.0f, 3.0f, 0.0f))
 			.VAlign(VAlign_Center)
 			[
 				SNew(SNumericEntryBox<NumericType>)
@@ -153,20 +187,12 @@ void FRangeStructCustomization<NumericType>::CustomizeHeader(TSharedRef<IPropert
 				.IsEnabled(this, &FRangeStructCustomization<NumericType>::OnQueryIfEnabled, LowerBoundTypeWeakPtr)
 				.Font(IDetailLayoutBuilder::GetDetailFont())
 				.AllowSpin(true)
-				.LabelVAlign(VAlign_Center)
-				.Label()
-				[
-					SNew(STextBlock)
-					.Font(IDetailLayoutBuilder::GetDetailFont())
-					.Text(LOCTEXT("MinimumBoundLabel", "Min"))
-				]
 			]
-
 			+SHorizontalBox::Slot()
 			.VAlign(VAlign_Center)
 			.AutoWidth()
 			[
-				SNew(SComboBox< TSharedPtr<FString> >)
+				SNew(SComboBox<TSharedPtr<FString>>)
 				.OptionsSource(&ComboBoxList)
 				.OnGenerateWidget(this, &FRangeStructCustomization<NumericType>::OnGenerateComboWidget)
 				.OnSelectionChanged(this, &FRangeStructCustomization<NumericType>::OnComboSelectionChanged, LowerBoundTypeWeakPtr)
@@ -182,9 +208,17 @@ void FRangeStructCustomization<NumericType>::CustomizeHeader(TSharedRef<IPropert
 		.Padding(FMargin(0.0f, 2.0f, 0.0f, 3.0f))
 		[
 			SNew(SHorizontalBox)
-
+			+ SHorizontalBox::Slot()
+			.Padding(FMargin(0.0f, 0.0f, 3.0f, 0.0f))
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(STextBlock)
+				.Font(IDetailLayoutBuilder::GetDetailFont())
+				.Text(LOCTEXT("MaximumBoundLabel", "Max"))
+			]
 			+SHorizontalBox::Slot()
-			.Padding(FMargin(0.0f, 0.0f, 5.0f, 0.0f))
+			.Padding(FMargin(0.0f, 0.0f, 3.0f, 0.0f))
 			.VAlign(VAlign_Center)
 			[
 				SNew(SNumericEntryBox<NumericType>)
@@ -200,13 +234,6 @@ void FRangeStructCustomization<NumericType>::CustomizeHeader(TSharedRef<IPropert
 				.IsEnabled(this, &FRangeStructCustomization<NumericType>::OnQueryIfEnabled, UpperBoundTypeWeakPtr)
 				.Font(IDetailLayoutBuilder::GetDetailFont())
 				.AllowSpin(true)
-				.LabelVAlign(VAlign_Center)
-				.Label()
-				[
-					SNew(STextBlock)
-					.Font(IDetailLayoutBuilder::GetDetailFont())
-					.Text(LOCTEXT("MaximumBoundLabel", "Max"))
-				]
 			]
 
 			+SHorizontalBox::Slot()
@@ -395,6 +422,7 @@ void FRangeStructCustomization<NumericType>::OnComboSelectionChanged(TSharedPtr<
  *****************************************************************************/
 
 template class FRangeStructCustomization<float>;
+template class FRangeStructCustomization<double>;
 template class FRangeStructCustomization<int32>;
 
 

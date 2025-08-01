@@ -5,16 +5,24 @@
 #if UE_TRACE_ENABLED
 
 #include "Trace/Platform.h"
+#include "Trace/Message.h"
+#include "Trace/Detail/Channel.h"
 
 #include "Misc/CString.h"
 #include "Templates/UnrealTemplate.h"
 
+#include <type_traits>
+
+namespace UE {
 namespace Trace {
 namespace Private {
 
+#if !defined(TRACE_PRIVATE_CONTROL_ENABLED) || TRACE_PRIVATE_CONTROL_ENABLED
+
 ////////////////////////////////////////////////////////////////////////////////
-bool	Writer_SendTo(const ANSICHAR*, uint32);
-bool	Writer_WriteTo(const ANSICHAR*);
+bool	Writer_SendTo(const ANSICHAR*, uint32=0, uint32=0);
+bool	Writer_WriteTo(const ANSICHAR*, uint32=0);
+bool	Writer_Stop();
 
 
 
@@ -39,6 +47,7 @@ struct FControlCommands
 	}			Commands[Max];
 	uint8		Count;
 };
+static_assert(std::is_trivial<FControlCommands>(), "FControlCommands must be trivial");
 
 
 
@@ -47,6 +56,7 @@ static FControlCommands	GControlCommands;
 static UPTRINT			GControlListen		= 0;
 static UPTRINT			GControlSocket		= 0;
 static EControlState	GControlState;		// = EControlState::Closed;
+static uint16			GControlPort		= 1985;
 
 ////////////////////////////////////////////////////////////////////////////////
 static uint32 Writer_ControlHash(const ANSICHAR* Word)
@@ -100,9 +110,26 @@ static bool Writer_ControlDispatch(uint32 ArgC, ANSICHAR const* const* ArgV)
 ////////////////////////////////////////////////////////////////////////////////
 static bool Writer_ControlListen()
 {
-	GControlListen = TcpSocketListen(1985);
+	GControlListen = TcpSocketListen(GControlPort);
 	if (!GControlListen)
 	{
+		uint32 Seed = uint32(TimeGetTimestamp());
+		for (uint32 i = 0; i < 10 && !GControlListen; Seed *= 13, ++i)
+		{
+			uint16 Port((Seed & 0x1fff) + 0x8000);
+			GControlListen = TcpSocketListen(Port);
+			if (GControlListen)
+			{
+				GControlPort = Port;
+				break;
+			}
+		}
+	}
+
+	if (!GControlListen)
+	{
+		//This unfortunately triggers on editor shutdown needlessly spamming the log
+		//UE_TRACE_ERRORMESSAGE_F(ListenFail, GetLastErrorCode(), "Port: %d", GControlPort);
 		GControlState = EControlState::Failed;
 		return false;
 	}
@@ -226,6 +253,12 @@ static void Writer_ControlRecv()
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+uint32 Writer_GetControlPort()
+{
+	return GControlPort;
+}
+
+////////////////////////////////////////////////////////////////////////////////
 void Writer_UpdateControl()
 {
 	switch (GControlState)
@@ -263,23 +296,20 @@ void Writer_InitializeControl()
 		{
 			if (ArgC > 0)
 			{
-				Writer_SendTo(ArgV[0], 1980);
+				Writer_SendTo(ArgV[0]);
 			}
 		}
 	);
 
-	Writer_ControlAddCommand("WriteTo", nullptr,
+	Writer_ControlAddCommand("Stop", nullptr,
 		[] (void*, uint32 ArgC, ANSICHAR const* const* ArgV)
 		{
-			if (ArgC > 0)
-			{
-				Writer_WriteTo(ArgV[0]);
-			}
+			Writer_Stop();
 		}
 	);
 
-	Writer_ControlAddCommand("ToggleChannels", nullptr, 
-		[] (void*, uint32 ArgC, ANSICHAR const* const* ArgV) 
+	Writer_ControlAddCommand("ToggleChannels", nullptr,
+		[] (void*, uint32 ArgC, ANSICHAR const* const* ArgV)
 		{
 			if (ArgC < 2)
 			{
@@ -290,12 +320,12 @@ void Writer_InitializeControl()
 			ANSICHAR Channels[BufferSize] = {};
 			ANSICHAR* Ctx;
 			const bool bState = (ArgV[1][0] != '0');
-			FPlatformString::Strcpy(Channels, BufferSize, ArgV[0]);
-			ANSICHAR* Channel = FPlatformString::Strtok(Channels, ",", &Ctx);
+			FCStringAnsi::Strcpy(Channels, BufferSize, ArgV[0]);
+			ANSICHAR* Channel = FCStringAnsi::Strtok(Channels, ",", &Ctx);
 			while (Channel)
 			{
 				FChannel::Toggle(Channel, bState);
-				Channel = FPlatformString::Strtok(nullptr, ",", &Ctx);
+				Channel = FCStringAnsi::Strtok(nullptr, ",", &Ctx);
 			}
 		}
 	);
@@ -311,7 +341,17 @@ void Writer_ShutdownControl()
 	}
 }
 
+#else
+
+void	Writer_InitializeControl()	{}
+void	Writer_ShutdownControl()	{}
+void	Writer_UpdateControl()		{}
+uint32	Writer_GetControlPort()		{ return ~0u; }
+
+#endif // TRACE_PRIVATE_CONTROL_ENABLED
+
 } // namespace Private
 } // namespace Trace
+} // namespace UE
 
 #endif // UE_TRACE_ENABLED

@@ -6,6 +6,7 @@ GeometryCollectionActor.cpp: AGeometryCollectionActor methods.
 
 #include "GeometryCollection/GeometryCollectionActor.h"
 
+#include "Chaos/ChaosSolverActor.h"
 #include "Chaos/Utilities.h"
 #include "Chaos/Plane.h"
 #include "Chaos/Box.h"
@@ -13,13 +14,18 @@ GeometryCollectionActor.cpp: AGeometryCollectionActor methods.
 #include "Chaos/PerParticleGravity.h"
 #include "Chaos/ImplicitObject.h"
 #include "Engine/SkeletalMesh.h"
+#include "Engine/World.h"
 #include "GeometryCollection/GeometryCollectionAlgo.h"
 #include "GeometryCollection/GeometryCollectionComponent.h"
+#include "GeometryCollection/GeometryCollectionObject.h"
 #include "GeometryCollection/GeometryCollectionUtility.h"
 #include "Math/Box.h"
+#include "Physics/Experimental/PhysScene_Chaos.h"
 #include "Physics/PhysicsInterfaceCore.h"
 #include "PhysicsSolver.h"
 #include "GeometryCollection/GeometryCollectionDebugDrawComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(GeometryCollectionActor)
 
 
 DEFINE_LOG_CATEGORY_STATIC(AGeometryCollectionActorLogging, Log, All);
@@ -32,23 +38,22 @@ AGeometryCollectionActor::AGeometryCollectionActor(const FObjectInitializer& Obj
 	GeometryCollectionComponent = CreateDefaultSubobject<UGeometryCollectionComponent>(TEXT("GeometryCollectionComponent0"));
 	RootComponent = GeometryCollectionComponent;
 
-#if GEOMETRYCOLLECTION_DEBUG_DRAW
-	GeometryCollectionDebugDrawComponent = CreateDefaultSubobject<UGeometryCollectionDebugDrawComponent>(TEXT("GeometryCollectionDrawComponent0"));
-	GeometryCollectionDebugDrawComponent->GeometryCollectionComponent = GeometryCollectionComponent;
-#else
-	GeometryCollectionDebugDrawComponent = nullptr;
-#endif
+	GeometryCollectionDebugDrawComponent_DEPRECATED = nullptr;
 
 	PrimaryActorTick.bCanEverTick = true;
 	SetActorTickEnabled(true);
 
 	bReplicates = true;
+	NetDormancy = DORM_Initial;
 }
 
 
 void AGeometryCollectionActor::Tick(float DeltaTime) 
 {
 	UE_LOG(AGeometryCollectionActorLogging, Verbose, TEXT("AGeometryCollectionActor::Tick()"));
+
+	Super::Tick(DeltaTime);
+
 	if (GeometryCollectionComponent)
 	{
 		GeometryCollectionComponent->SetRenderStateDirty();
@@ -58,27 +63,20 @@ void AGeometryCollectionActor::Tick(float DeltaTime)
 
 const Chaos::FPhysicsSolver* GetSolver(const AGeometryCollectionActor& GeomCollectionActor)
 {
-#if INCLUDE_CHAOS
 	return GeomCollectionActor.GetGeometryCollectionComponent()->ChaosSolverActor != nullptr ? GeomCollectionActor.GetGeometryCollectionComponent()->ChaosSolverActor->GetSolver() : GeomCollectionActor.GetWorld()->PhysicsScene_Chaos->GetSolver();
-#else
-	return nullptr;
-#endif
 }
 
 
 bool LowLevelRaycastImp(const Chaos::FVec3& Start, const Chaos::FVec3& Dir, float DeltaMag, const AGeometryCollectionActor& GeomCollectionActor, FHitResult& OutHit)
 {
+#if TODO_REIMPLEMENT_GET_RIGID_PARTICLES
 	using namespace Chaos;
-	//todo(ocohen): need to add thread safety / lock semantics
-	//const TManagedArray<int32>& RigidBodyIdArray = GeomCollectionActor.GetGeometryCollectionComponent()->GetRigidBodyIdArray();
-	const TManagedArray<FGuid>& RigidBodyIdArray = GeomCollectionActor.GetGeometryCollectionComponent()->GetRigidBodyGuidArray();
 	FPhysScene_Chaos* Scene = GeomCollectionActor.GetGeometryCollectionComponent()->GetInnerChaosScene();
 	ensure(Scene);
 
 	const Chaos::FPhysicsSolver* Solver = GetSolver(GeomCollectionActor);
 	if(ensure(Solver))
 	{
-#if TODO_REIMPLEMENT_GET_RIGID_PARTICLES
 		const TPBDRigidParticles<float, 3>& Particles = Solver->GetRigidParticles();	//todo(ocohen): should these just get passed in instead of hopping through scene?
 		FAABB3 RayBox(Start, Start);
 		RayBox.Thicken(Dir * DeltaMag);
@@ -112,8 +110,8 @@ bool LowLevelRaycastImp(const Chaos::FVec3& Start, const Chaos::FVec3& Dir, floa
 				return true;
 			}
 		}
-#endif
 	}
+#endif
 
 	return false;
 }
@@ -152,3 +150,4 @@ bool AGeometryCollectionActor::GetReferencedContentObjects(TArray<UObject*>& Obj
 	return true;
 }
 #endif
+

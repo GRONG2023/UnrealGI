@@ -4,10 +4,14 @@
 #include "UMGPrivate.h"
 #include "Blueprint/WidgetTree.h"
 #include "Blueprint/UserWidget.h"
+#include "Blueprint/UserWidgetPool.h"
 #include "Widgets/Layout/SWrapBox.h"
 #include "Widgets/SBoxPanel.h"
+#include "Widgets/SOverlay.h"
 #include "Editor/WidgetCompilerLog.h"
 #include "Widgets/Layout/SRadialBox.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(DynamicEntryBoxBase)
 
 #define LOCTEXT_NAMESPACE "UMG"
 
@@ -15,8 +19,10 @@ UDynamicEntryBoxBase::UDynamicEntryBoxBase(const FObjectInitializer& Initializer
 	: Super(Initializer)
 	, EntryWidgetPool(*this)
 {
-	Visibility = ESlateVisibility::SelfHitTestInvisible;
+	SetVisibilityInternal(ESlateVisibility::SelfHitTestInvisible);
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	EntrySizeRule.SizeRule = ESlateSizeRule::Automatic;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 void UDynamicEntryBoxBase::ReleaseSlateResources(bool bReleaseChildren)
@@ -31,6 +37,7 @@ void UDynamicEntryBoxBase::ResetInternal(bool bDeleteWidgets)
 {
 	EntryWidgetPool.ReleaseAll(bDeleteWidgets);
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	if (MyPanelWidget.IsValid())
 	{
 		switch (EntryBoxType)
@@ -51,6 +58,7 @@ void UDynamicEntryBoxBase::ResetInternal(bool bDeleteWidgets)
 			break;
 		}
 	}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 const TArray<UUserWidget*>& UDynamicEntryBoxBase::GetAllEntries() const
@@ -61,6 +69,27 @@ const TArray<UUserWidget*>& UDynamicEntryBoxBase::GetAllEntries() const
 int32 UDynamicEntryBoxBase::GetNumEntries() const
 {
 	return EntryWidgetPool.GetActiveWidgets().Num();
+}
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+EDynamicBoxType UDynamicEntryBoxBase::GetBoxType() const
+{
+	return EntryBoxType;
+}
+
+const FVector2D& UDynamicEntryBoxBase::GetEntrySpacing() const
+{
+	return EntrySpacing;
+}
+
+const FSlateChildSize& UDynamicEntryBoxBase::GetEntrySizeRule() const
+{
+	return EntrySizeRule;
+}
+
+const FRadialBoxSettings& UDynamicEntryBoxBase::GetRadialBoxSettings() const
+{
+	return RadialBoxSettings;
 }
 
 void UDynamicEntryBoxBase::RemoveEntryInternal(UUserWidget* EntryWidget)
@@ -122,7 +151,6 @@ void UDynamicEntryBoxBase::SetEntrySpacing(const FVector2D& InEntrySpacing)
 						int32 PatternIdx = CountIdx % SpacingPattern.Num();
 						Spacing += SpacingPattern[PatternIdx];
 					}
-					
 					// Negative padding is no good, so negative spacing is expressed as positive spacing on the opposite side
 					if (Spacing.X >= 0.f)
 					{
@@ -162,7 +190,7 @@ void UDynamicEntryBoxBase::SetEntrySpacing(const FVector2D& InEntrySpacing)
 					}
 				}
 				SOverlay::FOverlaySlot& OverlaySlot = (*OverlayChildren)[ChildIdx];
-				OverlaySlot.SlotPadding = Padding;
+				OverlaySlot.SetPadding(Padding);
 			}
 		}
 		else if (EntryBoxType == EDynamicBoxType::Horizontal || EntryBoxType == EDynamicBoxType::Vertical)
@@ -177,9 +205,8 @@ void UDynamicEntryBoxBase::SetEntrySpacing(const FVector2D& InEntrySpacing)
 				FMargin Padding;
 				Padding.Top = bIsHBox || bIsFirstChild ? 0.f : EntrySpacing.Y;
 				Padding.Left = bIsHBox && !bIsFirstChild ? EntrySpacing.X : 0.f;
-
 				SBoxPanel::FSlot& BoxSlot = (*BoxChildren)[ChildIdx];
-				BoxSlot.SlotPadding = Padding;
+				BoxSlot.SetPadding(Padding);
 			}
 		}
 	}
@@ -198,6 +225,23 @@ void UDynamicEntryBoxBase::SetRadialSettings(const FRadialBoxSettings& InSetting
 	}
 }
 
+EVerticalAlignment UDynamicEntryBoxBase::GetEntryVerticalAlignment() const
+{
+	return EntryVerticalAlignment.GetValue();
+}
+
+EHorizontalAlignment UDynamicEntryBoxBase::GetEntryHorizontalAlignment() const
+{
+	return EntryHorizontalAlignment.GetValue();
+}
+
+int32 UDynamicEntryBoxBase::GetMaxElementSize() const
+{
+	return MaxElementSize;
+}
+
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
 #if WITH_EDITOR
 
 const FText UDynamicEntryBoxBase::GetPaletteCategory()
@@ -206,6 +250,7 @@ const FText UDynamicEntryBoxBase::GetPaletteCategory()
 }
 #endif
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 TSharedRef<SWidget> UDynamicEntryBoxBase::RebuildWidget()
 {
 	TSharedPtr<SWidget> EntryBoxWidget;
@@ -256,6 +301,7 @@ TSharedRef<SWidget> UDynamicEntryBoxBase::RebuildWidget()
 
 	return EntryBoxWidget.ToSharedRef();
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 #if WITH_EDITOR
 void UDynamicEntryBoxBase::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
@@ -269,6 +315,7 @@ void UDynamicEntryBoxBase::PostEditChangeProperty(FPropertyChangedEvent& Propert
 }
 #endif
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void UDynamicEntryBoxBase::SynchronizeProperties()
 {
 	Super::SynchronizeProperties();
@@ -281,6 +328,7 @@ void UDynamicEntryBoxBase::SynchronizeProperties()
 	}
 #endif
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 bool UDynamicEntryBoxBase::IsEntryClassValid(TSubclassOf<UUserWidget> InEntryClass) const
 {
@@ -363,72 +411,128 @@ FMargin UDynamicEntryBoxBase::BuildEntryPadding(const FVector2D& DesiredSpacing)
 	return EntryPadding;
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void UDynamicEntryBoxBase::AddEntryChild(UUserWidget& ChildWidget)
 {
-	FSlotBase* NewSlot = nullptr;
 	if (EntryBoxType == EDynamicBoxType::Wrap || EntryBoxType == EDynamicBoxType::VerticalWrap)
 	{
-		NewSlot = &StaticCastSharedPtr<SWrapBox>(MyPanelWidget)->AddSlot()
+		StaticCastSharedPtr<SWrapBox>(MyPanelWidget)->AddSlot()
 			.FillEmptySpace(false)
 			.HAlign(EntryHorizontalAlignment)
-			.VAlign(EntryVerticalAlignment);
+			.VAlign(EntryVerticalAlignment)
+			[
+				ChildWidget.TakeWidget()
+			];
 	}
 	else if (EntryBoxType == EDynamicBoxType::Radial)
 	{
-		NewSlot = &StaticCastSharedPtr<SRadialBox>(MyPanelWidget)->AddSlot();
+		StaticCastSharedPtr<SRadialBox>(MyPanelWidget)->AddSlot()
+			[
+				ChildWidget.TakeWidget()
+			];
 	}
 	else if (EntryBoxType == EDynamicBoxType::Overlay)
 	{
-		const int32 ChildIdx = MyPanelWidget->GetChildren()->Num();
-		SOverlay::FOverlaySlot& OverlaySlot = (SOverlay::FOverlaySlot&)StaticCastSharedPtr<SOverlay>(MyPanelWidget)->AddSlot();
-
-		EHorizontalAlignment HAlign = EntryHorizontalAlignment;
-		EVerticalAlignment VAlign = EntryVerticalAlignment;
-
-		FVector2D TargetSpacing = FVector2D::ZeroVector;
-		if (SpacingPattern.Num() > 0)
+		if (MyPanelWidget.IsValid())
 		{
-			for (int32 CountIdx = 0; CountIdx < ChildIdx; ++CountIdx)
+			const int32 ChildIdx = MyPanelWidget->GetChildren()->Num();
+
+			EHorizontalAlignment HAlign = EntryHorizontalAlignment;
+			EVerticalAlignment VAlign = EntryVerticalAlignment;
+
+			FVector2D TargetSpacing = FVector2D::ZeroVector;
+			if (SpacingPattern.Num() > 0)
 			{
-				const int32 PatternIdx = CountIdx % SpacingPattern.Num();
-				TargetSpacing += SpacingPattern[PatternIdx];
+				for (int32 CountIdx = 0; CountIdx < ChildIdx; ++CountIdx)
+				{
+					const int32 PatternIdx = CountIdx % SpacingPattern.Num();
+					TargetSpacing += SpacingPattern[PatternIdx];
+				}
 			}
-		}
-		else
-		{
-			TargetSpacing = EntrySpacing * ChildIdx;
-			HAlign = EntrySpacing.X >= 0.f ? EHorizontalAlignment::HAlign_Left : EHorizontalAlignment::HAlign_Right;
-			VAlign = EntrySpacing.Y >= 0.f ? EVerticalAlignment::VAlign_Top : EVerticalAlignment::VAlign_Bottom;
-		}
+			else
+			{
+				TargetSpacing = EntrySpacing * ChildIdx;
+				HAlign = EntrySpacing.X >= 0.f ? EHorizontalAlignment::HAlign_Left : EHorizontalAlignment::HAlign_Right;
+				VAlign = EntrySpacing.Y >= 0.f ? EVerticalAlignment::VAlign_Top : EVerticalAlignment::VAlign_Bottom;
+			}
 		
-		OverlaySlot.HAlignment = HAlign;
-		OverlaySlot.VAlignment = VAlign;
-		OverlaySlot.SlotPadding = BuildEntryPadding(TargetSpacing);
-
-		NewSlot = &OverlaySlot;
+			StaticCastSharedPtr<SOverlay>(MyPanelWidget)->AddSlot()
+				.HAlign(HAlign)
+				.VAlign(VAlign)
+				.Padding(BuildEntryPadding(TargetSpacing))
+				[
+					ChildWidget.TakeWidget()
+				];
+		}
 	}
 	else
 	{
-		const bool bIsHBox = EntryBoxType == EDynamicBoxType::Horizontal;
-		const bool bIsFirstChild = MyPanelWidget->GetChildren()->Num() == 0;
+		if (MyPanelWidget.IsValid())
+		{
+			const bool bIsHBox = EntryBoxType == EDynamicBoxType::Horizontal;
+			const bool bIsFirstChild = MyPanelWidget->GetChildren()->Num() == 0;
 
-		SBoxPanel::FSlot& BoxPanelSlot = bIsHBox ? (SBoxPanel::FSlot&)StaticCastSharedPtr<SHorizontalBox>(MyPanelWidget)->AddSlot().MaxWidth(MaxElementSize) : (SBoxPanel::FSlot&)StaticCastSharedPtr<SVerticalBox>(MyPanelWidget)->AddSlot().MaxHeight(MaxElementSize);
-		BoxPanelSlot.HAlignment = EntryHorizontalAlignment;
-		BoxPanelSlot.VAlignment = EntryVerticalAlignment;
-		BoxPanelSlot.SizeParam = UWidget::ConvertSerializedSizeParamToRuntime(EntrySizeRule);
+			FMargin Padding;
+			Padding.Top = bIsHBox || bIsFirstChild ? 0.f : EntrySpacing.Y;
+			Padding.Left = bIsHBox && !bIsFirstChild ? EntrySpacing.X : 0.f;
 
-		FMargin Padding;
-		Padding.Top = bIsHBox || bIsFirstChild ? 0.f : EntrySpacing.Y;
-		Padding.Left = bIsHBox && !bIsFirstChild ? EntrySpacing.X : 0.f;
-		BoxPanelSlot.SlotPadding = Padding;
-
-		NewSlot = &BoxPanelSlot;
-	}
-
-	if (ensure(NewSlot))
-	{
-		NewSlot->AttachWidget(ChildWidget.TakeWidget());
+			if (bIsHBox)
+			{
+				StaticCastSharedPtr<SHorizontalBox>(MyPanelWidget)->AddSlot()
+					.MaxWidth(MaxElementSize)
+					.HAlign(EntryHorizontalAlignment)
+					.VAlign(EntryVerticalAlignment)
+					.SizeParam(UWidget::ConvertSerializedSizeParamToRuntime(EntrySizeRule))
+					.Padding(Padding)
+					[
+						ChildWidget.TakeWidget()
+					];
+			}
+			else
+			{
+				StaticCastSharedPtr<SVerticalBox>(MyPanelWidget)->AddSlot()
+					.MaxHeight(MaxElementSize)
+					.HAlign(EntryHorizontalAlignment)
+					.VAlign(EntryVerticalAlignment)
+					.SizeParam(UWidget::ConvertSerializedSizeParamToRuntime(EntrySizeRule))
+					.Padding(Padding)
+					[
+						ChildWidget.TakeWidget()
+					];
+			}
+		}
 	}
 }
+
+void UDynamicEntryBoxBase::InitEntryBoxType(EDynamicBoxType InEntryBoxType)
+{
+	ensureMsgf(!MyPanelWidget.IsValid(), TEXT("The widget is already created."));
+	EntryBoxType = InEntryBoxType;
+}
+
+void UDynamicEntryBoxBase::InitEntrySizeRule(FSlateChildSize InEntrySizeRule)
+{
+	ensureMsgf(!MyPanelWidget.IsValid(), TEXT("The widget is already created."));
+	EntrySizeRule = InEntrySizeRule;
+}
+
+void UDynamicEntryBoxBase::InitEntryHorizontalAlignment(EHorizontalAlignment InEntryHorizontalAlignment)
+{
+	ensureMsgf(!MyPanelWidget.IsValid(), TEXT("The widget is already created."));
+	EntryHorizontalAlignment = InEntryHorizontalAlignment;
+}
+
+void UDynamicEntryBoxBase::InitEntryVerticalAlignment(EVerticalAlignment InEntryVerticalAlignment)
+{
+	ensureMsgf(!MyPanelWidget.IsValid(), TEXT("The widget is already created."));
+	EntryVerticalAlignment = InEntryVerticalAlignment;
+}
+
+void UDynamicEntryBoxBase::InitMaxElementSize(int32 InMaxElementSize)
+{
+	ensureMsgf(!MyPanelWidget.IsValid(), TEXT("The widget is already created."));
+	MaxElementSize = InMaxElementSize;
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 #undef LOCTEXT_NAMESPACE

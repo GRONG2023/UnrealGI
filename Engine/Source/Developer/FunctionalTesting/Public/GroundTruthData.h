@@ -3,10 +3,15 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
 #include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
 #include "UObject/ScriptMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "GroundTruthData.generated.h"
+
+struct FFrame;
 
 /**
  * 
@@ -28,6 +33,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Automation")
 	bool CanModify() const;
 
+	UFUNCTION(BlueprintCallable, Category = "Automation")
+	void ResetObject();
+
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
@@ -40,5 +48,5 @@ public:
 protected:
 	
 	UPROPERTY(VisibleAnywhere, Instanced, Category=Data)
-	UObject* ObjectData;
+	TObjectPtr<UObject> ObjectData;
 };

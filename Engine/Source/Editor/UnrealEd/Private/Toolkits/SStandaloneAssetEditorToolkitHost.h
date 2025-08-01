@@ -13,6 +13,7 @@
 #include "Toolkits/AssetEditorToolkit.h"
 
 class SBorder;
+class SBox;
 
 /**
  * Base class for standalone asset editing host tabs
@@ -54,11 +55,15 @@ public:
 	/** IToolkitHost interface */
 	virtual TSharedRef< class SWidget > GetParentWidget() override;
 	virtual void BringToFront() override;
-	virtual TSharedRef< class SDockTabStack > GetTabSpot( const EToolkitTabSpot::Type TabSpot ) override;
 	virtual TSharedPtr< class FTabManager > GetTabManager() const override { return MyTabManager; }
 	virtual void OnToolkitHostingStarted( const TSharedRef< class IToolkit >& Toolkit ) override;
 	virtual void OnToolkitHostingFinished( const TSharedRef< class IToolkit >& Toolkit ) override;
 	virtual UWorld* GetWorld() const override;
+	virtual UTypedElementCommonActions* GetCommonActions() const override;
+	FName GetStatusBarName() const override { return StatusBarName; } 
+	virtual void AddViewportOverlayWidget(TSharedRef<SWidget> InOverlaidWidget, TSharedPtr<IAssetViewport> InViewport = nullptr) override;
+	virtual void RemoveViewportOverlayWidget(TSharedRef<SWidget> InOverlaidWidget, TSharedPtr<IAssetViewport> InViewport = nullptr) override;
+	virtual FOnActiveViewportChanged& OnActiveViewportChanged() override { return OnActiveViewportChangedDelegate; }
 	void CreateDefaultStandaloneMenuBar(UToolMenu* MenuBar);
 
 	/** SWidget overrides */
@@ -85,19 +90,39 @@ public:
 	 */
 	void SetMenuOverlay( TSharedRef<SWidget> NewOverlay );
 
+	/**
+	 * Sets the contents of the toolbar in this asset editor
+	 */
+	void SetToolbar(TSharedPtr<SWidget> Toolbar);
+
+	/**
+	 * Registers a drawer for the asset editor status bar
+	 */
+	void RegisterDrawer(struct FWidgetDrawerConfig&& Drawer, int32 SlotIndex = INDEX_NONE);
+
+	virtual FEditorModeTools& GetEditorModeManager() const override;
+
+	/**
+	 * Binds EditorCloseRequest to the HostTab so that it triggers when the tab is trying to close.
+	 */
+	void BindEditorCloseRequestToHostTab();
+
+	/**
+	 * Unbinds EditorCloseRequest from the HostTab so that it doesn't trigger when the tab is trying to close.
+	 */
+	void UnbindEditorCloseRequestFromHostTab();
+
 private:
 	void OnTabClosed(TSharedRef<SDockTab> TabClosed) const;
+	void ShutdownToolkitHost();
 
 	FName GetMenuName() const;
 
 	/** Manages internal tab layout */
 	TSharedPtr<FTabManager> MyTabManager;
 
-	/** The widget that will house the default menu widget */
-	TSharedPtr<SBorder> MenuWidgetContent;
-
 	/** The widget that will house the overlay widgets (if any) */
-	TSharedPtr<SBorder> MenuOverlayWidgetContent;
+	TSharedPtr<SBox> MenuOverlayWidgetContent;
 
 	/** The default menu widget */
 	TSharedPtr< SWidget > DefaultMenuWidget;
@@ -107,6 +132,9 @@ private:
 
 	/** Name ID for this app */
 	FName AppName;
+
+	/** Name for the status bar. Must be unique. This name is not preserved across sessions and should never be saved. */
+	FName StatusBarName;
 
 	/** List of all of the toolkits we're currently hosting */
 	TArray< TSharedPtr< class IToolkit > > HostedToolkits;
@@ -122,6 +150,16 @@ private:
 
 	/** The menu extenders to populate the main toolkit host menu with */
 	TArray< TSharedPtr<FExtender> > MenuExtenders;
+
+	/** A delegate which is called any time the LevelEditor's active viewport changes. */
+	FOnActiveViewportChanged OnActiveViewportChangedDelegate;
+
+	/** Reference to bottom status bar, containing dockable tabs */
+	TSharedPtr<SWidget> StatusBarWidget;
+
+	SVerticalBox::FSlot* ToolbarSlot;
+
+	TObjectPtr<UTypedElementCommonActions> CommonActions;
 };
 
 

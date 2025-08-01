@@ -21,7 +21,22 @@ class UTestBTService_Log : public UBTService
 	FName KeyNameTick;
 
 	UPROPERTY()
+	FName KeyNameBecomeRelevant;
+
+	UPROPERTY()
+	FName KeyNameCeaseRelevant;
+
+	UPROPERTY()
 	int32 LogTick;
+
+	UPROPERTY()
+	int32 TicksDelaySetKeyNameTick;
+
+	UPROPERTY()
+	int32 NumTicks;
+
+	UPROPERTY()
+	bool bToggleValue;
 
 	virtual void OnBecomeRelevant(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
 	virtual void OnCeaseRelevant(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;

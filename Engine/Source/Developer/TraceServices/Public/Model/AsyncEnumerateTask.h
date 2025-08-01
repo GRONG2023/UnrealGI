@@ -7,8 +7,9 @@
 #include "Model/MonotonicTimelineData.h"
 #include "TraceServices/Containers/Timelines.h"
 
-namespace Trace
+namespace TraceServices
 {
+
 template<typename InEventType, typename SettingsType>
 struct FAsyncEnumerateTaskData
 {
@@ -135,7 +136,6 @@ public:
 				{
 					--CurrentStackDepth;
 					InEventType CurrentEvent = DetailLevel.GetEvent(CurrentScopePage->InitialStack[CurrentStackDepth].EventIndex);
-					double StartTime = DetailLevel.GetScopeEntryTime(CurrentScopePage->InitialStack[CurrentStackDepth].EnterScopeIndex);
 					if (Callback(false, CurrentScopePage->InitialStack[CurrentStackDepth].EndTime, CurrentEvent) == EEventEnumerate::Stop)
 					{
 						return;
@@ -328,4 +328,5 @@ public:
 
 	FAsyncEnumerateTaskData<InEventType, SettingsType> Data;
 };
-}
+
+} // namespace TraceServices

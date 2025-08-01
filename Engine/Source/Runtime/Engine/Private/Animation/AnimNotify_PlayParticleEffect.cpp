@@ -6,6 +6,9 @@
 #include "ParticleHelper.h"
 #include "Kismet/GameplayStatics.h"
 #include "Animation/AnimSequenceBase.h"
+#include "UObject/UnrealType.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNotify_PlayParticleEffect)
 
 #if WITH_EDITOR
 #include "Logging/MessageLog.h"
@@ -72,6 +75,13 @@ void UAnimNotify_PlayParticleEffect::ValidateAssociatedAssets()
 
 void UAnimNotify_PlayParticleEffect::Notify(class USkeletalMeshComponent* MeshComp, class UAnimSequenceBase* Animation)
 {
+}
+
+void UAnimNotify_PlayParticleEffect::Notify(class USkeletalMeshComponent* MeshComp, class UAnimSequenceBase* Animation, const FAnimNotifyEventReference& EventReference)
+{
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+    Notify(MeshComp, Animation);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	// Don't call super to avoid unnecessary call in to blueprints
 	SpawnParticleSystem(MeshComp, Animation);
 }
@@ -121,3 +131,4 @@ UParticleSystemComponent* UAnimNotify_PlayParticleEffect::SpawnParticleSystem(cl
 
 	return ReturnComp;
 }
+

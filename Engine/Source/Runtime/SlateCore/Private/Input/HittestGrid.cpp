@@ -9,10 +9,14 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogHittestDebug, Display, All);
 
+#define UE_SLATE_ENABLE_HITTEST_STATS !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+
+#if UE_SLATE_ENABLE_HITTEST_STATS
 DECLARE_CYCLE_STAT(TEXT("HitTestGrid AddWidget"), STAT_SlateHTG_AddWidget, STATGROUP_Slate);
 DECLARE_CYCLE_STAT(TEXT("HitTestGrid RemoveWidget"), STAT_SlateHTG_RemoveWidget, STATGROUP_Slate);
 DECLARE_CYCLE_STAT(TEXT("HitTestGrid Clear"), STAT_SlateHTG_Clear, STATGROUP_Slate);
 DECLARE_CYCLE_STAT(TEXT("HitTestGrid GetCollapsedWidgets"), STAT_SlateHTG_GetCollapsedWidgets, STATGROUP_Slate);
+#endif
 
 #define LOCTEXT_NAMESPACE "HittestGrid"
 #define UE_SLATE_HITTESTGRID_ARRAYSIZEMAX 0
@@ -36,7 +40,7 @@ constexpr bool IsCompatibleUserIndex(int32 RequestedUserIndex, int32 TestUserInd
 // Helper Functions
 //
 
-FVector2D ClosestPointOnSlateRotatedRect(const FVector2D &Point, const FSlateRotatedRect& RotatedRect)
+FVector2f ClosestPointOnSlateRotatedRect(const FVector2f &Point, const FSlateRotatedRect& RotatedRect)
 {
 	//no need to do any testing if we are inside of the rect
 	if (RotatedRect.IsUnderLocation(Point))
@@ -45,26 +49,26 @@ FVector2D ClosestPointOnSlateRotatedRect(const FVector2D &Point, const FSlateRot
 	}
 
 	const static int32 NumOfCorners = 4;
-	FVector2D Corners[NumOfCorners];
-	Corners[0] = RotatedRect.TopLeft;
-	Corners[1] = Corners[0] + RotatedRect.ExtentX;
-	Corners[2] = Corners[1] + RotatedRect.ExtentY;
-	Corners[3] = Corners[0] + RotatedRect.ExtentY;
+	FVector2d Corners[NumOfCorners];
+	Corners[0] = FVector2d(RotatedRect.TopLeft);
+	Corners[1] = FVector2d(Corners[0]) + FVector2d(RotatedRect.ExtentX);
+	Corners[2] = FVector2d(Corners[1]) + FVector2d(RotatedRect.ExtentY);
+	Corners[3] = FVector2d(Corners[0]) + FVector2d(RotatedRect.ExtentY);
 
-	FVector2D RetPoint;
+	FVector2f RetPoint;
 	float ClosestDistSq = FLT_MAX;
 	for (int32 i = 0; i < NumOfCorners; ++i)
 	{
 		//grab the closest point along the line segment
-		const FVector2D ClosestPoint = FMath::ClosestPointOnSegment2D(Point, Corners[i], Corners[(i + 1) % NumOfCorners]);
+		const FVector2d ClosestPoint = FMath::ClosestPointOnSegment2D(FVector2d(Point), Corners[i], Corners[(i + 1) % NumOfCorners]);
 
 		//get the distance between the two
-		const float TestDist = FVector2D::DistSquared(Point, ClosestPoint);
+		const float TestDist = FVector2d::DistSquared(FVector2d(Point), ClosestPoint);
 
 		//if the distance is smaller than the current smallest, update our closest
 		if (TestDist < ClosestDistSq)
 		{
-			RetPoint = ClosestPoint;
+			RetPoint = FVector2f(UE_REAL_TO_FLOAT(ClosestPoint.X), UE_REAL_TO_FLOAT(ClosestPoint.Y));
 			ClosestDistSq = TestDist;
 		}
 	}
@@ -72,12 +76,12 @@ FVector2D ClosestPointOnSlateRotatedRect(const FVector2D &Point, const FSlateRot
 	return RetPoint;
 }
 
-FORCEINLINE float DistanceSqToSlateRotatedRect(const FVector2D &Point, const FSlateRotatedRect& RotatedRect)
+FORCEINLINE float DistanceSqToSlateRotatedRect(const FVector2f &Point, const FSlateRotatedRect& RotatedRect)
 {
-	return FVector2D::DistSquared(ClosestPointOnSlateRotatedRect(Point, RotatedRect), Point);
+	return FVector2f::DistSquared(ClosestPointOnSlateRotatedRect(Point, RotatedRect), Point);
 }
 
-FORCEINLINE bool IsOverlappingSlateRotatedRect(const FVector2D& Point, const float Radius, const FSlateRotatedRect& RotatedRect)
+FORCEINLINE bool IsOverlappingSlateRotatedRect(const FVector2f& Point, const float Radius, const FSlateRotatedRect& RotatedRect)
 {
 	return DistanceSqToSlateRotatedRect( Point, RotatedRect ) <= (Radius * Radius);
 }
@@ -96,7 +100,7 @@ bool ContainsInteractableWidget(const TArray<FWidgetAndPointer>& PathToTest)
 }
 
 
-const FVector2D CellSize(128.0f, 128.0f);
+const FVector2f CellSize(128.0f, 128.0f);
 
 //
 // FHittestGrid::FWidgetIndex
@@ -115,13 +119,13 @@ struct FHittestGrid::FGridTestingParams
 	/** Ctor */
 	FGridTestingParams()
 	: CellCoord(-1, -1)
-	, CursorPositionInGrid(FVector2D::ZeroVector)
+	, CursorPositionInGrid(FVector2f::ZeroVector)
 	, Radius(-1.0f)
 	, bTestWidgetIsInteractive(false)
 	{}
 
 	FIntPoint CellCoord;
-	FVector2D CursorPositionInGrid;
+	FVector2f CursorPositionInGrid;
 	float Radius;
 	bool bTestWidgetIsInteractive;
 };
@@ -139,6 +143,11 @@ void FHittestGrid::FCell::AddIndex(int32 WidgetIndex)
 void FHittestGrid::FCell::RemoveIndex(int32 WidgetIndex)
 {
 	WidgetIndexes.RemoveSingleSwap(WidgetIndex);
+}
+
+void FHittestGrid::FCell::Reset()
+{
+	WidgetIndexes.Reset();
 }
 
 //
@@ -159,11 +168,11 @@ FHittestGrid::FHittestGrid()
 {
 }
 
-TArray<FWidgetAndPointer> FHittestGrid::GetBubblePath(FVector2D DesktopSpaceCoordinate, float CursorRadius, bool bIgnoreEnabledStatus, int32 UserIndex)
+TArray<FWidgetAndPointer> FHittestGrid::GetBubblePath(UE::Slate::FDeprecateVector2DParameter DesktopSpaceCoordinate, float CursorRadius, bool bIgnoreEnabledStatus, int32 UserIndex)
 {
 	checkSlow(IsInGameThread());
 
-	const FVector2D CursorPositionInGrid = DesktopSpaceCoordinate - GridOrigin;
+	const FVector2f CursorPositionInGrid = DesktopSpaceCoordinate - GridOrigin;
 
 	if (WidgetArray.Num() > 0 && Cells.Num() > 0)
 	{
@@ -190,7 +199,7 @@ TArray<FWidgetAndPointer> FHittestGrid::GetBubblePath(FVector2D DesktopSpaceCoor
 					FGeometry DesktopSpaceGeometry = CurWidget->GetPaintSpaceGeometry();
 					DesktopSpaceGeometry.AppendTransform(FSlateLayoutTransform(GridOrigin - GridWindowOrigin));
 
-					Path.Emplace(FArrangedWidget(CurWidget.ToSharedRef(), DesktopSpaceGeometry), TSharedPtr<FVirtualPointerPosition>());
+					Path.Emplace(FArrangedWidget(CurWidget.ToSharedRef(), DesktopSpaceGeometry));
 					CurWidget = CurWidget->Advanced_GetPaintParentWidget();
 				}
 
@@ -219,8 +228,9 @@ TArray<FWidgetAndPointer> FHittestGrid::GetBubblePath(FVector2D DesktopSpaceCoor
 				{
 					if (BestHitWidgetData.CustomPath.IsValid())
 					{
-						const TArray<FWidgetAndPointer> BubblePathExtension = BestHitWidgetData.CustomPath.Pin()->GetBubblePathAndVirtualCursors(FirstHitWidget->GetTickSpaceGeometry(), DesktopSpaceCoordinate, bIgnoreEnabledStatus);
-						Path.Append(BubblePathExtension);
+						FVector2d DesktopSpaceCoordinate2d(DesktopSpaceCoordinate.X, DesktopSpaceCoordinate.Y);
+						TArray<FWidgetAndPointer> BubblePathExtension = BestHitWidgetData.CustomPath.Pin()->GetBubblePathAndVirtualCursors(FirstHitWidget->GetTickSpaceGeometry(), DesktopSpaceCoordinate2d, bIgnoreEnabledStatus);
+						Path.Append(MoveTemp(BubblePathExtension));
 					}
 				}
 	
@@ -232,7 +242,7 @@ TArray<FWidgetAndPointer> FHittestGrid::GetBubblePath(FVector2D DesktopSpaceCoor
 	return TArray<FWidgetAndPointer>();
 }
 
-bool FHittestGrid::SetHittestArea(const FVector2D& HittestPositionInDesktop, const FVector2D& HittestDimensions, const FVector2D& HitestOffsetInWindow)
+bool FHittestGrid::SetHittestArea(const UE::Slate::FDeprecateVector2DParameter& HittestPositionInDesktop, const UE::Slate::FDeprecateVector2DParameter& HittestDimensions, const UE::Slate::FDeprecateVector2DParameter& HitestOffsetInWindow)
 {
 	bool bWasCleared = false;
 
@@ -243,7 +253,17 @@ bool FHittestGrid::SetHittestArea(const FVector2D& HittestPositionInDesktop, con
 		NumCells = FIntPoint(FMath::CeilToInt(GridSize.X / CellSize.X), FMath::CeilToInt(GridSize.Y / CellSize.Y));
 		
 		const int32 NewTotalCells = NumCells.X * NumCells.Y;
-		ClearInternal(NewTotalCells);
+		if (NewTotalCells < 0)
+		{
+			ensureMsgf(false, TEXT("The gridsize is invalid. (%f, %f) (%d, %d)"), GridSize.X, GridSize.Y, NumCells.X, NumCells.Y);
+			GridSize = FVector2f(0.f, 0.f);
+			NumCells = 0;
+			ClearInternal(0);
+		}
+		else
+		{
+			ClearInternal(NewTotalCells);
+		}
 
 		bWasCleared = true;
 	}
@@ -262,8 +282,11 @@ void FHittestGrid::Clear()
 
 void FHittestGrid::ClearInternal(int32 TotalCells)
 {
+#if UE_SLATE_ENABLE_HITTEST_STATS
 	SCOPE_CYCLE_COUNTER(STAT_SlateHTG_Clear);
-	Cells.Reset(TotalCells);
+#endif
+	for (FCell& Cell : Cells)
+		Cell.Reset();
 	Cells.SetNumZeroed(TotalCells);
 
 	WidgetMap.Reset();
@@ -271,16 +294,14 @@ void FHittestGrid::ClearInternal(int32 TotalCells)
 	AppendedGridArray.Reset();
 }
 
-bool FHittestGrid::IsDescendantOf(const TSharedRef<SWidget> Parent, const FWidgetData& ChildData) const
+bool FHittestGrid::IsDescendantOf(const SWidget* ParentWidget, const FWidgetData& ChildData) const
 {
 	const TSharedPtr<SWidget> ChildWidgetPtr = ChildData.GetWidget();
-	if (ChildWidgetPtr == Parent)
+	const SWidget* CurWidget = ChildWidgetPtr.Get();
+	if (CurWidget == ParentWidget)
 	{
 		return false;
 	}
-
-	const SWidget* ParentWidget = &Parent.Get();
-	const SWidget* CurWidget = ChildWidgetPtr.Get();
 
 	while (CurWidget)
 	{
@@ -294,6 +315,22 @@ bool FHittestGrid::IsDescendantOf(const TSharedRef<SWidget> Parent, const FWidge
 	return false;
 }
 
+namespace UE::Slate::Private
+{
+	bool IsParentsEnabled(const SWidget* Widget)
+	{
+		while (Widget)
+		{
+			if (!Widget->IsEnabled())
+			{
+				return false;
+			}
+			Widget = Widget->Advanced_GetPaintParentWidget().Get();
+		}
+		return true;
+	}
+}
+
 #if WITH_SLATE_DEBUGGING
 namespace HittestGridDebuggingText
 {
@@ -303,6 +340,7 @@ namespace HittestGridDebuggingText
 	static FText PreviousWidgetIsBetter = LOCTEXT("StatePreviousWidgetIsBetter", "Previous Widget was better"); //~ The widget would be valid but the previous valid is closer
 	static FText NotADescendant = LOCTEXT("StateNotADescendant", "Not a descendant"); //~ We have a non escape boundary condition and the widget isn't a descendant of our boundary
 	static FText Disabled = LOCTEXT("StateNotEnabled", "Disabled"); //~ The widget is not enabled
+	static FText ParentDisabled = LOCTEXT("StateParentNotEnabled", "ParentDisabled"); //~ A parent of the widget is disabled
 	static FText DoesNotSuportKeyboardFocus = LOCTEXT("StateDoesNotSuportKeyboardFocus", "Keyboard focus unsupported"); //~ THe widget does not support keyboard focus
 }
 	#define AddToNextFocusableWidgetCondidateDebugResults(Candidate, Result) { if (IntermediateResultsPtr) { IntermediateResultsPtr->Emplace((Candidate), (Result)); } }
@@ -311,7 +349,7 @@ namespace HittestGridDebuggingText
 #endif
 
 template<typename TCompareFunc, typename TSourceSideFunc, typename TDestSideFunc>
-TSharedPtr<SWidget> FHittestGrid::FindFocusableWidget(FSlateRect WidgetRect, const FSlateRect SweptRect, int32 AxisIndex, int32 Increment, const EUINavigation Direction, const FNavigationReply& NavigationReply, TCompareFunc CompareFunc, TSourceSideFunc SourceSideFunc, TDestSideFunc DestSideFunc, int32 UserIndex, TArray<FDebuggingFindNextFocusableWidgetArgs::FWidgetResult>* IntermediateResultsPtr) const
+TSharedPtr<SWidget> FHittestGrid::FindFocusableWidget(FSlateRect WidgetRect, const FSlateRect SweptRect, int32 AxisIndex, int32 Increment, const EUINavigation Direction, const FNavigationReply& NavigationReply, TCompareFunc CompareFunc, TSourceSideFunc SourceSideFunc, TDestSideFunc DestSideFunc, int32 UserIndex, TArray<FDebuggingFindNextFocusableWidgetArgs::FWidgetResult>* IntermediateResultsPtr, TSet<TSharedPtr<SWidget>>* DisabledDestinations) const
 {
 	FIntPoint CurrentCellPoint = GetCellCoordinate(WidgetRect.GetCenter());
 
@@ -391,7 +429,7 @@ TSharedPtr<SWidget> FHittestGrid::FindFocusableWidget(FSlateRect WidgetRect, con
 				// If we have a non escape boundary condition and this widget isn't a descendant of our boundary condition widget then it's invalid so we keep looking.
 				if (NavigationReply.GetBoundaryRule() != EUINavigationRule::Escape
 					&& NavigationReply.GetHandler().IsValid()
-					&& !IsDescendantOf(NavigationReply.GetHandler().ToSharedRef(), TestCandidate))
+					&& !IsDescendantOf(NavigationReply.GetHandler().Get(), TestCandidate))
 				{
 					AddToNextFocusableWidgetCondidateDebugResults(TestWidget, HittestGridDebuggingText::NotADescendant);
 					continue;
@@ -406,6 +444,12 @@ TSharedPtr<SWidget> FHittestGrid::FindFocusableWidget(FSlateRect WidgetRect, con
 				if (!TestWidget->SupportsKeyboardFocus())
 				{
 					AddToNextFocusableWidgetCondidateDebugResults(TestWidget, HittestGridDebuggingText::DoesNotSuportKeyboardFocus);
+					continue;
+				}
+
+				if (DisabledDestinations->Contains(TestWidget))
+				{
+					AddToNextFocusableWidgetCondidateDebugResults(TestWidget, HittestGridDebuggingText::ParentDisabled);
 					continue;
 				}
 
@@ -438,7 +482,7 @@ TSharedPtr<SWidget> FHittestGrid::FindFocusableWidget(FSlateRect WidgetRect, con
 					return TSharedPtr<SWidget>();
 				case EUINavigationRule::Wrap:
 					CurrentSourceSide = DestSideFunc(SweptRect);
-					FVector2D SampleSpot = WidgetRect.GetCenter();
+					FVector2f SampleSpot = WidgetRect.GetCenter();
 					SampleSpot[AxisIndex] = CurrentSourceSide;
 					CurrentCellPoint = GetCellCoordinate(SampleSpot);
 					bWrapped = true;
@@ -446,7 +490,18 @@ TSharedPtr<SWidget> FHittestGrid::FindFocusableWidget(FSlateRect WidgetRect, con
 				}
 			}
 
-			return BestWidget;
+			// Make sure all parents of the chosen widget are enabled before returning.
+			// Note that IsParentsEnabled is a costly function. We call it here as the last step to minimize the number of calls to it.
+			if (!UE::Slate::Private::IsParentsEnabled(BestWidget.Get()))
+			{	
+				// Find the next best widget because this one has disabled parents.
+				DisabledDestinations->Add(BestWidget);
+				return FindFocusableWidget(WidgetRect, SweptRect, AxisIndex, Increment, Direction, NavigationReply, CompareFunc, SourceSideFunc, DestSideFunc, UserIndex, IntermediateResultsPtr, DisabledDestinations);
+			}
+			else
+			{
+				return BestWidget;
+			}
 		}
 
 		// break if we have looped back to where we started.
@@ -463,7 +518,7 @@ TSharedPtr<SWidget> FHittestGrid::FindFocusableWidget(FSlateRect WidgetRect, con
 					break;
 				}
 				CurrentSourceSide = DestSideFunc(SweptRect);
-				FVector2D SampleSpot = WidgetRect.GetCenter();
+				FVector2f SampleSpot = WidgetRect.GetCenter();
 				SampleSpot[AxisIndex] = CurrentSourceSide;
 				CurrentCellPoint = GetCellCoordinate(SampleSpot);
 				bWrapped = true;
@@ -505,6 +560,8 @@ TSharedPtr<SWidget> FHittestGrid::FindNextFocusableWidget(const FArrangedWidget&
 	TArray<FDebuggingFindNextFocusableWidgetArgs::FWidgetResult>* IntermediateResultsPtr = nullptr;
 #endif
 
+	TSet<TSharedPtr<SWidget>> DisabledDestinations = TSet<TSharedPtr<SWidget>>();
+
 	switch (Direction)
 	{
 	case EUINavigation::Left:
@@ -516,7 +573,7 @@ TSharedPtr<SWidget> FHittestGrid::FindNextFocusableWidget(const FArrangedWidget&
 			[](float A, float B) { return A - 0.1f < B; }, // Compare function
 			[](FSlateRect SourceRect) { return SourceRect.Left; }, // Source side function
 			[](FSlateRect DestRect) { return DestRect.Right; }, // Dest side function
-			UserIndex, IntermediateResultsPtr);
+			UserIndex, IntermediateResultsPtr, &DisabledDestinations);
 		break;
 	case EUINavigation::Right:
 		SweptWidgetRect.Left = BoundingRuleRect.Left;
@@ -527,7 +584,7 @@ TSharedPtr<SWidget> FHittestGrid::FindNextFocusableWidget(const FArrangedWidget&
 			[](float A, float B) { return A + 0.1f > B; }, // Compare function
 			[](FSlateRect SourceRect) { return SourceRect.Right; }, // Source side function
 			[](FSlateRect DestRect) { return DestRect.Left; }, // Dest side function
-			UserIndex, IntermediateResultsPtr);
+			UserIndex, IntermediateResultsPtr, &DisabledDestinations);
 		break;
 	case EUINavigation::Up:
 		SweptWidgetRect.Top = BoundingRuleRect.Top;
@@ -538,7 +595,7 @@ TSharedPtr<SWidget> FHittestGrid::FindNextFocusableWidget(const FArrangedWidget&
 			[](float A, float B) { return A - 0.1f < B; }, // Compare function
 			[](FSlateRect SourceRect) { return SourceRect.Top; }, // Source side function
 			[](FSlateRect DestRect) { return DestRect.Bottom; }, // Dest side function
-			UserIndex, IntermediateResultsPtr);
+			UserIndex, IntermediateResultsPtr, &DisabledDestinations);
 		break;
 	case EUINavigation::Down:
 		SweptWidgetRect.Top = BoundingRuleRect.Top;
@@ -549,7 +606,7 @@ TSharedPtr<SWidget> FHittestGrid::FindNextFocusableWidget(const FArrangedWidget&
 			[](float A, float B) { return A + 0.1f > B; }, // Compare function
 			[](FSlateRect SourceRect) { return SourceRect.Bottom; }, // Source side function
 			[](FSlateRect DestRect) { return DestRect.Top; }, // Dest side function
-			UserIndex, IntermediateResultsPtr);
+			UserIndex, IntermediateResultsPtr, &DisabledDestinations);
 		break;
 
 	default:
@@ -567,7 +624,7 @@ TSharedPtr<SWidget> FHittestGrid::FindNextFocusableWidget(const FArrangedWidget&
 	return Widget;
 }
 
-FIntPoint FHittestGrid::GetCellCoordinate(FVector2D Position) const
+FIntPoint FHittestGrid::GetCellCoordinate(UE::Slate::FDeprecateVector2DParameter Position) const
 {
 	return FIntPoint(
 		FMath::Min(FMath::Max(FMath::FloorToInt(Position.X / CellSize.X), 0), NumCells.X - 1),
@@ -670,17 +727,25 @@ bool FHittestGrid::SameSize(const FHittestGrid* OtherGrid) const
 
 void FHittestGrid::AddWidget(const TSharedRef<SWidget>& InWidget, int32 InBatchPriorityGroup, int32 InLayerId, int32 InSecondarySort)
 {
-	AddWidget(InWidget, InBatchPriorityGroup, InLayerId, FSlateInvalidationWidgetSortOrder());
+	AddWidget(&(InWidget.Get()), InBatchPriorityGroup, InLayerId, FSlateInvalidationWidgetSortOrder());
 }
 
 void FHittestGrid::AddWidget(const TSharedRef<SWidget>& InWidget, int32 InBatchPriorityGroup, int32 InLayerId, FSlateInvalidationWidgetSortOrder InSecondarySort)
 {
+	AddWidget(&(InWidget.Get()), InBatchPriorityGroup, InLayerId, InSecondarySort);
+}
+
+void FHittestGrid::AddWidget(const SWidget* InWidget, int32 InBatchPriorityGroup, int32 InLayerId, FSlateInvalidationWidgetSortOrder InSecondarySort)
+{
+	check(InWidget);
 	if (!InWidget->GetVisibility().IsHitTestVisible())
 	{
 		return;
 	}
 
+#if UE_SLATE_ENABLE_HITTEST_STATS
 	SCOPE_CYCLE_COUNTER(STAT_SlateHTG_AddWidget);
+#endif
 
 	// Track the widget and identify it's Widget Index
 	FGeometry GridSpaceGeometry = InWidget->GetPaintSpaceGeometry();
@@ -696,7 +761,7 @@ void FHittestGrid::AddWidget(const TSharedRef<SWidget>& InWidget, int32 InBatchP
 	const int64 PrimarySort = (((int64)InBatchPriorityGroup << 32) | InLayerId);
 
 	bool bAddWidget = true;
-	if (int32* FoundIndex = WidgetMap.Find(&*InWidget))
+	if (int32* FoundIndex = WidgetMap.Find(InWidget))
 	{
 		FWidgetData& WidgetData = WidgetArray[*FoundIndex];
 		if (WidgetData.UpperLeftCell != UpperLeftCell || WidgetData.LowerRightCell != LowerRightCell)
@@ -716,8 +781,8 @@ void FHittestGrid::AddWidget(const TSharedRef<SWidget>& InWidget, int32 InBatchP
 
 	if (bAddWidget)
 	{
-		int32& WidgetIndex = WidgetMap.Add(&*InWidget);
-		WidgetIndex = WidgetArray.Emplace(InWidget, UpperLeftCell, LowerRightCell, PrimarySort, InSecondarySort, CurrentUserIndex);
+		int32& WidgetIndex = WidgetMap.Add(InWidget);
+		WidgetIndex = WidgetArray.Emplace(const_cast<SWidget*>(InWidget)->AsShared(), UpperLeftCell, LowerRightCell, PrimarySort, InSecondarySort, CurrentUserIndex);
 		for (int32 XIndex = UpperLeftCell.X; XIndex <= LowerRightCell.X; ++XIndex)
 		{
 			for (int32 YIndex = UpperLeftCell.Y; YIndex <= LowerRightCell.Y; ++YIndex)
@@ -738,7 +803,9 @@ void FHittestGrid::RemoveWidget(const TSharedRef<SWidget>& InWidget)
 
 void FHittestGrid::RemoveWidget(const SWidget* InWidget)
 {
+#if UE_SLATE_ENABLE_HITTEST_STATS
 	SCOPE_CYCLE_COUNTER(STAT_SlateHTG_RemoveWidget);
+#endif
 
 	int32 WidgetIndex = INDEX_NONE;
 	if (WidgetMap.RemoveAndCopyValue(InWidget, WidgetIndex))
@@ -766,17 +833,36 @@ void FHittestGrid::RemoveWidget(const SWidget* InWidget)
 
 void FHittestGrid::UpdateWidget(const TSharedRef<SWidget>& InWidget, FSlateInvalidationWidgetSortOrder InSecondarySort)
 {
-	if (int32* FoundWidgetIndex = WidgetMap.Find(&*InWidget))
+	UpdateWidget(&(InWidget.Get()), InSecondarySort);
+}
+
+void FHittestGrid::UpdateWidget(const SWidget* InWidget, FSlateInvalidationWidgetSortOrder InSecondarySort)
+{
+	check(InWidget);
+	if (int32* FoundWidgetIndex = WidgetMap.Find(InWidget))
 	{
 		WidgetArray[*FoundWidgetIndex].SecondarySort = InSecondarySort;
 	}
 }
 
+bool FHittestGrid::ContainsWidget(const SWidget* InWidget) const
+{
+	return WidgetMap.Contains(InWidget);
+}
+
 void FHittestGrid::InsertCustomHitTestPath(const TSharedRef<SWidget> InWidget, TSharedRef<ICustomHitTestPath> CustomHitTestPath)
 {
-	int32 WidgetIndex = WidgetMap.FindChecked(&*InWidget);
-	FWidgetData& WidgetData = WidgetArray[WidgetIndex];
-	WidgetData.CustomPath = CustomHitTestPath;
+	InsertCustomHitTestPath(&InWidget.Get(), CustomHitTestPath);
+}
+
+void FHittestGrid::InsertCustomHitTestPath(const SWidget* InWidget, const TSharedRef<ICustomHitTestPath>& CustomHitTestPath)
+{
+	int32* WidgetIndex = WidgetMap.Find(InWidget);
+	if (ensureMsgf(WidgetIndex, TEXT("The widget is not in the hittest grid.")))
+	{
+		FWidgetData& WidgetData = WidgetArray[*WidgetIndex];
+		WidgetData.CustomPath = CustomHitTestPath;
+	}
 }
 
 FHittestGrid::FIndexAndDistance FHittestGrid::GetHitIndexFromCellIndex(const FGridTestingParams& Params) const
@@ -820,7 +906,7 @@ FHittestGrid::FIndexAndDistance FHittestGrid::GetHitIndexFromCellIndex(const FGr
 			const bool bIsValidWidget = TestWidget.IsValid() && (!Params.bTestWidgetIsInteractive || TestWidget->IsInteractable());
 			if (bIsValidWidget)
 			{
-				const FVector2D WindowSpaceCoordinate = Params.CursorPositionInGrid + GridWindowOrigin;
+				const FVector2f WindowSpaceCoordinate = Params.CursorPositionInGrid + GridWindowOrigin;
 
 				const FGeometry& TestGeometry = TestWidget->GetPaintSpaceGeometry();
 
@@ -891,8 +977,9 @@ FHittestGrid::FIndexAndDistance FHittestGrid::GetHitIndexFromCellIndex(const FGr
 #define UE_VERIFY_WIDGET_VALIDITE 0
  void FHittestGrid::GetCollapsedWidgets(FCollapsedWidgetsArray& OutResult, const int32 X, const int32 Y) const
  {
+#if UE_SLATE_ENABLE_HITTEST_STATS
 	 SCOPE_CYCLE_COUNTER(STAT_SlateHTG_GetCollapsedWidgets);
-
+#endif
 	 const int32 CellIndex = Y * NumCells.X + X;
 	 check(Cells.IsValidIndex(CellIndex));
 
@@ -983,7 +1070,7 @@ void FHittestGrid::LogGrid() const
 	{
 		const FWidgetData& CurWidgetData = *It;
 		const TSharedPtr<SWidget> CachedWidget = CurWidgetData.GetWidget();
-		UE_LOG(LogHittestDebug, Warning, TEXT("  [%d][%d][%d] => %s @ %s"),
+		UE_LOG(LogHittestDebug, Warning, TEXT("  [%d][%lld] => %s @ %s"),
 			It.GetIndex(),
 			CurWidgetData.PrimarySort,
 			CachedWidget.IsValid() ? *CachedWidget->ToString() : TEXT("Invalid Widget"),
@@ -1084,3 +1171,4 @@ TArray<FHittestGrid::FWidgetSortData> FHittestGrid::GetAllWidgetSortDatas() cons
 
 #undef UE_SLATE_HITTESTGRID_ARRAYSIZEMAX
 #undef LOCTEXT_NAMESPACE
+#undef UE_SLATE_ENABLE_HITTEST_STATS

@@ -2,12 +2,21 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "CoreTypes.h"
+#include "Misc/EngineVersion.h"
 #include "Misc/Guid.h"
 #include "Serialization/CustomVersion.h"
-#include "Misc/EngineVersion.h"
 #include "Serialization/StructuredArchive.h"
+#include "UObject/ObjectVersion.h"
 
+#if WITH_EDITORONLY_DATA
+#include "IO/IoHash.h"
+#endif
+
+class FArchive;
 struct FCompressedChunk;
 
 /*----------------------------------------------------------------------------
@@ -51,12 +60,17 @@ struct FPackageFileSummary
 	int32		Tag;
 
 private:
-	/* UE4 file version */
-	int32		FileVersionUE4;
+	/* UE file version */
+	FPackageFileVersion FileVersionUE;
 	/* Licensee file version */
-	int32		FileVersionLicenseeUE4;
+	int32		FileVersionLicenseeUE;
 	/* Custom version numbers. Keyed off a unique tag for each custom component. */
 	FCustomVersionContainer CustomVersionContainer;
+
+	/**
+	 * The flags for the package
+	 */
+	uint32	PackageFlags;
 
 public:
 	/**
@@ -66,14 +80,9 @@ public:
 	int32		TotalHeaderSize;
 
 	/**
-	* The flags for the package
+	* The package name the file was last saved with.
 	*/
-	uint32	PackageFlags;
-
-	/**
-	* The Generic Browser folder name that this package lives in
-	*/
-	FString	FolderName;
+	FString	PackageName;
 
 	/**
 	* Number of names used in this package
@@ -84,6 +93,17 @@ public:
 	* Location into the file on disk for the name data
 	*/
 	int32 	NameOffset;
+
+	/**
+	* Number of soft object paths references contained in this package
+	* @note: the soft object path lists slightly duplicate information found in the SoftPackageReferences list
+	*/
+	int32		SoftObjectPathsCount;
+
+	/**
+	* Location into the file on disk for the soft object paths reference list
+	*/
+	int32		SoftObjectPathsOffset;
 
 	/**
 	* Localization ID of this package
@@ -146,10 +166,7 @@ public:
 	*/
 	int32		ThumbnailTableOffset;
 
-	/**
-	* Current id for this package
-	*/
-	UE_DEPRECATED(4.27, "UPackage::Guid has not been used by the engine for a long time and FPackageFileSummary::Guid will be removed.")
+	UE_DEPRECATED(5.4, "Use GetSavedHash/SetSavedHash instead.")
 	FGuid	Guid;
 
 #if WITH_EDITORONLY_DATA
@@ -215,25 +232,52 @@ public:
 	*/
 	int32		PreloadDependencyOffset;
 
+	/**
+	* Number of names that are referenced from serialized export data (sorted first in the name map)
+	*/
+	int32		NamesReferencedFromExportDataCount;
+	
+	/**
+	* Location into the file on disk for the payload table of contents data
+	*/
+	int64		PayloadTocOffset;
+	
+	/**
+	* Location into the file of the data resource(s)
+	*/
+	int32		DataResourceOffset;
+
 	/** Constructor */
 	COREUOBJECT_API FPackageFileSummary();
 
-	// Workaround for clang deprecation warnings for deprecated Guid member in implicit constructors
+	// Workaround for clang deprecation warnings for deprecated members in implicit constructors
 	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	FPackageFileSummary(FPackageFileSummary&&) = default;
 	FPackageFileSummary(const FPackageFileSummary&) = default;
 	FPackageFileSummary& operator=(FPackageFileSummary&&) = default;
 	FPackageFileSummary& operator=(const FPackageFileSummary&) = default;
 	PRAGMA_ENABLE_DEPRECATION_WARNINGS
-
-	int32 GetFileVersionUE4() const
+	
+	FPackageFileVersion GetFileVersionUE() const
 	{
-		return FileVersionUE4;
+		return FileVersionUE;
 	}
 
+	UE_DEPRECATED(5.0, "Use UEVer instead which returns the version as a FPackageFileVersion. See the @FPackageFileVersion documentation for further details")
+	int32 GetFileVersionUE4() const
+	{
+		return FileVersionUE.FileVersionUE4;
+	}
+
+	int32 GetFileVersionLicenseeUE() const
+	{
+		return FileVersionLicenseeUE;
+	}
+
+	UE_DEPRECATED(5.0, "Use GetFileVersionLicenseeUE instead")
 	int32 GetFileVersionLicenseeUE4() const
 	{
-		return FileVersionLicenseeUE4;
+		return GetFileVersionLicenseeUE();
 	}
 
 	const FCustomVersionContainer& GetCustomVersionContainer() const
@@ -243,15 +287,70 @@ public:
 
 	void SetCustomVersionContainer(const FCustomVersionContainer& InContainer);
 
-	void SetFileVersions(const int32 EpicUE4, const int32 LicenseeUE4, const bool bInSaveUnversioned = false)
+	/** Used to manually set the package file and licensee versions */
+	COREUOBJECT_API void SetFileVersions(const int32 EpicUE4, const int32 EpicUE5, const int32 LicenseeUE, const bool bInSaveUnversioned = false);
+	
+	UE_DEPRECATED(5.0, "Use the other overload of SetFileVersions that takes an UE5 version as well")
+	inline void SetFileVersions(const int32 EpicUE, const int32 LicenseeUE, const bool bInSaveUnversioned = false)
 	{
-		FileVersionUE4 = EpicUE4;
-		FileVersionLicenseeUE4 = LicenseeUE4;
+		SetFileVersions(EpicUE, GPackageFileUEVersion.FileVersionUE5, LicenseeUE, bInSaveUnversioned);
+	}
+
+	/** Set both the package file versions and the licensee version to the most recent version numbers supported */
+	void SetToLatestFileVersions(const bool bInSaveUnversioned)
+	{
+		FileVersionUE = GPackageFileUEVersion;
+		FileVersionLicenseeUE = GPackageFileLicenseeUEVersion;
+
 		bUnversioned = bInSaveUnversioned;
 	}
+
+	/** Returns true if any of the package file versions are older than the minimum supported versions */
+	bool IsFileVersionTooOld() const
+	{
+		return FileVersionUE < VER_UE4_OLDEST_LOADABLE_PACKAGE;
+	}
+
+	/** Returns true if any of the package file versions are newer than currently supported by the running process */
+	bool IsFileVersionTooNew() const
+	{
+		return FileVersionUE.FileVersionUE4 > GPackageFileUEVersion.FileVersionUE4 || FileVersionUE.FileVersionUE5 > GPackageFileUEVersion.FileVersionUE5;
+	}
+
+	/** 
+	 * Returns false if the summary is unversioned and the current process does not support that. 
+	 * If this returns false and the summary was loaded from disk then the serialization of the summary was aborted early!
+	 */
+	COREUOBJECT_API bool IsFileVersionValid() const;
+
+	/** Get the summary package flags. */
+	uint32 GetPackageFlags() const
+	{
+		return PackageFlags;
+	}
+
+	/** Set the summary package flags while stripping out temporary flags (i.e. NewlyCreated, IsSaving) */
+	void SetPackageFlags(uint32 InPackageFlags);
+
+#if WITH_EDITORONLY_DATA
+	/** Hash of the package's .uasset/.umap file when it was last saved by the editor. */
+	COREUOBJECT_API FIoHash GetSavedHash() const;
+	COREUOBJECT_API void SetSavedHash(const FIoHash& InSavedHash);
+#endif
 
 	/** I/O functions */
 	friend COREUOBJECT_API FArchive& operator<<(FArchive& Ar, FPackageFileSummary& Sum);
 	friend COREUOBJECT_API void operator<<(FStructuredArchive::FSlot Slot, FPackageFileSummary& Sum);
-};
 
+private:
+
+	/** 
+	 * Set the UE4 version to below the oldest loadable version. This is used when an error is encountered during serialization 
+	 * and we need to prevent the use of the package. When calling this make sure you log a warning with the 'LogLinker' category
+	 * to inform the user of the problem.
+	 */
+	void InvalidateFileVersion()
+	{
+		FileVersionUE = FPackageFileVersion::CreateUE4Version((EUnrealEngineObjectUE4Version)(VER_UE4_OLDEST_LOADABLE_PACKAGE - 1));
+	}
+};

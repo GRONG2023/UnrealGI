@@ -7,33 +7,40 @@
 #include "Perception/AISense.h"
 #include "AISense_Touch.generated.h"
 
+class IAIPerceptionListenerInterface;
 class UAISense_Touch;
+class UAISenseConfig_Touch;
 
 USTRUCT()
-struct AIMODULE_API FAITouchEvent
+struct FAITouchEvent
 {	
 	GENERATED_USTRUCT_BODY()
 
 	typedef UAISense_Touch FSenseClass;
 
-	FVector Location;
+	FVector Location = FVector::ZeroVector;
 	
 	UPROPERTY()
-	AActor* TouchReceiver;
+	TObjectPtr<AActor> TouchReceiver;
 
 	UPROPERTY()
-	AActor* OtherActor;
+	TObjectPtr<AActor> OtherActor;
+
+	FGenericTeamId TeamIdentifier = FGenericTeamId::NoTeam;
 		
-	FAITouchEvent() : TouchReceiver(nullptr), OtherActor(nullptr) {}
+	FAITouchEvent() = default;
 	
 	FAITouchEvent(AActor* InTouchReceiver, AActor* InOtherActor, const FVector& EventLocation)
 		: Location(EventLocation), TouchReceiver(InTouchReceiver), OtherActor(InOtherActor)
 	{
+		TeamIdentifier = FGenericTeamId::GetTeamIdentifier(InOtherActor);
 	}
+
+	AIMODULE_API IAIPerceptionListenerInterface* GetTouchedActorAsPerceptionListener() const;
 };
 
-UCLASS(ClassGroup=AI)
-class AIMODULE_API UAISense_Touch : public UAISense
+UCLASS(ClassGroup=AI, MinimalAPI)
+class UAISense_Touch : public UAISense
 {
 	GENERATED_UCLASS_BODY()
 
@@ -41,8 +48,26 @@ class AIMODULE_API UAISense_Touch : public UAISense
 	TArray<FAITouchEvent> RegisteredEvents;
 
 public:		
-	void RegisterEvent(const FAITouchEvent& Event);	
+	AIMODULE_API void RegisterEvent(const FAITouchEvent& Event);	
+
+	UFUNCTION(BlueprintCallable, Category = "AI|Perception", meta = (WorldContext = "WorldContextObject"))
+	static AIMODULE_API void ReportTouchEvent(UObject* WorldContextObject, AActor* TouchReceiver, AActor* OtherActor, FVector Location);
 
 protected:
-	virtual float Update() override;
+	
+	struct FDigestedTouchProperties
+	{
+		uint8 AffiliationFlags;
+
+		FDigestedTouchProperties(const UAISenseConfig_Touch& SenseConfig);
+		FDigestedTouchProperties();
+	};
+	TMap<FPerceptionListenerID, FDigestedTouchProperties> DigestedProperties;
+
+	
+	AIMODULE_API virtual float Update() override;
+	
+	AIMODULE_API void OnNewListenerImpl(const FPerceptionListener& NewListener);
+	AIMODULE_API void OnListenerUpdateImpl(const FPerceptionListener& UpdatedListener);
+	AIMODULE_API void OnListenerRemovedImpl(const FPerceptionListener& RemovedListener);
 };

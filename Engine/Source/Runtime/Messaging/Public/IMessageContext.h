@@ -335,6 +335,7 @@ public:
 	 * @return Message type name.
 	 * @see GetMessage, GetMessageTypeInfo
 	 */
+	UE_DEPRECATED(5.1, "Type names are now represented by path names. Please use GetMessageTypePathName.")
 	FName GetMessageType() const
 	{
 		if (IsValid())
@@ -344,6 +345,23 @@ public:
 		}
 		
 		return NAME_None;
+	}
+
+	/**
+	 * Gets the path name of the message type.
+	 *
+	 * @return Message type path name.
+	 * @see GetMessage, GetMessageTypeInfo
+	 */
+	FTopLevelAssetPath GetMessageTypePathName() const
+	{
+		if (IsValid())
+		{
+			UStruct* MessageTypeInfoPtr = GetMessageTypeInfo().Get();
+			return MessageTypeInfoPtr->GetStructPathName();
+		}
+
+		return FTopLevelAssetPath();
 	}
 
 	/**
@@ -373,12 +391,3 @@ public:
 	/** Virtual destructor. */
 	virtual ~IMessageContext() { }
 };
-
-
-/** Type definition for shared pointers to instances of IMessageContext. */
-UE_DEPRECATED(4.16, "IMessageContextPtr is deprecated. Please use 'TSharedPtr<IMessageContext, ESPMode::ThreadSafe>' instead!")
-typedef TSharedPtr<IMessageContext, ESPMode::ThreadSafe> IMessageContextPtr;
-
-/** Type definition for shared references to instances of IMessageContext. */
-UE_DEPRECATED(4.16, "IMessageContextRef is deprecated. Please use 'TSharedRef<IMessageContext, ESPMode::ThreadSafe>' instead!")
-typedef TSharedRef<IMessageContext, ESPMode::ThreadSafe> IMessageContextRef;

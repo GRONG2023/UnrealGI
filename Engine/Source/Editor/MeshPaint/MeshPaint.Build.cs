@@ -25,25 +25,15 @@ public class MeshPaint : ModuleRules
                 "RHI",
                 "Slate",
 				"SlateCore",
-                "EditorStyle",
-                "UnrealEd",
+				"EditorFramework",
+				"UnrealEd",
                 "MeshDescription",
 				"StaticMeshDescription",
                 "SourceControl",
-                "ViewportInteraction",
-                "VREditor",
                 "PropertyEditor",
                 "MainFrame",
             }
         );
-
-		CircularlyReferencedDependentModules.AddRange(
-			new string[]
-			{
-				"ViewportInteraction",
-				"VREditor"
-			}
-		);
 
 		PrivateIncludePathModuleNames.AddRange(
 			new string[]

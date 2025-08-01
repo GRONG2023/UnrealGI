@@ -2,12 +2,12 @@
 
 #pragma once
 
-#if WITH_CHAOS
-
 #include "CoreMinimal.h"
 #include "DerivedDataPluginInterface.h"
 #include "UObject/GCObject.h"
 #include "Interface_CollisionDataProviderCore.h"
+#include "Templates/UniquePtr.h"
+#include "UObject/ObjectPtr.h"
 
 struct FBodySetupUVInfo;
 struct FCookBodySetupInfo;
@@ -37,7 +37,7 @@ struct FChaosConvexMeshCollisionBuildParameters
 	bool bMirror;
 };
 
-class FChaosDerivedDataCooker : public FDerivedDataPluginInterface, public FGCObject
+class FChaosDerivedDataCooker : public FDerivedDataPluginInterface
 {
 public:
 
@@ -49,13 +49,10 @@ public:
 	virtual FString GetPluginSpecificCacheKeySuffix() const override;
 	virtual bool IsBuildThreadsafe() const override;
 	virtual bool Build(TArray<uint8>& OutData) override;
+	virtual FString GetDebugContextString() const override;
 	//End FDerivedDataPluginInterface Interface
 
-	// FGCObject Interface
-	virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
-	// End FGCObject Interface
-
-	FChaosDerivedDataCooker(UBodySetup* InSetup, FName InFormat);
+	FChaosDerivedDataCooker(UBodySetup* InSetup, FName InFormat, bool bUseRefHolder = true);
 
 	bool CanBuild()
 	{
@@ -63,9 +60,10 @@ public:
 	}
 
 private:
-	UBodySetup* Setup;
+	friend class FChaosDerivedDataCookerRefHolder;
+	TObjectPtr<UBodySetup> Setup;
 	FName RequestedFormat;
+	TUniquePtr<FGCObject> RefHolder;
 };
 
 
-#endif

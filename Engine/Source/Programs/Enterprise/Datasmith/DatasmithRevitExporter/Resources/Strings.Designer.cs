@@ -61,6 +61,24 @@ namespace DatasmithRevitResources {
         }
         
         /// <summary>
+        ///   Looks up a localized string similar to Toggle Auto Sync.
+        /// </summary>
+        public static string ButtonAutoSync {
+            get {
+                return ResourceManager.GetString("ButtonAutoSync", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Toggle Direct Link Auto Sync.
+        /// </summary>
+        public static string ButtonAutoSyncHint {
+            get {
+                return ResourceManager.GetString("ButtonAutoSyncHint", resourceCulture);
+            }
+        }
+        
+        /// <summary>
         ///   Looks up a localized string similar to Connections.
         /// </summary>
         public static string ButtonConnections {
@@ -97,7 +115,7 @@ namespace DatasmithRevitResources {
         }
         
         /// <summary>
-        ///   Looks up a localized string similar to Datasmith Messages.
+        ///   Looks up a localized string similar to Messages.
         /// </summary>
         public static string ButtonMessages {
             get {
@@ -111,6 +129,24 @@ namespace DatasmithRevitResources {
         public static string ButtonMessagesHint {
             get {
                 return ResourceManager.GetString("ButtonMessagesHint", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Settings.
+        /// </summary>
+        public static string ButtonSettings {
+            get {
+                return ResourceManager.GetString("ButtonSettings", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Show Settings.
+        /// </summary>
+        public static string ButtonSettingsHint {
+            get {
+                return ResourceManager.GetString("ButtonSettingsHint", resourceCulture);
             }
         }
         
@@ -147,24 +183,6 @@ namespace DatasmithRevitResources {
         public static string ExportOptionsDialog_ButtonOK {
             get {
                 return ResourceManager.GetString("ExportOptionsDialog_ButtonOK", resourceCulture);
-            }
-        }
-        
-        /// <summary>
-        ///   Looks up a localized string similar to Level of Tessellation.
-        /// </summary>
-        public static string ExportOptionsDialog_LevelOfTesselation {
-            get {
-                return ResourceManager.GetString("ExportOptionsDialog_LevelOfTesselation", resourceCulture);
-            }
-        }
-        
-        /// <summary>
-        ///   Looks up a localized string similar to -1 :\tRevit will use its default algorithm, which is based on output resolution.\n0 to 15 :\tRevit will use the suggested level of detail when tessellating faces.\n\tUsing a value close to the middle of the range yields a very reasonable tessellation.\n\tRevit uses level 8 as its &apos;normal&apos; level of detail..
-        /// </summary>
-        public static string ExportOptionsDialog_LevelOfTesselationTooltip {
-            get {
-                return ResourceManager.GetString("ExportOptionsDialog_LevelOfTesselationTooltip", resourceCulture);
             }
         }
         
@@ -264,6 +282,123 @@ namespace DatasmithRevitResources {
         public static string RibbonSection_FileExport {
             get {
                 return ResourceManager.GetString("RibbonSection_FileExport", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Add Groups.
+        /// </summary>
+        public static string SettingsDialog_AddGroupsDialogTitle {
+            get {
+                return ResourceManager.GetString("SettingsDialog_AddGroupsDialogTitle", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Add Group....
+        /// </summary>
+        public static string SettingsDialog_ButtonAddGroups {
+            get {
+                return ResourceManager.GetString("SettingsDialog_ButtonAddGroups", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Close.
+        /// </summary>
+        public static string SettingsDialog_ButtonClose {
+            get {
+                return ResourceManager.GetString("SettingsDialog_ButtonClose", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Remove Selected.
+        /// </summary>
+        public static string SettingsDialog_ButtonRemoveGroups {
+            get {
+                return ResourceManager.GetString("SettingsDialog_ButtonRemoveGroups", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Datasmith Export Settings.
+        /// </summary>
+        public static string SettingsDialog_DialogTitle {
+            get {
+                return ResourceManager.GetString("SettingsDialog_DialogTitle", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Insertion Point.
+        /// </summary>
+        public static string SettingsDialog_InsertionPoint {
+            get {
+                return ResourceManager.GetString("SettingsDialog_InsertionPoint", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Change world origin for all exported elements.
+        /// </summary>
+        public static string SettingsDialog_InsertionPointTooltip {
+            get {
+                return ResourceManager.GetString("SettingsDialog_InsertionPointTooltip", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Metadata Export Filter.
+        /// </summary>
+        public static string SettingsDialog_LabelMatchGroups {
+            get {
+                return ResourceManager.GetString("SettingsDialog_LabelMatchGroups", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Match Parameter Names.
+        /// </summary>
+        public static string SettingsDialog_LabelMatchParamNames {
+            get {
+                return ResourceManager.GetString("SettingsDialog_LabelMatchParamNames", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Specify parameters (medata) export filter that will be used during DirectLink synchronization. Only parameters that match the filter will be exported as metadata..
+        /// </summary>
+        public static string SettingsDialog_LabelMetadataDescription {
+            get {
+                return ResourceManager.GetString("SettingsDialog_LabelMetadataDescription", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Level of Tessellation.
+        /// </summary>
+        public static string SettingsDialog_LevelOfTesselation {
+            get {
+                return ResourceManager.GetString("SettingsDialog_LevelOfTesselation", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to 1 to 15 : Revit will use the suggested level of detail when tessellating faces.\nUsing a value close to the middle of the range yields a very reasonable tessellation.\nRevit uses level 8 as its &apos;normal&apos; level of detail..
+        /// </summary>
+        public static string SettingsDialog_LevelOfTesselationTooltip {
+            get {
+                return ResourceManager.GetString("SettingsDialog_LevelOfTesselationTooltip", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Filter what metadata to export by adding allowed paramter groups..
+        /// </summary>
+        public static string SettingsDialog_MetadataFilterTooltip {
+            get {
+                return ResourceManager.GetString("SettingsDialog_MetadataFilterTooltip", resourceCulture);
             }
         }
     }

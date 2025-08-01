@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "SDeviceBrowserDeviceAdder.h"
+#include "Widgets/Browser/SDeviceBrowserDeviceAdder.h"
 
 #include "Internationalization/Text.h"
 #include "ITargetDeviceServiceManager.h"
@@ -10,7 +10,7 @@
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SEditableTextBox.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Interfaces/ITargetPlatform.h"
 #include "Interfaces/ITargetPlatformManagerModule.h"
 #include "Interfaces/IDeviceManagerCustomPlatformWidgetCreator.h"
@@ -61,7 +61,7 @@ void SDeviceBrowserDeviceAdder::Construct(const FArguments& InArgs, const TShare
 
 	// callback for generating widgets for the platforms combo box
 	auto PlatformComboBoxGenerateWidget = [this](TSharedPtr<FString> Item) -> TSharedRef<SWidget> {
-		const PlatformInfo::FPlatformInfo* const PlatformInfo = PlatformInfo::FindPlatformInfo(**Item);
+		const PlatformInfo::FTargetPlatformInfo* const PlatformInfo = PlatformInfo::FindPlatformInfo(**Item);
 
 		return
 			SNew(SHorizontalBox)
@@ -71,11 +71,11 @@ void SDeviceBrowserDeviceAdder::Construct(const FArguments& InArgs, const TShare
 				.HAlign(HAlign_Left)
 				[
 					SNew(SBox)
-						.WidthOverride(24)
-						.HeightOverride(24)
+						.WidthOverride(24.f)
+						.HeightOverride(24.f)
 						[
 							SNew(SImage)
-								.Image((PlatformInfo) ? FEditorStyle::GetBrush(PlatformInfo->GetIconStyleName(PlatformInfo::EPlatformIconSize::Normal)) : FStyleDefaults::GetNoBrush())
+								.Image((PlatformInfo) ? FAppStyle::GetBrush(PlatformInfo->GetIconStyleName(EPlatformIconSize::Normal)) : FStyleDefaults::GetNoBrush())
 						]
 				]
 

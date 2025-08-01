@@ -2,6 +2,9 @@
 
 #include "Models/TextureEditorCommands.h"
 
+#include "Framework/Commands/InputChord.h"
+#include "Framework/Commands/UICommandInfo.h"
+
 #define LOCTEXT_NAMESPACE "TextureEditorCommands"
 
 void FTextureEditorCommands::RegisterCommands()
@@ -19,13 +22,12 @@ void FTextureEditorCommands::RegisterCommands()
 	UI_COMMAND(ZoomToNatural, "Scale To 100%", "Resets the zoom level to 100%, displaying the texture at its natural size", EUserInterfaceActionType::ToggleButton, FInputChord());
 	UI_COMMAND(SolidBackground, "Solid Color", "Solid color background", EUserInterfaceActionType::RadioButton, FInputChord());
 	UI_COMMAND(TextureBorder, "Draw Border", "If enabled, a border is drawn around the texture", EUserInterfaceActionType::ToggleButton, FInputChord());
-
-	UI_COMMAND(DepthSlices, "Depth Slices", "Shows depth slice side by side", EUserInterfaceActionType::RadioButton, FInputChord());
-	UI_COMMAND(TraceIntoVolume, "Trace Into Volume", "Traces into the volume, accumuling opacity / color", EUserInterfaceActionType::RadioButton, FInputChord());
+	UI_COMMAND(DefaultSampling, "Default Sampling", "Use default texture sampling", EUserInterfaceActionType::RadioButton, FInputChord());
+	UI_COMMAND(PointSampling, "Nearest-Point Sampling", "Use nearest-point texture sampling", EUserInterfaceActionType::RadioButton, FInputChord());
 
 	UI_COMMAND(CompressNow, "Compress", "Compress the texture", EUserInterfaceActionType::Button, FInputChord());
 	UI_COMMAND(Reimport, "Reimport", "Reimports the texture from file", EUserInterfaceActionType::Button, FInputChord());
-	UI_COMMAND(Settings, "Settings...", "Opens the settings for the texture editor", EUserInterfaceActionType::Button, FInputChord());
+	UI_COMMAND(Settings, "Advanced Settings...", "Opens the advanced settings for the texture editor", EUserInterfaceActionType::Button, FInputChord());
 }
 
 #undef LOCTEXT_NAMESPACE

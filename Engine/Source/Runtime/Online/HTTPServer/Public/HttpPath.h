@@ -1,8 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "HAL/Platform.h"
 #include "HttpRequestHandler.h"
+#include "Misc/CString.h"
 
 struct FHttpPath
 {
@@ -60,7 +64,7 @@ public:
 	HTTPSERVER_API void MakeRelative(const FString& OtherPath);
 
 	// TMap<> Comparer
-	HTTPSERVER_API bool operator==(const FHttpPath& Other) const
+	bool operator==(const FHttpPath& Other) const
 	{
 		bool bEqual = (0 == Path.Compare(Other.Path, ESearchCase::CaseSensitive));
 		return bEqual;

@@ -8,16 +8,18 @@
 #include "Layout/Visibility.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "EditorViewportClient.h"
-#include "Editor/StaticMeshEditor/Private/StaticMeshEditorViewportClient.h"
+#include "StaticMeshEditorViewportClient.h"
 #include "AdvancedPreviewScene.h"
 #include "SEditorViewport.h"
 #include "SCommonEditorViewportToolbarBase.h"
 #include "SAssetEditorViewport.h"
+#include "Styling/StyleColors.h"
 
 class IStaticMeshEditor;
 class SVerticalBox;
 class UStaticMesh;
 class UStaticMeshComponent;
+class SRichTextBlock;
 
 /**
  * StaticMesh Editor Preview viewport widget
@@ -35,6 +37,10 @@ public:
 	
 	// FGCObject interface
 	virtual void AddReferencedObjects( FReferenceCollector& Collector ) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("SStaticMeshEditorViewport");
+	}
 	// End of FGCObject interface
 
 	/** Constructs, destroys, and updates preview mesh components based on the preview static mesh's sockets. */
@@ -43,10 +49,10 @@ public:
 	void RefreshViewport();
 	
 	/** Component for the preview static mesh. */
-	UStaticMeshComponent* PreviewMeshComponent;
+	TObjectPtr<UStaticMeshComponent> PreviewMeshComponent;
 
 	/** Component for the preview static mesh. */
-	TArray<UStaticMeshComponent*> SocketPreviewMeshComponents;
+	TArray<TObjectPtr<UStaticMeshComponent>> SocketPreviewMeshComponents;
 
 	/** 
 	 *	Forces a specific LOD level onto the static mesh component.
@@ -101,16 +107,17 @@ public:
 	/** Struct defining the text and its style of each item in the overlay widget */
 	struct FOverlayTextItem
 	{
-		explicit FOverlayTextItem(const FText& InText, const FName& InStyle = "TextBlock.ShadowedText")
-			: Text(InText), Style(InStyle)
+		explicit FOverlayTextItem(const FText& InText, bool bInIsWarning = false, bool bInIsCustomFormat=false)
+			: Text(InText), bIsWarning(bInIsWarning), bIsCustomFormat(bInIsCustomFormat)
 		{}
 
 		FText Text;
-		FName Style;
+		bool bIsWarning;
+		bool bIsCustomFormat;
 	};
 
 	/** Specifies an array of text items which will be added to the viewport overlay */
-	void PopulateOverlayText( const TArray<FOverlayTextItem>& TextItems );
+	void PopulateOverlayText( const TArrayView<FOverlayTextItem> TextItems );
 
 	// ICommonEditorViewportToolbarInfoProvider interface
 	virtual TSharedRef<class SEditorViewport> GetViewportWidget() override;
@@ -120,6 +127,9 @@ public:
 
 	/** Returns the preview scene being renderd in the viewport */
 	TSharedRef<FAdvancedPreviewScene> GetPreviewScene() { return PreviewScene.ToSharedRef(); }
+
+	TSharedPtr<SOverlay> GetViewportOverlay() { return ViewportOverlay; }
+
 protected:
 	/** SEditorViewport interface */
 	virtual TSharedRef<FEditorViewportClient> MakeEditorViewportClient() override;
@@ -171,6 +181,12 @@ private:
 
 	/** Override for preview component selection to inform the editor we consider it selected. */
 	bool PreviewComponentSelectionOverride(const UPrimitiveComponent* InComponent) const;
+
+	void ToggleShowNaniteFallback();
+
+	bool IsShowNaniteFallbackChecked() const;
+
+	bool IsShowNaniteFallbackVisible() const;
 private:
 	
 	/** The parent tab where this viewport resides */
@@ -186,13 +202,13 @@ private:
 	TSharedPtr<class FStaticMeshEditorViewportClient> EditorViewportClient;
 
 	/** Static mesh being edited */
-	UStaticMesh* StaticMesh;
+	TObjectPtr<UStaticMesh> StaticMesh;
 
 	/** The currently selected view mode. */
 	EViewModeIndex CurrentViewMode;
 
-	/** Pointer to the vertical box into which the overlay text items are added */
-	TSharedPtr<SVerticalBox> OverlayTextVerticalBox;
+	/** Pointer to the box into which the overlay text items are added */
+	TSharedPtr<SRichTextBlock> OverlayText;
 
 	/** Current LOD Selection where 0 is Auto */
 	int32 LODSelection;

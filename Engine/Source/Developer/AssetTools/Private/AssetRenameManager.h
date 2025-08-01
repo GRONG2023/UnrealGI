@@ -65,9 +65,15 @@ private:
 	/** Attempts to load and fix redirector references for the supplied assets */
 	bool FixReferencesAndRename(const TArray<FAssetRenameData>& AssetsAndNames, bool bAutoCheckout, bool bWithDialog) const;
 
-	/** Get a list of assets referenced from CDOs */
-	TArray<TWeakObjectPtr<UObject>> FindCDOReferencedAssets(const TArray<FAssetRenameDataWithReferencers>& AssetsToRename) const;
-
+	/**
+	 * Get lists of assets with references from CDOs
+	 * @param AssetsToRename      List of assets to be renamed
+	 * @param OutReferences       Output array of hard asset references
+	 * @param OutSoftReferences   Output array of soft path asset references
+	 * @param bSetRedirectorFlags If true, each renamed asset with a soft reference will be marked as needing a redirector
+	 */
+	void FindCDOReferences(const TArrayView<FAssetRenameDataWithReferencers>& AssetsToRename, TArray<FAssetRenameDataWithReferencers*>& OutHardReferences, TArray<FAssetRenameDataWithReferencers*>& OutSoftReferences, bool bSetRedirectorFlags) const;
+	
 	/** Fills out the Referencing packages for all the assets described in AssetsToPopulate */
 	void PopulateAssetReferencers(TArray<FAssetRenameDataWithReferencers>& AssetsToPopulate) const;
 
@@ -101,8 +107,18 @@ private:
 	/** Finds any read only packages and removes them from the save list. Assets referenced by these packages will leave redirectors. */ 
 	void DetectReadOnlyPackages(TArray<FAssetRenameDataWithReferencers>& AssetsToRename, TArray<UPackage*>& InOutReferencingPackagesToSave) const;
 
+	/** 
+	 * Make public any asset that will be referenced from another plugin after the rename.
+	 * If the asset cannot be made public or if moving it requires a referenced asset that's not being modified to become public,
+	 * its rename will fail and other assets that have dependencies between them will also fail to be renamed.
+	 */
+	void SetupPublicAssets(TArray<FAssetRenameDataWithReferencers>& AssetsToRename) const;
+
 	/** Performs the asset rename after the user has selected to proceed */
 	void PerformAssetRename(TArray<FAssetRenameDataWithReferencers>& AssetsToRename) const;
+
+	/** Performs the asset rename after the user has selected to proceed, also saving the provided referencing packages at the same time */
+	void PerformAssetRename(TArray<FAssetRenameDataWithReferencers>& AssetsToRename, const TArray<UPackage*>& ReferencingPackagesToSave) const;
 
 	/** Saves all the referencing packages and updates SCC state */
 	void SaveReferencingPackages(const TArray<UPackage*>& ReferencingPackagesToSave) const;

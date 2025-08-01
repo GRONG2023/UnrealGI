@@ -1,21 +1,37 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Widgets/SCompoundWidget.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "Fonts/SlateFontInfo.h"
-#include "EditorStyleSet.h"
+#include "Internationalization/Text.h"
+#include "Misc/Attribute.h"
+#include "PropertyEditorModule.h"
+#include "Styling/AppStyle.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
 #include "UserInterface/PropertyEditor/PropertyEditorConstants.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
 
 class FPropertyEditor;
 class IPropertyHandle;
+
+struct FTitleMetadataFormatter
+{
+	FText Format;
+	TArray<TSharedPtr<IPropertyHandle>> PropertyHandles;
+
+	FPropertyAccess::Result GetDisplayText(FText& OutText) const;
+
+	static TSharedPtr<FTitleMetadataFormatter> TryParse(TSharedPtr<IPropertyHandle> RootProperty, const FString& TitlePropertyRaw);
+};
 
 class SPropertyEditorArrayItem : public SCompoundWidget
 {
 public:
 	SLATE_BEGIN_ARGS( SPropertyEditorArrayItem ) 
-		: _Font( FEditorStyle::GetFontStyle( PropertyEditorConstants::PropertyFontStyle ) ) 
+		: _Font( FAppStyle::GetFontStyle( PropertyEditorConstants::PropertyFontStyle ) ) 
 		{}
 		SLATE_ATTRIBUTE( FSlateFontInfo, Font )
 	SLATE_END_ARGS()
@@ -34,5 +50,5 @@ private:
 
 private:
 	TSharedPtr<FPropertyEditor> PropertyEditor;
-	TSharedPtr<IPropertyHandle> TitlePropertyHandle;
+	TSharedPtr<FTitleMetadataFormatter> TitlePropertyFormatter;
 };

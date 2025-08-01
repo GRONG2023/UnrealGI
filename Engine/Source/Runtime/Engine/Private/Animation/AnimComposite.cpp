@@ -5,8 +5,12 @@
 =============================================================================*/ 
 
 #include "Animation/AnimComposite.h"
+#include "Animation/AnimData/IAnimationDataController.h"
 #include "Animation/AnimationPoseData.h"
-#include "Animation/CustomAttributesRuntime.h"
+#include "EngineLogs.h"
+#include "Animation/AnimationSettings.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimComposite)
 
 UAnimComposite::UAnimComposite(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -24,44 +28,32 @@ void UAnimComposite::ReplaceReferredAnimations(const TMap<UAnimationAsset*, UAni
 {
 	AnimationTrack.ReplaceReferredAnimations(ReplacementMap);
 }
+
+void UAnimComposite::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+	UpdateCommonTargetFrameRate();
+}
 #endif
 
 bool UAnimComposite::IsNotifyAvailable() const
 {
-	return (SequenceLength > 0.f && (Super::IsNotifyAvailable() || AnimationTrack.IsNotifyAvailable()));
+	return (GetPlayLength() > 0.f && (Super::IsNotifyAvailable() || AnimationTrack.IsNotifyAvailable()));
 }
 
-void UAnimComposite::GetAnimNotifiesFromDeltaPositions(const float& PreviousPosition, const float & CurrentPosition, TArray<FAnimNotifyEventReference>& OutActiveNotifies) const
+void UAnimComposite::GetAnimNotifiesFromDeltaPositions(const float& PreviousPosition, const float & CurrentPosition, FAnimNotifyContext& NotifyContext) const
 {
-	const bool bMovingForward = (RateScale >= 0.f);
-
-	Super::GetAnimNotifiesFromDeltaPositions(PreviousPosition, CurrentPosition, OutActiveNotifies);
-
-	if (bMovingForward)
-	{
-		if (PreviousPosition <= CurrentPosition)
-		{
-			AnimationTrack.GetAnimNotifiesFromTrackPositions(PreviousPosition, CurrentPosition, OutActiveNotifies);
-		}
-		else
-		{
-			AnimationTrack.GetAnimNotifiesFromTrackPositions(PreviousPosition, SequenceLength, OutActiveNotifies);
-			AnimationTrack.GetAnimNotifiesFromTrackPositions(0.f, CurrentPosition, OutActiveNotifies);
-		}
-	}
-	else
-	{
-		if (PreviousPosition >= CurrentPosition)
-		{
-			AnimationTrack.GetAnimNotifiesFromTrackPositions(PreviousPosition, CurrentPosition, OutActiveNotifies);
-		}
-		else
-		{
-			AnimationTrack.GetAnimNotifiesFromTrackPositions(PreviousPosition, 0.f, OutActiveNotifies);
-			AnimationTrack.GetAnimNotifiesFromTrackPositions(SequenceLength, CurrentPosition, OutActiveNotifies);
-		}
-	}
+	Super::GetAnimNotifiesFromDeltaPositions(PreviousPosition, CurrentPosition, NotifyContext);
+	AnimationTrack.GetAnimNotifiesFromTrackPositions(PreviousPosition, CurrentPosition, NotifyContext);
 }
+
+void UAnimComposite::GetResourceSizeEx(FResourceSizeEx& CumulativeResourceSize)
+{
+	Super::GetResourceSizeEx(CumulativeResourceSize);
+
+	CumulativeResourceSize.AddDedicatedSystemMemoryBytes(AnimationTrack.GetTotalBytesUsed());
+}
+
 
 void UAnimComposite::HandleAssetPlayerTickedInternal(FAnimAssetTickContext &Context, const float PreviousTime, const float MoveDelta, const FAnimTickRecord &Instance, struct FAnimNotifyQueue& NotifyQueue) const
 {
@@ -106,6 +98,43 @@ bool UAnimComposite::HasRootMotion() const
 	return AnimationTrack.HasRootMotion();
 }
 
+FTransform UAnimComposite::ExtractRootMotion(float StartTime, float DeltaTime, bool bAllowLooping) const
+{
+	return ExtractRootMotionFromRange(StartTime, DeltaTime);
+}
+
+FTransform UAnimComposite::ExtractRootMotionFromRange(float StartTrackPosition, float EndTrackPosition) const
+{
+	FRootMotionMovementParams RootMotion;
+	ExtractRootMotionFromTrack(AnimationTrack, StartTrackPosition, EndTrackPosition, RootMotion);
+	return RootMotion.GetRootMotionTransform();
+}
+
+FTransform UAnimComposite::ExtractRootTrackTransform(float Time, const FBoneContainer* RequiredBones) const
+{
+	if (const FAnimSegment* AnimSegment = AnimationTrack.GetSegmentAtTime(Time))
+	{
+		float SegmentTime = 0.0f;
+		if (const UAnimSequenceBase* SequenceBase = AnimSegment->GetAnimationData(Time, SegmentTime))
+		{
+			return SequenceBase->ExtractRootTrackTransform(SegmentTime, RequiredBones);
+		}
+	}
+
+	// Return the last valid value in case we're requesting for a time after the anim composite end time.
+	if (!AnimationTrack.AnimSegments.IsEmpty())
+	{
+		const int32 LastSegmentIndex = AnimationTrack.AnimSegments.Num() - 1;
+		if (Time > AnimationTrack.AnimSegments[LastSegmentIndex].AnimEndTime)
+		{
+			const UAnimSequenceBase* SequenceBase = AnimationTrack.AnimSegments[LastSegmentIndex].GetAnimReference().Get();
+			return SequenceBase->ExtractRootTrackTransform(SequenceBase->GetPlayLength(), RequiredBones);
+		}
+	}
+
+	return {};
+}
+
 #if WITH_EDITOR
 class UAnimSequence* UAnimComposite::GetAdditiveBasePose() const
 {
@@ -140,3 +169,106 @@ bool UAnimComposite::ContainRecursive(TArray<UAnimCompositeBase*>& CurrentAccumu
 
 	return false;
 }
+
+void UAnimComposite::SetCompositeLength(float InLength)
+{
+#if WITH_EDITOR		
+	Controller->SetNumberOfFrames(DataModelInterface->GetFrameRate().AsFrameNumber(InLength));
+#else
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	SequenceLength = InLength;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+#endif	
+}
+
+void UAnimComposite::PostLoad()
+{
+	Super::PostLoad();
+
+#if WITH_EDITOR
+	for (const FAnimSegment& AnimSegment : AnimationTrack.AnimSegments)
+	{
+		if(AnimSegment.IsPlayLengthOutOfDate())
+		{
+			UE_LOG(LogAnimation, Warning, TEXT("AnimComposite (%s) contains a Segment for which the playable length %f is out-of-sync with the represented AnimationSequence its length %f (%s). Please up-date the segment and resave."), *GetFullName(), (AnimSegment.AnimEndTime - AnimSegment.AnimStartTime), AnimSegment.GetAnimReference()->GetPlayLength(), *AnimSegment.GetAnimReference()->GetFullName());
+		}
+	}
+#endif
+}
+
+#if WITH_EDITOR
+void UAnimComposite::UpdateCommonTargetFrameRate()
+{
+	CommonTargetFrameRate = FFrameRate(0,0);
+	FFrameRate TargetRate = UAnimationSettings::Get()->GetDefaultFrameRate();
+
+	bool bFirst = true;
+	bool bValidFrameRate = AnimationTrack.AnimSegments.Num() != 0;
+	for (const FAnimSegment& Segment : AnimationTrack.AnimSegments)
+	{
+		const UAnimSequenceBase* Base = Segment.GetAnimReference();
+		if (Base && Base != this)
+		{
+			const FFrameRate BaseFrameRate = Base->GetSamplingFrameRate();
+			if (bFirst)
+			{
+				TargetRate = BaseFrameRate;
+				bFirst = false;
+			}
+			else
+			{
+				if (BaseFrameRate.IsValid())
+				{					
+					if (TargetRate.IsMultipleOf(BaseFrameRate))
+					{
+						TargetRate = BaseFrameRate;
+					}
+					else if (TargetRate != BaseFrameRate && !BaseFrameRate.IsMultipleOf(TargetRate))
+					{						
+						FString AssetString;
+						TArray<UAnimationAsset*> Assets;
+						if(GetAllAnimationSequencesReferred(Assets, false))
+						{
+							for (const UAnimationAsset* AnimAsset : Assets)
+							{
+								if (const UAnimSequenceBase* AnimSequenceBase = Cast<UAnimSequenceBase>(AnimAsset))
+								{
+									AssetString.Append(FString::Printf(TEXT("\n\t%s - %s"), *AnimSequenceBase->GetName(), *AnimSequenceBase->GetSamplingFrameRate().ToPrettyText().ToString()));
+								}
+							}
+						}						
+
+						if (UE::Anim::CVarOutputMontageFrameRateWarning.GetValueOnAnyThread() == true)
+						{
+							UE_LOG(LogAnimation, Warning, TEXT("Frame rate of animation %s (%s) is incompatible with other animations in Animation Composite %s - underlying frame-rate will be set to %s:%s"), *Base->GetName(), *BaseFrameRate.ToPrettyText().ToString(), *GetName(), *Super::GetSamplingFrameRate().ToPrettyText().ToString(), *AssetString);
+						}
+						
+						bValidFrameRate = false;
+						break;
+					}
+				}
+				else
+				{
+					UE_LOG(LogAnimation, Warning, TEXT("Invalid frame rate %s for %s in %s"), *BaseFrameRate.ToPrettyText().ToString(), *Base->GetName(), *GetName());
+				}
+			}			
+		}	
+	}
+
+	if (bValidFrameRate)
+	{
+		CommonTargetFrameRate = TargetRate;
+	}
+}
+#endif // WITH_EDITOR
+
+FFrameRate UAnimComposite::GetSamplingFrameRate() const
+{
+	if (CommonTargetFrameRate.IsValid())
+	{
+		return CommonTargetFrameRate;
+	}
+
+	return Super::GetSamplingFrameRate();
+}
+

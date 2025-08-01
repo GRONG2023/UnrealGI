@@ -1,11 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "TrackEditors/ParticleTrackEditor.h"
+#include "AnimatedRange.h"
 #include "Rendering/DrawElements.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Curves/IntegralCurve.h"
 #include "SequencerSectionPainter.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Editor/UnrealEdEngine.h"
 #include "Particles/Emitter.h"
 #include "Particles/ParticleSystemComponent.h"
@@ -13,17 +14,15 @@
 #include "Tracks/MovieSceneParticleTrack.h"
 #include "ISectionLayoutBuilder.h"
 #include "Sections/MovieSceneParticleSection.h"
-#include "CommonMovieSceneTools.h"
 #include "Particles/ParticleLODLevel.h"
 #include "Particles/ParticleModuleRequired.h"
-#include "Matinee/InterpTrackToggle.h"
-#include "MatineeImportTools.h"
-
+#include "TimeToPixel.h"
+#include "MVVM/ViewModels/ViewDensity.h"
 
 namespace AnimatableParticleEditorConstants
 {
 	// @todo Sequencer Allow this to be customizable
-	const uint32 ParticleTrackHeight = 20;
+	const uint32 ParticleTrackHeight = 28;
 }
 
 
@@ -47,9 +46,9 @@ UMovieSceneSection* FParticleSection::GetSectionObject()
 	return &Section;
 }
 
-float FParticleSection::GetSectionHeight() const
+float FParticleSection::GetSectionHeight(const UE::Sequencer::FViewDensityInfo& ViewDensity) const
 {
-	return (float)AnimatableParticleEditorConstants::ParticleTrackHeight;
+	return ViewDensity.UniformHeight.Get(AnimatableParticleEditorConstants::ParticleTrackHeight);
 }
 
 int32 FParticleSection::OnPaintSection( FSequencerSectionPainter& InPainter ) const
@@ -193,15 +192,15 @@ int32 FParticleSection::OnPaintSection( FSequencerSectionPainter& InPainter ) co
 		FSlateDrawElement::MakeBox(
 			InPainter.DrawElements,
 			InPainter.LayerId,
-			InPainter.SectionGeometry.ToPaintGeometry( FVector2D( XOffset, (InPainter.SectionGeometry.GetLocalSize().Y - SequencerSectionConstants::KeySize.Y) / 2 ), FVector2D( XSize, SequencerSectionConstants::KeySize.Y ) ),
-			FEditorStyle::GetBrush( "Sequencer.Section.Background" ),
+			InPainter.SectionGeometry.ToPaintGeometry( FVector2f( XSize, SequencerSectionConstants::KeySize.Y ), FSlateLayoutTransform(FVector2f( XOffset, (InPainter.SectionGeometry.GetLocalSize().Y - SequencerSectionConstants::KeySize.Y) / 2.f )) ),
+			FAppStyle::GetBrush( "Sequencer.Section.Background" ),
 			DrawEffects
 			);
 		FSlateDrawElement::MakeBox(
 			InPainter.DrawElements,
 			InPainter.LayerId,
-			InPainter.SectionGeometry.ToPaintGeometry( FVector2D( XOffset, (InPainter.SectionGeometry.GetLocalSize().Y - SequencerSectionConstants::KeySize.Y) / 2 ), FVector2D( XSize, SequencerSectionConstants::KeySize.Y ) ),
-			FEditorStyle::GetBrush( "Sequencer.Section.BackgroundTint" ),
+			InPainter.SectionGeometry.ToPaintGeometry( FVector2f( XSize, SequencerSectionConstants::KeySize.Y ), FSlateLayoutTransform(FVector2f( XOffset, (InPainter.SectionGeometry.GetLocalSize().Y - SequencerSectionConstants::KeySize.Y) / 2.f )) ),
+			FAppStyle::GetBrush( "Sequencer.Section.BackgroundTint" ),
 			DrawEffects,
 			TrackColor
 			);
@@ -294,36 +293,6 @@ FKeyPropertyResult FParticleTrackEditor::AddKeyInternal( FFrameNumber KeyTime, U
 	}
 
 	return KeyPropertyResult;
-}
-
-
-void CopyInterpParticleTrack(TSharedRef<ISequencer> Sequencer, UInterpTrackToggle* MatineeToggleTrack, UMovieSceneParticleTrack* ParticleTrack)
-{
-	if (FMatineeImportTools::CopyInterpParticleTrack(MatineeToggleTrack, ParticleTrack))
-	{
-		Sequencer.Get().NotifyMovieSceneDataChanged( EMovieSceneDataChangeType::MovieSceneStructureItemAdded );
-	}
-}
-
-void FParticleTrackEditor::BuildTrackContextMenu( FMenuBuilder& MenuBuilder, UMovieSceneTrack* Track )
-{
-	UInterpTrackToggle* MatineeToggleTrack = nullptr;
-	for ( UObject* CopyPasteObject : GUnrealEd->MatineeCopyPasteBuffer )
-	{
-		MatineeToggleTrack = Cast<UInterpTrackToggle>( CopyPasteObject );
-		if ( MatineeToggleTrack != nullptr )
-		{
-			break;
-		}
-	}
-	UMovieSceneParticleTrack* ParticleTrack = Cast<UMovieSceneParticleTrack>( Track );
-	MenuBuilder.AddMenuEntry(
-		NSLOCTEXT( "Sequencer", "PasteMatineeToggleTrack", "Paste Matinee Particle Track" ),
-		NSLOCTEXT( "Sequencer", "PasteMatineeToggleTrackTooltip", "Pastes keys from a Matinee particle track into this track." ),
-		FSlateIcon(),
-		FUIAction(
-			FExecuteAction::CreateStatic( &CopyInterpParticleTrack, GetSequencer().ToSharedRef(), MatineeToggleTrack, ParticleTrack ),
-			FCanExecuteAction::CreateLambda( [=]()->bool { return MatineeToggleTrack != nullptr && MatineeToggleTrack->ToggleTrack.Num() > 0 && ParticleTrack != nullptr; } ) ) );
 }
 
 

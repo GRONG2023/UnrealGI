@@ -8,9 +8,11 @@
 
 #include "CoreMinimal.h"
 #include "Containers/IndirectArray.h"
+#include "Engine/SkinnedAssetCommon.h"
 #include "ReferenceSkeleton.h"
 #include "Engine/SkeletalMesh.h"
 #include "Rendering/SkeletalMeshLODImporterData.h"
+#include "SkeletalMeshTypes.h"
 
 class UAssetImportData;
 class UMorphTarget;
@@ -19,12 +21,14 @@ class USkeletalMeshSocket;
 class USkeleton;
 class UThumbnailInfo;
 class FSkeletalMeshLODModel;
+enum class ESkinVertexColorChannel : uint8;
 
 struct FExistingMeshLodSectionData
 {
-	FExistingMeshLodSectionData(FName InImportedMaterialSlotName, bool InbCastShadow, bool InbRecomputeTangents, ESkinVertexColorChannel InRecomputeTangentsVertexMaskChannel, int32 InGenerateUpTo, bool InbDisabled)
+	FExistingMeshLodSectionData(FName InImportedMaterialSlotName, bool InbCastShadow, bool InbVisibleInRayTracing, bool InbRecomputeTangents, ESkinVertexColorChannel InRecomputeTangentsVertexMaskChannel, int32 InGenerateUpTo, bool InbDisabled)
 	: ImportedMaterialSlotName(InImportedMaterialSlotName)
 	, bCastShadow(InbCastShadow)
+	, bVisibleInRayTracing(InbVisibleInRayTracing)
 	, bRecomputeTangents(InbRecomputeTangents)
 	, RecomputeTangentsVertexMaskChannel(InRecomputeTangentsVertexMaskChannel)
 	, GenerateUpTo(InGenerateUpTo)
@@ -32,17 +36,43 @@ struct FExistingMeshLodSectionData
 	{}
 	FName ImportedMaterialSlotName;
 	bool bCastShadow;
+	bool bVisibleInRayTracing;
 	bool bRecomputeTangents;
 	ESkinVertexColorChannel RecomputeTangentsVertexMaskChannel;
 	int32 GenerateUpTo;
 	bool bDisabled;
 };
 
+
+struct FStreamableRenderAssetData
+{
+	int32 NumCinematicMipLevels;
+	FPerQualityLevelInt NoRefStreamingLODBias;
+	bool NeverStream;
+	bool bGlobalForceMipLevelsToBeResident;
+
+	void Save(const USkeletalMesh* SkeletalMesh)
+	{
+		NumCinematicMipLevels = SkeletalMesh->NumCinematicMipLevels;
+		NoRefStreamingLODBias = SkeletalMesh->GetNoRefStreamingLODBias();
+		NeverStream = SkeletalMesh->NeverStream;
+		bGlobalForceMipLevelsToBeResident = SkeletalMesh->bGlobalForceMipLevelsToBeResident;
+	}
+	void Restore(USkeletalMesh* SkeletalMesh) const
+	{
+		SkeletalMesh->NumCinematicMipLevels = NumCinematicMipLevels;
+		SkeletalMesh->SetNoRefStreamingLODBias(NoRefStreamingLODBias);
+		SkeletalMesh->NeverStream = NeverStream;
+		SkeletalMesh->bGlobalForceMipLevelsToBeResident = bGlobalForceMipLevelsToBeResident;
+	}
+};
+
 struct FExistingSkelMeshData
 {
 	TArray<USkeletalMeshSocket*>			ExistingSockets;
-	TArray<TSharedPtr<FReductionBaseSkeletalMeshBulkData>> ExistingOriginalReductionSourceMeshData;
+	TArray<FInlineReductionCacheData>		ExistingInlineReductionCacheDatas;
 	TIndirectArray<FSkeletalMeshLODModel>	ExistingLODModels;
+	TArray<FSkeletalMeshImportData>			ExistingLODImportDatas;
 	TArray<FSkeletalMeshLODInfo>			ExistingLODInfo;
 	FReferenceSkeleton						ExistingRefSkeleton;
 	TArray<FSkeletalMaterial>				ExistingMaterials;
@@ -55,12 +85,11 @@ struct FExistingSkelMeshData
 	USkeletalMeshLODSettings*				ExistingLODSettings;
 	TSubclassOf<UAnimInstance>				ExistingPostProcessAnimBlueprint;
 	TSoftObjectPtr<UObject>					ExistingDefaultAnimatingRig;
+	UMeshDeformer*							ExistingDefaultMeshDeformer;
 	//////////////////////////////////////////////////////////////////////////
 
 	bool									bExistingUseFullPrecisionUVs;
 	bool									bExistingUseHighPrecisionTangentBasis;
-
-	TArray<FBoneMirrorExport>				ExistingMirrorTable;
 
 	TWeakObjectPtr<UAssetImportData>		ExistingAssetImportData;
 	TWeakObjectPtr<UThumbnailInfo>			ExistingThumbnailInfo;
@@ -77,6 +106,7 @@ struct FExistingSkelMeshData
 
 	FSkeletalMeshSamplingInfo				ExistingSamplingInfo;
 	FPerPlatformInt							MinLOD;
+	FPerQualityLevelInt						QualityLevelMinLOD;
 	FPerPlatformBool						DisableBelowMinLodStripping;
 	bool									bOverrideLODStreamingSettings;
 	FPerPlatformBool						bSupportLODStreaming;
@@ -91,6 +121,13 @@ struct FExistingSkelMeshData
 
 	FVector PositiveBoundsExtension;
 	FVector NegativeBoundsExtension;
+
+	bool bExistingSupportRayTracing;
+	int32 ExistingRayTracingMinLOD;
+	EClothLODBiasMode ExistingClothLODBiasMode;
+
+	//Streamable member
+	FStreamableRenderAssetData ExistingStreamableRenderAssetData;
 };
 
 /** 

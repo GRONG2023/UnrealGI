@@ -6,6 +6,8 @@
 #include "Components/PrimitiveComponent.h"
 #include "Evaluation/MovieSceneEvaluation.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneParameterTemplate)
+
 
 FMovieSceneParameterSectionTemplate::FMovieSceneParameterSectionTemplate(const UMovieSceneParameterSection& Section)
 	: Scalars(Section.GetScalarParameterNamesAndCurves())
@@ -41,7 +43,7 @@ void FMovieSceneParameterSectionTemplate::EvaluateCurves(const FMovieSceneContex
 
 	for (const FVector2DParameterNameAndCurves& Vector : Vector2Ds)
 	{
-		FVector2D Value(ForceInitToZero);
+		FVector2f Value(ForceInitToZero);
 
 		bool bAnyEvaluated = false;
 		bAnyEvaluated |= Vector.XCurve.Evaluate(Time, Value.X);
@@ -49,14 +51,14 @@ void FMovieSceneParameterSectionTemplate::EvaluateCurves(const FMovieSceneContex
 
 		if (bAnyEvaluated)
 		{
-			Values.Vector2DValues.Emplace(Vector.ParameterName, Value);
+			Values.Vector2DValues.Emplace(Vector.ParameterName, FVector2D(Value));
 		}
 	}
 
 
 	for ( const FVectorParameterNameAndCurves& Vector : Vectors )
 	{
-		FVector Value(ForceInitToZero);
+		FVector3f Value(ForceInitToZero);
 
 		bool bAnyEvaluated = false;
 		bAnyEvaluated |= Vector.XCurve.Evaluate(Time, Value.X);
@@ -65,7 +67,7 @@ void FMovieSceneParameterSectionTemplate::EvaluateCurves(const FMovieSceneContex
 
 		if (bAnyEvaluated)
 		{
-			Values.VectorValues.Emplace(Vector.ParameterName, Value);
+			Values.VectorValues.Emplace(Vector.ParameterName, (FVector)Value);
 		}
 	}
 
@@ -87,8 +89,8 @@ void FMovieSceneParameterSectionTemplate::EvaluateCurves(const FMovieSceneContex
 
 	for (const FTransformParameterNameAndCurves& Transform : Transforms)
 	{
-		FVector Translation, Scale(FVector::OneVector);
-		FRotator Rotator;
+		FVector3f Translation, Scale(FVector3f::OneVector);
+		FRotator3f Rotator;
 		bool bAnyEvaluated = false;
 		bAnyEvaluated |= Transform.Translation[0].Evaluate(Time,Translation[0]);
 		bAnyEvaluated |= Transform.Translation[1].Evaluate(Time, Translation[1]);
@@ -106,98 +108,9 @@ void FMovieSceneParameterSectionTemplate::EvaluateCurves(const FMovieSceneContex
 
 		if (bAnyEvaluated)
 		{
-			FTransformParameterNameAndValue NameAndValue(Transform.ParameterName, Translation, Rotator, Scale);
+			FTransformParameterNameAndValue NameAndValue(Transform.ParameterName, (FVector)Translation, FRotator(Rotator), (FVector)Scale);
 			Values.TransformValues.Emplace(NameAndValue);
 		}
 	}
 }
 
-void FDefaultMaterialAccessor::Apply(UMaterialInstanceDynamic& Material, const FEvaluatedParameterSectionValues& Values)
-{
-	for (const FScalarParameterNameAndValue& ScalarValue : Values.ScalarValues)
-	{
-		Material.SetScalarParameterValue(ScalarValue.ParameterName, ScalarValue.Value);
-	}
-	for (const FVectorParameterNameAndValue& VectorValue : Values.VectorValues)
-	{
-		Material.SetVectorParameterValue(VectorValue.ParameterName, VectorValue.Value);
-	}
-	for (const FColorParameterNameAndValue& ColorValue : Values.ColorValues)
-	{
-		Material.SetVectorParameterValue(ColorValue.ParameterName, ColorValue.Value);
-	}
-}
-
-
-TMovieSceneAnimTypeIDContainer<int32> MaterialIndexAnimTypeIDs;
-
-struct FComponentMaterialAccessor : FDefaultMaterialAccessor
-{
-	FComponentMaterialAccessor(int32 InMaterialIndex)
-		: MaterialIndex(InMaterialIndex)
-	{}
-
-	FComponentMaterialAccessor(const FComponentMaterialAccessor&) = default;
-	FComponentMaterialAccessor& operator=(const FComponentMaterialAccessor&) = default;
-	
-	FMovieSceneAnimTypeID GetAnimTypeID() const
-	{
-		return MaterialIndexAnimTypeIDs.GetAnimTypeID(MaterialIndex);
-	}
-
-	UMaterialInterface* GetMaterialForObject(UObject& Object) const
-	{
-		if (UPrimitiveComponent* PrimitiveComponent = Cast<UPrimitiveComponent>(&Object))
-		{
-			return PrimitiveComponent->GetMaterial(MaterialIndex);
-		}
-		else if (UDecalComponent* DecalComponent = Cast<UDecalComponent>(&Object))
-		{
-			return DecalComponent->GetDecalMaterial();
-		}
-		return nullptr;
-	}
-
-	void SetMaterialForObject(UObject& Object, UMaterialInterface& Material) const
-	{
-		if (UPrimitiveComponent* PrimitiveComponent = Cast<UPrimitiveComponent>(&Object))
-		{
-			PrimitiveComponent->SetMaterial(MaterialIndex, &Material);
-		}
-		else if (UDecalComponent* DecalComponent = Cast<UDecalComponent>(&Object))
-		{
-			DecalComponent->SetDecalMaterial(&Material);
-		}
-	}
-
-	UMaterialInstanceDynamic* CreateMaterialInstanceDynamic(UObject& Object, UMaterialInterface& Material, FName UniqueDynamicName)
-	{
-		if (UPrimitiveComponent* PrimitiveComponent = Cast<UPrimitiveComponent>(&Object))
-		{
-			return UMaterialInstanceDynamic::Create(&Material, &Object, UniqueDynamicName );
-		}
-		else if (UDecalComponent* DecalComponent = Cast<UDecalComponent>(&Object))
-		{
-			return DecalComponent->CreateDynamicMaterialInstance();
-		}
-
-		return nullptr;
-	}
-
-	int32 MaterialIndex;
-};
-
-FMovieSceneComponentMaterialSectionTemplate::FMovieSceneComponentMaterialSectionTemplate(const UMovieSceneParameterSection& Section, const UMovieSceneComponentMaterialTrack& Track)
-	: FMovieSceneParameterSectionTemplate(Section)
-	, MaterialIndex(Track.GetMaterialIndex())
-{
-}
-
-void FMovieSceneComponentMaterialSectionTemplate::Evaluate(const FMovieSceneEvaluationOperand& Operand, const FMovieSceneContext& Context, const FPersistentEvaluationData& PersistentData, FMovieSceneExecutionTokens& ExecutionTokens) const
-{
-	TMaterialTrackExecutionToken<FComponentMaterialAccessor> ExecutionToken(MaterialIndex);
-
-	EvaluateCurves(Context, ExecutionToken.Values);
-
-	ExecutionTokens.Add(MoveTemp(ExecutionToken));
-}

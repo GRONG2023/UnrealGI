@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "MeshPaintStaticMeshAdapter.h"
+#include "StaticMeshComponentLODInfo.h"
 #include "StaticMeshResources.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "MeshPaintHelpers.h"
@@ -86,7 +87,7 @@ bool FMeshPaintGeometryAdapterForStaticMeshes::InitializeVertexData()
 	MeshVertices.AddDefaulted(NumVertices);
 	for (int32 Index = 0; Index < NumVertices; Index++)
 	{
-		const FVector& Position = LODModel->VertexBuffers.PositionVertexBuffer.VertexPosition(Index);
+		const FVector& Position = (FVector)LODModel->VertexBuffers.PositionVertexBuffer.VertexPosition(Index);
 		MeshVertices[Index] = Position;
 	}
 
@@ -145,7 +146,7 @@ void FMeshPaintGeometryAdapterForStaticMeshes::InitializeAdapterGlobals()
 
 void FMeshPaintGeometryAdapterForStaticMeshes::CleanupGlobals()
 {
-	for (TPair<UStaticMesh*, FStaticMeshReferencers>& Pair : MeshToComponentMap)
+	for (auto& Pair : MeshToComponentMap)
 	{
 		if (Pair.Key && Pair.Value.RestoreBodySetup)
 		{
@@ -165,7 +166,7 @@ void FMeshPaintGeometryAdapterForStaticMeshes::OnAdded()
 	FStaticMeshReferencers& StaticMeshReferencers = MeshToComponentMap.FindOrAdd(ReferencedStaticMesh);
 
 	check(!StaticMeshReferencers.Referencers.ContainsByPredicate(
-		[=](const FStaticMeshReferencers::FReferencersInfo& Info)
+		[this](const FStaticMeshReferencers::FReferencersInfo& Info)
 	{
 		return Info.StaticMeshComponent == this->StaticMeshComponent;
 	}
@@ -232,7 +233,7 @@ void FMeshPaintGeometryAdapterForStaticMeshes::OnRemoved()
 	{
 		check(StaticMeshReferencers->Referencers.Num() > 0);
 		int32 Index = StaticMeshReferencers->Referencers.IndexOfByPredicate(
-			[=](const FStaticMeshReferencers::FReferencersInfo& Info)
+			[this](const FStaticMeshReferencers::FReferencersInfo& Info)
 		{
 			return Info.StaticMeshComponent == this->StaticMeshComponent;
 		}
@@ -281,7 +282,7 @@ void FMeshPaintGeometryAdapterForStaticMeshes::ApplyOrRemoveTextureOverride(UTex
 
 void FMeshPaintGeometryAdapterForStaticMeshes::AddReferencedObjectsGlobals(FReferenceCollector& Collector)
 {
-	for (TPair<UStaticMesh*, FStaticMeshReferencers>& Pair : MeshToComponentMap)
+	for (auto& Pair : MeshToComponentMap)
 	{
 		Collector.AddReferencedObject(Pair.Key);
 		Collector.AddReferencedObject(Pair.Value.RestoreBodySetup);
@@ -375,7 +376,7 @@ FMatrix FMeshPaintGeometryAdapterForStaticMeshes::GetComponentToWorldMatrix() co
 
 void FMeshPaintGeometryAdapterForStaticMeshes::GetTextureCoordinate(int32 VertexIndex, int32 ChannelIndex, FVector2D& OutTextureCoordinate) const
 {
-	OutTextureCoordinate = LODModel->VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(VertexIndex, ChannelIndex);
+	OutTextureCoordinate = FVector2D(LODModel->VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(VertexIndex, ChannelIndex));
 }
 
 void FMeshPaintGeometryAdapterForStaticMeshes::PreEdit()

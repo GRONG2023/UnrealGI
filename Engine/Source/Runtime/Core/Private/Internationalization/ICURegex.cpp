@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "ICURegex.h"
+#include "Internationalization/ICURegex.h"
 #include "Misc/ScopeLock.h"
 
 #if UE_ENABLE_ICU
@@ -10,8 +10,19 @@
 class FRegexPatternImplementation
 {
 public:
-	FRegexPatternImplementation(const FString& SourceString)
-		: ICURegexPattern(FICURegexManager::Get().CreateRegexPattern(SourceString))
+	static uint32_t GetICURegexFlags(ERegexPatternFlags Flags)
+	{
+		uint32_t OutFlags = 0;
+		if (EnumHasAnyFlags(Flags, ERegexPatternFlags::CaseInsensitive))
+		{
+			OutFlags |= UREGEX_CASE_INSENSITIVE;
+		}
+
+		return OutFlags;
+	}
+
+	FRegexPatternImplementation(const FString& SourceString, ERegexPatternFlags Flags)
+		: ICURegexPattern(FICURegexManager::Get().CreateRegexPattern(SourceString, GetICURegexFlags(Flags)))
 	{
 	}
 
@@ -23,13 +34,13 @@ public:
 		}
 	}
 
-	TSharedPtr<icu::RegexPattern> GetInternalRegexPattern() const
+	TSharedPtr<const icu::RegexPattern> GetInternalRegexPattern() const
 	{
 		return ICURegexPattern.Pin();
 	}
 
 private:
-	TWeakPtr<icu::RegexPattern> ICURegexPattern;
+	TWeakPtr<const icu::RegexPattern> ICURegexPattern;
 };
 
 
@@ -94,13 +105,13 @@ FICURegexManager& FICURegexManager::Get()
 	return *Singleton;
 }
 
-TWeakPtr<icu::RegexPattern> FICURegexManager::CreateRegexPattern(const FString& InSourceString)
+TWeakPtr<const icu::RegexPattern> FICURegexManager::CreateRegexPattern(const FString& InSourceString, uint32_t InICURegexFlags)
 {
 	icu::UnicodeString ICUSourceString;
 	ICUUtilities::ConvertString(InSourceString, ICUSourceString);
 
 	UErrorCode ICUStatus = U_ZERO_ERROR;
-	TSharedPtr<icu::RegexPattern>ICURegexPattern = MakeShareable(icu::RegexPattern::compile(ICUSourceString, 0, ICUStatus));
+	TSharedPtr<const icu::RegexPattern> ICURegexPattern = MakeShareable(icu::RegexPattern::compile(ICUSourceString, InICURegexFlags, ICUStatus));
 
 	if (ICURegexPattern.IsValid())
 	{
@@ -111,9 +122,9 @@ TWeakPtr<icu::RegexPattern> FICURegexManager::CreateRegexPattern(const FString& 
 	return ICURegexPattern;
 }
 
-void FICURegexManager::DestroyRegexPattern(TWeakPtr<icu::RegexPattern>& InICURegexPattern)
+void FICURegexManager::DestroyRegexPattern(TWeakPtr<const icu::RegexPattern>& InICURegexPattern)
 {
-	TSharedPtr<icu::RegexPattern> ICURegexPattern = InICURegexPattern.Pin();
+	TSharedPtr<const icu::RegexPattern> ICURegexPattern = InICURegexPattern.Pin();
 	if (ICURegexPattern.IsValid())
 	{
 		FScopeLock ScopeLock(&AllocatedRegexPatternsCS);
@@ -122,7 +133,7 @@ void FICURegexManager::DestroyRegexPattern(TWeakPtr<icu::RegexPattern>& InICUReg
 	InICURegexPattern.Reset();
 }
 
-TWeakPtr<icu::RegexMatcher> FICURegexManager::CreateRegexMatcher(icu::RegexPattern* InPattern, const icu::UnicodeString* InInputString)
+TWeakPtr<icu::RegexMatcher> FICURegexManager::CreateRegexMatcher(const icu::RegexPattern* InPattern, const icu::UnicodeString* InInputString)
 {
 	TSharedPtr<icu::RegexMatcher> ICURegexMatcher;
 
@@ -153,16 +164,23 @@ void FICURegexManager::DestroyRegexMatcher(TWeakPtr<icu::RegexMatcher>& InICUReg
 }
 
 
-FRegexPattern::FRegexPattern(const FString& SourceString) 
-	: Implementation(new FRegexPatternImplementation(SourceString))
+FRegexPattern::FRegexPattern(const FString& SourceString, ERegexPatternFlags Flags /*= ERegexPatternFlags::None*/) 
+	: Implementation(MakeShared<FRegexPatternImplementation>(SourceString, Flags))
 {
 }
 
 
-FRegexMatcher::FRegexMatcher(const FRegexPattern& Pattern, const FString& InputString) 
-	: Implementation(new FRegexMatcherImplementation(Pattern.Implementation.Get(), InputString))
+FRegexMatcher::FRegexMatcher(const FRegexPattern& SourcePattern, const FString& InputString)
+	: Pattern(SourcePattern)
+	, Implementation(MakeShared<FRegexMatcherImplementation>(Pattern.Implementation.Get(), InputString))
 {
-}	
+}
+
+FRegexMatcher::FRegexMatcher(FRegexPattern&& SourcePattern, const FString& InputString)
+	: Pattern(MoveTemp(SourcePattern))
+	, Implementation(MakeShared<FRegexMatcherImplementation>(Pattern.Implementation.Get(), InputString))
+{
+}
 
 bool FRegexMatcher::FindNext()
 {

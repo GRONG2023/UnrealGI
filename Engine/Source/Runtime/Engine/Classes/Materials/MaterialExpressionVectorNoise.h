@@ -10,7 +10,7 @@
 #include "MaterialExpressionVectorNoise.generated.h"
 
 UENUM()
-enum EVectorNoiseFunction
+enum EVectorNoiseFunction : int
 {
 	/** Random color for each unit cell in 3D space.
 	  * RGB output range 0 to 1
@@ -57,29 +57,37 @@ class UMaterialExpressionVectorNoise : public UMaterialExpression
 	UPROPERTY()
 	FExpressionInput Position;
 
+	/** Defines the reference space for the Position input. */
+	UPROPERTY(EditAnywhere, Category = MaterialExpressionVectorNoise)
+	EPositionOrigin WorldPositionOriginType = EPositionOrigin::Absolute;
+
 	/** Noise function, affects performance and look */
-	UPROPERTY(EditAnywhere, Category = MaterialExpressionVectorNoise, meta = (DisplayName = "Function"))
+	UPROPERTY(EditAnywhere, Category = MaterialExpressionVectorNoise, meta = (DisplayName = "Function", ShowAsInputPin = "Advanced"))
 	TEnumAsByte<enum EVectorNoiseFunction> NoiseFunction;
 
 	/** For noise functions where applicable, lower numbers are faster and lower quality, higher numbers are slower and higher quality */
-	UPROPERTY(EditAnywhere, Category=MaterialExpressionVectorNoise, meta=(UIMin = "1", UIMax = "4"))
+	UPROPERTY(EditAnywhere, Category=MaterialExpressionVectorNoise, meta=(UIMin = "1", UIMax = "4", ShowAsInputPin = "Advanced"))
 	int32 Quality;
 
 	/** Whether tile the noise pattern, useful for baking to seam-free repeating textures */
-	UPROPERTY(EditAnywhere, Category = MaterialExpressionVectorNoise)
+	UPROPERTY(EditAnywhere, Category = MaterialExpressionVectorNoise, meta = (ShowAsInputPin = "Advanced"))
 	uint32 bTiling:1;
 
 	/** How many units in each tile (if Tiling is on) 
 	  * For Perlin noise functions, Tile Size must be a multiple of three
 	  */
-	UPROPERTY(EditAnywhere, Category = MaterialExpressionVectorNoise, meta=(UIMin = "4"))
+	UPROPERTY(EditAnywhere, Category = MaterialExpressionVectorNoise, meta=(UIMin = "4", ShowAsInputPin = "Advanced"))
 	uint32 TileSize;
 
 	//~ Begin UMaterialExpression Interface
 #if WITH_EDITOR
 	virtual bool CanEditChange(const FProperty* InProperty) const override;
+	virtual FName GetInputName(int32 InputIndex) const override;
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 	virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
 	virtual void GetCaption(TArray<FString>& OutCaptions) const override;
+
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
 #endif
 	//~ End UMaterialExpression Interface
 };

@@ -22,8 +22,8 @@
 #include "Modules/ModuleManager.h"
 #include "IEditableSkeleton.h"
 #include "Editor.h"
-#include "AnimModel.h"
-#include "AnimModel_AnimMontage.h"
+#include "AnimTimeline/AnimModel.h"
+#include "AnimTimeline/AnimModel_AnimMontage.h"
 #include "Preferences/PersonaOptions.h"
 #include "FrameNumberDisplayFormat.h"
 
@@ -45,11 +45,11 @@ public:
 
 		FArguments Args = InArgs;
 		Args._TextMargin = FMargin(1.0f);
-		Args._BorderImage = FEditorStyle::GetBrush("ContentBrowser.TileViewToolTip.ToolTipBorder");
+		Args._BorderImage = FAppStyle::GetBrush("ContentBrowser.TileViewToolTip.ToolTipBorder");
 		Args._Content.Widget =
 			SNew(SBorder)
 			.Padding(3)
-			.BorderImage(FEditorStyle::GetBrush("ContentBrowser.TileViewTooltip.NonContentBorder"))
+			.BorderImage(FAppStyle::GetBrush("ContentBrowser.TileViewTooltip.NonContentBorder"))
 			[
 				SNew(SVerticalBox)
 				+ SVerticalBox::Slot()
@@ -58,14 +58,14 @@ public:
 				[
 					SNew(SBorder)
 					.Padding(6)
-					.BorderImage(FEditorStyle::GetBrush("ContentBrowser.TileViewTooltip.ContentBorder"))
+					.BorderImage(FAppStyle::GetBrush("ContentBrowser.TileViewTooltip.ContentBorder"))
 					[
 						SNew(SBox)
 						.HAlign(HAlign_Left)
 						[
 							SNew(STextBlock)
 							.Text(FText::FromName(Element->GetTypeName()))
-							.Font(FEditorStyle::GetFontStyle("ContentBrowser.TileViewTooltip.NameFont"))
+							.Font(FAppStyle::GetFontStyle("ContentBrowser.TileViewTooltip.NameFont"))
 						]
 					]
 				]
@@ -78,7 +78,7 @@ public:
 					[
 						SNew(SBorder)
 						.Padding(3)
-						.BorderImage(FEditorStyle::GetBrush("ContentBrowser.TileViewTooltip.ContentBorder"))
+						.BorderImage(FAppStyle::GetBrush("ContentBrowser.TileViewTooltip.ContentBorder"))
 						[
 							DescriptionBox.ToSharedRef()
 						]
@@ -129,7 +129,7 @@ void SAnimTimingNode::Construct(const FArguments& InArgs)
 {
 	Element = InArgs._InElement;
 
-	const FSlateBrush* StyleInfo = FEditorStyle::GetBrush(TEXT("SpecialEditableTextImageNormal"));
+	const FSlateBrush* StyleInfo = FAppStyle::GetBrush(TEXT("SpecialEditableTextImageNormal"));
 	static FSlateFontInfo LabelFont = FCoreStyle::GetDefaultFontStyle("Regular", AnimTimingConstants::FontSize);
 
 	UPersonaOptions* EditorOptions = UPersonaOptions::StaticClass()->GetDefaultObject<UPersonaOptions>();
@@ -184,14 +184,14 @@ FVector2D SAnimTimingNode::ComputeDesiredSize(float) const
 {
 	// Desired height is always the same (a little less than the track height) but the width depends on the text we display
 	const TSharedRef< FSlateFontMeasure > FontMeasureService = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
-	static FSlateFontInfo LabelFont = FCoreStyle::GetDefaultFontStyle("Regular", 10);
-	float TextWidth = FontMeasureService->Measure(FString::FromInt(Element->TriggerIdx), LabelFont).X;
+	static FSlateFontInfo LabelFont = FCoreStyle::GetDefaultFontStyle("Regular", AnimTimingConstants::FontSize);
+	const float TextWidth = static_cast<float>(FontMeasureService->Measure(FString::FromInt(Element->TriggerIdx), LabelFont).X);
 	return FVector2D(FMath::Max(AnimTimingConstants::DefaultNodeSize, TextWidth), AnimTimingConstants::DefaultNodeSize);
 }
 
 void SAnimTimingTrackNode::Construct(const FArguments& InArgs)
 {
-	TAttribute<float> TimeAttr = TAttribute<float>::Create(TAttribute<float>::FGetter::CreateSP(InArgs._Element.ToSharedRef(), &FTimingRelevantElementBase::GetElementTime));
+	const TAttribute<float> TimeAttr = TAttribute<float>::Create(TAttribute<float>::FGetter::CreateSP(InArgs._Element.ToSharedRef(), &FTimingRelevantElementBase::GetElementTime));
 
 	STrackNode::Construct(STrackNode::FArguments()
 		.ViewInputMin(InArgs._ViewInputMin)
@@ -232,7 +232,7 @@ void SAnimTimingPanel::Construct(const FArguments& InArgs, const TSharedRef<FAni
 	this->ChildSlot
 	[
 		SAssignNew(PanelArea, SBorder)
-		.BorderImage(FEditorStyle::GetBrush("NoBorder"))
+		.BorderImage(FAppStyle::GetBrush("NoBorder"))
 		.Padding(0.0f)
 		.ColorAndOpacity(FLinearColor::White)
 	];
@@ -264,7 +264,7 @@ void SAnimTimingPanel::Update()
 			.ViewInputMax(ViewInputMax)
 			.TrackMinValue(InputMin)
 			.TrackMaxValue(InputMax)
-			.TrackNumDiscreteValues(AnimSequence->GetNumberOfFrames())
+			.TrackNumDiscreteValues(AnimSequence->GetNumberOfSampledKeys())
 		];
 
 	RefreshTrackNodes();
@@ -401,19 +401,22 @@ ETimingElementType::Type FTimingRelevantElement_Section::GetType()
 void FTimingRelevantElement_Section::GetDescriptionItems(TMap<FString, FText>& Items)
 {
 	check(Montage);
-	FCompositeSection& Section = Montage->CompositeSections[SectionIdx];
+	if(Montage->CompositeSections.IsValidIndex(SectionIdx))
+	{
+		FCompositeSection& Section = Montage->CompositeSections[SectionIdx];
 
-	Items.Add(LOCTEXT("SectionName", "Name").ToString(), FText::FromName(Section.SectionName));
-	if(GetDefault<UPersonaOptions>()->TimelineDisplayFormat == EFrameNumberDisplayFormats::Frames)
-	{
-		Items.Add(LOCTEXT("SectionTriggerFrame", "Trigger Frame").ToString(), FText::Format(LOCTEXT("SectionTriggerFrameValue", "{0}"), FText::AsNumber(Montage->GetFrameAtTime(Section.GetTime()))));
+		Items.Add(LOCTEXT("SectionName", "Name").ToString(), FText::FromName(Section.SectionName));
+		if(GetDefault<UPersonaOptions>()->TimelineDisplayFormat == EFrameNumberDisplayFormats::Frames)
+		{
+			Items.Add(LOCTEXT("SectionTriggerFrame", "Trigger Frame").ToString(), FText::Format(LOCTEXT("SectionTriggerFrameValue", "{0}"), FText::AsNumber(Montage->GetFrameAtTime(Section.GetTime()))));
+		}
+		else
+		{
+			FNumberFormattingOptions NumberOptions;
+			NumberOptions.MinimumFractionalDigits = 3;
+			Items.Add(LOCTEXT("SectionTriggerTime", "Trigger Time").ToString(), FText::Format(LOCTEXT("SectionTriggerTimeValue", "{0}s"), FText::AsNumber(Section.GetTime(), &NumberOptions)));
+		}	
 	}
-	else
-	{
-		FNumberFormattingOptions NumberOptions;
-		NumberOptions.MinimumFractionalDigits = 3;
-		Items.Add(LOCTEXT("SectionTriggerTime", "Trigger Time").ToString(), FText::Format(LOCTEXT("SectionTriggerTimeValue", "{0}s"), FText::AsNumber(Section.GetTime(), &NumberOptions)));
-	}	
 }
 
 FName FTimingRelevantElement_Notify::GetTypeName()
@@ -447,58 +450,70 @@ float FTimingRelevantElement_Notify::GetElementTime() const
 ETimingElementType::Type FTimingRelevantElement_Notify::GetType()
 {
 	check(Sequence);
-	FAnimNotifyEvent& Event = Sequence->Notifies[NotifyIndex];
+	if(Sequence->Notifies.IsValidIndex(NotifyIndex))
+	{
+		FAnimNotifyEvent& Event = Sequence->Notifies[NotifyIndex];
 
-	if(Event.IsBranchingPoint())
-	{
-		return ETimingElementType::BranchPointNotify;
-	}
-	else
-	{
-		if(Event.NotifyStateClass)
+		if(Event.IsBranchingPoint())
 		{
-			return ETimingElementType::NotifyStateBegin;
+			return ETimingElementType::BranchPointNotify;
 		}
 		else
 		{
-			return ETimingElementType::QueuedNotify;
+			if(Event.NotifyStateClass)
+			{
+				return ETimingElementType::NotifyStateBegin;
+			}
+			else
+			{
+				return ETimingElementType::QueuedNotify;
+			}
 		}
 	}
+
+	return ETimingElementType::Max;
 }
 
 void FTimingRelevantElement_Notify::GetDescriptionItems(TMap<FString, FText>& Items)
 {
 	check(Sequence);
-	FAnimNotifyEvent& Event = Sequence->Notifies[NotifyIndex];
-
-	FNumberFormattingOptions NumberOptions;
-	NumberOptions.MinimumFractionalDigits = 3;
-
-	Items.Add(LOCTEXT("NotifyName", "Name").ToString(), FText::FromName(Event.NotifyName));
-
-	if(GetDefault<UPersonaOptions>()->TimelineDisplayFormat == EFrameNumberDisplayFormats::Frames)
+	if(Sequence->Notifies.IsValidIndex(NotifyIndex))
 	{
-		Items.Add(LOCTEXT("NotifyTriggerFrame", "Trigger Frame").ToString(), FText::Format(LOCTEXT("NotifyTriggerFrame_Val", "{0}"), FText::AsNumber(Sequence->GetFrameAtTime(Event.GetTime()))));
-	}
-	else
-	{
-		Items.Add(LOCTEXT("NotifyTriggerTime", "Trigger Time").ToString(), FText::Format(LOCTEXT("NotifyTriggerTime_Val", "{0}s"), FText::AsNumber(Event.GetTime(), &NumberOptions)));
-	}	
+		FAnimNotifyEvent& Event = Sequence->Notifies[NotifyIndex];
 
-	// +1 as we start at 1 when showing tracks to the user
-	Items.Add(LOCTEXT("TrackIdx", "Track").ToString(), FText::AsNumber(Event.TrackIndex + 1));
+		FNumberFormattingOptions NumberOptions;
+		NumberOptions.MinimumFractionalDigits = 3;
 
-	if(Event.NotifyStateClass)
-	{
-		Items.Add(LOCTEXT("NotifyDuration", "Duration").ToString(), FText::Format(LOCTEXT("NotifyDuration_Val", "{0}s"), FText::AsNumber(Event.GetDuration(), &NumberOptions)));
+		Items.Add(LOCTEXT("NotifyName", "Name").ToString(), FText::FromName(Event.NotifyName));
+
+		if(GetDefault<UPersonaOptions>()->TimelineDisplayFormat == EFrameNumberDisplayFormats::Frames)
+		{
+			Items.Add(LOCTEXT("NotifyTriggerFrame", "Trigger Frame").ToString(), FText::Format(LOCTEXT("NotifyTriggerFrame_Val", "{0}"), FText::AsNumber(Sequence->GetFrameAtTime(Event.GetTime()))));
+		}
+		else
+		{
+			Items.Add(LOCTEXT("NotifyTriggerTime", "Trigger Time").ToString(), FText::Format(LOCTEXT("NotifyTriggerTime_Val", "{0}s"), FText::AsNumber(Event.GetTime(), &NumberOptions)));
+		}	
+
+		// +1 as we start at 1 when showing tracks to the user
+		Items.Add(LOCTEXT("TrackIdx", "Track").ToString(), FText::AsNumber(Event.TrackIndex + 1));
+
+		if(Event.NotifyStateClass)
+		{
+			Items.Add(LOCTEXT("NotifyDuration", "Duration").ToString(), FText::Format(LOCTEXT("NotifyDuration_Val", "{0}s"), FText::AsNumber(Event.GetDuration(), &NumberOptions)));
+		}
 	}
 }
 
 int32 FTimingRelevantElement_Notify::GetElementSortPriority() const
 {
 	check(Sequence);
-	FAnimNotifyEvent& Event = Sequence->Notifies[NotifyIndex];
-	return Event.TrackIndex;
+	if(Sequence->Notifies.IsValidIndex(NotifyIndex))
+	{
+		FAnimNotifyEvent& Event = Sequence->Notifies[NotifyIndex];
+		return Event.TrackIndex;
+	}
+	return 0;
 }
 
 FName FTimingRelevantElement_NotifyStateEnd::GetTypeName()
@@ -509,9 +524,15 @@ FName FTimingRelevantElement_NotifyStateEnd::GetTypeName()
 float FTimingRelevantElement_NotifyStateEnd::GetElementTime() const
 {
 	check(Sequence);
-	FAnimNotifyEvent& Event = Sequence->Notifies[NotifyIndex];
-	check(Event.NotifyStateClass);
-	return Event.GetEndTriggerTime();
+	if(Sequence->Notifies.IsValidIndex(NotifyIndex))
+	{
+		FAnimNotifyEvent& Event = Sequence->Notifies[NotifyIndex];
+		if(Event.NotifyStateClass)
+		{
+			return Event.GetEndTriggerTime();
+		}
+	}
+	return -1.0f;
 }
 
 ETimingElementType::Type FTimingRelevantElement_NotifyStateEnd::GetType()

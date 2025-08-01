@@ -6,17 +6,10 @@
 #include "EngineDefines.h"
 #include "ConstraintDrives.generated.h"
 
-#if WITH_PHYSX
-namespace physx
-{
-	class PxD6Joint;
-}
-#endif // WITH_PHYSX
-
 UENUM()
 namespace EAngularDriveMode
 {
-	enum Type
+	enum Type : int
 	{
 		/** Spherical lerp between the current orientation/velocity and the target orientation/velocity. NOTE: This will NOT work if any angular constraints are set to Locked. */
 		SLERP,
@@ -27,7 +20,7 @@ namespace EAngularDriveMode
 
 
 USTRUCT()
-struct ENGINE_API FConstraintDrive
+struct FConstraintDrive
 {
 	GENERATED_BODY()
 
@@ -51,12 +44,10 @@ struct ENGINE_API FConstraintDrive
 	UPROPERTY(EditAnywhere, Category = Constraint)
 	uint8 bEnableVelocityDrive : 1;
 
-	FConstraintDrive();
+	ENGINE_API FConstraintDrive();
 
-#if WITH_PHYSX
 	/** Updates physx drive with properties from unreal */
-	void UpdatePhysXDrive_AssumesLocked(physx::PxD6Joint* Joint, int DriveType, bool bDriveEnabled) const;
-#endif
+	//void UpdatePhysXDrive_AssumesLocked(physx::PxD6Joint* Joint, int DriveType, bool bDriveEnabled) const;
 
 private:
 	friend struct FConstraintInstance;
@@ -64,17 +55,16 @@ private:
 	friend struct FAngularDriveConstraint;
 	//These functions may leave the struct in an invalid state unless calling UpdatePhysX* functions.
 	//They are only meant as helpers for FConstraintInstance
-	void SetDriveParams(float InStiffness, float InDamping, float InForceLimit);
+	ENGINE_API void SetDriveParams(float InStiffness, float InDamping, float InForceLimit);
 
 
 };
 
 /** Linear Drive */
 USTRUCT()
-struct ENGINE_API FLinearDriveConstraint
+struct FLinearDriveConstraint
 {
 	GENERATED_BODY()
-	
 
 	/** Target position the linear drive.*/
 	UPROPERTY(EditAnywhere, Category = LinearMotor)
@@ -93,10 +83,14 @@ struct ENGINE_API FLinearDriveConstraint
 	UPROPERTY(EditAnywhere, Category = LinearMotor)
 	FConstraintDrive ZDrive;
 
-	UPROPERTY(EditAnywhere, Category = LinearMotor)
-	uint8 bEnablePositionDrive : 1;
+#if WITH_EDITORONLY_DATA
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	UPROPERTY(config, meta = (DeprecatedProperty, DeprecationMessage = "Enable/disable of drives is done inside the individual constraint drives."))
+	uint8 bEnablePositionDrive_DEPRECATED : 1;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+#endif
 
-	FLinearDriveConstraint();
+	ENGINE_API FLinearDriveConstraint();
 
 	bool IsPositionDriveEnabled() const
 	{
@@ -112,15 +106,18 @@ private:
 	friend struct FConstraintInstance;
 	//These functions may leave the struct in an invalid state unless calling UpdatePhysX* functions.
 	//They are only meant as helpers for FConstraintInstance
-	void SetLinearPositionDrive(bool bEnableXDrive, bool bEnableYDrive, bool bEnableZDrive);
-	void SetLinearVelocityDrive(bool bEnableXDrive, bool bEnableYDrive, bool bEnableZDrive);
-	void SetDriveParams(float InStiffness, float InDamping, float InForceLimit);
+	ENGINE_API void SetLinearPositionDrive(bool bEnableXDrive, bool bEnableYDrive, bool bEnableZDrive);
+	ENGINE_API void SetLinearVelocityDrive(bool bEnableXDrive, bool bEnableYDrive, bool bEnableZDrive);
+	ENGINE_API void SetDriveParams(float InStiffness, float InDamping, float InForceLimit);
+	ENGINE_API void SetDriveParams(const FVector& InStiffness, const FVector& InDamping, const FVector& InForceLimit);
+	ENGINE_API void GetDriveParams(float& OutStiffness, float& OutDamping, float& OutForceLimit) const;
+	ENGINE_API void GetDriveParams(FVector& OutStiffness, FVector& OutDamping, FVector& OutForceLimit) const;
 };
 
 
 /** Angular Drive */
 USTRUCT()
-struct ENGINE_API FAngularDriveConstraint
+struct FAngularDriveConstraint
 {
 	GENERATED_BODY()
 
@@ -140,7 +137,7 @@ struct ENGINE_API FAngularDriveConstraint
 	UPROPERTY(EditAnywhere, Category = AngularMotor)
 	FRotator OrientationTarget;
 
-	/** Target angular velocity relative to the body reference frame. */
+	/** Target angular velocity relative to the body reference frame in revolutions per second. */
 	UPROPERTY(EditAnywhere, Category = AngularMotor)
 	FVector AngularVelocityTarget;
 
@@ -148,7 +145,7 @@ struct ENGINE_API FAngularDriveConstraint
 	UPROPERTY(EditAnywhere, Category = AngularMotor)
 	TEnumAsByte<enum EAngularDriveMode::Type> AngularDriveMode;
 
-	FAngularDriveConstraint();
+	ENGINE_API FAngularDriveConstraint();
 
 	bool IsOrientationDriveEnabled() const
 	{
@@ -175,19 +172,24 @@ struct ENGINE_API FAngularDriveConstraint
 		
 	}
 
-#if WITH_PHYSX
 	/** Updates physx drive with properties from unreal */
-	void UpdatePhysXAngularDrive_AssumesLocked(physx::PxD6Joint* Joint) const;
-#endif	// WITH_PHYSX
+	//void UpdatePhysXAngularDrive_AssumesLocked(physx::PxD6Joint* Joint) const;
 
 private:
 	friend struct FConstraintInstance;
 	//These functions may leave the struct in an invalid state unless calling UpdatePhysX* functions.
 	//They are only meant as helpers for FConstraintInstance
-	void SetOrientationDriveTwistAndSwing(bool InEnableTwistDrive, bool InEnableSwingDrive);
-	void SetOrientationDriveSLERP(bool InEnableSLERP);
-	void SetAngularVelocityDriveTwistAndSwing(bool InEnableTwistDrive, bool InEnableSwingDrive);
-	void SetAngularVelocityDriveSLERP(bool InEnableSLERP);
-	void SetDriveParams(float InStiffness, float InDamping, float InForceLimit);
-	void SetAngularDriveMode(EAngularDriveMode::Type DriveMode);
+	ENGINE_API void SetOrientationDriveTwistAndSwing(bool InEnableTwistDrive, bool InEnableSwingDrive);
+	ENGINE_API void SetOrientationDriveSLERP(bool InEnableSLERP);
+	ENGINE_API void SetAngularVelocityDriveTwistAndSwing(bool InEnableTwistDrive, bool InEnableSwingDrive);
+	ENGINE_API void SetAngularVelocityDriveSLERP(bool InEnableSLERP);
+	// Sets the three drive parameters (swing, twist and slerp) to the same value 
+	ENGINE_API void SetDriveParams(float InStiffness, float InDamping, float InForceLimit);
+	// Sets drive parameters in the order swing, twist, slerp
+	ENGINE_API void SetDriveParams(const FVector& InStiffness, const FVector& InDamping, const FVector& InForceLimit);
+	// Gets just the swing drive parameters - assuming the single-float set function has previously been used
+	ENGINE_API void GetDriveParams(float& OutStiffness, float& OutDamping, float& OutForceLimit) const;
+	// Gets drive parameters in the order swing, twist, slerp
+	ENGINE_API void GetDriveParams(FVector& OutStiffness, FVector& OutDamping, FVector& OutForceLimit) const;
+	ENGINE_API void SetAngularDriveMode(EAngularDriveMode::Type DriveMode);
 };

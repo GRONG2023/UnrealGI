@@ -23,6 +23,7 @@
 
 class AActor;
 class ABrush;
+class FBlake3;
 class FMeshMapBuildData;
 class ULevel;
 class ULightComponent;
@@ -45,10 +46,10 @@ public:
 	int32		iSide;		// If shared, index of unique side. Otherwise INDEX_NONE.
 
 	/** The vertex's shadow map coordinate. */
-	FVector2D ShadowTexCoord;
+	FVector2f ShadowTexCoord;
 
 	/** The vertex's shadow map coordinate for the backface of the node. */
-	FVector2D BackfaceShadowTexCoord;
+	FVector2f BackfaceShadowTexCoord;
 
 	// Functions.
 	friend FArchive& operator<< (FArchive &Ar, FVert &Vert)
@@ -97,7 +98,7 @@ struct FBspNode // 62 bytes
 	enum {MAX_ZONES=64};			// Max zones per level.
 
 	// Persistent information.
-	FPlane		Plane;			// 16 Plane the node falls into (X, Y, Z, W).
+	FPlane4f		Plane;			// 16 Plane the node falls into (X, Y, Z, W).
 	int32			iVertPool;		// 4  Index of first vertex in vertex pool, =iTerrain if NumVertices==0 and NF_TerrainFront.
 	int32			iSurf;			// 4  Index to surface information.
 
@@ -204,20 +205,17 @@ struct FLeaf
 //
 struct FBspSurf
 {
-public:
-
-	UMaterialInterface*	Material;		// 4 Material.
-	uint32				PolyFlags;		// 4 Polygon flags.
-	int32					pBase;			// 4 Polygon & texture base point index (where U,V==0,0).
-	int32					vNormal;		// 4 Index to polygon normal.
-	int32					vTextureU;		// 4 Texture U-vector index.
-	int32					vTextureV;		// 4 Texture V-vector index.
-	int32					iBrushPoly;		// 4 Editor brush polygon index.
-	ABrush*				Actor;			// 4 Brush actor owning this Bsp surface.
-	FPlane				Plane;			// 16 The plane this surface lies on.
-	float				LightMapScale;	// 4 The number of units/lightmap texel on this surface.
-
-	int32					iLightmassIndex;// 4 Index to the lightmass settings
+	TObjectPtr<UMaterialInterface>	Material;		// 4 Material.
+	uint32							PolyFlags;		// 4 Polygon flags.
+	int32							pBase;			// 4 Polygon & texture base point index (where U,V==0,0).
+	int32							vNormal;		// 4 Index to polygon normal.
+	int32							vTextureU;		// 4 Texture U-vector index.
+	int32							vTextureV;		// 4 Texture V-vector index.
+	int32							iBrushPoly;		// 4 Editor brush polygon index.
+	TObjectPtr<ABrush>				Actor;			// 4 Brush actor owning this Bsp surface.
+	FPlane4f						Plane;			// 16 The plane this surface lies on.
+	float							LightMapScale;	// 4 The number of units/lightmap texel on this surface.
+	int32							iLightmassIndex;// 4 Index to the lightmass settings
 
 	bool				bHiddenEdTemporary;	// 1 Marks whether this surface is temporarily hidden in the editor or not. Not serialized.
 	bool				bHiddenEdLevel;		// 1 Marks whether this surface is hidden by the level browser or not. Not serialized.
@@ -271,16 +269,16 @@ enum EPolyFlags
 
 struct FModelVertex
 {
-	FVector Position;
-	FVector TangentX;
-	FVector4 TangentZ;
-	FVector2D TexCoord;
-	FVector2D ShadowTexCoord;
+	FVector3f Position;
+	FVector3f TangentX;
+	FVector4f TangentZ;
+	FVector2f TexCoord;
+	FVector2f ShadowTexCoord;
 
-	FVector GetTangentY() const
+	FVector3f GetTangentY() const
 	{
-		FVector TanX = TangentX;
-		FVector TanZ = TangentZ;
+		FVector3f TanX = TangentX;
+		FVector3f TanZ = TangentZ;
 
 		return (TanZ ^ TanX) * TangentZ.W;
 	};
@@ -297,11 +295,11 @@ struct FModelVertex
 
 struct FDepecatedModelVertex
 {
-	FVector Position;
+	FVector3f Position;
 	FDeprecatedSerializedPackedNormal TangentX;
 	FDeprecatedSerializedPackedNormal TangentZ;
-	FVector2D TexCoord;
-	FVector2D ShadowTexCoord;
+	FVector2f TexCoord;
+	FVector2f ShadowTexCoord;
 
 	operator FModelVertex() const
 	{
@@ -342,6 +340,9 @@ public:
 	* @param B - data to serialize
 	*/
 	friend FArchive& operator<<(FArchive& Ar,FModelVertexBuffer& B);
+#if WITH_EDITOR
+	friend void UpdateHash(FBlake3& Builder, const FModelVertexBuffer& B);
+#endif
 
 private:
 	UModel* Model;
@@ -351,15 +352,17 @@ private:
 /** A struct that contains a set of conodes that will be used in one mapping */
 struct FNodeGroup
 {
+	ENGINE_API ~FNodeGroup();
+
 	/** List of nodes in the node group */
 	TArray<int32> Nodes;
 
 	/** List of relevant lights for this nodegroup */
 	TArray<ULightComponent*> RelevantLights;
 
-	FVector TangentX;
-	FVector TangentY;
-	FVector TangentZ;
+	FVector3f TangentX;
+	FVector3f TangentY;
+	FVector3f TangentZ;
 
 	FMatrix MapToWorld;
 	FMatrix WorldToMap;
@@ -394,13 +397,13 @@ class UModel : public UObject
 
 #if WITH_EDITOR
 	// Arrays and subobjects.
-	UPolys*						Polys;
+	TObjectPtr<UPolys>						Polys;
 #endif // WITH_EDITOR
 
 	TArray<FBspNode>		Nodes;
 	TArray<FVert>			Verts;
-	TArray<FVector>			Vectors;
-	TArray<FVector>			Points;
+	TArray<FVector3f>			Vectors;
+	TArray<FVector3f>			Points;
 	TArray<FBspSurf>		Surfs;
 
 #if WITH_EDITOR
@@ -448,9 +451,9 @@ class UModel : public UObject
 	ULevel* LightingLevel;
 
 	/** Cached transform of the owner brush when the geometry was last built */
-	FVector OwnerLocationWhenLastBuilt;
+	FVector3f OwnerLocationWhenLastBuilt;
 	FRotator OwnerRotationWhenLastBuilt;
-	FVector OwnerScaleWhenLastBuilt;
+	FVector3f OwnerScaleWhenLastBuilt;
 
 	/** Specifies whether the above cached transform is valid */
 	bool bCachedOwnerTransformValid;
@@ -473,10 +476,10 @@ public:
 	// UObject interface.
 	virtual void Serialize( FArchive& Ar ) override;
 	virtual void PostLoad() override;
+	virtual void PreSave(FObjectPreSaveContext SaveContext) override;
 #if WITH_EDITOR
 	virtual void PostEditUndo() override;
-	virtual bool Modify(bool bAlwaysMarkDirty = false) override;
-	virtual void PreEditChange(FProperty*) override;
+	virtual bool Modify(bool bAlwaysMarkDirty = true) override;
 #endif // WITH_EDITOR
 	virtual bool Rename( const TCHAR* InName=NULL, UObject* NewOuter=NULL, ERenameFlags Flags=REN_None ) override;
 	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
@@ -541,16 +544,16 @@ public:
 	int32 BuildVertexBuffers();
 
 	// UModel transactions.
-	ENGINE_API void ModifySelectedSurfs( bool UpdateMaster );
-	void ModifyAllSurfs( bool UpdateMaster );
-	ENGINE_API void ModifySurf( int32 InIndex, bool UpdateMaster );
+	ENGINE_API void ModifySelectedSurfs( bool UpdateBrushes );
+	void ModifyAllSurfs( bool UpdateBrushes );
+	ENGINE_API void ModifySurf( int32 InIndex, bool UpdateBrushes );
 	ENGINE_API bool HasSelectedSurfaces() const;
 #endif
 
 	ENGINE_API float FindNearestVertex
 	(
-		const FVector	&SourcePoint,
-		FVector			&DestPoint,
+		const FVector3f	&SourcePoint,
+		FVector3f			&DestPoint,
 		float			MinRadius,
 		int32				&pVertex
 	) const;
@@ -560,7 +563,7 @@ public:
 	);
 
 	/* Find the source brush actor associated with this point, or NULL if the point does not lie on a BSP surface. */
-	ENGINE_API ABrush* FindBrush(const FVector &SourcePoint) const;
+	ENGINE_API ABrush* FindBrush(const FVector3f &SourcePoint) const;
 
 	/**
 	 * Creates a bounding box for the passed in node
@@ -602,7 +605,7 @@ public:
 	friend class AVolume;
 
 private:
-
+	FGuid ConstructLightingGuid() const;
 };
 
 /**
@@ -613,10 +616,10 @@ class FModelElement
 public:
 
 	/** The model component containing this element. */
-	class UModelComponent* Component;
+	TObjectPtr<class UModelComponent> Component;
 
 	/** The material used by the nodes in this element. */
-	class UMaterialInterface* Material;
+	TObjectPtr<class UMaterialInterface> Material;
 
 	/** The nodes in the element. */
 	TArray<uint16> Nodes;

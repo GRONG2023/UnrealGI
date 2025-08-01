@@ -5,9 +5,11 @@ TextureStreamingHelpers.cpp: Definitions of classes used for texture streaming.
 =============================================================================*/
 
 #include "Streaming/TextureStreamingHelpers.h"
+#include "Stats/StatsTrace.h"
 #include "UnrealEngine.h"
-#include "Engine/Texture2D.h"
+#include "Engine/Level.h"
 #include "GenericPlatform/GenericPlatformMemoryPoolStats.h"
+#include "RHI.h"
 
 /** Streaming stats */
 
@@ -70,7 +72,7 @@ TAutoConsoleVariable<float> CVarStreamingBoost(
 	TEXT("=1.0: normal\n")
 	TEXT("<1.0: decrease wanted mip levels\n")
 	TEXT(">1.0: increase wanted mip levels"),
-	ECVF_Scalability
+	ECVF_Scalability | ECVF_ExcludeFromPreview
 	);
 
 TAutoConsoleVariable<float> CVarStreamingMinBoost(
@@ -108,13 +110,13 @@ TAutoConsoleVariable<int32> CVarStreamingPoolSize(
 	TEXT("r.Streaming.PoolSize"),
 	-1,
 	TEXT("-1: Default texture pool size, otherwise the size in MB"),
-	ECVF_Scalability);
+	ECVF_Scalability | ECVF_ExcludeFromPreview);
 
 static TAutoConsoleVariable<int32> CVarStreamingPoolSizeForMeshes(
 	TEXT("r.Streaming.PoolSizeForMeshes"),
 	-1,
 	TEXT("< 0: Mesh and texture share the same pool, otherwise the size of pool dedicated to meshes."),
-	ECVF_Scalability);
+	ECVF_Scalability | ECVF_ExcludeFromPreview);
 
 TAutoConsoleVariable<int32> CVarStreamingMaxTempMemoryAllowed(
 	TEXT("r.Streaming.MaxTempMemoryAllowed"),
@@ -129,7 +131,8 @@ TAutoConsoleVariable<int32> CVarStreamingDropMips(
 	0,
 	TEXT("0: Drop No Mips \n")
 	TEXT("1: Drop Cached Mips\n")
-	TEXT("2: Drop Cached and Hidden Mips"),
+	TEXT("2: Drop Cached and Hidden Mips\n")
+	TEXT("3: Drop cached mips and non-inlined LODs of no-ref meshes"),
 	ECVF_Cheat);
 
 TAutoConsoleVariable<int32> CVarStreamingHLODStrategy(
@@ -188,6 +191,12 @@ TAutoConsoleVariable<int32> CVarStreamingFullyLoadUsedTextures(
 	TEXT("r.Streaming.FullyLoadUsedTextures"),
 	0,
 	TEXT("If non-zero, all used texture will be fully streamed in as fast as possible"),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarStreamingFullyLoadMeshes(
+	TEXT("r.Streaming.FullyLoadMeshes"),
+	0,
+	TEXT("If non-zero, stream in all mesh LODs. This allows semi-disabling mesh LOD streaming without recook."),
 	ECVF_Default);
 
 TAutoConsoleVariable<int32> CVarStreamingUseAllMips(
@@ -258,6 +267,12 @@ ENGINE_API TAutoConsoleVariable<int32> CVarFramesForFullUpdate(
 	5,
 	TEXT("Texture streaming is time sliced per frame. This values gives the number of frames to visit all textures."));
 
+TAutoConsoleVariable<int32> CVarStreamingLowResHandlingMode(
+	TEXT("r.Streaming.LowResHandlingMode"),
+	(int32)FRenderAssetStreamingSettings::LRHM_DoNothing,
+	TEXT("How to handle assets with too many missing MIPs or LODs. 0 (default): do nothing, 1: load before regular streaming requests, 2: load before async loading precache requests."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarPrioritizeMeshLODRetention(
 	TEXT("r.Streaming.PrioritizeMeshLODRetention"),
 	1,
@@ -302,6 +317,7 @@ void FRenderAssetStreamingSettings::Update()
 	bUseNewMetrics = CVarStreamingUseNewMetrics.GetValueOnAnyThread() != 0;
 	bLimitPoolSizeToVRAM = !GIsEditor && CVarStreamingLimitPoolSizeToVRAM.GetValueOnAnyThread() != 0;
 	bFullyLoadUsedTextures = CVarStreamingFullyLoadUsedTextures.GetValueOnAnyThread() != 0;
+	bFullyLoadMeshes = CVarStreamingFullyLoadMeshes.GetValueOnAnyThread() != 0;
 	bUseAllMips = CVarStreamingUseAllMips.GetValueOnAnyThread() != 0;
 	MinMipForSplitRequest = CVarStreamingMinMipForSplitRequest.GetValueOnAnyThread();
 	PerTextureBiasViewBoostThreshold = CVarStreamingPerTextureBiasViewBoostThreshold.GetValueOnAnyThread();
@@ -310,6 +326,7 @@ void FRenderAssetStreamingSettings::Update()
 	MaxTextureUVDensity = CVarStreamingMaxTextureUVDensity.GetValueOnAnyThread();
 	bUseMaterialData = bUseNewMetrics && CVarStreamingUseMaterialData.GetValueOnAnyThread() != 0;
 	HiddenPrimitiveScale = bUseNewMetrics ? CVarStreamingHiddenPrimitiveScale.GetValueOnAnyThread() : 1.f;
+	LowResHandlingMode = (ELowResHandlingMode)CVarStreamingLowResHandlingMode.GetValueOnAnyThread();
 	bMipCalculationEnablePerLevelList = CVarStreamingMipCalculationEnablePerLevelList.GetValueOnAnyThread() != 0;
 	bPrioritizeMeshLODRetention = CVarPrioritizeMeshLODRetention.GetValueOnAnyThread() != 0;
 	VRAMPercentageClamp = CVarStreamingVRAMPercentageClamp.GetValueOnAnyThread();
@@ -446,4 +463,17 @@ int64 GetAverageRequiredTexturePoolSize()
 #else
 	return 0;
 #endif
+}
+
+bool OwnerLevelHasRegisteredStaticComponentsInStreamingManager(const AActor* Owner)
+{
+	if (Owner)
+	{
+		const ULevel* Level = Owner->GetLevel();
+		if (Level)
+		{
+			return Level->bStaticComponentsRegisteredInStreamingManager;
+		}
+	}
+	return false;
 }

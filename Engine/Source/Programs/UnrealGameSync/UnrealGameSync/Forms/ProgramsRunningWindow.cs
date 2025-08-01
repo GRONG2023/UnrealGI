@@ -1,58 +1,66 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 using System;
-using System.Collections.Generic;
-using System.ComponentModel;
 using System.Data;
-using System.Drawing;
 using System.Linq;
-using System.Text;
 using System.Threading;
-using System.Threading.Tasks;
 using System.Windows.Forms;
+using EpicGames.Core;
 
 namespace UnrealGameSync
 {
 	public partial class ProgramsRunningWindow : Form
 	{
-		object SyncObject = new object();
-		string[] Programs;
-		Func<string[]> EnumeratePrograms;
-		ManualResetEvent TerminateEvent;
-		Thread BackgroundThread;
+		readonly object _syncObject = new object();
+		FileReference[] _programs;
+		readonly Func<FileReference[]> _enumeratePrograms;
+		ManualResetEvent? _terminateEvent;
+		Thread? _backgroundThread;
 
-		public ProgramsRunningWindow(Func<string[]> EnumeratePrograms, string[] Programs)
+		public ProgramsRunningWindow(Func<FileReference[]> enumeratePrograms, FileReference[] programs)
 		{
 			InitializeComponent();
+			Font = new System.Drawing.Font("Segoe UI", 8.25F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
 
-			this.Programs = Programs.OrderBy(x => x).ToArray();
-			this.EnumeratePrograms = EnumeratePrograms;
-			this.ProgramListBox.Items.AddRange(Programs);
+			_programs = programs.OrderBy(x => x).ToArray();
+			_enumeratePrograms = enumeratePrograms;
+			ProgramListBox.Items.AddRange(programs);
+		}
+
+		protected override void Dispose(bool disposing)
+		{
+			if (disposing)
+			{
+				_terminateEvent?.Dispose();
+				components?.Dispose();
+			}
+			base.Dispose(disposing);
 		}
 
 		private void ProgramsRunningWindow_Load(object sender, EventArgs e)
 		{
-			TerminateEvent = new ManualResetEvent(false);
+			_terminateEvent = new ManualResetEvent(false);
 
-			BackgroundThread = new Thread(() => ExecuteBackgroundWork());
-			BackgroundThread.Start();
+			_backgroundThread = new Thread(() => ExecuteBackgroundWork());
+			_backgroundThread.IsBackground = true;
+			_backgroundThread.Start();
 		}
 
 		private void ExecuteBackgroundWork()
 		{
-			for(;;)
+			for (; ; )
 			{
-				if(TerminateEvent.WaitOne(TimeSpan.FromSeconds(2.0)))
+				if (_terminateEvent!.WaitOne(TimeSpan.FromSeconds(2.0)))
 				{
 					break;
 				}
 
-				string[] NewPrograms = EnumeratePrograms().OrderBy(x => x).ToArray();
-				lock(SyncObject)
+				FileReference[] newPrograms = _enumeratePrograms().OrderBy(x => x).ToArray();
+				lock (_syncObject)
 				{
-					if(!Enumerable.SequenceEqual(Programs, NewPrograms))
+					if (!Enumerable.SequenceEqual(_programs, newPrograms))
 					{
-						Programs = NewPrograms;
+						_programs = newPrograms;
 						BeginInvoke(new MethodInvoker(() => UpdatePrograms()));
 					}
 				}
@@ -62,9 +70,9 @@ namespace UnrealGameSync
 		private void UpdatePrograms()
 		{
 			ProgramListBox.Items.Clear();
-			ProgramListBox.Items.AddRange(Programs);
+			ProgramListBox.Items.AddRange(_programs);
 
-			if(Programs.Length == 0)
+			if (_programs.Length == 0)
 			{
 				DialogResult = DialogResult.OK;
 				Close();
@@ -73,15 +81,15 @@ namespace UnrealGameSync
 
 		private void ProgramsRunningWindow_FormClosed(object sender, FormClosedEventArgs e)
 		{
-			if(BackgroundThread != null)
+			if (_backgroundThread != null)
 			{
-				TerminateEvent.Set();
+				_terminateEvent!.Set();
 
-				BackgroundThread.Join();
-				BackgroundThread = null;
+				_backgroundThread.Join();
+				_backgroundThread = null;
 
-				TerminateEvent.Dispose();
-				TerminateEvent = null;
+				_terminateEvent.Dispose();
+				_terminateEvent = null;
 			}
 		}
 	}

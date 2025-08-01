@@ -5,10 +5,12 @@
 =============================================================================*/
 
 #include "Engine/VoiceChannel.h"
-#include "Net/DataBunch.h"
+#include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "Engine/NetConnection.h"
 #include "Net/OnlineEngineInterface.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(VoiceChannel)
 
 /** Cleans up any voice data remaining in the queue */
 bool UVoiceChannel::CleanUp( const bool bForDestroy, EChannelCloseReason CloseReason )
@@ -124,7 +126,7 @@ void UVoiceChannel::Tick()
 	{
 		if (!VoicePackets[i]->IsReliable())
 		{
-			VoicePackets.RemoveAt(i,1,false);
+			VoicePackets.RemoveAt(i,1,EAllowShrinking::No);
 			PacketLoss++;
 		}
 	}
@@ -152,3 +154,4 @@ void UVoiceChannel::AddVoicePacket(TSharedPtr<FVoicePacket> VoicePacket)
 			*VoicePacket->GetSender()->ToDebugString());
 	}
 }
+

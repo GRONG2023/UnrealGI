@@ -6,6 +6,8 @@
 
 #pragma once
 
+// IWYU pragma: begin_keep
+
 #include "Misc/MonolithicHeaderBoilerplate.h"
 MONOLITHIC_HEADER_BOILERPLATE()
 
@@ -37,9 +39,10 @@ MONOLITHIC_HEADER_BOILERPLATE()
 #include "PrimitiveUniformShaderParameters.h"
 #include "MeshBatch.h"
 #include "SceneUtils.h"
-#include "TessellationRendering.h"
 #include "SceneManagement.h"
 #include "MeshParticleVertexFactory.h"
 #include "ParticleHelper.h"
 #include "Distributions.h"
 #include "ParticleEmitterInstances.h"
+
+// IWYU pragma: end_keep

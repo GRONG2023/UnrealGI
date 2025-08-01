@@ -1,10 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SOutputLog.h"
+#include "ConsoleSettings.h"
 #include "Framework/Text/IRun.h"
 #include "Framework/Text/TextLayout.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/OutputDeviceHelper.h"
+#include "Misc/ScopeLock.h"
 #include "SlateOptMacros.h"
 #include "Textures/SlateIcon.h"
 #include "Framework/Commands/UIAction.h"
@@ -17,8 +19,6 @@
 #include "Widgets/Input/SMultiLineEditableTextBox.h"
 #include "Widgets/Input/SComboButton.h"
 #include "Widgets/Views/SListView.h"
-#include "EditorStyleSet.h"
-#include "Classes/EditorStyleSettings.h"
 #include "Widgets/Input/SSearchBox.h"
 #include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Images/SImage.h"
@@ -26,13 +26,108 @@
 #include "Misc/CoreDelegates.h"
 #include "HAL/PlatformOutputDevices.h"
 #include "HAL/FileManager.h"
+#include "Widgets/Input/SButton.h"
+#include "Framework/Docking/TabManager.h"
+#include "Widgets/Docking/SDockTab.h"
+#include "OutputLogModule.h"
+#include "Widgets/Text/SlateEditableTextTypes.h"
+#include "OutputLogSettings.h"
+#include "OutputLogStyle.h"
+#include "OutputLogMenuContext.h"
+#include "ToolMenus.h"
+
 
 #define LOCTEXT_NAMESPACE "SOutputLog"
-/** Expression context to test the given messages against the current text filter */
-class FLogFilter_TextFilterExpressionContext : public ITextFilterExpressionContext
+
+class FCategoryLineHighlighter : public ISlateLineHighlighter
 {
 public:
-	explicit FLogFilter_TextFilterExpressionContext(const FOutputLogMessage& InMessage) : Message(&InMessage) {}
+	static TSharedRef<FCategoryLineHighlighter> Create()
+	{
+		return MakeShareable(new FCategoryLineHighlighter());
+	}
+
+	virtual int32 OnPaint(const FPaintArgs& Args, const FTextLayout::FLineView& Line, const float OffsetX, const float Width, const FTextBlockStyle& DefaultStyle, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override
+	{
+		const FVector2D Location(Line.Offset.X + OffsetX, Line.Offset.Y);
+
+		// If we've not been set to an explicit color, calculate a suitable one from the linked color
+		FLinearColor SelectionBackgroundColorAndOpacity = DefaultStyle.SelectedBackgroundColor.GetColor(InWidgetStyle);// *InWidgetStyle.GetColorAndOpacityTint();
+		SelectionBackgroundColorAndOpacity.A *= 0.2f;
+
+		// The block size and offset values are pre-scaled, so we need to account for that when converting the block offsets into paint geometry
+		const float InverseScale = Inverse(AllottedGeometry.Scale);
+
+		if (Width > 0.0f)
+		{
+			// Draw the actual highlight rectangle
+			FSlateDrawElement::MakeBox(
+				OutDrawElements,
+				++LayerId,
+				AllottedGeometry.ToPaintGeometry(TransformVector(InverseScale, FVector2D(Width, FMath::Max(Line.Size.Y, Line.TextHeight))), FSlateLayoutTransform(TransformPoint(InverseScale, Location))),
+				&DefaultStyle.HighlightShape,
+				bParentEnabled /*&& bHasKeyboardFocus*/ ? ESlateDrawEffect::None : ESlateDrawEffect::DisabledEffect,
+				SelectionBackgroundColorAndOpacity
+			);
+		}
+
+		return LayerId;
+	}
+
+protected:
+	FCategoryLineHighlighter()
+	{
+	}
+};
+
+
+class FCategoryBadgeHighlighter : public ISlateLineHighlighter
+{
+public:
+	static TSharedRef<FCategoryBadgeHighlighter> Create(const FLinearColor& InBadgeColor)
+	{
+		return MakeShareable(new FCategoryBadgeHighlighter(InBadgeColor));
+	}
+
+	virtual int32 OnPaint(const FPaintArgs& Args, const FTextLayout::FLineView& Line, const float OffsetX, const float Width, const FTextBlockStyle& DefaultStyle, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override
+	{
+		const FVector2D Location(Line.Offset.X + OffsetX, Line.Offset.Y);
+
+		// The block size and offset values are pre-scaled, so we need to account for that when converting the block offsets into paint geometry
+		const float InverseScale = Inverse(AllottedGeometry.Scale);
+
+		if (Width > 0.0f)
+		{
+			// Draw the actual highlight rectangle
+			FSlateDrawElement::MakeBox(
+				OutDrawElements,
+				++LayerId,
+				AllottedGeometry.ToPaintGeometry(TransformVector(InverseScale, FVector2D(Width, FMath::Max(Line.Size.Y, Line.TextHeight))), FSlateLayoutTransform(TransformPoint(InverseScale, Location))),
+				&DefaultStyle.HighlightShape,
+				bParentEnabled ? ESlateDrawEffect::None : ESlateDrawEffect::DisabledEffect,
+				BadgeColor
+			);
+		}
+
+		return LayerId;
+	}
+
+protected:
+	FLinearColor BadgeColor;
+
+	FCategoryBadgeHighlighter(const FLinearColor& InBadgeColor)
+		: BadgeColor(InBadgeColor)
+	{
+	}
+};
+
+
+
+/** Expression context to test the given messages against the current text filter */
+class FLogFilter_TextFilterExpressionContextOutputLog : public ITextFilterExpressionContext
+{
+public:
+	explicit FLogFilter_TextFilterExpressionContextOutputLog(const FOutputLogMessage& InMessage) : Message(&InMessage) {}
 
 	/** Test the given value against the strings extracted from the current item */
 	virtual bool TestBasicStringExpression(const FTextFilterString& InValue, const ETextFilterTextComparisonMode InTextComparisonMode) const override { return TextFilterUtils::TestBasicStringExpression(*Message->Message, InValue, InTextComparisonMode); }
@@ -82,48 +177,68 @@ void SConsoleInputBox::Construct(const FArguments& InArgs)
 		.Placement( InArgs._SuggestionListPlacement )
 		[
 			SNew(SHorizontalBox)
-
 			+SHorizontalBox::Slot()
 			.AutoWidth()
 			.Padding(FMargin(0.0f, 0.0f, 4.0f, 0.0f))
 			[
 				SNew(SComboButton)
 				.IsEnabled(this, &SConsoleInputBox::IsCommandExecutorMenuEnabled)
-				.ComboButtonStyle(FEditorStyle::Get(), "GenericFilters.ComboButtonStyle")
-				.ForegroundColor(FLinearColor::White)
-				.ContentPadding(0)
+				.ComboButtonStyle(FOutputLogStyle::Get(), "SimpleComboButton")
+				.ContentPadding(0.f)
 				.OnGetMenuContent(this, &SConsoleInputBox::GetCommandExecutorMenuContent)
 				.ButtonContent()
 				[
-					SNew(STextBlock)
-					.Text(this, &SConsoleInputBox::GetActiveCommandExecutorDisplayName)
+					SNew(SHorizontalBox)
+					+SHorizontalBox::Slot()
+					.Padding(2.0f)
+					.HAlign(HAlign_Left)
+					.VAlign(VAlign_Center)
+					.AutoWidth()
+					[
+						SNew(SImage)
+						.ColorAndOpacity(FSlateColor::UseForeground())
+						.Image(FOutputLogStyle::Get().GetBrush("DebugConsole.Icon"))
+					]
+					+ SHorizontalBox::Slot()
+					.VAlign(VAlign_Center)
+					.Padding(2.0f)
+					[
+						SNew(STextBlock)
+						.Text(this, &SConsoleInputBox::GetActiveCommandExecutorDisplayName)
+					]
 				]
 			]
 
 			+SHorizontalBox::Slot()
+			.AutoWidth()
 			[
-				SAssignNew(InputText, SMultiLineEditableTextBox)
-				.Font(FEditorStyle::Get().GetWidgetStyle<FTextBlockStyle>("Log.Normal").Font)
-				.HintText(this, &SConsoleInputBox::GetActiveCommandExecutorHintText)
-				.AllowMultiLine(this, &SConsoleInputBox::GetActiveCommandExecutorAllowMultiLine)
-				.OnTextCommitted(this, &SConsoleInputBox::OnTextCommitted)
-				.OnTextChanged(this, &SConsoleInputBox::OnTextChanged)
-				.OnKeyCharHandler(this, &SConsoleInputBox::OnKeyCharHandler)
-				.OnKeyDownHandler(this, &SConsoleInputBox::OnKeyDownHandler)
-				.OnIsTypedCharValid(FOnIsTypedCharValid::CreateLambda([](const TCHAR InCh) { return true; })) // allow tabs to be typed into the field
-				.ClearKeyboardFocusOnCommit(false)
-				.ModiferKeyForNewLine(EModifierKey::Shift)
+				SNew(SBox)
+				.MinDesiredWidth(300.f)
+				.MaxDesiredWidth(600.f)
+				[
+					SAssignNew(InputText, SMultiLineEditableTextBox)
+					.Font(FOutputLogStyle::Get().GetWidgetStyle<FTextBlockStyle>("Log.Normal").Font)
+					.HintText(this, &SConsoleInputBox::GetActiveCommandExecutorHintText)
+					.AllowMultiLine(this, &SConsoleInputBox::GetActiveCommandExecutorAllowMultiLine)
+					.OnTextCommitted(this, &SConsoleInputBox::OnTextCommitted)
+					.OnTextChanged(this, &SConsoleInputBox::OnTextChanged)
+					.OnKeyCharHandler(this, &SConsoleInputBox::OnKeyCharHandler)
+					.OnKeyDownHandler(this, &SConsoleInputBox::OnKeyDownHandler)
+					.OnIsTypedCharValid(FOnIsTypedCharValid::CreateLambda([](const TCHAR InCh) { return true; })) // allow tabs to be typed into the field
+					.ClearKeyboardFocusOnCommit(false)
+					.ModiferKeyForNewLine(EModifierKey::Shift)
+				]
 			]
 		]
 		.MenuContent
 		(
 			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("Menu.Background"))
+			.BorderImage(FOutputLogStyle::Get().GetBrush("Menu.Background"))
 			.Padding( FMargin(2) )
 			[
 				SNew(SBox)
-				.HeightOverride(250) // avoids flickering, ideally this would be adaptive to the content without flickering
-				.MinDesiredWidth(300)
+				.HeightOverride(250.f) // avoids flickering, ideally this would be adaptive to the content without flickering
+				.MinDesiredWidth(300.f)
 				.MaxDesiredWidth(this, &SConsoleInputBox::GetSelectionListMaxWidth)
 				[
 					SAssignNew(SuggestionListView, SListView< TSharedPtr<FString> >)
@@ -173,6 +288,11 @@ void SConsoleInputBox::SuggestionSelectionChanged(TSharedPtr<FString> NewValue, 
 	if( SelectInfo == ESelectInfo::OnMouseClick )
 	{
 		SuggestionBox->SetIsOpen( false );
+
+		// Jump the caret to the end of the newly auto-completed line. This makes it so that selecting
+		// an option doesn't leave the cursor in the middle of the suggestion (which makes it hard to 
+		// ctrl-back out, or to type "?" for help, etc.)
+		InputText->GoTo(ETextLocation::EndOfDocument);
 	}
 
 	// Ideally this would set the focus back to the edit control
@@ -203,8 +323,9 @@ TSharedRef<ITableRow> SConsoleInputBox::MakeSuggestionListItemWidget(TSharedPtr<
 		[
 			SNew(STextBlock)
 			.Text(FText::FromString(SanitizedText))
-			.TextStyle(FEditorStyle::Get(), "Log.Normal")
+			.TextStyle(FOutputLogStyle::Get(), "Log.Normal")
 			.HighlightText(Suggestions.SuggestionsHighlight)
+			.ColorAndOpacity(FSlateColor::UseForeground())
 		];
 }
 
@@ -243,6 +364,7 @@ void SConsoleInputBox::OnTextChanged(const FText& InText)
 			};
 
 			IConsoleManager::Get().ForEachConsoleObjectThatContains(FConsoleObjectVisitor::CreateLambda(OnConsoleVariable), *InputTextStr);
+			AutoCompleteList.Append(GetDefault<UConsoleSettings>()->GetFilteredManualAutoCompleteCommands(InputTextStr));
 		}
 		AutoCompleteList.Sort([InputTextStr](const FString& A, const FString& B)
 		{ 
@@ -348,6 +470,8 @@ FReply SConsoleInputBox::OnPreviewKeyDown(const FGeometry& MyGeometry, const FKe
 	}
 	else
 	{
+		const FInputChord KeyEventAsInputChord = FInputChord(KeyEvent.GetKey(), EModifierKey::FromBools(KeyEvent.IsControlDown(), KeyEvent.IsAltDown(), KeyEvent.IsShiftDown(), KeyEvent.IsCommandDown()));
+
 		if(KeyEvent.GetKey() == EKeys::Up)
 		{
 			// If the command field isn't empty we need you to have pressed Control+Up to summon the history (to make sure you're not just using caret navigation)
@@ -395,6 +519,11 @@ FReply SConsoleInputBox::OnPreviewKeyDown(const FGeometry& MyGeometry, const FKe
 				ClearSuggestions();
 			}
 
+			return FReply::Handled();
+		}
+		else if (ActiveCommandExecutor && ActiveCommandExecutor->GetIterateExecutorHotKey() == KeyEventAsInputChord)
+		{
+			MakeNextCommandExecutorActive();
 			return FReply::Handled();
 		}
 	}
@@ -549,6 +678,28 @@ bool SConsoleInputBox::IsCommandExecutorMenuEnabled() const
 	return !ConsoleCommandCustomExec.IsBound(); // custom execs always show the default executor in the UI (which has the selector disabled)
 }
 
+void SConsoleInputBox::MakeNextCommandExecutorActive()
+{
+	// Sorted so the iteration order matches the displayed order.
+	TArray<IConsoleCommandExecutor*> CommandExecutors = IModularFeatures::Get().GetModularFeatureImplementations<IConsoleCommandExecutor>(IConsoleCommandExecutor::ModularFeatureName());
+	CommandExecutors.Sort([](IConsoleCommandExecutor& LHS, IConsoleCommandExecutor& RHS)
+		{
+			return LHS.GetDisplayName().CompareTo(RHS.GetDisplayName()) < 0;
+		});
+
+	int32 CurrentIndex = CommandExecutors.IndexOfByKey(ActiveCommandExecutor);
+	if (CurrentIndex >= 0)
+	{
+		CurrentIndex++;
+		if (CurrentIndex >= CommandExecutors.Num())
+		{
+			CurrentIndex = 0;
+		}
+
+		SetActiveCommandExecutor(CommandExecutors[CurrentIndex]->GetName());
+	}
+}
+
 TSharedRef<SWidget> SConsoleInputBox::GetCommandExecutorMenuContent()
 {
 	FMenuBuilder MenuBuilder(/*bInShouldCloseWindowAfterMenuSelection=*/true, nullptr);
@@ -591,6 +742,7 @@ FReply SConsoleInputBox::OnKeyDownHandler(const FGeometry& MyGeometry, const FKe
 	// Intercept the "open console" key
 	if (ActiveCommandExecutor && (ActiveCommandExecutor->AllowHotKeyClose() && ActiveCommandExecutor->GetHotKey() == InputChord))
 	{
+		SuggestionBox->SetIsOpen(false);
 		OnCloseConsole.ExecuteIfBound();
 		return FReply::Handled();
 	}
@@ -610,6 +762,12 @@ FReply SConsoleInputBox::OnKeyCharHandler(const FGeometry& MyGeometry, const FCh
 	if (InCharacterEvent.GetCharacter() == '\t' && bConsumeTab)
 	{
 		bConsumeTab = false;
+		return FReply::Handled();
+	}
+
+	if (InCharacterEvent.GetModifierKeys().AnyModifiersDown() && InCharacterEvent.GetCharacter() == ' ')
+	{	
+		// Ignore space bar + a modifier key.  It should not type a space as this is used by other keyboard shortcuts
 		return FReply::Handled();
 	}
 
@@ -669,19 +827,50 @@ void FOutputLogTextLayoutMarshaller::GetText(FString& TargetString, const FTextL
 
 bool FOutputLogTextLayoutMarshaller::AppendPendingMessage(const TCHAR* InText, const ELogVerbosity::Type InVerbosity, const FName& InCategory)
 {
-	return SOutputLog::CreateLogMessages(InText, InVerbosity, InCategory, Messages);
+	// We don't want to skip adding messages, so just try to acquire the lock
+	FScopeLock PendingMessagesAccess(&PendingMessagesCriticalSection);
+	return SOutputLog::CreateLogMessages(InText, InVerbosity, InCategory, PendingMessages);
 }
 
 bool FOutputLogTextLayoutMarshaller::SubmitPendingMessages()
 {
+	// We can always submit messages next tick. So only try to lock, if not possible return.
+	if (PendingMessagesCriticalSection.TryLock())
+	{
+		Messages.Append(MoveTemp(PendingMessages));
+		PendingMessages.Reset();
+		PendingMessagesCriticalSection.Unlock();
+	}
+	else
+	{
+		return false;
+	}
+
 	if (Messages.IsValidIndex(NextPendingMessageIndex))
 	{
 		const int32 CurrentMessagesCount = Messages.Num();
+
 		AppendPendingMessagesToTextLayout();
 		NextPendingMessageIndex = CurrentMessagesCount;
 		return true;
 	}
+
 	return false;
+}
+
+float FOutputLogTextLayoutMarshaller::GetCategoryHue(FName CategoryName)
+{
+	if (float* pResult = CategoryHueMap.Find(CategoryName))
+	{
+		return *pResult;
+	}
+	else
+	{
+		FRandomStream RNG(GetTypeHash(CategoryName));
+		const float Hue = (float)RNG.FRandRange(0.0, 360.0);
+		CategoryHueMap.Add(CategoryName, Hue);
+		return Hue;
+	}
 }
 
 void FOutputLogTextLayoutMarshaller::AppendPendingMessagesToTextLayout()
@@ -710,14 +899,34 @@ void FOutputLogTextLayoutMarshaller::AppendPendingMessagesToTextLayout()
 		MakeDirty();
 	}
 
+	const ELogCategoryColorizationMode CategoryColorizationMode = GetDefault<UOutputLogSettings>()->CategoryColorizationMode;
+
 	TArray<FTextLayout::FNewLineData> LinesToAdd;
 	LinesToAdd.Reserve(NumPendingMessages);
+	TArray<FTextLineHighlight> Highlights;
 
 	int32 NumAddedMessages = 0;
+
+	auto ComputeCategoryColor = [this](const FTextBlockStyle& OriginalStyle, const FName MessageCategory)
+	{
+		FTextBlockStyle Result = OriginalStyle;
+
+		FLinearColor HSV = OriginalStyle.ColorAndOpacity.GetSpecifiedColor().LinearRGBToHSV();
+		HSV.R = GetCategoryHue(MessageCategory);
+		HSV.G = FMath::Max(0.4f, HSV.G);
+		Result.ColorAndOpacity = HSV.HSVToLinearRGB();
+		return Result;
+	};
 
 	for (int32 MessageIndex = NextPendingMessageIndex; MessageIndex < CurrentMessagesCount; ++MessageIndex)
 	{
 		const TSharedPtr<FOutputLogMessage> Message = Messages[MessageIndex];
+		const int32 LineIndex = TextLayout->GetLineModels().Num() + NumAddedMessages;
+
+		if (!Message)
+		{
+			continue;
+		}
 
 		Filter->AddAvailableLogCategory(Message->Category);
 		if (!Filter->IsMessageAllowed(Message))
@@ -727,12 +936,73 @@ void FOutputLogTextLayoutMarshaller::AppendPendingMessagesToTextLayout()
 
 		++NumAddedMessages;
 
-		const FTextBlockStyle& MessageTextStyle = FEditorStyle::Get().GetWidgetStyle<FTextBlockStyle>(Message->Style);
+		const FTextBlockStyle& MessageTextStyle = FOutputLogStyle::Get().GetWidgetStyle<FTextBlockStyle>(Message->Style);
 
 		TSharedRef<FString> LineText = Message->Message;
 
 		TArray<TSharedRef<IRun>> Runs;
-		Runs.Add(FSlateTextRun::Create(FRunInfo(), LineText, MessageTextStyle));
+
+
+		switch (CategoryColorizationMode)
+		{
+		case ELogCategoryColorizationMode::None:
+			Runs.Add(FSlateTextRun::Create(FRunInfo(), LineText, MessageTextStyle));
+			break;
+		case ELogCategoryColorizationMode::ColorizeWholeLine:
+			{
+				const bool bUseCategoryColor = (Message->Verbosity > ELogVerbosity::Warning);
+				Runs.Add(FSlateTextRun::Create(FRunInfo(), LineText, bUseCategoryColor ? ComputeCategoryColor(MessageTextStyle, Message->Category) : MessageTextStyle));
+			}
+			break;
+		case ELogCategoryColorizationMode::ColorizeCategoryOnly:
+			{
+				if (Message->CategoryStartIndex >= 0)
+				{
+					const int32 CategoryStartIndex = Message->CategoryStartIndex;
+					const int32 CategoryStopIndex = CategoryStartIndex + (int32)Message->Category.GetStringLength() + 1;
+					if (CategoryStartIndex > 0)
+					{
+						Runs.Add(FSlateTextRun::Create(FRunInfo(), LineText, MessageTextStyle, FTextRange(0, CategoryStartIndex)));
+					}
+					Runs.Add(FSlateTextRun::Create(FRunInfo(), LineText, ComputeCategoryColor(MessageTextStyle, Message->Category), FTextRange(CategoryStartIndex, CategoryStopIndex)));
+					Runs.Add(FSlateTextRun::Create(FRunInfo(), LineText, MessageTextStyle, FTextRange(CategoryStopIndex, LineText->Len())));
+				}
+				else
+				{
+					Runs.Add(FSlateTextRun::Create(FRunInfo(), LineText, MessageTextStyle));
+				}
+			}
+			break;
+		case ELogCategoryColorizationMode::ColorizeCategoryAsBadge:
+			{
+				if (Message->CategoryStartIndex >= 0)
+				{
+					const int32 CategoryStartIndex = Message->CategoryStartIndex;
+					const int32 CategoryStopIndex = CategoryStartIndex + (int32)Message->Category.GetStringLength();
+
+					FTextBlockStyle BadgeStyle = ComputeCategoryColor(MessageTextStyle, Message->Category);
+					Highlights.Emplace(LineIndex, FTextRange(CategoryStartIndex, CategoryStopIndex), /*Zorder=*/ -20, FCategoryBadgeHighlighter::Create(BadgeStyle.ColorAndOpacity.GetSpecifiedColor()));
+					BadgeStyle.ColorAndOpacity = FLinearColor::Black;
+
+					if (CategoryStartIndex > 0)
+					{
+						Runs.Add(FSlateTextRun::Create(FRunInfo(), LineText, MessageTextStyle, FTextRange(0, CategoryStartIndex)));
+					}
+					Runs.Add(FSlateTextRun::Create(FRunInfo(), LineText, BadgeStyle, FTextRange(CategoryStartIndex, CategoryStopIndex)));
+					Runs.Add(FSlateTextRun::Create(FRunInfo(), LineText, MessageTextStyle, FTextRange(CategoryStopIndex, LineText->Len())));
+				}
+				else
+				{
+					Runs.Add(FSlateTextRun::Create(FRunInfo(), LineText, MessageTextStyle));
+				}
+			}
+			break;
+		}
+
+		if (!Message->Category.IsNone() && (Message->Category == CategoryToHighlight))
+		{
+			Highlights.Emplace(LineIndex, FTextRange(0, LineText->Len()), /*Zorder=*/ -5, FCategoryLineHighlighter::Create());
+		}
 
 		LinesToAdd.Emplace(MoveTemp(LineText), MoveTemp(Runs));
 	}
@@ -744,6 +1014,11 @@ void FOutputLogTextLayoutMarshaller::AppendPendingMessagesToTextLayout()
 	}
 
 	TextLayout->AddLines(LinesToAdd);
+
+	for (const FTextLineHighlight& Highlight : Highlights)
+	{
+		TextLayout->AddLineHighlight(Highlight);
+	}
 }
 
 void FOutputLogTextLayoutMarshaller::ClearMessages()
@@ -804,6 +1079,21 @@ void FOutputLogTextLayoutMarshaller::MarkMessagesCacheAsDirty()
 	bNumMessagesCacheDirty = true;
 }
 
+FName FOutputLogTextLayoutMarshaller::GetCategoryForLocation(const FTextLocation Location) const
+{
+	if (Messages.IsValidIndex(Location.GetLineIndex()))
+	{
+		return Messages[Location.GetLineIndex()]->Category;
+	}
+
+	return NAME_None;
+}
+
+FTextLocation FOutputLogTextLayoutMarshaller::GetTextLocationAt(const FVector2D& Relative) const
+{
+	return TextLayout ? TextLayout->GetTextLocationAt(Relative) : FTextLocation(INDEX_NONE, INDEX_NONE);
+}
+
 FOutputLogTextLayoutMarshaller::FOutputLogTextLayoutMarshaller(TArray< TSharedPtr<FOutputLogMessage> > InMessages, FOutputLogFilter* InFilter)
 	: Messages(MoveTemp(InMessages))
 	, NextPendingMessageIndex(0)
@@ -813,21 +1103,32 @@ FOutputLogTextLayoutMarshaller::FOutputLogTextLayoutMarshaller(TArray< TSharedPt
 {
 }
 
-BEGIN_SLATE_FUNCTION_BUILD_OPTIMIZATION
-void SOutputLog::Construct( const FArguments& InArgs )
+//////////////////////////////////////////////////////////////////////////
+
+namespace
 {
-	// Build list of available log categories from historical logs
-	for (const auto& Message : InArgs._Messages)
-	{
-		Filter.AddAvailableLogCategory(Message->Category);
-	}
+	const FName SettingsMenuName("OutputLog.SettingsMenu");
+
+	const FName SettingsWordWrapEntryName("WordWrapEnable");
+	const FName SettingsTimestampsSubMenuName("TimestampsSubMenu");
+	const FName SettingsClearOnPIEEntryName("ClearOnPIE");
+
+	const FName SettingsSeparatorName("Separator");
+
+	const FName SettingsBrowseLogDirectoryEntryName("BrowseLogDirectory");
+	const FName SettingsOpenLogExternalEntryName("OpenLogExternal");
+}
+
+BEGIN_SLATE_FUNCTION_BUILD_OPTIMIZATION
+void SOutputLog::Construct( const FArguments& InArgs, bool bCreateDrawerDockButton)
+{
+	bShouldCreateDrawerDockButton = bCreateDrawerDockButton;
+	BuildInitialLogCategoryFilter(InArgs);
 
 	MessagesTextMarshaller = FOutputLogTextLayoutMarshaller::Create(InArgs._Messages, &Filter);
 
 	MessagesTextBox = SNew(SMultiLineEditableTextBox)
-		.Style(FEditorStyle::Get(), "Log.TextBox")
-		.TextStyle(FEditorStyle::Get(), "Log.Normal")
-		.ForegroundColor(FLinearColor::Gray)
+		.Style(FOutputLogStyle::Get(), "Log.TextBox")
 		.Marshaller(MessagesTextMarshaller)
 		.IsReadOnly(true)
 		.AlwaysShowScrollbars(true)
@@ -835,132 +1136,123 @@ void SOutputLog::Construct( const FArguments& InArgs )
 		.OnVScrollBarUserScrolled(this, &SOutputLog::OnUserScrolled)
 		.ContextMenuExtender(this, &SOutputLog::ExtendTextBoxMenu);
 
+	// We take the settings bit flags passed in, and register a corresponding runtime tool menu profile.
+	const FName SettingsMenuProfileName = GetSettingsMenuProfileForFlags(InArgs._SettingsMenuFlags);
+
 	ChildSlot
+	.Padding(3)
 	[
-		SNew(SBorder)
-		.Padding(3)
-		.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+		SNew(SVerticalBox)
+
+		// Output Log Filter
+		+SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(FMargin(0.0f, 4.0f, 0.0f, 4.0f))
 		[
-			SNew(SVerticalBox)
-
-			// Output Log Filter
-			+SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(FMargin(0.0f, 0.0f, 0.0f, 4.0f))
+			SNew(SHorizontalBox)
+			+SHorizontalBox::Slot()
+			.Padding(0, 0, 4, 0)
+			.FillWidth(.65f)
 			[
-				SNew(SHorizontalBox)
-			
-				+SHorizontalBox::Slot()
-				.AutoWidth()
+				SAssignNew(FilterTextBox, SSearchBox)
+				.HintText(LOCTEXT("SearchLogHint", "Search Log"))
+				.OnTextChanged(this, &SOutputLog::OnFilterTextChanged)
+				.OnTextCommitted(this, &SOutputLog::OnFilterTextCommitted)
+				.DelayChangeNotificationsWhileTyping(true)
+			]
+			+SHorizontalBox::Slot()
+			.AutoWidth()
+			.HAlign(HAlign_Left)
+			[
+				SNew(SComboButton)
+				.ComboButtonStyle(FOutputLogStyle::Get(), "SimpleComboButton")
+				.ToolTipText(LOCTEXT("AddFilterToolTip", "Add an output log filter."))
+				.OnGetMenuContent(this, &SOutputLog::MakeAddFilterMenu)
+				.ButtonContent()
 				[
-					SNew(SComboButton)
-					.ComboButtonStyle(FEditorStyle::Get(), "GenericFilters.ComboButtonStyle")
-					.ForegroundColor(FLinearColor::White)
-					.ContentPadding(0)
-					.ToolTipText(LOCTEXT("AddFilterToolTip", "Add an output log filter."))
-					.OnGetMenuContent(this, &SOutputLog::MakeAddFilterMenu)
-					.HasDownArrow(true)
-					.ContentPadding(FMargin(1, 0))
-					.ButtonContent()
+					SNew(SHorizontalBox)
+					+SHorizontalBox::Slot()
+					.AutoWidth()
 					[
-						SNew(SHorizontalBox)
-
-						+SHorizontalBox::Slot()
-						.AutoWidth()
-						[
-							SNew(STextBlock)
-							.TextStyle(FEditorStyle::Get(), "GenericFilters.TextStyle")
-							.Font(FEditorStyle::Get().GetFontStyle("FontAwesome.9"))
-							.Text(FText::FromString(FString(TEXT("\xf0b0"))) /*fa-filter*/)
-						]
-
-						+SHorizontalBox::Slot()
-						.AutoWidth()
-						.Padding(2, 0, 0, 0)
-						[
-							SNew(STextBlock)
-							.TextStyle(FEditorStyle::Get(), "GenericFilters.TextStyle")
-							.Text(LOCTEXT("Filters", "Filters"))
-						]
+						SNew(SImage)
+						.Image(FOutputLogStyle::Get().GetBrush("Icons.Filter"))
+						.ColorAndOpacity(FSlateColor::UseForeground())
+					]
+					+SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(2, 0, 0, 0)
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT("Filters", "Filters"))
+						.ColorAndOpacity(FSlateColor::UseForeground())
 					]
 				]
-
-				+SHorizontalBox::Slot()
-				.Padding(4, 1, 0, 0)
-				[
-					SAssignNew(FilterTextBox, SSearchBox)
-					.HintText(LOCTEXT("SearchLogHint", "Search Log"))
-					.OnTextChanged(this, &SOutputLog::OnFilterTextChanged)
-					.OnTextCommitted(this, &SOutputLog::OnFilterTextCommitted)
-					.DelayChangeNotificationsWhileTyping(true)
-				]
 			]
-
-			// Output log area
-			+SVerticalBox::Slot()
-			.FillHeight(1)
+			+SHorizontalBox::Slot()
+			.HAlign(HAlign_Right)
+			.VAlign(VAlign_Center)
+			.Padding(4, 0)
 			[
-				MessagesTextBox.ToSharedRef()
+				CreateDrawerDockButton()
 			]
-
-			// The console input box
-			+SVerticalBox::Slot()
-			.AutoHeight()
+			+ SHorizontalBox::Slot()
+			.HAlign(HAlign_Right)
+			.AutoWidth()
 			[
-				SNew(SHorizontalBox)
-
-				+SHorizontalBox::Slot()
-				.FillWidth(1.f)
-				.VAlign(VAlign_Center)
-				.Padding(FMargin(0.0f, 1.0f, 0.0f, 0.0f))
+				SNew(SComboButton)
+				.ComboButtonStyle(FOutputLogStyle::Get(), "SimpleComboButton")
+				.OnGetMenuContent(this, &SOutputLog::GetSettingsMenuContent, SettingsMenuProfileName)
+				.ButtonContent()
 				[
-					SNew(SBox)
-					.MaxDesiredHeight(180.0f)
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.VAlign(VAlign_Center)
 					[
-						SNew(SConsoleInputBox)
-						.OnConsoleCommandExecuted(this, &SOutputLog::OnConsoleCommandExecuted)
-
-						// Always place suggestions above the input line for the output log widget
-						.SuggestionListPlacement(MenuPlacement_AboveAnchor)
+						SNew(SImage)
+						.Image(FOutputLogStyle::Get().GetBrush("Icons.Settings"))
+						.ColorAndOpacity(FSlateColor::UseForeground())
 					]
-				]
-
-				+SHorizontalBox::Slot()
-				.AutoWidth()
-				.Padding(4, 0, 0, 0)
-				[
-					SAssignNew(ViewOptionsComboButton, SComboButton)
-					.ContentPadding(0)
-					.ForegroundColor( this, &SOutputLog::GetViewButtonForegroundColor )
-					.ButtonStyle( FEditorStyle::Get(), "ToggleButton" ) // Use the tool bar item style for this button
-					.OnGetMenuContent( this, &SOutputLog::GetViewButtonContent )
-					.ButtonContent()
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(2, 0, 0, 0)
+					.VAlign(VAlign_Center)
 					[
-						SNew(SHorizontalBox)
- 
-						+SHorizontalBox::Slot()
-						.AutoWidth()
-						.VAlign(VAlign_Center)
-						[
-							SNew(SImage).Image( FEditorStyle::GetBrush("GenericViewButton") )
-						]
- 
-						+SHorizontalBox::Slot()
-						.AutoWidth()
-						.Padding(2, 0, 0, 0)
-						.VAlign(VAlign_Center)
-						[
-							SNew(STextBlock).Text( LOCTEXT("ViewButton", "View Options") )
-						]
+						SNew(STextBlock)
+						.Text(LOCTEXT("SettingsButton", "Settings"))
+						.ColorAndOpacity(FSlateColor::UseForeground())
 					]
 				]
 			]
 		]
+
+		// Output log area
+		+SVerticalBox::Slot()
+		.FillHeight(1)
+		[
+			MessagesTextBox.ToSharedRef()
+		]
+
+		// The console input box
+		+SVerticalBox::Slot()
+		.AutoHeight()
+		[
+			SAssignNew(ConsoleInputBox, SConsoleInputBox)
+			.Visibility(MakeAttributeLambda([]() { return  FOutputLogModule::Get().ShouldHideConsole() ? EVisibility::Collapsed : EVisibility::Visible; }))
+			.OnConsoleCommandExecuted(this, &SOutputLog::OnConsoleCommandExecuted)
+			.OnCloseConsole(InArgs._OnCloseConsole)
+			// Always place suggestions above the input line for the output log widget
+			.SuggestionListPlacement(MenuPlacement_AboveAnchor) 
+		]
 	];
 
 	GLog->AddOutputDevice(this);
-	// Remove itself on crash (crashmalloc has limited memory and echoing logs here at that point is useless).
-	FCoreDelegates::OnHandleSystemError.AddRaw(this, &SOutputLog::OnCrash);
+
+#if WITH_EDITOR
+	// Listen for style changes
+	UOutputLogSettings* Settings = GetMutableDefault<UOutputLogSettings>();
+	SettingsWatchHandle = Settings->OnSettingChanged().AddRaw(this, &SOutputLog::HandleSettingChanged);
+#endif
 
 	bIsUserScrolled = false;
 	RequestForceScroll();
@@ -973,7 +1265,15 @@ SOutputLog::~SOutputLog()
 	{
 		GLog->RemoveOutputDevice(this);
 	}
-	FCoreDelegates::OnHandleSystemError.RemoveAll(this);
+
+#if WITH_EDITOR
+	if (UObjectInitialized() && !GExitPurge)
+	{
+		UOutputLogSettings* Settings = GetMutableDefault<UOutputLogSettings>();
+		Settings->OnSettingChanged().Remove(SettingsWatchHandle);
+	}
+#endif
+
 }
 
 void SOutputLog::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
@@ -981,22 +1281,16 @@ void SOutputLog::Tick(const FGeometry& AllottedGeometry, const double InCurrentT
 	if (MessagesTextMarshaller->SubmitPendingMessages())
 	{
 		// Don't scroll to the bottom automatically when the user is scrolling the view or has scrolled it away from the bottom.
-		if (!bIsUserScrolled)
-		{
-			RequestForceScroll();
-		}
+		RequestForceScroll(true);
 	}
 
 	SCompoundWidget::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
 }
 
-void SOutputLog::OnCrash()
-{
-	if (GLog != nullptr)
-	{
-		GLog->RemoveOutputDevice(this);
-	}
-}
+static const FName NAME_StyleLogCommand(TEXT("Log.Command"));
+static const FName NAME_StyleLogError(TEXT("Log.Error"));
+static const FName NAME_StyleLogWarning(TEXT("Log.Warning"));
+static const FName NAME_StyleLogNormal(TEXT("Log.Normal"));
 
 bool SOutputLog::CreateLogMessages( const TCHAR* V, ELogVerbosity::Type Verbosity, const class FName& Category, TArray< TSharedPtr<FOutputLogMessage> >& OutMessages )
 {
@@ -1007,24 +1301,24 @@ bool SOutputLog::CreateLogMessages( const TCHAR* V, ELogVerbosity::Type Verbosit
 	}
 	else
 	{
-		// Get the style for this message. When piping output from child processes (eg. when cooking through the editor), we want to highlight messages
+		// Get the style for this message. When piping output from child processes (e.g., when cooking through the editor), we want to highlight messages
 		// according to their original verbosity, so also check for "Error:" and "Warning:" substrings. This is consistent with how the build system processes logs.
 		FName Style;
 		if (Category == NAME_Cmd)
 		{
-			Style = FName(TEXT("Log.Command"));
+			Style = NAME_StyleLogCommand;
 		}
 		else if (Verbosity == ELogVerbosity::Error || FCString::Stristr(V, TEXT("Error:")) != nullptr)
 		{
-			Style = FName(TEXT("Log.Error"));
+			Style = NAME_StyleLogError;
 		}
 		else if (Verbosity == ELogVerbosity::Warning || FCString::Stristr(V, TEXT("Warning:")) != nullptr)
 		{
-			Style = FName(TEXT("Log.Warning"));
+			Style = NAME_StyleLogWarning;
 		}
 		else
 		{
-			Style = FName(TEXT("Log.Normal"));
+			Style = NAME_StyleLogNormal;
 		}
 
 		// Determine how to format timestamps
@@ -1032,7 +1326,7 @@ bool SOutputLog::CreateLogMessages( const TCHAR* V, ELogVerbosity::Type Verbosit
 		if (UObjectInitialized() && !GExitPurge)
 		{
 			// Logging can happen very late during shutdown, even after the UObject system has been torn down, hence the init check above
-			LogTimestampMode = GetDefault<UEditorStyleSettings>()->LogTimestampMode;
+			LogTimestampMode = GetDefault<UOutputLogSettings>()->LogTimestampMode;
 		}
 
 		const int32 OldNumMessages = OutMessages.Num();
@@ -1051,25 +1345,26 @@ bool SOutputLog::CreateLogMessages( const TCHAR* V, ELogVerbosity::Type Verbosit
 				Line = Line.ConvertTabsToSpaces(4);
 
 				// Hard-wrap lines to avoid them being too long
-				static const int32 HardWrapLen = 360;
+				static const int32 HardWrapLen = 600;
 				for (int32 CurrentStartIndex = 0; CurrentStartIndex < Line.Len();)
 				{
 					int32 HardWrapLineLen = 0;
 					if (bIsFirstLineInMessage)
 					{
-						FString MessagePrefix = FOutputDeviceHelper::FormatLogLine(Verbosity, Category, nullptr, LogTimestampMode);
+						int32 CategoryStartIndex;
+						const FString MessagePrefix = FOutputDeviceHelper::FormatLogLine(Verbosity, Category, nullptr, LogTimestampMode, -1.0, /*out*/ &CategoryStartIndex);
 						
 						HardWrapLineLen = FMath::Min(HardWrapLen - MessagePrefix.Len(), Line.Len() - CurrentStartIndex);
-						FString HardWrapLine = Line.Mid(CurrentStartIndex, HardWrapLineLen);
+						const FString HardWrapLine = Line.Mid(CurrentStartIndex, HardWrapLineLen);
 
-						OutMessages.Add(MakeShared<FOutputLogMessage>(MakeShared<FString>(MessagePrefix + HardWrapLine), Verbosity, Category, Style));
+						OutMessages.Add(MakeShared<FOutputLogMessage>(MakeShared<FString>(MessagePrefix + HardWrapLine), Verbosity, Category, Style, CategoryStartIndex));
 					}
 					else
 					{
 						HardWrapLineLen = FMath::Min(HardWrapLen, Line.Len() - CurrentStartIndex);
 						FString HardWrapLine = Line.Mid(CurrentStartIndex, HardWrapLineLen);
-
-						OutMessages.Add(MakeShared<FOutputLogMessage>(MakeShared<FString>(MoveTemp(HardWrapLine)), Verbosity, Category, Style));
+						
+						OutMessages.Add(MakeShared<FOutputLogMessage>(MakeShared<FString>(MoveTemp(HardWrapLine)), Verbosity, Category, Style, INDEX_NONE));
 					}
 
 					bIsFirstLineInMessage = false;
@@ -1087,14 +1382,6 @@ void SOutputLog::Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const 
 	MessagesTextMarshaller->AppendPendingMessage(V, Verbosity, Category);
 }
 
-FSlateColor SOutputLog::GetViewButtonForegroundColor() const
-{
-	static const FName InvertedForegroundName("InvertedForeground");
-	static const FName DefaultForegroundName("DefaultForeground");
-
-	return ViewOptionsComboButton->IsHovered() ? FEditorStyle::GetSlateColor(InvertedForegroundName) : FEditorStyle::GetSlateColor(DefaultForegroundName);
-}
-
 void SOutputLog::ExtendTextBoxMenu(FMenuBuilder& Builder)
 {
 	FUIAction ClearOutputLogAction(
@@ -1108,6 +1395,49 @@ void SOutputLog::ExtendTextBoxMenu(FMenuBuilder& Builder)
 		FSlateIcon(), 
 		ClearOutputLogAction
 		);
+
+	const FVector2D CursorPos = FSlateApplication::Get().GetCursorPos();
+	const FVector2D RelativeCursorPos = MessagesTextBox->GetTickSpaceGeometry().AbsoluteToLocal(CursorPos);
+	const FTextLocation CursorTextLocation = MessagesTextMarshaller->GetTextLocationAt(RelativeCursorPos);
+
+	if (CursorTextLocation.IsValid())
+	{
+		const FName CategoryName = MessagesTextMarshaller->GetCategoryForLocation(CursorTextLocation);
+
+		if (!CategoryName.IsNone())
+		{
+			Builder.BeginSection(NAME_None, FText::Format(LOCTEXT("CategoryActionsSectionHeading", "Category {0}"), FText::FromName(CategoryName)));
+
+			if (CategoryName == MessagesTextMarshaller->GetCategoryToHighlight())
+			{
+				FUIAction StopHighlightingCategoryAction(
+					FExecuteAction::CreateRaw(this, &SOutputLog::OnHighlightCategory, FName())
+				);
+
+				Builder.AddMenuEntry(
+					LOCTEXT("StopHighlightCategoryAction", "Remove category highlights"),
+					LOCTEXT("StopHighlightCategoryActionTooltip", "Stop highlighting all messages for this category"),
+					FSlateIcon(),
+					StopHighlightingCategoryAction
+				);
+			}
+			else
+			{
+				FUIAction HighlightCategoryAction(
+					FExecuteAction::CreateRaw(this, &SOutputLog::OnHighlightCategory, CategoryName)
+				);
+
+				Builder.AddMenuEntry(
+					FText::Format(LOCTEXT("HighlightCategoryAction", "Highlight category {0}"), FText::FromName(CategoryName)),
+					LOCTEXT("HighlightCategoryActionTooltip", "Highlights all messages for this category"),
+					FSlateIcon(),
+					HighlightCategoryAction
+				);
+			}
+
+			Builder.EndSection();
+		}
+	}
 }
 
 void SOutputLog::OnClearLog()
@@ -1120,6 +1450,33 @@ void SOutputLog::OnClearLog()
 	bIsUserScrolled = false;
 }
 
+void SOutputLog::OnHighlightCategory(FName NewCategoryToHighlight)
+{
+	MessagesTextMarshaller->SetCategoryToHighlight(NewCategoryToHighlight);
+
+	RefreshAllPreservingLocation();
+}
+
+void SOutputLog::HandleSettingChanged(FName ChangedSettingName)
+{
+	RefreshAllPreservingLocation();
+}
+
+void SOutputLog::RefreshAllPreservingLocation()
+{
+	const FTextLocation LastCursorTextLocation = MessagesTextBox->GetCursorLocation();
+
+	MessagesTextMarshaller->MarkMessagesCacheAsDirty();
+	MessagesTextMarshaller->MakeDirty();
+	MessagesTextBox->Refresh();
+
+	//@TODO: Without this, the window will scroll if the last 'normally clicked location' is not on screen
+	// (even with the right-click set cursor pos fix, the refresh will scroll you back to the top of the screen
+	// until you left click, or to where you last left clicked otherwise if off screen; spooky...)
+	// Ideally we could read the current location or fix the bug where a refresh causes a scroll
+	MessagesTextBox->GoTo(LastCursorTextLocation);
+}
+
 void SOutputLog::OnUserScrolled(float ScrollOffset)
 {
 	bIsUserScrolled = ScrollOffset < 1.0 && !FMath::IsNearlyEqual(ScrollOffset, 1.0f);
@@ -1130,6 +1487,11 @@ bool SOutputLog::CanClearLog() const
 	return MessagesTextMarshaller->GetNumMessages() > 0;
 }
 
+void SOutputLog::FocusConsoleCommandBox()
+{
+	FSlateApplication::Get().SetKeyboardFocus(ConsoleInputBox->GetEditableTextBox(), EFocusCause::SetDirectly);
+}
+
 void SOutputLog::OnConsoleCommandExecuted()
 {
 	// Submit pending messages when executing a command to keep the log feeling responsive to input
@@ -1137,9 +1499,10 @@ void SOutputLog::OnConsoleCommandExecuted()
 	RequestForceScroll();
 }
 
-void SOutputLog::RequestForceScroll()
+void SOutputLog::RequestForceScroll(bool bIfUserHasNotScrolledUp)
 {
-	if (MessagesTextMarshaller->GetNumFilteredMessages() > 0)
+	if (MessagesTextMarshaller->GetNumFilteredMessages() > 0
+		&& (!bIfUserHasNotScrolledUp || !bIsUserScrolled))
 	{
 		MessagesTextBox->ScrollTo(ETextLocation::EndOfDocument);
 		bIsUserScrolled = false;
@@ -1159,33 +1522,123 @@ void SOutputLog::Refresh()
 
 bool SOutputLog::IsWordWrapEnabled() const
 {
-	bool WordWrapEnabled = false;
-	GConfig->GetBool(TEXT("/Script/UnrealEd.EditorPerProjectUserSettings"), TEXT("bEnableOutputLogWordWrap"), WordWrapEnabled, GEditorPerProjectIni);
-	return WordWrapEnabled;
+	const UOutputLogSettings* Settings = GetDefault<UOutputLogSettings>();
+	return Settings ? Settings->bEnableOutputLogWordWrap : false;
 }
 
 void SOutputLog::SetWordWrapEnabled(ECheckBoxState InValue)
 {
-	const bool WordWrapEnabled = (InValue == ECheckBoxState::Checked);
-	GConfig->SetBool(TEXT("/Script/UnrealEd.EditorPerProjectUserSettings"), TEXT("bEnableOutputLogWordWrap"), WordWrapEnabled, GEditorPerProjectIni);
-
-	if (!bIsUserScrolled)
+	const bool bWordWrapEnabled = (InValue == ECheckBoxState::Checked);
+	UOutputLogSettings* Settings = GetMutableDefault<UOutputLogSettings>();
+	if (Settings)
 	{
-		RequestForceScroll();
+		Settings->bEnableOutputLogWordWrap = bWordWrapEnabled;
+		Settings->SaveConfig();
 	}
+
+	RequestForceScroll(true);
 }
 
+ELogTimes::Type SOutputLog::GetSelectedTimestampMode() 
+{
+	const UOutputLogSettings* Settings = GetDefault<UOutputLogSettings>();
+	return Settings->LogTimestampMode;
+}
+
+bool SOutputLog::IsSelectedTimestampMode(ELogTimes::Type NewType)
+{
+	return GetSelectedTimestampMode() == NewType;
+}
+
+void SOutputLog::AddTimestampMenuSection(FMenuBuilder& Menu)
+{
+
+	Menu.BeginSection("LoggingTimestampSection");
+	{
+		const UEnum* Enum = StaticEnum<ELogTimes::Type>();
+
+		for (int CurrentTimeStampType = 0; CurrentTimeStampType < Enum->NumEnums() - 1; CurrentTimeStampType++)
+		{
+			
+			ELogTimes::Type TimeStampType = static_cast<ELogTimes::Type>(CurrentTimeStampType);
+			FText Tooltip;
+
+			#if WITH_EDITOR
+				Tooltip = Enum->GetToolTipTextByIndex(CurrentTimeStampType);
+			#endif // WITH_EDITOR
+			
+			Menu.AddMenuEntry(Enum->GetDisplayNameTextByIndex(CurrentTimeStampType),
+				Tooltip,
+				FSlateIcon(),
+				FUIAction(
+					FExecuteAction::CreateLambda([this, TimeStampType] {
+						SetTimestampMode(TimeStampType);
+						}),
+					FCanExecuteAction::CreateLambda([] { return true; }),
+					FIsActionChecked::CreateLambda([this, TimeStampType] { return IsSelectedTimestampMode(TimeStampType); })
+							),
+				NAME_None,
+				EUserInterfaceActionType::RadioButton);
+
+		}
+	}
+	Menu.EndSection();
+}
+
+void SOutputLog::SetTimestampMode(ELogTimes::Type InValue)
+{
+	 UOutputLogSettings* Settings = GetMutableDefault<UOutputLogSettings>();
+	if (Settings)
+	{
+		Settings->LogTimestampMode = InValue;
+		Settings->SaveConfig();
+	}
+	RequestForceScroll(true);
+}
+
+#if WITH_EDITOR
 bool SOutputLog::IsClearOnPIEEnabled() const
 {
-	bool ClearOnPIEEnabled = false;
-	GConfig->GetBool(TEXT("/Script/UnrealEd.EditorPerProjectUserSettings"), TEXT("bEnableOutputLogClearOnPIE"), ClearOnPIEEnabled, GEditorPerProjectIni);
-	return ClearOnPIEEnabled;
+	const UOutputLogSettings* Settings = GetDefault<UOutputLogSettings>();
+	return Settings ? Settings->bEnableOutputLogClearOnPIE : false;
 }
 
 void SOutputLog::SetClearOnPIE(ECheckBoxState InValue)
 {
-	const bool ClearOnPIEEnabled = (InValue == ECheckBoxState::Checked);
-	GConfig->SetBool(TEXT("/Script/UnrealEd.EditorPerProjectUserSettings"), TEXT("bEnableOutputLogClearOnPIE"), ClearOnPIEEnabled, GEditorPerProjectIni);
+	const bool bClearOnPIEEnabled = (InValue == ECheckBoxState::Checked);
+	UOutputLogSettings* Settings = GetMutableDefault<UOutputLogSettings>();
+	if (Settings)
+	{
+		Settings->bEnableOutputLogClearOnPIE = bClearOnPIEEnabled;
+		Settings->SaveConfig();
+	}
+}
+#endif
+
+void SOutputLog::BuildInitialLogCategoryFilter(const FArguments& InArgs)
+{
+	for (const auto& Message : InArgs._Messages)
+	{
+		Filter.AddAvailableLogCategory(Message->Category);
+		const bool bIsDeselectedByDefault = InArgs._AllowInitialLogCategory.IsBound() && !InArgs._AllowInitialLogCategory.Execute(Message->Category);
+		if (bIsDeselectedByDefault && Filter.IsLogCategoryEnabled(Message->Category))
+		{
+			Filter.bShowAllCategories = false;
+			Filter.ToggleLogCategory(Message->Category);
+		}
+	}
+
+	for (auto DefaultCategorySelectionIt = InArgs._DefaultCategorySelection.CreateConstIterator(); DefaultCategorySelectionIt; ++DefaultCategorySelectionIt)
+	{
+		const FName Category = DefaultCategorySelectionIt->Key;
+		Filter.AddAvailableLogCategory(Category);
+
+		Filter.bShowAllCategories &= DefaultCategorySelectionIt->Value;
+		if (Filter.IsLogCategoryEnabled(Category) != DefaultCategorySelectionIt->Value)
+		{
+			Filter.ToggleLogCategory(Category);
+		}
+	}
 }
 
 void SOutputLog::OnFilterTextChanged(const FText& InFilterText)
@@ -1221,51 +1674,63 @@ TSharedRef<SWidget> SOutputLog::MakeAddFilterMenu()
 {
 	FMenuBuilder MenuBuilder(/*bInShouldCloseWindowAfterMenuSelection=*/true, nullptr);
 	
-	MenuBuilder.BeginSection("OutputLogVerbosityEntries", LOCTEXT("OutputLogVerbosityHeading", "Verbosity"));
+	MenuBuilder.BeginSection("OutputLogMiscEntries", LOCTEXT("OutputLogFilters", "Filters"));
 	{
 		MenuBuilder.AddMenuEntry(
-			LOCTEXT("ShowMessages", "Messages"), 
-			LOCTEXT("ShowMessages_Tooltip", "Filter the Output Log to show messages"), 
-			FSlateIcon(), 
-			FUIAction(FExecuteAction::CreateSP(this, &SOutputLog::VerbosityLogs_Execute), 
-				FCanExecuteAction::CreateLambda([] { return true; }), 
-				FIsActionChecked::CreateSP(this, &SOutputLog::VerbosityLogs_IsChecked)), 
-			NAME_None, 
+			LOCTEXT("ShowAllCategories", "Show All"),
+			LOCTEXT("ShowAllCategories_Tooltip", "Filter the Output Log to show all categories"),
+			FSlateIcon(),
+			FUIAction(FExecuteAction::CreateSP(this, &SOutputLog::CategoriesShowAll_Execute),
+				FCanExecuteAction::CreateLambda([] { return true; }),
+				FIsActionChecked::CreateSP(this, &SOutputLog::CategoriesShowAll_IsChecked)),
+			NAME_None,
 			EUserInterfaceActionType::ToggleButton
 		);
 
-		MenuBuilder.AddMenuEntry(
-			LOCTEXT("ShowWarnings", "Warnings"), 
-			LOCTEXT("ShowWarnings_Tooltip", "Filter the Output Log to show warnings"), 
-			FSlateIcon(), 
-			FUIAction(FExecuteAction::CreateSP(this, &SOutputLog::VerbosityWarnings_Execute), 
-				FCanExecuteAction::CreateLambda([] { return true; }), 
-				FIsActionChecked::CreateSP(this, &SOutputLog::VerbosityWarnings_IsChecked)), 
-			NAME_None, 
-			EUserInterfaceActionType::ToggleButton
-		);
-
-		MenuBuilder.AddMenuEntry(
-			LOCTEXT("ShowErrors", "Errors"), 
-			LOCTEXT("ShowErrors_Tooltip", "Filter the Output Log to show errors"), 
-			FSlateIcon(), 
-			FUIAction(FExecuteAction::CreateSP(this, &SOutputLog::VerbosityErrors_Execute), 
-				FCanExecuteAction::CreateLambda([] { return true; }), 
-				FIsActionChecked::CreateSP(this, &SOutputLog::VerbosityErrors_IsChecked)), 
-			NAME_None, 
-			EUserInterfaceActionType::ToggleButton
+		MenuBuilder.AddSubMenu(
+			LOCTEXT("Filters", "Filters"),
+			LOCTEXT("SelectCategoriesToolTip", "Set filter settings such as visible categories"),
+			FNewMenuDelegate::CreateSP(this, &SOutputLog::MakeSelectCategoriesSubMenu)
 		);
 	}
 	MenuBuilder.EndSection();
 
-	MenuBuilder.BeginSection("OutputLogMiscEntries", LOCTEXT("OutputLogMiscHeading", "Miscellaneous"));
+	MenuBuilder.BeginSection("OutputLogVerbosityEntries", LOCTEXT("OutputLogVerbosityHeading", "Verbosity"));
 	{
-		MenuBuilder.AddSubMenu(
-			LOCTEXT("Categories", "Categories"), 
-			LOCTEXT("SelectCategoriesToolTip", "Select Categories to display."), 
-			FNewMenuDelegate::CreateSP(this, &SOutputLog::MakeSelectCategoriesSubMenu)
+		MenuBuilder.AddMenuEntry(
+			LOCTEXT("ShowMessages", "Messages"), 
+			LOCTEXT("ShowMessages_Tooltip", "[Checked] Filter Output Log to show messages within selected categories. [-] Filter Output Log to show all messages"), 
+			FSlateIcon(), 
+			FUIAction(FExecuteAction::CreateSP(this, &SOutputLog::VerbosityLogs_Execute), 
+				FCanExecuteAction::CreateLambda([] { return true; }), 
+				FGetActionCheckState::CreateSP(this, &SOutputLog::VerbosityLogs_IsChecked)),
+			NAME_None, 
+			EUserInterfaceActionType::ToggleButton
+		);
+
+		MenuBuilder.AddMenuEntry(
+			LOCTEXT("ShowWarnings", "Warnings"),
+			LOCTEXT("ShowWarnings_Tooltip", "[Checked] Filter Output Log to show warnings within selected categories. [-] Filter Output Log to show all warnings"),
+			FSlateIcon(),
+			FUIAction(FExecuteAction::CreateSP(this, &SOutputLog::VerbosityWarnings_Execute),
+				FCanExecuteAction::CreateLambda([] { return true; }),
+				FGetActionCheckState::CreateSP(this, &SOutputLog::VerbosityWarnings_IsChecked)),
+			NAME_None,
+			EUserInterfaceActionType::ToggleButton
+		);
+
+		MenuBuilder.AddMenuEntry(
+			LOCTEXT("ShowErrors", "Errors"),
+			LOCTEXT("ShowErrors_Tooltip", "[Checked] Filter Output Log to show errors within selected categories. [-] Filter Output Log to show all errors"),
+			FSlateIcon(),
+			FUIAction(FExecuteAction::CreateSP(this, &SOutputLog::VerbosityErrors_Execute),
+				FCanExecuteAction::CreateLambda([] { return true; }),
+				FGetActionCheckState::CreateSP(this, &SOutputLog::VerbosityErrors_IsChecked)),
+			NAME_None,
+			EUserInterfaceActionType::ToggleButton
 		);
 	}
+	MenuBuilder.EndSection();
 
 	return MenuBuilder.MakeWidget();
 }
@@ -1273,18 +1738,7 @@ TSharedRef<SWidget> SOutputLog::MakeAddFilterMenu()
 void SOutputLog::MakeSelectCategoriesSubMenu(FMenuBuilder& MenuBuilder)
 {
 	MenuBuilder.BeginSection("OutputLogCategoriesEntries");
-	{
-		MenuBuilder.AddMenuEntry(
-			LOCTEXT("ShowAllCategories", "Show All"),
-			LOCTEXT("ShowAllCategories_Tooltip", "Filter the Output Log to show all categories"),
-			FSlateIcon(),
-			FUIAction(FExecuteAction::CreateSP(this, &SOutputLog::CategoriesShowAll_Execute),
-			FCanExecuteAction::CreateLambda([] { return true; }),
-			FIsActionChecked::CreateSP(this, &SOutputLog::CategoriesShowAll_IsChecked)),
-			NAME_None,
-			EUserInterfaceActionType::ToggleButton
-		);
-		
+	{	
 		for (const FName& Category : Filter.GetAvailableLogCategories())
 		{
 			MenuBuilder.AddMenuEntry(
@@ -1302,24 +1756,70 @@ void SOutputLog::MakeSelectCategoriesSubMenu(FMenuBuilder& MenuBuilder)
 	MenuBuilder.EndSection();
 }
 
-bool SOutputLog::VerbosityLogs_IsChecked() const
+ECheckBoxState SOutputLog::VerbosityLogs_IsChecked() const
 {
-	return Filter.bShowLogs;
+	if (Filter.bShowLogs && Filter.IgnoreFilterVerbosities.Contains(ELogVerbosity::Log))
+	{
+		return ECheckBoxState::Undetermined;
+	}
+
+	if (Filter.bShowLogs)
+	{
+		return ECheckBoxState::Checked;
+	}
+
+	return ECheckBoxState::Unchecked;
 }
 
-bool SOutputLog::VerbosityWarnings_IsChecked() const
+ECheckBoxState SOutputLog::VerbosityWarnings_IsChecked() const
 {
-	return Filter.bShowWarnings;
+	if (Filter.bShowWarnings && Filter.IgnoreFilterVerbosities.Contains(ELogVerbosity::Warning))
+	{
+		return ECheckBoxState::Undetermined;
+	}
+
+	if (Filter.bShowWarnings)
+	{
+		return ECheckBoxState::Checked;
+	}
+
+	return ECheckBoxState::Unchecked;
 }
 
-bool SOutputLog::VerbosityErrors_IsChecked() const
+ECheckBoxState SOutputLog::VerbosityErrors_IsChecked() const
 {
-	return Filter.bShowErrors;
+	if (Filter.bShowErrors && Filter.IgnoreFilterVerbosities.Contains(ELogVerbosity::Error))
+	{
+		return ECheckBoxState::Undetermined;
+	}
+
+	if (Filter.bShowErrors)
+	{
+		return ECheckBoxState::Checked;
+	}
+
+	return ECheckBoxState::Unchecked;
 }
 
 void SOutputLog::VerbosityLogs_Execute()
 { 
-	Filter.bShowLogs = !Filter.bShowLogs;
+	// Rotate through: showing the verbosity, showing the verbosity while ignoring filter categories, and hiding the verbosity
+	if (Filter.bShowLogs)
+	{
+		if (Filter.IgnoreFilterVerbosities.Contains(ELogVerbosity::Log))
+		{
+			Filter.bShowLogs = false;
+			Filter.IgnoreFilterVerbosities.Remove(ELogVerbosity::Log);
+		}
+		else
+		{
+			Filter.IgnoreFilterVerbosities.Emplace(ELogVerbosity::Log);
+		}
+	}
+	else
+	{
+		Filter.bShowLogs = true;
+	}
 
 	// Flag the messages count as dirty
 	MessagesTextMarshaller->MarkMessagesCacheAsDirty();
@@ -1329,7 +1829,23 @@ void SOutputLog::VerbosityLogs_Execute()
 
 void SOutputLog::VerbosityWarnings_Execute()
 {
-	Filter.bShowWarnings = !Filter.bShowWarnings;
+	// Rotate through: showing the verbosity, showing the verbosity while ignoring filter categories, and hiding the verbosity
+	if (Filter.bShowWarnings)
+	{
+		if (Filter.IgnoreFilterVerbosities.Contains(ELogVerbosity::Warning))
+		{
+			Filter.bShowWarnings = false;
+			Filter.IgnoreFilterVerbosities.Remove(ELogVerbosity::Warning);
+		}
+		else
+		{
+			Filter.IgnoreFilterVerbosities.Emplace(ELogVerbosity::Warning);
+		}
+	}
+	else
+	{
+		Filter.bShowWarnings = true;
+	}
 
 	// Flag the messages count as dirty
 	MessagesTextMarshaller->MarkMessagesCacheAsDirty();
@@ -1339,7 +1855,23 @@ void SOutputLog::VerbosityWarnings_Execute()
 
 void SOutputLog::VerbosityErrors_Execute()
 {
-	Filter.bShowErrors = !Filter.bShowErrors;
+	// Rotate through: showing the verbosity, showing the verbosity while ignoring filter categories, and hiding the verbosity
+	if (Filter.bShowErrors)
+	{
+		if (Filter.IgnoreFilterVerbosities.Contains(ELogVerbosity::Error))
+		{
+			Filter.bShowErrors = false;
+			Filter.IgnoreFilterVerbosities.Remove(ELogVerbosity::Error);
+		}
+		else
+		{
+			Filter.IgnoreFilterVerbosities.Emplace(ELogVerbosity::Error);
+		}
+	}
+	else
+	{
+		Filter.bShowErrors = true;
+	}
 
 	// Flag the messages count as dirty
 	MessagesTextMarshaller->MarkMessagesCacheAsDirty();
@@ -1386,64 +1918,331 @@ void SOutputLog::CategoriesSingle_Execute(FName InName)
 	Refresh();
 }
 
-TSharedRef<SWidget> SOutputLog::GetViewButtonContent()
+void SOutputLog::UpdateOutputLogFilter(const TArray<FName>& CategoriesToShow, TOptional<bool> bShowErrors, TOptional<bool> bShowWarnings, TOptional<bool> bShowLogs)
 {
-	TSharedPtr<FExtender> Extender;
-	FMenuBuilder MenuBuilder(true, nullptr, Extender, true);
-	MenuBuilder.AddMenuEntry(
+	if (bShowErrors.IsSet())
+	{
+		Filter.bShowErrors = bShowErrors.GetValue();
+	}
+	if (bShowWarnings.IsSet())
+	{
+		Filter.bShowWarnings = bShowWarnings.GetValue();
+	}
+	if (bShowLogs.IsSet())
+	{
+		Filter.bShowLogs = bShowLogs.GetValue();
+	}
+
+	// Show all categories if empty list is passed in. This means there's no way to change the Show* bools
+	// and also leave the categories as-is, but that use case is probably minimal. It can be added if needed.
+	Filter.bShowAllCategories = CategoriesToShow.Num() == 0;
+	Filter.ClearSelectedLogCategories();
+	const TArray<FName> ActualCategoriesToShow = Filter.bShowAllCategories ? Filter.GetAvailableLogCategories() : CategoriesToShow;
+	for (const auto& AvailableCategory : ActualCategoriesToShow)
+	{
+		Filter.ToggleLogCategory(AvailableCategory);
+	}
+
+	MessagesTextMarshaller->MarkMessagesCacheAsDirty();
+	Refresh();
+}
+
+void SOutputLog::UpdateOutputLogFilter(const FOutputLogFilter& InFilter)
+{
+	Filter = InFilter;
+	Filter.bShowAllCategories = Filter.GetSelectedLogCategories().Num() == 0 ;
+	MessagesTextMarshaller->MarkMessagesCacheAsDirty();
+	Refresh();
+}
+
+namespace
+{
+	template <typename TContext>
+	TSharedPtr<SOutputLog> GetWidgetFromContext(const TContext& InContext)
+	{
+		UOutputLogMenuContext* Context = InContext.template FindContext<UOutputLogMenuContext>();
+		if (!ensure(Context))
+		{
+			return nullptr;
+		}
+
+		TSharedPtr<SOutputLog> Widget = Context->GetOutputLog();
+		ensure(Widget);
+		return Widget;
+	};
+};
+
+// static
+void SOutputLog::RegisterSettingsMenu()
+{
+	// We declare the menu structure during module load, but instantiate the
+	// widget much later. Because of this, predicates/actions need to "late
+	// bind" to the instance, by pulling it back out of the FToolMenuContext
+	// or FToolMenuSection. See GetWidgetFromContext() above.
+
+	UToolMenus* ToolMenus = UToolMenus::Get();
+	if (!ensure(ToolMenus))
+	{
+		return;
+	}
+
+	if (ensure(!ToolMenus->IsMenuRegistered(SettingsMenuName)))
+	{
+		UToolMenu* Menu = ToolMenus->RegisterMenu(SettingsMenuName);
+
+		FToolMenuSection& Section = Menu->AddSection(NAME_None);
+
+		RegisterSettingsMenu_WordWrap(Section);
+		RegisterSettingsMenu_TimestampMode(Section);
+		RegisterSettingsMenu_ClearOnPIE(Section);
+
+		Section.AddSeparator(SettingsSeparatorName);
+
+		RegisterSettingsMenu_BrowseLogs(Section);
+		RegisterSettingsMenu_OpenLogExternal(Section);
+	}
+}
+
+// static
+void SOutputLog::RegisterSettingsMenu_WordWrap(FToolMenuSection& InSection)
+{
+	FToolUIAction WordWrapAction;
+	WordWrapAction.ExecuteAction = FToolMenuExecuteAction::CreateLambda([](const FToolMenuContext& InContext)
+		{
+			if (TSharedPtr<SOutputLog> This = GetWidgetFromContext(InContext); ensure(This))
+			{
+				This->SetWordWrapEnabled(This->IsWordWrapEnabled() ? ECheckBoxState::Unchecked : ECheckBoxState::Checked);
+			}
+		});
+	WordWrapAction.GetActionCheckState = FToolMenuGetActionCheckState::CreateLambda([](const FToolMenuContext& InContext) -> ECheckBoxState
+		{
+			if (TSharedPtr<SOutputLog> This = GetWidgetFromContext(InContext); ensure(This))
+			{
+				return This->IsWordWrapEnabled() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+			}
+
+			return ECheckBoxState::Unchecked;
+		});
+
+	InSection.AddMenuEntry(
+		SettingsWordWrapEntryName,
 		LOCTEXT("WordWrapEnabledOption", "Enable Word Wrapping"),
 		LOCTEXT("WordWrapEnabledOptionToolTip", "Enable word wrapping in the Output Log."),
 		FSlateIcon(),
-		FUIAction(
-			FExecuteAction::CreateLambda([this] {
-				// This is a toggle, hence that it is inverted
-				SetWordWrapEnabled(IsWordWrapEnabled() ? ECheckBoxState::Unchecked : ECheckBoxState::Checked);
-			}),
-			FCanExecuteAction::CreateLambda([] { return true; }),
-			FIsActionChecked::CreateSP(this, &SOutputLog::IsWordWrapEnabled)
-		),
-		NAME_None,
+		WordWrapAction,
 		EUserInterfaceActionType::ToggleButton
 	);
-	MenuBuilder.AddMenuEntry(
+}
+
+// static
+void SOutputLog::RegisterSettingsMenu_TimestampMode(FToolMenuSection& InSection)
+{
+	InSection.AddDynamicEntry(SettingsTimestampsSubMenuName, FNewToolMenuSectionDelegate::CreateLambda([](FToolMenuSection& InSection)
+		{
+			FText TimestampModeTooltip;
+#if WITH_EDITORONLY_DATA
+			TimestampModeTooltip = UOutputLogSettings::StaticClass()->FindPropertyByName(
+				GET_MEMBER_NAME_CHECKED(UOutputLogSettings, LogTimestampMode))->GetToolTipText();
+#endif // WITH_EDITORONLY_DATA
+
+			if (TSharedPtr<SOutputLog> This = GetWidgetFromContext(InSection); ensure(This))
+			{
+				InSection.AddSubMenu(
+					SettingsTimestampsSubMenuName,
+					TAttribute<FText>::CreateLambda([This]()
+						{
+							const UEnum* Enum = StaticEnum<ELogTimes::Type>();
+							return FText::Format(LOCTEXT("TimestampsSubmenu", "Timestamp Mode: {0}"),
+								Enum->GetDisplayNameTextByIndex(This->GetSelectedTimestampMode()));
+						}),
+					TimestampModeTooltip,
+					FNewMenuDelegate::CreateSP(This.ToSharedRef(), &SOutputLog::AddTimestampMenuSection)
+				);
+			}
+		}));
+}
+
+// static
+void SOutputLog::RegisterSettingsMenu_ClearOnPIE(FToolMenuSection& InSection)
+{
+#if WITH_EDITOR
+	FToolUIAction ClearOnPIEAction;
+	ClearOnPIEAction.ExecuteAction = FToolMenuExecuteAction::CreateLambda([](const FToolMenuContext& InContext)
+		{
+			if (TSharedPtr<SOutputLog> This = GetWidgetFromContext(InContext); ensure(This))
+			{
+				This->SetClearOnPIE(This->IsClearOnPIEEnabled() ? ECheckBoxState::Unchecked : ECheckBoxState::Checked);
+			}
+		});
+	ClearOnPIEAction.GetActionCheckState = FToolMenuGetActionCheckState::CreateLambda([](const FToolMenuContext& InContext) -> ECheckBoxState
+		{
+			if (TSharedPtr<SOutputLog> This = GetWidgetFromContext(InContext); ensure(This))
+			{
+				return This->IsClearOnPIEEnabled() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+			}
+
+			return ECheckBoxState::Unchecked;
+		});
+
+	InSection.AddMenuEntry(
+		SettingsClearOnPIEEntryName,
 		LOCTEXT("ClearOnPIE", "Clear on PIE"),
 		LOCTEXT("ClearOnPIEToolTip", "Enable clearing of the Output Log on PIE startup."),
 		FSlateIcon(),
-		FUIAction(
-			FExecuteAction::CreateLambda([this] {
-				// This is a toggle, hence that it is inverted
-				SetClearOnPIE(IsClearOnPIEEnabled() ? ECheckBoxState::Unchecked : ECheckBoxState::Checked);
-			}),
-			FCanExecuteAction::CreateLambda([] { return true; }),
-			FIsActionChecked::CreateSP(this, &SOutputLog::IsClearOnPIEEnabled)
-		),
-		NAME_None,
+		ClearOnPIEAction,
 		EUserInterfaceActionType::ToggleButton
 	);
-	MenuBuilder.AddMenuSeparator();
+#endif
+}
 
-	//Show Source In Explorer
-	MenuBuilder.AddMenuEntry(
+// static
+void SOutputLog::RegisterSettingsMenu_BrowseLogs(FToolMenuSection& InSection)
+{
+	InSection.AddMenuEntry(
+		SettingsBrowseLogDirectoryEntryName,
 		LOCTEXT("FindSourceFile", "Open Source Location"),
 		LOCTEXT("FindSourceFileTooltip", "Opens the folder containing the source of the Output Log."),
-		FSlateIcon(FEditorStyle::GetStyleSetName(), "OutputLog.OpenSourceLocation"),
-		FUIAction(
-			FExecuteAction::CreateSP(this, &SOutputLog::OpenLogFileInExplorer)
-		)
+		FSlateIcon(FOutputLogStyle::Get().GetStyleSetName(), "OutputLog.OpenSourceLocation"),
+		FToolMenuExecuteAction::CreateLambda([](const FToolMenuContext& InContext)
+			{
+				if (TSharedPtr<SOutputLog> This = GetWidgetFromContext(InContext); ensure(This))
+				{
+					This->OpenLogFileInExplorer();
+				}
+			})
 	);
-	
-	// Open In External Editor
-	MenuBuilder.AddMenuEntry(
+}
+
+// static
+void SOutputLog::RegisterSettingsMenu_OpenLogExternal(FToolMenuSection& InSection)
+{
+	InSection.AddMenuEntry(
+		SettingsOpenLogExternalEntryName,
 		LOCTEXT("OpenInExternalEditor", "Open In External Editor"),
 		LOCTEXT("OpenInExternalEditorTooltip", "Opens the Output Log in the default external editor."),
-		FSlateIcon(FEditorStyle::GetStyleSetName(), "OutputLog.OpenInExternalEditor"),
-		FUIAction(
-			FExecuteAction::CreateSP(this, &SOutputLog::OpenLogFileInExternalEditor)
-		)
+		FSlateIcon(FOutputLogStyle::Get().GetStyleSetName(), "OutputLog.OpenInExternalEditor"),
+		FToolMenuExecuteAction::CreateLambda([](const FToolMenuContext& InContext)
+			{
+				if (TSharedPtr<SOutputLog> This = GetWidgetFromContext(InContext); ensure(This))
+				{
+					This->OpenLogFileInExternalEditor();
+				}
+			})
 	);
+}
 
+FName SOutputLog::GetSettingsMenuProfileForFlags(EOutputLogSettingsMenuFlags InFlags)
+{
+	UToolMenus* ToolMenus = UToolMenus::Get();
+	if (!ensure(ToolMenus) || InFlags == EOutputLogSettingsMenuFlags::None)
+	{
+		return NAME_None;
+	}
 
-	return MenuBuilder.MakeWidget();
+	const FName MenuProfileName = *FString::Printf(TEXT("OutputLogSettings_Flags%i"), static_cast<int32>(InFlags));
+	FToolMenuProfile* FlagsProfile = ToolMenus->FindRuntimeMenuProfile(SettingsMenuName, MenuProfileName);
+	if (!FlagsProfile)
+	{
+		FlagsProfile = ToolMenus->AddRuntimeMenuProfile(SettingsMenuName, MenuProfileName);
+
+		const bool bSupportWordWrapping = !EnumHasAnyFlags(InFlags, EOutputLogSettingsMenuFlags::SkipEnableWordWrapping);
+		const bool bSupportClearOnPie = !EnumHasAnyFlags(InFlags, EOutputLogSettingsMenuFlags::SkipClearOnPie);
+		const bool bSupportBrowseLocation = !EnumHasAnyFlags(InFlags, EOutputLogSettingsMenuFlags::SkipOpenSourceButton);
+		const bool bSupportExternalEditor = !EnumHasAnyFlags(InFlags, EOutputLogSettingsMenuFlags::SkipOpenInExternalEditorButton);
+
+		const bool bNeedsSeparator = (bSupportWordWrapping || bSupportClearOnPie) && (bSupportBrowseLocation || bSupportExternalEditor);
+
+		if (!bSupportWordWrapping)
+		{
+			FlagsProfile->AddEntry(SettingsWordWrapEntryName)->Visibility = ECustomizedToolMenuVisibility::Hidden;
+		}
+
+		if (!bSupportClearOnPie)
+		{
+			FlagsProfile->AddEntry(SettingsClearOnPIEEntryName)->Visibility = ECustomizedToolMenuVisibility::Hidden;
+		}
+
+		if (!bNeedsSeparator)
+		{
+			FlagsProfile->AddEntry(SettingsSeparatorName)->Visibility = ECustomizedToolMenuVisibility::Hidden;
+		}
+
+		if (!bSupportBrowseLocation)
+		{
+			FlagsProfile->AddEntry(SettingsBrowseLogDirectoryEntryName)->Visibility = ECustomizedToolMenuVisibility::Hidden;
+		}
+
+		if (!bSupportExternalEditor)
+		{
+			FlagsProfile->AddEntry(SettingsOpenLogExternalEntryName)->Visibility = ECustomizedToolMenuVisibility::Hidden;
+		}
+	}
+
+	return MenuProfileName;
+}
+
+TSharedRef<SWidget> SOutputLog::GetSettingsMenuContent(FName InMenuProfileName)
+{
+	UToolMenus* ToolMenus = UToolMenus::Get();
+	if (!ensure(ToolMenus))
+	{
+		return SNullWidget::NullWidget;
+	}
+
+	FToolMenuContext MenuContext;
+
+	UOutputLogMenuContext* OutputLogContext = NewObject<UOutputLogMenuContext>();
+	OutputLogContext->Init(SharedThis(this));
+	MenuContext.AddObject(OutputLogContext);
+
+	if (InMenuProfileName != NAME_None)
+	{
+		UToolMenuProfileContext* ProfileContext = NewObject<UToolMenuProfileContext>();
+		ProfileContext->ActiveProfiles.Add(InMenuProfileName);
+		MenuContext.AddObject(ProfileContext);
+	}
+
+	return ToolMenus->GenerateWidget(SettingsMenuName, MenuContext);
+}
+
+TSharedRef<SWidget> SOutputLog::CreateDrawerDockButton()
+{
+	if (bShouldCreateDrawerDockButton)
+	{
+		return
+			SNew(SButton)
+			.ButtonStyle(FOutputLogStyle::Get(), "SimpleButton")
+			.ToolTipText(LOCTEXT("DockInLayout_Tooltip", "Docks this output log in the current layout.\nThe drawer will still be usable as a temporary log."))
+			.ContentPadding(FMargin(1, 0))
+			.Visibility_Lambda(
+				[]()
+				{
+					return FOutputLogModule::Get().GetOutputLogTab() == nullptr ? EVisibility::Visible : EVisibility::Hidden;
+				})
+			.OnClicked(this, &SOutputLog::OnDockInLayoutClicked)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				.Padding(4.0, 0.0f)
+				[
+					SNew(SImage)
+					.ColorAndOpacity(FSlateColor::UseForeground())
+					.Image(FOutputLogStyle::Get().GetBrush("Icons.Layout"))
+				]
+				+ SHorizontalBox::Slot()
+				.VAlign(VAlign_Center)
+				.Padding(4.0, 0.0f)
+				[
+					SNew(STextBlock)
+					.Text(LOCTEXT("DockInLayout", "Dock in Layout"))
+					.ColorAndOpacity(FSlateColor::UseForeground())
+				]
+			];
+	}
+
+	return SNullWidget::NullWidget;
 }
 
 void SOutputLog::OpenLogFileInExplorer()
@@ -1466,7 +2265,29 @@ void SOutputLog::OpenLogFileInExternalEditor()
 	}
 
 	FPlatformProcess::LaunchFileInDefaultExternalApplication(*Path, NULL, ELaunchVerb::Open);
-} 
+}
+
+FReply SOutputLog::OnDockInLayoutClicked()
+{
+	TSharedPtr<SDockTab> DockedTab;
+
+	static const FName OutputLogTabName = FName("OutputLog");
+	if (TSharedPtr<SDockTab> ActiveTab = FGlobalTabmanager::Get()->GetActiveTab())
+	{
+		if (TSharedPtr<FTabManager> TabManager = ActiveTab->GetTabManagerPtr())
+		{
+			DockedTab = TabManager->TryInvokeTab(OutputLogTabName);
+		}
+	}
+	
+	if (!DockedTab)
+	{
+		FGlobalTabmanager::Get()->TryInvokeTab(OutputLogTabName);
+	}
+
+	return FReply::Handled();
+}
+
 
 bool FOutputLogFilter::IsMessageAllowed(const TSharedPtr<FOutputLogMessage>& Message)
 {
@@ -1476,13 +2297,11 @@ bool FOutputLogFilter::IsMessageAllowed(const TSharedPtr<FOutputLogMessage>& Mes
 		{
 			return false;
 		}
-
-		if (Message->Verbosity == ELogVerbosity::Warning && !bShowWarnings)
+		else if (Message->Verbosity == ELogVerbosity::Warning && !bShowWarnings)
 		{
 			return false;
 		}
-
-		if (Message->Verbosity != ELogVerbosity::Error && Message->Verbosity != ELogVerbosity::Warning && !bShowLogs)
+		else if (Message->Verbosity != ELogVerbosity::Error && Message->Verbosity != ELogVerbosity::Warning && !bShowLogs)
 		{
 			return false;
 		}
@@ -1490,7 +2309,7 @@ bool FOutputLogFilter::IsMessageAllowed(const TSharedPtr<FOutputLogMessage>& Mes
 
 	// Filter by Category
 	{
-		if (!IsLogCategoryEnabled(Message->Category))
+		if (!bShowAllCategories && !IgnoreFilterVerbosities.Contains(Message->Verbosity) && !IsLogCategoryEnabled(Message->Category))
 		{
 			return false;
 		}
@@ -1498,7 +2317,7 @@ bool FOutputLogFilter::IsMessageAllowed(const TSharedPtr<FOutputLogMessage>& Mes
 
 	// Filter search phrase
 	{
-		if (!TextFilterExpressionEvaluator.TestTextFilter(FLogFilter_TextFilterExpressionContext(*Message)))
+		if (!TextFilterExpressionEvaluator.TestTextFilter(FLogFilter_TextFilterExpressionContextOutputLog(*Message)))
 		{
 			return false;
 		}
@@ -1507,7 +2326,7 @@ bool FOutputLogFilter::IsMessageAllowed(const TSharedPtr<FOutputLogMessage>& Mes
 	return true;
 }
 
-void FOutputLogFilter::AddAvailableLogCategory(FName& LogCategory)
+void FOutputLogFilter::AddAvailableLogCategory(const FName& LogCategory)
 {
 	// Use an insert-sort to keep AvailableLogCategories alphabetically sorted
 	int32 InsertIndex = 0;
@@ -1540,7 +2359,7 @@ void FOutputLogFilter::ToggleLogCategory(const FName& LogCategory)
 	}
 	else
 	{
-		SelectedLogCategories.RemoveAt(FoundIndex, /*Count=*/1, /*bAllowShrinking=*/false);
+		SelectedLogCategories.RemoveAt(FoundIndex, /*Count=*/1, EAllowShrinking::No);
 	}
 }
 

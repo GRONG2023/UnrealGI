@@ -1,22 +1,61 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SReplaceNodeReferences.h"
-#include "UObject/UObjectHash.h"
+
+#include "Algo/RemoveIf.h"
+#include "BlueprintEditor.h"
+#include "Components/ActorComponent.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "EdGraphSchema_K2.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "EditorCategoryUtils.h"
+#include "Engine/Blueprint.h"
+#include "Engine/MemberReference.h"
+#include "FindInBlueprints.h"
+#include "Framework/Views/ITypedTableView.h"
+#include "HAL/Platform.h"
+#include "ImaginaryBlueprintData.h"
+#include "Internationalization/Internationalization.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Misc/Attribute.h"
+#include "ObjectEditorUtils.h"
+#include "ReplaceNodeReferencesHelper.h"
+#include "ScopedTransaction.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/StyleColors.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "Types/SlateStructs.h"
+#include "UObject/Class.h"
+#include "UObject/Field.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Images/SLayeredImage.h"
 #include "Widgets/Input/SButton.h"
-#include "Widgets/Input/SComboButton.h"
 #include "Widgets/Input/SCheckBox.h"
-#include "Engine/MemberReference.h"
-#include "EdGraphSchema_K2.h"
-#include "K2Node_Variable.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "ImaginaryBlueprintData.h"
-#include "ObjectEditorUtils.h"
-#include "EditorCategoryUtils.h"
-#include "ScopedTransaction.h"
-#include "ReplaceNodeReferencesHelper.h"
-#include "Algo/RemoveIf.h"
+#include "Widgets/Input/SComboButton.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SWindow.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Widgets/Views/SListView.h"
+#include "Widgets/Views/STableRow.h"
+
+class ITableRow;
+class SWidget;
+struct FSlateBrush;
 
 #define LOCTEXT_NAMESPACE "SNodeVariableReferences"
 
@@ -75,7 +114,19 @@ public:
 			.VAlign(VAlign_Center)
 			[
 				SNew(STextBlock)
-					.Text(FText::FromString(VariableReference.GetMemberName().ToString()))
+				.Text(GetDisplayTitle())
+				.ToolTipText(TooltipWarning)
+			]
+			// type of the variable
+			+ SHorizontalBox::Slot()
+			.VAlign(VAlign_Center)
+			.HAlign(HAlign_Right)
+			.Padding(FMargin(1.0f, 0.0f, 0.0f, 0.0f))
+			[
+				SNew(STextBlock)
+				.Text(GetPinClass() ? GetPinClass()->GetDisplayNameText() : FText::GetEmpty())
+				.ToolTipText(TooltipWarning)
+				.ColorAndOpacity(GetVariableTypeColor())
 			];
 	}
 
@@ -113,18 +164,40 @@ public:
 	}
 	// End of FTargetReplaceReferences interface
 
+	/** gets the UClass of the object being referenced by PinType */
+	UClass *GetPinClass() const
+	{
+		if (PinType.PinCategory == UEdGraphSchema_K2::PC_Object && PinType.PinSubCategoryObject != nullptr)
+		{
+			return Cast<UClass>(PinType.PinSubCategoryObject);
+		}
+		return nullptr;
+	}
+
+	/** gets the color that the pin class will be displayed as in the menu */
+	FSlateColor GetVariableTypeColor() const
+	{
+		const FSlateColor TypeColor = TooltipWarning.IsEmpty() ? FSlateColor(EStyleColor::AccentGreen) : FSlateColor(EStyleColor::AccentYellow);
+		const FLinearColor LinearColor = TypeColor.GetSpecifiedColor();
+		return FSlateColor(LinearColor.Desaturate(.2f));
+	}
+
 public:
 	/** Variable reference for this item */
 	FMemberReference VariableReference;
 
 	/** Pin type representing the FProperty of this item */
 	FEdGraphPinType PinType;
+
+	/** Used to warn if the user is going to commit a potentially destructive action */
+	FText TooltipWarning = FText::GetEmpty();
 };
 
 void SReplaceNodeReferences::Construct(const FArguments& InArgs, TSharedPtr<class FBlueprintEditor> InBlueprintEditor)
 {
 	BlueprintEditor = InBlueprintEditor;
 	Refresh();
+	bFindWithinBlueprint = false;
 	bShowReplacementsWhenFinished = true;
 
 	ChildSlot
@@ -370,6 +443,7 @@ void SReplaceNodeReferences::SetSourceVariable(FProperty* InProperty)
 	else
 	{
 		SourceProperty = nullptr;
+		SelectedTargetReferenceItem.Reset();
 	}
 
 	// Reset the FindInBlueprints results
@@ -488,7 +562,33 @@ void SReplaceNodeReferences::GatherAllAvailableBlueprintVariables(UClass* InTarg
 			FEdGraphPinType Type;
 			K2Schema->ConvertPropertyToPinType(Property, VariableItem->PinType);
 
-			if (!bForTarget || VariableItem->PinType == SourcePinType)
+			// check whether this is a valid replacement using inheritance
+			bool bValidInheritance = false;
+			if (SourcePinType.PinCategory == UEdGraphSchema_K2::PC_Object &&
+				SourcePinType.PinSubCategoryObject != nullptr)
+			{
+				const UClass* VariableItemClass = VariableItem->GetPinClass();
+				const UClass* SourceClass = Cast<UClass>(SourcePinType.PinSubCategoryObject);
+
+				// ensure the casting succeeded
+				if (VariableItemClass && SourceClass)
+				{
+					if (VariableItemClass->IsChildOf(SourceClass) || SourceClass->IsChildOf(VariableItemClass))
+					{
+						bValidInheritance = true;
+						if (VariableItemClass != SourceClass)
+						{
+							VariableItem->TooltipWarning = FText::Format(
+								LOCTEXT("TooltipWarning", "Warning: Replacing a reference of type '{0}' with a reference of type '{1}' may break connections"),
+								SourceClass->GetDisplayNameText(),
+								VariableItemClass->GetDisplayNameText()
+							);
+						}
+					}
+				}
+			}
+
+			if (!bForTarget || bValidInheritance || VariableItem->PinType == SourcePinType)
 			{
 				CategoryReference->Children.Add(VariableItem);
 
@@ -591,7 +691,7 @@ FReply SReplaceNodeReferences::OnFindAndReplaceAll()
 
 void SReplaceNodeReferences::OnSubmitSearchQuery(bool bFindAndReplace)
 {
-	if (HasValidSource())
+	if (SourceProperty != nullptr)
 	{
 		FString SearchTerm;
 
@@ -629,10 +729,13 @@ void SReplaceNodeReferences::FindAllReplacementsComplete(TArray<FImaginaryFiBDat
 		}
 	}
 
-	if (SelectedTargetReferenceItem.IsValid())
+	if (SourceProperty != nullptr && SelectedTargetReferenceItem.IsValid())
 	{
-		FMemberReference VariableReference;
-		if (SelectedTargetReferenceItem->GetMemberReference(VariableReference))
+		FMemberReference SourceVariableReference;
+		UClass* SourcePropertyScope = SourceProperty->GetOwnerClass();
+		SourceVariableReference.SetFromField<FProperty>(SourceProperty, SourcePropertyScope);
+		FMemberReference TargetVariableReference;
+		if (SelectedTargetReferenceItem->GetMemberReference(TargetVariableReference) && SourceVariableReference.ResolveMember<FProperty>(SourcePropertyScope))
 		{
 			TSharedPtr<FBlueprintEditor> PinnedEditor = BlueprintEditor.Pin();
 			if (PinnedEditor.IsValid())
@@ -640,20 +743,25 @@ void SReplaceNodeReferences::FindAllReplacementsComplete(TArray<FImaginaryFiBDat
 				UBlueprint* Blueprint = PinnedEditor->GetBlueprintObj();
 				if (Blueprint)
 				{
-					const FScopedTransaction Transaction(GetTransactionTitle(VariableReference));
+					const FScopedTransaction Transaction(GetTransactionTitle(TargetVariableReference));
 					Blueprint->Modify();
 
-					FReplaceNodeReferencesHelper::ReplaceReferences(VariableReference, Blueprint, InRawDataList);
+					// Note: SourceProperty will be reset after this step! This occurs via a Refresh() that's triggered by an OnBlueprintChanged event.
+					FReplaceNodeReferencesHelper::ReplaceReferences(SourceVariableReference, TargetVariableReference, Blueprint, InRawDataList);
 
-					if (SourceProperty && bShowReplacementsWhenFinished)
+					if (bShowReplacementsWhenFinished)
 					{
+						// @todo - Possibly move this into a local SFindInBlueprints context that's separate from the replacement context.
+						// That way we could limit the results to just the local Blueprint if 'bFindWithinBlueprint' is toggled on. For now
+						// we're just utilizing one of the "floating" global FiB nomad tabs to display the results, which will not have an
+						// associated Blueprint editor context, so we cannot perform a local Blueprint search there.
 						TSharedPtr<SFindInBlueprints> GlobalResults = FFindInBlueprintSearchManager::Get().GetGlobalFindResults();
 						if (GlobalResults)
 						{
 							FStreamSearchOptions SearchOptions;
 							SearchOptions.ImaginaryDataFilter = ESearchQueryFilter::NodesFilter;
 							SearchOptions.MinimiumVersionRequirement = EFiBVersion::FIB_VER_VARIABLE_REFERENCE;
-							GlobalResults->MakeSearchQuery(VariableReference.GetReferenceSearchString(SourceProperty->GetOwnerClass()), bFindWithinBlueprint, SearchOptions);
+							GlobalResults->MakeSearchQuery(TargetVariableReference.GetReferenceSearchString(SourcePropertyScope), /*bInIsFindWithinBlueprint =*/ false, SearchOptions);
 						}
 					}
 				}
@@ -693,7 +801,7 @@ void SReplaceNodeReferences::OnSourceSelectionChanged(FTreeViewItem Selection, E
 
 FText SReplaceNodeReferences::GetSourceDisplayText() const
 {
-	if (!HasValidSource())
+	if (SourceProperty == nullptr)
 	{
 		return LOCTEXT("UnselectedSourceReference", "Please select a source reference!");
 	}
@@ -702,7 +810,7 @@ FText SReplaceNodeReferences::GetSourceDisplayText() const
 
 const FSlateBrush* SReplaceNodeReferences::GetSourceReferenceIcon() const
 {
-	if (HasValidSource())
+	if (SourceProperty != nullptr)
 	{
 		return FBlueprintEditorUtils::GetIconFromPin(SourcePinType);
 	}
@@ -718,7 +826,7 @@ FSlateColor SReplaceNodeReferences::GetSourceReferenceIconColor() const
 
 const FSlateBrush* SReplaceNodeReferences::GetSecondarySourceReferenceIcon() const
 {
-	if (HasValidSource())
+	if (SourceProperty != nullptr)
 	{
 		return FBlueprintEditorUtils::GetSecondaryIconFromPin(SourcePinType);
 	}
@@ -730,11 +838,6 @@ FSlateColor SReplaceNodeReferences::GetSecondarySourceReferenceIconColor() const
 {
 	UEdGraphSchema_K2 const* K2Schema = GetDefault<UEdGraphSchema_K2>();
 	return K2Schema->GetSecondaryPinTypeColor(SourcePinType);
-}
-
-bool SReplaceNodeReferences::HasValidSource() const
-{
-	return (SourceProperty != nullptr);
 }
 
 FText SReplaceNodeReferences::GetFindAllButtonText() const
@@ -775,7 +878,7 @@ FText SReplaceNodeReferences::GetFindAndReplaceToolTipText(bool bFindAndReplace)
 	}
 	else
 	{
-		if (!HasValidSource())
+		if (SourceProperty == nullptr)
 		{
 			return LOCTEXT("PickSourceVariable", "Pick a source variable from the menu!");
 		}
@@ -792,7 +895,7 @@ FText SReplaceNodeReferences::GetFindAndReplaceToolTipText(bool bFindAndReplace)
 
 bool SReplaceNodeReferences::CanBeginSearch(bool bFindAndReplace) const
 {
-	bool bCanSearch = HasValidSource() && !IsSearchInProgress();
+	bool bCanSearch = SourceProperty != nullptr && !IsSearchInProgress();
 
 	if (bFindAndReplace)
 	{
@@ -1015,7 +1118,7 @@ void SReplaceReferencesConfirmation::Construct(const FArguments& InArgs)
 				.MinDesiredHeight(100.0f)
 				[
 					SNew(SBorder)
-					.BorderImage(FEditorStyle::GetBrush("Menu.Background"))
+					.BorderImage(FAppStyle::GetBrush("Menu.Background"))
 					[
 						SNew(SListView<FListViewItem>)
 						.ItemHeight(24.0f)
@@ -1076,7 +1179,7 @@ SReplaceReferencesConfirmation::EDialogResponse SReplaceReferencesConfirmation::
 		[
 			SNew(SBorder)
 			.Padding(4.f)
-			.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 			[
 				SAssignNew(Widget, SReplaceReferencesConfirmation)
 				.FindResults(InFindResults)

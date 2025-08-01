@@ -8,6 +8,7 @@
 #include "Math/Vector2D.h"
 #include "Templates/SharedPointer.h"
 #include "Misc/Optional.h"
+#include "GenericPlatform/GenericPlatformInputDeviceMapper.h"
 
 class FGenericWindow;
 
@@ -25,47 +26,47 @@ namespace EMouseButtons
 	};
 }
 
-struct APPLICATIONCORE_API FGamepadKeyNames
+struct FGamepadKeyNames
 {
 	typedef FName Type;
 
-	static const FName Invalid;
+	static APPLICATIONCORE_API const FName Invalid;
 
-	static const FName LeftAnalogX;
-	static const FName LeftAnalogY;
-	static const FName RightAnalogX;
-	static const FName RightAnalogY;
-	static const FName LeftTriggerAnalog;
-	static const FName RightTriggerAnalog;
+	static APPLICATIONCORE_API const FName LeftAnalogX;
+	static APPLICATIONCORE_API const FName LeftAnalogY;
+	static APPLICATIONCORE_API const FName RightAnalogX;
+	static APPLICATIONCORE_API const FName RightAnalogY;
+	static APPLICATIONCORE_API const FName LeftTriggerAnalog;
+	static APPLICATIONCORE_API const FName RightTriggerAnalog;
 
-	static const FName LeftThumb;
-	static const FName RightThumb;
-	static const FName SpecialLeft;
-	static const FName SpecialLeft_X;
-	static const FName SpecialLeft_Y;
-	static const FName SpecialRight;
-	static const FName FaceButtonBottom;
-	static const FName FaceButtonRight;
-	static const FName FaceButtonLeft;
-	static const FName FaceButtonTop;
-	static const FName LeftShoulder;
-	static const FName RightShoulder;
-	static const FName LeftTriggerThreshold;
-	static const FName RightTriggerThreshold;
-	static const FName DPadUp;
-	static const FName DPadDown;
-	static const FName DPadRight;
-	static const FName DPadLeft;
+	static APPLICATIONCORE_API const FName LeftThumb;
+	static APPLICATIONCORE_API const FName RightThumb;
+	static APPLICATIONCORE_API const FName SpecialLeft;
+	static APPLICATIONCORE_API const FName SpecialLeft_X;
+	static APPLICATIONCORE_API const FName SpecialLeft_Y;
+	static APPLICATIONCORE_API const FName SpecialRight;
+	static APPLICATIONCORE_API const FName FaceButtonBottom;
+	static APPLICATIONCORE_API const FName FaceButtonRight;
+	static APPLICATIONCORE_API const FName FaceButtonLeft;
+	static APPLICATIONCORE_API const FName FaceButtonTop;
+	static APPLICATIONCORE_API const FName LeftShoulder;
+	static APPLICATIONCORE_API const FName RightShoulder;
+	static APPLICATIONCORE_API const FName LeftTriggerThreshold;
+	static APPLICATIONCORE_API const FName RightTriggerThreshold;
+	static APPLICATIONCORE_API const FName DPadUp;
+	static APPLICATIONCORE_API const FName DPadDown;
+	static APPLICATIONCORE_API const FName DPadRight;
+	static APPLICATIONCORE_API const FName DPadLeft;
 
-	static const FName LeftStickUp;
-	static const FName LeftStickDown;
-	static const FName LeftStickRight;
-	static const FName LeftStickLeft;
+	static APPLICATIONCORE_API const FName LeftStickUp;
+	static APPLICATIONCORE_API const FName LeftStickDown;
+	static APPLICATIONCORE_API const FName LeftStickRight;
+	static APPLICATIONCORE_API const FName LeftStickLeft;
 
-	static const FName RightStickUp;
-	static const FName RightStickDown;
-	static const FName RightStickRight;
-	static const FName RightStickLeft;
+	static APPLICATIONCORE_API const FName RightStickUp;
+	static APPLICATIONCORE_API const FName RightStickDown;
+	static APPLICATIONCORE_API const FName RightStickRight;
+	static APPLICATIONCORE_API const FName RightStickLeft;
 };
 
 enum class EWindowActivation : uint8
@@ -172,7 +173,7 @@ private:
  * This can be used to determine hardware-specific information when handling input from FGenericApplicationMessageHandler subclasses.
  * This is generally set during SendControllerEvents or Tick and is only valid on the game thread.
  */
-class APPLICATIONCORE_API FInputDeviceScope
+class FInputDeviceScope
 {
 public:
 	/** The specific InputDevice that is currently being polled. This is only valid within the current function scope and may be null */
@@ -188,8 +189,8 @@ public:
 	FString HardwareDeviceIdentifier;
 
 	/** Constructor, this should only be allocated directly on the stack */
-	FInputDeviceScope(IInputDevice* InInputDevice, FName InInputDeviceName, int32 InHardwareDeviceHandle = -1, FString InHardwareDeviceIdentifier = FString());
-	~FInputDeviceScope();
+	APPLICATIONCORE_API FInputDeviceScope(IInputDevice* InInputDevice, FName InInputDeviceName, int32 InHardwareDeviceHandle = -1, FString InHardwareDeviceIdentifier = FString());
+	APPLICATIONCORE_API ~FInputDeviceScope();
 
 	/** Cannot be copied/moved */
 	FInputDeviceScope() = delete;
@@ -199,11 +200,10 @@ public:
 	FInputDeviceScope& operator=(FInputDeviceScope&&) = delete;
 
 	/** Returns the currently active InputDeviceScope. This is only valid to call on the game thread and may return null */
-	static const FInputDeviceScope* GetCurrent();
-
-private:
-	static TArray<FInputDeviceScope*> ScopeStack;
+	static APPLICATIONCORE_API const FInputDeviceScope* GetCurrent();
 };
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 
 /** Interface that defines how to handle interaction with a user via hardware input and output */
 class FGenericApplicationMessageHandler
@@ -291,18 +291,40 @@ public:
 		return false;
 	}
 
-	virtual bool OnControllerAnalog( FGamepadKeyNames::Type KeyName, int32 ControllerId, float AnalogValue )
+	/** 
+	 * Return true if this message handler expects FPlatformUserIds. This base class will convert both directions.
+	 * As part of a larger fixup to allow mapping of multiple input devices to the same player, 
+	 * physical device id will be passed as part of the InputScope above and used to compute a logical input user.
+	 */
+	virtual bool ShouldUsePlatformUserId() const
 	{
+		return true;
+	}
+
+	virtual bool OnControllerAnalog(FGamepadKeyNames::Type KeyName, FPlatformUserId PlatformUserId, FInputDeviceId InputDeviceId, float AnalogValue)
+	{
+		if (!ShouldUsePlatformUserId())
+		{
+			return OnControllerAnalog(KeyName, PlatformUserId.GetInternalId(), AnalogValue);
+		}
 		return false;
 	}
 
-	virtual bool OnControllerButtonPressed( FGamepadKeyNames::Type KeyName, int32 ControllerId, bool IsRepeat )
+	virtual bool OnControllerButtonPressed(FGamepadKeyNames::Type KeyName, FPlatformUserId PlatformUserId, FInputDeviceId InputDeviceId, bool IsRepeat)
 	{
+		if (!ShouldUsePlatformUserId())
+		{
+			return OnControllerButtonPressed(KeyName, PlatformUserId.GetInternalId(), IsRepeat);
+		}
 		return false;
 	}
 
-	virtual bool OnControllerButtonReleased( FGamepadKeyNames::Type KeyName, int32 ControllerId, bool IsRepeat )
+	virtual bool OnControllerButtonReleased(FGamepadKeyNames::Type KeyName, FPlatformUserId PlatformUserId, FInputDeviceId InputDeviceId, bool IsRepeat)
 	{
+		if (!ShouldUsePlatformUserId())
+		{
+			return OnControllerButtonReleased(KeyName, PlatformUserId.GetInternalId(), IsRepeat);
+		}
 		return false;
 	}
 
@@ -319,40 +341,48 @@ public:
     {
     }
 
-	UE_DEPRECATED(4.20, "This function signature is deprecated, use OnTouchStarted that takes a Force")
-	virtual bool OnTouchStarted( const TSharedPtr< FGenericWindow >& Window, const FVector2D& Location, int32 TouchIndex, int32 ControllerId )
+	virtual bool OnTouchStarted( const TSharedPtr< FGenericWindow >& Window, const FVector2D& Location, float Force, int32 TouchIndex, FPlatformUserId PlatformUserId, FInputDeviceId DeviceId )
 	{
-		return OnTouchStarted(Window, Location, 1.0f, TouchIndex, ControllerId);
-	}
-
-	virtual bool OnTouchStarted( const TSharedPtr< FGenericWindow >& Window, const FVector2D& Location, float Force, int32 TouchIndex, int32 ControllerId )
-	{
+		if (!ShouldUsePlatformUserId())
+		{
+			return OnTouchStarted(Window, Location, Force, TouchIndex, PlatformUserId.GetInternalId());
+		}
 		return false;
 	}
 
-	UE_DEPRECATED(4.20, "This function signature is deprecated, use OnTouchMoved that takes a Force")
-	virtual bool OnTouchMoved( const FVector2D& Location, int32 TouchIndex, int32 ControllerId )
+	virtual bool OnTouchMoved( const FVector2D& Location, float Force, int32 TouchIndex, FPlatformUserId PlatformUserId, FInputDeviceId DeviceID )
 	{
-		return OnTouchMoved(Location, 1.0f, TouchIndex, ControllerId);
-	}
-
-	virtual bool OnTouchMoved( const FVector2D& Location, float Force, int32 TouchIndex, int32 ControllerId )
-	{
+		if (!ShouldUsePlatformUserId())
+		{
+			return OnTouchMoved(Location, Force, TouchIndex, PlatformUserId.GetInternalId());
+		}
 		return false;
 	}
 
-	virtual bool OnTouchEnded( const FVector2D& Location, int32 TouchIndex, int32 ControllerId )
+	virtual bool OnTouchEnded( const FVector2D& Location, int32 TouchIndex, FPlatformUserId PlatformUserId, FInputDeviceId DeviceID )
 	{
+		if (!ShouldUsePlatformUserId())
+		{
+			return OnTouchEnded(Location, TouchIndex, PlatformUserId.GetInternalId());
+		}
 		return false;
 	}
 
-	virtual bool OnTouchForceChanged(const FVector2D& Location, float Force, int32 TouchIndex, int32 ControllerId)
+	virtual bool OnTouchForceChanged(const FVector2D& Location, float Force, int32 TouchIndex, FPlatformUserId PlatformUserId, FInputDeviceId DeviceID)
 	{
+		if (!ShouldUsePlatformUserId())
+		{
+			return OnTouchForceChanged(Location, Force, TouchIndex, PlatformUserId.GetInternalId());
+		}
 		return false;
 	}
 
-	virtual bool OnTouchFirstMove(const FVector2D& Location, float Force, int32 TouchIndex, int32 ControllerId)
+	virtual bool OnTouchFirstMove(const FVector2D& Location, float Force, int32 TouchIndex, FPlatformUserId PlatformUserId, FInputDeviceId DeviceID)
 	{
+		if (!ShouldUsePlatformUserId())
+		{
+			return OnTouchFirstMove(Location, Force, TouchIndex, PlatformUserId.GetInternalId());
+		}
 		return false;
 	}
 
@@ -361,8 +391,12 @@ public:
 
 	}
 
-	virtual bool OnMotionDetected( const FVector& Tilt, const FVector& RotationRate, const FVector& Gravity, const FVector& Acceleration, int32 ControllerId )
+	virtual bool OnMotionDetected( const FVector& Tilt, const FVector& RotationRate, const FVector& Gravity, const FVector& Acceleration, FPlatformUserId PlatformUserId, FInputDeviceId InputDeviceId )
 	{
+		if (!ShouldUsePlatformUserId())
+		{
+			return OnMotionDetected(Tilt, RotationRate, Gravity, Acceleration, PlatformUserId.GetInternalId());
+		}
 		return false;
 	}
 
@@ -475,4 +509,119 @@ public:
 	{
 
 	}
+
+	// Deprecate these when engine code has been converted to handle platform user id
+	UE_DEPRECATED(5.1, "This version of OnControllerAnalog has been deprecated, please use the one that takes an FPlatformUser and FInputDeviceId instead.")
+	virtual bool OnControllerAnalog(FGamepadKeyNames::Type KeyName, int32 ControllerId, float AnalogValue)
+	{
+		if (ShouldUsePlatformUserId())
+		{
+			// Remap the old int32 ControlerId to the new Platform user for backwards compat
+			FPlatformUserId UserId = FGenericPlatformMisc::GetPlatformUserForUserIndex(ControllerId);
+			FInputDeviceId DeviceId = INPUTDEVICEID_NONE;
+			IPlatformInputDeviceMapper::Get().RemapControllerIdToPlatformUserAndDevice(ControllerId, UserId, DeviceId);
+			return OnControllerAnalog(KeyName, UserId, DeviceId, AnalogValue);
+		}
+		return false;
+	}
+	UE_DEPRECATED(5.1, "This version of OnControllerButtonPressed has been deprecated, please use the one that takes an FPlatformUser and FInputDeviceId instead.")
+	virtual bool OnControllerButtonPressed(FGamepadKeyNames::Type KeyName, int32 ControllerId, bool IsRepeat)
+	{
+		if (ShouldUsePlatformUserId())
+		{
+			// Remap the old int32 ControlerId to the new Platform user for backwards compat
+			FPlatformUserId UserId = FGenericPlatformMisc::GetPlatformUserForUserIndex(ControllerId);
+			FInputDeviceId DeviceId = INPUTDEVICEID_NONE;
+			IPlatformInputDeviceMapper::Get().RemapControllerIdToPlatformUserAndDevice(ControllerId, UserId, DeviceId);
+			return OnControllerButtonPressed(KeyName, UserId, DeviceId, IsRepeat);
+		}
+		return false;
+	}
+	UE_DEPRECATED(5.1, "This version of OnControllerButtonReleased has been deprecated, please use the one that takes an FPlatformUser and FInputDeviceId instead.")
+	virtual bool OnControllerButtonReleased(FGamepadKeyNames::Type KeyName, int32 ControllerId, bool IsRepeat)
+	{
+		if (ShouldUsePlatformUserId())
+		{
+			// Remap the old int32 ControlerId to the new Platform user for backwards compat
+			FPlatformUserId UserId = FGenericPlatformMisc::GetPlatformUserForUserIndex(ControllerId);
+			FInputDeviceId DeviceId = INPUTDEVICEID_NONE;
+			IPlatformInputDeviceMapper::Get().RemapControllerIdToPlatformUserAndDevice(ControllerId, UserId, DeviceId);
+			return OnControllerButtonReleased(KeyName, UserId, DeviceId, IsRepeat);
+		}
+		return false;
+	}
+	virtual bool OnTouchStarted(const TSharedPtr< FGenericWindow >& Window, const FVector2D& Location, float Force, int32 TouchIndex, int32 ControllerId)
+	{ 
+		if (ShouldUsePlatformUserId())
+		{
+			// Remap the old int32 ControlerId to the new Platform user for backwards compat
+			FPlatformUserId UserId = FGenericPlatformMisc::GetPlatformUserForUserIndex(ControllerId);
+			FInputDeviceId DeviceId = INPUTDEVICEID_NONE;
+			IPlatformInputDeviceMapper::Get().RemapControllerIdToPlatformUserAndDevice(ControllerId, UserId, DeviceId);
+			return OnTouchStarted(Window, Location, Force, TouchIndex, UserId, DeviceId);
+		}
+		return false;
+	}
+	virtual bool OnTouchMoved(const FVector2D& Location, float Force, int32 TouchIndex, int32 ControllerId)
+	{
+		if (ShouldUsePlatformUserId())
+		{
+			// Remap the old int32 ControlerId to the new Platform user for backwards compat
+			FPlatformUserId UserId = FGenericPlatformMisc::GetPlatformUserForUserIndex(ControllerId);
+			FInputDeviceId DeviceId = INPUTDEVICEID_NONE;
+			IPlatformInputDeviceMapper::Get().RemapControllerIdToPlatformUserAndDevice(ControllerId, UserId, DeviceId);
+			return OnTouchMoved(Location, Force, TouchIndex, UserId, DeviceId);
+		}
+		return false;
+	}
+	virtual bool OnTouchEnded(const FVector2D& Location, int32 TouchIndex, int32 ControllerId)
+	{
+		if (ShouldUsePlatformUserId())
+		{
+			// Remap the old int32 ControlerId to the new Platform user for backwards compat
+			FPlatformUserId UserId = FGenericPlatformMisc::GetPlatformUserForUserIndex(ControllerId);
+			FInputDeviceId DeviceId = INPUTDEVICEID_NONE;
+			IPlatformInputDeviceMapper::Get().RemapControllerIdToPlatformUserAndDevice(ControllerId, UserId, DeviceId);
+			return OnTouchEnded(Location, TouchIndex, UserId, DeviceId);
+		}
+		return false;
+	}
+	virtual bool OnTouchForceChanged(const FVector2D& Location, float Force, int32 TouchIndex, int32 ControllerId)
+	{
+		if (ShouldUsePlatformUserId())
+		{
+			// Remap the old int32 ControlerId to the new Platform user for backwards compat
+			FPlatformUserId UserId = FGenericPlatformMisc::GetPlatformUserForUserIndex(ControllerId);
+			FInputDeviceId DeviceId = INPUTDEVICEID_NONE;
+			IPlatformInputDeviceMapper::Get().RemapControllerIdToPlatformUserAndDevice(ControllerId, UserId, DeviceId);
+			return OnTouchForceChanged(Location, Force, TouchIndex, UserId, DeviceId);
+		}
+		return false;
+	}
+	virtual bool OnTouchFirstMove(const FVector2D& Location, float Force, int32 TouchIndex, int32 ControllerId)
+	{
+		if (ShouldUsePlatformUserId())
+		{
+			// Remap the old int32 ControlerId to the new Platform user for backwards compat
+			FPlatformUserId UserId = FGenericPlatformMisc::GetPlatformUserForUserIndex(ControllerId);
+			FInputDeviceId DeviceId = INPUTDEVICEID_NONE;
+			IPlatformInputDeviceMapper::Get().RemapControllerIdToPlatformUserAndDevice(ControllerId, UserId, DeviceId);
+			return OnTouchFirstMove(Location, Force, TouchIndex, UserId, DeviceId);
+		}
+		return false;
+	}
+	virtual bool OnMotionDetected(const FVector& Tilt, const FVector& RotationRate, const FVector& Gravity, const FVector& Acceleration, int32 ControllerId)
+	{
+		if (ShouldUsePlatformUserId())
+		{
+			// Remap the old int32 ControlerId to the new Platform user for backwards compat
+			FPlatformUserId UserId = FGenericPlatformMisc::GetPlatformUserForUserIndex(ControllerId);
+			FInputDeviceId DeviceId = INPUTDEVICEID_NONE;
+			IPlatformInputDeviceMapper::Get().RemapControllerIdToPlatformUserAndDevice(ControllerId, UserId, DeviceId);
+			return OnMotionDetected(Tilt, RotationRate, Gravity, Acceleration, UserId, DeviceId);
+		}
+		return false;
+	}
 };
+
+PRAGMA_ENABLE_DEPRECATION_WARNINGS

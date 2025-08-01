@@ -11,12 +11,14 @@
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Views/STableRow.h"
 #include "Widgets/Shared/ProjectLauncherDelegates.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Widgets/Views/SListView.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Shared/SProjectLauncherProfileLaunchButton.h"
 #include "Widgets/Shared/SProjectLauncherProfileNameDescEditor.h"
+#include "Widgets/Layout/SSeparator.h"
+#include "SSimpleButton.h"
 
 #define LOCTEXT_NAMESPACE "SProjectLauncherSimpleDeviceListRow"
 
@@ -60,7 +62,7 @@ public:
 		STableRow<ILauncherProfilePtr>::ConstructInternal(
 			STableRow::FArguments()
 			.ShowSelection(false)
-			.Style(FEditorStyle::Get(), "Launcher.NoHoverTableRow"),
+			.Style(FAppStyle::Get(), "TableView.Row"),
 			InOwnerTableView
 			);
 
@@ -75,11 +77,11 @@ public:
 
 			+ SHorizontalBox::Slot()
 			.FillWidth(1)
-			.Padding(0, 2, 0, 2)
+			.Padding(1)
 			[
 				SNew(SBorder)
-				.Padding(2)
-				.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+				.Padding(0)
+				.BorderImage(FAppStyle::GetBrush("Brushes.Panel"))
 				[
 					SNew(SHorizontalBox)
 
@@ -96,24 +98,26 @@ public:
 					.VAlign(VAlign_Center)
 					.Padding(4, 0, 0, 0)
 					[
-						SNew(SButton)
-						.ButtonStyle(FCoreStyle::Get(), "Toolbar.Button")
-						.ForegroundColor(FEditorStyle::GetSlateColor("DefaultForeground"))
+						SNew(SSimpleButton)
 						.OnClicked(this, &SProjectLauncherProfileListRow::OnEditClicked)
 						.ToolTipText(LOCTEXT("EditProfileToolTipText", "Edit profile."))
-						.HAlign(HAlign_Center)
-						.VAlign(VAlign_Center)
-						.ContentPadding(0)
-						[
-							SNew(SImage)
-							.Image(this, &SProjectLauncherProfileListRow::GetEditIcon)
-						]
+						.Icon(this, &SProjectLauncherProfileListRow::GetEditIcon)
+					]
+
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(12, 5, 0, 5)
+					[
+						SNew(SSeparator)
+						.Orientation(Orient_Vertical)
+						.Thickness(1.f)
 					]
 
 					+ SHorizontalBox::Slot()
 					.AutoWidth()
 					.VAlign(VAlign_Center)
-					.Padding(4, 0, 0, 0)
+					.HAlign(HAlign_Left)
+					.Padding(24, 0, 20, 0)
 					[
 						SNew(SProjectLauncherProfileLaunchButton, false)
 						.LaunchProfile(this, &SProjectLauncherProfileListRow::GetLaunchProfile)
@@ -126,7 +130,7 @@ public:
 					.Padding(4, 0, 0, 0)
 					[
 						SNew(SComboButton)
-						.ComboButtonStyle(FEditorStyle::Get(), "ContentBrowser.NewAsset.Style")
+						.ComboButtonStyle(FAppStyle::Get(), "ContentBrowser.NewAsset.Style")
 						.ForegroundColor(FLinearColor::White)
 						.ContentPadding(0)
 						.OnGetMenuContent(this, &SContentBrowser::MakeCreateAssetContextMenu)
@@ -178,7 +182,7 @@ private:
 	// Get the SlateIcon for Launch Button
 	const FSlateBrush* GetEditIcon() const
 	{
-		return FEditorStyle::GetBrush("Launcher.EditSettings");
+		return FAppStyle::Get().GetBrush("Icons.Toolbar.Settings");
 	}
 
 private:

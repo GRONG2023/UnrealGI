@@ -39,7 +39,7 @@ FMD5Hash FDatasmithMeshElementImpl::CalculateElementHash(bool bForce)
 		return ElementHash;
 	}
 	FMD5 MD5;
-	const FMD5Hash& FileHashValue = FileHash.Get(Store);
+	const FMD5Hash& FileHashValue = FileHash;
 	MD5.Update(FileHashValue.GetBytes(), FileHashValue.GetSize());
 	MD5.Update(reinterpret_cast<const uint8*>(&LightmapSourceUV), sizeof(LightmapSourceUV));
 	MD5.Update(reinterpret_cast<const uint8*>(&LightmapCoordinateIndex), sizeof(LightmapCoordinateIndex));
@@ -86,7 +86,6 @@ int32 FDatasmithMeshElementImpl::GetMaterialSlotCount() const
 	return MaterialSlots.Num();
 }
 
-
 TSharedPtr<const IDatasmithMaterialIDElement> FDatasmithMeshElementImpl::GetMaterialSlotAt(int32 Index) const
 {
 	if (MaterialSlots.IsValidIndex(Index))
@@ -107,30 +106,38 @@ TSharedPtr<IDatasmithMaterialIDElement> FDatasmithMeshElementImpl::GetMaterialSl
 	return InvalidMaterialID;
 }
 
+FDatasmithClothElementImpl::FDatasmithClothElementImpl(const TCHAR* InName)
+	: FDatasmithElementImpl(InName, EDatasmithElementType::Cloth)
+{
+	Store.RegisterParameter(File, "File");
+}
+
 TSharedPtr< IDatasmithKeyValueProperty > FDatasmithKeyValuePropertyImpl::NullPropertyPtr;
 
 FDatasmithKeyValuePropertyImpl::FDatasmithKeyValuePropertyImpl(const TCHAR* InName)
 	: FDatasmithElementImpl(InName, EDatasmithElementType::KeyValueProperty)
+	, PropertyType(EDatasmithKeyValuePropertyType::String)
 {
-	Store.RegisterParameter(Value, "Value").Set(Store, InName);
-	Store.RegisterParameter(PropertyType, "PropertyType").Set(Store, EDatasmithKeyValuePropertyType::String);
+	FDatasmithKeyValuePropertyImpl::SetName(InName);
+	Store.RegisterParameter(Value, "Value");
+	Store.RegisterParameter(PropertyType, "PropertyType");
 }
 
 void FDatasmithKeyValuePropertyImpl::SetPropertyType( EDatasmithKeyValuePropertyType InType )
 {
-	PropertyType.Set(Store, InType);
+	PropertyType = InType;
 	FormatValue();
 }
 
 void FDatasmithKeyValuePropertyImpl::SetValue(const TCHAR* InValue)
 {
-	Value.Set(Store, InValue);
+	Value = InValue;
 	FormatValue();
 }
 
 void FDatasmithKeyValuePropertyImpl::FormatValue()
 {
-	FString Tmp = Value.Get(Store);
+	FString Tmp = Value;
 	if ( Tmp.Len() > 0 && (
 		GetPropertyType() == EDatasmithKeyValuePropertyType::Vector ||
 		GetPropertyType() == EDatasmithKeyValuePropertyType::Color ) )
@@ -147,7 +154,7 @@ void FDatasmithKeyValuePropertyImpl::FormatValue()
 
 		Tmp.ReplaceInline( TEXT(" "), TEXT(",") ); // FVector::ToString separates the arguments with a " " rather than with a ","
 	}
-	Value.Set(Store, Tmp);
+	Value = Tmp;
 }
 
 FDatasmithMaterialIDElementImpl::FDatasmithMaterialIDElementImpl(const TCHAR* InName)
@@ -161,6 +168,7 @@ FDatasmithMaterialIDElementImpl::FDatasmithMaterialIDElementImpl(const TCHAR* In
 FDatasmithHierarchicalInstancedStaticMeshActorElementImpl::FDatasmithHierarchicalInstancedStaticMeshActorElementImpl(const TCHAR* InName)
 	: FDatasmithMeshActorElementImpl< IDatasmithHierarchicalInstancedStaticMeshActorElement >(InName, EDatasmithElementType::HierarchicalInstanceStaticMesh)
 {
+	Store.RegisterParameter(Instances, "Instaces");
 }
 
 FDatasmithHierarchicalInstancedStaticMeshActorElementImpl::~FDatasmithHierarchicalInstancedStaticMeshActorElementImpl()
@@ -169,41 +177,41 @@ FDatasmithHierarchicalInstancedStaticMeshActorElementImpl::~FDatasmithHierarchic
 
 int32 FDatasmithHierarchicalInstancedStaticMeshActorElementImpl::GetInstancesCount() const
 {
-	return Instances.Num();
+	return Instances.Get().Num();
 }
 
 void FDatasmithHierarchicalInstancedStaticMeshActorElementImpl::ReserveSpaceForInstances(int32 NumIntances)
 {
-	Instances.Reserve(NumIntances);
+	Instances.Get().Reserve(NumIntances);
 }
 
 int32 FDatasmithHierarchicalInstancedStaticMeshActorElementImpl::AddInstance(const FTransform& Transform)
 {
-	Instances.Add(Transform);
-	return Instances.Num() - 1;
+	Instances.Get().Add(Transform);
+	return Instances.Get().Num() - 1;
 }
 
 FTransform FDatasmithHierarchicalInstancedStaticMeshActorElementImpl::GetInstance(int32 InstanceIndex) const
 {
-	if (Instances.IsValidIndex(InstanceIndex))
+	if (Instances.Get().IsValidIndex(InstanceIndex))
 	{
-		return Instances[InstanceIndex];
+		return Instances.Get()[InstanceIndex];
 	}
 	return FTransform();
 }
 
 void FDatasmithHierarchicalInstancedStaticMeshActorElementImpl::RemoveInstance(int32 InstanceIndex)
 {
-	if (Instances.IsValidIndex(InstanceIndex))
+	if (Instances.Get().IsValidIndex(InstanceIndex))
 	{
-		Instances.RemoveAtSwap(InstanceIndex);
+		Instances.Get().RemoveAtSwap(InstanceIndex);
 	}
 }
 
 FDatasmithPostProcessElementImpl::FDatasmithPostProcessElementImpl()
 	: FDatasmithElementImpl( TEXT("unnamed"), EDatasmithElementType::PostProcess )
 	, Temperature(6500.0f)
-	, ColorFilter(FVector::ZeroVector)
+	, ColorFilter(FVector3f::ZeroVector)
 	, Vignette(0.0f)
 	, Dof(0.0f)
 	, MotionBlur(0.0f)
@@ -369,10 +377,10 @@ const TSharedPtr< IDatasmithShaderElement >& FDatasmithMaterialElementImpl::GetS
 	return Shaders[InIndex];
 }
 
-FDatasmithMasterMaterialElementImpl::FDatasmithMasterMaterialElementImpl(const TCHAR* InName)
-	: FDatasmithBaseMaterialElementImpl(InName, EDatasmithElementType::MasterMaterial)
-	, MaterialType( EDatasmithMasterMaterialType::Auto )
-	, Quality( EDatasmithMasterMaterialQuality::High )
+FDatasmithMaterialIntanceElementImpl::FDatasmithMaterialIntanceElementImpl(const TCHAR* InName)
+	: FDatasmithBaseMaterialElementImpl(InName, EDatasmithElementType::MaterialInstance)
+	, MaterialType( EDatasmithReferenceMaterialType::Auto )
+	, Quality( EDatasmithReferenceMaterialQuality::High )
 {
 	RegisterReferenceProxy(Properties, "Properties");
 
@@ -381,12 +389,12 @@ FDatasmithMasterMaterialElementImpl::FDatasmithMasterMaterialElementImpl(const T
 	Store.RegisterParameter(CustomMaterialPathName, "CustomMaterialPathName");
 }
 
-const TSharedPtr< IDatasmithKeyValueProperty >& FDatasmithMasterMaterialElementImpl::GetProperty( int32 InIndex ) const
+const TSharedPtr< IDatasmithKeyValueProperty >& FDatasmithMaterialIntanceElementImpl::GetProperty( int32 InIndex ) const
 {
 	return Properties.IsValidIndex( InIndex ) ? Properties[InIndex] : FDatasmithKeyValuePropertyImpl::NullPropertyPtr;
 }
 
-const TSharedPtr< IDatasmithKeyValueProperty >& FDatasmithMasterMaterialElementImpl::GetPropertyByName( const TCHAR* InName ) const
+const TSharedPtr< IDatasmithKeyValueProperty >& FDatasmithMaterialIntanceElementImpl::GetPropertyByName( const TCHAR* InName ) const
 {
 	int32 Index = Properties.View().IndexOfByPredicate([InName](const TSharedPtr<IDatasmithKeyValueProperty>& Property){
 		return Property.IsValid() && FCString::Stricmp(Property->GetName(), InName) == 0;
@@ -394,7 +402,7 @@ const TSharedPtr< IDatasmithKeyValueProperty >& FDatasmithMasterMaterialElementI
 	return GetProperty(Index);
 }
 
-void FDatasmithMasterMaterialElementImpl::AddProperty( const TSharedPtr< IDatasmithKeyValueProperty >& InProperty )
+void FDatasmithMaterialIntanceElementImpl::AddProperty( const TSharedPtr< IDatasmithKeyValueProperty >& InProperty )
 {
 	if (!InProperty.IsValid())
 	{
@@ -412,7 +420,7 @@ void FDatasmithMasterMaterialElementImpl::AddProperty( const TSharedPtr< IDatasm
 	}
 }
 
-FMD5Hash FDatasmithMasterMaterialElementImpl::CalculateElementHash(bool bForce)
+FMD5Hash FDatasmithMaterialIntanceElementImpl::CalculateElementHash(bool bForce)
 {
 	if (ElementHash.IsValid() && !bForce)
 	{
@@ -511,11 +519,11 @@ FMD5Hash FDatasmithTextureElementImpl::CalculateElementHash(bool bForce)
 	}
 	FMD5 MD5;
 	// Update FileHash if it has not already been done
-	if (!FileHash.Get(Store).IsValid() && GetFile() != nullptr && FCString::Strlen(GetFile()) > 0)
+	if (!FileHash.Get().IsValid() && GetFile() != nullptr && FCString::Strlen(GetFile()) > 0)
 	{
-		FileHash.Edit(Store) = FMD5Hash::HashFile(GetFile());
+		FileHash = FMD5Hash::HashFile(GetFile());
 	}
-	const FMD5Hash& FileHashValue = FileHash.Get(Store);
+	const FMD5Hash& FileHashValue = FileHash.Get();
 	MD5.Update(FileHashValue.GetBytes(), FileHashValue.GetSize());
 	MD5.Update(reinterpret_cast<uint8*>(&RGBCurve), sizeof(RGBCurve));
 	MD5.Update(reinterpret_cast<uint8*>(&TextureMode), sizeof(TextureMode));
@@ -662,17 +670,16 @@ FDatasmithShaderElementImpl::FDatasmithShaderElementImpl(const TCHAR* InName)
 	, ShaderUsage(EDatasmithShaderUsage::Surface)
 	, bUseEmissiveForDynamicAreaLighting(false)
 {
-	GetDiffuseComp()->SetBaseNames(DATASMITH_DIFFUSETEXNAME, DATASMITH_DIFFUSECOLNAME, TEXT("unsupported"), DATASMITH_DIFFUSECOMPNAME);
-	GetRefleComp()->SetBaseNames(DATASMITH_REFLETEXNAME, DATASMITH_REFLECOLNAME, TEXT("unsupported"), DATASMITH_REFLECOMPNAME);
-	GetRoughnessComp()->SetBaseNames(DATASMITH_ROUGHNESSTEXNAME, TEXT("unsupported"), DATASMITH_ROUGHNESSVALUENAME, DATASMITH_ROUGHNESSCOMPNAME);
-	GetNormalComp()->SetBaseNames(DATASMITH_NORMALTEXNAME, TEXT("unsupported"), DATASMITH_BUMPVALUENAME, DATASMITH_NORMALCOMPNAME);
-	GetBumpComp()->SetBaseNames(DATASMITH_BUMPTEXNAME, TEXT("unsupported"), DATASMITH_BUMPVALUENAME, DATASMITH_BUMPCOMPNAME);
-	GetTransComp()->SetBaseNames(DATASMITH_TRANSPTEXNAME, DATASMITH_TRANSPCOLNAME, TEXT("unsupported"), DATASMITH_TRANSPCOMPNAME);
-	GetMaskComp()->SetBaseNames(DATASMITH_CLIPTEXNAME, TEXT("unsupported"), TEXT("unsupported"), DATASMITH_CLIPCOMPNAME);
-	GetDisplaceComp()->SetBaseNames(DATASMITH_DISPLACETEXNAME, TEXT("unsupported"), TEXT("unsupported"), DATASMITH_DISPLACECOMPNAME);
-	GetMetalComp()->SetBaseNames(DATASMITH_METALTEXNAME, TEXT("unsupported"), DATASMITH_METALVALUENAME, DATASMITH_METALCOMPNAME);
-	GetEmitComp()->SetBaseNames(DATASMITH_EMITTEXNAME, DATASMITH_EMITCOLNAME, TEXT("unsupported"), DATASMITH_EMITCOMPNAME);
-	GetWeightComp()->SetBaseNames(DATASMITH_WEIGHTTEXNAME, DATASMITH_WEIGHTCOLNAME, DATASMITH_WEIGHTVALUENAME, DATASMITH_WEIGHTCOMPNAME);
+	FDatasmithShaderElementImpl::GetDiffuseComp()->SetBaseNames(DATASMITH_DIFFUSETEXNAME, DATASMITH_DIFFUSECOLNAME, TEXT("unsupported"), DATASMITH_DIFFUSECOMPNAME);
+	FDatasmithShaderElementImpl::GetRefleComp()->SetBaseNames(DATASMITH_REFLETEXNAME, DATASMITH_REFLECOLNAME, TEXT("unsupported"), DATASMITH_REFLECOMPNAME);
+	FDatasmithShaderElementImpl::GetRoughnessComp()->SetBaseNames(DATASMITH_ROUGHNESSTEXNAME, TEXT("unsupported"), DATASMITH_ROUGHNESSVALUENAME, DATASMITH_ROUGHNESSCOMPNAME);
+	FDatasmithShaderElementImpl::GetNormalComp()->SetBaseNames(DATASMITH_NORMALTEXNAME, TEXT("unsupported"), DATASMITH_BUMPVALUENAME, DATASMITH_NORMALCOMPNAME);
+	FDatasmithShaderElementImpl::GetBumpComp()->SetBaseNames(DATASMITH_BUMPTEXNAME, TEXT("unsupported"), DATASMITH_BUMPVALUENAME, DATASMITH_BUMPCOMPNAME);
+	FDatasmithShaderElementImpl::GetTransComp()->SetBaseNames(DATASMITH_TRANSPTEXNAME, DATASMITH_TRANSPCOLNAME, TEXT("unsupported"), DATASMITH_TRANSPCOMPNAME);
+	FDatasmithShaderElementImpl::GetMaskComp()->SetBaseNames(DATASMITH_CLIPTEXNAME, TEXT("unsupported"), TEXT("unsupported"), DATASMITH_CLIPCOMPNAME);
+	FDatasmithShaderElementImpl::GetMetalComp()->SetBaseNames(DATASMITH_METALTEXNAME, TEXT("unsupported"), DATASMITH_METALVALUENAME, DATASMITH_METALCOMPNAME);
+	FDatasmithShaderElementImpl::GetEmitComp()->SetBaseNames(DATASMITH_EMITTEXNAME, DATASMITH_EMITCOLNAME, TEXT("unsupported"), DATASMITH_EMITCOMPNAME);
+	FDatasmithShaderElementImpl::GetWeightComp()->SetBaseNames(DATASMITH_WEIGHTTEXNAME, DATASMITH_WEIGHTCOLNAME, DATASMITH_WEIGHTVALUENAME, DATASMITH_WEIGHTCOMPNAME);
 }
 
 FDatasmithCompositeSurface::FDatasmithCompositeSurface(const TSharedPtr<IDatasmithCompositeTexture>& SubComp)
@@ -1044,7 +1051,6 @@ FDatasmithSceneImpl::FDatasmithSceneImpl(const TCHAR * InName)
 	RegisterReferenceProxy(LevelVariantSets, "LevelVariantSets" );
 	RegisterReferenceProxy(PostProcess,      "PostProcess"      );
 
-	Store.RegisterParameter(LODScreenSizes,     "LODScreenSizes"     );
 	Store.RegisterParameter(Hostname,           "Hostname"           );
 	Store.RegisterParameter(ExporterVersion,    "ExporterVersion"    );
 	Store.RegisterParameter(ExporterSDKVersion, "ExporterSDKVersion" );
@@ -1054,9 +1060,10 @@ FDatasmithSceneImpl::FDatasmithSceneImpl(const TCHAR * InName)
 	Store.RegisterParameter(ProductVersion,     "ProductVersion"     );
 	Store.RegisterParameter(UserID,             "UserID"             );
 	Store.RegisterParameter(UserOS,             "UserOS"             );
+	Store.RegisterParameter(Geolocation,        "Geolocation"        );
 	Store.RegisterParameter(ExportDuration,     "ExportDuration"     );
 	Store.RegisterParameter(bUseSky,            "bUseSky"            );
-	Reset();
+	FDatasmithSceneImpl::Reset();
 }
 
 void FDatasmithSceneImpl::Reset()
@@ -1068,7 +1075,6 @@ void FDatasmithSceneImpl::Reset()
 	MetaData.Empty();
 	LevelSequences.Empty();
 	LevelVariantSets.Empty();
-	LODScreenSizes.Edit(Store).Reset();
 	PostProcess.Inner.Reset();
 	ElementToMetaDataMap.Empty();
 
@@ -1080,6 +1086,7 @@ void FDatasmithSceneImpl::Reset()
 	ProductVersion = TEXT("");
 	UserID = TEXT("");
 	UserOS = TEXT("");
+	Geolocation = FVector(TNumericLimits<double>::Max(), TNumericLimits<double>::Max(), TNumericLimits<double>::Max());  // max double indicates values are not set
 	ResourcePath = TEXT("");
 
 	ExportDuration = 0;
@@ -1089,15 +1096,14 @@ void FDatasmithSceneImpl::Reset()
 
 const TCHAR* FDatasmithSceneImpl::GetHost() const
 {
-	return *Hostname.Get(Store);
+	return *Hostname.Get();
 }
 
 void FDatasmithSceneImpl::SetHost(const TCHAR* InHostname)
 {
-	Hostname.Set(Store, InHostname);
+	Hostname = InHostname;
 }
 
-static const TSharedPtr< IDatasmithMeshElement > InvalidMeshElement;
 
 TSharedPtr< IDatasmithMeshElement > FDatasmithSceneImpl::GetMesh(int32 InIndex)
 {
@@ -1119,8 +1125,64 @@ const TSharedPtr< IDatasmithMeshElement >& FDatasmithSceneImpl::GetMesh(int32 In
 	}
 	else
 	{
+		static const TSharedPtr< IDatasmithMeshElement > InvalidMeshElement;
 		return InvalidMeshElement;
 	}
+}
+
+void FDatasmithSceneImpl::RemoveMeshAt(int32 InIndex)
+{
+	if (Meshes.IsValidIndex(InIndex))
+	{
+		Meshes.RemoveAt(InIndex);
+	}
+}
+
+void FDatasmithSceneImpl::AddCloth(const TSharedPtr< IDatasmithClothElement >& InElement)
+{
+	Clothes.Add(InElement);
+}
+
+int32 FDatasmithSceneImpl::GetClothesCount() const
+{
+	return Clothes.Num();
+}
+
+TSharedPtr< IDatasmithClothElement > FDatasmithSceneImpl::GetCloth(int32 InIndex)
+{
+	if ( Clothes.IsValidIndex( InIndex ) )
+	{
+		return Clothes[InIndex];
+	}
+	return {};
+}
+
+const TSharedPtr< IDatasmithClothElement >& FDatasmithSceneImpl::GetCloth(int32 InIndex) const
+{
+	if ( Clothes.IsValidIndex( InIndex ) )
+	{
+		return Clothes[InIndex];
+	}
+	static TSharedPtr< IDatasmithClothElement > NullCloth;
+	return NullCloth;
+}
+
+void FDatasmithSceneImpl::RemoveCloth(const TSharedPtr< IDatasmithClothElement >& InElement)
+{
+	Clothes.Remove(InElement);
+}
+
+void FDatasmithSceneImpl::RemoveClothAt(int32 InIndex)
+{
+	if (Clothes.IsValidIndex(InIndex))
+	{
+		Clothes.RemoveAt(InIndex);
+	}
+}
+
+void FDatasmithSceneImpl::EmptyClothes()
+{
+	Clothes.Empty();
 }
 
 static const TSharedPtr< IDatasmithMetaDataElement > InvalidMetaData;
@@ -1151,7 +1213,7 @@ const TSharedPtr< IDatasmithMetaDataElement >& FDatasmithSceneImpl::GetMetaData(
 
 TSharedPtr< IDatasmithMetaDataElement > FDatasmithSceneImpl::GetMetaData(const TSharedPtr<IDatasmithElement>& Element)
 {
-	if (TSharedPtr< IDatasmithMetaDataElement >* MetaDataElement = ElementToMetaDataMap.Find(Element))
+	if (TSharedPtr< IDatasmithMetaDataElement >* MetaDataElement = GetElementToMetaDataCache().Find(Element))
 	{
 		return *MetaDataElement;
 	}
@@ -1163,7 +1225,7 @@ TSharedPtr< IDatasmithMetaDataElement > FDatasmithSceneImpl::GetMetaData(const T
 
 const TSharedPtr< IDatasmithMetaDataElement >& FDatasmithSceneImpl::GetMetaData(const TSharedPtr<IDatasmithElement>& Element) const
 {
-	if (const TSharedPtr< IDatasmithMetaDataElement >* MetaDataElement = ElementToMetaDataMap.Find(Element))
+	if (const TSharedPtr< IDatasmithMetaDataElement >* MetaDataElement = GetElementToMetaDataCache().Find(Element))
 	{
 		return *MetaDataElement;
 	}
@@ -1177,8 +1239,64 @@ void FDatasmithSceneImpl::RemoveMetaData( const TSharedPtr<IDatasmithMetaDataEle
 {
 	if ( Element )
 	{
-		ElementToMetaDataMap.Remove( Element->GetAssociatedElement() );
+		GetElementToMetaDataCache().Remove( Element->GetAssociatedElement() );
 		MetaData.Remove( Element );
+	}
+}
+
+void FDatasmithSceneImpl::RemoveMetaDataAt(int32 InIndex)
+{
+	RemoveMetaData(GetMetaData(InIndex));
+}
+
+TMap< TSharedPtr< IDatasmithElement >, TSharedPtr< IDatasmithMetaDataElement> >& FDatasmithSceneImpl::GetElementToMetaDataCache() const
+{
+	if (ElementToMetaDataMap.Num() == 0)
+	{
+		for (const TSharedPtr<IDatasmithMetaDataElement>& MetaDataElement : MetaData.View())
+		{
+			ElementToMetaDataMap.Add(MetaDataElement->GetAssociatedElement(), MetaDataElement);
+		}
+	}
+
+	return ElementToMetaDataMap;
+}
+
+TSharedPtr<IDatasmithLevelSequenceElement> FDatasmithSceneImpl::GetLevelSequence(int32 InIndex)
+{
+	return LevelSequences.IsValidIndex(InIndex) ? LevelSequences[InIndex] : nullptr;
+}
+
+const TSharedPtr<IDatasmithLevelSequenceElement>& FDatasmithSceneImpl::GetLevelSequence(int32 InIndex) const
+{
+	static TSharedPtr<IDatasmithLevelSequenceElement> InvalidLevelSequence;
+	return LevelSequences.IsValidIndex(InIndex) ? LevelSequences[InIndex] : InvalidLevelSequence;
+}
+
+void FDatasmithSceneImpl::RemoveLevelSequenceAt(int32 InIndex)
+{
+	if (LevelSequences.IsValidIndex(InIndex))
+	{
+		LevelSequences.RemoveAt(InIndex);
+	}
+}
+
+TSharedPtr<IDatasmithLevelVariantSetsElement> FDatasmithSceneImpl::GetLevelVariantSets(int32 InIndex)
+{
+	return LevelVariantSets.IsValidIndex(InIndex) ? LevelVariantSets[InIndex] : nullptr;
+}
+
+const TSharedPtr<IDatasmithLevelVariantSetsElement>& FDatasmithSceneImpl::GetLevelVariantSets(int32 InIndex) const
+{
+	static TSharedPtr<IDatasmithLevelVariantSetsElement> InvalidLevelVariantSets;
+	return LevelVariantSets.IsValidIndex(InIndex) ? LevelVariantSets[InIndex] : InvalidLevelVariantSets;
+}
+
+void FDatasmithSceneImpl::RemoveLevelVariantSetsAt(int32 InIndex)
+{
+	if (LevelVariantSets.IsValidIndex(InIndex))
+	{
+		LevelVariantSets.RemoveAt(InIndex);
 	}
 }
 
@@ -1201,8 +1319,11 @@ namespace DatasmithSceneImplInternal
 					for (int32 ChildIndex = InActor->GetChildrenCount() - 1; ChildIndex >= 0; --ChildIndex)
 					{
 						const TSharedPtr< IDatasmithActorElement > Child = InActor->GetChild(ChildIndex);
-						InActor->RemoveChild(Child);
-						SceneImpl->AddActor(Child);
+						if (!Child->IsAComponent())
+						{
+							InActor->RemoveChild(Child);
+							SceneImpl->AddActor(Child);
+						}
 					}
 				}
 				else
@@ -1220,8 +1341,11 @@ namespace DatasmithSceneImplInternal
 					for (int32 ChildIndex = InActor->GetChildrenCount() - 1; ChildIndex >= 0; --ChildIndex)
 					{
 						const TSharedPtr< IDatasmithActorElement > Child = InActor->GetChild(ChildIndex);
-						InActor->RemoveChild(Child);
-						FoundHierarchy.Last()->AddChild(Child);
+						if (!Child->IsAComponent())
+						{
+							InActor->RemoveChild(Child);
+							FoundHierarchy.Last()->AddChild(Child);
+						}
 					}
 				}
 				else
@@ -1235,9 +1359,66 @@ namespace DatasmithSceneImplInternal
 	}
 }
 
+TSharedPtr<IDatasmithActorElement> FDatasmithSceneImpl::GetActor(int32 InIndex)
+{
+	return Actors.IsValidIndex(InIndex) ? Actors[InIndex] : nullptr;
+}
+
+const TSharedPtr<IDatasmithActorElement>& FDatasmithSceneImpl::GetActor(int32 InIndex) const
+{
+	static TSharedPtr<IDatasmithActorElement> InvalidActor;
+	return Actors.IsValidIndex(InIndex) ? Actors[InIndex] : InvalidActor;
+}
+
 void FDatasmithSceneImpl::RemoveActor(const TSharedPtr< IDatasmithActorElement >& InActor, EDatasmithActorRemovalRule RemoveRule)
 {
 	DatasmithSceneImplInternal::RemoveActor(this, Actors, InActor, RemoveRule);
+}
+
+void FDatasmithSceneImpl::RemoveActorAt(int32 InIndex, EDatasmithActorRemovalRule RemoveRule)
+{
+	if (Actors.IsValidIndex(InIndex))
+	{
+		RemoveActor(Actors[InIndex], RemoveRule);
+	}
+}
+
+TSharedPtr<IDatasmithBaseMaterialElement> FDatasmithSceneImpl::GetMaterial(int32 InIndex)
+{
+	return Materials.IsValidIndex(InIndex) ? Materials[InIndex] : nullptr;
+}
+
+const TSharedPtr<IDatasmithBaseMaterialElement>& FDatasmithSceneImpl::GetMaterial(int32 InIndex) const
+{
+	static TSharedPtr<IDatasmithBaseMaterialElement> InvalidBaseMaterial;
+	return Materials.IsValidIndex(InIndex) ? Materials[InIndex] : InvalidBaseMaterial;
+}
+
+void FDatasmithSceneImpl::RemoveMaterialAt(int32 InIndex)
+{
+	if (Materials.IsValidIndex(InIndex))
+	{
+		Materials.RemoveAt(InIndex);
+	}
+}
+
+TSharedPtr<IDatasmithTextureElement> FDatasmithSceneImpl::GetTexture(int32 InIndex)
+{
+	return Textures.IsValidIndex(InIndex) ? Textures[InIndex] : nullptr;
+}
+
+const TSharedPtr<IDatasmithTextureElement>& FDatasmithSceneImpl::GetTexture(int32 InIndex) const
+{
+	static TSharedPtr<IDatasmithTextureElement> InvalidTexture;
+	return Textures.IsValidIndex(InIndex) ? Textures[InIndex] : InvalidTexture;
+}
+
+void FDatasmithSceneImpl::RemoveTextureAt(int32 InIndex)
+{
+	if (Textures.IsValidIndex(InIndex))
+	{
+		Textures.RemoveAt(InIndex);
+	}
 }
 
 namespace DatasmithSceneImplInternal
@@ -1329,4 +1510,10 @@ void FDatasmithSceneImpl::AttachActorToSceneRoot(const TSharedPtr< IDatasmithAct
 	{
 		DatasmithSceneImplInternal::AttachActorToSceneRoot(this, Child, AttachmentRule, FoundChildHierarchy);
 	}
+}
+
+FDatasmithClothActorElementImpl::FDatasmithClothActorElementImpl(const TCHAR* InName)
+	: FDatasmithActorElementImpl<IDatasmithClothActorElement>(InName, EDatasmithElementType::ClothActor)
+{
+	Store.RegisterParameter(Cloth, "Cloth");
 }

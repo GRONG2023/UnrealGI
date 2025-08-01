@@ -2,9 +2,14 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
 #include "BoneIndices.h"
+#include "Containers/Array.h"
+#include "CoreMinimal.h"
+#include "CoreTypes.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector.h"
+#include "UObject/ObjectMacros.h"
+
 #include "FABRIK.generated.h"
 
 struct FBoneContainer;
@@ -25,7 +30,7 @@ public:
 	FVector Position;
 
 	/** Distance to its parent link. */
-	float Length;
+	double Length;
 
 	/** Bone Index in SkeletalMesh */
 	int32 BoneIndex;
@@ -42,23 +47,23 @@ public:
 
 	FFABRIKChainLink()
 		: Position(FVector::ZeroVector)
-		, Length(0.f)
+		, Length(0.0)
 		, BoneIndex(INDEX_NONE)
 		, TransformIndex(INDEX_NONE)
-		, DefaultDirToParent(FVector(-1.f, 0.f, 0.f))
+		, DefaultDirToParent(FVector(-1.0, 0.0, 0.0))
 	{
 	}
 
-	FFABRIKChainLink(const FVector& InPosition, const float InLength, const FCompactPoseBoneIndex& InBoneIndex, const int32& InTransformIndex)
+	FFABRIKChainLink(const FVector& InPosition, const double InLength, const FCompactPoseBoneIndex& InBoneIndex, const int32& InTransformIndex)
 		: Position(InPosition)
 		, Length(InLength)
 		, BoneIndex(InBoneIndex.GetInt())
 		, TransformIndex(InTransformIndex)
-		, DefaultDirToParent(FVector(-1.f, 0.f, 0.f))
+		, DefaultDirToParent(FVector(-1.0, 0.0, 0.0))
 	{
 	}
 
-	FFABRIKChainLink(const FVector& InPosition, const float InLength, const FCompactPoseBoneIndex& InBoneIndex, const int32& InTransformIndex, const FVector& InDefaultDirToParent)
+	FFABRIKChainLink(const FVector& InPosition, const double InLength, const FCompactPoseBoneIndex& InBoneIndex, const int32& InTransformIndex, const FVector& InDefaultDirToParent)
 		: Position(InPosition)
 		, Length(InLength)
 		, BoneIndex(InBoneIndex.GetInt())
@@ -67,16 +72,14 @@ public:
 	{
 	}
 
-	FFABRIKChainLink(const FVector& InPosition, const float InLength, const int32 InBoneIndex, const int32 InTransformIndex)
+	FFABRIKChainLink(const FVector& InPosition, const double InLength, const int32 InBoneIndex, const int32 InTransformIndex)
 		: Position(InPosition)
 		, Length(InLength)
 		, BoneIndex(InBoneIndex)
 		, TransformIndex(InTransformIndex)
-		, DefaultDirToParent(FVector(-1.f, 0.f, 0.f))
+		, DefaultDirToParent(FVector(-1.0, 0.0, 0.0))
 	{
 	}
-
-	static ANIMATIONCORE_API FVector GetDirectionToParent(const FBoneContainer& BoneContainer, FCompactPoseBoneIndex BoneIndex);
 };
 
 namespace AnimationCore
@@ -94,5 +97,5 @@ namespace AnimationCore
 	*
 	* @return  true if modified. False if not.
 	*/
-	ANIMATIONCORE_API bool SolveFabrik(TArray<FFABRIKChainLink>& InOutChain, const FVector& TargetPosition, float MaximumReach, float Precision, int32 MaxIteration);
+	ANIMATIONCORE_API bool SolveFabrik(TArray<FFABRIKChainLink>& InOutChain, const FVector& TargetPosition, double MaximumReach, double Precision, int32 MaxIteration);
 };

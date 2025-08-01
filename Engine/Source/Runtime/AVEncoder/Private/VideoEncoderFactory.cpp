@@ -9,11 +9,15 @@
 namespace AVEncoder
 {
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 FCriticalSection			FVideoEncoderFactory::ProtectSingleton;
 FVideoEncoderFactory		FVideoEncoderFactory::Singleton;
 FThreadSafeCounter			FVideoEncoderFactory::NextID = 4711;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 FVideoEncoderFactory& FVideoEncoderFactory::Get()
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 {
 	if (!Singleton.bWasSetup)
 	{
@@ -54,10 +58,14 @@ void FVideoEncoderFactory::Debug_SetDontRegisterDefaultCodecs()
 	Singleton.bDebugDontRegisterDefaultCodecs = true;
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void FVideoEncoderFactory::Register(const FVideoEncoderInfo& InInfo, const CreateEncoderCallback& InCreateEncoder)
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 {
 	AvailableEncoders.Push(InInfo);
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	AvailableEncoders.Last().ID = NextID.Increment();
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	CreateEncoders.Push(InCreateEncoder);
 }
 
@@ -70,24 +78,36 @@ void FVideoEncoderFactory::RegisterDefaultCodecs()
 
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 bool FVideoEncoderFactory::GetInfo(uint32 InID, FVideoEncoderInfo& OutInfo) const
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 {
 	for (int32 Index = 0; Index < AvailableEncoders.Num(); ++Index)
 	{
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		if (AvailableEncoders[Index].ID == InID)
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		{
+			PRAGMA_DISABLE_DEPRECATION_WARNINGS
 			OutInfo = AvailableEncoders[Index];
+			PRAGMA_ENABLE_DEPRECATION_WARNINGS
 			return true;
 		}
 	}
 	return false;
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 bool FVideoEncoderFactory::HasEncoderForCodec(ECodecType CodecType) const
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	for (const AVEncoder::FVideoEncoderInfo& EncoderInfo : AvailableEncoders)
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	{
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		if (EncoderInfo.CodecType == CodecType)
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		{
 			return true;
 		}
@@ -95,6 +115,7 @@ bool FVideoEncoderFactory::HasEncoderForCodec(ECodecType CodecType) const
 	return false;
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 TUniquePtr<FVideoEncoder> FVideoEncoderFactory::Create(uint32 InID, const FVideoEncoder::FLayerConfig& config)
 {
 	// HACK (M84FIX) create encoder without a ready FVideoEncoderInput
@@ -105,11 +126,11 @@ TUniquePtr<FVideoEncoder> FVideoEncoderFactory::Create(uint32 InID, const FVideo
 		{
 			Result = CreateEncoders[Index]();
 
-			FString RHIName = GDynamicRHI->GetName();
+			ERHIInterfaceType RHIType = RHIGetInterfaceType();
 
-			if (RHIName == TEXT("D3D11"))
+			if (RHIType == ERHIInterfaceType::D3D11)
 			{	
-				TSharedRef<FVideoEncoderInput> Input = FVideoEncoderInput::CreateForD3D11(GDynamicRHI->RHIGetNativeDevice(), config.Width, config.Height, true, IsRHIDeviceAMD()).ToSharedRef();
+				TSharedRef<FVideoEncoderInput> Input = FVideoEncoderInput::CreateForD3D11(GDynamicRHI->RHIGetNativeDevice(), true, IsRHIDeviceAMD()).ToSharedRef();
 				
 				if (Result && !Result->Setup(Input, config))
 				{
@@ -117,9 +138,9 @@ TUniquePtr<FVideoEncoder> FVideoEncoderFactory::Create(uint32 InID, const FVideo
 				}
 				break;
 			}
-			else if (RHIName == TEXT("D3D12"))
+			else if (RHIType == ERHIInterfaceType::D3D12)
 			{				
-				TSharedRef<FVideoEncoderInput> Input = FVideoEncoderInput::CreateForD3D12(GDynamicRHI->RHIGetNativeDevice(), config.Width, config.Height, true, IsRHIDeviceNVIDIA()).ToSharedRef();
+				TSharedRef<FVideoEncoderInput> Input = FVideoEncoderInput::CreateForD3D12(GDynamicRHI->RHIGetNativeDevice(), true, IsRHIDeviceNVIDIA()).ToSharedRef();
 				
 				if (Result && !Result->Setup(Input, config))
 				{
@@ -128,13 +149,13 @@ TUniquePtr<FVideoEncoder> FVideoEncoderFactory::Create(uint32 InID, const FVideo
 				break;
 			}
 #if PLATFORM_DESKTOP && !PLATFORM_APPLE
-			else if (RHIName == TEXT("Vulkan"))
+			else if (RHIType == ERHIInterfaceType::Vulkan)
 			{
 				AVEncoder::FVulkanDataStruct VulkanData = {	static_cast<VkInstance>(GDynamicRHI->RHIGetNativeInstance()), 
 															static_cast<VkPhysicalDevice>(GDynamicRHI->RHIGetNativePhysicalDevice()), 
 															static_cast<VkDevice>(GDynamicRHI->RHIGetNativeDevice())};
 
-				TSharedRef<FVideoEncoderInput> Input = FVideoEncoderInput::CreateForVulkan( &VulkanData, config.Width, config.Height, true).ToSharedRef();
+				TSharedRef<FVideoEncoderInput> Input = FVideoEncoderInput::CreateForVulkan( &VulkanData, true).ToSharedRef();
 				
 				if (Result && !Result->Setup(Input, config))
 				{
@@ -147,19 +168,31 @@ TUniquePtr<FVideoEncoder> FVideoEncoderFactory::Create(uint32 InID, const FVideo
 	}
 	return Result;
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 TUniquePtr<FVideoEncoder> FVideoEncoderFactory::Create(uint32 InID, TSharedPtr<FVideoEncoderInput> InInput, const FVideoEncoder::FLayerConfig& config)
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	TUniquePtr<FVideoEncoder>		Result;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	if (InInput)
 	{
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		TSharedRef<FVideoEncoderInput>	Input(InInput.ToSharedRef());
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		for (int32 Index = 0; Index < AvailableEncoders.Num(); ++Index)
 		{
+			PRAGMA_DISABLE_DEPRECATION_WARNINGS
 			if (AvailableEncoders[Index].ID == InID)
+			PRAGMA_ENABLE_DEPRECATION_WARNINGS
 			{
 				Result = CreateEncoders[Index]();
+				PRAGMA_DISABLE_DEPRECATION_WARNINGS
 				if (Result && !Result->Setup(MoveTemp(Input), config))
+				PRAGMA_ENABLE_DEPRECATION_WARNINGS
 				{
 					Result.Reset();
 				}

@@ -2,9 +2,16 @@
 
 #pragma once
 
+#include "AnalyticsProviderConfigurationDelegate.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "Modules/ModuleManager.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
 #include "Interfaces/IAnalyticsProviderModule.h"
+#include "Modules/ModuleManager.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UnrealTemplate.h"
 
 class IAnalyticsProvider;
 class IAnalyticsProviderET;
@@ -12,7 +19,7 @@ class IAnalyticsProviderET;
 /**
  *  Public implementation of EpicGames.MCP.AnalyticsProvider
  */
-class ANALYTICSET_API FAnalyticsET : public IAnalyticsProviderModule
+class FAnalyticsET : public IAnalyticsProviderModule
 {
 	//--------------------------------------------------------------------------
 	// Module functionality
@@ -44,6 +51,8 @@ public:
 		FString APIKeyET;
 		/** ET API Server - Base URL to send events. Set this to an empty string to essentially create a NULL analytics provider that will be non-null, but won't actually send events. */
 		FString APIServerET;
+		/** ET API Endpoint - This is the API endpoint for the provider. */
+		FString APIEndpointET;
 		/** ET Alt API Servers - Base URLs to send events on retry. */
 		TArray<FString> AltAPIServersET;
 		/** 
@@ -89,6 +98,8 @@ public:
 		static FString GetKeyNameForAPIKey() { return TEXT("APIKeyET"); }
 		/** KeyName required for APIServer configuration. */
 		static FString GetKeyNameForAPIServer() { return TEXT("APIServerET"); }
+		/** KeyName required for APIEndpoint configuration. */
+		static FString GetKeyNameForAPIEndpoint() { return TEXT("APIEndpointET"); }
 		/** KeyName required for AppVersion configuration. */
 		static FString GetKeyNameForAppVersion() { return TEXT("AppVersionET"); }
 		/** Optional parameter to use the legacy backend protocol. */
@@ -112,14 +123,21 @@ public:
 	 * Creates the analytics provider given a configuration delegate.
 	 * The keys required exactly match the field names in the Config object. 
 	 */
-	virtual TSharedPtr<IAnalyticsProvider> CreateAnalyticsProvider(const FAnalyticsProviderConfigurationDelegate& GetConfigValue) const override;
+	ANALYTICSET_API virtual TSharedPtr<IAnalyticsProvider> CreateAnalyticsProvider(const FAnalyticsProviderConfigurationDelegate& GetConfigValue) const override;
+
+	/**
+	 * Construct an ET analytics provider given a configuration delegate.
+	 * The keys required exactly match the field names in the Config object.
+	 */
+	ANALYTICSET_API virtual TSharedPtr<IAnalyticsProviderET> CreateAnalyticsProviderET(const FAnalyticsProviderConfigurationDelegate& GetConfigValue) const;
+
 	
 	/** 
 	 * Construct an ET analytics provider directly from a config object.
 	 */
-	virtual TSharedPtr<IAnalyticsProviderET> CreateAnalyticsProvider(const Config& ConfigValues) const;
+	ANALYTICSET_API virtual TSharedPtr<IAnalyticsProviderET> CreateAnalyticsProvider(const Config& ConfigValues) const;
 
 private:
-	virtual void StartupModule() override;
-	virtual void ShutdownModule() override;
+	ANALYTICSET_API virtual void StartupModule() override;
+	ANALYTICSET_API virtual void ShutdownModule() override;
 };

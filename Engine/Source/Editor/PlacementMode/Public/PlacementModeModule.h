@@ -66,11 +66,13 @@ public:
 	 * Add the specified assets to the recently placed items list
 	 */
 	virtual void AddToRecentlyPlaced(const TArray< UObject* >& PlacedObjects, UActorFactory* FactoryUsed = NULL) override;
+	virtual void AddToRecentlyPlaced(const TArray< UObject* >& Assets, TScriptInterface<IAssetFactoryInterface> FactoryUsed) override;
 
 	/**
 	 * Add the specified asset to the recently placed items list
 	 */
 	virtual void AddToRecentlyPlaced(UObject* Asset, UActorFactory* FactoryUsed = NULL) override;
+	virtual void AddToRecentlyPlaced(UObject* Asset, TScriptInterface<IAssetFactoryInterface> FactoryUsed) override;
 
 	/**
 	 * Get a copy of the recently placed items list
@@ -80,29 +82,7 @@ public:
 		return RecentlyPlaced;
 	}
 
-	/** @return the event that is broadcast whenever the placement mode enters a placing session */
-	DECLARE_DERIVED_EVENT(FPlacementModeModule, IPlacementModeModule::FOnStartedPlacingEvent, FOnStartedPlacingEvent);
-	virtual FOnStartedPlacingEvent& OnStartedPlacing() override
-	{
-		return StartedPlacingEvent;
-	}
-	virtual void BroadcastStartedPlacing(const TArray< UObject* >& Assets) override
-	{
-		StartedPlacingEvent.Broadcast(Assets);
-	}
-
-	/** @return the event that is broadcast whenever the placement mode exits a placing session */
-	DECLARE_DERIVED_EVENT(FPlacementModeModule, IPlacementModeModule::FOnStoppedPlacingEvent, FOnStoppedPlacingEvent);
-	virtual FOnStoppedPlacingEvent& OnStoppedPlacing() override
-	{
-		return StoppedPlacingEvent;
-	}
-	virtual void BroadcastStoppedPlacing(bool bWasSuccessfullyPlaced) override
-	{
-		StoppedPlacingEvent.Broadcast(bWasSuccessfullyPlaced);
-	}
-
-	virtual TSharedRef<SWidget> CreatePlacementModeBrowser() override;
+	virtual TSharedRef<SWidget> CreatePlacementModeBrowser(TSharedRef<SDockTab> ParentTab) override;
 
 	virtual bool RegisterPlacementCategory(const FPlacementCategoryInfo& Info);
 
@@ -113,7 +93,7 @@ public:
 
 	virtual void UnregisterPlacementCategory(FName Handle);
 
-	virtual TSharedRef<FBlacklistNames>& GetCategoryBlacklist() override { return CategoryBlacklist; }
+	virtual TSharedRef<FNamePermissionList>& GetCategoryPermissionList() override { return CategoryPermissionList; }
 
 	virtual void GetSortedCategories(TArray<FPlacementCategoryInfo>& OutCategories) const;
 
@@ -147,13 +127,13 @@ private:
 
 	bool PassesFilters(const TSharedPtr<FPlaceableItem>& Item) const;
 
-	void OnCategoryBlacklistChanged();
+	void OnCategoryPermissionListChanged();
 
 private:
 
 	TMap<FName, FPlacementCategory> Categories;
 
-	TSharedRef<FBlacklistNames> CategoryBlacklist;
+	TSharedRef<FNamePermissionList> CategoryPermissionList;
 
 	TMap<FName, TPlaceableItemPredicate> PlaceableItemPredicates;
 
@@ -165,13 +145,12 @@ private:
 	FOnPlaceableItemFilteringChanged PlaceableItemFilteringChanged;
 	FOnPlacementModeCategoryListChanged PlacementModeCategoryListChanged;
 
-	FOnStartedPlacingEvent StartedPlacingEvent;
-	FOnStoppedPlacingEvent StoppedPlacingEvent;
-
 	TArray< TSharedPtr<FExtender> > ContentPaletteFiltersExtenders;
 	TArray< TSharedPtr<FExtender> > PaletteExtenders;
 
-	TMap<FString, FString> BasicShapeThumbnails;
+	// When users explicitly add placeable items, they may add custom icons/descriptions, so we 
+	// need to store extra data to be able to recreate the placeable item in "recently placed"
+	TMap<FActorPlacementInfo, TWeakPtr<FPlaceableItem>> ManuallyCreatedPlaceableItems;
 };
 
 IMPLEMENT_MODULE(FPlacementModeModule, PlacementMode);

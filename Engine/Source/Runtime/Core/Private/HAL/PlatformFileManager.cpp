@@ -4,7 +4,8 @@
 	GenericPlatformFile.cpp: Generic implementations of platform file I/O functions
 =============================================================================*/
 
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
+#include "Misc/AccessDetection.h"
 #include "Misc/AssertionMacros.h"
 #include "GenericPlatform/GenericPlatformFile.h"
 #include "Modules/ModuleManager.h"
@@ -114,6 +115,39 @@ void FPlatformFileManager::RemovePlatformFile(IPlatformFile* PlatformFileToRemov
 	}
 }
 
+bool FPlatformFileManager::InsertPlatformFile(IPlatformFile* NewPlatformFile)
+{
+	check(TopmostPlatformFile != nullptr);
+	check(NewPlatformFile != nullptr);
+
+	if (FindPlatformFile(NewPlatformFile->GetName()))
+	{
+		return false;
+	}
+
+	if (NewPlatformFile->GetLowerLevel() == nullptr)
+	{
+		return false; // Physical layer must be at the bottom
+	}
+
+	if (NewPlatformFile->GetLowerLevel() == TopmostPlatformFile)
+	{
+		SetPlatformFile(*NewPlatformFile);
+		return true;
+	}
+
+	for (IPlatformFile* ChainElement = TopmostPlatformFile; ChainElement; ChainElement = ChainElement->GetLowerLevel())
+	{
+		if (ChainElement->GetLowerLevel() == NewPlatformFile->GetLowerLevel())
+		{
+			ChainElement->SetLowerLevel(NewPlatformFile);
+			return true;
+		}
+	}
+
+	return false;
+}
+
 void FPlatformFileManager::InitializeNewAsyncIO()
 {
 	// Removed the cached file wrapper because it doesn't work well with EDL
@@ -134,6 +168,7 @@ void FPlatformFileManager::InitializeNewAsyncIO()
 
 FPlatformFileManager& FPlatformFileManager::Get()
 {
+	UE::AccessDetection::ReportAccess(UE::AccessDetection::EType::File);
 	static FPlatformFileManager Singleton;
 	return Singleton;
 }

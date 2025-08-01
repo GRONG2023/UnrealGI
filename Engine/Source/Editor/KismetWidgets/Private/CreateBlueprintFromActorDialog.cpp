@@ -1,36 +1,87 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "CreateBlueprintFromActorDialog.h"
-#include "GameFramework/Actor.h"
-#include "Misc/FileHelper.h"
-#include "Misc/MessageDialog.h"
-#include "Misc/PackageName.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SWindow.h"
-#include "Widgets/Images/SImage.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Input/SEditableTextBox.h"
-#include "Widgets/Layout/SExpandableArea.h"
-#include "Widgets/Layout/SGridPanel.h"
-#include "Widgets/Layout/SUniformGridPanel.h"
-#include "Framework/Application/SlateApplication.h"
-#include "Framework/Docking/TabManager.h"
-#include "Editor/EditorEngine.h"
-#include "Engine/Selection.h"
-#include "Editor.h"
-#include "Kismet2/KismetEditorUtilities.h"
-#include "EdGraphSchema_K2.h"
-#include "Framework/Notifications/NotificationManager.h"
-#include "Widgets/Notifications/SNotificationList.h"
-#include "AssetRegistryModule.h"
+
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
 #include "AssetToolsModule.h"
 #include "ClassViewerFilter.h"
 #include "ClassViewerModule.h"
-#include "SClassViewer.h"
+#include "Components/ActorComponent.h"
+#include "Containers/Array.h"
+#include "Containers/Set.h"
+#include "ContentBrowserDataSubsystem.h"
+#include "ContentBrowserDelegates.h"
+#include "ContentBrowserItemPath.h"
 #include "ContentBrowserModule.h"
+#include "Delegates/Delegate.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Engine/Blueprint.h"
+#include "Fonts/SlateFontInfo.h"
+#include "Framework/Notifications/NotificationManager.h"
+#include "GameFramework/Actor.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMisc.h"
+#include "IAssetTools.h"
 #include "IContentBrowserSingleton.h"
+#include "Input/Events.h"
+#include "Input/Reply.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Layout/Visibility.h"
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/FileHelper.h"
+#include "Misc/MessageDialog.h"
+#include "Misc/Paths.h"
+#include "Modules/ModuleManager.h"
 #include "PackageTools.h"
-#include "DetailLayoutBuilder.h"
+#include "SClassViewer.h"
+#include "SPrimaryButton.h"
+#include "SSimpleButton.h"
+#include "Selection.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/CoreStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/SlateColor.h"
+#include "Styling/SlateTypes.h"
+#include "Styling/StyleColors.h"
+#include "Templates/Casts.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/SlateEnums.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SCheckBox.h"
+#include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SExpandableArea.h"
+#include "Widgets/Layout/SGridPanel.h"
+#include "Widgets/Layout/SUniformGridPanel.h"
+#include "Widgets/Notifications/SNotificationList.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/SWindow.h"
+#include "Widgets/Text/STextBlock.h"
+
+struct FGeometry;
 
 #define LOCTEXT_NAMESPACE "CreateBlueprintFromActorDialog"
 
@@ -112,7 +163,7 @@ public:
 	TWeakObjectPtr<AActor> ActorOverride;
 
 	/** The path the asset should be created at */
-	FString AssetPath;
+	FContentBrowserItemPath AssetPath;
 
 	/** The the name for the new asset */
 	FString AssetName;
@@ -143,6 +194,17 @@ ECreateBlueprintFromActorMode FCreateBlueprintFromActorDialog::GetValidCreationM
 			if (NumSelectedActors == 0)
 			{
 				bCanSubclass = FKismetEditorUtilities::CanCreateBlueprintOfClass(Actor->GetClass());
+				if (bCanSubclass)
+				{
+					// Check whether the class is allowed by the global class filter
+					FClassViewerModule& ClassViewerModule = FModuleManager::LoadModuleChecked<FClassViewerModule>("ClassViewer");
+					if (const TSharedPtr<IClassViewerFilter>& GlobalClassFilter = ClassViewerModule.GetGlobalClassViewerFilter())
+					{
+						TSharedRef<FClassViewerFilterFuncs> ClassFilterFuncs = ClassViewerModule.CreateFilterFuncs();
+						FClassViewerInitializationOptions ClassViewerOptions = {};
+						bCanSubclass = GlobalClassFilter->IsClassAllowed(ClassViewerOptions, Actor->GetClass(), ClassFilterFuncs);
+					}
+				}
 			}
 
 			if (bCanCreatePrefab && Actor->GetClass()->HasAnyClassFlags(CLASS_NotPlaceable))
@@ -232,11 +294,57 @@ void SSCreateBlueprintPicker::Construct(const FArguments& InArgs)
 
 	bPressedOk = false;
 	ChosenClass = nullptr;
-	CreateMode = InArgs._CreateMode;
 
-	FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser");
-	FClassViewerModule& ClassViewerModule = FModuleManager::LoadModuleChecked<FClassViewerModule>("ClassViewer");
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
+	ECreateBlueprintFromActorMode ValidCreateMethods = FCreateBlueprintFromActorDialog::GetValidCreationMethods();
+	const bool bCanHarvestComponents = !!(ValidCreateMethods & ECreateBlueprintFromActorMode::Harvest);
+	const bool bCanSubclass = !!(ValidCreateMethods & ECreateBlueprintFromActorMode::Subclass);
+	const bool bCanCreatePrefab = !!(ValidCreateMethods & ECreateBlueprintFromActorMode::ChildActor);
+
+	if (!!(InArgs._CreateMode & ValidCreateMethods))
+	{
+		CreateMode = InArgs._CreateMode;
+	}
+	else
+	{
+		if (bCanSubclass)
+		{
+			CreateMode = ECreateBlueprintFromActorMode::Subclass;
+		}
+		else if (bCanCreatePrefab)
+		{
+			CreateMode = ECreateBlueprintFromActorMode::ChildActor;
+		}
+		else if (bCanHarvestComponents)
+		{
+			CreateMode = ECreateBlueprintFromActorMode::Harvest;
+		}
+		else
+		{
+			CreateMode = ECreateBlueprintFromActorMode::None;
+		}
+	}
+
+	// Set initial destination asset folder and name
+	{
+		FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser");
+
+		AssetPath = ContentBrowserModule.Get().GetCurrentPath();
+		// Change path if cannot write to it
+		AssetPath = ContentBrowserModule.Get().GetInitialPathToSaveAsset(AssetPath);
+
+		for (FSelectionIterator Iter(*GEditor->GetSelectedActors()); Iter; ++Iter)
+		{
+			AActor* Actor = Cast<AActor>(*Iter);
+			if (Actor)
+			{
+				AssetName += Actor->GetActorLabel();
+				AssetName += TEXT("_");
+				break;
+			}
+		}
+
+		AssetName = UPackageTools::SanitizePackageName(AssetName + TEXT("Blueprint"));
+	}
 
 	ActorOverride = InArgs._ActorOverride;
 
@@ -287,7 +395,7 @@ void SSCreateBlueprintPicker::Construct(const FArguments& InArgs)
 	{
 		ActorOverrideClass = ActorOverride->GetClass();
 		TSharedPtr<FBlueprintFromActorParentFilter> Filter = MakeShareable(new FBlueprintFromActorParentFilter(ActorOverrideClass, CreateMode));
-		ClassViewerOptions.ClassFilter = Filter;
+		ClassViewerOptions.ClassFilters.Add(Filter.ToSharedRef());
 	}
 
 	if (ActorOverrideClass && CreateMode == ECreateBlueprintFromActorMode::Subclass)
@@ -299,32 +407,19 @@ void SSCreateBlueprintPicker::Construct(const FArguments& InArgs)
 		ClassViewerOptions.InitiallySelectedClass = AActor::StaticClass();
 	}
 
+	{
+		const FString DestPackageName = FPaths::Combine(AssetPath.GetInternalPathString(), AssetName);
+		const FString DestAssetPath = FString::Printf(TEXT("%s.%s"), *DestPackageName, *AssetName);
+		ClassViewerOptions.AdditionalReferencingAssets.Add(FAssetData(DestPackageName, DestAssetPath, UBlueprint::StaticClass()->GetClassPathName()));
+		// @fixme: Update the class viewer whenever the destination folder changes
+	}
+
+	FClassViewerModule& ClassViewerModule = FModuleManager::LoadModuleChecked<FClassViewerModule>("ClassViewer");
 	ClassViewer = StaticCastSharedRef<SClassViewer>(ClassViewerModule.CreateClassViewer(ClassViewerOptions, FOnClassPicked::CreateSP(this, &SSCreateBlueprintPicker::OnClassPicked)));
 
 	FString PackageName;
-	AssetPath = ContentBrowserModule.Get().GetCurrentPath();
-
-	ECreateBlueprintFromActorMode ValidCreateMethods = FCreateBlueprintFromActorDialog::GetValidCreationMethods();
-
-	const bool bCanHarvestComponents = !!(ValidCreateMethods & ECreateBlueprintFromActorMode::Harvest);
-	const bool bCanSubclass = !!(ValidCreateMethods & ECreateBlueprintFromActorMode::Subclass);
-	const bool bCanCreatePrefab = !!(ValidCreateMethods & ECreateBlueprintFromActorMode::ChildActor);
-
-	for (FSelectionIterator Iter(*GEditor->GetSelectedActors()); Iter; ++Iter)
-	{
-		AActor* Actor = Cast<AActor>(*Iter);
-		if (Actor)
-		{
-			AssetName += Actor->GetActorLabel();
-			AssetName += TEXT("_");
-			break;
-		}
-	}
-
-	AssetName = UPackageTools::SanitizePackageName(AssetName + TEXT("Blueprint"));
-
-	FString BasePath = AssetPath / AssetName;
-	AssetToolsModule.Get().CreateUniqueAssetName(BasePath, TEXT(""), PackageName, AssetName);
+	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
+	AssetToolsModule.Get().CreateUniqueAssetName(AssetPath.GetInternalPathString() / AssetName, TEXT(""), PackageName, AssetName);
 
 	TSharedPtr<SGridPanel> CreationMethodSection;
 
@@ -343,15 +438,18 @@ void SSCreateBlueprintPicker::Construct(const FArguments& InArgs)
 		{ LOCTEXT("CreateMode_Harvest", "Harvest Components"), LOCTEXT("CreateMode_Harvest_Description", "Replace the selected actors with an instance of a new Blueprint Class inherited from the selected parent class that contains the components."), ECreateBlueprintFromActorMode::Harvest, bCanHarvestComponents }
 	};
 
-	const FCheckBoxStyle& RadioStyle = FEditorStyle::Get().GetWidgetStyle<FCheckBoxStyle>("Property.ToggleButton");
+	const FCheckBoxStyle& RadioStyle = FAppStyle::Get().GetWidgetStyle<FCheckBoxStyle>("SegmentedCombo.ButtonOnly");
 
 	SAssignNew(CreationMethodSection, SGridPanel)
 	.FillColumn(1, 1.f);
 
 	for (int32 Index = 0; Index < UE_ARRAY_COUNT(CreateModeDetails); ++Index)
 	{
+		float TopPadding = Index == 0 ? 28.0f : 16.0f;
+		float BottomPadding = Index == UE_ARRAY_COUNT(CreateModeDetails) - 1 ? 28.0f : 16.0f;
+
 		CreationMethodSection->AddSlot(0, Index)
-		.Padding(10.0f, 5.0f, 5.0f, 5.0f)
+		.Padding(10.0f, TopPadding, 5.0f, BottomPadding)
 		.VAlign(VAlign_Center)
 		[
 			SNew(SCheckBox)
@@ -363,40 +461,85 @@ void SSCreateBlueprintPicker::Construct(const FArguments& InArgs)
 			[
 				SNew(SHorizontalBox)
 				+ SHorizontalBox::Slot()
-				.FillWidth(1.0f)
 				.VAlign(VAlign_Center)
-				.HAlign(HAlign_Center)
-				.Padding(6, 2)
+				.HAlign(HAlign_Left)
+				.Padding(-8, 3, 0, 3)
+				.AutoWidth()
+				[
+					SNew(SImage)
+					.Image(FAppStyle::Get().GetBrush("Icons.Blueprints"))
+				]
+				+ SHorizontalBox::Slot()
+				.VAlign(VAlign_Center)
+				.HAlign(HAlign_Left)
+				.Padding(4, 3, 0, 3)
+				.AutoWidth()
 				[
 					SNew(STextBlock)
 					.Text(CreateModeDetails[Index].Label)
-					.Font(IDetailLayoutBuilder::GetDetailFont())
-					.ColorAndOpacity(this, &SSCreateBlueprintPicker::GetCreateModeTextColor, CreateModeDetails[Index].CreateMode)
+					.TextStyle(FAppStyle::Get(), "NormalText")
+					.ColorAndOpacity(FStyleColors::White)
 				]
 			]
 		];
 
 		CreationMethodSection->AddSlot(1, Index)
-		.Padding(1.0f, 5.0f, 1.0f, 5.0f)
+		.Padding(4.0f, TopPadding, 1.0f, BottomPadding)
 		.VAlign(VAlign_Center)
 		[
 			SNew(STextBlock)
 			.Text(CreateModeDetails[Index].Description)
+			.TextStyle(FAppStyle::Get(), "SmallText")
 			.IsEnabled(CreateModeDetails[Index].bEnabled)
 			.AutoWrapText(true)
 		];
+
 	}
 
 	ChildSlot
 	[
 		SNew(SBorder)
 		.Visibility(EVisibility::Visible)
-		.BorderImage(FEditorStyle::GetBrush("Menu.Background"))
+		.BorderImage(FAppStyle::Get().GetBrush("Brushes.Panel"))
 		[
 			SNew(SBox)
 			.Visibility(EVisibility::Visible)
 			[
 				SNew(SVerticalBox)
+
+				+SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 0.0f, 0.0f, 0.0f)
+				[
+					SNew(SExpandableArea)
+					.AreaTitle(LOCTEXT("CreationMethod", "Creation Method"))
+					.AreaTitleFont(FCoreStyle::Get().GetFontStyle("NormalFontBold"))
+					.BorderImage(FAppStyle::Get().GetBrush("ToolPanel.GroupBorder"))
+					.BodyBorderImage(FAppStyle::Get().GetBrush("Brushes.Recessed"))
+					.BodyContent()
+					[
+						CreationMethodSection.ToSharedRef()
+					]
+				]
+				
+				+SVerticalBox::Slot()
+				.FillHeight(1.f)
+				.Padding(0.0f, 1.0f, 0.0f, 0.0f)
+				[
+					SNew(SExpandableArea)
+					.MaxHeight(320.f)
+					.InitiallyCollapsed(false)
+					.AreaTitle(NSLOCTEXT("SClassPickerDialog", "ParentClassAreaTitle", "Parent Class"))
+					.AreaTitleFont(FCoreStyle::Get().GetFontStyle("NormalFontBold"))
+					.BorderImage(FAppStyle::Get().GetBrush("ToolPanel.GroupBorder"))
+					.BodyBorderImage(FAppStyle::Get().GetBrush("Brushes.Recessed"))
+					.OnAreaExpansionChanged(this, &SSCreateBlueprintPicker::OnCustomAreaExpansionChanged)
+					.BodyContent()
+					[
+						ClassViewer.ToSharedRef()
+					]
+				]
+
 				+SVerticalBox::Slot()
 				.AutoHeight()
 				.Padding(0.0f, 10.0f, 0.0f, 0.0f)
@@ -404,21 +547,21 @@ void SSCreateBlueprintPicker::Construct(const FArguments& InArgs)
 					SNew(SGridPanel)
 					.FillColumn(1, 1.f)
 					+SGridPanel::Slot(0, 0)
-					.Padding(0.0f, 0.0f, 5.0f, 2.0f)
+					.Padding(16.0f, 0.0f, 13.0f, 7.0f)
 					.VAlign(VAlign_Center)
 					[
 						SNew(STextBlock)
 						.Text(LOCTEXT("CreateBlueprintFromActor_NameLabel", "Blueprint Name"))
 					]
 					+SGridPanel::Slot(1, 0)
-					.Padding(0.0f, 0.0f, 0.0f, 5.0f)
+					.Padding(0.0f, 0.0f, 55.0f, 10.0f)
 					[
 						SAssignNew(FileNameWidget, SEditableTextBox)
 						.Text(FText::FromString(AssetName))
 						.OnTextChanged(this, &SSCreateBlueprintPicker::OnFilenameChanged)
 					]
 					+SGridPanel::Slot(0, 1)
-					.Padding(0.0f, 0.0f, 5.0f, 0.0f)
+					.Padding(15.0f, 0.0f, 13.0f, 0.0f)
 					.VAlign(VAlign_Center)
 					[
 						SNew(STextBlock)
@@ -431,71 +574,41 @@ void SSCreateBlueprintPicker::Construct(const FArguments& InArgs)
 						.FillWidth(1.f)
 						[
 							SNew(SEditableTextBox)
-							.Text(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateLambda([this]() { return FText::FromString(AssetPath); })))
+							.Text(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateLambda([this]() { return FText::FromName(AssetPath.GetVirtualPathName()); })))
 							.IsReadOnly(true)
 						]
 						+SHorizontalBox::Slot()
+						.Padding(8.0f, 0.0f, 19.0f, 0.0f)
 						.AutoWidth()
 						[
-							SNew(SButton)
-							.Text(FText::FromString(TEXT("...")))
+							SNew(SSimpleButton)
 							.OnClicked(this, &SSCreateBlueprintPicker::OnPathPickerSummoned)
+							.Icon(FAppStyle::Get().GetBrush("Icons.FolderClosed"))
 						]
 					]
 				]
-				+SVerticalBox::Slot()
-				.AutoHeight()
-				.Padding(0.0f, 10.0f, 0.0f, 0.0f)
-				[
-					SNew(SExpandableArea)
-					.AreaTitle(LOCTEXT("CreationMethod", "Creation Method"))
-					.BodyContent()
-					[
-						CreationMethodSection.ToSharedRef()
-					]
-				]
-				+SVerticalBox::Slot()
-				.FillHeight(1.f)
-				.Padding(0.0f, 10.0f, 0.0f, 0.0f)
-				[
-					SNew(SExpandableArea)
-					.MaxHeight(320.f)
-					.InitiallyCollapsed(false)
-					.AreaTitle(NSLOCTEXT("SClassPickerDialog", "ParentClassAreaTitle", "Parent Class"))
-					.OnAreaExpansionChanged(this, &SSCreateBlueprintPicker::OnCustomAreaExpansionChanged)
-					.BodyContent()
-					[
-						ClassViewer.ToSharedRef()
-					]
-				]
+
 				+SVerticalBox::Slot()
 				.AutoHeight()
 				.HAlign(HAlign_Right)
 				.VAlign(VAlign_Bottom)
-				.Padding(8)
+				.Padding(8.0f)
 				[
 					SNew(SUniformGridPanel)
-					.SlotPadding(FEditorStyle::GetMargin("StandardDialog.SlotPadding"))
+					.SlotPadding(FAppStyle::GetMargin("StandardDialog.SlotPadding"))
 					+SUniformGridPanel::Slot(0,0)
 					[
-						SNew(SButton)
+						SNew(SPrimaryButton)
 						.Text(NSLOCTEXT("SClassPickerDialog", "ClassPickerSelectButton", "Select"))
-						.HAlign(HAlign_Center)
 						.Visibility( this, &SSCreateBlueprintPicker::GetSelectButtonVisibility )
-						.ContentPadding(FEditorStyle::GetMargin("StandardDialog.ContentPadding"))
 						.OnClicked(this, &SSCreateBlueprintPicker::OnClassPickerConfirmed)
-						.ButtonStyle(FEditorStyle::Get(), "FlatButton.Success")
-						.TextStyle(FEditorStyle::Get(), "FlatButton.DefaultTextStyle")
 					]
 					+SUniformGridPanel::Slot(1,0)
 					[
 						SNew(SButton)
 						.Text(NSLOCTEXT("SClassPickerDialog", "ClassPickerCancelButton", "Cancel"))
-						.HAlign(HAlign_Center)
-						.ContentPadding(FEditorStyle::GetMargin("StandardDialog.ContentPadding"))
 						.OnClicked(this, &SSCreateBlueprintPicker::OnClassPickerCanceled)
-						.ButtonStyle(FEditorStyle::Get(), "FlatButton.Default")
-						.TextStyle(FEditorStyle::Get(), "FlatButton.DefaultTextStyle")
+
 					]
 				]
 			]
@@ -550,13 +663,13 @@ class SSCreateBlueprintPathPicker : public SCompoundWidget
 	{}
 
 	SLATE_ARGUMENT(TSharedPtr<SWindow>, ParentWindow)
-		SLATE_ARGUMENT(FString, AssetPath)
+		SLATE_ARGUMENT(FContentBrowserItemPath, AssetPath)
 		SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs);
 
 	/** Callback when the selected asset path has changed. */
-	void OnSelectAssetPath(const FString& Path) { AssetPath = Path; }
+	void OnSelectAssetPath(const FString& InVirtualPath) { AssetPath.SetPathFromString(InVirtualPath, EContentBrowserPathType::Virtual); }
 
 	/** Callback when the "ok" button is clicked. */
 	FReply OnClickOk();
@@ -567,7 +680,7 @@ class SSCreateBlueprintPathPicker : public SCompoundWidget
 	/** A pointer to the window that is asking the user to select a parent class */
 	TWeakPtr<SWindow> WeakParentWindow;
 
-	FString AssetPath;
+	FContentBrowserItemPath AssetPath;
 
 	bool bPressedOk;
 };
@@ -582,8 +695,10 @@ void SSCreateBlueprintPathPicker::Construct(const FArguments& InArgs)
 	FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser");
 
 	FPathPickerConfig PathPickerConfig;
-	PathPickerConfig.DefaultPath = AssetPath;
+	PathPickerConfig.DefaultPath = AssetPath.GetVirtualPathString();
 	PathPickerConfig.OnPathSelected = FOnPathSelected::CreateRaw(this, &SSCreateBlueprintPathPicker::OnSelectAssetPath);
+	PathPickerConfig.bAllowReadOnlyFolders = false;
+	PathPickerConfig.bOnPathSelectedPassesVirtualPaths = true;
 
 	ChildSlot
 	[
@@ -607,8 +722,8 @@ void SSCreateBlueprintPathPicker::Construct(const FArguments& InArgs)
 				.VAlign(VAlign_Bottom)
 				.ContentPadding(FMargin(8, 2, 8, 2))
 				.OnClicked(this, &SSCreateBlueprintPathPicker::OnClickOk)
-				.ButtonStyle(FEditorStyle::Get(), "FlatButton.Success")
-				.TextStyle(FEditorStyle::Get(), "FlatButton.DefaultTextStyle")
+				.ButtonStyle(FAppStyle::Get(), "FlatButton.Success")
+				.TextStyle(FAppStyle::Get(), "FlatButton.DefaultTextStyle")
 				.Text(LOCTEXT("OkButtonText", "OK"))
 			]
 			+ SHorizontalBox::Slot()
@@ -619,8 +734,8 @@ void SSCreateBlueprintPathPicker::Construct(const FArguments& InArgs)
 				.VAlign(VAlign_Bottom)
 				.ContentPadding(FMargin(8, 2, 8, 2))
 				.OnClicked(this, &SSCreateBlueprintPathPicker::OnClickCancel)
-				.ButtonStyle(FEditorStyle::Get(), "FlatButton.Default")
-				.TextStyle(FEditorStyle::Get(), "FlatButton.DefaultTextStyle")
+				.ButtonStyle(FAppStyle::Get(), "FlatButton.Default")
+				.TextStyle(FAppStyle::Get(), "FlatButton.DefaultTextStyle")
 				.Text(LOCTEXT("CancelButtonText", "Cancel"))
 			]
 		]
@@ -667,7 +782,7 @@ FReply SSCreateBlueprintPicker::OnPathPickerSummoned()
 
 	if (PathPickerDialog->bPressedOk)
 	{
-		AssetPath = PathPickerDialog->AssetPath;
+		AssetPath.SetPathFromString(PathPickerDialog->AssetPath.GetVirtualPathString(), EContentBrowserPathType::Virtual);
 		UpdateFilenameStatus();
 	}
 
@@ -701,7 +816,7 @@ void SSCreateBlueprintPicker::UpdateFilenameStatus()
 	{
 		TArray<FAssetData> AssetData;
 		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-		AssetRegistryModule.Get().GetAssetsByPath(FName(*AssetPath), AssetData);
+		AssetRegistryModule.Get().GetAssetsByPath(AssetPath.GetInternalPathName(), AssetData);
 
 		// Check to see if the name conflicts
 		for (const FAssetData& Data : AssetData)
@@ -759,7 +874,7 @@ FReply SSCreateBlueprintPicker::OnKeyDown(const FGeometry& MyGeometry, const FKe
 	return FReply::Handled();
 }
 
-void FCreateBlueprintFromActorDialog::OpenDialog(ECreateBlueprintFromActorMode CreateMode, AActor* InActorOverride )
+void FCreateBlueprintFromActorDialog::OpenDialog(ECreateBlueprintFromActorMode CreateMode, AActor* InActorOverride, bool bInReplaceActors)
 {
 	TWeakObjectPtr<AActor> ActorOverride(InActorOverride);
 
@@ -782,13 +897,21 @@ void FCreateBlueprintFromActorDialog::OpenDialog(ECreateBlueprintFromActorMode C
 
 	if (ClassPickerDialog->bPressedOk)
 	{
-		FString NewAssetName = ClassPickerDialog->AssetPath / ClassPickerDialog->AssetName;
-
-		OnCreateBlueprint(NewAssetName, ClassPickerDialog->ChosenClass, ClassPickerDialog->CreateMode, ActorOverride.Get());
+		if (ClassPickerDialog->AssetPath.HasInternalPath())
+		{
+			FString NewAssetName = ClassPickerDialog->AssetPath.GetInternalPathString() / ClassPickerDialog->AssetName;
+			OnCreateBlueprint(NewAssetName, ClassPickerDialog->ChosenClass, ClassPickerDialog->CreateMode, ActorOverride.Get(), bInReplaceActors);
+		}
+		else
+		{
+			FNotificationInfo ErrorNotificationInfo(FText::FormatOrdered(LOCTEXT("PathError", "Could not convert virtual path '{0}' to internal path."), FText::FromString(*ClassPickerDialog->AssetPath.GetVirtualPathString())));
+			TSharedPtr<SNotificationItem> NotificationItem = FSlateNotificationManager::Get().AddNotification(ErrorNotificationInfo);
+			NotificationItem->SetCompletionState(SNotificationItem::CS_Fail);
+		}
 	}
 }
 
-void FCreateBlueprintFromActorDialog::OnCreateBlueprint(const FString& InAssetPath, UClass* ParentClass, ECreateBlueprintFromActorMode CreateMode, AActor* ActorToUse)
+void FCreateBlueprintFromActorDialog::OnCreateBlueprint(const FString& InAssetPath, UClass* ParentClass, ECreateBlueprintFromActorMode CreateMode, AActor* ActorToUse, bool bInReplaceActors)
 {
 	UBlueprint* Blueprint = nullptr;
 

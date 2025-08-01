@@ -1,13 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "UserDefinedStructure/UserDefinedStructEditorData.h"
-#include "Misc/ITransaction.h"
+#include "Misc/ITransactionObjectAnnotation.h"
+#include "UObject/UE5ReleaseStreamObjectVersion.h"
 #include "UObject/UnrealType.h"
+#include "UObject/ObjectSaveContext.h"
 #include "Engine/UserDefinedStruct.h"
 #include "Kismet2/StructureEditorUtils.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Blueprint/BlueprintSupport.h"
 #include "Editor.h"
+#include "EdGraphSchema_K2.h"
 
 #define LOCTEXT_NAMESPACE "UserDefinedStructEditorData"
 
@@ -18,7 +21,7 @@ void FStructVariableDescription::PostSerialize(const FArchive& Ar)
 		ContainerType = FEdGraphPinType::ToPinContainerType(bIsArray_DEPRECATED, bIsSet_DEPRECATED, bIsMap_DEPRECATED);
 	}
 
-	if (Ar.UE4Ver() < VER_UE4_ADDED_SOFT_OBJECT_PATH)
+	if (Ar.UEVer() < VER_UE4_ADDED_SOFT_OBJECT_PATH)
 	{
 		// Fix up renamed categories
 		if (Category == TEXT("asset"))
@@ -29,6 +32,26 @@ void FStructVariableDescription::PostSerialize(const FArchive& Ar)
 		{
 			Category = TEXT("softclass");
 		}
+	}
+
+	bool FixupPinCategories =
+		Ar.IsLoading() &&
+		((Category == UEdGraphSchema_K2::PC_Double) || (Category == UEdGraphSchema_K2::PC_Float));
+
+	if (FixupPinCategories)
+	{
+		Category = UEdGraphSchema_K2::PC_Real;
+		SubCategory = UEdGraphSchema_K2::PC_Double;
+	}
+
+	bool FixupPinValueCategories =
+		Ar.IsLoading() &&
+		((PinValueType.TerminalCategory == UEdGraphSchema_K2::PC_Double) || (PinValueType.TerminalCategory == UEdGraphSchema_K2::PC_Float));
+
+	if (FixupPinValueCategories)
+	{
+		PinValueType.TerminalCategory = UEdGraphSchema_K2::PC_Real;
+		PinValueType.TerminalSubCategory = UEdGraphSchema_K2::PC_Double;
 	}
 }
 
@@ -63,6 +86,13 @@ uint32 UUserDefinedStructEditorData::GenerateUniqueNameIdForMemberVariable()
 UUserDefinedStruct* UUserDefinedStructEditorData::GetOwnerStruct() const
 {
 	return Cast<UUserDefinedStruct>(GetOuter());
+}
+
+void UUserDefinedStructEditorData::Serialize(FArchive& Ar)
+{
+	Super::Serialize(Ar);
+
+	Ar.UsingCustomVersion(FUE5ReleaseStreamObjectVersion::GUID);
 }
 
 void UUserDefinedStructEditorData::PostUndo(bool bSuccess)
@@ -170,6 +200,14 @@ void UUserDefinedStructEditorData::PostLoadSubobjects(FObjectInstancingGraph* Ou
 	}
 }
 
+void UUserDefinedStructEditorData::PreSave(FObjectPreSaveContext ObjectSaveContext)
+{
+	Super::PreSave(ObjectSaveContext);
+
+	// Prior to saving, ensure that editor data matches up with the default instance data.
+	RefreshValuesFromDefaultInstance();
+}
+
 const uint8* UUserDefinedStructEditorData::GetDefaultInstance() const
 {
 	return GetOwnerStruct()->GetDefaultInstance();
@@ -231,6 +269,38 @@ void UUserDefinedStructEditorData::CleanDefaultInstance()
 	UUserDefinedStruct* ScriptStruct = GetOwnerStruct();
 	ensure(!ScriptStruct->DefaultStructInstance.IsValid() || ScriptStruct->DefaultStructInstance.GetStruct() == GetOwnerStruct());
 	ScriptStruct->DefaultStructInstance.Destroy();
+}
+
+void UUserDefinedStructEditorData::RefreshValuesFromDefaultInstance()
+{
+	UUserDefinedStruct* ScriptStruct = GetOwnerStruct();
+	if (!ScriptStruct || !ScriptStruct->DefaultStructInstance.IsValid())
+	{
+		return;
+	}
+
+	ensure(ScriptStruct->DefaultStructInstance.GetStruct() == ScriptStruct);
+	if (uint8* StructData = ScriptStruct->DefaultStructInstance.GetStructMemory())
+	{
+		for (TFieldIterator<FProperty> It(ScriptStruct); It; ++It)
+		{
+			if (const FProperty* Property = *It)
+			{
+				const FGuid VarGuid = FStructureEditorUtils::GetGuidFromPropertyName(Property->GetFName());
+				if (FStructVariableDescription* VarDesc = VariablesDescriptions.FindByPredicate(FStructureEditorUtils::FFindByGuidHelper<FStructVariableDescription>(VarGuid)))
+				{
+					// If the default value has been changed elsewhere, don't refresh it here. This is typically the result of an edit action prior to compilation.
+					const bool bHasDefaultValueChanged = (VarDesc->DefaultValue != VarDesc->CurrentDefaultValue);
+
+					FBlueprintEditorUtils::PropertyValueToString(Property, StructData, VarDesc->CurrentDefaultValue, ScriptStruct);
+					if (!bHasDefaultValueChanged)
+					{
+						VarDesc->DefaultValue = VarDesc->CurrentDefaultValue;
+					}
+				}
+			}
+		}
+	}
 }
 
 #undef LOCTEXT_NAMESPACE

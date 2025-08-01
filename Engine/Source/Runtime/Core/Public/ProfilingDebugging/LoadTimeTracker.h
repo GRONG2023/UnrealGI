@@ -6,16 +6,19 @@
 
 #pragma once
 
-#include "CoreTypes.h"
 #include "Containers/Array.h"
 #include "Containers/Map.h"
-#include "UObject/NameTypes.h"
-#include "Trace/Trace.inl"
+#include "Containers/SparseArray.h"
+#include "CoreTypes.h"
+#include "Misc/Build.h"
+#include "Misc/Optional.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "ProfilingDebugging/ScopedTimers.h"
 #include "Serialization/LoadTimeTrace.h"
 #include "Stats/Stats.h"
-#include "Misc/Optional.h"
+#include "Trace/Trace.h"
+#include "Trace/Trace.inl"
+#include "UObject/NameTypes.h"
 
 #ifndef ENABLE_LOADTIME_TRACKING
 	#define ENABLE_LOADTIME_TRACKING 0
@@ -28,23 +31,19 @@
 #define ENABLE_LOADTIME_RAW_TIMINGS 0
 
 /** High level load time tracker utility (such as initial engine startup or game specific timings) */
-class CORE_API FLoadTimeTracker
+class FLoadTimeTracker
 {
 public:
-	static FLoadTimeTracker& Get()
-	{
-		static FLoadTimeTracker Singleton;
-		return Singleton;
-	}
+	static CORE_API FLoadTimeTracker& Get();
 
 	/** Adds a scoped time for a given label.  Records each instance individually */
-	void ReportScopeTime(double ScopeTime, const FName ScopeLabel);
+	CORE_API void ReportScopeTime(double ScopeTime, const FName ScopeLabel);
 
 	/** Gets/adds a scoped time for a given label and instance. Records each instance individually */
-	double& GetScopeTimeAccumulator(const FName& ScopeLabel, const FName& ScopeInstance);
+	CORE_API double& GetScopeTimeAccumulator(const FName& ScopeLabel, const FName& ScopeInstance);
 
 	/** Prints out total time and individual times */
-	void DumpHighLevelLoadTimes() const;
+	CORE_API void DumpHighLevelLoadTimes() const;
 
 	static void DumpHighLevelLoadTimesStatic()
 	{
@@ -56,31 +55,31 @@ public:
 		return TimeInfo;
 	}
 
-	void ResetHighLevelLoadTimes();
+	CORE_API void ResetHighLevelLoadTimes();
 
 	/** Prints out raw load times for individual timers */
-	void DumpRawLoadTimes() const;
+	CORE_API void DumpRawLoadTimes() const;
 
 	static void DumpRawLoadTimesStatic()
 	{
 		Get().DumpRawLoadTimes();
 	}
 
-	void ResetRawLoadTimes();
+	CORE_API void ResetRawLoadTimes();
 
 	static void ResetRawLoadTimesStatic()
 	{
 		Get().ResetRawLoadTimes();
 	}
 
-	void StartAccumulatedLoadTimes();
+	CORE_API void StartAccumulatedLoadTimes();
 
 	static void StartAccumulatedLoadTimesStatic()
 	{
 		Get().StartAccumulatedLoadTimes();
 	}
 
-	void StopAccumulatedLoadTimes();
+	CORE_API void StopAccumulatedLoadTimes();
 
 	static void StopAccumulatedLoadTimesStatic()
 	{
@@ -258,15 +257,15 @@ private:
 	/** We dont normally track accumulated load time info, only when this flag is true */
 	bool bAccumulating;
 private:
-	FLoadTimeTracker();
+	CORE_API FLoadTimeTracker();
 };
 
 /** Scoped helper class for tracking accumulated object times */
-struct CORE_API FScopedLoadTimeAccumulatorTimer : public FScopedDurationTimer
+struct FScopedLoadTimeAccumulatorTimer : public FScopedDurationTimer
 {
-	static double DummyTimer;
+	static CORE_API double DummyTimer;
 
-	FScopedLoadTimeAccumulatorTimer(const FName& InTimerName, const FName& InInstanceName);
+	CORE_API FScopedLoadTimeAccumulatorTimer(const FName& InTimerName, const FName& InInstanceName);
 };
 
 #if ENABLE_LOADTIME_TRACKING
@@ -281,32 +280,46 @@ struct CORE_API FScopedLoadTimeAccumulatorTimer : public FScopedDurationTimer
 #define SCOPED_ACCUM_LOADTIME(TimerName, InstanceName)
 #endif
 
+// Uses raw timers to store cumulative load times, does not support specific strings
 #if ENABLE_LOADTIME_RAW_TIMINGS
 #define SCOPED_LOADTIMER_TEXT(TimerName)
+#define SCOPED_LOADTIMER_ASSET_TEXT(TimerName)
 #define SCOPED_LOADTIMER(TimerName) FScopedDurationTimer DurationTimer_##TimerName(FLoadTimeTracker::Get().TimerName);
 #define SCOPED_CUSTOM_LOADTIMER(TimerName)
 #define SCOPED_LOADTIMER_CNT(TimerName) FScopedDurationTimer DurationTimer_##TimerName(FLoadTimeTracker::Get().TimerName); FLoadTimeTracker::Get().TimerName##Cnt++;
 #define ADD_CUSTOM_LOADTIMER_META(TimerName, Key, Value)
 #else
 
-#if CPUPROFILERTRACE_ENABLED
-#define SCOPED_LOADTIMER_TEXT(TimerName) \
-	TOptional<FCpuProfilerTrace::FDynamicEventScope> PREPROCESSOR_JOIN(__LoadTimerEventScope, __LINE__); \
-	if (UE_TRACE_CHANNELEXPR_IS_ENABLED(LoadTimeChannel|CpuChannel)) \
-	{ \
-		PREPROCESSOR_JOIN(__LoadTimerEventScope, __LINE__).Emplace(TimerName, LoadTimeChannel); \
-	}
-#else
-#define SCOPED_LOADTIMER_TEXT(TimerName)
-#endif
-
 #define CUSTOM_LOADTIMER_LOG Cpu
 
+// Uses trace system that can be read by Insights
+#if LOADTIMEPROFILERTRACE_ENABLED
+
+// Writes any string to the LoadTime channel, normally used for class names 
+#define SCOPED_LOADTIMER_TEXT(TimerName) TRACE_CPUPROFILER_EVENT_SCOPE_TEXT_ON_CHANNEL(TimerName, LoadTimeChannel)
+
+// Writes any string to the AssetLoadTime channel, for full asset paths
+#define SCOPED_LOADTIMER_ASSET_TEXT(TimerName) TRACE_CPUPROFILER_EVENT_SCOPE_TEXT_ON_CHANNEL(TimerName, AssetLoadTimeChannel)
+
+// Writes raw scope name to LoadTime channel
 #define SCOPED_LOADTIMER(TimerName) TRACE_CPUPROFILER_EVENT_SCOPE_ON_CHANNEL(TimerName, LoadTimeChannel)
+
+// Used to create a custom trace event and add metadata
 #define SCOPED_CUSTOM_LOADTIMER(TimerName) UE_TRACE_LOG_SCOPED_T(CUSTOM_LOADTIMER_LOG, TimerName, LoadTimeChannel)
+#define ADD_CUSTOM_LOADTIMER_META(TimerName, Key, Value) << TimerName.Key(Value)
+
+// Increment cumulative event count, disabled in this mode
 #define SCOPED_LOADTIMER_CNT(TimerName)
 
-#define ADD_CUSTOM_LOADTIMER_META(TimerName, Key, Value) << TimerName.Key(Value)
+// All load time tracking is disabled
+#else
+#define SCOPED_LOADTIMER_TEXT(TimerName)
+#define SCOPED_LOADTIMER_ASSET_TEXT(TimerName)
+#define SCOPED_LOADTIMER(TimerName)
+#define SCOPED_CUSTOM_LOADTIMER(TimerName)
+#define ADD_CUSTOM_LOADTIMER_META(TimerName, Key, Value)
+#define SCOPED_LOADTIMER_CNT(TimerName)
+#endif
 #endif
 
 #if ENABLE_LOADTIME_TRACKING_WITH_STATS && STATS

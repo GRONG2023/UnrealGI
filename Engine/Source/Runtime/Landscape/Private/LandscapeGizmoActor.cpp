@@ -26,6 +26,8 @@
 #include "Components/BillboardComponent.h"
 #include "HAL/PlatformApplicationMisc.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(LandscapeGizmoActor)
+
 class FLandscapeGizmoMeshRenderProxy : public FMaterialRenderProxy
 {
 public:
@@ -38,7 +40,8 @@ public:
 
 	/** Initialization constructor. */
 	FLandscapeGizmoMeshRenderProxy(const FMaterialRenderProxy* InParent, const float InTop, const float InBottom, const UTexture2D* InAlphaTexture, const FLinearColor& InScaleBias, const FMatrix& InWorldToLandscapeMatrix)
-	:	Parent(InParent)
+	:	FMaterialRenderProxy(InParent->GetMaterialName())
+	,	Parent(InParent)
 	,	TopHeight(InTop)
 	,	BottomHeight(InBottom)
 	,	AlphaTexture(InAlphaTexture)
@@ -57,68 +60,70 @@ public:
 		return Parent->GetFallback(InFeatureLevel);
 	}
 
-	virtual bool GetVectorValue(const FHashedMaterialParameterInfo& ParameterInfo, FLinearColor* OutValue, const FMaterialRenderContext& Context) const override
+	virtual bool GetParameterValue(EMaterialParameterType Type, const FHashedMaterialParameterInfo& ParameterInfo, FMaterialParameterValue& OutValue, const FMaterialRenderContext& Context) const
 	{
-		if (ParameterInfo.Name == FName(TEXT("AlphaScaleBias")))
+		auto GetColor = [](const FMatrix::FReal* MatrixColumn)
 		{
-			*OutValue = ScaleBias;
-			return true;
-		}
-		else
-		if (ParameterInfo.Name == FName(TEXT("MatrixRow1")))
+			return FLinearColor(static_cast<float>(MatrixColumn[0]),
+			                    static_cast<float>(MatrixColumn[1]),
+			                    static_cast<float>(MatrixColumn[2]),
+			                    static_cast<float>(MatrixColumn[3]));
+		};
+		
+		switch (Type)
 		{
-			*OutValue = FLinearColor(WorldToLandscapeMatrix.M[0][0], WorldToLandscapeMatrix.M[0][1], WorldToLandscapeMatrix.M[0][2],WorldToLandscapeMatrix.M[0][3]);
-			return true;
+		case EMaterialParameterType::Vector:
+			if (ParameterInfo.Name == FName(TEXT("AlphaScaleBias")))
+			{
+				OutValue = ScaleBias;
+				return true;
+			}
+			else if (ParameterInfo.Name == FName(TEXT("MatrixRow1")))
+			{
+				OutValue = GetColor(WorldToLandscapeMatrix.M[0]);
+				return true;
+			}
+			else if (ParameterInfo.Name == FName(TEXT("MatrixRow2")))
+			{
+				OutValue = GetColor(WorldToLandscapeMatrix.M[1]);
+				return true;
+			}
+			else if (ParameterInfo.Name == FName(TEXT("MatrixRow3")))
+			{
+				OutValue = GetColor(WorldToLandscapeMatrix.M[2]);
+				return true;
+			}
+			else if (ParameterInfo.Name == FName(TEXT("MatrixRow4")))
+			{
+				OutValue = GetColor(WorldToLandscapeMatrix.M[3]);
+				return true;
+			}
+			break;
+		case EMaterialParameterType::Scalar:
+			if (ParameterInfo.Name == FName(TEXT("Top")))
+			{
+				OutValue = TopHeight;
+				return true;
+			}
+			else if (ParameterInfo.Name == FName(TEXT("Bottom")))
+			{
+				OutValue = BottomHeight;
+				return true;
+			}
+			break;
+		case EMaterialParameterType::Texture:
+			if (ParameterInfo.Name == FName(TEXT("AlphaTexture")))
+			{
+				// FIXME: This needs to return a black texture if AlphaTexture is nullptr.
+				// Returning nullptr will cause the material to use GWhiteTexture.
+				OutValue = AlphaTexture;
+				return true;
+			}
+			break;
+		default:
+			break;
 		}
-		else
-		if (ParameterInfo.Name == FName(TEXT("MatrixRow2")))
-		{
-			*OutValue = FLinearColor(WorldToLandscapeMatrix.M[1][0], WorldToLandscapeMatrix.M[1][1], WorldToLandscapeMatrix.M[1][2],WorldToLandscapeMatrix.M[1][3]);
-			return true;
-		}
-		else
-		if (ParameterInfo.Name == FName(TEXT("MatrixRow3")))
-		{
-			*OutValue = FLinearColor(WorldToLandscapeMatrix.M[2][0], WorldToLandscapeMatrix.M[2][1], WorldToLandscapeMatrix.M[2][2],WorldToLandscapeMatrix.M[2][3]);
-			return true;
-		}
-		else
-		if (ParameterInfo.Name == FName(TEXT("MatrixRow4")))
-		{
-			*OutValue = FLinearColor(WorldToLandscapeMatrix.M[3][0], WorldToLandscapeMatrix.M[3][1], WorldToLandscapeMatrix.M[3][2],WorldToLandscapeMatrix.M[3][3]);
-			return true;
-		}
-
-		return Parent->GetVectorValue(ParameterInfo, OutValue, Context);
-	}
-	virtual bool GetScalarValue(const FHashedMaterialParameterInfo& ParameterInfo, float* OutValue, const FMaterialRenderContext& Context) const override
-	{
-		if (ParameterInfo.Name == FName(TEXT("Top")))
-		{
-			*OutValue = TopHeight;
-			return true;
-		}
-		else if (ParameterInfo.Name == FName(TEXT("Bottom")))
-		{
-			*OutValue = BottomHeight;
-			return true;
-		}
-		return Parent->GetScalarValue(ParameterInfo, OutValue, Context);
-	}
-	virtual bool GetTextureValue(const FHashedMaterialParameterInfo& ParameterInfo,const UTexture** OutValue, const FMaterialRenderContext& Context) const override
-	{
-		if (ParameterInfo.Name == FName(TEXT("AlphaTexture")))
-		{
-			// FIXME: This needs to return a black texture if AlphaTexture is NULL.
-			// Returning NULL will cause the material to use GWhiteTexture.
-			*OutValue = AlphaTexture;
-			return true;
-		}
-		return Parent->GetTextureValue(ParameterInfo, OutValue, Context);
-	}
-	virtual bool GetTextureValue(const FHashedMaterialParameterInfo& ParameterInfo, const URuntimeVirtualTexture** OutValue, const FMaterialRenderContext& Context) const
-	{
-		return Parent->GetTextureValue(ParameterInfo, OutValue, Context);
+		return Parent->GetParameterValue(Type, ParameterInfo, OutValue, Context);
 	}
 };
 
@@ -133,32 +138,33 @@ public:
 	}
 
 	FVector XAxis, YAxis, Origin;
-	float SampleSizeX, SampleSizeY;
-	bool bHeightmapRendering;
-	HHitProxy* HitProxy;
+	float SampleSizeX = 0.0f;
+	float SampleSizeY = 0.0f;
+	bool bHeightmapRendering = false;
+	bool bIsValid = false;
+	HHitProxy* HitProxy = nullptr;
 	FMatrix MeshRT;
 	FVector FrustumVerts[8];
 	TArray<FVector> SampledPositions;
 	TArray<FVector> SampledNormals;
-	FLandscapeGizmoMeshRenderProxy* HeightmapRenderProxy;
-	FMaterialRenderProxy* GizmoRenderProxy;
+	FLandscapeGizmoMeshRenderProxy* HeightmapRenderProxy = nullptr;
+	FMaterialRenderProxy* GizmoRenderProxy = nullptr;
 
-	FLandscapeGizmoRenderSceneProxy(const ULandscapeGizmoRenderComponent* InComponent):
-		FPrimitiveSceneProxy(InComponent),
-		bHeightmapRendering(false),
-		HitProxy(nullptr),
-		HeightmapRenderProxy(nullptr),
-		GizmoRenderProxy(nullptr)
+	FLandscapeGizmoRenderSceneProxy(const ULandscapeGizmoRenderComponent* InComponent)
+		: FPrimitiveSceneProxy(InComponent)
 	{
 #if WITH_EDITOR	
 		ALandscapeGizmoActiveActor* Gizmo = Cast<ALandscapeGizmoActiveActor>(InComponent->GetOwner());
-		if (Gizmo && Gizmo->GizmoMeshMaterial && Gizmo->GizmoDataMaterial && Gizmo->GetRootComponent())
+		if (Gizmo && Gizmo->GizmoMeshMaterial && Gizmo->GizmoDataMaterial && Gizmo->GetRootComponent() 
+			&& !FMath::IsNearlyZero(Gizmo->CachedWidth) 
+			&& !FMath::IsNearlyZero(Gizmo->CachedHeight))
 		{
 			ULandscapeInfo* LandscapeInfo = Gizmo->TargetLandscapeInfo;
-			if (LandscapeInfo && LandscapeInfo->GetLandscapeProxy())
+ 			if (LandscapeInfo && LandscapeInfo->GetLandscapeProxy() && !FMath::IsNearlyZero(LandscapeInfo->DrawScale.X))
 			{
-				SampleSizeX = Gizmo->SampleSizeX;
-				SampleSizeY = Gizmo->SampleSizeY;
+				const float ScaleXY = static_cast<float>(LandscapeInfo->DrawScale.X);
+				SampleSizeX = static_cast<float>(Gizmo->SampleSizeX);
+				SampleSizeY = static_cast<float>(Gizmo->SampleSizeY);
 				bHeightmapRendering = (Gizmo->DataType & LGT_Height);
 				FTransform LToW = LandscapeInfo->GetLandscapeProxy()->LandscapeActorToWorld();
 				const float W = Gizmo->Width / 2;
@@ -186,38 +192,46 @@ public:
 
 				const FMatrix WToL = LToW.ToMatrixWithScale().InverseFast();
 				const FVector BaseLocation = WToL.TransformPosition(Gizmo->GetActorLocation());
-				const float ScaleXY = LandscapeInfo->DrawScale.X;
-
-				MeshRT = FTranslationMatrix(FVector(-W / ScaleXY + 0.5, -H / ScaleXY + 0.5, 0) * GizmoScale3D) * FRotationTranslationMatrix(FRotator(0, Gizmo->GetActorRotation().Yaw, 0), FVector(BaseLocation.X, BaseLocation.Y, 0)) * LToW.ToMatrixWithScale();
-				HeightmapRenderProxy = new FLandscapeGizmoMeshRenderProxy( Gizmo->GizmoMeshMaterial->GetRenderProxy(), BaseLocation.Z + L, BaseLocation.Z, Gizmo->GizmoTexture, FLinearColor(Gizmo->TextureScale.X, Gizmo->TextureScale.Y, 0, 0), WToL );
-
-				GizmoRenderProxy = (Gizmo->DataType != LGT_None) ? Gizmo->GizmoDataMaterial->GetRenderProxy() : Gizmo->GizmoMaterial->GetRenderProxy();
-
+				
 				// Cache sampled height
 				float ScaleX = Gizmo->GetWidth() / Gizmo->CachedWidth / ScaleXY * Gizmo->CachedScaleXY;
 				float ScaleY = Gizmo->GetHeight() / Gizmo->CachedHeight / ScaleXY * Gizmo->CachedScaleXY;
-				FScaleMatrix Mat(FVector(ScaleX, ScaleY, L));
-				FMatrix NormalM = Mat.InverseFast().GetTransposed();
 
-				int32 SamplingSize = Gizmo->SampleSizeX * Gizmo->SampleSizeY;
-				SampledPositions.Empty(SamplingSize);
-				SampledNormals.Empty(SamplingSize);
-
-				for (int32 Y = 0; Y < Gizmo->SampleSizeY; ++Y)
+				if (!FMath::IsNearlyZero(ScaleX) && !FMath::IsNearlyZero(ScaleY))
 				{
-					for (int32 X = 0; X < Gizmo->SampleSizeX; ++X)
+					MeshRT = FTranslationMatrix(FVector(-W / ScaleXY + 0.5, -H / ScaleXY + 0.5, 0) * GizmoScale3D) * FRotationTranslationMatrix(FRotator(0, Gizmo->GetActorRotation().Yaw, 0), FVector(BaseLocation.X, BaseLocation.Y, 0)) * LToW.ToMatrixWithScale();
+
+					HeightmapRenderProxy = new FLandscapeGizmoMeshRenderProxy(Gizmo->GizmoMeshMaterial->GetRenderProxy(),
+					                                                          static_cast<float>(BaseLocation.Z + L),
+					                                                          static_cast<float>(BaseLocation.Z),
+					                                                          Gizmo->GizmoTexture,
+					                                                          FLinearColor(static_cast<float>(Gizmo->TextureScale.X),
+					                                                                       static_cast<float>(Gizmo->TextureScale.Y), 0.0f, 0.0f),
+					                                                          WToL);
+					GizmoRenderProxy = (Gizmo->DataType != LGT_None) ? Gizmo->GizmoDataMaterial->GetRenderProxy() : Gizmo->GizmoMaterial->GetRenderProxy();
+
+					FScaleMatrix Mat(FVector(ScaleX, ScaleY, L));
+					FMatrix NormalM = Mat.InverseFast().GetTransposed();
+
+					int32 SamplingSize = Gizmo->SampleSizeX * Gizmo->SampleSizeY;
+					SampledPositions.Empty(SamplingSize);
+					SampledNormals.Empty(SamplingSize);
+
+					for (int32 Y = 0; Y < Gizmo->SampleSizeY; ++Y)
 					{
-						FVector SampledPos = Gizmo->SampledHeight[X + Y * ALandscapeGizmoActiveActor::DataTexSize];
-						SampledPos.X *= ScaleX;
-						SampledPos.Y *= ScaleY;
-						SampledPos.Z = Gizmo->GetLandscapeHeight(SampledPos.Z);
+						for (int32 X = 0; X < Gizmo->SampleSizeX; ++X)
+						{
+							FVector SampledPos = Gizmo->SampledHeight[X + Y * ALandscapeGizmoActiveActor::DataTexSize];
+							SampledPos.X *= ScaleX;
+							SampledPos.Y *= ScaleY;
+							SampledPos.Z = Gizmo->GetLandscapeHeight(static_cast<float>(SampledPos.Z));
 
-						FVector SampledNormal = NormalM.TransformVector(Gizmo->SampledNormal[X + Y * ALandscapeGizmoActiveActor::DataTexSize]);
-						SampledNormal = SampledNormal.GetSafeNormal();
+							FVector SampledNormal = NormalM.TransformVector(Gizmo->SampledNormal[X + Y * ALandscapeGizmoActiveActor::DataTexSize]);
+							SampledNormal = SampledNormal.GetSafeNormal();
 
-						SampledPositions.Add(SampledPos);
-						SampledNormals.Add(SampledNormal);
-						//MeshBuilder.AddVertex(SampledPos, FVector2D((float)X / (Gizmo->SampleSizeX), (float)Y / (Gizmo->SampleSizeY)), TangentX, SampledNormal^TangentX, SampledNormal, FColor::White );
+							SampledPositions.Add(SampledPos);
+							SampledNormals.Add(SampledNormal);
+						}
 					}
 				}
 			}
@@ -228,7 +242,7 @@ public:
 	~FLandscapeGizmoRenderSceneProxy()
 	{
 		delete HeightmapRenderProxy;
-		HeightmapRenderProxy = NULL;
+		HeightmapRenderProxy = nullptr;
 	}
 
 #if WITH_EDITOR
@@ -245,9 +259,8 @@ public:
 
 	virtual void GetDynamicMeshElements(const TArray<const FSceneView*>& Views, const FSceneViewFamily& ViewFamily, uint32 VisibilityMap, FMeshElementCollector& Collector) const override
 	{
-		//FMemMark Mark(FMemStack::Get());
 #if WITH_EDITOR
-		if( GizmoRenderProxy &&  HeightmapRenderProxy )
+		if(GizmoRenderProxy && HeightmapRenderProxy)
 		{
 			for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
 			{
@@ -264,35 +277,35 @@ public:
 						FDynamicMeshBuilder MeshBuilder(View->GetFeatureLevel());
 
 						const FColor GizmoColor = FColor::White;
-						MeshBuilder.AddVertex(FrustumVerts[0], FVector2D(0, 0), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
-						MeshBuilder.AddVertex(FrustumVerts[1], FVector2D(1, 0), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
-						MeshBuilder.AddVertex(FrustumVerts[2], FVector2D(1, 1), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
-						MeshBuilder.AddVertex(FrustumVerts[3], FVector2D(0, 1), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[0], FVector2f(0, 0), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[1], FVector2f(1, 0), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[2], FVector2f(1, 1), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[3], FVector2f(0, 1), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
 
-						MeshBuilder.AddVertex(FrustumVerts[4], FVector2D(0, 0), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
-						MeshBuilder.AddVertex(FrustumVerts[5], FVector2D(1, 0), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
-						MeshBuilder.AddVertex(FrustumVerts[6], FVector2D(1, 1), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
-						MeshBuilder.AddVertex(FrustumVerts[7], FVector2D(0, 1), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[4], FVector2f(0, 0), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[5], FVector2f(1, 0), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[6], FVector2f(1, 1), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[7], FVector2f(0, 1), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
 
-						MeshBuilder.AddVertex(FrustumVerts[1], FVector2D(0, 0), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
-						MeshBuilder.AddVertex(FrustumVerts[0], FVector2D(1, 0), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
-						MeshBuilder.AddVertex(FrustumVerts[4], FVector2D(1, 1), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
-						MeshBuilder.AddVertex(FrustumVerts[5], FVector2D(0, 1), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[1], FVector2f(0, 0), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[0], FVector2f(1, 0), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[4], FVector2f(1, 1), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[5], FVector2f(0, 1), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
 
-						MeshBuilder.AddVertex(FrustumVerts[3], FVector2D(0, 0), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
-						MeshBuilder.AddVertex(FrustumVerts[2], FVector2D(1, 0), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
-						MeshBuilder.AddVertex(FrustumVerts[6], FVector2D(1, 1), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
-						MeshBuilder.AddVertex(FrustumVerts[7], FVector2D(0, 1), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[3], FVector2f(0, 0), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[2], FVector2f(1, 0), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[6], FVector2f(1, 1), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[7], FVector2f(0, 1), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
 
-						MeshBuilder.AddVertex(FrustumVerts[2], FVector2D(0, 0), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
-						MeshBuilder.AddVertex(FrustumVerts[1], FVector2D(1, 0), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
-						MeshBuilder.AddVertex(FrustumVerts[5], FVector2D(1, 1), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
-						MeshBuilder.AddVertex(FrustumVerts[6], FVector2D(0, 1), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[2], FVector2f(0, 0), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[1], FVector2f(1, 0), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[5], FVector2f(1, 1), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[6], FVector2f(0, 1), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
 
-						MeshBuilder.AddVertex(FrustumVerts[0], FVector2D(0, 0), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
-						MeshBuilder.AddVertex(FrustumVerts[3], FVector2D(1, 0), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
-						MeshBuilder.AddVertex(FrustumVerts[7], FVector2D(1, 1), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
-						MeshBuilder.AddVertex(FrustumVerts[4], FVector2D(0, 1), FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[0], FVector2f(0, 0), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[3], FVector2f(1, 0), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[7], FVector2f(1, 1), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
+						MeshBuilder.AddVertex((FVector3f)FrustumVerts[4], FVector2f(0, 1), FVector3f(1,0,0), FVector3f(0,1,0), FVector3f(0,0,1), GizmoColor);
 
 						for (int32 i = 0; i < 6; ++i)
 						{
@@ -306,17 +319,23 @@ public:
 
 					if (bHeightmapRendering)
 					{
+						auto GetSampleIndex = [this](int32 X, int32 Y) -> int32
+						{
+							return static_cast<int32>(X + Y * SampleSizeX);
+						};
+
 						FDynamicMeshBuilder MeshBuilder(View->GetFeatureLevel());
 
 						for (int32 Y = 0; Y < SampleSizeY; ++Y)
 						{
 							for (int32 X = 0; X < SampleSizeX; ++X)
 							{
-								FVector SampledNormal = SampledNormals[X + Y * SampleSizeX];
+								const int32 SampleIndex = GetSampleIndex(X, Y);
+								FVector SampledNormal = SampledNormals[SampleIndex];
 								FVector TangentX(SampledNormal.Z, 0, -SampledNormal.X);
 								TangentX = TangentX.GetSafeNormal();
 
-								MeshBuilder.AddVertex(SampledPositions[X + Y * SampleSizeX], FVector2D((float)X / (SampleSizeX), (float)Y / (SampleSizeY)), TangentX, SampledNormal^TangentX, SampledNormal, FColor::White);
+								MeshBuilder.AddVertex((FVector3f)SampledPositions[SampleIndex], FVector2f((float)X / (SampleSizeX), (float)Y / (SampleSizeY)), (FVector3f)TangentX, FVector3f(SampledNormal^TangentX), (FVector3f)SampledNormal, FColor::White);
 							}
 						}
 
@@ -326,8 +345,8 @@ public:
 							{
 								if (X < SampleSizeX - 1 && Y < SampleSizeY - 1)
 								{
-									MeshBuilder.AddTriangle( (X+0) + (Y+0) * SampleSizeX, (X+1) + (Y+1) * SampleSizeX, (X+1) + (Y+0) * SampleSizeX );
-									MeshBuilder.AddTriangle( (X+0) + (Y+0) * SampleSizeX, (X+0) + (Y+1) * SampleSizeX, (X+1) + (Y+1) * SampleSizeX );
+									MeshBuilder.AddTriangle(GetSampleIndex(X + 0, Y + 0), GetSampleIndex(X + 1, Y + 1), GetSampleIndex(X + 1, Y + 0));
+									MeshBuilder.AddTriangle(GetSampleIndex(X + 0, Y + 0), GetSampleIndex(X + 0, Y + 1), GetSampleIndex(X + 1, Y + 1));
 								}
 							}
 						}
@@ -354,7 +373,7 @@ public:
 	}
 
 	virtual uint32 GetMemoryFootprint( void ) const override { return( sizeof( *this ) + GetAllocatedSize() ); }
-	uint32 GetAllocatedSize( void ) const { return( FPrimitiveSceneProxy::GetAllocatedSize() ); }
+	uint32 GetAllocatedSize( void ) const { return static_cast<uint32>(FPrimitiveSceneProxy::GetAllocatedSize()); }
 };
 
 ULandscapeGizmoRenderComponent::ULandscapeGizmoRenderComponent(const FObjectInitializer& ObjectInitializer)
@@ -451,6 +470,7 @@ ALandscapeGizmoActor::ALandscapeGizmoActor(const FObjectInitializer& ObjectIniti
 	RootComponent = SceneComponent;
 
 #if WITH_EDITORONLY_DATA
+	bListedInSceneOutliner = false;
 	bEditable = false;
 	Width = 1280.0f;
 	Height = 1280.0f;
@@ -474,7 +494,7 @@ void ALandscapeGizmoActor::Duplicate(ALandscapeGizmoActor* Gizmo)
 	Gizmo->SetActorLocation( GetActorLocation(), false );
 	Gizmo->SetActorRotation( GetActorRotation() );
 
-	if (Gizmo->GetRootComponent() != NULL && GetRootComponent() != NULL)
+	if (Gizmo->GetRootComponent() != nullptr && GetRootComponent() != nullptr)
 	{
 		Gizmo->GetRootComponent()->SetRelativeScale3D(GetRootComponent()->GetRelativeScale3D());
 	}
@@ -566,27 +586,55 @@ void ALandscapeGizmoActiveActor::PostEditMove(bool bFinished)
 
 FVector ALandscapeGizmoActiveActor::SnapToLandscapeGrid(const FVector& GizmoLocation) const
 {
-	check(TargetLandscapeInfo);
-	const FTransform LToW = TargetLandscapeInfo->GetLandscapeProxy()->LandscapeActorToWorld();
-	const FVector LandscapeSpaceLocation = LToW.InverseTransformPosition(GizmoLocation);
-	const FVector SnappedLandscapeSpaceLocation = LandscapeSpaceLocation.GridSnap(1);
-	const FVector ResultLocation = LToW.TransformPosition(SnappedLandscapeSpaceLocation);
+	FVector ResultLocation = GizmoLocation;
+	if (TargetLandscapeInfo != nullptr)
+	{
+		const ALandscapeProxy* LandscapeProxy = TargetLandscapeInfo->GetLandscapeProxy();
+
+		const FTransform LToW = LandscapeProxy->LandscapeActorToWorld();
+		const FVector LandscapeSpaceLocation = LToW.InverseTransformPosition(GizmoLocation);
+		float SnapDimension;
+		switch (SnapType)
+		{
+		case ELandscapeGizmoSnapType::Component:
+			SnapDimension = static_cast<float>(LandscapeProxy->ComponentSizeQuads);
+			break;
+		case ELandscapeGizmoSnapType::Texel:
+			SnapDimension = 1.0f;
+			break;
+		case ELandscapeGizmoSnapType::None:
+			SnapDimension = 0.0f;
+			break;
+		default:
+			SnapDimension = 0.0f;
+			break;
+		}
+
+		if (SnapDimension > 0.0f)
+		{
+			const FVector SnappedLandscapeSpaceLocation = LandscapeSpaceLocation.GridSnap(SnapDimension);
+			ResultLocation = LToW.TransformPosition(SnappedLandscapeSpaceLocation);
+		}
+		else
+		{
+			ResultLocation = GizmoLocation;
+		}
+
+		if (bFollowTerrainHeight)
+		{
+			ResultLocation.Z = LandscapeProxy->GetHeightAtLocation(ResultLocation, EHeightfieldSource::Editor).Get(static_cast<float>(GizmoLocation.Z));
+		}
+	}
+	
 	return ResultLocation;
 }
 
 void ALandscapeGizmoActiveActor::EditorApplyTranslation(const FVector& DeltaTranslation, bool bAltDown, bool bShiftDown, bool bCtrlDown)
 {
-	if (bSnapToLandscapeGrid)
-	{
-		const FVector GizmoLocation = GetActorLocation() + DeltaTranslation;
-		const FVector ResultLocation = SnapToLandscapeGrid(GizmoLocation);
+	const FVector GizmoLocation = GetActorLocation() + DeltaTranslation;
+	const FVector ResultLocation = SnapToLandscapeGrid(GizmoLocation);
 
-		SetActorLocation(ResultLocation, false);
-	}
-	else
-	{
-		Super::EditorApplyTranslation(DeltaTranslation, bAltDown, bShiftDown, bCtrlDown);
-	}
+	SetActorLocation(ResultLocation, false);
 
 	ReregisterAllComponents();
 }
@@ -601,13 +649,13 @@ FRotator ALandscapeGizmoActiveActor::SnapToLandscapeGrid(const FRotator& GizmoRo
 	//const FRotator ResultRotation = (SnappedLandscapeSpaceRotation.Quaternion() * LToW.GetRotation()).Rotator().GetNormalized();
 
 	// Gizmo rotation is used as if it was relative to the landscape even though it isn't, so snap in world space
-	const FRotator ResultRotation = FRotator(0.f, FMath::GridSnap(GizmoRotation.Yaw, 90.f), 0.f);
+	const FRotator ResultRotation = FRotator(0.f, FMath::GridSnap(GizmoRotation.Yaw, (FRotator::FReal)90.f), 0.f);
 	return ResultRotation;
 }
 
 void ALandscapeGizmoActiveActor::EditorApplyRotation(const FRotator& DeltaRotation, bool bAltDown, bool bShiftDown, bool bCtrlDown)
 {
-	if (bSnapToLandscapeGrid)
+	if (SnapType == ELandscapeGizmoSnapType::Texel || SnapType == ELandscapeGizmoSnapType::Component)
 	{
 		// Based on AActor::EditorApplyRotation
 		FRotator GizmoRotation = GetActorRotation() + UnsnappedRotation;
@@ -639,10 +687,18 @@ void ALandscapeGizmoActiveActor::EditorApplyRotation(const FRotator& DeltaRotati
 	ReregisterAllComponents();
 }
 
+void ALandscapeGizmoActiveActor::EditorApplyScale(const FVector& DeltaScale, const FVector* PivotLocation, bool bAltDown, bool bShiftDown, bool bCtrlDown)
+{
+	Super::EditorApplyScale(DeltaScale, PivotLocation, bAltDown, bShiftDown, bCtrlDown);
+	ReregisterAllComponents();
+} 
+
 ALandscapeGizmoActor* ALandscapeGizmoActiveActor::SpawnGizmoActor()
 {
 	// ALandscapeGizmoActor is history for ALandscapeGizmoActiveActor
-	ALandscapeGizmoActor* NewActor = GetWorld()->SpawnActor<ALandscapeGizmoActor>();
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.ObjectFlags |= RF_Transient;
+	ALandscapeGizmoActor* NewActor = GetWorld()->SpawnActor<ALandscapeGizmoActor>(SpawnParams);
 	Duplicate(NewActor);
 	return NewActor;
 }
@@ -655,10 +711,10 @@ void ALandscapeGizmoActiveActor::SetTargetLandscape(ULandscapeInfo* LandscapeInf
 		TargetLandscapeInfo = nullptr;
 		if (GetWorld())
 		{
-			for (const TPair<FGuid, ULandscapeInfo*>& InfoMapPair : ULandscapeInfoMap::GetLandscapeInfoMap(GetWorld()).Map)
+			for (const auto& InfoMapPair : ULandscapeInfoMap::GetLandscapeInfoMap(GetWorld()).Map)
 			{
 				ULandscapeInfo* CandidateInfo = InfoMapPair.Value;
-				if (CandidateInfo && !CandidateInfo->HasAnyFlags(RF_BeginDestroyed) && CandidateInfo->GetLandscapeProxy() != nullptr)
+				if (CandidateInfo && CandidateInfo->SupportsLandscapeEditing() && !CandidateInfo->HasAnyFlags(RF_BeginDestroyed) && CandidateInfo->GetLandscapeProxy() != nullptr)
 				{
 					TargetLandscapeInfo = CandidateInfo;
 					break;
@@ -676,8 +732,8 @@ void ALandscapeGizmoActiveActor::SetTargetLandscape(ULandscapeInfo* LandscapeInf
 		// if there's no copied data, try to move somewhere useful
 		if (TargetLandscapeInfo && DataType == LGT_None)
 		{
-			MarginZ = TargetLandscapeInfo->DrawScale.Z * 3;
-			Width = Height = TargetLandscapeInfo->DrawScale.X * (TargetLandscapeInfo->ComponentSizeQuads + 1);
+			MarginZ = static_cast<float>(TargetLandscapeInfo->DrawScale.Z * 3);
+			Width = Height = static_cast<float>(TargetLandscapeInfo->DrawScale.X * (TargetLandscapeInfo->ComponentSizeQuads + 1));
 
 			float NewLengthZ;
 			FVector NewLocation = TargetLandscapeInfo->GetLandscapeCenterPos(NewLengthZ);
@@ -720,9 +776,9 @@ void ALandscapeGizmoActiveActor::FitToSelection()
 		{
 			const FVector LocalScale3D = GetRootComponent()->GetRelativeScale3D();
 
-			float ScaleXY = TargetLandscapeInfo->DrawScale.X;
-			Width = ScaleXY * (MaxX - MinX + 1) / (LocalScale3D.X);
-			Height = ScaleXY * (MaxY - MinY + 1) / (LocalScale3D.Y);
+			const float ScaleXY = static_cast<float>(TargetLandscapeInfo->DrawScale.X);
+			Width = static_cast<float>(ScaleXY * (MaxX - MinX + 1) / LocalScale3D.X);
+			Height = static_cast<float>(ScaleXY * (MaxY - MinY + 1) / LocalScale3D.Y);
 			float NewLengthZ;
 			FVector NewLocation = TargetLandscapeInfo->GetLandscapeCenterPos(NewLengthZ, MinX, MinY, MaxX, MaxY);
 			SetLength(NewLengthZ);
@@ -740,7 +796,7 @@ void ALandscapeGizmoActiveActor::FitMinMaxHeight()
 {
 	if (TargetLandscapeInfo)
 	{
-		float MinZ = HALF_WORLD_MAX, MaxZ = -HALF_WORLD_MAX;
+		FVector::FReal MinZ = UE_OLD_HALF_WORLD_MAX, MaxZ = -UE_OLD_HALF_WORLD_MAX;
 		// Change MinRelativeZ and RelativeZScale to fit Gizmo Box
 		for (auto It = SelectedData.CreateConstIterator(); It; ++It )
 		{
@@ -749,10 +805,10 @@ void ALandscapeGizmoActiveActor::FitMinMaxHeight()
 			MaxZ = FMath::Max(MaxZ, Data.HeightData);
 		}
 
-		if (MinZ != HALF_WORLD_MAX && MaxZ > MinZ + KINDA_SMALL_NUMBER)
+		if (MinZ != UE_OLD_HALF_WORLD_MAX && MaxZ > MinZ + KINDA_SMALL_NUMBER)
 		{
-			MinRelativeZ = MinZ;
-			RelativeScaleZ = 1.f / (MaxZ - MinZ);
+			MinRelativeZ = static_cast<float>(MinZ);
+			RelativeScaleZ = static_cast<float>(1.f / (MaxZ - MinZ));
 			ReregisterAllComponents();
 		}
 	}
@@ -770,7 +826,9 @@ float ALandscapeGizmoActiveActor::GetNormalizedHeight(uint16 LandscapeHeight) co
 			if (ZScale > KINDA_SMALL_NUMBER)
 			{
 				FVector LocalGizmoPos = Proxy->LandscapeActorToWorld().InverseTransformPosition(GetActorLocation());
-				return FMath::Clamp<float>( (( LandscapeDataAccess::GetLocalHeight(LandscapeHeight) - LocalGizmoPos.Z) * TargetLandscapeInfo->DrawScale.Z) / ZScale, 0.f, 1.f );
+				return FMath::Clamp<float>(
+					static_cast<float>((LandscapeDataAccess::GetLocalHeight(LandscapeHeight) - LocalGizmoPos.Z) * TargetLandscapeInfo->DrawScale.Z / ZScale),
+					0.f, 1.f);
 			}
 		}
 	}
@@ -788,7 +846,7 @@ float ALandscapeGizmoActiveActor::GetWorldHeight(float NormalizedHeight) const
 			if (ZScale > KINDA_SMALL_NUMBER)
 			{
 				FVector LocalGizmoPos = Proxy->LandscapeActorToWorld().InverseTransformPosition(GetActorLocation());
-				return NormalizedHeight * ZScale + LocalGizmoPos.Z * TargetLandscapeInfo->DrawScale.Z;
+				return static_cast<float>(NormalizedHeight * ZScale + LocalGizmoPos.Z * TargetLandscapeInfo->DrawScale.Z);
 			}
 		}
 	}
@@ -800,7 +858,7 @@ float ALandscapeGizmoActiveActor::GetLandscapeHeight(float NormalizedHeight) con
 	if (TargetLandscapeInfo)
 	{
 		NormalizedHeight = (NormalizedHeight - MinRelativeZ) * RelativeScaleZ;
-		float ScaleZ = TargetLandscapeInfo->DrawScale.Z;
+		const float ScaleZ = static_cast<float>(TargetLandscapeInfo->DrawScale.Z);
 		return (GetWorldHeight(NormalizedHeight) / ScaleZ);
 	}
 	return 0.f;
@@ -880,11 +938,11 @@ void ALandscapeGizmoActiveActor::SampleData(int32 SizeX, int32 SizeY)
 				FGizmoSelectData* Data11 = SelectedData.Find(FIntPoint(LX+1, LY+1));
 
 				// Invert Tex Data to show selected region more visible
-				TexData[X + Y*GizmoTexSizeX] = 255 - FMath::Lerp(
+				TexData[X + Y*GizmoTexSizeX] = static_cast<uint8>(255 - FMath::Lerp(
 					FMath::Lerp(Data00 ? Data00->Ratio : 0, Data10 ? Data10->Ratio : 0, FracX),
 					FMath::Lerp(Data01 ? Data01->Ratio : 0, Data11 ? Data11->Ratio : 0, FracX),
 					FracY
-					) * 255;
+					) * 255);
 
 				if (DataType & LGT_Height)
 				{
@@ -916,7 +974,7 @@ void ALandscapeGizmoActiveActor::SampleData(int32 SizeX, int32 SizeY)
 
 LANDSCAPE_API void ALandscapeGizmoActiveActor::Import( int32 VertsX, int32 VertsY, uint16* HeightData, TArray<ULandscapeLayerInfoObject*> ImportLayerInfos, uint8* LayerDataPointers[] )
 {
-	if (VertsX <= 0 || VertsY <= 0 || HeightData == NULL || TargetLandscapeInfo == NULL || GizmoTexture == NULL || (ImportLayerInfos.Num() && !LayerDataPointers) )
+	if (VertsX <= 0 || VertsY <= 0 || HeightData == nullptr || TargetLandscapeInfo == nullptr || GizmoTexture == nullptr || (ImportLayerInfos.Num() && !LayerDataPointers) )
 	{
 		return;
 	}
@@ -925,7 +983,7 @@ LANDSCAPE_API void ALandscapeGizmoActiveActor::Import( int32 VertsX, int32 Verts
 
 	ClearGizmoData();
 
-	CachedScaleXY = TargetLandscapeInfo->DrawScale.X;
+	CachedScaleXY = static_cast<float>(TargetLandscapeInfo->DrawScale.X);
 	CachedWidth = CachedScaleXY * VertsX; // (DrawScale * DrawScale3D.X);
 	CachedHeight = CachedScaleXY * VertsY; // (DrawScale * DrawScale3D.Y);
 	
@@ -951,7 +1009,7 @@ LANDSCAPE_API void ALandscapeGizmoActiveActor::Import( int32 VertsX, int32 Verts
 		{
 			FGizmoSelectData Data;
 			Data.Ratio = 1.f;
-			Data.HeightData = (float)HeightData[X + Y*VertsX] / 65535.f; //GetNormalizedHeight(HeightData[X + Y*VertsX]);
+			Data.HeightData = (float)HeightData[X + Y*VertsX] / LandscapeDataAccess::MaxValue; //GetNormalizedHeight(HeightData[X + Y*VertsX]);
 			for (int32 i = 0; i < ImportLayerInfos.Num(); ++i)
 			{
 				Data.WeightDataMap.Add( ImportLayerInfos[i], LayerDataPointers[i][X + Y*VertsX] );
@@ -1027,7 +1085,7 @@ void ALandscapeGizmoActiveActor::Export(int32 Index, TArray<FString>& Filenames)
 						int32 Idx = (X-MinX) + Y *(1+MaxX-MinX);
 						if (!bExportOneTarget || Index == -1)
 						{
-							pHeightData[Idx] = FMath::Clamp<uint16>(Data->HeightData * 65535.f, 0, 65535);
+							pHeightData[Idx] = FMath::Clamp<uint16>(static_cast<uint16>(Data->HeightData * LandscapeDataAccess::MaxValue), 0, LandscapeDataAccess::MaxValue);
 						}
 
 						for( int32 i=1;i<Filenames.Num();i++ )
@@ -1035,7 +1093,7 @@ void ALandscapeGizmoActiveActor::Export(int32 Index, TArray<FString>& Filenames)
 							if (!bExportOneTarget || Index == i-1)
 							{
 								TArray<uint8>& WeightData = WeightDatas[i-1];
-								WeightData[Idx] = FMath::Clamp<uint8>(Data->WeightDataMap.FindRef(LayerInfos[i-1]), 0, 255);
+								WeightData[Idx] = FMath::Clamp<uint8>(static_cast<uint8>(Data->WeightDataMap.FindRef(LayerInfos[i-1])), 0, 255);
 							}
 						}
 					}
@@ -1210,7 +1268,7 @@ void ALandscapeGizmoActiveActor::ImportFromClipboard()
 						Str++;
 					}
 					StrBuf[i] = 0;
-					LayerInfos.Add( LoadObject<ULandscapeLayerInfoObject>(NULL, StrBuf) );
+					LayerInfos.Add( LoadObject<ULandscapeLayerInfoObject>(nullptr, StrBuf) );
 				}
 			}
 
@@ -1284,3 +1342,4 @@ void ALandscapeGizmoActiveActor::ImportFromClipboard()
 /** Returns SpriteComponent subobject **/
 UBillboardComponent* ALandscapeGizmoActor::GetSpriteComponent() const { return SpriteComponent; }
 #endif
+

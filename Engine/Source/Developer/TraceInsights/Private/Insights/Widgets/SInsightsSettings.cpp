@@ -2,11 +2,10 @@
 
 #include "SInsightsSettings.h"
 
-#include "EditorStyleSet.h"
 #include "Fonts/SlateFontInfo.h"
 #include "Misc/Paths.h"
 #include "SlateOptMacros.h"
-#include "Styling/CoreStyle.h"
+#include "Styling/AppStyle.h"
 #include "Styling/SlateTypes.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
@@ -19,6 +18,7 @@
 // Insights
 #include "Insights/InsightsManager.h"
 #include "Insights/InsightsSettings.h"
+#include "Insights/InsightsStyle.h"
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -38,13 +38,22 @@ void SInsightsSettings::Construct(const FArguments& InArgs)
 
 	AddTitle(LOCTEXT("SettingsTitle","Unreal Insights - Settings"), SettingsGrid, CurrentRowPos);
 	AddSeparator(SettingsGrid, CurrentRowPos);
-	AddHeader(LOCTEXT("TimingProfilerTitle","TimingProfiler"), SettingsGrid, CurrentRowPos);
+	AddHeader(LOCTEXT("TimingProfilerTitle","Timing Insights - defaults (applies when a new analysis session starts)"), SettingsGrid, CurrentRowPos);
 	AddOption
 	(
-		LOCTEXT("bShowEmptyTracksByDefault_T","Show empty CPU/GPU tracks in Timing View, by default"),
-		LOCTEXT("bShowEmptyTracksByDefault_TT","If True, empty CPU/GPU tracks will be visible in Timing View. Applies when session starts."),
-		SettingPtr->bShowEmptyTracksByDefault,
-		SettingPtr->GetDefaults().bShowEmptyTracksByDefault,
+		LOCTEXT("bAutoHideEmptyTracks_T","Auto hide empty CPU/GPU tracks in Timing View"),
+		LOCTEXT("bAutoHideEmptyTracks_TT","If enabled, the empty CPU/GPU tracks will be hidden in the Timing View."),
+		SettingPtr->bAutoHideEmptyTracks,
+		SettingPtr->GetDefaults().bAutoHideEmptyTracks,
+		SettingsGrid,
+		CurrentRowPos
+	);
+	AddOption
+	(
+		LOCTEXT("bAutoZoomOnFrameSelection_T", "Auto zoom on frame selection"),
+		LOCTEXT("bAutoZoomOnFrameSelection_TT", "If enabled, the Timing View will also be zoomed when a new frame is selected in the Frames track."),
+		SettingPtr->bAutoZoomOnFrameSelection,
+		SettingPtr->GetDefaults().bAutoZoomOnFrameSelection,
 		SettingsGrid,
 		CurrentRowPos
 	);
@@ -67,7 +76,7 @@ void SInsightsSettings::AddTitle(const FText& TitleText, const TSharedRef<SGridP
 	.Padding(2.0f)
 	[
 		SNew(STextBlock)
-		.Font(FCoreStyle::GetDefaultFontStyle("Regular", 18))
+		.Font(FAppStyle::Get().GetFontStyle("HeadingExtraSmall"))
 		.Text(TitleText)
 	];
 	RowPos++;
@@ -95,7 +104,7 @@ void SInsightsSettings::AddHeader(const FText& HeaderText, const TSharedRef<SGri
 	.Padding(2.0f)
 	[
 		SNew(STextBlock)
-		.Font(FCoreStyle::GetDefaultFontStyle("Regular", 14))
+		.Font(FAppStyle::Get().GetFontStyle("Font.Large.Bold"))
 		.Text(HeaderText)
 	];
 	RowPos++;
@@ -139,14 +148,14 @@ void SInsightsSettings::AddOption(const FText& OptionName, const FText& OptionDe
 		[
 			SNew(SButton)
 			.ToolTipText(LOCTEXT("ResetToDefaultToolTip", "Reset to default"))
-			.ButtonStyle(FEditorStyle::Get(), TEXT("NoBorder"))
+			.ButtonStyle(FAppStyle::Get(), TEXT("NoBorder"))
 			.ContentPadding(0.0f)
 			.Visibility(this, &SInsightsSettings::OptionDefault_GetDiffersFromDefaultAsVisibility, (const bool*)&Value, (const bool*)&Default)
 			.OnClicked(this, &SInsightsSettings::OptionDefault_OnClicked, (bool*)&Value, (const bool*)&Default)
 			.Content()
 			[
 				SNew(SImage)
-				.Image(FEditorStyle::GetBrush("PropertyWindow.DiffersFromDefault"))
+				.Image(FInsightsStyle::GetBrush("Icons.DiffersFromDefault"))
 			]
 		]
 	];
@@ -181,7 +190,7 @@ void SInsightsSettings::AddFooter(const TSharedRef<SGridPanel>& Grid, int32& Row
 				.VAlign(VAlign_Center)
 				[
 					SNew(SImage)
-					.Image(FEditorStyle::GetBrush("Profiler.Misc.Save16"))
+					.Image(FAppStyle::Get().GetBrush("Icons.Save"))
 				]
 
 				+SHorizontalBox::Slot()
@@ -209,7 +218,7 @@ void SInsightsSettings::AddFooter(const TSharedRef<SGridPanel>& Grid, int32& Row
 				.VAlign(VAlign_Center)
 				[
 					SNew(SImage)
-					.Image(FEditorStyle::GetBrush("Profiler.Misc.Reset16"))
+					.Image(FInsightsStyle::GetBrush("Icons.ResetToDefault"))
 				]
 
 				+SHorizontalBox::Slot()

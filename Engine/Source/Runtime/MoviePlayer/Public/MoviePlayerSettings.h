@@ -2,17 +2,21 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
 #include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "MoviePlayerSettings.generated.h"
 
 
 /**
  * Implements the settings for the Windows target platform.
  */
-UCLASS(config=Game, defaultconfig)
-class MOVIEPLAYER_API UMoviePlayerSettings
+UCLASS(config=Game, defaultconfig, MinimalAPI)
+class UMoviePlayerSettings
 	: public UObject
 {
 public:

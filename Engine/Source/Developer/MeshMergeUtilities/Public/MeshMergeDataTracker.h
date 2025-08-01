@@ -55,14 +55,9 @@ public:
 		VertexColorHash = InVertexColorHash;
 	}
 
-	inline bool operator==(const FMeshLODKey& Other)
+	inline bool operator==(const FMeshLODKey& Other) const
 	{
 		return CombinedKey == Other.CombinedKey;
-	}
-
-	inline friend bool operator==(const FMeshLODKey& Lhs, const FMeshLODKey& Rhs)
-	{
-		return Lhs.CombinedKey == Rhs.CombinedKey;
 	}
 
 	inline friend uint32 GetTypeHash(const FMeshLODKey& Item)
@@ -84,7 +79,7 @@ struct MESHMERGEUTILITIES_API FMaterialKey
 	{
 	}
 
-	inline bool operator==(const FMaterialKey& Other)
+	inline bool operator==(const FMaterialKey& Other) const
 	{
 		// Perform an optional custom comparison if we are trying to collapse material instances
 		const UMaterialInstance* MaterialInstance0 = Cast<UMaterialInstance>(Material);
@@ -188,6 +183,8 @@ public:
 
 	void AddComponentToWedgeMapping(int32 MeshIndex, int32 LODIndex, uint32 WedgeIndex);
 	uint32 GetComponentToWedgeMappng(int32 MeshIndex, int32 LODIndex) const;
+
+	double GetTextureSizeFromTargetTexelDensity(float InTargetTexelDensity) const;
 
 protected:
 	// Mesh / LOD index, RawMesh

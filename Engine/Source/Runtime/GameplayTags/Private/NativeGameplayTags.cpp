@@ -6,6 +6,7 @@
 #include "ProjectDescriptor.h"
 #include "PluginDescriptor.h"
 #include "Interfaces/IPluginManager.h"
+#include "Misc/PackageName.h"
 
 #define LOCTEXT_NAMESPACE "FNativeGameplayTag"
 
@@ -26,7 +27,6 @@ static bool VerifyModuleCanContainGameplayTag(FName ModuleName, FName TagName, c
 			//check(ThisPlugin.IsValid());
 			//UGameplayTagsManager::Get().AddTagIniSearchPath(ThisPlugin->GetBaseDir() / TEXT("Config") / TEXT("Tags"));
 
-			//const FString PluginName = FPaths::GetBaseFilename(StateProperties.PluginInstalledFilename);
 			//const FString PluginFolder = FPaths::GetPath(StateProperties.PluginInstalledFilename);
 			//UGameplayTagsManager::Get().AddTagIniSearchPath(PluginFolder / TEXT("Config") / TEXT("Tags"));
 
@@ -60,6 +60,7 @@ FNativeGameplayTag::FNativeGameplayTag(FName InPluginName, FName InModuleName, F
 #if !UE_BUILD_SHIPPING
 	PluginName = InPluginName;
 	ModuleName = InModuleName;
+	ModulePackageName = FPackageName::GetModuleScriptPackageName(InModuleName);
 #endif
 
 	InternalTag = TagName.IsNone() ? FGameplayTag() : FGameplayTag(TagName);
@@ -85,6 +86,8 @@ FNativeGameplayTag::~FNativeGameplayTag()
 	}
 }
 
+FName FNativeGameplayTag::NAME_NativeGameplayTag("Native");
+
 #if !UE_BUILD_SHIPPING
 
 void FNativeGameplayTag::ValidateTagRegistration() const
@@ -96,27 +99,28 @@ void FNativeGameplayTag::ValidateTagRegistration() const
 
 	bValidated = true;
 
-	const FProjectDescriptor* const CurrentProject = IProjectManager::Get().GetCurrentProject();
-	check(CurrentProject);
-
-	const FModuleDescriptor* ProjectModule =
-		CurrentProject->Modules.FindByPredicate([this](const FModuleDescriptor& Module) { return Module.Name == ModuleName; });
-
-	if (!VerifyModuleCanContainGameplayTag(ModuleName, InternalTag.GetTagName(), ProjectModule, TSharedPtr<IPlugin>()))
+	// Running commandlets or programs won't have projects potentially, so we can't assume there's a project.
+	if (const FProjectDescriptor* const CurrentProject = IProjectManager::Get().GetCurrentProject())
 	{
-		const FModuleDescriptor* PluginModule = nullptr;
+		const FModuleDescriptor* ProjectModule =
+			CurrentProject->Modules.FindByPredicate([this](const FModuleDescriptor& Module) { return Module.Name == ModuleName; });
 
-		// Ok, so we're not in a module for the project, 
-		TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(PluginName.ToString());
-		if (Plugin.IsValid())
+		if (!VerifyModuleCanContainGameplayTag(ModuleName, InternalTag.GetTagName(), ProjectModule, TSharedPtr<IPlugin>()))
 		{
-			const FPluginDescriptor& PluginDescriptor = Plugin->GetDescriptor();
-			PluginModule = PluginDescriptor.Modules.FindByPredicate([this](const FModuleDescriptor& Module) { return Module.Name == ModuleName; });
-		}
+			const FModuleDescriptor* PluginModule = nullptr;
 
-		if (!VerifyModuleCanContainGameplayTag(ModuleName, InternalTag.GetTagName(), PluginModule, Plugin))
-		{
-			ensureAlwaysMsgf(false, TEXT("Unable to find information about module '%s' in plugin '%s'"), *ModuleName.ToString(), *PluginName.ToString());
+			// Ok, so we're not in a module for the project, 
+			TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(PluginName.ToString());
+			if (Plugin.IsValid())
+			{
+				const FPluginDescriptor& PluginDescriptor = Plugin->GetDescriptor();
+				PluginModule = PluginDescriptor.Modules.FindByPredicate([this](const FModuleDescriptor& Module) { return Module.Name == ModuleName; });
+			}
+
+			if (!VerifyModuleCanContainGameplayTag(ModuleName, InternalTag.GetTagName(), PluginModule, Plugin))
+			{
+				ensureAlwaysMsgf(false, TEXT("Unable to find information about module '%s' in plugin '%s'"), *ModuleName.ToString(), *PluginName.ToString());
+			}
 		}
 	}
 }

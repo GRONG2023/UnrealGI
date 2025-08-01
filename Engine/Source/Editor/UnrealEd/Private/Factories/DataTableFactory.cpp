@@ -14,7 +14,7 @@
 #include "Widgets/Input/SComboButton.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Layout/SBox.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Input/Reply.h"
 
 #define LOCTEXT_NAMESPACE "DataTableFactory"
@@ -37,7 +37,7 @@ bool UDataTableFactory::ConfigureProperties()
 			return FDataTableEditorUtils::IsValidTableStruct(InStruct);
 		}
 
-		virtual bool IsUnloadedStructAllowed(const FStructViewerInitializationOptions& InInitOptions, const FName InStructPath, TSharedRef<FStructViewerFilterFuncs> InFilterFuncs) override
+		virtual bool IsUnloadedStructAllowed(const FStructViewerInitializationOptions& InInitOptions, const FSoftObjectPath& InStructPath, TSharedRef<FStructViewerFilterFuncs> InFilterFuncs) override
 		{
 			// Unloaded structs are always User Defined Structs, and User Defined Structs are always allowed
 			// They will be re-validated by IsStructAllowed once loaded during the pick
@@ -97,7 +97,7 @@ bool UDataTableFactory::ConfigureProperties()
 
 			return
 				SNew(SBox)
-				.WidthOverride(330)
+				.WidthOverride(330.0f)
 				[
 					SNew(SVerticalBox)
 
@@ -107,7 +107,7 @@ bool UDataTableFactory::ConfigureProperties()
 					[
 						SNew(SBorder)
 						.Padding(4)
-						.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+						.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 						[
 							StructViewerModule.CreateStructViewer(Options, FOnStructPicked::CreateSP(this, &FDataTableFactoryUI::OnPickedStruct))
 						]
@@ -132,7 +132,7 @@ bool UDataTableFactory::ConfigureProperties()
 				.SupportsMaximize(false)
 				[
 					SNew(SBorder)
-					.BorderImage(FEditorStyle::GetBrush("Menu.Background"))
+					.BorderImage(FAppStyle::GetBrush("Menu.Background"))
 					.Padding(10)
 					[
 						SNew(SVerticalBox)
@@ -200,7 +200,7 @@ UObject* UDataTableFactory::FactoryCreateNew(UClass* Class, UObject* InParent, F
 		DataTable = MakeNewDataTable(InParent, Name, Flags);
 		if (DataTable)
 		{
-			DataTable->RowStruct = const_cast<UScriptStruct*>(Struct);
+			DataTable->RowStruct = const_cast<UScriptStruct*>(ToRawPtr(Struct));
 		}
 	}
 	return DataTable;

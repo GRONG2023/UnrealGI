@@ -9,11 +9,18 @@
 #include "DepthRendering.h"
 #include "SceneRendering.h"
 #include "DeferredShadingRenderer.h"
-#include "LightPropagationVolume.h"
 #include "ScenePrivate.h"
 #include "PipelineStateCache.h"
 #include "ClearQuad.h"
 #include "HairStrands/HairStrandsRendering.h"
+#include "VirtualShadowMaps/VirtualShadowMapProjection.h"
+#include "Shadows/ShadowSceneRenderer.h"
+#include "Shadows/ScreenSpaceShadows.h"
+#include "RenderCore.h"
+#include "TranslucentLighting.h"
+#include "MobileBasePassRendering.h"
+
+using namespace LightFunctionAtlas;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // Directional light
@@ -58,7 +65,7 @@ static TAutoConsoleVariable<int32> CVarCSMDepthBoundsTest(
 static TAutoConsoleVariable<float> CVarShadowTransitionScale(
 	TEXT("r.Shadow.TransitionScale"),
 	60.0f,
-	TEXT("This controls the 'fade in' region between a caster and where his shadow shows up.  Larger values make a smaller region which will have more self shadowing artifacts"),
+	TEXT("This controls the 'fade in' region between a caster and where its shadow shows up.  Larger values make a smaller region which will have more self shadowing artifacts"),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<float> CVarCSMShadowReceiverBias(
@@ -108,13 +115,25 @@ static TAutoConsoleVariable<float> CVarRectLightShadowReceiverBias(
 static TAutoConsoleVariable<float> CVarSpotLightShadowDepthBias(
 	TEXT("r.Shadow.SpotLightDepthBias"),
 	3.0f,
-	TEXT("Depth bias that is applied in the depth pass for per object projected shadows from spot lights"),
+	TEXT("Depth bias that is applied in the depth pass for whole-scene projected shadows from spot lights"),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<float> CVarSpotLightShadowSlopeScaleDepthBias(
 	TEXT("r.Shadow.SpotLightSlopeDepthBias"),
 	3.0f,
-	TEXT("Slope scale depth bias that is applied in the depth pass for per object projected shadows from spot lights"),
+	TEXT("Slope scale depth bias that is applied in the depth pass for whole-scene projected shadows from spot lights"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarPerObjectSpotLightShadowDepthBias(
+	TEXT("r.Shadow.PerObjectSpotLightDepthBias"),
+	3.0f,
+	TEXT("Depth bias that is applied in the depth pass for per-object projected shadows from spot lights"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarPerObjectSpotLightShadowSlopeScaleDepthBias(
+	TEXT("r.Shadow.PerObjectSpotLightSlopeDepthBias"),
+	3.0f,
+	TEXT("Slope scale depth bias that is applied in the depth pass for per-object projected shadows from spot lights"),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<float> CVarSpotLightShadowTransitionScale(
@@ -146,6 +165,15 @@ static FAutoConsoleVariableRef CVarStencilOptimization(
 	ECVF_RenderThreadSafe
 	);
 
+
+static int GShadowStencilCulling = 1;
+static FAutoConsoleVariableRef CVarGShadowStencilCulling(
+	TEXT("r.Shadow.StencilCulling"),
+	GShadowStencilCulling,
+	TEXT("Whether to use stencil light culling during shadow projection (default) or only depth."),
+	ECVF_RenderThreadSafe
+);
+
 static TAutoConsoleVariable<int32> CVarFilterMethod(
 	TEXT("r.Shadow.FilterMethod"),
 	0,
@@ -169,6 +197,43 @@ static TAutoConsoleVariable<float> CVarShadowMaxSlopeScaleDepthBias(
 
 FForwardScreenSpaceShadowMaskTextureMobileOutputs GScreenSpaceShadowMaskTextureMobileOutputs;
 
+/**
+ * A dummy vertex buffer to bind when rendering whole scene shadows. This
+ * prevents some D3D debug warnings about zero-element input layouts, but is not
+ * strictly required.  It is, however, required for Metal.
+ */
+class FDummyWholeSceneDirectionalShadowStencilVertexBuffer : public FVertexBuffer
+{
+public:
+
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override
+	{
+		FRHIResourceCreateInfo CreateInfo(TEXT("FDummyWholeSceneDirectionalShadowStencilVertexBuffer"));
+		VertexBufferRHI = RHICmdList.CreateBuffer(sizeof(FVector4f) * 12, BUF_Static | BUF_VertexBuffer, 0, ERHIAccess::VertexOrIndexBuffer, CreateInfo);
+		FVector4f* DummyContents = (FVector4f*)RHICmdList.LockBuffer(VertexBufferRHI, 0, sizeof(FVector4f) * 12, RLM_WriteOnly);
+
+		// Far Plane
+		DummyContents[0] = FVector4f( 1,  1,  1 /* StencilFar */);
+		DummyContents[1] = FVector4f(-1,  1,  1);
+		DummyContents[2] = FVector4f( 1, -1,  1);
+		DummyContents[3] = FVector4f( 1, -1,  1);
+		DummyContents[4] = FVector4f(-1,  1,  1);
+		DummyContents[5] = FVector4f(-1, -1,  1);
+
+		// Near Plane
+		DummyContents[6]  = FVector4f(-1,  1, -1 /* StencilNear */);
+		DummyContents[7]  = FVector4f( 1,  1, -1);
+		DummyContents[8]  = FVector4f(-1, -1, -1);
+		DummyContents[9]  = FVector4f(-1, -1, -1);
+		DummyContents[10] = FVector4f( 1,  1, -1);
+		DummyContents[11] = FVector4f( 1, -1, -1);
+
+		RHICmdList.UnlockBuffer(VertexBufferRHI);
+	}
+};
+
+TGlobalResource<FDummyWholeSceneDirectionalShadowStencilVertexBuffer> GDummyWholeSceneDirectionalShadowStencilVertexBuffer;
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // Hair
 static TAutoConsoleVariable<int32> CVarHairStrandsCullPerObjectShadowCaster(
@@ -177,7 +242,10 @@ static TAutoConsoleVariable<int32> CVarHairStrandsCullPerObjectShadowCaster(
 	TEXT("Enable CPU culling of object casting per-object shadow (stationnary object)"),
 	ECVF_RenderThreadSafe);
 
-DEFINE_GPU_DRAWCALL_STAT(ShadowProjection);
+DEFINE_GPU_STAT(ShadowProjection);
+
+// Use Shadow stencil mask is set to 0x07u instead of 0xFF so that that last bit can be used for Substrate classification without clearing the stencil bit for pre-shadow/per-object static shadow mask
+constexpr uint32 ShadowStencilMask = 0x07u;
 
 // 0:off, 1:low, 2:med, 3:high, 4:very high, 5:max
 uint32 GetShadowQuality()
@@ -202,16 +270,14 @@ uint32 GetShadowQuality()
 	return FMath::Clamp(Ret, 0, 5);
 }
 
-void GetOnePassPointShadowProjectionParameters(const FProjectedShadowInfo* ShadowInfo, FOnePassPointShadowProjection& OutParameters)
+void GetOnePassPointShadowProjectionParameters(FRDGBuilder& GraphBuilder, const FProjectedShadowInfo* ShadowInfo, FOnePassPointShadowProjection& OutParameters)
 {
+	const FRDGSystemTextures& SystemTextures = FRDGSystemTextures::Get(GraphBuilder);
+
 	//@todo DynamicGI: remove duplication with FOnePassPointShadowProjectionShaderParameters
-	FRHITexture* ShadowDepthTextureValue = ShadowInfo
-		? ShadowInfo->RenderTargets.DepthTarget->GetRenderTargetItem().ShaderResourceTexture->GetTextureCube()
-		: GBlackTextureDepthCube->TextureRHI.GetReference();
-	if (!ShadowDepthTextureValue)
-	{
-		ShadowDepthTextureValue = GBlackTextureDepthCube->TextureRHI.GetReference();
-	}
+	FRDGTexture* ShadowDepthTextureValue = ShadowInfo
+		? GraphBuilder.RegisterExternalTexture(ShadowInfo->RenderTargets.DepthTarget)
+		: SystemTextures.BlackDepthCube;
 
 	OutParameters.ShadowDepthCubeTexture = ShadowDepthTextureValue;
 	OutParameters.ShadowDepthCubeTexture2 = ShadowDepthTextureValue;
@@ -222,7 +288,7 @@ void GetOnePassPointShadowProjectionParameters(const FProjectedShadowInfo* Shado
 	{
 		for (int32 i = 0; i < ShadowInfo->OnePassShadowViewProjectionMatrices.Num(); i++)
 		{
-			OutParameters.ShadowViewProjectionMatrices[i] = ShadowInfo->OnePassShadowViewProjectionMatrices[i];
+			OutParameters.ShadowViewProjectionMatrices[i] = FMatrix44f(ShadowInfo->OnePassShadowViewProjectionMatrices[i]);	// LWC_TODO: Precision loss
 		}
 
 		OutParameters.InvShadowmapResolution = 1.0f / ShadowInfo->ResolutionX;
@@ -238,34 +304,48 @@ void GetOnePassPointShadowProjectionParameters(const FProjectedShadowInfo* Shado
 	FShadowVolumeBoundProjectionVS
 -----------------------------------------------------------------------------*/
 
-void FShadowVolumeBoundProjectionVS::SetParameters(FRHICommandList& RHICmdList, const FSceneView& View, const FProjectedShadowInfo* ShadowInfo)
+void FShadowVolumeBoundProjectionVS::SetParameters(
+	FRHIBatchedShaderParameters& BatchedParameters,
+	const FSceneView& View,
+	const FProjectedShadowInfo* ShadowInfo,
+	EShadowProjectionVertexShaderFlags Flags)
 {
-	FGlobalShader::SetParameters<FViewUniformShaderParameters>(RHICmdList, RHICmdList.GetBoundVertexShader(), View.ViewUniformBuffer);
-	
-	if(ShadowInfo->IsWholeSceneDirectionalShadow())
-	{
-		// Calculate bounding geometry transform for whole scene directional shadow.
-		// Use a pair of pre-transformed planes for stenciling.
-		StencilingGeometryParameters.Set(RHICmdList, this, FVector4(0,0,0,1));
-	}
-	else if(ShadowInfo->IsWholeScenePointLightShadow())
+	if(ShadowInfo->IsWholeScenePointLightShadow())
 	{
 		// Handle stenciling sphere for point light.
-		StencilingGeometryParameters.Set(RHICmdList, this, View, ShadowInfo->LightSceneInfo);
+		StencilingGeometryParameters.Set(BatchedParameters, View, ShadowInfo->LightSceneInfo);
 	}
 	else
 	{
-		// Other bounding geometry types are pre-transformed.
-		StencilingGeometryParameters.Set(RHICmdList, this, FVector4(0,0,0,1));
+		StencilingGeometryParameters.Set(BatchedParameters, FVector4f(0,0,0,1));
+	}
+
+	if ((Flags & EShadowProjectionVertexShaderFlags::DrawingFrustum) != EShadowProjectionVertexShaderFlags::None)
+	{
+		const FVector PreShadowToPreView(View.ViewMatrices.GetPreViewTranslation() - ShadowInfo->PreShadowTranslation);
+		SetShaderValue(BatchedParameters, InvReceiverInnerMatrix, ShadowInfo->InvReceiverInnerMatrix);
+		SetShaderValue(BatchedParameters, PreShadowToPreViewTranslation, FVector4f((FVector3f)PreShadowToPreView, 0));
+	}
+	else
+	{
+		SetShaderValue(BatchedParameters, InvReceiverInnerMatrix, FMatrix44f::Identity);
+		SetShaderValue(BatchedParameters, PreShadowToPreViewTranslation, FVector4f(0, 0, 0, 0));
 	}
 }
 
-IMPLEMENT_TYPE_LAYOUT(FShadowProjectionVertexShaderInterface);
 IMPLEMENT_TYPE_LAYOUT(FShadowProjectionPixelShaderInterface);
 
-IMPLEMENT_SHADER_TYPE(,FShadowProjectionNoTransformVS,TEXT("/Engine/Private/ShadowProjectionVertexShader.usf"),TEXT("Main"),SF_Vertex);
+IMPLEMENT_SHADER_TYPE(,FShadowProjectionNoTransformVS,TEXT("/Engine/Private/ShadowProjectionVertexShader.usf"),TEXT("ShadowProjectionNoTransformVS"),SF_Vertex);
 
-IMPLEMENT_SHADER_TYPE(,FShadowVolumeBoundProjectionVS,TEXT("/Engine/Private/ShadowProjectionVertexShader.usf"),TEXT("Main"),SF_Vertex);
+IMPLEMENT_SHADER_TYPE(,FShadowVolumeBoundProjectionVS,TEXT("/Engine/Private/ShadowProjectionVertexShader.usf"),TEXT("ShadowVolumeBoundProjectionVS"),SF_Vertex);
+
+template<uint32 T>
+TModulatedShadowProjection<T>::TModulatedShadowProjection(const ShaderMetaType::CompiledShaderInitializerType& Initializer) :
+TShadowProjectionPS<T, false, true>(Initializer)
+{
+	ModulatedShadowColorParameter.Bind(Initializer.ParameterMap, TEXT("ModulatedShadowColor"));
+	MobileBasePassUniformBuffer.Bind(Initializer.ParameterMap, FMobileBasePassUniformParameters::FTypeInfo::GetStructMetadata()->GetShaderVariableName());
+} 
 
 /**
  * Implementations for TShadowProjectionPS.  
@@ -311,6 +391,7 @@ IMPLEMENT_SHADOW_PROJECTION_PIXEL_SHADER(5, false, false, true);
 #undef IMPLEMENT_SHADOW_PROJECTION_PIXEL_SHADER
 
 #define IMPLEMENT_MODULATED_SHADOW_PROJECTION_PIXEL_SHADER(Quality) \
+	template class TModulatedShadowProjection<Quality>; \
 	using FShadowModulatedProjectionPS##Quality = TShadowProjectionPS<Quality, false, true>; \
 	IMPLEMENT_TEMPLATE_TYPE_LAYOUT(template<>, FShadowModulatedProjectionPS##Quality); \
 	IMPLEMENT_SHADER_TYPE(template<>, TModulatedShadowProjection<Quality>, TEXT("/Engine/Private/ShadowProjectionPixelShader.usf"), TEXT("Main"), SF_Pixel);
@@ -374,24 +455,42 @@ IMPLEMENT_SHADOW_PROJECTION_PIXEL_SHADER(5, true);
 
 template<typename VertexShaderType, typename PixelShaderType>
 static void BindShaderShaders(FRHICommandList& RHICmdList, FGraphicsPipelineStateInitializer& GraphicsPSOInit,
-	int32 ViewIndex, const FViewInfo& View, const FHairStrandsVisibilityData* HairVisibilityData, const FProjectedShadowInfo* ShadowInfo)
+	int32 ViewIndex, const FViewInfo& View, const FProjectedShadowInfo* ShadowInfo, uint32 StencilRef, FRHIUniformBuffer* HairStrandsUniformBuffer = nullptr)
 {
 	TShaderRef<VertexShaderType> VertexShader = View.ShaderMap->GetShader<VertexShaderType>();
 	TShaderRef<PixelShaderType> PixelShader = View.ShaderMap->GetShader<PixelShaderType>();
 
 	GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShader.GetVertexShader();
 	GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
-	SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit);
+	SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, StencilRef);
 
-	VertexShader->SetParameters(RHICmdList, View, ShadowInfo);
-	PixelShader->SetParameters(RHICmdList, ViewIndex, View, HairVisibilityData, ShadowInfo);
+	SetShaderParametersLegacyVS(RHICmdList, VertexShader, View, ShadowInfo, EShadowProjectionVertexShaderFlags::DrawingFrustum);
+
+	FRHIBatchedShaderParameters& BatchedParameters = RHICmdList.GetScratchShaderParameters();
+
+	const bool bUseLightFunctionAtlas = LightFunctionAtlas::IsEnabled(View, ELightFunctionAtlasSystem::DeferredLighting);
+	PixelShader->SetParameters(BatchedParameters, ViewIndex, View, ShadowInfo, bUseLightFunctionAtlas);
+
+	if (Substrate::IsSubstrateEnabled())
+	{
+		TRDGUniformBufferRef<FSubstrateGlobalUniformParameters> SubstrateUniformBuffer = Substrate::BindSubstrateGlobalUniformParameters(View);
+		PixelShader->FGlobalShader::template SetParameters<FSubstrateGlobalUniformParameters>(BatchedParameters, SubstrateUniformBuffer->GetRHIRef());
+	}
+
+	if (HairStrandsUniformBuffer)
+	{
+		PixelShader->FGlobalShader::template SetParameters<FHairStrandsViewUniformParameters>(BatchedParameters, HairStrandsUniformBuffer);
+	}
+
+	RHICmdList.SetBatchedShaderParameters(PixelShader.GetPixelShader(), BatchedParameters);
 }
 
 
 static void BindShadowProjectionShaders(int32 Quality, FRHICommandList& RHICmdList, FGraphicsPipelineStateInitializer GraphicsPSOInit, int32 ViewIndex, const FViewInfo& View,
-	const FHairStrandsVisibilityData* HairVisibilityData, const FProjectedShadowInfo* ShadowInfo, bool bMobileModulatedProjections)
+	const FProjectedShadowInfo* ShadowInfo, uint32 StencilRef, bool bMobileModulatedProjections, FRHIUniformBuffer* HairStrandsUniformBuffer)
 {
-	if (HairVisibilityData)
+	const bool bSubPixelShadow = HairStrandsUniformBuffer != nullptr;
+	if (bSubPixelShadow)
 	{
 		check(!bMobileModulatedProjections);
 
@@ -399,11 +498,11 @@ static void BindShadowProjectionShaders(int32 Quality, FRHICommandList& RHICmdLi
 		{
 			switch (Quality)
 			{
-			case 1: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<1, false, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-			case 2: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<2, false, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-			case 3: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<3, false, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-			case 4: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<4, false, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-			case 5: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<5, false, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
+			case 1: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<1, false, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef, HairStrandsUniformBuffer); break;
+			case 2: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<2, false, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef, HairStrandsUniformBuffer); break;
+			case 3: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<3, false, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef, HairStrandsUniformBuffer); break;
+			case 4: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<4, false, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef, HairStrandsUniformBuffer); break;
+			case 5: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<5, false, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef, HairStrandsUniformBuffer); break;
 			default:
 				check(0);
 			}
@@ -412,11 +511,11 @@ static void BindShadowProjectionShaders(int32 Quality, FRHICommandList& RHICmdLi
 		{
 			switch (Quality)
 			{
-			case 1: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<1, false, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-			case 2: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<2, false, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-			case 3: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<3, false, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-			case 4: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<4, false, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-			case 5: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<5, false, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
+			case 1: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<1, false, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef, HairStrandsUniformBuffer); break;
+			case 2: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<2, false, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef, HairStrandsUniformBuffer); break;
+			case 3: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<3, false, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef, HairStrandsUniformBuffer); break;
+			case 4: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<4, false, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef, HairStrandsUniformBuffer); break;
+			case 5: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<5, false, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef, HairStrandsUniformBuffer); break;
 			default:
 				check(0);
 			}
@@ -428,11 +527,11 @@ static void BindShadowProjectionShaders(int32 Quality, FRHICommandList& RHICmdLi
 	{
 		switch (Quality)
 		{
-		case 1: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionFromTranslucencyPS<1> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-		case 2: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionFromTranslucencyPS<2> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-		case 3: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionFromTranslucencyPS<3> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-		case 4: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionFromTranslucencyPS<4> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-		case 5: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionFromTranslucencyPS<5> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
+		case 1: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionFromTranslucencyPS<1> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+		case 2: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionFromTranslucencyPS<2> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+		case 3: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionFromTranslucencyPS<3> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+		case 4: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionFromTranslucencyPS<4> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+		case 5: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionFromTranslucencyPS<5> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
 		default:
 			check(0);
 		}
@@ -442,9 +541,9 @@ static void BindShadowProjectionShaders(int32 Quality, FRHICommandList& RHICmdLi
 		if (CVarFilterMethod.GetValueOnRenderThread() == 1)
 		{
 			if (ShadowInfo->CascadeSettings.FadePlaneLength > 0)
-				BindShaderShaders<FShadowProjectionNoTransformVS, TDirectionalPercentageCloserShadowProjectionPS<5, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo);
+				BindShaderShaders<FShadowProjectionNoTransformVS, TDirectionalPercentageCloserShadowProjectionPS<5, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef);
 			else
-				BindShaderShaders<FShadowProjectionNoTransformVS, TDirectionalPercentageCloserShadowProjectionPS<5, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo);
+				BindShaderShaders<FShadowProjectionNoTransformVS, TDirectionalPercentageCloserShadowProjectionPS<5, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef);
 		}
 		else if (ShadowInfo->CascadeSettings.FadePlaneLength > 0)
 		{
@@ -452,11 +551,11 @@ static void BindShadowProjectionShaders(int32 Quality, FRHICommandList& RHICmdLi
 			{
 				switch (Quality)
 				{
-				case 1: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<1, true, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-				case 2: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<2, true, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-				case 3: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<3, true, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-				case 4: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<4, true, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-				case 5: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<5, true, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
+				case 1: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<1, true, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+				case 2: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<2, true, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+				case 3: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<3, true, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+				case 4: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<4, true, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+				case 5: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<5, true, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
 				default:
 					check(0);
 				}
@@ -465,11 +564,11 @@ static void BindShadowProjectionShaders(int32 Quality, FRHICommandList& RHICmdLi
 			{
 				switch (Quality)
 				{
-				case 1: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<1, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-				case 2: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<2, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-				case 3: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<3, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-				case 4: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<4, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-				case 5: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<5, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
+				case 1: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<1, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+				case 2: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<2, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+				case 3: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<3, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+				case 4: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<4, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+				case 5: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<5, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
 				default:
 					check(0);
 				}
@@ -481,11 +580,11 @@ static void BindShadowProjectionShaders(int32 Quality, FRHICommandList& RHICmdLi
 			{
 				switch (Quality)
 				{
-				case 1: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<1, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-				case 2: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<2, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-				case 3: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<3, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-				case 4: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<4, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-				case 5: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<5, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
+				case 1: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<1, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+				case 2: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<2, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+				case 3: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<3, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+				case 4: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<4, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+				case 5: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<5, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
 				default:
 					check(0);
 				}
@@ -494,11 +593,11 @@ static void BindShadowProjectionShaders(int32 Quality, FRHICommandList& RHICmdLi
 			{ 
 				switch (Quality)
 				{
-				case 1: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<1, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-				case 2: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<2, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-				case 3: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<3, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-				case 4: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<4, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-				case 5: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<5, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
+				case 1: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<1, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+				case 2: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<2, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+				case 3: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<3, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+				case 4: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<4, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+				case 5: BindShaderShaders<FShadowProjectionNoTransformVS, TShadowProjectionPS<5, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
 				default:
 					check(0);
 				}
@@ -511,11 +610,11 @@ static void BindShadowProjectionShaders(int32 Quality, FRHICommandList& RHICmdLi
 		{
 			switch (Quality)
 			{
-			case 1: BindShaderShaders<FShadowVolumeBoundProjectionVS, TModulatedShadowProjection<1> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-			case 2: BindShaderShaders<FShadowVolumeBoundProjectionVS, TModulatedShadowProjection<2> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-			case 3: BindShaderShaders<FShadowVolumeBoundProjectionVS, TModulatedShadowProjection<3> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-			case 4: BindShaderShaders<FShadowVolumeBoundProjectionVS, TModulatedShadowProjection<4> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-			case 5: BindShaderShaders<FShadowVolumeBoundProjectionVS, TModulatedShadowProjection<5> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
+			case 1: BindShaderShaders<FShadowVolumeBoundProjectionVS, TModulatedShadowProjection<1> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+			case 2: BindShaderShaders<FShadowVolumeBoundProjectionVS, TModulatedShadowProjection<2> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+			case 3: BindShaderShaders<FShadowVolumeBoundProjectionVS, TModulatedShadowProjection<3> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+			case 4: BindShaderShaders<FShadowVolumeBoundProjectionVS, TModulatedShadowProjection<4> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+			case 5: BindShaderShaders<FShadowVolumeBoundProjectionVS, TModulatedShadowProjection<5> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
 			default:
 				check(0);
 			}
@@ -524,11 +623,11 @@ static void BindShadowProjectionShaders(int32 Quality, FRHICommandList& RHICmdLi
 		{
 			switch (Quality)
 			{
-			case 1: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<1, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-			case 2: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<2, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-			case 3: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<3, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-			case 4: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<4, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-			case 5: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<5, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
+			case 1: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<1, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+			case 2: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<2, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+			case 3: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<3, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+			case 4: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<4, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+			case 5: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<5, false, false, true> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
 			default:
 				check(0);
 			}
@@ -537,17 +636,17 @@ static void BindShadowProjectionShaders(int32 Quality, FRHICommandList& RHICmdLi
 		{
 			if (CVarFilterMethod.GetValueOnRenderThread() == 1 && ShadowInfo->GetLightSceneInfo().Proxy->GetLightType() == LightType_Spot)
 			{
-				BindShaderShaders<FShadowVolumeBoundProjectionVS, TSpotPercentageCloserShadowProjectionPS<5, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo);
+				BindShaderShaders<FShadowVolumeBoundProjectionVS, TSpotPercentageCloserShadowProjectionPS<5, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef);
 			}
 			else
 			{
 				switch (Quality)
 				{
-				case 1: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<1, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-				case 2: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<2, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-				case 3: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<3, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-				case 4: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<4, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
-				case 5: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<5, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, HairVisibilityData, ShadowInfo); break;
+				case 1: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<1, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+				case 2: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<2, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+				case 3: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<3, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+				case 4: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<4, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
+				case 5: BindShaderShaders<FShadowVolumeBoundProjectionVS, TShadowProjectionPS<5, false> >(RHICmdList, GraphicsPSOInit, ViewIndex, View, ShadowInfo, StencilRef); break;
 				default:
 					check(0);
 				}
@@ -651,7 +750,7 @@ FRHIBlendState* FProjectedShadowInfo::GetBlendStateForProjection(
 			if (bMobileModulatedProjections)
 			{
 				// Color modulate shadows, ignore alpha.
-				BlendState = TStaticBlendState<CW_RGB, BO_Add, BF_Zero, BF_SourceColor, BO_Add, BF_Zero, BF_One>::GetRHI();
+				BlendState = TStaticBlendState<CW_RGB, BO_Add, BF_Zero, BF_SourceColor, BO_Add, BF_Zero, BF_One, CW_NONE>::GetRHI();
 			}
 			else
 			{
@@ -675,7 +774,36 @@ FRHIBlendState* FProjectedShadowInfo::GetBlendStateForProjection(bool bProjectin
 		bMobileModulatedProjections);
 }
 
-void FProjectedShadowInfo::SetupFrustumForProjection(const FViewInfo* View, TArray<FVector4, TInlineAllocator<8>>& OutFrustumVertices, bool& bOutCameraInsideShadowFrustum, FPlane* OutPlanes) const
+class FFrustumVertexBuffer : public FVertexBuffer
+{
+public:
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override
+	{
+		FRHIResourceCreateInfo CreateInfo(TEXT("FProjectedShadowInfoStencilFrustum"));
+		VertexBufferRHI = RHICmdList.CreateVertexBuffer(sizeof(FVector4f) * 8, BUF_Static, CreateInfo);
+		FVector4f* OutFrustumVertices = reinterpret_cast<FVector4f*>(RHICmdList.LockBuffer(VertexBufferRHI, 0, sizeof(FVector4f) * 8, RLM_WriteOnly));
+		
+		for(uint32 vZ = 0;vZ < 2;vZ++)
+		{
+			for(uint32 vY = 0;vY < 2;vY++)
+			{
+				for(uint32 vX = 0;vX < 2;vX++)
+				{
+					OutFrustumVertices[GetCubeVertexIndex(vX,vY,vZ)] = FVector4f(
+						(vX ? -1.0f : 1.0f),
+						(vY ? -1.0f : 1.0f),
+						(vZ ?  1.0f : 0.0f),
+						1.0f);
+				}
+			}
+		}
+
+		RHICmdList.UnlockBuffer(VertexBufferRHI);
+	}
+};
+TGlobalResource<FFrustumVertexBuffer> GFrustumVertexBuffer;
+
+void FProjectedShadowInfo::SetupFrustumForProjection(const FViewInfo* View, TArray<FVector4f, TInlineAllocator<8>>& OutFrustumVertices, bool& bOutCameraInsideShadowFrustum, FPlane* OutPlanes) const
 {
 	bOutCameraInsideShadowFrustum = true;
 
@@ -685,7 +813,7 @@ void FProjectedShadowInfo::SetupFrustumForProjection(const FViewInfo* View, TArr
 		OutFrustumVertices.AddUninitialized(8);
 
 		// The shadow transforms and view transforms are relative to different origins, so the world coordinates need to be translated.
-		const FVector PreShadowToPreViewTranslation(View->ViewMatrices.GetPreViewTranslation() - PreShadowTranslation);
+		const FVector3f PreShadowToPreViewTranslation(View->ViewMatrices.GetPreViewTranslation() - PreShadowTranslation);
 
 		// fill out the frustum vertices (this is only needed in the non-whole scene case)
 		for(uint32 vZ = 0;vZ < 2;vZ++)
@@ -694,16 +822,16 @@ void FProjectedShadowInfo::SetupFrustumForProjection(const FViewInfo* View, TArr
 			{
 				for(uint32 vX = 0;vX < 2;vX++)
 				{
-					const FVector4 UnprojectedVertex = InvReceiverMatrix.TransformFVector4(
-						FVector4(
+					const FVector4f UnprojectedVertex = InvReceiverInnerMatrix.TransformFVector4(
+						FVector4f(
 							(vX ? -1.0f : 1.0f),
 							(vY ? -1.0f : 1.0f),
-							(vZ ?  0.0f : 1.0f),
+							(vZ ?  1.0f : 0.0f),
 							1.0f
-							)
-						);
-					const FVector ProjectedVertex = UnprojectedVertex / UnprojectedVertex.W + PreShadowToPreViewTranslation;
-					OutFrustumVertices[GetCubeVertexIndex(vX,vY,vZ)] = FVector4(ProjectedVertex, 0);
+						)
+					);
+					const FVector3f ProjectedVertex = UnprojectedVertex / UnprojectedVertex.W + PreShadowToPreViewTranslation;
+					OutFrustumVertices[GetCubeVertexIndex(vX,vY,vZ)] = FVector4f(ProjectedVertex, 0);
 				}
 			}
 		}
@@ -711,14 +839,14 @@ void FProjectedShadowInfo::SetupFrustumForProjection(const FViewInfo* View, TArr
 		const FVector ShadowViewOrigin = View->ViewMatrices.GetViewOrigin();
 		const FVector ShadowPreViewTranslation = View->ViewMatrices.GetPreViewTranslation();
 
-		const FVector FrontTopRight		= OutFrustumVertices[GetCubeVertexIndex(0,0,1)] - ShadowPreViewTranslation;
-		const FVector FrontTopLeft		= OutFrustumVertices[GetCubeVertexIndex(1,0,1)] - ShadowPreViewTranslation;
-		const FVector FrontBottomLeft	= OutFrustumVertices[GetCubeVertexIndex(1,1,1)] - ShadowPreViewTranslation;
-		const FVector FrontBottomRight	= OutFrustumVertices[GetCubeVertexIndex(0,1,1)] - ShadowPreViewTranslation;
-		const FVector BackTopRight		= OutFrustumVertices[GetCubeVertexIndex(0,0,0)] - ShadowPreViewTranslation;
-		const FVector BackTopLeft		= OutFrustumVertices[GetCubeVertexIndex(1,0,0)] - ShadowPreViewTranslation;
-		const FVector BackBottomLeft	= OutFrustumVertices[GetCubeVertexIndex(1,1,0)] - ShadowPreViewTranslation;
-		const FVector BackBottomRight	= OutFrustumVertices[GetCubeVertexIndex(0,1,0)] - ShadowPreViewTranslation;
+		const FVector FrontTopRight		= (FVector4)OutFrustumVertices[GetCubeVertexIndex(0,0,1)] - ShadowPreViewTranslation;
+		const FVector FrontTopLeft		= (FVector4)OutFrustumVertices[GetCubeVertexIndex(1,0,1)] - ShadowPreViewTranslation;
+		const FVector FrontBottomLeft	= (FVector4)OutFrustumVertices[GetCubeVertexIndex(1,1,1)] - ShadowPreViewTranslation;
+		const FVector FrontBottomRight	= (FVector4)OutFrustumVertices[GetCubeVertexIndex(0,1,1)] - ShadowPreViewTranslation;
+		const FVector BackTopRight		= (FVector4)OutFrustumVertices[GetCubeVertexIndex(0,0,0)] - ShadowPreViewTranslation;
+		const FVector BackTopLeft		= (FVector4)OutFrustumVertices[GetCubeVertexIndex(1,0,0)] - ShadowPreViewTranslation;
+		const FVector BackBottomLeft	= (FVector4)OutFrustumVertices[GetCubeVertexIndex(1,1,0)] - ShadowPreViewTranslation;
+		const FVector BackBottomRight	= (FVector4)OutFrustumVertices[GetCubeVertexIndex(0,1,0)] - ShadowPreViewTranslation;
 
 		const FPlane Front(FrontTopRight, FrontTopLeft, FrontBottomLeft);
 		const float FrontDistance = Front.PlaneDot(ShadowViewOrigin);
@@ -759,49 +887,94 @@ void FProjectedShadowInfo::SetupFrustumForProjection(const FViewInfo* View, TArr
 	}
 }
 
+class FWholeSceneDirectionalShadowStencilVS : public FGlobalShader
+{
+	DECLARE_GLOBAL_SHADER(FWholeSceneDirectionalShadowStencilVS);
+	SHADER_USE_PARAMETER_STRUCT(FWholeSceneDirectionalShadowStencilVS, FGlobalShader)
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(FVector4f, ClipZValues)
+	END_SHADER_PARAMETER_STRUCT()
+};
+IMPLEMENT_GLOBAL_SHADER(FWholeSceneDirectionalShadowStencilVS, "/Engine/Private/ShadowProjectionVertexShader.usf", "WholeSceneDirectionalShadowStencilVS", SF_Vertex);
+
 void FProjectedShadowInfo::SetupProjectionStencilMask(
-	FRHICommandListImmediate& RHICmdList, 
+	FRHICommandList& RHICmdList, 
 	const FViewInfo* View, 
 	int32 ViewIndex, 
 	const FSceneRenderer* SceneRender,
-	const TArray<FVector4, TInlineAllocator<8>>& FrustumVertices,
+	const TArray<FVector4f, TInlineAllocator<8>>& FrustumVertices,
 	bool bMobileModulatedProjections, 
-	bool bCameraInsideShadowFrustum) const
+	bool bCameraInsideShadowFrustum,
+	const FInstanceCullingDrawParams& InstanceCullingDrawParams) const
 {
-	FMeshPassProcessorRenderState DrawRenderState(*View);
+	FMeshPassProcessorRenderState DrawRenderState;
 
 	// Depth test wo/ writes, no color writing.
 	DrawRenderState.SetDepthStencilState(TStaticDepthStencilState<false, CF_DepthNearOrEqual>::GetRHI());
-	DrawRenderState.SetBlendState(TStaticBlendState<CW_NONE>::GetRHI());
-
-	const bool bDynamicInstancing = IsDynamicInstancingEnabled(View->FeatureLevel);
+	DrawRenderState.SetBlendState(TStaticBlendState<CW_NONE, BO_Add, BF_Zero, BF_SourceColor, BO_Add, BF_Zero, BF_One, CW_NONE>::GetRHI());
 
 	// If this is a preshadow, mask the projection by the receiver primitives.
 	if (bPreShadow || bSelfShadowOnly)
 	{
 		SCOPED_DRAW_EVENTF(RHICmdList, EventMaskSubjects, TEXT("Stencil Mask Subjects"));
 
-		// If instanced stereo is enabled, we need to render each view of the stereo pair using the instanced stereo transform to avoid bias issues.
+		// NOTE: If instanced stereo is enabled, we need to render each view of the stereo pair using the instanced stereo transform to avoid bias issues.
+		//       This means doing 2x renders, but letting the scissor rect kill the undersired half. Drawing the full mask once is easy, but since the outer
+		//       loop is over each view, the stencil mask is not retained when the right view comes around.
 		// TODO: Support instanced stereo properly in the projection stenciling pass.
-		const bool bIsInstancedStereoEmulated = View->bIsInstancedStereoEnabled && !View->bIsMultiViewEnabled && IStereoRendering::IsStereoEyeView(*View);
-		if (bIsInstancedStereoEmulated)
+		const bool bIsInstancedStereoEmulated = View->bIsInstancedStereoEnabled && !View->bIsMobileMultiViewEnabled && IStereoRendering::IsStereoEyeView(*View);
+		if (bIsInstancedStereoEmulated && ProjectionStencilingPasses.IsValidIndex(View->PrimaryViewIndex))
 		{
-			RHICmdList.SetViewport(0, 0, 0, SceneRender->InstancedStereoWidth, View->ViewRect.Max.Y, 1);
-			RHICmdList.SetScissorRect(true, View->ViewRect.Min.X, View->ViewRect.Min.Y, View->ViewRect.Max.X, View->ViewRect.Max.Y);
-		}
+			ensure(ProjectionStencilingPasses[View->PrimaryViewIndex]->GetInstanceCullingMode() == EInstanceCullingMode::Stereo);
 
-		const FShadowMeshDrawCommandPass& ProjectionStencilingPass = ProjectionStencilingPasses[ViewIndex];
-		if (ProjectionStencilingPass.VisibleMeshDrawCommands.Num() > 0)
-		{
-			SubmitMeshDrawCommands(ProjectionStencilingPass.VisibleMeshDrawCommands, GraphicsMinimalPipelineStateSet, ProjectionStencilingPass.PrimitiveIdVertexBuffer, 0, bDynamicInstancing, bIsInstancedStereoEmulated ? 2 : 1, RHICmdList);
-		}
+			const FViewInfo* PrimaryView = View->GetPrimaryView();
+			const FViewInfo* InstancedView = View->GetInstancedView();
+			if (View->bIsMultiViewportEnabled)
+			{
+				float LeftMinX = PrimaryView->ViewRect.Min.X;
+				float LeftMaxX = PrimaryView->ViewRect.Max.X;
+				float LeftMinY = PrimaryView->ViewRect.Min.Y;
+				float LeftMaxY = PrimaryView->ViewRect.Max.Y;
 
-		// Restore viewport
-		if (bIsInstancedStereoEmulated)
-		{
+				float RightMinX = InstancedView->ViewRect.Min.X;
+				float RightMaxX = InstancedView->ViewRect.Max.X;
+				float RightMinY = InstancedView->ViewRect.Min.Y;
+				float RightMaxY = InstancedView->ViewRect.Max.Y;
+
+				// multi-viewport - collapse the other view in pair to be 0-width 0-height, effectively disabling it
+				if (IStereoRendering::IsAPrimaryView(*View))
+				{
+					RightMaxX = RightMinX;
+					RightMaxY = RightMinY;
+				}
+				else
+				{
+					LeftMinX = LeftMaxX;	// not a typo, just to have viewports adjacent to each other still
+					LeftMaxY = LeftMinY;
+				}
+
+				RHICmdList.SetStereoViewport(LeftMinX, RightMinX, LeftMinY, RightMinY, /*MinZ*/ 0.0f,
+					LeftMaxX, RightMaxX, LeftMaxY, RightMaxY, /*MaxZ*/ 1.0f);
+			}
+			else
+			{
+				// clip planes
+				RHICmdList.SetViewport(PrimaryView->ViewRect.Min.X, PrimaryView->ViewRect.Min.Y, 0.0f, InstancedView->ViewRect.Max.X, InstancedView->ViewRect.Max.Y, 1.0f);
+				RHICmdList.SetScissorRect(true, View->ViewRect.Min.X, View->ViewRect.Min.Y, View->ViewRect.Max.X, View->ViewRect.Max.Y);
+			}
+			// Submit the first (and only pass - we share that at least) as the pass is set up for stereo.
+			ProjectionStencilingPasses[View->PrimaryViewIndex]->SubmitDraw(RHICmdList, InstanceCullingDrawParams);
+
 			RHICmdList.SetScissorRect(false, 0, 0, 0, 0);
 			RHICmdList.SetViewport(View->ViewRect.Min.X, View->ViewRect.Min.Y, 0.0f, View->ViewRect.Max.X, View->ViewRect.Max.Y, 1.0f);
 		}
+		else if (ViewIndex < ProjectionStencilingPasses.Num())
+		{
+			check(ProjectionStencilingPasses[ViewIndex] != nullptr);
+			ProjectionStencilingPasses[ViewIndex]->SubmitDraw(RHICmdList, InstanceCullingDrawParams);
+		}
+
 		
 	}
 	else if (IsWholeSceneDirectionalShadow())
@@ -812,7 +985,7 @@ void FProjectedShadowInfo::SetupProjectionStencilMask(
 			false, CF_DepthNearOrEqual,
 			true, CF_Always, SO_Keep, SO_Increment, SO_Keep,
 			true, CF_Always, SO_Keep, SO_Decrement, SO_Keep,
-			0xff, 0xff
+			ShadowStencilMask, ShadowStencilMask
 			>::GetRHI());
 
 		FGraphicsPipelineStateInitializer GraphicsPSOInit;
@@ -826,48 +999,25 @@ void FProjectedShadowInfo::SetupProjectionStencilMask(
 		checkSlow(bDirectionalLight);
 
 		// Draw 2 fullscreen planes, front facing one at the near subfrustum plane, and back facing one at the far.
+		const FVector4 Near = View->ViewMatrices.GetProjectionMatrix().TransformFVector4(FVector4(0, 0, CascadeSettings.SplitNear));
+		const FVector4 Far = View->ViewMatrices.GetProjectionMatrix().TransformFVector4(FVector4(0, 0, CascadeSettings.SplitFar));
+		const FVector4::FReal StencilNear = (Near.Z / Near.W);
+		const FVector4::FReal StencilFar = (Far.Z / Far.W);
 
-		// Find the projection shaders.
-		TShaderMapRef<FShadowProjectionNoTransformVS> VertexShaderNoTransform(View->ShaderMap);
-		VertexShaderNoTransform->SetParameters(RHICmdList, View->ViewUniformBuffer);
-
+		TShaderMapRef<FWholeSceneDirectionalShadowStencilVS> VertexShader(View->ShaderMap);
+			
 		GraphicsPSOInit.BoundShaderState.VertexDeclarationRHI = GetVertexDeclarationFVector4();
-		GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShaderNoTransform.GetVertexShader();
-		GraphicsPSOInit.PrimitiveType = PT_TriangleList;
+		GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShader.GetVertexShader();
 
-		SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit);
+		SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
 
-		FVector4 Near = View->ViewMatrices.GetProjectionMatrix().TransformFVector4(FVector4(0, 0, CascadeSettings.SplitNear));
-		FVector4 Far = View->ViewMatrices.GetProjectionMatrix().TransformFVector4(FVector4(0, 0, CascadeSettings.SplitFar));
-		float StencilNear = Near.Z / Near.W;
-		float StencilFar = Far.Z / Far.W;
+		FWholeSceneDirectionalShadowStencilVS::FParameters Parameters;
+		Parameters.ClipZValues = FVector4f((float)StencilFar, (float)StencilNear, 0, 0); // LWC_TODO: precision loss
 
-		FRHIResourceCreateInfo CreateInfo;
-		FVertexBufferRHIRef VertexBufferRHI = RHICreateVertexBuffer(sizeof(FVector4) * 12, BUF_Volatile, CreateInfo);
-		void* VoidPtr = RHILockVertexBuffer(VertexBufferRHI, 0, sizeof(FVector4) * 12, RLM_WriteOnly);
+		SetShaderParameters(RHICmdList, VertexShader, VertexShader.GetVertexShader(), Parameters);
 
-		// Generate the vertices used
-		FVector4* Vertices = (FVector4*)VoidPtr;
-
-			// Far Plane
-		Vertices[0] = FVector4( 1,  1,  StencilFar);
-		Vertices[1] = FVector4(-1,  1,  StencilFar);
-		Vertices[2] = FVector4( 1, -1,  StencilFar);
-		Vertices[3] = FVector4( 1, -1,  StencilFar);
-		Vertices[4] = FVector4(-1,  1,  StencilFar);
-		Vertices[5] = FVector4(-1, -1,  StencilFar);
-
-			// Near Plane
-		Vertices[6]  = FVector4(-1,  1, StencilNear);
-		Vertices[7]  = FVector4( 1,  1, StencilNear);
-		Vertices[8]  = FVector4(-1, -1, StencilNear);
-		Vertices[9]  = FVector4(-1, -1, StencilNear);
-		Vertices[10] = FVector4( 1,  1, StencilNear);
-		Vertices[11] = FVector4( 1, -1, StencilNear);
-
-		RHIUnlockVertexBuffer(VertexBufferRHI);
-		RHICmdList.SetStreamSource(0, VertexBufferRHI, 0);
-		RHICmdList.DrawPrimitive(0, (CascadeSettings.ShadowSplitIndex > 0) ? 4 : 2, 1);
+		RHICmdList.SetStreamSource(0, GDummyWholeSceneDirectionalShadowStencilVertexBuffer.VertexBufferRHI, 0);
+		RHICmdList.DrawPrimitive(0, (CascadeSettings.ShadowSplitIndex > 0) ? 2 : 1, 1);
 	}
 	// Not a preshadow, mask the projection to any pixels inside the frustum.
 	else
@@ -883,7 +1033,7 @@ void FProjectedShadowInfo::SetupProjectionStencilMask(
 				false, CF_DepthNearOrEqual,
 				true, CF_Always, SO_Keep, SO_Increment, SO_Keep,
 				true, CF_Always, SO_Keep, SO_Decrement, SO_Keep,
-				0xff, 0xff
+				ShadowStencilMask, ShadowStencilMask
 				>::GetRHI());
 		}
 		else
@@ -895,7 +1045,7 @@ void FProjectedShadowInfo::SetupProjectionStencilMask(
 				false, CF_DepthNearOrEqual,
 				true, CF_Always, SO_Keep, SO_Keep, SO_Increment,
 				true, CF_Always, SO_Keep, SO_Keep, SO_Decrement,
-				0xff, 0xff
+				ShadowStencilMask, ShadowStencilMask
 				>::GetRHI());
 		}
 		
@@ -912,51 +1062,85 @@ void FProjectedShadowInfo::SetupProjectionStencilMask(
 		GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShader.GetVertexShader();
 		GraphicsPSOInit.PrimitiveType = PT_TriangleList;
 
-		SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit);
+		SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
 
 		// Set the projection vertex shader parameters
-		VertexShader->SetParameters(RHICmdList, *View, this);
+		SetShaderParametersLegacyVS(RHICmdList, VertexShader, *View, this, EShadowProjectionVertexShaderFlags::DrawingFrustum);
 
-		FRHIResourceCreateInfo CreateInfo;
-		FVertexBufferRHIRef VertexBufferRHI = RHICreateVertexBuffer(sizeof(FVector4) * FrustumVertices.Num(), BUF_Volatile, CreateInfo);
-		void* VoidPtr = RHILockVertexBuffer(VertexBufferRHI, 0, sizeof(FVector4) * FrustumVertices.Num(), RLM_WriteOnly);
-		FPlatformMemory::Memcpy(VoidPtr, FrustumVertices.GetData(), sizeof(FVector4) * FrustumVertices.Num());
-		RHIUnlockVertexBuffer(VertexBufferRHI);
+		RHICmdList.SetStreamSource(0, GFrustumVertexBuffer.VertexBufferRHI, 0);
 
-		RHICmdList.SetStreamSource(0, VertexBufferRHI, 0);
+		// Shadow projection stenciling is special-cased to run per-view for instanced stereo views.
+		// TODO: Support instanced stereo properly in the projection stenciling pass.
+		const bool bIsInstancedStereoEmulated = View->bIsInstancedStereoEnabled && !View->bIsMobileMultiViewEnabled && IStereoRendering::IsStereoEyeView(*View);
+		const uint32 NumberOfInstances = bIsInstancedStereoEmulated ? 1 : View->InstanceFactor;
+
 		// Draw the frustum using the stencil buffer to mask just the pixels which are inside the shadow frustum.
-		RHICmdList.DrawIndexedPrimitive(GCubeIndexBuffer.IndexBufferRHI, 0, 0, 8, 0, 12, 1);
-		VertexBufferRHI.SafeRelease();
+		RHICmdList.DrawIndexedPrimitive(GCubeIndexBuffer.IndexBufferRHI, 0, 0, 8, 0, 12, NumberOfInstances);
 
 		// if rendering modulated shadows mask out subject mesh elements to prevent self shadowing.
 		if (bMobileModulatedProjections && !CVarEnableModulatedSelfShadow.GetValueOnRenderThread())
 		{
-			const FShadowMeshDrawCommandPass& ProjectionStencilingPass = ProjectionStencilingPasses[ViewIndex];
-			if (ProjectionStencilingPass.VisibleMeshDrawCommands.Num() > 0)
+			if (ViewIndex < ProjectionStencilingPasses.Num())
 			{
-				SubmitMeshDrawCommands(ProjectionStencilingPass.VisibleMeshDrawCommands, GraphicsMinimalPipelineStateSet, ProjectionStencilingPass.PrimitiveIdVertexBuffer, 0, bDynamicInstancing, 1, RHICmdList);
+				ProjectionStencilingPasses[ViewIndex]->SubmitDraw(RHICmdList, InstanceCullingDrawParams);
 			}
 		}
 	}
 }
 
-void FProjectedShadowInfo::RenderProjection(FRHICommandListImmediate& RHICmdList, int32 ViewIndex, const FViewInfo* View, const FSceneRenderer* SceneRender, bool bProjectingForForwardShading, bool bMobileModulatedProjections, const FHairStrandsVisibilityData* HairVisibilityData, const FHairStrandsMacroGroupDatas* HairMacroGroupData) const
+// Mark hair-strands pixels encompassed into the rasterized volumes. 
+// * Mark 1: for hair pixels encompassed into the volume
+// * Mark 2: for pixels touching the volume
+// This affects only the hair-only depth stencil texture.
+void FProjectedShadowInfo::SetupProjectionStencilMaskForHair(FRHICommandList& RHICmdList, const FViewInfo* View) const
 {
-#if WANTS_DRAW_MESH_EVENTS
-	FString EventName;
-
-	if (GetEmitDrawEvents())
-	{
-		GetShadowTypeNameForDrawEvent(EventName);
-	}
-	SCOPED_DRAW_EVENTF(RHICmdList, EventShadowProjectionActor, *EventName);
-#endif
-
-	FScopeCycleCounter Scope(bWholeSceneShadow ? GET_STATID(STAT_RenderWholeSceneShadowProjectionsTime) : GET_STATID(STAT_RenderPerObjectShadowProjectionsTime));
+	check(!IsWholeSceneDirectionalShadow());
 
 	FGraphicsPipelineStateInitializer GraphicsPSOInit;
 	RHICmdList.ApplyCachedRenderTargets(GraphicsPSOInit);
 
+	TShaderRef<FShadowVolumeBoundProjectionVS> VertexShader = View->ShaderMap->GetShader<FShadowVolumeBoundProjectionVS>();
+	GraphicsPSOInit.RasterizerState = TStaticRasterizerState<FM_Solid, CM_None>::GetRHI();
+	GraphicsPSOInit.bDepthBounds = false;
+	GraphicsPSOInit.DepthStencilState =
+		TStaticDepthStencilState<
+		false, CF_GreaterEqual,
+		true, CF_Always, SO_Keep, SO_Keep, SO_Increment,
+		true, CF_Always, SO_Keep, SO_Keep, SO_Increment,
+		0xff, 0xff>::GetRHI();
+	GraphicsPSOInit.BlendState = TStaticBlendState<CW_RED, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha>::GetRHI();
+	GraphicsPSOInit.PrimitiveType = PT_TriangleList;
+	GraphicsPSOInit.BoundShaderState.VertexDeclarationRHI = GetVertexDeclarationFVector4();
+	GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShader.GetVertexShader();
+	GraphicsPSOInit.BoundShaderState.PixelShaderRHI = nullptr;
+	SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
+	SetShaderParametersLegacyVS(RHICmdList, VertexShader, *View, this, EShadowProjectionVertexShaderFlags::DrawingFrustum);
+
+	RHICmdList.SetStreamSource(0, GFrustumVertexBuffer.VertexBufferRHI, 0);
+	RHICmdList.DrawIndexedPrimitive(GCubeIndexBuffer.IndexBufferRHI, 0, 0, 8, 0, 12, 1);
+}
+
+BEGIN_SHADER_PARAMETER_STRUCT(FShadowProjectionPassParameters, )
+	SHADER_PARAMETER_STRUCT_INCLUDE(FViewShaderParameters, View)
+	SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FHairStrandsViewUniformParameters, HairStrands)
+	SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSubstrateGlobalUniformParameters, Substrate)
+	SHADER_PARAMETER_STRUCT_INCLUDE(FSceneTextureShaderParameters, SceneTextures)
+	SHADER_PARAMETER_STRUCT_INCLUDE(FInstanceCullingDrawParams, InstanceCullingDrawParams)
+	RDG_TEXTURE_ACCESS(ShadowTexture0, ERHIAccess::SRVGraphics)
+	RDG_TEXTURE_ACCESS(ShadowTexture1, ERHIAccess::SRVGraphics)
+	RENDER_TARGET_BINDING_SLOTS()
+END_SHADER_PARAMETER_STRUCT()
+
+void FProjectedShadowInfo::RenderProjection(
+	FRDGBuilder& GraphBuilder,
+	const FShadowProjectionPassParameters& CommonPassParameters,
+	int32 ViewIndex,
+	const FViewInfo* View,
+	const FLightSceneProxy* LightSceneProxy,
+	const FSceneRenderer* SceneRender,
+	bool bProjectingForForwardShading,
+	bool bSubPixelShadow) const
+{
 	// Find the shadow's view relevance.
 	const FVisibleLightViewInfo& VisibleLightViewInfo = View->VisibleLightInfos[LightSceneInfo->Id];
 	{
@@ -970,15 +1154,13 @@ void FProjectedShadowInfo::RenderProjection(FRHICommandListImmediate& RHICmdList
 	}
 
 	bool bCameraInsideShadowFrustum;
-	TArray<FVector4, TInlineAllocator<8>> FrustumVertices;
+	TArray<FVector4f, TInlineAllocator<8>> FrustumVertices;
 	FPlane OutPlanes[6];
 	SetupFrustumForProjection(View, FrustumVertices, bCameraInsideShadowFrustum, OutPlanes);
 
-	const bool bSubPixelSupport = HairVisibilityData != nullptr;
-	const bool bStencilTestEnabled = true;// !bSubPixelSupport;
 	const bool bDepthBoundsTestEnabled = IsWholeSceneDirectionalShadow() && GSupportsDepthBoundsTest && CVarCSMDepthBoundsTest.GetValueOnRenderThread() != 0;// && !bSubPixelSupport;
 
-	if (bSubPixelSupport)
+	if (bSubPixelShadow)
 	{
 		// Do not apply pre-shadow on opaque geometry during sub-pixel pass as we only care about opaque geometry 'casting' shadow (not receiving shadow)
 		// However, applied pre-shadow onto hair primitive (which are the only one able to cast deep shadow)
@@ -996,7 +1178,7 @@ void FProjectedShadowInfo::RenderProjection(FRHICommandListImmediate& RHICmdList
 		{
 			// Skip volume which does not intersect hair clusters
 			bool bIntersect = bValidPlanes;
-			for (const FHairStrandsMacroGroupData& Data : HairMacroGroupData->Datas)
+			for (const FHairStrandsMacroGroupData& Data : View->HairStrandsViewData.MacroGroupDatas)
 			{
 				const FSphere BoundSphere = Data.Bounds.GetSphere();
 				// Return the signed distance to the plane. The planes are pointing inward
@@ -1029,14 +1211,110 @@ void FProjectedShadowInfo::RenderProjection(FRHICommandListImmediate& RHICmdList
 			}
 		}
 	}
-	
+
+	FString EventName;
+
+#if WANTS_DRAW_MESH_EVENTS
+	if (GetEmitDrawEvents())
+	{
+		GetShadowTypeNameForDrawEvent(EventName);
+	}
+#endif
+
+	// Interpret null render targets as skipping the render pass; this is currently used by mobile.
+	const ERDGPassFlags PassFlags = CommonPassParameters.RenderTargets[0].GetTexture() == nullptr ? ERDGPassFlags::SkipRenderPass : ERDGPassFlags::None;
+
+	auto* PassParameters = GraphBuilder.AllocParameters<FShadowProjectionPassParameters>();
+	*PassParameters = CommonPassParameters;
+	PassParameters->View = View->GetShaderParameters();
+
+	if (RenderTargets.DepthTarget)
+	{
+		PassParameters->ShadowTexture0 = GraphBuilder.RegisterExternalTexture(RenderTargets.DepthTarget);
+	}
+	else
+	{
+		PassParameters->ShadowTexture0 = GraphBuilder.RegisterExternalTexture(RenderTargets.ColorTargets[0]);
+		PassParameters->ShadowTexture1 = GraphBuilder.RegisterExternalTexture(RenderTargets.ColorTargets[1]);
+	}
+
+	const bool bIsInstancedStereoEmulated = View->bIsInstancedStereoEnabled && !View->bIsMobileMultiViewEnabled && IStereoRendering::IsStereoEyeView(*View);
+	if (ViewIndex < ProjectionStencilingPasses.Num() && ProjectionStencilingPasses[ViewIndex] != nullptr)
+	{
+		// GPUCULL_TODO: get rid of const cast
+		FSimpleMeshDrawCommandPass& ProjectionStencilingPass = *const_cast<FSimpleMeshDrawCommandPass*>(ProjectionStencilingPasses[ViewIndex]);
+		ProjectionStencilingPass.BuildRenderingCommands(GraphBuilder, *View, *SceneRender->Scene, PassParameters->InstanceCullingDrawParams);
+	}
+	else if (bIsInstancedStereoEmulated && (bPreShadow || bSelfShadowOnly))
+	{
+		// NOTE: This here is a hack that must match up to the use inside SetupProjectionStencilMask, where we use the Stereo setup but draw each eye independently
+		//       by scissoring the undersired half (while setting the full viewport to get the scaling to match the stereo pathfor base/pre-pass 1:1).
+		ensure(View->StereoPass == EStereoscopicPass::eSSP_SECONDARY);
+
+		// GPUCULL_TODO: get rid of const cast
+		FSimpleMeshDrawCommandPass& ProjectionStencilingPass = *const_cast<FSimpleMeshDrawCommandPass*>(ProjectionStencilingPasses[0]);
+		ensure(ProjectionStencilingPass.GetInstanceCullingMode() == EInstanceCullingMode::Stereo);
+		ProjectionStencilingPass.BuildRenderingCommands(GraphBuilder, *View->GetPrimaryView(), *SceneRender->Scene, PassParameters->InstanceCullingDrawParams);
+	}
+
+	const FInstanceCullingDrawParams& InstanceCullingDrawParams = PassParameters->InstanceCullingDrawParams;
+
+	GraphBuilder.AddPass(
+		RDG_EVENT_NAME("%s", *EventName),
+		PassParameters,
+		ERDGPassFlags::Raster | PassFlags,
+		[this, SceneRender, View, ViewIndex, LightSceneProxy, bProjectingForForwardShading, &InstanceCullingDrawParams, bSubPixelShadow, PassParameters](FRHICommandList& RHICmdList)
+	{
+		RenderProjectionInternal(RHICmdList, ViewIndex, View, LightSceneProxy, SceneRender, bProjectingForForwardShading, false, InstanceCullingDrawParams, bSubPixelShadow && PassParameters->HairStrands ? PassParameters->HairStrands.GetUniformBuffer()->GetRHI() : nullptr);
+	});
+}
+
+void FProjectedShadowInfo::RenderProjectionInternal(
+	FRHICommandList& RHICmdList,
+	int32 ViewIndex,
+	const FViewInfo* View,
+	const FLightSceneProxy* LightSceneProxy,
+	const FSceneRenderer* SceneRender,
+	bool bProjectingForForwardShading,
+	bool bMobileModulatedProjections,
+	const FInstanceCullingDrawParams& InstanceCullingDrawParams, 
+	FRHIUniformBuffer* HairStrandsUniformBuffer) const
+{
+	RHICmdList.SetViewport(View->ViewRect.Min.X, View->ViewRect.Min.Y, 0.0f, View->ViewRect.Max.X, View->ViewRect.Max.Y, 1.0f);
+	LightSceneProxy->SetScissorRect(RHICmdList, *View, View->ViewRect);
+
+	FScopeCycleCounter Scope(bWholeSceneShadow ? GET_STATID(STAT_RenderWholeSceneShadowProjectionsTime) : GET_STATID(STAT_RenderPerObjectShadowProjectionsTime));
+
+	FGraphicsPipelineStateInitializer GraphicsPSOInit;
+	RHICmdList.ApplyCachedRenderTargets(GraphicsPSOInit);
+
+	FPlane OutFrustmPlanes[6];
+	bool bCameraInsideShadowFrustum;
+	TArray<FVector4f, TInlineAllocator<8>> FrustumVertices;
+	SetupFrustumForProjection(View, FrustumVertices, bCameraInsideShadowFrustum, OutFrustmPlanes);
+
+	const bool bSubPixelSupport = HairStrandsUniformBuffer != nullptr;// HairStrands::HasViewHairStrandsData(*View);
+	const bool bStencilTestEnabled = !bSubPixelSupport && GShadowStencilCulling;
+	const bool bDepthBoundsTestEnabled = IsWholeSceneDirectionalShadow() && GSupportsDepthBoundsTest && CVarCSMDepthBoundsTest.GetValueOnRenderThread() != 0;// && !bSubPixelSupport;
+	const uint32 StencilRef = bSubPixelSupport && !IsWholeSceneDirectionalShadow() && !bCameraInsideShadowFrustum ? 1u : 0u;
+
 	if (!bDepthBoundsTestEnabled && bStencilTestEnabled)
 	{
-		SetupProjectionStencilMask(RHICmdList, View, ViewIndex, SceneRender, FrustumVertices, bMobileModulatedProjections, bCameraInsideShadowFrustum);
+		SetupProjectionStencilMask(RHICmdList, View, ViewIndex, SceneRender, FrustumVertices, bMobileModulatedProjections, bCameraInsideShadowFrustum, InstanceCullingDrawParams);
+	}
+
+	// Mark stencil so that only hair pixel within volume bound will be affected by the pre-shadow mask
+	if (bSubPixelSupport && !bDepthBoundsTestEnabled)
+	{
+		DrawClearQuad(RHICmdList, false, FLinearColor::Transparent, false, 0, true, 0);
+		if (!IsWholeSceneDirectionalShadow())
+		{
+			SetupProjectionStencilMaskForHair(RHICmdList, View);
+		}
 	}
 
 	// solid rasterization w/ back-face culling.
-	GraphicsPSOInit.RasterizerState = (View->bReverseCulling || IsWholeSceneDirectionalShadow()) ? TStaticRasterizerState<FM_Solid,CM_CCW>::GetRHI() : TStaticRasterizerState<FM_Solid,CM_CW>::GetRHI();
+	GraphicsPSOInit.RasterizerState = (View->bReverseCulling || IsWholeSceneDirectionalShadow()) ? TStaticRasterizerState<FM_Solid, CM_CCW>::GetRHI() : TStaticRasterizerState<FM_Solid, CM_CW>::GetRHI();
 
 	GraphicsPSOInit.bDepthBounds = bDepthBoundsTestEnabled;
 	if (bDepthBoundsTestEnabled)
@@ -1068,26 +1346,32 @@ void FProjectedShadowInfo::RenderProjection(FRHICommandListImmediate& RHICmdList
 				false, CF_Always,
 				true, CF_NotEqual, SO_Zero, SO_Zero, SO_Zero,
 				false, CF_Always, SO_Zero, SO_Zero, SO_Zero,
-				0xff, 0xff
+				ShadowStencilMask, ShadowStencilMask
 				>::GetRHI();
 		}
 		else
 		{
 			// no depth test or writes, Test stencil for non-zero.
-			GraphicsPSOInit.DepthStencilState = 
+			GraphicsPSOInit.DepthStencilState =
 				TStaticDepthStencilState<
 				false, CF_Always,
 				true, CF_NotEqual, SO_Keep, SO_Keep, SO_Keep,
 				false, CF_Always, SO_Keep, SO_Keep, SO_Keep,
-				0xff, 0xff
+				ShadowStencilMask, ShadowStencilMask
 				>::GetRHI();
 		}
 	}
 	else
 	{
-		GraphicsPSOInit.DepthStencilState = TStaticDepthStencilState<false, CF_Always>::GetRHI();
+		if (bSubPixelSupport && !bDepthBoundsTestEnabled)
+		{
+			GraphicsPSOInit.DepthStencilState = TStaticDepthStencilState<false, CF_DepthFartherOrEqual, true, CF_Equal, SO_Keep, SO_Keep, SO_Keep, true, CF_Equal, SO_Keep, SO_Keep, SO_Keep, 0xFF, 0xFF>::GetRHI();
+		}
+		else
+		{
+			GraphicsPSOInit.DepthStencilState = TStaticDepthStencilState<false, CF_DepthFartherOrEqual>::GetRHI();
+		}
 	}
-
 
 	GraphicsPSOInit.BlendState = GetBlendStateForProjection(bProjectingForForwardShading, bMobileModulatedProjections);
 
@@ -1126,33 +1410,25 @@ void FProjectedShadowInfo::RenderProjection(FRHICommandListImmediate& RHICmdList
 		}
 
 		GraphicsPSOInit.BoundShaderState.VertexDeclarationRHI = GetVertexDeclarationFVector4();
-		BindShadowProjectionShaders(LocalQuality, RHICmdList, GraphicsPSOInit, ViewIndex, *View, HairVisibilityData, this, bMobileModulatedProjections);
+		BindShadowProjectionShaders(LocalQuality, RHICmdList, GraphicsPSOInit, ViewIndex, *View, this, StencilRef, bMobileModulatedProjections, HairStrandsUniformBuffer);
 
 		if (bDepthBoundsTestEnabled)
 		{
 			SetDepthBoundsTest(RHICmdList, CascadeSettings.SplitNear, CascadeSettings.SplitFar, View->ViewMatrices.GetProjectionMatrix());
 		}
-
-		RHICmdList.SetStencilRef(0);
 	}
 
+	uint32 NumberOfInstances = View->InstanceFactor;
 	if (IsWholeSceneDirectionalShadow())
 	{
 		RHICmdList.SetStreamSource(0, GClearVertexBuffer.VertexBufferRHI, 0);
-		RHICmdList.DrawPrimitive(0, 2, 1);
+		RHICmdList.DrawPrimitive(0, 2, NumberOfInstances);
 	}
 	else
 	{
-		FRHIResourceCreateInfo CreateInfo;
-		FVertexBufferRHIRef VertexBufferRHI = RHICreateVertexBuffer(sizeof(FVector4) * FrustumVertices.Num(), BUF_Volatile, CreateInfo);
-		void* VoidPtr = RHILockVertexBuffer(VertexBufferRHI, 0, sizeof(FVector4) * FrustumVertices.Num(), RLM_WriteOnly);
-		FPlatformMemory::Memcpy(VoidPtr, FrustumVertices.GetData(), sizeof(FVector4) * FrustumVertices.Num());
-		RHIUnlockVertexBuffer(VertexBufferRHI);
-
-		RHICmdList.SetStreamSource(0, VertexBufferRHI, 0);
+		RHICmdList.SetStreamSource(0, GFrustumVertexBuffer.VertexBufferRHI, 0);
 		// Draw the frustum using the projection shader..
-		RHICmdList.DrawIndexedPrimitive(GCubeIndexBuffer.IndexBufferRHI, 0, 0, 8, 0, 12, 1);
-		VertexBufferRHI.SafeRelease();
+		RHICmdList.DrawIndexedPrimitive(GCubeIndexBuffer.IndexBufferRHI, 0, 0, 8, 0, 12, NumberOfInstances);
 	}
 
 	if (!bDepthBoundsTestEnabled && bStencilTestEnabled)
@@ -1163,11 +1439,48 @@ void FProjectedShadowInfo::RenderProjection(FRHICommandListImmediate& RHICmdList
 			DrawClearQuad(RHICmdList, false, FLinearColor::Transparent, false, 0, true, 0);
 		}
 	}
+
+	RHICmdList.SetScissorRect(false, 0, 0, 0, 0);
 }
 
+void FProjectedShadowInfo::RenderMobileModulatedShadowProjection(
+	FRHICommandList& RHICmdList,
+	int32 ViewIndex,
+	const FViewInfo* View,
+	const FLightSceneProxy* LightSceneProxy,
+	const FSceneRenderer* SceneRender) const
+{
+	// Find the shadow's view relevance.
+	const FVisibleLightViewInfo& VisibleLightViewInfo = View->VisibleLightInfos[LightSceneInfo->Id];
+	{
+		FPrimitiveViewRelevance ViewRelevance = VisibleLightViewInfo.ProjectedShadowViewRelevanceMap[ShadowId];
+
+		// Don't render shadows for subjects which aren't view relevant.
+		if (ViewRelevance.bShadowRelevance == false)
+		{
+			return;
+		}
+	}
+
+	FString EventName;
+
+#if WANTS_DRAW_MESH_EVENTS
+	if (GetEmitDrawEvents())
+	{
+		GetShadowTypeNameForDrawEvent(EventName);
+	}
+#endif
+
+	const bool bProjectingForForwardShading = false;
+	const bool bMobileModulatedProjections = true;
+
+	// GPUCULL_TODO, mobile modulated shadow is inside the mobile render pass, probably couldn't work with the GPUCull.
+	FInstanceCullingDrawParams InstanceCullingDrawParams;
+	RenderProjectionInternal(RHICmdList, ViewIndex, View, LightSceneProxy, SceneRender, bProjectingForForwardShading, bMobileModulatedProjections, InstanceCullingDrawParams, nullptr);
+}
 
 template <uint32 Quality, bool bUseTransmission, bool bUseSubPixel>
-static void SetPointLightShaderTempl(FRHICommandList& RHICmdList, FGraphicsPipelineStateInitializer& GraphicsPSOInit, int32 ViewIndex, const FViewInfo& View, const FProjectedShadowInfo* ShadowInfo, const FHairStrandsVisibilityData* HairVisibilityData)
+static void SetPointLightShaderTempl(FRHICommandList& RHICmdList, FGraphicsPipelineStateInitializer& GraphicsPSOInit, int32 ViewIndex, const FViewInfo& View, const FProjectedShadowInfo* ShadowInfo, FRHIUniformBuffer* HairStrandsUniformBuffer = nullptr)
 {
 	TShaderMapRef<FShadowVolumeBoundProjectionVS> VertexShader(View.ShaderMap);
 	TShaderMapRef<TOnePassPointShadowProjectionPS<Quality,bUseTransmission,bUseSubPixel> > PixelShader(View.ShaderMap);
@@ -1176,47 +1489,76 @@ static void SetPointLightShaderTempl(FRHICommandList& RHICmdList, FGraphicsPipel
 	GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShader.GetVertexShader();
 	GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
 
-	SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit);
-	
-	VertexShader->SetParameters(RHICmdList, View, ShadowInfo);
-	PixelShader->SetParameters(RHICmdList, ViewIndex, View, HairVisibilityData, ShadowInfo);
+	SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
+
+	SetShaderParametersLegacyVS(RHICmdList, VertexShader, View, ShadowInfo, EShadowProjectionVertexShaderFlags::None);
+	SetShaderParametersLegacyPS(RHICmdList, PixelShader, ViewIndex, View, ShadowInfo, HairStrandsUniformBuffer);
 }
 
-/** Render one pass point light shadow projections. */
-void FProjectedShadowInfo::RenderOnePassPointLightProjection(FRHICommandListImmediate& RHICmdList, int32 ViewIndex, const FViewInfo& View, bool bProjectingForForwardShading, const FHairStrandsVisibilityData* HairVisibilityData, const FHairStrandsMacroGroupDatas* HairMacroGroupData) const
+void FProjectedShadowInfo::RenderOnePassPointLightProjection(
+	FRDGBuilder& GraphBuilder,
+	const FShadowProjectionPassParameters& CommonPassParameters,
+	int32 ViewIndex,
+	const FViewInfo& View,
+	const FLightSceneProxy* LightSceneProxy,
+	bool bProjectingForForwardShading,
+	bool bSubPixelShadow) const
 {
 	SCOPE_CYCLE_COUNTER(STAT_RenderWholeSceneShadowProjectionsTime);
 
 	checkSlow(bOnePassPointLightShadow);
 	
 	const FSphere LightBounds = LightSceneInfo->Proxy->GetBoundingSphere();
-
-	bool bUseTransmission = LightSceneInfo->Proxy->Transmission();
-
-	FGraphicsPipelineStateInitializer GraphicsPSOInit;
-	RHICmdList.ApplyCachedRenderTargets(GraphicsPSOInit);
-	GraphicsPSOInit.BlendState = GetBlendStateForProjection(bProjectingForForwardShading, false);
-	GraphicsPSOInit.PrimitiveType = PT_TriangleList;
-
+	const bool bUseTransmission = LightSceneInfo->Proxy->Transmission();
 	const bool bCameraInsideLightGeometry = ((FVector)View.ViewMatrices.GetViewOrigin() - LightBounds.Center).SizeSquared() < FMath::Square(LightBounds.W * 1.05f + View.NearClippingDistance * 2.0f);
 
-	if (bCameraInsideLightGeometry)
+	// Interpret null render targets as skipping the render pass; this is currently used by mobile.
+	const ERDGPassFlags PassFlags = CommonPassParameters.RenderTargets[0].GetTexture() == nullptr ? ERDGPassFlags::SkipRenderPass : ERDGPassFlags::None;
+
+	auto* PassParameters = GraphBuilder.AllocParameters<FShadowProjectionPassParameters>();
+	*PassParameters = CommonPassParameters;
+	PassParameters->View = View.GetShaderParameters();
+
+	if (RenderTargets.DepthTarget)
 	{
-		GraphicsPSOInit.DepthStencilState = TStaticDepthStencilState<false, CF_Always>::GetRHI();
-		// Render backfaces with depth tests disabled since the camera is inside (or close to inside) the light geometry
-		GraphicsPSOInit.RasterizerState = View.bReverseCulling ? TStaticRasterizerState<FM_Solid, CM_CW>::GetRHI() : TStaticRasterizerState<FM_Solid, CM_CCW>::GetRHI();
+		PassParameters->ShadowTexture0 = GraphBuilder.RegisterExternalTexture(RenderTargets.DepthTarget);
 	}
 	else
 	{
-		// Render frontfaces with depth tests on to get the speedup from HiZ since the camera is outside the light geometry
-		GraphicsPSOInit.DepthStencilState = TStaticDepthStencilState<false, CF_DepthNearOrEqual>::GetRHI();
-		GraphicsPSOInit.RasterizerState = View.bReverseCulling ? TStaticRasterizerState<FM_Solid, CM_CCW>::GetRHI() : TStaticRasterizerState<FM_Solid, CM_CW>::GetRHI();
-	}	
+		PassParameters->ShadowTexture0 = GraphBuilder.RegisterExternalTexture(RenderTargets.ColorTargets[0]);
+		PassParameters->ShadowTexture1 = GraphBuilder.RegisterExternalTexture(RenderTargets.ColorTargets[1]);
+	}
 
+	GraphBuilder.AddPass(
+		RDG_EVENT_NAME("OnePassPointLightProjection"),
+		PassParameters,
+		ERDGPassFlags::Raster | PassFlags,
+		[this, &View, LightBounds, bProjectingForForwardShading, bCameraInsideLightGeometry, bUseTransmission, ViewIndex, LightSceneProxy, bSubPixelShadow, PassParameters](FRHICommandList& RHICmdList)
 	{
-		uint32 LocalQuality = GetShadowQuality();
+		RHICmdList.SetViewport(View.ViewRect.Min.X, View.ViewRect.Min.Y, 0.0f, View.ViewRect.Max.X, View.ViewRect.Max.Y, 1.0f);
+		LightSceneProxy->SetScissorRect(RHICmdList, View, View.ViewRect);
 
-		if(LocalQuality > 1)
+		FGraphicsPipelineStateInitializer GraphicsPSOInit;
+		RHICmdList.ApplyCachedRenderTargets(GraphicsPSOInit);
+		GraphicsPSOInit.BlendState = GetBlendStateForProjection(bProjectingForForwardShading, false);
+		GraphicsPSOInit.PrimitiveType = PT_TriangleList;
+
+		if (bCameraInsideLightGeometry)
+		{
+			GraphicsPSOInit.DepthStencilState = TStaticDepthStencilState<false, CF_Always>::GetRHI();
+			// Render backfaces with depth tests disabled since the camera is inside (or close to inside) the light geometry
+			GraphicsPSOInit.RasterizerState = View.bReverseCulling ? TStaticRasterizerState<FM_Solid, CM_CW>::GetRHI() : TStaticRasterizerState<FM_Solid, CM_CCW>::GetRHI();
+		}
+		else
+		{
+			// Render frontfaces with depth tests on to get the speedup from HiZ since the camera is outside the light geometry
+			GraphicsPSOInit.DepthStencilState = TStaticDepthStencilState<false, CF_DepthNearOrEqual>::GetRHI();
+			GraphicsPSOInit.RasterizerState = View.bReverseCulling ? TStaticRasterizerState<FM_Solid, CM_CCW>::GetRHI() : TStaticRasterizerState<FM_Solid, CM_CW>::GetRHI();
+		}
+
+		const uint32 LocalQuality = GetShadowQuality();
+
+		if (LocalQuality > 1)
 		{
 			// adjust kernel size so that the penumbra size of distant splits will better match up with the closer ones
 			//const float SizeScale = ShadowInfo->ResolutionX;
@@ -1225,7 +1567,7 @@ void FProjectedShadowInfo::RenderOnePassPointLightProjection(FRHICommandListImme
 			{
 				int32 Res = ResolutionX;
 
-				while(Res < 512)
+				while (Res < 512)
 				{
 					Res *= 2;
 					++Reduce;
@@ -1233,8 +1575,7 @@ void FProjectedShadowInfo::RenderOnePassPointLightProjection(FRHICommandListImme
 			}
 		}
 
-		const bool bSubPixelSupport = HairVisibilityData != nullptr;
-		if (bSubPixelSupport)
+		if (bSubPixelShadow)
 		{
 			// Do not apply pre-shadow on opaque geometry during sub-pixel pass as we only care about opaque geometry 'casting' shadow (not receiving shadow)
 			// However, applied pre-shadow onto hair primitive (which are the only one able to cast deep shadow)
@@ -1251,7 +1592,7 @@ void FProjectedShadowInfo::RenderOnePassPointLightProjection(FRHICommandListImme
 			bool bIntersect = false;
 			if (CVarHairStrandsCullPerObjectShadowCaster.GetValueOnRenderThread() > 0)
 			{
-				for (const FHairStrandsMacroGroupData& Data : HairMacroGroupData->Datas)
+				for (const FHairStrandsMacroGroupData& Data : View.HairStrandsViewData.MacroGroupDatas)
 				{
 					const FSphere BoundSphere = Data.Bounds.GetSphere();
 					if (BoundSphere.Intersects(LightBounds))
@@ -1268,48 +1609,50 @@ void FProjectedShadowInfo::RenderOnePassPointLightProjection(FRHICommandListImme
 				}
 			}
 
+			FRHIUniformBuffer* HairStrandsUniformBuffer = PassParameters->HairStrands.GetUniformBuffer()->GetRHI();
 			switch (LocalQuality)
 			{
-				case 1: SetPointLightShaderTempl<1, false, true>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this, HairVisibilityData); break;
-				case 2: SetPointLightShaderTempl<2, false, true>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this, HairVisibilityData); break;
-				case 3: SetPointLightShaderTempl<3, false, true>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this, HairVisibilityData); break;
-				case 4: SetPointLightShaderTempl<4, false, true>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this, HairVisibilityData); break;
-				case 5: SetPointLightShaderTempl<5, false, true>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this, HairVisibilityData); break;
-				default:
-					check(0);
+			case 1: SetPointLightShaderTempl<1, false, true>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this, HairStrandsUniformBuffer); break;
+			case 2: SetPointLightShaderTempl<2, false, true>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this, HairStrandsUniformBuffer); break;
+			case 3: SetPointLightShaderTempl<3, false, true>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this, HairStrandsUniformBuffer); break;
+			case 4: SetPointLightShaderTempl<4, false, true>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this, HairStrandsUniformBuffer); break;
+			case 5: SetPointLightShaderTempl<5, false, true>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this, HairStrandsUniformBuffer); break;
+			default:
+				check(0);
 			}
 		}
 		else if (bUseTransmission)
 		{
 			switch (LocalQuality)
 			{
-				case 1: SetPointLightShaderTempl<1, true, false>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this, nullptr); break;
-				case 2: SetPointLightShaderTempl<2, true, false>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this, nullptr); break;
-				case 3: SetPointLightShaderTempl<3, true, false>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this, nullptr); break;
-				case 4: SetPointLightShaderTempl<4, true, false>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this, nullptr); break;
-				case 5: SetPointLightShaderTempl<5, true, false>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this, nullptr); break;
-				default:
-					check(0);
+			case 1: SetPointLightShaderTempl<1, true, false>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this); break;
+			case 2: SetPointLightShaderTempl<2, true, false>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this); break;
+			case 3: SetPointLightShaderTempl<3, true, false>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this); break;
+			case 4: SetPointLightShaderTempl<4, true, false>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this); break;
+			case 5: SetPointLightShaderTempl<5, true, false>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this); break;
+			default:
+				check(0);
 			}
 		}
 		else
 		{
 			switch (LocalQuality)
 			{
-				case 1: SetPointLightShaderTempl<1, false, false>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this, nullptr); break;
-				case 2: SetPointLightShaderTempl<2, false, false>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this, nullptr); break;
-				case 3: SetPointLightShaderTempl<3, false, false>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this, nullptr); break;
-				case 4: SetPointLightShaderTempl<4, false, false>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this, nullptr); break;
-				case 5: SetPointLightShaderTempl<5, false, false>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this, nullptr); break;
-				default:
-					check(0);
+			case 1: SetPointLightShaderTempl<1, false, false>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this); break;
+			case 2: SetPointLightShaderTempl<2, false, false>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this); break;
+			case 3: SetPointLightShaderTempl<3, false, false>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this); break;
+			case 4: SetPointLightShaderTempl<4, false, false>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this); break;
+			case 5: SetPointLightShaderTempl<5, false, false>(RHICmdList, GraphicsPSOInit, ViewIndex, View, this); break;
+			default:
+				check(0);
 			}
 		}
-	}
 
-	// Project the point light shadow with some approximately bounding geometry, 
-	// So we can get speedups from depth testing and not processing pixels outside of the light's influence.
-	StencilingGeometry::DrawSphere(RHICmdList);
+		// Project the point light shadow with some approximately bounding geometry, 
+		// So we can get speedups from depth testing and not processing pixels outside of the light's influence.
+		StencilingGeometry::DrawSphere(RHICmdList);
+		RHICmdList.SetScissorRect(false, 0, 0, 0, 0);
+	});
 }
 
 void FProjectedShadowInfo::RenderFrustumWireframe(FPrimitiveDrawInterface* PDI) const
@@ -1321,11 +1664,11 @@ void FProjectedShadowInfo::RenderFrustumWireframe(FPrimitiveDrawInterface* PDI) 
 		SubjectPrimitiveId = DynamicSubjectPrimitives[0]->GetIndex();
 	}
 
-	const FMatrix InvShadowTransform = (bWholeSceneShadow || bPreShadow) ? SubjectAndReceiverMatrix.InverseFast() : InvReceiverMatrix;
+	const FMatrix44f InvShadowTransform = (bWholeSceneShadow || bPreShadow) ? TranslatedWorldToClipInnerMatrix.InverseFast() : InvReceiverInnerMatrix;
 
 	FColor Color;
 
-	if(IsWholeSceneDirectionalShadow())
+	if (IsWholeSceneDirectionalShadow())
 	{
 		Color = FColor::White;
 		switch(CascadeSettings.ShadowSplitIndex)
@@ -1344,11 +1687,26 @@ void FProjectedShadowInfo::RenderFrustumWireframe(FPrimitiveDrawInterface* PDI) 
 	// Render the wireframe for the frustum derived from ReceiverMatrix.
 	DrawFrustumWireframe(
 		PDI,
-		InvShadowTransform * FTranslationMatrix(-PreShadowTranslation),
+		FMatrix(InvShadowTransform) * FTranslationMatrix(-PreShadowTranslation),
 		Color,
 		SDPG_World
 		);
 }
+
+FVector4f FProjectedShadowInfo::GetClipToShadowBufferUvScaleBias() const
+{
+	const FIntPoint ShadowBufferResolution = GetShadowBufferResolution();
+	const float InvBufferResolutionX = 1.0f / (float)ShadowBufferResolution.X;
+	const float ShadowResolutionFractionX = 0.5f * (float)ResolutionX * InvBufferResolutionX;
+	const float InvBufferResolutionY = 1.0f / (float)ShadowBufferResolution.Y;
+	const float ShadowResolutionFractionY = 0.5f * (float)ResolutionY * InvBufferResolutionY;
+	
+	return FVector4f(ShadowResolutionFractionX,
+		-ShadowResolutionFractionY,
+		(X + BorderSize) * InvBufferResolutionX + ShadowResolutionFractionX,
+		(Y + BorderSize) * InvBufferResolutionY + ShadowResolutionFractionY);
+}
+
 
 FMatrix FProjectedShadowInfo::GetScreenToShadowMatrix(const FSceneView& View, uint32 TileOffsetX, uint32 TileOffsetY, uint32 TileResolutionX, uint32 TileResolutionY) const
 {
@@ -1364,11 +1722,7 @@ FMatrix FProjectedShadowInfo::GetScreenToShadowMatrix(const FSceneView& View, ui
 		// Z of the position being transformed is actually view space Z, 
 			// Transform it into post projection space by applying the projection matrix,
 			// Which is the required space before applying View.InvTranslatedViewProjectionMatrix
-		FMatrix(
-			FPlane(1,0,0,0),
-			FPlane(0,1,0,0),
-			FPlane(0,0,View.ViewMatrices.GetProjectionMatrix().M[2][2],1),
-			FPlane(0,0,View.ViewMatrices.GetProjectionMatrix().M[3][2],0)) *
+		View.ViewMatrices.GetScreenToClipMatrix() *
 		// Transform the post projection space position into translated world space
 		// Translated world space is normal world space translated to the view's origin, 
 		// Which prevents floating point imprecision far from the world origin.
@@ -1380,7 +1734,7 @@ FMatrix FProjectedShadowInfo::GetScreenToShadowMatrix(const FSceneView& View, ui
 		FTranslationMatrix(PreShadowTranslation) *
 		// Transform into the shadow's post projection space
 		// This has to be the same transform used to render the shadow depths
-		SubjectAndReceiverMatrix *
+		FMatrix(TranslatedWorldToClipInnerMatrix) *
 		// Scale and translate x and y to be texture coordinates into the ShadowInfo's rectangle in the shadow depth buffer
 		// Normalize z by MaxSubjectDepth, as was done when writing shadow depths
 		FMatrix(
@@ -1395,7 +1749,15 @@ FMatrix FProjectedShadowInfo::GetScreenToShadowMatrix(const FSceneView& View, ui
 				)
 			);
 
-	if (View.bIsMobileMultiViewEnabled && View.Family->Views.Num() > 0)
+	// Aspects creation is embedded in lambda so we don't pay the price for it when it's not needed.
+	auto IsMobileMultiViewEnabledInAspects = [](const FSceneView& View) {
+		const UE::StereoRenderUtils::FStereoShaderAspects Aspects(View.GetShaderPlatform());
+		return Aspects.IsMobileMultiViewEnabled();
+	};
+	
+	// Checking the Aspects is a workaround for editor windows or scene captures where View.bIsMobileMultiViewEnabled
+	// is false but shaders have been compiled with MOBILE_MULTI_VIEW enabled.
+	if (View.bIsMobileMultiViewEnabled || IsMobileMultiViewEnabledInAspects(View))
 	{
 		// In Multiview, we split ViewDependentTransform out into ViewUniformShaderParameters.MobileMultiviewShadowTransform
 		// So we can multiply it later in shader.
@@ -1408,7 +1770,7 @@ FMatrix FProjectedShadowInfo::GetScreenToShadowMatrix(const FSceneView& View, ui
 	return ScreenToShadow;
 }
 
-FMatrix FProjectedShadowInfo::GetWorldToShadowMatrix(FVector4& ShadowmapMinMax, const FIntPoint* ShadowBufferResolutionOverride) const
+FMatrix FProjectedShadowInfo::GetWorldToShadowMatrix(FVector4f& ShadowmapMinMax, const FIntPoint* ShadowBufferResolutionOverride) const
 {
 	FIntPoint ShadowBufferResolution = ( ShadowBufferResolutionOverride ) ? *ShadowBufferResolutionOverride : GetShadowBufferResolution();
 
@@ -1422,7 +1784,7 @@ FMatrix FProjectedShadowInfo::GetWorldToShadowMatrix(FVector4& ShadowmapMinMax, 
 		FTranslationMatrix(PreShadowTranslation) *
 		// Transform into the shadow's post projection space
 		// This has to be the same transform used to render the shadow depths
-		SubjectAndReceiverMatrix *
+		FMatrix(TranslatedWorldToClipInnerMatrix) *
 		// Scale and translate x and y to be texture coordinates into the ShadowInfo's rectangle in the shadow depth buffer
 		// Normalize z by MaxSubjectDepth, as was done when writing shadow depths
 		FMatrix(
@@ -1437,7 +1799,7 @@ FMatrix FProjectedShadowInfo::GetWorldToShadowMatrix(FVector4& ShadowmapMinMax, 
 			)
 		);
 
-	ShadowmapMinMax = FVector4(
+	ShadowmapMinMax = FVector4f(
 		(X + BorderSize) * InvBufferResolutionX, 
 		(Y + BorderSize) * InvBufferResolutionY,
 		(X + BorderSize * 2 + ResolutionX) * InvBufferResolutionX, 
@@ -1495,7 +1857,7 @@ void FProjectedShadowInfo::UpdateShaderDepthBias()
 	}
 	else
 	{
-		// per object shadows
+		// per object shadows (the whole-scene are taken care of above)
 		if(bDirectionalLight)
 		{
 			// we use CSMShadowDepthBias cvar but this is per object shadows, maybe we want to use different settings
@@ -1511,6 +1873,21 @@ void FProjectedShadowInfo::UpdateShaderDepthBias()
 			SlopeScaleDepthBias = CVarPerObjectDirectionalShadowSlopeScaleDepthBias.GetValueOnRenderThread();
 			SlopeScaleDepthBias *= LightSceneInfo->Proxy->GetUserShadowSlopeBias();
 		}
+		else // Only spot-lights left (both whole-scene and per-object), as point-lights dont have per-object shadowing
+		{
+			ensure(!bDirectionalLight);
+			ensure(!bOnePassPointLightShadow);
+			if (bPerObjectOpaqueShadow)
+			{
+				// spot lights (old code, might need to be improved)
+				const float LightTypeDepthBias = CVarPerObjectSpotLightShadowDepthBias.GetValueOnRenderThread();
+				DepthBias = LightTypeDepthBias * 512.0f / ((MaxSubjectZ - MinSubjectZ) * FMath::Max(ResolutionX, ResolutionY));
+				// * 2.0f to be compatible with the system we had before ShadowBias
+				DepthBias *= 2.0f * LightSceneInfo->Proxy->GetUserShadowBias();
+
+				SlopeScaleDepthBias = CVarPerObjectSpotLightShadowSlopeScaleDepthBias.GetValueOnRenderThread();
+				SlopeScaleDepthBias *= LightSceneInfo->Proxy->GetUserShadowSlopeBias();
+			}
 		else
 		{
 			// spot lights (old code, might need to be improved)
@@ -1521,6 +1898,7 @@ void FProjectedShadowInfo::UpdateShaderDepthBias()
 
 			SlopeScaleDepthBias = CVarSpotLightShadowSlopeScaleDepthBias.GetValueOnRenderThread();
 			SlopeScaleDepthBias *= LightSceneInfo->Proxy->GetUserShadowSlopeBias();
+		}
 		}
 
 		// Prevent a large depth bias due to low resolution from causing near plane clipping
@@ -1576,6 +1954,16 @@ float FProjectedShadowInfo::ComputeTransitionSize() const
 	return FMath::Max(TransitionSize, MinTransitionSize);
 }
 
+bool FProjectedShadowInfo::IsWholeSceneDirectionalShadow() const
+{
+	return bWholeSceneShadow && CascadeSettings.ShadowSplitIndex >= 0 && bDirectionalLight;
+}
+
+bool FProjectedShadowInfo::IsWholeScenePointLightShadow() const
+{
+	return bWholeSceneShadow && (LightSceneInfo->Proxy->GetLightType() == LightType_Point || LightSceneInfo->Proxy->GetLightType() == LightType_Rect);
+}
+
 float FProjectedShadowInfo::GetShaderReceiverDepthBias() const
 {
 	float ShadowReceiverBias = 1;
@@ -1614,7 +2002,7 @@ bool FSceneRenderer::CheckForProjectedShadows( const FLightSceneInfo* LightScene
 
 	// Find the projected shadows cast by this light.
 	const FVisibleLightInfo& VisibleLightInfo = VisibleLightInfos[LightSceneInfo->Id];
-	for( int32 ShadowIndex=0; ShadowIndex<VisibleLightInfo.AllProjectedShadows.Num(); ShadowIndex++ )
+	for( int32 ShadowIndex=0; ShadowIndex < VisibleLightInfo.AllProjectedShadows.Num(); ShadowIndex++ )
 	{
 		const FProjectedShadowInfo* ProjectedShadowInfo = VisibleLightInfo.AllProjectedShadows[ShadowIndex];
 
@@ -1623,7 +2011,7 @@ bool FSceneRenderer::CheckForProjectedShadows( const FLightSceneInfo* LightScene
 		for(int32 ViewIndex = 0;ViewIndex < Views.Num();ViewIndex++)
 		{
 			const FViewInfo& View = Views[ViewIndex];
-			if (ProjectedShadowInfo->DependentView && ProjectedShadowInfo->DependentView != &View)
+			if (ProjectedShadowInfo->DependentView && ProjectedShadowInfo->DependentView != &View && ProjectedShadowInfo->DependentView != View.GetPrimaryView())
 			{
 				continue;
 			}
@@ -1639,72 +2027,53 @@ bool FSceneRenderer::CheckForProjectedShadows( const FLightSceneInfo* LightScene
 	return false;
 }
 
-bool FDeferredShadingSceneRenderer::InjectReflectiveShadowMaps(FRHICommandListImmediate& RHICmdList, const FLightSceneInfo* LightSceneInfo)
-{
-	FVisibleLightInfo& VisibleLightInfo = VisibleLightInfos[LightSceneInfo->Id];
-
-	// Inject the RSM into the LPVs
-	for (int32 ShadowIndex = 0; ShadowIndex < VisibleLightInfo.RSMsToProject.Num(); ShadowIndex++)
-	{
-		FProjectedShadowInfo* ProjectedShadowInfo = VisibleLightInfo.RSMsToProject[ShadowIndex];
-
-		check(ProjectedShadowInfo->bReflectiveShadowmap);
-
-		if (ProjectedShadowInfo->bAllocated && ProjectedShadowInfo->DependentView)
-		{
-			FSceneViewState* ViewState = (FSceneViewState*)ProjectedShadowInfo->DependentView->State;
-
-			FLightPropagationVolume* LightPropagationVolume = ViewState ? ViewState->GetLightPropagationVolume(FeatureLevel) : NULL;
-
-			if (LightPropagationVolume)
-			{
-				if (ProjectedShadowInfo->bWholeSceneShadow)
-				{
-					LightPropagationVolume->InjectDirectionalLightRSM( 
-						RHICmdList, 
-						*ProjectedShadowInfo->DependentView,
-						(const FTexture2DRHIRef&)ProjectedShadowInfo->RenderTargets.ColorTargets[0]->GetRenderTargetItem().ShaderResourceTexture,
-						(const FTexture2DRHIRef&)ProjectedShadowInfo->RenderTargets.ColorTargets[1]->GetRenderTargetItem().ShaderResourceTexture, 
-						(const FTexture2DRHIRef&)ProjectedShadowInfo->RenderTargets.DepthTarget->GetRenderTargetItem().ShaderResourceTexture,
-						*ProjectedShadowInfo, 
-						LightSceneInfo->Proxy->GetColor() );
-				}
-			}
-		}
-	}
-
-	return true;
-}
 
 void FSceneRenderer::RenderShadowProjections(
-	FRHICommandListImmediate& RHICmdList,
+	FRDGBuilder& GraphBuilder,
+	FRDGTextureRef OutputTexture,
+	const FMinimalSceneTextures& SceneTextures,
 	const FLightSceneProxy* LightSceneProxy,
-	const FHairStrandsRenderingData* HairDatas,
 	TArrayView<const FProjectedShadowInfo* const> Shadows,
-	bool bProjectingForForwardShading,
-	bool bMobileModulatedProjections)
+	bool bSubPixelShadow,
+	bool bProjectingForForwardShading)
 {
-	FPersistentUniformBuffers& UniformBuffers = Scene->UniformBuffers;
+	CheckShadowDepthRenderCompleted();
 
 	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
 	{
 		const FViewInfo& View = Views[ViewIndex];
+		const FExclusiveDepthStencil ExclusiveDepthStencil = FExclusiveDepthStencil::DepthRead_StencilWrite;
 
-		SCOPED_GPU_MASK(RHICmdList, View.GPUMask);
-		SCOPED_CONDITIONAL_DRAW_EVENTF(RHICmdList, EventView, Views.Num() > 1, TEXT("View%d"), ViewIndex);
-		UniformBuffers.UpdateViewUniformBuffer(View);
-
-		const FHairStrandsVisibilityData* HairVisibilityData = nullptr;
-		const FHairStrandsMacroGroupDatas* HairMacroGroupData = nullptr;
-		if (HairDatas)
+		if (bSubPixelShadow && !HairStrands::HasViewHairStrandsData(View))
 		{
-			const int32 HairViewIndex = 0; // HAIR_TODO multiview support
-			HairVisibilityData = &(HairDatas->HairVisibilityViews.HairDatas[HairViewIndex]);
-			HairMacroGroupData = &(HairDatas->MacroGroupsPerViews.Views[HairViewIndex]);
+			continue;
 		}
 
-		RHICmdList.SetViewport(View.ViewRect.Min.X, View.ViewRect.Min.Y, 0.0f, View.ViewRect.Max.X, View.ViewRect.Max.Y, 1.0f);
-		LightSceneProxy->SetScissorRect(RHICmdList, View, View.ViewRect);
+		View.BeginRenderView();
+
+		// Sanity check
+		if (bSubPixelShadow)
+		{
+			check(View.HairStrandsViewData.VisibilityData.HairOnlyDepthTexture);
+		}
+
+		FShadowProjectionPassParameters CommonPassParameters;
+		CommonPassParameters.SceneTextures = SceneTextures.GetSceneTextureShaderParameters(View.FeatureLevel);
+		CommonPassParameters.HairStrands = HairStrands::BindHairStrandsViewUniformParameters(View);
+
+		if (Substrate::IsSubstrateEnabled())
+		{
+			CommonPassParameters.Substrate = Substrate::BindSubstrateGlobalUniformParameters(View);
+		}
+		
+		CommonPassParameters.RenderTargets[0] = FRenderTargetBinding(OutputTexture, ERenderTargetLoadAction::ELoad);
+		CommonPassParameters.RenderTargets.DepthStencil =
+			bSubPixelShadow ?
+			FDepthStencilBinding(View.HairStrandsViewData.VisibilityData.HairOnlyDepthTexture, ERenderTargetLoadAction::ELoad, ERenderTargetLoadAction::ELoad, ExclusiveDepthStencil) :
+			FDepthStencilBinding(SceneTextures.Depth.Target, ERenderTargetLoadAction::ELoad, ERenderTargetLoadAction::ELoad, ExclusiveDepthStencil);
+
+		RDG_GPU_MASK_SCOPE(GraphBuilder, View.GPUMask);
+		RDG_EVENT_SCOPE_CONDITIONAL(GraphBuilder, Views.Num() > 1, "View%d", ViewIndex);
 
 		// Project the shadow depth buffers onto the scene.
 		for (const FProjectedShadowInfo* ProjectedShadowInfo : Shadows)
@@ -1716,77 +2085,46 @@ void FSceneRenderer::RenderShadowProjections(
 				{
 					if (ProjectedShadowInfo->bOnePassPointLightShadow)
 					{
-						ProjectedShadowInfo->RenderOnePassPointLightProjection(RHICmdList, ViewIndex, View, bProjectingForForwardShading, HairVisibilityData, HairMacroGroupData);
+						ProjectedShadowInfo->RenderOnePassPointLightProjection(GraphBuilder, CommonPassParameters, ViewIndex, View, LightSceneProxy, bProjectingForForwardShading, bSubPixelShadow);
 					}
 					else
 					{
-						ProjectedShadowInfo->RenderProjection(RHICmdList, ViewIndex, &View, this, bProjectingForForwardShading, bMobileModulatedProjections, HairVisibilityData, HairMacroGroupData);
+						ProjectedShadowInfo->RenderProjection(GraphBuilder, CommonPassParameters, ViewIndex, &View, LightSceneProxy, this, bProjectingForForwardShading, bSubPixelShadow);
 					}
 				}
 			}
 		}
 	}
-
-	RHICmdList.SetScissorRect(false, 0, 0, 0, 0);
 }
 
-// TODO(RDG): This is a temporary solution while the shadow depth rendering code still isn't ported to RDG.
-static void TransitionShadowsToReadable(FRHICommandList& RHICmdList, TArrayView<const FProjectedShadowInfo* const> Shadows)
-{
-	TSet<IPooledRenderTarget*, DefaultKeyFuncs<IPooledRenderTarget*>, SceneRenderingSetAllocator> FoundTextures;
-	FoundTextures.Reserve(Shadows.Num());
-
-	TArray<FRHITransitionInfo, SceneRenderingAllocator> TexturesToTransition;
-	TexturesToTransition.Reserve(Shadows.Num());
-
-	for (const FProjectedShadowInfo* ProjectedShadowInfo : Shadows)
-	{
-		IPooledRenderTarget* DepthTarget = ProjectedShadowInfo->RenderTargets.DepthTarget;
-
-		if (ProjectedShadowInfo->bAllocated && DepthTarget)
-		{
-			bool bAlreadyInSet = false;
-			FoundTextures.Emplace(DepthTarget, &bAlreadyInSet);
-			if (!bAlreadyInSet)
-			{
-				TexturesToTransition.Add(FRHITransitionInfo(DepthTarget->GetShaderResourceRHI(), ERHIAccess::Unknown, ERHIAccess::SRVMask));
-			}
-		}
-	}
-
-	RHICmdList.Transition(TexturesToTransition);
-}
-
-BEGIN_SHADER_PARAMETER_STRUCT(FRenderShadowProjectionsParameters, )
-	SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSceneTextureUniformParameters, SceneTextures)
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, HairCategorizationTexture)
-	RENDER_TARGET_BINDING_SLOTS()
-END_SHADER_PARAMETER_STRUCT()
-
-void FDeferredShadingSceneRenderer::RenderShadowProjections(
+void FSceneRenderer::RenderShadowProjections(
 	FRDGBuilder& GraphBuilder,
-	TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBuffer,
+	const FMinimalSceneTextures& SceneTextures,
 	FRDGTextureRef ScreenShadowMaskTexture,
 	FRDGTextureRef ScreenShadowMaskSubPixelTexture,
-	FRDGTextureRef SceneDepthTexture,
 	const FLightSceneInfo* LightSceneInfo,
-	const FHairStrandsRenderingData* HairDatas,
 	bool bProjectingForForwardShading)
 {
+	CheckShadowDepthRenderCompleted();
+
 	const FVisibleLightInfo& VisibleLightInfo = VisibleLightInfos[LightSceneInfo->Id];
 	const FLightSceneProxy* LightSceneProxy = LightSceneInfo->Proxy;
 
 	// Allocate arrays using the graph allocator so we can safely reference them in passes.
-	using FProjectedShadowInfoArray = TArray<const FProjectedShadowInfo*, SceneRenderingAllocator>;
+	using FProjectedShadowInfoArray = TArray<FProjectedShadowInfo*, SceneRenderingAllocator>;
 	auto& DistanceFieldShadows = *GraphBuilder.AllocObject<FProjectedShadowInfoArray>();
 	auto& NormalShadows = *GraphBuilder.AllocObject<FProjectedShadowInfoArray>();
 
 	for (int32 ShadowIndex = 0; ShadowIndex < VisibleLightInfo.ShadowsToProject.Num(); ShadowIndex++)
 	{
-		const FProjectedShadowInfo* ProjectedShadowInfo = VisibleLightInfo.ShadowsToProject[ShadowIndex];
+		FProjectedShadowInfo* ProjectedShadowInfo = VisibleLightInfo.ShadowsToProject[ShadowIndex];
 		if (ProjectedShadowInfo->bRayTracedDistanceField)
 		{
 			DistanceFieldShadows.Add(ProjectedShadowInfo);
+		}
+		else if (ProjectedShadowInfo->HasVirtualShadowMap())
+		{
+			// Skip - handled elsewhere
 		}
 		else
 		{
@@ -1796,50 +2134,31 @@ void FDeferredShadingSceneRenderer::RenderShadowProjections(
 
 	if (NormalShadows.Num() > 0)
 	{
-		AddPass(GraphBuilder, [&NormalShadows](FRHICommandList& RHICmdList)
+		const auto RenderNormalShadows = [&](FRDGTextureRef OutputTexture, bool bSubPixel)
 		{
-			TransitionShadowsToReadable(RHICmdList, NormalShadows);
-		});
-
-		const auto RenderNormalShadows = [&](FRDGTextureRef OutputTexture, FExclusiveDepthStencil ExclusiveDepthStencil, bool bSubPixel)
-		{
-			auto* PassParameters = GraphBuilder.AllocParameters<FRenderShadowProjectionsParameters>();
-			PassParameters->SceneTextures = SceneTexturesUniformBuffer;
-			PassParameters->HairCategorizationTexture = bSubPixel && HairDatas->HairVisibilityViews.HairDatas.Num() > 0 ? HairDatas->HairVisibilityViews.HairDatas[0].CategorizationTexture : nullptr;
-			PassParameters->RenderTargets[0] = FRenderTargetBinding(OutputTexture, ERenderTargetLoadAction::ELoad);
-			PassParameters->RenderTargets.DepthStencil = 
-				bSubPixel && HairDatas->HairVisibilityViews.HairDatas.Num() > 0 ?
-				FDepthStencilBinding(HairDatas->HairVisibilityViews.HairDatas[0].HairOnlyDepthTexture, ERenderTargetLoadAction::ELoad, ERenderTargetLoadAction::ELoad, ExclusiveDepthStencil) :
-				FDepthStencilBinding(SceneDepthTexture, ERenderTargetLoadAction::ELoad, ERenderTargetLoadAction::ELoad, ExclusiveDepthStencil);
-
 			FString LightNameWithLevel;
 			GetLightNameForDrawEvent(LightSceneProxy, LightNameWithLevel);
+			RDG_EVENT_SCOPE(GraphBuilder, "%s", *LightNameWithLevel);
 
-			// All shadows projections are rendered in one RDG pass for efficiency purposes. Technically, RDG is able to merge all these
-			// render passes together if we used a separate one per shadow, but we are paying a cost for it which just seems unnecessary
-			// here. We are also able to bulk-transition all of the shadows in one go, which RDG is currently not able to do.
-			GraphBuilder.AddPass(
-				RDG_EVENT_NAME("%s", *LightNameWithLevel),
-				PassParameters,
-				ERDGPassFlags::Raster,
-				[this, &NormalShadows, LightSceneProxy, HairDatas, bProjectingForForwardShading, bSubPixel](FRHICommandListImmediate& RHICmdList)
-			{
-				const bool bMobileModulatedProjections = false;
-				FSceneRenderer::RenderShadowProjections(RHICmdList, LightSceneProxy, bSubPixel ? HairDatas : nullptr, NormalShadows, bProjectingForForwardShading, bMobileModulatedProjections);
-			});
+			FSceneRenderer::RenderShadowProjections(
+				GraphBuilder,
+				OutputTexture,
+				SceneTextures,
+				LightSceneProxy,
+				NormalShadows,
+				bSubPixel,
+				bProjectingForForwardShading);
 		};
 
 		{
 			RDG_EVENT_SCOPE(GraphBuilder, "Shadows");
-			RenderNormalShadows(ScreenShadowMaskTexture, FExclusiveDepthStencil::DepthRead_StencilWrite, false);
+			RenderNormalShadows(ScreenShadowMaskTexture, false);
 		}
 
-		if (ScreenShadowMaskSubPixelTexture && HairDatas && HairDatas->HairVisibilityViews.HairDatas.Num() > 0 && HairDatas->HairVisibilityViews.HairDatas[0].CategorizationTexture)
+		if (ScreenShadowMaskSubPixelTexture)
 		{
 			RDG_EVENT_SCOPE(GraphBuilder, "SubPixelShadows");
-
-			// Sub-pixel shadows don't use stencil.
-			RenderNormalShadows(ScreenShadowMaskSubPixelTexture, FExclusiveDepthStencil::DepthRead_StencilWrite, true);
+			RenderNormalShadows(ScreenShadowMaskSubPixelTexture, true);
 		}
 	}
 
@@ -1847,8 +2166,6 @@ void FDeferredShadingSceneRenderer::RenderShadowProjections(
 	{
 		RDG_EVENT_SCOPE(GraphBuilder, "DistanceFieldShadows");
 
-		FSceneTextureShaderParameters SceneTextures;
-		SceneTextures.SceneTextures = SceneTexturesUniformBuffer;
 		// Distance field shadows need to be renderer last as they blend over far shadow cascades.
 		for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
 		{
@@ -1866,31 +2183,131 @@ void FDeferredShadingSceneRenderer::RenderShadowProjections(
 			{
 				for (int32 ShadowIndex = 0; ShadowIndex < DistanceFieldShadows.Num(); ShadowIndex++)
 				{
-					const FProjectedShadowInfo* ProjectedShadowInfo = DistanceFieldShadows[ShadowIndex];
-					ProjectedShadowInfo->RenderRayTracedDistanceFieldProjection(
-						GraphBuilder,
-						SceneTextures,
-						ScreenShadowMaskTexture,
-						SceneDepthTexture,
-						View,
-						ScissorRect,
-						bProjectingForForwardShading);
+					FProjectedShadowInfo* ProjectedShadowInfo = DistanceFieldShadows[ShadowIndex];
+
+					if (Views.Num() == 1 || !ProjectedShadowInfo->DependentView || ProjectedShadowInfo->DependentView == &View || ProjectedShadowInfo->DependentView == View.GetPrimaryView())
+					{
+						ProjectedShadowInfo->RenderRayTracedDistanceFieldProjection(
+							GraphBuilder,
+							SceneTextures,
+							ScreenShadowMaskTexture,
+							View,
+							ScissorRect,
+							bProjectingForForwardShading);
+					}
 				}
 			}
 		}
 	}
 }
 
+void FSceneRenderer::BeginAsyncDistanceFieldShadowProjections(FRDGBuilder& GraphBuilder, const FMinimalSceneTextures& SceneTextures, const FDynamicShadowsTaskData* TaskData) const
+{
+	extern int32 GDFShadowAsyncCompute;
+
+	TConstArrayView<FProjectedShadowInfo*> ProjectedDistanceFieldShadows = GetProjectedDistanceFieldShadows(TaskData);
+
+	if (!!GDFShadowAsyncCompute && ViewFamily.EngineShowFlags.DynamicShadows && GetShadowQuality() > 0 && ProjectedDistanceFieldShadows.Num() > 0)
+	{
+		RDG_EVENT_SCOPE(GraphBuilder, "DistanceFieldShadows");
+
+		for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
+		{
+			const FViewInfo& View = Views[ViewIndex];
+			RDG_GPU_MASK_SCOPE(GraphBuilder, View.GPUMask);
+			RDG_EVENT_SCOPE_CONDITIONAL(GraphBuilder, Views.Num() > 1, "View%d", ViewIndex);
+
+			for (int32 DFShadowIndex = 0; DFShadowIndex < ProjectedDistanceFieldShadows.Num(); ++DFShadowIndex)
+			{
+				FProjectedShadowInfo* ProjectedShadowInfo = ProjectedDistanceFieldShadows[DFShadowIndex];
+
+				FIntRect ScissorRect;
+				if (ProjectedShadowInfo->bDirectionalLight || !ProjectedShadowInfo->GetLightSceneInfo().Proxy->GetScissorRect(ScissorRect, View, View.ViewRect))
+				{
+					ScissorRect = View.ViewRect;
+				}
+
+				if (ScissorRect.Area() > 0 && (Views.Num() == 1 || ProjectedShadowInfo->DependentView == &View || ProjectedShadowInfo->DependentView == View.GetPrimaryView() || !ProjectedShadowInfo->DependentView))
+				{
+					// Kick off distance field shadow calculation in async compute
+					// Don't need store result reference because it is internally cached by FProjectedShadowInfo
+					ProjectedShadowInfo->RenderRayTracedDistanceFieldProjection(GraphBuilder, true, SceneTextures, View, ScissorRect);
+				}
+			}
+		}
+	}
+}
+
+
+void FDeferredShadingSceneRenderer::CollectLightForTranslucencyLightingVolumeInjection(
+	FRDGBuilder& GraphBuilder,
+	const FMinimalSceneTextures& SceneTextures,
+	const FTranslucencyLightingVolumeTextures& TranslucencyLightingVolumeTextures,
+	const FLightSceneInfo* LightSceneInfo,
+	bool bSupportShadowMaps,
+	FTranslucentLightInjectionCollector& Collector)
+{	
+	bool bInjectedShadowedLight = false;
+	if (bSupportShadowMaps)
+	{
+		const FVisibleLightInfo& VisibleLightInfo = VisibleLightInfos[LightSceneInfo->Id];
+		const TArray<FProjectedShadowInfo*, SceneRenderingAllocator>& ShadowMaps = VisibleLightInfo.ShadowsToProject;
+		for (int32 ShadowIndex = 0; ShadowIndex < ShadowMaps.Num(); ShadowIndex++)
+		{
+			const FProjectedShadowInfo* ProjectedShadowInfo = ShadowMaps[ShadowIndex];
+
+			if (ProjectedShadowInfo->bAllocated
+				&& ProjectedShadowInfo->bWholeSceneShadow
+				// Not supported on translucency yet
+				&& !ProjectedShadowInfo->bRayTracedDistanceField
+				// Don't inject shadowed lighting with whole scene shadows used for previewing a light with static shadows,
+				// Since that would cause a mismatch with the built lighting
+				// However, stationary directional lights allow whole scene shadows that blend with precomputed shadowing
+				&& (!LightSceneInfo->Proxy->HasStaticShadowing() || ProjectedShadowInfo->IsWholeSceneDirectionalShadow()))
+			{
+				for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
+				{
+					const FViewInfo& View = Views[ViewIndex];
+					// The translucency volume is shared between eyes when doing stereo so only need to inject once for primary
+					if (View.IsPrimarySceneView() && LightSceneInfo->ShouldRenderLight(View))
+					{
+						const FViewInfo* DependentView = ProjectedShadowInfo->DependentView;
+						if (DependentView == nullptr || DependentView == &View)
+						{
+							Collector.AddLightForInjection(View, ViewIndex, VisibleLightInfos, *LightSceneInfo, ProjectedShadowInfo);
+							bInjectedShadowedLight = true;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if (!bInjectedShadowedLight)
+	{
+		// Add unshadowed (or shadowed via VSM) lighting contribution
+		for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
+		{
+			FViewInfo& View = Views[ViewIndex];
+			if (View.IsPrimarySceneView() && LightSceneInfo->ShouldRenderLight(View))
+			{
+				Collector.AddLightForInjection(View, ViewIndex, VisibleLightInfos, *LightSceneInfo);
+			}
+		}
+	}
+}
+
+
 void FDeferredShadingSceneRenderer::RenderDeferredShadowProjections(
 	FRDGBuilder& GraphBuilder,
-	TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBuffer,
+	const FMinimalSceneTextures& SceneTextures,
+	const FTranslucencyLightingVolumeTextures& TranslucencyLightingVolumeTextures,
 	const FLightSceneInfo* LightSceneInfo,
 	FRDGTextureRef ScreenShadowMaskTexture,
-	FRDGTextureRef ScreenShadowMaskSubPixelTexture,
-	FRDGTextureRef SceneDepthTexture,
-	const FHairStrandsRenderingData* HairDatas,
-	bool& bInjectedTranslucentVolume)
+	FRDGTextureRef ScreenShadowMaskSubPixelTexture)
 {
+	CheckShadowDepthRenderCompleted();
+
 	SCOPED_NAMED_EVENT(FDeferredShadingSceneRenderer_RenderShadowProjections, FColor::Emerald);
 	SCOPE_CYCLE_COUNTER(STAT_ProjectedShadowDrawTime);
 	RDG_EVENT_SCOPE(GraphBuilder, "ShadowProjectionOnOpaque");
@@ -1899,95 +2316,42 @@ void FDeferredShadingSceneRenderer::RenderDeferredShadowProjections(
 	const FVisibleLightInfo& VisibleLightInfo = VisibleLightInfos[LightSceneInfo->Id];
 	
 	const bool bProjectingForForwardShading = false;
-	RenderShadowProjections(GraphBuilder, SceneTexturesUniformBuffer, ScreenShadowMaskTexture, ScreenShadowMaskSubPixelTexture, SceneDepthTexture, LightSceneInfo, HairDatas, bProjectingForForwardShading);
+	RenderShadowProjections(GraphBuilder, SceneTextures, ScreenShadowMaskTexture, ScreenShadowMaskSubPixelTexture, LightSceneInfo, bProjectingForForwardShading);
+	ShadowSceneRenderer->ApplyVirtualShadowMapProjectionForLight(GraphBuilder, SceneTextures, LightSceneInfo, ScreenShadowMaskTexture, ScreenShadowMaskSubPixelTexture);
 
-	for (int32 ShadowIndex = 0; ShadowIndex < VisibleLightInfo.ShadowsToProject.Num(); ShadowIndex++)
+	RenderCapsuleDirectShadows(GraphBuilder, SceneTextures.UniformBuffer, *LightSceneInfo, ScreenShadowMaskTexture, VisibleLightInfo.CapsuleShadowsToProject, bProjectingForForwardShading);
+
+	// Inject deep shadow mask for regular shadow map. When using virtual shadow map, it is directly handled in the shadow kernel.
+	if (HairStrands::HasViewHairStrandsData(Views))
 	{
-		const FProjectedShadowInfo* ProjectedShadowInfo = VisibleLightInfo.ShadowsToProject[ShadowIndex];
-
-		if (ProjectedShadowInfo->bAllocated
-			&& ProjectedShadowInfo->bWholeSceneShadow
-			// Not supported on translucency yet
-			&& !ProjectedShadowInfo->bRayTracedDistanceField
-			// Don't inject shadowed lighting with whole scene shadows used for previewing a light with static shadows,
-			// Since that would cause a mismatch with the built lighting
-			// However, stationary directional lights allow whole scene shadows that blend with precomputed shadowing
-			&& (!LightSceneInfo->Proxy->HasStaticShadowing() || ProjectedShadowInfo->IsWholeSceneDirectionalShadow()))
+		bool bNeedHairShadowMaskPass = false;
+		const bool bVirtualShadowOnePass = VisibleLightInfo.VirtualShadowMapClipmaps.Num() > 0;
+		if (!bVirtualShadowOnePass && VisibleLightInfo.ShadowsToProject.Num() > 0)
 		{
-			bInjectedTranslucentVolume = true;
-			RDG_EVENT_SCOPE(GraphBuilder, "InjectTranslucentVolume");
-
-			// Inject the shadowed light into the translucency lighting volumes
-			if (ProjectedShadowInfo->DependentView != nullptr)
-			{
-				int32 ViewIndex = -1;
-				for (int32 i = 0; i < Views.Num(); ++i)
-				{
-					if (ProjectedShadowInfo->DependentView == &Views[i])
-					{
-						ViewIndex = i;
-						break;
-					}
-				}
-
-				RDG_GPU_MASK_SCOPE(GraphBuilder, ProjectedShadowInfo->DependentView->GPUMask);
-				InjectTranslucentVolumeLighting(GraphBuilder, *LightSceneInfo, ProjectedShadowInfo, *ProjectedShadowInfo->DependentView, ViewIndex);
-			}
-			else
-			{
-				for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
-				{
-					FViewInfo& View = Views[ViewIndex];
-					RDG_GPU_MASK_SCOPE(GraphBuilder, View.GPUMask);
-					InjectTranslucentVolumeLighting(GraphBuilder, *LightSceneInfo, ProjectedShadowInfo, View, ViewIndex);
-				}
-			}
+			bNeedHairShadowMaskPass = !VisibleLightInfo.ShadowsToProject[0]->HasVirtualShadowMap();
 		}
-	}
-
-	RenderCapsuleDirectShadows(GraphBuilder, SceneTexturesUniformBuffer, *LightSceneInfo, ScreenShadowMaskTexture, VisibleLightInfo.CapsuleShadowsToProject, bProjectingForForwardShading);
-
-	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
-	{
-		const FViewInfo& View = Views[ViewIndex];
-		RDG_GPU_MASK_SCOPE(GraphBuilder, View.GPUMask);
-
-		for (int32 ShadowIndex = 0; ShadowIndex < VisibleLightInfo.ShadowsToProject.Num(); ShadowIndex++)
+		if (bNeedHairShadowMaskPass)
 		{
-			const FProjectedShadowInfo* ProjectedShadowInfo = VisibleLightInfo.ShadowsToProject[ShadowIndex];
-
-			if (ProjectedShadowInfo->bAllocated && ProjectedShadowInfo->bWholeSceneShadow)
-			{
-				View.HeightfieldLightingViewInfo.ComputeShadowMapShadowing(GraphBuilder, View, ProjectedShadowInfo);
-			}
+			RenderHairStrandsShadowMask(GraphBuilder, Views, LightSceneInfo, VisibleLightInfos, false /*bForward*/, ScreenShadowMaskTexture);
 		}
-	}
-
-	// Inject deep shadow mask
-	if (HairDatas)
-	{
-		RenderHairStrandsShadowMask(GraphBuilder, Views, LightSceneInfo, HairDatas, ScreenShadowMaskTexture);
 	}
 }
 
-void FMobileSceneRenderer::RenderModulatedShadowProjections(FRHICommandListImmediate& RHICmdList)
+void FMobileSceneRenderer::RenderModulatedShadowProjections(FRHICommandList& RHICmdList, int32 ViewIndex, const FViewInfo& View)
 {
-	if (IsSimpleForwardShadingEnabled(ShaderPlatform) || !ViewFamily.EngineShowFlags.DynamicShadows)
+	if (!ViewFamily.EngineShowFlags.DynamicShadows || View.bIsPlanarReflection || bRequiresShadowProjections)
 	{
 		return;
 	}
 
+	CSV_SCOPED_TIMING_STAT_EXCLUSIVE(RenderShadowProjections);
 	SCOPED_NAMED_EVENT(FMobileSceneRenderer_RenderModulatedShadowProjections, FColor::Emerald);
 	SCOPE_CYCLE_COUNTER(STAT_ProjectedShadowDrawTime);
 	SCOPED_DRAW_EVENT(RHICmdList, ShadowProjectionOnOpaque);
 	SCOPED_GPU_STAT(RHICmdList, ShadowProjection);
 
-	FSceneRenderTargets& SceneContext = FSceneRenderTargets::Get(RHICmdList);
-	TRefCountPtr<FRHIUniformBuffer> SceneTexturesUniformBuffer = CreateMobileSceneTextureUniformBuffer(RHICmdList, EMobileSceneTextureSetupMode::SceneColor);
-	SCOPED_UNIFORM_BUFFER_GLOBAL_BINDINGS(RHICmdList, SceneTexturesUniformBuffer);
-
 	// render shadowmaps for relevant lights.
-	for (TSparseArray<FLightSceneInfoCompact>::TConstIterator LightIt(Scene->Lights); LightIt; ++LightIt)
+	for (auto LightIt = Scene->Lights.CreateConstIterator(); LightIt; ++LightIt)
 	{
 		const FLightSceneInfoCompact& LightSceneInfoCompact = *LightIt;
 		const FLightSceneInfo* LightSceneInfo = LightSceneInfoCompact.LightSceneInfo;
@@ -1995,24 +2359,38 @@ void FMobileSceneRenderer::RenderModulatedShadowProjections(FRHICommandListImmed
 
 		if(LightSceneInfo->ShouldRenderLightViewIndependent() && LightSceneProxy && LightSceneProxy->CastsModulatedShadows())
 		{
-
 			const FVisibleLightInfo& VisibleLightInfo = VisibleLightInfos[LightSceneInfo->Id];
 
 			if (VisibleLightInfo.ShadowsToProject.Num() > 0)
-			{
-				TransitionShadowsToReadable(RHICmdList, VisibleLightInfo.ShadowsToProject);
+			{			
+				LightSceneProxy->SetScissorRect(RHICmdList, View, View.ViewRect);
+				TArrayView<const FProjectedShadowInfo* const> Shadows = VisibleLightInfo.ShadowsToProject;
 
-				const bool bProjectingForForwardShading = false;
-				const bool bMobileModulatedProjections = true;
-				RenderShadowProjections(RHICmdList, LightSceneProxy, nullptr, VisibleLightInfo.ShadowsToProject, bProjectingForForwardShading, bMobileModulatedProjections);
+				// Project the shadow depth buffers onto the scene.
+				for (const FProjectedShadowInfo* ProjectedShadowInfo : Shadows)
+				{
+					if (ProjectedShadowInfo->bAllocated)
+					{
+						// Only project the shadow if it's large enough in this particular view (split screen, etc... may have shadows that are large in one view but irrelevantly small in others)
+						if (ProjectedShadowInfo->FadeAlphas[ViewIndex] > 1.0f / 256.0f 
+							// Skip, if it is a whole scene directional shadow
+							&& !ProjectedShadowInfo->IsWholeSceneDirectionalShadow())
+						{
+							checkSlow(!ProjectedShadowInfo->bOnePassPointLightShadow);
+							ProjectedShadowInfo->RenderMobileModulatedShadowProjection(RHICmdList, ViewIndex, &View, LightSceneProxy, this);
+						}
+					}
+				}
+
+				RHICmdList.SetScissorRect(false, 0, 0, 0, 0);
 			}
 		}
 	}
 }
 
-void FMobileSceneRenderer::InitSDFShadowingOutputs(FRHICommandListImmediate& RHICmdList, const TRefCountPtr<IPooledRenderTarget>& SceneDepthZ)
+void InitMobileShadowProjectionOutputs(FRHICommandListImmediate& RHICmdList, const FIntPoint& Extent)
 {
-	const FIntPoint& BufferSize = SceneDepthZ->GetDesc().Extent;
+	const FIntPoint& BufferSize = Extent;
 
 	if (!GScreenSpaceShadowMaskTextureMobileOutputs.IsValid() || GScreenSpaceShadowMaskTextureMobileOutputs.ScreenSpaceShadowMaskTextureMobile->GetDesc().Extent != BufferSize)
 	{
@@ -2021,17 +2399,16 @@ void FMobileSceneRenderer::InitSDFShadowingOutputs(FRHICommandListImmediate& RHI
 	}
 }
 
-void FMobileSceneRenderer::RenderSDFShadowing(FRHICommandListImmediate& RHICmdList)
+void FMobileSceneRenderer::RenderMobileShadowProjections(
+	FRDGBuilder& GraphBuilder)
 {
-	FRDGBuilder GraphBuilder(RHICmdList);
+	RDG_RHI_EVENT_SCOPE(GraphBuilder, RenderMobileShadowProjections);
 
-	FSceneRenderTargets& SceneContext = FSceneRenderTargets::Get(RHICmdList);
-	FRDGTextureRef SceneDepthTexture = GraphBuilder.RegisterExternalTexture(SceneContext.SceneDepthZ, TEXT("SceneDepthTexture"));
 	FRDGTextureRef ScreenShadowMaskTexture = GraphBuilder.RegisterExternalTexture(GScreenSpaceShadowMaskTextureMobileOutputs.ScreenSpaceShadowMaskTextureMobile, TEXT("ScreenSpaceShadowMaskTextureMobile"));
 	AddClearRenderTargetPass(GraphBuilder, ScreenShadowMaskTexture);
 
-	FSceneTextureShaderParameters SceneTextures = CreateSceneTextureShaderParameters(GraphBuilder, Views[0].GetFeatureLevel(), ESceneTextureSetupMode::All);
-	for (TSparseArray<FLightSceneInfoCompact>::TConstIterator LightIt(Scene->Lights); LightIt; ++LightIt)
+	const FMinimalSceneTextures& SceneTextures = GetActiveSceneTextures();
+	for (auto LightIt = Scene->Lights.CreateConstIterator(); LightIt; ++LightIt)
 	{
 		const FLightSceneInfoCompact& LightSceneInfoCompact = *LightIt;
 		const FLightSceneInfo* LightSceneInfo = LightSceneInfoCompact.LightSceneInfo;
@@ -2039,59 +2416,28 @@ void FMobileSceneRenderer::RenderSDFShadowing(FRHICommandListImmediate& RHICmdLi
 		const FVisibleLightInfo& VisibleLightInfo = VisibleLightInfos[LightSceneInfo->Id];
 		const FLightSceneProxy* LightSceneProxy = LightSceneInfo->Proxy;
 
-		// Allocate arrays using the graph allocator so we can safely reference them in passes.
-		using FProjectedShadowInfoArray = TArray<const FProjectedShadowInfo*, SceneRenderingAllocator>;
-		auto& DistanceFieldShadows = *GraphBuilder.AllocObject<FProjectedShadowInfoArray>();
+		const bool bProjectingForForwardShading = true;
 
-		for (int32 ShadowIndex = 0; ShadowIndex < VisibleLightInfo.ShadowsToProject.Num(); ShadowIndex++)
+		// Local light shadows don't render to shadow mask texture on mobile deferred
+		if (LightSceneProxy->GetLightType() == LightType_Directional || !IsMobileDeferredShadingEnabled(ShaderPlatform))
 		{
-			const FProjectedShadowInfo* ProjectedShadowInfo = VisibleLightInfo.ShadowsToProject[ShadowIndex];
-			if (ProjectedShadowInfo->bRayTracedDistanceField)
-			{
-				DistanceFieldShadows.Add(ProjectedShadowInfo);
-			}
+			RenderShadowProjections(GraphBuilder, SceneTextures,
+				ScreenShadowMaskTexture,
+				nullptr,
+				LightSceneInfo,
+				bProjectingForForwardShading);
 		}
-
-		if (DistanceFieldShadows.Num() > 0)
+		
+		if (LightSceneProxy->GetLightType() == LightType_Directional && LightSceneInfo->GetDynamicShadowMapChannel() != -1)
 		{
-			RDG_EVENT_SCOPE(GraphBuilder, "DistanceFieldShadows");
-
-			// Distance field shadows need to be renderer last as they blend over far shadow cascades.
-			for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
-			{
-				const FViewInfo& View = Views[ViewIndex];
-				RDG_GPU_MASK_SCOPE(GraphBuilder, View.GPUMask);
-				RDG_EVENT_SCOPE_CONDITIONAL(GraphBuilder, Views.Num() > 1, "View%d", ViewIndex);
-
-				FIntRect ScissorRect;
-				if (!LightSceneProxy->GetScissorRect(ScissorRect, View, View.ViewRect))
-				{
-					ScissorRect = View.ViewRect;
-				}
-
-				if (ScissorRect.Area() > 0)
-				{
-					for (int32 ShadowIndex = 0; ShadowIndex < DistanceFieldShadows.Num(); ShadowIndex++)
-					{
-						const FProjectedShadowInfo* ProjectedShadowInfo = DistanceFieldShadows[ShadowIndex];
-						ProjectedShadowInfo->RenderRayTracedDistanceFieldProjection(
-							GraphBuilder,
-							SceneTextures,
-							ScreenShadowMaskTexture,
-							SceneDepthTexture,
-							View,
-							ScissorRect,
-							false);
-					}
-				}
-			}
+			// Dynamic shadows are projected into channels of the light attenuation texture based on their assigned DynamicShadowMapChannel
+			// Only render screen space shadows if light is assigned to a valid DynamicShadowMapChannel
+			RenderScreenSpaceShadows(GraphBuilder, SceneTextures, Views, LightSceneInfo, bProjectingForForwardShading, ScreenShadowMaskTexture);
 		}
 	}
-
-	GraphBuilder.Execute();
 }
 
-void FMobileSceneRenderer::ReleaseSDFShadowingOutputs()
+void ReleaseMobileShadowProjectionOutputs()
 {
 	GScreenSpaceShadowMaskTextureMobileOutputs.Release();
 }
@@ -2102,22 +2448,31 @@ void SetupTranslucentSelfShadowUniformParameters(const FProjectedShadowInfo* Sha
 {
 	if (ShadowInfo)
 	{
-		FVector4 ShadowmapMinMax;
+		FVector4f ShadowmapMinMax;
 		FMatrix WorldToShadowMatrixValue = ShadowInfo->GetWorldToShadowMatrix(ShadowmapMinMax);
 
-		OutParameters.WorldToShadowMatrix = WorldToShadowMatrixValue;
+		OutParameters.WorldToShadowMatrix = FMatrix44f(WorldToShadowMatrixValue);		// LWC_TODO: Precision loss?
 		OutParameters.ShadowUVMinMax = ShadowmapMinMax;
 
 		const FLightSceneProxy* const LightProxy = ShadowInfo->GetLightSceneInfo().Proxy;
-		OutParameters.DirectionalLightDirection = LightProxy->GetDirection();
+		OutParameters.DirectionalLightDirection = FVector3f(LightProxy->GetDirection());
 
 		//@todo - support fading from both views
 		const float FadeAlpha = ShadowInfo->FadeAlphas[0];
+		FLinearColor LightColor;
+		if (LightProxy->IsUsedAsAtmosphereSunLight())
+		{
+			LightColor = LightProxy->GetSunIlluminanceAccountingForSkyAtmospherePerPixelTransmittance();
+		}
+		else
+		{
+			LightColor = LightProxy->GetColor();
+		}
 		// Incorporate the diffuse scale of 1 / PI into the light color
-		OutParameters.DirectionalLightColor = FVector4(FVector(LightProxy->GetColor() * FadeAlpha / PI), FadeAlpha);
+		OutParameters.DirectionalLightColor = FVector4f(FVector3f(LightColor * FadeAlpha / PI), FadeAlpha);
 
-		OutParameters.Transmission0 = ShadowInfo->RenderTargets.ColorTargets[0]->GetRenderTargetItem().ShaderResourceTexture.GetReference();
-		OutParameters.Transmission1 = ShadowInfo->RenderTargets.ColorTargets[1]->GetRenderTargetItem().ShaderResourceTexture.GetReference();
+		OutParameters.Transmission0 = ShadowInfo->RenderTargets.ColorTargets[0]->GetRHI();
+		OutParameters.Transmission1 = ShadowInfo->RenderTargets.ColorTargets[1]->GetRHI();
 		OutParameters.Transmission0Sampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 		OutParameters.Transmission1Sampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 	}
@@ -2128,18 +2483,48 @@ void SetupTranslucentSelfShadowUniformParameters(const FProjectedShadowInfo* Sha
 		OutParameters.Transmission0Sampler = GBlackTexture->SamplerStateRHI;
 		OutParameters.Transmission1Sampler = GBlackTexture->SamplerStateRHI;
 		
-		OutParameters.DirectionalLightColor = FVector4(0.0f, 0.0f, 0.0f, 0.0f);
+		OutParameters.DirectionalLightColor = FVector4f(0.0f, 0.0f, 0.0f, 0.0f);
 	}
 }
 
-void FEmptyTranslucentSelfShadowUniformBuffer::InitDynamicRHI()
+void FEmptyTranslucentSelfShadowUniformBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	FTranslucentSelfShadowUniformParameters Parameters;
 	SetupTranslucentSelfShadowUniformParameters(nullptr, Parameters);
 	SetContentsNoUpdate(Parameters);
 
-	Super::InitDynamicRHI();
+	Super::InitRHI(RHICmdList);
 }
+
+
+FViewMatrices FProjectedShadowInfo::GetShadowDepthRenderingViewMatrices(int32 CubeFaceIndex, bool bUseForVSMCubeFaceWorkaround) const
+{
+	FViewMatrices::FMinimalInitializer MatricesInitializer;
+	MatricesInitializer.ViewOrigin = -PreShadowTranslation;
+	MatricesInitializer.ConstrainedViewRect = GetOuterViewRect();
+
+	ensure(!bOnePassPointLightShadow || CubeFaceIndex >= 0 && CubeFaceIndex < 6);
+	if (bOnePassPointLightShadow && CubeFaceIndex >= 0 && CubeFaceIndex < 6)
+	{
+		if (bUseForVSMCubeFaceWorkaround)
+		{
+			MatricesInitializer.ViewRotationMatrix = OnePassShadowViewMatrices[CubeFaceIndex] * FScaleMatrix(FVector(1, 1, -1));
+		}
+		else
+		{
+			MatricesInitializer.ViewRotationMatrix = OnePassShadowViewMatrices[CubeFaceIndex];
+		}
+		MatricesInitializer.ProjectionMatrix = OnePassShadowFaceProjectionMatrix;
+	}
+	else
+	{
+		MatricesInitializer.ViewRotationMatrix = TranslatedWorldToView;
+		MatricesInitializer.ProjectionMatrix = ViewToClipOuter;
+	}
+
+	return FViewMatrices(MatricesInitializer);
+}
+
 
 /** */
 TGlobalResource< FEmptyTranslucentSelfShadowUniformBuffer > GEmptyTranslucentSelfShadowUniformBuffer;

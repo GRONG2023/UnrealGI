@@ -10,6 +10,8 @@
 #include "ProjectDescriptor.h"
 #include "Misc/App.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Sound/AudioFormatSettings.h"
+#include "AnalyticsEventAttribute.h"
 
 #define LOCTEXT_NAMESPACE "TargetPlatform"
 
@@ -27,8 +29,8 @@ bool FTargetPlatformBase::UsesDBuffer() const
 
 bool FTargetPlatformBase::UsesBasePassVelocity() const
 {
-	static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.BasePassOutputsVelocity"));
-	return CVar ? (CVar->GetInt() != 0) : false;
+	static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.VelocityOutputPass"));
+	return CVar ? (CVar->GetInt() == 1) : false;
 }
 
 bool FTargetPlatformBase::VelocityEncodeDepth() const
@@ -44,13 +46,29 @@ bool FTargetPlatformBase::UsesSelectiveBasePassOutputs() const
 
 bool FTargetPlatformBase::UsesDistanceFields() const
 {
-	return true;
+	static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.DistanceFields"));
+	return CVar ? (CVar->GetInt() != 0) : false;
 }
 
 bool FTargetPlatformBase::UsesRayTracing() const
 {
 	static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RayTracing"));
 	return CVar ? (CVar->GetInt() != 0) : false;
+}
+
+uint32 FTargetPlatformBase::GetSupportedHardwareMask() const
+{
+	return 0;
+}
+
+EOfflineBVHMode FTargetPlatformBase::GetStaticMeshOfflineBVHMode() const
+{
+	return EOfflineBVHMode::Disabled;
+}
+
+bool FTargetPlatformBase::GetStaticMeshOfflineBVHCompression() const
+{
+	return false;
 }
 
 bool FTargetPlatformBase::ForcesSimpleSkyDiffuse() const
@@ -76,6 +94,91 @@ bool FTargetPlatformBase::UsesMobileAmbientOcclusion() const
 	return CVar ? (CVar->GetInt() != 0) : false;
 }
 
+bool FTargetPlatformBase::UsesMobileDBuffer() const
+{
+	static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Mobile.DBuffer"));
+	return CVar ? (CVar->GetInt() != 0) : false;
+}
+
+int32 GASTCHDRProfile = 0;
+static FAutoConsoleVariableRef CVarAllowASTCHDRProfile(
+	TEXT("cook.AllowASTCHDRProfile"),
+	GASTCHDRProfile,
+	TEXT("whether to allow ASTC HDR profile, the hdr format is only supported on some devices, e.g. Apple A13, Mali-G72, Adreno (TM) 660"),
+	ECVF_Default | ECVF_ReadOnly
+);
+
+bool FTargetPlatformBase::UsesASTCHDR() const
+{
+	static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("cook.ASTCTextureCompressor"));
+	const bool bUsesARMCompressor = (CVar ? (CVar->GetInt() != 0) : false);
+	
+	return (bUsesARMCompressor && GASTCHDRProfile != 0);
+}
+
+void FTargetPlatformBase::GetRayTracingShaderFormats(TArray<FName>& OutFormats) const
+{
+	if (UsesRayTracing())
+	{
+		GetAllTargetedShaderFormats(OutFormats);
+	}
+}
+
+void FTargetPlatformBase::GetPlatformSpecificProjectAnalytics( TArray<FAnalyticsEventAttribute>& AnalyticsParamArray ) const
+{
+	AppendAnalyticsEventAttributeArray( AnalyticsParamArray,
+		TEXT("UsesDistanceFields"), UsesDistanceFields(),
+		TEXT("UsesForwardShading"), UsesForwardShading()
+	);
+}
+
+void FTargetPlatformBase::AppendAnalyticsEventConfigBool( TArray<FAnalyticsEventAttribute>& AnalyticsParamArray, const TCHAR* ConfigSection, const TCHAR* ConfigKey, const FString& IniFileName, const TCHAR* AnalyticsKeyNameOverride )
+{
+	bool ConfigValue;
+	if (GConfig->GetBool(ConfigSection, ConfigKey, ConfigValue, IniFileName))
+	{
+		AnalyticsParamArray.Add( FAnalyticsEventAttribute( AnalyticsKeyNameOverride ? AnalyticsKeyNameOverride : ConfigKey, ConfigValue ) );
+	}
+}
+
+void FTargetPlatformBase::AppendAnalyticsEventConfigInt( TArray<FAnalyticsEventAttribute>& AnalyticsParamArray, const TCHAR* ConfigSection, const TCHAR* ConfigKey, const FString& IniFileName, const TCHAR* AnalyticsKeyNameOverride )
+{
+	int32 ConfigValue;
+	if (GConfig->GetInt(ConfigSection, ConfigKey, ConfigValue, IniFileName))
+	{
+		AnalyticsParamArray.Add( FAnalyticsEventAttribute( AnalyticsKeyNameOverride ? AnalyticsKeyNameOverride : ConfigKey, ConfigValue ) );
+	}
+}
+
+void FTargetPlatformBase::AppendAnalyticsEventConfigFloat( TArray<FAnalyticsEventAttribute>& AnalyticsParamArray, const TCHAR* ConfigSection, const TCHAR* ConfigKey, const FString& IniFileName, const TCHAR* AnalyticsKeyNameOverride )
+{
+	float ConfigValue;
+	if (GConfig->GetFloat(ConfigSection, ConfigKey, ConfigValue, IniFileName))
+	{
+		AnalyticsParamArray.Add( FAnalyticsEventAttribute( AnalyticsKeyNameOverride ? AnalyticsKeyNameOverride : ConfigKey, ConfigValue ) );
+	}
+}
+
+void FTargetPlatformBase::AppendAnalyticsEventConfigString( TArray<FAnalyticsEventAttribute>& AnalyticsParamArray, const TCHAR* ConfigSection, const TCHAR* ConfigKey, const FString& IniFileName, const TCHAR* AnalyticsKeyNameOverride )
+{
+	FString ConfigValue;
+	if (GConfig->GetString(ConfigSection, ConfigKey, ConfigValue, IniFileName))
+	{
+		AnalyticsParamArray.Add( FAnalyticsEventAttribute( AnalyticsKeyNameOverride ? AnalyticsKeyNameOverride : ConfigKey, ConfigValue ) );
+	}
+}
+
+void FTargetPlatformBase::AppendAnalyticsEventConfigArray( TArray<FAnalyticsEventAttribute>& AnalyticsParamArray, const TCHAR* ConfigSection, const TCHAR* ConfigKey, const FString& IniFileName, const TCHAR* AnalyticsKeyNameOverride )
+{
+	TArray<FString> ConfigValue;
+	if (GConfig->GetArray(ConfigSection, ConfigKey, ConfigValue, IniFileName))
+	{
+		AnalyticsParamArray.Add( FAnalyticsEventAttribute( AnalyticsKeyNameOverride ? AnalyticsKeyNameOverride : ConfigKey, ConfigValue ) );
+	}
+}
+
+
+
 static bool IsPluginEnabledForTarget(const IPlugin& Plugin, const FProjectDescriptor* Project, const FString& Platform, EBuildConfiguration Configuration, EBuildTargetType TargetType)
 {
 	if (!Plugin.GetDescriptor().SupportsTargetPlatform(Platform))
@@ -83,101 +186,42 @@ static bool IsPluginEnabledForTarget(const IPlugin& Plugin, const FProjectDescri
 		return false;
 	}
 
-	const bool bAllowEnginePluginsEnabledByDefault = (Project == nullptr || !Project->bDisableEnginePluginsByDefault);
-	bool bEnabledForProject = Plugin.IsEnabledByDefault(bAllowEnginePluginsEnabledByDefault);
+	// TODO: Support transitive calculation of per-platform disabling for plugins.
+	// Plugins can reference other plugins, and it would be nice to be able to automatically disable for platform X
+	// plugins that are only referenced through another plugin that is disabled for platform X.
+	// For the time-being, to disable a transitively referenced plugin per-platform, the project has to 
+	// directly include the plugin.
+	IPluginManager& PluginManager = IPluginManager::Get();
+
 	if (Project != nullptr)
 	{
-		for(const FPluginReferenceDescriptor& PluginReference : Project->Plugins)
+		const FString& PluginName = Plugin.GetName();
+		const FPluginReferenceDescriptor* PluginReference = Project->Plugins.FindByPredicate(
+			[&PluginName](const FPluginReferenceDescriptor& ExistingReference)
+			{
+				return ExistingReference.Name == PluginName;
+			});
+		if (PluginReference)
 		{
-			if (PluginReference.Name == Plugin.GetName() && !PluginReference.bOptional)
+			// TODO: Remove this workaround for indirect plugin references. A project can mark a plugin as
+			// "Enabled": false, but that merely prevents a direct reference, and the plugin might be referenced and
+			// enabled by other plugins. PluginReference->IsEnabledForPlatform, IsEnabledForTargetConfiguration, and
+			// IsEnabledForTarget will all return false in that case, even though the plugin is actually enabled.
+			// Other systems using IPluginManager::Get().GetEnabledPlugins will disagree with the disabled result.
+			// To workaround it, when we detect the case of a disabled plugin reference for a plugin that is
+			// indirectly enabled, we treat it as having all platforms enabled.
+			// To fix it properly, we will need to have plugins track for which platforms they are enabled,
+			// and query the pluginmanager here instead of querying the PluginReference directly.
+			if (PluginReference->bEnabled || PluginReference->bEnabled == Plugin.IsEnabled())
 			{
-				bEnabledForProject = PluginReference.IsEnabledForPlatform(Platform) && PluginReference.IsEnabledForTargetConfiguration(Configuration) && PluginReference.IsEnabledForTarget(TargetType);
-			}
-		}
-	}
-	return bEnabledForProject;
-}
-
-static bool IsPluginCompiledForTarget(const IPlugin& Plugin, const FProjectDescriptor* Project, const FString& Platform, EBuildConfiguration Configuration, EBuildTargetType TargetType, bool bRequiresCookedData)
-{
-	bool bCompiledForTarget = false;
-	if (IsPluginEnabledForTarget(Plugin, Project, Platform, Configuration, TargetType))
-	{
-		bool bBuildDeveloperTools = (TargetType == EBuildTargetType::Editor || TargetType == EBuildTargetType::Program || (Configuration != EBuildConfiguration::Test && Configuration != EBuildConfiguration::Shipping));
-		for (const FModuleDescriptor& Module : Plugin.GetDescriptor().Modules)
-		{
-			if (Module.IsCompiledInConfiguration(Platform, Configuration, TEXT(""), TargetType, bBuildDeveloperTools, bRequiresCookedData))
-			{
-				bCompiledForTarget = true;
-				break;
-			}
-		}
-	}
-	return bCompiledForTarget;
-}
-
-static bool ConfigureEnabledPlugins(const FPluginReferenceDescriptor& FirstReference, const FProjectDescriptor* ProjectDescriptor, const FString& TargetName, const FString& Platform, EBuildConfiguration Configuration, EBuildTargetType TargetType, const TMap<FString, IPlugin*>& Plugins, TSet<FString>& EnabledPluginNames)
-{
-	if (!EnabledPluginNames.Contains(FirstReference.Name))
-	{
-		// Set of plugin names we've added to the queue for processing
-		TSet<FString> NewPluginNames;
-		NewPluginNames.Add(FirstReference.Name);
-
-		// Queue of plugin references to consider
-		TArray<const FPluginReferenceDescriptor*> NewPluginReferences;
-		NewPluginReferences.Add(&FirstReference);
-
-		// Loop through the queue of plugin references that need to be enabled, queuing more items as we go
-		TArray<TSharedRef<IPlugin>> NewPlugins;
-		for (int32 Idx = 0; Idx < NewPluginReferences.Num(); Idx++)
-		{
-			const FPluginReferenceDescriptor& Reference = *NewPluginReferences[Idx];
-
-			// Check if the plugin is required for this platform
-			if(!Reference.IsEnabledForPlatform(Platform) || !Reference.IsEnabledForTargetConfiguration(Configuration) || !Reference.IsEnabledForTarget(TargetType))
-			{
-				continue;
-			}
-
-			// Find the plugin being enabled
-			const IPlugin* const* PluginPtr = Plugins.Find(Reference.Name);
-			if (PluginPtr == nullptr)
-			{
-				continue;
-			}
-
-			// Check the plugin supports this platform
-			const FPluginDescriptor& PluginDescriptor = (*PluginPtr)->GetDescriptor();
-			if(!PluginDescriptor.SupportsTargetPlatform(Platform))
-			{
-				continue;
-			}
-
-			// Check that this plugin supports the current program
-			if (TargetType == EBuildTargetType::Program && !PluginDescriptor.SupportedPrograms.Contains(TargetName))
-			{
-				continue;
-			}
-
-			// Skip loading Enterprise plugins when project is not an Enterprise project
-			if ((*PluginPtr)->GetType() == EPluginType::Enterprise && !ProjectDescriptor->bIsEnterpriseProject)
-			{
-				continue;
-			}
-
-			// Add references to all its dependencies
-			for (const FPluginReferenceDescriptor& NextReference : PluginDescriptor.Plugins)
-			{
-				if (!EnabledPluginNames.Contains(NextReference.Name) && !NewPluginNames.Contains(NextReference.Name))
+				bool bEnabledForProject = PluginReference->IsEnabledForPlatform(Platform) &&
+					(Configuration == EBuildConfiguration::Unknown || PluginReference->IsEnabledForTargetConfiguration(Configuration)) &&
+					PluginReference->IsEnabledForTarget(TargetType);
+				if (!bEnabledForProject)
 				{
-					NewPluginNames.Add(NextReference.Name);
-					NewPluginReferences.Add(&NextReference);
+					return false;
 				}
 			}
-
-			// Add the plugin
-			EnabledPluginNames.Add((*PluginPtr)->GetName());
 		}
 	}
 	return true;
@@ -201,7 +245,7 @@ bool FTargetPlatformBase::RequiresTempTarget(bool bProjectHasCode, EBuildConfigu
 	// check to see if any projectmutator modular features are available
 	for (IProjectBuildMutatorFeature* Feature : IModularFeatures::Get().GetModularFeatureImplementations<IProjectBuildMutatorFeature>(PROJECT_BUILD_MUTATOR_FEATURE))
 	{
-		if (Feature->RequiresProjectBuild(PlatformInfo->PlatformInfoName, OutReason))
+		if (Feature->RequiresProjectBuild(PlatformInfo->Name, OutReason))
 		{
 			return true;
 		}
@@ -217,13 +261,20 @@ bool FTargetPlatformBase::RequiresTempTarget(bool bProjectHasCode, EBuildConfigu
 
 	// check if there's a non-default plugin change
 	FText Reason;
-	if (IPluginManager::Get().RequiresTempTargetForCodePlugin(Project, PlatformInfo->UBTTargetId.ToString(), Configuration, PlatformInfo->PlatformType, Reason))
+	if (IPluginManager::Get().RequiresTempTargetForCodePlugin(Project, GetPlatformInfo().UBTPlatformString, Configuration, PlatformInfo->PlatformType, Reason))
 	{
 		OutReason = Reason;
 		return true;
 	}
 
 	return false;
+}
+
+bool FTargetPlatformBase::IsEnabledForPlugin(const IPlugin& Plugin) const
+{
+	const FProjectDescriptor* Project = IProjectManager::Get().GetCurrentProject();
+	return IsPluginEnabledForTarget(Plugin, Project, GetPlatformInfo().UBTPlatformString, EBuildConfiguration::Unknown,
+		GetRuntimePlatformType());
 }
 
 TSharedPtr<IDeviceManagerCustomPlatformWidgetCreator> FTargetPlatformBase::GetCustomWidgetCreator() const
@@ -249,8 +300,7 @@ bool FTargetPlatformBase::HasDefaultBuildSettings() const
 	BuildKeys.Add(TEXT("bCompileCEF3")); 
 	BuildKeys.Add(TEXT("bCompileCustomSQLitePlatform"));
 
-	const PlatformInfo::FPlatformInfo& PlatInfo = GetPlatformInfo();
-	if (!DoProjectSettingsMatchDefault(PlatInfo.TargetPlatformName.ToString(), TEXT("/Script/BuildSettings.BuildSettings"), &BuildKeys, nullptr, nullptr))
+	if (!DoProjectSettingsMatchDefault(IniPlatformName(), TEXT("/Script/BuildSettings.BuildSettings"), &BuildKeys, nullptr, nullptr))
 	{
 		return false;
 	}
@@ -258,7 +308,7 @@ bool FTargetPlatformBase::HasDefaultBuildSettings() const
 	FString PlatformSection;
 	GetBuildProjectSettingKeys(PlatformSection, BoolKeys, IntKeys, StringKeys);
 
-	if(!DoProjectSettingsMatchDefault(PlatInfo.TargetPlatformName.ToString(), PlatformSection, &BoolKeys, &IntKeys, &StringKeys))
+	if(!DoProjectSettingsMatchDefault(IniPlatformName(), PlatformSection, &BoolKeys, &IntKeys, &StringKeys))
 	{
 		return false;
 	}
@@ -317,5 +367,45 @@ bool FTargetPlatformBase::DoProjectSettingsMatchDefault(const FString& InPlatfor
 
 	return true;
 }
+
+
+FTargetPlatformBase::FTargetPlatformBase(const PlatformInfo::FTargetPlatformInfo* const InPlatformInfo) : PlatformInfo(InPlatformInfo)
+{
+	checkf(PlatformInfo, TEXT("Null PlatformInfo was passed to FTargetPlatformBase. Check the static IsUsable function before creating this object. See FWindowsTargetPlatformModule::GetTargetPlatform()"));
+
+	PlatformOrdinal = AssignPlatformOrdinal(*this);
+
+#if WITH_ENGINE
+	// Build Audio Format Settings, Using long form equiv of GetConfigSysten to avoid calling a virtual
+	AudioFormatSettings = MakePimpl<Audio::FAudioFormatSettings>(
+		FConfigCacheIni::ForPlatform(InPlatformInfo->IniPlatformName), GEngineIni, InPlatformInfo->IniPlatformName.ToString());
+#endif //WITH_ENGINE
+
+}
+
+#if WITH_ENGINE
+
+const Audio::FAudioFormatSettings& FTargetPlatformBase::GetAudioFormatSettings() const
+{
+	check(AudioFormatSettings.IsValid())
+	return *AudioFormatSettings;
+}
+
+FName FTargetPlatformBase::GetWaveFormat(const class USoundWave* InWave) const
+{
+	return GetAudioFormatSettings().GetWaveFormat(InWave);
+}
+
+void FTargetPlatformBase::GetAllWaveFormats(TArray<FName>& OutFormats) const
+{
+	GetAudioFormatSettings().GetAllWaveFormats(OutFormats);
+}
+
+void FTargetPlatformBase::GetWaveFormatModuleHints(TArray<FName>& OutModuleNames) const
+{
+	GetAudioFormatSettings().GetWaveFormatModuleHints(OutModuleNames);
+}
+
+#endif // WITH_ENGINE
 
 #undef LOCTEXT_NAMESPACE

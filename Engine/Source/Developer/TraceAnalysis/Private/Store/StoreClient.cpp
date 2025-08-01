@@ -1,13 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Trace/StoreClient.h"
+#include "Algo/Transform.h"
 #include "Asio/Asio.h"
-#include "AsioStore.h"
 #include "CborPayload.h"
 #include "Templates/UnrealTemplate.h"
 
-namespace Trace
-{
+namespace UE {
+namespace Trace {
 
 ////////////////////////////////////////////////////////////////////////////////
 class FTraceDataStream
@@ -67,7 +67,7 @@ int32 FTraceDataStream::Read(void* Dest, uint32 DestSize)
 	while (true)
 	{
 		fd_set ReadFds = Fds;
-		int Ret = select(Handle + 1, &ReadFds, 0, 0, &Timeout);
+		int Ret = select((int)Handle + 1, &ReadFds, 0, 0, &Timeout);
 
 		if (Ret < 0)
 		{
@@ -106,21 +106,28 @@ public:
 	uint32					GetStorePort() const;
 	const FResponse&		GetResponse() const;
 	bool					Connect(const TCHAR* Host, uint16 Port);
-	bool					GetStatus();
-	bool					GetTraceCount();
-	bool					GetTraceInfo(uint32 Index);
-	bool					GetTraceInfoById(uint32 Id);
-	FTraceDataStream*		ReadTrace(uint32 Id);
-	bool					GetSessionCount();
-	bool					GetSessionInfo(uint32 Index);
-	bool					GetSessionInfoById(uint32 Id);
-	bool					GetSessionInfoByTraceId(uint32 TraceId);
+	bool					GetStatus() const;
+	bool					GetVersion() const;
+	bool					GetTraceCount() const;
+	bool					GetTraceInfo(uint32 Index) const;
+	bool					GetTraceInfoById(uint32 Id) const;
+	FTraceDataStream*		ReadTrace(uint32 Id) const;
+	bool					GetSessionCount() const;
+	bool					GetSessionInfo(uint32 Index) const;
+	bool					GetSessionInfoById(uint32 Id) const;
+	bool					GetSessionInfoByTraceId(uint32 TraceId) const;
+	bool					GetSessionInfoByTraceGuid(const FGuid& TraceGuid) const;
+	bool					SetStoreDirectories(const TCHAR* StoreDir, const TArray<FString>& AddWatchDirs, const TArray<FString>& RemoveWatchDirs);
+	bool					SetSponsored(bool bSponsored);
 
 private:
-	bool					Communicate(const FPayload& Payload);
-	asio::io_context&		IoContext;
-	asio::ip::tcp::socket	Socket;
-	FResponse				Response;
+	bool					Communicate(const FPayload& Payload) const;
+
+	asio::io_context&				IoContext;
+	mutable asio::ip::tcp::socket	Socket;
+	mutable FResponse				Response;
+	FString							Host;
+	uint16							Port;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -180,14 +187,19 @@ const FResponse& FStoreCborClient::GetResponse() const
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-bool FStoreCborClient::Connect(const TCHAR* Host, uint16 Port)
+bool FStoreCborClient::Connect(const TCHAR* InHost, uint16 InPort)
 {
-	FTCHARToUTF8 HostUtf8(Host);
+	InPort = (InPort == 0) ? 1989 : InPort;
+
+	FTCHARToUTF8 HostUtf8(InHost);
 	char PortString[8];
-	FCStringAnsi::Sprintf(PortString, "%d", Port);
+	FCStringAnsi::Sprintf(PortString, "%d", InPort);
 
 	asio::ip::tcp::resolver Resolver(IoContext);
-	asio::ip::tcp::resolver::results_type Endpoints = Resolver.resolve(HostUtf8.Get(), PortString);
+	asio::ip::tcp::resolver::results_type Endpoints = Resolver.resolve(
+		asio::ip::tcp::resolver::protocol_type::v4(),
+		(const char*)HostUtf8.Get(),
+		PortString);
 
 	asio::error_code ErrorCode;
 #if PLATFORM_WINDOWS
@@ -204,14 +216,15 @@ bool FStoreCborClient::Connect(const TCHAR* Host, uint16 Port)
 		return false;
 	}
 
-	TPayloadBuilder<> Builder("connect");
-	Builder.AddInteger("version", int32(EStoreVersion::Value));
-	FPayload Payload = Builder.Done();
-	return Communicate(Payload);
+	// Save connection details if we need to reconnect
+	Host = InHost;
+	Port = InPort;
+
+	return true;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-bool FStoreCborClient::Communicate(const FPayload& Payload)
+bool FStoreCborClient::Communicate(const FPayload& Payload) const
 {
 	if (!Socket.is_open())
 	{
@@ -262,43 +275,51 @@ bool FStoreCborClient::Communicate(const FPayload& Payload)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-bool FStoreCborClient::GetStatus()
+bool FStoreCborClient::GetStatus() const
 {
-	TPayloadBuilder<32> Builder("status");
+	TPayloadBuilder<32> Builder("v1/status");
 	FPayload Payload = Builder.Done();
 	return Communicate(Payload);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-bool FStoreCborClient::GetTraceCount()
+bool FStoreCborClient::GetVersion() const
 {
-	TPayloadBuilder<32> Builder("trace/count");
+	TPayloadBuilder<32> Builder("v1/version");
 	FPayload Payload = Builder.Done();
 	return Communicate(Payload);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-bool FStoreCborClient::GetTraceInfo(uint32 Index)
+bool FStoreCborClient::GetTraceCount() const
 {
-	TPayloadBuilder<> Builder("trace/info");
+	TPayloadBuilder<32> Builder("v1/trace/count");
+	FPayload Payload = Builder.Done();
+	return Communicate(Payload);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+bool FStoreCborClient::GetTraceInfo(uint32 Index) const
+{
+	TPayloadBuilder<> Builder("v1/trace/info");
 	Builder.AddInteger("index", Index);
 	FPayload Payload = Builder.Done();
 	return Communicate(Payload);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-bool FStoreCborClient::GetTraceInfoById(uint32 Id)
+bool FStoreCborClient::GetTraceInfoById(uint32 Id) const
 {
-	TPayloadBuilder<> Builder("trace/info");
+	TPayloadBuilder<> Builder("v1/trace/info");
 	Builder.AddInteger("id", int32(Id));
 	FPayload Payload = Builder.Done();
 	return Communicate(Payload);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-FTraceDataStream* FStoreCborClient::ReadTrace(uint32 Id)
+FTraceDataStream* FStoreCborClient::ReadTrace(uint32 Id) const
 {
-	TPayloadBuilder<> Builder("trace/read");
+	TPayloadBuilder<> Builder("v1/trace/read");
 	Builder.AddInteger("id", Id);
 	FPayload Payload = Builder.Done();
 	if (!Communicate(Payload))
@@ -306,13 +327,13 @@ FTraceDataStream* FStoreCborClient::ReadTrace(uint32 Id)
 		return nullptr;
 	}
 
-	uint32 SenderPort = Response.GetInteger("port", 0);
+	uint32 SenderPort = Response.GetUint32Checked("port", 0);
 	if (!SenderPort)
 	{
 		return nullptr;
 	}
 
-	asio::ip::address ServerAddr = Socket.local_endpoint().address();
+	asio::ip::address ServerAddr = Socket.remote_endpoint().address();
 	asio::ip::tcp::endpoint Endpoint(ServerAddr, uint16(SenderPort));
 
 	asio::error_code ErrorCode;
@@ -335,124 +356,241 @@ FTraceDataStream* FStoreCborClient::ReadTrace(uint32 Id)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-bool FStoreCborClient::GetSessionCount()
+bool FStoreCborClient::GetSessionCount() const
 {
-	TPayloadBuilder<> Builder("session/count");
+	TPayloadBuilder<> Builder("v1/session/count");
 	FPayload Payload = Builder.Done();
 	return Communicate(Payload);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-bool FStoreCborClient::GetSessionInfo(uint32 Index)
+bool FStoreCborClient::GetSessionInfo(uint32 Index) const
 {
-	TPayloadBuilder<> Builder("session/info");
+	TPayloadBuilder<> Builder("v1/session/info");
 	Builder.AddInteger("index", int32(Index));
 	FPayload Payload = Builder.Done();
 	return Communicate(Payload);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-bool FStoreCborClient::GetSessionInfoById(uint32 Id)
+bool FStoreCborClient::GetSessionInfoById(uint32 Id) const
 {
-	TPayloadBuilder<> Builder("session/info");
+	TPayloadBuilder<> Builder("v1/session/info");
 	Builder.AddInteger("id", int32(Id));
 	FPayload Payload = Builder.Done();
 	return Communicate(Payload);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-bool FStoreCborClient::GetSessionInfoByTraceId(uint32 TraceId)
+bool FStoreCborClient::GetSessionInfoByTraceId(uint32 TraceId) const
 {
-	TPayloadBuilder<> Builder("session/info");
+	TPayloadBuilder<> Builder("v1/session/info");
 	Builder.AddInteger("trace_id", int32(TraceId));
 	FPayload Payload = Builder.Done();
 	return Communicate(Payload);
 }
 
-} // namespace Trace
-
-
-namespace Trace
+////////////////////////////////////////////////////////////////////////////////
+bool FStoreCborClient::GetSessionInfoByTraceGuid(const FGuid& TraceGuid) const
 {
+	TPayloadBuilder<> Builder("v1/session/info");
+	Builder.AddString("trace_guid", TCHAR_TO_ANSI(*TraceGuid.ToString()));
+	FPayload Payload = Builder.Done();
+	return Communicate(Payload);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+bool FStoreCborClient::SetStoreDirectories(const TCHAR* StoreDir, const TArray<FString>& AddWatchDirs, const TArray<FString>& RemoveWatchDir)
+{
+	TPayloadBuilder<> Builder("v1/settings/write");
+	if (StoreDir)
+	{
+		Builder.AddString("StoreDir", TCHAR_TO_ANSI(StoreDir));
+	}
+	TArray<FString> WatchDirs;
+	if (!RemoveWatchDir.IsEmpty())
+	{
+		Algo::Transform(RemoveWatchDir, WatchDirs, [](const FString& In) { return TEXT("-") + In; });
+	}
+	if (!AddWatchDirs.IsEmpty())
+	{
+		WatchDirs.Append(AddWatchDirs);
+	}
+	if (!WatchDirs.IsEmpty())
+	{
+		Builder.AddStringArray("Additionalwatchdirs", WatchDirs);
+	}
+	return Communicate(Builder.Done());
+}
+
+////////////////////////////////////////////////////////////////////////////////
+bool FStoreCborClient::SetSponsored(bool bSponsored)
+{
+	TPayloadBuilder<> Builder("v1/settings/write");
+	Builder.AddInteger("Sponsored", bSponsored ? 1 : 0);
+	return Communicate(Builder.Done());
+}
+
+
+
+////////////////////////////////////////////////////////////////////////////////
+// FStoreClient::FStatus
+////////////////////////////////////////////////////////////////////////////////
+FUtf8StringView FStoreClient::FStatus::GetStoreDir() const
+{
+	const FResponse* Response = (const FResponse*)this;
+	return Response->GetString("store_dir", "");
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 uint32 FStoreClient::FStatus::GetRecorderPort() const
 {
-	const auto* Response = (const FResponse*)this;
-	return Response->GetInteger("recorder_port", 0);
+	const FResponse* Response = (const FResponse*)this;
+	return Response->GetUint32Checked("recorder_port", 0);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+uint32 FStoreClient::FStatus::GetStorePort() const
+{
+	const FResponse* Response = (const FResponse*)this;
+	return Response->GetUint32Checked("store_port", 0);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+bool FStoreClient::FStatus::GetSponsored() const
+{
+	const FResponse* Response = (const FResponse*)this;
+	return !!Response->GetInteger("sponsored", 0);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 uint32 FStoreClient::FStatus::GetChangeSerial() const
 {
-	const auto* Response = (const FResponse*)this;
-	return Response->GetInteger("change_serial", 0);
+	const FResponse* Response = (const FResponse*)this;
+	return Response->GetUint32Checked("change_serial", 0);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+uint32 FStoreClient::FStatus::GetSettingsSerial() const
+{
+	const FResponse* Response = (const FResponse*)this;
+	return Response->GetUint32Checked("settings_serial", 0);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+void FStoreClient::FStatus::GetWatchDirectories(TArray<FString>& OutDirs) const
+{
+	const FResponse* Response = (const FResponse*)this;
+	Response->GetStringArray("watch_dirs", OutDirs);
 }
 
 
 
+////////////////////////////////////////////////////////////////////////////////
+// FStoreClient::FVersion
+////////////////////////////////////////////////////////////////////////////////
+uint32 FStoreClient::FVersion::GetMajorVersion() const
+{
+	const FResponse* Response = (const FResponse*)this;
+	return Response->GetUint32Checked("major", 0);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+uint32 FStoreClient::FVersion::GetMinorVersion() const
+{
+	const FResponse* Response = (const FResponse*)this;
+	return Response->GetUint32Checked("minor", 0);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+FUtf8StringView FStoreClient::FVersion::GetConfiguration() const
+{
+	const FResponse* Response = (const FResponse*)this;
+	return Response->GetString("configuration", "unknown");
+}
+
 
 
 ////////////////////////////////////////////////////////////////////////////////
+// FStoreClient::FTraceInfo
+////////////////////////////////////////////////////////////////////////////////
 uint32 FStoreClient::FTraceInfo::GetId() const
 {
-	const auto* Response = (const FResponse*)this;
-	return Response->GetInteger("id", 0);
+	const FResponse* Response = (const FResponse*)this;
+	return Response->GetUint32Checked("id", 0);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 uint64 FStoreClient::FTraceInfo::GetSize() const
 {
-	const auto* Response = (const FResponse*)this;
-	return Response->GetInteger("size", 0);
+	const FResponse* Response = (const FResponse*)this;
+	return Response->GetUint64Checked("size", 0);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 uint64 FStoreClient::FTraceInfo::GetTimestamp() const
 {
-	const auto* Response = (const FResponse*)this;
-	return Response->GetInteger("timestamp", 0);
+	const FResponse* Response = (const FResponse*)this;
+	return Response->GetUint64Checked("timestamp", 0);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-FAnsiStringView FStoreClient::FTraceInfo::GetName() const
+FUtf8StringView FStoreClient::FTraceInfo::GetUri() const
 {
-	const auto* Response = (const FResponse*)this;
+	const FResponse* Response = (const FResponse*)this;
+	return Response->GetString("uri", "");
+}
+
+////////////////////////////////////////////////////////////////////////////////
+FUtf8StringView FStoreClient::FTraceInfo::GetName() const
+{
+	const FResponse* Response = (const FResponse*)this;
 	return Response->GetString("name", "nameless");
 }
 
 
 
 ////////////////////////////////////////////////////////////////////////////////
+// FStoreClient::FSessionInfo
+////////////////////////////////////////////////////////////////////////////////
 uint32 FStoreClient::FSessionInfo::GetId() const
 {
-	const auto* Response = (const FResponse*)this;
-	return Response->GetInteger("id", 0);
+	const FResponse* Response = (const FResponse*)this;
+	return Response->GetUint32Checked("id", 0);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 uint32 FStoreClient::FSessionInfo::GetTraceId() const
 {
-	const auto* Response = (const FResponse*)this;
-	return Response->GetInteger("trace_id", 0);
+	const FResponse* Response = (const FResponse*)this;
+	return Response->GetUint32Checked("trace_id", 0);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 uint32 FStoreClient::FSessionInfo::GetIpAddress() const
 {
-	const auto* Response = (const FResponse*)this;
-	return Response->GetInteger("ip_address", 0);
+	const FResponse* Response = (const FResponse*)this;
+	return Response->GetUint32Checked("ip_address", 0);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+uint32 FStoreClient::FSessionInfo::GetControlPort() const
+{
+	const FResponse* Response = (const FResponse*)this;
+	return Response->GetUint32Checked("control_port", 0);
 }
 
 
 
+////////////////////////////////////////////////////////////////////////////////
+// FStoreClient
 ////////////////////////////////////////////////////////////////////////////////
 FStoreClient* FStoreClient::Connect(const TCHAR* Host, uint32 Port)
 {
 	static asio::io_context IoContext;
 
 	FStoreCborClient* Impl = new FStoreCborClient(IoContext);
-	if (!Impl->Connect(Host, Port))
+	if (!Impl->Connect(Host, static_cast<uint16>(Port)))
 	{
 		delete Impl;
 		return nullptr;
@@ -462,37 +600,44 @@ FStoreClient* FStoreClient::Connect(const TCHAR* Host, uint32 Port)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+bool FStoreClient::Reconnect(const TCHAR* Host, uint32 Port)
+{
+	FStoreCborClient* Self = (FStoreCborClient*)this;
+	return Self->Connect(Host, static_cast<uint16>(Port));
+}
+
+////////////////////////////////////////////////////////////////////////////////
 void FStoreClient::operator delete (void* Addr)
 {
-	auto* Self = (FStoreCborClient*)Addr;
+	FStoreCborClient* Self = (FStoreCborClient*)Addr;
 	delete Self;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 bool FStoreClient::IsValid() const
 {
-	auto* Self = (FStoreCborClient*)this;
+	const FStoreCborClient* Self = (FStoreCborClient*)this;
 	return Self->IsOpen();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 uint32 FStoreClient::GetStoreAddress() const
 {
-	auto* Self = (FStoreCborClient*)this;
+	const FStoreCborClient* Self = (FStoreCborClient*)this;
 	return Self->GetStoreAddress();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 uint32 FStoreClient::GetStorePort() const
 {
-	auto* Self = (FStoreCborClient*)this;
+	const FStoreCborClient* Self = (FStoreCborClient*)this;
 	return Self->GetStorePort();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-const FStoreClient::FStatus* FStoreClient::GetStatus()
+const FStoreClient::FStatus* FStoreClient::GetStatus() const
 {
-	auto* Self = (FStoreCborClient*)this;
+	const FStoreCborClient* Self = (FStoreCborClient*)this;
 	if (!Self->GetStatus())
 	{
 		return nullptr;
@@ -503,21 +648,34 @@ const FStoreClient::FStatus* FStoreClient::GetStatus()
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-uint32 FStoreClient::GetTraceCount()
+const FStoreClient::FVersion* FStoreClient::GetVersion() const
 {
-	auto* Self = (FStoreCborClient*)this;
+	const FStoreCborClient* Self = (FStoreCborClient*)this;
+	if (!Self->GetVersion())
+	{
+		return nullptr;
+	}
+
+	const FResponse& Response = Self->GetResponse();
+	return (FVersion*)(&Response);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+uint32 FStoreClient::GetTraceCount() const
+{
+	const FStoreCborClient* Self = (FStoreCborClient*)this;
 	if (!Self->GetTraceCount())
 	{
 		return 0;
 	}
 
-	return Self->GetResponse().GetInteger("count", 0);
+	return Self->GetResponse().GetUint32Checked("count", 0);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-const FStoreClient::FTraceInfo* FStoreClient::GetTraceInfo(uint32 Index)
+const FStoreClient::FTraceInfo* FStoreClient::GetTraceInfo(uint32 Index) const
 {
-	auto* Self = (FStoreCborClient*)this;
+	const FStoreCborClient* Self = (FStoreCborClient*)this;
 	if (!Self->GetTraceInfo(Index))
 	{
 		return nullptr;
@@ -528,9 +686,9 @@ const FStoreClient::FTraceInfo* FStoreClient::GetTraceInfo(uint32 Index)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-const FStoreClient::FTraceInfo* FStoreClient::GetTraceInfoById(uint32 Id)
+const FStoreClient::FTraceInfo* FStoreClient::GetTraceInfoById(uint32 Id) const
 {
-	auto* Self = (FStoreCborClient*)this;
+	const FStoreCborClient* Self = (FStoreCborClient*)this;
 	if (!Self->GetTraceInfoById(Id))
 	{
 		return nullptr;
@@ -541,28 +699,44 @@ const FStoreClient::FTraceInfo* FStoreClient::GetTraceInfoById(uint32 Id)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-FStoreClient::FTraceData FStoreClient::ReadTrace(uint32 Id)
+FStoreClient::FTraceData FStoreClient::ReadTrace(uint32 Id) const
 {
-	auto* Self = (FStoreCborClient*)this;
+	const FStoreCborClient* Self = (FStoreCborClient*)this;
 	return FTraceData(Self->ReadTrace(Id));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+bool FStoreClient::SetStoreDirectories(const TCHAR* StoreDir,
+										const TArray<FString>& AddWatchDirs,
+										const TArray<FString>& RemoveWatchDirs)
+{
+	FStoreCborClient* Self = (FStoreCborClient*)this;
+	return Self->SetStoreDirectories(StoreDir, AddWatchDirs, RemoveWatchDirs);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+bool FStoreClient::SetSponsored(bool bSponsored)
+{
+	FStoreCborClient* Self = (FStoreCborClient*)this;
+	return Self->SetSponsored(bSponsored);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 uint32 FStoreClient::GetSessionCount() const
 {
-	auto* Self = (FStoreCborClient*)this;
+	const FStoreCborClient* Self = (FStoreCborClient*)this;
 	if (!Self->GetSessionCount())
 	{
 		return 0;
 	}
 
-	return Self->GetResponse().GetInteger("count", 0);
+	return Self->GetResponse().GetUint32Checked("count", 0);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 const FStoreClient::FSessionInfo* FStoreClient::GetSessionInfo(uint32 Index) const
 {
-	auto* Self = (FStoreCborClient*)this;
+	const FStoreCborClient* Self = (FStoreCborClient*)this;
 	if (!Self->GetSessionInfo(Index))
 	{
 		return nullptr;
@@ -575,7 +749,7 @@ const FStoreClient::FSessionInfo* FStoreClient::GetSessionInfo(uint32 Index) con
 ////////////////////////////////////////////////////////////////////////////////
 const FStoreClient::FSessionInfo* FStoreClient::GetSessionInfoById(uint32 Id) const
 {
-	auto* Self = (FStoreCborClient*)this;
+	const FStoreCborClient* Self = (FStoreCborClient*)this;
 	if (!Self->GetSessionInfoById(Id))
 	{
 		return nullptr;
@@ -588,7 +762,7 @@ const FStoreClient::FSessionInfo* FStoreClient::GetSessionInfoById(uint32 Id) co
 ////////////////////////////////////////////////////////////////////////////////
 const FStoreClient::FSessionInfo* FStoreClient::GetSessionInfoByTraceId(uint32 TraceId) const
 {
-	auto* Self = (FStoreCborClient*)this;
+	const FStoreCborClient* Self = (FStoreCborClient*)this;
 	if (!Self->GetSessionInfoByTraceId(TraceId))
 	{
 		return nullptr;
@@ -598,4 +772,18 @@ const FStoreClient::FSessionInfo* FStoreClient::GetSessionInfoByTraceId(uint32 T
 	return (FSessionInfo*)(&Response);
 }
 
+////////////////////////////////////////////////////////////////////////////////
+const FStoreClient::FSessionInfo* FStoreClient::GetSessionInfoByGuid(const FGuid& TraceGuid) const
+{
+	const FStoreCborClient* Self = (FStoreCborClient*)this;
+	if (!Self->GetSessionInfoByTraceGuid(TraceGuid))
+	{
+		return nullptr;
+	}
+
+	const FResponse& Response = Self->GetResponse();
+	return (FSessionInfo*)(&Response);
+}
+
 } // namespace Trace
+} // namespace UE

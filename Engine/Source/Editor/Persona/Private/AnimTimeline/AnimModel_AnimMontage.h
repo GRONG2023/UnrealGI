@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include "AnimModel_AnimSequenceBase.h"
+#include "AnimTimeline/AnimModel_AnimSequenceBase.h"
 #include "SAnimTimingPanel.h"
 
 class UAnimMontage;
@@ -60,6 +60,9 @@ public:
 	/** Montage section track timing options */
 	bool IsSectionTimingDisplayEnabled() const;
 	void ToggleSectionTimingDisplay();
+
+protected:	
+	virtual void OnDataModelChanged(const EAnimDataModelNotifyType& NotifyType, IAnimationDataModel* Model, const FAnimDataModelNotifPayload& PayLoad) override;
 
 private:
 	/** The anim montage we wrap */

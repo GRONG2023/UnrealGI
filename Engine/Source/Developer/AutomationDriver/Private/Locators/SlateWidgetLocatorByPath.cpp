@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "SlateWidgetLocatorByPath.h"
+#include "Locators/SlateWidgetLocatorByPath.h"
 #include "SlateWidgetElement.h"
 #include "IElementLocator.h"
 #include "Framework/MetaData/DriverIdMetaData.h"
@@ -203,8 +203,9 @@ public:
 			const FArrangedWidget& Candidate = State.Path.Widgets.Last();
 
 			const bool bAllow3DWidgets = true;
+			const bool bUpdateVisibilityAttributes = true;
 			FArrangedChildren ArrangedChildren(VisibilityFilter, bAllow3DWidgets);
-			Candidate.Widget->ArrangeChildren(Candidate.Geometry, ArrangedChildren);
+			Candidate.Widget->ArrangeChildren(Candidate.Geometry, ArrangedChildren, bUpdateVisibilityAttributes);
 
 			for (int32 ChildIndex = 0; ChildIndex < ArrangedChildren.Num(); ++ChildIndex)
 			{
@@ -264,13 +265,13 @@ private:
 			while (TempPath.FindChar(TEXT('/'), Index))
 			{
 				const FString PathPiece = TempPath.Left(Index);
-				TempPath.RightChopInline(Index + 1, false);
+				TempPath.RightChopInline(Index + 1, EAllowShrinking::No);
 
 				if (PathPiece.Len() == 0)
 				{
 					if (Matchers.Last()->bAllowRelativeDescendants)
 					{
-						UE_LOG(LogAutomationDriver, Error, TEXT("Invalid path specified as widget locator: %s"));
+						UE_LOG(LogAutomationDriver, Error, TEXT("Invalid path specified as widget locator: %s"), *Path);
 						Matchers.Empty();
 						break;
 					}

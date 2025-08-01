@@ -4,92 +4,96 @@
 #include "CoreMinimal.h"
 
 #include "Chaos/CollisionResolutionTypes.h"
-#include "Chaos/Collision/PBDCollisionConstraint.h"
 #include "Chaos/ConstraintHandle.h"
 #include "Chaos/PBDConstraintContainer.h"
 
 namespace Chaos
 {
 	class FPBDCollisionConstraints;
+	class FPBDCollisionConstraint;
+	class FPBDCollisionContainerSolver;
 
-	class CHAOS_API FPBDCollisionConstraintHandle : public TContainerConstraintHandle<FPBDCollisionConstraints>
+	/**
+	 * @brief Whether we should run CCD (swept collision) or not
+	*/
+	enum class ECollisionCCDType
+	{
+		// Standard contact constraint
+		Disabled,
+
+		// Swept contact constraint
+		Enabled,
+	};
+
+	/**
+	 * @brief The resting directionality of a contact constraint for use in constraint solver ordering
+	*/
+	enum ECollisionConstraintDirection
+	{
+		// Particle 1 is on top
+		Particle0ToParticle1,
+
+		// Particle 0 is on top
+		Particle1ToParticle0,
+
+		// Neither particle is on top
+		NoRestingDependency
+	};
+
+	/**
+	 * @brief A handle to a contact constraint.
+	 * @note This is an intrusive handle, so you can use a contact pointer as a handle.
+	 * @todo(chaos): remove this class - it can just be a "using FPBDCollisionConstraintHandle = FPBDCollisionConstraint"
+	*/
+	class FPBDCollisionConstraintHandle : public TIntrusiveConstraintHandle<FPBDCollisionConstraint>
 	{
 	public:
-		using Base = TContainerConstraintHandle<FPBDCollisionConstraints>;
+		using Base = TIntrusiveConstraintHandle<FPBDCollisionConstraint>;
 		using FImplicitPair = TPair<const FImplicitObject*, const FImplicitObject*>;
 		using FGeometryPair = TPair<const TGeometryParticleHandle<FReal, 3>*, const TGeometryParticleHandle<FReal, 3>*>;
 		using FHandleKey = TPair<FImplicitPair, FGeometryPair>;
 
-
 		FPBDCollisionConstraintHandle()
-			: ConstraintType(FCollisionConstraintBase::FType::None)
-		{}
-
-		FPBDCollisionConstraintHandle(FPBDCollisionConstraints* InConstraintContainer, int32 InConstraintIndex, typename FCollisionConstraintBase::FType InType)
-			: TContainerConstraintHandle<FPBDCollisionConstraints>(StaticType(), InConstraintContainer, InConstraintIndex)
-			, ConstraintType(InType)
+			: TIntrusiveConstraintHandle<FPBDCollisionConstraint>()
 		{
 		}
-		static FConstraintHandle::EType StaticType() { return FConstraintHandle::EType::Collision; }
 
+		CHAOS_API const FPBDCollisionConstraint& GetContact() const;
+		CHAOS_API FPBDCollisionConstraint& GetContact();
 
-		FHandleKey GetKey();
+		UE_DEPRECATED(4.27, "Use GetContact()")
+		const FPBDCollisionConstraint& GetPointContact() const { return GetContact(); }
 
-		static FHandleKey MakeKey(const TGeometryParticleHandle<FReal, 3>* Particle0, const TGeometryParticleHandle<FReal, 3>* Particle1,
-			const FImplicitObject* Implicit0, const FImplicitObject* Implicit1)
+		UE_DEPRECATED(4.27, "Use GetContact()")
+		FPBDCollisionConstraint& GetPointContact() { return GetContact(); }
+
+		UE_DEPRECATED(4.27, "Use GetContact()")
+		const FPBDCollisionConstraint& GetSweptPointContact() const { return GetContact(); }
+
+		UE_DEPRECATED(4.27, "Use GetContact()")
+		FPBDCollisionConstraint& GetSweptPointContact() { return GetContact(); }
+
+		CHAOS_API bool GetCCDEnabled() const;
+
+		CHAOS_API virtual void SetEnabled(bool InEnabled) override final;
+
+		CHAOS_API virtual bool IsEnabled() const override final;
+
+		CHAOS_API virtual bool IsProbe() const override final;
+
+		CHAOS_API FVec3 GetAccumulatedImpulse() const;
+
+		// Declared final so that TPBDConstraintGraphRuleImpl::AddToGraph() does not need to hit vtable
+		CHAOS_API virtual FParticlePair GetConstrainedParticles() const override final;
+
+		CHAOS_API const FPBDCollisionConstraints* ConcreteContainer() const;
+		CHAOS_API FPBDCollisionConstraints* ConcreteContainer();
+
+		static const FConstraintHandleTypeID& StaticType()
 		{
-			return FHandleKey(FImplicitPair(Implicit0, Implicit1), FGeometryPair(Particle0, Particle1));
+			static FConstraintHandleTypeID STypeID(TEXT("FCollisionConstraintHandle"), &FIntrusiveConstraintHandle::StaticType());
+			return STypeID;
 		}
-
-		static FHandleKey MakeKey(const FCollisionConstraintBase* Base)
-		{
-			return FHandleKey(FImplicitPair(Base->Manifold.Implicit[0], Base->Manifold.Implicit[1]), FGeometryPair(Base->Particle[0], Base->Particle[1]));
-		}
-
-
-		const FCollisionConstraintBase& GetContact() const;
-		FCollisionConstraintBase& GetContact();
-
-		const FRigidBodyPointContactConstraint& GetPointContact() const;
-		FRigidBodyPointContactConstraint& GetPointContact();
-
-		const FRigidBodySweptPointContactConstraint& GetSweptPointContact() const;
-		FRigidBodySweptPointContactConstraint& GetSweptPointContact();
-
-		typename FCollisionConstraintBase::FType GetType() const { return ConstraintType; }
-
-		void SetConstraintIndex(int32 IndexIn, typename FCollisionConstraintBase::FType InType)
-		{
-			ConstraintIndex = IndexIn;
-			ConstraintType = InType;
-		}
-
-		FVec3 GetContactLocation() const
-		{
-			return GetContact().GetLocation();
-		}
-
-		FVec3 GetAccumulatedImpulse() const
-		{
-			return GetContact().AccumulatedImpulse;
-		}
-
-		TVector<const TGeometryParticleHandle<FReal, 3>*, 2> GetConstrainedParticles() const
-		{
-			return { GetContact().Particle[0], GetContact().Particle[1] };
-		}
-
-		TVector<TGeometryParticleHandle<FReal, 3>*, 2> GetConstrainedParticles()
-		{
-			return { GetContact().Particle[0], GetContact().Particle[1] };
-		}
-
-
-	protected:
-		typename FCollisionConstraintBase::FType ConstraintType;
-		using Base::ConstraintIndex;
-		using Base::ConstraintContainer;
-
-
 	};
+
 }

@@ -44,9 +44,11 @@ FString GetInstallationDescription(const FString &Id, const FString &RootDir)
 
 static void InitSlate()
 {
+#if WITH_EDITOR
 	FCoreStyle::ResetToDefault();
 	
 	FModuleManager::Get().LoadModuleChecked("EditorStyle");
+#endif
 	FSlateApplication::InitializeAsStandaloneApplication(GetStandardStandaloneRenderer());
 }
 
@@ -509,7 +511,7 @@ bool FLinuxPlatformInstallation::LaunchEditor(const FString& RootDirName, const 
 	FString FileName;
 	if (ExplicitFileName.IsEmpty())
 	{
-		FileName = RootDirName / TEXT("Engine/Binaries/Linux/UE4Editor");
+		FileName = RootDirName / TEXT("Engine/Binaries/Linux/UnrealEditor");
 	}
 	else
 	{

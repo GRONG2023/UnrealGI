@@ -1,18 +1,20 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Class.h"
 #include "UObject/UnrealType.h"
-#include "UObject/UnrealTypePrivate.h"
-#include "UObject/PropertyHelper.h"
-#include "UObject/LinkerPlaceholderFunction.h"
+
 #include "Serialization/ArchiveUObjectFromStructuredArchive.h"
+#include "UObject/LinkerPlaceholderFunction.h"
+#include "UObject/PropertyHelper.h"
+#include "UObject/PropertyTypeName.h"
+#include "UObject/UnrealTypePrivate.h"
 
-// WARNING: This should always be the last include in any file that needs it (except .generated.h)
-#include "UObject/UndefineUPropertyMacros.h"
+FMulticastScriptDelegate FMulticastDelegateProperty::EmptyDelegate;
 
-FMulticastScriptDelegate::FInvocationList FMulticastDelegateProperty::EmptyList;
+FMulticastDelegateProperty::FMulticastDelegateProperty(FFieldVariant InOwner, const UECodeGen_Private::FMulticastDelegatePropertyParams& Prop, EPropertyFlags AdditionalPropertyFlags /*= CPF_None*/)
+	: FProperty(InOwner, (const UECodeGen_Private::FPropertyParamsBaseWithOffset&)Prop, AdditionalPropertyFlags)
+{
+	SignatureFunction = Prop.SignatureFunctionFunc ? Prop.SignatureFunctionFunc() : nullptr;
+}
 
 #if WITH_EDITORONLY_DATA
 FMulticastDelegateProperty::FMulticastDelegateProperty(UField* InField)
@@ -35,35 +37,48 @@ void FMulticastDelegateProperty::PostDuplicate(const FField& InField)
 -----------------------------------------------------------------------------*/
 void FMulticastDelegateProperty::InstanceSubobjects(void* Data, void const* DefaultData, UObject* InOwner, FObjectInstancingGraph* InstanceGraph )
 {
+	check(Data);
 	if (DefaultData)
 	{
 		for( int32 i=0; i<ArrayDim; i++ )
 		{
 			// Fix up references to the class default object (if necessary)
-			FMulticastScriptDelegate::FInvocationList::TIterator CurInvocation(GetInvocationList((uint8*)Data + i));
-			FMulticastScriptDelegate::FInvocationList::TIterator DefaultInvocation(GetInvocationList((uint8*)DefaultData + i));
+
+			FMulticastScriptDelegate& Delegate = GetMulticastScriptDelegate((uint8*)Data, i);
+			FMulticastScriptDelegate& DefaultDelegate = GetMulticastScriptDelegate((uint8*)DefaultData, i);
+
+			if (&Delegate == &EmptyDelegate || &DefaultDelegate == &EmptyDelegate)
+			{
+				continue;
+			}
+
+			FMulticastScriptDelegate::FWriteAccessScope DelegateWriteScope = Delegate.GetWriteAccessScope();
+			FMulticastScriptDelegate::FReadAccessScope DefaultDelegateReadScope = DefaultDelegate.GetReadAccessScope();
+
+			FMulticastScriptDelegate::InvocationListType::TIterator CurInvocation(Delegate.InvocationList);
+			FMulticastScriptDelegate::InvocationListType::TIterator DefaultInvocation(DefaultDelegate.InvocationList);
 			for(; CurInvocation && DefaultInvocation; ++CurInvocation, ++DefaultInvocation )
 			{
-				FScriptDelegate& DestDelegateInvocation = *CurInvocation;
+				FMulticastScriptDelegate::UnicastDelegateType& DestDelegateInvocation = *CurInvocation;
 				UObject* CurrentUObject = DestDelegateInvocation.GetUObject();
 
 				if (CurrentUObject)
 				{
-					FScriptDelegate& DefaultDelegateInvocation = *DefaultInvocation;
+					FMulticastScriptDelegate::UnicastDelegateType& DefaultDelegateInvocation = *DefaultInvocation;
 					UObject *Template = DefaultDelegateInvocation.GetUObject();
-					UObject* NewUObject = InstanceGraph->InstancePropertyValue(Template, CurrentUObject, InOwner, HasAnyPropertyFlags(CPF_Transient), false, true);
+					UObject* NewUObject = InstanceGraph->InstancePropertyValue(Template, CurrentUObject, InOwner, EInstancePropertyValueFlags::AllowSelfReference | EInstancePropertyValueFlags::DoNotCreateNewInstance);
 					DestDelegateInvocation.BindUFunction(NewUObject, DestDelegateInvocation.GetFunctionName());
 				}
 			}
 			// now finish up the ones for which there is no default
 			for(; CurInvocation; ++CurInvocation )
 			{
-				FScriptDelegate& DestDelegateInvocation = *CurInvocation;
+				FMulticastScriptDelegate::UnicastDelegateType& DestDelegateInvocation = *CurInvocation;
 				UObject* CurrentUObject = DestDelegateInvocation.GetUObject();
 
 				if (CurrentUObject)
 				{
-					UObject* NewUObject = InstanceGraph->InstancePropertyValue(NULL, CurrentUObject, InOwner, HasAnyPropertyFlags(CPF_Transient), false, true);
+					UObject* NewUObject = InstanceGraph->InstancePropertyValue(NULL, CurrentUObject, InOwner, EInstancePropertyValueFlags::AllowSelfReference | EInstancePropertyValueFlags::DoNotCreateNewInstance);
 					DestDelegateInvocation.BindUFunction(NewUObject, DestDelegateInvocation.GetFunctionName());
 				}
 			}
@@ -73,14 +88,22 @@ void FMulticastDelegateProperty::InstanceSubobjects(void* Data, void const* Defa
 	{
 		for( int32 i=0; i<ArrayDim; i++ )
 		{
-			for( FMulticastScriptDelegate::FInvocationList::TIterator CurInvocation(GetInvocationList((uint8*)Data + i)); CurInvocation; ++CurInvocation )
+			FMulticastScriptDelegate& Delegate = GetMulticastScriptDelegate((uint8*)Data, i);
+			if (&Delegate == &EmptyDelegate)
 			{
-				FScriptDelegate& DestDelegateInvocation = *CurInvocation;
+				continue;
+			}
+
+			FMulticastScriptDelegate::FWriteAccessScope DelegateWriteScope = Delegate.GetWriteAccessScope();
+
+			for (FMulticastScriptDelegate::InvocationListType::TIterator CurInvocation(Delegate.InvocationList); CurInvocation; ++CurInvocation)
+			{
+				FMulticastScriptDelegate::UnicastDelegateType& DestDelegateInvocation = *CurInvocation;
 				UObject* CurrentUObject = DestDelegateInvocation.GetUObject();
 
 				if (CurrentUObject)
 				{
-					UObject* NewUObject = InstanceGraph->InstancePropertyValue(NULL, CurrentUObject, InOwner, HasAnyPropertyFlags(CPF_Transient), false, true);
+					UObject* NewUObject = InstanceGraph->InstancePropertyValue(NULL, CurrentUObject, InOwner, EInstancePropertyValueFlags::AllowSelfReference | EInstancePropertyValueFlags::DoNotCreateNewInstance);
 					DestDelegateInvocation.BindUFunction(NewUObject, DestDelegateInvocation.GetFunctionName());
 				}
 			}
@@ -90,19 +113,33 @@ void FMulticastDelegateProperty::InstanceSubobjects(void* Data, void const* Defa
 
 bool FMulticastDelegateProperty::Identical( const void* A, const void* B, uint32 PortFlags ) const
 {
-	const FMulticastScriptDelegate::FInvocationList& ListA = GetInvocationList(A);
-	const FMulticastScriptDelegate::FInvocationList& ListB = GetInvocationList(B);
+	if (!A || !B)
+	{
+		return A == B;
+	}
 
-	const int32 ListASize = ListA.Num();
-	if (ListASize != ListB.Num())
+	const FMulticastScriptDelegate& DelegateA = GetMulticastScriptDelegate(A, 0);
+	const FMulticastScriptDelegate& DelegateB = GetMulticastScriptDelegate(B, 0);
+
+	if (&DelegateA == &DelegateB)
+	{
+		return true;
+	}
+
+	FMulticastScriptDelegate::FReadAccessScope DelegateA_ReadScope = DelegateA.GetReadAccessScope();
+	FMulticastScriptDelegate::FReadAccessScope DelegateB_ReadScope = DelegateB.GetReadAccessScope();
+
+
+	const int32 ListASize = DelegateA.InvocationList.Num();
+	if (ListASize != DelegateB.InvocationList.Num())
 	{
 		return false;
 	}
 
 	for (int32 CurInvocationIndex = 0; CurInvocationIndex != ListASize; ++CurInvocationIndex)
 	{
-		const FScriptDelegate& BindingA = ListA[CurInvocationIndex];
-		const FScriptDelegate& BindingB = ListB[CurInvocationIndex];
+		const FMulticastScriptDelegate::UnicastDelegateType& BindingA = DelegateA.InvocationList[CurInvocationIndex];
+		const FMulticastScriptDelegate::UnicastDelegateType& BindingB = DelegateB.InvocationList[CurInvocationIndex];
 
 		if (BindingA.GetUObject() != BindingB.GetUObject())
 		{
@@ -127,14 +164,12 @@ bool FMulticastDelegateProperty::NetSerializeItem( FArchive& Ar, UPackageMap* Ma
 
 FString FMulticastDelegateProperty::GetCPPType( FString* ExtendedTypeText/*=NULL*/, uint32 CPPExportFlags/*=0*/ ) const
 {
-#if HACK_HEADER_GENERATOR
 	// We have this test because sometimes the delegate hasn't been set up by FixupDelegateProperties at the time
 	// we need the type for an error message.  We deliberately format it so that it's unambiguously not CPP code, but is still human-readable.
 	if (!SignatureFunction)
 	{
 		return FString(TEXT("{multicast delegate type}"));
 	}
-#endif
 
 	FString UnmangledFunctionName = SignatureFunction->GetName().LeftChop( FString( HEADER_GENERATED_DELEGATE_SIGNATURE_SUFFIX ).Len() );
 	const UClass* OwnerClass = SignatureFunction->GetOwnerClass();
@@ -178,34 +213,43 @@ FString FMulticastDelegateProperty::GetCPPTypeForwardDeclaration() const
 }
 
 
-void FMulticastDelegateProperty::ExportTextItem( FString& ValueStr, const void* PropertyValue, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
+void FMulticastDelegateProperty::ExportText_Internal( FString& ValueStr, const void* PropertyValueOrContainer, EPropertyPointerType PropertyPointerType, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
 {
-	if (0 != (PortFlags & PPF_ExportCpp))
+	FMulticastScriptDelegate DelegateInContainer;
+	FMulticastScriptDelegate* Delegate;
+	if (PropertyPointerType == EPropertyPointerType::Container && HasGetter())
 	{
-		ValueStr += TEXT("{}");
-		return;
+		GetValue_InContainer(PropertyValueOrContainer, &DelegateInContainer);
+		Delegate = &GetMulticastScriptDelegate(&DelegateInContainer, 0);
 	}
-
-	const FMulticastScriptDelegate::FInvocationList& InvocationList = GetInvocationList(PropertyValue);
+	else
+	{
+		Delegate = &GetMulticastScriptDelegate(PointerToValuePtr(PropertyValueOrContainer, PropertyPointerType), 0);
+	}
 
 	// Start delegate array with open paren
 	ValueStr += TEXT( "(" );
 
-	bool bIsFirstFunction = true;
-	for (FMulticastScriptDelegate::FInvocationList::TConstIterator CurInvocation(InvocationList); CurInvocation; ++CurInvocation)
+	if (Delegate && Delegate != &EmptyDelegate)
 	{
-		if (CurInvocation->IsBound())
-		{
-			if (!bIsFirstFunction)
-			{
-				ValueStr += TEXT(",");
-			}
-			bIsFirstFunction = false;
+		FMulticastScriptDelegate::FReadAccessScope DelegateReadScope = Delegate->GetReadAccessScope();
 
-			bool bDelegateHasValue = CurInvocation->GetFunctionName() != NAME_None;
-			ValueStr += FString::Printf(TEXT("%s.%s"),
-				CurInvocation->GetUObject() != NULL ? *CurInvocation->GetUObject()->GetName() : TEXT("(null)"),
-				*CurInvocation->GetFunctionName().ToString());
+		bool bIsFirstFunction = true;
+		for (FMulticastScriptDelegate::InvocationListType::TConstIterator CurInvocation(Delegate->InvocationList); CurInvocation; ++CurInvocation)
+		{
+			if (CurInvocation->IsBound())
+			{
+				if (!bIsFirstFunction)
+				{
+					ValueStr += TEXT(",");
+				}
+				bIsFirstFunction = false;
+
+				bool bDelegateHasValue = CurInvocation->GetFunctionName() != NAME_None;
+				ValueStr += FString::Printf(TEXT("%s.%s"),
+					CurInvocation->GetUObject() != NULL ? *CurInvocation->GetUObject()->GetPathName() : TEXT("(null)"),
+					*CurInvocation->GetFunctionName().ToString());
+			}
 		}
 	}
 
@@ -345,7 +389,7 @@ bool FMulticastDelegateProperty::SameType(const FProperty* Other) const
 	return Super::SameType(Other) && (SignatureFunction == ((FMulticastDelegateProperty*)Other)->SignatureFunction);
 }
 
-EConvertFromTypeResult FMulticastDelegateProperty::ConvertFromType(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct)
+EConvertFromTypeResult FMulticastDelegateProperty::ConvertFromType(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct, const uint8* Defaults)
 {
 	// Multicast delegate properties are serialization compatible
 	if (Tag.Type == NAME_MulticastDelegateProperty || Tag.Type == FMulticastInlineDelegateProperty::StaticClass()->GetFName() || Tag.Type == FMulticastSparseDelegateProperty::StaticClass()->GetFName())
@@ -373,6 +417,11 @@ void FMulticastDelegateProperty::AddReferencedObjects(FReferenceCollector& Colle
 
 IMPLEMENT_FIELD(FMulticastDelegateProperty)
 
+FMulticastInlineDelegateProperty::FMulticastInlineDelegateProperty(FFieldVariant InOwner, const UECodeGen_Private::FMulticastDelegatePropertyParams& Prop)
+	: TProperty_MulticastDelegate(InOwner, Prop)
+{
+}
+
 const FMulticastScriptDelegate* FMulticastInlineDelegateProperty::GetMulticastDelegate(const void* PropertyValue) const
 {
 	return (const FMulticastScriptDelegate*)PropertyValue;
@@ -383,9 +432,9 @@ void FMulticastInlineDelegateProperty::SetMulticastDelegate(void* PropertyValue,
 	*(FMulticastScriptDelegate*)PropertyValue = MoveTemp(ScriptDelegate);
 }
 
-FMulticastScriptDelegate::FInvocationList& FMulticastInlineDelegateProperty::GetInvocationList(const void* PropertyValue) const
+FMulticastScriptDelegate& FMulticastInlineDelegateProperty::GetMulticastScriptDelegate(const void* PropertyValue, int32 Index) const
 {
-	return (PropertyValue ? ((FMulticastScriptDelegate*)PropertyValue)->InvocationList : EmptyList);
+	return (PropertyValue ? *((FMulticastScriptDelegate*)PropertyValue + Index) : EmptyDelegate);
 }
 
 void FMulticastInlineDelegateProperty::SerializeItem(FStructuredArchive::FSlot Slot, void* Value, void const* Defaults) const
@@ -393,12 +442,27 @@ void FMulticastInlineDelegateProperty::SerializeItem(FStructuredArchive::FSlot S
 	FArchiveUObjectFromStructuredArchive Adapter(Slot);
 	FArchive& Ar = Adapter.GetArchive();
 	Ar << *GetPropertyValuePtr(Value);
+	Adapter.Close();
 }
 
-const TCHAR* FMulticastInlineDelegateProperty::ImportText_Internal(const TCHAR* Buffer, void* PropertyValue, int32 PortFlags, UObject* Parent, FOutputDevice* ErrorText) const
+const TCHAR* FMulticastInlineDelegateProperty::ImportText_Internal(const TCHAR* Buffer, void* ContainerOrPropertyPtr, EPropertyPointerType PropertyPointerType, UObject* Parent, int32 PortFlags, FOutputDevice* ErrorText) const
 {
-	FMulticastScriptDelegate& MulticastDelegate = (*(FMulticastScriptDelegate*)PropertyValue);
-	return ImportDelegateFromText(MulticastDelegate, Buffer, Parent, ErrorText);
+	const TCHAR* Result = nullptr;
+	if (PropertyPointerType == EPropertyPointerType::Container && HasSetter())
+	{
+		FMulticastScriptDelegate MulticastDelegate;		
+		Result = ImportDelegateFromText(MulticastDelegate, Buffer, Parent, ErrorText);
+		if (Result)
+		{
+			SetValue_InContainer(ContainerOrPropertyPtr, MulticastDelegate);
+		}
+	}
+	else
+	{
+		FMulticastScriptDelegate& MulticastDelegate = *(FMulticastScriptDelegate*)PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType);
+		Result = ImportDelegateFromText(MulticastDelegate, Buffer, Parent, ErrorText);
+	}
+	return Result;	
 }
 
 void ResolveDelegateReference(const FMulticastInlineDelegateProperty* InlineProperty, UObject*& Parent, void*& PropertyValue)
@@ -441,6 +505,11 @@ void FMulticastInlineDelegateProperty::ClearDelegate(UObject* Parent, void* Prop
 
 IMPLEMENT_FIELD(FMulticastInlineDelegateProperty)
 
+FMulticastSparseDelegateProperty::FMulticastSparseDelegateProperty(FFieldVariant InOwner, const UECodeGen_Private::FMulticastDelegatePropertyParams& Prop)
+	: TProperty_MulticastDelegate(InOwner, Prop)
+{
+}
+
 const FMulticastScriptDelegate* FMulticastSparseDelegateProperty::GetMulticastDelegate(const void* PropertyValue) const
 {
 	const FSparseDelegate* SparseDelegate = (const FSparseDelegate*)PropertyValue;
@@ -474,27 +543,29 @@ void FMulticastSparseDelegateProperty::SetMulticastDelegate(void* PropertyValue,
 }
 
 
-FMulticastScriptDelegate::FInvocationList& FMulticastSparseDelegateProperty::GetInvocationList(const void* PropertyValue) const
+FMulticastScriptDelegate& FMulticastSparseDelegateProperty::GetMulticastScriptDelegate(const void* PropertyValue, int32 Index) const
 {
 	if (FSparseDelegate* SparseDelegate = (FSparseDelegate*)PropertyValue)
 	{
+		SparseDelegate += Index;
 		if (SparseDelegate->IsBound())
 		{
 			USparseDelegateFunction* SparseDelegateFunc = CastChecked<USparseDelegateFunction>(SignatureFunction);
 			UObject* OwningObject = FSparseDelegateStorage::ResolveSparseOwner(*SparseDelegate, SparseDelegateFunc->OwningClassName, SparseDelegateFunc->DelegateName);
 			if (FMulticastScriptDelegate* Delegate = FSparseDelegateStorage::GetMulticastDelegate(OwningObject, SparseDelegateFunc->DelegateName))
 			{
-				return Delegate->InvocationList;
+				return *Delegate;
 			}
 		}
 	}
-	return EmptyList;
+	return EmptyDelegate;
 }
 
 void FMulticastSparseDelegateProperty::SerializeItem(FStructuredArchive::FSlot Slot, void* Value, void const* Defaults) const
 {
 	FArchiveUObjectFromStructuredArchive Adapter(Slot);
 	SerializeItemInternal(Adapter.GetArchive(), Value, Defaults);
+	Adapter.Close();
 }
 
 void FMulticastSparseDelegateProperty::SerializeItemInternal(FArchive& Ar, void* Value, void const* Defaults) const
@@ -533,35 +604,42 @@ void FMulticastSparseDelegateProperty::SerializeItemInternal(FArchive& Ar, void*
 			}
 			else
 			{
-				Ar << EmptyList;
+				Ar << EmptyDelegate;
 			}
 		}
 		else
 		{
-			Ar << EmptyList;
+			Ar << EmptyDelegate;
 		}
 	}
 }
 
-const TCHAR* FMulticastSparseDelegateProperty::ImportText_Internal(const TCHAR* Buffer, void* PropertyValue, int32 PortFlags, UObject* Parent, FOutputDevice* ErrorText) const
+const TCHAR* FMulticastSparseDelegateProperty::ImportText_Internal(const TCHAR* Buffer, void* ContainerOrPropertyPtr, EPropertyPointerType PropertyPointerType, UObject* Parent, int32 PortFlags, FOutputDevice* ErrorText) const
 {
 	FMulticastScriptDelegate Delegate;
 	const TCHAR* Result = ImportDelegateFromText(Delegate, Buffer, Parent, ErrorText);
 
 	if (Result)
 	{
-		FSparseDelegate& SparseDelegate = *(FSparseDelegate*)PropertyValue;
-		USparseDelegateFunction* SparseDelegateFunc = CastChecked<USparseDelegateFunction>(SignatureFunction);
-
-		if (Delegate.IsBound())
+		if (PropertyPointerType == EPropertyPointerType::Container && HasSetter())
 		{
-			FSparseDelegateStorage::SetMulticastDelegate(Parent, SparseDelegateFunc->DelegateName, MoveTemp(Delegate));
-			SparseDelegate.bIsBound = true;
+			FProperty::SetValue_InContainer(ContainerOrPropertyPtr, &Delegate);
 		}
 		else
 		{
-			FSparseDelegateStorage::Clear(Parent, SparseDelegateFunc->DelegateName);
-			SparseDelegate.bIsBound = false;
+			FSparseDelegate& SparseDelegate = *(FSparseDelegate*)PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType);
+			USparseDelegateFunction* SparseDelegateFunc = CastChecked<USparseDelegateFunction>(SignatureFunction);
+
+			if (Delegate.IsBound())
+			{
+				FSparseDelegateStorage::SetMulticastDelegate(Parent, SparseDelegateFunc->DelegateName, MoveTemp(Delegate));
+				SparseDelegate.bIsBound = true;
+			}
+			else
+			{
+				FSparseDelegateStorage::Clear(Parent, SparseDelegateFunc->DelegateName);
+				SparseDelegate.bIsBound = false;
+			}
 		}
 	}
 
@@ -611,6 +689,15 @@ void FMulticastSparseDelegateProperty::ClearDelegate(UObject* Parent, void* Prop
 	SparseDelegate.__Internal_Clear(Parent, SparseDelegateFunc->DelegateName);
 }
 
-IMPLEMENT_FIELD(FMulticastSparseDelegateProperty)
+bool FMulticastSparseDelegateProperty::LoadTypeName(UE::FPropertyTypeName Type, const FPropertyTag* Tag)
+{
+	if (!Super::LoadTypeName(Type, Tag))
+	{
+		return false;
+	}
 
-#include "UObject/DefineUPropertyMacros.h"
+	// This cannot be used without its SignatureFunction and the tag lacks the information needed to load it.
+	return false;
+}
+
+IMPLEMENT_FIELD(FMulticastSparseDelegateProperty)

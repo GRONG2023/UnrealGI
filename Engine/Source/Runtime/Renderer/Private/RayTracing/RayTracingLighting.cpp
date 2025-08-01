@@ -1,417 +1,375 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RayTracingLighting.h"
-#include "RHI/Public/RHIDefinitions.h"
+#include "RHIDefinitions.h"
 #include "RendererPrivate.h"
 
 #if RHI_RAYTRACING
 
+#include "LightRendering.h"
+#include "LightSceneProxy.h"
 #include "SceneRendering.h"
+#include "RayTracingMaterialHitShaders.h"
+#include "RayTracingTypes.h"
 
-static TAutoConsoleVariable<int32> CVarRayTracingLightingMissShader(
-	TEXT("r.RayTracing.LightingMissShader"),
+static TAutoConsoleVariable<int32> CVarRayTracingLightFunction(
+	TEXT("r.RayTracing.LightFunction"),
 	1,
-	TEXT("Whether evaluate lighting using a miss shader when rendering reflections and translucency instead of doing it in ray generation shader. (default = 1)"),
+	TEXT("Whether to support light material functions in ray tracing effects. (default = 1)"),
 	ECVF_RenderThreadSafe);
 
-static TAutoConsoleVariable<int32> CVarRayTracingLightingCells(
-	TEXT("r.RayTracing.LightCulling.Cells"),
-	16,
-	TEXT("Number of cells in each dimension for lighting grid (default 16)"),
+TAutoConsoleVariable<int32> CVarRayTracingLightGridResolution(
+	TEXT("r.RayTracing.LightGridResolution"),
+	256,
+	TEXT("Controls the resolution of the 2D light grid used to cull irrelevant lights from lighting calculations (default = 256)\n"),
 	ECVF_RenderThreadSafe
 );
 
-static TAutoConsoleVariable<float> CVarRayTracingLightingCellSize(
-	TEXT("r.RayTracing.LightCulling.CellSize"),
-	200.0f,
-	TEXT("Minimum size of light cell (default 200 units)"),
+TAutoConsoleVariable<int32> CVarRayTracingLightGridMaxCount(
+	TEXT("r.RayTracing.LightGridMaxCount"),
+	128,
+	TEXT("Controls the maximum number of lights per cell in the 2D light grid. The minimum of this value and the number of lights in the scene is used. (default = 128)\n"),
 	ECVF_RenderThreadSafe
 );
 
-bool CanUseRayTracingLightingMissShader(EShaderPlatform ShaderPlatform)
+IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FRayTracingLightGrid, "RaytracingLightGridData");
+
+class FRayTracingBuildLightGridCS : public FGlobalShader
 {
-	return CVarRayTracingLightingMissShader.GetValueOnRenderThread() != 0;
-}
-
-IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FRaytracingLightDataPacked, "RaytracingLightsDataPacked");
-
-
-class FSetupRayTracingLightCullData : public FGlobalShader
-{
-	DECLARE_GLOBAL_SHADER(FSetupRayTracingLightCullData);
-	SHADER_USE_PARAMETER_STRUCT(FSetupRayTracingLightCullData, FGlobalShader)
-
-		static int32 GetGroupSize()
-	{
-		return 32;
-	}
+	DECLARE_GLOBAL_SHADER(FRayTracingBuildLightGridCS)
+	SHADER_USE_PARAMETER_STRUCT(FRayTracingBuildLightGridCS, FGlobalShader)
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 	{
-		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
+		return IsRayTracingEnabledForProject(Parameters.Platform);
 	}
 
 	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
 	{
-		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
-		OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE"), GetGroupSize());
+		OutEnvironment.CompilerFlags.Add(CFLAG_WarningsAsErrors);
+		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
+		OutEnvironment.SetDefine(TEXT("THREADGROUPSIZE_X"), FComputeShaderUtils::kGolden2DGroupSize);
+		OutEnvironment.SetDefine(TEXT("THREADGROUPSIZE_Y"), FComputeShaderUtils::kGolden2DGroupSize);
 	}
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-		SHADER_PARAMETER_SRV(StructuredBuffer<float4>, RankedLights)
-		SHADER_PARAMETER(FVector, WorldPos)
-		SHADER_PARAMETER(uint32, NumLightsToUse)
-		SHADER_PARAMETER(uint32, CellCount)
-		SHADER_PARAMETER(float, CellScale)
-		SHADER_PARAMETER_UAV(RWBuffer<uint>, LightIndices)
-		SHADER_PARAMETER_UAV(RWStructuredBuffer<uint4>, LightCullingVolume)
-		END_SHADER_PARAMETER_STRUCT()
+		SHADER_PARAMETER(uint32, SceneLightCount)
+		SHADER_PARAMETER(uint32, SceneInfiniteLightCount)
+		SHADER_PARAMETER(FVector3f, SceneLightsTranslatedBoundMin)
+		SHADER_PARAMETER(FVector3f, SceneLightsTranslatedBoundMax)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRTLightingData>, SceneLights)
+		SHADER_PARAMETER(unsigned, LightGridResolution)
+		SHADER_PARAMETER(unsigned, LightGridMaxCount)
+		SHADER_PARAMETER(int, LightGridAxis)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D, RWLightGrid)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWLightGridData)
+	END_SHADER_PARAMETER_STRUCT()
 };
+IMPLEMENT_SHADER_TYPE(, FRayTracingBuildLightGridCS, TEXT("/Engine/Private/RayTracing/RayTracingBuildLightGrid.usf"), TEXT("RayTracingBuildLightGridCS"), SF_Compute);
 
-IMPLEMENT_GLOBAL_SHADER(FSetupRayTracingLightCullData, "/Engine/Private/RayTracing/GenerateCulledLightListCS.usf", "GenerateCulledLightListCS", SF_Compute);
-DECLARE_GPU_STAT_NAMED(LightCullingVolumeCompute, TEXT("RT Light Culling Volume Compute"));
-
-
-static void SelectRaytracingLights(
-	const TSparseArray<FLightSceneInfoCompact>& Lights,
-	const FViewInfo& View,
-	TArray<int32>& OutSelectedLights
-)
+static void PrepareLightGrid(FRDGBuilder& GraphBuilder, FGlobalShaderMap* ShaderMap, FRayTracingLightGrid* LightGridParameters, const FRTLightingData* Lights)
 {
-	OutSelectedLights.Empty();
+	// number of lights and infinite lights is provided by caller
+	const uint32 NumLights = LightGridParameters->SceneLightCount;
+	const uint32 NumInfiniteLights = LightGridParameters->SceneInfiniteLightCount;
+	
+	// Set all grid related parameters
+	const float Inf = std::numeric_limits<float>::infinity();
+	LightGridParameters->SceneLightsTranslatedBoundMin = FVector3f(+Inf, +Inf, +Inf);
+	LightGridParameters->SceneLightsTranslatedBoundMax = FVector3f(-Inf, -Inf, -Inf);
+	LightGridParameters->LightGrid = nullptr;
+	LightGridParameters->LightGridData = nullptr;
 
-	for (auto Light : Lights)
+	int NumFiniteLights = NumLights - NumInfiniteLights;
+	if (NumFiniteLights == 0)
 	{
-		const bool bHasStaticLighting = Light.LightSceneInfo->Proxy->HasStaticLighting() && Light.LightSceneInfo->IsPrecomputedLightingValid();
-		const bool bAffectReflection = Light.LightSceneInfo->Proxy->AffectReflection();
-		if (bHasStaticLighting || !bAffectReflection) continue;
-
-		OutSelectedLights.Add(Light.LightSceneInfo->Id);
-
-		if (OutSelectedLights.Num() >= RAY_TRACING_LIGHT_COUNT_MAXIMUM) break;
+		// light grid is not needed - just hookup dummy data and exit
+		LightGridParameters->LightGridResolution = 0;
+		LightGridParameters->LightGridMaxCount = 0;
+		LightGridParameters->LightGridAxis = 0;
+		LightGridParameters->LightGrid = GraphBuilder.RegisterExternalTexture(GSystemTextures.BlackDummy);
+		FRDGBuffer* LightGridData = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), 1), TEXT("RayTracing.LightGridData"));
+		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(LightGridData, PF_R32_UINT), 0);
+		LightGridParameters->LightGridData = GraphBuilder.CreateSRV(LightGridData, PF_R32_UINT);
+		return;
 	}
-}
-
-static int32 GetCellsPerDim()
-{
-	// round to next even as the structure relies on symmetry for address computations
-	return (FMath::Max(2, CVarRayTracingLightingCells.GetValueOnRenderThread()) + 1) & (~1); 
-}
-
-static void CreateRaytracingLightCullingStructure(
-	FRHICommandListImmediate& RHICmdList,
-	const TSparseArray<FLightSceneInfoCompact>& Lights,
-	const FViewInfo& View,
-	const TArray<int32>& LightIndices,
-	FRayTracingLightData& OutLightingData)
-{
-	const int32 NumLightsToUse = LightIndices.Num();
-
-	struct FCullRecord
+	// if we have some finite lights -- build a light grid
+	check(NumFiniteLights > 0);
+	// get bounding box of all finite lights
+	const FRTLightingData* FiniteLights = Lights + NumInfiniteLights;
+	for (int Index = 0; Index < NumFiniteLights; Index++)
 	{
-		uint32 NumLights;
-		uint32 Offset;
-		uint32 Unused1;
-		uint32 Unused2;
-	};
+		const FRTLightingData& Light = FiniteLights[Index];
+		FVector3f Lo = FVector3f(-Inf, -Inf, -Inf);
+		FVector3f Hi = FVector3f( Inf,  Inf,  Inf);
 
-	const int32 CellsPerDim = GetCellsPerDim();
-
-	TResourceArray<VectorRegister> RankedLights;
-	RankedLights.Reserve(NumLightsToUse);
-
-	// setup light vector array sorted by rank
-	for (int32 LightIndex = 0; LightIndex < NumLightsToUse; LightIndex++)
-	{
-		RankedLights.Push(Lights[LightIndices[LightIndex]].BoundingSphereVector);
-	}
-
-	// push null vector to prevent failure in RHICreateStructuredBuffer due to requesting a zero sized allocation
-	if (RankedLights.Num() == 0)
-	{
-		RankedLights.Push(VectorRegister{});
-	}
-
-	FRHIResourceCreateInfo CreateInfo;
-	CreateInfo.ResourceArray = &RankedLights;
-
-	FStructuredBufferRHIRef RayTracingCullLights = RHICreateStructuredBuffer(sizeof(RankedLights[0]),
-		RankedLights.GetResourceDataSize(),
-		BUF_Static | BUF_ShaderResource,
-		CreateInfo);
-	FShaderResourceViewRHIRef RankedLightsSRV = RHICreateShaderResourceView(RayTracingCullLights);
-
-	// Structured buffer version
-	FRHIResourceCreateInfo CullStructureCreateInfo;
-	CullStructureCreateInfo.DebugName = TEXT("RayTracingLightCullVolume");
-	OutLightingData.LightCullVolume = RHICreateStructuredBuffer(sizeof(FUintVector4), CellsPerDim*CellsPerDim*CellsPerDim* sizeof(FUintVector4), BUF_UnorderedAccess | BUF_ShaderResource, CullStructureCreateInfo);
-	OutLightingData.LightCullVolumeSRV = RHICmdList.CreateShaderResourceView(OutLightingData.LightCullVolume);
-	FUnorderedAccessViewRHIRef LightCullVolumeUAV = RHICmdList.CreateUnorderedAccessView(OutLightingData.LightCullVolume, false, false);
-
-	// ensure zero sized texture isn't requested  to prevent failure in Initialize
-	OutLightingData.LightIndices.Initialize(
-		sizeof(uint16),
-		FMath::Max(NumLightsToUse, 1) * CellsPerDim * CellsPerDim * CellsPerDim,
-		EPixelFormat::PF_R16_UINT,
-		BUF_UnorderedAccess,
-		TEXT("RayTracingLightIndices"));
-
-	{
-		auto* GlobalShaderMap = GetGlobalShaderMap(GMaxRHIFeatureLevel);
-		TShaderMapRef<FSetupRayTracingLightCullData> Shader(GlobalShaderMap);
-
+		const float Radius = 1.0f / Light.InvRadius;
+		const FVector3f Center = Light.TranslatedLightPosition;
+		const FVector3f Normal = -Light.Direction;
+		const FVector3f Disc = FVector3f(
+			FMath::Sqrt(FMath::Clamp(1 - Normal.X * Normal.X, 0.0f, 1.0f)),
+			FMath::Sqrt(FMath::Clamp(1 - Normal.Y * Normal.Y, 0.0f, 1.0f)),
+			FMath::Sqrt(FMath::Clamp(1 - Normal.Z * Normal.Z, 0.0f, 1.0f))
+		);
+		switch (Light.Type)
 		{
-			FSetupRayTracingLightCullData::FParameters Params;
-			Params.RankedLights = RankedLightsSRV;
-
-			Params.WorldPos = View.ViewMatrices.GetViewOrigin(); // View.ViewLocation;
-			Params.NumLightsToUse = NumLightsToUse;
-			Params.LightCullingVolume = LightCullVolumeUAV;
-			Params.LightIndices = OutLightingData.LightIndices.UAV;
-			Params.CellCount = CellsPerDim;
-			Params.CellScale = CVarRayTracingLightingCellSize.GetValueOnRenderThread() / 2.0f; // cells are based on pow2, and initial cell is 2^1, so scale is half min cell size
+			case LightType_Point:
 			{
-				SCOPED_GPU_STAT(RHICmdList, LightCullingVolumeCompute);
-				FComputeShaderUtils::Dispatch(RHICmdList, Shader, Params, FIntVector(CellsPerDim, CellsPerDim, CellsPerDim));
+				// simple sphere of influence
+				Lo = Center - FVector3f(Radius, Radius, Radius);
+				Hi = Center + FVector3f(Radius, Radius, Radius);
+				break;
+			}
+			case LightType_Spot:
+			{
+				// box around ray from light center to tip of the cone
+				const FVector3f Tip = Center + Normal * Radius;
+				Lo = FVector3f::Min(Center, Tip);
+				Hi = FVector3f::Max(Center, Tip);
+
+				// expand by disc around the farthest part of the cone
+				const float CosOuter = Light.SpotAngles.X;
+				const float SinOuter = FMath::Sqrt(1.0f - CosOuter * CosOuter);
+
+				Lo = FVector3f::Min(Lo, Center + Radius * (Normal * CosOuter - Disc * SinOuter));
+				Hi = FVector3f::Max(Hi, Center + Radius * (Normal * CosOuter + Disc * SinOuter));
+				break;
+			}
+			case LightType_Rect:
+			{
+				// quad bbox is the bbox of the disc +  the tip of the hemisphere
+				// TODO: is it worth trying to account for barndoors? seems unlikely to cut much empty space since the volume _inside_ the barndoor receives light
+				const FVector3f Tip = Center + Normal * Radius;
+				Lo = FVector3f::Min(Tip, Center - Radius * Disc);
+				Hi = FVector3f::Max(Tip, Center + Radius * Disc);
+				break;
+			}
+			default:
+			{
+				// non-finite lights should not appear in this case
+				checkSlow(false);
+				break;
 			}
 		}
+		LightGridParameters->SceneLightsTranslatedBoundMin = FVector3f::Min(LightGridParameters->SceneLightsTranslatedBoundMin, Lo);
+		LightGridParameters->SceneLightsTranslatedBoundMax = FVector3f::Max(LightGridParameters->SceneLightsTranslatedBoundMax, Hi);
 	}
 
+	const uint32 Resolution = FMath::RoundUpToPowerOfTwo(CVarRayTracingLightGridResolution.GetValueOnRenderThread());
+	const uint32 MaxCount = FMath::Clamp(CVarRayTracingLightGridMaxCount.GetValueOnRenderThread(), 1, NumFiniteLights);
+	LightGridParameters->LightGridResolution = Resolution;
+	LightGridParameters->LightGridMaxCount = MaxCount;
+
+	// pick the shortest axis
+	FVector3f Diag = LightGridParameters->SceneLightsTranslatedBoundMax - LightGridParameters->SceneLightsTranslatedBoundMin;
+	if (Diag.X < Diag.Y && Diag.X < Diag.Z)
 	{
-		FRHITransitionInfo Transitions[] =
-		{
-			FRHITransitionInfo(LightCullVolumeUAV.GetReference(), ERHIAccess::UAVCompute, ERHIAccess::SRVMask),
-			FRHITransitionInfo(OutLightingData.LightIndices.UAV.GetReference(), ERHIAccess::UAVCompute, ERHIAccess::SRVMask)
-		};
-		RHICmdList.Transition(MakeArrayView(Transitions, UE_ARRAY_COUNT(Transitions)));
+		LightGridParameters->LightGridAxis = 0;
+	}
+	else if (Diag.Y < Diag.Z)
+	{
+		LightGridParameters->LightGridAxis = 1;
+	}
+	else
+	{
+		LightGridParameters->LightGridAxis = 2;
 	}
 
+
+	// The light grid stores indexes in the range [0,NumLights-1]
+	EPixelFormat LightGridDataFormat = PF_R32_UINT;
+	size_t LightGridDataNumBytes = sizeof(uint32);
+	if (NumLights <= (MAX_uint8 + 1))
+	{
+		LightGridDataFormat = PF_R8_UINT;
+		LightGridDataNumBytes = sizeof(uint8);
+	}
+	else if (NumLights <= (MAX_uint16 + 1))
+	{
+		LightGridDataFormat = PF_R16_UINT;
+		LightGridDataNumBytes = sizeof(uint16);
+	}
+	// The texture stores a number of lights in the range [0,NumLights]
+	EPixelFormat TextureDataFormat = PF_R32_UINT;
+	if (NumLights <= MAX_uint8)
+	{
+		TextureDataFormat = PF_R8_UINT;
+	}
+	else if (NumLights <= MAX_uint16)
+	{
+		TextureDataFormat = PF_R16_UINT;
+	}
+
+
+	FRDGTextureDesc LightGridDesc = FRDGTextureDesc::Create2D(
+		FIntPoint(Resolution, Resolution),
+		TextureDataFormat,
+		FClearValueBinding::None,
+		TexCreate_ShaderResource | TexCreate_UAV);
+
+	// Run the build compute shader
+	FRDGTexture* LightGridTexture = GraphBuilder.CreateTexture(LightGridDesc, TEXT("RayTracing.LightGrid"), ERDGTextureFlags::None);
+	FRDGBuffer* LightGridData = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateBufferDesc(LightGridDataNumBytes, MaxCount * Resolution * Resolution), TEXT("RayTracing.LightGridData"));
+
+
+	FRayTracingBuildLightGridCS::FParameters* BuilderParams = GraphBuilder.AllocParameters<FRayTracingBuildLightGridCS::FParameters>();
+	BuilderParams->SceneLightCount = LightGridParameters->SceneLightCount;
+	BuilderParams->SceneInfiniteLightCount = LightGridParameters->SceneInfiniteLightCount;
+	BuilderParams->SceneLights = LightGridParameters->SceneLights;
+	BuilderParams->SceneLightsTranslatedBoundMin = LightGridParameters->SceneLightsTranslatedBoundMin;
+	BuilderParams->SceneLightsTranslatedBoundMax = LightGridParameters->SceneLightsTranslatedBoundMax;
+	BuilderParams->LightGridResolution = LightGridParameters->LightGridResolution;
+	BuilderParams->LightGridMaxCount = LightGridParameters->LightGridMaxCount;
+	BuilderParams->LightGridAxis = LightGridParameters->LightGridAxis;
+	BuilderParams->RWLightGrid = GraphBuilder.CreateUAV(LightGridTexture);
+	BuilderParams->RWLightGridData = GraphBuilder.CreateUAV(LightGridData, LightGridDataFormat);
+
+	TShaderMapRef<FRayTracingBuildLightGridCS> ComputeShader(ShaderMap);
+	FComputeShaderUtils::AddPass(
+		GraphBuilder,
+		RDG_EVENT_NAME("Light Grid Create (%u lights)", NumFiniteLights),
+		ComputeShader,
+		BuilderParams,
+		FComputeShaderUtils::GetGroupCount(FIntPoint(Resolution, Resolution), FComputeShaderUtils::kGolden2DGroupSize));
+
+	// hookup to the actual rendering pass
+	LightGridParameters->LightGrid = LightGridTexture;
+	LightGridParameters->LightGridData = GraphBuilder.CreateSRV(LightGridData, LightGridDataFormat);
 }
 
-
-static void SetupRaytracingLightDataPacked(
-	FRHICommandListImmediate& RHICmdList,
-	const TSparseArray<FLightSceneInfoCompact>& Lights,
-	const TArray<int32>& LightIndices,
-	const FViewInfo& View,
-	FRaytracingLightDataPacked* LightData,
-	TResourceArray<FRTLightingData>& LightDataArray)
+static bool ShouldIncludeRayTracingLight(const FLightSceneInfoCompact& Light)
 {
-	TMap<UTextureLightProfile*, int32> IESLightProfilesMap;
-	TMap<FRHITexture*, uint32> RectTextureMap;
+	const bool bHasStaticLighting = Light.LightSceneInfo->Proxy->HasStaticLighting() && Light.LightSceneInfo->IsPrecomputedLightingValid();
+	const bool bAffectReflection = Light.LightSceneInfo->Proxy->AffectReflection();
+	return !bHasStaticLighting && bAffectReflection;
+}
 
-	LightData->Count = 0;
-	LightData->LTCMatTexture = GSystemTextures.LTCMat->GetRenderTargetItem().ShaderResourceTexture;
-	LightData->LTCMatSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
-	LightData->LTCAmpTexture = GSystemTextures.LTCAmp->GetRenderTargetItem().ShaderResourceTexture;
-	LightData->LTCAmpSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+TRDGUniformBufferRef<FRayTracingLightGrid> CreateRayTracingLightData(
+	FRDGBuilder& GraphBuilder,
+	const FScene* Scene,
+	const FSceneView& View,
+	FGlobalShaderMap* ShaderMap,
+	bool bBuildLightGrid)
+{
+	FRayTracingLightGrid* LightGridParameters = GraphBuilder.AllocParameters<FRayTracingLightGrid>();
 
-	FTextureRHIRef DymmyWhiteTexture = GWhiteTexture->TextureRHI;
-	LightData->RectLightTexture0 = DymmyWhiteTexture;
-	LightData->RectLightTexture1 = DymmyWhiteTexture;
-	LightData->RectLightTexture2 = DymmyWhiteTexture;
-	LightData->RectLightTexture3 = DymmyWhiteTexture;
-	LightData->RectLightTexture4 = DymmyWhiteTexture;
-	LightData->RectLightTexture5 = DymmyWhiteTexture;
-	LightData->RectLightTexture6 = DymmyWhiteTexture;
-	LightData->RectLightTexture7 = DymmyWhiteTexture;
-	static constexpr uint32 MaxRectLightTextureSlos = 8;
-	static constexpr uint32 InvalidTextureIndex = 99; // #dxr_todo: share this definition with ray tracing shaders
-
+	if (bBuildLightGrid)
 	{
-		// IES profiles
-		FRHITexture* IESTextureRHI = nullptr;
-		float IESInvProfileCount = 1.0f;
+		const FScene::FLightSceneInfoCompactSparseArray& Lights = Scene->Lights;
 
-		if (View.IESLightProfileResource && View.IESLightProfileResource->GetIESLightProfilesCount())
+		// Count the number of lights we want to include by type
+		int NumLightsByType[LightType_MAX] = {};
+		for (const FLightSceneInfoCompact& Light : Lights)
 		{
-			LightData->IESLightProfileTexture = View.IESLightProfileResource->GetTexture();
-
-			uint32 ProfileCount = View.IESLightProfileResource->GetIESLightProfilesCount();
-			IESInvProfileCount = ProfileCount ? 1.f / static_cast<float>(ProfileCount) : 0.f;
-		}
-		else
-		{
-			LightData->IESLightProfileTexture = GWhiteTexture->TextureRHI;
+			if (!ShouldIncludeRayTracingLight(Light))
+				continue;
+			check(Light.LightType < LightType_MAX);
+			NumLightsByType[Light.LightType]++;
 		}
 
-		LightData->IESLightProfileInvCount = IESInvProfileCount;
-		LightData->IESLightProfileTextureSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
-	}
-
-	for (auto LightIndex : LightIndices)
-	{
-		auto Light = Lights[LightIndex];
-		const bool bHasStaticLighting = Light.LightSceneInfo->Proxy->HasStaticLighting() && Light.LightSceneInfo->IsPrecomputedLightingValid();
-		const bool bAffectReflection = Light.LightSceneInfo->Proxy->AffectReflection();
-		if (bHasStaticLighting || !bAffectReflection) continue;
-
-		FLightShaderParameters LightParameters;
-		Light.LightSceneInfo->Proxy->GetLightShaderParameters(LightParameters);
-
-		if (Light.LightSceneInfo->Proxy->IsInverseSquared())
+		// Figure out offset in the target light buffer where each light type will start
+		int LightTypeOffsets[LightType_MAX + 1];
+		LightTypeOffsets[0] = 0;
+		for (int TypeIndex = 1; TypeIndex <= LightType_MAX; TypeIndex++)
 		{
-			LightParameters.FalloffExponent = 0;
+			LightTypeOffsets[TypeIndex] = LightTypeOffsets[TypeIndex - 1] + NumLightsByType[TypeIndex - 1];
 		}
 
-		int32 IESLightProfileIndex = INDEX_NONE;
-		if (View.Family->EngineShowFlags.TexturedLightProfiles)
+		LightGridParameters->SceneLightCount = LightTypeOffsets[LightType_MAX];
+
+		FRDGUploadData<FRTLightingData> LightDataArray(GraphBuilder, LightGridParameters->SceneLightCount);
+
+		const FRayTracingLightFunctionMap* RayTracingLightFunctionMap = GraphBuilder.Blackboard.Get<FRayTracingLightFunctionMap>();
+		for (const FLightSceneInfoCompact& Light : Lights)
 		{
-			UTextureLightProfile* IESLightProfileTexture = Light.LightSceneInfo->Proxy->GetIESTexture();
-			if (IESLightProfileTexture)
+			if (!ShouldIncludeRayTracingLight(Light))
+				continue;
+
+			FLightRenderParameters LightParameters;
+			Light.LightSceneInfo->Proxy->GetLightShaderParameters(LightParameters);
+
+			if (Light.LightSceneInfo->Proxy->IsInverseSquared())
 			{
-				int32* IndexFound = IESLightProfilesMap.Find(IESLightProfileTexture);
-				if (!IndexFound)
+				LightParameters.FalloffExponent = 0;
+			}
+
+			// Figure out where in the target light array this light goes (so that all lights will be sorted by type)
+			int32 Offset = LightTypeOffsets[Light.LightType];
+			LightTypeOffsets[Light.LightType]++; // increment offset for next light
+
+
+			FRTLightingData& LightDataElement = LightDataArray[Offset];
+
+			LightDataElement.Type = Light.LightType;
+
+			LightDataElement.Direction = LightParameters.Direction;
+			LightDataElement.TranslatedLightPosition = FVector3f(LightParameters.WorldPosition + View.ViewMatrices.GetPreViewTranslation());
+			LightDataElement.LightColor = FVector3f(LightParameters.Color) * LightParameters.GetLightExposureScale(View.GetLastEyeAdaptationExposure());
+			LightDataElement.Tangent = LightParameters.Tangent;
+
+			// Ray tracing should compute fade parameters ignoring lightmaps
+			const FVector2D FadeParams = Light.LightSceneInfo->Proxy->GetDirectionalLightDistanceFadeParameters(View.GetFeatureLevel(), false, View.MaxShadowCascades);
+			const FVector2D DistanceFadeMAD = { FadeParams.Y, -FadeParams.X * FadeParams.Y };
+
+			LightDataElement.SpotAngles = LightParameters.SpotAngles;
+			LightDataElement.DistanceFadeMAD = FVector2f(DistanceFadeMAD);
+
+			LightDataElement.InvRadius = LightParameters.InvRadius;
+			LightDataElement.SpecularScale = LightParameters.SpecularScale;
+			LightDataElement.FalloffExponent = LightParameters.FalloffExponent;
+			LightDataElement.SourceRadius = LightParameters.SourceRadius;
+			LightDataElement.SourceLength = LightParameters.SourceLength;
+			LightDataElement.SoftSourceRadius = LightParameters.SoftSourceRadius;
+			LightDataElement.RectLightBarnCosAngle = LightParameters.RectLightBarnCosAngle;
+			LightDataElement.RectLightBarnLength = LightParameters.RectLightBarnLength;
+			LightDataElement.IESAtlasIndex = LightParameters.IESAtlasIndex;
+			LightDataElement.RectLightAtlasUVOffset[0] = LightParameters.RectLightAtlasUVOffset.X;
+			LightDataElement.RectLightAtlasUVOffset[1] = LightParameters.RectLightAtlasUVOffset.Y;
+			LightDataElement.RectLightAtlasUVScale[0] = LightParameters.RectLightAtlasUVScale.X;
+			LightDataElement.RectLightAtlasUVScale[1] = LightParameters.RectLightAtlasUVScale.Y;
+			LightDataElement.RectLightAtlasMaxLevel = LightParameters.RectLightAtlasMaxLevel;
+			LightDataElement.LightMissShaderIndex = RAY_TRACING_MISS_SHADER_SLOT_LIGHTING;
+
+			// Stuff directional light's shadow angle factor into a RectLight parameter
+			if (Light.LightType == LightType_Directional)
+			{
+				LightDataElement.RectLightBarnCosAngle = Light.LightSceneInfo->Proxy->GetShadowSourceAngleFactor();
+			}
+
+			// NOTE: This map will be empty if the light functions are disabled for some reason
+			if (RayTracingLightFunctionMap)
+			{
+				const int32* LightFunctionIndex = RayTracingLightFunctionMap->Find(Light.LightSceneInfo);
+				if (LightFunctionIndex)
 				{
-					IESLightProfileIndex = IESLightProfilesMap.Add(IESLightProfileTexture, IESLightProfilesMap.Num());
-				}
-				else
-				{
-					IESLightProfileIndex = *IndexFound;
+					check(uint32(*LightFunctionIndex) > RAY_TRACING_MISS_SHADER_SLOT_LIGHTING);
+					check(uint32(*LightFunctionIndex) < Scene->RayTracingScene.NumMissShaderSlots);
+					LightDataElement.LightMissShaderIndex = *LightFunctionIndex;
 				}
 			}
 		}
+		// last light type should not match the total scene light count
+		check(LightGridParameters->SceneLightCount == LightTypeOffsets[LightType_MAX - 1]);
 
-		FRTLightingData LightDataElement;
-
-		LightDataElement.Type = Light.LightType;
-		LightDataElement.LightProfileIndex = IESLightProfileIndex;
-		LightDataElement.RectLightTextureIndex = InvalidTextureIndex;
-
-		for (int32 Element = 0; Element < 3; Element++)
-		{
-			LightDataElement.Direction[Element] = LightParameters.Direction[Element];
-			LightDataElement.LightPosition[Element] = LightParameters.Position[Element];
-			LightDataElement.LightColor[Element] = LightParameters.Color[Element];
-			LightDataElement.Tangent[Element] = LightParameters.Tangent[Element];
-		}
-
-		// Ray tracing should compute fade parameters ignoring lightmaps
-		const FVector2D FadeParams = Light.LightSceneInfo->Proxy->GetDirectionalLightDistanceFadeParameters(View.GetFeatureLevel(), false, View.MaxShadowCascades);
-		const FVector2D DistanceFadeMAD = { FadeParams.Y, -FadeParams.X * FadeParams.Y };
-
-		for (int32 Element = 0; Element < 2; Element++)
-		{
-			LightDataElement.SpotAngles[Element] = LightParameters.SpotAngles[Element];
-			LightDataElement.DistanceFadeMAD[Element] = DistanceFadeMAD[Element];
-		}
-
-		LightDataElement.InvRadius = LightParameters.InvRadius;
-		LightDataElement.SpecularScale = LightParameters.SpecularScale;
-		LightDataElement.FalloffExponent = LightParameters.FalloffExponent;
-		LightDataElement.SourceRadius = LightParameters.SourceRadius;
-		LightDataElement.SourceLength = LightParameters.SourceLength;
-		LightDataElement.SoftSourceRadius = LightParameters.SoftSourceRadius;
-		LightDataElement.RectLightBarnCosAngle = LightParameters.RectLightBarnCosAngle;
-		LightDataElement.RectLightBarnLength = LightParameters.RectLightBarnLength;
-		LightDataElement.Pad = 0;
-
-		// Stuff directional light's shadow angle factor into a RectLight parameter
-		if (Light.LightType == LightType_Directional)
-		{
-			LightDataElement.RectLightBarnCosAngle = Light.LightSceneInfo->Proxy->GetShadowSourceAngleFactor();
-		}
-
-		LightDataArray.Add(LightDataElement);
-
-		const bool bRequireTexture = Light.LightType == ELightComponentType::LightType_Rect && LightParameters.SourceTexture;
-		uint32 RectLightTextureIndex = InvalidTextureIndex;
-		if (bRequireTexture)
-		{
-			const uint32* IndexFound = RectTextureMap.Find(LightParameters.SourceTexture);
-			if (!IndexFound)
-			{
-				if (RectTextureMap.Num() < MaxRectLightTextureSlos)
-				{
-					RectLightTextureIndex = RectTextureMap.Num();
-					RectTextureMap.Add(LightParameters.SourceTexture, RectLightTextureIndex);
-				}
-			}
-			else
-			{
-				RectLightTextureIndex = *IndexFound;
-			}
-		}
-
-		if (RectLightTextureIndex != InvalidTextureIndex)
-		{
-			LightDataArray[LightData->Count].RectLightTextureIndex = RectLightTextureIndex;
-			switch (RectLightTextureIndex)
-			{
-			case 0: LightData->RectLightTexture0 = LightParameters.SourceTexture; break;
-			case 1: LightData->RectLightTexture1 = LightParameters.SourceTexture; break;
-			case 2: LightData->RectLightTexture2 = LightParameters.SourceTexture; break;
-			case 3: LightData->RectLightTexture3 = LightParameters.SourceTexture; break;
-			case 4: LightData->RectLightTexture4 = LightParameters.SourceTexture; break;
-			case 5: LightData->RectLightTexture5 = LightParameters.SourceTexture; break;
-			case 6: LightData->RectLightTexture6 = LightParameters.SourceTexture; break;
-			case 7: LightData->RectLightTexture7 = LightParameters.SourceTexture; break;
-			}
-		}
-
-		LightData->Count++;
-
-		if (LightData->Count >= RAY_TRACING_LIGHT_COUNT_MAXIMUM) break;
+		LightGridParameters->SceneLights = GraphBuilder.CreateSRV(CreateStructuredBuffer(GraphBuilder, TEXT("LightBuffer"), LightDataArray));
+		LightGridParameters->SceneInfiniteLightCount = NumLightsByType[LightType_Directional];
+		PrepareLightGrid(GraphBuilder, ShaderMap, LightGridParameters, LightDataArray.GetData());
 	}
-
-	// Update IES light profiles texture 
-	// TODO (Move to a shared place)
-	if (View.IESLightProfileResource != nullptr && IESLightProfilesMap.Num() > 0)
+	else
 	{
-		TArray<UTextureLightProfile*, SceneRenderingAllocator> IESProfilesArray;
-		IESProfilesArray.AddUninitialized(IESLightProfilesMap.Num());
-		for (auto It = IESLightProfilesMap.CreateIterator(); It; ++It)
-		{
-			IESProfilesArray[It->Value] = It->Key;
-		}
-
-		View.IESLightProfileResource->BuildIESLightProfilesTexture(RHICmdList, IESProfilesArray);
-	}
-}
-
-
-FRayTracingLightData CreateRayTracingLightData(
-	FRHICommandListImmediate& RHICmdList,
-	const TSparseArray<FLightSceneInfoCompact>& Lights,
-	const FViewInfo& View, EUniformBufferUsage Usage)
-{
-	FRayTracingLightData LightingData;
-	FRaytracingLightDataPacked LightData;
-	TResourceArray<FRTLightingData> LightDataArray;
-	TArray<int32> LightIndices;
-
-	SelectRaytracingLights(Lights, View, LightIndices);
-
-	// Create light culling volume
-	CreateRaytracingLightCullingStructure(RHICmdList, Lights, View, LightIndices, LightingData);
-	LightData.CellCount = GetCellsPerDim();
-	LightData.CellScale = CVarRayTracingLightingCellSize.GetValueOnRenderThread() / 2.0f;
-	LightData.LightCullingVolume = LightingData.LightCullVolumeSRV;
-	LightData.LightIndices = LightingData.LightIndices.SRV;
-
-	SetupRaytracingLightDataPacked(RHICmdList, Lights, LightIndices, View, &LightData, LightDataArray);
-
-	check(LightData.Count == LightDataArray.Num());
-
-	// need at least one element
-	if (LightDataArray.Num() == 0)
-	{
-		LightDataArray.AddZeroed(1);
+		LightGridParameters->SceneLightCount = 0;
+		LightGridParameters->SceneInfiniteLightCount = 0;
+		LightGridParameters->SceneLightsTranslatedBoundMin = FVector3f::ZeroVector;
+		LightGridParameters->SceneLightsTranslatedBoundMax = FVector3f::ZeroVector;
+		LightGridParameters->SceneLights = GraphBuilder.CreateSRV(GSystemTextures.GetDefaultBuffer(GraphBuilder, sizeof(uint32), 0u), PF_R32_UINT);
+		LightGridParameters->LightGrid = GSystemTextures.GetDefaultTexture2D(GraphBuilder, PF_R32_UINT, 0u);
+		LightGridParameters->LightGridData = GraphBuilder.CreateSRV(GSystemTextures.GetDefaultStructuredBuffer(GraphBuilder, sizeof(uint32), 0u), PF_R32_UINT);
+		LightGridParameters->LightGridResolution = 0;
+		LightGridParameters->LightGridMaxCount = 0;
+		LightGridParameters->LightGridAxis = 0;
 	}
 
-	// This buffer might be best placed as an element of the LightData uniform buffer
-	FRHIResourceCreateInfo CreateInfo;
-	CreateInfo.ResourceArray = &LightDataArray;
-
-	LightingData.LightBuffer = RHICreateStructuredBuffer(sizeof(FUintVector4), LightDataArray.GetResourceDataSize(), BUF_Static | BUF_ShaderResource, CreateInfo);
-	LightingData.LightBufferSRV = RHICreateShaderResourceView(LightingData.LightBuffer);
-
-	LightData.LightDataBuffer = LightingData.LightBufferSRV;
-	LightData.SSProfilesTexture = View.RayTracingSubSurfaceProfileSRV;
-
-	LightingData.UniformBuffer = CreateUniformBufferImmediate(LightData, Usage);
-
-	return LightingData;
+	return GraphBuilder.CreateUniformBuffer(LightGridParameters);
 }
 
 class FRayTracingLightingMS : public FGlobalShader
@@ -419,22 +377,245 @@ class FRayTracingLightingMS : public FGlobalShader
 	DECLARE_GLOBAL_SHADER(FRayTracingLightingMS);
 	SHADER_USE_ROOT_PARAMETER_STRUCT(FRayTracingLightingMS, FGlobalShader)
 
-		BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-		SHADER_PARAMETER_STRUCT_REF(FRaytracingLightDataPacked, LightDataPacked)
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FRayTracingLightGrid, LightDataPacked)
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, ViewUniformBuffer)
-		END_SHADER_PARAMETER_STRUCT()
+	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 	{
 		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
 	}
+
+	static ERayTracingPayloadType GetRayTracingPayloadType(const int32 PermutationId)
+	{
+		return ERayTracingPayloadType::RayTracingMaterial;
+	}
 };
 
 IMPLEMENT_GLOBAL_SHADER(FRayTracingLightingMS, "/Engine/Private/RayTracing/RayTracingLightingMS.usf", "RayTracingLightingMS", SF_RayMiss);
 
-FRHIRayTracingShader* FDeferredShadingSceneRenderer::GetRayTracingLightingMissShader(FViewInfo& View)
+/**
+ * FLightFunctionParametersRayTracing
+ * Global constant buffer derived from loose parameters of standard light function materials. Note that it lacks
+ * the screen to world transform, as the RT version never have screen as a reference frame
+ * This is nearly identical to the one found in Lumen and ultimately should be converted to a shared solution
+ *
+ * function to create the constant buffer is deirved from the LightFunctionMaterial SetParameters code
+ */
+BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FLightFunctionParametersRayTracing, )
+	SHADER_PARAMETER(FMatrix44f, LightFunctionTranslatedWorldToLight)
+	SHADER_PARAMETER(FVector4f, LightFunctionParameters)
+	SHADER_PARAMETER(FVector3f, LightFunctionParameters2)
+END_GLOBAL_SHADER_PARAMETER_STRUCT()
+
+IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FLightFunctionParametersRayTracing, "RaytracingLightFunctionParameters");
+
+static TUniformBufferRef<FLightFunctionParametersRayTracing> CreateLightFunctionParametersBufferRT(
+	const FLightSceneInfo* LightSceneInfo,
+	const FSceneView& View,
+	EUniformBufferUsage Usage)
 {
-	return View.ShaderMap->GetShader<FRayTracingLightingMS>().GetRayTracingShader();
+	FLightFunctionParametersRayTracing LightFunctionParameters;
+
+	const FVector Scale = LightSceneInfo->Proxy->GetLightFunctionScale();
+	// Switch x and z so that z of the user specified scale affects the distance along the light direction
+	const FVector InverseScale = FVector(1.f / Scale.Z, 1.f / Scale.Y, 1.f / Scale.X);
+	const FMatrix WorldToLight = LightSceneInfo->Proxy->GetWorldToLight() * FScaleMatrix(FVector(InverseScale));
+
+	LightFunctionParameters.LightFunctionTranslatedWorldToLight = FMatrix44f(FTranslationMatrix(-View.ViewMatrices.GetPreViewTranslation()) * WorldToLight);
+
+	const bool bIsSpotLight = LightSceneInfo->Proxy->GetLightType() == LightType_Spot;
+	const bool bIsPointLight = LightSceneInfo->Proxy->GetLightType() == LightType_Point;
+	const float TanOuterAngle = bIsSpotLight ? FMath::Tan(LightSceneInfo->Proxy->GetOuterConeAngle()) : 1.0f;
+
+	// should this match raster?
+	const float ShadowFadeFraction = 1.0f;
+
+	LightFunctionParameters.LightFunctionParameters = FVector4f(TanOuterAngle, ShadowFadeFraction, bIsSpotLight ? 1.0f : 0.0f, bIsPointLight ? 1.0f : 0.0f);
+
+	// do we need this?
+	const bool bRenderingPreviewShadowIndicator = false;
+
+	LightFunctionParameters.LightFunctionParameters2 = FVector3f(
+		LightSceneInfo->Proxy->GetLightFunctionFadeDistance(),
+		LightSceneInfo->Proxy->GetLightFunctionDisabledBrightness(),
+		bRenderingPreviewShadowIndicator ? 1.0f : 0.0f);
+
+	return CreateUniformBufferImmediate(LightFunctionParameters, Usage);
+}
+
+/**
+ * Generic light function for ray tracing compilable as miss shader with lighting
+ */
+class FLightFunctionRayTracingShader : public FMaterialShader
+{
+	DECLARE_SHADER_TYPE(FLightFunctionRayTracingShader, Material);
+public:
+
+	/**
+	  * Makes sure only shaders for materials that are explicitly flagged
+	  * as 'UsedAsLightFunction' in the Material Editor gets compiled into
+	  * the shader cache.
+	  */
+	static bool ShouldCompilePermutation(const FMaterialShaderPermutationParameters& Parameters)
+	{
+		return Parameters.MaterialParameters.MaterialDomain == MD_LightFunction && ShouldCompileRayTracingShadersForProject(Parameters.Platform);
+	}
+
+	FLightFunctionRayTracingShader() {}
+	FLightFunctionRayTracingShader(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
+		: FMaterialShader(Initializer)
+	{
+		LightMaterialsParameter.Bind(Initializer.ParameterMap, TEXT("RaytracingLightFunctionParameters"));
+		LightDataPacked.Bind(Initializer.ParameterMap, TEXT("RaytracingLightGridData"));
+	}
+
+	void GetShaderBindings(
+		const FScene* Scene,
+		ERHIFeatureLevel::Type FeatureLevel,
+		const FMaterialRenderProxy& MaterialRenderProxy,
+		const FMaterial& Material,
+		const FViewInfo& View,
+		const TUniformBufferRef<FDeferredLightUniformStruct>& DeferredLightBuffer,
+		const TUniformBufferRef<FLightFunctionParametersRayTracing>& LightFunctionParameters,
+		const TUniformBufferRef<FRayTracingLightGrid>& LightGridBuffer,
+		FMeshDrawSingleShaderBindings& ShaderBindings) const
+	{
+		FMaterialShader::GetShaderBindings(Scene, FeatureLevel, MaterialRenderProxy, Material, ShaderBindings);
+
+		// Bind view
+		ShaderBindings.Add(GetUniformBufferParameter<FViewUniformShaderParameters>(), View.ViewUniformBuffer);
+
+		// Bind light parameters
+		ShaderBindings.Add(GetUniformBufferParameter<FDeferredLightUniformStruct>(), DeferredLightBuffer);
+
+		//bind Lightfunction parameters
+		ShaderBindings.Add(LightMaterialsParameter, LightFunctionParameters);
+
+		//bind light data
+		ShaderBindings.Add(LightDataPacked, LightGridBuffer);
+	}
+
+	static void ModifyCompilationEnvironment(const FMaterialShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		OutEnvironment.SetDefine(TEXT("SUPPORT_LIGHT_FUNCTION"), 1);
+		FMaterialShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+	}
+
+	static ERayTracingPayloadType GetRayTracingPayloadType(const int32 PermutationId)
+	{
+		return ERayTracingPayloadType::RayTracingMaterial;
+	}
+
+private:
+
+	LAYOUT_FIELD(FShaderUniformBufferParameter, LightMaterialsParameter);
+	LAYOUT_FIELD(FShaderUniformBufferParameter, LightDataPacked);
+};
+
+IMPLEMENT_MATERIAL_SHADER_TYPE(, FLightFunctionRayTracingShader, TEXT("/Engine/Private/RayTracing/RayTracingLightingMS.usf"), TEXT("RayTracingLightingMS"), SF_RayMiss);
+
+FRayTracingLightFunctionMap GatherLightFunctionLights(FScene* Scene, const FEngineShowFlags EngineShowFlags, ERHIFeatureLevel::Type InFeatureLevel)
+{
+	checkf(EngineShowFlags.LightFunctions, TEXT("This function should not be called if light functions are disabled"));
+
+	// gives control over lighting functions in raytraced effects, independently of the show flag (for performance testing / debug)
+	if (CVarRayTracingLightFunction.GetValueOnRenderThread() == 0)
+	{
+		return {};
+	}
+
+	FRayTracingLightFunctionMap RayTracingLightFunctionMap;
+	for (const FLightSceneInfoCompact& Light : Scene->Lights)
+	{
+		FLightSceneInfo* LightSceneInfo = Light.LightSceneInfo;
+		auto MaterialProxy = LightSceneInfo->Proxy->GetLightFunctionMaterial();
+		if (MaterialProxy)
+		{
+			const FMaterialRenderProxy* FallbackMaterialRenderProxyPtr = nullptr;
+			const FMaterial& Material = MaterialProxy->GetMaterialWithFallback(InFeatureLevel, FallbackMaterialRenderProxyPtr);
+			if (Material.IsLightFunction())
+			{
+				const FMaterialShaderMap* MaterialShaderMap = Material.GetRenderingThreadShaderMap();
+				// Getting the shader here has the side-effect of populating the raytracing miss shader library which is used when building the raytracing pipeline
+				MaterialShaderMap->GetShader<FLightFunctionRayTracingShader>().GetRayTracingShader();
+
+				int32 Index = Scene->RayTracingScene.NumMissShaderSlots;
+				Scene->RayTracingScene.NumMissShaderSlots++;
+				RayTracingLightFunctionMap.Add(LightSceneInfo, Index);
+			}
+		}
+	}
+	return RayTracingLightFunctionMap;
+}
+
+static void BindLightFunction(
+	FRHICommandList& RHICmdList,
+	const FScene* Scene,
+	const FViewInfo& View,
+	const FMaterial& Material,
+	const FMaterialRenderProxy& MaterialRenderProxy,
+	const TUniformBufferRef<FDeferredLightUniformStruct>& DeferredLightBuffer,
+	const TUniformBufferRef<FLightFunctionParametersRayTracing>& LightFunctionParameters,
+	int32 Index
+	)
+{
+	FRHIRayTracingScene* RTScene = View.GetRayTracingSceneChecked();
+	FRayTracingPipelineState* Pipeline = View.RayTracingMaterialPipeline;
+	const FMaterialShaderMap* MaterialShaderMap = Material.GetRenderingThreadShaderMap();
+
+	TShaderRef<FLightFunctionRayTracingShader> Shader = MaterialShaderMap->GetShader<FLightFunctionRayTracingShader>();
+
+	FMeshDrawShaderBindings ShaderBindings;
+	ShaderBindings.Initialize(Shader);
+
+	FMeshDrawSingleShaderBindings SingleShaderBindings = ShaderBindings.GetSingleShaderBindings( SF_RayMiss);
+
+	Shader->GetShaderBindings(Scene, Scene->GetFeatureLevel(), MaterialRenderProxy, Material, View, DeferredLightBuffer, LightFunctionParameters, View.RayTracingLightGridUniformBuffer->GetRHIRef(), SingleShaderBindings);
+
+	int32 MissShaderPipelineIndex = FindRayTracingMissShaderIndex(View.RayTracingMaterialPipeline, Shader.GetRayTracingShader(), true);
+
+	ShaderBindings.SetRayTracingShaderBindingsForMissShader(RHICmdList, RTScene, Pipeline, MissShaderPipelineIndex, Index);
+}
+
+FRHIRayTracingShader* GetRayTracingLightingMissShader(const FGlobalShaderMap* ShaderMap)
+{
+	return ShaderMap->GetShader<FRayTracingLightingMS>().GetRayTracingShader();
+}
+
+void BindLightFunctionShaders(
+	FRHICommandList& RHICmdList,
+	const FScene* Scene,
+	const FRayTracingLightFunctionMap* RayTracingLightFunctionMap,
+	const class FViewInfo& View)
+{
+	if (RayTracingLightFunctionMap == nullptr)
+	{
+		return;
+	}
+
+	for (const FRayTracingLightFunctionMap::ElementType& LightAndIndex : *RayTracingLightFunctionMap)
+	{
+		const FLightSceneInfo* LightSceneInfo = LightAndIndex.Key;
+
+		const FMaterialRenderProxy* MaterialProxy = LightSceneInfo->Proxy->GetLightFunctionMaterial();
+		check(MaterialProxy != nullptr);
+		// Catch the fallback material case
+		const FMaterialRenderProxy* FallbackMaterialRenderProxyPtr = nullptr;
+		const FMaterial& Material = MaterialProxy->GetMaterialWithFallback(Scene->GetFeatureLevel(), FallbackMaterialRenderProxyPtr);
+
+		check(Material.IsLightFunction());
+
+		const FMaterialRenderProxy& MaterialRenderProxy = FallbackMaterialRenderProxyPtr ? *FallbackMaterialRenderProxyPtr : *MaterialProxy;
+
+		//create the uniform buffers we need
+		TUniformBufferRef<FDeferredLightUniformStruct> DeferredLightBuffer = CreateUniformBufferImmediate(GetDeferredLightParameters(View, *LightSceneInfo), EUniformBufferUsage::UniformBuffer_SingleFrame);
+		TUniformBufferRef<FLightFunctionParametersRayTracing> LightFunctionParameters = CreateLightFunctionParametersBufferRT(LightSceneInfo, View, EUniformBufferUsage::UniformBuffer_SingleFrame);
+
+		int32 MissIndex = LightAndIndex.Value;
+		BindLightFunction(RHICmdList, Scene, View, Material, MaterialRenderProxy, DeferredLightBuffer, LightFunctionParameters, MissIndex);
+	}
 }
 
 template< typename ShaderClass>
@@ -458,7 +639,7 @@ static int32 BindParameters(const TShaderRef<ShaderClass>& Shader, typename Shad
 	int32 MaxUniformBufferUsed = -1;
 	for (int32 UniformBufferIndex = 0; UniformBufferIndex < NumUniformBuffers; UniformBufferIndex++)
 	{
-		const FShaderParameterInfo &Parameter = ParameterMap.UniformBuffers[UniformBufferIndex];
+		const FShaderUniformBufferParameterInfo Parameter = ParameterMap.UniformBuffers[UniformBufferIndex];
 		checkSlow(Parameter.BaseIndex < MaxParams);
 		const FRHIUniformBuffer* UniformBuffer = ResourceBinder.UniformBuffers[UniformBufferIndex];
 		if (Parameter.BaseIndex < MaxParams)
@@ -471,11 +652,22 @@ static int32 BindParameters(const TShaderRef<ShaderClass>& Shader, typename Shad
 	return MaxUniformBufferUsed + 1;
 }
 
+void FDeferredShadingSceneRenderer::SetupRayTracingDefaultMissShader(FRHICommandListImmediate& RHICmdList, const FViewInfo& View)
+{
+	int32 MissShaderPipelineIndex = FindRayTracingMissShaderIndex(View.RayTracingMaterialPipeline, GetRayTracingDefaultMissShader(View.ShaderMap), true);
+
+	RHICmdList.SetRayTracingMissShader(View.GetRayTracingSceneChecked(),
+		RAY_TRACING_MISS_SHADER_SLOT_DEFAULT,
+		View.RayTracingMaterialPipeline,
+		MissShaderPipelineIndex,
+		0, nullptr, 0);
+}
+
 void FDeferredShadingSceneRenderer::SetupRayTracingLightingMissShader(FRHICommandListImmediate& RHICmdList, const FViewInfo& View)
 {
 	FRayTracingLightingMS::FParameters MissParameters;
-	MissParameters.LightDataPacked = View.RayTracingLightData.UniformBuffer;
 	MissParameters.ViewUniformBuffer = View.ViewUniformBuffer;
+	MissParameters.LightDataPacked = View.RayTracingLightGridUniformBuffer;
 
 	static constexpr uint32 MaxUniformBuffers = UE_ARRAY_COUNT(FRayTracingShaderBindings::UniformBuffers);
 	const FRHIUniformBuffer* MissData[MaxUniformBuffers] = {};
@@ -483,10 +675,12 @@ void FDeferredShadingSceneRenderer::SetupRayTracingLightingMissShader(FRHIComman
 
 	int32 ParameterSlots = BindParameters(MissShader, MissParameters, MaxUniformBuffers, MissData);
 
-	RHICmdList.SetRayTracingMissShader(View.RayTracingScene.RayTracingSceneRHI,
-		RAY_TRACING_MISS_SHADER_SLOT_LIGHTING, // Shader slot in the scene
+	int32 MissShaderPipelineIndex = FindRayTracingMissShaderIndex(View.RayTracingMaterialPipeline, MissShader.GetRayTracingShader(), true);
+
+	RHICmdList.SetRayTracingMissShader(View.GetRayTracingSceneChecked(),
+		RAY_TRACING_MISS_SHADER_SLOT_LIGHTING,
 		View.RayTracingMaterialPipeline,
-		RAY_TRACING_MISS_SHADER_SLOT_LIGHTING, // Miss shader index in the pipeline
+		MissShaderPipelineIndex,
 		ParameterSlots, (FRHIUniformBuffer**)MissData, 0);
 }
 

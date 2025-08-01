@@ -16,6 +16,7 @@
 #include "Widgets/Layout/SScrollBar.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SComboButton.h"
+#include "Widgets/Layout/SSeparator.h"
 
 #define LOCTEXT_NAMESPACE "SHeaderRow"
 
@@ -24,14 +25,15 @@ class STableColumnHeader : public SCompoundWidget
 public:
 	 
 	SLATE_BEGIN_ARGS(STableColumnHeader)
-		: _Style( &FCoreStyle::Get().GetWidgetStyle<FTableColumnHeaderStyle>("TableView.Header.Column") )
+		: _Style( &FAppStyle::Get().GetWidgetStyle<FTableColumnHeaderStyle>("TableView.Header.Column") )
 		{}
 		SLATE_STYLE_ARGUMENT( FTableColumnHeaderStyle, Style )
 
 	SLATE_END_ARGS()
 
 	STableColumnHeader()
-		: SortMode( EColumnSortMode::None )
+		: InitialSortMode( EColumnSortMode::Ascending )
+		, SortMode( EColumnSortMode::None )
 		, SortPriority( EColumnSortPriority::Primary )
 		, OnSortModeChanged()
 		, ContextMenuContent( SNullWidget::NullWidget )
@@ -52,6 +54,7 @@ public:
 
 		Style = InArgs._Style;
 		ColumnId = Column.ColumnId;
+		InitialSortMode = Column.InitialSortMode;
 		SortMode = Column.SortMode;
 		SortPriority = Column.SortPriority;
 
@@ -60,21 +63,12 @@ public:
 
 		ComboVisibility = Column.HeaderComboVisibility;
 
-		FMargin AdjustedDefaultHeaderContentPadding = DefaultHeaderContentPadding;
-
 		TAttribute< FText > LabelText = Column.DefaultText;
-		TAttribute< FText > TooltipText = Column.DefaultTooltip;
-
 		if (Column.HeaderContent.Widget == SNullWidget::NullWidget)
 		{
 			if (!Column.DefaultText.IsSet())
 			{
 				LabelText = FText::FromString( Column.ColumnId.ToString() + TEXT("[LabelMissing]") );
-			}
-
-			if (!Column.DefaultTooltip.IsSet())
-			{
-				TooltipText = LabelText;
 			}
 		}
 
@@ -91,35 +85,70 @@ public:
 		{
 			PrimaryContent = 
 				SNew( SBox )
-				.Padding( OnSortModeChanged.IsBound() ? FMargin( 0, 2, 0, 2 ) : FMargin( 0, 4, 0, 4 ) )
+				.HeightOverride( 24.0f )
+				.Padding( 0.0f )
 				.VAlign( VAlign_Center )
 				[
-					SNew(STextBlock)
+					SNew( STextBlock )
+					.TextStyle( FAppStyle::Get(), "NormalText" )
 					.Text( LabelText )
-					.ToolTipText( TooltipText )
+					.OverflowPolicy(Column.OverflowPolicy)
 				];
 		}
 
 		if ( OnSortModeChanged.IsBound() )
 		{
 			//optional main button with the column's title. Used to toggle sorting modes.
-			PrimaryContent = SNew(SButton)
-			.ButtonStyle( FCoreStyle::Get(), "NoBorder" )
-			.ForegroundColor( FSlateColor::UseForeground() )
-			.ContentPadding( FMargin( 0, 2, 0, 2 ) )
-			.OnClicked(this, &STableColumnHeader::OnTitleClicked)
+			Box->AddSlot()
+			.FillWidth( 1.0f )
+			.HAlign( HAlign_Fill )
+			[
+				SNew( SButton )
+				.ButtonStyle( FAppStyle::Get(), "NoBorder" )
+				.ForegroundColor( FSlateColor::UseForeground() )
+				.OnClicked( this, &STableColumnHeader::OnTitleClicked )
+				.ContentPadding( 0.0f )
+				[
+					SNew(SBox)
+					.HAlign( Column.HeaderHAlignment )
+					.VAlign( Column.HeaderVAlignment )
+					[
+						SNew( SHorizontalBox )
+						+SHorizontalBox::Slot()
+						.AutoWidth()
+						.Padding( FMargin( 0.0f ) )
+						[
+							PrimaryContent
+						]
+						+SHorizontalBox::Slot()
+						.AutoWidth()
+						.HAlign( HAlign_Left )
+						.VAlign( VAlign_Center)
+						.Padding( FMargin( 4.0f, 0.0f, 0.0f, 0.0f) )
+						[
+							SNew( SImage )
+							.ColorAndOpacity( FSlateColor::UseForeground() )
+							.Image( this, &STableColumnHeader::GetSortingBrush )
+							.Visibility( this, &STableColumnHeader::GetSortModeVisibility )
+						]
+					]
+				]
+			];
+		}
+		else
+		{
+			Box->AddSlot()
+			.FillWidth( 1.0f )
+			.HAlign( Column.HeaderHAlignment )
+			.VAlign( Column.HeaderVAlignment )
 			[
 				PrimaryContent
 			];
 		}
-		
-		Box->AddSlot()
-		.FillWidth(1.0f)
-		[
-			PrimaryContent
-		];
 
-		if( Column.HeaderMenuContent.Widget != SNullWidget::NullWidget )
+		if( ComboVisibility != EHeaderComboVisibility::Never &&
+			(Column.HeaderMenuContent.Widget != SNullWidget::NullWidget ||
+			Column.OnGetMenuContent.IsBound()))
 		{
 			// Add Drop down menu button (only if menu content has been specified)
 			Box->AddSlot()
@@ -127,71 +156,80 @@ public:
 			[
 				SAssignNew( MenuOverlay, SOverlay )
 				.Visibility( this, &STableColumnHeader::GetMenuOverlayVisibility )
-				+SOverlay::Slot()
-				[
-					SNew( SSpacer )
-					.Size( FVector2D( 12.0f, 0 ) )
-				]
 
 				+SOverlay::Slot()
-				.Padding(FMargin(0,1,0,1))
 				[
 					SNew( SBorder )
-					.Padding( FMargin( 0, 0, AdjustedDefaultHeaderContentPadding.Right, 0 ) )
+					.Padding( FMargin( 0.0f ) )
 					.BorderImage( this, &STableColumnHeader::GetComboButtonBorderBrush )
 					[
-						SAssignNew( ComboButton, SComboButton)
+						SAssignNew( ComboButton, SComboButton )
 						.HasDownArrow(false)
-						.ButtonStyle( FCoreStyle::Get(), "NoBorder" )
+						.ButtonStyle( FAppStyle::Get(), "NoBorder" )
 						.ContentPadding( FMargin(0) )
 						.ButtonContent()
 						[
 							SNew( SSpacer )
 							.Size( FVector2D( 14.0f, 0 ) )
 						]
-						.MenuContent()
-						[
-							ContextMenuContent
-						]
 					]
 				]
 
 				+SOverlay::Slot()
-				.Padding(FMargin(0,0,0,2))
 				.HAlign( HAlign_Center )
-				.VAlign( VAlign_Bottom )
+				.VAlign( VAlign_Center )
 				[
-					SNew(SImage)
-					.Image( &Style->MenuDropdownImage )
-					.ColorAndOpacity( this, &STableColumnHeader::GetComboButtonTint )
-					.Visibility( EVisibility::HitTestInvisible )
+					SNew( SBox )
+					.HeightOverride( 18.0f )
+					.Padding( FMargin( 0.0f, -2.0f ) )
+					[
+						SNew( SImage )
+						.Image( &Style->MenuDropdownImage )
+						.ColorAndOpacity( this, &STableColumnHeader::GetComboButtonTint )
+						.Visibility( EVisibility::HitTestInvisible )
+					]
 				]
-			];		
-
-			AdjustedDefaultHeaderContentPadding.Right = 0;
-		}
-
-		Overlay->AddSlot( 1 )
-			.HAlign(HAlign_Center)
-			.VAlign( VAlign_Top )
-			.Padding( FMargin( 0, 2, 0, 0 ) )
-			[
-				SNew(SImage)
-				.Image( this, &STableColumnHeader::GetSortingBrush )
-				.Visibility( this, &STableColumnHeader::GetSortModeVisibility )
 			];
+
+			if (Column.HeaderMenuContent.Widget != SNullWidget::NullWidget)
+			{
+				ComboButton->SetMenuContent( ContextMenuContent );
+			}
+			else if (Column.OnGetMenuContent.IsBound())
+			{
+				ComboButton->SetOnGetMenuContent( Column.OnGetMenuContent );
+			}
+		}
 
 		this->ChildSlot
 		[
 			SNew( SBorder )
 			.BorderImage( this, &STableColumnHeader::GetHeaderBackgroundBrush )
-			.HAlign( Column.HeaderHAlignment )
-			.VAlign( Column.HeaderVAlignment )
-			.Padding( Column.HeaderContentPadding.Get( AdjustedDefaultHeaderContentPadding ) )
+			.HAlign( HAlign_Fill )
+			.VAlign( VAlign_Fill )
+			.ToolTip( Column.ToolTip )
+			.ToolTipText( Column.ToolTip.IsSet()                                 ? TAttribute<FText>() :
+			              Column.DefaultTooltip.IsSet()                          ? Column.DefaultTooltip :
+			              Column.HeaderContent.Widget == SNullWidget::NullWidget ? LabelText :
+			                                                                       TAttribute<FText>() )
+			.Padding( Column.HeaderContentPadding.Get( DefaultHeaderContentPadding ) )
+			.Clipping( EWidgetClipping::ClipToBounds )
 			[
 				Overlay
 			]
 		];
+	}
+
+	/** Gets initial sorting mode */
+	EColumnSortMode::Type GetInitialSortMode() const
+	{
+		return InitialSortMode.Get();
+	}
+
+	/** Sets initial sorting mode */
+	void SetInitialSortMode(EColumnSortMode::Type NewMode)
+	{
+		InitialSortMode = NewMode;
 	}
 
 	/** Gets sorting mode */
@@ -245,12 +283,17 @@ public:
 			}
 		}
 
+		if (ComboVisibility == EHeaderComboVisibility::Never)
+		{
+			return EVisibility::Collapsed;
+		}
+
 		return EVisibility::Visible;
 	}
 
-	FVector2D GetMenuOverlaySize() const 
+	UE::Slate::FDeprecateVector2DResult GetMenuOverlaySize() const 
 	{ 
-		return MenuOverlay.IsValid() ? MenuOverlay->GetDesiredSize() : FVector2D::ZeroVector; 
+		return MenuOverlay.IsValid() ? MenuOverlay->GetDesiredSize() : FVector2f::ZeroVector; 
 	}
 
 private:
@@ -268,14 +311,17 @@ private:
 	
 	const FSlateBrush* GetComboButtonBorderBrush() const
 	{
-		if ( ComboButton.IsValid() && ( ComboButton->IsHovered() || ComboButton->IsOpen() ) )
+		if (ComboVisibility != EHeaderComboVisibility::Never)
 		{
-			return &Style->MenuDropdownHoveredBorderBrush;
-		}
+			if ( ComboButton.IsValid() && ( ComboButton->IsHovered() || ComboButton->IsOpen() ) )
+			{
+				return &Style->MenuDropdownHoveredBorderBrush;
+			}
 
-		if ( IsHovered() || ComboVisibility == EHeaderComboVisibility::Always )
-		{
-			return &Style->MenuDropdownNormalBorderBrush;
+			if ( IsHovered() || ComboVisibility == EHeaderComboVisibility::Always )
+			{
+				return &Style->MenuDropdownNormalBorderBrush;
+			}
 		}
 
 		return FStyleDefaults::GetNoBrush();
@@ -312,6 +358,11 @@ private:
 			}
 			break;
 
+		case EHeaderComboVisibility::Never:
+			{
+				return FLinearColor::White;
+			}
+
 		default:
 			break;
 		}
@@ -332,7 +383,7 @@ private:
 	/** Checks if sorting mode has been selected */
 	EVisibility GetSortModeVisibility() const
 	{
-		return (SortMode.Get() != EColumnSortMode::None) ? EVisibility::HitTestInvisible : EVisibility::Hidden;
+		return (SortMode.Get() != EColumnSortMode::None) ? EVisibility::HitTestInvisible : EVisibility::Collapsed;
 	}
 	
 	/** Called when the column title has been clicked to change sorting mode */
@@ -340,6 +391,8 @@ private:
 	{
 		if ( OnSortModeChanged.IsBound() )
 		{
+			FSlateApplication::Get().CloseToolTip();
+
 			const bool bIsShiftClicked = FSlateApplication::Get().GetModifierKeys().IsShiftDown();
 			EColumnSortPriority::Type ColumnSortPriority = SortPriority.Get();
 			EColumnSortMode::Type ColumnSortMode = SortMode.Get();
@@ -354,7 +407,7 @@ private:
 					ColumnSortPriority = EColumnSortPriority::Primary;
 				}
 
-				ColumnSortMode = EColumnSortMode::Ascending;
+				ColumnSortMode = InitialSortMode.Get();
 			}
 			else
 			{
@@ -383,15 +436,19 @@ private:
 	{
 		if ( ContextMenuContent != SNullWidget::NullWidget )
 		{
-			const FVector2D& SummonLocation = MouseEvent.GetScreenSpacePosition();
+			FVector2f SummonLocation = MouseEvent.GetScreenSpacePosition();
 			FWidgetPath WidgetPath = MouseEvent.GetEventPath() != nullptr ? *MouseEvent.GetEventPath() : FWidgetPath();
 
+			FSlateApplication::Get().CloseToolTip();
 			FSlateApplication::Get().PushMenu(AsShared(), WidgetPath, ContextMenuContent, SummonLocation, FPopupTransitionEffect(FPopupTransitionEffect::ContextMenu));
 		}
 	}
 
 
 private:
+
+	/** Initial sorting mode */
+	TAttribute< EColumnSortMode::Type > InitialSortMode;
 
 	/** Current sorting mode */
 	TAttribute< EColumnSortMode::Type > SortMode;
@@ -420,11 +477,17 @@ void SHeaderRow::Construct( const FArguments& InArgs )
 {
 	check(InArgs._Style);
 
-	ScrollBarThickness = FVector2D::ZeroVector;
+	ScrollBarThickness = FVector2f::ZeroVector;
 	ScrollBarVisibility = EVisibility::Collapsed;
 	Style = InArgs._Style;
 	OnGetMaxRowSizeForColumn = InArgs._OnGetMaxRowSizeForColumn;
 	ResizeMode = InArgs._ResizeMode;
+
+	SplitterHandleSize =   Style->SplitterHandleSize;
+	if (InArgs._SplitterHandleSize.IsSet())
+	{
+		SplitterHandleSize = InArgs._SplitterHandleSize.GetValue();
+	}
 	bCanSelectGeneratedColumn = InArgs._CanSelectGeneratedColumn;
 	OnHiddenColumnsListChanged = InArgs._OnHiddenColumnsListChanged;
 
@@ -434,7 +497,7 @@ void SHeaderRow::Construct( const FArguments& InArgs )
 	}
 
 	SBorder::Construct( SBorder::FArguments()
-		.Padding( 0 )
+		.Padding( 0.f )
 		.BorderImage( &Style->BackgroundBrush )
 		.ForegroundColor( Style->ForegroundColor )
 	);
@@ -560,7 +623,7 @@ FVector2D SHeaderRow::GetRowSizeForSlotIndex(int32 SlotIndex) const
 		const TSharedPtr<STableColumnHeader>& HeaderWidget = HeaderWidgets[SlotIndex];
 		const FColumn& Column = Columns[SlotIndex];
 
-		FVector2D HeaderSize = HeaderWidget->GetDesiredSize();
+		FVector2D HeaderSize = FVector2D(HeaderWidget->GetDesiredSize());
 
 		if (Column.HeaderMenuContent.Widget != SNullWidget::NullWidget && HeaderWidget->GetMenuOverlayVisibility() != EVisibility::Visible)
 		{
@@ -617,17 +680,30 @@ bool SHeaderRow::IsColumnGenerated(const FName& InColumnId) const
 	return false;
 }
 
+bool SHeaderRow::IsColumnVisible(const FName& InColumnId) const
+{
+	for (const FColumn& SomeColumn : Columns)
+	{
+		if (SomeColumn.ColumnId == InColumnId)
+		{
+			return SomeColumn.bIsVisible;
+		}
+	}
+	return false;
+}
+
 FReply SHeaderRow::OnMouseButtonUp(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
 {
 	if (bCanSelectGeneratedColumn && MouseEvent.GetEffectingButton() == EKeys::RightMouseButton)
 	{
-		const FVector2D& SummonLocation = MouseEvent.GetScreenSpacePosition();
+		FVector2f SummonLocation = MouseEvent.GetScreenSpacePosition();
 		FWidgetPath WidgetPath = MouseEvent.GetEventPath() != nullptr ? *MouseEvent.GetEventPath() : FWidgetPath();
 
 		const bool CloseAfterSelection = true;
 		FMenuBuilder MenuBuilder(CloseAfterSelection, nullptr);
 		OnGenerateSelectColumnsSubMenu(MenuBuilder);
 
+		FSlateApplication::Get().CloseToolTip();
 		FSlateApplication::Get().PushMenu(AsShared(), WidgetPath, MenuBuilder.MakeWidget(), SummonLocation, FPopupTransitionEffect(FPopupTransitionEffect::ContextMenu));
 		return FReply::Handled();
 	}
@@ -637,12 +713,12 @@ FReply SHeaderRow::OnMouseButtonUp(const FGeometry& MyGeometry, const FPointerEv
 
 void SHeaderRow::RegenerateWidgets()
 {
-	const float SplitterHandleDetectionSize = 5.0f;
+	const float SplitterHandleDetectionSize = SplitterHandleSize > 0.0f ? SplitterHandleSize + 4.0f : 5.0f;
 	HeaderWidgets.Empty();
 
 	TSharedPtr<SSplitter> Splitter;
 
-	TSharedRef< SHorizontalBox > Box = 
+	TSharedRef< SHorizontalBox > HeaderContent = 
 		SNew(SHorizontalBox)
 		+SHorizontalBox::Slot()
 		.FillWidth( 1.0f )
@@ -650,7 +726,7 @@ void SHeaderRow::RegenerateWidgets()
 			SAssignNew(Splitter, SSplitter)
 			.Style( &Style->ColumnSplitterStyle )
 			.ResizeMode(ResizeMode)
-			.PhysicalSplitterHandleSize( 0.0f )
+			.PhysicalSplitterHandleSize( SplitterHandleSize )
 			.HitDetectionSplitterHandleSize( SplitterHandleDetectionSize )
 			.OnGetMaxSlotSize(this, &SHeaderRow::GetRowSizeForSlotIndex)
 		]
@@ -740,9 +816,9 @@ void SHeaderRow::RegenerateWidgets()
 						[
 							SNew(SBox)
 							.WidthOverride(SomeColumn.GetWidth())
-						[
-							NewHeader
-						]
+							[
+								NewHeader
+							]
 						];
 				}
 				break;
@@ -750,10 +826,10 @@ void SHeaderRow::RegenerateWidgets()
 				case EColumnSizeMode::Manual:
 				{
 					// Sizing grip to put at the end of the column - we can't use a SSplitter here as it doesn't have the resizing behavior we need
-					const float GripSize = 5.0f;
+					const float GripSize = SplitterHandleSize > 0.0f ? SplitterHandleSize + 4.0f : 5.0f;
 					TSharedRef<SBorder> SizingGrip = SNew(SBorder)
 						.Padding(0.0f)
-						.BorderImage(FCoreStyle::Get().GetBrush("NoBorder"))
+						.BorderImage( nullptr )
 						.Cursor(EMouseCursor::ResizeLeftRight)
 						.Content()
 						[
@@ -800,9 +876,10 @@ void SHeaderRow::RegenerateWidgets()
 					SizingGrip->SetOnMouseButtonUp(FPointerEventHandler::CreateLambda(SizingGrip_OnMouseButtonUp));
 					SizingGrip->SetOnMouseMove(FPointerEventHandler::CreateLambda(SizingGrip_OnMouseMove));
 
-					auto GetColumnWidthAsOptionalSize = [&SomeColumn]() -> FOptionalSize
+					auto GetColumnWidthAsOptionalSize = [&SomeColumn, SplitterHandleSizeCopy = SplitterHandleSize]() -> FOptionalSize
 					{
-						const float DesiredWidth = SomeColumn.GetWidth();
+						// Subtract SplitterHandleSize to compensate for SSplitter adding a handle between items.
+						const float DesiredWidth = SomeColumn.GetWidth() - SplitterHandleSizeCopy;
 						return FOptionalSize(DesiredWidth);
 					};
 
@@ -812,6 +889,7 @@ void SHeaderRow::RegenerateWidgets()
 					// Add resizable cell
 					Splitter->AddSlot()
 						.SizeRule(SSplitter::SizeToContent)
+						.Resizable(false)
 						[
 							SNew(SBox)
 							.WidthOverride(WidthBinding)
@@ -831,19 +909,146 @@ void SHeaderRow::RegenerateWidgets()
 				}
 				break;
 
+				case EColumnSizeMode::FillSized:
+				{
+					auto GetColumnWidthAsOptionalSize = [&SomeColumn]() -> FOptionalSize
+					{
+						const float DesiredWidth = SomeColumn.GetWidth();
+						return FOptionalSize(DesiredWidth);
+					};
+
+					TAttribute<FOptionalSize> WidthBinding;
+					WidthBinding.Bind(TAttribute<FOptionalSize>::FGetter::CreateLambda(GetColumnWidthAsOptionalSize));
+
+					Splitter->AddSlot()
+						.SizeRule(SSplitter::SizeToContent)
+						.Resizable(true)
+						.OnSlotResized(SSplitter::FOnSlotResized::CreateRaw(&SomeColumn, &FColumn::SetWidth))
+						[
+							SNew(SBox)
+							.WidthOverride(WidthBinding)
+							[
+								NewHeader
+							]
+						];
+				}
+				break;
+
 				default:
+					ensure(false);
 					break;
 				}
 			}			
 		}
 	}
 
-	// Create a box to contain widgets for each column
-	SetContent( Box );
+	if(Style->HorizontalSeparatorBrush.GetDrawType() != ESlateBrushDrawType::NoDrawType && Style->HorizontalSeparatorThickness > 0)
+	{
+		// Create a box to contain widgets for each column
+		SetContent(
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot()
+			[
+				HeaderContent
+			]
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			[
+				SNew(SSeparator)
+				.Thickness(Style->HorizontalSeparatorThickness)
+				.SeparatorImage(&Style->HorizontalSeparatorBrush)
+			]);
+	}
+	else
+	{
+		SetContent(HeaderContent);
+	}
+}
+
+void SHeaderRow::ToggleAllColumns()
+{
+	ECheckBoxState CurrentState = GetSelectAllColumnsCheckState();
+	bool bShouldSelectAll = CurrentState == ECheckBoxState::Unchecked || CurrentState == ECheckBoxState::Undetermined;
+
+	for (FColumn& SomeColumn : Columns)
+	{
+		if (!SomeColumn.ShouldGenerateWidget.IsSet())
+		{
+			SomeColumn.bIsVisible = bShouldSelectAll;
+		}
+	}
+	
+	RefreshColumns();
+	ColumnsChanged.Broadcast(SharedThis(this));
+	OnHiddenColumnsListChanged.ExecuteIfBound();
+}
+
+bool SHeaderRow::CanToggleAllColumns() const
+{
+	return true;
+}
+
+ECheckBoxState SHeaderRow::GetSelectAllColumnsCheckState() const
+{
+	bool bAnyColumnsVisible = false;
+	bool bAnyColumnsInvisible = false;
+	for (const FColumn& SomeColumn : Columns)
+	{
+		if (!SomeColumn.ShouldGenerateWidget.IsSet())
+		{
+			if(SomeColumn.bIsVisible)
+			{
+				bAnyColumnsVisible = true;
+			}
+			else
+			{
+				bAnyColumnsInvisible = true;
+			}			
+		}
+	}
+
+	if(bAnyColumnsVisible && bAnyColumnsInvisible)
+	{
+		return ECheckBoxState::Undetermined;
+	}
+
+	if(bAnyColumnsVisible)
+	{
+		return ECheckBoxState::Checked;
+	}
+
+	return ECheckBoxState::Unchecked;
+}
+
+FText SHeaderRow::GetToggleAllColumnsText() const
+{
+	ECheckBoxState CurrentState = GetSelectAllColumnsCheckState();
+	if(CurrentState == ECheckBoxState::Checked)
+	{
+		return LOCTEXT("DeselectAllColumns", "Select: None");
+	}
+	else if(CurrentState == ECheckBoxState::Unchecked || CurrentState == ECheckBoxState::Undetermined)
+	{
+		return LOCTEXT("SelectAllColumns", "Select: All");
+	}
+
+	return FText::GetEmpty();
 }
 
 void SHeaderRow::OnGenerateSelectColumnsSubMenu(FMenuBuilder& InSubMenuBuilder)
 {
+	InSubMenuBuilder.AddMenuEntry(
+		TAttribute<FText>::CreateSP(this, &SHeaderRow::GetToggleAllColumnsText),
+		FText::GetEmpty(),
+		FSlateIcon(),
+		FUIAction(
+			FExecuteAction::CreateSP(this, &SHeaderRow::ToggleAllColumns),
+			FCanExecuteAction::CreateSP(this, &SHeaderRow::CanToggleAllColumns),
+			FGetActionCheckState::CreateSP(this, &SHeaderRow::GetSelectAllColumnsCheckState)
+		),
+		NAME_None,
+		EUserInterfaceActionType::ToggleButton);
+	
 	for (const FColumn& SomeColumn : Columns)
 	{
 		const bool bCanExecuteAction = !SomeColumn.ShouldGenerateWidget.IsSet();
@@ -886,6 +1091,29 @@ void SHeaderRow::ToggleGeneratedColumn(FName ColumnId)
 ECheckBoxState SHeaderRow::GetGeneratedColumnCheckedState(FName ColumnId) const
 {
 	return IsColumnGenerated(ColumnId) ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+void SHeaderRow::SetShowGeneratedColumn(const FName& ColumnId, bool InShow)
+{
+	// Only column that doesn't have a ShouldGenerateWidget, can be toggled
+	for (FColumn& SomeColumn : Columns)
+	{
+		if (SomeColumn.ColumnId == ColumnId)
+		{
+			if (!SomeColumn.ShouldGenerateWidget.IsSet())
+			{
+				if (SomeColumn.bIsVisible != InShow)
+				{
+					SomeColumn.bIsVisible = !SomeColumn.bIsVisible;
+
+					RefreshColumns();
+					ColumnsChanged.Broadcast(SharedThis(this));
+					OnHiddenColumnsListChanged.ExecuteIfBound();
+				}
+			}
+			break;
+		}
+	}
 }
 
 #undef LOCTEXT_NAMESPACE

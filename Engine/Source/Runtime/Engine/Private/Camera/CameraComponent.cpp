@@ -1,8 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Camera/CameraComponent.h"
+#include "Camera/CameraTypes.h"
 #include "UObject/ConstructorHelpers.h"
-#include "EngineGlobals.h"
+#include "Engine/World.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/Controller.h"
 #include "Components/StaticMeshComponent.h"
@@ -10,17 +11,19 @@
 #include "Engine/Engine.h"
 #include "Engine/CollisionProfile.h"
 #include "Engine/StaticMesh.h"
-#include "Logging/TokenizedMessage.h"
 #include "Logging/MessageLog.h"
 #include "Misc/UObjectToken.h"
 #include "Rendering/MotionVectorSimulation.h"
 #include "Misc/MapErrors.h"
 #include "Components/DrawFrustumComponent.h"
-#include "IHeadMountedDisplay.h"
 #include "IXRTrackingSystem.h"
 #include "IXRCamera.h"
 #include "Math/UnitConversion.h"
-#include "Widgets/Input/NumericTypeInterface.h"
+#include "UObject/FortniteMainBranchObjectVersion.h"
+#include "UObject/UE5ReleaseStreamObjectVersion.h"
+#include "UObject/UnrealType.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(CameraComponent)
 
 #define LOCTEXT_NAMESPACE "CameraComponent"
 
@@ -43,15 +46,25 @@ UCameraComponent::UCameraComponent(const FObjectInitializer& ObjectInitializer)
 
 	FieldOfView = 90.0f;
 	AspectRatio = 1.777778f;
-	OrthoWidth = 512.0f;
-	OrthoNearClipPlane = 0.0f;
-	OrthoFarClipPlane = WORLD_MAX;
+	OrthoWidth = DEFAULT_ORTHOWIDTH;
+	bAutoCalculateOrthoPlanes = true;
+	AutoPlaneShift = 0.0f;
+	bUpdateOrthoPlanes = true;
+	bUseCameraHeightAsViewTarget = true;
+	OrthoNearClipPlane = DEFAULT_ORTHONEARPLANE;
+	OrthoFarClipPlane = DEFAULT_ORTHOFARPLANE;
 	bConstrainAspectRatio = false;
+	bOverrideAspectRatioAxisConstraint = false;
 	bUseFieldOfViewForLOD = true;
 	PostProcessBlendWeight = 1.0f;
 	bUsePawnControlRotation = false;
 	bAutoActivate = true;
 	bLockToHmd = true;
+
+#if WITH_EDITORONLY_DATA
+	bTickInEditor = true;
+	PrimaryComponentTick.bCanEverTick = true;
+#endif
 }
 
 void UCameraComponent::OnUpdateTransform(EUpdateTransformFlags UpdateTransformFlags, ETeleportType Teleport)
@@ -133,6 +146,7 @@ void UCameraComponent::OnRegister()
 			DrawFrustum->SetupAttachment(this);
 			DrawFrustum->SetIsVisualizationComponent(true);
 			DrawFrustum->CreationMethod = CreationMethod;
+			DrawFrustum->bFrustumEnabled = bDrawFrustumAllowed;
 			DrawFrustum->RegisterComponentWithWorld(GetWorld());
 		}
 	}
@@ -143,15 +157,24 @@ void UCameraComponent::OnRegister()
 	Super::OnRegister();
 }
 
+#if WITH_EDITOR
+void UCameraComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+{
+	UpdateDrawFrustum();
+
+	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+}
+#endif
+
 #if WITH_EDITORONLY_DATA
 
 void UCameraComponent::PostLoad()
 {
 	Super::PostLoad();
 
-	const int32 LinkerUE4Ver = GetLinkerUE4Version();
+	const FPackageFileVersion LinkerUEVer = GetLinkerUEVersion();
 
-	if (LinkerUE4Ver < VER_UE4_RENAME_CAMERA_COMPONENT_VIEW_ROTATION)
+	if (LinkerUEVer < VER_UE4_RENAME_CAMERA_COMPONENT_VIEW_ROTATION)
 	{
 		bUsePawnControlRotation = bUseControllerViewRotation_DEPRECATED;
 	}
@@ -178,27 +201,53 @@ void UCameraComponent::ResetProxyMeshTransform()
 	}
 }
 
-
-void UCameraComponent::RefreshVisualRepresentation()
+void UCameraComponent::UpdateDrawFrustum()
 {
 	if (DrawFrustum != nullptr)
 	{
+		bool bAnythingChanged = false;
 		const float FrustumDrawDistance = 1000.0f;
 		if (ProjectionMode == ECameraProjectionMode::Perspective)
 		{
-			DrawFrustum->FrustumAngle = FieldOfView;
-			DrawFrustum->FrustumStartDist = 10.f;
-			DrawFrustum->FrustumEndDist = DrawFrustum->FrustumStartDist + FrustumDrawDistance;
+			if (DrawFrustum->FrustumAngle != FieldOfView ||
+				DrawFrustum->FrustumStartDist != 10.f ||
+				DrawFrustum->FrustumEndDist != DrawFrustum->FrustumStartDist + FrustumDrawDistance)
+			{
+				DrawFrustum->FrustumAngle = FieldOfView;
+				DrawFrustum->FrustumStartDist = 10.f;
+				DrawFrustum->FrustumEndDist = DrawFrustum->FrustumStartDist + FrustumDrawDistance;
+				bAnythingChanged = true;
+			}
 		}
 		else
 		{
-			DrawFrustum->FrustumAngle = -OrthoWidth;
-			DrawFrustum->FrustumStartDist = OrthoNearClipPlane;
-			DrawFrustum->FrustumEndDist = FMath::Min(OrthoFarClipPlane - OrthoNearClipPlane, FrustumDrawDistance);
+			if (DrawFrustum->FrustumAngle != -OrthoWidth ||
+				DrawFrustum->FrustumStartDist != OrthoNearClipPlane ||
+				DrawFrustum->FrustumEndDist != FMath::Min(OrthoFarClipPlane - OrthoNearClipPlane, FrustumDrawDistance))
+			{
+				DrawFrustum->FrustumAngle = -OrthoWidth;
+				DrawFrustum->FrustumStartDist = OrthoNearClipPlane;
+				DrawFrustum->FrustumEndDist = FMath::Min(OrthoFarClipPlane - OrthoNearClipPlane, FrustumDrawDistance);
+				bAnythingChanged = true;
+			}
 		}
-		DrawFrustum->FrustumAspectRatio = AspectRatio;
-		DrawFrustum->MarkRenderStateDirty();
+
+		if (DrawFrustum->FrustumAspectRatio != AspectRatio)
+		{
+			DrawFrustum->FrustumAspectRatio = AspectRatio;
+			bAnythingChanged = true;
+		}	
+		
+		if (bAnythingChanged)
+		{
+			DrawFrustum->MarkRenderStateDirty();
+		}
 	}
+}
+
+void UCameraComponent::RefreshVisualRepresentation()
+{
+	UpdateDrawFrustum();
 
 	// Update the proxy camera mesh if necessary
 	if (ProxyMeshComponent && ProxyMeshComponent->GetStaticMesh() != CameraMesh)
@@ -246,6 +295,20 @@ void UCameraComponent::RestoreFrustumColor()
 
 void UCameraComponent::Serialize(FArchive& Ar)
 {
+	Ar.UsingCustomVersion(FFortniteMainBranchObjectVersion::GUID);
+	if (Ar.CustomVer(FFortniteMainBranchObjectVersion::GUID) < FFortniteMainBranchObjectVersion::OrthographicCameraDefaultSettings)
+	{
+		OrthoWidth = 512.0f;
+		OrthoNearClipPlane = 0.0f;
+		OrthoFarClipPlane = UE_OLD_WORLD_MAX;
+	}
+
+	Ar.UsingCustomVersion(FUE5ReleaseStreamObjectVersion::GUID);
+	if (Ar.CustomVer(FUE5ReleaseStreamObjectVersion::GUID) < FUE5ReleaseStreamObjectVersion::OrthographicAutoNearFarPlane)
+	{
+		bAutoCalculateOrthoPlanes = false;
+	}
+
 	Super::Serialize(Ar);
 
 	if (Ar.IsLoading())
@@ -265,9 +328,9 @@ void UCameraComponent::OnCameraMeshHiddenChanged()
 #endif
 }
 
-void UCameraComponent::GetCameraView(float DeltaTime, FMinimalViewInfo& DesiredView)
+bool UCameraComponent::IsXRHeadTrackedCamera() const
 {
-	if (GEngine && GEngine->XRSystem.IsValid() && GetWorld() && GetWorld()->WorldType != EWorldType::Editor )
+	if (GEngine && GEngine->XRSystem.IsValid() && GetWorld() && GetWorld()->WorldType != EWorldType::Editor)
 	{
 		IXRTrackingSystem* XRSystem = GEngine->XRSystem.Get();
 		auto XRCamera = XRSystem->GetXRCamera();
@@ -276,27 +339,50 @@ void UCameraComponent::GetCameraView(float DeltaTime, FMinimalViewInfo& DesiredV
 		{
 			if (XRSystem->IsHeadTrackingAllowedForWorld(*GetWorld()))
 			{
-				const FTransform ParentWorld = CalcNewComponentToWorld(FTransform());
-
-				XRCamera->SetupLateUpdate(ParentWorld, this, bLockToHmd == 0);
-
-				if (bLockToHmd)
-				{
-					FQuat Orientation;
-					FVector Position;
-					if (XRCamera->UpdatePlayerCamera(Orientation, Position))
-					{
-						SetRelativeTransform(FTransform(Orientation, Position));
-					}
-					else
-					{
-						ResetRelativeTransform();
-					}
-				}
-
-				XRCamera->OverrideFOV(this->FieldOfView);
+				return true;
 			}
 		}
+	}
+
+	return false;
+}
+
+void UCameraComponent::HandleXRCamera()
+{
+	IXRTrackingSystem* XRSystem = GEngine->XRSystem.Get();
+	auto XRCamera = XRSystem->GetXRCamera();
+
+	if (!XRCamera.IsValid())
+	{
+		return;
+	}
+
+	const FTransform ParentWorld = CalcNewComponentToWorld(FTransform());
+
+	XRCamera->SetupLateUpdate(ParentWorld, this, bLockToHmd == 0);
+
+	if (bLockToHmd)
+	{
+		FQuat Orientation;
+		FVector Position;
+		if (XRCamera->UpdatePlayerCamera(Orientation, Position))
+		{
+			SetRelativeTransform(FTransform(Orientation, Position));
+		}
+		else
+		{
+			ResetRelativeTransform();
+		}
+	}
+
+	XRCamera->OverrideFOV(this->FieldOfView);
+}
+
+void UCameraComponent::GetCameraView(float DeltaTime, FMinimalViewInfo& DesiredView)
+{
+	if (IsXRHeadTrackedCamera())
+	{
+		HandleXRCamera();
 	}
 
 	if (bUsePawnControlRotation)
@@ -336,6 +422,23 @@ void UCameraComponent::GetCameraView(float DeltaTime, FMinimalViewInfo& DesiredV
 	DesiredView.OrthoWidth = OrthoWidth;
 	DesiredView.OrthoNearClipPlane = OrthoNearClipPlane;
 	DesiredView.OrthoFarClipPlane = OrthoFarClipPlane;
+	DesiredView.bAutoCalculateOrthoPlanes = bAutoCalculateOrthoPlanes;
+	DesiredView.AutoPlaneShift = AutoPlaneShift;
+	DesiredView.bUpdateOrthoPlanes = bUpdateOrthoPlanes;
+	DesiredView.bUseCameraHeightAsViewTarget = bUseCameraHeightAsViewTarget;
+	
+	if (bAutoCalculateOrthoPlanes)
+	{
+		if (const AActor* ViewTarget = GetOwner())
+		{
+			DesiredView.SetCameraToViewTarget(ViewTarget->GetActorLocation());
+		}
+	}
+
+	if (bOverrideAspectRatioAxisConstraint)
+	{
+		DesiredView.AspectRatioAxisConstraint = AspectRatioAxisConstraint;
+	}
 
 	// See if the CameraActor wants to override the PostProcess settings used.
 	DesiredView.PostProcessBlendWeight = PostProcessBlendWeight;
@@ -434,4 +537,5 @@ void UCameraComponent::GetExtraPostProcessBlends(TArray<FPostProcessSettings>& O
 
 
 #undef LOCTEXT_NAMESPACE
+
 

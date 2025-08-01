@@ -17,22 +17,27 @@ class UBehaviorTree;
  * Does NOT support subtree's root level decorators!
  */
 
-UCLASS()
-class AIMODULE_API UBTTask_RunBehaviorDynamic : public UBTTaskNode
+UCLASS(MinimalAPI)
+class UBTTask_RunBehaviorDynamic : public UBTTaskNode
 {
 	GENERATED_UCLASS_BODY()
 
-	virtual EBTNodeResult::Type ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
-	virtual void OnInstanceCreated(UBehaviorTreeComponent& OwnerComp) override;
-	virtual FString GetStaticDescription() const override;
-	virtual void DescribeRuntimeValues(const UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTDescriptionVerbosity::Type Verbosity, TArray<FString>& Values) const override;
+	AIMODULE_API virtual EBTNodeResult::Type ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
+	AIMODULE_API virtual void OnInstanceCreated(UBehaviorTreeComponent& OwnerComp) override;
+	AIMODULE_API virtual FString GetStaticDescription() const override;
+	AIMODULE_API virtual void DescribeRuntimeValues(const UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTDescriptionVerbosity::Type Verbosity, TArray<FString>& Values) const override;
 
 #if WITH_EDITOR
-	virtual FName GetNodeIconName() const override;
+	AIMODULE_API virtual FName GetNodeIconName() const override;
+	AIMODULE_API UBehaviorTree* GetBehaviorAssetFromRuntimeValue(const FString& RuntimeValue) const;
 #endif // WITH_EDITOR
 
-	bool HasMatchingTag(const FGameplayTag& Tag) const;
-	bool SetBehaviorAsset(UBehaviorTree* NewBehaviorAsset);
+	AIMODULE_API bool HasMatchingTag(const FGameplayTag& Tag) const;
+	AIMODULE_API const FGameplayTag& GetInjectionTag() const;
+	AIMODULE_API bool SetBehaviorAsset(UBehaviorTree* NewBehaviorAsset);
+	
+	/** @returns default subtree asset */
+	AIMODULE_API UBehaviorTree* GetDefaultBehaviorAsset() const;
 
 protected:
 
@@ -42,14 +47,14 @@ protected:
 
 	/** default behavior to run */
 	UPROPERTY(Category=Node, EditAnywhere)
-	UBehaviorTree* DefaultBehaviorAsset;
+	TObjectPtr<UBehaviorTree> DefaultBehaviorAsset;
 
 	/** current subtree */
 	UPROPERTY()
-	UBehaviorTree* BehaviorAsset;
+	TObjectPtr<UBehaviorTree> BehaviorAsset;
 
 	/** called when subtree is removed from active stack */
-	virtual void OnSubtreeDeactivated(UBehaviorTreeComponent& OwnerComp, EBTNodeResult::Type NodeResult);
+	AIMODULE_API virtual void OnSubtreeDeactivated(UBehaviorTreeComponent& OwnerComp, EBTNodeResult::Type NodeResult);
 };
 
 //////////////////////////////////////////////////////////////////////////
@@ -60,3 +65,12 @@ FORCEINLINE bool UBTTask_RunBehaviorDynamic::HasMatchingTag(const FGameplayTag& 
 	return InjectionTag == Tag;
 }
 
+FORCEINLINE UBehaviorTree* UBTTask_RunBehaviorDynamic::GetDefaultBehaviorAsset() const
+{
+	return DefaultBehaviorAsset;
+}
+
+FORCEINLINE const FGameplayTag& UBTTask_RunBehaviorDynamic::GetInjectionTag() const
+{
+	return InjectionTag;
+}

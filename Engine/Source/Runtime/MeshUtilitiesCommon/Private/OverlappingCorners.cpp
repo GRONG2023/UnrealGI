@@ -3,16 +3,44 @@
 #include "OverlappingCorners.h"
 #include "MeshUtilitiesCommon.h"
 
-FOverlappingCorners::FOverlappingCorners(const TArray<FVector>& InVertices, const TArray<uint32>& InIndices, float ComparisonThreshold)
+// Create a mesh view from arrays of vertices & indices
+struct FOverlappingCornersArrayMeshView : FLayoutUV::IMeshView
 {
-	const int32 NumWedges = InIndices.Num();
+	const TArray<FVector3f>& Vertices;
+	const TArray<uint32>& Indices;
+
+	FOverlappingCornersArrayMeshView(const TArray<FVector3f>& InVertices, const TArray<uint32>& InIndices)
+		: Vertices(InVertices)
+		, Indices(InIndices)
+	{
+	}
+
+	// IMeshView Interface --
+	virtual uint32      GetNumIndices() const override { return Indices.Num(); }
+	virtual FVector3f   GetPosition(uint32 Index) const override { return Vertices[Indices[Index]]; }
+
+	virtual FVector3f   GetNormal(uint32 Index) const override { check(0); return FVector3f(); }
+	virtual FVector2f   GetInputTexcoord(uint32 Index) const override { check(0); return FVector2f(); }
+	virtual void        InitOutputTexcoords(uint32 Num) override { check(0); }
+	virtual void        SetOutputTexcoord(uint32 Index, const FVector2f& Value) override { check(0); }
+	// IMeshView Interface --
+};
+
+FOverlappingCorners::FOverlappingCorners(const TArray<FVector3f>& InVertices, const TArray<uint32>& InIndices, float ComparisonThreshold)
+	: FOverlappingCorners(FOverlappingCornersArrayMeshView(InVertices, InIndices), ComparisonThreshold)
+{
+}
+
+FOverlappingCorners::FOverlappingCorners(const FLayoutUV::IMeshView& MeshView, float ComparisonThreshold)
+{
+	const int32 NumWedges = MeshView.GetNumIndices();
 
 	// Create a list of vertex Z/index pairs
 	TArray<FIndexAndZ> VertIndexAndZ;
 	VertIndexAndZ.Reserve(NumWedges);
 	for (int32 WedgeIndex = 0; WedgeIndex < NumWedges; WedgeIndex++)
 	{
-		new(VertIndexAndZ)FIndexAndZ(WedgeIndex, InVertices[InIndices[WedgeIndex]]);
+		VertIndexAndZ.Emplace(WedgeIndex, MeshView.GetPosition(WedgeIndex));
 	}
 
 	// Sort the vertices by z value
@@ -29,8 +57,8 @@ FOverlappingCorners::FOverlappingCorners(const TArray<FVector>& InVertices, cons
 			if (FMath::Abs(VertIndexAndZ[j].Z - VertIndexAndZ[i].Z) > ComparisonThreshold)
 				break; // can't be any more dups
 
-			const FVector& PositionA = InVertices[InIndices[VertIndexAndZ[i].Index]];
-			const FVector& PositionB = InVertices[InIndices[VertIndexAndZ[j].Index]];
+			const FVector3f& PositionA = MeshView.GetPosition(VertIndexAndZ[i].Index);
+			const FVector3f& PositionB = MeshView.GetPosition(VertIndexAndZ[j].Index);
 
 			if (PointsEqual(PositionA, PositionB, ComparisonThreshold))
 			{
@@ -145,4 +173,3 @@ uint32 FOverlappingCorners::GetAllocatedSize(void) const
 
 	return BaseMemoryAllocated + ArraysMemory + SetsMemory;
 }
-

@@ -3,6 +3,7 @@
 #include "PhysicalMaterialMaskImport.h"
 #include "PhysicalMaterials/PhysicalMaterialMask.h"
 #include "CoreMinimal.h"
+#include "Engine/Texture2D.h"
 #include "EngineDefines.h"
 #include "Misc/MessageDialog.h"
 #include "HAL/PlatformApplicationMisc.h"
@@ -29,6 +30,7 @@
 #include "EditorDirectories.h"
 #include "EditorReimportHandler.h"
 #include "EditorFramework/AssetImportData.h"
+#include "Framework/Application/SlateApplication.h"
 #include "ObjectTools.h"
 #include "PackageTools.h"
 #include "Modules/ModuleManager.h"
@@ -36,7 +38,7 @@
 #include "ContentBrowserModule.h"
 #include "ClassViewerModule.h"
 #include "ClassViewerFilter.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
 #include "DesktopPlatformModule.h"
@@ -176,12 +178,14 @@ UTexture* FPhysicalMaterialMaskImport::ImportMaskTextureFile(UPhysicalMaterialMa
 		Texture = (UTexture*)TextureFactory->FactoryCreateBinary(UTexture2D::StaticClass(), PhysMatMask->GetOuter(), *TextureName, RF_NoFlags, NULL, *Extension, PtrTexture, PtrTexture + TextureData.Num(), GWarn);
 		if (Texture != NULL)
 		{
+			Texture->PreEditChange(nullptr);
 			Texture->SRGB = false;
 			Texture->CompressionNone = true;
 			Texture->CompressionSettings = TC_Masks;
 			Texture->MipGenSettings = TMGS_NoMipmaps;
 			Texture->Filter = TF_Nearest;
 			Texture->AssetImportData->Update(TextureFilename);
+			Texture->PostEditChange();
 		}
 
 		TextureFactory->RemoveFromRoot();
@@ -200,7 +204,6 @@ void FPhysicalMaterialMaskImport::GetSupportedTextureFileTypes(TArray<FString>& 
 void FPhysicalMaterialMaskImport::GetSupportedTextureSourceFormats(TArray<ETextureSourceFormat>& OutSourceFormats)
 {
 	OutSourceFormats.Empty();
-	OutSourceFormats.Emplace(ETextureSourceFormat::TSF_RGBA8);
 	OutSourceFormats.Emplace(ETextureSourceFormat::TSF_BGRA8);
 	OutSourceFormats.Emplace(ETextureSourceFormat::TSF_RGBA16);
 }

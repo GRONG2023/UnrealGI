@@ -1,13 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Sound/SampleBufferIO.h"
-#include "AudioMixer.h"
-#include "HAL/PlatformFilemanager.h"
-#include "GenericPlatform/GenericPlatformFile.h"
-#include "AssetRegistryModule.h"
-#include "Sound/SoundWave.h"
+#include "Engine/Engine.h"
+#include "HAL/PlatformFile.h"
+#include "HAL/PlatformFileManager.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "Misc/PackageName.h"
 #include "AudioDevice.h"
 #include "Async/Async.h"
+#include "UObject/Package.h"
 
 namespace Audio
 {
@@ -61,6 +62,7 @@ namespace Audio
 		}
 	}
 
+
 	void FSoundWavePCMLoader::Update()
 	{
 		for (int32 i = LoadingSoundWaves.Num() - 1; i >= 0; --i)
@@ -80,7 +82,7 @@ namespace Audio
 
 					TSampleBuffer<> SampleBuffer(RawPCMData, NumSamples, SoundWave->NumChannels, SoundWave->GetSampleRateForCurrentPlatform());
 					LoadingSoundWaveInfo.OnLoaded(SoundWave, SampleBuffer);
-					LoadingSoundWaves.RemoveAtSwap(i, 1, false);
+					LoadingSoundWaves.RemoveAtSwap(i, 1, EAllowShrinking::No);
 				}
 			}
 		}
@@ -204,21 +206,15 @@ namespace Audio
 		{
 			CurrentBuffer.MixBufferToChannels(2);
 		}
-
+	
 		CurrentOperation.Reset(new FAsyncSoundWavePCMWriterTask(this, ESoundWavePCMWriteTaskType::GenerateAndWriteSoundWave, OnSuccess));
 		CurrentOperation->StartBackgroundTask();
 
 		return true;
 	}
 
-	bool FSoundWavePCMWriter::BeginWriteToWavFile(const TSampleBuffer<>& InSampleBuffer, const FString& FileName, FString& FilePath, TFunction<void()> OnSuccess)
+	bool FSoundWavePCMWriter::PrepWavFileOutput(const TSampleBuffer<>& InSampleBuffer, const FString& FileName, const FString& FilePath)
 	{
-		if (!IsDone())
-		{
-			UE_LOG(LogAudio, Error, TEXT("This instance of FSoundWavePCMWriter is already processing another write operation."));
-			return false;
-		}
-
 		const bool bIsRelativePath = FPaths::IsRelative(FilePath);
 		if (bIsRelativePath)
 		{
@@ -250,6 +246,22 @@ namespace Audio
 
 		CurrentBuffer = InSampleBuffer;
 
+		return true;
+	}
+
+	bool FSoundWavePCMWriter::BeginWriteToWavFile(const TSampleBuffer<>& InSampleBuffer, const FString& FileName, const FString& FilePath, TFunction<void()> OnSuccess)
+	{
+		if (!IsDone())
+		{
+			UE_LOG(LogAudio, Error, TEXT("This instance of FSoundWavePCMWriter is already processing another write operation."));
+			return false;
+		}
+
+		if (!PrepWavFileOutput(InSampleBuffer, FileName, FilePath))
+		{
+			return false;
+		}
+
 		// For convenience in our async task, we only take void(USoundWave*) type lambdas. So let's wrap our void() lambda here:
 		TFunction<void(const USoundWave*)> WrappedCallback = [OnSuccess](const USoundWave*)
 		{
@@ -258,6 +270,30 @@ namespace Audio
 
 		CurrentOperation.Reset(new FAsyncSoundWavePCMWriterTask(this, ESoundWavePCMWriteTaskType::WriteWavFile, WrappedCallback));
 		CurrentOperation->StartBackgroundTask();
+
+		return true;
+	}
+
+	bool FSoundWavePCMWriter::SynchronouslyWriteToWavFile(const TSampleBuffer<>& InSampleBuffer, const FString& FileName, const FString& FilePath, FString* OutFilePathName)
+	{
+		if (!IsDone())
+		{
+			UE_LOG(LogAudio, Error, TEXT("This instance of FSoundWavePCMWriter is already processing another write operation."));
+			return false;
+		}
+
+		if (!PrepWavFileOutput(InSampleBuffer, FileName, FilePath))
+		{
+			return false;
+		}
+
+		CurrentOperation.Reset(new FAsyncSoundWavePCMWriterTask(this, ESoundWavePCMWriteTaskType::WriteWavFile, [](const USoundWave*){}));
+		CurrentOperation->StartSynchronousTask();
+
+		if (OutFilePathName != nullptr)
+		{
+			*OutFilePathName = AbsoluteFilePath;
+		}
 
 		return true;
 	}
@@ -361,10 +397,16 @@ namespace Audio
 
 	bool FSoundWavePCMWriter::IsDone()
 	{
-		return (CurrentState == ESoundWavePCMWriterState::Suceeded
+		bool bCurrentOperationDone = true;
+		if (CurrentOperation.IsValid())
+		{
+			bCurrentOperationDone = CurrentOperation->IsDone();
+		}
+
+		return ((CurrentState == ESoundWavePCMWriterState::Suceeded
 			|| CurrentState == ESoundWavePCMWriterState::Failed
 			|| CurrentState == ESoundWavePCMWriterState::Cancelled
-			|| CurrentState == ESoundWavePCMWriterState::Idle);
+			|| CurrentState == ESoundWavePCMWriterState::Idle) && bCurrentOperationDone);
 	}
 
 	void FSoundWavePCMWriter::Reset()
@@ -446,12 +488,14 @@ namespace Audio
 
 	void FSoundWavePCMWriter::ApplyBufferToSoundWave()
 	{
-		CurrentSoundWave->InvalidateCompressedData();
+		// Since we just want to replace the PCM data to save it to disk. We don't need to compute anything platformdata related.
+		CurrentSoundWave->InvalidateCompressedData(false /* bFreeResources */, false /* bRebuildStreamingChunk */);
 
 		CurrentSoundWave->SetSampleRate(CurrentBuffer.GetSampleRate());
 		CurrentSoundWave->NumChannels = CurrentBuffer.GetNumChannels();
 		CurrentSoundWave->RawPCMDataSize = CurrentBuffer.GetNumSamples() * sizeof(int16);
 		CurrentSoundWave->Duration = (float) CurrentBuffer.GetNumFrames() / CurrentBuffer.GetSampleRate();
+		CurrentSoundWave->TotalSamples = CurrentBuffer.GetNumSamples();
 
 		if (CurrentSoundWave->RawPCMData != nullptr)
 		{
@@ -482,10 +526,13 @@ namespace Audio
 		// TODO: Check to see if we need to call USoundWave::FreeResources here.
 
 		// Emplace wav data in the RawData component of the sound wave.
-		CurrentSoundWave->RawData.Lock(LOCK_READ_WRITE);
-		void* LockedData = CurrentSoundWave->RawData.Realloc(SerializedWavData.Num());
-		FMemory::Memcpy(LockedData, SerializedWavData.GetData(), SerializedWavData.Num());
-		CurrentSoundWave->RawData.Unlock();
+		FSharedBuffer Buffer = FSharedBuffer::Clone(SerializedWavData.GetData(), SerializedWavData.Num());
+
+#if WITH_EDITORONLY_DATA
+		CurrentSoundWave->RawData.UpdatePayload(Buffer);
+#else //WITH_EDITORONLY_DATA
+		checkNoEntry();
+#endif //WITH_EDITORONLY_DATA
 
 		USoundWave* SavedSoundWave = CurrentSoundWave;
 
@@ -678,5 +725,4 @@ namespace Audio
 	}
 
 }
-
 

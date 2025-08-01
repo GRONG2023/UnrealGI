@@ -14,6 +14,9 @@
 #include "ProfilingDebugging/CookStats.h"
 #include "Interfaces/ITargetPlatform.h"
 #include "CoreGlobals.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(NavCollision)
+
 #if WITH_EDITOR
 #include "DeviceProfiles/DeviceProfile.h"
 #include "DeviceProfiles/DeviceProfileManager.h"
@@ -36,11 +39,7 @@ namespace NavCollisionCookStats
 }
 #endif
 
-#if WITH_PHYSX && PHYSICS_INTERFACE_PHYSX
-static const FName NAVCOLLISION_FORMAT = TEXT("NavCollision_X");
-#elif WITH_CHAOS
 static const FName NAVCOLLISION_FORMAT = TEXT("NavCollision_Chaos");
-#endif
 
 class FNavCollisionDataReader
 {
@@ -48,15 +47,17 @@ public:
 	FNavCollisionConvex& TriMeshCollision;
 	FNavCollisionConvex& ConvexCollision;
 	TNavStatArray<int32>& ConvexShapeIndices;
+	FBox& Bounds;
 
-	FNavCollisionDataReader(FByteBulkData& InBulkData, FNavCollisionConvex& InTriMeshCollision, FNavCollisionConvex& InConvexCollision, TNavStatArray<int32>& InShapeIndices)
+	FNavCollisionDataReader(FByteBulkData& InBulkData, FNavCollisionConvex& InTriMeshCollision, FNavCollisionConvex& InConvexCollision, TNavStatArray<int32>& InShapeIndices, FBox& InBounds)
 		: TriMeshCollision(InTriMeshCollision)
 		, ConvexCollision(InConvexCollision)
 		, ConvexShapeIndices(InShapeIndices)
+		, Bounds(InBounds)
 	{
 		// Read cooked data
 		uint8* DataPtr = (uint8*)InBulkData.Lock( LOCK_READ_ONLY );
-		FBufferReader Ar( DataPtr, InBulkData.GetBulkDataSize(), false );
+		FBufferReader Ar( DataPtr, InBulkData.GetBulkDataSize(), false, true );
 
 		uint8 bLittleEndian = true;
 
@@ -67,6 +68,7 @@ public:
 		Ar << ConvexCollision.VertexBuffer;
 		Ar << ConvexCollision.IndexBuffer;
 		Ar << ConvexShapeIndices;
+		Ar << Bounds;
 
 		InBulkData.Unlock();
 	}
@@ -94,7 +96,7 @@ public:
 
 	virtual const TCHAR* GetVersionString() const override
 	{
-		return TEXT("2983273BE5D6425391E8C0B3D1C0A55D");
+		return TEXT("8F4645C7A18B40C487C7E50E19CD6B6C");
 	}
 
 	virtual FString GetPluginSpecificCacheKeySuffix() const override
@@ -115,6 +117,7 @@ public:
 	}
 
 	virtual bool Build( TArray<uint8>& OutData ) override;
+	virtual FString GetDebugContextString() const override;
 
 	/** Return true if we can build **/
 	bool CanBuild()
@@ -140,6 +143,8 @@ FDerivedDataNavCollisionCooker::FDerivedDataNavCollisionCooker(FName InFormat, U
 
 bool FDerivedDataNavCollisionCooker::Build( TArray<uint8>& OutData )
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FDerivedDataNavCollisionCooker::Build);
+
 	if ((NavCollisionInstance->ConvexShapeIndices.Num() == 0) ||
 		(NavCollisionInstance->GetTriMeshCollision().VertexBuffer.Num() == 0 && NavCollisionInstance->GetConvexCollision().VertexBuffer.Num() == 0))
 	{
@@ -156,9 +161,24 @@ bool FDerivedDataNavCollisionCooker::Build( TArray<uint8>& OutData )
 	Ar << NavCollisionInstance->GetMutableConvexCollision().VertexBuffer;
 	Ar << NavCollisionInstance->GetMutableConvexCollision().IndexBuffer;
 	Ar << NavCollisionInstance->ConvexShapeIndices;
+	Ar << NavCollisionInstance->Bounds;
 
 	// Whatever got cached return true. We want to cache 'failure' too.
 	return true;
+}
+
+FString FDerivedDataNavCollisionCooker::GetDebugContextString() const
+{
+	if (NavCollisionInstance)
+	{
+		UObject* Outer = NavCollisionInstance->GetOuter();
+		if (Outer)
+		{
+			return Outer->GetFullName();
+		}
+	}
+
+	return FDerivedDataPluginInterface::GetDebugContextString();
 }
 
 namespace
@@ -210,6 +230,8 @@ void UNavCollision::Setup(UBodySetup* BodySetup)
 		return;
 	}
 
+	LLM_SCOPE_BYNAME(TEXT("NavigationCollision"));
+
 	BodySetupGuid = BodySetup->BodySetupGuid;
 
 	// Make sure all are cleared before we start
@@ -223,7 +245,7 @@ void UNavCollision::Setup(UBodySetup* BodySetup)
 		if (FormatData->IsLocked() == false)
 		{
 			// Create physics objects
-			FNavCollisionDataReader CookedDataReader(*FormatData, TriMeshCollision, ConvexCollision, ConvexShapeIndices);
+			FNavCollisionDataReader CookedDataReader(*FormatData, TriMeshCollision, ConvexCollision, ConvexShapeIndices, Bounds);
 			bHasConvexGeometry = true;
 		}
 	}
@@ -231,6 +253,11 @@ void UNavCollision::Setup(UBodySetup* BodySetup)
 	{
 		GatherCollision();
 	}
+}
+
+FBox UNavCollision::GetBounds() const
+{
+	return Bounds;
 }
 
 void UNavCollision::GatherCollision()
@@ -248,7 +275,12 @@ void UNavCollision::GatherCollision()
 	{
 		const FNavCollisionBox& BoxInfo = BoxCollision[Idx];
 
-		FKBoxElem BoxElem(BoxInfo.Extent.X * 2.0f, BoxInfo.Extent.Y * 2.0f, BoxInfo.Extent.Z * 2.0f);
+		const float X = FloatCastChecked<float>(BoxInfo.Extent.X * 2.0f, UE::LWC::DefaultFloatPrecision);
+		const float Y = FloatCastChecked<float>(BoxInfo.Extent.Y * 2.0f, UE::LWC::DefaultFloatPrecision);
+		const float Z = FloatCastChecked<float>(BoxInfo.Extent.Z * 2.0f, UE::LWC::DefaultFloatPrecision);
+
+		FKBoxElem BoxElem(X, Y, Z);
+
 		BoxElem.SetTransform(FTransform(BoxInfo.Offset));
 
 		SimpleGeom.BoxElems.Add(BoxElem);
@@ -280,6 +312,7 @@ void UNavCollision::ClearCollision()
 	ConvexCollision.VertexBuffer.Reset();
 	ConvexCollision.IndexBuffer.Reset();
 	ConvexShapeIndices.Reset();
+	Bounds = FBox();
 
 	bHasConvexGeometry = false;
 }
@@ -518,7 +551,10 @@ void UNavCollision::PostLoad()
 		Outer->ConditionalPostLoad();
 
 		UStaticMesh* StaticMeshOuter = Cast<UStaticMesh>(Outer);
-		if (StaticMeshOuter != NULL)
+		
+		// It's OK to skip this in case of StaticMesh pending compilation because it is also
+		// called by UStaticMesh::CreateNavCollision at the end of UStaticMesh's PostLoad.
+		if (StaticMeshOuter != nullptr && !StaticMeshOuter->IsCompiling())
 		{
 			Setup(StaticMeshOuter->GetBodySetup());
 		}
@@ -527,6 +563,8 @@ void UNavCollision::PostLoad()
 
 FByteBulkData* UNavCollision::GetCookedData(FName Format)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UNavCollision::GetCookedData);
+
 	const bool bUseConvexCollision = bGatherConvexGeometry || (BoxCollision.Num() > 0) || (CylinderCollision.Num() > 0);
 	if (IsTemplate() || !bUseConvexCollision)
 	{

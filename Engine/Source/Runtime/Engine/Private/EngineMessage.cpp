@@ -4,7 +4,10 @@
 #include "GameFramework/PlayerController.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/Console.h"
+#include "Engine/GameViewportClient.h"
 #include "GameFramework/PlayerState.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(EngineMessage)
 
 UEngineMessage::UEngineMessage(const FObjectInitializer& ObjectInitializer) :
 	Super(ObjectInitializer)
@@ -80,3 +83,4 @@ void UEngineMessage::ClientReceive(const FClientReceiveData& ClientData) const
 		Cast<ULocalPlayer>(ClientData.LocalPC->Player)->ViewportClient->ViewportConsole->OutputText( LocalMessageString );
 	}
 }
+

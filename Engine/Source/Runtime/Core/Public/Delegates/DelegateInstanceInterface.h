@@ -6,19 +6,27 @@
 #include "Templates/TypeCompatibleBytes.h"
 #include "Templates/Tuple.h"
 
-class FDelegateBase;
 class IDelegateInstance;
 
 template <typename FuncType, typename UserPolicy>
 struct IBaseDelegateInstance;
 
+template <typename>
+class TDelegateBase;
+
+struct FNotThreadSafeNotCheckedDelegateMode;
+struct FThreadSafeDelegateMode;
+struct FNotThreadSafeDelegateMode;
+
 template <typename RetType, typename... ArgTypes, typename UserPolicy>
 struct IBaseDelegateInstance<RetType(ArgTypes...), UserPolicy> : public UserPolicy::FDelegateInstanceExtras
 {
 	/**
-	 * Emplaces a copy of the delegate instance into the FDelegateBase.
+	 * Emplaces a copy of the delegate instance into the given base delegate.
 	 */
-	virtual void CreateCopy(FDelegateBase& Base) = 0;
+	virtual void CreateCopy(TDelegateBase<FThreadSafeDelegateMode>& Base) const = 0;
+	virtual void CreateCopy(TDelegateBase<FNotThreadSafeDelegateMode>& Base) const = 0;
+	virtual void CreateCopy(TDelegateBase<FNotThreadSafeNotCheckedDelegateMode>& Base) const = 0;
 
 	/**
 	 * Execute the delegate.  If the function pointer is not valid, an error will occur.
@@ -34,6 +42,9 @@ struct IBaseDelegateInstance<RetType(ArgTypes...), UserPolicy> : public UserPoli
 	virtual bool ExecuteIfSafe(ArgTypes...) const = 0;
 };
 
+// Temp workaround for deprecation warnings being emitted by this template with VS2022 17.9. Reported fixed in 17.10
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+
 template <bool Const, typename Class, typename FuncType>
 struct TMemFunPtrType;
 
@@ -48,6 +59,9 @@ struct TMemFunPtrType<true, Class, RetType(ArgTypes...)>
 {
 	typedef RetType (Class::* Type)(ArgTypes...) const;
 };
+
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+// End temp workaround
 
 template <typename FuncType>
 struct TPayload;

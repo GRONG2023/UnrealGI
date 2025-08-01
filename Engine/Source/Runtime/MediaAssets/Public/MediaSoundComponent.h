@@ -16,11 +16,14 @@
 #include "DSP/BufferVectorOperations.h"
 #include "DSP/EnvelopeFollower.h"
 #include "Sound/SoundClass.h"
+#include "Sound/SoundGenerator.h"
+#include "MediaAudioResampler.h"
 
 #include "MediaSoundComponent.generated.h"
 
 class FMediaAudioResampler;
 class FMediaPlayerFacade;
+class FMediaSoundComponentClockSink;
 class IMediaAudioSample;
 class IMediaPlayer;
 class UMediaPlayer;
@@ -65,11 +68,87 @@ struct FMediaSoundComponentSpectralData
 	float Magnitude = 0.0f;
 };
 
+// Class implements an ISoundGenerator to feed decoded audio to audio renderering async tasks
+class FMediaSoundGenerator : public ISoundGenerator
+{
+public:
+	struct FSoundGeneratorParams
+	{
+		int32 SampleRate = 0;
+		int32 NumChannels = 0;
+
+		TSharedPtr<FMediaAudioSampleQueue, ESPMode::ThreadSafe> SampleQueue;
+
+		bool bSpectralAnalysisEnabled = false;
+		bool bEnvelopeFollowingEnabled = false;
+
+		int32 EnvelopeFollowerAttackTime = 0;
+		int32 EnvelopeFollowerReleaseTime = 0;
+
+		Audio::FSpectrumAnalyzerSettings SpectrumAnalyzerSettings;
+		TArray<float> FrequenciesToAnalyze;
+
+		float CachedRate = 0.0f;
+		FTimespan CachedTime;
+		FTimespan LastPlaySampleTime;
+	};
+
+	FMediaSoundGenerator(FSoundGeneratorParams& InParams);
+
+	virtual ~FMediaSoundGenerator();
+
+	virtual void OnEndGenerate() override;
+
+	virtual int32 OnGenerateAudio(float* OutAudio, int32 NumSamples) override;
+
+	void SetCachedData(float InCachedRate, const FTimespan& InCachedTime);
+	void SetLastPlaySampleTime(const FTimespan& InLastPlaySampleTime);
+
+	void SetEnableSpectralAnalysis(bool bInSpectralAnlaysisEnabled);
+	void SetEnableEnvelopeFollowing(bool bInEnvelopeFollowingEnabled);
+
+	void SetSpectrumAnalyzerSettings(Audio::FSpectrumAnalyzerSettings::EFFTSize InFFTSize, const TArray<float>& InFrequenciesToAnalyze);
+	void SetEnvelopeFollowingSettings(int32 InAttackTimeMsec, int32 InReleaseTimeMsec);
+
+	void SetSampleQueue(TSharedPtr<FMediaAudioSampleQueue, ESPMode::ThreadSafe>& InSampleQueue);
+
+	TArray<FMediaSoundComponentSpectralData> GetSpectralData() const;
+	TArray<FMediaSoundComponentSpectralData> GetNormalizedSpectralData() const;
+	float GetCurrentEnvelopeValue() const { return CurrentEnvelopeValue; }
+
+	FTimespan GetLastPlayTime() const { return LastPlaySampleTime.Load(); }
+
+private:
+
+	FSoundGeneratorParams Params;
+
+	/** The audio resampler. */
+	FMediaAudioResampler Resampler;
+
+	/** Scratch buffer to mix in source audio to from decoder */
+	Audio::AlignedFloatBuffer AudioScratchBuffer;
+
+	/** Spectrum analyzer used for analyzing audio in media. */
+	mutable Audio::FAsyncSpectrumAnalyzer SpectrumAnalyzer;
+
+	Audio::FEnvelopeFollower EnvelopeFollower;
+
+	TAtomic<float> CachedRate;
+	TAtomic<FTimespan> CachedTime;
+	TAtomic<FTimespan> LastPlaySampleTime;
+
+	float CurrentEnvelopeValue = 0.0f;
+	bool bEnvelopeFollowerSettingsChanged = false;
+
+	mutable FCriticalSection AnalysisCritSect;
+	mutable FCriticalSection SampleQueueCritSect;
+};
+
 /**
  * Implements a sound component for playing a media player's audio output.
  */
-UCLASS(ClassGroup=Media, editinlinenew, meta=(BlueprintSpawnableComponent))
-class MEDIAASSETS_API UMediaSoundComponent
+UCLASS(ClassGroup=Media, editinlinenew, meta=(BlueprintSpawnableComponent), MinimalAPI)
+class UMediaSoundComponent
 	: public USynthComponent
 {
 	GENERATED_BODY()
@@ -110,10 +189,10 @@ public:
 	 *
 	 * @param ObjectInitializer Initialization parameters.
 	 */
-	UMediaSoundComponent(const FObjectInitializer& ObjectInitializer);
+	MEDIAASSETS_API UMediaSoundComponent(const FObjectInitializer& ObjectInitializer);
 
 	/** Virtual destructor. */
-	~UMediaSoundComponent();
+	MEDIAASSETS_API ~UMediaSoundComponent();
 
 public:
 
@@ -124,7 +203,7 @@ public:
 	 * @return true if attenuation settings were returned, false if attenuation is disabled.
 	 */
 	UFUNCTION(BlueprintCallable, Category="Media|MediaSoundComponent", meta=(DisplayName="Get Attenuation Settings To Apply", ScriptName="GetAttenuationSettingsToApply"))
-	bool BP_GetAttenuationSettingsToApply(FSoundAttenuationSettings& OutAttenuationSettings);
+	MEDIAASSETS_API bool BP_GetAttenuationSettingsToApply(FSoundAttenuationSettings& OutAttenuationSettings);
 
 	/**
 	 * Get the media player that provides the audio samples.
@@ -133,7 +212,7 @@ public:
 	 * @see SetMediaPlayer
 	 */
 	UFUNCTION(BlueprintCallable, Category="Media|MediaSoundComponent")
-	UMediaPlayer* GetMediaPlayer() const;
+	MEDIAASSETS_API UMediaPlayer* GetMediaPlayer() const;
 
 	virtual USoundClass* GetSoundClass() override
 	{
@@ -165,39 +244,45 @@ public:
 	 * @see GetMediaPlayer
 	 */
 	UFUNCTION(BlueprintCallable, Category="Media|MediaSoundComponent")
-	void SetMediaPlayer(UMediaPlayer* NewMediaPlayer);
+	MEDIAASSETS_API void SetMediaPlayer(UMediaPlayer* NewMediaPlayer);
 
 	/** Turns on spectral analysis of the audio generated in the media sound component. */
 	UFUNCTION(BlueprintCallable, Category = "Media|MediaSoundComponent")
-	void SetEnableSpectralAnalysis(bool bInSpectralAnalysisEnabled);
+	MEDIAASSETS_API void SetEnableSpectralAnalysis(bool bInSpectralAnalysisEnabled);
 	
 	/** Sets the settings to use for spectral analysis. */
 	UFUNCTION(BlueprintCallable, Category = "Media|MediaSoundComponent")
-	void SetSpectralAnalysisSettings(TArray<float> InFrequenciesToAnalyze, EMediaSoundComponentFFTSize InFFTSize = EMediaSoundComponentFFTSize::Medium_512);
+	MEDIAASSETS_API void SetSpectralAnalysisSettings(TArray<float> InFrequenciesToAnalyze, EMediaSoundComponentFFTSize InFFTSize = EMediaSoundComponentFFTSize::Medium_512);
 
 	/** Retrieves the spectral data if spectral analysis is enabled. */
 	UFUNCTION(BlueprintCallable, Category = "TimeSynth")
-	TArray<FMediaSoundComponentSpectralData> GetSpectralData();
+	MEDIAASSETS_API TArray<FMediaSoundComponentSpectralData> GetSpectralData();
 
 	/** Retrieves and normalizes the spectral data if spectral analysis is enabled. */
 	UFUNCTION(BlueprintCallable, Category = "TimeSynth")
-	TArray<FMediaSoundComponentSpectralData> GetNormalizedSpectralData();
+	MEDIAASSETS_API TArray<FMediaSoundComponentSpectralData> GetNormalizedSpectralData();
 
 	/** Turns on amplitude envelope following the audio in the media sound component. */
 	UFUNCTION(BlueprintCallable, Category = "Media|MediaSoundComponent")
-	void SetEnableEnvelopeFollowing(bool bInEnvelopeFollowing);
+	MEDIAASSETS_API void SetEnableEnvelopeFollowing(bool bInEnvelopeFollowing);
 
 	/** Sets the envelope attack and release times (in ms). */
 	UFUNCTION(BlueprintCallable, Category = "Media|MediaSoundComponent")
-	void SetEnvelopeFollowingsettings(int32 AttackTimeMsec, int32 ReleaseTimeMsec);
+	MEDIAASSETS_API void SetEnvelopeFollowingsettings(int32 AttackTimeMsec, int32 ReleaseTimeMsec);
 
 	/** Retrieves the current amplitude envelope. */
 	UFUNCTION(BlueprintCallable, Category = "TimeSynth")
-	float GetEnvelopeValue() const;
+	MEDIAASSETS_API float GetEnvelopeValue() const;
 
 public:
 
-	void UpdatePlayer();
+	/** Adds a clock sink so this can be ticked without the world. */
+	MEDIAASSETS_API void AddClockSink();
+
+	/** Removes the clock sink. */
+	MEDIAASSETS_API void RemoveClockSink();
+
+	MEDIAASSETS_API void UpdatePlayer();
 
 #if WITH_EDITOR
 	/**
@@ -206,37 +291,37 @@ public:
 	 * @param NewMediaPlayer The player to set.
 	 * @see SetMediaPlayer
 	 */
-	void SetDefaultMediaPlayer(UMediaPlayer* NewMediaPlayer);
+	MEDIAASSETS_API void SetDefaultMediaPlayer(UMediaPlayer* NewMediaPlayer);
 #endif
 
 public:
 
 	//~ TAttenuatedComponentVisualizer interface
 
-	void CollectAttenuationShapesForVisualization(TMultiMap<EAttenuationShape::Type, FBaseAttenuationSettings::AttenuationShapeDetails>& ShapeDetailsMap) const;
+	MEDIAASSETS_API void CollectAttenuationShapesForVisualization(TMultiMap<EAttenuationShape::Type, FBaseAttenuationSettings::AttenuationShapeDetails>& ShapeDetailsMap) const;
 
 public:
 
 	//~ UActorComponent interface
 
-	virtual void OnRegister() override;
-	virtual void OnUnregister() override;
-	virtual void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction *ThisTickFunction) override;
+	MEDIAASSETS_API virtual void OnRegister() override;
+	MEDIAASSETS_API virtual void OnUnregister() override;
+	MEDIAASSETS_API virtual void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction *ThisTickFunction) override;
 
 public:
 
 	//~ USceneComponent interface
 
-	virtual void Activate(bool bReset = false) override;
-	virtual void Deactivate() override;
+	MEDIAASSETS_API virtual void Activate(bool bReset = false) override;
+	MEDIAASSETS_API virtual void Deactivate() override;
 
 public:
 
 	//~ UObject interface
-	virtual void PostLoad() override;
+	MEDIAASSETS_API virtual void PostLoad() override;
 
 #if WITH_EDITOR
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	MEDIAASSETS_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
 
 protected:
@@ -246,14 +331,15 @@ protected:
 	 *
 	 * @return Attenuation settings, or nullptr if attenuation is disabled.
 	 */
-	const FSoundAttenuationSettings* GetSelectedAttenuationSettings() const;
+	MEDIAASSETS_API const FSoundAttenuationSettings* GetSelectedAttenuationSettings() const;
 
 protected:
 
 	//~ USynthComponent interface
 
-	virtual bool Init(int32& SampleRate) override;
-	virtual int32 OnGenerateAudio(float* OutAudio, int32 NumSamples) override;
+	MEDIAASSETS_API virtual bool Init(int32& SampleRate) override;
+
+	MEDIAASSETS_API virtual ISoundGeneratorPtr CreateSoundGenerator(const FSoundGeneratorInitParams& InParams) override;
 
 protected:
 
@@ -266,15 +352,15 @@ protected:
 	 * @see SetMediaPlayer
 	 */
 	UPROPERTY(EditAnywhere, Category="Media")
-	UMediaPlayer* MediaPlayer;
+	TObjectPtr<UMediaPlayer> MediaPlayer;
 
 private:
 
 	/** The player's current play rate (cached for use on audio thread). */
-	TAtomic<float> CachedRate;
+	float CachedRate;
 
 	/** The player's current time (cached for use on audio thread). */
-	TAtomic<FTimespan> CachedTime;
+	FTimespan CachedTime;
 
 	/** Critical section for synchronizing access to PlayerFacadePtr. */
 	FCriticalSection CriticalSection;
@@ -288,33 +374,18 @@ private:
 	/** Adjusts the output sample rate to synchronize audio and media clock. */
 	float RateAdjustment;
 
-	/** The audio resampler. */
-	FMediaAudioResampler* Resampler;
-
 	/** Audio sample queue. */
 	TSharedPtr<FMediaAudioSampleQueue, ESPMode::ThreadSafe> SampleQueue;
 
 	/* Time of last sample played. */
-	TAtomic<FTimespan> LastPlaySampleTime;
+	FTimespan LastPlaySampleTime;
 
 	/** Which frequencies to analyze. */
 	TArray<float> FrequenciesToAnalyze;
-
-	/** The FFT bin-size to use for FFT analysis. Smaller sizes make it more reactive but less accurate in the frequency space. */
-	EMediaSoundComponentFFTSize FFTSize;
-
 	/** Spectrum analyzer used for analyzing audio in media. */
-	Audio::FAsyncSpectrumAnalyzer SpectrumAnalyzer;
 	Audio::FSpectrumAnalyzerSettings SpectrumAnalyzerSettings;
-
-	Audio::FEnvelopeFollower EnvelopeFollower;
 	int32 EnvelopeFollowerAttackTime;
 	int32 EnvelopeFollowerReleaseTime;
-	float CurrentEnvelopeValue;
-	FCriticalSection EnvelopeFollowerCriticalSection;
-
-	/** Scratch buffer to mix in source audio to from decoder */
-	Audio::AlignedFloatBuffer AudioScratchBuffer;
 
 	/** Whether or not spectral analysis is enabled. */
 	bool bSpectralAnalysisEnabled;
@@ -322,10 +393,9 @@ private:
 	/** Whether or not envelope following is enabled. */
 	bool bEnvelopeFollowingEnabled;
 
-	/** Whether or not envelope follower settings changed. */
-	bool bEnvelopeFollowerSettingsChanged;
+	/** Holds our clock sink if available. */
+	TSharedPtr<FMediaSoundComponentClockSink, ESPMode::ThreadSafe> ClockSink;
 
-private:
-
-	static USoundClass* DefaultMediaSoundClassObject;
+	/** Instance of our media sound generator. This is a non-uobject that is used to feed sink audio to a sound source on the audio render thread (or async task). */
+	ISoundGeneratorPtr MediaSoundGenerator;
 };

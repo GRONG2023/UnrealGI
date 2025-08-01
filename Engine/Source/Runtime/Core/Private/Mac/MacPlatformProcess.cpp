@@ -11,6 +11,7 @@
 #include "Misc/App.h"
 #include "Misc/CoreDelegates.h"
 #include "Misc/Paths.h"
+#include "Misc/StringBuilder.h"
 #include "HAL/FileManager.h"
 #include "Apple/PreAppleSystemHeaders.h"
 #include <mach-o/dyld.h>
@@ -19,7 +20,6 @@
 #include <libproc.h>
 #include <spawn.h>
 #include "Apple/PostAppleSystemHeaders.h"
-
 #if PLATFORM_MAC_X86
     #include <cpuid.h>
 #endif
@@ -28,7 +28,6 @@ namespace PlatformProcessLimits
 {
 	enum
 	{
-		MaxUserHomeDirLength = MAC_MAX_PATH + 1,
 		MaxArgvParameters	 = 256
 	};
 };
@@ -51,13 +50,13 @@ static void* GetDllHandleImpl(NSString* DylibPath, NSString* ExecutableFolder)
 		{
 			DylibName = [DylibPath lastPathComponent];
 		}
-		Handle = dlopen([[@"@rpath" stringByAppendingPathComponent:DylibName] fileSystemRepresentation], RTLD_NOLOAD | RTLD_LAZY | RTLD_LOCAL);
+		Handle = dlopen([[@"@rpath" stringByAppendingPathComponent:DylibName] fileSystemRepresentation], RTLD_NOLOAD | RTLD_LAZY | RTLD_GLOBAL);
 	}
 	
 	if (!Handle)
 	{
 		// Not loaded yet, so try to open it
-		Handle = dlopen([DylibPath fileSystemRepresentation], RTLD_LAZY | RTLD_LOCAL);
+		Handle = dlopen([DylibPath fileSystemRepresentation], RTLD_LAZY | RTLD_GLOBAL);
 	}
 	
 	if (!Handle && FParse::Param(FCommandLine::Get(), TEXT("dllerrors")))
@@ -74,32 +73,17 @@ void* FMacPlatformProcess::GetDllHandle( const TCHAR* Filename )
 
 	check(Filename);
 
-	NSString* DylibPath = [NSString stringWithUTF8String:TCHAR_TO_UTF8(Filename)];
+	NSString* DylibPath = FString(Filename).GetNSString();
 	NSString* ExecutableFolder = [[[NSBundle mainBundle] executablePath] stringByDeletingLastPathComponent];
 	void* Handle = nullptr;
 
-	// On 11.0.0+, system-provided dynamic libraries do not exist on the
-	// filesystem, only in a built-in dynamic linker cache.
-	if (FPlatformMisc::MacOSXVersionCompare(10,16,0) >= 0)
-	{
-		Handle = GetDllHandleImpl(DylibPath, ExecutableFolder);
-		if (!Handle)
-		{
-			// If it's not a absolute or relative path, try to find the file in the app bundle
-			DylibPath = [ExecutableFolder stringByAppendingPathComponent:FString(Filename).GetNSString()];
-			Handle = GetDllHandleImpl(DylibPath, ExecutableFolder);
-		}
-	}
-	else
-	{
-		NSFileManager* FileManager = [NSFileManager defaultManager];
-		if (![FileManager fileExistsAtPath:DylibPath])
-		{
-			// If it's not a absolute or relative path, try to find the file in the app bundle
-			DylibPath = [ExecutableFolder stringByAppendingPathComponent:FString(Filename).GetNSString()];
-		}
-		Handle = GetDllHandleImpl(DylibPath, ExecutableFolder);
-	}
+    Handle = GetDllHandleImpl(DylibPath, ExecutableFolder);
+    if (!Handle)
+    {
+        // If it's not a absolute or relative path, try to find the file in the app bundle
+        DylibPath = [ExecutableFolder stringByAppendingPathComponent:DylibPath];
+        Handle = GetDllHandleImpl(DylibPath, ExecutableFolder);
+    }
 	return Handle;
 }
 
@@ -201,7 +185,7 @@ FString FMacPlatformProcess::GetGameBundleId()
 	return FString([[NSBundle mainBundle] bundleIdentifier]);
 }
 
-bool FMacPlatformProcess::ExecProcess( const TCHAR* URL, const TCHAR* Params, int32* OutReturnCode, FString* OutStdOut, FString* OutStdErr, const TCHAR* OptionalWorkingDirectory)
+bool FMacPlatformProcess::ExecProcess( const TCHAR* URL, const TCHAR* Params, int32* OutReturnCode, FString* OutStdOut, FString* OutStdErr, const TCHAR* OptionalWorkingDirectory, bool bShouldEndWithParentProcess)
 {
 	FString CmdLineParams = Params;
 	FString ExecutableFileName = URL;
@@ -309,6 +293,11 @@ FProcHandle FMacPlatformProcess::CreateProc( const TCHAR* URL, const TCHAR* Parm
 	return CreateProcInternal(URL, Parms, bLaunchDetached, bLaunchHidden, bLaunchReallyHidden, OutProcessID, PriorityModifier, OptionalWorkingDirectory, PipeWriteChild, PipeWriteChild, PipeReadChild);
 }
 
+FProcHandle FMacPlatformProcess::CreateProc( const TCHAR* URL, const TCHAR* Parms, bool bLaunchDetached, bool bLaunchHidden, bool bLaunchReallyHidden, uint32* OutProcessID, int32 PriorityModifier, const TCHAR* OptionalWorkingDirectory, void* PipeWriteChild, void* PipeReadChild, void* PipeStdErrChild)
+{
+	return CreateProcInternal(URL, Parms, bLaunchDetached, bLaunchHidden, bLaunchReallyHidden, OutProcessID, PriorityModifier, OptionalWorkingDirectory, PipeWriteChild, PipeStdErrChild, PipeReadChild);
+}
+
 FProcHandle FMacPlatformProcess::CreateProcInternal(const TCHAR* URL, const TCHAR* Parms, bool bLaunchDetached, bool bLaunchHidden, bool bLaunchReallyHidden, uint32* OutProcessID, int32 PriorityModifier, const TCHAR* OptionalWorkingDirectory, void* PipeStdOutChild, void* PipeStdErrChild, void *PipeStdInChild)
 {
 	SCOPED_AUTORELEASE_POOL;
@@ -327,7 +316,7 @@ FProcHandle FMacPlatformProcess::CreateProcInternal(const TCHAR* URL, const TCHA
 		if (![[NSFileManager defaultManager] fileExistsAtPath: nsProcessPath])
 		{
 			NSString* AppName = [[nsProcessPath lastPathComponent] stringByDeletingPathExtension];
-			nsProcessPath = [[NSWorkspace sharedWorkspace] fullPathForApplication:AppName];
+			nsProcessPath = [[[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:AppName] path];
 		}
 		
 		if ([[NSFileManager defaultManager] fileExistsAtPath: nsProcessPath])
@@ -537,10 +526,7 @@ FProcHandle FMacPlatformProcess::CreateProcInternal(const TCHAR* URL, const TCHA
 
 	if (OptionalWorkingDirectory)
 	{
-		if (@available(macOS 10.15, *))
-		{
-			posix_spawn_file_actions_addchdir_np(&FileActions, TCHAR_TO_UTF8(OptionalWorkingDirectory));
-		}
+		posix_spawn_file_actions_addchdir_np(&FileActions, TCHAR_TO_UTF8(OptionalWorkingDirectory));
 	}
 
 	posix_spawnattr_setflags(&SpawnAttr, SpawnFlags);
@@ -1021,11 +1007,11 @@ const TCHAR* FMacPlatformProcess::BaseDir()
 				NSString* BundledBinariesPath = NULL;
 				if (!FApp::IsProjectNameEmpty())
 				{
-					BundledBinariesPath = [BasePath stringByAppendingPathComponent : [NSString stringWithFormat : @"Contents/UE4/%s/Binaries/Mac", TCHAR_TO_UTF8(FApp::GetProjectName())]];
+					BundledBinariesPath = [BasePath stringByAppendingPathComponent : [NSString stringWithFormat : @"Contents/UE/%s/Binaries/Mac", TCHAR_TO_UTF8(FApp::GetProjectName())]];
 				}
 				if (!BundledBinariesPath || ![FileManager fileExistsAtPath:BundledBinariesPath])
 				{
-					BundledBinariesPath = [BasePath stringByAppendingPathComponent: @"Contents/UE4/Engine/Binaries/Mac"];
+					BundledBinariesPath = [BasePath stringByAppendingPathComponent: @"Contents/UE/Engine/Binaries/Mac"];
 				}
 				if ([FileManager fileExistsAtPath: BundledBinariesPath])
 				{
@@ -1036,40 +1022,31 @@ const TCHAR* FMacPlatformProcess::BaseDir()
 					BasePath = [BasePath stringByDeletingLastPathComponent];
 				}
 			}
-		
+#ifdef UE_RELATIVE_BASE_DIR
+			else
+			{
+				// Get executable path
+				NSString* ExecutablePath = [[NSBundle mainBundle] executablePath];
+
+				// When building an extra console app i.e. a commandlet, the Mac executable can  be placed in a distinct folder, usually 3 directories up compared to the packaged app
+				if ([[ExecutablePath lowercaseString] hasSuffix : @"-cmd"] )
+				{
+#ifdef UE_CMDLET_RELATIVE_BASE_DIR
+					BasePath = [BasePath stringByAppendingPathComponent : @UE_CMDLET_RELATIVE_BASE_DIR];
+#endif
+				}
+				else
+				{
+					BasePath = [BasePath stringByAppendingPathComponent : @UE_RELATIVE_BASE_DIR];
+				}
+			}
+#endif
+
 			FCString::Strcpy(Result, MAC_MAX_PATH, *FString(BasePath));
 			FCString::Strcat(Result, TEXT("/"));
 		}
 	}
 	return Result;
-}
-
-const TCHAR* FMacPlatformProcess::UserDir()
-{
-	static TCHAR Result[MAC_MAX_PATH] = TEXT("");
-	if (!Result[0])
-	{
-		SCOPED_AUTORELEASE_POOL;
-		NSString *DocumentsFolder = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) objectAtIndex: 0];
-		FPlatformString::CFStringToTCHAR((CFStringRef)DocumentsFolder, Result);
-		FCString::Strcat(Result, TEXT("/"));
-	}
-	return Result;
-}
-
-const TCHAR* FMacPlatformProcess::UserTempDir()
-{
-	static FString MacUserTempDir;
-	if (!MacUserTempDir.Len())
-	{
-		MacUserTempDir = NSTemporaryDirectory();
-	}
-	return *MacUserTempDir;
-}
-
-const TCHAR* FMacPlatformProcess::UserSettingsDir()
-{
-	return ApplicationSettingsDir();
 }
 
 static TCHAR* UserLibrarySubDirectory()
@@ -1118,31 +1095,6 @@ const TCHAR* FMacPlatformProcess::UserLogsDir()
 		FPlatformString::CFStringToTCHAR((CFStringRef)UserLibraryDirectory, Result);
 		FCString::Strcat(Result, TEXT("/Logs/"));
 		FCString::Strcat(Result, UserLibrarySubDirectory());
-	}
-	return Result;
-}
-
-const TCHAR* FMacPlatformProcess::UserHomeDir()
-{
-	static TCHAR Result[MAC_MAX_PATH] = TEXT("");
-	if (!Result[0])
-	{
-		SCOPED_AUTORELEASE_POOL;
-		FPlatformString::CFStringToTCHAR((CFStringRef)NSHomeDirectory(), Result);
-	}
-	return Result;
-}
-
-const TCHAR* FMacPlatformProcess::ApplicationSettingsDir()
-{
-	static TCHAR Result[MAC_MAX_PATH] = TEXT("");
-	if (!Result[0])
-	{
-		SCOPED_AUTORELEASE_POOL;
-		NSString *ApplicationSupportFolder = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) objectAtIndex: 0];
-		FPlatformString::CFStringToTCHAR((CFStringRef)ApplicationSupportFolder, Result);
-		// @todo rocket this folder should be based on your company name, not just be hard coded to /Epic/
-		FCString::Strcat(Result, TEXT("/Epic/"));
 	}
 	return Result;
 }
@@ -1241,7 +1193,12 @@ const TCHAR* FMacPlatformProcess::GetBinariesSubdirectory()
 	return TEXT("Mac");
 }
 
-void FMacPlatformProcess::LaunchFileInDefaultExternalApplication( const TCHAR* FileName, const TCHAR* Parms /*= NULL*/, ELaunchVerb::Type Verb /*= ELaunchVerb::Open*/ )
+const FString FMacPlatformProcess::GetModulesDirectory()
+{
+	return FString(BaseDir());
+}
+
+bool FMacPlatformProcess::LaunchFileInDefaultExternalApplication( const TCHAR* FileName, const TCHAR* Parms /*= NULL*/, ELaunchVerb::Type Verb /*= ELaunchVerb::Open*/, bool bPromptToOpenOnFailure /*= true */)
 {
 	SCOPED_AUTORELEASE_POOL;
 	// First attempt to open the file in its default application
@@ -1253,8 +1210,10 @@ void FMacPlatformProcess::LaunchFileInDefaultExternalApplication( const TCHAR* F
 		// Xcode project is a special case where we don't open the project file itself, but the .xcodeproj folder containing it
 		FileToOpen = [FileToOpen stringByDeletingLastPathComponent];
 	}
-	[[NSWorkspace sharedWorkspace] openFile: FileToOpen];
+	bool Result = [[NSWorkspace sharedWorkspace] openURL: [NSURL fileURLWithPath:FileToOpen]];
 	CFRelease( CFFileName );
+
+	return Result;
 }
 
 void FMacPlatformProcess::ExploreFolder( const TCHAR* FilePath )
@@ -1297,14 +1256,14 @@ void FMacPlatformProcess::ClosePipe( void* ReadPipe, void* WritePipe )
 	}
 }
 
-bool FMacPlatformProcess::CreatePipe( void*& ReadPipe, void*& WritePipe )
+bool FMacPlatformProcess::CreatePipe( void*& ReadPipe, void*& WritePipe, bool bWritePipeLocal )
 {
 	SCOPED_AUTORELEASE_POOL;
 	int pipefd[2];
 	pipe(pipefd);
 
+	// The read pipe should be non-blocking, but the write pipe SHOULD block
 	fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
-	fcntl(pipefd[1], F_SETFL, O_NONBLOCK);
 
 	// create an NSFileHandle from the descriptor
 	ReadPipe = [[NSFileHandle alloc] initWithFileDescriptor: pipefd[0]];
@@ -1317,26 +1276,28 @@ FString FMacPlatformProcess::ReadPipe( void* ReadPipe )
 {
 	SCOPED_AUTORELEASE_POOL;
 
-	FString Output;
-
 	const int32 READ_SIZE = 8192;
 	ANSICHAR Buffer[READ_SIZE+1];
 	int32 BytesRead = 0;
+
+	// We don't want to use FUtf8StringBuilderBase here because the Buffer boundary could split a UTF-8 character
+	// and we don't want .Append to attempt to interpert the incoming data.  We will convert the whole string in one go at the end.
+	FAnsiStringBuilderBase StringBuilder;
 
 	if(ReadPipe)
 	{
 		do
 		{
-		BytesRead = read([(NSFileHandle*)ReadPipe fileDescriptor], Buffer, READ_SIZE);
-		if (BytesRead > 0)
-		{
-			Buffer[BytesRead] = '\0';
-			Output += StringCast<TCHAR>(Buffer).Get();
-		}
+			BytesRead = read([(NSFileHandle*)ReadPipe fileDescriptor], Buffer, READ_SIZE);
+			if (BytesRead > 0)
+			{
+				Buffer[BytesRead] = '\0';
+				StringBuilder.Append(Buffer, BytesRead);
+			}
 		} while (BytesRead > 0);
 	}
-
-	return Output;
+	
+	return FString(UTF8_TO_TCHAR(StringBuilder.ToString()));
 }
 
 bool FMacPlatformProcess::ReadPipeToArray(void* ReadPipe, TArray<uint8>& Output)
@@ -1371,19 +1332,17 @@ bool FMacPlatformProcess::ReadPipeToArray(void* ReadPipe, TArray<uint8>& Output)
 bool FMacPlatformProcess::WritePipe(void* WritePipe, const FString& Message, FString* OutWritten)
 {
 	// if there is not a message or WritePipe is nullptr
-	if ((Message.Len() == 0) || (WritePipe == nullptr))
+	int32 MessageLen = Message.Len();
+	if ((MessageLen == 0) || (WritePipe == nullptr))
 	{
 		return false;
 	}
 
 	// Convert input to UTF8CHAR
-	uint32 BytesAvailable = Message.Len();
-	UTF8CHAR * Buffer = new UTF8CHAR[BytesAvailable + 2];
-	for (uint32 i = 0; i < BytesAvailable; i++)
-	{
-		Buffer[i] = Message[i];
-	}
-	Buffer[BytesAvailable] = '\n';
+	const TCHAR* MessagePtr = *Message;
+	int32 BytesAvailable = FPlatformString::ConvertedLength<UTF8CHAR>(MessagePtr, MessageLen);
+	UTF8CHAR* Buffer = new UTF8CHAR[BytesAvailable + 2];
+	*FPlatformString::Convert(Buffer, BytesAvailable, MessagePtr, MessageLen) = (UTF8CHAR)'\n';
 
 	// Write to pipe
 	uint32 BytesWritten = write([(NSFileHandle*)WritePipe fileDescriptor], Buffer, BytesAvailable + 1);
@@ -1391,8 +1350,7 @@ bool FMacPlatformProcess::WritePipe(void* WritePipe, const FString& Message, FSt
 	// Get written message
 	if (OutWritten)
 	{
-		Buffer[BytesWritten] = '\0';
-		*OutWritten = FUTF8ToTCHAR((const ANSICHAR*)Buffer).Get();
+		*OutWritten = StringCast<TCHAR>(Buffer, BytesWritten).Get();
 	}
 
 	delete[] Buffer;

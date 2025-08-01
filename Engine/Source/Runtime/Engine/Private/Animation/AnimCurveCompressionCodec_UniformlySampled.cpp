@@ -1,8 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Animation/AnimCurveCompressionCodec_UniformlySampled.h"
-#include "Animation/AnimSequence.h"
-#include "Serialization/MemoryWriter.h"
+#include "Animation/AnimCompressionTypes.h"
+#include "Animation/AnimCurveUtils.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimCurveCompressionCodec_UniformlySampled)
 
 UAnimCurveCompressionCodec_UniformlySampled::UAnimCurveCompressionCodec_UniformlySampled(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -16,16 +18,15 @@ UAnimCurveCompressionCodec_UniformlySampled::UAnimCurveCompressionCodec_Uniforml
 #if WITH_EDITORONLY_DATA
 bool UAnimCurveCompressionCodec_UniformlySampled::Compress(const FCompressibleAnimData& AnimSeq, FAnimCurveCompressionResult& OutResult)
 {
-	const int32 NumCurves = AnimSeq.RawCurveData.FloatCurves.Num();
+	const int32 NumCurves = AnimSeq.RawFloatCurves.Num();
 	const float Duration = AnimSeq.SequenceLength;
 
 	int32 NumSamples;
 	float SampleRate_;
 	if (UseAnimSequenceSampleRate)
 	{
-		const FAnimKeyHelper Helper(AnimSeq.SequenceLength, AnimSeq.NumFrames);
-		SampleRate_ = Helper.KeysPerSecond();
-		NumSamples = FMath::RoundToInt(Duration * SampleRate_) + 1;
+		NumSamples = AnimSeq.NumberOfKeys;
+		SampleRate_ = AnimSeq.SampledFrameRate.AsDecimal();
 	}
 	else
 	{
@@ -37,7 +38,7 @@ bool UAnimCurveCompressionCodec_UniformlySampled::Compress(const FCompressibleAn
 	}
 
 	int32 NumConstantCurves = 0;
-	for (const FFloatCurve& Curve : AnimSeq.RawCurveData.FloatCurves)
+	for (const FFloatCurve& Curve : AnimSeq.RawFloatCurves)
 	{
 		if (Curve.FloatCurve.IsConstant())
 		{
@@ -92,7 +93,7 @@ bool UAnimCurveCompressionCodec_UniformlySampled::Compress(const FCompressibleAn
 		{
 			for (int32 CurveIndex = 0, ConstantCurveIndex = 0; CurveIndex < NumCurves; ++CurveIndex)
 			{
-				const FFloatCurve& Curve = AnimSeq.RawCurveData.FloatCurves[CurveIndex];
+				const FFloatCurve& Curve = AnimSeq.RawFloatCurves[CurveIndex];
 				if (Curve.FloatCurve.IsConstant())
 				{
 					if (Curve.FloatCurve.IsEmpty())
@@ -124,7 +125,7 @@ bool UAnimCurveCompressionCodec_UniformlySampled::Compress(const FCompressibleAn
 
 				for (int32 CurveIndex = 0, AnimatedCurveIndex = 0; CurveIndex < NumCurves; ++CurveIndex)
 				{
-					const FFloatCurve& Curve = AnimSeq.RawCurveData.FloatCurves[CurveIndex];
+					const FFloatCurve& Curve = AnimSeq.RawFloatCurves[CurveIndex];
 					if (Curve.FloatCurve.IsConstant())
 					{
 						// Skip constant curves, their data has already been written
@@ -162,8 +163,8 @@ void UAnimCurveCompressionCodec_UniformlySampled::PopulateDDCKey(FArchive& Ar)
 
 void UAnimCurveCompressionCodec_UniformlySampled::DecompressCurves(const FCompressedAnimSequence& AnimSeq, FBlendedCurve& Curves, float CurrentTime) const
 {
-	const TArray<FSmartName>& CompressedCurveNames = AnimSeq.CompressedCurveNames;
-	const int32 NumCurves = CompressedCurveNames.Num();
+	const TArray<FAnimCompressedCurveIndexedName>& IndexedCurveNames = AnimSeq.IndexedCurveNames;
+	const int32 NumCurves = IndexedCurveNames.Num();
 
 	if (NumCurves == 0)
 	{
@@ -207,35 +208,42 @@ void UAnimCurveCompressionCodec_UniformlySampled::DecompressCurves(const FCompre
 	const float* AnimatedSamples0 = AnimatedSamplesPtr + (SampleIndex0 * NumAnimatedCurves);
 	const float* AnimatedSamples1 = AnimatedSamplesPtr + (SampleIndex1 * NumAnimatedCurves);
 
-	for (int32 CurveIndex = 0, ConstantCurveIndex = 0, AnimatedCurveIndex = 0; CurveIndex < NumCurves; ++CurveIndex)
-	{
-		const FSmartName& CurveName = CompressedCurveNames[CurveIndex];
-		const bool bIsConstant = (ConstantCurvesBitsetPtr[CurveIndex / 32] & (1 << (CurveIndex % 32))) != 0;
-		if (Curves.IsEnabled(CurveName.UID))
-		{
-			float Sample;
-			if (bIsConstant)
-			{
-				Sample = ConstantSamplesPtr[ConstantCurveIndex];
-			}
-			else
-			{
-				const float Sample0 = AnimatedSamples0[AnimatedCurveIndex];
-				const float Sample1 = AnimatedSamples1[AnimatedCurveIndex];
-				Sample = FMath::Lerp(Sample0, Sample1, InterpolationAlpha);
-			}
+	int32 ConstantCurveIndex = 0, AnimatedCurveIndex = 0;
 
-			Curves.Set(CurveName.UID, Sample);
+	auto GetNameFromIndex = [&IndexedCurveNames](int32 InCurveIndex)
+	{
+		return IndexedCurveNames[IndexedCurveNames[InCurveIndex].CurveIndex].CurveName;
+	};
+
+	auto GetValueFromIndex = [&IndexedCurveNames, ConstantCurvesBitsetPtr, &ConstantCurveIndex, &AnimatedCurveIndex, ConstantSamplesPtr, AnimatedSamples0, AnimatedSamples1, InterpolationAlpha](int32 InCurveIndex) 
+	{
+		const int32 CurveIndex = IndexedCurveNames[InCurveIndex].CurveIndex;
+		const bool bIsConstant = (ConstantCurvesBitsetPtr[CurveIndex / 32] & (1 << (CurveIndex % 32))) != 0;
+
+		float Sample;
+		if (bIsConstant)
+		{
+			Sample = ConstantSamplesPtr[ConstantCurveIndex];
+		}
+		else
+		{
+			const float Sample0 = AnimatedSamples0[AnimatedCurveIndex];
+			const float Sample1 = AnimatedSamples1[AnimatedCurveIndex];
+			Sample = FMath::Lerp(Sample0, Sample1, InterpolationAlpha);
 		}
 
 		(bIsConstant ? ConstantCurveIndex : AnimatedCurveIndex)++;
-	}
+
+		return Sample;
+	};
+
+	UE::Anim::FCurveUtils::BuildSorted(Curves, NumCurves, GetNameFromIndex, GetValueFromIndex, Curves.GetFilter());
 }
 
-float UAnimCurveCompressionCodec_UniformlySampled::DecompressCurve(const FCompressedAnimSequence& AnimSeq, SmartName::UID_Type CurveUID, float CurrentTime) const
+float UAnimCurveCompressionCodec_UniformlySampled::DecompressCurve(const FCompressedAnimSequence& AnimSeq, FName InCurveName, float CurrentTime) const
 {
-	const TArray<FSmartName>& CompressedCurveNames = AnimSeq.CompressedCurveNames;
-	const int32 NumCurves = CompressedCurveNames.Num();
+	const TArray<FAnimCompressedCurveIndexedName>& IndexedCurveNames = AnimSeq.IndexedCurveNames;
+	const int32 NumCurves = IndexedCurveNames.Num();
 
 	if (NumCurves == 0)
 	{
@@ -267,9 +275,9 @@ float UAnimCurveCompressionCodec_UniformlySampled::DecompressCurve(const FCompre
 
 	for (int32 CurveIndex = 0, ConstantCurveIndex = 0, AnimatedCurveIndex = 0; CurveIndex < NumCurves; ++CurveIndex)
 	{
-		const FSmartName& CurveName = CompressedCurveNames[CurveIndex];
+		const FName& CurveName = IndexedCurveNames[CurveIndex].CurveName;
 		const bool bIsConstant = (ConstantCurvesBitsetPtr[CurveIndex / 32] & (1 << (CurveIndex % 32))) != 0;
-		if (CurveName.UID == CurveUID)
+		if (CurveName == InCurveName)
 		{
 			float Sample;
 			if (bIsConstant)
@@ -296,3 +304,4 @@ float UAnimCurveCompressionCodec_UniformlySampled::DecompressCurve(const FCompre
 
 	return 0.0f;
 }
+

@@ -8,7 +8,6 @@
 
 #if WITH_CEF3
 #if PLATFORM_WINDOWS
-	#include "Windows/WindowsHWrapper.h"
 	#include "Windows/AllowWindowsPlatformTypes.h"
 	#include "Windows/AllowWindowsPlatformAtomics.h"
 #endif
@@ -30,6 +29,7 @@ THIRD_PARTY_INCLUDES_END
 	#include "Windows/HideWindowsPlatformTypes.h"
 #endif
 #include "CEF/CEFSchemeHandler.h"
+#include "CEF/CEFResourceContextHandler.h"
 class CefListValue;
 class FCEFBrowserApp;
 class FCEFWebBrowserWindow;
@@ -48,7 +48,7 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
  */
 class FWebBrowserSingleton
 	: public IWebBrowserSingleton
-	, public FTickerObjectBase
+	, public FTSTickerObjectBase
 {
 public:
 
@@ -77,24 +77,11 @@ public:
 		TSharedPtr<FCEFWebBrowserWindow>& BrowserWindowParent,
 		TSharedPtr<FWebBrowserWindowInfo>& BrowserWindowInfo) override;
 
-	TSharedPtr<IWebBrowserWindow> CreateBrowserWindow(
-		void* OSWindowHandle,
-		FString InitialURL,
-		bool bUseTransparency,
-		bool bThumbMouseButtonNavigation,
-		TOptional<FString> ContentsToLoad = TOptional<FString>(),
-		bool ShowErrorMessage = true,
-		FColor BackgroundColor = FColor(255, 255, 255, 255),
-		int BrowserFrameRate = 24,
-		const TArray<FString>& AltRetryDomains = TArray<FString>()) override;
-
 	TSharedPtr<IWebBrowserWindow> CreateBrowserWindow(const FCreateBrowserWindowSettings& Settings) override;
 
 #if	BUILD_EMBEDDED_APP
 	TSharedPtr<IWebBrowserWindow> CreateNativeBrowserProxy() override;
 #endif
-
-	virtual void DeleteBrowserCookies(FString URL = TEXT(""), FString CookieName = TEXT(""), TFunction<void(int)> Completed = nullptr) override;
 
 	virtual TSharedPtr<IWebBrowserCookieManager> GetCookieManager() const override
 	{
@@ -126,6 +113,8 @@ public:
 		bJSBindingsToLoweringEnabled = bEnabled;
 	}
 
+	virtual void ClearOldCacheFolders(const FString& CachePathRoot, const FString& CachePrefix) override;
+
 	/** Set a reference to UWebBrowser's default material*/
 	virtual void SetDefaultMaterial(UMaterialInterface* InDefaultMaterial) override
 	{
@@ -152,29 +141,38 @@ public:
 
 public:
 
-	// FTickerObjectBase Interface
+	// FTSTickerObjectBase Interface
 
 	virtual bool Tick(float DeltaTime) override;
 
+#if WITH_CEF3
+	/** Return true if this URL will support adding an Authorization header to it */
+	bool URLRequestAllowsCredentials(const FString& URL);
+#endif
 private:
 
 	TSharedPtr<IWebBrowserCookieManager> DefaultCookieManager;
 
 #if WITH_CEF3
-	/** When new render processes are created, send all permanent variable bindings to them. */
-	void HandleRenderProcessCreated(CefRefPtr<CefListValue> ExtraInfo);
+	/** Helper function to generate the CEF build unique name for the cache_path */
+	FString GenerateWebCacheFolderName(const FString &InputPath);
+	/** Helper function that blocks until the CEF task queue has processed a posted task, flushing the queue */
+	void WaitForTaskQueueFlush();
+
 	/** Pointer to the CEF App implementation */
 	CefRefPtr<FCEFBrowserApp>			CEFBrowserApp;
 
 	TMap<FString, CefRefPtr<CefRequestContext>> RequestContexts;
+	TMap<FString, CefRefPtr<FCEFResourceContextHandler>> RequestResourceHandlers;
 	FCefSchemeHandlerFactories SchemeHandlerFactories;
 	bool bAllowCEF;
+	bool bTaskFinished;
 #endif
 
 	/** List of currently existing browser windows */
 #if WITH_CEF3
 	TArray<TWeakPtr<FCEFWebBrowserWindow>>	WindowInterfaces;
-#elif PLATFORM_IOS || PLATFORM_PS4 || (PLATFORM_ANDROID && USE_ANDROID_JNI)
+#elif PLATFORM_IOS || PLATFORM_SPECIFIC_WEB_BROWSER || (PLATFORM_ANDROID && USE_ANDROID_JNI)
 	TArray<TWeakPtr<IWebBrowserWindow>>	WindowInterfaces;
 #endif
 
@@ -186,6 +184,13 @@ private:
 	bool bDevToolsShortcutEnabled;
 
 	bool bJSBindingsToLoweringEnabled;
+
+	bool bAppIsFocused;
+
+#if WITH_CEF3
+	/** Did CEF successfully initialize itself */
+	bool bCEFInitialized;
+#endif
 
 	/** Reference to UWebBrowser's default material*/
 	UMaterialInterface* DefaultMaterial;

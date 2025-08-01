@@ -5,10 +5,11 @@
 =============================================================================*/
 
 #include "VertexFactory.h"
-#include "Serialization/MemoryWriter.h"
-#include "UObject/DebugSerializationFlags.h"
 #include "PipelineStateCache.h"
+#include "RHICommandList.h"
 #include "ShaderCompilerCore.h"
+#include "RenderUtils.h"
+#include "DataDrivenShaderPlatformInfo.h"
 
 IMPLEMENT_TYPE_LAYOUT(FVertexFactoryShaderParameters);
 
@@ -51,8 +52,17 @@ FVertexFactoryType* FVertexFactoryType::GetVFByName(const FHashedName& VFName)
 	return Type ? *Type : nullptr;
 }
 
+#if WITH_EDITOR
+void FVertexFactoryType::UpdateReferencedUniformBufferNames(const TMap<FString, TArray<const TCHAR*>>& ShaderFileToUniformBufferVariables)
+{
+	ReferencedUniformBufferNames.Empty();
+	GenerateReferencedUniformBufferNames(ShaderFilename, Name, ShaderFileToUniformBufferVariables, ReferencedUniformBufferNames);
+}
+#endif
+
 void FVertexFactoryType::Initialize(const TMap<FString, TArray<const TCHAR*> >& ShaderFileToUniformBufferVariables)
 {
+#if WITH_EDITOR
 	if (!FPlatformProperties::RequiresCookedData())
 	{
 		// Cache serialization history for each VF type
@@ -60,9 +70,10 @@ void FVertexFactoryType::Initialize(const TMap<FString, TArray<const TCHAR*> >& 
 		for(TLinkedList<FVertexFactoryType*>::TIterator It(FVertexFactoryType::GetTypeList()); It; It.Next())
 		{
 			FVertexFactoryType* Type = *It;
-			GenerateReferencedUniformBuffers(Type->ShaderFilename, Type->Name, ShaderFileToUniformBufferVariables, Type->ReferencedUniformBufferStructsCache);
+			Type->UpdateReferencedUniformBufferNames(ShaderFileToUniformBufferVariables);
 		}
 	}
+#endif // WITH_EDITOR
 
 	bInitializedSerializationHistory = true;
 }
@@ -75,39 +86,31 @@ void FVertexFactoryType::Uninitialize()
 FVertexFactoryType::FVertexFactoryType(
 	const TCHAR* InName,
 	const TCHAR* InShaderFilename,
-	bool bInUsedWithMaterials,
-	bool bInSupportsStaticLighting,
-	bool bInSupportsDynamicLighting,
-	bool bInSupportsPrecisePrevWorldPos,
-	bool bInSupportsPositionOnly,
-	bool bInSupportsCachingMeshDrawCommands,
-	bool bInSupportsPrimitiveIdStream,
+	EVertexFactoryFlags InFlags,
 	ConstructParametersType InConstructParameters,
 	GetParameterTypeLayoutType InGetParameterTypeLayout,
 	GetParameterTypeElementShaderBindingsType InGetParameterTypeElementShaderBindings,
-	ShouldCacheType InShouldCache,
-	ModifyCompilationEnvironmentType InModifyCompilationEnvironment,
-	ValidateCompiledResultType InValidateCompiledResult,
-	SupportsTessellationShadersType InSupportsTessellationShaders
+	GetPSOPrecacheVertexFetchElementsType InGetPSOPrecacheVertexFetchElements,
+	ShouldCacheType InShouldCache
+#if WITH_EDITOR
+	, ModifyCompilationEnvironmentType InModifyCompilationEnvironment
+	, ValidateCompiledResultType InValidateCompiledResult
+#endif // WITH_EDITOR
 	):
 	Name(InName),
 	ShaderFilename(InShaderFilename),
 	TypeName(InName),
 	HashedName(TypeName),
-	bUsedWithMaterials(bInUsedWithMaterials),
-	bSupportsStaticLighting(bInSupportsStaticLighting),
-	bSupportsDynamicLighting(bInSupportsDynamicLighting),
-	bSupportsPrecisePrevWorldPos(bInSupportsPrecisePrevWorldPos),
-	bSupportsPositionOnly(bInSupportsPositionOnly),
-	bSupportsCachingMeshDrawCommands(bInSupportsCachingMeshDrawCommands),
-	bSupportsPrimitiveIdStream(bInSupportsPrimitiveIdStream),
+	Flags(InFlags),
 	ConstructParameters(InConstructParameters),
 	GetParameterTypeLayout(InGetParameterTypeLayout),
 	GetParameterTypeElementShaderBindings(InGetParameterTypeElementShaderBindings),
+	GetPSOPrecacheVertexFetchElements(InGetPSOPrecacheVertexFetchElements),
 	ShouldCacheRef(InShouldCache),
+#if WITH_EDITOR
 	ModifyCompilationEnvironmentRef(InModifyCompilationEnvironment),
 	ValidateCompiledResultRef(InValidateCompiledResult),
-	SupportsTessellationShadersRef(InSupportsTessellationShaders),
+#endif // WITH_EDITOR
 	GlobalListLink(this)
 {
 	// Make sure the format of the source file path is right.
@@ -117,17 +120,15 @@ FVertexFactoryType::FVertexFactoryType(
 		TEXT("Incorrect virtual shader path extension for vertex factory shader header '%s': Only .ush files should be included."),
 		InShaderFilename);
 
-	bCachedUniformBufferStructDeclarations = false;
-
 	// This will trigger if an IMPLEMENT_VERTEX_FACTORY_TYPE was in a module not loaded before InitializeShaderTypes
 	// Vertex factory types need to be implemented in modules that are loaded before that
 	checkf(!bInitializedSerializationHistory, TEXT("VF type was loaded after engine init, use ELoadingPhase::PostConfigInit on your module to cause it to load earlier."));
 
 	// Add this vertex factory type to the global list.
-	GlobalListLink.LinkHead(GetTypeList());
+	GlobalListLink.LinkHead(GetTypeList()); 
 	GetVFTypeMap().Add(HashedName, this);
 
-	if (bUsedWithMaterials)
+	if (IsUsedWithMaterials())
 	{
 		TArray<FVertexFactoryType*>& SortedTypes = GetSortedMaterialVertexFactoryTypes();
 		const int32 SortedIndex = Algo::LowerBoundBy(SortedTypes, HashedName, [](const FVertexFactoryType* InType) { return InType->GetHashedName(); });
@@ -142,7 +143,7 @@ FVertexFactoryType::~FVertexFactoryType()
 	GlobalListLink.Unlink();
 	verify(GetVFTypeMap().Remove(HashedName) == 1);
 
-	if (bUsedWithMaterials)
+	if (IsUsedWithMaterials())
 	{
 		TArray<FVertexFactoryType*>& SortedTypes = GetSortedMaterialVertexFactoryTypes();
 		const int32 SortedIndex = Algo::BinarySearchBy(SortedTypes, HashedName, [](const FVertexFactoryType* InType) { return InType->GetHashedName(); });
@@ -152,6 +153,12 @@ FVertexFactoryType::~FVertexFactoryType()
 
 	check(NumVertexFactories > 0u);
 	--NumVertexFactories;
+}
+
+bool FVertexFactoryType::CheckManualVertexFetchSupport(ERHIFeatureLevel::Type InFeatureLevel)
+{
+	check(InFeatureLevel != ERHIFeatureLevel::Num);
+	return (InFeatureLevel > ERHIFeatureLevel::ES3_1) && RHISupportsManualVertexFetch(GShaderPlatformForFeatureLevel[InFeatureLevel]);
 }
 
 /** Calculates a Hash based on this vertex factory type's source code and includes */
@@ -274,31 +281,52 @@ void FVertexFactory::ReleaseRHI()
 	PositionAndNormalStream.Empty();
 }
 
-FVertexElement FVertexFactory::AccessStreamComponent(const FVertexStreamComponent& Component, uint8 AttributeIndex)
+bool FVertexFactory::AddPrimitiveIdStreamElement(EVertexInputStreamType InputStreamType, FVertexDeclarationElementList& Elements, uint8 AttributeIndex, uint8 AttributeIndex_Mobile)
 {
-	FVertexStream VertexStream;
-	VertexStream.VertexBuffer = Component.VertexBuffer;
-	VertexStream.Stride = Component.Stride;
-	VertexStream.Offset = Component.StreamOffset;
-	VertexStream.VertexStreamUsage = Component.VertexStreamUsage;
+	if (GetType()->SupportsPrimitiveIdStream() && UseGPUScene(GMaxRHIShaderPlatform, GMaxRHIFeatureLevel))
+	{
+		// mobile PrimitiveId stream should either disabled or same as desktop
+		check(AttributeIndex_Mobile == 0xff || AttributeIndex == AttributeIndex_Mobile);
 
-	return FVertexElement(Streams.AddUnique(VertexStream),Component.Offset,Component.Type,AttributeIndex,VertexStream.Stride, EnumHasAnyFlags(EVertexStreamUsage::Instancing, VertexStream.VertexStreamUsage));
+		if (GIsEditor || GMaxRHIFeatureLevel > ERHIFeatureLevel::ES3_1 || AttributeIndex_Mobile != 0xff)
+		{
+			// UniformView path does not use PrimitiveId stream, we still need to set it to a non-negative index
+			int32 AddedStreamIndex = 0;
+			if (!PlatformGPUSceneUsesUniformBufferView(GMaxRHIShaderPlatform))
+			{
+				// When the VF is used for rendering in normal mesh passes, this vertex buffer and offset will be overridden
+				Elements.Add(AccessStreamComponent(FVertexStreamComponent(&GPrimitiveIdDummy, 0, 0, 0u, VET_UInt, EVertexStreamUsage::Instancing), AttributeIndex, InputStreamType));
+				AddedStreamIndex = Elements.Last().StreamIndex;
+			}
+			
+			SetPrimitiveIdStreamIndex(GMaxRHIFeatureLevel, InputStreamType, AddedStreamIndex);
+			
+			if (GIsEditor && (AttributeIndex_Mobile != 0xff && GMaxRHIFeatureLevel != ERHIFeatureLevel::ES3_1))
+			{
+				SetPrimitiveIdStreamIndex(ERHIFeatureLevel::ES3_1, InputStreamType, AddedStreamIndex);
+			}
+		}
+
+		return true;
+	}
+
+	return false;
 }
 
-FVertexElement FVertexFactory::AccessStreamComponent(const FVertexStreamComponent& Component,uint8 AttributeIndex, EVertexInputStreamType InputStreamType)
+FVertexElement FVertexFactory::AccessStreamComponent(const FVertexStreamComponent& Component, uint8 AttributeIndex, EVertexInputStreamType InputStreamType)
 {
-	FVertexStream VertexStream;
-	VertexStream.VertexBuffer = Component.VertexBuffer;
-	VertexStream.Stride = Component.Stride;
-	VertexStream.Offset = Component.StreamOffset;
-	VertexStream.VertexStreamUsage = Component.VertexStreamUsage;
-
 	if (InputStreamType == EVertexInputStreamType::PositionOnly)
-		return FVertexElement(PositionStream.AddUnique(VertexStream), Component.Offset, Component.Type, AttributeIndex, VertexStream.Stride, EnumHasAnyFlags(EVertexStreamUsage::Instancing, VertexStream.VertexStreamUsage));
+	{
+		return AccessStreamComponent(Component, AttributeIndex, PositionStream);
+	}
 	else if (InputStreamType == EVertexInputStreamType::PositionAndNormalOnly)
-		return FVertexElement(PositionAndNormalStream.AddUnique(VertexStream), Component.Offset, Component.Type, AttributeIndex, VertexStream.Stride, EnumHasAnyFlags(EVertexStreamUsage::Instancing, VertexStream.VertexStreamUsage));
+	{
+		return AccessStreamComponent(Component, AttributeIndex, PositionAndNormalStream);
+	}
 	else /* (InputStreamType == EVertexInputStreamType::Default) */
-		return FVertexElement(Streams.AddUnique(VertexStream), Component.Offset, Component.Type, AttributeIndex, VertexStream.Stride, EnumHasAnyFlags(EVertexStreamUsage::Instancing, VertexStream.VertexStreamUsage));
+	{
+		return AccessStreamComponent(Component, AttributeIndex, Streams);
+	}
 }
 
 void FVertexFactory::InitDeclaration(const FVertexDeclarationElementList& Elements, EVertexInputStreamType StreamType)
@@ -319,17 +347,16 @@ void FVertexFactory::InitDeclaration(const FVertexDeclarationElementList& Elemen
 	}
 }
 
-void FPrimitiveIdDummyBuffer::InitRHI() 
+void FPrimitiveIdDummyBuffer::InitRHI(FRHICommandListBase& RHICmdList) 
 {
 	// create a static vertex buffer
-	FRHIResourceCreateInfo CreateInfo;
-		
-	void* LockedData = nullptr;
-	VertexBufferRHI = RHICreateAndLockVertexBuffer(sizeof(uint32), BUF_Static | BUF_ShaderResource, CreateInfo, LockedData);
-	uint32* Vertices = (uint32*)LockedData;
+	FRHIResourceCreateInfo CreateInfo(TEXT("FPrimitiveIdDummyBuffer"));
+
+	VertexBufferRHI = RHICmdList.CreateBuffer(sizeof(uint32), BUF_Static | BUF_VertexBuffer | BUF_ShaderResource, 0, ERHIAccess::VertexOrIndexBuffer | ERHIAccess::SRVMask, CreateInfo);
+	uint32* Vertices = (uint32*)RHICmdList.LockBuffer(VertexBufferRHI, 0, sizeof(uint32), RLM_WriteOnly);
 	Vertices[0] = 0;
-	RHIUnlockVertexBuffer(VertexBufferRHI);
-	VertexBufferSRV = RHICreateShaderResourceView(VertexBufferRHI, sizeof(uint32), PF_R32_UINT);
+	RHICmdList.UnlockBuffer(VertexBufferRHI);
+	VertexBufferSRV = RHICmdList.CreateShaderResourceView(VertexBufferRHI, sizeof(uint32), PF_R32_UINT);
 }
 
 TGlobalResource<FPrimitiveIdDummyBuffer> GPrimitiveIdDummy;

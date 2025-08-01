@@ -1,12 +1,28 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Animation/AnimationAsset.h"
+#include "Animation/AnimData/IAnimationDataController.h"
+#include "Animation/AnimMontage.h"
 #include "Engine/AssetUserData.h"
+#include "Engine/SkeletalMesh.h"
 #include "Animation/AssetMappingTable.h"
+#include "Animation/AnimMetaData.h"
 #include "Animation/AnimSequence.h"
 #include "AnimationUtils.h"
-#include "Animation/AnimInstance.h"
+#include "UObject/AssetRegistryTagsContext.h"
 #include "UObject/LinkerLoad.h"
+#include "Animation/BlendSpace.h"
+#include "Animation/PoseAsset.h"
+#include "Animation/AnimNodeBase.h"
+#include "Animation/AnimationSequenceCompiler.h"
+
+#if WITH_EDITOR
+#include "Misc/DataValidation.h"
+#endif
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimationAsset)
+
+#define LOCTEXT_NAMESPACE "AnimationAsset"
 
 #define LEADERSCORE_ALWAYSLEADER  	2.f
 #define LEADERSCORE_MONTAGE			3.f
@@ -19,71 +35,74 @@ const TArray<FName> FMarkerTickContext::DefaultMarkerNames;
 
 void FAnimGroupInstance::TestTickRecordForLeadership(EAnimGroupRole::Type MembershipType)
 {
-	// always set leader score if you have potential to be leader
-	// that way if the top leader fails, we'll continue to search next available leader
-	int32 TestIndex = ActivePlayers.Num() - 1;
+	check(ActivePlayers.Num() > 0);
+
+	// Always set leader score if you have potential to be leader
+	// that way if the top leader fails, we'll continue to search next available leader.
+	const int32 TestIndex = ActivePlayers.Num() - 1;
 	FAnimTickRecord& Candidate = ActivePlayers[TestIndex];
 
-	switch (MembershipType)
+	// Handle Montage candidate.
+	if (Candidate.SourceAsset->IsA<UAnimMontage>())
 	{
-	case EAnimGroupRole::CanBeLeader:
-	case EAnimGroupRole::TransitionLeader:
-		Candidate.LeaderScore = Candidate.EffectiveBlendWeight;
-		break;
-	case EAnimGroupRole::AlwaysLeader:
-		// Always set the leader index
-		Candidate.LeaderScore = LEADERSCORE_ALWAYSLEADER;
-		break;
-	default:
-	case EAnimGroupRole::AlwaysFollower:
-	case EAnimGroupRole::TransitionFollower:
-		// Never set the leader index; the actual tick code will handle the case of no leader by using the first element in the array
-		break;
-	}
-}
-
-void FAnimGroupInstance::TestMontageTickRecordForLeadership()
-{
-	int32 TestIndex = ActivePlayers.Num() - 1;
-	ensure(TestIndex <= 1);
-	FAnimTickRecord& Candidate = ActivePlayers[TestIndex];
-
-	// if the candidate has higher weight
-	if (Candidate.EffectiveBlendWeight > MontageLeaderWeight)
-	{
-		// if this is going to be leader, I'll clean ActivePlayers because we don't sync multi montages
-		const int32 LastIndex = TestIndex - 1;
-		if (LastIndex >= 0)
+		// Check if the candidate has a higher weight.
+		if (Candidate.EffectiveBlendWeight > MontageLeaderWeight)
 		{
-			ActivePlayers.RemoveAt(TestIndex - 1, 1);
+			// If this is going to be leader, clean ActivePlayers because we don't sync multi montages.
+			const int32 LastIndex = TestIndex - 1;
+			if (LastIndex >= 0)
+			{
+				// Removing based on the last index works because any montage's tick records are all added during Montage Update which happens before the Anim Graph is updated.
+				ActivePlayers.RemoveAt(LastIndex, 1);
+			}
+
+			// At this time, it should only have one.
+			check(ActivePlayers.Num() == 1);
+
+			// then override
+			// @note : leader weight doesn't applied WITHIN montages
+			// we still only contain one montage at a time, if this montage fails, next candidate will get the chance, not next weight montage
+			MontageLeaderWeight = Candidate.EffectiveBlendWeight;
+			Candidate.LeaderScore = LEADERSCORE_MONTAGE;
+		}
+		else
+		{
+			if (TestIndex != 0)
+			{
+				// We delete the later ones because we only have one montage for leader 
+				// this can happen if there was already active one with higher weight. 
+				ActivePlayers.RemoveAt(TestIndex, 1);
+			}
 		}
 
-		// at this time, it should only have one
-		ensure(ActivePlayers.Num() == 1);
-
-		// then override
-		// @note : leader weight doesn't applied WITHIN montages
-		// we still only contain one montage at a time, if this montage fails, next candidate will get the chance, not next weight montage
-		MontageLeaderWeight = Candidate.EffectiveBlendWeight;
-		Candidate.LeaderScore = LEADERSCORE_MONTAGE;
+		ensureAlways(ActivePlayers.Num() == 1);
 	}
+	// Handle Sequence or BlendSpace candidate.
 	else
 	{
-		if (TestIndex != 0)
+		switch (MembershipType)
 		{
-			// we delete the later ones because we only have one montage for leader. 
-			// this can happen if there was already active one with higher weight. 
-			ActivePlayers.RemoveAt(TestIndex, 1);
+		case EAnimGroupRole::CanBeLeader:
+		case EAnimGroupRole::TransitionLeader:
+			Candidate.LeaderScore = Candidate.EffectiveBlendWeight;
+			break;
+		case EAnimGroupRole::AlwaysLeader:
+			// Always set the leader index
+			Candidate.LeaderScore = LEADERSCORE_ALWAYSLEADER;
+			break;
+		default:
+		case EAnimGroupRole::AlwaysFollower:
+		case EAnimGroupRole::TransitionFollower:
+			// Never set the leader index; the actual tick code will handle the case of no leader by using the first element in the array
+			break;
 		}
 	}
-
-	ensureAlways(ActivePlayers.Num() == 1);
 }
 
 void FAnimGroupInstance::Finalize(const FAnimGroupInstance* PreviousGroup)
 {
-	if (!PreviousGroup || PreviousGroup->GroupLeaderIndex != GroupLeaderIndex
-		|| (PreviousGroup->MontageLeaderWeight > 0.f && MontageLeaderWeight == 0.f/*if montage disappears, we should reset as well*/))
+	// Reset follower records if the previous group is non-existent, the group leader changed, or the montage leader disappears
+	if (!PreviousGroup || PreviousGroup->GroupLeaderIndex != GroupLeaderIndex || (PreviousGroup->MontageLeaderWeight > 0.f && MontageLeaderWeight == 0.f))
 	{
 		UE_LOG(LogAnimMarkerSync, Log, TEXT("Resetting Marker Sync Groups"));
 
@@ -96,24 +115,32 @@ void FAnimGroupInstance::Finalize(const FAnimGroupInstance* PreviousGroup)
 
 void FAnimGroupInstance::Prepare(const FAnimGroupInstance* PreviousGroup)
 {
+	// Sort asset players by leader score.
 	ActivePlayers.Sort();
 
-	TArray<FName>* MarkerNames = ActivePlayers[0].SourceAsset->GetUniqueMarkerNames();
-	if (MarkerNames)
+	// Prepare group, if leader has any markers.
+	const TArray<FName>* MarkerNames = ActivePlayers[0].SourceAsset->GetUniqueMarkerNames();
+	const bool bLeaderHasMarkers = MarkerNames && !MarkerNames->IsEmpty();
+	
+	if (bLeaderHasMarkers)
 	{
-		// Group leader has markers, off to a good start
+		// Get leader's markers.
 		ValidMarkers = *MarkerNames;
+
+		// Enable marker based syncing for leader and instance group.
 		ActivePlayers[0].bCanUseMarkerSync = true;
 		bCanUseMarkerSync = true;
 
-		//filter markers based on what exists in the other animations
-		for ( int32 ActivePlayerIndex = 0; ActivePlayerIndex < ActivePlayers.Num(); ++ActivePlayerIndex )
+		// Prepare asset player candidates.
+		for (int32 ActivePlayerIndex = 0; ActivePlayerIndex < ActivePlayers.Num(); ++ActivePlayerIndex)
 		{
 			FAnimTickRecord& Candidate = ActivePlayers[ActivePlayerIndex];
 
+			// Reset candidate's marker tick record if needed.
 			if (PreviousGroup)
 			{
 				bool bCandidateFound = false;
+				
 				for (const FAnimTickRecord& PrevRecord : PreviousGroup->ActivePlayers)
 				{
 					if (PrevRecord.MarkerTickRecord == Candidate.MarkerTickRecord)
@@ -121,40 +148,52 @@ void FAnimGroupInstance::Prepare(const FAnimGroupInstance* PreviousGroup)
 						// Found previous record for "us"
 						if (PrevRecord.SourceAsset != Candidate.SourceAsset)
 						{
-							Candidate.MarkerTickRecord->Reset(); // Changed animation, clear our cached data
+							Candidate.MarkerTickRecord->Reset(); // Changed animation, clear our cached data.
 						}
 						bCandidateFound = true;
 						break;
 					}
 				}
+				
 				if (!bCandidateFound)
 				{
-					Candidate.MarkerTickRecord->Reset(); // we weren't active last frame, reset
+					Candidate.MarkerTickRecord->Reset(); // We weren't active last frame, invalidate record.
 				}
 			}
 
+			// Filter follower's markers that are not shared in common with the group's candidate leader.
 			if (ActivePlayerIndex != 0 && ValidMarkers.Num() > 0)
 			{
-				TArray<FName>* PlayerMarkerNames = Candidate.SourceAsset->GetUniqueMarkerNames();
-				if ( PlayerMarkerNames ) // Let anims with no markers set use length scaling sync
+				// Let anims with no markers use length scaling sync.
+				const TArray<FName>* PlayerMarkerNames = Candidate.SourceAsset->GetUniqueMarkerNames();
+				const bool bFollowerHasMarkers = PlayerMarkerNames && !PlayerMarkerNames->IsEmpty();
+				
+				if (bFollowerHasMarkers) 
 				{
+					// Make follower use marker based-syncing.
 					Candidate.bCanUseMarkerSync = true;
-					for ( int32 ValidMarkerIndex = ValidMarkers.Num() - 1; ValidMarkerIndex >= 0; --ValidMarkerIndex )
+
+					// Filter.
+					for (int32 ValidMarkerIndex = ValidMarkers.Num() - 1; ValidMarkerIndex >= 0; --ValidMarkerIndex)
 					{
 						FName& MarkerName = ValidMarkers[ValidMarkerIndex];
-						if ( !PlayerMarkerNames->Contains(MarkerName) )
+						
+						if (!PlayerMarkerNames->Contains(MarkerName))
 						{
-							ValidMarkers.RemoveAtSwap(ValidMarkerIndex, 1, false);
+							ValidMarkers.RemoveAtSwap(ValidMarkerIndex, 1, EAllowShrinking::No);
 						}
 					}
 				}
 			}
 		}
 
+		// Ensure group can use maker based syncing.
 		bCanUseMarkerSync = ValidMarkers.Num() > 0;
-
+		
+		// Alphabetical ordering for markers.
 		ValidMarkers.Sort(FNameLexicalLess());
 
+		// Source marker data changed.
 		if (!PreviousGroup || (ValidMarkers != PreviousGroup->ValidMarkers))
 		{
 			for (int32 InternalActivePlayerIndex = 0; InternalActivePlayerIndex < ActivePlayers.Num(); ++InternalActivePlayerIndex)
@@ -163,25 +202,106 @@ void FAnimGroupInstance::Prepare(const FAnimGroupInstance* PreviousGroup)
 			}
 		}
 	}
-	else
+	
+	// Leader has no markers or all them were filtered out, fallback to length based syncing.
+	if (!bLeaderHasMarkers || !bCanUseMarkerSync)
 	{
-		// Leader has no markers, we can't use SyncMarkers.
+		// We can't use sync markers in sync group.
 		bCanUseMarkerSync = false;
+
+		// Invalidate markers.
 		ValidMarkers.Reset();
+
+		// Ensure tick records do not use marker-based syncing.
 		for (FAnimTickRecord& AnimTickRecord : ActivePlayers)
 		{
 			AnimTickRecord.MarkerTickRecord->Reset();
+			AnimTickRecord.bCanUseMarkerSync = false;
+		}
+	}
+}
+
+void FAnimTickRecord::AllocateContextDataContainer()
+{
+	ContextData = MakeShared<TArray<TUniquePtr<const UE::Anim::IAnimNotifyEventContextDataInterface>>>();
+}
+
+FAnimTickRecord::FAnimTickRecord(UAnimSequenceBase* InSequence, bool bInLooping, float InPlayRate, float InFinalBlendWeight, float& InCurrentTime, FMarkerTickRecord& InMarkerTickRecord)
+	: FAnimTickRecord(InSequence, bInLooping, InPlayRate, /*bInIsEvaluator*/ false, InFinalBlendWeight, InCurrentTime, InMarkerTickRecord)
+{
+}
+
+FAnimTickRecord::FAnimTickRecord(UAnimSequenceBase* InSequence, bool bInLooping, float InPlayRate, bool bInIsEvaluator, float InFinalBlendWeight, float& InCurrentTime, FMarkerTickRecord& InMarkerTickRecord)
+{
+	SourceAsset = InSequence;
+	TimeAccumulator = &InCurrentTime;
+	MarkerTickRecord = &InMarkerTickRecord;
+	PlayRateMultiplier = InPlayRate;
+	EffectiveBlendWeight = InFinalBlendWeight;
+	bLooping = bInLooping;
+	bIsEvaluator = bInIsEvaluator;
+}
+
+FAnimTickRecord::FAnimTickRecord(
+	UBlendSpace* InBlendSpace, const FVector& InBlendInput, TArray<FBlendSampleData>& InBlendSampleDataCache, FBlendFilter& InBlendFilter, bool bInLooping, 
+	float InPlayRate, bool bTeleportToTime, bool bInIsEvaluator, float InFinalBlendWeight, float& InCurrentTime, FMarkerTickRecord& InMarkerTickRecord)
+{
+	SourceAsset = InBlendSpace;
+	BlendSpace.BlendSpacePositionX = InBlendInput.X;
+	BlendSpace.BlendSpacePositionY = InBlendInput.Y;
+	BlendSpace.BlendSampleDataCache = &InBlendSampleDataCache;
+	BlendSpace.BlendFilter = &InBlendFilter;
+	BlendSpace.bTeleportToTime = bTeleportToTime;
+	TimeAccumulator = &InCurrentTime;
+	MarkerTickRecord = &InMarkerTickRecord;
+	PlayRateMultiplier = InPlayRate;
+	EffectiveBlendWeight = InFinalBlendWeight;
+	bLooping = bInLooping;
+	bIsEvaluator = bInIsEvaluator;
+}
+
+FAnimTickRecord::FAnimTickRecord(UAnimMontage* InMontage, float InCurrentPosition, float, float, float InWeight, TArray<FPassedMarker>& InMarkersPassedThisTick, FMarkerTickRecord& InMarkerTickRecord)
+	: FAnimTickRecord(InMontage, InCurrentPosition, InWeight, InMarkersPassedThisTick, InMarkerTickRecord)
+{
+}
+
+FAnimTickRecord::FAnimTickRecord(UAnimMontage* InMontage, float InCurrentPosition, float InWeight, TArray<FPassedMarker>& InMarkersPassedThisTick, FMarkerTickRecord& InMarkerTickRecord)
+{
+	SourceAsset = InMontage;
+	Montage.CurrentPosition = InCurrentPosition;
+	Montage.MarkersPassedThisTick = &InMarkersPassedThisTick;
+	MarkerTickRecord = &InMarkerTickRecord;
+	PlayRateMultiplier = 1.f; // we don't care here, this is alreayd applied in the montageinstance::Advance
+	EffectiveBlendWeight = InWeight;
+	bLooping = false;
+}
+
+FAnimTickRecord::FAnimTickRecord(UPoseAsset* InPoseAsset, float InFinalBlendWeight)
+{
+	SourceAsset = InPoseAsset;
+	EffectiveBlendWeight = InFinalBlendWeight;
+}
+
+void FAnimTickRecord::GatherContextData(const FAnimationUpdateContext& InContext)
+{
+	if(InContext.GetSharedContext())
+	{
+		TArray<TUniquePtr<const UE::Anim::IAnimNotifyEventContextDataInterface>> NewContextData;
+		InContext.GetSharedContext()->MessageStack.MakeEventContextData(NewContextData);
+		if(NewContextData.Num())
+		{
+			if (!ContextData.IsValid())
+			{
+				AllocateContextDataContainer();
+			}
+
+			ContextData->Append(MoveTemp(NewContextData));
 		}
 	}
 }
 
 //////////////////////////////////////////////////////////////////////////
 // UAnimationAsset
-
-UAnimationAsset::UAnimationAsset(const FObjectInitializer& ObjectInitializer)
-	: Super(ObjectInitializer)
-{
-}
 
 void UAnimationAsset::PostLoad()
 {
@@ -223,9 +343,7 @@ void UAnimationAsset::PostLoad()
 
 void UAnimationAsset::ResetSkeleton(USkeleton* NewSkeleton)
 {
-// @TODO LH, I'd like this to work outside of editor, but that requires unlocking track names data in game
 #if WITH_EDITOR
-	Skeleton = NULL;
 	ReplaceSkeleton(NewSkeleton);
 #endif
 }
@@ -236,23 +354,42 @@ void UAnimationAsset::Serialize(FArchive& Ar)
 
 	Super::Serialize(Ar);
 
-	if (Ar.UE4Ver() >= VER_UE4_SKELETON_GUID_SERIALIZATION)
+	if (Ar.UEVer() >= VER_UE4_SKELETON_GUID_SERIALIZATION)
 	{
 		Ar << SkeletonGuid;
 	}
 }
 
-void UAnimationAsset::AddMetaData(class UAnimMetaData* MetaDataInstance)
+UAnimMetaData* UAnimationAsset::FindMetaDataByClass(const TSubclassOf<UAnimMetaData> MetaDataClass) const
+{
+	UAnimMetaData* FoundMetaData = nullptr;
+
+	if (UClass* TargetClass = MetaDataClass.Get())
+	{
+		for (UAnimMetaData* MetaDataInstance : MetaData)
+		{
+			if (MetaDataInstance && MetaDataInstance->IsA(TargetClass))
+			{
+				FoundMetaData = MetaDataInstance;
+				break;
+			}
+		}
+	}
+
+	return FoundMetaData;
+}
+
+void UAnimationAsset::AddMetaData(UAnimMetaData* MetaDataInstance)
 {
 	MetaData.Add(MetaDataInstance);
 }
 
-void UAnimationAsset::RemoveMetaData(class UAnimMetaData* MetaDataInstance)
+void UAnimationAsset::RemoveMetaData(UAnimMetaData* MetaDataInstance)
 {
 	MetaData.Remove(MetaDataInstance);
 }
 
-void UAnimationAsset::RemoveMetaData(const TArray<UAnimMetaData*> MetaDataInstances)
+void UAnimationAsset::RemoveMetaData(TArrayView<UAnimMetaData*> MetaDataInstances)
 {
 	MetaData.RemoveAll(
 		[&](UAnimMetaData* MetaDataInstance)
@@ -263,10 +400,17 @@ void UAnimationAsset::RemoveMetaData(const TArray<UAnimMetaData*> MetaDataInstan
 
 void UAnimationAsset::SetSkeleton(USkeleton* NewSkeleton)
 {
-	if (NewSkeleton && NewSkeleton != Skeleton)
+#if WITH_EDITOR
+	OnSetSkeleton(NewSkeleton);
+#endif // WITH_EDITOR
+	Skeleton = NewSkeleton;
+	if (Skeleton)
 	{
-		Skeleton = NewSkeleton;
 		SkeletonGuid = NewSkeleton->GetGuid();
+	}
+	else
+	{
+		SkeletonGuid.Invalidate();
 	}
 }
 
@@ -275,7 +419,7 @@ USkeletalMesh* UAnimationAsset::GetPreviewMesh(bool bFindIfNotSet)
 #if WITH_EDITORONLY_DATA
 	USkeletalMesh* PreviewMesh = PreviewSkeletalMesh.LoadSynchronous();
 	// if somehow skeleton changes, just nullify it. 
-	if (PreviewMesh && PreviewMesh->GetSkeleton() != Skeleton)
+	if (PreviewMesh && !PreviewMesh->GetSkeleton()->IsCompatibleForEditor(Skeleton))
 	{
 		PreviewMesh = nullptr;
 		SetPreviewMesh(nullptr);
@@ -320,8 +464,10 @@ void UAnimationAsset::RemapTracksToNewSkeleton(USkeleton* NewSkeleton, bool bCon
 bool UAnimationAsset::ReplaceSkeleton(USkeleton* NewSkeleton, bool bConvertSpaces/*=false*/)
 {
 	// if it's not same 
-	if (NewSkeleton != Skeleton)
+	if (NewSkeleton && (NewSkeleton != Skeleton || NewSkeleton->GetGuid() != SkeletonGuid))
 	{
+		OnSetSkeleton(NewSkeleton);
+
 		// get all sequences that need to change
 		TArray<UAnimationAsset*> AnimAssetsToReplace;
 
@@ -331,6 +477,8 @@ bool UAnimationAsset::ReplaceSkeleton(USkeleton* NewSkeleton, bool bConvertSpace
 		}
 		if (GetAllAnimationSequencesReferred(AnimAssetsToReplace))
 		{
+			TArray<UAnimSequence*> Sequences;
+			
 			//Firstly need to remap
 			for (UAnimationAsset* AnimAsset : AnimAssetsToReplace)
 			{
@@ -341,31 +489,56 @@ bool UAnimationAsset::ReplaceSkeleton(USkeleton* NewSkeleton, bool bConvertSpace
 				}
 				AnimAsset->ConditionalPostLoad();
 
-				// these two are different functions for now
-				// technically if you have implementation for Remap, it will also set skeleton 
-				AnimAsset->RemapTracksToNewSkeleton(NewSkeleton, bConvertSpaces);
+				if (AnimAsset->GetSkeleton() != GetSkeleton())
+				{
+					UE_LOG(LogAnimation, Warning, TEXT("AnimationAsset referencing asset using different skeleton. This will generate undeterministic builds. Please Fix the Asset : AnimationAsset: [%s] - ReferencedAsset : [%s]"), *GetName(), *AnimAsset->GetName());
+				}
+
+				// This ensure that in subsequent behaviour the RawData GUID is never 'new-ed' but always calculated from the 
+				// raw animation data itself.
+				if (UAnimSequence* Sequence = Cast<UAnimSequence>(AnimAsset))
+				{
+					Sequences.Add(Sequence);				
+				}
+				else
+				{
+					// these two are different functions for now
+					// technically if you have implementation for Remap, it will also set skeleton 
+					AnimAsset->RemapTracksToNewSkeleton(NewSkeleton, bConvertSpaces);
+				}
+			}
+
+			UE::Anim::FAnimSequenceCompilingManager::Get().FinishCompilation(Sequences);
+			for (UAnimSequence* Sequence : Sequences)
+			{
+				Sequence->GetController().OpenBracket(LOCTEXT("ReplaceSkeleton_Bracket", "Replacing USkeleton"));
+				Sequence->RemapTracksToNewSkeleton(NewSkeleton, bConvertSpaces);
 			}
 
 			//Second need to process anim sequences themselves. This is done in two stages as additives can rely on other animations.
-			for (UAnimationAsset* AnimAsset : AnimAssetsToReplace)
+			for (UAnimSequence* Sequence : Sequences)
 			{
-				if (UAnimSequence* Seq = Cast<UAnimSequence>(AnimAsset))
-				{
-					// We don't force gen here as that can cause us to constantly generate
-					// new anim ddc keys if users never resave anims that need to remap.
-					Seq->PostProcessSequence(false);
-				}
+				Sequence->GetController().CloseBracket();
 			}
 		}
 
-		RemapTracksToNewSkeleton(NewSkeleton, bConvertSpaces);
-		if (UAnimSequence* Seq = Cast<UAnimSequence>(this))
-		{
-			Seq->PostProcessSequence(false);
+		UAnimSequence* Seq = Cast<UAnimSequence>(this);
+		{			
+			// This ensure that in subsequent behaviour the RawData GUID is never 'new-ed' but always calculated from the 
+			// raw animation data itself.
+			if (Seq)
+			{
+				Seq->GetController().OpenBracket(LOCTEXT("ReplaceSkeleton_Bracket", "Replacing USkeleton"));
+			}
+  
+			RemapTracksToNewSkeleton(NewSkeleton, bConvertSpaces);
+
+			if (Seq)
+			{
+				Seq->GetController().CloseBracket();
+			}
 		}
 
-		PostEditChange();
-		MarkPackageDirty();
 		return true;
 	}
 
@@ -374,7 +547,7 @@ bool UAnimationAsset::ReplaceSkeleton(USkeleton* NewSkeleton, bool bConvertSpace
 
 bool UAnimationAsset::GetAllAnimationSequencesReferred(TArray<UAnimationAsset*>& AnimationSequences, bool bRecursive /*= true*/) 
 {
-	//@todo:@fixme: this doens't work for retargeting because postload gets called after duplication, mixing up the mapping table
+	//@todo:@fixme: this doesn't work for retargeting because postload gets called after duplication, mixing up the mapping table
 	// because skeleton changes, for now we don't support retargeting for parent asset, it will disconnect, and just duplicate everything else
 // 	if (ParentAsset)
 // 	{
@@ -401,7 +574,7 @@ void UAnimationAsset::HandleAnimReferenceCollection(TArray<UAnimationAsset*>& An
 
 void UAnimationAsset::ReplaceReferredAnimations(const TMap<UAnimationAsset*, UAnimationAsset*>& ReplacementMap)
 {
-	//@todo:@fixme: this doens't work for retargeting because postload gets called after duplication, mixing up the mapping table
+	//@todo:@fixme: this doesn't work for retargeting because postload gets called after duplication, mixing up the mapping table
 	// because skeleton changes, for now we don't support retargeting for parent asset, it will disconnect, and just duplicate everything else
 	if (ParentAsset)
 	{
@@ -530,9 +703,13 @@ void UAnimationAsset::ValidateSkeleton()
 {
 	if (Skeleton && Skeleton->GetGuid() != SkeletonGuid)
 	{
+#if WITH_EDITOR
 		// reset Skeleton
-		ResetSkeleton(Skeleton);
+		ReplaceSkeleton(Skeleton);
 		UE_LOG(LogAnimation, Verbose, TEXT("Needed to reset skeleton. Resave this asset to speed up load time: %s"), *GetPathNameSafe(this));
+#else
+		UE_LOG(LogAnimation, Warning, TEXT("Skeleton GUID is out-of-date, this should have been updated during cook. %s"), *GetPathNameSafe(this));
+#endif
 	}
 }
 
@@ -577,7 +754,7 @@ void UAnimationAsset::RemoveUserDataOfClass(TSubclassOf<UAssetUserData> InUserDa
 
 const TArray<UAssetUserData*>* UAnimationAsset::GetAssetUserDataArray() const
 {
-	return &AssetUserData;
+	return &ToRawPtrTArrayUnsafe(AssetUserData);
 }
 
 #if WITH_EDITOR
@@ -592,6 +769,41 @@ void UAnimationAsset::PostEditChangeProperty(FPropertyChangedEvent& PropertyChan
 	}
 
 	Super::PostEditChangeProperty(PropertyChangedEvent);
+}
+
+void UAnimationAsset::GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const
+{
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+	Super::GetAssetRegistryTags(OutTags);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void UAnimationAsset::GetAssetRegistryTags(FAssetRegistryTagsContext Context) const
+{
+	Super::GetAssetRegistryTags(Context);
+	
+	for (const UAssetUserData* UserData : AssetUserData)
+	{
+		if (UserData)
+		{
+			UserData->GetAssetRegistryTags(Context);
+		}
+	}
+	
+	Context.AddTag( FAssetRegistryTag("HasParentAsset", HasParentAsset() ? TEXT("True") : TEXT("False"), FAssetRegistryTag::TT_Hidden) );
+}
+
+EDataValidationResult UAnimationAsset::IsDataValid(FDataValidationContext& Context) const
+{
+	EDataValidationResult Result = UObject::IsDataValid(Context);
+	for (const UAssetUserData* Datum : AssetUserData)
+	{
+		if(Datum != nullptr && Datum->IsDataValid(Context) == EDataValidationResult::Invalid)
+		{
+			Result = EDataValidationResult::Invalid;
+		}
+	}
+	return Result;
 }
 #endif
 
@@ -614,7 +826,7 @@ void FBlendSampleData::NormalizeDataWeight(TArray<FBlendSampleData>& SampleDataL
 	{
 		checkf(SampleDataList[PoseIndex].PerBoneBlendData.Num() == NumBones, TEXT("Attempted to normalise a blend sample list, but the samples have differing numbers of bones."));
 
-		TotalSum += SampleDataList[PoseIndex].GetWeight();
+		TotalSum += SampleDataList[PoseIndex].TotalWeight;
 
 		if (SampleDataList[PoseIndex].PerBoneBlendData.Num() > 0)
 		{
@@ -627,7 +839,7 @@ void FBlendSampleData::NormalizeDataWeight(TArray<FBlendSampleData>& SampleDataL
 	}
 
 	// Re-normalize Pose weight
-	if (ensure(TotalSum > ZERO_ANIMWEIGHT_THRESH))
+	if (TotalSum > ZERO_ANIMWEIGHT_THRESH)
 	{
 		if (FMath::Abs<float>(TotalSum - 1.f) > ZERO_ANIMWEIGHT_THRESH)
 		{
@@ -637,11 +849,18 @@ void FBlendSampleData::NormalizeDataWeight(TArray<FBlendSampleData>& SampleDataL
 			}
 		}
 	}
+	else
+	{
+		for (int32 PoseIndex = 0; PoseIndex < SampleDataList.Num(); PoseIndex++)
+		{
+			SampleDataList[PoseIndex].TotalWeight = 1.0f / SampleDataList.Num();
+		}
+	}
 
 	// Re-normalize per bone weights.
 	for (int32 BoneIndex = 0; BoneIndex < NumBones; BoneIndex++)
 	{
-		if (ensure(PerBoneTotalSums[BoneIndex] > ZERO_ANIMWEIGHT_THRESH))
+		if (PerBoneTotalSums[BoneIndex] > ZERO_ANIMWEIGHT_THRESH)
 		{
 			if (FMath::Abs<float>(PerBoneTotalSums[BoneIndex] - 1.f) > ZERO_ANIMWEIGHT_THRESH)
 			{
@@ -651,6 +870,14 @@ void FBlendSampleData::NormalizeDataWeight(TArray<FBlendSampleData>& SampleDataL
 				}
 			}
 		}
+		else
+		{
+			for (int32 PoseIndex = 0; PoseIndex < SampleDataList.Num(); PoseIndex++)
+			{
+				SampleDataList[PoseIndex].PerBoneBlendData[BoneIndex] = 1.0f / SampleDataList.Num();
+			}
+		}
 	}
 }
 
+#undef LOCTEXT_NAMESPACE // "AnimationAsset"

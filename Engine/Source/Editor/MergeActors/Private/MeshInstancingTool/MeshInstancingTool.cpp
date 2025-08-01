@@ -17,7 +17,7 @@
 #include "MeshInstancingTool/SMeshInstancingDialog.h"
 #include "IContentBrowserSingleton.h"
 #include "ContentBrowserModule.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "ScopedTransaction.h"
 #include "MeshMergeModule.h"
 
@@ -28,6 +28,7 @@ UMeshInstancingSettingsObject* UMeshInstancingSettingsObject::DefaultSettings = 
 
 FMeshInstancingTool::FMeshInstancingTool()
 {
+	bAllowShapeComponents = false;
 	SettingsObject = UMeshInstancingSettingsObject::Get();
 }
 
@@ -43,9 +44,19 @@ TSharedRef<SWidget> FMeshInstancingTool::GetWidget()
 	return InstancingDialog.ToSharedRef();
 }
 
+FName FMeshInstancingTool::GetIconName() const
+{
+	return "MergeActors.MeshInstancingTool";
+}
+
+FText FMeshInstancingTool::GetToolNameText() const
+{
+	return LOCTEXT("MeshInstancingToolName", "Batch");
+}
+
 FText FMeshInstancingTool::GetTooltipText() const
 {
-	return LOCTEXT("MeshInstancingToolTooltip", "Harvest geometry from selected actors and merge them into an actor with multiple instanced static mesh components.");
+	return LOCTEXT("MeshInstancingToolTooltip", "Batch the source actors components to use instancing as much as possible. Will generate an actor with instanced static mesh component(s).");
 }
 
 FString FMeshInstancingTool::GetDefaultPackageName() const
@@ -53,28 +64,25 @@ FString FMeshInstancingTool::GetDefaultPackageName() const
 	return FString();
 }
 
-bool FMeshInstancingTool::RunMerge(const FString& PackageName)
+const TArray<TSharedPtr<FMergeComponentData>>& FMeshInstancingTool::GetSelectedComponentsInWidget() const
+{
+	return InstancingDialog->GetSelectedComponents();
+}
+
+bool FMeshInstancingTool::RunMerge(const FString& PackageName, const TArray<TSharedPtr<FMergeComponentData>>& SelectedComponents)
 {
 	const IMeshMergeUtilities& MeshUtilities = FModuleManager::Get().LoadModuleChecked<IMeshMergeModule>("MeshMergeUtilities").GetUtilities();
-	USelection* SelectedActors = GEditor->GetSelectedActors();
 	TArray<AActor*> Actors;
 	TArray<ULevel*> UniqueLevels;
-	for (FSelectionIterator Iter(*SelectedActors); Iter; ++Iter)
-	{
-		AActor* Actor = Cast<AActor>(*Iter);
-		if (Actor)
-		{
-			Actors.Add(Actor);
-			UniqueLevels.AddUnique(Actor->GetLevel());
-		}
-	}
+
+	BuildActorsListFromMergeComponentsData(SelectedComponents, Actors, &UniqueLevels);
 
 	// This restriction is only for replacement of selected actors with merged mesh actor
 	if (UniqueLevels.Num() > 1)
 	{
 		FText Message = NSLOCTEXT("UnrealEd", "FailedToInstanceActorsSublevels_Msg", "The selected actors should be in the same level");
 		FText Title = NSLOCTEXT("UnrealEd", "FailedToInstanceActors_Title", "Unable to replace actors with instanced meshes");
-		FMessageDialog::Open(EAppMsgType::Ok, Message, &Title);
+		FMessageDialog::Open(EAppMsgType::Ok, Message, Title);
 		return false;
 	}
 
@@ -84,10 +92,9 @@ bool FMeshInstancingTool::RunMerge(const FString& PackageName)
 		SlowTask.MakeDialog();
 
 		// Extracting static mesh components from the selected mesh components in the dialog
-		const TArray<TSharedPtr<FInstanceComponentData>>& SelectedComponents = InstancingDialog->GetSelectedComponents();
 		TArray<UPrimitiveComponent*> ComponentsToMerge;
 
-		for ( const TSharedPtr<FInstanceComponentData>& SelectedComponent : SelectedComponents)
+		for ( const TSharedPtr<FMergeComponentData>& SelectedComponent : SelectedComponents)
 		{
 			// Determine whether or not this component should be incorporated according the user settings
 			if (SelectedComponent->bShouldIncorporate && SelectedComponent->PrimComponent.IsValid())
@@ -101,11 +108,15 @@ bool FMeshInstancingTool::RunMerge(const FString& PackageName)
 			// spawn the actor that will contain out instances
 			UWorld* World = ComponentsToMerge[0]->GetWorld();
 			checkf(World != nullptr, TEXT("Invalid World retrieved from Mesh components"));
-			MeshUtilities.MergeComponentsToInstances(ComponentsToMerge, World, UniqueLevels[0], SettingsObject->Settings);
+			const bool bActuallyMerge = true;
+			MeshUtilities.MergeComponentsToInstances(ComponentsToMerge, World, UniqueLevels[0], SettingsObject->Settings, bActuallyMerge, bReplaceSourceActors, nullptr);
 		}
 	}
 
-	InstancingDialog->Reset();
+	if (InstancingDialog)
+	{
+		InstancingDialog->Reset();
+	}
 
 	return true;
 }
@@ -113,18 +124,11 @@ bool FMeshInstancingTool::RunMerge(const FString& PackageName)
 FText FMeshInstancingTool::GetPredictedResultsText()
 {
 	const IMeshMergeUtilities& MeshUtilities = FModuleManager::Get().LoadModuleChecked<IMeshMergeModule>("MeshMergeUtilities").GetUtilities();
-	USelection* SelectedActors = GEditor->GetSelectedActors();
+	const TArray<TSharedPtr<FMergeComponentData>>& SelectedComponents = InstancingDialog->GetSelectedComponents();
 	TArray<AActor*> Actors;
 	TArray<ULevel*> UniqueLevels;
-	for (FSelectionIterator Iter(*SelectedActors); Iter; ++Iter)
-	{
-		AActor* Actor = Cast<AActor>(*Iter);
-		if (Actor)
-		{
-			Actors.Add(Actor);
-			UniqueLevels.AddUnique(Actor->GetLevel());
-		}
-	}
+
+	BuildActorsListFromMergeComponentsData(SelectedComponents, Actors, &UniqueLevels);
 
 	// This restriction is only for replacement of selected actors with merged mesh actor
 	if (UniqueLevels.Num() > 1)
@@ -133,10 +137,9 @@ FText FMeshInstancingTool::GetPredictedResultsText()
 	}
 
 	// Extracting static mesh components from the selected mesh components in the dialog
-	const TArray<TSharedPtr<FInstanceComponentData>>& SelectedComponents = InstancingDialog->GetSelectedComponents();
 	TArray<UPrimitiveComponent*> ComponentsToMerge;
 
-	for ( const TSharedPtr<FInstanceComponentData>& SelectedComponent : SelectedComponents)
+	for ( const TSharedPtr<FMergeComponentData>& SelectedComponent : SelectedComponents)
 	{
 		// Determine whether or not this component should be incorporated according the user settings
 		if (SelectedComponent->bShouldIncorporate)
@@ -146,11 +149,12 @@ FText FMeshInstancingTool::GetPredictedResultsText()
 	}
 		
 	FText OutResultsText;
-	if(ComponentsToMerge.Num() > 0)
+	if(ComponentsToMerge.Num() > 0 && ComponentsToMerge[0])
 	{
 		UWorld* World = ComponentsToMerge[0]->GetWorld();
 		checkf(World != nullptr, TEXT("Invalid World retrieved from Mesh components"));
-		MeshUtilities.MergeComponentsToInstances(ComponentsToMerge, World, UniqueLevels[0], SettingsObject->Settings, false, &OutResultsText);
+		const bool bActuallyMerge = false;
+		MeshUtilities.MergeComponentsToInstances(ComponentsToMerge, World, UniqueLevels.Num() > 0 ? UniqueLevels[0] : nullptr, SettingsObject->Settings, bActuallyMerge, bReplaceSourceActors, &OutResultsText);
 	}
 	else
 	{
@@ -158,10 +162,5 @@ FText FMeshInstancingTool::GetPredictedResultsText()
 	}
 
 	return OutResultsText;
-}
-
-bool FMeshInstancingTool::CanMerge() const
-{	
-	return InstancingDialog->GetNumSelectedMeshComponents() >= 1;
 }
 #undef LOCTEXT_NAMESPACE

@@ -15,14 +15,14 @@ class UTexture;
 
 /** Enum defining the object sets for this stats object */
 UENUM()
-enum ETextureObjectSets
+enum ETextureObjectSets : int
 {
 	TextureObjectSet_CurrentStreamingLevel	UMETA( DisplayName = "Current Streaming Level" , ToolTip = "Display texture statistics for the current streaming level" ),
 	TextureObjectSet_AllStreamingLevels		UMETA( DisplayName = "All Streaming Levels" , ToolTip = "Display texture statistics for all streaming levels" ),
 	TextureObjectSet_SelectedActors			UMETA( DisplayName = "Selected Actor(s)" , ToolTip = "Display texture statistics of selected Actors" ),
 	TextureObjectSet_SelectedMaterials		UMETA( DisplayName = "Selected Materials(s)" , ToolTip = "Display texture statistics of selected Materials" ),
 
-	// @todo: These two stat sets are deprecated as UE4 doesnt support them currently
+	// @todo: These two stat sets are deprecated as UE doesnt support them currently
 	// To recreate them, you will need to re-implement the functionality left behind in
 	// Engine\Source\Editor\Stats\Private\TextureInfo.cpp
 //	TextureObjectSet_CookerStatistics		UMETA( DisplayName = "Cooker Statistics" , ToolTip = "Display texture statistics from a cooker statistics file (.upk)" ),
@@ -46,6 +46,10 @@ class UTextureStats : public UObject
 	/** Texture type e.g. 2D, 3D, Cube, "" if not known, ... */
 	UPROPERTY(VisibleAnywhere, AssetRegistrySearchable, Category="Stats", meta=( ColumnWidth = "60" ) )
 	FString Type;
+
+	/** Is the texture virtual? Yes/No */
+	UPROPERTY(VisibleAnywhere, AssetRegistrySearchable, Category = "Stats", meta = (ColumnWidth = "60"))
+	FString Virtual;
 
 	/** Max Dimension e.g. 256x256, not including the format */
 	UPROPERTY(VisibleAnywhere, AssetRegistrySearchable, Category="Stats", meta=( DisplayName = "Max Dimension", ColumnWidth = "90" ) )

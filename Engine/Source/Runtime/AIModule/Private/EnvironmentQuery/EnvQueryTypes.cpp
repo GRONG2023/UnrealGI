@@ -3,6 +3,7 @@
 #include "EnvironmentQuery/EnvQueryTypes.h"
 #include "UObject/Package.h"
 #include "AI/Navigation/NavAgentInterface.h"
+#include "NavFilters/NavigationQueryFilter.h"
 #include "NavigationSystem.h"
 #include "NavMesh/RecastNavMesh.h"
 #include "EnvironmentQuery/Items/EnvQueryItemType_VectorBase.h"
@@ -13,9 +14,6 @@
 #include "DataProviders/AIDataProvider_QueryParams.h"
 #include "EnvironmentQuery/EnvQuery.h"
 #include "BehaviorTree/BlackboardComponent.h"
-#include "BehaviorTree/Blackboard/BlackboardKeyType_Float.h"
-#include "BehaviorTree/Blackboard/BlackboardKeyType_Int.h"
-#include "BehaviorTree/Blackboard/BlackboardKeyType_Bool.h"
 #include "EnvironmentQuery/EnvQueryManager.h"
 
 #define LOCTEXT_NAMESPACE "EnvQueryGenerator"
@@ -111,7 +109,7 @@ FText UEnvQueryTypes::GetShortTypeName(const UObject* Ob)
 	const int32 ShortNameIdx = TypeDesc.Find(TEXT("_"), ESearchCase::CaseSensitive);
 	if (ShortNameIdx != INDEX_NONE)
 	{
-		TypeDesc.MidInline(ShortNameIdx + 1, MAX_int32, false);
+		TypeDesc.MidInline(ShortNameIdx + 1, MAX_int32, EAllowShrinking::No);
 	}
 
 	return FText::FromString(TypeDesc);
@@ -141,11 +139,21 @@ FText FEnvDirection::ToText() const
 	}
 }
 
+FEnvTraceData::FEnvTraceData() :
+	VersionNum(0), 
+	ProjectDown(1024.0f), ProjectUp(1024.0f), ExtentX(10.0f), ExtentY(10.0f), ExtentZ(10.0f),
+	PostProjectionVerticalOffset(0.0f),	TraceChannel(TraceTypeQuery1), SerializedChannel(ECC_WorldStatic), TraceProfileName(NAME_None),
+	TraceShape(EEnvTraceShape::Line), TraceMode(EEnvQueryTrace::None),
+	bTraceComplex(false), bOnlyBlockingHits(true),
+	bCanTraceOnNavMesh(true), bCanTraceOnGeometry(true), bCanDisableTrace(true), bCanProjectDown(false)
+{
+}
+
 FText FEnvTraceData::ToText(FEnvTraceData::EDescriptionMode DescMode) const
 {
 	FText Desc;
 
-	if (TraceMode == EEnvQueryTrace::Geometry)
+	if (TraceMode == EEnvQueryTrace::GeometryByChannel || TraceMode == EEnvQueryTrace::GeometryByProfile)
 	{
 		FNumberFormattingOptions NumberFormatOptions;
 		NumberFormatOptions.MaximumFractionalDigits = 2;
@@ -246,7 +254,7 @@ FText FEnvTraceData::ToText(FEnvTraceData::EDescriptionMode DescMode) const
 
 void FEnvTraceData::SetGeometryOnly()
 {
-	TraceMode = EEnvQueryTrace::Geometry;
+	TraceMode = EEnvQueryTrace::GeometryByChannel;
 	bCanTraceOnGeometry = true;
 	bCanTraceOnNavMesh = false;
 	bCanDisableTrace = false;
@@ -281,18 +289,19 @@ namespace FEQSHelpers
 	const ANavigationData* FindNavigationDataForQuery(FEnvQueryInstance& QueryInstance)
 	{
 		const UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(QueryInstance.World);
-		
 		if (NavSys == nullptr)
 		{
 			return nullptr;
 		}
 
 		// try to match navigation agent for querier
-		INavAgentInterface* NavAgent = QueryInstance.Owner.IsValid() ? Cast<INavAgentInterface>(QueryInstance.Owner.Get()) : NULL;
-		if (NavAgent)
+		if (const INavAgentInterface* NavAgent = QueryInstance.Owner.IsValid() ? Cast<INavAgentInterface>(QueryInstance.Owner.Get()) : nullptr)
 		{
 			const FNavAgentProperties& NavAgentProps = NavAgent->GetNavAgentPropertiesRef();
-			return NavSys->GetNavDataForProps(NavAgentProps, NavAgent->GetNavAgentLocation());
+			if (NavAgentProps.IsValid() || NavAgentProps.PreferredNavData.IsValid())
+			{
+				return NavSys->GetNavDataForProps(NavAgentProps, NavAgent->GetNavAgentLocation());
+			}
 		}
 
 		return NavSys->GetDefaultNavDataInstance();
@@ -411,7 +420,7 @@ void FEQSParametrizedQueryExecutionRequest::InitForOwnerAndBlackboard(UObject& O
 	}
 }
 
-int32 FEQSParametrizedQueryExecutionRequest::Execute(AActor& QueryOwner, const UBlackboardComponent* BlackboardComponent, FQueryFinishedSignature& QueryFinishedDelegate)
+int32 FEQSParametrizedQueryExecutionRequest::Execute(UObject& QueryOwner, const UBlackboardComponent* BlackboardComponent, FQueryFinishedSignature& QueryFinishedDelegate)
 {
 	if (bUseBBKeyForQueryTemplate)
 	{
@@ -433,62 +442,7 @@ int32 FEQSParametrizedQueryExecutionRequest::Execute(AActor& QueryOwner, const U
 			// resolve 
 			for (FAIDynamicParam& RuntimeParam : QueryConfig)
 			{
-				// check if given param requires runtime resolve, like reading from BB
-				if (RuntimeParam.BBKey.IsSet())
-				{
-					check(BlackboardComponent && "If BBKey.IsSet and there's no BB component then we\'re in the error land!");
-
-					// grab info from BB
-					switch (RuntimeParam.ParamType)
-					{
-					case EAIParamType::Float:
-					{
-						const float Value = BlackboardComponent->GetValue<UBlackboardKeyType_Float>(RuntimeParam.BBKey.GetSelectedKeyID());
-						QueryRequest.SetFloatParam(RuntimeParam.ParamName, Value);
-					}
-					break;
-					case EAIParamType::Int:
-					{
-						const int32 Value = BlackboardComponent->GetValue<UBlackboardKeyType_Int>(RuntimeParam.BBKey.GetSelectedKeyID());
-						QueryRequest.SetIntParam(RuntimeParam.ParamName, Value);
-					}
-					break;
-					case EAIParamType::Bool:
-					{
-						const bool Value = BlackboardComponent->GetValue<UBlackboardKeyType_Bool>(RuntimeParam.BBKey.GetSelectedKeyID());
-						QueryRequest.SetBoolParam(RuntimeParam.ParamName, Value);
-					}
-					break;
-					default:
-						checkNoEntry();
-						break;
-					}
-				}
-				else
-				{
-					switch (RuntimeParam.ParamType)
-					{
-					case EAIParamType::Float:
-					{
-						QueryRequest.SetFloatParam(RuntimeParam.ParamName, RuntimeParam.Value);
-					}
-					break;
-					case EAIParamType::Int:
-					{
-						QueryRequest.SetIntParam(RuntimeParam.ParamName, RuntimeParam.Value);
-					}
-					break;
-					case EAIParamType::Bool:
-					{
-						bool Result = RuntimeParam.Value > 0;
-						QueryRequest.SetBoolParam(RuntimeParam.ParamName, Result);
-					}
-					break;
-					default:
-						checkNoEntry();
-						break;
-					}
-				}
+				QueryRequest.SetDynamicParam(RuntimeParam, BlackboardComponent);
 			}
 		}
 

@@ -12,13 +12,16 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/Class.h"
+#include "Templates/SubclassOf.h"
 #include "UserDefinedEnum.generated.h"
+
+class UEnumCookedMetaData;
 
 /** 
  *	An Enumeration is a list of named values.
  */
-UCLASS()
-class ENGINE_API UUserDefinedEnum : public UEnum
+UCLASS(MinimalAPI)
+class UUserDefinedEnum : public UEnum
 {
 	GENERATED_UCLASS_BODY()
 
@@ -40,7 +43,7 @@ class ENGINE_API UUserDefinedEnum : public UEnum
 
 public:
 	//~ Begin UObject Interface.
-	virtual void Serialize(FArchive& Ar) override;
+	ENGINE_API virtual void Serialize(FArchive& Ar) override;
 	//~ End UObject Interface.
 
 	/**
@@ -50,7 +53,7 @@ public:
 	 * @param InEnumName Enum name.
 	 * @return Full enum name.
 	 */
-	virtual FString GenerateFullEnumName(const TCHAR* InEnumName) const override;
+	ENGINE_API virtual FString GenerateFullEnumName(const TCHAR* InEnumName) const override;
 
 	/**
 	 *	Try to update value in enum variable after an enum's change.
@@ -58,24 +61,42 @@ public:
 	 *	@param EnumeratorIndex	old index
 	 *	@return	new index
 	 */
-	virtual int64 ResolveEnumerator(FArchive& Ar, int64 EnumeratorValue) const override;
+	ENGINE_API virtual int64 ResolveEnumerator(FArchive& Ar, int64 EnumeratorValue) const override;
 
 	/** Overridden to read DisplayNameMap*/
-	virtual FText GetDisplayNameTextByIndex(int32 InIndex) const override;
-	virtual FString GetAuthoredNameStringByIndex(int32 InIndex) const override;
+	ENGINE_API virtual FText GetDisplayNameTextByIndex(int32 InIndex) const override;
+	ENGINE_API virtual FString GetAuthoredNameStringByIndex(int32 InIndex) const override;
 
-	virtual bool SetEnums(TArray<TPair<FName, int64>>& InNames, ECppForm InCppForm, EEnumFlags InFlags = EEnumFlags::None, bool bAddMaxKeyIfMissing = true) override;
+	ENGINE_API virtual bool SetEnums(TArray<TPair<FName, int64>>& InNames, ECppForm InCppForm, EEnumFlags InFlags = EEnumFlags::None, bool bAddMaxKeyIfMissing = true) override;
 
 #if WITH_EDITOR
 	//~ Begin UObject Interface
-	virtual bool Rename(const TCHAR* NewName = NULL, UObject* NewOuter = NULL, ERenameFlags Flags = REN_None) override;
-	virtual void PostDuplicate(bool bDuplicateForPIE) override;
-	virtual void PostLoad() override;
-	virtual void PostEditUndo() override;
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent);
-	virtual void GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const override;
+	ENGINE_API virtual bool Rename(const TCHAR* NewName = NULL, UObject* NewOuter = NULL, ERenameFlags Flags = REN_None) override;
+	ENGINE_API virtual void PostDuplicate(bool bDuplicateForPIE) override;
+	ENGINE_API virtual void PostLoad() override;
+	ENGINE_API virtual bool IsPostLoadThreadSafe() const override;
+	ENGINE_API virtual void PostEditUndo() override;
+	ENGINE_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent);
+	ENGINE_API virtual void GetAssetRegistryTags(FAssetRegistryTagsContext Context) const override;
+	UE_DEPRECATED(5.4, "Implement the version that takes FAssetRegistryTagsContext instead.")
+	ENGINE_API virtual void GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const override;
+	ENGINE_API virtual void PreSaveRoot(FObjectPreSaveRootContext ObjectSaveContext) override;
+	ENGINE_API virtual void PostSaveRoot(FObjectPostSaveRootContext ObjectSaveContext) override;
 	//~ End UObject Interface
 
-	FString GenerateNewEnumeratorName();
+	ENGINE_API FString GenerateNewEnumeratorName();
 #endif	// WITH_EDITOR
+
+#if WITH_EDITORONLY_DATA
+protected:
+	ENGINE_API virtual TSubclassOf<UEnumCookedMetaData> GetCookedMetaDataClass() const;
+
+private:
+	UEnumCookedMetaData* NewCookedMetaData();
+	const UEnumCookedMetaData* FindCookedMetaData();
+	void PurgeCookedMetaData();
+
+	UPROPERTY()
+	TObjectPtr<UEnumCookedMetaData> CachedCookedMetaDataPtr;
+#endif // WITH_EDITORONLY_DATA
 };

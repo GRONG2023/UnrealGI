@@ -4,7 +4,8 @@
 #include "Fonts/FontCache.h"
 #include "Fonts/FontCacheFreeType.h"
 #include "Fonts/SlateFontRenderer.h"
-#include "HAL/LowLevelMemTracker.h"
+#include "Trace/SlateMemoryTags.h"
+#include "Fonts/FontUtils.h"
 
 #if WITH_HARFBUZZ
 
@@ -13,13 +14,13 @@ extern "C"
 
 void* HarfBuzzMalloc(size_t InSizeBytes)
 {
-	LLM_SCOPE(ELLMTag::UI);
+	LLM_SCOPE_BYTAG(UI_Text);
 	return FMemory::Malloc(InSizeBytes);
 }
 
 void* HarfBuzzCalloc(size_t InNumItems, size_t InItemSizeBytes)
 {
-	LLM_SCOPE(ELLMTag::UI);
+	LLM_SCOPE_BYTAG(UI_Text);
 	const size_t AllocSizeBytes = InNumItems * InItemSizeBytes;
 	if (AllocSizeBytes > 0)
 	{
@@ -32,7 +33,7 @@ void* HarfBuzzCalloc(size_t InNumItems, size_t InItemSizeBytes)
 
 void* HarfBuzzRealloc(void* InPtr, size_t InSizeBytes)
 {
-	LLM_SCOPE(ELLMTag::UI);
+	LLM_SCOPE_BYTAG(UI_Text);
 	return FMemory::Realloc(InPtr, InSizeBytes);
 }
 
@@ -60,7 +61,7 @@ void AppendStringToBuffer(const FStringView InString, const int32 InStartIndex, 
 	//				   In practice this may not be an issue as our platforms should all use the other functions, but to fix it we'd need UTF-8 iteration functions to find the correct points the buffer
 	FStringView SubString = InString.Mid(InStartIndex, InLength);
 	FTCHARToUTF8 SubStringUtf8(SubString.GetData(), SubString.Len());
-	hb_buffer_add_utf8(InHarfBuzzTextBuffer, SubStringUtf8.Get(), SubStringUtf8.Length(), 0, SubStringUtf8.Length());
+	hb_buffer_add_utf8(InHarfBuzzTextBuffer, (const char*)SubStringUtf8.Get(), SubStringUtf8.Length(), 0, SubStringUtf8.Length());
 }
 
 template <>
@@ -103,7 +104,7 @@ hb_user_data_key_t UserDataKey;
 
 struct FUserData
 {
-	FUserData(const int32 InFontSize, const float InFontScale, FFreeTypeCacheDirectory* InFTCacheDirectory, const hb_font_extents_t& InHarfBuzzFontExtents)
+	FUserData(const float InFontSize, const float InFontScale, FFreeTypeCacheDirectory* InFTCacheDirectory, const hb_font_extents_t& InHarfBuzzFontExtents)
 		: FontSize(InFontSize)
 		, FontScale(InFontScale)
 		, FTCacheDirectory(InFTCacheDirectory)
@@ -111,13 +112,13 @@ struct FUserData
 	{
 	}
 
-	int32 FontSize;
+	float FontSize;
 	float FontScale;
 	FFreeTypeCacheDirectory* FTCacheDirectory;
 	hb_font_extents_t HarfBuzzFontExtents;
 };
 
-void* CreateUserData(const int32 InFontSize, const float InFontScale, FFreeTypeCacheDirectory* InFTCacheDirectory, const hb_font_extents_t& InHarfBuzzFontExtents)
+void* CreateUserData(const float InFontSize, const float InFontScale, FFreeTypeCacheDirectory* InFTCacheDirectory, const hb_font_extents_t& InHarfBuzzFontExtents)
 {
 	return new FUserData(InFontSize, InFontScale, InFTCacheDirectory, InHarfBuzzFontExtents);
 }
@@ -449,13 +450,13 @@ FHarfBuzzFontFactory::~FHarfBuzzFontFactory()
 
 #if WITH_HARFBUZZ
 
-hb_font_t* FHarfBuzzFontFactory::CreateFont(const FFreeTypeFace& InFace, const uint32 InGlyphFlags, const int32 InFontSize, const float InFontScale) const
+hb_font_t* FHarfBuzzFontFactory::CreateFont(const FFreeTypeFace& InFace, const uint32 InGlyphFlags, const FSlateFontInfo& InFontInfo, const float InFontScale) const
 {
 	hb_font_t* HarfBuzzFont = nullptr;
 
 #if WITH_FREETYPE
 	FT_Face FreeTypeFace = InFace.GetFace();
-	FreeTypeUtils::ApplySizeAndScale(FreeTypeFace, InFontSize, InFontScale);
+	FreeTypeUtils::ApplySizeAndScale(FreeTypeFace, InFontInfo.Size, InFontScale);
 
 	hb_font_extents_t HarfBuzzFontExtents;
 	FMemory::Memzero(HarfBuzzFontExtents);
@@ -472,9 +473,10 @@ hb_font_t* FHarfBuzzFontFactory::CreateFont(const FFreeTypeFace& InFace, const u
 			hb_font_get_scale(HarfBuzzFTFont, &HarfBuzzFTFontXScale, &HarfBuzzFTFontYScale);
 
 			// Cache the font extents
-			HarfBuzzFontExtents.ascender = InFace.GetAscender();
-			HarfBuzzFontExtents.descender = InFace.GetDescender();
-			HarfBuzzFontExtents.line_gap = InFace.GetScaledHeight() - (HarfBuzzFontExtents.ascender - HarfBuzzFontExtents.descender);
+			const bool IsAscentDescentOverridenEnabled = UE::Slate::FontUtils::IsAscentDescentOverrideEnabled(InFontInfo.FontObject);
+			HarfBuzzFontExtents.ascender = InFace.GetAscender(IsAscentDescentOverridenEnabled);
+			HarfBuzzFontExtents.descender = InFace.GetDescender(IsAscentDescentOverridenEnabled);
+			HarfBuzzFontExtents.line_gap = InFace.GetScaledHeight(IsAscentDescentOverridenEnabled) - (HarfBuzzFontExtents.ascender - HarfBuzzFontExtents.descender);
 			if (HarfBuzzFTFontYScale < 0)
 			{
 				HarfBuzzFontExtents.ascender = -HarfBuzzFontExtents.ascender;
@@ -493,7 +495,7 @@ hb_font_t* FHarfBuzzFontFactory::CreateFont(const FFreeTypeFace& InFace, const u
 	hb_font_set_user_data(
 		HarfBuzzFont, 
 		&HarfBuzzFontFunctions::UserDataKey, 
-		HarfBuzzFontFunctions::CreateUserData(InFontSize, InFontScale, FTCacheDirectory, HarfBuzzFontExtents),
+		HarfBuzzFontFunctions::CreateUserData(InFontInfo.Size, InFontScale, FTCacheDirectory, HarfBuzzFontExtents),
 		&HarfBuzzFontFunctions::DestroyUserData, 
 		true
 		);

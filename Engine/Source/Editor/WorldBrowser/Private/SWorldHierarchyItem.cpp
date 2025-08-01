@@ -5,7 +5,7 @@
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Text/SInlineEditableTextBlock.h"
 #include "Widgets/Input/SButton.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Engine/Engine.h"
 #include "ISourceControlProvider.h"
 #include "ISourceControlModule.h"
@@ -21,6 +21,7 @@
 #include "WorldTreeItemTypes.h"
 #include "LevelFolders.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Styling/StyleColors.h"
 
 #define LOCTEXT_NAMESPACE "WorldBrowser"
 
@@ -104,12 +105,14 @@ TSharedRef< SWidget > SWorldHierarchyItem::GenerateWidgetForColumn( const FName&
 				[
 					SNew(SImage)
 					.Image(this, &SWorldHierarchyItem::GetLevelIconBrush)
+					.ColorAndOpacity(FStyleColors::AccentFolder)
 				]
 			]
 
 			+SHorizontalBox::Slot()
 			.VAlign(VAlign_Center)
 			.AutoWidth()
+			.Padding(FMargin(5.f, 0.f, 0.f, 0.f))
 			[
 				TextWidget.ToSharedRef()
 			]
@@ -124,17 +127,19 @@ TSharedRef< SWidget > SWorldHierarchyItem::GenerateWidgetForColumn( const FName&
 			TableRowContent =
 				SAssignNew(LightingScenarioButton, SButton)
 				.ContentPadding(0)
-				.ButtonStyle(FEditorStyle::Get(), "ToggleButton")
+				.ButtonStyle(FAppStyle::Get(), "SimpleButton")
 				.IsEnabled(this, &SWorldHierarchyItem::IsLightingScenarioEnabled)
 				.OnClicked(this, &SWorldHierarchyItem::OnToggleLightingScenario)
 				.ToolTipText(this, &SWorldHierarchyItem::GetLightingScenarioToolTip)
 				.Visibility(this, &SWorldHierarchyItem::GetLightingScenarioVisibility)
 				.HAlign(HAlign_Center)
 				.VAlign(VAlign_Center)
+				.ForegroundColor_Lambda([this]() { return IsSelected() ? FSlateColor::UseForeground() : FSlateColor::UseStyle(); })
 				.Content()
 				[
 					SNew(SImage)
 					.Image(this, &SWorldHierarchyItem::GetLightingScenarioBrush)
+					.ColorAndOpacity(FSlateColor::UseForeground())
 				]
 			;
 		}
@@ -143,16 +148,18 @@ TSharedRef< SWidget > SWorldHierarchyItem::GenerateWidgetForColumn( const FName&
 			TableRowContent =
 				SAssignNew(LockButton, SButton)
 				.ContentPadding(0)
-				.ButtonStyle(FEditorStyle::Get(), "ToggleButton")
+				.ButtonStyle(FAppStyle::Get(), "SimpleButton")
 				.IsEnabled(this, &SWorldHierarchyItem::IsLockEnabled)
 				.OnClicked(this, &SWorldHierarchyItem::OnToggleLock)
 				.ToolTipText(this, &SWorldHierarchyItem::GetLevelLockToolTip)
 				.HAlign(HAlign_Center)
 				.VAlign(VAlign_Center)
+				.ForegroundColor_Lambda([this]() { return IsSelected() ? FSlateColor::UseForeground() : FSlateColor::UseStyle(); })
 				.Content()
 				[
 					SNew(SImage)
 					.Image(this, &SWorldHierarchyItem::GetLevelLockBrush)
+					.ColorAndOpacity(FSlateColor::UseForeground())
 				]
 			;
 		}
@@ -161,16 +168,18 @@ TSharedRef< SWidget > SWorldHierarchyItem::GenerateWidgetForColumn( const FName&
 			TableRowContent =
 				SAssignNew(VisibilityButton, SButton)
 				.ContentPadding(0)
-				.ButtonStyle(FEditorStyle::Get(), "ToggleButton")
+				.ButtonStyle(FAppStyle::Get(), "SimpleButton")
 				.IsEnabled(this, &SWorldHierarchyItem::IsVisibilityEnabled)
 				.OnClicked(this, &SWorldHierarchyItem::OnToggleVisibility)
 				.ToolTipText(this, &SWorldHierarchyItem::GetVisibilityToolTip)
 				.HAlign(HAlign_Center)
 				.VAlign(VAlign_Center)
+				.ForegroundColor_Lambda([this]() { return IsSelected() ? FSlateColor::UseForeground() : FSlateColor::UseStyle(); })
 				.Content()
 				[
 					SNew(SImage)
 					.Image(this, &SWorldHierarchyItem::GetLevelVisibilityBrush)
+					.ColorAndOpacity(FSlateColor::UseForeground())
 				]
 			;
 		}
@@ -179,7 +188,7 @@ TSharedRef< SWidget > SWorldHierarchyItem::GenerateWidgetForColumn( const FName&
 			TableRowContent =
 				SAssignNew(ColorButton, SButton)
 				.ContentPadding(0)
-				.ButtonStyle(FEditorStyle::Get(), "ToggleButton")
+				.ButtonStyle(FAppStyle::Get(), "SimpleButton")
 				.IsEnabled(true)
 				.OnClicked(this, &SWorldHierarchyItem::OnChangeColor)
 				.ToolTipText(LOCTEXT("LevelColorButtonToolTip", "Change Level Color"))
@@ -190,7 +199,7 @@ TSharedRef< SWidget > SWorldHierarchyItem::GenerateWidgetForColumn( const FName&
 				[
 					SNew(SImage)
 					.ColorAndOpacity(this, &SWorldHierarchyItem::GetDrawColor)
-				.Image(this, &SWorldHierarchyItem::GetLevelColorBrush)
+					.Image(FAppStyle::Get().GetBrush("Level.ColorIcon"))
 				]
 			;
 		}
@@ -199,16 +208,18 @@ TSharedRef< SWidget > SWorldHierarchyItem::GenerateWidgetForColumn( const FName&
 			TableRowContent =
 				SAssignNew(KismetButton, SButton)
 				.ContentPadding(0)
-				.ButtonStyle(FEditorStyle::Get(), "ToggleButton")
+				.ButtonStyle(FAppStyle::Get(), "SimpleButton")
 				.IsEnabled(this, &SWorldHierarchyItem::IsKismetEnabled)
 				.OnClicked(this, &SWorldHierarchyItem::OnOpenKismet)
 				.ToolTipText(this, &SWorldHierarchyItem::GetKismetToolTip)
 				.HAlign(HAlign_Center)
 				.VAlign(VAlign_Center)
+				.ForegroundColor_Lambda([this]() { return IsSelected() ? FSlateColor::UseForeground() : FSlateColor::UseStyle(); })
 				.Content()
 				[
 					SNew(SImage)
 					.Image(this, &SWorldHierarchyItem::GetLevelKismetBrush)
+					.ColorAndOpacity(FSlateColor::UseForeground())
 				]
 			;
 		}
@@ -221,15 +232,9 @@ TSharedRef< SWidget > SWorldHierarchyItem::GenerateWidgetForColumn( const FName&
 				.HAlign(HAlign_Center)
 				.VAlign(VAlign_Center)
 				[
-					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot()
-					.FillWidth(1.0f)
-					.VAlign(VAlign_Center)
-					[
-						SNew(SImage)
-						.Image(this, &SWorldHierarchyItem::GetSCCStateImage)
-						.ToolTipText(this, &SWorldHierarchyItem::GetSCCStateTooltip)
-					]
+					SNew(SImage)
+					.Image(this, &SWorldHierarchyItem::GetSCCStateImage)
+					.ToolTipText(this, &SWorldHierarchyItem::GetSCCStateTooltip)
 				]
 			;
 		}
@@ -238,16 +243,18 @@ TSharedRef< SWidget > SWorldHierarchyItem::GenerateWidgetForColumn( const FName&
 			TableRowContent =
 				SAssignNew(SaveButton, SButton)
 				.ContentPadding(0)
-				.ButtonStyle(FEditorStyle::Get(), "ToggleButton")
+				.ButtonStyle(FAppStyle::Get(), "SimpleButton")
 				.IsEnabled(this, &SWorldHierarchyItem::IsSaveEnabled)
 				.OnClicked(this, &SWorldHierarchyItem::OnSave)
 				.ToolTipText(this, &SWorldHierarchyItem::GetSaveToolTip)
 				.HAlign(HAlign_Center)
 				.VAlign(VAlign_Center)
+				.ForegroundColor_Lambda([this]() { return IsSelected() ? FSlateColor::UseForeground() : FSlateColor::UseStyle(); })
 				.Content()
 				[
 					SNew(SImage)
 					.Image(this, &SWorldHierarchyItem::GetLevelSaveBrush)
+					.ColorAndOpacity(FSlateColor::UseForeground())
 				]
 			;
 		}
@@ -261,10 +268,11 @@ FText SWorldHierarchyItem::GetDisplayNameText() const
 {
 	FFormatNamedArguments Args;
 	Args.Add(TEXT("DisplayText"), FText::FromString(WorldTreeItem->GetDisplayString()));
+	Args.Add(TEXT("DirtyFlag"), WorldTreeItem->IsDirty() ? FText::FromString(" *") : FText::GetEmpty());
 	Args.Add(TEXT("Transient"), (WorldTreeItem->IsTransient() ? LOCTEXT("WorldItem_Transient", " (Transient)") : FText::GetEmpty()));
 	Args.Add(TEXT("ReadOnly"), (WorldTreeItem->IsReadOnly() ? LOCTEXT("WorldItem_ReadOnly", " (Read-Only)") : FText::GetEmpty()));
 
-	return FText::Format(LOCTEXT("WorldItem", "{DisplayText}{Transient}{ReadOnly}"), Args);
+	return FText::Format(LOCTEXT("WorldItem", "{DisplayText}{DirtyFlag}{Transient}{ReadOnly}"), Args);
 }
 
 void SWorldHierarchyItem::OnLabelCommitted(const FText& InLabel, ETextCommit::Type InCommitInfo)
@@ -468,7 +476,7 @@ FReply SWorldHierarchyItem::OnChangeColor()
 	{
 		FColorPickerArgs PickerArgs;
 		PickerArgs.DisplayGamma = TAttribute<float>::Create(TAttribute<float>::FGetter::CreateUObject(GEngine, &UEngine::GetDisplayGamma));
-		PickerArgs.InitialColorOverride = WorldTreeItem->GetDrawColor();
+		PickerArgs.InitialColor = WorldTreeItem->GetDrawColor();
 		PickerArgs.bOnlyRefreshOnMouseUp = false;
 		PickerArgs.bOnlyRefreshOnOk = false;
 		PickerArgs.OnColorCommitted = FOnLinearColorValueChanged::CreateSP(this, &SWorldHierarchyItem::OnSetColorFromColorPicker);
@@ -582,7 +590,7 @@ void SWorldHierarchyItem::OnDragEnter( const FGeometry& MyGeometry, const FDragD
 	WorldHierarchy::FValidationInfo ValidationInfo = WorldTreeItem->ValidateDrop(DragDropEvent);
 
 	FName IconName = ValidationInfo.bValid ? TEXT("Graph.ConnectorFeedback.OK") : TEXT("Graph.ConnectorFeedback.Error");
-	const FSlateBrush* Icon = FEditorStyle::GetBrush(IconName);
+	const FSlateBrush* Icon = FAppStyle::Get().GetBrush(IconName);
 
 	TSharedPtr<FDragDropOperation> Operation = DragDropEvent.GetOperation();
 	if (Operation.IsValid())
@@ -622,11 +630,11 @@ FSlateFontInfo SWorldHierarchyItem::GetDisplayNameFont() const
 {
 	if (WorldTreeItem->IsCurrent())
 	{
-		return FEditorStyle::GetFontStyle("WorldBrowser.LabelFontBold");
+		return FAppStyle::Get().GetFontStyle("WorldBrowser.LabelFontBold");
 	}
 	else
 	{
-		return FEditorStyle::GetFontStyle("WorldBrowser.LabelFont");
+		return FAppStyle::Get().GetFontStyle("WorldBrowser.LabelFont");
 	}
 }
 
@@ -669,18 +677,18 @@ const FSlateBrush* SWorldHierarchyItem::GetLevelVisibilityBrush() const
 	{
 		if (WorldTreeItem->IsVisible())
 		{
-			return VisibilityButton->IsHovered() ? FEditorStyle::GetBrush( "Level.VisibleHighlightIcon16x" ) :
-													FEditorStyle::GetBrush( "Level.VisibleIcon16x" );
+			return VisibilityButton->IsHovered() ? FAppStyle::Get().GetBrush( "Level.VisibleHighlightIcon16x" ) :
+													FAppStyle::Get().GetBrush( "Level.VisibleIcon16x" );
 		}
 		else
 		{
-			return VisibilityButton->IsHovered() ? FEditorStyle::GetBrush( "Level.NotVisibleHighlightIcon16x" ) :
-													FEditorStyle::GetBrush( "Level.NotVisibleIcon16x" );
+			return VisibilityButton->IsHovered() ? FAppStyle::Get().GetBrush( "Level.NotVisibleHighlightIcon16x" ) :
+													FAppStyle::Get().GetBrush( "Level.NotVisibleIcon16x" );
 		}
 	}
 	else
 	{
-		return FEditorStyle::GetBrush( "Level.EmptyIcon16x" );
+		return FAppStyle::Get().GetBrush( "Level.EmptyIcon16x" );
 	}
 }
 
@@ -688,11 +696,11 @@ const FSlateBrush* SWorldHierarchyItem::GetLightingScenarioBrush() const
 {
 	if (WorldTreeItem->IsLightingScenario())
 	{
-		return FEditorStyle::GetBrush( "Level.LightingScenarioIcon16x" );
+		return FAppStyle::Get().GetBrush( "Level.LightingScenarioIconSolid16x" );
 	}
 	else
 	{
-		return FEditorStyle::GetBrush( "Level.LightingScenarioNotIcon16x" );
+		return FAppStyle::Get().GetBrush( "Level.LightingScenarioNotIconSolid16x" );
 	}
 }
 
@@ -706,29 +714,17 @@ const FSlateBrush* SWorldHierarchyItem::GetLevelLockBrush() const
 	if (!WorldTreeItem->HasLockControls())
 	{
 		//Locking the persistent level is not allowed; stub in a different brush
-		return FEditorStyle::GetBrush( "Level.EmptyIcon16x" );
+		return FStyleDefaults::GetNoBrush();
 	}
 	else 
 	{
-		////Non-Persistent
-		//if ( GEngine && GEngine->bLockReadOnlyLevels )
-		//{
-		//	if(LevelModel->IsReadOnly())
-		//	{
-		//		return LockButton->IsHovered() ? FEditorStyle::GetBrush( "Level.ReadOnlyLockedHighlightIcon16x" ) :
-		//											FEditorStyle::GetBrush( "Level.ReadOnlyLockedIcon16x" );
-		//	}
-		//}
-			
 		if (WorldTreeItem->IsLocked())
 		{
-			return LockButton->IsHovered() ? FEditorStyle::GetBrush( "Level.LockedHighlightIcon16x" ) :
-												FEditorStyle::GetBrush( "Level.LockedIcon16x" );
+			return FAppStyle::Get().GetBrush("Icons.Lock");
 		}
 		else
 		{
-			return LockButton->IsHovered() ? FEditorStyle::GetBrush( "Level.UnlockedHighlightIcon16x" ) :
-												FEditorStyle::GetBrush( "Level.UnlockedIcon16x" );
+			return  FAppStyle::Get().GetBrush("Icons.Unlock");
 		}
 	}
 }
@@ -761,7 +757,7 @@ const FSlateBrush* SWorldHierarchyItem::GetSCCStateImage() const
 		FSourceControlStatePtr SourceControlState = ISourceControlModule::Get().GetProvider().GetState(PackageName, EStateCacheUsage::Use);
 		if(SourceControlState.IsValid())
 		{
-			return FEditorStyle::GetBrush(SourceControlState->GetSmallIconName());
+			return SourceControlState->GetIcon().GetIcon();
 		}
 	}
 
@@ -770,30 +766,14 @@ const FSlateBrush* SWorldHierarchyItem::GetSCCStateImage() const
 
 const FSlateBrush* SWorldHierarchyItem::GetLevelSaveBrush() const
 {
-	if (WorldTreeItem->IsLoaded())
+	if (WorldTreeItem->IsDirty())
 	{
-		if (WorldTreeItem->Flags.bLocked)
-		{
-			return FEditorStyle::GetBrush( "Level.SaveDisabledIcon16x" );
-		}
-		else
-		{
-			if (WorldTreeItem->IsDirty())
-			{
-				return SaveButton->IsHovered() ? FEditorStyle::GetBrush( "Level.SaveModifiedHighlightIcon16x" ) :
-													FEditorStyle::GetBrush( "Level.SaveModifiedIcon16x" );
-			}
-			else
-			{
-				return SaveButton->IsHovered() ? FEditorStyle::GetBrush( "Level.SaveHighlightIcon16x" ) :
-													FEditorStyle::GetBrush( "Level.SaveIcon16x" );
-			}
-		}								
+		return FAppStyle::Get().GetBrush("Icons.SaveModified");
 	}
 	else
 	{
-		return FEditorStyle::GetBrush( "Level.EmptyIcon16x" );
-	}	
+		return FStyleDefaults::GetNoBrush();
+	}
 }
 
 const FSlateBrush* SWorldHierarchyItem::GetLevelKismetBrush() const
@@ -802,23 +782,17 @@ const FSlateBrush* SWorldHierarchyItem::GetLevelKismetBrush() const
 	{
 		if (WorldTreeItem->HasKismet())
 		{
-			return KismetButton->IsHovered() ? FEditorStyle::GetBrush( "Level.ScriptHighlightIcon16x" ) :
-												FEditorStyle::GetBrush( "Level.ScriptIcon16x" );
+			return FAppStyle::Get().GetBrush("Icons.Blueprints");
 		}
 		else
 		{
-			return FEditorStyle::GetBrush( "Level.EmptyIcon16x" );
+			return FStyleDefaults::GetNoBrush();
 		}
 	}
 	else
 	{
-		return FEditorStyle::GetBrush( "Level.EmptyIcon16x" );
+		return FStyleDefaults::GetNoBrush();
 	}	
-}
-
-const FSlateBrush* SWorldHierarchyItem::GetLevelColorBrush() const
-{
-	return FEditorStyle::GetBrush("Level.ColorIcon40x");
 }
 
 #undef LOCTEXT_NAMESPACE

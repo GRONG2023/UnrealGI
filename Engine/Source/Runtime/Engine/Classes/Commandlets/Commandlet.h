@@ -15,7 +15,7 @@
  *     yourgame.exe UnrealEd.CookCommandlet
  *
  * As a convenience, if a user tries to run a commandlet and the exact
- * name he types isn't found, then ucc.exe appends the text "commandlet"
+ * name they type isn't found, then ucc.exe appends the text "commandlet"
  * onto the name and tries again.  Therefore, the following shortcuts
  * perform identically to the above:
  *
@@ -87,6 +87,14 @@ class UCommandlet : public UObject
 	UPROPERTY()
 	uint32 ShowProgress:1;
 
+	/** Whether to exit the process as soon as the commandlet completes, skipping the engine shutdown */
+	UPROPERTY()
+	uint32 FastExit:1;
+
+	/** Whether to use the commandlet result as the exit code, even if errors were logged during the whole engine execution */
+	UPROPERTY()
+	uint32 UseCommandletResultAsExitCode: 1;
+
 	/**
 	 * Entry point for your commandlet
 	 *
@@ -111,11 +119,11 @@ class UCommandlet : public UObject
 		{
 			if ( **NextToken == TCHAR('-') )
 			{
-				new(Switches) FString(NextToken.Mid(1));
+				Switches.Add(NextToken.Mid(1));
 			}
 			else
 			{
-				new(Tokens) FString(NextToken);
+				Tokens.Add(MoveTemp(NextToken));
 			}
 		}
 	}
@@ -133,15 +141,20 @@ class UCommandlet : public UObject
 	 */
 	static void ParseCommandLine( const TCHAR* CmdLine, TArray<FString>& Tokens, TArray<FString>& Switches, TMap<FString, FString>& Params )
 	{
+		// Turn -foo -bar=1 into [Foo, Bar=1]
 		ParseCommandLine(CmdLine, Tokens, Switches);
 
 		for (int32 SwitchIdx = Switches.Num() - 1; SwitchIdx >= 0; --SwitchIdx)
 		{
 			FString& Switch = Switches[SwitchIdx];
 			TArray<FString> SplitSwitch;
-			if (2 == Switch.ParseIntoArray(SplitSwitch, TEXT("="), true))
+
+			// Remove Bar=1 from the switch list and put it in params as {Bar,1}.
+			// Note: Handle nested equality such as Bar="Key=Value"
+			int32 AssignmentIndex = 0;
+			if (Switch.FindChar(TEXT('='), AssignmentIndex))
 			{
-				Params.Add(SplitSwitch[0], SplitSwitch[1].TrimQuotes());
+				Params.Add(Switch.Left(AssignmentIndex), Switch.RightChop(AssignmentIndex+1).TrimQuotes());
 				Switches.RemoveAt(SwitchIdx);
 			}
 		}
@@ -156,5 +169,12 @@ class UCommandlet : public UObject
 
 };
 
-
-
+namespace CommandletHelpers
+{
+	/**
+	 * Simulate an engine frame tick.
+	 * Can be used by commandlets to tick various subsystems. If running with -AllowCommandletRendering, this will
+	 * also tick rendering for the provided world scene(s).
+	 */
+	ENGINE_API void TickEngine(class UWorld* InWorld = nullptr, double InDeltaTime = 0.0);
+}

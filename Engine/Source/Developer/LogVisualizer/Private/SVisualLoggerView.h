@@ -8,9 +8,10 @@
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Framework/Commands/UICommandList.h"
 #include "Widgets/Layout/SSplitter.h"
-#include "Developer/LogVisualizer/Private/LogVisualizerPrivate.h"
 #include "Widgets/Input/SComboButton.h"
 #include "Widgets/Layout/SScrollBox.h"
+#include "SVisualLoggerBaseWidget.h"
+
 
 class SVisualLoggerTimelinesContainer;
 
@@ -34,7 +35,7 @@ public:
 		SSplitter::FSlot const& LeftSplitterSlot = SearchSplitter->SlotAt(0);
 		SSplitter::FSlot const& RightSplitterSlot = SearchSplitter->SlotAt(1);
 
-		return LeftSplitterSlot.SizeValue.Get()/ RightSplitterSlot.SizeValue.Get();
+		return LeftSplitterSlot.GetSizeValue()/ RightSplitterSlot.GetSizeValue();
 	}
 	void SetAnimationOutlinerFillPercentage(float FillPercentage);
 

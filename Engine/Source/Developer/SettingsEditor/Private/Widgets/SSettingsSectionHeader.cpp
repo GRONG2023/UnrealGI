@@ -5,20 +5,26 @@
 #include "ISettingsCategory.h"
 #include "Widgets/SBoxPanel.h"
 #include "Framework/Notifications/NotificationManager.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "Misc/MessageDialog.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Text/STextBlock.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "ISourceControlModule.h"
 #include "SSettingsEditorCheckoutNotice.h"
 #include "DesktopPlatformModule.h"
 #include "IDetailsView.h"
 #include "Widgets/Views/SExpanderArrow.h"
 #include "Widgets/Views/STableRow.h"
+#include "HAL/IConsoleManager.h"
 
 #define LOCTEXT_NAMESPACE "SSettingsEditor"
+
+// Workaround to hide Set As Default button until there's a better way to determine if config file is cooked
+// Currently the only way to know is to check if MakeDefaultConfigFileWritable returns false, but that can't happen before the button is clicked
+bool bHideSetAsDefaultButton = false;
+FAutoConsoleVariableRef CVarHideSetAsDefaultButton(TEXT("SettingsEditor.HideSetAsDefaultButton"), bHideSetAsDefaultButton, TEXT("Hide the Settings Editor button to save to default config."));
 
 void SSettingsSectionHeader::Construct(const FArguments& InArgs, const UObject* InSettingsObject, ISettingsEditorModelPtr InModel, TSharedPtr<IDetailsView> InDetailsView, const TSharedPtr<ITableRow>& InTableRow)
 {
@@ -39,7 +45,7 @@ void SSettingsSectionHeader::Construct(const FArguments& InArgs, const UObject* 
 
 
 	ChildSlot
-	.Padding(FMargin(0.0f, 8.0f, 0.0f, 5.0f))
+	.Padding(FMargin(0.0f, 8.0f, 16.0f, 5.0f))
 	[
 		SNew(SVerticalBox)
 		+ SVerticalBox::Slot()
@@ -64,7 +70,7 @@ void SSettingsSectionHeader::Construct(const FArguments& InArgs, const UObject* 
 					+ SHorizontalBox::Slot()// category title
 					[
 						SNew(STextBlock)
-						.Font(FEditorStyle::GetFontStyle("SettingsEditor.CatgoryAndSectionFont"))
+						.Font(FAppStyle::GetFontStyle("SettingsEditor.CatgoryAndSectionFont"))
 						.Text(GetSettingsBoxTitleText())
 					]
 				]
@@ -320,7 +326,7 @@ bool SSettingsSectionHeader::HandleResetToDefaultsButtonEnabled() const
 
 EVisibility SSettingsSectionHeader::HandleSetAsDefaultButtonVisibility() const
 {
-	return (SettingsSection.IsValid() && SettingsSection->CanSaveDefaults()) ? EVisibility::Visible : EVisibility::Collapsed;
+	return (!bHideSetAsDefaultButton && (SettingsSection.IsValid() && SettingsSection->CanSaveDefaults())) ? EVisibility::Visible : EVisibility::Collapsed;
 }
 
 FReply SSettingsSectionHeader::HandleSetAsDefaultButtonClicked()
@@ -333,7 +339,7 @@ FReply SSettingsSectionHeader::HandleSetAsDefaultButtonClicked()
 		}
 
 		bool FileNeedToBeAddedToSourceControl = false;
-		FText SaveAsDefaultNeedsAddMessage = LOCTEXT("SaveAsDefaultNeedsAddMessage", "The default configuration file for these settings is currently not under source control. Would you like to add it to source control?");
+		FText SaveAsDefaultNeedsAddMessage = LOCTEXT("SaveAsDefaultNeedsAddMessage", "The default configuration file for these settings is currently not under revision control. Would you like to add it to revision control?");
 		FString DefaultConfigFilePath = GetDefaultConfigFilePath();
 		
 		if (FPlatformFileManager::Get().GetPlatformFile().FileExists(*DefaultConfigFilePath))
@@ -346,7 +352,7 @@ FReply SSettingsSectionHeader::HandleSetAsDefaultButtonClicked()
 
 					if (SettingsHelpers::IsSourceControlled(DefaultConfigFilePath))
 					{
-						DisplayMessage = LOCTEXT("SaveAsDefaultNeedsCheckoutMessage", "The default configuration file for these settings is currently not checked out. Would you like to check it out from source control?");
+						DisplayMessage = LOCTEXT("SaveAsDefaultNeedsCheckoutMessage", "The default configuration file for these settings is currently not checked out. Would you like to check it out from revision control?");
 					}
 					else
 					{
@@ -357,7 +363,7 @@ FReply SSettingsSectionHeader::HandleSetAsDefaultButtonClicked()
 					{
 						if (!CheckOutOrAddDefaultConfigFile())
 						{
-							if (FMessageDialog::Open(EAppMsgType::YesNo, LOCTEXT("SaveAsDefaultsSourceControlOperationFailed", "The source control operation failed. Would you like to make it writable?")) == EAppReturnType::Yes)
+							if (FMessageDialog::Open(EAppMsgType::YesNo, LOCTEXT("SaveAsDefaultsSourceControlOperationFailed", "The revision control operation failed. Would you like to make it writable?")) == EAppReturnType::Yes)
 							{
 								MakeDefaultConfigFileWritable();
 							}
@@ -397,13 +403,13 @@ FReply SSettingsSectionHeader::HandleSetAsDefaultButtonClicked()
 			{
 				if (!CheckOutOrAddDefaultConfigFile(true))
 				{
-					FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("SaveAsDefaultsSourceControlFailedAddManually", "The source control operation failed. You will need to add it manually"));
+					FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("SaveAsDefaultsSourceControlFailedAddManually", "The revision control operation failed. You will need to add it manually"));
 					return FReply::Handled();
 				}
 			}
 		}
 
-		FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("SaveAsDefaultsSucceededMessage", "The default configuration file for these settings was updated successfully. \n\nIf checked into source control this would affect other developers."));
+		FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("SaveAsDefaultsSucceededMessage", "The default configuration file for these settings was updated successfully. \n\nIf checked into revision control this would affect other developers."));
 	}
 
 	return FReply::Handled();

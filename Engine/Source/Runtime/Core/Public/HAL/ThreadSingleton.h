@@ -25,6 +25,11 @@ public:
 	 * @return an instance of the singleton if it exists on the current thread.
 	 */
 	static CORE_API FTlsAutoCleanup* TryGet(uint32& TlsSlot);
+
+	/**
+	* @return sets the TLS store to the instance and returns the previous instance.
+	*/
+	static CORE_API FTlsAutoCleanup* Inject(FTlsAutoCleanup* Instance, uint32& TlsSlot);
 };
 
 
@@ -41,16 +46,19 @@ class TThreadSingleton : public FTlsAutoCleanup
 	 */
 	CORE_API static uint32& GetTlsSlot()
 	{
-		static uint32 TlsSlot = 0xFFFFFFFF;
+		static uint32 TlsSlot = FPlatformTLS::InvalidTlsSlot;
 		return TlsSlot;
 	}
 #else
 	/**
 	 * @return TLS slot that holds a TThreadSingleton.
 	 */
+#if PLATFORM_CONSOLE_DYNAMIC_LINK
+	FORCENOINLINE
+#endif
 	static uint32& GetTlsSlot()
 	{
-		static uint32 TlsSlot = 0xFFFFFFFF;
+		static uint32 TlsSlot = FPlatformTLS::InvalidTlsSlot;
 		return TlsSlot;
 	}
 #endif
@@ -61,6 +69,16 @@ protected:
 	TThreadSingleton()
 		: ThreadId(FPlatformTLS::GetCurrentThreadId())
 	{}
+
+	virtual ~TThreadSingleton()
+	{
+		// Clean the dangling pointer from the TLS.
+		check(GetTlsSlot() != FPlatformTLS::InvalidTlsSlot);
+		if(((FTlsAutoCleanup*)FPlatformTLS::GetTlsValue(GetTlsSlot())) == static_cast<FTlsAutoCleanup*>(this))
+		{
+			FPlatformTLS::SetTlsValue(GetTlsSlot(), nullptr);
+		}
+	}
 
 	/**
 	 * @return a new instance of the thread singleton.
@@ -98,5 +116,13 @@ public:
 	FORCEINLINE static T* TryGet()
 	{
 		return (T*)FThreadSingletonInitializer::TryGet( T::GetTlsSlot() );
+	}
+
+	/**
+	* @return sets the TLS store to the instance and returns the previous instance.
+	*/
+	FORCEINLINE static T* Inject(T* Instance)
+	{
+		return (T*)FThreadSingletonInitializer::Inject(Instance, T::GetTlsSlot());
 	}
 };

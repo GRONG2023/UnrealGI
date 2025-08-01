@@ -5,6 +5,7 @@
 #include "Misc/Paths.h"
 #include "Misc/OutputDeviceFile.h"
 #include "HAL/IConsoleManager.h"
+#include "Model.h"
 #include "Modules/ModuleManager.h"
 #include "Serialization/ArchiveUObject.h"
 #include "UObject/Class.h"
@@ -13,13 +14,13 @@
 #include "Engine/Level.h"
 #include "GameFramework/Actor.h"
 #include "Materials/MaterialInterface.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Editor/UnrealEdEngine.h"
 #include "ThumbnailRendering/ThumbnailManager.h"
 #include "Editor.h"
 #include "UnrealEdGlobals.h"
-#include "ARFilter.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/ARFilter.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Framework/Notifications/NotificationManager.h"
 #include "Widgets/Notifications/SNotificationList.h"
 #include "Engine/Selection.h"
@@ -48,7 +49,7 @@ void ExecuteReferenceInfo(const TArray<FString>& Args, UWorld* InWorld )
 	ReferenceInfoUtils::GenerateOutput(InWorld, Depth, bShowDefault, bShowScript);
 }
 
-FAutoConsoleCommandWithWorldAndArgs ReferenceInfo(
+static FAutoConsoleCommandWithWorldAndArgs ActorReferenceInfoCVar(
 	TEXT("ReferenceInfo"),
 	TEXT("Outputs reference info for selected actors to a log file. Syntax is: ReferenceInfo [-depth=<depth value>] [-nodefault] [-noscript]"),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(ExecuteReferenceInfo)
@@ -56,7 +57,7 @@ FAutoConsoleCommandWithWorldAndArgs ReferenceInfo(
 
 namespace ReferenceInfoUtils
 {
-	typedef TMap< UObject*, TArray<UObject*> > ObjectReferenceGraph;
+	typedef TMap< TObjectPtr<UObject>, TArray<TObjectPtr<UObject>> > ObjectReferenceGraph;
 	typedef TMap<UObject*, int32> ReferenceTreeMap;
 	typedef TMap<UObject*, FString> ObjectNameMap;
 	
@@ -133,7 +134,7 @@ namespace ReferenceInfoUtils
 					// Now change the current reference list to the one for this object
 					if (bIncludeDefaultRefs == true)
 					{
-						TArray<UObject*>* ReferencedAssets = GetAssetList(Obj);
+						auto* ReferencedAssets = GetAssetList(Obj);
 
 						// See the comment for the bIncludeScriptRefs block
 						UObject* ObjectArc = Obj->GetArchetype();
@@ -159,7 +160,7 @@ namespace ReferenceInfoUtils
 
 					if (bIncludeScriptRefs == true)
 					{
-						TArray<UObject*>* ReferencedAssets = GetAssetList(Obj);
+						auto* ReferencedAssets = GetAssetList(Obj);
 
 						// We want to see assets referenced by this object's class, but classes don't have associated thumbnail rendering info
 						// So we'll need to serialize the class manually in order to get the object references encountered through the class to fall
@@ -188,15 +189,15 @@ namespace ReferenceInfoUtils
 		/**
 		 * Retrieves the referenced assets list for the specified object
 		 */
-		TArray<UObject*>* GetAssetList(UObject* Referencer)
+		TArray<TObjectPtr<UObject>>* GetAssetList(UObject* Referencer)
 		{
 			check(Referencer);
 
-			TArray<UObject*>* ReferencedAssetList = CurrentReferenceGraph->Find(Referencer);
+			auto* ReferencedAssetList = CurrentReferenceGraph->Find(ObjectPtrWrap(Referencer));
 			if (ReferencedAssetList == NULL)
 			{
 				// add a new entry for the specified object
-				ReferencedAssetList = &CurrentReferenceGraph->Add(Referencer, TArray<UObject*>());
+				ReferencedAssetList = &CurrentReferenceGraph->Add(ObjectPtrWrap(Referencer), TArray<TObjectPtr<UObject>>{});
 			}
 
 			return ReferencedAssetList;
@@ -260,7 +261,7 @@ namespace ReferenceInfoUtils
 						AssetList.Add(CurrentObject);
 						if (CurrentReferenceGraph != NULL)
 						{
-							TArray<UObject*>* CurrentObjectAssets = GetAssetList(PreviousObject);
+							auto* CurrentObjectAssets = GetAssetList(PreviousObject);
 							check(CurrentObjectAssets);
 
 							// Add this object to the list of objects referenced by the object currently being serialized
@@ -385,11 +386,11 @@ namespace ReferenceInfoUtils
 		// If any BSP surfaces are selected
 		if (BspMats.Num() > 0)
 		{
-			FReferencedAssets* Referencer = new(Referencers) FReferencedAssets(InWorld->GetModel());
+			FReferencedAssets& Referencer = Referencers.Emplace_GetRef(InWorld->GetModel());
 
 			// Now copy the array
-			Referencer->AssetList = BspMats;
-			ReferenceGraph.Add(InWorld->GetModel(), BspMats);
+			Referencer.AssetList = BspMats;
+			ReferenceGraph.Add(ObjectPtrWrap(InWorld->GetModel()), ObjectPtrWrap(BspMats));
 		}
 
 		// This is the maximum depth to use when searching for references
@@ -423,10 +424,10 @@ namespace ReferenceInfoUtils
 			SelectedActors[Index]->Mark(OBJECTMARK_TagExp);
 
 			// Create a new entry for this actor
-			FReferencedAssets* Referencer = new(Referencers) FReferencedAssets(SelectedActors[Index]);
+			FReferencedAssets& Referencer = Referencers.Emplace_GetRef(SelectedActors[Index]);
 
 			// Add to the list of referenced assets
-			FFindAssetsArchive(SelectedActors[Index], Referencer->AssetList, &ReferenceGraph, MaxRecursionDepth, bShowScript, bShowDefault);
+			FFindAssetsArchive(SelectedActors[Index], Referencer.AssetList, &ReferenceGraph, MaxRecursionDepth, bShowScript, bShowDefault);
 		}
 
 		// Rebuild the name cache
@@ -502,7 +503,7 @@ namespace ReferenceInfoUtils
 	/**
 	 * Recursively transverses the reference tree
 	 */
-	void OutputReferencedAssets(FOutputDeviceFile& FileAr, int32 CurrentDepth, FString ParentId, UObject* BaseObject, TArray<UObject*>* AssetList)
+	void OutputReferencedAssets(FOutputDeviceFile& FileAr, int32 CurrentDepth, FString ParentId, UObject* BaseObject, const TArray<UObject*>* AssetList)
 	{
 		check(AssetList);
 
@@ -514,7 +515,7 @@ namespace ReferenceInfoUtils
 			check(ReferencedObject);
 
 			// get the list of assets this object is referencing
-			TArray<UObject*>* ReferencedAssets = ReferenceGraph.Find(ReferencedObject);
+			auto* ReferencedAssets = ReferenceGraph.Find(ObjectPtrWrap(ReferencedObject));
 			
 			// add a new tree item for this referenced asset
 			FString ItemString;
@@ -568,7 +569,7 @@ namespace ReferenceInfoUtils
 			if (ReferencedAssets != NULL)
 			{
 				// If this object is referencing other objects, output those objects
-				OutputReferencedAssets(FileAr, (CurrentDepth == 0)? 0: CurrentDepth + 1, AssetId, ReferencedObject, ReferencedAssets);
+				OutputReferencedAssets(FileAr, (CurrentDepth == 0)? 0: CurrentDepth + 1, AssetId, ReferencedObject, &ObjectPtrDecay(*ReferencedAssets));
 			}
 		}
 	}
@@ -591,10 +592,10 @@ namespace ReferenceInfoUtils
 
 			FileAr.Logf(TEXT("(%s) %s"), *Id, GetObjectNameFromCache(Asset.Referencer));
 
-			TArray<UObject*>* ReferencedAssets = ReferenceGraph.Find(Asset.Referencer);
+			auto* ReferencedAssets = ReferenceGraph.Find(ObjectPtrWrap(Asset.Referencer));
 			if (ReferencedAssets)
 			{
-				OutputReferencedAssets(FileAr, 1, Id, Asset.Referencer, ReferencedAssets);
+				OutputReferencedAssets(FileAr, 1, Id, Asset.Referencer, &ObjectPtrDecay(*ReferencedAssets));
 			}
 		}
 	}
@@ -619,10 +620,10 @@ namespace ReferenceInfoUtils
 			
 			OutputDetailsItem(FileAr, Id, Asset.Referencer, ItemName);
 
-			TArray<UObject*>* ReferencedAssets = ReferenceGraph.Find(Asset.Referencer);
+			auto* ReferencedAssets = ReferenceGraph.Find(ObjectPtrWrap(Asset.Referencer));
 			if (ReferencedAssets)
 			{
-				OutputReferencedAssets(FileAr, 0, Id, Asset.Referencer, ReferencedAssets);
+				OutputReferencedAssets(FileAr, 0, Id, Asset.Referencer, &ObjectPtrDecay(*ReferencedAssets));
 			}
 		}
 	}
@@ -671,7 +672,7 @@ namespace ReferenceInfoUtils
 		IgnorePackages.Add(GetTransientPackage());
 
 		// Bug?  At this point IgnorePackages often has a handful of null entries, which, completely throws off the filtering process
-		IgnorePackages.Remove(NULL);
+		IgnorePackages.Remove(nullptr);
 
 		// Generate reference info
 

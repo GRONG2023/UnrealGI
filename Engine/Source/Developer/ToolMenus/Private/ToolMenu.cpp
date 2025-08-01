@@ -10,18 +10,21 @@
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Internationalization/Internationalization.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ToolMenu)
+
 UToolMenu::UToolMenu() :
 	MenuType(EMultiBoxType::Menu)
+	, bShouldCleanupContextOnDestroy(true)
 	, bShouldCloseWindowAfterMenuSelection(true)
 	, bCloseSelfOnly(false)
-	, bSearchable(false)
+	, bSearchable(true)
 	, bToolBarIsFocusable(false)
 	, bToolBarForceSmallIcons(false)
 	, bRegistered(false)
 	, bIsRegistering(false)
 	, bExtendersEnabled(true)
 	, StyleSet(&FCoreStyle::Get())
-	, MaxHeight(INT_MAX)
+	, MaxHeight(1000.f)
 {
 }
 
@@ -31,6 +34,41 @@ void UToolMenu::InitMenu(const FToolMenuOwner InOwner, FName InName, FName InPar
 	MenuName = InName;
 	MenuParent = InParent;
 	MenuType = InType;
+}
+
+FReply UToolMenu::OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)
+{
+	for (int32 i = 0; i < Sections.Num(); ++i)
+	{
+		for (FToolMenuEntry& Entry : Sections[i].Blocks)
+		{
+			if (Entry.Type == EMultiBlockType::ToolBarButton
+				&& Entry.IsCommandKeybindOnly())
+			{
+				if (Entry.CommandAcceptsInput(InKeyEvent))
+				{
+					if (Entry.TryExecuteToolUIAction(Context))
+					{
+						return FReply::Handled();
+					}
+				}
+			}
+		}
+	}
+	return FReply::Unhandled();
+}
+
+const ISlateStyle* UToolMenu::GetStyleSet() const
+{
+	return StyleSet;
+}
+
+void UToolMenu::SetStyleSet(const ISlateStyle* InStyleSet)
+{
+	if (InStyleSet && InStyleSet != StyleSet)
+	{
+		StyleSet = InStyleSet;
+	}
 }
 
 void UToolMenu::InitGeneratedCopy(const UToolMenu* Source, const FName InMenuName, const FToolMenuContext* InContext)
@@ -167,7 +205,7 @@ FToolMenuSection& UToolMenu::AddSection(const FName SectionName, const TAttribut
 					FToolMenuSection RemovedSection;
 					Swap(Sections[InsertIndex], RemovedSection);
 					Sections.Insert(MoveTempIfPossible(RemovedSection), i);
-					Sections.RemoveAt(InsertIndex + 1, 1, false);
+					Sections.RemoveAt(InsertIndex + 1, 1, EAllowShrinking::No);
 					InsertIndex = i;
 				}
 			}
@@ -224,6 +262,11 @@ void UToolMenu::AddDynamicSectionScript(const FName SectionName, UToolMenuSectio
 void UToolMenu::AddMenuEntryObject(UToolMenuEntryScript* InObject)
 {
 	FindOrAddSection(InObject->Data.Section).AddEntryObject(InObject);
+
+	if (MenuType == EMultiBoxType::MenuBar || MenuType == EMultiBoxType::ToolBar)
+	{
+		UToolMenus::Get()->RefreshAllWidgets();
+	}
 }
 
 UToolMenu* UToolMenu::AddSubMenuScript(const FName InOwner, const FName SectionName, const FName InName, const FText& InLabel, const FText& InToolTip)
@@ -263,6 +306,19 @@ FToolMenuSection& UToolMenu::FindOrAddSection(const FName SectionName)
 	}
 	
 	return AddSection(SectionName);
+}
+
+FToolMenuSection& UToolMenu::FindOrAddSection(
+	const FName SectionName,
+	const TAttribute<FText>& InLabel,
+	const FToolMenuInsert InPosition)
+{
+	if (FToolMenuSection* FoundSection = FindSection(SectionName))
+	{
+		return *FoundSection;
+	}
+
+	return AddSection(SectionName, InLabel, InPosition);
 }
 
 void UToolMenu::RemoveSection(const FName SectionName)
@@ -440,6 +496,38 @@ FCustomizedToolMenuHierarchy UToolMenu::GetMenuCustomizationHierarchy() const
 	return Result;
 }
 
+FToolMenuProfile* UToolMenu::FindMenuProfile(const FName& ProfileName) const
+{
+	return UToolMenus::Get()->FindMenuProfile(MenuName, ProfileName);
+}
+
+FToolMenuProfile* UToolMenu::AddMenuProfile(const FName& ProfileName) const
+{
+	return UToolMenus::Get()->AddMenuProfile(MenuName, ProfileName);
+}
+
+FToolMenuProfileHierarchy UToolMenu::GetMenuProfileHierarchy(const FName& ProfileName) const
+{
+	FToolMenuProfileHierarchy Result;
+	
+	UToolMenus* ToolMenus = UToolMenus::Get();
+	TArray<FName> HierarchyNames = GetMenuHierarchyNames(true);
+	for (const FName& ItName : HierarchyNames)
+	{
+		if (FToolMenuProfile* Found = ToolMenus->FindMenuProfile(ItName, ProfileName))
+		{
+			Result.ProfileHierarchy.Add(Found);
+		}
+
+		if (FToolMenuProfile* FoundRuntime = ToolMenus->FindRuntimeMenuProfile(ItName, ProfileName))
+		{
+			Result.RuntimeProfileHierarchy.Add(FoundRuntime);
+		}
+	}
+
+	return Result;
+}
+
 void UToolMenu::UpdateMenuCustomizationFromMultibox(const TSharedRef<const FMultiBox>& InMultiBox)
 {
 	FCustomizedToolMenu* Customization = AddMenuCustomization();
@@ -475,6 +563,16 @@ void UToolMenu::UpdateMenuCustomizationFromMultibox(const TSharedRef<const FMult
 			EntryOrderForSection.Names.Add(Block->GetExtensionHook());
 		}
 	}
+}
+
+void UToolMenu::OnMenuDestroyed()
+{
+	if (bShouldCleanupContextOnDestroy && !SubMenuParent)
+	{
+		Context.CleanupObjects();
+	}
+
+	//Empty();
 }
 
 TArray<const UToolMenu*> UToolMenu::GetSubMenuChain() const
@@ -530,3 +628,4 @@ void UToolMenu::Empty()
 	SubMenuParent = nullptr;
 	ModifyBlockWidgetAfterMake.Unbind();
 }
+

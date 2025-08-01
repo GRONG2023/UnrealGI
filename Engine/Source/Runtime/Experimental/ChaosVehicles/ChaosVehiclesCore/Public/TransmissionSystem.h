@@ -2,11 +2,13 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Math/UnrealMathSSE.h"
 #include "VehicleSystemTemplate.h"
 #include "VehicleUtility.h"
 
 #if VEHICLE_DEBUGGING_ENABLED
-PRAGMA_DISABLE_OPTIMIZATION
+UE_DISABLE_OPTIMIZATION
 #endif
 
 /**
@@ -23,6 +25,36 @@ namespace Chaos
 	{
 		Manual,
 		Automatic
+	};
+
+	enum EDifferentialType : uint8
+	{
+		UndefinedDrive,
+		AllWheelDrive,
+		FrontWheelDrive,
+		RearWheelDrive,
+	};
+
+	struct CHAOSVEHICLESCORE_API FSimpleDifferentialConfig
+	{
+		FSimpleDifferentialConfig()
+			: DifferentialType(EDifferentialType::RearWheelDrive)
+			, FrontRearSplit(0.5f)
+		{
+		}
+
+		EDifferentialType DifferentialType;
+		float FrontRearSplit;
+	};
+
+	class CHAOSVEHICLESCORE_API FSimpleDifferentialSim : public TVehicleSystem<FSimpleDifferentialConfig>
+	{
+	public:
+		FSimpleDifferentialSim(const FSimpleDifferentialConfig* SetupIn) 
+			: TVehicleSystem<FSimpleDifferentialConfig>(SetupIn)
+			, FrontRearSplit(Setup().FrontRearSplit) {}
+
+		float FrontRearSplit;
 	};
 
 	struct CHAOSVEHICLESCORE_API FSimpleTransmissionConfig
@@ -49,6 +81,7 @@ namespace Chaos
 		float TransmissionEfficiency;	// Loss from friction in the system mean we might run at around 0.94 Efficiency
 
 		ETransmissionType TransmissionType;	// Specify Automatic or Manual transmission
+
 		bool AutoReverse;					// Arcade handling - holding Brake switches into reverse after vehicle has stopped
 	};
 
@@ -69,7 +102,7 @@ namespace Chaos
 		/** set the target gear to one higher than current target, will clamp gear index within rage */
 		void ChangeUp()
 		{
-			SetGear(TargetGear + 1);
+			SetGear(TargetGear + 1);		
 		}
 
 		/** set the target gear to one lower than current target, will clamp gear index within rage */
@@ -104,6 +137,30 @@ namespace Chaos
 			return TargetGear;
 		}
 
+		/** Get the current gear change time */
+		float GetCurrentGearChangeTime() const
+		{
+			return CurrentGearChangeTime;
+		}
+
+		/** Set the current gear index, (reverse gears < 0, neutral 0, forward gears > 0) */
+		void SetCurrentGear(const int32 InCurrentGear) 
+		{
+			CurrentGear = InCurrentGear;
+		}
+
+		/** Set the target gear index, (reverse gears < 0, neutral 0, forward gears > 0) */
+		void SetTargetGear(const int32 InTargetGear) 
+		{
+			TargetGear = InTargetGear;
+		}
+
+		/** Set the current gear change time */
+		void SetCurrentGearChangeTime(const float InCurrentGearChangeTime) 
+		{
+			CurrentGearChangeTime = InCurrentGearChangeTime;
+		}
+
 		/** Are we currently in the middle of a gear change */
 		bool IsCurrentlyChangingGear() const
 		{
@@ -121,6 +178,11 @@ namespace Chaos
 		/** Get the transmission RPM, from the specified engine RPM and gear selection */
 		float GetTransmissionRPM(float InEngineRPM, int InGear)
 		{
+			if (InGear == 0) // neutral, don't want to divide by zero
+			{
+				return 0.0f;
+			}
+
 			return InEngineRPM / GetGearRatio(InGear);
 		}
 
@@ -154,13 +216,13 @@ namespace Chaos
 		 * - implements gear change time, where gear goes through neutral
 		 */
 		void Simulate(float DeltaTime);
-
-
-	private:
+	
 		void CorrectGearInputRange(int32& GearIndexInOut)
 		{
 			GearIndexInOut = FMath::Clamp(GearIndexInOut, -Setup().ReverseRatios.Num(), Setup().ForwardRatios.Num());
 		}
+
+	private:
 
 		int32 CurrentGear; // <0 reverse gear(s), 0 neutral, >0 forward gears
 		int32 TargetGear;  // <0 reverse gear(s), 0 neutral, >0 forward gears
@@ -175,6 +237,6 @@ namespace Chaos
 } // namespace Chaos
 
 #if VEHICLE_DEBUGGING_ENABLED
-PRAGMA_ENABLE_OPTIMIZATION
+UE_ENABLE_OPTIMIZATION
 #endif
 

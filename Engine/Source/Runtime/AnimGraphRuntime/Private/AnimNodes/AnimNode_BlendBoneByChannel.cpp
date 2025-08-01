@@ -4,6 +4,9 @@
 #include "AnimationRuntime.h"
 #include "Animation/AnimInstanceProxy.h"
 #include "Animation/AnimTrace.h"
+#include "Animation/AnimStats.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNode_BlendBoneByChannel)
 
 /////////////////////////////////////////////////////
 // FAnimNode_BlendBoneByChannel
@@ -60,6 +63,8 @@ void FAnimNode_BlendBoneByChannel::Update_AnyThread(const FAnimationUpdateContex
 void FAnimNode_BlendBoneByChannel::Evaluate_AnyThread(FPoseContext& Output)
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_ANIMNODE(Evaluate_AnyThread)
+	ANIM_MT_SCOPE_CYCLE_COUNTER_VERBOSE(BlendBoneByChannel, !IsInGameThread());
+
 	A.Evaluate(Output);
 
 	if (bBIsRelevant)
@@ -186,3 +191,4 @@ void FAnimNode_BlendBoneByChannel::GatherDebugData(FNodeDebugData& DebugData)
 	A.GatherDebugData(DebugData.BranchFlow(1.f));
 	B.GatherDebugData(DebugData.BranchFlow(InternalBlendAlpha));
 }
+

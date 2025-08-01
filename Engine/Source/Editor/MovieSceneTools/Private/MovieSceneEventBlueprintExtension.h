@@ -2,14 +2,18 @@
 
 #pragma once
 
-#include "Containers/Array.h"
 #include "Blueprint/BlueprintExtension.h"
+#include "Containers/Array.h"
+#include "HAL/PlatformCrt.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
 #include "MovieSceneEventBlueprintExtension.generated.h"
 
-class UBlueprint;
 class FKismetCompilerContext;
+class UBlueprint;
 class UMovieSceneEventSectionBase;
+class UObject;
 
 UCLASS()
 class UMovieSceneEventBlueprintExtension : public UBlueprintExtension
@@ -18,7 +22,7 @@ public:
 
 	GENERATED_BODY()
 
-	void Add(UMovieSceneEventSectionBase* EventSection)
+	void Add(TWeakObjectPtr<UMovieSceneEventSectionBase> EventSection)
 	{
 		EventSections.AddUnique(EventSection);
 	}
@@ -31,5 +35,5 @@ private:
 
 	/** List of event sections that are bound to the blueprint */
 	UPROPERTY()
-	TArray<UMovieSceneEventSectionBase*> EventSections;
+	TArray<TWeakObjectPtr<UMovieSceneEventSectionBase>> EventSections;
 };

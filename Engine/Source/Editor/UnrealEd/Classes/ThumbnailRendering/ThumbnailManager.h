@@ -10,6 +10,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Delegates/Delegate.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/Object.h"
 #include "Templates/SubclassOf.h"
@@ -17,12 +18,13 @@
 #include "ThumbnailManager.generated.h"
 
 class FViewport;
+class FAssetThumbnailPool;
 
 /**
  * Types of primitives for drawing thumbnails of resources.
  */
 UENUM()
-enum EThumbnailPrimType
+enum EThumbnailPrimType : int
 {
 	TPT_None,
 	TPT_Sphere,
@@ -67,7 +69,7 @@ struct FThumbnailRenderingInfo
 	 * The instance of the renderer class
 	 */
 	UPROPERTY()
-	class UThumbnailRenderer* Renderer;
+	TObjectPtr<class UThumbnailRenderer> Renderer;
 
 public:
 	FThumbnailRenderingInfo()
@@ -78,36 +80,12 @@ public:
 
 };
 
+DECLARE_EVENT_OneParam(UThumbnailManager, FOnThumbnailDirtied, const FSoftObjectPath&);
+
 UCLASS(config=Editor)
 class UThumbnailManager : public UObject
 {
 	GENERATED_UCLASS_BODY()
-
-protected:
-	/**
-	 * The array of thumbnail rendering information entries. Each type that supports
-	 * thumbnail rendering has an entry in here.
-	 */
-	UPROPERTY(config)
-	TArray<struct FThumbnailRenderingInfo> RenderableThumbnailTypes;
-
-	/**
-	 * Determines whether the initialization function is needed or not
-	 */
-	bool bIsInitialized;
-
-	// The following members are present for performance optimizations
-	
-	/**
-	 * Whether to update the map or not (GC usually causes this)
-	 */
-	bool bMapNeedsUpdate;
-
-	/**
-	 * This holds a map of object type to render info entries
-	 */
-	TMap<UClass*, FThumbnailRenderingInfo*> RenderInfoMap;
-
 public:
 	/**
 	 * The render info to share across all object types when the object doesn't
@@ -118,28 +96,28 @@ public:
 
 	// All these meshes/materials/textures are preloaded via default properties
 	UPROPERTY(Transient)
-	class UStaticMesh* EditorCube;
+	TObjectPtr<class UStaticMesh> EditorCube;
 
 	UPROPERTY(Transient)
-	class UStaticMesh* EditorSphere;
+	TObjectPtr<class UStaticMesh> EditorSphere;
 
 	UPROPERTY(Transient)
-	class UStaticMesh* EditorCylinder;
+	TObjectPtr<class UStaticMesh> EditorCylinder;
 
 	UPROPERTY(Transient)
-	class UStaticMesh* EditorPlane;
+	TObjectPtr<class UStaticMesh> EditorPlane;
 
 	UPROPERTY(Transient)
-	class UStaticMesh* EditorSkySphere;
+	TObjectPtr<class UStaticMesh> EditorSkySphere;
 
 	UPROPERTY(Transient)
-	class UMaterial* FloorPlaneMaterial;
+	TObjectPtr<class UMaterial> FloorPlaneMaterial;
 
 	UPROPERTY(Transient)
-	class UTextureCube* AmbientCubemap;
+	TObjectPtr<class UTextureCube> AmbientCubemap;
 
 	UPROPERTY(Transient)
-	class UTexture2D* CheckerboardTexture;
+	TObjectPtr<class UTexture2D> CheckerboardTexture;
 
 public:
 	//~ Begin UObject Interface
@@ -175,11 +153,31 @@ public:
 	 */
 	UNREALED_API virtual void UnregisterCustomRenderer(UClass* Class);
 
+	/** 
+	 * Returns the thumbnail pool which should be used for most thumbnails in the editor.
+	 */
+	TSharedPtr<FAssetThumbnailPool> GetSharedThumbnailPool() const { return SharedThumbnailPool; }
 
-
-
+	/**
+	 * Event that is being broadcasted when a thumbnail gets dirtied.
+	 * Parameter is the object soft object path associated with the thumbnail.
+	 */
+	FOnThumbnailDirtied& GetOnThumbnailDirtied() { return OnThumbnailDirtied; }
 
 protected:
+	/**
+	 * The array of thumbnail rendering information entries. Each type that supports
+	 * thumbnail rendering has an entry in here.
+	 */
+	UPROPERTY(config)
+	TArray<struct FThumbnailRenderingInfo> RenderableThumbnailTypes;
+
+	/**
+	 * This holds a map of object type to render info entries
+	 */
+	TMap<UClass*, FThumbnailRenderingInfo*> RenderInfoMap;
+
+
 	/**
 	 * Holds the name of the thumbnail manager singleton class to instantiate
 	 */
@@ -191,9 +189,29 @@ protected:
 	 */
 	static class UThumbnailManager* ThumbnailManagerSingleton;
 
+	/** Thumbnail pool used for most thumbnails in the editor */
+	TSharedPtr<FAssetThumbnailPool> SharedThumbnailPool;
+
+	/**
+	 * Determines whether the initialization function is needed or not
+	 */
+	bool bIsInitialized;
+
+	// The following members are present for performance optimizations
+
+	/**
+	 * Whether to update the map or not (GC usually causes this)
+	 */
+	bool bMapNeedsUpdate;
+
+	FOnThumbnailDirtied OnThumbnailDirtied;
+
 public:
 	/** Returns the thumbnail manager and creates it if missing */
 	UNREALED_API static UThumbnailManager& Get();
+
+	/** Returns the thumbnail manager if it exists */
+	UNREALED_API static UThumbnailManager* TryGet();
 
 	/** Writes out a png of what is currently in the specified viewport, scaled appropriately */
 	UNREALED_API static bool CaptureProjectThumbnail(FViewport* Viewport, const FString& OutputFilename, bool bUseSCCIfPossible);
@@ -207,6 +225,15 @@ protected:
 private:
 	/** Initialize the checkerboard texture for texture thumbnails */
 	void SetupCheckerboardTexture();
+
+	/** Handler for when an object is edited. Used to dirty its thumbnail. */
+	void OnObjectPropertyChanged(UObject* Asset, FPropertyChangedEvent& PropertyChangedEvent);
+
+	/** Handler for when an actor is moved in a level. Used to update world asset thumbnails. */
+	void OnActorPostEditMove(AActor* Actor);
+
+	/** Handler to dirty cached thumbnails in packages to make sure they are re-rendered later */
+	void DirtyThumbnailForObject(UObject* ObjectBeingModified);
 };
 
 

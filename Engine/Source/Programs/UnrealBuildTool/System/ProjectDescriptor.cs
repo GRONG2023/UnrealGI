@@ -2,10 +2,10 @@
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 using System.IO;
-using Tools.DotNETCommon;
+using System.Linq;
+using System.Text.Json;
+using EpicGames.Core;
 
 namespace UnrealBuildTool
 {
@@ -35,9 +35,9 @@ namespace UnrealBuildTool
 		ProjectPluginUnification = 3,
 
 		/// <summary>
-        /// This needs to be the last line, so we can calculate the value of Latest below
+		/// This needs to be the last line, so we can calculate the value of Latest below
 		/// </summary>
-        LatestPlusOne,
+		LatestPlusOne,
 
 		/// <summary>
 		/// The latest plugin descriptor version
@@ -58,27 +58,27 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// The engine to open this project with.
 		/// </summary>
-		public string EngineAssociation;
+		public string? EngineAssociation;
 
 		/// <summary>
 		/// Category to show under the project browser
 		/// </summary>
-		public string Category;
+		public string? Category;
 
 		/// <summary>
 		/// Description to show in the project browser
 		/// </summary>
-		public string Description;
+		public string? Description;
 
 		/// <summary>
 		/// List of all modules associated with this project
 		/// </summary>
-		public ModuleDescriptor[] Modules;
+		public ModuleDescriptor[]? Modules;
 
 		/// <summary>
 		/// List of plugins for this project (may be enabled/disabled)
 		/// </summary>
-		public PluginReferenceDescriptor[] Plugins;
+		public PluginReferenceDescriptor[]? Plugins;
 
 		/// <summary>
 		/// Array of additional root directories
@@ -93,7 +93,7 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// Array of platforms that this project is targeting
 		/// </summary>
-		public string[] TargetPlatforms;
+		public string[]? TargetPlatforms;
 
 		/// <summary>
 		/// A hash that is used to determine if the project was forked from a sample
@@ -101,14 +101,19 @@ namespace UnrealBuildTool
 		public uint EpicSampleNameHash;
 
 		/// <summary>
-		/// Steps to execute before building targets in this project
+		/// Steps to execute before creating rules assemblies in this project
 		/// </summary>
-		public CustomBuildSteps PreBuildSteps;
+		public CustomBuildSteps? InitSteps;
 
 		/// <summary>
 		/// Steps to execute before building targets in this project
 		/// </summary>
-		public CustomBuildSteps PostBuildSteps;
+		public CustomBuildSteps? PreBuildSteps;
+
+		/// <summary>
+		/// Steps to execute before building targets in this project
+		/// </summary>
+		public CustomBuildSteps? PostBuildSteps;
 
 		/// <summary>
 		/// Indicates if this project is an Enterprise project
@@ -135,7 +140,8 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="RawObject">Raw JSON object to parse</param>
 		/// <param name="BaseDir">Base directory for resolving relative paths</param>
-		public ProjectDescriptor(JsonObject RawObject, DirectoryReference BaseDir)
+		/// <param name="JsonFilePath"></param>
+		public ProjectDescriptor(JsonObject RawObject, DirectoryReference BaseDir, FileReference JsonFilePath)
 		{
 			// Read the version
 			if (!RawObject.TryGetIntegerField("FileVersion", out FileVersion))
@@ -160,28 +166,28 @@ namespace UnrealBuildTool
 			RawObject.TryGetBoolField("DisableEnginePluginsByDefault", out DisableEnginePluginsByDefault);
 
 			// Read the modules
-			JsonObject[] ModulesArray;
+			JsonObject[]? ModulesArray;
 			if (RawObject.TryGetObjectArrayField("Modules", out ModulesArray))
 			{
-				Modules = Array.ConvertAll(ModulesArray, x => ModuleDescriptor.FromJsonObject(x));
+				Modules = Array.ConvertAll(ModulesArray, x => ModuleDescriptor.FromJsonObject(x, JsonFilePath));
 			}
 
 			// Read the plugins
-			JsonObject[] PluginsArray;
+			JsonObject[]? PluginsArray;
 			if (RawObject.TryGetObjectArrayField("Plugins", out PluginsArray))
 			{
 				Plugins = Array.ConvertAll(PluginsArray, x => PluginReferenceDescriptor.FromJsonObject(x));
 			}
 
 			// Read the additional root directories
-			string[] RootDirectoryStrings;
+			string[]? RootDirectoryStrings;
 			if (RawObject.TryGetStringArrayField("AdditionalRootDirectories", out RootDirectoryStrings))
 			{
 				AdditionalRootDirectories.AddRange(RootDirectoryStrings.Select(x => DirectoryReference.Combine(BaseDir, x)));
 			}
 
 			// Read the additional plugin directories
-			string[] PluginDirectoryStrings;
+			string[]? PluginDirectoryStrings;
 			if (RawObject.TryGetStringArrayField("AdditionalPluginDirectories", out PluginDirectoryStrings))
 			{
 				AdditionalPluginDirectories.AddRange(PluginDirectoryStrings.Select(x => DirectoryReference.Combine(BaseDir, x)));
@@ -193,7 +199,8 @@ namespace UnrealBuildTool
 			// Get the sample name hash
 			RawObject.TryGetUnsignedIntegerField("EpicSampleNameHash", out EpicSampleNameHash);
 
-			// Read the pre and post-build steps
+			// Read the init, pre and post-build steps
+			CustomBuildSteps.TryRead(RawObject, "InitSteps", out InitSteps);
 			CustomBuildSteps.TryRead(RawObject, "PreBuildSteps", out PreBuildSteps);
 			CustomBuildSteps.TryRead(RawObject, "PostBuildSteps", out PostBuildSteps);
 		}
@@ -208,8 +215,8 @@ namespace UnrealBuildTool
 			JsonObject RawObject = JsonObject.Read(FileName);
 			try
 			{
-				ProjectDescriptor Descriptor = new ProjectDescriptor(RawObject, FileName.Directory);
-				if(Descriptor.Modules != null)
+				ProjectDescriptor Descriptor = new ProjectDescriptor(RawObject, FileName.Directory, FileName);
+				if (Descriptor.Modules != null)
 				{
 					foreach (ModuleDescriptor Module in Descriptor.Modules)
 					{
@@ -218,9 +225,9 @@ namespace UnrealBuildTool
 				}
 				return Descriptor;
 			}
-			catch (JsonParseException ParseException)
+			catch (JsonException ex)
 			{
-				throw new JsonParseException("{0} (in {1})", ParseException.Message, FileName);
+				throw new JsonException($"{ex.Message} (in {FileName})", ex.Source ?? FileName.FullName, ex.LineNumber, ex.BytePositionInLine, ex);
 			}
 		}
 
@@ -262,7 +269,7 @@ namespace UnrealBuildTool
 			Writer.WriteValue("EngineAssociation", EngineAssociation);
 			Writer.WriteValue("Category", Category);
 			Writer.WriteValue("Description", Description);
-			
+
 			if (DisableEnginePluginsByDefault)
 			{
 				Writer.WriteValue("DisableEnginePluginsByDefault", DisableEnginePluginsByDefault);
@@ -281,35 +288,39 @@ namespace UnrealBuildTool
 			PluginReferenceDescriptor.WriteArray(Writer, "Plugins", Plugins);
 
 			// Write the custom module roots
-			if(AdditionalRootDirectories.Count > 0)
+			if (AdditionalRootDirectories.Count > 0)
 			{
 				Writer.WriteStringArrayField("AdditionalRootDirectories", AdditionalRootDirectories.Select(x => x.MakeRelativeTo(BaseDir).Replace(Path.DirectorySeparatorChar, '/')));
 			}
 
 			// Write out the additional plugin directories to scan
-			if(AdditionalPluginDirectories.Count > 0)
+			if (AdditionalPluginDirectories.Count > 0)
 			{
 				Writer.WriteStringArrayField("AdditionalPluginDirectories", AdditionalPluginDirectories.Select(x => x.MakeRelativeTo(BaseDir).Replace(Path.DirectorySeparatorChar, '/')));
 			}
 
 			// Write the target platforms
-			if(TargetPlatforms != null && TargetPlatforms.Length > 0)
+			if (TargetPlatforms != null && TargetPlatforms.Length > 0)
 			{
 				Writer.WriteStringArrayField("TargetPlatforms", TargetPlatforms);
 			}
 
 			// If it's a signed sample, write the name hash
-			if(EpicSampleNameHash != 0)
+			if (EpicSampleNameHash != 0)
 			{
 				Writer.WriteValue("EpicSampleNameHash", (uint)EpicSampleNameHash);
 			}
 
 			// Write the custom build steps
-			if(PreBuildSteps != null)
+			if (InitSteps != null)
+			{
+				InitSteps.Write(Writer, "InitSteps");
+			}
+			if (PreBuildSteps != null)
 			{
 				PreBuildSteps.Write(Writer, "PreBuildSteps");
 			}
-			if(PostBuildSteps != null)
+			if (PostBuildSteps != null)
 			{
 				PostBuildSteps.Write(Writer, "PostBuildSteps");
 			}

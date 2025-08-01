@@ -3,6 +3,8 @@
 #include "EnvironmentQuery/Items/EnvQueryItemType_Direction.h"
 #include "EnvironmentQuery/EnvQueryTypes.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(EnvQueryItemType_Direction)
+
 UEnvQueryItemType_Direction::UEnvQueryItemType_Direction(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
 	ValueSize = sizeof(FVector);
@@ -63,6 +65,8 @@ void UEnvQueryItemType_Direction::SetContextHelper(FEnvQueryContextData& Context
 	ContextData.NumValues = MultipleDirections.Num();
 	ContextData.RawData.SetNumUninitialized(sizeof(FVector) * MultipleDirections.Num());
 
+	checkf(ContextData.RawData.Num() == sizeof(FVector) * MultipleDirections.Num(), TEXT("Failed to allocate the appropriate amount of memory"));
+
 	uint8* RawData = (uint8*)ContextData.RawData.GetData();
 	for (int32 DirectionIndex = 0; DirectionIndex < MultipleDirections.Num(); DirectionIndex++)
 	{
@@ -77,6 +81,8 @@ void UEnvQueryItemType_Direction::SetContextHelper(FEnvQueryContextData& Context
 	ContextData.NumValues = MultipleRotations.Num();
 	ContextData.RawData.SetNumUninitialized(sizeof(FVector) * MultipleRotations.Num());
 
+	checkf(ContextData.RawData.Num() == sizeof(FVector) * MultipleRotations.Num(), TEXT("Failed to allocate the appropriate amount of memory"));
+
 	uint8* RawData = (uint8*)ContextData.RawData.GetData();
 	for (int32 RotationIndex = 0; RotationIndex < MultipleRotations.Num(); RotationIndex++)
 	{
@@ -84,3 +90,4 @@ void UEnvQueryItemType_Direction::SetContextHelper(FEnvQueryContextData& Context
 		RawData += sizeof(FVector);
 	}
 }
+

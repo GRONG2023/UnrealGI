@@ -2,15 +2,33 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
 #include "CoreMinimal.h"
+#include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
-#include "Layout/ArrangedWidget.h"
-#include "Widgets/SWidget.h"
-#include "SGraphPin.h"
-#include "GraphSplineOverlapResult.h"
 #include "GraphEditorSettings.h"
+#include "GraphSplineOverlapResult.h"
+#include "HAL/Platform.h"
+#include "Layout/ArrangedWidget.h"
+#include "Logging/LogMacros.h"
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
+#include "SGraphPin.h"
+#include "Templates/SharedPointer.h"
+#include "Widgets/SWidget.h"
 
+class FArrangedChildren;
+class FArrangedWidget;
+class FSlateRect;
 class FSlateWindowElementList;
+class SGraphPin;
+class SWidget;
+class UGraphEditorSettings;
+struct FGeometry;
+struct FSlateBrush;
+template <class T> class FInterpCurve;
 
 /////////////////////////////////////////////////////
 
@@ -50,6 +68,9 @@ struct GRAPHEDITOR_API FConnectionParams
 	EEdGraphPinDirection StartDirection;
 	EEdGraphPinDirection EndDirection;
 
+	FVector2D StartTangent;
+	FVector2D EndTangent;
+
 	FConnectionParams()
 		: WireColor(FLinearColor::White)
 		, AssociatedPin1(nullptr)
@@ -60,6 +81,8 @@ struct GRAPHEDITOR_API FConnectionParams
 		, bUserFlag2(false)
 		, StartDirection(EGPD_Output)
 		, EndDirection(EGPD_Input)
+		, StartTangent(FVector2D::ZeroVector)
+		, EndTangent(FVector2D::ZeroVector)
 	{
 	}
 };
@@ -86,6 +109,13 @@ public:
 
 	FGraphSplineOverlapResult SplineOverlapResult;
 
+	/** Handle for a currently relinked connection. */
+	struct FRelinkConnection
+	{
+		UEdGraphPin* SourcePin;
+		UEdGraphPin* TargetPin;
+	};
+
 protected:
 	float ZoomFactor; 
 	float HoverDeemphasisDarkFraction;
@@ -96,9 +126,15 @@ protected:
 	TMap<TSharedRef<SWidget>, FArrangedWidget>* PinGeometries;
 	double LastHoverTimeEvent;
 	FVector2D LocalMousePosition;
+
+	/** List of currently relinked connections. */
+	TArray<FRelinkConnection> RelinkConnections;
+
+	/** Selected nodes in the graph panel. */
+	TArray<UEdGraphNode*> SelectedGraphNodes;
 public:
 	virtual ~FConnectionDrawingPolicy() {}
-
+	
 	FConnectionDrawingPolicy(int32 InBackLayerID, int32 InFrontLayerID, float InZoomFactor, const FSlateRect& InClippingRect, FSlateWindowElementList& InDrawElements);
 
 	// Update the drawing policy with the set of hovered pins (which can be empty)
@@ -108,6 +144,12 @@ public:
 
 	// Update the drawing policy with the marked pin (which may not be valid)
 	void SetMarkedPin(TWeakPtr<SGraphPin> InMarkedPin);
+
+	// Set the selected nodes from the graph panel.
+	void SetSelectedNodes(const TArray<UEdGraphNode*>& InSelectedNodes) { SelectedGraphNodes = InSelectedNodes; }
+
+	// Set the list of currently relinked connections.
+	void SetRelinkConnections(const TArray<FRelinkConnection>& Connections) { RelinkConnections = Connections; }
 
 	static float MakeSplineReparamTable(const FVector2D& P0, const FVector2D& P0Tangent, const FVector2D& P1, const FVector2D& P1Tangent, FInterpCurve<float>& OutReparamTable);
 
@@ -133,6 +175,9 @@ public:
 		/*out*/ FArrangedWidget*& EndWidgetGeometry
 		);
 
+	// Choose whether we want to cache the pins draw state to avoid resetting it for every tick 
+	virtual bool UseDrawStateCaching() const { return false; }
+	
 	virtual void SetIncompatiblePinDrawState(const TSharedPtr<SGraphPin>& StartPin, const TSet< TSharedRef<SWidget> >& VisiblePins);
 	virtual void ResetIncompatiblePinDrawState(const TSet< TSharedRef<SWidget> >& VisiblePins);
 
@@ -140,6 +185,8 @@ public:
 
 	virtual bool IsConnectionCulled( const FArrangedWidget& StartLink, const FArrangedWidget& EndLink ) const;
 
+	virtual TSharedPtr<IToolTip> GetConnectionToolTip(const SGraphPanel& GraphPanel, const FGraphSplineOverlapResult& OverlapData) const;
+	
 protected:
 	// Helper function used by Draw(). Called before DrawPinGeometries to populate PinToPinWidgetMap
 	virtual void BuildPinToPinWidgetMap(TMap<TSharedRef<SWidget>, FArrangedWidget>& InPinGeometries);

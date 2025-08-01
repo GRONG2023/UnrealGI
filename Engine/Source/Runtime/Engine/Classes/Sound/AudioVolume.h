@@ -26,10 +26,10 @@ class USoundSubmix;
 UENUM(BlueprintType)
 enum class EAudioVolumeLocationState : uint8
 {
-	// A send based on linear interpolation between a distance range and send-level range
+	// Used for when the listener is located inside the Audio Volume
 	InsideTheVolume,
 
-	// A send based on a supplied curve
+	// Used for when the listener is located outside the Audio Volume
 	OutsideTheVolume,
 };
 
@@ -46,7 +46,7 @@ struct FAudioVolumeSubmixSendSettings
 	UPROPERTY()
 	EAudioVolumeLocationState SourceLocationState_DEPRECATED = EAudioVolumeLocationState::InsideTheVolume;
 
-	// Submix send array for sounds that are outside the audio volume when the listener is inside the volume
+	// Submix send array for sounds that are in the ListenerLocationState at the same time as the listener
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AudioVolumeSubmixSends)
 	TArray<FSoundSubmixSendInfo> SubmixSends;
 };
@@ -58,11 +58,11 @@ struct FAudioVolumeSubmixOverrideSettings
 
 	// The submix to override the effect chain of
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AudioVolumeSubmixSends)
-	USoundSubmix* Submix = nullptr;
+	TObjectPtr<USoundSubmix> Submix = nullptr;
 
-	// The submix effect chain to overrideac
+	// The submix effect chain to override
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = SoundSubmix)
-	TArray<USoundEffectSubmixPreset*> SubmixEffectChain;
+	TArray<TObjectPtr<USoundEffectSubmixPreset>> SubmixEffectChain;
 
 	// The amount of time to crossfade to the override for the submix chain
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = SoundSubmix)
@@ -88,7 +88,7 @@ struct FInteriorSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=InteriorSettings)
 	float ExteriorTime;
 
-	// The desired LPF frequency cutoff in hertz of sounds inside the volume when the player is outside the volume
+	// The desired LPF frequency cutoff in hertz of sounds outside the volume when the player is inside the volume
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = InteriorSettings)
 	float ExteriorLPF;
 
@@ -100,25 +100,25 @@ struct FInteriorSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=InteriorSettings)
 	float InteriorVolume;
 
-	// The time over which to interpolate from the current volume to the desired volume of sounds inside the volume when the player enters the volume
+	// The time over which to interpolate from the current volume to the desired volume of sounds inside the volume when the player exits the volume
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=InteriorSettings)
 	float InteriorTime;
 
-	// The desired LPF frequency cutoff in hertz of sounds outside the volume when the player is inside the volume
+	// The desired LPF frequency cutoff in hertz of sounds inside the volume when the player is outside the volume
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = InteriorSettings)
 	float InteriorLPF;
 
-	// The time over which to interpolate from the current LPF to the desired LPF of sounds inside the volume when the player enters the volume
+	// The time over which to interpolate from the current LPF to the desired LPF of sounds inside the volume when the player exits the volume
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=InteriorSettings)
 	float InteriorLPFTime;
 
-	FInteriorSettings();
+	ENGINE_API FInteriorSettings();
 
-	bool operator==(const FInteriorSettings& Other) const;
-	bool operator!=(const FInteriorSettings& Other) const;
+	ENGINE_API bool operator==(const FInteriorSettings& Other) const;
+	ENGINE_API bool operator!=(const FInteriorSettings& Other) const;
 
 #if WITH_EDITORONLY_DATA
-	void PostSerialize(const FArchive& Ar);
+	ENGINE_API void PostSerialize(const FArchive& Ar);
 #endif
 };
 
@@ -135,40 +135,33 @@ struct TStructOpsTypeTraits<FInteriorSettings> : public TStructOpsTypeTraitsBase
 
 struct FAudioVolumeProxy
 {
-	FAudioVolumeProxy()
-		: AudioVolumeID(0)
-		, WorldID(0)
-		, Priority(0.f)
-		, BodyInstance(nullptr)
-	{
-	}
-
 	FAudioVolumeProxy(const AAudioVolume* AudioVolume);
 
-	uint32 AudioVolumeID;
-	uint32 WorldID;
-	float Priority;
+	uint32 AudioVolumeID = 0;
+	uint32 WorldID = 0;
+	float Priority = 0.0f;
 	FReverbSettings ReverbSettings;
 	FInteriorSettings InteriorSettings;
 	TArray<FAudioVolumeSubmixSendSettings> SubmixSendSettings;
 	TArray<FAudioVolumeSubmixOverrideSettings> SubmixOverrideSettings;
-	FBodyInstance* BodyInstance; // This is scary
+	FBodyInstance* BodyInstance = nullptr;
+	bool bChanged = false;
 };
 
-UCLASS(hidecategories=(Advanced, Attachment, Collision, Volume))
-class ENGINE_API AAudioVolume : public AVolume
+UCLASS(hidecategories=(Advanced, Attachment, Collision, Volume), MinimalAPI)
+class AAudioVolume : public AVolume
 {
 	GENERATED_UCLASS_BODY()
 
 private:
 	/**
-	 * Priority of this volume. In the case of overlapping volumes the one with the highest priority
+	 * Priority of this volume. In the case of overlapping volumes, the one with the highest priority
 	 * is chosen. The order is undefined if two or more overlapping volumes have the same priority.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=AudioVolume, meta=(AllowPrivateAccess="true"))
 	float Priority;
 
-	/** whether this volume is currently enabled and able to affect sounds */
+	/** Whether this volume is currently enabled and able to affect sounds */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, ReplicatedUsing=OnRep_bEnabled, Category=AudioVolume, meta=(AllowPrivateAccess="true"))
 	uint32 bEnabled:1;
 
@@ -176,7 +169,7 @@ private:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Reverb, meta=(AllowPrivateAccess="true"))
 	FReverbSettings Settings;
 
-	/** Interior settings used for this volume */
+	/** Impacts sounds that have "Apply Ambient Volumes" set to true in their Sound Class, based on whether the sound sources and the player are inside or outside the audio volume */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=AmbientZone, meta=(AllowPrivateAccess="true"))
 	FInteriorSettings AmbientZoneSettings;
 
@@ -193,55 +186,55 @@ public:
 	float GetPriority() const { return Priority; }
 	
 	UFUNCTION(BlueprintCallable, Category=AudioVolume)
-	void SetPriority(float NewPriority);
+	ENGINE_API void SetPriority(float NewPriority);
 
 	bool GetEnabled() const { return bEnabled; }
 	
 	UFUNCTION(BlueprintCallable, Category=AudioVolume)
-	void SetEnabled(bool bNewEnabled);
+	ENGINE_API void SetEnabled(bool bNewEnabled);
 
 	const FReverbSettings& GetReverbSettings() const { return Settings; }
 	
 	UFUNCTION(BlueprintCallable, Category=AudioVolume)
-	void SetReverbSettings(const FReverbSettings& NewReverbSettings);
+	ENGINE_API void SetReverbSettings(const FReverbSettings& NewReverbSettings);
 
 	const FInteriorSettings& GetInteriorSettings() const { return AmbientZoneSettings; }
 
 	UFUNCTION(BlueprintCallable, Category=AudioVolume)
-	void SetInteriorSettings(const FInteriorSettings& NewInteriorSettings);
+	ENGINE_API void SetInteriorSettings(const FInteriorSettings& NewInteriorSettings);
 
 	const TArray<FAudioVolumeSubmixSendSettings>& GetSubmixSendSettings() const { return SubmixSendSettings; }
 
 	UFUNCTION(BlueprintCallable, Category = AudioVolume)
-	void SetSubmixSendSettings(const TArray<FAudioVolumeSubmixSendSettings>& NewSubmixSendSettings);
+	ENGINE_API void SetSubmixSendSettings(const TArray<FAudioVolumeSubmixSendSettings>& NewSubmixSendSettings);
 
 	const TArray<FAudioVolumeSubmixOverrideSettings>& GetSubmixOverrideSettings() const { return SubmixOverrideSettings; }
 
 	UFUNCTION(BlueprintCallable, Category = AudioVolume)
-	void SetSubmixOverrideSettings(const TArray<FAudioVolumeSubmixOverrideSettings>& NewSubmixOverrideSettings);
+	ENGINE_API void SetSubmixOverrideSettings(const TArray<FAudioVolumeSubmixOverrideSettings>& NewSubmixOverrideSettings);
 
 private:
 
 	UFUNCTION()
-	virtual void OnRep_bEnabled();
+	ENGINE_API virtual void OnRep_bEnabled();
 
-	void TransformUpdated(USceneComponent* RootComponent, EUpdateTransformFlags UpdateTransformFlags, ETeleportType Teleport);
+	ENGINE_API void TransformUpdated(USceneComponent* RootComponent, EUpdateTransformFlags UpdateTransformFlags, ETeleportType Teleport);
 
-	void AddProxy() const;
-	void RemoveProxy() const;
-	void UpdateProxy() const;
+	ENGINE_API void AddProxy() const;
+	ENGINE_API void RemoveProxy() const;
+	ENGINE_API void UpdateProxy() const;
 
 public:
 
 	//~ Begin UObject Interface
 #if WITH_EDITOR
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	ENGINE_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif // WITH_EDITOR
-	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+	ENGINE_API virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	//~ End UObject Interface
 
 	//~ Begin AActor Interface
-	virtual void PostUnregisterAllComponents() override;
-	virtual void PostRegisterAllComponents() override;
+	ENGINE_API virtual void PostUnregisterAllComponents() override;
+	ENGINE_API virtual void PostRegisterAllComponents() override;
 	//~ End AActor Interface
 };

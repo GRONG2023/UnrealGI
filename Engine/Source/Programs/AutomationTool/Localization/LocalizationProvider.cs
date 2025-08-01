@@ -4,7 +4,12 @@ using System.Collections.Generic;
 using System.IO;
 using AutomationTool;
 using UnrealBuildTool;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using System.Threading.Tasks;
+using System.Reflection;
+using Microsoft.Extensions.Logging;
+
+using static AutomationTool.CommandUtils;
 
 namespace EpicGames.Localization
 {
@@ -93,6 +98,19 @@ namespace EpicGames.Localization
 			ExportInfo = InExportInfo;
 		}
 
+		public List<string> GetConfigFilesToRun(List<string> RequestedLocalizationStepNames)
+		{
+			List<string> ConfigFiles = new();
+			foreach (var LocalizationStep in LocalizationSteps)
+			{
+				if (RequestedLocalizationStepNames.Contains(LocalizationStep.Name))
+				{
+					ConfigFiles.Add(LocalizationStep.LocalizationConfigFile);
+				}
+			}
+			return ConfigFiles;
+		}
+
 		/** The name of this project */
 		public string ProjectName { get; private set; }
 
@@ -133,14 +151,19 @@ namespace EpicGames.Localization
 			throw new AutomationException("Unimplemented GetLocalizationProviderId.");
 		}
 
-		public virtual void DownloadProjectFromLocalizationProvider(string ProjectName, ProjectImportExportInfo ProjectImportInfo)
+		public async virtual Task InitializeProjectWithLocalizationProvider(string ProjectName, ProjectImportExportInfo ProjectImportInfo)
 		{
-			throw new AutomationException("Unimplemented DownloadProjectFromLocalizationProvider.");
+			await Task.CompletedTask;
 		}
 
-		public virtual void UploadProjectToLocalizationProvider(string ProjectName, ProjectImportExportInfo ProjectExportInfo)
+		public async virtual Task DownloadProjectFromLocalizationProvider(string ProjectName, ProjectImportExportInfo ProjectImportInfo)
 		{
-			throw new AutomationException("Unimplemented UploadProjectToLocalizationProvider.");
+			await Task.FromException(new NotImplementedException());
+		}
+
+		public async virtual Task UploadProjectToLocalizationProvider(string ProjectName, ProjectImportExportInfo ProjectExportInfo)
+		{
+			await Task.FromException(new NotImplementedException());
 		}
 
 		public static LocalizationProvider GetLocalizationProvider(string InLocalizationProviderId, LocalizationProvider.LocalizationProviderArgs InLocalizationProviderArgs)
@@ -154,8 +177,7 @@ namespace EpicGames.Localization
 			{
 				// Find all types that derive from LocalizationProvider in any of our DLLs
 				CachedLocalizationProviderTypes = new Dictionary<string, Type>();
-				var LoadedAssemblies = AppDomain.CurrentDomain.GetAssemblies();
-				foreach (var Dll in LoadedAssemblies)
+				foreach (Assembly Dll in ScriptManager.AllScriptAssemblies)
 				{
 					var AllTypes = Dll.GetTypes();
 					foreach (var PotentialLocalizationNodeType in AllTypes)
@@ -173,12 +195,12 @@ namespace EpicGames.Localization
 								}
 								catch
 								{
-									BuildCommand.LogWarning("Type '{0}' threw when calling its StaticGetLocalizationProviderId method.", PotentialLocalizationNodeType.FullName);
+									Logger.LogWarning("Type '{Name}' threw when calling its StaticGetLocalizationProviderId method.", PotentialLocalizationNodeType.FullName);
 								}
 							}
 							else
 							{
-								BuildCommand.LogWarning("Type '{0}' derives from LocalizationProvider but is missing its StaticGetLocalizationProviderId method.", PotentialLocalizationNodeType.FullName);
+								Logger.LogWarning("Type '{Name}' derives from LocalizationProvider but is missing its StaticGetLocalizationProviderId method.", PotentialLocalizationNodeType.FullName);
 							}
 						}
 					}
@@ -195,12 +217,12 @@ namespace EpicGames.Localization
 				}
 				catch (Exception e)
 				{
-					BuildCommand.LogWarning("Unable to create an instance of the type '{0}'. {1}", LocalizationNodeType.FullName, e.ToString());
+					Logger.LogWarning(e, "Unable to create an instance of the type '{Type}'. {Message}", LocalizationNodeType.FullName, e.ToString());
 				}
 			}
 			else
 			{
-				BuildCommand.LogWarning("Could not find a localization provider for '{0}'", InLocalizationProviderId);
+				Logger.LogWarning("Could not find a localization provider for '{Id}'", InLocalizationProviderId);
 			}
 
 			return null;

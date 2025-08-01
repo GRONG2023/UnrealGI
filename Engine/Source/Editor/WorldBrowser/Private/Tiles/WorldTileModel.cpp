@@ -4,9 +4,11 @@
 #include "Engine/World.h"
 #include "HAL/FileManager.h"
 #include "UObject/Package.h"
+#include "DragAndDrop/LevelDragDropOp.h"
 #include "Engine/LevelBounds.h"
 #include "Engine/LevelStreamingDynamic.h"
 #include "Editor.h"
+#include "Editor/Transactor.h"
 #include "ScopedTransaction.h"
 #include "EditorLevelUtils.h"
 #include "LevelCollectionModel.h"
@@ -21,6 +23,7 @@
 #include "LandscapeFileFormatInterface.h"
 #include "LandscapeStreamingProxy.h"
 #include "Landscape.h"
+#include "Modules/ModuleManager.h"
 
 
 #define LOCTEXT_NAMESPACE "WorldBrowser"
@@ -69,7 +72,7 @@ FWorldTileModel::FWorldTileModel(FWorldTileCollectionModel& InWorldModel, int32 
 		{
 			// Find the world object
 			UWorld* World = UWorld::FindWorldInPackage(LevelPackage);
-			if (World)
+			if (IsValid(World))
 			{
 				LoadedLevel = World->PersistentLevel;
 				// Enable tile properties
@@ -103,7 +106,7 @@ FWorldTileModel::~FWorldTileModel()
 		TileDetails->HideInTileViewChangedEvent.RemoveAll(this);
 				
 		TileDetails->RemoveFromRoot();
-		TileDetails->MarkPendingKill();
+		TileDetails->MarkAsGarbage();
 	}
 
 	if (LoadedLevel.IsValid())
@@ -349,7 +352,7 @@ bool FWorldTileModel::CanReimportHeightmap() const
 		const FString TargetExtension = FPaths::GetExtension(GetLandscape()->ReimportHeightmapFilePath, true);
 		const ILandscapeHeightmapFileFormat* HeightmapFormat = LandscapeEditorModule.GetHeightmapFormatByExtension(*TargetExtension);
 
-		FLandscapeHeightmapInfo HeightmapInfo = HeightmapFormat->Validate(*GetLandscape()->ReimportHeightmapFilePath);
+		FLandscapeFileInfo HeightmapInfo = HeightmapFormat->Validate(*GetLandscape()->ReimportHeightmapFilePath, NAME_None);
 		if (HeightmapInfo.ResultCode != ELandscapeImportResult::Error)
 		{
 			FIntRect ComponentsRect = GetLandscape()->GetBoundingRect();
@@ -977,7 +980,7 @@ bool FWorldTileModel::CreateAdjacentLandscapeProxy(ALandscapeProxy* SourceLandsc
 	if (AdjacentLandscape)
 	{
 		// Copy source landscape properties 
-		AdjacentLandscape->GetSharedProperties(SourceLandscape);
+		AdjacentLandscape->CopySharedProperties(SourceLandscape);
 		
 		// Refresh level model bounding box
 		FBox AdjacentLandscapeBounds = AdjacentLandscape->GetComponentsBoundingBox(true);

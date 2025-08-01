@@ -11,18 +11,40 @@
 #include "ScopedTransaction.h"
 #include "Tools/SequencerSnapField.h"
 #include "Channels/MovieSceneChannelHandle.h"
+#include "MVVM/Extensions/IDraggableTrackAreaExtension.h"
 
 
 class FSequencer;
 class FSlateWindowElementList;
-class FVirtualTrackArea;
 class USequencerSettings;
+
+namespace UE
+{
+namespace Sequencer
+{
+
+class IDraggableTrackAreaExtension;
+class FSectionModel;
+class FTrackModel;
+class FVirtualTrackArea;
+
+} // namespace Sequencer
+} // namespace UE
+
+
+
+enum class ESequencerMoveOperationType
+{
+	MoveKeys     = 1<<0,
+	MoveSections = 1<<1,
+};
+ENUM_CLASS_FLAGS(ESequencerMoveOperationType)
 
 /**
  * Abstract base class for drag operations that handle an operation for an edit tool.
  */
 class FEditToolDragOperation
-	: public ISequencerEditToolDragOperation
+	: public UE::Sequencer::ISequencerEditToolDragOperation
 {
 public:
 
@@ -39,10 +61,15 @@ public:
 protected:
 
 	/** begin a new scoped transaction for this drag */
-	void BeginTransaction( TArray< TWeakObjectPtr<UMovieSceneSection> >& Sections, const FText& TransactionDesc );
+	void BeginTransaction( TSet<UMovieSceneSection*>& Sections, const FText& TransactionDesc );
 
 	/** End an existing scoped transaction if one exists */
 	void EndTransaction();
+
+	virtual void GetSections(TArray<UMovieSceneSection*>& OutSections) {}
+
+	/** Get the bounds within which the specified section can be resized based on its surrounding sections */
+	TRange<FFrameNumber> GetSectionBoundaries(const UMovieSceneSection* Section);
 
 protected:
 
@@ -66,21 +93,21 @@ class FResizeSection
 public:
 
 	/** Create and initialize a new instance. */
-	FResizeSection( FSequencer& InSequencer, const TSet<TWeakObjectPtr<UMovieSceneSection>>& Sections, bool bInDraggingByEnd, bool bIsSlipping );
+	FResizeSection( FSequencer& InSequencer, bool bInDraggingByEnd, bool bIsSlipping );
 
 public:
 
 	// FEditToolDragOperation interface
 
-	virtual void OnBeginDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const FVirtualTrackArea& VirtualTrackArea) override;
-	virtual void OnDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const FVirtualTrackArea& VirtualTrackArea) override;
-	virtual void OnEndDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const FVirtualTrackArea& VirtualTrackArea) override;
+	virtual void OnBeginDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const UE::Sequencer::FVirtualTrackArea& VirtualTrackArea) override;
+	virtual void OnDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const UE::Sequencer::FVirtualTrackArea& VirtualTrackArea) override;
+	virtual void OnEndDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const UE::Sequencer::FVirtualTrackArea& VirtualTrackArea) override;
 	virtual FCursorReply GetCursor() const override { return FCursorReply::Cursor( EMouseCursor::ResizeLeftRight ); }
 
 private:
 
 	/** The sections we are interacting with */
-	TArray<TWeakObjectPtr<UMovieSceneSection>> Sections;
+	TSet<UMovieSceneSection*> Sections;
 
 	/********************************************************/
 	struct FPreDragChannelData
@@ -122,6 +149,9 @@ private:
 
 	/** Optional snap field to use when dragging */
 	TOptional<FSequencerSnapField> SnapField;
+
+protected:
+	void GetSections(TArray<UMovieSceneSection*>& OutSections) override { OutSections = Sections.Array(); }
 };
 
 /**
@@ -129,28 +159,33 @@ private:
  */
 class FMoveKeysAndSections
 	: public FEditToolDragOperation
+	, public UE::Sequencer::IDragOperation
 {
 public:
-	FMoveKeysAndSections(FSequencer& InSequencer, const TSet<FSequencerSelectedKey>& InSelectedKeys, const TSet<TWeakObjectPtr<UMovieSceneSection>>& InSelectedSections, bool InbHotspotWasSection);
+
+	FMoveKeysAndSections(FSequencer& InSequencer, ESequencerMoveOperationType InMoveType);
 
 	// FEditToolDragOperation interface
-	virtual void OnBeginDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const FVirtualTrackArea& VirtualTrackArea) override;
-	virtual void OnDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const FVirtualTrackArea& VirtualTrackArea) override;
-	virtual void OnEndDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const FVirtualTrackArea& VirtualTrackArea) override;
+	virtual void OnBeginDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const UE::Sequencer::FVirtualTrackArea& VirtualTrackArea) override;
+	virtual void OnDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const UE::Sequencer::FVirtualTrackArea& VirtualTrackArea) override;
+	virtual void OnEndDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const UE::Sequencer::FVirtualTrackArea& VirtualTrackArea) override;
 	virtual FCursorReply GetCursor() const override { return FCursorReply::Cursor(EMouseCursor::CardinalCross); }
 	// ~FEditToolDragOperation interface
+
+	/* UE::Sequencer:IDragOperation Interface */
+	virtual void AddSnapTime(FFrameNumber SnapTime) override;
+	virtual void AddModel(TSharedPtr<UE::Sequencer::FViewModel> Model) override;
 
 protected:
 	/** Calculate the possible horizontal movement we can, constrained by sections running into things. */
 	TOptional<FFrameNumber> GetMovementDeltaX(FFrameTime MouseTime);
 
-	/** Get the bounds within which the specified section can move based on its surrounding sections */
-	TRange<FFrameNumber> GetSectionBoundaries(const UMovieSceneSection* Section);
-
 	/** Move selected sections, if any. */
 	bool HandleSectionMovement(FFrameTime MouseTime, FVector2D VirtualMousePos, FVector2D LocalMousePos, TOptional<FFrameNumber> MaxDeltaX, FFrameNumber DesiredDeltaX);
 	/** Move selected keys, if any. */
 	void HandleKeyMovement(TOptional<FFrameNumber> MaxDeltaX, FFrameNumber DesiredDeltaX);
+	/** Move selected marked frames, if any. */
+	void HandleMarkedFrameMovement(TOptional<FFrameNumber> MaxDeltaX, FFrameNumber DesiredDeltaX);
 
 	void OnSequencerNodeTreeUpdated();
 
@@ -158,12 +193,18 @@ protected:
 	void ModifyNonSelectedSections();
 
 protected:
+	/** Array of models that we're moving. */
+	TSet<TWeakPtr<UE::Sequencer::IDraggableTrackAreaExtension>> DraggedItems;
+
 	/** Array of sections that we're moving. */
-	TArray<TWeakObjectPtr<UMovieSceneSection>> Sections;
+	TSet<UMovieSceneSection*> Sections;
 
 	/** Set of keys that are being moved. */
 	TSet<FSequencerSelectedKey> Keys;
 	TArray<FSequencerSelectedKey> KeysAsArray;
+
+	/** Set of marked frames that are being moved. */
+	TSet<int32> MarkedFrames;
 
 	/** What was the time of the mouse for the previous frame? Used to calculate a per-frame delta. */
 	FFrameTime MouseTimePrev;
@@ -171,28 +212,8 @@ protected:
 	/** The position of the mouse when the last section move occurred */
 	TOptional<float> PrevMousePosY;
 
-	struct FRelativeOffset
-	{
-		FRelativeOffset()
-			: StartOffset()
-			, EndOffset()
-		{
-		}
-
-		/**
-		 * The offset for the start of the section. Can be unset in the case of a section with no lower bound.
-		 * Keys are represented only by StartOffset and do not have an End Offset (which would imply a range).
-		 */
-		TOptional<FFrameTime> StartOffset;
-
-		/**
-		 * The offset for the end of the section. Can be unset in the case of a section with no upper bound.
-		 */
-		TOptional<FFrameTime> EndOffset;
-	};
-
 	/** Array of relative offsets for each selected item. Keys + Sections are both added to this array. */
-	TArray<FRelativeOffset> RelativeOffsets;
+	TArray<FFrameNumber> RelativeSnapOffsets;
 
 	struct FInitialRowIndex
 	{
@@ -204,16 +225,19 @@ protected:
 	TArray<FInitialRowIndex> InitialSectionRowIndicies;
 
 	/** Array of sections that we called Modify on because we're editing keys that belong to these sections, but not actually moving these sections. */
-	TArray<UMovieSceneSection*> ModifiedNonSelectedSections;
+	TArray<TWeakObjectPtr<UMovieSceneSection> > ModifiedNonSelectedSections;
 
 	/** Optional snap field to use when dragging */
 	TOptional<FSequencerSnapField> SnapField;
 
 	/** If we expanded a parent track while dragging, track it here so we can re-collapse it if not dropping on it. */
-	TSharedPtr<FSequencerTrackNode> ExpandedParentTrack;
+	TWeakPtr<UE::Sequencer::FTrackModel> ExpandedParentTrack;
 
 	/** If the user is moving them via clicking on the Section then we'll allow vertical re-arranging, otherwise not. */
-	bool bHotspotWasSection;
+	bool bAllowVerticalMovement;
+
+protected:
+	void GetSections(TArray<UMovieSceneSection*>& OutSections) override { OutSections = Sections.Array(); }
 };
 
 /**
@@ -223,14 +247,14 @@ class FDuplicateKeysAndSections : public FMoveKeysAndSections
 {
 public:
 
-	FDuplicateKeysAndSections( FSequencer& InSequencer, const TSet<FSequencerSelectedKey>& InSelectedKeys, const TSet<TWeakObjectPtr<UMovieSceneSection>>& InSelectedSections, bool InbHotspotWasSection)
-		: FMoveKeysAndSections(InSequencer, InSelectedKeys, InSelectedSections, InbHotspotWasSection)
+	FDuplicateKeysAndSections( FSequencer& InSequencer, ESequencerMoveOperationType Type)
+		: FMoveKeysAndSections(InSequencer, Type)
 	{}
 
 public:
 
-	virtual void OnBeginDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const FVirtualTrackArea& VirtualTrackArea) override;
-	virtual void OnEndDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const FVirtualTrackArea& VirtualTrackArea) override;
+	virtual void OnBeginDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const UE::Sequencer::FVirtualTrackArea& VirtualTrackArea) override;
+	virtual void OnEndDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const UE::Sequencer::FVirtualTrackArea& VirtualTrackArea) override;
 };
 
 /**
@@ -248,9 +272,9 @@ public:
 
 	// FEditToolDragOperation interface
 
-	virtual void OnBeginDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const FVirtualTrackArea& VirtualTrackArea) override;
-	virtual void OnDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const FVirtualTrackArea& VirtualTrackArea) override;
-	virtual void OnEndDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const FVirtualTrackArea& VirtualTrackArea) override;
+	virtual void OnBeginDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const UE::Sequencer::FVirtualTrackArea& VirtualTrackArea) override;
+	virtual void OnDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const UE::Sequencer::FVirtualTrackArea& VirtualTrackArea) override;
+	virtual void OnEndDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const UE::Sequencer::FVirtualTrackArea& VirtualTrackArea) override;
 	virtual FCursorReply GetCursor() const override { return FCursorReply::Cursor( EMouseCursor::ResizeLeftRight ); }
 
 private:

@@ -71,6 +71,8 @@ public:
 
 	virtual bool IsUsingHighPrecisionMouseMode() const override { return bUsingHighPrecisionMouseInput; }
 
+	virtual bool IsGamepadAttached() const override;
+	
 	virtual FModifierKeysState GetModifierKeys() const override;
 
 	virtual FPlatformRect GetWorkArea( const FPlatformRect& CurrentWindow ) const override;
@@ -213,6 +215,9 @@ private:
 	/** Gets the location from a given touch event. */
 	FVector2D GetTouchEventLocation(SDL_HWindow NativeWindow, SDL_Event TouchEvent);
 
+	/** Searches for a free touch index. */
+	int GetFirstFreeTouchId();
+
 public:
 	virtual IInputInterface* GetInputInterface() override
 	{
@@ -245,6 +250,9 @@ private:
 	/** Holds currently active touches (i.e. fingers pressed but not released) */
 	TMap<uint64, FTouchContext> Touches;
 
+	/** Maps touch indexes to SDL touch IDs. */
+	TArray<TOptional<uint64>> TouchIds;
+
 	struct SDLControllerState
 	{
 		/** SDL controller */
@@ -253,8 +261,8 @@ private:
 		/** Tracks whether the "button" was previously pressed so we don't generate extra events */
 		bool AnalogOverThreshold[10];
 
-		/** The player index of the controller, because the joystick index includes devices that are not controllers. */
-		int32 ControllerIndex;
+		/** The input device Id of the controller that can be used to find the matching ULocalPlayer */
+		FInputDeviceId DeviceId;
 
 		/** Store axis values from events here to be handled once per frame. */
 		TMap<FGamepadKeyNames::Type, float> AxisEvents;
@@ -270,7 +278,7 @@ private:
 
 		SDLControllerState()
 			:	Controller(nullptr)
-			,	ControllerIndex(-1)
+			,	DeviceId(INPUTDEVICEID_NONE)
 			,	Haptic(nullptr)
 			,	EffectId(-1)
 			,	bEffectRunning(false)
@@ -308,6 +316,9 @@ private:
 
 	/** TODO: describe */
 	bool bIsMouseCaptureEnabled;
+
+	/** True after every SDL_WINDOWEVENT_HIT_TEST until a following SDL_WINDOWEVENT_MOVED */
+	bool bFirstFrameOfWindowMove = false;
 
 	/** Window that we think has been activated last. */
 	TSharedPtr< FLinuxWindow > CurrentlyActiveWindow;

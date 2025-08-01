@@ -10,7 +10,8 @@ namespace UnrealBuildTool.Rules
 				new string[]
 				{
 					"Core",
-					"CoreUObject"
+					"CoreUObject",
+					"AutomationTest",
 				}
 			); 
 			
@@ -18,7 +19,7 @@ namespace UnrealBuildTool.Rules
 				new string[]
 				{
                     "AssetRegistry",
-                    "AutomationMessages",
+					"AutomationMessages",
 					"UnrealEdMessages",
                     "MessageLog",
                     "Json",
@@ -33,22 +34,17 @@ namespace UnrealBuildTool.Rules
             {
                 PrivateDependencyModuleNames.AddRange(
                     new string[] {
+						"EditorFramework",
                         "UnrealEd",
                         "Engine", // Needed for UWorld/GWorld to find current level
 				    }
                 );
             }
 
-            PrivateIncludePathModuleNames.AddRange(
+			PrivateIncludePathModuleNames.AddRange(
 				new string[]
 				{
-					"MessagingCommon",
-				}
-			);
-
-			PrivateIncludePaths.AddRange(
-				new string[]
-				{
+					"MessagingCommon"
 				}
 			);
 

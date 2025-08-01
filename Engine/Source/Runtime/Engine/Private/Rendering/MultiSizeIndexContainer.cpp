@@ -1,13 +1,25 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Rendering/MultiSizeIndexContainer.h"
+#include "Rendering/RenderCommandPipes.h"
 #include "EngineLogs.h"
+#include "RawIndexBuffer.h"
+#include "Stats/Stats.h"
 
 FMultiSizeIndexContainer::~FMultiSizeIndexContainer()
 {
 	if (IndexBuffer)
 	{
 		delete IndexBuffer;
+	}
+}
+
+void FMultiSizeIndexContainer::SetOwnerName(const FName& OwnerName)
+{
+	check(IsInGameThread());
+	if (IndexBuffer)
+	{
+		IndexBuffer->SetOwnerName(OwnerName);
 	}
 }
 
@@ -19,7 +31,7 @@ void FMultiSizeIndexContainer::InitResources()
 	check(IsInGameThread());
 	if (IndexBuffer)
 	{
-		BeginInitResource(IndexBuffer);
+		BeginInitResource(IndexBuffer, &UE::RenderCommandPipe::SkeletalMesh);
 	}
 }
 
@@ -31,7 +43,7 @@ void FMultiSizeIndexContainer::ReleaseResources()
 	check(IsInGameThread());
 	if (IndexBuffer)
 	{
-		BeginReleaseResource(IndexBuffer);
+		BeginReleaseResource(IndexBuffer, &UE::RenderCommandPipe::SkeletalMesh);
 	}
 }
 
@@ -141,7 +153,7 @@ void FMultiSizeIndexContainer::CopyIndexBuffer(const TArray<uint32>& NewArray)
 void FMultiSizeIndexContainer::Serialize(FArchive& Ar, bool bNeedsCPUAccess)
 {
 	DECLARE_SCOPE_CYCLE_COUNTER(TEXT("FMultiSizeIndexContainer::Serialize"), STAT_MultiSizeIndexContainer_Serialize, STATGROUP_LoadTime);
-	if (Ar.UE4Ver() < VER_UE4_KEEP_SKEL_MESH_INDEX_DATA)
+	if (Ar.UEVer() < VER_UE4_KEEP_SKEL_MESH_INDEX_DATA)
 	{
 		bool bOldNeedsCPUAccess = true;
 		Ar << bOldNeedsCPUAccess;
@@ -182,36 +194,62 @@ void FMultiSizeIndexContainer::SerializeMetaData(FArchive& Ar, bool bNeedsCPUAcc
 	IndexBuffer->SerializeMetaData(Ar);
 }
 
-FIndexBufferRHIRef FMultiSizeIndexContainer::CreateRHIBuffer_RenderThread()
+FBufferRHIRef FMultiSizeIndexContainer::CreateRHIBuffer(FRHICommandListBase& RHICmdList)
 {
 	if (IndexBuffer)
 	{
 		if (DataTypeSize == sizeof(uint16))
 		{
-			return static_cast<FRawStaticIndexBuffer16or32<uint16>*>(IndexBuffer)->CreateRHIBuffer_RenderThread();
+			return static_cast<FRawStaticIndexBuffer16or32<uint16>*>(IndexBuffer)->CreateRHIBuffer(RHICmdList);
 		}
 		else
 		{
-			return static_cast<FRawStaticIndexBuffer16or32<uint32>*>(IndexBuffer)->CreateRHIBuffer_RenderThread();
+			return static_cast<FRawStaticIndexBuffer16or32<uint32>*>(IndexBuffer)->CreateRHIBuffer(RHICmdList);
 		}
 	}
 	return nullptr;
 }
 
-FIndexBufferRHIRef FMultiSizeIndexContainer::CreateRHIBuffer_Async()
+FBufferRHIRef FMultiSizeIndexContainer::CreateRHIBuffer_RenderThread()
+{
+	return CreateRHIBuffer(FRHICommandListImmediate::Get());
+}
+
+FBufferRHIRef FMultiSizeIndexContainer::CreateRHIBuffer_Async()
+{
+	FRHIAsyncCommandList RHICmdList;
+	return CreateRHIBuffer(*RHICmdList);
+}
+
+void FMultiSizeIndexContainer::InitRHIForStreaming(FRHIBuffer* IntermediateBuffer, FRHIResourceUpdateBatcher& Batcher)
+{
+	check(!((uint32)!!IntermediateBuffer ^ (uint32)!!IndexBuffer));
+	if (IntermediateBuffer)
+	{
+		if (DataTypeSize == sizeof(uint16))
+		{
+			static_cast<FRawStaticIndexBuffer16or32<uint16>*>(IndexBuffer)->InitRHIForStreaming(IntermediateBuffer, Batcher);
+		}
+		else
+		{
+			static_cast<FRawStaticIndexBuffer16or32<uint32>*>(IndexBuffer)->InitRHIForStreaming(IntermediateBuffer, Batcher);
+		}
+	}
+}
+
+void FMultiSizeIndexContainer::ReleaseRHIForStreaming(FRHIResourceUpdateBatcher& Batcher)
 {
 	if (IndexBuffer)
 	{
 		if (DataTypeSize == sizeof(uint16))
 		{
-			return static_cast<FRawStaticIndexBuffer16or32<uint16>*>(IndexBuffer)->CreateRHIBuffer_Async();
+			static_cast<FRawStaticIndexBuffer16or32<uint16>*>(IndexBuffer)->ReleaseRHIForStreaming(Batcher);
 		}
 		else
 		{
-			return static_cast<FRawStaticIndexBuffer16or32<uint32>*>(IndexBuffer)->CreateRHIBuffer_Async();
+			static_cast<FRawStaticIndexBuffer16or32<uint32>*>(IndexBuffer)->ReleaseRHIForStreaming(Batcher);
 		}
 	}
-	return nullptr;
 }
 
 #if WITH_EDITOR

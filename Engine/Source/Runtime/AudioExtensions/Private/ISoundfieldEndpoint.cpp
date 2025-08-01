@@ -2,6 +2,10 @@
 
 #include "ISoundfieldEndpoint.h"
 
+#include "AudioExtentionsModule.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ISoundfieldEndpoint)
+
 ISoundfieldEndpoint::ISoundfieldEndpoint(int32 NumRenderCallbacksToBuffer)
 {
 	NumRenderCallbacksToBuffer = FMath::Max(NumRenderCallbacksToBuffer, 2);
@@ -116,8 +120,9 @@ ISoundfieldEndpointFactory* ISoundfieldEndpointFactory::Get(const FName& InName)
 	{
 		return nullptr;
 	}
-
+	IModularFeatures::Get().LockModularFeatureList();
 	TArray<ISoundfieldEndpointFactory*> Factories = IModularFeatures::Get().GetModularFeatureImplementations<ISoundfieldEndpointFactory>(GetModularFeatureName());
+	IModularFeatures::Get().UnlockModularFeatureList();
 
 	for (ISoundfieldEndpointFactory* Factory : Factories)
 	{
@@ -133,17 +138,29 @@ ISoundfieldEndpointFactory* ISoundfieldEndpointFactory::Get(const FName& InName)
 
 TArray<FName> ISoundfieldEndpointFactory::GetAllSoundfieldEndpointTypes()
 {
+	// Ensure the module is loaded. This will cause any platform extension modules to load and register. 
+	ensure(FAudioExtensionsModule::Get() != nullptr);
+	
 	TArray<FName> SoundfieldFormatNames;
 
 	SoundfieldFormatNames.Add(DefaultSoundfieldEndpointName());
 
+	IModularFeatures::Get().LockModularFeatureList();
 	TArray<ISoundfieldEndpointFactory*> Factories = IModularFeatures::Get().GetModularFeatureImplementations<ISoundfieldEndpointFactory>(GetModularFeatureName());
+	IModularFeatures::Get().UnlockModularFeatureList();
+
 	for (ISoundfieldEndpointFactory* Factory : Factories)
 	{
 		SoundfieldFormatNames.Add(Factory->GetEndpointTypeName());
 	}
 
 	return SoundfieldFormatNames;
+}
+
+FName ISoundfieldEndpointFactory::DefaultSoundfieldEndpointName()
+{
+	static FName DefaultEndpointName = FName(TEXT("Default Soundfield Endpoint"));
+	return DefaultEndpointName;
 }
 
 TUniquePtr<ISoundfieldDecoderStream> ISoundfieldEndpointFactory::CreateDecoderStream(const FAudioPluginInitializationParams& InitInfo, const ISoundfieldEncodingSettingsProxy& InitialSettings)
@@ -162,3 +179,4 @@ bool ISoundfieldEndpointFactory::CanTranscodeToSoundfieldFormat(FName Destinatio
 {
 	return false;
 }
+

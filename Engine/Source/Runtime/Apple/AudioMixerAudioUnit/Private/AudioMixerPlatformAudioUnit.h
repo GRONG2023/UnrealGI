@@ -20,7 +20,7 @@ namespace Audio
 		~FMixerPlatformAudioUnit();
 		
 		//~ Begin IAudioMixerPlatformInterface
-		virtual EAudioMixerPlatformApi::Type GetPlatformApi() const override { return EAudioMixerPlatformApi::AudioUnit; }
+		virtual FString GetPlatformApi() const override { return TEXT("AudioUnit"); }
 		virtual bool InitializeHardware() override;
 		virtual bool CheckAudioDeviceChange() override;
 		virtual bool TeardownHardware() override;
@@ -35,18 +35,12 @@ namespace Audio
 		virtual bool MoveAudioStreamToNewAudioDevice(const FString& InNewDeviceId) override;
 		virtual FAudioPlatformDeviceInfo GetPlatformDeviceInfo() const override;
 		virtual void SubmitBuffer(const uint8* Buffer) override;
-		virtual FName GetRuntimeFormat(USoundWave* InSoundWave) override;
-		virtual bool HasCompressedAudioInfoClass(USoundWave* InSoundWave) override;
-		virtual ICompressedAudioInfo* CreateCompressedAudioInfo(USoundWave* InSoundWave) override;
 		virtual FString GetDefaultDeviceName() override;
 		virtual FAudioPlatformSettings GetPlatformSettings() const override;
 		virtual int32 GetNumFrames(const int32 InNumReqestedFrames) override;
 		virtual void ResumeContext() override;
 		virtual void SuspendContext() override;
-		
-		/** Whether or not the platform supports realtime decompression. */
-		virtual bool SupportsRealtimeDecompression() const override { return true; }
-		
+			
 		/** Whether or not the platform disables caching of decompressed PCM data (i.e. to save memory on fixed memory platforms) */
 		virtual bool DisablePCMAudioCaching() const override { return true; }
 		
@@ -76,6 +70,8 @@ namespace Audio
 		int32       BytesPerSubmittedBuffer;
 		
 		double GraphSampleRate;
+        
+        bool bSupportsBackgroundAudio;
 		
 		// We may have to grow the circular buffer capacity since Audio Unit callback size is not guaranteed to be constant
 		// Currently, this just zero's-out and reallocates, so it will pop. (We always keep largest capacity)

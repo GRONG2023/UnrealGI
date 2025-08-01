@@ -36,8 +36,7 @@ public:
 	virtual int32 OnPaintSection( FSequencerSectionPainter& Painter ) const override;
 	virtual void BuildSectionContextMenu(FMenuBuilder& MenuBuilder, const FGuid& ObjectBinding) override;
 	virtual FText GetSectionTitle() const override;
-	virtual FText GetSectionToolTip() const override;
-	virtual float GetSectionHeight() const override;
+	virtual float GetSectionHeight(const UE::Sequencer::FViewDensityInfo& ViewDensity) const override;
 	virtual FMargin GetContentPadding() const override;
 	virtual bool IsReadOnly() const override;
 
@@ -46,11 +45,6 @@ public:
 	virtual FText HandleThumbnailTextBlockText() const override;
 	virtual void HandleThumbnailTextBlockTextCommitted(const FText& NewThumbnailName, ETextCommit::Type CommitType) override;
 	virtual UCameraComponent* GetViewCamera() override;
-
-private:
-
-	/** Add shot takes menu */
-	void AddTakesMenu(FMenuBuilder& MenuBuilder);
 
 private:
 

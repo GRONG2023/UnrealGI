@@ -14,6 +14,7 @@
 #include "HAL/PlatformProcess.h"
 #include "Logging/LogMacros.h"
 #include "HAL/FileManager.h"
+#include "HAL/IConsoleManager.h"
 #include "Misc/Parse.h"
 #include "Misc/Paths.h"
 #include "HAL/Runnable.h"
@@ -30,10 +31,30 @@
 #include "Dom/JsonObject.h"
 #include "Misc/FileHelper.h"
 #include "Misc/MessageDialog.h"
+#include "Internationalization/Regex.h"
+
+#if WITH_EDITOR
+#include "PIEPreviewDeviceProfileSelectorModule.h"
+#include "IDesktopPlatform.h"
+#include "DesktopPlatformModule.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Styling/AppStyle.h"
+#endif
+#include "String/ParseLines.h"
 
 #define LOCTEXT_NAMESPACE "FAndroidDeviceDetectionModule" 
 
 DEFINE_LOG_CATEGORY_STATIC(AndroidDeviceDetectionLog, Log, All);
+
+static int32 GAndroidDeviceDetectionPollInterval = 10;
+static FAutoConsoleVariableRef CVarAndroidDeviceDetectionPollInterval(
+	TEXT("Android.DeviceDetectionPollInterval"),
+	GAndroidDeviceDetectionPollInterval,
+	TEXT("The number of seconds between polling for connected Android devices.\n")
+	TEXT("Default: 10"),
+	ECVF_Default
+);
 
 class FAndroidDeviceDetectionRunnable : public FRunnable
 {
@@ -72,8 +93,8 @@ public:
 
 		while (StopTaskCounter.GetValue() == 0)
 		{
-			// query every 10 seconds
-			if (LoopCount++ >= 10 || ForceCheck)
+			// query when we have waited 'GAndroidDeviceDetectionPollInterval' seconds.
+			if (LoopCount++ >= GAndroidDeviceDetectionPollInterval || ForceCheck)
 			{
 				// Make sure we have an ADB path before checking
 				FScopeLock PathLock(ADBPathCheckLock);
@@ -90,12 +111,11 @@ public:
 		return 0;
 	}
 
-	void UpdateADBPath(FString &InADBPath, FString& InGetPropCommand, bool InbGetExtensionsViaSurfaceFlinger, bool InbForLumin)
+	void UpdateADBPath(FString &InADBPath, FString& InGetPropCommand, bool InbGetExtensionsViaSurfaceFlinger)
 	{
 		ADBPath = InADBPath;
 		GetPropCommand = InGetPropCommand;
 		bGetExtensionsViaSurfaceFlinger = InbGetExtensionsViaSurfaceFlinger;
-		bForLumin = InbForLumin;
 
 		HasADBPath = !ADBPath.IsEmpty();
 		// Force a check next time we go around otherwise it can take over 10sec to find devices
@@ -122,7 +142,7 @@ private:
 			OutStdErr = &DefaultError;
 		}
 
-		if (FPaths::FileExists(*ADBPath))
+		if (FPaths::FileExists(ADBPath))
 		{
 			FPlatformProcess::ExecProcess(*ADBPath, *CommandLine, &ReturnCode, OutStdOut, OutStdErr);
 
@@ -278,22 +298,6 @@ private:
 			const FString DeviceState = DeviceString.Mid(TabIndex + 1).TrimStart();
 
 			NewDeviceInfo.bAuthorizedDevice = DeviceState != TEXT("unauthorized");
-			if (bForLumin)
-			{
-				// 'mldb oobestaus' is deprecated. 'mldb ps' gives us similar functionality for checking device readiness to some extent.
-				const FString OobeCommand = FString::Printf(TEXT("-s %s ps"), *NewDeviceInfo.SerialNumber);
-				FString OobeStatus;
-				NewDeviceInfo.bAuthorizedDevice = ExecuteAdbCommand(*OobeCommand, &OobeStatus, nullptr);
-				if (DeviceMap.Contains(NewDeviceInfo.SerialNumber))
-				{
-					if (DeviceMap[NewDeviceInfo.SerialNumber].bAuthorizedDevice != NewDeviceInfo.bAuthorizedDevice)
-					{
-						// if this device is already in the connected list but authorization has changed, remove it.
-						// it will be added in the next query which will allow UI to refresh properly.
-						continue;
-					}
-				}
-			}
 
 			// add it to our list of currently connected devices
 			CurrentlyConnectedDevices.Add(NewDeviceInfo.SerialNumber);
@@ -306,16 +310,15 @@ private:
 				continue;
 			}
 
-			if (!NewDeviceInfo.bAuthorizedDevice && !bForLumin)
+			if (!NewDeviceInfo.bAuthorizedDevice)
 			{
 				//note: AndroidTargetDevice::GetName() does not fetch this value, do not rely on this
 				NewDeviceInfo.DeviceName = TEXT("Unauthorized - enable USB debugging");
 			}
 			else
 			{
-				// grab the Lumin/Android version
-				const FString AndroidVersionCommand = bForLumin ? FString::Printf(TEXT("%s ro.build.id"), *GetPropCommand) :
-					FString::Printf(TEXT("-s %s %s ro.build.version.release"), *NewDeviceInfo.SerialNumber, *GetPropCommand);
+				// grab the Android version
+				const FString AndroidVersionCommand = FString::Printf(TEXT("-s %s %s ro.build.version.release"), *NewDeviceInfo.SerialNumber, *GetPropCommand);
 				if (!ExecuteAdbCommand(*AndroidVersionCommand, &NewDeviceInfo.HumanAndroidVersion, nullptr))
 				{
 					continue;
@@ -411,15 +414,142 @@ private:
 				}
 				NewDeviceInfo.GLESVersion = FCString::Atoi(*GLESVersionString);
 
-				// parse the device model
+				// Find the device model
 				FParse::Value(*DeviceString, TEXT("model:"), NewDeviceInfo.Model);
-				if (NewDeviceInfo.Model.IsEmpty())
+				// find the product model (this must match java's android.os.build.model)
+				FString ModelCommand = FString::Printf(TEXT("-s %s %s ro.product.model"), *NewDeviceInfo.SerialNumber, *GetPropCommand);
+				FString RoProductModel;
+				if( ExecuteAdbCommand(*ModelCommand, &RoProductModel, nullptr) )
 				{
-					FString ModelCommand = FString::Printf(TEXT("-s %s %s ro.product.model"), *NewDeviceInfo.SerialNumber, *GetPropCommand);
-					FString RoProductModel;
-					ExecuteAdbCommand(*ModelCommand, &RoProductModel, nullptr);
-					const TCHAR* Ptr = *RoProductModel;
-					FParse::Line(&Ptr, NewDeviceInfo.Model);
+					if(!RoProductModel.IsEmpty())
+					{
+						NewDeviceInfo.Model = RoProductModel.TrimStartAndEnd();
+					}
+				}
+				
+				// Find the build ID
+				FString BuildNumberString;
+				const FString BuildNumberCommand = FString::Printf(TEXT("-s %s %s ro.build.display.id"), *NewDeviceInfo.SerialNumber, *GetPropCommand);
+				if (ExecuteAdbCommand(*BuildNumberCommand, &BuildNumberString, nullptr))
+				{
+					NewDeviceInfo.BuildNumber = BuildNumberString.TrimStartAndEnd();
+				}
+
+				// Scan lines looking for ContainsTerm
+				auto FindLineContaining = [](const FString& SourceString, const FString& ContainsTerm)
+				{
+					FString result;
+					UE::String::ParseLines(SourceString,
+						[&result, &ContainsTerm](const FStringView& Line)
+						{
+							if (result.IsEmpty() && Line.Contains(ContainsTerm))
+							{
+								result = Line;
+							}
+						});
+
+					return result;
+				};
+
+				// Parse vulkan version:
+				auto MajorVK = [](uint32 Version) { return (((uint32_t)(Version) >> 22) & 0x7FU); };
+				auto MinorVK = [](uint32 Version) { return (((uint32_t)(Version) >> 12) & 0x3FFU); };
+				auto PatchVK = [](uint32 Version) { return ((uint32_t)(Version) & 0xFFFU); };
+				FString FeaturesString;
+				const FString FeaturesStringCommand = FString::Printf(TEXT("-s %s shell pm list features"), *NewDeviceInfo.SerialNumber);
+				if (ExecuteAdbCommand(*FeaturesStringCommand, &FeaturesString, nullptr))
+				{
+					FString VulkanVersionLine = FindLineContaining(FeaturesString, TEXT("android.hardware.vulkan.version"));
+					const FRegexPattern RegexPattern(TEXT("android\\.hardware\\.vulkan\\.version=(\\d*)"));
+					FRegexMatcher RegexMatcher(RegexPattern, *VulkanVersionLine);
+					if (RegexMatcher.FindNext())
+					{
+						uint32 PackedVersion = (uint32)FCString::Atoi64(*RegexMatcher.GetCaptureGroup(1));
+						NewDeviceInfo.VulkanVersion = FString::Printf(TEXT("%d.%d.%d"), MajorVK(PackedVersion), MinorVK(PackedVersion), PatchVK(PackedVersion));
+					}
+				}
+
+				// try vkjson:
+				FString VKJsonString;
+				const FString VKJsonStringCommand = FString::Printf(TEXT("-s %s shell cmd gpu vkjson"), *NewDeviceInfo.SerialNumber);
+				if (ExecuteAdbCommand(*VKJsonStringCommand, &VKJsonString, nullptr))
+				{
+					FString VulkanVersionLine = FindLineContaining(VKJsonString, TEXT("apiVersion"));
+
+					const FRegexPattern RegexPattern(TEXT("\"apiVersion\"\\s*:\\s*(\\d*)"));
+ 					FRegexMatcher RegexMatcher(RegexPattern, *VulkanVersionLine);
+ 					if (RegexMatcher.FindNext())
+					{
+						FString VulkanVersion = RegexMatcher.GetCaptureGroup(1);
+						uint32 PackedVersion = (uint32)FCString::Atoi64(*VulkanVersion);
+						if(PackedVersion>0)
+						{
+							NewDeviceInfo.VulkanVersion = FString::Printf(TEXT("%d.%d.%d"), MajorVK(PackedVersion), MinorVK(PackedVersion), PatchVK(PackedVersion));
+						}
+					}
+				}
+				
+				if(NewDeviceInfo.VulkanVersion.IsEmpty())
+				{
+					NewDeviceInfo.VulkanVersion = TEXT("0.0.0");
+				}
+
+				// create the hardware field
+				FString HardwareCommand = FString::Printf(TEXT("-s %s %s ro.hardware"), *NewDeviceInfo.SerialNumber, *GetPropCommand);
+				FString RoHardware;
+				{
+					ExecuteAdbCommand(*HardwareCommand, &RoHardware, nullptr);
+					const TCHAR* Ptr = *RoHardware;
+					FParse::Line(&Ptr, NewDeviceInfo.Hardware);
+				}
+				if (RoHardware.Contains(TEXT("qcom")))
+				{
+					HardwareCommand = FString::Printf(TEXT("-s %s %s ro.hardware.chipname"), *NewDeviceInfo.SerialNumber, *GetPropCommand);
+					ExecuteAdbCommand(*HardwareCommand, &RoHardware, nullptr);
+					const TCHAR* Ptr = *RoHardware;
+					FParse::Line(&Ptr, NewDeviceInfo.Hardware);
+				}
+				{
+					HardwareCommand = FString::Printf(TEXT("-s %s %s ro.soc.model"), *NewDeviceInfo.SerialNumber, *GetPropCommand);
+					FString RoSOCModelIn;
+					FString RoSOCModelOut;
+					ExecuteAdbCommand(*HardwareCommand, &RoSOCModelIn, nullptr);
+					const TCHAR* Ptr = *RoSOCModelIn;
+					FParse::Line(&Ptr, RoSOCModelOut);
+					if (!RoSOCModelOut.IsEmpty())
+					{
+						NewDeviceInfo.Hardware = RoSOCModelOut;
+					}
+				}
+
+				// Read hardware from cpuinfo:
+				FString CPUInfoString;
+				const FString CPUInfoCommand = FString::Printf(TEXT("-s %s shell cat /proc/cpuinfo"), *NewDeviceInfo.SerialNumber);
+				if (ExecuteAdbCommand(*CPUInfoCommand, &CPUInfoString, nullptr))
+				{
+					FString HardwareLine = FindLineContaining(CPUInfoString, TEXT("Hardware"));
+
+					const FRegexPattern RegexPattern(TEXT("Hardware\\s*:\\s*(.*)"));
+					FRegexMatcher RegexMatcher(RegexPattern, *HardwareLine);
+					if (RegexMatcher.FindNext())
+					{
+						NewDeviceInfo.Hardware = RegexMatcher.GetCaptureGroup(1);
+					}
+				}
+
+				// Total physical mem:
+				FString MemTotalString;
+				const FString MemTotalCommand = FString::Printf(TEXT("-s %s shell cat /proc/meminfo"), *NewDeviceInfo.SerialNumber);
+				if (ExecuteAdbCommand(*MemTotalCommand, &MemTotalString, nullptr))
+				{
+					FString MemTotalLine = FindLineContaining(MemTotalString, TEXT("MemTotal"));
+
+					const FRegexPattern RegexPattern(TEXT("MemTotal:\\s*(\\d*)"));
+					FRegexMatcher RegexMatcher(RegexPattern, *MemTotalLine);
+					if (RegexMatcher.FindNext())
+					{
+						NewDeviceInfo.TotalPhysicalKB = (uint32)FCString::Atoi64(*RegexMatcher.GetCaptureGroup(1));
+					}
 				}
 
 				// parse the device name
@@ -492,7 +622,7 @@ private:
 				// Add reverse port forwarding
 				uint16 ReversePortMappings[] = {
 					41899,	// Network file server, DEFAULT_TCP_FILE_SERVING_PORT in NetworkMessage.h
-					1980,	// Unreal Insights data collection, TraceInsightsModule.cpp
+					1981,	// Unreal Insights data collection, TraceInsightsModule.cpp
 					0		// end of list
 					};
 
@@ -546,7 +676,6 @@ private:
 	FString ADBPath;
 	FString GetPropCommand;
 	bool bGetExtensionsViaSurfaceFlinger;
-	bool bForLumin;
 
 	// > 0 if we've been asked to abort work in progress at the next opportunity
 	FThreadSafeCounter StopTaskCounter;
@@ -572,10 +701,30 @@ public:
 		// create and fire off our device detection thread
 		DetectionThreadRunnable = new FAndroidDeviceDetectionRunnable(DeviceMap, &DeviceMapLock, &ADBPathCheckLock);
 		DetectionThread = FRunnableThread::Create(DetectionThreadRunnable, TEXT("FAndroidDeviceDetectionRunnable"));
+
+#if WITH_EDITOR
+		// add some menu options just for Android
+		FPIEPreviewDeviceModule* PIEPreviewDeviceModule = FModuleManager::LoadModulePtr<FPIEPreviewDeviceModule>(TEXT("PIEPreviewDeviceProfileSelector"));
+		PIEPreviewDeviceModule->AddToDevicePreviewMenuDelegates.AddLambda([this](const FText& CategoryName, class FMenuBuilder& MenuBuilder)
+			{
+				if (CategoryName.CompareToCaseIgnored(FText::FromString(TEXT("Android"))) == 0)
+				{
+					CreatePIEPreviewMenu(MenuBuilder);
+				}
+			});
+#endif
 	}
 
 	virtual ~FAndroidDeviceDetection()
 	{
+#if WITH_EDITOR
+		FPIEPreviewDeviceModule* PIEPreviewDeviceModule = FModuleManager::GetModulePtr<FPIEPreviewDeviceModule>(TEXT("PIEPreviewDeviceProfileSelector"));
+		if (PIEPreviewDeviceModule != nullptr)
+		{
+			PIEPreviewDeviceModule->AddToDevicePreviewMenuDelegates.Remove(DelegateHandle);
+		}
+#endif
+
 		if (DetectionThreadRunnable && DetectionThread)
 		{
 			DetectionThreadRunnable->Stop();
@@ -583,13 +732,12 @@ public:
 		}
 	}
 
-	virtual void Initialize(const TCHAR* InSDKDirectoryEnvVar, const TCHAR* InSDKRelativeExePath, const TCHAR* InGetPropCommand, bool InbGetExtensionsViaSurfaceFlinger, bool InbForLumin = false) override
+	virtual void Initialize(const TCHAR* InSDKDirectoryEnvVar, const TCHAR* InSDKRelativeExePath, const TCHAR* InGetPropCommand, bool InbGetExtensionsViaSurfaceFlinger) override
 	{
 		SDKDirEnvVar = InSDKDirectoryEnvVar;
 		SDKRelativeExePath = InSDKRelativeExePath;
 		GetPropCommand = InGetPropCommand;
 		bGetExtensionsViaSurfaceFlinger = InbGetExtensionsViaSurfaceFlinger;
-		bForLumin = InbForLumin;
 		UpdateADBPath();
 	}
 
@@ -659,12 +807,12 @@ public:
 			ADBPath = FPaths::Combine(*AndroidDirectory, SDKRelativeExePath);
 
 			// if it doesn't exist then just clear the path as we might set it later
-			if (!FPaths::FileExists(*ADBPath))
+			if (!FPaths::FileExists(ADBPath))
 			{
 				ADBPath.Empty();
 			}
 		}
-		DetectionThreadRunnable->UpdateADBPath(ADBPath, GetPropCommand, bGetExtensionsViaSurfaceFlinger, bForLumin);
+		DetectionThreadRunnable->UpdateADBPath(ADBPath, GetPropCommand, bGetExtensionsViaSurfaceFlinger);
 	}
 
 	virtual void ExportDeviceProfile(const FString& OutPath, const FString& DeviceName) override
@@ -679,8 +827,7 @@ public:
 			const FAndroidDeviceInfo* DeviceInfo = GetDeviceMap().Find(DeviceName);
 			if (DeviceInfo == nullptr)
 			{
-				FText TitleMessage = LOCTEXT("loc_ExportError_Title", "File export error.");
-				FMessageDialog::Open(EAppMsgType::Ok, EAppReturnType::Ok, LOCTEXT("loc_ExportError_Message", "Device disconnected!"), &TitleMessage);
+				FMessageDialog::Open(EAppMsgType::Ok, EAppReturnType::Ok, LOCTEXT("loc_ExportError_Message", "Device disconnected!"), LOCTEXT("loc_ExportError_Title", "File export error."));
 				return;
 			}
 
@@ -698,9 +845,15 @@ public:
 			DeviceSpecs.AndroidProperties.DeviceMake = DeviceInfo->DeviceBrand;
 			DeviceSpecs.AndroidProperties.GLVersion = DeviceInfo->OpenGLVersionString;
 			DeviceSpecs.AndroidProperties.GPUFamily = DeviceInfo->GPUFamilyString;
-			DeviceSpecs.AndroidProperties.VulkanVersion = "0.0.0";
+			DeviceSpecs.AndroidProperties.VulkanVersion = DeviceInfo->VulkanVersion;
+			DeviceSpecs.AndroidProperties.Hardware = DeviceInfo->Hardware;
+			DeviceSpecs.AndroidProperties.DeviceBuildNumber = DeviceInfo->BuildNumber;
+			// this is used in the same way as PlatformMemoryBucket..
+			// to establish the nearest GB Android has a different rounding algo (hence 384 used here). See GenericPlatformMemory::GetMemorySizeBucket.
+			DeviceSpecs.AndroidProperties.TotalPhysicalGB = FString::Printf(TEXT("%d"),(((uint64)DeviceInfo->TotalPhysicalKB + 384 * 1024 - 1) / 1024 / 1024));
+			
 			DeviceSpecs.AndroidProperties.UsingHoudini = false;
-			DeviceSpecs.AndroidProperties.VulkanAvailable = false;
+			DeviceSpecs.AndroidProperties.VulkanAvailable = !(DeviceInfo->VulkanVersion.IsEmpty() || DeviceInfo->VulkanVersion.Contains(TEXT("0.0.0")));
 
 			// OpenGL ES 3.x
 			bOpenGL3x = DeviceInfo->OpenGLVersionString.Contains(TEXT("OpenGL ES 3"));
@@ -715,15 +868,20 @@ public:
 				DeviceSpecs.AndroidProperties.GLES31RHIState.SupportsMultipleRenderTargets = true;
 			}
 
-			// OpenGL ES 2.0
-			UE_CLOG(!bOpenGL3x, LogCore, Fatal, TEXT("OpenGL ES 3 Required."));
+			// OpenGL ES 2.0 devices are no longer supported.
+			if (!bOpenGL3x)
+			{
+				UE_LOG(LogCore, Warning, TEXT("Cannot export device info, a minimum of OpenGL ES 3 is required."));
+				return;
+			}
 		} // FScopeLock ExportLock released
 
 		// create a JSon object from the above structure
 		TSharedPtr<FJsonObject> JsonObject = FJsonObjectConverter::UStructToJsonObject<FPIEPreviewDeviceSpecifications>(DeviceSpecs);
 
-		// remove IOS fields
-		JsonObject->RemoveField("IOSProperties");
+		// remove IOS and switch fields
+		JsonObject->RemoveField(TEXT("IOSProperties"));
+		JsonObject->RemoveField(TEXT("switchProperties"));
 
 		// serialize the JSon object to string
 		FString OutputString;
@@ -743,7 +901,6 @@ private:
 	FString SDKRelativeExePath;
 	FString GetPropCommand;
 	bool bGetExtensionsViaSurfaceFlinger;
-	bool bForLumin;
 
 	FRunnableThread* DetectionThread;
 	FAndroidDeviceDetectionRunnable* DetectionThreadRunnable;
@@ -751,6 +908,92 @@ private:
 	TMap<FString,FAndroidDeviceInfo> DeviceMap;
 	FCriticalSection DeviceMapLock;
 	FCriticalSection ADBPathCheckLock;
+
+
+#if WITH_EDITOR
+	FDelegateHandle DelegateHandle;
+
+	// function will enumerate available Android devices that can export their profile to a json file
+	// called (below) from AddAndroidConfigExportMenu()
+	void AddAndroidConfigExportSubMenus(FMenuBuilder& InMenuBuilder)
+	{
+		TMap<FString, FAndroidDeviceInfo> AndroidDeviceMap;
+
+		// lock device map and copy its contents
+		{
+			FCriticalSection* DeviceLock = GetDeviceMapLock();
+			FScopeLock Lock(DeviceLock);
+			AndroidDeviceMap = GetDeviceMap();
+		}
+
+		for (auto& Pair : AndroidDeviceMap)
+		{
+			FAndroidDeviceInfo& DeviceInfo = Pair.Value;
+
+			FString ModelName = DeviceInfo.Model + TEXT("[") + DeviceInfo.DeviceBrand + TEXT("]");
+
+			// lambda function called to open the save dialog and trigger device export
+			auto LambdaSaveConfigFile = [DeviceName = Pair.Key, DefaultFileName = ModelName, this]()
+			{
+				TArray<FString> OutputFileName;
+				FString DefaultFolder = FPaths::EngineContentDir() + TEXT("Editor/PIEPreviewDeviceSpecs/Android/");
+
+				bool bResult = FDesktopPlatformModule::Get()->SaveFileDialog(
+					FSlateApplication::Get().FindBestParentWindowHandleForDialogs(nullptr),
+					LOCTEXT("PackagePluginDialogTitle", "Save platform configuration...").ToString(),
+					DefaultFolder,
+					DefaultFileName,
+					TEXT("Json config file (*.json)|*.json"),
+					0,
+					OutputFileName);
+
+				if (bResult && OutputFileName.Num())
+				{
+					ExportDeviceProfile(OutputFileName[0], DeviceName);
+				}
+			};
+
+			InMenuBuilder.AddMenuEntry(
+				FText::FromString(ModelName),
+				FText(),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "AssetEditor.SaveAsset"),
+				FUIAction(FExecuteAction::CreateLambda(LambdaSaveConfigFile))
+			);
+		}
+	}
+
+	// function adds a sub-menu that will enumerate Android devices whose profiles can be exported json files
+	void AddAndroidConfigExportMenu(FMenuBuilder& MenuBuilder)
+	{
+		MenuBuilder.AddMenuSeparator();
+
+		MenuBuilder.AddSubMenu(
+			LOCTEXT("loc_AddAndroidConfigExportMenu", "Export device settings"),
+			LOCTEXT("loc_tip_AddAndroidConfigExportMenu", "Export device settings to a Json file."),
+			FNewMenuDelegate::CreateLambda([this](FMenuBuilder& Builder) { AddAndroidConfigExportSubMenus(Builder); }),
+			false,
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "MainFrame.SaveAll")
+		);
+	}
+
+	// Android devices can export their profile to a json file which then can be used for PIE device simulations
+	void CreatePIEPreviewMenu(FMenuBuilder& MenuBuilder)
+	{
+		// check to see if we have any connected devices
+		bool bHasAndroidDevices = false;
+		{
+			FCriticalSection* DeviceLock = GetDeviceMapLock();
+			FScopeLock Lock(DeviceLock);
+			bHasAndroidDevices = GetDeviceMap().Num() > 0;
+		}
+
+		// add the config. export menu
+		if (bHasAndroidDevices)
+		{
+			AddAndroidConfigExportMenu(MenuBuilder);
+		}
+	}
+#endif
 };
 
 
@@ -766,7 +1009,6 @@ static TMap<FString, FAndroidDeviceDetection*> AndroidDeviceDetectionSingletons;
 class FAndroidDeviceDetectionModule : public IAndroidDeviceDetectionModule
 {
 public:
-
 	/**
 	 * Destructor.
 	 */

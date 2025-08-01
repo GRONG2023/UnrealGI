@@ -23,7 +23,7 @@ enum class ESourceBusSendLevelControlMethod : uint8
 };
 
 USTRUCT(BlueprintType)
-struct ENGINE_API FSoundSourceBusSendInfo
+struct FSoundSourceBusSendInfo
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -37,14 +37,14 @@ struct ENGINE_API FSoundSourceBusSendInfo
 
 	// A source Bus to send the audio to. Source buses sonify (make audible) the audio sent to it and are themselves sounds which take up a voice slot in the audio engine.
 	UPROPERTY(EditAnywhere, Category = BusSend)
-	USoundSourceBus* SoundSourceBus;
+	TObjectPtr<USoundSourceBus> SoundSourceBus;
 
 	// An audio bus to send the audio to. Audio buses can be used to route audio to DSP effects or other purposes. E.g. side-chaining, analysis, etc. Audio buses are not audible unless hooked up to a source bus.
 	UPROPERTY(EditAnywhere, Category = BusSend)
-	UAudioBus* AudioBus;
+	TObjectPtr<UAudioBus> AudioBus;
 
 	// The amount of audio to send to the bus.
-	UPROPERTY(EditAnywhere, Category = BusSend)
+	UPROPERTY(EditAnywhere, Category = BusSend, meta = (DisplayName = "Manual Send Level"))
 	float SendLevel;
 
 	// The amount to send to the bus when sound is located at a distance equal to value specified in the min send distance.
@@ -71,7 +71,7 @@ struct ENGINE_API FSoundSourceBusSendInfo
 		: SourceBusSendLevelControlMethod(ESourceBusSendLevelControlMethod::Manual)
 		, SoundSourceBus(nullptr)
 		, AudioBus(nullptr)
-		, SendLevel(0.0f)
+		, SendLevel(1.0f)
 		, MinSendLevel(0.0f)
 		, MaxSendLevel(1.0f)
 		, MinSendDistance(100.0f)

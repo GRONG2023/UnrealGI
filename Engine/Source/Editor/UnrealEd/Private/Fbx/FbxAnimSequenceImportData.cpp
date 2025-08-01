@@ -8,6 +8,7 @@ UFbxAnimSequenceImportData::UFbxAnimSequenceImportData(const FObjectInitializer&
 	, bImportMeshesInBoneHierarchy(true)
 	, bImportCustomAttribute(true)
 	, bImportBoneTracks(true)
+	, bAddCurveMetadataToSkeleton(true)
 	, bRemoveRedundantKeys(true)
 	, bDoNotImportCurveWithZero(true)
 {
@@ -55,7 +56,7 @@ void UFbxAnimSequenceImportData::Serialize(FArchive& Ar)
 {
 	Super::Serialize(Ar);
 
-	if(Ar.UE4Ver() < VER_UE4_FBX_IMPORT_DATA_RANGE_ENCAPSULATION)
+	if(Ar.UEVer() < VER_UE4_FBX_IMPORT_DATA_RANGE_ENCAPSULATION)
 	{
 		FrameImportRange.Min = StartFrame_DEPRECATED;
 		FrameImportRange.Max = EndFrame_DEPRECATED;
@@ -93,6 +94,7 @@ void UFbxAnimSequenceImportData::CopyAnimationValues(const UFbxAnimSequenceImpor
 	bPreserveLocalTransform = Other->bPreserveLocalTransform;
 	bRemoveRedundantKeys = Other->bRemoveRedundantKeys;
 	bSetMaterialDriveParameterOnCustomAttribute = Other->bSetMaterialDriveParameterOnCustomAttribute;
+	bAddCurveMetadataToSkeleton = Other->bAddCurveMetadataToSkeleton;
 	bUseDefaultSampleRate = Other->bUseDefaultSampleRate;
 	CustomSampleRate = Other->CustomSampleRate;
 	FrameImportRange = Other->FrameImportRange;

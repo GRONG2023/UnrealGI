@@ -6,11 +6,13 @@
 
 #include "Sound/AudioVolume.h"
 #include "Engine/CollisionProfile.h"
-#include "AudioThread.h"
+#include "Engine/World.h"
 #include "Sound/ReverbEffect.h"
 #include "AudioDevice.h"
 #include "Components/BrushComponent.h"
 #include "Net/UnrealNetwork.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AudioVolume)
 
 FInteriorSettings::FInteriorSettings()
 	: bIsWorldSettings(false)
@@ -28,17 +30,17 @@ FInteriorSettings::FInteriorSettings()
 #if WITH_EDITORONLY_DATA
 void FInteriorSettings::PostSerialize(const FArchive& Ar)
 {
-	if (Ar.UE4Ver() < VER_UE4_USE_LOW_PASS_FILTER_FREQ)
+	if (Ar.UEVer() < VER_UE4_USE_LOW_PASS_FILTER_FREQ)
 	{
 		if (InteriorLPF > 0.0f && InteriorLPF < 1.0f)
 		{
-			float FilterConstant = 2.0f * FMath::Sin(PI * 6000.0f * InteriorLPF / 48000);
+			float FilterConstant = 2.0f * FMath::Sin(UE_PI * 6000.0f * InteriorLPF / 48000);
 			InteriorLPF = FilterConstant * MAX_FILTER_FREQUENCY;
 		}
 
 		if (ExteriorLPF > 0.0f && ExteriorLPF < 1.0f)
 		{
-			float FilterConstant = 2.0f * FMath::Sin(PI * 6000.0f * ExteriorLPF / 48000);
+			float FilterConstant = 2.0f * FMath::Sin(UE_PI * 6000.0f * ExteriorLPF / 48000);
 			ExteriorLPF = FilterConstant * MAX_FILTER_FREQUENCY;
 		}
 	}
@@ -179,6 +181,9 @@ void FAudioDevice::UpdateAudioVolumeProxy(const FAudioVolumeProxy& NewProxy)
 		const float CurrentPriority = CurrentProxy->Priority;
 
 		*CurrentProxy = NewProxy;
+
+		// Flag that the proxy changed so it can propagate any changes to runtime systems
+		CurrentProxy->bChanged = true;
 
 		if (CurrentPriority != NewProxy.Priority)
 		{
@@ -324,29 +329,47 @@ void AAudioVolume::PostEditChangeProperty(FPropertyChangedEvent& PropertyChanged
 	AmbientZoneSettings.ExteriorTime = FMath::Max<float>( 0.01f, AmbientZoneSettings.ExteriorTime );
 	AmbientZoneSettings.ExteriorLPFTime = FMath::Max<float>( 0.01f, AmbientZoneSettings.ExteriorLPFTime );
 
-	if (PropertyChangedEvent.Property && PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(AAudioVolume, Priority))
+	if (PropertyChangedEvent.Property)
 	{
-		if (UWorld* World = GetWorld())
+		static FName NAME_Priority = GET_MEMBER_NAME_CHECKED(AAudioVolume, Priority);
+		static FName NAME_Enabled = GET_MEMBER_NAME_CHECKED(AAudioVolume, bEnabled);
+		static FName NAME_ApplyReverb = GET_MEMBER_NAME_CHECKED(FReverbSettings, bApplyReverb);
+
+		FName PropertyName = PropertyChangedEvent.Property->GetFName();
+
+		if (PropertyName == NAME_Priority)
 		{
-			World->AudioVolumes.Sort([](const AAudioVolume& A, const AAudioVolume& B) { return (A.GetPriority() > B.GetPriority()); });
+			if (UWorld* World = GetWorld())
+			{
+				World->AudioVolumes.Sort([](const AAudioVolume& A, const AAudioVolume& B) { return (A.GetPriority() > B.GetPriority()); });
+			}
+		}
+		else if (PropertyName == NAME_Enabled)
+		{
+			if (bEnabled)
+			{
+				AddProxy();
+			}
+			else
+			{
+				RemoveProxy();
+			}
+		}
+		else if (PropertyName == NAME_ApplyReverb)
+		{
+			if (Settings.ReverbEffect)
+			{
+				Settings.ReverbEffect->bChanged = true;
+			}
+		}
+
+		if (bEnabled)
+		{
+			UpdateProxy();
 		}
 	}
 
-	if (PropertyChangedEvent.Property && PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(AAudioVolume, bEnabled))
-	{
-		if (bEnabled)
-		{
-			AddProxy();
-		}
-		else
-		{
-			RemoveProxy();
-		}
-	}
-	else if (bEnabled)
-	{
-		UpdateProxy();
-	}
 
 }
 #endif // WITH_EDITOR
+

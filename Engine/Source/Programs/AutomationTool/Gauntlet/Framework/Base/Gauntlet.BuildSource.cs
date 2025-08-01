@@ -20,8 +20,8 @@ namespace Gauntlet
 		CanReplaceExecutable = (1 << 3),		// build can use exes from elsewhere
         Bulk = (1 << 4),						// build is full-content, now startup download
 		NotBulk = (1 << 5),						// build is not bulk
-		ContentOnlyProject = (1 << 6)			// build is a content-only project, e.g. exe is ue4game.exe
-    }
+		ContentOnlyProject = (1 << 6),          // build is a content-only project, e.g. exe is UnrealGame.exe
+	}
 
 	/// <summary>
 	/// An interface that represents a build. A build is defined as something that a device is able to install, hence
@@ -29,6 +29,11 @@ namespace Gauntlet
 	/// </summary>
     public interface IBuild
 	{
+		/// <summary>
+		/// Preference order for this build type vs. other build types. Lower is more prefered.
+		/// </summary>
+		int PreferenceOrder { get; }
+
 		/// <summary>
 		/// Flags that describe the properties of this build
 		/// </summary>
@@ -38,6 +43,11 @@ namespace Gauntlet
 		/// Platform that this build is for
 		/// </summary>
 		UnrealTargetPlatform Platform { get; }
+
+		/// <summary>
+		/// Special property of the build (vanilla, asan, uban, etc)
+		/// </summary>
+		string Flavor { get; }
 
 		/// <summary>
 		/// Configuration of this build

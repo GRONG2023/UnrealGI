@@ -15,7 +15,6 @@
 #include "AudioDeviceManager.h"
 #include "Engine/Engine.h"
 #include "AudioDecompress.h"
-#include "ADPCMAudioInfo.h"
 
 /*------------------------------------------------------------------------------------
 	FIOSAudioSoundBuffer
@@ -31,14 +30,12 @@ FIOSAudioSoundBuffer::FIOSAudioSoundBuffer(FIOSAudioDevice* InAudioDevice, USoun
 {
 	if (!bIsProcedural)
 	{
-		DecompressionState = static_cast<FADPCMAudioInfo*>(InAudioDevice->CreateCompressedAudioInfo(InWave));
-
 		if (!ReadCompressedInfo(InWave))
 		{
 			return;
 		}
 
-		SoundFormat = static_cast<ESoundFormat>(DecompressionState->GetFormatTag());
+		SoundFormat = SoundFormat_LPCM; 
 	}
     else
     {
@@ -118,7 +115,8 @@ int32 FIOSAudioSoundBuffer::GetCurrentChunkOffset() const
 
 bool FIOSAudioSoundBuffer::ReadCompressedInfo(USoundWave* InWave)
 {
-	check(DecompressionState != nullptr)
+	check(DecompressionState != nullptr);
+	check(InWave->SoundWaveDataPtr.IsValid());
 
 	FSoundQualityInfo QualityInfo = { 0 };
 	if(bStreaming)
@@ -127,20 +125,21 @@ bool FIOSAudioSoundBuffer::ReadCompressedInfo(USoundWave* InWave)
 	}
 
 	InWave->InitAudioResource(FName(TEXT("ADPCM")));
-	if (!InWave->ResourceData || InWave->ResourceSize <= 0)
+	if (InWave->GetResourceSize() <= 0)
 	{
 		InWave->RemoveAudioResource();
 		return false;
 	}
 
-	return DecompressionState->ReadCompressedInfo(InWave->ResourceData, InWave->ResourceSize, &QualityInfo);
+	return DecompressionState->ReadCompressedInfo(InWave->GetResourceData(), InWave->GetResourceSize(), &QualityInfo);
 }
 
 bool FIOSAudioSoundBuffer::ReadCompressedData( uint8* Destination, int32 NumFramesToDecode, bool bLooping )
 {
+	int32 NumFramesDecoded = NumFramesToDecode;
 	if(bStreaming)
 	{
-		return DecompressionState->StreamCompressedData(Destination, bLooping, RenderCallbackBufferSize);
+		return DecompressionState->StreamCompressedData(Destination, bLooping, RenderCallbackBufferSize, NumFramesDecoded);
 	}
 	else
 	{

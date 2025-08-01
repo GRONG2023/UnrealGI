@@ -18,15 +18,11 @@
 class AActor;
 class ACameraActor;
 class ALight;
-class AMatineeActor;
 class Error;
 class FSkeletalMeshImportData;
 class UActorComponent;
 class UAnimSequence;
 class UFbxSkeletalMeshImportData;
-class UInterpGroupInst;
-class UInterpTrackMove;
-class UInterpTrackMoveAxis;
 class ULightComponent;
 class UMaterial;
 class UMaterialInstanceConstant;
@@ -101,7 +97,6 @@ THIRD_PARTY_INCLUDES_END
 class FSkeletalMeshImportData;
 class FSkelMeshOptionalImportData;
 class ASkeletalMeshActor;
-class UInterpTrackMoveAxis;
 struct FbxSceneInfo;
 struct FExistingStaticMeshData;
 
@@ -153,9 +148,10 @@ struct FBXImportOptions
 	bool bCombineToSingle;
 	EVertexColorImportOption::Type VertexColorImportOption;
 	FColor VertexOverrideColor;
+	float DistanceFieldResolutionScale;
 	bool bRemoveDegenerates;
-	bool bBuildAdjacencyBuffer;
 	bool bBuildReversedIndexBuffer;
+	bool bBuildNanite;
 	bool bGenerateLightmapUVs;
 	bool bOneConvexHullPerUCX;
 	bool bAutoGenerateCollision;
@@ -179,13 +175,16 @@ struct FBXImportOptions
 	bool bReorderMaterialToFbxOrder;
 	// Skeletal Mesh options
 	bool bImportMorph;
+	bool bImportVertexAttributes;
 	bool bImportAnimations;
 	bool bUpdateSkeletonReferencePose;
 	bool bResample;
 	int32 ResampleRate;
+	bool bSnapToClosestFrameBoundary;
 	bool bImportRigidMesh;
 	bool bUseT0AsRefPose;
 	bool bPreserveSmoothingGroups;
+	bool bKeepSectionsSeparate;
 	FOverlappingThresholds OverlappingThresholds;
 	bool bImportMeshesInBoneHierarchy;
 	bool bCreatePhysicsAsset;
@@ -194,7 +193,7 @@ struct FBXImportOptions
 	// Animation option
 	USkeleton* SkeletonForAnimation;
 	EFBXAnimationLengthImportType AnimationLengthImportType;
-	struct FIntPoint AnimationRange;
+	FIntPoint AnimationRange;
 	FString AnimationName;
 	bool	bPreserveLocalTransform;
 	bool	bDeleteExistingMorphTargetCurves;
@@ -203,6 +202,7 @@ struct FBXImportOptions
 	bool	bDeleteExistingNonCurveCustomAttributes;
 	bool	bImportBoneTracks;
 	bool	bSetMaterialDriveParameterOnCustomAttribute;
+	bool	bAddCurveMetadataToSkeleton;
 	bool	bRemoveRedundantKeys;
 	bool	bDoNotImportCurveWithZero;
 	bool	bResetToFbxOnMaterialConflict;
@@ -270,18 +270,6 @@ public:
 		AnimationTimeSecond = 0.0f;
 		AnimCurve = nullptr;
 		CurveType = NotTransform;
-	}
-
-	FFbxAnimCurveHandle(const FFbxAnimCurveHandle &CurveHandle)
-	{
-		UniqueId = CurveHandle.UniqueId;
-		Name = CurveHandle.Name;
-		ChannelIndex = CurveHandle.ChannelIndex;
-		CompositeIndex = CurveHandle.CompositeIndex;
-		KeyNumber = CurveHandle.KeyNumber;
-		AnimationTimeSecond = CurveHandle.AnimationTimeSecond;
-		AnimCurve = CurveHandle.AnimCurve;
-		CurveType = CurveHandle.CurveType;
 	}
 
 	//Identity Data
@@ -389,6 +377,8 @@ public:
 
 	UNREALED_API void GetBakeCurveData(const FFbxAnimCurveHandle &CurveHandle, TArray<float>& CurveData, float PeriodTime, float StartTime = 0.0f, float StopTime = -1.0f, bool bNegative = false, float Scale = 1.0f) const;
 
+	UNREALED_API void GetConvertedNonTransformCurveData(const FString& NodeName, bool bUseSequencerCurve, float UniformScale, TMap<FName, FRichCurve>& OutCurves);
+	
 	//Conversion API
 	UE_DEPRECATED(4.21, "Please use FRichCurve version instead to get tangent weight support")
 	UNREALED_API void GetConvertedTransformCurveData(const FString& NodeName, FInterpCurveFloat& TranslationX, FInterpCurveFloat& TranslationY, FInterpCurveFloat& TranslationZ,
@@ -483,7 +473,7 @@ struct FbxSceneInfo
 /**
 * FBX basic data conversion class.
 */
-class UNREALED_API FFbxDataConverter
+class FFbxDataConverter
 {
 public:
 	static void SetJointPostConversionMatrix(FbxAMatrix ConversionMatrix) { JointPostConversionMatrix = ConversionMatrix; }
@@ -493,35 +483,35 @@ public:
 	static const FbxAMatrix &GetAxisConversionMatrix() { return AxisConversionMatrix; }
 	static const FbxAMatrix &GetAxisConversionMatrixInv() { return AxisConversionMatrixInv; }
 
-	static FVector ConvertPos(FbxVector4 Vector);
-	static FVector ConvertDir(FbxVector4 Vector);
-	static FRotator ConvertEuler(FbxDouble3 Euler);
-	static FVector ConvertScale(FbxDouble3 Vector);
-	static FVector ConvertScale(FbxVector4 Vector);
-	static FRotator ConvertRotation(FbxQuaternion Quaternion);
-	static FVector ConvertRotationToFVect(FbxQuaternion Quaternion, bool bInvertRot);
-	static FQuat ConvertRotToQuat(FbxQuaternion Quaternion);
-	static float ConvertDist(FbxDouble Distance);
-	static bool ConvertPropertyValue(FbxProperty& FbxProperty, FProperty& UnrealProperty, union UPropertyValue& OutUnrealPropertyValue);
-	static FTransform ConvertTransform(FbxAMatrix Matrix);
-	static FMatrix ConvertMatrix(const FbxAMatrix& Matrix);
-	static FbxAMatrix ConvertMatrix(const FMatrix& Matrix);
+	static UNREALED_API FVector ConvertPos(FbxVector4 Vector);
+	static UNREALED_API FVector ConvertDir(FbxVector4 Vector);
+	static UNREALED_API FRotator ConvertEuler(FbxDouble3 Euler);
+	static UNREALED_API FVector ConvertScale(FbxDouble3 Vector);
+	static UNREALED_API FVector ConvertScale(FbxVector4 Vector);
+	static UNREALED_API FRotator ConvertRotation(FbxQuaternion Quaternion);
+	static UNREALED_API FVector ConvertRotationToFVect(FbxQuaternion Quaternion, bool bInvertRot);
+	static UNREALED_API FQuat ConvertRotToQuat(FbxQuaternion Quaternion);
+	static UNREALED_API float ConvertDist(FbxDouble Distance);
+	static UNREALED_API bool ConvertPropertyValue(FbxProperty& FbxProperty, FProperty& UnrealProperty, union UPropertyValue& OutUnrealPropertyValue);
+	static UNREALED_API FTransform ConvertTransform(FbxAMatrix Matrix);
+	static UNREALED_API FMatrix ConvertMatrix(const FbxAMatrix& Matrix);
+	static UNREALED_API FbxAMatrix ConvertMatrix(const FMatrix& Matrix);
 
 	/*
 	 * Convert fbx linear space color to sRGB FColor
 	 */
-	static FColor ConvertColor(FbxDouble3 Color);
+	static UNREALED_API FColor ConvertColor(FbxDouble3 Color);
 
-	static FbxVector4 ConvertToFbxPos(FVector Vector);
-	static FbxVector4 ConvertToFbxRot(FVector Vector);
-	static FbxVector4 ConvertToFbxScale(FVector Vector);
+	static UNREALED_API FbxVector4 ConvertToFbxPos(FVector Vector);
+	static UNREALED_API FbxVector4 ConvertToFbxRot(FVector Vector);
+	static UNREALED_API FbxVector4 ConvertToFbxScale(FVector Vector);
 	
 	/*
 	* Convert sRGB FColor to fbx linear space color
 	*/
-	static FbxDouble3   ConvertToFbxColor(FColor Color);
-	static FbxString	ConvertToFbxString(FName Name);
-	static FbxString	ConvertToFbxString(const FString& String);
+	static UNREALED_API FbxDouble3   ConvertToFbxColor(FColor Color);
+	static UNREALED_API FbxString	ConvertToFbxString(FName Name);
+	static UNREALED_API FbxString	ConvertToFbxString(const FString& String);
 
 	// FbxCamera with no rotation faces X with Y-up while ours faces X with Z-up so add a -90 degrees roll to compensate
 	static FRotator GetCameraRotation() { return FRotator(0.f, 0.f, -90.f); }
@@ -530,9 +520,9 @@ public:
 	static FRotator GetLightRotation() { return FRotator(0.f, 90.f, 0.f); }
 
 private:
-	static FbxAMatrix JointPostConversionMatrix;
-	static FbxAMatrix AxisConversionMatrix;
-	static FbxAMatrix AxisConversionMatrixInv;
+	static UNREALED_API FbxAMatrix JointPostConversionMatrix;
+	static UNREALED_API FbxAMatrix AxisConversionMatrix;
+	static UNREALED_API FbxAMatrix AxisConversionMatrixInv;
 };
 
 FBXImportOptions* GetImportOptions( class FFbxImporter* FbxImporter, UFbxImportUI* ImportUI, bool bShowOptionDialog, bool bIsAutomated, const FString& FullPath, bool& OutOperationCanceled, bool& OutImportAll, bool bIsObjFormat, const FString& InFilename, bool bForceImportType = false, EFBXImportType ImportType = FBXIT_StaticMesh);
@@ -616,7 +606,7 @@ public:
 	/**
 	 * Returns the importer singleton. It will be created on the first request.
 	 */
-	UNREALED_API static FFbxImporter* GetInstance();
+	UNREALED_API static FFbxImporter* GetInstance(bool bDoNotCreate = false);
 	static void DeleteInstance();
 
 	/**
@@ -631,6 +621,16 @@ public:
 		//read a new fbx file
 		TransformSettingsToFbxApply.Reset();
 	}
+
+	/**
+	 * The asset tool have a filter mecanism for ImportAsset, return true if the asset can be imported, false otherwise
+	 */
+	bool CanImportClass(UClass* Class) const;
+
+	/**
+	 * The asset tool have a filter mecanism for CreateAsset, return true if the asset can be created, false otherwise
+	 */
+	bool CanCreateClass(UClass* Class) const;
 
 	/**
 	 * Detect if the FBX file has skeletal mesh model. If there is deformer definition, then there is skeletal mesh.
@@ -685,6 +685,14 @@ public:
 	 * @returns true on success.
 	 */
 	UNREALED_API bool ImportFromFile(const FString& Filename, const FString& Type, bool bPreventMaterialNameClash = false);
+
+	/**
+	 * Prime the importer with an already existing scene object.
+	 *
+	 * @param Scene - The scene we want to load.
+	 */
+	UE_DEPRECATED(5.1, "Do not use this function.")
+	UNREALED_API void SetScene(FbxScene* InScene);
 
 	/**
 	 * Retrieve the FBX loader's error message explaining its failure to read a given FBX file.
@@ -841,6 +849,7 @@ public:
 			, OrderedMaterialNames(nullptr)
 			, ImportMaterialOriginalNameData(nullptr)
 			, ImportMeshSectionsData(nullptr)
+			, bMapMorphTargetToTimeZero(false)
 		{}
 
 		UObject* InParent;
@@ -856,6 +865,7 @@ public:
 
 		TArray<FName> *ImportMaterialOriginalNameData;
 		FImportMeshLodSectionsData *ImportMeshSectionsData;
+		bool bMapMorphTargetToTimeZero;
 	};
 
 	UNREALED_API USkeletalMesh* ImportSkeletalMesh(FImportSkeletalMeshArgs &ImportSkeletalMeshArgs);
@@ -893,7 +903,7 @@ public:
 	 * @param ResampleRate	Resample Rate for data
 	 * @param AnimTimeSpan	AnimTimeSpan
 	 */
-	bool ImportAnimation(USkeleton* Skeleton, UAnimSequence* DestSeq, const FString& FileName, TArray<FbxNode*>& SortedLinks, TArray<FbxNode*>& NodeArray, FbxAnimStack* CurAnimStack, const int32 ResampleRate, const FbxTimeSpan AnimTimeSpan);
+	bool ImportAnimation(USkeleton* Skeleton, UAnimSequence* DestSeq, const FString& FileName, TArray<FbxNode*>& SortedLinks, TArray<FbxNode*>& NodeArray, FbxAnimStack* CurAnimStack, const int32 ResampleRate, const FbxTimeSpan AnimTimeSpan, const bool bReimport);
 	/**
 	* Calculate the global Sample Rate for all the nodes in the FbxAnimStack pass in parameter
 	*
@@ -906,7 +916,7 @@ public:
 	 * @param SortedLinks	skeleton nodes which are sorted
 	 * @param NodeArray node array of FBX meshes
 	 */
-	int32 GetMaxSampleRate(TArray<FbxNode*>& SortedLinks, TArray<FbxNode*>& NodeArray);
+	int32 GetMaxSampleRate(TArray<FbxNode*>& SortedLinks);
 	/**
 	 * Validate Anim Stack - multiple check for validating animstack
 	 *
@@ -916,7 +926,7 @@ public:
 	 * @param ResampleRate	Resample Rate for data
 	 * @param AnimTimeSpan	AnimTimeSpan	 
 	 */	
-	bool ValidateAnimStack(TArray<FbxNode*>& SortedLinks, TArray<FbxNode*>& NodeArray, FbxAnimStack* CurAnimStack, int32 ResampleRate, bool bImportMorph, FbxTimeSpan &AnimTimeSpan);
+	bool ValidateAnimStack(TArray<FbxNode*>& SortedLinks, TArray<FbxNode*>& NodeArray, FbxAnimStack* CurAnimStack, int32 ResampleRate, bool bImportMorph, bool bSnapToClosestFrameBoundary, FbxTimeSpan &AnimTimeSpan);
 
 	/**
 	 * Import Fbx Morph object for the Skeletal Mesh.
@@ -926,7 +936,7 @@ public:
 	 * @param BaseSkelMesh - base Skeletal Mesh
 	 * @param LODIndex - LOD index
 	 */
-	UNREALED_API void ImportFbxMorphTarget(TArray<FbxNode*> &SkelMeshNodeArray, USkeletalMesh* BaseSkelMesh, int32 LODIndex, FSkeletalMeshImportData &BaseSkeletalMeshImportData);
+	UNREALED_API void ImportFbxMorphTarget(TArray<FbxNode*> &SkelMeshNodeArray, USkeletalMesh* BaseSkelMesh, int32 LODIndex, FSkeletalMeshImportData &BaseSkeletalMeshImportData, const bool bSkinControlPointToTimeZero);
 
 	/**
 	 * Import LOD object for skeletal mesh
@@ -1029,6 +1039,13 @@ public:
 	bool IsUnrealBone(FbxNode* Link);
 
 	/**
+	 * Returns if the passed FbxNode can be used as a transform attribute in Unreal.
+	 * 
+	 * @return bool
+	 */
+	bool IsUnrealTransformAttribute(FbxNode* Link);
+
+	/**
 	* Fill FBX skeletons to OutSortedLinks recursively
 	*
 	* @param Link Fbx node of skeleton root
@@ -1100,7 +1117,7 @@ public:
 	/**
 	 * Import FbxCurve to Curve
 	 */
-	static bool ImportCurve(const FbxAnimCurve* FbxCurve, FRichCurve& RichCurve, const FbxTimeSpan &AnimTimeSpan, const float ValueScale = 1.f, const bool bAutoSetTangents = true);
+	static bool ImportCurve(const FbxAnimCurve* FbxCurve, FRichCurve& RichCurve, const FbxTimeSpan &AnimTimeSpan, const bool bNegative = false, const float ValueScale = 1.f, const bool bAutoSetTangents = true);
 
 	/**
 	 * Merge all layers of one AnimStack to one layer.
@@ -1191,8 +1208,9 @@ private:
 	 * @param SkelMeshNodeArray - Fbx Nodes that the base Skeletal Mesh construct from
 	 * @param BaseSkelMesh - base Skeletal Mesh
 	 * @param LODIndex - LOD index of the skeletal mesh
+	 * @param bSkinControlPointToTimeZero Use the pose at T0 to map the morph targets onto, since the base mesh was imported at that time, rather than the ref pose.
 	 */
-	void ImportMorphTargetsInternal( TArray<FbxNode*>& SkelMeshNodeArray, USkeletalMesh* BaseSkelMesh, int32 LODIndex, FSkeletalMeshImportData &BaseSkeletalMeshImportData);
+	void ImportMorphTargetsInternal( TArray<FbxNode*>& SkelMeshNodeArray, USkeletalMesh* BaseSkelMesh, int32 LODIndex, FSkeletalMeshImportData &BaseSkeletalMeshImportData, bool bMapMorphTargetToTimeZero);
 
 	/**
 	* sub-method called from ImportSkeletalMeshLOD method
@@ -1208,6 +1226,16 @@ private:
 	* @param StaticMesh - The imported static mesh which we'd like to verify
 	*/
 	void VerifyGeometry(UStaticMesh* StaticMesh);
+
+	/**
+	 * Get the epsilon value, according to the import settings, below which two vertex positions should be considered coincident.
+	 */
+	float GetPointComparisonThreshold() const;
+
+	/**
+	 * Get the epsilon value, according to the import settings, below which a triangle should be considered to have "zero area" and therefore be degenerate.
+	 */
+	float GetTriangleAreaThreshold() const;
 
 	/**
 	* When there is some materials with the same name we add a clash suffixe _ncl1_x.
@@ -1256,8 +1284,9 @@ private:
 	 * @param AnimImportSettings	Common settings to import animation.
 	 * @param CurAnimStack			The current anim stack we are importing.
 	 * @param OutKeyCount			Out parameter returning the number of keys imported, used to set the number of keys in the sequencer.
+ 	 * @param bReimport				Flag indicating whether or not this operation is part of reimporting.
 	 */
-	void ImportBlendShapeCurves(FAnimCurveImportSettings& AnimImportSettings, FbxAnimStack* CurAnimStack, int32& OutKeyCount);
+	void ImportBlendShapeCurves(FAnimCurveImportSettings& AnimImportSettings, FbxAnimStack* CurAnimStack, int32& OutKeyCount, const bool bReimport);
 
 	/**
 	 * Import the custom attributes curves into the UAnimSequence.
@@ -1265,8 +1294,9 @@ private:
 	 * @param AnimImportSettings	Common settings to import animation.
 	 * @param OutKeyCount			Out parameter returning the number of keys imported, used to set the number of keys in the sequencer.
 	 * @param OutCurvesNotFound		Out parameter returning a list of curves name already present in the AnimSequence that were not imported, indicating that some curve data are missing during a reimport.
+ 	 * @param bReimport				Flag indicating whether or not this operation is part of reimporting.
 	 */
-	void ImportAnimationCustomAttribute(FAnimCurveImportSettings& AnimImportSettings, int32& OutKeyCount, TArray<FString>& OutCurvesNotFound);
+	void ImportAnimationCustomAttribute(FAnimCurveImportSettings& AnimImportSettings, int32& OutKeyCount, TArray<FString>& OutCurvesNotFound, const bool bReimport);
 
 	/**
 	 * Import the bone transforms curves into the UAnimSequence.
@@ -1277,8 +1307,9 @@ private:
 	 * @param ResampleRate			The rate at which the animations are resampled.
 	 * @param TransformDebugData	Out parameter data for internal debugging.
 	 * @param OutTotalNumKeys		Out parameter returning the number of keys imported, used to set the number of keys in the sequencer.
+ 	 * @param bReimport				Flag indicating whether or not this operation is part of reimporting.
 	 */
-	void ImportBoneTracks(USkeleton* Skeleton, FAnimCurveImportSettings& AnimImportSettings, FbxNode* SkeletalMeshRootNode, const int32 ResampleRate, TArray<AnimationTransformDebug::FAnimationTransformDebugData>& TransformDebugData, int32& OutTotalNumKeys);
+	void ImportBoneTracks(USkeleton* Skeleton, FAnimCurveImportSettings& AnimImportSettings, FbxNode* SkeletalMeshRootNode, const int32 ResampleRate, TArray<AnimationTransformDebug::FAnimationTransformDebugData>& TransformDebugData, int32& OutTotalNumKeys, const bool bReimport);
 
 public:
 	// current Fbx scene we are importing. Make sure to release it after import
@@ -1398,7 +1429,7 @@ protected:
 	 * @return bool true if set up successfully
 	 */
 	bool BuildStaticMeshFromGeometry(FbxNode* Node, UStaticMesh* StaticMesh, TArray<FFbxMaterial>& MeshMaterials, int LODIndex,
-									 EVertexColorImportOption::Type VertexColorImportOption, const TMap<FVector, FColor>& ExistingVertexColorData, const FColor& VertexOverrideColor);
+									 EVertexColorImportOption::Type VertexColorImportOption, const TMap<FVector3f, FColor>& ExistingVertexColorData, const FColor& VertexOverrideColor);
 	
 	/**
 	 * Clean up for destroy the Importer.
@@ -1473,7 +1504,7 @@ protected:
 	* @returns bool*	true if import successfully.
 	*/
     bool FillSkelMeshImporterFromFbx(FSkeletalMeshImportData& ImportData, FbxMesh*& Mesh, FbxSkin* Skin, 
-										FbxShape* Shape, TArray<FbxNode*> &SortedLinks, const TArray<FbxSurfaceMaterial*>& FbxMaterials, FbxNode *RootNode, const TMap<FVector, FColor>& ExistingVertexColorData);
+										FbxShape* Shape, TArray<FbxNode*> &SortedLinks, const TArray<FbxSurfaceMaterial*>& FbxMaterials, FbxNode *RootNode, const TMap<FVector3f, FColor>& ExistingVertexColorData);
 public:
 
 	/**
@@ -1489,7 +1520,7 @@ public:
 	*/
 	bool FillSkeletalMeshImportData(TArray<FbxNode*>& NodeArray, UFbxSkeletalMeshImportData* TemplateImportData, TArray<FbxShape*> *FbxShapeArray,
 									FSkeletalMeshImportData* OutData, TArray<FbxNode*>& OutImportedSkeletonLinkNodes, TArray<FName> &LastImportedMaterialNames, 
-									const bool bIsReimport, const TMap<FVector, FColor>& ExistingVertexColorData);
+									const bool bIsReimport, const TMap<FVector3f, FColor>& ExistingVertexColorData, bool& bMapMorphTargetToTimeZero);
 
 protected:
 
@@ -1515,10 +1546,11 @@ protected:
 	* @param NodeArray		Fbx node array to look at
 	* @param FbxShapeArray	Fbx Morph object, if not NULL, we are importing a morph object.
 	* @param ModifiedPoints	Set of points indices for which we've modified the value in OutData
+	* @param bInUseT0AsRefPose Use the pose at T0 to map the morph targets onto, since the base mesh was imported at that time, rather than the ref pose.
 	*
 	* @returns bool			true if import successfully.
 	*/
-	bool GatherPointsForMorphTarget(FSkeletalMeshImportData* OutData, TArray<FbxNode*>& NodeArray, TArray< FbxShape* >* FbxShapeArray, TSet<uint32>& ModifiedPoints);
+	bool GatherPointsForMorphTarget(FSkeletalMeshImportData* OutData, TArray<FbxNode*>& NodeArray, TArray< FbxShape* >* FbxShapeArray, TSet<uint32>& ModifiedPoints, bool bSkinControlPointToTimeZero);
 
 	/**
 	 * Import bones from skeletons that NodeArray bind to.
@@ -1564,8 +1596,6 @@ protected:
 	* @param Scale scale factor for this skeleton node
 	*/
 	bool FillAnimSequenceByKey(FbxNode* Node, UAnimSequence* AnimSequence, const char* TakeName, FbxTime& Start, FbxTime& End, bool bIsRoot, FbxVector4 Scale);
-	/*bool CreateMatineeSkeletalAnimation(ASkeletalMeshActor* Actor, UAnimSet* AnimSet);
-	bool CreateMatineeAnimation(FbxNode* Node, AActor* Actor, bool bInvertOrient, bool bAddDirectorTrack);*/
 
 
 	// material
@@ -1734,87 +1764,15 @@ protected:
 	void LoadNodeKeyframeAnimation(FbxNode* NodeToQuery, FFbxCurvesAPI &CurvesAPI);
 	void SetupTransformForNode(FbxNode *Node);
 
-
-	//
-	// for matinee export
-	//
-public:
-	/**
-	 * Retrieves whether there are any unknown camera instances within the FBX document.
-	 */
-	UNREALED_API bool HasUnknownCameras( AMatineeActor* InMatineeActor ) const;
-	
-	/**
-	 * Sets the camera creation flag. Call this function before the import in order to enforce
-	 * the creation of FBX camera instances that do not exist in the current scene.
-	 */
-	inline void SetProcessUnknownCameras(bool bCreateMissingCameras)
-	{
-		bCreateUnknownCameras = bCreateMissingCameras;
-	}
-	
-	/**
-	 * Modifies the Matinee actor with the animations found in the FBX document.
-	 * 
-	 * @return	true, if sucessful
-	 */
-	UNREALED_API bool ImportMatineeSequence(AMatineeActor* InMatineeActor);
-
-
 	/** Create a new asset from the package and objectname and class */
 	static UObject* CreateAssetOfClass(UClass* AssetClass, FString ParentPackageName, FString ObjectName, bool bAllowReplace = false);
 
 	/* Templated function to create an asset with given package and name */
-	template< class T> 
-	static T * CreateAsset( FString ParentPackageName, FString ObjectName, bool bAllowReplace = false )
+	template< class T>
+	static T* CreateAsset(FString ParentPackageName, FString ObjectName, bool bAllowReplace = false)
 	{
 		return (T*)CreateAssetOfClass(T::StaticClass(), ParentPackageName, ObjectName, bAllowReplace);
 	}
-
-protected:
-	bool bCreateUnknownCameras;
-	
-	/**
-	 * Creates a Matinee group for a given actor within a given Matinee actor.
-	 */
-	UInterpGroupInst* CreateMatineeGroup(AMatineeActor* InMatineeActor, AActor* Actor, FString GroupName);
-	/**
-	 * Imports a FBX scene node into a Matinee actor group.
-	 */
-	float ImportMatineeActor(FbxNode* FbxNode, UInterpGroupInst* MatineeGroup);
-
-	/**
-	 * Imports an FBX transform curve into a movement subtrack
-	 */
-	void ImportMoveSubTrack( FbxAnimCurve* FbxCurve, int32 FbxDimension, UInterpTrackMoveAxis* SubTrack, int32 CurveIndex, bool bNegative, FbxAnimCurve* RealCurve, float DefaultVal );
-
-	/**
-	 * Imports a FBX animated element into a Matinee track.
-	 */
-	void ImportMatineeAnimated(FbxAnimCurve* FbxCurve, FInterpCurveVector& Curve, int32 CurveIndex, bool bNegative, FbxAnimCurve* RealCurve, float DefaultVal);
-	/**
-	 * Imports a FBX camera into properties tracks of a Matinee group for a camera actor.
-	 */
-	void ImportCamera(ACameraActor* Actor, UInterpGroupInst* MatineeGroup, FbxCamera* Camera);
-	/**
-	 * Imports a FBX animated value into a property track of a Matinee group.
-	 */
-	void ImportAnimatedProperty(float* Value, const TCHAR* ValueName, UInterpGroupInst* MatineeGroup, const float FbxValue, FbxProperty Property, bool bImportFOV = false, FbxCamera* Camera = NULL );
-	/**
-	 * Check if FBX node has transform animation (translation and rotation, not check scale animation)
-	 */
-	bool IsNodeAnimated(FbxNode* FbxNode, FbxAnimLayer* AnimLayer = NULL);
-
-	/** 
-	 * As movement tracks in Unreal cannot have differing interpolation modes for position & rotation,
-	 * we consolidate the two modes here.
-	 */
-	void ConsolidateMovementTrackInterpModes(UInterpTrackMove* MovementTrack);
-
-	/**
-	 * Get Unreal Interpolation mode from FBX interpolation mode
-	 */
-	EInterpCurveMode GetUnrealInterpMode(FbxAnimCurveKey FbxKey);
 
 	/**
 	 * Fill up and verify bone names for animation 
@@ -1858,8 +1816,8 @@ private:
 
 	// logger set/clear function
 	class FFbxLogger * Logger;
-	void SetLogger(class FFbxLogger * InLogger);
-	void ClearLogger();
+	UNREALED_API void SetLogger(class FFbxLogger * InLogger);
+	UNREALED_API void ClearLogger();
 
 	FImportedMaterialData ImportedMaterialData;
 
@@ -1883,22 +1841,41 @@ private:
 	/**
 	 * Import FbxCurve to anim sequence
 	 */
-	bool ImportCurveToAnimSequence(class UAnimSequence * TargetSequence, const FString& CurveName, const FbxAnimCurve* FbxCurve, int32 CurveFlags,const FbxTimeSpan& AnimTimeSpan, float ValueScale = 1.f) const;
+	bool ImportCurveToAnimSequence(class UAnimSequence * TargetSequence, const FString& CurveName, const FbxAnimCurve* FbxCurve, int32 CurveFlags,const FbxTimeSpan& AnimTimeSpan, const bool bReimport, float ValueScale = 1.f) const;
 
+	/**
+	 * Import rich Curves to anim sequence
+	 */
+	bool ImportRichCurvesToAnimSequence(class UAnimSequence * TargetSequence, const TArray<FString>& CurveNames, const TArray<FRichCurve> RichCurves, int32 CurveFlags, const bool bReimport) const;
+	
+	/**
+	 * Given a primary blend shape channel curve and inbetween target full weights,
+	 * generate curves for each target as if they are standalone blend shapes
+	 * while preserving the animation
+	 */
+	TArray<FRichCurve> ResolveWeightsForBlendShapeCurve(FRichCurve& ChannelWeightCurve, const TArray<float>& InbetweenFullWeights) const;
+	
+	/**
+	 * Given a primary blend shape channel curve value and inbetween target full weights,
+	 * calculate the curve value for each target as if they are standalone blend shapes
+	 * while preserving the animation
+	 */
+	void ResolveWeightsForBlendShape(const TArray<float>& InbetweenFullWeights , float InWeight, float& OutMainWeight, TArray<float>& OutInbetweenWeights) const;
+	
 	/**
 	 * Import custom attribute (curve or not) to the associated bone.
 	 *
 	 * @return Returns true if the given custom attribute was properly added to the bone, false otherwise.
 	 */
-	bool ImportCustomAttributeToBone(class UAnimSequence* TargetSequence, FbxProperty& InProperty, FName BoneName, const FString& CurveName, const FbxAnimCurve* FbxCurve, const FbxTimeSpan& AnimTimeSpan, float ValueScale=1.f);
+	bool ImportCustomAttributeToBone(class UAnimSequence* TargetSequence, FbxProperty& InProperty, FName BoneName, const FString& CurveName, const FbxAnimCurve* FbxCurve, const FbxTimeSpan& AnimTimeSpan, const bool bReimport, float ValueScale=1.f);
 };
 
 
 /** message Logger for FBX. Saves all the messages and prints when it's destroyed */
-class UNREALED_API FFbxLogger
+class FFbxLogger
 {
-	FFbxLogger();
-	~FFbxLogger();
+	UNREALED_API FFbxLogger();
+	UNREALED_API ~FFbxLogger();
 
 	/** Error messages **/
 	TArray<TSharedRef<FTokenizedMessage>> TokenizedErrorMessages;
@@ -1915,7 +1892,7 @@ class UNREALED_API FFbxLogger
 * We add this only top level of functions where it needs to be handled
 * if the importer already has logger set, it won't set anymore
 */
-class UNREALED_API FFbxLoggerSetter
+class FFbxLoggerSetter
 {
 	class FFbxLogger Logger;
 	FFbxImporter * Importer;

@@ -2,8 +2,9 @@
 
 #pragma once
 
-#include "CoreTypes.h"
 #include "Async/Future.h"
+#include "Containers/UnrealString.h"
+#include "CoreTypes.h"
 #include "IImageWrapper.h"
 #include "MediaSampleQueue.h"
 #include "Misc/Timespan.h"
@@ -19,12 +20,12 @@ class IImageWriteQueue;
  * Loop, seek or reverse and not supported.
  * Currently only records texture samples and that support sample format 8bit BGRA, half float RBGA
  */
-class MEDIAUTILS_API FMediaRecorder
+class FMediaRecorder
 {
 public:
 
 	/** Default constructor. */
-	FMediaRecorder();
+	MEDIAUTILS_API FMediaRecorder();
 
 public:
 
@@ -69,12 +70,12 @@ public:
 	/**
 	 * Start recording samples from a given media player.
 	 */
-	void StartRecording(const FMediaRecorderData& InRecoderData);
+	MEDIAUTILS_API void StartRecording(const FMediaRecorderData& InRecoderData);
 
 	/**
 	 * Stop recording media samples.
 	 */
-	void StopRecording();
+	MEDIAUTILS_API void StopRecording();
 
 	/**
 	 * Is currently recording media samples.
@@ -84,7 +85,7 @@ public:
 	/**
 	 * Blocking call that will wait for all frames to be recorded before returning.
 	 */
-	bool WaitPendingTasks(const FTimespan& InDuration);
+	MEDIAUTILS_API bool WaitPendingTasks(const FTimespan& InDuration);
 
 protected:
 
@@ -93,7 +94,7 @@ protected:
 	 *
 	 * @param Timecode The current timecode.
 	 */
-	void TickRecording();
+	MEDIAUTILS_API void TickRecording();
 
 private:
 

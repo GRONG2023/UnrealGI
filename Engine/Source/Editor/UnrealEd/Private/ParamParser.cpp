@@ -11,9 +11,11 @@
 
 #include "CoreTypes.h"
 #include "Logging/LogMacros.h"
-#include "Misc/Parse.h"
-#include "Math/Vector.h"
 #include "Math/Rotator.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector.h"
+#include "Misc/CString.h"
+#include "Misc/Parse.h"
 
 /*-----------------------------------------------------------------------------
 	Getters.
@@ -39,7 +41,7 @@ bool GetFVECTOR( const TCHAR* Stream, FVector& Value )
 	// New format.
 	if( NumVects == 0 )
 	{
-		Value.X = FCString::Atof(Stream);
+		Value.X = (FVector::FReal)FCString::Atof(Stream);
 		Stream = FCString::Strchr(Stream,',');
 		if( !Stream )
 		{
@@ -47,7 +49,7 @@ bool GetFVECTOR( const TCHAR* Stream, FVector& Value )
 		}
 
 		Stream++;
-		Value.Y = FCString::Atof(Stream);
+		Value.Y = (FVector::FReal)FCString::Atof(Stream);
 		Stream = FCString::Strchr(Stream,',');
 		if( !Stream )
 		{
@@ -55,7 +57,7 @@ bool GetFVECTOR( const TCHAR* Stream, FVector& Value )
 		}
 
 		Stream++;
-		Value.Z = FCString::Atof(Stream);
+		Value.Z = (FVector::FReal)FCString::Atof(Stream);
 
 		NumVects=3;
 	}

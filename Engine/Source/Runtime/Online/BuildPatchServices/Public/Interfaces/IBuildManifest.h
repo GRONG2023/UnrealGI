@@ -163,6 +163,13 @@ public:
 	virtual TArray<FString> GetBuildFileList() const = 0;
 
 	/**
+	 * Get the list of files in this build. Filenames are all relative to an install directory.
+	 * Filenames returned are a view over memory owned by the BuildManifest
+	 * @return an array containing build files
+	 */
+	virtual TArray<FStringView> GetBuildFileListView() const = 0;
+
+	/**
 	 * Get the list of files in this build which match a tag from a given set. Filenames are all relative to an install directory
 	 * @param		Tags	The set of tags to query
 	 * @return an array containing build files
@@ -170,11 +177,18 @@ public:
 	virtual TArray<FString> GetBuildFileList(const TSet<FString>& Tags) const = 0;
 
 	/**
+	 * Get the list of files in this build which match a tag from a given set. Filenames are all relative to an install directory
+	 * Filenames returned are a view over memory owned by the BuildManifest
+	 * @return an array containing build files
+	 */
+	virtual TArray<FStringView> GetBuildFileListView(const TSet<FString>& Tags) const = 0;
+
+	/**
 	 * Returns the size of a particular file in the build
 	 * @param Filename      The file.
 	 * @return the file size.
 	 */
-	virtual int64 GetFileSize(const FString& Filename) const = 0;
+	virtual int64 GetFileSize(FStringView Filename) const = 0;
 
 	/**
 	 * Returns the total size of all files in the array
@@ -190,6 +204,14 @@ public:
 	 */
 	virtual int64 GetFileSize(const TSet<FString>& Filenames) const = 0;
 
+	/**
+	 * Gets the file hash for a given file
+	 * @param Filename		IN		The filename in the build
+	 * @param OutHash		OUT		Receives the hash value if found
+	 * @return	true if we had the hash for this file
+	 */
+	virtual bool GetFileHash(const FString& Filename, FSHAHash& OutHash) const = 0;
+	
 	/**
 	 * Get the list of install tags in this manifest
 	 * @return the tags referenced.

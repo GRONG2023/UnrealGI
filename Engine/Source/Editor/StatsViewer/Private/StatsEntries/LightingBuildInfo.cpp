@@ -2,6 +2,7 @@
 
 #include "LightingBuildInfo.h"
 #include "UObject/Package.h"
+#include "Engine/Level.h"
 #include "GameFramework/Actor.h"
 #include "Model.h"
 #include "Lightmass/LightmappedSurfaceCollection.h"
@@ -45,7 +46,7 @@ void ULightingBuildInfo::UpdateNames()
 		const int32 NameIndex = LevelName.Find( TEXT("/"), ESearchCase::CaseSensitive);
 		if ( NameIndex != INDEX_NONE )
 		{
-			LevelName.RightChopInline( NameIndex + 1, false );
+			LevelName.RightChopInline( NameIndex + 1, EAllowShrinking::No );
 		}
 	}
 }

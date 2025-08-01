@@ -1,21 +1,20 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "GameFramework/WorldSettings.h"
-#include "Algo/Partition.h"
 #include "Misc/MessageDialog.h"
 #include "UObject/ConstructorHelpers.h"
-#include "EngineDefines.h"
 #include "EngineStats.h"
-#include "Engine/World.h"
 #include "SceneInterface.h"
 #include "GameFramework/DefaultPhysicsVolume.h"
 #include "EngineUtils.h"
 #include "Engine/AssetUserData.h"
+#include "Engine/Engine.h"
 #include "Engine/WorldComposition.h"
+#include "WorldPartition/WorldPartition.h"
 #include "Net/UnrealNetwork.h"
+#include "Net/Core/PushModel/PushModel.h"
 #include "GameFramework/GameNetworkManager.h"
 #include "AudioDevice.h"
-#include "Logging/TokenizedMessage.h"
 #include "Logging/MessageLog.h"
 #include "Misc/UObjectToken.h"
 #include "Misc/MapErrors.h"
@@ -23,21 +22,21 @@
 #include "PhysicsEngine/PhysicsSettings.h"
 #include "UObject/ReleaseObjectVersion.h"
 #include "UObject/EnterpriseObjectVersion.h"
+#include "UObject/FortniteMainBranchObjectVersion.h"
 #include "SceneManagement.h"
 #include "AI/AISystemBase.h"
 #include "AI/NavigationSystemConfig.h"
 #include "AI/NavigationSystemBase.h"
-#include "Engine/BookmarkBase.h"
 #include "Engine/BookMark.h"
+#include "WorldSettingsCustomVersion.h"
+#include "Materials/Material.h"
+#include "ComponentRecreateRenderStateContext.h"
 
 #if WITH_EDITOR
 #include "Editor.h"
+#include "Misc/TransactionObjectEvent.h"
 #include "HierarchicalLOD.h"
-#include "IMeshMergeUtilities.h"
-#include "MeshMergeModule.h"
-#include "Settings/EditorExperimentalSettings.h"
-#include "Landscape.h"
-#include "Rendering/StaticLightingSystemInterface.h"
+#include "WorldPartition/DataLayer/DataLayerManager.h"
 #endif 
 
 #define LOCTEXT_NAMESPACE "ErrorChecking"
@@ -52,9 +51,11 @@ ENGINE_API float GNewWorldToMetersScale = 0.0f;
 AWorldSettings::FOnBookmarkClassChanged AWorldSettings::OnBookmarkClassChanged;
 AWorldSettings::FOnNumberOfBookmarksChanged AWorldSettings::OnNumberOfBoomarksChanged;
 #endif
+AWorldSettings::FOnNaniteSettingsChanged AWorldSettings::OnNaniteSettingsChanged;
 
 AWorldSettings::AWorldSettings(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.DoNotCreateDefaultSubobject(TEXT("Sprite")))
+	, WorldPartition(nullptr)
 {
 	// Structure to hold one-time initialization
 	struct FConstructorStatics
@@ -73,20 +74,27 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	NavigationSystemConfig = nullptr;
 	bEnableAISystem = true;
+	AISystemClass = UAISystemBase::GetAISystemClassName();
 	bEnableWorldComposition = false;
 	bEnableWorldOriginRebasing = false;
-#if WITH_EDITORONLY_DATA	
-	bEnableHierarchicalLODSystem = false;
-
- 	FHierarchicalSimplification LODBaseSetup;
-	HierarchicalLODSetup.Add(LODBaseSetup);
-	NumHLODLevels = HierarchicalLODSetup.Num();
+#if WITH_EDITORONLY_DATA
+	bEnableLargeWorlds_DEPRECATED = (UE_USE_UE4_WORLD_MAX != 0);
+	bEnableHierarchicalLODSystem_DEPRECATED = true;
+	NumHLODLevels = 0;
 	bGenerateSingleClusterForLevel = false;
 #endif
 
-	KillZ = -HALF_WORLD_MAX1;
+	KillZ = -UE_OLD_HALF_WORLD_MAX1;	// LWC_TODO: HALF_WORLD_MAX1? Something else?
 	KillZDamageType = ConstructorStatics.DmgType_Environmental_Object.Object;
 
+#if WITH_EDITORONLY_DATA
+	InstancedFoliageGridSize = DefaultPlacementGridSize = LandscapeSplineMeshesGridSize = 25600;
+	NavigationDataChunkGridSize = 102400;
+	NavigationDataBuilderLoadingCellSize = 102400 * 4;
+	bHideEnableStreamingWarning = false;
+	bIncludeGridSizeInNameForFoliageActors = false;
+	bIncludeGridSizeInNameForPartitionedActors = false;
+#endif
 	WorldToMeters = 100.f;
 
 	DefaultPhysicsVolumeClass = ADefaultPhysicsVolume::StaticClass();
@@ -95,7 +103,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	bReplicates = true;
 	bAlwaysRelevant = true;
 	TimeDilation = 1.0f;
-	MatineeTimeDilation = 1.0f;
+	CinematicTimeDilation = 1.0f;
 	DemoPlayTimeDilation = 1.0f;
 	PackedLightAndShadowMapTextureSize = 1024;
 	SetHidden(false);
@@ -118,6 +126,10 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	DefaultBookmarkClass = UBookMark::StaticClass();
 	LastBookmarkClass = DefaultBookmarkClass;
+
+	LevelInstancePivotOffset = FVector::ZeroVector;
+
+	bReuseAddressAndPort = false;
 }
 
 void AWorldSettings::PostInitProperties()
@@ -201,6 +213,25 @@ void AWorldSettings::PostRegisterAllComponents()
 	}
 }
 
+UWorldPartition* AWorldSettings::GetWorldPartition() const
+{
+	return WorldPartition;
+}
+
+void AWorldSettings::SetWorldPartition(UWorldPartition* InWorldPartition)
+{
+	check(!InWorldPartition || !WorldPartition);
+	WorldPartition = InWorldPartition;
+	ApplyWorldPartitionForcedSettings();
+}
+
+void AWorldSettings::ApplyWorldPartitionForcedSettings()
+{
+	bEnableWorldComposition = false;
+	bForceNoPrecomputedLighting = true;
+	bPrecomputeVisibility = false;
+}
+
 float AWorldSettings::GetGravityZ() const
 {
 	if (!bWorldGravitySet)
@@ -213,9 +244,36 @@ float AWorldSettings::GetGravityZ() const
 	return WorldGravityZ;
 }
 
+#if WITH_EDITOR
+void AWorldSettings::SupportsWorldPartitionStreamingChanged()
+{
+	if (WorldPartition)
+	{
+		WorldPartition->OnEnableStreamingChanged();
+	}
+}
+#endif
+
 void AWorldSettings::OnRep_WorldGravityZ()
 {
 	bWorldGravitySet = true;
+}
+
+void AWorldSettings::OnRep_NaniteSettings()
+{
+	// Need to recreate scene proxies when Nanite settings changes.
+	FGlobalComponentRecreateRenderStateContext Context;
+
+	OnNaniteSettingsChanged.Broadcast(this);
+}
+
+void AWorldSettings::SetAllowMaskedMaterials(bool bState)
+{
+	if (GetLocalRole() == ROLE_Authority)
+	{
+		NaniteSettings.bAllowMaskedMaterials = bState;
+		MARK_PROPERTY_DIRTY_FROM_NAME(AWorldSettings, NaniteSettings, this);
+	}
 }
 
 float AWorldSettings::FixupDeltaSeconds(float DeltaSeconds, float RealDeltaSeconds)
@@ -238,7 +296,7 @@ float AWorldSettings::SetTimeDilation(float NewTimeDilation)
 void AWorldSettings::NotifyBeginPlay()
 {
 	UWorld* World = GetWorld();
-	if (!World->bBegunPlay)
+	if (!World->GetBegunPlay())
 	{
 		for (FActorIterator It(World); It; ++It)
 		{
@@ -247,13 +305,14 @@ void AWorldSettings::NotifyBeginPlay()
 			It->DispatchBeginPlay(bFromLevelLoad);
 		}
 
-		World->bBegunPlay = true;
+		World->SetBegunPlay(true);
 	}
 }
 
 void AWorldSettings::NotifyMatchStarted()
 {
 	UWorld* World = GetWorld();
+	World->OnWorldMatchStarting.Broadcast();
 	World->bMatchStarted = true;
 }
 
@@ -263,10 +322,18 @@ void AWorldSettings::GetLifetimeReplicatedProps( TArray< FLifetimeProperty > & O
 
 	DOREPLIFETIME( AWorldSettings, PauserPlayerState );
 	DOREPLIFETIME( AWorldSettings, TimeDilation );
-	DOREPLIFETIME( AWorldSettings, MatineeTimeDilation );
+	DOREPLIFETIME( AWorldSettings, CinematicTimeDilation );
 	DOREPLIFETIME( AWorldSettings, WorldGravityZ );
 	DOREPLIFETIME( AWorldSettings, bHighPriorityLoading );
+
+	FDoRepLifetimeParams SharedParams;
+	SharedParams.bIsPushBased = true;
+	DOREPLIFETIME_WITH_PARAMS_FAST( AWorldSettings, NaniteSettings, SharedParams );
 }
+
+const FGuid FWorldSettingCustomVersion::GUID(0x1ED048F4, 0x2F2E4C68, 0x89D053A4, 0xF18F102D);
+// Register the custom version with core
+FCustomVersionRegistration GRegisterWorldSettingCustomVersion(FWorldSettingCustomVersion::GUID, FWorldSettingCustomVersion::LatestVersion, TEXT("WorldSettingVer"));
 
 void AWorldSettings::Serialize( FArchive& Ar )
 {
@@ -274,8 +341,9 @@ void AWorldSettings::Serialize( FArchive& Ar )
 
 	Ar.UsingCustomVersion(FReleaseObjectVersion::GUID);
 	Ar.UsingCustomVersion(FEnterpriseObjectVersion::GUID);
+	Ar.UsingCustomVersion(FWorldSettingCustomVersion::GUID);
 
-	if (Ar.UE4Ver() < VER_UE4_ADD_OVERRIDE_GRAVITY_FLAG)
+	if (Ar.UEVer() < VER_UE4_ADD_OVERRIDE_GRAVITY_FLAG)
 	{
 		//before we had override flag we would use GlobalGravityZ != 0
 		if(GlobalGravityZ != 0.0f)
@@ -290,14 +358,14 @@ void AWorldSettings::Serialize( FArchive& Ar )
 		{
 			const float OldScreenSize = Setup.TransitionScreenSize;
 
-			const float HalfFOV = PI * 0.25f;
+			const float HalfFOV = UE_PI * 0.25f;
 			const float ScreenWidth = 1920.0f;
 			const float ScreenHeight = 1080.0f;
 			const FPerspectiveMatrix ProjMatrix(HalfFOV, ScreenWidth, ScreenHeight, 1.0f);
 
 			const float DummySphereRadius = 16.0f;
 			const float ScreenArea = OldScreenSize * (ScreenWidth * ScreenHeight);
-			const float ScreenRadius = FMath::Sqrt(ScreenArea / PI);
+			const float ScreenRadius = FMath::Sqrt(ScreenArea / UE_PI);
 			const float ScreenDistance = FMath::Max(ScreenWidth / 2.0f * ProjMatrix.M[0][0], ScreenHeight / 2.0f * ProjMatrix.M[1][1]) * DummySphereRadius / ScreenRadius;
 
 			Setup.TransitionScreenSize = ComputeBoundsScreenSize(FVector::ZeroVector, DummySphereRadius, FVector(0.0f, 0.0f, ScreenDistance), ProjMatrix);
@@ -311,10 +379,19 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	{
 		if (Ar.CustomVer(FEnterpriseObjectVersion::GUID) < FEnterpriseObjectVersion::BookmarkExtensibilityUpgrade)
 		{
-			UBookmarkBase** LocalBookmarks = reinterpret_cast<UBookmarkBase**>(static_cast<UBookMark**>(BookMarks)); //-V777
+			const TObjectPtr<UBookmarkBase>* LocalBookmarks =
+				reinterpret_cast<TObjectPtr<UBookmarkBase>*>(BookMarks);
 			const int32 NumBookmarks = sizeof(BookMarks) / sizeof(UBookMark*);
-			BookmarkArray = TArray<UBookmarkBase*>(LocalBookmarks, NumBookmarks);
+			BookmarkArray = TArray<TObjectPtr<UBookmarkBase>>(LocalBookmarks, NumBookmarks);
 			AdjustNumberOfBookmarks();
+		}
+
+		if (Ar.CustomVer(FWorldSettingCustomVersion::GUID) < FWorldSettingCustomVersion::DeprecatedEnableHierarchicalLODSystem)
+		{
+			if (!bEnableHierarchicalLODSystem_DEPRECATED)
+			{
+				ResetHierarchicalLODSetup();
+			}
 		}
 	}
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
@@ -346,6 +423,12 @@ UAssetUserData* AWorldSettings::GetAssetUserDataOfClass(TSubclassOf<UAssetUserDa
 	}
 	return NULL;
 }
+
+const TArray<UAssetUserData*>* AWorldSettings::GetAssetUserDataArray() const
+{
+	return &ToRawPtrTArrayUnsafe(AssetUserData);
+}
+
 #if WITH_EDITOR
 const TArray<FHierarchicalSimplification>& AWorldSettings::GetHierarchicalLODSetup() const
 {
@@ -395,7 +478,7 @@ int32 AWorldSettings::GetNumHierarchicalLODLevels() const
 		return HLODSettings->DefaultSetup->GetDefaultObject<UHierarchicalLODSetup>()->HierarchicalLODSetup.Num();
 	}
 
-	return  HierarchicalLODSetup.Num();
+	return HierarchicalLODSetup.Num();
 }
 
 UMaterialInterface* AWorldSettings::GetHierarchicalLODBaseMaterial() const
@@ -418,6 +501,44 @@ UMaterialInterface* AWorldSettings::GetHierarchicalLODBaseMaterial() const
 	return Material;
 }
 
+void AWorldSettings::ResetHierarchicalLODSetup()
+{
+	HLODSetupAsset = nullptr;
+	OverrideBaseMaterial = nullptr;
+	HierarchicalLODSetup.Reset();
+	NumHLODLevels = 0;
+}
+
+void AWorldSettings::SaveDefaultWorldPartitionSettings()
+{
+	ResetDefaultWorldPartitionSettings();
+
+	if (WorldPartition)
+	{
+		DefaultWorldPartitionSettings.LoadedEditorRegions = WorldPartition->GetUserLoadedEditorRegions();
+
+		if (const UDataLayerManager* DataLayerManager = UDataLayerManager::GetDataLayerManager(GetWorld()))
+		{
+			DataLayerManager->GetUserLoadedInEditorStates(DefaultWorldPartitionSettings.LoadedDataLayers, DefaultWorldPartitionSettings.NotLoadedDataLayers);
+		}
+	}
+}
+
+void AWorldSettings::ResetDefaultWorldPartitionSettings()
+{
+	Modify();
+	DefaultWorldPartitionSettings.Reset();
+}
+
+const FWorldPartitionPerWorldSettings* AWorldSettings::GetDefaultWorldPartitionSettings() const
+{
+	if (WorldPartition)
+	{
+		return &DefaultWorldPartitionSettings;
+	}
+
+	return nullptr;
+}
 #endif // WITH_EDITOR
 
 void AWorldSettings::RemoveUserDataOfClass(TSubclassOf<UAssetUserData> InUserDataClass)
@@ -438,12 +559,11 @@ void AWorldSettings::PostLoad()
 	Super::PostLoad();
 
 #if WITH_EDITOR
-	for (FHierarchicalSimplification& Entry : HierarchicalLODSetup)
+	if (WorldPartition)
 	{
-		Entry.ProxySetting.PostLoadDeprecated();
-		Entry.MergeSetting.PostLoadDeprecated();
+		// Force to re-apply WorldPartition restrictions on WorldSettings (in case they changed)
+		ApplyWorldPartitionForcedSettings();
 	}
-
 #endif// WITH_EDITOR
 
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
@@ -463,6 +583,19 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	}
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
+
+#if WITH_EDITORONLY_DATA
+void AWorldSettings::DeclareConstructClasses(TArray<FTopLevelAssetPath>& OutConstructClasses, const UClass* SpecificSubclass)
+{
+	Super::DeclareConstructClasses(OutConstructClasses, SpecificSubclass);
+	OutConstructClasses.Add(FTopLevelAssetPath(UNavigationSystemConfig::StaticClass()));	
+	TSubclassOf<UNavigationSystemConfig> NavSystemConfigClass = UNavigationSystemConfig::GetDefaultConfigClass();
+	if (*NavSystemConfigClass)
+	{
+		OutConstructClasses.Add(FTopLevelAssetPath(NavSystemConfigClass));
+	}
+}
+#endif
 
 bool AWorldSettings::IsNavigationSystemEnabled() const
 {
@@ -500,24 +633,26 @@ void AWorldSettings::CheckForErrors()
 			->AddToken(FMapErrorToken::Create(FMapErrors::DuplicateLevelInfo));
 	}
 
-	int32 NumLightingScenariosEnabled = 0;
-
-	for (int32 LevelIndex = 0; LevelIndex < World->GetNumLevels(); LevelIndex++)
+	if (!World->GetWorldSettings()->bForceNoPrecomputedLighting)
 	{
-		ULevel* Level = World->GetLevels()[LevelIndex];
+		int32 NumLightingScenariosEnabled = 0;
 
-		if (Level->bIsLightingScenario && Level->bIsVisible)
+		for (int32 LevelIndex = 0; LevelIndex < World->GetNumLevels(); LevelIndex++)
 		{
-			NumLightingScenariosEnabled++;
-		}
-	}
+			ULevel* Level = World->GetLevels()[LevelIndex];
 
-	if( World->NumLightingUnbuiltObjects > 0 && NumLightingScenariosEnabled <= 1 )
-	{
-		FMessageLog("MapCheck").Error()
-			->AddToken(FUObjectToken::Create(this))
-			->AddToken(FTextToken::Create(LOCTEXT( "MapCheck_Message_RebuildLighting", "Maps need lighting rebuilt" ) ))
-			->AddToken(FMapErrorToken::Create(FMapErrors::RebuildLighting));
+			if (Level->bIsLightingScenario && Level->bIsVisible)
+			{
+				NumLightingScenariosEnabled++;
+			}
+		}
+		if( World->NumLightingUnbuiltObjects > 0 && NumLightingScenariosEnabled <= 1 )
+		{
+			FMessageLog("MapCheck").Error()
+				->AddToken(FUObjectToken::Create(this))
+				->AddToken(FTextToken::Create(LOCTEXT( "MapCheck_Message_RebuildLighting", "Maps need lighting rebuilt" ) ))
+				->AddToken(FMapErrorToken::Create(FMapErrors::RebuildLighting));
+		}
 	}
 }
 
@@ -558,6 +693,20 @@ bool AWorldSettings::CanEditChange(const FProperty* InProperty) const
 				return LightmassSettings.EnvironmentIntensity > 0;
 			}
 		}
+		else if (PropertyName == GET_MEMBER_NAME_STRING_CHECKED(AWorldSettings, bEnableWorldComposition ) ||
+				 PropertyName == GET_MEMBER_NAME_STRING_CHECKED(AWorldSettings, bForceNoPrecomputedLighting ) ||
+				 PropertyName == GET_MEMBER_NAME_STRING_CHECKED(AWorldSettings, bPrecomputeVisibility))
+		{
+			return !IsPartitionedWorld();
+		}
+		else if (PropertyName == GET_MEMBER_NAME_STRING_CHECKED(AWorldSettings, LandscapeSplineMeshesGridSize))
+		{
+			return IsPartitionedWorld();
+		}
+		if (PropertyName == GET_MEMBER_NAME_STRING_CHECKED(AWorldSettings, InstancedFoliageGridSize))
+		{
+			return false;
+		}
 	}
 
 	return Super::CanEditChange(InProperty);
@@ -565,9 +714,11 @@ bool AWorldSettings::CanEditChange(const FProperty* InProperty) const
 
 void AWorldSettings::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
+	UWorld* World = GetWorld();
+
 	FProperty* PropertyThatChanged = PropertyChangedEvent.Property;
 	if (PropertyThatChanged)
-{
+	{
 		InternalPostPropertyChanged(PropertyThatChanged->GetFName());
 	}
 
@@ -587,12 +738,22 @@ void AWorldSettings::PostEditChangeProperty(FPropertyChangedEvent& PropertyChang
 	LightmassSettings.MaxOcclusionDistance = FMath::Max(LightmassSettings.MaxOcclusionDistance, 0.0f);
 	LightmassSettings.EnvironmentIntensity = FMath::Max(LightmassSettings.EnvironmentIntensity, 0.0f);
 
+	const FName PropName = PropertyChangedEvent.GetPropertyName();
+	if (PropName == GET_MEMBER_NAME_CHECKED(AWorldSettings, bEnableAISystem)
+	|| PropName == GET_MEMBER_NAME_CHECKED(AWorldSettings, AISystemClass))
+	{
+		if (World)
+		{
+			World->CreateAISystem();
+		}
+	}
+
 	// Ensure texture size is power of two between 512 and 4096.
 	PackedLightAndShadowMapTextureSize = FMath::Clamp<uint32>( FMath::RoundUpToPowerOfTwo( PackedLightAndShadowMapTextureSize ), 512, 4096 );
 
-	if (PropertyThatChanged != nullptr && GetWorld() != nullptr && GetWorld()->Scene)
+	if (PropertyThatChanged != nullptr && World != nullptr && World->Scene)
 	{
-		GetWorld()->Scene->UpdateSceneSettings(this);
+		World->Scene->UpdateSceneSettings(this);
 	}
 
 	for (UAssetUserData* Datum : AssetUserData)
@@ -600,6 +761,29 @@ void AWorldSettings::PostEditChangeProperty(FPropertyChangedEvent& PropertyChang
 		if (Datum != nullptr)
 		{
 			Datum->PostEditChangeOwner();
+		}
+	}
+
+	if (PropName == GET_MEMBER_NAME_CHECKED(AWorldSettings, bShowInstancedFoliageGrid))
+	{
+		if (bShowInstancedFoliageGrid)
+		{
+			check(!InstancedFoliageGridGridPreviewer);
+			InstancedFoliageGridGridPreviewer = MakeUnique<FWorldGridPreviewer>(GetTypedOuter<UWorld>(), true);
+		}
+		else
+		{
+			check(InstancedFoliageGridGridPreviewer);
+			InstancedFoliageGridGridPreviewer.Reset();
+		}
+
+		if (InstancedFoliageGridGridPreviewer)
+		{
+			InstancedFoliageGridGridPreviewer->CellSize = InstancedFoliageGridSize;
+			InstancedFoliageGridGridPreviewer->GridColor = FColor::White;
+			InstancedFoliageGridGridPreviewer->GridOffset = FVector::ZeroVector;
+			InstancedFoliageGridGridPreviewer->LoadingRange = MAX_int32;
+			InstancedFoliageGridGridPreviewer->Update();
 		}
 	}
 
@@ -629,39 +813,32 @@ void AWorldSettings::InternalPostPropertyChanged(FName PropertyName)
 		}
 	}
 	else if (PropertyName == GET_MEMBER_NAME_CHECKED(AWorldSettings, bForceNoPrecomputedLighting) && bForceNoPrecomputedLighting)
+	{
+		FMessageDialog::Open( EAppMsgType::Ok, LOCTEXT("bForceNoPrecomputedLightingIsEnabled", "bForceNoPrecomputedLighting is now enabled, build lighting once to propagate the change (will remove existing precomputed lighting data)."));
+	}
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(AWorldSettings,bEnableWorldComposition))
+	{
+		bEnableWorldComposition = UWorldComposition::EnableWorldCompositionEvent.IsBound() ? UWorldComposition::EnableWorldCompositionEvent.Execute(GetWorld(), bEnableWorldComposition): false;
+	}
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(AWorldSettings, NavigationSystemConfig))
+	{
+		UWorld* World = GetWorld();
+		if (World)
 		{
-			FMessageDialog::Open( EAppMsgType::Ok, LOCTEXT("bForceNoPrecomputedLightingIsEnabled", "bForceNoPrecomputedLighting is now enabled, build lighting once to propagate the change (will remove existing precomputed lighting data)."));
-		}
-		else if (PropertyName == GET_MEMBER_NAME_CHECKED(AWorldSettings,bEnableWorldComposition))
-		{
-			if (UWorldComposition::EnableWorldCompositionEvent.IsBound())
+			World->SetNavigationSystem(nullptr);
+			if (NavigationSystemConfig)
 			{
-				bEnableWorldComposition = UWorldComposition::EnableWorldCompositionEvent.Execute(GetWorld(), bEnableWorldComposition);
-			}
-			else
-			{
-				bEnableWorldComposition = false;
-			}
-		}
-		else if (PropertyName == GET_MEMBER_NAME_CHECKED(AWorldSettings, NavigationSystemConfig))
-		{
-			UWorld* World = GetWorld();
-			if (World)
-			{
-				World->SetNavigationSystem(nullptr);
-				if (NavigationSystemConfig)
-				{
-					FNavigationSystem::AddNavigationSystemToWorld(*World, FNavigationSystemRunMode::EditorMode);
-				}
+				FNavigationSystem::AddNavigationSystemToWorld(*World, FNavigationSystemRunMode::EditorMode);
 			}
 		}
-		else if (PropertyName == GET_MEMBER_NAME_CHECKED(AWorldSettings, MaxNumberOfBookmarks))
-		{
-			UpdateNumberOfBookmarks();
-		}
-		else if (PropertyName == GET_MEMBER_NAME_CHECKED(AWorldSettings, DefaultBookmarkClass))
-		{
-			UpdateBookmarkClass();
+	}
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(AWorldSettings, MaxNumberOfBookmarks))
+	{
+		UpdateNumberOfBookmarks();
+	}
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(AWorldSettings, DefaultBookmarkClass))
+	{
+		UpdateBookmarkClass();
 	}
 
 	if (GetWorld() != nullptr && GetWorld()->PersistentLevel && GetWorld()->PersistentLevel->GetWorldSettings() == this)
@@ -679,12 +856,18 @@ void AWorldSettings::InternalPostPropertyChanged(FName PropertyName)
 		{
 			if (!OverrideBaseMaterial.IsNull())
 			{
-				const IMeshMergeUtilities& Module = FModuleManager::Get().LoadModuleChecked<IMeshMergeModule>("MeshMergeUtilities").GetUtilities();
-				if (!Module.IsValidBaseMaterial(OverrideBaseMaterial.LoadSynchronous(), true))
+				if (!UHierarchicalLODSettings::IsValidFlattenMaterial(OverrideBaseMaterial.LoadSynchronous(), true))
 				{
-					OverrideBaseMaterial = LoadObject<UMaterialInterface>(NULL, TEXT("/Engine/EngineMaterials/BaseFlattenMaterial.BaseFlattenMaterial"), NULL, LOAD_None, NULL);
+					OverrideBaseMaterial = GEngine->DefaultHLODFlattenMaterial;
 				}
 			}
+		}
+		else if (PropertyName == GET_MEMBER_NAME_CHECKED(FNaniteSettings, bAllowMaskedMaterials))
+		{
+			// Need to recreate scene proxies when this flag changes.
+			FGlobalComponentRecreateRenderStateContext Context;
+		
+			OnNaniteSettingsChanged.Broadcast(this);
 		}
 	}
 }
@@ -695,10 +878,9 @@ void UHierarchicalLODSetup::PostEditChangeProperty(struct FPropertyChangedEvent&
 	{
 		if (!OverrideBaseMaterial.IsNull())
 		{
-			const IMeshMergeUtilities& Module = FModuleManager::Get().LoadModuleChecked<IMeshMergeModule>("MeshMergeUtilities").GetUtilities();
-			if (!Module.IsValidBaseMaterial(OverrideBaseMaterial.LoadSynchronous(), true))
+			if (!UHierarchicalLODSettings::IsValidFlattenMaterial(OverrideBaseMaterial.LoadSynchronous(), true))
 			{
-				OverrideBaseMaterial = LoadObject<UMaterialInterface>(NULL, TEXT("/Engine/EngineMaterials/BaseFlattenMaterial.BaseFlattenMaterial"), NULL, LOAD_None, NULL);
+				OverrideBaseMaterial = GEngine->DefaultHLODFlattenMaterial;
 			}
 		}
 	}
@@ -724,7 +906,7 @@ class UBookmarkBase* AWorldSettings::GetOrAddBookmark(const uint32 BookmarkIndex
 {
 	if (BookmarkArray.IsValidIndex(BookmarkIndex))
 	{
-		UBookmarkBase*& Bookmark = BookmarkArray[BookmarkIndex];
+		TObjectPtr<UBookmarkBase>& Bookmark = BookmarkArray[BookmarkIndex];
 
 		if (Bookmark == nullptr || (bRecreateOnClassMismatch && Bookmark->GetClass() != GetDefaultBookmarkClass()))
 		{
@@ -774,7 +956,7 @@ void AWorldSettings::ClearBookmark(const uint32 BookmarkIndex)
 {
 	if (BookmarkArray.IsValidIndex(BookmarkIndex))
 	{
-		if (UBookmarkBase*& Bookmark = BookmarkArray[BookmarkIndex])
+		if (TObjectPtr<UBookmarkBase>& Bookmark = BookmarkArray[BookmarkIndex])
 		{
 			Modify();
 			Bookmark->OnCleared();
@@ -786,7 +968,7 @@ void AWorldSettings::ClearBookmark(const uint32 BookmarkIndex)
 void AWorldSettings::ClearAllBookmarks()
 {
 	Modify();
-	for (UBookmarkBase*& Bookmark : BookmarkArray)
+	for (TObjectPtr<UBookmarkBase>& Bookmark : BookmarkArray)
 	{
 		if (Bookmark)
 		{
@@ -800,7 +982,7 @@ void AWorldSettings::AdjustNumberOfBookmarks()
 {
 	if (MaxNumberOfBookmarks < 0)
 	{
-		UE_LOG(LogWorldSettings, Warning, TEXT("%s: MaxNumberOfBookmarks cannot be below 0 (Value=%d). Defaulting to 10"), *GetPathName(this), MaxNumberOfBookmarks);
+		UE_LOG(LogWorldSettings, Warning, TEXT("%s: MaxNumberOfBookmarks cannot be below 0 (Value=%d). Defaulting to 10"), *GetPathNameSafe(this), MaxNumberOfBookmarks);
 		MaxNumberOfBookmarks = NumMappedBookmarks;
 	}
 
@@ -835,7 +1017,7 @@ void AWorldSettings::SanitizeBookmarkClasses()
 		bool bFoundInvalidBookmarks = false;
 		for (int32 i = 0; i < BookmarkArray.Num(); ++i)
 		{
-			if (UBookmarkBase*& Bookmark = BookmarkArray[i])
+			if (TObjectPtr<UBookmarkBase>& Bookmark = BookmarkArray[i])
 			{
 				if (Bookmark->GetClass() != ExpectedClass)
 				{
@@ -849,12 +1031,12 @@ void AWorldSettings::SanitizeBookmarkClasses()
 
 		if (bFoundInvalidBookmarks)
 		{
-			UE_LOG(LogWorldSettings, Warning, TEXT("%s: Bookmarks found with invalid classes"), *GetPathName(this));
+			UE_LOG(LogWorldSettings, Warning, TEXT("%s: Bookmarks found with invalid classes"), *GetPathNameSafe(this));
 		}
 	}
 	else
 	{
-		UE_LOG(LogWorldSettings, Warning, TEXT("%s: Invalid bookmark class, clearing existing bookmarks."), *GetPathName(this));
+		UE_LOG(LogWorldSettings, Warning, TEXT("%s: Invalid bookmark class, clearing existing bookmarks."), *GetPathNameSafe(this));
 		DefaultBookmarkClass = UBookMark::StaticClass();
 		SanitizeBookmarkClasses();
 	}
@@ -879,7 +1061,7 @@ void AWorldSettings::UpdateBookmarkClass()
 
 FSoftClassPath AWorldSettings::GetAISystemClassName() const
 {
-	return bEnableAISystem ? UAISystemBase::GetAISystemClassName() : FSoftClassPath();
+	return bEnableAISystem ? FSoftClassPath(AISystemClass.ToString()) : FSoftClassPath();
 }
 
 void AWorldSettings::RewindForReplay()
@@ -888,9 +1070,49 @@ void AWorldSettings::RewindForReplay()
 
 	PauserPlayerState = nullptr;
 	TimeDilation = 1.0;
-	MatineeTimeDilation = 1.0;
+	CinematicTimeDilation = 1.0;
 	bWorldGravitySet = false;
 	bHighPriorityLoading = false;
+}
+
+#if WITH_EDITORONLY_DATA
+
+bool FHierarchicalSimplification::Serialize(FArchive& Ar)
+{
+	Ar.UsingCustomVersion(FFortniteMainBranchObjectVersion::GUID);
+
+	// Don't actually serialize, just write the custom version for PostSerialize
+	return false;
+}
+
+void FHierarchicalSimplification::PostSerialize(const FArchive& Ar)
+{
+	if (Ar.IsLoading())
+	{
+		if (Ar.CustomVer(FFortniteMainBranchObjectVersion::GUID) < FFortniteMainBranchObjectVersion::HierarchicalSimplificationMethodEnumAdded)
+		{
+			SimplificationMethod = bSimplifyMesh_DEPRECATED ? EHierarchicalSimplificationMethod::Simplify : EHierarchicalSimplificationMethod::Merge;
+		}
+	}
+}
+
+#endif
+
+FMaterialProxySettings* FHierarchicalSimplification::GetSimplificationMethodMaterialSettings()
+{
+	switch (SimplificationMethod)
+	{
+	case EHierarchicalSimplificationMethod::Merge:
+		return &MergeSetting.MaterialSettings;
+
+	case EHierarchicalSimplificationMethod::Simplify:
+		return &ProxySetting.MaterialSettings;
+
+	case EHierarchicalSimplificationMethod::Approximate:
+		return &ApproximateSettings.MaterialSettings;
+	}
+
+	return nullptr;
 }
 
 #undef LOCTEXT_NAMESPACE

@@ -87,6 +87,12 @@ struct FAnalyticsEventAttribute
 	/** Hack to allow assignment. This class only "sort of" acts like an immutable class because the const members prevents assignment, which was not intended when this code was changed. */
 	FAnalyticsEventAttribute& operator=(FAnalyticsEventAttribute&& RHS);
 
+	/** ALlow aggregation of attributes */
+	FAnalyticsEventAttribute& operator+=(const FAnalyticsEventAttribute& RHS);
+
+	/** ALlow aggregation of attributes */
+	FAnalyticsEventAttribute& operator+(const FAnalyticsEventAttribute& RHS);
+
 	/** If you need the old AttrValue behavior (i.e. stringify everything), call this function instead. */
 	UE_DEPRECATED(4.26, "This property has been deprecated, use GetValue() instead")
 	FString ToString() const;
@@ -145,7 +151,7 @@ inline FAnalyticsEventAttribute::FAnalyticsEventAttribute(FString InName, ValueT
 , AttrValueString(AnalyticsConversionToString(Forward<ValueType>(InValue)))
 , AttrValueNumber(0)
 , AttrValueBool(false)
-, AttrType(TIsArithmetic<typename TDecay<ValueType>::Type>::Value || TIsSame<typename TDecay<ValueType>::Type, FJsonNull>::Value || TIsSame<typename TDecay<ValueType>::Type, FJsonFragment>::Value ? AttrTypeEnum::JsonFragment : AttrTypeEnum::String)
+, AttrType(TIsArithmetic<typename TDecay<ValueType>::Type>::Value || std::is_same_v<typename TDecay<ValueType>::Type, FJsonNull> || std::is_same_v<typename TDecay<ValueType>::Type, FJsonFragment> ? AttrTypeEnum::JsonFragment : AttrTypeEnum::String)
 {
 
 }
@@ -163,6 +169,22 @@ inline FAnalyticsEventAttribute& FAnalyticsEventAttribute::operator=(const FAnal
 	const_cast<double&>(AttrValueNumber) = RHS.AttrValueNumber;
 	const_cast<bool&>(AttrValueBool) = RHS.AttrValueBool;
 	const_cast<AttrTypeEnum&>(AttrType) = RHS.AttrType;
+	return *this;
+}
+
+inline FAnalyticsEventAttribute& FAnalyticsEventAttribute::operator+=(const FAnalyticsEventAttribute& RHS)
+{
+	return *this+RHS;
+}
+
+inline FAnalyticsEventAttribute& FAnalyticsEventAttribute::operator+(const FAnalyticsEventAttribute& RHS)
+{
+	if (&RHS == this)
+	{
+		return *this;
+	}
+
+	const_cast<double&>(AttrValueNumber) += RHS.AttrValueNumber;
 	return *this;
 }
 
@@ -206,7 +228,7 @@ template<typename ValueType>
 inline void FAnalyticsEventAttribute::SetValue(ValueType&& InValue)
 {
 	const_cast<FString&>(AttrValueString) = AnalyticsConversionToString(Forward<ValueType>(InValue));
-	const_cast<AttrTypeEnum&>(AttrType) = TIsArithmetic<typename TDecay<ValueType>::Type>::Value || TIsSame<typename TDecay<ValueType>::Type, FJsonNull>::Value || TIsSame<typename TDecay<ValueType>::Type, FJsonFragment>::Value ? AttrTypeEnum::JsonFragment : AttrTypeEnum::String;
+	const_cast<AttrTypeEnum&>(AttrType) = TIsArithmetic<typename TDecay<ValueType>::Type>::Value || std::is_same_v<typename TDecay<ValueType>::Type, FJsonNull> || std::is_same_v<typename TDecay<ValueType>::Type, FJsonFragment> ? AttrTypeEnum::JsonFragment : AttrTypeEnum::String;
 }
 
 inline void FAnalyticsEventAttribute::SwitchToJsonFragment()
@@ -222,20 +244,20 @@ namespace ImplMakeAnalyticsEventAttributeArray
 {
 	/** Recursion terminator. Empty list. */
 	template <typename Allocator>
-	inline void MakeArray(TArray<FAnalyticsEventAttribute, Allocator>& Attrs)
+	FORCEINLINE void MakeArray(TArray<FAnalyticsEventAttribute, Allocator>& Attrs)
 	{
 	}
 
 	/** Recursion terminator. Convert the key/value pair to analytics strings. */
 	template <typename Allocator, typename KeyType, typename ValueType>
-	inline void MakeArray(TArray<FAnalyticsEventAttribute, Allocator>& Attrs, KeyType&& Key, ValueType&& Value)
+	FORCEINLINE void MakeArray(TArray<FAnalyticsEventAttribute, Allocator>& Attrs, KeyType&& Key, ValueType&& Value)
 	{
 		Attrs.Emplace(Forward<KeyType>(Key), Forward<ValueType>(Value));
 	}
 
 	/** recursively add the arguments to the array. */
 	template <typename Allocator, typename KeyType, typename ValueType, typename...ArgTypes>
-	inline void MakeArray(TArray<FAnalyticsEventAttribute, Allocator>& Attrs, KeyType&& Key, ValueType&& Value, ArgTypes&&...Args)
+	FORCEINLINE void MakeArray(TArray<FAnalyticsEventAttribute, Allocator>& Attrs, KeyType&& Key, ValueType&& Value, ArgTypes&&...Args)
 	{
 		// pop off the top two args and recursively apply the rest.
 		Attrs.Emplace(Forward<KeyType>(Key), Forward<ValueType>(Value));
@@ -245,7 +267,7 @@ namespace ImplMakeAnalyticsEventAttributeArray
 
 /** Helper to create an array of attributes using a single expression. Reserves the necessary space in advance. There must be an even number of arguments, one for each key/value pair. */
 template <typename Allocator = FDefaultAllocator, typename...ArgTypes>
-inline TArray<FAnalyticsEventAttribute, Allocator> MakeAnalyticsEventAttributeArray(ArgTypes&&...Args)
+FORCEINLINE TArray<FAnalyticsEventAttribute, Allocator> MakeAnalyticsEventAttributeArray(ArgTypes&&...Args)
 {
 	static_assert(sizeof...(Args) % 2 == 0, "Must pass an even number of arguments.");
 	TArray<FAnalyticsEventAttribute, Allocator> Attrs;
@@ -256,7 +278,7 @@ inline TArray<FAnalyticsEventAttribute, Allocator> MakeAnalyticsEventAttributeAr
 
 /** Helper to append to an array of attributes using a single expression. Reserves the necessary space in advance. There must be an even number of arguments, one for each key/value pair. */
 template <typename Allocator = FDefaultAllocator, typename...ArgTypes>
-inline TArray<FAnalyticsEventAttribute, Allocator>& AppendAnalyticsEventAttributeArray(TArray<FAnalyticsEventAttribute, Allocator>& Attrs, ArgTypes&&...Args)
+FORCEINLINE TArray<FAnalyticsEventAttribute, Allocator>& AppendAnalyticsEventAttributeArray(TArray<FAnalyticsEventAttribute, Allocator>& Attrs, ArgTypes&&...Args)
 {
 	static_assert(sizeof...(Args) % 2 == 0, "Must pass an even number of arguments.");
 	Attrs.Reserve(Attrs.Num() + (sizeof...(Args) / 2));

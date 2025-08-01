@@ -20,11 +20,11 @@
 #include "Engine/EngineTypes.h"
 #include "UObject/GCObject.h"
 #include "Containers/StaticBitArray.h"
-#include "Net/GuidReferences.h"
+#include "Net/Core/Misc/GuidReferences.h"
 #include "Net/Core/PushModel/PushModel.h"
+#include "Net/Core/PropertyConditions/RepChangedPropertyTracker.h"
 #include "Templates/CopyQualifiersFromTo.h"
 
-class FGuidReferences;
 class FNetFieldExportGroup;
 class FRepLayout;
 class UActorChannel;
@@ -49,13 +49,19 @@ enum class EReceivePropertiesFlags : uint32
 
 ENUM_CLASS_FLAGS(EReceivePropertiesFlags);
 
+enum class ESerializePropertyType : uint8
+{
+	Handle,	// Properties are seralized using handles in SendProperties_r
+	Name	// Properties are seralized using their names in SendProperties_r
+};
+
 enum class ERepDataBufferType
 {
 	ObjectBuffer,	//! Indicates this buffer is a full object's memory.
 	ShadowBuffer	//! Indicates this buffer is a packed shadow buffer.
 };
 
-namespace UE4_RepLayout_Private
+namespace UE_RepLayout_Private
 {
 	/**
 	 * TRepDataBuffer and TConstRepDataBuffer act as wrapper around internal data
@@ -105,103 +111,62 @@ namespace UE4_RepLayout_Private
 	}
 }
 
-template<ERepDataBufferType DataType> using TRepDataBuffer = UE4_RepLayout_Private::TRepDataBufferBase<DataType, uint8>;
-template<ERepDataBufferType DataType> using TConstRepDataBuffer = UE4_RepLayout_Private::TRepDataBufferBase<DataType, const uint8>;
+template<ERepDataBufferType DataType> using TRepDataBuffer = UE_RepLayout_Private::TRepDataBufferBase<DataType, uint8>;
+template<ERepDataBufferType DataType> using TConstRepDataBuffer = UE_RepLayout_Private::TRepDataBufferBase<DataType, const uint8>;
 
 typedef TRepDataBuffer<ERepDataBufferType::ObjectBuffer> FRepObjectDataBuffer;
 typedef TRepDataBuffer<ERepDataBufferType::ShadowBuffer> FRepShadowDataBuffer;
 typedef TConstRepDataBuffer<ERepDataBufferType::ObjectBuffer> FConstRepObjectDataBuffer;
 typedef TConstRepDataBuffer<ERepDataBufferType::ShadowBuffer> FConstRepShadowDataBuffer;
 
-/** Stores meta data about a given Replicated property. */
-class FRepChangedParent
-{
-public:
-	FRepChangedParent():
-		Active(1),
-		OldActive(1),
-		IsConditional(0)
-	{}
-
-	/** Whether or not this property is currently Active (i.e., considered for replication). */
-	uint32 Active: 1;
-
-	/** The last updated state of Active, used to track when the Active state changes. */
-	uint32 OldActive: 1;
-
-	/**
-	 * Whether or not this property has conditions that may exclude it from replicating to a given connection.
-	 * @see FRepState::ConditionMap.
-	 */
-	uint32 IsConditional: 1;
-};
-
-/**
- * This class is used to store meta data about properties that is shared between connections,
- * including whether or not a given property is Conditional, Active, and any external data
- * that may be needed for Replays.
- *
- * TODO: This class (and arguably IRepChangedPropertyTracker) should be renamed to reflect
- *			what they actually do now.
- */
-PRAGMA_DISABLE_DEPRECATION_WARNINGS	// IsReplay()
-class FRepChangedPropertyTracker : public IRepChangedPropertyTracker
-{
-public:
-	FRepChangedPropertyTracker(const bool InbIsReplay, const bool InbIsClientReplayRecording);
-
-	virtual ~FRepChangedPropertyTracker();
-
-	//~ Begin IRepChangedPropertyTracker Interface.
-	/**
-	 * Manually set whether or not Property should be marked inactive.
-	 * This will change the Active status for all connections.
-	 *
-	 * @see DOREPLIFETIME_ACTIVE_OVERRIDE
-	 *
-	 * @param OwningObject	The object that we're tracking.
-	 * @param RepIndex		Replication index for the Property.
-	 * @param bIsActive		The new Active state.
-	 */
-	virtual void SetCustomIsActiveOverride(
-		UObject* OwningObject,
-		const uint16 RepIndex,
-		const bool bIsActive) override;
-
-	/**
-	 * Sets (or resets) the External Data.
-	 * External Data is primarily used for Replays, and is used to track additional non-replicated
-	 * data or state about an object.
-	 *
-	 * @param Src		Memory containing the external data.
-	 * @param NumBits	Size of the memory, in bits.
-	 */
-	virtual void SetExternalData(const uint8* Src, const int32 NumBits) override;
-
-	/** Whether or not this is being used for a replay (may be recording or playback). */
-	virtual bool IsReplay() const override { return bIsReplay; }
-
-	virtual void CountBytes(FArchive& Ar) const override;
-	//~ End IRepChangedPropertyTracker Interface
-
-	/** Activation data for top level Properties on the given Actor / Object. */
-	TArray<FRepChangedParent>	Parents;
-
-	/** Whether or not this is being used for a replay (may be recording or playback). */
-	UE_DEPRECATED(4.26, "Will be removed in a future release.")
-	bool bIsReplay;
-
-	/** Whether or not this is being used for a client replay recording. */
-	UE_DEPRECATED(4.26, "Will be removed in a future release.")
-	bool bIsClientReplayRecording;
-
-	TArray<uint8> ExternalData;
-	uint32 ExternalDataNumBits;
-};
-PRAGMA_ENABLE_DEPRECATION_WARNINGS
+/** FRepChangedPropertyTracker moved to NetCore module */
 
 class FRepLayout;
 class FRepLayoutCmd;
+
+namespace UE::Net
+{
+	/**
+	 * Builds a new ConditionMap given the input RepFlags.
+	 * This can be used to determine whether or not a given property should be
+	 * considered enabled / disabled based on ELifetimeCondition.
+	 */
+	inline TStaticBitArray<COND_Max> BuildConditionMapFromRepFlags(const FReplicationFlags& RepFlags)
+	{
+		TStaticBitArray<COND_Max> ConditionMap;
+
+		// Setup condition map
+		const bool bIsInitial = RepFlags.bNetInitial ? true : false;
+		const bool bIsOwner = RepFlags.bNetOwner ? true : false;
+		const bool bIsSimulated = RepFlags.bNetSimulated ? true : false;
+		const bool bIsPhysics = RepFlags.bRepPhysics ? true : false;
+		const bool bIsReplay = RepFlags.bReplay ? true : false;
+
+		ConditionMap[COND_None] = true;
+		ConditionMap[COND_InitialOnly] = bIsInitial;
+
+		ConditionMap[COND_OwnerOnly] = bIsOwner;
+		ConditionMap[COND_SkipOwner] = !bIsOwner;
+
+		ConditionMap[COND_SimulatedOnly] = bIsSimulated;
+		ConditionMap[COND_SimulatedOnlyNoReplay] = bIsSimulated && !bIsReplay;
+		ConditionMap[COND_AutonomousOnly] = !bIsSimulated;
+
+		ConditionMap[COND_SimulatedOrPhysics] = bIsSimulated || bIsPhysics;
+		ConditionMap[COND_SimulatedOrPhysicsNoReplay] = (bIsSimulated || bIsPhysics) && !bIsReplay;
+
+		ConditionMap[COND_InitialOrOwner] = bIsInitial || bIsOwner;
+		ConditionMap[COND_ReplayOrOwner] = bIsReplay || bIsOwner;
+		ConditionMap[COND_ReplayOnly] = bIsReplay;
+		ConditionMap[COND_SkipReplay] = !bIsReplay;
+
+		ConditionMap[COND_Custom] = true;
+		ConditionMap[COND_Dynamic] = true;
+		ConditionMap[COND_Never] = false;
+
+		return ConditionMap;
+	}
+}
 
 struct FRepSharedPropertyKey
 {
@@ -254,10 +219,6 @@ struct FRepSerializedPropertyInfo
 		PropBitLength(0)
 	{}
 
-	/** Unique identifier for this property, may include array index and depth. */
-	UE_DEPRECATED(4.27, "No longer used, please use PropertyKey instead.")
-	FGuid Guid;
-
 	/** Unique identifier for this property */
 	FRepSharedPropertyKey PropertyKey;
 
@@ -278,13 +239,20 @@ struct FRepSerializedPropertyInfo
 struct FRepSerializationSharedInfo
 {
 	FRepSerializationSharedInfo():
-		SerializedProperties(MakeUnique<FNetBitWriter>(0)),
 		bIsValid(false)
 	{}
 
 	void SetValid()
 	{
 		bIsValid = true;
+	}
+
+	void Init()
+	{
+		if (!SerializedProperties.IsValid())
+		{
+			SerializedProperties.Reset(new FNetBitWriter(0));
+		}
 	}
 
 	bool IsValid() const
@@ -302,27 +270,6 @@ struct FRepSerializationSharedInfo
 			bIsValid = false;
 		}
 	}
-
-	/**
-	 * Creates a new SharedPropertyInfo and adds it to the SharedPropertyInfo list.
-	 *
-	 * @param Cmd				The command that represents the property we want to share.
-	 * @param PropertyGuid		A guid used to identify the property.
-	 * @param CmdIndex			Index of the property command. Only used if bDoChecksum is true.
-	 * @param Handle			Relative Handle of the property command. Only used if bWriteHandle is true.
-	 * @param Data				Pointer to the raw property memory that will be serialized.
-	 * @param bWriteHandle		Whether or not we should write Command handles into the serialized data.
-	 * @param bDoChecksum		Whether or not we should do checksums. Only used if ENABLE_PROPERTY_CHECKSUMS is enabled.
-	 */
-	UE_DEPRECATED(4.27, "Now passing a FRepSharedPropertyKey instead of FGuid")
-	const FRepSerializedPropertyInfo* WriteSharedProperty(
-		const FRepLayoutCmd& Cmd,
-		const FGuid& PropertyGuid,
-		const int32 CmdIndex,
-		const uint16 Handle,
-		const FConstRepObjectDataBuffer Data,
-		const bool bWriteHandle,
-		const bool bDoChecksum);
 
 	/**
 	 * Creates a new SharedPropertyInfo and adds it to the SharedPropertyInfo list.
@@ -499,6 +446,9 @@ public:
 	/** Number of times that properties have been compared */
 	int32 CompareIndex;
 
+	/** Tracking custom delta sends, for comparison against sending rep state. */
+	uint32 CustomDeltaChangeIndex = 0;
+	
 	/** Latest state of all property data. Not used on Clients, only used on Servers if Shadow State is enabled. */
 	FRepStateStaticBuffer StaticBuffer;
 
@@ -509,13 +459,17 @@ public:
 
 #if WITH_PUSH_MODEL
 
-	const UE4PushModelPrivate::FPushModelPerNetDriverHandle& GetPushModelObjectHandle() const
+	const UEPushModelPrivate::FPushModelPerNetDriverHandle& GetPushModelObjectHandle() const
 	{
 		return PushModelObjectHandle;
 	}
 
+	bool HasAnyDirtyProperties() const;
+
+	bool HasValidPushModelHandle() const;
+
 private:
-	const UE4PushModelPrivate::FPushModelPerNetDriverHandle PushModelObjectHandle;
+	const UEPushModelPrivate::FPushModelPerNetDriverHandle PushModelObjectHandle;
 #endif
 };
 
@@ -606,15 +560,11 @@ private:
 public:
 
 	void CountBytes(FArchive& Ar) const;
-	
-	/**
-	 * Builds a new ConditionMap given the input RepFlags.
-	 * This can be used to determine whether or not a given property should be
-	 * considered enabled / disabled based on ELifetimeCondition.
-	 *
-	 * TODO: This doesn't have to be part of FRepState.
-	 */
-	static TStaticBitArray<COND_Max> BuildConditionMapFromRepFlags(const FReplicationFlags InFlags);
+
+	UE_DEPRECATED(5.4, "Use UE::Net::BuildConditionMapFromRepFlags instead")
+	static inline TStaticBitArray<COND_Max> BuildConditionMapFromRepFlags(const FReplicationFlags InFlags) { return UE::Net::BuildConditionMapFromRepFlags(InFlags); }
+
+	bool HasAnyPendingRetirements() const;
 
 	/** Whether or not FRepLayout::OpenAcked has been called with this FRepState. */
 	bool bOpenAckedCalled;
@@ -650,6 +600,9 @@ public:
 	 * Note, we can't solely rely on on LastChangelistIndex, since changelists are stored in circular buffers.
 	 */
 	int32 LastCompareIndex;
+
+	/** Tracking custom delta sends, for comparison against the changelist state. */
+	uint32 CustomDeltaChangeIndex = 0;
 
 	FReplicationFlags RepFlags;
 
@@ -770,8 +723,11 @@ enum class ERepLayoutCmdType : uint8
 	PropertyNativeBool		= 21,
 	PropertySoftObject		= 22,
 	PropertyWeakObject		= 23,
-	NetSerializeStructWithObjectReferences = 24,
+	PropertyInterface		= 24,
+	NetSerializeStructWithObjectReferences = 25,
 };
+
+const TCHAR* LexToString(ERepLayoutCmdType CmdType);
 
 /** Various flags that describe how a Top Level Property should be handled. */
 enum class ERepParentFlags : uint32
@@ -862,7 +818,8 @@ enum class ERepLayoutCmdFlags : uint8
 {
 	None					= 0,		//! No flags.
 	IsSharedSerialization	= (1 << 0),	//! Indicates the property is eligible for shared serialization.
-	IsStruct				= (1 << 1)	//! This is a struct property.
+	IsStruct				= (1 << 1),	//! This is a struct property.
+	IsEmptyArrayStruct		= (1 << 2),	//! This is an ArrayProperty whose InnerProperty has no replicated properties.
 };
 
 ENUM_CLASS_FLAGS(ERepLayoutCmdFlags)
@@ -1083,10 +1040,16 @@ enum class ERepLayoutFlags : uint8
 	None								= 0,
 	IsActor 							= (1 << 0),	//! This RepLayout is for AActor or a subclass of AActor.
 	PartialPushSupport					= (1 << 1),	//! This RepLayout has some properties that use Push Model and some that don't.
-	FullPushSupport						= (1 << 2),	//! All properties in this RepLayout use Push Model.
+	FullPushSupport						= (1 << 2),	//! All properties and fast arrays in this RepLayout use Push Model.
 	HasObjectOrNetSerializeProperties	= (1 << 3),	//! Will be set for any RepLayout that contains Object or Net Serialize property commands.
+	NoReplicatedProperties				= (1 << 4), //! Will be set if the RepLayout has no lifetime properties, or they are all disabled.
+	FullPushProperties					= (1 << 5), //! All properties in this RepLayout use Push Model.
+	HasInitialOnlyProperties			= (1 << 6), //! There is at least 1 Initial Only Lifetime property on this RepLayout.
+	HasDynamicConditionProperties		= (1 << 7), //! There is at least 1 Dynamic lifetime property on this RepLayout.
 };
 ENUM_CLASS_FLAGS(ERepLayoutFlags);
+
+const TCHAR* LexToString(ERepLayoutFlags Flag);
 
 enum class ERepLayoutResult
 {
@@ -1253,6 +1216,7 @@ public:
 		TSharedPtr<FRepChangedPropertyTracker>& InRepChangedPropertyTracker,
 		ECreateRepStateFlags Flags) const;
 
+	UE_DEPRECATED(5.1, "No longer used, trackers are initialized by the replication subsystem.")
 	void InitChangedTracker(FRepChangedPropertyTracker * ChangedTracker) const;
 
 	/**
@@ -1513,13 +1477,42 @@ public:
 
 	const bool IsEmpty() const
 	{
-		return 0 == Parents.Num();
+		return EnumHasAnyFlags(Flags, ERepLayoutFlags::NoReplicatedProperties) || (0 == Parents.Num());
 	}
 
 	const int32 GetNumParents() const
 	{
 		return Parents.Num();
 	}
+
+	const FProperty* GetParentProperty(int32 Index) const
+	{ 
+		return Parents.IsValidIndex(Index) ? Parents[Index].Property : nullptr;
+	}
+
+	const int32 GetParentArrayIndex(int32 Index) const
+	{
+		return Parents.IsValidIndex(Index) ? Parents[Index].ArrayIndex : 0;
+	}
+
+	const int32 GetParentCondition(int32 Index) const
+	{
+		return Parents.IsValidIndex(Index) ? Parents[Index].Condition : COND_None;
+	}
+
+	const bool IsCustomDeltaProperty(int32 Index) const
+	{
+		return Parents.IsValidIndex(Index) ? EnumHasAnyFlags(Parents[Index].Flags, ERepParentFlags::IsCustomDelta) : false;
+	}
+
+#if WITH_PUSH_MODEL
+	const bool IsPushModelProperty(int32 Index) const
+	{
+		return PushModelProperties.IsValidIndex(Index) ? PushModelProperties[Index] : false;
+	}
+#endif
+
+	const uint16 GetCustomDeltaIndexFromPropertyRepIndex(const uint16 PropertyRepIndex) const;
 
 	void CountBytes(FArchive& Ar) const;
 
@@ -1539,12 +1532,14 @@ private:
 	 * @param RepChangelistState	The FRepChangelistState that contains the last cached values and changelists.
 	 * @param Data					The newest Property Data available.
 	 * @param RepFlags				Flags that will be used if the object is replicated.
+	 * @param bForceCompare			Compare the property even if the dirty flag is not set.
 	 */
 	ERepLayoutResult CompareProperties(
 		FSendingRepState* RESTRICT RepState,
 		FRepChangelistState* RESTRICT RepChangelistState,
 		const FConstRepObjectDataBuffer Data,
-		const FReplicationFlags& RepFlags) const;
+		const FReplicationFlags& RepFlags,
+		const bool bForceCompare) const;
 
 	/**
 	 * Writes all changed property values from the input owner data to the given buffer.
@@ -1569,7 +1564,8 @@ private:
 		UClass* ObjectClass,
 		FNetBitWriter& Writer,
 		TArray<uint16>& Changed,
-		const FRepSerializationSharedInfo& SharedInfo) const;
+		const FRepSerializationSharedInfo& SharedInfo,
+		const ESerializePropertyType SerializePropertyType) const;
 
 	/**
 	 * Clamps a changelist so that it conforms to the current size of either an array, or arrays within structs/arrays.
@@ -1590,8 +1586,8 @@ private:
 		TArray<uint16>& MergedDirty) const;
 
 	void RebuildConditionalProperties(
-		FSendingRepState* RESTRICT RepState,
-		const FReplicationFlags& RepFlags) const;
+		FSendingRepState* RepState,
+		const FReplicationFlags RepFlags) const;
 
 	void UpdateChangelistHistory(
 		FSendingRepState* RepState,
@@ -1627,7 +1623,8 @@ private:
 		FRepHandleIterator& HandleIterator,
 		const FConstRepObjectDataBuffer SourceData,
 		const int32	 ArrayDepth,
-		const FRepSerializationSharedInfo* const RESTRICT SharedInfo) const;
+		const FRepSerializationSharedInfo* const RESTRICT SharedInfo,
+		const ESerializePropertyType SerializePropertyType) const;
 
 	void BuildSharedSerialization(
 		const FConstRepObjectDataBuffer Data,
@@ -1692,7 +1689,7 @@ private:
 		FReceivingRepState* RESTRICT RepState, 
 		FGuidReferencesMap* GuidReferencesMap,
 		UObject* OriginalObject,
-		UPackageMap* PackageMap, 
+		UNetConnection* Connection,
 		FRepShadowDataBuffer ShadowData, 
 		FRepObjectDataBuffer Data, 
 		const int32 MaxAbsOffset,
@@ -1834,6 +1831,7 @@ private:
 		UObject* Object,
 		UNetConnection* Connection,
 		FReplicationChangelistMgr& ChangelistMgr,
+		uint32 ReplicationFrame,
 		TArray<TSharedPtr<INetDeltaBaseState>>& CustomDeltaStates) const;
 
 	void PostSendCustomDeltaProperties(
@@ -1844,9 +1842,11 @@ private:
 
 	const uint16 GetNumLifetimeCustomDeltaProperties() const;
 
+	const uint16 GetLifetimeCustomDeltaPropertyRepIndex(const uint16 RepIndCustomDeltaPropertyIndex) const;
+
 	FProperty* GetLifetimeCustomDeltaProperty(const uint16 CustomDeltaPropertyIndex) const;
 
-	const ELifetimeCondition GetLifetimeCustomDeltaPropertyCondition(const uint16 RepIndCustomDeltaPropertyIndexex) const;
+	const ELifetimeCondition GetLifetimeCustomDeltaPropertyCondition(const uint16 RepIndCustomDeltaPropertyIndex) const;
 
 	ERepLayoutFlags Flags;
 

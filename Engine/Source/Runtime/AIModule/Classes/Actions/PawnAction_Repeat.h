@@ -7,8 +7,8 @@
 #include "Actions/PawnAction.h"
 #include "PawnAction_Repeat.generated.h"
 
-UCLASS()
-class AIMODULE_API UPawnAction_Repeat : public UPawnAction
+UCLASS(MinimalAPI)
+class UDEPRECATED_PawnAction_Repeat : public UDEPRECATED_PawnAction
 {
 	GENERATED_UCLASS_BODY()
 
@@ -19,10 +19,10 @@ class AIMODULE_API UPawnAction_Repeat : public UPawnAction
 
 	/** Action to repeat. This instance won't really be run, it's a source for copying actions to be actually performed */
 	UPROPERTY()
-	UPawnAction* ActionToRepeat;
+	TObjectPtr<UDEPRECATED_PawnAction> ActionToRepeat_DEPRECATED;
 
 	UPROPERTY(Transient)
-	UPawnAction* RecentActionCopy;
+	TObjectPtr<UDEPRECATED_PawnAction> RecentActionCopy_DEPRECATED;
 
 	UPROPERTY(Category = PawnAction, EditAnywhere, BlueprintReadOnly)
 	TEnumAsByte<EPawnActionFailHandling::Type> ChildFailureHandlingMode;
@@ -31,13 +31,13 @@ class AIMODULE_API UPawnAction_Repeat : public UPawnAction
 
 	EPawnSubActionTriggeringPolicy::Type SubActionTriggeringPolicy;
 
-	/** @param NumberOfRepeats number of times to repeat action. UPawnAction_Repeat::LoopForever loops forever */
-	static UPawnAction_Repeat* CreateAction(UWorld& World, UPawnAction* ActionToRepeat, int32 NumberOfRepeats, EPawnSubActionTriggeringPolicy::Type InSubActionTriggeringPolicy = EPawnSubActionTriggeringPolicy::CopyBeforeTriggering);
+	/** @param NumberOfRepeats number of times to repeat action. UDEPRECATED_PawnAction_Repeat::LoopForever loops forever */
+	static AIMODULE_API UDEPRECATED_PawnAction_Repeat* CreateAction(UWorld& World, UDEPRECATED_PawnAction* ActionToRepeat, int32 NumberOfRepeats, EPawnSubActionTriggeringPolicy::Type InSubActionTriggeringPolicy = EPawnSubActionTriggeringPolicy::CopyBeforeTriggering);
 
 protected:
-	virtual bool Start() override;
-	virtual bool Resume() override;
-	virtual void OnChildFinished(UPawnAction& Action, EPawnActionResult::Type WithResult) override;
+	AIMODULE_API virtual bool Start() override;
+	AIMODULE_API virtual bool Resume() override;
+	AIMODULE_API virtual void OnChildFinished(UDEPRECATED_PawnAction& Action, EPawnActionResult::Type WithResult) override;
 
-	bool PushSubAction();
+	AIMODULE_API bool PushSubAction();
 };

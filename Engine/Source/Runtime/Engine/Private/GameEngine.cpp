@@ -5,19 +5,23 @@
 =============================================================================*/
 
 #include "Engine/GameEngine.h"
+#include "Brushes/SlateNoResource.h"
+#include "Engine/GameInstance.h"
+#include "Engine/NetConnection.h"
 #include "Framework/Docking/TabManager.h"
 #include "GenericPlatform/GenericPlatformSurvey.h"
-#include "Misc/CommandLine.h"
 #include "Misc/TimeGuard.h"
 #include "Misc/App.h"
 #include "GameMapsSettings.h"
 #include "EngineStats.h"
-#include "EngineGlobals.h"
+#include "Rendering/SlateRenderer.h"
 #include "RenderingThread.h"
+#include "Engine/EngineConsoleCommandExecutor.h"
 #include "Engine/GameViewportClient.h"
 #include "Engine/LevelStreaming.h"
 #include "Engine/PlatformInterfaceBase.h"
 #include "ContentStreaming.h"
+#include "Subsystems/EngineSubsystem.h"
 #include "UnrealEngine.h"
 #include "HAL/PlatformSplash.h"
 #include "UObject/Package.h"
@@ -26,11 +30,10 @@
 #include "Framework/Application/SlateApplication.h"
 #include "AudioDeviceManager.h"
 #include "Net/NetworkProfiler.h"
-#include "RendererInterface.h"
 #include "EngineModule.h"
-#include "GeneralProjectSettings.h"
 #include "Misc/PackageName.h"
 #include "HAL/PlatformApplicationMisc.h"
+#include "Null/NullPlatformApplicationMisc.h"
 #include "ShaderPipelineCache.h"
 
 #include "Misc/ConfigCacheIni.h"
@@ -55,27 +58,24 @@
 #include "StudioAnalytics.h"
 #include "Engine/DemoNetDriver.h"
 
-#include "Tickable.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "DynamicResolutionProxy.h"
 #include "DynamicResolutionState.h"
-#include "ProfilingDebugging/CsvProfiler.h"
+#include "MoviePlayerProxy.h"
 #include "RenderTargetPool.h"
 #include "RenderGraphBuilder.h"
 #include "CustomResourcePool.h"
+#include "ComponentRecreateRenderStateContext.h"
 
 #if WITH_EDITOR
 #include "PIEPreviewDeviceProfileSelectorModule.h"
-#include "IPIEPreviewDeviceModule.h"
 #endif
 
 #if !UE_SERVER
 	#include "IMediaModule.h"
 #endif
 
-#if WITH_CHAOS
-#include "ChaosSolversModule.h"
-#endif
+
 
 CSV_DECLARE_CATEGORY_MODULE_EXTERN(CORE_API, Basic);
 
@@ -83,6 +83,8 @@ ENGINE_API bool GDisallowNetworkTravel = false;
 
 // How slow must a frame be (in seconds) to be logged out (<= 0 to disable)
 ENGINE_API float GSlowFrameLoggingThreshold = 0.0f;
+
+static bool bGameWindowSettingsOverrideEnabled = true;
 
 static FAutoConsoleVariableRef CvarSlowFrameLoggingThreshold(
 	TEXT("t.SlowFrameLoggingThreshold"),
@@ -97,6 +99,13 @@ static FAutoConsoleVariableRef CVarDoAsyncEndOfFrameTasks(
 	GDoAsyncEndOfFrameTasks,
 	TEXT("Experimental option to run various things concurrently with the HUD render.")
 	);
+
+static int32 GMinimizedSyncDrawToGPU = 1;
+static FAutoConsoleVariableRef CVarMinimizedSyncDrawToGPU(
+	TEXT("tick.MinimizedSyncDrawToGPU"),
+	GMinimizedSyncDrawToGPU,
+	TEXT("True means we will wait for GPU idle when minimized. Prevents mem leaks due to CPU issuing draws faster than GPU processes when minimized.")
+);
 
 bool ParseResolution(const TCHAR* InResolution, uint32& OutX, uint32& OutY, int32& WindowMode);
 
@@ -165,8 +174,9 @@ void GenerateConvenientWindowedResolutions(const struct FDisplayMetrics& InDispl
 		else
 		{
 			//Force a resolution even if its smaller then the minimum height and width to avoid a bigger window then the desktop
-			float TargetWidth = FMath::RoundToFloat(InDisplayMetrics.PrimaryDisplayWidth) * Scales[NumScales - 1];
-			float TargetHeight = FMath::RoundToFloat(InDisplayMetrics.PrimaryDisplayHeight) * Scales[NumScales - 1];
+			// LWC_TODO: revisit. Seems like the round should be done after the multiply, otherwise the int was going to float and no rounding at all occured here.
+			float TargetWidth = FMath::RoundToFloat((float)InDisplayMetrics.PrimaryDisplayWidth) * Scales[NumScales - 1];
+			float TargetHeight = FMath::RoundToFloat((float)InDisplayMetrics.PrimaryDisplayHeight) * Scales[NumScales - 1];
 			OutResolutions.Add(FIntPoint(TargetWidth, TargetHeight));
 		}
 	}
@@ -238,6 +248,7 @@ void UGameEngine::CreateGameViewportWidget( UGameViewportClient* GameViewportCli
 
 void UGameEngine::CreateGameViewport( UGameViewportClient* GameViewportClient )
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(CreateGameViewport);
 	check(GameViewportWindow.IsValid());
 
 	if( !GameViewportWidget.IsValid() )
@@ -254,18 +265,10 @@ void UGameEngine::CreateGameViewport( UGameViewportClient* GameViewportClient )
 	int32 SaveWinPos;
 	if (FParse::Value(FCommandLine::Get(), TEXT("SAVEWINPOS="), SaveWinPos) && SaveWinPos > 0 )
 	{
-		// Get WinX/WinY from GameSettings, apply them if valid.
-		FIntPoint PiePosition = GetGameUserSettings()->GetWindowPosition();
-		if (PiePosition.X >= 0 && PiePosition.Y >= 0)
-		{
-			int32 WinX = GetGameUserSettings()->GetWindowPosition().X;
-			int32 WinY = GetGameUserSettings()->GetWindowPosition().Y;
-			Window->MoveWindowTo(FVector2D(WinX, WinY));
-		}
 		Window->SetOnWindowMoved( FOnWindowMoved::CreateUObject( this, &UGameEngine::OnGameWindowMoved ) );
 	}
 
-	SceneViewport = MakeShareable( new FSceneViewport( GameViewportClient, GameViewportWidgetRef ) );
+	SceneViewport = MakeShareable( GameViewportClient->CreateGameViewport(GameViewportWidgetRef) );
 	GameViewportClient->Viewport = SceneViewport.Get();
 	//GameViewportClient->CreateHighresScreenshotCaptureRegionWidget(); //  Disabled until mouse based input system can be made to work correctly.
 
@@ -286,28 +289,37 @@ FSceneViewport* UGameEngine::GetGameSceneViewport(UGameViewportClient* ViewportC
 	return ViewportClient->GetGameViewport();
 }
 
+void UGameEngine::EnableGameWindowSettingsOverride(bool bEnabled)
+{
+	check(IsInGameThread());
+	bGameWindowSettingsOverrideEnabled = bEnabled;
+}
+
 void UGameEngine::ConditionallyOverrideSettings(int32& ResolutionX, int32& ResolutionY, EWindowMode::Type& WindowMode)
 {
-	if (FParse::Param(FCommandLine::Get(), TEXT("Windowed")) || FParse::Param(FCommandLine::Get(), TEXT("SimMobile")))
+	if (bGameWindowSettingsOverrideEnabled)
 	{
-		// -Windowed or -SimMobile
-		WindowMode = EWindowMode::Windowed;
-	}
-	else if (FParse::Param(FCommandLine::Get(), TEXT("FullScreen")))
-	{
-		// -FullScreen
-		static auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.FullScreenMode"));
-		check(CVar);
-		WindowMode = CVar->GetValueOnGameThread() == 0 ? EWindowMode::Fullscreen : EWindowMode::WindowedFullscreen;
-
-		if (PLATFORM_WINDOWS && WindowMode == EWindowMode::Fullscreen)
+		if (FParse::Param(FCommandLine::Get(), TEXT("Windowed")) || FParse::Param(FCommandLine::Get(), TEXT("SimMobile")))
 		{
-			// Handle fullscreen mode differently for D3D11/D3D12
-			static const bool bD3D12 = FParse::Param(FCommandLine::Get(), TEXT("d3d12")) || FParse::Param(FCommandLine::Get(), TEXT("dx12"));
-			if (bD3D12)
+			// -Windowed or -SimMobile
+			WindowMode = EWindowMode::Windowed;
+		}
+		else if (FParse::Param(FCommandLine::Get(), TEXT("FullScreen")))
+		{
+			// -FullScreen
+			static auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.FullScreenMode"));
+			check(CVar);
+			WindowMode = CVar->GetValueOnGameThread() == 0 ? EWindowMode::Fullscreen : EWindowMode::WindowedFullscreen;
+
+			if (PLATFORM_WINDOWS && WindowMode == EWindowMode::Fullscreen)
 			{
-				// Force D3D12 RHI to use windowed fullscreen mode
-				WindowMode = EWindowMode::WindowedFullscreen;
+				// Handle fullscreen mode differently for D3D11/D3D12
+				static const bool bD3D12 = FParse::Param(FCommandLine::Get(), TEXT("d3d12")) || FParse::Param(FCommandLine::Get(), TEXT("dx12"));
+				if (bD3D12)
+				{
+					// Force D3D12 RHI to use windowed fullscreen mode
+					WindowMode = EWindowMode::WindowedFullscreen;
+				}
 			}
 		}
 	}
@@ -318,7 +330,7 @@ void UGameEngine::ConditionallyOverrideSettings(int32& ResolutionX, int32& Resol
 void UGameEngine::DetermineGameWindowResolution( int32& ResolutionX, int32& ResolutionY, EWindowMode::Type& WindowMode, bool bUseWorkAreaForWindowed )
 {
 	FString ResolutionStr;;
-	if (FParse::Value(FCommandLine::Get(), TEXT("Res="), ResolutionStr))
+	if (bGameWindowSettingsOverrideEnabled && FParse::Value(FCommandLine::Get(), TEXT("Res="), ResolutionStr))
 	{
 		uint32 ResX = 0;
 		uint32 ResY = 0;
@@ -333,8 +345,8 @@ void UGameEngine::DetermineGameWindowResolution( int32& ResolutionX, int32& Reso
 	}
 	else
 	{
-		bool UserSpecifiedWidth = FParse::Value(FCommandLine::Get(), TEXT("ResX="), ResolutionX);
-		bool UserSpecifiedHeight = FParse::Value(FCommandLine::Get(), TEXT("ResY="), ResolutionY);
+		bool UserSpecifiedWidth = bGameWindowSettingsOverrideEnabled && FParse::Value(FCommandLine::Get(), TEXT("ResX="), ResolutionX);
+		bool UserSpecifiedHeight = bGameWindowSettingsOverrideEnabled && FParse::Value(FCommandLine::Get(), TEXT("ResY="), ResolutionY);
 
 		const float AspectRatio = 16.0 / 9.0;
 
@@ -395,7 +407,7 @@ void UGameEngine::DetermineGameWindowResolution( int32& ResolutionX, int32& Reso
 	}
 
 	// Optionally force the resolution by passing -ForceRes
-	const bool bForceRes = FParse::Param(FCommandLine::Get(), TEXT("ForceRes"));
+	const bool bForceRes = bGameWindowSettingsOverrideEnabled && FParse::Param(FCommandLine::Get(), TEXT("ForceRes"));
 
 	//Don't allow a resolution bigger then the desktop found a convenient one
 	if (!bForceRes && !IsRunningDedicatedServer() && ((ResolutionX <= 0 || ResolutionX > MaxResolutionX) || (ResolutionY <= 0 || ResolutionY > MaxResolutionY)))
@@ -420,7 +432,7 @@ void UGameEngine::DetermineGameWindowResolution( int32& ResolutionX, int32& Reso
 				for (int32 i = WindowedResolutions.Num() - 1; i >= 0; --i)
 				{
 					float Aspect = (float)WindowedResolutions[i].X / (float)WindowedResolutions[i].Y;
-					if (FMath::Abs(Aspect - DisplayAspect) < KINDA_SMALL_NUMBER)
+					if (FMath::Abs(Aspect - DisplayAspect) < UE_KINDA_SMALL_NUMBER)
 					{
 						ResolutionX = WindowedResolutions[i].X;
 						ResolutionY = WindowedResolutions[i].Y;
@@ -441,7 +453,7 @@ void UGameEngine::DetermineGameWindowResolution( int32& ResolutionX, int32& Reso
 	}
 
 
-	if (FParse::Param(FCommandLine::Get(), TEXT("Portrait")))
+	if (bGameWindowSettingsOverrideEnabled && FParse::Param(FCommandLine::Get(), TEXT("Portrait")))
 	{
 		Swap(ResolutionX, ResolutionY);
 	}
@@ -542,6 +554,21 @@ TSharedRef<SWindow> UGameEngine::CreateGameWindow()
 		AutoCenterType = EAutoCenter::None;
 	}
 
+	// SAVEWINPOS tells us to load/save window positions to user settings (this is disabled by default)
+	int32 SaveWinPos;
+	if (FParse::Value(FCommandLine::Get(), TEXT("SAVEWINPOS="), SaveWinPos) && SaveWinPos > 0)
+	{
+		// Note GameUserSettings is not instantiated here yet, so we need to read directly from the configs
+		FString ScriptEngineCategory = TEXT("/Script/Engine.Engine");
+		FString GameUserSettingsCategory = TEXT("/Script/Engine.GameUserSettings");
+		GConfig->GetString(*ScriptEngineCategory, TEXT("GameUserSettingsClassName"), GameUserSettingsCategory, GEngineIni);
+		if (GConfig->GetInt(*GameUserSettingsCategory, TEXT("WindowPosX"), WinX, GGameUserSettingsIni) &&
+			GConfig->GetInt(*GameUserSettingsCategory, TEXT("WindowPosY"), WinY, GGameUserSettingsIni))
+		{
+			AutoCenterType = EAutoCenter::None;
+		}
+	}
+
 	// Give the window the max width/height of either the requested resolution, or your available desktop resolution
 	// We need to do this as we request some 4K windows when rendering sequences, and the OS may try and clamp that
 	// window to your available desktop resolution
@@ -621,8 +648,8 @@ TSharedRef<SWindow> UGameEngine::CreateGameWindow()
 		Window->SetWindowMode(WindowMode);
 	}
 
-	// No need to show window in off-screen rendering mode as it does not render to screen
-	if (FSlateApplication::Get().IsRenderingOffScreen())
+	// No need to show window if rendering off-screen without the null platform as it does not render to screen
+	if (FSlateApplication::Get().IsRenderingOffScreen() && !FNullPlatformApplicationMisc::IsUsingNullApplication())
 	{
 		FSlateApplicationBase::Get().GetRenderer()->CreateViewport(Window);
 	}
@@ -646,31 +673,38 @@ TSharedRef<SWindow> UGameEngine::CreateGameWindow()
 
 void UGameEngine::SwitchGameWindowToUseGameViewport()
 {
-	if (GameViewportWindow.IsValid() && GameViewportWindow.Pin()->GetContent() != GameViewportWidget)
+	if (TSharedPtr<SWindow> GameViewportWindowPtr = GameViewportWindow.Pin())
 	{
-		if( !GameViewportWidget.IsValid() )
+		if (GameViewportWindowPtr->GetContent() != GameViewportWidget)
 		{
-			CreateGameViewport( GameViewport );
-		}
-		
-		TSharedRef<SViewport> GameViewportWidgetRef = GameViewportWidget.ToSharedRef();
-		TSharedPtr<SWindow> GameViewportWindowPtr = GameViewportWindow.Pin();
-		
-		GameViewportWindowPtr->SetContent(GameViewportWidgetRef);
-		GameViewportWindowPtr->SlatePrepass();
-		
-		if ( SceneViewport.IsValid() )
-		{
-			SceneViewport->ResizeFrame((uint32)GSystemResolution.ResX, (uint32)GSystemResolution.ResY, GSystemResolution.WindowMode);
-		}
+			if (!GameViewportWidget.IsValid())
+			{
+				CreateGameViewport(GameViewport);
+			}
 
-		// Registration of the game viewport to that messages are correctly received.
-		// Could be a re-register, however it's necessary after the window is set.
-		FSlateApplication::Get().RegisterGameViewport(GameViewportWidgetRef);
+			if (GameViewportWidget.IsValid() && FSlateApplication::IsInitialized())
+			{
+				GameViewportWindowPtr->SetContent(GameViewportWidget.ToSharedRef());
+				GameViewportWindowPtr->SlatePrepass(FSlateApplication::Get().GetApplicationScale() * GameViewportWindowPtr->GetNativeWindow()->GetDPIScaleFactor());
+			}
+			else
+			{
+				UE_LOG(LogEngine, Error, TEXT("The Game Viewport Widget is invalid."));
+			}
 
-		if (FSlateApplication::IsInitialized())
-		{
-			FSlateApplication::Get().SetAllUserFocusToGameViewport(EFocusCause::SetDirectly);
+			// If Scene Viewport is not valid, the window was closed.
+			if (SceneViewport.IsValid() && FSlateApplication::IsInitialized())
+			{
+				SceneViewport->ResizeFrame((uint32)GSystemResolution.ResX, (uint32)GSystemResolution.ResY, GSystemResolution.WindowMode);
+
+				// Registration of the game viewport to that messages are correctly received.
+				// Could be a re-register, however it's necessary after the window is set.
+				if (GameViewportWidget.IsValid())
+				{
+					FSlateApplication::Get().RegisterGameViewport(GameViewportWidget.ToSharedRef());
+				}
+				FSlateApplication::Get().SetAllUserFocusToGameViewport(EFocusCause::SetDirectly);
+			}
 		}
 	}
 }
@@ -783,6 +817,12 @@ UEngine::UEngine(const FObjectInitializer& ObjectInitializer)
 		}
 	}
 	#endif
+
+	// Relay to deprecated delegates
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	PreRenderDelegateEx.AddLambda([this](FRDGBuilder&) { PreRenderDelegate.Broadcast(); });
+	PostRenderDelegateEx.AddLambda([this](FRDGBuilder&){ PostRenderDelegate.Broadcast(); });
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 
@@ -790,10 +830,9 @@ UEngine::UEngine(const FObjectInitializer& ObjectInitializer)
 //@todo kairos: Move this and maybe the above engine handling code to somewhere else. I can't put this into Core
 // with Embedded because of the Json dependency that I don't want/can't? add to Core. Maybe ApplicationCore?
 
-#include "Misc/CoreMisc.h"
 #include "Misc/ConfigCacheIni.h"
-#include "Misc/Parse.h"
-#include "Serialization/JsonReader.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(GameEngine)
 
 
 class FEmbeddedCommunicationExec : public FSelfRegisteringExec
@@ -805,7 +844,7 @@ public:
 
 		FEmbeddedDelegates::GetNativeToEmbeddedParamsDelegateForSubsystem(TEXT("engine")).AddLambda([](const FEmbeddedCallParamsHelper& Message)
 		{
-			if (Message.Command == TEXT("StartUE4Live"))
+			if (Message.Command == TEXT("StartUELive"))
 			{
 				FName Requester = *Message.Parameters.FindRef(TEXT("requester"));
 				bool bTickOnly = Message.Parameters.FindRef(TEXT("tickonly")) == TEXT("true");
@@ -813,7 +852,7 @@ public:
 				FEmbeddedCommunication::KeepAwake(Requester, !bTickOnly);
 				Message.OnCompleteDelegate({}, TEXT(""));
 			}
-			else if (Message.Command == TEXT("StopUE4Live"))
+			else if (Message.Command == TEXT("StopUELive"))
 			{
 				FName Requester = *Message.Parameters.FindRef(TEXT("requester"));
 				
@@ -983,6 +1022,7 @@ public:
 		return GEngineIni;
 	}
 
+#if UE_ALLOW_EXEC_COMMANDS
 	virtual bool Exec(UWorld* Inworld, const TCHAR* Cmd, FOutputDevice& Ar) override
 	{
 		if (FParse::Command(&Cmd, TEXT("exitembedded")))
@@ -1059,14 +1099,19 @@ public:
 		}
 		return false;
 	}
-
+#endif // UE_ALLOW_EXEC_COMMANDS
 } GEmbeddedCommunicationExec;
 
 
 void UGameEngine::Init(IEngineLoop* InEngineLoop)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UGameEngine::Init);
 	DECLARE_SCOPE_CYCLE_COUNTER(TEXT("UGameEngine Init"), STAT_GameEngineStartup, STATGROUP_LoadTime);
-	
+
+	if (!GIsEditor)
+	{
+		CmdExec = MakePimpl<FEngineConsoleCommandExecutor>(this);
+	}
 
 	// Call base.
 	UEngine::Init(InEngineLoop);
@@ -1080,11 +1125,19 @@ void UGameEngine::Init(IEngineLoop* InEngineLoop)
 #endif
 
 	// Load and apply user game settings
-	GetGameUserSettings()->LoadSettings();
-	GetGameUserSettings()->ApplyNonResolutionSettings();
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(InitGameUserSettings);
+
+		// Push recreate render state context to force single recreate instead of multiple recreates for each changed cvar
+		FGlobalComponentRecreateRenderStateContext Context;
+
+		GetGameUserSettings()->LoadSettings();
+		GetGameUserSettings()->ApplyNonResolutionSettings();
+	}
 
 	// Create game instance.  For GameEngine, this should be the only GameInstance that ever gets created.
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(InitGameInstance);
 		FSoftClassPath GameInstanceClassName = GetDefault<UGameMapsSettings>()->GameInstanceClass;
 		UClass* GameInstanceClass = (GameInstanceClassName.IsValid() ? LoadObject<UClass>(NULL, *GameInstanceClassName.ToString()) : UGameInstance::StaticClass());
 		
@@ -1118,6 +1171,7 @@ void UGameEngine::Init(IEngineLoop* InEngineLoop)
 	UGameViewportClient* ViewportClient = NULL;
 	if(GIsClient)
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(InitGameViewPortClient);
 		ViewportClient = NewObject<UGameViewportClient>(this, GameViewportClientClass);
 		ViewportClient->Init(*GameInstance->GetWorldContext(), GameInstance);
 		GameViewport = ViewportClient;
@@ -1129,6 +1183,7 @@ void UGameEngine::Init(IEngineLoop* InEngineLoop)
 	// Attach the viewport client to a new viewport.
 	if(ViewportClient)
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(AttachGameViewport);
 		// This must be created before any gameplay code adds widgets
 		bool bWindowAlreadyExists = GameViewportWindow.IsValid();
 		if (!bWindowAlreadyExists)
@@ -1150,6 +1205,7 @@ void UGameEngine::Init(IEngineLoop* InEngineLoop)
 			UE_LOG(LogEngine, Fatal,TEXT("%s"),*Error);
 		}
 
+		TRACE_CPUPROFILER_EVENT_SCOPE(BroadcastOnViewPortCreated);
 		UGameViewportClient::OnViewportCreated().Broadcast();
 	}
 
@@ -1161,6 +1217,7 @@ void UGameEngine::Init(IEngineLoop* InEngineLoop)
 
 void UGameEngine::Start()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UGameEngine::Start);
 	UE_LOG(LogInit, Display, TEXT("Starting Game."));
 
 	GameInstance->StartGameInstance();
@@ -1191,6 +1248,13 @@ void UGameEngine::PreExit()
 			// Shut down any existing game connections
 			ShutdownWorldNetDriver(World);
 
+			// Force mark all streaming levels for stream out
+			World->bIsLevelStreamingFrozen = false;
+			World->SetShouldForceUnloadStreamingLevels(true);
+
+			// Make sure there are no pending visibility requests.
+			World->FlushLevelStreaming(EFlushLevelStreamingType::Visibility);
+						
 			for (FActorIterator ActorIt(World); ActorIt; ++ActorIt)
 			{
 				ActorIt->RouteEndPlay(EEndPlayReason::Quit);
@@ -1201,7 +1265,6 @@ void UGameEngine::PreExit()
 				World->GetGameInstance()->Shutdown();
 			}
 
-			World->FlushLevelStreaming(EFlushLevelStreamingType::Visibility);
 			World->CleanupWorld();
 		}
 	}
@@ -1218,9 +1281,10 @@ void UGameEngine::FinishDestroy()
 	}
 
 	Super::FinishDestroy();
+
+	CmdExec.Reset();
 }
 
-//@todo: unify this and the driver version
 bool UGameEngine::NetworkRemapPath(UNetConnection* Connection, FString& Str, bool bReading /*= true*/)
 {
 	if (Connection == nullptr)
@@ -1322,104 +1386,6 @@ bool UGameEngine::NetworkRemapPath(UNetConnection* Connection, FString& Str, boo
 	return false;
 }
 
-bool UGameEngine::NetworkRemapPath(UNetDriver* Driver, FString& Str, bool bReading /*= true*/)
-{
-	if (Driver == nullptr)
-	{
-		return false;
-	}
-
-	UWorld* const World = Driver->GetWorld();
-
-	if (World == nullptr)
-	{
-		return false;
-	}
-
-	// If the driver is using a duplicate level ID, find the level collection using the driver
-	// and see if any of its levels match the prefixed name. If so, remap Str to that level's
-	// prefixed name.
-	if (Driver->GetDuplicateLevelID() != INDEX_NONE && bReading)
-	{
-		const FName PrefixedName = *UWorld::ConvertToPIEPackageName(Str, Driver->GetDuplicateLevelID());
-
-		for (const FLevelCollection& Collection : World->GetLevelCollections())
-		{
-			if (Collection.GetNetDriver() == Driver || Collection.GetDemoNetDriver() == Driver)
-			{
-				for (const ULevel* Level : Collection.GetLevels())
-				{
-					const UPackage* const CachedOutermost = Level ? Level->GetOutermost() : nullptr;
-					if (CachedOutermost && CachedOutermost->GetFName() == PrefixedName)
-					{
-						Str = PrefixedName.ToString();
-						return true;
-					}
-				}
-			}
-		}
-	}
-
-	if (!bReading)
-	{
-		return false;
-	}
-
-	// Try to find the level script objects and remap them for when demos are being replayed.
-	if (World->GetDemoNetDriver() == Driver && World->RemapCompiledScriptActor(Str))
-	{
-		return true;
-	}
-
-	// If the game has created multiple worlds, some of them may have prefixed package names,
-	// so we need to remap the world package and streaming levels for replay playback to work correctly.
-	FWorldContext& Context = GetWorldContextFromWorldChecked(World);
-	if (Context.PIEInstance == INDEX_NONE)
-	{
-		if (WorldList.Num() > 1)
-		{
-			// If this is not a PIE instance but sender is PIE, we need to strip the PIE prefix
-			const FString Stripped = UWorld::RemovePIEPrefix(Str);
-			if (!Stripped.Equals(Str, ESearchCase::CaseSensitive))
-			{
-				Str = Stripped;
-				return true;
-			}
-		}
-		return false;
-	}
-
-	// If the prefixed path matches the world package name or the name of a streaming level,
-	// return the prefixed name.
-	FString PackageNameOnly = Str;
-	FPackageName::TryConvertFilenameToLongPackageName(PackageNameOnly, PackageNameOnly);
-
-	const FString PrefixedFullName = UWorld::ConvertToPIEPackageName(Str, Context.PIEInstance);
-	const FString PrefixedPackageName = UWorld::ConvertToPIEPackageName(PackageNameOnly, Context.PIEInstance);
-	const FString WorldPackageName = World->GetOutermost()->GetName();
-
-	if (WorldPackageName == PrefixedPackageName)
-	{
-		Str = PrefixedFullName;
-		return true;
-	}
-
-	for (ULevelStreaming* StreamingLevel : World->GetStreamingLevels())
-	{
-		if (StreamingLevel != nullptr)
-		{
-			const FString StreamingLevelName = StreamingLevel->GetWorldAsset().GetLongPackageName();
-			if (StreamingLevelName == PrefixedPackageName)
-			{
-				Str = PrefixedFullName;
-				return true;
-			}
-		}
-	}
-
-	return false;
-}
-
 bool UGameEngine::ShouldDoAsyncEndOfFrameTasks() const
 {
 	return FApp::ShouldUseThreadingForPerformance() && ENamedThreads::GetRenderThread() != ENamedThreads::GameThread && !!GDoAsyncEndOfFrameTasks;
@@ -1429,6 +1395,7 @@ bool UGameEngine::ShouldDoAsyncEndOfFrameTasks() const
 	Command line executor.
 -----------------------------------------------------------------------------*/
 
+#if UE_ALLOW_EXEC_COMMANDS
 bool UGameEngine::Exec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar )
 {
 	if( FParse::Command( &Cmd,TEXT("REATTACHCOMPONENTS")) || FParse::Command( &Cmd,TEXT("REREGISTERCOMPONENTS")))
@@ -1468,8 +1435,7 @@ bool UGameEngine::Exec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar )
 		}
 		else
 		{
-			// ignore command on xbox one and ps4 as it will cause a crash
-			// ttp:321126
+			// ignore command on remaining platforms as it will cause a crash
 			return true;
 		}
 	}
@@ -1584,6 +1550,7 @@ bool UGameEngine::Exec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar )
 		return false;
 	}
 }
+#endif // UE_ALLOW_EXEC_COMMANDS
 
 bool UGameEngine::HandleExitCommand( const TCHAR* Cmd, FOutputDevice& Ar )
 {
@@ -1591,7 +1558,7 @@ bool UGameEngine::HandleExitCommand( const TCHAR* Cmd, FOutputDevice& Ar )
 
 	FGameDelegates::Get().GetExitCommandDelegate().Broadcast();
 
-	FPlatformMisc::RequestExit( 0 );
+	FPlatformMisc::RequestExit(false, TEXT("UGameEngine::HandleExitCommand"));
 	return true;
 }
 
@@ -1651,7 +1618,7 @@ float UGameEngine::GetMaxTickRate(float DeltaTime, bool bAllowFrameRateSmoothing
 			if( NetDriver && (NetDriver->GetNetMode() == NM_DedicatedServer || (NetDriver->GetNetMode() == NM_ListenServer && NetDriver->bClampListenServerTickRate)))
 			{
 				// We're a dedicated server, use the LAN or Net tick rate.
-				MaxTickRate = FMath::Clamp( NetDriver->NetServerMaxTickRate, 1, 1000 );
+				MaxTickRate = FMath::Clamp( NetDriver->GetNetServerMaxTickRate(), 1, 1000 );
 			}
 			/*else if( NetDriver && NetDriver->ServerConnection )
 			{
@@ -1723,7 +1690,7 @@ void UGameEngine::Tick( float DeltaSeconds, bool bIdleMode )
 	if (GIsClient && (GameViewport == nullptr) && FApp::CanEverRender())
 	{
 		UE_LOG(LogEngine, Log,  TEXT("All Windows Closed") );
-		FPlatformMisc::RequestExit( 0 );
+		FPlatformMisc::RequestExit(false, TEXT("UGameEngine::Tick.ViewportClosed"));
 		return;
 	}
 
@@ -1775,11 +1742,6 @@ void UGameEngine::Tick( float DeltaSeconds, bool bIdleMode )
 		FEngineAnalytics::Tick(DeltaSeconds);
 	}
 
-	{
-		SCOPE_TIME_GUARD(TEXT("UGameEngine::Tick - Studio Analytics"));
-		FStudioAnalytics::Tick(DeltaSeconds);
-	}
-
 	// -----------------------------------------------------
 	// Begin ticking worlds
 	// -----------------------------------------------------
@@ -1827,9 +1789,11 @@ void UGameEngine::Tick( float DeltaSeconds, bool bIdleMode )
 			// This won't work with actual level streaming though
 			if (Context.World()->AreAlwaysLoadedLevelsLoaded())
 			{
+				const bool bInsideTick = true;
+
 				// Update sky light first because it's considered direct lighting, sky diffuse will be visible in reflection capture indirect specular
 				USkyLightComponent::UpdateSkyCaptureContents(Context.World());
-				UReflectionCaptureComponent::UpdateReflectionCaptureContents(Context.World());
+				UReflectionCaptureComponent::UpdateReflectionCaptureContents(Context.World(), nullptr, false, false, bInsideTick);
 			}
 		}
 
@@ -1907,6 +1871,7 @@ void UGameEngine::Tick( float DeltaSeconds, bool bIdleMode )
 		GameViewport->Tick(DeltaSeconds);
 	}
 
+	FMoviePlayerProxy::BlockingForceFinished();
 	if (FPlatformProperties::SupportsWindowedMode())
 	{
 		// Hide the splashscreen and show the game window
@@ -1927,13 +1892,45 @@ void UGameEngine::Tick( float DeltaSeconds, bool bIdleMode )
 		}
 	}
 
+	const bool bRenderingSuspended = IsRenderingSuspended();
+
 	if (!bIdleMode && !IsRunningDedicatedServer() && !IsRunningCommandlet() && FEmbeddedCommunication::IsAwakeForRendering())
 	{
-		// Render everything.
-		RedrawViewports();
+		if (!bRenderingSuspended)
+		{
+			// Render everything.
+			RedrawViewports();
 
-		// Some tasks can only be done once we finish all scenes/viewports
-		GetRendererModule().PostRenderAllViewports();
+			// CPU/GPU synchronization is achieved by calling EndDrawingViewport. If no viewports are updated (because the game is hidden),
+			// we need to explicitly wait for the GPU to finish here, to prevent the CPU from submitting work faster than the GPU
+			// can process it, which leads to an unbounded accumulation of resources.
+			if (GMinimizedSyncDrawToGPU && AreAllWindowsHidden())
+			{
+				ENQUEUE_RENDER_COMMAND(SubmitAndBlockUntilGPUIdle_MinimizedRealtime)([](FRHICommandListImmediate& RHICmdList)
+				{
+					RHICmdList.BlockUntilGPUIdle();
+				});
+			}
+			else
+			{
+				// Some tasks can only be done once we finish all scenes/viewports
+				GetRendererModule().PostRenderAllViewports();
+			}
+		}
+		else
+		{
+			// Still need to call UpdateLevelStreaming() even when not rendering
+			if (GameViewport && GameViewport->Viewport)
+			{
+				if (FViewportClient* ViewportClient = GameViewport->Viewport->GetClient())
+				{
+					if (UWorld* World = ViewportClient->GetWorld())
+					{
+						World->UpdateLevelStreaming();
+					}
+				}
+			}
+		}
 	}
 
 	if( GIsClient )
@@ -1967,6 +1964,11 @@ void UGameEngine::Tick( float DeltaSeconds, bool bIdleMode )
 			FRDGBuilder::TickPoolElements();
 			ICustomResourcePool::TickPoolElements(RHICmdList);
 		});
+
+		if (bRenderingSuspended)
+		{
+			GetRendererModule().PerFrameCleanupIfSkipRenderer();
+		}
 	}
 
 #if WITH_EDITOR
@@ -2040,5 +2042,6 @@ void UGameEngine::HandleTravelFailure_NotifyGameInstance(UWorld* World, ETravelF
 void UGameEngine::HandleBrowseToDefaultMapFailure(FWorldContext& Context, const FString& TextURL, const FString& Error)
 {
 	Super::HandleBrowseToDefaultMapFailure(Context, TextURL, Error);
-	FPlatformMisc::RequestExit(false);
+	FPlatformMisc::RequestExit(false, TEXT("UGameEngine::HandleBrowseToDefaultMapFailure"));
 }
+

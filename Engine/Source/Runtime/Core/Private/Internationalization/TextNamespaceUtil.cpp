@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Internationalization/TextNamespaceUtil.h"
+#include "Misc/Guid.h"
 
 FString TextNamespaceUtil::BuildFullNamespace(const FString& InTextNamespace, const FString& InPackageNamespace, const bool bAlwaysApplyPackageNamespace)
 {
@@ -10,7 +11,7 @@ FString TextNamespaceUtil::BuildFullNamespace(const FString& InTextNamespace, co
 	{
 		FString FullNamespace = InTextNamespace;
 
-		FullNamespace.RemoveAt(StartMarkerIndex + 1, EndMarkerIndex - StartMarkerIndex - 1, /*bAllowShrinking*/false);
+		FullNamespace.RemoveAt(StartMarkerIndex + 1, EndMarkerIndex - StartMarkerIndex - 1, EAllowShrinking::No);
 		FullNamespace.InsertAt(StartMarkerIndex + 1, InPackageNamespace);
 
 		return FullNamespace;
@@ -55,9 +56,31 @@ void TextNamespaceUtil::StripPackageNamespaceInline(FString& InOutTextNamespace)
 	int32 EndMarkerIndex = InOutTextNamespace.Len() - 1;
 	if (InOutTextNamespace.Len() > 0 && InOutTextNamespace[EndMarkerIndex] == PackageNamespaceEndMarker && InOutTextNamespace.FindLastChar(PackageNamespaceStartMarker, StartMarkerIndex))
 	{
-		InOutTextNamespace.RemoveAt(StartMarkerIndex, (EndMarkerIndex - StartMarkerIndex) + 1, /*bAllowShrinking*/false);
+		InOutTextNamespace.RemoveAt(StartMarkerIndex, (EndMarkerIndex - StartMarkerIndex) + 1, EAllowShrinking::No);
 		InOutTextNamespace.TrimEndInline();
 	}
+}
+
+FText TextNamespaceUtil::CopyTextToPackage(const FText& InText, const FString& InPackageNamespace, const ETextCopyMethod InCopyMethod, const bool bAlwaysApplyPackageNamespace)
+{
+#if USE_STABLE_LOCALIZATION_KEYS
+	if (!InPackageNamespace.IsEmpty() && (InCopyMethod == ETextCopyMethod::NewKey || InCopyMethod == ETextCopyMethod::PreserveKey))
+	{
+		const TOptional<FString> TextNamespace = FTextInspector::GetNamespace(InText);
+		const TOptional<FString> TextKey = FTextInspector::GetKey(InText);
+
+		if (TextNamespace.IsSet() && TextKey.IsSet())
+		{
+			const FString FullNamespace = BuildFullNamespace(TextNamespace.GetValue(), InPackageNamespace, bAlwaysApplyPackageNamespace);
+			if (!TextNamespace.GetValue().Equals(FullNamespace, ESearchCase::CaseSensitive))
+			{
+				return FText::ChangeKey(FullNamespace, InCopyMethod == ETextCopyMethod::NewKey ? FGuid::NewGuid().ToString() : TextKey.GetValue(), InText);
+			}
+		}
+	}
+#endif	// USE_STABLE_LOCALIZATION_KEYS
+
+	return InText;
 }
 
 #if USE_STABLE_LOCALIZATION_KEYS

@@ -6,6 +6,8 @@
 #include "Engine/World.h"
 #include "GameFramework/Controller.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PawnNoiseEmitterComponent)
+
 UPawnNoiseEmitterComponent::UPawnNoiseEmitterComponent(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
@@ -44,7 +46,7 @@ void UPawnNoiseEmitterComponent::MakeNoise(AActor* NoiseMaker, float Loudness, c
 	}
 
 	// only emit sounds from pawns with controllers
-	if (!PawnOwner || PawnOwner->IsPendingKill() || !PawnOwner->Controller)
+	if (!PawnOwner || !IsValidChecked(PawnOwner) || !PawnOwner->Controller)
 	{
 		return;
 	}
@@ -100,3 +102,4 @@ float UPawnNoiseEmitterComponent::GetLastNoiseTime(bool bSourceWithinNoiseEmitte
 
 	return LastRemoteNoiseTime;
 }
+

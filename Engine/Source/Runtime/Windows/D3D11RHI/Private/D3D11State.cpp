@@ -5,14 +5,18 @@
 =============================================================================*/
 
 #include "D3D11RHIPrivate.h"
+#include "RHIUtilities.h"
 
 // Cache of Sampler States; we store pointers to both as we don't want the TMap to be artificially
 // modifying ref counts if not needed; so we manage that ourselves
 static TMap<ID3D11SamplerState*, FD3D11SamplerState*> GSamplerStateCache;
+static FCriticalSection GSamplerStateCacheCS;
 
 
 void EmptyD3DSamplerStateCache()
 {
+	FScopeLock Lock(&GSamplerStateCacheCS);
+
 	for (auto Iter = GSamplerStateCache.CreateIterator(); Iter; ++Iter )
 	{
 		auto* State = Iter.Value();
@@ -180,6 +184,7 @@ FSamplerStateRHIRef FD3D11DynamicRHI::RHICreateSamplerState(const FSamplerStateI
 	TRefCountPtr<ID3D11SamplerState> SamplerStateHandle;
 	VERIFYD3D11RESULT_EX(Direct3DDevice->CreateSamplerState(&SamplerDesc, SamplerStateHandle.GetInitReference()), Direct3DDevice);
 
+	FScopeLock Lock(&GSamplerStateCacheCS);
 	FD3D11SamplerState** Found = GSamplerStateCache.Find(SamplerStateHandle);
 	if (Found)
 	{
@@ -204,7 +209,7 @@ FRasterizerStateRHIRef FD3D11DynamicRHI::RHICreateRasterizerState(const FRasteri
 	RasterizerDesc.SlopeScaledDepthBias = Initializer.SlopeScaleDepthBias;
 	RasterizerDesc.FrontCounterClockwise = true;
 	RasterizerDesc.DepthBias = FMath::FloorToInt(Initializer.DepthBias * (float)(1 << 24));
-	RasterizerDesc.DepthClipEnable = true;
+	RasterizerDesc.DepthClipEnable = Initializer.DepthClipMode == ERasterizerDepthClipMode::DepthClip;
 	RasterizerDesc.MultisampleEnable = Initializer.bAllowMSAA;
 	RasterizerDesc.ScissorEnable = true;
 

@@ -1,10 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Rendering/SkeletalMeshVertexClothBuffer.h"
+#include "Containers/ClosableMpscQueue.h"
 #include "Rendering/SkeletalMeshVertexBuffer.h"
 #include "EngineUtils.h"
-#include "SkeletalMeshTypes.h"
+#include "Experimental/Containers/HazardPointer.h"
 #include "ProfilingDebugging/LoadTimeTracker.h"
+#include "RHIResourceUpdates.h"
+#include "RHI.h"
 
 /**
 * Constructor
@@ -72,53 +75,49 @@ void FSkeletalMeshVertexClothBuffer::ClearMetaData()
 	NumVertices = 0;
 }
 
-template <bool bRenderThread>
-FVertexBufferRHIRef FSkeletalMeshVertexClothBuffer::CreateRHIBuffer_Internal()
+FBufferRHIRef FSkeletalMeshVertexClothBuffer::CreateRHIBuffer(FRHICommandListBase& RHICmdList)
 {
-	if (NumVertices)
+	return FRenderResource::CreateRHIBuffer(RHICmdList, VertexData, NumVertices, BUF_Static | BUF_ShaderResource, TEXT("FSkeletalMeshVertexClothBuffer"));
+}
+
+FBufferRHIRef FSkeletalMeshVertexClothBuffer::CreateRHIBuffer_RenderThread()
+{
+	return CreateRHIBuffer(FRHICommandListImmediate::Get());
+}
+
+FBufferRHIRef FSkeletalMeshVertexClothBuffer::CreateRHIBuffer_Async()
+{
+	FRHIAsyncCommandList CommandList;
+	return CreateRHIBuffer(*CommandList);
+}
+
+void FSkeletalMeshVertexClothBuffer::InitRHIForStreaming(FRHIBuffer* IntermediateBuffer, FRHIResourceUpdateBatcher& Batcher)
+{
+	if (VertexBufferRHI && IntermediateBuffer)
 	{
-		FResourceArrayInterface* ResourceArray = VertexData ? VertexData->GetResourceArray() : nullptr;
-		const uint32 SizeInBytes = ResourceArray ? ResourceArray->GetResourceDataSize() : 0;
-		const uint32 BuffFlags = BUF_Static | BUF_ShaderResource;
-		FRHIResourceCreateInfo CreateInfo(ResourceArray);
-		CreateInfo.bWithoutNativeResource = !VertexData;
-
-		if (bRenderThread)
-		{
-			return RHICreateVertexBuffer(SizeInBytes, BuffFlags, CreateInfo);
-		}
-		else
-		{
-			return RHIAsyncCreateVertexBuffer(SizeInBytes, BuffFlags, CreateInfo);
-		}
+		Batcher.QueueUpdateRequest(VertexBufferRHI, IntermediateBuffer);
 	}
-	return nullptr;
 }
 
-FVertexBufferRHIRef FSkeletalMeshVertexClothBuffer::CreateRHIBuffer_RenderThread()
+void FSkeletalMeshVertexClothBuffer::ReleaseRHIForStreaming(FRHIResourceUpdateBatcher& Batcher)
 {
-	return CreateRHIBuffer_Internal<true>();
-}
-
-FVertexBufferRHIRef FSkeletalMeshVertexClothBuffer::CreateRHIBuffer_Async()
-{
-	return CreateRHIBuffer_Internal<false>();
+	if (VertexBufferRHI)
+	{
+		Batcher.QueueUpdateRequest(VertexBufferRHI, nullptr);
+	}
 }
 
 /**
 * Initialize the RHI resource for this vertex buffer
 */
-void FSkeletalMeshVertexClothBuffer::InitRHI()
+void FSkeletalMeshVertexClothBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	SCOPED_LOADTIMER(FSkeletalMeshVertexClothBuffer_InitRHI);
 
-	VertexBufferRHI = CreateRHIBuffer_RenderThread();
-
+	VertexBufferRHI = CreateRHIBuffer(RHICmdList);
 	if (VertexBufferRHI)
 	{
-		// When VertexData is null, this buffer hasn't been streamed in yet. We still need to create a FRHIShaderResourceView which will be
-		// cached in a vertex factory uniform buffer later. The nullptr tells the RHI that the SRV doesn't view on anything yet.
-		VertexBufferSRV = RHICreateShaderResourceView(FShaderResourceViewInitializer(VertexData ? VertexBufferRHI : nullptr, PF_A32B32G32R32F));
+		VertexBufferSRV = RHICmdList.CreateShaderResourceView(VertexBufferRHI, 16, PF_A32B32G32R32F);
 	}
 }
 
@@ -139,14 +138,14 @@ void FSkeletalMeshVertexClothBuffer::ReleaseRHI()
 */
 FArchive& operator<<(FArchive& Ar, FSkeletalMeshVertexClothBuffer& VertexBuffer)
 {
-	FStripDataFlags StripFlags(Ar, 0, VER_UE4_STATIC_SKELETAL_MESH_SERIALIZATION_FIX);
+	FStripDataFlags StripFlags(Ar, 0, FPackageFileVersion::CreateUE4Version(VER_UE4_STATIC_SKELETAL_MESH_SERIALIZATION_FIX));
 
 	if (Ar.IsLoading())
 	{
 		VertexBuffer.AllocateData();
 	}
 
-	if (!StripFlags.IsDataStrippedForServer() || Ar.IsCountingMemory())
+	if (!StripFlags.IsAudioVisualDataStripped() || Ar.IsCountingMemory())
 	{
 		if (VertexBuffer.VertexData != NULL)
 		{
@@ -174,7 +173,7 @@ void FSkeletalMeshVertexClothBuffer::SerializeMetaData(FArchive& Ar)
 * Initializes the buffer with the given vertices.
 * @param InVertices - The vertices to initialize the buffer with.
 */
-void FSkeletalMeshVertexClothBuffer::Init(const TArray<FMeshToMeshVertData>& InMappingData, const TArray<uint64>& InClothIndexMapping)
+void FSkeletalMeshVertexClothBuffer::Init(const TArray<FMeshToMeshVertData>& InMappingData, const TArray<FClothBufferIndexMapping>& InClothIndexMapping)
 {
 	// Allocate new data
 	AllocateData();

@@ -1,15 +1,22 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 /*=============================================================================
-	MallocTTB.cpp: IntelTTB Malloc
+	MallocMimalloc.cpp: MiMalloc
 =============================================================================*/
 
 #include "HAL/MallocMimalloc.h"
-#include "Math/UnrealMathUtility.h"
-#include "HAL/UnrealMemory.h"
 
 // Only use for supported platforms
-#if PLATFORM_SUPPORTS_MIMALLOC && MIMALLOC_ALLOCATOR_ALLOWED
+#if MIMALLOC_ENABLED
+
+#include "HAL/UnrealMemory.h"
+#include "HAL/IConsoleManager.h"
+#include "Math/UnrealMathUtility.h"
+#include "Thirdparty/IncludeMiMalloc.h"
+
+#if PLATFORM_MAC
+#include "Templates/AlignmentTemplates.h"
+#endif
 
 /** Value we fill a memory block with after it is free, in UE_BUILD_DEBUG **/
 #define DEBUG_FILL_FREED (0xdd)
@@ -17,15 +24,32 @@
 /** Value we fill a new memory block with, in UE_BUILD_DEBUG **/
 #define DEBUG_FILL_NEW (0xcd)
 
-// Statically linked tbbmalloc requires tbbmalloc_debug.lib in debug
-#if UE_BUILD_DEBUG && !defined(NDEBUG)	// Use !defined(NDEBUG) to check to see if we actually are linking with Debug third party libraries (bDebugBuildsActuallyUseDebugCRT)
-	#ifndef MIMALLOC_USE_DEBUG
-		#define MIMALLOC_USE_DEBUG 1
-	#endif
-#endif
-THIRD_PARTY_INCLUDES_START
-#include <mimalloc.h>
-THIRD_PARTY_INCLUDES_END
+// Dramatically reduce memory zeroing and page faults during alloc intense workloads
+// by keeping freed pages for a little while instead of releasing them
+// right away to the OS, effectively acting like a scratch buffer 
+// until pages are both freed and inactive for the delay specified
+// in milliseconds.
+int32 GMiMallocMemoryResetDelay = 10000;
+
+void ApplyMiMallocMemoryResetDelayChange(IConsoleVariable* InConsolveVariable = nullptr)
+{
+	mi_option_set(mi_option_reset_delay, GMiMallocMemoryResetDelay);
+}
+
+static FAutoConsoleVariableRef CVarMiMallocMemoryResetDelay(
+	TEXT("mi.MemoryResetDelay"),
+	GMiMallocMemoryResetDelay,
+	TEXT("The time in milliseconds to keep recently freed memory pages inside the process for reuse. This can dramatically reduce OS overhead of memory zeroing and page faults during alloc intense workloads."),
+	FConsoleVariableDelegate::CreateStatic(&ApplyMiMallocMemoryResetDelayChange),
+	ECVF_Default
+);
+
+FMallocMimalloc::FMallocMimalloc()
+{
+	FPlatformMemory::MiMallocInit();
+
+	ApplyMiMallocMemoryResetDelayChange();
+}
 
 void* FMallocMimalloc::TryMalloc( SIZE_T Size, uint32 Alignment )
 {
@@ -102,10 +126,9 @@ void* FMallocMimalloc::TryRealloc(void* Ptr, SIZE_T NewSize, uint32 Alignment)
 	}
 
 #if PLATFORM_MAC
-#error TODO
-	// macOS expects all allocations to be aligned to 16 bytes, but TBBs default alignment is 8, so on Mac we always have to use scalable_aligned_realloc
+	// macOS expects all allocations to be aligned to 16 bytes, so on Mac we always have to use mi_realloc_aligned
 	Alignment = AlignArbitrary(FMath::Max((uint32)16, Alignment), (uint32)16);
-	NewPtr	= scalable_aligned_realloc(Ptr, NewSize, Alignment);
+	NewPtr	= mi_realloc_aligned(Ptr, NewSize, Alignment);
 #else
 	if (Alignment != DEFAULT_ALIGNMENT)
 	{
@@ -159,6 +182,10 @@ bool FMallocMimalloc::GetAllocationSize(void *Original, SIZE_T &SizeOut)
 
 void FMallocMimalloc::Trim(bool bTrimThreadCaches)
 {
+	mi_collect(bTrimThreadCaches);
 }
 
-#endif
+#undef DEBUG_FILL_FREED
+#undef DEBUG_FILL_NEW
+
+#endif // MIMALLOC_ENABLED

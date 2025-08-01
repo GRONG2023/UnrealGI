@@ -2,13 +2,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
-using System.Diagnostics;
 using System.Linq;
+using System.Text.Json;
 using System.Xml.Serialization;
-using System.ComponentModel;
-using System.Runtime.Serialization;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using UnrealBuildBase;
 
 namespace UnrealBuildTool
 {
@@ -74,6 +74,7 @@ namespace UnrealBuildTool
 		/// </summary>
 		private BuildProduct()
 		{
+			Path = null!;
 		}
 
 		/// <summary>
@@ -154,6 +155,7 @@ namespace UnrealBuildTool
 		/// </summary>
 		private RuntimeDependency()
 		{
+			Path = null!;
 		}
 
 		/// <summary>
@@ -258,12 +260,12 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// Path to the project file for this target
 		/// </summary>
-		public FileReference ProjectFile;
+		public FileReference? ProjectFile;
 
 		/// <summary>
 		/// The project directory
 		/// </summary>
-		public DirectoryReference ProjectDir;
+		public DirectoryReference? ProjectDir;
 
 		/// <summary>
 		/// The name of this target
@@ -278,7 +280,7 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// Which platform the target is compiled for
 		/// </summary>
-		public string Architecture;
+		public UnrealArchitectures Architectures;
 
 		/// <summary>
 		/// Which configuration this target is compiled in
@@ -291,6 +293,11 @@ namespace UnrealBuildTool
 		public TargetType TargetType;
 
 		/// <summary>
+		/// Whether it's a low level tests target
+		/// </summary>
+		public bool IsTestTarget;
+
+		/// <summary>
 		/// Version information for this target.
 		/// </summary>
 		public BuildVersion Version;
@@ -298,7 +305,12 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// The exectuable to launch for this target
 		/// </summary>
-		public FileReference Launch;
+		public FileReference? Launch;
+
+		/// <summary>
+		/// The console subsystem/commmandlet exectuable to launch for this target
+		/// </summary>
+		public FileReference? LaunchCmd;
 
 		/// <summary>
 		/// The build products which are part of this target
@@ -316,16 +328,14 @@ namespace UnrealBuildTool
 		public Dictionary<string, bool> PluginNameToEnabledState = new Dictionary<string, bool>();
 
 		/// <summary>
+		/// All plugins that were built via the target rules.
+		/// </summary>
+		public List<string> BuildPlugins = new List<string>();
+
+		/// <summary>
 		/// Additional build properties passed through from the module rules
 		/// </summary>
 		public List<ReceiptProperty> AdditionalProperties = new List<ReceiptProperty>();
-
-		/// <summary>
-		/// Default constructor
-		/// </summary>
-		public TargetReceipt()
-		{
-		}
 
 		/// <summary>
 		/// Constructor
@@ -336,8 +346,9 @@ namespace UnrealBuildTool
 		/// <param name="InPlatform">Platform for the target being compiled</param>
 		/// <param name="InConfiguration">Configuration of the target being compiled</param>
 		/// <param name="InVersion">Version information for the target</param>
-		/// <param name="InArchitecture">Architecture information for the target</param>
-		public TargetReceipt(FileReference InProjectFile, string InTargetName, TargetType InTargetType, UnrealTargetPlatform InPlatform, UnrealTargetConfiguration InConfiguration, BuildVersion InVersion, string InArchitecture)
+		/// <param name="InArchitectures">Architecture information for the target</param>
+		/// <param name="InIsTestTarget">Whether it's a target for low level tests</param>
+		public TargetReceipt(FileReference? InProjectFile, string InTargetName, TargetType InTargetType, UnrealTargetPlatform InPlatform, UnrealTargetConfiguration InConfiguration, BuildVersion InVersion, UnrealArchitectures InArchitectures, bool InIsTestTarget)
 		{
 			ProjectFile = InProjectFile;
 			ProjectDir = DirectoryReference.FromFile(InProjectFile);
@@ -346,32 +357,8 @@ namespace UnrealBuildTool
 			Configuration = InConfiguration;
 			TargetType = InTargetType;
 			Version = InVersion;
-			Architecture = InArchitecture;
-		}
-
-		/// <summary>
-		/// Copy constructor
-		/// </summary>
-		/// <param name="Other">Receipt to copy from</param>
-		public TargetReceipt(TargetReceipt Other)
-		{
-			Launch = Other.Launch;
-			foreach (BuildProduct OtherBuildProduct in Other.BuildProducts)
-			{
-				BuildProducts.Add(new BuildProduct(OtherBuildProduct));
-			}
-			foreach (RuntimeDependency OtherRuntimeDependency in Other.RuntimeDependencies)
-			{
-				RuntimeDependencies.Add(new RuntimeDependency(OtherRuntimeDependency));
-			}
-			foreach (KeyValuePair<string, bool> Pair in Other.PluginNameToEnabledState)
-			{
-				if (!PluginNameToEnabledState.ContainsKey(Pair.Key))
-				{
-					PluginNameToEnabledState.Add(Pair.Key, Pair.Value);
-				}
-			}
-			AdditionalProperties.AddRange(Other.AdditionalProperties);
+			Architectures = InArchitectures;
+			IsTestTarget = InIsTestTarget;
 		}
 
 		/// <summary>
@@ -411,6 +398,13 @@ namespace UnrealBuildTool
 					PluginNameToEnabledState.Add(Pair.Key, Pair.Value);
 				}
 			}
+			foreach (string PluginName in Other.BuildPlugins)
+			{
+				if (!BuildPlugins.Contains(PluginName))
+				{
+					BuildPlugins.Add(PluginName);
+				}
+			}
 		}
 
 		/// <summary>
@@ -420,7 +414,7 @@ namespace UnrealBuildTool
 		/// <param name="EngineDir">Value of the $(EngineDir) variable.</param>
 		/// <param name="ProjectDir">Value of the $(ProjectDir) variable.</param>
 		/// <returns>Converted path for the file.</returns>
-		static string InsertPathVariables(FileReference File, DirectoryReference EngineDir, DirectoryReference ProjectDir)
+		static string InsertPathVariables(FileReference File, DirectoryReference EngineDir, DirectoryReference? ProjectDir)
 		{
 			if (File.IsUnderDirectory(EngineDir))
 			{
@@ -443,16 +437,16 @@ namespace UnrealBuildTool
 		/// <param name="EngineDir">Value of the $(EngineDir) variable.</param>
 		/// <param name="ProjectDir">Value of the $(ProjectDir) variable.</param>
 		/// <returns>Converted path for the file.</returns>
-		static FileReference ExpandPathVariables(string Path, DirectoryReference EngineDir, DirectoryReference ProjectDir)
+		static FileReference ExpandPathVariables(string Path, DirectoryReference EngineDir, DirectoryReference? ProjectDir)
 		{
 			const string EnginePrefix = "$(EngineDir)";
-			if(Path.StartsWith(EnginePrefix, StringComparison.InvariantCultureIgnoreCase))
+			if (Path.StartsWith(EnginePrefix, StringComparison.InvariantCultureIgnoreCase))
 			{
 				return new FileReference(EngineDir.FullName + Path.Substring(EnginePrefix.Length));
 			}
 
 			const string ProjectPrefix = "$(ProjectDir)";
-			if(ProjectDir != null && Path.StartsWith(ProjectPrefix, StringComparison.InvariantCultureIgnoreCase))
+			if (ProjectDir != null && Path.StartsWith(ProjectPrefix, StringComparison.InvariantCultureIgnoreCase))
 			{
 				return new FileReference(ProjectDir.FullName + Path.Substring(ProjectPrefix.Length));
 			}
@@ -467,17 +461,18 @@ namespace UnrealBuildTool
 		/// <param name="TargetName">The target being built</param>
 		/// <param name="Platform">The target platform</param>
 		/// <param name="Configuration">The target configuration</param>
-		/// <param name="BuildArchitecture">The architecture being built</param>
+		/// <param name="BuildArchitectures">The architecture being built</param>
 		/// <returns>Path to the receipt for this target</returns>
-		public static FileReference GetDefaultPath(DirectoryReference BaseDir, string TargetName, UnrealTargetPlatform Platform, UnrealTargetConfiguration Configuration, string BuildArchitecture)
+		public static FileReference GetDefaultPath(DirectoryReference BaseDir, string TargetName, UnrealTargetPlatform Platform, UnrealTargetConfiguration Configuration, UnrealArchitectures? BuildArchitectures)
 		{
 			// Get the architecture suffix. Platforms have the option of overriding whether to include this string in filenames.
 			string ArchitectureSuffix = "";
-			if(!String.IsNullOrEmpty(BuildArchitecture) && UEBuildPlatform.GetBuildPlatform(Platform).RequiresArchitectureSuffix())
+			// @todo disallow null here?
+			if (BuildArchitectures != null && UnrealArchitectureConfig.ForPlatform(Platform).RequiresArchitectureFilenames(BuildArchitectures))
 			{
-				ArchitectureSuffix = BuildArchitecture;
+				ArchitectureSuffix = BuildArchitectures.ToString();
 			}
-		
+
 			// Build the output filename
 			if (String.IsNullOrEmpty(ArchitectureSuffix) && Configuration == UnrealTargetConfiguration.Development)
 			{
@@ -530,7 +525,7 @@ namespace UnrealBuildTool
 		/// <param name="Location">Filename to read from</param>
 		public static TargetReceipt Read(FileReference Location)
 		{
-			return Read(Location, UnrealBuildTool.EngineDirectory);
+			return Read(Location, Unreal.EngineDirectory);
 		}
 
 		/// <summary>
@@ -549,17 +544,17 @@ namespace UnrealBuildTool
 			UnrealTargetConfiguration Configuration = RawObject.GetEnumField<UnrealTargetConfiguration>("Configuration");
 
 			// Try to read the build version
-			BuildVersion Version;
+			BuildVersion? Version;
 			if (!BuildVersion.TryParse(RawObject.GetObjectField("Version"), out Version))
 			{
-				throw new JsonParseException("Invalid 'Version' field");
+				throw new JsonException("Invalid 'Version' field");
 			}
 
 			// Read the project path
-			FileReference ProjectFile;
+			FileReference? ProjectFile;
 
-			string RelativeProjectFile;
-			if(RawObject.TryGetStringField("Project", out RelativeProjectFile))
+			string? RelativeProjectFile;
+			if (RawObject.TryGetStringField("Project", out RelativeProjectFile))
 			{
 				ProjectFile = FileReference.Combine(Location.Directory, RelativeProjectFile);
 			}
@@ -569,39 +564,52 @@ namespace UnrealBuildTool
 			}
 
 			// Read the launch executable
-			string Architecture;
-			if (!RawObject.TryGetStringField("Architecture", out Architecture))
+			string? Architecture;
+			UnrealArchitectures Architectures;
+			if (RawObject.TryGetStringField("Architecture", out Architecture))
 			{
-				Architecture = "";
+				Architectures = UnrealArchitectures.FromString(Architecture, Platform)!;
+			}
+			else
+			{
+				// @todo this doesn't necessarily match how it was compiled - should this be an error case?
+				Architectures = UnrealArchitectureConfig.ForPlatform(Platform).ActiveArchitectures(ProjectFile, TargetName);
 			}
 
+			bool IsTestTarget;
+			RawObject.TryGetBoolField("IsTestTarget", out IsTestTarget);
 
 			// Create the receipt
-			TargetReceipt Receipt = new TargetReceipt(ProjectFile, TargetName, TargetType, Platform, Configuration, Version, Architecture);
+			TargetReceipt Receipt = new TargetReceipt(ProjectFile, TargetName, TargetType, Platform, Configuration, Version, Architectures, IsTestTarget);
 
 			// Get the project directory
-			DirectoryReference ProjectDir = Receipt.ProjectDir;
+			DirectoryReference? ProjectDir = Receipt.ProjectDir;
 
 			// Read the launch executable
-			string Launch;
-			if(RawObject.TryGetStringField("Launch", out Launch))
+			string? Launch;
+			if (RawObject.TryGetStringField("Launch", out Launch))
 			{
 				Receipt.Launch = ExpandPathVariables(Launch, EngineDir, ProjectDir);
 			}
+			string? LaunchCmd;
+			if (RawObject.TryGetStringField("LaunchCmd", out LaunchCmd))
+			{
+				Receipt.LaunchCmd = ExpandPathVariables(LaunchCmd, EngineDir, ProjectDir);
+			}
 
 			// Read the build products
-			JsonObject[] BuildProductObjects;
+			JsonObject[]? BuildProductObjects;
 			if (RawObject.TryGetObjectArrayField("BuildProducts", out BuildProductObjects))
 			{
 				foreach (JsonObject BuildProductObject in BuildProductObjects)
 				{
-					string Path;
+					string? Path;
 					BuildProductType Type;
 					if (BuildProductObject.TryGetStringField("Path", out Path) && BuildProductObject.TryGetEnumField("Type", out Type))
 					{
 						FileReference File = ExpandPathVariables(Path, EngineDir, ProjectDir);
 
-						string Module;
+						string? Module;
 						BuildProductObject.TryGetStringField("Module", out Module);
 
 						Receipt.AddBuildProduct(File, Type);
@@ -610,26 +618,26 @@ namespace UnrealBuildTool
 			}
 
 			// Read the runtime dependencies
-			JsonObject[] RuntimeDependencyObjects;
+			JsonObject[]? RuntimeDependencyObjects;
 			if (RawObject.TryGetObjectArrayField("RuntimeDependencies", out RuntimeDependencyObjects))
 			{
 				foreach (JsonObject RuntimeDependencyObject in RuntimeDependencyObjects)
 				{
-					string Path;
+					string? Path;
 					if (RuntimeDependencyObject.TryGetStringField("Path", out Path))
 					{
 						FileReference File = ExpandPathVariables(Path, EngineDir, ProjectDir);
 
 						StagedFileType Type;
-						if(!RuntimeDependencyObject.TryGetEnumField("Type", out Type))
+						if (!RuntimeDependencyObject.TryGetEnumField("Type", out Type))
 						{
 							// Previous format included an optional IgnoreIfMissing flag, which was only used for debug files. We can explicitly reference them as DebugNonUFS files now.
 							bool bIgnoreIfMissing;
-							if(RuntimeDependencyObject.TryGetBoolField("IgnoreIfMissing", out bIgnoreIfMissing))
+							if (RuntimeDependencyObject.TryGetBoolField("IgnoreIfMissing", out bIgnoreIfMissing))
 							{
 								bIgnoreIfMissing = false;
 							}
-							Type = bIgnoreIfMissing? StagedFileType.DebugNonUFS : StagedFileType.NonUFS;
+							Type = bIgnoreIfMissing ? StagedFileType.DebugNonUFS : StagedFileType.NonUFS;
 						}
 
 						Receipt.RuntimeDependencies.Add(File, Type);
@@ -638,12 +646,12 @@ namespace UnrealBuildTool
 			}
 
 			// Read the enabled/disabled plugins
-			JsonObject[] PluginObjects;
+			JsonObject[]? PluginObjects;
 			if (RawObject.TryGetObjectArrayField("Plugins", out PluginObjects))
 			{
 				foreach (JsonObject PluginObject in PluginObjects)
 				{
-					string PluginName;
+					string? PluginName;
 					if (PluginObject.TryGetStringField("Name", out PluginName))
 					{
 						bool PluginEnabled;
@@ -655,17 +663,24 @@ namespace UnrealBuildTool
 				}
 			}
 
-			// Read the additional properties
-			JsonObject[] AdditionalPropertyObjects;
-			if(RawObject.TryGetObjectArrayField("AdditionalProperties", out AdditionalPropertyObjects))
+			// Read the build plugins
+			string[]? BuildPlugins;
+			if (RawObject.TryGetStringArrayField("BuildPlugins", out BuildPlugins))
 			{
-				foreach(JsonObject AdditionalPropertyObject in AdditionalPropertyObjects)
+				Receipt.BuildPlugins.AddAll(BuildPlugins);
+			}
+
+			// Read the additional properties
+			JsonObject[]? AdditionalPropertyObjects;
+			if (RawObject.TryGetObjectArrayField("AdditionalProperties", out AdditionalPropertyObjects))
+			{
+				foreach (JsonObject AdditionalPropertyObject in AdditionalPropertyObjects)
 				{
-					string Name;
-					if(AdditionalPropertyObject.TryGetStringField("Name", out Name))
+					string? Name;
+					if (AdditionalPropertyObject.TryGetStringField("Name", out Name))
 					{
-						string Value;
-						if(AdditionalPropertyObject.TryGetStringField("Value", out Value))
+						string? Value;
+						if (AdditionalPropertyObject.TryGetStringField("Value", out Value))
 						{
 							Receipt.AdditionalProperties.Add(new ReceiptProperty(Name, Value));
 						}
@@ -682,9 +697,9 @@ namespace UnrealBuildTool
 		/// <param name="Location">Filename to read from</param>
 		/// <param name="Receipt">If successful, the receipt that was read</param>
 		/// <returns>True if successful</returns>
-		public static bool TryRead(FileReference Location, out TargetReceipt Receipt)
+		public static bool TryRead(FileReference Location, [NotNullWhen(true)] out TargetReceipt? Receipt)
 		{
-			return TryRead(Location, UnrealBuildTool.EngineDirectory, out Receipt);
+			return TryRead(Location, Unreal.EngineDirectory, out Receipt);
 		}
 
 		/// <summary>
@@ -694,7 +709,7 @@ namespace UnrealBuildTool
 		/// <param name="EngineDir">Engine directory for expanded paths</param>
 		/// <param name="Receipt">If successful, the receipt that was read</param>
 		/// <returns>True if successful</returns>
-		public static bool TryRead(FileReference Location, DirectoryReference EngineDir, out TargetReceipt Receipt)
+		public static bool TryRead(FileReference Location, DirectoryReference EngineDir, [NotNullWhen(true)] out TargetReceipt? Receipt)
 		{
 			if (!FileReference.Exists(Location))
 			{
@@ -720,7 +735,7 @@ namespace UnrealBuildTool
 		/// <param name="Location">Output filename</param>
 		public void Write(FileReference Location)
 		{
-			Write(Location, UnrealBuildTool.EngineDirectory);
+			Write(Location, Unreal.EngineDirectory);
 		}
 
 		/// <summary>
@@ -737,16 +752,22 @@ namespace UnrealBuildTool
 				Writer.WriteValue("Platform", Platform.ToString());
 				Writer.WriteValue("Configuration", Configuration.ToString());
 				Writer.WriteValue("TargetType", TargetType.ToString());
-				Writer.WriteValue("Architecture", Architecture);
+				Writer.WriteValue("IsTestTarget", IsTestTarget);
+				Writer.WriteValue("Architecture", Architectures.ToString());
 
-				if(ProjectFile != null)
+				if (ProjectFile != null)
 				{
 					Writer.WriteValue("Project", ProjectFile.MakeRelativeTo(Location.Directory).Replace(Path.DirectorySeparatorChar, '/'));
 				}
 
-				if(Launch != null)
+				if (Launch != null)
 				{
 					Writer.WriteValue("Launch", InsertPathVariables(Launch, EngineDir, ProjectDir));
+				}
+
+				if (LaunchCmd != null)
+				{
+					Writer.WriteValue("LaunchCmd", InsertPathVariables(LaunchCmd, EngineDir, ProjectDir));
 				}
 
 				Writer.WriteObjectStart("Version");
@@ -754,7 +775,7 @@ namespace UnrealBuildTool
 				Writer.WriteObjectEnd();
 
 				Writer.WriteArrayStart("BuildProducts");
-				foreach (BuildProduct BuildProduct in BuildProducts)
+				foreach (BuildProduct BuildProduct in BuildProducts.OrderBy(x => x.Path.FullName))
 				{
 					Writer.WriteObjectStart();
 					Writer.WriteValue("Path", InsertPathVariables(BuildProduct.Path, EngineDir, ProjectDir));
@@ -764,7 +785,7 @@ namespace UnrealBuildTool
 				Writer.WriteArrayEnd();
 
 				Writer.WriteArrayStart("RuntimeDependencies");
-				foreach (RuntimeDependency RuntimeDependency in RuntimeDependencies)
+				foreach (RuntimeDependency RuntimeDependency in RuntimeDependencies.OrderBy(x => x.Path.FullName))
 				{
 					Writer.WriteObjectStart();
 					Writer.WriteValue("Path", InsertPathVariables(RuntimeDependency.Path, EngineDir, ProjectDir));
@@ -784,6 +805,11 @@ namespace UnrealBuildTool
 						Writer.WriteObjectEnd();
 					}
 					Writer.WriteArrayEnd();
+				}
+
+				if (BuildPlugins.Count > 0)
+				{
+					Writer.WriteStringArrayField("BuildPlugins", BuildPlugins.OrderBy(x => x));
 				}
 
 				if (AdditionalProperties.Count > 0)

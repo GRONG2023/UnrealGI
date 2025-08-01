@@ -6,9 +6,7 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "RendererInterface.h"
-#include "RenderGraphDefinitions.h"
+#include "RenderGraphFwd.h"
 
 class FViewInfo;
 
@@ -20,10 +18,5 @@ enum FHairLUTType
 	HairLUTTypeCount
 };
 
-struct FHairLUT
-{
-	FRDGTextureRef Textures[HairLUTTypeCount] = { nullptr, nullptr, nullptr };
-};
-
 /// Returns Hair LUTs. LUTs are generated on demand.
-FHairLUT GetHairLUT(FRDGBuilder& GraphBuilder, const FViewInfo& View);
+FRDGTextureRef GetHairLUT(FRDGBuilder& GraphBuilder, const FViewInfo& View, FHairLUTType Type);

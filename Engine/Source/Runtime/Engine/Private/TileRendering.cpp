@@ -4,22 +4,18 @@
 	TileRendering.cpp: Tile rendering implementation.
 =============================================================================*/
 
-#include "RHI.h"
-#include "ShowFlags.h"
-#include "RenderResource.h"
-#include "RenderingThread.h"
-#include "VertexFactory.h"
-#include "PackedNormal.h"
-#include "LocalVertexFactory.h"
-#include "SceneView.h"
-#include "CanvasTypes.h"
-#include "MeshBatch.h"
-#include "RendererInterface.h"
-#include "SceneUtils.h"
+#include "CanvasRender.h"
+#include "CanvasRendererItem.h"
+#include "PrimitiveUniformShaderParameters.h"
+#include "RHIStaticStates.h"
 #include "EngineModule.h"
 #include "MeshPassProcessor.h"
+#include "RenderGraphUtils.h"
+#include "RenderUtils.h"
+#include "UnrealClient.h"
+#include "Materials/MaterialRenderProxy.h"
 
-DECLARE_GPU_STAT_NAMED(CanvasDrawTile, TEXT("CanvasDrawTile"));
+DECLARE_GPU_STAT_NAMED(CanvasDrawTiles, TEXT("CanvasDrawTiles"));
 
 static const uint32 CanvasTileVertexCount = 4;
 static const uint32 CanvasTileIndexCount = 6;
@@ -31,7 +27,7 @@ FCanvasTileRendererItem::FTileVertexFactory::FTileVertexFactory(
 	, VertexBuffers(InVertexBuffers)
 {}
 
-void FCanvasTileRendererItem::FTileVertexFactory::InitResource()
+void FCanvasTileRendererItem::FTileVertexFactory::InitResource(FRHICommandListBase& RHICmdList)
 {
 	FLocalVertexFactory::FDataType VertexData;
 	VertexBuffers->PositionVertexBuffer.BindPositionVertexBuffer(this, VertexData);
@@ -39,32 +35,31 @@ void FCanvasTileRendererItem::FTileVertexFactory::InitResource()
 	VertexBuffers->StaticMeshVertexBuffer.BindPackedTexCoordVertexBuffer(this, VertexData);
 	VertexBuffers->StaticMeshVertexBuffer.BindLightMapVertexBuffer(this, VertexData, 0);
 	VertexBuffers->ColorVertexBuffer.BindColorVertexBuffer(this, VertexData);
-	SetData(VertexData);
+	SetData(RHICmdList, VertexData);
 
-	FLocalVertexFactory::InitResource();
+	FLocalVertexFactory::InitResource(RHICmdList);
 }
 
-FCanvasTileRendererItem::FTileMesh::FTileMesh(
-	const FRawIndexBuffer* InIndexBuffer,
-	const FCanvasTileRendererItem::FTileVertexFactory* InVertexFactory)
-	: IndexBuffer(InIndexBuffer)
-	, VertexFactory(InVertexFactory)
-{}
-
-void FCanvasTileRendererItem::FTileMesh::InitRHI()
+FMeshBatch* FCanvasTileRendererItem::FRenderData::AllocTileMeshBatch(FCanvasRenderContext& InRenderContext, FHitProxyId InHitProxyId)
 {
-	MeshElement.VertexFactory = VertexFactory;
-	MeshElement.ReverseCulling = false;
-	MeshElement.Type = PT_TriangleList;
-	MeshElement.DepthPriorityGroup = SDPG_Foreground;
+	FMeshBatch* MeshBatch = InRenderContext.Alloc<FMeshBatch>();
 
-	FMeshBatchElement& BatchElement = MeshElement.Elements[0];
-	BatchElement.IndexBuffer = IndexBuffer;
-	BatchElement.FirstIndex = 0;
-	BatchElement.NumPrimitives = 2;
-	BatchElement.MinVertexIndex = 0;
-	BatchElement.MaxVertexIndex = CanvasTileVertexCount - 1;
-	BatchElement.PrimitiveUniformBufferResource = &GIdentityPrimitiveUniformBuffer;
+	MeshBatch->VertexFactory = &VertexFactory;
+	MeshBatch->MaterialRenderProxy = MaterialRenderProxy;
+	MeshBatch->ReverseCulling = false;
+	MeshBatch->Type = PT_TriangleList;
+	MeshBatch->DepthPriorityGroup = SDPG_Foreground;
+	MeshBatch->BatchHitProxyId = InHitProxyId;
+
+	FMeshBatchElement& MeshBatchElement = MeshBatch->Elements[0];
+	MeshBatchElement.IndexBuffer = &IndexBuffer;
+	MeshBatchElement.FirstIndex = 0;
+	MeshBatchElement.NumPrimitives = 0;
+	MeshBatchElement.MinVertexIndex = 0;
+	MeshBatchElement.MaxVertexIndex = GetNumVertices() - 1;
+	MeshBatchElement.PrimitiveUniformBufferResource = &GIdentityPrimitiveUniformBuffer;
+
+	return MeshBatch;
 }
 
 FCanvasTileRendererItem::FRenderData::FRenderData(
@@ -74,21 +69,33 @@ FCanvasTileRendererItem::FRenderData::FRenderData(
 	: MaterialRenderProxy(InMaterialRenderProxy)
 	, Transform(InTransform)
 	, VertexFactory(&StaticMeshVertexBuffers, InFeatureLevel)
-	, TileMesh(&IndexBuffer, &VertexFactory)
 {}
 
-void FCanvasTileRendererItem::FRenderData::InitTileMesh(const FSceneView& View, bool bNeedsToSwitchVerticalAxis)
+uint32 FCanvasTileRendererItem::FRenderData::GetNumVertices() const
+{
+	return Tiles.Num() * CanvasTileVertexCount;
+}
+
+uint32 FCanvasTileRendererItem::FRenderData::GetNumIndices() const
+{
+	return Tiles.Num() * CanvasTileIndexCount;
+}
+
+void FCanvasTileRendererItem::FRenderData::InitTileMesh(FRHICommandListBase& RHICmdList, const FSceneView& View)
 {
 	static_assert(CanvasTileVertexCount == 4, "Invalid tile tri-list size.");
 	static_assert(CanvasTileIndexCount == 6, "Invalid tile tri-list size.");
 
-	const uint32 TotalVertexCount = Tiles.Num() * CanvasTileVertexCount;
-	const uint32 TotalIndexCount = Tiles.Num() * CanvasTileIndexCount;
+	const uint32 TotalVertexCount = GetNumVertices();
+	const uint32 TotalIndexCount = GetNumIndices();
 
 	StaticMeshVertexBuffers.PositionVertexBuffer.Init(TotalVertexCount);
 	StaticMeshVertexBuffers.StaticMeshVertexBuffer.Init(TotalVertexCount, 1);
 	StaticMeshVertexBuffers.ColorVertexBuffer.Init(TotalVertexCount);
+	
 	IndexBuffer.Indices.SetNum(TotalIndexCount);
+	// Make sure the index buffer is using the appropriate size :
+	IndexBuffer.ForceUse32Bit(TotalVertexCount > MAX_uint16);
 
 	for (int32 i = 0; i < Tiles.Num(); i++)
 	{
@@ -112,49 +119,32 @@ void FCanvasTileRendererItem::FRenderData::InitTileMesh(const FSceneView& View, 
 		const float SizeU = Tile.SizeU;
 		const float SizeV = Tile.SizeV;
 
-		if (bNeedsToSwitchVerticalAxis)
-		{
-			StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(FirstVertex + 0) = FVector(X + SizeX, View.UnscaledViewRect.Height() - (Y + SizeY), 0.0f);
-			StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(FirstVertex + 1) = FVector(X, View.UnscaledViewRect.Height() - (Y + SizeY), 0.0f);
-			StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(FirstVertex + 2) = FVector(X + SizeX, View.UnscaledViewRect.Height() - Y, 0.0f);
-			StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(FirstVertex + 3) = FVector(X, View.UnscaledViewRect.Height() - Y, 0.0f);
+		StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(FirstVertex + 0) = FVector3f(X + SizeX, Y, 0.0f);
+		StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(FirstVertex + 1) = FVector3f(X, Y, 0.0f);
+		StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(FirstVertex + 2) = FVector3f(X + SizeX, Y + SizeY, 0.0f);
+		StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(FirstVertex + 3) = FVector3f(X, Y + SizeY, 0.0f);
 
-			StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(FirstVertex + 0, 0, FVector2D(U + SizeU, V + SizeV));
-			StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(FirstVertex + 1, 0, FVector2D(U, V + SizeV));
-			StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(FirstVertex + 2, 0, FVector2D(U + SizeU, V));
-			StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(FirstVertex + 3, 0, FVector2D(U, V));
-		}
-		else
-		{
-			StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(FirstVertex + 0) = FVector(X + SizeX, Y, 0.0f);
-			StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(FirstVertex + 1) = FVector(X, Y, 0.0f);
-			StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(FirstVertex + 2) = FVector(X + SizeX, Y + SizeY, 0.0f);
-			StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(FirstVertex + 3) = FVector(X, Y + SizeY, 0.0f);
-
-			StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(FirstVertex + 0, 0, FVector2D(U + SizeU, V));
-			StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(FirstVertex + 1, 0, FVector2D(U, V));
-			StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(FirstVertex + 2, 0, FVector2D(U + SizeU, V + SizeV));
-			StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(FirstVertex + 3, 0, FVector2D(U, V + SizeV));
-		}
+		StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(FirstVertex + 0, 0, FVector2f(U + SizeU, V));
+		StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(FirstVertex + 1, 0, FVector2f(U, V));
+		StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(FirstVertex + 2, 0, FVector2f(U + SizeU, V + SizeV));
+		StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(FirstVertex + 3, 0, FVector2f(U, V + SizeV));
 
 		for (int j = 0; j < CanvasTileVertexCount; j++)
 		{
-			StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexTangents(FirstVertex + j, FVector(1.0f, 0.0f, 0.0f), FVector(0.0f, 1.0f, 0.0f), FVector(0.0f, 0.0f, 1.0f));
+			StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexTangents(FirstVertex + j, FVector3f(1.0f, 0.0f, 0.0f), FVector3f(0.0f, 1.0f, 0.0f), FVector3f(0.0f, 0.0f, 1.0f));
 			StaticMeshVertexBuffers.ColorVertexBuffer.VertexColor(FirstVertex + j) = Tile.InColor;
 		}
 	}
 
-	StaticMeshVertexBuffers.PositionVertexBuffer.InitResource();
-	StaticMeshVertexBuffers.StaticMeshVertexBuffer.InitResource();
-	StaticMeshVertexBuffers.ColorVertexBuffer.InitResource();
-	IndexBuffer.InitResource();
-	VertexFactory.InitResource();
-	TileMesh.InitResource();
+	StaticMeshVertexBuffers.PositionVertexBuffer.InitResource(RHICmdList);
+	StaticMeshVertexBuffers.StaticMeshVertexBuffer.InitResource(RHICmdList);
+	StaticMeshVertexBuffers.ColorVertexBuffer.InitResource(RHICmdList);
+	IndexBuffer.InitResource(RHICmdList);
+	VertexFactory.InitResource(RHICmdList);
 }
 
 void FCanvasTileRendererItem::FRenderData::ReleaseTileMesh()
 {
-	TileMesh.ReleaseResource();
 	VertexFactory.ReleaseResource();
 	IndexBuffer.ReleaseResource();
 	StaticMeshVertexBuffers.PositionVertexBuffer.ReleaseResource();
@@ -163,67 +153,83 @@ void FCanvasTileRendererItem::FRenderData::ReleaseTileMesh()
 }
 
 void FCanvasTileRendererItem::FRenderData::RenderTiles(
-	FRHICommandListImmediate& RHICmdList,
+	FCanvasRenderContext& RenderContext,
 	FMeshPassProcessorRenderState& DrawRenderState,
 	const FSceneView& View,
 	bool bIsHitTesting,
-	bool bNeedsToSwitchVerticalAxis,
 	bool bUse128bitRT)
 {
 	check(IsInRenderingThread());
 
-	SCOPED_GPU_STAT(RHICmdList, CanvasDrawTile);
-	SCOPED_DRAW_EVENTF(RHICmdList, CanvasDrawTile, *MaterialRenderProxy->GetIncompleteMaterialWithFallback(GMaxRHIFeatureLevel).GetFriendlyName());
-	TRACE_CPUPROFILER_EVENT_SCOPE(CanvasDrawTile);
-	QUICK_SCOPE_CYCLE_COUNTER(STAT_CanvasDrawTile)
+	if (Tiles.Num() == 0)
+	{
+		return;
+	}
+
+	RDG_GPU_STAT_SCOPE(RenderContext.GraphBuilder, CanvasDrawTiles);
+	RDG_EVENT_SCOPE(RenderContext.GraphBuilder, "%s", *MaterialRenderProxy->GetIncompleteMaterialWithFallback(GMaxRHIFeatureLevel).GetFriendlyName());
+	TRACE_CPUPROFILER_EVENT_SCOPE(CanvasDrawTiles);
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_CanvasDrawTiles)
 
 	IRendererModule& RendererModule = GetRendererModule();
 
-	InitTileMesh(View, bNeedsToSwitchVerticalAxis);
+	InitTileMesh(RenderContext.GraphBuilder.RHICmdList, View);
+
+	// We know we have at least 1 tile so prep up a new batch right away : 
+	FMeshBatch* CurrentMeshBatch = AllocTileMeshBatch(RenderContext, Tiles[0].HitProxyId);
+	check(CurrentMeshBatch->Elements[0].FirstIndex == 0); // The first batch should always start at the first index 
 
 	for (int32 TileIdx = 0; TileIdx < Tiles.Num(); TileIdx++)
 	{
-		FRenderData::FTileInst& Tile = Tiles[TileIdx];
+		const FTileInst& Tile = Tiles[TileIdx];
 
-		FMeshBatch& Mesh = TileMesh.MeshElement;
-		Mesh.MaterialRenderProxy = MaterialRenderProxy;
-		Mesh.Elements[0].FirstIndex = CanvasTileIndexCount * TileIdx;
+		// We only need a new batch when the hit proxy id changes : 
+		if (CurrentMeshBatch->BatchHitProxyId != Tile.HitProxyId)
+		{
+			// Flush the current batch before allocating a new one: 
+			GetRendererModule().DrawTileMesh(RenderContext, DrawRenderState, View, *CurrentMeshBatch, bIsHitTesting, CurrentMeshBatch->BatchHitProxyId, bUse128bitRT);
 
-		RendererModule.DrawTileMesh(RHICmdList, DrawRenderState, View, Mesh, bIsHitTesting, Tile.HitProxyId, bUse128bitRT);
+			CurrentMeshBatch = AllocTileMeshBatch(RenderContext, Tile.HitProxyId);
+			CurrentMeshBatch->Elements[0].FirstIndex = CanvasTileIndexCount * TileIdx;
+		}
+
+		// Add 2 triangles to the batch per tile : 
+		CurrentMeshBatch->Elements[0].NumPrimitives += 2;
 	}
 
-	ReleaseTileMesh();
+	// Flush the final batch: 
+	check(CurrentMeshBatch != nullptr);
+	GetRendererModule().DrawTileMesh(RenderContext, DrawRenderState, View, *CurrentMeshBatch, bIsHitTesting, CurrentMeshBatch->BatchHitProxyId, bUse128bitRT);
+
+	AddPass(RenderContext.GraphBuilder, RDG_EVENT_NAME("ReleaseTileMesh"), [this](FRHICommandListImmediate&)
+	{
+		ReleaseTileMesh();
+	});
 }
 
-bool FCanvasTileRendererItem::Render_RenderThread(FRHICommandListImmediate& RHICmdList, FMeshPassProcessorRenderState& DrawRenderState, const FCanvas* Canvas)
+bool FCanvasTileRendererItem::Render_RenderThread(FCanvasRenderContext& RenderContext, FMeshPassProcessorRenderState& DrawRenderState, const FCanvas* Canvas)
 {
-	float CurrentRealTime = 0.f;
-	float CurrentWorldTime = 0.f;
-	float DeltaWorldTime = 0.f;
-
+	FGameTime Time;
 	if (!bFreezeTime)
 	{
-		CurrentRealTime = Canvas->GetCurrentRealTime();
-		CurrentWorldTime = Canvas->GetCurrentWorldTime();
-		DeltaWorldTime = Canvas->GetCurrentDeltaWorldTime();
+		Time = Canvas->GetTime();
 	}
 
 	checkSlow(Data);
 
 	const FRenderTarget* CanvasRenderTarget = Canvas->GetRenderTarget();
 
-	TUniquePtr<const FSceneViewFamily> ViewFamily = MakeUnique<const FSceneViewFamily>(FSceneViewFamily::ConstructionValues(
+	const FSceneViewFamily& ViewFamily = *RenderContext.Alloc<FSceneViewFamily>(FSceneViewFamily::ConstructionValues(
 		CanvasRenderTarget,
 		nullptr,
 		FEngineShowFlags(ESFIM_Game))
-		.SetWorldTimes(CurrentWorldTime, DeltaWorldTime, CurrentRealTime)
-		.SetGammaCorrection(CanvasRenderTarget->GetDisplayGamma()));
+		.SetTime(Time));
 
 	const FIntRect ViewRect(FIntPoint(0, 0), CanvasRenderTarget->GetSizeXY());
 
 	// make a temporary view
 	FSceneViewInitOptions ViewInitOptions;
-	ViewInitOptions.ViewFamily = ViewFamily.Get();
+	ViewInitOptions.ViewFamily = &ViewFamily;
 	ViewInitOptions.SetViewRectangle(ViewRect);
 	ViewInitOptions.ViewOrigin = FVector::ZeroVector;
 	ViewInitOptions.ViewRotationMatrix = FMatrix::Identity;
@@ -231,31 +237,25 @@ bool FCanvasTileRendererItem::Render_RenderThread(FRHICommandListImmediate& RHIC
 	ViewInitOptions.BackgroundColor = FLinearColor::Black;
 	ViewInitOptions.OverlayColor = FLinearColor::White;
 
-	TUniquePtr<const FSceneView> View = MakeUnique<const FSceneView>(ViewInitOptions);
+	const FSceneView& View = *RenderContext.Alloc<const FSceneView>(ViewInitOptions);
 
-	const bool bNeedsToSwitchVerticalAxis = RHINeedsToSwitchVerticalAxis(Canvas->GetShaderPlatform()) && Canvas->GetAllowSwitchVerticalAxis(); 
-
-	Data->RenderTiles(RHICmdList, DrawRenderState, *View, Canvas->IsHitTesting(), bNeedsToSwitchVerticalAxis);
+	Data->RenderTiles(RenderContext, DrawRenderState, View, Canvas->IsHitTesting());
 
 	if (Canvas->GetAllowedModes() & FCanvas::Allow_DeleteOnRender)
 	{
+		RenderContext.DeferredRelease(MoveTemp(Data));
 		Data = nullptr;
 	}
 
 	return true;
 }
 
-bool FCanvasTileRendererItem::Render_GameThread(const FCanvas* Canvas, FRenderThreadScope& RenderScope)
+bool FCanvasTileRendererItem::Render_GameThread(const FCanvas* Canvas, FCanvasRenderThreadScope& RenderScope)
 {
-	float CurrentRealTime = 0.f;
-	float CurrentWorldTime = 0.f;
-	float DeltaWorldTime = 0.f;
-
+	FGameTime Time;
 	if (!bFreezeTime)
 	{
-		CurrentRealTime = Canvas->GetCurrentRealTime();
-		CurrentWorldTime = Canvas->GetCurrentWorldTime();
-		DeltaWorldTime = Canvas->GetCurrentDeltaWorldTime();
+		Time = Canvas->GetTime();
 	}
 
 	checkSlow(Data);
@@ -267,8 +267,7 @@ bool FCanvasTileRendererItem::Render_GameThread(const FCanvas* Canvas, FRenderTh
 			CanvasRenderTarget,
 			Canvas->GetScene(),
 			FEngineShowFlags(ESFIM_Game))
-			.SetWorldTimes(CurrentWorldTime, DeltaWorldTime, CurrentRealTime)
-			.SetGammaCorrection(CanvasRenderTarget->GetDisplayGamma()));
+			.SetTime(Time));
 
 		const FIntRect ViewRect(FIntPoint(0, 0), CanvasRenderTarget->GetSizeXY());
 
@@ -284,7 +283,6 @@ bool FCanvasTileRendererItem::Render_GameThread(const FCanvas* Canvas, FRenderTh
 
 		const FSceneView* View = new FSceneView(ViewInitOptions);
 
-		const bool bNeedsToSwitchVerticalAxis = RHINeedsToSwitchVerticalAxis(Canvas->GetShaderPlatform()) && Canvas->GetAllowSwitchVerticalAxis();
 		const bool bIsHitTesting = Canvas->IsHitTesting();
 		const bool bDeleteOnRender = Canvas->GetAllowedModes() & FCanvas::Allow_DeleteOnRender;
 
@@ -297,18 +295,19 @@ bool FCanvasTileRendererItem::Render_GameThread(const FCanvas* Canvas, FRenderTh
 		}
 
 		RenderScope.EnqueueRenderCommand(
-			[LocalData = Data, View, bIsHitTesting, bNeedsToSwitchVerticalAxis, bRequiresExplicit128bitRT]
-		(FRHICommandListImmediate& RHICmdList)
+			[LocalData = Data, View, bIsHitTesting, bRequiresExplicit128bitRT]
+			(FCanvasRenderContext& RenderContext) mutable
 		{
-			FMeshPassProcessorRenderState DrawRenderState(*View);
+			FMeshPassProcessorRenderState DrawRenderState;
 
 			// disable depth test & writes
 			DrawRenderState.SetDepthStencilState(TStaticDepthStencilState<false, CF_Always>::GetRHI());
 
-			LocalData->RenderTiles(RHICmdList, DrawRenderState, *View, bIsHitTesting, bNeedsToSwitchVerticalAxis, bRequiresExplicit128bitRT);
+			LocalData->RenderTiles(RenderContext, DrawRenderState, *View, bIsHitTesting, bRequiresExplicit128bitRT);
 
-			delete View->Family;
-			delete View;
+			RenderContext.DeferredRelease(MoveTemp(LocalData));
+			RenderContext.DeferredDelete(View->Family);
+			RenderContext.DeferredDelete(View);
 		});
 
 		if (bDeleteOnRender)

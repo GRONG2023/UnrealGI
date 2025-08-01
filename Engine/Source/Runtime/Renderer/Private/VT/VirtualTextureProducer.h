@@ -56,12 +56,16 @@ class FVirtualTextureProducerCollection
 {
 public:
 	FVirtualTextureProducerCollection();
-	FVirtualTextureProducerHandle RegisterProducer(FVirtualTextureSystem* System, const FVTProducerDescription& InDesc, IVirtualTexture* InProducer);
+	FVirtualTextureProducerHandle RegisterProducer(FRHICommandListBase& RHICmdList, FVirtualTextureSystem* System, const FVTProducerDescription& InDesc, IVirtualTexture* InProducer);
 	void ReleaseProducer(FVirtualTextureSystem* System, const FVirtualTextureProducerHandle& Handle);
 	
 	void AddDestroyedCallback(const FVirtualTextureProducerHandle& Handle, FVTProducerDestroyedFunction* Function, void* Baton);
 	uint32 RemoveAllCallbacks(const void* Baton);
 	void CallPendingCallbacks();
+	bool HasPendingCallbacks() const;
+
+	/** Notify producers marked as "continous notify" that all requests have been completed. */
+	void NotifyRequestsCompleted();
 
 	/**
 	 * Gets the producer associated with the given handle, or nullptr if handle is invalid
@@ -203,5 +207,6 @@ private:
 
 	TArray<FProducerEntry> Producers;
 	TArray<FCallbackEntry> Callbacks;
+	TMap<void*, TArray<uint32>> CallbacksMap;
 	uint32 NumPendingCallbacks;
 };

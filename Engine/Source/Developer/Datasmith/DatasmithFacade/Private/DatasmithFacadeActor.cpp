@@ -7,8 +7,8 @@
 #include "DatasmithFacadeActorMesh.h"
 #include "DatasmithFacadeScene.h"
 
-// OpenEXR third party library.
-#include "ImathMatrixAlgo.h"
+// Imath third party library.
+#include "Imath/ImathMatrixAlgo.h"
 
 
 FDatasmithFacadeActor::FDatasmithFacadeActor(
@@ -27,7 +27,7 @@ FDatasmithFacadeActor::FDatasmithFacadeActor(
 {}
 
 void FDatasmithFacadeActor::SetWorldTransform(
-	const float InWorldMatrix[16],
+	const double InWorldMatrix[16],
 	bool bRowMajor
 )
 {
@@ -41,18 +41,18 @@ void FDatasmithFacadeActor::SetWorldTransform(
 }
 
 void FDatasmithFacadeActor::SetScale(
-	float X,
-	float Y,
-	float Z
+	double X,
+	double Y,
+	double Z
 )
 {
 	GetDatasmithActorElement()->SetScale(FVector(X, Y, Z));
 }
 
 void FDatasmithFacadeActor::GetScale(
-	float& OutX,
-	float& OutY,
-	float& OutZ
+	double& OutX,
+	double& OutY,
+	double& OutZ
 ) const
 {
 	FVector ScaleVector(GetDatasmithActorElement()->GetScale());
@@ -63,18 +63,18 @@ void FDatasmithFacadeActor::GetScale(
 }
 
 void FDatasmithFacadeActor::SetRotation(
-	float Pitch,
-	float Yaw,
-	float Roll
+	double Pitch,
+	double Yaw,
+	double Roll
 )
 {
 	GetDatasmithActorElement()->SetRotation(FQuat(FRotator(Pitch, Yaw, Roll)));
 }
 
 void FDatasmithFacadeActor::GetRotation(
-	float& OutPitch,
-	float& OutYaw,
-	float& OutRoll
+	double& OutPitch,
+	double& OutYaw,
+	double& OutRoll
 ) const
 {
 	FRotator Rotator(GetDatasmithActorElement()->GetRotation().Rotator());
@@ -85,20 +85,20 @@ void FDatasmithFacadeActor::GetRotation(
 }
 
 void FDatasmithFacadeActor::SetRotation(
-	float X,
-	float Y,
-	float Z,
-	float W
+	double X,
+	double Y,
+	double Z,
+	double W
 )
 {
 	GetDatasmithActorElement()->SetRotation(FQuat(X, Y, Z, W));
 }
 
 void FDatasmithFacadeActor::GetRotation(
-	float& OutX,
-	float& OutY,
-	float& OutZ,
-	float& OutW
+	double& OutX,
+	double& OutY,
+	double& OutZ,
+	double& OutW
 ) const
 {
 	FQuat RotationQuat(GetDatasmithActorElement()->GetRotation());
@@ -110,18 +110,18 @@ void FDatasmithFacadeActor::GetRotation(
 }
 
 void FDatasmithFacadeActor::SetTranslation(
-	float X,
-	float Y,
-	float Z
+	double X,
+	double Y,
+	double Z
 )
 {
 	GetDatasmithActorElement()->SetTranslation(FVector(X, Y, Z));
 }
 
 void FDatasmithFacadeActor::GetTranslation(
-	float& OutX,
-	float& OutY,
-	float& OutZ
+	double& OutX,
+	double& OutY,
+	double& OutZ
 ) const
 {
 	FVector TranslationVector(GetDatasmithActorElement()->GetTranslation());
@@ -189,6 +189,16 @@ void FDatasmithFacadeActor::SetVisibility(
 bool FDatasmithFacadeActor::GetVisibility() const
 {
 	return GetDatasmithActorElement()->GetVisibility();
+}
+
+void FDatasmithFacadeActor::SetCastShadow(bool bInCastShadow)
+{
+	GetDatasmithActorElement()->SetCastShadow(bInCastShadow);
+}
+
+bool FDatasmithFacadeActor::GetCastShadow() const
+{
+	return GetDatasmithActorElement()->GetCastShadow();
 }
 
 FDatasmithFacadeActor::EActorType FDatasmithFacadeActor::GetActorType() const
@@ -321,34 +331,34 @@ void FDatasmithFacadeActor::RemoveChild(
 }
 
 FTransform FDatasmithFacadeActor::ConvertTransform(
-	const float InSourceMatrix[16],
+	const double InSourceMatrix[16],
 	bool bRowMajor
 ) const
 {
 	// We use Imath::extractAndRemoveScalingAndShear() because FMatrix::ExtractScaling() is deemed unreliable.
 
 	// Set up a scaling and rotation matrix.
-	Imath::Matrix44<float> Matrix;
+	Imath::Matrix44<double> Matrix;
 
 	if (bRowMajor)
 	{
-		Matrix = Imath::Matrix44<float>(InSourceMatrix[0], InSourceMatrix[4], InSourceMatrix[8],  0.0,
+		Matrix = Imath::Matrix44<double>(InSourceMatrix[0], InSourceMatrix[4], InSourceMatrix[8],  0.0,
 										InSourceMatrix[1], InSourceMatrix[5], InSourceMatrix[9],  0.0,
 										InSourceMatrix[2], InSourceMatrix[6], InSourceMatrix[10], 0.0,
 										0.0			   , 0.0            , 0.0				, 1.0);
 	}
 	else
 	{
-		Matrix = Imath::Matrix44<float>(InSourceMatrix[0], InSourceMatrix[1], InSourceMatrix[2],  0.0,
+		Matrix = Imath::Matrix44<double>(InSourceMatrix[0], InSourceMatrix[1], InSourceMatrix[2],  0.0,
 										InSourceMatrix[4], InSourceMatrix[5], InSourceMatrix[6],  0.0,
 										InSourceMatrix[8], InSourceMatrix[9], InSourceMatrix[10], 0.0,
 										0.0			  , 0.0              , 0.0               , 1.0);
 	}
 
 	// Remove any scaling from the matrix and get the scale vector that was initially present.
-	Imath::Vec3<float> Scale;
-	Imath::Vec3<float> Shear;
-	bool bExtracted = Imath::extractAndRemoveScalingAndShear<float>(Matrix, Scale, Shear, false);
+	Imath::Vec3<double> Scale;
+	Imath::Vec3<double> Shear;
+	bool bExtracted = Imath::extractAndRemoveScalingAndShear<double>(Matrix, Scale, Shear, false);
 
 	if (!bExtracted)
 	{
@@ -361,7 +371,7 @@ FTransform FDatasmithFacadeActor::ConvertTransform(
 	FVector TransformScale3D;
 
 	// Initialize a rotation quaternion with the rotation matrix.
-	Imath::Quat<float> Quaternion = Imath::extractQuat<float>(Matrix);
+	Imath::Quat<double> Quaternion = Imath::extractQuat<double>(Matrix);
 
 	switch (WorldCoordinateSystemType)
 	{
@@ -405,8 +415,8 @@ FTransform FDatasmithFacadeActor::ConvertTransform(
 	}
 
 	// Make sure Unreal will be able to handle the rotation quaternion.
-	float              Angle = Quaternion.angle();
-	Imath::Vec3<float> Axis  = Quaternion.axis();
+	double              Angle = Quaternion.angle();
+	Imath::Vec3<double> Axis  = Quaternion.axis();
 	FQuat TransformRotation = FQuat(FVector(Axis.x, Axis.y, Axis.z), Angle);
 
 	// Scale and convert the source translation into a Datasmith actor translation.

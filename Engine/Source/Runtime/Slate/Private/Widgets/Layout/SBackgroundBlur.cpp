@@ -1,7 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #include "Widgets/Layout/SBackgroundBlur.h"
-#include "Rendering/DrawElements.h"
 #include "HAL/IConsoleManager.h"
+#include "Rendering/DrawElements.h"
+#include "Styling/SlateBrush.h"
 
 static int32 bAllowBackgroundBlur = 1;
 static FAutoConsoleVariableRef CVarSlateAllowBackgroundBlurWidgets(TEXT("Slate.AllowBackgroundBlurWidgets"), bAllowBackgroundBlur, TEXT("If 0, no background blur widgets will be rendered"));
@@ -15,13 +16,29 @@ static FAutoConsoleVariableRef CVarDownsampleForBlur(TEXT("Slate.BackgroundBlurD
 static int32 bForceLowQualityBrushFallback = 0;
 static FAutoConsoleVariableRef CVarForceLowQualityBackgroundBlurOverride(TEXT("Slate.ForceBackgroundBlurLowQualityOverride"), bForceLowQualityBrushFallback, TEXT("Whether or not to force a slate brush to be used instead of actually blurring the background"), ECVF_Scalability);
 
+SLATE_IMPLEMENT_WIDGET(SBackgroundBlur)
+void SBackgroundBlur::PrivateRegisterAttributes(FSlateAttributeInitializer& AttributeInitializer)
+{
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION_WITH_NAME(AttributeInitializer, "BlurStrength", BlurStrengthAttribute, EInvalidateWidgetReason::Paint);
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION_WITH_NAME(AttributeInitializer, "BlurRadius", BlurRadiusAttribute, EInvalidateWidgetReason::Paint);
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION_WITH_NAME(AttributeInitializer, "CornerRadius", CornerRadiusAttribute, EInvalidateWidgetReason::Paint);
+}
+
+SBackgroundBlur::SBackgroundBlur()
+	: BlurStrengthAttribute(*this, 0.f)
+	, BlurRadiusAttribute(*this)
+	, CornerRadiusAttribute(*this, FVector4(0.f, 0.f, 0.f, 0.f))
+{
+}
+
 
 void SBackgroundBlur::Construct(const FArguments& InArgs)
 {
 	bApplyAlphaToBlur = InArgs._bApplyAlphaToBlur;
 	LowQualityFallbackBrush = InArgs._LowQualityFallbackBrush;
-	BlurStrength = InArgs._BlurStrength;
-	BlurRadius = InArgs._BlurRadius;
+	SetBlurStrength(InArgs._BlurStrength);
+	SetBlurRadius(InArgs._BlurRadius);
+	SetCornerRadius(InArgs._CornerRadius);
 
 	ChildSlot
 		.HAlign(InArgs._HAlign)
@@ -48,22 +65,14 @@ void SBackgroundBlur::SetApplyAlphaToBlur(bool bInApplyAlphaToBlur)
 	}
 }
 
-void SBackgroundBlur::SetBlurRadius(const TAttribute<TOptional<int32>>& InBlurRadius)
+void SBackgroundBlur::SetBlurRadius(TAttribute<TOptional<int32>> InBlurRadius)
 {
-	if(!BlurRadius.IdenticalTo(InBlurRadius))
-	{
-		BlurRadius = InBlurRadius;
-		Invalidate(EInvalidateWidget::Paint);
-	}
+	BlurRadiusAttribute.Assign(*this, MoveTemp(InBlurRadius));
 }
 
-void SBackgroundBlur::SetBlurStrength(const TAttribute<float>& InStrength)
+void SBackgroundBlur::SetBlurStrength(TAttribute<float> InStrength)
 {
-	if(!BlurStrength.IdenticalTo(InStrength))
-	{
-		BlurStrength = InStrength;
-		Invalidate(EInvalidateWidget::Paint);
-	}
+	BlurStrengthAttribute.Assign(*this, MoveTemp(InStrength));
 }
 
 void SBackgroundBlur::SetLowQualityBackgroundBrush(const FSlateBrush* InBrush)
@@ -75,31 +84,24 @@ void SBackgroundBlur::SetLowQualityBackgroundBrush(const FSlateBrush* InBrush)
 	}
 }
 
+void SBackgroundBlur::SetCornerRadius(TAttribute<FVector4> InCornerRadius)
+{
+	CornerRadiusAttribute.Assign(*this, MoveTemp(InCornerRadius));
+}
+
 void SBackgroundBlur::SetHAlign(EHorizontalAlignment HAlign)
 {
-	if (ChildSlot.HAlignment != HAlign)
-	{
-		ChildSlot.HAlignment = HAlign;
-		Invalidate(EInvalidateWidget::Layout);
-	}
+	ChildSlot.SetHorizontalAlignment(HAlign);
 }
 
 void SBackgroundBlur::SetVAlign(EVerticalAlignment VAlign)
 {
-	if (ChildSlot.VAlignment != VAlign)
-	{
-		ChildSlot.VAlignment = VAlign;
-		Invalidate(EInvalidateWidget::Layout);
-	}
+	ChildSlot.SetVerticalAlignment(VAlign);
 }
 
-void SBackgroundBlur::SetPadding(const TAttribute<FMargin>& InPadding)
+void SBackgroundBlur::SetPadding(TAttribute<FMargin> InPadding)
 {
-	if (!ChildSlot.SlotPadding.IdenticalTo(InPadding))
-	{
-		ChildSlot.SlotPadding = InPadding;
-		Invalidate(EInvalidateWidget::Layout);
-	}
+	ChildSlot.Padding(MoveTemp(InPadding));
 }
 
 bool SBackgroundBlur::IsUsingLowQualityFallbackBrush() const
@@ -112,16 +114,16 @@ int32 SBackgroundBlur::OnPaint(const FPaintArgs& Args, const FGeometry& Allotted
 	const bool bUsingLowQualityFallbackBrush = IsUsingLowQualityFallbackBrush();
 
 	int32 PostFXLayerId = LayerId;
-	if (bAllowBackgroundBlur && AllottedGeometry.GetLocalSize() > FVector2D::ZeroVector)
+	if (bAllowBackgroundBlur && AllottedGeometry.GetLocalSize().GetMin() > 0)
 	{
 		if (!bUsingLowQualityFallbackBrush)
 		{
 			// Modulate blur strength by the widget alpha
-			const float Strength = BlurStrength.Get() * (bApplyAlphaToBlur ? InWidgetStyle.GetColorAndOpacityTint().A : 1.f);
+			const float Strength = BlurStrengthAttribute.Get() * (bApplyAlphaToBlur ? InWidgetStyle.GetColorAndOpacityTint().A : 1.f);
 			if (Strength > 0.f)
 			{
 				FSlateRect RenderBoundingRect = AllottedGeometry.GetRenderBoundingRect();
-				FPaintGeometry PaintGeometry(RenderBoundingRect.GetTopLeft(), RenderBoundingRect.GetSize(), 1.0f);
+				FPaintGeometry PaintGeometry(RenderBoundingRect.GetTopLeft(), RenderBoundingRect.GetSize(), AllottedGeometry.GetAccumulatedLayoutTransform().GetScale());
 
 				int32 RenderTargetWidth = FMath::RoundToInt(RenderBoundingRect.GetSize().X);
 				int32 RenderTargetHeight = FMath::RoundToInt(RenderBoundingRect.GetSize().Y);
@@ -143,7 +145,7 @@ int32 SBackgroundBlur::OnPaint(const FPaintArgs& Args, const FGeometry& Allotted
 				{
 					OutDrawElements.PushClip(FSlateClippingZone(AllottedGeometry));
 
-					FSlateDrawElement::MakePostProcessPass(OutDrawElements, LayerId, PaintGeometry, FVector4(KernelSize, ComputedStrength, RenderTargetWidth, RenderTargetHeight), DownsampleAmount);
+					FSlateDrawElement::MakePostProcessBlur(OutDrawElements, LayerId, PaintGeometry, FVector4f((float)KernelSize, ComputedStrength, (float)RenderTargetWidth, (float)RenderTargetHeight), DownsampleAmount, FVector4f(CornerRadiusAttribute.Get()));
 
 					OutDrawElements.PopClip();
 				}
@@ -169,7 +171,7 @@ int32 SBackgroundBlur::OnPaint(const FPaintArgs& Args, const FGeometry& Allotted
 void SBackgroundBlur::ComputeEffectiveKernelSize(float Strength, int32& OutKernelSize, int32& OutDownsampleAmount) const
 {
 	// If the radius isn't set, auto-compute it based on the strength
-	OutKernelSize = BlurRadius.Get().Get(FMath::RoundToInt(Strength * 3.f));
+	OutKernelSize = BlurRadiusAttribute.Get().Get(FMath::RoundToInt(Strength * 3.f));
 
 	// Downsample if needed
 	if (bDownsampleForBlur && OutKernelSize > 9)

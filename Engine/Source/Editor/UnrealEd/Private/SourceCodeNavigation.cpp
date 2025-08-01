@@ -7,6 +7,7 @@
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeLock.h"
+#include "Misc/ConfigCacheIni.h"
 #include "Async/AsyncWork.h"
 #include "Modules/ModuleManager.h"
 #include "UObject/Class.h"
@@ -16,7 +17,7 @@
 #include "UObject/MetaData.h"
 #include "Misc/PackageName.h"
 #include "Async/TaskGraphInterfaces.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/Pawn.h"
 #include "TickableEditorObject.h"
@@ -26,9 +27,11 @@
 #include "Interfaces/IHttpResponse.h"
 #include "Interfaces/IHttpRequest.h"
 #include "HttpModule.h"
+#include "Editor/UnrealEdEngine.h"
+#include "Preferences/UnrealEdOptions.h"
+#include "UnrealEdGlobals.h"
 
 #if PLATFORM_WINDOWS
-#include "Windows/WindowsHWrapper.h"
 #include "Windows/AllowWindowsPlatformTypes.h"
 	#include <DbgHelp.h>				
 	#include <TlHelp32.h>		
@@ -461,131 +464,97 @@ void FSourceCodeNavigationImpl::NavigateToFunctionSource( const FString& Functio
 	ISourceCodeAccessor& SourceCodeAccessor = SourceCodeAccessModule.GetAccessor();
 
 #if PLATFORM_WINDOWS
-	// We'll need the current process handle in order to call into DbgHelp.  This must be the same
-	// process handle that was passed to SymInitialize() earlier.
-	const HANDLE ProcessHandle = ::GetCurrentProcess();
-
-	// Setup our symbol info structure so that DbgHelp can write to it
-	ANSICHAR SymbolInfoBuffer[ sizeof( IMAGEHLP_SYMBOL64 ) + MAX_SYM_NAME ];
-	PIMAGEHLP_SYMBOL64 SymbolInfoPtr = reinterpret_cast< IMAGEHLP_SYMBOL64*>( SymbolInfoBuffer );
-	SymbolInfoPtr->SizeOfStruct = sizeof( SymbolInfoBuffer );
-	SymbolInfoPtr->MaxNameLength = MAX_SYM_NAME;
-
-	FString FullyQualifiedSymbolName = FunctionSymbolName;
-	if( !FunctionModuleName.IsEmpty() )
+	FString SourceFileName;
+	uint32 SourceLineNumber = 1;
+	uint32 SourceColumnNumber = 0;
+	if (FPlatformStackWalk::GetFunctionDefinitionLocation(FunctionSymbolName, FunctionModuleName, SourceFileName, SourceLineNumber, SourceColumnNumber))
 	{
-		FullyQualifiedSymbolName = FString::Printf( TEXT( "%s!%s" ), *FunctionModuleName, *FunctionSymbolName );
-	}
-
-	// Ask DbgHelp to locate information about this symbol by name
-	// NOTE:  Careful!  This function is not thread safe, but we're calling it from a separate thread!
-	if( SymGetSymFromName64( ProcessHandle, TCHAR_TO_ANSI( *FullyQualifiedSymbolName ), SymbolInfoPtr ) )
-	{
-		// Setup our file and line info structure so that DbgHelp can write to it
-		IMAGEHLP_LINE64 FileAndLineInfo;
-		FileAndLineInfo.SizeOfStruct = sizeof( FileAndLineInfo );
-
-		// Query file and line number information for this symbol from DbgHelp
-		uint32 SourceColumnNumber = 0;
-		if( SymGetLineFromAddr64( ProcessHandle, SymbolInfoPtr->Address, (::DWORD *)&SourceColumnNumber, &FileAndLineInfo ) )
+		// If the file cannot be found, we are likely in a case of an Installed Build or a Project that was relocated post compilation. Try to rebuild the path from known roots.
+		if (FPaths::FileExists(SourceFileName) == false)
 		{
-			FString SourceFileName( (const ANSICHAR*)(FileAndLineInfo.FileName) );
-			int32 SourceLineNumber = 1;
-			if( bIgnoreLineNumber )
+			bool bFoundSource = false;
+			TArray<FString> Tokens;
+
+			//Split path from the PDB on backslashes 
+			SourceFileName.ParseIntoArray(Tokens, TEXT("\\"));
+
+			auto PathSearch = [&Tokens, &SourceFileName](const FString& BasePath) {
+				FString PathTail;
+				PathTail.Reserve(SourceFileName.Len());
+				FString TempPath;
+				TempPath.Reserve(SourceFileName.Len());
+
+				int32 index = Tokens.Num() - 1;
+
+				//Add the file name
+				PathTail = Tokens[index--];
+
+				//Successively prepend the folders until the file is found on disk or the full path is consumed.
+				do
+				{
+					TempPath = BasePath + PathTail;
+						
+					if (FPaths::FileExists(TempPath) == true)
+					{
+						//Resolve the path to an absolute path.
+						SourceFileName = IFileManager::Get().GetFilenameOnDisk(*TempPath);
+						return true;
+					}
+
+					//Prepend another folder to the current tail
+					PathTail = Tokens[index] + TEXT("\\") + PathTail;
+				} while (--index > 0);
+
+				return false;
+			};
+
+			const FString EnginePath = FPaths::EngineDir();
+			const FString ProjectPath = FPaths::ProjectDir();
+				
+			if((PathSearch(EnginePath) == false) && (PathSearch(ProjectPath) == false))
 			{
-				SourceColumnNumber = 1;
+				UE_LOG(LogSelectionDetails, Warning, TEXT("NavigateToFunctionSource:  Didn't find source file for [%s] - File [%s], Line [%i], Column [%i]"),
+					*FunctionSymbolName,
+					*SourceFileName,
+					SourceLineNumber,
+					SourceColumnNumber);
 			}
 			else
 			{
-				SourceLineNumber = FileAndLineInfo.LineNumber;
+				UE_LOG(LogSelectionDetails, Verbose, TEXT("NavigateToFunctionSource:  Found symbol file in renamed or moved code base."));
 			}
-
-			//If the file cannot be found, we are likely in a case of an Installed Build or a Project that was relocated post compilation. Try to rebuild the path from known roots.
- 			if (FPaths::FileExists(SourceFileName) == false)
-			{
-				bool bFoundSource = false;
-				TArray<FString> Tokens;
-
-				//Split path from the PDB on backslashes 
-				SourceFileName.ParseIntoArray(Tokens, TEXT("\\"));
-
-				auto PathSearch = [&Tokens, &SourceFileName](const FString& BasePath) {
-					FString PathTail;
-					PathTail.Reserve(SourceFileName.Len());
-					FString TempPath;
-					TempPath.Reserve(SourceFileName.Len());
-
-					int32 index = Tokens.Num() - 1;
-
-					//Add the file name
-					PathTail = Tokens[index--];
-
-					//Successively prepend the folders until the file is found on disk or the full path is consumed.
-					do
-					{
-						TempPath = BasePath + PathTail;
-						
-						if (FPaths::FileExists(TempPath) == true)
-						{
-							//Resolve the path to an absolute path.
-							SourceFileName = IFileManager::Get().GetFilenameOnDisk(*TempPath);
-							return true;
-						}
-
-						//Prepend another folder to the current tail
-						PathTail = Tokens[index] + TEXT("\\") + PathTail;
-					} while (--index > 0);
-
-					return false;
-				};
-
-				const FString EnginePath = FPaths::EngineDir();
-				const FString ProjectPath = FPaths::ProjectDir();
-				
-				if((PathSearch(EnginePath) == false) && (PathSearch(ProjectPath) == false))
-				{
-					UE_LOG(LogSelectionDetails, Warning, TEXT("NavigateToFunctionSource:  Didn't find source file for [%s] - File [%s], Line [%i], Column [%i]"),
-						*FunctionSymbolName,
-						*SourceFileName,
-						(uint32)FileAndLineInfo.LineNumber,
-						SourceColumnNumber);
-				}
-				else
-				{
-					UE_LOG(LogSelectionDetails, Verbose, TEXT("NavigateToFunctionSource:  Found symbol file in renamed or moved code base."));
-				}
-			}
-
-			UE_LOG(LogSelectionDetails, Verbose, TEXT( "NavigateToFunctionSource:  Found symbols for [%s] - File [%s], Line [%i], Column [%i]" ),
-				*FunctionSymbolName,
-				*SourceFileName,
-				(uint32)FileAndLineInfo.LineNumber,
-				SourceColumnNumber );
-
-			// Open this source file in our IDE and take the user right to the line number
-			SourceCodeAccessor.OpenFileAtLine( SourceFileName, SourceLineNumber, SourceColumnNumber );
 		}
-#if !NO_LOGGING
-		else
+
+		UE_LOG(LogSelectionDetails, Verbose, TEXT( "NavigateToFunctionSource:  Found symbols for [%s] - File [%s], Line [%i], Column [%i]" ),
+			*FunctionSymbolName,
+			*SourceFileName,
+			SourceLineNumber,
+			SourceColumnNumber );
+
+		if (bIgnoreLineNumber)
 		{
-			TCHAR ErrorBuffer[ MAX_SPRINTF ];
-			UE_LOG(LogSelectionDetails, Warning, TEXT( "NavigateToFunctionSource:  Unable to find source file and line number for '%s' [%s]" ),
-				*FunctionSymbolName,
-				FPlatformMisc::GetSystemErrorMessage( ErrorBuffer, MAX_SPRINTF, 0 ) );
+			SourceLineNumber = 1;
+			SourceColumnNumber = 1;
 		}
-#endif // !NO_LOGGING
+
+		// Open this source file in our IDE and take the user right to the line number
+		SourceCodeAccessor.OpenFileAtLine( SourceFileName, SourceLineNumber, SourceColumnNumber );
 	}
 #if !NO_LOGGING
 	else
 	{
 		TCHAR ErrorBuffer[ MAX_SPRINTF ];
-		UE_LOG(LogSelectionDetails, Warning, TEXT( "NavigateToFunctionSource:  Unable to find symbols for '%s' [%s]" ),
+		UE_LOG(LogSelectionDetails, Warning, TEXT( "NavigateToFunctionSource:  Unable to find source file and line number for '%s' [%s]" ),
 			*FunctionSymbolName,
 			FPlatformMisc::GetSystemErrorMessage( ErrorBuffer, MAX_SPRINTF, 0 ) );
 	}
 #endif // !NO_LOGGING
+
 #elif PLATFORM_MAC
-	
+    
+    int32 ReturnCode = 0;
+    FString Results;
+    FString Errors;
 	for(uint32 Index = 0; Index < _dyld_image_count(); Index++)
 	{
 		char const* IndexName = _dyld_get_image_name(Index);
@@ -593,175 +562,67 @@ void FSourceCodeNavigationImpl::NavigateToFunctionSource( const FString& Functio
 		FString Name = FPaths::GetBaseFilename(FullModulePath);
 		if(Name == FunctionModuleName)
 		{
-			struct mach_header_64 const* IndexModule64 = NULL;
-			struct load_command const* LoadCommands = NULL;
-			
-			struct mach_header const* IndexModule32 = _dyld_get_image_header(Index);
-			check(IndexModule32->magic == MH_MAGIC_64);
-			
-			IndexModule64 = (struct mach_header_64 const*)IndexModule32;
-			LoadCommands = (struct load_command const*)(IndexModule64 + 1);
-			struct load_command const* Command = LoadCommands;
-			struct symtab_command const* SymbolTable = nullptr;
-			struct dysymtab_command const* DsymTable = nullptr;
-			struct uuid_command* UUIDCommand = nullptr;
-			for(uint32 CommandIndex = 0; CommandIndex < IndexModule64->ncmds; CommandIndex++)
-			{
-				if (Command && Command->cmd == LC_SYMTAB)
-				{
-					SymbolTable = (struct symtab_command const*)Command;
-				}
-				else if(Command && Command->cmd == LC_DYSYMTAB)
-				{
-					DsymTable = (struct dysymtab_command const*)Command;
-				}
-				else if (Command && Command->cmd == LC_UUID)
-				{
-					UUIDCommand = (struct uuid_command*)Command;
-				}
-				Command = (struct load_command const*)(((char const*)Command) + Command->cmdsize);
-			}
-			
-			check(SymbolTable && DsymTable && UUIDCommand);
-			
-			IPlatformFile& PlatformFile = IPlatformFile::GetPlatformPhysical();
-			IFileHandle* File = PlatformFile.OpenRead(*FullModulePath);
-			if(File)
-			{
-				struct nlist_64* SymbolEntries = new struct nlist_64[SymbolTable->nsyms];
-				check(SymbolEntries);
-				char* StringTable = new char[SymbolTable->strsize];
-				check(StringTable);
-				
-				bool FileOK = File->Seek(SymbolTable->symoff+(DsymTable->iextdefsym*sizeof(struct nlist_64)));
-				FileOK &= File->Read((uint8*)SymbolEntries, DsymTable->nextdefsym*sizeof(struct nlist_64));
-				
-				FileOK &= File->Seek(SymbolTable->stroff);
-				FileOK &= File->Read((uint8*)StringTable, SymbolTable->strsize);
-				
-				delete File;
-				
-				for(uint32 SymbolIndex = 0; FileOK && SymbolIndex < DsymTable->nextdefsym; SymbolIndex++)
-				{
-					struct nlist_64 const& SymbolEntry = SymbolEntries[SymbolIndex];
-					// All the entries in the mach-o external table are functions.
-					// The local table contains the minimal debug stabs used by dsymutil to create the DWARF dsym.
-					if(SymbolEntry.n_un.n_strx)
-					{
-						if (SymbolEntry.n_value)
-						{
-							char const* MangledSymbolName = (StringTable+SymbolEntry.n_un.n_strx);
-							// Remove leading '_'
-							MangledSymbolName += 1;
-							
-							int32 Status = 0;
-							char* DemangledName = abi::__cxa_demangle(MangledSymbolName, NULL, 0, &Status);
-							
-							FString SymbolName;
-							if (DemangledName)
-							{
-								// C++ function
-								SymbolName = DemangledName;
-								free(DemangledName);
-								
-								// This contains return & arguments, it would seem that the DbgHelp API doesn't.
-								// So we shall strip them.
-								int32 ArgumentIndex = -1;
-								if(SymbolName.FindLastChar(TCHAR('('), ArgumentIndex))
-								{
-									SymbolName.LeftInline(ArgumentIndex, false);
-									int32 TemplateNesting = 0;
-									
-									int32 Pos = SymbolName.Len();
-									// Cast operators are special & include spaces, whereas normal functions don't.
-									int32 OperatorIndex = SymbolName.Find("operator");
-									if(OperatorIndex >= 0)
-									{
-										// Trim from before the 'operator'
-										Pos = OperatorIndex;
-									}
-									
-									for(; Pos > 0; --Pos)
-									{
-										TCHAR Character = SymbolName[Pos - 1];
-										if(Character == TCHAR(' ') && TemplateNesting == 0)
-										{
-											SymbolName.MidInline(Pos, MAX_int32, false);
-											break;
-										}
-										else if(Character == TCHAR('>'))
-										{
-											TemplateNesting++;
-										}
-										else if(Character == TCHAR('<'))
-										{
-											TemplateNesting--;
-										}
-									}
-								}
-							}
-							else
-							{
-								// C function
-								SymbolName = MangledSymbolName;
-							}
-							
-							if(FunctionSymbolName == SymbolName)
-							{
-								CFUUIDBytes UUIDBytes;
-								FMemory::Memcpy(&UUIDBytes, UUIDCommand->uuid, sizeof(CFUUIDBytes));
-								CFUUIDRef UUIDRef = CFUUIDCreateFromUUIDBytes(kCFAllocatorDefault, UUIDBytes);
-								CFStringRef UUIDString = CFUUIDCreateString(kCFAllocatorDefault, UUIDRef);
-								FString UUID((NSString*)UUIDString);
-								CFRelease(UUIDString);
-								CFRelease(UUIDRef);
-							
-								uint64 Address = SymbolEntry.n_value;
-								uint64 BaseAddress = (uint64)IndexModule64;
-								FString AtoSCommand = FString::Printf(TEXT("\"%s\" -s %s -l 0x%lx 0x%lx"), *FullModulePath, *UUID, BaseAddress, Address);
-								int32 ReturnCode = 0;
-								FString Results;
-								
-								const FString AtoSPath = FString::Printf(TEXT("%sBinaries/Mac/UnrealAtoS"), *FPaths::EngineDir() );
-								FPlatformProcess::ExecProcess( *AtoSPath, *AtoSCommand, &ReturnCode, &Results, NULL );
-								if(ReturnCode == 0)
-								{
-									bool bSourceFileOpened = false;
-									int32 FirstIndex = -1;
-									int32 LastIndex = -1;
-									if(Results.FindChar(TCHAR('('), FirstIndex) && Results.FindLastChar(TCHAR('('), LastIndex) && FirstIndex != LastIndex)
-									{
-										int32 CloseIndex = -1;
-										int32 ColonIndex = -1;
-										if(Results.FindLastChar(TCHAR(':'), ColonIndex) && Results.FindLastChar(TCHAR(')'), CloseIndex) && CloseIndex > ColonIndex && LastIndex < ColonIndex)
-										{
-											int32 FileNamePos = LastIndex+1;
-											int32 FileNameLen = ColonIndex-FileNamePos;
-											FString FileName = Results.Mid(FileNamePos, FileNameLen);
-											FString LineNumber = Results.Mid(ColonIndex + 1, CloseIndex-(ColonIndex + 1));
-											bSourceFileOpened = SourceCodeAccessor.OpenFileAtLine( FileName, FCString::Atoi(*LineNumber), 0 );
-										}
-									}
-#if !NO_LOGGING
-									if (!bSourceFileOpened)
-									{
-										UE_LOG(LogSelectionDetails, Warning, TEXT("NavigateToFunctionSource:  Unable to find source file and line number for '%s'"), *FunctionSymbolName);
-									}
-#endif
-								}
-								break;
-							}
-						}
-					}
-				}
-				
-				delete [] StringTable;
-				delete [] SymbolEntries;
-			}
-			break;
+            FString FullDsymPath = FPaths::ChangeExtension(FullModulePath, TEXT("dsym"));
+            const FString SourceCodeLookupCommand = FString::Printf(TEXT("%sBuild/BatchFiles/Mac/SourceCodeLookup.sh \"%s\" \"%s\" \"%s\""), *FPaths::EngineDir(), *FunctionSymbolName, *FullModulePath, *FullDsymPath);
+            FPlatformProcess::ExecProcess( TEXT("/bin/sh"), *SourceCodeLookupCommand, &ReturnCode, &Results, &Errors );
+            if(ReturnCode == 0 && !Results.IsEmpty())
+            {
+                // find the last occurance of (filepath:linenumber)
+                int32 OpenIndex = -1;
+                int32 ColonIndex = -1;
+                int32 CloseIndex = -1;
+                if(Results.FindLastChar(TCHAR('('), OpenIndex) && Results.FindLastChar(TCHAR(':'), ColonIndex) && Results.FindLastChar(TCHAR(')'), CloseIndex)
+                   && CloseIndex > ColonIndex && OpenIndex < ColonIndex)
+                {
+                    int32 FileNamePos = OpenIndex + 1;
+                    int32 FileNameLen = ColonIndex - FileNamePos;
+                    FString FileName = Results.Mid(FileNamePos, FileNameLen);
+                    int32 LineNumberPos = ColonIndex + 1;
+                    int32 LineNumberLen = CloseIndex - LineNumberPos;
+                    FString LineNumber = Results.Mid(LineNumberPos, LineNumberLen);
+                    
+                    if (!FPaths::FileExists(FileName))
+                    {
+                        // could be using dsym which has fullpath of source file on Horde build machine
+                        // fix it from /Users/build/Build/++UE5/Sync/Engine/Source/** to FPaths::EngineDir()/Source/**
+                        int pos = FileName.Find(TEXT("/Engine/Source/"));
+                        if (pos != INDEX_NONE)
+                        {
+                            FileName.RemoveAt(0, pos + 8 /* length of "/Engine/" */ );
+                            FileName.InsertAt(0, FPaths::EngineDir());
+                        }
+                    }
+                    
+                    if (SourceCodeAccessor.OpenFileAtLine( FileName, FCString::Atoi(*LineNumber), 0 ))
+                    {
+                        return;
+                    }
+                    else
+                    {
+                        UE_LOG(LogSelectionDetails, Warning, TEXT("NavigateToFunctionSource: Unable to open file %s and line number %s"), *FileName, *LineNumber);
+                    }
+                }
+                else
+                {
+                    if (!FPaths::FileExists(FullDsymPath))
+                    {
+                        UE_LOG(LogSelectionDetails, Warning, TEXT("NavigateToFunctionSource: Missing dSYM files, please install Editor symbols for debugging"), *Results);
+                    }
+                    else
+                    {
+                        UE_LOG(LogSelectionDetails, Warning, TEXT("NavigateToFunctionSource: Unexpected SourceCodeLookup.sh output: %s"), *Results);
+                    }
+                }
+            }
+            else if (ReturnCode != 0 || !Errors.IsEmpty())
+            {
+                UE_LOG(LogSelectionDetails, Warning, TEXT("NavigateToFunctionSource: SourceCodeLookup.sh failed with code: %d\n%s"), ReturnCode, *Errors);
+            }
 		}
 	}
-	
+    
+    UE_LOG(LogSelectionDetails, Warning, TEXT("NavigateToFunctionSource: Unable to look up symbol: %s in module:%s"), *FunctionSymbolName, *FunctionModuleName);
+    
 #endif	// PLATFORM_WINDOWS
 }
 
@@ -802,11 +663,9 @@ void FSourceCodeNavigation::Initialize()
 
 const FSourceFileDatabase& FSourceCodeNavigation::GetSourceFileDatabase()
 {
-#if !( PLATFORM_WINDOWS && defined(__clang__) )		// @todo clang: This code causes a strange stack overflow issue when compiling using Clang on Windows
 	// Lock so that nothing may proceed while the AsyncTask is constructing the FSourceFileDatabase for the first time
 	FScopeLock Lock(&CriticalSection);
 	Instance.UpdateIfNeeded();
-#endif
 
 	return Instance;
 }
@@ -860,7 +719,7 @@ void FSourceCodeNavigation::NavigateToFunctionSourceAsync( const FString& Functi
 	};
 
 	FNotificationInfo Info( LOCTEXT("ReadingSymbols", "Reading C++ Symbols") );
-	Info.Image = FEditorStyle::GetBrush(TEXT("LevelEditor.RecompileGameCode"));
+	Info.Image = FAppStyle::GetBrush(TEXT("LevelEditor.RecompileGameCode"));
 	Info.ExpireDuration = 2.0f;
 	Info.bFireAndForget = false;
 
@@ -1506,9 +1365,24 @@ void FSourceCodeNavigation::RemoveNavigationHandler(ISourceCodeNavigationHandler
 	SourceCodeNavigationHandlers.Remove(Handler);
 }
 
+void FSourceCodeNavigation::SetPreferredAccessor(const TCHAR* Name)
+{
+	GConfig->SetString(TEXT("/Script/SourceCodeAccess.SourceCodeAccessSettings"), TEXT("PreferredAccessor"), Name, GEditorSettingsIni);
+
+	ISourceCodeAccessModule& SourceCodeAccessModule = FModuleManager::LoadModuleChecked<ISourceCodeAccessModule>(TEXT("SourceCodeAccess"));
+	SourceCodeAccessModule.SetAccessor(Name);
+
+	RefreshCompilerAvailability();
+}
+
 bool FSourceCodeNavigation::CanNavigateToClass(const UClass* InClass)
 {
 	if (!InClass)
+	{
+		return false;
+	}
+
+	if (ensure(GUnrealEd) && !GUnrealEd->GetUnrealEdOptions()->IsCPPAllowed())
 	{
 		return false;
 	}
@@ -1558,6 +1432,11 @@ bool FSourceCodeNavigation::CanNavigateToStruct(const UScriptStruct* InStruct)
 		return false;
 	}
 
+	if (ensure(GUnrealEd) && !GUnrealEd->GetUnrealEdOptions()->IsCPPAllowed())
+	{
+		return false;
+	}
+
 	for (int32 i = 0; i < SourceCodeNavigationHandlers.Num(); ++i)
 	{
 		ISourceCodeNavigationHandler* Handler = SourceCodeNavigationHandlers[i];
@@ -1599,6 +1478,11 @@ bool FSourceCodeNavigation::NavigateToStruct(const UScriptStruct* InStruct)
 bool FSourceCodeNavigation::CanNavigateToFunction(const UFunction* InFunction)
 {
 	if (!InFunction)
+	{
+		return false;
+	}
+
+	if (ensure(GUnrealEd) && !GUnrealEd->GetUnrealEdOptions()->IsCPPAllowed())
 	{
 		return false;
 	}
@@ -1657,6 +1541,11 @@ bool FSourceCodeNavigation::CanNavigateToProperty(const FProperty* InProperty)
 		return false;
 	}
 
+	if (ensure(GUnrealEd) && !GUnrealEd->GetUnrealEdOptions()->IsCPPAllowed())
+	{
+		return false;
+	}
+
 	for (int32 i = 0; i < SourceCodeNavigationHandlers.Num(); ++i)
 	{
 		ISourceCodeNavigationHandler* Handler = SourceCodeNavigationHandlers[i];
@@ -1703,6 +1592,11 @@ bool FSourceCodeNavigation::NavigateToProperty(const FProperty* InProperty)
 bool FSourceCodeNavigation::CanNavigateToStruct(const UStruct* InStruct)
 {
 	if (!InStruct)
+	{
+		return false;
+	}
+
+	if (ensure(GUnrealEd) && !GUnrealEd->GetUnrealEdOptions()->IsCPPAllowed())
 	{
 		return false;
 	}
@@ -1805,15 +1699,29 @@ FText FSourceCodeNavigation::GetSuggestedSourceCodeIDE(bool bShortIDEName)
 	}
 	else
 	{
-		return LOCTEXT("SuggestedCodeIDE_Windows", "Visual Studio 2019");
+		return LOCTEXT("SuggestedCodeIDE_Windows", "Visual Studio 2022");
 	}
 #elif PLATFORM_MAC
 	return LOCTEXT("SuggestedCodeIDE_Mac", "Xcode");
 #elif PLATFORM_LINUX
-	return LOCTEXT("SuggestedCodeIDE_Linux", "NullSourceCodeAccessor");
+	return LOCTEXT("SuggestedCodeIDE_Linux", "VS Code");
 #else
 	return LOCTEXT("SuggestedCodeIDE_Generic", "an IDE to edit source code");
 #endif
+}
+
+
+FSlateIcon FSourceCodeNavigation::GetOpenSourceCodeIDEIcon()
+{
+	ISourceCodeAccessModule& SourceCodeAccessModule = FModuleManager::LoadModuleChecked<ISourceCodeAccessModule>("SourceCodeAccess");
+	return FSlateIcon(SourceCodeAccessModule.GetAccessor().GetStyleSet(), SourceCodeAccessModule.GetAccessor().GetOpenIconName());
+}
+
+
+FSlateIcon FSourceCodeNavigation::GetRefreshSourceCodeIDEIcon()
+{
+	ISourceCodeAccessModule& SourceCodeAccessModule = FModuleManager::LoadModuleChecked<ISourceCodeAccessModule>("SourceCodeAccess");
+	return FSlateIcon(SourceCodeAccessModule.GetAccessor().GetStyleSet(), SourceCodeAccessModule.GetAccessor().GetRefreshIconName());
 }
 
 FString FSourceCodeNavigation::GetSuggestedSourceCodeIDEDownloadURL()
@@ -1825,6 +1733,9 @@ FString FSourceCodeNavigation::GetSuggestedSourceCodeIDEDownloadURL()
 #elif PLATFORM_MAC
 	// Xcode
 	FUnrealEdMisc::Get().GetURL( TEXT("SourceCodeIDEURL_Mac"), SourceCodeIDEURL );
+#elif PLATFORM_LINUX
+	// VSCode
+	FUnrealEdMisc::Get().GetURL( TEXT("SourceCodeIDEURL_Linux"), SourceCodeIDEURL );
 #else
 	// Unknown platform, just link to wikipedia page on IDEs
 	FUnrealEdMisc::Get().GetURL( TEXT("SourceCodeIDEURL_Other"), SourceCodeIDEURL );
@@ -1990,7 +1901,7 @@ bool FSourceCodeNavigation::FindClassHeaderPath( const UField* InField, FString 
 	}
 
 	// Get the class package, and skip past the "/Script/" portion to get the module name
-	UPackage* ModulePackage = InField->GetTypedOuter<UPackage>();
+	UPackage* ModulePackage = InField->GetPackage();
 
 	// Find the base path for the module
 	FString ModuleBasePath;
@@ -2015,7 +1926,7 @@ bool FSourceCodeNavigation::FindClassSourcePath( const UField* InField, FString 
 	}
 
 	// Get the class package, and skip past the "/Script/" portion to get the module name
-	UPackage *ModulePackage = InField->GetTypedOuter<UPackage>();
+	UPackage *ModulePackage = InField->GetPackage();
 
 	// Find the base path for the module
 	FString ModuleBasePath;
@@ -2176,7 +2087,7 @@ FString FSourceCodeNavigationImpl::GetSuggestedIDEInstallerFileName()
 void FSourceCodeNavigationImpl::LaunchIDEInstaller(const FString& Filepath)
 {
 #if PLATFORM_WINDOWS
-	auto Params = TEXT("--productId \"Microsoft.VisualStudio.Product.Community\" --add \"Microsoft.VisualStudio.Workload.NativeDesktop\" --add \"Microsoft.VisualStudio.Workload.NativeGame\" --add \"Component.Unreal\" --add \"Microsoft.VisualStudio.Component.Windows10SDK.17763\" --campaign \"EpicGames_UE4\"");
+	auto Params = TEXT("--productId \"Microsoft.VisualStudio.Product.Community\" --add \"Microsoft.VisualStudio.Workload.NativeDesktop\" --add \"Microsoft.VisualStudio.Workload.NativeGame\" --add \"Component.Unreal\" --add \"Microsoft.VisualStudio.Component.Windows10SDK.18362\" --campaign \"EpicGames_UE5\"");
 	FPlatformProcess::ExecElevatedProcess(*Filepath, Params, nullptr);
 #endif
 }

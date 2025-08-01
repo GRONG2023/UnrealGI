@@ -3,7 +3,7 @@
 #include "Sections/MovieSceneSkeletalAnimationSection.h"
 #include "Channels/MovieSceneChannelProxy.h"
 #include "Animation/AnimSequence.h"
-#include "Evaluation/MovieSceneSkeletalAnimationTemplate.h"
+#include "AnimSequencerInstanceProxy.h"
 #include "Logging/MessageLog.h"
 #include "MovieScene.h"
 #include "UObject/SequencerObjectVersion.h"
@@ -11,9 +11,19 @@
 #include "Tracks/MovieSceneSkeletalAnimationTrack.h"
 #include "BoneContainer.h"
 #include "Animation/AnimationPoseData.h"
-#include "Animation/CustomAttributesRuntime.h"
+#include "Animation/AnimSequenceDecompressionContext.h"
+#include "Animation/AttributesRuntime.h"
+#include "Misc/FrameRate.h"
+#include "EntitySystem/BuiltInComponentTypes.h"
+#include "MovieSceneTracksComponentTypes.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneSkeletalAnimationSection)
 
 #define LOCTEXT_NAMESPACE "MovieSceneSkeletalAnimationSection"
+
+TAutoConsoleVariable<bool> CVarStartTransformOffsetInBoneSpace(TEXT("Sequencer.StartTransformOffsetInBoneSpace"), true,
+	TEXT("When true we offset the start offsets for skeletal animation matching in bone space, if false we do it in root space, by default true"));
+
 
 namespace
 {
@@ -24,6 +34,7 @@ namespace
 FMovieSceneSkeletalAnimationParams::FMovieSceneSkeletalAnimationParams()
 {
 	Animation = nullptr;
+	MirrorDataTable = nullptr; 
 	StartOffset_DEPRECATED = SkeletalDeprecatedMagicNumber;
 	EndOffset_DEPRECATED = SkeletalDeprecatedMagicNumber;
 	PlayRate = 1.f;
@@ -32,6 +43,59 @@ FMovieSceneSkeletalAnimationParams::FMovieSceneSkeletalAnimationParams()
 	Weight.SetDefault(1.f);
 	bSkipAnimNotifiers = false;
 	bForceCustomMode = false;
+	SwapRootBone = ESwapRootBone::SwapRootBone_None;
+}
+
+double FMovieSceneSkeletalAnimationParams::MapTimeToAnimation(const UMovieSceneSection* InSection, FFrameTime InPosition, FFrameRate InFrameRate) const
+{
+	const FFrameNumber SectionStartTime = InSection->GetInclusiveStartFrame();
+	const FFrameNumber SectionEndTime = InSection->GetExclusiveEndFrame();
+	return MapTimeToAnimation(SectionStartTime, SectionEndTime, InPosition, InFrameRate);
+}
+
+double FMovieSceneSkeletalAnimationParams::MapTimeToAnimation(FFrameNumber InSectionStartTime, FFrameNumber InSectionEndTime, FFrameTime InPosition, FFrameRate InFrameRate) const
+{
+	// Get Animation Length and frame time
+	if (Animation)
+	{
+		const FFrameTime AnimationLength = GetSequenceLength() * InFrameRate;
+		const int32 LengthInFrames = AnimationLength.FrameNumber.Value + (int)(AnimationLength.GetSubFrame() + 0.5f) + 1;
+
+		// we only play end if we are not looping, and assuming we are looping if Length is greater than default length;
+		const bool bLooping = (InSectionEndTime.Value - InSectionStartTime.Value + StartFrameOffset + EndFrameOffset) > LengthInFrames;
+
+		// Make sure InPosition FrameTime doesn't underflow InSectionStartTime or overflow InSectionEndTime
+		InPosition = FMath::Clamp(InPosition, FFrameTime(InSectionStartTime), FFrameTime(InSectionEndTime - 1));
+
+		// Gather helper values
+		const float SectionPlayRate = PlayRate * Animation->RateScale;
+		const float AnimPlayRate = FMath::IsNearlyZero(SectionPlayRate) ? 1.0f : SectionPlayRate;
+		const double SeqLength = GetSequenceLength() - InFrameRate.AsSeconds(StartFrameOffset + EndFrameOffset);
+
+		// The Time from the beginning of InSectionStartTime to InPosition in seconds
+		double SecondsFromSectionStart = FFrameTime::FromDecimal((InPosition - InSectionStartTime).AsDecimal() * AnimPlayRate) / InFrameRate;
+
+		// Logic for reversed animation
+		if (bReverse)
+		{
+			// Duration of this section 
+			double SectionDuration = (((InSectionEndTime - InSectionStartTime) * AnimPlayRate) / InFrameRate);
+			SecondsFromSectionStart = SectionDuration - SecondsFromSectionStart;
+		}
+
+		SecondsFromSectionStart += InFrameRate.AsSeconds(FirstLoopStartFrameOffset);
+
+		// Make sure Seconds is in range
+		if (SeqLength > 0.0 && (bLooping || !FMath::IsNearlyEqual(SecondsFromSectionStart, SeqLength, 1e-4)))
+		{
+			SecondsFromSectionStart = FMath::Fmod(SecondsFromSectionStart, SeqLength);
+		}
+
+		// Add the StartFrameOffset to the current seconds in the section to get the right animation frame
+		SecondsFromSectionStart += InFrameRate.AsSeconds(StartFrameOffset);
+		return SecondsFromSectionStart;
+	}
+	return 0.0;
 }
 
 UMovieSceneSkeletalAnimationSection::UMovieSceneSkeletalAnimationSection( const FObjectInitializer& ObjectInitializer )
@@ -67,7 +131,6 @@ UMovieSceneSkeletalAnimationSection::UMovieSceneSkeletalAnimationSection( const 
 	bMatchRotationPitch = false;
 	bMatchIncludeZHeight = false;
 
-	TempRootBoneIndex = 0;
 #if WITH_EDITOR
 
 	PreviousPlayRate = Params.PlayRate;
@@ -86,6 +149,26 @@ UMovieSceneSkeletalAnimationSection::UMovieSceneSkeletalAnimationSection( const 
 TOptional<FFrameTime> UMovieSceneSkeletalAnimationSection::GetOffsetTime() const
 {
 	return TOptional<FFrameTime>(Params.FirstLoopStartFrameOffset);
+}
+
+void UMovieSceneSkeletalAnimationSection::MigrateFrameTimes(FFrameRate SourceRate, FFrameRate DestinationRate)
+{
+	if (Params.StartFrameOffset.Value > 0)
+	{
+		FFrameNumber NewStartFrameOffset = ConvertFrameTime(FFrameTime(Params.StartFrameOffset), SourceRate, DestinationRate).FloorToFrame();
+		Params.StartFrameOffset = NewStartFrameOffset;
+	}
+
+	if (Params.EndFrameOffset.Value > 0)
+	{
+		FFrameNumber NewEndFrameOffset = ConvertFrameTime(FFrameTime(Params.EndFrameOffset), SourceRate, DestinationRate).FloorToFrame();
+		Params.EndFrameOffset = NewEndFrameOffset;
+	}
+	if (Params.FirstLoopStartFrameOffset.Value > 0)
+	{
+		FFrameNumber NewFirstLoopStartFrameOffset = ConvertFrameTime(FFrameTime(Params.FirstLoopStartFrameOffset), SourceRate, DestinationRate).FloorToFrame();
+		Params.FirstLoopStartFrameOffset = NewFirstLoopStartFrameOffset;
+	}
 }
 
 void UMovieSceneSkeletalAnimationSection::Serialize(FArchive& Ar)
@@ -189,29 +272,14 @@ void UMovieSceneSkeletalAnimationSection::PostLoad()
 	Super::PostLoad();
 }
 
-FFrameNumber GetFirstLoopStartOffsetAtTrimTime(FQualifiedFrameTime TrimTime, const FMovieSceneSkeletalAnimationParams& Params, FFrameNumber StartFrame, FFrameRate FrameRate)
-{
-	const float AnimPlayRate = FMath::IsNearlyZero(Params.PlayRate) ? 1.0f : Params.PlayRate;
-	const float AnimPosition = (TrimTime.Time - StartFrame) / TrimTime.Rate * AnimPlayRate;
-	const float SeqLength = Params.GetSequenceLength() - FrameRate.AsSeconds(Params.StartFrameOffset + Params.EndFrameOffset) / AnimPlayRate;
-
-	FFrameNumber NewOffset = FrameRate.AsFrameNumber(FMath::Fmod(AnimPosition, SeqLength));
-	NewOffset += Params.FirstLoopStartFrameOffset;
-
-	const FFrameNumber SeqLengthInFrames = FrameRate.AsFrameNumber(SeqLength);
-	while (NewOffset >= SeqLengthInFrames)
-		NewOffset -= SeqLengthInFrames;
-
-	return NewOffset;
-}
-
-
 TOptional<TRange<FFrameNumber> > UMovieSceneSkeletalAnimationSection::GetAutoSizeRange() const
 {
-	FFrameRate FrameRate = GetTypedOuter<UMovieScene>()->GetTickResolution();
+	const FFrameRate FrameRate = GetTypedOuter<UMovieScene>()->GetTickResolution();
+	const float AnimPlayRate = FMath::IsNearlyZero(Params.PlayRate) || Params.Animation == nullptr ? 1.0f : Params.PlayRate * Params.Animation->RateScale;
 
-	FFrameTime AnimationLength = Params.GetSequenceLength() * FrameRate;
-	int32 IFrameNumber = AnimationLength.FrameNumber.Value + (int)(AnimationLength.GetSubFrame() + 0.5f);
+	const FFrameTime UnscaledAnimationLength = FMath::Max(Params.GetSequenceLength() * FrameRate - Params.FirstLoopStartFrameOffset - Params.StartFrameOffset - Params.EndFrameOffset, FFrameTime(1));
+	const FFrameTime AnimationLength = UnscaledAnimationLength / AnimPlayRate;
+	const int32 IFrameNumber = AnimationLength.FrameNumber.Value + (int)(AnimationLength.GetSubFrame() + 0.5f);
 
 	return TRange<FFrameNumber>(GetInclusiveStartFrame(), GetInclusiveStartFrame() + IFrameNumber + 1);
 }
@@ -236,22 +304,63 @@ void UMovieSceneSkeletalAnimationSection::TrimSection(FQualifiedFrameTime TrimTi
 
 UMovieSceneSection* UMovieSceneSkeletalAnimationSection::SplitSection(FQualifiedFrameTime SplitTime, bool bDeleteKeys)
 {
+	//handle root motion, only in editor
+#if WITH_EDITOR
+
+	TOptional<FTransform> RootTransform;
+	FName BoneName;
+	UMovieSceneSkeletalAnimationTrack* Track = GetTypedOuter<UMovieSceneSkeletalAnimationTrack>();
+	//if we are doing root motion then get the BoneName 
+	if (Track)
+	{
+		int32 BoneIndex = SetBoneIndexForRootMotionCalculations(Track->bBlendFirstChildOfRoot);
+		FMovieSceneSkeletalAnimRootMotionTrackParams* RootMotionParams = GetRootMotionParams();
+		if (RootMotionParams->bHaveRootMotion)
+		{
+			if (UAnimSequence* AnimSequence = Cast<UAnimSequence>(Params.Animation))
+			{
+				const FReferenceSkeleton& RefSkeleton = AnimSequence->GetSkeleton()->GetReferenceSkeleton();
+				RootTransform = Track->GetRootMotion(SplitTime.Time);
+				if (RootTransform.IsSet())
+				{
+					BoneName = RefSkeleton.GetBoneName(BoneIndex);
+				}
+			}
+		}
+	}
+#endif
+
+	//handle FirstLoopStartFrameOffset
 	const FFrameNumber InitialFirstLoopStartFrameOffset = Params.FirstLoopStartFrameOffset;
 
 	FFrameRate FrameRate = GetTypedOuter<UMovieScene>()->GetTickResolution();
 
 	const FFrameNumber NewOffset = HasStartFrame() ? GetFirstLoopStartOffsetAtTrimTime(SplitTime, Params, GetInclusiveStartFrame(), FrameRate) : 0;
 
-	UMovieSceneSection* NewSection = Super::SplitSection(SplitTime, bDeleteKeys);
+	UMovieSceneSkeletalAnimationSection* NewSection = Cast<UMovieSceneSkeletalAnimationSection>(Super::SplitSection(SplitTime, bDeleteKeys));
 	if (NewSection != nullptr)
 	{
-		UMovieSceneSkeletalAnimationSection* NewSkeletalSection = Cast<UMovieSceneSkeletalAnimationSection>(NewSection);
-		NewSkeletalSection->Params.FirstLoopStartFrameOffset = NewOffset;
+		NewSection->Params.FirstLoopStartFrameOffset = NewOffset;
+
+#if WITH_EDITOR
+
+		if (RootTransform.IsSet())
+		{
+			NewSection->bMatchTranslation = NewSection->bMatchIncludeZHeight = true;
+			NewSection->bMatchRotationYaw = NewSection->bMatchRotationPitch = NewSection->bMatchRotationRoll = true;
+			NewSection->bMatchWithPrevious = true;
+			NewSection->MatchedLocationOffset = FVector(0.0, 0.0, 0.0);
+			NewSection->MatchedRotationOffset = FRotator(0.0, 0.0, 0.0);
+			if (NewSection->GetRootMotionParams())
+			{
+				NewSection->GetRootMotionParams()->bRootMotionsDirty = true;
+			}
+		}
+#endif
 	}
 
 	// Restore original offset modified by splitting
 	Params.FirstLoopStartFrameOffset = InitialFirstLoopStartFrameOffset;
-
 	return NewSection;
 }
 
@@ -291,10 +400,9 @@ void UMovieSceneSkeletalAnimationSection::GetSnapTimes(TArray<FFrameNumber>& Out
 	}
 }
 
-float UMovieSceneSkeletalAnimationSection::MapTimeToAnimation(FFrameTime InPosition, FFrameRate InFrameRate) const
+double UMovieSceneSkeletalAnimationSection::MapTimeToAnimation(FFrameTime InPosition, FFrameRate InFrameRate) const
 {
-	FMovieSceneSkeletalAnimationSectionTemplateParameters TemplateParams(Params, GetInclusiveStartFrame(), GetExclusiveEndFrame());
-	return TemplateParams.MapTimeToAnimation(InPosition, InFrameRate);
+	return Params.MapTimeToAnimation(this, InPosition, InFrameRate);
 }
 
 float UMovieSceneSkeletalAnimationSection::GetTotalWeightValue(FFrameTime InTime) const
@@ -330,8 +438,34 @@ void UMovieSceneSkeletalAnimationSection::SetEndFrame(TRangeBound<FFrameNumber> 
 	}
 }
 
+void UMovieSceneSkeletalAnimationSection::ImportEntityImpl(UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& InParams, FImportedEntity* OutImportedEntity)
+{
+	using namespace UE::MovieScene;
+
+	const FBuiltInComponentTypes* BuiltInComponents = FBuiltInComponentTypes::Get();
+	const FMovieSceneTracksComponentTypes* TrackComponents = FMovieSceneTracksComponentTypes::Get();
+
+	const FGuid ObjectBindingID = InParams.GetObjectBindingID();
+	FMovieSceneSkeletalAnimationComponentData ComponentData { this };
+
+	OutImportedEntity->AddBuilder(
+		FEntityBuilder()
+		.Add(TrackComponents->SkeletalAnimation, ComponentData)
+		.AddConditional(BuiltInComponents->GenericObjectBinding, ObjectBindingID, ObjectBindingID.IsValid())
+		.AddConditional(BuiltInComponents->WeightChannel, &Params.Weight, Params.Weight.HasAnyData())
+	);
+}
 
 #if WITH_EDITOR
+bool UMovieSceneSkeletalAnimationSection::Modify(bool bAlwaysMarkDirty)
+{
+	if (GetRootMotionParams())
+	{
+		GetRootMotionParams()->bRootMotionsDirty = true;
+	}
+	return Super::Modify(bAlwaysMarkDirty);
+}
+
 void UMovieSceneSkeletalAnimationSection::PreEditChange(FProperty* PropertyAboutToChange)
 {
 	// Store the current play rate so that we can compute the amount to compensate the section end time when the play rate changes
@@ -370,6 +504,7 @@ void UMovieSceneSkeletalAnimationSection::PostEditImport()
 	{
 		GetRootMotionParams()->bRootMotionsDirty = true;
 	}
+	Super::PostEditImport();
 }
 void UMovieSceneSkeletalAnimationSection::PostEditUndo()
 {
@@ -377,34 +512,24 @@ void UMovieSceneSkeletalAnimationSection::PostEditUndo()
 	{
 		GetRootMotionParams()->bRootMotionsDirty = true;
 	}
+	Super::PostEditUndo();
 }
 
 #endif
 
-TOptional<FTransform> UMovieSceneSkeletalAnimationSection::GetRootMotion(FFrameTime CurrentTime, bool& bBlendFirstChildOfRoot) const
+void UMovieSceneSkeletalAnimationSection::GetRootMotion(FFrameTime CurrentTime, UMovieSceneSkeletalAnimationSection::FRootMotionParams& OutRootMotionParams) const
 {
-	//if we don't have an offset transform set then it's fine to return nothing, we just use the default root. Also use smaller tolerance here just in case
-	if (GetRootMotionParams() && GetOffsetTransform().Equals(FTransform::Identity, KINDA_SMALL_NUMBER)  == false)
+	if (GetRootMotionParams())
 	{
-		UMovieSceneSkeletalAnimationTrack* Track = GetTypedOuter<UMovieSceneSkeletalAnimationTrack>();
-		if (GetRootMotionParams()->bRootMotionsDirty)
+		if (UMovieSceneSkeletalAnimationTrack* Track = GetTypedOuter<UMovieSceneSkeletalAnimationTrack>())
 		{
-			if (Track)
-			{
-				Track->SetUpRootMotions(true);
-				if (GetRootMotionParams()->RootTransforms.Num() == 0) //should never be true but just in case
-				{
-					return TOptional<FTransform>();
-				}
-			}
+			OutRootMotionParams.Transform = Track->GetRootMotion(CurrentTime);
+			OutRootMotionParams.ChildBoneIndex = TempRootBoneIndex.IsSet() ? TempRootBoneIndex.GetValue() : INDEX_NONE;
+			OutRootMotionParams.bBlendFirstChildOfRoot = Track->bBlendFirstChildOfRoot ;
+			OutRootMotionParams.PreviousTransform = PreviousTransform;
 		}
-
-		bBlendFirstChildOfRoot = Track ? Track->bBlendFirstChildOfRoot : false;
-		return GetRootMotionParams()->GetRootMotion(CurrentTime);
 	}
-	return TOptional<FTransform>();
 }
-
 
 bool UMovieSceneSkeletalAnimationSection::GetRootMotionVelocity(FFrameTime PreviousTime, FFrameTime CurrentTime, FFrameRate FrameRate, 
 	FTransform& OutVelocity, float& OutWeight) const
@@ -417,8 +542,8 @@ bool UMovieSceneSkeletalAnimationSection::GetRootMotionVelocity(FFrameTime Previ
 		OutWeight = ManualWeight * EvaluateEasing(CurrentTime);
 		//mz todo we should be able to cache the PreviousTimeSeconds;
 		//mz todo need to get the starting value.
-		float PreviousTimeSeconds = MapTimeToAnimation(PreviousTime, FrameRate);
-		float CurrentTimeSeconds  = MapTimeToAnimation(CurrentTime, FrameRate);
+		float PreviousTimeSeconds = static_cast<float>(MapTimeToAnimation(PreviousTime, FrameRate));
+		float CurrentTimeSeconds  = static_cast<float>(MapTimeToAnimation(CurrentTime, FrameRate));
 		OutVelocity = AnimSequence->ExtractRootMotionFromRange(PreviousTimeSeconds, CurrentTimeSeconds);
 		return true;
 	}
@@ -435,91 +560,169 @@ FMovieSceneSkeletalAnimRootMotionTrackParams*  UMovieSceneSkeletalAnimationSecti
 	return nullptr;
 }
 
-
-FTransform  UMovieSceneSkeletalAnimationSection::GetOffsetTransform() const
-{
-	FTransform OffsetTransform(FQuat(StartRotationOffset), StartLocationOffset);
-	FTransform MatchedTransform(FQuat(MatchedRotationOffset), MatchedLocationOffset);
-	OffsetTransform *= MatchedTransform;
-	return OffsetTransform;
-}
-
 int32 UMovieSceneSkeletalAnimationSection::SetBoneIndexForRootMotionCalculations(bool bBlendFirstChildOfRoot)
 {
-	TempRootBoneIndex = 0;
 	if (!bBlendFirstChildOfRoot)
 	{
-		return TempRootBoneIndex.GetValue();
+		TempRootBoneIndex.Reset();
+		return 0;
 	}
-	else if(UAnimSequence* AnimSequence = Cast<UAnimSequence>(Params.Animation))
-	{ 
-		//but if not first find first
-		int32 RootIndex = INDEX_NONE;
-		for (int32 TrackIndex = 0; TrackIndex < AnimSequence->GetRawAnimationData().Num(); ++TrackIndex)
+	else if (UAnimSequence* AnimSequence = Cast<UAnimSequence>(Params.Animation))
+	{
+		if (TempRootBoneIndex.IsSet() == false || TempRootBoneIndex.GetValue() == INDEX_NONE)
 		{
-			// verify if this bone exists in skeleton
-			int32 BoneTreeIndex = AnimSequence->GetSkeletonIndexFromRawDataTrackIndex(TrackIndex);
-			if (BoneTreeIndex != INDEX_NONE)
+			//but if not first find first
+			int32 RootIndex = INDEX_NONE;
+#if WITH_EDITOR
+			TArray<FName> TrackNames;
+			AnimSequence->GetDataModelInterface()->GetBoneTrackNames(TrackNames);
+			const FReferenceSkeleton& RefSkeleton = AnimSequence->GetSkeleton()->GetReferenceSkeleton();
+			const IAnimationDataModel* DataModel = AnimSequence->GetDataModel();
+			TArray<FTransform> OutTransforms;
+			for (int32 BoneIndex = 0; BoneIndex < RefSkeleton.GetNum(); ++BoneIndex)
 			{
-				int32 ParentIndex = AnimSequence->GetSkeleton()->GetReferenceSkeleton().GetParentIndex(BoneTreeIndex);
-				if (ParentIndex == INDEX_NONE)
+				const FName BoneName = RefSkeleton.GetBoneName(BoneIndex);
+				if (DataModel->IsValidBoneTrackName(BoneName))
 				{
-					RootIndex = TrackIndex;
-				}
-				else if (ParentIndex == RootIndex)
-				{
-					TempRootBoneIndex = TrackIndex;
-					break;
+					DataModel->GetBoneTrackTransforms(BoneName, OutTransforms);
+					TOptional<FTransform> LocalPreviousTransform;
+					for (const FTransform& Transform : OutTransforms)
+					{
+						if (Transform.GetLocation().IsNearlyZero() == false
+							&& LocalPreviousTransform.IsSet() && LocalPreviousTransform.GetValue().GetLocation() != Transform.GetLocation())
+						{
+							TempRootBoneIndex = BoneIndex;
+							break;
+						}
+						LocalPreviousTransform = Transform;
+					}
+					
+					OutTransforms.Reset();
+					if (TempRootBoneIndex.IsSet())
+					{
+						break;
+					}
+					
 				}
 			}
+#else
+			const TArray<FTrackToSkeletonMap>& BoneMappings = AnimSequence->GetCompressedTrackToSkeletonMapTable();
+			const int32 NumTracks = BoneMappings.Num();
+			for (int32 TrackIndex = 0; TrackIndex < NumTracks; ++TrackIndex)
+			{
+				const FTrackToSkeletonMap& Mapping = BoneMappings[TrackIndex];
+				// verify if this bone exists in skeleton
+				const int32 BoneTreeIndex = Mapping.BoneTreeIndex;
+				if (BoneTreeIndex != INDEX_NONE)
+				{
+					int32 ParentIndex = AnimSequence->GetSkeleton()->GetReferenceSkeleton().GetParentIndex(BoneTreeIndex);
+					if (ParentIndex == INDEX_NONE)
+					{
+						RootIndex = TrackIndex;
+					}
+					else if (ParentIndex == RootIndex)
+					{
+						FTransform Transform;
+						const int32 NumFrames = AnimSequence->GetNumberOfSampledKeys();
+						for (int32 Index = 0; Index < NumFrames; ++Index)
+						{
+							const double Pos = FMath::Clamp(AnimSequence->GetSamplingFrameRate().AsSeconds(Index), 0.0, AnimSequence->GetPlayLength());
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+							AnimSequence->GetBoneTransform(Transform, TrackIndex, Pos, false);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+							if (Transform.Equals(FTransform::Identity) == false)
+							{
+								TempRootBoneIndex = BoneTreeIndex;
+								break;
+							}
+						}
+						if (TempRootBoneIndex.IsSet())
+						{
+							break;
+						}
+					}
+				}
+			}
+#endif
 		}
 	}
-	return TempRootBoneIndex.GetValue();
+	return TempRootBoneIndex.IsSet() ? TempRootBoneIndex.GetValue() : 0;
 }
 
-
-bool UMovieSceneSkeletalAnimationSection::GetRootMotionTransform(FFrameTime CurrentTime, FFrameRate FrameRate, FAnimationPoseData& AnimationPoseData, bool& bIsAdditive,FTransform& OutTransform, float& OutWeight) const
+FTransform UMovieSceneSkeletalAnimationSection::GetRootMotionStartOffset() const
 {
 	UAnimSequence* AnimSequence = Cast<UAnimSequence>(Params.Animation);
-	FTransform OffsetTransform = GetOffsetTransform();
+	if (AnimSequence && TempRootBoneIndex.IsSet() && TempRootBoneIndex.GetValue() != 0)
+	{
+		UMovieScene* MovieScene = GetTypedOuter<UMovieScene>();
+		const double StartSeconds = MovieScene ? (MapTimeToAnimation(FFrameNumber(0), MovieScene->GetTickResolution())): 0.0;
+		return AnimSequence->ExtractRootTrackTransform(StartSeconds, nullptr);
+	}
+	return FTransform::Identity;;
+}
+
+bool UMovieSceneSkeletalAnimationSection::GetRootMotionTransform(FAnimationPoseData& AnimationPoseData,FRootMotionTransformParam& InOutParams) const
+{
+	UAnimSequence* AnimSequence = Cast<UAnimSequence>(Params.Animation);
+	FTransform OffsetTransform(FQuat(StartRotationOffset), StartLocationOffset);
+	FTransform MatchedTransform(FQuat(MatchedRotationOffset), MatchedLocationOffset);
+
 	if (AnimSequence)
 	{
 		float ManualWeight = 1.f;
-		Params.Weight.Evaluate(CurrentTime, ManualWeight);
-		OutWeight = ManualWeight * EvaluateEasing(CurrentTime);
-		bIsAdditive = false;
-		float CurrentTimeSeconds = MapTimeToAnimation(CurrentTime, FrameRate);
-		bIsAdditive = AnimSequence->GetAdditiveAnimType() != EAdditiveAnimationType::AAT_None;
+		Params.Weight.Evaluate(InOutParams.CurrentTime, ManualWeight);
+		InOutParams.OutWeight = ManualWeight * EvaluateEasing(InOutParams.CurrentTime);
+		InOutParams.bOutIsAdditive = false;
+		const double CurrentTimeSeconds = MapTimeToAnimation(InOutParams.CurrentTime, InOutParams.FrameRate);
+		const double StartSeconds = (MapTimeToAnimation(FFrameNumber(0), InOutParams.FrameRate));
 
-		if (TempRootBoneIndex.IsSet())
+		InOutParams.bOutIsAdditive = AnimSequence->GetAdditiveAnimType() != EAdditiveAnimationType::AAT_None;
+		FTransform StartBoneTransform;
+		InOutParams.OutRootStartTransform = GetRootMotionStartOffset();
+
+		if (TempRootBoneIndex.IsSet() && TempRootBoneIndex.GetValue() != 0)
 		{
-			FAnimExtractContext ExtractionContext(CurrentTimeSeconds, false);
+			//get the start pose first since we pass out the pose and need the current
+			FCompactPoseBoneIndex PoseIndex = AnimationPoseData.GetPose().GetBoneContainer().GetCompactPoseIndexFromSkeletonIndex(TempRootBoneIndex.GetValue());
+			FAnimExtractContext ExtractionContext(StartSeconds);
 			AnimSequence->GetAnimationPose(AnimationPoseData, ExtractionContext);
-			OutTransform = AnimationPoseData.GetPose()[FCompactPoseBoneIndex(TempRootBoneIndex.GetValue())];
+			StartBoneTransform = AnimationPoseData.GetPose()[FCompactPoseBoneIndex(PoseIndex)];
+
+			ExtractionContext.CurrentTime = CurrentTimeSeconds;
+			AnimSequence->GetAnimationPose(AnimationPoseData, ExtractionContext);
+			InOutParams.OutPoseTransform = AnimationPoseData.GetPose()[FCompactPoseBoneIndex(PoseIndex)];
 		}
 		else //not set then just use root.
 		{
-			OutTransform = AnimSequence->ExtractRootTrackTransform(CurrentTimeSeconds, nullptr);
+			StartBoneTransform = AnimSequence->ExtractRootTrackTransform(StartSeconds, nullptr);
+			InOutParams.OutPoseTransform = AnimSequence->ExtractRootTrackTransform(CurrentTimeSeconds, nullptr);
 		}
 		//note though we don't support mesh space addtive just local additive it will still work the same here for the root so 
-		if (!bIsAdditive)
+		if (!InOutParams.bOutIsAdditive)
 		{
-			OutTransform = OutTransform * OffsetTransform;
+			const bool bStartTransformOffsetInBoneSpace = CVarStartTransformOffsetInBoneSpace.GetValueOnGameThread();
+			if (bStartTransformOffsetInBoneSpace)
+			{
+				FTransform StartMatchedInRoot = StartBoneTransform * MatchedTransform;
+				FTransform LocalToRoot = (InOutParams.OutPoseTransform * StartBoneTransform.Inverse());
+				FTransform OffsetInLocalSpace = LocalToRoot * OffsetTransform;
+				InOutParams.OutTransform = OffsetInLocalSpace * StartMatchedInRoot;
+			}
+			else
+			{
+				InOutParams.OutTransform = InOutParams.OutPoseTransform * OffsetTransform * MatchedTransform;
+
+			}
+			InOutParams.OutParentTransform = OffsetTransform.GetRelativeTransformReverse(InOutParams.OutTransform);
+
 		}
 		return true;
 	}
 	//for safety always return true for now
-	OutTransform = OffsetTransform;
+	InOutParams.OutParentTransform = OffsetTransform * MatchedTransform;
+	InOutParams.OutTransform = InOutParams.OutParentTransform;
+	InOutParams.OutPoseTransform = FTransform::Identity;
 	return true;
-}
-
-void UMovieSceneSkeletalAnimationSection::FindBestBlendPoint(USkeletalMeshComponent* SkelMeshComp)
-{
-	UMovieSceneSkeletalAnimationTrack* Track = GetTypedOuter<UMovieSceneSkeletalAnimationTrack>();
-	if (Track)
-	{
-		Track->FindBestBlendPoint(SkelMeshComp, this);
-	}
 }
 
 void UMovieSceneSkeletalAnimationSection::MultiplyOutInverseOnNextClips(FVector PreviousMatchedLocationOffset, FRotator PreviousMatchedRotationOffset)

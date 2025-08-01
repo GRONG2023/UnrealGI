@@ -4,6 +4,9 @@
 #include "AISystem.h"
 #include "NavigationSystem.h"
 #include "Engine/Engine.h"
+#include "VisualLogger/VisualLogger.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(NavLocalGridManager)
 
 float UNavLocalGridManager::GridCellSize = 50.0f;
 
@@ -15,7 +18,7 @@ UNavLocalGridManager::UNavLocalGridManager(const FObjectInitializer& ObjectIniti
 
 int32 UNavLocalGridManager::AddGridData(const FNavLocalGridData& GridData, bool bUpdate)
 {
-	const float GameTime = HasSourceGridLimit() ? GetWorld()->GetTimeSeconds() : 0;
+	const double GameTime = HasSourceGridLimit() ? GetWorld()->GetTimeSeconds() : 0.;
 	const int32 NewGridIdx = SourceGrids.Add(GridData);
 
 	SourceGrids[NewGridIdx].SetGridId(NextGridId);
@@ -41,7 +44,7 @@ void UNavLocalGridManager::RemoveGridData(int32 GridId, bool bUpdate)
 	{
 		if (SourceGrids[Idx].GetGridId() == GridId)
 		{
-			SourceGrids.RemoveAt(Idx, 1, false);
+			SourceGrids.RemoveAt(Idx, 1, EAllowShrinking::No);
 
 			bNeedsRebuilds = true;
 			if (bUpdate)
@@ -215,7 +218,7 @@ void UNavLocalGridManager::UpdateAccessTime(int32 CombinedGridIdx)
 {
 	if (CombinedGrids.IsValidIndex(CombinedGridIdx))
 	{
-		const float GameTime = GetWorld()->GetTimeSeconds();
+		const double GameTime = GetWorld()->GetTimeSeconds();
 
 		for (int32 Idx = 0; Idx < CombinedGrids[CombinedGridIdx].SourceIds.Num(); Idx++)
 		{
@@ -248,7 +251,7 @@ bool UNavLocalGridManager::UpdateSourceGrids()
 
 	while (SourceGrids.Num() > MaxActiveSourceGrids)
 	{
-		float BestScore = FLT_MAX;
+		double BestScore = DBL_MAX;
 		int32 BestIdx = 0;
 
 		for (int32 Idx = 0; Idx < SourceGrids.Num(); Idx++)
@@ -261,7 +264,7 @@ bool UNavLocalGridManager::UpdateSourceGrids()
 			}
 		}
 
-		SourceGrids.RemoveAt(BestIdx, 1, false);
+		SourceGrids.RemoveAt(BestIdx, 1, EAllowShrinking::No);
 	}
 
 	return true;
@@ -321,7 +324,8 @@ int32 UNavLocalGridManager::AddLocalNavigationGridForPoint(UObject* WorldContext
 	int32 GridId = 0;
 
 	UNavLocalGridManager* GridManager = UNavLocalGridManager::GetCurrent(WorldContextObject);
-	if (GridManager)
+	UE_CVLOG_ALWAYS_UELOG(Radius2D <= 0, WorldContextObject, LogNavigation, Warning, TEXT("%hs must be called with a positive non-zero Radius2D but received %d."), __FUNCTION__, Radius2D);
+	if (GridManager && Radius2D > 0)
 	{
 		FNavLocalGridData GridData(Location, UNavLocalGridManager::GridCellSize * Radius2D);
 		GridData.SetHeight(Height);
@@ -338,10 +342,12 @@ int32 UNavLocalGridManager::AddLocalNavigationGridForPoints(UObject* WorldContex
 	int32 GridId = 0;
 
 	UNavLocalGridManager* GridManager = UNavLocalGridManager::GetCurrent(WorldContextObject);
-	if (GridManager)
+	UE_CVLOG_ALWAYS_UELOG(Locations.IsEmpty(), WorldContextObject, LogNavigation, Warning, TEXT("%hs must be called with a non-empty list of locations."), __FUNCTION__);
+	UE_CVLOG_ALWAYS_UELOG(Radius2D <= 0, WorldContextObject, LogNavigation, Warning, TEXT("%hs must be called with a positive non-zero Radius2D but received %d."), __FUNCTION__, Radius2D);
+	if (GridManager && Locations.Num() > 0 && Radius2D > 0)
 	{
 		const FBox Bounds(Locations);
-		const float BoundsSize2D = FMath::Max(Bounds.Max.X - Bounds.Min.X, Bounds.Max.Y - Bounds.Min.Y);
+		const float BoundsSize2D = FloatCastChecked<float>(FMath::Max(Bounds.Max.X - Bounds.Min.X, Bounds.Max.Y - Bounds.Min.Y), UE::LWC::DefaultFloatPrecision);
 
 		FNavLocalGridData GridData(Bounds.GetCenter(), (UNavLocalGridManager::GridCellSize * Radius2D) + BoundsSize2D);
 		GridData.SetHeight(Height);
@@ -362,10 +368,11 @@ int32 UNavLocalGridManager::AddLocalNavigationGridForBox(UObject* WorldContextOb
 	int32 GridId = 0;
 
 	UNavLocalGridManager* GridManager = UNavLocalGridManager::GetCurrent(WorldContextObject);
-	if (GridManager)
+	UE_CVLOG_ALWAYS_UELOG(Radius2D <= 0, WorldContextObject, LogNavigation, Warning, TEXT("%hs must be called with a positive non-zero Radius2D but received %d."), __FUNCTION__, Radius2D);
+	if (GridManager && Radius2D > 0)
 	{
 		FNavLocalGridData GridData(Location, FVector2D(Extent.X + UNavLocalGridManager::GridCellSize * Radius2D, Extent.Y + UNavLocalGridManager::GridCellSize * Radius2D));
-		GridData.SetHeight(Height + Extent.Z);
+		GridData.SetHeight(FloatCastChecked<float>(Height + Extent.Z, UE::LWC::DefaultFloatPrecision));
 		GridData.MarkBoxObstacle(Location, Extent, Rotation.Quaternion());
 
 		GridId = GridManager->AddGridData(GridData, bRebuildGrids);
@@ -379,7 +386,8 @@ int32 UNavLocalGridManager::AddLocalNavigationGridForCapsule(UObject* WorldConte
 	int32 GridId = 0;
 
 	UNavLocalGridManager* GridManager = UNavLocalGridManager::GetCurrent(WorldContextObject);
-	if (GridManager)
+	UE_CVLOG_ALWAYS_UELOG(Radius2D <= 0, WorldContextObject, LogNavigation, Warning, TEXT("%hs must be called with a positive non-zero Radius2 Dbut received %d."), __FUNCTION__, Radius2D);
+	if (GridManager && Radius2D > 0)
 	{
 		FNavLocalGridData GridData(Location, FVector2D(CapsuleRadius + UNavLocalGridManager::GridCellSize * Radius2D, CapsuleRadius + UNavLocalGridManager::GridCellSize * Radius2D));
 		GridData.SetHeight(Height + CapsuleHalfHeight);
@@ -441,3 +449,4 @@ UWorld* UNavLocalGridManager::GetWorld() const
 	return GetOuter()->GetWorld();
 }
 #endif // WITH_ENGINE
+

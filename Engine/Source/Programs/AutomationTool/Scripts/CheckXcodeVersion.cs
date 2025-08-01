@@ -6,6 +6,7 @@ using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 
 namespace AutomationTool
 {
@@ -15,27 +16,22 @@ namespace AutomationTool
 	{
 		public override void ExecuteBuild()
 		{
-			string Version = ParseParamValue("Version");
-			if(Version == null)
+			string RequestedVersion = ParseParamValue("Version");
+			if(RequestedVersion == null)
 			{
 				throw new AutomationException("Missing -Version=... parameter");
 			}
 
-			IProcessResult Result = Run("xcodebuild", "-version");
-			if(Result.ExitCode != 0)
-			{
-				throw new AutomationException("Unable to query version number from xcodebuild (exit code={0})", Result.ExitCode);
-			}
+			string InstalledSdkVersion = UnrealBuildBase.ApplePlatformSDK.InstalledSDKVersion;
 
-			Match Match = Regex.Match(Result.Output, "^Xcode ([0-9.]+)", RegexOptions.Multiline);
-			if(!Match.Success)
+			if (InstalledSdkVersion == null)
 			{
-				throw new AutomationException("Missing version number from xcodebuild output:\n{0}", Result.Output);
+				throw new AutomationException("Unable to query version number from xcodebuild");
 			}
-
-			if(Match.Groups[1].Value != Version)
+			
+			if (InstalledSdkVersion != RequestedVersion)
 			{
-				LogWarning("Installed Xcode version is {0} - expected {1}", Match.Groups[1].Value, Version);
+				Logger.LogWarning("Installed Xcode version is {InstalledSdkVersion} - expected {RequestedVersion}", InstalledSdkVersion, RequestedVersion);
 			}
 		}
 	}

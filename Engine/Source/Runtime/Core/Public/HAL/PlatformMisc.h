@@ -36,7 +36,40 @@
 
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
-class CORE_API FScopedNamedEvent
+class FScopedNamedEventConditional
+{
+public:
+	FScopedNamedEventConditional(const struct FColor& Color, const TCHAR* Text, bool bCondition)
+		: bStarted(bCondition)
+	{
+		if (bCondition)
+		{
+			FPlatformMisc::BeginNamedEvent(Color, Text);
+		}
+	}
+
+	FScopedNamedEventConditional(const struct FColor& Color, const ANSICHAR* Text, bool bCondition)
+		: bStarted(bCondition)
+	{
+		if (bCondition)
+		{
+			FPlatformMisc::BeginNamedEvent(Color, Text);
+		}
+	}
+
+	~FScopedNamedEventConditional()
+	{
+		if (bStarted)
+		{
+			FPlatformMisc::EndNamedEvent();
+		}
+	}
+
+private:
+	bool bStarted;
+};
+
+class FScopedNamedEvent
 {
 public:
 
@@ -56,7 +89,7 @@ public:
 	}	
 };
 
-class CORE_API FScopedProfilerColor
+class FScopedProfilerColor
 {
 public:
 
@@ -78,7 +111,7 @@ public:
 // BeginNamedEventStatic works the same as BeginNamedEvent, but should only be passed a compile-time string literal.
 // Some platform profilers can optimize the case where strings for certain events are constant.
 //
-class CORE_API FScopedNamedEventStatic
+class FScopedNamedEventStatic
 {
 public:
 
@@ -113,7 +146,7 @@ public:
 #if PLATFORM_USES_ANSI_STRING_FOR_EXTERNAL_PROFILING
 #define NAMED_EVENT_STR(x) x
 #else
-#define NAMED_EVENT_STR(x) L##x
+#define NAMED_EVENT_STR(x) TEXT(x)
 #endif
 
 #define SCOPED_NAMED_EVENT(Name, Color)\
@@ -136,12 +169,16 @@ public:
 	FScopedNamedEvent ANONYMOUS_VARIABLE(NamedEvent_)(Color, *FString::Printf(Format, __VA_ARGS__));\
 	TRACE_CPUPROFILER_EVENT_SCOPE_TEXT(*FString::Printf(Format, __VA_ARGS__));
 
+#define SCOPED_NAMED_EVENT_TCHAR_CONDITIONAL(Text, Color, bCondition)\
+	FScopedNamedEventConditional ANONYMOUS_VARIABLE(NamedEvent_)(Color, Text, (bCondition));\
+	TRACE_CPUPROFILER_EVENT_SCOPE_TEXT_CONDITIONAL(Text, (bCondition));
+
 #define SCOPED_PROFILER_COLOR(Color)			 FScopedProfilerColor    ANONYMOUS_VARIABLE(ProfilerColor_##Name##_)(Color);
 
 
 #else
 
-class CORE_API FScopedNamedEvent
+class FScopedNamedEvent
 {
 public:
 	UE_DEPRECATED(4.19, "FScopedNamedEvent is compiled out in shipping builds, use SCOPED_NAMED_EVENT or variant instead to compile correctly for all targets.")
@@ -155,7 +192,7 @@ public:
 	}
 };
 
-class CORE_API FScopedNamedEventStatic
+class FScopedNamedEventStatic
 {
 public:
 	UE_DEPRECATED(4.19, "FScopedNamedEventStatic is compiled out in shipping builds, use SCOPED_NAMED_EVENT or variant instead to compile correctly for all targets.")
@@ -174,6 +211,44 @@ public:
 #define SCOPED_NAMED_EVENT_TCHAR(...)
 #define SCOPED_NAMED_EVENT_TEXT(...)
 #define SCOPED_NAMED_EVENT_F(...)
+#define SCOPED_NAMED_EVENT_TCHAR_CONDITIONAL(...)
 #define SCOPED_PROFILER_COLOR(...)
 
+#endif
+
+// For timing OnEnterBackground tasks. This can be time sensitive on some platforms
+class FScopedEnterBackgroundEvent
+{
+public:
+
+	FScopedEnterBackgroundEvent(const TCHAR* Text)
+	{
+		FPlatformMisc::BeginEnterBackgroundEvent(Text);
+	}
+
+	~FScopedEnterBackgroundEvent()
+	{
+		FPlatformMisc::EndEnterBackgroundEvent();
+	}
+};
+
+// Note: we don't use ANONYMOUS_VARIABLE here because we might want to view the event in a crash dump watch window
+#define SCOPED_ENTER_BACKGROUND_EVENT(Name)	\
+	FScopedEnterBackgroundEvent EnterBackgroundEvent_##Name##_(TEXT(#Name)); \
+	QUICK_SCOPE_CYCLE_COUNTER(Name);
+
+
+#ifdef PLATFORM_COMPILER_IWYU
+
+// There are limitations to what IWYU can read out of the ast. decltype() inside unused template parameter default initializer is one example
+// In those cases we need to give IWYU something it can use to know what is needed
+namespace UE::Core::Private
+{
+	template <typename T, bool IsSameTypes = true> struct IwyuTestSize { enum { Value = 0 }; };
+	template <typename T> struct IwyuTestSize<T, false> { enum { Value = sizeof(T) }; };
+}
+#define IWYU_MARKUP_IMPLICIT_CAST(From, To) UE::Core::Private::IwyuTestSize<From, std::is_same<typename std::remove_cv<To>::type, typename std::remove_cv<From>::type>::value>::Value
+
+#else
+#define IWYU_MARKUP_IMPLICIT_CAST(From, To)
 #endif

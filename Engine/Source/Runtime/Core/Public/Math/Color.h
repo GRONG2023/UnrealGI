@@ -2,15 +2,28 @@
 
 #pragma once
 
-#include "CoreTypes.h"
-#include "Misc/Crc.h"
-#include "Math/UnrealMathUtility.h"
+#include "Containers/Array.h"
 #include "Containers/UnrealString.h"
+#include "CoreTypes.h"
+#include "HAL/PreprocessorHelpers.h"
+#include "Math/MathFwd.h"
+#include "Math/UnrealMathUtility.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Crc.h"
 #include "Misc/Parse.h"
-#include "Serialization/StructuredArchive.h"
+#include "Serialization/Archive.h"
 #include "Serialization/MemoryLayout.h"
+#include "Serialization/StructuredArchive.h"
+#include "Serialization/StructuredArchiveNameHelpers.h"
+#include "Serialization/StructuredArchiveSlots.h"
 
 class FFloat16Color;
+class FMemoryImageWriter;
+class FMemoryUnfreezeContent;
+class FPointerTableBase;
+class FSHA1;
+struct FColor;
+template <typename T> struct TIsPODType;
 
 /**
  * Enum for the different kinds of gamma spaces we expect to need to convert from/to.
@@ -23,6 +36,8 @@ enum class EGammaSpace : uint8
 	Pow22,
 	/** Use the standard sRGB conversion. */
 	sRGB,
+
+	Invalid
 };
 
 
@@ -31,16 +46,25 @@ enum class EGammaSpace : uint8
  */
 struct FLinearColor
 {
-	float	R,
-			G,
-			B,
-			A;
+	union
+	{
+		struct 
+		{
+			float	R,
+					G,
+					B,
+					A;
+		};
+
+		UE_DEPRECATED(all, "For internal use only.")
+		float RGBA[4];
+	};
 
 	/** Static lookup table used for FColor -> FLinearColor conversion. Pow(2.2) */
 	static float Pow22OneOver255Table[256];
 
 	/** Static lookup table used for FColor -> FLinearColor conversion. sRGB */
-	static float sRGBToLinearTable[256];
+	static CORE_API float sRGBToLinearTable[256];
 
 	FORCEINLINE FLinearColor() {}
 	FORCEINLINE explicit FLinearColor(EForceInit)
@@ -51,16 +75,31 @@ struct FLinearColor
 	/**
 	 * Converts an FColor which is assumed to be in sRGB space, into linear color space.
 	 * @param Color The sRGB color that needs to be converted into linear space.
+	 * to get direct conversion use ReinterpretAsLinear
 	 */
-	CORE_API FLinearColor(const FColor& Color);
+	constexpr FORCEINLINE FLinearColor(const FColor& Color);
 
-	CORE_API FLinearColor(const FVector& Vector);
+	CORE_API FLinearColor(const FVector3f& Vector);
+	CORE_API explicit FLinearColor(const FVector3d& Vector); // Warning: keep this explicit, or FVector4f will be implicitly created from FVector3d via FLinearColor
 
-	CORE_API explicit FLinearColor(const FVector4& Vector);
+	CORE_API FLinearColor(const FVector4f& Vector);
+	CORE_API explicit FLinearColor(const FVector4d& Vector); // Warning: keep this explicit, or FVector4f will be implicitly created from FVector4d via FLinearColor
 	
+	// use Float16Color::GetFloats() directly
 	CORE_API explicit FLinearColor(const FFloat16Color& C);
 
 	// Serializer.
+	
+	friend FArchive& operator<<(FArchive& Ar,FLinearColor& Color)
+	{
+		return Ar << Color.R << Color.G << Color.B << Color.A;
+	}
+
+	bool Serialize( FArchive& Ar )
+	{
+		Ar << *this;
+		return true;
+	}
 
 	friend void operator<<(FStructuredArchive::FSlot Slot, FLinearColor& Color)
 	{
@@ -81,7 +120,10 @@ struct FLinearColor
 	 * Converts an FColor coming from an observed sRGB output, into a linear color.
 	 * @param Color The sRGB color that needs to be converted into linear space.
 	 */
-	CORE_API static FLinearColor FromSRGBColor(const FColor& Color);
+	FORCEINLINE static FLinearColor FromSRGBColor(const FColor& Color)
+	{
+		return FLinearColor(Color);
+	}
 
 	/**
 	 * Converts an FColor coming from an observed Pow(1/2.2) output, into a linear color.
@@ -93,12 +135,16 @@ struct FLinearColor
 
 	FORCEINLINE float& Component(int32 Index)
 	{
-		return (&R)[Index];
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		return RGBA[Index];
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
 
 	FORCEINLINE const float& Component(int32 Index) const
 	{
-		return (&R)[Index];
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		return RGBA[Index];
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
 
 	FORCEINLINE FLinearColor operator+(const FLinearColor& ColorB) const
@@ -236,12 +282,12 @@ struct FLinearColor
 	}
 
 	// Error-tolerant comparison.
-	FORCEINLINE bool Equals(const FLinearColor& ColorB, float Tolerance=KINDA_SMALL_NUMBER) const
+	FORCEINLINE bool Equals(const FLinearColor& ColorB, float Tolerance=UE_KINDA_SMALL_NUMBER) const
 	{
 		return FMath::Abs(this->R - ColorB.R) < Tolerance && FMath::Abs(this->G - ColorB.G) < Tolerance && FMath::Abs(this->B - ColorB.B) < Tolerance && FMath::Abs(this->A - ColorB.A) < Tolerance;
 	}
 
-	CORE_API FLinearColor CopyWithNewOpacity(float NewOpacicty) const
+	FLinearColor CopyWithNewOpacity(float NewOpacicty) const
 	{
 		FLinearColor NewCopy = *this;
 		NewCopy.A = NewOpacicty;
@@ -265,6 +311,11 @@ struct FLinearColor
 	* Converts temperature in Kelvins of a black body radiator to RGB chromaticity.
 	*/
 	static CORE_API FLinearColor MakeFromColorTemperature( float Temp );
+
+	/**
+	* Makes a random color based on a seed.
+	*/
+	static CORE_API FLinearColor MakeRandomSeededColor(int32 Seed);
 
 	/**
 	 * Euclidean distance between two points.
@@ -302,15 +353,33 @@ struct FLinearColor
 	 */
 	static CORE_API FLinearColor LerpUsingHSV( const FLinearColor& From, const FLinearColor& To, const float Progress );
 
-	/** Quantizes the linear color and returns the result as a FColor.  This bypasses the SRGB conversion. */
-	CORE_API FColor Quantize() const;
+	/** Quantizes the linear color with rounding and returns the result as a FColor.  This bypasses the SRGB conversion. 
+	* QuantizeRound can be dequantized back to linear with FColor::ReinterpretAsLinear (just /255.f)
+	* this matches the GPU UNORM<->float conversion spec and should be preferred
+	*/
+	FORCEINLINE FColor QuantizeRound() const;
+	
+	/** Quantizes the linear color and returns the result as a FColor.  This bypasses the SRGB conversion.
+	* Uses floor quantization, which does not match the GPU standard conversion.
+	* Restoration to float should be done with a +0.5 bias to restore to centered buckets.
+	* Do NOT use this for graphics or textures or images, use QuantizeRound instead.
+	*/
+	FORCEINLINE FColor QuantizeFloor() const;
 
-	/** Quantizes the linear color with rounding and returns the result as a FColor.  This bypasses the SRGB conversion. */
-	CORE_API FColor QuantizeRound() const;
+	/** backwards compatible Quantize function name, does QuantizeFloor.
+	* @todo deprecate me
+	*/
+	UE_DEPRECATED(5.0, "Most callers of Quantize should have been calling QuantizeRound; to match old behavior use QuantizeFloor")
+	FORCEINLINE FColor Quantize() const;
 
-	/** Quantizes the linear color and returns the result as a FColor with optional sRGB conversion and quality as goal. */
-	CORE_API FColor ToFColor(const bool bSRGB) const;
-
+	/** Quantizes the linear color and returns the result as a FColor with optional sRGB conversion. 
+	* Clamps in [0,1] range before conversion.
+	* ToFColor(false) is QuantizeRound
+	*/
+	CORE_API FColor ToFColorSRGB() const;
+	
+	FORCEINLINE FColor ToFColor(const bool bSRGB) const;
+	
 	/**
 	 * Returns a desaturated color, with 0 meaning no desaturation and 1 == full desaturation
 	 *
@@ -320,11 +389,11 @@ struct FLinearColor
 	CORE_API FLinearColor Desaturate( float Desaturation ) const;
 
 	/** Computes the perceptually weighted luminance value of a color. */
-	inline float ComputeLuminance() const
+	inline float GetLuminance() const
 	{		
 		return R * 0.3f + G * 0.59f + B * 0.11f;
 	}
-
+	
 	/**
 	 * Returns the maximum value in this color structure
 	 *
@@ -338,7 +407,7 @@ struct FLinearColor
 	/** useful to detect if a light contribution needs to be rendered */
 	bool IsAlmostBlack() const
 	{
-		return FMath::Square(R) < DELTA && FMath::Square(G) < DELTA && FMath::Square(B) < DELTA;
+		return FMath::Square(R) < UE_DELTA && FMath::Square(G) < UE_DELTA && FMath::Square(B) < UE_DELTA;
 	}
 
 	/**
@@ -351,15 +420,7 @@ struct FLinearColor
 		return FMath::Min( FMath::Min( FMath::Min( R, G ), B ), A );
 	}
 
-	FORCEINLINE float GetLuminance() const 
-	{ 
-		return R * 0.3f + G * 0.59f + B * 0.11f; 
-	}
-
-	FString ToString() const
-	{
-		return FString::Printf(TEXT("(R=%f,G=%f,B=%f,A=%f)"),R,G,B,A);
-	}
+	CORE_API FString ToString() const;
 
 	/**
 	 * Initialize this Color based on an FString. The String is expected to contain R=, G=, B=, A=.
@@ -368,18 +429,21 @@ struct FLinearColor
 	 * @param InSourceString FString containing the color values.
 	 * @return true if the R,G,B values were read successfully; false otherwise.
 	 */
-	bool InitFromString( const FString& InSourceString )
-	{
-		R = G = B = 0.f;
-		A = 1.f;
+	CORE_API bool InitFromString( const FString& InSourceString );
 
-		// The initialization is only successful if the R, G, and B values can all be parsed from the string
-		const bool bSuccessful = FParse::Value( *InSourceString, TEXT("R=") , R ) && FParse::Value( *InSourceString, TEXT("G="), G ) && FParse::Value( *InSourceString, TEXT("B="), B );
-		
-		// Alpha is optional, so don't factor in its presence (or lack thereof) in determining initialization success
-		FParse::Value( *InSourceString, TEXT("A="), A );
-		
-		return bSuccessful;
+	/**
+	 * Helper for pixel format conversions. Clamps to [0,1], mapping NaNs to 0,
+	 * for consistency with GPU conversions.
+	 * 
+	 * @param InValue The input value.
+	 * @return InValue clamped to [0,1]. NaNs map to 0.
+	 */
+	static FORCEINLINE float Clamp01NansTo0(float InValue)
+	{
+		// Write this explicitly instead of using FMath::Clamp because we're particular
+		// about what happens with NaNs here.
+		const float ClampedLo = (InValue > 0.0f) ? InValue : 0.0f; // Also turns NaNs into 0.
+		return (ClampedLo < 1.0f) ? ClampedLo : 1.0f;
 	}
 
 	// Common colors.	
@@ -391,6 +455,12 @@ struct FLinearColor
 	static CORE_API const FLinearColor Green;
 	static CORE_API const FLinearColor Blue;
 	static CORE_API const FLinearColor Yellow;
+
+	friend FORCEINLINE uint32 GetTypeHash( const FLinearColor& LinearColor )
+	{
+		// Note: this assumes there's no padding in FLinearColor that could contain uncompared data.
+		return FCrc::MemCrc_DEPRECATED(&LinearColor, sizeof(FLinearColor));
+	}
 };
 DECLARE_INTRINSIC_TYPE_LAYOUT(FLinearColor);
 
@@ -411,20 +481,13 @@ struct FColor
 public:
 	// Variables.
 #if PLATFORM_LITTLE_ENDIAN
-	#ifdef _MSC_VER
-		// Win32 x86
-		union { struct{ uint8 B,G,R,A; }; uint32 AlignmentDummy; };
-	#else
-		// Linux x86, etc
-		uint8 B GCC_ALIGN(4);
-		uint8 G,R,A;
-	#endif
+	union { struct{ uint8 B,G,R,A; }; uint32 Bits; };
 #else // PLATFORM_LITTLE_ENDIAN
-	union { struct{ uint8 A,R,G,B; }; uint32 AlignmentDummy; };
+	union { struct{ uint8 A,R,G,B; }; uint32 Bits; };
 #endif
 
-	uint32& DWColor(void) {return *((uint32*)this);}
-	const uint32& DWColor(void) const {return *((uint32*)this);}
+	uint32& DWColor(void) {return Bits;}
+	const uint32& DWColor(void) const {return Bits;}
 
 	// Constructors.
 	FORCEINLINE FColor() {}
@@ -519,6 +582,84 @@ public:
 	static CORE_API FColor MakeFromColorTemperature( float Temp );
 
 	/**
+	* Makes a random color based on a seed.
+	*/
+	static CORE_API FColor MakeRandomSeededColor(int32 Seed);
+
+	/**
+	* Conversions to/from GPU UNorm floats, U8, U16
+	* matches convention of FColor FLinearColor::QuantizeRound
+	*/
+
+	static uint8 QuantizeUNormFloatTo8( float UnitFloat )
+	{
+		return (uint8)( 0.5f + FLinearColor::Clamp01NansTo0(UnitFloat) * 255.f );
+	}
+	
+	static uint16 QuantizeUNormFloatTo16( float UnitFloat )
+	{
+		return (uint16)( 0.5f + FLinearColor::Clamp01NansTo0(UnitFloat) * 65535.f );
+	}
+
+	static float DequantizeUNorm8ToFloat( int Value8 )
+	{
+		check( Value8 >= 0 && Value8 <= 255 );
+
+		return (float)Value8 * (1.f/255.f);
+	}
+	
+	static float DequantizeUNorm16ToFloat( int Value16 )
+	{
+		check( Value16 >= 0 && Value16 <= 65535 );
+
+		return (float)Value16 * (1.f/65535.f);
+	}
+
+	static uint8 Requantize10to8( int Value10 )
+	{
+		check( Value10 >= 0 && Value10 <= 1023 );
+
+		// Dequantize from 10 bit (Value10/1023.f)
+		// requantize to 8 bit with rounding (GPU convention UNorm)
+		//  this is the computation we want :
+		// (int)( (Value10/1023.f)*255.f + 0.5f );
+		// this gives the exactly the same results :
+		int Temp = Value10*255 + (1<<9);
+		int Value8 = (Temp + (Temp >> 10)) >> 10;
+		return (uint8)Value8;
+	}
+	
+	static uint8 Requantize16to8(int Value16)
+	{
+		check( Value16 >= 0 && Value16 <= 65535 );
+
+		// Dequantize x from 16 bit (Value16/65535.f)
+		// then requantize to 8 bit with rounding (GPU convention UNorm)
+
+		// matches exactly with :
+		//  (int)( (Value16/65535.f) * 255.f + 0.5f );
+		int Value8 = (Value16*255 + 32895)>>16;
+		return (uint8)Value8;
+	}
+
+	/**
+	* Return 8-bit color Quantized from 10-bit RGB , 2-bit A
+	*/
+	static FColor MakeRequantizeFrom1010102( int R, int G, int B, int A )
+	{
+		check( A >= 0 && A <= 3 );
+
+		// requantize 2 bits to 8 ; could bit-replicate or just table lookup :
+		const uint8 Requantize2to8[4] = { 0, 0x55, 0xAA, 0xFF };
+		return FColor(
+			Requantize10to8(R),
+			Requantize10to8(G),
+			Requantize10to8(B),
+			Requantize2to8[A] );
+
+	}
+
+	/**
 	 *	@return a new FColor based of this color with the new alpha value.
 	 *	Usage: const FColor& MyColor = FColorList::Green.WithAlpha(128);
 	 */
@@ -529,12 +670,14 @@ public:
 
 	/**
 	 * Reinterprets the color as a linear color.
-	 *
+	 * This is the correct dequantizer for QuantizeRound.
+	 * This matches the GPU spec conversion for U8<->float
 	 * @return The linear color representation.
 	 */
 	FORCEINLINE FLinearColor ReinterpretAsLinear() const
 	{
-		return FLinearColor(R / 255.f, G / 255.f, B / 255.f, A / 255.f);
+		constexpr float inv255 = 1.f / 255.f;
+		return FLinearColor(R * inv255, G * inv255, B * inv255, A * inv255);
 	}
 
 	/**
@@ -545,10 +688,7 @@ public:
 	 * @return Hexadecimal string.
 	 * @see FromHex, ToString
 	 */
-	FORCEINLINE FString ToHex() const
-	{
-		return FString::Printf(TEXT("%02X%02X%02X%02X"), R, G, B, A);
-	}
+	CORE_API FString ToHex() const;
 
 	/**
 	 * Converts this color value to a string.
@@ -556,10 +696,7 @@ public:
 	 * @return The string representation.
 	 * @see ToHex
 	 */
-	FORCEINLINE FString ToString() const
-	{
-		return FString::Printf(TEXT("(R=%i,G=%i,B=%i,A=%i)"), R, G, B, A);
-	}
+	CORE_API FString ToString() const;
 
 	/**
 	 * Initialize this Color based on an FString. The String is expected to contain R=, G=, B=, A=.
@@ -568,19 +705,7 @@ public:
 	 * @param	InSourceString	FString containing the color values.
 	 * @return true if the R,G,B values were read successfully; false otherwise.
 	 */
-	bool InitFromString( const FString& InSourceString )
-	{
-		R = G = B = 0;
-		A = 255;
-
-		// The initialization is only successful if the R, G, and B values can all be parsed from the string
-		const bool bSuccessful = FParse::Value( *InSourceString, TEXT("R=") , R ) && FParse::Value( *InSourceString, TEXT("G="), G ) && FParse::Value( *InSourceString, TEXT("B="), B );
-		
-		// Alpha is optional, so don't factor in its presence (or lack thereof) in determining initialization success
-		FParse::Value( *InSourceString, TEXT("A="), A );
-		
-		return bSuccessful;
-	}
+	CORE_API bool InitFromString( const FString& InSourceString );
 
 	/**
 	 * Gets the color in a packed uint32 format packed in the order ARGB.
@@ -630,6 +755,11 @@ public:
 	static CORE_API const FColor Silver;
 	static CORE_API const FColor Emerald;
 
+	friend FORCEINLINE uint32 GetTypeHash( const FColor& Color )
+	{
+		return Color.DWColor();
+	}
+
 private:
 	/**
 	 * Please use .ToFColor(true) on FLinearColor if you wish to convert from FLinearColor to FColor,
@@ -642,21 +772,58 @@ private:
 };
 DECLARE_INTRINSIC_TYPE_LAYOUT(FColor);
 
-FORCEINLINE uint32 GetTypeHash( const FColor& Color )
+constexpr FORCEINLINE FLinearColor::FLinearColor(const FColor& Color)
+	: R(sRGBToLinearTable[Color.R])
+    , G(sRGBToLinearTable[Color.G])
+    , B(sRGBToLinearTable[Color.B])
+    , A(static_cast<float>(Color.A) * (1.0f / 255.0f))
 {
-	return Color.DWColor();
 }
 
-
-FORCEINLINE uint32 GetTypeHash( const FLinearColor& LinearColor )
+FORCEINLINE FColor FLinearColor::QuantizeRound() const
 {
-	// Note: this assumes there's no padding in FLinearColor that could contain uncompared data.
-	return FCrc::MemCrc_DEPRECATED(&LinearColor, sizeof(FLinearColor));
+	// Avoid FMath::RoundToInt because it calls floor()
+	return FColor(
+		(uint8)(0.5f + Clamp01NansTo0(R) * 255.f),
+		(uint8)(0.5f + Clamp01NansTo0(G) * 255.f),
+		(uint8)(0.5f + Clamp01NansTo0(B) * 255.f),
+		(uint8)(0.5f + Clamp01NansTo0(A) * 255.f)
+	);
+}
+
+FORCEINLINE FColor FLinearColor::QuantizeFloor() const
+{
+	return FColor(
+		(uint8)(Clamp01NansTo0(R) * 255.f),
+		(uint8)(Clamp01NansTo0(G) * 255.f),
+		(uint8)(Clamp01NansTo0(B) * 255.f),
+		(uint8)(Clamp01NansTo0(A) * 255.f)
+	);
+}
+
+FORCEINLINE FColor FLinearColor::Quantize() const
+{
+	return QuantizeFloor();
+}
+
+FORCEINLINE FColor FLinearColor::ToFColor(const bool bSRGB) const
+{
+	if ( bSRGB )
+	{
+		return ToFColorSRGB();
+	}
+	else
+	{
+		return QuantizeRound();
+	}
 }
 
 
 /** Computes a brightness and a fixed point color from a floating point color. */
 extern CORE_API void ComputeAndFixedColorAndIntensity(const FLinearColor& InLinearColor,FColor& OutColor,float& OutIntensity);
+
+/** Convert multiple FLinearColors to sRGB FColor; array version of FLinearColor::ToFColorSRGB. */
+extern CORE_API void ConvertFLinearColorsToFColorSRGB(const FLinearColor* InLinearColors, FColor* OutColorsSRGB, int64 InCount);
 
 // These act like a POD
 template <> struct TIsPODType<FColor> { enum { Value = true }; };

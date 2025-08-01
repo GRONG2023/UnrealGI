@@ -3,13 +3,103 @@
 #pragma once
 
 #include "CoreTypes.h"
-#include "Misc/AssertionMacros.h"
-#include "HAL/UnrealMemory.h"
-#include "Templates/TypeCompatibleBytes.h"
+#include "Containers/ContainerHelpers.h"
 #include "HAL/PlatformMath.h"
-#include "Templates/MemoryOps.h"
+#include "HAL/UnrealMemory.h"
 #include "Math/NumericLimits.h"
+#include "Misc/AssertionMacros.h"
 #include "Templates/IsPolymorphic.h"
+#include "Templates/MemoryOps.h"
+#include "Templates/TypeCompatibleBytes.h"
+#include <type_traits>
+
+
+// Array slack tracking is a debug feature to track unused space in heap allocated TArray (and TScriptArray) structures.  This feature increases heap
+// memory usage, and costs perf, so it is usually disabled by default.  Only works in builds where LLM is compiled in, but doesn't require -llm to be
+// active.  Note that cooks will run quite slow with tracking enabled due to involving significantly more allocations than the engine, so be careful
+// about leaving this enabled when kicking off a cook (including !WITH_EDITOR ensures it will only be enabled for client builds).  For more details,
+// see additional comments in LowLevelMemTracker.cpp.
+#ifndef UE_ENABLE_ARRAY_SLACK_TRACKING
+#define UE_ENABLE_ARRAY_SLACK_TRACKING (0 && !WITH_EDITOR)
+#endif
+
+
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+
+CORE_API uint8 LlmGetActiveTag();
+CORE_API void ArraySlackTrackInit();
+CORE_API void ArraySlackTrackGenerateReport(const TCHAR* Cmd, FOutputDevice& Ar);
+
+// For detailed tracking of array slack waste, we need to add a header to heap allocations.  It's impossible to keep track of the TArray structure itself,
+// because it can be inside other structures, and potentially moved around in unsafe ways, while the heap allocation the TArray points to is invariant.
+// The heap allocations also have an advantage in that the contents are copied on Move or Realloc, simplifying tracking.
+struct FArraySlackTrackingHeader
+{
+	FArraySlackTrackingHeader* Next;	// Linked list of tracked items
+	FArraySlackTrackingHeader** Prev;
+	uint16 AllocOffset;					// Offset below the header to the start of the actual allocation, to account for alignment padding
+	uint8 Tag;
+	int8 NumStackFrames;
+	uint32 FirstAllocFrame;				// Frame where array allocation first occurred
+	uint32 ReallocCount;				// Number of times realloc happened
+	uint32 ArrayPeak;					// Peak observed ArrayNum
+	uint64 ElemSize;
+
+	// Note that we initially set the slack tracking ArrayNum to INDEX_NONE.  The container allocator is used by both arrays and
+	// other containers (Set / Map / Hash), and we don't know it's actually an array until "UpdateNumUsed" is called on it.
+	int64 ArrayNum;
+	int64 ArrayMax;
+	uint64 StackFrames[9];
+
+	CORE_API void AddAllocation();
+	CORE_API void RemoveAllocation();
+	CORE_API void UpdateNumUsed(int64 NewNumUsed);
+	CORE_API FORCENOINLINE static void* Realloc(void* Ptr, int64 Count, uint64 ElemSize, int32 Alignment);
+
+	static void Free(void* Ptr)
+	{
+		if (Ptr)
+		{
+			FArraySlackTrackingHeader* TrackingHeader = (FArraySlackTrackingHeader*)((uint8*)Ptr - sizeof(FArraySlackTrackingHeader));
+			TrackingHeader->RemoveAllocation();
+
+			Ptr = (uint8*)TrackingHeader - TrackingHeader->AllocOffset;
+
+			FMemory::Free(Ptr);
+		}
+	}
+
+	static FORCEINLINE void UpdateNumUsed(void* Ptr, int64 NewNumUsed)
+	{
+		if (Ptr)
+		{
+			FArraySlackTrackingHeader* TrackingHeader = (FArraySlackTrackingHeader*)((uint8*)Ptr - sizeof(FArraySlackTrackingHeader));
+
+			TrackingHeader->UpdateNumUsed(NewNumUsed);
+		}
+	}
+
+	static FORCEINLINE void DisableTracking(void* Ptr)
+	{
+		if (Ptr)
+		{
+			FArraySlackTrackingHeader* TrackingHeader = (FArraySlackTrackingHeader*)((uint8*)Ptr - sizeof(FArraySlackTrackingHeader));
+
+			TrackingHeader->RemoveAllocation();
+
+			// When disabling tracking, we need to also reset ArrayNum, as it's used internally as a flag specifying whether
+			// the allocation is currently tracked.  We don't reset this inside RemoveAllocation, because ArrayNum needs to
+			// persist during realloc of tracked allocations, where RemoveAllocation is called, followed by AddAllocation.
+			TrackingHeader->ArrayNum = INDEX_NONE;
+		}
+	}
+
+	FORCEINLINE int64 SlackSizeInBytes() const
+	{
+		return (ArrayMax - ArrayNum) * ElemSize;
+	}
+};
+#endif  // UE_ENABLE_ARRAY_SLACK_TRACKING
 
 // This option disables array slack for initial allocations, e.g where TArray::SetNum 
 // is called. This tends to save a lot of memory with almost no measured performance cost.
@@ -22,18 +112,6 @@ class FDefaultBitArrayAllocator;
 
 template<int IndexSize> class TSizedDefaultAllocator;
 using FDefaultAllocator = TSizedDefaultAllocator<32>;
-
-/** branchless pointer selection
-* return A ? A : B;
-**/
-template<typename ReferencedType>
-ReferencedType* IfAThenAElseB(ReferencedType* A,ReferencedType* B);
-
-/** branchless pointer selection based on predicate
-* return PTRINT(Predicate) ? A : B;
-**/
-template<typename PredicateType,typename ReferencedType>
-ReferencedType* IfPThenAElseB(PredicateType Predicate,ReferencedType* A,ReferencedType* B);
 
 template <typename SizeType>
 FORCEINLINE SizeType DefaultCalculateSlackShrink(SizeType NumElements, SizeType NumAllocatedElements, SIZE_T BytesPerElement, bool bAllowQuantize, uint32 Alignment = DEFAULT_ALIGNMENT)
@@ -73,7 +151,6 @@ FORCEINLINE SizeType DefaultCalculateSlackGrow(SizeType NumElements, SizeType Nu
 #endif
 #if AGGRESSIVE_MEMORY_SAVING
 	const SIZE_T FirstGrow = 1;
-	const SIZE_T ConstantGrow = 0;
 #else
 	const SIZE_T FirstGrow = 4;
 	const SIZE_T ConstantGrow = 16;
@@ -88,7 +165,11 @@ FORCEINLINE SizeType DefaultCalculateSlackGrow(SizeType NumElements, SizeType Nu
 	if (NumAllocatedElements)
 	{
 		// Allocate slack for the array proportional to its size.
+#if AGGRESSIVE_MEMORY_SAVING
+		Grow = SIZE_T(NumElements) + SIZE_T(NumElements) / 4;
+#else
 		Grow = SIZE_T(NumElements) + 3 * SIZE_T(NumElements) / 8 + ConstantGrow;
+#endif
 	}
 	else if (SIZE_T(NumElements) > Grow)
 	{
@@ -98,9 +179,14 @@ FORCEINLINE SizeType DefaultCalculateSlackGrow(SizeType NumElements, SizeType Nu
 	if (NumAllocatedElements || SIZE_T(NumElements) > Grow)
 	{
 		// Allocate slack for the array proportional to its size.
+#if AGGRESSIVE_MEMORY_SAVING
+		Grow = SIZE_T(NumElements) + SIZE_T(NumElements) / 4;
+#else
 		Grow = SIZE_T(NumElements) + 3 * SIZE_T(NumElements) / 8 + ConstantGrow;
+#endif
 	}
 #endif
+	
 	if (bAllowQuantize)
 	{
 		Retval = (SizeType)(FMemory::QuantizeSize(Grow * BytesPerElement, Alignment) / BytesPerElement);
@@ -144,9 +230,10 @@ struct FScriptContainerElement
 template <typename AllocatorType>
 struct TAllocatorTraitsBase
 {
-	enum { SupportsMove    = false };
-	enum { IsZeroConstruct = false };
+	enum { IsZeroConstruct           = false };
 	enum { SupportsFreezeMemoryImage = false };
+	enum { SupportsElementAlignment  = false };
+	enum { SupportsSlackTracking     = false };
 };
 
 template <typename AllocatorType>
@@ -211,19 +298,47 @@ public:
 			SizeType PreviousNumElements,
 			SizeType NumElements,
 			SIZE_T NumBytesPerElement
-			);
+		);
+
+		/**
+		 * Resizes the container's allocation.
+		 * @param PreviousNumElements - The number of elements that were stored in the previous allocation.
+		 * @param NumElements - The number of elements to allocate space for.
+		 * @param NumBytesPerElement - The number of bytes/element.
+		 * @param AlignmentOfElement - The alignment of the element type.
+		 *
+		 * @note  This overload only exists if TAllocatorTraits<Allocator>::SupportsElementAlignment == true.
+		 */
+		void ResizeAllocation(
+			SizeType PreviousNumElements,
+			SizeType NumElements,
+			SIZE_T NumBytesPerElement,
+			uint32 AlignmentOfElement
+		);
 
 		/**
 		 * Calculates the amount of slack to allocate for an array that has just grown or shrunk to a given number of elements.
 		 * @param NumElements - The number of elements to allocate space for.
-		 * @param CurrentNumSlackElements - The current number of elements allocated.
 		 * @param NumBytesPerElement - The number of bytes/element.
 		 */
 		SizeType CalculateSlackReserve(
 			SizeType NumElements,
-			SizeType CurrentNumSlackElements,
 			SIZE_T NumBytesPerElement
-			) const;
+		) const;
+
+		/**
+		 * Calculates the amount of slack to allocate for an array that has just grown or shrunk to a given number of elements.
+		 * @param NumElements - The number of elements to allocate space for.
+		 * @param NumBytesPerElement - The number of bytes/element.
+		 * @param AlignmentOfElement - The alignment of the element type.
+		 *
+		 * @note  This overload only exists if TAllocatorTraits<Allocator>::SupportsElementAlignment == true.
+		 */
+		SizeType CalculateSlackReserve(
+			SizeType NumElements,
+			SIZE_T NumBytesPerElement,
+			uint32 AlignmentOfElement
+		) const;
 
 		/**
 		 * Calculates the amount of slack to allocate for an array that has just shrunk to a given number of elements.
@@ -238,6 +353,22 @@ public:
 			) const;
 
 		/**
+		 * Calculates the amount of slack to allocate for an array that has just shrunk to a given number of elements.
+		 * @param NumElements - The number of elements to allocate space for.
+		 * @param CurrentNumSlackElements - The current number of elements allocated.
+		 * @param NumBytesPerElement - The number of bytes/element.
+		 * @param AlignmentOfElement - The alignment of the element type.
+		 *
+		 * @note  This overload only exists if TAllocatorTraits<Allocator>::SupportsElementAlignment == true.
+		 */
+		SizeType CalculateSlackShrink(
+			SizeType NumElements,
+			SizeType CurrentNumSlackElements,
+			SIZE_T NumBytesPerElement,
+			uint32 AlignmentOfElement
+		) const;
+
+		/**
 		 * Calculates the amount of slack to allocate for an array that has just grown to a given number of elements.
 		 * @param NumElements - The number of elements to allocate space for.
 		 * @param CurrentNumSlackElements - The current number of elements allocated.
@@ -247,7 +378,23 @@ public:
 			SizeType NumElements,
 			SizeType CurrentNumSlackElements,
 			SIZE_T NumBytesPerElement
-			) const;
+		) const;
+
+		/**
+		 * Calculates the amount of slack to allocate for an array that has just grown to a given number of elements.
+		 * @param NumElements - The number of elements to allocate space for.
+		 * @param CurrentNumSlackElements - The current number of elements allocated.
+		 * @param NumBytesPerElement - The number of bytes/element.
+		 * @param AlignmentOfElement - The alignment of the element type.
+		 *
+		 * @note  This overload only exists if TAllocatorTraits<Allocator>::SupportsElementAlignment == true.
+		 */
+		SizeType CalculateSlackGrow(
+			SizeType NumElements,
+			SizeType CurrentNumSlackElements,
+			SIZE_T NumBytesPerElement,
+			uint32 AlignmentOfElement
+		) const;
 
 		/**
 		 * Returns the size of any requested heap allocation currently owned by the allocator.
@@ -261,6 +408,9 @@ public:
 
 		/** Returns number of pre-allocated elements the container can use before allocating more space */
 		SizeType GetInitialCapacity() const;
+
+		/** Function called when ArrayNum changes for a TArray or TScriptArray, if TAllocatorTraits<Allocator>::SupportsSlackTracking == true */
+		void SlackTrackerLogNum(SizeType NewNumUsed);
 	};
 
 	/**
@@ -269,6 +419,12 @@ public:
 	 */
 	typedef ForElementType<FScriptContainerElement> ForAnyElementType;
 };
+
+namespace UE::Core::Private
+{
+	[[noreturn]] CORE_API void OnInvalidAlignedHeapAllocatorNum(int32 NewNum, SIZE_T NumBytesPerElement);
+	[[noreturn]] CORE_API void OnInvalidSizedHeapAllocatorNum(int32 IndexSize, int64 NewNum, SIZE_T NumBytesPerElement);
+}
 
 /** The indirect allocation policy always allocates the elements indirectly. */
 template<uint32 Alignment = DEFAULT_ALIGNMENT>
@@ -300,7 +456,11 @@ public:
 
 			if (Data)
 			{
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+				FArraySlackTrackingHeader::Free(Data);
+#else
 				FMemory::Free(Data);
+#endif
 			}
 
 			Data       = Other.Data;
@@ -312,7 +472,11 @@ public:
 		{
 			if(Data)
 			{
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+				FArraySlackTrackingHeader::Free(Data);
+#else
 				FMemory::Free(Data);
+#endif
 			}
 		}
 
@@ -330,8 +494,19 @@ public:
 			// Avoid calling FMemory::Realloc( nullptr, 0 ) as ANSI C mandates returning a valid pointer which is not what we want.
 			if (Data || NumElements)
 			{
-				//checkSlow(((uint64)NumElements*(uint64)ElementTypeInfo.GetSize() < (uint64)INT_MAX));
+				static_assert(sizeof(int32) <= sizeof(SIZE_T), "SIZE_T is expected to be larger than int32");
+
+				// Check for under/overflow
+				if (UNLIKELY(NumElements < 0 || NumBytesPerElement < 1 || NumBytesPerElement > (SIZE_T)MAX_int32))
+				{
+					UE::Core::Private::OnInvalidAlignedHeapAllocatorNum(NumElements, NumBytesPerElement);
+				}
+
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+				Data = (FScriptContainerElement*)FArraySlackTrackingHeader::Realloc(Data, NumElements, NumBytesPerElement, Alignment > alignof(FArraySlackTrackingHeader) ? Alignment : alignof(FArraySlackTrackingHeader));
+#else
 				Data = (FScriptContainerElement*)FMemory::Realloc( Data, NumElements*NumBytesPerElement, Alignment );
+#endif
 			}
 		}
 		FORCEINLINE SizeType CalculateSlackReserve(SizeType NumElements, SIZE_T NumBytesPerElement) const
@@ -362,6 +537,20 @@ public:
 			return 0;
 		}
 
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+		FORCEINLINE void SlackTrackerLogNum(SizeType NewNumUsed)
+		{
+			FArraySlackTrackingHeader::UpdateNumUsed(Data, (int64)NewNumUsed);
+		}
+
+		// Suppress slack tracking on an allocation -- should be called whenever the container may have been resized.
+		// Useful for debug allocations you don't want to show up in slack reports.
+		FORCEINLINE void DisableSlackTracking()
+		{
+			FArraySlackTrackingHeader::DisableTracking(Data);
+		}
+#endif
+
 	private:
 		ForAnyElementType(const ForAnyElementType&);
 		ForAnyElementType& operator=(const ForAnyElementType&);
@@ -373,11 +562,14 @@ public:
 	template<typename ElementType>
 	class ForElementType : public ForAnyElementType
 	{
-	public:
+		static constexpr SIZE_T MinimumAlignment = (Alignment <= __STDCPP_DEFAULT_NEW_ALIGNMENT__) ? __STDCPP_DEFAULT_NEW_ALIGNMENT__ : Alignment;
 
+	public:
 		/** Default constructor. */
 		ForElementType()
-		{}
+		{
+			UE_STATIC_DEPRECATE(5.0, alignof(ElementType) > MinimumAlignment, "Using TAlignedHeapAllocator with an alignment lower than the element type's alignment - please update the alignment parameter");
+		}
 
 		FORCEINLINE ElementType* GetAllocation() const
 		{
@@ -389,14 +581,15 @@ public:
 template <uint32 Alignment>
 struct TAllocatorTraits<TAlignedHeapAllocator<Alignment>> : TAllocatorTraitsBase<TAlignedHeapAllocator<Alignment>>
 {
-	enum { SupportsMove    = true };
 	enum { IsZeroConstruct = true };
+	enum { SupportsSlackTracking = true };
 };
 
 template <int IndexSize>
 struct TBitsToSizeType
 {
-	static_assert(IndexSize, "Unsupported allocator index size.");
+	// Fabricate a compile-time false result that's still dependent on the template parameter
+	static_assert(IndexSize == IndexSize+1, "Unsupported allocator index size.");
 };
 
 template <> struct TBitsToSizeType<8>  { using Type = int8; };
@@ -405,18 +598,22 @@ template <> struct TBitsToSizeType<32> { using Type = int32; };
 template <> struct TBitsToSizeType<64> { using Type = int64; };
 
 /** The indirect allocation policy always allocates the elements indirectly. */
-template <int IndexSize>
+template <int IndexSize, typename BaseMallocType = FMemory>
 class TSizedHeapAllocator
 {
 public:
 	using SizeType = typename TBitsToSizeType<IndexSize>::Type;
 
-	enum { NeedsElementType = false };
+private:
+	using USizeType = std::make_unsigned_t<SizeType>;
+
+public:
+	enum { NeedsElementType = true };
 	enum { RequireRangeCheck = true };
 
 	class ForAnyElementType
 	{
-		template <int>
+		template <int, typename>
 		friend class TSizedHeapAllocator;
 
 	public:
@@ -438,7 +635,11 @@ public:
 
 			if (Data)
 			{
-				FMemory::Free(Data);
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+				FArraySlackTrackingHeader::Free(Data);
+#else
+				BaseMallocType::Free(Data);
+#endif
 			}
 
 			Data = Other.Data;
@@ -462,7 +663,11 @@ public:
 		{
 			if(Data)
 			{
-				FMemory::Free(Data);
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+				FArraySlackTrackingHeader::Free(Data);
+#else
+				BaseMallocType::Free(Data);
+#endif
 			}
 		}
 
@@ -471,26 +676,79 @@ public:
 		{
 			return Data;
 		}
-		FORCEINLINE void ResizeAllocation(SizeType PreviousNumElements, SizeType NumElements, SIZE_T NumBytesPerElement)
+		void ResizeAllocation(SizeType PreviousNumElements, SizeType NumElements, SIZE_T NumBytesPerElement)
 		{
 			// Avoid calling FMemory::Realloc( nullptr, 0 ) as ANSI C mandates returning a valid pointer which is not what we want.
 			if (Data || NumElements)
 			{
-				//checkSlow(((uint64)NumElements*(uint64)ElementTypeInfo.GetSize() < (uint64)INT_MAX));
-				Data = (FScriptContainerElement*)FMemory::Realloc( Data, NumElements*NumBytesPerElement );
+				static_assert(sizeof(SizeType) <= sizeof(SIZE_T), "SIZE_T is expected to handle all possible sizes");
+
+				// Check for under/overflow
+				bool bInvalidResize = NumElements < 0 || NumBytesPerElement < 1 || NumBytesPerElement > (SIZE_T)MAX_int32;
+				if constexpr (sizeof(SizeType) == sizeof(SIZE_T))
+				{
+					bInvalidResize = bInvalidResize || (SIZE_T)(USizeType)NumElements > (SIZE_T)TNumericLimits<SizeType>::Max() / NumBytesPerElement;
+				}
+				if (UNLIKELY(bInvalidResize))
+				{
+					UE::Core::Private::OnInvalidSizedHeapAllocatorNum(IndexSize, NumElements, NumBytesPerElement);
+				}
+
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+				Data = (FScriptContainerElement*)FArraySlackTrackingHeader::Realloc(Data, NumElements, NumBytesPerElement, 0);
+#else
+				Data = (FScriptContainerElement*)BaseMallocType::Realloc( Data, NumElements*NumBytesPerElement );
+#endif
+			}
+		}
+		void ResizeAllocation(SizeType PreviousNumElements, SizeType NumElements, SIZE_T NumBytesPerElement, uint32 AlignmentOfElement)
+		{
+			// Avoid calling FMemory::Realloc( nullptr, 0 ) as ANSI C mandates returning a valid pointer which is not what we want.
+			if (Data || NumElements)
+			{
+				static_assert(sizeof(SizeType) <= sizeof(SIZE_T), "SIZE_T is expected to handle all possible sizes");
+
+				// Check for under/overflow
+				bool bInvalidResize = NumElements < 0 || NumBytesPerElement < 1 || NumBytesPerElement > (SIZE_T)MAX_int32;
+				if constexpr (sizeof(SizeType) == sizeof(SIZE_T))
+				{
+					bInvalidResize = bInvalidResize || ((SIZE_T)(USizeType)NumElements > (SIZE_T)TNumericLimits<SizeType>::Max() / NumBytesPerElement);
+				}
+				if (UNLIKELY(bInvalidResize))
+				{
+					UE::Core::Private::OnInvalidSizedHeapAllocatorNum(IndexSize, NumElements, NumBytesPerElement);
+				}
+
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+				Data = (FScriptContainerElement*)FArraySlackTrackingHeader::Realloc(Data, NumElements, NumBytesPerElement, AlignmentOfElement > alignof(FArraySlackTrackingHeader) ? AlignmentOfElement : alignof(FArraySlackTrackingHeader));
+#else
+				Data = (FScriptContainerElement*)BaseMallocType::Realloc( Data, NumElements*NumBytesPerElement, AlignmentOfElement );
+#endif
 			}
 		}
 		FORCEINLINE SizeType CalculateSlackReserve(SizeType NumElements, SIZE_T NumBytesPerElement) const
 		{
 			return DefaultCalculateSlackReserve(NumElements, NumBytesPerElement, true);
 		}
+		FORCEINLINE SizeType CalculateSlackReserve(SizeType NumElements, SIZE_T NumBytesPerElement, uint32 AlignmentOfElement) const
+		{
+			return DefaultCalculateSlackReserve(NumElements, NumBytesPerElement, true, (uint32)AlignmentOfElement);
+		}
 		FORCEINLINE SizeType CalculateSlackShrink(SizeType NumElements, SizeType NumAllocatedElements, SIZE_T NumBytesPerElement) const
 		{
 			return DefaultCalculateSlackShrink(NumElements, NumAllocatedElements, NumBytesPerElement, true);
 		}
+		FORCEINLINE SizeType CalculateSlackShrink(SizeType NumElements, SizeType NumAllocatedElements, SIZE_T NumBytesPerElement, uint32 AlignmentOfElement) const
+		{
+			return DefaultCalculateSlackShrink(NumElements, NumAllocatedElements, NumBytesPerElement, true, (uint32)AlignmentOfElement);
+		}
 		FORCEINLINE SizeType CalculateSlackGrow(SizeType NumElements, SizeType NumAllocatedElements, SIZE_T NumBytesPerElement) const
 		{
 			return DefaultCalculateSlackGrow(NumElements, NumAllocatedElements, NumBytesPerElement, true);
+		}
+		FORCEINLINE SizeType CalculateSlackGrow(SizeType NumElements, SizeType NumAllocatedElements, SIZE_T NumBytesPerElement, uint32 AlignmentOfElement) const
+		{
+			return DefaultCalculateSlackGrow(NumElements, NumAllocatedElements, NumBytesPerElement, true, (uint32)AlignmentOfElement);
 		}
 
 		SIZE_T GetAllocatedSize(SizeType NumAllocatedElements, SIZE_T NumBytesPerElement) const
@@ -508,6 +766,20 @@ public:
 			return 0;
 		}
 
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+		FORCEINLINE void SlackTrackerLogNum(SizeType NewNumUsed)
+		{
+			FArraySlackTrackingHeader::UpdateNumUsed(Data, (int64)NewNumUsed);
+		}
+
+		// Suppress slack tracking on an allocation -- should be called whenever the container may have been resized.
+		// Useful for debug allocations you don't want to show up in slack reports.
+		FORCEINLINE void DisableSlackTracking()
+		{
+			FArraySlackTrackingHeader::DisableTracking(Data);
+		}
+#endif
+
 	private:
 		ForAnyElementType(const ForAnyElementType&);
 		ForAnyElementType& operator=(const ForAnyElementType&);
@@ -520,10 +792,10 @@ public:
 	class ForElementType : public ForAnyElementType
 	{
 	public:
-
 		/** Default constructor. */
 		ForElementType()
-		{}
+		{
+		}
 
 		FORCEINLINE ElementType* GetAllocation() const
 		{
@@ -532,11 +804,18 @@ public:
 	};
 };
 
+// Define the ResizeAllocation functions with the regular allocator as exported to avoid bloat
+extern template CORE_API FORCENOINLINE void TSizedHeapAllocator<32, FMemory>::ForAnyElementType::ResizeAllocation(SizeType PreviousNumElements, SizeType NumElements, SIZE_T NumBytesPerElement);
+extern template CORE_API FORCENOINLINE void TSizedHeapAllocator<32, FMemory>::ForAnyElementType::ResizeAllocation(SizeType PreviousNumElements, SizeType NumElements, SIZE_T NumBytesPerElement, uint32 AlignmentOfElement);
+extern template CORE_API FORCENOINLINE void TSizedHeapAllocator<64, FMemory>::ForAnyElementType::ResizeAllocation(SizeType PreviousNumElements, SizeType NumElements, SIZE_T NumBytesPerElement);
+extern template CORE_API FORCENOINLINE void TSizedHeapAllocator<64, FMemory>::ForAnyElementType::ResizeAllocation(SizeType PreviousNumElements, SizeType NumElements, SIZE_T NumBytesPerElement, uint32 AlignmentOfElement);
+
 template <uint8 IndexSize>
 struct TAllocatorTraits<TSizedHeapAllocator<IndexSize>> : TAllocatorTraitsBase<TSizedHeapAllocator<IndexSize>>
 {
-	enum { SupportsMove    = true };
-	enum { IsZeroConstruct = true };
+	enum { IsZeroConstruct          = true };
+	enum { SupportsElementAlignment = true };
+	enum { SupportsSlackTracking    = true };
 };
 
 using FHeapAllocator = TSizedHeapAllocator<32>;
@@ -553,11 +832,13 @@ struct TCanMoveBetweenAllocators<TSizedHeapAllocator<FromIndexSize>, TSizedHeapA
  * Any allocation needed beyond that causes all data to be moved into an indirect allocation.
  * It always uses DEFAULT_ALIGNMENT.
  */
-template <uint32 NumInlineElements, typename SecondaryAllocator = FDefaultAllocator>
-class TInlineAllocator
+template <uint32 NumInlineElements, int IndexSize, typename SecondaryAllocator = FDefaultAllocator>
+class TSizedInlineAllocator
 {
 public:
-	using SizeType = int32;
+	using SizeType = typename TBitsToSizeType<IndexSize>::Type;
+
+	static_assert(std::is_same_v<SizeType, typename SecondaryAllocator::SizeType>, "Secondary allocator SizeType mismatch");
 
 	enum { NeedsElementType = true };
 	enum { RequireRangeCheck = true };
@@ -595,7 +876,11 @@ public:
 		// FContainerAllocatorInterface
 		FORCEINLINE ElementType* GetAllocation() const
 		{
-			return IfAThenAElseB<ElementType>(SecondaryData.GetAllocation(),GetInlineElements());
+			if (ElementType* Result = SecondaryData.GetAllocation())
+			{
+				return Result;
+			}
+			return GetInlineElements();
 		}
 
 		void ResizeAllocation(SizeType PreviousNumElements, SizeType NumElements,SIZE_T NumBytesPerElement)
@@ -647,9 +932,12 @@ public:
 		FORCEINLINE SizeType CalculateSlackGrow(SizeType NumElements, SizeType NumAllocatedElements, SIZE_T NumBytesPerElement) const
 		{
 			// If the elements use less space than the inline allocation, only use the inline allocation as slack.
+			// Also, when computing slack growth, don't count inline elements -- the slack algorithm has a special
+			// case to save memory on the initial heap allocation, versus subsequent reallocations, and we don't
+			// want the inline elements to be treated as if they were the first heap allocation.
 			return NumElements <= NumInlineElements ?
 				NumInlineElements :
-				SecondaryData.CalculateSlackGrow(NumElements, NumAllocatedElements, NumBytesPerElement);
+				SecondaryData.CalculateSlackGrow(NumElements, NumAllocatedElements <= NumInlineElements ? 0 : NumAllocatedElements, NumBytesPerElement);
 		}
 
 		SIZE_T GetAllocatedSize(SizeType NumAllocatedElements, SIZE_T NumBytesPerElement) const
@@ -671,6 +959,16 @@ public:
 			return NumInlineElements;
 		}
 
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+		FORCEINLINE void SlackTrackerLogNum(SizeType NewNumUsed)
+		{
+			if constexpr (TAllocatorTraits<SecondaryAllocator>::SupportsSlackTracking)
+			{
+				SecondaryData.SlackTrackerLogNum(NewNumUsed);
+			}
+		}
+#endif
+
 	private:
 		ForElementType(const ForElementType&);
 		ForElementType& operator=(const ForElementType&);
@@ -691,11 +989,17 @@ public:
 	typedef void ForAnyElementType;
 };
 
-template <uint32 NumInlineElements, typename SecondaryAllocator>
-struct TAllocatorTraits<TInlineAllocator<NumInlineElements, SecondaryAllocator>> : TAllocatorTraitsBase<TInlineAllocator<NumInlineElements, SecondaryAllocator>>
+template <uint32 NumInlineElements, int IndexSize, typename SecondaryAllocator>
+struct TAllocatorTraits<TSizedInlineAllocator<NumInlineElements, IndexSize, SecondaryAllocator>> : TAllocatorTraitsBase<TSizedInlineAllocator<NumInlineElements, IndexSize, SecondaryAllocator>>
 {
-	enum { SupportsMove = TAllocatorTraits<SecondaryAllocator>::SupportsMove };
+	enum { SupportsSlackTracking = true };
 };
+
+template <uint32 NumInlineElements, typename SecondaryAllocator = FDefaultAllocator>
+using TInlineAllocator = TSizedInlineAllocator<NumInlineElements, 32, SecondaryAllocator>;
+
+template <uint32 NumInlineElements, typename SecondaryAllocator = FDefaultAllocator64>
+using TInlineAllocator64 = TSizedInlineAllocator<NumInlineElements, 64, SecondaryAllocator>;
 
 /**
  * Implements a variant of TInlineAllocator with a secondary heap allocator that is allowed to store a pointer to its inline elements.
@@ -715,11 +1019,23 @@ public:
 	class ForElementType
 	{
 	public:
-
 		/** Default constructor. */
 		ForElementType()
 			: Data(GetInlineElements())
 		{
+			UE_STATIC_DEPRECATE(5.0, alignof(ElementType) > __STDCPP_DEFAULT_NEW_ALIGNMENT__, "TNonRelocatableInlineAllocator uses GMalloc's default alignment, which is lower than the element type's alignment - please consider a different approach");
+		}
+
+		~ForElementType()
+		{
+			if (HasAllocation())
+			{
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+				FArraySlackTrackingHeader::Free(Data);
+#else
+				FMemory::Free(Data);
+#endif
+			}
 		}
 
 		/**
@@ -733,7 +1049,11 @@ public:
 
 			if (HasAllocation())
 			{
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+				FArraySlackTrackingHeader::Free(Data);
+#else
 				FMemory::Free(Data);
+#endif
 			}
 
 			if (Other.HasAllocation())
@@ -763,7 +1083,11 @@ public:
 				if(HasAllocation())
 				{
 					RelocateConstructItems<ElementType>(GetInlineElements(), Data, PreviousNumElements);
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+					FArraySlackTrackingHeader::Free(Data);
+#else
 					FMemory::Free(Data);
+#endif
 					Data = GetInlineElements();
 				}
 			}
@@ -772,12 +1096,20 @@ public:
 				if (HasAllocation())
 				{
 					// Reallocate the indirect data for the new size.
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+					Data = (ElementType*)FArraySlackTrackingHeader::Realloc(Data, (int32)NumElements, (int32)NumBytesPerElement, 0);
+#else
 					Data = (ElementType*)FMemory::Realloc(Data, NumElements*NumBytesPerElement);
+#endif
 				}
 				else
 				{
 					// Allocate new indirect memory for the data.
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+					Data = (ElementType*)FArraySlackTrackingHeader::Realloc(nullptr, (int32)NumElements, (int32)NumBytesPerElement, 0);
+#else
 					Data = (ElementType*)FMemory::Realloc(nullptr, NumElements*NumBytesPerElement);
+#endif
 
 					// Move the data out of the inline data area into the new allocation.
 					RelocateConstructItems<ElementType>(Data, GetInlineElements(), PreviousNumElements);
@@ -818,6 +1150,18 @@ public:
 			return NumInlineElements;
 		}
 
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+		FORCEINLINE void SlackTrackerLogNum(SizeType NewNumUsed)
+		{
+			if (HasAllocation())
+			{
+				FArraySlackTrackingHeader* TrackingHeader = (FArraySlackTrackingHeader*)((uint8*)Data - sizeof(FArraySlackTrackingHeader));
+
+				TrackingHeader->UpdateNumUsed((int64)NewNumUsed);
+			}
+		}
+#endif
+
 	private:
 		ForElementType(const ForElementType&) = delete;
 		ForElementType& operator=(const ForElementType&) = delete;
@@ -841,7 +1185,7 @@ public:
 template <uint32 NumInlineElements>
 struct TAllocatorTraits<TNonRelocatableInlineAllocator<NumInlineElements>> : TAllocatorTraitsBase<TNonRelocatableInlineAllocator<NumInlineElements>>
 {
-	enum { SupportsMove = true };
+	enum { SupportsSlackTracking = true };
 };
 
 /**
@@ -889,7 +1233,7 @@ public:
 		void ResizeAllocation(SizeType PreviousNumElements, SizeType NumElements,SIZE_T NumBytesPerElement)
 		{
 			// Ensure the requested allocation will fit in the inline data area.
-			check(NumElements <= NumInlineElements);
+			check(NumElements >= 0 && NumElements <= NumInlineElements);
 		}
 
 		FORCEINLINE SizeType CalculateSlackReserve(SizeType NumElements, SIZE_T NumBytesPerElement) const
@@ -943,12 +1287,6 @@ public:
 	typedef void ForAnyElementType;
 };
 
-template <uint32 NumInlineElements>
-struct TAllocatorTraits<TFixedAllocator<NumInlineElements>> : TAllocatorTraitsBase<TFixedAllocator<NumInlineElements>>
-{
-	enum { SupportsMove = true };
-};
-
 // We want these to be correctly typed as int32, but we don't want them to have linkage, so we make them macros
 #define NumBitsPerDWORD ((int32)32)
 #define NumBitsPerDWORDLogTwo ((int32)5)
@@ -963,6 +1301,14 @@ class TSparseArrayAllocator
 {
 public:
 
+	typedef InElementAllocator ElementAllocator;
+	typedef InBitArrayAllocator BitArrayAllocator;
+};
+
+template <uint32 Alignment = DEFAULT_ALIGNMENT, typename InElementAllocator = TAlignedHeapAllocator<Alignment>,typename InBitArrayAllocator = FDefaultBitArrayAllocator>
+class TAlignedSparseArrayAllocator
+{
+public:
 	typedef InElementAllocator ElementAllocator;
 	typedef InBitArrayAllocator BitArrayAllocator;
 };
@@ -1006,9 +1352,11 @@ public:
 // Set allocation definitions.
 //
 
-#define DEFAULT_NUMBER_OF_ELEMENTS_PER_HASH_BUCKET	2
-#define DEFAULT_BASE_NUMBER_OF_HASH_BUCKETS			8
-#define DEFAULT_MIN_NUMBER_OF_HASHED_ELEMENTS		4
+#if !defined(DEFAULT_NUMBER_OF_ELEMENTS_PER_HASH_BUCKET)
+#	define DEFAULT_NUMBER_OF_ELEMENTS_PER_HASH_BUCKET	2
+#endif
+#define DEFAULT_BASE_NUMBER_OF_HASH_BUCKETS				8
+#define DEFAULT_MIN_NUMBER_OF_HASHED_ELEMENTS			4
 
 /** Encapsulates the allocators used by a set in a single type. */
 template<

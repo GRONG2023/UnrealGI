@@ -2,8 +2,10 @@
 
 #include "Chaos/ChaosGameplayEventDispatcher.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "PhysicsEngine/BodyInstance.h"
 #include "Chaos/Framework/PhysicsProxy.h"
+#include "PhysicsProxy/SingleParticlePhysicsProxy.h"
 #include "PhysicsSolver.h"
 #include "Physics/Experimental/PhysScene_Chaos.h"
 #include "Engine/World.h"
@@ -14,14 +16,16 @@
 #include "PhysicsEngine/BodySetup.h"
 #include "EventManager.h"
 
-FChaosBreakEvent::FChaosBreakEvent()
-	: Component(nullptr)
-	, Location(FVector::ZeroVector)
-	, Velocity(FVector::ZeroVector)
-	, AngularVelocity(FVector::ZeroVector)
-	, Mass(0.0f)
-{
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ChaosGameplayEventDispatcher)
 
+
+
+UChaosGameplayEventDispatcher::UChaosGameplayEventDispatcher()
+{
+	PrimaryComponentTick.bCanEverTick = false;
+	PrimaryComponentTick.bStartWithTickEnabled = false;
+	PrimaryComponentTick.bAllowTickOnDedicatedServer = false;
+	PrimaryComponentTick.SetTickFunctionEnable(false);
 }
 
 void UChaosGameplayEventDispatcher::OnRegister()
@@ -38,7 +42,7 @@ void UChaosGameplayEventDispatcher::OnUnregister()
 }
 
 // internal
-static void DispatchPendingBreakEvents(TArray<FChaosBreakEvent> const& Events, TMap<UPrimitiveComponent*, FBreakEventCallbackWrapper> const& Registrations)
+static void DispatchPendingBreakEvents(TArray<FChaosBreakEvent> const& Events, TMap<TObjectPtr<UPrimitiveComponent>, FBreakEventCallbackWrapper> const& Registrations)
 {
 	for (FChaosBreakEvent const& E : Events)
 	{
@@ -53,13 +57,42 @@ static void DispatchPendingBreakEvents(TArray<FChaosBreakEvent> const& Events, T
 	}
 }
 
+static void DispatchPendingRemovalEvents(TArray<FChaosRemovalEvent> const& Events, TMap<TObjectPtr<UPrimitiveComponent>, FRemovalEventCallbackWrapper> const& Registrations)
+{
+	for (FChaosRemovalEvent const& E : Events)
+	{
+		if (E.Component)
+		{
+			const FRemovalEventCallbackWrapper* const Callback = Registrations.Find(E.Component);
+			if (Callback)
+			{
+				Callback->RemovalEventCallback(E);
+			}
+		}
+	}
+}
+
+static void DispatchPendingCrumblingEvents(TArray<FChaosCrumblingEvent> const& Events, TMap<TObjectPtr<UPrimitiveComponent>, FCrumblingEventCallbackWrapper> const& Registrations)
+{
+	for (FChaosCrumblingEvent const& E : Events)
+	{
+		if (E.Component)
+		{
+			if (const FCrumblingEventCallbackWrapper* const Callback = Registrations.Find(E.Component))
+			{
+				Callback->CrumblingEventCallback(E);
+			}
+		}
+	}
+}
+
 static void SetCollisionInfoFromComp(FRigidBodyCollisionInfo& Info, UPrimitiveComponent* Comp)
 {
 	if (Comp)
 	{
 		Info.Component = Comp;
 		Info.Actor = Comp->GetOwner();
-		
+
 		const FBodyInstance* const BodyInst = Comp->GetBodyInstance();
 		Info.BodyIndex = BodyInst ? BodyInst->InstanceBodyIndex : INDEX_NONE;
 		Info.BoneName = BodyInst && BodyInst->BodySetup.IsValid() ? BodyInst->BodySetup->BoneName : NAME_None;
@@ -72,7 +105,6 @@ static void SetCollisionInfoFromComp(FRigidBodyCollisionInfo& Info, UPrimitiveCo
 		Info.BoneName = NAME_None;
 	}
 }
-
 
 FCollisionNotifyInfo& UChaosGameplayEventDispatcher::GetPendingCollisionForContactPair(const void* P0, const void* P1, bool& bNewEntry)
 {
@@ -203,40 +235,57 @@ void UChaosGameplayEventDispatcher::UnRegisterForBreakEvents(UPrimitiveComponent
 	}
 }
 
-void UChaosGameplayEventDispatcher::DispatchPendingWakeNotifies()
+void UChaosGameplayEventDispatcher::RegisterForRemovalEvents(UPrimitiveComponent* Component, FOnRemovalEventCallback InFunc)
 {
-	for (auto MapItr = PendingSleepNotifies.CreateIterator(); MapItr; ++MapItr)
+	if (Component)
 	{
-		FBodyInstance* BodyInstance = MapItr.Key();
-		if (UPrimitiveComponent* PrimitiveComponent = BodyInstance->OwnerComponent.Get())
-		{
-			PrimitiveComponent->DispatchWakeEvents(MapItr.Value(), BodyInstance->BodySetup->BoneName);
-		}
+		FRemovalEventCallbackWrapper F = { InFunc };
+		RemovalEventRegistrations.Add(Component, F);
 	}
+}
 
-	PendingSleepNotifies.Empty();
+void UChaosGameplayEventDispatcher::UnRegisterForRemovalEvents(UPrimitiveComponent* Component)
+{
+	if (Component)
+	{
+		RemovalEventRegistrations.Remove(Component);
+	}
+}
+
+void UChaosGameplayEventDispatcher::RegisterForCrumblingEvents(UPrimitiveComponent* Component, FOnCrumblingEventCallback InFunc)
+{
+	if (Component)
+	{
+		FCrumblingEventCallbackWrapper F = { InFunc };
+		CrumblingEventRegistrations.Add(Component, F);
+	}
+}
+
+void UChaosGameplayEventDispatcher::UnRegisterForCrumblingEvents(UPrimitiveComponent* Component)
+{
+	if (Component)
+	{
+		CrumblingEventRegistrations.Remove(Component);
+	}
 }
 
 void UChaosGameplayEventDispatcher::RegisterChaosEvents()
 {
-#if WITH_CHAOS
 	if (FPhysScene* Scene = GetWorld()->GetPhysicsScene())
 	{
 		if (Chaos::FPhysicsSolver* Solver = Scene->GetSolver())
 		{
 			Chaos::FEventManager* EventManager = Solver->GetEventManager();
-			EventManager->RegisterHandler<Chaos::FCollisionEventData>(Chaos::EEventType::Collision, this, &UChaosGameplayEventDispatcher::HandleCollisionEvents);
-			EventManager->RegisterHandler<Chaos::FBreakingEventData>(Chaos::EEventType::Breaking, this, &UChaosGameplayEventDispatcher::HandleBreakingEvents);
-			EventManager->RegisterHandler<Chaos::FSleepingEventData>(Chaos::EEventType::Sleeping, this, &UChaosGameplayEventDispatcher::HandleSleepingEvents);
+			EventManager->RegisterHandler<Chaos::FCollisionEventData>(Chaos::EEventType::Collision, this, &UChaosGameplayEventDispatcher::HandleCollisionEvents, &UChaosGameplayEventDispatcher::GetInterestedProxyOwnersForCollisionEvents);
+			EventManager->RegisterHandler<Chaos::FBreakingEventData>(Chaos::EEventType::Breaking, this, &UChaosGameplayEventDispatcher::HandleBreakingEvents, &UChaosGameplayEventDispatcher::GetInterestedProxyOwnersForBreakingEvents);
+			EventManager->RegisterHandler<Chaos::FRemovalEventData>(Chaos::EEventType::Removal, this, &UChaosGameplayEventDispatcher::HandleRemovalEvents, &UChaosGameplayEventDispatcher::GetInterestedProxyOwnersForRemovalEvents);
+			EventManager->RegisterHandler<Chaos::FCrumblingEventData>(Chaos::EEventType::Crumbling, this, &UChaosGameplayEventDispatcher::HandleCrumblingEvents, &UChaosGameplayEventDispatcher::GetInterestedProxyOwnersForCrumblingEvents);
 		}
 	}
-
-#endif
 }
 
 void UChaosGameplayEventDispatcher::UnregisterChaosEvents()
 {
-#if WITH_CHAOS
 	if (GetWorld())
 	{
 		if (FPhysScene* Scene = GetWorld()->GetPhysicsScene())
@@ -247,17 +296,89 @@ void UChaosGameplayEventDispatcher::UnregisterChaosEvents()
 				EventManager->UnregisterHandler(Chaos::EEventType::Collision, this);
 				EventManager->UnregisterHandler(Chaos::EEventType::Breaking, this);
 				EventManager->UnregisterHandler(Chaos::EEventType::Sleeping, this);
+				EventManager->UnregisterHandler(Chaos::EEventType::Removal, this);
+				EventManager->UnregisterHandler(Chaos::EEventType::Crumbling, this);
 			}
 		}
 	}
-#endif
+}
+
+template <typename EventIterator>
+void UChaosGameplayEventDispatcher::FillPhysicsProxy(FPhysScene_Chaos& Scene, TArray<UObject*>& Result, EventIterator& It)
+{
+	UPrimitiveComponent* const Comp0 = Cast<UPrimitiveComponent>(It.Key());
+	const TArray<IPhysicsProxyBase*>* PhysicsProxyArray = Scene.GetOwnedPhysicsProxies(Comp0);
+
+	if (PhysicsProxyArray)
+	{
+		for (IPhysicsProxyBase* PhysicsProxy0 : *PhysicsProxyArray)
+		{
+			Result.AddUnique(PhysicsProxy0->GetOwner());
+		}
+	}
+}
+
+
+TArray<UObject*> UChaosGameplayEventDispatcher::GetInterestedProxyOwnersForCollisionEvents()
+{
+	TArray<UObject*> Result;
+	FPhysScene_Chaos& Scene = *(GetWorld()->GetPhysicsScene());
+		
+	// look through all the components that someone is interested in and get all the proxies
+	for (decltype(CollisionEventRegistrations)::TIterator It(CollisionEventRegistrations); It; ++It)
+	{
+		FillPhysicsProxy(Scene, Result, It);
+	}
+
+	return Result;
+}
+
+TArray<UObject*> UChaosGameplayEventDispatcher::GetInterestedProxyOwnersForBreakingEvents()
+{
+	TArray<UObject*> Result;
+	FPhysScene_Chaos& Scene = *(GetWorld()->GetPhysicsScene());
+
+	// look through all the components that someone is interested in and get all the proxies
+	for (decltype(BreakEventRegistrations)::TIterator It(BreakEventRegistrations); It; ++It)
+	{
+		FillPhysicsProxy(Scene, Result, It);
+	}
+
+	return Result;
+}
+
+TArray<UObject*> UChaosGameplayEventDispatcher::GetInterestedProxyOwnersForRemovalEvents()
+{
+	TArray<UObject*> Result;
+	FPhysScene_Chaos& Scene = *(GetWorld()->GetPhysicsScene());
+
+	// look through all the components that someone is interested in and get all the proxies
+	for (decltype(RemovalEventRegistrations)::TIterator It(RemovalEventRegistrations); It; ++It)
+	{
+		FillPhysicsProxy(Scene, Result, It);
+	}
+
+	return Result;
+}
+
+TArray<UObject*> UChaosGameplayEventDispatcher::GetInterestedProxyOwnersForCrumblingEvents()
+{
+	TArray<UObject*> Result;
+	FPhysScene_Chaos& Scene = *(GetWorld()->GetPhysicsScene());
+
+	// look through all the components that someone is interested in and get all the proxies
+	for (decltype(CrumblingEventRegistrations)::TIterator It(CrumblingEventRegistrations); It; ++It)
+	{
+		FillPhysicsProxy(Scene, Result, It);
+	}
+
+	return Result;
 }
 
 void UChaosGameplayEventDispatcher::HandleCollisionEvents(const Chaos::FCollisionEventData& Event)
 {
+	// todo(chaos) : this code is very similar to FPhysScene_Chaos::HandleCollisionEvents, we should propably consolidate if possible or share as much code as possible 
 	SCOPE_CYCLE_COUNTER(STAT_DispatchCollisionEvents);
-
-#if INCLUDE_CHAOS
 
 	FPhysScene_Chaos& Scene = *(GetWorld()->GetPhysicsScene());
 
@@ -274,7 +395,7 @@ void UChaosGameplayEventDispatcher::HandleCollisionEvents(const Chaos::FCollisio
 			// look through all the components that someone is interested in, and see if they had a collision
 			// note that we only need to care about the interaction from the POV of the registered component,
 			// since if anyone wants notifications for the other component it hit, it's also registered and we'll get to that elsewhere in the list
-			for (TMap<UPrimitiveComponent*, FChaosHandlerSet>::TIterator It(CollisionEventRegistrations); It; ++It)
+			for (decltype(CollisionEventRegistrations)::TIterator It(CollisionEventRegistrations); It; ++It)
 			{
 				const FChaosHandlerSet& HandlerSet = It.Value();
 
@@ -288,13 +409,29 @@ void UChaosGameplayEventDispatcher::HandleCollisionEvents(const Chaos::FCollisio
 						TArray<int32> const* const CollisionIndices = PhysicsProxyToCollisionIndicesMap.Find(PhysicsProxy0);
 						if (CollisionIndices)
 						{
-							for (int32 EncodedCollisionIdx : *CollisionIndices)
+							const int32 NumCollisionIndices = CollisionIndices->Num();
+
+							if(NumCollisionIndices == 0)
 							{
+								continue;
+							}
+
+							for(int32 Index = 0; Index < NumCollisionIndices; ++Index)
+							{
+								int32 EncodedCollisionIdx = (*CollisionIndices)[Index];
+
 								bool bSwapOrder;
 								int32 CollisionIdx = Chaos::FEventManager::DecodeCollisionIndex(EncodedCollisionIdx, bSwapOrder);
 
 								Chaos::FCollidingData const& CollisionDataItem = CollisionData[CollisionIdx];
-								IPhysicsProxyBase* const PhysicsProxy1 = bSwapOrder ? CollisionDataItem.ParticleProxy : CollisionDataItem.LevelsetProxy;
+
+								IPhysicsProxyBase* const PhysicsProxy1 = CollisionDataItem.Proxy2 ? CollisionDataItem.Proxy2: PhysicsProxy0;
+
+								// Are the proxies pending destruction? If they are no longer tracked by the PhysScene, the proxy is deleted or pending deletion.
+								if (Scene.GetOwningComponent<UPrimitiveComponent>(PhysicsProxy0) == nullptr || Scene.GetOwningComponent<UPrimitiveComponent>(PhysicsProxy1) == nullptr)
+								{
+									continue;
+								}
 
 								{
 									bool bNewEntry = false;
@@ -314,6 +451,7 @@ void UChaosGameplayEventDispatcher::HandleCollisionEvents(const Chaos::FCollisio
 										NotifyInfo.bCallEvent0 = true;
 										// if Comp1 wants this event too, it will get its own pending collision entry, so we leave it false
 
+										// @todo(chaos) this may not handle welded objects properly as the component returned may be thewrong one ( see FPhysScene_Chaos::HandleCollisionEvents ) 
 										SetCollisionInfoFromComp(NotifyInfo.Info0, Comp0);
 										SetCollisionInfoFromComp(NotifyInfo.Info1, Comp1);
 
@@ -322,8 +460,12 @@ void UChaosGameplayEventDispatcher::HandleCollisionEvents(const Chaos::FCollisio
 										NewContact.ContactPosition = CollisionDataItem.Location;
 										NewContact.ContactPenetration = CollisionDataItem.PenetrationDepth;
 										// NewContact.PhysMaterial[1] UPhysicalMaterial required here
-									}
 
+										if (bSwapOrder)
+										{
+											NotifyInfo.RigidCollisionData.SwapContactOrders();
+										}
+									}
 								}
 
 								if (HandlerSet.ChaosHandlers.Num() > 0)
@@ -380,13 +522,10 @@ void UChaosGameplayEventDispatcher::HandleCollisionEvents(const Chaos::FCollisio
 
 	// Tell the world and actors about the collisions
 	DispatchPendingCollisionNotifies();
-
-#endif
 }
 
 void UChaosGameplayEventDispatcher::HandleBreakingEvents(const Chaos::FBreakingEventData& Event)
 {
-
 	SCOPE_CYCLE_COUNTER(STAT_DispatchBreakEvents);
 
 	// BREAK EVENTS
@@ -398,26 +537,24 @@ void UChaosGameplayEventDispatcher::HandleBreakingEvents(const Chaos::FBreakingE
 	{
 		LastBreakingDataTime = BreakingDataTimestamp;
 
-		Chaos::FBreakingDataArray const& BreakingData = Event.BreakingData.AllBreakingsArray;
+		const Chaos::FBreakingDataArray& BreakingDataArray = Event.BreakingData.AllBreakingsArray;
 
 		// let's assume breaks are very rare, so we will iterate breaks instead of registered components for now
-		const int32 NumBreaks = BreakingData.Num();
+		const int32 NumBreaks = BreakingDataArray.Num();
 		if (NumBreaks > 0)
 		{
-			for (Chaos::FBreakingData const& BreakingDataItem : BreakingData)
+			const FPhysScene& Scene = *(GetWorld()->GetPhysicsScene());
+
+			for (const Chaos::FBreakingData& BreakingData : BreakingDataArray)
 			{	
-				if (BreakingDataItem.Particle && (BreakingDataItem.ParticleProxy))
+				if ((BreakingData.EmitterFlag & Chaos::EventEmitterFlag::OwnDispatcher) && BreakingData.Proxy)
 				{
-					UPrimitiveComponent* const PrimComp = Cast<UPrimitiveComponent>(BreakingDataItem.ParticleProxy->GetOwner());
-					if (PrimComp && BreakEventRegistrations.Contains(PrimComp))
+					UPrimitiveComponent* const PrimComp = Scene.GetOwningComponent<UPrimitiveComponent>(BreakingData.Proxy);
+					if (PrimComp)
 					{
 						// queue them up so we can release the physics data before trigging BP events
-						FChaosBreakEvent& BreakEvent = PendingBreakEvents.AddZeroed_GetRef();
-							BreakEvent.Component = PrimComp;
-							BreakEvent.Location = BreakingDataItem.Location;
-							BreakEvent.Velocity = BreakingDataItem.Velocity;
-							BreakEvent.AngularVelocity = BreakingDataItem.AngularVelocity;
-							BreakEvent.Mass = BreakingDataItem.Mass;
+						FChaosBreakEvent& BreakEvent = PendingBreakEvents.Emplace_GetRef(BreakingData);
+						BreakEvent.Component = PrimComp;
 					}
 				}
 			}
@@ -428,31 +565,112 @@ void UChaosGameplayEventDispatcher::HandleBreakingEvents(const Chaos::FBreakingE
 
 }
 
-
 void UChaosGameplayEventDispatcher::HandleSleepingEvents(const Chaos::FSleepingEventData& SleepingData)
 {
+	const FPhysScene& Scene = *(GetWorld()->GetPhysicsScene());
+
 	const Chaos::FSleepingDataArray& SleepingArray = SleepingData.SleepingData;
 
 	for (const Chaos::FSleepingData& SleepData : SleepingArray)
 	{
-		if (SleepData.Particle->GetProxy()!= nullptr)
+		ESleepEvent WakeSleepEvent = SleepData.Sleeping ? ESleepEvent::SET_Sleep : ESleepEvent::SET_Wakeup;
+		if (UPrimitiveComponent* PrimitiveComponent = Scene.GetOwningComponent<UPrimitiveComponent>(SleepData.Proxy))
 		{
-			if (FBodyInstance* BodyInstance = FPhysicsUserData::Get<FBodyInstance>(SleepData.Particle->UserData()))
+			FName BoneName = NAME_None;
+			if (FBodyInstance* BodyInstance = Scene.GetBodyInstanceFromProxy(SleepData.Proxy))
 			{
-				if (BodyInstance->bGenerateWakeEvents)
-				{
-					ESleepEvent WakeSleepEvent = SleepData.Sleeping ? ESleepEvent::SET_Sleep : ESleepEvent::SET_Wakeup;
-					AddPendingSleepingNotify(BodyInstance, WakeSleepEvent);
-				}
+				BoneName = BodyInstance->BodySetup->BoneName;
+			}
+
+			if (PrimitiveComponent->ShouldDispatchWakeEvents(BoneName))
+			{
+				PrimitiveComponent->DispatchWakeEvents(WakeSleepEvent, BoneName);
 			}
 		}
 	}
-
-	DispatchPendingWakeNotifies();
 }
 
-
-void UChaosGameplayEventDispatcher::AddPendingSleepingNotify(FBodyInstance* BodyInstance, ESleepEvent SleepEventType)
+void UChaosGameplayEventDispatcher::HandleRemovalEvents(const Chaos::FRemovalEventData& Event)
 {
-	PendingSleepNotifies.FindOrAdd(BodyInstance) = SleepEventType;
+	// REMOVAL EVENTS
+
+	TArray<FChaosRemovalEvent> PendingRemovalEvents;
+
+	const float RemovalDataTimestamp = Event.RemovalData.TimeCreated;
+	if (RemovalDataTimestamp > LastRemovalDataTime)
+	{
+		LastRemovalDataTime = RemovalDataTimestamp;
+
+		Chaos::FRemovalDataArray const& RemovalData = Event.RemovalData.AllRemovalArray;
+
+		const int32 NumRemovals = RemovalData.Num();
+		if (NumRemovals > 0)
+		{
+			const FPhysScene& Scene = *(GetWorld()->GetPhysicsScene());
+
+			for (Chaos::FRemovalData const& RemovalDataItem : RemovalData)
+			{
+				if (RemovalDataItem.Proxy)
+				{
+					UPrimitiveComponent* const PrimComp = Scene.GetOwningComponent<UPrimitiveComponent>(RemovalDataItem.Proxy);
+					if (PrimComp && RemovalEventRegistrations.Contains(PrimComp))
+					{
+						// queue them up so we can release the physics data before trigging BP events
+						FChaosRemovalEvent& RemovalEvent = PendingRemovalEvents.AddZeroed_GetRef();
+						RemovalEvent.Component = PrimComp;
+						RemovalEvent.Location = RemovalDataItem.Location;
+						RemovalEvent.Mass = RemovalDataItem.Mass;
+					}
+				}
+			}
+
+			DispatchPendingRemovalEvents(PendingRemovalEvents, RemovalEventRegistrations);
+		}
+	}
+
 }
+
+void UChaosGameplayEventDispatcher::HandleCrumblingEvents(const Chaos::FCrumblingEventData& Event)
+{
+	SCOPE_CYCLE_COUNTER(STAT_DispatchCrumblingEvents);
+
+	// CRUMBLING EVENTS
+
+	const float CrumblingDataTimestamp = Event.CrumblingData.TimeCreated;
+	if (CrumblingDataTimestamp > LastCrumblingDataTime)
+	{
+		LastCrumblingDataTime = CrumblingDataTimestamp;
+
+		Chaos::FCrumblingDataArray const& BreakingData = Event.CrumblingData.AllCrumblingsArray;
+
+		const FPhysScene& Scene = *(GetWorld()->GetPhysicsScene());
+
+		// let's assume crumbles are rare, so we will iterate breaks instead of registered components for now
+		TArray<FChaosCrumblingEvent> PendingCrumblingEvent;
+		for (const Chaos::FCrumblingData& CrumblingDataItem : Event.CrumblingData.AllCrumblingsArray)
+		{	
+			if ((CrumblingDataItem.EmitterFlag & Chaos::EventEmitterFlag::OwnDispatcher) && CrumblingDataItem.Proxy)
+			{
+				if (UPrimitiveComponent* const PrimComp = Scene.GetOwningComponent<UPrimitiveComponent>(CrumblingDataItem.Proxy))
+				{
+					// queue them up so we can release the physics data before triggering BP events
+					FChaosCrumblingEvent& CrumblingEvent = PendingCrumblingEvent.AddZeroed_GetRef();
+					CrumblingEvent.Component = PrimComp;
+					CrumblingEvent.Location = CrumblingDataItem.Location;
+					CrumblingEvent.Orientation = CrumblingDataItem.Orientation;
+					CrumblingEvent.LinearVelocity = CrumblingDataItem.LinearVelocity;
+					CrumblingEvent.AngularVelocity = CrumblingDataItem.AngularVelocity;
+					CrumblingEvent.Mass = static_cast<float>(CrumblingDataItem.Mass);
+					CrumblingEvent.LocalBounds = FBox(CrumblingDataItem.LocalBounds.Min(), CrumblingDataItem.LocalBounds.Max());
+					CrumblingEvent.Children = CrumblingDataItem.Children;
+				}
+			}
+		}
+		if (PendingCrumblingEvent.Num() > 0)
+		{
+			DispatchPendingCrumblingEvents(PendingCrumblingEvent, CrumblingEventRegistrations);
+		}
+	}
+
+}
+

@@ -3,7 +3,7 @@
 #include "AssetTypeActions/AssetTypeActions_AnimCurveCompressionSettings.h"
 #include "Animation/AnimSequence.h"
 #include "Misc/MessageDialog.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "ToolMenus.h"
 #include "Misc/ScopedSlowTask.h"
 #include "UObject/UObjectIterator.h"
@@ -36,7 +36,7 @@ void FAssetTypeActions_AnimCurveCompressionSettings::AddToolbarExtension(FToolBa
 		NAME_None,
 		LOCTEXT("AnimCurveCompressionSettings_Compress", "Compress"),
 		LOCTEXT("AnimCurveCompressionSettings_CompressTooltip", "All animation sequences that use these settings will be compressed."),
-		FSlateIcon(FEditorStyle::GetStyleSetName(), "Persona.ApplyCompression")
+		FSlateIcon(FAppStyle::GetAppStyleSetName(), "Persona.ApplyCompression")
 		);
 	Builder.EndSection();
 }
@@ -54,7 +54,7 @@ void FAssetTypeActions_AnimCurveCompressionSettings::GetActions(const TArray<UOb
 		"AnimCurveCompressionSettings_Compress",
 		LOCTEXT("AnimCurveCompressionSettings_Compress", "Compress"),
 		LOCTEXT("AnimCurveCompressionSettings_CompressTooltip", "All animation sequences that use these settings will be compressed."),
-		FSlateIcon(FEditorStyle::GetStyleSetName(), "Persona.ApplyCompression.Small"),
+		FSlateIcon(FAppStyle::GetAppStyleSetName(), "Persona.ApplyCompression.Small"),
 		FUIAction(
 			FExecuteAction::CreateSP(this, &FAssetTypeActions_AnimCurveCompressionSettings::ExecuteCompression, SettingAssets[0])
 		)
@@ -94,21 +94,30 @@ void FAssetTypeActions_AnimCurveCompressionSettings::ExecuteCompression(TWeakObj
 	Arguments.Add(TEXT("NumAnimSequences"), FText::AsNumber(AnimSeqsToRecompress.Num()));
 	FText DialogText = FText::Format(LOCTEXT("AnimCurveCompressionSettings_CompressWarningText", "{NumAnimSequences} animation sequences are about to compress."), Arguments);
 	FText DialogTitle = LOCTEXT("AnimCurveCompressionSettings_CompressWarning", "Warning");
-	const EAppReturnType::Type DlgResult = FMessageDialog::Open(EAppMsgType::OkCancel, DialogText, &DialogTitle);
+	const EAppReturnType::Type DlgResult = FMessageDialog::Open(EAppMsgType::OkCancel, DialogText, DialogTitle);
 	if (DlgResult != EAppReturnType::Ok)
 	{
 		return;
 	}
 
 	const FText StatusText = FText::Format(LOCTEXT("AnimCurveCompressionSettings_Compressing", "Compressing '{0}' animations"), FText::AsNumber(AnimSeqsToRecompress.Num()));
-	FScopedSlowTask LoadingAnimSlowTask(AnimSeqsToRecompress.Num(), StatusText);
+	FScopedSlowTask LoadingAnimSlowTask(static_cast<float>(AnimSeqsToRecompress.Num()), StatusText);
 	LoadingAnimSlowTask.MakeDialog();
 
 	for (UAnimSequence* AnimSeq : AnimSeqsToRecompress)
 	{
 		LoadingAnimSlowTask.EnterProgressFrame();
-		AnimSeq->RequestSyncAnimRecompression(false);
+		AnimSeq->CacheDerivedDataForCurrentPlatform();
 	}
+}
+
+const TArray<FText>& FAssetTypeActions_AnimCurveCompressionSettings::GetSubMenus() const
+{
+	static const TArray<FText> SubMenus
+	{
+		LOCTEXT("AnimAdvancedSubMenu", "Advanced")
+	};
+	return SubMenus;
 }
 
 #undef LOCTEXT_NAMESPACE

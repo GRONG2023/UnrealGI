@@ -4,11 +4,11 @@
 	ParticleModules_Event.cpp: Particle event-related module implementations.
 =============================================================================*/
 
-#include "CoreMinimal.h"
+#include "Engine/HitResult.h"
 #include "Particles/ParticleSystem.h"
-#include "ParticleHelper.h"
 #include "Distributions/DistributionFloatConstant.h"
 #include "Distributions/DistributionVectorConstant.h"
+#include "ParticleEmitterInstances.h"
 #include "Particles/Event/ParticleModuleEventBase.h"
 #include "Particles/ParticleEmitter.h"
 #include "Particles/Event/ParticleModuleEventGenerator.h"
@@ -17,6 +17,8 @@
 #include "Particles/Event/ParticleModuleEventReceiverSpawn.h"
 #include "Particles/Event/ParticleModuleEventSendToGame.h"
 #include "Particles/ParticleLODLevel.h"
+#include "Particles/ParticleModule.h"
+#include "Particles/ParticleSystemComponent.h"
 
 /*-----------------------------------------------------------------------------
 	Abstract base modules used for categorization.
@@ -102,7 +104,7 @@ void UParticleModuleEventGenerator::PostEditChangeProperty(FPropertyChangedEvent
 		check(Emitter);
 		OuterObj = Emitter->GetOuter();
 	}
-	UParticleSystem* PartSys = PartSys = CastChecked<UParticleSystem>(OuterObj);
+	UParticleSystem* PartSys = CastChecked<UParticleSystem>(OuterObj);
 	if (PartSys)
 	{
 		PartSys->PostEditChangeProperty(PropertyChangedEvent);
@@ -125,10 +127,10 @@ bool UParticleModuleEventGenerator::HandleParticleSpawned(FParticleEmitterInstan
 		{
 			if (EventGenInfo.Frequency == 0 || (EventPayload->SpawnTrackingCount % EventGenInfo.Frequency) == 0)
 			{
-				FVector ParticleLocation = EventGenInfo.bUseOrbitOffset ? Owner->GetParticleLocationWithOrbitOffset(NewParticle) : NewParticle->Location;
+				FVector ParticleLocation = EventGenInfo.bUseOrbitOffset ? Owner->GetParticleLocationWithOrbitOffset(NewParticle) : FVector(NewParticle->Location);
 
 				Owner->Component->ReportEventSpawn(EventGenInfo.CustomName, Owner->EmitterTime, 
-					ParticleLocation, NewParticle->Velocity, EventGenInfo.ParticleModuleEventsToSendToGame);
+					ParticleLocation, FVector(NewParticle->Velocity), EventGenInfo.ParticleModuleEventsToSendToGame);
 				bProcessed = true;
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 				Owner->EventCount++;
@@ -155,10 +157,10 @@ bool UParticleModuleEventGenerator::HandleParticleKilled(FParticleEmitterInstanc
 		{
 			if (EventGenInfo.Frequency == 0 || (EventPayload->DeathTrackingCount % EventGenInfo.Frequency) == 0)
 			{
-				FVector ParticleLocation = EventGenInfo.bUseOrbitOffset ? Owner->GetParticleLocationWithOrbitOffset(DeadParticle) : DeadParticle->Location;
+				FVector ParticleLocation = EventGenInfo.bUseOrbitOffset ? Owner->GetParticleLocationWithOrbitOffset(DeadParticle) : FVector(DeadParticle->Location);
 
 				Owner->Component->ReportEventDeath(EventGenInfo.CustomName, 
-					Owner->EmitterTime, ParticleLocation, DeadParticle->Velocity, 
+					Owner->EmitterTime, ParticleLocation, (FVector)DeadParticle->Velocity,
 					EventGenInfo.ParticleModuleEventsToSendToGame, DeadParticle->RelativeTime);
 				bProcessed = true;
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
@@ -208,7 +210,7 @@ bool UParticleModuleEventGenerator::HandleParticleCollision(FParticleEmitterInst
 					Owner->EmitterTime, 
 					Hit->Location,
 					CollideDirection, 
-					CollideParticle->Velocity, 
+					(FVector)CollideParticle->Velocity,
 					EventGenInfo.ParticleModuleEventsToSendToGame,
 					CollideParticle->RelativeTime, 
 					Hit->Normal, 

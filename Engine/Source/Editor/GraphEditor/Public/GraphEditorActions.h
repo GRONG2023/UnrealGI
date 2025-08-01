@@ -2,16 +2,25 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
 #include "Framework/Commands/Commands.h"
-#include "EditorStyleSet.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Internationalization.h"
+#include "Styling/AppStyle.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
+
+class FUICommandInfo;
 
 class FGraphEditorCommandsImpl : public TCommands<FGraphEditorCommandsImpl>
 {
 public:
 
 	FGraphEditorCommandsImpl()
-		: TCommands<FGraphEditorCommandsImpl>( TEXT("GraphEditor"), NSLOCTEXT("Contexts", "GraphEditor", "Graph Editor"), NAME_None, FEditorStyle::GetStyleSetName() )
+		: TCommands<FGraphEditorCommandsImpl>( TEXT("GraphEditor"), NSLOCTEXT("Contexts", "GraphEditor", "Graph Editor"), NAME_None, FAppStyle::GetAppStyleSetName() )
 	{
 	}	
 
@@ -95,12 +104,21 @@ public:
 
 	// Find references
 	TSharedPtr< FUICommandInfo > FindReferences;
+	GRAPHEDITOR_API TSharedPtr< FUICommandInfo > GetFindReferences() const { return FindReferences; }
+
+	// Find references options that appear by context like for functions and variables
+	TSharedPtr< FUICommandInfo > FindReferencesByNameLocal;
+	TSharedPtr< FUICommandInfo > FindReferencesByNameGlobal;
+	TSharedPtr< FUICommandInfo > FindReferencesByClassMemberLocal;
+	TSharedPtr< FUICommandInfo > FindReferencesByClassMemberGlobal;
+	
 	TSharedPtr< FUICommandInfo > FindAndReplaceReferences;
 
 	// Jumps to the definition of the selected node (or otherwise focuses something interesting about that node, e.g., the inner graph for a collapsed graph)
 	TSharedPtr< FUICommandInfo > GoToDefinition;
 
 	// Pin-specific actions
+	TSharedPtr< FUICommandInfo > BreakThisLink;
 	TSharedPtr< FUICommandInfo > BreakPinLinks;
 	TSharedPtr< FUICommandInfo > PromoteToVariable;
 	TSharedPtr< FUICommandInfo > PromoteToLocalVariable;
@@ -112,33 +130,11 @@ public:
 	TSharedPtr< FUICommandInfo > SelectAllInputNodes;
 	TSharedPtr< FUICommandInfo > SelectAllOutputNodes;
 
-	// SkeletalControl specific commands
-	TSharedPtr< FUICommandInfo > SelectBone;
-	// Blend list options
-	TSharedPtr< FUICommandInfo > AddBlendListPin;
-	TSharedPtr< FUICommandInfo > RemoveBlendListPin;
-
-	// options for sequence/evaluator converter
-	TSharedPtr< FUICommandInfo > ConvertToSeqEvaluator;
-	TSharedPtr< FUICommandInfo > ConvertToSeqPlayer;
-
-	// options for blendspace sequence/evaluator converter
-	TSharedPtr< FUICommandInfo > ConvertToBSEvaluator;
-	TSharedPtr< FUICommandInfo > ConvertToBSPlayer;
-
-	// options for aimoffset converter
-	TSharedPtr< FUICommandInfo > ConvertToAimOffsetLookAt;
-	TSharedPtr< FUICommandInfo > ConvertToAimOffsetSimple;
-
-	// options for sequence/evaluator converter
-	TSharedPtr< FUICommandInfo > ConvertToPoseBlender;
-	TSharedPtr< FUICommandInfo > ConvertToPoseByName;
-
-	// option for opening the asset related to the graph node
-	TSharedPtr< FUICommandInfo > OpenRelatedAsset;
-
 	//create a comment node
 	TSharedPtr< FUICommandInfo > CreateComment;
+	
+	// Create a custom event node
+	TSharedPtr< FUICommandInfo > CreateCustomEvent;
 
 	// Zoom in and out on the graph editor
 	TSharedPtr< FUICommandInfo > ZoomIn;
@@ -167,6 +163,9 @@ public:
 	static void Register();
 
 	static const FGraphEditorCommandsImpl& Get();
+	
+	/** Build "Find References" submenu when a context allows for it */
+	static void BuildFindReferencesMenu(FMenuBuilder& MenuBuilder);
 
 	static void Unregister();
 };

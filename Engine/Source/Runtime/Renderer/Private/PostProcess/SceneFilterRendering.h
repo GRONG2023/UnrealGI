@@ -11,14 +11,17 @@
 #include "RendererInterface.h"
 #include "ShaderParameters.h"
 #include "Shader.h"
-#include "SceneRenderTargets.h"
+#include "PostProcess/SceneRenderTargets.h"
 #include "ShaderParameterUtils.h"
+#include "SceneRenderTargetParameters.h"
+
+enum class EStereoscopicPass;
 
 /** Uniform buffer for computing the vertex positional and UV adjustments in the vertex shader. */
-BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT( FDrawRectangleParameters, RENDERER_API)
-	SHADER_PARAMETER( FVector4, PosScaleBias )
-	SHADER_PARAMETER( FVector4, UVScaleBias )
-	SHADER_PARAMETER( FVector4, InvTargetSizeAndTextureSize )
+BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT( FDrawRectangleParameters, )
+	SHADER_PARAMETER( FVector4f, PosScaleBias )
+	SHADER_PARAMETER( FVector4f, UVScaleBias )
+	SHADER_PARAMETER( FVector4f, InvTargetSizeAndTextureSize )
 END_GLOBAL_SHADER_PARAMETER_STRUCT()
 
 /**
@@ -57,7 +60,7 @@ extern RENDERER_API void DrawRectangle(
 
 // NOTE: Assumes previously set PSO has PrimitiveType = PT_TriangleList
 extern RENDERER_API void DrawTransformedRectangle(
-	FRHICommandListImmediate& RHICmdList,
+	FRHICommandList& RHICmdList,
 	float X,
 	float Y,
 	float SizeX,
@@ -103,106 +106,10 @@ extern RENDERER_API void DrawPostProcessPass(
 	FIntPoint TargetSize,
 	FIntPoint TextureSize,
 	const TShaderRef<FShader>& VertexShader,
-	EStereoscopicPass StereoView,
+	int32 StereoViewIndex,
 	bool bHasCustomMesh,
 	EDrawRectangleFlags Flags = EDRF_Default
 	);
-
-
-
-/*-----------------------------------------------------------------------------
-FMGammaShaderParameters
------------------------------------------------------------------------------*/
-
-/** Encapsulates the gamma correction parameters. */
-class FGammaShaderParameters
-{
-	DECLARE_TYPE_LAYOUT(FGammaShaderParameters, NonVirtual);
-public:
-
-	/** Default constructor. */
-	FGammaShaderParameters() {}
-
-	/** Initialization constructor. */
-	FGammaShaderParameters(const FShaderParameterMap& ParameterMap)
-	{
-		RenderTargetExtent.Bind(ParameterMap,TEXT("RenderTargetExtent"));
-		GammaColorScaleAndInverse.Bind(ParameterMap,TEXT("GammaColorScaleAndInverse"));
-		GammaOverlayColor.Bind(ParameterMap,TEXT("GammaOverlayColor"));
-	}
-
-	/** Set the material shader parameter values. */
-	void Set(FRHICommandList& RHICmdList, FRHIPixelShader* RHIShader, float DisplayGamma, FLinearColor const& ColorScale, FLinearColor const& ColorOverlay)
-	{
-		// GammaColorScaleAndInverse
-
-		float InvDisplayGamma = 1.f / FMath::Max<float>(DisplayGamma,KINDA_SMALL_NUMBER);
-		float OneMinusOverlayBlend = 1.f - ColorOverlay.A;
-
-		FVector4 ColorScaleAndInverse;
-
-		ColorScaleAndInverse.X = ColorScale.R * OneMinusOverlayBlend;
-		ColorScaleAndInverse.Y = ColorScale.G * OneMinusOverlayBlend;
-		ColorScaleAndInverse.Z = ColorScale.B * OneMinusOverlayBlend;
-		ColorScaleAndInverse.W = InvDisplayGamma;
-
-		SetShaderValue(
-			RHICmdList,
-			RHIShader,
-			GammaColorScaleAndInverse,
-			ColorScaleAndInverse
-			);
-
-		// GammaOverlayColor
-
-		FVector4 OverlayColor;
-
-		OverlayColor.X = ColorOverlay.R * ColorOverlay.A;
-		OverlayColor.Y = ColorOverlay.G * ColorOverlay.A;
-		OverlayColor.Z = ColorOverlay.B * ColorOverlay.A;
-		OverlayColor.W = 0.f; // Unused
-
-		SetShaderValue(
-			RHICmdList,
-			RHIShader,
-			GammaOverlayColor,
-			OverlayColor
-			);
-
-		FIntPoint BufferSize = FSceneRenderTargets::Get(RHICmdList).GetBufferSizeXY();
-		float BufferSizeX = (float)BufferSize.X;
-		float BufferSizeY = (float)BufferSize.Y;
-		float InvBufferSizeX = 1.0f / BufferSizeX;
-		float InvBufferSizeY = 1.0f / BufferSizeY;
-
-		const FVector4 vRenderTargetExtent(BufferSizeX, BufferSizeY,  InvBufferSizeX, InvBufferSizeY);
-
-		SetShaderValue(
-			RHICmdList,
-			RHIShader,
-			RenderTargetExtent,
-			vRenderTargetExtent);
-	}
-
-	/** Serializer. */
-	friend FArchive& operator<<(FArchive& Ar,FGammaShaderParameters& P)
-	{
-		Ar << P.GammaColorScaleAndInverse;
-		Ar << P.GammaOverlayColor;
-		Ar << P.RenderTargetExtent;
-
-		return Ar;
-	}
-
-
-private:
-	
-		LAYOUT_FIELD(FShaderParameter, GammaColorScaleAndInverse)
-		LAYOUT_FIELD(FShaderParameter, GammaOverlayColor)
-		LAYOUT_FIELD(FShaderParameter, RenderTargetExtent)
-	
-};
-
 
 class FTesselatedScreenRectangleIndexBuffer : public FIndexBuffer
 {
@@ -216,7 +123,7 @@ public:
 	static const uint32 Height = 20;	// to minimize distortion we also tessellate in Y but a perspective distortion could do that with fewer triangles.
 
 	/** Initialize the RHI for this rendering resource */
-	void InitRHI() override;
+	void InitRHI(FRHICommandListBase& RHICmdList) override;
 
 	uint32 NumVertices() const;
 

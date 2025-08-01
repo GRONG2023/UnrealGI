@@ -9,8 +9,8 @@
 #include "Templates/SubclassOf.h"
 #include "BlueprintCore.generated.h"
 
-UCLASS()
-class ENGINE_API UBlueprintCore
+UCLASS(MinimalAPI)
+class UBlueprintCore
 	: public UObject
 {
 	GENERATED_UCLASS_BODY()
@@ -34,16 +34,8 @@ private:
 	FGuid BlueprintGuid;
 
 public:
-	UE_DEPRECATED(4.22, "The minimum UE4 object version implies the Blueprint generated class is always authoritative. It is no longer necessary to explicitly set it.")
-	void SetLegacyGeneratedClassIsAuthoritative() {}
 
-	UE_DEPRECATED(4.22, "The minimum UE4 object version implies the Blueprint generated class is always authoritative. It is no longer necessary to explicitly check it.")
-	bool IsGeneratedClassAuthoritative()
-	{
-		return true;
-	}
-
-	virtual void Serialize( FArchive& Ar ) override;
+	ENGINE_API virtual void Serialize( FArchive& Ar ) override;
 
 	/** Generates a new blueprint Guid, used when creating new blueprints */
 	void GenerateNewGuid()
@@ -57,5 +49,5 @@ public:
 private:
 	
 	/** Generates a new deterministic guid based on blueprint properties */
-	void GenerateDeterministicGuid();
+	ENGINE_API void GenerateDeterministicGuid();
 };

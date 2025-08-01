@@ -4,14 +4,17 @@
 
 #include "CoreTypes.h"
 #include "Containers/Map.h"
+#include "EntitySystem/MovieSceneEntityIDs.h"
+#include "EntitySystem/MovieSceneInstanceRegistry.h"
+#include "EntitySystem/MovieSceneSharedPlaybackState.h"
 #include "Templates/UniquePtr.h"
 #include "UObject/WeakObjectPtr.h"
 #include "UObject/StrongObjectPtr.h"
 #include "UObject/WeakObjectPtrTemplates.h"
+#include "MovieSceneFwd.h"
 #include "MovieSceneSequenceID.h"
 #include "Evaluation/MovieSceneRootOverridePath.h"
 #include "Compilation/MovieSceneCompiledDataID.h"
-#include "EntitySystem/MovieSceneEntitySystemRunner.h"
 #include "EntitySystem/MovieSceneSequenceInstanceHandle.h"
 #include "MovieSceneEvaluationTemplateInstance.generated.h"
 
@@ -21,6 +24,7 @@ struct FMovieSceneBlendingAccumulator;
 
 class IMovieScenePlayer;
 class UMovieSceneSequence;
+class FMovieSceneEntitySystemRunner;
 class UMovieSceneEntitySystemLinker;
 class UMovieSceneCompiledDataManager;
 
@@ -46,66 +50,60 @@ public:
 	 * @param Player					The player responsible for playback
 	 * @param TemplateStore				Template store responsible for supplying templates for a given sequence
 	 */
-	MOVIESCENE_API void Initialize(UMovieSceneSequence& RootSequence, IMovieScenePlayer& Player, UMovieSceneCompiledDataManager* InCompiledDataManager);
+	MOVIESCENE_API void Initialize(UMovieSceneSequence& RootSequence, IMovieScenePlayer& Player, UMovieSceneCompiledDataManager* InCompiledDataManager, TSharedPtr<FMovieSceneEntitySystemRunner> InRunner);
 
 	/**
 	 * Evaluate this sequence in a synchronous way.
 	 *
 	 * @param Context				Evaluation context containing the time (or range) to evaluate
-	 * @param Player				The player responsible for playback
 	 */
+	MOVIESCENE_API void EvaluateSynchronousBlocking(FMovieSceneContext Context);
+
+	UE_DEPRECATED(5.4, "Use the version without the player parameter")
+	MOVIESCENE_API void EvaluateSynchronousBlocking(FMovieSceneContext Context, IMovieScenePlayer& Player);
+
+	UE_DEPRECATED(5.1, "Use EvaluateSynchronousBlocking instead.")
 	MOVIESCENE_API void Evaluate(FMovieSceneContext Context, IMovieScenePlayer& Player);
 
-	/**
-	 * Indicate that we're not going to evaluate this instance again, and that we should tear down any current state
-	 *
-	 * @param Player				The player responsible for playback
-	 */
-	MOVIESCENE_API void Finish(IMovieScenePlayer& Player);
+	UE_DEPRECATED(5.4, "Director instances are now auto-managed via FSequenceDirectorPlaybackCapability")
+	MOVIESCENE_API void ResetDirectorInstances();
 
-	bool IsValid() const
-	{
-		return CompiledDataManager && WeakRootSequence.Get();
-	}
+	MOVIESCENE_API bool IsValid() const;
 
-	UE::MovieScene::FInstanceHandle GetRootInstanceHandle() const
-	{
-		return RootInstanceHandle;
-	}
+	MOVIESCENE_API TSharedPtr<UE::MovieScene::FSharedPlaybackState> GetSharedPlaybackState();
 
-	UMovieSceneSequence* GetRootSequence() const
-	{
-		return WeakRootSequence.Get();
-	}
+	MOVIESCENE_API TSharedPtr<const UE::MovieScene::FSharedPlaybackState> GetSharedPlaybackState() const;
 
-	FMovieSceneCompiledDataID GetCompiledDataID() const
-	{
-		return CompiledDataID;
-	}
+	MOVIESCENE_API UE::MovieScene::FRootInstanceHandle GetRootInstanceHandle() const;
 
-	UMovieSceneCompiledDataManager* GetCompiledDataManager() const
-	{
-		return CompiledDataManager;
-	}
+	MOVIESCENE_API UMovieSceneSequence* GetRootSequence() const;
+
+	MOVIESCENE_API FMovieSceneCompiledDataID GetCompiledDataID() const;
+
+	MOVIESCENE_API UMovieSceneCompiledDataManager* GetCompiledDataManager() const;
+
+	MOVIESCENE_API TSharedPtr<FMovieSceneEntitySystemRunner> GetRunner() const;
 
 	MOVIESCENE_API bool HasEverUpdated() const;
 
 	MOVIESCENE_API UMovieSceneEntitySystemLinker* GetEntitySystemLinker() const;
 
-	MOVIESCENE_API FMovieSceneEntitySystemRunner& GetEntitySystemRunner();
-
 	MOVIESCENE_API const FMovieSceneSequenceHierarchy* GetHierarchy() const;
 
 	MOVIESCENE_API void GetSequenceParentage(const UE::MovieScene::FInstanceHandle InstanceHandle, TArray<UE::MovieScene::FInstanceHandle>& OutParentHandles) const;
+
+	MOVIESCENE_API const UE::MovieScene::FSequenceInstance* GetRootInstance() const;
 
 	MOVIESCENE_API UE::MovieScene::FSequenceInstance* FindInstance(FMovieSceneSequenceID SequenceID);
 
 	MOVIESCENE_API const UE::MovieScene::FSequenceInstance* FindInstance(FMovieSceneSequenceID SequenceID) const;
 
 	MOVIESCENE_API UE::MovieScene::FMovieSceneEntityID FindEntityFromOwner(UObject* Owner, uint32 EntityID, FMovieSceneSequenceID SequenceID) const;
+	MOVIESCENE_API void FindEntitiesFromOwner(UObject* Owner, FMovieSceneSequenceID SequenceID, TArray<UE::MovieScene::FMovieSceneEntityID>& OutEntityIDs) const;
 
 	MOVIESCENE_API UMovieSceneSequence* GetSequence(FMovieSceneSequenceIDRef SequenceID) const;
 
+	UE_DEPRECATED(5.4, "Director instances are now auto-managed via FSequenceDirectorPlaybackCapability")
 	MOVIESCENE_API UObject* GetOrCreateDirectorInstance(FMovieSceneSequenceIDRef SequenceID, IMovieScenePlayer& Player);
 
 	MOVIESCENE_API void PlaybackContextChanged(IMovieScenePlayer& Player);
@@ -114,13 +112,22 @@ public:
 
 	MOVIESCENE_API void CopyActuators(FMovieSceneBlendingAccumulator& Accumulator) const;
 
-	MOVIESCENE_API void BeginDestroy();
+	UE_DEPRECATED(5.3, "Please call TearDown instead.")
+	void BeginDestroy()
+	{
+		TearDown();
+	}
+
+	MOVIESCENE_API void TearDown();
 
 	MOVIESCENE_API void EnableGlobalPreAnimatedStateCapture();
 
 #if WITH_EDITOR
-	MOVIESCENE_API void SetEmulatedNetworkMask(EMovieSceneServerClientMask InNewMask, IMovieScenePlayer& Player);
+	MOVIESCENE_API void SetEmulatedNetworkMask(EMovieSceneServerClientMask InNewMask);
 	MOVIESCENE_API EMovieSceneServerClientMask GetEmulatedNetworkMask() const;
+
+	UE_DEPRECATED(5.4, "Please use the version without the player parameter")
+	MOVIESCENE_API void SetEmulatedNetworkMask(EMovieSceneServerClientMask InNewMask, IMovieScenePlayer& Player);
 #endif
 
 private:
@@ -130,25 +137,12 @@ private:
 private:
 
 	UPROPERTY()
-	TWeakObjectPtr<UMovieSceneSequence> WeakRootSequence;
+	TObjectPtr<UMovieSceneEntitySystemLinker> EntitySystemLinker;
 
-	UPROPERTY()
-	UMovieSceneCompiledDataManager* CompiledDataManager;
-
-	UE::MovieScene::FInstanceHandle RootInstanceHandle;
-
-	UPROPERTY()
-	UMovieSceneEntitySystemLinker* EntitySystemLinker;
-
-	FMovieSceneEntitySystemRunner EntitySystemRunner;
-
-	/** Map of director instances by sequence ID. Kept alive by this map assuming this struct is reference collected */
-	UPROPERTY()
-	TMap<FMovieSceneSequenceID, UObject*> DirectorInstances;
+	/** The playback state for the hierarchy of sequence instances */
+	TSharedPtr<UE::MovieScene::FSharedPlaybackState> SharedPlaybackState;
 
 	FMovieSceneSequenceID RootID;
-
-	FMovieSceneCompiledDataID CompiledDataID;
 
 #if WITH_EDITOR
 	EMovieSceneServerClientMask EmulatedNetworkMask;

@@ -5,17 +5,21 @@
 =============================================================================*/
 
 #include "GameFramework/PlayerInput.h"
-#include "Misc/CommandLine.h"
-#include "Components/InputComponent.h"
+#include "Engine/World.h"
 #include "Misc/App.h"
-#include "UObject/UObjectHash.h"
+#include "GlobalRenderResources.h"
 #include "UObject/UObjectIterator.h"
 #include "GameFramework/PlayerController.h"
-#include "CanvasItem.h"
 #include "Engine/Canvas.h"
 #include "GameFramework/WorldSettings.h"
 #include "Engine/LocalPlayer.h"
 #include "GameFramework/InputSettings.h"
+
+#if UE_ENABLE_DEBUG_DRAWING
+#include "Engine/GameViewportClient.h"	// For grabbing some info about mouse capture for the debug display
+#endif	// UE_ENABLE_DEBUG_DRAWING
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PlayerInput)
 
 DECLARE_CYCLE_STAT(TEXT("    PC Gesture Recognition"), STAT_PC_GestureRecognition, STATGROUP_PlayerController);
 
@@ -32,6 +36,22 @@ const TArray<FInputActionKeyMapping> UPlayerInput::NoKeyMappings;
 const TArray<FInputAxisKeyMapping> UPlayerInput::NoAxisMappings;
 TArray<FInputActionKeyMapping> UPlayerInput::EngineDefinedActionMappings;
 TArray<FInputAxisKeyMapping> UPlayerInput::EngineDefinedAxisMappings;
+
+namespace UE
+{
+	namespace Input
+	{
+		static bool AxisEventsCanBeConsumed = true;
+		static FAutoConsoleVariableRef CVarShouldOnlyTriggerLastActionInChord(TEXT("Input.AxisEventsCanBeConsumed"),
+			AxisEventsCanBeConsumed,
+			TEXT("If true and all FKey's for a given Axis Event are consumed, then the axis delegate will not fire."));
+
+		static bool bAutoReconcilePressedEventsOnFirstRepeat = true;
+		static FAutoConsoleVariableRef CVarAutoReconcilePressedEventsOnFirstRepeat(TEXT("Input.AutoReconcilePressedEventsOnFirstRepeat"),
+			bAutoReconcilePressedEventsOnFirstRepeat,
+			TEXT("If true, then we will automatically mark a IE_Pressed event if we receive an IE_Repeat event but have not received a pressed event first.\nNote: This option will be removed in a future update."));
+	}
+}
 
 /** Runtime struct that gathers up the different kinds of delegates that might be issued */
 struct FDelegateDispatchDetails
@@ -93,8 +113,8 @@ void UPlayerInput::PostInitProperties()
 void UPlayerInput::FlushPressedKeys()
 {
 	APlayerController* PlayerController = GetOuterAPlayerController();
-	ULocalPlayer* LocalPlayer = Cast<ULocalPlayer>(PlayerController->Player);
-	if ( LocalPlayer != NULL )
+	ULocalPlayer* LocalPlayer = PlayerController ? Cast<ULocalPlayer>(PlayerController->Player) : nullptr;
+	if (LocalPlayer != nullptr)
 	{
 		TArray<FKey> PressedKeys;
 
@@ -109,14 +129,16 @@ void UPlayerInput::FlushPressedKeys()
 
 		// we may have gotten here as a result of executing an input bind.  in order to ensure that the simulated IE_Released events
 		// we're about to fire are actually propagated to the game, we need to clear the bExecutingBindCommand flag
-		if ( PressedKeys.Num() > 0 )
+		if (PressedKeys.Num() > 0)
 		{
 			bExecutingBindCommand = false;
-
-			for ( int32 KeyIndex = 0; KeyIndex < PressedKeys.Num(); KeyIndex++ )
+			
+			for (int32 KeyIndex = 0; KeyIndex < PressedKeys.Num(); KeyIndex++)
 			{
 				FKey& Key = PressedKeys[KeyIndex];
-				InputKey(Key, IE_Released, 0, Key.IsGamepadKey());
+				FInputKeyParams Params(Key, IE_Released, 0.0);
+				Params.NumSamples = 1;
+				InputKey(Params);
 			}
 		}
 	}
@@ -171,11 +193,11 @@ void UPlayerInput::FlushPressedActionBindingKeys(FName ActionName)
 		// we may have gotten here as a result of executing an input bind.  in order to ensure that the simulated IE_Released events
 		// we're about to fire are actually propagated to the game, we need to clear the bExecutingBindCommand flag
 		bExecutingBindCommand = false;
-
+		
 		//go through all the keys, releasing them
 		for (const FKey& Key : AssociatedPressedKeys)
 		{
-			InputKey(Key, IE_Released, 0, Key.IsGamepadKey());
+			InputKey(FInputKeyParams(Key, IE_Released, 0.0));
 		}
 
 		UWorld* World = GetWorld();
@@ -199,146 +221,203 @@ void UPlayerInput::FlushPressedActionBindingKeys(FName ActionName)
 
 bool UPlayerInput::InputKey(FKey Key, EInputEvent Event, float AmountDepressed, bool bGamepad)
 {
-	// first event associated with this key, add it to the map
-	FKeyState& KeyState = KeyStateMap.FindOrAdd(Key);
-	UWorld* World = GetWorld();
-	check(World);
-
-	switch(Event)
-	{
-	case IE_Pressed:
-	case IE_Repeat:
-		KeyState.RawValueAccumulator.X = AmountDepressed;
-		KeyState.EventAccumulator[Event].Add(++EventCount);
-		if (KeyState.bDownPrevious == false)
-		{
-			// check for doubleclick
-			// note, a tripleclick will currently count as a 2nd double click.
-			const float WorldRealTimeSeconds = World->GetRealTimeSeconds();
-			if ((WorldRealTimeSeconds - KeyState.LastUpDownTransitionTime) < GetDefault<UInputSettings>()->DoubleClickTime)
-			{
-				KeyState.EventAccumulator[IE_DoubleClick].Add(++EventCount);
-			}
-
-			// just went down
-			KeyState.LastUpDownTransitionTime = WorldRealTimeSeconds;
-		}
-		break;
-	case IE_Released:
-		KeyState.RawValueAccumulator.X = 0.f;
-		KeyState.EventAccumulator[IE_Released].Add(++EventCount);
-		break;
-	case IE_DoubleClick:
-		KeyState.RawValueAccumulator.X = AmountDepressed;
-		KeyState.EventAccumulator[IE_Pressed].Add(++EventCount);
-		KeyState.EventAccumulator[IE_DoubleClick].Add(++EventCount);
-		break;
-	}
-	KeyState.SampleCountAccumulator++;
-
-#if !UE_BUILD_SHIPPING
-	CurrentEvent		= Event;
-
-	const FString Command = GetBind(Key);
-	if(Command.Len())
-	{
-		return ExecInputCommands(World, *Command,*GLog);
-	}
-#endif
-
-	if( Event == IE_Pressed )
-	{
-		return IsKeyHandledByAction( Key );
-	}
-
-	return true;
+	FInputKeyParams Params;
+	Params.Key = Key;
+	Params.Event = Event;
+	Params.Delta = FVector((double)AmountDepressed, 0.0, 0.0);
+	Params.bIsGamepadOverride = bGamepad;
+	
+	return InputKey(Params);
 }
 
-bool UPlayerInput::InputAxis(FKey Key, float Delta, float DeltaTime, int32 NumSamples, bool bGamepad )
+bool UPlayerInput::InputKey(const FInputKeyParams& Params)
 {
-	ensure((Key != EKeys::MouseX && Key != EKeys::MouseY) || NumSamples > 0);
+	const bool bGamepad = Params.IsGamepad();
 
-	auto TestEventEdges = [this, &Delta](FKeyState& TestKeyState, float EdgeValue)
+	// MouseX and MouseY should not be treated as analog if there are no samples, as they need their EventAccumulator to be incremented 
+	// in the case of a IE_Pressed or IE_Released
+	const bool bTreatAsAnalog =
+		Params.Key.IsAnalog() &&
+		((Params.Key != EKeys::MouseX && Params.Key != EKeys::MouseY) || Params.NumSamples > 0);
+	
+	if(bTreatAsAnalog)
 	{
-		// look for event edges
-		if (EdgeValue == 0.f && Delta != 0.f)
-		{
-			TestKeyState.EventAccumulator[IE_Pressed].Add(++EventCount);
-		}
-		else if (EdgeValue != 0.f && Delta == 0.f)
-		{
-			TestKeyState.EventAccumulator[IE_Released].Add(++EventCount);
-		}
-		else
-		{
-			TestKeyState.EventAccumulator[IE_Repeat].Add(++EventCount);
-		}
-	};
+		ensure((Params.Key != EKeys::MouseX && Params.Key != EKeys::MouseY) || Params.NumSamples > 0);
 
+		auto TestEventEdges = [this, &Params](FKeyState& TestKeyState, float EdgeValue)
+		{
+			// look for event edges
+			if (EdgeValue == 0.f && Params.Delta.Size() != 0.f)
+			{
+				TestKeyState.EventAccumulator[IE_Pressed].Add(++EventCount);
+			}
+			else if (EdgeValue != 0.f && Params.Delta.Size() == 0.f)
+			{
+				TestKeyState.EventAccumulator[IE_Released].Add(++EventCount);
+			}
+			else
+			{
+				TestKeyState.EventAccumulator[IE_Repeat].Add(++EventCount);
+			}
+		};
+
+		{
+			// first event associated with this key, add it to the map
+			FKeyState& KeyState = KeyStateMap.FindOrAdd(Params.Key);
+
+			TestEventEdges(KeyState, KeyState.Value.X);
+
+			// accumulate deltas until processed next
+			KeyState.SampleCountAccumulator += Params.NumSamples;
+			KeyState.RawValueAccumulator += Params.Delta;
+		}
+
+		// Mirror the key press to any associated paired axis
+		FKey PairedKey = Params.Key.GetPairedAxisKey();
+		if (PairedKey.IsValid())
+		{
+			//UE_LOG(LogTemp, Warning, TEXT("Spotted axis %s which is paired to %s"), *Key.GetDisplayName().ToString(), Key.GetPairedAxisKey().IsValid() ? *Key.GetPairedAxisKey().GetDisplayName().ToString() : TEXT("NONE"));
+
+			EPairedAxis PairedAxis = Params.Key.GetPairedAxis();
+			FKeyState& PairedKeyState = KeyStateMap.FindOrAdd(PairedKey);
+
+			// The FindOrAdd can invalidate KeyState, so we must look it back up
+			FKeyState& KeyState = KeyStateMap.FindChecked(Params.Key);
+
+			// Update accumulator for the appropriate axis
+			if (PairedAxis == EPairedAxis::X)
+			{
+				PairedKeyState.RawValueAccumulator.X = KeyState.RawValueAccumulator.X;
+				PairedKeyState.PairSampledAxes |= 0b001;
+			}
+			else if (PairedAxis == EPairedAxis::Y)
+			{
+				PairedKeyState.RawValueAccumulator.Y = KeyState.RawValueAccumulator.X;
+				PairedKeyState.PairSampledAxes |= 0b010;
+			}
+			else if (PairedAxis == EPairedAxis::Z)
+			{
+				PairedKeyState.RawValueAccumulator.Z = KeyState.RawValueAccumulator.X;
+				PairedKeyState.PairSampledAxes |= 0b100;
+			}
+			else
+			{
+				checkf(false, TEXT("Key %s has paired axis key %s but no valid paired axis!"), *Params.Key.GetFName().ToString(), *Params.Key.GetPairedAxisKey().GetFName().ToString());
+			}
+
+			PairedKeyState.SampleCountAccumulator = FMath::Max(PairedKeyState.SampleCountAccumulator, KeyState.SampleCountAccumulator);	// Take max count of each contributing axis.
+
+			// TODO: Will trigger multiple times for the paired axis key. Not desirable.
+			TestEventEdges(PairedKeyState, PairedKeyState.Value.Size());
+		}
+
+	#if !UE_BUILD_SHIPPING
+		CurrentEvent		= IE_Axis;
+
+		if(Params.Event == IE_Pressed)
+		{
+			const FString Command = GetBind(Params.Key);
+			if(Command.Len())
+			{
+				UWorld* World = GetWorld();
+				check(World);
+				ExecInputCommands( World, *Command,*GLog);
+				return true;
+			}
+		}
+	#endif
+
+		return false;
+	}
+	// Non-analog key
+	else
 	{
+		FKeyState* ExistingKeyState = KeyStateMap.Find(Params.Key);
+		
 		// first event associated with this key, add it to the map
-		FKeyState& KeyState = KeyStateMap.FindOrAdd(Key);
+		FKeyState& KeyState = !ExistingKeyState ? KeyStateMap.Add(Params.Key) : *ExistingKeyState;
 
-		TestEventEdges(KeyState, KeyState.Value.X);
-
-		// accumulate deltas until processed next
-		KeyState.SampleCountAccumulator += NumSamples;
-		KeyState.RawValueAccumulator.X += Delta;
-	}
-
-	// Mirror the key press to any associated paired axis
-	FKey PairedKey = Key.GetPairedAxisKey();
-	if (PairedKey.IsValid())
-	{
-		//UE_LOG(LogTemp, Warning, TEXT("Spotted axis %s which is paired to %s"), *Key.GetDisplayName().ToString(), Key.GetPairedAxisKey().IsValid() ? *Key.GetPairedAxisKey().GetDisplayName().ToString() : TEXT("NONE"));
-
-		EPairedAxis PairedAxis = Key.GetPairedAxis();
-		FKeyState& PairedKeyState = KeyStateMap.FindOrAdd(PairedKey);
-
-		// The FindOrAdd can invalidate KeyState, so we must look it back up
-		FKeyState& KeyState = KeyStateMap.FindChecked(Key);
-
-		// Update accumulator for the appropriate axis
-		if (PairedAxis == EPairedAxis::X)
-		{
-			PairedKeyState.RawValueAccumulator.X = KeyState.RawValueAccumulator.X;
-			PairedKeyState.PairSampledAxes |= 0b001;
-		}
-		else if (PairedAxis == EPairedAxis::Y)
-		{
-			PairedKeyState.RawValueAccumulator.Y = KeyState.RawValueAccumulator.X;
-			PairedKeyState.PairSampledAxes |= 0b010;
-		}
-		else if (PairedAxis == EPairedAxis::Z)
-		{
-			PairedKeyState.RawValueAccumulator.Z = KeyState.RawValueAccumulator.X;
-			PairedKeyState.PairSampledAxes |= 0b100;
-		}
-		else
-		{
-			checkf(false, TEXT("Key %s has paired axis key %s but no valid paired axis!"), *Key.GetFName().ToString(), *Key.GetPairedAxisKey().GetFName().ToString());
-		}
-
-		PairedKeyState.SampleCountAccumulator = FMath::Max(PairedKeyState.SampleCountAccumulator, KeyState.SampleCountAccumulator);	// Take max count of each contributing axis.
-
-		// TODO: Will trigger multiple times for the paired axis key. Not desirable.
-		TestEventEdges(PairedKeyState, PairedKeyState.Value.Size());
-	}
-
-#if !UE_BUILD_SHIPPING
-	CurrentEvent		= IE_Axis;
-
-	const FString Command = GetBind(Key);
-	if(Command.Len())
-	{
 		UWorld* World = GetWorld();
 		check(World);
-		ExecInputCommands( World, *Command,*GLog);
+
+		const bool bIsFirstEventForKey = (ExistingKeyState == nullptr);
+
+		// If this is the first key press for us and it is a repeat, then we have missed the initial IE_Pressed event.
+		// This can happen if you are holding down a key between level transitions and the player controller gets recreated,
+		// which means that we will be using a new UPlayerInput object and the KeyState map is emptied.
+		if (UE::Input::bAutoReconcilePressedEventsOnFirstRepeat && bIsFirstEventForKey && Params.Event == IE_Repeat && KeyState.EventAccumulator[IE_Pressed].IsEmpty())
+		{
+			// Mark as having received the IE_Pressed event already, so that we can correctly evaluate the 
+			// state of the IE_Repeat event. It is impossible to get a IE_Repeat with an initial IE_Pressed somewhere
+			//
+			// Without this, the key will incorrectly evaluate as being released/pressed
+			// every frame, even if you are just holding it
+			KeyState.RawValueAccumulator.X = Params.Delta.X;
+			KeyState.EventAccumulator[IE_Pressed].Add(++EventCount);
+			KeyState.LastUpDownTransitionTime = World->GetRealTimeSeconds();
+			KeyState.SampleCountAccumulator++;
+		}
+
+		switch(Params.Event)
+		{
+		case IE_Pressed:
+		case IE_Repeat:
+			KeyState.RawValueAccumulator.X = Params.Delta.X;
+			KeyState.EventAccumulator[Params.Event].Add(++EventCount);
+			if (KeyState.bDownPrevious == false)
+			{
+				// check for doubleclick
+				// note, a tripleclick will currently count as a 2nd double click.
+				const float WorldRealTimeSeconds = World->GetRealTimeSeconds();
+				if ((WorldRealTimeSeconds - KeyState.LastUpDownTransitionTime) < GetDefault<UInputSettings>()->DoubleClickTime)
+				{
+					KeyState.EventAccumulator[IE_DoubleClick].Add(++EventCount);
+				}
+
+				// just went down
+				KeyState.LastUpDownTransitionTime = WorldRealTimeSeconds;
+			}
+			break;
+		case IE_Released:
+			KeyState.RawValueAccumulator.X = 0.f;
+			KeyState.EventAccumulator[IE_Released].Add(++EventCount);
+			break;
+		case IE_DoubleClick:
+			KeyState.RawValueAccumulator.X = Params.Delta.X;
+			KeyState.EventAccumulator[IE_Pressed].Add(++EventCount);
+			KeyState.EventAccumulator[IE_DoubleClick].Add(++EventCount);
+			break;
+		}
+		KeyState.SampleCountAccumulator++;
+
+	#if !UE_BUILD_SHIPPING
+		CurrentEvent		= Params.Event;
+
+		const FString Command = GetBind(Params.Key);
+		if(Command.Len())
+		{
+			return ExecInputCommands(World, *Command,*GLog);
+		}
+	#endif
+
+		if(Params.Event == IE_Pressed)
+		{
+			return IsKeyHandledByAction( Params.Key);
+		}
+
 		return true;
 	}
-#endif
+}
 
-	return false;
+bool UPlayerInput::InputAxis(FKey Key, float Delta, float DeltaTime, int32 NumSamples, bool bGamepad)
+{
+	FInputKeyParams Params;
+	Params.Key = Key;
+	Params.Delta = FVector((double)Delta, 0.0, 0.0);
+	Params.NumSamples = NumSamples;
+	Params.bIsGamepadOverride = bGamepad;
+	
+	return InputKey(Params);
 }
 
 bool UPlayerInput::InputTouch(uint32 Handle, ETouchType::Type Type, const FVector2D& TouchLocation, float Force, FDateTime DeviceTimestamp, uint32 TouchpadIndex)
@@ -558,7 +637,7 @@ void UPlayerInput::InvertAxis(const FName AxisName)
 			{
 				if (InvertedAxis[InvertIndex] == AxisName)
 				{
-					InvertedAxis.RemoveAtSwap(InvertIndex, 1, false);
+					InvertedAxis.RemoveAtSwap(InvertIndex, 1, EAllowShrinking::No);
 				}
 			}
 		}
@@ -571,7 +650,7 @@ void UPlayerInput::InvertAxis(const FName AxisName)
 			if (InvertedAxis[InvertIndex] == AxisName)
 			{
 				bFound = true;
-				InvertedAxis.RemoveAtSwap(InvertIndex, 1, false);
+				InvertedAxis.RemoveAtSwap(InvertIndex, 1, EAllowShrinking::No);
 			}
 		}
 		if (!bFound)
@@ -618,7 +697,7 @@ struct FAxisDelegate
 
 	friend inline uint32 GetTypeHash(FAxisDelegate const& D)
 	{
-		return (PTRINT)D.Obj + (PTRINT)D.Func;
+		return uint32((PTRINT)D.Obj + (PTRINT)D.Func);
 	}
 };
 
@@ -635,7 +714,7 @@ void UPlayerInput::RemoveActionMapping(const FInputActionKeyMapping& KeyMapping)
 	{
 		if (ActionMappings[ActionIndex] == KeyMapping)
 		{
-			ActionMappings.RemoveAtSwap(ActionIndex, 1, false);
+			ActionMappings.RemoveAtSwap(ActionIndex, 1, EAllowShrinking::No);
 			ActionKeyMap.Reset();
 			bKeyMapsBuilt = false;
 			// we don't break because the mapping may have been in the array twice
@@ -658,7 +737,7 @@ void UPlayerInput::RemoveAxisMapping(const FInputAxisKeyMapping& InKeyMapping)
 		if (KeyMapping.AxisName == InKeyMapping.AxisName
 			&& KeyMapping.Key == InKeyMapping.Key)
 		{
-			AxisMappings.RemoveAtSwap(AxisIndex, 1, false);
+			AxisMappings.RemoveAtSwap(AxisIndex, 1, EAllowShrinking::No);
 			AxisKeyMap.Reset();
 			bKeyMapsBuilt = false;
 			// we don't break because the mapping may have been in the array twice
@@ -712,6 +791,21 @@ void UPlayerInput::ForceRebuildingKeyMaps(const bool bRestoreDefaults)
 	AxisKeyMap.Reset();
 	AxisProperties.Reset();
 	bKeyMapsBuilt = false;
+}
+
+APlayerController* UPlayerInput::GetOuterAPlayerController() const
+{
+	return Cast<APlayerController>(GetOuter());
+}
+
+ULocalPlayer* UPlayerInput::GetOwningLocalPlayer() const
+{
+	if (const APlayerController* PC = GetOuterAPlayerController())
+	{
+		return PC->GetLocalPlayer();
+	}
+
+	return nullptr;
 }
 
 void UPlayerInput::ConditionalBuildKeyMappings_Internal() const
@@ -801,12 +895,12 @@ void UPlayerInput::GetChordsForKeyMapping(const FInputActionKeyMapping& KeyMappi
 		{
 			FInputChord::ERelationshipType ChordRelationship = Chord.GetRelationship(FoundChords[ChordIndex].Chord);
 
-			if (ChordRelationship == FInputChord::Masks)
+			if (ChordRelationship == FInputChord::ERelationshipType::Masks)
 			{
 				// If we mask the found one, then remove it from the list
-				FoundChords.RemoveAtSwap(ChordIndex, 1, false);
+				FoundChords.RemoveAtSwap(ChordIndex, 1, EAllowShrinking::No);
 			}
-			else if (ChordRelationship == FInputChord::Masked)
+			else if (ChordRelationship == FInputChord::ERelationshipType::Masked)
 			{
 				bAddDelegate = false;
 				break;
@@ -920,12 +1014,12 @@ void UPlayerInput::GetChordForKey(const FInputKeyBinding& KeyBinding, const bool
 				{
 					FInputChord::ERelationshipType ChordRelationship = KeyBinding.Chord.GetRelationship(FoundChords[ChordIndex].Chord);
 
-					if (ChordRelationship == FInputChord::Masks)
+					if (ChordRelationship == FInputChord::ERelationshipType::Masks)
 					{
 						// If we mask the found one, then remove it from the list
-						FoundChords.RemoveAtSwap(ChordIndex, 1, false);
+						FoundChords.RemoveAtSwap(ChordIndex, 1, EAllowShrinking::No);
 					}
-					else if (ChordRelationship == FInputChord::Masked)
+					else if (ChordRelationship == FInputChord::ERelationshipType::Masked)
 					{
 						bAddDelegate = false;
 						break;
@@ -965,11 +1059,12 @@ void UPlayerInput::GetChordForKey(const FInputKeyBinding& KeyBinding, const bool
 	}
 }
 
-float UPlayerInput::DetermineAxisValue(const FInputAxisBinding& AxisBinding, const bool bGamePaused, TArray<FKey>& KeysToConsume)
+float UPlayerInput::DetermineAxisValue(const FInputAxisBinding& AxisBinding, const bool bGamePaused, TArray<FKey>& KeysToConsume, OUT bool& bHadAnyNonConsumedKeys) const
 {
 	ConditionalBuildKeyMappings();
 
-	float AxisValue = 0.f;
+	float AxisValue = 0.0f;
+	bHadAnyNonConsumedKeys = false;
 
 	FAxisKeyDetails* KeyDetails = AxisKeyMap.Find(AxisBinding.AxisName);
 	if (KeyDetails)
@@ -988,6 +1083,7 @@ float UPlayerInput::DetermineAxisValue(const FInputAxisBinding& AxisBinding, con
 				{
 					KeysToConsume.AddUnique(KeyMapping.Key);
 				}
+				bHadAnyNonConsumedKeys = true;
 			}
 		}
 
@@ -1033,49 +1129,39 @@ void UPlayerInput::ProcessInputStack(const TArray<UInputComponent*>& InputCompon
 {
 	ConditionalBuildKeyMappings();
 
-	// We collect axis contributions by delegate, so we can sum up
-	// contributions from multiple bindings.
-	struct FAxisDelegateDetails
-	{
-		FInputAxisUnifiedDelegate Delegate;
-		float Value;
-
-		FAxisDelegateDetails(FInputAxisUnifiedDelegate InDelegate, const float InValue)
-			: Delegate(MoveTemp(InDelegate))
-			, Value(InValue)
-		{
-		}
-	};
-	struct FVectorAxisDelegateDetails
-	{
-		FInputVectorAxisUnifiedDelegate Delegate;
-		FVector Value;
-
-		FVectorAxisDelegateDetails(FInputVectorAxisUnifiedDelegate InDelegate, const FVector InValue)
-			: Delegate(MoveTemp(InDelegate))
-			, Value(InValue)
-		{
-		}
-	};
-
-	static TArray<FAxisDelegateDetails> AxisDelegates;
-	static TArray<FVectorAxisDelegateDetails> VectorAxisDelegates;
-	static TArray<FDelegateDispatchDetails> NonAxisDelegates;
-	static TArray<FKey> KeysToConsume;
-	static TArray<FDelegateDispatchDetails> FoundChords;
 	static TArray<TPair<FKey, FKeyState*>> KeysWithEvents;
-	static TArray<TSharedPtr<FInputActionBinding>> PotentialActions;
-
-	// must be called non-recursively and on the game thread
-	check(IsInGameThread() && !AxisDelegates.Num() && !VectorAxisDelegates.Num() && !NonAxisDelegates.Num() && !KeysToConsume.Num() && !FoundChords.Num() && !EventIndices.Num() && !KeysWithEvents.Num() && !PotentialActions.Num());
 
 	// @todo, if input is coming in asynchronously, we should buffer anything that comes in during playerinput() and not include it
 	// in this processing batch
 
 	APlayerController* PlayerController = GetOuterAPlayerController();
+	if (PlayerController)
+	{
+		PlayerController->PreProcessInput(DeltaTime, bGamePaused);
+	}
+	
+	// Evaluate the current state of the key map. This will take the event accumulators and put them into the actual values of the key state map.
+	EvaluateKeyMapState(DeltaTime, bGamePaused, OUT KeysWithEvents);
+	
+	// Determine potential delegates
+	EvaluateInputDelegates(InputComponentStack, DeltaTime, bGamePaused, KeysWithEvents);
 
-	PlayerController->PreProcessInput(DeltaTime, bGamePaused);
+	if (PlayerController)
+	{
+		PlayerController->PostProcessInput(DeltaTime, bGamePaused);
+	}
+	
+	FinishProcessingPlayerInput();
 
+	TouchEventLocations.Reset();
+	KeysWithEvents.Reset();
+}
+
+void UPlayerInput::EvaluateKeyMapState(const float DeltaTime, const bool bGamePaused, OUT TArray<TPair<FKey, FKeyState*>>& KeysWithEvents)
+{
+	// Must be called non-recursively on the game thread
+	check(IsInGameThread() && !KeysWithEvents.Num());
+	
 	// copy data from accumulators to the real values
 	for (TMap<FKey,FKeyState>::TIterator It(KeyStateMap); It; ++It)
 	{
@@ -1135,7 +1221,7 @@ void UPlayerInput::ProcessInputStack(const TArray<UInputComponent*>& InputCompon
 		 	if ( SmoothedMouse[0] != 0 )
 		 	{
 		 		// not first non-zero
-		 		MouseSamplingTotal += FApp::GetDeltaTime();
+		 		MouseSamplingTotal += UE_REAL_TO_FLOAT(FApp::GetDeltaTime());
 		 		MouseSamples += KeyState->SampleCountAccumulator;
 		 	}
 		}
@@ -1149,7 +1235,35 @@ void UPlayerInput::ProcessInputStack(const TArray<UInputComponent*>& InputCompon
 		KeyState->PairSampledAxes = 0;
 	}
 	EventCount = 0;
+}
 
+void UPlayerInput::EvaluateInputDelegates(const TArray<UInputComponent*>& InputComponentStack, const float DeltaTime, const bool bGamePaused, const TArray<TPair<FKey, FKeyState*>>& KeysWithEvents)
+{
+	// We collect axis contributions by delegate, so we can sum up
+	// contributions from multiple bindings.
+	struct FAxisDelegateDetails
+	{
+		FInputAxisUnifiedDelegate Delegate;
+		float Value;
+
+		FAxisDelegateDetails(FInputAxisUnifiedDelegate InDelegate, const float InValue)
+			: Delegate(MoveTemp(InDelegate))
+			, Value(InValue)
+		{
+		}
+	};
+	struct FVectorAxisDelegateDetails
+	{
+		FInputVectorAxisUnifiedDelegate Delegate;
+		FVector Value;
+
+		FVectorAxisDelegateDetails(FInputVectorAxisUnifiedDelegate InDelegate, const FVector InValue)
+			: Delegate(MoveTemp(InDelegate))
+			, Value(InValue)
+		{
+		}
+	};
+	
 	struct FDelegateDispatchDetailsSorter
 	{
 		bool operator()( const FDelegateDispatchDetails& A, const FDelegateDispatchDetails& B ) const
@@ -1157,6 +1271,17 @@ void UPlayerInput::ProcessInputStack(const TArray<UInputComponent*>& InputCompon
 			return (A.EventIndex == B.EventIndex ? A.FoundIndex < B.FoundIndex : A.EventIndex < B.EventIndex);
 		}
 	};
+
+	
+	static TArray<FAxisDelegateDetails> AxisDelegates;
+	static TArray<FVectorAxisDelegateDetails> VectorAxisDelegates;
+	static TArray<FDelegateDispatchDetails> NonAxisDelegates;
+	static TArray<FKey> KeysToConsume;
+	static TArray<FDelegateDispatchDetails> FoundChords;	
+	static TArray<TSharedPtr<FInputActionBinding>> PotentialActions;
+
+	// must be called non-recursively and on the game thread
+	check(IsInGameThread() && !AxisDelegates.Num() && !VectorAxisDelegates.Num() && !NonAxisDelegates.Num() && !KeysToConsume.Num() && !FoundChords.Num() && !EventIndices.Num() && !PotentialActions.Num());
 
 	int32 StackIndex = InputComponentStack.Num()-1;
 
@@ -1282,11 +1407,15 @@ void UPlayerInput::ProcessInputStack(const TArray<UInputComponent*>& InputCompon
 				EventIndices.Reset();
 			}
 
+			// A flag that is set in DetermineAxisValue. If false, then all keys related to the axis binding have been consumed.
+			bool bHadAnyKeys = false;
+			
 			// Run though game axis bindings and accumulate axis values
 			for (FInputAxisBinding& AB : IC->AxisBindings)
 			{
-				AB.AxisValue = DetermineAxisValue(AB, bGamePaused, KeysToConsume);
-				if (AB.AxisDelegate.IsBound())
+				AB.AxisValue = DetermineAxisValue(AB, bGamePaused, KeysToConsume, bHadAnyKeys); 
+				
+				if ((bHadAnyKeys || !UE::Input::AxisEventsCanBeConsumed) && AB.AxisDelegate.IsBound())
 				{
 					AxisDelegates.Emplace(FAxisDelegateDetails(AB.AxisDelegate, AB.AxisValue));
 				}
@@ -1352,7 +1481,10 @@ void UPlayerInput::ProcessInputStack(const TArray<UInputComponent*>& InputCompon
 			// we do this after finishing the whole component, so we don't consume a key while there might be more bindings to it
 			for (int32 KeyIndex=0; KeyIndex<KeysToConsume.Num(); ++KeyIndex)
 			{
-				ConsumeKey(KeysToConsume[KeyIndex]);
+				if (FKeyState* KeyState = KeyStateMap.Find(KeysToConsume[KeyIndex]))
+				{
+					KeyState->bConsumed = true;	
+				}
 			}
 			KeysToConsume.Reset();
 			FoundChords.Reset();
@@ -1412,14 +1544,9 @@ void UPlayerInput::ProcessInputStack(const TArray<UInputComponent*>& InputCompon
 		}
 	}
 
-	PlayerController->PostProcessInput(DeltaTime, bGamePaused);
-
-	FinishProcessingPlayerInput();
 	AxisDelegates.Reset();
 	VectorAxisDelegates.Reset();
 	NonAxisDelegates.Reset();
-	TouchEventLocations.Reset();
-	KeysWithEvents.Reset();
 }
 
 void UPlayerInput::DiscardPlayerInput()
@@ -1482,7 +1609,7 @@ float UPlayerInput::SmoothMouse(float aMouse, uint8& SampleCount, int32 Index)
 		}
 	}
 
-	const float DeltaTime = FApp::GetDeltaTime();
+	const float DeltaTime = UE_REAL_TO_FLOAT(FApp::GetDeltaTime());
 
 	if (DeltaTime < 0.25f)
 	{
@@ -1523,7 +1650,7 @@ float UPlayerInput::SmoothMouse(float aMouse, uint8& SampleCount, int32 Index)
 				{
 					// fewer samples, so going slow
 					// use number of samples we should have had for sample count
-					SampleCount = DeltaTime/MouseSamplingTime;
+					SampleCount = (uint8)(DeltaTime / MouseSamplingTime);
 				}
 			}
 
@@ -1554,6 +1681,44 @@ void UPlayerInput::DisplayDebug(class UCanvas* Canvas, const FDebugDisplayInfo& 
 	if (Canvas)
 	{
 		FDisplayDebugManager& DisplayDebugManager = Canvas->DisplayDebugManager;
+
+#if UE_ENABLE_DEBUG_DRAWING
+		// Show the UI mode of the owning player controller if there is one. This is a very common issue with folks
+		// debugging input. Often times users will set the UI mode to "UI Only", and then never set it back so the 
+		// game can consume input again. 
+		if (const APlayerController* PlayerController = GetOuterAPlayerController())
+		{		
+			DisplayDebugManager.SetDrawColor(FColor::Orange);
+			DisplayDebugManager.DrawString(FString::Printf(TEXT("\t Player Controller Input Settings:  %s"), *GetNameSafe(PlayerController)));
+			
+			// Display whether input is enabled on the player controller or not
+			const bool bIsInputEnabled = PlayerController->InputEnabled();
+			DisplayDebugManager.SetDrawColor(bIsInputEnabled ? FColor::White : FColor::Red);
+			DisplayDebugManager.DrawString(FString::Printf(TEXT("\t PlayerController bIsInputEnabled: %s"), bIsInputEnabled ? TEXT("True") : TEXT("False")));
+
+			DisplayDebugManager.SetDrawColor(FColor::White);
+			DisplayDebugManager.DrawString(FString::Printf(TEXT("\t PlayerController Input Mode: %s"), *PlayerController->GetCurrentInputModeDebugString()));
+
+			const ULocalPlayer* LP = GetOwningLocalPlayer();
+
+			// Display some info about the viewport, all of these settings can affect the input behavior of the mouse
+			if (LP && LP->ViewportClient)
+			{
+				// Show the capture mode of the viewport
+				DisplayDebugManager.DrawString(FString::Printf(TEXT("\t ViewportClient MouseCaptureMode: %s"), *UEnum::GetValueAsString(TEXT("Engine.EMouseCaptureMode"), LP->ViewportClient->GetMouseCaptureMode())));
+				DisplayDebugManager.DrawString(FString::Printf(TEXT("\t ViewportClient MouseLockMode: %s"), *UEnum::GetValueAsString(TEXT("Engine.EMouseLockMode"), LP->ViewportClient->GetMouseLockMode())));
+				
+				const bool bIsIgnoringInput = LP->ViewportClient->IgnoreInput();
+				DisplayDebugManager.SetDrawColor(bIsIgnoringInput ? FColor::Red : FColor::White);
+				DisplayDebugManager.DrawString(FString::Printf(TEXT("\t ViewportClient bIsIgnoringInput: %s"), bIsIgnoringInput ? TEXT("True") : TEXT("False")));
+				
+				const bool bIsUsingMouseForTouch = LP->ViewportClient->GetUseMouseForTouch();
+				DisplayDebugManager.SetDrawColor(bIsUsingMouseForTouch ? FColor::Green : FColor::White);
+				DisplayDebugManager.DrawString(FString::Printf(TEXT("\t ViewportClient bIsUsingMouseForTouch: %s"), bIsUsingMouseForTouch ? TEXT("True") : TEXT("False")));
+			}
+		}
+#endif // #if UE_ENABLE_DEBUG_DRAWING
+
 		DisplayDebugManager.SetDrawColor(FColor::Red);
 		DisplayDebugManager.DrawString(FString::Printf(TEXT("INPUT %s"), *GetName()));
 
@@ -1864,7 +2029,7 @@ float UPlayerInput::MassageAxisInput(FKey Key, float RawValue)
 
 		// Take FOV into account (lower FOV == less sensitivity).
 		APlayerController const* const PlayerController = GetOuterAPlayerController();
-		float const FOVScale = (DefaultInputSettings->bEnableFOVScaling && PlayerController->PlayerCameraManager) ? (DefaultInputSettings->FOVScale*PlayerController->PlayerCameraManager->GetFOVAngle()) : 1.0f;
+		float const FOVScale = (DefaultInputSettings->bEnableFOVScaling && PlayerController && PlayerController->PlayerCameraManager) ? (DefaultInputSettings->FOVScale*PlayerController->PlayerCameraManager->GetFOVAngle()) : 1.0f;
 		NewVal *= FOVScale;
 
 		// debug
@@ -1914,11 +2079,8 @@ void UPlayerInput::Tick(float DeltaTime)
 
 void UPlayerInput::ConsumeKey(FKey Key)
 {
-	FKeyState* const KeyState = KeyStateMap.Find(Key);
-	if (KeyState)
-	{
-		KeyState->bConsumed = true;
-	}
+	FKeyState& KeyState = KeyStateMap.FindOrAdd(Key);
+	KeyState.bConsumed = true;
 }
 
 bool UPlayerInput::KeyEventOccurred(FKey Key, EInputEvent Event, TArray<uint32>& InEventIndices, const FKeyState* KeyState) const
@@ -2038,7 +2200,7 @@ bool UPlayerInput::ExecInputCommands( UWorld* InWorld, const TCHAR* Cmd, FOutput
 		if(CurrentEvent == IE_Pressed || (CurrentEvent == IE_Released && FParse::Command(&Str,TEXT("OnRelease"))))
 		{
 			APlayerController*	Actor = Cast<APlayerController>(GetOuter());
-			UPlayer* Player = Actor ? Actor->Player : NULL;
+			UPlayer* Player = Actor ? ToRawPtr(Actor->Player) : NULL;
 			if(ProcessConsoleExec(Str,Ar,this))
 			{
 				bResult = true;
@@ -2162,7 +2324,7 @@ void UPlayerInput::SetBind(FName BindName, const FString& Command)
 		FString CommandMod = Command;
 		if ( CommandMod.Left(1) == TEXT("\"") && CommandMod.Right(1) == ("\"") )
 		{
-			CommandMod.MidInline(1, CommandMod.Len() - 2, false);
+			CommandMod.MidInline(1, CommandMod.Len() - 2, EAllowShrinking::No);
 		}
 
 		for(int32 BindIndex = DebugExecBindings.Num()-1;BindIndex >= 0;BindIndex--)
@@ -2186,7 +2348,11 @@ void UPlayerInput::SetBind(FName BindName, const FString& Command)
 
 class UWorld* UPlayerInput::GetWorld() const
 {
-	check(GetOuterAPlayerController());
-	UWorld* World = GetOuterAPlayerController()->GetWorld();
-	return World;
+	if (APlayerController* PC = GetOuterAPlayerController())
+	{
+		return PC->GetWorld();	
+	}
+	
+	return Super::GetWorld();
 }
+

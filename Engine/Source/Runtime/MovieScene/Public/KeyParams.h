@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 
+#include "KeyParams.generated.h"
+
 UENUM()
 enum class EMovieSceneKeyInterpolation : uint8
 {
@@ -22,6 +24,9 @@ enum class EMovieSceneKeyInterpolation : uint8
 
 	/** Constant. */
 	Constant UMETA(DisplayName="Constant"),
+
+	/** Smart Auto. */
+	SmartAuto UMETA(DisplayName = "Smart Auto"),
 };
 
 /** Defines different modes for adding keyframes in sequencer. */

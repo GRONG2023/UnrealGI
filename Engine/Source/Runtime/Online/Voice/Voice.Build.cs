@@ -22,19 +22,22 @@ public class Voice : ModuleRules
 
 		PublicIncludePathModuleNames.AddRange(
 			new string[] {
-				"AndroidPermission"
+					"HeadMountedDisplay"
 			}
 			);
+
+		if (Target.Platform == UnrealTargetPlatform.Android)
+		{
+			PublicIncludePathModuleNames.AddRange(
+				new string[] {
+					"AndroidPermission"
+				}
+				);
+		}
 
 		PublicDependencyModuleNames.AddRange(
 			new string[] {
 				"Engine",
-			}
-			);
-
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				"Runtime/Online/Voice/Private",
 			}
 			);
 

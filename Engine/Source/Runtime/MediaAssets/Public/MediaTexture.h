@@ -21,9 +21,8 @@ class FMediaTextureClockSink;
 class IMediaTextureSample;
 class UMediaPlayer;
 
-
 UENUM()
-enum MediaTextureOutputFormat
+enum UE_DEPRECATED(5.4, "This enum was unused (not connected to active logic) and is now deprecated.") MediaTextureOutputFormat : int
 {
 	MTOF_Default					UMETA(DisplayName = "Default (sRGB)"),
 	MTOF_SRGB_LINOUT				UMETA(DisplayName = "sRGB (linear output)"),		// sRGB data, using sRGB texture formats; hence read as linear RGB
@@ -31,7 +30,7 @@ enum MediaTextureOutputFormat
 };
 
 UENUM()
-enum MediaTextureOrientation
+enum MediaTextureOrientation : int
 {
 	MTORI_Original					UMETA(DisplayName = "Original (as decoded)"),
 	MTORI_CW90						UMETA(DisplayName = "Clockwise 90deg"),
@@ -41,12 +40,26 @@ enum MediaTextureOrientation
 
 /**
  * Implements a texture asset for rendering video tracks from UMediaPlayer assets.
+ * 
+ * note: derives directly from UTexture, not from UTexture2D or UTexture2DDynamic
+ *    maybe should have been UTexture2DDynamic?
  */
-UCLASS(hidecategories=(Adjustments, Compositing, LevelOfDetail, ImportSettings, Object))
-class MEDIAASSETS_API UMediaTexture
+UCLASS(hidecategories=(Adjustments, Compositing, LevelOfDetail, ImportSettings, Object), MinimalAPI)
+class UMediaTexture
 	: public UTexture
 {
 	GENERATED_UCLASS_BODY()
+
+public:
+
+	/** Possible render modes of this media texture. */
+	enum class ERenderMode
+	{
+		Default = 0,
+		JustInTime, // Will defer rendering this media texture until its consumer calls its JustInTimeRender function.
+	};
+
+public:
 
 	/** The addressing mode to use for the X axis. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="MediaTexture", meta=(DisplayName="X-axis Tiling Method"), AssetRegistrySearchable, AdvancedDisplay)
@@ -72,12 +85,17 @@ class MEDIAASSETS_API UMediaTexture
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MediaTexture", meta=(DisplayName="Total number of Mipmaps to output"))
 	uint8 NumMips;
 
-	/** Enable new style output (default = false). */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MediaTexture", meta = (DisplayName = "Enable new style output"))
+	/** Enable new style output. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MediaTexture", meta = (DisplayName = "Enable new style output"))
 	bool NewStyleOutput;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MediaTexture", meta = (DisplayName = "Output format (new style)"))
-	TEnumAsByte<enum MediaTextureOutputFormat> OutputFormat;
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+#if WITH_EDITORONLY_DATA
+	/** DEPRECATED 5.4 */
+	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "Output format was unused (not connected to active logic) and is now deprecated. References to it can be safely deleted."))
+	TEnumAsByte<enum MediaTextureOutputFormat> OutputFormat_DEPRECATED;
+#endif
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	/** Current aspect ratio */
 	UPROPERTY(Transient, TextExportTransient, SkipSerialization, BlueprintReadOnly, Category = "MediaTexture", meta = (DisplayName = "Current frame's aspect ratio"))
@@ -96,7 +114,7 @@ public:
 	 * @see GetHeight, GetWidth
 	 */
 	UFUNCTION(BlueprintCallable, Category="Media|MediaTexture")
-	float GetAspectRatio() const;
+	MEDIAASSETS_API float GetAspectRatio() const;
 
 	/**
 	 * Gets the current height of the texture.
@@ -105,7 +123,7 @@ public:
 	 * @see GetAspectRatio, GetWidth
 	 */
 	UFUNCTION(BlueprintCallable, Category="Media|MediaTexture")
-	int32 GetHeight() const;
+	MEDIAASSETS_API int32 GetHeight() const;
 
 	/**
 	 * Gets the current width of the texture.
@@ -114,7 +132,7 @@ public:
 	 * @see GetAspectRatio, GetHeight
 	 */
 	UFUNCTION(BlueprintCallable, Category="Media|MediaTexture")
-	int32 GetWidth() const;
+	MEDIAASSETS_API int32 GetWidth() const;
 
 	/**
 	 * Gets the current numbe of mips of the texture.
@@ -122,7 +140,7 @@ public:
 	 * @return Number of mips.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Media|MediaTexture")
-	int32 GetTextureNumMips() const;
+	MEDIAASSETS_API int32 GetTextureNumMips() const;
 
 	/**
 	 * Get the media player that provides the video samples.
@@ -131,7 +149,7 @@ public:
 	 * @see SetMediaPlayer
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Media|MediaTexture")
-	UMediaPlayer* GetMediaPlayer() const;
+	MEDIAASSETS_API UMediaPlayer* GetMediaPlayer() const;
 
 	/**
 	 * Set the media player that provides the video samples.
@@ -140,13 +158,20 @@ public:
 	 * @see GetMediaPlayer
 	 */
 	UFUNCTION(BlueprintCallable, Category="Media|MediaTexture")
-	void SetMediaPlayer(UMediaPlayer* NewMediaPlayer);
+	MEDIAASSETS_API void SetMediaPlayer(UMediaPlayer* NewMediaPlayer);
+	
+	/**
+	 * Creates a new resource for the texture, and updates any cached references to the resource.
+	 * This obviously is just an override to expose to blueprints.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Media|MediaTexture")
+	virtual void UpdateResource() override  { Super::UpdateResource(); }
 
 	/**
 	 * Caches the next available sample time from the queue when last rendering was made
 	 * @see GetNextSampleTime
 	 */
-	void CacheNextAvailableSampleTime(FTimespan InNextSampleTime);
+	MEDIAASSETS_API void CacheNextAvailableSampleTime(FTimespan InNextSampleTime);
 
 	/**
 	 * Gets the next sample Time. Only valid if GetAvailableSampleCount is greater than 0
@@ -154,13 +179,13 @@ public:
 	 * @return FTimespan of the next sample or FTimespan::MinValue if no sample was available in the queue.
 	 * @see GetAvailableSampleCount, CacheNextAvailableSampleTime
 	 */
-	FTimespan GetNextSampleTime() const;
+	MEDIAASSETS_API FTimespan GetNextSampleTime() const;
 
 	/**
 	 * Gets the number of samples that are available
 	 * @return The number of samples in the queue
 	 */
-	int32 GetAvailableSampleCount() const;
+	MEDIAASSETS_API int32 GetAvailableSampleCount() const;
 
 #if WITH_EDITOR
 
@@ -170,7 +195,7 @@ public:
 	 * @param NewMediaPlayer The player to set.
 	 * @see SetMediaPlayer
 	 */
-	void SetDefaultMediaPlayer(UMediaPlayer* NewMediaPlayer);
+	MEDIAASSETS_API void SetDefaultMediaPlayer(UMediaPlayer* NewMediaPlayer);
 
 #endif
 
@@ -178,37 +203,79 @@ public:
 	 * Get current aspect ratio of presented frame.
 	 * @return Aspect ratio of current frame
 	 */
-	float GetCurrentAspectRatio() const;
+	MEDIAASSETS_API float GetCurrentAspectRatio() const;
 
 	/**
 	 * Get current orientation of presented frame.
 	 * @return Orientation of current frame
 	 */
-	MediaTextureOrientation GetCurrentOrientation() const;
+	MEDIAASSETS_API MediaTextureOrientation GetCurrentOrientation() const;
+
+	/**
+	 * Get the texture's mip-map bias, clamped to a legal range.
+	 * @return Mip-map bias value
+	 */
+	MEDIAASSETS_API float GetMipMapBias() const;
+
+	/**
+	 * Set texture's mip-map bias, for use by the texture resource sampler.
+	 * Note: UpdateResource() should be called afterwards and the material should be notified.
+	 *
+	 * @param InMipMapBias Bias value.
+	 */
+	MEDIAASSETS_API void SetMipMapBias(float InMipMapBias);
+
+	/**
+	 * Set an override for color space conversions
+	 */
+	void SetColorSpaceOverride(UE::Color::EColorSpace InColorspaceOverride)
+	{
+		ColorspaceOverride = InColorspaceOverride;
+	}
+
+	/** Renders this media texture. Only has an effect if its RenderMode is ERenderMode::JustInTime */
+	MEDIAASSETS_API virtual void JustInTimeRender();
+
+	/** Sets the ERenderMode of this media texture */
+	void SetRenderMode(ERenderMode InRenderMode)
+	{
+		RenderMode = InRenderMode;
+	}
+
+	/** Returns the ERenderMode of this media texture */
+	ERenderMode GetRenderMode()
+	{
+		return RenderMode;
+	}
 
 public:
 
 	//~ UTexture interface.
 
-	virtual void BeginDestroy() override;
-	virtual FTextureResource* CreateResource() override;
-	virtual EMaterialValueType GetMaterialType() const override;
-	virtual float GetSurfaceWidth() const override;
-	virtual float GetSurfaceHeight() const override;
-	virtual FGuid GetExternalTextureGuid() const override;
-	void SetRenderedExternalTextureGuid(const FGuid& InNewGuid);
+	MEDIAASSETS_API virtual void BeginDestroy() override;
+	MEDIAASSETS_API virtual FTextureResource* CreateResource() override;
+	MEDIAASSETS_API virtual EMaterialValueType GetMaterialType() const override;
+	MEDIAASSETS_API virtual float GetSurfaceWidth() const override;
+	MEDIAASSETS_API virtual float GetSurfaceHeight() const override;
+	virtual float GetSurfaceDepth() const override { return 0; }
+	virtual uint32 GetSurfaceArraySize() const override { return 0; }
+	MEDIAASSETS_API virtual FGuid GetExternalTextureGuid() const override;
+	MEDIAASSETS_API void SetRenderedExternalTextureGuid(const FGuid& InNewGuid);
+	virtual ETextureClass GetTextureClass() const override { return ETextureClass::Other2DNoSource; }
+	MEDIAASSETS_API virtual uint32 CalcTextureMemorySizeEnum(ETextureMipCount Enum) const override;
 
 public:
 
 	//~ UObject interface.
 
-	virtual FString GetDesc() override;
-	virtual void GetResourceSizeEx(FResourceSizeEx& CumulativeResourceSize) override;
-	virtual void PostLoad() override;
-	virtual bool IsPostLoadThreadSafe() const override;
+	MEDIAASSETS_API virtual FString GetDesc() override;
+	MEDIAASSETS_API virtual void GetResourceSizeEx(FResourceSizeEx& CumulativeResourceSize) override;
+	MEDIAASSETS_API virtual void PostInitProperties() override;
+	MEDIAASSETS_API virtual void PostLoad() override;
+	MEDIAASSETS_API virtual bool IsPostLoadThreadSafe() const override;
 
 #if WITH_EDITOR
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	MEDIAASSETS_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
 
 protected:
@@ -218,13 +285,13 @@ protected:
 	 *
 	 * @param Timecode The current timecode.
 	 */
-	void TickResource(FTimespan Timecode);
+	MEDIAASSETS_API void TickResource(FTimespan Timecode);
 
 	/** Update the video sample queue, if necessary. */
-	void UpdatePlayerAndQueue();
+	MEDIAASSETS_API void UpdatePlayerAndQueue();
 
 	/** Update sample info */
-	void UpdateSampleInfo(const TSharedPtr<IMediaTextureSample, ESPMode::ThreadSafe>& Sample);
+	MEDIAASSETS_API void UpdateSampleInfo(const TSharedPtr<IMediaTextureSample, ESPMode::ThreadSafe>& Sample);
 
 protected:
 
@@ -237,7 +304,7 @@ protected:
 	 * @see SetMediaPlayer
 	 */
 	UPROPERTY(EditAnywhere, Category="Media")
-	UMediaPlayer* MediaPlayer;
+	TObjectPtr<UMediaPlayer> MediaPlayer;
 
 private:
 
@@ -267,6 +334,9 @@ private:
 	/** The previously used sRGB flag. */
 	bool LastSrgb;
 
+	/** True if the texture has been cleared. */
+	bool bIsCleared;
+
 	/** Texture sample queue. */
 	TSharedPtr<FMediaTextureSampleQueue, ESPMode::ThreadSafe> SampleQueue;
 
@@ -281,4 +351,13 @@ private:
 
 	/** Number of mips in the actual output texture */
 	int32 TextureNumMips;
+
+	/** Mip-map bias used by the media texture resource sampler. */
+	float MipMapBias;
+
+	/** Current render mode of this media texture. Can be changed using SetRenderMode() */
+	ERenderMode RenderMode = ERenderMode::Default;
+
+	/** Colorspace override */
+	UE::Color::EColorSpace ColorspaceOverride;
 };

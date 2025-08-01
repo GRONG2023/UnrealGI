@@ -16,12 +16,24 @@
 #include "Widgets/Views/STableRow.h"
 #include "Widgets/Views/SListView.h"
 #include "Animation/AnimInstance.h"
-#include "EditorObjectsTracker.h"
 #include "PersonaDelegates.h"
+#include "EditorUndoClient.h"
+#include "Filters/FilterBase.h"
+#include "Widgets/Input/SComboBox.h"
+
+namespace UE::Anim
+{
+enum class ECurveElementFlags : uint8;
+}
 
 class FUICommandList;
 class IEditableSkeleton;
 class SAnimCurveViewer;
+class UEditorAnimCurveBoneLinks;
+class UPoseWatchPoseElement;
+class UAnimBlueprint;
+class UEdGraphNode;
+enum class EAnimCurveViewerFilterFlags: uint8;
 
 //////////////////////////////////////////////////////////////////////////
 // FDisplayedAnimCurveInfo
@@ -29,30 +41,31 @@ class SAnimCurveViewer;
 class FDisplayedAnimCurveInfo
 {
 public:
-	FSmartName SmartName;
+	FName CurveName;
 	float Weight;
-	bool bAutoFillData;
-	TWeakPtr<class IEditableSkeleton> EditableSkeleton;		// The skeleton we're associated with
-	TSharedPtr<SInlineEditableTextBlock> EditableText;	// The editable text box in the list, used to focus from the context menu
-	FName ContainerName;	// The container in the skeleton this name resides in
-	class UEditorAnimCurveBoneLinks* EditorMirrorObject;
+	bool bOverrideData;
 	bool bShown;
+	bool bMorphTarget;
+	bool bMaterial;
+	
 	/** Static function for creating a new item, but ensures that you can only have a TSharedRef to one */
-	static TSharedRef<FDisplayedAnimCurveInfo> Make(TWeakPtr<class IEditableSkeleton> InEditableSkeleton, const FName& InContainerName, const FSmartName& InSmartName, class UEditorAnimCurveBoneLinks* InEditorMirrorObject)
+	static TSharedRef<FDisplayedAnimCurveInfo> Make(const FName& InCurveName)
 	{
-		return MakeShareable(new FDisplayedAnimCurveInfo(InEditableSkeleton, InContainerName, InSmartName, InEditorMirrorObject));
+		return MakeShareable(new FDisplayedAnimCurveInfo(InCurveName));
 	}
+
+	// Get the active morph/material flag for this curve 
+	bool GetActiveFlag(const TSharedPtr<SAnimCurveViewer>& InAnimCurveViewer, bool bMorphTarget) const;
 
 protected:
 	/** Hidden constructor, always use Make above */
-	FDisplayedAnimCurveInfo(TWeakPtr<class IEditableSkeleton> InEditableSkeleton, const FName& InContainerName, const FSmartName& InSmartName, class UEditorAnimCurveBoneLinks* InEditorMirrorObject)
-		: SmartName(InSmartName)
-		, Weight( 0 )
-		, bAutoFillData(true)
-		, EditableSkeleton(InEditableSkeleton)
-		, ContainerName(InContainerName)
-		, EditorMirrorObject(InEditorMirrorObject)
+	FDisplayedAnimCurveInfo(const FName& InCurveName)
+		: CurveName(InCurveName)
+		, Weight(0.0f)
+		, bOverrideData(false)
 		, bShown(false)
+		, bMorphTarget(false)
+		, bMaterial(false)
 	{}
 };
 
@@ -97,22 +110,28 @@ private:
 	*/
 	void OnAnimCurveWeightValueCommitted(float NewWeight, ETextCommit::Type CommitType);
 
-	/** Auto fill check call back functions */
-	void OnAnimCurveAutoFillChecked(ECheckBoxState InState);
-	ECheckBoxState IsAnimCurveAutoFillChangedChecked() const;
+	/** Override check call back functions */
+	void OnAnimCurveOverrideChecked(ECheckBoxState InState);
+	ECheckBoxState IsAnimCurveOverrideChecked() const;
 
+	/** Check for an active morph target or material flag */
+	bool GetActiveFlag(bool bMorphTarget) const;
+	
 	/* Curve Flag checks for morphtarget or material */
-	void OnAnimCurveTypeBoxChecked(ECheckBoxState InState, bool bMorphTarget);
 	ECheckBoxState IsAnimCurveTypeBoxChangedChecked(bool bMorphTarget) const;
 
 	/** Returns the weight of this curve */
 	float GetWeight() const;
+	/** Returns the min seen weight of this curve */
+	TOptional<float> GetMinWeight() const;
+	/** Returns the max seen weight of this curve */
+	TOptional<float> GetMaxWeight() const;
 	/** Returns name of this curve */
 	FText GetItemName() const;
 	/** Get text we are filtering for */
 	FText GetFilterText() const;
-	/** Return color for text of item */
-	FSlateColor GetItemTextColor() const;
+	/** Return font for text of item */
+	FSlateFontInfo GetItemFont() const;
 
 	/** Get current active weight. Returns false if not currently active */
 	bool GetActiveWeight(float& OutWeight) const;
@@ -122,25 +141,30 @@ private:
 
 	/** The name and weight of the morph target */
 	TSharedPtr<FDisplayedAnimCurveInfo>	Item;
-
+	
 	/** Preview scene used to update on scrub */
 	TWeakPtr<class IPersonaPreviewScene> PreviewScenePtr;
+
+	/** The min weight we have seen */
+	mutable float MinWeight = -1.0f;
+
+	/** The max weight we have seen */
+	mutable float MaxWeight = 1.0f;
+	
 	/** Returns curve type widget constructed */
 	TSharedRef<SWidget> GetCurveTypeWidget();
-
-	/** returns display text for number of connected joint setting */
-	FText GetNumConntectedBones() const;
 };
 
 //////////////////////////////////////////////////////////////////////////
 // SAnimCurveViewer
 
-class SAnimCurveViewer : public SCompoundWidget
+class SAnimCurveViewer : public SCompoundWidget, public FSelfRegisteringEditorUndoClient
 {
 public:
-	SLATE_BEGIN_ARGS( SAnimCurveViewer )
-	{}
-	
+	SLATE_BEGIN_ARGS( SAnimCurveViewer ) {}
+
+	SLATE_ARGUMENT(TSharedPtr<IEditableSkeleton>, EditableSkeleton)
+
 	SLATE_END_ARGS()
 
 	/**
@@ -149,17 +173,14 @@ public:
 	* @param InArgs - Arguments passed from Slate
 	*
 	*/
-	void Construct( const FArguments& InArgs, const TSharedRef<class IEditableSkeleton>& InEditableSkeleton, const TSharedRef<class IPersonaPreviewScene>& InPreviewScene, FSimpleMulticastDelegate& InOnPostUndo, FOnObjectsSelected InOnObjectsSelected);
+	void Construct( const FArguments& InArgs, const TSharedRef<class IPersonaPreviewScene>& InPreviewScene, FOnObjectsSelected InOnObjectsSelected);
 
 	/**
 	* Destructor - resets the animation curve
 	*
 	*/
 	virtual ~SAnimCurveViewer();
-
-	/** SWidget interface */
-	virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent);
-
+	
 	/**
 	* Is registered with Persona to handle when its preview mesh is changed.
 	*
@@ -175,9 +196,6 @@ public:
 	*/
 	void OnPreviewAssetChanged(class UAnimationAsset* NewPreviewAsset);
 
-	/** Is registered with Persona to handle when curves change. */
-	void OnCurvesChanged();
-
 	/**
 	* Filters the SListView when the user changes the search text box (NameFilterBox)
 	*
@@ -185,9 +203,6 @@ public:
 	*
 	*/
 	void OnFilterTextChanged( const FText& SearchText );
-
-
-
 
 	/**
 	* Filters the SListView when the user hits enter or clears the search box
@@ -225,36 +240,27 @@ public:
 	bool GetAnimCurveOverride(FName& Name, float& Weight);
 
 	/**
-	* Tells the AnimInstance to reset all of its morph target curves
-	*
-	*/
-	void ResetAnimCurves();
-	
-	/**
 	* Accessor so our rows can grab the filtertext for highlighting
 	*
 	*/
 	FText& GetFilterText() { return FilterText; }
 
+	// FSelfRegisteringEditorUndoClient interface
+	virtual void PostUndo(bool bSuccess) override { PostUndoRedo(); }
+	virtual void PostRedo(bool bSuccess) override { PostUndoRedo(); }
+
 	/**
 	 * Refreshes the morph target list after an undo
 	 */
-	void OnPostUndo();
+	void PostUndoRedo();
 
-	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime);
+	/** SWidget interface */
+	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
+	virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
 
 	void RefreshCurveList(bool bInFullRefresh);
 
-	// When a name is committed after being edited in the list
-	virtual void OnNameCommitted(const FText& NewName, ETextCommit::Type CommitType, TSharedPtr<FDisplayedAnimCurveInfo> Item);
-
 private:
-
-	void BindCommands();
-
-	/** Handler for context menus */
-	TSharedPtr<SWidget> OnGetContextMenuContent() const;
-	void OnSelectionChanged(TSharedPtr<FDisplayedAnimCurveInfo> InItem, ESelectInfo::Type SelectInfo);
 
 	/**
 	* Clears and rebuilds the table, according to an optional search string
@@ -263,36 +269,30 @@ private:
 	*
 	*/
 	void CreateAnimCurveList( const FString& SearchText = FString(), bool bInFullRefresh = false );
-	void CreateAnimCurveTypeList(TSharedRef<SHorizontalBox> HorizontalBox);
 
 	void ApplyCustomCurveOverride(UAnimInstance* AnimInstance) const;
 
-	void OnDeleteNameClicked();
-	bool CanDelete();
-
-	void OnRenameClicked();
-	bool CanRename();
-
-	void OnAddClicked();
-
-	ECheckBoxState IsShowingAllCurves() const;
-	void OnToggleShowingAllCurves(ECheckBoxState NewState);
-
-	bool IsCurveFilterEnabled() const;
-
-
-	// Adds a new smartname entry to the skeleton in the container we are managing
-	void CreateNewNameEntry(const FText& CommittedText, ETextCommit::Type CommitType);
-
-	/** Handle smart name (i.e. curve) removal */
-	void HandleSmartNamesChange(const FName& InContainerName);
-
-	/** Get the SmartNameMapping for anim curves */
-	const struct FSmartNameMapping* GetAnimCurveMapping();
+	/** Handle curve meta data removal */
+	void HandleCurveMetaDataChange();
 
 	/** Get the anim instance we are viewing */
 	UAnimInstance* GetAnimInstance() const;
 
+	TSharedRef<SWidget> CreateCurveSourceSelector();
+	
+	/** Handle building list of available pose watches */
+	void HandlePoseWatchesChanged(UAnimBlueprint* /*InAnimBlueprint*/, UEdGraphNode* /*InNode*/);
+	void RebuildPoseWatches();
+
+	void BindCommands();
+	
+	/** Build context menu */
+	TSharedPtr<SWidget> OnGetContextMenuContent() const;
+	
+	void OnFindCurveUsesClicked();
+	bool CanFindCurveUses();
+	void FindReplaceCurves();
+	
 	/** Pointer to the preview scene we are bound to */
 	TWeakPtr<class IPersonaPreviewScene> PreviewScenePtr;
 
@@ -305,24 +305,16 @@ private:
 	/** A list of animation curve. Used by the AnimCurveListView. */
 	TArray< TSharedPtr<FDisplayedAnimCurveInfo> > AnimCurveList;
 
-	/** Tracking array of anim curves indexed by UID */
-	TArray< TSharedPtr<FDisplayedAnimCurveInfo> > AnimCurvesByUID;
-	
-	/** The skeletal mesh that we grab the animation curve from */
-	UAnimInstance* CachedPreviewInstance;						
+	/** Tracking map of anim curves */
+	TMap< FName, TSharedPtr<FDisplayedAnimCurveInfo> > AllSeenAnimCurvesMap;
 
 	/** Widget used to display the list of animation curve */
 	TSharedPtr<SAnimCurveListType> AnimCurveListView;
 
-	/** Name of the skeleton smart name container to display in the list */
-	FName ContainerName;
-
 	/** Current text typed into NameFilterBox */
 	FText FilterText;
 
-	int32 CurrentCurveFlag;
-
-	bool bShowAllCurves;
+	EAnimCurveViewerFilterFlags CurrentCurveFlag;
 
 	TMap<FName, float> OverrideCurves;
 
@@ -331,16 +323,20 @@ private:
 
 	friend class SAnimCurveListRow;
 	friend class SAnimCurveTypeList;
-
-	/** Tracks objects created for the details panel */
-	FEditorObjectTracker EditorObjectTracker;
+	friend class FDisplayedAnimCurveInfo;
 
 	/** Delegate called to select objects */
 	FOnObjectsSelected OnObjectsSelected;
 
-	/** apply curve bone links from editor mirror object to skeleton */
-	void ApplyCurveBoneLinks(class UEditorAnimCurveBoneLinks* EditorObj);
+	/** Valid when viewing a pose watch's data */
+	TWeakObjectPtr<UPoseWatchPoseElement> PoseWatch;
 
-	/** Delegate handle for HandleSmartNameRemoved callback */
-	FDelegateHandle SmartNameChangedHandle;
+	/** Names of each pose watch that can be selected */
+	TArray<TSharedPtr<TWeakObjectPtr<UPoseWatchPoseElement>>> PoseWatches;
+	
+	/** Combobox used to select pose watch */
+	TSharedPtr<SComboBox<TSharedPtr<TWeakObjectPtr<UPoseWatchPoseElement>>>> PoseWatchCombo;
+
+	/** All filters that can be applied to the widget's display */
+	TArray<TSharedRef<FFilterBase<EAnimCurveViewerFilterFlags>>> Filters;
 };

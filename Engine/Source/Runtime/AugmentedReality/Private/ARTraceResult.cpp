@@ -2,6 +2,10 @@
 
 #include "ARTraceResult.h"
 #include "ARSystem.h"
+#include "ARSupportInterface.h"
+#include "IXRTrackingSystem.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ARTraceResult)
 
 
 //
@@ -60,3 +64,4 @@ EARLineTraceChannels FARTraceResult::GetTraceChannel() const
 {
 	return TraceChannel;
 }
+

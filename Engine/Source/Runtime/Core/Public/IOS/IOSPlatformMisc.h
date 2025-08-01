@@ -22,7 +22,7 @@ struct CORE_API FIOSPlatformMisc : public FApplePlatformMisc
     static void PlatformHandleSplashScreen(bool ShowSplashScreen = false);
 	static const TCHAR* GetPlatformFeaturesModuleName();
 
-	FORCEINLINE static int32 GetMaxPathLength()
+	FORCEINLINE static constexpr int32 GetMaxPathLength()
 	{
 		return IOS_MAX_PATH;
 	}
@@ -46,8 +46,8 @@ struct CORE_API FIOSPlatformMisc : public FApplePlatformMisc
 	static const TCHAR* GamePersistentDownloadDir();
     static bool HasSeparateChannelForDebugOutput();
 
-	static void RequestExit(bool Force);
-	static void RequestExitWithStatus(bool Force, uint8 ReturnCode);
+	static void RequestExit(bool Force, const TCHAR* CallSite = nullptr);
+	static void RequestExitWithStatus(bool Force, uint8 ReturnCode, const TCHAR* CallSite = nullptr);
 
 	UE_DEPRECATED(4.21, "Use GetDeviceVolume, it is now callable on all platforms.")
 	static int GetAudioVolume();
@@ -57,11 +57,12 @@ struct CORE_API FIOSPlatformMisc : public FApplePlatformMisc
 	static bool IsRunningOnBattery();
 	static float GetDeviceTemperatureLevel();
 	static EDeviceScreenOrientation GetDeviceOrientation();
+	UE_DEPRECATED(5.1, "SetDeviceOrientation is deprecated. Use SetAllowedDeviceOrientation instead.")
 	static void SetDeviceOrientation(EDeviceScreenOrientation NewDeviceOrientation);
+	static void SetAllowedDeviceOrientation(EDeviceScreenOrientation NewAllowedDeviceOrientation);
 	static int32 GetDeviceVolume();
 	static void SetBrightness(float Brightness);
 	static float GetBrightness();
-	static void ResetBrightness(); //reset brightness to original value the application started with
 	static bool SupportsBrightness() { return true; }
     static bool IsInLowPowerMode();
 
@@ -72,6 +73,8 @@ struct CORE_API FIOSPlatformMisc : public FApplePlatformMisc
 	// Check if notifications are allowed if min iOS version is < 10
 	UE_DEPRECATED(4.21, "IsAllowedRemoteNotifications is deprecated. Use FIOSLocalNotificationService::CheckAllowedNotifications instead.")
 	static bool IsAllowedRemoteNotifications();
+    
+    static bool IsEntitlementEnabled(const char *EntitlementToCheck);
 	
 	static class IPlatformChunkInstall* GetPlatformChunkInstall();
 
@@ -170,6 +173,8 @@ struct CORE_API FIOSPlatformMisc : public FApplePlatformMisc
 		IOS_NewDevice7,
 		IOS_NewDevice8,
 
+		IOS_RealityPro,
+		
 		IOS_Unknown,
 	};
 
@@ -195,11 +200,11 @@ struct CORE_API FIOSPlatformMisc : public FApplePlatformMisc
 
 	static bool RequestDeviceCheckToken(TFunction<void(const TArray<uint8>&)> QuerySucceededFunc, TFunction<void(const FString&, const FString&)> QueryFailedFunc);
     
-	FORCEINLINE static void ChooseHDRDeviceAndColorGamut(uint32 DeviceId, uint32 DisplayNitLevel, int32& OutputDevice, int32& ColorGamut)
+	FORCEINLINE static void ChooseHDRDeviceAndColorGamut(uint32 DeviceId, uint32 DisplayNitLevel, EDisplayOutputFormat& OutputDevice, EDisplayColorGamut& ColorGamut)
 	{
 		// Linear output to Apple's specific format.
-		OutputDevice = 7;
-		ColorGamut = 0;
+		OutputDevice = EDisplayOutputFormat::HDR_LinearEXR;
+		ColorGamut = EDisplayColorGamut::sRGB_D65;
 	}
 
 	static int32 GetMaxRefreshRate();
@@ -207,6 +212,8 @@ struct CORE_API FIOSPlatformMisc : public FApplePlatformMisc
     // added these for now because Crashlytics doesn't properly break up different callstacks all ending in UE_LOG(LogXXX, Fatal, ...)
     static FORCENOINLINE CA_NO_RETURN void GPUAssert();
     static FORCENOINLINE CA_NO_RETURN void MetalAssert();
+
+	static bool CPUHasHwCrcSupport();
 };
 
 typedef FIOSPlatformMisc FPlatformMisc;

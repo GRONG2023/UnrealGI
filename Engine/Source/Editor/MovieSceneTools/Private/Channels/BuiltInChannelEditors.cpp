@@ -4,23 +4,33 @@
 #include "MovieSceneSequence.h"
 #include "MovieSceneSequenceEditor.h"
 #include "MovieSceneEventUtils.h"
+#include "Channels/MovieSceneChannelHandle.h"
 #include "Sections/MovieSceneEventSectionBase.h"
 #include "ISequencerChannelInterface.h"
+#include "Widgets/Input/SComboButton.h"
+#include "Widgets/Layout/SSpacer.h"
 #include "Widgets/SNullWidget.h"
+#include "IKeyArea.h"
 #include "ISequencer.h"
+#include "SequencerSettings.h"
 #include "MovieSceneCommonHelpers.h"
 #include "GameFramework/Actor.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Styling/CoreStyle.h"
 #include "CurveKeyEditors/SNumericKeyEditor.h"
 #include "CurveKeyEditors/SBoolCurveKeyEditor.h"
 #include "CurveKeyEditors/SStringCurveKeyEditor.h"
 #include "CurveKeyEditors/SEnumKeyEditor.h"
 #include "UObject/StructOnScope.h"
-#include "KeyDrawParams.h"
+#include "MVVM/Views/KeyDrawParams.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Channels/MovieSceneChannelProxy.h"
 #include "Channels/MovieSceneChannelEditorData.h"
+#include "Channels/MovieSceneFloatChannel.h"
+#include "Channels/MovieSceneDoubleChannel.h"
+#include "Channels/MovieSceneBoolChannel.h"
+#include "Channels/MovieSceneIntegerChannel.h"
+#include "Channels/DoubleChannelCurveModel.h"
 #include "Channels/FloatChannelCurveModel.h"
 #include "Channels/IntegerChannelCurveModel.h"
 #include "Channels/BoolChannelCurveModel.h"
@@ -32,12 +42,15 @@
 #include "Modules/ModuleManager.h"
 #include "Framework/Application/MenuStack.h"
 #include "Framework/Application/SlateApplication.h"
-#include "Editor/SceneOutliner/Private/SSocketChooser.h"
+#include "SSocketChooser.h"
 #include "SComponentChooser.h"
+#include "EntitySystem/MovieSceneDecompositionQuery.h"
 #include "EntitySystem/Interrogation/MovieSceneInterrogationLinker.h"
 #include "EntitySystem/Interrogation/MovieSceneInterrogatedPropertyInstantiator.h"
 #include "Systems/MovieScenePropertyInstantiator.h"
+#include "Tracks/MovieSceneObjectPropertyTrack.h"
 #include "Tracks/MovieScenePropertyTrack.h"
+#include "Widgets/Input/SComboButton.h"
 #include "MovieSceneSpawnableAnnotation.h"
 #include "ISequencerModule.h"
 #include "MovieSceneTracksComponentTypes.h"
@@ -45,7 +58,8 @@
 #define LOCTEXT_NAMESPACE "BuiltInChannelEditors"
 
 
-FKeyHandle AddOrUpdateKey(FMovieSceneFloatChannel* Channel, UMovieSceneSection* SectionToKey, const TMovieSceneExternalValue<float>& ExternalValue, FFrameNumber InTime, ISequencer& Sequencer, const FGuid& InObjectBindingID, FTrackInstancePropertyBindings* PropertyBindings)
+template<typename ChannelType, typename ValueType>
+FKeyHandle AddOrUpdateKeyImpl(ChannelType* Channel, UMovieSceneSection* SectionToKey, const TMovieSceneExternalValue<ValueType>& ExternalValue, FFrameNumber InTime, ISequencer& Sequencer, const FGuid& InObjectBindingID, FTrackInstancePropertyBindings* PropertyBindings)
 {
 	using namespace UE::MovieScene;
 
@@ -53,7 +67,7 @@ FKeyHandle AddOrUpdateKey(FMovieSceneFloatChannel* Channel, UMovieSceneSection* 
 
 	// Find the first bound object so we can get the current property channel value on it.
 	UObject* FirstBoundObject = nullptr;
-	TOptional<float> CurrentBoundObjectValue;
+	TOptional<ValueType> CurrentBoundObjectValue;
 	if (InObjectBindingID.IsValid())
 	{
 		for (TWeakObjectPtr<> WeakObject : Sequencer.FindBoundObjects(InObjectBindingID, SequenceID))
@@ -76,7 +90,7 @@ FKeyHandle AddOrUpdateKey(FMovieSceneFloatChannel* Channel, UMovieSceneSection* 
 	// object *would* be at if we scrubbed here and let the sequence evaluation do its thing). This will help us figure out the difference between the current object value
 	// and the evaluated sequencer value: we will compute a new value for the channel so that a new sequence evaluation would come out at the "desired" value, which is
 	// what the current object value.
-	float NewValue = Channel->GetDefault().Get(0.f);
+	ValueType NewValue = Channel->GetDefault().Get(0.f);
 
 	const bool bWasEvaluated = Channel->Evaluate(InTime, NewValue);
 
@@ -85,7 +99,7 @@ FKeyHandle AddOrUpdateKey(FMovieSceneFloatChannel* Channel, UMovieSceneSection* 
 		if (ExternalValue.OnGetCurrentValueAndWeight)
 		{
 			// We have a custom callback that can provide us with the evaluated value of this channel.
-			float CurrentValue = CurrentBoundObjectValue.Get(0.0f);
+			ValueType CurrentValue = CurrentBoundObjectValue.Get(0.0f);
 			float CurrentWeight = 1.0f;
 			FMovieSceneRootEvaluationTemplateInstance& EvaluationTemplate = Sequencer.GetEvaluationTemplate();
 			ExternalValue.OnGetCurrentValueAndWeight(FirstBoundObject, SectionToKey, InTime, Sequencer.GetFocusedTickResolution(), EvaluationTemplate, CurrentValue, CurrentWeight);
@@ -94,7 +108,7 @@ FKeyHandle AddOrUpdateKey(FMovieSceneFloatChannel* Channel, UMovieSceneSection* 
 			{
 				if (bWasEvaluated)
 				{
-					float CurrentGlobalValue = CurrentBoundObjectValue.GetValue();
+					ValueType CurrentGlobalValue = CurrentBoundObjectValue.GetValue();
 					NewValue = (CurrentBoundObjectValue.Get(0.0f) - CurrentValue) * CurrentWeight + NewValue;
 				}
 				else //Nothing set (key or default) on channel so use external value
@@ -176,16 +190,26 @@ FKeyHandle AddOrUpdateKey(FMovieSceneFloatChannel* Channel, UMovieSceneSection* 
 
 					FIntermediate3DTransform InTransformData;
 
-					TRecompositionResult<float> RecomposeResult = System->RecomposeBlendFloatChannel(BoundPropertyDefinition, ChannelIndex, Query, CurrentBoundObjectValue.Get(0.f));
+					TRecompositionResult<double> RecomposeResult = System->RecomposeBlendChannel(BoundPropertyDefinition, ChannelIndex, Query, (double)CurrentBoundObjectValue.Get(0.f));
 
-					NewValue = RecomposeResult.Values[0];
+					NewValue = (ValueType)RecomposeResult.Values[0];
 				}
 			}
 		}
 	}
-
 	using namespace UE::MovieScene;
-	return AddKeyToChannel(Channel, InTime, NewValue, Sequencer.GetKeyInterpolation());
+	EMovieSceneKeyInterpolation KeyInterpolation = GetInterpolationMode(Channel,InTime,Sequencer.GetKeyInterpolation());
+	return AddKeyToChannel(Channel, InTime, NewValue, KeyInterpolation);
+}
+
+FKeyHandle AddOrUpdateKey(FMovieSceneFloatChannel* Channel, UMovieSceneSection* SectionToKey, const TMovieSceneExternalValue<float>& ExternalValue, FFrameNumber InTime, ISequencer& Sequencer, const FGuid& InObjectBindingID, FTrackInstancePropertyBindings* PropertyBindings)
+{
+	return AddOrUpdateKeyImpl<FMovieSceneFloatChannel, float>(Channel, SectionToKey, ExternalValue, InTime, Sequencer, InObjectBindingID, PropertyBindings);
+}
+
+FKeyHandle AddOrUpdateKey(FMovieSceneDoubleChannel* Channel, UMovieSceneSection* SectionToKey, const TMovieSceneExternalValue<double>& ExternalValue, FFrameNumber InTime, ISequencer& Sequencer, const FGuid& InObjectBindingID, FTrackInstancePropertyBindings* PropertyBindings)
+{
+	return AddOrUpdateKeyImpl<FMovieSceneDoubleChannel, double>(Channel, SectionToKey, ExternalValue, InTime, Sequencer, InObjectBindingID, PropertyBindings);
 }
 
 FKeyHandle AddOrUpdateKey(FMovieSceneActorReferenceData* Channel, UMovieSceneSection* SectionToKey, FFrameNumber InTime, ISequencer& Sequencer, const FGuid& InObjectBindingID, FTrackInstancePropertyBindings* PropertyBindings)
@@ -242,6 +266,10 @@ bool CanCreateKeyEditor(const FMovieSceneIntegerChannel* Channel)
 	return true;
 }
 bool CanCreateKeyEditor(const FMovieSceneFloatChannel*   Channel)
+{
+	return true;
+}
+bool CanCreateKeyEditor(const FMovieSceneDoubleChannel*   Channel)
 {
 	return true;
 }
@@ -312,6 +340,24 @@ TSharedRef<SWidget> CreateKeyEditor(const TMovieSceneChannelHandle<FMovieSceneFl
 }
 
 
+TSharedRef<SWidget> CreateKeyEditor(const TMovieSceneChannelHandle<FMovieSceneDoubleChannel>&   Channel, UMovieSceneSection* Section, const FGuid& InObjectBindingID, TWeakPtr<FTrackInstancePropertyBindings> PropertyBindings, TWeakPtr<ISequencer> InSequencer)
+{
+	const TMovieSceneExternalValue<double>* ExternalValue = Channel.GetExtendedEditorData();
+	if (!ExternalValue)
+	{
+		return SNullWidget::NullWidget;
+	}
+
+	TSequencerKeyEditor<FMovieSceneDoubleChannel, double> KeyEditor(
+		InObjectBindingID, Channel,
+		Section, InSequencer, PropertyBindings, ExternalValue->OnGetExternalValue
+		);
+
+	typedef SNumericKeyEditor<FMovieSceneDoubleChannel, double> KeyEditorType;
+	return SNew(KeyEditorType, KeyEditor);
+}
+
+
 TSharedRef<SWidget> CreateKeyEditor(const TMovieSceneChannelHandle<FMovieSceneStringChannel>&  Channel, UMovieSceneSection* Section, const FGuid& InObjectBindingID, TWeakPtr<FTrackInstancePropertyBindings> PropertyBindings, TWeakPtr<ISequencer> InSequencer)
 {
 	const TMovieSceneExternalValue<FString>* ExternalValue = Channel.GetExtendedEditorData();
@@ -358,28 +404,87 @@ TSharedRef<SWidget> CreateKeyEditor(const TMovieSceneChannelHandle<FMovieSceneOb
 {
 	const TMovieSceneExternalValue<UObject*>* ExternalValue = Channel.GetExtendedEditorData();
 	const FMovieSceneObjectPathChannel*       RawChannel    = Channel.Get();
+	UMovieSceneObjectPropertyTrack* ObjectPathTrack = Cast<UMovieSceneObjectPropertyTrack>(Section->GetOuter());
+
 	if (ExternalValue && RawChannel)
 	{
 		TSequencerKeyEditor<FMovieSceneObjectPathChannel, UObject*> KeyEditor(InObjectBindingID, Channel, Section, InSequencer, PropertyBindings, ExternalValue->OnGetExternalValue);
 
-		auto OnSetObjectLambda = [KeyEditor](const FAssetData& Asset) mutable
+		UClass* PropertyClass = ObjectPathTrack ? ObjectPathTrack->PropertyClass : nullptr;
+		const bool bClassPicker = ObjectPathTrack ? ObjectPathTrack->bClassProperty : false;
+		if (bClassPicker)
 		{
-			FScopedTransaction Transaction(LOCTEXT("SetEnumKey", "Set Enum Key Value"));
-			KeyEditor.SetValueWithNotify(Asset.GetAsset(), EMovieSceneDataChangeType::TrackValueChangedRefreshImmediately);
-		};
+			auto OnSetClassLambda = [KeyEditor](const UClass* Class) mutable
+			{
+				FScopedTransaction Transaction(LOCTEXT("SetObjectPathKey", "Set Object Path Key Value"));
+				KeyEditor.SetValueWithNotify(const_cast<UClass*>(Class), EMovieSceneDataChangeType::TrackValueChangedRefreshImmediately);
+			};
 
-		auto GetObjectPathLambda = [KeyEditor]() -> FString
+			auto GetSelectedClassLambda = [KeyEditor]() -> const UClass*
+			{
+				return Cast<UClass>(KeyEditor.GetCurrentValue());
+			};
+
+			return SNew(SHorizontalBox)
+
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				[
+					SNew(SClassPropertyEntryBox)
+					.MetaClass(PropertyClass)
+					.SelectedClass_Lambda(GetSelectedClassLambda)
+					.OnSetClass_Lambda(OnSetClassLambda)
+				]
+
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.Padding(8.0f, 0.0f)
+				[
+					SNew(SSpacer)
+				];
+		}
+		else
 		{
-			UObject* Obj = KeyEditor.GetCurrentValue();
-			return Obj ? Obj->GetPathName() : FString();
-		};
+			auto OnSetObjectLambda = [KeyEditor](const FAssetData& Asset) mutable
+			{
+				FScopedTransaction Transaction(LOCTEXT("SetObjectPathKey", "Set Object Path Key Value"));
+				KeyEditor.SetValueWithNotify(Asset.GetAsset(), EMovieSceneDataChangeType::TrackValueChangedRefreshImmediately);
+			};
 
-		return SNew(SObjectPropertyEntryBox)
-		.DisplayBrowse(false)
-		.DisplayUseSelected(false)
-		.ObjectPath_Lambda(GetObjectPathLambda)
-		.AllowedClass(RawChannel->GetPropertyClass())
-		.OnObjectChanged_Lambda(OnSetObjectLambda);
+			auto GetObjectPathLambda = [KeyEditor]() -> FString
+			{
+				UObject* Obj = KeyEditor.GetCurrentValue();
+				return Obj ? Obj->GetPathName() : FString();
+			};
+
+			TArray<FAssetData> AssetDataArray;
+			if (InSequencer.IsValid())
+			{
+				UMovieSceneSequence* Sequence = InSequencer.Pin()->GetFocusedMovieSceneSequence();
+				AssetDataArray.Add((FAssetData)Sequence);
+			}
+
+			return SNew(SHorizontalBox)
+
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				[
+					SNew(SObjectPropertyEntryBox)
+					.DisplayBrowse(true)
+					.DisplayUseSelected(false)
+					.ObjectPath_Lambda(GetObjectPathLambda)
+					.AllowedClass(RawChannel->GetPropertyClass())
+					.OnObjectChanged_Lambda(OnSetObjectLambda)
+					.OwnerAssetDataArray(AssetDataArray)
+				]
+
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.Padding(8.0f, 0.0f)
+				[
+					SNew(SSpacer)
+				];
+		}
 	}
 
 	return SNullWidget::NullWidget;
@@ -418,13 +523,13 @@ public:
 				SNew(SComboButton)
 				.OnGetMenuContent(this, &SActorReferenceBox::GetPickerMenu)
 				.ContentPadding(FMargin(0.0, 0.0))
-				.ButtonStyle(FEditorStyle::Get(), "PropertyEditor.AssetComboStyle")
-				.ForegroundColor(FEditorStyle::GetColor("PropertyEditor.AssetName.ColorAndOpacity"))
+				.ButtonStyle(FAppStyle::Get(), "PropertyEditor.AssetComboStyle")
+				.ForegroundColor(FAppStyle::GetColor("PropertyEditor.AssetName.ColorAndOpacity"))
 				.ButtonContent()
 				[
 					GetCurrentItemWidget(
 						SNew(STextBlock)
-						.TextStyle(FEditorStyle::Get(), "PropertyEditor.AssetClass")
+						.TextStyle(FAppStyle::Get(), "PropertyEditor.AssetClass")
 						.Font(FCoreStyle::GetDefaultFontStyle("Regular", 8))
 					)
 				]
@@ -511,7 +616,7 @@ TSharedRef<SWidget> CreateKeyEditor(const TMovieSceneChannelHandle<FMovieSceneAc
 
 	TSequencerKeyEditor<FMovieSceneActorReferenceData, FMovieSceneActorReferenceKey> KeyEditor(InObjectBindingID, Channel, Section, InSequencer, PropertyBindings, Func);
 
-	auto OnSetCurrentValueLambda = [KeyEditor](FMovieSceneActorReferenceKey& ActorKey) mutable
+	auto OnSetCurrentValueLambda = [KeyEditor](const FMovieSceneActorReferenceKey& ActorKey) mutable
 	{
 		FScopedTransaction Transaction(LOCTEXT("SetActorReferenceKey", "Set Actor Reference Key Value"));
 		KeyEditor.SetValueWithNotify(ActorKey, EMovieSceneDataChangeType::TrackValueChangedRefreshImmediately);
@@ -550,8 +655,10 @@ TSharedRef<SWidget> CreateKeyEditor(const TMovieSceneChannelHandle<FMovieSceneAc
 		TSharedPtr<SWidget> ComponentMenuWidget =
 			SNew(SComponentChooserPopup)
 			.Actor(Actor)
-			.OnComponentChosen_Lambda([=](FName InComponentName) mutable
+			.OnComponentChosen_Lambda([Actor, LevelEditor, KeyEditor, ActorKey = ActorKey](FName InComponentName) mutable
 				{
+					// ActorKey is self-captured so that the lambda can mutate its copy.
+
 					ActorKey.ComponentName = InComponentName;
 					KeyEditor.SetValueWithNotify(ActorKey, EMovieSceneDataChangeType::TrackValueChangedRefreshImmediately);
 
@@ -676,8 +783,8 @@ UMovieSceneKeyStructType* InstanceGeneratedStruct(FMovieSceneObjectPathChannel* 
 		return nullptr;
 	}
 
-	FSoftObjectProperty* NewValueProperty = new FSoftObjectProperty(NewStruct, "Value", RF_NoFlags);
-	NewValueProperty->SetPropertyFlags(CPF_Edit);
+	FObjectProperty* NewValueProperty = new FObjectProperty(NewStruct, "Value", RF_NoFlags);
+	NewValueProperty->SetPropertyFlags(CPF_Edit | CPF_TObjectPtrWrapper);
 	NewValueProperty->SetMetaData("Category", TEXT("Key"));
 	NewValueProperty->PropertyClass = PropertyClass;
 	NewValueProperty->ArrayDim = 1;
@@ -691,48 +798,74 @@ UMovieSceneKeyStructType* InstanceGeneratedStruct(FMovieSceneObjectPathChannel* 
 	return NewStruct;
 }
 
+
 void PostConstructKeyInstance(const TMovieSceneChannelHandle<FMovieSceneObjectPathChannel>& ChannelHandle, FKeyHandle InHandle, FStructOnScope* Struct)
-{	
+{
 	const UMovieSceneKeyStructType* GeneratedStructType = CastChecked<const UMovieSceneKeyStructType>(Struct->GetStruct());
 
-	FSoftObjectProperty* EditProperty = CastFieldChecked<FSoftObjectProperty>(GeneratedStructType->DestValueProperty.Get());
-	const uint8* PropertyAddress = EditProperty->ContainerPtrToValuePtr<uint8>(Struct->GetStructMemory());
+	uint8* StructMemory = Struct->GetStructMemory();
+
+	FObjectProperty* ValueProperty = CastFieldChecked<FObjectProperty>(GeneratedStructType->DestValueProperty.Get());
+	FStructProperty*     TimeProperty  = CastFieldChecked<FStructProperty>(GeneratedStructType->DestTimeProperty.Get());
+
+	const FFrameNumber*  TimeAddress   = TimeProperty->ContainerPtrToValuePtr<FFrameNumber>(StructMemory);
+	void*                ValueAddress  = ValueProperty->ContainerPtrToValuePtr<uint8>(StructMemory);
 
 	// It is safe to capture the property and address in this lambda because the lambda is owned by the struct itself, so cannot be invoked if the struct has been destroyed
-	auto CopyInstanceToKeyLambda = [ChannelHandle, InHandle, EditProperty, PropertyAddress](const FPropertyChangedEvent&)
+	auto CopyInstanceToKeyLambda = [ChannelHandle, InHandle, GeneratedStructType, ValueProperty, ValueAddress, TimeAddress](const FPropertyChangedEvent&)
 	{
 		if (FMovieSceneObjectPathChannel* DestinationChannel = ChannelHandle.Get())
 		{
 			const int32 KeyIndex = DestinationChannel->GetData().GetIndex(InHandle);
 			if (KeyIndex != INDEX_NONE)
 			{
-				UObject* ObjectPropertyValue = EditProperty->GetObjectPropertyValue(PropertyAddress);
+				UObject* ObjectPropertyValue = ValueProperty->GetObjectPropertyValue(ValueAddress);
 				DestinationChannel->GetData().GetValues()[KeyIndex] = ObjectPropertyValue;
+
+				// Set the new key time
+				DestinationChannel->SetKeyTime(InHandle, *TimeAddress);
 			}
 		}
 	};
 
 	FGeneratedMovieSceneKeyStruct* KeyStruct = reinterpret_cast<FGeneratedMovieSceneKeyStruct*>(Struct->GetStructMemory());
 	KeyStruct->OnPropertyChangedEvent = CopyInstanceToKeyLambda;
+
+	// Copy the initial value for the struct
+	FMovieSceneObjectPathChannel* Channel = ChannelHandle.Get();
+	if (Channel)
+	{
+		// Copy the initial value into the struct
+		const int32 KeyIndex = Channel->GetData().GetIndex(InHandle);
+		if (KeyIndex != INDEX_NONE)
+		{
+			UObject* InitialObject = Channel->GetData().GetValues()[KeyIndex].Get();
+			ValueProperty->SetObjectPropertyValue(ValueAddress, InitialObject);
+		}
+	}
 }
 
-void DrawKeys(FMovieSceneFloatChannel* Channel, TArrayView<const FKeyHandle> InKeyHandles, const UMovieSceneSection* InOwner, TArrayView<FKeyDrawParams> OutKeyDrawParams)
+template<typename ChannelType>
+void DrawKeysImpl(ChannelType* Channel, TArrayView<const FKeyHandle> InKeyHandles, const UMovieSceneSection* InOwner, TArrayView<FKeyDrawParams> OutKeyDrawParams)
 {
+	using ChannelValueType = typename ChannelType::ChannelValueType;
+
 	static const FName CircleKeyBrushName("Sequencer.KeyCircle");
 	static const FName DiamondKeyBrushName("Sequencer.KeyDiamond");
 	static const FName SquareKeyBrushName("Sequencer.KeySquare");
 	static const FName TriangleKeyBrushName("Sequencer.KeyTriangle");
 
-	const FSlateBrush* CircleKeyBrush = FEditorStyle::GetBrush(CircleKeyBrushName);
-	const FSlateBrush* DiamondKeyBrush = FEditorStyle::GetBrush(DiamondKeyBrushName);
-	const FSlateBrush* SquareKeyBrush = FEditorStyle::GetBrush(SquareKeyBrushName);
-	const FSlateBrush* TriangleKeyBrush = FEditorStyle::GetBrush(TriangleKeyBrushName);
+	const FSlateBrush* CircleKeyBrush = FAppStyle::GetBrush(CircleKeyBrushName);
+	const FSlateBrush* DiamondKeyBrush = FAppStyle::GetBrush(DiamondKeyBrushName);
+	const FSlateBrush* SquareKeyBrush = FAppStyle::GetBrush(SquareKeyBrushName);
+	const FSlateBrush* TriangleKeyBrush = FAppStyle::GetBrush(TriangleKeyBrushName);
 
-	TMovieSceneChannelData<FMovieSceneFloatValue> ChannelData = Channel->GetData();
-	TArrayView<const FMovieSceneFloatValue> Values = ChannelData.GetValues();
+	TMovieSceneChannelData<ChannelValueType> ChannelData = Channel->GetData();
+	TArrayView<const ChannelValueType> Values = ChannelData.GetValues();
 
 	FKeyDrawParams TempParams;
 	TempParams.BorderBrush = TempParams.FillBrush = DiamondKeyBrush;
+	TempParams.ConnectionStyle = EKeyConnectionStyle::Solid;
 
 	for (int32 Index = 0; Index < InKeyHandles.Num(); ++Index)
 	{
@@ -744,6 +877,7 @@ void DrawKeys(FMovieSceneFloatChannel* Channel, TArrayView<const FKeyHandle> InK
 		ERichCurveTangentMode TangentMode = KeyIndex == INDEX_NONE ? RCTM_None : Values[KeyIndex].TangentMode.GetValue();
 
 		TempParams.FillOffset = FVector2D(0.f, 0.f);
+		TempParams.ConnectionStyle = EKeyConnectionStyle::Solid;
 
 		switch (InterpMode)
 		{
@@ -756,6 +890,7 @@ void DrawKeys(FMovieSceneFloatChannel* Channel, TArrayView<const FKeyHandle> InK
 		case RCIM_Constant:
 			TempParams.BorderBrush = TempParams.FillBrush = SquareKeyBrush;
 			TempParams.FillTint = FLinearColor(0.0f, 0.445f, 0.695f, 1.0f); // blue
+			TempParams.ConnectionStyle = EKeyConnectionStyle::Dashed;
 			break;
 
 		case RCIM_Cubic:
@@ -763,6 +898,7 @@ void DrawKeys(FMovieSceneFloatChannel* Channel, TArrayView<const FKeyHandle> InK
 
 			switch (TangentMode)
 			{
+			case RCTM_SmartAuto:  TempParams.FillTint = FLinearColor(0.759f, 0.176f, 0.67f, 1.0f);break; // little vermillion
 			case RCTM_Auto:  TempParams.FillTint = FLinearColor(0.972f, 0.2f, 0.2f, 1.0f);     break; // vermillion
 			case RCTM_Break: TempParams.FillTint = FLinearColor(0.336f, 0.703f, 0.5f, 0.91f);  break; // sky blue
 			case RCTM_User:  TempParams.FillTint = FLinearColor(0.797f, 0.473f, 0.5f, 0.652f); break; // reddish purple
@@ -780,15 +916,25 @@ void DrawKeys(FMovieSceneFloatChannel* Channel, TArrayView<const FKeyHandle> InK
 	}
 }
 
+void DrawKeys(FMovieSceneFloatChannel* Channel, TArrayView<const FKeyHandle> InKeyHandles, const UMovieSceneSection* InOwner, TArrayView<FKeyDrawParams> OutKeyDrawParams)
+{
+	DrawKeysImpl(Channel, InKeyHandles, InOwner, OutKeyDrawParams);
+}
+
+void DrawKeys(FMovieSceneDoubleChannel* Channel, TArrayView<const FKeyHandle> InKeyHandles, const UMovieSceneSection* InOwner, TArrayView<FKeyDrawParams> OutKeyDrawParams)
+{
+	DrawKeysImpl(Channel, InKeyHandles, InOwner, OutKeyDrawParams);
+}
+
 void DrawKeys(FMovieSceneParticleChannel* Channel, TArrayView<const FKeyHandle> InKeyHandles, const UMovieSceneSection* InOwner, TArrayView<FKeyDrawParams> OutKeyDrawParams)
 {
 	static const FName KeyLeftBrushName("Sequencer.KeyLeft");
 	static const FName KeyRightBrushName("Sequencer.KeyRight");
 	static const FName KeyDiamondBrushName("Sequencer.KeyDiamond");
 
-	const FSlateBrush* LeftKeyBrush = FEditorStyle::GetBrush(KeyLeftBrushName);
-	const FSlateBrush* RightKeyBrush = FEditorStyle::GetBrush(KeyRightBrushName);
-	const FSlateBrush* DiamondBrush = FEditorStyle::GetBrush(KeyDiamondBrushName);
+	const FSlateBrush* LeftKeyBrush = FAppStyle::GetBrush(KeyLeftBrushName);
+	const FSlateBrush* RightKeyBrush = FAppStyle::GetBrush(KeyRightBrushName);
+	const FSlateBrush* DiamondBrush = FAppStyle::GetBrush(KeyDiamondBrushName);
 
 	TMovieSceneChannelData<uint8> ChannelData = Channel->GetData();
 
@@ -825,10 +971,10 @@ void DrawKeys(FMovieSceneEventChannel* Channel, TArrayView<const FKeyHandle> InK
 
 	FKeyDrawParams ValidEventParams, InvalidEventParams;
 
-	ValidEventParams.BorderBrush   = ValidEventParams.FillBrush   = FEditorStyle::Get().GetBrush("Sequencer.KeyDiamond");
+	ValidEventParams.BorderBrush   = ValidEventParams.FillBrush   = FAppStyle::Get().GetBrush("Sequencer.KeyDiamond");
 
-	InvalidEventParams.FillBrush   = FEditorStyle::Get().GetBrush("Sequencer.KeyDiamond");
-	InvalidEventParams.BorderBrush = FEditorStyle::Get().GetBrush("Sequencer.KeyDiamondBorder");
+	InvalidEventParams.FillBrush   = FAppStyle::Get().GetBrush("Sequencer.KeyDiamond");
+	InvalidEventParams.BorderBrush = FAppStyle::Get().GetBrush("Sequencer.KeyDiamondBorder");
 	InvalidEventParams.FillTint    = FLinearColor(1.f,1.f,1.f,.2f);
 
 	TMovieSceneChannelData<FMovieSceneEvent> ChannelData = Channel->GetData();
@@ -853,9 +999,12 @@ void DrawKeys(FMovieSceneEventChannel* Channel, TArrayView<const FKeyHandle> InK
 	}
 }
 
-struct FFloatChannelKeyMenuExtension : FExtender, TSharedFromThis<FFloatChannelKeyMenuExtension>
+template<typename ChannelType>
+struct TCurveChannelKeyMenuExtension : TSharedFromThis<TCurveChannelKeyMenuExtension<ChannelType>>
 {
-	FFloatChannelKeyMenuExtension(TWeakPtr<ISequencer> InSequencer, TArray<TExtendKeyMenuParams<FMovieSceneFloatChannel>>&& InChannels)
+	using ChannelValueType = typename ChannelType::ChannelValueType;
+
+	TCurveChannelKeyMenuExtension(TWeakPtr<ISequencer> InSequencer, TArray<TExtendKeyMenuParams<ChannelType>>&& InChannels)
 		: WeakSequencer(InSequencer)
 		, ChannelAndHandles(MoveTemp(InChannels))
 	{}
@@ -868,14 +1017,26 @@ struct FFloatChannelKeyMenuExtension : FExtender, TSharedFromThis<FFloatChannelK
 			return;
 		}
 
-		TSharedRef<FFloatChannelKeyMenuExtension> SharedThis = AsShared();
+		TSharedRef<TCurveChannelKeyMenuExtension<ChannelType>> SharedThis = this->AsShared();
 
 		MenuBuilder.BeginSection("SequencerInterpolation", LOCTEXT("KeyInterpolationMenu", "Key Interpolation"));
 		{
 			MenuBuilder.AddMenuEntry(
+				LOCTEXT("SetKeyInterpolationSmartAuto", "Cubic (Smart Auto)"),
+				LOCTEXT("SetKeyInterpolationSmartAutoTooltip", "Set key interpolation to smart auto"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "Sequencer.IconKeySmartAuto"),
+				FUIAction(
+					FExecuteAction::CreateLambda([SharedThis] { SharedThis->SetInterpTangentMode(RCIM_Cubic, RCTM_SmartAuto); }),
+					FCanExecuteAction(),
+					FIsActionChecked::CreateLambda([SharedThis] { return SharedThis->IsInterpTangentModeSelected(RCIM_Cubic, RCTM_SmartAuto); })),
+				NAME_None,
+				EUserInterfaceActionType::ToggleButton
+			);
+
+			MenuBuilder.AddMenuEntry(
 				LOCTEXT("SetKeyInterpolationAuto", "Cubic (Auto)"),
 				LOCTEXT("SetKeyInterpolationAutoTooltip", "Set key interpolation to auto"),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "Sequencer.IconKeyAuto"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "Sequencer.IconKeyAuto"),
 				FUIAction(
 					FExecuteAction::CreateLambda([SharedThis]{ SharedThis->SetInterpTangentMode(RCIM_Cubic, RCTM_Auto); }),
 					FCanExecuteAction(),
@@ -887,7 +1048,7 @@ struct FFloatChannelKeyMenuExtension : FExtender, TSharedFromThis<FFloatChannelK
 			MenuBuilder.AddMenuEntry(
 				LOCTEXT("SetKeyInterpolationUser", "Cubic (User)"),
 				LOCTEXT("SetKeyInterpolationUserTooltip", "Set key interpolation to user"),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "Sequencer.IconKeyUser"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "Sequencer.IconKeyUser"),
 				FUIAction(
 					FExecuteAction::CreateLambda([SharedThis]{ SharedThis->SetInterpTangentMode(RCIM_Cubic, RCTM_User); }),
 					FCanExecuteAction(),
@@ -899,7 +1060,7 @@ struct FFloatChannelKeyMenuExtension : FExtender, TSharedFromThis<FFloatChannelK
 			MenuBuilder.AddMenuEntry(
 				LOCTEXT("SetKeyInterpolationBreak", "Cubic (Break)"),
 				LOCTEXT("SetKeyInterpolationBreakTooltip", "Set key interpolation to break"),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "Sequencer.IconKeyBreak"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "Sequencer.IconKeyBreak"),
 				FUIAction(
 					FExecuteAction::CreateLambda([SharedThis]{ SharedThis->SetInterpTangentMode(RCIM_Cubic, RCTM_Break); }),
 					FCanExecuteAction(),
@@ -911,7 +1072,7 @@ struct FFloatChannelKeyMenuExtension : FExtender, TSharedFromThis<FFloatChannelK
 			MenuBuilder.AddMenuEntry(
 				LOCTEXT("SetKeyInterpolationLinear", "Linear"),
 				LOCTEXT("SetKeyInterpolationLinearTooltip", "Set key interpolation to linear"),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "Sequencer.IconKeyLinear"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "Sequencer.IconKeyLinear"),
 				FUIAction(
 					FExecuteAction::CreateLambda([SharedThis]{ SharedThis->SetInterpTangentMode(RCIM_Linear, RCTM_Auto); }),
 					FCanExecuteAction(),
@@ -923,7 +1084,7 @@ struct FFloatChannelKeyMenuExtension : FExtender, TSharedFromThis<FFloatChannelK
 			MenuBuilder.AddMenuEntry(
 				LOCTEXT("SetKeyInterpolationConstant", "Constant"),
 				LOCTEXT("SetKeyInterpolationConstantTooltip", "Set key interpolation to constant"),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "Sequencer.IconKeyConstant"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "Sequencer.IconKeyConstant"),
 				FUIAction(
 					FExecuteAction::CreateLambda([SharedThis]{ SharedThis->SetInterpTangentMode(RCIM_Constant, RCTM_Auto); }),
 					FCanExecuteAction(),
@@ -940,17 +1101,17 @@ struct FFloatChannelKeyMenuExtension : FExtender, TSharedFromThis<FFloatChannelK
 		FScopedTransaction SetInterpTangentModeTransaction(NSLOCTEXT("Sequencer", "SetInterpTangentMode_Transaction", "Set Interpolation and Tangent Mode"));
 		bool bAnythingChanged = false;
 
-		for (const TExtendKeyMenuParams<FMovieSceneFloatChannel>& Channel : ChannelAndHandles)
+		for (const TExtendKeyMenuParams<ChannelType>& Channel : ChannelAndHandles)
 		{
 			UMovieSceneSection* Section = Channel.Section.Get();
-			FMovieSceneFloatChannel* ChannelPtr = Channel.Channel.Get();
+			ChannelType* ChannelPtr = Channel.Channel.Get();
 
 			if (Section && ChannelPtr)
 			{
 				Section->Modify();
 
-				TMovieSceneChannelData<FMovieSceneFloatValue> ChannelData = ChannelPtr->GetData();
-				TArrayView<FMovieSceneFloatValue> Values = ChannelData.GetValues();
+				TMovieSceneChannelData<ChannelValueType> ChannelData = ChannelPtr->GetData();
+				TArrayView<ChannelValueType> Values = ChannelData.GetValues();
 
 				for (FKeyHandle Handle : Channel.Handles)
 				{
@@ -978,13 +1139,13 @@ struct FFloatChannelKeyMenuExtension : FExtender, TSharedFromThis<FFloatChannelK
 
 	bool IsInterpTangentModeSelected(ERichCurveInterpMode InterpMode, ERichCurveTangentMode TangentMode) const
 	{
-		for (const TExtendKeyMenuParams<FMovieSceneFloatChannel>& Channel : ChannelAndHandles)
+		for (const TExtendKeyMenuParams<ChannelType>& Channel : ChannelAndHandles)
 		{
-			FMovieSceneFloatChannel* ChannelPtr = Channel.Channel.Get();
+			ChannelType* ChannelPtr = Channel.Channel.Get();
 			if (ChannelPtr)
 			{
-				TMovieSceneChannelData<FMovieSceneFloatValue> ChannelData = ChannelPtr->GetData();
-				TArrayView<FMovieSceneFloatValue> Values = ChannelData.GetValues();
+				TMovieSceneChannelData<ChannelValueType> ChannelData = ChannelPtr->GetData();
+				TArrayView<ChannelValueType> Values = ChannelData.GetValues();
 
 				for (FKeyHandle Handle : Channel.Handles)
 				{
@@ -1002,52 +1163,248 @@ struct FFloatChannelKeyMenuExtension : FExtender, TSharedFromThis<FFloatChannelK
 private:
 
 	/** Hidden AsShared() methods to prevent CreateSP delegate use since this extender disappears with its menu. */
-	using TSharedFromThis::AsShared;
+	using TSharedFromThis<TCurveChannelKeyMenuExtension<ChannelType>>::AsShared;
 
 	TWeakPtr<ISequencer> WeakSequencer;
-	TArray<TExtendKeyMenuParams<FMovieSceneFloatChannel>> ChannelAndHandles;
+	TArray<TExtendKeyMenuParams<ChannelType>> ChannelAndHandles;
 };
 
-
-struct FFloatChannelSectionMenuExtension : FExtender, TSharedFromThis<FFloatChannelSectionMenuExtension>
+struct FFloatChannelKeyMenuExtension : TCurveChannelKeyMenuExtension<FMovieSceneFloatChannel>
 {
-	FFloatChannelSectionMenuExtension(TWeakPtr<ISequencer> InSequencer, TArray<TMovieSceneChannelHandle<FMovieSceneFloatChannel>>&& InChannels, TArrayView<UMovieSceneSection* const> InSections)
-		: WeakSequencer(InSequencer)
-		, Channels(MoveTemp(InChannels))
+	FFloatChannelKeyMenuExtension(TWeakPtr<ISequencer> InSequencer, TArray<TExtendKeyMenuParams<FMovieSceneFloatChannel>>&& InChannels)
+		: TCurveChannelKeyMenuExtension<FMovieSceneFloatChannel>(InSequencer, MoveTemp(InChannels))
+	{}
+};
+
+struct FDoubleChannelKeyMenuExtension : TCurveChannelKeyMenuExtension<FMovieSceneDoubleChannel>
+{
+	FDoubleChannelKeyMenuExtension(TWeakPtr<ISequencer> InSequencer, TArray<TExtendKeyMenuParams<FMovieSceneDoubleChannel>>&& InChannels)
+		: TCurveChannelKeyMenuExtension<FMovieSceneDoubleChannel>(InSequencer, MoveTemp(InChannels))
+	{}
+};
+
+struct FCurveChannelSectionMenuExtension : TSharedFromThis<FCurveChannelSectionMenuExtension>
+{
+	static TSharedRef<FCurveChannelSectionMenuExtension> GetOrCreate(TWeakPtr<ISequencer> InSequencer)
 	{
-		Sections.Reserve(InSections.Num());
+		TSharedPtr<FCurveChannelSectionMenuExtension> CurrentExtension = WeakCurrentExtension.Pin();
+		if (!CurrentExtension)
+		{
+			CurrentExtension = MakeShared<FCurveChannelSectionMenuExtension>(InSequencer);
+			WeakCurrentExtension = CurrentExtension;
+		}
+		else
+		{
+			ensure(CurrentExtension->NumCurveChannelTypes > 0);
+			ensure(CurrentExtension->WeakSequencer == InSequencer);
+		}
+		return CurrentExtension.ToSharedRef();
+	}
+
+	FCurveChannelSectionMenuExtension(TWeakPtr<ISequencer> InSequencer)
+		: WeakSequencer(InSequencer)
+		, NumCurveChannelTypes(0)
+		, bMenusAdded(false)
+	{
+	}
+
+	void AddSections(TArrayView<UMovieSceneSection* const> InSections)
+	{
 		for (UMovieSceneSection* Section : InSections)
 		{
 			Sections.Add(Section);
 		}
+		++NumCurveChannelTypes;
 	}
 
 	void ExtendMenu(FMenuBuilder& MenuBuilder)
 	{
+		--NumCurveChannelTypes;
+
+		if (bMenusAdded)
+		{
+			// Only add menus once -- not once per curve channel type (float, double, etc)
+			return;
+		}
+
+		bMenusAdded = true;
+
 		ISequencer* SequencerPtr = WeakSequencer.Pin().Get();
 		if (!SequencerPtr)
 		{
 			return;
 		}
 
-		TSharedRef<FFloatChannelSectionMenuExtension> SharedThis = AsShared();
+		TSharedRef<FCurveChannelSectionMenuExtension> SharedThis = this->AsShared();
 
 		MenuBuilder.AddSubMenu(
-			LOCTEXT("SetPreInfinityExtrap", "Pre-Infinity"),
-			LOCTEXT("SetPreInfinityExtrapTooltip", "Set pre-infinity extrapolation"),
-			FNewMenuDelegate::CreateLambda([SharedThis](FMenuBuilder& SubMenuBuilder){ SharedThis->AddExtrapolationMenu(SubMenuBuilder, true); })
-			);
+			LOCTEXT("CurveChannelsMenuLabel", "Curve Channels"),
+			LOCTEXT("CurveChannelsMenuToolTip", "Edit parameters for curve channels"),
+			FNewMenuDelegate::CreateLambda([SharedThis](FMenuBuilder& SubMenuBuilder)
+			{
+				SubMenuBuilder.AddSubMenu(
+						LOCTEXT("SetPreInfinityExtrap", "Pre-Infinity"),
+						LOCTEXT("SetPreInfinityExtrapTooltip", "Set pre-infinity extrapolation"),
+						FNewMenuDelegate::CreateLambda([SharedThis](FMenuBuilder& SubMenuBuilder){ SharedThis->AddExtrapolationMenu(SubMenuBuilder, true); })
+						);
 
-		MenuBuilder.AddSubMenu(
-			LOCTEXT("SetPostInfinityExtrap", "Post-Infinity"),
-			LOCTEXT("SetPostInfinityExtrapTooltip", "Set post-infinity extrapolation"),
-			FNewMenuDelegate::CreateLambda([SharedThis](FMenuBuilder& SubMenuBuilder){ SharedThis->AddExtrapolationMenu(SubMenuBuilder, false); })
-			);
+				SubMenuBuilder.AddSubMenu(
+						LOCTEXT("SetPostInfinityExtrap", "Post-Infinity"),
+						LOCTEXT("SetPostInfinityExtrapTooltip", "Set post-infinity extrapolation"),
+						FNewMenuDelegate::CreateLambda([SharedThis](FMenuBuilder& SubMenuBuilder){ SharedThis->AddExtrapolationMenu(SubMenuBuilder, false); })
+						);
+
+				SubMenuBuilder.AddSubMenu(
+						LOCTEXT("DisplayOpyions", "Display"),
+						LOCTEXT("DisplayOptionsTooltip", "Display options"),
+						FNewMenuDelegate::CreateLambda([SharedThis](FMenuBuilder& SubMenuBuilder){ SharedThis->AddDisplayOptionsMenu(SubMenuBuilder); })
+						);
+			}));
+	}
+
+	void AddDisplayOptionsMenu(FMenuBuilder& MenuBuilder)
+	{
+		TSharedRef<FCurveChannelSectionMenuExtension> SharedThis = this->AsShared();
+
+		ISequencer* Sequencer = WeakSequencer.Pin().Get();
+		if (!Sequencer)
+		{
+			return;
+		}
+
+		USequencerSettings* Settings = Sequencer->GetSequencerSettings();
+		if (!Settings)
+		{
+			return;
+		}
+
+		// Menu entry for key area height
+		auto OnKeyAreaHeightChanged = [=](int32 NewValue) { Settings->SetKeyAreaHeightWithCurves((float)NewValue); };
+		auto GetKeyAreaHeight = [=]() { return (int)Settings->GetKeyAreaHeightWithCurves(); };
+
+		auto OnKeyAreaCurveNormalized = [=](FString KeyAreaName) 
+		{ 
+			if (Settings->HasKeyAreaCurveExtents(KeyAreaName))
+			{	
+				Settings->RemoveKeyAreaCurveExtents(KeyAreaName);
+			}
+			else
+			{
+				// Initialize to some arbitrary value
+				Settings->SetKeyAreaCurveExtents(KeyAreaName, 0.f, 6.f); 
+			}
+		};
+		auto GetKeyAreaCurveNormalized = [=](FString KeyAreaName) { return !Settings->HasKeyAreaCurveExtents(KeyAreaName); };
+
+		auto OnKeyAreaCurveMinChanged = [=](double NewValue, FString KeyAreaName) { double CurveMin = 0.f; double CurveMax = 0.f; Settings->GetKeyAreaCurveExtents(KeyAreaName, CurveMin, CurveMax); Settings->SetKeyAreaCurveExtents(KeyAreaName, NewValue, CurveMax); };
+		auto GetKeyAreaCurveMin = [=](FString KeyAreaName) { double CurveMin = 0.f; double CurveMax = 0.f; Settings->GetKeyAreaCurveExtents(KeyAreaName, CurveMin, CurveMax); return CurveMin; };
+
+		auto OnKeyAreaCurveMaxChanged = [=](double NewValue, FString KeyAreaName) { double CurveMin = 0.f; double CurveMax = 0.f; Settings->GetKeyAreaCurveExtents(KeyAreaName, CurveMin, CurveMax); Settings->SetKeyAreaCurveExtents(KeyAreaName, CurveMin, NewValue); };
+		auto GetKeyAreaCurveMax = [=](FString KeyAreaName) { double CurveMin = 0.f; double CurveMax = 0.f; Settings->GetKeyAreaCurveExtents(KeyAreaName, CurveMin, CurveMax); return CurveMax; };
+
+		MenuBuilder.AddMenuEntry(
+			LOCTEXT("ToggleShowCurve", "Show Curve"),
+			LOCTEXT("ToggleShowCurveTooltip", "Toggle showing the curve in the track area"),
+			FSlateIcon(),
+			FUIAction(
+				FExecuteAction::CreateLambda([SharedThis]{ SharedThis->ToggleShowCurve(); }),
+				FCanExecuteAction(),
+				FGetActionCheckState::CreateLambda([SharedThis]{ return SharedThis->IsShowCurve(); })
+			),
+			NAME_None,
+			EUserInterfaceActionType::ToggleButton
+		);	
+		
+		FString KeyAreaName;
+		TArray<const IKeyArea*> SelectedKeyAreas;
+		Sequencer->GetSelectedKeyAreas(SelectedKeyAreas);
+		for (const IKeyArea* KeyArea : SelectedKeyAreas)
+		{			
+			if (KeyArea)
+			{
+				KeyAreaName = KeyArea->GetName().ToString();
+				break;
+			}
+		}
+
+		MenuBuilder.AddMenuEntry(
+			LOCTEXT("ToggleKeyAreaCurveNormalized", "Key Area Curve Normalized"),
+			LOCTEXT("ToggleKeyAreaCurveNormalizedTooltip", "Toggle showing the curve in the track area as normalized"),
+			FSlateIcon(),
+			FUIAction(
+				FExecuteAction::CreateLambda([=] { OnKeyAreaCurveNormalized(KeyAreaName); }),
+				FCanExecuteAction(FCanExecuteAction::CreateLambda([SharedThis]{ return SharedThis->IsAnyShowCurve(); })),
+				FIsActionChecked::CreateLambda([=] { return GetKeyAreaCurveNormalized(KeyAreaName); })
+			),
+			NAME_None,
+			EUserInterfaceActionType::ToggleButton
+		);	
+
+		MenuBuilder.AddWidget(
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+				[
+					SNew(SSpacer)
+				]
+			+ SHorizontalBox::Slot()
+				.AutoWidth()
+				[
+					SNew(SBox)
+					.WidthOverride(50.f)
+					.IsEnabled_Lambda([=]() { return SharedThis->IsAnyShowCurve() && Settings->HasKeyAreaCurveExtents(KeyAreaName); })
+					[
+						SNew(SSpinBox<double>)
+						.Style(&FAppStyle::GetWidgetStyle<FSpinBoxStyle>("Sequencer.HyperlinkSpinBox"))
+						.OnValueCommitted_Lambda([=](double NewValue, ETextCommit::Type CommitType) { OnKeyAreaCurveMinChanged(NewValue, KeyAreaName); })
+						.OnValueChanged_Lambda([=](double NewValue) { OnKeyAreaCurveMinChanged(NewValue, KeyAreaName); })
+						.Value_Lambda([=]() -> double { return GetKeyAreaCurveMin(KeyAreaName); })
+					]
+				]
+			+ SHorizontalBox::Slot()
+				.AutoWidth()
+				[
+					SNew(SBox)
+					.WidthOverride(50.f)
+					.IsEnabled_Lambda([=]() { return SharedThis->IsAnyShowCurve() && Settings->HasKeyAreaCurveExtents(KeyAreaName); })
+					[
+						SNew(SSpinBox<double>)
+						.Style(&FAppStyle::GetWidgetStyle<FSpinBoxStyle>("Sequencer.HyperlinkSpinBox"))
+						.OnValueCommitted_Lambda([=](double NewValue, ETextCommit::Type CommitType) { OnKeyAreaCurveMaxChanged(NewValue, KeyAreaName); })
+						.OnValueChanged_Lambda([=](double NewValue) { OnKeyAreaCurveMaxChanged(NewValue, KeyAreaName); })
+						.Value_Lambda([=]() -> double { return GetKeyAreaCurveMax(KeyAreaName); })
+					]
+				],
+				LOCTEXT("KeyAreaCurveRangeText", "Key Area Curve Range")
+		);		
+		
+		MenuBuilder.AddWidget(
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+				[
+					SNew(SSpacer)
+				]
+			+ SHorizontalBox::Slot()
+				.AutoWidth()
+				[
+					SNew(SBox)
+					.WidthOverride(50.f)
+					[
+						SNew(SSpinBox<int32>)
+						.Style(&FAppStyle::GetWidgetStyle<FSpinBoxStyle>("Sequencer.HyperlinkSpinBox"))
+						.OnValueCommitted_Lambda([=](int32 Value, ETextCommit::Type CommitType) { OnKeyAreaHeightChanged(Value); })
+						.OnValueChanged_Lambda(OnKeyAreaHeightChanged)
+						.MinValue(15)
+						.MaxValue(300)
+						.Value_Lambda([=]() -> int32 { return GetKeyAreaHeight(); })
+					]
+				],
+				LOCTEXT("KeyAreaHeightText", "Key Area Height")
+		);
 	}
 
 	void AddExtrapolationMenu(FMenuBuilder& MenuBuilder, bool bPreInfinity)
 	{
-		TSharedRef<FFloatChannelSectionMenuExtension> SharedThis = AsShared();
+		TSharedRef<FCurveChannelSectionMenuExtension> SharedThis = this->AsShared();
 
 		MenuBuilder.AddMenuEntry(
 			LOCTEXT("SetExtrapCycle", "Cycle"),
@@ -1115,8 +1472,86 @@ struct FFloatChannelSectionMenuExtension : FExtender, TSharedFromThis<FFloatChan
 		);
 	}
 
+	void GetChannels(TArray<FMovieSceneFloatChannel*>& FloatChannels, TArray<FMovieSceneDoubleChannel*>& DoubleChannels,
+		TArray<FMovieSceneIntegerChannel*>& IntegerChannels, TArray<FMovieSceneBoolChannel*>& BoolChannels) const
+	{
+		ISequencer* Sequencer = WeakSequencer.Pin().Get();
+		if (!Sequencer)
+		{
+			return;
+		}
+
+		// Get selected channels
+		TArray<const IKeyArea*> KeyAreas;
+		Sequencer->GetSelectedKeyAreas(KeyAreas);
+		for (const IKeyArea* KeyArea : KeyAreas)
+		{
+			FMovieSceneChannelHandle Handle = KeyArea->GetChannel();
+			if (Handle.GetChannelTypeName() == FMovieSceneFloatChannel::StaticStruct()->GetFName())
+			{
+				FMovieSceneFloatChannel* Channel = static_cast<FMovieSceneFloatChannel*>(Handle.Get());
+				FloatChannels.Add(Channel);
+			}
+			else if (Handle.GetChannelTypeName() == FMovieSceneDoubleChannel::StaticStruct()->GetFName())
+			{
+				FMovieSceneDoubleChannel* Channel = static_cast<FMovieSceneDoubleChannel*>(Handle.Get());
+				DoubleChannels.Add(Channel);
+			}
+			else if (Handle.GetChannelTypeName() == FMovieSceneIntegerChannel::StaticStruct()->GetFName())
+			{
+				FMovieSceneIntegerChannel* Channel = static_cast<FMovieSceneIntegerChannel*>(Handle.Get());
+				IntegerChannels.Add(Channel);
+			}
+			else if (Handle.GetChannelTypeName() == FMovieSceneBoolChannel::StaticStruct()->GetFName())
+			{
+				FMovieSceneBoolChannel* Channel = static_cast<FMovieSceneBoolChannel*>(Handle.Get());
+				BoolChannels.Add(Channel);
+			}
+		}
+
+		// Otherwise, the channels of all the sections
+		if (FloatChannels.Num() + DoubleChannels.Num() + IntegerChannels.Num() + BoolChannels.Num() == 0)
+		{
+			for (TWeakObjectPtr<UMovieSceneSection> WeakSection : Sections)
+			{
+				if (UMovieSceneSection* Section = WeakSection.Get())
+				{
+					FMovieSceneChannelProxy& ChannelProxy = Section->GetChannelProxy();
+					for (FMovieSceneFloatChannel* Channel : ChannelProxy.GetChannels<FMovieSceneFloatChannel>())
+					{
+						FloatChannels.Add(Channel);
+					}
+					for (FMovieSceneDoubleChannel* Channel : ChannelProxy.GetChannels<FMovieSceneDoubleChannel>())
+					{
+						DoubleChannels.Add(Channel);
+					}
+					for (FMovieSceneIntegerChannel* Channel : ChannelProxy.GetChannels<FMovieSceneIntegerChannel>())
+					{
+						IntegerChannels.Add(Channel);
+					}
+					for (FMovieSceneBoolChannel* Channel : ChannelProxy.GetChannels<FMovieSceneBoolChannel>())
+					{
+						BoolChannels.Add(Channel);
+					}
+				}
+			}
+		}
+	}
+
 	void SetExtrapolationMode(ERichCurveExtrapolation ExtrapMode, bool bPreInfinity)
 	{
+		TArray<FMovieSceneFloatChannel*> FloatChannels;
+		TArray<FMovieSceneDoubleChannel*> DoubleChannels;
+		TArray<FMovieSceneIntegerChannel*> IntegerChannels;
+		TArray<FMovieSceneBoolChannel*> BoolChannels;
+
+		GetChannels(FloatChannels, DoubleChannels,IntegerChannels,BoolChannels);
+
+		if (FloatChannels.Num() + DoubleChannels.Num() + IntegerChannels.Num() + BoolChannels.Num() == 0)
+		{
+			return;
+		}
+
 		FScopedTransaction Transaction(LOCTEXT("SetExtrapolationMode_Transaction", "Set Extrapolation Mode"));
 
 		bool bAnythingChanged = false;
@@ -1131,16 +1566,29 @@ struct FFloatChannelSectionMenuExtension : FExtender, TSharedFromThis<FFloatChan
 		}
 
 		// Apply to all channels
-		for (const TMovieSceneChannelHandle<FMovieSceneFloatChannel>& Handle : Channels)
+		for (FMovieSceneFloatChannel* Channel : FloatChannels)
 		{
-			FMovieSceneFloatChannel* Channel = Handle.Get();
-
-			if (Channel)
-			{
-				TEnumAsByte<ERichCurveExtrapolation>& DestExtrap = bPreInfinity ? Channel->PreInfinityExtrap : Channel->PostInfinityExtrap;
-				DestExtrap = ExtrapMode;
-				bAnythingChanged = true;
-			}
+			TEnumAsByte<ERichCurveExtrapolation>& DestExtrap = bPreInfinity ? Channel->PreInfinityExtrap : Channel->PostInfinityExtrap;
+			DestExtrap = ExtrapMode;
+			bAnythingChanged = true;
+		}
+		for (FMovieSceneDoubleChannel* Channel : DoubleChannels)
+		{
+			TEnumAsByte<ERichCurveExtrapolation>& DestExtrap = bPreInfinity ? Channel->PreInfinityExtrap : Channel->PostInfinityExtrap;
+			DestExtrap = ExtrapMode;
+			bAnythingChanged = true;
+		}
+		for (FMovieSceneIntegerChannel* Channel : IntegerChannels)
+		{
+			TEnumAsByte<ERichCurveExtrapolation>& DestExtrap = bPreInfinity ? Channel->PreInfinityExtrap : Channel->PostInfinityExtrap;
+			DestExtrap = ExtrapMode;
+			bAnythingChanged = true;
+		}
+		for (FMovieSceneBoolChannel* Channel : BoolChannels)
+		{
+			TEnumAsByte<ERichCurveExtrapolation>& DestExtrap = bPreInfinity ? Channel->PreInfinityExtrap : Channel->PostInfinityExtrap;
+			DestExtrap = ExtrapMode;
+			bAnythingChanged = true;
 		}
 
 		if (bAnythingChanged)
@@ -1156,57 +1604,233 @@ struct FFloatChannelSectionMenuExtension : FExtender, TSharedFromThis<FFloatChan
 		}
 	}
 
-
 	bool IsExtrapolationModeSelected(ERichCurveExtrapolation ExtrapMode, bool bPreInfinity) const
 	{
-		for (const TMovieSceneChannelHandle<FMovieSceneFloatChannel>& Handle : Channels)
-		{
-			FMovieSceneFloatChannel* Channel = Handle.Get();
+		TArray<FMovieSceneFloatChannel*> FloatChannels;
+		TArray<FMovieSceneDoubleChannel*> DoubleChannels;
+		TArray<FMovieSceneIntegerChannel*> IntegerChannels;
+		TArray<FMovieSceneBoolChannel*> BoolChannels;
 
-			if (Channel)
+		GetChannels(FloatChannels, DoubleChannels, IntegerChannels, BoolChannels);
+
+		for (FMovieSceneFloatChannel* Channel : FloatChannels)
+		{
+			ERichCurveExtrapolation SourceExtrap = bPreInfinity ? Channel->PreInfinityExtrap : Channel->PostInfinityExtrap;
+			if (SourceExtrap != ExtrapMode)
 			{
-				ERichCurveExtrapolation SourceExtrap = bPreInfinity ? Channel->PreInfinityExtrap : Channel->PostInfinityExtrap;
-				if (SourceExtrap != ExtrapMode)
-				{
-					return false;
-				}
+				return false;
+			}
+		}
+		for (FMovieSceneDoubleChannel* Channel : DoubleChannels)
+		{
+			ERichCurveExtrapolation SourceExtrap = bPreInfinity ? Channel->PreInfinityExtrap : Channel->PostInfinityExtrap;
+			if (SourceExtrap != ExtrapMode)
+			{
+				return false;
+			}
+		}
+		for (FMovieSceneIntegerChannel* Channel : IntegerChannels)
+		{
+			ERichCurveExtrapolation SourceExtrap = bPreInfinity ? Channel->PreInfinityExtrap : Channel->PostInfinityExtrap;
+			if (SourceExtrap != ExtrapMode)
+			{
+				return false;
+			}
+		}
+		for (FMovieSceneBoolChannel* Channel : BoolChannels)
+		{
+			ERichCurveExtrapolation SourceExtrap = bPreInfinity ? Channel->PreInfinityExtrap : Channel->PostInfinityExtrap;
+			if (SourceExtrap != ExtrapMode)
+			{
+				return false;
 			}
 		}
 
 		return true;
 	}
 
+	void ToggleShowCurve()
+	{
+		const ECheckBoxState CurrentState = IsShowCurve();
+		const bool bShowCurve = (CurrentState != ECheckBoxState::Checked); // If unchecked or mixed, check it
+
+		FScopedTransaction Transaction(LOCTEXT("ToggleShowCurve_Transaction", "Toggle Show Curve"));
+
+		bool bAnythingChanged = false;
+
+		// Modify all sections
+
+		for (TWeakObjectPtr<UMovieSceneSection> WeakSection : Sections)
+		{
+			if (UMovieSceneSection* Section = WeakSection.Get())
+			{
+				Section->Modify();
+			}
+		}
+
+		// Apply to all channels
+		for (TWeakObjectPtr<UMovieSceneSection> WeakSection : Sections)
+		{
+			if (UMovieSceneSection* Section = WeakSection.Get())
+			{
+				FMovieSceneChannelProxy& ChannelProxy = Section->GetChannelProxy();
+				for (FMovieSceneFloatChannel* Channel : ChannelProxy.GetChannels<FMovieSceneFloatChannel>())
+				{
+					if (Channel)
+					{
+						Channel->SetShowCurve(bShowCurve);
+						bAnythingChanged = true;
+					}
+				}
+				for (FMovieSceneDoubleChannel* Channel : ChannelProxy.GetChannels<FMovieSceneDoubleChannel>())
+				{
+					if (Channel)
+					{
+						Channel->SetShowCurve(bShowCurve);
+						bAnythingChanged = true;
+					}
+				}
+			}
+		}
+
+		if (!bAnythingChanged)
+		{
+			Transaction.Cancel();
+		}
+	}
+
+	ECheckBoxState IsShowCurve() const
+	{
+		int32 NumShowedAndHidden[2] = { 0, 0 };
+		for (TWeakObjectPtr<UMovieSceneSection> WeakSection : Sections)
+		{
+			if (UMovieSceneSection* Section = WeakSection.Get())
+			{
+				FMovieSceneChannelProxy& ChannelProxy = Section->GetChannelProxy();
+				for (FMovieSceneFloatChannel* Channel : ChannelProxy.GetChannels<FMovieSceneFloatChannel>())
+				{
+					if (Channel)
+					{
+						NumShowedAndHidden[Channel->GetShowCurve() ? 0 : 1]++;
+					}
+				}
+				for (FMovieSceneDoubleChannel* Channel : ChannelProxy.GetChannels<FMovieSceneDoubleChannel>())
+				{
+					if (Channel)
+					{
+						NumShowedAndHidden[Channel->GetShowCurve() ? 0 : 1]++;
+					}
+				}
+			}
+		}
+
+		if (NumShowedAndHidden[0] == 0 && NumShowedAndHidden[1] > 0)  // No curve showed, some hidden
+		{
+			return ECheckBoxState::Unchecked;
+		}
+		else if (NumShowedAndHidden[0] > 0 && NumShowedAndHidden[1] == 0) // Some curves showed, none hidden
+		{
+			return ECheckBoxState::Checked;
+		}
+		return ECheckBoxState::Undetermined;  // Mixed states, or no curves
+	}
+
+	bool IsAnyShowCurve() const
+	{
+		for (TWeakObjectPtr<UMovieSceneSection> WeakSection : Sections)
+		{
+			if (UMovieSceneSection* Section = WeakSection.Get())
+			{
+				FMovieSceneChannelProxy& ChannelProxy = Section->GetChannelProxy();
+				for (FMovieSceneFloatChannel* Channel : ChannelProxy.GetChannels<FMovieSceneFloatChannel>())
+				{
+					if (Channel && Channel->GetShowCurve())
+					{
+						return true;
+					}
+				}
+				for (FMovieSceneDoubleChannel* Channel : ChannelProxy.GetChannels<FMovieSceneDoubleChannel>())
+				{
+					if (Channel && Channel->GetShowCurve())
+					{
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+
 private:
 
 	/** Hidden AsShared() methods to prevent CreateSP delegate use since this extender disappears with its menu. */
-	using TSharedFromThis::AsShared;
+	using TSharedFromThis<FCurveChannelSectionMenuExtension>::AsShared;
+
+	/** Held weekly so that only the context menu owns the instance, and it gets naturally deleted when the menu closes */
+	static TWeakPtr<FCurveChannelSectionMenuExtension> WeakCurrentExtension;
 
 	TWeakPtr<ISequencer> WeakSequencer;
-	TArray<TMovieSceneChannelHandle<FMovieSceneFloatChannel>> Channels;
-	TArray<TWeakObjectPtr<UMovieSceneSection>> Sections;
+	TSet<TWeakObjectPtr<UMovieSceneSection>> Sections;
+	int32 NumCurveChannelTypes;
+	bool bMenusAdded;
 };
 
-void ExtendSectionMenu(FMenuBuilder& OuterMenuBuilder, TArray<TMovieSceneChannelHandle<FMovieSceneFloatChannel>>&& Channels, TArrayView<UMovieSceneSection* const> Sections, TWeakPtr<ISequencer> InSequencer)
+TWeakPtr<FCurveChannelSectionMenuExtension> FCurveChannelSectionMenuExtension::WeakCurrentExtension;
+
+void ExtendSectionMenu(FMenuBuilder& OuterMenuBuilder, TSharedPtr<FExtender> MenuExtender, TArray<TMovieSceneChannelHandle<FMovieSceneFloatChannel>>&& Channels, TArrayView<UMovieSceneSection* const> Sections, TWeakPtr<ISequencer> InSequencer)
 {
-	TSharedRef<FFloatChannelSectionMenuExtension> Extension = MakeShared<FFloatChannelSectionMenuExtension>(InSequencer, MoveTemp(Channels), Sections);
+	TSharedRef<FCurveChannelSectionMenuExtension> Extension = FCurveChannelSectionMenuExtension::GetOrCreate(InSequencer);
+	Extension->AddSections(Sections);
 
-	Extension->AddMenuExtension("SequencerSections", EExtensionHook::First, nullptr, FMenuExtensionDelegate::CreateLambda([Extension](FMenuBuilder& MenuBuilder) { Extension->ExtendMenu(MenuBuilder); }));
-
-	OuterMenuBuilder.PushExtender(Extension);
+	MenuExtender->AddMenuExtension("SequencerChannels", EExtensionHook::First, nullptr, FMenuExtensionDelegate::CreateLambda([Extension](FMenuBuilder& MenuBuilder) { Extension->ExtendMenu(MenuBuilder); }));
 }
 
-void ExtendKeyMenu(FMenuBuilder& OuterMenuBuilder, TArray<TExtendKeyMenuParams<FMovieSceneFloatChannel>>&& Channels, TWeakPtr<ISequencer> InSequencer)
+void ExtendSectionMenu(FMenuBuilder& OuterMenuBuilder, TSharedPtr<FExtender> MenuExtender, TArray<TMovieSceneChannelHandle<FMovieSceneDoubleChannel>>&& Channels, TArrayView<UMovieSceneSection* const> Sections, TWeakPtr<ISequencer> InSequencer)
+{
+	TSharedRef<FCurveChannelSectionMenuExtension> Extension = FCurveChannelSectionMenuExtension::GetOrCreate(InSequencer);
+	Extension->AddSections(Sections);
+
+	MenuExtender->AddMenuExtension("SequencerChannels", EExtensionHook::First, nullptr, FMenuExtensionDelegate::CreateLambda([Extension](FMenuBuilder& MenuBuilder) { Extension->ExtendMenu(MenuBuilder); }));
+}
+
+void ExtendSectionMenu(FMenuBuilder& OuterMenuBuilder, TSharedPtr<FExtender> MenuExtender, TArray<TMovieSceneChannelHandle<FMovieSceneIntegerChannel>>&& Channels, TArrayView<UMovieSceneSection* const> Sections, TWeakPtr<ISequencer> InSequencer)
+{
+	TSharedRef<FCurveChannelSectionMenuExtension> Extension = FCurveChannelSectionMenuExtension::GetOrCreate(InSequencer);
+	Extension->AddSections(Sections);
+
+	MenuExtender->AddMenuExtension("SequencerChannels", EExtensionHook::First, nullptr, FMenuExtensionDelegate::CreateLambda([Extension](FMenuBuilder& MenuBuilder) { Extension->ExtendMenu(MenuBuilder); }));
+}
+
+void ExtendSectionMenu(FMenuBuilder& OuterMenuBuilder, TSharedPtr<FExtender> MenuExtender, TArray<TMovieSceneChannelHandle<FMovieSceneBoolChannel>>&& Channels, TArrayView<UMovieSceneSection* const> Sections, TWeakPtr<ISequencer> InSequencer)
+{
+	TSharedRef<FCurveChannelSectionMenuExtension> Extension = FCurveChannelSectionMenuExtension::GetOrCreate(InSequencer);
+	Extension->AddSections(Sections);
+
+	MenuExtender->AddMenuExtension("SequencerChannels", EExtensionHook::First, nullptr, FMenuExtensionDelegate::CreateLambda([Extension](FMenuBuilder& MenuBuilder) { Extension->ExtendMenu(MenuBuilder); }));
+}
+
+void ExtendKeyMenu(FMenuBuilder& OuterMenuBuilder, TSharedPtr<FExtender> MenuExtender, TArray<TExtendKeyMenuParams<FMovieSceneFloatChannel>>&& Channels, TWeakPtr<ISequencer> InSequencer)
 {
 	TSharedRef<FFloatChannelKeyMenuExtension> Extension = MakeShared<FFloatChannelKeyMenuExtension>(InSequencer, MoveTemp(Channels));
 
-	Extension->AddMenuExtension("SequencerKeyEdit", EExtensionHook::After, nullptr, FMenuExtensionDelegate::CreateLambda([Extension](FMenuBuilder& MenuBuilder) { Extension->ExtendMenu(MenuBuilder); }));
+	MenuExtender->AddMenuExtension("SequencerKeyEdit", EExtensionHook::After, nullptr, FMenuExtensionDelegate::CreateLambda([Extension](FMenuBuilder& MenuBuilder) { Extension->ExtendMenu(MenuBuilder); }));
+}
 
-	OuterMenuBuilder.PushExtender(Extension);
+void ExtendKeyMenu(FMenuBuilder& OuterMenuBuilder, TSharedPtr<FExtender> MenuExtender, TArray<TExtendKeyMenuParams<FMovieSceneDoubleChannel>>&& Channels, TWeakPtr<ISequencer> InSequencer)
+{
+	TSharedRef<FDoubleChannelKeyMenuExtension> Extension = MakeShared<FDoubleChannelKeyMenuExtension>(InSequencer, MoveTemp(Channels));
+
+	MenuExtender->AddMenuExtension("SequencerKeyEdit", EExtensionHook::After, nullptr, FMenuExtensionDelegate::CreateLambda([Extension](FMenuBuilder& MenuBuilder) { Extension->ExtendMenu(MenuBuilder); }));
 }
 
 TUniquePtr<FCurveModel> CreateCurveEditorModel(const TMovieSceneChannelHandle<FMovieSceneFloatChannel>& FloatChannel, UMovieSceneSection* OwningSection, TSharedRef<ISequencer> InSequencer)
 {
 	return MakeUnique<FFloatChannelCurveModel>(FloatChannel, OwningSection, InSequencer);
+}
+
+TUniquePtr<FCurveModel> CreateCurveEditorModel(const TMovieSceneChannelHandle<FMovieSceneDoubleChannel>& DoubleChannel, UMovieSceneSection* OwningSection, TSharedRef<ISequencer> InSequencer)
+{
+	return MakeUnique<FDoubleChannelCurveModel>(DoubleChannel, OwningSection, InSequencer);
 }
 
 TUniquePtr<FCurveModel> CreateCurveEditorModel(const TMovieSceneChannelHandle<FMovieSceneIntegerChannel>& IntegerChannel, UMovieSceneSection* OwningSection, TSharedRef<ISequencer> InSequencer)
@@ -1224,5 +1848,13 @@ TUniquePtr<FCurveModel> CreateCurveEditorModel(const TMovieSceneChannelHandle<FM
 	return MakeUnique<FEventChannelCurveModel>(EventChannel, OwningSection, InSequencer);
 }
 
+bool ShouldShowCurve(const FMovieSceneFloatChannel* Channel, UMovieSceneSection* InSection)
+{
+	return Channel->GetShowCurve();
+}
+bool ShouldShowCurve(const FMovieSceneDoubleChannel* Channel, UMovieSceneSection* InSection)
+{
+	return Channel->GetShowCurve();
+}
 
 #undef LOCTEXT_NAMESPACE

@@ -5,17 +5,19 @@
 #include "BoneControllers/AnimNode_SkeletalControlBase.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Physics/ImmediatePhysics/ImmediatePhysicsDeclares.h"
+#include "PhysicsEngine/PhysicsAsset.h"
 #include "PhysicsProxy/PerSolverFieldSystem.h"
+#include "Tasks/Task.h"
 #include "AnimNode_RigidBody.generated.h"
 
 struct FBodyInstance;
 struct FConstraintInstance;
+class FEvent;
 
-extern ANIMGRAPHRUNTIME_API TAutoConsoleVariable<int32> CVarEnableRigidBodyNode;
+extern ANIMGRAPHRUNTIME_API bool bEnableRigidBodyNode;
+extern ANIMGRAPHRUNTIME_API FAutoConsoleVariableRef CVarEnableRigidBodyNode;
 extern ANIMGRAPHRUNTIME_API TAutoConsoleVariable<int32> CVarEnableRigidBodyNodeSimulation;
 extern ANIMGRAPHRUNTIME_API TAutoConsoleVariable<int32> CVarRigidBodyLODThreshold;
-
-#define ENABLE_RBAN_PERF_LOGGING (1 && !NO_LOGGING && !UE_BUILD_SHIPPING)
 
 /** Determines in what space the simulation should run */
 UENUM()
@@ -29,24 +31,49 @@ enum class ESimulationSpace : uint8
 	BaseBoneSpace,
 };
 
+/** Determines behaviour regarding deferral of simulation tasks. */
+UENUM()
+enum class ESimulationTiming : uint8
+{
+	/** Use the default project setting as defined by p.RigidBodyNode.DeferredSimulationDefault. */
+	Default,
+	/** Always run the simulation to completion during animation evaluation. */
+	Synchronous,
+	/** Always run the simulation in the background and retrieve the result on the next animation evaluation. */
+	Deferred
+};
 
 /**
  * Settings for the system which passes motion of the simulation's space into the simulation. This allows the simulation to pass a 
  * fraction of the world space motion onto the bodies which allows Bone-Space and Component-Space simulations to react to world-space 
  * movement in a controllable way.
  */
+template <> struct TIsPODType<FSimSpaceSettings> { enum { Value = true }; };
+
 USTRUCT(BlueprintType)
-struct ANIMGRAPHRUNTIME_API FSimSpaceSettings
+struct FSimSpaceSettings
 {
 	GENERATED_USTRUCT_BODY()
 
-	FSimSpaceSettings();
+	ANIMGRAPHRUNTIME_API FSimSpaceSettings();
 
-	// Global multipler on the effects of simulation space movement. Must be in range [0, 1]. If MasterAlpha = 0.0, the system is disabled and the simulation will
-	// be fully local (i.e., world-space actor movement and rotation does not affect the simulation). When MasterAlpha = 1.0 the simulation effectively acts as a 
+	// Disable deprecation errors by providing defaults wrapped with pragma disable
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	~FSimSpaceSettings() = default;
+	FSimSpaceSettings(FSimSpaceSettings const&) = default;
+	FSimSpaceSettings& operator=(const FSimSpaceSettings &) = default;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+	// Global multipler on the effects of simulation space movement. Must be in range [0, 1]. If WorldAlpha = 0.0, the system is disabled and the simulation will
+	// be fully local (i.e., world-space actor movement and rotation does not affect the simulation). When WorldAlpha = 1.0 the simulation effectively acts as a 
 	// world-space sim, but with the ability to apply limits using the other parameters.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Settings, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float MasterAlpha;
+	float WorldAlpha;
+
+#if WITH_EDITORONLY_DATA
+	UE_DEPRECATED(5.1, "This property has been deprecated. Please, use WorldAlpha.")
+	float MasterAlpha = 0.f;
+#endif // WITH_EDITORONLY_DATA
 
 	// Multiplier on the Z-component of velocity and acceleration that is passed to the simulation. Usually from 0.0 to 1.0 to 
 	// reduce the effects of jumping and crouching on the simulation, but it can be higher than 1.0 if you need to exaggerate this motion for some reason.
@@ -77,8 +104,10 @@ struct ANIMGRAPHRUNTIME_API FSimSpaceSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Settings, meta = (ClampMin = "0.0"))
 	float MaxAngularAcceleration;
 
+#if WITH_EDITORONLY_DATA
 	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "ExternalLinearDrag is deprecated. Please use ExternalLinearDragV instead."))
 	float ExternalLinearDrag_DEPRECATED;
+#endif
 
 	// Additional linear drag applied to every body in addition to linear drag specified on them in the physics asset. 
 	// When combined with ExternalLinearVelocity, this can be used to add a temporary wind-blown effect without having to tune linear drag on 
@@ -99,7 +128,7 @@ struct ANIMGRAPHRUNTIME_API FSimSpaceSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Settings)
 	FVector ExternalAngularVelocity;
 
-	void PostSerialize(const FArchive& Ar);
+	ANIMGRAPHRUNTIME_API void PostSerialize(const FArchive& Ar);
 };
 
 #if WITH_EDITORONLY_DATA
@@ -118,49 +147,70 @@ struct TStructOpsTypeTraits<FSimSpaceSettings> : public TStructOpsTypeTraitsBase
  *	Controller that simulates physics based on the physics asset of the skeletal mesh component
  */
 USTRUCT()
-struct ANIMGRAPHRUNTIME_API FAnimNode_RigidBody : public FAnimNode_SkeletalControlBase
+struct FAnimNode_RigidBody : public FAnimNode_SkeletalControlBase
 {
 	GENERATED_USTRUCT_BODY()
 
-	FAnimNode_RigidBody();
-	~FAnimNode_RigidBody();
+	ANIMGRAPHRUNTIME_API FAnimNode_RigidBody();
+	ANIMGRAPHRUNTIME_API ~FAnimNode_RigidBody();
 
 	// FAnimNode_Base interface
-	virtual void GatherDebugData(FNodeDebugData& DebugData) override;
+	ANIMGRAPHRUNTIME_API virtual void GatherDebugData(FNodeDebugData& DebugData) override;
+	ANIMGRAPHRUNTIME_API virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
 	// End of FAnimNode_Base interface
 
 	// FAnimNode_SkeletalControlBase interface
-	virtual void UpdateComponentPose_AnyThread(const FAnimationUpdateContext& Context) override;
-	virtual void EvaluateComponentPose_AnyThread(FComponentSpacePoseContext& Output) override;
-	virtual void EvaluateSkeletalControl_AnyThread(FComponentSpacePoseContext& Output, TArray<FBoneTransform>& OutBoneTransforms) override;
-	virtual void OnInitializeAnimInstance(const FAnimInstanceProxy* InProxy, const UAnimInstance* InAnimInstance) override;
+	ANIMGRAPHRUNTIME_API virtual void UpdateComponentPose_AnyThread(const FAnimationUpdateContext& Context) override;
+	ANIMGRAPHRUNTIME_API virtual void EvaluateComponentPose_AnyThread(FComponentSpacePoseContext& Output) override;
+	ANIMGRAPHRUNTIME_API virtual void EvaluateSkeletalControl_AnyThread(FComponentSpacePoseContext& Output, TArray<FBoneTransform>& OutBoneTransforms) override;
+	ANIMGRAPHRUNTIME_API virtual void OnInitializeAnimInstance(const FAnimInstanceProxy* InProxy, const UAnimInstance* InAnimInstance) override;
 	virtual bool NeedsOnInitializeAnimInstance() const override { return true; }
-	virtual void PreUpdate(const UAnimInstance* InAnimInstance) override;
-	virtual void UpdateInternal(const FAnimationUpdateContext& Context) override;
+	ANIMGRAPHRUNTIME_API virtual void PreUpdate(const UAnimInstance* InAnimInstance) override;
+	ANIMGRAPHRUNTIME_API virtual void UpdateInternal(const FAnimationUpdateContext& Context) override;
 	virtual bool HasPreUpdate() const override { return true; }
-	virtual bool IsValidToEvaluate(const USkeleton* Skeleton, const FBoneContainer& RequiredBones) override;
-	virtual bool NeedsDynamicReset() const override;
-	virtual void ResetDynamics(ETeleportType InTeleportType) override;
-	virtual int32 GetLODThreshold() const override;
+	ANIMGRAPHRUNTIME_API virtual bool IsValidToEvaluate(const USkeleton* Skeleton, const FBoneContainer& RequiredBones) override;
+	ANIMGRAPHRUNTIME_API virtual bool NeedsDynamicReset() const override;
+	ANIMGRAPHRUNTIME_API virtual void ResetDynamics(ETeleportType InTeleportType) override;
+	ANIMGRAPHRUNTIME_API virtual int32 GetLODThreshold() const override;
 	// End of FAnimNode_SkeletalControlBase interface
 
-	virtual void AddImpulseAtLocation(FVector Impulse, FVector Location, FName BoneName = NAME_None);
+	ANIMGRAPHRUNTIME_API virtual void AddImpulseAtLocation(FVector Impulse, FVector Location, FName BoneName = NAME_None);
 
 	// TEMP: Exposed for use in PhAt as a quick way to get drag handles working with Chaos
 	virtual ImmediatePhysics::FSimulation* GetSimulation() { return PhysicsSimulation; }
 
+	/**
+	 * Set the override physics asset. This will automatically trigger a physics re-init in case the override physics asset changes. 
+	 * Users can get access to this in the Animation Blueprint via the Animation Node Functions.
+	 */
+	void SetOverridePhysicsAsset(UPhysicsAsset* PhysicsAsset);
+
+	UPhysicsAsset* GetPhysicsAsset() const { return UsePhysicsAsset; }
+
 public:
-	/** Physics asset to use. If empty use the skeletal mesh's default physics asset */
+	/** Physics asset to use. If empty use the skeletal mesh's default physics asset in case Default To Skeletal Mesh Physics Asset is set to True. */
 	UPROPERTY(EditAnywhere, Category = Settings)
-	UPhysicsAsset* OverridePhysicsAsset;
+	TObjectPtr<UPhysicsAsset> OverridePhysicsAsset;
+
+	/** Use the skeletal mesh physics asset as default in case set to True. The Override Physics Asset will always have priority over this. */
+	UPROPERTY(EditAnywhere, Category = Settings)
+	bool bDefaultToSkeletalMeshPhysicsAsset = true;
 
 private:
+	/** Get the physics asset candidate to be used while respecting the bDefaultToSkeletalMeshPhysicsAsset and the priority to the override physics asset. */
+	UPhysicsAsset* GetPhysicsAssetToBeUsed(const UAnimInstance* InAnimInstance) const;
+
 	FTransform PreviousCompWorldSpaceTM;
 	FTransform CurrentTransform;
 	FTransform PreviousTransform;
 
 	UPhysicsAsset* UsePhysicsAsset;
+
 public:
+	/** Enable if you want to ignore the p.RigidBodyLODThreshold CVAR and force the node to solely use the LOD threshold. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Performance, meta = (PinHiddenByDefault))
+	bool bUseLocalLODThresholdOnly = false;
+
 	/** Override gravity*/
 	UPROPERTY(EditAnywhere, Category = Settings, meta = (PinHiddenByDefault, editcondition = "bOverrideWorldGravity"))
 	FVector OverrideWorldGravity;
@@ -219,6 +269,9 @@ public:
 	UPROPERTY(EditAnywhere, Category = Settings)
 	bool bForceDisableCollisionBetweenConstraintBodies;
 
+	/** If true, kinematic objects will be added to the simulation at runtime to represent any cloth colliders defined for the parent object. */
+	UPROPERTY(EditAnywhere, Category = Settings)
+	bool bUseExternalClothCollision;
 
 private:
 	ETeleportType ResetSimulatedTeleportType;
@@ -271,7 +324,7 @@ private:
 	uint8 bCheckForBodyTransformInit : 1;
 
 public:
-	void PostSerialize(const FArchive& Ar);
+	ANIMGRAPHRUNTIME_API void PostSerialize(const FArchive& Ar);
 
 private:
 
@@ -281,21 +334,21 @@ private:
 #endif
 
 	// FAnimNode_SkeletalControlBase interface
-	virtual void InitializeBoneReferences(const FBoneContainer& RequiredBones) override;
+	ANIMGRAPHRUNTIME_API virtual void InitializeBoneReferences(const FBoneContainer& RequiredBones) override;
 	// End of FAnimNode_SkeletalControlBase interface
 
-	void InitPhysics(const UAnimInstance* InAnimInstance);
-	void UpdateWorldGeometry(const UWorld& World, const USkeletalMeshComponent& SKC);
-	void UpdateWorldForces(const FTransform& ComponentToWorld, const FTransform& RootBoneTM, const float DeltaSeconds);
+	ANIMGRAPHRUNTIME_API void InitPhysics(const UAnimInstance* InAnimInstance);
+	ANIMGRAPHRUNTIME_API void UpdateWorldGeometry(const UWorld& World, const USkeletalMeshComponent& SKC);
+	ANIMGRAPHRUNTIME_API void UpdateWorldForces(const FTransform& ComponentToWorld, const FTransform& RootBoneTM, const float DeltaSeconds);
 
-	void InitializeNewBodyTransformsDuringSimulation(FComponentSpacePoseContext& Output, const FTransform& ComponentTransform, const FTransform& BaseBoneTM);
+	ANIMGRAPHRUNTIME_API void InitializeNewBodyTransformsDuringSimulation(FComponentSpacePoseContext& Output, const FTransform& ComponentTransform, const FTransform& BaseBoneTM);
 
-	void InitSimulationSpace(
+	ANIMGRAPHRUNTIME_API void InitSimulationSpace(
 		const FTransform& ComponentToWorld,
 		const FTransform& BoneToComponent);
 
 	// Calculate simulation space transform, velocity etc to pass into the solver
-	void CalculateSimulationSpace(
+	ANIMGRAPHRUNTIME_API void CalculateSimulationSpace(
 		ESimulationSpace Space,
 		const FTransform& ComponentToWorld,
 		const FTransform& BoneToComponent,
@@ -307,26 +360,46 @@ private:
 		FVector& SpaceLinearAcc,
 		FVector& SpaceAngularAcc);
 
+	// Gather cloth collision sources from the supplied Skeltal Mesh and add a kinematic actor representing each one of them to the sim.
+	ANIMGRAPHRUNTIME_API void CollectClothColliderObjects(const USkeletalMeshComponent* SkeletalMeshComp);
+	
+	// Remove all cloth collider objects from the sim.
+	ANIMGRAPHRUNTIME_API void RemoveClothColliderObjects();
+
+	// Update the sim-space transforms of all cloth collider objects.
+	ANIMGRAPHRUNTIME_API void UpdateClothColliderObjects(const FTransform& SpaceTransform);
+
 	// Gather nearby world objects and add them to the sim
-	void CollectWorldObjects();
+	ANIMGRAPHRUNTIME_API void CollectWorldObjects();
 
 	// Flag invalid world objects to be removed from the sim
-	void ExpireWorldObjects();
+	ANIMGRAPHRUNTIME_API void ExpireWorldObjects();
 
 	// Remove simulation objects that are flagged as expired
-	void PurgeExpiredWorldObjects();
+	ANIMGRAPHRUNTIME_API void PurgeExpiredWorldObjects();
 
 	// Update sim-space transforms of world objects
-	void UpdateWorldObjects(const FTransform& SpaceTransform);
+	ANIMGRAPHRUNTIME_API void UpdateWorldObjects(const FTransform& SpaceTransform);
+
+	// Advances the simulation by a given timestep
+	ANIMGRAPHRUNTIME_API void RunPhysicsSimulation(float DeltaSeconds, const FVector& SimSpaceGravity);
+
+	// Waits for the deferred simulation task to complete if it's not already finished
+	ANIMGRAPHRUNTIME_API void FlushDeferredSimulationTask();
+
+	// Destroy the simulation and free related structures
+	ANIMGRAPHRUNTIME_API void DestroyPhysicsSimulation();
+
+public:
+
+	/* Whether the physics simulation runs synchronously with the node's evaluation or is run in the background until the next frame. */
+	UPROPERTY(EditAnywhere, Category=Settings, AdvancedDisplay)
+	ESimulationTiming SimulationTiming;
 
 private:
 
-	float WorldTimeSeconds;
-	float LastEvalTimeSeconds;
-
-#if ENABLE_RBAN_PERF_LOGGING
-	float LastPerfWarningTimeSeconds;
-#endif
+	double WorldTimeSeconds;
+	double LastEvalTimeSeconds;
 
 	float AccumulatedDeltaTime;
 	float AnimPhysicsMinDeltaTime;
@@ -335,7 +408,11 @@ private:
 	TWeakObjectPtr<USkeletalMeshComponent> SkelMeshCompWeakPtr;
 
 	ImmediatePhysics::FSimulation* PhysicsSimulation;
-	FSolverIterations SolverIterations;
+	FPhysicsAssetSolverSettings SolverSettings;
+	FSolverIterations SolverIterations;	// to be deprecated
+
+	friend class FRigidBodyNodeSimulationTask;
+	UE::Tasks::FTask SimulationTask;
 
 	struct FOutputBoneData
 	{
@@ -400,12 +477,29 @@ private:
 
 	FPerSolverFieldSystem PerSolverField;
 
+	// Information required to identify and update a kinematic object representing a cloth collision source in the sim.
+	struct FClothCollider
+	{
+		FClothCollider(ImmediatePhysics::FActorHandle* const InActorHandle, const USkeletalMeshComponent* const InSkeletalMeshComponent, const uint32 InBoneIndex)
+			: ActorHandle(InActorHandle)
+			, SkeletalMeshComponent(InSkeletalMeshComponent)
+			, BoneIndex(InBoneIndex)
+		{}
+
+		ImmediatePhysics::FActorHandle* ActorHandle; // Identifies the physics actor in the sim.
+		const USkeletalMeshComponent* SkeletalMeshComponent; // Parent skeleton.
+		uint32 BoneIndex; // Bone within parent skeleton that drives physics actors transform.
+	};
+
+	// List of actors in the sim that represent objects collected from other parts of this character.
+	TArray<FClothCollider> ClothColliders; 
+	
 	TMap<const UPrimitiveComponent*, FWorldObject> ComponentsInSim;
 	int32 ComponentsInSimTick;
 
 	FVector WorldSpaceGravity;
 
-	float TotalMass;
+	double TotalMass;
 
 	// Bounds used to gather world objects copied into the simulation
 	FSphere CachedBounds;
@@ -445,7 +539,57 @@ struct TStructOpsTypeTraits<FAnimNode_RigidBody> : public TStructOpsTypeTraitsBa
 {
 	enum
 	{
-		WithPostSerialize = true
+		WithPostSerialize = true,
 	};
 };
 #endif
+
+FORCEINLINE_DEBUGGABLE FTransform SpaceToWorldTransform(
+	ESimulationSpace Space, const FTransform& ComponentToWorld, const FTransform& BaseBoneTM)
+{
+	switch (Space)
+	{
+	case ESimulationSpace::ComponentSpace: return ComponentToWorld;
+	case ESimulationSpace::WorldSpace: return FTransform::Identity;
+	case ESimulationSpace::BaseBoneSpace: return BaseBoneTM * ComponentToWorld;
+	default: return FTransform::Identity;
+	}
+}
+
+FORCEINLINE_DEBUGGABLE FVector WorldVectorToSpaceNoScale(
+	ESimulationSpace Space, const FVector& WorldDir, const FTransform& ComponentToWorld, const FTransform& BaseBoneTM)
+{
+	switch (Space)
+	{
+	case ESimulationSpace::ComponentSpace: return ComponentToWorld.InverseTransformVectorNoScale(WorldDir);
+	case ESimulationSpace::WorldSpace: return WorldDir;
+	case ESimulationSpace::BaseBoneSpace:
+		return BaseBoneTM.InverseTransformVectorNoScale(ComponentToWorld.InverseTransformVectorNoScale(WorldDir));
+	default: return FVector::ZeroVector;
+	}
+}
+
+FORCEINLINE_DEBUGGABLE FVector WorldPositionToSpace(
+	ESimulationSpace Space, const FVector& WorldPoint, const FTransform& ComponentToWorld, const FTransform& BaseBoneTM)
+{
+	switch (Space)
+	{
+	case ESimulationSpace::ComponentSpace: return ComponentToWorld.InverseTransformPosition(WorldPoint);
+	case ESimulationSpace::WorldSpace: return WorldPoint;
+	case ESimulationSpace::BaseBoneSpace:
+		return BaseBoneTM.InverseTransformPosition(ComponentToWorld.InverseTransformPosition(WorldPoint));
+	default: return FVector::ZeroVector;
+	}
+}
+
+FORCEINLINE_DEBUGGABLE FTransform ConvertCSTransformToSimSpace(
+	ESimulationSpace Space, const FTransform& InCSTransform, const FTransform& ComponentToWorld, const FTransform& BaseBoneTM)
+{
+	switch (Space)
+	{
+	case ESimulationSpace::ComponentSpace: return InCSTransform;
+	case ESimulationSpace::WorldSpace:  return InCSTransform * ComponentToWorld;
+	case ESimulationSpace::BaseBoneSpace: return InCSTransform.GetRelativeTransform(BaseBoneTM); break;
+	default: ensureMsgf(false, TEXT("Unsupported Simulation Space")); return InCSTransform;
+	}
+}

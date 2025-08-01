@@ -2,13 +2,20 @@
 
 #pragma once 
 
-#include "CoreTypes.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
 #include "Containers/SortedMap.h"
-#include "Internationalization/TextKey.h"
+#include "Containers/UnrealString.h"
+#include "CoreTypes.h"
 #include "Internationalization/LocalizedTextSourceTypes.h"
+#include "Internationalization/TextKey.h"
+#include "Misc/Crc.h"
+#include "Templates/SharedPointer.h"
+
+class FArchive;
 
 /** Utility class for working with Localization MetaData Resource (LocMeta) files. */
-class CORE_API FTextLocalizationMetaDataResource
+class FTextLocalizationMetaDataResource
 {
 public:
 	FTextLocalizationMetaDataResource() = default;
@@ -29,20 +36,20 @@ public:
 	TArray<FString> CompiledCultures;
 
 	/** Load the given LocMeta file into this resource. */
-	bool LoadFromFile(const FString& FilePath);
+	CORE_API bool LoadFromFile(const FString& FilePath);
 
 	/** Load the given LocMeta archive into this resource. */
-	bool LoadFromArchive(FArchive& Archive, const FString& LocMetaID);
+	CORE_API bool LoadFromArchive(FArchive& Archive, const FString& LocMetaID);
 
 	/** Save this resource to the given LocMeta file. */
-	bool SaveToFile(const FString& FilePath);
+	CORE_API bool SaveToFile(const FString& FilePath);
 
 	/** Save this resource to the given LocMeta archive. */
-	bool SaveToArchive(FArchive& Archive, const FString& LocMetaID);
+	CORE_API bool SaveToArchive(FArchive& Archive, const FString& LocMetaID);
 };
 
 /** Utility class for working with Localization Resource (LocRes) files. */
-class CORE_API FTextLocalizationResource
+class FTextLocalizationResource
 {
 public:
 	FTextLocalizationResource() = default;
@@ -56,8 +63,9 @@ public:
 	/** Data struct for tracking a localization entry from a localization resource. */
 	struct FEntry
 	{
-		FString LocalizedString;
+		FTextConstDisplayStringPtr LocalizedString;
 		FTextKey LocResID;
+		int32 LocalizationTargetPathId = INDEX_NONE;
 		uint32 SourceStringHash = 0;
 		int32 Priority = 0; // Smaller numbers are higher priority
 	};
@@ -78,30 +86,32 @@ public:
 	}
 
 	/** Add a single entry to this resource. */
-	void AddEntry(const FTextKey& InNamespace, const FTextKey& InKey, const FString& InSourceString, const FString& InLocalizedString, const int32 InPriority, const FTextKey& InLocResID = FTextKey());
-	void AddEntry(const FTextKey& InNamespace, const FTextKey& InKey, const uint32 InSourceStringHash, const FString& InLocalizedString, const int32 InPriority, const FTextKey& InLocResID = FTextKey());
+	CORE_API void AddEntry(const FTextKey& InNamespace, const FTextKey& InKey, const FString& InSourceString, const FString& InLocalizedString, const int32 InPriority, const FTextKey& InLocResID = FTextKey());
+	CORE_API void AddEntry(const FTextKey& InNamespace, const FTextKey& InKey, const FString& InSourceString, const FTextConstDisplayStringRef& InLocalizedString, const int32 InPriority, const FTextKey& InLocResID = FTextKey());
+	CORE_API void AddEntry(const FTextKey& InNamespace, const FTextKey& InKey, const uint32 InSourceStringHash, const FString& InLocalizedString, const int32 InPriority, const FTextKey& InLocResID = FTextKey());
+	CORE_API void AddEntry(const FTextKey& InNamespace, const FTextKey& InKey, const uint32 InSourceStringHash, const FTextConstDisplayStringRef& InLocalizedString, const int32 InPriority, const FTextKey& InLocResID = FTextKey());
 
 	/** Is this resource empty? */
-	bool IsEmpty() const;
+	CORE_API bool IsEmpty() const;
 
 	/** Load all LocRes files in the specified directory into this resource. */
-	void LoadFromDirectory(const FString& DirectoryPath, const int32 Priority);
+	CORE_API void LoadFromDirectory(const FString& DirectoryPath, const int32 Priority);
 
 	/** Load the given LocRes file into this resource. */
-	bool LoadFromFile(const FString& FilePath, const int32 Priority);
+	CORE_API bool LoadFromFile(const FString& FilePath, const int32 Priority);
 
 	/** Load the given LocRes archive into this resource. */
-	bool LoadFromArchive(FArchive& Archive, const FTextKey& LocResID, const int32 Priority);
+	CORE_API bool LoadFromArchive(FArchive& Archive, const FTextKey& LocResID, const int32 Priority);
 
 	/** Save this resource to the given LocRes file. */
-	bool SaveToFile(const FString& FilePath) const;
+	CORE_API bool SaveToFile(const FString& FilePath) const;
 
 	/** Save this resource to the given LocRes archive. */
-	bool SaveToArchive(FArchive& Archive, const FTextKey& LocResID) const;
+	CORE_API bool SaveToArchive(FArchive& Archive, const FTextKey& LocResID) const;
 
 private:
 	/** Test whether the new entry should replace the current entry, optionally logging a conflict */
-	static bool ShouldReplaceEntry(const FTextKey& Namespace, const FTextKey& Key, const FEntry& CurrentEntry, const FEntry& NewEntry);
+	static CORE_API bool ShouldReplaceEntry(const FTextKey& Namespace, const FTextKey& Key, const FEntry& CurrentEntry, const FEntry& NewEntry);
 };
 
 namespace TextLocalizationResourceUtil

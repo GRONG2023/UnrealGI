@@ -7,8 +7,12 @@
 #include "Framework/Text/TextHitPoint.h"
 #include "Framework/Text/ILayoutBlock.h"
 #include "Internationalization/BreakIterator.h"
+#include "Internationalization/Culture.h"
+#include "Internationalization/Internationalization.h"
 #include "Internationalization/TextTransformer.h"
 #include "Framework/Text/ShapedTextCache.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(TextLayout)
 
 DECLARE_CYCLE_STAT(TEXT("Text Layout"), STAT_SlateTextLayout, STATGROUP_Slate);
 
@@ -361,6 +365,7 @@ void FTextLayout::CreateLineViewBlocks( int32 LineModelIndex, const int32 StopIn
 	}
 
 	FVector2D LineSize( ForceInitToZero );
+	float UnscaleLineHeight = 0.f;
 	
 	// Use a negative scroll offset since positive scrolling moves things negatively in screen space
 	FVector2D CurrentOffset(-ScrollOffset.X, TextLayoutSize.Height - ScrollOffset.Y);
@@ -421,7 +426,7 @@ void FTextLayout::CreateLineViewBlocks( int32 LineModelIndex, const int32 StopIn
 			CurrentHorizontalPos += Block->GetSize().X;
 		}
 
-		const float UnscaleLineHeight = MaxAboveBaseline + MaxBelowBaseline;
+		UnscaleLineHeight = MaxAboveBaseline + MaxBelowBaseline;
 
 		LineSize.X = CurrentHorizontalPos;
 		LineSize.Y = UnscaleLineHeight * LineHeightPercentage;
@@ -450,6 +455,7 @@ void FTextLayout::CreateLineViewBlocks( int32 LineModelIndex, const int32 StopIn
 	TextLayoutSize.DrawWidth = FMath::Max( TextLayoutSize.DrawWidth, LineSize.X ); // DrawWidth is the size of the longest line + the Margin
 	TextLayoutSize.WrappedWidth = FMath::Max( TextLayoutSize.WrappedWidth, (StopIndex == INDEX_NONE) ? LineSize.X : WrappedLineWidth ); // WrappedWidth is the size of the longest line + the Margin + any trailing whitespace width
 	TextLayoutSize.Height += LineSize.Y; // Height is the total height of all lines
+	OverHeight = LineSize.Y - UnscaleLineHeight;
 }
 
 void FTextLayout::JustifyLayout()
@@ -482,6 +488,7 @@ void FTextLayout::JustifyLayout()
 		switch (VisualJustification)
 		{
 		case ETextJustify::Left:
+		case ETextJustify::InvariantLeft:
 			{
 				const float ExtraSpace = LineView.Size.X - LineJustificationWidth;
 				OffsetAdjustment.X = -ExtraSpace;
@@ -496,6 +503,7 @@ void FTextLayout::JustifyLayout()
 			break;
 
 		case ETextJustify::Right:
+		case ETextJustify::InvariantRight:
 			{
 				const float ExtraSpace = LayoutWidthNoMargin - LineJustificationWidth;
 				OffsetAdjustment.X = ExtraSpace;
@@ -765,6 +773,10 @@ void FTextLayout::FlowLineLayout(const int32 LineModelIndex, const float Wrappin
 			}
 		}
 	}
+	if (!ApplyLineHeightToBottomLine)
+	{
+		TextLayoutSize.Height -= OverHeight;
+	}
 }
 
 void FTextLayout::FlowHighlights()
@@ -983,6 +995,7 @@ void FTextLayout::BeginLineLayout(FLineModel& LineModel)
 void FTextLayout::ClearView()
 {
 	TextLayoutSize = FTextLayoutSize();
+	OverHeight = 0.f;
 	LineViews.Empty();
 	LineViewsToJustify.Empty();
 }
@@ -1036,6 +1049,9 @@ void FTextLayout::CalculateLineTextDirection(FLineModel& LineModel) const
 		break;
 	case ETextFlowDirection::RightToLeft:
 		LineModel.TextBaseDirection = TextBiDi::ETextDirection::RightToLeft;
+		break;
+	case ETextFlowDirection::Culture:
+		LineModel.TextBaseDirection = FInternationalization::Get().GetCurrentLanguage()->IsRightToLeft() ? TextBiDi::ETextDirection::RightToLeft : TextBiDi::ETextDirection::LeftToRight;
 		break;
 	default:
 		break;
@@ -1153,13 +1169,16 @@ FTextLayout::FTextLayout()
 	, Margin()
 	, Justification( ETextJustify::Left )
 	, LineHeightPercentage( 1.0f )
+	, ApplyLineHeightToBottomLine( true )
 	, TextLayoutSize()
+	, OverHeight( 0.0f )
 	, ViewSize( ForceInitToZero )
 	, ScrollOffset( ForceInitToZero )
 	, LineBreakIterator() // Initialized in FTextLayout::CreateWrappingCache if no custom iterator is provided
 	, GraphemeBreakIterator(FBreakIterator::CreateCharacterBoundaryIterator())
 	, WordBreakIterator(FBreakIterator::CreateWordBreakIterator())
 	, TextBiDiDetection(TextBiDi::CreateTextBiDi())
+	, TextOverflowPolicyOverride()
 {
 }
 
@@ -1311,7 +1330,7 @@ void FTextLayout::RemoveRunRenderer( const FTextRunRenderer& Renderer )
 	{
 		if (LineModel.RunRenderers[Index] == Renderer)
 		{
-			LineModel.RunRenderers.RemoveAt(Index, 1, /*bAllowShrinking*/false);
+			LineModel.RunRenderers.RemoveAt(Index, 1, EAllowShrinking::No);
 			bWasRemoved = true;
 			break;
 		}
@@ -1383,7 +1402,7 @@ void FTextLayout::RemoveLineHighlight( const FTextLineHighlight& Highlight )
 	{
 		if (LineModel.LineHighlights[Index] == Highlight)
 		{
-			LineModel.LineHighlights.RemoveAt(Index, 1, /*bAllowShrinking*/false);
+			LineModel.LineHighlights.RemoveAt(Index, 1, EAllowShrinking::No);
 			bWasRemoved = true;
 			break;
 		}
@@ -1789,7 +1808,7 @@ bool FTextLayout::InsertAt(const FTextLocation& Location, TSharedRef<IRun> InRun
 			InRun->Move(LineModel.Text, FTextRange(InsertLocation, InsertLocationEnd));
 
 			// Remove the old run (it may get re-added again as the right hand run)
-			LineModel.Runs.RemoveAt(RunIndex--, 1, /*bAllowShrinking*/false);
+			LineModel.Runs.RemoveAt(RunIndex--, 1, EAllowShrinking::No);
 
 			// Insert the new runs at the correct place, and then skip over these new array entries
 			const bool LeftRunHasText = !LeftRun->GetTextRange().IsEmpty();
@@ -1857,7 +1876,7 @@ bool FTextLayout::JoinLineWithNextLine(int32 LineIndex)
 	}
 
 	//Remove the next line from the list of line models
-	LineModels.RemoveAt(LineIndex + 1, 1, /*bAllowShrinking*/false);
+	LineModels.RemoveAt(LineIndex + 1, 1, EAllowShrinking::No);
 
 	DirtyFlags |= ETextLayoutDirtyState::Layout;
 	return true;
@@ -1967,7 +1986,7 @@ bool FTextLayout::RemoveAt( const FTextLocation& Location, int32 Count )
 	FLineModel& LineModel = LineModels[LineIndex];
 
 	//Make sure we aren't trying to remove more characters then we have
-	Count = RemoveLocation + Count > LineModel.Text->Len() ? Count - ((RemoveLocation + Count) - LineModel.Text->Len()) : Count;
+	Count = FMath::Min(Count, LineModel.Text->Len() - RemoveLocation);
 
 	if (Count == 0)
 	{
@@ -2070,6 +2089,20 @@ bool FTextLayout::RemoveLine(int32 LineIndex)
 				{
 					OffsetAdjustment += (LineViews[ViewIndex + 1].Offset.Y - LineView.Offset.Y);
 				}
+				else // Last line is being removed - OverHeight needs to be re-computed from the preceding line
+				{
+					float NewOverHeight = 0.f;
+					if (ViewIndex > 0)
+					{
+						FLineView& PrevLineView = LineViews[ViewIndex - 1];
+						NewOverHeight = PrevLineView.Size.Y - PrevLineView.TextHeight;
+					}
+					if (!ApplyLineHeightToBottomLine)
+					{
+						HeightAdjustment += NewOverHeight - OverHeight;
+					}
+					OverHeight = NewOverHeight;
+				}
 
 				LineViews.RemoveAt(ViewIndex);
 				LineViewsToJustify.Remove(ViewIndex);
@@ -2094,11 +2127,6 @@ bool FTextLayout::RemoveLine(int32 LineIndex)
 	}
 
 	return true;
-}
-
-void FTextLayout::AddLine( const TSharedRef< FString >& Text, const TArray< TSharedRef< IRun > >& Runs )
-{
-	AddLine(FNewLineData(Text, Runs));
 }
 
 void FTextLayout::AddLine( const FNewLineData& NewLine )
@@ -2161,11 +2189,13 @@ void FTextLayout::AddLine( const FNewLineData& NewLine )
 
 void FTextLayout::AddLines( const TArray<FNewLineData>& NewLines )
 {
+	LineModels.Reserve(NewLines.Num());
 	for (const auto& NewLine : NewLines)
 	{
 		FLineModel LineModel( NewLine.Text );
 		TransformLineText(LineModel);
 
+		LineModel.Runs.Reserve(NewLine.Runs.Num());
 		for (const auto& Run : NewLine.Runs)
 		{
 			LineModel.Runs.Add( FRunModel( Run ) );
@@ -2514,7 +2544,7 @@ void FTextLayout::SetScale( float Value )
 {
 	if (FMath::IsNaN(Value))
 	{
-		Value = 0.0;
+		Value = 0.0f;
 	}
 
 	if (Scale != Value)
@@ -2560,6 +2590,17 @@ void FTextLayout::SetTextFlowDirection( const ETextFlowDirection InTextFlowDirec
 	DirtyAllLineModels(ELineModelDirtyState::WrappingInformation | ELineModelDirtyState::TextBaseDirection | ELineModelDirtyState::ShapingCache);
 }
 
+void FTextLayout::SetTextOverflowPolicy(const TOptional<ETextOverflowPolicy> InTextOverflowPolicy)
+{
+	if (TextOverflowPolicyOverride == InTextOverflowPolicy)
+	{
+		return;
+	}
+
+	TextOverflowPolicyOverride = InTextOverflowPolicy;
+	DirtyFlags |= ETextLayoutDirtyState::Layout;
+}
+
 void FTextLayout::SetJustification( ETextJustify::Type Value )
 {
 	if ( Justification == Value )
@@ -2581,6 +2622,15 @@ void FTextLayout::SetLineHeightPercentage( float Value )
 	if ( LineHeightPercentage != Value )
 	{
 		LineHeightPercentage = Value; 
+		DirtyFlags |= ETextLayoutDirtyState::Layout;
+	}
+}
+
+void FTextLayout::SetApplyLineHeightToBottomLine( bool Value )
+{
+	if ( ApplyLineHeightToBottomLine != Value )
+	{
+		ApplyLineHeightToBottomLine = Value; 
 		DirtyFlags |= ETextLayoutDirtyState::Layout;
 	}
 }
@@ -2633,6 +2683,11 @@ void FTextLayout::SetDebugSourceInfo(const TAttribute<FString>& InDebugSourceInf
 FVector2D FTextLayout::GetSize() const
 {
 	return TextLayoutSize.GetDrawSize() * Inverse(Scale);
+}
+
+FVector2D FTextLayout::GetViewSize() const
+{
+	return ViewSize;
 }
 
 FVector2D FTextLayout::GetDrawSize() const
@@ -2931,3 +2986,4 @@ int32 FTextLayout::FTextOffsetLocations::GetTextLength() const
 	}
 	return 0;
 }
+

@@ -1,6 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Widgets/SDataGraph.h"
+
+#if STATS
+
 #include "Fonts/SlateFontInfo.h"
 #include "Misc/Paths.h"
 #include "Rendering/DrawElements.h"
@@ -18,10 +21,11 @@
 #include "Widgets/Text/STextBlock.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Widgets/Input/SButton.h"
-#include "EditorStyleSet.h"
 #include "ProfilerDataProvider.h"
 #include "ProfilerManager.h"
 #include "Widgets/StatDragDropOp.h"
+#include "ProfilerStyle.h"
+#include "SSimpleButton.h"
 
 #define LOCTEXT_NAMESPACE "SDataGraph"
 
@@ -65,7 +69,6 @@ public:
 		OnGetMouseFrameIndex = InArgs._OnGetMouseFrameIndex;
 
 		const FSlateColor TextColor( TrackedStat->GraphColor );
-		const FName CloseButtonStyle = TEXT("Docking.MajorTab.CloseButton");
 		FFormatNamedArguments Args;
 		Args.Add( TEXT("StatName"), FText::FromString( TrackedStat->GraphDataSource->GetStatName() ) );
 		const FText ToolTipText = FText::Format( LOCTEXT("DataGraphSummary_CloseButton_TT", "Click to stop tracking '{StatName}' stat"), Args );
@@ -81,15 +84,10 @@ public:
 			.VAlign(VAlign_Center)
 			.Padding( 1.0f )
 			[
-				SNew(SButton)
-				.ButtonStyle( FEditorStyle::Get(), CloseButtonStyle )
+				SNew(SSimpleButton)
+				.Icon(FAppStyle::GetBrush("Icons.Stop"))
 				.OnClicked( this, &SDataGraphSummary::CloseButton_OnClicked )
-				.ContentPadding( 0 )
 				.ToolTipText( ToolTipText )
-				[
-					SNew(SSpacer)
-					.Size( FEditorStyle::GetBrush(CloseButtonStyle, ".Normal" )->ImageSize )
-				]
 			]
 
 			// Stat group name.
@@ -101,7 +99,7 @@ public:
 			[
 				SNew(STextBlock)
 				.ColorAndOpacity( TextColor )
-				.TextStyle( FEditorStyle::Get(), TEXT("Profiler.Tooltip") )
+				.TextStyle( FProfilerStyle::Get(), TEXT("Profiler.Tooltip") )
 				.Text( this, &SDataGraphSummary::SummaryInformation_GetGroupName )
 			]
 
@@ -114,7 +112,7 @@ public:
 			[
 				SNew(STextBlock)
 				.ColorAndOpacity( TextColor )
-				.TextStyle( FEditorStyle::Get(), TEXT("Profiler.Tooltip") )
+				.TextStyle(FProfilerStyle::Get(), TEXT("Profiler.Tooltip") )
 				.Text( this, &SDataGraphSummary::SummaryInformation_GetStatName )
 			]
 
@@ -127,7 +125,7 @@ public:
 			[
 				SNew(STextBlock)
 				.ColorAndOpacity( TextColor )
-				.TextStyle( FEditorStyle::Get(), TEXT("Profiler.Tooltip") )
+				.TextStyle(FProfilerStyle::Get(), TEXT("Profiler.Tooltip") )
 				.Text( this, &SDataGraphSummary::SummaryInformation_GetSummary )
 			]
 		];
@@ -272,13 +270,13 @@ void SDataGraph::UpdateState()
 			NumDataPoints = (int32)FirstTrackedStat->GraphDataSource->GetNumFrames();
 		}
 
-		NumVisiblePoints = FMath::Max( 0, FMath::TruncToInt(ThisGeometry.Size.X) / DistanceBetweenPoints );
+		NumVisiblePoints = FMath::Max( 0, static_cast<int32>(FMath::TruncToInt(ThisGeometry.Size.X)) / DistanceBetweenPoints );
 		// GraphOffset - Updated by OnMouseMove or by ScrollTo
 		GraphOffset = FMath::Clamp( GraphOffset, 0, FMath::Max(NumDataPoints-NumVisiblePoints,0) );
 		
 		DataTotalTimeMS = FirstTrackedStat->GraphDataSource->GetTotalTimeMS();
-		VisibleTimeMS = NumVisiblePoints * FTimeAccuracy::AsFrameTime( TimeBasedAccuracy );
-		GraphOffsetMS = GraphOffset * FTimeAccuracy::AsFrameTime( TimeBasedAccuracy );
+		VisibleTimeMS = (float)NumVisiblePoints * FTimeAccuracy::AsFrameTime( TimeBasedAccuracy );
+		GraphOffsetMS = (float)GraphOffset * FTimeAccuracy::AsFrameTime( TimeBasedAccuracy );
 	}
 	else
 	{
@@ -303,19 +301,19 @@ int32 SDataGraph::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeom
 	// Rendering info.
 	const bool bEnabled  = ShouldBeEnabled( bParentEnabled );
 	ESlateDrawEffect DrawEffects = bEnabled ? ESlateDrawEffect::None : ESlateDrawEffect::DisabledEffect;
-	const FSlateBrush* TimelineAreaBrush = FEditorStyle::GetBrush("Profiler.LineGraphArea");
-	const FSlateBrush* WhiteBrush = FEditorStyle::GetBrush("WhiteTexture");
+	const FSlateBrush* TimelineAreaBrush = FProfilerStyle::Get().GetBrush("Brushes.White25");
+	const FSlateBrush* WhiteBrush = FProfilerStyle::Get().GetBrush("Brushes.White");
 
 	/** Width of the alloted geometry that is used to draw a data graph. */
 	const float AreaX0 = 0.0f;
-	const float AreaX1 = AllottedGeometry.GetLocalSize().X;
+	const float AreaX1 = static_cast<float>(AllottedGeometry.GetLocalSize().X);
 
 	// Draw background.
 	FSlateDrawElement::MakeBox
 	(
 		OutDrawElements,
 		LayerId,
-		AllottedGeometry.ToPaintGeometry( FVector2D(0,0), FVector2D(AreaX1,AllottedGeometry.GetLocalSize().Y) ),
+		AllottedGeometry.ToPaintGeometry( FVector2D(AreaX1,AllottedGeometry.GetLocalSize().Y), FSlateLayoutTransform() ),
 		TimelineAreaBrush,
 		DrawEffects,
 		TimelineAreaBrush->GetTint( InWidgetStyle ) * InWidgetStyle.GetColorAndOpacityTint()
@@ -339,7 +337,7 @@ int32 SDataGraph::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeom
 		SCOPE_CYCLE_COUNTER(STAT_DG_OnPaint);
 
 		const FTrackedStat& TrackedStat = *It.Value();
-		const float GraphYScale = AllottedGeometry.GetLocalSize().Y/ScaleY;
+		const float GraphYScale = static_cast<float>(AllottedGeometry.GetLocalSize().Y) / ScaleY;
 		
 		const float UnitTypeScale = TrackedStat.GraphDataSource->GetSampleType() != EProfilerSampleTypes::Memory ? 1.0f : CounterToTimeScale;
 		const float TimeAccuracyMS = FTimeAccuracy::AsFrameTime( TimeBasedAccuracy );
@@ -429,8 +427,8 @@ int32 SDataGraph::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeom
 				for (float GraphStartTimeMS = GraphOffsetMS; GraphStartTimeMS < GraphRangeEndMS; GraphStartTimeMS += TimeAccuracyMS)
 				{
 					const float Value = GraphDataSource->GetValueFromTimeRange( GraphStartTimeMS, GraphStartTimeMS + TimeAccuracyMS );
-					const float XPos = DistanceBetweenPoints*GraphPoints.Num();
-					const float YPos = FMath::Clamp( AllottedGeometry.GetLocalSize().Y - GraphYScale*Value*UnitTypeScale, 0.0f, AllottedGeometry.GetLocalSize().Y );
+					const float XPos = static_cast<float>(DistanceBetweenPoints * GraphPoints.Num());
+					const float YPos = FMath::Clamp( static_cast<float>(AllottedGeometry.GetLocalSize().Y) - GraphYScale*Value*UnitTypeScale, 0.0f, static_cast<float>(AllottedGeometry.GetLocalSize().Y) );
 					new (GraphPoints)FVector2D( XPos, YPos );
 				}
 
@@ -459,8 +457,8 @@ int32 SDataGraph::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeom
 				for( uint32 GraphStartIndex = (uint32)GraphOffset; GraphStartIndex < (uint32)GraphRangeEndIndex; GraphStartIndex++ )
 				{
 					const float Value = GraphDataSource->GetValueFromIndex( GraphStartIndex );
-					const float XPos = DistanceBetweenPoints*(float)GraphPoints.Num();
-					const float YPos = FMath::Clamp( AllottedGeometry.Size.Y - GraphYScale*Value*UnitTypeScale, 0.0f, AllottedGeometry.Size.Y );
+					const float XPos = (float)DistanceBetweenPoints * (float)GraphPoints.Num();
+					const float YPos = FMath::Clamp( static_cast<float>(AllottedGeometry.Size.Y) - GraphYScale*Value*UnitTypeScale, 0.0f, static_cast<float>(AllottedGeometry.Size.Y) );
 					GraphPoints.Add( FVector2D(XPos,YPos) );
 				}
  
@@ -483,7 +481,7 @@ int32 SDataGraph::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeom
 
 
 	FSlateFontInfo SummaryFont = FCoreStyle::GetDefaultFontStyle("Regular", 8);
-	const float MaxFontCharHeight = FontMeasureService->Measure( TEXT("!"), SummaryFont ).Y;
+	const float MaxFontCharHeight = static_cast<float>(FontMeasureService->Measure( TEXT("!"), SummaryFont ).Y);
 
 	// Draw graph annotations.
 	//const IDataProviderPtr DataProvider = StatIDToGraphDescriptionMapping.Num() > 0 ? StatIDToGraphDescriptionMapping.CreateConstIterator().Key().DataSource->GetDataProvider() : NULL;
@@ -516,7 +514,7 @@ int32 SDataGraph::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeom
 
 			for( int32 FrameIndex = FrameStartIndex; FrameIndex < FrameEndIndex; FrameIndex += AvgFrameRate )
 			{
-				const float MarkerPosX = (FrameIndex - GraphOffset) * DistanceBetweenPoints;
+				const float MarkerPosX = static_cast<float>((FrameIndex - GraphOffset) * DistanceBetweenPoints);
 				const float ElapsedFrameTimeMS = DataProvider->GetElapsedFrameTimeMS( FrameIndex );
 
 				LinePoints.Add( FVector2D(MarkerPosX, 0.0) );
@@ -576,8 +574,8 @@ int32 SDataGraph::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeom
 
 			for( int32 FrameIndex = FrameStartIndex; FrameIndex < FrameEndIndex; FrameIndex += AvgFrameRate )
 			{
-				const float MarkerPosX = (FrameIndex - GraphOffset) * DistanceBetweenPoints;
-				const float ElapsedFrameTimeMS = FrameIndex * FTimeAccuracy::AsFrameTime( TimeBasedAccuracy );
+				const float MarkerPosX = static_cast<float>((FrameIndex - GraphOffset) * DistanceBetweenPoints);
+				const float ElapsedFrameTimeMS = (float)FrameIndex * FTimeAccuracy::AsFrameTime( TimeBasedAccuracy );
 				const int32 ElapsedFrameTime = FMath::Max( FMath::RoundToInt( ElapsedFrameTimeMS * 0.001f ) - 1, 0 );
 				const int32 AccumulatedFrameCounter = bCanBeDisplayedAsMulti ? FrameIndex : DataProvider->GetAccumulatedFrameCounter(ElapsedFrameTime);
 
@@ -633,7 +631,7 @@ int32 SDataGraph::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeom
 
 	//-----------------------------------------------------------------------------
 
-	const int32 MaxGridPixelSpacing = 160.0f;
+	const int32 MaxGridPixelSpacing = 160;
 
 	// Draw a horizontal lines every 150 pixels and draw a few basic lines
 	static const TArray<float> DefaultTimeValueHints = TArrayBuilder<float>()
@@ -659,8 +657,8 @@ int32 SDataGraph::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeom
 
 	const float MinTimeValue = 0.0f;
 	const float MaxTimeValue = ScaleY;
-	const float TimeValueGraphScale = MaxTimeValue / SecondaryIndicators;
-	const float TimeValueToGraph = AllottedGeometry.GetLocalSize().Y/MaxTimeValue;
+	const float TimeValueGraphScale = MaxTimeValue / (float)SecondaryIndicators;
+	const float TimeValueToGraph = static_cast<float>(AllottedGeometry.GetLocalSize().Y) / MaxTimeValue;
 
 	for( int32 SecondaryIndex = 1; SecondaryIndex <= SecondaryIndicators; SecondaryIndex++ )
 	{
@@ -757,7 +755,7 @@ int32 SDataGraph::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeom
 			continue;
 		}
 
-		const float MarkerPosY = AllottedGeometry.GetLocalSize().Y - TimeValue*TimeValueToGraph;
+		const float MarkerPosY = static_cast<float>(AllottedGeometry.GetLocalSize().Y) - TimeValue * TimeValueToGraph;
 
 		// Check if this hint should be drawn as the basic hint.
 		const FLinearColor* BasicHintColor = DefaultTimeValueHintColors.Find( TimeValue );
@@ -809,7 +807,7 @@ int32 SDataGraph::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeom
 
 		// Right	-	Values in human readable string, for the non-hierarchical samples
 		const FString CounterValueStr = FString::Printf( TEXT("%.1f KB"), TimeValue/CounterToTimeScale );
-		const float RightValueSizeX = FontMeasureService->Measure( CounterValueStr, SummaryFont ).X;
+		const float RightValueSizeX = static_cast<float>(FontMeasureService->Measure( CounterValueStr, SummaryFont ).X);
 		FSlateDrawElement::MakeText
 		(
 			OutDrawElements, 
@@ -825,9 +823,9 @@ int32 SDataGraph::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeom
 	// Draw selected frames markers.
 	{
 		LayerId++;
-		const float LocalGraphOffset = GraphOffset * DistanceBetweenPoints;
-		const float LocalGraphSelectionX0 = FrameIndices[0]*DistanceBetweenPoints - LocalGraphOffset;
-		const float LocalGraphSelectionX1 = FrameIndices[1]*DistanceBetweenPoints - LocalGraphOffset;
+		const float LocalGraphOffset = static_cast<float>(GraphOffset * DistanceBetweenPoints);
+		const float LocalGraphSelectionX0 = static_cast<float>(FrameIndices[0] * DistanceBetweenPoints) - LocalGraphOffset;
+		const float LocalGraphSelectionX1 = static_cast<float>(FrameIndices[1] * DistanceBetweenPoints) - LocalGraphOffset;
 		const float LocalGraphSelectionX[2] = { LocalGraphSelectionX0, LocalGraphSelectionX1 };
 
 		const uint32 NumVisibleFrameMarkers = ( FrameIndices[0]==FrameIndices[1] ) ? 1 : 2;
@@ -840,8 +838,8 @@ int32 SDataGraph::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeom
 				(
 					OutDrawElements,
 					LayerId,
-					AllottedGeometry.ToPaintGeometry( FVector2D(LocalGraphSelectionX[Nx]-HalfGraphMarkerWidth,0.0f), FVector2D(GraphMarkerWidth, AllottedGeometry.GetLocalSize().Y) ),
-					FEditorStyle::GetBrush("ProgressBar.Background"),
+					AllottedGeometry.ToPaintGeometry( FVector2D(GraphMarkerWidth, AllottedGeometry.GetLocalSize().Y), FSlateLayoutTransform(FVector2D(LocalGraphSelectionX[Nx]-HalfGraphMarkerWidth,0.0f)) ),
+					FAppStyle::GetBrush("Brushes.Foldout"),
 					DrawEffects,
 					FColor(64,64,255,128)
 				);
@@ -862,8 +860,8 @@ int32 SDataGraph::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeom
 				(
 					OutDrawElements,
 					LayerId,
-					AllottedGeometry.ToPaintGeometry( FVector2D(GraphSelectionX0/*+HalfGraphMarkerWidth*/,0.0f), FVector2D(GraphSelectionW/*-GraphMarkerWidth*/, AllottedGeometry.GetLocalSize().Y) ),
-					FEditorStyle::GetBrush("ProgressBar.Background"),
+					AllottedGeometry.ToPaintGeometry( FVector2D(GraphSelectionW/*-GraphMarkerWidth*/, AllottedGeometry.GetLocalSize().Y), FSlateLayoutTransform(FVector2D(GraphSelectionX0/*+HalfGraphMarkerWidth*/,0.0f)) ),
+					FAppStyle::GetBrush("Brushes.Foldout"),
 					DrawEffects,
 					FColor(64,64,255,32)
 				);
@@ -876,14 +874,14 @@ int32 SDataGraph::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeom
 		LayerId++;
 
 		const int32 LocalPosition = HoveredFrameIndex - GraphOffset;
-		const float LocalPositionGraphX = LocalPosition * DistanceBetweenPoints;
+		const float LocalPositionGraphX = static_cast<float>(LocalPosition * DistanceBetweenPoints);
 
 		FSlateDrawElement::MakeBox
 		(
 			OutDrawElements,
 			LayerId,
-			AllottedGeometry.ToPaintGeometry( FVector2D(LocalPositionGraphX-HalfGraphMarkerWidth,0.0f), FVector2D(GraphMarkerWidth, AllottedGeometry.GetLocalSize().Y) ),
-			FEditorStyle::GetBrush("ProgressBar.Background"),
+			AllottedGeometry.ToPaintGeometry( FVector2D(GraphMarkerWidth, AllottedGeometry.GetLocalSize().Y), FSlateLayoutTransform(FVector2D(LocalPositionGraphX-HalfGraphMarkerWidth,0.0f)) ),
+			FAppStyle::Get().GetBrush("Brushes.Recessed"),
 			DrawEffects,
 			FColor(255,128,128,128)
 		);
@@ -1005,7 +1003,7 @@ FReply SDataGraph::OnMouseButtonDown( const FGeometry& MyGeometry, const FPointe
 		if( NumDataPoints > 0 )
 		{
 			// Capture mouse, so we can scroll outside this widget.
-			RealGraphOffset = GraphOffset;
+			RealGraphOffset = static_cast<float>(GraphOffset);
 			Reply = FReply::Handled().CaptureMouse(SharedThis(this));
 		}
 	}
@@ -1078,7 +1076,7 @@ FReply SDataGraph::OnMouseMove( const FGeometry& MyGeometry, const FPointerEvent
 	FReply Reply = FReply::Unhandled();
 	MousePosition = MyGeometry.AbsoluteToLocal( MouseEvent.GetScreenSpacePosition() );
 	HoveredFrameIndex = CalculateFrameIndex( MousePosition );
-	HoveredFrameStartTimeMS = HoveredFrameIndex * FTimeAccuracy::AsFrameTime( TimeBasedAccuracy );
+	HoveredFrameStartTimeMS = (float)HoveredFrameIndex * FTimeAccuracy::AsFrameTime( TimeBasedAccuracy );
 
 	if( MouseEvent.IsMouseButtonDown(EKeys::LeftMouseButton) )
 	{
@@ -1097,7 +1095,7 @@ FReply SDataGraph::OnMouseMove( const FGeometry& MyGeometry, const FPointerEvent
 		if( HasMouseCapture() && !MouseEvent.GetCursorDelta().IsZero() )
 		{
 			bIsRMB_Scrolling = true;
-			const float ScrollByAmount = -MouseEvent.GetCursorDelta().X * (1.0f/DistanceBetweenPoints);
+			const float ScrollByAmount = -static_cast<float>(MouseEvent.GetCursorDelta().X) * (1.0f/(float)DistanceBetweenPoints);
 			RealGraphOffset += ScrollByAmount;
 
 			GraphOffset = FMath::Clamp( FMath::TruncToInt( RealGraphOffset ), 0, FMath::Max(NumDataPoints-NumVisiblePoints,0) );
@@ -1112,8 +1110,8 @@ FReply SDataGraph::OnMouseMove( const FGeometry& MyGeometry, const FPointerEvent
 
 const int32 SDataGraph::CalculateFrameIndex( const FVector2D InMousePosition ) const
 {
-	const float ScaleX = 1.0f/DistanceBetweenPoints;
-	const int32 MousePositionOffset = FMath::TruncToInt( (InMousePosition.X+HalfGraphMarkerWidth) * ScaleX );
+	const float ScaleX = 1.0f/(float)DistanceBetweenPoints;
+	const int32 MousePositionOffset = FMath::TruncToInt( (static_cast<float>(InMousePosition.X) + HalfGraphMarkerWidth) * ScaleX );
 	return FMath::Clamp( GraphOffset+MousePositionOffset, 0, NumDataPoints-1 );
 }
 
@@ -1342,3 +1340,5 @@ void SDataGraph::EventGraph_OnRestoredFromHistory( uint32 FrameStartIndex, uint3
 }
 
 #undef LOCTEXT_NAMESPACE
+
+#endif // STATS

@@ -9,28 +9,47 @@
 #include "Stats/Stats.h"
 #include "ProfilingDebugging/ResourceSize.h"
 #include "PackedNormal.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "RenderingThread.h"
+#endif
+#include "RenderDeferredCleanup.h"
 #include "RenderUtils.h"
 #include "Engine/SkeletalMesh.h"
 #include "Components/SkinnedMeshComponent.h"
+#include "MeshUVChannelInfo.h"
+#include "SkeletalMeshTypes.h"
+#include "RenderMath.h"
 
 class FPrimitiveDrawInterface;
 class FVertexFactory;
 class UMorphTarget;
 struct FSkelMeshRenderSection;
+struct FCachedGeometry;
+struct FRWBuffer;
+class FGPUSkinCacheEntry;
+class FMeshDeformerGeometry;
+class FRayTracingGeometry;
+class FRHICommandList;
+
+namespace UE::SkeletalRender::Settings
+{
+	// Returns the maximum value allowed for morph targets blend weights, configured at RenderSettings
+	ENGINE_API float GetMorphTargetMaxBlendWeight();
+}
 
 /** data for a single skinned skeletal mesh vertex */
 struct FFinalSkinVertex
 {
-	FVector			Position;
+	FVector3f			Position;
 	FPackedNormal	TangentX;
 	FPackedNormal	TangentZ;
 	float			U;
 	float			V;
+	FVector2D TextureCoordinates[MAX_TEXCOORDS];
 
-	FVector GetTangentY() const
+	FVector3f GetTangentY() const
 	{
-		return GenerateYAxis(TangentX, TangentZ);
+		return FVector3f(GenerateYAxis(TangentX, TangentZ));
 	};
 };
 
@@ -41,6 +60,13 @@ enum class EPreviousBoneTransformUpdateMode
 	UpdatePrevious,
 
 	DuplicateCurrentToPrevious,
+};
+
+struct FSkinBatchVertexFactoryUserData
+{
+	FGPUSkinCacheEntry* SkinCacheEntry = nullptr;
+	FMeshDeformerGeometry* DeformerGeometry = nullptr;
+	int32 SectionIndex = -1;
 };
 
 /**
@@ -68,13 +94,13 @@ public:
 	 * @param	InSkeletalMeshComponen - parent prim component doing the updating
 	 * @param	ActiveMorphs - morph targets to blend with during skinning
 	 */
-	virtual void Update(int32 LODIndex,USkinnedMeshComponent* InMeshComponent,const TArray<FActiveMorphTarget>& ActiveMorphTargets, const TArray<float>& MorphTargetWeights, EPreviousBoneTransformUpdateMode PreviousBoneTransformUpdateMode) = 0;
+	virtual void Update(int32 LODIndex,USkinnedMeshComponent* InMeshComponent, const FMorphTargetWeightMap& InActiveMorphTargets, const TArray<float>& MorphTargetWeights, EPreviousBoneTransformUpdateMode PreviousBoneTransformUpdateMode, const FExternalMorphWeightData& InExternalMorphWeightData) = 0;
 
 	/**
 	 * Called by FSkeletalMeshObject prior to GDME. This allows the GPU skin version to update bones etc now that we know we are going to render
 	 * @param FrameNumber from GFrameNumber
 	 */
-	virtual void PreGDMECallback(class FGPUSkinCache* GPUSkinCache, uint32 FrameNumber)
+	virtual void PreGDMECallback(FRHICommandList& RHICmdList, class FGPUSkinCache* GPUSkinCache, uint32 FrameNumber)
 	{
 	}
 
@@ -84,20 +110,24 @@ public:
 	 * @param	ChunkIdx - not used
 	 * @return	vertex factory for rendering the LOD, 0 to suppress rendering
 	 */
-	virtual const FVertexFactory* GetSkinVertexFactory(const FSceneView* View, int32 LODIndex,int32 ChunkIdx) const = 0;
+	virtual const FVertexFactory* GetSkinVertexFactory(const FSceneView* View, int32 LODIndex, int32 ChunkIdx, ESkinVertexFactoryMode VFMode = ESkinVertexFactoryMode::Default) const = 0;
 
 	/**
-	 * Re-skin cached vertices for an LOD and update the vertex buffer. Note that this
-	 * function is called from the render thread!
-	 * @param	LODIndex - index to LODs
-	 * @param	bForce - force update even if LOD index hasn't changed
+	 * @param	LODIndex - Index to LODs
+	 * @param	ChunkIdx - Index to render sections.
+	 * @return	VertexFactoryUserData for storing on a FMeshBatch.
 	 */
-	virtual void CacheVertices(int32 LODIndex, bool bForce) const = 0;
+	virtual const FSkinBatchVertexFactoryUserData* GetVertexFactoryUserData(const int32 LODIndex, int32 ChunkIdx, ESkinVertexFactoryMode VFMode) const { return nullptr; }
 
 	/**
 	 * Returns true if this mesh performs skinning on the CPU.
 	 */
 	virtual bool IsCPUSkinned() const = 0;
+
+	/**
+	 * Returns true if this mesh is an FSkeletalMeshObjectGPUSkin
+	 */
+	virtual bool IsGPUSkinMesh() const { return false; }
 
 	/** 
 	 *	Get the array of component-space bone transforms. 
@@ -109,7 +139,12 @@ public:
 	 *	Get the array of refpose->local matrices
 	 *	Not safe to hold this reference between frames, because it exists in dynamic data passed from main thread.
 	 */
-	virtual const TArray<FMatrix>& GetReferenceToLocalMatrices() const = 0;
+	virtual const TArray<FMatrix44f>& GetReferenceToLocalMatrices() const = 0;
+
+	/**
+	 * If we are caching geometry deformation through skin-cache/mesh-deformers or other, then this returns the currently cached geoemtry.
+	 */
+	virtual bool GetCachedGeometry(FCachedGeometry& OutCachedGeometry) const { return false; }
 
 	/**
 	*	Will force re-evaluating which Skin Weight buffer should be used for skinning, determined by checking for any override weights or a skin weight profile being set.
@@ -143,12 +178,12 @@ public:
 	 *	This is called from the rendering thread (PreRender) so be very careful what you read/write to.
 	 * @param FrameNumber from ViewFamily.FrameNumber
 	 */
-	void UpdateMinDesiredLODLevel(const FSceneView* View, const FBoxSphereBounds& Bounds, int32 FrameNumber, uint8 CurFirstLODIdx);
+	void UpdateMinDesiredLODLevel(const FSceneView* View, const FBoxSphereBounds& Bounds, int32 FrameNumber);
 
 	/**
 	 *	Return true if this does have valid dynamic data to render
 	 */
-	virtual bool HaveValidDynamicData() = 0;
+	virtual bool HaveValidDynamicData() const = 0;
 
 	// allow access to mesh component
 	friend class FDynamicSkelMeshObjectDataCPUSkin;
@@ -199,12 +234,24 @@ public:
 	/** Get the skeletal mesh resource for which this mesh object was created. */
 	FORCEINLINE FSkeletalMeshRenderData& GetSkeletalMeshRenderData() const { return *SkeletalMeshRenderData; }
 
+	FColor GetSkinCacheVisualizationDebugColor(const FName& GPUSkinCacheVisualizationMode, uint32 SectionIndex) const;
+
+	/** Helper function to return the asset path name, optionally joined with the LOD index if LODIndex > -1. */
+	FName GetAssetPathName(int32 LODIndex = -1) const;
+
 #if RHI_RAYTRACING
 	/** Retrieve ray tracing geometry from the underlying mesh object */
 	virtual FRayTracingGeometry* GetRayTracingGeometry() { return nullptr; }
 	virtual const FRayTracingGeometry* GetRayTracingGeometry() const { return nullptr; }
 	virtual FRWBuffer* GetRayTracingDynamicVertexBuffer() { return nullptr; }
+	virtual int32 GetRayTracingLOD() const { return GetLOD(); }
+
+	virtual bool ShouldUseSeparateSkinCacheEntryForRayTracing() const { return GetLOD() != GetRayTracingLOD() || SkinCacheEntry == nullptr; }
+	virtual FGPUSkinCacheEntry* GetSkinCacheEntryForRayTracing() const { return ShouldUseSeparateSkinCacheEntryForRayTracing() ? SkinCacheEntryForRayTracing : SkinCacheEntry; }
 #endif // RHI_RAYTRACING
+
+	/** Called when that component transform has changed */
+	virtual void SetTransform(const FMatrix& InNewLocalToWorld, uint32 FrameNumber) {};
 
 	/** Called to notify clothing data that component transform has changed */
 	virtual void RefreshClothingTransforms(const FMatrix& InNewLocalToWorld, uint32 FrameNumber) {};
@@ -218,10 +265,13 @@ public:
 
 	TArray<FSkelMeshObjectLODInfo> LODInfo;
 
-	TArray<FCapsuleShape> ShadowCapsuleShapes;
+	TArray<FCapsuleShape3f> ShadowCapsuleShapes;
 
 	/** 
-	 *	Lowest (best) LOD that was desired for rendering this SkeletalMesh last frame. 
+	 *	Lowest (best) LOD that was desired for rendering this SkeletalMesh last frame.
+	 *
+	 *	Note that if LOD streaming is enabled, the desired LOD is not guaranteed to be currently loaded.
+	 * 
 	 *	This should only ever be WRITTEN by the RENDER thread (in FSkeletalMeshProxy::PreRenderView) and READ by the GAME thread (in USkeletalMeshComponent::UpdateSkelPose).
 	 */
 	int32 MinDesiredLODLevel;
@@ -242,9 +292,17 @@ public:
 	bool bHasBeenUpdatedAtLeastOnce;
 
 #if RHI_RAYTRACING
-	bool bRequireRecreatingRayTracingGeometry;
 	bool bSupportRayTracing;
+	bool bHiddenMaterialVisibilityDirtyForRayTracing;
+	int32 RayTracingMinLOD;
 #endif
+
+#if UE_BUILD_SHIPPING
+	FName GetDebugName() const { return FName(); }
+#else
+	FName GetDebugName() const { return DebugName; }
+	FName DebugName;
+#endif // !UE_BUILD_SHIPPING
 
 #if WITH_EDITORONLY_DATA
 	/** Index of the section to preview... If set to -1, all section will be rendered */
@@ -270,6 +328,12 @@ public:
 	 */
 	float GetScreenSize(int32 LODIndex) const;
 
+	/** Get the weight buffer either from the component LOD info or the skeletal mesh LOD render data */
+	static FSkinWeightVertexBuffer* GetSkinWeightVertexBuffer(FSkeletalMeshLODRenderData& LODData, FSkelMeshComponentLODInfo* CompLODInfo);
+
+	/** Get the color buffer either from the component LOD info or the skeletal mesh LOD render data */
+	static FColorVertexBuffer* GetColorVertexBuffer(FSkeletalMeshLODRenderData& LODData, FSkelMeshComponentLODInfo* CompLODInfo);
+
 protected:
 	/** The skeletal mesh resource with which to render. */
 	FSkeletalMeshRenderData* SkeletalMeshRenderData;
@@ -277,7 +341,8 @@ protected:
 	/** Per-LOD info. */
 	TArray<FSkeletalMeshLODInfo> SkeletalMeshLODInfo;
 
-	class FGPUSkinCacheEntry* SkinCacheEntry;
+	FGPUSkinCacheEntry* SkinCacheEntry;
+	FGPUSkinCacheEntry* SkinCacheEntryForRayTracing;
 
 	/** Used to keep track of the first call to UpdateMinDesiredLODLevel each frame. from ViewFamily.FrameNumber */
 	uint32 LastFrameNumber;
@@ -295,4 +360,10 @@ protected:
 
 	/** Component ID to which belong this  mesh object  */
 	uint32 ComponentId;
+
+	FVector WorldScale = FVector::OneVector;
+
+#if RHI_ENABLE_RESOURCE_INFO
+	FName AssetPathName;
+#endif
 };

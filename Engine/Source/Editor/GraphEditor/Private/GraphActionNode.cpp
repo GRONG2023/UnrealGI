@@ -2,6 +2,17 @@
 
 #include "GraphActionNode.h"
 
+#include "Containers/BitArray.h"
+#include "HAL/PlatformCrt.h"
+#include "Math/NumericLimits.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Optional.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "UObject/NameTypes.h"
+#include "Widgets/Views/STableViewBase.h"
+#include "Widgets/Views/STreeView.h"
+
 /*******************************************************************************
  * Static FGraphActionNode Helpers
  ******************************************************************************/
@@ -193,6 +204,34 @@ TSharedPtr<FGraphActionNode> FGraphActionNode::AddChild(FGraphActionListBuilderB
 }
 
 //------------------------------------------------------------------------------
+void FGraphActionNode::AddChildAlphabetical(FGraphActionListBuilderBase::ActionGroup const& ActionSet)
+{
+	TSharedPtr<FGraphActionNode> ActionNode = FGraphActionNode::NewActionNode(ActionSet.Actions);
+	check(ActionNode->SectionID == INVALID_SECTION_ID); // this method does not support sections, those should be built statically
+
+	// if a divider hasn't been created for the grouping, create one:
+	AddChildGrouping(ActionNode, this->AsShared());
+
+	// find or add categories iteratively, inserting as needed:
+	FGraphActionNode* OwningCategory = this;
+	const TArray<FString>& CategoryStack = ActionSet.GetCategoryChain();
+	for (const FString& CategorySection : CategoryStack)
+	{
+		TSharedPtr<FGraphActionNode> CategoryNode = OwningCategory->FindMatchingParent(CategorySection, ActionNode);
+		if (!CategoryNode.IsValid())
+		{
+			CategoryNode = NewCategoryNode(CategorySection, ActionNode->Grouping, ActionNode->SectionID);
+			OwningCategory->InsertChildAlphabetical(CategoryNode);
+		}
+
+		OwningCategory = CategoryNode.Get();
+	}
+
+	// finally insert the leaf:
+	OwningCategory->InsertChildAlphabetical(ActionNode);
+}
+
+//------------------------------------------------------------------------------
 TSharedPtr<FGraphActionNode> FGraphActionNode::AddSection(int32 InGrouping, int32 InSectionID)
 {
 	if ( !ChildSections.Contains(InSectionID) )
@@ -211,6 +250,8 @@ TSharedPtr<FGraphActionNode> FGraphActionNode::AddSection(int32 InGrouping, int3
 //------------------------------------------------------------------------------
 void FGraphActionNode::SortChildren(bool bAlphabetically/* = true*/, bool bRecursive/* = true*/)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(SGraphActionMenu::GenerateFilteredItems_SortNodes);
+
 	if (bRecursive)
 	{
 		for (TSharedPtr<FGraphActionNode>& ChildNode : Children)
@@ -236,6 +277,19 @@ void FGraphActionNode::GetAllNodes(TArray< TSharedPtr<FGraphActionNode> >& OutNo
 	{
 		OutNodeArray.Add(ChildNode);
 		ChildNode->GetAllNodes(OutNodeArray);
+	}
+}
+
+void FGraphActionNode::GetAllActionNodes(TArray<TSharedPtr<FGraphActionNode>>& OutNodeArray) const
+{	
+	for (TSharedPtr<FGraphActionNode> const& ChildNode : Children)
+	{
+		if(ChildNode->IsActionNode())
+		{
+			OutNodeArray.Add(ChildNode);
+		}
+		
+		ChildNode->GetAllActionNodes(OutNodeArray);
 	}
 }
 
@@ -580,33 +634,69 @@ void FGraphActionNode::InsertChild(TSharedPtr<FGraphActionNode> NodeToAdd)
 	}
 	// we don't use group-dividers inside of sections (we use groups to more to
 	// hardcode the order), but if this isn't in a section...
-	else if (!ChildGroupings.Contains(NodeToAdd->Grouping))
+	else
 	{
-		// don't need a divider if this is the first group
-		if (ChildGroupings.Num() > 0)
-		{
-			int32 LowestGrouping = MAX_int32;
-			for (int32 Group : ChildGroupings)
-			{
-				LowestGrouping = FMath::Min(LowestGrouping, Group);
-			}
-			// dividers come at the end of a menu group, so it would be 
-			// undesirable to add it for NodeToAdd->Grouping if that group is 
-			// lower than all the others (the lowest group should not have a 
-			// divider associated with it)
-			int32 DividerGrouping = FMath::Max(LowestGrouping, NodeToAdd->Grouping);
-
-			ChildGroupings.Add(NodeToAdd->Grouping); // to avoid recursion, add before we insert
-			InsertChild(NewGroupDividerNode(NodeToAdd->ParentNode, DividerGrouping));
-		}
-		else
-		{
-			ChildGroupings.Add(NodeToAdd->Grouping);
-		}
+		AddChildGrouping(NodeToAdd, NodeToAdd->ParentNode);
 	}
 
 	NodeToAdd->InsertOrder = Children.Num();
 	Children.Add(NodeToAdd);
+	if (NodeToAdd->IsCategoryNode())
+	{
+		CategoryNodes.Add(NodeToAdd->DisplayText.ToString(), NodeToAdd);
+	}
+}
+
+//------------------------------------------------------------------------------
+void FGraphActionNode::AddChildGrouping(TSharedPtr<FGraphActionNode> ActionNode, TWeakPtr<FGraphActionNode> Parent)
+{
+	if (ChildGroupings.Find(ActionNode->Grouping))
+	{
+		return;
+	}
+
+	if (ChildGroupings.Num() > 0)
+	{
+		int32 LowestGrouping = MAX_int32;
+		for (int32 Group : ChildGroupings)
+		{
+			LowestGrouping = FMath::Min(LowestGrouping, Group);
+		}
+		// dividers come at the end of a menu group, so it would be 
+		// undesirable to add it for NodeToAdd->Grouping if that group is 
+		// lower than all the others (the lowest group should not have a 
+		// divider associated with it)
+		int32 DividerGrouping = FMath::Max(LowestGrouping, ActionNode->Grouping);
+
+		ChildGroupings.Add(ActionNode->Grouping); // to avoid recursion, add before we insert
+		InsertChild(NewGroupDividerNode(this->AsShared(), DividerGrouping));
+	}
+	else
+	{
+		ChildGroupings.Add(ActionNode->Grouping);
+	}
+}
+
+//------------------------------------------------------------------------------
+void FGraphActionNode::InsertChildAlphabetical(TSharedPtr<FGraphActionNode> NodeToAdd)
+{
+	check(NodeToAdd->SectionID == INVALID_SECTION_ID);
+	int Idx = Algo::LowerBound(Children, NodeToAdd, FGraphActionNodeImpl::AlphabeticalNodeCompare);
+	if (Idx != INDEX_NONE)
+	{
+		NodeToAdd->InsertOrder = Idx;
+		Children.Insert(NodeToAdd, Idx);
+		for (int32 I = Idx + 1; I < Children.Num(); ++I)
+		{
+			++(Children[I]->InsertOrder);
+		}
+	}
+	else
+	{
+		NodeToAdd->InsertOrder = Children.Num();
+		Children.Add(NodeToAdd);
+	}
+
 	if (NodeToAdd->IsCategoryNode())
 	{
 		CategoryNodes.Add(NodeToAdd->DisplayText.ToString(), NodeToAdd);

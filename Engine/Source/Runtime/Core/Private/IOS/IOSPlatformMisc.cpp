@@ -5,54 +5,56 @@
 =============================================================================*/
 
 #include "IOS/IOSPlatformMisc.h"
-#include "Misc/App.h"
+#include "Async/TaskGraphInterfaces.h"
+#include "Apple/ApplePlatformCrashContext.h"
 #include "HAL/ExceptionHandling.h"
-#include "Misc/SecureHash.h"
-#include "Misc/EngineVersion.h"
-#include "Templates/Function.h"
+#include "HAL/FileManager.h"
+#include "HAL/PlatformOutputDevices.h"
+#include "Internationalization/Culture.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Regex.h"
+#include "IOSChunkInstaller.h"
 #include "IOS/IOSMallocZone.h"
 #include "IOS/IOSApplication.h"
 #include "IOS/IOSAppDelegate.h"
+#include "IOS/IOSPlatformCrashContext.h"
+#include "IOS/IOSPlatformPLCrashReporterIncludes.h"
 #include "IOS/IOSView.h"
-#include "IOSChunkInstaller.h"
+#include "Misc/App.h"
 #include "Misc/CommandLine.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/CoreDelegates.h"
-#include "Misc/ScopeExit.h"
-#include "Apple/ApplePlatformCrashContext.h"
-#include "IOS/IOSPlatformCrashContext.h"
-#include "IOS/IOSPlatformPLCrashReporterIncludes.h"
-#include "HAL/FileManager.h"
-#include "HAL/PlatformOutputDevices.h"
+#include "Misc/EngineVersion.h"
+#include "Misc/FeedbackContext.h"
 #include "Misc/OutputDeviceError.h"
 #include "Misc/OutputDeviceRedirector.h"
-#include "Misc/FeedbackContext.h"
-#include "Internationalization/Internationalization.h"
-#include "Internationalization/Culture.h"
-#include "Internationalization/Regex.h"
+#include "Misc/ScopeExit.h"
+#include "Misc/SecureHash.h"
+#include "Modules/ModuleManager.h"
+#include "Templates/Function.h"
 
-#if !PLATFORM_TVOS
-#include <AdSupport/ASIdentifierManager.h> 
+#include "Apple/PreAppleSystemHeaders.h"
+
+#if !PLATFORM_TVOS && !PLATFORM_VISIONOS
+#include <AdSupport/ASIdentifierManager.h>
+#endif // !PLATFORM_TVOS
+
+#import <DeviceCheck/DeviceCheck.h>
+#import <Foundation/Foundation.h>
+//#include <libproc.h>
+#import <mach-o/dyld.h>
+#include <netinet/in.h>
+#include <SystemConfiguration/SystemConfiguration.h>
+#import <StoreKit/StoreKit.h>
+#if !PLATFORM_VISIONOS
+#import <UserNotifications/UserNotifications.h>
 #endif
 
-#include "Async/TaskGraphInterfaces.h"
-#include <SystemConfiguration/SystemConfiguration.h>
-#include <netinet/in.h>
-
-#import <StoreKit/StoreKit.h>
-#import <DeviceCheck/DeviceCheck.h>
-
-#import <UserNotifications/UserNotifications.h>
-#include "Async/TaskGraphInterfaces.h"
-#include "Misc/CoreDelegates.h"
+#include "Apple/PostAppleSystemHeaders.h"
 
 #if !defined ENABLE_ADVERTISING_IDENTIFIER
 	#define ENABLE_ADVERTISING_IDENTIFIER 0
 #endif
-
-//#include <libproc.h>
-// @pjs commented out to resolve issue with PLATFORM_TVOS being defined by mach-o loader
-//#include <mach-o/dyld.h>
 
 /** Amount of free memory in MB reported by the system at startup */
 CORE_API int32 GStartupFreeMemoryMB;
@@ -64,7 +66,6 @@ void (* GMemoryWarningHandler)(const FGenericMemoryWarningContext& Context) = NU
 
 /** global for showing the splash screen */
 bool GShowSplashScreen = true;
-float GOriginalBrightness = -1.0f;
 
 static int32 GetFreeMemoryMB()
 {
@@ -74,9 +75,12 @@ static int32 GetFreeMemoryMB()
 
 void FIOSPlatformMisc::PlatformInit()
 {
+	// PlatformInit() starts the UI thread which creates the framebuffer and it requires
+	// "r.MobileContentScaleFactor" and "r.Mobile.DesiredResX/Y" to be available before 
+	// it's creation, so need to cache those value now.
+	[[IOSAppDelegate GetDelegate] LoadScreenResolutionModifiers];
+		
 	FAppEntry::PlatformInit();
-    
-    GOriginalBrightness = FIOSPlatformMisc::GetBrightness();
 
 	// Increase the maximum number of simultaneously open files
 	struct rlimit Limit;
@@ -233,8 +237,8 @@ int FIOSPlatformMisc::GetBatteryLevel()
 
 float FIOSPlatformMisc::GetBrightness()
 {
-#if !PLATFORM_TVOS
-	return [UIScreen mainScreen].brightness;
+#if !PLATFORM_TVOS && !PLATFORM_VISIONOS
+	return (float)[[[IOSAppDelegate GetDelegate] window] screen].brightness;
 #else
 	return 1.0f;
 #endif // !PLATFORM_TVOS
@@ -242,17 +246,11 @@ float FIOSPlatformMisc::GetBrightness()
 
 void FIOSPlatformMisc::SetBrightness(float Brightness)
 {
-#if !PLATFORM_TVOS
-	[UIScreen mainScreen].brightness = Brightness;
+#if !PLATFORM_TVOS && !PLATFORM_VISIONOS
+	dispatch_async(dispatch_get_main_queue(), ^{
+		[[[IOSAppDelegate GetDelegate] window] screen].brightness = Brightness;
+	});
 #endif // !PLATFORM_TVOS
-}
-
-void FIOSPlatformMisc::ResetBrightness()
-{
-	if (GOriginalBrightness >= 0.f)
-	{
-		SetBrightness(GOriginalBrightness);
-	}
 }
 
 bool FIOSPlatformMisc::IsRunningOnBattery()
@@ -263,16 +261,13 @@ bool FIOSPlatformMisc::IsRunningOnBattery()
 float FIOSPlatformMisc::GetDeviceTemperatureLevel()
 {
 #if !PLATFORM_TVOS
-	if (@available(iOS 11, *))
-	{
-		switch ([[IOSAppDelegate GetDelegate] GetThermalState])
-		{
-		case NSProcessInfoThermalStateNominal:	return (float)FCoreDelegates::ETemperatureSeverity::Good; break;
-		case NSProcessInfoThermalStateFair:		return (float)FCoreDelegates::ETemperatureSeverity::Bad; break;
-		case NSProcessInfoThermalStateSerious:	return (float)FCoreDelegates::ETemperatureSeverity::Serious; break;
-		case NSProcessInfoThermalStateCritical:	return (float)FCoreDelegates::ETemperatureSeverity::Critical; break;
-		}
-	}
+    switch ([[IOSAppDelegate GetDelegate] GetThermalState])
+    {
+        case NSProcessInfoThermalStateNominal:	return (float)FCoreDelegates::ETemperatureSeverity::Good; break;
+        case NSProcessInfoThermalStateFair:		return (float)FCoreDelegates::ETemperatureSeverity::Bad; break;
+        case NSProcessInfoThermalStateSerious:	return (float)FCoreDelegates::ETemperatureSeverity::Serious; break;
+        case NSProcessInfoThermalStateCritical:	return (float)FCoreDelegates::ETemperatureSeverity::Critical; break;
+    }
 #endif
 	return -1.0f;
 }
@@ -280,44 +275,64 @@ float FIOSPlatformMisc::GetDeviceTemperatureLevel()
 bool FIOSPlatformMisc::IsInLowPowerMode()
 {
 #if !PLATFORM_TVOS
-    if (@available(iOS 11, *))
-    {
-        bool bInLowPowerMode = [[NSProcessInfo processInfo] isLowPowerModeEnabled];
-        return bInLowPowerMode;
-    }
+    bool bInLowPowerMode = [[NSProcessInfo processInfo] isLowPowerModeEnabled];
+    return bInLowPowerMode;
 #endif
     return false;
 }
 
 
-#if !PLATFORM_TVOS
-EDeviceScreenOrientation ConvertFromUIInterfaceOrientation(UIInterfaceOrientation Orientation)
+#if !PLATFORM_TVOS && !PLATFORM_VISIONOS
+UIInterfaceOrientationMask GetUIInterfaceOrientationMask(EDeviceScreenOrientation ScreenOrientation)
 {
-	switch(Orientation)
+	switch (ScreenOrientation)
 	{
-		default:
-		case UIInterfaceOrientationUnknown : return EDeviceScreenOrientation::Unknown; break;
-		case UIInterfaceOrientationPortrait : return EDeviceScreenOrientation::Portrait; break;
-		case UIInterfaceOrientationPortraitUpsideDown : return EDeviceScreenOrientation::PortraitUpsideDown; break;
-		case UIInterfaceOrientationLandscapeLeft : return EDeviceScreenOrientation::LandscapeLeft; break;
-		case UIInterfaceOrientationLandscapeRight : return EDeviceScreenOrientation::LandscapeRight; break;
+	default:
+		// Fallthrough...
+	case EDeviceScreenOrientation::Unknown:
+		return UIInterfaceOrientationMaskAll;
+		break;
+	case EDeviceScreenOrientation::Portrait:
+		return UIInterfaceOrientationMaskPortrait;
+		break;
+	case EDeviceScreenOrientation::PortraitUpsideDown:
+		return UIInterfaceOrientationMaskPortraitUpsideDown;
+		break;
+	case EDeviceScreenOrientation::LandscapeLeft:
+		return UIInterfaceOrientationMaskLandscapeLeft;
+		break;
+	case EDeviceScreenOrientation::LandscapeRight:
+		return UIInterfaceOrientationMaskLandscapeRight;
+		break;
+	case EDeviceScreenOrientation::FaceUp:
+		return UIInterfaceOrientationMaskAll;
+		break;
+	case EDeviceScreenOrientation::FaceDown:
+		return UIInterfaceOrientationMaskAll;
+		break;
+	case EDeviceScreenOrientation::PortraitSensor:
+		return UIInterfaceOrientationMaskPortrait;
+		break;
+	case EDeviceScreenOrientation::LandscapeSensor:
+		return UIInterfaceOrientationMaskLandscape;
+		break;
+	case EDeviceScreenOrientation::FullSensor:
+		return UIInterfaceOrientationMaskAll;
+		break;
 	}
 }
 #endif
 
-#if !PLATFORM_TVOS
-UIInterfaceOrientation GInterfaceOrientation = UIInterfaceOrientationUnknown;
-#endif
-
 EDeviceScreenOrientation FIOSPlatformMisc::GetDeviceOrientation()
 {
-#if !PLATFORM_TVOS
-	if (GInterfaceOrientation == UIInterfaceOrientationUnknown)
+#if !PLATFORM_TVOS && !PLATFORM_VISIONOS
+	IOSAppDelegate* AppDelegate = [IOSAppDelegate GetDelegate];
+	if (AppDelegate.InterfaceOrientation == UIInterfaceOrientationUnknown)
 	{
-		GInterfaceOrientation = [[UIApplication sharedApplication] statusBarOrientation];
+		AppDelegate.InterfaceOrientation = [[[[[UIApplication sharedApplication] delegate] window] windowScene] interfaceOrientation];
 	}
 
-	return ConvertFromUIInterfaceOrientation(GInterfaceOrientation);
+	return [IOSAppDelegate ConvertFromUIInterfaceOrientation:AppDelegate.InterfaceOrientation];
 #else
 	return EDeviceScreenOrientation::Unknown;
 #endif
@@ -325,16 +340,23 @@ EDeviceScreenOrientation FIOSPlatformMisc::GetDeviceOrientation()
 
 void FIOSPlatformMisc::SetDeviceOrientation(EDeviceScreenOrientation NewDeviceOrientation)
 {
-	// not implemented yet
+	SetAllowedDeviceOrientation(NewDeviceOrientation);
 }
 
-#include "Modules/ModuleManager.h"
+void FIOSPlatformMisc::SetAllowedDeviceOrientation(EDeviceScreenOrientation NewAllowedDeviceOrientation)
+{
+	AllowedDeviceOrientation = NewAllowedDeviceOrientation;
+
+#if !PLATFORM_TVOS && !PLATFORM_VISIONOS
+	[IOSAppDelegate GetDelegate].IOSView->SupportedInterfaceOrientations = GetUIInterfaceOrientationMask(NewAllowedDeviceOrientation);
+#endif
+}
 
 bool FIOSPlatformMisc::HasPlatformFeature(const TCHAR* FeatureName)
 {
 	if (FCString::Stricmp(FeatureName, TEXT("Metal")) == 0)
 	{
-		return [IOSAppDelegate GetDelegate].IOSView->bIsUsingMetal;
+		return true;
 	}
 
 	return FGenericPlatformMisc::HasPlatformFeature(FeatureName);
@@ -358,6 +380,20 @@ FString GetIOSDeviceIDString()
 		bCached = true;
 
 		free(DeviceID);
+		
+		// arm simulator
+		// @todo test intel simulator
+		if (CachedResult == "arm64")
+		{
+#if PLATFORM_VISIONOS
+			CachedResult = TEXT("VisionPro0,1");
+#elif PLATFORM_TVOS
+			CachedResult = TEXT("AppleTV0,1");
+#else
+			NSString* ModelID = [[NSProcessInfo processInfo] environment][@"SIMULATOR_MODEL_IDENTIFIER"];
+			CachedResult = FString(ModelID);
+#endif
+		}
 	}
 
 	return CachedResult;
@@ -418,6 +454,10 @@ FIOSPlatformMisc::EIOSDevice FIOSPlatformMisc::GetIOSDeviceType()
 
     FPlatformMisc::LowLevelOutputDebugStringf(TEXT("Device Type: %s") LINE_TERMINATOR, *DeviceIDString);
 
+#if PLATFORM_VISIONOS
+	DeviceType = IOS_RealityPro;
+#else
+	
     // iPods
 	if (DeviceIDString.StartsWith(TEXT("iPod")))
 	{
@@ -737,7 +777,8 @@ FIOSPlatformMisc::EIOSDevice FIOSPlatformMisc::GetIOSDeviceType()
 			}
 		}
 	}
-
+#endif
+	
 	// if this is unknown at this point, we have a problem
 	if (DeviceType == IOS_Unknown)
 	{
@@ -818,31 +859,28 @@ bool FIOSPlatformMisc::GetDiskTotalAndFreeSpace(const FString& InPath, uint64& T
 {
     //On iOS 11 use new method to return disk space available for important usages
 #if !PLATFORM_TVOS
-    if (@available(iOS 11, *))
+    bool GetValueSuccess = false;
+    
+    NSNumber *FreeBytes = nil;
+    NSURL *URL = [NSURL fileURLWithPath : NSHomeDirectory()];
+    GetValueSuccess = [URL getResourceValue : &FreeBytes forKey : NSURLVolumeAvailableCapacityForImportantUsageKey error : nil];
+    if (FreeBytes)
     {
-	    bool GetValueSuccess = false;
-
-	    NSNumber *FreeBytes = nil;
-	    NSURL *URL = [NSURL fileURLWithPath : NSHomeDirectory()];
-	    GetValueSuccess = [URL getResourceValue : &FreeBytes forKey : NSURLVolumeAvailableCapacityForImportantUsageKey error : nil];
-	    if (FreeBytes)
-	    {
-	        NumberOfFreeBytes = [FreeBytes longLongValue];
-	    }
-
-	    NSNumber *TotalBytes = nil;
-	    GetValueSuccess = GetValueSuccess &&[URL getResourceValue : &TotalBytes forKey : NSURLVolumeTotalCapacityKey error : nil];
-	    if (TotalBytes)
-	    {
-	        TotalNumberOfBytes = [TotalBytes longLongValue];
-	    }
-
-	    if (GetValueSuccess
-	        && (NumberOfFreeBytes > 0)
-	        && (TotalNumberOfBytes > 0))
-	    {
-	        return true;
-	    }
+        NumberOfFreeBytes = [FreeBytes longLongValue];
+    }
+    
+    NSNumber *TotalBytes = nil;
+    GetValueSuccess = GetValueSuccess &&[URL getResourceValue : &TotalBytes forKey : NSURLVolumeTotalCapacityKey error : nil];
+    if (TotalBytes)
+    {
+        TotalNumberOfBytes = [TotalBytes longLongValue];
+    }
+    
+    if (GetValueSuccess
+        && (NumberOfFreeBytes > 0)
+        && (TotalNumberOfBytes > 0))
+    {
+        return true;
     }
 #endif
 
@@ -865,10 +903,7 @@ bool FIOSPlatformMisc::GetDiskTotalAndFreeSpace(const FString& InPath, uint64& T
 void FIOSPlatformMisc::RequestStoreReview()
 {
 #if !PLATFORM_TVOS
-	if (@available(iOS 10, *))
-	{
-		[SKStoreReviewController requestReview];
-	}
+    [SKStoreReviewController requestReviewInScene:[[[[UIApplication sharedApplication] delegate] window] windowScene]];
 #endif
 }
 
@@ -884,7 +919,7 @@ bool FIOSPlatformMisc::IsUpdateAvailable()
 */
 FString FIOSPlatformMisc::GetUniqueAdvertisingId()
 {
-#if !PLATFORM_TVOS && ENABLE_ADVERTISING_IDENTIFIER
+#if !PLATFORM_TVOS && !PLATFORM_VISIONOS && ENABLE_ADVERTISING_IDENTIFIER
 	// Check to see if this OS has this function
 	if ([[ASIdentifierManager sharedManager] respondsToSelector:@selector(advertisingIdentifier)])
 	{
@@ -937,14 +972,14 @@ class IPlatformChunkInstall* FIOSPlatformMisc::GetPlatformChunkInstall()
 
 bool FIOSPlatformMisc::SupportsForceTouchInput()
 {
-#if !PLATFORM_TVOS
+#if !PLATFORM_TVOS && !PLATFORM_VISIONOS
 	return [[[IOSAppDelegate GetDelegate].IOSView traitCollection] forceTouchCapability];
 #else
 	return false;
 #endif
 }
 
-#if !PLATFORM_TVOS
+#if !PLATFORM_TVOS && !PLATFORM_VISIONOS
 static UIFeedbackGenerator* GFeedbackGenerator = nullptr;
 #endif // !PLATFORM_TVOS
 static EMobileHapticsType GHapticsType;
@@ -953,7 +988,7 @@ void FIOSPlatformMisc::PrepareMobileHaptics(EMobileHapticsType Type)
 	// these functions must run on the main IOS thread
 	dispatch_async(dispatch_get_main_queue(), ^
 	{
-#if !PLATFORM_TVOS
+#if !PLATFORM_TVOS && !PLATFORM_VISIONOS
 		if (GFeedbackGenerator != nullptr)
 		{
             UE_LOG(LogIOS, Warning, TEXT("Multiple haptics were prepared at once! Implement a stack of haptics types, or a wrapper object that is returned, with state"));
@@ -1000,7 +1035,7 @@ void FIOSPlatformMisc::TriggerMobileHaptics()
 {
 	dispatch_async(dispatch_get_main_queue(), ^
 	{
-#if !PLATFORM_TVOS
+#if !PLATFORM_TVOS && !PLATFORM_VISIONOS
 		if (GFeedbackGenerator == nullptr)
 		{
 			return;
@@ -1038,7 +1073,7 @@ void FIOSPlatformMisc::ReleaseMobileHaptics()
 {
 	dispatch_async(dispatch_get_main_queue(), ^
 	{
-#if !PLATFORM_TVOS
+#if !PLATFORM_TVOS && !PLATFORM_VISIONOS
 		if (GFeedbackGenerator == nullptr)
 		{
 			return;
@@ -1175,7 +1210,7 @@ void FIOSPlatformMisc::RegisterForRemoteNotifications()
 	}
 
     dispatch_async(dispatch_get_main_queue(), ^{
-#if !PLATFORM_TVOS && NOTIFICATIONS_ENABLED
+#if !PLATFORM_TVOS && !PLATFORM_VISIONOS && NOTIFICATIONS_ENABLED
 		UNUserNotificationCenter *Center = [UNUserNotificationCenter currentNotificationCenter];
 		[Center requestAuthorizationWithOptions:(UNAuthorizationOptionBadge | UNAuthorizationOptionSound | UNAuthorizationOptionAlert)
 							  completionHandler:^(BOOL granted, NSError * _Nullable error) {
@@ -1210,7 +1245,7 @@ bool FIOSPlatformMisc::IsRegisteredForRemoteNotifications()
 
 bool FIOSPlatformMisc::IsAllowedRemoteNotifications()
 {
-#if !PLATFORM_TVOS && NOTIFICATIONS_ENABLED
+#if !PLATFORM_TVOS && !PLATFORM_VISIONOS && NOTIFICATIONS_ENABLED
 	checkf(false, TEXT("For min iOS version >= 10 use FIOSLocalNotificationService::CheckAllowedNotifications."));
 	return true;
 #else
@@ -1223,11 +1258,226 @@ void FIOSPlatformMisc::UnregisterForRemoteNotifications()
 
 }
 
+
+// See for more information about the Blobs
+// https://opensource.apple.com/source/xnu/xnu-4570.61.1/osfmk/kern/cs_blobs.h.auto.html
+
+typedef struct __Blob {
+    uint32_t magic;
+    uint32_t length;
+    char data[];
+} CS_GenericBlob;
+
+typedef struct __BlobIndex {
+    uint32_t type;
+    uint32_t offset;
+} CS_BlobIndex;
+
+typedef struct __MultiBlob {
+    uint32_t magic;
+    uint32_t length;
+    uint32_t count;
+    CS_BlobIndex index[];
+} CS_MultiBlob;
+
+extern NSString *EntitlementsData(void)
+{
+    // iterate through the headers to find the executable, since only the executable has the entitlements
+    const struct mach_header_64* executableHeader = nullptr;
+    char* ImageName = nullptr;
+    for (uint32_t i = 0; i < _dyld_image_count() && executableHeader == nullptr; i++)
+    {
+        const struct mach_header_64 *header = (struct mach_header_64 *)_dyld_get_image_header(i);
+        if (header->filetype == MH_EXECUTE)
+        {
+            ImageName = (char *)_dyld_get_image_name(i);
+            executableHeader = header;
+        }
+    }
+
+    if (executableHeader == nullptr)
+    {
+        return nil;
+    }
+
+    // verify that it's a 64bit app
+    if (executableHeader->magic != MH_MAGIC_64)
+    {
+        UE_LOG(LogIOS, Error, TEXT("Executable is NOT 64bit. Entitlement retrieval not supported."));
+        return nil;
+    }
+    uintptr_t cursor = (uintptr_t)executableHeader + sizeof(struct mach_header_64);
+    const struct linkedit_data_command *segmentCommand = NULL;
+
+    for (uint32_t i = 0; i < executableHeader->ncmds; i++, cursor += segmentCommand->cmdsize)
+    {
+        segmentCommand = (struct linkedit_data_command *)cursor;
+    
+        switch (segmentCommand->cmd)
+        {
+            case LC_CODE_SIGNATURE:
+                UE_LOG(LogIOS, Log, TEXT("LC_CODE_SIGNATURE found"));
+                break;
+            default:
+                continue;
+        }
+
+        const struct linkedit_data_command *dataCommand = (const struct linkedit_data_command *)segmentCommand;
+
+        FILE* file = fopen(ImageName, "rb");
+        if (file == NULL)
+        {
+            UE_LOG(LogIOS, Error, TEXT("Could not open binary file"));
+            return nil;
+        }
+        CS_MultiBlob multiBlob;
+        int isSuccess = fseek(file, UInt64(dataCommand->dataoff), SEEK_SET);
+        size_t Count = fread(&multiBlob, sizeof(CS_MultiBlob), 1, file);
+        uint32 multiBlobCount = ntohl(multiBlob.count);
+        CS_BlobIndex multiBlobIndex[multiBlobCount];
+        fread(&multiBlobIndex[0], sizeof(CS_BlobIndex) * multiBlobCount, 1, file);
+        
+        if (__builtin_bswap32(multiBlob.magic) != 0xfade0cc0)
+        {
+            fclose(file);
+            return nil;
+        }
+        
+        uint32 multiBlobSize = sizeof(multiBlob);
+        uint32 blobSize = sizeof(CS_GenericBlob);
+
+        for (int j = 0; j < multiBlobCount; j++)
+        {
+            uint32_t currentOffset = dataCommand->dataoff;
+            uint32_t blobOffset = ntohl(multiBlobIndex[j].offset);
+            CS_GenericBlob blob;
+            isSuccess = fseek(file, currentOffset + blobOffset, SEEK_SET);
+            Count = fread(&blob, sizeof(CS_GenericBlob), 1, file);
+            
+
+            if (__builtin_bswap32(blob.magic) == 0xfade7171)
+            {
+                uint32 blobLength = ntohl(blob.length);
+                char data[blobLength];
+                fread(&data[0], sizeof(char) * blobLength, 1, file);
+                NSString *stringFromData = [NSString stringWithFormat: @"%s", data];
+                NSLog(@"%@", stringFromData);
+                fclose(file);
+                return stringFromData;
+            }
+            else
+            {
+                continue;
+            }
+        }
+        fclose(file);
+    }
+    return nil;
+}
+
+extern bool IsEntitlementPresentInEmbeddedProvision(const char *EntitlementsToFind)
+{
+    NSString* mobileprovisionPath = [[[NSBundle mainBundle] bundlePath] stringByAppendingPathComponent:@"embedded.mobileprovision"];
+  
+    FILE* file = fopen([mobileprovisionPath cStringUsingEncoding:1],"rb");
+
+    size_t entitlements_len = strlen(EntitlementsToFind);
+    
+    if (file == NULL)
+    {
+        NSLog(@"Mobile Provision not found");
+        return false;
+    }
+
+    size_t readcount;
+    char buffer[1025]; //room for null
+    while(true)
+    {
+        readcount = fread(buffer, 1, 1024, file);
+        if (readcount <= 0)
+        {
+            break;
+        }
+        for(size_t i = 0; i < readcount; i++)
+        {
+            if(buffer[i] == 0)
+            {
+                buffer[i] = ' ';  // replace any null terminators that might be in the binary data
+            }
+        }
+        
+        buffer[readcount] = 0; // null terminate buffer!
+        char* entitlementskeyptr = strstr(buffer, EntitlementsToFind);
+        
+        if(entitlementskeyptr)
+        {
+            fseek(file, -readcount + entitlementskeyptr - buffer, SEEK_CUR); // seek to immediately after the entitlements key
+            readcount = fread(buffer, 1, 1024, file); // read 1024 bytes immediately after the entitlements key so we definitely get the value untruncated
+            // we don't expect any \0 characters between the key and the value, so we don't do the replace thing.
+            buffer[readcount] = 0; // null terminate buffer!
+            
+            // there could be keys following our one with their own true or false values that we could accidentally match if we just look for 'true' and return immediately.
+            char* trueptr = strstr(buffer, "true");
+            char* falseptr = strstr(buffer, "false");
+            
+            if(trueptr == NULL && falseptr == NULL)
+            {
+                UE_LOG(LogIOS, Error, TEXT("Unexpected Behaviour. The entitlement key is found but its value is not set."));
+                return false;
+            }
+            if(trueptr && falseptr == NULL)  // only true
+            {
+                UE_LOG(LogIOS, Log, TEXT("Entitlements found in embedded mobile provision file."));
+                return true;
+            }
+            if(trueptr == NULL && falseptr) // only false
+            {
+                UE_LOG(LogIOS, Log, TEXT("Entitlements found but set to false."));
+                return false;
+            }
+            return (trueptr < falseptr); // return true if true comes before false
+        }
+        
+        if(readcount < 1024)
+        {
+            break; // end of file
+        }
+        
+        // seek back in case the entitlements was truncated.
+        fseek(file, -entitlements_len, SEEK_CUR);
+    }
+    fclose(file);
+    return false;
+}
+
+bool FIOSPlatformMisc::IsEntitlementEnabled(const char * EntitlementToCheck)
+{
+    NSString* TrueFlag = @"</key><true/>";
+    NSString* EntitlementsToFind = [NSString stringWithFormat: @"%s%@" , EntitlementToCheck, TrueFlag];
+    
+    NSString* CleanedEntitlementData = [EntitlementsData() stringByReplacingOccurrencesOfString: @"\\s+" withString: @"" options: NSRegularExpressionSearch range: NSMakeRange(0, EntitlementsToFind.length)];
+
+    CleanedEntitlementData = [[CleanedEntitlementData componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\t"]] componentsJoinedByString:@""];
+    CleanedEntitlementData = [[CleanedEntitlementData componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]] componentsJoinedByString:@""];
+
+    if ([CleanedEntitlementData rangeOfString: (@"%s", EntitlementsToFind)].location == NSNotFound)
+    {
+        UE_LOG(LogIOS, Log, TEXT("Entitlements not found in binary Mach-O header. Looking at the embedded mobile provision file."));
+        return IsEntitlementPresentInEmbeddedProvision(EntitlementToCheck);
+    }
+    else
+    {
+        return true;
+    }
+}
+
 void FIOSPlatformMisc::GetValidTargetPlatforms(TArray<FString>& TargetPlatformNames)
 {
 	// this is only used to cook with the proper TargetPlatform with COTF, it's not the runtime platform (which is just IOS for both)
 #if PLATFORM_TVOS
 	TargetPlatformNames.Add(TEXT("TVOS"));
+#elif PLATFORM_VISIONOS
+	TargetPlatformNames.Add(TEXT("VISIONOS"));
 #else
 	TargetPlatformNames.Add(FIOSPlatformProperties::PlatformName());
 #endif
@@ -1294,6 +1544,8 @@ void FIOSPlatformMisc::GetOSVersions(FString& out_OSVersionLabel, FString& out_O
 {
 #if PLATFORM_TVOS
 	out_OSVersionLabel = TEXT("TVOS");
+#elif PLATFORM_VISIONOS
+	out_OSVersionLabel = TEXT("VisionOS");
 #else
 	out_OSVersionLabel = TEXT("IOS");
 #endif
@@ -1381,8 +1633,7 @@ static void DefaultCrashHandler(FIOSCrashContext const& Context)
     Context.ReportCrash();
     if (GLog)
     {
-        GLog->SetCurrentThreadAsMasterThread();
-        GLog->Flush();
+        GLog->Panic();
     }
     if (GWarn)
     {
@@ -1396,9 +1647,6 @@ static void DefaultCrashHandler(FIOSCrashContext const& Context)
     return Context.GenerateCrashInfo();
 }
 
-// number of stack entries to ignore in backtrace
-static uint32 GIOSStackIgnoreDepth = 6;
-
 // true system specific crash handler that gets called first
 static FIOSCrashContext TempCrashContext(ECrashContextType::Crash, TEXT("Temp Context"));
 static void PlatformCrashHandler(int32 Signal, siginfo_t* Info, void* Context)
@@ -1408,7 +1656,6 @@ static void PlatformCrashHandler(int32 Signal, siginfo_t* Info, void* Context)
 	FIOSApplicationInfo::CrashMalloc->Enable(&TempCrashContext, FPlatformTLS::GetCurrentThreadId());
 	
     FIOSCrashContext CrashContext(ECrashContextType::Crash, TEXT("Caught signal"));
-    CrashContext.IgnoreDepth = GIOSStackIgnoreDepth;
     CrashContext.InitFromSignal(Signal, Info, Context);
 	
 	// switch to the crash malloc to the new context now that we have everything
@@ -1436,7 +1683,7 @@ static void GracefulTerminationHandler(int32 Signal, siginfo_t* Info, void* Cont
     // make sure we write out as much as possible
     if (GLog)
     {
-        GLog->Flush();
+        GLog->Panic();
     }
     if (GWarn)
     {
@@ -1550,7 +1797,7 @@ void FIOSPlatformMisc::SetCrashHandler(void (* CrashHandler)(const FGenericCrash
     
     GCrashHandlerPointer = CrashHandler;
     
-#if !PLATFORM_TVOS
+#if !PLATFORM_TVOS && !PLATFORM_VISIONOS
     if (!FIOSApplicationInfo::CrashReporter && !FIOSApplicationInfo::CrashMalloc)
     {
         // configure the crash handler malloc zone to reserve a little memory for itself
@@ -1570,7 +1817,7 @@ void FIOSPlatformMisc::SetCrashHandler(void (* CrashHandler)(const FGenericCrash
         NSError* Error = nil;
         if ([FIOSApplicationInfo::CrashReporter enableCrashReporterAndReturnError: &Error])
         {
-            GIOSStackIgnoreDepth = 0;
+            /* no-op */
         }
         else
         {
@@ -1606,11 +1853,11 @@ bool FIOSPlatformMisc::HasSeparateChannelForDebugOutput()
 #endif
 }
 
-void FIOSPlatformMisc::RequestExit(bool Force)
+void FIOSPlatformMisc::RequestExit(bool Force, const TCHAR* CallSite)
 {
 	if (Force)
 	{
-		FApplePlatformMisc::RequestExit(Force);
+		FApplePlatformMisc::RequestExit(Force, CallSite);
 	}
 	else
 	{
@@ -1619,16 +1866,17 @@ void FIOSPlatformMisc::RequestExit(bool Force)
 	}
 }
 
-void FIOSPlatformMisc::RequestExitWithStatus(bool Force, uint8 ReturnCode)
+void FIOSPlatformMisc::RequestExitWithStatus(bool Force, uint8 ReturnCode, const TCHAR* CallSite)
 {
 	if (Force)
 	{
-		FApplePlatformMisc::RequestExit(Force);
+		FApplePlatformMisc::RequestExit(Force, CallSite);
 	}
 	else
 	{
 		// Implementation will ignore the return code - this may be important, so warn.
-		UE_LOG(LogIOS, Warning, TEXT("FIOSPlatformMisc::RequestExitWithStatus(%i, %d) - return code will be ignored by the generic implementation."), Force, ReturnCode);
+		UE_LOG(LogIOS, Warning, TEXT("FIOSPlatformMisc::RequestExitWithStatus(%i, %d, %s) - return code will be ignored by the generic implementation."),
+			Force, ReturnCode, CallSite ? CallSite : TEXT("<NoCallSiteInfo>"));
 
 		// ForceExit is sort of a misnomer here.  This will exit the engine loop before calling _Exit() from the app delegate
 		[[IOSAppDelegate GetDelegate] ForceExit];
@@ -1637,7 +1885,11 @@ void FIOSPlatformMisc::RequestExitWithStatus(bool Force, uint8 ReturnCode)
 
 int32 FIOSPlatformMisc::GetMaxRefreshRate()
 {
+#if PLATFORM_VISIONOS
+	return 60;
+#else
 	return [UIScreen mainScreen].maximumFramesPerSecond;
+#endif
 }
 
 void FIOSPlatformMisc::GPUAssert()
@@ -1652,6 +1904,48 @@ void FIOSPlatformMisc::MetalAssert()
     // make this a fatal error that ends here not in the log
     // changed to 3 from NULL because clang noticed writing to NULL and warned about it
     *(int32 *)7 = 123;
+}
+
+bool FIOSPlatformMisc::CPUHasHwCrcSupport()
+{
+	// HW CRC instructions support is available on Apple A10+
+	static int HwCrcSupported = -1;
+	if (HwCrcSupported == -1)
+	{
+		HwCrcSupported = 0;
+		
+		const FString DeviceIDString = GetIOSDeviceIDString();
+		if (DeviceIDString.StartsWith(TEXT("iPod")))
+		{
+			const int Major = FCString::Atoi(&DeviceIDString[4]);
+			//iPod Touch 6 and lower don't support hw CRC32
+			HwCrcSupported = Major > 7;
+		}
+		else if (DeviceIDString.StartsWith(TEXT("iPad")))
+		{
+			// get major revision number
+			const int Major = FCString::Atoi(&DeviceIDString[4]);
+
+			//iPad 5, iPad Pro and lower
+			HwCrcSupported = Major > 6;
+		}
+		else if (DeviceIDString.StartsWith(TEXT("iPhone")))
+		{
+			const int Major = FCString::Atoi(&DeviceIDString[6]);
+			
+			// iPhone 6S, iPhone SE and below
+			HwCrcSupported = Major > 9;
+		}
+		else if (DeviceIDString.StartsWith(TEXT("AppleTV")))
+		{
+			const int Major = FCString::Atoi(&DeviceIDString[7]);
+			
+			// Apple TV
+			HwCrcSupported = Major > 5;
+		}
+	}
+
+	return HwCrcSupported == 1;
 }
 
 static FCriticalSection EnsureLock;
@@ -1670,7 +1964,7 @@ void ReportEnsure( const TCHAR* ErrorMessage, int NumStackFramesToIgnore )
     
     bReentranceGuard = true;
     
-#if !PLATFORM_TVOS
+#if !PLATFORM_TVOS && !PLATFORM_VISIONOS
     if(FIOSApplicationInfo::CrashReporter != nil)
     {
         siginfo_t Signal;
@@ -1693,7 +1987,7 @@ FString FIOSCrashContext::CreateCrashFolder() const
 	// create a crash-specific directory
 	char CrashInfoFolder[PATH_MAX] = {};
 	FCStringAnsi::Strncpy(CrashInfoFolder, GIOSAppInfo.CrashReportPath, PATH_MAX);
-	FCStringAnsi::Strcat(CrashInfoFolder, PATH_MAX, "/CrashReport-UE4-");
+	FCStringAnsi::Strcat(CrashInfoFolder, PATH_MAX, "/CrashReport-UE-");
 	FCStringAnsi::Strcat(CrashInfoFolder, PATH_MAX, GIOSAppInfo.AppNameUTF8);
 	FCStringAnsi::Strcat(CrashInfoFolder, PATH_MAX, "-pid-");
 	FCStringAnsi::Strcat(CrashInfoFolder, PATH_MAX, ItoANSI(getpid(), 10));

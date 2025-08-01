@@ -4,7 +4,9 @@
 #include "Camera/CameraShakeSourceComponent.h"
 #include "Compilation/MovieSceneCompilerRules.h"
 #include "Sections/MovieSceneCameraShakeSourceShakeSection.h"
-#include "Evaluation/MovieSceneCameraShakeSourceShakeTemplate.h"
+#include "MovieScene.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneCameraShakeSourceShakeTrack)
 
 #define LOCTEXT_NAMESPACE "MovieSceneCameraShakeSourceShakeTrack"
 
@@ -103,10 +105,6 @@ bool UMovieSceneCameraShakeSourceShakeTrack::IsEmpty() const
 	return CameraShakeSections.Num() == 0;
 }
 
-FMovieSceneEvalTemplatePtr UMovieSceneCameraShakeSourceShakeTrack::CreateTemplateForSection(const UMovieSceneSection& InSection) const
-{
-	return FMovieSceneCameraShakeSourceShakeSectionTemplate(*CastChecked<const UMovieSceneCameraShakeSourceShakeSection>(&InSection));
-}
-
 #undef LOCTEXT_NAMESPACE
+
 

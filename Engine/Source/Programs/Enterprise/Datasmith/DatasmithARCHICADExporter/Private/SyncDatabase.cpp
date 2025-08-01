@@ -17,8 +17,6 @@
 
 #undef TicksPerSecond
 
-DISABLE_SDK_WARNINGS_START
-
 #include "DatasmithUtils.h"
 #include "IDirectLinkUI.h"
 #include "IDatasmithExporterUIModule.h"
@@ -27,8 +25,6 @@ DISABLE_SDK_WARNINGS_START
 #if PLATFORM_MAC
 	#include "Misc/ConfigCacheIni.h"
 #endif
-
-DISABLE_SDK_WARNINGS_END
 
 BEGIN_NAMESPACE_UE_AC
 
@@ -409,7 +405,11 @@ const FString& FSyncDatabase::GetLayerName(short InLayerIndex)
 	FString* Found = LayerIndex2Name.Find(InLayerIndex);
 	if (Found == nullptr)
 	{
+#if AC_VERSION > 26
+		LayerIndex2Name.Add(InLayerIndex, GSStringToUE(UE_AC::GetLayerName(ACAPI_CreateAttributeIndex(InLayerIndex))));
+#else
 		LayerIndex2Name.Add(InLayerIndex, GSStringToUE(UE_AC::GetLayerName(InLayerIndex)));
+#endif
 		Found = LayerIndex2Name.Find(InLayerIndex);
 		UE_AC_TestPtr(Found);
 	}
@@ -588,8 +588,6 @@ void FSyncDatabase::SetSceneInfo()
 	TheScene.SetVendor(TEXT("Graphisoft"));
 	TheScene.SetProductName(TEXT("ARCHICAD"));
 	TheScene.SetProductVersion(UTF8_TO_TCHAR(UE_AC_STRINGIZE(AC_VERSION)));
-	TheScene.SetExporterVersion(TEXT("4.27.2"));
-	TheScene.SetExporterSDKVersion(TEXT("4.27.2"));
 }
 
 void FSyncDatabase::ResetMeshClasses()
@@ -795,7 +793,7 @@ void FSyncDatabase::ScanLights(FElementID& InElementID)
 					SyncData->SetParent(InElementID.GetSyncData());
 					SyncData->MarkAsModified();
 				}
-				FSyncData::FLight& LightSyncData = static_cast< FSyncData::FLight& >(*SyncData);
+				FSyncData::FLight& LightSyncData = static_cast<FSyncData::FLight&>(*SyncData);
 				LightSyncData.MarkAsExisting();
 
 				LightSyncData.SetLightData(LightData);
@@ -808,7 +806,7 @@ void FSyncDatabase::ScanLights(FElementID& InElementID)
 				{
 					SignaledTypes.insert(LightData.LightType);
 					UE_AC_DebugF("FSyncDatabase::ScanLights - Unhandled LightType=%d, %s", LightData.LightType,
-								 InElementID.GetElementName());
+						InElementID.GetElementName());
 				}
 			}
 		}

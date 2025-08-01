@@ -3,36 +3,26 @@
 #pragma once
 
 #include "UnrealEdMisc.h"
-#include "SubComponentTreeItem.h"
 
-namespace SceneOutliner
+class FSceneOutlinerDelegates
 {
-
-	class FSceneOutlinerDelegates
+public:
+	/** Return a single FSceneOutlinerDelegates object */
+	SCENEOUTLINER_API static FSceneOutlinerDelegates& Get()
 	{
-	public:
-		/** Return a single FSceneOutlinerDelegates object */
-		SCENEOUTLINER_API static FSceneOutlinerDelegates& Get()
-		{
-			// return the singleton object
-			static FSceneOutlinerDelegates Singleton;
-			return Singleton;
-		}
+		// return the singleton object
+		static FSceneOutlinerDelegates Singleton;
+		return Singleton;
+	}
 
-		/**	Broadcasts whenever the current selection changes */
-		FSimpleMulticastDelegate SelectionChanged;
+	/**	Broadcasts whenever the current selection changes */
+	FSimpleMulticastDelegate SelectionChanged;
 
-		/** Broadcasts whenever a SubComponentTreeItem selection changes */
-		DECLARE_MULTICAST_DELEGATE_OneParam(FOnSubComponentSelectionChanged, TArray<FSubComponentTreeItem*>&);
-		FOnSubComponentSelectionChanged OnSubComponentSelectionChanged;
+	/** Broadcasts whenever a Component Selection Changes */
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnComponentSelectionChanged, class UActorComponent*);
+	FOnComponentSelectionChanged OnComponentSelectionChanged;
 
-		/** Broadcasts whenever a Component Selection Changes */
-		DECLARE_MULTICAST_DELEGATE_OneParam(FOnComponentSelectionChanged, class UActorComponent*);
-		FOnComponentSelectionChanged OnComponentSelectionChanged;
+	/** Broadcasts whenever a Component has been modified */
+	FSimpleMulticastDelegate OnComponentsUpdated;
 
-		/** Broadcasts whenever a Component has been modified */
-		FSimpleMulticastDelegate OnComponentsUpdated;
-
-	};
-
-} // namespace SceneOutliner
+};

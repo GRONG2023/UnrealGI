@@ -10,13 +10,13 @@
 #include "Widgets/SWidget.h"
 #include "PreviewScene.h"
 #include "EditorViewportClient.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Widgets/SToolTip.h"
 #include "PersonaDelegates.h"
-#include "Editor/ContentBrowser/Public/ContentBrowserDelegates.h"
+#include "ContentBrowserDelegates.h"
 #include "EditorAnimUtils.h"
 #include "IAnimationSequenceBrowser.h"
-#include "ARFilter.h"
+#include "AssetRegistry/ARFilter.h"
 
 class FSceneViewport;
 class FUICommandList;
@@ -60,6 +60,8 @@ public:
 public:
 	void Construct(const FArguments& InArgs, const TSharedRef<class IPersonaToolkit>& InPersonaToolkit);
 
+	void OnRequestOpenAssets(const TArray<FAssetData>& SelectedAssets, bool bFromHistory);
+
 	void OnRequestOpenAsset(const FAssetData& AssetData, bool bFromHistory);
 
 	virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
@@ -73,6 +75,9 @@ public:
 	
 	/** Delegate that handles creation of context menu */
 	TSharedPtr<SWidget> OnGetAssetContextMenu(const TArray<FAssetData>& SelectedAssets);
+
+	/** Delegate to open animation assets each in a new window */
+	void OpenInNewWindow(TArray<FAssetData> AnimationAssets);
 
 	/** Delegate to handle "Find in Content Browser" context menu option */
 	void FindInContentBrowser();
@@ -264,8 +269,6 @@ protected:
 
 	/** The skeleton notify filter */
 	TSharedPtr<FFrontendFilter_SkeletonNotify> SkeletonNotifyFilter;
-
-	void RetargetAnimationHandler(USkeleton* OldSkeleton, USkeleton* NewSkeleton, bool bRemapReferencedAssets, bool bAllowRemapToExisting, bool bConvertSpaces, const EditorAnimUtils::FNameDuplicationRule* NameRule, TArray<TWeakObjectPtr<UObject>> InAnimAssets);
 
 private:
 	/** Updates the animation preview in the tooltip */

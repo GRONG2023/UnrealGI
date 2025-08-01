@@ -14,8 +14,8 @@ class USkeletalMeshComponent;
 /**
  *	A library of the most common animation blueprint functions.
  */
-UCLASS(meta=(ScriptName="AnimGraphLibrary", DocumentationPolicy="Strict"))
-class ANIMGRAPHRUNTIME_API UKismetAnimationLibrary : public UBlueprintFunctionLibrary
+UCLASS(meta=(ScriptName="AnimGraphLibrary", BlueprintThreadSafe, DocumentationPolicy="Strict"), MinimalAPI)
+class UKismetAnimationLibrary : public UBlueprintFunctionLibrary
 {
 	GENERATED_UCLASS_BODY()
 
@@ -33,8 +33,8 @@ class ANIMGRAPHRUNTIME_API UKismetAnimationLibrary : public UBlueprintFunctionLi
 	 *	@param StartStretchRatio The ratio at which the bones should start to stretch. The higher the value, the later the stretching wil start.
 	 *	@param MaxStretchScale The maximum multiplier for the stretch to reach.
 	 */
-	UFUNCTION(BlueprintPure, Category = "Utilities|Animation", meta = (DisplayName = "Two Bone IK Function", ScriptName = "TwoBoneIK", bAllowStretching = "false", StartStretchRatio = "1.0", MaxStretchScale = "1.2"))
-	static void K2_TwoBoneIK(
+	UFUNCTION(BlueprintPure, Category = "Animation|Utilities", meta = (DisplayName = "Two Bone IK Function", ScriptName = "TwoBoneIK", bAllowStretching = "false", StartStretchRatio = "1.0", MaxStretchScale = "1.2"))
+	static ANIMGRAPHRUNTIME_API void K2_TwoBoneIK(
 		const FVector& RootPos, 
 		const FVector& JointPos, 
 		const FVector& EndPos, 
@@ -57,8 +57,8 @@ class ANIMGRAPHRUNTIME_API UKismetAnimationLibrary : public UBlueprintFunctionLi
 	 *	@param UpVector The position to use for the upvector target (only used is bUseUpVector is turned on)
 	 *	@param ClampConeInDegree A limit for only allowing the lookat to rotate as much as defined by the float value
 	 */
-	UFUNCTION(BlueprintPure, Category = "Utilities|Animation", meta = (DisplayName = "Look At Function", ScriptName = "LookAt", bUseUpVector = "false"))
-	static FTransform K2_LookAt(
+	UFUNCTION(BlueprintPure, Category = "Animation|Utilities", meta = (DisplayName = "Look At Function", ScriptName = "LookAt", bUseUpVector = "false"))
+	static ANIMGRAPHRUNTIME_API FTransform K2_LookAt(
 		const FTransform& CurrentTransform, 
 		const FVector& TargetPosition, 
 		FVector LookAtVector, 
@@ -81,8 +81,8 @@ class ANIMGRAPHRUNTIME_API UKismetAnimationLibrary : public UBlueprintFunctionLi
 	 *	@param OutRangeMin The minimum for the output range (commonly == 0.0)
 	 *	@param OutRangeMax The maximum for the output range (commonly == 1.0)
 	 */
-	UFUNCTION(BlueprintPure, Category = "Utilities|Animation", meta = (DisplayName = "Get Distance Between Two Sockets", ScriptName = "DistanceBetweenSockets", bRemapRange= "false"))
-	static float K2_DistanceBetweenTwoSocketsAndMapRange(
+	UFUNCTION(BlueprintPure, Category = "Animation|Utilities", meta = (NotBlueprintThreadSafe, DisplayName = "Get Distance Between Two Sockets", ScriptName = "DistanceBetweenSockets", bRemapRange= "false"))
+	static ANIMGRAPHRUNTIME_API float K2_DistanceBetweenTwoSocketsAndMapRange(
 		const USkeletalMeshComponent* Component, 
 		const FName SocketOrBoneNameA, 
 		ERelativeTransformSpace SocketSpaceA, 
@@ -101,8 +101,8 @@ class ANIMGRAPHRUNTIME_API UKismetAnimationLibrary : public UBlueprintFunctionLi
 	 *	@param SocketOrBoneNameFrom The name of the first socket / bone
 	 *	@param SocketOrBoneNameTo The name of the second socket / bone
 	 */
-	UFUNCTION(BlueprintPure, Category = "Utilities|Animation", meta = (DisplayName = "Get Direction Between Sockets", ScriptName = "DirectionBetweenSockets"))
-	static FVector K2_DirectionBetweenSockets(const USkeletalMeshComponent* Component, const FName SocketOrBoneNameFrom, const FName SocketOrBoneNameTo);
+	UFUNCTION(BlueprintPure, Category = "Animation|Utilities", meta = (NotBlueprintThreadSafe, DisplayName = "Get Direction Between Sockets", ScriptName = "DirectionBetweenSockets"))
+	static ANIMGRAPHRUNTIME_API FVector K2_DirectionBetweenSockets(const USkeletalMeshComponent* Component, const FName SocketOrBoneNameFrom, const FName SocketOrBoneNameTo);
 
 	/** 
 	 *	This function creates perlin noise from input X, Y, Z, and then range map to RangeOut, and out put to OutX, OutY, OutZ
@@ -117,8 +117,8 @@ class ANIMGRAPHRUNTIME_API UKismetAnimationLibrary : public UBlueprintFunctionLi
 	 *	@param RangeOutMinZ The minimum for the output range for the z component
 	 *	@param RangeOutMaxZ The maximum for the output range for the z component
 	 */
-	UFUNCTION(BlueprintPure, Category = "Utilities|Animation", meta = (DisplayName = "Make Perlin Noise Vector and Remap", ScriptName = "MakeVectorFromPerlinNoise", RangeOutMinX = "-1.f", RangeOutMaxX = "1.f", RangeOutMinY = "-1.f", RangeOutMaxY = "1.f", RangeOutMinZ = "-1.f", RangeOutMaxZ = "1.f"))
-	static FVector K2_MakePerlinNoiseVectorAndRemap(
+	UFUNCTION(BlueprintPure, Category = "Animation|Utilities", meta = (DisplayName = "Make Perlin Noise Vector and Remap", ScriptName = "MakeVectorFromPerlinNoise", RangeOutMinX = "-1.f", RangeOutMaxX = "1.f", RangeOutMinY = "-1.f", RangeOutMaxY = "1.f", RangeOutMinZ = "-1.f", RangeOutMaxZ = "1.f"))
+	static ANIMGRAPHRUNTIME_API FVector K2_MakePerlinNoiseVectorAndRemap(
 		float X,
 		float Y,
 		float Z,
@@ -137,8 +137,8 @@ class ANIMGRAPHRUNTIME_API UKismetAnimationLibrary : public UBlueprintFunctionLi
 	 *	@param RangeOutMin The minimum for the output range
 	 *	@param RangeOutMax The maximum for the output range
 	 */
-	UFUNCTION(BlueprintPure, Category = "Utilities|Animation", meta = (DisplayName = "Make Perlin Noise and Remap", ScriptName = "MakeFloatFromPerlinNoise", RangeOutMinX = "-1.f", RangeOutMaxX = "1.f", RangeOutMinY = "-1.f", RangeOutMaxY = "1.f", RangeOutMinZ = "-1.f", RangeOutMaxZ = "1.f"))
-	static float K2_MakePerlinNoiseAndRemap(
+	UFUNCTION(BlueprintPure, Category = "Animation|Utilities", meta = (DisplayName = "Make Perlin Noise and Remap", ScriptName = "MakeFloatFromPerlinNoise", RangeOutMinX = "-1.f", RangeOutMaxX = "1.f", RangeOutMinY = "-1.f", RangeOutMaxY = "1.f", RangeOutMinZ = "-1.f", RangeOutMaxZ = "1.f"))
+	static ANIMGRAPHRUNTIME_API float K2_MakePerlinNoiseAndRemap(
 		float Value,
 		float RangeOutMin,
 		float RangeOutMax
@@ -155,8 +155,8 @@ class ANIMGRAPHRUNTIME_API UKismetAnimationLibrary : public UBlueprintFunctionLi
 	 *	@param VelocityMin The minimum velocity to use for normalization (if both min and max are set to 0, normalization is turned off)
 	 *	@param VelocityMax The maximum velocity to use for normalization (if both min and max are set to 0, normalization is turned off)
 	 */
-	UFUNCTION(BlueprintCallable, Category = "Utilities|Animation", meta = (DisplayName = "Calculate Velocity From Position History", ScriptName = "CalculateVelocityFromPositionHistory", NumberOfSamples = "16", VelocityMin = "0.f", VelocityMax = "128.f"))
-	static float K2_CalculateVelocityFromPositionHistory(
+	UFUNCTION(BlueprintCallable, Category = "Animation|Utilities", meta = (DisplayName = "Calculate Velocity From Position History", ScriptName = "CalculateVelocityFromPositionHistory", NumberOfSamples = "16", VelocityMin = "0.f", VelocityMax = "128.f"))
+	static ANIMGRAPHRUNTIME_API float K2_CalculateVelocityFromPositionHistory(
 		float DeltaSeconds,
 		FVector Position,
 		UPARAM(ref) FPositionHistory& History,
@@ -183,8 +183,8 @@ class ANIMGRAPHRUNTIME_API UKismetAnimationLibrary : public UBlueprintFunctionLi
 	 *	@param EasingType The easing function to use
 	 *	@param CustomCurve The curve to use if the easing type is "Custom"
 	 */
-	UFUNCTION(BlueprintCallable, Category = "Utilities|Animation", meta = (DisplayName = "Calculate Velocity From Sockets", ScriptName = "CalculateVelocityFromSockets", NumberOfSamples = "16", VelocityMin = "0.f", VelocityMax = "128.f"))
-	static float K2_CalculateVelocityFromSockets(
+	UFUNCTION(BlueprintCallable, Category = "Animation|Utilities", meta = (NotBlueprintThreadSafe, DisplayName = "Calculate Velocity From Sockets", ScriptName = "CalculateVelocityFromSockets", NumberOfSamples = "16", VelocityMin = "0.f", VelocityMax = "128.f"))
+	static ANIMGRAPHRUNTIME_API float K2_CalculateVelocityFromSockets(
 		float DeltaSeconds,
 		USkeletalMeshComponent * Component,
 		const FName SocketOrBoneName,
@@ -202,8 +202,8 @@ class ANIMGRAPHRUNTIME_API UKismetAnimationLibrary : public UBlueprintFunctionLi
 	/**
 	 *	This function starts measuring the time for a profiling bracket
 	 */
-	UFUNCTION(BlueprintCallable, Category = "Utilities|Animation", meta = (DisplayName = "Start Profiling Timer"))
-	static void K2_StartProfilingTimer();
+	UFUNCTION(BlueprintCallable, Category = "Animation|Utilities", meta = (DisplayName = "Start Profiling Timer"))
+	static ANIMGRAPHRUNTIME_API void K2_StartProfilingTimer();
 
 	/**
 	 *	This function ends measuring a profiling bracket and optionally logs the result
@@ -212,16 +212,16 @@ class ANIMGRAPHRUNTIME_API UKismetAnimationLibrary : public UBlueprintFunctionLi
 	 *  @param LogPrefix A prefix to use for the log
 	 *  @result The time spent in milliseconds
 	 */
-	UFUNCTION(BlueprintCallable, Category = "Utilities|Animation", meta = (DisplayName = "End Profiling Timer"))
-	static float K2_EndProfilingTimer(bool bLog = true, const FString& LogPrefix = "");
+	UFUNCTION(BlueprintCallable, Category = "Animation|Utilities", meta = (DisplayName = "End Profiling Timer"))
+	static ANIMGRAPHRUNTIME_API float K2_EndProfilingTimer(bool bLog = true, const FString& LogPrefix = "");
 
-private:
-
-	struct FK2ProfilingTimer
-	{
-		double LastTime;
-		double AccummulatedTime;
-	};
-	static TArray<FK2ProfilingTimer> sProfilingTimers;
+	/** 
+	 * Returns degree of the angle between Velocity and Rotation forward vector
+	 * The range of return will be from [-180, 180]. Useful for feeding directional blendspaces.
+	 * @param	Velocity		The velocity to use as direction relative to BaseRotation
+	 * @param	BaseRotation	The base rotation, e.g. of a pawn
+	 */
+	UFUNCTION(BlueprintPure, Category="Animation|Utilities")
+	static ANIMGRAPHRUNTIME_API float CalculateDirection(const FVector& Velocity, const FRotator& BaseRotation);
 };
 

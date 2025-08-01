@@ -17,6 +17,7 @@
 #include "MaterialShaderQualitySettingsCustomization.h"
 #include "MaterialShaderQualitySettings.h"
 #include "ComponentRecreateRenderStateContext.h"
+#include "RenderingThread.h"
 #include "ShaderPlatformQualitySettings.h"
 #include "Misc/CoreDelegates.h"
 
@@ -80,9 +81,9 @@ class FAndroidPlatformEditorModule
 			{
 				static FName NAME_GLSL_ES3_1_ANDROID(TEXT("GLSL_ES3_1_ANDROID"));
 				UShaderPlatformQualitySettings* AndroidMaterialQualitySettings = UMaterialShaderQualitySettings::Get()->GetShaderPlatformQualitySettings(NAME_GLSL_ES3_1_ANDROID);
-				SettingsModule->RegisterSettings("Project", "Platforms", "AndroidES31Quality",
-					LOCTEXT("AndroidES31QualitySettingsName", "Android Material Quality - ES31"),
-					LOCTEXT("AndroidES31QualitySettingsDescription", "Settings for Android ES3.1 material quality"),
+				SettingsModule->RegisterSettings("Project", "Platforms", "AndroidOpenGLMobileQuality",
+					LOCTEXT("AndroidOpenGLMobileQualitySettingsName", "Android Material Quality - OpenGL Mobile"),
+					LOCTEXT("AndroidOpenGLMobileQualitySettingsDescription", "Settings for Android OpenGL Mobile material quality"),
 					AndroidMaterialQualitySettings
 				);
 			}

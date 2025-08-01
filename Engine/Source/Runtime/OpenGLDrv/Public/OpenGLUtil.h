@@ -11,6 +11,17 @@
 #define ENABLE_VERIFY_GL (0 & DO_CHECK)
 #define ENABLE_VERIFY_GL_TRACE 0
 
+// Include GL debug output functionality on everything but shipping configs.
+// to enable the debug output specify '-OpenGLDebugLevel=[1-5]' via the command line.
+#define ENABLE_DEBUG_OUTPUT	(!UE_BUILD_SHIPPING)
+#if !ENABLE_DEBUG_OUTPUT
+inline bool IsOGLDebugOutputEnabled() { return false; }
+inline int32 GetOGLDebugOutputLevel() { return 0; }
+#else
+bool IsOGLDebugOutputEnabled();
+int32 GetOGLDebugOutputLevel();
+#endif
+
 // Additional check that our GL calls are occurring on the expected thread
 #define ENABLE_VERIFY_GL_THREAD (UE_BUILD_DEBUG)
 
@@ -21,7 +32,7 @@
 #define ENABLE_UNIFORM_BUFFER_LAYOUT_DUMP 0
 
 /** Set to 1 to enable shader debugging which e.g. keeps the GLSL source as members of TOpenGLShader*/
-#define DEBUG_GL_SHADERS (UE_BUILD_DEBUG)
+#define DEBUG_GL_SHADERS (UE_BUILD_DEBUG || UE_EDITOR)
 
 /** Set to 1 to enable calls to place event markers into the OpenGL stream
     this is purposefully not considered for OPENGL_PERFORMANCE_DATA_INVALID, 
@@ -68,12 +79,12 @@ extern bool PlatformOpenGLContextValid();
 
 	struct FOpenGLErrorScope
 	{
-		const TCHAR* FunctionName;
+		const char* FunctionName;
 		const TCHAR* Filename;
 		const uint32 Line;
 
 		FOpenGLErrorScope(
-			const TCHAR* InFunctionName,
+			const char* InFunctionName,
 			const TCHAR* InFilename,
 			const uint32 InLine)
 			: FunctionName(InFunctionName)
@@ -81,7 +92,7 @@ extern bool PlatformOpenGLContextValid();
 			, Line(InLine)
 		{
 #if ENABLE_VERIFY_GL_TRACE
-			UE_LOG(LogRHI, Log, TEXT("log before %s(%d): %s"), InFilename, InLine, InFunctionName);
+			UE_LOG(LogRHI, Log, TEXT("log before %s(%d): %s"), InFilename, InLine, ANSI_TO_TCHAR(InFunctionName));
 #endif
 			CheckForErrors(0);
 		}
@@ -89,7 +100,7 @@ extern bool PlatformOpenGLContextValid();
 		~FOpenGLErrorScope()
 		{
 #if ENABLE_VERIFY_GL_TRACE
-			UE_LOG(LogRHI, Log, TEXT("log after  %s(%d): %s"), Filename, Line, FunctionName);
+			UE_LOG(LogRHI, Log, TEXT("log after  %s(%d): %s"), Filename, Line, ANSI_TO_TCHAR(FunctionName));
 
 #endif
 
@@ -104,15 +115,15 @@ extern bool PlatformOpenGLContextValid();
 			if (ErrorCode != GL_NO_ERROR)
 			{
 				const TCHAR* PrefixStrings[] = { TEXT("Before "), TEXT("During ") };
-				VerifyOpenGLResult(ErrorCode,PrefixStrings[BeforeOrAfter],FunctionName,Filename,Line);
+				VerifyOpenGLResult(ErrorCode,PrefixStrings[BeforeOrAfter], ANSI_TO_TCHAR(FunctionName),Filename,Line);
 			}
 		}
 	};
 	#define MACRO_TOKENIZER(IdentifierName, Msg, FileName, LineNumber) FOpenGLErrorScope IdentifierName_ ## LineNumber (Msg, FileName, LineNumber)
 	#define MACRO_TOKENIZER2(IdentifierName, Msg, FileName, LineNumber) MACRO_TOKENIZER(IdentiferName, Msg, FileName, LineNumber)
 	#define VERIFY_GL_SCOPE_WITH_MSG_STR(MsgStr) CHECK_EXPECTED_GL_THREAD(); MACRO_TOKENIZER2(ErrorScope_, MsgStr, TEXT(__FILE__), __LINE__)
-	#define VERIFY_GL_SCOPE() VERIFY_GL_SCOPE_WITH_MSG_STR(ANSI_TO_TCHAR(__FUNCTION__))
-	#define VERIFY_GL_FUNC(Func, ...) { VERIFY_GL_SCOPE_WITH_MSG_STR(TEXT(#Func)); Func(__VA_ARGS__); }
+	#define VERIFY_GL_SCOPE() VERIFY_GL_SCOPE_WITH_MSG_STR(__FUNCTION__)
+	#define VERIFY_GL_FUNC(Func, ...) { VERIFY_GL_SCOPE_WITH_MSG_STR((#Func)); Func(__VA_ARGS__); }
 
 	/**
 	 * Some important GL calls are trapped individually.
@@ -132,13 +143,22 @@ struct FRHICommandGLCommandString
 	static const TCHAR* TStr() { return TEXT("FRHICommandGLCommand"); }
 };
 
+#define GL_CAPTURE_CALLSTACK 0 // Capture the callstack at the point of enqueuing the command. 
+
 struct FRHICommandGLCommand final : public FRHICommand<FRHICommandGLCommand, FRHICommandGLCommandString>
 {
+#if GL_CAPTURE_CALLSTACK
+	uint64 CallStack[16];
+#endif
 	TUniqueFunction<void()> GLFunction;
 
 	FORCEINLINE_DEBUGGABLE FRHICommandGLCommand(TUniqueFunction<void()> InGLFunction)
 		: GLFunction(MoveTemp(InGLFunction))
-	{}
+	{
+#if GL_CAPTURE_CALLSTACK
+		FPlatformStackWalk::CaptureStackBackTrace(CallStack, UE_ARRAY_COUNT(CallStack), nullptr);
+#endif
+	}
 
 	void Execute(FRHICommandListBase& CmdList)
 	{
@@ -147,7 +167,37 @@ struct FRHICommandGLCommand final : public FRHICommand<FRHICommandGLCommand, FRH
 };
 
 void RunOnGLRenderContextThread(TUniqueFunction<void(void)> GLFunc, bool bWaitForCompletion = false);
-inline bool ShouldRunGLRenderContextOpOnThisThread(FRHICommandListImmediate& RHICmdList)
+
+
+#if 0
+// TODO: investigate simplifying GL's explicit RHIT tests to this.
+inline bool ShouldRunGLRenderContextOpOnThisThread(FRHICommandListBase* RHICmdList)
 {
-	return (RHICmdList.Bypass() || !IsRunningRHIInSeparateThread() || IsInRHIThread());
+	return !RHICmdList || RHICmdList->IsBottomOfPipe();
 }
+
+inline bool ShouldRunGLRenderContextOpOnThisThread(FRHICommandListBase& RHICmdList)
+{
+	return ShouldRunGLRenderContextOpOnThisThread(&RHICmdList);
+}
+#else
+
+inline bool ShouldRunGLRenderContextOpOnThisThread(FRHICommandListBase* RHICmdList)
+{
+	if (RHICmdList)
+	{
+		return (RHICmdList->Bypass() || RHICmdList->IsBottomOfPipe() || !IsRunningRHIInSeparateThread() || IsInRHIThread());
+	}
+	else
+	{
+		check(!IsRunningRHIInSeparateThread() || IsInRHIThread());
+		return true;
+	}
+}
+
+inline bool ShouldRunGLRenderContextOpOnThisThread(FRHICommandListBase& RHICmdList)
+{
+	return ShouldRunGLRenderContextOpOnThisThread(&RHICmdList);
+}
+
+#endif

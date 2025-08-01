@@ -2,15 +2,26 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Widgets/SWidget.h"
-#include "Layout/Margin.h"
-#include "Widgets/SCompoundWidget.h"
-#include "Modules/ModuleInterface.h"
 #include "AssetDiscoveryIndicator.h"
+#include "Containers/Array.h"
+#include "CoreMinimal.h"
+#include "Layout/Margin.h"
+#include "Modules/ModuleInterface.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/SWidget.h"
 
+class FName;
 class ITransportControl;
+class SWidget;
+class UObject;
 struct FTransportControlArgs;
+
+namespace UE::EditorWidgets
+{
+class FObjectNameEditSinkRegistry;
+}
 
 /** Interface for the widget that wraps an editable text box for viewing the names of objects or editing the labels of actors */
 class IObjectNameEditableTextBox : public SCompoundWidget
@@ -59,6 +70,17 @@ public:
 	 */
 	virtual TSharedRef<ITransportControl> CreateTransportControl(const FTransportControlArgs& Args);
 
+	/**
+	 * Gets the registry of name edit 'sinks' used for getting and editing object display names
+	 * 
+	 * @return The registry
+	 */
+	virtual TSharedRef<UE::EditorWidgets::FObjectNameEditSinkRegistry> GetObjectNameEditSinkRegistry() const;
+
 	/** Editor Widgets app identifier string */
 	static const FName EditorWidgetsAppIdentifier;
+
+private:
+	/** Registry for name interfaces */
+	TSharedPtr<UE::EditorWidgets::FObjectNameEditSinkRegistry> ObjectNameEditSinkRegistry;
 };

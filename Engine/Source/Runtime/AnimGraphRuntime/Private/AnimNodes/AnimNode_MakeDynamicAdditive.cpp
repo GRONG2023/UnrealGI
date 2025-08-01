@@ -2,7 +2,10 @@
 
 #include "AnimNodes/AnimNode_MakeDynamicAdditive.h"
 #include "AnimationRuntime.h"
+#include "Animation/AnimStats.h"
 #include "Animation/AnimTrace.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNode_MakeDynamicAdditive)
 
 /////////////////////////////////////////////////////
 // FAnimNode_MakeDynamicAdditive
@@ -40,6 +43,9 @@ void FAnimNode_MakeDynamicAdditive::Update_AnyThread(const FAnimationUpdateConte
 void FAnimNode_MakeDynamicAdditive::Evaluate_AnyThread(FPoseContext& Output)
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_ANIMNODE(Evaluate_AnyThread)
+	ANIM_MT_SCOPE_CYCLE_COUNTER_VERBOSE(MakeDynamicAdditive, !IsInGameThread());
+
+	FScopedExpectsAdditiveOverride ScopedExpectsAdditiveOverride(Output, false);
 	FPoseContext BaseEvalContext(Output);
 
 	Base.Evaluate(BaseEvalContext);
@@ -54,7 +60,7 @@ void FAnimNode_MakeDynamicAdditive::Evaluate_AnyThread(FPoseContext& Output)
 	FAnimationRuntime::ConvertPoseToAdditive(Output.Pose, BaseEvalContext.Pose);
 	Output.Curve.ConvertToAdditive(BaseEvalContext.Curve);
 
-	FCustomAttributesRuntime::SubtractAttributes(BaseEvalContext.CustomAttributes, Output.CustomAttributes);
+	UE::Anim::Attributes::ConvertToAdditive(BaseEvalContext.CustomAttributes, Output.CustomAttributes);
 }
 
 void FAnimNode_MakeDynamicAdditive::GatherDebugData(FNodeDebugData& DebugData)
@@ -67,3 +73,4 @@ void FAnimNode_MakeDynamicAdditive::GatherDebugData(FNodeDebugData& DebugData)
 	Base.GatherDebugData(DebugData.BranchFlow(1.f));
 	Additive.GatherDebugData(DebugData.BranchFlow(1.f));
 }
+

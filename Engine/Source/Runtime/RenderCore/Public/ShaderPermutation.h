@@ -7,7 +7,12 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "ShaderCore.h"
 
+// Enable this to log the parameters of each compiled permutation
+inline constexpr bool bLogPermutations = false;
+
+struct FShaderCompilerEnvironment;
 
 /** Defines at compile time a boolean permutation dimension. */
 struct FShaderPermutationBool
@@ -276,6 +281,12 @@ public:
 	template<typename TPermutationVector, typename TDimension>
 	static void ModifyCompilationEnvironment(const TPermutationVector& PermutationVector, FShaderCompilerEnvironment& OutEnvironment)
 	{
+
+		if constexpr (bLogPermutations)
+		{
+			UE_LOG(LogShaders, Verbose, TEXT("		%s = %d"), TDimension::DefineName, TDimension::ToDefineValue(PermutationVector.DimensionValue));
+		}
+
 		OutEnvironment.SetDefine(TDimension::DefineName, TDimension::ToDefineValue(PermutationVector.DimensionValue));
 		return PermutationVector.Tail.ModifyCompilationEnvironment(OutEnvironment);
 	}
@@ -357,7 +368,7 @@ struct TShaderPermutationDomain<TDimension, Ts...>
 	template<class DimensionToSet>
 	void Set(typename DimensionToSet::Type Value)
 	{
-		return TShaderPermutationDomainSpetialization<TIsSame<TDimension, DimensionToSet>::Value>::template SetDimension<Type, DimensionToSet>(*this, Value);
+		return TShaderPermutationDomainSpetialization<std::is_same_v<TDimension, DimensionToSet>>::template SetDimension<Type, DimensionToSet>(*this, Value);
 	}
 
 
@@ -365,7 +376,7 @@ struct TShaderPermutationDomain<TDimension, Ts...>
 	template<class DimensionToGet>
 	const typename DimensionToGet::Type& Get() const
 	{
-		return TShaderPermutationDomainSpetialization<TIsSame<TDimension, DimensionToGet>::Value>::template GetDimension<Type, DimensionToGet>(*this);
+		return TShaderPermutationDomainSpetialization<std::is_same_v<TDimension, DimensionToGet>>::template GetDimension<Type, DimensionToGet>(*this);
 	}
 
 
@@ -473,4 +484,3 @@ using FShaderPermutationNone = TShaderPermutationDomain<>;
  */
 #define SHADER_PERMUTATION_ENUM_CLASS(InDefineName, EnumName) \
 	DECLARE_SHADER_PERMUTATION_IMPL(InDefineName, TShaderPermutationInt, EnumName, static_cast<int32>(EnumName::MAX))
-	

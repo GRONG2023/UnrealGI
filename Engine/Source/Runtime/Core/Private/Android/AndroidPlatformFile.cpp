@@ -20,6 +20,13 @@
 #include "Android/AndroidJava.h"
 #include "Containers/Map.h"
 #include <limits>
+#include <sys/mman.h>
+#include "Misc/ScopeLock.h"
+#include <Async/MappedFileHandle.h>
+
+#if PLATFORM_USE_PLATFORM_FILE_MANAGED_STORAGE_WRAPPER
+#include "HAL/IPlatformFileManagedStorageWrapper.h"
+#endif //PLATFORM_USE_PLATFORM_FILE_MANAGED_STORAGE_WRAPPER
 
 DEFINE_LOG_CATEGORY_STATIC(LogAndroidFile, Log, All);
 
@@ -59,9 +66,9 @@ namespace
 		}
 
 		return FFileStatData(
-			AndroidEpoch + FTimespan::FromSeconds(FileInfo.st_ctime), 
-			AndroidEpoch + FTimespan::FromSeconds(FileInfo.st_atime), 
-			AndroidEpoch + FTimespan::FromSeconds(FileInfo.st_mtime), 
+			AndroidEpoch + FTimespan::FromSeconds((double)FileInfo.st_ctime),
+			AndroidEpoch + FTimespan::FromSeconds((double)FileInfo.st_atime),
+			AndroidEpoch + FTimespan::FromSeconds((double)FileInfo.st_mtime), 
 			FileSize,
 			bIsDirectory,
 			!(FileInfo.st_mode & S_IWUSR)
@@ -78,6 +85,8 @@ FString GPackageName;
 int32 GAndroidPackageVersion = 0;
 int32 GAndroidPackagePatchVersion = 0;
 FString GAndroidAppType;
+
+#define ANDROID_MAX_OVERFLOW_FILES	32
 
 // External File Path base - setup during load
 FString GFilePathBase;
@@ -98,6 +107,9 @@ FString GExternalFilePath;
 // External font path base - setup during load
 FString GFontPathBase;
 
+// Last opened OBB comment (set during mounting of OBB)
+FString GLastOBBComment;
+
 // Is the OBB in an APK file or not
 bool GOBBinAPK;
 FString GAPKFilename;
@@ -106,20 +118,26 @@ FString GAPKFilename;
 bool GOverrideAndroidLogDir = false;
 static FString AndroidLogDir;
 
-#define FILEBASE_DIRECTORY "/UE4Game/"
+#define FILEBASE_DIRECTORY "/UnrealGame/"
 
 extern jobject AndroidJNI_GetJavaAssetManager();
 extern AAssetManager * AndroidThunkCpp_GetAssetManager();
 
 //This function is declared in the Java-defined class, GameActivity.java: "public native void nativeSetObbInfo(String PackageName, int Version, int PatchVersion);"
-JNI_METHOD void Java_com_epicgames_ue4_GameActivity_nativeSetObbInfo(JNIEnv* jenv, jobject thiz, jstring ProjectName, jstring PackageName, jint Version, jint PatchVersion, jstring AppType)
+JNI_METHOD void Java_com_epicgames_unreal_GameActivity_nativeSetObbInfo(JNIEnv* jenv, jobject thiz, jstring ProjectName, jstring PackageName, jint Version, jint PatchVersion, jstring AppType)
 {
 	GAndroidProjectName = FJavaHelper::FStringFromParam(jenv, ProjectName);
 	GPackageName = FJavaHelper::FStringFromParam(jenv, PackageName);
 	GAndroidAppType = FJavaHelper::FStringFromParam(jenv, AppType);
-	
+
 	GAndroidPackageVersion = Version;
 	GAndroidPackagePatchVersion = PatchVersion;
+}
+
+//This function is declared in the Java-defined class, GameActivity.java: "public native String nativeGetObbComment();"
+JNI_METHOD jstring Java_com_epicgames_makeaar_GameActivityForMakeAAR_nativeGetObbComment(JNIEnv* jenv, jobject thiz)
+{
+	return jenv->NewStringUTF(TCHAR_TO_UTF8(*GLastOBBComment));
 }
 
 // Constructs the base path for any files which are not in OBB/pak data
@@ -361,6 +379,12 @@ public:
 				bSuccess = false;
 				break;
 			}
+#if LOG_ANDROID_FILE
+			FPlatformMisc::LowLevelOutputDebugStringf(
+				TEXT("(%d/%d) FFileHandleAndroid:Write => Path = %s, this size = %d, CurrentOffset = %d, Source = %p"),
+				FAndroidTLS::GetCurrentThreadId(), File->Handle,
+				*(File->Path), int32(ThisSize), CurrentOffset, Source);
+#endif
 			CurrentOffset += ThisSize;
 			Source += ThisSize;
 			BytesToWrite -= ThisSize;
@@ -368,7 +392,12 @@ public:
 		
 		// Update the cached file length
 		Length = FMath::Max(Length, CurrentOffset);
-
+#if LOG_ANDROID_FILE
+		FPlatformMisc::LowLevelOutputDebugStringf(
+			TEXT("(%d/%d) FFileHandleAndroid:Write => Path = %s, final size %d"),
+			FAndroidTLS::GetCurrentThreadId(), File->Handle,
+			*(File->Path), Length);
+#endif
 		return bSuccess;
 	}
 
@@ -413,6 +442,7 @@ private:
 	bool bInitialized;
 	FString ManifestFileName;
 	TMap<FString, FDateTime> ManifestEntries;
+	FCriticalSection ManifestEntriesCS;
 public:
 
 	FAndroidFileManifestReader( const FString& InManifestFileName ) : ManifestFileName(InManifestFileName), bInitialized(false)
@@ -421,6 +451,8 @@ public:
 
 	bool GetFileTimeStamp( const FString& FileName, FDateTime& DateTime ) 
 	{
+		FScopeLock Lock(&ManifestEntriesCS);
+
 		if ( bInitialized == false )
 		{
 			Read();
@@ -445,6 +477,8 @@ public:
 
 	bool SetFileTimeStamp( const FString& FileName, const FDateTime& DateTime )
 	{
+		FScopeLock Lock(&ManifestEntriesCS);
+
 		if (bInitialized == false)
 		{
 			Read();
@@ -468,6 +502,8 @@ public:
 
 	bool DeleteFileTimeStamp(const FString& FileName)
 	{
+		FScopeLock Lock(&ManifestEntriesCS);
+
 		if (bInitialized == false)
 		{
 			Read();
@@ -492,6 +528,8 @@ public:
 	// read manifest from disk
 	void Read()
 	{
+		FScopeLock Lock(&ManifestEntriesCS);
+
 		// Local filepaths are directly in the deployment directory.
 		static const FString &BasePath = GetFileBasePath();
 		const FString ManifestPath = BasePath + ManifestFileName;
@@ -511,12 +549,11 @@ public:
 
 		FString EntireFile;
 		char Buffer[1024];
-		Buffer[1023] = '\0';
 		int BytesRead = 1023;
 		while ( BytesRead == 1023 )
 		{
 			BytesRead = read(Handle, Buffer, 1023);
-			check( Buffer[1023] == '\0');
+			Buffer[BytesRead] = '\0';
 			EntireFile.Append(FString(UTF8_TO_TCHAR(Buffer)));
 		}
 
@@ -568,7 +605,8 @@ public:
 
 	void Write()
 	{
-		
+		FScopeLock Lock(&ManifestEntriesCS);
+
 		// Local filepaths are directly in the deployment directory.
 		static const FString &BasePath = GetFileBasePath();
 		const FString ManifestPath = BasePath + ManifestFileName;
@@ -630,12 +668,12 @@ public:
 		FEntryMap::TIterator Current;
 		FString Path;
 
-		Directory(FEntryMap & entries, const FString & dirpath)
-			: Current(entries.CreateIterator()), Path(dirpath)
+		Directory(FEntryMap& Entries, const FString& DirPath)
+			: Current(Entries.CreateIterator()), Path(DirPath)
 		{
 			if (!Path.IsEmpty())
 			{
-				Path /= "";
+				Path /= TEXT("");
 			}
 			// This would be much easier, and efficient, if TMap
 			// supported getting iterators to found entries in
@@ -731,6 +769,17 @@ public:
 		int64 DirOffset = (Buffer.GetValue<uint32>(EOCDIndex + kEOCDFileOffset));
 		check( DirOffset + DirSize <= FileLength );
 		check( NumEntries > 0 );
+
+		uint16 CommentLength = (Buffer.GetValue<uint16>(EOCDIndex + kEOCDCommentLen));
+		if (CommentLength > 0)
+		{
+			GLastOBBComment = FString(CommentLength, reinterpret_cast<const ANSICHAR*>(Buffer.Data + EOCDIndex + kEOCDCommentStart));
+		}
+		else
+		{
+			GLastOBBComment = FString("");
+		}
+
 
 		/*
 		* Walk through the central directory, adding entries to the hash table.
@@ -867,7 +916,8 @@ public:
 
 	int64 GetEntryLength(const FString & Path)
 	{
-		return Entries[Path]->File->Size();
+		TSharedPtr<FFileHandleAndroid>& File = Entries[Path]->File;
+		return File != nullptr ? File->Size() : 0;
 	}
 
 	int64 GetEntryModTime(const FString & Path)
@@ -900,6 +950,8 @@ private:
 	const uint32 kEOCDNumEntries = 8; // offset to #of entries in file
 	const uint32 kEOCDSize = 12; // size of the central directory
 	const uint32 kEOCDFileOffset = 16; // offset to central directory
+	const uint32 kEOCDCommentLen = 20; // offset to comment length (ushort)
+	const uint32 kEOCDCommentStart = 22; // offset to start of optional comment
 
 	const uint32 kMaxCommentLen = 65535; // longest possible in ushort
 	const uint32 kMaxEOCDSearch = (kMaxCommentLen + kEOCDLen);
@@ -947,6 +999,124 @@ private:
 	};
 };
 
+
+class FAndroidMappedFileRegion final : public IMappedFileRegion
+{
+public:
+	class FAndroidMappedFileHandle* Parent;
+	const uint8* AlignedPtr;
+	uint64 AlignedSize;
+	FAndroidMappedFileRegion(const uint8* InMappedPtr, const uint8* InAlignedPtr, size_t InMappedSize, uint64 InAlignedSize, const FString& InDebugFilename, size_t InDebugOffsetIntoFile, FAndroidMappedFileHandle* InParent)
+		: IMappedFileRegion(InMappedPtr, InMappedSize, InDebugFilename, InDebugOffsetIntoFile)
+		, Parent(InParent)
+		, AlignedPtr(InAlignedPtr)
+		, AlignedSize(InAlignedSize)
+	{
+	}
+
+	virtual ~FAndroidMappedFileRegion();
+};
+
+class FAndroidMappedFileHandle final : public IMappedFileHandle
+{
+	inline static SIZE_T FileMappingAlignment = FPlatformMemory::GetConstants().PageSize;
+
+public:
+	FAndroidMappedFileHandle(int InFileHandle, int64 FileSize, const FString& InFilename)
+		: IMappedFileHandle(FileSize)
+		, MappedPtr(nullptr)
+		, Filename(InFilename)
+		, NumOutstandingRegions(0)
+		, FileHandle(InFileHandle)
+	{
+	}
+
+	virtual ~FAndroidMappedFileHandle() override
+	{
+		check(!NumOutstandingRegions); // can't delete the file before you delete all outstanding regions
+		close(FileHandle);
+	}
+
+	virtual IMappedFileRegion* MapRegion(int64 Offset = 0, int64 BytesToMap = MAX_int64, bool bPreloadHint = false) override
+	{
+		LLM_PLATFORM_SCOPE(ELLMTag::PlatformMMIO);
+		const int64 CurrentFileSize = GetCurrentFileSize();
+		check(Offset < CurrentFileSize); // don't map zero bytes and don't map off the end of the file
+		BytesToMap = FMath::Min<int64>(BytesToMap, CurrentFileSize - Offset);
+		check(BytesToMap > 0); // don't map zero bytes
+
+		const int64 AlignedOffset = AlignDown(Offset, FileMappingAlignment);
+		//File mapping can extend beyond file size. It's OK, kernel will just fill any leftover page data with zeros
+		const int64 AlignedSize = Align(BytesToMap + Offset - AlignedOffset, FileMappingAlignment);
+
+		int Flags = MAP_PRIVATE;
+		if (bPreloadHint)
+		{
+			Flags |= MAP_POPULATE;
+		}
+
+		const uint8* AlignedMapPtr = static_cast<const uint8*>(mmap(nullptr, AlignedSize, PROT_READ, Flags, FileHandle, AlignedOffset));
+		if (AlignedMapPtr == MAP_FAILED || AlignedMapPtr == nullptr)
+		{
+#if LOG_ANDROID_FILE
+			FPlatformMisc::LowLevelOutputDebugStringf(TEXT("Failed to mmap region from %s, errno=%s"), *Filename, UTF8_TO_TCHAR(strerror(errno)));
+#endif
+			UE_LOG(LogAndroidFile, Warning, TEXT("Failed to map memory %s, error is %d"), *Filename, errno);
+			return nullptr;
+		}
+		LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelAlloc(ELLMTracker::Platform, AlignedMapPtr, AlignedSize));
+
+		// create a mapping for this range
+		const uint8* MapPtr = AlignedMapPtr + Offset - AlignedOffset;
+		FAndroidMappedFileRegion* Result = new FAndroidMappedFileRegion(MapPtr, AlignedMapPtr, BytesToMap, AlignedSize, Filename, Offset, this);
+		NumOutstandingRegions++;
+		return Result;
+	}
+
+	void UnMap(const FAndroidMappedFileRegion* Region)
+	{
+		LLM_PLATFORM_SCOPE(ELLMTag::PlatformMMIO);
+		check(NumOutstandingRegions > 0);
+		NumOutstandingRegions--;
+
+		LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelFree(ELLMTracker::Platform, Region->AlignedPtr));
+		const int Res = munmap(const_cast<uint8*>(Region->AlignedPtr), Region->AlignedSize);
+#if LOG_ANDROID_FILE
+		FPlatformMisc::LowLevelOutputDebugStringf(TEXT("Failed to unmap region from %s, errno=%s"), *Filename, UTF8_TO_TCHAR(strerror(errno)));
+#endif
+		const int64 CurrentFileSize = GetCurrentFileSize();
+		checkf(Res == 0, TEXT("Failed to unmap, error is %d, errno is %d [params: %x, %d]"), Res, errno, MappedPtr, CurrentFileSize);
+	}
+
+private:
+	const uint8* MappedPtr;
+	FString Filename;
+	int32 NumOutstandingRegions;
+	int FileHandle;
+
+	int64 GetCurrentFileSize() const
+	{
+		struct stat FileInfo;
+		FileInfo.st_size = -1;
+		const int StatResult = fstat(FileHandle, &FileInfo);
+		if (StatResult == -1)
+		{
+			const int ErrNo = errno;
+#if LOG_ANDROID_FILE
+			FPlatformMisc::LowLevelOutputDebugStringf(TEXT("FAndroidPlatformFile::FAndroidMappedFileHandle fstat failed: ('%s') failed: errno=%d (%s)"), *Filename, ErrNo, UTF8_TO_TCHAR(strerror(ErrNo)));
+#endif
+			return GetFileSize();
+		}
+		return FileInfo.st_size;
+	}
+};
+
+FAndroidMappedFileRegion::~FAndroidMappedFileRegion()
+{
+	Parent->UnMap(this);
+}
+
+
 // NOTE: Files are stored either loosely in the deployment directory
 // or packed in an OBB archive. We don't know which one unless we try
 // and get the files. We always first check if the files are local,
@@ -972,14 +1142,20 @@ public:
 	// Singleton implementation.
 	static FAndroidPlatformFile & GetPlatformPhysical()
 	{
+#if PLATFORM_USE_PLATFORM_FILE_MANAGED_STORAGE_WRAPPER
+		static TManagedStoragePlatformFile<FAndroidPlatformFile> AndroidPlatformSingleton;
+#else
 		static FAndroidPlatformFile AndroidPlatformSingleton;
+#endif
 		return AndroidPlatformSingleton;
 	}
 
 	FAndroidPlatformFile()
 		: AssetMgr(nullptr)
 	{
+#if USE_ANDROID_JNI
 		AssetMgr = AndroidThunkCpp_GetAssetManager();
+#endif
 	}
 
 	//~ For visibility of overloads we don't override
@@ -1095,48 +1271,49 @@ public:
 			// Only check for overflow files if we found a patch file
 			if (bHavePatch)
 			{
-				FString Overflow1OBBName = FString::Printf(TEXT("overflow1.%d.%s.obb"), GAndroidPackageVersion, *GPackageName);
-				FString Overflow2OBBName = FString::Printf(TEXT("overflow2.%d.%s.obb"), GAndroidPackageVersion, *GPackageName);
+				int32 OverflowIndex = 1;
 
 				if (!GOBBOverflow1FilePath.IsEmpty() && FileExists(*GOBBOverflow1FilePath, true))
 				{
+					OverflowIndex = 2;
 					MountOBB(*GOBBOverflow1FilePath);
 					FPlatformMisc::LowLevelOutputDebugStringf(TEXT("Mounted overflow1 OBB: %s"), *GOBBOverflow1FilePath);
 				}
-				else if (FileExists(*(OBBDir1 / Overflow1OBBName), true))
-				{
-					GOBBOverflow1FilePath = OBBDir1 / Overflow1OBBName;
-					MountOBB(*GOBBOverflow1FilePath);
-					FPlatformMisc::LowLevelOutputDebugStringf(TEXT("Mounted overflow1 OBB: %s"), *GOBBOverflow1FilePath);
-				}
-				else if (FileExists(*(OBBDir2 / Overflow1OBBName), true))
-				{
-					GOBBOverflow1FilePath = OBBDir2 / Overflow1OBBName;
-					MountOBB(*GOBBOverflow1FilePath);
-					FPlatformMisc::LowLevelOutputDebugStringf(TEXT("Mounted overflow1 OBB: %s"), *GOBBOverflow1FilePath);
-				}
-
 				if (!GOBBOverflow2FilePath.IsEmpty() && FileExists(*GOBBOverflow2FilePath, true))
 				{
+					OverflowIndex = 3;
 					MountOBB(*GOBBOverflow2FilePath);
 					FPlatformMisc::LowLevelOutputDebugStringf(TEXT("Mounted overflow2 OBB: %s"), *GOBBOverflow2FilePath);
 				}
-				else if (FileExists(*(OBBDir1 / Overflow2OBBName), true))
+
+				while (OverflowIndex <= ANDROID_MAX_OVERFLOW_FILES)
 				{
-					GOBBOverflow2FilePath = OBBDir1 / Overflow2OBBName;
-					MountOBB(*GOBBOverflow2FilePath);
-					FPlatformMisc::LowLevelOutputDebugStringf(TEXT("Mounted overflow2 OBB: %s"), *GOBBOverflow2FilePath);
-				}
-				else if (FileExists(*(OBBDir2 / Overflow2OBBName), true))
-				{
-					GOBBOverflow2FilePath = OBBDir2 / Overflow2OBBName;
-					MountOBB(*GOBBOverflow2FilePath);
-					FPlatformMisc::LowLevelOutputDebugStringf(TEXT("Mounted overflow2 OBB: %s"), *GOBBOverflow2FilePath);
+					FString OverflowOBBName = FString::Printf(TEXT("overflow%d.%d.%s.obb"), OverflowIndex, GAndroidPackageVersion, *GPackageName);
+
+					if (FileExists(*(OBBDir1 / OverflowOBBName), true))
+					{
+						FString OBBOverflowFilePath = OBBDir1 / OverflowOBBName;
+						MountOBB(*OBBOverflowFilePath);
+						FPlatformMisc::LowLevelOutputDebugStringf(TEXT("Mounted overflow%d OBB: %s"), OverflowIndex, *OBBOverflowFilePath);
+					}
+					else if (FileExists(*(OBBDir2 / OverflowOBBName), true))
+					{
+						FString OBBOverflowFilePath = OBBDir2 / OverflowOBBName;
+						MountOBB(*OBBOverflowFilePath);
+						FPlatformMisc::LowLevelOutputDebugStringf(TEXT("Mounted overflow%d OBB: %s"), OverflowIndex, *OBBOverflowFilePath);
+					}
+					else
+					{
+						break;
+					}
+
+					OverflowIndex++;
 				}
 			}
 		}
 
-		// make sure the base path directory exists (UE4Game and UE4Game/ProjectName)
+
+		// make sure the base path directory exists (UnrealGame and UnrealGame/ProjectName)
 		FString FileBaseDir = GFilePathBase + FString(FILEBASE_DIRECTORY);
 		mkdir(TCHAR_TO_UTF8(*FileBaseDir), 0777);
 		mkdir(TCHAR_TO_UTF8(*(FileBaseDir + GAndroidProjectName)), 0777);
@@ -1188,6 +1365,43 @@ public:
 		FPlatformMisc::LowLevelOutputDebugStringf(TEXT("FAndroidPlatformFile::FileExists('%s') => %s\nResolved as %s"), Filename, result ? TEXT("TRUE") : TEXT("FALSE"), *LocalPath);
 #endif
 		return result;
+	}
+
+	virtual IMappedFileHandle* OpenMapped(const TCHAR* Filename) override
+	{
+		FString LocalPath;
+		FString AssetPath;
+		PathToAndroidPaths(LocalPath, AssetPath, Filename, false);
+
+		const FString NormalizedFilename = LocalPath;
+
+		constexpr int Flags = O_RDONLY;
+		const int32 Handle = open(TCHAR_TO_UTF8(*NormalizedFilename), Flags);
+		if (Handle == -1)
+		{
+			const int ErrNo = errno;
+#if LOG_ANDROID_FILE
+			FPlatformMisc::LowLevelOutputDebugStringf(TEXT("FAndroidPlatformFile::OpenMapped('%s', Flags=0x%08X) failed: errno=%d (%s)"), *NormalizedFilename, Flags, ErrNo, UTF8_TO_TCHAR(strerror(ErrNo)));
+#endif
+
+			return nullptr;
+		}
+
+		struct stat FileInfo;
+		FileInfo.st_size = -1;
+		const int StatResult = fstat(Handle, &FileInfo);
+		if (StatResult == -1)
+		{
+			const int ErrNo = errno;
+
+#if LOG_ANDROID_FILE
+			FPlatformMisc::LowLevelOutputDebugStringf(TEXT("FAndroidPlatformFile::OpenMapped fstat failed: ('%s', Flags=0x%08X) failed: errno=%d (%s)"), *NormalizedFilename, Flags, ErrNo, UTF8_TO_TCHAR(strerror(ErrNo)));
+#endif
+
+			return nullptr;
+		}
+
+		return new FAndroidMappedFileHandle(Handle, FileInfo.st_size, NormalizedFilename);
 	}
 
 	virtual int64 FileSize(const TCHAR* Filename) override
@@ -1640,7 +1854,7 @@ public:
 			Flags |= O_WRONLY;
 		}
 
-		int32 Handle = open(TCHAR_TO_UTF8(*LocalPath), Flags, S_IRUSR | S_IWUSR);
+		int32 Handle = open(TCHAR_TO_UTF8(*LocalPath), Flags, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
 		if (Handle != -1)
 		{
 			FFileHandleAndroid* FileHandleAndroid = new FFileHandleAndroid(LocalPath, Handle);
@@ -1650,6 +1864,12 @@ public:
 			}
 			return FileHandleAndroid;
 		}
+#if LOG_ANDROID_FILE
+		else
+		{
+			FPlatformMisc::LowLevelOutputDebugStringf(TEXT("FAndroidPlatformFile::OpenWrite('%s') - failed = %s"), Filename, UTF8_TO_TCHAR(strerror(errno)));
+		}
+#endif
 		return nullptr;
 	}
 
@@ -1726,8 +1946,13 @@ public:
 		FString LocalPath;
 		FString AssetPath;
 		PathToAndroidPaths(LocalPath, AssetPath, Directory, AllowLocal);
-
-		return (mkdir(TCHAR_TO_UTF8(*LocalPath), 0755) == 0) || (errno == EEXIST);
+		uint32 mkdirperms = 0755;
+#if !UE_BUILD_SHIPPING
+		// some devices prevent ADB (shell user) from modifying files.
+		// To allow adb shell to modify files we give group users all perms to the new dir.
+		mkdirperms = 0775;
+#endif
+		return (mkdir(TCHAR_TO_UTF8(*LocalPath), mkdirperms) == 0) || (errno == EEXIST);
 	}
 
 	// We assert that modifying dirs are in the local file-system.
@@ -1760,12 +1985,12 @@ public:
 		auto InternalVisitor = [&](const FString& InLocalPath, struct dirent* InEntry) -> bool
 		{
 			const FString DirPath = DirectoryStr / UTF8_TO_TCHAR(InEntry->d_name);
-			return Visitor.Visit(*DirPath, InEntry->d_type == DT_DIR);
+			return Visitor.CallShouldVisitAndVisit(*DirPath, InEntry->d_type == DT_DIR);
 		};
 		
 		auto InternalResourceVisitor = [&](const FString& InResourceName, bool IsDirectory) -> bool
 		{
-			return Visitor.Visit(*InResourceName, IsDirectory);
+			return Visitor.CallShouldVisitAndVisit(*InResourceName, IsDirectory);
 		};
 		
 		auto InternalAssetVisitor = [&](const char* InAssetPath) -> bool
@@ -1778,7 +2003,7 @@ public:
 				AAssetDir_close(subdir);
 			}
 
-			return Visitor.Visit(UTF8_TO_TCHAR(InAssetPath), isDirectory);
+			return Visitor.CallShouldVisitAndVisit(UTF8_TO_TCHAR(InAssetPath), isDirectory);
 		};
 
 		return IterateDirectoryCommon(Directory, InternalVisitor, InternalResourceVisitor, InternalAssetVisitor, AllowLocal, AllowAsset);
@@ -1800,7 +2025,7 @@ public:
 			struct stat FileInfo;
 			if (stat(TCHAR_TO_UTF8(*(InLocalPath / UTF8_TO_TCHAR(InEntry->d_name))), &FileInfo) != -1)
 			{
-				return Visitor.Visit(*DirPath, AndroidStatToUEFileData(FileInfo));
+				return Visitor.CallShouldVisitAndVisit(*DirPath, AndroidStatToUEFileData(FileInfo));
 			}
 
 			return true;
@@ -1808,7 +2033,7 @@ public:
 		
 		auto InternalResourceVisitor = [&](const FString& InResourceName, bool IsDir) -> bool
 		{
-			return Visitor.Visit(
+			return Visitor.CallShouldVisitAndVisit(
 				*InResourceName, 
 				FFileStatData(
 					FDateTime::MinValue(),						// CreationTime
@@ -1839,7 +2064,7 @@ public:
 				AAssetDir_close(subdir);
 			}
 
-			return Visitor.Visit(
+			return Visitor.CallShouldVisitAndVisit(
 				UTF8_TO_TCHAR(InAssetPath), 
 				FFileStatData(
 					FDateTime::MinValue(),	// CreationTime
@@ -1946,10 +2171,12 @@ public:
 		return false;
 	}
 
+#if USE_ANDROID_JNI
 	virtual jobject GetAssetManager() override
 	{
 		return AndroidJNI_GetJavaAssetManager();
 	}
+#endif
 
 	virtual bool IsAsset(const TCHAR* Filename) override
 	{
@@ -2169,7 +2396,7 @@ IPlatformFile& IPlatformFile::GetPlatformPhysical()
 	return FAndroidPlatformFile::GetPlatformPhysical();
 }
 
-IAndroidPlatformFile & IAndroidPlatformFile::GetPlatformPhysical()
+IAndroidPlatformFile& IAndroidPlatformFile::GetPlatformPhysical()
 {
 	return FAndroidPlatformFile::GetPlatformPhysical();
 }

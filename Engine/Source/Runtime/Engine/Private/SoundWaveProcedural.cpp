@@ -4,6 +4,9 @@
 
 #include "AudioDevice.h"
 #include "Engine/Engine.h"
+#include "UObject/AssetRegistryTagsContext.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SoundWaveProcedural)
 
 
 USoundWaveProcedural::USoundWaveProcedural(const FObjectInitializer& ObjectInitializer)
@@ -13,29 +16,15 @@ USoundWaveProcedural::USoundWaveProcedural(const FObjectInitializer& ObjectIniti
 	bReset = false;
 	NumBufferUnderrunSamples = 512;
 	NumSamplesToGeneratePerCallback = DEFAULT_PROCEDURAL_SOUNDWAVE_BUFFER_SIZE;
+	static_assert(DEFAULT_PROCEDURAL_SOUNDWAVE_BUFFER_SIZE >= 512, TEXT("Should generate more samples than this per callback."));
+	//checkf(NumSamplesToGeneratePerCallback >= NumBufferUnderrunSamples, TEXT("Should generate more samples than this per callback."));
 
 	// If the main audio device has been set up, we can use this to define our callback size.
 	// We need to do this for procedural sound waves that we do not process asynchronously,
 	// to ensure that we do not underrun.
 	
-	if (GEngine)
-	{
-		FAudioDevice* MainAudioDevice = GEngine->GetMainAudioDeviceRaw();
-		if (MainAudioDevice && !MainAudioDevice->IsAudioMixerEnabled())
-		{
-#if PLATFORM_MAC
-			// We special case the mac callback on the old audio engine, Since Buffer Length is smaller than the device callback size.
-			NumSamplesToGeneratePerCallback = 2048;
-#else
-			NumSamplesToGeneratePerCallback = MainAudioDevice->GetBufferLength();
-#endif
-			NumBufferUnderrunSamples = NumSamplesToGeneratePerCallback / 2;
-		}
-	}
-
 	SampleByteSize = 2;
 
-	checkf(NumSamplesToGeneratePerCallback >= NumBufferUnderrunSamples, TEXT("Should generate more samples than this per callback."));
 }
 
 void USoundWaveProcedural::QueueAudio(const uint8* AudioData, const int32 BufferSize)
@@ -51,7 +40,7 @@ void USoundWaveProcedural::QueueAudio(const uint8* AudioData, const int32 Buffer
 	TArray<uint8> NewAudioBuffer;
 	NewAudioBuffer.AddUninitialized(BufferSize);
 	FMemory::Memcpy(NewAudioBuffer.GetData(), AudioData, BufferSize);
-	QueuedAudio.Enqueue(NewAudioBuffer);
+	QueuedAudio.Enqueue(MoveTemp(NewAudioBuffer));
 
 	AvailableByteCount.Add(BufferSize);
 }
@@ -98,7 +87,7 @@ int32 USoundWaveProcedural::GeneratePCMData(uint8* PCMData, const int32 SamplesN
 			ensureAlwaysMsgf(BytesGenerated <= AudioBuffer.Num(), TEXT("Soundwave Procedural generated more bytes than expected (%d generated, %d expected)"), BytesGenerated, AudioBuffer.Num());
 			if (BytesGenerated < AudioBuffer.Num())
 			{
-				AudioBuffer.SetNum(BytesGenerated, false);
+				AudioBuffer.SetNum(BytesGenerated, EAllowShrinking::No);
 			}
 			bPumpQueuedAudio = false;
 		}
@@ -124,7 +113,7 @@ int32 USoundWaveProcedural::GeneratePCMData(uint8* PCMData, const int32 SamplesN
 		const int32 BytesToCopy = SamplesToCopy * SampleByteSize;
 
 		FMemory::Memcpy((void*)PCMData, &AudioBuffer[0], BytesToCopy);
-		AudioBuffer.RemoveAt(0, BytesToCopy, false);
+		AudioBuffer.RemoveAt(0, BytesToCopy, EAllowShrinking::No);
 
 		// Decrease the available by count
 		if (bPumpQueuedAudio)
@@ -162,7 +151,14 @@ int32 USoundWaveProcedural::GetResourceSizeForFormat(FName Format)
 
 void USoundWaveProcedural::GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
 	Super::GetAssetRegistryTags(OutTags);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void USoundWaveProcedural::GetAssetRegistryTags(FAssetRegistryTagsContext Context) const
+{
+	Super::GetAssetRegistryTags(Context);
 }
 
 bool USoundWaveProcedural::HasCompressedData(FName Format, ITargetPlatform* TargetPlatform) const
@@ -170,12 +166,12 @@ bool USoundWaveProcedural::HasCompressedData(FName Format, ITargetPlatform* Targ
 	return false;
 }
 
-void USoundWaveProcedural::BeginGetCompressedData(FName Format, const FPlatformAudioCookOverrides* CompressionOverrides)
+void USoundWaveProcedural::BeginGetCompressedData(FName Format, const FPlatformAudioCookOverrides* CompressionOverrides, const ITargetPlatform* InTargetPlatform)
 {
 	// SoundWaveProcedural does not have compressed data and should generally not be asked about it
 }
 
-FByteBulkData* USoundWaveProcedural::GetCompressedData(FName Format, const FPlatformAudioCookOverrides* CompressionOverrides)
+FByteBulkData* USoundWaveProcedural::GetCompressedData(FName Format, const FPlatformAudioCookOverrides* CompressionOverrides, const ITargetPlatform* InTargetPlatform )
 {
 	// SoundWaveProcedural does not have compressed data and should generally not be asked about it
 	return nullptr;
@@ -185,6 +181,15 @@ void USoundWaveProcedural::Serialize(FArchive& Ar)
 {
 	// Do not call the USoundWave version of serialize
 	USoundBase::Serialize(Ar);
+
+#if WITH_EDITORONLY_DATA
+	// Due to "skipping" USoundWave::Serialize above, modulation
+	// versioning is required to be called explicitly here.
+	if (Ar.IsLoading())
+	{
+		ModulationSettings.VersionModulators();
+	}
+#endif // WITH_EDITORONLY_DATA
 }
 
 void USoundWaveProcedural::InitAudioResource(FByteBulkData& CompressedData)
@@ -198,3 +203,4 @@ bool USoundWaveProcedural::InitAudioResource(FName Format)
 	// Nothing to be done to initialize a USoundWaveProcedural
 	return true;
 }
+

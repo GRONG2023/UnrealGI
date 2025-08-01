@@ -52,6 +52,12 @@ namespace Gauntlet.SelfTest
 			return InnerResult;
 		}
 
+		/// <summary>
+		/// Manually set the value of the test result
+		/// </summary>
+		public void SetTestResult(TestResult testResult)
+		{
+		}
 
 		public TestStatus GetTestStatus()
 		{
@@ -81,6 +87,12 @@ namespace Gauntlet.SelfTest
 			return new string[0];
 		}
 
+		public virtual string GetRunLocalCommand(string LaunchingBuildCommand)
+		{
+			string CommandToRunLocally =
+				string.Format("RunUAT {0} -Test={1} ", LaunchingBuildCommand, GetType());
+			return CommandToRunLocally;
+		}
 
 		public virtual ITestNode[] GetSubTests()
 		{
@@ -113,8 +125,17 @@ namespace Gauntlet.SelfTest
 		{
 		}
 
-		public virtual void StopTest(bool WasCancelled)
+		public virtual void SetCancellationReason(string Reason)
 		{
+		}
+
+		public virtual void StopTest(StopReason InReason)
+		{
+		}
+
+		public virtual void AddTestEvent(UnrealTestEvent InEvent)
+		{ 
+		
 		}
 
 		public BaseTestNode()

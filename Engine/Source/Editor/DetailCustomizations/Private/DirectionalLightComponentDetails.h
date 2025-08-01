@@ -2,8 +2,8 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
 #include "IDetailCustomization.h"
+#include "Templates/SharedPointer.h"
 
 class IDetailLayoutBuilder;
 class IPropertyHandle;
@@ -16,12 +16,4 @@ public:
 
 	/** IDetailCustomization interface */
 	virtual void CustomizeDetails( IDetailLayoutBuilder& DetailBuilder ) override;
-
-private:
-
-	bool IsLightMovable() const;
-	bool IsLightStationary() const;
-
-	TSharedPtr<IPropertyHandle> MobilityProperty;
-
 };

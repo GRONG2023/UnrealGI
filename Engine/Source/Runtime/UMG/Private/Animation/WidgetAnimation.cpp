@@ -12,6 +12,8 @@
 #include "Tracks/MovieSceneMaterialParameterCollectionTrack.h"
 #include "UObject/SequencerObjectVersion.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(WidgetAnimation)
+
 
 #define LOCTEXT_NAMESPACE "UWidgetAnimation"
 
@@ -231,6 +233,11 @@ void UWidgetAnimation::LocateBoundObjects(const FGuid& ObjectId, UObject* InCont
 	}
 
 	UUserWidget* PreviewWidget = CastChecked<UUserWidget>(InContext);
+	if (PreviewWidget->WidgetTree == nullptr)
+	{
+		return;
+	}
+
 	for (const FWidgetAnimationBinding& Binding : AnimationBindings)
 	{
 		if (Binding.AnimationGuid == ObjectId)
@@ -252,10 +259,10 @@ UMovieScene* UWidgetAnimation::GetMovieScene() const
 	return MovieScene;
 }
 
-UObject* UWidgetAnimation::CreateDirectorInstance(IMovieScenePlayer& Player, FMovieSceneSequenceID SequenceID)
+UObject* UWidgetAnimation::CreateDirectorInstance(TSharedRef<const FSharedPlaybackState> SharedPlaybackState, FMovieSceneSequenceID SequenceID)
 {
 	// Widget animations do not create separate director instances, but just re-use the UUserWidget from the playback context
-	UUserWidget* WidgetContext = CastChecked<UUserWidget>(Player.GetPlaybackContext());
+	UUserWidget* WidgetContext = CastChecked<UUserWidget>(SharedPlaybackState->GetPlaybackContext());
 	return WidgetContext;
 }
 
@@ -318,3 +325,4 @@ bool UWidgetAnimation::IsPostLoadThreadSafe() const
 }
 
 #undef LOCTEXT_NAMESPACE
+

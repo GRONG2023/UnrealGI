@@ -1,14 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Particles/ParticleSystemManager.h"
+#include "Misc/App.h"
 #include "Particles/ParticleSystemComponent.h"
 #include "ParticleHelper.h"
+#include "Particles/ParticleSystem.h"
 #include "UObject/UObjectIterator.h"
 #include "FXSystem.h"
 #include "Distributions/Distribution.h"
-#include "Async/ParallelFor.h"
 #include "Particles/ParticleEmitter.h"
 #include "Particles/ParticlePerfStatsManager.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ParticleSystemManager)
 
 DECLARE_STATS_GROUP(TEXT("Particle World Manager"), STATGROUP_PSCWorldMan, STATCAT_Advanced);
 DECLARE_CYCLE_STAT(TEXT("PSC Manager Tick [GT]"), STAT_PSCMan_Tick, STATGROUP_PSCWorldMan);
@@ -110,6 +113,8 @@ public:
 
 	void DoTask(ENamedThreads::Type CurrentThread, const FGraphEventRef& MyCompletionGraphEvent)
 	{
+		//FTaskTagScope Scope(ETaskTag::EParallelRenderingThread);
+		FTaskTagScope Scope(ETaskTag::EParallelGameThread);
 		SCOPE_CYCLE_COUNTER(STAT_PSCMan_AsyncBatch);
 
 // 		FString Ticked;
@@ -173,7 +178,7 @@ void FParticleSystemWorldManager::OnWorldInit(UWorld* World, const UWorld::Initi
 #if !UE_BUILD_SHIPPING
 	if (TickGroupEnum == nullptr)
 	{
-		TickGroupEnum = FindObjectChecked<UEnum>(ANY_PACKAGE, TEXT("ETickingGroup"));
+		TickGroupEnum = FindObjectChecked<UEnum>(nullptr, TEXT("/Script/Engine.ETickingGroup"));
 	}
 #endif
 	FParticleSystemWorldManager* NewWorldMan = new FParticleSystemWorldManager(World);
@@ -255,18 +260,38 @@ void FParticleSystemWorldManager::AddReferencedObjects(FReferenceCollector& Coll
 
 		for (int32 PSCIndex = 0; PSCIndex < ManagedPSCs.Num(); ++PSCIndex)
 		{
-			//UE_LOG(LogParticles, Warning, TEXT("| Add Ref %d - 0x%p |"), PSCIndex, ManagedPSCs[PSCIndex]);
-			Collector.AddReferencedObject(ManagedPSCs[PSCIndex]);
-			if (PSCTickData[PSCIndex].PrereqComponent)
+			// If a managed component is streamed out or destroyed, drop references to it and its prerequisite			
+			if (IsValid(ManagedPSCs[PSCIndex]))
+			{
+				Collector.AddReferencedObject(ManagedPSCs[PSCIndex]);
+			}
+			else
+			{
+				ManagedPSCs[PSCIndex] = nullptr; // Null entries will be cleaned up after GC
+			}
+
+			// If prerequisite has been marked for deletion forget it
+			if (IsValid(PSCTickData[PSCIndex].PrereqComponent))
 			{
 				Collector.AddReferencedObject(PSCTickData[PSCIndex].PrereqComponent);
+			}
+			else
+			{
+				PSCTickData[PSCIndex].PrereqComponent = nullptr; 
 			}
 		}
 
 		for (int32 PSCIndex = 0; PSCIndex < PendingRegisterPSCs.Num(); ++PSCIndex)
 		{
-			//UE_LOG(LogParticles, Warning, TEXT("| Add Pending PSC Ref %d - 0x%p |"), PSCIndex, PendingRegisterPSCs[PSCIndex]);
-			Collector.AddReferencedObject(PendingRegisterPSCs[PSCIndex]);
+			if (IsValid(PendingRegisterPSCs[PSCIndex]))
+			{
+				//UE_LOG(LogParticles, Warning, TEXT("| Add Pending PSC Ref %d - 0x%p |"), PSCIndex, PendingRegisterPSCs[PSCIndex]);
+				Collector.AddReferencedObject(PendingRegisterPSCs[PSCIndex]);
+			}
+			else
+			{
+				PendingRegisterPSCs[PSCIndex] = nullptr; // Array will be emptied next time we handled pending entries
+			}
 		}
 	}
 	else
@@ -325,7 +350,7 @@ bool FParticleSystemWorldManager::RegisterComponent(UParticleSystemComponent* PS
 	{
 		if (!PSC->IsPendingManagerAdd())
 		{
-			Handle = PendingRegisterPSCs.Add(PSC);
+			Handle = PendingRegisterPSCs.Add(ObjectPtrWrap(PSC));
 			PSC->SetManagerHandle(Handle);
 			PSC->SetPendingManagerAdd(true);
 
@@ -372,10 +397,19 @@ void FParticleSystemWorldManager::UnregisterComponent(UParticleSystemComponent* 
 			UE_LOG(LogParticles, Verbose, TEXT("| UnRegister Pending PSC: %p | Man: %p | %d | %s"), PSC, this, Handle, *PSC->Template->GetName());
 
 			//Clear existing handle
-			check(PendingRegisterPSCs[Handle]);
-			PendingRegisterPSCs[Handle]->SetManagerHandle(INDEX_NONE);
+			if (PendingRegisterPSCs[Handle])
+			{
+				PendingRegisterPSCs[Handle]->SetManagerHandle(INDEX_NONE);
+			}
+			else
+			{
+				// Handle scenario where registration and destruction of a component happens 
+				// without FParticleSystemWorldManager tick in between and component being nulled
+				// after being marked as PendingKill
+				PSC->SetManagerHandle(INDEX_NONE);
+			}
 
-			PendingRegisterPSCs.RemoveAtSwap(Handle, 1, false);
+			PendingRegisterPSCs.RemoveAtSwap(Handle, 1, EAllowShrinking::No);
 
 			//Update handle for moved PCS.
 			if (PendingRegisterPSCs.IsValidIndex(Handle))
@@ -401,9 +435,9 @@ void FParticleSystemWorldManager::UnregisterComponent(UParticleSystemComponent* 
 
 void FParticleSystemWorldManager::AddPSC(UParticleSystemComponent* PSC)
 {
-	if (PSC)
+	if (IsValid(PSC))  // Don't add PSC if it has been marked for deletion
 	{
-		int32 Handle = ManagedPSCs.Add(PSC);
+		int32 Handle = ManagedPSCs.Add(ObjectPtrWrap(PSC));
 		PSCTickData.AddDefaulted();
 		FPSCTickData& TickData = PSCTickData[Handle];
 
@@ -437,7 +471,7 @@ void FParticleSystemWorldManager::AddPSC(UParticleSystemComponent* PSC)
 		TickList.Add(Handle);
 #endif
 
-		UE_LOG(LogParticles, Verbose, TEXT("| Add PSC - PSC: %p | Man: %p | %d | %d |Num: %d |"), ManagedPSCs[Handle], this, Handle, TickList[TickData.TickListHandle], ManagedPSCs.Num());
+		UE_LOG(LogParticles, Verbose, TEXT("| Add PSC - PSC: %p | Man: %p | %d | %d |Num: %d |"), ManagedPSCs[Handle].Get(), this, Handle, TickList[TickData.TickListHandle], ManagedPSCs.Num());
 	}
 }
 
@@ -457,17 +491,17 @@ void FParticleSystemWorldManager::RemovePSC(int32 PSCIndex)
 	}
 
 
-	UE_LOG(LogParticles, Verbose, TEXT("| Remove PSC - PSC: %p | Man: %p | %d |Num: %d |"), ManagedPSCs[PSCIndex], this, PSCIndex, ManagedPSCs.Num());
+	UE_LOG(LogParticles, Verbose, TEXT("| Remove PSC - PSC: %p | Man: %p | %d |Num: %d |"), ManagedPSCs[PSCIndex].Get(), this, PSCIndex, ManagedPSCs.Num());
 
 #if PSC_MAN_USE_STATIC_TICK_LISTS
 	FTickList& TickList = TickData.bCanTickConcurrent ? TickLists_Concurrent[(int32)TickData.TickGroup] : TickLists_GT[(int32)TickData.TickGroup];
 
-	UE_LOG(LogParticles, Verbose, TEXT("| Remove PSC - PSC: %p | Man: %p | %d | %d |Num: %d |"), ManagedPSCs[PSCIndex], this, PSCIndex, TickList[TickData.TickListHandle], ManagedPSCs.Num());
+	UE_LOG(LogParticles, Verbose, TEXT("| Remove PSC - PSC: %p | Man: %p | %d | %d |Num: %d |"), ManagedPSCs[PSCIndex].Get(), this, PSCIndex, TickList[TickData.TickListHandle], ManagedPSCs.Num());
 
 	TickList.Remove(PSCIndex);
 
-	ManagedPSCs.RemoveAtSwap(PSCIndex, 1, false);
-	PSCTickData.RemoveAtSwap(PSCIndex, 1, false);
+	ManagedPSCs.RemoveAtSwap(PSCIndex, 1, EAllowShrinking::No);
+	PSCTickData.RemoveAtSwap(PSCIndex, 1, EAllowShrinking::No);
 
 	if (ManagedPSCs.IsValidIndex(PSCIndex))
 	{
@@ -483,8 +517,8 @@ void FParticleSystemWorldManager::RemovePSC(int32 PSCIndex)
 	}
 #else
 
-	ManagedPSCs.RemoveAtSwap(PSCIndex, 1, false);
-	PSCTickData.RemoveAtSwap(PSCIndex, 1, false);
+	ManagedPSCs.RemoveAtSwap(PSCIndex, 1, EAllowShrinking::No);
+	PSCTickData.RemoveAtSwap(PSCIndex, 1, EAllowShrinking::No);
 
 	if (ManagedPSCs.IsValidIndex(PSCIndex))
 	{
@@ -587,7 +621,7 @@ void FParticleSystemWorldManager::ProcessTickList(float DeltaTime, ELevelTick Ti
 				// FORT-319316 - Tracking down why we sometimes have a PSC with no world in the manager?
 				if (!PSC->GetWorld())
 				{
-					UE_LOG(LogParticles, Warning, TEXT("PSC(%s) has no world but is inside PSC Manager. Template(%s) PendingKill(%d) IsTickManaged(%d) ManagerHandle(%d) PendingAdd(%d) PendingRemove(%d)"), *GetFullNameSafe(PSC), *GetFullNameSafe(PSC->Template), PSC->IsPendingKill(), PSC->IsTickManaged(), PSC->GetManagerHandle(), PSC->IsPendingManagerAdd(), PSC->IsPendingManagerRemove());
+					UE_LOG(LogParticles, Warning, TEXT("PSC(%s) has no world but is inside PSC Manager. Template(%s) IsValid(%d) IsTickManaged(%d) ManagerHandle(%d) PendingAdd(%d) PendingRemove(%d)"), *GetFullNameSafe(PSC), *GetFullNameSafe(PSC->Template), IsValid(PSC), PSC->IsTickManaged(), PSC->GetManagerHandle(), PSC->IsPendingManagerAdd(), PSC->IsPendingManagerRemove());
 					PSC->SetPendingManagerAdd(false);
 					PSC->SetPendingManagerRemove(true);
 					TickData.bPendingUnregister = true;
@@ -805,7 +839,7 @@ void FParticleSystemWorldManager::Dump()
 		bool bVis = PSC->CanConsiderInvisible();
 		bool bActive = PSC->IsActive();
 		UE_LOG(LogParticles, Log, TEXT("| %d | %s |0x%p | Active: %d | Sig: %s | Vis: %d | Num: %d | %s | Prereq: 0x%p - %s |"),
-			Handle, *TickGroupEnum->GetNameByValue(TickData.TickGroup).ToString() , PSC, bActive, *SigString, bVis, NumParticles, *PSC->GetFullName(), TickData.PrereqComponent, TickData.PrereqComponent ? *TickData.PrereqComponent->GetFullName() : TEXT(""));
+					 Handle, *TickGroupEnum->GetNameByValue(TickData.TickGroup).ToString() , PSC, bActive, *SigString, bVis, NumParticles, *PSC->GetFullName(), TickData.PrereqComponent.Get(), TickData.PrereqComponent ? *TickData.PrereqComponent->GetFullName() : TEXT(""));
 	}
 #endif
 }
@@ -821,7 +855,7 @@ void FParticleSystemWorldManagerTickFunction::ExecuteTick(float DeltaTime, enum 
 
 FString FParticleSystemWorldManagerTickFunction::DiagnosticMessage()
 {
-	static const UEnum* EnumType = FindObjectChecked<UEnum>(ANY_PACKAGE, TEXT("ETickingGroup"));
+	static const UEnum* EnumType = FindObjectChecked<UEnum>(nullptr, TEXT("/Script/Engine.ETickingGroup"));
 
 	return TEXT("FParticleSystemManager::Tick(") + EnumType->GetNameStringByIndex(static_cast<uint32>(TickGroup)) + TEXT(")");
 }
@@ -868,7 +902,7 @@ void FParticleSystemWorldManager::FTickList::Remove(int32 Handle)
 	FPSCTickData& TickData = Owner->GetTickData(Handle);
 	check(TickList.IsValidIndex(TickData.TickListHandle));
 
-	TickList.RemoveAtSwap(TickData.TickListHandle, 1, false);
+	TickList.RemoveAtSwap(TickData.TickListHandle, 1, EAllowShrinking::No);
 
 	if (TickList.IsValidIndex(TickData.TickListHandle))
 	{

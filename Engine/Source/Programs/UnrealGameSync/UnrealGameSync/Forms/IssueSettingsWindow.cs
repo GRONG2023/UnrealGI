@@ -2,38 +2,36 @@
 
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
-using System.Drawing;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using System.Windows.Forms;
+using Microsoft.Extensions.Logging;
 
 namespace UnrealGameSync
 {
 	partial class IssueSettingsWindow : Form
 	{
-		UserSettings Settings;
+		readonly UserSettings _settings;
+		readonly ILogger _logger;
 
-		public IssueSettingsWindow(UserSettings Settings, string CurrentProject)
+		public IssueSettingsWindow(UserSettings settings, string currentProject, ILogger logger)
 		{
-			this.Settings = Settings;
+			_settings = settings;
+			_logger = logger;
 
 			InitializeComponent();
+			Font = new System.Drawing.Font("Segoe UI", 8.25F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
 
-			if (Settings.NotifyProjects.Count == 0)
+			if (settings.NotifyProjects.Count == 0)
 			{
 				NotifyProjectsCheckBox.Checked = false;
-				NotifyProjectsTextBox.Text = CurrentProject;
+				NotifyProjectsTextBox.Text = currentProject;
 			}
 			else
 			{
 				NotifyProjectsCheckBox.Checked = true;
-				NotifyProjectsTextBox.Text = String.Join(" ", Settings.NotifyProjects);
+				NotifyProjectsTextBox.Text = String.Join(" ", settings.NotifyProjects);
 			}
 
-			if(Settings.NotifyUnassignedMinutes < 0)
+			if (settings.NotifyUnassignedMinutes < 0)
 			{
 				NotifyUnassignedCheckBox.Checked = false;
 				NotifyUnassignedTextBox.Text = "5";
@@ -41,10 +39,10 @@ namespace UnrealGameSync
 			else
 			{
 				NotifyUnassignedCheckBox.Checked = true;
-				NotifyUnassignedTextBox.Text = Settings.NotifyUnassignedMinutes.ToString();
+				NotifyUnassignedTextBox.Text = settings.NotifyUnassignedMinutes.ToString();
 			}
 
-			if (Settings.NotifyUnacknowledgedMinutes < 0)
+			if (settings.NotifyUnacknowledgedMinutes < 0)
 			{
 				NotifyUnacknowledgedCheckBox.Checked = false;
 				NotifyUnacknowledgedTextBox.Text = "5";
@@ -52,10 +50,10 @@ namespace UnrealGameSync
 			else
 			{
 				NotifyUnacknowledgedCheckBox.Checked = true;
-				NotifyUnacknowledgedTextBox.Text = Settings.NotifyUnacknowledgedMinutes.ToString();
+				NotifyUnacknowledgedTextBox.Text = settings.NotifyUnacknowledgedMinutes.ToString();
 			}
 
-			if (Settings.NotifyUnresolvedMinutes < 0)
+			if (settings.NotifyUnresolvedMinutes < 0)
 			{
 				NotifyUnresolvedCheckBox.Checked = false;
 				NotifyUnresolvedTextBox.Text = "20";
@@ -63,7 +61,7 @@ namespace UnrealGameSync
 			else
 			{
 				NotifyUnresolvedCheckBox.Checked = true;
-				NotifyUnresolvedTextBox.Text = Settings.NotifyUnresolvedMinutes.ToString();
+				NotifyUnresolvedTextBox.Text = settings.NotifyUnresolvedMinutes.ToString();
 			}
 
 			UpdateEnabledTextBoxes();
@@ -99,53 +97,54 @@ namespace UnrealGameSync
 
 		private void OkBtn_Click(object sender, EventArgs e)
 		{
-			List<string> NewNotifyProjects = new List<string>();
+			List<string> newNotifyProjects = new List<string>();
 			if (NotifyProjectsCheckBox.Checked)
 			{
-				NewNotifyProjects.AddRange(NotifyProjectsTextBox.Text.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries));
+				newNotifyProjects.AddRange(NotifyProjectsTextBox.Text.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries));
 			}
 
-			int NewNotifyUnresolvedMinutes = -1;
-			if(NotifyUnresolvedCheckBox.Checked)
+			int newNotifyUnresolvedMinutes = -1;
+			if (NotifyUnresolvedCheckBox.Checked)
 			{
-				ushort NewNotifyUnresolvedMinutesValue;
-				if(!ushort.TryParse(NotifyUnresolvedTextBox.Text, out NewNotifyUnresolvedMinutesValue))
+				ushort newNotifyUnresolvedMinutesValue;
+				if (!UInt16.TryParse(NotifyUnresolvedTextBox.Text, out newNotifyUnresolvedMinutesValue))
 				{
 					MessageBox.Show("Invalid time");
 					return;
 				}
-				NewNotifyUnresolvedMinutes = NewNotifyUnresolvedMinutesValue;
+				newNotifyUnresolvedMinutes = newNotifyUnresolvedMinutesValue;
 			}
 
-			int NewNotifyUnacknowledgedMinutes = -1;
+			int newNotifyUnacknowledgedMinutes = -1;
 			if (NotifyUnacknowledgedCheckBox.Checked)
 			{
-				ushort NewNotifyUnacknowledgedMinutesValue;
-				if (!ushort.TryParse(NotifyUnacknowledgedTextBox.Text, out NewNotifyUnacknowledgedMinutesValue))
+				ushort newNotifyUnacknowledgedMinutesValue;
+				if (!UInt16.TryParse(NotifyUnacknowledgedTextBox.Text, out newNotifyUnacknowledgedMinutesValue))
 				{
 					MessageBox.Show("Invalid time");
 					return;
 				}
-				NewNotifyUnacknowledgedMinutes = NewNotifyUnacknowledgedMinutesValue;
+				newNotifyUnacknowledgedMinutes = newNotifyUnacknowledgedMinutesValue;
 			}
 
-			int NewNotifyUnassignedMinutes = -1;
-			if(NotifyUnassignedCheckBox.Checked)
+			int newNotifyUnassignedMinutes = -1;
+			if (NotifyUnassignedCheckBox.Checked)
 			{
-				ushort NewNotifyUnassignedMinutesValue;
-				if(!ushort.TryParse(NotifyUnassignedTextBox.Text, out NewNotifyUnassignedMinutesValue))
+				ushort newNotifyUnassignedMinutesValue;
+				if (!UInt16.TryParse(NotifyUnassignedTextBox.Text, out newNotifyUnassignedMinutesValue))
 				{
 					MessageBox.Show("Invalid time");
 					return;
 				}
-				NewNotifyUnassignedMinutes = NewNotifyUnassignedMinutesValue;
+				newNotifyUnassignedMinutes = newNotifyUnassignedMinutesValue;
 			}
 
-			Settings.NotifyProjects = NewNotifyProjects;
-			Settings.NotifyUnresolvedMinutes = NewNotifyUnresolvedMinutes;
-			Settings.NotifyUnacknowledgedMinutes = NewNotifyUnacknowledgedMinutes;
-			Settings.NotifyUnassignedMinutes = NewNotifyUnassignedMinutes;
-			Settings.Save();
+			_settings.NotifyProjects.Clear();
+			_settings.NotifyProjects.AddRange(newNotifyProjects);
+			_settings.NotifyUnresolvedMinutes = newNotifyUnresolvedMinutes;
+			_settings.NotifyUnacknowledgedMinutes = newNotifyUnacknowledgedMinutes;
+			_settings.NotifyUnassignedMinutes = newNotifyUnassignedMinutes;
+			_settings.Save(_logger);
 
 			DialogResult = DialogResult.OK;
 			Close();

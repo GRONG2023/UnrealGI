@@ -5,6 +5,8 @@
 #include "Evaluation/MovieSceneEvaluationCustomVersion.h"
 #include "UObject/ReleaseObjectVersion.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneEventSectionBase)
+
 #if WITH_EDITOR
 
 #include "Engine/Blueprint.h"
@@ -13,6 +15,7 @@
 UMovieSceneEventSectionBase::FFixupPayloadParameterNameEvent UMovieSceneEventSectionBase::FixupPayloadParameterNameEvent;
 UMovieSceneEventSectionBase::FUpgradeLegacyEventEndpoint UMovieSceneEventSectionBase::UpgradeLegacyEventEndpoint;
 UMovieSceneEventSectionBase::FPostDuplicateEvent UMovieSceneEventSectionBase::PostDuplicateSectionEvent;
+UMovieSceneEventSectionBase::FRemoveForCookEvent UMovieSceneEventSectionBase::RemoveForCookEvent;
 
 void UMovieSceneEventSectionBase::OnPostCompile(UBlueprint* Blueprint)
 {
@@ -72,6 +75,13 @@ void UMovieSceneEventSectionBase::PostRename(UObject* OldOuter, const FName OldN
 
 		PostDuplicateSectionEvent.Execute(this);
 	}
+}
+
+void UMovieSceneEventSectionBase::RemoveForCook()
+{
+	RemoveForCookEvent.Execute(this);
+
+	Super::RemoveForCook();
 }
 
 void UMovieSceneEventSectionBase::AttemptUpgrade()

@@ -3,6 +3,8 @@
 #pragma once
 
 #include "GenericPlatform/GenericWindow.h"
+#include "GenericPlatform/GenericWindowDefinition.h"
+
 #if WITH_ACCESSIBILITY
 #include "GenericPlatform/Accessibility/GenericAccessibleInterfaces.h"
 #endif
@@ -17,7 +19,7 @@
 	bool bDisplayReconfiguring;
 	bool bRenderInitialized;
 	bool bIsBeingOrderedFront;
-	float Opacity;
+	CGFloat Opacity;
 @public
 	bool bAcceptsInput;
 	bool bZoomed;
@@ -26,6 +28,8 @@
 }
 
 @property (assign) EWindowMode::Type TargetWindowMode;
+@property (assign,readonly,getter=AllowMainWindow) BOOL AllowMainWindow;
+@property (assign) EWindowType Type;
 
 #if WITH_ACCESSIBILITY
 /** Adds the accessible element representing this window to the content view and exposes the window to accessibility interactions */

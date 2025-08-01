@@ -9,6 +9,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Diagnostics;
+using System;
 
 [SupportedPlatforms("Win64")]
 public abstract class DatasmithSolidworksBaseTarget : TargetRules
@@ -19,25 +20,28 @@ public abstract class DatasmithSolidworksBaseTarget : TargetRules
 	{
 		string result = "";
 
-		RegistryKey lKey202x = Registry.LocalMachine.OpenSubKey("SOFTWARE\\SolidWorks\\" + swKey + "\\Setup");
-		if (lKey202x != null)
+		if (OperatingSystem.IsWindows())
 		{
-			string[] names = lKey202x.GetValueNames();
-			object value = null;
-			foreach (var nn in names)
+			RegistryKey lKey202x = Registry.LocalMachine.OpenSubKey("SOFTWARE\\SolidWorks\\" + swKey + "\\Setup");
+			if (lKey202x != null)
 			{
-				if (nn.ToUpper() == "SOLIDWORKS FOLDER")
+				string[] names = lKey202x.GetValueNames();
+				object value = null;
+				foreach (var nn in names)
 				{
-					value = lKey202x.GetValue("SolidWorks Folder");
-					break;
+					if (nn.ToUpper() == "SOLIDWORKS FOLDER")
+					{
+						value = lKey202x.GetValue("SolidWorks Folder");
+						break;
+					}
 				}
-			}
-			if (value != null)
-			{
-				string fullPath = Path.Combine(value as string, "solidworkstools.dll");
-				if (File.Exists(fullPath))
+				if (value != null)
 				{
-					result = Path.GetDirectoryName(fullPath);
+					string fullPath = Path.Combine(value as string, "solidworkstools.dll");
+					if (File.Exists(fullPath))
+					{
+						result = Path.GetDirectoryName(fullPath);
+					}
 				}
 			}
 		}
@@ -47,13 +51,13 @@ public abstract class DatasmithSolidworksBaseTarget : TargetRules
 	public DatasmithSolidworksBaseTarget(TargetInfo Target) : base(Target)
 	{
 		Type = TargetType.Program;
+		IncludeOrderVersion = EngineIncludeOrderVersion.Latest;
 		SolutionDirectory = "Programs/Datasmith";
 		bBuildInSolutionByDefault = false;
 		ExeBinariesSubFolder = "Solidworks/" + GetVersionShort();
 		bShouldCompileAsDLL = true;
 		LinkType = TargetLinkType.Monolithic;
 		bBuildDeveloperTools = false;
-		bUseMallocProfiler = false;
 		bBuildWithEditorOnlyData = true;
 		bCompileAgainstEngine = false;
 		bCompileAgainstCoreUObject = false;
@@ -63,28 +67,31 @@ public abstract class DatasmithSolidworksBaseTarget : TargetRules
 		string ProjectName = "DatasmithSolidworks";
 		LaunchModuleName = ProjectName + GetVersionShort();
 
-		string SolidworksSDKPath = CheckSolidworksInstalledSub(GetVersionLong());
-		if (!Directory.Exists(SolidworksSDKPath))
+		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
-			// Try with build machine setup
-			string SDKRootEnvVar = System.Environment.GetEnvironmentVariable("UE_SDKS_ROOT");
-			if (SDKRootEnvVar != null && SDKRootEnvVar != "")
+			string SolidworksSDKPath = CheckSolidworksInstalledSub(GetVersionLong());
+			if (!Directory.Exists(SolidworksSDKPath))
 			{
-				SolidworksSDKPath = Path.Combine(SDKRootEnvVar, "HostWin64", "Win64", "Solidworks", GetVersionShort());
+				// Try with build machine setup
+				string SDKRootEnvVar = System.Environment.GetEnvironmentVariable("UE_SDKS_ROOT");
+				if (SDKRootEnvVar != null && SDKRootEnvVar != "")
+				{
+					SolidworksSDKPath = Path.Combine(SDKRootEnvVar, "HostWin64", "Win64", "Solidworks", GetVersionShort());
+				}
 			}
+
+			// Define post-build step
+			// Since the Datasmith Solidworks Exporter is a C# project, build in batch the release configuration of the Visual Studio C# project file.
+			string Config = "Release";
+			string SolidworksExporterPath = @"$(EngineDir)\Source\Programs\Enterprise\Datasmith\DatasmithSolidworksExporter";
+			string ProjectFile = Path.Combine(SolidworksExporterPath, ProjectName, ProjectName+".csproj");
+
+			string BuildCommand = string.Format(@"$(EngineDir)\Build\BatchFiles\MSBuild.bat /t:Build /p:Configuration={1} /p:EngineDir=""$(EngineDir)"" /p:ExternalAssemblies=""{2}"" ""{0}""",
+				ProjectFile, Config, SolidworksSDKPath);
+
+			PostBuildSteps.Add(string.Format(@"echo BuildCommand: {0}", BuildCommand));
+			PostBuildSteps.Add(BuildCommand);
 		}
-
-		// Define post-build step
-		// Since the Datasmith Solidworks Exporter is a C# project, build in batch the release configuration of the Visual Studio C# project file.
-		string Config = "Release";
-		string SolidworksExporterPath = @"$(EngineDir)\Source\Programs\Enterprise\Datasmith\DatasmithSolidworksExporter";
-		string ProjectFile = Path.Combine(SolidworksExporterPath, ProjectName, ProjectName+".csproj");
-
-		string BuildCommand = string.Format(@"$(EngineDir)\Build\BatchFiles\MSBuild.bat /t:Build /p:Configuration={1} /p:EngineDir=""$(EngineDir)"" /p:ExternalAssemblies=""{2}"" ""{0}""",
-			ProjectFile, Config, SolidworksSDKPath);
-
-		PostBuildSteps.Add(string.Format(@"echo BuildCommand: {0}", BuildCommand));
-		PostBuildSteps.Add(BuildCommand);
 	}
 
 	public abstract string GetVersionLong();

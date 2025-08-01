@@ -5,8 +5,8 @@
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Input/SButton.h"
-#include "Editor/SceneOutliner/Public/SceneOutlinerPublicTypes.h"
-#include "Editor/SceneOutliner/Public/SceneOutlinerModule.h"
+#include "SceneOutlinerPublicTypes.h"
+#include "SceneOutlinerModule.h"
 
 #define LOCTEXT_NAMESPACE "PropertySceneOutliner"
 
@@ -27,18 +27,18 @@ void SPropertySceneOutliner::Construct( const FArguments& InArgs )
 			.OnGetMenuContent( this, &SPropertySceneOutliner::OnGenerateSceneOutliner )
 		]
 		+ SVerticalBox::Slot()
-		.FillHeight(1)
+		.FillHeight(1.0f)
 		[
 			SNew( SButton )
-			.ButtonStyle( FEditorStyle::Get(), "HoverHintOnly" )
+			.ButtonStyle( FAppStyle::Get(), "HoverHintOnly" )
 			.OnClicked( this, &SPropertySceneOutliner::OnClicked )
 			.ToolTipText(LOCTEXT("PickButtonLabel", "Pick Actor"))
-			.ContentPadding(0)
+			.ContentPadding(0.0f)
 			.ForegroundColor( FSlateColor::UseForeground() )
 			.IsFocusable(false)
 			[ 
 				SNew( SImage )
-				.Image( FEditorStyle::GetBrush("PropertyWindow.Button_PickActor") )
+				.Image( FAppStyle::GetBrush("PropertyWindow.Button_PickActor") )
 				.ColorAndOpacity( FSlateColor::UseForeground() )
 			]
 		]
@@ -55,19 +55,18 @@ TSharedRef<SWidget> SPropertySceneOutliner::OnGenerateSceneOutliner()
 {
 	FSceneOutlinerModule& SceneOutlinerModule = FModuleManager::Get().LoadModuleChecked<FSceneOutlinerModule>(TEXT("SceneOutliner"));
 
-	SceneOutliner::FInitializationOptions InitOptions;
-	InitOptions.Mode = ESceneOutlinerMode::ActorPicker;
+	FSceneOutlinerInitializationOptions InitOptions;
 	OnGetActorFilters.ExecuteIfBound( InitOptions.Filters );
 
 	TSharedRef<SWidget> MenuContent = 
 		SNew(SBox)
-		.HeightOverride(300)
-		.WidthOverride(300)
+		.HeightOverride(300.0f)
+		.WidthOverride(300.0f)
 		[
 			SNew( SBorder )
-			.BorderImage( FEditorStyle::GetBrush("Menu.Background") )
+			.BorderImage( FAppStyle::GetBrush("Menu.Background") )
 			[
-				SceneOutlinerModule.CreateSceneOutliner(InitOptions, FOnActorPicked::CreateSP(this, &SPropertySceneOutliner::OnActorSelectedFromOutliner))
+				SceneOutlinerModule.CreateActorPicker(InitOptions, FOnActorPicked::CreateSP(this, &SPropertySceneOutliner::OnActorSelectedFromOutliner))
 			]
 		];
 

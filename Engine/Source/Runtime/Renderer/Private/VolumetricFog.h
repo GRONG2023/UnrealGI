@@ -10,60 +10,20 @@
 #include "SceneView.h"
 #include "SceneRendering.h"
 
+// Grid size for resource allocation to be independent of dynamic resolution
+extern FIntVector GetVolumetricFogResourceGridSize(const FViewInfo& View, int32& OutVolumetricFogGridPixelSize);
+// Grid size for the view rectangle within the allocated resource
+extern FIntVector GetVolumetricFogViewGridSize(const FViewInfo& View, int32& OutVolumetricFogGridPixelSize);
 
-class FTransientLightFunctionTextureAtlas
-{
-public:
+extern FVector2f GetVolumetricFogUVMaxForSampling(const FVector2f& ViewRectSize, FIntVector VolumetricFogResourceGridSize, int32 VolumetricFogResourceGridPixelSize);
+extern FVector2f GetVolumetricFogPrevUVMaxForTemporalBlend(const FVector2f& ViewRectSize, FIntVector VolumetricFogResourceGridSize, int32 VolumetricFogResourceGridPixelSize);
 
-	FTransientLightFunctionTextureAtlas(FRDGBuilder& GraphBuilder);
-	~FTransientLightFunctionTextureAtlas();
+extern FVector2f GetVolumetricFogFroxelToScreenSVPosRatio(const FViewInfo& View);
 
-	// FTransientLightFunctionTextureAtlasTile will never be null, but it can be a default white light function
-	FTransientLightFunctionTextureAtlasTile AllocateAtlasTile();
+extern FRDGTextureDesc GetVolumetricFogRDGTextureDesc(const FIntVector& VolumetricFogResourceGridSize);
 
-	FRDGTextureRef GetTransientLightFunctionAtlasTexture()
-	{
-		return TransientLightFunctionAtlasTexture;
-	}
-	FRDGTextureRef GetDefaultLightFunctionTexture()
-	{
-		return DefaultLightFunctionAtlasItemTexture;
-	}
-
-	uint32 GetAtlasTextureWidth()
-	{
-		return AtlasTextureWidth;
-	}
-
-private:
-	FTransientLightFunctionTextureAtlas() {}
-
-	uint32 AtlasItemWidth;
-	uint32 AtlasTextureWidth;
-	uint32 AllocatedAtlasTiles;
-	float HalfTexelSize;
-
-	FRDGTextureRef TransientLightFunctionAtlasTexture;
-	FRDGTextureRef DefaultLightFunctionAtlasItemTexture;
-};
-
-inline bool DoesPlatformSupportVolumetricFog(const FStaticShaderPlatform Platform)
-{
-	return Platform == SP_PCD3D_SM5
-		|| Platform == SP_METAL_SM5 || Platform == SP_METAL_SM5_NOTESS
-		|| IsVulkanSM5Platform(Platform)
-		|| FDataDrivenShaderPlatformInfo::GetSupportsVolumetricFog(Platform);
-}
-
-inline bool DoesPlatformSupportVolumetricFogVoxelization(const FStaticShaderPlatform Platform)
-{
-	return Platform == SP_PCD3D_SM5
-		|| Platform == SP_METAL_SM5 || Platform == SP_METAL_SM5_NOTESS
-		|| IsVulkanSM5Platform(Platform)
-		|| FDataDrivenShaderPlatformInfo::GetSupportsVolumetricFog(Platform);
-}
-
+extern bool DoesPlatformSupportVolumetricFogVoxelization(const FStaticShaderPlatform Platform);
 extern bool ShouldRenderVolumetricFog(const FScene* Scene, const FSceneViewFamily& ViewFamily);
+extern const FProjectedShadowInfo* GetShadowForInjectionIntoVolumetricFog(const FVisibleLightInfo& VisibleLightInfo);
 
-extern bool LightNeedsSeparateInjectionIntoVolumetricFogForOpaqueShadow(const FLightSceneInfo* LightSceneInfo, FVisibleLightInfo& VisibleLightInfo);
-extern bool LightNeedsSeparateInjectionIntoVolumetricFogForLightFunction(const FLightSceneInfo* LightSceneInfo);
+extern bool LightNeedsSeparateInjectionIntoVolumetricFogForOpaqueShadow(const FViewInfo& View, const FLightSceneInfo* LightSceneInfo, const FVisibleLightInfo& VisibleLightInfo);

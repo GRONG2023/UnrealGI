@@ -12,12 +12,20 @@
 #include "Modules/ModuleManager.h"
 #include "Preferences/MaterialEditorOptions.h"
 #include "MaterialEditorModule.h"
+#include "MaterialShared.h"
 
 #include "Materials/MaterialExpressionComment.h"
 #include "Materials/MaterialExpressionParameter.h"
 #include "Materials/MaterialExpressionMaterialLayerOutput.h"
 #include "Materials/MaterialExpressionNamedReroute.h"
+#include "Materials/MaterialExpressionExecBegin.h"
+#include "Materials/MaterialExpressionExecEnd.h"
 
+#include "Materials/MaterialExpressionIfThenElse.h"
+#include "Materials/MaterialExpressionForLoop.h"
+#include "Materials/MaterialExpressionGetLocal.h"
+#include "Materials/MaterialExpressionSetLocal.h"
+#include "Materials/MaterialExpressionSubstrate.h"
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //
@@ -46,7 +54,7 @@ MaterialExpressionClasses* MaterialExpressionClasses::Get()
 const UStruct* MaterialExpressionClasses::GetExpressionInputStruct()
 {
 	static const UStruct* ExpressionInputStruct =
-		CastChecked<UStruct>( StaticFindObject( UStruct::StaticClass(), ANY_PACKAGE, TEXT("ExpressionInput")) );
+		CastChecked<UStruct>( StaticFindObject( UStruct::StaticClass(), nullptr, TEXT("/Script/Engine.ExpressionInput")) );
 	check( ExpressionInputStruct );
 	return ExpressionInputStruct;
 }
@@ -78,6 +86,11 @@ void MaterialExpressionClasses::InitMaterialExpressionClasses()
 {
 	if(!bInitialized)
 	{
+		static const auto CVarMaterialEnableNewHLSLGenerator = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.MaterialEnableNewHLSLGenerator"));
+		
+		const bool bEnableControlFlow = AllowMaterialControlFlow();
+		const bool bEnableNewHLSLGenerator = CVarMaterialEnableNewHLSLGenerator->GetValueOnAnyThread() != 0;
+
 		UMaterialEditorOptions* TempEditorOptions = NewObject<UMaterialEditorOptions>();
 		UClass* BaseType = UMaterialExpression::StaticClass();
 		if( BaseType )
@@ -98,11 +111,30 @@ void MaterialExpressionClasses::InitMaterialExpressionClasses()
 						{
 							continue;
 						}
-						
+
+						// Hide node types related to control flow, unless it's enabled
+						if (!bEnableControlFlow && Class->HasMetaData("MaterialControlFlow"))
+						{
+							continue;
+						}
+
+						if (!bEnableNewHLSLGenerator && Class->HasMetaData("MaterialNewHLSLGenerator"))
+						{
+							continue;
+						}
+
+						// Hide node types that are tagged private
+						if(Class->HasMetaData(TEXT("Private")))
+						{
+							continue;
+						}
+
 						// Exclude comments from the expression list, as well as the base parameter expression and local variable usage, as they should not be used directly
 						if ( Class != UMaterialExpressionComment::StaticClass() 
 							&& Class != UMaterialExpressionParameter::StaticClass()
-							&& Class != UMaterialExpressionNamedRerouteUsage::StaticClass())
+							&& Class != UMaterialExpressionNamedRerouteUsage::StaticClass()
+							&& Class != UMaterialExpressionExecBegin::StaticClass()
+							&& Class != UMaterialExpressionExecEnd::StaticClass() )
 						{
 							FMaterialExpression MaterialExpression;
 							// Trim the material expression name and add it to the list used for filtering.
@@ -116,7 +148,7 @@ void MaterialExpressionClasses::InitMaterialExpressionClasses()
 
 							if (ClassName.StartsWith(ExpressionPrefix, ESearchCase::CaseSensitive))
 							{
-								ClassName.MidInline(ExpressionPrefix.Len(), MAX_int32, false);
+								ClassName.MidInline(ExpressionPrefix.Len(), MAX_int32, EAllowShrinking::No);
 							}
 							MaterialExpression.Name = ClassName;
 							MaterialExpression.MaterialClass = Class;
@@ -146,6 +178,13 @@ void MaterialExpressionClasses::InitMaterialExpressionClasses()
 								{
 									FavoriteExpressionClasses.AddUnique(MaterialExpression);
 								}
+							}
+
+							// Skip adding Substrate node to the context menu if Substrate is disabled
+							// SUBSTRATE_TODO: remove this when Substrate becomes the only shading path
+							if ((Class->IsChildOf(UMaterialExpressionSubstrateBSDF::StaticClass()) || Class->IsChildOf(UMaterialExpressionSubstrateUtilityBase::StaticClass())) && !Substrate::IsSubstrateEnabled())
+							{
+								continue;
 							}
 
 							// Category fill...

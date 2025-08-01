@@ -22,21 +22,22 @@ UE_TRACE_EVENT_BEGIN(NetTrace, InitEvent)
 	UE_TRACE_EVENT_FIELD(uint32, NetTraceReporterVersion)
 UE_TRACE_EVENT_END()
 
-// Trace a name, the utf encoded name is attached as a attachment
+// Trace a name
 UE_TRACE_EVENT_BEGIN(NetTrace, NameEvent)
 	UE_TRACE_EVENT_FIELD(uint16, NameId)
+	UE_TRACE_EVENT_FIELD(UE::Trace::AnsiString, Name)
 UE_TRACE_EVENT_END()
 
 UE_TRACE_EVENT_BEGIN(NetTrace, ObjectCreatedEvent)	
 	UE_TRACE_EVENT_FIELD(uint64, TypeId)
-	UE_TRACE_EVENT_FIELD(uint32, ObjectId)
+	UE_TRACE_EVENT_FIELD(uint64, ObjectId)
 	UE_TRACE_EVENT_FIELD(uint32, OwnerId)
 	UE_TRACE_EVENT_FIELD(uint16, NameId)
 	UE_TRACE_EVENT_FIELD(uint8, GameInstanceId)
 UE_TRACE_EVENT_END()
 
 UE_TRACE_EVENT_BEGIN(NetTrace, ObjectDestroyedEvent)
-	UE_TRACE_EVENT_FIELD(uint32, ObjectId)
+	UE_TRACE_EVENT_FIELD(uint64, ObjectId)
 	UE_TRACE_EVENT_FIELD(uint8, GameInstanceId)
 UE_TRACE_EVENT_END()
 
@@ -46,10 +47,46 @@ UE_TRACE_EVENT_BEGIN(NetTrace, ConnectionCreatedEvent)
 	UE_TRACE_EVENT_FIELD(uint8, GameInstanceId)
 UE_TRACE_EVENT_END()
 
+UE_TRACE_EVENT_BEGIN(NetTrace, ConnectionStateUpdatedEvent)
+	UE_TRACE_EVENT_FIELD(uint16, ConnectionId)
+	UE_TRACE_EVENT_FIELD(uint8, GameInstanceId)
+	UE_TRACE_EVENT_FIELD(uint8, ConnectionStateValue)
+UE_TRACE_EVENT_END()
+
+// Provides additional information about connection after it is created
+UE_TRACE_EVENT_BEGIN(NetTrace, ConnectionUpdatedEvent)
+	UE_TRACE_EVENT_FIELD(uint16, ConnectionId)
+	UE_TRACE_EVENT_FIELD(uint8, GameInstanceId)
+	UE_TRACE_EVENT_FIELD(UE::Trace::WideString, Name)
+	UE_TRACE_EVENT_FIELD(UE::Trace::WideString, Address)
+UE_TRACE_EVENT_END()
+
 // Add close reason?
 UE_TRACE_EVENT_BEGIN(NetTrace, ConnectionClosedEvent)
 	UE_TRACE_EVENT_FIELD(uint16, ConnectionId)
 	UE_TRACE_EVENT_FIELD(uint8, GameInstanceId)
+UE_TRACE_EVENT_END()
+
+// StatsCounterEvent
+UE_TRACE_EVENT_BEGIN(NetTrace, PacketStatsCounterEvent)
+	UE_TRACE_EVENT_FIELD(uint32, StatsValue)
+	UE_TRACE_EVENT_FIELD(uint16, NameId)
+	UE_TRACE_EVENT_FIELD(uint16, ConnectionId)
+	UE_TRACE_EVENT_FIELD(uint8, GameInstanceId)
+UE_TRACE_EVENT_END()
+
+UE_TRACE_EVENT_BEGIN(NetTrace, FrameStatsCounterEvent)
+	UE_TRACE_EVENT_FIELD(uint64, Timestamp)
+	UE_TRACE_EVENT_FIELD(uint32, StatsValue)
+	UE_TRACE_EVENT_FIELD(uint16, NameId)
+	UE_TRACE_EVENT_FIELD(uint8, GameInstanceId)
+UE_TRACE_EVENT_END()
+
+// Provides additional information about game instance
+UE_TRACE_EVENT_BEGIN(NetTrace, InstanceUpdatedEvent)
+	UE_TRACE_EVENT_FIELD(uint8, GameInstanceId)
+	UE_TRACE_EVENT_FIELD(bool, bIsServer)
+	UE_TRACE_EVENT_FIELD(UE::Trace::WideString, Name)
 UE_TRACE_EVENT_END()
 
 // rename 
@@ -62,6 +99,7 @@ UE_TRACE_EVENT_BEGIN(NetTrace, PacketContentEvent)
 	UE_TRACE_EVENT_FIELD(uint16, ConnectionId)
 	UE_TRACE_EVENT_FIELD(uint8, GameInstanceId)
 	UE_TRACE_EVENT_FIELD(uint8, PacketType)
+	UE_TRACE_EVENT_FIELD(uint8[], Data)
 UE_TRACE_EVENT_END()
 
 //$TODO: Drop the timestamp when we can get them for free on the analysis side
@@ -90,17 +128,25 @@ void FNetTraceReporter::ReportInitEvent(uint32 NetTraceVersion)
 		<< InitEvent.NetTraceReporterVersion(NetTraceReporterVersion);
 }
 
+void FNetTraceReporter::ReportInstanceUpdated(uint32 GameInstanceId, bool bIsServer, const TCHAR* Name)
+{
+	UE_TRACE_LOG(NetTrace, InstanceUpdatedEvent, NetChannel)
+		<< InstanceUpdatedEvent.GameInstanceId((uint8)GameInstanceId)
+		<< InstanceUpdatedEvent.bIsServer(bIsServer)
+		<< InstanceUpdatedEvent.Name(Name);
+}
+
 void FNetTraceReporter::ReportInstanceDestroyed(uint32 GameInstanceId)
 {
 	UE_TRACE_LOG(NetTrace, InstanceDestroyedEvent, NetChannel)
-		<< InstanceDestroyedEvent.GameInstanceId(GameInstanceId);
+		<< InstanceDestroyedEvent.GameInstanceId((uint8)GameInstanceId);
 }
 
-void FNetTraceReporter::ReportAnsiName(FNetDebugNameId NameId, uint32 NameSize, const char* Name)
+void FNetTraceReporter::ReportAnsiName(UE::Net::FNetDebugNameId NameId, uint32 NameSize, const char* Name)
 {
-	UE_TRACE_LOG(NetTrace, NameEvent, NetChannel, NameSize)
+	UE_TRACE_LOG(NetTrace, NameEvent, NetChannel)
 		<< NameEvent.NameId(NameId)
-		<< NameEvent.Attachment(Name, NameSize);
+		<< NameEvent.Name(Name, NameSize);
 }
 
 void FNetTraceReporter::ReportPacketDropped(const FNetTracePacketInfo& PacketInfo)
@@ -109,7 +155,7 @@ void FNetTraceReporter::ReportPacketDropped(const FNetTracePacketInfo& PacketInf
 		<< PacketDroppedEvent.Timestamp(FPlatformTime::Cycles64())
 		<< PacketDroppedEvent.SequenceNumber(PacketInfo.PacketSequenceNumber)
 		<< PacketDroppedEvent.ConnectionId(PacketInfo.ConnectionId)
-		<< PacketDroppedEvent.GameInstanceId(PacketInfo.GameInstanceId)
+		<< PacketDroppedEvent.GameInstanceId((uint8)PacketInfo.GameInstanceId)
 		<< PacketDroppedEvent.PacketType((uint8)PacketInfo.PacketType);
 }
 
@@ -120,7 +166,7 @@ void FNetTraceReporter::ReportPacket(const FNetTracePacketInfo& PacketInfo, uint
 		<< PacketEvent.PacketBits(PacketBits)
 		<< PacketEvent.SequenceNumber(PacketInfo.PacketSequenceNumber)
 		<< PacketEvent.ConnectionId(PacketInfo.ConnectionId)
-		<< PacketEvent.GameInstanceId(PacketInfo.GameInstanceId)
+		<< PacketEvent.GameInstanceId((uint8)PacketInfo.GameInstanceId)
 		<< PacketEvent.PacketType((uint8)PacketInfo.PacketType);
 }
 
@@ -138,11 +184,11 @@ void FNetTraceReporter::ReportPacketContent(FNetTracePacketContentEvent* Events,
 
 	auto FlushPacketContentBuffer = [](const FNetTracePacketInfo& InPacketInfo, const uint8* InBuffer, uint32 Count)
 	{
-		UE_TRACE_LOG(NetTrace, PacketContentEvent, NetChannel, Count)
+		UE_TRACE_LOG(NetTrace, PacketContentEvent, NetChannel)
 			<< PacketContentEvent.ConnectionId(InPacketInfo.ConnectionId)
-			<< PacketContentEvent.GameInstanceId(InPacketInfo.GameInstanceId)
+			<< PacketContentEvent.GameInstanceId((uint8)InPacketInfo.GameInstanceId)
 			<< PacketContentEvent.PacketType((uint8)InPacketInfo.PacketType)
-			<< PacketContentEvent.Attachment(InBuffer, Count);
+			<< PacketContentEvent.Data(InBuffer, Count);
 	};
 
 	for (const FNetTracePacketContentEvent& CurrentEvent : MakeArrayView(Events, EventCount))
@@ -150,7 +196,7 @@ void FNetTraceReporter::ReportPacketContent(FNetTracePacketContentEvent* Events,
 		// Flush
 		if ((BufferPtr - Buffer) > FlushBufferThreshold)
 		{
-			FlushPacketContentBuffer(PacketInfo, Buffer, BufferPtr - Buffer);
+			FlushPacketContentBuffer(PacketInfo, Buffer, (uint32)(BufferPtr - Buffer));
 			BufferPtr = Buffer;
 			LastOffset = 0;
 		}
@@ -163,13 +209,29 @@ void FNetTraceReporter::ReportPacketContent(FNetTracePacketContentEvent* Events,
 		switch (ENetTracePacketContentEventType(CurrentEvent.EventType))
 		{
 			case ENetTracePacketContentEventType::Object:
+			{
+				// NestingLevel
+				*(BufferPtr++) = CurrentEvent.NestingLevel;
+
+				FTraceUtils::Encode7bit(CurrentEvent.ObjectId, BufferPtr);
+
+				// Encode event data, all offsets are delta compressed against previous begin marker
+				const uint64 StartPos = CurrentEvent.StartPos;
+
+				// Start
+				FTraceUtils::Encode7bit(StartPos - LastOffset, BufferPtr);
+				LastOffset = StartPos;
+
+				// End
+				FTraceUtils::Encode7bit(CurrentEvent.EndPos - StartPos, BufferPtr);
+			}
+			break;
 			case ENetTracePacketContentEventType::NameId:
 			{
 				// NestingLevel
 				*(BufferPtr++) = CurrentEvent.NestingLevel;
 
-				uint32 EventId = (ENetTracePacketContentEventType)CurrentEvent.EventType == ENetTracePacketContentEventType::Object ? CurrentEvent.ObjectId : CurrentEvent.DebugNameId;
-				FTraceUtils::Encode7bit(EventId, BufferPtr);
+				FTraceUtils::Encode7bit(CurrentEvent.DebugNameId, BufferPtr);
 
 				// Encode event data, all offsets are delta compressed against previous begin marker
 				const uint64 StartPos = CurrentEvent.StartPos;
@@ -185,14 +247,12 @@ void FNetTraceReporter::ReportPacketContent(FNetTracePacketContentEvent* Events,
 			case ENetTracePacketContentEventType::BunchEvent:
 			{
 				// DebugName
-				uint32 EventId = CurrentEvent.DebugNameId;
+				const uint32 EventId = CurrentEvent.DebugNameId;
 				FTraceUtils::Encode7bit(EventId, BufferPtr);
 
-				// Start, do not delta compress as we have to deal with overshoot of previous bunch
-				FTraceUtils::Encode7bit(CurrentEvent.StartPos, BufferPtr);
-
-				// End
-				FTraceUtils::Encode7bit(CurrentEvent.EndPos - CurrentEvent.StartPos, BufferPtr);
+				// BunchSize
+				const uint32 BunchSize = CurrentEvent.EndPos;
+				FTraceUtils::Encode7bit(BunchSize, BufferPtr);
 
 				// Must reset LastOffest when we begin a new bunch
 				LastOffset = 0U;
@@ -220,7 +280,7 @@ void FNetTraceReporter::ReportPacketContent(FNetTracePacketContentEvent* Events,
 
 	if (BufferPtr > Buffer)
 	{
-		FlushPacketContentBuffer(PacketInfo, Buffer, BufferPtr - Buffer);
+		FlushPacketContentBuffer(PacketInfo, Buffer, (uint32)(BufferPtr - Buffer));
 		BufferPtr = Buffer;
 	}
 }
@@ -228,32 +288,67 @@ void FNetTraceReporter::ReportPacketContent(FNetTracePacketContentEvent* Events,
 void FNetTraceReporter::ReportConnectionCreated(uint32 GameInstanceId, uint32 ConnectionId)
 {
 	UE_TRACE_LOG(NetTrace, ConnectionCreatedEvent, NetChannel)
-		<< ConnectionCreatedEvent.ConnectionId(ConnectionId)
-		<< ConnectionCreatedEvent.GameInstanceId(GameInstanceId);
+		<< ConnectionCreatedEvent.ConnectionId((uint16)ConnectionId)
+		<< ConnectionCreatedEvent.GameInstanceId((uint8)GameInstanceId);
+}
+
+void FNetTraceReporter::ReportConnectionStateUpdated(uint32 GameInstanceId, uint32 ConnectionId, uint8 ConnectionStateValue)
+{
+	UE_TRACE_LOG(NetTrace, ConnectionStateUpdatedEvent, NetChannel)
+		<< ConnectionStateUpdatedEvent.ConnectionId((uint16)ConnectionId)
+		<< ConnectionStateUpdatedEvent.GameInstanceId((uint8)GameInstanceId)
+		<< ConnectionStateUpdatedEvent.ConnectionStateValue(ConnectionStateValue);
+}
+
+void FNetTraceReporter::ReportConnectionUpdated(uint32 GameInstanceId, uint32 ConnectionId, const TCHAR* AddressString, const TCHAR* OwningActor)
+{
+	UE_TRACE_LOG(NetTrace, ConnectionUpdatedEvent, NetChannel)
+		<< ConnectionUpdatedEvent.GameInstanceId((uint8)GameInstanceId)
+		<< ConnectionUpdatedEvent.ConnectionId((uint16)ConnectionId)
+		<< ConnectionUpdatedEvent.Name(OwningActor)
+		<< ConnectionUpdatedEvent.Address(AddressString);
 }
 
 void FNetTraceReporter::ReportConnectionClosed(uint32 GameInstanceId, uint32 ConnectionId)
 {
 	UE_TRACE_LOG(NetTrace, ConnectionClosedEvent, NetChannel)
-		<< ConnectionClosedEvent.ConnectionId(ConnectionId)
-		<< ConnectionClosedEvent.GameInstanceId(GameInstanceId);
+		<< ConnectionClosedEvent.ConnectionId((uint16)ConnectionId)
+		<< ConnectionClosedEvent.GameInstanceId((uint8)GameInstanceId);
 }
 
-void FNetTraceReporter::ReportObjectCreated(uint32 GameInstanceId, uint32 NetObjectId, FNetDebugNameId NameId, uint64 TypeIdentifier, uint32 OwnerId)
+void FNetTraceReporter::ReportPacketStatsCounter(uint32 GameInstanceId, uint32 ConnectionId, UE::Net::FNetDebugNameId CounterNameId, uint32 StatValue)
+{
+	UE_TRACE_LOG(NetTrace, PacketStatsCounterEvent, NetChannel)
+		<< PacketStatsCounterEvent.StatsValue(StatValue)
+		<< PacketStatsCounterEvent.NameId(CounterNameId)
+		<< PacketStatsCounterEvent.ConnectionId((uint16)ConnectionId)
+		<< PacketStatsCounterEvent.GameInstanceId((uint8)GameInstanceId);
+}
+
+void FNetTraceReporter::ReportFrameStatsCounter(uint32 GameInstanceId, UE::Net::FNetDebugNameId CounterNameId, uint32 StatValue)
+{
+	UE_TRACE_LOG(NetTrace, FrameStatsCounterEvent, NetChannel)
+		<< FrameStatsCounterEvent.Timestamp(FPlatformTime::Cycles64())
+		<< FrameStatsCounterEvent.StatsValue(StatValue)
+		<< FrameStatsCounterEvent.NameId(CounterNameId)
+		<< FrameStatsCounterEvent.GameInstanceId((uint8)GameInstanceId);
+}
+
+void FNetTraceReporter::ReportObjectCreated(uint32 GameInstanceId, uint64 NetObjectId, UE::Net::FNetDebugNameId NameId, uint64 TypeIdentifier, uint32 OwnerId)
 {
 	UE_TRACE_LOG(NetTrace, ObjectCreatedEvent, NetChannel)
 		<< ObjectCreatedEvent.TypeId(TypeIdentifier)
 		<< ObjectCreatedEvent.ObjectId(NetObjectId)
 		<< ObjectCreatedEvent.OwnerId(OwnerId)
 		<< ObjectCreatedEvent.NameId(NameId)
-		<< ObjectCreatedEvent.GameInstanceId(GameInstanceId);
+		<< ObjectCreatedEvent.GameInstanceId((uint8)GameInstanceId);
 }
 
-void FNetTraceReporter::ReportObjectDestroyed(uint32 GameInstanceId, uint32 NetObjectId)
+void FNetTraceReporter::ReportObjectDestroyed(uint32 GameInstanceId, uint64 NetObjectId)
 {
 	UE_TRACE_LOG(NetTrace, ObjectDestroyedEvent, NetChannel)
 		<< ObjectDestroyedEvent.ObjectId(NetObjectId)
-		<< ObjectDestroyedEvent.GameInstanceId(GameInstanceId);
+		<< ObjectDestroyedEvent.GameInstanceId((uint8)GameInstanceId);
 }
 
 #endif

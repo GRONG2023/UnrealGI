@@ -58,6 +58,42 @@ FArchive& FArchiveUObject::SerializeLazyObjectPtr(FArchive& Ar, FLazyObjectPtr& 
 	return Ar;
 }
 
+FArchive& FArchiveUObject::SerializeObjectPtr(FArchive& Ar, FObjectPtr& Value)
+{
+	if (Ar.IsCountingMemory() && !(Ar.IsLoading() || Ar.IsSaving()) && !Value.IsResolved())
+	{
+		return Ar;
+	}
+
+	// Default behavior is to fully resolve the reference (if we're not loading) and send it through
+	// the raw UObject* serialization codepath and ensure that the result is saved back into
+	// the FObjectPtr afterwards.  There will be many use cases where this is
+	// not what we want to do, but this should be a reasonable default that
+	// allows FObjectPtrs to be treated like raw UObject*'s by default.
+
+	// This dummy value is used when we're not intending for the incoming value to be meaningful (it may be uninitialized memory)
+	// in those cases, we don't attempt to resolve the object reference and instead feed this dummy value in with the expectation
+	// that the UObject* serialization codepath is going to overwrite it.  If for any reason it is not overwritten, the FObjectPtr
+	// will remain its initial value.  Note that the dummy value is chosen to represent an unaligned value that can't be a valid
+	// address for an object.
+	#if PLATFORM_64BITS
+	UObject* const DummyValue = (UObject* const)0xFFFF'FEFB'F123'4567;
+	#elif PLATFORM_32BITS
+	UObject* const DummyValue = (UObject* const)0xF123'4567;
+	#endif
+	UObject* Object = DummyValue;
+	if (!Ar.IsLoading())
+	{
+		Object = Value.Get();
+	}
+	Ar << Object;
+	if ((Ar.IsLoading() || Ar.IsModifyingWeakAndStrongReferences()) && (Object != DummyValue))
+	{
+		Value = Object;
+	}
+	return Ar;
+}
+
 FArchive& FArchiveUObject::SerializeSoftObjectPtr(FArchive& Ar, FSoftObjectPtr& Value)
 {
 	if (Ar.IsSaving() || Ar.IsLoading())
@@ -127,6 +163,14 @@ FArchive& FObjectAndNameAsStringProxyArchive::operator<<(UObject*& Obj)
 		// load the path name to the object
 		FString LoadedString;
 		InnerArchive << LoadedString;
+
+		// if it's empty, let's exit early
+		if (LoadedString.IsEmpty())
+		{
+			Obj = nullptr;
+			return *this;
+		}
+
 		// look up the object by fully qualified pathname
 		Obj = FindObject<UObject>(nullptr, *LoadedString, false);
 		// If we couldn't find it, and we want to load it, do that
@@ -135,11 +179,17 @@ FArchive& FObjectAndNameAsStringProxyArchive::operator<<(UObject*& Obj)
 			Obj = LoadObject<UObject>(nullptr, *LoadedString);
 		}
 	}
-	else
+	else if (Obj)
 	{
 		// save out the fully qualified object name
 		FString SavedString(Obj->GetPathName());
 		InnerArchive << SavedString;
+	}
+	else
+	{
+		// for null pointer, output empty string
+		FString EmptyString;
+		InnerArchive << EmptyString;
 	}
 	return *this;
 }
@@ -166,6 +216,11 @@ FArchive& FObjectAndNameAsStringProxyArchive::operator<<(FSoftObjectPath& Value)
 	return *this;
 }
 
+FArchive& FObjectAndNameAsStringProxyArchive::operator<<(FObjectPtr& Obj)
+{
+	return FArchiveUObject::SerializeObjectPtr(*this, Obj);
+}
+
 void FSerializedPropertyScope::PushProperty()
 {
 	if (Property)
@@ -180,6 +235,12 @@ void FSerializedPropertyScope::PopProperty()
 	{
 		Ar.PopSerializedProperty(Property, Property->IsEditorOnlyProperty());
 	}
+}
+
+const TMap<UObject*, TArray<FProperty*>>& FArchiveReplaceObjectRefBase::GetReplacedReferences() const
+{ 
+	ensure(bTrackReplacedReferences);
+	return ReplacedReferences; 
 }
 
 void FArchiveReplaceObjectRefBase::SerializeObject(UObject* ObjectToSerialize)

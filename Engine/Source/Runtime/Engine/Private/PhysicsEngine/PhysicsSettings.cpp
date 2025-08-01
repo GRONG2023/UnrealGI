@@ -3,22 +3,26 @@
 #include "PhysicsEngine/PhysicsSettings.h"
 #include "GameFramework/MovementComponent.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
-#include "UObject/Package.h"
+#include "PhysicsCoreTypes.h"
+#include "PhysicsEngine/BodySetup.h"
+#include "UObject/UObjectIterator.h"
 
-#include "Framework/Threading.h"
 
-#include "ChaosSolversModule.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PhysicsSettings)
 
 UPhysicsSettings::UPhysicsSettings(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 	, LockedAxis_DEPRECATED(ESettingsLockedAxis::Invalid)
 	, bSuppressFaceRemapTable(false)
 	, bDisableActiveActors(false)
-	, bEnableEnhancedDeterminism(false)
 	, AnimPhysicsMinDeltaTime(0.f)
 	, bSimulateAnimPhysicsAfterReset(false)
+	, MinPhysicsDeltaTime(UE_SMALL_NUMBER)
 	, MaxPhysicsDeltaTime(1.f / 30.f)
 	, bSubstepping(false)
+	, bTickPhysicsAsync(false)
+	, AsyncFixedTimeStepSize(1.f / 30.f)
 	, MaxSubstepDeltaTime(1.f / 60.f)
 	, MaxSubsteps(6)
 	, SyncSceneSmoothingFactor(0.0f)
@@ -111,6 +115,20 @@ void UPhysicsSettings::PostEditChangeProperty(struct FPropertyChangedEvent& Prop
 	{
 		ChaosSettings.OnSettingsUpdated();
 	}
+
+	if(PropertyChangedEvent.GetPropertyName() == GET_MEMBER_NAME_CHECKED(UPhysicsSettingsCore, DefaultShapeComplexity))
+	{
+		for(TObjectIterator<UBodySetup> It; It; ++It)
+		{
+			UBodySetup* Setup = *It;
+			check(Setup);
+
+			if(Setup->bCreatedPhysicsMeshes)
+			{
+				Setup->InvalidatePhysicsData();
+			}
+		}
+	}
 }
 
 void UPhysicsSettings::LoadSurfaceType()
@@ -161,3 +179,4 @@ void FChaosPhysicsSettings::OnSettingsUpdated()
 {
 
 }
+

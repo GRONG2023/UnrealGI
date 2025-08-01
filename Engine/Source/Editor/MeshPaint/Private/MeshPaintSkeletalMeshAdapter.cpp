@@ -2,13 +2,16 @@
 
 #include "MeshPaintSkeletalMeshAdapter.h"
 #include "Engine/SkeletalMesh.h"
+#include "Engine/SkinnedAssetCommon.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "MeshPaintHelpers.h"
 #include "MeshPaintTypes.h"
 #include "ComponentReregisterContext.h"
+#include "StaticMeshAttributes.h"
 #include "Rendering/SkeletalMeshRenderData.h"
 #include "Rendering/SkeletalMeshModel.h"
 #include "Factories/FbxSkeletalMeshImportData.h"
+#include "Rendering/RenderCommandPipes.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogMeshPaintSkeletalMeshAdapter, Log, All);
 
@@ -23,23 +26,23 @@ void PropagateVertexPaintToAsset(USkeletalMesh* SkeletalMesh, int32 LODIndex)
 {
 	struct FMatchFaceData
 	{
-		int32 SoftVerticeIndexes[3];
+		int32 SoftVertexIndexes[3];
 	};
 
-	if (!SkeletalMesh || SkeletalMesh->IsLODImportedDataEmpty(LODIndex) || !SkeletalMesh->IsLODImportedDataBuildAvailable(LODIndex))
+	if (!SkeletalMesh || !SkeletalMesh->HasMeshDescription(LODIndex))
 	{
-		//We do not propagate vertex color for old asset
+		// We do not propagate vertex color for LODs that don't have editable mesh data.
 		return;
 	}
 
-	auto GetMatchKey = [](const FVector& PositionA, const FVector& PositionB, const FVector& PositionC)->FSHAHash
+	auto GetMatchKey = [](const FVector3f& PositionA, const FVector3f& PositionB, const FVector3f& PositionC)->FSHAHash
 	{
 		FSHA1 SHA;
 		FSHAHash SHAHash;
 
-		SHA.Update((const uint8*)&PositionA, sizeof(FVector));
-		SHA.Update((const uint8*)&PositionB, sizeof(FVector));
-		SHA.Update((const uint8*)&PositionC, sizeof(FVector));
+		SHA.Update(reinterpret_cast<const uint8*>(&PositionA), sizeof(FVector3f));
+		SHA.Update(reinterpret_cast<const uint8*>(&PositionB), sizeof(FVector3f));
+		SHA.Update(reinterpret_cast<const uint8*>(&PositionC), sizeof(FVector3f));
 		SHA.Final();
 		SHA.GetHash(&SHAHash.Hash[0]);
 
@@ -51,55 +54,60 @@ void PropagateVertexPaintToAsset(USkeletalMesh* SkeletalMesh, int32 LODIndex)
 
 	TArray<FSoftSkinVertex> SrcVertices;
 	LODModel.GetVertices(SrcVertices);
-	
-	FSkeletalMeshImportData ImportData;
-	SkeletalMesh->LoadLODImportedData(LODIndex, ImportData);
+
+	FMeshDescription* MeshDescription = SkeletalMesh->GetMeshDescription(LODIndex);
 
 	TMap<FSHAHash, FMatchFaceData> MatchTriangles;
-	MatchTriangles.Reserve(ImportData.Wedges.Num());
+	MatchTriangles.Reserve(MeshDescription->Triangles().Num());
 
 	for (int32 IndexBufferIndex = 0, SrcIndexBufferNum = SrcIndexBuffer.Num(); IndexBufferIndex < SrcIndexBufferNum; IndexBufferIndex += 3)
 	{
-		FVector PositionA = SrcVertices[SrcIndexBuffer[IndexBufferIndex]].Position;
-		FVector PositionB = SrcVertices[SrcIndexBuffer[IndexBufferIndex + 1]].Position;
-		FVector PositionC = SrcVertices[SrcIndexBuffer[IndexBufferIndex + 2]].Position;
+		const FVector3f& PositionA = SrcVertices[SrcIndexBuffer[IndexBufferIndex]].Position;
+		const FVector3f& PositionB = SrcVertices[SrcIndexBuffer[IndexBufferIndex + 1]].Position;
+		const FVector3f& PositionC = SrcVertices[SrcIndexBuffer[IndexBufferIndex + 2]].Position;
 
 		FSHAHash Key = GetMatchKey(PositionA, PositionB, PositionC);
 		FMatchFaceData MatchFaceData;
-		MatchFaceData.SoftVerticeIndexes[0] = SrcIndexBuffer[IndexBufferIndex];
-		MatchFaceData.SoftVerticeIndexes[1] = SrcIndexBuffer[IndexBufferIndex + 1];
-		MatchFaceData.SoftVerticeIndexes[2] = SrcIndexBuffer[IndexBufferIndex + 2];
+		MatchFaceData.SoftVertexIndexes[0] = SrcIndexBuffer[IndexBufferIndex];
+		MatchFaceData.SoftVertexIndexes[1] = SrcIndexBuffer[IndexBufferIndex + 1];
+		MatchFaceData.SoftVertexIndexes[2] = SrcIndexBuffer[IndexBufferIndex + 2];
 		MatchTriangles.Add(Key, MatchFaceData);
 	}
 
+	FStaticMeshAttributes MeshAttributes(*MeshDescription);
+	TVertexInstanceAttributesRef<FVector4f> ColorAttribute = MeshAttributes.GetVertexInstanceColors();
+
 	bool bAllVertexFound = true;
-	for (int32 FaceIndex = 0, FaceNum = ImportData.Faces.Num(); FaceIndex < FaceNum; ++FaceIndex)
+	for (const FTriangleID TriangleID: MeshDescription->Triangles().GetElementIDs())
 	{
-		const SkeletalMeshImportData::FTriangle& Triangle = ImportData.Faces[FaceIndex];
-		SkeletalMeshImportData::FVertex& WedgeA = ImportData.Wedges[Triangle.WedgeIndex[0]];
-		SkeletalMeshImportData::FVertex& WedgeB = ImportData.Wedges[Triangle.WedgeIndex[1]];
-		SkeletalMeshImportData::FVertex& WedgeC = ImportData.Wedges[Triangle.WedgeIndex[2]];
-		FVector PositionA = ImportData.Points[WedgeA.VertexIndex];
-		FVector PositionB = ImportData.Points[WedgeB.VertexIndex];
-		FVector PositionC = ImportData.Points[WedgeC.VertexIndex];
+		TArrayView<const FVertexID> TriangleVertexIDs = MeshDescription->GetTriangleVertices(TriangleID);
+
+		FVector3f PositionA = MeshDescription->GetVertexPosition(TriangleVertexIDs[0]);
+		FVector3f PositionB = MeshDescription->GetVertexPosition(TriangleVertexIDs[1]);
+		FVector3f PositionC = MeshDescription->GetVertexPosition(TriangleVertexIDs[2]);
 
 		const FSHAHash Key = GetMatchKey(PositionA, PositionB, PositionC);
-		if (FMatchFaceData* MatchFaceData = MatchTriangles.Find(Key))
+		if (const FMatchFaceData* MatchFaceData = MatchTriangles.Find(Key))
 		{
-			WedgeA.Color = SrcVertices[MatchFaceData->SoftVerticeIndexes[0]].Color;
-			WedgeB.Color = SrcVertices[MatchFaceData->SoftVerticeIndexes[1]].Color;
-			WedgeC.Color = SrcVertices[MatchFaceData->SoftVerticeIndexes[2]].Color;
+			TArrayView<const FVertexInstanceID> TriangleVertexIndexIDs = MeshDescription->GetTriangleVertexInstances(TriangleID);
+
+			for (int32 Index = 0; Index < 3; Index++)
+			{
+				FLinearColor Color(SrcVertices[MatchFaceData->SoftVertexIndexes[Index]].Color.ReinterpretAsLinear());
+				ColorAttribute.Set(TriangleVertexIndexIDs[Index], Color);
+			}
 		}
-		else if(bAllVertexFound)
+		else if (bAllVertexFound)
 		{
 			bAllVertexFound = false;
 			FString SkeletalMeshName(SkeletalMesh->GetName());
 			UE_LOG(LogMeshPaintSkeletalMeshAdapter, Warning, TEXT("Some vertex color data could not be applied to the %s SkeletalMesh asset."), *SkeletalMeshName);
 		}
 	}
-		
-	SkeletalMesh->SaveLODImportedData(LODIndex, ImportData);
+	
+	SkeletalMesh->CommitMeshDescription(LODIndex);
 }
+
 
 bool FMeshPaintGeometryAdapterForSkeletalMeshes::Construct(UMeshComponent* InComponent, int32 InMeshLODIndex)
 {
@@ -108,9 +116,9 @@ bool FMeshPaintGeometryAdapterForSkeletalMeshes::Construct(UMeshComponent* InCom
 	{
 		SkeletalMeshChangedHandle = SkeletalMeshComponent->RegisterOnSkeletalMeshPropertyChanged(USkeletalMeshComponent::FOnSkeletalMeshPropertyChanged::CreateRaw(this, &FMeshPaintGeometryAdapterForSkeletalMeshes::OnSkeletalMeshChanged));
 
-		if (SkeletalMeshComponent->SkeletalMesh != nullptr)
+		if (SkeletalMeshComponent->GetSkeletalMeshAsset() != nullptr)
 		{
-			ReferencedSkeletalMesh = SkeletalMeshComponent->SkeletalMesh;
+			ReferencedSkeletalMesh = SkeletalMeshComponent->GetSkeletalMeshAsset();
 			MeshLODIndex = InMeshLODIndex;
 			const bool bSuccess = Initialize();
 			return bSuccess;
@@ -131,8 +139,8 @@ FMeshPaintGeometryAdapterForSkeletalMeshes::~FMeshPaintGeometryAdapterForSkeleta
 void FMeshPaintGeometryAdapterForSkeletalMeshes::OnSkeletalMeshChanged()
 {
 	OnRemoved();
-	ReferencedSkeletalMesh = SkeletalMeshComponent->SkeletalMesh;
-	if (SkeletalMeshComponent->SkeletalMesh != nullptr)
+	ReferencedSkeletalMesh = SkeletalMeshComponent->GetSkeletalMeshAsset();
+	if (SkeletalMeshComponent->GetSkeletalMeshAsset() != nullptr)
 	{	
 		Initialize();
 		OnAdded();
@@ -149,7 +157,7 @@ void FMeshPaintGeometryAdapterForSkeletalMeshes::OnPostMeshCached(USkeletalMesh*
 
 bool FMeshPaintGeometryAdapterForSkeletalMeshes::Initialize()
 {
-	check(ReferencedSkeletalMesh == SkeletalMeshComponent->SkeletalMesh);
+	check(ReferencedSkeletalMesh == SkeletalMeshComponent->GetSkeletalMeshAsset());
 
 	bool bInitializationResult = false;
 
@@ -175,8 +183,8 @@ bool FMeshPaintGeometryAdapterForSkeletalMeshes::InitializeVertexData()
 	MeshVertices.AddDefaulted(NumVertices);
 	for (int32 Index = 0; Index < NumVertices; Index++)
 	{
-		const FVector& Position = LODData->StaticVertexBuffers.PositionVertexBuffer.VertexPosition(Index);
-		MeshVertices[Index] = Position;
+		const FVector3f& Position = LODData->StaticVertexBuffers.PositionVertexBuffer.VertexPosition(Index);
+		MeshVertices[Index] = (FVector)Position;
 	}
 
 	MeshIndices.Reserve(LODData->MultiSizeIndexContainer.GetIndexBuffer()->Num());
@@ -197,7 +205,7 @@ void FMeshPaintGeometryAdapterForSkeletalMeshes::InitializeAdapterGlobals()
 
 void FMeshPaintGeometryAdapterForSkeletalMeshes::CleanupGlobals()
 {
-	for (TPair<USkeletalMesh*, FSkeletalMeshReferencers>& Pair : MeshToComponentMap)
+	for (auto& Pair : MeshToComponentMap)
 	{
 		if (Pair.Key && Pair.Value.RestoreBodySetup)
 		{
@@ -212,12 +220,12 @@ void FMeshPaintGeometryAdapterForSkeletalMeshes::OnAdded()
 {
 	checkf(SkeletalMeshComponent, TEXT("Invalid SkeletalMesh Component"));
 	checkf(ReferencedSkeletalMesh, TEXT("Invalid reference to Skeletal Mesh"));
-	checkf(ReferencedSkeletalMesh == SkeletalMeshComponent->SkeletalMesh, TEXT("Referenced Skeletal Mesh does not match one in Component"));
+	checkf(ReferencedSkeletalMesh == SkeletalMeshComponent->GetSkeletalMeshAsset(), TEXT("Referenced Skeletal Mesh does not match one in Component"));
 
 	FSkeletalMeshReferencers& SkeletalMeshReferencers = MeshToComponentMap.FindOrAdd(ReferencedSkeletalMesh);
 
 	checkf(!SkeletalMeshReferencers.Referencers.ContainsByPredicate(
-		[=](const FSkeletalMeshReferencers::FReferencersInfo& Info)
+		[this](const FSkeletalMeshReferencers::FReferencersInfo& Info)
 		{
 			return Info.SkeletalMeshComponent == this->SkeletalMeshComponent;
 		}), TEXT("This Skeletal Mesh Component has already been Added"));
@@ -285,7 +293,7 @@ void FMeshPaintGeometryAdapterForSkeletalMeshes::OnRemoved()
 	checkf(SkeletalMeshReferencers->Referencers.Num() > 0, TEXT("Skeletal Mesh does not have any referencers"));
 
 	const int32 Index = SkeletalMeshReferencers->Referencers.IndexOfByPredicate(
-		[=](const FSkeletalMeshReferencers::FReferencersInfo& Info)
+		[this](const FSkeletalMeshReferencers::FReferencersInfo& Info)
 		{
 			return Info.SkeletalMeshComponent == this->SkeletalMeshComponent;
 		}
@@ -407,7 +415,7 @@ void FMeshPaintGeometryAdapterForSkeletalMeshes::ApplyOrRemoveTextureOverride(UT
 
 void FMeshPaintGeometryAdapterForSkeletalMeshes::AddReferencedObjectsGlobals(FReferenceCollector& Collector)
 {
-	for (TPair<USkeletalMesh*, FSkeletalMeshReferencers>& Pair : MeshToComponentMap)
+	for (auto& Pair : MeshToComponentMap)
 	{
 		Collector.AddReferencedObject(Pair.Key);
 		Collector.AddReferencedObject(Pair.Value.RestoreBodySetup);
@@ -426,7 +434,7 @@ void FMeshPaintGeometryAdapterForSkeletalMeshes::AddReferencedObjects(FReference
 
 void FMeshPaintGeometryAdapterForSkeletalMeshes::GetTextureCoordinate(int32 VertexIndex, int32 ChannelIndex, FVector2D& OutTextureCoordinate) const
 {
-	OutTextureCoordinate = LODData->StaticVertexBuffers.StaticMeshVertexBuffer.GetVertexUV(VertexIndex, ChannelIndex);
+	OutTextureCoordinate = FVector2D(LODData->StaticVertexBuffers.StaticMeshVertexBuffer.GetVertexUV(VertexIndex, ChannelIndex));
 }
 
 void FMeshPaintGeometryAdapterForSkeletalMeshes::PreEdit()
@@ -454,7 +462,7 @@ void FMeshPaintGeometryAdapterForSkeletalMeshes::PreEdit()
 		LODData->StaticVertexBuffers.ColorVertexBuffer.InitFromSingleColor(FColor(255, 255, 255, 255), LODData->GetNumVertices());
 		ReferencedSkeletalMesh->SetHasVertexColors(true);
 		ReferencedSkeletalMesh->SetVertexColorGuid(FGuid::NewGuid());
-		BeginInitResource(&LODData->StaticVertexBuffers.ColorVertexBuffer);
+		BeginInitResource(&LODData->StaticVertexBuffers.ColorVertexBuffer, &UE::RenderCommandPipe::SkeletalMesh);
 	}
 	//Make sure we change the import data so the re-import do not replace the new data
 	if (ReferencedSkeletalMesh->GetAssetImportData())
@@ -473,6 +481,7 @@ void FMeshPaintGeometryAdapterForSkeletalMeshes::PostEdit()
 {
 	TUniquePtr< FSkinnedMeshComponentRecreateRenderStateContext > RecreateRenderStateContext = MakeUnique<FSkinnedMeshComponentRecreateRenderStateContext>(ReferencedSkeletalMesh);
 	ReferencedSkeletalMesh->InitResources();
+	ReferencedSkeletalMesh->GetOnMeshChanged().Broadcast();
 }
 
 void FMeshPaintGeometryAdapterForSkeletalMeshes::GetVertexColor(int32 VertexIndex, FColor& OutColor, bool bInstance /*= true*/) const
@@ -514,7 +523,7 @@ TSharedPtr<IMeshPaintGeometryAdapter> FMeshPaintGeometryAdapterForSkeletalMeshes
 {
 	if (USkeletalMeshComponent* SkeletalMeshComponent = Cast<USkeletalMeshComponent>(InComponent))
 	{
-		if (SkeletalMeshComponent->SkeletalMesh != nullptr)
+		if (SkeletalMeshComponent->GetSkeletalMeshAsset() != nullptr)
 		{
 			TSharedRef<FMeshPaintGeometryAdapterForSkeletalMeshes> Result = MakeShareable(new FMeshPaintGeometryAdapterForSkeletalMeshes());
 			if (Result->Construct(InComponent, InMeshLODIndex))

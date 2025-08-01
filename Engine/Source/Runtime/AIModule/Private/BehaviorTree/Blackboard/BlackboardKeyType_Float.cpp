@@ -2,6 +2,8 @@
 
 #include "BehaviorTree/Blackboard/BlackboardKeyType_Float.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BlackboardKeyType_Float)
+
 const UBlackboardKeyType_Float::FDataType UBlackboardKeyType_Float::InvalidValue = UBlackboardKeyType_Float::FDataType(0);
 
 UBlackboardKeyType_Float::UBlackboardKeyType_Float(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
@@ -31,6 +33,11 @@ EBlackboardCompare::Type UBlackboardKeyType_Float::CompareValues(const UBlackboa
 		EBlackboardCompare::Less;
 }
 
+void UBlackboardKeyType_Float::InitializeMemory(UBlackboardComponent& OwnerComp, uint8* MemoryBlock)
+{
+	SetValue(this, MemoryBlock, DefaultValue);
+}
+
 FString UBlackboardKeyType_Float::DescribeValue(const UBlackboardComponent& OwnerComp, const uint8* RawData) const
 {
 	return FString::Printf(TEXT("%f"), GetValue(this, RawData));
@@ -57,3 +64,4 @@ FString UBlackboardKeyType_Float::DescribeArithmeticParam(int32 IntValue, float 
 {
 	return FString::Printf(TEXT("%f"), FloatValue);
 }
+

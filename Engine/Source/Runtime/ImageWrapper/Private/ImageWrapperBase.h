@@ -48,6 +48,8 @@ public:
 	 * Compresses the data.
 	 *
 	 * @param Quality The compression quality.
+	 * 
+	 * returns void. call SetError() in your implementation if you fail.
 	 */
 	virtual void Compress(int32 Quality) = 0;
 
@@ -61,12 +63,22 @@ public:
 	 *
 	 * @param ErrorMessage The error message to set.
 	 */
-	virtual void SetError(const TCHAR* ErrorMessage);
+	void SetError(const TCHAR* ErrorMessage);
+	
+	/**
+	 * Gets last error message.
+	 */
+	const FString & GetLastError() const
+	{
+		return LastError;
+	}
 
 	/**  
 	 * Function to uncompress our data 
 	 *
 	 * @param InFormat How we want to manipulate the RGB data
+	 * 
+	 * returns void. call SetError() in your implementation if you fail.
 	 */
 	virtual void Uncompress(const ERGBFormat InFormat, int32 InBitDepth) = 0;
 
@@ -74,7 +86,7 @@ public:
 
 	//~ IImageWrapper interface
 
-	virtual const TArray64<uint8>& GetCompressed(int32 Quality = 0) override;
+	virtual TArray64<uint8> GetCompressed(int32 Quality = 0) override;
 
 	virtual int32 GetBitDepth() const override
 	{
@@ -86,56 +98,43 @@ public:
 		return Format;
 	}
 
-	virtual int32 GetHeight() const override
+	virtual int64 GetHeight() const override
 	{
 		return Height;
 	}
 
 	virtual bool GetRaw(const ERGBFormat InFormat, int32 InBitDepth, TArray64<uint8>& OutRawData) override;
 
-	virtual int32 GetWidth() const override
+	virtual int64 GetWidth() const override
 	{
 		return Width;
 	}
 
-	virtual int32 GetNumFrames() const override
-	{
-		return NumFrames;
-	}
-	
-	virtual int32 GetFramerate() const override
-	{
-		return Framerate;
-	}
-
 	virtual bool SetCompressed(const void* InCompressedData, int64 InCompressedSize) override;
-	virtual bool SetRaw(const void* InRawData, int64 InRawSize, const int32 InWidth, const int32 InHeight, const ERGBFormat InFormat, const int32 InBitDepth) override;
-	virtual bool SetAnimationInfo(int32 InNumFrames, int32 InFramerate) override;
+	virtual bool SetRaw(const void* InRawData, int64 InRawSize, const int32 InWidth, const int32 InHeight, const ERGBFormat InFormat, const int32 InBitDepth, const int32 InBytesPerRow = 0) override;
 
 protected:
+
+	int64 GetBytesPerPel() const { return GetRGBFormatBytesPerPel(Format,BitDepth); }
+	int64 GetBytesPerRow() const { return Width * GetBytesPerPel(); }
+
+	// For writers: after SetRaw(), call this to get an ImageView of the raw data that was set
+	//	can return false if the SetRaw does not map to an image format
+	//	pixels point at the RawData array
+	bool GetImageViewOfSetRawForCompress(FImageView & OutImage) const;
 
 	/** Arrays of compressed/raw data */
 	TArray64<uint8> RawData;
 	TArray64<uint8> CompressedData;
 
 	/** Format of the raw data */
-	ERGBFormat RawFormat;
-	int8 RawBitDepth;
-
-	/** Format of the image */
 	ERGBFormat Format;
-
-	/** Bit depth of the image */
-	int8 BitDepth;
+	int BitDepth;
 
 	/** Width/Height of the image data */
-	int32 Width;
-	int32 Height;
+	int64 Width;
+	int64 Height;
 	
-	/** Animation information */
-	int32 NumFrames;
-	int32 Framerate;
-
 	/** Last Error Message. */
 	FString LastError;
 };

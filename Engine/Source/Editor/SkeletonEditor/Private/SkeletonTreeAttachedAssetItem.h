@@ -6,7 +6,7 @@
 #include "Widgets/SWidget.h"
 #include "ISkeletonTreeItem.h"
 #include "SkeletonTreeItem.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 
 class USceneComponent;
 
@@ -19,7 +19,7 @@ public:
 
 	/** ISkeletonTreeItem interface */
 	virtual void GenerateWidgetForNameColumn(TSharedPtr< SHorizontalBox > Box, const TAttribute<FText>& FilterText, FIsSelected InIsSelected) override;
-	virtual TSharedRef< SWidget > GenerateWidgetForDataColumn(const FName& DataColumnName) override;
+	virtual TSharedRef< SWidget > GenerateWidgetForDataColumn(const FName& DataColumnName, FIsSelected InIsSelected) override;
 	virtual FName GetRowItemName() const { return Asset->GetFName(); }
 	virtual FName GetAttachName() const { return GetParentName(); }
 	virtual void OnItemDoubleClicked() override;

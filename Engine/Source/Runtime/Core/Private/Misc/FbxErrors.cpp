@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Misc/FbxErrors.h"
+
+#include "CoreTypes.h"
 	
 /** Generic */
 FLazyName FFbxErrors::Generic_ImportingNewObjectFailed(TEXT("Generic_ImportingNewObjectFailed"));
@@ -141,6 +143,8 @@ FLazyName FFbxErrors::SkeletalMesh_FillImportDataFailed(TEXT("SkeletalMesh_FillI
 
 FLazyName FFbxErrors::SkeletalMesh_InvalidPosition(TEXT("SkeletalMesh_InvalidPosition"));
 
+FLazyName FFbxErrors::SkeletalMesh_AttributeComponentCountMismatch(TEXT("SkeletalMesh_AttributeComponentCountMismatch"));
+
 /** Animation **/
 FLazyName FFbxErrors::Animation_CouldNotFindRootTrack(TEXT("Animation_CouldNotFindRootTrack"));
 
@@ -166,10 +170,11 @@ FLazyName FFbxErrors::Animation_CurveNotFound(TEXT("Animation_CurveNotFound"));
 
 namespace
 {
-	constexpr TCHAR FbxErrorsPath[] = TEXT("Shared/Editor/FbxErrors");
+	const TCHAR* FbxErrorsURLPath = TEXT("WorkingWithContent/Importing/FBX/FbxErrors/");
+	const TCHAR* FbxErrorsLocalPath = TEXT("Shared/Editor/FbxErrors");
 }
 
 FFbxErrorToken::FFbxErrorToken(const FName& InErrorName)
-	: FDocumentationToken(FbxErrorsPath, FbxErrorsPath, InErrorName.ToString())
+	: FDocumentationToken(FbxErrorsURLPath, FbxErrorsLocalPath, InErrorName.ToString())
 {
 }

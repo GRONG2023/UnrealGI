@@ -3,7 +3,9 @@
 #pragma once
 
 #include "CoreTypes.h"
+#include "Misc/OutputDevice.h"
 #include "HAL/CriticalSection.h"
+#include "HAL/PlatformMemory.h"
 
 struct FCachedOSPageAllocator
 {
@@ -21,8 +23,13 @@ protected:
 	};
 
 	void* AllocateImpl(SIZE_T Size, uint32 CachedByteLimit, FFreePageBlock* First, FFreePageBlock* Last, uint32& FreedPageBlocksNum, SIZE_T& CachedTotal, FCriticalSection* Mutex);
-	void FreeImpl(void* Ptr, SIZE_T Size, uint32 NumCacheBlocks, uint32 CachedByteLimit, FFreePageBlock* First, uint32& FreedPageBlocksNum, SIZE_T& CachedTotal, FCriticalSection* Mutex);
+	void FreeImpl(void* Ptr, SIZE_T Size, uint32 NumCacheBlocks, uint32 CachedByteLimit, FFreePageBlock* First, uint32& FreedPageBlocksNum, SIZE_T& CachedTotal, FCriticalSection* Mutex, bool ThreadIsTimeCritical);
 	void FreeAllImpl(FFreePageBlock* First, uint32& FreedPageBlocksNum, SIZE_T& CachedTotal, FCriticalSection* Mutex);
+
+	static bool IsOSAllocation(SIZE_T Size, uint32 CachedByteLimit)
+	{
+		return (FPlatformMemory::BinnedPlatformHasMemoryPoolForThisSize(Size) || Size > CachedByteLimit / 4);
+	}
 };
 
 template <uint32 NumCacheBlocks, uint32 CachedByteLimit>
@@ -39,22 +46,40 @@ struct TCachedOSPageAllocator : private FCachedOSPageAllocator
 		return AllocateImpl(Size, CachedByteLimit, FreedPageBlocks, FreedPageBlocks + FreedPageBlocksNum, FreedPageBlocksNum, CachedTotal, Mutex);
 	}
 
-	void Free(void* Ptr, SIZE_T Size, FCriticalSection* Mutex = nullptr)
+	void Free(void* Ptr, SIZE_T Size, FCriticalSection* Mutex = nullptr, bool ThreadIsTimeCritical = false)
 	{
-		return FreeImpl(Ptr, Size, NumCacheBlocks, CachedByteLimit, FreedPageBlocks, FreedPageBlocksNum, CachedTotal, Mutex);
+		return FreeImpl(Ptr, Size, ThreadIsTimeCritical ? NumCacheBlocks*2 : NumCacheBlocks, CachedByteLimit, FreedPageBlocks, FreedPageBlocksNum, CachedTotal, Mutex, ThreadIsTimeCritical);
 	}
 	void FreeAll(FCriticalSection* Mutex = nullptr)
 	{
 		return FreeAllImpl(FreedPageBlocks, FreedPageBlocksNum, CachedTotal, Mutex);
 	}
+	// Refresh cached os allocator if needed. Does nothing for this implementation
+	void Refresh()
+	{
 
+	}
+	void UpdateStats()
+	{
+
+	}
 	uint64 GetCachedFreeTotal()
 	{
 		return CachedTotal;
 	}
 
+	bool IsOSAllocation(SIZE_T Size)
+	{
+		return FCachedOSPageAllocator::IsOSAllocation(Size, CachedByteLimit);
+	}
+
+	void DumpAllocatorStats(class FOutputDevice& Ar)
+	{
+		Ar.Logf(TEXT("CachedOSPageAllocator = %fkb"), (double)GetCachedFreeTotal() / 1024.0);
+	}
+
 private:
-	FFreePageBlock FreedPageBlocks[NumCacheBlocks];
+	FFreePageBlock FreedPageBlocks[NumCacheBlocks*2];
 	SIZE_T         CachedTotal;
 	uint32         FreedPageBlocksNum;
 };

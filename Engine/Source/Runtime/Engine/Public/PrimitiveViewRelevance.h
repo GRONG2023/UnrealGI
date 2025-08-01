@@ -54,6 +54,8 @@ struct FPrimitiveViewRelevance : public FMaterialRelevance
 	uint32 bRenderInMainPass : 1;
 	/** The primitive is drawn only in the editor and composited onto the scene after post processing */
 	uint32 bEditorPrimitiveRelevance : 1;
+	/** The primitive's elements belong to a LevelInstance which is being edited and rendered again in the visualize LevelInstance pass */
+	uint32 bEditorVisualizeLevelInstanceRelevance : 1;
 	/** The primitive's static elements are selected and rendered again in the selection outline pass*/
 	uint32 bEditorStaticSelectionRelevance : 1;
 	/** The primitive is drawn only in the editor and composited onto the scene after post processing using no depth testing */
@@ -64,6 +66,8 @@ struct FPrimitiveViewRelevance : public FMaterialRelevance
 	uint32 bUsesLightingChannels : 1;
 	/** Whether the primitive has materials that use volumetric translucent self shadow. */
 	uint32 bTranslucentSelfShadow : 1;
+	/** Whether the primitive should be rendered in the second stage depth only pass. */
+	uint32 bRenderInSecondStageDepthPass : 1;
 
 	/** 
 	 * Whether this primitive view relevance has been initialized this frame.  
@@ -74,7 +78,7 @@ struct FPrimitiveViewRelevance : public FMaterialRelevance
 
 	bool HasTranslucency() const 
 	{
-		return bSeparateTranslucency || bNormalTranslucency || bSeparateTranslucencyModulate;
+		return bNormalTranslucency || bSeparateTranslucency || bTranslucencyModulate || bPostMotionBlurTranslucency;
 	}
 
 	bool HasVelocity() const

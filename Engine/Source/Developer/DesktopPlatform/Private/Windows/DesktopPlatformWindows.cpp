@@ -117,7 +117,7 @@ bool FDesktopPlatformWindows::OpenFontDialog(const void* ParentWindowHandle, FSt
 	{
 		HDC DC = ::GetDC( cf.hwndOwner ); 
 		const float LogicalPixelsY = static_cast<float>(GetDeviceCaps(DC, LOGPIXELSY));
-		const int32 PixelHeight = static_cast<int32>(-lf.lfHeight * ( 72.0f / LogicalPixelsY ));	// Always target 72 DPI
+		const int32 PixelHeight = static_cast<int32>((float) - lf.lfHeight * (72.0f / LogicalPixelsY));	// Always target 72 DPI
 		auto FontFlags = EFontImportFlags::None;
 		if ( lf.lfUnderline )
 		{
@@ -133,7 +133,7 @@ bool FDesktopPlatformWindows::OpenFontDialog(const void* ParentWindowHandle, FSt
 		}
 
 		OutFontName = (const TCHAR*)lf.lfFaceName;
-		OutHeight = PixelHeight;
+		OutHeight = (float)PixelHeight;
 		OutFlags = FontFlags;
 
 		::ReleaseDC( cf.hwndOwner, DC ); 
@@ -257,7 +257,7 @@ bool FDesktopPlatformWindows::FileDialogShared(bool bSave, const void* ParentWin
 								int32 WildCardIndex = INDEX_NONE;
 								if (CleanExtension.FindChar(TEXT('*'), WildCardIndex))
 								{
-									CleanExtension.RightChopInline(WildCardIndex + 1, false);
+									CleanExtension.RightChopInline(WildCardIndex + 1, EAllowShrinking::No);
 								}
 							}
 
@@ -361,7 +361,7 @@ void FDesktopPlatformWindows::EnumerateEngineInstallations(TMap<FString, FString
 				int32 ValueDataLength = ValueDataSize / sizeof(TCHAR);
 				if(ValueDataLength > 0 && ValueData[ValueDataLength - 1] == 0) ValueDataLength--;
 
-				FString NormalizedInstalledDirectory(ValueDataLength, ValueData);
+				FString NormalizedInstalledDirectory = FString::ConstructFromPtrSize(ValueData, ValueDataLength);
 				FPaths::NormalizeDirectoryName(NormalizedInstalledDirectory);
 				FPaths::CollapseRelativeDirectories(NormalizedInstalledDirectory);
 
@@ -382,7 +382,7 @@ void FDesktopPlatformWindows::EnumerateEngineInstallations(TMap<FString, FString
 		}
 
 		// Remove all the keys which weren't valid
-		for(const FString& InvalidKey: InvalidKeys)
+		for(const FString &InvalidKey: InvalidKeys)
 		{
 			RegDeleteValue(hKey, *InvalidKey);
 		}
@@ -463,7 +463,7 @@ bool FDesktopPlatformWindows::RunUnrealBuildTool(const FText& Description, const
 	OutExitCode = 1;
 
 	// Get the path to UBT
-	FString UnrealBuildToolPath = RootDir / TEXT("Engine/Binaries/DotNET/UnrealBuildTool.exe");
+	FString UnrealBuildToolPath = GetUnrealBuildToolExecutableFilename(RootDir);
 	if(IFileManager::Get().FileSize(*UnrealBuildToolPath) < 0)
 	{
 		Warn->Logf(ELogVerbosity::Error, TEXT("Couldn't find UnrealBuildTool at '%s'"), *UnrealBuildToolPath);
@@ -475,34 +475,6 @@ bool FDesktopPlatformWindows::RunUnrealBuildTool(const FText& Description, const
 
 	// Spawn UBT
 	return FFeedbackContextMarkup::PipeProcessOutput(Description, UnrealBuildToolPath, Arguments, Warn, &OutExitCode) && OutExitCode == 0;
-}
-
-bool FDesktopPlatformWindows::IsUnrealBuildToolRunning()
-{
-	FString UBTPath = GetUnrealBuildToolExecutableFilename(FPaths::RootDir());
-	FPaths::MakePlatformFilename(UBTPath);
-
-	HANDLE SnapShot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-	if (SnapShot != INVALID_HANDLE_VALUE)
-	{
-		PROCESSENTRY32 Entry;
-		Entry.dwSize = sizeof(PROCESSENTRY32);
-
-		if (::Process32First(SnapShot, &Entry))
-		{
-			do
-			{
-				const FString EntryFullPath = FPlatformProcess::GetApplicationName(Entry.th32ProcessID);
-				if (EntryFullPath == UBTPath)
-				{
-					::CloseHandle(SnapShot);
-					return true;
-				}
-			} while (::Process32Next(SnapShot, &Entry));
-		}
-	}
-	::CloseHandle(SnapShot);
-	return false;
 }
 
 FFeedbackContext* FDesktopPlatformWindows::GetNativeFeedbackContext()
@@ -633,6 +605,11 @@ int32 FDesktopPlatformWindows::GetShellIntegrationVersion(const FString &FileNam
 		}
 	}
 	return 0;
+}
+
+FString FDesktopPlatformWindows::GetOidcTokenExecutableFilename(const FString& RootDir) const
+{
+	return FPaths::ConvertRelativePathToFull(RootDir / TEXT("Engine/Binaries/DotNET/OidcToken/win-x64/OidcToken.exe"));
 }
 
 #undef LOCTEXT_NAMESPACE

@@ -7,12 +7,15 @@
 #include "IOSMessageProtocol.h"
 #include "MessageEndpoint.h"
 #include "MessageEndpointBuilder.h"
+#include <UIKit/UIDevice.h>
 
 #import <TargetConditionals.h>
 
 
 void FGameLaunchDaemonMessageHandler::Init()
 {
+    FModuleManager::Get().LoadModuleChecked(TEXT("LaunchDaemonMessages"));
+    
 	MessageEndpoint = FMessageEndpoint::Builder("FGameLaunchDaemonMessageHandler")
 		.Handling<FIOSLaunchDaemonPing>(this, &FGameLaunchDaemonMessageHandler::HandlePingMessage)
 		.Handling<FIOSLaunchDaemonLaunchApp>(this, &FGameLaunchDaemonMessageHandler::HandleLaunchRequest);
@@ -39,13 +42,16 @@ void FGameLaunchDaemonMessageHandler::HandlePingMessage(const FIOSLaunchDaemonPi
 	{
 		FMessageAddress MessageSender = Context->GetSender();
 
-		MessageEndpoint->Send(new FIOSLaunchDaemonPong(FString(FPlatformProperties::PlatformName()) + (TARGET_IPHONE_SIMULATOR ? FString(TEXT("Simulator:")) : FString(TEXT("@"))) + FString(FPlatformProcess::ComputerName())
+		MessageEndpoint->Send(FMessageEndpoint::MakeMessage<FIOSLaunchDaemonPong>(FString(FPlatformProperties::PlatformName()) + (TARGET_IPHONE_SIMULATOR ? FString(TEXT("Simulator:")) : FString(TEXT("@"))) + FString(FPlatformProcess::ComputerName())
+			, FString(TEXT("udid"))
 			, FPlatformProcess::ComputerName()
 			, "Game_Running"
-			, UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPhone? "Phone" : "Tablet"
+			, [[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPhone? "Phone" : "Tablet"
+			, FString(TEXT("local"))
 			, false
 			, false
 			, false
+			, true
 			), MessageSender);
 	}
 }

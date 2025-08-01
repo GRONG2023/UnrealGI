@@ -2,23 +2,42 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
 #include "AddToProjectConfig.h"
-#include "Layout/Visibility.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Styling/SlateColor.h"
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
 #include "GameProjectUtils.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
 #include "Input/Reply.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/SCompoundWidget.h"
-#include "Widgets/Views/STableViewBase.h"
-#include "Widgets/Views/STableRow.h"
+#include "Internationalization/Text.h"
+#include "Layout/Visibility.h"
+#include "Misc/Optional.h"
+#include "Serialization/Archive.h"
+#include "Styling/SlateColor.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/SlateEnums.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Input/SComboBox.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/Views/SListView.h"
 
 class IClassViewerFilter;
-class SClassViewer;
+class ITableRow;
 class SEditableTextBox;
+class STableViewBase;
+class SWidget;
+class SWindow;
 class SWizard;
+class UClass;
+struct FGeometry;
+struct FKeyEvent;
+struct FModuleContextInfo;
 struct FParentClassItem;
 
 enum class EClassDomain : uint8 { Blueprint, Native };
@@ -103,11 +122,11 @@ private:
 	/** Handler for when a class was picked in the full class tree */
 	void OnAdvancedClassSelected(UClass* Class);
 
-	/** Gets the check box state for the full class list */
-	ECheckBoxState IsFullClassTreeChecked() const;
+	/** Gets the boolean for the full class list */
+	bool IsFullClassTreeShown() const;
 
-	/** Gets the check box state for the full class list */
-	void OnFullClassTreeChanged(ECheckBoxState NewCheckedState);
+	/** Sets the boolean for the full class list */
+	void OnFullClassTreeChanged(bool bInShowFullClassTree);
 
 	/** Gets the visibility of the basic class list */
 	EVisibility GetBasicParentClassVisibility() const;
@@ -184,10 +203,10 @@ private:
 	FSlateColor GetClassLocationTextColor(GameProjectUtils::EClassLocation InLocation) const;
 
 	/** Checks to see if the given class location is active based on the current value of NewClassPath */
-	ECheckBoxState IsClassLocationActive(GameProjectUtils::EClassLocation InLocation) const;
+	GameProjectUtils::EClassLocation IsClassLocationActive() const;
 
 	/** Update the value of NewClassPath so that it uses the given class location */
-	void OnClassLocationChanged(ECheckBoxState InCheckedState, GameProjectUtils::EClassLocation InLocation);
+	void OnClassLocationChanged(GameProjectUtils::EClassLocation InLocation);
 
 	/** Checks the current class name/path for validity and updates cached values accordingly */
 	void UpdateInputValidity();
@@ -279,4 +298,7 @@ private:
 
 	/** Event called when code is succesfully added to the project */
 	FOnAddedToProject OnAddedToProject;
+
+	/** Flag set when PathPicker selects a path*/
+	bool IsBlueprintPathSelected = false;
 };

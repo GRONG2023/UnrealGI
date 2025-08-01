@@ -3,6 +3,8 @@
 #include "Generators/MovieSceneEasingCurves.h"
 #include "Curves/CurveFloat.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneEasingCurves)
+
 float IMovieSceneEasingFunction::EvaluateWith(const TScriptInterface<IMovieSceneEasingFunction>& ScriptInterface, float Time)
 {
 	return ScriptInterface.GetInterface() ? ScriptInterface->Evaluate(Time) : Execute_OnEvaluate(ScriptInterface.GetObject(), Time);
@@ -68,9 +70,12 @@ float UMovieSceneBuiltInEasingFunction::Evaluate(float Interp) const
 	case EMovieSceneBuiltInEasing::QuadOut: 	return PowOut(Interp,2);
 	case EMovieSceneBuiltInEasing::QuadInOut: 	return InTime < 1.f ? .5f*PowIn(InTime,2) : .5f + .5f*PowOut(OutTime,2);
 
+	case EMovieSceneBuiltInEasing::Cubic: 		return FMath::Clamp<float>(FMath::CubicInterp<float>(0.f, 0.f, 1.f, 0.f, Interp), 0.f, 1.f);
 	case EMovieSceneBuiltInEasing::CubicIn: 	return PowIn(Interp,3);
 	case EMovieSceneBuiltInEasing::CubicOut: 	return PowOut(Interp,3);
 	case EMovieSceneBuiltInEasing::CubicInOut: 	return InTime < 1.f ? .5f*PowIn(InTime,3) : .5f + .5f*PowOut(OutTime,3);
+
+	case EMovieSceneBuiltInEasing::HermiteCubicInOut: return FMath::Clamp<float>(FMath::SmoothStep(0.0f, 1.0f, Interp), 0.0f, 1.0f);
 
 	case EMovieSceneBuiltInEasing::QuartIn: 	return PowIn(Interp,4);
 	case EMovieSceneBuiltInEasing::QuartOut: 	return PowOut(Interp,4);
@@ -98,3 +103,4 @@ float UMovieSceneEasingExternalCurve::Evaluate(float InTime) const
 {
 	return Curve ? Curve->GetFloatValue(InTime) : 0.f;
 }
+

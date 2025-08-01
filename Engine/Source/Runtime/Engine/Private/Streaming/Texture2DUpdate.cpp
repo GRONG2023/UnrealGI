@@ -5,8 +5,8 @@ Texture2DUpdate.cpp: Helpers to stream in and out mips.
 =============================================================================*/
 
 #include "Streaming/Texture2DUpdate.h"
-#include "RenderUtils.h"
 #include "Containers/ResourceArray.h"
+#include "Rendering/Texture2DResource.h"
 #include "Streaming/RenderAssetUpdate.inl"
 
 // Instantiate TRenderAssetUpdate for FTexture2DUpdateContext
@@ -23,7 +23,7 @@ FTexture2DUpdateContext::FTexture2DUpdateContext(const UTexture2D* InTexture, ET
 {
 	check(InTexture);
 	checkSlow(InCurrentThread != FTexture2DUpdate::TT_Render || IsInRenderingThread());
-	Resource = Texture && Texture->Resource ? Texture->Resource->GetTexture2DResource() : nullptr;
+	Resource = Texture && Texture->GetResource() ? const_cast<UTexture2D*>(Texture)->GetResource()->GetTexture2DResource() : nullptr;
 	if (Resource)
 	{
 		MipsView = Resource->GetPlatformMipsView();
@@ -37,7 +37,7 @@ FTexture2DUpdateContext::FTexture2DUpdateContext(const UStreamableRenderAsset* I
 FTexture2DUpdate::FTexture2DUpdate(UTexture2D* InTexture) 
 	: TRenderAssetUpdate<FTexture2DUpdateContext>(InTexture)
 {
-	if (!InTexture->Resource)
+	if (!InTexture->GetResource())
 	{
 		bIsCancelled = true;
 	}
@@ -94,18 +94,21 @@ void FTexture2DUpdate::DoConvertToVirtualWithNewMips(const FContext& Context)
 			ensure(!IntermediateTextureRHI);
 
 			// Create a copy of the texture that is a virtual texture.
-			FRHIResourceCreateInfo CreateInfo(Context.Resource->ResourceMem);
-			IntermediateTextureRHI = RHICreateTexture2D(
-				MipMap0.SizeX, 
-				MipMap0.SizeY, 
-				Context.Resource->GetPixelFormat(), 
-				ResourceState.MaxNumLODs, 
-				1, 
-				Context.Resource->GetCreationFlags() | TexCreate_Virtual, 
-				CreateInfo);
+			const FRHITextureCreateDesc Desc =
+				FRHITextureCreateDesc::Create2D(TEXT("FTexture2DUpdate"), MipMap0.SizeX, MipMap0.SizeY, Context.Resource->GetPixelFormat())
+				.SetNumMips(ResourceState.MaxNumLODs)
+				.SetFlags(Context.Resource->GetCreationFlags() | ETextureCreateFlags::Virtual)
+				.SetBulkData(Context.Resource->ResourceMem);
+
+			IntermediateTextureRHI = RHICreateTexture(Desc);
+
 			RHIVirtualTextureSetFirstMipInMemory(IntermediateTextureRHI, CurrentFirstLODIdx);
 			RHIVirtualTextureSetFirstMipVisible(IntermediateTextureRHI, CurrentFirstLODIdx);
-			RHICopySharedMips(IntermediateTextureRHI, Context.Resource->GetTexture2DRHI());
+
+			UE::RHI::CopySharedMips_AssumeSRVMaskState(
+				FRHICommandListExecutor::GetImmediateCommandList(),
+				Context.Resource->GetTexture2DRHI(),
+				IntermediateTextureRHI);
 		}
 		else
 		{
@@ -128,16 +131,19 @@ bool FTexture2DUpdate::DoConvertToNonVirtual(const FContext& Context)
 			const FTexture2DMipMap& PendingFirstMipMap = *Context.MipsView[PendingFirstLODIdx];
 
 			ensure(!IntermediateTextureRHI);
-			FRHIResourceCreateInfo CreateInfo(Context.Resource->ResourceMem);
-			IntermediateTextureRHI = RHICreateTexture2D(
-				PendingFirstMipMap.SizeX, 
-				PendingFirstMipMap.SizeY, 
-				Context.Resource->GetPixelFormat(), 
-				ResourceState.NumRequestedLODs,
-				1, 
-				Context.Resource->GetCreationFlags(), 
-				CreateInfo);
-			RHICopySharedMips(IntermediateTextureRHI, Context.Resource->GetTexture2DRHI());
+
+			const FRHITextureCreateDesc Desc =
+				FRHITextureCreateDesc::Create2D(TEXT("FTexture2DUpdate"), PendingFirstMipMap.SizeX, PendingFirstMipMap.SizeY, Context.Resource->GetPixelFormat())
+				.SetNumMips(ResourceState.NumRequestedLODs)
+				.SetFlags(Context.Resource->GetCreationFlags())
+				.SetBulkData(Context.Resource->ResourceMem);
+
+			IntermediateTextureRHI = RHICreateTexture(Desc);
+
+			UE::RHI::CopySharedMips_AssumeSRVMaskState(
+				FRHICommandListExecutor::GetImmediateCommandList(),
+				Context.Resource->GetTexture2DRHI(),
+				IntermediateTextureRHI);
 
 			return true;
 		}

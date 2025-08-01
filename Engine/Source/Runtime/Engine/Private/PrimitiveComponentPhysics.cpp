@@ -1,19 +1,18 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "CoreMinimal.h"
-#include "Stats/Stats.h"
-#include "Engine/EngineTypes.h"
-#include "CollisionQueryParams.h"
-#include "Engine/World.h"
 #include "Components/PrimitiveComponent.h"
 #include "AI/NavigationSystemBase.h"
-#include "Components/LineBatchComponent.h"
+#include "Collision/CollisionConversions.h"
+#include "Engine/OverlapResult.h"
+#include "EngineLogs.h"
 #include "Logging/MessageLog.h"
+#include "Physics/Experimental/PhysScene_Chaos.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "DrawDebugHelpers.h"
 #include "PhysicsReplication.h"
-#include "Physics/PhysicsInterfaceCore.h"
 #include "UObject/UObjectThreadContext.h"
+#include "PhysicsEngine/PhysicsObjectExternalInterface.h"
+#include "PhysicsProxy/SingleParticlePhysicsProxy.h"
 
 //////////////// PRIMITIVECOMPONENT ///////////////
 
@@ -30,19 +29,41 @@ DECLARE_CYCLE_STAT(TEXT("PrimComp SetCollisionProfileName"), STAT_PrimComp_SetCo
 	#define WarnInvalidPhysicsOperations(Text, BodyInstance, BoneName)
 #endif
 
-void UPrimitiveComponent::SetRigidBodyReplicatedTarget(FRigidBodyState& UpdatedState, FName BoneName)
+namespace PrimitiveComponentCVars
 {
+	bool bReplicatePhysicsObject = 1;
+	static FAutoConsoleVariableRef CVarReplicatePhysicsObject(
+		TEXT("p.PrimitiveComponent.ReplicatePhysicsObject"),
+		bReplicatePhysicsObject,
+		TEXT("When a primitive component has no BodyInstance, allow replication based on PhysicsObject\n"),
+		ECVF_Default);
+}
+
+void UPrimitiveComponent::SetRigidBodyReplicatedTarget(FRigidBodyState& UpdatedState, FName BoneName, int32 ServerFrame, int32 ServerHandle)
+{
+	if (!CanBeUsedInPhysicsReplication(BoneName))
+	{
+		return;
+	}
+
 	if (UWorld* World = GetWorld())
 	{
 		if (FPhysScene* PhysScene = World->GetPhysicsScene())
 		{
-			if (FPhysicsReplication* PhysicsReplication = PhysScene->GetPhysicsReplication())
+			if (IPhysicsReplication* PhysicsReplication = PhysScene->GetPhysicsReplication())
 			{
-				FBodyInstance* BI = GetBodyInstance(BoneName);
-				if (BI && BI->IsValidBodyInstance())
+				// If we are not allowed to replicate physics objects,
+				// don't set replicated target unless we have a BodyInstance.
+				if (PrimitiveComponentCVars::bReplicatePhysicsObject == false)
 				{
-					PhysicsReplication->SetReplicatedTarget(this, BoneName, UpdatedState);
+					FBodyInstance* BI = GetBodyInstance(BoneName);
+					if (BI == nullptr || !BI->IsValidBodyInstance())
+					{
+						return;
+					}
 				}
+				
+				PhysicsReplication->SetReplicatedTarget(this, BoneName, UpdatedState, ServerFrame);
 			}
 		}
 	}
@@ -50,10 +71,31 @@ void UPrimitiveComponent::SetRigidBodyReplicatedTarget(FRigidBodyState& UpdatedS
 
 bool UPrimitiveComponent::GetRigidBodyState(FRigidBodyState& OutState, FName BoneName)
 {
+	// If we have a BodyInstance, use it
+	//
+	// TODO: Remove this code path
 	FBodyInstance* BI = GetBodyInstance(BoneName);
 	if (BI)
 	{
 		return BI->GetRigidBodyState(OutState);
+	}
+
+	// If we don't, get data from the physics object.
+	//
+	// TODO: Add support for multiple physics objects
+	if (PrimitiveComponentCVars::bReplicatePhysicsObject)
+	{
+		if (Chaos::FPhysicsObject* PhysicsObject = GetPhysicsObjectByName(BoneName))
+		{
+			FLockedReadPhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockRead(PhysicsObject);
+			const FTransform Transform = Interface->GetTransform(PhysicsObject);
+			OutState.Position = Transform.GetLocation();
+			OutState.Quaternion = Transform.GetRotation();
+			OutState.LinVel = Interface->GetV(PhysicsObject);
+			OutState.AngVel = Interface->GetW(PhysicsObject);
+			OutState.Flags = (Interface->AreAllSleeping({ PhysicsObject }) ? ERigidBodyFlags::Sleeping : ERigidBodyFlags::None);
+			return true;
+		}
 	}
 
 	return false;
@@ -104,11 +146,20 @@ void UPrimitiveComponent::SetSimulatePhysics(bool bSimulate)
 	BodyInstance.SetInstanceSimulatePhysics(bSimulate);
 }
 
+void UPrimitiveComponent::SetStaticWhenNotMoveable(bool bInStaticWhenNotMoveable)
+{
+	if (bStaticWhenNotMoveable != bInStaticWhenNotMoveable)
+	{
+		bStaticWhenNotMoveable = bInStaticWhenNotMoveable;
+		RecreatePhysicsState();
+	}
+}
+
 void UPrimitiveComponent::SetConstraintMode(EDOFMode::Type ConstraintMode)
 {
 	FBodyInstance * RootBI = GetBodyInstance(NAME_None, false);
 
-	if (RootBI == NULL || IsPendingKill())
+	if (RootBI == NULL || !IsValid(this))
 	{
 		return;
 	}
@@ -123,6 +174,24 @@ void UPrimitiveComponent::AddImpulse(FVector Impulse, FName BoneName, bool bVelC
 		WarnInvalidPhysicsOperations(LOCTEXT("AddImpulse", "AddImpulse"), BI, BoneName);
 		BI->AddImpulse(Impulse, bVelChange);
 	}
+	else if (BoneName == NAME_None)
+	{
+		TArray<Chaos::FPhysicsObjectHandle> PhysicsObjects = GetAllPhysicsObjects();
+		FLockedWritePhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockWrite(PhysicsObjects);
+		
+		PhysicsObjects = PhysicsObjects.FilterByPredicate(
+			[&Interface](Chaos::FPhysicsObject* Object) {
+			return !Interface->AreAllDisabled({ &Object, 1 });
+		}
+		);
+		Interface->SetLinearImpulseVelocity(PhysicsObjects, Impulse, bVelChange);
+	}
+	else if (Chaos::FPhysicsObject* Object = GetPhysicsObjectByName(BoneName))
+	{
+		FLockedWritePhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockWrite({ &Object, 1 });
+		Interface->SetLinearImpulseVelocity({ &Object, 1 }, Impulse, bVelChange);
+	}
+
 }
 
 void UPrimitiveComponent::AddAngularImpulseInRadians(FVector Impulse, FName BoneName, bool bVelChange)
@@ -140,6 +209,15 @@ void UPrimitiveComponent::AddImpulseAtLocation(FVector Impulse, FVector Location
 	{
 		WarnInvalidPhysicsOperations(LOCTEXT("AddImpulseAtLocation", "AddImpulseAtLocation"), BI, BoneName);
 		BI->AddImpulseAtPosition(Impulse, Location);
+	}
+}
+
+void UPrimitiveComponent::AddVelocityChangeImpulseAtLocation(FVector Impulse, FVector Location, FName BoneName)
+{
+	if (FBodyInstance* BI = GetBodyInstance(BoneName))
+	{
+		WarnInvalidPhysicsOperations(LOCTEXT("AddImpulseAtLocation", "AddImpulseAtLocation"), BI, BoneName);
+		BI->AddVelocityChangeImpulseAtLocation(Impulse, Location);
 	}
 }
 
@@ -223,6 +301,11 @@ FVector UPrimitiveComponent::GetPhysicsLinearVelocity(FName BoneName)
 	{
 		return BI->GetUnrealWorldVelocity();
 	}
+	else if (Chaos::FConstPhysicsObjectHandle Handle = GetPhysicsObjectByName(BoneName))
+	{
+		FLockedReadPhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockRead(Handle);
+		return Interface->GetV(Handle);
+	}
 	return FVector(0,0,0);
 }
 
@@ -231,6 +314,11 @@ FVector UPrimitiveComponent::GetPhysicsLinearVelocityAtPoint(FVector Point, FNam
 	if (FBodyInstance* BI = GetBodyInstance(BoneName))
 	{
 		return BI->GetUnrealWorldVelocityAtPoint(Point);
+	}
+	else if (Chaos::FConstPhysicsObjectHandle Handle = GetPhysicsObjectByName(BoneName))
+	{
+		FLockedReadPhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockRead(Handle);
+		return Interface->GetVAtPoint(Handle, Point);
 	}
 	return FVector(0, 0, 0);
 }
@@ -260,10 +348,14 @@ void UPrimitiveComponent::SetPhysicsMaxAngularVelocityInRadians(float NewMaxAngV
 
 FVector UPrimitiveComponent::GetPhysicsAngularVelocityInRadians(FName BoneName) const
 {
-	FBodyInstance* const BI = GetBodyInstance(BoneName);
-	if(BI != NULL)
+	if (FBodyInstance* const BI = GetBodyInstance(BoneName))
 	{
 		return BI->GetUnrealWorldAngularVelocityInRadians();
+	}
+	else if (Chaos::FConstPhysicsObjectHandle Handle = GetPhysicsObjectByName(BoneName))
+	{
+		FLockedReadPhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockRead(Handle);
+		return Interface->GetW(Handle);
 	}
 	return FVector(0,0,0);
 }
@@ -273,6 +365,11 @@ FVector UPrimitiveComponent::GetCenterOfMass(FName BoneName) const
 	if (FBodyInstance* ComponentBodyInstance = GetBodyInstance(BoneName))
 	{
 		return ComponentBodyInstance->GetCOMPosition();
+	}
+	else if (Chaos::FConstPhysicsObjectHandle Handle = GetPhysicsObjectByName(BoneName))
+	{
+		FLockedReadPhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockRead(Handle);
+		return Interface->GetWorldCoM(Handle);
 	}
 
 	return FVector::ZeroVector;
@@ -296,13 +393,13 @@ void UPrimitiveComponent::SetAllPhysicsAngularVelocityInRadians(FVector const& N
 
 void UPrimitiveComponent::SetAllPhysicsPosition(FVector NewPos)
 {
-	SetWorldLocation(NewPos, NAME_None);
+	SetWorldLocation(NewPos);
 }
 
 
 void UPrimitiveComponent::SetAllPhysicsRotation(FRotator NewRot)
 {
-	SetWorldRotation(NewRot, NAME_None);
+	SetWorldRotation(NewRot);
 }
 
 void UPrimitiveComponent::SetAllPhysicsRotation(const FQuat& NewRot)
@@ -316,6 +413,23 @@ void UPrimitiveComponent::WakeRigidBody(FName BoneName)
 	if(BI)
 	{
 		BI->WakeInstance();
+	}
+	else if (BoneName == NAME_None)
+	{
+		TArray<Chaos::FPhysicsObject*> PhysicsObjects = GetAllPhysicsObjects();
+		FLockedWritePhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockWrite(PhysicsObjects);
+		
+		PhysicsObjects = PhysicsObjects.FilterByPredicate(
+			[&Interface](Chaos::FPhysicsObject* Object) {
+				return !Interface->AreAllDisabled({ &Object, 1 });
+			}
+		);
+		Interface->WakeUp(PhysicsObjects);
+	}
+	else if (Chaos::FPhysicsObject* Object = GetPhysicsObjectByName(BoneName))
+	{
+		FLockedWritePhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockWrite({ &Object, 1 });
+		Interface->WakeUp({ &Object, 1 });
 	}
 }
 
@@ -344,6 +458,26 @@ bool UPrimitiveComponent::IsGravityEnabled() const
 	return false;
 }
 
+void UPrimitiveComponent::SetUpdateKinematicFromSimulation(bool bUpdateKinematicFromSimulation)
+{
+	FBodyInstance* BI = GetBodyInstance();
+	if (BI)
+	{
+		BI->SetUpdateKinematicFromSimulation(bUpdateKinematicFromSimulation);
+	}
+}
+
+bool UPrimitiveComponent::GetUpdateKinematicFromSimulation() const
+{
+	FBodyInstance* BI = GetBodyInstance();
+	if (BI)
+	{
+		return BI->bUpdateKinematicFromSimulation;
+	}
+
+	return false;
+}
+
 void UPrimitiveComponent::SetLinearDamping(float InDamping)
 {
 	FBodyInstance* BI = GetBodyInstance();
@@ -351,6 +485,12 @@ void UPrimitiveComponent::SetLinearDamping(float InDamping)
 	{
 		BI->LinearDamping = InDamping;
 		BI->UpdateDampingProperties();
+	}
+
+	else if (Chaos::FPhysicsObject* Object = GetPhysicsObjectByName(NAME_None))
+	{
+		FLockedWritePhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockWrite({ &Object, 1 });
+		Interface->SetLinearEtherDrag({ &Object, 1 }, InDamping);
 	}
 }
 
@@ -373,6 +513,12 @@ void UPrimitiveComponent::SetAngularDamping(float InDamping)
 	{
 		BI->AngularDamping = InDamping;
 		BI->UpdateDampingProperties();
+	}
+
+	else if (Chaos::FPhysicsObject* Object = GetPhysicsObjectByName(NAME_None))
+	{
+		FLockedWritePhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockWrite({ &Object, 1 });
+		Interface->SetAngularEtherDrag({ &Object, 1 }, InDamping);
 	}
 }
 
@@ -428,6 +574,23 @@ float UPrimitiveComponent::GetMass() const
 		WarnInvalidPhysicsOperations(LOCTEXT("GetMass", "GetMass"), BI, NAME_None);
 		return BI->GetBodyMass();
 	}
+	else
+	{
+		TArray<Chaos::FPhysicsObject*> PhysicsObjects = GetAllPhysicsObjects();
+		if (!PhysicsObjects.IsEmpty())
+		{
+			FLockedWritePhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockWrite(PhysicsObjects);
+
+			// Filter out inactive particles (E.g., inactive children in a geometry collection)
+			PhysicsObjects = PhysicsObjects.FilterByPredicate(
+				[&Interface](Chaos::FPhysicsObject* Object) 
+				{
+					return !Interface->AreAllDisabled({ &Object, 1 });
+				});
+
+			return Interface->GetMass(PhysicsObjects);
+		}
+	}
 
 	return 0.0f;
 }
@@ -469,6 +632,29 @@ float UPrimitiveComponent::CalculateMass(FName)
 	return 0.0f;
 }
 
+float UPrimitiveComponent::GetMaxDepenetrationVelocity(FName BoneName)
+{
+	FBodyInstance* BI = GetBodyInstance(BoneName);
+	if (BI)
+	{
+		return BI->GetMaxDepenetrationVelocity();
+	}
+	// @todo: add PhysicsObject support
+
+	// Negative means the config default value will be used
+	return -1.0f;
+}
+
+void UPrimitiveComponent::SetMaxDepenetrationVelocity(FName BoneName, float InMaxDepenetrationVelocity)
+{
+	FBodyInstance* BI = GetBodyInstance(BoneName);
+	if (BI)
+	{
+		BI->SetMaxDepenetrationVelocity(InMaxDepenetrationVelocity);
+	}
+	// @todo: add PhysicsObject support
+}
+
 void UPrimitiveComponent::SetUseCCD(bool bInUseCCD, FName BoneName)
 {
 	FBodyInstance* BI = GetBodyInstance(BoneName);
@@ -489,6 +675,23 @@ void UPrimitiveComponent::PutRigidBodyToSleep(FName BoneName)
 	if(BI)
 	{
 		BI->PutInstanceToSleep();
+	}
+	else if (BoneName == NAME_None)
+	{
+		TArray<Chaos::FPhysicsObject*> PhysicsObjects = GetAllPhysicsObjects();
+		FLockedWritePhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockWrite(PhysicsObjects);
+
+		PhysicsObjects = PhysicsObjects.FilterByPredicate(
+			[&Interface](Chaos::FPhysicsObject* Object) {
+				return !Interface->AreAllDisabled({ &Object, 1 });
+			}
+		);
+		Interface->PutToSleep(PhysicsObjects);
+	}
+	else if (Chaos::FPhysicsObject* Object = GetPhysicsObjectByName(BoneName))
+	{
+		FLockedWritePhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockWrite({ &Object, 1 });
+		Interface->PutToSleep({ &Object, 1 });
 	}
 }
 
@@ -552,13 +755,13 @@ void UPrimitiveComponent::SyncComponentToRBPhysics()
 	AActor* Owner = GetOwner();
 	if(Owner != NULL)
 	{
-		if (Owner->IsPendingKill() || !Owner->CheckStillInWorld())
+		if (!IsValid(Owner) || !Owner->CheckStillInWorld())
 		{
 			return;
 		}
 	}
 
-	if (IsPendingKill() || !IsSimulatingPhysics() || !RigidBodyIsAwake())
+	if (!IsValid(this) || !IsSimulatingPhysics() || !RigidBodyIsAwake())
 	{
 		return;
 	}
@@ -636,7 +839,7 @@ void UPrimitiveComponent::GetWeldedBodies(TArray<FBodyInstance*> & OutWeldedBodi
 	}
 }
 
-bool UPrimitiveComponent::WeldToImplementation(USceneComponent * InParent, FName ParentSocketName /* = Name_None */, bool bWeldSimulatedChild /* = false */)
+bool UPrimitiveComponent::WeldToImplementation(USceneComponent * InParent, FName ParentSocketName /* = Name_None */, bool bWeldSimulatedChild /* = true */, bool bWeldToKinematicParent /* = false */)
 {
 	SCOPE_CYCLE_COUNTER(STAT_WeldPhysics);
 
@@ -685,7 +888,7 @@ bool UPrimitiveComponent::WeldToImplementation(USceneComponent * InParent, FName
 			//Child always inherits from root
 
 			//if root is kinematic simply set child to be kinematic and we're done
-			if (RootComponent->IsSimulatingPhysics(SocketName) == false)
+			if ((RootComponent->IsSimulatingPhysics(SocketName) == false) && (bWeldToKinematicParent == false))
 			{
 				FPlatformAtomics::InterlockedExchangePtr((void**)&BI->WeldParent, nullptr);
 				SetSimulatePhysics(false);
@@ -703,7 +906,7 @@ bool UPrimitiveComponent::WeldToImplementation(USceneComponent * InParent, FName
 	return false;
 }
 
-void UPrimitiveComponent::WeldTo(USceneComponent* InParent, FName InSocketName /* = NAME_None */)
+void UPrimitiveComponent::WeldTo(USceneComponent* InParent, FName InSocketName /* = NAME_None */, bool bWeldToKinematicParent /* = false */)
 {
 	//automatically attach if needed
 	if (GetAttachParent() != InParent || GetAttachSocketName() != InSocketName)
@@ -711,7 +914,8 @@ void UPrimitiveComponent::WeldTo(USceneComponent* InParent, FName InSocketName /
 		AttachToComponent(InParent, FAttachmentTransformRules::KeepWorldTransform, InSocketName);
 	}
 
-	WeldToImplementation(InParent, InSocketName);
+	const bool bWeldSimulatedChild = true;
+	WeldToImplementation(InParent, InSocketName, bWeldSimulatedChild, bWeldToKinematicParent);
 }
 
 void UPrimitiveComponent::UnWeldFromParent()
@@ -720,7 +924,7 @@ void UPrimitiveComponent::UnWeldFromParent()
 
 	FBodyInstance* NewRootBI = GetBodyInstance(NAME_None, false);
 	UWorld* CurrentWorld = GetWorld();
-	if (NewRootBI == NULL || NewRootBI->WeldParent == nullptr || CurrentWorld == nullptr || CurrentWorld->GetPhysicsScene() == nullptr || IsPendingKillOrUnreachable())
+	if (NewRootBI == NULL || NewRootBI->WeldParent == nullptr || CurrentWorld == nullptr || CurrentWorld->GetPhysicsScene() == nullptr || !IsValidChecked(this) || IsUnreachable())
 	{
 		return;
 	}
@@ -739,7 +943,7 @@ void UPrimitiveComponent::UnWeldFromParent()
 	{
 		if (FBodyInstance* RootBI = RootComponent->GetBodyInstance(SocketName, false))
 		{
-			bool bRootIsBeingDeleted = RootComponent->IsPendingKillOrUnreachable();
+			bool bRootIsBeingDeleted = !IsValidChecked(RootComponent) || RootComponent->IsUnreachable();
 			const FBodyInstance* PrevWeldParent = NewRootBI->WeldParent;
 			RootBI->UnWeld(NewRootBI);
 			
@@ -803,9 +1007,22 @@ void UPrimitiveComponent::UnWeldChildren()
 	}
 }
 
-FBodyInstance* UPrimitiveComponent::GetBodyInstance(FName BoneName, bool bGetWelded) const
+FBodyInstance* UPrimitiveComponent::GetBodyInstance(FName BoneName, bool bGetWelded, int32 Index) const
 {
 	return const_cast<FBodyInstance*>((bGetWelded && BodyInstance.WeldParent) ? BodyInstance.WeldParent : &BodyInstance);
+}
+
+FBodyInstanceAsyncPhysicsTickHandle UPrimitiveComponent::GetBodyInstanceAsyncPhysicsTickHandle(FName BoneName, bool bGetWelded, int32 Index) const
+{
+	if(FBodyInstance* BI = GetBodyInstance(BoneName, bGetWelded, Index))
+	{
+		return BI->GetBodyInstanceAsyncPhysicsTickHandle();
+	}
+	else
+	{
+		return FBodyInstanceAsyncPhysicsTickHandle();
+	}
+	
 }
 
 bool UPrimitiveComponent::GetSquaredDistanceToCollision(const FVector& Point, float& OutSquaredDistance, FVector& OutClosestPointOnCollision) const
@@ -835,14 +1052,37 @@ float UPrimitiveComponent::GetClosestPointOnCollision(const FVector& Point, FVec
 
 bool UPrimitiveComponent::IsSimulatingPhysics(FName BoneName) const
 {
-	FBodyInstance* BodyInst = GetBodyInstance(BoneName);
-	if(BodyInst != NULL)
+	if(FBodyInstance* BodyInst = GetBodyInstance(BoneName))
 	{
 		return BodyInst->IsInstanceSimulatingPhysics();
 	}
 	else
 	{
-		return false;
+		TArray<Chaos::FPhysicsObjectHandle> PhysicsObjects;
+		if (BoneName != NAME_None)
+		{
+			PhysicsObjects.Add(GetPhysicsObjectByName(BoneName));
+		}
+		else
+		{
+			PhysicsObjects = GetAllPhysicsObjects();
+		}
+
+		if (PhysicsObjects.IsEmpty())
+		{
+			return false;
+		}
+
+		FLockedReadPhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockRead(PhysicsObjects);
+
+		PhysicsObjects.RemoveAllSwap(
+			[&Interface](Chaos::FPhysicsObjectHandle Object)
+			{
+				return Interface->AreAllDisabled({ &Object, 1 });
+			},
+			EAllowShrinking::No);
+
+		return Interface->AreAllDynamicOrSleeping(PhysicsObjects);
 	}
 }
 
@@ -891,9 +1131,19 @@ void UPrimitiveComponent::SetCollisionResponseToChannels(const FCollisionRespons
 
 void UPrimitiveComponent::SetCollisionEnabled(ECollisionEnabled::Type NewType)
 {
-	if (BodyInstance.GetCollisionEnabled() != NewType)
+	ECollisionEnabled::Type CurrentType = BodyInstance.GetCollisionEnabled();
+
+	if (CurrentType != NewType)
 	{
-		BodyInstance.SetCollisionEnabled(NewType);
+		UE_AUTORTFM_OPEN({
+			BodyInstance.SetCollisionEnabled(NewType);
+		});
+
+		// If we fail set the CollisionEnabled back to the CurrentType
+		UE_AUTORTFM_ONABORT(
+		{
+			BodyInstance.SetCollisionEnabled(CurrentType);
+		});
 
 		EnsurePhysicsStateCreated();
 		OnComponentCollisionSettingsChanged();
@@ -1042,7 +1292,12 @@ bool UPrimitiveComponent::K2_BoxOverlapComponent(FVector InBoxCentre, const FBox
 {
 	FCollisionShape QueryBox = FCollisionShape::MakeBox(InBox.GetExtent());
 
-	bool bHit = OverlapComponent(InBoxCentre, FQuat::Identity, QueryBox);
+	TArray<FOverlapResult> OverlapResult;
+	bool bHit = OverlapComponentWithResult(InBoxCentre, FQuat::Identity, QueryBox, OverlapResult);
+	if (bHit && !OverlapResult.IsEmpty())
+	{
+		OutHit = ConvertOverlapToHitResult(OverlapResult[0]);
+	}
 
 	if(bShowTrace)
 	{
@@ -1058,7 +1313,12 @@ bool UPrimitiveComponent::K2_SphereOverlapComponent(FVector InSphereCentre, floa
 {
 	FCollisionShape QuerySphere = FCollisionShape::MakeSphere(InSphereRadius);
 
-	bool bHit = OverlapComponent(InSphereCentre, FQuat::Identity, QuerySphere);
+	TArray<FOverlapResult> OverlapResult;
+	bool bHit = OverlapComponentWithResult(InSphereCentre, FQuat::Identity, QuerySphere, OverlapResult);
+	if (bHit && !OverlapResult.IsEmpty())
+	{
+		OutHit = ConvertOverlapToHitResult(OverlapResult[0]);
+	}
 
 	if(bShowTrace)
 	{
@@ -1097,6 +1357,32 @@ void UPrimitiveComponent::UpdatePhysicsToRBChannels()
 	{
 		BodyInstance.UpdatePhysicsFilterData();
 	}
+}
+
+Chaos::FPhysicsObject* UPrimitiveComponent::GetPhysicsObjectById(Chaos::FPhysicsObjectId Id) const
+{
+	if (!BodyInstance.IsValidBodyInstance())
+	{
+		return nullptr;
+	}
+
+	return BodyInstance.ActorHandle->GetPhysicsObject();
+}
+
+Chaos::FPhysicsObject* UPrimitiveComponent::GetPhysicsObjectByName(const FName& Name) const
+{
+	return GetPhysicsObjectById(0);
+}
+
+TArray<Chaos::FPhysicsObject*> UPrimitiveComponent::GetAllPhysicsObjects() const
+{
+	TArray<Chaos::FPhysicsObject*> Bodies = { GetPhysicsObjectById(INDEX_NONE) };
+	return Bodies;
+}
+
+Chaos::FPhysicsObjectId UPrimitiveComponent::GetIdFromGTParticle(Chaos::FGeometryParticle* Particle) const
+{
+	return 0;
 }
 
 #undef LOCTEXT_NAMESPACE

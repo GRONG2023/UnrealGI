@@ -1,25 +1,50 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SLocalizationDashboardTargetRow.h"
-#include "Misc/MessageDialog.h"
-#include "Internationalization/Culture.h"
+
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
 #include "DesktopPlatformModule.h"
-#include "Framework/Application/SlateApplication.h"
-#include "Widgets/Images/SImage.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Views/SListView.h"
-#include "EditorStyleSet.h"
 #include "FileHelpers.h"
-#include "LocalizationDashboard.h"
+#include "Framework/Application/SlateApplication.h"
+#include "GenericPlatform/GenericWindow.h"
+#include "HAL/PlatformMath.h"
+#include "HAL/PlatformMisc.h"
+#include "IDesktopPlatform.h"
 #include "IPropertyUtilities.h"
-#include "PropertyHandle.h"
-#include "LocalizationTargetTypes.h"
-#include "Widgets/Docking/SDockTab.h"
-#include "Widgets/Input/SHyperlink.h"
-#include "SLocalizationTargetStatusButton.h"
-#include "LocalizationConfigurationScript.h"
+#include "Internationalization/Culture.h"
+#include "Internationalization/CulturePointer.h"
+#include "Internationalization/Internationalization.h"
 #include "LocalizationCommandletTasks.h"
+#include "LocalizationConfigurationScript.h"
+#include "LocalizationDashboard.h"
+#include "LocalizationTargetTypes.h"
+#include "Misc/Attribute.h"
+#include "Misc/MessageDialog.h"
+#include "Misc/Optional.h"
+#include "Misc/Paths.h"
+#include "PropertyEditorModule.h"
+#include "PropertyHandle.h"
+#include "SLocalizationTargetStatusButton.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "Types/SlateEnums.h"
+#include "UObject/Object.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Docking/SDockTab.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SHyperlink.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SNullWidget.h"
+#include "Widgets/SWidget.h"
+#include "Widgets/SWindow.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Widgets/Views/SListView.h"
+
+class STableViewBase;
 
 #define LOCTEXT_NAMESPACE "LocalizationDashboardTargetRow"
 
@@ -69,13 +94,13 @@ TSharedRef<SWidget> SLocalizationDashboardTargetRow::GenerateWidgetForColumn( co
 			.VAlign(VAlign_Center)
 			[
 				SNew(SButton)
-				.ButtonStyle( FEditorStyle::Get(), TEXT("HoverHintOnly") )
+				.ButtonStyle( FAppStyle::Get(), TEXT("HoverHintOnly") )
 				.ToolTipText(LOCTEXT("DeleteButtonLabel", "Delete this target."))
 				.OnClicked(this, &SLocalizationDashboardTargetRow::EnqueueDeletion)
 				.Content()
 				[
 					SNew(SImage)
-					.Image(FEditorStyle::GetBrush("LocalizationDashboard.DeleteTarget"))
+					.Image(FAppStyle::GetBrush("LocalizationDashboard.DeleteTarget"))
 				]
 			];
 	}
@@ -252,7 +277,7 @@ FReply SLocalizationDashboardTargetRow::GatherText()
 			// Give warning dialog.
 			const FText MessageText = NSLOCTEXT("LocalizationCultureActions", "UnsavedPackagesWarningDialogMessage", "There are unsaved changes. These changes may not be gathered from correctly.");
 			const FText TitleText = NSLOCTEXT("LocalizationCultureActions", "UnsavedPackagesWarningDialogTitle", "Unsaved Changes Before Gather");
-			switch(FMessageDialog::Open(EAppMsgType::OkCancel, MessageText, &TitleText))
+			switch(FMessageDialog::Open(EAppMsgType::OkCancel, MessageText, TitleText))
 			{
 			case EAppReturnType::Cancel:
 				{
@@ -524,7 +549,7 @@ void SLocalizationDashboardTargetRow::Delete()
 			const FText MessageText = FText::Format(FormatPattern, Arguments);
 			const FText TitleText = NSLOCTEXT("LocalizationDashboard", "DeleteTargetConfirmationDialogTitle", "Confirm Target Deletion");
 
-			switch(FMessageDialog::Open(EAppMsgType::OkCancel, MessageText, &TitleText))
+			switch(FMessageDialog::Open(EAppMsgType::OkCancel, MessageText, TitleText))
 			{
 			case EAppReturnType::Ok:
 				{

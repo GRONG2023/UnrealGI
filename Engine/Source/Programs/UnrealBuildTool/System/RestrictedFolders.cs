@@ -2,7 +2,7 @@
 
 using System;
 using System.Collections.Generic;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 
 namespace UnrealBuildTool
 {
@@ -24,17 +24,17 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// Array of all restricted folder names
 		/// </summary>
-		private static string[] Names;
+		private static string[]? Names;
 
 		/// <summary>
 		/// Array of all restricted folders
 		/// </summary>
-		private static RestrictedFolder[] Values;
+		private static RestrictedFolder[]? Values;
 
 		/// <summary>
 		/// Set of permitted references for each restricted folder. Determined via data-driven platform info.
 		/// </summary>
-		private static Dictionary<RestrictedFolder, RestrictedFolder[]> PermittedReferences;
+		private static Dictionary<RestrictedFolder, RestrictedFolder[]>? PermittedReferences;
 
 		/// <summary>
 		/// Constructor
@@ -50,7 +50,7 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="Name">Name of the folder</param>
 		/// <returns>New restricted folder instance</returns>
-		static private RestrictedFolder FindOrAddByName(string Name)
+		private static RestrictedFolder FindOrAddByName(string Name)
 		{
 			return new RestrictedFolder(StringRegistry.FindOrAddByName(Name));
 		}
@@ -82,9 +82,9 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="Other">The restricted folder to compare against</param>
 		/// <returns>True if the restricted folder is equal to the other instance</returns>
-		public override bool Equals(object Other)
+		public override bool Equals(object? Other)
 		{
-			return Other is RestrictedFolder && Id == ((RestrictedFolder)Other).Id;
+			return Other is RestrictedFolder folder && Id == folder.Id;
 		}
 
 		/// <summary>
@@ -102,8 +102,8 @@ namespace UnrealBuildTool
 		/// <returns>Collection of restricted folders</returns>
 		public IEnumerable<RestrictedFolder> GetPermittedReferences()
 		{
-			RestrictedFolder[] References;
-			if (PermittedReferences.TryGetValue(this, out References))
+			RestrictedFolder[]? References;
+			if (PermittedReferences != null && PermittedReferences.TryGetValue(this, out References))
 			{
 				foreach (RestrictedFolder Reference in References)
 				{
@@ -142,7 +142,7 @@ namespace UnrealBuildTool
 		/// <returns></returns>
 		public static string[] GetNames()
 		{
-			if(Names == null)
+			if (Names == null)
 			{
 				AddConfidentialPlatforms();
 				Names = StringRegistry.GetStringNames();
@@ -156,7 +156,7 @@ namespace UnrealBuildTool
 		/// <returns>Array of restricted folder values</returns>
 		public static RestrictedFolder[] GetValues()
 		{
-			if(Values == null)
+			if (Values == null)
 			{
 				AddConfidentialPlatforms();
 				Values = Array.ConvertAll(StringRegistry.GetStringIds(), x => new RestrictedFolder(x));
@@ -185,7 +185,7 @@ namespace UnrealBuildTool
 		public static RestrictedFolder EpicInternal = FindOrAddByName("EpicInternal");
 
 		/// <summary>
-		/// Can be used by UE4 but not required
+		/// Can be used by UE but not required
 		/// </summary>
 		public static RestrictedFolder CarefullyRedist = FindOrAddByName("CarefullyRedist");
 

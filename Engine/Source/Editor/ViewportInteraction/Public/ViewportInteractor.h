@@ -8,7 +8,7 @@
 #include "InputCoreTypes.h"
 #include "Engine/EngineTypes.h"
 #include "ViewportInteractionTypes.h"
-#include "Editor/ViewportInteraction/ViewportInteractorData.h"
+#include "ViewportInteractorData.h"
 #include "ViewportInteractionUtils.h"
 #include "ViewportInteractor.generated.h"
 
@@ -133,7 +133,6 @@ public:
 	/**
 	 * Gets the start and end point of the laser pointer for the specified hand
 	 *
-	 * @param HandIndex				Index of the hand to use
 	 * @param LasertPointerStart	(Out) The start location of the laser pointer in world space
 	 * @param LasertPointerEnd		(Out) The end location of the laser pointer in world space
 	 * @param bEvenIfBlocked		If true, returns a laser pointer even if the hand has UI in front of it (defaults to false)
@@ -193,12 +192,14 @@ public:
 	virtual void ResetHoverState();
 
 	/** Needs to be implemented by the base to calculate drag ray length and the velocity for the ray */
+	virtual void CalculateDragRay( double& InOutDragRayLength, double& InOutDragRayVelocity ) {};
+
+	UE_DEPRECATED(5.2, "CalculateDragRay() now uses double-precision arguments.")
 	virtual void CalculateDragRay( float& InOutDragRayLength, float& InOutDragRayVelocity ) {};
 
 	/**
 	 * Creates a hand transform and forward vector for a laser pointer for a given hand
 	 *
-	 * @param HandIndex			Index of the hand to use
 	 * @param OutHandTransform	The created hand transform
 	 * @param OutForwardVector	The forward vector of the hand
 	 *
@@ -296,11 +297,11 @@ protected:
 
 	/** The owning world interaction */
 	UPROPERTY()
-	class UViewportWorldInteraction* WorldInteraction;
+	TObjectPtr<class UViewportWorldInteraction> WorldInteraction;
 
 	/** The paired interactor by the world interaction */
 	UPROPERTY()
-	UViewportInteractor* OtherInteractor;
+	TObjectPtr<UViewportInteractor> OtherInteractor;
 
 	/** True if this interactor supports 'grabber sphere' interaction.  Usually disabled for mouse cursors */
 	bool bAllowGrabberSphere;

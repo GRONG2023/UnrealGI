@@ -24,6 +24,7 @@ enum class EARTextureType : uint8
 /**
  * Base class for all AR texture types.
  * Derived from UTexture instead of UTexture2D because UTexture2D is all about streaming and source art
+ * ? probably should have been UTexture2DDynamic
  */
 UCLASS(Abstract, BlueprintType)
 class AUGMENTEDREALITY_API UARTexture : public UTexture
@@ -46,7 +47,10 @@ public:
 	// UTexture interface implementation
 	virtual float GetSurfaceWidth() const override { return Size.X; }
 	virtual float GetSurfaceHeight() const override { return Size.Y; }
+	virtual float GetSurfaceDepth() const override { return 0; }
+	virtual uint32 GetSurfaceArraySize() const override { return 0; }
 	virtual FGuid GetExternalTextureGuid() const override { return ExternalTextureGuid; }
+	virtual ETextureClass GetTextureClass() const { return ETextureClass::Other2DNoSource; }
 	// End UTexture interface
 	
 	/** The type of texture this is */
@@ -63,7 +67,7 @@ public:
 
 	/** The width and height of the texture */
 	UPROPERTY(BlueprintReadOnly, Category="AR AugmentedReality", meta=(Experimental))
-	FVector2D Size;
+	FVector2f Size;
 };
 
 /**
@@ -129,6 +133,8 @@ public:
 	// UTexture interface implementation
 	virtual float GetSurfaceWidth() const override { return Size.X; }
 	virtual float GetSurfaceHeight() const override { return Size.Y; }
+	virtual float GetSurfaceDepth() const override { return 0; }
+	virtual uint32 GetSurfaceArraySize() const override { return 6; }
 	virtual FGuid GetExternalTextureGuid() const override { return ExternalTextureGuid; }
 	// End UTexture interface
 	
@@ -146,5 +152,5 @@ public:
 	
 	/** The width and height of the texture */
 	UPROPERTY(BlueprintReadOnly, Category="AR AugmentedReality", meta=(Experimental))
-	FVector2D Size;
+	FVector2f Size;
 };

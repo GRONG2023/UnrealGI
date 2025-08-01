@@ -6,10 +6,11 @@
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Framework/Application/SlateApplication.h"
+#include "RHI.h"
 #include "UMGPrivate.h"
 
 #include "SlateMaterialBrush.h"
-#include "Runtime/SlateRHIRenderer/Public/Interfaces/ISlateRHIRendererModule.h"
+#include "Interfaces/ISlateRHIRendererModule.h"
 #include "Slate/SlateVectorArtData.h"
 #include "Slate/SlateVectorArtInstanceData.h"
 
@@ -258,7 +259,7 @@ void SMeshWidget::PushUpdate(uint32 VectorArtId, SMeshWidget& Widget, const FVec
 
 	{
 		FSlateInstanceBufferData PerInstanceData;
-		PerInstanceData.Add(Data.GetData());
+		PerInstanceData.Add((FVector4f)Data.GetData()); // LWC_TODO: precision loss
 		Widget.UpdatePerInstanceBuffer(VectorArtId, PerInstanceData);
 	}
 }

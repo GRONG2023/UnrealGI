@@ -16,8 +16,13 @@
 #include "Windows/WindowsHWrapper.h"
 #include "Misc/MonitoredProcess.h"
 #include "LiveCodingManifest.h"
-#include "SourceCodeAccess/Public/ISourceCodeAccessModule.h"
+#include "ISourceCodeAccessModule.h"
 #include "Modules/ModuleInterface.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SCheckBox.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Misc/CompilationResult.h"
+#include "Misc/MessageDialog.h"
 
 #define LOCTEXT_NAMESPACE "LiveCodingConsole"
 
@@ -31,6 +36,10 @@ static void OnRequestExit()
 class FLiveCodingConsoleApp
 {
 private:
+	static constexpr const TCHAR* SectionName = TEXT("LiveCodingConsole");
+	static constexpr const TCHAR* DisableActionLimitKey = TEXT("bDisableActionLimit");
+	static constexpr const TCHAR* ActionLimitKey = TEXT("ActionLimit");
+
 	FCriticalSection CriticalSection;
 	FSlateApplication& Slate;
 	ILiveCodingServer& Server;
@@ -39,21 +48,25 @@ private:
 	TSharedPtr<SNotificationItem> CompileNotification;
 	TArray<FSimpleDelegate> MainThreadTasks;
 	bool bRequestCancel;
-	FDateTime LastPatchTime;
-	FDateTime NextPatchStartTime;
+	bool bDisableActionLimit;
+	bool bHasReinstancingProcess;
+	bool bWarnOnRestart;
 
 public:
 	FLiveCodingConsoleApp(FSlateApplication& InSlate, ILiveCodingServer& InServer)
 		: Slate(InSlate)
 		, Server(InServer)
 		, bRequestCancel(false)
-		, LastPatchTime(FDateTime::MinValue())
-		, NextPatchStartTime(FDateTime::MinValue())
+		, bDisableActionLimit(false)
+		, bHasReinstancingProcess(false)
+		, bWarnOnRestart(false)
 	{
 	}
 
 	void Run()
 	{
+		GConfig->GetBool(SectionName, DisableActionLimitKey, bDisableActionLimit, GEngineIni);
+
 		// open up the app window	
 		LogWidget = SNew(SLogWidget);
 
@@ -81,9 +94,51 @@ public:
 					.AutoHeight()
 					.Padding(0.0f, 6.0f, 0.0f, 4.0f)
 					[
-						SNew(SButton)
-						.Text(LOCTEXT("QuickRestart", "Quick Restart"))
-						.OnClicked(FOnClicked::CreateRaw(this, &FLiveCodingConsoleApp::RestartTargets))
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot()
+						.HAlign(HAlign_Center)
+						[
+							SNew(SButton)
+							.Text(LOCTEXT("QuickRestart", "Quick Restart"))
+							.OnClicked(FOnClicked::CreateRaw(this, &FLiveCodingConsoleApp::RestartTargets))
+							.ToolTipText_Lambda([this]() { return Server.HasReinstancingProcess() ? 
+								LOCTEXT("DisableQuickRestart", "Quick restarting isn't supported when re-instancing is enabled") :
+								LOCTEXT("EnableQuickRestart", "Restart all live coding applications"); })
+							.IsEnabled_Lambda([this]() 
+								{ 
+									bool bNewState = Server.HasReinstancingProcess();
+									if (bNewState != bHasReinstancingProcess)
+									{
+										bHasReinstancingProcess = bNewState;
+										if (bHasReinstancingProcess)
+										{
+											LogWidget->AppendLine(GetLogColor(ELiveCodingLogVerbosity::Warning), TEXT("Quick restart disabled when re-instancing is enabled."));
+										}
+										else
+										{
+											LogWidget->AppendLine(GetLogColor(ELiveCodingLogVerbosity::Success), TEXT("Quick restart enabled."));
+										}
+									}
+									return !bHasReinstancingProcess;
+								})
+						]
+						+ SHorizontalBox::Slot()
+						.HAlign(HAlign_Center)
+						.Padding(5)
+						[
+							SNew(SCheckBox)
+							.IsChecked_Lambda([this]() { return bDisableActionLimit ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+							.OnCheckStateChanged_Lambda([this](ECheckBoxState InCheckBoxState) 
+								{ 
+									bDisableActionLimit = InCheckBoxState == ECheckBoxState::Checked;
+									GConfig->SetBool(SectionName, DisableActionLimitKey, bDisableActionLimit, GEngineIni);
+									GConfig->Flush(false, GEngineIni);
+								})
+							[
+								SNew(STextBlock)
+								.Text(LOCTEXT("DisableLimit", "Disable action limit for this session"))
+							]
+						]
 					]
 				]
 			];
@@ -146,6 +201,8 @@ public:
 			MainThreadTasks.Empty();
 		}
 
+		// NOTE: In normal operation, this is never reached.  The window's JOB system will terminate the process.
+
 		// Make sure the window is hidden, because it might take a while for the background thread to finish.
 		Window->HideWindow();
 
@@ -204,20 +261,55 @@ private:
 		LogWidget->AppendLine(GetLogColor(Verbosity), MoveTemp(Text));
 	}
 
-	bool CompilePatch(const TArray<FString>& Targets, const TArray<FString>& ValidModules, TArray<FString>& RequiredModules, TMap<FString, TArray<FString>>& ModuleToObjectFiles)
+	ELiveCodingCompileResult CompilePatch(const TArray<FString>& Targets, const TArray<FString>& ValidModules, const TSet<FString>& LazyLoadModules,
+		TArray<FString>& RequiredModules, FModuleToModuleFiles& ModuleToModuleFiles, ELiveCodingCompileReason CompileReason)
 	{
-		// Update the compile start time. This gets copied into the last patch time once a patch has been confirmed to have been applied.
-		NextPatchStartTime = FDateTime::UtcNow();
-
 		// Get the UBT path
-		FString Executable = FPaths::EngineDir() / TEXT("Binaries/DotNET/UnrealBuildTool.exe");
+		FString Executable;
+		FString Entry;
+		if( GConfig->GetString( TEXT("PlatformPaths"), TEXT("UnrealBuildTool"), Entry, GEngineIni ))
+		{
+			Executable = FPaths::ConvertRelativePathToFull(FPaths::RootDir() / Entry);
+		}
+		else
+		{
+			Executable = FPaths::EngineDir() / TEXT("Binaries/DotNET/UnrealBuildTool/UnrealBuildTool.exe");
+		}
 		FPaths::MakePlatformFilename(Executable);
 
 		// Write out the list of lazy-loaded modules for UBT to check
-		FString ModulesFileName = FPaths::ConvertRelativePathToFull(FPaths::EngineIntermediateDir() / TEXT("LiveCodingModules.txt"));
-		FFileHelper::SaveStringArrayToFile(ValidModules, *ModulesFileName);
+		FString ModulesFileName = FPaths::ConvertRelativePathToFull(FPaths::EngineIntermediateDir() / TEXT("LiveCodingModules.json"));
 
-		// Delete the output file for non-whitelisted modules
+		// Create and open a new Json file for writing, and initialize a JsonWriter to serialize the contents
+		{
+			TArray<uint8> TCharJsonData;
+			FMemoryWriter MemWriter(TCharJsonData, true);
+			{
+				TSharedRef<TJsonWriter<>> JsonWriter = TJsonWriterFactory<>::Create(&MemWriter);
+				JsonWriter->WriteObjectStart();
+				JsonWriter->WriteArrayStart(TEXT("EnabledModules"));
+				for (const FString& name : ValidModules)
+				{
+					JsonWriter->WriteValue(name);
+				}
+				JsonWriter->WriteArrayEnd();
+				JsonWriter->WriteArrayStart(TEXT("LazyLoadModules"));
+				for (const FString& name : LazyLoadModules)
+				{
+					JsonWriter->WriteValue(name);
+				}
+				JsonWriter->WriteArrayEnd();
+				JsonWriter->WriteObjectEnd();
+			}
+			MemWriter.Close();
+
+			TCharJsonData.AddZeroed(sizeof(TCHAR));
+			auto Utf8Data = StringCast<UTF8CHAR>((const TCHAR*)TCharJsonData.GetData());
+			TSharedPtr<FArchive> Ar(IFileManager::Get().CreateFileWriter(*ModulesFileName));
+			Ar->Serialize(const_cast<UTF8CHAR*>(Utf8Data.Get()), Utf8Data.Length());
+		}
+
+		// Delete the output file for non-allowed modules
 		FString ModulesOutputFileName = ModulesFileName + TEXT(".out");
 		IFileManager::Get().Delete(*ModulesOutputFileName);
 
@@ -232,6 +324,15 @@ private:
 			Arguments += FString::Printf(TEXT("-Target=\"%s\" "), *Target.Replace(TEXT("\""), TEXT("\"\"")));
 		}
 		Arguments += FString::Printf(TEXT("-LiveCoding -LiveCodingModules=\"%s\" -LiveCodingManifest=\"%s\" -WaitMutex"), *ModulesFileName, *ManifestFileName);
+		if (!bDisableActionLimit && CompileReason == ELiveCodingCompileReason::Initial)
+		{
+			int ActionLimit = 99;
+			GConfig->GetInt(SectionName, ActionLimitKey, ActionLimit, GEngineIni);
+			if (ActionLimit > 0)
+			{
+				Arguments += FString::Printf(TEXT(" -LiveCodingLimit=%d"), ActionLimit);
+			}
+		}
 		AppendLogLine(ELiveCodingLogVerbosity::Info, *FString::Printf(TEXT("Running %s %s"), *Executable, *Arguments));
 
 		// Spawn UBT and wait for it to complete (or the compile button to be pressed)
@@ -243,7 +344,7 @@ private:
 			if (HasCancelledBuild())
 			{
 				AppendLogLine(ELiveCodingLogVerbosity::Warning, TEXT("Build cancelled."));
-				return false;
+				return ELiveCodingCompileResult::Canceled;
 			}
 			FPlatformProcess::Sleep(0.1f);
 		}
@@ -251,15 +352,33 @@ private:
 		int ReturnCode = Process.GetReturnCode();
 		if (ReturnCode != 0)
 		{
+			ELiveCodingCompileResult CompileResult = ELiveCodingCompileResult::Failure;
+
+			// If there are missing modules, then we always retry them
 			if (FPaths::FileExists(ModulesOutputFileName))
 			{
 				FFileHelper::LoadFileToStringArray(RequiredModules, *ModulesOutputFileName);
+				if (!RequiredModules.IsEmpty())
+				{
+					CompileResult = ELiveCodingCompileResult::Retry;
+				}
 			}
-			else
+
+			// If we reached the live coding limit, the prompt the user to retry
+			if (ReturnCode == ECompilationResult::LiveCodingLimitError)
+			{
+				const FText Message = LOCTEXT("LimitText", "Live Coding action limit reached.  Do you wish to compile anyway?\n\n"
+				"The limit can be permanently changed or disabled by setting the ActionLimit or DisableActionLimit setting for the LiveCodingConsole program.");
+				const FText Title = LOCTEXT("LimitTitle", "Live Coding Action Limit Reached");
+				EAppReturnType::Type ReturnType = FMessageDialog::Open(EAppMsgType::YesNo, Message, Title);
+				CompileResult = ReturnType == EAppReturnType::Yes ? ELiveCodingCompileResult::Retry : ELiveCodingCompileResult::Canceled;
+			}
+
+			if (CompileResult == ELiveCodingCompileResult::Failure)
 			{
 				AppendLogLine(ELiveCodingLogVerbosity::Failure, TEXT("Build failed."));
 			}
-			return false;
+			return CompileResult;
 		}
 
 		// Read the output manifest
@@ -268,31 +387,31 @@ private:
 		if (!Manifest.Read(*ManifestFileName, ManifestFailReason))
 		{
 			AppendLogLine(ELiveCodingLogVerbosity::Failure, *ManifestFailReason);
-			return false;
+			return ELiveCodingCompileResult::Failure;
 		}
 
 		// Override the linker path
 		Server.SetLinkerPath(*Manifest.LinkerPath, Manifest.LinkerEnvironment);
 
-		// Strip out all the files that haven't been modified
-		IFileManager& FileManager = IFileManager::Get();
+		// Add all the sources regardless of modification time.  The patch will exclude old ones
 		for(TPair<FString, TArray<FString>>& Pair : Manifest.BinaryToObjectFiles)
 		{
-			FDateTime MinTimeStamp = FileManager.GetTimeStamp(*Pair.Key);
-			if(LastPatchTime > MinTimeStamp)
-			{
-				MinTimeStamp = LastPatchTime;
-			}
-
 			for (const FString& ObjectFileName : Pair.Value)
 			{
-				if (FileManager.GetTimeStamp(*ObjectFileName) > MinTimeStamp)
-				{
-					ModuleToObjectFiles.FindOrAdd(Pair.Key).Add(ObjectFileName);
-				}
+				ModuleToModuleFiles.FindOrAdd(Pair.Key).Objects.Add(ObjectFileName);
 			}
 		}
-		return true;
+
+		// Add all of the additional libraries
+		for (TPair<FString, TArray<FString>>& Pair : Manifest.Libraries)
+		{
+			for (const FString& Library : Pair.Value)
+			{
+				ModuleToModuleFiles.FindOrAdd(Pair.Key).Libraries.Add(Library);
+			}
+		}
+
+		return ELiveCodingCompileResult::Success;
 	}
 
 	void CancelBuild()
@@ -309,6 +428,16 @@ private:
 
 	FReply RestartTargets()
 	{
+		if (bWarnOnRestart)
+		{
+			const FText Message = LOCTEXT("RestartWarningText", "Restarting after patching while re-instancing was enabled can lead to unexpected results.\r\n\r\nDo you wish to continue?");
+			const FText Title = LOCTEXT("RestartWarningTitle", "Restarting after patching while re-instancing was enabled?");
+			EAppReturnType::Type ReturnType = FMessageDialog::Open(EAppMsgType::YesNo, Message, Title);
+			if (ReturnType != EAppReturnType::Yes)
+			{
+				return FReply::Handled();
+			}
+		}
 		Server.RestartTargets();
 		return FReply::Handled();
 	}
@@ -348,7 +477,6 @@ private:
 		FScopeLock Lock(&CriticalSection);
 		MainThreadTasks.Add(FSimpleDelegate::CreateRaw(this, &FLiveCodingConsoleApp::OnCompileStarted));
 		bRequestCancel = false;
-		NextPatchStartTime = FDateTime::UtcNow();
 	}
 
 	void OnCompileStarted()
@@ -374,38 +502,56 @@ private:
 	{
 		FScopeLock Lock(&CriticalSection);
 		MainThreadTasks.Add(FSimpleDelegate::CreateLambda([this, Result, Status](){ OnCompileFinished(Result, Status); }));
-
-		if (Result == ELiveCodingResult::Success)
-		{
-			LastPatchTime = NextPatchStartTime;
-		}
 	}
 
 	void OnCompileFinished(ELiveCodingResult Result, const FString& Status)
 	{
 		if(CompileNotification.IsValid())
 		{
-			if(Result == ELiveCodingResult::Success)
+			if (Result == ELiveCodingResult::Success)
 			{
-				CompileNotification->SetText(FText::FromString(Status));
-				CompileNotification->SetCompletionState(SNotificationItem::CS_Success);
-				CompileNotification->SetExpireDuration(1.5f);
-				CompileNotification->SetFadeOutDuration(0.4f);
+				if (Server.ShowCompileFinishNotification())
+				{
+					CompileNotification->SetText(FText::FromString(Status));
+					CompileNotification->SetCompletionState(SNotificationItem::CS_Success);
+					CompileNotification->SetExpireDuration(1.5f);
+					CompileNotification->SetFadeOutDuration(0.4f);
+				}
+				else
+				{
+					CompileNotification->SetExpireDuration(0.0f);
+					CompileNotification->SetFadeOutDuration(0.1f);
+				}
 			}
-			else if(HasCancelledBuild())
+			else if (HasCancelledBuild())
 			{
 				CompileNotification->SetExpireDuration(0.0f);
 				CompileNotification->SetFadeOutDuration(0.1f);
 			}
 			else
 			{
-				CompileNotification->SetText(FText::FromString(Status));
-				CompileNotification->SetCompletionState(SNotificationItem::CS_Fail);
-				CompileNotification->SetExpireDuration(5.0f);
-				CompileNotification->SetFadeOutDuration(2.0f);
+				if (Server.ShowCompileFinishNotification())
+				{
+					CompileNotification->SetText(FText::FromString(Status));
+					CompileNotification->SetCompletionState(SNotificationItem::CS_Fail);
+					CompileNotification->SetExpireDuration(5.0f);
+					CompileNotification->SetFadeOutDuration(2.0f);
+				}
+				else
+				{
+					CompileNotification->SetExpireDuration(0.0f);
+					CompileNotification->SetFadeOutDuration(0.1f);
+					ShowConsole();
+				}
 			}
-			CompileNotification->ExpireAndFadeout();
-			CompileNotification.Reset();
+
+		}
+		CompileNotification->ExpireAndFadeout();
+		CompileNotification.Reset();
+
+		if (Result == ELiveCodingResult::Success && bHasReinstancingProcess)
+		{
+			bWarnOnRestart = true;
 		}
 	}
 
@@ -450,14 +596,14 @@ bool LiveCodingConsoleMain(const TCHAR* CmdLine)
 				return false;
 			}
 
-			// Set the normal UE4 IsEngineExitRequested() when outer frame is closed
+			// Set the normal UE IsEngineExitRequested() when outer frame is closed
 			Slate->SetExitRequestedHandler(FSimpleDelegate::CreateStatic(&OnRequestExit));
 
 			// Prepare the custom Slate styles
 			FLiveCodingConsoleStyle::Initialize();
 
 			// Set the icon
-			Slate->SetAppIcon(FLiveCodingConsoleStyle::Get().GetBrush("AppIcon"));
+			FAppStyle::SetAppStyleSet(FLiveCodingConsoleStyle::Get());
 
 			// Load the source code access module
 			ISourceCodeAccessModule& SourceCodeAccessModule = FModuleManager::LoadModuleChecked<ISourceCodeAccessModule>(FName("SourceCodeAccess"));

@@ -4,18 +4,25 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Misc/Attribute.h"
-#include "Layout/Visibility.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Input/Reply.h"
-#include "Widgets/SCompoundWidget.h"
-#include "SViewportToolBar.h"
 #include "Framework/SlateDelegates.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Layout/Visibility.h"
+#include "Misc/Attribute.h"
+#include "SViewportToolBar.h"
+#include "Styling/AppStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/SlateColor.h"
 #include "Styling/SlateTypes.h"
-#include "EditorStyleSet.h"
 #include "Styling/SlateWidgetStyleAsset.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
 
 class SMenuAnchor;
+struct FGeometry;
+struct FPointerEvent;
 struct FSlateBrush;
 
 namespace EMenuItemType
@@ -32,35 +39,45 @@ namespace EMenuItemType
 /**
  * Widget that opens a menu when clicked
  */
-class UNREALED_API SEditorViewportToolbarMenu : public SCompoundWidget
+class SEditorViewportToolbarMenu : public SCompoundWidget
 {
 public:
-	SLATE_BEGIN_ARGS( SEditorViewportToolbarMenu )
-		: _MenuStyle(&FEditorStyle::Get().GetWidgetStyle<FButtonStyle>("EditorViewportToolBar.MenuButton"))
+	SLATE_BEGIN_ARGS(SEditorViewportToolbarMenu)
+		: _MenuStyle(&FAppStyle::Get().GetWidgetStyle<FButtonStyle>("EditorViewportToolBar.Button"))
+		, _ForegroundColor(FSlateColor::UseStyle())
 	{}
 		/** We need to know about the toolbar we are in */
-		SLATE_ARGUMENT( TSharedPtr<class SViewportToolBar>, ParentToolBar );
+		SLATE_ARGUMENT(TSharedPtr<class SViewportToolBar>, ParentToolBar);
 		/** Style to use */
 		SLATE_STYLE_ARGUMENT(FButtonStyle, MenuStyle)
 		/** The label to show in the menu */
-		SLATE_ATTRIBUTE( FText, Label )
+		SLATE_ATTRIBUTE(FText, Label)
 		/** Optional icon to display next to the label */
-		SLATE_ATTRIBUTE( const FSlateBrush*, LabelIcon )
+		SLATE_ATTRIBUTE(const FSlateBrush*, LabelIcon)
 		/** The image to show in the menu.  If both the label and image are valid, the button image is used.  Note that if this image is used, the label icon will not be displayed. */
-		SLATE_ARGUMENT( FName, Image )
+		SLATE_ARGUMENT(FName, Image)
 		/** Content to show in the menu */
-		SLATE_EVENT( FOnGetContent, OnGetMenuContent )
+		SLATE_EVENT(FOnGetContent, OnGetMenuContent)
+		/** The foreground color of the content */
+		SLATE_ATTRIBUTE(FSlateColor, ForegroundColor)
+		/** Where the menu is spawned relative to the menu button */
+		SLATE_ARGUMENT_DEFAULT(EMenuPlacement, MenuPlacement) = EMenuPlacement::MenuPlacement_BelowAnchor;
 	SLATE_END_ARGS()
 
 	/**
 	 * Constructs the menu
 	 */
-	void Construct( const FArguments& Declaration );
+	UNREALED_API void Construct( const FArguments& Declaration );
 
 	/**
 	 * Returns parent tool bar
 	 */
-	TWeakPtr<class SViewportToolBar> GetParentToolBar() const;
+	UNREALED_API TWeakPtr<class SViewportToolBar> GetParentToolBar() const;
+
+	/**
+	 * @return true if this menu is open
+	 */
+	UNREALED_API bool IsMenuOpen() const;
 
 private:
 	/**
@@ -72,7 +89,7 @@ private:
 	 * Called when the mouse enters a menu button.  If there was a menu previously opened
 	 * we open this menu automatically
 	 */
-	void OnMouseEnter( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent );
+	UNREALED_API void OnMouseEnter( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent );
 
 	EVisibility GetLabelIconVisibility() const;
 
@@ -82,6 +99,16 @@ protected:
 
 	/** Name of tool menu */
 	FName MenuName;
+
+	/**
+	 * Called to query the tool tip text for this widget, but will return an empty text for menu bar items
+	 * when a menu for that menu bar is already open
+	 *
+	 * @param	ToolTipText	Tool tip text to display, if possible
+	 *
+	 * @return	Tool tip text, or an empty text if filtered out
+	 */
+	UNREALED_API FText GetFilteredToolTipText(TAttribute<FText> ToolTipText) const;
 
 private:
 	/** Our menus anchor */

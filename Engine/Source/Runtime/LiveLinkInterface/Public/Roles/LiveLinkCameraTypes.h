@@ -17,7 +17,7 @@ enum class ELiveLinkCameraProjectionMode : uint8
  * Static data for Camera data. 
  */
 USTRUCT(BlueprintType)
-struct LIVELINKINTERFACE_API FLiveLinkCameraStaticData : public FLiveLinkTransformStaticData
+struct FLiveLinkCameraStaticData : public FLiveLinkTransformStaticData
 {
 	GENERATED_BODY()
 
@@ -54,13 +54,17 @@ public:
 	//Whether FocusDistance in frame data can be used
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LiveLink")
 	bool bIsFocusDistanceSupported = false;
+
+	//Set to false to force the camera to disable depth of field
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LiveLink")
+	bool bIsDepthOfFieldSupported = true;
 };
 
 /**
  * Dynamic data for camera 
  */
 USTRUCT(BlueprintType)
-struct LIVELINKINTERFACE_API FLiveLinkCameraFrameData : public FLiveLinkTransformFrameData
+struct FLiveLinkCameraFrameData : public FLiveLinkTransformFrameData
 {
 	GENERATED_BODY()
 
@@ -93,7 +97,7 @@ struct LIVELINKINTERFACE_API FLiveLinkCameraFrameData : public FLiveLinkTransfor
  * Facility structure to handle camera data in blueprint
  */
 USTRUCT(BlueprintType)
-struct LIVELINKINTERFACE_API FLiveLinkCameraBlueprintData : public FLiveLinkBaseBlueprintData
+struct FLiveLinkCameraBlueprintData : public FLiveLinkBaseBlueprintData
 {
 	GENERATED_BODY()
 	

@@ -2,6 +2,8 @@
 
 #include "LevelSequenceBurnIn.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(LevelSequenceBurnIn)
+
 ULevelSequenceBurnIn::ULevelSequenceBurnIn( const FObjectInitializer& ObjectInitializer )
 	: Super(ObjectInitializer)
 {
@@ -10,10 +12,11 @@ ULevelSequenceBurnIn::ULevelSequenceBurnIn( const FObjectInitializer& ObjectInit
 void ULevelSequenceBurnIn::TakeSnapshotsFrom(ALevelSequenceActor& InActor)
 {
 	LevelSequenceActor = &InActor;
-	if (ensure(InActor.SequencePlayer))
+	ULevelSequencePlayer* SequencePlayer = InActor.GetSequencePlayer();
+	if (ensure(SequencePlayer))
 	{
-		InActor.SequencePlayer->OnSequenceUpdated().AddUObject(this, &ULevelSequenceBurnIn::OnSequenceUpdated);
-		InActor.SequencePlayer->TakeFrameSnapshot(FrameInformation);
+		SequencePlayer->OnSequenceUpdated().AddUObject(this, &ULevelSequenceBurnIn::OnSequenceUpdated);
+		SequencePlayer->TakeFrameSnapshot(FrameInformation);
 	}
 }
 
@@ -21,3 +24,4 @@ void ULevelSequenceBurnIn::OnSequenceUpdated(const UMovieSceneSequencePlayer& Pl
 {
 	static_cast<const ULevelSequencePlayer&>(Player).TakeFrameSnapshot(FrameInformation);
 }
+

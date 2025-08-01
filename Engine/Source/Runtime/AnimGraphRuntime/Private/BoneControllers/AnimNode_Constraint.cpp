@@ -3,9 +3,12 @@
 #include "BoneControllers/AnimNode_Constraint.h"
 #include "AnimationCoreLibrary.h"
 #include "AnimationRuntime.h"
+#include "Animation/AnimStats.h"
 #include "SceneManagement.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Animation/AnimTrace.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNode_Constraint)
 
 /////////////////////////////////////////////////////
 // FAnimNode_Constraint
@@ -38,6 +41,8 @@ void FAnimNode_Constraint::GatherDebugData(FNodeDebugData& DebugData)
 void FAnimNode_Constraint::EvaluateSkeletalControl_AnyThread(FComponentSpacePoseContext& Output, TArray<FBoneTransform>& OutBoneTransforms)
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_ANIMNODE(EvaluateSkeletalControl_AnyThread)
+	ANIM_MT_SCOPE_CYCLE_COUNTER_VERBOSE(Constraint, !IsInGameThread());
+
  	const FBoneContainer& BoneContainer = Output.Pose.GetPose().GetBoneContainer();
 	const int32 ConstraintNum = ConstraintSetup.Num();
 #if WITH_EDITOR
@@ -164,3 +169,4 @@ void FAnimNode_Constraint::ConditionalDebugDraw(FPrimitiveDrawInterface* PDI, US
 	}
 }
 #endif // WITH_EDITOR
+

@@ -1,12 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "AnimModel.h"
+#include "AnimTimeline/AnimModel.h"
 #include "IPersonaPreviewScene.h"
 #include "Animation/DebugSkelMeshComponent.h"
 #include "AnimPreviewInstance.h"
 #include "Preferences/PersonaOptions.h"
 #include "Animation/EditorAnimBaseObj.h"
-#include "AnimTimelineTrack.h"
+#include "AnimTimeline/AnimTimelineTrack.h"
 #include "Animation/AnimSequence.h"
 
 #define LOCTEXT_NAMESPACE "FAnimModel"
@@ -14,10 +14,10 @@
 const FAnimModel::FSnapType FAnimModel::FSnapType::Frames("Frames", LOCTEXT("FramesSnapName", "Frames"), [](const FAnimModel& InModel, double InTime)
 {
 	// Round to nearest frame
-	double FrameRate = InModel.GetFrameRate();
-	if(FrameRate > 0)
+	FFrameRate FrameRate = InModel.GetFrameRate();
+	if(FrameRate.IsValid())
 	{
-		return FMath::RoundToDouble(InTime * FrameRate) / FrameRate;
+		return (double)FrameRate.AsFrameNumber(InTime).Value;
 	}
 	
 	return InTime;
@@ -52,27 +52,20 @@ FAnimatedRange FAnimModel::GetWorkingRange() const
 	return WorkingRange;
 }
 
-double FAnimModel::GetFrameRate() const
+FFrameRate FAnimModel::GetFrameRate() const
 {
-	if(UAnimSequence* AnimSequence = Cast<UAnimSequence>(GetAnimSequenceBase()))
-	{
-		return (double)AnimSequence->GetFrameRate();
-	}
-	else
-	{
-		return 30.0;
-	}
+	return GetAnimSequenceBase()->GetSamplingFrameRate();
 }
 
 int32 FAnimModel::GetTickResolution() const
 {
-	return FMath::RoundToInt((double)GetDefault<UPersonaOptions>()->TimelineScrubSnapValue * GetFrameRate());
+	return FMath::RoundToInt32((double)GetDefault<UPersonaOptions>()->TimelineScrubSnapValue * GetFrameRate().AsDecimal());
 }
 
 TRange<FFrameNumber> FAnimModel::GetPlaybackRange() const
 {
 	const int32 Resolution = GetTickResolution();
-	return TRange<FFrameNumber>(FFrameNumber(FMath::RoundToInt(PlaybackRange.GetLowerBoundValue() * (double)Resolution)), FFrameNumber(FMath::RoundToInt(PlaybackRange.GetUpperBoundValue() * (double)Resolution)));
+	return TRange<FFrameNumber>(FFrameNumber(FMath::RoundToInt32(PlaybackRange.GetLowerBoundValue() * (double)Resolution)), FFrameNumber(FMath::RoundToInt32(PlaybackRange.GetUpperBoundValue() * (double)Resolution)));
 }
 
 FFrameNumber FAnimModel::GetScrubPosition() const
@@ -82,7 +75,7 @@ FFrameNumber FAnimModel::GetScrubPosition() const
 		UDebugSkelMeshComponent* PreviewMeshComponent = WeakPreviewScene.Pin()->GetPreviewMeshComponent();
 		if(PreviewMeshComponent && PreviewMeshComponent->IsPreviewOn())
 		{
-			return FFrameNumber(FMath::RoundToInt(PreviewMeshComponent->PreviewInstance->GetCurrentTime() * (double)GetTickResolution()));
+			return FFrameNumber(FMath::RoundToInt32(PreviewMeshComponent->PreviewInstance->GetCurrentTime() * (double)GetTickResolution()));
 		}
 	}
 
@@ -110,7 +103,12 @@ void FAnimModel::SetScrubPosition(FFrameTime NewScrubPostion) const
 		UDebugSkelMeshComponent* PreviewMeshComponent = WeakPreviewScene.Pin()->GetPreviewMeshComponent();
 		if(PreviewMeshComponent && PreviewMeshComponent->IsPreviewOn())
 		{
-			PreviewMeshComponent->PreviewInstance->SetPosition(NewScrubPostion.AsDecimal() / (double)GetTickResolution());
+			if(PreviewMeshComponent->PreviewInstance->IsPlaying())
+			{
+				PreviewMeshComponent->PreviewInstance->SetPlaying(false);
+			}
+			
+			PreviewMeshComponent->PreviewInstance->SetPosition(static_cast<float>(NewScrubPostion.AsDecimal() / static_cast<double>(GetTickResolution())));
 		}
 	}
 }
@@ -139,7 +137,7 @@ void FAnimModel::HandleWorkingRangeChanged(TRange<double> InRange)
 	WorkingRange = InRange;
 }
 
-bool FAnimModel::IsTrackSelected(const TSharedRef<FAnimTimelineTrack>& InTrack) const
+bool FAnimModel::IsTrackSelected(const TSharedRef<const FAnimTimelineTrack>& InTrack) const
 { 
 	return SelectedTracks.Find(InTrack) != nullptr;
 }
@@ -220,7 +218,7 @@ float FAnimModel::CalculateSequenceLengthOfEditorObject() const
 {
 	if(UAnimSequenceBase* AnimSequenceBase = GetAnimSequenceBase())
 	{
-		return AnimSequenceBase->SequenceLength;
+		return AnimSequenceBase->GetPlayLength();
 	}
 
 	return 0.0f;
@@ -243,9 +241,9 @@ void FAnimModel::SetEditableTime(int32 TimeIndex, double Time, bool bIsDragging)
 
 bool FAnimModel::Snap(float& InOutTime, float InSnapMargin, TArrayView<const FName> InSkippedSnapTypes) const
 {
-	double DoubleTime = (double)InOutTime;
+	double DoubleTime = InOutTime;
 	bool bResult = Snap(DoubleTime, (double)InSnapMargin, InSkippedSnapTypes);
-	InOutTime = DoubleTime;
+	InOutTime = static_cast<float>(DoubleTime);
 	return bResult;
 }
 
@@ -339,6 +337,33 @@ void FAnimModel::BuildContextMenu(FMenuBuilder& InMenuBuilder)
 	{
 		SelectedItem->AddToContextMenu(InMenuBuilder, ExistingMenuTypes);
 	}
+}
+
+void FAnimModel::AddRootTrack(TSharedRef<FAnimTimelineTrack> InTrack)
+{
+	if (GetMutableDefault<UPersonaOptions>()->GetAllowedAnimationEditorTracks().PassesFilter(InTrack->GetTypeName()))
+	{
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		RootTracks.Add(InTrack);
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	}
+}
+
+void FAnimModel::ClearRootTracks()
+{
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	RootTracks.Empty();
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+}
+
+void FAnimModel::ForEachRootTrack(TFunctionRef<void(FAnimTimelineTrack&)> InFunction)
+{
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	for (TSharedRef<FAnimTimelineTrack>& Track : RootTracks)
+	{
+		InFunction(Track.Get());
+	}
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 #undef LOCTEXT_NAMESPACE

@@ -14,6 +14,7 @@
 #include "UObject/Class.h"
 #include "UObject/Package.h"
 #include "UObject/UnrealType.h"
+#include "UObject/StrongObjectPtr.h"
 #include "InputCoreTypes.h"
 #include "Input/Reply.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
@@ -30,7 +31,7 @@
 #include "Widgets/Text/STextBlock.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Widgets/Input/SButton.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "GameFramework/Actor.h"
 #include "RawIndexBuffer.h"
 #include "Model.h"
@@ -39,7 +40,8 @@
 #include "Settings/LevelEditorViewportSettings.h"
 #include "Settings/LevelEditorMiscSettings.h"
 #include "Engine/Brush.h"
-#include "AssetData.h"
+#include "Engine/GameViewportClient.h"
+#include "AssetRegistry/AssetData.h"
 #include "Editor/EditorEngine.h"
 #include "ISourceControlModule.h"
 #include "Editor/UnrealEdEngine.h"
@@ -78,17 +80,17 @@
 #include "AssetToolsModule.h"
 #include "IContentBrowserSingleton.h"
 #include "ContentBrowserModule.h"
-#include "AssetRegistryModule.h"
-#include "Matinee/MatineeActor.h"
-#include "MatineeExporter.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "FbxExporter.h"
 #include "DesktopPlatformModule.h"
+#include "Elements/Framework/TypedElementList.h"
+#include "Elements/Framework/TypedElementRegistry.h"
+#include "Elements/Framework/TypedElementCommonActions.h"
 #include "SnappingUtils.h"
 #include "AssetSelection.h"
 #include "HighResScreenshot.h"
 #include "ActorEditorUtils.h"
 #include "Editor/ActorPositioning.h"
-#include "Matinee/InterpData.h"
 #include "LandscapeInfo.h"
 #include "LandscapeInfoMap.h"
 #include "Framework/Notifications/NotificationManager.h"
@@ -103,7 +105,10 @@
 #endif
 #include "ActorGroupingUtils.h"
 #include "EdMode.h"
+#include "ILevelEditor.h"
 #include "Subsystems/BrushEditingSubsystem.h"
+#include "Subsystems/EditorActorSubsystem.h"
+#include "Elements/Framework/TypedElementCommonActions.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogUnrealEdSrv, Log, All);
 
@@ -139,7 +144,7 @@ public:
 		this->ChildSlot
 		[
 			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 			[
 				SNew( SVerticalBox )
 				+ SVerticalBox::Slot()
@@ -296,9 +301,9 @@ UPackage* UUnrealEdEngine::GeneratePackageThumbnailsIfRequired( const TCHAR* Str
 			Packages.Add( Pkg );
 
 			// Allocate a new thumbnail map if we need one
-			if( !Pkg->ThumbnailMap )
+			if( !Pkg->HasThumbnailMap() )
 			{
-				Pkg->ThumbnailMap = MakeUnique<FThumbnailMap>();
+				Pkg->SetThumbnailMap(MakeUnique<FThumbnailMap>());
 			}
 
 			// OK, now query all of the browsable objects in the package we're about to save
@@ -352,7 +357,7 @@ UPackage* UUnrealEdEngine::GeneratePackageThumbnailsIfRequired( const TCHAR* Str
 					if( ThumbnailTools::ConditionallyLoadThumbnailsForObjects( ObjectFullNames, LoadedThumbnails ) )
 					{
 						//store off the names of the thumbnails that were loaded as part of a save so we can delete them after the save
-					GeneratedThumbNamesList.Add(ObjectFullNameFName.ToString());
+						GeneratedThumbNamesList.Add(ObjectFullNameFName.ToString());
 
 						if (bPrintThumbnailDiagnostics)
 						{
@@ -612,47 +617,6 @@ bool UUnrealEdEngine::HandleRemoveLandscapeXYOffsetsCommand(const TCHAR* Str, FO
 	return true;
 }
 
-bool UUnrealEdEngine::HandleConvertMatineesCommand( const TCHAR* Str, FOutputDevice& Ar, UWorld* InWorld )
-{
-	FVector StartLocation= FVector::ZeroVector;
-	if( InWorld )
-	{
-		ULevel* Level = InWorld->GetCurrentLevel();
-		if( !Level )
-		{
-			Level = InWorld->PersistentLevel;
-	}
-		check(Level);
-		for( TObjectIterator<UInterpData> It; It; ++It )
-		{
-			UInterpData* InterpData = *It;
-			if( InterpData->IsIn( Level ) ) 
-			{
-				// We dont care about renaming references or adding redirectors.  References to this will be old seqact_interps
-				GEditor->RenameObject( InterpData, Level->GetOutermost(), *InterpData->GetName() );
-
-				AMatineeActor* MatineeActor = Level->OwningWorld->SpawnActor<AMatineeActor>(StartLocation, FRotator::ZeroRotator);
-				StartLocation.Y += 50;
-
-				MatineeActor->MatineeData = InterpData;
-				FProperty* MatineeDataProp = NULL;
-				for( FProperty* Property = MatineeActor->GetClass()->PropertyLink; Property != NULL; Property = Property->PropertyLinkNext )
-				{
-					if( Property->GetName() == TEXT("MatineeData") )
-					{
-						MatineeDataProp = Property;
-						break;
-					}
-				}
-
-				FPropertyChangedEvent PropertyChangedEvent( MatineeDataProp ); 
-				MatineeActor->PostEditChangeProperty( PropertyChangedEvent );
-			}
-		}
-	}
-		return true;
-	}
-
 bool UUnrealEdEngine::HandleDisasmScriptCommand(const TCHAR* Str, FOutputDevice& Ar)
 {
 	FString ClassName;
@@ -665,6 +629,7 @@ bool UUnrealEdEngine::HandleDisasmScriptCommand(const TCHAR* Str, FOutputDevice&
 	return true;
 }
 
+#if UE_ALLOW_EXEC_COMMANDS
 bool UUnrealEdEngine::Exec( UWorld* InWorld, const TCHAR* Stream, FOutputDevice& Ar )
 {
 	const TCHAR* Str = Stream;
@@ -760,6 +725,13 @@ bool UUnrealEdEngine::Exec( UWorld* InWorld, const TCHAR* Stream, FOutputDevice&
 		return Exec_Actor( InWorld, Str, Ar );
 	}
 	//------------------------------------------------------------------------------------
+	// ELEMENT: Element-related functions
+	//
+	else if (FParse::Command(&Str,TEXT("ELEMENT")))
+	{
+		return Exec_Element( InWorld, Str, Ar );
+	}
+	//------------------------------------------------------------------------------------
 	// MODE management (Global EDITOR mode):
 	//
 	else if( FParse::Command(&Str,TEXT("MODE")) )
@@ -796,10 +768,6 @@ bool UUnrealEdEngine::Exec( UWorld* InWorld, const TCHAR* Stream, FOutputDevice&
 		return HandleRemoveLandscapeXYOffsetsCommand(Str, Ar, World);
 	}
 #endif // WITH_EDITOR
-	else if( FParse::Command(&Str, TEXT("CONVERTMATINEES")) )
-	{
-		return HandleConvertMatineesCommand( Str, Ar, InWorld );
-	}
 	else if( FParse::Command(&Str, TEXT("DISASMSCRIPT")) )
 	{
 		return HandleDisasmScriptCommand( Str, Ar );
@@ -827,7 +795,7 @@ bool UUnrealEdEngine::Exec( UWorld* InWorld, const TCHAR* Stream, FOutputDevice&
 		bool bScale = false;
 		bool bScaleRadii = false;
 
-		float Scale = 1.0f;
+		FVector::FReal Scale = 1.0f;
 		FString ScaleStr;
 		FVector ScaleVec( Scale );
 		if(FParse::Value( Str, TEXT("Scale="), ScaleStr, false) && GetFVECTOR( *ScaleStr, ScaleVec ))
@@ -884,26 +852,28 @@ bool UUnrealEdEngine::Exec( UWorld* InWorld, const TCHAR* Stream, FOutputDevice&
 						{
 							const FVector OldLocation = Brush->GetActorLocation();
 							const FVector NewLocation = OldLocation * ScaleVec;
-							Brush->Modify();
+							Brush->Modify(false);
 							Brush->SetActorLocation( NewLocation );
 							
-							Brush->Brush->Modify();
+							Brush->Brush->Modify(false);
 							for( int32 poly = 0 ; poly < Brush->Brush->Polys->Element.Num() ; poly++ )
 							{
 								FPoly* Poly = &(Brush->Brush->Polys->Element[poly]);
 
-								Poly->TextureU /= ScaleVec;
-								Poly->TextureV /= ScaleVec;
-								Poly->Base = ((Poly->Base - Brush->GetPivotOffset()) * ScaleVec) + Brush->GetPivotOffset();
+								Poly->TextureU /= (FVector3f)ScaleVec;
+								Poly->TextureV /= (FVector3f)ScaleVec;
+								Poly->Base = ((Poly->Base - (FVector3f)Brush->GetPivotOffset()) * (FVector3f)ScaleVec) + (FVector3f)Brush->GetPivotOffset();
 
 								for( int32 vtx = 0 ; vtx < Poly->Vertices.Num() ; vtx++ )
 								{
-									Poly->Vertices[vtx] = ((Poly->Vertices[vtx] - Brush->GetPivotOffset()) * ScaleVec) + Brush->GetPivotOffset();
+									Poly->Vertices[vtx] = ((Poly->Vertices[vtx] - (FVector3f)Brush->GetPivotOffset()) * (FVector3f)ScaleVec) + (FVector3f)Brush->GetPivotOffset();
 
 									// "Then snap the vertices new positions by the specified Snap amount"
 									if ( bSnap )
 									{
-										FSnappingUtils::SnapPointToGrid( Poly->Vertices[vtx], FVector(0, 0, 0) );
+										FVector VPos = (FVector)Poly->Vertices[vtx];	// LWC_TODO: Perf pessimization
+										FSnappingUtils::SnapPointToGrid( VPos, FVector(0, 0, 0) );
+										Poly->Vertices[vtx] = (FVector3f)VPos;
 									}
 								}
 
@@ -1222,6 +1192,8 @@ bool UUnrealEdEngine::Exec( UWorld* InWorld, const TCHAR* Stream, FOutputDevice&
 	}
 	else if( FParse::Command(&Str, TEXT("HighResShot") ) )
 	{
+		// this is HighResShot from the Editor NOT in PIE
+		// Editor PIE HighResShot is in GameViewportClient
 		if (GetHighResScreenshotConfig().ParseConsoleCommand(Str, Ar))
 		{
 			TakeHighResScreenShots();
@@ -1272,7 +1244,7 @@ bool UUnrealEdEngine::Exec( UWorld* InWorld, const TCHAR* Stream, FOutputDevice&
 						//Strip off the * from the end if it exists
 						if( CurrentWindowName.EndsWith(TEXT("*"), ESearchCase::CaseSensitive) )
 						{
-							CurrentWindowName.LeftChopInline(1, false);
+							CurrentWindowName.LeftChopInline(1, EAllowShrinking::No);
 						}
 
 						if( CurrentWindowName == WindowNameStr )
@@ -1295,6 +1267,7 @@ bool UUnrealEdEngine::Exec( UWorld* InWorld, const TCHAR* Stream, FOutputDevice&
 	}
 	return false;
 }
+#endif // UE_ALLOW_EXEC_COMMANDS
 
 bool UUnrealEdEngine::AnyWorldsAreDirty( UWorld* InWorld ) const
 {
@@ -1345,9 +1318,9 @@ bool UUnrealEdEngine::AnyContentPackagesAreDirty() const
 
 bool UUnrealEdEngine::IsTemplateMap( const FString& MapName ) const
 {
-	for (TArray<FTemplateMapInfo>::TConstIterator It(TemplateMapInfos); It; ++It)
+	for (const FTemplateMapInfo& It : GetTemplateMapInfos())
 	{
-		if (It->Map == MapName)
+		if (It.Map.GetLongPackageName() == MapName)
 		{
 			return true;
 		}
@@ -1523,13 +1496,50 @@ bool UUnrealEdEngine::Exec_Edit( UWorld* InWorld, const TCHAR* Str, FOutputDevic
 			return true;
 		}
 
-		if (bComponentsSelected)
+		if (TypedElementCommonActionsUtils::IsElementCopyAndPasteEnabled())
+		{
+			if (GCurrentLevelEditingViewportClient)
+			{
+				if (TSharedPtr<ILevelEditor> LevelEditor = GCurrentLevelEditingViewportClient->ParentLevelEditor.Pin())
+				{
+					if (UTypedElementCommonActions* CommonActions = LevelEditor->GetCommonActions())
+					{
+						// End drags to avoid deleting something out from under one.
+						FSlateApplication::Get().CancelDragDrop();
+
+						const FScopedTransaction Transaction(NSLOCTEXT("UnrealEd", "Cut", "Cut"));
+
+						UTypedElementSelectionSet* SelectionSet = LevelEditor->GetMutableElementSelectionSet();
+
+						if (!bComponentsSelected)
+						{
+							FEditorDelegates::OnEditCutActorsBegin.Broadcast();
+						}
+
+						CommonActions->CopySelectedElements(SelectionSet);
+						const bool bCheckRef = GetDefault<ULevelEditorMiscSettings>()->bCheckReferencesOnDelete;
+						FTypedElementDeletionOptions Options;
+						Options
+							.SetWarnAboutReferences(bCheckRef)
+							.SetWarnAboutSoftReferences(bCheckRef);
+						CommonActions->DeleteSelectedElements(SelectionSet, InWorld, Options);
+
+						if (!bComponentsSelected)
+						{
+							FEditorDelegates::OnEditCutActorsEnd.Broadcast();
+						}
+					}
+				}
+			}
+		}
+		else if (bComponentsSelected)
 		{
 			// Same transaction language used in CopySelectedActorsToClipboard below
 			const FScopedTransaction Transaction(NSLOCTEXT("UnrealEd", "Cut", "Cut"));
 
 			edactCopySelected(InWorld);
-			edactDeleteSelected(InWorld);
+			const bool bCheckRef = GetDefault<ULevelEditorMiscSettings>()->bCheckReferencesOnDelete;
+			edactDeleteSelected(InWorld, true, bCheckRef, bCheckRef);
 		}
 		else
 		{
@@ -1546,7 +1556,32 @@ bool UUnrealEdEngine::Exec_Edit( UWorld* InWorld, const TCHAR* Str, FOutputDevic
 			return true;
 		}
 
-		if (bComponentsSelected)
+		if (TypedElementCommonActionsUtils::IsElementCopyAndPasteEnabled())
+		{
+			if (GCurrentLevelEditingViewportClient)
+			{
+				if (TSharedPtr<ILevelEditor> LevelEditor = GCurrentLevelEditingViewportClient->ParentLevelEditor.Pin())
+				{
+					if (UTypedElementCommonActions* CommonActions = LevelEditor->GetCommonActions())
+					{
+						UTypedElementSelectionSet* SelectionSet = LevelEditor->GetMutableElementSelectionSet();
+
+						if (!bComponentsSelected)
+						{
+							FEditorDelegates::OnEditCopyActorsBegin.Broadcast();
+						}
+
+						CommonActions->CopySelectedElements(SelectionSet);
+
+						if (!bComponentsSelected)
+						{
+							FEditorDelegates::OnEditCopyActorsEnd.Broadcast();
+						}
+					}
+				}
+			}
+		}
+		else if (bComponentsSelected)
 		{
 			edactCopySelected(InWorld);
 		}
@@ -1564,39 +1599,99 @@ bool UUnrealEdEngine::Exec_Edit( UWorld* InWorld, const TCHAR* Str, FOutputDevic
 			return true;
 		}
 
-		if (bComponentsSelected)
+		bool bImportedElements = false;
+		if (TypedElementCommonActionsUtils::IsElementCopyAndPasteEnabled())
 		{
-			const FScopedTransaction Transaction(NSLOCTEXT("UnrealEd", "PasteComponents", "Paste Components"));
-			edactPasteSelected(InWorld, false, false, true);
-		}
-		else
-		{
-			// How should this paste be handled
-			EPasteTo PasteTo = PT_OriginalLocation;
-			FText TransDescription = NSLOCTEXT("UnrealEd", "Paste", "Paste");
-
-			FString TempStr;
-			if (FParse::Value(Str, TEXT("TO="), TempStr))
+			if (GCurrentLevelEditingViewportClient)
 			{
-				if (!FCString::Strcmp(*TempStr, TEXT("HERE")))
+				if (TSharedPtr<ILevelEditor> LevelEditor = GCurrentLevelEditingViewportClient->ParentLevelEditor.Pin())
 				{
-					PasteTo = PT_Here;
-					TransDescription = NSLOCTEXT("UnrealEd", "PasteHere", "Paste Here");
-				}
-				else
-				{
-					if (!FCString::Strcmp(*TempStr, TEXT("ORIGIN")))
+					if (UTypedElementCommonActions* CommonActions = LevelEditor->GetCommonActions())
 					{
-						PasteTo = PT_WorldOrigin;
-						TransDescription = NSLOCTEXT("UnrealEd", "PasteToWorldOrigin", "Paste To World Origin");
+						FText TransDescription = NSLOCTEXT("UnrealEd", "Paste", "Paste");
+
+						UTypedElementSelectionSet* SelectionSet = LevelEditor->GetMutableElementSelectionSet();
+						FTypedElementPasteOptions PasteOptions;
+						PasteOptions.SelectionSetToModify = SelectionSet;
+
+						FString TempStr;
+						if (FParse::Value(Str, TEXT("TO="), TempStr))
+						{
+							if (!FCString::Strcmp(*TempStr, TEXT("HERE")))
+							{
+								PasteOptions.bPasteAtLocation = true;
+								const FSnappedPositioningData PositioningData = FSnappedPositioningData(GCurrentLevelEditingViewportClient, ClickLocation, ClickPlane)
+									.AlignToSurfaceRotation(false);
+								PasteOptions.PasteLocation = FActorPositioning::GetSnappedSurfaceAlignedTransform(PositioningData).GetLocation();
+
+								TransDescription = NSLOCTEXT("UnrealEd", "PasteHere", "Paste Here");
+							}
+							else
+							{
+								if (!FCString::Strcmp(*TempStr, TEXT("ORIGIN")))
+								{
+									PasteOptions.bPasteAtLocation = true;
+									PasteOptions.PasteLocation = FVector::ZeroVector;
+									TransDescription = NSLOCTEXT("UnrealEd", "PasteToWorldOrigin", "Paste To World Origin");
+								}
+							}
+						}
+
+						
+						const FScopedTransaction Transaction(TransDescription);
+
+						if (!bComponentsSelected)
+						{
+							FEditorDelegates::OnEditPasteActorsBegin.Broadcast();
+						}
+						
+						bImportedElements = !CommonActions->PasteElements(SelectionSet, InWorld, PasteOptions).IsEmpty();
+
+						if (!bComponentsSelected)
+						{
+							FEditorDelegates::OnEditPasteActorsEnd.Broadcast();
+						}
 					}
 				}
 			}
+		}
 
-			const FScopedTransaction Transaction(TransDescription);
-			FEditorDelegates::OnEditPasteActorsBegin.Broadcast();
-			PasteSelectedActorsFromClipboard(InWorld, TransDescription, PasteTo);
-			FEditorDelegates::OnEditPasteActorsEnd.Broadcast();
+		if (!bImportedElements)
+		{ 
+			if (bComponentsSelected)
+			{
+				const FScopedTransaction Transaction(NSLOCTEXT("UnrealEd", "PasteComponents", "Paste Components"));
+				edactPasteSelected(InWorld, false, false, true);
+			}
+			else
+			{
+				// How should this paste be handled
+				EPasteTo PasteTo = PT_OriginalLocation;
+				FText TransDescription = NSLOCTEXT("UnrealEd", "Paste", "Paste");
+
+				FString TempStr;
+				if (FParse::Value(Str, TEXT("TO="), TempStr))
+				{
+					if (!FCString::Strcmp(*TempStr, TEXT("HERE")))
+					{
+						PasteTo = PT_Here;
+						TransDescription = NSLOCTEXT("UnrealEd", "PasteHere", "Paste Here");
+					}
+					else
+					{
+						if (!FCString::Strcmp(*TempStr, TEXT("ORIGIN")))
+						{
+							PasteTo = PT_WorldOrigin;
+							TransDescription = NSLOCTEXT("UnrealEd", "PasteToWorldOrigin", "Paste To World Origin");
+						}
+					}
+				}
+
+				const FScopedTransaction Transaction(TransDescription);
+				FEditorDelegates::OnEditPasteActorsBegin.Broadcast();
+				PasteSelectedActorsFromClipboard(InWorld, TransDescription, PasteTo);
+				FEditorDelegates::OnEditPasteActorsEnd.Broadcast();
+			}
 		}
 	}
 
@@ -1647,7 +1742,7 @@ bool UUnrealEdEngine::Exec_Pivot( const TCHAR* Str, FOutputDevice& Ar )
 					{
 						for (const auto& Vertex : Element.Vertices)
 						{
-							UniqueVertices.Add(Vertex);
+							UniqueVertices.Add((FVector)Vertex);
 						}
 					}
 
@@ -1689,45 +1784,6 @@ bool UUnrealEdEngine::Exec_Pivot( const TCHAR* Str, FOutputDevice& Ar )
 
 	return false;
 }
-
-static void MirrorActors(const FVector& MirrorScale)
-{
-	const FScopedTransaction Transaction( NSLOCTEXT("UnrealEd", "MirroringActors", "Mirroring Actors") );
-
-	// Fires ULevel::LevelDirtiedEvent when falling out of scope.
-	FScopedLevelDirtied		LevelDirtyCallback;
-
-	for ( FSelectionIterator It( GEditor->GetSelectedActorIterator() ) ; It ; ++It )
-	{
-		AActor* Actor = static_cast<AActor*>( *It );
-		checkSlow( Actor->IsA(AActor::StaticClass()) );
-
-		const FVector PivotLocation = GLevelEditorModeTools().PivotLocation;
-
-		Actor->Modify();
-		Actor->EditorApplyMirror( MirrorScale, PivotLocation );
-
-		ABrush* Brush = Cast< ABrush >(Actor);
-		if (Brush && Brush->GetBrushComponent())
-		{
-			Brush->GetBrushComponent()->RequestUpdateBrushCollision();
-		}
-
-		Actor->InvalidateLightingCache();
-		Actor->PostEditMove( true );
-
-		Actor->MarkPackageDirty();
-		LevelDirtyCallback.Request();
-	}
-
-	if (UBrushEditingSubsystem* BrushSubsystem = GEditor->GetEditorSubsystem<UBrushEditingSubsystem>())
-	{
-		BrushSubsystem->UpdateGeometryFromSelectedBrushes();
-	}
-
-	GEditor->RedrawLevelEditingViewports();
-}
-
 
 /**
 * Gathers up a list of selection FPolys from selected static meshes.
@@ -1779,9 +1835,9 @@ TArray<FPoly*> GetSelectedPolygons()
 							Polygon->Init();
 							Polygon->PolyFlags = PF_DefaultFlags;
 
-							new(Polygon->Vertices) FVector(ActorToWorld.TransformPosition( PositionVertexBuffer.VertexPosition(Idx2) ));
-							new(Polygon->Vertices) FVector(ActorToWorld.TransformPosition( PositionVertexBuffer.VertexPosition(Idx1) ));
-							new(Polygon->Vertices) FVector(ActorToWorld.TransformPosition( PositionVertexBuffer.VertexPosition(Idx0) ));
+							new(Polygon->Vertices) FVector3f(ActorToWorld.TransformPosition( (FVector)PositionVertexBuffer.VertexPosition(Idx2) ));
+							new(Polygon->Vertices) FVector3f(ActorToWorld.TransformPosition( (FVector)PositionVertexBuffer.VertexPosition(Idx1) ));
+							new(Polygon->Vertices) FVector3f(ActorToWorld.TransformPosition( (FVector)PositionVertexBuffer.VertexPosition(Idx0) ));
 
 							Polygon->CalcNormal(1);
 							Polygon->Fix();
@@ -1798,9 +1854,9 @@ TArray<FPoly*> GetSelectedPolygons()
 							Polygon->Init();
 							Polygon->PolyFlags = PF_DefaultFlags;
 
-							new(Polygon->Vertices) FVector(ActorToWorld.TransformPosition( PositionVertexBuffer.VertexPosition(Idx2) ));
-							new(Polygon->Vertices) FVector(ActorToWorld.TransformPosition( PositionVertexBuffer.VertexPosition(Idx0) ));
-							new(Polygon->Vertices) FVector(ActorToWorld.TransformPosition( PositionVertexBuffer.VertexPosition(Idx1) ));
+							new(Polygon->Vertices) FVector3f(ActorToWorld.TransformPosition( (FVector)PositionVertexBuffer.VertexPosition(Idx2) ));
+							new(Polygon->Vertices) FVector3f(ActorToWorld.TransformPosition( (FVector)PositionVertexBuffer.VertexPosition(Idx0) ));
+							new(Polygon->Vertices) FVector3f(ActorToWorld.TransformPosition( (FVector)PositionVertexBuffer.VertexPosition(Idx1) ));
 							Polygon->CalcNormal(1);
 							Polygon->Fix();
 							if( Polygon->Vertices.Num() > 2 )
@@ -1845,11 +1901,11 @@ void CreateBoundingBoxBuilderBrush( UWorld* InWorld, const TArray<FPoly*> Select
 		{
 			if( bSnapVertsToGrid )
 			{
-				Vertex = Poly->Vertices[v].GridSnap(GEditor->GetGridSize());
+				Vertex = (FVector)Poly->Vertices[v].GridSnap(GEditor->GetGridSize());
 			}
 			else
 			{
-				Vertex = Poly->Vertices[v];
+				Vertex = (FVector)Poly->Vertices[v];
 			}
 
 			BBox += Vertex;
@@ -1897,18 +1953,18 @@ FPoly* CreateHugeTrianglePolygonOnPlane( const FPlane* InPlane )
 	FPoly* Triangle = new FPoly();
 
 	FVector Center = FVector( InPlane->X, InPlane->Y, InPlane->Z ) * InPlane->W;
-	FVector V0 = Center + (A * WORLD_MAX);
-	FVector V1 = Center + (B * WORLD_MAX);
-	FVector V2 = Center - (((A + B) / 2.0f) * WORLD_MAX);
+	FVector V0 = Center + (A * UE_OLD_WORLD_MAX);	// LWC_TODO: WORLD_MAX misuse?
+	FVector V1 = Center + (B * UE_OLD_WORLD_MAX);
+	FVector V2 = Center - (((A + B) / 2.0f) * UE_OLD_WORLD_MAX);
 
 	// Create a triangle that lays on InPlane
 
 	Triangle->Init();
 	Triangle->PolyFlags = PF_DefaultFlags;
 
-	new(Triangle->Vertices) FVector( V0 );
-	new(Triangle->Vertices) FVector( V2 );
-	new(Triangle->Vertices) FVector( V1 );
+	new(Triangle->Vertices) FVector3f( V0 );
+	new(Triangle->Vertices) FVector3f( V2 );
+	new(Triangle->Vertices) FVector3f( V1 );
 
 	Triangle->CalcNormal(1);
 	Triangle->Fix();
@@ -1932,7 +1988,7 @@ bool UUnrealEdEngine::Exec_Actor( UWorld* InWorld, const TCHAR* Str, FOutputDevi
 	if( FParse::Command(&Str,TEXT("ADD")) )
 	{
 		UClass* Class;
-		if( ParseObject<UClass>( Str, TEXT("CLASS="), Class, ANY_PACKAGE ) )
+		if( ParseObject<UClass>( Str, TEXT("CLASS="), Class, nullptr ) )
 		{
 			int32 bSnap = 1;
 			FParse::Value(Str,TEXT("SNAP="),bSnap);
@@ -1948,7 +2004,7 @@ bool UUnrealEdEngine::Exec_Actor( UWorld* InWorld, const TCHAR* Str, FOutputDevi
 	else if( FParse::Command(&Str,TEXT("CREATE_BV_BOUNDINGBOX")) )
 	{
 		const FScopedTransaction Transaction( NSLOCTEXT("UnrealEd", "CreateBoundingBoxBlockingVolume", "Create Bounding Box Blocking Volume") );
-		InWorld->GetDefaultBrush()->Modify();
+		InWorld->GetDefaultBrush()->Modify(false);
 
 		bool bSnapToGrid=0;
 		FParse::Bool( Str, TEXT("SNAPTOGRID="), bSnapToGrid );
@@ -1979,7 +2035,7 @@ bool UUnrealEdEngine::Exec_Actor( UWorld* InWorld, const TCHAR* Str, FOutputDevi
 	else if( FParse::Command(&Str,TEXT("CREATE_BV_CONVEXVOLUME")) )
 	{
 		const FScopedTransaction Transaction( NSLOCTEXT("UnrealEd", "CreateConvexBlockingVolume", "Create Convex Blocking Volume") );
-		InWorld->GetDefaultBrush()->Modify();
+		InWorld->GetDefaultBrush()->Modify(false);
 
 		bool bSnapToGrid=0;
 		FParse::Bool( Str, TEXT("SNAPTOGRID="), bSnapToGrid );
@@ -1993,7 +2049,7 @@ bool UUnrealEdEngine::Exec_Actor( UWorld* InWorld, const TCHAR* Str, FOutputDevi
 		float NormalTolerance = 0.25f;
 		FParse::Value( Str, TEXT("NORMALTOLERANCE="), NormalTolerance );
 
-		FVector NormalLimits( 1.0f, 1.0f, 1.0f );
+		FVector3f NormalLimits( 1.0f, 1.0f, 1.0f );
 		FParse::Value( Str, TEXT("NLIMITX="), NormalLimits.X );
 		FParse::Value( Str, TEXT("NLIMITY="), NormalLimits.Y );
 		FParse::Value( Str, TEXT("NLIMITZ="), NormalLimits.Z );
@@ -2017,7 +2073,7 @@ bool UUnrealEdEngine::Exec_Actor( UWorld* InWorld, const TCHAR* Str, FOutputDevi
 			// Get a splitting plane from the first poly in our selection
 
 			poly = SelectedPolys[p];
-			FPlane* SplittingPlane = new FPlane( poly->Vertices[0], poly->Normal );
+			FPlane* SplittingPlane = new FPlane( (FVector)poly->Vertices[0], (FVector)poly->Normal );
 
 			// Make sure this poly doesn't clip any other polys in the selection.  If it does, we can't use it for generating the convex volume.
 
@@ -2111,7 +2167,7 @@ bool UUnrealEdEngine::Exec_Actor( UWorld* InWorld, const TCHAR* Str, FOutputDevi
 				poly = &(*BuilderBrushPolys)[bp];
 
 				FPoly Front, Back;
-				int res = poly->SplitWithPlane( FVector( plane->X, plane->Y, plane->Z ) * plane->W, plane->GetSafeNormal(), &Front, &Back, true );
+				int res = poly->SplitWithPlane( FVector3f( plane->X, plane->Y, plane->Z ) * plane->W, (FVector3f)plane->GetSafeNormal(), &Front, &Back, true );
 				switch( res )
 				{
 					// Ignore these results.  We don't want them.
@@ -2159,10 +2215,10 @@ bool UUnrealEdEngine::Exec_Actor( UWorld* InWorld, const TCHAR* Str, FOutputDevi
 					for( int bp = 0 ; bp < BuilderBrushPolys->Num() ; ++bp )
 					{
 						poly = &((*BuilderBrushPolys)[bp]);
-						plane = new FPlane( poly->Vertices[0], poly->Vertices[1], poly->Vertices[2] );
+						plane = new FPlane((FVector)poly->Vertices[0], (FVector)poly->Vertices[1], (FVector)poly->Vertices[2] );
 
 						FPoly Front, Back;
-						int res = CappingPoly->SplitWithPlane( FVector( plane->X, plane->Y, plane->Z ) * plane->W, plane->GetSafeNormal(), &Front, &Back, true );
+						int res = CappingPoly->SplitWithPlane( FVector3f( plane->X, plane->Y, plane->Z ) * plane->W, (FVector3f)plane->GetSafeNormal(), &Front, &Back, true );
 						switch( res )
 						{
 							case SP_Split:
@@ -2227,9 +2283,13 @@ bool UUnrealEdEngine::Exec_Actor( UWorld* InWorld, const TCHAR* Str, FOutputDevi
 		if( !MirrorScale.Y )		MirrorScale.Y = 1;
 		if( !MirrorScale.Z )		MirrorScale.Z = 1;
 
-		const FScopedTransaction Transaction(NSLOCTEXT("UnrealEd", "MirroringActors", "Mirroring Actors"));
-		MirrorActors(MirrorScale);
-		RebuildAlteredBSP(); // Update the Bsp of any levels containing a modified brush
+		if (GCurrentLevelEditingViewportClient)
+		{
+			const FScopedTransaction Transaction(NSLOCTEXT("UnrealEd", "MirroringActors", "Mirroring Actors"));
+			GCurrentLevelEditingViewportClient->MirrorSelectedActors(MirrorScale);
+			RebuildAlteredBSP(); // Update the Bsp of any levels containing a modified brush
+		}
+
 		return true;
 	}
 	else if( FParse::Command(&Str,TEXT("DELTAMOVE")) )
@@ -2238,14 +2298,17 @@ bool UUnrealEdEngine::Exec_Actor( UWorld* InWorld, const TCHAR* Str, FOutputDevi
 		FVector DeltaMove = FVector::ZeroVector;
 		GetFVECTOR( Str, DeltaMove );
 
-		FEditorModeTools& Tools = GLevelEditorModeTools();
-		Tools.SetPivotLocation( Tools.PivotLocation + DeltaMove, false );
-
 		if (GCurrentLevelEditingViewportClient)
 		{
+			if (TSharedPtr<ILevelEditor> LevelEditor = GCurrentLevelEditingViewportClient->ParentLevelEditor.Pin())
+			{
+				FEditorModeTools& Tools = LevelEditor->GetEditorModeManager();
+				Tools.SetPivotLocation(Tools.PivotLocation + DeltaMove, false);
+			}
+
 			GCurrentLevelEditingViewportClient->ApplyDeltaToActors(DeltaMove, FRotator::ZeroRotator, FVector::ZeroVector);
+			RedrawLevelEditingViewports();
 		}
-		RedrawLevelEditingViewports();
 
 		return true;
 	}
@@ -2321,7 +2384,7 @@ bool UUnrealEdEngine::Exec_Actor( UWorld* InWorld, const TCHAR* Str, FOutputDevi
 			edactReplaceSelectedBrush( InWorld );
 			return true;
 		}
-		else if( ParseObject<UClass>( Str, TEXT("CLASS="), Class, ANY_PACKAGE ) ) // ACTOR REPLACE CLASS=<class>
+		else if( ParseObject<UClass>( Str, TEXT("CLASS="), Class, nullptr ) ) // ACTOR REPLACE CLASS=<class>
 		{
 			const FScopedTransaction Transaction( NSLOCTEXT("UnrealEd", "ReplaceSelectedNonBrushActors", "Replace Selected Non-Brush Actors") );
 			edactReplaceSelectedNonBrushWithClass( Class );
@@ -2375,20 +2438,33 @@ bool UUnrealEdEngine::Exec_Actor( UWorld* InWorld, const TCHAR* Str, FOutputDevi
 			}
 			else if( FParse::Command(&Str, TEXT("CHILDREN")) ) // ACTOR SELECT ALL CHILDREN
 			{
-				const FScopedTransaction Transaction( NSLOCTEXT("UnrealEd", "SelectAllChildren", "Select All Children") );
-				edactSelectAllChildren( false );
+				UEditorActorSubsystem* EditorActorSubsystem = GEditor->GetEditorSubsystem<UEditorActorSubsystem>();
+
+				if (EditorActorSubsystem)
+				{
+					EditorActorSubsystem->SelectAllChildren(false);
+				}
+				
 				return true;
 			}
 			else if( FParse::Command(&Str, TEXT("DESCENDANTS")) ) // ACTOR SELECT ALL DESCENDANTS
 			{
-				const FScopedTransaction Transaction( NSLOCTEXT("UnrealEd", "SelectAllDescendants", "Select All Descendants") );
-				edactSelectAllChildren( true );
+				UEditorActorSubsystem* EditorActorSubsystem = GEditor->GetEditorSubsystem<UEditorActorSubsystem>();
+
+				if (EditorActorSubsystem)
+				{
+					EditorActorSubsystem->SelectAllChildren(true);
+				}
 				return true;
 			}
 			else
 			{
-				const FScopedTransaction Transaction( NSLOCTEXT("UnrealEd", "SelectAll", "Select All") );
-				edactSelectAll( InWorld );
+				UEditorActorSubsystem* EditorActorSubsystem = GEditor->GetEditorSubsystem<UEditorActorSubsystem>();
+
+				if (EditorActorSubsystem)
+				{
+					EditorActorSubsystem->SelectAll(InWorld);
+				}
 				return true;
 			}
 		}
@@ -2398,14 +2474,18 @@ bool UUnrealEdEngine::Exec_Actor( UWorld* InWorld, const TCHAR* Str, FOutputDevi
 		}
 		else if( FParse::Command(&Str,TEXT("INVERT") ) ) // ACTOR SELECT INVERT
 		{
-			const FScopedTransaction Transaction( NSLOCTEXT("UnrealEd", "SelectInvert", "Select Invert") );
-			edactSelectInvert( InWorld );
+			UEditorActorSubsystem* EditorActorSubsystem = GEditor->GetEditorSubsystem<UEditorActorSubsystem>();
+
+			if (EditorActorSubsystem)
+			{
+				EditorActorSubsystem->InvertSelection(InWorld);
+			}
 			return true;
 		}
 		else if( FParse::Command(&Str,TEXT("OFCLASS")) ) // ACTOR SELECT OFCLASS CLASS=<class>
 		{
 			UClass* Class;
-			if( ParseObject<UClass>(Str,TEXT("CLASS="),Class,ANY_PACKAGE) )
+			if( ParseObject<UClass>(Str,TEXT("CLASS="),Class,nullptr) )
 			{
 				const FScopedTransaction Transaction( NSLOCTEXT("UnrealEd", "SelectOfClass", "Select Of Class") );
 				edactSelectOfClass( InWorld, Class );
@@ -2419,7 +2499,7 @@ bool UUnrealEdEngine::Exec_Actor( UWorld* InWorld, const TCHAR* Str, FOutputDevi
 		else if( FParse::Command(&Str,TEXT("OFSUBCLASS")) ) // ACTOR SELECT OFSUBCLASS CLASS=<class>
 		{
 			UClass* Class;
-			if( ParseObject<UClass>(Str,TEXT("CLASS="),Class,ANY_PACKAGE) )
+			if( ParseObject<UClass>(Str,TEXT("CLASS="),Class,nullptr) )
 			{
 				const FScopedTransaction Transaction( NSLOCTEXT("UnrealEd", "SelectSubclassOfClass", "Select Subclass Of Class") );
 				edactSelectSubclassOf( InWorld, Class );
@@ -2432,7 +2512,7 @@ bool UUnrealEdEngine::Exec_Actor( UWorld* InWorld, const TCHAR* Str, FOutputDevi
 		}
 		else if( FParse::Command(&Str,TEXT("BASED")) ) // ACTOR SELECT BASED
 		{
-			// @TODO UE4 - no longer meaningful
+			// @TODO no longer meaningful
 			return true;
 		}
 		else if( FParse::Command(&Str,TEXT("BYPROPERTY")) ) // ACTOR SELECT BYPROPERTY
@@ -2492,18 +2572,43 @@ bool UUnrealEdEngine::Exec_Actor( UWorld* InWorld, const TCHAR* Str, FOutputDevi
 	}
 	else if( FParse::Command(&Str,TEXT("DELETE")) )		// ACTOR SELECT DELETE
 	{
-	
-		bool bHandled = false;
-		bHandled |= GLevelEditorModeTools().ProcessEditDelete();
-
-		// if not specially handled by the current editing mode,
-		if (!bHandled)
+		if (GCurrentLevelEditingViewportClient)
 		{
-			const FScopedTransaction Transaction( bComponentsSelected ? NSLOCTEXT("UnrealEd", "DeleteComponents", "Delete Components") : NSLOCTEXT("UnrealEd", "DeleteActors", "Delete Actors") );
-			FEditorDelegates::OnDeleteActorsBegin.Broadcast();
-			const bool bCheckRef = GetDefault<ULevelEditorMiscSettings>()->bCheckReferencesOnDelete;
-			edactDeleteSelected(InWorld, true, bCheckRef, bCheckRef);
-			FEditorDelegates::OnDeleteActorsEnd.Broadcast();
+			if (TSharedPtr<ILevelEditor> LevelEditor = GCurrentLevelEditingViewportClient->ParentLevelEditor.Pin())
+			{
+				if (UTypedElementCommonActions* CommonActions = LevelEditor->GetCommonActions())
+				{
+					UTypedElementSelectionSet* SelectionSet = LevelEditor->GetMutableElementSelectionSet();
+				
+					// End drags to avoid deleting something out from under one.
+					FSlateApplication::Get().CancelDragDrop();
+
+					const FScopedTransaction Transaction(NSLOCTEXT("UnrealEd", "DeleteElements", "Delete Elements"));
+					if (SelectionSet->GetNumSelectedElements() == 0)
+					{
+						// HACK: Not all modes will select elements, so allow them a shot at deletion if we don't think anything else is selected
+						// TODO: Move this logic into FLevelEditorActionCallbacks and have it call into the mode directly
+						if (!GLevelEditorModeTools().ProcessEditDelete())
+						{
+							// HACK: Call these directly for an empty selection so that folder deletion in the outliner still works
+							// TODO: Move this logic into FLevelEditorActionCallbacks and have it call into the outliner directly
+							FEditorDelegates::OnDeleteActorsBegin.Broadcast();
+							FEditorDelegates::OnDeleteActorsEnd.Broadcast();
+						}
+					}
+					else
+					{
+						FEditorDelegates::OnDeleteActorsBegin.Broadcast();
+						const bool bCheckRef = GetDefault<ULevelEditorMiscSettings>()->bCheckReferencesOnDelete;
+						FTypedElementDeletionOptions Options;
+						Options
+							.SetWarnAboutReferences(bCheckRef)
+							.SetWarnAboutSoftReferences(bCheckRef);
+						CommonActions->DeleteSelectedElements(SelectionSet, InWorld, Options);
+						FEditorDelegates::OnDeleteActorsEnd.Broadcast();
+					}
+				}
+			}
 		}
 		return true;
 	}
@@ -2673,33 +2778,44 @@ bool UUnrealEdEngine::Exec_Actor( UWorld* InWorld, const TCHAR* Str, FOutputDevi
 	}
 	else if( FParse::Command(&Str,TEXT("DUPLICATE")) )
 	{
-		bool bHandled = false;
-		bHandled |= GLevelEditorModeTools().ProcessEditDuplicate();
-
-		// if not specially handled by the current editing mode,
-		if (!bHandled)
+		if (GCurrentLevelEditingViewportClient)
 		{
-			//@todo locked levels - if all actor levels are locked, cancel the transaction
-			const FScopedTransaction Transaction( bComponentsSelected ? NSLOCTEXT("UnrealEd", "DuplicateComponents", "Duplicate Components") : NSLOCTEXT("UnrealEd", "DuplicateActors", "Duplicate Actors") );
-
-			FEditorDelegates::OnDuplicateActorsBegin.Broadcast();
-
-			// duplicate selected
-			ABrush::SetSuppressBSPRegeneration(true);
-			edactDuplicateSelected(InWorld->GetCurrentLevel(), GetDefault<ULevelEditorViewportSettings>()->GridEnabled);
-			ABrush::SetSuppressBSPRegeneration(false);
-
-			// Find out if any of the selected actors will change the BSP.
-			// and only then rebuild BSP as this is expensive.
-			const FSelectedActorInfo& SelectedActors = AssetSelectionUtils::GetSelectedActorInfo();
-			if( SelectedActors.bHaveBrush )
+			if (TSharedPtr<ILevelEditor> LevelEditor = GCurrentLevelEditingViewportClient->ParentLevelEditor.Pin())
 			{
-				RebuildAlteredBSP(); // Update the Bsp of any levels containing a modified brush
-			}
+				if (UTypedElementCommonActions* CommonActions = LevelEditor->GetCommonActions())
+				{
+					UTypedElementSelectionSet* SelectionSet = LevelEditor->GetMutableElementSelectionSet();
 
-			FEditorDelegates::OnDuplicateActorsEnd.Broadcast();
+					const FScopedTransaction Transaction(NSLOCTEXT("UnrealEd", "DuplicateElements", "Duplicate Elements"));
+					if (SelectionSet->GetNumSelectedElements() == 0)
+					{
+						// HACK: Not all modes will select elements, so allow them a shot at duplication if we don't think anything else is selected
+						// TODO: Move this logic into FLevelEditorActionCallbacks and have it call into the mode directly
+						if (!GLevelEditorModeTools().ProcessEditDuplicate())
+						{
+							// HACK: Call these directly for an empty selection so that folder duplication in the outliner still works
+							// TODO: Move this logic into FLevelEditorActionCallbacks and have it call into the outliner directly
+							FEditorDelegates::OnDuplicateActorsBegin.Broadcast();
+							FEditorDelegates::OnDuplicateActorsEnd.Broadcast();
+						}
+					}
+					else
+					{
+						const FVector DuplicateOffset = GEditor->GetGridLocationOffset(/*bUniformOffset*/false);
+						const TArray<FTypedElementHandle> DuplicatedElements = CommonActions->DuplicateSelectedElements(SelectionSet, InWorld, DuplicateOffset);
+						if (DuplicatedElements.Num() > 0)
+						{
+							SelectionSet->SetSelection(DuplicatedElements, FTypedElementSelectionOptions());
+							SelectionSet->NotifyPendingChanges();
+
+							// notify the global mode tools, the selection set should be identical to the new actors at this point
+							TArray<AActor*> SelectedActors = SelectionSet->GetSelectedObjects<AActor>();
+							GLevelEditorModeTools().ActorsDuplicatedNotify(SelectedActors, SelectedActors, DuplicateOffset != FVector::ZeroVector);
+						}
+					}
+				}
+			}
 		}
-		RedrawLevelEditingViewports();
 		return true;
 	}
 	else if( FParse::Command(&Str, TEXT("ALIGN")) )
@@ -2830,6 +2946,53 @@ bool UUnrealEdEngine::Exec_Actor( UWorld* InWorld, const TCHAR* Str, FOutputDevi
 	return false;
 }
 
+bool UUnrealEdEngine::Exec_Element( UWorld* InWorld, const TCHAR* Str, FOutputDevice& Ar )
+{
+	// Keep a pointer to the beginning of the string to use for message displaying purposes
+	const TCHAR* const FullStr = Str;
+
+	if (FParse::Command(&Str, TEXT("MIRROR")))
+	{
+		FVector MirrorScale(1, 1, 1);
+		GetFVECTOR(Str, MirrorScale);
+		// We can't have zeroes in the vector
+		if (!MirrorScale.X)		MirrorScale.X = 1;
+		if (!MirrorScale.Y)		MirrorScale.Y = 1;
+		if (!MirrorScale.Z)		MirrorScale.Z = 1;
+
+		if (GCurrentLevelEditingViewportClient)
+		{
+			const FScopedTransaction Transaction(NSLOCTEXT("UnrealEd", "MirroringElements", "Mirroring Elements"));
+			GCurrentLevelEditingViewportClient->MirrorSelectedElements(MirrorScale);
+			RebuildAlteredBSP(); // Update the Bsp of any levels containing a modified brush
+		}
+
+		return true;
+	}
+	
+	if (FParse::Command(&Str, TEXT("DELTAMOVE")))
+	{
+		const FScopedTransaction Transaction(NSLOCTEXT("UnrealEd", "DeltaMovElements", "Move Elements by Delta"));
+		FVector DeltaMove = FVector::ZeroVector;
+		GetFVECTOR(Str, DeltaMove);
+
+		if (GCurrentLevelEditingViewportClient)
+		{
+			if (TSharedPtr<ILevelEditor> LevelEditor = GCurrentLevelEditingViewportClient->ParentLevelEditor.Pin())
+			{
+				FEditorModeTools& Tools = LevelEditor->GetEditorModeManager();
+				Tools.SetPivotLocation(Tools.PivotLocation + DeltaMove, false);
+			}
+
+			GCurrentLevelEditingViewportClient->ApplyDeltaToSelectedElements(FTransform(FRotator::ZeroRotator, DeltaMove, FVector::ZeroVector));
+			RedrawLevelEditingViewports();
+		}
+
+		return true;
+	}
+
+	return false;
+}
 
 bool UUnrealEdEngine::Exec_Mode( const TCHAR* Str, FOutputDevice& Ar )
 {

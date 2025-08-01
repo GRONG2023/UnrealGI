@@ -22,11 +22,12 @@ struct FTexture2DMipMap;
 struct FTextureMipInfo
 {
 	void* DestData = nullptr; // The mip data where the content must be copied too.
-	uint32 DataSize = 0; // Optional, might be 0 in cooked. Mostly for safeguard.
+	uint64 DataSize = 0; // Optional, might be 0 in cooked. Mostly for safeguard.
 	EPixelFormat Format = PF_Unknown;
 	uint32 SizeX = 0;
 	uint32 SizeY = 0;
-	uint32 SizeZ = 0;
+	uint32 SizeZ = 0; // For 3d textures
+	uint32 ArraySize = 0; // For texture arrays / cubemaps
 	uint32 RowPitch = 0;
 	uint32 DepthPitch = 0;	// For volume texture, texture array only.
 	ECubeFace CubeFace = CubeFace_MAX; // Cubemap only.
@@ -87,7 +88,7 @@ struct FTextureUpdateContext
 * used in FTextureStreamIn. It allows to decouples where the texture mip data source from the texture update.
 * Typical implementations are using DDC, disk files, internet server or dynamically generated.
 */
-class ENGINE_API FTextureMipDataProvider
+class FTextureMipDataProvider
 {
 public:
 
@@ -108,7 +109,7 @@ public:
 	};
 
 	// Constructor, defining the first tick step and thread.
-	FTextureMipDataProvider(const UTexture* Texture, ETickState InTickState, ETickThread InTickThread);
+	ENGINE_API FTextureMipDataProvider(const UTexture* Texture, ETickState InTickState, ETickThread InTickThread);
 
 	virtual ~FTextureMipDataProvider() {}
 
@@ -117,7 +118,7 @@ public:
 	FORCEINLINE ETickThread GetNextTickThread() const { return NextTickThread; }
 
 	/**
-	* Initialize data prelimary to the GetMips() step. Can be called several time. Mostly useful to simplify the logic in GetMips().
+	* Initialize data prelimary to the GetMips() step. Can be called several time (it does not have to advance to GetMips immediately). Mostly useful to simplify the logic in GetMips().
 	* This is because GetMips is a chained call between all mip data providers, each taking some mips to handle, and is not compatible with multi step process.
 	* This means that GetMips() must return immediately and can not postpone or delay return by not advancing to the next steps.
 	*
@@ -140,7 +141,7 @@ public:
 	virtual int32 GetMips(const FTextureUpdateContext& Context, int32 StartingMipIndex, const FTextureMipInfoArray& MipInfos, const FTextureUpdateSyncOptions& SyncOptions) = 0;
 
 	/**
-	* Check if each mip handled by this mip data provider have been updated correctly. Must move to CleanUp() when done.
+	* Check if each mip handled by this mip data provider have been updated correctly. Must move to CleanUp() or Done() when done.
 	*
 	* @param SyncOptions - Different sync options to control when the next tick of FTextureStreamIn can be scheduled.
 	*

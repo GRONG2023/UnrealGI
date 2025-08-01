@@ -15,7 +15,7 @@
 class ABrush;
 
 UENUM()
-enum ESheetAxis
+enum ESheetAxis : int
 {
 	AX_Horizontal,
 	AX_XAxis,
@@ -23,7 +23,7 @@ enum ESheetAxis
 	AX_MAX,
 };
 
-UCLASS(MinimalAPI, autoexpandcategories=BrushSettings, EditInlineNew, NotPlaceable, meta=(DisplayName="Plane"))
+UCLASS(MinimalAPI, autoexpandcategories=BrushSettings, EditInlineNew, meta=(DisplayName="Plane"))
 class USheetBuilder : public UEditorBrushBuilder
 {
 public:

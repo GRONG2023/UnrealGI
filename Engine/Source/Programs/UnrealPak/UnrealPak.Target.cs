@@ -9,25 +9,38 @@ public class UnrealPakTarget : TargetRules
 	{
 		Type = TargetType.Program;
 		LinkType = TargetLinkType.Modular;
+		IncludeOrderVersion = EngineIncludeOrderVersion.Latest;
 		LaunchModuleName = "UnrealPak";
 
-		bBuildDeveloperTools = false;
-		bUseMallocProfiler = false;
-		bCompileWithPluginSupport = true;
-		bIncludePluginsForTargetPlatforms = true;
+		bUseXGEController					= false;
+		bCompileFreeType					= false;
+		bLoggingToMemoryEnabled				= false;
+		bUseLoggingInShipping				= true;
+		bCompileWithAccessibilitySupport	= false;
+		bCompileWithPluginSupport			= true;
+		bIncludePluginsForTargetPlatforms	= true;
+		bWithServerCode						= false;
+		bCompileNavmeshClusterLinks			= false;
+		bCompileNavmeshSegmentLinks			= false;
+		bCompileRecast						= false;
+		bCompileICU 						= false;
+		bWithLiveCoding						= false;
+		bBuildDeveloperTools				= false;
+		bBuildWithEditorOnlyData			= true;
+		bCompileAgainstEngine				= false;
+		bCompileAgainstCoreUObject			= true;
+		bCompileAgainstApplicationCore		= true;
+		bUsesSlate							= false;
+		bIsBuildingConsoleApplication		= true;
+		bForceBuildTargetPlatforms			= true;
+		bNeedsExtraShaderFormats			= true;
 
-		// Editor-only data, however, is needed
-		bBuildWithEditorOnlyData = true;
+		WindowsPlatform.bUseBundledDbgHelp = false;
+		WindowsPlatform.bPixProfilingEnabled = false;
+		WindowsPlatform.bMergeIdenticalCOMDATs = true;
+		WindowsPlatform.bStripUnreferencedSymbols = true;
 
-		// Currently this app is not linking against the engine, so we'll compile out references from Core to the rest of the engine
-		bCompileAgainstEngine = false;
-		bCompileAgainstCoreUObject = false;
-
-		// ICU is not needed
-		bCompileICU = false;
-
-		// UnrealPak is a console application, not a Windows app (sets entry point to main(), instead of WinMain())
-		bCompileAgainstApplicationCore = false;
-		bIsBuildingConsoleApplication = true;
+		bEnableTrace = true;
+		GlobalDefinitions.Add("UE_EXTERNAL_PROFILING_ENABLED=0");
 	}
 }

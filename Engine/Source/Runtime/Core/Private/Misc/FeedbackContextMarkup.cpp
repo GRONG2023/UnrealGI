@@ -1,10 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Misc/FeedbackContextMarkup.h"
-#include "Misc/AssertionMacros.h"
+
 #include "Containers/UnrealString.h"
 #include "HAL/PlatformProcess.h"
 #include "Internationalization/Text.h"
+#include "Logging/LogVerbosity.h"
+#include "Math/NumericLimits.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/CString.h"
+#include "Misc/Char.h"
 #include "Misc/FeedbackContext.h"
 
 bool FFeedbackContextMarkup::ParseCommand(const FString& Line, FFeedbackContext* Warn)
@@ -37,6 +42,7 @@ bool FFeedbackContextMarkup::ParseCommand(const FString& Line, FFeedbackContext*
 
 bool FFeedbackContextMarkup::PipeProcessOutput(const FText& Description, const FString& URL, const FString& Params, FFeedbackContext* Warn, int32* OutExitCode)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE_STR("FFeedbackContextMarkup::PipeProcessOutput");
 	bool bRes;
 
 	// Create a read and write pipe for the child process
@@ -48,7 +54,7 @@ bool FFeedbackContextMarkup::PipeProcessOutput(const FText& Description, const F
 	Warn->BeginSlowTask(Description, true, true);
 
 	// Create the process
-	FProcHandle ProcessHandle = FPlatformProcess::CreateProc(*URL, *Params, false, true, true, NULL, 0, NULL, PipeWrite);
+	FProcHandle ProcessHandle = FPlatformProcess::CreateProc(*URL, *Params, false, true, true, NULL, 0, NULL, PipeWrite, PipeRead);
 	if(ProcessHandle.IsValid())
 	{
 		FString BufferedText;
@@ -65,7 +71,7 @@ bool FFeedbackContextMarkup::PipeProcessOutput(const FText& Description, const F
 			BufferedText += FPlatformProcess::ReadPipe(PipeRead);
 
 			int32 EndOfLineIdx;
-			while(BufferedText.FindChar('\n', EndOfLineIdx))
+			while(BufferedText.FindChar(TEXT('\n'), EndOfLineIdx))
 			{
 				FString Line = BufferedText.Left(EndOfLineIdx);
 				Line.RemoveFromEnd(TEXT("\r"), ESearchCase::CaseSensitive);
@@ -75,7 +81,7 @@ bool FFeedbackContextMarkup::PipeProcessOutput(const FText& Description, const F
 					Warn->Log(*Line);
 				}
 
-				BufferedText.MidInline(EndOfLineIdx + 1, MAX_int32, false);
+				BufferedText.MidInline(EndOfLineIdx + 1, MAX_int32, EAllowShrinking::No);
 			}
 
 			FPlatformProcess::Sleep(0.1f);
@@ -162,7 +168,7 @@ bool FFeedbackContextMarkup::ReadString(const TCHAR*& Text, FString& OutString)
 		{
 			if(*End == *Text)
 			{
-				OutString = FString(UE_PTRDIFF_TO_INT32(End - (Text + 1)), Text + 1);
+				OutString = FString::ConstructFromPtrSize(Text + 1, UE_PTRDIFF_TO_INT32(End - (Text + 1)));
 				do { End++; } while(FChar::IsWhitespace(*End));
 				Text = End;
 				return true;

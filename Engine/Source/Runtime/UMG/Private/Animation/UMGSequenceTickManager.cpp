@@ -4,26 +4,41 @@
 #include "Animation/UMGSequencePlayer.h"
 #include "Blueprint/UserWidget.h"
 #include "Engine/World.h"
+#include "EntitySystem/MovieSceneEntitySystemRunner.h"
 #include "EntitySystem/MovieSceneEntitySystemLinker.h"
 #include "ProfilingDebugging/CountersTrace.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Engine/Engine.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(UMGSequenceTickManager)
+
 DECLARE_CYCLE_STAT(TEXT("Flush End of Frame Animations"), MovieSceneEval_FlushEndOfFrameAnimations, STATGROUP_MovieSceneEval);
 
-static TAutoConsoleVariable<int32> CVarUMGMaxAnimationLatentActions(
-	TEXT("Widget.MaxAnimationLatentActions"),
-	100,
-	TEXT("Defines the maximum number of latent actions that can be run in one frame."),
-	ECVF_Default
-);
-int32 GFlushUMGAnimationsAtEndOfFrame = 1;
-static FAutoConsoleVariableRef CVarUMGAnimationsAtEndOfFrame(
-	TEXT("UMG.FlushAnimationsAtEndOfFrame"),
-	GFlushUMGAnimationsAtEndOfFrame,
-	TEXT("Whether to automatically flush any outstanding animations at the end of the frame, or just wait until next frame."),
-	ECVF_Default
-);
+
+namespace UE::UMG
+{
+
+	static TAutoConsoleVariable<int32> CVarUMGMaxAnimationLatentActions(
+		TEXT("Widget.MaxAnimationLatentActions"),
+		100,
+		TEXT("Defines the maximum number of latent actions that can be run in one frame."),
+		ECVF_Default
+	);
+	int32 GFlushUMGAnimationsAtEndOfFrame = 1;
+	static FAutoConsoleVariableRef CVarUMGAnimationsAtEndOfFrame(
+		TEXT("UMG.FlushAnimationsAtEndOfFrame"),
+		GFlushUMGAnimationsAtEndOfFrame,
+		TEXT("Whether to automatically flush any outstanding animations at the end of the frame, or just wait until next frame."),
+		ECVF_Default
+	);
+
+	float GAnimationBudgetMs = 0.0f;
+	FAutoConsoleVariableRef CVarAnimationBudgetMs(
+		TEXT("UMG.AnimationBudgetMs"),
+		GAnimationBudgetMs,
+		TEXT("(Default: 0.0) EXPERIMENTAL: A per-frame animation budget to use for evaluation of all UMG animations this frame.")
+	);
+} // namespace UE::UMG
 
 extern TAutoConsoleVariable<bool> CVarUserWidgetUseParallelAnimation;
 
@@ -31,18 +46,45 @@ UUMGSequenceTickManager::UUMGSequenceTickManager(const FObjectInitializer& Init)
 	: Super(Init)
 	, bIsTicking(false)
 {
+	if (!HasAnyFlags(RF_ClassDefaultObject))
+	{
+		Runner = MakeShared<FMovieSceneEntitySystemRunner>();
+	}
 }
 
 void UUMGSequenceTickManager::AddWidget(UUserWidget* InWidget)
 {
+	// This is functionally the same as OnWidgetTicked, but they remain
+	// separate functions to convey the semantic difference
 	TWeakObjectPtr<UUserWidget> WeakWidget = InWidget;
-	WeakUserWidgets.Add(WeakWidget);
+
+	if (FSequenceTickManagerWidgetData* WidgetData = WeakUserWidgetData.Find(WeakWidget))
+	{
+		WidgetData->bIsTicking = true;
+	}
+	else
+	{
+		WeakUserWidgetData.Add(WeakWidget, FSequenceTickManagerWidgetData());
+	}
 }
 
 void UUMGSequenceTickManager::RemoveWidget(UUserWidget* InWidget)
 {
+	ClearLatentActions(InWidget);
 	TWeakObjectPtr<UUserWidget> WeakWidget = InWidget;
-	WeakUserWidgets.Remove(WeakWidget);
+	WeakUserWidgetData.Remove(WeakWidget);
+}
+
+void UUMGSequenceTickManager::OnWidgetTicked(UUserWidget* InWidget)
+{
+	if (FSequenceTickManagerWidgetData* WidgetData = WeakUserWidgetData.Find(InWidget))
+	{
+		WidgetData->bIsTicking = true;
+	}
+	else
+	{
+		WeakUserWidgetData.Add(InWidget, FSequenceTickManagerWidgetData());
+	}
 }
 
 void UUMGSequenceTickManager::BeginDestroy()
@@ -89,32 +131,64 @@ void UUMGSequenceTickManager::TickWidgetAnimations(float DeltaSeconds)
 	// will queue evaluations on the global sequencer ECS linker. In some specific cases, though (pausing,
 	// stopping, etc.), we might see some blocking (immediate) evaluations running here.
 	//
-
+	// The WidgetData have one frame delay (they are updated at the end of the frame).
+	// This may delay the animation update by one frame.
+	const bool bIsCurrentlyEvaluating = Runner->IsCurrentlyEvaluating();
 	{
-	#if STATS || ENABLE_STATNAMEDEVENTS
-		const bool bShouldTrackObject = Stats::IsThreadCollectingData();
-		FScopeCycleCounterUObject ContextScope(bShouldTrackObject ? this : nullptr);
-	#endif
+		SCOPE_CYCLE_UOBJECT(ContextScope, this);
 
-		for (auto WidgetIter = WeakUserWidgets.CreateIterator(); WidgetIter; ++WidgetIter)
+		// Process animations for visible widgets
+		for (auto WidgetIter = WeakUserWidgetData.CreateIterator(); WidgetIter; ++WidgetIter)
 		{
-			UUserWidget* UserWidget = WidgetIter->Get();
+			UUserWidget* UserWidget = WidgetIter.Key().Get();
+			FSequenceTickManagerWidgetData& WidgetData = WidgetIter.Value();
+
+			WidgetData.bActionsAndAnimationTicked = false;
+
 			if (!UserWidget)
 			{
 				WidgetIter.RemoveCurrent();
 			}
 			else if (!UserWidget->IsConstructed())
 			{
-				UserWidget->TearDownAnimations();
-				UserWidget->AnimationTickManager = nullptr;
+				if (!bIsCurrentlyEvaluating)
+				{
+					// Tear down any animations that are not currently being stopped
+					UserWidget->ConditionalTearDownAnimations();
+					UserWidget->UpdateCanTick();
 
-				WidgetIter.RemoveCurrent();
+					// If there are no more animations playing, we can remove this widget altogether
+					if (!UserWidget->IsAnyAnimationPlaying())
+					{
+						// Resetting the animation tick manager is ok here because TearDownAnimations will always clear out all animations
+						UserWidget->AnimationTickManager = nullptr;
+
+						WidgetIter.RemoveCurrent();
+					}
+				}
+			}
+			else if (!WidgetData.bIsTicking)
+			{
+				// If this widget has not told us it is ticking, we disable animations for that widget.
+				// Once it ticks again, the animation will be updated naturally, and doesn't need anything re-enabling.
+				// 
+				// @todo: There is a chance that relative animations hitting this code path will resume with
+				// different relative bases due to the way the ecs data is destroyed and re-created.
+				// In order to fix this we would have to annex that data instead of destroying it.
+				if (!bIsCurrentlyEvaluating)
+				{
+					UserWidget->DisableAnimations();
+
+					// Do not null out UUserWidget::AnimationTickManager because although we removed animation _data_
+					// the animations themselves are still playing. As such any UUMGSequencePlayers may hold a reference to this
+					// tick manager's linker, and therefore also need to keep this tick manager alive since the linker is not outered to this tick manager
+
+					WidgetIter.RemoveCurrent();
+				}
 			}
 			else
 			{
-	#if STATS || ENABLE_STATNAMEDEVENTS
-				FScopeCycleCounterUObject WidgetContextScope(bShouldTrackObject ? UserWidget : nullptr);
-	#endif
+				SCOPE_CYCLE_UOBJECT(WidgetContextScope, UserWidget);
 
 	#if WITH_EDITOR
 				const bool bTickAnimations = !UserWidget->IsDesignTime();
@@ -124,43 +198,50 @@ void UUMGSequenceTickManager::TickWidgetAnimations(float DeltaSeconds)
 				if (bTickAnimations && UserWidget->IsVisible())
 				{
 					UserWidget->TickActionsAndAnimation(DeltaSeconds);
+					WidgetData.bActionsAndAnimationTicked = true;
 				}
+
+				// Assume this widget will no longer tick, until we're told otherwise by way of OnWidgetTicked
+				WidgetData.bIsTicking = false;
 			}
 		}
 	}
 
 	ForceFlush();
 
-	for (auto WidgetIter = WeakUserWidgets.CreateIterator(); WidgetIter; ++WidgetIter)
+	if (!Runner->IsCurrentlyEvaluating())
 	{
-		UUserWidget* UserWidget = WidgetIter->Get();
-		ensureMsgf(UserWidget, TEXT("Widget became null during animation tick!"));
-
-		if (UserWidget)
+		for (auto WidgetIter = WeakUserWidgetData.CreateIterator(); WidgetIter; ++WidgetIter)
 		{
-			UserWidget->PostTickActionsAndAnimation(DeltaSeconds);
+			UUserWidget* UserWidget = WidgetIter.Key().Get();
+			ensureMsgf(UserWidget, TEXT("Widget became null during animation tick!"));
 
-			// If this widget no longer has any animations playing, it doesn't need to be ticked any more
-			if (UserWidget->ActiveSequencePlayers.Num() == 0)
+			if (UserWidget)
 			{
-				UserWidget->UpdateCanTick();
-				UserWidget->AnimationTickManager = nullptr;
+				// If this widget no longer has any animations playing, it doesn't need to be ticked any more
+				if (UserWidget->ActiveSequencePlayers.Num() == 0)
+				{
+					UserWidget->UpdateCanTick();
+					UserWidget->AnimationTickManager = nullptr;
+					WidgetIter.RemoveCurrent();
+				}
+			}
+			else
+			{
 				WidgetIter.RemoveCurrent();
 			}
 		}
-		else
-		{
-			WidgetIter.RemoveCurrent();
-		}
 	}
+
+	WeakUserWidgetData.Shrink();
 }
 
 void UUMGSequenceTickManager::ForceFlush()
 {
-	if (Runner.IsAttachedToLinker())
+	if (Runner->IsAttachedToLinker())
 	{
-		Runner.Flush();
-		LatentActionManager.RunLatentActions(Runner);
+		Runner->Flush(UE::UMG::GAnimationBudgetMs);
+		RunLatentActions();
 	}
 }
 
@@ -172,12 +253,13 @@ void UUMGSequenceTickManager::HandleSlatePostTick(float DeltaSeconds)
 		return;
 	}
 
-	if (GFlushUMGAnimationsAtEndOfFrame && Runner.IsAttachedToLinker() && Runner.HasQueuedUpdates())
+	// Only tick widgets at the end of the frame if our runner has completely finished, and we still have updates
+	if (UE::UMG::GFlushUMGAnimationsAtEndOfFrame && Runner->IsAttachedToLinker() && Runner->HasQueuedUpdates() && !Runner->IsCurrentlyEvaluating())
 	{
 		SCOPE_CYCLE_COUNTER(MovieSceneEval_FlushEndOfFrameAnimations);
 
-		Runner.Flush();
-		LatentActionManager.RunLatentActions(Runner);
+		Runner->Flush();
+		RunLatentActions();
 	}
 }
 
@@ -193,7 +275,24 @@ void UUMGSequenceTickManager::ClearLatentActions(UObject* Object)
 
 void UUMGSequenceTickManager::RunLatentActions()
 {
-	LatentActionManager.RunLatentActions(Runner);
+	if (!this->Runner->IsCurrentlyEvaluating())
+	{
+		int32 UpdateCount   = this->Runner->GetQueuedUpdateCount();
+		uint64 SystemSerial = this->Linker->EntityManager.GetSystemSerial();
+
+		LatentActionManager.RunLatentActions([this, &SystemSerial, &UpdateCount]
+		{
+			int32  NewUpdateCount  = this->Runner->GetQueuedUpdateCount();
+			uint64 NewSystemSerial = this->Linker->EntityManager.GetSystemSerial();
+			if (NewUpdateCount != UpdateCount || NewSystemSerial != SystemSerial)
+			{
+				UpdateCount = NewUpdateCount;
+				SystemSerial = NewSystemSerial;
+
+				this->Runner->Flush();
+			}
+		});
+	}
 }
 
 UUMGSequenceTickManager* UUMGSequenceTickManager::Get(UObject* PlaybackContext)
@@ -218,9 +317,9 @@ UUMGSequenceTickManager* UUMGSequenceTickManager::Get(UObject* PlaybackContext)
 	{
 		TickManager = NewObject<UUMGSequenceTickManager>(Owner, TickManagerName);
 
-		TickManager->Linker = UMovieSceneEntitySystemLinker::FindOrCreateLinker(Owner, TEXT("UMGAnimationEntitySystemLinker"));
+		TickManager->Linker = UMovieSceneEntitySystemLinker::FindOrCreateLinker(Owner, UE::MovieScene::EEntitySystemLinkerRole::UMG, TEXT("UMGAnimationEntitySystemLinker"));
 		check(TickManager->Linker);
-		TickManager->Runner.AttachToLinker(TickManager->Linker);
+		TickManager->Runner->AttachToLinker(TickManager->Linker);
 
 		FSlateApplication& SlateApp = FSlateApplication::Get();
 		FDelegateHandle PreTickHandle = SlateApp.OnPreTick().AddUObject(TickManager, &UUMGSequenceTickManager::TickWidgetAnimations);
@@ -233,4 +332,5 @@ UUMGSequenceTickManager* UUMGSequenceTickManager::Get(UObject* PlaybackContext)
 	}
 	return TickManager;
 }
+
 

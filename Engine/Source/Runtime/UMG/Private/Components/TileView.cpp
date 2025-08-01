@@ -2,6 +2,8 @@
 
 #include "Components/TileView.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(TileView)
+
 /////////////////////////////////////////////////////
 // UTileView
 
@@ -18,17 +20,31 @@ TSharedRef<STableViewBase> UTileView::RebuildListWidget()
 
 FMargin UTileView::GetDesiredEntryPadding(UObject* Item) const
 {
-	return FMargin(EntrySpacing * 0.5f);
+	return FMargin(GetHorizontalEntrySpacing() * 0.5f, GetVerticalEntrySpacing() * 0.5f);
 }
 
 float UTileView::GetTotalEntryHeight() const
 {
-	return EntryHeight + (EntrySpacing * 0.5f);
+	if (IsAligned() && !bEntrySizeIncludesEntrySpacing)
+	{
+		return EntryHeight + GetVerticalEntrySpacing();
+	}
+	else
+	{
+		return EntryHeight + GetVerticalEntrySpacing() * 0.5f;
+	}
 }
 
 float UTileView::GetTotalEntryWidth() const
 {
-	return EntryWidth + (EntrySpacing * 0.5f);
+	if (IsAligned() && !bEntrySizeIncludesEntrySpacing)
+	{
+		return EntryWidth + GetHorizontalEntrySpacing();
+	}
+	else
+	{
+		return EntryWidth + GetHorizontalEntrySpacing() * 0.5f;
+	}
 }
 
 void UTileView::SetEntryHeight(float NewHeight)
@@ -47,6 +63,13 @@ void UTileView::SetEntryWidth(float NewWidth)
 	{
 		MyTileView->SetItemWidth(GetTotalEntryWidth());
 	}
+}
+
+bool UTileView::IsAligned() const
+{
+	return TileAlignment == EListItemAlignment::LeftAligned
+		|| TileAlignment == EListItemAlignment::RightAligned
+		|| TileAlignment == EListItemAlignment::CenterAligned;
 }
 
 void UTileView::ReleaseSlateResources(bool bReleaseChildren)

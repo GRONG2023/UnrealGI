@@ -6,9 +6,12 @@
 
 typedef TSharedPtr<class IBackgroundHttpManager, ESPMode::ThreadSafe> FBackgroundHttpManagerPtr;
 
-class BACKGROUNDHTTP_API IBackgroundHttpManager
+class IBackgroundHttpManager : public TSharedFromThis<IBackgroundHttpManager>
 {
 public:
+
+	virtual ~IBackgroundHttpManager() = default;
+
 	/**
 	 * Initialize
 	 */
@@ -72,6 +75,11 @@ public:
 	 * Should really never be calling this outside of a BackgroundHTTP class
 	 */
 	virtual void CleanUpDataAfterCompletingRequest(const FBackgroundHttpRequestPtr Request) = 0;
+
+	/**
+		* Setting cellular preference
+		*/
+	virtual void SetCellularPreference(int32 Value) = 0;
 	
 protected:
 	/**

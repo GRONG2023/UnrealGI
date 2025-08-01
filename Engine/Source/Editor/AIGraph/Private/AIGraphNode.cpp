@@ -4,7 +4,8 @@
 #include "UObject/Class.h"
 #include "UObject/UnrealType.h"
 #include "Engine/Blueprint.h"
-#include "AssetData.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "AssetRegistry/AssetData.h"
 #include "EdGraph/EdGraphSchema.h"
 #include "AIGraph.h"
 #include "DiffResults.h"
@@ -260,7 +261,7 @@ void UAIGraphNode::FindDiffs(UEdGraphNode* OtherNode, FDiffResults& Results)
 			Diff.Node1 = this;
 			Diff.Node2 = OtherNode;
 			Diff.ToolTip = LOCTEXT("DIF_NodeInstancePropertyToolTip", "A property of the node instance has changed");
-			Diff.DisplayColor = FLinearColor(0.25f, 0.71f, 0.85f);
+			Diff.Category = EDiffType::MODIFICATION;
 
 			DiffProperties(NodeInstance->GetClass(), OtherGraphNode->NodeInstance->GetClass(), NodeInstance, OtherGraphNode->NodeInstance, Results, Diff);
 		}
@@ -301,8 +302,8 @@ void UAIGraphNode::OnSubNodeAdded(UAIGraphNode* SubNode)
 
 void UAIGraphNode::RemoveSubNode(UAIGraphNode* SubNode)
 {
-	SubNodes.RemoveSingle(SubNode);
 	Modify();
+	SubNodes.RemoveSingle(SubNode);
 
 	OnSubNodeRemoved(SubNode);
 }
@@ -374,18 +375,26 @@ void UAIGraphNode::UpdateNodeClassData()
 	if (NodeInstance)
 	{
 		UpdateNodeClassDataFrom(NodeInstance->GetClass(), ClassData);
-		ErrorMessage = ClassData.GetDeprecatedMessage();
+		UpdateErrorMessage();
 	}
+}
+
+void UAIGraphNode::UpdateErrorMessage()
+{
+	ErrorMessage = ClassData.GetDeprecatedMessage();
 }
 
 void UAIGraphNode::UpdateNodeClassDataFrom(UClass* InstanceClass, FGraphNodeClassData& UpdatedData)
 {
 	if (InstanceClass)
 	{
-		UBlueprint* BPOwner = Cast<UBlueprint>(InstanceClass->ClassGeneratedBy);
-		if (BPOwner)
+		if (UBlueprint* BPOwner = Cast<UBlueprint>(InstanceClass->ClassGeneratedBy))
 		{
 			UpdatedData = FGraphNodeClassData(BPOwner->GetName(), BPOwner->GetOutermost()->GetName(), InstanceClass->GetName(), InstanceClass);
+		}
+		else if (UBlueprintGeneratedClass* BPGC = Cast<UBlueprintGeneratedClass>(InstanceClass))
+		{
+			UpdatedData = FGraphNodeClassData(BPGC->GetClassPathName(), BPGC);
 		}
 		else
 		{

@@ -8,6 +8,8 @@
 #include "Application/SlateApplicationBase.h"
 #include "CoreGlobals.h"
 #include "Debugging/SlateDebugging.h"
+#include "FastUpdate/SlateInvalidationRoot.h"
+#include "FastUpdate/WidgetProxy.h"
 #include "Misc/App.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/StringBuilder.h"
@@ -20,15 +22,17 @@
 FConsoleSlateDebuggerInvalidate::FConsoleSlateDebuggerInvalidate()
 	: bEnabled(false)
 	, bEnabledCVarValue(false)
-	, bDisplayWidgetList(true)
+	, bShowWidgetList(true)
 	, bUseWidgetPathAsName(false)
 	, bShowLegend(false)
 	, bLogInvalidatedWidget(false)
+	, bUsePerformanceThreshold(false)
 	, InvalidateWidgetReasonFilter(static_cast<EInvalidateWidgetReason>(0xFF))
 	, InvalidateRootReasonFilter(static_cast<ESlateDebuggingInvalidateRootReason>(0xFF))
 	, DrawRootRootColor(FColorList::Red)
 	, DrawRootChildOrderColor(FColorList::Blue)
 	, DrawRootScreenPositionColor(FColorList::Green)
+	, DrawWidgetPrepassColor(FColorList::Magenta)
 	, DrawWidgetLayoutColor(FColorList::Magenta)
 	, DrawWidgetPaintColor(FColorList::Yellow)
 	, DrawWidgetVolatilityColor(FColorList::Grey)
@@ -36,40 +40,56 @@ FConsoleSlateDebuggerInvalidate::FConsoleSlateDebuggerInvalidate()
 	, DrawWidgetRenderTransformColor(FColorList::Black)
 	, DrawWidgetVisibilityColor(FColorList::White)
 	, MaxNumberOfWidgetInList(20)
-	, CacheDuration(2.0)
+	, CacheDuration(2.0f)
+	, ThresholdPerformanceMs(1.5f) //1.5ms
 	, StartCommand(
 		TEXT("SlateDebugger.Invalidate.Start"),
-		TEXT("Start the Invalidation widget debug tool. It shows when widgets are invalidated."),
+		TEXT("Start the Invalidation widget debug tool. It shows widgets that are invalidated."),
 		FConsoleCommandDelegate::CreateRaw(this, &FConsoleSlateDebuggerInvalidate::StartDebugging))
 	, StopCommand(
 		TEXT("SlateDebugger.Invalidate.Stop"),
 		TEXT("Stop the Invalidation widget debug tool."),
 		FConsoleCommandDelegate::CreateRaw(this, &FConsoleSlateDebuggerInvalidate::StopDebugging))
 	, EnabledRefCVar(
-		TEXT("SlateDebugger.Invalidate.Enable")
-		, bEnabledCVarValue
-		, TEXT("Start/Stop the Invalidation widget debug tool. It shows when widgets are invalidated.")
-		, FConsoleVariableDelegate::CreateRaw(this, &FConsoleSlateDebuggerInvalidate::HandleEnabled))
-	, ToggleLegendCommand(
-		TEXT("SlateDebugger.Invalidate.ToggleLegend"),
+		TEXT("SlateDebugger.Invalidate.Enabled"),
+		bEnabledCVarValue,
+		TEXT("Start/Stop the Invalidation widget debug tool. It shows widgets that are invalidated."),
+		FConsoleVariableDelegate::CreateRaw(this, &FConsoleSlateDebuggerInvalidate::HandleEnabled))
+	, ShowLegendRefCVar(
+		TEXT("SlateDebugger.Invalidate.bShowLegend"),
+		bShowLegend,
 		TEXT("Option to display the color legend."),
-		FConsoleCommandDelegate::CreateRaw(this, &FConsoleSlateDebuggerInvalidate::ToggleLegend))
-	, ToogleWidgetsNameListCommand(
-		TEXT("SlateDebugger.Invalidate.ToggleWidgetNameList"),
-		TEXT("Option to display the name of the invalidated widget."),
-		FConsoleCommandDelegate::CreateRaw(this, &FConsoleSlateDebuggerInvalidate::ToggleWidgetNameList))
-	, ToogleLogInvalidatedWidgetCommand(
-		TEXT("SlateDebugger.Invalidate.ToggleLogInvalidatedWidget"),
-		TEXT("Option to log to the console the invalidated widget."),
-		FConsoleCommandDelegate::CreateRaw(this, &FConsoleSlateDebuggerInvalidate::ToggleLogInvalidatedWidget))
+		FConsoleVariableDelegate::CreateRaw(this, &FConsoleSlateDebuggerInvalidate::HandledConfigChanged))
+	, ShowWidgetsNameListRefCVar(
+		TEXT("SlateDebugger.Invalidate.bShowWidgetList"),
+		bShowWidgetList,
+		TEXT("Option to display the names of invalidated widgets."),
+		FConsoleVariableDelegate::CreateRaw(this, &FConsoleSlateDebuggerInvalidate::HandledConfigChanged))
+	, LogInvalidatedWidgetRefCVar(
+		TEXT("SlateDebugger.Invalidate.bLogInvalidatedWidget"),
+		bLogInvalidatedWidget,
+		TEXT("Option to log the invalidated widget to the console."),
+		FConsoleVariableDelegate::CreateRaw(this, &FConsoleSlateDebuggerInvalidate::HandledConfigChanged))
+	, UsePerformanceThresholdRefCVar(
+		TEXT("SlateDebugger.Invalidate.bUsePerformanceThreshold"),
+		bUsePerformanceThreshold,
+		TEXT("Only display the invalidated widgets and/or log them if the performance are worst than the threshold (in millisecond)."),
+		FConsoleVariableDelegate::CreateRaw(this, &FConsoleSlateDebuggerInvalidate::HandledConfigChanged))
+	, ThresholdPerformanceRefCVar(
+		TEXT("SlateDebugger.Invalidate.ThresholdPerformanceMS"),
+		ThresholdPerformanceMs,
+		TEXT("For bUsePerformanceThreshold, threshold in milliseconds to reach before logging and/or displaying the invalidated widgets."),
+		FConsoleVariableDelegate::CreateRaw(this, &FConsoleSlateDebuggerInvalidate::HandledConfigChanged))
 	, SetInvalidateWidgetReasonFilterCommand(
 		TEXT("SlateDebugger.Invalidate.SetInvalidateWidgetReasonFilter"),
-		TEXT("Enable Invalidate Widget Reason filters. Usage: SetInvalidateWidgetReasonFilter [None] [Layout] [Paint] [Volatility] [ChildOrder] [RenderTransform] [Visibility] [Any]"),
+		TEXT("Enable Invalidate Widget Reason filters. Usage: SetInvalidateWidgetReasonFilter None|Layout|Paint|Volatility|ChildOrder|RenderTransform|Visibility|Any"),
 		FConsoleCommandWithArgsDelegate::CreateRaw(this, &FConsoleSlateDebuggerInvalidate::HandleSetInvalidateWidgetReasonFilter))
 	, SetInvalidateRootReasonFilterCommand(
 		TEXT("SlateDebugger.Invalidate.SetInvalidateRootReasonFilter"),
-		TEXT("Enable Invalidate Root Reason filters. Usage: SetInvalidateRootReasonFilter [None] [ChildOrder] [Root] [ScreenPosition] [Any]"),
+		TEXT("Enable Invalidate Root Reason filters. Usage: SetInvalidateRootReasonFilter None|ChildOrder|Root|ScreenPosition|Any"),
 		FConsoleCommandWithArgsDelegate::CreateRaw(this, &FConsoleSlateDebuggerInvalidate::HandleSetInvalidateRootReasonFilter))
+	, LastPerformanceThresholdFrameCount(0)
+	, LastPerformanceThresholdSeconds(0.0)
 {
 	LoadConfig();
 }
@@ -90,13 +110,16 @@ void FConsoleSlateDebuggerInvalidate::LoadConfig()
 		}
 	};
 
-	GConfig->GetBool(TEXT("SlateDebugger.Invalidate"), TEXT("bDisplayWidgetList"), bDisplayWidgetList, *GEditorPerProjectIni);
+	GConfig->GetBool(TEXT("SlateDebugger.Invalidate"), TEXT("bEnabled"), bEnabledCVarValue, *GEditorPerProjectIni);
+	GConfig->GetBool(TEXT("SlateDebugger.Invalidate"), TEXT("bShowWidgetList"), bShowWidgetList, *GEditorPerProjectIni);
 	GConfig->GetBool(TEXT("SlateDebugger.Invalidate"), TEXT("bUseWidgetPathAsName"), bUseWidgetPathAsName, *GEditorPerProjectIni);
 	GConfig->GetBool(TEXT("SlateDebugger.Invalidate"), TEXT("bShowLegend"), bShowLegend, *GEditorPerProjectIni);
 	GConfig->GetBool(TEXT("SlateDebugger.Invalidate"), TEXT("bLogInvalidatedWidget"), bLogInvalidatedWidget, *GEditorPerProjectIni);
+	GConfig->GetBool(TEXT("SlateDebugger.Invalidate"), TEXT("bUsePerformanceThreshold"), bUsePerformanceThreshold, *GEditorPerProjectIni);
 	GetColor(TEXT("DrawRootRootColor"), DrawRootRootColor);
 	GetColor(TEXT("DrawRootChildOrderColor"), DrawRootChildOrderColor);
 	GetColor(TEXT("DrawRootScreenPositionColor"), DrawRootScreenPositionColor);
+	GetColor(TEXT("DrawWidgetPrepassColor"), DrawWidgetPrepassColor);
 	GetColor(TEXT("DrawWidgetLayoutColor"), DrawWidgetLayoutColor);
 	GetColor(TEXT("DrawWidgetPaintColor"), DrawWidgetPaintColor);
 	GetColor(TEXT("DrawWidgetVolatilityColor"), DrawWidgetVolatilityColor);
@@ -105,6 +128,12 @@ void FConsoleSlateDebuggerInvalidate::LoadConfig()
 	GetColor(TEXT("DrawWidgetVisibilityColor"), DrawWidgetVisibilityColor);
 	GConfig->GetInt(TEXT("SlateDebugger.Invalidate"), TEXT("MaxNumberOfWidgetInList"), MaxNumberOfWidgetInList, *GEditorPerProjectIni);
 	GConfig->GetFloat(TEXT("SlateDebugger.Invalidate"), TEXT("CacheDuration"), CacheDuration, *GEditorPerProjectIni);
+	GConfig->GetFloat(TEXT("SlateDebugger.Invalidate"), TEXT("ThresholdPerformanceMs"), ThresholdPerformanceMs, *GEditorPerProjectIni);
+
+	if (bEnabledCVarValue)
+	{
+		StartDebugging();
+	}
 }
 
 void FConsoleSlateDebuggerInvalidate::SaveConfig()
@@ -115,13 +144,15 @@ void FConsoleSlateDebuggerInvalidate::SaveConfig()
 		GConfig->SetColor(TEXT("SlateDebugger.Invalidate"), ColorText, TmpColor, *GEditorPerProjectIni);
 	};
 
-	GConfig->SetBool(TEXT("SlateDebugger.Invalidate"), TEXT("bDisplayWidgetList"), bDisplayWidgetList, *GEditorPerProjectIni);
+	GConfig->SetBool(TEXT("SlateDebugger.Invalidate"), TEXT("bShowWidgetList"), bShowWidgetList, *GEditorPerProjectIni);
 	GConfig->SetBool(TEXT("SlateDebugger.Invalidate"), TEXT("bUseWidgetPathAsName"), bUseWidgetPathAsName, *GEditorPerProjectIni);
 	GConfig->SetBool(TEXT("SlateDebugger.Invalidate"), TEXT("bShowLegend"), bShowLegend, *GEditorPerProjectIni);
 	GConfig->SetBool(TEXT("SlateDebugger.Invalidate"), TEXT("bLogInvalidatedWidget"), bLogInvalidatedWidget, *GEditorPerProjectIni);
+	GConfig->SetBool(TEXT("SlateDebugger.Invalidate"), TEXT("bUsePerformanceThreshold"), bUsePerformanceThreshold, *GEditorPerProjectIni);
 	SetColor(TEXT("DrawRootRootColor"), DrawRootRootColor);
 	SetColor(TEXT("DrawRootChildOrderColor"), DrawRootChildOrderColor);
 	SetColor(TEXT("DrawRootScreenPositionColor"), DrawRootScreenPositionColor);
+	SetColor(TEXT("DrawWidgetPrepassColor"), DrawWidgetPrepassColor);
 	SetColor(TEXT("DrawWidgetLayoutColor"), DrawWidgetLayoutColor);
 	SetColor(TEXT("DrawWidgetPaintColor"), DrawWidgetPaintColor);
 	SetColor(TEXT("DrawWidgetVolatilityColor"), DrawWidgetVolatilityColor);
@@ -130,6 +161,7 @@ void FConsoleSlateDebuggerInvalidate::SaveConfig()
 	SetColor(TEXT("DrawWidgetVisibilityColor"), DrawWidgetVisibilityColor);
 	GConfig->SetInt(TEXT("SlateDebugger.Invalidate"), TEXT("MaxNumberOfWidgetInList"), MaxNumberOfWidgetInList, *GEditorPerProjectIni);
 	GConfig->SetFloat(TEXT("SlateDebugger.Invalidate"), TEXT("CacheDuration"), CacheDuration, *GEditorPerProjectIni);
+	GConfig->SetFloat(TEXT("SlateDebugger.Invalidate"), TEXT("ThresholdPerformanceMs"), ThresholdPerformanceMs, *GEditorPerProjectIni);
 }
 
 void FConsoleSlateDebuggerInvalidate::StartDebugging()
@@ -139,6 +171,7 @@ void FConsoleSlateDebuggerInvalidate::StartDebugging()
 		bEnabled = true;
 		InvalidationInfos.Empty();
 		FrameInvalidationInfos.Empty();
+		FrameRootHandles.Empty();
 
 		FSlateDebugging::PaintDebugElements.AddRaw(this, &FConsoleSlateDebuggerInvalidate::HandlePaintDebugInfo);
 		FSlateDebugging::WidgetInvalidateEvent.AddRaw(this, &FConsoleSlateDebuggerInvalidate::HandleWidgetInvalidated);
@@ -157,6 +190,7 @@ void FConsoleSlateDebuggerInvalidate::StopDebugging()
 
 		InvalidationInfos.Empty();
 		FrameInvalidationInfos.Empty();
+		FrameRootHandles.Empty();
 		bEnabled = false;
 	}
 	bEnabledCVarValue = bEnabled;
@@ -174,119 +208,29 @@ void FConsoleSlateDebuggerInvalidate::HandleEnabled(IConsoleVariable* Variable)
 	}
 }
 
-void FConsoleSlateDebuggerInvalidate::ToggleLegend()
+void FConsoleSlateDebuggerInvalidate::HandledConfigChanged(IConsoleVariable* Variable)
 {
-	bShowLegend = !bShowLegend;
 	SaveConfig();
-}
-
-void FConsoleSlateDebuggerInvalidate::ToggleWidgetNameList()
-{
-	bDisplayWidgetList = !bDisplayWidgetList;
-	SaveConfig();
-}
-
-void FConsoleSlateDebuggerInvalidate::ToggleLogInvalidatedWidget()
-{
-	bLogInvalidatedWidget = !bLogInvalidatedWidget;
-	SaveConfig();
-}
-
-namespace ConsoleSlateDebuggerInvalidate
-{
-	template<class EnumType, int32 BuilderSize>
-	bool CheckAndAddToMessageBuilder(TStringBuilder<BuilderSize>& MessageBuilder, EnumType Filter, EnumType Reason, const TCHAR* Message, bool bFirstFlag)
-	{
-		if (EnumHasAnyFlags(Filter, Reason))
-		{
-			if (!bFirstFlag)
-			{
-				MessageBuilder << TEXT("|");
-			}
-			bFirstFlag = false;
-			MessageBuilder << Message;
-		}
-		return bFirstFlag;
-	}
-
-	template<class EnumType>
-	bool TestAndSetEnum(const FString& Param, EnumType& NewFilter, EnumType Reason, const TCHAR* ReasonParam)
-	{
-		if (Param == ReasonParam)
-		{
-			NewFilter |= Reason;
-			return true;
-		}
-		return false;
-	}
-
-	template<int32 BuilderSize>
-	void BuildEnumMessage(TStringBuilder<BuilderSize>& MessageBuilder, EInvalidateWidgetReason InvalidateWidgetReasonFilter)
-	{
-		bool bFirstFlag = true;
-		bFirstFlag = CheckAndAddToMessageBuilder(MessageBuilder, InvalidateWidgetReasonFilter, EInvalidateWidgetReason::Layout, TEXT("Layout"), bFirstFlag);
-		bFirstFlag = CheckAndAddToMessageBuilder(MessageBuilder, InvalidateWidgetReasonFilter, EInvalidateWidgetReason::Paint, TEXT("Paint"), bFirstFlag);
-		bFirstFlag = CheckAndAddToMessageBuilder(MessageBuilder, InvalidateWidgetReasonFilter, EInvalidateWidgetReason::Volatility, TEXT("Volatility"), bFirstFlag);
-		bFirstFlag = CheckAndAddToMessageBuilder(MessageBuilder, InvalidateWidgetReasonFilter, EInvalidateWidgetReason::ChildOrder, TEXT("ChildOrder"), bFirstFlag);
-		bFirstFlag = CheckAndAddToMessageBuilder(MessageBuilder, InvalidateWidgetReasonFilter, EInvalidateWidgetReason::RenderTransform, TEXT("RenderTransform"), bFirstFlag);
-		bFirstFlag = CheckAndAddToMessageBuilder(MessageBuilder, InvalidateWidgetReasonFilter, EInvalidateWidgetReason::Visibility, TEXT("Visibility"), bFirstFlag);
-
-		if (bFirstFlag)
-		{
-			MessageBuilder << TEXT("None");
-		}
-	}
-
-	template<int32 BuilderSize>
-	void BuildEnumMessage(TStringBuilder<BuilderSize>& MessageBuilder, ESlateDebuggingInvalidateRootReason InvalidateRootReasonFilter)
-	{
-		bool bFirstFlag = true;
-		bFirstFlag = ConsoleSlateDebuggerInvalidate::CheckAndAddToMessageBuilder(MessageBuilder, InvalidateRootReasonFilter, ESlateDebuggingInvalidateRootReason::ChildOrder, TEXT("ChildOrder"), bFirstFlag);
-		bFirstFlag = ConsoleSlateDebuggerInvalidate::CheckAndAddToMessageBuilder(MessageBuilder, InvalidateRootReasonFilter, ESlateDebuggingInvalidateRootReason::Root, TEXT("Root"), bFirstFlag);
-		bFirstFlag = ConsoleSlateDebuggerInvalidate::CheckAndAddToMessageBuilder(MessageBuilder, InvalidateRootReasonFilter, ESlateDebuggingInvalidateRootReason::ScreenPosition, TEXT("ScreenPosition"), bFirstFlag);
-
-		if (bFirstFlag)
-		{
-			MessageBuilder << TEXT("None");
-		}
-	}
 }
 
 void FConsoleSlateDebuggerInvalidate::HandleSetInvalidateWidgetReasonFilter(const TArray<FString>& Params)
 {
-	const TCHAR* UsageMessage = TEXT("Usage: SetInvalidateWidgetReasonFilter [None] [Layout] [Paint] [Volatility] [ChildOrder] [RenderTransform] [Visibility] [Any]");
+	const TCHAR* UsageMessage = TEXT("Usage: SetInvalidateWidgetReasonFilter None|Layout|Paint|Volatility|ChildOrder|RenderTransform|Visibility|Any");
 	if (Params.Num() == 0)
 	{
 		UE_LOG(LogSlateDebugger, Log, TEXT("%s"), UsageMessage);
 
-		TStringBuilder<128> MessageBuilder;
+		TStringBuilder<512> MessageBuilder;
 		MessageBuilder << TEXT("Current Invalidate Widget Reason set: ");
-		ConsoleSlateDebuggerInvalidate::BuildEnumMessage(MessageBuilder, InvalidateWidgetReasonFilter);
+		MessageBuilder << LexToString(InvalidateWidgetReasonFilter);
 		UE_LOG(LogSlateDebugger, Log, TEXT("%s"), MessageBuilder.GetData());
 	}
 	else
 	{
-		EInvalidateWidgetReason NewInvalidateWidgetReasonFilter = EInvalidateWidgetReason::None;
-		bool bHasValidFlags = true;
-		for (const FString& Param : Params)
-		{
-			if (ConsoleSlateDebuggerInvalidate::TestAndSetEnum(Param, NewInvalidateWidgetReasonFilter, EInvalidateWidgetReason::Layout, TEXT("Layout"))) {}
-			else if (ConsoleSlateDebuggerInvalidate::TestAndSetEnum(Param, NewInvalidateWidgetReasonFilter, EInvalidateWidgetReason::Paint, TEXT("Paint"))) {}
-			else if (ConsoleSlateDebuggerInvalidate::TestAndSetEnum(Param, NewInvalidateWidgetReasonFilter, EInvalidateWidgetReason::Volatility, TEXT("Volatility"))) {}
-			else if (ConsoleSlateDebuggerInvalidate::TestAndSetEnum(Param, NewInvalidateWidgetReasonFilter, EInvalidateWidgetReason::ChildOrder, TEXT("ChildOrder"))) {}
-			else if (ConsoleSlateDebuggerInvalidate::TestAndSetEnum(Param, NewInvalidateWidgetReasonFilter, EInvalidateWidgetReason::RenderTransform, TEXT("RenderTransform"))) {}
-			else if (ConsoleSlateDebuggerInvalidate::TestAndSetEnum(Param, NewInvalidateWidgetReasonFilter, EInvalidateWidgetReason::Visibility, TEXT("Visibility"))) {}
-			else if (ConsoleSlateDebuggerInvalidate::TestAndSetEnum(Param, NewInvalidateWidgetReasonFilter, static_cast<EInvalidateWidgetReason>(0xFF), TEXT("Any"))) {}
-			else if (ConsoleSlateDebuggerInvalidate::TestAndSetEnum(Param, NewInvalidateWidgetReasonFilter, EInvalidateWidgetReason::None, TEXT("None"))) {}
-			else
-			{
-				bHasValidFlags = false;
-				UE_LOG(LogSlateDebugger, Warning, TEXT("Param '%s' is invalid."), *Param);
-				break;
-			}
-		}
-
-		if (!bHasValidFlags)
+		TStringBuilder<512> MessageBuilder;
+		MessageBuilder.Join(Params, TEXT('|'));
+		EInvalidateWidgetReason NewInvalidateWidgetReasonFilter;
+		if (!LexTryParseString(NewInvalidateWidgetReasonFilter, MessageBuilder.ToString()))
 		{
 			UE_LOG(LogSlateDebugger, Log, TEXT("%s"), UsageMessage);
 		}
@@ -300,42 +244,28 @@ void FConsoleSlateDebuggerInvalidate::HandleSetInvalidateWidgetReasonFilter(cons
 
 void FConsoleSlateDebuggerInvalidate::HandleSetInvalidateRootReasonFilter(const TArray<FString>& Params)
 {
-	const TCHAR* UsageMessage = TEXT("Usage: SetInvalidateRootReasonFilter [None] [ChildOrder] [Root] [ScreenPosition] [Any]");
+	const TCHAR* UsageMessage = TEXT("Usage: SetInvalidateRootReasonFilter None|ChildOrder|Root|ScreenPosition|Any");
 	if (Params.Num() == 0)
 	{
 		UE_LOG(LogSlateDebugger, Log, TEXT("%s"), UsageMessage);
 
-		TStringBuilder<128> MessageBuilder;
+		TStringBuilder<512> MessageBuilder;
 		MessageBuilder << TEXT("Current Invalidate Root Reason set: ");
-		ConsoleSlateDebuggerInvalidate::BuildEnumMessage(MessageBuilder, InvalidateRootReasonFilter);
+		MessageBuilder << LexToString(InvalidateRootReasonFilter);
 		UE_LOG(LogSlateDebugger, Log, TEXT("%s"), MessageBuilder.GetData());
 	}
 	else
 	{
-		ESlateDebuggingInvalidateRootReason NewInvalidateRoottReasonFilter = ESlateDebuggingInvalidateRootReason::None;
-		bool bHasValidFlags = true;
-		for (const FString& Param : Params)
-		{
-			if (ConsoleSlateDebuggerInvalidate::TestAndSetEnum(Param, NewInvalidateRoottReasonFilter, ESlateDebuggingInvalidateRootReason::ChildOrder, TEXT("ChildOrder"))) {}
-			else if (ConsoleSlateDebuggerInvalidate::TestAndSetEnum(Param, NewInvalidateRoottReasonFilter, ESlateDebuggingInvalidateRootReason::Root, TEXT("Root"))) {}
-			else if (ConsoleSlateDebuggerInvalidate::TestAndSetEnum(Param, NewInvalidateRoottReasonFilter, ESlateDebuggingInvalidateRootReason::ScreenPosition, TEXT("ScreenPosition"))) {}
-			else if (ConsoleSlateDebuggerInvalidate::TestAndSetEnum(Param, NewInvalidateRoottReasonFilter, static_cast<ESlateDebuggingInvalidateRootReason>(0xFF), TEXT("Any"))) {}
-			else if (ConsoleSlateDebuggerInvalidate::TestAndSetEnum(Param, NewInvalidateRoottReasonFilter, ESlateDebuggingInvalidateRootReason::None, TEXT("None"))) {}
-			else
-			{
-				bHasValidFlags = false;
-				UE_LOG(LogSlateDebugger, Warning, TEXT("Param '%s' is invalid."), *Param);
-				break;
-			}
-		}
-
-		if (!bHasValidFlags)
+		TStringBuilder<512> MessageBuilder;
+		MessageBuilder.Join(Params, TEXT('|'));
+		ESlateDebuggingInvalidateRootReason NewInvalidateRootReasonFilter;
+		if (!LexTryParseString(NewInvalidateRootReasonFilter, MessageBuilder.ToString()))
 		{
 			UE_LOG(LogSlateDebugger, Log, TEXT("%s"), UsageMessage);
 		}
 		else
 		{
-			InvalidateRootReasonFilter = NewInvalidateRoottReasonFilter;
+			InvalidateRootReasonFilter = NewInvalidateRootReasonFilter;
 			SaveConfig();
 		}
 	}
@@ -359,17 +289,17 @@ int32 FConsoleSlateDebuggerInvalidate::GetInvalidationPriority(EInvalidateWidget
 		return 50;
 	}
 
-	if (EnumHasAnyFlags(InvalidationInfo, EInvalidateWidgetReason::Layout | EInvalidateWidgetReason::ChildOrder | EInvalidateWidgetReason::Visibility | EInvalidateWidgetReason::RenderTransform))
+	if (EnumHasAnyFlags(InvalidationInfo, EInvalidateWidgetReason::Prepass | EInvalidateWidgetReason::Layout | EInvalidateWidgetReason::ChildOrder | EInvalidateWidgetReason::Visibility | EInvalidateWidgetReason::RenderTransform))
 	{
 		return 40;
+	}
+	else if (EnumHasAnyFlags(InvalidationInfo, EInvalidateWidgetReason::Volatility))
+	{
+		return 30;
 	}
 	else if (EnumHasAnyFlags(InvalidationInfo, EInvalidateWidgetReason::Paint))
 	{
 		return 20;
-	}
-	else if (EnumHasAnyFlags(InvalidationInfo, EInvalidateWidgetReason::Volatility))
-	{
-		return 10;
 	}
 	return 0;
 }
@@ -389,7 +319,11 @@ const FLinearColor& FConsoleSlateDebuggerInvalidate::GetColor(const FInvalidatio
 		return DrawRootScreenPositionColor;
 	}
 
-	if (EnumHasAnyFlags(InvalidationInfo.WidgetReason, EInvalidateWidgetReason::Layout))
+	if (EnumHasAnyFlags(InvalidationInfo.WidgetReason, EInvalidateWidgetReason::Prepass))
+	{
+		return DrawWidgetPrepassColor;
+	}
+	else if (EnumHasAnyFlags(InvalidationInfo.WidgetReason, EInvalidateWidgetReason::Layout))
 	{
 		return DrawWidgetLayoutColor;
 	}
@@ -480,7 +414,7 @@ void FConsoleSlateDebuggerInvalidate::FInvalidationInfo::UpdateInvalidationReaso
 
 void FConsoleSlateDebuggerInvalidate::HandleEndFrame()
 {
-	double LastTime = FSlateApplicationBase::Get().GetCurrentTime() - CacheDuration;
+	const double LastTime = FSlateApplicationBase::Get().GetCurrentTime() - CacheDuration;
 	for (int32 Index = InvalidationInfos.Num() - 1; Index >= 0; --Index)
 	{
 		if (InvalidationInfos[Index].InvalidationTime < LastTime)
@@ -488,7 +422,12 @@ void FConsoleSlateDebuggerInvalidate::HandleEndFrame()
 			InvalidationInfos.RemoveAtSwap(Index);
 		}
 	}
+	if (LastPerformanceThresholdSeconds < LastTime)
+	{
+		LastPerformanceThresholdFrameCount = 0;
+	}
 
+	CleanFrameList();
 	ProcessFrameList();
 }
 
@@ -553,7 +492,7 @@ void FConsoleSlateDebuggerInvalidate::HandleWidgetInvalidated(const FSlateDebugg
 			//A->D [Paint] to A->D [Layout]. 
 			if (FoundInvalidated->InvalidationPriority < InvalidationPriority)
 			{
-				FoundInvalidated->ReplaceInvalidator(Args, InvalidationPriority, bDisplayWidgetList, bUseWidgetPathAsName);
+				FoundInvalidated->ReplaceInvalidator(Args, InvalidationPriority, bShowWidgetList, bUseWidgetPathAsName);
 			}
 		}
 		else
@@ -568,13 +507,64 @@ void FConsoleSlateDebuggerInvalidate::HandleWidgetInvalidated(const FSlateDebugg
 				// is this a continuation of an existing chain
 				if (FoundInvalidated->InvalidationPriority <= InvalidationPriority)
 				{
-					FoundInvalidated->ReplaceInvalidated(Args, InvalidationPriority, bDisplayWidgetList, bUseWidgetPathAsName);
+					FoundInvalidated->ReplaceInvalidated(Args, InvalidationPriority, bShowWidgetList, bUseWidgetPathAsName);
 				}
 			}
 			else
 			{
 				// New element in the chain
-				FrameInvalidationInfos.Emplace(Args, InvalidationPriority, bDisplayWidgetList, bUseWidgetPathAsName);
+				FrameInvalidationInfos.Emplace(Args, InvalidationPriority, bShowWidgetList, bUseWidgetPathAsName);
+				FrameRootHandles.AddUnique(Args.WidgetInvalidated->GetProxyHandle().GetInvalidationRootHandle());
+			}
+		}
+	}
+}
+
+void FConsoleSlateDebuggerInvalidate::CleanFrameList()
+{
+	if (bUsePerformanceThreshold)
+	{
+		const double ThresholdPerformanceSeconds = double(ThresholdPerformanceMs)/1000.0;
+		bool bFirstItem = true;
+		for (int32 Index = FrameRootHandles.Num() - 1; Index >= 0; --Index)
+		{
+			FSlateInvalidationRootHandle RootHandle = FrameRootHandles[Index];
+			if (RootHandle.GetInvalidationRoot() == nullptr)
+			{
+				FrameRootHandles.RemoveAtSwap(Index);
+			}
+			else if (RootHandle.Advanced_GetInvalidationRootNoCheck()->GetPerformanceStat().InvalidationProcessing < ThresholdPerformanceSeconds)
+			{
+				FrameRootHandles.RemoveAtSwap(Index);
+			}
+			else
+			{
+				if (bFirstItem)
+				{
+					UE_LOG(LogSlateDebugger, Log, TEXT("Slate Performance Threshold reached at frame %d"), GFrameCounter);
+					UE_TRACE_SLATE_BOOKMARK(TEXT("Slate Performance Threshold %d"), GFrameCounter);
+					LastPerformanceThresholdFrameCount = GFrameCounter;
+					LastPerformanceThresholdSeconds = FSlateApplicationBase::Get().GetCurrentTime();
+				}
+
+				if (bLogInvalidatedWidget)
+				{
+					if (const SWidget* InvalidationRootAsWidget = RootHandle.Advanced_GetInvalidationRootNoCheck()->GetInvalidationRootWidget())
+					{
+						const FSlateInvalidationRoot::FPerformanceStat PerformanceStat = RootHandle.Advanced_GetInvalidationRootNoCheck()->GetPerformanceStat();
+
+						UE_LOG(LogSlateDebugger, Log, TEXT("InvalidationRoot: '%s' Total: %f")
+							TEXT("   PreUpdate: %f  Attribute: %f  Prepass: %f  Update: %f")
+							, *(bUseWidgetPathAsName ? FReflectionMetaData::GetWidgetPath(InvalidationRootAsWidget) : FReflectionMetaData::GetWidgetDebugInfo(InvalidationRootAsWidget))
+							, PerformanceStat.InvalidationProcessing
+							, PerformanceStat.WidgetsPreUpdate
+							, PerformanceStat.WidgetsAttribute
+							, PerformanceStat.WidgetsPrepass
+							, PerformanceStat.WidgetsUpdate
+							);
+					}
+				}
+				bFirstItem = false;
 			}
 		}
 	}
@@ -584,33 +574,50 @@ void FConsoleSlateDebuggerInvalidate::ProcessFrameList()
 {
 	const double CurrentTime = FSlateApplicationBase::Get().GetCurrentTime();
 
+	bool bLogOnce = false;
 	for (FInvalidationInfo& FrameInvalidationInfo : FrameInvalidationInfos)
 	{
+		TSharedPtr<const SWidget> InvalidatedWidget = FrameInvalidationInfo.WidgetInvalidated.Pin();
+		if (bUsePerformanceThreshold)
+		{
+			if (InvalidatedWidget == nullptr)
+			{
+				continue;
+			}
+
+			// is the invalidation root reach the performance threshold to be displayed
+			FSlateInvalidationRootHandle RootHandle = InvalidatedWidget->GetProxyHandle().GetInvalidationRootHandle();
+			if (!FrameRootHandles.Contains(RootHandle))
+			{
+				continue;
+			}
+		}
+
 		if (bLogInvalidatedWidget)
 		{
-			TStringBuilder<255> MessageBuilder;
+			TStringBuilder<512> MessageBuilder;
 			MessageBuilder << TEXT("Invalidator: '");
 			MessageBuilder << FrameInvalidationInfo.WidgetInvalidatorName;
 			MessageBuilder << TEXT("' Invalidated: '");
 			MessageBuilder << FrameInvalidationInfo.WidgetInvalidatedName;
 			MessageBuilder << TEXT("' Root Reason: '");
-			ConsoleSlateDebuggerInvalidate::BuildEnumMessage(MessageBuilder, FrameInvalidationInfo.InvalidationRootReason);
+			MessageBuilder << LexToString(FrameInvalidationInfo.InvalidationRootReason);
 			MessageBuilder << TEXT("' Widget Reason: '");
-			ConsoleSlateDebuggerInvalidate::BuildEnumMessage(MessageBuilder, FrameInvalidationInfo.WidgetReason);
+			MessageBuilder << LexToString(FrameInvalidationInfo.WidgetReason);
 			MessageBuilder << TEXT("'");
 
-			UE_LOG(LogSlateDebugger, Log, TEXT("%s"), MessageBuilder.GetData());
+			UE_LOG(LogSlateDebugger, Log, TEXT("%s"), MessageBuilder.ToString());
 		}
 
-		if (TSharedPtr<const SWidget> Invalidated = FrameInvalidationInfo.WidgetInvalidated.Pin())
+		if (InvalidatedWidget)
 		{
-			FrameInvalidationInfo.WindowId = FConsoleSlateDebuggerUtility::FindWindowId(Invalidated.Get());
+			FrameInvalidationInfo.WindowId = FConsoleSlateDebuggerUtility::FindWindowId(InvalidatedWidget.Get());
 			if (FrameInvalidationInfo.WindowId != FConsoleSlateDebuggerUtility::InvalidWindowId)
 			{
 				FrameInvalidationInfo.DisplayColor = GetColor(FrameInvalidationInfo);
 				FrameInvalidationInfo.InvalidationTime = CurrentTime;
-				FrameInvalidationInfo.InvalidatedPaintLocation = Invalidated->GetPersistentState().AllottedGeometry.GetAbsolutePosition();
-				FrameInvalidationInfo.InvalidatedPaintSize = Invalidated->GetPersistentState().AllottedGeometry.GetAbsoluteSize();
+				FrameInvalidationInfo.InvalidatedPaintLocation = InvalidatedWidget->GetPersistentState().AllottedGeometry.GetAbsolutePosition();
+				FrameInvalidationInfo.InvalidatedPaintSize = InvalidatedWidget->GetPersistentState().AllottedGeometry.GetAbsoluteSize();
 
 				if (TSharedPtr<const SWidget> Invalidator = FrameInvalidationInfo.WidgetInvalidator.Pin())
 				{
@@ -623,6 +630,7 @@ void FConsoleSlateDebuggerInvalidate::ProcessFrameList()
 		}
 	}
 	FrameInvalidationInfos.Reset();
+	FrameRootHandles.Reset();
 }
 
 void FConsoleSlateDebuggerInvalidate::HandlePaintDebugInfo(const FPaintArgs& InArgs, const FGeometry& InAllottedGeometry, FSlateWindowElementList& InOutDrawElements, int32& InOutLayerId)
@@ -635,40 +643,28 @@ void FConsoleSlateDebuggerInvalidate::HandlePaintDebugInfo(const FPaintArgs& InA
 	const FSlateBrush* CheckerboardBrush = FCoreStyle::Get().GetBrush("Checkerboard");
 	FontInfo.OutlineSettings.OutlineSize = 1;
 
-	int32 NumberOfWidget = 0;
 	CacheDuration = FMath::Max(CacheDuration, 0.01f);
 	const double SlateApplicationCurrentTime = FSlateApplicationBase::Get().GetCurrentTime();
 
-	float TextElementY = 48.f;
-	auto MakeText = [&](const FString& Text, const FVector2D& Location, const FLinearColor& Color)
+	FVector2f TextElementLocation {16.f, 64.f};
+	auto MakeText = [&](const FString& Text, const FLinearColor& Color)
 	{
 		FSlateDrawElement::MakeText(
 			InOutDrawElements
 			, InOutLayerId
-			, InAllottedGeometry.ToPaintGeometry(Location, FVector2D(1.f, 1.f))
+			, InAllottedGeometry.ToPaintGeometry(FVector2f(1.f, 1.f), FSlateLayoutTransform(TextElementLocation))
 			, Text
 			, FontInfo
 			, ESlateDrawEffect::None
 			, Color);
+		TextElementLocation.Y += 12.f;
 	};
 
-	if (bShowLegend)
-	{
-		MakeText(TEXT("Invalidation Root - Root"), FVector2D(10.f, 10.f+0.f), DrawRootRootColor);
-		MakeText(TEXT("Invalidation Root - Child Order"), FVector2D(10.f, 10.f+12.f), DrawRootChildOrderColor);
-		MakeText(TEXT("Invalidation Root - Screen Position"), FVector2D(10.f, 10.f+24.f), DrawRootScreenPositionColor);
-		MakeText(TEXT("Widget - Layout"), FVector2D(10.f, 10.f+36.f), DrawWidgetLayoutColor);
-		MakeText(TEXT("Widget - Paint"), FVector2D(10.f, 10.f+48.f), DrawWidgetPaintColor);
-		MakeText(TEXT("Widget - Volatility"), FVector2D(10.f, 10.f+60.f), DrawWidgetVolatilityColor);
-		MakeText(TEXT("Widget - Child Order"), FVector2D(10.f, 10.f+72.f), DrawWidgetChildOrderColor);
-		MakeText(TEXT("Widget - Render Transform"), FVector2D(10.f, 10.f+84.f), DrawWidgetRenderTransformColor);
-		MakeText(TEXT("Widget - Visibility"), FVector2D(10.f, 10.f+96.f), DrawWidgetVisibilityColor);
-		TextElementY += 108.f;
-	}
-
 	TArray<FConsoleSlateDebuggerUtility::TSWidgetId, TInlineAllocator<32>> AlreadyProcessedInvalidatedId;
-	for (const FInvalidationInfo& InvalidationInfo : InvalidationInfos)
+	TArray<FConsoleSlateDebuggerUtility::TSWidgetId, TInlineAllocator<32>> InvalidationInfoIndexToPaint;
+	for (int32 Index = 0; Index < InvalidationInfos.Num(); ++Index)
 	{
+		const FInvalidationInfo& InvalidationInfo = InvalidationInfos[Index];
 		if (InvalidationInfo.WindowId != PaintWindow)
 		{
 			continue;
@@ -687,7 +683,7 @@ void FConsoleSlateDebuggerInvalidate::HandlePaintDebugInfo(const FPaintArgs& InA
 			AlreadyProcessedInvalidatedId.Add(InvalidationInfo.WidgetInvalidatorId);
 		}
 
-		const double LerpValue = FMath::Clamp((SlateApplicationCurrentTime - InvalidationInfo.InvalidationTime) / CacheDuration, 0.0, 1.0);
+		const float LerpValue = FMath::Clamp((float)(SlateApplicationCurrentTime - InvalidationInfo.InvalidationTime) / CacheDuration, 0.0f, 1.0f);
 		const FLinearColor ColorWithOpacity = InvalidationInfo.DisplayColor.CopyWithNewOpacity(FMath::InterpExpoOut(1.0f, 0.2f, LerpValue));
 
 		{
@@ -722,21 +718,59 @@ void FConsoleSlateDebuggerInvalidate::HandlePaintDebugInfo(const FPaintArgs& InA
 				ColorWithOpacity);
 		}
 
-		if (bDisplayWidgetList)
+		if (bShowWidgetList)
 		{
-			if (NumberOfWidget < MaxNumberOfWidgetInList)
-			{
-				FString WidgetDisplayName = FString::Printf(TEXT("'%s' -> '%s'"), *InvalidationInfo.WidgetInvalidatorName, *InvalidationInfo.WidgetInvalidatedName);
-				MakeText(WidgetDisplayName, FVector2D(0.f, (12.f * NumberOfWidget) + TextElementY), InvalidationInfo.DisplayColor);
-			}
+			InvalidationInfoIndexToPaint.Add(Index);
 		}
-		++NumberOfWidget;
 	}
 
-	if (bDisplayWidgetList && NumberOfWidget > MaxNumberOfWidgetInList)
+
+	if (bShowLegend)
 	{
-		FString WidgetDisplayName = FString::Printf(TEXT("   %d more invalidations"), NumberOfWidget - MaxNumberOfWidgetInList);
-		MakeText(WidgetDisplayName, FVector2D(0.f, (12.f * NumberOfWidget) + TextElementY), FLinearColor::White);
+		MakeText(TEXT("Invalidation Root - Root"), DrawRootRootColor);
+		MakeText(TEXT("Invalidation Root - Child Order"), DrawRootChildOrderColor);
+		MakeText(TEXT("Invalidation Root - Screen Position"), DrawRootScreenPositionColor);
+		MakeText(TEXT("Widget - Layout"), DrawWidgetLayoutColor);
+		MakeText(TEXT("Widget - Paint"), DrawWidgetPaintColor);
+		MakeText(TEXT("Widget - Volatility"), DrawWidgetVolatilityColor);
+		MakeText(TEXT("Widget - Child Order"), DrawWidgetChildOrderColor);
+		MakeText(TEXT("Widget - Render Transform"), DrawWidgetRenderTransformColor);
+		MakeText(TEXT("Widget - Visibility"), DrawWidgetVisibilityColor);
+		TextElementLocation.Y += 20.f;
+	}
+
+	if (LastPerformanceThresholdFrameCount > 0)
+	{
+		FSlateFontInfo NormalFontInfo = FCoreStyle::Get().GetFontStyle("NormalFont");
+		FSlateDrawElement::MakeText(
+			InOutDrawElements
+			, InOutLayerId
+			, InAllottedGeometry.ToPaintGeometry(FVector2f(1.f, 1.f), FSlateLayoutTransform(TextElementLocation))
+			, FString::Printf(TEXT("Slate Performance Threshold Reached: %d"), LastPerformanceThresholdFrameCount)
+			, NormalFontInfo
+			, ESlateDrawEffect::None
+			, FLinearColor::Red);
+		TextElementLocation.Y += 20.f;
+	}
+
+	if (bShowWidgetList)
+	{
+		int32 MaxCount = FMath::Min(InvalidationInfoIndexToPaint.Num(), MaxNumberOfWidgetInList);
+		for (int32 Index = 0; Index < MaxCount; ++Index)
+		{
+			const int32 IndexValue = InvalidationInfoIndexToPaint[Index];
+			const FInvalidationInfo& InvalidationInfo = InvalidationInfos[IndexValue];
+
+			FString WidgetDisplayName = FString::Printf(TEXT("'%s' -> '%s'"), *InvalidationInfo.WidgetInvalidatorName, *InvalidationInfo.WidgetInvalidatedName);
+			MakeText(WidgetDisplayName, InvalidationInfo.DisplayColor);
+		}
+
+		if (InvalidationInfoIndexToPaint.Num() > MaxNumberOfWidgetInList)
+		{
+			TextElementLocation.Y += 12.f;
+			FString WidgetDisplayName = FString::Printf(TEXT("   %d more invalidations"), InvalidationInfoIndexToPaint.Num() - MaxNumberOfWidgetInList);
+			MakeText(WidgetDisplayName, FLinearColor::White);
+		}
 	}
 }
 

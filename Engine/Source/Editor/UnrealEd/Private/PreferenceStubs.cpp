@@ -2,6 +2,7 @@
 
 
 #include "CoreMinimal.h"
+#include "Animation/Skeleton.h"
 #include "Preferences/CascadeOptions.h"
 #include "Preferences/CurveEdOptions.h"
 #include "Preferences/MaterialEditorOptions.h"
@@ -10,6 +11,8 @@
 #include "Preferences/PhysicsAssetEditorOptions.h"
 #include "Preferences/MaterialStatsOptions.h"
 #include "FrameNumberDisplayFormat.h"
+#include "RHI.h"
+#include "Animation/Skeleton.h"
 
 // @todo find a better place for all of this, preferably in the appropriate modules
 // though this would require the classes to be relocated as well
@@ -40,14 +43,16 @@ UPhysicsAssetEditorOptions::UPhysicsAssetEditorOptions(const FObjectInitializer&
 	InterpolationSpeed = 50.f;
 
 	bShowConstraintsAsPoints = false;
+	bDrawViolatedLimits = false;
+	bSimulationFloorCollisionEnabled = true;
 	ConstraintDrawSize = 1.0f;
 
 	// view options
-	MeshViewMode = EPhysicsAssetEditorRenderMode::Solid;
-	CollisionViewMode = EPhysicsAssetEditorRenderMode::Solid;
+	MeshViewMode = EPhysicsAssetEditorMeshViewMode::Solid;
+	CollisionViewMode = EPhysicsAssetEditorCollisionViewMode::Solid;
 	ConstraintViewMode = EPhysicsAssetEditorConstraintViewMode::AllLimits;
-	SimulationMeshViewMode = EPhysicsAssetEditorRenderMode::Solid;
-	SimulationCollisionViewMode = EPhysicsAssetEditorRenderMode::Solid;
+	SimulationMeshViewMode = EPhysicsAssetEditorMeshViewMode::Solid;
+	SimulationCollisionViewMode = EPhysicsAssetEditorCollisionViewMode::Solid;
 	SimulationConstraintViewMode = EPhysicsAssetEditorConstraintViewMode::None;
 
 	CollisionOpacity = 0.3f;
@@ -65,14 +70,24 @@ UMaterialEditorOptions::UMaterialEditorOptions(const FObjectInitializer& ObjectI
 UMaterialStatsOptions::UMaterialStatsOptions(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
+	uint32 CurrentlyUsedSP = static_cast<int32>(GMaxRHIShaderPlatform);
+	if (CurrentlyUsedSP < UE_ARRAY_COUNT(bPlatformUsed))
+	{
+		bPlatformUsed[CurrentlyUsedSP] = 1;
+	}
+
+	// enable a mobile platform by default so we can check if shaders are compiling for mobile
 #if PLATFORM_WINDOWS
-	//#todo-sm6
-	bPlatformUsed[/*GMaxRHIFeatureLevel == ERHIFeatureLevel::SM5 ? */SP_PCD3D_SM5/* : SP_PCD3D_SM4*/] = 1;
-#elif PLATFORM_IOS
+	bPlatformUsed[SP_PCD3D_ES3_1] = 1;
+#elif PLATFORM_MAC
 	bPlatformUsed[SP_METAL] = 1;
+#elif PLATFORM_LINUX
+	bPlatformUsed[SP_VULKAN_PCES3_1] = 1;
 #endif
 
 	bMaterialQualityUsed[EMaterialQualityLevel::High] = 1;
+
+	MaterialStatsDerivedMIOption = EMaterialStatsDerivedMIOption::Ignore;
 }
 
 UAnimationBlueprintEditorOptions::UAnimationBlueprintEditorOptions(const FObjectInitializer& ObjectInitializer)
@@ -107,6 +122,7 @@ UPersonaOptions::UPersonaOptions(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 	, DefaultLocalAxesSelection(2)
 	, DefaultBoneDrawSelection(1)
+	, bPauseAnimationOnCameraMove(false)
 	, bAllowPreviewMeshCollectionsToSelectFromDifferentSkeletons(true)
 {
 	AssetEditorOptions.AddUnique(FAssetEditorOptions(TEXT("SkeletonEditor")));
@@ -123,12 +139,17 @@ UPersonaOptions::UPersonaOptions(const FObjectInitializer& ObjectInitializer)
 	SectionTimingNodeColor = FLinearColor(0.39f, 0.39f, 1.0f, 0.75f);
 	NotifyTimingNodeColor = FLinearColor(0.8f, 0.1f, 0.1f);
 	BranchingPointTimingNodeColor = FLinearColor(0.5f, 1.0f, 1.0f);
+	
+	DefaultBoneColor = FLinearColor(0.0f,0.0f,0.025f,1.0f);
+	SelectedBoneColor = FLinearColor(0.2f,1.0f,0.2f,1.0f);
+	AffectedBoneColor = FLinearColor(1.0f,1.0f,1.0f,1.0f);
+	DisabledBoneColor = FLinearColor(0.4f,0.4f,0.4f,1.0f);
+	ParentOfSelectedBoneColor = FLinearColor(0.85f,0.45f,0.12f,1.0f);
+	VirtualBoneColor = FLinearColor(0.4f, 0.4f, 1.0f, 1.0f);
 
 	bAutoAlignFloorToMesh = true;
 
 	NumFolderFiltersInAssetBrowser = 2;
-
-	bUseAudioAttenuation = true;
 
 	CurveEditorSnapInterval = 0.01f;
 
@@ -143,6 +164,12 @@ UPersonaOptions::UPersonaOptions(const FObjectInitializer& ObjectInitializer)
 	bTimelineDisplayCurveKeys = false;
 
 	TimelineEnabledSnaps = { "CompositeSegment", "MontageSection" };
+
+	bExpandTreeOnSelection = true;
+
+	bAllowIncompatibleSkeletonSelection = false;
+
+	USkeleton::AreAllSkeletonsCompatibleDelegate.BindUObject(this, &UPersonaOptions::GetAllowIncompatibleSkeletonSelection);
 }
 
 void UPersonaOptions::SetShowGrid( bool bInShowGrid )
@@ -175,12 +202,6 @@ void UPersonaOptions::SetAutoAlignFloorToMesh(bool bInAutoAlignFloorToMesh)
 void UPersonaOptions::SetMuteAudio( bool bInMuteAudio )
 {
 	bMuteAudio = bInMuteAudio;
-	SaveConfig();
-}
-
-void UPersonaOptions::SetUseAudioAttenuation( bool bInUseAudioAttenuation )
-{
-	bUseAudioAttenuation = bInUseAudioAttenuation;
 	SaveConfig();
 }
 
@@ -274,4 +295,22 @@ FAssetEditorOptions& UPersonaOptions::GetAssetEditorOptions(const FName& InConte
 	{
 		return *FoundOptions;
 	}
+}
+
+void UPersonaOptions::PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+
+	OnSettingsChange.Broadcast(this, PropertyChangedEvent.ChangeType);
+}
+
+bool UPersonaOptions::GetAllowIncompatibleSkeletonSelection() const
+{
+	return bAllowIncompatibleSkeletonSelection;
+}
+
+void UPersonaOptions::SetAllowIncompatibleSkeletonSelection(bool bState)
+{
+	bAllowIncompatibleSkeletonSelection = bState;
+	SaveConfig();
 }

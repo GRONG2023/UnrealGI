@@ -5,7 +5,7 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/UObjectGlobals.h"
-#include "Engine/EngineTypes.h"
+#include "Engine/HitResult.h"
 #include "TraceQueryTestResults.generated.h"
 
 class AFunctionalTest;

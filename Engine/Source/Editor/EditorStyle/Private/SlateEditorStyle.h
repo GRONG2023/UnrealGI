@@ -2,17 +2,18 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
 #include "UObject/UObjectGlobals.h"
-#include "Modules/ModuleManager.h"
 #include "Styling/SlateColor.h"
 #include "Styling/SlateStyle.h"
 #include "Styling/SlateTypes.h"
 #include "EditorStyleSet.h"
-#include "Classes/EditorStyleSettings.h"
-#include "ISettingsModule.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "UObject/Object.h"
+#include "Math/Vector2D.h"
+#include "Templates/SharedPointer.h"
 
 struct FPropertyChangedEvent;
+class UEditorStyleSettings;
 
 /**
  * Declares the Editor's visual style.
@@ -26,33 +27,12 @@ public:
 	{
 		Settings = NULL;
 
-#if WITH_EDITOR
-		Settings = GetMutableDefault<UEditorStyleSettings>();
-		ISettingsModule* SettingsModule = FModuleManager::GetModulePtr<ISettingsModule>("Settings");
-
-		if (SettingsModule != nullptr)
-		{
-			SettingsModule->RegisterSettings( "Editor", "General", "Appearance",
-				NSLOCTEXT("EditorStyle", "Appearance_UserSettingsName", "Appearance"),
-				NSLOCTEXT("EditorStyle", "Appearance_UserSettingsDescription", "Customize the look of the editor."),
-				Settings
-			);
-		}
-#endif
-
 		StyleInstance = Create( Settings );
 		SetStyle( StyleInstance.ToSharedRef() );
 	}
 
 	static void Shutdown()
 	{
-		ISettingsModule* SettingsModule = FModuleManager::GetModulePtr<ISettingsModule>("Settings");
-
-		if (SettingsModule != nullptr)
-		{
-			SettingsModule->UnregisterSettings( "Editor", "General", "Appearance");
-		}
-
 		ResetToDefault();
 		ensure( StyleInstance.IsUnique() );
 		StyleInstance.Reset();
@@ -66,12 +46,13 @@ public:
 	class FStyle : public FSlateStyleSet
 	{
 	public:
-		FStyle( const TWeakObjectPtr< UEditorStyleSettings >& InSettings );
+		FStyle( const TWeakObjectPtr<UEditorStyleSettings>& InSettings );
 
 		void Initialize();
 		void SetupGeneralStyles();
 		void SetupLevelGeneralStyles();
 		void SetupWorldBrowserStyles();
+		void SetupWorldPartitionStyles();
 		void SetupSequencerStyles();
 		void SetupViewportStyles();
 		void SetupNotificationBarStyles();
@@ -93,7 +74,6 @@ public:
 		void SetupContentBrowserStyle();
 		void SetupLandscapeEditorStyle();
 		void SetupToolkitStyles();
-		void SetupMatineeStyle();
 		void SetupSourceControlStyles();
 		void SetupAutomationStyles();
 		void SetupUMGEditorStyles();
@@ -166,10 +146,13 @@ public:
 		FButtonStyle Button;
 		FButtonStyle HoverHintOnly;
 
-		TWeakObjectPtr< UEditorStyleSettings > Settings;
+		TWeakObjectPtr<UEditorStyleSettings> Settings;
+
+		static bool IncludeEditorSpecificStyles();
+
 	};
 
-	static TSharedRef< class FSlateEditorStyle::FStyle > Create( const TWeakObjectPtr< UEditorStyleSettings >& InCustomization )
+	static TSharedRef< class FSlateEditorStyle::FStyle > Create( const TWeakObjectPtr<UEditorStyleSettings>& InCustomization )
 	{
 		TSharedRef< class FSlateEditorStyle::FStyle > NewStyle = MakeShareable( new FSlateEditorStyle::FStyle( InCustomization ) );
 		NewStyle->Initialize();
@@ -182,5 +165,5 @@ public:
 	}
 
 	static TSharedPtr< FSlateEditorStyle::FStyle > StyleInstance;
-	static TWeakObjectPtr< UEditorStyleSettings > Settings;
+	static TWeakObjectPtr<UEditorStyleSettings > Settings;
 };

@@ -2,11 +2,17 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "CoreTypes.h"
 #include "Misc/Guid.h"
+#include "MovieSceneTrack.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+
 #include "MovieSceneBinding.generated.h"
 
+class UMovieScene;
 class UMovieSceneTrack;
 
 /**
@@ -93,7 +99,7 @@ struct FMovieSceneBinding
 	 *
 	 * @param NewTrack	The track to add
 	 */
-	void MOVIESCENE_API AddTrack(UMovieSceneTrack& NewTrack);
+	MOVIESCENE_API void AddTrack(UMovieSceneTrack& NewTrack, UMovieScene* Owner);
 
 	/**
 	 * Removes a track from this binding
@@ -101,7 +107,12 @@ struct FMovieSceneBinding
 	 * @param Track	The track to remove
 	 * @return true if the track was successfully removed, false if the track could not be found
 	 */
-	bool RemoveTrack(UMovieSceneTrack& Track);
+	MOVIESCENE_API bool RemoveTrack(UMovieSceneTrack& Track, UMovieScene* Owner);
+
+	/**
+	 * Removes all null tracks from this binding
+	 */
+	MOVIESCENE_API void RemoveNullTracks();
 
 	/**
 	 * @return All tracks in this binding
@@ -114,28 +125,17 @@ struct FMovieSceneBinding
 	/**
 	 * Reset all tracks in this binding, returning the previous array of tracks
 	 */
-	TArray<UMovieSceneTrack*> StealTracks()
-	{
-		TArray<UMovieSceneTrack*> Empty;
-		Swap(Empty, Tracks);
-		return Empty;
-	}
+	MOVIESCENE_API TArray<UMovieSceneTrack*> StealTracks(UMovieScene* Owner);
 
 	/**
 	 * Assign all tracks in this binding
 	 */
-	void SetTracks(TArray<UMovieSceneTrack*>&& InTracks)
-	{
-		Tracks = MoveTemp(InTracks);
-	}
+	MOVIESCENE_API void SetTracks(TArray<UMovieSceneTrack*>&& InTracks, UMovieScene* Owner);
 
-	/**
-	* Assign all tracks in this binding
-	*/
-	void SetTracks(TArray<UMovieSceneTrack*>& InTracks)
-	{
-		Tracks = InTracks;
-	}
+	/* For sorts so we can search quickly by Guid */
+	FORCEINLINE bool operator<(const FMovieSceneBinding& RHS) const { return ObjectGuid < RHS.ObjectGuid; }
+	FORCEINLINE bool operator<(const FGuid& InGuid) const { return ObjectGuid < InGuid; }
+	FORCEINLINE friend bool operator<(const FGuid& InGuid, const FMovieSceneBinding& RHS) { return InGuid < RHS.GetObjectGuid(); }
 
 #if WITH_EDITORONLY_DATA
 	/**
@@ -169,7 +169,7 @@ private:
 
 	/** All tracks in this binding */
 	UPROPERTY(Instanced)
-	TArray<UMovieSceneTrack*> Tracks;
+	TArray<TObjectPtr<UMovieSceneTrack>> Tracks;
 
 #if WITH_EDITORONLY_DATA
 	/** The desired sorting order for this binding in Sequencer */

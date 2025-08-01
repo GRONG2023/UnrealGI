@@ -38,7 +38,7 @@ void FAndroidErrorOutputDevice::Serialize( const TCHAR* Msg, ELogVerbosity::Type
 	else
 	{
 		HandleError();
-		FPlatformMisc::RequestExit(true);
+		FPlatformMisc::RequestExit(true, TEXT("FAndroidErrorOutputDevice::Serialize.!GIsGuarded"));
 	}
 }
 
@@ -64,7 +64,7 @@ void FAndroidErrorOutputDevice::HandleError()
 	FDebug::LogFormattedMessageWithCallstack(LogAndroid.GetCategoryName(), __FILE__, __LINE__, TEXT("=== Critical error: ==="), GErrorHist, ELogVerbosity::Error);
 #endif
 	
-	GLog->PanicFlushThreadedLogs();
+	GLog->Panic();
 
 	FCoreDelegates::OnHandleSystemError.Broadcast();
 	FCoreDelegates::OnShutdownAfterError.Broadcast();

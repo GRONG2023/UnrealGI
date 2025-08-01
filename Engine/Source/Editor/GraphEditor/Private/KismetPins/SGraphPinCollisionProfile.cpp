@@ -1,9 +1,25 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "KismetPins/SGraphPinCollisionProfile.h"
-#include "SNameComboBox.h"
+
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphSchema.h"
 #include "Engine/CollisionProfile.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Margin.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/CString.h"
+#include "SNameComboBox.h"
 #include "ScopedTransaction.h"
+#include "UObject/Class.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+
+class SWidget;
 
 void SGraphPinCollisionProfile::Construct(const FArguments& InArgs, UEdGraphPin* InGraphPinObj)
 {
@@ -106,14 +122,14 @@ void SGraphPinCollisionProfile::GetPropertyAsName(FName& OutName) const
 
 	if (PinString.StartsWith(TEXT("("), ESearchCase::CaseSensitive) && PinString.EndsWith(TEXT(")"), ESearchCase::CaseSensitive))
 	{
-		PinString.LeftChopInline(1, false);
-		PinString.RightChopInline(1, false);
+		PinString.LeftChopInline(1, EAllowShrinking::No);
+		PinString.RightChopInline(1, EAllowShrinking::No);
 		PinString.Split(TEXT("="), nullptr, &PinString, ESearchCase::CaseSensitive);
 
 		if (PinString.StartsWith(TEXT("\""), ESearchCase::CaseSensitive) && PinString.EndsWith(TEXT("\""), ESearchCase::CaseSensitive))
 		{
-			PinString.LeftChopInline(1, false);
-			PinString.RightChopInline(1, false);
+			PinString.LeftChopInline(1, EAllowShrinking::No);
+			PinString.RightChopInline(1, EAllowShrinking::No);
 		}
 	}
 

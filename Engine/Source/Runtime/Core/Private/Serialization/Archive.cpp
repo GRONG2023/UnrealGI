@@ -22,6 +22,10 @@
 #include "Interfaces/ITargetPlatform.h"
 #include "Serialization/CompressedChunkInfo.h"
 #include "Serialization/ArchiveSerializedPropertyChain.h"
+#include "UObject/NameTypes.h"
+#include "Compression/CompressionUtil.h"
+#include "UObject/UnrealNames.h"
+#include "Misc/EngineNetworkCustomVersion.h"
 
 PRAGMA_DISABLE_UNSAFE_TYPECAST_WARNINGS
 
@@ -149,12 +153,11 @@ void FArchiveState::Reset()
 #if DEVIRTUALIZE_FLinkerLoad_Serialize
 	ActiveFPLB->Reset();
 #endif
-	ArUE4Ver							= GPackageFileUE4Version;
-	ArLicenseeUE4Ver					= GPackageFileLicenseeUE4Version;
+	ArUEVer								= GPackageFileUEVersion;
+	ArLicenseeUEVer						= GPackageFileLicenseeUEVersion;
 	ArEngineVer							= FEngineVersion::Current();
-	ArEngineNetVer						= FNetworkVersion::GetEngineNetworkProtocolVersion();
-	ArGameNetVer						= FNetworkVersion::GetGameNetworkProtocolVersion();
 	ArIsLoading							= false;
+	ArIsLoadingFromCookedPackage		= false;
 	ArIsSaving							= false;
 	ArIsTransacting						= false;
 	ArIsTextFormat						= false;
@@ -181,13 +184,15 @@ void FArchiveState::Reset()
 	ArIsCountingMemory					= false;
 	ArPortFlags							= 0;
 	ArShouldSkipBulkData				= false;
+	ArShouldSkipCompilingAssets			= false;
 	ArMaxSerializeSize					= 0;
 	ArIsFilterEditorOnly				= false;
 	ArIsSaveGame						= false;
 	ArIsNetArchive						= false;
 	ArCustomPropertyList				= nullptr;
 	ArUseCustomPropertyList				= false;
-	CookingTargetPlatform				= nullptr;
+	ArShouldSkipUpdateCustomVersion		= false;
+	CookData							= nullptr;
 	SerializedProperty					= nullptr;
 
 	delete SerializedPropertyChain;
@@ -207,12 +212,11 @@ void FArchiveState::Reset()
 
 void FArchiveState::CopyTrivialFArchiveStatusMembers(const FArchiveState& ArchiveToCopy)
 {
-	ArUE4Ver                             = ArchiveToCopy.ArUE4Ver;
-	ArLicenseeUE4Ver                     = ArchiveToCopy.ArLicenseeUE4Ver;
+	ArUEVer                              = ArchiveToCopy.ArUEVer;
+	ArLicenseeUEVer                      = ArchiveToCopy.ArLicenseeUEVer;
 	ArEngineVer                          = ArchiveToCopy.ArEngineVer;
-	ArEngineNetVer                       = ArchiveToCopy.ArEngineNetVer;
-	ArGameNetVer                         = ArchiveToCopy.ArGameNetVer;
 	ArIsLoading                          = ArchiveToCopy.ArIsLoading;
+	ArIsLoadingFromCookedPackage         = ArchiveToCopy.ArIsLoadingFromCookedPackage;
 	ArIsSaving                           = ArchiveToCopy.ArIsSaving;
 	ArIsTransacting                      = ArchiveToCopy.ArIsTransacting;
 	ArIsTextFormat                       = ArchiveToCopy.ArIsTextFormat;
@@ -239,13 +243,15 @@ void FArchiveState::CopyTrivialFArchiveStatusMembers(const FArchiveState& Archiv
 	ArIsCountingMemory                   = ArchiveToCopy.ArIsCountingMemory;
 	ArPortFlags                          = ArchiveToCopy.ArPortFlags;
 	ArShouldSkipBulkData                 = ArchiveToCopy.ArShouldSkipBulkData;
+	ArShouldSkipCompilingAssets          = ArchiveToCopy.ArShouldSkipCompilingAssets;
 	ArMaxSerializeSize                   = ArchiveToCopy.ArMaxSerializeSize;
 	ArIsFilterEditorOnly                 = ArchiveToCopy.ArIsFilterEditorOnly;
 	ArIsSaveGame                         = ArchiveToCopy.ArIsSaveGame;
 	ArIsNetArchive                       = ArchiveToCopy.ArIsNetArchive;
 	ArCustomPropertyList                 = ArchiveToCopy.ArCustomPropertyList;
 	ArUseCustomPropertyList              = ArchiveToCopy.ArUseCustomPropertyList;
-	CookingTargetPlatform                = ArchiveToCopy.CookingTargetPlatform;
+	ArShouldSkipUpdateCustomVersion		 = ArchiveToCopy.ArShouldSkipUpdateCustomVersion;
+	CookData							 = ArchiveToCopy.CookData;
 	SerializedProperty					 = ArchiveToCopy.SerializedProperty;
 #if USE_STABLE_LOCALIZATION_KEYS
 	SetBaseLocalizationNamespace(ArchiveToCopy.GetBaseLocalizationNamespace());
@@ -395,11 +401,6 @@ void FArchive::PopSerializedProperty(class FProperty* InProperty, const bool bIs
 	}
 }
 
-bool FArchive::IsUsingEventDrivenLoader() const
-{
-	return GEventDrivenLoaderEnabled;
-}
-
 #if WITH_EDITORONLY_DATA
 bool FArchiveState::IsEditorOnlyPropertyOnTheStack() const
 {
@@ -459,6 +460,13 @@ FArchive& FArchive::operator<<(struct FLazyObjectPtr& Value)
 {
 	// The base FArchive does not implement this method. Use FArchiveUObject instead.
 	UE_LOG(LogSerialization, Fatal, TEXT("FArchive does not support FLazyObjectPtr serialization. Use FArchiveUObject instead."));
+	return *this;
+}
+
+FArchive& FArchive::operator<<(struct FObjectPtr& Value)
+{
+	// The base FArchive does not implement this method. Use FArchiveUObject instead.
+	UE_LOG(LogSerialization, Fatal, TEXT("FArchive does not support FObjectPtr serialization. Use FArchiveUObject instead."));
 	return *this;
 }
 
@@ -563,8 +571,8 @@ void FArchive::UsingCustomVersion(const FGuid& Key)
 		return;
 	}
 
-	FCustomVersion RegisteredVersion = FCurrentCustomVersions::Get(Key).GetValue();
-	const_cast<FCustomVersionContainer&>(GetCustomVersions()).SetVersion(Key, RegisteredVersion.Version, RegisteredVersion.GetFriendlyName());
+	ESetCustomVersionFlags SetVersionFlags = ArShouldSkipUpdateCustomVersion ? ESetCustomVersionFlags::SkipUpdateExistingVersion : ESetCustomVersionFlags::None;
+	const_cast<FCustomVersionContainer&>(GetCustomVersions()).SetVersionUsingRegistry(Key, SetVersionFlags);
 }
 
 int32 FArchiveState::CustomVer(const FGuid& Key) const
@@ -576,6 +584,11 @@ int32 FArchiveState::CustomVer(const FGuid& Key) const
 	check(IsLoading() || CustomVersion);
 
 	return CustomVersion ? CustomVersion->Version : -1;
+}
+
+void FArchiveState::SetShouldSkipUpdateCustomVersion(bool bShouldSkip)
+{
+	ForEachState([bShouldSkip](FArchiveState& State) { State.ArShouldSkipUpdateCustomVersion = bShouldSkip; });
 }
 
 void FArchiveState::SetCustomVersion(const FGuid& Key, int32 Version, FName FriendlyName)
@@ -654,7 +667,7 @@ public:
 		, CompressedSize(0)
 		, UncompressedSize(0)
 		, BitWindow(DEFAULT_ZLIB_BIT_WINDOW)
-		, CompressionFormat(NAME_Zlib)
+		, CompressionFormat(NAME_None)
 		, Flags(COMPRESS_NoFlags)
 	{
 	}
@@ -663,13 +676,6 @@ public:
 	 */
 	void DoWork()
 	{
-		// upgrade old flag method
-		if ((Flags & COMPRESS_DeprecatedFormatFlagsMask) != 0)
-		{
-			UE_LOG(LogSerialization, Warning, TEXT("Old style compression flags are being used with FAsyncCompressionChunk, please update any code using this!"));
-			CompressionFormat = FCompression::GetCompressionFormatFromDeprecatedFlags(Flags);
-		}
-
 		// Compress from memory to memory.
 		verify( FCompression::CompressMemory(CompressionFormat, CompressedBuffer, CompressedSize, UncompressedBuffer, UncompressedSize, Flags, BitWindow) );
 	}
@@ -681,53 +687,136 @@ public:
 };
 #endif		// WITH_MULTI_THREADED_COMPRESSION
 
-void FArchive::SerializeCompressed(void* V, int64 Length, FName CompressionFormat, ECompressionFlags Flags, bool bTreatBufferAsFileReader)
+
+
+void FArchive::SerializeCompressed(void* V, int64 Length, FName CompressionFormatCannotChange, ECompressionFlags Flags, bool bTreatBufferAsFileReader)
 {
+	// with this legacy/deprecated API you can NOT change the CompressionFormat and still load old files
+	//  CompressionFormat must match exactly the format that was written to the file
+
+	SerializeCompressedNew(V,Length,CompressionFormatCannotChange,CompressionFormatCannotChange,Flags,bTreatBufferAsFileReader,nullptr);
+}
+
+void FArchive::SerializeCompressedNew(void* V, int64 Length)
+{
+	SerializeCompressedNew(V,Length,NAME_Oodle,NAME_Zlib);
+}
+
+void FArchive::SerializeCompressedNew(void* V, int64 Length, FName CompressionFormatToEncode, FName CompressionFormatToDecodeOldV1Files,  ECompressionFlags Flags, bool bTreatBufferAsFileReader, int64 * OutPartialReadLength)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(FArchive::SerializeCompressed);
+
+	// CompressionFormatToEncode can be changed freely without breaking loading of old files
+	// CompressionFormatToDecodeOldV1Files must match what was used to encode old files, cannot change
+	
+	UE_CLOG(Length < 0, LogSerialization, Fatal, TEXT(" Archive SerializedCompressed Length (%lld) < 0"), Length);
+
 	if( IsLoading() )
 	{
-		if (CompressionFormat == NAME_Zlib && FPlatformProperties::GetZlibReplacementFormat() != nullptr)
-		{
-			// use this platform's replacement format in case it's not zlib
-			CompressionFormat = FPlatformProperties::GetZlibReplacementFormat();
-		}
-
 		// Serialize package file tag used to determine endianess.
 		FCompressedChunkInfo PackageFileTag;
 		PackageFileTag.CompressedSize	= 0;
 		PackageFileTag.UncompressedSize	= 0;
 		*this << PackageFileTag;
-		bool bWasByteSwapped = PackageFileTag.CompressedSize != PACKAGE_FILE_TAG;
 
-		// Read in base summary.
-		FCompressedChunkInfo Summary;
-		*this << Summary;
+		// v1 header did not store CompressionFormatToDecode
+		//	assume it was CompressionFormatToDecodeOldV1Files (usually Zlib)
+		FName CompressionFormatToDecode = CompressionFormatToDecodeOldV1Files;
 
-		bool bHeaderWasValid = true;
+		bool bWasByteSwapped=false;
+		bool bReadCompressionFormat=false;
+		
+		// FPackageFileSummary has int32 Tag == PACKAGE_FILE_TAG
+		// this header does not otherwise match FPackageFileSummary in any way
 
-		if (bWasByteSwapped)
+		// low 32 bits of ARCHIVE_V2_HEADER_TAG are == PACKAGE_FILE_TAG
+		#define ARCHIVE_V2_HEADER_TAG	(PACKAGE_FILE_TAG | ((uint64)0x22222222<<32) )
+
+		if ( PackageFileTag.CompressedSize == PACKAGE_FILE_TAG )
 		{
-			bHeaderWasValid = PackageFileTag.CompressedSize == PACKAGE_FILE_TAG_SWAPPED;
-			if (bHeaderWasValid)
-			{
-				Summary.CompressedSize = BYTESWAP_ORDER64(Summary.CompressedSize);
-				Summary.UncompressedSize = BYTESWAP_ORDER64(Summary.UncompressedSize);
-				PackageFileTag.UncompressedSize = BYTESWAP_ORDER64(PackageFileTag.UncompressedSize);
-			}
+			// v1 header, not swapped
+		}
+		else if ( PackageFileTag.CompressedSize == PACKAGE_FILE_TAG_SWAPPED ||
+			PackageFileTag.CompressedSize == BYTESWAP_ORDER64((uint64)PACKAGE_FILE_TAG) )
+		{
+			// v1 header, swapped
+			bWasByteSwapped = true;
+		}
+		else if ( PackageFileTag.CompressedSize == ARCHIVE_V2_HEADER_TAG ||
+			PackageFileTag.CompressedSize == BYTESWAP_ORDER64((uint64)ARCHIVE_V2_HEADER_TAG) )
+		{
+			// v2 header
+			bWasByteSwapped = ( PackageFileTag.CompressedSize != ARCHIVE_V2_HEADER_TAG );
+			bReadCompressionFormat = true;
+
+			// read CompressionFormatToDecode
+			FCompressionUtil::SerializeCompressorName(*this,CompressionFormatToDecode);
 		}
 		else
 		{
-			bHeaderWasValid = PackageFileTag.CompressedSize == PACKAGE_FILE_TAG; //-V547
-		}
-
-		if (!bHeaderWasValid)
-		{
 			UE_LOG(LogSerialization, Log, TEXT("ArchiveName: %s"), *GetArchiveName());
-			UE_LOG(LogSerialization, Log, TEXT("Archive UE4 Version: %d"), UE4Ver());
-			UE_LOG(LogSerialization, Log, TEXT("Archive Licensee Version: %d"), LicenseeUE4Ver());
+			UE_LOG(LogSerialization, Log, TEXT("Archive UE Version: %d"), UEVer().ToValue());
+			UE_LOG(LogSerialization, Log, TEXT("Archive Licensee Version: %d"), LicenseeUEVer());
 			UE_LOG(LogSerialization, Log, TEXT("Position: %lld"), Tell());
 			UE_LOG(LogSerialization, Log, TEXT("Read Size: %lld"), Length);
 			UE_LOG(LogSerialization, Fatal, TEXT("BulkData compressed header read error. This package may be corrupt!"));
 		}
+		
+		if ( ! bReadCompressionFormat )
+		{
+			// upgrade old flag method
+			if ((Flags & COMPRESS_DeprecatedFormatFlagsMask) != 0)
+			{
+				UE_LOG(LogSerialization, Warning, TEXT("Old style compression flags are being used with FAsyncCompressionChunk, please update any code using this!"));
+				CompressionFormatToDecode = FCompression::GetCompressionFormatFromDeprecatedFlags(Flags);
+			}
+
+			if (CompressionFormatToDecode == NAME_Zlib && FPlatformProperties::GetZlibReplacementFormat() != nullptr)
+			{
+				// use this platform's replacement format in case it's not zlib
+				CompressionFormatToDecode = FPlatformProperties::GetZlibReplacementFormat();
+			}
+		}
+		else
+		{		
+			// shouldn't need to do this step for v2 headers; zlib should have already been changed by the encoder
+			//	need to verify that's working right for xb1
+			if (CompressionFormatToDecode == NAME_Zlib && FPlatformProperties::GetZlibReplacementFormat() != nullptr)
+			{
+				const char * ZlibReplacement = FPlatformProperties::GetZlibReplacementFormat();
+				
+				// go ahead and do it but warn :
+				CompressionFormatToDecode = FName(ZlibReplacement);
+
+				UE_LOG(LogSerialization, Warning, TEXT("Archive v2 header with ZLib not ZlibReplacement: %s"), *CompressionFormatToDecode.ToString());
+			}
+		}
+
+		// CompressionFormatToDecode came from disk, need to validate it :
+		if ( ! FCompression::IsFormatValid(CompressionFormatToDecode) )
+		{
+			UE_LOG(LogSerialization, Log, TEXT("ArchiveName: %s"), *GetArchiveName());
+			UE_LOG(LogSerialization, Log, TEXT("Archive UE Version: %d"), UEVer().ToValue());
+			UE_LOG(LogSerialization, Log, TEXT("Archive Licensee Version: %d"), LicenseeUEVer());
+			UE_LOG(LogSerialization, Log, TEXT("Position: %lld"), Tell());
+			UE_LOG(LogSerialization, Log, TEXT("Read Size: %lld"), Length);
+			UE_LOG(LogSerialization, Log, TEXT("CompressionFormatToDecode not found : %s"), *CompressionFormatToDecode.ToString());
+			UE_LOG(LogSerialization, Fatal, TEXT("BulkData compressed header read error. This package may be corrupt!"));
+		}
+
+		// Read in base summary, contains total sizes :
+		FCompressedChunkInfo Summary;
+		*this << Summary;
+
+		if (bWasByteSwapped)
+		{
+			Summary.CompressedSize = BYTESWAP_ORDER64(Summary.CompressedSize);
+			Summary.UncompressedSize = BYTESWAP_ORDER64(Summary.UncompressedSize);
+			PackageFileTag.UncompressedSize = BYTESWAP_ORDER64(PackageFileTag.UncompressedSize);
+		}
+		
+		UE_CLOG(Summary.CompressedSize < 0 || Summary.CompressedSize > (INT64_MAX/2) , LogSerialization, Fatal, TEXT(" Archive SerializedCompressed CompressedSize (%lld) invalid"), (int64)Summary.CompressedSize);
+		UE_CLOG(Summary.UncompressedSize < 0 || Summary.UncompressedSize > (INT64_MAX/2) , LogSerialization, Fatal, TEXT(" Archive SerializedCompressed UncompressedSize (%lld) invalid"), (int64)Summary.UncompressedSize);
 
 		// Handle change in compression chunk size in backward compatible way.
 		int64 LoadingCompressionChunkSize = PackageFileTag.UncompressedSize;
@@ -736,13 +825,33 @@ void FArchive::SerializeCompressed(void* V, int64 Length, FName CompressionForma
 			LoadingCompressionChunkSize = LOADING_COMPRESSION_CHUNK_SIZE;
 		}
 
+		UE_CLOG(LoadingCompressionChunkSize <= 0, LogSerialization, Fatal, TEXT(" Archive SerializedCompressed LoadingCompressionChunkSize (%lld) <= 0"), LoadingCompressionChunkSize);
+		UE_CLOG(LoadingCompressionChunkSize >= INT32_MAX, LogSerialization, Fatal, TEXT(" Archive SerializedCompressed LoadingCompressionChunkSize (%lld) >= INT32_MAX"), LoadingCompressionChunkSize);
+
+		// check Summary.UncompressedSize vs [V,Length] passed in
+		if ( OutPartialReadLength == nullptr )
+		{
+			// UncompressedSize must == Length
+			UE_CLOG( Summary.UncompressedSize != Length, LogSerialization, Fatal, TEXT(" Archive SerializedCompressed UncompressedSize (%lld) != Length (%lld)"), (int64)Summary.UncompressedSize, (int64) Length );
+		}
+		else
+		{
+			// UncompressedSize must be <= Length and >= 0
+			UE_CLOG( Summary.UncompressedSize > Length || Summary.UncompressedSize < 0, LogSerialization, Fatal, TEXT(" Archive SerializedCompressed UncompressedSize (%lld) > Length (%lld) or < 0"), (int64)Summary.UncompressedSize, (int64) Length );
+			*OutPartialReadLength = Summary.UncompressedSize;
+		}
+
 		// Figure out how many chunks there are going to be based on uncompressed size and compression chunk size.
-		int64	TotalChunkCount	= (Summary.UncompressedSize + LoadingCompressionChunkSize - 1) / LoadingCompressionChunkSize;
-		
+		//  divide and round up, safe without overflow due to previous range checks :
+		int64	TotalChunkCount	= FMath::DivideAndRoundUp( Summary.UncompressedSize , LoadingCompressionChunkSize );
+
 		// Allocate compression chunk infos and serialize them, keeping track of max size of compression chunks used.
-		FCompressedChunkInfo*	CompressionChunks	= new FCompressedChunkInfo[TotalChunkCount];
-		int64						MaxCompressedSize	= 0;
-		for( int32 ChunkIndex=0; ChunkIndex<TotalChunkCount; ChunkIndex++ )
+		TArray64<FCompressedChunkInfo> CompressionChunks;
+		CompressionChunks.SetNum(TotalChunkCount);
+		int64 MaxCompressedSize	= 0;
+		int64 TotalChunkCompressedSize = 0;
+		int64 TotalChunkUncompressedSize = 0;
+		for( int64 ChunkIndex=0; ChunkIndex<TotalChunkCount; ChunkIndex++ )
 		{
 			*this << CompressionChunks[ChunkIndex];
 			if (bWasByteSwapped)
@@ -750,10 +859,22 @@ void FArchive::SerializeCompressed(void* V, int64 Length, FName CompressionForma
 				CompressionChunks[ChunkIndex].CompressedSize	= BYTESWAP_ORDER64( CompressionChunks[ChunkIndex].CompressedSize );
 				CompressionChunks[ChunkIndex].UncompressedSize	= BYTESWAP_ORDER64( CompressionChunks[ChunkIndex].UncompressedSize );
 			}
+			
+			UE_CLOG( CompressionChunks[ChunkIndex].CompressedSize < 0 || CompressionChunks[ChunkIndex].UncompressedSize < 0, 
+				LogSerialization, Fatal, TEXT(" Archive SerializedCompressed CompressionChunks[ChunkIndex].CompressedSize (%lld) < 0 || CompressionChunks[ChunkIndex].UncompressedSize (%lld) < 0"), CompressionChunks[ChunkIndex].CompressedSize, CompressionChunks[ChunkIndex].UncompressedSize );
+
 			MaxCompressedSize = FMath::Max( CompressionChunks[ChunkIndex].CompressedSize, MaxCompressedSize );
+
+			TotalChunkCompressedSize += CompressionChunks[ChunkIndex].CompressedSize;
+			TotalChunkUncompressedSize += CompressionChunks[ChunkIndex].UncompressedSize;
 		}
+		
+		// verify the CompressionChunks[] sizes we read add up to the total we read
+		UE_CLOG( TotalChunkCompressedSize != Summary.CompressedSize, LogSerialization, Fatal, TEXT(" Archive SerializedCompressed TotalChunkCompressedSize (%lld) != Summary.CompressedSize (%lld)"), (int64)TotalChunkCompressedSize, (int64) Summary.CompressedSize );
+		UE_CLOG( TotalChunkUncompressedSize != Summary.UncompressedSize, LogSerialization, Fatal, TEXT(" Archive SerializedCompressed TotalChunkUncompressedSize (%lld) != Summary.UnompressedSize (%lld)"), (int64)TotalChunkUncompressedSize, (int64) Summary.UncompressedSize );
 
 		// Set up destination pointer and allocate memory for compressed chunk[s] (one at a time).
+		check( ! bTreatBufferAsFileReader );
 		uint8*	Dest				= (uint8*) V;
 		void*	CompressedBuffer	= FMemory::Malloc( MaxCompressedSize );
 
@@ -763,43 +884,84 @@ void FArchive::SerializeCompressed(void* V, int64 Length, FName CompressionForma
 			const FCompressedChunkInfo& Chunk = CompressionChunks[ChunkIndex];
 			// Read compressed data.
 			Serialize( CompressedBuffer, Chunk.CompressedSize );
+
+			// check Serialize error before trying to decode
+			if ( IsError() )
+			{
+				UE_LOG(LogSerialization,Error, TEXT("Failed to serialize compress chunk in %s, Chunk.CompressedSize=%d"), *GetArchiveName(), (int)Chunk.CompressedSize);
+				break;
+			}
+
 			// Decompress into dest pointer directly.
-			bool bUncompressMemorySucceeded = FCompression::UncompressMemory( CompressionFormat, Dest, Chunk.UncompressedSize, CompressedBuffer, Chunk.CompressedSize, COMPRESS_NoFlags);
-			verifyf(bUncompressMemorySucceeded, TEXT("Failed to uncompress data in %s. Check log for details."), *GetArchiveName());			// And advance it by read amount.
+			bool bUncompressMemorySucceeded = FCompression::UncompressMemory( CompressionFormatToDecode, Dest, Chunk.UncompressedSize, CompressedBuffer, Chunk.CompressedSize, COMPRESS_NoFlags);
+
+			if ( ! bUncompressMemorySucceeded )
+			{
+				UE_LOG(LogSerialization,Error, TEXT("Failed to uncompress data in %s, CompressionFormatToDecode=%s"), *GetArchiveName(), *CompressionFormatToDecode.ToString());
+				SetError();
+				break;
+			}
+
+			// And advance it by read amount.
 			Dest += Chunk.UncompressedSize;
 		}
 
 		// Free up allocated memory.
 		FMemory::Free( CompressedBuffer );
-		delete [] CompressionChunks;
 	}
 	else if( IsSaving() )
-	{	
+	{
 		SCOPE_SECONDS_COUNTER(GArchiveSerializedCompressedSavingTime);
 		check( Length > 0 );
 
-		// if there's a cooking target, and it wants to replace Zlib compression with another format, use it. When loading, 
-		// the platform will replace Zlib with that format above
-		if (CompressionFormat == NAME_Zlib && CookingTargetPlatform != nullptr)
+		// upgrade old flag method
+		if ((Flags & COMPRESS_DeprecatedFormatFlagsMask) != 0)
 		{
-			// use the replacement format
-			CompressionFormat = CookingTargetPlatform->GetZlibReplacementFormat();
+			check( CompressionFormatToEncode == NAME_Zlib );
+			UE_LOG(LogSerialization, Warning, TEXT("Old style compression flags are being used with FAsyncCompressionChunk, please update any code using this!"));
+			CompressionFormatToEncode = FCompression::GetCompressionFormatFromDeprecatedFlags(Flags);
 		}
 
-		// Serialize package file tag used to determine endianess in LoadCompressedData.
+		// if there's a cooking target, and it wants to replace Zlib compression with another format, use it. When loading, 
+		// the platform will replace Zlib with that format above
+		if (CompressionFormatToEncode == NAME_Zlib && IsCooking())
+		{
+			// use the replacement format
+			CompressionFormatToEncode = CookingTarget()->GetZlibReplacementFormat();
+
+			// with v2 headers, the modified CompressionFormatToEncode will be written in the archive
+		}
+
+		// compression chunk sizes must fit in int32 for old FCompression API
+		//	(GSavingCompressionChunkSize is an int32 so this is automatic)
+		check( GSavingCompressionChunkSize > 0 );
+		check( GSavingCompressionChunkSize < INT32_MAX );
+		// limit on maximum length we can serialize :
+		check( Length <= (INT64_MAX/2) );
+
+		// Serialize package file tag used to determine endianness in LoadCompressedData.
 		FCompressedChunkInfo PackageFileTag;
-		PackageFileTag.CompressedSize	= PACKAGE_FILE_TAG;
+		//PackageFileTag.CompressedSize	= PACKAGE_FILE_TAG;
+		PackageFileTag.CompressedSize	= ARCHIVE_V2_HEADER_TAG;
 		PackageFileTag.UncompressedSize	= GSavingCompressionChunkSize;
 		*this << PackageFileTag;
 
+		// v2 header writes compressor used :
+		FCompressionUtil::SerializeCompressorName(*this,CompressionFormatToEncode);
+
 		// Figure out how many chunks there are going to be based on uncompressed size and compression chunk size.
-		int64	TotalChunkCount	= (Length + GSavingCompressionChunkSize - 1) / GSavingCompressionChunkSize + 1;
-		
+		//  divide and round up, overflow safe due to previous range checks
+		int64	TotalChunkCount	= FMath::DivideAndRoundUp( Length, (int64)GSavingCompressionChunkSize );
+
+		//  +1 for Summary chunk	
+		TotalChunkCount += 1;
+
 		// Keep track of current position so we can later seek back and overwrite stub compression chunk infos.
 		int64 StartPosition = Tell();
 
-		// Allocate compression chunk infos and serialize them so we can later overwrite the data.
-		FCompressedChunkInfo* CompressionChunks	= new FCompressedChunkInfo[TotalChunkCount];
+		// Allocate compression chunk infos and serialize them with default fields so we can later overwrite the data.
+		TArray64<FCompressedChunkInfo> CompressionChunks;
+		CompressionChunks.SetNum(TotalChunkCount);
 		for( int64 ChunkIndex=0; ChunkIndex<TotalChunkCount; ChunkIndex++ )
 		{
 			*this << CompressionChunks[ChunkIndex];
@@ -817,7 +979,7 @@ void FArchive::SerializeCompressed(void* V, int64 Length, FName CompressionForma
 		FAsyncTask<FAsyncCompressionChunk> AsyncChunks[MAX_COMPRESSION_JOBS];
 
 		// used to keep track of which job is the next one we need to retire
-		int32 AsyncChunkIndex[MAX_COMPRESSION_JOBS]={0};
+		int64 AsyncChunkIndex[MAX_COMPRESSION_JOBS]={0};
 
 		static uint32 GNumUnusedThreads_SerializeCompressed = -1;
 		if (GNumUnusedThreads_SerializeCompressed == (uint32)-1)
@@ -841,7 +1003,7 @@ void FArchive::SerializeCompressed(void* V, int64 Length, FName CompressionForma
 		}
 
 		// Number of chunks left to finalize.
-		int64 NumChunksLeftToFinalize	= (Length + GSavingCompressionChunkSize - 1) / GSavingCompressionChunkSize;
+		int64 NumChunksLeftToFinalize	= TotalChunkCount -1; // -1 for summary chunk
 		// Number of chunks left to kick off
 		int64 NumChunksLeftToKickOff	= NumChunksLeftToFinalize;
 		// Start at index 1 as first chunk info is summary.
@@ -884,8 +1046,8 @@ void FArchive::SerializeCompressed(void* V, int64 Length, FName CompressionForma
 				if( FreeIndex != INDEX_NONE )
 				{
 					FAsyncCompressionChunk& NewChunk = AsyncChunks[FreeIndex].GetTask();
-					// 2 times the uncompressed size should be more than enough; the compressed data shouldn't be that much larger
-					NewChunk.CompressedSize	= 2 * GSavingCompressionChunkSize;
+
+					NewChunk.CompressedSize	= FCompression::CompressMemoryBound(CompressionFormatToEncode, GSavingCompressionChunkSize);
 					// Allocate compressed buffer placeholder on first use.
 					if( NewChunk.CompressedBuffer == NULL )
 					{
@@ -906,9 +1068,9 @@ void FArchive::SerializeCompressed(void* V, int64 Length, FName CompressionForma
 						}
 						((FArchive*)V)->Serialize(NewChunk.UncompressedBuffer, NewChunk.UncompressedSize);
 					}
-					// Advance src pointer by amount to be compressed.
 					else
 					{
+						// Advance src pointer by amount to be compressed.
 						NewChunk.UncompressedBuffer = SrcBuffer;
 						SrcBuffer += NewChunk.UncompressedSize;
 					}
@@ -917,17 +1079,18 @@ void FArchive::SerializeCompressed(void* V, int64 Length, FName CompressionForma
 					BytesRemainingToKickOff -= NewChunk.UncompressedSize;
 					AsyncChunkIndex[FreeIndex] = CurrentChunkIndex++;
 					NewChunk.Flags = Flags;
-					NewChunk.CompressionFormat = CompressionFormat;
+					NewChunk.CompressionFormat = CompressionFormatToEncode;
 					NumChunksLeftToKickOff--;
 
 					AsyncChunks[FreeIndex].StartBackgroundTask();
 				}
-				// No chunks were available to use, complete some
 				else
 				{
+					// No chunks were available to use, complete some
 					bNeedToWaitForAsyncTask = true;
 				}
 			}
+
 			// Wait for the oldest task to finish instead of spinning
 			if (NumChunksLeftToKickOff == 0)
 			{
@@ -1014,9 +1177,9 @@ void FArchive::SerializeCompressed(void* V, int64 Length, FName CompressionForma
 		}
 		int64		BytesRemaining			= Length;
 		// Start at index 1 as first chunk info is summary.
-		int32		CurrentChunkIndex		= 1;
-		// 2 times the uncompressed size should be more than enough; the compressed data shouldn't be that much larger
-		int64		CompressedBufferSize	= 2 * GSavingCompressionChunkSize;
+		int64		CurrentChunkIndex		= 1;
+
+		int64		CompressedBufferSize	= FCompression::CompressMemoryBound(CompressionFormatToEncode, GSavingCompressionChunkSize);
 		void*	CompressedBuffer		= FMemory::Malloc( CompressedBufferSize );
 
 		while( BytesRemaining > 0 )
@@ -1033,7 +1196,7 @@ void FArchive::SerializeCompressed(void* V, int64 Length, FName CompressionForma
 			check(CompressedSize < INT_MAX);
 			int32 CompressedSizeInt = (int32)CompressedSize;
 						
-			verify( FCompression::CompressMemory( CompressionFormat, CompressedBuffer, CompressedSizeInt, Src, BytesToCompress, Flags ) );
+			verify( FCompression::CompressMemory( CompressionFormatToEncode, CompressedBuffer, CompressedSizeInt, Src, BytesToCompress, Flags ) );
 			CompressedSize = CompressedSizeInt;
 			// move to next chunk if not reading from file
 			if (!bTreatBufferAsFileReader)
@@ -1069,15 +1232,12 @@ void FArchive::SerializeCompressed(void* V, int64 Length, FName CompressionForma
 		// Seek to the beginning.
 		Seek( StartPosition );
 		// Serialize chunk infos.
-		for( int32 ChunkIndex=0; ChunkIndex<TotalChunkCount; ChunkIndex++ )
+		for( int64 ChunkIndex=0; ChunkIndex<TotalChunkCount; ChunkIndex++ )
 		{
 			*this << CompressionChunks[ChunkIndex];
 		}
 		// Seek back to end.
 		Seek( EndPosition );
-
-		// Free intermediate data.
-		delete [] CompressionChunks;
 	}
 }
 
@@ -1166,6 +1326,48 @@ void FArchive::SerializeIntPacked(uint32& Value)
 	}
 }
 
+void FArchive::SerializeIntPacked64(uint64& Value)
+{
+	if (IsLoading())
+	{
+		Value = 0;
+		uint8 cnt = 0;
+		uint8 more = 1;
+		while (more)
+		{
+			uint8 NextByte;
+			Serialize(&NextByte, 1);			// Read next byte
+
+			more = NextByte & 1;				// Check 1 bit to see if theres more after this
+			NextByte = NextByte >> 1;			// Shift to get actual 7 bit value
+			Value += (uint64)NextByte << (7 * cnt++);	// Add to total value
+		}
+	}
+	else
+	{
+		uint8 PackedBytes[10];
+		int32 PackedByteCount = 0;
+		uint64 Remaining = Value;
+		while (true)
+		{
+			uint8 nextByte = Remaining & 0x7f;		// Get next 7 bits to write
+			Remaining = Remaining >> 7;				// Update remaining
+			nextByte = nextByte << 1;				// Make room for 'more' bit
+			if (Remaining > 0)
+			{
+				nextByte |= 1;						// set more bit
+				PackedBytes[PackedByteCount++] = nextByte;
+			}
+			else
+			{
+				PackedBytes[PackedByteCount++] = nextByte;
+				break;
+			}
+		}
+		Serialize(PackedBytes, PackedByteCount); // Actually serialize the bytes we made
+	}
+}
+
 void FArchive::LogfImpl(const TCHAR* Fmt, ...)
 {
 	// We need to use malloc here directly as GMalloc might not be safe, e.g. if called from within GMalloc!
@@ -1177,10 +1379,10 @@ void FArchive::LogfImpl(const TCHAR* Fmt, ...)
 	{
 		FMemory::SystemFree(Buffer);
 		Buffer = (TCHAR*) FMemory::SystemMalloc( BufferSize * sizeof(TCHAR) );
-		GET_VARARGS_RESULT( Buffer, BufferSize, BufferSize-1, Fmt, Fmt, Result );
+		GET_TYPED_VARARGS_RESULT( TCHAR, Buffer, BufferSize, BufferSize-1, Fmt, Fmt, Result );
 		BufferSize *= 2;
 	};
-	Buffer[Result] = 0;
+	Buffer[Result] = TEXT('\0');
 
 	// Convert to ANSI and serialize as ANSI char.
 	for( int32 i=0; i<Result; i++ )
@@ -1200,14 +1402,14 @@ void FArchive::LogfImpl(const TCHAR* Fmt, ...)
 	FMemory::SystemFree( Buffer );
 }
 
-void FArchiveState::SetUE4Ver(int32 InVer)
+void FArchiveState::SetUEVer(FPackageFileVersion InVer)
 {
-	ArUE4Ver = InVer;
+	ArUEVer = InVer;
 }
 
-void FArchiveState::SetLicenseeUE4Ver(int32 InVer)
+void FArchiveState::SetLicenseeUEVer(int32 InVer)
 {
-	ArLicenseeUE4Ver = InVer;
+	ArLicenseeUEVer = InVer;
 }
 
 void FArchiveState::SetEngineVer(const FEngineVersionBase& InVer)
@@ -1217,17 +1419,32 @@ void FArchiveState::SetEngineVer(const FEngineVersionBase& InVer)
 
 void FArchiveState::SetEngineNetVer(const uint32 InEngineNetVer)
 {
-	ArEngineNetVer = InEngineNetVer;
+	SetCustomVersion(FEngineNetworkCustomVersion::Guid, InEngineNetVer, TEXT("EngineNetworkVersion"));
+}
+
+uint32 FArchiveState::EngineNetVer() const
+{
+	return CustomVer(FEngineNetworkCustomVersion::Guid);
 }
 
 void FArchiveState::SetGameNetVer(const uint32 InGameNetVer)
 {
-	ArGameNetVer = InGameNetVer;
+	SetCustomVersion(FGameNetworkCustomVersion::Guid, InGameNetVer, TEXT("GameNetworkVersion"));
+}
+
+uint32 FArchiveState::GameNetVer() const
+{
+	return CustomVer(FGameNetworkCustomVersion::Guid);
 }
 
 void FArchiveState::SetIsLoading(bool bInIsLoading)
 {
 	ArIsLoading = bInIsLoading;
+}
+
+void FArchiveState::SetIsLoadingFromCookedPackage(bool bInIsLoadingFromCookedPackage)
+{
+	ArIsLoadingFromCookedPackage = bInIsLoadingFromCookedPackage;
 }
 
 void FArchiveState::SetIsSaving(bool bInIsSaving)
@@ -1267,4 +1484,4 @@ void FArchiveState::SetIsPersistent(bool bInIsPersistent)
 
 static_assert(sizeof(FArchive) == sizeof(FArchiveState), "New FArchive members should be added to FArchiveState instead");
 
-PRAGMA_ENABLE_UNSAFE_TYPECAST_WARNINGS
+PRAGMA_RESTORE_UNSAFE_TYPECAST_WARNINGS

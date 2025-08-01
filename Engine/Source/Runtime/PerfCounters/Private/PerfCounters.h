@@ -20,7 +20,7 @@ class FInternetAddr;
 DECLARE_LOG_CATEGORY_EXTERN(LogPerfCounters, Log, All);
 
 class FPerfCounters 
-	: public FTickerObjectBase
+	: public FTSTickerObjectBase
 	, public FSelfRegisteringExec
 	, public IPerfCounters
 	, public TSharedFromThis<FPerfCounters>
@@ -33,12 +33,8 @@ public:
 	/** Initializes this instance from JSON config. */
 	bool Initialize();
 
-	/** FTickerObjectBase */
+	/** FTSTickerObjectBase */
 	virtual bool Tick(float DeltaTime) override;
-
-	//~ Begin Exec Interface
-	virtual bool Exec(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar);
-	//~ End Exec Interface
 
 	//~ Begin IPerfCounters Interface
 	const FString& GetInstanceName() const override { return UniqueInstanceId; }
@@ -58,6 +54,11 @@ public:
 	virtual bool StopMachineLoadTracking();
 	virtual bool ReportUnplayableCondition(const FString& ConditionDescription);
 	//~ Begin IPerfCounters Interface end
+
+protected:
+	//~ Begin Exec Interface
+	virtual bool Exec_Runtime(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar);
+	//~ End Exec Interface
 
 private:
 	

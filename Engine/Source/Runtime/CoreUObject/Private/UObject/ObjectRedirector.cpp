@@ -5,18 +5,30 @@
 =============================================================================*/
 
 #include "UObject/ObjectRedirector.h"
+
+#include "UObject/AssetRegistryTagsContext.h"
+#include "UObject/ObjectSaveContext.h"
 #include "UObject/Package.h"
 #include "Templates/Casts.h"
+#include "UObject/GarbageCollectionSchema.h"
 #include "UObject/PropertyPortFlags.h"
+#include "UObject/UnrealType.h"
 
 /*-----------------------------------------------------------------------------
 	UObjectRedirector
 -----------------------------------------------------------------------------*/
 
 
+void UObjectRedirector::PreSave(const class ITargetPlatform* TargetPlatform)
+{
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+	Super::PreSave(TargetPlatform);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
 // If this object redirector is pointing to an object that won't be serialized anyway, set the RF_Transient flag
 // so that this redirector is also removed from the package.
-void UObjectRedirector::PreSave(const class ITargetPlatform* TargetPlatform)
+void UObjectRedirector::PreSave(FObjectPreSaveContext ObjectSaveContext)
 {
 	if (DestinationObject == NULL
 	||	DestinationObject->HasAnyFlags(RF_Transient)
@@ -31,6 +43,8 @@ void UObjectRedirector::PreSave(const class ITargetPlatform* TargetPlatform)
 			DestinationObject->SetFlags(RF_Transient);
 		}
 	}
+
+	Super::PreSave(ObjectSaveContext);
 }
 
 IMPLEMENT_FARCHIVE_SERIALIZER(UObjectRedirector);
@@ -49,17 +63,26 @@ bool UObjectRedirector::NeedsLoadForEditorGame() const
 
 void UObjectRedirector::GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+	Super::GetAssetRegistryTags(OutTags);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void UObjectRedirector::GetAssetRegistryTags(FAssetRegistryTagsContext Context) const
+{
+	Super::GetAssetRegistryTags(Context);
+
 	FString DestVal;
-	if ( DestinationObject != NULL )
+	if ( DestinationObject != nullptr )
 	{
-		DestVal = FString::Printf(TEXT("%s'%s'"), *DestinationObject->GetClass()->GetName(), *DestinationObject->GetPathName());
+		DestVal = FObjectPropertyBase::GetExportPath(DestinationObject);
 	}
 	else
 	{
 		DestVal = TEXT("None");
 	}
 
-	OutTags.Add(FAssetRegistryTag("DestinationObject", DestVal, UObject::FAssetRegistryTag::TT_Alphabetical));
+	Context.AddTag(FAssetRegistryTag("DestinationObject", DestVal, UObject::FAssetRegistryTag::TT_Alphabetical));
 }
 
 /**
@@ -90,6 +113,6 @@ bool UObjectRedirector::GetNativePropertyValues( TMap<FString,FString>& out_Prop
 
 IMPLEMENT_CORE_INTRINSIC_CLASS(UObjectRedirector, UObject,
 	{
-		Class->EmitObjectReference(STRUCT_OFFSET(UObjectRedirector, DestinationObject), TEXT("DestinationObject"));
+		UE::GC::DeclareIntrinsicMembers(Class, { UE_GC_MEMBER(UObjectRedirector, DestinationObject) });
 	}
 );

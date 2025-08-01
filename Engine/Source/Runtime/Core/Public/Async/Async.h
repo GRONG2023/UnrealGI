@@ -2,20 +2,24 @@
 
 #pragma once
 
-#include "CoreTypes.h"
 #include "Async/Future.h"
 #include "Async/TaskGraphInterfaces.h"
 #include "Containers/UnrealString.h"
+#include "CoreTypes.h"
+#include "HAL/PlatformAffinity.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/Runnable.h"
 #include "HAL/RunnableThread.h"
 #include "HAL/ThreadSafeCounter.h"
 #include "Misc/AssertionMacros.h"
 #include "Misc/CoreStats.h"
+#include "Misc/Fork.h"
 #include "Misc/IQueuedWork.h"
 #include "Misc/QueuedThreadPool.h"
 #include "Stats/Stats.h"
+#include "Stats/Stats2.h"
 #include "Templates/Function.h"
+#include "Templates/UnrealTemplate.h"
 
 /**
  * Enumerates available asynchronous execution methods.
@@ -28,8 +32,11 @@ enum class EAsyncExecution
 	/** Execute in Task Graph on the main thread (for short running tasks). */
 	TaskGraphMainThread,
 
-	/** Execute in separate thread (for long running tasks). */
+	/** Execute in separate thread if supported (for long running tasks). */
 	Thread,
+
+	/** Execute in separate thread if supported or supported post fork (see FForkProcessHelper::CreateThreadIfForkSafe) (for long running tasks). */
+	ThreadIfForkSafe,
 
 	/** Execute in global queued thread pool. */
 	ThreadPool,
@@ -244,15 +251,7 @@ private:
  */
 struct FAsyncThreadIndex
 {
-#if ( !PLATFORM_WINDOWS ) || ( !defined(__clang__) )
-	static CORE_API int32 GetNext()
-	{
-		static FThreadSafeCounter ThreadIndex;
-		return ThreadIndex.Add(1);
-	}
-#else
-	static CORE_API int32 GetNext(); // @todo clang: Workaround for missing symbol export
-#endif
+	static CORE_API int32 GetNext();
 };
 
 
@@ -318,6 +317,27 @@ auto Async(EAsyncExecution Execution, CallableType&& Callable, TUniqueFunction<v
 			FRunnableThread* RunnableThread = FRunnableThread::Create(Runnable, *TAsyncThreadName);
 
 			check(RunnableThread != nullptr);
+			check(RunnableThread->GetThreadType() == FRunnableThread::ThreadType::Real);
+
+			ThreadPromise.SetValue(RunnableThread);
+		}
+		else
+		{
+			SetPromise(Promise, Function);
+		}
+		break;
+
+	case EAsyncExecution::ThreadIfForkSafe:
+		if (FPlatformProcess::SupportsMultithreading() || FForkProcessHelper::IsForkedMultithreadInstance())
+		{
+			TPromise<FRunnableThread*> ThreadPromise;
+			TAsyncRunnable<ResultType>* Runnable = new TAsyncRunnable<ResultType>(MoveTemp(Function), MoveTemp(Promise), ThreadPromise.GetFuture());
+
+			const FString TAsyncThreadName = FString::Printf(TEXT("TAsync %d"), FAsyncThreadIndex::GetNext());
+			FRunnableThread* RunnableThread = FForkProcessHelper::CreateForkableThread(Runnable, *TAsyncThreadName);
+
+			check(RunnableThread != nullptr);
+			check(RunnableThread->GetThreadType() == FRunnableThread::ThreadType::Real);
 
 			ThreadPromise.SetValue(RunnableThread);
 		}
@@ -330,6 +350,7 @@ auto Async(EAsyncExecution Execution, CallableType&& Callable, TUniqueFunction<v
 	case EAsyncExecution::ThreadPool:
 		if (FPlatformProcess::SupportsMultithreading())
 		{
+			check(GThreadPool != nullptr);
 			GThreadPool->AddQueuedWork(new TAsyncQueuedWork<ResultType>(MoveTemp(Function), MoveTemp(Promise)));
 		}
 		else
@@ -342,6 +363,7 @@ auto Async(EAsyncExecution Execution, CallableType&& Callable, TUniqueFunction<v
 	case EAsyncExecution::LargeThreadPool:
 		if (FPlatformProcess::SupportsMultithreading())
 		{
+			check(GLargeThreadPool != nullptr);
 			GLargeThreadPool->AddQueuedWork(new TAsyncQueuedWork<ResultType>(MoveTemp(Function), MoveTemp(Promise)));
 		}
 		else
@@ -368,14 +390,14 @@ auto Async(EAsyncExecution Execution, CallableType&& Callable, TUniqueFunction<v
  * @result A TFuture object that will receive the return value from the function.
  */
 template<typename CallableType>
-auto AsyncPool(FQueuedThreadPool& ThreadPool, CallableType&& Callable, TUniqueFunction<void()> CompletionCallback = nullptr) -> TFuture<decltype(Forward<CallableType>(Callable)())>
+auto AsyncPool(FQueuedThreadPool& ThreadPool, CallableType&& Callable, TUniqueFunction<void()> CompletionCallback = nullptr, EQueuedWorkPriority InQueuedWorkPriority = EQueuedWorkPriority::Normal) -> TFuture<decltype(Forward<CallableType>(Callable)())>
 {
 	using ResultType = decltype(Forward<CallableType>(Callable)());
 	TUniqueFunction<ResultType()> Function(Forward<CallableType>(Callable));
 	TPromise<ResultType> Promise(MoveTemp(CompletionCallback));
 	TFuture<ResultType> Future = Promise.GetFuture();
 
-	ThreadPool.AddQueuedWork(new TAsyncQueuedWork<ResultType>(MoveTemp(Function), MoveTemp(Promise)));
+	ThreadPool.AddQueuedWork(new TAsyncQueuedWork<ResultType>(MoveTemp(Function), MoveTemp(Promise)), InQueuedWorkPriority);
 
 	return MoveTemp(Future);
 }
@@ -436,7 +458,7 @@ uint32 TAsyncRunnable<ResultType>::Run()
 	FRunnableThread* Thread = ThreadFuture.Get();
 
 	// Enqueue deletion of the thread to a different thread.
-	Async(EAsyncExecution::TaskGraph, [=]() {
+	Async(EAsyncExecution::TaskGraph, [Thread, this]() {
 			delete Thread;
 			delete this;
 		}

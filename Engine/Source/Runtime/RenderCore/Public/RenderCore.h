@@ -6,17 +6,32 @@
 
 #pragma once
 
+#include "Stats/Stats.h" // IWYU pragma: keep
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "CoreMinimal.h"
+#include "HAL/PlatformTime.h"
+#include "Logging/LogMacros.h"
+#include "Math/Matrix.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector2D.h"
+#include "Math/Vector4.h"
+#include "RHIDefinitions.h"
 #include "Stats/Stats.h"
+#include "RenderTimer.h"
+#include "HDRHelper.h"
+#endif
 
 DECLARE_LOG_CATEGORY_EXTERN(LogRendererCore, Log, All);
+
+DECLARE_STATS_GROUP(TEXT("Command List Markers"), STATGROUP_CommandListMarkers, STATCAT_Advanced);
 
 /**
  * The scene rendering stats.
  */
 
 DECLARE_CYCLE_STAT_EXTERN(TEXT("BeginOcclusionTests"),STAT_BeginOcclusionTestsTime,STATGROUP_SceneRendering, RENDERCORE_API);
-DECLARE_CYCLE_STAT_EXTERN(TEXT("RenderQuery Result"),STAT_RenderQueryResultTime,STATGROUP_SceneRendering, RENDERCORE_API);
+DECLARE_CYCLE_STAT_EXTERN(TEXT("Waiting for GPU - check ProfileGPU"),STAT_RenderQueryResultTime,STATGROUP_SceneRendering, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("InitViews"),STAT_InitViewsTime,STATGROUP_SceneRendering, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("GatherRayTracingWorldInstances"), STAT_GatherRayTracingWorldInstances, STATGROUP_SceneRendering, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("InitViewsPossiblyAfterPrepass"), STAT_InitViewsPossiblyAfterPrepass, STATGROUP_SceneRendering, RENDERCORE_API);
@@ -32,7 +47,6 @@ DECLARE_CYCLE_STAT_EXTERN(TEXT("Water pass drawing"), STAT_WaterPassDrawTime, ST
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Lighting drawing"),STAT_LightingDrawTime,STATGROUP_SceneRendering, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Proj Shadow drawing"),STAT_ProjectedShadowDrawTime,STATGROUP_SceneRendering, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Reflective Shadow map drawing"),STAT_ReflectiveShadowMapDrawTime,STATGROUP_SceneRendering, RENDERCORE_API);
-DECLARE_CYCLE_STAT_EXTERN(TEXT("Update LPVs"),STAT_UpdateLPVs,STATGROUP_SceneRendering, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Translucency drawing"),STAT_TranslucencyDrawTime,STATGROUP_SceneRendering, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Dynamic Primitive drawing"),STAT_DynamicPrimitiveDrawTime,STATGROUP_SceneRendering, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("StaticDrawList drawing"),STAT_StaticDrawListDrawTime,STATGROUP_SceneRendering, RENDERCORE_API);
@@ -45,14 +59,16 @@ DECLARE_CYCLE_STAT_EXTERN(TEXT("Decal drawing"),STAT_DecalsDrawTime,STATGROUP_Sc
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Cache Uniform Expressions"),STAT_CacheUniformExpressions,STATGROUP_SceneRendering, RENDERCORE_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Lights using light shafts"), STAT_LightShaftsLights, STATGROUP_SceneRendering, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Bind ray tracing pipeline"), STAT_BindRayTracingPipeline, STATGROUP_SceneRendering, RENDERCORE_API);
-DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Ray tracing instances"), STAT_RayTracingInstances, STATGROUP_SceneRendering, RENDERCORE_API);
+// Number of instances sent to the TLAS build command, including active and inactive (culled) instances
+DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Ray tracing total instances"), STAT_RayTracingTotalInstances, STATGROUP_SceneRendering, RENDERCORE_API);
+// Number of valid instances, taking into account per-instance culling / activation mask
+DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Ray tracing active instances"), STAT_RayTracingActiveInstances, STATGROUP_SceneRendering, RENDERCORE_API);
 
+DECLARE_CYCLE_STAT_EXTERN(TEXT("Always Visible"), STAT_UpdateAlwaysVisible, STATGROUP_InitViews, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("View Visibility"),STAT_ViewVisibilityTime,STATGROUP_InitViews, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Decompress Occlusion"),STAT_DecompressPrecomputedOcclusion,STATGROUP_InitViews, RENDERCORE_API);
-DECLARE_CYCLE_STAT_EXTERN(TEXT("Frustum Cull"),STAT_FrustumCull,STATGROUP_InitViews, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Update Fading"),STAT_UpdatePrimitiveFading,STATGROUP_InitViews, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Occlusion Cull"),STAT_OcclusionCull,STATGROUP_InitViews, RENDERCORE_API);
-DECLARE_CYCLE_STAT_EXTERN(TEXT("Software Occlusion Cull"),STAT_SoftwareOcclusionCull,STATGROUP_InitViews, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("View Relevance"),STAT_ViewRelevance,STATGROUP_InitViews, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Compute View Relevance"),STAT_ComputeViewRelevance,STATGROUP_InitViews, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Static Mesh Relevance"),STAT_StaticRelevance,STATGROUP_InitViews, RENDERCORE_API);
@@ -76,6 +92,7 @@ DECLARE_CYCLE_STAT_EXTERN(TEXT("GatherShadowPrimitives"),STAT_GatherShadowPrimit
 DECLARE_CYCLE_STAT_EXTERN(TEXT("BuildCSMVisibilityState"), STAT_BuildCSMVisibilityState, STATGROUP_InitViews, RENDERCORE_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Processed primitives"),STAT_ProcessedPrimitives,STATGROUP_InitViews, RENDERCORE_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Frustum Culled primitives"),STAT_CulledPrimitives,STATGROUP_InitViews, RENDERCORE_API);
+DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Visible Raytracing Primitives"), STAT_VisibleRayTracingPrimitives, STATGROUP_InitViews, RENDERCORE_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Statically occluded primitives"),STAT_StaticallyOccludedPrimitives,STATGROUP_InitViews, RENDERCORE_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Occluded primitives"),STAT_OccludedPrimitives,STATGROUP_InitViews, RENDERCORE_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Occlusion queries"),STAT_OcclusionQueries,STATGROUP_InitViews, RENDERCORE_API);
@@ -105,10 +122,8 @@ DECLARE_CYCLE_STAT_EXTERN(TEXT("Render Lights and Shadows"),STAT_LightRendering,
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Direct lighting"),STAT_DirectLightRenderingTime,STATGROUP_LightRendering, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Translucent injection"),STAT_TranslucentInjectTime,STATGROUP_LightRendering, RENDERCORE_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Num using standard deferred"),STAT_NumLightsUsingStandardDeferred,STATGROUP_LightRendering, RENDERCORE_API);
-DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Num using tiled deferred"),STAT_NumLightsUsingTiledDeferred,STATGROUP_LightRendering, RENDERCORE_API);
-DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Num using simple lighting model"),STAT_NumLightsUsingSimpleTiledDeferred,STATGROUP_LightRendering, RENDERCORE_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Num injected into translucency"),STAT_NumLightsInjectedIntoTranslucency,STATGROUP_LightRendering, RENDERCORE_API);
-DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Num unshadowed"),STAT_NumUnshadowedLights,STATGROUP_LightRendering, RENDERCORE_API);
+DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Num batched"),STAT_NumBatchedLights,STATGROUP_LightRendering, RENDERCORE_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Num light function only"),STAT_NumLightFunctionOnlyLights,STATGROUP_LightRendering, RENDERCORE_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Num shadowed"),STAT_NumShadowedLights,STATGROUP_LightRendering, RENDERCORE_API);
 
@@ -116,6 +131,7 @@ DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Num shadowed"),STAT_NumShadowedLights,ST
 // The purpose of the SceneUpdate stat group is to show where rendering thread time is going from a high level outside of RenderViewFamily.
 // It should only contain stats that are likely to track a lot of time in a typical scene, not edge case stats that are rarely non-zero.
 // Use a more detailed profiler (like an instruction trace or sampling capture on Xbox 360) to track down where time is going in more detail.
+DECLARE_CYCLE_STAT_EXTERN(TEXT("Update GPU Scene"), STAT_UpdateGPUSceneTime, STATGROUP_SceneUpdate, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("AddPrimitive"),STAT_AddScenePrimitiveRenderThreadTime,STATGROUP_SceneUpdate, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("UpdatePrimitive"), STAT_UpdateScenePrimitiveRenderThreadTime, STATGROUP_SceneUpdate, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("AddLight"),STAT_AddSceneLightTime,STATGROUP_SceneUpdate, RENDERCORE_API);
@@ -123,16 +139,16 @@ DECLARE_CYCLE_STAT_EXTERN(TEXT("RemovePrimitive"),STAT_RemoveScenePrimitiveTime,
 DECLARE_CYCLE_STAT_EXTERN(TEXT("RemoveLight"),STAT_RemoveSceneLightTime,STATGROUP_SceneUpdate, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("UpdateLight"),STAT_UpdateSceneLightTime,STATGROUP_SceneUpdate, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("UpdatePrimitiveTransform"),STAT_UpdatePrimitiveTransformRenderThreadTime,STATGROUP_SceneUpdate, RENDERCORE_API);
+DECLARE_CYCLE_STAT_EXTERN(TEXT("UpdatePrimitiveInstance"), STAT_UpdatePrimitiveInstanceRenderThreadTime, STATGROUP_SceneUpdate, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Update CPU Skin"),STAT_CPUSkinUpdateRTTime,STATGROUP_SceneUpdate, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Update GPU Skin"),STAT_GPUSkinUpdateRTTime,STATGROUP_SceneUpdate, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Update particles"),STAT_ParticleUpdateRTTime,STATGROUP_SceneUpdate, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Update Influence Weights"),STAT_InfluenceWeightsUpdateRTTime,STATGROUP_SceneUpdate, RENDERCORE_API);
-DECLARE_CYCLE_STAT_EXTERN(TEXT("Flush async LPI creation"), STAT_FlushAsyncLPICreation, STATGROUP_SceneUpdate, RENDERCORE_API);
 
 DECLARE_CYCLE_STAT_EXTERN(TEXT("RemovePrimitive (GT)"),STAT_RemoveScenePrimitiveGT,STATGROUP_SceneUpdate, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("AddPrimitive (GT)"),STAT_AddScenePrimitiveGT,STATGROUP_SceneUpdate, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("UpdatePrimitiveTransform (GT)"),STAT_UpdatePrimitiveTransformGT,STATGROUP_SceneUpdate, RENDERCORE_API);
-DECLARE_CYCLE_STAT_EXTERN(TEXT("UpdateCustomPrimitiveData (GT)"),STAT_UpdateCustomPrimitiveDataGT,STATGROUP_SceneUpdate, RENDERCORE_API);
+DECLARE_CYCLE_STAT_EXTERN(TEXT("UpdatePrimitiveInstance (GT)"), STAT_UpdatePrimitiveInstanceGT, STATGROUP_SceneUpdate, RENDERCORE_API);
 
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Set Shader Maps On Material Resources (RT)"),STAT_Scene_SetShaderMapsOnMaterialResources_RT,STATGROUP_SceneUpdate, RENDERCORE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Update Static Draw Lists (RT)"), STAT_Scene_UpdateStaticDrawLists_RT, STATGROUP_SceneUpdate, RENDERCORE_API);
@@ -143,7 +159,6 @@ DECLARE_DWORD_COUNTER_STAT_EXTERN( TEXT( "Proxy Total" ), STAT_GameToRendererMal
 DECLARE_MEMORY_STAT_EXTERN(TEXT("Primitive memory"),STAT_PrimitiveInfoMemory,STATGROUP_SceneMemory, RENDERCORE_API);
 DECLARE_MEMORY_STAT_EXTERN(TEXT("Scene memory"),STAT_RenderingSceneMemory,STATGROUP_SceneMemory, RENDERCORE_API);
 DECLARE_MEMORY_STAT_EXTERN(TEXT("ViewState memory"),STAT_ViewStateMemory,STATGROUP_SceneMemory, RENDERCORE_API);
-DECLARE_MEMORY_STAT_EXTERN(TEXT("Rendering mem stack memory"),STAT_RenderingMemStackMemory,STATGROUP_SceneMemory, RENDERCORE_API);
 DECLARE_MEMORY_STAT_EXTERN(TEXT("Light interaction memory"),STAT_LightInteractionMemory,STATGROUP_SceneMemory, RENDERCORE_API);
 
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Num reflective shadow map lights"),STAT_NumReflectiveShadowMapLights,STATGROUP_LightRendering, RENDERCORE_API);
@@ -152,140 +167,6 @@ DECLARE_MEMORY_STAT_EXTERN(TEXT("Pool Size"), STAT_RenderTargetPoolSize, STATGRO
 DECLARE_MEMORY_STAT_EXTERN(TEXT("Pool Used"), STAT_RenderTargetPoolUsed, STATGROUP_RenderTargetPool, RENDERCORE_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("Pool Count"), STAT_RenderTargetPoolCount, STATGROUP_RenderTargetPool, RENDERCORE_API);
 
-/**
- *	Timer helper class.
- **/
-class FTimer
-{
-public:
-	/**
-	 *	Constructor
-	 **/
-	FTimer()
-		: CurrentDeltaTime(0.0f)
-		, CurrentTime(0.0f)
-	{
-	}
-
-	/**
-	 *	Returns the current time, in seconds.
-	 *	@return Current time, in seconds
-	 */
-	float GetCurrentTime() const
-	{
-		return CurrentTime;
-	}
-
-	/**
-	 *	Returns the current delta time.
-	 *	@return Current delta time (number of seconds that passed between the last two tick)
-	 */
-	float GetCurrentDeltaTime() const
-	{
-		return CurrentDeltaTime;
-	}
-
-	/**
-	 *	Updates the timer.
-	 *	@param DeltaTime	Number of seconds that have passed since the last tick
-	 **/
-	void Tick( float DeltaTime )
-	{
-		CurrentDeltaTime = DeltaTime;
-		CurrentTime += DeltaTime;
-	}
-
-protected:
-	/** Current delta time (number of seconds that passed between the last two tick). */
-	float CurrentDeltaTime;
-	/** Current time, in seconds. */
-	float CurrentTime;
-};
-
-/** Whether to pause the global realtime clock for the rendering thread (read and write only on main thread). */
-extern RENDERCORE_API bool GPauseRenderingRealtimeClock;
-
-/** Global realtime clock for the rendering thread. */
-extern RENDERCORE_API FTimer GRenderingRealtimeClock;
-
-/**
- * Encapsulates a latency timer that measures the time from when mouse input
- * is read on the gamethread until that frame is fully displayed by the GPU.
- */
-struct FInputLatencyTimer
-{
-	/**
-	 * Constructor
-	 * @param InUpdateFrequency	How often the timer should be updated (in seconds).
-	 */
-	FInputLatencyTimer( float InUpdateFrequency )
-	{
-		bInitialized = false;
-		RenderThreadTrigger = false;
-		GameThreadTrigger = false;
-		StartTime = 0;
-		DeltaTime = 0;
-		LastCaptureTime = 0.0f;
-		UpdateFrequency = InUpdateFrequency;
-	}
-
-	/** Potentially starts the timer on the gamethread, based on the UpdateFrequency. */
-	RENDERCORE_API void GameThreadTick();
-
-	/** @return The number of seconds of input latency. */
-	inline float GetDeltaSeconds() const
-	{
-		return FPlatformTime::ToSeconds(DeltaTime);
-	}
-
-	/** Whether GInputLatencyTimer is initialized or not. */
-	bool	bInitialized;
-
-	/** Whether a measurement has been triggered on the gamethread. */
-	bool	GameThreadTrigger;
-
-	/** Whether a measurement has been triggered on the renderthread. */
-	bool	RenderThreadTrigger;
-
-	/** Start time (in FPlatformTime::Cycles). */
-	uint32	StartTime;
-
-	/** Last delta time that was measured (in FPlatformTime::Cycles). */
-	uint32	DeltaTime;
-
-	/** Last time we did a measurement (in seconds). */
-	float	LastCaptureTime;
-
-	/** How often we should do a measurement (in seconds). */
-	float	UpdateFrequency;
-};
-
-namespace ERenderThreadIdleTypes
-{
-	enum Type
-	{
-		WaitingForAllOtherSleep, 
-		WaitingForGPUQuery, 
-		WaitingForGPUPresent, 
-		Num
-	};
-}
-
-/** Accumulates how many cycles the renderthread has been idle. It's defined in RenderingThread.cpp. */
-extern RENDERCORE_API uint32 GRenderThreadIdle[ERenderThreadIdleTypes::Num];
-/** Accumulates how times renderthread was idle. It's defined in RenderingThread.cpp. */
-extern RENDERCORE_API uint32 GRenderThreadNumIdle[ERenderThreadIdleTypes::Num];
-/** Global input latency timer. Defined in UnrealClient.cpp */
-extern RENDERCORE_API FInputLatencyTimer GInputLatencyTimer;
-/** How many cycles the renderthread used (excluding idle time). It's set once per frame in FViewport::Draw. */
-extern RENDERCORE_API uint32 GRenderThreadTime;
-/** How many cycles the rhithread used (excluding idle time). */
-extern RENDERCORE_API uint32 GRHIThreadTime;
-/** How many cycles the gamethread used (excluding idle time). It's set once per frame in FViewport::Draw. */
-extern RENDERCORE_API uint32 GGameThreadTime;
-/** How many cycles it took to swap buffers to present the frame. */
-extern RENDERCORE_API uint32 GSwapBufferTime;
-
 // shared by renderer and engine, compiles down to a constant in final release
 RENDERCORE_API int32 GetCVarForceLOD();
 RENDERCORE_API int32 GetCVarForceLOD_AnyThread();
@@ -293,49 +174,4 @@ RENDERCORE_API int32 GetCVarForceLOD_AnyThread();
 RENDERCORE_API int32 GetCVarForceLODShadow();
 RENDERCORE_API int32 GetCVarForceLODShadow_AnyThread();
 
-RENDERCORE_API bool IsHDREnabled();
-
-RENDERCORE_API bool IsHDRAllowed();
-
-// struct containing all data the GPU needs to perform a lookup/feedback request
-struct RENDERCORE_API FVirtualTextureUniformData
-{
-	int SpaceID;
-	float PageTableSize;
-	float vPageSize;
-	float pPageBorder;
-	FVector2D pTextureSize; // The size of the cache texture
-	float MaxAnisotropic;
-	int MaxAssetLevel;
-	FVector4 Transform;
-	FVector2D vOneMinusOneOverTextureSize; // 1 - (1/TextureSize) this rather specific value is needed for clamp texturing.
-										   // We could store something more generically useful at the cost of a few shader ALU instructions?
-
-	FMatrix Pack() const
-	{
-		FMatrix Data(ForceInitToZero);
-
-		Data.M[0][0] = SpaceID;
-		Data.M[0][1] = PageTableSize;
-		Data.M[0][2] = vPageSize;
-		Data.M[0][3] = pPageBorder;
-
-		Data.M[1][0] = pTextureSize.X;
-		Data.M[1][1] = pTextureSize.Y;
-		Data.M[1][2] = FMath::Log2(MaxAnisotropic);
-		Data.M[1][3] = MaxAssetLevel;
-
-		Data.M[2][0] = Transform.X;
-		Data.M[2][1] = Transform.Y;
-		Data.M[2][2] = Transform.Z;
-		Data.M[2][3] = Transform.W;
-
-		Data.M[3][0] = vOneMinusOneOverTextureSize.X;
-		Data.M[3][1] = vOneMinusOneOverTextureSize.Y;
-
-		return Data;
-	}
-
-	static FMatrix Invalid;
-};
-static_assert(sizeof(FVirtualTextureUniformData) <= sizeof(FMatrix), "FVirtualTextureUniformData is unable to pack");
+RENDERCORE_API void SetNearClipPlaneGlobals(float NewNearClipPlane);

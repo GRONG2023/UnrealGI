@@ -3,7 +3,7 @@
 using System;
 using System.Collections.Generic;
 using AutomationTool;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 using UnrealBuildTool;
 
 namespace Gauntlet
@@ -49,6 +49,21 @@ namespace Gauntlet
         public List<UnrealFileToCopy> FilesToCopy { get; set; }
 
 		/// <summary>
+		/// Some IAppInstall instances can alter command line after it has been copied from AppConfig.CommandLine
+		/// Use this to restrict this behavior if necessary.
+		/// </summary>
+		public bool CanAlterCommandArgs {
+			get { return CanAlterCommandArgsPrivate; }
+			set { CanAlterCommandArgsPrivate = value; }
+		}
+		private bool CanAlterCommandArgsPrivate = true;
+
+		/// <summary>
+		/// Set this property when the application is executed through a Docker container.
+		/// </summary>
+		public ContainerInfo ContainerInfo { get; set; }
+
+		/// <summary>
 		/// Arguments for this instance
 		/// </summary>
 		public string CommandLine
@@ -84,8 +99,25 @@ namespace Gauntlet
 		/// </summary>
 		public string Sandbox { get; set; }
 
-		// new system
 		public IBuild Build { get; set; }
+
+		// Prevents installing a build on device
+		public bool SkipInstall => ForceSkipInstall.HasValue ? ForceSkipInstall.Value : _SkipInstall;
+
+		// Performs a full clean on the device before installing
+		public bool FullClean => ForceFullClean.HasValue ? ForceFullClean.Value : _FullClean;
+
+		// Force a full clean
+		public static bool? ForceFullClean = null;
+
+		// Force a skip install
+		public static bool? ForceSkipInstall = null;
+		
+		[AutoParamWithNames(false, "SkipInstall", "SkipDeploy", "SkipCopy")]
+		private bool _SkipInstall { get; set; }
+		
+		[AutoParamWithNames(false, "FullClean")]
+		private bool _FullClean { get; set; }
 
 		/// <summary>
 		/// Constructor that sets some required values to defaults
@@ -97,6 +129,7 @@ namespace Gauntlet
 			CommandLine = "";
 			Configuration = UnrealTargetConfiguration.Development;
 			Sandbox = "Gauntlet";
+			AutoParam.ApplyParamsAndDefaults(this, Globals.Params.AllArguments);
 		}
 	}
 }

@@ -63,7 +63,7 @@ public:
 	
 	void Serialize( void* V, int64 Length ) override
 	{
-		int32 iStart = ScriptBuffer.AddUninitialized( Length );
+		int32 iStart = ScriptBuffer.AddUninitialized(IntCastChecked<int32, int64>(Length));
 		FMemory::Memcpy( &(ScriptBuffer[iStart]), V, Length );
 	}
 
@@ -73,11 +73,12 @@ public:
 	{
 		FArchive& Ar = *this;
 
-		// We can't call Serialize directly as we need to store the data endian clean.
-		FScriptName ScriptName = NameToScriptName(Name);
-		Ar << ScriptName.ComparisonIndex;
-		Ar << ScriptName.DisplayIndex;
-		Ar << ScriptName.Number;
+		// This must match the format and endianness expected by XFERNAME 
+		FNameEntryId ComparisonIndex = Name.GetComparisonIndex(), DisplayIndex = Name.GetDisplayIndex();
+		uint32 Number = Name.GetNumber();
+		Ar << ComparisonIndex;
+		Ar << DisplayIndex;
+		Ar << Number;
 
 		return Ar;
 	}
@@ -91,6 +92,14 @@ public:
 		return Ar;
 	}
 
+	FArchive& operator<<(FObjectPtr& Res) override
+	{
+		ScriptPointerType D = (ScriptPointerType)Res.GetHandle().PointerOrRef;
+		FArchive& Ar = *this;
+
+		Ar << D;
+		return Ar;
+	}
 	FArchive& operator<<(FField*& Res) override
 	{
 		ScriptPointerType D = (ScriptPointerType)Res;
@@ -124,14 +133,14 @@ public:
 	{
 		checkSlow(E < 0xFF);
 
-		uint8 B = E; 
+		uint8 B = static_cast<uint8>(E); 
 		Serialize(&B, 1); 
 		return *this;
 	}
 
 	FArchive& operator<<(ECastToken E)
 	{
-		uint8 B = E; 
+		uint8 B = static_cast<uint8>(E);
 		Serialize(&B, 1); 
 		return *this;
 	}
@@ -147,7 +156,7 @@ public:
 
 	FArchive& operator<<(EPropertyType E)
 	{
-		uint8 B = E; 
+		uint8 B = static_cast<uint8>(E);
 		Serialize(&B, 1); 
 		return *this;
 	}
@@ -269,6 +278,7 @@ private:
 
 	// Pointers to commonly used structures (found in constructor)
 	UScriptStruct* VectorStruct;
+	UScriptStruct* Vector3fStruct;
 	UScriptStruct* RotatorStruct;
 	UScriptStruct* TransformStruct;
 	UScriptStruct* LatentInfoStruct;
@@ -404,6 +414,7 @@ public:
 		, PureNodeEntryStart(0)
 	{
 		VectorStruct = TBaseStructure<FVector>::Get();
+		Vector3fStruct = TVariantStructure<FVector3f>::Get();
 		RotatorStruct = TBaseStructure<FRotator>::Get();
 		TransformStruct = TBaseStructure<FTransform>::Get();
 		LatentInfoStruct = FLatentActionInfo::StaticStruct();
@@ -458,6 +469,15 @@ public:
 			return Type && (Type->PinCategory == UEdGraphSchema_K2::PC_Boolean);
 		}
 
+		static bool IsBit(const FProperty* Property)
+		{
+			if (Property && Property->GetOwnerStruct() && !CastFieldChecked<FBoolProperty>(Property)->IsNativeBool())
+			{
+				return true;
+			}
+			return false;
+		}
+
 		static bool IsString(const FEdGraphPinType* Type, const FProperty* Property)
 		{
 			if (Property)
@@ -482,7 +502,16 @@ public:
 			{
 				return Property->IsA<FFloatProperty>();
 			}
-			return Type && (Type->PinCategory == UEdGraphSchema_K2::PC_Float);
+			return Type && (Type->PinCategory == UEdGraphSchema_K2::PC_Real) && (Type->PinSubCategory == UEdGraphSchema_K2::PC_Float);
+		}
+
+		static bool IsDouble(const FEdGraphPinType* Type, const FProperty* Property)
+		{
+			if (Property)
+			{
+				return Property->IsA<FDoubleProperty>();
+			}
+			return Type && (Type->PinCategory == UEdGraphSchema_K2::PC_Real) && (Type->PinSubCategory == UEdGraphSchema_K2::PC_Double);
 		}
 
 		static bool IsInt(const FEdGraphPinType* Type, const FProperty* Property)
@@ -595,7 +624,7 @@ public:
 		}
 	};
 
-	virtual void EmitTermExpr(FBPTerminal* Term, FProperty* CoerceProperty = NULL, bool bAllowStaticArray = false)
+	void EmitTermExpr(FBPTerminal* Term, const FProperty* CoerceProperty = NULL, bool bAllowStaticArray = false, bool bCallerRequiresBit = false)
 	{
 		if (Term->bIsLiteral)
 		{
@@ -604,8 +633,8 @@ public:
 			// Additional Validation, since we cannot trust custom k2nodes
 			if (CoerceProperty && ensure(Schema) && ensure(CurrentCompilerContext))
 			{
-			    const bool bSecialCaseSelf = (Term->Type.PinSubCategory == UEdGraphSchema_K2::PN_Self);
-				if(!bSecialCaseSelf)
+			    const bool bSpecialCaseSelf = (Term->Type.PinSubCategory == UEdGraphSchema_K2::PN_Self);
+				if(!bSpecialCaseSelf)
 			    {
 				    FEdGraphPinType TrueType;
 				    const bool bValidProperty = Schema->ConvertPropertyToPinType(CoerceProperty, TrueType);
@@ -630,12 +659,12 @@ public:
 					    }
 					    return true;
 				    };
-    
-				    if (!bValidProperty || !AreTypesBinaryCompatible(Term->Type, TrueType))
-				    {
-					    const FString ErrorMessage = FString::Printf(TEXT("ICE: The type of property %s doesn't match a term. @@"), *CoerceProperty->GetPathName());
-					    CurrentCompilerContext->MessageLog.Error(*ErrorMessage, Term->SourcePin);
-				    }
+
+					if (bValidProperty && !AreTypesBinaryCompatible(Term->Type, TrueType))
+					{
+						const FString ErrorMessage = FString::Printf(TEXT("ICE: The type of property %s doesn't match the terminal type for pin @@."), *CoerceProperty->GetPathName());
+						CurrentCompilerContext->MessageLog.Error(*ErrorMessage, Term->SourcePin);
+					}
 				}
 			}
 
@@ -658,7 +687,7 @@ public:
 				{
 					FName TableId;
 					FString Key;
-					FStringTableRegistry::Get().FindTableIdAndKey(Term->TextLiteral, TableId, Key);
+					FTextInspector::GetTableIdAndKey(Term->TextLiteral, TableId, Key);
 
 					UStringTable* StringTableAsset = FStringTableRegistry::Get().FindStringTableAsset(TableId);
 
@@ -674,21 +703,20 @@ public:
 				}
 				else
 				{
-					bool bIsLocalized = false;
-					FString Namespace;
-					FString Key;
+					FTextId TextId;
 					const FString* SourceString = FTextInspector::GetSourceString(Term->TextLiteral);
 
 					if (SourceString && Term->TextLiteral.ShouldGatherForLocalization())
 					{
-						bIsLocalized = FTextLocalizationManager::Get().FindNamespaceAndKeyFromDisplayString(FTextInspector::GetSharedDisplayString(Term->TextLiteral), Namespace, Key);
+						TextId = FTextInspector::GetTextId(Term->TextLiteral);
 					}
 
-					if (bIsLocalized)
+					if (!TextId.IsEmpty())
 					{
 						// BP bytecode always removes the package localization ID to match how text works at runtime
 						// If we're gathering editor-only text then we'll pick up the version with the package localization ID from the property/pin rather than the bytecode
-						Namespace = TextNamespaceUtil::StripPackageNamespace(Namespace);
+						const FString Namespace = TextNamespaceUtil::StripPackageNamespace(TextId.GetNamespace().GetChars());
+						const FString Key = TextId.GetKey().GetChars();
 
 						Writer << EBlueprintTextLiteralType::LocalizedText;
 						EmitStringLiteral(*SourceString);
@@ -706,6 +734,21 @@ public:
 			{
 				float Value = FCString::Atof(*(Term->Name));
 				Writer << EX_FloatConst;
+				Writer << Value;
+			}
+			else if (FLiteralTypeHelper::IsDouble(&Term->Type, CoerceProperty))
+			{
+				double Value = 0.0;
+				if (Term->Type.bSerializeAsSinglePrecisionFloat)
+				{
+					Value = FCString::Atof(*(Term->Name));
+				}
+				else
+				{
+					Value = FCString::Atod(*(Term->Name));
+				}
+				
+				Writer << EX_DoubleConst;
 				Writer << Value;
 			}
 			else if (FLiteralTypeHelper::IsInt(&Term->Type, CoerceProperty))
@@ -755,11 +798,11 @@ public:
 
 				UEnum* EnumPtr = nullptr;
 
-				if (FByteProperty* ByteProp = CastField< FByteProperty >(CoerceProperty))
+				if (const FByteProperty* ByteProp = CastField< FByteProperty >(CoerceProperty))
 				{
 					EnumPtr = ByteProp->Enum;
 				}
-				else if (FEnumProperty* EnumProp = CastField< FEnumProperty >(CoerceProperty))
+				else if (const FEnumProperty* EnumProp = CastField< FEnumProperty >(CoerceProperty))
 				{
 					EnumPtr = EnumProp->GetEnum();
 				}
@@ -786,8 +829,29 @@ public:
 			}
 			else if (FLiteralTypeHelper::IsBoolean(&Term->Type, CoerceProperty))
 			{
+				// Bitfields in struct literals were being treated as full bytes, but instructions like
+				// EX_LetBool provide the destination as the CoercePoperty, even though they are going
+				// to allocate a full byte for us to write to. To disambiguate I have added bCallerRequiresBit
+				// when a calling expressing allocates only a single bit for us to write to:
 				bool bValue = Term->Name.ToBool();
-				Writer << (bValue ? EX_True : EX_False);
+				const bool bIsBit = bCallerRequiresBit && FLiteralTypeHelper::IsBit(CoerceProperty);
+				
+				if(bIsBit)
+				{
+					check(CoerceProperty);
+					// FArchive const correctness workaround:
+					FProperty* BitProperty = const_cast<FProperty*>(CoerceProperty);
+					uint8 ValueAsByte = bValue;
+
+					// Emit the literal, with enough information to safely write to CoerceProperty:
+					Writer << EX_BitFieldConst;
+					Writer << BitProperty;
+					Writer << ValueAsByte;
+				}
+				else
+				{
+					Writer << (bValue ? EX_True : EX_False);
+				}
 			}
 			else if (FLiteralTypeHelper::IsName(&Term->Type, CoerceProperty))
 			{
@@ -797,8 +861,8 @@ public:
 			}
 			else if (FLiteralTypeHelper::IsStruct(&Term->Type, CoerceProperty))
 			{
-				FStructProperty* StructProperty = CastField<FStructProperty>(CoerceProperty);
-				UScriptStruct* Struct = StructProperty ? StructProperty->Struct : Cast<UScriptStruct>(Term->Type.PinSubCategoryObject.Get());
+				const FStructProperty* StructProperty = CastField<FStructProperty>(CoerceProperty);
+				UScriptStruct* Struct = StructProperty ? ToRawPtr(StructProperty->Struct) : ToRawPtr(Cast<UScriptStruct>(Term->Type.PinSubCategoryObject.Get()));
 				check(Struct);
 
 				if (Struct == VectorStruct)
@@ -813,6 +877,20 @@ public:
 						}
 					}
 					Writer << EX_VectorConst;
+					Writer << V;
+				}
+				else if (Struct == Vector3fStruct)
+				{
+					FVector3f V = FVector3f::ZeroVector;
+					if (!Term->Name.IsEmpty())
+					{
+						const bool bParsedUsingCustomFormat = FDefaultValueHelper::ParseVector(Term->Name, /*out*/ V);
+						if (!bParsedUsingCustomFormat)
+						{
+							Struct->ImportText(*Term->Name, &V, nullptr, PPF_None, GWarn, GetPathNameSafe(StructProperty));
+						}
+					}
+					Writer << EX_Vector3fConst;
 					Writer << V;
 				}
 				else if (Struct == RotatorStruct)
@@ -873,11 +951,17 @@ public:
 							continue;
 						}
 
+						// Create a new term for each property, and serialize it out
 						for (int32 ArrayIter = 0; ArrayIter < Prop->ArrayDim; ++ArrayIter)
 						{
-							// Create a new term for each property, and serialize it out
 							FBPTerminal NewTerm;
-							Schema->ConvertPropertyToPinType(Prop, NewTerm.Type);
+							if(!Schema->ConvertPropertyToPinType(Prop, NewTerm.Type))
+							{								
+								// Do nothing for unsupported/unhandled property types. This will leave the value unchanged from its constructed default.
+								Writer << EX_Nothing;
+								continue;
+							}
+
 							NewTerm.bIsLiteral = true;
 							NewTerm.Source = Term->Source;
 							NewTerm.SourcePin = Term->SourcePin;
@@ -892,19 +976,19 @@ public:
 								NewTerm.ObjectLiteral = CastField<FObjectProperty>(Prop)->GetObjectPropertyValue(Prop->ContainerPtrToValuePtr<void>(StructData));
 							}
 
-							EmitTermExpr(&NewTerm, Prop, true);
+							EmitTermExpr(&NewTerm, Prop, true, true);
 						}
 					}
 					Struct->DestroyStruct(StructData, ArrayDim);
 					Writer << EX_EndStructConst;
 				}
 			}
-			else if (FArrayProperty* ArrayPropr = CastField<FArrayProperty>(CoerceProperty))
+			else if (const FArrayProperty* ArrayPropr = CastField<FArrayProperty>(CoerceProperty))
 			{
 				FProperty* InnerProp = ArrayPropr->Inner;
 				ensure(InnerProp);
 				FScriptArray ScriptArray;
-				ArrayPropr->ImportText(*Term->Name, &ScriptArray, 0, NULL, GLog);
+				ArrayPropr->ImportText_Direct(*Term->Name, &ScriptArray, NULL, 0, GLog);
 
 				FScriptArrayHelper ScriptArrayHelper(ArrayPropr, &ScriptArray);
 				int32 ElementNum = ScriptArrayHelper.Num();
@@ -919,13 +1003,13 @@ public:
 				}
 				Writer << EX_EndArrayConst;
 			}
-			else if (FSetProperty* SetPropr = CastField<FSetProperty>(CoerceProperty))
+			else if (const FSetProperty* SetPropr = CastField<FSetProperty>(CoerceProperty))
 			{
 				FProperty* InnerProp = SetPropr->ElementProp;
 				ensure(InnerProp);
 
 				FScriptSet ScriptSet;
-				SetPropr->ImportText(*Term->Name, &ScriptSet, 0, NULL, GLog);
+				SetPropr->ImportText_Direct(*Term->Name, &ScriptSet, NULL, 0, GLog);
 				int32 ElementNum = ScriptSet.Num();
 
 				FScriptSetHelper ScriptSetHelper(SetPropr, &ScriptSet);
@@ -934,26 +1018,21 @@ public:
 				Writer << InnerProp;
 				Writer << ElementNum;
 
-				for (int32 ElemIdx = 0, SparseIndex = 0; ElemIdx < ElementNum; ++SparseIndex)
+				for (FScriptSetHelper::FIterator It(ScriptSetHelper); It; ++It)
 				{
-					if (ScriptSet.IsValidIndex(SparseIndex))
-					{
-						uint8* RawElemData = ScriptSetHelper.GetElementPtr(SparseIndex);
-						EmitInnerElementExpr(Term, InnerProp, RawElemData);
-
-						++ElemIdx;
-					}
+					uint8* RawElemData = ScriptSetHelper.GetElementPtr(It);
+					EmitInnerElementExpr(Term, InnerProp, RawElemData);
 				}
 				Writer << EX_EndSetConst;
 			}
-			else if (FMapProperty* MapPropr = CastField<FMapProperty>(CoerceProperty))
+			else if (const FMapProperty* MapPropr = CastField<FMapProperty>(CoerceProperty))
 			{
 				FProperty* KeyProp = MapPropr->KeyProp;
 				FProperty* ValProp = MapPropr->ValueProp;
 				ensure(KeyProp && ValProp);
 
 				FScriptMap ScriptMap;
-				MapPropr->ImportText(*Term->Name, &ScriptMap, 0, NULL, GLog);
+				MapPropr->ImportText_Direct(*Term->Name, &ScriptMap, NULL, 0, GLog);
 				int32 ElementNum = ScriptMap.Num();
 
 				FScriptMapHelper ScriptMapHelper(MapPropr, &ScriptMap);
@@ -963,31 +1042,25 @@ public:
 				Writer << ValProp;
 				Writer << ElementNum;
 
-				for (int32 ElemIdx = 0, SparseIndex = 0; ElemIdx < ElementNum; ++SparseIndex)
+				for (FScriptMapHelper::FIterator It(ScriptMapHelper); It; ++It)
 				{
-					if (ScriptMap.IsValidIndex(SparseIndex))
-					{
-						EmitInnerElementExpr(Term, KeyProp, ScriptMapHelper.GetKeyPtr(SparseIndex));
-						EmitInnerElementExpr(Term, ValProp, ScriptMapHelper.GetValuePtr(SparseIndex));
-
-						++ElemIdx;
-					}
+					EmitInnerElementExpr(Term, KeyProp, ScriptMapHelper.GetKeyPtr(It));
+					EmitInnerElementExpr(Term, ValProp, ScriptMapHelper.GetValuePtr(It));
 				}
 				Writer << EX_EndMapConst;
 			}
 			else if (FLiteralTypeHelper::IsDelegate(&Term->Type, CoerceProperty))
 			{
-				if (Term->Name == TEXT(""))
-				{
-					ensureMsgf(false, TEXT("Cannot use an empty literal expression for a delegate property"));
-				}
-				else
-				{
-					FName FunctionName(*(Term->Name)); //@TODO: K2 Delegate Support: Need to verify this function actually exists and has the right signature?
+				FName FunctionName;
 
-					Writer << EX_InstanceDelegate;
-					Writer << FunctionName;
+				// Deliberately null delegates are allowed, using empty string or the ExportText format
+				if (Term->Name != TEXT("") && Term->Name != TEXT("(null).None"))
+				{
+					FunctionName = *Term->Name; //@TODO: K2 Delegate Support: Need to verify this function actually exists and has the right signature?
 				}
+	
+				Writer << EX_InstanceDelegate;
+				Writer << FunctionName;
 			}
 			else if (FLiteralTypeHelper::IsSoftObject(&Term->Type, CoerceProperty))
 			{
@@ -1006,7 +1079,7 @@ public:
 				{
 					Writer << EX_Self;
 				}
-				else if (Term->ObjectLiteral == NULL)
+				else if (!Term->ObjectLiteral)
 				{
 					Writer << EX_NoObject;
 				}
@@ -1104,7 +1177,7 @@ public:
 		StructProperty->InitializeValue(StructData);
 
 		// Assume that any errors on the import of the name string have been caught in the function call generation
-		StructProperty->ImportText(*Term->Name, StructData, 0, NULL, GLog);
+		StructProperty->ImportText_Direct(*Term->Name, StructData, NULL, 0, GLog);
 
 		Writer << EX_StructConst;
 		Writer << LatentInfoStruct;
@@ -1131,11 +1204,18 @@ public:
 			{
 				// Create a new term for each property, and serialize it out
 				FBPTerminal NewTerm;
-				Schema->ConvertPropertyToPinType(Prop, NewTerm.Type);
-				NewTerm.bIsLiteral = true;
-				Prop->ExportText_InContainer(0, NewTerm.Name, StructData, StructData, NULL, PPF_None);
+				if(Schema->ConvertPropertyToPinType(Prop, NewTerm.Type))
+				{
+					NewTerm.bIsLiteral = true;
+					Prop->ExportText_InContainer(0, NewTerm.Name, StructData, StructData, NULL, PPF_None);
 
-				EmitTermExpr(&NewTerm, Prop);
+					EmitTermExpr(&NewTerm, Prop);
+				}
+				else
+				{
+					// Do nothing for unsupported/unhandled property types. This will leave the value unchanged from its constructed default.
+					Writer << EX_Nothing;
+				}
 			}
 		}
 
@@ -1359,7 +1439,7 @@ public:
 		Writer << EX_EndFunctionParms;
 	}
 
-	void EmitTerm(FBPTerminal* Term, FProperty* CoerceProperty = NULL, FBPTerminal* RValueTerm = NULL)
+	void EmitTerm(FBPTerminal* Term, const FProperty* CoerceProperty = NULL, FBPTerminal* RValueTerm = NULL)
 	{
 		if (Term->InlineGeneratedParameter)
 		{
@@ -1578,8 +1658,9 @@ public:
 		Writer << PropertyToHandleComplexStruct;
 		EmitTerm(DestinationExpression);
 
-		Writer << EX_PrimitiveCast;
-		uint8 CastType = !bIsInterfaceCast ? CST_ObjectToBool : CST_InterfaceToBool;
+		Writer << EX_Cast;
+		ECastToken CastToken = !bIsInterfaceCast ? CST_ObjectToBool : CST_InterfaceToBool;
+		uint8 CastType = static_cast<uint8>(CastToken);
 		Writer << CastType;
 		
 		FProperty* TargetProperty = !bIsInterfaceCast ? ((FProperty*)(GetDefault<FObjectProperty>())) : ((FProperty*)(GetDefault<FInterfaceProperty>()));
@@ -1810,7 +1891,7 @@ public:
 
 		Writer << EX_SwitchValue;
 		// number of cases (without default)
-		uint16 NumCases = ((Statement.RHS.Num() - 2) / TermsPerCase);
+		uint16 NumCases = IntCastChecked<uint16, int32>((Statement.RHS.Num() - 2) / TermsPerCase);
 		Writer << NumCases;
 		// end goto index
 		CodeSkipSizeType PatchUpNeededAtOffset = Writer.EmitPlaceholderSkip();
@@ -2000,6 +2081,38 @@ public:
 		EmitTerm(Statement.RHS[1], (FProperty*)(GetDefault<FIntProperty>()));
 	}
 
+	void EmitCastStatement(FBlueprintCompiledStatement& Statement)
+	{
+		FBPTerminal* DestinationExpression = Statement.LHS;
+		FBPTerminal* TargetExpression = Statement.RHS[0];
+
+		Writer << EX_Let;
+		FProperty* PropertyToHandleComplexStruct = nullptr;
+		Writer << PropertyToHandleComplexStruct;
+		EmitTerm(DestinationExpression);
+
+		Writer << EX_Cast;
+
+		ECastToken CastType = CST_Max;
+
+		switch (Statement.Type)
+		{
+			case KCST_DoubleToFloatCast:
+				CastType = CST_DoubleToFloat;
+				break;
+			case KCST_FloatToDoubleCast:
+				CastType = CST_FloatToDouble;
+				break;
+			default:
+				check(false);
+				break;
+		}
+
+		Writer << CastType;
+
+		EmitTerm(TargetExpression);
+	}
+
 	void PushReturnAddress(FBlueprintCompiledStatement& ReturnTarget)
 	{
 		Writer << EX_PushExecutionFlow;
@@ -2126,6 +2239,10 @@ public:
 		case KCST_CreateMap:
 			EmitCreateMapStatement(Statement);
 			break;
+		case KCST_DoubleToFloatCast:
+		case KCST_FloatToDoubleCast:
+			EmitCastStatement(Statement);
+			break;
 		default:
 			UE_LOG(LogK2Compiler, Warning, TEXT("VM backend encountered unsupported statement type %d"), (int32)Statement.Type);
 		}
@@ -2206,25 +2323,34 @@ void FKismetCompilerVMBackend::ConstructFunction(FKismetFunctionContext& Functio
 			UEdGraphNode* StatementNode = FunctionContext.LinearExecutionList[NodeIndex];
 			TArray<FBlueprintCompiledStatement*>* StatementList = FunctionContext.StatementsPerNode.Find(StatementNode);
 
-			if (StatementList != NULL)
+			if (StatementList != nullptr)
 			{
 				for (int32 StatementIndex = 0; StatementIndex < StatementList->Num(); ++StatementIndex)
 				{
 					FBlueprintCompiledStatement* Statement = (*StatementList)[StatementIndex];
 
 					ScriptWriter.GenerateCodeForStatement(CompilerContext, FunctionContext, *Statement, StatementNode);
-					
-					const bool bUberGraphFunctionCall = Statement->FunctionToCall && (Statement->FunctionToCall == Class->UberGraphFunction)
-						&& (EKismetCompiledStatementType::KCST_CallFunction == Statement->Type);
-					const bool bIsReducible = FKismetCompilerUtilities::IsStatementReducible(Statement->Type) || bUberGraphFunctionCall;
-					bAnyNonReducibleFunctionGenerated |= !bIsReducible;
+
+					// Abort code generation on error (no need to process additional statements).
+					if (FunctionContext.MessageLog.NumErrors > 0)
+					{
+						break;
+					}
 				}
+			}
+
+			// Reduce to a stub if any errors were raised. This ensures the VM won't attempt to evaluate an incomplete expression.
+			if (FunctionContext.MessageLog.NumErrors > 0)
+			{
+				ScriptArray.Empty();
+				ReturnStatement.bIsJumpTarget = false;
+				break;
 			}
 		}
 	}
 
 	// Handle the function return value
-	ScriptWriter.GenerateCodeForStatement(CompilerContext, FunctionContext, ReturnStatement, NULL);	
+	ScriptWriter.GenerateCodeForStatement(CompilerContext, FunctionContext, ReturnStatement, nullptr);	
 
 	// Fix up jump addresses
 	ScriptWriter.PerformFixups();

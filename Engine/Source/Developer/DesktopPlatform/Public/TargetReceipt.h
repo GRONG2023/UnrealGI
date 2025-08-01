@@ -2,7 +2,12 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformMisc.h"
 #include "Modules/BuildVersion.h"
 
 /**
@@ -82,6 +87,9 @@ struct DESKTOPPLATFORM_API FTargetReceipt
 	/** All plugins that were either enabled or disabled via the target rules. */
 	TMap<FString, bool> PluginNameToEnabledState;
 
+	/** All plugins which are part of this target. */
+	TArray<FString> BuildPlugins;
+
 	/** Additional build properties passed through from the module rules */
 	TArray<FReceiptProperty> AdditionalProperties;
 
@@ -89,9 +97,10 @@ struct DESKTOPPLATFORM_API FTargetReceipt
 	 * Read a target receipt from disk
 	 *
 	 * @param FileName The file to read from
+	 * @param bExpandVariables Whether variables should be expanded in paths or not
 	 * @return True if the file was read successfully
 	 */
-	bool Read(const FString& FileName);
+	bool Read(const FString& FileName, bool bExpandVariables = true);
 
 	/**
 	 * Gets the default path for a target receipt

@@ -12,14 +12,14 @@
 
 class AController;
 class APawn;
-class UPawnAction;
-class UPawnActionsComponent;
+class UDEPRECATED_PawnAction;
+class UDEPRECATED_PawnActionsComponent;
 struct FPawnActionStack;
 
 UENUM()
 namespace EPawnSubActionTriggeringPolicy
 {
-	enum Type
+	enum Type : int
 	{
 		CopyBeforeTriggering,
 		ReuseInstances,
@@ -27,12 +27,12 @@ namespace EPawnSubActionTriggeringPolicy
 }
 
 AIMODULE_API DECLARE_LOG_CATEGORY_EXTERN(LogPawnAction, Warning, All);
-DECLARE_DELEGATE_TwoParams(FPawnActionEventDelegate, UPawnAction&, EPawnActionEventType::Type);
+DECLARE_DELEGATE_TwoParams(FPawnActionEventDelegate, UDEPRECATED_PawnAction&, EPawnActionEventType::Type);
 
 UENUM()
 namespace EPawnActionFailHandling
 {
-	enum Type
+	enum Type : int
 	{
 		RequireSuccess,
 		IgnoreFailure
@@ -43,35 +43,35 @@ namespace EPawnActionFailHandling
  *	Things to remember:
  *	* Actions are created paused
  */
-UCLASS(abstract, EditInlineNew)
-class AIMODULE_API UPawnAction : public UObject
+UCLASS(abstract, EditInlineNew, deprecated, meta = (DeprecationMessage = "PawnActions have been deprecated and are no longer being supported. It will get removed in following UE5 releases. Use GameplayTasks or AITasks instead."), MinimalAPI)
+class UDEPRECATED_PawnAction : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
-	friend UPawnActionsComponent;
+	friend UDEPRECATED_PawnActionsComponent;
 	friend FPawnActionStack;
 
 private:
 	/** Current child node executing on top of this Action */
 	UPROPERTY(Transient)
-	UPawnAction* ChildAction;
+	TObjectPtr<UDEPRECATED_PawnAction> ChildAction_DEPRECATED;
 
 	UPROPERTY(Transient)
-	UPawnAction* ParentAction;
+	TObjectPtr<UDEPRECATED_PawnAction> ParentAction_DEPRECATED;
 
 	/** Extra reference to the component this action is being governed by */
 	UPROPERTY(Transient)
-	UPawnActionsComponent* OwnerComponent;
+	TObjectPtr<UDEPRECATED_PawnActionsComponent> OwnerComponent_DEPRECATED;
 	
 	/** indicates an object that caused this action. Used for mass removal of actions 
 	 *	by specific object */
 	UPROPERTY(Transient)
-	UObject* Instigator;
+	TObjectPtr<UObject> Instigator;
 
 protected:
 	/** @Note: THIS IS HERE _ONLY_ BECAUSE OF THE WAY AI MESSAGING IS CURRENTLY IMPLEMENTED. WILL GO AWAY! */
 	UPROPERTY(Transient)
-	UBrainComponent* BrainComp;
+	TObjectPtr<UBrainComponent> BrainComp;
 
 private:
 	/** stores registered message observers */
@@ -134,12 +134,12 @@ private:
 public:
 
 	// Begin UObject
-	virtual UWorld* GetWorld() const override;
+	AIMODULE_API virtual UWorld* GetWorld() const override;
 	// End UObject
 
-	FORCEINLINE const UPawnAction* GetParentAction() const { return ParentAction; }
-	FORCEINLINE const UPawnAction* GetChildAction() const { return ChildAction; }
-	FORCEINLINE UPawnAction* GetChildAction() { return ChildAction; }
+	FORCEINLINE const UDEPRECATED_PawnAction* GetParentAction() const { return ParentAction_DEPRECATED; }
+	FORCEINLINE const UDEPRECATED_PawnAction* GetChildAction() const { return ChildAction_DEPRECATED; }
+	FORCEINLINE UDEPRECATED_PawnAction* GetChildAction() { return ChildAction_DEPRECATED; }
 	FORCEINLINE bool IsPaused() const { return !!bPaused; }
 	FORCEINLINE bool IsActive() const { return FinishResult == EPawnActionResult::InProgress && IsPaused() == false && AbortState == EPawnActionAbortState::NotBeingAborted; }
 	FORCEINLINE bool IsBeingAborted() const { return AbortState != EPawnActionAbortState::NotBeingAborted; }
@@ -152,9 +152,9 @@ protected:
 	FORCEINLINE void TickAction(float DeltaTime)
 	{ 
 		// tick ChildAction 
-		if (ChildAction != NULL)
+		if (ChildAction_DEPRECATED != NULL)
 		{
-			ChildAction->Tick(DeltaTime);
+			ChildAction_DEPRECATED->Tick(DeltaTime);
 		}
 		// or self if not paused
 		else if (!!bWantsTick && IsPaused() == false)
@@ -167,29 +167,29 @@ protected:
 	 *	@param bForce
 	 *	@return current state of task abort
 	 *	@NOTE do not make this virtual! Contains some essential logic. */
-	EPawnActionAbortState::Type Abort(EAIForceParam::Type ShouldForce = EAIForceParam::DoNotForce);
+	AIMODULE_API EPawnActionAbortState::Type Abort(EAIForceParam::Type ShouldForce = EAIForceParam::DoNotForce);
 	
-	FORCEINLINE UPawnActionsComponent* GetOwnerComponent() { return OwnerComponent; }
+	FORCEINLINE UDEPRECATED_PawnActionsComponent* GetOwnerComponent() { return OwnerComponent_DEPRECATED; }
 public:
 	FORCEINLINE EAIRequestPriority::Type GetPriority() const { return ExecutionPriority; }
 	FORCEINLINE EPawnActionResult::Type GetResult() const { return FinishResult; }
 	FORCEINLINE EPawnActionAbortState::Type GetAbortState() const { return AbortState; }
-	FORCEINLINE UPawnActionsComponent* GetOwnerComponent() const { return OwnerComponent; }
+	FORCEINLINE UDEPRECATED_PawnActionsComponent* GetOwnerComponent() const { return OwnerComponent_DEPRECATED; }
 	FORCEINLINE UObject* GetInstigator() const { return Instigator; }
-	APawn* GetPawn() const;
-	AController* GetController() const;
+	AIMODULE_API APawn* GetPawn() const;
+	AIMODULE_API AController* GetController() const;
 
 	template<class TActionClass>
 	static TActionClass* CreateActionInstance(UWorld& World)
 	{
-		TSubclassOf<UPawnAction> ActionClass = TActionClass::StaticClass();
+		TSubclassOf<UDEPRECATED_PawnAction> ActionClass = TActionClass::StaticClass();
 		return NewObject<TActionClass>(&World, ActionClass);
 	}
 
 	//----------------------------------------------------------------------//
 	// messaging
 	//----------------------------------------------------------------------//
-	void WaitForMessage(FName MessageType, FAIRequestID RequestID = FAIRequestID::AnyRequest);
+	AIMODULE_API void WaitForMessage(FName MessageType, FAIRequestID RequestID = FAIRequestID::AnyRequest);
 	// @note this function will change its signature once AI messaging is rewritten @todo
 	virtual void HandleAIMessage(UBrainComponent*, const FAIMessage&){};
 
@@ -200,55 +200,56 @@ public:
 	// Blueprint interface
 	//----------------------------------------------------------------------//
 	UFUNCTION(BlueprintPure, Category = "AI|PawnActions")
-	TEnumAsByte<EAIRequestPriority::Type> GetActionPriority();
+	AIMODULE_API TEnumAsByte<EAIRequestPriority::Type> GetActionPriority();
 
-	UFUNCTION(BlueprintCallable, Category = "AI|PawnActions", meta = (WorldContext="WorldContextObject"))
-	static UPawnAction* CreateActionInstance(UObject* WorldContextObject, TSubclassOf<UPawnAction> ActionClass);
+	UE_DEPRECATED(5.2, "PawnActions have been deprecated and are no longer being supported. It will get removed in following UE5 releases. Use GameplayTasks or AITasks instead.")
+	UFUNCTION(BlueprintCallable, Category = "AI|PawnActions", meta = (WorldContext="WorldContextObject", DeprecatedFunction, DeprecationMessage = "PawnActions have been deprecated and are no longer being supported. It will get removed in following UE5 releases. Use GameplayTasks or AITasks instead."))
+	static AIMODULE_API UDEPRECATED_PawnAction* CreateActionInstance(UObject* WorldContextObject, TSubclassOf<UDEPRECATED_PawnAction> ActionClass);
 
 	//----------------------------------------------------------------------//
 	// debug
 	//----------------------------------------------------------------------//
-	FString GetStateDescription() const;
-	FString GetPriorityName() const;
-	virtual FString GetDisplayName() const;
+	AIMODULE_API FString GetStateDescription() const;
+	AIMODULE_API FString GetPriorityName() const;
+	AIMODULE_API virtual FString GetDisplayName() const;
 
 protected:
 
 	/** starts or resumes action, depending on internal state */
-	bool Activate();
-	void OnPopped();
+	AIMODULE_API bool Activate();
+	AIMODULE_API void OnPopped();
 
 	UFUNCTION(BlueprintCallable, Category = "AI|PawnActions")
-	virtual void Finish(TEnumAsByte<EPawnActionResult::Type> WithResult);
+	AIMODULE_API virtual void Finish(TEnumAsByte<EPawnActionResult::Type> WithResult);
 
-	void SendEvent(EPawnActionEventType::Type Event);
+	AIMODULE_API void SendEvent(EPawnActionEventType::Type Event);
 
-	void StopWaitingForMessages();
+	AIMODULE_API void StopWaitingForMessages();
 
-	void SetOwnerComponent(UPawnActionsComponent* Component);
+	AIMODULE_API void SetOwnerComponent(UDEPRECATED_PawnActionsComponent* Component);
 
-	void SetInstigator(UObject* const InInstigator);
+	AIMODULE_API void SetInstigator(UObject* const InInstigator);
 
-	virtual void Tick(float DeltaTime);
+	AIMODULE_API virtual void Tick(float DeltaTime);
 
 	/** called to start off the Action
 	 *	@return 'true' if actions successfully started. 
 	 *	@NOTE if action fails to start no finishing or aborting mechanics will be triggered */
-	virtual bool Start();
+	AIMODULE_API virtual bool Start();
 	/** called to pause action when higher priority or child action kicks in */
-	virtual bool Pause(const UPawnAction* PausedBy);
+	AIMODULE_API virtual bool Pause(const UDEPRECATED_PawnAction* PausedBy);
 	/** called to resume action after being paused */
-	virtual bool Resume();
+	AIMODULE_API virtual bool Resume();
 	/** called when this action is being removed from action stacks */
-	virtual void OnFinished(EPawnActionResult::Type WithResult);
+	AIMODULE_API virtual void OnFinished(EPawnActionResult::Type WithResult);
 	/** called to give Action chance to react to child action finishing.
 	 *	@NOTE gets called _AFTER_ child's OnFinished to give child action chance 
 	 *		to prepare "finishing data" for parent to read. 
 	 *	@NOTE clears parent-child binding */
-	virtual void OnChildFinished(UPawnAction& Action, EPawnActionResult::Type WithResult);
+	AIMODULE_API virtual void OnChildFinished(UDEPRECATED_PawnAction& Action, EPawnActionResult::Type WithResult);
 
 	/** apart from doing regular push request copies additional values from Parent, like Priority and Instigator */
-	bool PushChildAction(UPawnAction& Action);
+	AIMODULE_API bool PushChildAction(UDEPRECATED_PawnAction& Action);
 	
 	/** performs actual work on aborting Action. Should be called exclusively by Abort function
 	 *	@return only valid return values here are LatendAbortInProgress and AbortDone */
@@ -259,20 +260,20 @@ protected:
 private:
 	/** called when this action is put on a stack. Does not indicate action will be started soon
 	 *	(it depends on other actions on other action stacks. Called before Start() call */
-	void OnPushed();
+	AIMODULE_API void OnPushed();
 
 	/** Sets final result for this Action. To be called only once upon Action's finish */
-	void SetFinishResult(EPawnActionResult::Type Result);
+	AIMODULE_API void SetFinishResult(EPawnActionResult::Type Result);
 
 	// do not un-private. Internal logic only!
-	void SetAbortState(EPawnActionAbortState::Type NewAbortState);
+	AIMODULE_API void SetAbortState(EPawnActionAbortState::Type NewAbortState);
 };
 
 
 //----------------------------------------------------------------------//
 // Blueprint inlines
 //----------------------------------------------------------------------//
-FORCEINLINE TEnumAsByte<EAIRequestPriority::Type> UPawnAction::GetActionPriority()
+FORCEINLINE TEnumAsByte<EAIRequestPriority::Type> UDEPRECATED_PawnAction::GetActionPriority()
 {
 	return ExecutionPriority;
 }

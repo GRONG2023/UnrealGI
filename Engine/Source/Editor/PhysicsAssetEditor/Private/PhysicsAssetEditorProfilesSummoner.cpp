@@ -15,7 +15,7 @@ FPhysicsAssetEditorProfilesSummoner::FPhysicsAssetEditorProfilesSummoner(TShared
 	, PhysicsAssetPtr(InPhysicsAsset)
 {
 	TabLabel = LOCTEXT("PhysicsAssetProfilesTabTitle", "Profiles");
-	TabIcon = FSlateIcon(FEditorStyle::GetStyleSetName(), "PhysicsAssetEditor.Tabs.Profiles");
+	TabIcon = FSlateIcon(FAppStyle::GetAppStyleSetName(), "PhysicsAssetEditor.Tabs.Profiles");
 
 	bIsSingleton = true;
 
@@ -30,7 +30,9 @@ TSharedPtr<SToolTip> FPhysicsAssetEditorProfilesSummoner::CreateTabToolTipWidget
 
 TSharedRef<SWidget> FPhysicsAssetEditorProfilesSummoner::CreateTabBody(const FWorkflowTabSpawnInfo& Info) const
 {
-	FDetailsViewArgs DetailsViewArgs(false, false, true, FDetailsViewArgs::HideNameArea, true);
+	FDetailsViewArgs DetailsViewArgs;
+	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+	DetailsViewArgs.bHideSelectionTip = true;
 	DetailsViewArgs.bAllowSearch = false;
 
 	FPropertyEditorModule& PropertyEditorModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");

@@ -6,10 +6,17 @@
 
 #pragma once
 
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "CoreMinimal.h"
+#include "Net/RPCDoSDetection.h"
+#include "Net/NetConnectionFaultRecovery.h"
+#endif
+#include "UObject/ObjectKey.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/UObjectGlobals.h"
 #include "Serialization/BitWriter.h"
+#include "Serialization/CustomVersion.h"
+#include "Misc/EngineVersion.h"
 #include "Misc/NetworkGuid.h"
 #include "GameFramework/OnlineReplStructs.h"
 #include "GameFramework/UpdateLevelVisibilityLevelInfo.h"
@@ -21,30 +28,48 @@
 #include "ProfilingDebugging/Histogram.h"
 #include "Containers/ArrayView.h"
 #include "Containers/CircularBuffer.h"
-#include "Net/Core/Trace/Config.h"
+#include "Net/Core/Trace/NetTraceConfig.h"
 #include "ReplicationDriver.h"
 #include "Analytics/EngineNetAnalytics.h"
 #include "Net/Common/Packets/PacketTraits.h"
 #include "Net/Core/Misc/ResizableCircularQueue.h"
 #include "Net/NetAnalyticsTypes.h"
+#include "Net/Core/Connection/NetCloseResult.h"
 #include "Net/TrafficControl.h"
+#include "Net/NetDormantHolder.h"
+#include "HAL/LowLevelMemTracker.h"
+#include "GameFramework/Actor.h"
 
 #include "NetConnection.generated.h"
 
 #define NETCONNECTION_HAS_SETENCRYPTIONKEY 1
+
+LLM_DECLARE_TAG_API(NetConnection, ENGINE_API);
 
 class FInternetAddr;
 class FObjectReplicator;
 class StatelessConnectHandlerComponent;
 class UActorChannel;
 class UChildConnection;
+class ULevelStreaming;
+struct FEncryptionKeyResponse;
+class PacketHandler;
+class FRPCDoSDetection;
+enum class EEngineNetworkRuntimeFeatures : uint16;
+
+namespace UE::Net
+{
+	class FNetPing;
+	class FNetConnectionFaultRecovery;
+
+} // end namespace UE::Net
 
 typedef TMap<TWeakObjectPtr<AActor>, UActorChannel*, FDefaultSetAllocator, TWeakObjectPtrMapKeyFuncs<TWeakObjectPtr<AActor>, UActorChannel*>> FActorChannelMap;
 
 namespace NetConnectionHelper
 {
 	/** Number of bits to use in the packet header for sending the milliseconds on the clock when the packet is sent */
-	constexpr int32 NumBitsForJitterClockTimeInHeader = 10;
+	inline constexpr int32 NumBitsForJitterClockTimeInHeader = 10;
 }
 
 extern ENGINE_API TAutoConsoleVariable<int32> CVarNetEnableCongestionControl;
@@ -52,7 +77,7 @@ extern ENGINE_API TAutoConsoleVariable<int32> CVarNetEnableCongestionControl;
 /*-----------------------------------------------------------------------------
 	Types.
 -----------------------------------------------------------------------------*/
-enum { RELIABLE_BUFFER = 256 }; // Power of 2 >= 1.
+enum { RELIABLE_BUFFER = 512 }; // Power of 2 >= 1.
 enum { MAX_PACKETID = FNetPacketNotify::SequenceNumberT::SeqNumberCount };  // Power of 2 >= 1, covering guaranteed loss/misorder time.
 enum { MAX_CHSEQUENCE = 1024 }; // Power of 2 >RELIABLE_BUFFER, covering loss/misorder time.
 enum { MAX_BUNCH_HEADER_BITS = 256 };
@@ -71,40 +96,18 @@ enum EConnectionState
 	USOCK_Pending	= 2, // Connection is awaiting connection.
 	USOCK_Open      = 3, // Connection is open.
 };
+ENGINE_API const TCHAR* LexToString(const EConnectionState Value);
 
-// 
-// Security event types used for UE_SECURITY_LOG
-//
-namespace ESecurityEvent
-{ 
-	enum Type
+namespace UE::Net
+{
+	/** The source of a net upgrade message */
+	enum class ENetUpgradeSource : uint8
 	{
-		Malformed_Packet = 0, // The packet didn't follow protocol
-		Invalid_Data = 1,     // The packet contained invalid data
-		Closed = 2            // The connection had issues (potentially malicious) and was closed
+		ControlChannel,			// The upgrade message came from the control channel
+		StatelessHandshake		// The upgrade message came from the stateless handshake
 	};
-	
-	/** @return the stringified version of the enum passed in */
-	inline const TCHAR* ToString(const ESecurityEvent::Type EnumVal)
-	{
-		switch (EnumVal)
-		{
-			case Malformed_Packet:
-			{
-				return TEXT("Malformed_Packet");
-			}
-			case Invalid_Data:
-			{
-				return TEXT("Invalid_Data");
-			}
-			case Closed:
-			{
-				return TEXT("Closed");
-			}
-		}
-		return TEXT("");
-	}
 }
+
 
 /** If this connection is from a client, this is the current login state of this connection/login attempt */
 namespace EClientLoginState
@@ -269,16 +272,19 @@ public:
 UCLASS(customConstructor, Abstract, MinimalAPI, transient, config=Engine)
 class UNetConnection : public UPlayer
 {
+	using FNetResult = UE::Net::FNetResult;
+	using FNetCloseResult = UE::Net::FNetCloseResult;
+
 	GENERATED_BODY()
 
 public:
 	/** child connections for secondary viewports */
 	UPROPERTY(transient)
-	TArray<class UChildConnection*> Children;
+	TArray<TObjectPtr<class UChildConnection>> Children;
 
 	/** Owning net driver */
 	UPROPERTY()
-	class UNetDriver* Driver;	
+	TObjectPtr<class UNetDriver> Driver;	
 
 	/** The class name for the PackageMap to be loaded */
 	UPROPERTY()
@@ -286,31 +292,32 @@ public:
 
 	UPROPERTY()
 	/** Package map between local and remote. (negotiates net serialization) */
-	class UPackageMap* PackageMap;
+	TObjectPtr<class UPackageMap> PackageMap;
 
 	/** @todo document */
 	UPROPERTY()
-	TArray<class UChannel*> OpenChannels;
+	TArray<TObjectPtr<class UChannel>> OpenChannels;
 	 
 	/** This actor is bNetTemporary, which means it should never be replicated after it's initial packet is complete */
 	UPROPERTY()
-	TArray<class AActor*> SentTemporaries;
+	TArray<TObjectPtr<class AActor>> SentTemporaries;
 
 	/** The actor that is currently being viewed/controlled by the owning controller */
 	UPROPERTY()
-	class AActor* ViewTarget;
+	TObjectPtr<class AActor> ViewTarget;
 
 	/** Reference to controlling actor (usually PlayerController) */
 	UPROPERTY()
-	class AActor* OwningActor;
+	TObjectPtr<class AActor> OwningActor;
 
 	UPROPERTY()
 	int32	MaxPacket;						// Maximum packet size.
 
-	UE_DEPRECATED(4.25, "Please use IsInternalAck/SetInternalAck instead")
+private:
 	UPROPERTY()
 	uint32 InternalAck:1;					// Internally ack all packets, for 100% reliable connections.
 
+public:
 	bool IsInternalAck() const { return bInternalAck; }
 	void SetInternalAck(bool bValue) 
 	{ 
@@ -328,9 +335,32 @@ public:
 
 	virtual bool IsReplayReady() const { return false; }
 
+	bool IsForceInitialDirty() const { return bForceInitialDirty; }
+	void SetForceInitialDirty(bool bValue)
+	{
+		bForceInitialDirty = bValue;
+	}
+
+	/**	Used to allow connections to ignore the bunch size limitation applied before splitting into partial bunch packets, 
+	*	or when receiving partial bunches to reassemble.
+	* 
+	*	!!!WARNING!!!  This is a security risk as the connection will accept much larger bunches before hitting the 
+	*	reliable buffer limit, or the array/string serialization limit.
+	*/
+	bool IsUnlimitedBunchSizeAllowed() const { return bUnlimitedBunchSizeAllowed; }
+	void SetUnlimitedBunchSizeAllowed(bool bValue)
+	{
+		bUnlimitedBunchSizeAllowed = bValue;
+	}
+
+	/** Destructor */
+	ENGINE_API virtual ~UNetConnection();
+
 private:
-	uint32 bInternalAck : 1;	// Internally ack all packets, for 100% reliable connections.
-	uint32 bReplay : 1;			// Flag to indicate a replay connection, independent of reliability
+	uint32 bInternalAck : 1;				// Internally ack all packets, for 100% reliable connections.
+	uint32 bReplay : 1;						// Flag to indicate a replay connection, independent of reliability
+	uint32 bForceInitialDirty : 1;			// Force all properties dirty on initial replication
+	uint32 bUnlimitedBunchSizeAllowed : 1;	// Ignore the value of net.MaxConstructedPartialBunchSizeBytes
 
 public:
 	struct FURL			URL;				// URL of the other side.
@@ -372,10 +402,13 @@ public:
 	/** Clears the actor starvation map */
 	void ResetActorsStarvedByClassTimeMap() { ActorsStarvedByClassTimeMap.Empty(); }
 
-public:
+private:
 	// Connection information.
-
 	EConnectionState	State;					// State this connection is in.
+
+public:
+	ENGINE_API const EConnectionState GetConnectionState() const;
+	ENGINE_API void SetConnectionState(EConnectionState ConnectionState);
 	
 	uint32 bPendingDestroy:1;    // when true, playercontroller or beaconclient is being destroyed
 
@@ -415,16 +448,7 @@ public:
 	int32			TickCount;				// Count of ticks.
 	uint32			LastProcessedFrame;   // The last frame where we gathered and processed actors for this connection
 
-	/** The last time an ack was received */
-	UE_DEPRECATED(4.25, "Please use GetLastRecvAckTime() instead.")
-	float			LastRecvAckTime;
-
 	double GetLastRecvAckTime() const { return LastRecvAckTimestamp; }
-
-	/** Time when connection request was first initiated */
-	UE_DEPRECATED(4.25, "Please use GetConnectTime() instead.")
-	float			ConnectTime;
-
 	double GetConnectTime() const { return ConnectTimestamp; }
 
 private:
@@ -495,6 +519,10 @@ public:
 	int32 InTotalBytes, OutTotalBytes;
 	/** packets sent/received on this connection (accumulated during a StatPeriod) */
 	int32 InPackets, OutPackets;
+	/** Packets received in the current tick */
+	int32 InPacketsThisFrame = 0;
+	/** Packets sent in the current tick */
+	int32 OutPacketsThisFrame = 0;
 	/** total packets sent/received on this connection */
 	int32 InTotalPackets, OutTotalPackets;
 	/** bytes sent/received on this connection (per second) - these are from previous StatPeriod interval */
@@ -507,6 +535,19 @@ public:
 	int32 InTotalPacketsLost, OutTotalPacketsLost;
 	/** total acks sent on this connection */
 	int32 OutTotalAcks;
+	/** Delayed RPCs and the total average frame delay */
+	int32 TotalDelayedRPCs = 0;
+	int32 TotalDelayedRPCsFrameCount = 0;
+
+private:
+	/** total packets received on this connection, including PacketHandler */
+	int32 InTotalHandlerPackets;
+
+public:
+	int32 GetInTotalHandlerPackets() const
+	{
+		return InTotalHandlerPackets;
+	}
 
 	/** Percentage of packets lost during the last StatPeriod */
 	using FNetConnectionPacketLoss = TPacketLossData<3>;
@@ -545,8 +586,6 @@ public:
 	double			OutLagTime[256];				// For lag measuring.
 	int32			OutLagPacketId[256];			// For lag measuring.
 	uint8			OutBytesPerSecondHistory[256];	// For saturation measuring.
-	UE_DEPRECATED(4.25, "RemoteSaturation is not calculated anymore and is now deprecated")
-	float			RemoteSaturation;
 	int32			InPacketId;						// Full incoming packet index.
 	int32			OutPacketId;					// Most recently sent packet.
 	int32 			OutAckPacketId;					// Most recently acked outgoing packet.
@@ -554,10 +593,17 @@ public:
 	bool			bLastHasServerFrameTime;
 
 	// Channel table.
+
+	UPROPERTY(config)
+	int32 DefaultMaxChannelSize;
+
+	UE_DEPRECATED(5.1, "Deprecated in favor of DefaultMaxChannelSize config property.")
 	static const int32 DEFAULT_MAX_CHANNEL_SIZE;
 
+	UE_DEPRECATED(5.1, "No longer used")
 	int32 MaxChannelSize;
-	TArray<UChannel*>	Channels;
+
+	TArray<TObjectPtr<UChannel>>	Channels;
 	TArray<int32>		OutReliable;
 	TArray<int32>		InReliable;
 	TArray<int32>		PendingOutRec;	// Outgoing reliable unacked data from previous (now destroyed) channel in this slot.  This contains the first chsequence not acked
@@ -565,8 +611,18 @@ public:
 	int32				InitInReliable;
 
 	// Network version
+	UE_DEPRECATED(5.2, "Deprecated in favor of NetworkCustomVersions, please use GetNetworkCustomVersion instead")
 	uint32				EngineNetworkProtocolVersion;
+	UE_DEPRECATED(5.2, "Deprecated in favor of NetworkCustomVersions, please use GetNetworkCustomVersion instead")
 	uint32				GameNetworkProtocolVersion;
+
+	uint32 GetNetworkCustomVersion(const FGuid& VersionGuid) const;
+	void SetNetworkCustomVersions(const FCustomVersionContainer& CustomVersions);
+
+private:
+	FCustomVersionContainer NetworkCustomVersions;
+
+public:
 
 	// Log tracking
 	double			LogCallLastTime;
@@ -581,6 +637,9 @@ public:
 
 	FNetTraceCollector* GetInTraceCollector() const;
 	FNetTraceCollector* GetOutTraceCollector() const;
+
+	/** Returns the view target for this connection. Controlled by the player controller when one is assigned. The view target is the owning actor when no PC's are assigned or the PC's view target is invalid */
+	AActor* GetConnectionViewTarget() const;
 
 	// ----------------------------------------------
 	// Actor Channel Accessors
@@ -659,11 +718,36 @@ private:
 
 	UReplicationConnectionDriver* ReplicationConnectionDriver;
 
+	/** Engine package version for compatibility */
+	FPackageFileVersion PackageVersionUE;
+
+	/** Licensee package version for compatibility */
+	int32 PackageVersionLicenseeUE;
+
+	/** Engine version information for compatibility */
+	FEngineVersion EngineVersion;
 
 public:
+	/** Sets the UE package version for compatibility purposes */
+	void SetPackageVersionUE(FPackageFileVersion InPackageVersionUE) { PackageVersionUE = InPackageVersionUE; }
+	
+	/** Sets the licensee package version for compatibility purposes */
+	void SetPackageVersionLicenseeUE(int32 InPackageVersionLicenseeUE) { PackageVersionLicenseeUE = InPackageVersionLicenseeUE; }
+
+	/** Sets engine version information for compatibility purposes */
+	void SetEngineVersion(const FEngineVersion& InEngineVersion) { EngineVersion = InEngineVersion; }
+
+	/** Set version information on an archive that can be used for compatibility checks */
+	void SetNetVersionsOnArchive(FArchive& Ar) const;
 
 	void AddDestructionInfo(FActorDestructionInfo* DestructionInfo)
 	{
+#if UE_WITH_IRIS
+		if (Driver && Driver->GetReplicationSystem())
+		{
+			return;
+		}
+#endif // UE_WITH_IRIS
 		if (ReplicationConnectionDriver)
 		{
 			ReplicationConnectionDriver->NotifyAddDestructionInfo(DestructionInfo);
@@ -676,6 +760,12 @@ public:
 
 	void RemoveDestructionInfo(FActorDestructionInfo* DestructionInfo)
 	{
+#if UE_WITH_IRIS
+		if (Driver && Driver->GetReplicationSystem())
+		{
+			return;
+		}
+#endif // UE_WITH_IRIS
 		if (ReplicationConnectionDriver)
 		{
 			ReplicationConnectionDriver->NotifyRemoveDestructionInfo(DestructionInfo);
@@ -688,6 +778,12 @@ public:
 	
 	void ResetDestructionInfos()
 	{
+#if UE_WITH_IRIS
+		if (Driver && Driver->GetReplicationSystem())
+		{
+			return;
+		}
+#endif // UE_WITH_IRIS
 		if (ReplicationConnectionDriver)
 		{
 			ReplicationConnectionDriver->NotifyResetDestructionInfo();
@@ -709,17 +805,25 @@ private:
 	 */
 	TSet<FNetworkGUID>	DestroyedStartupOrDormantActorGUIDs;
 
+	/** On the server, the package names of streaming levels that the client has told us it is making visible */
+	TSet<FName> ClientMakingVisibleLevelNames;
+
 public:
 
 	/** This holds a list of actor channels that want to fully shutdown, but need to continue processing bunches before doing so */
-	TMap<FNetworkGUID, TArray<class UActorChannel*>> KeepProcessingActorChannelBunchesMap;
+	TMap<FNetworkGUID, TArray<TObjectPtr<class UActorChannel>>> KeepProcessingActorChannelBunchesMap;
 
 	/** A list of replicators that belong to recently dormant actors/objects */
-	TMap< UObject*, TSharedRef< FObjectReplicator > > DormantReplicatorMap;
+	UE_DEPRECATED(5.2, "The DormantReplicatorMap is deprecated in favor of the private DormantReplicatorSet.")
+	TMap<FObjectKey, TSharedRef<FObjectReplicator>> DormantReplicatorMap;
 
-	
+private:
 
-	ENGINE_API FName GetClientWorldPackageName() const { return ClientWorldPackageName; }
+	UE::Net::Private::FDormantReplicatorHolder DormantReplicatorSet;
+
+public:
+
+	FName GetClientWorldPackageName() const { return ClientWorldPackageName; }
 
 	ENGINE_API void SetClientWorldPackageName(FName NewClientWorldPackageName);
 
@@ -730,8 +834,10 @@ public:
 	 */
 	TSet<FName> ClientVisibleLevelNames;
 
-	/** Called by PlayerController to tell connection about client level visiblity change */
+	/** Called by PlayerController to tell connection about client level visibility change */
 	ENGINE_API void UpdateLevelVisibility(const struct FUpdateLevelVisibilityLevelInfo& LevelVisibility);
+
+	const TSet<FName>& GetClientMakingVisibleLevelNames() const { return ClientMakingVisibleLevelNames; }
 	
 #if DO_ENABLE_NET_TEST
 
@@ -798,6 +904,8 @@ public:
 	// Constructors and destructors.
 	ENGINE_API UNetConnection(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 
+	ENGINE_API UNetConnection(FVTableHelper& Helper);
+
 	//~ Begin UObject Interface.
 
 	ENGINE_API virtual void Serialize( FArchive& Ar ) override;
@@ -817,9 +925,9 @@ public:
 
 
 	//~ Begin FExec Interface.
-
+#if UE_ALLOW_EXEC_COMMANDS
 	ENGINE_API virtual bool Exec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar=*GLog ) override;
-
+#endif
 	//~ End FExec Interface.
 
 	/** read input */
@@ -870,14 +978,16 @@ public:
 	ENGINE_API virtual void FlushNet(bool bIgnoreSimulation = false);
 
 	/** Poll the connection. If it is timed out, close it. */
-	UE_DEPRECATED(4.26, "Now takes DeltaSeconds")
-	ENGINE_API virtual void Tick() { Tick(0.0f); }
-
-	/** Poll the connection. If it is timed out, close it. */
 	ENGINE_API virtual void Tick(float DeltaSeconds);
 
-	/** Return whether this channel is ready for sending. */
-	ENGINE_API virtual int32 IsNetReady(bool Saturate);
+	/** Return whether this connection is ready for sending. */
+	ENGINE_API virtual int32 IsNetReady( bool Saturate );
+
+	/**
+	 * Return whether this connection can send packets without exhausting the packet sequence history window, as it could cause packets to be NAKed even when they've been received by the remote peer. 
+	 * @param SafetyMargin A small number representing how many packets you would like to keep as a safety margin for heart beats or other important packets.
+	 */
+	ENGINE_API bool IsPacketSequenceWindowFull(uint32 SafetyMargin=0U);
 
 	/** 
 	 * Handle the player controller client
@@ -905,8 +1015,32 @@ public:
 	 */
 	virtual TSharedPtr<const FInternetAddr> GetRemoteAddr() { return RemoteAddr; }
 
-	/** closes the connection (including sending a close notify across the network) */
-	ENGINE_API void Close();
+	/**
+	 * Closes the connection (including sending a close notify across the network)
+	 * NOTE: To be deprecated in the near future.
+	 */
+	void Close()
+	{
+		Close(FNetCloseResult());
+	}
+
+	/**
+	 * Closes the connection (including sending a close notify across the network)
+	 *
+	 * @param CloseReason	Specifies the reason for the Close
+	 */
+	void Close(FNetCloseResult&& CloseReason)
+	{
+		Close(static_cast<FNetResult&&>(MoveTemp(CloseReason)));
+	}
+
+	/**
+	 * Closes the connection (including sending a close notify across the network)
+	 *
+	 * @param CloseReason	Specifies the reason for the Close
+	 */
+	ENGINE_API void Close(FNetResult&& CloseReason);
+
 
 	/** closes the control channel, cleans up structures, and prepares for deletion */
 	ENGINE_API virtual void CleanUp();
@@ -979,32 +1113,14 @@ public:
 	ENGINE_API virtual void NotifyAnalyticsProvider();
 
 	/**
-	 * Sets the encryption key and enables encryption.
-	 */
-	UE_DEPRECATED(4.24, "Use SetEncryptionData instead.")
-	ENGINE_API void EnableEncryptionWithKey(TArrayView<const uint8> Key);
-	
-	/**
 	 * Sets the encryption data and enables encryption.
 	 */
 	ENGINE_API void EnableEncryption(const FEncryptionData& EncryptionData);
 
 	/**
-	 * Sets the encryption key, enables encryption, and sends the encryption ack to the client.
-	 */
-	UE_DEPRECATED(4.24, "Use SetEncryptionData instead.")
-	ENGINE_API void EnableEncryptionWithKeyServer(TArrayView<const uint8> Key);
-
-	/**
 	 * Sets the encryption data, enables encryption, and sends the encryption ack to the client.
 	 */
 	ENGINE_API void EnableEncryptionServer(const FEncryptionData& EncryptionData);
-
-	/**
-	 * Sets the key for the underlying encryption packet handler component, but doesn't modify encryption enabled state.
-	 */
-	UE_DEPRECATED(4.24, "Use SetEncryptionData instead.")
-	ENGINE_API void SetEncryptionKey(TArrayView<const uint8> Key);
 
 	/**
 	 * Sets the data for the underlying encryption packet handler component, but doesn't modify encryption enabled state.
@@ -1030,7 +1146,7 @@ public:
 	* Gets a unique ID for the connection, this ID depends on the underlying connection
 	* For IP connections this is an IP Address and port, for steam this is a SteamID
 	*/
-	ENGINE_API virtual FString RemoteAddressToString()
+	virtual FString RemoteAddressToString()
 	{
 		if (RemoteAddr.IsValid())
 		{
@@ -1066,10 +1182,17 @@ public:
 	/** Pops the LastStart bits off of the send buffer, used for merging bunches */
 	void PopLastStart();
 
+	/**
+	 * returns whether the client has initialized the given level
+	 * @return true if the client has initialized the given level, false otherwise
+	 */
+	ENGINE_API virtual bool ClientHasInitializedLevel(const ULevel* TestLevel) const;
+
 	/** 
 	 * returns whether the client has initialized the level required for the given object
 	 * @return true if the client has initialized the level the object is in or the object is not in a level, false otherwise
 	 */
+	UE_DEPRECATED(5.4, "ClientHasInitializedLevelFor is deprecated. Use ClientHasInitializedLevel and pass the actor's level (Actor->GetLevel()) instead.")
 	ENGINE_API virtual bool ClientHasInitializedLevelFor(const AActor* TestActor) const;
 
 	/**
@@ -1100,8 +1223,16 @@ public:
 	/** 
 	* Handle a packet we just received. 
 	* bIsReinjectedPacket is true if a packet is reprocessed after getting cached 
+	* bDispatchPacket if true the packet will be processed (passed to DispatchPacket)
 	*/
-	void ReceivedPacket( FBitReader& Reader, bool bIsReinjectedPacket=false );
+	ENGINE_API virtual void ReceivedPacket( FBitReader& Reader, bool bIsReinjectedPacket=false, bool bDispatchPacket=true );
+	
+	/**
+	* Disassemble and dispatch packet.
+	* PacketId is an id of the packet to dispatch
+	* bOutSkipAck Flag that marks packet as dropped
+	*/
+	ENGINE_API virtual void DispatchPacket( FBitReader& Reader, int32 PacketId, bool& bOutSkipAck, bool& bOutHasBunchErrors );
 
 	/** Packet was negatively acknowledged. */
 	void ReceivedNak( int32 NakPacketId );
@@ -1128,13 +1259,22 @@ public:
 	ENGINE_API void ForcePropertyCompare( AActor* Actor );
 
 	/** Wrapper for validating an objects dormancy state, and to prepare the object for replication again */
-	void FlushDormancyForObject( UObject* Object );
+	UE_DEPRECATED(5.2, "FlushDormancyForObject has been replaced with a version that needs to receive the dormant actor.")
+	void FlushDormancyForObject( UObject* Object ) {}
+
+	/**
+	* Validate an objects dormancy state and prepare the object for replication again
+	* 
+	* @param DormantActor The dormant actor that owns the replicated object that needs to be flushed
+	* @param ReplicatedObject The replicated object that is flushed.
+	*/
+	void FlushDormancyForObject(AActor* DormantActor, UObject* ReplicatedObject);
 
 	/** 
 	 * Wrapper for setting the current client login state, so we can trap for debugging, and verbosity purposes. 
 	 * Only valid on the server
 	 */
-	ENGINE_API void SetClientLoginState( const EClientLoginState::Type NewState );
+	ENGINE_API virtual void SetClientLoginState( const EClientLoginState::Type NewState );
 
 	/** 
 	 * Wrapper for setting the current expected client login msg type. 
@@ -1165,6 +1305,8 @@ public:
 	/** Removes a channel from the ticking list directly */
 	void StopTickingChannel(UChannel* Channel) { ChannelsToTick.Remove(Channel); }
 
+	int32 GetNumTickingChannels() const { return ChannelsToTick.Num(); }
+
 	FORCEINLINE FHistogram GetNetHistogram() const { return NetConnectionHistogram; }
 
 	/** Whether or not a client packet has been received - used serverside, to delay any packet sends */
@@ -1179,20 +1321,18 @@ public:
 	 * Sets the PlayerOnlinePlatformName member.
 	 * Called by the engine during the login process with the NMT_Login message parameter.
 	 */
-	void SetPlayerOnlinePlatformName(const FName InPlayerOnlinePlatformName);
+	ENGINE_API void SetPlayerOnlinePlatformName(const FName InPlayerOnlinePlatformName);
 
 	/** Returns the online platform name for the player on this connection. Only valid for client connections on servers. */
-	ENGINE_API FName GetPlayerOnlinePlatformName() const { return PlayerOnlinePlatformName; }
+	FName GetPlayerOnlinePlatformName() const { return PlayerOnlinePlatformName; }
 	
-	/**
-	 * Sets whether or not we should ignore bunches that would attempt to open channels that are already open.
-	 * Should only be used with InternalAck.
-	 */
-	UE_DEPRECATED(4.26, "Please call SetAllowExistingChannelIndex instead.")
-	void SetIgnoreAlreadyOpenedChannels(bool bInIgnoreAlreadyOpenedChannels) { SetAllowExistingChannelIndex(bInIgnoreAlreadyOpenedChannels); }
-
 	/** Sets whether we handle opening channels with an index that already exists, used by replays to fast forward the packet stream */
 	void SetAllowExistingChannelIndex(bool bAllow);
+
+private:
+	void RestoreRemappedChannel(const int32 ChIndex);
+
+public:
 
 	/**
 	 * Sets whether or not we should ignore bunches for a specific set of NetGUIDs.
@@ -1219,12 +1359,39 @@ public:
 	/** Returns the OutgoingBunches array, only to be used by UChannel::SendBunch */
 	TArray<FOutBunch *>& GetOutgoingBunches() { return OutgoingBunches; }
 
-	/** Removes Actor and its replicated components from DormantReplicatorMap. */
+	/** Add a replicator to the dormancy map and release its strong pointer to its object */
+	UE_DEPRECATED(5.2, "AddDormantReplicator has been replaced by StoreDormantReplicator and will be removed soon.")
+	void AddDormantReplicator(UObject* Object, const TSharedRef<FObjectReplicator>& Replicator) {}
+
+	/** Store a replicator to the dormancy map and release its strong pointer to its object */
+	void StoreDormantReplicator(AActor* OwnerActor, UObject* Object, const TSharedRef<FObjectReplicator>& ObjectReplicator);
+	
+	/** Find a dormant replicator for the channel actor or one of its subobjects. Removes it from the map if found. */
+	UE_DEPRECATED(5.2, "FindAndRemoveDormantReplicator is deprecated. Use the new version that needs to receive the owning actor.")
+	TSharedPtr<FObjectReplicator> FindAndRemoveDormantReplicator(UObject* Object) { return {}; }
+
+	/** Find a dormant replicator for the channel actor or one of its subobjects. Removes it from the map if found. */
+	TSharedPtr<FObjectReplicator> FindAndRemoveDormantReplicator(AActor* OwnerActor, UObject* Object);
+
+	/** Remove any reference to the dormant object replicator */
+	void RemoveDormantReplicator(AActor* Actor, UObject* Object);
+
+	/** Remove the reference of all dormant object replicators owned by an actor */
 	void CleanupDormantReplicatorsForActor(AActor* Actor);
 
-	/** Removes stale entries from DormantReplicatorMap. */
+	/** Trigger a callback on all dormant replicators of every dormant actor we stored */
+	ENGINE_API void ExecuteOnAllDormantReplicators(UE::Net::FExecuteForEachDormantReplicator ExecuteFunction);
+
+	/** Trigger a callback on all dormant replicators owned by a dormant actor */
+	void ExecuteOnAllDormantReplicatorsOfActor(AActor* OwnerActor, UE::Net::FExecuteForEachDormantReplicator ExecuteFunction);
+
+	/** Removes dormant object replicators from objects now invalid. */
 	void CleanupStaleDormantReplicators();
 
+	/** Called before Driver.TickDispatch processes received packets */
+	void PreTickDispatch();
+
+	/** Called after Driver.TickDispatch has processed received packets */
 	void PostTickDispatch();
 
 	/**
@@ -1233,6 +1400,46 @@ public:
 	 * @param bFlushWholeCache	Whether or not the whole cache should be flushed, or only flush up to the next missing packet
 	 */
 	void FlushPacketOrderCache(bool bFlushWholeCache=false);
+
+	/**
+	 * Get the total number of out of order packets on this connection.
+	 *
+	 * @return The total number of out of order packets.
+	 */
+	int32 GetTotalOutOfOrderPackets() const
+	{
+		return TotalOutOfOrderPacketsLost + TotalOutOfOrderPacketsRecovered + TotalOutOfOrderPacketsDuplicate;
+	}
+
+	/**
+	 * Get the total number of out of order packets lost on this connection.
+	 *
+	 * @return The total number of out of order packets lost.
+	 */
+	int32 GetTotalOutOfOrderPacketsLost() const
+	{
+		return TotalOutOfOrderPacketsLost;
+	}
+
+	/**
+	 * Get the total number of out of order packets recovered on this connection.
+	 *
+	 * @return The total number of out of order packets recovered.
+	 */
+	int32 GetTotalOutOfOrderPacketsRecovered() const
+	{
+		return TotalOutOfOrderPacketsRecovered;
+	}
+
+	/**
+	 * Get the total number of out of order packets that were duplicates on this connection.
+	 *
+	 * @return The total number of out of order packets that were duplicates.
+	 */
+	int32 GetTotalOutOfOrderPacketsDuplicate() const
+	{
+		return TotalOutOfOrderPacketsDuplicate;
+	}
 
 	/**
 	 * Sets the OS/NIC level timestamp, for the last packet that was received
@@ -1247,7 +1454,7 @@ public:
 	}
 
 	/** Called when an actor channel is open and knows its NetGUID. */
-	ENGINE_API virtual void NotifyActorNetGUID(UActorChannel* Channel) {}
+	virtual void NotifyActorNetGUID(UActorChannel* Channel) {}
 
 	/**
 	 * Returns the current delinquency analytics and resets them.
@@ -1299,10 +1506,10 @@ public:
 	/**
 	 * Get the current number of sent packets for which we have received a delivery notification
 	 */
-	ENGINE_API uint32 GetOutTotalNotifiedPackets() const { return OutTotalNotifiedPackets; }
+	uint32 GetOutTotalNotifiedPackets() const { return OutTotalNotifiedPackets; }
 
 	/** Sends the NMT_Challenge message */
-	void SendChallengeControlMessage();
+	ENGINE_API void SendChallengeControlMessage();
 
 	/** Sends the NMT_Challenge message based on encryption response */
 	void SendChallengeControlMessage(const FEncryptionKeyResponse& Response);
@@ -1319,6 +1526,9 @@ public:
 
 	ENGINE_API virtual void NotifyActorChannelCleanedUp(UActorChannel* Channel, EChannelCloseReason CloseReason);
 
+	/** Update FNetLevelVisibilityTransactionId for server instigated level streaming */
+	FNetLevelVisibilityTransactionId UpdateLevelStreamStatusChangedTransactionId(const ULevelStreaming* LevelObject, const FName PackageName, bool bShouldBeVisible);
+
 protected:
 
 	bool GetPendingCloseDueToSocketSendFailure() const
@@ -1330,6 +1540,8 @@ protected:
 
 	void CleanupDormantActorState();
 
+	void ClearDormantReplicatorsReference();
+
 	/** During cleanup this will destroy the actor owned by this connection (generally a PlayerController) */
 	ENGINE_API virtual void DestroyOwningActor();
 
@@ -1339,6 +1551,16 @@ protected:
 	/** This is called whenever a connection has passed the relative time to be considered timed out. */
 	ENGINE_API virtual void HandleConnectionTimeout(const FString& Error);
 
+	/**
+	 * Notification that information about this connection may have been updated
+	 */
+	ENGINE_API void NotifyConnectionUpdated();
+
+	/**
+	 * Return last notified packet id
+	 */
+	ENGINE_API int32 GetLastNotifiedPacketId() const;
+
 private:
 	/**
 	 * The channels that need ticking. This will be a subset of OpenChannels, only including
@@ -1347,7 +1569,7 @@ private:
 	 * OpenChannels every frame.
 	 */
 	UPROPERTY()
-	TArray<UChannel*> ChannelsToTick;
+	TArray<TObjectPtr<UChannel>> ChannelsToTick;
 
 	/** Histogram of the received packet time */
 	FHistogram NetConnectionHistogram;
@@ -1356,10 +1578,13 @@ private:
 	FName PlayerOnlinePlatformName;
 
 	/** This is an acceleration set that is derived from ClientWorldPackageName and ClientVisibleLevelNames. We use this to quickly test an AActor*'s visibility while replicating. */
-	mutable TMap<UObject*, bool> ClientVisibleActorOuters;
+	mutable TMap<FName, bool> ClientVisibleActorOuters;
 
 	/** This is used to capture visibility updates while the server is in transition and deffer the update until the server has completed the transition */
 	TMap<FName, FUpdateLevelVisibilityLevelInfo> PendingUpdateLevelVisibility;
+
+	/** This is used to track any pending streaming status requests the server has sent */
+	TMap<FName, FNetLevelVisibilityTransactionId> ClientPendingStreamingStatusRequest;
 
 private:
 
@@ -1367,7 +1592,7 @@ private:
 	void UpdateLevelVisibilityInternal(const struct FUpdateLevelVisibilityLevelInfo& LevelVisibility);
 
 	/** Called internally to update cached acceleration map */
-	bool UpdateCachedLevelVisibility(ULevel* Level) const;
+	bool UpdateCachedLevelVisibility(const FName& PackageName) const;
 
 	/** Updates entire cached LevelVisibility map */
 	void UpdateAllCachedLevelVisibility() const;
@@ -1395,7 +1620,7 @@ private:
 	void WriteFinalPacketInfo(FBitWriter& Writer, double PacketSentTimeInS);
 	
 	/** Read extended packet header information (ServerFrameTime) */
-	bool ReadPacketInfo(FBitReader& Reader, bool bHasPacketInfoPayload);
+	bool ReadPacketInfo(FBitReader& Reader, bool bHasPacketInfoPayload, FEngineNetworkCustomVersion::Type EngineNetVer);
 
 	/** Packet was acknowledged as delivered */
 	void ReceivedAck(int32 AckPacketId, FChannelsToClose& OutChannelsToClose);
@@ -1477,8 +1702,14 @@ private:
 
 	/** Out of order packet tracking/correction */
 
-	/** Stat tracking for the total number of out of order packets, for this connection */
-	int32 TotalOutOfOrderPackets;
+	/** Stat tracking for the total number of out of order packets lost */
+	int32 TotalOutOfOrderPacketsLost = 0;
+
+	/** Stat tracking for the total number of out of order packets recovered */
+	int32 TotalOutOfOrderPacketsRecovered = 0;
+
+	/** Stat tracking for the total number of out of order packets that were duplicates */
+	int32 TotalOutOfOrderPacketsDuplicate = 0;
 
 	/** Buffer of partially read (post-PacketHandler) sequenced packets, which are waiting for a missing packet/sequence */
 	TOptional<TCircularBuffer<TUniquePtr<FBitReader>>> PacketOrderCache;
@@ -1518,6 +1749,22 @@ private:
 
 	bool bAutoFlush;
 
+	/** Used to limit logging when we detect QueuedBits overflow */
+	bool bLoggedFlushNetQueuedBitsOverflow = false;
+
+	/** RPC/Replication code DoS detection */
+	TUniquePtr<FRPCDoSDetection> RPCDoS;
+
+	/** NetConnection specific Fault Recovery for attempting to recover from connection faults, before triggering Close */
+	TUniquePtr<UE::Net::FNetConnectionFaultRecovery> FaultRecovery;
+
+	/** Whether or not this NetConnection has already received an NMT_CloseReason message */
+	bool bReceivedCloseReason = false;
+
+	/** Ping collection and calculation */
+	TPimplPtr<UE::Net::FNetPing> NetPing;
+
+
 	int32 GetFreeChannelIndex(const FName& ChName) const;
 
 public:
@@ -1527,28 +1774,92 @@ public:
 	bool GetAutoFlush() const { return bAutoFlush; }
 	void SetAutoFlush(bool bValue) { bAutoFlush = bValue; }
 
+	FRPCDoSDetection* GetRPCDoS()
+	{
+		return RPCDoS.Get();
+	}
+
+	UE::Net::FNetConnectionFaultRecovery* GetFaultRecovery()
+	{
+		return FaultRecovery.Get();
+	}
+
+	UE::Net::FNetPing* GetNetPing()
+	{
+		return NetPing.Get();
+	}
+
+	/**
+	 * Sends an NMT_CloseReason message, with the specified close reason or close reason chain.
+	 * Called automatically by UNetConnection::Close, but should be called beforehand if sending a packet that will trigger a remote close.
+	 *
+	 * @param CloseReason	The close reason or close reason chain to send
+	 */
+	void SendCloseReason(FNetCloseResult&& CloseReason)
+	{
+		SendCloseReason(static_cast<FNetResult&&>(MoveTemp(CloseReason)));
+	}
+
+	/**
+	 * Sends an NMT_CloseReason message, with the specified close reason or close reason chain.
+	 * Called automatically by UNetConnection::Close, but should be called beforehand if sending a packet that will trigger a remote close.
+	 *
+	 * @param CloseReason	The close reason or close reason chain to send
+	 */
+	ENGINE_API void SendCloseReason(FNetResult&& CloseReason);
+
+	/**
+	 * Handles parsing/validation and logging of NMT_CloseReason messages
+	 *
+	 * @param CloseReasonList	Delimited list of close reasons
+	 */
+	ENGINE_API void HandleReceiveCloseReason(const FString& CloseReasonList);
+
+	/**
+	 * Handles receiving NMT_Upgrade messages (including at stateless handshake level)
+	 *
+	 * @param RemoteNetworkVersion		The net version of the remote side
+	 * @param RemoteNetworkFeatures		The net runtime features of the remote side
+	 * @param NetUpgradeSource			The source of the net upgrade message
+	 */
+	ENGINE_API void HandleReceiveNetUpgrade(uint32 RemoteNetworkVersion, EEngineNetworkRuntimeFeatures RemoteNetworkFeatures,
+											UE::Net::ENetUpgradeSource NetUpgradeSource=UE::Net::ENetUpgradeSource::ControlChannel);
+
+private:
+	/**
+	 * Attempts to recover from a NetConnection error, and closes the connection if that fails
+	 *
+	 * @param InResult		The type of error result being handled
+	 */
+	void HandleNetResultOrClose(ENetCloseResult InResult);
+
 protected:
 	TOptional<FNetworkCongestionControl> NetworkCongestionControl;
+
+	void InitChannelData();
+
+public:
+	/**
+	 * Retrieve stored set of replicated sub-objects of the given actor at the time of the last dormancy flush
+	 * This data is cleared when the actor is processed by ReplicateActor
+	 *
+	 * @param Actor		The actor to retrieve the object map for
+	 * @return A map of network guids to weak object pointers 
+	 */
+	UE::Net::FDormantObjectMap* GetDormantFlushedObjectsForActor(AActor* Actor);
+
+	/**
+	 * Clear stored flushed replicated sub-objects for a given actor, generally after replication or when the actor is destroyed
+	 *
+	 * @param Actor		The actor to clear the flushed object data for
+	 */
+	void ClearDormantFlushedObjectsForActor(AActor* Actor);
 };
 
 struct FScopedRepContext
 {
 public:
-	FScopedRepContext(UNetConnection* InConnection, AActor* InActor)
-		: Connection(InConnection)
-	{
-		if (Connection)
-		{
-			check(!Connection->RepContextActor);
-			check(!Connection->RepContextLevel);
-
-			Connection->RepContextActor = InActor;
-			if (InActor)
-			{
-				Connection->RepContextLevel = InActor->GetLevel();
-			}
-		}
-	}
+	FScopedRepContext(UNetConnection* InConnection, AActor* InActor);
 
 	FScopedRepContext(UNetConnection* InConnection, ULevel* InLevel)
 		: Connection(InConnection)
@@ -1636,17 +1947,17 @@ struct FScopedNetConnectionSettings
 };
 
 /** A fake connection that will absorb traffic and auto ack every packet. Useful for testing scaling. Use net.SimulateConnections command to add at runtime. */
-UCLASS(transient, config=Engine)
-class ENGINE_API USimulatedClientNetConnection
+UCLASS(transient, config=Engine, MinimalAPI)
+class USimulatedClientNetConnection
 	: public UNetConnection
 {
 	GENERATED_UCLASS_BODY()
 public:
 
 	virtual void LowLevelSend(void* Data, int32 CountBits, FOutPacketTraits& Traits) override { }
-	void HandleClientPlayer( APlayerController* PC, UNetConnection* NetConnection ) override;
+	ENGINE_API void HandleClientPlayer( APlayerController* PC, UNetConnection* NetConnection ) override;
 	virtual FString LowLevelGetRemoteAddress(bool bAppendPort=false) override { return FString(); }
-	virtual bool ClientHasInitializedLevelFor(const AActor* TestActor) const { return true; }
+	virtual bool ClientHasInitializedLevel(const ULevel* TestLevel) const override { return true; }
 
 	virtual void DestroyOwningActor() override { /* Don't destroy the OwningActor since we follow a real PlayerController*/ }
 

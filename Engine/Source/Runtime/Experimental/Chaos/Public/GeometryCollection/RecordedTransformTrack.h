@@ -269,7 +269,7 @@ struct FRecordedFrame
 };
 
 USTRUCT()
-struct CHAOS_API FRecordedTransformTrack
+struct FRecordedTransformTrack
 {
 	GENERATED_BODY()
 
@@ -279,11 +279,6 @@ struct CHAOS_API FRecordedTransformTrack
 	float GetDt() const
 	{
 		return Records.Num() > 1 ? Records[1].Timestamp - Records[0].Timestamp : 0;
-	}
-
-	int32 GetLastTime() const
-	{
-		return Records.Num() > 1 ? Records.Last().Timestamp : 0;
 	}
 
 	/**
@@ -345,7 +340,7 @@ struct CHAOS_API FRecordedTransformTrack
 	/**
 	 * Find a frame at InTime if available within a specified tolarance of the timestamp
 	 */
-	const FRecordedFrame* FindRecordedFrame(float InTime, float InTolerance = SMALL_NUMBER) const
+	const FRecordedFrame* FindRecordedFrame(float InTime, float InTolerance = UE_SMALL_NUMBER) const
 	{
 		for(const FRecordedFrame& Frame : Records)
 		{
@@ -361,7 +356,7 @@ struct CHAOS_API FRecordedTransformTrack
 	/**
 	 * Find a frame at InTime if available within a specified tolarance of the timestamp
 	 */
-	FRecordedFrame* FindRecordedFrame(float InTime, float InTolerance = SMALL_NUMBER)
+	FRecordedFrame* FindRecordedFrame(float InTime, float InTolerance = UE_SMALL_NUMBER)
 	{
 		for(FRecordedFrame& Frame : Records)
 		{
@@ -377,7 +372,7 @@ struct CHAOS_API FRecordedTransformTrack
 	/**
 	 * Find a frame index at InTime if available within a specified tolarance of the timestamp
 	 */
-	int32 FindRecordedFrameIndex(float InTime, float InTolerance = SMALL_NUMBER) const
+	int32 FindRecordedFrameIndex(float InTime, float InTolerance = UE_SMALL_NUMBER) const
 	{
 		const int32 NumFrames = Records.Num();
 		for(int32 FrameIndex = 0; FrameIndex < NumFrames; ++FrameIndex)
@@ -518,7 +513,7 @@ struct CHAOS_API FRecordedTransformTrack
 			return FVector::ZeroVector;
 		}
 		// We're at the beginning of the cache, zero velocity (also guarantees we have at least SampleWidth before InTime)
-		if(FMath::Abs(InTime - Records[0].Timestamp) <= (SampleWidth + SMALL_NUMBER))
+		if(FMath::Abs(InTime - Records[0].Timestamp) <= (SampleWidth + UE_SMALL_NUMBER))
 		{
 			return FVector::ZeroVector;
 		}
@@ -539,7 +534,7 @@ struct CHAOS_API FRecordedTransformTrack
 			return FVector::ZeroVector;
 		}
 		// We're at the beginning of the cache, zero velocity (also guarantees we have at least SampleWidth before InTime)
-		if(FMath::Abs(InTime - Records[0].Timestamp) <= (SampleWidth + SMALL_NUMBER))
+		if(FMath::Abs(InTime - Records[0].Timestamp) <= (SampleWidth + UE_SMALL_NUMBER))
 		{
 			return FVector::ZeroVector;
 		}
@@ -549,12 +544,12 @@ struct CHAOS_API FRecordedTransformTrack
 
 		FQuat Delta = Curr.GetRotation() * Prev.GetRotation().Inverse();
 		FVector Axis;
-		float Angle;
+		FVector::FReal Angle;
 		Delta.ToAxisAndAngle(Axis, Angle);
 
 		return (Axis * Angle) / SampleWidth;
 	}
 
-	static FRecordedTransformTrack ProcessRawRecordedData(const FRecordedTransformTrack& InCache);
+	static CHAOS_API FRecordedTransformTrack ProcessRawRecordedData(const FRecordedTransformTrack& InCache);
 
 };

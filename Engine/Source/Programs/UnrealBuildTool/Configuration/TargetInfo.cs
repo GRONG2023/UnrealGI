@@ -1,12 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 using System;
-using System.Collections.Generic;
 using System.Linq;
-using System.Runtime.Serialization;
-using System.Text;
-using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 
 namespace UnrealBuildTool
 {
@@ -31,27 +27,29 @@ namespace UnrealBuildTool
 		public readonly UnrealTargetConfiguration Configuration;
 
 		/// <summary>
-		/// Architecture that the target is being built for (or an empty string for the default)
+		/// Architecture that the target is being built for
 		/// </summary>
-		public readonly string Architecture;
+		public readonly UnrealArchitectures Architectures;
+
+		/// <summary>
+		/// Intermediate environment. Determines if the intermediates end up in a different folder than normal.
+		/// </summary>
+		public UnrealIntermediateEnvironment IntermediateEnvironment;
 
 		/// <summary>
 		/// The project containing the target
 		/// </summary>
-		public readonly FileReference ProjectFile;
+		public readonly FileReference? ProjectFile;
 
 		/// <summary>
 		/// The current build version
 		/// </summary>
-		public ReadOnlyBuildVersion Version
-		{
-			get { return ReadOnlyBuildVersion.Current; }
-		}
+		public ReadOnlyBuildVersion Version => ReadOnlyBuildVersion.Current;
 
 		/// <summary>
 		/// Additional command line arguments for this target
 		/// </summary>
-		public CommandLineArguments Arguments;
+		public CommandLineArguments? Arguments;
 
 		/// <summary>
 		/// Constructs a TargetInfo for passing to the TargetRules constructor.
@@ -59,17 +57,27 @@ namespace UnrealBuildTool
 		/// <param name="Name">Name of the target being built</param>
 		/// <param name="Platform">The platform that the target is being built for</param>
 		/// <param name="Configuration">The configuration being built</param>
-		/// <param name="Architecture">The architecture being built for</param>
+		/// <param name="Architectures">The architectures being built for</param>
 		/// <param name="ProjectFile">Path to the project file containing the target</param>
 		/// <param name="Arguments">Additional command line arguments for this target</param>
-		public TargetInfo(string Name, UnrealTargetPlatform Platform, UnrealTargetConfiguration Configuration, string Architecture, FileReference ProjectFile, CommandLineArguments Arguments)
+		/// <param name="IntermediateEnvironment">Intermediate environment to use</param>
+		public TargetInfo(string Name, UnrealTargetPlatform Platform, UnrealTargetConfiguration Configuration, UnrealArchitectures? Architectures, FileReference? ProjectFile, CommandLineArguments? Arguments, UnrealIntermediateEnvironment IntermediateEnvironment = UnrealIntermediateEnvironment.Default)
 		{
 			this.Name = Name;
 			this.Platform = Platform;
 			this.Configuration = Configuration;
-			this.Architecture = Architecture;
+			this.IntermediateEnvironment = IntermediateEnvironment;
 			this.ProjectFile = ProjectFile;
 			this.Arguments = Arguments;
+
+			if (Architectures == null)
+			{
+				this.Architectures = UnrealArchitectureConfig.ForPlatform(Platform).ActiveArchitectures(ProjectFile, Name);
+			}
+			else
+			{
+				this.Architectures = Architectures;
+			}
 		}
 
 		/// <summary>
@@ -78,20 +86,26 @@ namespace UnrealBuildTool
 		/// <param name="Reader">Archive to read from</param>
 		public TargetInfo(BinaryArchiveReader Reader)
 		{
-			this.Name = Reader.ReadString();
-			this.Platform = UnrealTargetPlatform.Parse(Reader.ReadString());
-			string ConfigurationStr = Reader.ReadString();
-			this.Architecture = Reader.ReadString();
-			this.ProjectFile = Reader.ReadFileReference();
-			string[] ArgumentStrs = Reader.ReadArray(() => Reader.ReadString());
+			Name = Reader.ReadString()!;
+			Platform = UnrealTargetPlatform.Parse(Reader.ReadString()!);
+			string ConfigurationStr = Reader.ReadString()!;
+			Architectures = new UnrealArchitectures(Reader.ReadArray(() => Reader.ReadString()!)!);
+			ProjectFile = Reader.ReadFileReferenceOrNull();
+			string[]? ArgumentStrs = Reader.ReadArray(() => Reader.ReadString()!);
 
 			if (!UnrealTargetConfiguration.TryParse(ConfigurationStr, out Configuration))
 			{
-				throw new BuildException(string.Format("The configration name {0} is not a valid configration name. Valid names are ({1})", Name,
-					string.Join(",", Enum.GetValues(typeof(UnrealTargetConfiguration)).Cast<UnrealTargetConfiguration>().Select(x => x.ToString()))));
+				throw new BuildException(String.Format("The configration name {0} is not a valid configration name. Valid names are ({1})", Name,
+					String.Join(",", Enum.GetValues(typeof(UnrealTargetConfiguration)).Cast<UnrealTargetConfiguration>().Select(x => x.ToString()))));
 			}
 
-			Arguments = new CommandLineArguments(ArgumentStrs);
+			string? IntermediateEnvironmentStr = Reader.ReadString();
+			if (IntermediateEnvironmentStr != null)
+			{
+				UnrealIntermediateEnvironment.TryParse(IntermediateEnvironmentStr, out IntermediateEnvironment);
+			}
+
+			Arguments = ArgumentStrs == null ? null : new CommandLineArguments(ArgumentStrs);
 		}
 
 		/// <summary>
@@ -103,9 +117,10 @@ namespace UnrealBuildTool
 			Writer.WriteString(Name);
 			Writer.WriteString(Platform.ToString());
 			Writer.WriteString(Configuration.ToString());
-			Writer.WriteString(Architecture);
+			Writer.WriteArray(Architectures.Architectures.ToArray(), Item => Writer.WriteString(Item.ToString()));
 			Writer.WriteFileReference(ProjectFile);
-			Writer.WriteArray(Arguments.GetRawArray(), Item => Writer.WriteString(Item));
+			Writer.WriteArray(Arguments?.GetRawArray(), Item => Writer.WriteString(Item));
+			Writer.WriteString(IntermediateEnvironment.ToString());
 		}
 	}
 }

@@ -3,22 +3,25 @@
 using System;
 using System.Text;
 using System.IO;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 using System.Collections.Generic;
 using System.Linq;
+using UnrealBuildBase;
+using Microsoft.Extensions.Logging;
 
 namespace AutomationTool
 {
 	[Help("Auto-detects P4 settings based on the current path and creates a p4config file with the relevant settings.")]
-	[Help("setignore", "Adds a P4IGNORE to the default file (Engine/Extras/Perforce/p4ignore)")]
-	[Help("path=<path>", "Write to a path other than the current directory")]
-	[Help("p4port=<server:port>", "Optional hint/override of the server to use during lookup")]
-	[Help("p4user=<server:port>", "Optional hint/override of the username to use during lookup")]
-	public class P4WriteConfig: BuildCommand
+	[ParamHelp("SetIgnore", "Adds a P4IGNORE to the default file (p4ignore in the root, or Engine/Extras/Perforce/p4ignore)", ParamType = typeof(bool), Flag = "-SetIgnore")]
+	[ParamHelp("Path", "Write to a path other than the current directory")]
+	[ParamHelp("ReplaceEnv", "When a filename passed in via 'Path' an error will be thrown if it does not match the existing value for P4CONFIG (if set), using this parameter will force the existing environment setting to be replaced", ParamType = typeof(bool), Flag = "-ReplaceEnv")]
+	[ParamHelp("p4port=<server:port>", "Optional hint/override of the server to use during lookup")]
+	[ParamHelp("p4user=<username>", "Optional hint/override of the username to use during lookup")]
+	public class P4WriteConfig : BuildCommand
 	{
 		public override ExitCode Execute()
 		{
-			Log.TraceInformation("Setting up Perforce environment.");
+			Logger.LogInformation("Setting up Perforce environment.");
 
 			// User can specify these to help auto detection
 			string Port = ParseParamValue("p4port", "");
@@ -26,8 +29,6 @@ namespace AutomationTool
 
 			bool SetIgnore = ParseParam("setignore");
 			bool ListOnly = ParseParam("listonly");
-
-			string OutputPath = ParseParamValue("path", "");
 
 			// apply any hints
 			if (!string.IsNullOrEmpty(Port))
@@ -47,67 +48,167 @@ namespace AutomationTool
 				CommandUtils.InitDefaultP4Connection();
 			}
 			catch (Exception Ex)
-			{ 		
-				Log.TraceError("Unable to find matching Perforce info. If the below does not help try P4CreateConfig -p4port=<server:port> and -p4user=<username> to supply more info");
-				Log.TraceError("{0}", Ex.Message);
+			{
+				Logger.LogError("Unable to find matching Perforce info. If the below does not help try P4WriteConfig -p4port=<server:port> and -p4user=<username> to supply more info");
+				Logger.LogError(Ex, "{Message}", Ex.Message);
 				return ExitCode.Error_Arguments;
 			}
 
 			// store all our settings
-			Dictionary<string, string> P4Config = new Dictionary<string, string>();
+			StringBuilder P4Config = new StringBuilder();
 
-			P4Config["P4PORT"] = P4Env.ServerAndPort;
-			P4Config["P4USER"] = P4Env.User;
-			P4Config["P4CLIENT"] = P4Env.Client;
+			P4Config.AppendLine($"P4PORT={P4Env.ServerAndPort}");
+			P4Config.AppendLine($"P4USER={P4Env.User}");
+			P4Config.AppendLine($"P4CLIENT={P4Env.Client}");
 
 			if (SetIgnore)
 			{
-				string IgnorePath = Path.Combine(CommandUtils.EngineDirectory.ToString(), "Extras", "Perforce", "p4ignore");
-				P4Config["P4IGNORE"] = IgnorePath;
-			}
-
-			string P4Settings = string.Join("\n", P4Config.Keys.Select(K => string.Format("{0}={1}", K, P4Config[K])));
-
-			string DefaultPath = Environment.CurrentDirectory;
-
-			if (!string.IsNullOrEmpty(OutputPath))
-			{
-				if (!DirectoryExists(OutputPath) && !FileExists(OutputPath))
+				// If a p4 ignore file is in the root, prefer it
+				string IgnorePath = Directory.EnumerateFiles(Unreal.RootDirectory.FullName, "*p4ignore*", SearchOption.TopDirectoryOnly).FirstOrDefault();
+				if (string.IsNullOrEmpty(IgnorePath))
 				{
-					throw new AutomationException("Path {0} does not exist.", OutputPath);
+					IgnorePath = Path.Combine(Unreal.EngineDirectory.ToString(), "Extras", "Perforce", "p4ignore");
 				}
-				DefaultPath = OutputPath;
-			}
-			else
-			{
-				OutputPath = Environment.CurrentDirectory;
-			}
-
-			if (!File.Exists(OutputPath))
-			{
-				OutputPath = Path.Combine(OutputPath, "p4config.txt");
+				else
+				{
+					// If a file was found in the root, use the filename so will apply to any same-named file in the tree
+					IgnorePath = Path.GetFileName(IgnorePath);
+				}
+				P4Config.AppendLine($"P4IGNORE={IgnorePath}");
 			}
 
-			Console.WriteLine("***\nWriting_\n{0}\nto - {1}\n***", P4Settings, OutputPath);
+			string P4Settings = P4Config.ToString();
+
+			(string P4ConfigDirectory, string P4ConfigFilename) = GenerateP4ConfigPath();
+
+			string FullP4ConfigPath = Path.Combine(P4ConfigDirectory, P4ConfigFilename);
+
+			Logger.LogInformation("***\nWriting\n----------\n{Settings}----------\nto '{OutputPath}'\n***", P4Settings.Replace("\r\n", "\n"), FullP4ConfigPath);
 
 			if (!ListOnly)
 			{
-				File.WriteAllText(OutputPath, P4Settings);
+				File.WriteAllText(FullP4ConfigPath, P4Settings);
 
-				string OutputFile = Path.GetFileName(OutputPath);
+				Logger.LogInformation("Wrote P4 settings to {OutputPath}", FullP4ConfigPath);
 
-				Log.TraceInformation("Wrote P4 settings to {0}", OutputPath);
-
-				P4.P4(string.Format("set P4CONFIG={0}", OutputFile));
-				Log.TraceInformation("set P4CONFIG={0}", OutputFile);
+				P4.P4(string.Format("set P4CONFIG={0}", P4ConfigFilename));
+				Logger.LogInformation("set P4CONFIG={Filename}", P4ConfigFilename);
 			}
 			else
 			{
-				Log.TraceInformation("Skipped write");
+				Logger.LogInformation("Skipped write");
 			}
 
-
 			return ExitCode.Success;
-		}		
+		}
+
+		/// <summary>
+		/// Generate the path of the p4config file based on the users input on the commandline and the existing P4CONFIG settings in
+		/// the current environment.
+		/// </summary>
+		/// <returns>The directory that we should write the p4config file to, and the filename to use for it</returns>
+		/// <exception cref="AutomationException">Exceptions will be thrown if the users input is invalid and the script cannot continue</exception>
+		private (string Directory, string Filename) GenerateP4ConfigPath()
+		{
+			bool ReplaceEnv = ParseParam("replaceenv");
+
+			(string OutputDirectory, string Filename) = ParseCmdlinePath();
+			
+			if (string.IsNullOrEmpty(OutputDirectory))
+			{
+				// We will write the file to the current directory if none was supplied on the cmdline
+				OutputDirectory = Environment.CurrentDirectory;
+			}
+
+			if (string.IsNullOrEmpty(Filename))
+			{
+				// If no filename was provided on the cmdline we will first try to use the existing value set in the users environment
+				// falling back to our default name if nothing has been set there either.
+				Filename = FindP4ConfigEnvValue();
+				if (string.IsNullOrEmpty(Filename))
+				{
+					Filename = DefaultFilename;
+				}
+			}
+			else
+			{
+				// As the caller provided a filename via the commandline we need to check if it will work with the current environment settings (if any)
+				string EnvFilename = FindP4ConfigEnvValue();
+
+				if (!string.IsNullOrEmpty(EnvFilename) && Filename != EnvFilename)
+				{
+					if (ReplaceEnv)
+					{
+						Logger.LogWarning("Changing P4CONFIG from '{CurrentName} to '{NewName}'", EnvFilename, Filename);
+					}
+					else
+					{
+						throw new AutomationException("The provided filename '{0}' will not work with the current environment setting 'P4CONFIG={1}'" +
+							"\nEither update the -path parameter or use '-ReplaceEnv' to change the environment setting", Filename, EnvFilename);
+					}
+				}
+			}
+
+			return (OutputDirectory, Filename);
+		}
+
+		/// <summary>
+		/// Parses the cmdline arg '-Path=' and returns it split into the directory and filename components.
+		/// </summary>
+		/// <returns>The directory and the filename that the user supplied on the commandline, either or both values can be empty strings</returns>
+		/// <exception cref="AutomationException">Throws an exception if the user specifies a directory on the commandline that does not exist</exception>
+		private (string Directory, string Filename) ParseCmdlinePath()
+		{
+			string CmdlinePath = ParseParamValue("path", "");
+
+			string Directory = "";
+			string Filename = "";
+
+			if (!string.IsNullOrEmpty(CmdlinePath))
+			{
+				if (Path.HasExtension(CmdlinePath))
+				{
+					Directory = Path.GetDirectoryName(CmdlinePath);
+					Filename = Path.GetFileName(CmdlinePath);
+				}
+				else
+				{
+					Directory = CmdlinePath;
+				}
+
+				if (!string.IsNullOrEmpty(Directory) && !DirectoryExists(Directory))
+				{
+					throw new AutomationException("Directory {0} does not exist, please create it before calling the script", Directory);
+				}
+			}
+
+			return (Directory, Filename);
+		}
+
+		/// <summary>
+		/// Utility to return the currently set p4config value from the users environment
+		/// </summary>
+		/// <returns>The p4config filename currently set in the environment or an empty string if none is set</returns>
+		private string FindP4ConfigEnvValue()
+		{
+			string Filename = DefaultFilename;
+
+			IProcessResult P4SetResult = P4.P4("set -q P4CONFIG");
+			if (P4SetResult.ExitCode == 0)
+			{
+				string[] Tokens = P4SetResult.Output.Trim().Split("=");
+				if (Tokens.Length == 2)
+				{
+					Filename = Tokens[1];
+				}
+			}
+
+			return Filename;
+		}
+
+		/// <summary>
+		/// The standard name we should use for the p4config file if there is nothing existing set in the users environment
+		/// </summary>
+		private const string DefaultFilename = "p4config.txt";
 	}
 }

@@ -4,8 +4,10 @@
 
 #include "CoreMinimal.h"
 #include "Misc/Guid.h"
+#include "Installer/BuildInstallStreamer.h"
 #include "Interfaces/IBuildPatchServicesModule.h"
 #include "BuildPatchInstaller.h"
+#include "Containers/Ticker.h"
 
 class IAnalyticsProvider;
 
@@ -34,7 +36,9 @@ public:
 	// IModuleInterface interface end.
 
 	// IBuildPatchServicesModule interface begin.
+	virtual IBuildInstallStreamerRef CreateBuildInstallStreamer(BuildPatchServices::FBuildInstallStreamerConfiguration Configuration) override;
 	virtual IBuildInstallerRef CreateBuildInstaller(BuildPatchServices::FBuildInstallerConfiguration Configuration, FBuildPatchInstallerDelegate OnComplete) const override;
+	virtual IBuildInstallerSharedContextRef CreateBuildInstallerSharedContext(const TCHAR* DebugName) const override;
 	virtual BuildPatchServices::IBuildStatisticsRef CreateBuildStatistics(const IBuildInstallerRef& Installer) const override;
 	virtual BuildPatchServices::IPatchDataEnumerationRef CreatePatchDataEnumeration(BuildPatchServices::FPatchDataEnumerationConfiguration Configuration) const override;
 	virtual IBuildManifestPtr LoadManifestFromFile(const FString& Filename) override;
@@ -138,8 +142,11 @@ private:
 	// Holds available installations used for recycling install data
 	TMultiMap<FString, FBuildPatchAppManifestRef> AvailableInstallations;
 
+	// Array of running streamers
+	TArray<FBuildInstallStreamerWeakPtr> WeakBuildInstallStreamers;
+
 	// Handle to the registered Tick delegate
-	FDelegateHandle TickDelegateHandle;
+	FTSTicker::FDelegateHandle TickDelegateHandle;
 
 	// Delegate to give to installers so we know when they have been started.
 	FBuildPatchInstallerDelegate InstallerStartDelegate;

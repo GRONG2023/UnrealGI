@@ -1,16 +1,36 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Sections/ColorPropertySection.h"
+
+#include "Channels/MovieSceneChannelEditorData.h"
+#include "Channels/MovieSceneChannelProxy.h"
+#include "Channels/MovieSceneFloatChannel.h"
+#include "Containers/ArrayView.h"
+#include "Containers/SparseArray.h"
+#include "ISequencer.h"
+#include "Layout/Geometry.h"
+#include "Layout/PaintGeometry.h"
+#include "Math/Vector2D.h"
+#include "MovieSceneSection.h"
+#include "Sections/MovieSceneSectionHelpers.h"
+#include "Rendering/DrawElementPayloads.h"
 #include "Rendering/DrawElements.h"
+#include "Rendering/RenderingCommon.h"
 #include "Sections/MovieSceneColorSection.h"
 #include "SequencerSectionPainter.h"
-#include "MovieSceneSectionHelpers.h"
-#include "ISectionLayoutBuilder.h"
-#include "EditorStyleSet.h"
-#include "CommonMovieSceneTools.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "Templates/Function.h"
+#include "Templates/Tuple.h"
+#include "TimeToPixel.h"
 #include "Tracks/MovieScenePropertyTrack.h"
-#include "ISequencer.h"
-#include "Channels/MovieSceneChannelProxy.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+
+class UObject;
+struct FKeyHandle;
 
 FColorPropertySection::FColorPropertySection(UMovieSceneSection& InSectionObject, const FGuid& InObjectBindingID, TWeakPtr<ISequencer> InSequencer)
 	: FSequencerSection(InSectionObject)
@@ -60,14 +80,14 @@ int32 FColorPropertySection::OnPaintSection( FSequencerSectionPainter& Painter )
 	FVector2D GradientSize = FVector2D( Painter.SectionGeometry.Size.X - 2.f, (Painter.SectionGeometry.Size.Y / 4) - 3.0f );
 	if ( GradientSize.X >= 1.f )
 	{
-		FPaintGeometry PaintGeometry = Painter.SectionGeometry.ToPaintGeometry( FVector2D( 1.f, 1.f ), GradientSize );
+		FPaintGeometry PaintGeometry = Painter.SectionGeometry.ToPaintGeometry( GradientSize, FSlateLayoutTransform(FVector2D( 1.f, 1.f )) );
 
 		// If we are showing a background pattern and the colors is transparent, draw a checker pattern
 		FSlateDrawElement::MakeBox(
 			Painter.DrawElements,
 			LayerId,
 			PaintGeometry,
-			FEditorStyle::GetBrush( "Checker" ),
+			FAppStyle::GetBrush( "Checker" ),
 			DrawEffects);
 
 		FLinearColor DefaultColor = GetPropertyValueAsLinearColor();

@@ -20,11 +20,12 @@ namespace UnrealBuildTool.Rules
 					"ApplicationCore",
                     "Slate",
                     "SlateCore",
-                    "EditorStyle",
+                    "ToolWidgets",
                     "CoreUObject",
                     "Json",
-                    "JsonUtilities"
-                }
+                    "JsonUtilities",
+					"AutomationTest"
+				}
 			);
 
             // Added more direct dependencies to the editor for testing functionality
@@ -32,15 +33,16 @@ namespace UnrealBuildTool.Rules
             {
                 PrivateDependencyModuleNames.AddRange(
                     new string[] {
+						"EditorFramework",
                         "UnrealEd",
-                        "Engine", // Needed for UWorld/GWorld to find current level
+						"Kismet",
+						"Engine", // Needed for UWorld/GWorld to find current level
 				    }
                 );
             }
 
             PrivateIncludePathModuleNames.AddRange(
 				new string[] {
-					"Messaging",
 					"SessionServices",
 				}
 			);

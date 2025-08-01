@@ -7,17 +7,18 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
+using UnrealBuildBase;
 
 namespace Gauntlet
 {
 	public class TestGauntlet : BuildCommand
 	{
 
-		[AutoParamWithNames("", "Test", "Tests")]
-		public string Tests;
+		[AutoParamWithNames("Test", "Tests")]
+		public string Tests = "";
 
-		[AutoParamWithNames("", "Group")]
-		public string Group;
+		[AutoParamWithNames("Group")]
+		public string Group = "";
 
 		[AutoParam(false)]
 		public bool Verbose;
@@ -54,7 +55,7 @@ namespace Gauntlet
 			IEnumerable<ITestNode> Nodes = Utils.TestConstructor.ConstructTests<ITestNode, string[]>(TestList, null, new[] { "Gauntlet.SelfTest" });
 
 			// Create the test executor
-			var Executor = new TextExecutor();
+			var Executor = new TestExecutor(ToString());
 
 			TestExecutorOptions Options = new TestExecutorOptions();
 			AutoParam.ApplyParamsAndDefaults(Options, this.Params);

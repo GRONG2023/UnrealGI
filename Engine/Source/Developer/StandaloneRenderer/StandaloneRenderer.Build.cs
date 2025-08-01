@@ -6,8 +6,6 @@ public class StandaloneRenderer : ModuleRules
 {
 	public StandaloneRenderer(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateIncludePaths.Add("Developer/StandaloneRenderer/Private");
-
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
@@ -16,26 +14,26 @@ public class StandaloneRenderer : ModuleRules
 				"ImageWrapper",
 				"InputCore",
 				"SlateCore",
+				"SlateNullRenderer",
 			}
 			);
 
 		AddEngineThirdPartyPrivateStaticDependencies(Target, "OpenGL");
 
-		if ((Target.Platform == UnrealTargetPlatform.Win64) ||
-			(Target.Platform == UnrealTargetPlatform.Win32))
+		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
 			// @todo: This should be private? Not sure!!
 			AddEngineThirdPartyPrivateStaticDependencies(Target, "DX11");
 		}
 		else if (Target.Platform == UnrealTargetPlatform.Mac)
 		{
-			PublicFrameworks.Add("QuartzCore");
+			PublicFrameworks.AddRange(new string[] { "QuartzCore", "IOSurface" });
 		}
 		else if (Target.IsInPlatformGroup(UnrealPlatformGroup.Linux))
 		{
 			AddEngineThirdPartyPrivateStaticDependencies(Target, "SDL2");
 		}
-		else if (Target.Platform == UnrealTargetPlatform.IOS || Target.Platform == UnrealTargetPlatform.TVOS)
+		else if (Target.IsInPlatformGroup(UnrealPlatformGroup.IOS))
 		{
 			PublicFrameworks.AddRange(new string[] { "OpenGLES", "GLKit" });
 			// weak for IOS8 support since CAMetalLayer is in QuartzCore

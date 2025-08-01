@@ -2,12 +2,18 @@
 
 #pragma once
 
+#include "Containers/Map.h"
 #include "CoreMinimal.h"
-#include "Stats/Stats.h"
-#include "MovieSceneFwd.h"
 #include "Evaluation/MovieSceneEvaluationKey.h"
 #include "Evaluation/MovieSceneEvaluationOperand.h"
 #include "Evaluation/MovieSceneSequenceInstanceData.h"
+#include "HAL/Platform.h"
+#include "Misc/AssertionMacros.h"
+#include "MovieSceneFwd.h"
+#include "Stats/Stats.h"
+#include "Stats/Stats2.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UniquePtr.h"
 
 class IMovieScenePlayer;
 
@@ -59,7 +65,7 @@ struct FSharedPersistentDataKey
 	/** The actual shared ID */
 	FMovieSceneSharedDataId UniqueId;
 
-	/** The operand that this key relates to (may be invalid where the data pertains to master tracks) */
+	/** The operand that this key relates to (may be invalid where the data pertains to root tracks) */
 	FMovieSceneEvaluationOperand Operand;
 };
 
@@ -119,6 +125,11 @@ public:
 	 * Get the raw instance data for the current sequence
 	 */
 	MOVIESCENE_API const FMovieSceneSequenceInstanceData* GetInstanceData() const;
+
+	/**
+	 * Get the player
+	 */
+	MOVIESCENE_API IMovieScenePlayer& GetMovieScenePlayer() const { return Player; }
 
 	/**
 	 * Find the current sequence's instance data as the templated type, provided its type matches

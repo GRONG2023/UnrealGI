@@ -1,15 +1,26 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SequenceBindingTree.h"
-#include "MovieSceneSequence.h"
-#include "MovieScene.h"
-#include "Tracks/MovieSceneSubTrack.h"
-#include "Sections/MovieSceneSubSection.h"
-#include "Sections/MovieSceneCinematicShotSection.h"
 
+#include "CoreTypes.h"
+#include "Internationalization/Internationalization.h"
+#include "Misc/AssertionMacros.h"
+#include "MovieScene.h"
+#include "MovieSceneFwd.h"
+#include "MovieScenePossessable.h"
+#include "MovieSceneSection.h"
+#include "MovieSceneSequence.h"
+#include "MovieSceneSpawnable.h"
+#include "MovieSceneTrack.h"
+#include "Sections/MovieSceneCinematicShotSection.h"
+#include "Sections/MovieSceneSubSection.h"
+#include "Styling/AppStyle.h"
 #include "Styling/SlateIconFinder.h"
+#include "Templates/Casts.h"
 #include "Textures/SlateIcon.h"
-#include "EditorStyleSet.h"
+#include "Tracks/MovieSceneSubTrack.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
 
 #define LOCTEXT_NAMESPACE "MovieSceneObjectBindingIDPicker"
 
@@ -31,7 +42,7 @@ struct FSequenceBindingTree::FSequenceIDStack
 	void Push(FMovieSceneSequenceID InSequenceID) { IDs.Add(InSequenceID); }
 
 	/** Pop the last sequence ID off the stack */
-	void Pop() { IDs.RemoveAt(IDs.Num() - 1, 1, false); }
+	void Pop() { IDs.RemoveAt(IDs.Num() - 1, 1, EAllowShrinking::No); }
 	
 private:
 	TArray<FMovieSceneSequenceID> IDs;
@@ -50,9 +61,9 @@ bool FSequenceBindingTree::ConditionalRebuild(UMovieSceneSequence* InSequence, F
 			}
 
 			UMovieScene* ThisMovieScene = ThisSequence->GetMovieScene();
-			for (const UMovieSceneTrack* MasterTrack : ThisMovieScene->GetMasterTracks())
+			for (const UMovieSceneTrack* Track : ThisMovieScene->GetTracks())
 			{
-				const UMovieSceneSubTrack* SubTrack = Cast<const UMovieSceneSubTrack>(MasterTrack);
+				const UMovieSceneSubTrack* SubTrack = Cast<const UMovieSceneSubTrack>(Track);
 				if (SubTrack)
 				{
 					for (UMovieSceneSection* Section : SubTrack->GetAllSections())
@@ -181,9 +192,9 @@ void FSequenceBindingTree::Build(UMovieSceneSequence* InSequence, FSequenceIDSta
 	}
 
 	// Iterate all sub sections
-	for (const UMovieSceneTrack* MasterTrack : MovieScene->GetMasterTracks())
+	for (const UMovieSceneTrack* Track : MovieScene->GetTracks())
 	{
-		const UMovieSceneSubTrack* SubTrack = Cast<const UMovieSceneSubTrack>(MasterTrack);
+		const UMovieSceneSubTrack* SubTrack = Cast<const UMovieSceneSubTrack>(Track);
 		if (SubTrack)
 		{
 			for (UMovieSceneSection* Section : SubTrack->GetAllSections())
@@ -200,7 +211,7 @@ void FSequenceBindingTree::Build(UMovieSceneSequence* InSequence, FSequenceIDSta
 
 					UMovieSceneCinematicShotSection* ShotSection = Cast<UMovieSceneCinematicShotSection>(Section);
 					FText DisplayString = ShotSection ? FText::FromString(ShotSection->GetShotDisplayName()) : FText::FromName(SubSequence->GetFName());
-					FSlateIcon Icon(FEditorStyle::GetStyleSetName(), ShotSection ? "Sequencer.Tracks.CinematicShot" : "Sequencer.Tracks.Sub");
+					FSlateIcon Icon(FAppStyle::GetAppStyleSetName(), ShotSection ? "Sequencer.Tracks.CinematicShot" : "Sequencer.Tracks.Sub");
 					
 					TSharedRef<FSequenceBindingNode> NewNode = MakeShared<FSequenceBindingNode>(DisplayString, CurrentID, Icon);
 					ensure(!Hierarchy.Contains(CurrentID));

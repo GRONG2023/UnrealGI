@@ -3,9 +3,14 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "WorkflowOrientedApp/WorkflowCentricApplication.h"
+#include "PersonaAssetEditorToolkit.h"
 #include "IHasPersonaToolkit.h"
 
-class ISkeletonEditor : public FWorkflowCentricApplication, public IHasPersonaToolkit
+class IAnimationSequenceBrowser;
+
+class ISkeletonEditor : public FPersonaAssetEditorToolkit, public IHasPersonaToolkit
 {
+	public:
+	/** Get the asset browser we host */
+	virtual IAnimationSequenceBrowser* GetAssetBrowser() const = 0;
 };

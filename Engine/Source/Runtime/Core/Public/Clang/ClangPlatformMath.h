@@ -7,6 +7,8 @@
 #pragma once
 #include "GenericPlatform/GenericPlatformMath.h"
 
+// HEADER_UNIT_UNSUPPORTED - Clang not supporting header units
+
 /**
  * Clang implementation of math functions
  **/
@@ -89,13 +91,53 @@ struct FClangPlatformMath : public FGenericPlatformMath
 
 	static FORCEINLINE uint32 FloorLog2(uint32 Value)
 	{
-		int32 Mask = -int32(Value != 0);
-		return (31 - __builtin_clz(Value)) & Mask;
+		return 31 - __builtin_clz(Value | 1);
 	}
 
 	static FORCEINLINE uint64 FloorLog2_64(uint64 Value)
 	{
-		int64 Mask = -int64(Value != 0);
-		return (63 - __builtin_clzll(Value)) & Mask;
+		return 63 - __builtin_clzll(Value | 1);
+	}
+	
+	/**
+	 * Adds two integers of any integer type, checking for overflow.
+	 * If there was overflow, it returns false, and OutResult may or may not be written.
+	 * If there wasn't overflow, it returns true, and the result of the addition is written to OutResult.
+	 */
+	template <
+		typename IntType
+		UE_REQUIRES(std::is_integral_v<IntType>)
+	>
+	static FORCEINLINE bool AddAndCheckForOverflow(IntType A, IntType B, IntType& OutResult)
+	{
+		return !__builtin_add_overflow(A, B, &OutResult);
+	}
+
+	/**
+	 * Subtracts two integers of any integer type, checking for overflow.
+	 * If there was overflow, it returns false, and OutResult may or may not be written.
+	 * If there wasn't overflow, it returns true, and the result of the subtraction is written to OutResult.
+	 */
+	template <
+		typename IntType
+		UE_REQUIRES(std::is_integral_v<IntType>)
+	>
+	static FORCEINLINE bool SubtractAndCheckForOverflow(IntType A, IntType B, IntType& OutResult)
+	{
+		return !__builtin_sub_overflow(A, B, &OutResult);
+	}
+
+	/**
+	 * Multiplies two integers of any integer type, checking for overflow.
+	 * If there was overflow, it returns false, and OutResult may or may not be written.
+	 * If there wasn't overflow, it returns true, and the result of the multiplication is written to OutResult.
+	 */
+	template <
+		typename IntType
+		UE_REQUIRES(std::is_integral_v<IntType>)
+	>
+	static FORCEINLINE bool MultiplyAndCheckForOverflow(IntType A, IntType B, IntType& OutResult)
+	{
+		return !__builtin_mul_overflow(A, B, &OutResult);
 	}
 };

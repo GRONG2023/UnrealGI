@@ -2,10 +2,13 @@
 
 #include "PersonaAssetFamily.h"
 #include "Modules/ModuleManager.h"
-#include "ARFilter.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/ARFilter.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Animation/AnimBlueprint.h"
 #include "PhysicsEngine/PhysicsAsset.h"
+#include "Styling/AppStyle.h"
+#include "AssetToolsModule.h"
+#include "Preferences/PersonaOptions.h"
 
 #define LOCTEXT_NAMESPACE "PersonaAssetFamily"
 
@@ -14,6 +17,7 @@ FPersonaAssetFamily::FPersonaAssetFamily(const UObject* InFromObject)
 	, Mesh(nullptr)
 	, AnimBlueprint(nullptr)
 	, AnimationAsset(nullptr)
+	, PhysicsAsset(nullptr)
 {
 	if (InFromObject)
 	{
@@ -42,6 +46,43 @@ FPersonaAssetFamily::FPersonaAssetFamily(const UObject* InFromObject)
 	}
 }
 
+FPersonaAssetFamily::FPersonaAssetFamily(const UObject* InFromObject, const TSharedRef<FPersonaAssetFamily> InFromFamily)
+	: Skeleton(InFromFamily->Skeleton)
+	, Mesh(InFromFamily->Mesh)
+	, AnimBlueprint(InFromFamily->AnimBlueprint)
+	, AnimationAsset(InFromFamily->AnimationAsset)
+	, PhysicsAsset(InFromFamily->PhysicsAsset)
+{
+	if (InFromObject)
+	{
+		if (InFromObject->IsA<USkeleton>())
+		{
+			Skeleton = CastChecked<USkeleton>(InFromObject);
+		}
+		else if (InFromObject->IsA<UAnimationAsset>())
+		{
+			AnimationAsset = CastChecked<UAnimationAsset>(InFromObject);
+		}
+		else if (InFromObject->IsA<USkeletalMesh>())
+		{
+			Mesh = CastChecked<USkeletalMesh>(InFromObject);
+		}
+		else if (InFromObject->IsA<UAnimBlueprint>())
+		{
+			AnimBlueprint = CastChecked<UAnimBlueprint>(InFromObject);
+		}
+		else if (InFromObject->IsA<UPhysicsAsset>())
+		{
+			PhysicsAsset = CastChecked<UPhysicsAsset>(InFromObject);
+		}
+	}
+}
+
+void FPersonaAssetFamily::Initialize()
+{
+	GetMutableDefault<UPersonaOptions>()->RegisterOnUpdateSettings(UPersonaOptions::FOnUpdateSettingsMulticaster::FDelegate::CreateSP(this, &FPersonaAssetFamily::OnSettingsChange));
+}
+
 void FPersonaAssetFamily::GetAssetTypes(TArray<UClass*>& OutAssetTypes) const
 {
 	OutAssetTypes.Reset();
@@ -55,13 +96,12 @@ void FPersonaAssetFamily::GetAssetTypes(TArray<UClass*>& OutAssetTypes) const
 template<typename AssetType>
 static void FindAssets(const USkeleton* InSkeleton, TArray<FAssetData>& OutAssetData, FName SkeletonTag)
 {
-	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-	FARFilter Filter;
-	Filter.bRecursiveClasses = true;
-	Filter.ClassNames.Add(AssetType::StaticClass()->GetFName());
-	Filter.TagsAndValues.Add(SkeletonTag, FAssetData(InSkeleton).GetExportTextName());
+	if (!InSkeleton)
+	{
+		return;
+	}
 
-	AssetRegistryModule.Get().GetAssets(Filter, OutAssetData);
+	InSkeleton->GetCompatibleAssets(AssetType::StaticClass(), *SkeletonTag.ToString(), OutAssetData);
 }
 
 FAssetData FPersonaAssetFamily::FindAssetOfType(UClass* InAssetClass) const
@@ -129,15 +169,26 @@ FAssetData FPersonaAssetFamily::FindAssetOfType(UClass* InAssetClass) const
 			}
 			else
 			{
+				// If we have a mesh and it has a physics asset, use it
+				if (Mesh.IsValid())
+				{
+					if (UPhysicsAsset* MeshPhysicsAsset = Mesh->GetPhysicsAsset())
+					{
+						return FAssetData(MeshPhysicsAsset);
+					}
+				}
+
 				TArray<FAssetData> Assets;
 
 				FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
 				FARFilter Filter;
 				Filter.bRecursiveClasses = true;
-				Filter.ClassNames.Add(UPhysicsAsset::StaticClass()->GetFName());
-				if(Mesh.IsValid())
+				Filter.ClassPaths.Add(UPhysicsAsset::StaticClass()->GetClassPathName());
+
+				// If we have a mesh, look for a physics asset that has that mesh as its preview mesh
+				if (Mesh.IsValid())
 				{
-					Filter.TagsAndValues.Add(GET_MEMBER_NAME_CHECKED(UPhysicsAsset, PreviewSkeletalMesh), FAssetData(Mesh.Get()).ObjectPath.ToString());
+					Filter.TagsAndValues.Add(GET_MEMBER_NAME_CHECKED(UPhysicsAsset, PreviewSkeletalMesh), FSoftObjectPath(Mesh.Get()).ToString());
 				}
 
 				AssetRegistryModule.Get().GetAssets(Filter, Assets);
@@ -159,8 +210,7 @@ void FPersonaAssetFamily::FindAssetsOfType(UClass* InAssetClass, TArray<FAssetDa
 	{
 		if (InAssetClass->IsChildOf<USkeleton>())
 		{
-			// we should always have a skeleton here, this asset family is based on it
-			OutAssets.Add(FAssetData(Skeleton.Get()));
+			Skeleton.Get()->GetCompatibleSkeletonAssets(OutAssets);
 		}
 		else if (InAssetClass->IsChildOf<UAnimationAsset>())
 		{
@@ -179,13 +229,24 @@ void FPersonaAssetFamily::FindAssetsOfType(UClass* InAssetClass, TArray<FAssetDa
 			FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
 			FARFilter Filter;
 			Filter.bRecursiveClasses = true;
-			Filter.ClassNames.Add(UPhysicsAsset::StaticClass()->GetFName());
-			if(Mesh != nullptr)
+			Filter.ClassPaths.Add(UPhysicsAsset::StaticClass()->GetClassPathName());
+
+			// If we have a mesh, look for a physics asset that has that mesh as its preview mesh
+			if (Mesh.IsValid())
 			{
-				Filter.TagsAndValues.Add(GET_MEMBER_NAME_CHECKED(UPhysicsAsset, PreviewSkeletalMesh), FAssetData(Mesh.Get()).ObjectPath.ToString());
+				Filter.TagsAndValues.Add(GET_MEMBER_NAME_CHECKED(UPhysicsAsset, PreviewSkeletalMesh), FSoftObjectPath(Mesh.Get()).ToString());
 			}
 
 			AssetRegistryModule.Get().GetAssets(Filter, OutAssets);
+
+			// If we have a mesh and it has a physics asset, use it but only if its different from the one on the preview mesh
+			if (Mesh.IsValid())
+			{
+				if (UPhysicsAsset* MeshPhysicsAsset = Mesh->GetPhysicsAsset())
+				{
+					OutAssets.AddUnique(FAssetData(MeshPhysicsAsset));
+				}
+			}
 		}
 	}
 }
@@ -219,6 +280,75 @@ FText FPersonaAssetFamily::GetAssetTypeDisplayName(UClass* InAssetClass) const
 	return FText();
 }
 
+const FSlateBrush* FPersonaAssetFamily::GetAssetTypeDisplayIcon(UClass* InAssetClass) const
+{
+	if (InAssetClass)
+	{
+		if (InAssetClass->IsChildOf<USkeleton>())
+		{
+			return FAppStyle::Get().GetBrush("Persona.AssetClass.Skeleton");
+		}
+		else if (InAssetClass->IsChildOf<UAnimationAsset>())
+		{
+			return FAppStyle::Get().GetBrush("Persona.AssetClass.Animation");
+		}
+		else if (InAssetClass->IsChildOf<USkeletalMesh>())
+		{
+			return FAppStyle::Get().GetBrush("Persona.AssetClass.SkeletalMesh");
+		}
+		else if (InAssetClass->IsChildOf<UAnimBlueprint>())
+		{
+			return FAppStyle::Get().GetBrush("Persona.AssetClass.Blueprint");
+		}
+		else if (InAssetClass->IsChildOf<UPhysicsAsset>())
+		{
+			return FAppStyle::Get().GetBrush("Persona.AssetClass.Physics");
+		}
+	}
+
+	return nullptr;
+}	
+
+FSlateColor FPersonaAssetFamily::GetAssetTypeDisplayTint(UClass* InAssetClass) const
+{
+	static const FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
+
+	UClass* UseAssetClass = nullptr;
+	if (InAssetClass)
+	{
+		if (InAssetClass->IsChildOf<USkeleton>())
+		{
+			UseAssetClass = USkeleton::StaticClass();
+		}
+		else if (InAssetClass->IsChildOf<UAnimationAsset>())
+		{
+			UseAssetClass = UAnimationAsset::StaticClass();
+		}
+		else if (InAssetClass->IsChildOf<USkeletalMesh>())
+		{
+			UseAssetClass = USkeletalMesh::StaticClass();
+		}
+		else if (InAssetClass->IsChildOf<UAnimBlueprint>())
+		{
+			UseAssetClass = UAnimBlueprint::StaticClass();
+		}
+		else if (InAssetClass->IsChildOf<UPhysicsAsset>())
+		{
+			UseAssetClass = UPhysicsAsset::StaticClass();
+		}
+	}
+
+	if (UseAssetClass)
+	{
+		TWeakPtr<IAssetTypeActions> AssetTypeActions = AssetToolsModule.Get().GetAssetTypeActionsForClass(UseAssetClass);
+		if (AssetTypeActions.IsValid())
+		{
+			return AssetTypeActions.Pin()->GetTypeColor();
+		}
+	}
+	return FSlateColor::UseForeground();
+}
+
 bool FPersonaAssetFamily::IsAssetCompatible(const FAssetData& InAssetData) const
 {
 	UClass* Class = InAssetData.GetClass();
@@ -226,7 +356,10 @@ bool FPersonaAssetFamily::IsAssetCompatible(const FAssetData& InAssetData) const
 	{
 		if (Class->IsChildOf<USkeleton>())
 		{
-			return FAssetData(Skeleton.Get()) == InAssetData;
+			if (Skeleton.Get())
+			{
+				return Skeleton.Get()->IsCompatibleForEditor(InAssetData);
+			}
 		}
 		else if (Class->IsChildOf<UAnimationAsset>() || Class->IsChildOf<USkeletalMesh>())
 		{
@@ -234,7 +367,10 @@ bool FPersonaAssetFamily::IsAssetCompatible(const FAssetData& InAssetData) const
 
 			if (Result.IsSet())
 			{
-				return Result.GetValue() == FAssetData(Skeleton.Get()).GetExportTextName();
+				if (Skeleton.Get())
+				{
+					return Skeleton.Get()->IsCompatibleForEditor(Result.GetValue());
+				}
 			}
 		}
 		else if (Class->IsChildOf<UAnimBlueprint>())
@@ -243,15 +379,25 @@ bool FPersonaAssetFamily::IsAssetCompatible(const FAssetData& InAssetData) const
 
 			if (Result.IsSet())
 			{
-				return Result.GetValue() == FAssetData(Skeleton.Get()).GetExportTextName();
+				if (Skeleton.Get())
+				{
+					return Skeleton.Get()->IsCompatibleForEditor(Result.GetValue());
+				}
 			}
 		}
 		else if (Class->IsChildOf<UPhysicsAsset>())
 		{
+			// If our mesh is valid and this is the physics asset used on it, we are compatible
+			if (Mesh.IsValid() && InAssetData.GetSoftObjectPath() == FSoftObjectPath(Mesh.Get()->GetPhysicsAsset()))
+			{
+				return true;
+			}
+
+			// Otherwise check if our mesh is the preview mesh of the physics asset
 			FAssetDataTagMapSharedView::FFindTagResult Result = InAssetData.TagsAndValues.FindTag(GET_MEMBER_NAME_CHECKED(UPhysicsAsset, PreviewSkeletalMesh));
 			if (Result.IsSet() && Mesh.IsValid())
 			{
-				return Result.GetValue() == FAssetData(Mesh.Get()).ObjectPath.ToString();
+				return Result.GetValue() == FSoftObjectPath(Mesh.Get()).ToString();
 			}
 		}
 	}
@@ -295,11 +441,7 @@ void FPersonaAssetFamily::RecordAssetOpened(const FAssetData& InAssetData)
 		UClass* Class = InAssetData.GetClass();
 		if (Class)
 		{
-			if (Class->IsChildOf<USkeleton>())
-			{
-				Skeleton = Cast<USkeleton>(InAssetData.GetAsset());
-			}
-			else if (Class->IsChildOf<UAnimationAsset>())
+			if (Class->IsChildOf<UAnimationAsset>())
 			{
 				AnimationAsset = Cast<UAnimationAsset>(InAssetData.GetAsset());
 			}
@@ -365,7 +507,7 @@ void FPersonaAssetFamily::FindCounterpartAssets(const UObject* InAsset, const US
 		const UAnimBlueprint* AnimBlueprint = CastChecked<const UAnimBlueprint>(InAsset);
 		OutSkeleton = AnimBlueprint->TargetSkeleton;
 		OutMesh = AnimBlueprint->GetPreviewMesh();
-		check(AnimBlueprint->BlueprintType == BPTYPE_Interface || AnimBlueprint->TargetSkeleton != nullptr);
+		check(AnimBlueprint->BlueprintType == BPTYPE_Interface || AnimBlueprint->bIsTemplate || AnimBlueprint->TargetSkeleton != nullptr);
 		if(OutMesh == nullptr && AnimBlueprint->TargetSkeleton)
 		{
 			OutMesh = AnimBlueprint->TargetSkeleton->GetPreviewMesh();
@@ -384,6 +526,11 @@ void FPersonaAssetFamily::FindCounterpartAssets(const UObject* InAsset, const US
 			OutSkeleton = OutMesh->GetSkeleton();
 		}
 	}
+}
+
+void FPersonaAssetFamily::OnSettingsChange(const UPersonaOptions* InOptions, EPropertyChangeType::Type InChangeType)
+{
+	OnAssetFamilyChanged.Broadcast();
 }
 
 #undef LOCTEXT_NAMESPACE

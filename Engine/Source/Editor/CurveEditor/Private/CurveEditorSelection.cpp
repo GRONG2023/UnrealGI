@@ -1,9 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "CurveEditorSelection.h"
-#include "CurveEditorTypes.h"
+
 #include "Algo/BinarySearch.h"
 #include "CurveEditor.h"
+#include "CurveEditorTypes.h"
+#include "CurveModel.h"
+#include "Misc/EnumClassFlags.h"
+#include "Templates/Tuple.h"
+#include "Templates/UniquePtr.h"
 
 FCurveEditorSelection::FCurveEditorSelection()
 {
@@ -161,7 +166,7 @@ void FKeyHandleSet::Toggle(FKeyHandle Handle, ECurvePointType PointType)
 			if (HandleToPointType.FindChecked(Handle) == ECurvePointType::None)
 			{
 				HandleToPointType.FindAndRemoveChecked(Handle);		
-				SortedHandles.RemoveAt(ExistingIndex, 1, false);
+				SortedHandles.RemoveAt(ExistingIndex, 1, EAllowShrinking::No);
 			}
 		}
 	}
@@ -185,7 +190,7 @@ void FKeyHandleSet::Remove(FKeyHandle Handle, ECurvePointType PointType)
 			if (HandleToPointType.FindChecked(Handle) == ECurvePointType::None)
 			{
 				HandleToPointType.FindAndRemoveChecked(Handle);		
-				SortedHandles.RemoveAt(ExistingIndex, 1, false);
+				SortedHandles.RemoveAt(ExistingIndex, 1, EAllowShrinking::No);
 			}
 		}
 	}

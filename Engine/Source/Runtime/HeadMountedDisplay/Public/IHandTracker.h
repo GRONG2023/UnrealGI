@@ -2,9 +2,13 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-//#include "UObject/ObjectMacros.h"
 #include "Features/IModularFeature.h"
+#include "Math/Quat.h"
+#include "Math/Transform.h"
+#include "Math/UnrealMathSSE.h"
+#include "UObject/NameTypes.h"
 
 enum class EControllerHand : uint8;
 enum class EHandKeypoint : uint8;
@@ -12,7 +16,7 @@ enum class EHandKeypoint : uint8;
 /**
  */
 
-class HEADMOUNTEDDISPLAY_API IHandTracker : public IModularFeature
+class IHandTracker : public IModularFeature
 {
 public:
 	static FName GetModularFeatureName()
@@ -43,14 +47,14 @@ public:
 	 */
 	virtual bool GetKeypointState(EControllerHand Hand, EHandKeypoint Keypoint, FTransform& OutTransform, float& OutRadius) const = 0;
 
-	virtual bool GetAllKeypointStates(EControllerHand Hand, TArray<struct FVector>& OutPositions, TArray<struct FQuat>& OutRotations, TArray<float>& OutRadii) const = 0;
+	virtual bool GetAllKeypointStates(EControllerHand Hand, TArray<FVector>& OutPositions, TArray<FQuat>& OutRotations, TArray<float>& OutRadii) const = 0;
 
 	virtual bool HasHandMeshData() const
 	{
 		return false;
 	}
 
-	virtual bool GetHandMeshData(EControllerHand Hand, TArray<struct FVector>& OutVertices, TArray<struct FVector>& OutNormals, TArray<int32>& OutIndices, FTransform& OutHandMeshTransform) const
+	virtual bool GetHandMeshData(EControllerHand Hand, TArray<FVector>& OutVertices, TArray<FVector>& OutNormals, TArray<int32>& OutIndices, FTransform& OutHandMeshTransform) const
 	{
 		return false;
 	}

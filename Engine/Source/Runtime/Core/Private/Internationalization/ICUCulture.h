@@ -28,6 +28,8 @@ THIRD_PARTY_INCLUDES_END
 
 struct FDecimalNumberFormattingRules;
 
+class FInternationalization;
+
 inline UColAttributeValue UEToICU(const ETextComparisonLevel::Type ComparisonLevel)
 {
 	UColAttributeValue Value;
@@ -194,13 +196,14 @@ public:
 	virtual ETextPluralForm GetPluralForm(double Val, const ETextPluralType PluralType) const override;
 	virtual const TArray<ETextPluralForm>& GetValidPluralForms(const ETextPluralType PluralType) const override;
 
-	static FString GetCanonicalName(const FString& Name);
+	static FString GetCanonicalName(const FString& Name, FInternationalization& I18N);
 
 	TSharedRef<const icu::BreakIterator> GetBreakIterator(const EBreakIteratorType Type);
 	TSharedRef<const icu::Collator, ESPMode::ThreadSafe> GetCollator(const ETextComparisonLevel::Type ComparisonLevel);
 	TSharedRef<const icu::DateFormat, ESPMode::ThreadSafe> GetDateFormatter(const EDateTimeStyle::Type DateStyle, const FString& TimeZone);
 	TSharedRef<const icu::DateFormat, ESPMode::ThreadSafe> GetTimeFormatter(const EDateTimeStyle::Type TimeStyle, const FString& TimeZone);
 	TSharedRef<const icu::DateFormat, ESPMode::ThreadSafe> GetDateTimeFormatter(const EDateTimeStyle::Type DateStyle, const EDateTimeStyle::Type TimeStyle, const FString& TimeZone);
+	TSharedRef<const icu::DateFormat, ESPMode::ThreadSafe> GetDateTimeFormatter(const FString& CustomPattern, const FString& TimeZone);
 
 private:
 	icu::Locale ICULocale;

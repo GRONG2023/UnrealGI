@@ -2,23 +2,23 @@
 
 #pragma once
 
-#include "CoreTypes.h"
 #include "Containers/ContainersFwd.h"
+#include "CoreTypes.h"
 
 #if PLATFORM_SUPPORTS_NAMED_PIPES
 
 /**
  * Wrapper for platform named pipe communication.
  */
-class CORE_API FGenericPlatformNamedPipe
+class FGenericPlatformNamedPipe
 {
 public:
 
 	/** Default constructor. */
-	FGenericPlatformNamedPipe();
+	CORE_API FGenericPlatformNamedPipe();
 
 	/** Virtual destructor. */
-	virtual ~FGenericPlatformNamedPipe();
+	CORE_API virtual ~FGenericPlatformNamedPipe();
 
 	FGenericPlatformNamedPipe(const FGenericPlatformNamedPipe&) = delete;
 	FGenericPlatformNamedPipe& operator=(const FGenericPlatformNamedPipe&) = delete;

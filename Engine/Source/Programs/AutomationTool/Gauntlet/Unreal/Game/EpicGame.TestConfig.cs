@@ -15,7 +15,7 @@ namespace EpicGame
 	/// <summary>
 	/// An additional set of options that pertain to internal epic games.
 	/// </summary>
-	public class EpicGameTestConfig : UE4Game.UE4TestConfig, IAutoParamNotifiable
+	public class EpicGameTestConfig : UnrealGame.UnrealTestConfig, IAutoParamNotifiable
 	{
 		/// <summary>
 		/// Should this test skip mcp?
@@ -27,7 +27,7 @@ namespace EpicGame
 		/// Tell the server not to authenticate u
 		/// </summary>
 		[AutoParam]
-		public bool XboxAuthSkip = false;
+		public bool DeviceAuthSkip = false;
 
 		[AutoParam]
 		public bool FastCook = false;
@@ -78,11 +78,17 @@ namespace EpicGame
 		/// Should this test assign a random test account?
 		/// </summary>
 		[AutoParam]
-        public bool PreAssignAccount = true;
+		public bool PreAssignAccount = true;
+
+		/// <summary>
+		/// Does the current test require a user to be logged in to function correctly?
+		/// </summary>
+		[AutoParam]
+		public bool RequiresLogin = false;
 
 
-        // incrementing value to ensure we can assign unique values to ports etc
-        static private int NumberOfConfigsCreated = 0;
+		// incrementing value to ensure we can assign unique values to ports etc
+		static private int NumberOfConfigsCreated = 0;
 
 		public EpicGameTestConfig()
 		{
@@ -122,9 +128,10 @@ namespace EpicGame
 		{
 			base.ApplyToConfig(AppConfig, ConfigRole, OtherRoles);
 
-			if (ConfigRole.RoleType.IsClient() || ConfigRole.RoleType.IsServer())
+			if (ConfigRole.RoleType.IsClient() || ConfigRole.RoleType.IsServer() || RequiresLogin)
 			{
 				string McpString = "";
+				bool bIsBuildMachine = CommandUtils.IsBuildMachine; 
 
 				if (ConfigRole.RoleType.IsServer())
 				{
@@ -134,6 +141,11 @@ namespace EpicGame
 					McpString += string.Format(" -beaconport={0}", BeaconPort);
 
 					AppConfig.CommandLine += " -net.forcecompatible";
+
+					if (!bIsBuildMachine || !NoMCP)
+					{
+						AppConfig.CommandLineParams.Add("UseLocalIPs");
+					}
 				}
 
 				// Default to the first address with a valid prefix
@@ -176,7 +188,7 @@ namespace EpicGame
 				// Do we need to add the -multihome argument to bind to specific IP?
 				if (ConfigRole.RoleType.IsServer() && (MultipleInterfaces || !string.IsNullOrEmpty(RequestedServerIP)))
 				{
-					AppConfig.CommandLine += string.Format(" -multihome={0}", ServerIP);
+					AppConfig.CommandLine += string.Format(" -multihome={0} -multihomehttp={0}", ServerIP);
 				}
 
 				// client too, but only desktop platforms
@@ -184,7 +196,7 @@ namespace EpicGame
 				{
 					if (ConfigRole.Platform == UnrealTargetPlatform.Win64 || ConfigRole.Platform == UnrealTargetPlatform.Mac)
 					{
-						AppConfig.CommandLine += string.Format(" -multihome={0}", ClientIP);
+						AppConfig.CommandLine += string.Format(" -multihome={0} -multihomehttp={0}", ClientIP);
 					}
 				}
 
@@ -216,15 +228,21 @@ namespace EpicGame
 					McpString += " -FastCook";
 				}
 
-				// turn off XboxAuth for NoMcp, or if specified, but only if there's an Xbox client somewhere
-				bool SkipAuth = ConfigRole.RoleType.IsServer() && (NoMCP || XboxAuthSkip) && OtherRoles.Any(R => R.Platform == UnrealTargetPlatform.XboxOne);
-
-				if (SkipAuth)
-				{
-					AppConfig.CommandLine += " -ini:Game:[/Script/FortniteGame.FortGameModeZone]:bTrustXboxPlatformId=true";
-				}
-
 				AppConfig.CommandLine += McpString;
+			}
+
+			if (ConfigRole.RoleType.IsClient() || RequiresLogin)
+			{
+				bool bNoAccountOverride = DataDrivenPlatformInfo.GetDataDrivenInfoForPlatform(ConfigRole.Platform.ToString())?.bNoAccountOverride ?? false;
+				// select an account
+				if (!NoMCP)
+				{
+					if (!bNoAccountOverride && PreAssignAccount)
+					{
+						Account UserAccount = AccountPool.Instance.ReserveAccount();
+						UserAccount.ApplyToConfig(AppConfig);
+					}
+				}
 			}
 
 			if (ConfigRole.RoleType.IsClient())
@@ -247,19 +265,6 @@ namespace EpicGame
 				{
 					// turn off skill-based matchmaking, turn off porta;
 					AppConfig.CommandLine += " -noepicportal";
-				}
-
-				// select an account
-				if (NoMCP == false && ConfigRole.Platform != UnrealTargetPlatform.PS4 && ConfigRole.Platform != UnrealTargetPlatform.XboxOne && PreAssignAccount == true)
-				{
-					Account UserAccount = AccountPool.Instance.ReserveAccount();
-					UserAccount.ApplyToConfig(AppConfig);
-				}
-
-				// turn off voice chat, otherwise will open blocking permission requests on mobile
-				if (ConfigRole.Platform == UnrealTargetPlatform.IOS)
-				{
-					AppConfig.CommandLine += " -ini:Engine:[VoiceChat.Vivox]:bEnabled=false";
 				}
 
 				// turn off crashlytics so we get symbolicated tombstone crashes on Android

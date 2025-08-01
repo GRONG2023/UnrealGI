@@ -7,26 +7,11 @@
 #include "D3D11RHIPrivate.h"
 #include "EngineModule.h"
 #include "RendererInterface.h"
+#include "ProfilingDebugging/ScopedDebugInfo.h"
+#include "HAL/ExceptionHandling.h"
 
 #define D3DERR(x) case x: ErrorCodeText = TEXT(#x); break;
 #define LOCTEXT_NAMESPACE "Developer.MessageLog"
-
-#ifndef _FACD3D 
-	#define _FACD3D  0x876
-#endif	//_FACD3D 
-#ifndef MAKE_D3DHRESULT
-	#define _FACD3D  0x876
-	#define MAKE_D3DHRESULT( code )  MAKE_HRESULT( 1, _FACD3D, code )
-#endif	//MAKE_D3DHRESULT
-
-#if WITH_D3DX_LIBS
-	#ifndef D3DERR_INVALIDCALL
-		#define D3DERR_INVALIDCALL MAKE_D3DHRESULT(2156)
-	#endif//D3DERR_INVALIDCALL
-	#ifndef D3DERR_WASSTILLDRAWING
-		#define D3DERR_WASSTILLDRAWING MAKE_D3DHRESULT(540)
-	#endif//D3DERR_WASSTILLDRAWING
-#endif
 
 static FString GetD3D11DeviceHungErrorString(HRESULT ErrorCode)
 {
@@ -54,16 +39,14 @@ FString GetD3D11ErrorString(HRESULT ErrorCode, ID3D11Device* Device)
 		D3DERR(S_OK);
 		D3DERR(D3D11_ERROR_FILE_NOT_FOUND)
 		D3DERR(D3D11_ERROR_TOO_MANY_UNIQUE_STATE_OBJECTS)
-#if WITH_D3DX_LIBS
-		D3DERR(D3DERR_INVALIDCALL)
-		D3DERR(D3DERR_WASSTILLDRAWING)
-#endif	//WITH_D3DX_LIBS
 		D3DERR(E_FAIL)
 		D3DERR(E_INVALIDARG)
 		D3DERR(E_OUTOFMEMORY)
 		D3DERR(DXGI_ERROR_INVALID_CALL)
+		D3DERR(DXGI_ERROR_WAS_STILL_DRAWING)
 		D3DERR(E_NOINTERFACE)
 		D3DERR(DXGI_ERROR_DEVICE_REMOVED)
+		D3DERR(DXGI_ERROR_NOT_CURRENTLY_AVAILABLE)
 		default: ErrorCodeText = FString::Printf(TEXT("%08X"),(int32)ErrorCode);
 	}
 
@@ -77,50 +60,6 @@ FString GetD3D11ErrorString(HRESULT ErrorCode, ID3D11Device* Device)
 }
 
 #undef D3DERR
-
-const TCHAR* GetD3D11TextureFormatString(DXGI_FORMAT TextureFormat)
-{
-	static const TCHAR* EmptyString = TEXT("");
-	const TCHAR* TextureFormatText = EmptyString;
-#define D3DFORMATCASE(x) case x: TextureFormatText = TEXT(#x); break;
-	switch(TextureFormat)
-	{
-		D3DFORMATCASE(DXGI_FORMAT_R8G8B8A8_UNORM)
-		D3DFORMATCASE(DXGI_FORMAT_B8G8R8A8_UNORM)
-		D3DFORMATCASE(DXGI_FORMAT_B8G8R8X8_UNORM)
-		D3DFORMATCASE(DXGI_FORMAT_BC1_UNORM)
-		D3DFORMATCASE(DXGI_FORMAT_BC2_UNORM)
-		D3DFORMATCASE(DXGI_FORMAT_BC3_UNORM)
-		D3DFORMATCASE(DXGI_FORMAT_BC4_UNORM)
-		D3DFORMATCASE(DXGI_FORMAT_R16G16B16A16_FLOAT)
-		D3DFORMATCASE(DXGI_FORMAT_R32G32B32A32_FLOAT)
-		D3DFORMATCASE(DXGI_FORMAT_UNKNOWN)
-		D3DFORMATCASE(DXGI_FORMAT_R8_UNORM)
-		D3DFORMATCASE(DXGI_FORMAT_D32_FLOAT_S8X24_UINT)
-		D3DFORMATCASE(DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS)
-		D3DFORMATCASE(DXGI_FORMAT_R32G8X24_TYPELESS)
-		D3DFORMATCASE(DXGI_FORMAT_D24_UNORM_S8_UINT)
-		D3DFORMATCASE(DXGI_FORMAT_R24_UNORM_X8_TYPELESS)
-		D3DFORMATCASE(DXGI_FORMAT_R32_FLOAT)
-		D3DFORMATCASE(DXGI_FORMAT_R16G16_UINT)
-		D3DFORMATCASE(DXGI_FORMAT_R16G16_UNORM)
-		D3DFORMATCASE(DXGI_FORMAT_R16G16_SNORM)
-		D3DFORMATCASE(DXGI_FORMAT_R16G16_FLOAT)
-		D3DFORMATCASE(DXGI_FORMAT_R32G32_FLOAT)
-		D3DFORMATCASE(DXGI_FORMAT_R10G10B10A2_UNORM)
-		D3DFORMATCASE(DXGI_FORMAT_R16G16B16A16_UINT)
-		D3DFORMATCASE(DXGI_FORMAT_R8G8_SNORM)
-		D3DFORMATCASE(DXGI_FORMAT_BC5_UNORM)
-		D3DFORMATCASE(DXGI_FORMAT_R1_UNORM)
-		D3DFORMATCASE(DXGI_FORMAT_R8G8B8A8_TYPELESS)
-		D3DFORMATCASE(DXGI_FORMAT_B8G8R8A8_TYPELESS)
-		D3DFORMATCASE(DXGI_FORMAT_BC7_UNORM)
-		D3DFORMATCASE(DXGI_FORMAT_BC6H_UF16)
-		default: TextureFormatText = EmptyString;
-	}
-#undef D3DFORMATCASE
-	return TextureFormatText;
-}
 
 static FString GetD3D11TextureFlagString(uint32 TextureFlags)
 {
@@ -160,14 +99,29 @@ static void TerminateOnDeviceRemoved(HRESULT D3DResult, ID3D11Device* Direct3DDe
 	if (D3DResult == DXGI_ERROR_DEVICE_REMOVED)
 	{
 #if NV_AFTERMATH
-		uint32 Result = 0xffffffff;
+		GFSDK_Aftermath_Result Result{};
 		uint32 bDeviceActive = 0;
 		if (GDX11NVAfterMathEnabled)
 		{
+			// Wait until the Aftermath crash dump has been handled.
+			GFSDK_Aftermath_CrashDump_Status AftermathStatus{};
+			GFSDK_Aftermath_GetCrashDumpStatus(&AftermathStatus);
+			if (AftermathStatus != GFSDK_Aftermath_CrashDump_Status_Unknown && AftermathStatus != GFSDK_Aftermath_CrashDump_Status_NotStarted)
+			{
+				const float StartTime = FPlatformTime::Seconds();
+				const float EndTime = StartTime + GDX11NVAfterMathDumpWaitTime;
+				while (AftermathStatus != GFSDK_Aftermath_CrashDump_Status_CollectingDataFailed
+					&& AftermathStatus != GFSDK_Aftermath_CrashDump_Status_Finished
+					&& FPlatformTime::Seconds() < EndTime)
+				{
+					FPlatformProcess::Sleep(0.01f);
+					GFSDK_Aftermath_GetCrashDumpStatus(&AftermathStatus);
+				}
+			}
+
 			GFSDK_Aftermath_Device_Status Status;
-			auto Res = GFSDK_Aftermath_GetDeviceStatus(&Status);
-			Result = uint32(Res);
-			if (Res == GFSDK_Aftermath_Result_Success)
+			Result = GFSDK_Aftermath_GetDeviceStatus(&Status);
+			if (Result == GFSDK_Aftermath_Result_Success)
 			{
 				bDeviceActive = Status == GFSDK_Aftermath_Device_Status_Active ? 1 : 0;
 			}
@@ -176,6 +130,9 @@ static void TerminateOnDeviceRemoved(HRESULT D3DResult, ID3D11Device* Direct3DDe
 #else
 		UE_LOG(LogD3D11RHI, Log, TEXT("[Aftermath] NV_AFTERMATH is not set"));
 #endif
+
+		// Report the GPU crash which will raise the exception
+		ReportGPUCrash(TEXT("GPU Crash dump Triggered"), nullptr);
 
 		GIsGPUCrashed = true;		
 		if (Direct3DDevice)
@@ -199,14 +156,29 @@ static void TerminateOnDeviceRemoved(HRESULT D3DResult, ID3D11Device* Direct3DDe
 		}
 		else
 		{
-			UE_LOG(LogD3D11RHI, Fatal, TEXT("Unreal Engine is exiting due to D3D device being lost. D3D device was not available to assertain DXGI cause."));
+			UE_LOG(LogD3D11RHI, Fatal, TEXT("Unreal Engine is exiting due to D3D device being lost. D3D device was not available to determine DXGI cause."));
 		}
 
 		// Workaround for the fact that in non-monolithic builds the exe gets into a weird state and exception handling fails. 
 		// @todo investigate why non-monolithic builds fail to capture the exception when graphics driver crashes.
 #if !IS_MONOLITHIC
-		FPlatformMisc::RequestExit(true);
+		FPlatformMisc::RequestExit(true, TEXT("TerminateOnDeviceRemoved"));
 #endif
+	}
+}
+
+void GetAndLogMemoryInfo(const FD3D11Adapter& InAdapter, uint64& OutVRAMBudgetBytes, uint64& OutVRAMUsageBytes)
+{
+	TRefCountPtr<IDXGIAdapter3> Adapter3;
+	const HRESULT AdapterHR = InAdapter.DXGIAdapter->QueryInterface(IID_PPV_ARGS(Adapter3.GetInitReference()));
+	if (SUCCEEDED(AdapterHR))
+	{
+		DXGI_QUERY_VIDEO_MEMORY_INFO LocalMemoryInfo{};
+		VERIFYD3D11RESULT(Adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &LocalMemoryInfo));
+		UE_LOG(LogD3D11RHI, Error, TEXT("\tBudget:\t%7.2f MB"), LocalMemoryInfo.Budget / (1024.0f * 1024));
+		UE_LOG(LogD3D11RHI, Error, TEXT("\tUsed:\t%7.2f MB"), LocalMemoryInfo.CurrentUsage / (1024.0f * 1024));
+		OutVRAMBudgetBytes = LocalMemoryInfo.Budget;
+		OutVRAMUsageBytes = LocalMemoryInfo.CurrentUsage;
 	}
 }
 
@@ -214,6 +186,10 @@ static void TerminateOnOutOfMemory(HRESULT D3DResult, bool bCreatingTextures)
 {
 	if (D3DResult == E_OUTOFMEMORY)
 	{
+		uint64 VRAMBudgetBytes = 0, VRAMUsageBytes = 0;
+		GetAndLogMemoryInfo(GD3D11RHI->GetAdapter(), VRAMBudgetBytes, VRAMUsageBytes);
+		FCoreDelegates::GetGPUOutOfMemoryDelegate().Broadcast(VRAMBudgetBytes, VRAMUsageBytes);
+
 		if (bCreatingTextures)
 		{
 			FPlatformMisc::MessageBoxExt(EAppMsgType::Ok, *LOCTEXT("OutOfVideoMemoryTextures", "Out of video memory trying to allocate a texture! Make sure your video card has the minimum required memory, try lowering the resolution and/or closing other applications that are running. Exiting...").ToString(), TEXT("Error"));
@@ -225,15 +201,17 @@ static void TerminateOnOutOfMemory(HRESULT D3DResult, bool bCreatingTextures)
 #if STATS
 		GetRendererModule().DebugLogOnCrash();
 #endif
-		FPlatformMisc::RequestExit(true);
+		static IConsoleVariable* GPUCrashOOM = IConsoleManager::Get().FindConsoleVariable(TEXT("r.GPUCrashOnOutOfMemory"));
+		if (GPUCrashOOM && GPUCrashOOM->GetInt())
+		{
+			UE_LOG(LogD3D11RHI, Fatal, TEXT("Out of video memory trying to allocate a rendering resource"));
+		}
+		else
+		{
+			FPlatformMisc::RequestExit(true, TEXT("TerminateOnOutOfMemory"));
+		}
 	}
 }
-
-
-#ifndef MAKE_D3DHRESULT
-	#define _FACD3D						0x876
-	#define MAKE_D3DHRESULT( code)		MAKE_HRESULT( 1, _FACD3D, code )
-#endif	//MAKE_D3DHRESULT
 
 void VerifyD3D11ResultNoExit(HRESULT D3DResult, const ANSICHAR* Code, const ANSICHAR* Filename, uint32 Line, ID3D11Device* Device)
 {
@@ -241,7 +219,7 @@ void VerifyD3D11ResultNoExit(HRESULT D3DResult, const ANSICHAR* Code, const ANSI
 
 	const FString& ErrorString = GetD3D11ErrorString(D3DResult, Device);
 
-	UE_LOG(LogD3D11RHI, Error, TEXT("%s failed \n at %s:%u \n with error %s Error Code List: https://docs.microsoft.com/en-us/windows/desktop/direct3ddxgi/dxgi-error"), ANSI_TO_TCHAR(Code), ANSI_TO_TCHAR(Filename), Line, *ErrorString);
+	UE_LOG(LogD3D11RHI, Error, TEXT("%s failed with error %s\n at %s:%u\n Error Code List: https://docs.microsoft.com/en-us/windows/desktop/direct3ddxgi/dxgi-error"), ANSI_TO_TCHAR(Code), *ErrorString, ANSI_TO_TCHAR(Filename), Line);
 }
 
 void VerifyD3D11Result(HRESULT D3DResult,const ANSICHAR* Code,const ANSICHAR* Filename,uint32 Line, ID3D11Device* Device)
@@ -250,12 +228,12 @@ void VerifyD3D11Result(HRESULT D3DResult,const ANSICHAR* Code,const ANSICHAR* Fi
 
 	const FString& ErrorString = GetD3D11ErrorString(D3DResult, Device);
 
-	UE_LOG(LogD3D11RHI, Error, TEXT("%s failed \n at %s:%u \n with error %s"), ANSI_TO_TCHAR(Code), ANSI_TO_TCHAR(Filename), Line, *ErrorString);
+	UE_LOG(LogD3D11RHI, Error, TEXT("%s failed with error %s\n at %s:%u"), ANSI_TO_TCHAR(Code), *ErrorString, ANSI_TO_TCHAR(Filename), Line);
 
 	TerminateOnDeviceRemoved(D3DResult, Device);
 	TerminateOnOutOfMemory(D3DResult, false);
 
-	UE_LOG(LogD3D11RHI, Fatal,TEXT("%s failed \n at %s:%u \n with error %s"),ANSI_TO_TCHAR(Code),ANSI_TO_TCHAR(Filename),Line,*ErrorString);
+	UE_LOG(LogD3D11RHI, Fatal,TEXT("%s failed with error %s\n at %s:%u"),ANSI_TO_TCHAR(Code), *ErrorString, ANSI_TO_TCHAR(Filename), Line);
 }
 
 void VerifyD3D11ShaderResult(FRHIShader* Shader, HRESULT D3DResult, const ANSICHAR* Code, const ANSICHAR* Filename, uint32 Line, ID3D11Device* Device)
@@ -264,37 +242,35 @@ void VerifyD3D11ShaderResult(FRHIShader* Shader, HRESULT D3DResult, const ANSICH
 
 	const FString& ErrorString = GetD3D11ErrorString(D3DResult, Device);
 
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
-	if (Shader->ShaderName.Len())
-	{
-		UE_LOG(LogD3D11RHI, Error, TEXT("%s failed trying to create shader %s\n at %s:%u \n with error %s"), ANSI_TO_TCHAR(Code), *Shader->ShaderName, ANSI_TO_TCHAR(Filename), Line, *ErrorString);
-		TerminateOnDeviceRemoved(D3DResult, Device);
-		TerminateOnOutOfMemory(D3DResult, false);
+	UE_LOG(LogD3D11RHI, Error, TEXT("%s failed trying to create shader '%s' with error %s\n at %s:%u"), ANSI_TO_TCHAR(Code), Shader->GetShaderName(), *ErrorString, ANSI_TO_TCHAR(Filename), Line);
+	TerminateOnDeviceRemoved(D3DResult, Device);
+	TerminateOnOutOfMemory(D3DResult, false);
 
-		UE_LOG(LogD3D11RHI, Fatal, TEXT("%s failed trying to create shader %s \n at %s:%u \n with error %s"), ANSI_TO_TCHAR(Code), *Shader->ShaderName, ANSI_TO_TCHAR(Filename), Line, *ErrorString);
-	}
-	else
-#endif
-	{
-		VerifyD3D11Result(D3DResult, Code, Filename, Line, Device);
-	}
+	UE_LOG(LogD3D11RHI, Fatal, TEXT("%s failed trying to create shader '%s' with error %s\n at %s:%u"), ANSI_TO_TCHAR(Code), Shader->GetShaderName(), *ErrorString, ANSI_TO_TCHAR(Filename), Line);
 }
 
 void VerifyD3D11CreateTextureResult(HRESULT D3DResult, int32 UEFormat,const ANSICHAR* Code,const ANSICHAR* Filename,uint32 Line,uint32 SizeX,uint32 SizeY,uint32 SizeZ,uint8 D3DFormat,uint32 NumMips,uint32 Flags,
 	D3D11_USAGE Usage, uint32 CPUAccessFlags, uint32 MiscFlags, uint32 SampleCount, uint32 SampleQuality,
-	const void* SubResPtr, uint32 SubResPitch, uint32 SubResSlicePitch, ID3D11Device* Device)
+	const void* SubResPtr, uint32 SubResPitch, uint32 SubResSlicePitch, ID3D11Device* Device, const TCHAR* DebugName)
 {
 	check(FAILED(D3DResult));
 
 	const FString ErrorString = GetD3D11ErrorString(D3DResult, 0);
-	const TCHAR* D3DFormatString = GetD3D11TextureFormatString((DXGI_FORMAT)D3DFormat);
+	const TCHAR* D3DFormatString = UE::DXGIUtilities::GetFormatString((DXGI_FORMAT)D3DFormat);
+
+	FString DebugInfoString;
+
+	if (FScopedDebugInfo* DebugInfo = FScopedDebugInfo::GetDebugInfoStack())
+	{
+		DebugInfoString = DebugInfo->GetFunctionName();
+	}
 
 	UE_LOG(LogD3D11RHI, Error,
-		TEXT("%s failed \n at %s:%u \n with error %s, \n Size=%ix%ix%i PF=%d D3DFormat=%s(0x%08X), NumMips=%i, Flags=%s, Usage:0x%x, CPUFlags:0x%x, MiscFlags:0x%x, SampleCount:0x%x, SampleQuality:0x%x, SubresPtr:0x%p, SubresPitch:%i, SubresSlicePitch:%i"),
+		TEXT("%s failed with error %s\n at %s:%u\n Size=%ix%ix%i PF=%d D3DFormat=%s(0x%08X), NumMips=%i, Flags=%s, Usage:0x%x, CPUFlags:0x%x, MiscFlags:0x%x, SampleCount:0x%x, SampleQuality:0x%x, SubresPtr:0x%p, SubresPitch:%i, SubresSlicePitch:%i, Name:'%s', DebugInfo: %s"),
 		ANSI_TO_TCHAR(Code),
+		*ErrorString,
 		ANSI_TO_TCHAR(Filename),
 		Line,
-		*ErrorString,
 		SizeX,
 		SizeY,
 		SizeZ,
@@ -310,17 +286,19 @@ void VerifyD3D11CreateTextureResult(HRESULT D3DResult, int32 UEFormat,const ANSI
 		SampleQuality,
 		SubResPtr,
 		SubResPitch,
-		SubResSlicePitch);
+		SubResSlicePitch,
+		DebugName ? DebugName : TEXT(""),
+		*DebugInfoString);
 
 	TerminateOnDeviceRemoved(D3DResult, Device);
 	TerminateOnOutOfMemory(D3DResult, true);
 
 	UE_LOG(LogD3D11RHI, Fatal,
-		TEXT("%s failed \n at %s:%u \n with error %s, \n Size=%ix%ix%i PF=%d Format=%s(0x%08X), NumMips=%i, Flags=%s, Usage:0x%x, CPUFlags:0x%x, MiscFlags:0x%x, SampleCount:0x%x, SampleQuality:0x%x, SubresPtr:0x%p, SubresPitch:%i, SubresSlicePitch:%i"),
+		TEXT("%s failed with error %s\n at %s:%u\n Size=%ix%ix%i PF=%d Format=%s(0x%08X), NumMips=%i, Flags=%s, Usage:0x%x, CPUFlags:0x%x, MiscFlags:0x%x, SampleCount:0x%x, SampleQuality:0x%x, SubresPtr:0x%p, SubresPitch:%i, SubresSlicePitch:%i"),
 		ANSI_TO_TCHAR(Code),
+		*ErrorString,
 		ANSI_TO_TCHAR(Filename),
 		Line,
-		*ErrorString,
 		SizeX,
 		SizeY,
 		SizeZ,
@@ -351,15 +329,15 @@ void VerifyD3D11ResizeViewportResult(
 	check(FAILED(D3DResult));
 
 	const FString ErrorString = GetD3D11ErrorString(D3DResult, 0);
-	const TCHAR* OldStateFormat = GetD3D11TextureFormatString(OldState.Format);
-	const TCHAR* NewStateFormat = GetD3D11TextureFormatString(NewState.Format);
+	const TCHAR* OldStateFormat = UE::DXGIUtilities::GetFormatString(OldState.Format);
+	const TCHAR* NewStateFormat = UE::DXGIUtilities::GetFormatString(NewState.Format);
 
 	UE_LOG(LogD3D11RHI, Error,
-		TEXT("%s failed \n at %s:%u \n with error %s, \n (Size=%ix%i Fullscreen=%d Format=%s(0x%08X)) -> (Size=%ix%i Fullscreen=%d Format=%s(0x%08X))"),
+		TEXT("%s failed with error %s\n at %s:%u\n (Size=%ix%i Fullscreen=%d Format=%s(0x%08X)) -> (Size=%ix%i Fullscreen=%d Format=%s(0x%08X))"),
 		ANSI_TO_TCHAR(Code),
+		*ErrorString,
 		ANSI_TO_TCHAR(Filename),
 		Line,
-		*ErrorString,
 		OldState.SizeX,
 		OldState.SizeY,
 		OldState.bIsFullscreen ? 1 : 0,
@@ -375,11 +353,11 @@ void VerifyD3D11ResizeViewportResult(
 	TerminateOnOutOfMemory(D3DResult, true);
 
 	UE_LOG(LogD3D11RHI, Fatal,
-		TEXT("%s failed \n at %s:%u \n with error %s, \n (Size=%ix%i Fullscreen=%d Format=%s(0x%08X)) -> (Size=%ix%i Fullscreen=%d Format=%s(0x%08X))"),
+		TEXT("%s failed with error %s\n at %s:%u\n (Size=%ix%i Fullscreen=%d Format=%s(0x%08X)) -> (Size=%ix%i Fullscreen=%d Format=%s(0x%08X))"),
 		ANSI_TO_TCHAR(Code),
+		*ErrorString,
 		ANSI_TO_TCHAR(Filename),
 		Line,
-		*ErrorString,
 		OldState.SizeX,
 		OldState.SizeY,
 		OldState.bIsFullscreen ? 1 : 0,
@@ -390,6 +368,55 @@ void VerifyD3D11ResizeViewportResult(
 		NewState.bIsFullscreen ? 1 : 0,
 		NewStateFormat,
 		NewState.Format);
+}
+
+void VerifyD3D11CreateViewResult(HRESULT D3DResult, const ANSICHAR* Code, const ANSICHAR* Filename, uint32 Line, ID3D11Device* Device, const FString& ResourceName, const D3D11_UNORDERED_ACCESS_VIEW_DESC& Desc)
+{
+	check(FAILED(D3DResult));
+
+	D3D11_FEATURE_DATA_FORMAT_SUPPORT FormatSupport{};
+	FormatSupport.InFormat = Desc.Format;
+	Device->CheckFeatureSupport(D3D11_FEATURE_FORMAT_SUPPORT, &FormatSupport, sizeof(FormatSupport));
+
+	D3D11_FEATURE_DATA_FORMAT_SUPPORT2 FormatSupport2{};
+	FormatSupport2.InFormat = Desc.Format;
+	Device->CheckFeatureSupport(D3D11_FEATURE_FORMAT_SUPPORT2, &FormatSupport2, sizeof(FormatSupport2));
+
+	const TCHAR* ViewFormat = UE::DXGIUtilities::GetFormatString(Desc.Format);
+
+	const FString& ErrorString = GetD3D11ErrorString(D3DResult, Device);
+
+	UE_LOG(LogD3D11RHI, Error, TEXT("%s failed with error %s (Name='%s', Format='%s' (0x%08X), FormatSupport=0x%08X, FormatSupport2=0x%08X)\n at %s:%u"),
+		ANSI_TO_TCHAR(Code), *ErrorString,
+		*ResourceName, ViewFormat, Desc.Format, FormatSupport.OutFormatSupport, FormatSupport2.OutFormatSupport2,
+		ANSI_TO_TCHAR(Filename), Line);
+
+	TerminateOnDeviceRemoved(D3DResult, Device);
+	TerminateOnOutOfMemory(D3DResult, false);
+
+	UE_LOG(LogD3D11RHI, Fatal, TEXT("%s failed with error %s (Name='%s', Format='%s' (0x%08X), FormatSupport=0x%08X, FormatSupport2=0x%08X)\n at %s:%u"),
+		ANSI_TO_TCHAR(Code), *ErrorString,
+		*ResourceName, ViewFormat, Desc.Format, FormatSupport.OutFormatSupport, FormatSupport2.OutFormatSupport2,
+		ANSI_TO_TCHAR(Filename), Line);
+}
+
+void VerifyD3D11CreateViewResult(HRESULT D3DResult, const ANSICHAR* Code, const ANSICHAR* Filename, uint32 Line, ID3D11Device* Device, FRHITexture* Texture, const D3D11_UNORDERED_ACCESS_VIEW_DESC& Desc)
+{
+	const FString TextureName = Texture ? Texture->GetName().ToString() : FString(TEXT("<Unknown>"));
+	VerifyD3D11CreateViewResult(D3DResult, Code, Filename, Line, Device, TextureName, Desc);
+}
+
+void VerifyD3D11CreateViewResult(HRESULT D3DResult, const ANSICHAR* Code, const ANSICHAR* Filename, uint32 Line, ID3D11Device* Device, FRHIBuffer* Buffer, const D3D11_UNORDERED_ACCESS_VIEW_DESC& Desc)
+{
+	FString BufferName = FString(TEXT("<Unknown>"));
+#if ENABLE_RHI_VALIDATION
+	if (Buffer)
+	{
+		BufferName = Buffer->GetDebugName();
+	}
+#endif
+
+	VerifyD3D11CreateViewResult(D3DResult, Code, Filename, Line, Device, BufferName, Desc);
 }
 
 void VerifyComRefCount(IUnknown* Object,int32 ExpectedRefs,const TCHAR* Code,const TCHAR* Filename,int32 Line)

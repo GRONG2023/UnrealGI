@@ -1,14 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "DataTableUtils.h"
-#include "UObject/UnrealType.h"
+#include "UObject/FieldPathProperty.h"
 #include "UObject/TextProperty.h"
 #include "Engine/DataTable.h"
 #include "Engine/UserDefinedEnum.h"
-#include "Engine/UserDefinedStruct.h"
-#include "Policies/PrettyJsonPrintPolicy.h"
 #include "Serialization/JsonWriter.h"
-#include "UObject/PropertyPortFlags.h"
 #include "UObject/EnumProperty.h"
 #include "DataTableJSON.h"
 
@@ -30,7 +27,7 @@ void AssignStringToPropertyDirect(const FString& InString, const FProperty* InPr
 {
 	auto DoImportText = [&](const FString& InStringToImport)
 	{
-		InProp->ImportText(*InStringToImport, InData, InPortFlags, nullptr, &OutImportError);
+		InProp->ImportText_Direct(*InStringToImport, InData, nullptr, InPortFlags, &OutImportError);
 	};
 
 	bool bNeedsImport = true;
@@ -145,21 +142,17 @@ void GetPropertyValueAsStringDirect(const FProperty* InProp, const uint8* InData
 
 			OutString.AppendChar('(');
 
-			int32 NumWrittenSetEntries = 0;
 			FScriptSetHelper SetHelper(SetProp, InData);
-			for (int32 SetSparseIndex = 0; SetSparseIndex < SetHelper.GetMaxIndex(); ++SetSparseIndex)
+			for (FScriptSetHelper::FIterator It(SetHelper); It; ++It)
 			{
-				if (SetHelper.IsValidIndex(SetSparseIndex))
-				{
-					if (NumWrittenSetEntries++ > 0)
+					if (It.GetLogicalIndex() > 0)
 					{
 						OutString.AppendChar(',');
 						OutString.AppendChar(' ');
 					}
 
-					const uint8* SetEntryData = SetHelper.GetElementPtr(SetSparseIndex);
+					const uint8* SetEntryData = SetHelper.GetElementPtr(It);
 					OutString.Append(ExportStructAsJson(StructInner->Struct, SetEntryData));
-				}
 			}
 
 			OutString.AppendChar(')');
@@ -169,36 +162,32 @@ void GetPropertyValueAsStringDirect(const FProperty* InProp, const uint8* InData
 		{
 			OutString.AppendChar('(');
 
-			int32 NumWrittenMapEntries = 0;
 			FScriptMapHelper MapHelper(MapProp, InData);
-			for (int32 MapSparseIndex = 0; MapSparseIndex < MapHelper.GetMaxIndex(); ++MapSparseIndex)
+			for (FScriptMapHelper::FIterator It(MapHelper); It; ++It)
 			{
-				if (MapHelper.IsValidIndex(MapSparseIndex))
+				if (It.GetLogicalIndex() > 0)
 				{
-					if (NumWrittenMapEntries++ > 0)
-					{
-						OutString.AppendChar(',');
-						OutString.AppendChar(' ');
-					}
+					OutString.AppendChar(',');
+					OutString.AppendChar(' ');
+				}
 
-					const uint8* MapKeyData = MapHelper.GetKeyPtr(MapSparseIndex);
-					const uint8* MapValueData = MapHelper.GetValuePtr(MapSparseIndex);
+				const uint8* MapKeyData = MapHelper.GetKeyPtr(It);
+				const uint8* MapValueData = MapHelper.GetValuePtr(It);
 
-					OutString.AppendChar('"');
-					GetPropertyValueAsStringDirect(MapHelper.GetKeyProperty(), MapKeyData, InPortFlags, InDTExportFlags, OutString);
-					OutString.AppendChar('"');
+				OutString.AppendChar('"');
+				GetPropertyValueAsStringDirect(MapHelper.GetKeyProperty(), MapKeyData, InPortFlags, InDTExportFlags, OutString);
+				OutString.AppendChar('"');
 
-					OutString.Append(TEXT(" = "));
+				OutString.Append(TEXT(" = "));
 
-					if (MapHelper.GetValueProperty()->IsA<FStructProperty>() && EnumHasAnyFlags(InDTExportFlags, EDataTableExportFlags::UseJsonObjectsForStructs))
-					{
-						const FStructProperty* StructMapValue = CastFieldChecked<const FStructProperty>(MapHelper.GetValueProperty());
-						OutString.Append(ExportStructAsJson(StructMapValue->Struct, MapValueData));
-					}
-					else
-					{
-						GetPropertyValueAsStringDirect(MapHelper.GetValueProperty(), MapValueData, InPortFlags, InDTExportFlags, OutString);
-					}
+				if (MapHelper.GetValueProperty()->IsA<FStructProperty>() && EnumHasAnyFlags(InDTExportFlags, EDataTableExportFlags::UseJsonObjectsForStructs))
+				{
+					const FStructProperty* StructMapValue = CastFieldChecked<const FStructProperty>(MapHelper.GetValueProperty());
+					OutString.Append(ExportStructAsJson(StructMapValue->Struct, MapValueData));
+				}
+				else
+				{
+					GetPropertyValueAsStringDirect(MapHelper.GetValueProperty(), MapValueData, InPortFlags, InDTExportFlags, OutString);
 				}
 			}
 
@@ -381,10 +370,10 @@ FText DataTableUtils::GetPropertyValueAsText(const FProperty* InProp, const uint
 	return Result;
 }
 
-TArray<FName> DataTableUtils::GetStructPropertyNames(UStruct* InStruct)
+TArray<FName> DataTableUtils::GetStructPropertyNames(const UStruct* InStruct)
 {
 	TArray<FName> PropNames;
-	for (TFieldIterator<FProperty> It(InStruct); It; ++It)
+	for (TFieldIterator<const FProperty> It(InStruct); It; ++It)
 	{
 		PropNames.Add(It->GetFName());
 	}
@@ -396,7 +385,7 @@ FName DataTableUtils::MakeValidName(const FString& InString)
 	FString InvalidChars(INVALID_NAME_CHARACTERS);
 
 	FString FixedString;
-	TArray<TCHAR>& FixedCharArray = FixedString.GetCharArray();
+	TArray<TCHAR, FString::AllocatorType>& FixedCharArray = FixedString.GetCharArray();
 
 	// Iterate over input string characters
 	for(int32 CharIdx=0; CharIdx<InString.Len(); CharIdx++)

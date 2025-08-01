@@ -15,13 +15,13 @@
 #include "Misc/App.h"
 #include "EngineGlobals.h"
 #include "Modules/ModuleInterface.h"
-#include "RenderingThread.h"
 #include "EditorModeManager.h"
 #include "EditorDirectories.h"
 #include "Misc/OutputDeviceConsole.h"
 #include "UnrealEngine.h"
 #include "UnrealEdMisc.h"
 #include "EditorModes.h"
+#include "Framework/Application/SlateApplication.h"
 #include "DesktopPlatformModule.h"
 
 #include "DebugToolExec.h"
@@ -45,10 +45,26 @@ DEFINE_LOG_CATEGORY_STATIC(LogUnrealEd, Log, All);
 /**
  * Provides access to the FEditorModeTools for the level editor
  */
-class FEditorModeTools& GLevelEditorModeTools()
+namespace Internal
 {
-	static FEditorModeTools* EditorModeToolsSingleton = new FEditorModeTools;
-	return *EditorModeToolsSingleton;
+	static TSharedPtr<FEditorModeTools>& GetGlobalModeManager()
+	{
+		checkf(!IsRunningCommandlet(), TEXT("The global mode manager should not be created or accessed in a commandlet environment. Check that your mode or module is not accessing the global mode tools or that scriptable features of modes have been moved to subsystems."));
+
+		static TSharedPtr<FEditorModeTools> EditorModeToolsSingleton = MakeShared<FEditorModeTools>();
+		return EditorModeToolsSingleton;
+	}
+};
+
+bool GLevelEditorModeToolsIsValid()
+{
+	return Internal::GetGlobalModeManager().IsValid();
+}
+
+FEditorModeTools& GLevelEditorModeTools()
+{
+	check(GLevelEditorModeToolsIsValid());
+	return *Internal::GetGlobalModeManager().Get();
 }
 
 FLevelEditorViewportClient* GCurrentLevelEditingViewportClient = NULL;
@@ -81,6 +97,8 @@ void CheckAndMaybeGoToVRModeInternal(const bool bIsImmersive)
 
 int32 EditorInit( IEngineLoop& EngineLoop )
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(EditorInit);
+
 	// Create debug exec.	
 	GDebugToolExec = new FDebugToolExec;
 
@@ -109,16 +127,25 @@ int32 EditorInit( IEngineLoop& EngineLoop )
 
 	SlowTask.EnterProgressFrame(40);
 
+	// Set up the actor folders singleton
+	FActorFolders::Get();
+
 	// Initialize the misc editor
 	FUnrealEdMisc::Get().OnInit();
+	FCoreDelegates::OnExit.AddLambda([]()
+	{
+		// Shutdown the global static mode manager
+		if (Internal::GetGlobalModeManager().IsValid())
+		{
+			GLevelEditorModeTools().SetDefaultMode(FBuiltinEditorModes::EM_Default);
+			Internal::GetGlobalModeManager().Reset();
+		}
+	});
 	
 	SlowTask.EnterProgressFrame(10);
 
 	// Prime our array of default directories for loading and saving content files to
 	FEditorDirectories::Get().LoadLastDirectories();
-
-	// Set up the actor folders singleton
-	FActorFolders::Init();
 
 	// Cache the available targets for the current project, so we can display the appropriate options in the package project menu
 	FDesktopPlatformModule::Get()->GetTargetsForCurrentProject();
@@ -130,21 +157,30 @@ int32 EditorInit( IEngineLoop& EngineLoop )
 
 	// Are we in immersive mode?
 	const bool bIsImmersive = FPaths::IsProjectFilePathSet() && FParse::Param( FCommandLine::Get(), TEXT( "immersive" ) );
+	const bool bIsPlayInEditorRequested = FPaths::IsProjectFilePathSet() && FParse::Param(FCommandLine::Get(), TEXT("pie"));
 
 	// Do final set up on the editor frame and show it
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(EditorInit::MainFrame);
 
-		// Tear down rendering thread once instead of doing it for every window being resized.
-		SCOPED_SUSPEND_RENDERING_THREAD(true);
-
-		// Startup Slate main frame and other editor windows
+		// Startup Slate main frame and other editor windows if possible
 		{
 			const bool bStartImmersive = bIsImmersive;
-			const bool bStartPIE = bIsImmersive;
+			const bool bStartPIE = bIsImmersive || bIsPlayInEditorRequested;
 
 			IMainFrameModule& MainFrameModule = FModuleManager::LoadModuleChecked<IMainFrameModule>(TEXT("MainFrame"));
-			MainFrameModule.CreateDefaultMainFrame( bStartImmersive, bStartPIE );
+			if (!MainFrameModule.IsWindowInitialized())
+			{
+				if (FSlateApplication::IsInitialized())
+				{
+					MainFrameModule.CreateDefaultMainFrame(bStartImmersive, bStartPIE);
+				}
+				else
+				{
+					RequestEngineExit(TEXT("Slate Application terminated or not initialized for MainFrame"));
+					return 1;
+				}
+			}
 		}
 	}
 
@@ -189,15 +225,14 @@ int32 EditorInit( IEngineLoop& EngineLoop )
 
 int32 EditorReinit()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(EditorReinit);
+
 	// Are we in immersive mode?
 	const bool bIsImmersive = FPaths::IsProjectFilePathSet() && FParse::Param(FCommandLine::Get(), TEXT("immersive"));
 	// Do final set up on the editor frame and show it
 	{
 		const bool bStartImmersive = bIsImmersive;
 		const bool bStartPIE = bIsImmersive;
-
-		// Tear down rendering thread once instead of doing it for every window being resized.
-		SCOPED_SUSPEND_RENDERING_THREAD(true);
 
 		// Startup Slate main frame and other editor windows
 		IMainFrameModule& MainFrameModule = FModuleManager::LoadModuleChecked<IMainFrameModule>(TEXT("MainFrame"));
@@ -212,16 +247,12 @@ int32 EditorReinit()
 void EditorExit()
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(EditorExit);
-
-	GLevelEditorModeTools().SetDefaultMode(FBuiltinEditorModes::EM_Default);
-	GLevelEditorModeTools().DeactivateAllModes(); // this also activates the default mode
+	LLM_SCOPE(ELLMTag::EngineMisc);
 
 	// Save out any config settings for the editor so they don't get lost
 	GEditor->SaveConfig();
 	GLevelEditorModeTools().SaveConfig();
 
-	// Clean up the actor folders singleton
-	FActorFolders::Cleanup();
 
 	// Save out default file directories
 	FEditorDirectories::Get().SaveLastDirectories();

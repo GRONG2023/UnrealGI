@@ -1,15 +1,20 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Tools/SequencerEditTool_Movement.h"
+#include "MVVM/ViewModels/SectionModel.h"
+#include "MVVM/ViewModels/SequencerEditorViewModel.h"
+#include "MVVM/Selection/Selection.h"
 #include "Editor.h"
 #include "Fonts/FontMeasure.h"
+#include "MVVM/Views/STrackAreaView.h"
 #include "Styling/CoreStyle.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "SequencerCommonHelpers.h"
 #include "SSequencer.h"
-#include "ISequencerHotspot.h"
+#include "MVVM/Views/ITrackAreaHotspot.h"
 #include "SequencerHotspots.h"
-#include "VirtualTrackArea.h"
+#include "MVVM/ViewModels/VirtualTrackArea.h"
+#include "MVVM/ViewModels/TrackAreaViewModel.h"
 #include "SequencerSettings.h"
 #include "Tools/EditToolDragOperations.h"
 #include "IKeyArea.h"
@@ -21,37 +26,37 @@
 const FName FSequencerEditTool_Movement::Identifier = "Movement";
 
 
-FSequencerEditTool_Movement::FSequencerEditTool_Movement(FSequencer& InSequencer)
+FSequencerEditTool_Movement::FSequencerEditTool_Movement(FSequencer& InSequencer, UE::Sequencer::STrackAreaView& InTrackArea)
 	: FSequencerEditTool(InSequencer)
+	, TrackArea(InTrackArea)
 	, CursorDecorator(nullptr)
 { }
 
 
 FReply FSequencerEditTool_Movement::OnMouseButtonDown(SWidget& OwnerWidget, const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
 {
+	using namespace UE::Sequencer;
+
 	TSharedRef<SSequencer> SequencerWidget = StaticCastSharedRef<SSequencer>(Sequencer.GetSequencerWidget());
 
-	TSharedPtr<ISequencerHotspot> Hotspot = Sequencer.GetHotspot();
+	TSharedPtr<FTrackAreaViewModel> TrackAreaViewModel = TrackArea.GetViewModel();
+	TSharedPtr<ITrackAreaHotspot> Hotspot = TrackAreaViewModel->GetHotspot();
 
 	DelayedDrag.Reset();
 
 	if (MouseEvent.GetEffectingButton() == EKeys::LeftMouseButton || MouseEvent.GetEffectingButton() == EKeys::MiddleMouseButton)
 	{
-		const FVirtualTrackArea VirtualTrackArea = SequencerWidget->GetVirtualTrackArea();
+		const FVirtualTrackArea VirtualTrackArea = SequencerWidget->GetVirtualTrackArea(&TrackArea);
 
 		DelayedDrag = FDelayedDrag_Hotspot(VirtualTrackArea.CachedTrackAreaGeometry().AbsoluteToLocal(MouseEvent.GetScreenSpacePosition()), MouseEvent.GetEffectingButton(), Hotspot);
 
  		if (Sequencer.GetSequencerSettings()->GetSnapPlayTimeToPressedKey() || (MouseEvent.IsShiftDown() && MouseEvent.GetEffectingButton() == EKeys::LeftMouseButton) )
 		{
-			if (DelayedDrag->Hotspot.IsValid())
+			if (TSharedPtr<FKeyHotspot> KeyHotspot = HotspotCast<FKeyHotspot>(DelayedDrag->Hotspot))
 			{
-				if (DelayedDrag->Hotspot->GetType() == ESequencerHotspot::Key)
+				if (TOptional<FFrameNumber> Time = KeyHotspot->GetTime())
 				{
-					TOptional<FFrameNumber> Time = StaticCastSharedPtr<FKeyHotspot>(DelayedDrag->Hotspot)->GetTime();
-					if (Time.IsSet())
-					{
-						Sequencer.SetLocalTime(Time.GetValue());
-					}
+					Sequencer.SetLocalTime(Time.GetValue());
 				}
 			}
 		}
@@ -69,10 +74,12 @@ FReply FSequencerEditTool_Movement::OnMouseButtonDown(SWidget& OwnerWidget, cons
 
 FReply FSequencerEditTool_Movement::OnMouseMove(SWidget& OwnerWidget, const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
 {
+	using namespace UE::Sequencer;
+
 	if (DelayedDrag.IsSet())
 	{
 		TSharedRef<SSequencer> SequencerWidget = StaticCastSharedRef<SSequencer>(Sequencer.GetSequencerWidget());
-		const FVirtualTrackArea VirtualTrackArea = SequencerWidget->GetVirtualTrackArea();
+		const FVirtualTrackArea VirtualTrackArea = SequencerWidget->GetVirtualTrackArea(&TrackArea);
 
 		FReply Reply = FReply::Handled();
 
@@ -83,18 +90,10 @@ FReply FSequencerEditTool_Movement::OnMouseMove(SWidget& OwnerWidget, const FGeo
 			{
 				DragPosition = MyGeometry.AbsoluteToLocal(MouseEvent.GetScreenSpacePosition());
 
-				if (Sequencer.GetSequencerSettings()->GetIsSnapEnabled() && Sequencer.GetSequencerSettings()->GetSnapKeysAndSectionsToPlayRange() && !Sequencer.GetSequencerSettings()->ShouldKeepPlayRangeInSectionBounds())
-				{
-					DragPosition.X = FMath::Max(DragPosition.X, 0.f);
-					FFrameTime CurrentTime = VirtualTrackArea.PixelToFrame(DragPosition.X);
-					CurrentTime = UE::MovieScene::ClampToDiscreteRange(CurrentTime, Sequencer.GetPlaybackRange());
-					DragPosition.X = VirtualTrackArea.FrameToPixel(CurrentTime);
-				}
-					
 				double CurrentTime = VirtualTrackArea.PixelToSeconds(DragPosition.X);
 				Sequencer.UpdateAutoScroll(CurrentTime);
 
-				DragOperation->OnDrag(MouseEvent, DragPosition, VirtualTrackArea);
+				DragOperation->OnDrag(MouseEvent, FVector2D(DragPosition), VirtualTrackArea);
 			}
 		}
 		// Otherwise we can attempt a new drag
@@ -149,9 +148,11 @@ FFrameTime FSequencerEditTool_Movement::GetHotspotOffsetTime(FFrameTime CurrentT
 	return CurrentTime - OriginalHotspotTime;
 }
 
-TSharedPtr<ISequencerEditToolDragOperation> FSequencerEditTool_Movement::CreateDrag(const FPointerEvent& MouseEvent)
+TSharedPtr<UE::Sequencer::ISequencerEditToolDragOperation> FSequencerEditTool_Movement::CreateDrag(const FPointerEvent& MouseEvent)
 {
-	FSequencerSelection& Selection = Sequencer.GetSelection();
+	using namespace UE::Sequencer;
+
+	FSequencerSelection& Selection = *Sequencer.GetViewModel()->GetSelection();
 	TSharedRef<SSequencer> SequencerWidget = StaticCastSharedRef<SSequencer>(Sequencer.GetSequencerWidget());
 
 	GetHotspotTime(OriginalHotspotTime);
@@ -159,134 +160,124 @@ TSharedPtr<ISequencerEditToolDragOperation> FSequencerEditTool_Movement::CreateD
 	if (DelayedDrag->Hotspot.IsValid())
 	{
 		// Let the hotspot start a drag first, if it wants to
-		auto HotspotDrag = DelayedDrag->Hotspot->InitiateDrag(Sequencer);
+		TSharedPtr<ISequencerEditToolDragOperation> HotspotDrag = DelayedDrag->Hotspot->InitiateDrag(MouseEvent);
 		if (HotspotDrag.IsValid())
 		{
 			return HotspotDrag;
 		}
-		auto HotspotType = DelayedDrag->Hotspot->GetType();
 
-		const bool bSectionsSelected = Selection.GetSelectedSections().Num() > 0;
-		const bool bKeySelected = Selection.GetSelectedKeys().Num() > 0;
+		// Gather the draggable sections from all selected models
+		const bool bModelsSelected = Selection.TrackArea.Num() > 0;
+		const bool bKeySelected = Selection.KeySelection.Num() > 0;
 		// @todo sequencer: Make this a customizable UI command modifier?
 		const bool bIsDuplicateEvent = MouseEvent.IsAltDown() || MouseEvent.GetEffectingButton() == EKeys::MiddleMouseButton;
-		const bool bHotspotIsSection = HotspotType == ESequencerHotspot::Section;
+
+		FSectionHotspotBase* SectionHotspot = DelayedDrag->Hotspot->CastThis<FSectionHotspotBase>();
+		FKeyHotspot*         KeyHotspot     = DelayedDrag->Hotspot->CastThis<FKeyHotspot>();
 
 		// If they have both keys and sections selected then we only support moving them right now, so we
 		// check for that first before trying to figure out if they're resizing or dilating.
-		if (bSectionsSelected && bKeySelected && !bIsDuplicateEvent)
+		if (bModelsSelected && bKeySelected && !bIsDuplicateEvent)
 		{
-			return MakeShareable(new FMoveKeysAndSections(Sequencer, Selection.GetSelectedKeys(), Selection.GetSelectedSections(), bHotspotIsSection));
+			return MakeShareable(new FMoveKeysAndSections(Sequencer, ESequencerMoveOperationType::MoveKeys | ESequencerMoveOperationType::MoveSections));
 		}
 		else if (bIsDuplicateEvent)
 		{
-			if (HotspotType == ESequencerHotspot::Key)
+			if (KeyHotspot)
 			{
-				TArrayView<const FSequencerSelectedKey> HoveredKeys = StaticCastSharedPtr<FKeyHotspot>(DelayedDrag->Hotspot)->Keys;
+				const TSet<FSequencerSelectedKey>& HoveredKeys = KeyHotspot->Keys;
 
-				auto AnyUnselectedKey = [&Selection](const FSequencerSelectedKey& InKey)
-				{
-					return !Selection.IsSelected(InKey);
-				};
-
-				if (HoveredKeys.ContainsByPredicate(AnyUnselectedKey))
+				bool bUniqueDrag = false;
+				for (const FSequencerSelectedKey& Key : HoveredKeys)
 				{
 					// If any are not selected, we'll treat this as a unique drag
-					Selection.EmptySelectedKeys();
-					Selection.EmptySelectedSections();
-					Selection.EmptyNodesWithSelectedKeysOrSections();
+					if (!Selection.KeySelection.IsSelected(Key.KeyHandle))
+					{
+						bUniqueDrag = true;
+					}
+				};
+
+				if (bUniqueDrag)
+				{
+					Selection.KeySelection.Empty();
+					Selection.TrackArea.Empty();
 					for (const FSequencerSelectedKey& Key : HoveredKeys)
 					{
-						Selection.AddToSelection(Key);
+						Selection.KeySelection.Select(Key.WeakChannel.Pin(), Key.KeyHandle);
 					}
-					SequencerHelpers::UpdateHoveredNodeFromSelectedKeys(Sequencer);
 				}
 			}
-			else if (HotspotType == ESequencerHotspot::Section)
+			else if (SectionHotspot)
 			{
-				UMovieSceneSection* HoveredSection = StaticCastSharedPtr<FSectionHotspot>(DelayedDrag->Hotspot)->WeakSection.Get();
-
-				if (!Selection.IsSelected(HoveredSection))
+				if (!Selection.TrackArea.IsSelected(SectionHotspot->WeakSectionModel.Pin()))
 				{
-					Selection.EmptySelectedKeys();
-					Selection.EmptySelectedSections();
-					Selection.EmptyNodesWithSelectedKeysOrSections();
-					Selection.AddToSelection(HoveredSection);
-					SequencerHelpers::UpdateHoveredNodeFromSelectedSections(Sequencer);
+					Selection.KeySelection.Empty();
+					Selection.TrackArea.Empty();
+					Selection.TrackArea.Select(SectionHotspot->WeakSectionModel.Pin());
 				}
 			}
 
-			return MakeShareable(new FDuplicateKeysAndSections(Sequencer, Selection.GetSelectedKeys(), Selection.GetSelectedSections(), bHotspotIsSection));
-		}
-
-
-		UMovieSceneSection* SectionToDrag = nullptr;
-		if (HotspotType == ESequencerHotspot::Section || HotspotType == ESequencerHotspot::EasingArea)
-		{
-			SectionToDrag = StaticCastSharedPtr<FSectionHotspot>(DelayedDrag->Hotspot)->WeakSection.Get();
+			return MakeShareable(new FDuplicateKeysAndSections(Sequencer, ESequencerMoveOperationType::MoveKeys | ESequencerMoveOperationType::MoveSections));
 		}
 
 		// Moving section(s)?
-		if (SectionToDrag)
+		if (SectionHotspot)
 		{
-			if (!Selection.IsSelected(SectionToDrag))
+			if (!Selection.TrackArea.IsSelected(SectionHotspot->WeakSectionModel.Pin()))
 			{
-				Selection.EmptySelectedKeys();
-				Selection.EmptySelectedSections();
-				Selection.EmptyNodesWithSelectedKeysOrSections();
-				Selection.AddToSelection(SectionToDrag);
-				SequencerHelpers::UpdateHoveredNodeFromSelectedSections(Sequencer);
+				Selection.KeySelection.Empty();
+				Selection.TrackArea.Empty();
+				Selection.TrackArea.Select(SectionHotspot->WeakSectionModel.Pin());
 			}
 
 			if (MouseEvent.IsShiftDown())
 			{
 				const bool bDraggingByEnd = false;
 				const bool bIsSlipping = true;
-				return MakeShareable( new FResizeSection( Sequencer, Selection.GetSelectedSections(), bDraggingByEnd, bIsSlipping ) );
+				return MakeShareable( new FResizeSection( Sequencer, bDraggingByEnd, bIsSlipping ) );
 			}
 			else
 			{
-				TSet<FSequencerSelectedKey> EmptyKeySet;
-				return MakeShareable( new FMoveKeysAndSections( Sequencer, EmptyKeySet, Selection.GetSelectedSections(), true) );
+				return MakeShareable( new FMoveKeysAndSections( Sequencer, ESequencerMoveOperationType::MoveSections) );
 			}
 		}
 		// Moving key(s)?
-		else if (HotspotType == ESequencerHotspot::Key)
+		else if (KeyHotspot)
 		{
-			TArrayView<const FSequencerSelectedKey> HoveredKeys = StaticCastSharedPtr<FKeyHotspot>(DelayedDrag->Hotspot)->Keys;
+			const TSet<FSequencerSelectedKey>& HoveredKeys = KeyHotspot->Keys;
 
-			auto AnyUnselectedKey = [&Selection](const FSequencerSelectedKey& InKey)
-			{
-				return !Selection.IsSelected(InKey);
-			};
-
-			if (HoveredKeys.ContainsByPredicate(AnyUnselectedKey))
+			bool bUniqueDrag = false;
+			for (const FSequencerSelectedKey& Key : HoveredKeys)
 			{
 				// If any are not selected, we'll treat this as a unique drag
-				Selection.EmptySelectedKeys();
-				Selection.EmptySelectedSections();
-				Selection.EmptyNodesWithSelectedKeysOrSections();
+				if (!Selection.KeySelection.IsSelected(Key.KeyHandle))
+				{
+					bUniqueDrag = true;
+				}
+			};
+
+			if (bUniqueDrag)
+			{
+				Selection.KeySelection.Empty();
+				Selection.TrackArea.Empty();
 				for (const FSequencerSelectedKey& Key : HoveredKeys)
 				{
-					Selection.AddToSelection(Key);
+					Selection.KeySelection.Select(Key.WeakChannel.Pin(), Key.KeyHandle);
 				}
-				SequencerHelpers::UpdateHoveredNodeFromSelectedKeys(Sequencer);
 			}
 
 			TSet<TWeakObjectPtr<UMovieSceneSection>> NoSections;
-			return MakeShareable( new FMoveKeysAndSections( Sequencer, Selection.GetSelectedKeys(), NoSections, false) );
+			return MakeShareable( new FMoveKeysAndSections( Sequencer, ESequencerMoveOperationType::MoveKeys) );
 		}
 	}
 	// If we're not dragging a hotspot, sections take precedence over keys
-	else if (Selection.GetSelectedSections().Num())
+	else if (Selection.TrackArea.Num())
 	{
-		TSet<FSequencerSelectedKey> EmptyKeySet;
-		return MakeShareable( new FMoveKeysAndSections( Sequencer, EmptyKeySet, Selection.GetSelectedSections(), true ) );
+		return MakeShareable( new FMoveKeysAndSections( Sequencer, ESequencerMoveOperationType::MoveSections ) );
 	}
-	else if (Selection.GetSelectedKeys().Num())
+	else if (Selection.KeySelection.Num())
 	{
-		TSet<TWeakObjectPtr<UMovieSceneSection>> NoSections;
-		return MakeShareable( new FMoveKeysAndSections( Sequencer, Selection.GetSelectedKeys(), NoSections, false) );
+		return MakeShareable( new FMoveKeysAndSections( Sequencer, ESequencerMoveOperationType::MoveKeys) );
 	}
 
 	return nullptr;
@@ -295,13 +286,17 @@ TSharedPtr<ISequencerEditToolDragOperation> FSequencerEditTool_Movement::CreateD
 
 FReply FSequencerEditTool_Movement::OnMouseButtonUp(SWidget& OwnerWidget, const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
 {
+	using namespace UE::Sequencer;
+
 	DelayedDrag.Reset();
+
+	TSharedPtr<FTrackAreaViewModel> TrackAreaViewModel = TrackArea.GetViewModel();
 
 	if (DragOperation.IsValid())
 	{
 		TSharedRef<SSequencer> SequencerWidget = StaticCastSharedRef<SSequencer>(Sequencer.GetSequencerWidget());
 
-		DragOperation->OnEndDrag(MouseEvent, MyGeometry.AbsoluteToLocal(MouseEvent.GetScreenSpacePosition()), SequencerWidget->GetVirtualTrackArea());
+		DragOperation->OnEndDrag(MouseEvent, MyGeometry.AbsoluteToLocal(MouseEvent.GetScreenSpacePosition()), SequencerWidget->GetVirtualTrackArea(&TrackArea));
 		DragOperation = nullptr;
 
 		if (MouseEvent.GetEffectingButton() == EKeys::MiddleMouseButton)
@@ -333,25 +328,18 @@ FReply FSequencerEditTool_Movement::OnMouseButtonUp(SWidget& OwnerWidget, const 
 				);
 
 			// Lock the hotspot while the menu is open
-			TSharedPtr<ISequencerHotspot> ExistingHotspot = Sequencer.GetHotspot();
-			if (ExistingHotspot.IsValid())
-			{
-				ExistingHotspot->bIsLocked = true;
-			}
+			TrackAreaViewModel->LockHotspot(true);
 
 			// Unlock and reset the hotspot when the menu closes
 			{
-				FSequencer* SequencerPtr = &Sequencer;
+				TSharedPtr<ITrackAreaHotspot> ExistingHotspot = TrackAreaViewModel->GetHotspot();
 				Menu->GetOnMenuDismissed().AddLambda(
-					[=](TSharedRef<IMenu>)
+					[TrackAreaViewModel, ExistingHotspot](TSharedRef<IMenu>)
 					{
-						if (ExistingHotspot.IsValid())
+						TrackAreaViewModel->LockHotspot(false);
+						if (TrackAreaViewModel->GetHotspot() == ExistingHotspot)
 						{
-							ExistingHotspot->bIsLocked = false;
-						}
-						if (SequencerPtr->GetHotspot() == ExistingHotspot)
-						{
-							SequencerPtr->SetHotspot(nullptr);
+							TrackAreaViewModel->SetHotspot(nullptr);
 						}
 					}
 				);
@@ -371,27 +359,33 @@ FReply FSequencerEditTool_Movement::OnMouseButtonUp(SWidget& OwnerWidget, const 
 
 void FSequencerEditTool_Movement::OnMouseCaptureLost()
 {
-	DelayedDrag.Reset();
-	DragOperation = nullptr;
-	CursorDecorator = nullptr;
+	// Delaying nulling out until next tick because this could be invoked during OnMouseMove()
+	GEditor->GetTimerManager()->SetTimerForNextTick([this]()
+	{
+		DelayedDrag.Reset();
+		DragOperation = nullptr;
+		CursorDecorator = nullptr;
+	});
 }
 
 
 int32 FSequencerEditTool_Movement::OnPaint(const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId) const
 {
+	using namespace UE::Sequencer;
+
 	if (CursorDecorator)
 	{
 		FSlateDrawElement::MakeBox(
 			OutDrawElements,
 			++LayerId,
-			AllottedGeometry.ToPaintGeometry(DragPosition + FVector2D(5, -25), CursorDecorator->ImageSize),
+			AllottedGeometry.ToPaintGeometry(CursorDecorator->ImageSize, FSlateLayoutTransform(DragPosition + FVector2f(5.f, -25.f))),
 			CursorDecorator
 			);
 	}
 
 	if (DelayedDrag.IsSet() && DelayedDrag->IsDragging())
 	{
-		const TSharedPtr<ISequencerHotspot>& Hotspot = DelayedDrag->Hotspot;
+		const TSharedPtr<ITrackAreaHotspot>& Hotspot = DelayedDrag->Hotspot;
 
 		if (Hotspot.IsValid())
 		{
@@ -403,12 +397,12 @@ int32 FSequencerEditTool_Movement::OnPaint(const FGeometry& AllottedGeometry, co
 
 				const FSlateFontInfo SmallLayoutFont = FCoreStyle::GetDefaultFontStyle("Bold", 10);
 				const TSharedRef< FSlateFontMeasure > FontMeasureService = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
-				const FLinearColor DrawColor = FEditorStyle::GetSlateColor("SelectionColor").GetColor(FWidgetStyle());
+				const FLinearColor DrawColor = FAppStyle::GetSlateColor("SelectionColor").GetColor(FWidgetStyle());
 				const FVector2D BoxPadding = FVector2D(4.0f, 2.0f);
 				const float MousePadding = 20.0f;
 
 				// calculate draw position
-				const FVirtualTrackArea VirtualTrackArea = SequencerWidget->GetVirtualTrackArea();
+				const FVirtualTrackArea VirtualTrackArea = SequencerWidget->GetVirtualTrackArea(&TrackArea);
 				const float HorizontalDelta = DragPosition.X - DelayedDrag->GetInitialPosition().X;
 				const float InitialY = DelayedDrag->GetInitialPosition().Y;
 
@@ -426,7 +420,7 @@ int32 FSequencerEditTool_Movement::OnPaint(const FGeometry& AllottedGeometry, co
 				FSlateDrawElement::MakeLines(
 					OutDrawElements,
 					LayerId + 1,
-					AllottedGeometry.ToPaintGeometry(FVector2D(OldPos.X, 0.0f), FVector2D(1.0f, 1.0f)),
+					AllottedGeometry.ToPaintGeometry(FVector2f(1.0f, 1.0f), FSlateLayoutTransform(FVector2f(OldPos.X, 0.0f))),
 					LinePoints,
 					ESlateDrawEffect::None,
 					FLinearColor::White.CopyWithNewOpacity(0.5f),
@@ -437,7 +431,7 @@ int32 FSequencerEditTool_Movement::OnPaint(const FGeometry& AllottedGeometry, co
 				FSlateDrawElement::MakeLines(
 					OutDrawElements,
 					LayerId + 1,
-					AllottedGeometry.ToPaintGeometry(FVector2D(NewPos.X, 0.0f), FVector2D(1.0f, 1.0f)),
+					AllottedGeometry.ToPaintGeometry(FVector2f(1.0f, 1.0f), FSlateLayoutTransform(FVector2f(NewPos.X, 0.0f))),
 					LinePoints,
 					ESlateDrawEffect::None,
 					DrawColor,
@@ -452,8 +446,8 @@ int32 FSequencerEditTool_Movement::OnPaint(const FGeometry& AllottedGeometry, co
 				FSlateDrawElement::MakeBox( 
 					OutDrawElements,
 					LayerId + 2, 
-					AllottedGeometry.ToPaintGeometry(TimePos - BoxPadding, TimeStringSize + 2.0f * BoxPadding),
-					FEditorStyle::GetBrush("WhiteBrush"),
+					AllottedGeometry.ToPaintGeometry(TimeStringSize + 2.0f * BoxPadding, FSlateLayoutTransform(TimePos - BoxPadding)),
+					FAppStyle::GetBrush("WhiteBrush"),
 					ESlateDrawEffect::None, 
 					FLinearColor::Black.CopyWithNewOpacity(0.5f)
 				);
@@ -461,7 +455,7 @@ int32 FSequencerEditTool_Movement::OnPaint(const FGeometry& AllottedGeometry, co
 				FSlateDrawElement::MakeText(
 					OutDrawElements,
 					LayerId + 3,
-					AllottedGeometry.ToPaintGeometry(TimePos, TimeStringSize),
+					AllottedGeometry.ToPaintGeometry(TimeStringSize, FSlateLayoutTransform(TimePos)),
 					TimeString,
 					SmallLayoutFont,
 					ESlateDrawEffect::None,
@@ -477,8 +471,8 @@ int32 FSequencerEditTool_Movement::OnPaint(const FGeometry& AllottedGeometry, co
 				FSlateDrawElement::MakeBox( 
 					OutDrawElements,
 					LayerId + 2, 
-					AllottedGeometry.ToPaintGeometry(OffsetPos - BoxPadding, OffsetStringSize + 2.0f * BoxPadding),
-					FEditorStyle::GetBrush("WhiteBrush"),
+					AllottedGeometry.ToPaintGeometry(OffsetStringSize + 2.0f * BoxPadding, FSlateLayoutTransform(OffsetPos - BoxPadding)),
+					FAppStyle::GetBrush("WhiteBrush"),
 					ESlateDrawEffect::None, 
 					FLinearColor::Black.CopyWithNewOpacity(0.5f)
 				);
@@ -486,7 +480,7 @@ int32 FSequencerEditTool_Movement::OnPaint(const FGeometry& AllottedGeometry, co
 				FSlateDrawElement::MakeText(
 					OutDrawElements,
 					LayerId + 3,
-					AllottedGeometry.ToPaintGeometry(OffsetPos, TimeStringSize),
+					AllottedGeometry.ToPaintGeometry(TimeStringSize, FSlateLayoutTransform(OffsetPos)),
 					OffsetString,
 					SmallLayoutFont,
 					ESlateDrawEffect::None,
@@ -501,11 +495,13 @@ int32 FSequencerEditTool_Movement::OnPaint(const FGeometry& AllottedGeometry, co
 
 void FSequencerEditTool_Movement::UpdateCursorDecorator(const FGeometry& MyGeometry, const FPointerEvent& CursorEvent)
 {
+	using namespace UE::Sequencer;
+
 	DragPosition = MyGeometry.AbsoluteToLocal(CursorEvent.GetScreenSpacePosition());
-	
-	TSharedPtr<ISequencerHotspot> Hotspot = DelayedDrag.IsSet()
+	TSharedPtr<FTrackAreaViewModel> TrackAreaViewModel = TrackArea.GetViewModel();
+	TSharedPtr<ITrackAreaHotspot> Hotspot = DelayedDrag.IsSet()
 		? DelayedDrag->Hotspot
-		: Sequencer.GetHotspot();
+		: TrackAreaViewModel->GetHotspot();
 
 	if (Hotspot.IsValid())
 	{
@@ -515,17 +511,11 @@ void FSequencerEditTool_Movement::UpdateCursorDecorator(const FGeometry& MyGeome
 
 FCursorReply FSequencerEditTool_Movement::OnCursorQuery(const FGeometry& MyGeometry, const FPointerEvent& CursorEvent) const
 {
-	TSharedPtr<ISequencerHotspot> Hotspot = DelayedDrag.IsSet()
-		? DelayedDrag->Hotspot
-		: Sequencer.GetHotspot();
+	using namespace UE::Sequencer;
 
-	if (Hotspot.IsValid())
+	if (DragOperation)
 	{
-		FCursorReply Reply = Hotspot->GetCursor();
-		if (Reply.IsEventHandled())
-		{
-			return Reply;
-		}
+		return DragOperation->GetCursor();
 	}
 
 	return FCursorReply::Cursor(EMouseCursor::CardinalCross);
@@ -599,7 +589,7 @@ FString FSequencerEditTool_Movement::TimeToString(FFrameTime Time, bool IsDelta)
 	return FString();
 }
 
-const ISequencerHotspot* FSequencerEditTool_Movement::GetDragHotspot() const
+TSharedPtr<UE::Sequencer::ITrackAreaHotspot> FSequencerEditTool_Movement::GetDragHotspot() const
 {
-	return DelayedDrag.IsSet() ? DelayedDrag->Hotspot.Get() : nullptr;
+	return DelayedDrag.IsSet() ? DelayedDrag->Hotspot : nullptr;
 }

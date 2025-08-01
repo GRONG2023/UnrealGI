@@ -6,6 +6,7 @@
 #include "PropertyHandleImpl.h"
 #include "DetailPropertyRow.h"
 #include "ObjectPropertyNode.h"
+#include "SStandaloneCustomizedValueWidget.h"
 
 IDetailChildrenBuilder& FCustomChildrenBuilder::AddCustomBuilder( TSharedRef<class IDetailCustomNodeBuilder> InCustomBuilder )
 {
@@ -28,17 +29,17 @@ IDetailGroup& FCustomChildrenBuilder::AddGroup( FName GroupName, const FText& Lo
 
 FDetailWidgetRow& FCustomChildrenBuilder::AddCustomRow( const FText& SearchString )
 {
-	TSharedRef<FDetailWidgetRow> NewRow = MakeShareable( new FDetailWidgetRow );
+	const TSharedRef<FDetailWidgetRow> NewRow = MakeShared<FDetailWidgetRow>();
 	FDetailLayoutCustomization NewCustomization;
 
 	NewRow->FilterString( SearchString );
-	
-	IDetailsViewPrivate* DetailsView = ParentCategory.Pin()->GetDetailsView();
-	if (DetailsView && DetailsView->IsCustomRowVisibilityFiltered() && !DetailsView->IsCustomRowVisible(FName(*SearchString.ToString()), FName(*GetParentCategory().GetDisplayName().ToString())))
-	{
-		NewRow->Visibility(TAttribute<EVisibility>(EVisibility::Collapsed));
-	}
 
+	// Bind to PasteFromText if specified
+	if (const TSharedPtr<FOnPasteFromText> PasteFromTextDelegate = GetParentCategory().OnPasteFromText())
+	{
+		NewRow->OnPasteFromTextDelegate = PasteFromTextDelegate;
+	}
+	
 	NewCustomization.WidgetDecl = NewRow;
 
 	ChildCustomizations.Add( NewCustomization );
@@ -61,7 +62,6 @@ IDetailPropertyRow& FCustomChildrenBuilder::AddProperty( TSharedRef<IPropertyHan
 
 	return *NewCustomization.PropertyRow;
 }
-
 
 IDetailPropertyRow* FCustomChildrenBuilder::AddExternalStructure(TSharedRef<FStructOnScope> ChildStructure, FName UniqueIdName)
 {
@@ -91,74 +91,47 @@ IDetailPropertyRow* FCustomChildrenBuilder::AddExternalStructureProperty(TShared
 	return NewRow.Get();
 }
 
-IDetailPropertyRow* FCustomChildrenBuilder::AddExternalObjects(const TArray<UObject *>& Objects, FName UniqueIdName)
-{
-	return AddExternalObjectProperty(Objects, NAME_None, FAddPropertyParams().UniqueId(UniqueIdName));
-}
-
 TArray<TSharedPtr<IPropertyHandle>> FCustomChildrenBuilder::AddAllExternalStructureProperties(TSharedRef<FStructOnScope> ChildStructure)
 {
 	return ParentCategory.Pin()->AddAllExternalStructureProperties(ChildStructure);
 }
 
+IDetailPropertyRow* FCustomChildrenBuilder::AddExternalObjects(const TArray<UObject*>& Objects, FName UniqueIdName)
+{
+	FAddPropertyParams Params = FAddPropertyParams()
+		.UniqueId(UniqueIdName)
+		.AllowChildren(true);
+
+	return AddExternalObjects(Objects, Params);
+}
+
+IDetailPropertyRow* FCustomChildrenBuilder::AddExternalObjects(const TArray<UObject*>& Objects, const FAddPropertyParams& Params)
+{
+	return AddExternalObjectProperty(Objects, NAME_None, Params);
+}
+
 IDetailPropertyRow* FCustomChildrenBuilder::AddExternalObjectProperty(const TArray<UObject*>& Objects, FName PropertyName, const FAddPropertyParams& Params)
 {
-	FDetailLayoutCustomization NewCustomization;
-
 	TSharedRef<FDetailCategoryImpl> ParentCategoryRef = ParentCategory.Pin().ToSharedRef();
 
+	FDetailLayoutCustomization NewCustomization;
 	FDetailPropertyRow::MakeExternalPropertyRowCustomization(Objects, PropertyName, ParentCategoryRef, NewCustomization, Params);
 
-	TSharedPtr<FDetailPropertyRow> NewRow = NewCustomization.PropertyRow;
+	if (Params.ShouldHideRootObjectNode() && NewCustomization.HasPropertyNode() && NewCustomization.GetPropertyNode()->AsObjectNode())
+	{
+		NewCustomization.PropertyRow->SetForceShowOnlyChildren(true);
+	}
 
+	TSharedPtr<FDetailPropertyRow> NewRow = NewCustomization.PropertyRow;
 	if (NewRow.IsValid())
 	{
 		NewRow->SetCustomExpansionId(Params.GetUniqueId());
-
-		TSharedPtr<FPropertyNode> PropertyNode = NewRow->GetPropertyNode();
-		TSharedPtr<FObjectPropertyNode> RootNode = StaticCastSharedRef<FObjectPropertyNode>(PropertyNode->FindObjectItemParent()->AsShared());
 
 		ChildCustomizations.Add(NewCustomization);
 	}
 
 	return NewRow.Get();
 }
-
-class SStandaloneCustomStructValue : public SCompoundWidget, public IPropertyTypeCustomizationUtils
-{
-public:
-	SLATE_BEGIN_ARGS( SStandaloneCustomStructValue )
-	{}
-	SLATE_END_ARGS()
-	
-	void Construct( const FArguments& InArgs, TSharedPtr<IPropertyTypeCustomization> InCustomizationInterface, TSharedRef<IPropertyHandle> InStructPropertyHandle, TSharedRef<FDetailCategoryImpl> InParentCategory )
-	{
-		CustomizationInterface = InCustomizationInterface;
-		StructPropertyHandle = InStructPropertyHandle;
-		ParentCategory = InParentCategory;
-		CustomPropertyWidget = MakeShareable(new FDetailWidgetRow);
-
-		CustomizationInterface->CustomizeHeader(InStructPropertyHandle, *CustomPropertyWidget, *this);
-
-		ChildSlot
-		[
-			CustomPropertyWidget->ValueWidget.Widget
-		];
-	}
-
-	virtual TSharedPtr<FAssetThumbnailPool> GetThumbnailPool() const override
-	{
-		TSharedPtr<FDetailCategoryImpl> ParentCategoryPinned = ParentCategory.Pin();
-		return ParentCategoryPinned.IsValid() ? ParentCategoryPinned->GetParentLayout().GetThumbnailPool() : NULL;
-	}
-
-private:
-	TWeakPtr<FDetailCategoryImpl> ParentCategory;
-	TSharedPtr<IPropertyTypeCustomization> CustomizationInterface;
-	TSharedPtr<IPropertyHandle> StructPropertyHandle;
-	TSharedPtr<FDetailWidgetRow> CustomPropertyWidget;
-};
-
 
 TSharedRef<SWidget> FCustomChildrenBuilder::GenerateStructValueWidget( TSharedRef<IPropertyHandle> StructPropertyHandle )
 {
@@ -173,7 +146,7 @@ TSharedRef<SWidget> FCustomChildrenBuilder::GenerateStructValueWidget( TSharedRe
 	{
 		TSharedRef<IPropertyTypeCustomization> CustomStructInterface = LayoutCallback.GetCustomizationInstance();
 
-		return SNew( SStandaloneCustomStructValue, CustomStructInterface, StructPropertyHandle, ParentCategory.Pin().ToSharedRef() );
+		return SNew( SStandaloneCustomizedValueWidget, CustomStructInterface, StructPropertyHandle).ParentCategory(ParentCategory.Pin().ToSharedRef());
 	}
 	else
 	{

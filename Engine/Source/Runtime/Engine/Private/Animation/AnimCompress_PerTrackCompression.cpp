@@ -5,9 +5,13 @@
 =============================================================================*/ 
 
 #include "Animation/AnimCompress_PerTrackCompression.h"
-#include "AnimationCompression.h"
-#include "AnimEncoding.h"
 #include "AnimEncoding_PerTrackCompression.h"
+#include "Animation/AnimSequence.h"
+#include "Animation/AnimSequenceDecompressionContext.h"
+#include "AnimationUtils.h"
+#include "UObject/UnrealType.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimCompress_PerTrackCompression)
 
 struct FAnimSetMeshLinkup;
 
@@ -31,7 +35,7 @@ struct FPerTrackParams
 {
 	float MaxZeroingThreshold;
 
-	int32 NumFrames;
+	int32 NumberOfKeys;
 
 	float SequenceLength;
 
@@ -65,7 +69,7 @@ protected:
 		bReallyNeedsFrameTable = false;
 		ActualCompressionMode = ACF_None;
 		ActualKeyFlags = 0;
-		CompressedBytes.Empty();
+		CompressedBytes.Reset();
 	}
 
 	/**
@@ -123,7 +127,7 @@ protected:
 		const int32 NumKeys = TranslationData.PosKeys.Num();
 
 		// Determine the bounds
-		const FBox KeyBounds(TranslationData.PosKeys.GetData(), NumKeys);
+		const FBox3f KeyBounds(TranslationData.PosKeys.GetData(), NumKeys);
 		const bool bHasX = (FMath::Abs(KeyBounds.Max.X) >= ZeroingThreshold) || (FMath::Abs(KeyBounds.Min.X) >= ZeroingThreshold);
 		const bool bHasY = (FMath::Abs(KeyBounds.Max.Y) >= ZeroingThreshold) || (FMath::Abs(KeyBounds.Min.Y) >= ZeroingThreshold);
 		const bool bHasZ = (FMath::Abs(KeyBounds.Max.Z) >= ZeroingThreshold) || (FMath::Abs(KeyBounds.Min.Z) >= ZeroingThreshold);
@@ -142,7 +146,7 @@ protected:
 		// Write the keys for the non-zero components
 		for (int32 i = 0; i < NumKeys; ++i)
 		{
-			const FVector& V = TranslationData.PosKeys[i];
+			const FVector3f& V = TranslationData.PosKeys[i];
 			
 			uint16 X = 0;
 			uint16 Y = 0;
@@ -164,7 +168,7 @@ protected:
 				AppendBytes(&Z, sizeof(Z));
 			}
 
-			const FVector DecompressedV(
+			const FVector3f DecompressedV(
 				bHasX ? FAnimationCompression_PerTrackUtils::DecompressFixed16<LogScale>(X) : 0.0f,
 				bHasY ? FAnimationCompression_PerTrackUtils::DecompressFixed16<LogScale>(Y) : 0.0f,
 				bHasZ ? FAnimationCompression_PerTrackUtils::DecompressFixed16<LogScale>(Z) : 0.0f);
@@ -180,7 +184,7 @@ protected:
 		const int32 NumKeys = TranslationData.PosKeys.Num();
 
 		// Determine the bounds
-		const FBox KeyBounds(TranslationData.PosKeys.GetData(), NumKeys);
+		const FBox3f KeyBounds(TranslationData.PosKeys.GetData(), NumKeys);
 		const bool bHasX = (FMath::Abs(KeyBounds.Max.X) >= ZeroingThreshold) || (FMath::Abs(KeyBounds.Min.X) >= ZeroingThreshold);
 		const bool bHasY = (FMath::Abs(KeyBounds.Max.Y) >= ZeroingThreshold) || (FMath::Abs(KeyBounds.Min.Y) >= ZeroingThreshold);
 		const bool bHasZ = (FMath::Abs(KeyBounds.Max.Z) >= ZeroingThreshold) || (FMath::Abs(KeyBounds.Min.Z) >= ZeroingThreshold);
@@ -199,7 +203,7 @@ protected:
 		// Write the keys out
 		for (int32 i = 0; i < NumKeys; ++i)
 		{
-			const FVector& V = TranslationData.PosKeys[i];
+			const FVector3f& V = TranslationData.PosKeys[i];
 			if( bHasX )
 			{
 				AppendBytes(&(V.X), sizeof(float));
@@ -226,7 +230,7 @@ protected:
 		const int32 NumKeys = TranslationData.PosKeys.Num();
 
 		// Determine the bounds
-		const FBox KeyBounds(TranslationData.PosKeys.GetData(), NumKeys);
+		const FBox3f KeyBounds(TranslationData.PosKeys.GetData(), NumKeys);
 		const bool bHasX = (FMath::Abs(KeyBounds.Max.X) >= ZeroingThreshold) || (FMath::Abs(KeyBounds.Min.X) >= ZeroingThreshold);
 		const bool bHasY = (FMath::Abs(KeyBounds.Max.Y) >= ZeroingThreshold) || (FMath::Abs(KeyBounds.Min.Y) >= ZeroingThreshold);
 		const bool bHasZ = (FMath::Abs(KeyBounds.Max.Z) >= ZeroingThreshold) || (FMath::Abs(KeyBounds.Min.Z) >= ZeroingThreshold);
@@ -245,7 +249,7 @@ protected:
 		// Write the bounds out
 		float Mins[3];
 		float Ranges[3];
-		FVector Range(KeyBounds.Max - KeyBounds.Min);
+		FVector3f Range(KeyBounds.Max - KeyBounds.Min);
 		Mins[0] = KeyBounds.Min.X;
 		Mins[1] = KeyBounds.Min.Y;
 		Mins[2] = KeyBounds.Min.Z;
@@ -285,12 +289,12 @@ protected:
 		// Write the keys out
 		for (int32 i = 0; i < NumKeys; ++i)
 		{
-			const FVector& V = TranslationData.PosKeys[i];
+			const FVector3f& V = TranslationData.PosKeys[i];
 			const FVectorIntervalFixed32NoW Compressor(V, Mins, Ranges);
 			AppendBytes(&Compressor, sizeof(Compressor));
 
 			// Decompress and update the error stats
-			FVector DecompressedV;
+			FVector3f DecompressedV;
 			Compressor.ToVector(DecompressedV, Mins, Ranges);
 
 			const float Error = (DecompressedV - V).Size();
@@ -299,7 +303,8 @@ protected:
 		}
 	}
 
-	static FBox CalculateQuatACF96Bounds(const FQuat* Points, int32 NumPoints)
+	template<typename T>
+	static FBox CalculateQuatACF96Bounds(const UE::Math::TQuat<T>* Points, int32 NumPoints)
 	{
 		FBox Results(ForceInitToZero);
 
@@ -320,7 +325,7 @@ protected:
 		const int32 NumKeys = RotationData.RotKeys.Num();
 		for (int32 i = 0; i < NumKeys; ++i)
 		{
-			const float Error = FQuat::ErrorAutoNormalize(RotationData.RotKeys[i], FQuat::Identity);
+			const float Error = FQuat4f::ErrorAutoNormalize(RotationData.RotKeys[i], FQuat4f::Identity);
 			MaxError = FMath::Max(MaxError, Error);
 			SumError += Error;
 		}
@@ -336,7 +341,7 @@ protected:
 		const int32 NumKeys = RotationData.RotKeys.Num();
 		for (int32 i = 0; i < NumKeys; ++i)
 		{
-			const FQuat& Q = RotationData.RotKeys[i];
+			const FQuat4f& Q = RotationData.RotKeys[i];
 			check(Q.IsNormalized());
 
 			// Compress and write out the quaternion
@@ -344,11 +349,11 @@ protected:
 			AppendBytes(&Compressor, sizeof(Compressor));
 
 			// Decompress and check the error caused by the compression
-			FQuat DecompressedQ;
+			FQuat4f DecompressedQ;
 			Compressor.ToQuat(DecompressedQ);
 
 			check(DecompressedQ.IsNormalized());
-			const float Error = FQuat::ErrorAutoNormalize(Q, DecompressedQ);
+			const float Error = FQuat4f::ErrorAutoNormalize(Q, DecompressedQ);
 			MaxError = FMath::Max(MaxError, Error);
 			SumError += Error;
 		}
@@ -392,9 +397,9 @@ protected:
 		// Write the keys for the non-zero components
 		for (int32 i = 0; i < NumKeys; ++i)
 		{
-			const FQuat& Q = RotationData.RotKeys[i];
+			const FQuat4f& Q = RotationData.RotKeys[i];
 
-			FQuat QRenorm(Q);
+			FQuat4f QRenorm(Q);
 			if (!bHasX)
 			{
 				QRenorm.X = 0;
@@ -436,7 +441,7 @@ protected:
 			Decompressor.Y = bHasY ? FAnimationCompression_PerTrackUtils::DecompressFixed16<0>(Y) : 0.0f;
 			Decompressor.Z = bHasZ ? FAnimationCompression_PerTrackUtils::DecompressFixed16<0>(Z) : 0.0f;
 
-			FQuat DecompressedQ;
+			FQuat4f DecompressedQ;
 			Decompressor.ToQuat(DecompressedQ);
 
 			if (!DecompressedQ.IsNormalized())
@@ -449,7 +454,7 @@ protected:
 			}
 
 			check(DecompressedQ.IsNormalized());
-			const float Error = FQuat::ErrorAutoNormalize(Q, DecompressedQ);
+			const float Error = FQuat4f::ErrorAutoNormalize(Q, DecompressedQ);
 			MaxError = FMath::Max(MaxError, Error);
 			SumError += Error;
 		}
@@ -461,7 +466,7 @@ protected:
 
 		// Determine the bounds
 		const FBox KeyBounds = CalculateQuatACF96Bounds(RotationData.RotKeys.GetData(), NumKeys);
-		FVector Range(KeyBounds.Max - KeyBounds.Min);
+		FVector3f Range(KeyBounds.Max - KeyBounds.Min);
 
 		const bool bHasX = (FMath::Abs(KeyBounds.Max.X) >= ZeroingThreshold) || (FMath::Abs(KeyBounds.Min.X) >= ZeroingThreshold);
 		const bool bHasY = (FMath::Abs(KeyBounds.Max.Y) >= ZeroingThreshold) || (FMath::Abs(KeyBounds.Min.Y) >= ZeroingThreshold);
@@ -521,9 +526,9 @@ protected:
 		// Write the keys out
 		for (int32 i = 0; i < NumKeys; ++i)
 		{
-			const FQuat& Q = RotationData.RotKeys[i];
+			const FQuat4f& Q = RotationData.RotKeys[i];
 
-			FQuat QRenorm(Q);
+			FQuat4f QRenorm(Q);
 			if (!bHasX)
 			{
 				QRenorm.X = 0;
@@ -544,7 +549,7 @@ protected:
 			AppendBytes(&Compressor, sizeof(Compressor));
 
 			// Decompress and check the error caused by the compression
-			FQuat DecompressedQ;
+			FQuat4f DecompressedQ;
 			Compressor.ToQuat(DecompressedQ, Mins, Ranges);
 
 			if (!DecompressedQ.IsNormalized())
@@ -557,7 +562,7 @@ protected:
 				UE_LOG(LogAnimationCompression, Log, TEXT(" Mins(%f, %f, %f)   Maxs(%f, %f,%f)"), KeyBounds.Min.X, KeyBounds.Min.Y, KeyBounds.Min.Z, KeyBounds.Max.X, KeyBounds.Max.Y, KeyBounds.Max.Z);
 			}
 			check(DecompressedQ.IsNormalized());
-			const float Error = FQuat::ErrorAutoNormalize(Q, DecompressedQ);
+			const float Error = FQuat4f::ErrorAutoNormalize(Q, DecompressedQ);
 			MaxError = FMath::Max(MaxError, Error);
 			SumError += Error;
 		}
@@ -605,7 +610,7 @@ protected:
 		const int32 NumKeys = ScaleData.ScaleKeys.Num();
 
 		// Determine the bounds
-		const FBox KeyBounds(ScaleData.ScaleKeys.GetData(), NumKeys);
+		const FBox3f KeyBounds(ScaleData.ScaleKeys.GetData(), NumKeys);
 		const bool bHasX = (FMath::Abs(KeyBounds.Max.X) >= ZeroingThreshold) || (FMath::Abs(KeyBounds.Min.X) >= ZeroingThreshold);
 		const bool bHasY = (FMath::Abs(KeyBounds.Max.Y) >= ZeroingThreshold) || (FMath::Abs(KeyBounds.Min.Y) >= ZeroingThreshold);
 		const bool bHasZ = (FMath::Abs(KeyBounds.Max.Z) >= ZeroingThreshold) || (FMath::Abs(KeyBounds.Min.Z) >= ZeroingThreshold);
@@ -624,7 +629,7 @@ protected:
 		// Write the keys for the non-zero components
 		for (int32 i = 0; i < NumKeys; ++i)
 		{
-			const FVector& V = ScaleData.ScaleKeys[i];
+			const FVector3f& V = ScaleData.ScaleKeys[i];
 
 			uint16 X = 0;
 			uint16 Y = 0;
@@ -646,7 +651,7 @@ protected:
 				AppendBytes(&Z, sizeof(Z));
 			}
 
-			const FVector DecompressedV(
+			const FVector3f DecompressedV(
 				bHasX ? FAnimationCompression_PerTrackUtils::DecompressFixed16<LogScale>(X) : 0.0f,
 				bHasY ? FAnimationCompression_PerTrackUtils::DecompressFixed16<LogScale>(Y) : 0.0f,
 				bHasZ ? FAnimationCompression_PerTrackUtils::DecompressFixed16<LogScale>(Z) : 0.0f);
@@ -662,7 +667,7 @@ protected:
 		const int32 NumKeys = ScaleData.ScaleKeys.Num();
 
 		// Determine the bounds
-		const FBox KeyBounds(ScaleData.ScaleKeys.GetData(), NumKeys);
+		const FBox3f KeyBounds(ScaleData.ScaleKeys.GetData(), NumKeys);
 		const bool bHasX = (FMath::Abs(KeyBounds.Max.X) >= ZeroingThreshold) || (FMath::Abs(KeyBounds.Min.X) >= ZeroingThreshold);
 		const bool bHasY = (FMath::Abs(KeyBounds.Max.Y) >= ZeroingThreshold) || (FMath::Abs(KeyBounds.Min.Y) >= ZeroingThreshold);
 		const bool bHasZ = (FMath::Abs(KeyBounds.Max.Z) >= ZeroingThreshold) || (FMath::Abs(KeyBounds.Min.Z) >= ZeroingThreshold);
@@ -681,7 +686,7 @@ protected:
 		// Write the keys out
 		for (int32 i = 0; i < NumKeys; ++i)
 		{
-			const FVector& V = ScaleData.ScaleKeys[i];
+			const FVector3f& V = ScaleData.ScaleKeys[i];
 			if( bHasX )
 			{
 				AppendBytes(&(V.X), sizeof(float));
@@ -708,7 +713,7 @@ protected:
 		const int32 NumKeys = ScaleData.ScaleKeys.Num();
 
 		// Determine the bounds
-		const FBox KeyBounds(ScaleData.ScaleKeys.GetData(), NumKeys);
+		const FBox3f KeyBounds(ScaleData.ScaleKeys.GetData(), NumKeys);
 		const bool bHasX = (FMath::Abs(KeyBounds.Max.X) >= ZeroingThreshold) || (FMath::Abs(KeyBounds.Min.X) >= ZeroingThreshold);
 		const bool bHasY = (FMath::Abs(KeyBounds.Max.Y) >= ZeroingThreshold) || (FMath::Abs(KeyBounds.Min.Y) >= ZeroingThreshold);
 		const bool bHasZ = (FMath::Abs(KeyBounds.Max.Z) >= ZeroingThreshold) || (FMath::Abs(KeyBounds.Min.Z) >= ZeroingThreshold);
@@ -727,7 +732,7 @@ protected:
 		// Write the bounds out
 		float Mins[3];
 		float Ranges[3];
-		FVector Range(KeyBounds.Max - KeyBounds.Min);
+		FVector3f Range(KeyBounds.Max - KeyBounds.Min);
 		Mins[0] = KeyBounds.Min.X;
 		Mins[1] = KeyBounds.Min.Y;
 		Mins[2] = KeyBounds.Min.Z;
@@ -767,12 +772,12 @@ protected:
 		// Write the keys out
 		for (int32 i = 0; i < NumKeys; ++i)
 		{
-			const FVector& V = ScaleData.ScaleKeys[i];
+			const FVector3f& V = ScaleData.ScaleKeys[i];
 			const FVectorIntervalFixed32NoW Compressor(V, Mins, Ranges);
 			AppendBytes(&Compressor, sizeof(Compressor));
 
 			// Decompress and update the error stats
-			FVector DecompressedV;
+			FVector3f DecompressedV;
 			Compressor.ToVector(DecompressedV, Mins, Ranges);
 
 			const float Error = (DecompressedV - V).Size();
@@ -804,7 +809,7 @@ protected:
 	{
 		if (bReallyNeedsFrameTable && (CompressedBytes.Num() > 0))
 		{
-			const int32 NumFrames = Params.NumFrames;
+			const int32 NumFrames = Params.NumberOfKeys;
 			const float SequenceLength = Params.SequenceLength;
 			const float FramesPerSecond = (NumFrames - 1) / SequenceLength;
 
@@ -824,7 +829,10 @@ public:
 	FPerTrackCompressor(int32 InCompressionType, const FTranslationTrack& TranslationData, const FPerTrackParams& Params)
 	{
 		Reset();
-		bReallyNeedsFrameTable = Params.bIncludeKeyTable && (TranslationData.PosKeys.Num() > 1) && (TranslationData.PosKeys.Num() < Params.NumFrames);
+		bReallyNeedsFrameTable = Params.bIncludeKeyTable && (TranslationData.PosKeys.Num() > 1) && (TranslationData.PosKeys.Num() < Params.NumberOfKeys);
+
+		const int32 MaxSize = TranslationData.Times.Num() * sizeof(FVector3f);
+		CompressedBytes.Reset(MaxSize);
 
 		switch (InCompressionType)
 		{
@@ -858,7 +866,10 @@ public:
 	FPerTrackCompressor(int32 InCompressionType, const FRotationTrack& RotationData, const FPerTrackParams& Params)
 	{
 		Reset();
-		bReallyNeedsFrameTable = Params.bIncludeKeyTable && (RotationData.RotKeys.Num() > 1) && (RotationData.RotKeys.Num() < Params.NumFrames);
+		bReallyNeedsFrameTable = Params.bIncludeKeyTable && (RotationData.RotKeys.Num() > 1) && (RotationData.RotKeys.Num() < Params.NumberOfKeys);
+
+		const int32 MaxSize = RotationData.Times.Num() * sizeof(FQuat4f);
+		CompressedBytes.Reset(MaxSize);
 
 		switch (InCompressionType)
 		{
@@ -895,7 +906,7 @@ public:
 	FPerTrackCompressor(int32 InCompressionType, const FScaleTrack& ScaleData, const FPerTrackParams& Params)
 	{
 		Reset();
-		bReallyNeedsFrameTable = Params.bIncludeKeyTable && (ScaleData.ScaleKeys.Num() > 1) && (ScaleData.ScaleKeys.Num() < Params.NumFrames);
+		bReallyNeedsFrameTable = Params.bIncludeKeyTable && (ScaleData.ScaleKeys.Num() > 1) && (ScaleData.ScaleKeys.Num() < Params.NumberOfKeys);
 
 		switch (InCompressionType)
 		{
@@ -1024,7 +1035,7 @@ void UAnimCompress_PerTrackCompression::CompressUsingUnderlyingCompressor(
 		}
 		// Compression parameters / thresholds
 		FPerTrackParams Params;
-		Params.NumFrames = CompressibleAnimData.NumFrames;
+		Params.NumberOfKeys = CompressibleAnimData.NumberOfKeys;
 		Params.SequenceLength = CompressibleAnimData.SequenceLength;
 		Params.MaxZeroingThreshold = MaxZeroingThreshold;
 
@@ -1055,19 +1066,19 @@ void UAnimCompress_PerTrackCompression::CompressUsingUnderlyingCompressor(
 		{
 			const FAnimPerturbationError& TrackError = Cache->PerTrackErrors[TrackIndex];
 
-			float ThresholdT_DueR = (TrackError.MaxErrorInTransDueToRot > SMALL_NUMBER) ? (PerturbationProbeSize / TrackError.MaxErrorInTransDueToRot) : 1.0f;
-			float ThresholdT_DueT = (TrackError.MaxErrorInTransDueToTrans > SMALL_NUMBER) ? (PerturbationProbeSize / TrackError.MaxErrorInTransDueToTrans) : 1.0f;
-			float ThresholdT_DueS = (TrackError.MaxErrorInTransDueToScale > SMALL_NUMBER) ? (PerturbationProbeSize / TrackError.MaxErrorInTransDueToScale) : 1.0f;
+			float ThresholdT_DueR = (TrackError.MaxErrorInTransDueToRot > UE_SMALL_NUMBER) ? (PerturbationProbeSize / TrackError.MaxErrorInTransDueToRot) : 1.0f;
+			float ThresholdT_DueT = (TrackError.MaxErrorInTransDueToTrans > UE_SMALL_NUMBER) ? (PerturbationProbeSize / TrackError.MaxErrorInTransDueToTrans) : 1.0f;
+			float ThresholdT_DueS = (TrackError.MaxErrorInTransDueToScale > UE_SMALL_NUMBER) ? (PerturbationProbeSize / TrackError.MaxErrorInTransDueToScale) : 1.0f;
 
 			//@TODO: Mixing spaces (target angle error is in radians, perturbation is in quaternion component units)
-			float ThresholdR_DueR = (TrackError.MaxErrorInRotDueToRot > SMALL_NUMBER) ? (PerturbationProbeSize / TrackError.MaxErrorInRotDueToRot) : 1.0f;
-			float ThresholdR_DueT = (TrackError.MaxErrorInRotDueToTrans > SMALL_NUMBER) ? (PerturbationProbeSize / TrackError.MaxErrorInRotDueToTrans) : 1.0f;
-			float ThresholdR_DueS = (TrackError.MaxErrorInRotDueToScale > SMALL_NUMBER) ? (PerturbationProbeSize / TrackError.MaxErrorInRotDueToScale) : 1.0f;
+			float ThresholdR_DueR = (TrackError.MaxErrorInRotDueToRot > UE_SMALL_NUMBER) ? (PerturbationProbeSize / TrackError.MaxErrorInRotDueToRot) : 1.0f;
+			float ThresholdR_DueT = (TrackError.MaxErrorInRotDueToTrans > UE_SMALL_NUMBER) ? (PerturbationProbeSize / TrackError.MaxErrorInRotDueToTrans) : 1.0f;
+			float ThresholdR_DueS = (TrackError.MaxErrorInRotDueToScale > UE_SMALL_NUMBER) ? (PerturbationProbeSize / TrackError.MaxErrorInRotDueToScale) : 1.0f;
 
 			// these values are not used, so I don't think we should calculate?
-// 			float ThresholdS_DueR = (TrackError.MaxErrorInScaleDueToRot > SMALL_NUMBER) ? (PerturbationProbeSize / TrackError.MaxErrorInScaleDueToRot) : 1.0f;
-// 			float ThresholdS_DueT = (TrackError.MaxErrorInScaleDueToTrans > SMALL_NUMBER) ? (PerturbationProbeSize / TrackError.MaxErrorInScaleDueToTrans) : 1.0f;
-// 			float ThresholdS_DueS = (TrackError.MaxErrorInScaleDueToScale > SMALL_NUMBER) ? (PerturbationProbeSize / TrackError.MaxErrorInScaleDueToScale) : 1.0f;
+// 			float ThresholdS_DueR = (TrackError.MaxErrorInScaleDueToRot > UE_SMALL_NUMBER) ? (PerturbationProbeSize / TrackError.MaxErrorInScaleDueToRot) : 1.0f;
+// 			float ThresholdS_DueT = (TrackError.MaxErrorInScaleDueToTrans > UE_SMALL_NUMBER) ? (PerturbationProbeSize / TrackError.MaxErrorInScaleDueToTrans) : 1.0f;
+// 			float ThresholdS_DueS = (TrackError.MaxErrorInScaleDueToScale > UE_SMALL_NUMBER) ? (PerturbationProbeSize / TrackError.MaxErrorInScaleDueToScale) : 1.0f;
 
 			// @Todo fix the error - this doesn't make sense
 			MaxAngleErrorCutoff = FMath::Min(MaxAngleDiffBitwise, MaxErrorPerTrackRatio * MaxAngleDiff * FMath::Lerp(ThresholdR_DueR, ThresholdT_DueR, RotationErrorSourceRatio));
@@ -1078,7 +1089,7 @@ void UAnimCompress_PerTrackCompression::CompressUsingUnderlyingCompressor(
 		// Start compressing translation using a totally lossless float32x3
 		const FTranslationTrack& TranslationTrack = TranslationData[TrackIndex];
 
-		Params.bIncludeKeyTable = bActuallyFilterLinearKeys && !FAnimationUtils::HasUniformKeySpacing(CompressibleAnimData.NumFrames, TranslationTrack.Times);
+		Params.bIncludeKeyTable = bActuallyFilterLinearKeys && !FAnimationUtils::HasUniformKeySpacing(CompressibleAnimData.NumberOfKeys, TranslationTrack.Times);
 		FPerTrackCompressor BestTranslation(ACF_Float96NoW, TranslationTrack, Params);
 
 		// Try the other translation formats
@@ -1102,7 +1113,7 @@ void UAnimCompress_PerTrackCompression::CompressUsingUnderlyingCompressor(
 		// Start compressing rotation, first using lossless float32x3
 		const FRotationTrack& RotationTrack = RotationData[TrackIndex];
 
-		Params.bIncludeKeyTable = bActuallyFilterLinearKeys && !FAnimationUtils::HasUniformKeySpacing(CompressibleAnimData.NumFrames, RotationTrack.Times);
+		Params.bIncludeKeyTable = bActuallyFilterLinearKeys && !FAnimationUtils::HasUniformKeySpacing(CompressibleAnimData.NumberOfKeys, RotationTrack.Times);
 		FPerTrackCompressor BestRotation(ACF_Float96NoW, RotationTrack, Params);
 
 		//bool bLeaveRotationUncompressed = (RotationTrack.Times.Num() <= 1) && (GHighQualityEmptyTracks != 0);
@@ -1132,7 +1143,7 @@ void UAnimCompress_PerTrackCompression::CompressUsingUnderlyingCompressor(
 		{
 			const FScaleTrack& ScaleTrack = ScaleData[TrackIndex];
 
-			Params.bIncludeKeyTable = bActuallyFilterLinearKeys && !FAnimationUtils::HasUniformKeySpacing(CompressibleAnimData.NumFrames, ScaleTrack.Times);
+			Params.bIncludeKeyTable = bActuallyFilterLinearKeys && !FAnimationUtils::HasUniformKeySpacing(CompressibleAnimData.NumberOfKeys, ScaleTrack.Times);
 			FPerTrackCompressor BestScale(ACF_Float96NoW, ScaleTrack, Params);
 
 			//bool bLeaveScaleUncompressed = (ScaleTrack.Times.Num() <= 1) && (GHighQualityEmptyTracks != 0);
@@ -1223,7 +1234,7 @@ void ResamplePositionKeys(
 
 	check(Track.Times.Num() == Track.PosKeys.Num());
 
-	TArray<FVector> NewPosKeys;
+	TArray<FVector3f> NewPosKeys;
 	TArray<float> NewTimes;
 
 	NewTimes.Empty(KeyCount);
@@ -1246,15 +1257,15 @@ void ResamplePositionKeys(
 			}
 		}
 
-		FVector Value;
+		FVector3f Value;
 
 		check(Track.Times[CachedIndex] <= Time);
 		if (CachedIndex + 1 < KeyCount)
 		{
 			check(Track.Times[CachedIndex+1] >= Time);
 
-			FVector A = Track.PosKeys[CachedIndex];
-			FVector B = Track.PosKeys[CachedIndex + 1];
+			FVector3f A = Track.PosKeys[CachedIndex];
+			FVector3f B = Track.PosKeys[CachedIndex + 1];
 
 			float Alpha = (Time - Track.Times[CachedIndex]) / (Track.Times[CachedIndex+1] - Track.Times[CachedIndex]);
 			Value = FMath::Lerp(A, B, Alpha);
@@ -1294,7 +1305,7 @@ void ResampleScaleKeys(
 
 	check(Track.Times.Num() == Track.ScaleKeys.Num());
 
-	TArray<FVector> NewScaleKeys;
+	TArray<FVector3f> NewScaleKeys;
 	TArray<float> NewTimes;
 
 	NewTimes.Empty(KeyCount);
@@ -1317,15 +1328,15 @@ void ResampleScaleKeys(
 			}
 		}
 
-		FVector Value;
+		FVector3f Value;
 
 		check(Track.Times[CachedIndex] <= Time);
 		if (CachedIndex + 1 < KeyCount)
 		{
 			check(Track.Times[CachedIndex+1] >= Time);
 
-			FVector A = Track.ScaleKeys[CachedIndex];
-			FVector B = Track.ScaleKeys[CachedIndex + 1];
+			FVector3f A = Track.ScaleKeys[CachedIndex];
+			FVector3f B = Track.ScaleKeys[CachedIndex + 1];
 
 			float Alpha = (Time - Track.Times[CachedIndex]) / (Track.Times[CachedIndex+1] - Track.Times[CachedIndex]);
 			Value = FMath::Lerp(A, B, Alpha);
@@ -1365,7 +1376,7 @@ void ResampleRotationKeys(
 		IntervalTime = IntervalTime * (KeyCount / (float)(KeyCount - 1));
 	}
 
-	TArray<FQuat> NewRotKeys;
+	TArray<FQuat4f> NewRotKeys;
 	TArray<float> NewTimes;
 
 	NewTimes.Empty(KeyCount);
@@ -1388,15 +1399,15 @@ void ResampleRotationKeys(
 			}
 		}
 
-		FQuat Value;
+		FQuat4f Value;
 
 		check(Track.Times[CachedIndex] <= Time);
 		if (CachedIndex + 1 < KeyCount)
 		{
 			check(Track.Times[CachedIndex+1] >= Time);
 
-			FQuat A = Track.RotKeys[CachedIndex];
-			FQuat B = Track.RotKeys[CachedIndex + 1];
+			FQuat4f A = Track.RotKeys[CachedIndex];
+			FQuat4f B = Track.RotKeys[CachedIndex + 1];
 
 			float Alpha = (Time - Track.Times[CachedIndex]) / (Track.Times[CachedIndex+1] - Track.Times[CachedIndex]);
 			Value = FMath::Lerp(A, B, Alpha);
@@ -1457,12 +1468,12 @@ void* UAnimCompress_PerTrackCompression::FilterBeforeMainKeyRemoval(
 	const int32 NumTracks = TranslationData.Num();
 
 	// Downsample the keys if enabled
-	if ((CompressibleAnimData.NumFrames >= MinKeysForResampling) && bResampleAnimation)
+	if ((CompressibleAnimData.NumberOfKeys >= MinKeysForResampling) && bResampleAnimation)
 	{
 		if(CompressibleAnimData.SequenceLength > 0)
 		{
 			//Make sure we aren't going to oversample the original animation
-			const float CurrentFramerate = (CompressibleAnimData.NumFrames - 1) / CompressibleAnimData.SequenceLength;
+			const float CurrentFramerate = (CompressibleAnimData.NumberOfKeys - 1) / CompressibleAnimData.SequenceLength;
 			if (CurrentFramerate > ResampledFramerate)
 			{
 				ResampleKeys(TranslationData, RotationData, ScaleData, 1.0f / ResampledFramerate, 0.0f);
@@ -1557,7 +1568,7 @@ bool UAnimCompress_PerTrackCompression::DoReduction(const FCompressibleAnimData&
 		return false;
 	}
 
-	if (bResampleAnimation && CompressibleAnimData.NumFrames < MinKeysForResampling)
+	if (bResampleAnimation && CompressibleAnimData.NumberOfKeys < MinKeysForResampling)
 	{
 		return false;
 	}
@@ -1587,9 +1598,9 @@ void WriteEnumArrayToKey(FArchive& Ar, TArray<TEnumAsByte<enum AnimationCompress
 		Ar << Val;
 	}
 }
-void UAnimCompress_PerTrackCompression::PopulateDDCKey(FArchive& Ar)
+void UAnimCompress_PerTrackCompression::PopulateDDCKey(const UE::Anim::Compression::FAnimDDCKeyArgs& KeyArgs, FArchive& Ar)
 {
-	Super::PopulateDDCKey(Ar);
+	Super::PopulateDDCKey(KeyArgs, Ar);
 
 	Ar << MaxZeroingThreshold;
 	Ar << MaxPosDiffBitwise;
@@ -1650,3 +1661,4 @@ void UAnimCompress_PerTrackCompression::DecompressBone(FAnimSequenceDecompressio
 		AEFPerTrackCompressionCodec::GetBoneAtomScale(OutAtom, DecompContext, TrackIndex);
 	}
 }
+

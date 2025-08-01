@@ -1,18 +1,25 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Serializers/MovieSceneSectionSerialization.h"
-#include "Serializers/MovieSceneSectionSerialization.h"
-#include "Serializers/MovieSceneActorSerialization.h"
-#include "Serializers/MovieSceneManifestSerialization.h"
-#include "Serializers/MovieScenePropertySerialization.h"
-#include "Serializers/MovieSceneTransformSerialization.h"
-#include "Serializers/MovieSceneSpawnSerialization.h"
-#include "Serializers/MovieSceneAnimationSerialization.h"
-#include "Serializers/MovieSceneSerializedType.h"
 
+#include "Math/MathFwd.h"
+#include "Serialization/CustomVersion.h"
 
-//#include "FrameDebuggerServer.h"
-#include "Misc/Paths.h"
+struct FActorFileHeader;
+struct FActorProperty;
+struct FAnimationFileHeader;
+struct FColor;
+struct FLinearColor;
+struct FManifestFileHeader;
+struct FManifestProperty;
+struct FPropertyFileHeader;
+struct FSerializedAnimation;
+struct FSerializedTransform;
+struct FSerializedTypeFileHeader;
+struct FSpawnFileHeader;
+struct FSpawnProperty;
+struct FTransformFileHeader;
+template <typename PropertyType> struct FSerializedProperty;
 
 DEFINE_LOG_CATEGORY(MovieSceneSerialization);
 
@@ -67,9 +74,19 @@ template<> SERIALIZEDRECORDERINTERFACE_API
 FRunnableThread* TMovieSceneSerializer<FPropertyFileHeader, FSerializedProperty<float>>::Thread = nullptr;
 
 template<> SERIALIZEDRECORDERINTERFACE_API
-FMovieSceneSerializerRunnable<FPropertyFileHeader, FSerializedProperty<FVector>>* TMovieSceneSerializer<FPropertyFileHeader, FSerializedProperty<FVector>>::Runnable = nullptr;
+FMovieSceneSerializerRunnable<FPropertyFileHeader, FSerializedProperty<double>>* TMovieSceneSerializer<FPropertyFileHeader, FSerializedProperty<double>>::Runnable = nullptr;
 template<> SERIALIZEDRECORDERINTERFACE_API
-FRunnableThread* TMovieSceneSerializer<FPropertyFileHeader, FSerializedProperty<FVector>>::Thread = nullptr;
+FRunnableThread* TMovieSceneSerializer<FPropertyFileHeader, FSerializedProperty<double>>::Thread = nullptr;
+
+template<> SERIALIZEDRECORDERINTERFACE_API
+FMovieSceneSerializerRunnable<FPropertyFileHeader, FSerializedProperty<FVector3f>>* TMovieSceneSerializer<FPropertyFileHeader, FSerializedProperty<FVector3f>>::Runnable = nullptr;
+template<> SERIALIZEDRECORDERINTERFACE_API
+FRunnableThread* TMovieSceneSerializer<FPropertyFileHeader, FSerializedProperty<FVector3f>>::Thread = nullptr;
+
+template<> SERIALIZEDRECORDERINTERFACE_API
+FMovieSceneSerializerRunnable<FPropertyFileHeader, FSerializedProperty<FVector3d>>* TMovieSceneSerializer<FPropertyFileHeader, FSerializedProperty<FVector3d>>::Runnable = nullptr;
+template<> SERIALIZEDRECORDERINTERFACE_API
+FRunnableThread* TMovieSceneSerializer<FPropertyFileHeader, FSerializedProperty<FVector3d>>::Thread = nullptr;
 
 template<> SERIALIZEDRECORDERINTERFACE_API
 FMovieSceneSerializerRunnable<FPropertyFileHeader, FSerializedProperty<FColor>>* TMovieSceneSerializer<FPropertyFileHeader, FSerializedProperty<FColor>>::Runnable = nullptr;
@@ -85,6 +102,11 @@ template<> SERIALIZEDRECORDERINTERFACE_API
 FMovieSceneSerializerRunnable<FPropertyFileHeader, FSerializedProperty<FString>>* TMovieSceneSerializer<FPropertyFileHeader, FSerializedProperty<FString>>::Runnable = nullptr;
 template<> SERIALIZEDRECORDERINTERFACE_API
 FRunnableThread* TMovieSceneSerializer<FPropertyFileHeader, FSerializedProperty<FString>>::Thread = nullptr;
+
+template<> SERIALIZEDRECORDERINTERFACE_API
+FMovieSceneSerializerRunnable<FPropertyFileHeader, FSerializedProperty<FLinearColor>>* TMovieSceneSerializer<FPropertyFileHeader, FSerializedProperty<FLinearColor>>::Runnable = nullptr;
+template<> SERIALIZEDRECORDERINTERFACE_API
+FRunnableThread* TMovieSceneSerializer<FPropertyFileHeader, FSerializedProperty<FLinearColor>>::Thread = nullptr;
 
 /** External Tempplate statics.  Need to define here due to linkage issues*/
 

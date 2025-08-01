@@ -6,20 +6,20 @@
 #include "SampleBuffer.h"
 #include "Async/Async.h"
 
-
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AudioAnalyzerNRT)
 #if WITH_EDITOR
 
 namespace 
 {
-	class FAudioAnalyzeTask : public FNonAbandonableTask
+	class FAudioAnalyzeNRTTask : public FNonAbandonableTask
 	{
-		friend class FAutoDeleteAsyncTask<FAudioAnalyzeTask>;
+		friend class FAutoDeleteAsyncTask<FAudioAnalyzeNRTTask>;
 
 		public:
-			FAudioAnalyzeTask(
+			FAudioAnalyzeNRTTask(
 					TWeakObjectPtr<UAudioAnalyzerNRT> InAnalyzerUObject, 
 					const UAudioAnalyzerNRT::FResultId InResultId,
-					TUniquePtr<Audio::FAnalyzerNRTBatch>&& InAnalyzerFacade, 
+					TUniquePtr<Audio::FAnalyzerNRTFacade>&& InAnalyzerFacade, 
 					TArray<uint8>&& InRawWaveData,
 					int32 InNumChannels,
 					float InSampleRate)
@@ -45,12 +45,12 @@ namespace
 				});
 			}
 
-			FORCEINLINE TStatId GetStatId() const { RETURN_QUICK_DECLARE_CYCLE_STAT(AudioAnalyzeTask, STATGROUP_ThreadPoolAsyncTasks); }
+			FORCEINLINE TStatId GetStatId() const { RETURN_QUICK_DECLARE_CYCLE_STAT(AudioAnalyzeNRTTask, STATGROUP_ThreadPoolAsyncTasks); }
 
 		private:
 			TWeakObjectPtr<UAudioAnalyzerNRT> AnalyzerUObject;
 			const UAudioAnalyzerNRT::FResultId ResultId;
-			TUniquePtr<Audio::FAnalyzerNRTBatch> AnalyzerFacade;
+			TUniquePtr<Audio::FAnalyzerNRTFacade> AnalyzerFacade;
 			TArray<uint8> RawWaveData;
 			int32 NumChannels;
 			float SampleRate;
@@ -123,17 +123,25 @@ bool UAudioAnalyzerNRT::ShouldEventTriggerAnalysis(struct FPropertyChangedEvent 
 
 void UAudioAnalyzerNRT::AnalyzeAudio()
 {
-	TSharedPtr<Audio::IAnalyzerNRTResult, ESPMode::ThreadSafe> NewResult;
+	AUDIO_ANALYSIS_LLM_SCOPE
 
 	// Create a new result id for this result.
 	FResultId ThisResultId = ++CurrentResultId;
 
 	if (nullptr != Sound)
 	{
+		if (Sound->bProcedural)
+		{
+			UE_LOG(LogAudioAnalyzer, Warning, TEXT("Soundwave '%s' is procedural. NRT audio analysis is not currently supported for this."), *Sound->GetFullName());
+			SetResult(nullptr);
+			return;
+		}
+
 		// Read audio while Sound object is assured safe. 
 		if (Sound->ChannelSizes.Num() > 0)
 		{
 			UE_LOG(LogAudioAnalyzer, Warning, TEXT("Soundwave '%s' has multi-channel audio (channels greater than 2). Audio analysis is not currently supported for this yet."), *Sound->GetFullName());
+			SetResult(nullptr);
 			return;
 		}
 
@@ -145,23 +153,25 @@ void UAudioAnalyzerNRT::AnalyzeAudio()
 		if (!Sound->GetImportedSoundWaveData(RawWaveData, SampleRate, NumChannels))
 		{
 			UE_LOG(LogAudioAnalyzer, Error, TEXT("Could not analyze audio due to failed import of sound wave data from Soundwave '%s'."), *Sound->GetFullName());
+			SetResult(nullptr);
 			return;
 		}
 
 		if (SampleRate == 0 || NumChannels == 0)
 		{
 			UE_LOG(LogAudioAnalyzer, Error, TEXT("Failed to parse the raw imported data for '%s' for analysis."), *Sound->GetFullName());
+			SetResult(nullptr);
 			return;
 		}
 		
 		// Create analyzer helper object
-		TUniquePtr<Audio::FAnalyzerNRTBatch> BatchAnalyzer = MakeUnique<Audio::FAnalyzerNRTBatch>(GetSettings(SampleRate, NumChannels), GetAnalyzerNRTFactoryName());
+		TUniquePtr<Audio::FAnalyzerNRTFacade> BatchAnalyzer = MakeUnique<Audio::FAnalyzerNRTFacade>(GetSettings(SampleRate, NumChannels), GetAnalyzerNRTFactoryName());
 
 		// Use weak reference in case this object is deleted before analysis is done
 		TWeakObjectPtr<UAudioAnalyzerNRT> AnalyzerPtr(this);
 		
 		// Create and start async task. Parentheses avoids memory leak warnings from static analysis.
-		(new FAutoDeleteAsyncTask<FAudioAnalyzeTask>(AnalyzerPtr, ThisResultId, MoveTemp(BatchAnalyzer), MoveTemp(RawWaveData), NumChannels, SampleRate))->StartBackgroundTask();
+		(new FAutoDeleteAsyncTask<FAudioAnalyzeNRTTask>(AnalyzerPtr, ThisResultId, MoveTemp(BatchAnalyzer), MoveTemp(RawWaveData), NumChannels, SampleRate))->StartBackgroundTask();
 	}
 	else
 	{
@@ -268,6 +278,8 @@ void UAudioAnalyzerNRT::Serialize(FArchive& Ar)
 
 TUniquePtr<Audio::IAnalyzerNRTSettings> UAudioAnalyzerNRT::GetSettings(const float InSampleRate, const int32 InNumChannels) const
 {
+	AUDIO_ANALYSIS_LLM_SCOPE
+
 	return MakeUnique<Audio::IAnalyzerNRTSettings>();
 }
 

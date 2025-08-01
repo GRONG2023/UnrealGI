@@ -5,34 +5,22 @@
 =============================================================================*/ 
 
 #include "PhysicalMaterials/PhysicalMaterialMask.h"
+#include "Physics/Experimental/PhysInterface_Chaos.h"
+#include "UObject/UnrealType.h"
 
 #if WITH_EDITOR
 
+#include "AssetRegistry/AssetData.h"
 #include "EditorFramework/AssetImportData.h"
-#include "Editor.h"
-#include "EditorDirectories.h"
-#include "ObjectTools.h"
-#include "PackageTools.h"
 #include "Modules/ModuleManager.h"
-#include "AssetRegistryModule.h"
-#include "AssetToolsModule.h"
-#include "IAssetTools.h"
-#include "DesktopPlatformModule.h"
-#include "IDesktopPlatform.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Engine/Texture.h"
-#include "Factories/TextureFactory.h"
-#include "HAL/PlatformApplicationMisc.h"
-#include "HAL/FileManager.h"
-#include "Misc/FileHelper.h"
-#include "Misc/Paths.h"
-#include "Misc/PackageName.h"
 
 #endif
 
-#if WITH_CHAOS
 #include "Chaos/PhysicalMaterials.h"
-#endif
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PhysicalMaterialMask)
 
 DEFINE_LOG_CATEGORY_STATIC(LogPhysicalMaterialMask, Log, All);
 
@@ -46,7 +34,7 @@ static void OnDumpPhysicalMaterialMaskData(const TArray< FString >& Arguments)
 	if (Arguments.Num() > 0)
 	{
 		const FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-		FAssetData PhysMatMaskAsset = AssetRegistryModule.Get().GetAssetByObjectPath(*Arguments[0]);
+		FAssetData PhysMatMaskAsset = AssetRegistryModule.Get().GetAssetByObjectPath(FSoftObjectPath(Arguments[0]));
 		if (PhysMatMaskAsset.IsValid() == false)
 		{
 			TArray<FAssetData> AssetsInPackage;
@@ -109,12 +97,10 @@ UPhysicalMaterialMask::~UPhysicalMaterialMask() = default;
 
 void UPhysicalMaterialMask::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
-#if WITH_CHAOS
 	if (MaterialMaskHandle && MaterialMaskHandle->IsValid())
 	{
 		FPhysicsInterface::UpdateMaterialMask(*MaterialMaskHandle, this);
 	}
-#endif
 
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 }
@@ -147,12 +133,11 @@ void UPhysicalMaterialMask::PostLoad()
 
 void UPhysicalMaterialMask::FinishDestroy()
 {
-#if WITH_CHAOS
 	if(MaterialMaskHandle)
 	{
 		FPhysicsInterface::ReleaseMaterialMask(*MaterialMaskHandle);
 	}
-#endif
+
 	Super::FinishDestroy();
 }
 
@@ -239,8 +224,6 @@ void UPhysicalMaterialMask::DumpMaskData()
 
 #endif // WITH_EDITOR
 
-#if	WITH_CHAOS
-
 FPhysicsMaterialMaskHandle& UPhysicalMaterialMask::GetPhysicsMaterialMask()
 {
 	if(!MaterialMaskHandle)
@@ -260,15 +243,13 @@ FPhysicsMaterialMaskHandle& UPhysicalMaterialMask::GetPhysicsMaterialMask()
 	return *MaterialMaskHandle;
 }
 
-#endif
-
 // This template generates mask data from the texture mask, converting colors to mask ids.
 template<typename PixelDataType, int32 RIdx, int32 GIdx, int32 BIdx, int32 AIdx> class MaskDataGenerator
 {
 public:
 
-	MaskDataGenerator(int32 SizeX, int32 SizeY, uint8* SourceTextureData)
-		: SourceData(reinterpret_cast<PixelDataType*>(SourceTextureData))
+	MaskDataGenerator(int32 SizeX, int32 SizeY, const uint8* SourceTextureData)
+		: SourceData(reinterpret_cast<const PixelDataType*>(SourceTextureData))
 		, TextureWidth(SizeX)
 		, TextureHeight(SizeY)
 	{
@@ -280,7 +261,7 @@ public:
 
 		OutMaskData.Empty();
 
-		PixelDataType* PixelData = SourceData;
+		const PixelDataType* PixelData = SourceData;
 
 		for (int32 Y = 0; Y < TextureHeight; ++Y)
 		{
@@ -341,7 +322,7 @@ public:
 		return UPhysicalMaterialMask::INVALID_MASK_INDEX;
 	}
 
-	PixelDataType* SourceData;
+	const PixelDataType* SourceData;
 	int32 TextureWidth;
 	int32 TextureHeight;
 };
@@ -355,7 +336,7 @@ void UPhysicalMaterialMask::GenerateMaskData(TArray<uint32>& OutMaskData, int32&
 
 	if (MaskTexture)
 	{
-		uint8* TextureData = MaskTexture->Source.LockMip(0);
+		const uint8* TextureData = MaskTexture->Source.LockMipReadOnly(0);
 		if (TextureData)
 		{
 			const int32 TextureDataSize = MaskTexture->Source.CalcMipSize(0);
@@ -375,19 +356,16 @@ void UPhysicalMaterialMask::GenerateMaskData(TArray<uint32>& OutMaskData, int32&
 					break;
 				}
 
-				case TSF_RGBA8:
-				{
-					MaskDataGenerator<uint8, 0, 1, 2, 3> MaskDataGen(OutSizeX, OutSizeY, TextureData);
-					MaskDataGen.GenerateMask(OutMaskData);
-					break;
-				}
-
 				case TSF_RGBA16:
 				{
 					MaskDataGenerator<uint16, 0, 1, 2, 3> MaskDataGen(OutSizeX, OutSizeY, TextureData);
 					MaskDataGen.GenerateMask(OutMaskData);
 					break;
 				}
+
+				default:
+					check(0);
+					break;
 				}
 			}
 		}
@@ -440,5 +418,6 @@ uint32 UPhysicalMaterialMask::GetPhysMatIndex(const TArray<uint32>& MaskData, in
 
 	return UPhysicalMaterialMask::INVALID_MASK_INDEX;
 }
+
 
 

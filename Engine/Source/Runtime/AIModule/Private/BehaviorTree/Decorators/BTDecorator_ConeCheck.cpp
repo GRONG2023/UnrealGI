@@ -4,6 +4,8 @@
 #include "GameFramework/Actor.h"
 #include "BehaviorTree/BlackboardComponent.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BTDecorator_ConeCheck)
+
 UBTDecorator_ConeCheck::UBTDecorator_ConeCheck(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
 	NodeName = "Cone Check";
@@ -17,8 +19,7 @@ UBTDecorator_ConeCheck::UBTDecorator_ConeCheck(const FObjectInitializer& ObjectI
 	Observed.AddObjectFilter(this, GET_MEMBER_NAME_CHECKED(UBTDecorator_ConeCheck, Observed), AActor::StaticClass());
 	Observed.AddVectorFilter(this, GET_MEMBER_NAME_CHECKED(UBTDecorator_ConeCheck, Observed));
 
-	bNotifyBecomeRelevant = true;
-	bNotifyTick = true;
+	INIT_DECORATOR_NODE_NOTIFY_FLAGS();
 
 	// KeepInCone always abort current branch
 	FlowAbortMode = EBTFlowAbortMode::None;
@@ -86,7 +87,7 @@ bool UBTDecorator_ConeCheck::CalculateRawConditionValue(UBehaviorTreeComponent& 
 
 void UBTDecorator_ConeCheck::OnBecomeRelevant(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
 {
-	TNodeInstanceMemory* DecoratorMemory = (TNodeInstanceMemory*)NodeMemory;
+	TNodeInstanceMemory* DecoratorMemory = CastInstanceNodeMemory<TNodeInstanceMemory>(NodeMemory);
 	DecoratorMemory->bLastRawResult = CalcConditionImpl(OwnerComp, NodeMemory);
 }
 
@@ -124,8 +125,8 @@ void UBTDecorator_ConeCheck::DescribeRuntimeValues(const UBehaviorTreeComponent&
 	if (CalculateDirection(BBComponent, ConeOrigin, Observed, DirectionToObserved)
 		&& CalculateDirection(BBComponent, ConeOrigin, ConeDirection, ConeDir))
 	{
-		const float CurrentAngleDot = ConeDir.CosineAngle2D(DirectionToObserved);
-		const float CurrentAngleRad = FMath::Acos(CurrentAngleDot);
+		const FVector::FReal CurrentAngleDot = ConeDir.CosineAngle2D(DirectionToObserved);
+		const FVector::FReal CurrentAngleRad = FMath::Acos(CurrentAngleDot);
 
 		Values.Add(FString::Printf(TEXT("Angle: %.0f (%s cone)"),
 			FMath::RadiansToDegrees(CurrentAngleRad),
@@ -140,6 +141,16 @@ uint16 UBTDecorator_ConeCheck::GetInstanceMemorySize() const
 	return sizeof(TNodeInstanceMemory);
 }
 
+void UBTDecorator_ConeCheck::InitializeMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryInit::Type InitType) const
+{
+	InitializeNodeMemory<TNodeInstanceMemory>(NodeMemory, InitType);
+}
+
+void UBTDecorator_ConeCheck::CleanupMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryClear::Type CleanupType) const
+{
+	CleanupNodeMemory<TNodeInstanceMemory>(NodeMemory, CleanupType);
+}
+
 #if WITH_EDITOR
 
 FName UBTDecorator_ConeCheck::GetNodeIconName() const
@@ -148,3 +159,4 @@ FName UBTDecorator_ConeCheck::GetNodeIconName() const
 }
 
 #endif	// WITH_EDITOR
+

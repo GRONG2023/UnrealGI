@@ -2,9 +2,13 @@
 
 #pragma once
 
-#include "PixelFormat.h"
 #include "Containers/Array.h"
 #include "Containers/ArrayView.h"
+#include "HAL/Platform.h"
+#include "PixelFormat.h"
+
+class FCbFieldView;
+class FCbWriter;
 
 // Describes the type of data found in a given file region.
 enum class EFileRegionType : uint8
@@ -25,7 +29,7 @@ enum class EFileRegionType : uint8
 // Regions are used to improve data compression and patching on some platforms.
 struct FFileRegion
 {
-	static const constexpr TCHAR* RegionsFileExtension = TEXT(".uregs");
+	static CORE_API const TCHAR* RegionsFileExtension;
 
 	uint64 Offset;
 	uint64 Length;
@@ -45,6 +49,9 @@ struct FFileRegion
 
 	static CORE_API void AccumulateFileRegions(TArray<FFileRegion>& InOutRegions, int64 EntryOffset, int64 PayloadOffset, int64 EndOffset, TArrayView<const FFileRegion> InnerFileRegions);
 	static CORE_API void SerializeFileRegions(class FArchive& Ar, TArray<FFileRegion>& Regions);
+
+	CORE_API friend FCbWriter& operator<<(FCbWriter& Writer, const FFileRegion& Region);
+	static CORE_API bool LoadFromCompactBinary(FCbFieldView Obj, FFileRegion& OutRegion);
 
 	static inline EFileRegionType SelectType(EPixelFormat Format)
 	{

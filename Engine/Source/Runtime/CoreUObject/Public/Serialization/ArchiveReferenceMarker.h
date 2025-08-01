@@ -6,16 +6,25 @@
 #include "UObject/Object.h"
 #include "Serialization/ArchiveUObject.h"
 
+enum class EArchiveReferenceMarkerFlags : uint32
+{
+	None = 0,
+	SkipCompilingAssets = 1 // Skip serialization of assets still being compiled, some data might be missing.
+};
+
+ENUM_CLASS_FLAGS(EArchiveReferenceMarkerFlags);
+
 /**
  * This archive marks all objects referenced by the specified "root set" of objects.
  */
 class FArchiveReferenceMarker : public FArchiveUObject
 {
 public:
-	FArchiveReferenceMarker( TArray<UObject*>& SourceObjects )
+	FArchiveReferenceMarker( TArray<UObject*>& SourceObjects, EArchiveReferenceMarkerFlags InFlags = EArchiveReferenceMarkerFlags::None)
 	{
 		ArIsObjectReferenceCollector = true;
 		ArIgnoreOuterRef = true;
+		SetShouldSkipCompilingAssets((InFlags & EArchiveReferenceMarkerFlags::SkipCompilingAssets) != EArchiveReferenceMarkerFlags::None);
 
 		for ( int32 ObjectIndex = 0; ObjectIndex < SourceObjects.Num(); ObjectIndex++ )
 		{
@@ -41,7 +50,7 @@ public:
 	*/
 	FArchive& operator<<( UObject*& Object )
 	{
-		if (Object != NULL && !(Object->HasAnyMarks(OBJECTMARK_TagExp) || Object->IsPendingKillOrUnreachable()) )
+		if (Object != NULL && !(Object->HasAnyMarks(OBJECTMARK_TagExp) || !IsValidChecked(Object) || Object->IsUnreachable()) )
 		{
 			Object->Mark(OBJECTMARK_TagExp);
 

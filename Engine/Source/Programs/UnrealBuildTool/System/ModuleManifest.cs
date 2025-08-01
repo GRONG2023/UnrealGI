@@ -1,12 +1,11 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 
 namespace UnrealBuildTool
 {
@@ -18,9 +17,16 @@ namespace UnrealBuildTool
 	/// module when making versioned builds.
 	/// </summary>
 	[Serializable]
-	class ModuleManifest
+	public class ModuleManifest
 	{
+		/// <summary>
+		/// Unique build id for the modules described in the manifest.
+		/// </summary>
 		public string BuildId;
+
+		/// <summary>
+		/// Map of module name to file name.
+		/// </summary>
 		public Dictionary<string, string> ModuleNameToFileName = new Dictionary<string, string>();
 
 		/// <summary>
@@ -53,19 +59,19 @@ namespace UnrealBuildTool
 		/// <param name="AppName">The modular app name being built</param>
 		/// <param name="Configuration">The target configuration</param>
 		/// <param name="Platform">The target platform</param>
-		/// <param name="BuildArchitecture">The architecture of the target platform</param>
+		/// <param name="BuildArchitectures">The architecture of the target platform</param>
 		/// <param name="bIsGameDirectory"></param>
 		/// <returns>Filename for the app receipt</returns>
-		public static string GetStandardFileName(string AppName, UnrealTargetPlatform Platform, UnrealTargetConfiguration Configuration, string BuildArchitecture, bool bIsGameDirectory)
+		public static string GetStandardFileName(string AppName, UnrealTargetPlatform Platform, UnrealTargetConfiguration Configuration, UnrealArchitectures BuildArchitectures, bool bIsGameDirectory)
 		{
 			string BaseName = AppName;
 			if (Configuration != UnrealTargetConfiguration.Development && !(Configuration == UnrealTargetConfiguration.DebugGame && !bIsGameDirectory))
 			{
 				BaseName += String.Format("-{0}-{1}", Platform.ToString(), Configuration.ToString());
 			}
-			if(!String.IsNullOrEmpty(BuildArchitecture) && UEBuildPlatform.GetBuildPlatform(Platform).RequiresArchitectureSuffix())
+			if (UnrealArchitectureConfig.ForPlatform(Platform).RequiresArchitectureFilenames(BuildArchitectures))
 			{
-				BaseName += BuildArchitecture;
+				BaseName += BuildArchitectures.ToString();
 			}
 			return String.Format("{0}.modules", BaseName);
 		}
@@ -95,7 +101,7 @@ namespace UnrealBuildTool
 		/// <param name="FileName">The filename that was read</param>
 		/// <param name="Result">If successful, the receipt that was read. Null otherwise.</param>
 		/// <returns>True if the file was read succesfully.</returns>
-		public static bool TryRead(FileReference FileName, out ModuleManifest Result)
+		public static bool TryRead(FileReference FileName, [NotNullWhen(true)] out ModuleManifest? Result)
 		{
 			if (!FileReference.Exists(FileName))
 			{
@@ -121,7 +127,7 @@ namespace UnrealBuildTool
 		public void Write(FileReference FileName)
 		{
 			DirectoryReference.CreateDirectory(FileName.Directory);
-			using(StreamWriter Writer = new StreamWriter(FileName.FullName))
+			using (StreamWriter Writer = new StreamWriter(FileName.FullName))
 			{
 				Write(Writer);
 			}

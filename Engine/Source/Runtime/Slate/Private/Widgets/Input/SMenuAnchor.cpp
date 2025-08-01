@@ -83,15 +83,12 @@ SMenuAnchor::FPopupPlacement::FPopupPlacement(const FGeometry& PlacementGeometry
  */
 void SMenuAnchor::Construct( const FArguments& InArgs )
 {
-	Children.Add( new FSimpleSlot(this) );
-	Children.Add( new FSimpleSlot(this) );
-	
-
-	Children[0]
+	Children.AddSlot(MoveTemp(FBasicLayoutWidgetSlot::FSlotArguments(MakeUnique<FBasicLayoutWidgetSlot>())
 		.Padding(InArgs._Padding)
 		[
 			InArgs._Content.Widget
-		];
+		]));
+	Children.AddSlot(FBasicLayoutWidgetSlot::FSlotArguments(MakeUnique<FBasicLayoutWidgetSlot>()));
 
 	MenuContent                            = InArgs._MenuContent;
 	WrappedContent                         = InArgs._MenuContent;
@@ -148,6 +145,16 @@ void SMenuAnchor::Tick( const FGeometry& AllottedGeometry, const double InCurren
 		// passed down in FGeometry, along with the window DPI Scale, as one extra value code can take into account if it needs to.
 		const FVector2D NewSize = PopupGeometry.GetDrawSize() / ( AllottedGeometry.GetAccumulatedLayoutTransform().GetScale() / PopupWindow->GetLocalToWindowTransform().GetScale() );
 
+		// When in a ComboBox, we want the submenu to be at minimum the size of the combo box, so we update the Popupwindow minimum size.
+		const EMenuPlacement PlacementMode = Placement.Get();
+		if (PlacementMode == MenuPlacement_ComboBox)
+		{
+			// Set the new size limits
+			FWindowSizeLimits SizeLimits = PopupWindow->GetSizeLimits();
+			SizeLimits.SetMinWidth(NewSize.X);
+			PopupWindow->SetSizeLimits(SizeLimits);
+		}
+
 		// We made a window for showing the popup.
 		// Update the window's position!
 		PopupWindow->ReshapeWindow(NewPosition, NewSize);
@@ -156,7 +163,7 @@ void SMenuAnchor::Tick( const FGeometry& AllottedGeometry, const double InCurren
 	{
 		// Ideally, do this in OnArrangeChildren(); currently not possible because OnArrangeChildren()
 		// can be called in DesktopSpace or WindowSpace, and we will not know which version of the Window
-		// geometry to use. Tick() is always in DesktopSpace, so cache the solution here and just use
+		// geometry to use. Tick() is always in DesktopSpace, so cache the position here and just use
 		// it in OnArrangeChildren().
 		const FPopupPlacement LocalPlacement(AllottedGeometry, Children[1].GetWidget()->GetDesiredSize(), Placement.Get());
 
@@ -283,11 +290,8 @@ bool SMenuAnchor::IsOpenViaCreatedWindow() const
 
 void SMenuAnchor::SetContent(TSharedRef<SWidget> InContent)
 {
-	Children[0]
-	.Padding(0)
-	[
-		InContent
-	];
+	Children[0].SetPadding(0.f);
+	Children[0].AttachWidget(InContent);
 }
 
 void SMenuAnchor::SetMenuContent(TSharedRef<SWidget> InMenuContent)
@@ -351,7 +355,7 @@ void SMenuAnchor::SetIsOpen( bool InIsOpen, const bool bFocusMenu, const int32 F
 					const FVector2D DesiredContentSize = MenuContentRef->GetDesiredSize();  // @todo slate: This is ignoring any window border size!
 					const EMenuPlacement PlacementMode = Placement.Get();
 
-					const FVector2D NewPosition = MyGeometry.AbsolutePosition;
+					const FVector2D NewPosition = FVector2D(MyGeometry.AbsolutePosition);
 					FVector2D NewWindowSize = DesiredContentSize;
 
 					FPopupTransitionEffect TransitionEffect( FPopupTransitionEffect::None );

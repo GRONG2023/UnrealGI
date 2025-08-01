@@ -1,14 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Stats/StatsMallocProfilerProxy.h"
+
+#if STATS && UE_STATS_MEMORY_PROFILER_ENABLED
+
 #include "UObject/NameTypes.h"
 #include "Logging/LogMacros.h"
 #include "Misc/Parse.h"
 #include "Misc/CommandLine.h"
 #include "Stats/Stats.h"
-
-#if STATS
-
 
 /** Fake stat group and memory stats. */
 DECLARE_STATS_GROUP( TEXT( "Memory Profiler" ), STATGROUP_MemoryProfiler, STATCAT_Advanced );
@@ -132,7 +132,7 @@ void FStatsMallocProfilerProxy::TrackAlloc( void* Ptr, int64 Size, int32 Sequenc
 			{
 				ThreadStats->MemoryMessageScope++;
 				const double InvMB = 1.0f / 1024.0f / 1024.0f;
-				UE_LOG( LogStats, Verbose, TEXT( "ThreadID: %i, Current: %.1f" ), FPlatformTLS::GetCurrentThreadId(), InvMB*(int64)ThreadStats->Packet.StatMessages.Num()*sizeof( FStatMessage ) );
+				UE_LOG(LogStats, Verbose, TEXT("ThreadID: %i, Current: %.1f"), FPlatformTLS::GetCurrentThreadId(), InvMB * double(int64(ThreadStats->Packet.StatMessages.Num()) * sizeof(FStatMessage)));
 				ThreadStats->MemoryMessageScope--;
 			}
 #endif // UE_BUILD_DEBUG
@@ -251,4 +251,4 @@ void FStatsMallocProfilerProxy::UpdateStats()
 	}
 }
 
-#endif //STATS
+#endif //STATS && UE_STATS_MEMORY_PROFILER_ENABLED

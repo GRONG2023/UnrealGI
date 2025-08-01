@@ -15,10 +15,8 @@ class FMenuBuilder;
 class FTimingProfilerCommands : public TCommands<FTimingProfilerCommands>
 {
 public:
-	/** Default constructor. */
 	FTimingProfilerCommands();
-
-	/** Initialize commands. */
+	virtual ~FTimingProfilerCommands();
 	virtual void RegisterCommands() override;
 
 public:
@@ -31,9 +29,6 @@ public:
 
 	/** Toggles visibility for the Frames Track. Global and custom command. */
 	TSharedPtr<FUICommandInfo> ToggleFramesTrackVisibility;
-
-	/** Toggles visibility for the Graph Track. Global and custom command. */
-	TSharedPtr<FUICommandInfo> ToggleGraphTrackVisibility;
 
 	/** Toggles visibility for the Timing View. Global and custom command. */
 	TSharedPtr<FUICommandInfo> ToggleTimingViewVisibility;
@@ -59,18 +54,25 @@ public:
 class FTimingViewCommands : public TCommands<FTimingViewCommands>
 {
 public:
-	/** Default constructor. */
 	FTimingViewCommands();
-
-	/** Initialize commands. */
+	virtual ~FTimingViewCommands();
 	virtual void RegisterCommands() override;
 
 public:
-	/** Toggles visibility for GPU thread track. */
-	TSharedPtr<FUICommandInfo> ShowAllGpuTracks;
+	/** Toggles visibility of empty tracks. */
+	TSharedPtr<FUICommandInfo> AutoHideEmptyTracks;
 
-	/** Toggles visibility for all CPU thread tracks at once. */
-	TSharedPtr<FUICommandInfo> ShowAllCpuTracks;
+	/** Toggles "panning on screen edges". */
+	TSharedPtr<FUICommandInfo> PanningOnScreenEdges;
+
+	/** Toggles 'compact mode' for timing tracks. */
+	TSharedPtr<FUICommandInfo> ToggleCompactMode;
+
+	/** Toggles visibility for Main Graph track. */
+	TSharedPtr<FUICommandInfo> ShowMainGraphTrack;
+
+	/** Opens the Quick Find widget. */
+	TSharedPtr<FUICommandInfo> QuickFind;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -123,7 +125,6 @@ protected:\
 	ECheckBoxState CmdName##_GetCheckState() const; /**< Handles FGetActionCheckState for CmdName. */
 
 	DECLARE_TOGGLE_COMMAND(ToggleFramesTrackVisibility)
-	DECLARE_TOGGLE_COMMAND(ToggleGraphTrackVisibility)
 	DECLARE_TOGGLE_COMMAND(ToggleTimingViewVisibility)
 	DECLARE_TOGGLE_COMMAND(ToggleTimersViewVisibility)
 	DECLARE_TOGGLE_COMMAND(ToggleCallersTreeViewVisibility)

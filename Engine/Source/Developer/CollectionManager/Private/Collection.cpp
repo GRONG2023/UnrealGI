@@ -1,8 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Collection.h"
+#include "CollectionSettings.h"
 #include "HAL/PlatformTime.h"
 #include "HAL/FileManager.h"
+#include "HAL/IConsoleManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/FeedbackContext.h"
@@ -17,15 +19,22 @@
 #include "Misc/ScopeRWLock.h"
 #include "Async/ParallelFor.h"
 #include "String/ParseLines.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 #define LOCTEXT_NAMESPACE "CollectionManager"
 
+static TAutoConsoleVariable<int32> CVarCollectionsMaxCLDescriptionPathCount(
+	TEXT("Collections.MaxCLDescriptionPathCount"),
+	1000,
+	TEXT("Sets the maximum number of paths reported in a changelist when checking in a collection that adds or removes entries."),
+	ECVF_Default);
+
 struct FCollectionUtils
 {
-	static void AppendCollectionToArray(const TSet<FName>& InObjectSet, TArray<FName>& OutObjectArray)
+	static void AppendCollectionToArray(const TSet<FSoftObjectPath>& InObjectSet, TArray<FSoftObjectPath>& OutObjectArray)
 	{
 		OutObjectArray.Reserve(OutObjectArray.Num() + InObjectSet.Num());
-		for (const FName& ObjectName : InObjectSet)
+		for (const FSoftObjectPath& ObjectName : InObjectSet)
 		{
 			OutObjectArray.Add(ObjectName);
 		}
@@ -105,7 +114,7 @@ bool FCollection::Load(FText& OutError)
 			break;
 		}
 
-		FStringView::SizeType Offset;
+		int32 Offset;
 		if (Line.FindChar(TEXT(':'), Offset))
 		{
 			FString Key(Line.Left(Offset));
@@ -127,26 +136,26 @@ bool FCollection::Load(FText& OutError)
 	{
 		const int32 NamesNum = FileContents.Num() - LineIndex;
 
-		TArray<FName> FNames;
-		FNames.SetNum(NamesNum);
+		TArray<FSoftObjectPath> Paths;
+		Paths.SetNum(NamesNum);
 
 		// Name hashing to register new FName takes time
 		// Process as much as possible in multiple threads
 		ParallelFor(
 			NamesNum,
-			[this, &FileContents, &LineIndex, &FNames](int32 LocalLineIndex)
+			[this, &FileContents, &LineIndex, &Paths](int32 LocalLineIndex)
 			{
 				FStringView Line(FileContents[LineIndex + LocalLineIndex]);
-				FNames[LocalLineIndex] = FName(Line.TrimStartAndEnd());
+				Paths[LocalLineIndex] = FSoftObjectPath(Line.TrimStartAndEnd());
 			},
 			// Do not pay for scheduling cost if number of items is too low
 			NamesNum < 1000 ? EParallelForFlags::ForceSingleThread : EParallelForFlags::None
 		);
 
 		// Static collection, a flat list of asset paths
-		for (FName& Name : FNames)
+		for (FSoftObjectPath& Path : Paths)
 		{
-			AddObjectToCollection(Name);
+			AddObjectToCollection(Path);
 		}
 	}
 	else
@@ -156,11 +165,12 @@ bool FCollection::Load(FText& OutError)
 	}
 
 	DiskSnapshot.TakeSnapshot(*this);
+	bChangedSinceLastDiskSnapshot = false;
 
 	return true;
 }
 
-bool FCollection::Save(const TArray<FText>& AdditionalChangelistText, FText& OutError)
+bool FCollection::Save(const TArray<FText>& AdditionalChangelistText, FText& OutError, bool bForceCommitToRevisionControl)
 {
 	if ( !ensure(SourceFilename.Len()) )
 	{
@@ -208,11 +218,11 @@ bool FCollection::Save(const TArray<FText>& AdditionalChangelistText, FText& Out
 	if (StorageMode == ECollectionStorageMode::Static)
 	{
 		// Write out the set as a sorted array to keep things in a known order for diffing
-		TArray<FName> ObjectList = ObjectSet.Array();
-		ObjectList.Sort(FNameLexicalLess());
+		TArray<FSoftObjectPath> ObjectList = ObjectSet.Array();
+		ObjectList.Sort([](FSoftObjectPath A, FSoftObjectPath B){ return A.LexicalLess(B); });
 
 		// Static collection. Save a flat list of all objects in the collection.
-		for (const FName& ObjectName : ObjectList)
+		for (const FSoftObjectPath& ObjectName : ObjectList)
 		{
 			FileOutput += ObjectName.ToString() + LINE_TERMINATOR;
 		}
@@ -247,7 +257,7 @@ bool FCollection::Save(const TArray<FText>& AdditionalChangelistText, FText& Out
 
 	if ( bSaveSuccessful )
 	{
-		if ( bUseSCC )
+		if ( bUseSCC && (bForceCommitToRevisionControl || GetDefault<UCollectionSettings>()->bAutoCommitOnSave))
 		{
 			// Check in the file if the save was successful
 			if ( bSaveSuccessful )
@@ -282,6 +292,7 @@ bool FCollection::Save(const TArray<FText>& AdditionalChangelistText, FText& Out
 		FileVersion = ECollectionVersion::CurrentVersion;
 
 		DiskSnapshot.TakeSnapshot(*this);
+		bChangedSinceLastDiskSnapshot = false;
 	}
 
 	GWarn->EndSlowTask();
@@ -310,13 +321,13 @@ bool FCollection::Update(FText& OutError)
 	ISourceControlProvider& SourceControlProvider = ISourceControlModule::Get().GetProvider();
 	if ( !ISourceControlModule::Get().IsEnabled() )
 	{
-		OutError = LOCTEXT("Error_SCCDisabled", "Source control is not enabled. Enable source control in the preferences menu.");
+		OutError = LOCTEXT("Error_SCCDisabled", "Revision control is not enabled. Enable revision control in the preferences menu.");
 		return false;
 	}
 
 	if ( !SourceControlProvider.IsAvailable() )
 	{
-		OutError = LOCTEXT("Error_SCCNotAvailable", "Source control is currently not available. Check your connection and try again.");
+		OutError = LOCTEXT("Error_SCCNotAvailable", "Revision control is currently not available. Check your connection and try again.");
 		return false;
 	}
 
@@ -397,6 +408,7 @@ bool FCollection::DeleteSourceFile(FText& OutError)
 	if ( bSuccessfullyDeleted )
 	{
 		DiskSnapshot = FCollectionSnapshot();
+		bChangedSinceLastDiskSnapshot = (ObjectSet.Num() == 0);
 	}
 
 	return bSuccessfullyDeleted;
@@ -409,11 +421,12 @@ void FCollection::Empty()
 	DynamicQueryExpressionEvaluatorPtr.Reset();
 
 	DiskSnapshot.TakeSnapshot(*this);
+	bChangedSinceLastDiskSnapshot = false;
 }
 
-bool FCollection::AddObjectToCollection(FName ObjectPath)
+bool FCollection::AddObjectToCollection(const FSoftObjectPath& ObjectPath)
 {
-	if (ObjectPath.IsNone())
+	if (ObjectPath.IsNull())
 	{
 		return false;
 	}
@@ -422,34 +435,36 @@ bool FCollection::AddObjectToCollection(FName ObjectPath)
 	{
 		bool bAlreadyInSet = false;
 		ObjectSet.Add(ObjectPath, &bAlreadyInSet);
+		bChangedSinceLastDiskSnapshot |= !bAlreadyInSet;
 		return !bAlreadyInSet;
 	}
 
 	return false;
 }
 
-bool FCollection::RemoveObjectFromCollection(FName ObjectPath)
+bool FCollection::RemoveObjectFromCollection(const FSoftObjectPath& ObjectPath)
 {
-	if (ObjectPath.IsNone())
+	if (ObjectPath.IsNull())
 	{
 		return false;
 	}
 
-	if (StorageMode == ECollectionStorageMode::Static)
+	if (StorageMode == ECollectionStorageMode::Static && ObjectSet.Remove(ObjectPath) > 0)
 	{
-		return ObjectSet.Remove(ObjectPath) > 0;
+		bChangedSinceLastDiskSnapshot = true;
+		return true;
 	}
 
 	return false;
 }
 
-void FCollection::GetAssetsInCollection(TArray<FName>& Assets) const
+void FCollection::GetAssetsInCollection(TArray<FSoftObjectPath>& Assets) const
 {
 	if (StorageMode == ECollectionStorageMode::Static)
 	{
-		for (const FName& ObjectName : ObjectSet)
+		for (const FSoftObjectPath& ObjectName : ObjectSet)
 		{
-			if (!ObjectName.ToString().StartsWith(TEXT("/Script/")))
+			if (!ObjectName.GetLongPackageName().StartsWith(TEXT("/Script/")))
 			{
 				Assets.Add(ObjectName);
 			}
@@ -457,21 +472,21 @@ void FCollection::GetAssetsInCollection(TArray<FName>& Assets) const
 	}
 }
 
-void FCollection::GetClassesInCollection(TArray<FName>& Classes) const
+void FCollection::GetClassesInCollection(TArray<FTopLevelAssetPath>& Classes) const
 {
 	if (StorageMode == ECollectionStorageMode::Static)
 	{
-		for (const FName& ObjectName : ObjectSet)
+		for (const FSoftObjectPath& ObjectName : ObjectSet)
 		{
-			if (ObjectName.ToString().StartsWith(TEXT("/Script/")))
+			if (ObjectName.GetLongPackageName().StartsWith(TEXT("/Script/")))
 			{
-				Classes.Add(ObjectName);
+				Classes.Add(ObjectName.GetAssetPath());
 			}
 		}
 	}
 }
 
-void FCollection::GetObjectsInCollection(TArray<FName>& Objects) const
+void FCollection::GetObjectsInCollection(TArray<FSoftObjectPath>& Objects) const
 {
 	if (StorageMode == ECollectionStorageMode::Static)
 	{
@@ -479,7 +494,7 @@ void FCollection::GetObjectsInCollection(TArray<FName>& Objects) const
 	}
 }
 
-bool FCollection::IsObjectInCollection(FName ObjectPath) const
+bool FCollection::IsObjectInCollection(const FSoftObjectPath& ObjectPath) const
 {
 	if (StorageMode == ECollectionStorageMode::Static)
 	{
@@ -489,7 +504,7 @@ bool FCollection::IsObjectInCollection(FName ObjectPath) const
 	return false;
 }
 
-bool FCollection::IsRedirectorInCollection(FName ObjectPath) const
+bool FCollection::IsRedirectorInCollection(const FSoftObjectPath& ObjectPath) const
 {
 	if (StorageMode == ECollectionStorageMode::Static)
 	{
@@ -539,6 +554,8 @@ bool FCollection::TestDynamicQuery(const ITextFilterExpressionContext& InContext
 
 FCollectionStatusInfo FCollection::GetStatusInfo() const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FCollection::GetStatusInfo);
+
 	FCollectionStatusInfo StatusInfo;
 
 	StatusInfo.bIsDirty = IsDirty();
@@ -562,6 +579,8 @@ FCollectionStatusInfo FCollection::GetStatusInfo() const
 
 bool FCollection::IsDirty() const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FCollection::IsDirty);
+
 	if (ParentCollectionGuid != DiskSnapshot.ParentCollectionGuid)
 	{
 		return true;
@@ -572,22 +591,14 @@ bool FCollection::IsDirty() const
 		return true;
 	}
 
-	bool bHasChanges = false;
-
 	if (StorageMode == ECollectionStorageMode::Static)
 	{
-		TArray<FName> ObjectsAdded;
-		TArray<FName> ObjectsRemoved;
-		GetObjectDifferencesFromDisk(ObjectsAdded, ObjectsRemoved);
-
-		bHasChanges = ObjectsAdded.Num() != 0 || ObjectsRemoved.Num() != 0;
+		return bChangedSinceLastDiskSnapshot;
 	}
 	else
 	{
-		bHasChanges = DynamicQueryText != DiskSnapshot.DynamicQueryText;
+		return DynamicQueryText != DiskSnapshot.DynamicQueryText;
 	}
-
-	return bHasChanges;
 }
 
 bool FCollection::IsEmpty() const
@@ -610,10 +621,10 @@ void FCollection::PrintCollection() const
 		UE_LOG(LogCollectionManager, Log, TEXT("    ============================="));
 
 		// Print the set as a sorted array to keep things in a sane order
-		TArray<FName> ObjectList = ObjectSet.Array();
-		ObjectList.Sort(FNameLexicalLess());
+		TArray<FSoftObjectPath> ObjectList = ObjectSet.Array();
+		ObjectList.Sort([](const FSoftObjectPath& A, const FSoftObjectPath& B){ return A.LexicalLess(B); });
 
-		for (const FName& ObjectName : ObjectList)
+		for (const FSoftObjectPath& ObjectName : ObjectList)
 		{
 			UE_LOG(LogCollectionManager, Log, TEXT("        %s"), *ObjectName.ToString());
 		}
@@ -709,8 +720,8 @@ bool FCollection::MergeWithCollection(const FCollection& Other)
 	if (StorageMode == ECollectionStorageMode::Static)
 	{
 		// Work out whether we have any changes compared to the other collection
-		TArray<FName> ObjectsAdded;
-		TArray<FName> ObjectsRemoved;
+		TArray<FSoftObjectPath> ObjectsAdded;
+		TArray<FSoftObjectPath> ObjectsRemoved;
 		GetObjectDifferences(ObjectSet, Other.ObjectSet, ObjectsAdded, ObjectsRemoved);
 
 		bHasChanges = bHasChanges || ObjectsAdded.Num() > 0 || ObjectsRemoved.Num() > 0;
@@ -726,16 +737,18 @@ bool FCollection::MergeWithCollection(const FCollection& Other)
 			ObjectSet = Other.ObjectSet;
 
 			// Add the objects that were added before the merge
-			for (const FName& AddedObjectName : ObjectsAdded)
+			for (const FSoftObjectPath& AddedObjectName : ObjectsAdded)
 			{
 				ObjectSet.Add(AddedObjectName);
 			}
 
 			// Remove the objects that were removed before the merge
-			for (const FName& RemovedObjectName : ObjectsRemoved)
+			for (const FSoftObjectPath& RemovedObjectName : ObjectsRemoved)
 			{
 				ObjectSet.Remove(RemovedObjectName);
 			}
+			
+			bChangedSinceLastDiskSnapshot = true;
 		}
 	}
 	else
@@ -749,10 +762,10 @@ bool FCollection::MergeWithCollection(const FCollection& Other)
 	return bHasChanges;
 }
 
-void FCollection::GetObjectDifferences(const TSet<FName>& BaseSet, const TSet<FName>& NewSet, TArray<FName>& ObjectsAdded, TArray<FName>& ObjectsRemoved)
+void FCollection::GetObjectDifferences(const TSet<FSoftObjectPath>& BaseSet, const TSet<FSoftObjectPath>& NewSet, TArray<FSoftObjectPath>& ObjectsAdded, TArray<FSoftObjectPath>& ObjectsRemoved)
 {
 	// Find the objects that were removed compared to the base set
-	for (const FName& BaseObjectName : BaseSet)
+	for (const FSoftObjectPath& BaseObjectName : BaseSet)
 	{
 		if (!NewSet.Contains(BaseObjectName))
 		{
@@ -769,7 +782,7 @@ void FCollection::GetObjectDifferences(const TSet<FName>& BaseSet, const TSet<FN
 	}
 
 	// Find the objects that were added compare to the base set
-	for (const FName& NewObjectName : NewSet)
+	for (const FSoftObjectPath& NewObjectName : NewSet)
 	{
 		if (!BaseSet.Contains(NewObjectName))
 		{
@@ -778,7 +791,7 @@ void FCollection::GetObjectDifferences(const TSet<FName>& BaseSet, const TSet<FN
 	}
 }
 
-void FCollection::GetObjectDifferencesFromDisk(TArray<FName>& ObjectsAdded, TArray<FName>& ObjectsRemoved) const
+void FCollection::GetObjectDifferencesFromDisk(TArray<FSoftObjectPath>& ObjectsAdded, TArray<FSoftObjectPath>& ObjectsRemoved) const
 {
 	if (StorageMode == ECollectionStorageMode::Static)
 	{
@@ -797,13 +810,13 @@ bool FCollection::CheckoutCollection(FText& OutError)
 	ISourceControlProvider& SourceControlProvider = ISourceControlModule::Get().GetProvider();
 	if ( !ISourceControlModule::Get().IsEnabled() )
 	{
-		OutError = LOCTEXT("Error_SCCDisabled", "Source control is not enabled. Enable source control in the preferences menu.");
+		OutError = LOCTEXT("Error_SCCDisabled", "Revision control is not enabled. Enable revision control in the preferences menu.");
 		return false;
 	}
 
 	if ( !SourceControlProvider.IsAvailable() )
 	{
-		OutError = LOCTEXT("Error_SCCNotAvailable", "Source control is currently not available. Check your connection and try again.");
+		OutError = LOCTEXT("Error_SCCNotAvailable", "Revision control is currently not available. Check your connection and try again.");
 		return false;
 	}
 
@@ -886,12 +899,12 @@ bool FCollection::CheckoutCollection(FText& OutError)
 		}
 		else
 		{
-			OutError = FText::Format(LOCTEXT("Error_SCCUnknown", "Could not determine source control state for collection '{0}'"), FText::FromName(CollectionName));
+			OutError = FText::Format(LOCTEXT("Error_SCCUnknown", "Could not determine revision control state for collection '{0}'"), FText::FromName(CollectionName));
 		}
 	}
 	else
 	{
-		OutError = LOCTEXT("Error_SCCInvalid", "Source control state is invalid.");
+		OutError = LOCTEXT("Error_SCCInvalid", "Revision control state is invalid.");
 	}
 
 	return bSuccessfullyCheckedOut;
@@ -908,13 +921,13 @@ bool FCollection::CheckinCollection(const TArray<FText>& AdditionalChangelistTex
 	ISourceControlProvider& SourceControlProvider = ISourceControlModule::Get().GetProvider();
 	if ( !ISourceControlModule::Get().IsEnabled() )
 	{
-		OutError = LOCTEXT("Error_SCCDisabled", "Source control is not enabled. Enable source control in the preferences menu.");
+		OutError = LOCTEXT("Error_SCCDisabled", "Revision control is not enabled. Enable revision control in the preferences menu.");
 		return false;
 	}
 
 	if ( !SourceControlProvider.IsAvailable() )
 	{
-		OutError = LOCTEXT("Error_SCCNotAvailable", "Source control is currently not available. Check your connection and try again.");
+		OutError = LOCTEXT("Error_SCCNotAvailable", "Revision control is currently not available. Check your connection and try again.");
 		return false;
 	}
 
@@ -927,7 +940,7 @@ bool FCollection::CheckinCollection(const TArray<FText>& AdditionalChangelistTex
 		const bool bWasAdded = (SourceControlProvider.Execute(ISourceControlOperation::Create<FMarkForAdd>(), AbsoluteFilename) == ECommandResult::Succeeded);
 		if (!bWasAdded)
 		{
-			OutError = FText::Format(LOCTEXT("Error_SCCAdd", "Failed to add collection '{0}' to source control."), FText::FromName(CollectionName));
+			OutError = FText::Format(LOCTEXT("Error_SCCAdd", "Failed to add collection '{0}' to revision control."), FText::FromName(CollectionName));
 			return false;
 		}
 		SourceControlState = SourceControlProvider.GetState(AbsoluteFilename, EStateCacheUsage::ForceUpdate);
@@ -951,19 +964,35 @@ bool FCollection::CheckinCollection(const TArray<FText>& AdditionalChangelistTex
 	{
 		if (StorageMode == ECollectionStorageMode::Static)
 		{
+			auto AddFileListToDescription = [&ChangelistDescBuilder](const TArray<FSoftObjectPath>& Paths)
+			{
+				const int32 MaxPaths = CVarCollectionsMaxCLDescriptionPathCount.GetValueOnAnyThread();
+				const int32 ReportedPaths = FMath::Min(Paths.Num(), MaxPaths);
+				const int32 UnreportedPaths = FMath::Max(0, Paths.Num() - MaxPaths);
+				for (int32 PathIdx = 0; PathIdx < ReportedPaths; ++PathIdx)
+				{
+					const FSoftObjectPath& AddedObjectName = Paths[PathIdx];
+					ChangelistDescBuilder.AppendLine(FText::FromString(AddedObjectName.ToString()));
+				}
+				if (UnreportedPaths > 0)
+				{
+					ChangelistDescBuilder.AppendLineFormat(LOCTEXT("CollectionUnreportedPathsDesc", "... {0} more path(s)"), UnreportedPaths);
+				}
+			};
+
 			// Gather differences from disk
-			TArray<FName> ObjectsAdded;
-			TArray<FName> ObjectsRemoved;
+			TArray<FSoftObjectPath> ObjectsAdded;
+			TArray<FSoftObjectPath> ObjectsRemoved;
 			GetObjectDifferencesFromDisk(ObjectsAdded, ObjectsRemoved);
 
-			ObjectsAdded.Sort(FNameLexicalLess());
-			ObjectsRemoved.Sort(FNameLexicalLess());
+			ObjectsAdded.Sort([](FSoftObjectPath A, FSoftObjectPath B){ return A.LexicalLess(B); });
+			ObjectsRemoved.Sort([](FSoftObjectPath A, FSoftObjectPath B) { return A.LexicalLess(B); });
 
 			// Report added files
 			FFormatNamedArguments Args;
-			Args.Add(TEXT("FirstObjectAdded"), ObjectsAdded.Num() > 0 ? FText::FromName(ObjectsAdded[0]) : NSLOCTEXT("Core", "None", "None"));
+			Args.Add(TEXT("FirstObjectAdded"), ObjectsAdded.Num() > 0 ? FText::FromString(ObjectsAdded[0].ToString()) : NSLOCTEXT("Core", "None", "None"));
 			Args.Add(TEXT("NumberAdded"), FText::AsNumber(ObjectsAdded.Num()));
-			Args.Add(TEXT("FirstObjectRemoved"), ObjectsRemoved.Num() > 0 ? FText::FromName(ObjectsRemoved[0]) : NSLOCTEXT("Core", "None", "None"));
+			Args.Add(TEXT("FirstObjectRemoved"), ObjectsRemoved.Num() > 0 ? FText::FromString(ObjectsRemoved[0].ToString()) : NSLOCTEXT("Core", "None", "None"));
 			Args.Add(TEXT("NumberRemoved"), FText::AsNumber(ObjectsRemoved.Num()));
 			Args.Add(TEXT("CollectionName"), CollectionNameText);
 
@@ -976,10 +1005,7 @@ bool FCollection::CheckinCollection(const TArray<FText>& AdditionalChangelistTex
 				ChangelistDescBuilder.AppendLineFormat(LOCTEXT("CollectionAddedMultipleDesc", "Added {NumberAdded} objects to collection '{CollectionName}':"), Args);
 
 				ChangelistDescBuilder.Indent();
-				for (const FName& AddedObjectName : ObjectsAdded)
-				{
-					ChangelistDescBuilder.AppendLine(FText::FromName(AddedObjectName));
-				}
+				AddFileListToDescription(ObjectsAdded);
 				ChangelistDescBuilder.Unindent();
 			}
 
@@ -992,10 +1018,7 @@ bool FCollection::CheckinCollection(const TArray<FText>& AdditionalChangelistTex
 				ChangelistDescBuilder.AppendLineFormat(LOCTEXT("CollectionRemovedMultipleDesc", "Removed {NumberRemoved} objects from collection '{CollectionName}'"), Args);
 
 				ChangelistDescBuilder.Indent();
-				for (const FName& RemovedObjectName : ObjectsRemoved)
-				{
-					ChangelistDescBuilder.AppendLine(FText::FromName(RemovedObjectName));
-				}
+				AddFileListToDescription(ObjectsRemoved);
 				ChangelistDescBuilder.Unindent();
 			}
 		}
@@ -1064,13 +1087,13 @@ bool FCollection::RevertCollection(FText& OutError)
 	ISourceControlProvider& SourceControlProvider = ISourceControlModule::Get().GetProvider();
 	if ( !ISourceControlModule::Get().IsEnabled() )
 	{
-		OutError = LOCTEXT("Error_SCCDisabled", "Source control is not enabled. Enable source control in the preferences menu.");
+		OutError = LOCTEXT("Error_SCCDisabled", "Revision control is not enabled. Enable revision control in the preferences menu.");
 		return false;
 	}
 
 	if ( !SourceControlProvider.IsAvailable() )
 	{
-		OutError = LOCTEXT("Error_SCCNotAvailable", "Source control is currently not available. Check your connection and try again.");
+		OutError = LOCTEXT("Error_SCCNotAvailable", "Revision control is currently not available. Check your connection and try again.");
 		return false;
 	}
 
@@ -1099,13 +1122,13 @@ bool FCollection::DeleteFromSourceControl(FText& OutError)
 	ISourceControlProvider& SourceControlProvider = ISourceControlModule::Get().GetProvider();
 	if ( !ISourceControlModule::Get().IsEnabled() )
 	{
-		OutError = LOCTEXT("Error_SCCDisabled", "Source control is not enabled. Enable source control in the preferences menu.");
+		OutError = LOCTEXT("Error_SCCDisabled", "Revision control is not enabled. Enable revision control in the preferences menu.");
 		return false;
 	}
 
 	if ( !SourceControlProvider.IsAvailable() )
 	{
-		OutError = LOCTEXT("Error_SCCNotAvailable", "Source control is currently not available. Check your connection and try again.");
+		OutError = LOCTEXT("Error_SCCNotAvailable", "Revision control is currently not available. Check your connection and try again.");
 		return false;
 	}
 
@@ -1184,7 +1207,7 @@ bool FCollection::DeleteFromSourceControl(FText& OutError)
 	{
 		if(SourceControlState->IsAdded() || SourceControlState->IsCheckedOut())
 		{
-			OutError = FText::Format(LOCTEXT("Error_SCCDeleteWhileCheckedOut", "Failed to delete collection '{0}' in source control because it is checked out or open for add."), FText::FromName(CollectionName));
+			OutError = FText::Format(LOCTEXT("Error_SCCDeleteWhileCheckedOut", "Failed to delete collection '{0}' in revision control because it is checked out or open for add."), FText::FromName(CollectionName));
 		}
 		else if(SourceControlState->CanCheckout())
 		{
@@ -1212,7 +1235,7 @@ bool FCollection::DeleteFromSourceControl(FText& OutError)
 			}
 			else
 			{
-				OutError = FText::Format(LOCTEXT("Error_SCCDeleteFailed", "Failed to delete collection '{0}' in source control."), FText::FromName(CollectionName));
+				OutError = FText::Format(LOCTEXT("Error_SCCDeleteFailed", "Failed to delete collection '{0}' in revision control."), FText::FromName(CollectionName));
 			}
 		}
 		else if(!SourceControlState->IsSourceControlled())
@@ -1234,12 +1257,12 @@ bool FCollection::DeleteFromSourceControl(FText& OutError)
 		}
 		else
 		{
-			OutError = FText::Format(LOCTEXT("Error_SCCUnknown", "Could not determine source control state for collection '{0}'"), FText::FromName(CollectionName));
+			OutError = FText::Format(LOCTEXT("Error_SCCUnknown", "Could not determine revision control state for collection '{0}'"), FText::FromName(CollectionName));
 		}
 	}
 	else
 	{
-		OutError = LOCTEXT("Error_SCCInvalid", "Source control state is invalid.");
+		OutError = LOCTEXT("Error_SCCInvalid", "Revision control state is invalid.");
 	}
 
 	GWarn->UpdateProgress(DeleteProgressNumerator++, DeleteProgressDenominator);

@@ -2,9 +2,10 @@
 
 #include "Kismet/KismetInternationalizationLibrary.h"
 #include "Internationalization/TextLocalizationManager.h"
-#include "Internationalization/Internationalization.h"
 #include "Internationalization/Culture.h"
 #include "Misc/ConfigCacheIni.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(KismetInternationalizationLibrary)
 
 #define LOCTEXT_NAMESPACE "Kismet"
 
@@ -91,11 +92,8 @@ bool UKismetInternationalizationLibrary::SetCurrentAssetGroupCulture(const FName
 	{
 		if (!GIsEditor && SaveToConfig)
 		{
-			if (FConfigSection* AssetGroupCulturesSection = GConfig->GetSectionPrivate(TEXT("Internationalization.AssetGroupCultures"), false, false, GGameUserSettingsIni))
-			{
-				AssetGroupCulturesSection->Remove(AssetGroup);
-				AssetGroupCulturesSection->Add(AssetGroup, Culture);
-			}
+			GConfig->RemoveKeyFromSection(TEXT("Internationalization.AssetGroupCultures"), AssetGroup, GGameUserSettingsIni);
+			GConfig->AddToSection(TEXT("Internationalization.AssetGroupCultures"), AssetGroup, Culture, GGameUserSettingsIni);
 			GConfig->Flush(false, GGameUserSettingsIni);
 		}
 		return true;
@@ -115,10 +113,7 @@ void UKismetInternationalizationLibrary::ClearCurrentAssetGroupCulture(const FNa
 
 	if (!GIsEditor && SaveToConfig)
 	{
-		if (FConfigSection* AssetGroupCulturesSection = GConfig->GetSectionPrivate(TEXT("Internationalization.AssetGroupCultures"), false, false, GGameUserSettingsIni))
-		{
-			AssetGroupCulturesSection->Remove(AssetGroup);
-		}
+		GConfig->RemoveKeyFromSection(TEXT("Internationalization.AssetGroupCultures"), AssetGroup, GGameUserSettingsIni);
 		GConfig->Flush(false, GGameUserSettingsIni);
 	}
 }
@@ -170,3 +165,4 @@ FString UKismetInternationalizationLibrary::GetCultureDisplayName(const FString&
 }
 
 #undef LOCTEXT_NAMESPACE
+

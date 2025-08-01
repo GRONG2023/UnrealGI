@@ -11,13 +11,14 @@
 #include "RHI.h"
 #include "RHIResources.h"
 
-// Wrapper for com/epicgames/ue4/CameraPlayer*.java.
+// Wrapper for com/epicgames/unreal/CameraPlayer*.java.
 class FJavaAndroidWebBrowser : public FJavaClassObject
 {
 public:
-	FJavaAndroidWebBrowser(bool swizzlePixels, bool vulkanRenderer, int32 width, int32 height, jlong widgetPtr, bool bEnableRemoteDebugging, bool bUseTransparency, bool bEnableDomStorage);
+	FJavaAndroidWebBrowser(bool swizzlePixels, bool vulkanRenderer, int32 width, int32 height, jlong widgetPtr, bool bEnableRemoteDebugging, bool bUseTransparency, bool bEnableDomStorage, bool bShouldUseBitmapRender);
 	virtual ~FJavaAndroidWebBrowser();
 	void Release();
+	bool GetVideoLastFrameBitmap(void* outPixels, int64 outCount);
 	bool GetVideoLastFrameData(void* & outPixels, int64 & outCount, bool *bRegionChanged);
 	bool GetVideoLastFrame(int32 destTexture);
 	bool DidResolutionChange();
@@ -30,6 +31,11 @@ public:
 	void Close();
 	void GoBack();
 	void GoForward();
+	void SendTouchDown(float x, float y);
+	void SendTouchUp(float x, float y);
+	void SendTouchMove(float x, float y);
+	bool SendKeyDown(int32 KeyCode);
+	bool SendKeyUp(int32 KeyCode);
 	void SetAndroid3DBrowser(bool InIsAndroid3DBrowser);
 	void SetVisibility(bool InIsVisible);
 	void Update(const int posX, const int posY, const int sizeX, const int sizeY);
@@ -37,6 +43,7 @@ private:
 	static FName GetClassName();
 
 	FJavaClassMethod ReleaseMethod;
+	FJavaClassMethod GetVideoLastFrameBitmapMethod;
 	FJavaClassMethod GetVideoLastFrameDataMethod;
 	FJavaClassMethod GetVideoLastFrameMethod;
 	FJavaClassMethod DidResolutionChangeMethod;
@@ -49,12 +56,15 @@ private:
 	FJavaClassMethod ReloadMethod;
 	FJavaClassMethod CloseMethod;
 	FJavaClassMethod GoBackOrForwardMethod;
+	FJavaClassMethod SendTouchEventMethod;
+	FJavaClassMethod SendKeyEventMethod;
 	FJavaClassMethod SetAndroid3DBrowserMethod;
 	FJavaClassMethod SetVisibilityMethod;
 
 	// FrameUpdateInfo member field ids
 	jclass FrameUpdateInfoClass;
 	jfieldID FrameUpdateInfo_Buffer;
+	jfieldID FrameUpdateInfo_Bitmap;
 	jfieldID FrameUpdateInfo_FrameReady;
 	jfieldID FrameUpdateInfo_RegionChanged;
 	

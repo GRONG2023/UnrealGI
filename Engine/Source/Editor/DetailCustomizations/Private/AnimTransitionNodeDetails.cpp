@@ -1,41 +1,61 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AnimTransitionNodeDetails.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SBoxPanel.h"
-#include "Layout/WidgetPath.h"
-#include "SlateOptMacros.h"
-#include "Framework/Application/MenuStack.h"
-#include "Framework/Application/SlateApplication.h"
-#include "Textures/SlateIcon.h"
-#include "Framework/Commands/UIAction.h"
-#include "Widgets/Layout/SBorder.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Widgets/Input/SEditableTextBox.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Input/SComboButton.h"
-#include "EditorStyleSet.h"
-#include "Animation/AnimInstance.h"
-#include "DetailLayoutBuilder.h"
-#include "DetailWidgetRow.h"
-#include "IDetailPropertyRow.h"
-#include "DetailCategoryBuilder.h"
-#include "IDetailsView.h"
-#include "Modules/ModuleManager.h"
 
-#include "AnimationTransitionGraph.h"
 #include "AnimGraphNode_TransitionResult.h"
 #include "AnimStateConduitNode.h"
+#include "AnimStateNodeBase.h"
 #include "AnimStateTransitionNode.h"
-#include "Kismet2/KismetEditorUtilities.h"
-#include "SKismetLinearExpression.h"
-#include "Widgets/Input/STextEntryPopup.h"
-#include "Widgets/Layout/SExpandableArea.h"
+#include "Animation/AnimInstance.h"
+#include "Animation/AnimStateMachineTypes.h"
+#include "AnimationTransitionGraph.h"
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/Map.h"
+#include "Delegates/Delegate.h"
+#include "DetailCategoryBuilder.h"
+#include "DetailLayoutBuilder.h"
+#include "DetailWidgetRow.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
+#include "Engine/Blueprint.h"
+#include "Fonts/SlateFontInfo.h"
+#include "Framework/Application/MenuStack.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMath.h"
+#include "IDetailPropertyRow.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "Animation/BlendProfile.h"
-#include "BlendProfilePicker.h"
-#include "ISkeletonEditorModule.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Layout/Margin.h"
+#include "Layout/WidgetPath.h"
+#include "Math/Color.h"
+#include "Misc/AssertionMacros.h"
+#include "PropertyEditorModule.h"
+#include "PropertyHandle.h"
+#include "SKismetLinearExpression.h"
+#include "SlateOptMacros.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "Textures/SlateIcon.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SComboButton.h"
+#include "Widgets/Input/STextEntryPopup.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SWindow.h"
+#include "Widgets/Text/STextBlock.h"
+
+class SWidget;
 
 #define LOCTEXT_NAMESPACE "FAnimStateNodeDetails"
 
@@ -76,9 +96,6 @@ void FAnimTransitionNodeDetails::CustomizeDetails( IDetailLayoutBuilder& DetailB
 	UAnimStateTransitionNode* TransNode = TransitionNode.Get();
 	IDetailCategoryBuilder& TransitionCategory = DetailBuilder.EditCategory("Transition", LOCTEXT("TransitionCategoryTitle", "Transition") );
 
-	// Added below via CreateBlendProfilePicker
-	DetailBuilder.HideProperty(GET_MEMBER_NAME_CHECKED(UAnimStateTransitionNode, BlendProfile));
-
 	if (bTransitionToConduit)
 	{
 		// Transitions to conduits are just shorthand for some other real transition;
@@ -89,6 +106,7 @@ void FAnimTransitionNodeDetails::CustomizeDetails( IDetailLayoutBuilder& DetailB
 		DetailBuilder.HideProperty(GET_MEMBER_NAME_CHECKED(UAnimStateTransitionNode, CustomBlendCurve));
 		DetailBuilder.HideProperty(GET_MEMBER_NAME_CHECKED(UAnimStateTransitionNode, LogicType));
 		DetailBuilder.HideProperty(GET_MEMBER_NAME_CHECKED(UAnimStateTransitionNode, PriorityOrder));
+		DetailBuilder.HideProperty(GET_MEMBER_NAME_CHECKED(UAnimStateTransitionNode, BlendProfile));
 	}
 	else
 	{
@@ -121,7 +139,7 @@ void FAnimTransitionNodeDetails::CustomizeDetails( IDetailLayoutBuilder& DetailB
 					.OnClicked(this, &FAnimTransitionNodeDetails::OnClickEditBlendGraph)
 					.Visibility( this, &FAnimTransitionNodeDetails::GetBlendGraphButtonVisibility, SelectedObjects.Num() > 1)
 					.Text(LOCTEXT("EditBlendGraph", "Edit Blend Graph"))
-					.TextStyle(&FEditorStyle::Get(), TEXT("TinyText"))
+					.TextStyle(&FAppStyle::Get(), TEXT("TinyText"))
 				]
 			];
 
@@ -156,58 +174,80 @@ void FAnimTransitionNodeDetails::CustomizeDetails( IDetailLayoutBuilder& DetailB
 				}
 			}
 
-			// indicate if a native transition rule applies to this
-			UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForNodeChecked(TransitionNode.Get());
-			if(Blueprint && Blueprint->ParentClass)
+			if (TransNode->bAutomaticRuleBasedOnSequencePlayerInState)
 			{
-				UAnimInstance* AnimInstance = CastChecked<UAnimInstance>(Blueprint->ParentClass->GetDefaultObject());
-				if(AnimInstance)
+				if (CanExecPin != nullptr && CanExecPin->LinkedTo.Num() > 0)
 				{
-					UEdGraph* ParentGraph = TransitionNode->GetGraph();
-					UAnimStateNodeBase* PrevState = TransitionNode->GetPreviousState();
-					UAnimStateNodeBase* NextState = TransitionNode->GetNextState();
-					if(PrevState != nullptr && NextState != nullptr && ParentGraph != nullptr)
+					TransitionCategory.AddCustomRow(LOCTEXT("AnimGraphNodeDetailsAutomaticRule_RowWarning", "Automatic Rule"))
+					[
+						SNew(SBox)
+						.VAlign(VAlign_Center)
+						.HAlign(HAlign_Left)
+						[
+							SNew(STextBlock)
+							.Text(LOCTEXT("AnimGraphNodeDetailsAutomaticRule_Warning", "Warning : Automatic Rule Based Transition will override graph exit rule."))
+							.ColorAndOpacity(FCoreStyle::Get().GetColor("ErrorReporting.WarningBackgroundColor"))
+							.Font(IDetailLayoutBuilder::GetDetailFontBold())
+						]
+					];
+				}
+				else
+				{
+					TransitionCategory.AddCustomRow(LOCTEXT("AnimGraphNodeDetailsAutomaticRule_Row", "Automatic Rule"))
+					[
+						SNew(SBox)
+						.VAlign(VAlign_Center)
+						.HAlign(HAlign_Left)
+						[
+							SNew(STextBlock)
+							.Text(LOCTEXT("AnimGraphNodeDetailsAutomaticRule", "Automatic Rule Based Transition"))
+							.Font(IDetailLayoutBuilder::GetDetailFontBold())
+						]
+					];
+				}
+			}
+			else
+			{
+				// indicate if a native transition rule applies to this
+				UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForNodeChecked(TransitionNode.Get());
+				if(Blueprint && Blueprint->ParentClass)
+				{
+					UAnimInstance* AnimInstance = CastChecked<UAnimInstance>(Blueprint->ParentClass->GetDefaultObject());
+					if(AnimInstance)
 					{
-						FName FunctionName;
-						if(AnimInstance->HasNativeTransitionBinding(ParentGraph->GetFName(), FName(*PrevState->GetStateName()), FName(*NextState->GetStateName()), FunctionName))
+						UEdGraph* ParentGraph = TransitionNode->GetGraph();
+						UAnimStateNodeBase* PrevState = TransitionNode->GetPreviousState();
+						UAnimStateNodeBase* NextState = TransitionNode->GetNextState();
+						if(PrevState != nullptr && NextState != nullptr && ParentGraph != nullptr)
 						{
-							TransitionCategory.AddCustomRow( LOCTEXT("NativeBindingPresent_Filter", "Transition has native binding") )
-							[
-								SNew(STextBlock)
-								.Text(FText::Format(LOCTEXT("NativeBindingPresent", "Transition has native binding to {0}()"), FText::FromName(FunctionName)))
-								.Font( IDetailLayoutBuilder::GetDetailFontBold() )
-							];
+							FName FunctionName;
+							if(AnimInstance->HasNativeTransitionBinding(ParentGraph->GetFName(), FName(*PrevState->GetStateName()), FName(*NextState->GetStateName()), FunctionName))
+							{
+								TransitionCategory.AddCustomRow( LOCTEXT("NativeBindingPresent_Filter", "Transition has native binding") )
+								[
+									SNew(STextBlock)
+									.Text(FText::Format(LOCTEXT("NativeBindingPresent", "Transition has native binding to {0}()"), FText::FromName(FunctionName)))
+									.Font( IDetailLayoutBuilder::GetDetailFontBold() )
+								];
+							}
 						}
 					}
 				}
-			}
 
-			TransitionCategory.AddCustomRow( CanExecPin ? CanExecPin->PinFriendlyName : FText::GetEmpty() )
-			[
-				SNew(SKismetLinearExpression, CanExecPin)
-			];
+				TransitionCategory.AddCustomRow( CanExecPin ? CanExecPin->PinFriendlyName : FText::GetEmpty() )
+				[
+					SNew(SKismetLinearExpression, CanExecPin)
+				];
+			}
 		}
 
 		//////////////////////////////////////////////////////////////////////////
-
-		auto BlendSettingsEnabled = [LogicTypeHandle]()
-		{
-			uint8 LogicType;
-			if (LogicTypeHandle->GetValue(LogicType) == FPropertyAccess::Result::Success)
-			{
-				return LogicType != ETransitionLogicType::TLT_Inertialization;
-			}
-			return true;
-		};
-
-		auto BlendSettingsEnabledAttribute = TAttribute<bool>::Create(TAttribute<bool>::FGetter::CreateLambda(BlendSettingsEnabled));
 
 		IDetailCategoryBuilder& CrossfadeCategory = DetailBuilder.EditCategory("BlendSettings", LOCTEXT("BlendSettingsCategoryTitle", "Blend Settings") );
 		if (TransitionNode != NULL && SelectedObjects.Num() == 1)
 		{
 			// The sharing option for the crossfade settings
 			CrossfadeCategory.AddCustomRow( LOCTEXT("TransitionCrossfadeSharingLabel", "Transition Crossfade Sharing") )
-			.IsEnabled(BlendSettingsEnabledAttribute)
 			.NameContent()
 			[
 				SNew(STextBlock)
@@ -228,38 +268,9 @@ void FAnimTransitionNodeDetails::CustomizeDetails( IDetailLayoutBuilder& DetailB
 
 		//@TODO: Gate editing these on shared non-authoritative ones
 		CrossfadeCategory.AddProperty(GET_MEMBER_NAME_CHECKED(UAnimStateTransitionNode, CrossfadeDuration)).DisplayName( LOCTEXT("DurationLabel", "Duration") );
-		CrossfadeCategory.AddProperty(GET_MEMBER_NAME_CHECKED(UAnimStateTransitionNode, BlendMode)).DisplayName(LOCTEXT("ModeLabel", "Mode")).IsEnabled(BlendSettingsEnabledAttribute);
-		CrossfadeCategory.AddProperty(GET_MEMBER_NAME_CHECKED(UAnimStateTransitionNode, CustomBlendCurve)).DisplayName(LOCTEXT("CurveLabel", "Custom Blend Curve")).IsEnabled(BlendSettingsEnabledAttribute);
-
-		USkeleton* TargetSkeleton = TransNode ? TransNode->GetAnimBlueprint()->TargetSkeleton : nullptr;
-
-		if(TargetSkeleton)
-		{
-			TSharedPtr<IPropertyHandle> BlendProfileHandle = DetailBuilder.GetProperty(GET_MEMBER_NAME_CHECKED(UAnimStateTransitionNode, BlendProfile));
-			UObject* BlendProfilePropertyValue = nullptr;
-			BlendProfileHandle->GetValue(BlendProfilePropertyValue);
-			UBlendProfile* CurrentProfile = Cast<UBlendProfile>(BlendProfilePropertyValue);
-
-			ISkeletonEditorModule& SkeletonEditorModule = FModuleManager::LoadModuleChecked<ISkeletonEditorModule>("SkeletonEditor");
-
-			FBlendProfilePickerArgs Args;
-			Args.InitialProfile = CurrentProfile;
-			Args.OnBlendProfileSelected = FOnBlendProfileSelected::CreateSP(this, &FAnimTransitionNodeDetails::OnBlendProfileChanged, BlendProfileHandle);
-			Args.bAllowNew = false;
-			Args.bAllowClear = true;
-			Args.bAllowRemove = false;
-
-			CrossfadeCategory.AddCustomRow(LOCTEXT("BlendProfileLabel", "Blend Profile"))
-				.IsEnabled(BlendSettingsEnabledAttribute)
-				.NameContent()
-				[
-					BlendProfileHandle->CreatePropertyNameWidget()
-				]
-				.ValueContent()
-				[
-					SkeletonEditorModule.CreateBlendProfilePicker(TargetSkeleton, Args)
-				];
-		}
+		CrossfadeCategory.AddProperty(GET_MEMBER_NAME_CHECKED(UAnimStateTransitionNode, BlendMode)).DisplayName(LOCTEXT("ModeLabel", "Mode"));
+		CrossfadeCategory.AddProperty(GET_MEMBER_NAME_CHECKED(UAnimStateTransitionNode, CustomBlendCurve)).DisplayName(LOCTEXT("CurveLabel", "Custom Blend Curve"));
+		CrossfadeCategory.AddProperty(GET_MEMBER_NAME_CHECKED(UAnimStateTransitionNode, BlendProfile)).DisplayName(LOCTEXT("BlendProfileLabel", "Blend Profile"));
 
 		//////////////////////////////////////////////////////////////////////////
 
@@ -377,33 +388,58 @@ TSharedRef<SWidget> FAnimTransitionNodeDetails::OnGetShareableNodesMenu(bool bSh
 
 	MenuBuilder.BeginSection("AnimTransitionSharableNodes", SectionText);
 
-	if (UAnimStateTransitionNode* TransNode = TransitionNode.Get())
+	if (UAnimStateTransitionNode* RawTransitionNode = TransitionNode.Get())
 	{
-		const UEdGraph* CurrentGraph = TransNode->GetGraph();
+		const UEdGraph* CurrentGraph = RawTransitionNode->GetGraph();
 
-		// Loop through the graph and build a list of the unique shared transitions
-		TMap<FString, UAnimStateTransitionNode*> SharedTransitions;
-
-		for (int32 NodeIdx=0; NodeIdx < CurrentGraph->Nodes.Num(); NodeIdx++)
+		// Collect all unique shared transitions and group them by their name.
+		TMultiMap<FString, UAnimStateTransitionNode*> SharedTransitions;
+		if (UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraph(CurrentGraph))
 		{
-			if (UAnimStateTransitionNode* GraphTransNode = Cast<UAnimStateTransitionNode>(CurrentGraph->Nodes[NodeIdx]))
-			{
-				if (bShareRules && !GraphTransNode->SharedRulesName.IsEmpty())
-				{
-					SharedTransitions.Add(GraphTransNode->SharedRulesName, GraphTransNode);
-				}
+			TArray<UAnimStateNodeBase*> StateNodes;
+			FBlueprintEditorUtils::GetAllNodesOfClassEx<UAnimStateNodeBase>(Blueprint, StateNodes);
 
-				if (!bShareRules && !GraphTransNode->SharedCrossfadeName.IsEmpty())
+			for (UAnimStateNodeBase* StateNodeBase : StateNodes)
+			{
+				if (UAnimStateTransitionNode* GraphTransNode = Cast<UAnimStateTransitionNode>(StateNodeBase))
 				{
-					SharedTransitions.Add(GraphTransNode->SharedCrossfadeName, GraphTransNode);
+					if (bShareRules && !GraphTransNode->SharedRulesName.IsEmpty())
+					{
+						SharedTransitions.Add(GraphTransNode->SharedRulesName, GraphTransNode);
+					}
+
+					if (!bShareRules && !GraphTransNode->SharedCrossfadeName.IsEmpty())
+					{
+						SharedTransitions.Add(GraphTransNode->SharedCrossfadeName, GraphTransNode);
+					}
 				}
 			}
 		}
 
-		for (auto Iter = SharedTransitions.CreateIterator(); Iter; ++Iter)
+		// Get the unique shared transition names
+		TSet<FString> SharedTransitionKeys;
+		SharedTransitions.GetKeys(SharedTransitionKeys);
+
+		// Iterate through the unique shared transition names and list all the places where they are referenced in the tooltip.
+		TArray<UAnimStateTransitionNode*> UsedIn;
+		for (const FString& Key : SharedTransitionKeys)
 		{
-			FUIAction Action = FUIAction( FExecuteAction::CreateSP(this, &FAnimTransitionNodeDetails::BecomeSharedWith, Iter.Value(), bShareRules) );
-			MenuBuilder.AddMenuEntry( FText::FromString( Iter.Key() ), LOCTEXT("ShaerdTransitionToolTip", "Use this shared transition"), FSlateIcon(), Action);
+			UsedIn.Reset();
+			SharedTransitions.MultiFind(Key, UsedIn, /*bMaintainOrder=*/true);
+			if (UsedIn.IsEmpty())
+			{
+				continue;
+			}
+
+			FTextBuilder ToolTipBuilder;
+			ToolTipBuilder.AppendLine(LOCTEXT("AnimTransitionUsedBy", "Used by:"));
+			for (const UAnimStateTransitionNode* UsedInTransitionNode : UsedIn)
+			{
+				ToolTipBuilder.AppendLine(UsedInTransitionNode->GetGraph()->GetName());
+			}
+
+			FUIAction Action = FUIAction( FExecuteAction::CreateSP(this, &FAnimTransitionNodeDetails::BecomeSharedWith, UsedIn[0], bShareRules));
+			MenuBuilder.AddMenuEntry( FText::FromString(Key), ToolTipBuilder.ToText(), FSlateIcon(), Action);
 		}
 	}
 	MenuBuilder.EndSection();
@@ -518,7 +554,7 @@ TSharedRef<SWidget> FAnimTransitionNodeDetails::GetWidgetForInlineShareMenu(cons
 			.VAlign(VAlign_Center)
 			.OnClicked_Lambda([bInIsCurrentlyShared, DemoteClick, PromoteClick]() { return bInIsCurrentlyShared.Get() ? DemoteClick.Execute() : PromoteClick.Execute(); } )
 			.Text_Lambda([bInIsCurrentlyShared](){ return bInIsCurrentlyShared.Get() ? LOCTEXT("UnshareLabel", "Unshare") : LOCTEXT("ShareLabel", "Promote To Shared"); } )
-			.TextStyle(&FEditorStyle::Get(), TEXT("TinyText"))
+			.TextStyle(&FAppStyle::Get(), TEXT("TinyText"))
 		];
 }
 

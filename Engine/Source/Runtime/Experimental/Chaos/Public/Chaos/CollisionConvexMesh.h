@@ -7,6 +7,8 @@
 #include "TriangleMesh.h"
 #include "Particles.h"
 #include "ChaosLog.h"
+#include "Containers/ChunkedArray.h"
+#include "CompGeom/ConvexHull3.h"
 
 #define DEBUG_HULL_GENERATION 0
 
@@ -26,12 +28,25 @@ namespace Chaos
 	// a prism with a small thickness to emulate the desired result as a hull. Otherwise hull generation will fail on
 	// these cases. Verbose logging on LogChaos will point out when this path is taken for further scrutiny about
 	// the geometry
-	static constexpr FReal TriQuadPrismInflation() { return 0.1f; }
-	static constexpr FReal DefaultHorizonEpsilon() { return 0.1f; }
+	static constexpr FRealSingle TriQuadPrismInflation() { return 0.1f; }
+	static constexpr FRealSingle DefaultHorizonEpsilon() { return 0.1f; }
 
 	class FConvexBuilder
 	{
+		using FRealType = FRealSingle;
+		using FVec3Type = TVec3<FRealType>;
+		using FPlaneType = TPlaneConcrete<FRealType, 3>;
+		using FAABB3Type = TAABB<FRealType, 3>;
+
 	public:
+
+		enum EBuildMethod
+		{
+			Default = 0,	// use what is set as default from cvars
+			Original = 1,	// original method, fast but has issues
+			ConvexHull3 = 2,// new method, slower but less issues
+			ConvexHull3Simplified = 3, // same as above new method, plus new simplification method
+		};
 
 		class Params
 		{
@@ -40,10 +55,10 @@ namespace Chaos
 				: HorizonEpsilon(DefaultHorizonEpsilon())
 			{}
 
-			FReal HorizonEpsilon;
+			FRealType HorizonEpsilon;
 		};
 
-		static CHAOS_API FReal SuggestEpsilon(const TArray<FVec3>& InVertices)
+		static FRealType SuggestEpsilon(const TArray<FVec3Type>& InVertices)
 		{
 			if (ComputeHorizonEpsilonFromMeshExtends == 0)
 			{
@@ -55,7 +70,7 @@ namespace Chaos
 			// above 1.0 such that 1.0 + FLT_EPSILON != 1.0. Floats aren't equally disanced though so big or small numbers
 			// don't work well with it. Here we take the max absolute of each axis and scale that for a wider margin and
 			// use that to scale FLT_EPSILON to get a more relevant value.
-			FVec3 MaxAxes(TNumericLimits<FReal>::Lowest());
+			FVec3Type MaxAxes(TNumericLimits<FRealType>::Lowest());
 			const int32 NumVertices = InVertices.Num();
 
 			if (NumVertices <= 1)
@@ -65,7 +80,7 @@ namespace Chaos
 
 			for (int32 Index = 0; Index < NumVertices; ++Index)
 			{
-				FVec3 PositionAbs = InVertices[Index].GetAbs();
+				FVec3Type PositionAbs = InVertices[Index].GetAbs();
 
 				MaxAxes[0] = FMath::Max(MaxAxes[0], PositionAbs[0]);
 				MaxAxes[1] = FMath::Max(MaxAxes[1], PositionAbs[1]);
@@ -75,30 +90,30 @@ namespace Chaos
 			return 3.0f * (MaxAxes[0] + MaxAxes[1] + MaxAxes[2]) * FLT_EPSILON;
 		}
 
-		static bool IsValidTriangle(const FVec3& A, const FVec3& B, const FVec3& C, FVec3& OutNormal)
+		static bool IsValidTriangle(const FVec3Type& A, const FVec3Type& B, const FVec3Type& C, FVec3Type& OutNormal)
 		{
-			const FVec3 BA = B - A;
-			const FVec3 CA = C - A;
-			const FVec3 Cross = FVec3::CrossProduct(BA, CA);
+			const FVec3Type BA = B - A;
+			const FVec3Type CA = C - A;
+			const FVec3Type Cross = FVec3Type::CrossProduct(BA, CA);
 			OutNormal = Cross.GetUnsafeNormal();
 			return Cross.Size() > 1e-4;
 		}
 
-		static bool IsValidTriangle(const FVec3& A, const FVec3& B, const FVec3& C)
+		static bool IsValidTriangle(const FVec3Type& A, const FVec3Type& B, const FVec3Type& C)
 		{
-			FVec3 Normal(0);
+			FVec3Type Normal(0);
 			return IsValidTriangle(A, B, C, Normal);
 		}
 
-		static bool IsValidQuad(const FVec3& A, const FVec3& B, const FVec3& C, const FVec3& D, FVec3& OutNormal)
+		static bool IsValidQuad(const FVec3Type& A, const FVec3Type& B, const FVec3Type& C, const FVec3Type& D, FVec3Type& OutNormal)
 		{
-			FPlane TriPlane(A, B, C);
-			const FReal DPointDistance = FMath::Abs(TriPlane.PlaneDot(D));
-			OutNormal = FVec3(TriPlane.X, TriPlane.Y, TriPlane.Z);
-			return FMath::IsNearlyEqual(DPointDistance, 0, KINDA_SMALL_NUMBER);
+			const UE::Math::TPlane<FRealType> TriPlane(A, B, C);
+			const FRealType DPointDistance = FMath::Abs(TriPlane.PlaneDot(D));
+			OutNormal = FVec3Type(TriPlane.X, TriPlane.Y, TriPlane.Z);
+			return FMath::IsNearlyEqual(DPointDistance, FRealType(0), FRealType(UE_KINDA_SMALL_NUMBER));
 		}
-
-		static bool IsPlanarShape(const TArray<FVec3>& InVertices, FVec3& OutNormal)
+		
+		static bool IsPlanarShape(const TArray<FVec3Type>& InVertices, FVec3Type& OutNormal)
 		{
 			bool bResult = false;
 			const int32 NumVertices = InVertices.Num();
@@ -110,13 +125,13 @@ namespace Chaos
 			}
 			else // > 3 points
 			{
-				FPlane TriPlane(InVertices[0], InVertices[1], InVertices[2]);
-				OutNormal = FVec3(TriPlane.X, TriPlane.Y, TriPlane.Z);
+				const UE::Math::TPlane<FRealType> TriPlane(InVertices[0], InVertices[1], InVertices[2]);
+				OutNormal = FVec3Type(TriPlane.X, TriPlane.Y, TriPlane.Z);
 
 				for (int32 Index = 3; Index < NumVertices; ++Index)
 				{
-					const FReal PointPlaneDot = FMath::Abs(TriPlane.PlaneDot(InVertices[Index]));
-					if(!FMath::IsNearlyEqual(PointPlaneDot, 0, KINDA_SMALL_NUMBER))
+					const FRealType PointPlaneDot = FMath::Abs(TriPlane.PlaneDot(InVertices[Index]));
+					if(!FMath::IsNearlyEqual(PointPlaneDot, FRealType(0), FRealType(UE_KINDA_SMALL_NUMBER)))
 					{
 						return false;
 					}
@@ -133,26 +148,30 @@ namespace Chaos
 		{
 			FHalfEdge* FirstEdge;
 			FHalfEdge* ConflictList; //Note that these half edges are really just free verts grouped together
-			TPlaneConcrete<FReal,3> Plane;
+			FPlaneType Plane;
 			FConvexFace* Prev;
 			FConvexFace* Next; //these have no geometric meaning, just used for book keeping
 			int32 PoolIdx;
 
 		private:
-			FConvexFace(const TPlaneConcrete<FReal,3>& FacePlane)
+			FConvexFace(int32 InPoolIdx, const FPlaneType& FacePlane)
+				: PoolIdx(InPoolIdx)
 			{
 				Reset(FacePlane);
 			}
 
-			void Reset(const TPlaneConcrete<FReal,3>& FacePlane)
+			void Reset(const FPlaneType& FacePlane)
 			{
 				ConflictList = nullptr;
 				Plane = FacePlane;
 			}
 
+			// Required for TChunkedArray
+			FConvexFace() = default;
 			~FConvexFace() = default;
 
 			friend FMemPool;
+			friend TChunkedArray<FConvexFace>;
 		};
 
 		struct FHalfEdge
@@ -165,7 +184,8 @@ namespace Chaos
 			int32 PoolIdx;
 
 		private:
-			FHalfEdge(int32 InVertex=-1)
+			FHalfEdge(int32 InPoolIdx, int32 InVertex)
+				: PoolIdx(InPoolIdx)
 			{
 				Reset(InVertex);
 			}
@@ -175,9 +195,12 @@ namespace Chaos
 				Vertex = InVertex;
 			}
 
+			// Required for TChunkedArray
+			FHalfEdge() = default;
 			~FHalfEdge() = default;
 
 			friend FMemPool;
+			friend TChunkedArray<FHalfEdge>;
 		};
 
 		class FMemPool
@@ -187,37 +210,33 @@ namespace Chaos
 			{
 				if(HalfEdgesFreeIndices.Num())
 				{
-					const uint32 Idx = HalfEdgesFreeIndices.Pop(/*bAllowShrinking=*/false);
-					FHalfEdge* FreeHalfEdge = HalfEdges[Idx];
+					const uint32 Idx = HalfEdgesFreeIndices.Pop(EAllowShrinking::No);
+					FHalfEdge* FreeHalfEdge = &HalfEdges[Idx];
 					FreeHalfEdge->Reset(InVertex);
 					ensure(FreeHalfEdge->PoolIdx == Idx);
 					return FreeHalfEdge;
 				}
 				else
 				{
-					FHalfEdge* NewHalfEdge = new FHalfEdge(InVertex);
-					NewHalfEdge->PoolIdx = HalfEdges.Num();
-					HalfEdges.Add(NewHalfEdge);
-					return NewHalfEdge;
+					int32 Idx = HalfEdges.AddElement(FHalfEdge(HalfEdges.Num(), InVertex));
+					return &HalfEdges[Idx];
 				}
 			}
 
-			FConvexFace* AllocConvexFace(const TPlaneConcrete<FReal,3>& FacePlane)
+			FConvexFace* AllocConvexFace(const FPlaneType& FacePlane)
 			{
 				if(FacesFreeIndices.Num())
 				{
-					const uint32 Idx = FacesFreeIndices.Pop(/*bAllowShrinking=*/false);
-					FConvexFace* FreeFace = Faces[Idx];
+					const uint32 Idx = FacesFreeIndices.Pop(EAllowShrinking::No);
+					FConvexFace* FreeFace = &Faces[Idx];
 					FreeFace->Reset(FacePlane);
 					ensure(FreeFace->PoolIdx == Idx);
 					return FreeFace;
 				}
 				else
 				{
-					FConvexFace* NewFace = new FConvexFace(FacePlane);
-					NewFace->PoolIdx = Faces.Num();
-					Faces.Add(NewFace);
-					return NewFace;
+					int32 Idx = Faces.AddElement(FConvexFace(Faces.Num(), FacePlane));
+					return &Faces[Idx];
 				}
 			}
 
@@ -231,135 +250,28 @@ namespace Chaos
 				FacesFreeIndices.Add(Face->PoolIdx);
 			}
 
-			~FMemPool()
-			{
-				for(FHalfEdge* HalfEdge : HalfEdges)
-				{
-					delete HalfEdge;
-				}
-
-				for(FConvexFace* Face : Faces)
-				{
-					delete Face;
-				}
-			}
-
 		private:
 			TArray<int32> HalfEdgesFreeIndices;
-			TArray<FHalfEdge*> HalfEdges;
+			TChunkedArray<FHalfEdge> HalfEdges;
 
 			TArray<int32> FacesFreeIndices;
-			TArray<FConvexFace*> Faces;
+			TChunkedArray<FConvexFace> Faces;
 		};
 
 	public:
 
-		static void Build(const TArray<FVec3>& InVertices, TArray <TPlaneConcrete<FReal, 3>>& OutPlanes, TArray<TArray<int32>>& OutFaceIndices, TArray<FVec3>& OutVertices, FAABB3& OutLocalBounds)
+		static CHAOS_API void Build(const TArray<FVec3Type>& InVertices, TArray<FPlaneType>& OutPlanes, TArray<TArray<int32>>& OutFaceIndices, TArray<FVec3Type>& OutVertices, FAABB3Type& OutLocalBounds, EBuildMethod BuildMethod = EBuildMethod::Default);
+
+		static bool UseConvexHull3(EBuildMethod BuildMethod);
+
+		static bool UseConvexHull3Simplifier(EBuildMethod BuildMethod);
+
+		static CHAOS_API void BuildIndices(const TArray<FVec3Type>& InVertices, TArray<int32>& OutResultIndexData, EBuildMethod BuildMethod = EBuildMethod::Default);
+		
+		static void BuildConvexHull(const TArray<FVec3Type>& InVertices, TArray<TVec3<int32>>& OutIndices, const Params& InParams = Params())
 		{
-			OutPlanes.Reset();
-			OutVertices.Reset();
-			OutLocalBounds = FAABB3::EmptyAABB();
+			TRACE_CPUPROFILER_EVENT_SCOPE(Chaos::BuildConvexHull);
 
-			const int32 NumVerticesIn = InVertices.Num();
-			if(NumVerticesIn == 0)
-			{
-				return;
-			}
-
-			const TArray<FVec3>* VerticesToUse = &InVertices;
-			TArray<FVec3> ModifiedVertices;
-
-			// For triangles and planar shapes, create a very thin prism as a convex
-			auto Inflate = [](const TArray<FVec3>& Source, TArray<FVec3>& Destination, const FVec3& Normal, FReal Inflation)
-			{
-				const int32 NumSource = Source.Num();
-				Destination.Reset();
-				Destination.SetNum(NumSource * 2);
-
-				for(int32 Index = 0; Index < NumSource; ++Index)
-				{
-					Destination[Index] = Source[Index];
-					Destination[NumSource + Index] = Source[Index] + Normal * Inflation;
-				}
-			};
-
-			FVec3 PlanarNormal(0);
-			if (NumVerticesIn == 3)
-			{
-				const bool bIsValidTriangle = IsValidTriangle(InVertices[0], InVertices[1], InVertices[2], PlanarNormal);
-
-				//TODO_SQ_IMPLEMENTATION: should do proper cleanup to avoid this
-				if(ensureMsgf(bIsValidTriangle, TEXT("FConvexBuilder::Build(): Generated invalid triangle!")))
-				{
-					Inflate(InVertices, ModifiedVertices, PlanarNormal, TriQuadPrismInflation());
-					VerticesToUse = &ModifiedVertices;
-					UE_LOG(LogChaos, Verbose, TEXT("Encountered a triangle in convex hull generation. Will prepare a prism of thickness %.5f in place of a triangle."), TriQuadPrismInflation());
-				}
-				else
-				{
-					return;
-				}
-			}
-			else if (IsPlanarShape(InVertices, PlanarNormal))
-			{
-				Inflate(InVertices, ModifiedVertices, PlanarNormal, TriQuadPrismInflation());
-				VerticesToUse = &ModifiedVertices;
-				UE_LOG(LogChaos, Verbose, TEXT("Encountered a planar shape in convex hull generation. Will prepare a prism of thickness %.5f in place of a triangle."), TriQuadPrismInflation());
-			}
-
-			const int32 NumVerticesToUse = VerticesToUse->Num();
-
-			OutLocalBounds = FAABB3((*VerticesToUse)[0], (*VerticesToUse)[0]);
-			for (int32 VertexIndex = 0; VertexIndex < NumVerticesToUse; ++VertexIndex)
-			{
-				OutLocalBounds.GrowToInclude((*VerticesToUse)[VertexIndex]);
-			}
-
-			if (NumVerticesToUse >= 4)
-			{
-				TArray<TVec3<int32>> Indices;
-				Params BuildParams;
-				BuildParams.HorizonEpsilon = Chaos::FConvexBuilder::SuggestEpsilon(*VerticesToUse);
-				BuildConvexHull(*VerticesToUse, Indices, BuildParams);
-				OutPlanes.Reserve(Indices.Num());
-				TMap<int32, int32> IndexMap; // maps original particle indices to output particle indices
-				int32 NewIdx = 0;
-
-				const auto AddIndex = [&IndexMap, &NewIdx](const int32 OriginalIdx)
-				{
-					if (int32* Idx = IndexMap.Find(OriginalIdx))
-					{
-						return *Idx;
-					}
-					IndexMap.Add(OriginalIdx, NewIdx);
-					return NewIdx++;
-				};
-
-				for(const TVec3<int32>& Idx : Indices)
-				{
-					FVec3 Vs[3] = { (*VerticesToUse)[Idx[0]], (*VerticesToUse)[Idx[1]], (*VerticesToUse)[Idx[2]] };
-					const FVec3 Normal = FVec3::CrossProduct(Vs[1] - Vs[0], Vs[2] - Vs[0]).GetUnsafeNormal();
-					OutPlanes.Add(TPlaneConcrete<FReal, 3>(Vs[0], Normal));
-					TArray<int32> FaceIndices;
-					FaceIndices.SetNum(3);
-					FaceIndices[0] = AddIndex(Idx[0]);
-					FaceIndices[1] = AddIndex(Idx[1]);
-					FaceIndices[2] = AddIndex(Idx[2]);
-					OutFaceIndices.Add(FaceIndices);
-				}
-
-				OutVertices.SetNum(IndexMap.Num());
-				for(const auto& Elem : IndexMap)
-				{
-					OutVertices[Elem.Value] = (*VerticesToUse)[Elem.Key];
-				}
-			}
-
-			UE_CLOG(OutVertices.Num() == 0, LogChaos, Warning, TEXT("Convex hull generation produced zero convex particles, collision will fail for this primitive."));
-		}
-
-		static void BuildConvexHull(const TArray<FVec3>& InVertices, TArray<TVec3<int32>>& OutIndices, const Params& InParams = Params())
-		{
 			OutIndices.Reset();
 			FMemPool Pool;
 			FConvexFace* Faces = BuildInitialHull(Pool, InVertices);
@@ -391,7 +303,7 @@ namespace Chaos
 #if DEBUG_HULL_GENERATION
 #if DEBUG_HULL_GENERATION_HULLSTEPS_TO_OBJ
 				UE_LOG(LogChaos, VeryVerbose, TEXT("# ======================================================"));
-				const FVec3 ConflictPos = InVertices[ConflictV->Vertex];
+				const FVec3Type ConflictPos = InVertices[ConflictV->Vertex];
 				UE_LOG(LogChaos, VeryVerbose, TEXT("# GENERATED HULL before adding Vtx %d (%f %f %f)"), ConflictV->Vertex, ConflictPos.X, ConflictPos.Y, ConflictPos.Z);
 				UE_LOG(LogChaos, VeryVerbose, TEXT("# ------------------------------------------------------"));
 				FConvexFace* Face = DummyFace->Next;
@@ -409,7 +321,13 @@ namespace Chaos
 #endif
 #endif
 
-				AddVertex(Pool, InVertices, ConflictV, InParams);
+				if (!AddVertex(Pool, InVertices, ConflictV, InParams))
+				{
+					// AddVertex failed to process the conflict vertex -- 
+					// subsequent calls to FindConflictVertex will just keep finding the same one,
+					// so all we can do here is fail to build a convex hull at all
+					return;
+				}
 				ConflictV = FindConflictVertex(InVertices, DummyFace->Next);
 			}
 
@@ -423,14 +341,14 @@ namespace Chaos
 			}
 		}
 
-		static FTriangleMesh BuildConvexHullTriMesh(const TArray<FVec3>& InVertices)
+		static FTriangleMesh BuildConvexHullTriMesh(const TArray<FVec3Type>& InVertices)
 		{
 			TArray<TVec3<int32>> Indices;
 			BuildConvexHull(InVertices, Indices);
 			return FTriangleMesh(MoveTemp(Indices));
 		}
 
-		static CHAOS_API bool IsPerformanceWarning(int32 NumPlanes, int32 NumVertices)
+		static bool IsPerformanceWarning(int32 NumPlanes, int32 NumVertices)
 		{
 			if (!PerformGeometryCheck)
 			{
@@ -440,7 +358,7 @@ namespace Chaos
 			return (NumVertices > VerticesThreshold);
 		}
 
-		static CHAOS_API bool IsGeometryReductionEnabled()
+		static bool IsGeometryReductionEnabled()
 		{
 			return (PerformGeometryReduction>0)?true:false;
 		}
@@ -450,7 +368,7 @@ namespace Chaos
 			return FString::Printf(TEXT("Planes %d, Vertices %d"), NumPlanes, NumVertices);
 		}
 
-		static CHAOS_API void Simplify(TArray <TPlaneConcrete<FReal, 3>>& InOutPlanes, TArray<TArray<int32>>& InOutFaces, TArray<FVec3>& InOutVertices, FAABB3& InOutLocalBounds)
+		static void Simplify(TArray<FPlaneType>& InOutPlanes, TArray<TArray<int32>>& InOutFaces, TArray<FVec3Type>& InOutVertices, FAABB3Type& InOutLocalBounds)
 		{
 			struct TPair
 			{
@@ -464,7 +382,7 @@ namespace Chaos
 			int32 NumToDelete = NumberOfVerticesWeHave - NumberOfVerticesRequired;
 
 			int32 Size = InOutVertices.Num();
-			TArray<FVec3> Vertices(InOutVertices);
+			TArray<FVec3Type> Vertices(InOutVertices);
 
 			TArray<bool> IsDeleted;
 			IsDeleted.Reset();
@@ -475,7 +393,7 @@ namespace Chaos
 				for (uint32 Iteration = 0; Iteration < (uint32)NumToDelete; Iteration++)
 				{
 					TPair ClosestPair;
-					FReal ClosestDistSqr = FLT_MAX;
+					FRealType ClosestDistSqr = FLT_MAX;
 
 					for (int32 A = 0; A < (Size - 1); A++)
 					{
@@ -485,8 +403,8 @@ namespace Chaos
 							{
 								if (!IsDeleted[B])
 								{
-									FVec3 Vec = Vertices[A] - Vertices[B];
-									FReal LengthSqr = Vec.SizeSquared();
+									FVec3Type Vec = Vertices[A] - Vertices[B];
+									FRealType LengthSqr = Vec.SizeSquared();
 									if (LengthSqr < ClosestDistSqr)
 									{
 										ClosestDistSqr = LengthSqr;
@@ -507,7 +425,7 @@ namespace Chaos
 				}
 			}
 
-			TArray<FVec3> TmpVertices;
+			TArray<FVec3Type> TmpVertices;
 			for (int Idx = 0; Idx < Vertices.Num(); Idx++)
 			{
 				// Only add vertices that have not been merged away
@@ -521,32 +439,95 @@ namespace Chaos
 			check(InOutVertices.Num() > 3);
 		}
 
-		// Convert multi-triangle faces to single n-gons
-		static void MergeFaces(TArray<TPlaneConcrete<FReal, 3>>& InOutPlanes, TArray<TArray<int32>>& InOutFaceVertexIndices, const TArray<FVec3>& Vertices, FReal DistanceThreshold)
+		static bool IsFaceOutlineConvex(const FPlaneType& Plane, const TArray<int32>& Indices, const TArray<FVec3Type>& Vertices)
 		{
-			const FReal NormalThreshold = 1.e-4f;
+			TArray<int8> Signs;
+			Signs.SetNum(Indices.Num());
+
+			if (Indices.Num() < 4)
+			{
+				return true;
+			}
+
+			for (int32 PointIndex = 0; PointIndex < Indices.Num(); PointIndex++)
+			{
+				const int32 Index0 = Indices[PointIndex];
+				const int32 Index1 = Indices[(PointIndex + 1) % Indices.Num()];
+				const int32 Index2 = Indices[(PointIndex + 2) % Indices.Num()];
+
+				const FVec3Type Point0 = Vertices[Index0];
+				const FVec3Type Point1 = Vertices[Index1];
+				const FVec3Type Point2 = Vertices[Index2];
+
+				const FVec3Type Segment0(Point1 - Point0);
+				const FVec3Type Segment1(Point2 - Point1);
+
+				const FVec3Type Cross = FVec3Type::CrossProduct(Segment0, Segment1);
+				const FRealType Dot = FVec3Type::DotProduct(Cross, Plane.Normal());
+
+				Signs[PointIndex] = static_cast<int8>(FMath::Sign(Dot));
+			}
+
+			int8 RefSign = 0;
+			for (const int8 Sign : Signs)
+			{
+				if (RefSign == 0)
+				{
+					RefSign = Sign;
+				}
+				if (Sign != 0 && RefSign != Sign)
+				{
+					return false;
+				}
+			}
+
+			return true;
+		}
+
+		// remove any invalid faces ( less than 3 vertices )
+		static void RemoveInvalidFaces(TArray<FPlaneType>& InOutPlanes, TArray<TArray<int32>>& InOutFaceVertexIndices)
+		{
+			int32 PlaneIndex = 0;
+			while (PlaneIndex < InOutPlanes.Num())
+			{
+				if (InOutFaceVertexIndices[PlaneIndex].Num() < 3)
+				{
+					InOutFaceVertexIndices.RemoveAtSwap(PlaneIndex);
+					InOutPlanes.RemoveAtSwap(PlaneIndex);
+				}
+				else
+				{
+					++PlaneIndex;
+				}
+			}
+		}
+		
+		// Convert multi-triangle faces to single n-gons
+		static void MergeFaces(TArray<FPlaneType>& InOutPlanes, TArray<TArray<int32>>& InOutFaceVertexIndices, const TArray<FVec3Type>& Vertices, FRealType DistanceThreshold)
+		{
+			const FRealType NormalThreshold = 1.e-4f;
 
 			// Find planes with equal normal within the threshold and merge them
 			for (int32 PlaneIndex0 = 0; PlaneIndex0 < InOutPlanes.Num(); ++PlaneIndex0)
 			{
-				const TPlaneConcrete<FReal, 3>& Plane0 = InOutPlanes[PlaneIndex0];
+				const FPlaneType& Plane0 = InOutPlanes[PlaneIndex0];
 				TArray<int32>& Vertices0 = InOutFaceVertexIndices[PlaneIndex0];
 
 				for (int32 PlaneIndex1 = PlaneIndex0 + 1; PlaneIndex1 < InOutPlanes.Num(); ++PlaneIndex1)
 				{
-					const TPlaneConcrete<FReal, 3>& Plane1 = InOutPlanes[PlaneIndex1];
+					const FPlaneType& Plane1 = InOutPlanes[PlaneIndex1];
 					const TArray<int32>& Vertices1 = InOutFaceVertexIndices[PlaneIndex1];
 
 					// First similarity test: normals are close - this will reject all very dissimilar faces
-					const FReal PlaneNormalDot = FVec3::DotProduct(Plane0.Normal(), Plane1.Normal());
+					const FRealType PlaneNormalDot = FVec3Type::DotProduct(Plane0.Normal(), Plane1.Normal());
 					if (PlaneNormalDot > 1.0f - NormalThreshold)
 					{
 						// Second similarity test: vertices of one plane are within threshold distance of the other. This is slower but more accurate
 						bool bWithinDistanceThreshold = true;
 						for (int32 Plane0VertexIndex : Vertices0)
 						{
-							const FVec3 Plane0Vertex = Vertices[Plane0VertexIndex];
-							const FReal Plane0VertexDistance = FMath::Abs(FVec3::DotProduct(Plane1.X() - Plane0Vertex, Plane1.Normal()));
+							const FVec3Type Plane0Vertex = Vertices[Plane0VertexIndex];
+							const FRealType Plane0VertexDistance = FMath::Abs(FVec3Type::DotProduct(Plane1.X() - Plane0Vertex, Plane1.Normal()));
 							if (Plane0VertexDistance > DistanceThreshold)
 							{
 								bWithinDistanceThreshold = false;
@@ -557,8 +538,8 @@ namespace Chaos
 						{
 							for (int32 Plane1VertexIndex : Vertices1)
 							{
-								const FVec3 Plane1Vertex = Vertices[Plane1VertexIndex];
-								const FReal Plane1VertexDistance = FMath::Abs(FVec3::DotProduct(Plane0.X() - Plane1Vertex, Plane0.Normal()));
+								const FVec3Type Plane1Vertex = Vertices[Plane1VertexIndex];
+								const FRealType Plane1VertexDistance = FMath::Abs(FVec3Type::DotProduct(Plane0.X() - Plane1Vertex, Plane0.Normal()));
 								if (Plane1VertexDistance > DistanceThreshold)
 								{
 									bWithinDistanceThreshold = false;
@@ -576,8 +557,8 @@ namespace Chaos
 							}
 
 							// Erase the second plane
-							InOutPlanes.RemoveAtSwap(PlaneIndex1, 1, false);
-							InOutFaceVertexIndices.RemoveAtSwap(PlaneIndex1, 1, false);
+							InOutPlanes.RemoveAtSwap(PlaneIndex1, 1, EAllowShrinking::No);
+							InOutFaceVertexIndices.RemoveAtSwap(PlaneIndex1, 1, EAllowShrinking::No);
 							--PlaneIndex1;
 						}
 					}
@@ -587,29 +568,199 @@ namespace Chaos
 			// Re-order the face vertices to form the face half-edges
 			for (int32 PlaneIndex0 = 0; PlaneIndex0 < InOutPlanes.Num(); ++PlaneIndex0)
 			{
-				SortFaceVerticesCCW(InOutPlanes[PlaneIndex0], InOutFaceVertexIndices[PlaneIndex0], Vertices);
+				FinalizeFaces(InOutPlanes[PlaneIndex0], InOutFaceVertexIndices[PlaneIndex0], Vertices);
+#if DEBUG_HULL_GENERATION
+				ensure(IsFaceOutlineConvex(InOutPlanes[PlaneIndex0], InOutFaceVertexIndices[PlaneIndex0], Vertices));
+#endif
+			}
+			
+			RemoveInvalidFaces(InOutPlanes, InOutFaceVertexIndices);
+		}
+
+		// Find edge pairs that are colinear and remove the unnecessary vertex to make a single edge.
+		// If we are left with an invalid face (2 verts or less), remove it.
+		// NOTE: a vertex in the middle of two colinear edges on one face may still be required by some other face, 
+		// although if we are lucky those faces would have been merged by the MergeFaces() function, depending on the tolerances used
+		static void MergeColinearEdges(TArray<FPlaneType>& InOutPlanes, TArray<TArray<int32>>& InOutFaceVertexIndices, TArray<FVec3Type>& InOutVertices, FRealType AngleToleranceCos)
+		{
+			check(InOutPlanes.Num() == InOutFaceVertexIndices.Num());
+
+			// This array maps from the input vertex to the output vertex array. INDEX_NONE means removed.
+			TArray<int32> VertexIndexMap;
+			VertexIndexMap.SetNum(InOutVertices.Num());
+			for (int32& VertexIndex : VertexIndexMap)
+			{
+				VertexIndex = INDEX_NONE;
+			}
+
+			// See if we have any co-linear edges in any faces, where the center vertex
+			// is not required by some other face. Assume we already removed coincident vertices.
+			// NOTE: after this loop the vertex index map contains INDEX_NONE for items to remove
+			// and other vertex has its original index. We pack and re-index later.
+			for (int32 PlaneIndex0 = 0; PlaneIndex0 < InOutFaceVertexIndices.Num(); ++PlaneIndex0)
+			{
+				TArray<int32>& FaceVertexIndices = InOutFaceVertexIndices[PlaneIndex0];
+				if (FaceVertexIndices.Num() > 2)
+				{
+					// Visit all set of 3-vertex chains in the face
+					int32 VertexIndex0 = FaceVertexIndices[FaceVertexIndices.Num() - 2];
+					int32 VertexIndex1 = FaceVertexIndices[FaceVertexIndices.Num() - 1];
+					for (int32 FaceVertexIndex = 0; FaceVertexIndex < FaceVertexIndices.Num(); ++FaceVertexIndex)
+					{
+						int32 VertexIndex2 = FaceVertexIndices[FaceVertexIndex];
+
+						// Calculate the sine of the angle between the two edges formed by the 3 vertices
+						const FVec3 Edge0 = (InOutVertices[VertexIndex1] - InOutVertices[VertexIndex0]).GetSafeNormal();
+						const FVec3 Edge1 = (InOutVertices[VertexIndex2] - InOutVertices[VertexIndex1]).GetSafeNormal();
+						const FReal CosAngle = FVec3::DotProduct(Edge0, Edge1);
+
+						// See if we need the vertex.
+						if (CosAngle < (FReal(1) - AngleToleranceCos))
+						{
+							VertexIndexMap[VertexIndex1] = VertexIndex1;
+						}
+
+						// Move to next edge pair
+						VertexIndex0 = VertexIndex1;
+						VertexIndex1 = VertexIndex2;
+					}
+				}
+			}
+
+			// Remove unused vertices from all faces and update the index map to account for removals
+			int32 NumVerticesRemoved = 0;
+			for (int32 VertexIndex = 0; VertexIndex < InOutVertices.Num(); ++VertexIndex)
+			{
+				if (VertexIndexMap[VertexIndex] == INDEX_NONE)
+				{
+					// Remove vertices we don't need from faces that use them
+					// If we end up with less than 3 verts, remove the face
+					for (int32 PlaneIndex0 = InOutFaceVertexIndices.Num() - 1; PlaneIndex0 >= 0; --PlaneIndex0)
+					{
+						InOutFaceVertexIndices[PlaneIndex0].Remove(VertexIndex);
+						if (InOutFaceVertexIndices[PlaneIndex0].Num() < 3)
+						{
+							InOutFaceVertexIndices.RemoveAt(PlaneIndex0);
+							InOutPlanes.RemoveAt(PlaneIndex0);
+						}
+					}
+					++NumVerticesRemoved;
+				}
+				else
+				{
+					VertexIndexMap[VertexIndex] = VertexIndex - NumVerticesRemoved;
+				}
+			}
+
+			if (NumVerticesRemoved > 0)
+			{
+				// Remove unused verts from the array
+				for (int32 VertexIndex = InOutVertices.Num() - 1; VertexIndex >= 0; --VertexIndex)
+				{
+					if (VertexIndexMap[VertexIndex] == INDEX_NONE)
+					{
+						InOutVertices.RemoveAt(VertexIndex);
+					}
+				}
+
+				// Remap vertex indices in all faces
+				for (int32 PlaneIndex0 = 0; PlaneIndex0 < InOutFaceVertexIndices.Num(); ++PlaneIndex0)
+				{
+					TArray<int32>& FaceVertexIndices = InOutFaceVertexIndices[PlaneIndex0];
+					for (int32 FaceVertexIndex = FaceVertexIndices.Num() - 1; FaceVertexIndex >= 0; --FaceVertexIndex)
+					{
+						FaceVertexIndices[FaceVertexIndex] = VertexIndexMap[FaceVertexIndices[FaceVertexIndex]];
+					}
+				}
+			}
+		}
+
+		// IMPORTANT : vertices are assumed to be sorted CCW
+		static void RemoveInsideFaceVertices(const FPlaneType& Face, TArray<int32>& InOutFaceVertexIndices, const TArray<FVec3Type>& Vertices, const FVec3Type& Centroid)
+		{
+			// we let 3 points faces being processed as there may be colinear cases that will result n invalid faces out of this function?
+			if (InOutFaceVertexIndices.Num() < 3)
+			{
+			 	return;
+			}
+			// find furthest point from centroid as it is garanteed to be part of the convex hull 
+			int32 StartIndex = 0;
+			FRealType FurthestSquaredDistance = TNumericLimits<FRealType>::Lowest();
+			for (int32 Index = 0; Index < InOutFaceVertexIndices.Num(); ++Index)
+			{
+				const FRealType SquaredDistance = (Vertices[InOutFaceVertexIndices[Index]] - Centroid).SquaredLength();
+				if (SquaredDistance > FurthestSquaredDistance)
+				{
+					StartIndex = Index;
+					FurthestSquaredDistance = SquaredDistance;
+				}
+			}
+
+			const int32 VtxCount = InOutFaceVertexIndices.Num();
+
+			struct FPointSegment
+			{
+				int32 VtxIndex;
+				FVec3Type Segment;
+			};
+
+			const int32 VtxStartIndex = InOutFaceVertexIndices[StartIndex];
+			int32 VtxIndex0 = VtxStartIndex;
+			int32 VtxIndex1 = InOutFaceVertexIndices[(StartIndex + 1) % VtxCount];
+
+			TArray<FPointSegment> Stack;
+			Stack.Push({ VtxIndex0, FVec3Type{0} });
+			Stack.Push({ VtxIndex1, Vertices[VtxIndex1] - Vertices[VtxIndex0] });
+
+			int32 Step = 2; // we already processed the two first 
+			while (Step <= VtxCount)
+			{
+				const int32 NextIndex = (StartIndex + Step) % VtxCount;
+
+				const FPointSegment& LastOnStack = Stack.Last();
+				VtxIndex0 = LastOnStack.VtxIndex;
+				VtxIndex1 = InOutFaceVertexIndices[NextIndex];
+				const FVec3Type Segment = Vertices[VtxIndex1] - Vertices[VtxIndex0];
+
+				const FVec3 Cross = FVec3Type::CrossProduct(LastOnStack.Segment, Segment);
+				if (FVec3Type::DotProduct(Cross, Face.Normal()) >= 0)
+				{
+					if (VtxIndex1 != VtxStartIndex)
+					{
+						Stack.Push({ VtxIndex1, Segment });
+					}
+					Step++;
+				}
+				else
+				{
+					Stack.Pop();
+				}
+			}
+
+			// faces where all points are on the same line may produce 2 points faces after removal
+			// in that case let's keep the entire face empty as a sign this should be trimmed 
+			InOutFaceVertexIndices.Reset();
+			if (Stack.Num() >= 3)
+			{
+				for (const FPointSegment& PointSegment : Stack)
+				{
+					InOutFaceVertexIndices.Add(PointSegment.VtxIndex);
+				}
 			}
 		}
 
 		// Reorder the vertices to be counter-clockwise about the normal
-		static void SortFaceVerticesCCW(const TPlaneConcrete<FReal, 3>& Face, TArray<int32>& InOutFaceVertexIndices, const TArray<FVec3>& Vertices)
+		static void SortFaceVerticesCCW(const FPlaneType& Face, TArray<int32>& InOutFaceVertexIndices, const TArray<FVec3Type>& Vertices, const FVec3Type& Centroid)
 		{
-			FMatrix33 FaceMatrix = FRotationMatrix::MakeFromZ(Face.Normal());
-
-			FVec3 Centroid = FVec3(0);
-			for (int32 VertexIndex = 0; VertexIndex < InOutFaceVertexIndices.Num(); ++VertexIndex)
-			{
-				Centroid += Vertices[InOutFaceVertexIndices[VertexIndex]];
-			}
-			Centroid /= FReal(InOutFaceVertexIndices.Num());
+			const FMatrix33 FaceMatrix = (FMatrix44f)FRotationMatrix::MakeFromZ(FVector(Face.Normal()));
 
 			// [2, -2] based on clockwise angle about the normal
 			auto VertexScore = [&Centroid, &FaceMatrix, &Vertices](int32 VertexIndex)
 			{
-				const FVec3 CentroidOffsetDir = (Vertices[VertexIndex] - Centroid).GetSafeNormal();
-				const FReal DotX = FVec3::DotProduct(CentroidOffsetDir, FaceMatrix.GetAxis(0));
-				const FReal DotY = FVec3::DotProduct(CentroidOffsetDir, FaceMatrix.GetAxis(1));
-				const FReal Score = (DotX >= 0.0f) ? 1.0f + DotY : -1.0f - DotY;
+				const FVec3Type CentroidOffsetDir = (Vertices[VertexIndex] - Centroid).GetSafeNormal();
+				const FRealType DotX = FVec3Type::DotProduct(CentroidOffsetDir, FaceMatrix.GetAxis(0));
+				const FRealType DotY = FVec3Type::DotProduct(CentroidOffsetDir, FaceMatrix.GetAxis(1));
+				const FRealType Score = (DotX >= 0.0f) ? 1.0f + DotY : -1.0f - DotY;
 				return Score;
 			};
 
@@ -621,46 +772,58 @@ namespace Chaos
 			InOutFaceVertexIndices.Sort(VertexSortPredicate);
 		}
 
+		// make sure faces have CCW winding, remove inside points 
+		static void FinalizeFaces(const FPlaneType& Face, TArray<int32>& InOutFaceVertexIndices, const TArray<FVec3Type>& Vertices)
+		{
+			// compute centroid as this is needed for both sorting and removing inside points
+			FVec3Type Centroid(0);
+			for (int32 VertexIndex = 0; VertexIndex < InOutFaceVertexIndices.Num(); ++VertexIndex)
+			{
+				Centroid += Vertices[InOutFaceVertexIndices[VertexIndex]];
+			}
+			Centroid /= FRealType(InOutFaceVertexIndices.Num());
+
+			SortFaceVerticesCCW(Face, InOutFaceVertexIndices, Vertices, Centroid);
+			
+			RemoveInsideFaceVertices(Face, InOutFaceVertexIndices, Vertices, Centroid);
+		}
+
 		// Generate the vertex indices for all planes in CCW order (used to serialize old data that did not have structure data)
-		static void BuildPlaneVertexIndices(const TArray<TPlaneConcrete<FReal, 3>>& InPlanes, const TArray<FVec3>& Vertices, TArray<TArray<int32>>& OutFaceVertexIndices, const FReal DistanceTolerance = 1.e-3f)
+		static void BuildPlaneVertexIndices(TArray<FPlaneType>& InPlanes, const TArray<FVec3Type>& Vertices, TArray<TArray<int32>>& OutFaceVertexIndices, const FRealType DistanceTolerance = 1.e-3f)
 		{
 			OutFaceVertexIndices.Reset(InPlanes.Num());
 			for (int32 PlaneIndex = 0; PlaneIndex < InPlanes.Num(); ++PlaneIndex)
 			{
 				for (int32 VertexIndex = 0; VertexIndex < Vertices.Num(); ++VertexIndex)
 				{
-					const FReal PlaneVertexDistance = FVec3::DotProduct(InPlanes[PlaneIndex].Normal(), Vertices[VertexIndex] - InPlanes[PlaneIndex].X());
+					const FRealType PlaneVertexDistance = FVec3Type::DotProduct(InPlanes[PlaneIndex].Normal(), Vertices[VertexIndex] - InPlanes[PlaneIndex].X());
 					if (FMath::Abs(PlaneVertexDistance) < DistanceTolerance)
 					{
 						OutFaceVertexIndices[PlaneIndex].Add(VertexIndex);
 					}
 				}
 
-				SortFaceVerticesCCW(InPlanes[PlaneIndex], OutFaceVertexIndices[PlaneIndex], Vertices);
+				FinalizeFaces(InPlanes[PlaneIndex], OutFaceVertexIndices[PlaneIndex], Vertices);
 			}
+			RemoveInvalidFaces(InPlanes, OutFaceVertexIndices);
 		}
 
 		// CVars variables for controlling geometry complexity checking and simplification
-#if PLATFORM_MAC || PLATFORM_LINUX
 		static CHAOS_API int32 PerformGeometryCheck;
 		static CHAOS_API int32 PerformGeometryReduction;
 		static CHAOS_API int32 VerticesThreshold;
 		static CHAOS_API int32 ComputeHorizonEpsilonFromMeshExtends;
-#else
-		static int32 PerformGeometryCheck;
-		static int32 PerformGeometryReduction;
-		static int32 VerticesThreshold;
-		static int32 ComputeHorizonEpsilonFromMeshExtends;
-#endif
+		static CHAOS_API bool bUseGeometryTConvexHull3;
+		static CHAOS_API bool bUseSimplifierForTConvexHull3;
 
 	private:
 
-		static FVec3 ComputeFaceNormal(const FVec3& A, const FVec3& B, const FVec3& C)
+		static FVec3Type ComputeFaceNormal(const FVec3Type& A, const FVec3Type& B, const FVec3Type& C)
 		{
-			return FVec3::CrossProduct((B - A), (C - A));
+			return FVec3Type::CrossProduct((B - A), (C - A));
 		}
 
-		static FConvexFace* CreateFace(FMemPool& Pool, const TArray<FVec3>& InVertices, FHalfEdge* RS, FHalfEdge* ST, FHalfEdge* TR)
+		static FConvexFace* CreateFace(FMemPool& Pool, const TArray<FVec3Type>& InVertices, FHalfEdge* RS, FHalfEdge* ST, FHalfEdge* TR)
 		{
 			RS->Prev = TR;
 			RS->Next = ST;
@@ -668,11 +831,18 @@ namespace Chaos
 			ST->Next = TR;
 			TR->Prev = ST;
 			TR->Next = RS;
-			FVec3 RSTNormal = ComputeFaceNormal(InVertices[RS->Vertex], InVertices[ST->Vertex], InVertices[TR->Vertex]);
-			const FReal RSTNormalSize = RSTNormal.Size();
-			check(RSTNormalSize > FLT_EPSILON);
-			RSTNormal = RSTNormal * (1 / RSTNormalSize);
-			FConvexFace* RST = Pool.AllocConvexFace(TPlaneConcrete<FReal, 3>(InVertices[RS->Vertex], RSTNormal));
+			FVec3Type RSTNormal = ComputeFaceNormal(InVertices[RS->Vertex], InVertices[ST->Vertex], InVertices[TR->Vertex]);
+			const FRealType RSTNormalSize = RSTNormal.Size();
+			if (RSTNormalSize > 0)
+			{
+				RSTNormal = RSTNormal * (1 / RSTNormalSize);
+			}
+			else
+			{
+				// degenerated face, use a valid neighbor face normal 
+				RSTNormal = RS->Twin->Face->Plane.Normal();
+			}
+			FConvexFace* RST = Pool.AllocConvexFace(FPlaneType(InVertices[RS->Vertex], RSTNormal));
 			RST->FirstEdge = RS;
 			RS->Face = RST;
 			ST->Face = RST;
@@ -680,16 +850,16 @@ namespace Chaos
 			return RST;
 		}
 
-		static void StealConflictList(FMemPool& Pool, const TArray<FVec3>& InVertices, FHalfEdge* OldList, FConvexFace** Faces, int32 NumFaces)
+		static void StealConflictList(FMemPool& Pool, const TArray<FVec3Type>& InVertices, FHalfEdge* OldList, FConvexFace** Faces, int32 NumFaces)
 		{
 			FHalfEdge* Cur = OldList;
 			while(Cur)
 			{
-				FReal MaxD = 1e-4;
+				FRealType MaxD = 1e-4f;
 				int32 MaxIdx = -1;
 				for(int32 Idx = 0; Idx < NumFaces; ++Idx)
 				{
-					FReal Distance = Faces[Idx]->Plane.SignedDistance(InVertices[Cur->Vertex]);
+					FRealType Distance = Faces[Idx]->Plane.SignedDistance(InVertices[Cur->Vertex]);
 					if(Distance > MaxD)
 					{
 						MaxD = Distance;
@@ -702,7 +872,7 @@ namespace Chaos
 				{
 					//let's make sure faces created with this new conflict vertex will be valid. The plane check above is not sufficient because long thin triangles will have a plane with its point at one of these. Combined with normal and precision we can have errors
 					auto PretendNormal = [&InVertices](FHalfEdge* A, FHalfEdge* B, FHalfEdge* C) {
-						return FVec3::CrossProduct(InVertices[B->Vertex] - InVertices[A->Vertex], InVertices[C->Vertex] - InVertices[A->Vertex]).SizeSquared();
+						return FVec3Type::CrossProduct(InVertices[B->Vertex] - InVertices[A->Vertex], InVertices[C->Vertex] - InVertices[A->Vertex]).SizeSquared();
 					};
 					FHalfEdge* Edge = Faces[MaxIdx]->FirstEdge;
 					do
@@ -739,21 +909,21 @@ namespace Chaos
 			}
 		}
 
-		static FConvexFace* BuildInitialHull(FMemPool& Pool, const TArray<FVec3>& InVertices)
+		static FConvexFace* BuildInitialHull(FMemPool& Pool, const TArray<FVec3Type>& InVertices)
 		{
 			if (InVertices.Num() < 4) //not enough points
 			{
 				return nullptr;
 			}
 
-			constexpr FReal Epsilon = 1e-4;
+			constexpr FRealType Epsilon = 1e-4f;
 
 			const int32 NumVertices = InVertices.Num();
 
 			//We store the vertex directly in the half-edge. We use its next to group free vertices by context list
 			//create a starting triangle by finding min/max on X and max on Y
-			FReal MinX = TNumericLimits<FReal>::Max();
-			FReal MaxX = TNumericLimits<FReal>::Lowest();
+			FRealType MinX = TNumericLimits<FRealType>::Max();
+			FRealType MaxX = TNumericLimits<FRealType>::Lowest();
 			FHalfEdge* A = nullptr; //min x
 			FHalfEdge* B = nullptr; //max x
 			FHalfEdge* DummyHalfEdge = Pool.AllocHalfEdge(-1);
@@ -767,7 +937,7 @@ namespace Chaos
 				Prev->Next = VHalf;
 				VHalf->Prev = Prev;
 				VHalf->Next = nullptr;
-				const FVec3& V = InVertices[i];
+				const FVec3Type& V = InVertices[i];
 
 				if(V[0] < MinX)
 				{
@@ -802,12 +972,12 @@ namespace Chaos
 			}
 
 			//find C so that we get the biggest base triangle
-			FReal MaxTriSize = Epsilon;
-			const FVec3 AToB = InVertices[B->Vertex] - InVertices[A->Vertex];
+			FRealType MaxTriSize = Epsilon;
+			const FVec3Type AToB = InVertices[B->Vertex] - InVertices[A->Vertex];
 			FHalfEdge* C = nullptr;
 			for(FHalfEdge* V = DummyHalfEdge->Next; V; V = V->Next)
 			{
-				FReal TriSize = FVec3::CrossProduct(AToB, InVertices[V->Vertex] - InVertices[A->Vertex]).SizeSquared();
+				FRealType TriSize = FVec3Type::CrossProduct(AToB, InVertices[V->Vertex] - InVertices[A->Vertex]).SizeSquared();
 				if(TriSize > MaxTriSize)
 				{
 					MaxTriSize = TriSize;
@@ -828,16 +998,16 @@ namespace Chaos
 			}
 
 			//find farthest D along normal
-			const FVec3 AToC = InVertices[C->Vertex] - InVertices[A->Vertex];
-			const FVec3 Normal = FVec3::CrossProduct(AToB, AToC).GetSafeNormal();
+			const FVec3Type AToC = InVertices[C->Vertex] - InVertices[A->Vertex];
+			const FVec3Type Normal = FVec3Type::CrossProduct(AToB, AToC).GetSafeNormal();
 
-			FReal MaxPosDistance = Epsilon;
-			FReal MaxNegDistance = Epsilon;
+			FRealType MaxPosDistance = Epsilon;
+			FRealType MaxNegDistance = Epsilon;
 			FHalfEdge* PosD = nullptr;
 			FHalfEdge* NegD = nullptr;
 			for(FHalfEdge* V = DummyHalfEdge->Next; V; V = V->Next)
 			{
-				FReal Dot = FVec3::DotProduct(InVertices[V->Vertex] - InVertices[A->Vertex], Normal);
+				FRealType Dot = FVec3Type::DotProduct(InVertices[V->Vertex] - InVertices[A->Vertex], Normal);
 				if(Dot > MaxPosDistance)
 				{
 					MaxPosDistance = Dot;
@@ -857,6 +1027,7 @@ namespace Chaos
 
 			const bool bPositive = MaxNegDistance < MaxPosDistance;
 			FHalfEdge* D = bPositive ? PosD : NegD;
+			check(D);
 
 			//remove D from conflict list
 			D->Prev->Next = D->Next;
@@ -909,7 +1080,7 @@ namespace Chaos
 			return Faces[0];
 		}
 
-		static FHalfEdge* FindConflictVertex(const TArray<FVec3>& InVertices, FConvexFace* FaceList)
+		static FHalfEdge* FindConflictVertex(const TArray<FVec3Type>& InVertices, FConvexFace* FaceList)
 		{
 			UE_CLOG(DEBUG_HULL_GENERATION, LogChaos, VeryVerbose, TEXT("Finding conflict vertex"));
 
@@ -917,12 +1088,12 @@ namespace Chaos
 			{
 				UE_CLOG(DEBUG_HULL_GENERATION, LogChaos, VeryVerbose, TEXT("\tTesting Face (%d %d %d)"), CurFace->FirstEdge->Vertex, CurFace->FirstEdge->Next->Vertex, CurFace->FirstEdge->Prev->Vertex);
 
-				FReal MaxD = TNumericLimits<FReal>::Lowest();
+				FRealType MaxD = TNumericLimits<FRealType>::Lowest();
 				FHalfEdge* MaxV = nullptr;
 				for(FHalfEdge* CurFaceVertex = CurFace->ConflictList; CurFaceVertex; CurFaceVertex = CurFaceVertex->Next)
 				{
 					//is it faster to cache this from stealing stage?
-					FReal Dist = FVec3::DotProduct(InVertices[CurFaceVertex->Vertex], CurFace->Plane.Normal());
+					FRealType Dist = FVec3Type::DotProduct(InVertices[CurFaceVertex->Vertex], CurFace->Plane.Normal());
 					if(Dist > MaxD)
 					{
 						MaxD = Dist;
@@ -956,13 +1127,16 @@ namespace Chaos
 			return nullptr;
 		}
 
-		static void BuildHorizon(const TArray<FVec3>& InVertices, FHalfEdge* ConflictV, TArray<FHalfEdge*>& HorizonEdges, TArray<FConvexFace*>& FacesToDelete, const Params& InParams)
+		static void BuildHorizon(const TArray<FVec3Type>& InVertices, FHalfEdge* ConflictV, TArray<FHalfEdge*>& HorizonEdges, TArray<FConvexFace*>& FacesToDelete, const Params& InParams)
 		{
+#if DEBUG_HULL_GENERATION
+			UE_LOG(LogChaos, VeryVerbose, TEXT("Generate horizon - START"));
+#endif
 			//We must flood fill from the initial face and mark edges of faces the conflict vertex cannot see
 			//In order to return a CCW ordering we must traverse each face in CCW order from the edge we crossed over
 			//This should already be the ordering in the half edge
-			const FReal Epsilon = InParams.HorizonEpsilon;
-			const FVec3 V = InVertices[ConflictV->Vertex];
+			const FRealType Epsilon = InParams.HorizonEpsilon;
+			const FVec3Type V = InVertices[ConflictV->Vertex];
 			TSet<FConvexFace*> Processed;
 			TArray<FHalfEdge*> Queue;
 			check(ConflictV->Face);
@@ -972,31 +1146,66 @@ namespace Chaos
 			FacesToDelete.Add(ConflictV->Face);
 			while(Queue.Num())
 			{
-				FHalfEdge* Edge = Queue.Pop(/*bAllowShrinking=*/false);
+#if DEBUG_HULL_GENERATION
+				FString QueueString(TEXT("\t Queue ("));
+				for (const FHalfEdge* QueuedEdge : Queue)
+				{
+					QueueString += FString::Printf(TEXT(" [%d - %d] "), QueuedEdge->Vertex, QueuedEdge->Next->Vertex);
+				}
+				QueueString += TEXT(")");
+				UE_LOG(LogChaos, VeryVerbose, TEXT("%s"), *QueueString);
+#endif 
+
+				FHalfEdge* Edge = Queue.Pop(EAllowShrinking::No);
 				Processed.Add(Edge->Face);
 				FHalfEdge* Twin = Edge->Twin;
 				FConvexFace* NextFace = Twin->Face;
+
+#if DEBUG_HULL_GENERATION
+				UE_LOG(LogChaos, VeryVerbose, TEXT("\tPop edge [%d - %d] from queue"), Edge->Vertex, Edge->Next->Vertex);
+#endif 
+
 				if(Processed.Contains(NextFace))
 				{
+#if DEBUG_HULL_GENERATION
+					UE_LOG(LogChaos, VeryVerbose, TEXT("\tTwin Face [%d] already processed - skip"), NextFace);
+#endif
 					continue;
 				}
-				const FReal Distance = NextFace->Plane.SignedDistance(V);
+				const FRealType Distance = NextFace->Plane.SignedDistance(V);
 				if(Distance > Epsilon)
 				{
+#if DEBUG_HULL_GENERATION
+					UE_LOG(LogChaos, VeryVerbose, TEXT("\tDistance [%f] > Epsilon [%f] - add to queue"), Distance, Epsilon);
+#endif 
 					Queue.Add(Twin->Prev); //stack pops so reverse order
 					Queue.Add(Twin->Next);
 					FacesToDelete.Add(NextFace);
 				}
 				else
 				{
-					HorizonEdges.Add(Edge);
+#if DEBUG_HULL_GENERATION
+					UE_LOG(LogChaos, VeryVerbose, TEXT("\tAdd [%d - %d] to horizon "), Edge->Vertex, Edge->Next->Vertex);
+#endif 
+					// we need to ensure that the horizon is a continous edge loop
+					// this may get the wrong edge path, but way more roibust than not testing this
+					if (HorizonEdges.Num() == 0 || Edge->Vertex == HorizonEdges[HorizonEdges.Num()-1]->Next->Vertex)
+					{
+						HorizonEdges.Add(Edge);
+					}
+					else
+					{
+#if DEBUG_HULL_GENERATION
+						UE_LOG(LogChaos, VeryVerbose, TEXT("\tNON VALID EDGE LOOP - internal horizon edge detected [%d - %d] - skipping "), Edge->Vertex, Edge->Next->Vertex);
+#endif 
+					}
 				}
 			}
 
 #if DEBUG_HULL_GENERATION
 #if DEBUG_HULL_GENERATION_BUILDHORIZON_TO_OBJ
 			UE_LOG(LogChaos, VeryVerbose, TEXT("# ======================================================"));
-			const FVec3 ConflictPos = InVertices[ConflictV->Vertex];
+			const FVec3Type ConflictPos = InVertices[ConflictV->Vertex];
 			UE_LOG(LogChaos, VeryVerbose, TEXT("# BUILD_HORIZON - Conflict Vertex = %d (%f %f %f)"), ConflictV->Vertex, ConflictPos.X, ConflictPos.Y, ConflictPos.Z);
 			UE_LOG(LogChaos, VeryVerbose, TEXT("# ------------------------------------------------------"));
 			for (TSet<FConvexFace*>::TConstIterator SetIt(Processed); SetIt; ++SetIt)
@@ -1011,13 +1220,27 @@ namespace Chaos
 				UE_LOG(LogChaos, VeryVerbose, TEXT("f -3 -2 -1"));
 			}
 #endif
+
+			FString HorizonString(TEXT("> Final Horizon: ("));
+			for (const FHalfEdge* HorizonEdge : HorizonEdges)
+			{
+				HorizonString += FString::Printf(TEXT("%d (%d)"), HorizonEdge->Vertex, HorizonEdge->Next->Vertex);
+			}
+			HorizonString += TEXT(")");
+			UE_LOG(LogChaos, VeryVerbose, TEXT("%s"), *HorizonString);
+
+			UE_LOG(LogChaos, VeryVerbose, TEXT("Generate horizon - END"));
 #endif
+
 		}
 
-		static void BuildFaces(FMemPool& Pool, const TArray<FVec3>& InVertices, const FHalfEdge* ConflictV, const TArray<FHalfEdge*>& HorizonEdges, const TArray<FConvexFace*> OldFaces, TArray<FConvexFace*>& NewFaces)
+		static bool BuildFaces(FMemPool& Pool, const TArray<FVec3Type>& InVertices, const FHalfEdge* ConflictV, const TArray<FHalfEdge*>& HorizonEdges, const TArray<FConvexFace*>& OldFaces, TArray<FConvexFace*>& NewFaces)
 		{
 			//The HorizonEdges are in CCW order. We must make new faces and edges to join from ConflictV to these edges
-			check(HorizonEdges.Num() >= 3);
+			if (!(HorizonEdges.Num() >= 3)) // TODO: previously this was a check(), but it sometimes failed; can we fix things so this always holds?
+			{
+				return false;
+			}
 			NewFaces.Reserve(HorizonEdges.Num());
 			FHalfEdge* PrevEdge = nullptr;
 			for(int32 HorizonIdx = 0; HorizonIdx < HorizonEdges.Num(); ++HorizonIdx)
@@ -1027,7 +1250,11 @@ namespace Chaos
 				NewHorizonEdge->Twin = OriginalEdge->Twin; //swap edges
 				NewHorizonEdge->Twin->Twin = NewHorizonEdge;
 				FHalfEdge* HorizonNext = Pool.AllocHalfEdge(OriginalEdge->Next->Vertex);
-				check(HorizonNext->Vertex == HorizonEdges[(HorizonIdx + 1) % HorizonEdges.Num()]->Vertex); //should be ordered properly
+				// TODO: previously this was a check(), but it sometimes failed; can we fix things so this always holds?
+				if (!(HorizonNext->Vertex == HorizonEdges[(HorizonIdx + 1) % HorizonEdges.Num()]->Vertex)) //should be ordered properly
+				{
+					return false;
+				}
 				FHalfEdge* V = Pool.AllocHalfEdge(ConflictV->Vertex);
 				V->Twin = PrevEdge;
 				if(PrevEdge)
@@ -1050,7 +1277,11 @@ namespace Chaos
 				NewFaces.Add(NewFace);
 			}
 
-			check(PrevEdge);
+			// TODO: previously this was a check(); can we determine if this always hold and switch it back if so?
+			if (!PrevEdge)
+			{
+				return false;
+			}
 			NewFaces[0]->FirstEdge->Prev->Twin = PrevEdge;
 			PrevEdge->Twin = NewFaces[0]->FirstEdge->Prev;
 			NewFaces[NewFaces.Num() - 1]->Next = nullptr;
@@ -1072,9 +1303,11 @@ namespace Chaos
 			EndFace->Next = OldFace->Next;
 			OldFace->Next = StartFace;
 			StartFace->Prev = OldFace;
+
+			return true;
 		}
 
-		static void AddVertex(FMemPool& Pool, const TArray<FVec3>& InVertices, FHalfEdge* ConflictV, const Params& InParams)
+		static bool AddVertex(FMemPool& Pool, const TArray<FVec3Type>& InVertices, FHalfEdge* ConflictV, const Params& InParams)
 		{
 			UE_CLOG(DEBUG_HULL_GENERATION, LogChaos, VeryVerbose, TEXT("Adding Vertex %d"), ConflictV->Vertex);
 
@@ -1082,18 +1315,11 @@ namespace Chaos
 			TArray<FConvexFace*> FacesToDelete;
 			BuildHorizon(InVertices, ConflictV, HorizonEdges, FacesToDelete, InParams);
 
-#if DEBUG_HULL_GENERATION
-			FString HorizonString(TEXT("\tHorizon: ("));
-			for(const FHalfEdge* HorizonEdge : HorizonEdges)
-			{
-				HorizonString += FString::Printf(TEXT("%d "), HorizonEdge->Vertex);
-			}
-			HorizonString += TEXT(")");
-			UE_LOG(LogChaos, VeryVerbose, TEXT("%s"), *HorizonString);
-#endif
-
 			TArray<FConvexFace*> NewFaces;
-			BuildFaces(Pool, InVertices, ConflictV, HorizonEdges, FacesToDelete, NewFaces);
+			if (!ensure(BuildFaces(Pool, InVertices, ConflictV, HorizonEdges, FacesToDelete, NewFaces)))
+			{
+				return false;
+			}
 
 #if DEBUG_HULL_GENERATION
 			FString NewFaceString(TEXT("\tNew Faces: "));
@@ -1133,7 +1359,10 @@ namespace Chaos
 
 			//todo(ocohen): need to explicitly test for merge failures. Coplaner, nonconvex, etc...
 			//getting this in as is for now to unblock other systems
+
+			return true;
 		}
 
 	};
 }
+

@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ExternalTexture.h"
+#include "MaterialShared.h"
+#include "Materials/MaterialRenderProxy.h"
 
 
 #define EXTERNALTEXTURE_TRACE_REGISTRY 0
@@ -30,7 +32,7 @@ void FExternalTextureRegistry::RegisterExternalTexture(const FGuid& InGuid, FTex
 
 	for (const FMaterialRenderProxy* MaterialRenderProxy : ReferencingMaterialRenderProxies)
 	{
-		const_cast<FMaterialRenderProxy*>(MaterialRenderProxy)->CacheUniformExpressions(false);
+		const_cast<FMaterialRenderProxy*>(MaterialRenderProxy)->CacheUniformExpressions(FRHICommandListImmediate::Get(), false);
 	}
 }
 
@@ -43,14 +45,13 @@ void FExternalTextureRegistry::UnregisterExternalTexture(const FGuid& InGuid)
 
 	for (const FMaterialRenderProxy* MaterialRenderProxy : ReferencingMaterialRenderProxies)
 	{
-		const_cast<FMaterialRenderProxy*>(MaterialRenderProxy)->CacheUniformExpressions(false);
+		const_cast<FMaterialRenderProxy*>(MaterialRenderProxy)->CacheUniformExpressions(FRHICommandListImmediate::Get(), false);
 	}
 }
 
 
 void FExternalTextureRegistry::RemoveMaterialRenderProxyReference(const FMaterialRenderProxy* MaterialRenderProxy)
 {
-	check(IsInRenderingThread());
 	FScopeLock Lock(&CriticalSection);
 	ReferencingMaterialRenderProxies.Remove(MaterialRenderProxy);
 }
@@ -73,7 +74,7 @@ bool FExternalTextureRegistry::GetExternalTexture(const FMaterialRenderProxy* Ma
 	{
 		ReferencingMaterialRenderProxies.Add(MaterialRenderProxy);
 
-		// Note: FMaterialRenderProxy::ReleaseDynamicRHI()
+		// Note: FMaterialRenderProxy::ReleaseRHI()
 		// is responsible for removing the material proxy
 	}
 

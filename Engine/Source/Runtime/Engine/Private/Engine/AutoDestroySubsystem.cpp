@@ -2,8 +2,8 @@
 
 #include "Engine/AutoDestroySubsystem.h"
 #include "Engine/World.h"
-#include "Logging/LogMacros.h"
-#include "GameFramework/Actor.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AutoDestroySubsystem)
 
 DECLARE_LOG_CATEGORY_EXTERN(LogAutoDestroySubsystem, Log, All);
 DEFINE_LOG_CATEGORY(LogAutoDestroySubsystem);

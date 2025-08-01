@@ -5,6 +5,8 @@
 #include "Logging/LogVerbosity.h"
 #include "SlateGlobals.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(Clipping)
+
 FSlateClippingZone::FSlateClippingZone(const FShortRect& AxisAlignedRect)
 	: bIsAxisAligned(true)
 	, bIntersect(true)
@@ -15,10 +17,10 @@ FSlateClippingZone::FSlateClippingZone(const FShortRect& AxisAlignedRect)
 	int16 Top = FMath::Min(AxisAlignedRect.Top, AxisAlignedRect.Bottom);
 	int16 Bottom = FMath::Max(AxisAlignedRect.Top, AxisAlignedRect.Bottom);
 
-	TopLeft = FVector2D(Left, Top);
-	TopRight = FVector2D(Right, Top);
-	BottomLeft = FVector2D(Left, Bottom);
-	BottomRight = FVector2D(Right, Bottom);
+	TopLeft = FVector2f(Left, Top);
+	TopRight = FVector2f(Right, Top);
+	BottomLeft = FVector2f(Left, Bottom);
+	BottomRight = FVector2f(Right, Bottom);
 }
 
 FSlateClippingZone::FSlateClippingZone(const FSlateRect& AxisAlignedRect)
@@ -32,10 +34,10 @@ FSlateClippingZone::FSlateClippingZone(const FSlateRect& AxisAlignedRect)
 	float Top = FMath::Min(RoundedAxisAlignedRect.Top, RoundedAxisAlignedRect.Bottom);
 	float Bottom = FMath::Max(RoundedAxisAlignedRect.Top, RoundedAxisAlignedRect.Bottom);
 
-	TopLeft = FVector2D(Left, Top);
-	TopRight = FVector2D(Right, Top);
-	BottomLeft = FVector2D(Left, Bottom);
-	BottomRight = FVector2D(Right, Bottom);
+	TopLeft = FVector2f(Left, Top);
+	TopRight = FVector2f(Right, Top);
+	BottomLeft = FVector2f(Left, Bottom);
+	BottomRight = FVector2f(Right, Bottom);
 }
 
 FSlateClippingZone::FSlateClippingZone(const FGeometry& BooundingGeometry)
@@ -43,12 +45,12 @@ FSlateClippingZone::FSlateClippingZone(const FGeometry& BooundingGeometry)
 	, bAlwaysClip(false)
 {
 	const FSlateRenderTransform& Transform = BooundingGeometry.GetAccumulatedRenderTransform();
-	const FVector2D& LocalSize = BooundingGeometry.GetLocalSize();
+	FVector2f LocalSize = BooundingGeometry.GetLocalSize();
 
 	InitializeFromArbitraryPoints(
-		Transform.TransformPoint(FVector2D(0,0)),
-		Transform.TransformPoint(FVector2D(LocalSize.X, 0)),
-		Transform.TransformPoint(FVector2D(0, LocalSize.Y)),
+		Transform.TransformPoint(FVector2f(0.f, 0.f)),
+		Transform.TransformPoint(FVector2f(LocalSize.X, 0.f)),
+		Transform.TransformPoint(FVector2f(0.f, LocalSize.Y)),
 		Transform.TransformPoint(LocalSize)
 	);
 }
@@ -58,24 +60,24 @@ FSlateClippingZone::FSlateClippingZone(const FPaintGeometry& PaintingGeometry)
 	, bAlwaysClip(false)
 {
 	const FSlateRenderTransform& Transform = PaintingGeometry.GetAccumulatedRenderTransform();
-	const FVector2D& LocalSize = PaintingGeometry.GetLocalSize();
+	FVector2f LocalSize = PaintingGeometry.GetLocalSize();
 
 	InitializeFromArbitraryPoints(
-		Transform.TransformPoint(FVector2D(0, 0)),
-		Transform.TransformPoint(FVector2D(LocalSize.X, 0)),
-		Transform.TransformPoint(FVector2D(0, LocalSize.Y)),
+		Transform.TransformPoint(FVector2f(0.f, 0.f)),
+		Transform.TransformPoint(FVector2f(LocalSize.X, 0.f)),
+		Transform.TransformPoint(FVector2f(0.f, LocalSize.Y)),
 		Transform.TransformPoint(LocalSize)
 	);
 }
 
-FSlateClippingZone::FSlateClippingZone(const FVector2D& InTopLeft, const FVector2D& InTopRight, const FVector2D& InBottomLeft, const FVector2D& InBottomRight)
+FSlateClippingZone::FSlateClippingZone(const UE::Slate::FDeprecateVector2DParameter& InTopLeft, const UE::Slate::FDeprecateVector2DParameter& InTopRight, const UE::Slate::FDeprecateVector2DParameter& InBottomLeft, const UE::Slate::FDeprecateVector2DParameter& InBottomRight)
 	: bIntersect(true)
 	, bAlwaysClip(false)
 {
 	InitializeFromArbitraryPoints(InTopLeft, InTopRight, InBottomLeft, InBottomRight);
 }
 
-void FSlateClippingZone::InitializeFromArbitraryPoints(const FVector2D& InTopLeft, const FVector2D& InTopRight, const FVector2D& InBottomLeft, const FVector2D& InBottomRight)
+void FSlateClippingZone::InitializeFromArbitraryPoints(const UE::Slate::FDeprecateVector2DParameter& InTopLeft, const UE::Slate::FDeprecateVector2DParameter& InTopRight, const UE::Slate::FDeprecateVector2DParameter& InBottomLeft, const UE::Slate::FDeprecateVector2DParameter& InBottomRight)
 {
 	bIsAxisAligned = false;
 
@@ -107,17 +109,17 @@ void FSlateClippingZone::InitializeFromArbitraryPoints(const FVector2D& InTopLef
 		const float Top = FMath::Min(RoundedAxisAlignedRect.Top, RoundedAxisAlignedRect.Bottom);
 		const float Bottom = FMath::Max(RoundedAxisAlignedRect.Top, RoundedAxisAlignedRect.Bottom);
 
-		TopLeft = FVector2D(Left, Top);
-		TopRight = FVector2D(Right, Top);
-		BottomLeft = FVector2D(Left, Bottom);
-		BottomRight = FVector2D(Right, Bottom);
+		TopLeft = FVector2f(Left, Top);
+		TopRight = FVector2f(Right, Top);
+		BottomLeft = FVector2f(Left, Bottom);
+		BottomRight = FVector2f(Right, Bottom);
 	}
 	else
 	{
-		TopLeft = InTopLeft;
-		TopRight = InTopRight;
-		BottomLeft = InBottomLeft;
-		BottomRight = InBottomRight;
+		TopLeft = FVector2f(InTopLeft);
+		TopRight = FVector2f(InTopRight);
+		BottomLeft = FVector2f(InBottomLeft);
+		BottomRight = FVector2f(InBottomRight);
 	}
 }
 
@@ -144,7 +146,7 @@ FSlateClippingZone FSlateClippingZone::Intersect(const FSlateClippingZone& Other
 
 FSlateRect FSlateClippingZone::GetBoundingBox() const
 {
-	FVector2D Points[4] =
+	FVector2f Points[4] =
 	{
 		TopLeft,
 		TopRight,
@@ -160,14 +162,14 @@ FSlateRect FSlateClippingZone::GetBoundingBox() const
 	);
 }
 
-static float VectorSign(const FVector2D& Vec, const FVector2D& A, const FVector2D& B)
+static float VectorSign(const FVector2f& Vec, const FVector2f& A, const FVector2f& B)
 {
 	return FMath::Sign((B.X - A.X) * (Vec.Y - A.Y) - (B.Y - A.Y) * (Vec.X - A.X));
 }
 
 // Returns true when the point is inside the triangle
 // Should not return true when the point is on one of the edges
-static bool IsPointInTriangle(const FVector2D& TestPoint, const FVector2D& A, const FVector2D& B, const FVector2D& C)
+static bool IsPointInTriangle(const FVector2f& TestPoint, const FVector2f& A, const FVector2f& B, const FVector2f& C)
 {
 	float BA = VectorSign(B, A, TestPoint);
 	float CB = VectorSign(C, B, TestPoint);
@@ -178,7 +180,7 @@ static bool IsPointInTriangle(const FVector2D& TestPoint, const FVector2D& A, co
 	return BA == CB && CB == AC;
 }
 
-bool FSlateClippingZone::IsPointInside(const FVector2D& Point) const
+bool FSlateClippingZone::IsPointInside(const UE::Slate::FDeprecateVector2DParameter& Point) const
 {
 	if (IsAxisAligned())
 	{
@@ -206,18 +208,7 @@ FSlateClippingState::FSlateClippingState(EClippingFlags InFlags /*= EClippingFla
 {
 }
 
-FSlateClippingState::FSlateClippingState(const FSlateClippingState& Other)
-	: StencilQuads(Other.StencilQuads)
-	, ScissorRect(Other.ScissorRect)
-	, Flags(Other.Flags)
-#if WITH_SLATE_DEBUGGING
-	, Debugging_StateIndex(Other.Debugging_StateIndex)
-	, Debugging_StateIndexFromFrame(Other.Debugging_StateIndexFromFrame)
-#endif
-{
-}
-
-bool FSlateClippingState::IsPointInside(const FVector2D& Point) const
+bool FSlateClippingState::IsPointInside(const UE::Slate::FDeprecateVector2DParameter& Point) const
 {
 	if (ScissorRect.IsSet())
 	{
@@ -373,6 +364,7 @@ void FSlateClippingManager::PopToStackIndex(int32 Index)
 	const int32 StartIndexToPop = Index + 1;
 	if (ClippingStack.Num() > StartIndexToPop)
 	{
-		ClippingStack.RemoveAt(StartIndexToPop, ClippingStack.Num() - StartIndexToPop, false);
+		ClippingStack.RemoveAt(StartIndexToPop, ClippingStack.Num() - StartIndexToPop, EAllowShrinking::No);
 	}
 }
+

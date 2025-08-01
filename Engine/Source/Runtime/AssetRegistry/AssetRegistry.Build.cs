@@ -10,8 +10,10 @@ public class AssetRegistry : ModuleRules
 			new string[] {
 				"Core",
 				"CoreUObject",
+				"TraceLog",
 				"ApplicationCore",
 				"Projects",
+				"TelemetryUtils"
 			}
 			);
 
@@ -20,5 +22,7 @@ public class AssetRegistry : ModuleRules
 			PrivateIncludePathModuleNames.AddRange(new string[] { "DirectoryWatcher" });
 			DynamicallyLoadedModuleNames.AddRange(new string[] { "DirectoryWatcher" });
 		}
+
+		UnsafeTypeCastWarningLevel = WarningLevel.Error;
 	}
 }

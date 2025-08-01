@@ -4,7 +4,10 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GameTime.h"
+#include "RendererInterface.h"
 #include "Rendering/RenderingCommon.h"
+#include "Rendering/SlateRendererTypes.h"
 #include "Rendering/ShaderResourceManager.h"
 #include "Rendering/DrawElements.h"
 #include "Rendering/RenderingPolicy.h"
@@ -23,25 +26,28 @@ class UDeviceProfile;
 class FSlateElementPS;
 class FSlateMaterialShaderPS;
 class FSlateMaterialShaderVS;
+struct FMaterialShaderTypes;
+struct IPooledRenderTarget;
 
 struct FSlateRenderingParams
 {
-	FMatrix ViewProjectionMatrix;
-	FVector2D ViewOffset;
-	float CurrentWorldTime;
-	float DeltaTimeSeconds;
-	float CurrentRealTime;
-	bool bAllowSwitchVerticalAxis;
+	FMatrix44f ViewProjectionMatrix;
+	FVector2f ViewOffset;
+	FIntRect ViewRect;
+	FGameTime Time;
+	TRefCountPtr<IPooledRenderTarget> UITarget;
+	EDisplayColorGamut HDRDisplayColorGamut;
+	ESlatePostRT UsedSlatePostBuffers;
 	bool bWireFrame;
 	bool bIsHDR;
 
-	FSlateRenderingParams(const FMatrix& InViewProjectionMatrix, float InCurrentWorldTime, float InDeltaTimeSeconds, float InCurrentRealTime)
+	FSlateRenderingParams(const FMatrix& InViewProjectionMatrix, FGameTime InTime)
 		: ViewProjectionMatrix(InViewProjectionMatrix)
-		, ViewOffset(0, 0)
-		, CurrentWorldTime(InCurrentWorldTime)
-		, DeltaTimeSeconds(InDeltaTimeSeconds)
-		, CurrentRealTime(InCurrentRealTime)
-		, bAllowSwitchVerticalAxis(true)
+		, ViewOffset(0.f, 0.f)
+		, ViewRect(FIntRect())
+		, Time(InTime)
+		, HDRDisplayColorGamut(EDisplayColorGamut::sRGB_D65)
+		, UsedSlatePostBuffers(ESlatePostRT::None)
 		, bWireFrame(false)
 		, bIsHDR(false)
 	{
@@ -70,10 +76,16 @@ public:
 	void SetUseGammaCorrection( bool bInUseGammaCorrection ) { bGammaCorrect = bInUseGammaCorrection; }
 	void SetApplyColorDeficiencyCorrection(bool bInApplyColorCorrection) { bApplyColorDeficiencyCorrection = bInApplyColorCorrection; }
 
+	void TickPostProcessResources();
+
+	bool GetApplyColorDeficiencyCorrection() const { return bApplyColorDeficiencyCorrection; }
+
 	virtual void AddSceneAt(FSceneInterface* Scene, int32 Index) override;
 	virtual void ClearScenes() override;
 
 	virtual void FlushGeneratedResources();
+
+	void BlurRectExternal(FRHICommandListImmediate& RHICmdList, FRHITexture* BlurSrc, FRHITexture* BlurDst, FIntRect SrcRect, FIntRect DstRect, float BlurStrength) const;
 
 private:
 	ETextureSamplerFilter GetSamplerFilter(const UTexture* Texture) const;
@@ -85,17 +97,16 @@ private:
 	 * @param DrawEffects	Draw effects being used
 	 * @return The pixel shader for use with the shader type and draw effects
 	 */
-	TShaderRef<FSlateElementPS> GetTexturePixelShader(FGlobalShaderMap* ShaderMap, ESlateShader ShaderType, ESlateDrawEffect DrawEffects );
-	TShaderRef<FSlateMaterialShaderPS> GetMaterialPixelShader( const class FMaterial* Material, ESlateShader ShaderType );
-	TShaderRef<FSlateMaterialShaderVS> GetMaterialVertexShader( const class FMaterial* Material, bool bUseInstancing );
+	TShaderRef<FSlateElementPS> GetTexturePixelShader(FGlobalShaderMap* ShaderMap, ESlateShader ShaderType, ESlateDrawEffect DrawEffects, bool bUseTextureGrayscale,  bool bIsVirtualTexture);
+	void ChooseMaterialShaderTypes(ESlateShader ShaderType, bool bUseInstancing, FMaterialShaderTypes& OutShaderTypes);
 
 	/** @return The RHI primitive type from the Slate primitive type */
 	EPrimitiveType GetRHIPrimitiveType(ESlateDrawPrimitive SlateType);
 
 private:
 	/** Buffers used for rendering */
-	TSlateElementVertexBuffer<FSlateVertex> MasterVertexBuffer;
-	FSlateElementIndexBuffer MasterIndexBuffer;
+	TSlateElementVertexBuffer<FSlateVertex> SourceVertexBuffer;
+	FSlateElementIndexBuffer SourceIndexBuffer;
 
 	FSlateStencilClipVertexBuffer StencilVertexBuffer;
 

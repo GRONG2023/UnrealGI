@@ -1,8 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
+
 #include "DatasmithSceneXmlReader.h"
 
 #include "DatasmithCore.h"
 #include "DatasmithDefinitions.h"
+#include "DatasmithLocaleScope.h"
 #include "DatasmithSceneFactory.h"
 #include "DatasmithUtils.h"
 
@@ -14,119 +16,77 @@
 #include "Templates/SharedPointer.h"
 #include "XmlParser.h"
 
-// Set proper locale on Mac and Linux since locale "C" and not "en_US.UTF-8" is the default on those platforms
-#if PLATFORM_MAC | PLATFORM_LINUX
-#define USE_LOCALE
-#if PLATFORM_MAC
-#include <xlocale.h>
-#else
-#include <locale.h>
-#endif
-#endif
 
 FDatasmithSceneXmlReader::FDatasmithSceneXmlReader() = default;
 FDatasmithSceneXmlReader::~FDatasmithSceneXmlReader() = default;
 
-namespace DatasmithSceneXmlReaderImpl
+
+const TCHAR* ActorTagsView[] = {
+	DATASMITH_ACTORNAME,
+	DATASMITH_ACTORHIERARCHICALINSTANCEDMESHNAME,
+	DATASMITH_ACTORMESHNAME,
+	DATASMITH_CAMERANAME,
+	DATASMITH_CLOTHACTORNAME,
+	DATASMITH_CUSTOMACTORNAME,
+	DATASMITH_DECALACTORNAME,
+	DATASMITH_LANDSCAPENAME,
+	DATASMITH_LIGHTNAME,
+	DATASMITH_POSTPROCESSVOLUME,
+};
+
+template<>
+float FDatasmithSceneXmlReader::ValueFromString< float >( const FString& InString ) const
 {
-	const TCHAR* ActorTags[] = { DATASMITH_ACTORNAME, DATASMITH_ACTORMESHNAME, DATASMITH_CAMERANAME, DATASMITH_LIGHTNAME,
-		DATASMITH_CUSTOMACTORNAME, DATASMITH_LANDSCAPENAME, DATASMITH_POSTPROCESSVOLUME, DATASMITH_ACTORHIERARCHICALINSTANCEDMESHNAME, DATASMITH_DECALACTORNAME };
-
-	template< typename T >
-	T ValueFromString( const FString& InString )
-	{
-		// Invalid
-	}
-
-	template<>
-	float ValueFromString< float >( const FString& InString )
-	{
-		return FCString::Atof( *InString );
-	}
-
-	template<>
-	double ValueFromString< double >( const FString& InString )
-	{
-		return FCString::Atod( *InString );
-	}
-
-	template<>
-	FVector ValueFromString< FVector >( const FString& InString )
-	{
-		FVector Value;
-		Value.InitFromString( InString );
-
-		return Value;
-	}
-
-	template<>
-	FColor ValueFromString< FColor >( const FString& InString )
-	{
-		FColor Value;
-		Value.InitFromString( InString );
-
-		return Value;
-	}
-
-	template<>
-	FLinearColor ValueFromString< FLinearColor >( const FString& InString )
-	{
-		FLinearColor Value;
-		Value.InitFromString( InString );
-
-		return Value;
-	}
-
-	template<>
-	int32 ValueFromString< int32 >( const FString& InString )
-	{
-		return FCString::Atoi( *InString );
-	}
-
-	template<>
-	bool ValueFromString< bool >( const FString& InString )
-	{
-		return InString.ToBool();
-	}
-
-	UE_NODISCARD FString UnsanitizeXMLText(const FString& InString)
-	{
-		FString OutString = InString;
-		OutString.ReplaceInline( TEXT("&apos;"), TEXT("'")  );
-		OutString.ReplaceInline( TEXT("&quot;"), TEXT("\"") );
-		OutString.ReplaceInline( TEXT("&gt;"),   TEXT(">")  );
-		OutString.ReplaceInline( TEXT("&lt;"),   TEXT("<")  );
-		OutString.ReplaceInline( TEXT("&amp;"),  TEXT("&")  );
-		return OutString;
-	}
+	return FCString::Atof( *InString );
 }
 
-template<typename T>
-T FDatasmithSceneXmlReader::ValueFromString( const FString& InString ) const
+template<>
+double FDatasmithSceneXmlReader::ValueFromString< double >( const FString& InString ) const
 {
-	return DatasmithSceneXmlReaderImpl::ValueFromString<T>(InString);
+	return FCString::Atod( *InString );
 }
 
-FString FDatasmithSceneXmlReader::ResolveFilePath(const FString& AssetFile) const
+template<>
+FVector FDatasmithSceneXmlReader::ValueFromString< FVector >( const FString& InString ) const
 {
-	if ( !FPaths::IsRelative( AssetFile ) )
-	{
-		return AssetFile;
-	}
+	FVector Value;
+	Value.InitFromString( InString );
 
-	FString FullAssetPath = FPaths::Combine(ProjectPath, AssetFile);
-
-	if ( FPaths::FileExists(FullAssetPath) )
-	{
-		return FullAssetPath;
-	}
-	else
-	{
-		return AssetFile;
-	}
+	return Value;
 }
 
-void FDatasmithSceneXmlReader::PatchUpVersion(TSharedRef< IDatasmithScene >& OutScene)
+template<>
+FColor FDatasmithSceneXmlReader::ValueFromString< FColor >( const FString& InString ) const
+{
+	FColor Value;
+	Value.InitFromString( InString );
+
+	return Value;
+}
+
+template<>
+FLinearColor FDatasmithSceneXmlReader::ValueFromString< FLinearColor >( const FString& InString ) const
+{
+	FLinearColor Value;
+	Value.InitFromString( InString );
+
+	return Value;
+}
+
+template<>
+int32 FDatasmithSceneXmlReader::ValueFromString< int32 >( const FString& InString ) const
+{
+	return FCString::Atoi( *InString );
+}
+
+template<>
+bool FDatasmithSceneXmlReader::ValueFromString< bool >( const FString& InString ) const
+{
+	return InString.ToBool();
+}
+
+
+void FDatasmithSceneXmlReader::PatchUpVersion(TSharedRef< IDatasmithScene >& OutScene) const
 {
 	//@todo parse version string in proper version object
 	// Handle legacy behavior, when materials from the first actor using a mesh applied its materials to it.
@@ -157,6 +117,82 @@ void FDatasmithSceneXmlReader::PatchUpVersion(TSharedRef< IDatasmithScene >& Out
 	}
 }
 
+[[nodiscard]] FString FDatasmithSceneXmlReader::UnsanitizeXMLText(const FString& InString) const
+{
+	FString OutString = InString;
+	OutString.ReplaceInline( TEXT("&apos;"), TEXT("'")  );
+	OutString.ReplaceInline( TEXT("&quot;"), TEXT("\"") );
+	OutString.ReplaceInline( TEXT("&gt;"),   TEXT(">")  );
+	OutString.ReplaceInline( TEXT("&lt;"),   TEXT("<")  );
+	OutString.ReplaceInline( TEXT("&amp;"),  TEXT("&")  );
+	return OutString;
+}
+
+FVector FDatasmithSceneXmlReader::VectorFromNode(FXmlNode* InNode, const TCHAR* XName, const TCHAR* YName, const TCHAR* ZName) const
+{
+	return {
+		ValueFromString<double>(InNode->GetAttribute(XName)),
+		ValueFromString<double>(InNode->GetAttribute(YName)),
+		ValueFromString<double>(InNode->GetAttribute(ZName))
+	};
+}
+
+FQuat FDatasmithSceneXmlReader::QuatFromHexString(const FString& HexString) const
+{
+	if (HexString.Len() / 2 >= 4 * sizeof(double))
+	{
+		double Double[4];
+		FString::ToHexBlob( HexString, (uint8*)Double, sizeof(Double) );
+		return FQuat( Double[0], Double[1], Double[2], Double[3] );
+	}
+	else if (HexString.Len() / 2 >= 4 * sizeof(float))
+	{
+		float Floats[4];
+		FString::ToHexBlob( HexString, (uint8*)Floats, sizeof(Floats) );
+		return FQuat( Floats[0], Floats[1], Floats[2], Floats[3] );
+	}
+
+	return FQuat::Identity;
+}
+
+FQuat FDatasmithSceneXmlReader::QuatFromNode(FXmlNode* InNode) const
+{
+	FString RotationBlob = InNode->GetAttribute(TEXT("qhex64"));
+	if (RotationBlob.IsEmpty())
+	{
+		RotationBlob = InNode->GetAttribute(TEXT("qhex"));
+	}
+
+	if (!RotationBlob.IsEmpty())
+	{
+		return QuatFromHexString(RotationBlob);
+	}
+
+	return FQuat(
+		ValueFromString<double>(InNode->GetAttribute(TEXT("qx"))),
+		ValueFromString<double>(InNode->GetAttribute(TEXT("qy"))),
+		ValueFromString<double>(InNode->GetAttribute(TEXT("qz"))),
+		ValueFromString<double>(InNode->GetAttribute(TEXT("qw")))
+	);
+}
+
+FTransform FDatasmithSceneXmlReader::ParseTransform(FXmlNode* InNode) const
+{
+	return {
+		QuatFromNode(InNode),
+		VectorFromNode(InNode, TEXT("tx"), TEXT("ty"), TEXT("tz")),
+		VectorFromNode(InNode, TEXT("sx"), TEXT("sy"), TEXT("sz"))
+	};
+}
+
+void FDatasmithSceneXmlReader::ParseTransform(FXmlNode* InNode, TSharedPtr< IDatasmithActorElement >& OutElement) const
+{
+	FTransform Tmp = ParseTransform(InNode);
+	OutElement->SetTranslation(Tmp.GetTranslation());
+	OutElement->SetRotation(Tmp.GetRotation());
+	OutElement->SetScale(Tmp.GetScale3D());
+}
+
 void FDatasmithSceneXmlReader::ParseElement(FXmlNode* InNode, TSharedRef<IDatasmithElement> OutElement) const
 {
 	OutElement->SetLabel( *InNode->GetAttribute( TEXT("label") ) );
@@ -169,7 +205,7 @@ void FDatasmithSceneXmlReader::ParseLevelSequence(FXmlNode* InNode, const TShare
 	{
 		if (ChildrenNodes[j]->GetTag() == TEXT("file"))
 		{
-			OutElement->SetFile( *ResolveFilePath(ChildrenNodes[j]->GetAttribute(TEXT("path"))) );
+			OutElement->SetFile( *ChildrenNodes[j]->GetAttribute(TEXT("path")) );
 		}
 		else if (ChildrenNodes[j]->GetTag() == DATASMITH_HASH)
 		{
@@ -251,7 +287,7 @@ void FDatasmithSceneXmlReader::ParseVariant( FXmlNode* InNode, const TSharedRef<
 			}
 			else
 			{
-				UE_LOG( LogDatasmith, Warning, TEXT( "Missing actor referenced in variant %s" ), *OutElement->GetName() );
+				UE_LOG( LogDatasmith, Warning, TEXT( "Missing actor referenced in variant %s" ), OutElement->GetName() );
 			}
 
 			ParseActorBinding( ChildNode, BindingElement, Objects );
@@ -306,14 +342,14 @@ void FDatasmithSceneXmlReader::ParsePropertyCapture( FXmlNode* InNode, const TSh
 	{
 		if ( !CheckTCharIsHex( Char ) )
 		{
-			UE_LOG( LogDatasmith, Warning, TEXT( "Invalid recorded data '%s' for captured property with path '%s' and category '%d'" ), *RecordedDataHex, *PropertyPath, Category );
+			UE_LOG( LogDatasmith, Warning, TEXT( "Invalid recorded data '%s' for captured property with path '%s' and category '%d'" ), *RecordedDataHex, *PropertyPath, int(Category) );
 			RecordedDataHex = FString();
 			break;
 		}
 	}
 	if ( RecordedDataHex.Len() % 2 != 0 )
 	{
-		UE_LOG( LogDatasmith, Warning, TEXT( "Invalid recorded data '%s' for captured property with path '%s' and category '%d'" ), *RecordedDataHex, *PropertyPath, Category );
+		UE_LOG( LogDatasmith, Warning, TEXT( "Invalid recorded data '%s' for captured property with path '%s' and category '%d'" ), *RecordedDataHex, *PropertyPath, int(Category) );
 		RecordedDataHex = FString();
 	}
 
@@ -324,9 +360,8 @@ void FDatasmithSceneXmlReader::ParsePropertyCapture( FXmlNode* InNode, const TSh
 	int32 NumRead = HexToBytes( RecordedDataHex, RecordedBytes.GetData() );
 	if ( NumRead != NumBytes )
 	{
-		UE_LOG( LogDatasmith, Warning, TEXT( "Invalid recorded data '%s' for captured property with path '%s' and category '%d'" ), *RecordedDataHex, *PropertyPath, Category );
-		bool bAllowShrinking = false;
-		RecordedBytes.SetNum( 0, bAllowShrinking );
+		UE_LOG( LogDatasmith, Warning, TEXT( "Invalid recorded data '%s' for captured property with path '%s' and category '%d'" ), *RecordedDataHex, *PropertyPath, int(Category) );
+		RecordedBytes.SetNum( 0, EAllowShrinking::No );
 		RecordedBytes.SetNumZeroed( NumBytes );
 	}
 
@@ -356,7 +391,7 @@ void FDatasmithSceneXmlReader::ParseObjectPropertyCapture( FXmlNode* InNode, con
 	}
 	else
 	{
-		UE_LOG( LogDatasmith, Warning, TEXT( "Missing object '%s' referenced by captured property with path '%s' and category '%d'" ), *OutElement->GetName(), *PropertyPath, Category );
+		UE_LOG( LogDatasmith, Warning, TEXT( "Missing object '%s' referenced by captured property with path '%s' and category '%d'" ), OutElement->GetName(), *PropertyPath, int(Category) );
 	}
 }
 
@@ -369,7 +404,7 @@ void FDatasmithSceneXmlReader::ParseMesh(FXmlNode* InNode, TSharedPtr<IDatasmith
 	{
 		if (MeshNodes[j]->GetTag() == TEXT("file"))
 		{
-			OutElement->SetFile( *ResolveFilePath(MeshNodes[j]->GetAttribute(TEXT("path"))) );
+			OutElement->SetFile(*UnsanitizeXMLText(MeshNodes[j]->GetAttribute(TEXT("path"))));
 		}
 		else if (MeshNodes[j]->GetTag() == TEXT("Size"))
 		{
@@ -398,6 +433,19 @@ void FDatasmithSceneXmlReader::ParseMesh(FXmlNode* InNode, TSharedPtr<IDatasmith
 			OutElement->SetMaterial(*MeshNodes[j]->GetAttribute(TEXT("name")), ValueFromString<int32>(MeshNodes[j]->GetAttribute(TEXT("id"))));
 		}
 
+	}
+}
+
+void FDatasmithSceneXmlReader::ParseCloth(FXmlNode* InNode, TSharedPtr<IDatasmithClothElement>& OutElement) const
+{
+	ParseElement( InNode, OutElement.ToSharedRef() );
+
+	for (const FXmlNode* Node : InNode->GetChildrenNodes())
+	{
+		if (Node->GetTag() == TEXT("file"))
+		{
+			OutElement->SetFile(*UnsanitizeXMLText(Node->GetAttribute(TEXT("path"))));
+		}
 	}
 }
 
@@ -441,7 +489,7 @@ void FDatasmithSceneXmlReader::ParseTextureElement(FXmlNode* InNode, TSharedPtr<
 	{
 		OutElement->SetTextureAddressY((EDatasmithTextureAddress)ValueFromString<int32>(StrValue));
 	}
-	OutElement->SetFile(*ResolveFilePath(InNode->GetAttribute(TEXT("file"))));
+	OutElement->SetFile(*InNode->GetAttribute(TEXT("file")));
 
 	const TArray<FXmlNode*>& TexNode = InNode->GetChildrenNodes();
 	for (int i = 0; i < TexNode.Num(); ++i)
@@ -480,58 +528,6 @@ void FDatasmithSceneXmlReader::ParseTexture(FXmlNode* InNode, FString& OutTextur
 	}
 }
 
-void FDatasmithSceneXmlReader::ParseTransform(FXmlNode* InNode, TSharedPtr< IDatasmithActorElement >& OutElement) const
-{
-	OutElement->SetTranslation(ValueFromString<float>(InNode->GetAttribute(TEXT("tx"))), ValueFromString<float>(InNode->GetAttribute(TEXT("ty"))),
-		ValueFromString<float>(InNode->GetAttribute(TEXT("tz"))));
-
-	FString RotationBlob(InNode->GetAttribute(TEXT("qhex")));
-	if (!RotationBlob.IsEmpty())
-	{
-		OutElement->SetRotation( QuatFromHexString( RotationBlob ) );
-	}
-	else
-	{
-		OutElement->SetRotation(ValueFromString<float>(InNode->GetAttribute(TEXT("qx"))), ValueFromString<float>(InNode->GetAttribute(TEXT("qy"))),
-			ValueFromString<float>(InNode->GetAttribute(TEXT("qz"))), ValueFromString<float>(InNode->GetAttribute(TEXT("qw"))));
-	}
-
-	OutElement->SetScale(ValueFromString<float>(InNode->GetAttribute(TEXT("sx"))), ValueFromString<float>(InNode->GetAttribute(TEXT("sy"))), ValueFromString<float>(InNode->GetAttribute(TEXT("sz"))));
-}
-
-FTransform FDatasmithSceneXmlReader::ParseTransform(FXmlNode* InNode) const
-{
-	FVector Translation(ValueFromString<float>(InNode->GetAttribute(TEXT("tx"))), ValueFromString<float>(InNode->GetAttribute(TEXT("ty"))),
-		ValueFromString<float>(InNode->GetAttribute(TEXT("tz"))));
-
-	FQuat Quaternion;
-
-	FString RotationBlob(InNode->GetAttribute(TEXT("qhex")));
-	if (!RotationBlob.IsEmpty())
-	{
-		Quaternion = QuatFromHexString(RotationBlob);
-	}
-	else
-	{
-		Quaternion = FQuat(ValueFromString<float>(InNode->GetAttribute(TEXT("qx"))), ValueFromString<float>(InNode->GetAttribute(TEXT("qy"))),
-			ValueFromString<float>(InNode->GetAttribute(TEXT("qz"))), ValueFromString<float>(InNode->GetAttribute(TEXT("qw"))));
-	}
-
-	FVector Scale(ValueFromString<float>(InNode->GetAttribute(TEXT("sx"))), ValueFromString<float>(InNode->GetAttribute(TEXT("sy"))), ValueFromString<float>(InNode->GetAttribute(TEXT("sz"))));
-
-	return FTransform(Quaternion, Translation, Scale);
-}
-
-
-FQuat FDatasmithSceneXmlReader::QuatFromHexString(const FString& HexString) const
-{
-	float Floats[4];
-	FString::ToHexBlob( HexString, (uint8*)Floats, sizeof(Floats) );
-
-	FQuat QuatResult( Floats[0], Floats[1], Floats[2], Floats[3] );
-
-	return QuatResult;
-}
 
 void FDatasmithSceneXmlReader::ParsePostProcess(FXmlNode *InNode, const TSharedPtr< IDatasmithPostProcessElement >& Element) const
 {
@@ -539,7 +535,6 @@ void FDatasmithSceneXmlReader::ParsePostProcess(FXmlNode *InNode, const TSharedP
 
 	const TArray<FXmlNode*>& CompNodes = InNode->GetChildrenNodes();
 
-	FLinearColor Color;
 	for (int j = 0; j < CompNodes.Num(); j++)
 	{
 		if (CompNodes[j]->GetTag() == DATASMITH_POSTPRODUCTIONTEMP)
@@ -550,25 +545,15 @@ void FDatasmithSceneXmlReader::ParsePostProcess(FXmlNode *InNode, const TSharedP
 		{
 			Element->SetVignette(ValueFromString<float>(CompNodes[j]->GetAttribute(TEXT("value"))));
 		}
-		// #ueent_wip: broken PostProcess serialization.
-		// - create missing tags
-		// - update Writer
-// 		else if (CompNodes[j]->GetTag() == DATASMITH_POSTPRODUCTIONVIGNETTE)
-// 		{
-// 			Element->SetDof(ValueFromString<float>(CompNodes[j]->GetAttribute(TEXT("value"))));
-// 		}
-// 		else if (CompNodes[j]->GetTag() == DATASMITH_POSTPRODUCTIONVIGNETTE)
-// 		{
-// 			Element->SetMotionBlur(ValueFromString<float>(CompNodes[j]->GetAttribute(TEXT("value"))));
-// 		}
+		else if (CompNodes[j]->GetTag() == DATASMITH_POSTPRODUCTIONCOLOR)
+		{
+			FLinearColor Color;
+			ParseColor(CompNodes[j], Color);
+			Element->SetColorFilter(Color);
+		}
 		else if (CompNodes[j]->GetTag() == DATASMITH_POSTPRODUCTIONSATURATION)
 		{
 			Element->SetSaturation(ValueFromString<float>(CompNodes[j]->GetAttribute(TEXT("value"))));
-		}
-		else if (CompNodes[j]->GetTag() == DATASMITH_POSTPRODUCTIONCOLOR)
-		{
-			ParseColor(CompNodes[j], Color);
-			Element->SetColorFilter(Color);
 		}
 		else if (CompNodes[j]->GetTag() == DATASMITH_POSTPRODUCTIONCAMERAISO)
 		{
@@ -608,9 +593,11 @@ void FDatasmithSceneXmlReader::ParsePostProcessVolume(FXmlNode* InNode, const TS
 
 void FDatasmithSceneXmlReader::ParseColor(FXmlNode* InNode, FLinearColor& OutColor) const
 {
-	OutColor.R = ValueFromString<float>(InNode->GetAttribute(TEXT("R")));
-	OutColor.G = ValueFromString<float>(InNode->GetAttribute(TEXT("G")));
-	OutColor.B = ValueFromString<float>(InNode->GetAttribute(TEXT("B")));
+	OutColor = FLinearColor(
+		ValueFromString<float>(InNode->GetAttribute(TEXT("R"))),
+		ValueFromString<float>(InNode->GetAttribute(TEXT("G"))),
+		ValueFromString<float>(InNode->GetAttribute(TEXT("B")))
+	);
 }
 
 void FDatasmithSceneXmlReader::ParseComp(FXmlNode* InNode, TSharedPtr< IDatasmithCompositeTexture >& OutCompTexture, bool bInIsNormal) const
@@ -675,6 +662,12 @@ void FDatasmithSceneXmlReader::ParseActor(FXmlNode* InNode, TSharedPtr<IDatasmit
 		TSharedPtr< IDatasmithMeshActorElement> MeshElement = FDatasmithSceneFactory::CreateMeshActor(*InNode->GetAttribute(TEXT("name")));
 		ParseMeshActor(InNode, MeshElement, Scene);
 		InOutElement = MeshElement;
+	}
+	else if (InNode->GetTag() == DATASMITH_CLOTHACTORNAME)
+	{
+		TSharedPtr< IDatasmithClothActorElement> Element = FDatasmithSceneFactory::CreateClothActor(*InNode->GetAttribute(TEXT("name")));
+		ParseClothActor(InNode, Element, Scene);
+		InOutElement = Element;
 	}
 	else if (InNode->GetTag() == DATASMITH_LIGHTNAME)
 	{
@@ -758,6 +751,9 @@ void FDatasmithSceneXmlReader::ParseActor(FXmlNode* InNode, TSharedPtr<IDatasmit
 	FString VisibleAtribute = InNode->GetAttribute(TEXT("visible"));
 	InOutElement->SetVisibility(VisibleAtribute.IsEmpty() ? true : ValueFromString<bool>(VisibleAtribute));
 
+	FString CastShadowAtribute = InNode->GetAttribute(TEXT("castshadow"));
+	InOutElement->SetCastShadow(CastShadowAtribute.IsEmpty() ? true : ValueFromString<bool>(CastShadowAtribute));
+
 	for (FXmlNode* ChildNode : InNode->GetChildrenNodes())
 	{
 		if (ChildNode->GetTag() == TEXT("transform"))
@@ -773,8 +769,6 @@ void FDatasmithSceneXmlReader::ParseActor(FXmlNode* InNode, TSharedPtr<IDatasmit
 			// Recursively parse the children, can be of any supported actor type
 			for (FXmlNode* ChildActorNode : ChildNode->GetChildrenNodes())
 			{
-				TArrayView< const TCHAR* > ActorTagsView( DatasmithSceneXmlReaderImpl::ActorTags );
-
 				for ( const TCHAR* ActorTag : ActorTagsView )
 				{
 					if ( ChildActorNode->GetTag() == ActorTag )
@@ -828,6 +822,19 @@ void FDatasmithSceneXmlReader::ParseMeshActor(FXmlNode* InNode, TSharedPtr<IData
 			TSharedPtr< IDatasmithMaterialIDElement > MatElement = FDatasmithSceneFactory::CreateMaterialId(*ChildNode->GetAttribute(TEXT("name")));
 			MatElement->SetId(ValueFromString<int32>(ChildNode->GetAttribute(TEXT("id"))));
 			OutElement->AddMaterialOverride(MatElement);
+		}
+	}
+}
+
+void FDatasmithSceneXmlReader::ParseClothActor(FXmlNode* InNode, TSharedPtr<IDatasmithClothActorElement>& OutElement, TSharedRef< IDatasmithScene > Scene) const
+{
+	ParseElement(InNode, OutElement.ToSharedRef());
+
+	for (FXmlNode* ChildNode : InNode->GetChildrenNodes())
+	{
+		if (ChildNode->GetTag() == TEXT("Cloth"))
+		{
+			OutElement->SetCloth(*ChildNode->GetAttribute(TEXT("name")));
 		}
 	}
 }
@@ -909,7 +916,7 @@ void FDatasmithSceneXmlReader::ParseLight(FXmlNode* InNode, TSharedPtr<IDatasmit
 		else if (ChildNode->GetTag() == DATASMITH_LIGHTIESNAME)
 		{
 			OutElement->SetUseIes(true);
-			OutElement->SetIesFile( *ResolveFilePath(ChildNode->GetAttribute(TEXT("file"))) );
+			OutElement->SetIesFile( *ChildNode->GetAttribute(TEXT("file")) );
 		}
 		else if (ChildNode->GetTag() == DATASMITH_LIGHTIESTEXTURENAME)
 		{
@@ -931,7 +938,7 @@ void FDatasmithSceneXmlReader::ParseLight(FXmlNode* InNode, TSharedPtr<IDatasmit
 		}
 		else if (ChildNode->GetTag() == DATASMITH_LIGHTIESROTATION)
 		{
-			OutElement->SetIesRotation( QuatFromHexString( ChildNode->GetAttribute( TEXT("qhex") ) ) );
+			OutElement->SetIesRotation( QuatFromNode( ChildNode ) );
 		}
 		else if (ChildNode->GetTag() == DATASMITH_LIGHTINTENSITYNAME)
 		{
@@ -1108,7 +1115,7 @@ bool FDatasmithSceneXmlReader::LoadFromBuffer(const FString& XmlBuffer)
 	if (SceneNode->GetTag() != TEXT("DatasmithUnrealScene"))
 	{
 		FText DialogTitle = FText::FromString( TEXT("Error parsing file") );
-		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString( SceneNode->GetTag() ), &DialogTitle);
+		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString( SceneNode->GetTag() ), DialogTitle);
 		XmlFile.Reset();
 	}
 
@@ -1144,16 +1151,12 @@ bool FDatasmithSceneXmlReader::ParseXmlFile(TSharedRef< IDatasmithScene >& OutSc
 
 	TRACE_CPUPROFILER_EVENT_SCOPE(FDatasmithSceneXmlReader::ParseXmlFile);
 
+	FDatasmithLocaleScope CLocaleScope;
+
 	if (bInAppend == false)
 	{
 		OutScene->Reset();
 	}
-
-	// Set locale to support UTF-8 character set only on current thread
-#ifdef USE_LOCALE
-	locale_t Locale = ::newlocale(LC_ALL_MASK, "en_US.UTF-8", nullptr);
-	locale_t PreviousLocale = ::uselocale(Locale);
-#endif
 
 	OutScene->SetExporterSDKVersion( TEXT("N/A") ); // We're expecting to read the SDK Version from the XML file. If it's not available, put "N/A"
 
@@ -1167,7 +1170,7 @@ bool FDatasmithSceneXmlReader::ParseXmlFile(TSharedRef< IDatasmithScene >& OutSc
 		// HOST
 		if (Nodes[i]->GetTag() == DATASMITH_HOSTNAME)
 		{
-			OutScene->SetHost(*Nodes[i]->GetContent());
+			OutScene->SetHost(*UnsanitizeXMLText(Nodes[i]->GetContent()));
 		}
 		// VERSION
 		else if (Nodes[i]->GetTag() == DATASMITH_EXPORTERVERSION)
@@ -1187,9 +1190,9 @@ bool FDatasmithSceneXmlReader::ParseXmlFile(TSharedRef< IDatasmithScene >& OutSc
 		// APPLICATION INFO
 		else if (Nodes[i]->GetTag() == DATASMITH_APPLICATION)
 		{
-			OutScene->SetVendor(*Nodes[i]->GetAttribute(DATASMITH_VENDOR));
-			OutScene->SetProductName(*Nodes[i]->GetAttribute(DATASMITH_PRODUCTNAME));
-			OutScene->SetProductVersion(*Nodes[i]->GetAttribute(DATASMITH_PRODUCTVERSION));
+			OutScene->SetVendor(*UnsanitizeXMLText(Nodes[i]->GetAttribute(DATASMITH_VENDOR)));
+			OutScene->SetProductName(*UnsanitizeXMLText(Nodes[i]->GetAttribute(DATASMITH_PRODUCTNAME)));
+			OutScene->SetProductVersion(*UnsanitizeXMLText(Nodes[i]->GetAttribute(DATASMITH_PRODUCTVERSION)));
 		}
 		// USER INFO
 		else if (Nodes[i]->GetTag() == DATASMITH_USER)
@@ -1197,7 +1200,27 @@ bool FDatasmithSceneXmlReader::ParseXmlFile(TSharedRef< IDatasmithScene >& OutSc
 			OutScene->SetUserID(*Nodes[i]->GetAttribute(DATASMITH_USERID));
 			OutScene->SetUserOS(*Nodes[i]->GetAttribute(DATASMITH_USEROS));
 		}
-		//READ STATIC MESHES
+		else if (Nodes[i]->GetTag() == DATASMITH_GEOLOCATION)
+		{
+			FString LatitudeStr = Nodes[i]->GetAttribute(DATASMITH_GEOLOCATION_LATITUDE);
+			if (!LatitudeStr.IsEmpty())
+			{
+				OutScene->SetGeolocationLatitude(ValueFromString<double>(LatitudeStr));
+			}
+
+			FString LongitudeStr = Nodes[i]->GetAttribute(DATASMITH_GEOLOCATION_LONGITUDE);
+			if (!LongitudeStr.IsEmpty())
+			{
+				OutScene->SetGeolocationLongitude(ValueFromString<double>(LongitudeStr));
+			}
+
+			FString ElevationStr = Nodes[i]->GetAttribute(DATASMITH_GEOLOCATION_ELEVATION);
+			if (!ElevationStr.IsEmpty())
+			{
+				OutScene->SetGeolocationElevation(ValueFromString<double>(ElevationStr));
+			}
+		}
+		// STATIC MESHES
 		else if (Nodes[i]->GetTag() == DATASMITH_STATICMESHNAME)
 		{
 			FString ElementName = Nodes[i]->GetAttribute(TEXT("name"));
@@ -1209,7 +1232,19 @@ bool FDatasmithSceneXmlReader::ParseXmlFile(TSharedRef< IDatasmithScene >& OutSc
 
 			Objects.Add( Element->GetName(), Element );
 		}
-		//READ LEVEL SEQUENCES
+		// CLOTHES
+		else if (Nodes[i]->GetTag() == DATASMITH_CLOTH)
+		{
+			FString ElementName = Nodes[i]->GetAttribute(TEXT("name"));
+			TSharedPtr< IDatasmithClothElement > Element = FDatasmithSceneFactory::CreateCloth(*ElementName);
+
+			ParseCloth( Nodes[i], Element );
+
+			OutScene->AddCloth(Element);
+
+// 			Objects.Add( Element->GetName(), Element ); // #ue_ds_cloth_todo cloths referencable by other elements
+		}
+		// LEVEL SEQUENCES
 		else if (Nodes[i]->GetTag() == DATASMITH_LEVELSEQUENCENAME)
 		{
 			FString ElementName = Nodes[i]->GetAttribute(TEXT("name"));
@@ -1219,7 +1254,7 @@ bool FDatasmithSceneXmlReader::ParseXmlFile(TSharedRef< IDatasmithScene >& OutSc
 
 			OutScene->AddLevelSequence(Element);
 		}
-		//READ LEVEL VARIANT SETS
+		// LEVEL VARIANT SETS
 		else if (Nodes[i]->GetTag() == DATASMITH_LEVELVARIANTSETSNAME)
 		{
 			FString ElementName = Nodes[i]->GetAttribute(TEXT("name"));
@@ -1229,36 +1264,33 @@ bool FDatasmithSceneXmlReader::ParseXmlFile(TSharedRef< IDatasmithScene >& OutSc
 
 			OutScene->AddLevelVariantSets(Element);
 		}
-		//READ TEXTURES
+		// TEXTURES
 		else if (Nodes[i]->GetTag() == DATASMITH_TEXTURENAME)
 		{
 			TSharedPtr< IDatasmithTextureElement > Element = FDatasmithSceneFactory::CreateTexture(*Nodes[i]->GetAttribute(TEXT("name")));
 			ParseTextureElement(Nodes[i], Element);
 
 			FString TextureName(Element->GetName());
-			if (FPaths::FileExists(Element->GetFile()))
+			int32 TexturesCount = OutScene->GetTexturesCount();
+			bool bIsDuplicate = false;
+			for (int32 t = 0; t < TexturesCount; t++)
 			{
-				int32 TexturesCount = OutScene->GetTexturesCount();
-				bool bIsDuplicate = false;
-				for (int32 t = 0; t < TexturesCount; t++)
+				const TSharedPtr< IDatasmithTextureElement >& TextureElement = OutScene->GetTexture(t);
+				if (TextureName == TextureElement->GetName())
 				{
-					const TSharedPtr< IDatasmithTextureElement >& TextureElement = OutScene->GetTexture(t);
-					if (TextureName == TextureElement->GetName())
-					{
-						bIsDuplicate = true;
-						break;
-					}
-				}
-
-				if (bIsDuplicate == false)
-				{
-					OutScene->AddTexture(Element);
-
-					Objects.Add( Element->GetName(), Element );
+					bIsDuplicate = true;
+					break;
 				}
 			}
+
+			if (bIsDuplicate == false)
+			{
+				OutScene->AddTexture(Element);
+
+				Objects.Add(Element->GetName(), Element);
+			}
 		}
-		//READ ENVIRONMENTS
+		// ENVIRONMENTS
 		else if (Nodes[i]->GetTag() == DATASMITH_ENVIRONMENTNAME)
 		{
 			TSharedPtr< IDatasmithEnvironmentElement > Element = FDatasmithSceneFactory::CreateEnvironment(*Nodes[i]->GetAttribute(TEXT("name")));
@@ -1289,19 +1321,19 @@ bool FDatasmithSceneXmlReader::ParseXmlFile(TSharedRef< IDatasmithScene >& OutSc
 				Objects.Add( Element->GetName(), Element );
 			}
 		}
-		//READ SKY
+		// SKY
 		else if (Nodes[i]->GetTag() == DATASMITH_PHYSICALSKYNAME)
 		{
 			OutScene->SetUsePhysicalSky( ValueFromString<bool>(Nodes[i]->GetAttribute(TEXT("enabled"))));
 		}
-		//READ POSTPROCESS
+		// POSTPROCESS
 		else if (Nodes[i]->GetTag() == DATASMITH_POSTPRODUCTIONNAME)
 		{
 			TSharedPtr< IDatasmithPostProcessElement > PostProcess = FDatasmithSceneFactory::CreatePostProcess();
 			ParsePostProcess(Nodes[i], PostProcess);
 			OutScene->SetPostProcess(PostProcess);
 		}
-		//READ MATERIALS
+		// MATERIALS
 		else if (Nodes[i]->GetTag() == DATASMITH_MATERIALNAME)
 		{
 			TSharedPtr< IDatasmithMaterialElement > Material = FDatasmithSceneFactory::CreateMaterial(*Nodes[i]->GetAttribute(TEXT("name")));
@@ -1311,17 +1343,18 @@ bool FDatasmithSceneXmlReader::ParseXmlFile(TSharedRef< IDatasmithScene >& OutSc
 
 			Objects.Add( Material->GetName(), Material );
 		}
-		//READ MASTER MATERIALS
-		else if (Nodes[i]->GetTag() == DATASMITH_MASTERMATERIALNAME)
+		// MATERIAL INSTANCES
+		// Support legacy udatasmith files which have the banned word
+		else if (Nodes[i]->GetTag().Equals(TEXT("Mas" "terMaterial")) || Nodes[i]->GetTag() == DATASMITH_MATERIALINSTANCENAME)
 		{
-			TSharedPtr< IDatasmithMasterMaterialElement > MasterMaterial = FDatasmithSceneFactory::CreateMasterMaterial(*Nodes[i]->GetAttribute(TEXT("name")));
+			TSharedPtr< IDatasmithMaterialInstanceElement > ReferenceMaterial = FDatasmithSceneFactory::CreateMaterialInstance(*Nodes[i]->GetAttribute(TEXT("name")));
 
-			ParseMasterMaterial(Nodes[i], MasterMaterial);
-			OutScene->AddMaterial(MasterMaterial);
+			ParseMaterialInstance(Nodes[i], ReferenceMaterial);
+			OutScene->AddMaterial(ReferenceMaterial);
 
-			Objects.Add( MasterMaterial->GetName(), MasterMaterial );
+			Objects.Add( ReferenceMaterial->GetName(), ReferenceMaterial );
 		}
-		//READ DECAL MATERIALS
+		// DECAL MATERIALS
 		else if (Nodes[i]->GetTag() == DATASMITH_DECALMATERIALNAME)
 		{
 			TSharedPtr< IDatasmithDecalMaterialElement > DecalMaterial = FDatasmithSceneFactory::CreateDecalMaterial(*Nodes[i]->GetAttribute(TEXT("name")));
@@ -1331,7 +1364,7 @@ bool FDatasmithSceneXmlReader::ParseXmlFile(TSharedRef< IDatasmithScene >& OutSc
 
 			Objects.Add( DecalMaterial->GetName(), DecalMaterial );
 		}
-		//READ UEPBR MATERIALS
+		// UEPBR MATERIALS
 		else if (Nodes[i]->GetTag() == DATASMITH_UEPBRMATERIALNAME)
 		{
 			TSharedPtr< IDatasmithUEPbrMaterialElement > Material = FDatasmithSceneFactory::CreateUEPbrMaterial(*Nodes[i]->GetAttribute(TEXT("name")));
@@ -1341,29 +1374,21 @@ bool FDatasmithSceneXmlReader::ParseXmlFile(TSharedRef< IDatasmithScene >& OutSc
 
 			Objects.Add( Material->GetName(), Material );
 		}
-		//READ METADATA
+		// METADATA
 		else if (Nodes[i]->GetTag() == DATASMITH_METADATANAME)
 		{
 			TSharedPtr< IDatasmithMetaDataElement > MetaData = FDatasmithSceneFactory::CreateMetaData(*Nodes[i]->GetAttribute(TEXT("name")));
 			ParseMetaData(Nodes[i], MetaData, OutScene, Actors );
 			OutScene->AddMetaData(MetaData);
 		}
-		//LOD SCREEN SIZES
-		else if (Nodes[i]->GetTag() == DATASMITH_LODSCREENSIZE)
-		{
-			float LODScreenSize = ValueFromString<float>( Nodes[i]->GetAttribute(TEXT("value")) );
-			OutScene->AddLODScreenSize(LODScreenSize);
-		}
 		// EXPORT STATS
 		else if (Nodes[i]->GetTag() == DATASMITH_EXPORT)
 		{
 			OutScene->SetExportDuration(ValueFromString<int32>(Nodes[i]->GetAttribute(DATASMITH_EXPORTDURATION)));
 		}
-		//READ ACTORS
+		// ACTORS
 		else
 		{
-			TArrayView< const TCHAR* > ActorTagsView( DatasmithSceneXmlReaderImpl::ActorTags );
-
 			for ( const TCHAR* ActorTag : ActorTagsView )
 			{
 				if ( Nodes[i]->GetTag() == ActorTag )
@@ -1387,12 +1412,6 @@ bool FDatasmithSceneXmlReader::ParseXmlFile(TSharedRef< IDatasmithScene >& OutSc
 
 	FDatasmithSceneUtils::CleanUpScene(OutScene);
 
-	// Restore locale only on current thread
-#ifdef USE_LOCALE
-	::uselocale(PreviousLocale);
-	::freelocale(Locale);
-#endif
-
 	return true;
 }
 
@@ -1413,203 +1432,185 @@ void FDatasmithSceneXmlReader::ParseMaterial(FXmlNode* InNode, TSharedPtr< IData
 				FString Texture;
 				FDatasmithTextureSampler TextureSampler;
 				FLinearColor Color;
-
-				if (ShaderNodes[j]->GetTag() == DATASMITH_DIFFUSETEXNAME)
+				const FString& NodeTag = ShaderNodes[j]->GetTag();
+				if (NodeTag == DATASMITH_DIFFUSETEXNAME)
 				{
 					ParseTexture(ShaderNodes[j], Texture, TextureSampler);
 					ShaderElement->SetDiffuseTexture(*Texture);
 					ShaderElement->SetDiffTextureSampler(TextureSampler);
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_DIFFUSECOLNAME)
+				else if (NodeTag == DATASMITH_DIFFUSECOLNAME)
 				{
 					ParseColor(ShaderNodes[j], Color);
 					ShaderElement->SetDiffuseColor(Color);
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_DIFFUSECOMPNAME)
+				else if (NodeTag == DATASMITH_DIFFUSECOMPNAME)
 				{
 					ParseComp(ShaderNodes[j], ShaderElement->GetDiffuseComp());
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_REFLETEXNAME)
+				else if (NodeTag == DATASMITH_REFLETEXNAME)
 				{
 					ParseTexture(ShaderNodes[j], Texture, TextureSampler);
 					ShaderElement->SetReflectanceTexture(*Texture);
 					ShaderElement->SetRefleTextureSampler(TextureSampler);
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_REFLECOLNAME)
+				else if (NodeTag == DATASMITH_REFLECOLNAME)
 				{
 					ParseColor(ShaderNodes[j], Color);
 					ShaderElement->SetReflectanceColor(Color);
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_REFLECOMPNAME)
+				else if (NodeTag == DATASMITH_REFLECOMPNAME)
 				{
 					ParseComp(ShaderNodes[j], ShaderElement->GetRefleComp());
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_ROUGHNESSTEXNAME)
+				else if (NodeTag == DATASMITH_ROUGHNESSTEXNAME)
 				{
 					ParseTexture(ShaderNodes[j], Texture, TextureSampler);
 					ShaderElement->SetRoughnessTexture(*Texture);
 					ShaderElement->SetRoughTextureSampler(TextureSampler);
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_ROUGHNESSVALUENAME)
+				else if (NodeTag == DATASMITH_ROUGHNESSVALUENAME)
 				{
 					ShaderElement->SetRoughness(fmax(0.02, ValueFromString<double>(ShaderNodes[j]->GetAttribute(TEXT("value")))));
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_ROUGHNESSCOMPNAME)
+				else if (NodeTag == DATASMITH_ROUGHNESSCOMPNAME)
 				{
 					ParseComp(ShaderNodes[j], ShaderElement->GetRoughnessComp());
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_BUMPVALUENAME)
+				else if (NodeTag == DATASMITH_BUMPVALUENAME)
 				{
 					ShaderElement->SetBumpAmount(ValueFromString<double>(ShaderNodes[j]->GetAttribute(TEXT("value"))));
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_BUMPTEXNAME)
+				else if (NodeTag == DATASMITH_BUMPTEXNAME)
 				{
 					ParseTexture(ShaderNodes[j], Texture, TextureSampler);
 					ShaderElement->SetBumpTexture(*Texture);
 					ShaderElement->SetBumpTextureSampler(TextureSampler);
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_NORMALTEXNAME)
+				else if (NodeTag == DATASMITH_NORMALTEXNAME)
 				{
 					ParseTexture(ShaderNodes[j], Texture, TextureSampler);
 					ShaderElement->SetNormalTexture(*Texture);
 					ShaderElement->SetNormalTextureSampler(TextureSampler);
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_NORMALCOMPNAME)
+				else if (NodeTag == DATASMITH_NORMALCOMPNAME)
 				{
 					ParseComp(ShaderNodes[j], ShaderElement->GetNormalComp());
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_TRANSPTEXNAME)
+				else if (NodeTag == DATASMITH_TRANSPTEXNAME)
 				{
 					ParseTexture(ShaderNodes[j], Texture, TextureSampler);
 					ShaderElement->SetTransparencyTexture(*Texture);
 					ShaderElement->SetTransTextureSampler(TextureSampler);
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_TRANSPCOMPNAME)
+				else if (NodeTag == DATASMITH_TRANSPCOMPNAME)
 				{
 					ParseComp(ShaderNodes[j], ShaderElement->GetTransComp());
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_CLIPTEXNAME)
+				else if (NodeTag == DATASMITH_CLIPTEXNAME)
 				{
 					ParseTexture(ShaderNodes[j], Texture, TextureSampler);
 					ShaderElement->SetMaskTexture(*Texture);
 					ShaderElement->SetMaskTextureSampler(TextureSampler);
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_CLIPCOMPNAME)
+				else if (NodeTag == DATASMITH_CLIPCOMPNAME)
 				{
 					ParseComp(ShaderNodes[j], ShaderElement->GetMaskComp());
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_TRANSPCOLNAME)
+				else if (NodeTag == DATASMITH_TRANSPCOLNAME)
 				{
 					ParseColor(ShaderNodes[j], Color);
 					ShaderElement->SetTransparencyColor(Color);
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_IORVALUENAME)
+				else if (NodeTag == DATASMITH_IORVALUENAME)
 				{
 					ShaderElement->SetIOR(ValueFromString<double>(ShaderNodes[j]->GetAttribute(TEXT("value"))));
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_IORKVALUENAME)
+				else if (NodeTag == DATASMITH_IORKVALUENAME)
 				{
 					ShaderElement->SetIORk(ValueFromString<double>(ShaderNodes[j]->GetAttribute(TEXT("value"))));
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_REFRAIORVALUENAME)
+				else if (NodeTag == DATASMITH_REFRAIORVALUENAME)
 				{
 					ShaderElement->SetIORRefra(ValueFromString<double>(ShaderNodes[j]->GetAttribute(TEXT("value"))));
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_TWOSIDEDVALUENAME)
+				else if (NodeTag == DATASMITH_TWOSIDEDVALUENAME)
 				{
 					ShaderElement->SetTwoSided(ValueFromString<bool>(ShaderNodes[j]->GetAttribute(TEXT("enabled"))));
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_DISPLACETEXNAME)
-				{
-					ParseTexture(ShaderNodes[j], Texture, TextureSampler);
-					ShaderElement->SetDisplaceTexture(*Texture);
-					ShaderElement->SetDisplaceTextureSampler(TextureSampler);
-				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_DISPLACEVALNAME)
-				{
-					ShaderElement->SetDisplace(ValueFromString<double>(ShaderNodes[j]->GetAttribute(TEXT("value"))));
-				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_DISPLACECOMPNAME)
-				{
-					ParseComp(ShaderNodes[j], ShaderElement->GetDisplaceComp());
-				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_DISPLACESUBNAME)
-				{
-					ShaderElement->SetDisplaceSubDivision(ValueFromString<double>(ShaderNodes[j]->GetAttribute(TEXT("value"))));
-				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_METALTEXNAME)
+				else if (NodeTag == DATASMITH_METALTEXNAME)
 				{
 					ParseTexture(ShaderNodes[j], Texture, TextureSampler);
 					ShaderElement->SetMetalTexture(*Texture);
 					ShaderElement->SetMetalTextureSampler(TextureSampler);
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_METALVALUENAME)
+				else if (NodeTag == DATASMITH_METALVALUENAME)
 				{
 					ShaderElement->SetMetal(ValueFromString<double>(ShaderNodes[j]->GetAttribute(TEXT("value"))));
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_METALCOMPNAME)
+				else if (NodeTag == DATASMITH_METALCOMPNAME)
 				{
 					ParseComp(ShaderNodes[j], ShaderElement->GetMetalComp());
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_EMITTEXNAME)
+				else if (NodeTag == DATASMITH_EMITTEXNAME)
 				{
 					ParseTexture(ShaderNodes[j], Texture, TextureSampler);
 					ShaderElement->SetEmitTexture(*Texture);
 					ShaderElement->SetEmitTextureSampler(TextureSampler);
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_EMITVALUENAME)
+				else if (NodeTag == DATASMITH_EMITVALUENAME)
 				{
 					ShaderElement->SetEmitPower(ValueFromString<double>(ShaderNodes[j]->GetAttribute(TEXT("value"))));
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_EMITCOMPNAME)
+				else if (NodeTag == DATASMITH_EMITCOMPNAME)
 				{
 					ParseComp(ShaderNodes[j], ShaderElement->GetEmitComp());
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_EMITTEMPNAME)
+				else if (NodeTag == DATASMITH_EMITTEMPNAME)
 				{
 					ShaderElement->SetEmitTemperature(ValueFromString<double>(ShaderNodes[j]->GetAttribute(TEXT("value"))));
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_EMITCOLNAME)
+				else if (NodeTag == DATASMITH_EMITCOLNAME)
 				{
 					ParseColor(ShaderNodes[j], Color);
 					ShaderElement->SetEmitColor(Color);
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_EMITONLYVALUENAME)
+				else if (NodeTag == DATASMITH_EMITONLYVALUENAME)
 				{
 					ShaderElement->SetLightOnly(ValueFromString<bool>(ShaderNodes[j]->GetAttribute(TEXT("enabled"))));
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_WEIGHTTEXNAME)
+				else if (NodeTag == DATASMITH_WEIGHTTEXNAME)
 				{
 					ParseTexture(ShaderNodes[j], Texture, TextureSampler);
 					ShaderElement->SetWeightTexture(*Texture);
 					ShaderElement->SetWeightTextureSampler(TextureSampler);
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_WEIGHTCOLNAME)
+				else if (NodeTag == DATASMITH_WEIGHTCOLNAME)
 				{
 					ParseColor(ShaderNodes[j], Color);
 					ShaderElement->SetWeightColor(Color);
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_WEIGHTCOMPNAME)
+				else if (NodeTag == DATASMITH_WEIGHTCOMPNAME)
 				{
 					ParseComp(ShaderNodes[j], ShaderElement->GetWeightComp());
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_WEIGHTVALUENAME)
+				else if (NodeTag == DATASMITH_WEIGHTVALUENAME)
 				{
 					ShaderElement->SetWeightValue(ValueFromString<double>(ShaderNodes[j]->GetAttribute(TEXT("value"))));
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_BLENDMODE)
+				else if (NodeTag == DATASMITH_BLENDMODE)
 				{
 					ShaderElement->SetBlendMode((EDatasmithBlendMode)ValueFromString<int32>(ShaderNodes[j]->GetAttribute(TEXT("value"))));
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_STACKLAYER)
+				else if (NodeTag == DATASMITH_STACKLAYER)
 				{
 					ShaderElement->SetIsStackedLayer(ValueFromString<bool>(ShaderNodes[j]->GetAttribute(TEXT("enabled"))));
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_DYNAMICEMISSIVE)
+				else if (NodeTag == DATASMITH_DYNAMICEMISSIVE)
 				{
 					ShaderElement->SetUseEmissiveForDynamicAreaLighting(ValueFromString<bool>(ShaderNodes[j]->GetAttribute(TEXT("enabled"))));
 				}
-				else if (ShaderNodes[j]->GetTag() == DATASMITH_SHADERUSAGE)
+				else if (NodeTag == DATASMITH_SHADERUSAGE)
 				{
 					ShaderElement->SetShaderUsage((EDatasmithShaderUsage)ValueFromString<int32>(ShaderNodes[j]->GetAttribute(TEXT("value"))));
 				}
@@ -1626,24 +1627,24 @@ void FDatasmithSceneXmlReader::ParseMaterial(FXmlNode* InNode, TSharedPtr< IData
 	}
 }
 
-void FDatasmithSceneXmlReader::ParseMasterMaterial(FXmlNode* InNode, TSharedPtr< IDatasmithMasterMaterialElement >& OutElement) const
+void FDatasmithSceneXmlReader::ParseMaterialInstance(FXmlNode* InNode, TSharedPtr< IDatasmithMaterialInstanceElement >& OutElement) const
 {
 	ParseElement( InNode, OutElement.ToSharedRef() );
 
 	for ( const FXmlAttribute& Attribute : InNode->GetAttributes() )
 	{
-		if (Attribute.GetTag() == DATASMITH_MASTERMATERIALTYPE)
+		if (Attribute.GetTag() == DATASMITH_MATERIALINSTANCETYPE)
 		{
-			EDatasmithMasterMaterialType MaterialType = (EDatasmithMasterMaterialType)FMath::Clamp( ValueFromString<int32>( Attribute.GetValue() ), 0, (int32)EDatasmithMasterMaterialType::Count - 1 );
+			EDatasmithReferenceMaterialType MaterialType = (EDatasmithReferenceMaterialType)FMath::Clamp( ValueFromString<int32>( Attribute.GetValue() ), 0, (int32)EDatasmithReferenceMaterialType::Count - 1 );
 
 			OutElement->SetMaterialType( MaterialType );
 		}
-		else if (Attribute.GetTag() == DATASMITH_MASTERMATERIALQUALITY)
+		else if (Attribute.GetTag() == DATASMITH_MATERIALINSTANCEQUALITY)
 		{
-			EDatasmithMasterMaterialQuality Quality = (EDatasmithMasterMaterialQuality)FMath::Clamp( ValueFromString<int32>( Attribute.GetValue() ), 0, (int32)EDatasmithMasterMaterialQuality::Count - 1 );
+			EDatasmithReferenceMaterialQuality Quality = (EDatasmithReferenceMaterialQuality)FMath::Clamp( ValueFromString<int32>( Attribute.GetValue() ), 0, (int32)EDatasmithReferenceMaterialQuality::Count - 1 );
 			OutElement->SetQuality( Quality );
 		}
-		else if (Attribute.GetTag() == DATASMITH_MASTERMATERIALPATHNAME)
+		else if (Attribute.GetTag() == DATASMITH_MATERIALINSTANCEPATHNAME)
 		{
 			OutElement->SetCustomMaterialPathName( *Attribute.GetValue() );
 		}
@@ -1671,8 +1672,9 @@ void FDatasmithSceneXmlReader::ParseDecalMaterial(FXmlNode* InNode, TSharedPtr< 
 	}
 }
 
+
 template< typename ExpressionInputType >
-void ParseExpressionInput(const FXmlNode* InNode, TSharedPtr< IDatasmithUEPbrMaterialElement >& OutElement, ExpressionInputType& ExpressionInput)
+void FDatasmithSceneXmlReader::ParseExpressionInput(const FXmlNode* InNode, TSharedPtr< IDatasmithUEPbrMaterialElement >& OutElement, ExpressionInputType& ExpressionInput) const
 {
 	if ( !InNode )
 	{
@@ -1687,9 +1689,9 @@ void ParseExpressionInput(const FXmlNode* InNode, TSharedPtr< IDatasmithUEPbrMat
 		// From 4.23 Expressions are serialized as <Input Name="0" expression="5" OutputIndex="0"/>
 		// So if the Name is used and that backward compatibility is desired, the Node Tag can be used instead of the "Name" Attribute.
 
-		int32 ExpressionIndex = DatasmithSceneXmlReaderImpl::ValueFromString<int32>( ExpressionIndexAttribute );
+		int32 ExpressionIndex = ValueFromString<int32>( ExpressionIndexAttribute );
 
-		int32 OutputIndex = DatasmithSceneXmlReaderImpl::ValueFromString<int32>( InNode->GetAttribute( TEXT("OutputIndex") ) );
+		int32 OutputIndex = ValueFromString<int32>( InNode->GetAttribute( TEXT("OutputIndex") ) );
 
 		IDatasmithMaterialExpression* Expression = OutElement->GetExpression( ExpressionIndex );
 
@@ -1736,9 +1738,9 @@ void FDatasmithSceneXmlReader::ParseUEPbrMaterial(FXmlNode* InNode, TSharedPtr< 
 				if ( Expression )
 				{
 					IDatasmithMaterialExpressionTextureCoordinate* TextureCoordinateExpression = static_cast< IDatasmithMaterialExpressionTextureCoordinate* >( Expression );
-					TextureCoordinateExpression->SetCoordinateIndex( DatasmithSceneXmlReaderImpl::ValueFromString< int32 >( ChildNode->GetAttribute( TEXT("Index") ) ) );
-					TextureCoordinateExpression->SetUTiling( DatasmithSceneXmlReaderImpl::ValueFromString< float >( ChildNode->GetAttribute( TEXT("UTiling") ) ) );
-					TextureCoordinateExpression->SetVTiling( DatasmithSceneXmlReaderImpl::ValueFromString< float >( ChildNode->GetAttribute( TEXT("VTiling") ) ) );
+					TextureCoordinateExpression->SetCoordinateIndex( ValueFromString< int32 >( ChildNode->GetAttribute( TEXT("Index") ) ) );
+					TextureCoordinateExpression->SetUTiling( ValueFromString< float >( ChildNode->GetAttribute( TEXT("UTiling") ) ) );
+					TextureCoordinateExpression->SetVTiling( ValueFromString< float >( ChildNode->GetAttribute( TEXT("VTiling") ) ) );
 				}
 			}
 			else if ( ChildNode->GetTag() == TEXT("FlattenNormal") )
@@ -1760,7 +1762,7 @@ void FDatasmithSceneXmlReader::ParseUEPbrMaterial(FXmlNode* InNode, TSharedPtr< 
 
 					IDatasmithMaterialExpressionBool* ConstantBool = static_cast< IDatasmithMaterialExpressionBool* >( Expression );
 
-					ConstantBool->GetBool() = DatasmithSceneXmlReaderImpl::ValueFromString< bool >( ChildNode->GetAttribute( TEXT("Constant") ) );
+					ConstantBool->GetBool() = ValueFromString< bool >( ChildNode->GetAttribute( TEXT("Constant") ) );
 				}
 			}
 			else if ( ChildNode->GetTag() == TEXT("Color") )
@@ -1773,7 +1775,7 @@ void FDatasmithSceneXmlReader::ParseUEPbrMaterial(FXmlNode* InNode, TSharedPtr< 
 
 					IDatasmithMaterialExpressionColor* ConstantColor = static_cast< IDatasmithMaterialExpressionColor* >( Expression );
 
-					ConstantColor->GetColor() = DatasmithSceneXmlReaderImpl::ValueFromString< FLinearColor >( ChildNode->GetAttribute( TEXT("Constant") ) );
+					ConstantColor->GetColor() = ValueFromString< FLinearColor >( ChildNode->GetAttribute( TEXT("Constant") ) );
 				}
 			}
 			else if ( ChildNode->GetTag() == TEXT("Scalar") )
@@ -1786,7 +1788,7 @@ void FDatasmithSceneXmlReader::ParseUEPbrMaterial(FXmlNode* InNode, TSharedPtr< 
 
 					IDatasmithMaterialExpressionScalar* ConstantScalar = static_cast< IDatasmithMaterialExpressionScalar* >( Expression );
 
-					ConstantScalar->GetScalar() = DatasmithSceneXmlReaderImpl::ValueFromString< float >( ChildNode->GetAttribute( TEXT("Constant") ) );
+					ConstantScalar->GetScalar() = ValueFromString< float >( ChildNode->GetAttribute( TEXT("Constant") ) );
 				}
 			}
 			else if ( ChildNode->GetTag() == TEXT("FunctionCall") )
@@ -1813,23 +1815,23 @@ void FDatasmithSceneXmlReader::ParseUEPbrMaterial(FXmlNode* InNode, TSharedPtr< 
 						if (CustomChildNode->GetTag() == TEXT("Code"))
 						{
 							const FString& SanitizedContent = CustomChildNode->GetContent();
-							const FString& Content = DatasmithSceneXmlReaderImpl::UnsanitizeXMLText(SanitizedContent);
+							const FString& Content = UnsanitizeXMLText(SanitizedContent);
 							Expression->SetCode(*Content);
 						}
 						else if (CustomChildNode->GetTag() == TEXT("Include"))
 						{
-							const FString& Path = DatasmithSceneXmlReaderImpl::UnsanitizeXMLText(CustomChildNode->GetAttribute(TEXT("path")));
+							const FString& Path = UnsanitizeXMLText(CustomChildNode->GetAttribute(TEXT("path")));
 							Expression->AddIncludeFilePath(*Path);
 						}
 						else if (CustomChildNode->GetTag() == TEXT("Define"))
 						{
-							const FString& Value = DatasmithSceneXmlReaderImpl::UnsanitizeXMLText(CustomChildNode->GetAttribute(TEXT("value")));
+							const FString& Value = UnsanitizeXMLText(CustomChildNode->GetAttribute(TEXT("value")));
 							Expression->AddAdditionalDefine(*Value);
 						}
 						else if (CustomChildNode->GetTag() == TEXT("Arg"))
 						{
-							int32 Index = DatasmithSceneXmlReaderImpl::ValueFromString<int32>(CustomChildNode->GetAttribute(TEXT("index")));
-							const FString& Value = DatasmithSceneXmlReaderImpl::UnsanitizeXMLText(CustomChildNode->GetAttribute(TEXT("name")));
+							int32 Index = ValueFromString<int32>(CustomChildNode->GetAttribute(TEXT("index")));
+							const FString& Value = UnsanitizeXMLText(CustomChildNode->GetAttribute(TEXT("name")));
 							Expression->SetArgumentName(Index, *Value);
 						}
 					}
@@ -1837,7 +1839,7 @@ void FDatasmithSceneXmlReader::ParseUEPbrMaterial(FXmlNode* InNode, TSharedPtr< 
 					const FString& Description = ChildNode->GetAttribute( TEXT("Description") );
 					Expression->SetDescription( *Description );
 
-					int32 OutputType = DatasmithSceneXmlReaderImpl::ValueFromString< int32 >( ChildNode->GetAttribute( TEXT("OutputType") ) );;
+					int32 OutputType = ValueFromString< int32 >( ChildNode->GetAttribute( TEXT("OutputType") ) );;
 					Expression->SetOutputType(EDatasmithShaderDataType(OutputType));
 				}
 			}
@@ -1894,7 +1896,7 @@ void FDatasmithSceneXmlReader::ParseUEPbrMaterial(FXmlNode* InNode, TSharedPtr< 
 					for ( const FXmlNode* InputChildNode : ChildNode->GetChildrenNodes() )
 					{
 						const FString& NameAttribute = InputChildNode->GetAttribute(TEXT("Name"));
-						int32 InputIndex = DatasmithSceneXmlReaderImpl::ValueFromString< int32 >( NameAttribute.IsEmpty() ? InputChildNode->GetTag() : NameAttribute );
+						int32 InputIndex = ValueFromString< int32 >( NameAttribute.IsEmpty() ? InputChildNode->GetTag() : NameAttribute );
 
 						if (IDatasmithExpressionInput* Input = GenericExpression->GetInput( InputIndex ))
 						{
@@ -1910,7 +1912,7 @@ void FDatasmithSceneXmlReader::ParseUEPbrMaterial(FXmlNode* InNode, TSharedPtr< 
 
 	const TArray<FXmlNode*>& ChildrenNodes = InNode->GetChildrenNodes();
 
-	auto TryConnectMaterialInput = [&ChildrenNodes, &OutElement](IDatasmithExpressionInput& Input)
+	auto TryConnectMaterialInput = [&](IDatasmithExpressionInput& Input)
 	{
 		const TCHAR* InputName = Input.GetName();
 		for (FXmlNode* XmlNode : ChildrenNodes)
@@ -1930,32 +1932,38 @@ void FDatasmithSceneXmlReader::ParseUEPbrMaterial(FXmlNode* InNode, TSharedPtr< 
 	TryConnectMaterialInput(OutElement->GetEmissiveColor());
 	TryConnectMaterialInput(OutElement->GetOpacity());
 	TryConnectMaterialInput(OutElement->GetNormal());
-	TryConnectMaterialInput(OutElement->GetWorldDisplacement());
 	TryConnectMaterialInput(OutElement->GetRefraction());
 	TryConnectMaterialInput(OutElement->GetAmbientOcclusion());
+	TryConnectMaterialInput(OutElement->GetClearCoat());
+	TryConnectMaterialInput(OutElement->GetClearCoatRoughness());
+	TryConnectMaterialInput(OutElement->GetWorldPositionOffset());
 	TryConnectMaterialInput(OutElement->GetMaterialAttributes());
 
 	for ( const FXmlNode* ChildNode : InNode->GetChildrenNodes() )
 	{
 		if ( ChildNode->GetTag() == DATASMITH_USEMATERIALATTRIBUTESNAME )
 		{
-			OutElement->SetUseMaterialAttributes( DatasmithSceneXmlReaderImpl::ValueFromString< bool >( ChildNode->GetAttribute( TEXT("enabled") ) ) );
+			OutElement->SetUseMaterialAttributes( ValueFromString< bool >( ChildNode->GetAttribute( TEXT("enabled") ) ) );
 		}
 		else if ( ChildNode->GetTag() == DATASMITH_TWOSIDEDVALUENAME )
 		{
-			OutElement->SetTwoSided( DatasmithSceneXmlReaderImpl::ValueFromString< bool >( ChildNode->GetAttribute( TEXT("enabled") ) ) );
+			OutElement->SetTwoSided( ValueFromString< bool >( ChildNode->GetAttribute( TEXT("enabled") ) ) );
 		}
 		else if ( ChildNode->GetTag() == DATASMITH_BLENDMODE )
 		{
-			OutElement->SetBlendMode( DatasmithSceneXmlReaderImpl::ValueFromString< int >( ChildNode->GetAttribute( TEXT("value") ) ) );
+			OutElement->SetBlendMode( ValueFromString< int >( ChildNode->GetAttribute( TEXT("value") ) ) );
 		}
 		else if ( ChildNode->GetTag() == DATASMITH_OPACITYMASKCLIPVALUE )
 		{
-			OutElement->SetOpacityMaskClipValue( DatasmithSceneXmlReaderImpl::ValueFromString< float >( ChildNode->GetAttribute( TEXT("value") ) ) );
+			OutElement->SetOpacityMaskClipValue( ValueFromString< float >( ChildNode->GetAttribute( TEXT("value") ) ) );
+		}
+		else if (ChildNode->GetTag() == DATASMITH_TRANSLUCENCYLIGHTINGMODE)
+		{
+			OutElement->SetTranslucencyLightingMode(ValueFromString< int >(ChildNode->GetAttribute(TEXT("value"))));
 		}
 		else if ( ChildNode->GetTag() == DATASMITH_FUNCTIONLYVALUENAME )
 		{
-			OutElement->SetMaterialFunctionOnly( DatasmithSceneXmlReaderImpl::ValueFromString< bool >( ChildNode->GetAttribute( TEXT("enabled") ) ) );
+			OutElement->SetMaterialFunctionOnly( ValueFromString< bool >( ChildNode->GetAttribute( TEXT("enabled") ) ) );
 		}
 		else if ( ChildNode->GetTag() == DATASMITH_SHADINGMODEL )
 		{
@@ -2076,7 +2084,7 @@ void FDatasmithSceneXmlReader::ParseLandscape(FXmlNode* InNode, TSharedRef< IDat
 	{
 		if ( ChildNode->GetTag() == DATASMITH_HEIGHTMAPNAME )
 		{
-			OutElement->SetHeightmap( *ResolveFilePath( ChildNode->GetAttribute( TEXT("value") ) ) );
+			OutElement->SetHeightmap( *ChildNode->GetAttribute( TEXT("value") ) );
 		}
 		else if ( ChildNode->GetTag() == DATASMITH_MATERIAL )
 		{

@@ -2,119 +2,226 @@
 
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Data;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using System.Windows.Forms;
+
+#nullable enable
 
 namespace UnrealGameSync
 {
 	public partial class SdkInfoWindow : Form
 	{
+		abstract class SdkAction
+		{
+			public string Name { get; init; }
+
+			public SdkAction(string name)
+			{
+				Name = name;
+			}
+
+			public abstract void Execute();
+		}
+
+		class SdkActionRun : SdkAction
+		{
+			public string Program { get; set; } = "";
+			public string Args { get; set; } = "";
+
+			public SdkActionRun(string name, string program = "", string args = "")
+				: base(name)
+			{
+				Program = program;
+				Args = args;
+			}
+
+			public override void Execute()
+			{
+				try
+				{
+					ProcessStartInfo startInfo = new ProcessStartInfo();
+					startInfo.FileName = Program;
+					startInfo.Arguments = Args;
+					startInfo.UseShellExecute = true;
+					Process.Start(startInfo);
+				}
+
+				catch (Exception ex)
+				{
+					MessageBox.Show($"Unable to run '{Program} {Args}': {ex.Message}");
+				}
+			}
+		}
+
 		class SdkItem
 		{
-			public string Category;
-			public string Description;
-			public string Install;
-			public string Browse;
+			public string Category { get; }
+			public string Description { get; }
+
+			public List<SdkAction> Actions = new List<SdkAction>();
+
+			public SdkItem(string category, string description)
+			{
+				Category = category;
+				Description = description;
+			}
 		}
 
 		class BadgeInfo
 		{
-			public string UniqueId;
-			public string Label;
-			public Rectangle Rectangle;
-			public Action OnClick;
+			public string UniqueId { get; }
+			public string Label { get; }
+			public Rectangle Rectangle { get; set; }
+			public Action? OnClick { get; set; }
+
+			public BadgeInfo(string uniqueId, string label)
+			{
+				UniqueId = uniqueId;
+				Label = label;
+			}
 		}
 
-		Font BadgeFont;
-		string HoverBadgeUniqueId;
+		readonly Font _badgeFont;
+		string? _hoverBadgeUniqueId;
 
-		public SdkInfoWindow(string[] SdkInfoEntries, Dictionary<string, string> Variables, Font BadgeFont)
+		public SdkInfoWindow(string[] sdkInfoEntries, Dictionary<string, string> variables, Font badgeFont)
 		{
 			InitializeComponent();
+			Font = new System.Drawing.Font("Segoe UI", 8.25F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
 
-			this.BadgeFont = BadgeFont;
+			_badgeFont = badgeFont;
 
-			Dictionary<string, ConfigObject> UniqueIdToObject = new Dictionary<string, ConfigObject>(StringComparer.InvariantCultureIgnoreCase);
-			foreach(string SdkInfoEntry in SdkInfoEntries)
+			Dictionary<string, ConfigObject> uniqueIdToObject = new Dictionary<string, ConfigObject>(StringComparer.InvariantCultureIgnoreCase);
+			foreach (string sdkInfoEntry in sdkInfoEntries)
 			{
-				ConfigObject Object = new ConfigObject(SdkInfoEntry);
+				ConfigObject obj = new ConfigObject(sdkInfoEntry);
 
-				string UniqueId = Object.GetValue("UniqueId", Guid.NewGuid().ToString());
+				string uniqueId = obj.GetValue("UniqueId", Guid.NewGuid().ToString());
 
-				ConfigObject ExistingObject;
-				if(UniqueIdToObject.TryGetValue(UniqueId, out ExistingObject))
+				ConfigObject? existingObject;
+				if (uniqueIdToObject.TryGetValue(uniqueId, out existingObject))
 				{
-					ExistingObject.AddOverrides(Object, null);
+					existingObject.AddOverrides(obj, null);
 				}
 				else
 				{
-					UniqueIdToObject.Add(UniqueId, Object);
+					uniqueIdToObject.Add(uniqueId, obj);
 				}
 			}
 
-			List<SdkItem> Items = new List<SdkItem>();
-			foreach(ConfigObject Object in UniqueIdToObject.Values)
+			List<SdkItem> items = new List<SdkItem>();
+			foreach (ConfigObject obj in uniqueIdToObject.Values)
 			{
-				SdkItem Item = new SdkItem();
-				Item.Category = Object.GetValue("Category", "Other");
-				Item.Description = Object.GetValue("Description", "");
+				string category = obj.GetValue("Category", "Other");
+				string description = obj.GetValue("Description", "");
+				SdkItem item = new SdkItem(category, description);
 
-				Item.Install = Utility.ExpandVariables(Object.GetValue("Install", ""), Variables);
-				if(Item.Install.Contains("$("))
-				{
-					Item.Install = null;
-				}
+				List<string> keys = obj.GetKeys().ToList();
 
-				Item.Browse = Utility.ExpandVariables(Object.GetValue("Browse", ""), Variables);
-				if(Item.Browse.Contains("$("))
+				foreach (string key in keys)
 				{
-					Item.Browse = null;
-				}
+					string keyToAdd = key;
+					string? value = obj.GetValue(keyToAdd, "");
 
-				if(!String.IsNullOrEmpty(Item.Install) && String.IsNullOrEmpty(Item.Browse))
-				{
-					try
+					if (String.IsNullOrEmpty(value))
 					{
-						Item.Browse = Path.GetDirectoryName(Item.Install);
+						continue;
 					}
-					catch
+
+					if (!value.StartsWith('('))
 					{
-						Item.Browse = null;
+						// Handle the predefined Install and Browse actions.
+
+						if (keyToAdd == "Install")
+						{
+							string? installArgument = Utility.ExpandVariables(value, variables);
+							if (!installArgument.Contains("$(", StringComparison.Ordinal))
+							{
+								item.Actions.Add(new SdkActionRun("Install", installArgument));
+
+								// If Browse is not explicitly defined, generate it automatically from the Installer path.
+								if (!keys.Contains("Browse"))
+								{
+									keyToAdd = "Browse";
+									value = Path.GetDirectoryName(installArgument);
+
+									if (String.IsNullOrEmpty(value))
+									{
+										continue;
+									}
+								}
+							}
+						}
+
+						if (keyToAdd == "Browse")
+						{
+							string? browseArgument = Utility.ExpandVariables(value, variables);
+							if (!browseArgument.Contains("$(", StringComparison.Ordinal))
+							{
+								item.Actions.Add(new SdkActionRun("Browse", "explorer.exe", browseArgument.Replace('/', '\\')));
+							}
+						}
+					}
+					else
+					{
+						// Handle generic actions i.e. ones with custom names which may launch arbitrary executables with additional parameters.
+						// For instance,
+						//		ReleaseNotes=(Program="notepad.exe", Args="notes.txt")
+						// will add a "ReleaseNotes" badge which, when clicked, will open "notes.txt" in the notepad.
+
+						ConfigObject valueObj = new ConfigObject(value);
+
+						string program = valueObj.GetValue("Program", "");
+						string args = valueObj.GetValue("Args", "");
+
+						program = Utility.ExpandVariables(program, variables);
+						if (program.Contains("$(", StringComparison.Ordinal))
+						{
+							continue;
+						}
+
+						args = Utility.ExpandVariables(args, variables);
+						if (args.Contains("$(", StringComparison.Ordinal))
+						{
+							continue;
+						}
+
+						if (!String.IsNullOrEmpty(program))
+						{
+							item.Actions.Add(new SdkActionRun(keyToAdd, program, args));
+						}
 					}
 				}
 
-				Items.Add(Item);
+				items.Add(item);
 			}
 
-			foreach(IGrouping<string, SdkItem> ItemGroup in Items.GroupBy(x => x.Category).OrderBy(x => x.Key))
+			foreach (IGrouping<string, SdkItem> itemGroup in items.GroupBy(x => x.Category).OrderBy(x => x.Key))
 			{
-				ListViewGroup Group = new ListViewGroup(ItemGroup.Key);
-				SdkListView.Groups.Add(Group);
+				ListViewGroup group = new ListViewGroup(itemGroup.Key);
+				SdkListView.Groups.Add(group);
 
-				foreach(SdkItem Item in ItemGroup)
+				foreach (SdkItem item in itemGroup)
 				{
-					ListViewItem NewItem = new ListViewItem(Group);
-					NewItem.SubItems.Add(Item.Description);
-					NewItem.SubItems.Add(new ListViewItem.ListViewSubItem(){ Tag = Item });
-					SdkListView.Items.Add(NewItem);
+					ListViewItem newItem = new ListViewItem(group);
+					newItem.SubItems.Add(item.Description);
+					newItem.SubItems.Add(new ListViewItem.ListViewSubItem() { Tag = item });
+					SdkListView.Items.Add(newItem);
 				}
 			}
 
-			System.Reflection.PropertyInfo DoubleBufferedProperty = typeof(Control).GetProperty("DoubleBuffered", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-			DoubleBufferedProperty.SetValue(SdkListView, true, null);
+			System.Reflection.PropertyInfo doubleBufferedProperty = typeof(Control).GetProperty("DoubleBuffered", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+			doubleBufferedProperty.SetValue(SdkListView, true, null);
 
-			if(SdkListView.Items.Count > 0)
+			if (SdkListView.Items.Count > 0)
 			{
-				int ItemsHeight = SdkListView.Items[SdkListView.Items.Count - 1].Bounds.Bottom + 20;
-				Height = SdkListView.Top + ItemsHeight + (Height - SdkListView.Bottom);
+				int itemsHeight = SdkListView.Items[^1].Bounds.Bottom + 20;
+				Height = SdkListView.Top + itemsHeight + (Height - SdkListView.Bottom);
 			}
 		}
 
@@ -131,7 +238,11 @@ namespace UnrealGameSync
 
 		private void SdkListView_DrawSubItem(object sender, DrawListViewSubItemEventArgs e)
 		{
-			if(e.ColumnIndex != columnHeader3.Index)
+			if (e.Item == null || e.SubItem == null)
+			{
+				e.DrawDefault = true;
+			}
+			else if (e.ColumnIndex != columnHeader3.Index)
 			{
 				TextRenderer.DrawText(e.Graphics, e.SubItem.Text, SdkListView.Font, e.Bounds, SdkListView.ForeColor, TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 			}
@@ -139,13 +250,13 @@ namespace UnrealGameSync
 			{
 				e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
 
-				List<BadgeInfo> Badges = GetBadges(e.Item, e.SubItem);
-				for(int Idx = 0; Idx < Badges.Count; Idx++)
+				List<BadgeInfo> badges = GetBadges(e.Item, e.SubItem);
+				for (int idx = 0; idx < badges.Count; idx++)
 				{
-					Color BadgeColor = (HoverBadgeUniqueId == Badges[Idx].UniqueId)? Color.FromArgb(140, 180, 230) : Color.FromArgb(112, 146, 190);
-					if(Badges[Idx].OnClick != null)
+					Color badgeColor = (_hoverBadgeUniqueId == badges[idx].UniqueId) ? Color.FromArgb(140, 180, 230) : Color.FromArgb(112, 146, 190);
+					if (badges[idx].OnClick != null)
 					{
-						DrawBadge(e.Graphics, Badges[Idx].Label, Badges[Idx].Rectangle, (Idx > 0), (Idx < Badges.Count - 1), BadgeColor);
+						DrawBadge(e.Graphics, badges[idx].Label, badges[idx].Rectangle, (idx > 0), (idx < badges.Count - 1), badgeColor);
 					}
 				}
 			}
@@ -153,132 +264,101 @@ namespace UnrealGameSync
 
 		private void SdkListView_MouseMove(object sender, MouseEventArgs e)
 		{
-			string NewHoverUniqueId = null;
+			string? newHoverUniqueId = null;
 
-			ListViewHitTestInfo HitTest = SdkListView.HitTest(e.Location);
-			if(HitTest.Item != null && HitTest.SubItem == HitTest.Item.SubItems[2])
+			ListViewHitTestInfo hitTest = SdkListView.HitTest(e.Location);
+			if (hitTest.Item != null && hitTest.SubItem == hitTest.Item.SubItems[2])
 			{
-				List<BadgeInfo> Badges = GetBadges(HitTest.Item, HitTest.SubItem);
-				foreach(BadgeInfo Badge in Badges)
+				List<BadgeInfo> badges = GetBadges(hitTest.Item, hitTest.SubItem);
+				foreach (BadgeInfo badge in badges)
 				{
-					if(Badge.Rectangle.Contains(e.Location))
+					if (badge.Rectangle.Contains(e.Location))
 					{
-						NewHoverUniqueId = Badge.UniqueId;
+						newHoverUniqueId = badge.UniqueId;
 					}
 				}
 			}
 
-			if(NewHoverUniqueId != HoverBadgeUniqueId)
+			if (newHoverUniqueId != _hoverBadgeUniqueId)
 			{
-				HoverBadgeUniqueId = NewHoverUniqueId;
+				_hoverBadgeUniqueId = newHoverUniqueId;
 				SdkListView.Invalidate();
 			}
 		}
 
 		private void SdkListView_MouseLeave(object sender, EventArgs e)
 		{
-			HoverBadgeUniqueId = null;
+			_hoverBadgeUniqueId = null;
 		}
 
 		private void SdkListView_MouseDown(object sender, MouseEventArgs e)
 		{
-			ListViewHitTestInfo HitTest = SdkListView.HitTest(e.Location);
-			if(HitTest.Item != null && HitTest.SubItem == HitTest.Item.SubItems[2])
+			ListViewHitTestInfo hitTest = SdkListView.HitTest(e.Location);
+			if (hitTest.Item != null && hitTest.SubItem == hitTest.Item.SubItems[2])
 			{
-				List<BadgeInfo> Badges = GetBadges(HitTest.Item, HitTest.SubItem);
-				foreach(BadgeInfo Badge in Badges)
+				List<BadgeInfo> badges = GetBadges(hitTest.Item, hitTest.SubItem);
+				foreach (BadgeInfo badge in badges)
 				{
-					if(Badge.Rectangle.Contains(e.Location) && Badge.OnClick != null)
+					if (badge.Rectangle.Contains(e.Location) && badge.OnClick != null)
 					{
-						Badge.OnClick();
+						badge.OnClick();
 					}
 				}
 			}
 		}
 
-		private List<BadgeInfo> GetBadges(ListViewItem Item, ListViewItem.ListViewSubItem SubItem)
+		private List<BadgeInfo> GetBadges(ListViewItem item, ListViewItem.ListViewSubItem subItem)
 		{
-			string UniqueIdPrefix = String.Format("{0}_", Item.Index);
+			string uniqueIdPrefix = String.Format("{0}_", item.Index);
 
-			List<BadgeInfo> Badges = new List<BadgeInfo>();
+			List<BadgeInfo> badges = new List<BadgeInfo>();
 
-			SdkItem Sdk = (SdkItem)SubItem.Tag;
+			SdkItem sdk = (SdkItem)subItem.Tag;
 
-			Action InstallAction = null;
-			if(!String.IsNullOrEmpty(Sdk.Install))
+			foreach (SdkAction action in sdk.Actions)
 			{
-				InstallAction = () => { Install(Sdk.Install); };
-			}
-			Badges.Add(new BadgeInfo(){ UniqueId = UniqueIdPrefix + "_Install", Label = "Install", OnClick = InstallAction });
+				Action clickAction = () => { action.Execute(); };
 
-			Action BrowseAction = null;
-			if(!String.IsNullOrEmpty(Sdk.Browse))
-			{
-				BrowseAction = () => { Browse(Sdk.Browse); };
-			}
-			Badges.Add(new BadgeInfo(){ UniqueId = UniqueIdPrefix + "_Browse", Label = "Browse", OnClick = BrowseAction });
-
-			int Right = SubItem.Bounds.Right - 10;
-			for(int Idx = Badges.Count - 1; Idx >= 0; Idx--)
-			{
-				Size BadgeSize = GetBadgeSize(Badges[Idx].Label);
-				Right -= BadgeSize.Width;
-				Badges[Idx].Rectangle = new Rectangle(Right, SubItem.Bounds.Y + (SubItem.Bounds.Height - BadgeSize.Height) / 2, BadgeSize.Width, BadgeSize.Height);
+				badges.Add(new BadgeInfo($"{uniqueIdPrefix}_{action.Name}", action.Name) { OnClick = clickAction });
 			}
 
-			return Badges;
+			int right = subItem.Bounds.Right - 10;
+			for (int idx = badges.Count - 1; idx >= 0; idx--)
+			{
+				Size badgeSize = GetBadgeSize(badges[idx].Label);
+				right -= badgeSize.Width;
+				badges[idx].Rectangle = new Rectangle(right, subItem.Bounds.Y + (subItem.Bounds.Height - badgeSize.Height) / 2, badgeSize.Width, badgeSize.Height);
+			}
+
+			return badges;
 		}
 
-		private void Browse(string DirectoryName)
+		private Size GetBadgeSize(string badgeText)
 		{
-			try
-			{
-				Process.Start("explorer.exe", String.Format("\"{0}\"", DirectoryName));
-			}
-			catch(Exception Ex)
-			{
-				MessageBox.Show(String.Format("Unable to open explorer to {0}: {1}", DirectoryName, Ex.Message));
-			}
+			Size labelSize = TextRenderer.MeasureText(badgeText, _badgeFont);
+			int badgeHeight = _badgeFont.Height + 1;
+
+			return new Size(labelSize.Width + badgeHeight - 4, badgeHeight);
 		}
 
-		private void Install(string FileName)
+		private void DrawBadge(Graphics graphics, string badgeText, Rectangle badgeRect, bool mergeLeft, bool mergeRight, Color badgeColor)
 		{
-			try
+			using (GraphicsPath path = new GraphicsPath())
 			{
-				Process.Start(FileName);
-			}
-			catch(Exception Ex)
-			{
-				MessageBox.Show(String.Format("Unable to run {0}: {1}", FileName, Ex.Message));
-			}
-		}
+				path.StartFigure();
+				path.AddLine(badgeRect.Left + (mergeLeft ? 1 : 0), badgeRect.Top, badgeRect.Left - (mergeLeft ? 1 : 0), badgeRect.Bottom);
+				path.AddLine(badgeRect.Left - (mergeLeft ? 1 : 0), badgeRect.Bottom, badgeRect.Right - 1 - (mergeRight ? 1 : 0), badgeRect.Bottom);
+				path.AddLine(badgeRect.Right - 1 - (mergeRight ? 1 : 0), badgeRect.Bottom, badgeRect.Right - 1 + (mergeRight ? 1 : 0), badgeRect.Top);
+				path.AddLine(badgeRect.Right - 1 + (mergeRight ? 1 : 0), badgeRect.Top, badgeRect.Left + (mergeLeft ? 1 : 0), badgeRect.Top);
+				path.CloseFigure();
 
-		private Size GetBadgeSize(string BadgeText)
-		{
-			Size LabelSize = TextRenderer.MeasureText(BadgeText, BadgeFont);
-			int BadgeHeight = BadgeFont.Height + 1;
-
-			return new Size(LabelSize.Width + BadgeHeight - 4, BadgeHeight);
-		}
-
-		private void DrawBadge(Graphics Graphics, string BadgeText, Rectangle BadgeRect, bool bMergeLeft, bool bMergeRight, Color BadgeColor)
-		{
-			using (GraphicsPath Path = new GraphicsPath())
-			{
-				Path.StartFigure();
-				Path.AddLine(BadgeRect.Left + (bMergeLeft? 1 : 0), BadgeRect.Top, BadgeRect.Left - (bMergeLeft? 1 : 0), BadgeRect.Bottom);
-				Path.AddLine(BadgeRect.Left - (bMergeLeft? 1 : 0), BadgeRect.Bottom, BadgeRect.Right - 1 - (bMergeRight? 1 : 0), BadgeRect.Bottom);
-				Path.AddLine(BadgeRect.Right - 1 - (bMergeRight? 1 : 0), BadgeRect.Bottom, BadgeRect.Right - 1 + (bMergeRight? 1 : 0), BadgeRect.Top);
-				Path.AddLine(BadgeRect.Right - 1 + (bMergeRight? 1 : 0), BadgeRect.Top, BadgeRect.Left + (bMergeLeft? 1 : 0), BadgeRect.Top);
-				Path.CloseFigure();
-
-				using(SolidBrush Brush = new SolidBrush(BadgeColor))
+				using (SolidBrush brush = new SolidBrush(badgeColor))
 				{
-					Graphics.FillPath(Brush, Path);
+					graphics.FillPath(brush, path);
 				}
 			}
 
-			TextRenderer.DrawText(Graphics, BadgeText, BadgeFont, BadgeRect, Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.PreserveGraphicsClipping);
+			TextRenderer.DrawText(graphics, badgeText, _badgeFont, badgeRect, Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.PreserveGraphicsClipping);
 		}
 	}
 }

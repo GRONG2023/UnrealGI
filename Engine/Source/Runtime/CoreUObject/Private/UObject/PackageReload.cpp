@@ -11,6 +11,157 @@
 #include "Templates/Casts.h"
 #include "UObject/UObjectIterator.h"
 
+#if WITH_EDITOR
+#include "UObject/ReferencerFinder.h"
+#endif
+
+#if WITH_EDITOR
+TAutoConsoleVariable<bool> CVarPackageReloadEnableFastPath(
+	TEXT("PackageReload.EnableFastPath"),
+	true,
+	TEXT("When 'true', an optimized codepath is used to speed up reloading packages (experimental)."),
+	ECVF_Default);
+#endif
+
+class FPackageReferencersHelper
+{
+#if WITH_EDITOR
+	/**
+	 * Set of all objects that could potentially refer to any of the packages that are about to be reloaded.
+	 */
+	TSet<TWeakObjectPtr<UObject>> PotentialReferencerObjects;
+
+	/**
+	 * Callback handles.
+	 */
+	FDelegateHandle OnObjectsReplacedHandle;
+	FDelegateHandle OnObjectConstructedHandle;
+
+	/**
+	 * Callback to be called when one or more UObjects are replaced with others.
+	 */
+	void OnObjectsReplaced(const TMap<UObject*, UObject*>& OldToNewInstanceMap)
+	{
+		for (const TPair<UObject*, UObject*>& Pair : OldToNewInstanceMap)
+		{
+			if (Pair.Key && Pair.Value)
+			{
+				TWeakObjectPtr<UObject> OldObject = MakeWeakObjectPtr<UObject>(Pair.Key);
+				TWeakObjectPtr<UObject> NewObject = MakeWeakObjectPtr<UObject>(Pair.Value);
+				if (PotentialReferencerObjects.Contains(OldObject))
+				{
+					PotentialReferencerObjects.Add(NewObject);
+					PotentialReferencerObjects.Remove(OldObject);
+				}
+			}
+		}
+	}
+
+	/**
+	 * Callback to be called when a new UObject is constructed.
+	 */
+	void OnObjectConstructed(UObject* InObject)
+	{
+		TWeakObjectPtr<UObject> Object = MakeWeakObjectPtr<UObject>(InObject);
+		PotentialReferencerObjects.Add(Object);
+	}
+
+	/**
+	 * Recursively retrieve all objects that reference any object in the InReferencedObjects.
+	 */
+	static void RecursiveRetrieveReferencers(const TArray<UObject*>& InReferencedObjects, TSet<TWeakObjectPtr<UObject>>& OutReferencingObjects)
+	{
+		TSet<UObject*> ReferencerObjects;
+
+		// Use the fast reference collector to recursively find referencers until no more new ones are found.
+		int32 LastObjectCount = 0;
+
+		TArray<UObject*> FoundReferencerObjects = FReferencerFinder::GetAllReferencers(InReferencedObjects, nullptr, EReferencerFinderFlags::None);
+		do
+		{
+			LastObjectCount = ReferencerObjects.Num();
+			ReferencerObjects.Append(FoundReferencerObjects);
+
+			FoundReferencerObjects = FReferencerFinder::GetAllReferencers(FoundReferencerObjects, nullptr, EReferencerFinderFlags::SkipInnerReferences);
+
+		} while (LastObjectCount != ReferencerObjects.Num());
+
+		// Convert them into weak pointers to deal with objects that get GC'd during the reload operation.
+		OutReferencingObjects.Reserve(ReferencerObjects.Num());
+		for (UObject* ReferencerObject : ReferencerObjects)
+		{
+			OutReferencingObjects.Emplace(MakeWeakObjectPtr(ReferencerObject));
+		}
+	}
+#endif
+
+public:
+	FPackageReferencersHelper(const TArrayView<FReloadPackageData>& InPackagesToReload)
+	{
+#if WITH_EDITOR
+		if (CVarPackageReloadEnableFastPath.GetValueOnAnyThread())
+		{
+			OnObjectsReplacedHandle = FCoreUObjectDelegates::OnObjectsReplaced.AddRaw(this, &FPackageReferencersHelper::OnObjectsReplaced);
+			OnObjectConstructedHandle = FCoreUObjectDelegates::OnObjectConstructed.AddRaw(this, &FPackageReferencersHelper::OnObjectConstructed);
+
+			// Build list of UObjects that represent the packages about to be reloaded.
+			TArray<UObject*> ObjectsToReload;
+			ObjectsToReload.Reserve(InPackagesToReload.Num());
+
+			for (const FReloadPackageData& PackageToReloadData : InPackagesToReload)
+			{
+				ObjectsToReload.Add(PackageToReloadData.PackageToReload);
+			}
+
+			// Collect all other objects that reference any of them.
+			RecursiveRetrieveReferencers(ObjectsToReload, PotentialReferencerObjects);
+		}
+#endif
+	}
+
+	~FPackageReferencersHelper()
+	{
+#if WITH_EDITOR
+		if (OnObjectConstructedHandle.IsValid())
+		{
+			FCoreUObjectDelegates::OnObjectConstructed.Remove(OnObjectConstructedHandle);
+			OnObjectConstructedHandle.Reset();
+		}
+		if (OnObjectsReplacedHandle.IsValid())
+		{
+			FCoreUObjectDelegates::OnObjectsReplaced.Remove(OnObjectsReplacedHandle);
+			OnObjectsReplacedHandle.Reset();
+		}
+#endif
+	}
+
+public:
+	void ForEachObject(TFunctionRef<void(UObject*)> Operation)
+	{
+#if WITH_EDITOR
+		if (CVarPackageReloadEnableFastPath.GetValueOnAnyThread())
+		{
+			for (TWeakObjectPtr<UObject> Object : PotentialReferencerObjects)
+			{
+				UObject* PotentialReferencer = Object.Get();
+				if (PotentialReferencer != nullptr)
+				{
+					Operation(PotentialReferencer);
+				}
+			}
+		}
+		else
+#endif
+		{
+			for (FThreadSafeObjectIterator ObjIter(UObject::StaticClass(), false, RF_NoFlags, EInternalObjectFlags::Garbage); ObjIter; ++ObjIter)
+			{
+				UObject* PotentialReferencer = *ObjIter;
+				Operation(PotentialReferencer);
+			}
+		}
+	}
+};
+
 namespace PackageReloadInternal
 {
 
@@ -28,7 +179,7 @@ struct FExistingPackageReference
 	}
 
 	UPackage* RawRef;
-	UPackage* StrongRef;
+	TObjectPtr<UPackage> StrongRef;
 	TWeakObjectPtr<UPackage> WeakRef;
 };
 
@@ -46,6 +197,11 @@ struct FExistingPackageReferences : public FGCObject
 		}
 	}
 
+	virtual FString GetReferencerName() const
+	{
+		return TEXT("FExistingPackageReferences");
+	}
+
 	TArray<FExistingPackageReference> Refs;
 };
 
@@ -61,7 +217,7 @@ struct FNewPackageReference
 	{
 	}
 
-	UPackage* Package;
+	TObjectPtr<UPackage> Package;
 	TSharedPtr<FPackageReloadedEvent> EventData;
 };
 
@@ -80,6 +236,11 @@ struct FNewPackageReferences : public FGCObject
 				Ref.EventData->AddReferencedObjects(Collector);
 			}
 		}
+	}
+
+	virtual FString GetReferencerName() const
+	{
+		return TEXT("FNewPackageReferences");
 	}
 
 	TArray<FNewPackageReference> Refs;
@@ -253,10 +414,12 @@ void DumpExternalReferences(UObject* InObject, UPackage* InPackage)
 			for (int32 NodeIndex = 0; NodeIndex < ObjectRefChain->Num(); ++NodeIndex)
 			{
 				const FReferenceChainSearch::FGraphNode* ObjectRefChainLink = ObjectRefChain->GetNode(NodeIndex);
-				const bool bIsExternalRef = ObjectRefChainLink->Object->GetOutermost() != InPackage;
+				UObject* LinkObject = ObjectRefChainLink->ObjectInfo->TryResolveObject();
+				checkf(LinkObject, TEXT("Unable to resolve object: %s when dumping external references"), *ObjectRefChainLink->ObjectInfo->GetPathName());
+				const bool bIsExternalRef = LinkObject->GetOutermost() != InPackage;
 				if (bIsExternalRef)
 				{
-					ExternalRefDumps.Emplace(ObjectRefChainLink->Object->GetFullName());
+					ExternalRefDumps.Emplace(ObjectRefChainLink->ObjectInfo->GetFullName());
 				}
 			}
 		}
@@ -460,6 +623,8 @@ UPackage* ReloadPackage(UPackage* InPackageToReload, const uint32 InLoadFlags)
 
 void ReloadPackages(const TArrayView<FReloadPackageData>& InPackagesToReload, TArray<UPackage*>& OutReloadedPackages, int32 InNumPackagesPerBatch)
 {
+	FPackageReferencersHelper PackageReferencersHelper(InPackagesToReload);
+
 	// Interdependencies between packages (in particular Blueprints) make it unsafe to run this logic in batches. 
 	// There are a number of edge cases that would have to be addressed if the batching logic were to be re-enabled, but 
 	// most likely the blueprint reparenting step would have to take in a TMap<UObject*, UObject*> that it could update
@@ -478,8 +643,8 @@ void ReloadPackages(const TArrayView<FReloadPackageData>& InPackagesToReload, TA
 	}
 	UE_LOG(LogUObjectGlobals, Log, TEXT("%s"), *Msg);
 
-	FScopedSlowTask ReloadingPackagesSlowTask(InPackagesToReload.Num(), NSLOCTEXT("CoreUObject", "ReloadingPackages", "Reloading Packages"));
-	ReloadingPackagesSlowTask.MakeDialog();
+	FScopedSlowTask ReloadingPackagesSlowTask((float)InPackagesToReload.Num(), NSLOCTEXT("CoreUObject", "ReloadingPackages", "Reloading Packages"));
+	ReloadingPackagesSlowTask.MakeDialogDelayed(3.0f);
 
 	// Cache the current dirty state of all packages so we can restore it after the reload
 	TSet<FName> DirtyPackages;
@@ -496,7 +661,7 @@ void ReloadPackages(const TArrayView<FReloadPackageData>& InPackagesToReload, TA
 	PackageReloadInternal::FExistingPackageReferences ExistingPackages;
 	ExistingPackages.Refs.Reserve(InPackagesToReload.Num());
 	{
-		FScopedSlowTask PreparingPackagesForReloadSlowTask(InPackagesToReload.Num(), NSLOCTEXT("CoreUObject", "PreparingPackagesForReload", "Preparing Packages for Reload"));
+		FScopedSlowTask PreparingPackagesForReloadSlowTask((float)InPackagesToReload.Num(), NSLOCTEXT("CoreUObject", "PreparingPackagesForReload", "Preparing Packages for Reload"));
 
 		for (const FReloadPackageData& PackageToReloadData : InPackagesToReload)
 		{
@@ -552,7 +717,7 @@ void ReloadPackages(const TArrayView<FReloadPackageData>& InPackagesToReload, TA
 
 			const int32 NumPackagesInBatch = PackageIndex - BatchStartIndex;
 
-			FScopedSlowTask FixingUpReferencesSlowTask((NumPackagesInBatch * 4) + GUObjectArray.GetObjectArrayNum(), NSLOCTEXT("CoreUObject", "FixingUpReferences", "Fixing-Up References"));
+			FScopedSlowTask FixingUpReferencesSlowTask((float)((NumPackagesInBatch * 4) + GUObjectArray.GetObjectArrayNum()), NSLOCTEXT("CoreUObject", "FixingUpReferences", "Fixing-Up References"));
 
 			// Pre-pass to notify things that the package old package is about to be fixed-up
 			TMap<UObject*, PackageReloadInternal::FObjectAndPackageIndex> OldObjectToNewData;
@@ -577,27 +742,35 @@ void ReloadPackages(const TArrayView<FReloadPackageData>& InPackagesToReload, TA
 
 			// Main pass to go through and fix-up any references pointing to data from the old package to point to data from the new package
 			// todo: multi-thread this like FHotReloadModule::ReplaceReferencesToReconstructedCDOs?
-			for (FThreadSafeObjectIterator ObjIter(UObject::StaticClass(), false, RF_NoFlags, EInternalObjectFlags::PendingKill); ObjIter; ++ObjIter)
-			{
-				UObject* PotentialReferencer = *ObjIter;
+			//The FThreadSafeObjectIterator will lock the global UObject array, to avoid potential deadlock we simply build the list
+			//of the potential referencers and do the reference fix serialize outside of the FThreadSafeObjectIterator.
+			TArray<UObject*> PotentialReferencers;
 
-				// Mutating the old versions of classes can result in us replacing the SuperStruct pointer, which results
-				// in class layout change and subsequently crashes because instances will not match this new class layout:
-				UClass* AsClass = Cast<UClass>(PotentialReferencer);
-				if (!AsClass)
+			PackageReferencersHelper.ForEachObject(
+				[&PotentialReferencers] (UObject* PotentialReferencer)
 				{
-					AsClass = PotentialReferencer->GetTypedOuter<UClass>();
-				}
-
-				if(AsClass)
-				{
-					if( AsClass->HasAnyClassFlags(CLASS_NewerVersionExists) || 
-						AsClass->HasAnyFlags(RF_NewerVersionExists))
+					// Mutating the old versions of classes can result in us replacing the SuperStruct pointer, which results
+					// in class layout change and subsequently crashes because instances will not match this new class layout:
+					UClass* AsClass = Cast<UClass>(PotentialReferencer);
+					if (!AsClass)
 					{
-						continue;
+						AsClass = PotentialReferencer->GetTypedOuter<UClass>();
 					}
-				}
 
+					if (AsClass)
+					{
+						if (AsClass->HasAnyClassFlags(CLASS_NewerVersionExists) ||
+							AsClass->HasAnyFlags(RF_NewerVersionExists))
+						{
+							return;
+						}
+					}
+					PotentialReferencers.Add(PotentialReferencer);
+				}
+			);
+
+			for (UObject* PotentialReferencer : PotentialReferencers)
+			{
 				FixingUpReferencesSlowTask.EnterProgressFrame(1.0f);
 
 				PackageReloadInternal::FReplaceObjectReferencesArchive ReplaceRefsArchive(PotentialReferencer, OldObjectToNewData, ExistingPackages.Refs, NewPackages.Refs);
@@ -683,7 +856,7 @@ void ReloadPackages(const TArrayView<FReloadPackageData>& InPackagesToReload, TA
 				//{
 				//	PackageReloadInternal::DumpExternalReferences(InExistingObject, ExistingPackage);
 				//	return true; // continue
-				//}, true, RF_NoFlags, EInternalObjectFlags::PendingKill);
+				//}, true, RF_NoFlags, EInternalObjectFlags::Garbage);
 			}
 		}
 	}

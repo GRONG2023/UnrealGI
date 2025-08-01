@@ -2,12 +2,12 @@
 
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 
 namespace DatasmithSolidworks
 {
-	[ComVisible(false)]
 	public class FStripGeometryBody
 	{
 		public FBoundingBox Bounds { get; set; } = null;
@@ -26,7 +26,6 @@ namespace DatasmithSolidworks
 		}
 	}
 
-	[ComVisible(false)]
 	public class FStripGeometryFace
 	{
 		public FMaterial Material { get; set; } = null;
@@ -61,7 +60,6 @@ namespace DatasmithSolidworks
 		}
 	}
 
-	[ComVisible(false)]
 	public class FStripGeometry
 	{
 		private ConcurrentBag<FStripGeometryBody> Bodies { get; set; } = new ConcurrentBag<FStripGeometryBody>();
@@ -76,7 +74,10 @@ namespace DatasmithSolidworks
 					Body.ExtractGeometry(Chunks);
 				}
 			}
-			catch { }
+			catch
+			{
+				Debug.Assert(false);
+			}
 
 			return Chunks;
 		}
@@ -114,7 +115,10 @@ namespace DatasmithSolidworks
 					MeshData = FMeshData.Create(Chunks);
 				}
 			}
-			catch { }
+			catch
+			{
+				Debug.Assert(false);
+			}
 
 			return MeshData;
 		}

@@ -1,13 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "AnimTimelineTrack_Montage.h"
+#include "AnimTimeline/AnimTimelineTrack_Montage.h"
 #include "SAnimMontagePanel.h"
 #include "Animation/AnimComposite.h"
 #include "PersonaUtils.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Widgets/Layout/SBorder.h"
-#include "AnimTimelineTrack_MontagePanel.h"
-#include "AnimModel_AnimMontage.h"
+#include "AnimTimeline/AnimTimelineTrack_MontagePanel.h"
+#include "AnimTimeline/AnimModel_AnimMontage.h"
 #include "Fonts/FontMeasure.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Preferences/PersonaOptions.h"
@@ -52,7 +52,7 @@ class SMontageSections : public SLeafWidget
 		bDisplayTiming = InArgs._DisplayTiming;
 
 		LabelFont = FCoreStyle::GetDefaultFontStyle("Regular", 10);
-		IconFont = FEditorStyle::Get().GetFontStyle("FontAwesome.10");
+		IconFont = FAppStyle::Get().GetFontStyle("FontAwesome.10");
 
 		InModel->OnHandleObjectsSelected().AddSP(this, &SMontageSections::HandleObjectsSelected);
 		InModel->OnSectionTimeDragged.BindSP(this, &SMontageSections::HandleSectionTimeDragged);
@@ -127,8 +127,8 @@ class SMontageSections : public SLeafWidget
 	{
 		FTrackScaleInfo ScaleInfo(ViewInputMin.Get(), ViewInputMax.Get(), 0, 0, AllottedGeometry.GetLocalSize());
 		const TSharedRef<FSlateFontMeasure> FontMeasureService = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
-		const FSlateBrush* BorderBrush = FEditorStyle::GetBrush("SpecialEditableTextImageNormal");
-		const FLinearColor SelectedColor = FEditorStyle::GetSlateColor("SelectionColor").GetSpecifiedColor();
+		const FSlateBrush* BorderBrush = FAppStyle::GetBrush("SpecialEditableTextImageNormal");
+		const FLinearColor SelectedColor = FAppStyle::GetSlateColor("SelectionColor").GetSpecifiedColor();
 	
 		const FLinearColor MontageColor = AnimMontage->HasParentAsset() ? GetDefault<UPersonaOptions>()->SectionTimingNodeColor.Desaturate(0.75f) : GetDefault<UPersonaOptions>()->SectionTimingNodeColor;
 
@@ -154,26 +154,26 @@ class SMontageSections : public SLeafWidget
 				NameText = FText::FromName(CompositeSection.SectionName);
 			}
 
-			FVector2D TextSize = FontMeasureService->Measure(NameText, LabelFont);
-			FVector2D TextBorderSize = TextSize + (MontageSectionsConstants::TextBorderMargin * 2.0f);
+			const FVector2D TextSize = FontMeasureService->Measure(NameText, LabelFont);
+			const FVector2D TextBorderSize = TextSize + (MontageSectionsConstants::TextBorderMargin * 2.0f);
 
-			FText IconText = GetSectionIconText(SectionIndex);
-			FVector2D TextIconSize = FontMeasureService->Measure(IconText, LabelFont);
-			FVector2D TextIconBorderSize = TextIconSize + (MontageSectionsConstants::TextBorderMargin * 2.0f);
+			const FText IconText = GetSectionIconText(SectionIndex);
+			const FVector2D TextIconSize = FontMeasureService->Measure(IconText, LabelFont);
+			const FVector2D TextIconBorderSize = TextIconSize + (MontageSectionsConstants::TextBorderMargin * 2.0f);
 
-			FVector2D TotalBorderSize(TextBorderSize.X + TextIconBorderSize.X, FMath::Max(TextBorderSize.Y, TextIconBorderSize.Y));
+			const FVector2D TotalBorderSize(TextBorderSize.X + TextIconBorderSize.X, FMath::Max(TextBorderSize.Y, TextIconBorderSize.Y));
 
-			float LabelPosX = ScaleInfo.InputToLocalX(DraggedSectionIndex == SectionIndex ? DraggedSectionTime : CompositeSection.GetTime());
-			float LabelPosY = (AllottedGeometry.GetLocalSize().Y * 0.5f) - (TextBorderSize.Y * 0.5f);
-			float IconPosY = (AllottedGeometry.GetLocalSize().Y * 0.5f) - (TextIconBorderSize.Y * 0.5f);
+			const float LabelPosX = ScaleInfo.InputToLocalX(DraggedSectionIndex == SectionIndex ? DraggedSectionTime : CompositeSection.GetTime());
+			const float LabelPosY = static_cast<float>((AllottedGeometry.GetLocalSize().Y * 0.5) - (TextBorderSize.Y * 0.5));
+			const float IconPosY = static_cast<float>((AllottedGeometry.GetLocalSize().Y * 0.5) - (TextIconBorderSize.Y * 0.5));
 
-			float RightEdgeToNotify = AllottedGeometry.Size.X - (LabelPosX + TextBorderSize.X);
-			bool bDrawLabelOnLeft = RightEdgeToNotify < 0.0f;
+			const float RightEdgeToNotify = static_cast<float>(AllottedGeometry.Size.X - (LabelPosX + TextBorderSize.X));
+			const bool bDrawLabelOnLeft = RightEdgeToNotify < 0.0f;
 
 			FSlateDrawElement::MakeBox( 
 				OutDrawElements,
 				++LayerId,
-				AllottedGeometry.ToPaintGeometry(FVector2D(bDrawLabelOnLeft ? LabelPosX - TotalBorderSize.X : LabelPosX, LabelPosY), TotalBorderSize),
+				AllottedGeometry.ToPaintGeometry(TotalBorderSize, FSlateLayoutTransform(FVector2D(bDrawLabelOnLeft ? LabelPosX - TotalBorderSize.X : LabelPosX, LabelPosY))),
 				BorderBrush,
 				ESlateDrawEffect::None,
 				SelectedSectionIndex == SectionIndex ? SelectedColor : MontageColor);
@@ -181,7 +181,7 @@ class SMontageSections : public SLeafWidget
 			FSlateDrawElement::MakeText( 
 				OutDrawElements,
 				++LayerId,
-				AllottedGeometry.ToPaintGeometry(FVector2D(bDrawLabelOnLeft ? (LabelPosX - TotalBorderSize.X) + MontageSectionsConstants::TextOffset.X : LabelPosX + MontageSectionsConstants::TextOffset.X, LabelPosY + MontageSectionsConstants::TextOffset.Y), TextSize),
+				AllottedGeometry.ToPaintGeometry(TextSize, FSlateLayoutTransform(FVector2D(bDrawLabelOnLeft ? (LabelPosX - TotalBorderSize.X) + MontageSectionsConstants::TextOffset.X : LabelPosX + MontageSectionsConstants::TextOffset.X, LabelPosY + MontageSectionsConstants::TextOffset.Y))),
 				NameText,
 				LabelFont,
 				ESlateDrawEffect::None,
@@ -190,7 +190,7 @@ class SMontageSections : public SLeafWidget
 			FSlateDrawElement::MakeText( 
 				OutDrawElements,
 				++LayerId,
-				AllottedGeometry.ToPaintGeometry(FVector2D(bDrawLabelOnLeft ? (LabelPosX - TotalBorderSize.X) + TextBorderSize.X + (MontageSectionsConstants::TextBorderMargin.X * 2.0f) + MontageSectionsConstants::TextOffset.X : LabelPosX + MontageSectionsConstants::TextOffset.X + (MontageSectionsConstants::TextBorderMargin.X * 2.0f) + TextBorderSize.X, IconPosY + MontageSectionsConstants::TextOffset.Y), TextIconSize),
+				AllottedGeometry.ToPaintGeometry(TextIconSize, FSlateLayoutTransform(FVector2D(bDrawLabelOnLeft ? (LabelPosX - TotalBorderSize.X) + TextBorderSize.X + (MontageSectionsConstants::TextBorderMargin.X * 2.0f) + MontageSectionsConstants::TextOffset.X : LabelPosX + MontageSectionsConstants::TextOffset.X + (MontageSectionsConstants::TextBorderMargin.X * 2.0f) + TextBorderSize.X, IconPosY + MontageSectionsConstants::TextOffset.Y))),
 				IconText,
 				IconFont,
 				ESlateDrawEffect::None,
@@ -214,23 +214,26 @@ class SMontageSections : public SLeafWidget
 		{
 			const FCompositeSection& CompositeSection = AnimMontage->CompositeSections[SectionIndex];
 
-			FText NameText = FText::FromName(CompositeSection.SectionName);
-			FVector2D TextSize = FontMeasureService->Measure(NameText, LabelFont);
-			FVector2D TextBorderSize = TextSize + (MontageSectionsConstants::TextBorderMargin * 2.0f);
+			const FText NameText = FText::FromName(CompositeSection.SectionName);
+			const FVector2D TextSize = FontMeasureService->Measure(NameText, LabelFont);
+			const FVector2D TextBorderSize = TextSize + (MontageSectionsConstants::TextBorderMargin * 2.0f);
 
-			FText IconText = GetSectionIconText(SectionIndex);
-			FVector2D TextIconSize = FontMeasureService->Measure(IconText, LabelFont);
-			FVector2D TextIconBorderSize = TextIconSize + (MontageSectionsConstants::TextBorderMargin * 2.0f);
+			const FText IconText = GetSectionIconText(SectionIndex);
+			const FVector2D TextIconSize = FontMeasureService->Measure(IconText, LabelFont);
+			const FVector2D TextIconBorderSize = TextIconSize + (MontageSectionsConstants::TextBorderMargin * 2.0f);
 
-			FVector2D TotalBorderSize(TextBorderSize.X + TextIconBorderSize.X, FMath::Max(TextBorderSize.Y, TextIconBorderSize.Y));
+			const FVector2D TotalBorderSize(TextBorderSize.X + TextIconBorderSize.X, FMath::Max(TextBorderSize.Y, TextIconBorderSize.Y));
 
-			float LabelPosX = ScaleInfo.InputToLocalX(CompositeSection.GetTime());
-			float LabelPosY = (MyGeometry.GetLocalSize().Y * 0.5f) - (TotalBorderSize.Y * 0.5f);
+			const double LabelPosX = ScaleInfo.InputToLocalX(CompositeSection.GetTime());
+			const double LabelPosY = (MyGeometry.GetLocalSize().Y * 0.5) - (TotalBorderSize.Y * 0.5);
 
-			float RightEdgeToNotify = MyGeometry.Size.X - (LabelPosX + TotalBorderSize.X);
-			bool bDrawLabelOnLeft = RightEdgeToNotify < 0.0f;
+			const double RightEdgeToNotify = MyGeometry.Size.X - (LabelPosX + TotalBorderSize.X);
+			const bool bDrawLabelOnLeft = RightEdgeToNotify < 0.0;
 
-			const FGeometry LabelGeometry = MyGeometry.MakeChild(FVector2D(bDrawLabelOnLeft ? LabelPosX - TotalBorderSize.X: LabelPosX, LabelPosY), TotalBorderSize);
+			const FGeometry LabelGeometry = MyGeometry.MakeChild(
+				TotalBorderSize,
+				FSlateLayoutTransform(FVector2D(bDrawLabelOnLeft ? LabelPosX - TotalBorderSize.X: LabelPosX, LabelPosY))
+			);
 
 			if(LabelGeometry.IsUnderLocation(MouseEvent.GetScreenSpacePosition()))
 			{
@@ -277,7 +280,7 @@ class SMontageSections : public SLeafWidget
 				FMenuBuilder MenuBuilder(true, nullptr);
 
 				FTrackScaleInfo ScaleInfo(ViewInputMin.Get(), ViewInputMax.Get(), 0, 0, MyGeometry.GetLocalSize());
-				SummonTrackContextMenu(MenuBuilder, ScaleInfo.LocalXToInput(MyGeometry.AbsoluteToLocal(MouseEvent.GetScreenSpacePosition()).X), SelectedSectionIndex);
+				SummonTrackContextMenu(MenuBuilder, ScaleInfo.LocalXToInput(static_cast<float>(MyGeometry.AbsoluteToLocal(MouseEvent.GetScreenSpacePosition()).X)), SelectedSectionIndex);
 
 				FSlateApplication::Get().PushMenu(
 					AsShared(),
@@ -359,9 +362,9 @@ class SMontageSections : public SLeafWidget
 						.WidthOverride(100.0f)
 						[
 							SNew(SNumericEntryBox<float>)
-							.Font(FEditorStyle::GetFontStyle(TEXT("MenuItem.Font")))
+							.Font(FAppStyle::GetFontStyle(TEXT("MenuItem.Font")))
 							.MinValue(0.0f)
-							.MaxValue(AnimMontage->SequenceLength)
+							.MaxValue(AnimMontage->GetPlayLength())
 							.Value(Section.GetTime())
 							.AllowSpin(true)
 							.OnValueCommitted_Lambda([this, SectionIndex](float InValue, ETextCommit::Type InCommitType)
@@ -389,16 +392,16 @@ class SMontageSections : public SLeafWidget
 						.WidthOverride(100.0f)
 						[
 							SNew(SNumericEntryBox<int32>)
-							.Font(FEditorStyle::GetFontStyle(TEXT("MenuItem.Font")))
+							.Font(FAppStyle::GetFontStyle(TEXT("MenuItem.Font")))
 							.MinValue(0)
-							.MaxValue(AnimMontage->GetNumberOfFrames())
+							.MaxValue(AnimMontage->GetNumberOfSampledKeys())
 							.Value(AnimMontage->GetFrameAtTime(Section.GetTime()))
 							.AllowSpin(true)						
 							.OnValueCommitted_Lambda([this, SectionIndex](int32 InValue, ETextCommit::Type InCommitType)
 							{
 								if (AnimMontage->CompositeSections.IsValidIndex(SectionIndex))
 								{
-									float NewTime = FMath::Clamp(AnimMontage->GetTimeAtFrame(InValue), 0.0f, AnimMontage->SequenceLength);
+									float NewTime = FMath::Clamp(AnimMontage->GetTimeAtFrame(InValue), 0.0f, AnimMontage->GetPlayLength());
 									WeakModel.Pin()->GetMontagePanel()->GetAnimMontagePanel()->SetSectionTime(SectionIndex, NewTime);
 								}
 
@@ -460,7 +463,7 @@ TSharedRef<SWidget> FAnimTimelineTrack_Montage::GenerateContainerWidgetForOutlin
 	TSharedPtr<SHorizontalBox> InnerHorizontalBox;
 	TSharedPtr<SWidget> OutlinerWidget = GenerateStandardOutlinerWidget(InRow, true, OuterBorder, InnerHorizontalBox);
 
-	OuterBorder->SetBorderBackgroundColor(FEditorStyle::GetColor("AnimTimeline.Outliner.HeaderColor"));
+	OuterBorder->SetBorderBackgroundColor(FAppStyle::GetColor("AnimTimeline.Outliner.HeaderColor"));
 
 	InnerHorizontalBox->AddSlot()
 		.AutoWidth()
@@ -500,14 +503,14 @@ TSharedRef<SWidget> FAnimTimelineTrack_Montage::BuildMontageSubMenu()
 			MenuBuilder.AddMenuEntry(
 				LOCTEXT("FindParent", "Find parent"),
 				LOCTEXT("FindParentInCBToolTip", "Find parent in Content Browser"),
-				FSlateIcon("EditorStyle", "PropertyWindow.Button_Browse"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Search"),
 				FUIAction(FExecuteAction::CreateSP(this, &FAnimTimelineTrack_Montage::OnFindParentClassInContentBrowserClicked))
 			);
 
 			MenuBuilder.AddMenuEntry(
 				LOCTEXT("EditParent", "Edit parent"),
 				LOCTEXT("EditParentToolTip", "Open parent in editor"),
-				FSlateIcon("EditorStyle", "PropertyWindow.Button_Edit"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Edit"),
 				FUIAction(FExecuteAction::CreateSP(this, &FAnimTimelineTrack_Montage::OnEditParentClassClicked))
 			);
 		}
@@ -518,11 +521,10 @@ TSharedRef<SWidget> FAnimTimelineTrack_Montage::BuildMontageSubMenu()
 		// Slots
 		MenuBuilder.BeginSection("AnimMontageSlots", LOCTEXT("Slots", "Slots") );
 		{
-			MenuBuilder.AddMenuEntry(
+			MenuBuilder.AddSubMenu(
 				LOCTEXT("NewSlot", "New Slot"),
-				LOCTEXT("NewSlotToolTip", "Adds a new Slot"),
-				FSlateIcon(), 
-				FUIAction(FExecuteAction::CreateSP(&MontageModel->GetMontagePanel()->GetAnimMontagePanel().Get(), &SAnimMontagePanel::OnNewSlotClicked))
+				LOCTEXT("NewSlotToolTip", "Adds a new Slot"), 
+				FNewMenuDelegate::CreateSP(&MontageModel->GetMontagePanel()->GetAnimMontagePanel().Get(), &SAnimMontagePanel::BuildNewSlotMenu)
 			);
 
 			MenuBuilder.AddMenuEntry(

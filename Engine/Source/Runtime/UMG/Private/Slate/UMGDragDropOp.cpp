@@ -2,6 +2,7 @@
 
 #include "Slate/UMGDragDropOp.h"
 #include "Application/SlateApplicationBase.h"
+#include "Engine/GameViewportClient.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SWidget.h"
 #include "Widgets/Text/STextBlock.h"
@@ -24,7 +25,6 @@ FUMGDragDropOp::FUMGDragDropOp()
 void FUMGDragDropOp::AddReferencedObjects(FReferenceCollector& Collector)
 {
 	Collector.AddReferencedObject(DragOperation);
-	Collector.AddReferencedObject(GameViewport);
 }
 
 FString FUMGDragDropOp::GetReferencerName() const
@@ -52,9 +52,9 @@ void FUMGDragDropOp::OnDrop( bool bDropWasHandled, const FPointerEvent& MouseEve
 		}
 		else
 		{
-			if ( SourceUserWidget.IsValid() )
+			if ( TSharedPtr<SObjectWidget> SourceUserWidgetPtr = SourceUserWidget.Pin() )
 			{
-				SourceUserWidget->OnDragCancelled(FDragDropEvent(MouseEvent, AsShared()), DragOperation);
+				SourceUserWidgetPtr->OnDragCancelled(FDragDropEvent(MouseEvent, AsShared()), DragOperation);
 			}
 
 			DragOperation->DragCancelled(MouseEvent);
@@ -118,7 +118,7 @@ void FUMGDragDropOp::OnDragged( const class FDragDropEvent& DragDropEvent )
 	
 		if ( DeltaTime < AnimationTime )
 		{
-			float T = DeltaTime / AnimationTime;
+			double T = DeltaTime / AnimationTime;
 			FVector2D LerpPosition = ( Position - StartingScreenPos ) * T;
 			
 			DecoratorPosition = StartingScreenPos + LerpPosition;
@@ -144,12 +144,23 @@ FCursorReply FUMGDragDropOp::OnCursorQuery()
 		CursorReply = CursorReply.Cursor(EMouseCursor::Default);
 	}
 
-	if ( GameViewport )
+	if ( UGameViewportClient* GameViewportPtr = GameViewport.Get() )
 	{
-		TOptional<TSharedRef<SWidget>> CursorWidget = GameViewport->MapCursor(nullptr, CursorReply);
+		TOptional<TSharedRef<SWidget>> CursorWidget = GameViewportPtr->MapCursor(nullptr, CursorReply);
 		if ( CursorWidget.IsSet() )
 		{
-			CursorReply.SetCursorWidget(GameViewport->GetWindow(), CursorWidget.GetValue());
+			CursorReply.SetCursorWidget(GameViewportPtr->GetWindow(), CursorWidget.GetValue());
+		}
+	}
+
+	if (TSharedPtr<SObjectWidget> SourceUserWidgetObj = SourceUserWidget.Pin())
+	{
+		if (UUserWidget* SourceUserWidgetPtr = SourceUserWidgetObj->GetWidgetObject())
+		{
+			if (SourceUserWidgetPtr->bOverride_Cursor)
+			{
+				CursorReply = CursorReply.Cursor(SourceUserWidgetPtr->GetCursor());
+			}
 		}
 	}
 
@@ -159,6 +170,7 @@ FCursorReply FUMGDragDropOp::OnCursorQuery()
 TSharedRef<FUMGDragDropOp> FUMGDragDropOp::New(UDragDropOperation* InOperation, const int32 PointerIndex, const FVector2D &PointerPosition, const FVector2D &ScreenPositionOfDragee, float DPIScale, TSharedPtr<SObjectWidget> SourceUserWidget)
 {
 	check(InOperation);
+	check(SourceUserWidget);
 
 	TSharedRef<FUMGDragDropOp> Operation = MakeShareable(new FUMGDragDropOp());
 	Operation->PointerIndex = PointerIndex;

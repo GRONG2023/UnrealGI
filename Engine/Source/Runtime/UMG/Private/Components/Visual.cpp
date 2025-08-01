@@ -3,6 +3,8 @@
 #include "Components/Visual.h"
 #include "Engine/UserInterfaceSettings.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(Visual)
+
 /////////////////////////////////////////////////////
 // UVisual
 
@@ -25,7 +27,6 @@ void UVisual::BeginDestroy()
 
 bool UVisual::NeedsLoadForServer() const
 {
-	const UUserInterfaceSettings* UISettings = GetDefault<UUserInterfaceSettings>(UUserInterfaceSettings::StaticClass());
-	check(UISettings);
+	const UUserInterfaceSettings* UISettings = GetDefault<UUserInterfaceSettings>();
 	return UISettings->bLoadWidgetsOnDedicatedServer;
 }

@@ -25,6 +25,125 @@ FSlateTextBlockLayout::FSlateTextBlockLayout(SWidget* InOwner, FTextBlockStyle I
 	TextLayout->SetLineBreakIterator(MoveTemp(InLineBreakPolicy));
 }
 
+void FSlateTextBlockLayout::ConditionallyUpdateTextStyle(const FTextBlockStyle& InTextStyle)
+{
+	// Has the style used for this text block changed?
+	if (!IsStyleUpToDate(InTextStyle))
+	{
+		UpdateTextStyle(InTextStyle);
+	}
+}
+
+void FSlateTextBlockLayout::ConditionallyUpdateTextStyle(const FTextBlockStyle::CompareParams& InNewStyleParams)
+{
+	// Has the style used for this text block changed?
+	if (!IsStyleUpToDate(InNewStyleParams))
+	{
+		UpdateTextStyle(InNewStyleParams);
+	}
+}
+
+void FSlateTextBlockLayout::UpdateTextStyle(const FTextBlockStyle& InTextStyle)
+{
+	TextLayout->SetDefaultTextStyle(InTextStyle);
+	Marshaller->MakeDirty(); // will regenerate the text in ComputeDesiredSize()
+}
+
+void FSlateTextBlockLayout::UpdateTextStyle(const FTextBlockStyle::CompareParams& InNewStyleParams)
+{
+	FTextBlockStyle ComputedStyle = InNewStyleParams.StyleBase;
+	ComputedStyle.SetFont(InNewStyleParams.Font);
+	if (InNewStyleParams.StrikeBrush)
+	{
+		ComputedStyle.SetStrikeBrush(*InNewStyleParams.StrikeBrush);
+	}
+	ComputedStyle.SetColorAndOpacity(InNewStyleParams.ColorAndOpacity);
+	ComputedStyle.SetShadowOffset(InNewStyleParams.ShadowOffset);
+	ComputedStyle.SetShadowColorAndOpacity(InNewStyleParams.ShadowColorAndOpacity);
+	ComputedStyle.SetHighlightColor(InNewStyleParams.HighlightColor);
+	if (InNewStyleParams.HighlightShape)
+	{
+		ComputedStyle.SetHighlightShape(*InNewStyleParams.HighlightShape);
+	}
+
+	UpdateTextStyle(ComputedStyle);
+}
+
+
+FVector2D FSlateTextBlockLayout::ComputeDesiredSize(const FWidgetDesiredSizeArgs& InWidgetArgs, const float InScale)
+{
+	// Cache the wrapping rules so that we can recompute the wrap at width in paint.
+	CachedWrapTextAt = InWidgetArgs.WrapTextAt;
+	bCachedAutoWrapText = InWidgetArgs.AutoWrapText;
+
+	const ETextTransformPolicy PreviousTransformPolicy = TextLayout->GetTransformPolicy();
+
+	// Set the text layout information
+	TextLayout->SetScale(InScale);
+	TextLayout->SetWrappingWidth(CalculateWrappingWidth());
+	TextLayout->SetWrappingPolicy(InWidgetArgs.WrappingPolicy);
+	TextLayout->SetTransformPolicy(InWidgetArgs.TransformPolicy);
+	TextLayout->SetMargin(InWidgetArgs.Margin);
+	TextLayout->SetJustification(InWidgetArgs.Justification);
+	TextLayout->SetLineHeightPercentage(InWidgetArgs.LineHeightPercentage);
+	TextLayout->SetApplyLineHeightToBottomLine(InWidgetArgs.ApplyLineHeightToBottomLine);
+
+	// Has the transform policy changed? If so we need a full refresh as that is destructive to the model text
+	if (PreviousTransformPolicy != TextLayout->GetTransformPolicy())
+	{
+		Marshaller->MakeDirty();
+	}
+
+	{
+		bool bRequiresTextUpdate = false;
+		const FText& TextToSet = InWidgetArgs.Text;
+		if (!TextLastUpdate.IdenticalTo(TextToSet))
+		{
+			// The pointer used by the bound text has changed, however the text may still be the same - check that now
+			if (!TextLastUpdate.IsDisplayStringEqualTo(TextToSet))
+			{
+				// The source text has changed, so update the internal text
+				bRequiresTextUpdate = true;
+			}
+
+			// Update this even if the text is lexically identical, as it will update the pointer compared by IdenticalTo for the next Tick
+			TextLastUpdate = FTextSnapshot(TextToSet);
+		}
+
+		if (bRequiresTextUpdate || Marshaller->IsDirty())
+		{
+			UpdateTextLayout(TextToSet);
+		}
+	}
+
+	{
+		const FText& HighlightTextToSet = InWidgetArgs.HighlightText;
+		if (!HighlightTextLastUpdate.IdenticalTo(HighlightTextToSet))
+		{
+			// The pointer used by the bound text has changed, however the text may still be the same - check that now
+			if (!HighlightTextLastUpdate.IsDisplayStringEqualTo(HighlightTextToSet))
+			{
+				UpdateTextHighlights(HighlightTextToSet);
+			}
+
+			// Update this even if the text is lexically identical, as it will update the pointer compared by IdenticalTo for the next Tick
+			HighlightTextLastUpdate = FTextSnapshot(HighlightTextToSet);
+		}
+	}
+
+	// We need to update our size if the text layout has become dirty
+	TextLayout->UpdateIfNeeded();
+
+	return TextLayout->GetSize();
+}
+
+FVector2D FSlateTextBlockLayout::ComputeDesiredSize(const FWidgetDesiredSizeArgs& InWidgetArgs, const float InScale, const FTextBlockStyle& InTextStyle)
+{
+	ConditionallyUpdateTextStyle(InTextStyle);
+	return ComputeDesiredSize(InWidgetArgs, InScale);
+}
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 FVector2D FSlateTextBlockLayout::ComputeDesiredSize(const FWidgetArgs& InWidgetArgs, const float InScale, const FTextBlockStyle& InTextStyle)
 {
 	// Cache the wrapping rules so that we can recompute the wrap at width in paint.
@@ -41,6 +160,7 @@ FVector2D FSlateTextBlockLayout::ComputeDesiredSize(const FWidgetArgs& InWidgetA
 	TextLayout->SetMargin(InWidgetArgs.Margin.Get());
 	TextLayout->SetJustification(InWidgetArgs.Justification.Get());
 	TextLayout->SetLineHeightPercentage(InWidgetArgs.LineHeightPercentage.Get());
+	TextLayout->SetApplyLineHeightToBottomLine(true);
 
 	// Has the transform policy changed? If so we need a full refresh as that is destructive to the model text
 	if (PreviousTransformPolicy != TextLayout->GetTransformPolicy())
@@ -97,6 +217,7 @@ FVector2D FSlateTextBlockLayout::ComputeDesiredSize(const FWidgetArgs& InWidgetA
 
 	return TextLayout->GetSize();
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 FVector2D FSlateTextBlockLayout::GetDesiredSize() const
 {
@@ -111,7 +232,7 @@ float FSlateTextBlockLayout::GetLayoutScale() const
 int32 FSlateTextBlockLayout::OnPaint(const FPaintArgs& InPaintArgs, const FGeometry& InAllottedGeometry, const FSlateRect& InClippingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled)
 {
 	// Store a new cached size with the scale
-	CachedSize = InAllottedGeometry.GetLocalSize();
+	CachedSize = FVector2f(InAllottedGeometry.GetLocalSize());
 
 	// Recompute wrapping in case the cached size changed.
 	TextLayout->SetWrappingWidth(CalculateWrappingWidth());
@@ -142,7 +263,7 @@ int32 FSlateTextBlockLayout::OnPaint(const FPaintArgs& InPaintArgs, const FGeome
 		}
 	}
 
-	TextLayout->SetVisibleRegion(CachedSize, AutoScrollValue * TextLayout->GetScale());
+	TextLayout->SetVisibleRegion(FVector2D(CachedSize), AutoScrollValue * TextLayout->GetScale());
 	TextLayout->UpdateIfNeeded();
 
 	return TextLayout->OnPaint(InPaintArgs, InAllottedGeometry, InClippingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
@@ -180,6 +301,11 @@ void FSlateTextBlockLayout::SetTextShapingMethod(const TOptional<ETextShapingMet
 void FSlateTextBlockLayout::SetTextFlowDirection(const TOptional<ETextFlowDirection>& InTextFlowDirection)
 {
 	TextLayout->SetTextFlowDirection((InTextFlowDirection.IsSet()) ? InTextFlowDirection.GetValue() : GetDefaultTextFlowDirection());
+}
+
+void FSlateTextBlockLayout::SetTextOverflowPolicy(const TOptional<ETextOverflowPolicy> InTextOverflowPolicy)
+{
+	TextLayout->SetTextOverflowPolicy(InTextOverflowPolicy);
 }
 
 void FSlateTextBlockLayout::SetDebugSourceInfo(const TAttribute<FString>& InDebugSourceInfo)
@@ -254,14 +380,13 @@ void FSlateTextBlockLayout::UpdateTextHighlights(const FText& InHighlightText)
 bool FSlateTextBlockLayout::IsStyleUpToDate(const FTextBlockStyle& NewStyle) const
 {
 	const FTextBlockStyle& CurrentStyle = TextLayout->GetDefaultTextStyle();
+	return CurrentStyle.IsIdenticalTo(NewStyle);
+}
 
-	return (CurrentStyle.Font.IsIdenticalTo(NewStyle.Font)) 
-		&& (CurrentStyle.ColorAndOpacity == NewStyle.ColorAndOpacity)
-		&& (CurrentStyle.ShadowOffset == NewStyle.ShadowOffset)
-		&& (CurrentStyle.ShadowColorAndOpacity == NewStyle.ShadowColorAndOpacity)
-		&& (CurrentStyle.SelectedBackgroundColor == NewStyle.SelectedBackgroundColor)
-		&& (CurrentStyle.HighlightColor == NewStyle.HighlightColor)
-		&& (CurrentStyle.HighlightShape == NewStyle.HighlightShape);
+bool FSlateTextBlockLayout::IsStyleUpToDate(const FTextBlockStyle::CompareParams& InNewStyleParams) const
+{
+	const FTextBlockStyle& CurrentStyle = TextLayout->GetDefaultTextStyle();
+	return CurrentStyle.IsIdenticalTo(InNewStyleParams);
 }
 
 float FSlateTextBlockLayout::CalculateWrappingWidth() const

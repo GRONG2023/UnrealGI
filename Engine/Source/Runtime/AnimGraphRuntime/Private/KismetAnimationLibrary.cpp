@@ -7,6 +7,8 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "TwoBoneIK.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(KismetAnimationLibrary)
+
 #define LOCTEXT_NAMESPACE "UKismetAnimationLibrary"
 
 //////////////////////////////////////////////////////////////////////////
@@ -65,11 +67,11 @@ float UKismetAnimationLibrary::K2_DistanceBetweenTwoSocketsAndMapRange(const USk
 		FTransform SocketTransformA = Component->GetSocketTransform(SocketOrBoneNameA, SocketSpaceA);
 		FTransform SocketTransformB = Component->GetSocketTransform(SocketOrBoneNameB, SocketSpaceB);
 
-		float Distance = (SocketTransformB.GetLocation() - SocketTransformA.GetLocation()).Size();
+		const float Distance = static_cast<float>((SocketTransformB.GetLocation() - SocketTransformA.GetLocation()).Size());
 
 		if (bRemapRange)
 		{
-			return FMath::GetMappedRangeValueClamped(FVector2D(InRangeMin, InRangeMax), FVector2D(OutRangeMin, OutRangeMax), Distance);
+			return FMath::GetMappedRangeValueClamped(FVector2f(InRangeMin, InRangeMax), FVector2f(OutRangeMin, OutRangeMax), Distance);
 		}
 		else
 		{
@@ -105,7 +107,7 @@ FVector UKismetAnimationLibrary::K2_MakePerlinNoiseVectorAndRemap(float X, float
 float UKismetAnimationLibrary::K2_MakePerlinNoiseAndRemap(float Value, float RangeOutMin, float RangeOutMax)
 {
 	// perlin noise output is always from [-1, 1]
-	return FMath::GetMappedRangeValueClamped(FVector2D(-1.f, 1.f), FVector2D(RangeOutMin, RangeOutMax), FMath::PerlinNoise1D(Value));
+	return FMath::GetMappedRangeValueClamped(FVector2f(-1.f, 1.f), FVector2f(RangeOutMin, RangeOutMax), FMath::PerlinNoise1D(Value));
 }
 
 float UKismetAnimationLibrary::K2_CalculateVelocityFromPositionHistory(
@@ -143,7 +145,7 @@ float UKismetAnimationLibrary::K2_CalculateVelocityFromPositionHistory(
 	}
 	else
 	{
-		float LengthOfV = ((Position - History.Positions[History.LastIndex]) / DeltaSeconds).Size();
+		const float LengthOfV = static_cast<float>(((Position - History.Positions[History.LastIndex]) / DeltaSeconds).Size());
 
 		if (History.Positions.Num() == NumberOfSamples)
 		{
@@ -215,26 +217,37 @@ float UKismetAnimationLibrary::K2_CalculateVelocityFromSockets(
 	return VelocityMin;
 }
 
+struct FK2ProfilingTimer
+{
+	double LastTime;
+	double AccummulatedTime;
+};
 
-TArray<UKismetAnimationLibrary::FK2ProfilingTimer> UKismetAnimationLibrary::sProfilingTimers;
+class FProfilingTimerPerThread : public TThreadSingleton<FProfilingTimerPerThread>
+{
+public:
+	TArray<FK2ProfilingTimer> ProfilingTimers;
+};
 
 void UKismetAnimationLibrary::K2_StartProfilingTimer()
 {
 	FK2ProfilingTimer Timer;
 	Timer.LastTime = FPlatformTime::Seconds() * 1000.0;
 	Timer.AccummulatedTime = 0.0;
-	sProfilingTimers.Add(Timer);
+	FProfilingTimerPerThread::Get().ProfilingTimers.Add(Timer);
 }
 
 float UKismetAnimationLibrary::K2_EndProfilingTimer(bool bLog, const FString& LogPrefix)
 {
-	if (sProfilingTimers.Num() == 0)
+	TArray<FK2ProfilingTimer>& ProfilingTimers = FProfilingTimerPerThread::Get().ProfilingTimers;
+	
+	if (ProfilingTimers.Num() == 0)
 	{
 		UE_LOG(LogAnimation, Warning, TEXT("Unbalanced use of Start & End Profiling Timer nodes."));
 		return 0.f;
 	}
 
-	FK2ProfilingTimer Timer = sProfilingTimers.Pop();
+	FK2ProfilingTimer Timer = ProfilingTimers.Pop();
 	double CurrentTimer = FPlatformTime::Seconds() * 1000.0;
 	Timer.AccummulatedTime = CurrentTimer - Timer.LastTime;
 
@@ -254,5 +267,33 @@ float UKismetAnimationLibrary::K2_EndProfilingTimer(bool bLog, const FString& Lo
 	return Delta;
 }
 
+float UKismetAnimationLibrary::CalculateDirection(const FVector& Velocity, const FRotator& BaseRotation)
+{
+	if (!Velocity.IsNearlyZero())
+	{
+		const FMatrix RotMatrix = FRotationMatrix(BaseRotation);
+		const FVector ForwardVector = RotMatrix.GetScaledAxis(EAxis::X);
+		const FVector RightVector = RotMatrix.GetScaledAxis(EAxis::Y);
+		const FVector NormalizedVel = Velocity.GetSafeNormal2D();
+
+		// get a cos(alpha) of forward vector vs velocity
+		const float ForwardCosAngle = static_cast<float>(FVector::DotProduct(ForwardVector, NormalizedVel));
+		// now get the alpha and convert to degree
+		float ForwardDeltaDegree = FMath::RadiansToDegrees(FMath::Acos(ForwardCosAngle));
+
+		// depending on where right vector is, flip it
+		const float RightCosAngle = static_cast<float>(FVector::DotProduct(RightVector, NormalizedVel));
+		if (RightCosAngle < 0.f)
+		{
+			ForwardDeltaDegree *= -1.f;
+		}
+
+		return ForwardDeltaDegree;
+	}
+
+	return 0.f;
+}
+
 #undef LOCTEXT_NAMESPACE
+
 

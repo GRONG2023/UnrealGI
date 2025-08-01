@@ -6,11 +6,12 @@
 #include "Misc/Guid.h"
 #include "EngineDefines.h"
 #include "Engine/StaticMesh.h"
-#include "MatineeExporter.h"
+#include "CinematicExporter.h"
 #include "MovieSceneSequenceID.h"
 #include "Evaluation/MovieSceneSequenceTransform.h"
 #include "MovieSceneFwd.h"
 #include "FbxImporter.h"
+#include "INodeAndChannelMappings.h"
 #include "UObject/GCObject.h"
 #include "Animation/AnimTypes.h"
 
@@ -18,16 +19,11 @@ class ABrush;
 class ACameraActor;
 class ALandscapeProxy;
 class ALight;
-class AMatineeActor;
 class ASkeletalMeshActor;
 class IMovieScenePlayer;
 class UAnimSequence;
 class UCameraComponent;
 class UInstancedStaticMeshComponent;
-class UInterpTrackFloatProp;
-class UInterpTrackInstMove;
-class UInterpTrackMove;
-class UInterpTrackMoveAxis;
 class ULightComponent;
 class UMaterialInterface;
 class UModel;
@@ -44,14 +40,15 @@ class FColorVertexBuffer;
 class UFbxExportOption;
 struct FAnimControlTrackKey;
 struct FExpressionInput;
+struct FMovieSceneDoubleChannel;
 struct FMovieSceneFloatChannel;
 struct FMovieSceneIntegerChannel;
 struct FMovieSceneSequenceTransform;
 
 namespace UnFbx
 {
-	/** Adapter interface which allows ExportAnimTrack to act on both sequencer and matinee data. */
-	class UNREALED_API IAnimTrackAdapter
+	/** Adapter interface which allows ExportAnimTrack to act on sequencer without a tight coupling. */
+	class IAnimTrackAdapter
 	{
 	public:
 		virtual ~IAnimTrackAdapter() {};
@@ -60,37 +57,25 @@ namespace UnFbx
 		virtual int32 GetLength() const = 0;
 		/** Updates the runtime state of the animation track to the specified frame. */
 		virtual void UpdateAnimation(int32 LocalFrame) = 0;
-		virtual float GetFrameRate() const { return 1.f / DEFAULT_SAMPLERATE; }
+		virtual double GetFrameRate() const { return 1.0 / static_cast<double>(DEFAULT_SAMPLERATE); }
 		/** The anim sequence that drives this anim track */
 		virtual UAnimSequence* GetAnimSequence(int32 LocalFrame) const { return nullptr; }
 		/** The time into the anim sequence for the given LocalFrame */
 		virtual float GetAnimTime(int32 LocalFrame) const { return 0.f; }
 	};
 
-	/** An anim track adapter for matinee. */
-	class UNREALED_API FMatineeAnimTrackAdapter : public IAnimTrackAdapter
-	{
-	public:
-		FMatineeAnimTrackAdapter(AMatineeActor* InMatineeActor);
-		virtual int32 GetLocalStartFrame() const override;
-		virtual int32 GetLength() const override;
-		virtual void UpdateAnimation(int32 LocalFrame) override;
-
-	private:
-		AMatineeActor* MatineeActor;
-	};
 	/** An anim track adapter for a level sequence. */
-	class UNREALED_API FLevelSequenceAnimTrackAdapter : public IAnimTrackAdapter
+	class FLevelSequenceAnimTrackAdapter : public IAnimTrackAdapter
 	{
 	public:
-		FLevelSequenceAnimTrackAdapter(IMovieScenePlayer* InMovieScenePlayer, UMovieScene* InMovieScene, const FMovieSceneSequenceTransform& InRootToLocalTransform, UMovieSceneSkeletalAnimationTrack* InAnimTrack = nullptr);
-		virtual int32 GetLocalStartFrame() const override;
-		virtual int32 GetStartFrame() const override;
-		virtual int32 GetLength() const override;
-		virtual void UpdateAnimation(int32 LocalFrame) override;
-		virtual float GetFrameRate() const override;
-		virtual UAnimSequence* GetAnimSequence(int32 LocalFrame) const override;
-		virtual float GetAnimTime(int32 LocalFrame) const override;
+		UNREALED_API FLevelSequenceAnimTrackAdapter(IMovieScenePlayer* InMovieScenePlayer, UMovieScene* InMovieScene, const FMovieSceneSequenceTransform& InRootToLocalTransform, UMovieSceneSkeletalAnimationTrack* InAnimTrack = nullptr);
+		UNREALED_API virtual int32 GetLocalStartFrame() const override;
+		UNREALED_API virtual int32 GetStartFrame() const override;
+		UNREALED_API virtual int32 GetLength() const override;
+		UNREALED_API virtual void UpdateAnimation(int32 LocalFrame) override;
+		UNREALED_API virtual double GetFrameRate() const override;
+		UNREALED_API virtual UAnimSequence* GetAnimSequence(int32 LocalFrame) const override;
+		UNREALED_API virtual float GetAnimTime(int32 LocalFrame) const override;
 
 	private:
 		IMovieScenePlayer* MovieScenePlayer;
@@ -101,175 +86,152 @@ namespace UnFbx
 /**
  * Main FBX Exporter class.
  */
-class UNREALED_API FFbxExporter  : public MatineeExporter, public FGCObject
+class FFbxExporter : public FCinematicExporter, public FGCObject
 {
 public:
 	/**
 	 * Returns the exporter singleton. It will be created on the first request.
 	 */
-	static FFbxExporter* GetInstance();
-	static void DeleteInstance();
-	~FFbxExporter();
+	static UNREALED_API FFbxExporter* GetInstance();
+	static UNREALED_API void DeleteInstance();
+	UNREALED_API ~FFbxExporter();
 	
 	//~ FGCObject
-	virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
-
+	UNREALED_API virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FFbxExporter");
+	}
 
 	/**
 	* Load the export option from the last save state and show the dialog if bShowOptionDialog is true.
-	* FullPath is the export file path we display it in the dialog
-	* If user cancel the dialog, the OutOperationCanceled will be true
-	* bOutExportAll will be true if the user want to use the same option for all other asset he want to export
+	* FullPath is the export file path we display in the dialog.
+	* If the user cancels the dialog, the OutOperationCanceled will be true.
+	* bOutExportAll will be true if the user wants to use the same option for all other assets they want to export.
 	*
 	* The function is saving the dialog state in a user ini file and reload it from there. It is not changing the CDO.
 	*/
-	void FillExportOptions(bool BatchMode, bool bShowOptionDialog, const FString& FullPath, bool& OutOperationCanceled, bool& bOutExportAll);
+	UNREALED_API void FillExportOptions(bool BatchMode, bool bShowOptionDialog, const FString& FullPath, bool& OutOperationCanceled, bool& bOutExportAll);
 
 	/**
 	* Custom set of export options instead of UI dialog. For automation.
 	*/
-	void SetExportOptionsOverride(UFbxExportOption* OverrideOptions);
+	UNREALED_API void SetExportOptionsOverride(UFbxExportOption* OverrideOptions);
 
 	/**
 	 * Creates and readies an empty document for export.
 	 */
-	virtual void CreateDocument();
+	UNREALED_API virtual void CreateDocument();
 	
 	/**
 	 * Closes the FBX document, releasing its memory.
 	 */
-	virtual void CloseDocument();
+	UNREALED_API virtual void CloseDocument();
 	
 	/**
 	 * Writes the FBX document to disk and releases it by calling the CloseDocument() function.
 	 */
-	virtual void WriteToFile(const TCHAR* Filename);
+	UNREALED_API virtual void WriteToFile(const TCHAR* Filename);
 	
 	/**
 	 * Exports the light-specific information for a light actor.
 	 */
-	virtual void ExportLight( ALight* Actor, INodeNameAdapter& NodeNameAdapter );
+	UNREALED_API virtual void ExportLight( ALight* Actor, INodeNameAdapter& NodeNameAdapter );
 
 	/**
 	 * Exports the camera-specific information for a camera actor.
 	 */
-	virtual void ExportCamera( ACameraActor* Actor, bool bExportComponents, INodeNameAdapter& NodeNameAdapter );
+	UNREALED_API virtual void ExportCamera( ACameraActor* Actor, bool bExportComponents, INodeNameAdapter& NodeNameAdapter );
 
 	/**
 	 * Exports the mesh and the actor information for a brush actor.
 	 */
-	virtual void ExportBrush(ABrush* Actor, UModel* InModel, bool bConvertToStaticMesh, INodeNameAdapter& NodeNameAdapter );
+	UNREALED_API virtual void ExportBrush(ABrush* Actor, UModel* InModel, bool bConvertToStaticMesh, INodeNameAdapter& NodeNameAdapter );
 
 	/**
 	 * Exports the basic scene information to the FBX document.
 	 */
-	virtual void ExportLevelMesh( ULevel* InLevel, bool bSelectedOnly, INodeNameAdapter& NodeNameAdapter , bool bSaveAnimSeq = true);
+	UNREALED_API virtual void ExportLevelMesh( ULevel* InLevel, bool bSelectedOnly, INodeNameAdapter& NodeNameAdapter , bool bSaveAnimSeq = true);
 
 	/**
 	* Exports the basic scene information to the FBX document, using the passed in Actors
 	*/
-	virtual void ExportLevelMesh(ULevel* InLevel, bool bExportLevelGeometry, TArray<AActor*>& ActorToExport, INodeNameAdapter& NodeNameAdapter, bool bSaveAnimSeq = true);
+	UNREALED_API virtual void ExportLevelMesh(ULevel* InLevel, bool bExportLevelGeometry, TArray<AActor*>& ActorToExport, INodeNameAdapter& NodeNameAdapter, bool bSaveAnimSeq = true);
 
-
-	/**
-	 * Exports the given Matinee sequence information into a FBX document.
-	 * 
-	 * @return	true, if sucessful
-	 */
-	virtual bool ExportMatinee(class AMatineeActor* InMatineeActor);
 
 	/**
 	 * Exports the given level sequence information into a FBX document.
 	 *
 	 * @return	true, if successful
 	 */
-	bool ExportLevelSequence(UMovieScene* MovieScene, const TArray<FGuid>& InBindings, IMovieScenePlayer* MovieScenePlayer, INodeNameAdapter& NodeNameAdapter, FMovieSceneSequenceIDRef SequenceID, const FMovieSceneSequenceTransform& RootToLocalTransform);
+	UNREALED_API bool ExportLevelSequence(UMovieScene* MovieScene, const TArray<FGuid>& InBindings, IMovieScenePlayer* MovieScenePlayer, INodeNameAdapter& NodeNameAdapter, FMovieSceneSequenceIDRef SequenceID, const FMovieSceneSequenceTransform& RootToLocalTransform);
 
+	/** Add timecode attributes to the given fbx node and add a key at the sequence playback start, using the timecode of the source section */
+	UNREALED_API void AddTimecodeAttributesAndSetKey(const UMovieSceneSection* InSection, FbxNode* InFbxNode, const FMovieSceneSequenceTransform& RootToLocalTransform);
+
+	/** Export an FBX from the given control rig section. Optionally remapping and filtering controls. */
+	UNREALED_API bool ExportControlRigSection(const UMovieSceneSection* Section, const TArray<FControlRigFbxNodeMapping>& ChannelsMapping, const TArray<FName>& FilterControls, const FMovieSceneSequenceTransform& RootToLocalTransform);
+	
 	/**
 	 * Exports the given level sequence track information into a FBX document.
 	 *
 	 * @return	true, if successful
 	 */
-	bool ExportLevelSequenceTracks(UMovieScene* MovieScene, IMovieScenePlayer* MovieScenePlayer, FMovieSceneSequenceIDRef InSequenceID, FbxNode* FbxActor, UObject* BoundObject, const TArray<UMovieSceneTrack*>& Tracks, const FMovieSceneSequenceTransform& RootToLocalTransform);
-
-	/**
-	 * Exports all the animation sequences part of a single Group in a Matinee sequence
-	 * as a single animation in the FBX document.  The animation is created by sampling the
-	 * sequence at 30 updates/second and extracting the resulting bone transforms from the given
-	 * skeletal mesh
-	 * @param MatineeSequence The Matinee Sequence containing the group to export
-	 * @param SkeletalMeshComponent The Skeletal mesh that the animations from the Matinee group are applied to
-	 */
-	virtual void ExportMatineeGroup(class AMatineeActor* MatineeActor, USkeletalMeshComponent* SkeletalMeshComponent);
+	UNREALED_API bool ExportLevelSequenceTracks(UMovieScene* MovieScene, IMovieScenePlayer* MovieScenePlayer, FMovieSceneSequenceIDRef InSequenceID, FbxNode* FbxActor, UObject* BoundObject, const TArray<UMovieSceneTrack*>& Tracks, const FMovieSceneSequenceTransform& RootToLocalTransform);
 
 
 	/**
 	 * Exports the mesh and the actor information for a static mesh actor.
 	 */
-	virtual void ExportStaticMesh( AActor* Actor, UStaticMeshComponent* StaticMeshComponent, INodeNameAdapter& NodeNameAdapter );
+	UNREALED_API virtual void ExportStaticMesh( AActor* Actor, UStaticMeshComponent* StaticMeshComponent, INodeNameAdapter& NodeNameAdapter );
 
 	/**
 	 * Exports a static mesh
 	 * @param StaticMesh	The static mesh to export
 	 * @param MaterialOrder	Optional ordering of materials to set up correct material ID's across multiple meshes being export such as BSP surfaces which share common materials. Should be used sparingly
 	 */
-	virtual void ExportStaticMesh( UStaticMesh* StaticMesh, const TArray<FStaticMaterial>* MaterialOrder = NULL );
+	UNREALED_API virtual void ExportStaticMesh( UStaticMesh* StaticMesh, const TArray<FStaticMaterial>* MaterialOrder = nullptr );
 
 	/**
 	 * Exports BSP
 	 * @param Model			 The model with BSP to export
 	 * @param bSelectedOnly  true to export only selected surfaces (or brushes)
 	 */
-	virtual void ExportBSP( UModel* Model, bool bSelectedOnly );
+	UNREALED_API virtual void ExportBSP( UModel* Model, bool bSelectedOnly );
 
 	/**
 	 * Exports a static mesh light map
 	 */
-	virtual void ExportStaticMeshLightMap( UStaticMesh* StaticMesh, int32 LODIndex, int32 UVChannel );
+	UNREALED_API virtual void ExportStaticMeshLightMap( UStaticMesh* StaticMesh, int32 LODIndex, int32 UVChannel );
 
 	/**
 	 * Exports a skeletal mesh
 	 */
-	virtual void ExportSkeletalMesh( USkeletalMesh* SkeletalMesh );
+	UNREALED_API virtual void ExportSkeletalMesh( USkeletalMesh* SkeletalMesh );
 
 	/**
 	 * Exports the mesh and the actor information for a skeletal mesh actor.
 	 */
-	virtual void ExportSkeletalMesh( AActor* Actor, USkeletalMeshComponent* SkeletalMeshComponent, INodeNameAdapter& NodeNameAdapter );
+	UNREALED_API virtual void ExportSkeletalMesh( AActor* Actor, USkeletalMeshComponent* SkeletalMeshComponent, INodeNameAdapter& NodeNameAdapter );
 	
 	/**
 	 * Exports the mesh and the actor information for a landscape actor.
 	 */
-	void ExportLandscape(ALandscapeProxy* Landscape, bool bSelectedOnly, INodeNameAdapter& NodeNameAdapter);
+	UNREALED_API void ExportLandscape(ALandscapeProxy* Landscape, bool bSelectedOnly, INodeNameAdapter& NodeNameAdapter);
 
 	/**
 	 * Exports a single UAnimSequence, and optionally a skeletal mesh
 	 */
-	FbxNode* ExportAnimSequence( const UAnimSequence* AnimSeq, const USkeletalMesh* SkelMesh, bool bExportSkelMesh, const TCHAR* MeshNames=NULL, FbxNode* ActorRootNode=NULL, const TArray<UMaterialInterface*>* OverrideMaterials = nullptr);
-
-	/**
-	 * Exports the list of UAnimSequences as a single animation based on the settings in the TrackKeys
-	 */
-	void ExportAnimSequencesAsSingle( USkeletalMesh* SkelMesh, const ASkeletalMeshActor* SkelMeshActor, const FString& ExportName, const TArray<UAnimSequence*>& AnimSeqList, const TArray<FAnimControlTrackKey>& TrackKeys );
-
-	/** A node name adapter for matinee. */
-	class UNREALED_API FMatineeNodeNameAdapter : public INodeNameAdapter
-	{
-	public:
-		FMatineeNodeNameAdapter( AMatineeActor* InMatineeActor );
-		virtual FString GetActorNodeName(const AActor* InActor) override;
-	private:
-		AMatineeActor* MatineeActor;
-	};
+	UNREALED_API FbxNode* ExportAnimSequence( const UAnimSequence* AnimSeq, const USkeletalMesh* SkelMesh, bool bExportSkelMesh, const TCHAR* MeshNames=nullptr, FbxNode* ActorRootNode=nullptr, const TArray<UMaterialInterface*>* OverrideMaterials = nullptr);
 
 	/** A node name adapter for a level sequence. */
-	class UNREALED_API FLevelSequenceNodeNameAdapter : public INodeNameAdapter
+	class FLevelSequenceNodeNameAdapter : public INodeNameAdapter
 	{
 	public:
-		FLevelSequenceNodeNameAdapter( UMovieScene* InMovieScene, IMovieScenePlayer* InMovieScenePlayer, FMovieSceneSequenceIDRef InSequenceID);
-		virtual FString GetActorNodeName(const AActor* InActor) override;
-		virtual void AddFbxNode(UObject* InObject, FbxNode* InFbxNode) override;
-		virtual FbxNode* GetFbxNode(UObject* InObject) override;
+		UNREALED_API FLevelSequenceNodeNameAdapter( UMovieScene* InMovieScene, IMovieScenePlayer* InMovieScenePlayer, FMovieSceneSequenceIDRef InSequenceID);
+		UNREALED_API virtual FString GetActorNodeName(const AActor* InActor) override;
+		UNREALED_API virtual void AddFbxNode(UObject* InObject, FbxNode* InFbxNode) override;
+		UNREALED_API virtual FbxNode* GetFbxNode(UObject* InObject) override;
 	private:
 		UMovieScene* MovieScene;
 		IMovieScenePlayer* MovieScenePlayer;
@@ -278,18 +240,18 @@ public:
 	};
 
 	/* Get a valid unique name from a name */
-	FString GetFbxObjectName(const FString &FbxObjectNode, INodeNameAdapter& NodeNameAdapter);
+	UNREALED_API FString GetFbxObjectName(const FString &FbxObjectNode, INodeNameAdapter& NodeNameAdapter);
 
 	/**
 	 * Exports the basic information about an actor and buffers it.
 	 * This function creates one FBX node for the actor with its placement.
 	 */
-	FbxNode* ExportActor(AActor* Actor, bool bExportComponents, INodeNameAdapter& NodeNameAdapter, bool bSaveAnimSeq = true);
+	UNREALED_API FbxNode* ExportActor(AActor* Actor, bool bExportComponents, INodeNameAdapter& NodeNameAdapter, bool bSaveAnimSeq = true);
 
 private:
-	FFbxExporter();
+	UNREALED_API FFbxExporter();
 
-	static TSharedPtr<FFbxExporter> StaticInstance;
+	static UNREALED_API TSharedPtr<FFbxExporter> StaticInstance;
 
 	FbxManager* SdkManager;
 	FbxScene* Scene;
@@ -307,24 +269,22 @@ private:
 	TMap<const UStaticMesh*, FbxMesh*> FbxCollisionMeshes;
 
 	/** The frames-per-second (FPS) used when baking transforms */
-	static const float BakeTransformsFPS;
+	static UNREALED_API const float BakeTransformsFPS;
 	
 	/** Whether or not to export vertices unwelded */
-	static bool bStaticMeshExportUnWeldedVerts;
+	static UNREALED_API bool bStaticMeshExportUnWeldedVerts;
 
-	UFbxExportOption *ExportOptionsUI;
-	UFbxExportOption *ExportOptionsOverride;
+	TObjectPtr<UFbxExportOption> ExportOptionsUI;
+	TObjectPtr<UFbxExportOption> ExportOptionsOverride;
 
 	/**
 	* Export Anim Track of the given SkeletalMeshComponent
 	*/
-	void ExportAnimTrack( IAnimTrackAdapter& AnimTrackAdapter, AActor* Actor, USkeletalMeshComponent* SkeletalMeshComponent, float SamplingRate );
+	UNREALED_API void ExportAnimTrack( IAnimTrackAdapter& AnimTrackAdapter, AActor* Actor, USkeletalMeshComponent* SkeletalMeshComponent, double SamplingRate );
 
-	void ExportModel(UModel* Model, FbxNode* Node, const char* Name);
-	
-#if (WITH_PHYSX && PHYSICS_INTERFACE_PHYSX) || WITH_CHAOS
-	FbxNode* ExportCollisionMesh(const UStaticMesh* StaticMesh, const TCHAR* MeshName, FbxNode* ParentActor);
-#endif
+	UNREALED_API void ExportModel(UModel* Model, FbxNode* Node, const char* Name);
+
+	UNREALED_API FbxNode* ExportCollisionMesh(const UStaticMesh* StaticMesh, const TCHAR* MeshName, FbxNode* ParentActor);
 
 	/**
 	 * Exports a static mesh
@@ -337,7 +297,24 @@ private:
 	 * @param MaterialOrderOverride	Optional ordering of materials to set up correct material ID's across multiple meshes being export such as BSP surfaces which share common materials. Should be used sparingly
 	 * @param OverrideMaterials	Optional array of materials to be used instead of the static mesh materials. Used for material overrides in static mesh components.
 	 */
-	FbxNode* ExportStaticMeshToFbx(const UStaticMesh* StaticMesh, int32 ExportLOD, const TCHAR* MeshName, FbxNode* FbxActor, int32 LightmapUVChannel = -1, const FColorVertexBuffer* ColorBuffer = NULL, const TArray<FStaticMaterial>* MaterialOrderOverride = NULL, const TArray<UMaterialInterface*>* OverrideMaterials = NULL);
+	UNREALED_API FbxNode* ExportStaticMeshToFbx(const UStaticMesh* StaticMesh, int32 ExportLOD, const TCHAR* MeshName, FbxNode* FbxActor, int32 LightmapUVChannel = -1, const FColorVertexBuffer* ColorBuffer = nullptr, const TArray<FStaticMaterial>* MaterialOrderOverride = nullptr, const TArray<UMaterialInterface*>* OverrideMaterials = nullptr);
+
+	UNREALED_API bool ExportStaticMeshFromMeshDescription(FbxMesh* Mesh
+		, const UStaticMesh* StaticMesh
+		, const FMeshDescription* MeshDescription
+		, FbxNode* FbxActor
+		, int32 LightmapUVChannel
+		, const TArray<FStaticMaterial>* MaterialOrderOverride
+		, const TArray<UMaterialInterface*>* OverrideMaterials);
+
+	UNREALED_API bool ExportStaticMeshFromRenderData(FbxMesh* Mesh
+		, const UStaticMesh* StaticMesh
+		, const FStaticMeshLODResources& RenderMesh
+		, FbxNode* FbxActor
+		, int32 LightmapUVChannel
+		, const FColorVertexBuffer* ColorBuffer
+		, const TArray<FStaticMaterial>* MaterialOrderOverride
+		, const TArray<UMaterialInterface*>* OverrideMaterials);
 
 	/**
 	 * Exports a spline mesh
@@ -345,7 +322,7 @@ private:
 	 * @param MeshName		The name of the mesh for the FBX file
 	 * @param FbxActor		The fbx node representing the mesh
 	 */
-	void ExportSplineMeshToFbx(const USplineMeshComponent* SplineMeshComp, const TCHAR* MeshName, FbxNode* FbxActor);
+	UNREALED_API void ExportSplineMeshToFbx(const USplineMeshComponent* SplineMeshComp, const TCHAR* MeshName, FbxNode* FbxActor);
 
 	/**
 	 * Exports an instanced mesh
@@ -353,7 +330,7 @@ private:
 	 * @param MeshName		The name of the mesh for the FBX file
 	 * @param FbxActor		The fbx node representing the mesh
 	 */
-	void ExportInstancedMeshToFbx(const UInstancedStaticMeshComponent* InstancedMeshComp, const TCHAR* MeshName, FbxNode* FbxActor);
+	UNREALED_API void ExportInstancedMeshToFbx(const UInstancedStaticMeshComponent* InstancedMeshComp, const TCHAR* MeshName, FbxNode* FbxActor);
 
 	/**
 	* Exports a landscape
@@ -361,7 +338,7 @@ private:
 	* @param MeshName		The name of the mesh for the FBX file
 	* @param FbxActor		The fbx node representing the mesh
 	*/
-	void ExportLandscapeToFbx(ALandscapeProxy* Landscape, const TCHAR* MeshName, FbxNode* FbxActor, bool bSelectedOnly);
+	UNREALED_API void ExportLandscapeToFbx(ALandscapeProxy* Landscape, const TCHAR* MeshName, FbxNode* FbxActor, bool bSelectedOnly);
 
 	/**
 	* Fill an fbx light with from a unreal light component
@@ -369,7 +346,7 @@ private:
 	* @param Camera				Fbx light object
 	* @param CameraComponent	Unreal light component
 	*/
-	void FillFbxLightAttribute(FbxLight* Light, FbxNode* FbxParentNode, ULightComponent* BaseLight);
+	UNREALED_API void FillFbxLightAttribute(FbxLight* Light, FbxNode* FbxParentNode, ULightComponent* BaseLight);
 
 	/**
 	* Fill an fbx camera with from a unreal camera component
@@ -377,13 +354,13 @@ private:
 	* @param Camera				Fbx camera object
 	* @param CameraComponent	Unreal camera component
 	*/
-	void FillFbxCameraAttribute(FbxNode* ParentNode, FbxCamera* Camera, UCameraComponent *CameraComponent);
+	UNREALED_API void FillFbxCameraAttribute(FbxNode* ParentNode, FbxCamera* Camera, UCameraComponent *CameraComponent);
 
 	/**
 	 * Adds FBX skeleton nodes to the FbxScene based on the skeleton in the given USkeletalMesh, and fills
 	 * the given array with the nodes created
 	 */
-	FbxNode* CreateSkeleton(const USkeletalMesh* SkelMesh, TArray<FbxNode*>& BoneNodes);
+	UNREALED_API FbxNode* CreateSkeleton(const USkeletalMesh* SkelMesh, TArray<FbxNode*>& BoneNodes);
 
 	/**
 	 * Adds an Fbx Mesh to the FBX scene based on the data in the given FSkeletalMeshLODModel
@@ -393,89 +370,80 @@ private:
 	 * @param AnimSeq			If an AnimSeq is provided and are exporting MorphTarget, the MorphTarget animation will be exported as well.
 	 * @param OverrideMaterials Optional array of materials to be used instead of the skeletal mesh materials. Used for material overrides in skeletal mesh components.
 	 */
-	FbxNode* CreateMesh(const USkeletalMesh* SkelMesh, const TCHAR* MeshName, int32 LODIndex, const UAnimSequence* AnimSeq = nullptr, const TArray<UMaterialInterface*>* OverrideMaterials = nullptr);
+	UNREALED_API FbxNode* CreateMesh(const USkeletalMesh* SkelMesh, const TCHAR* MeshName, int32 LODIndex, const UAnimSequence* AnimSeq = nullptr, const TArray<UMaterialInterface*>* OverrideMaterials = nullptr);
 
 	/**
 	 * Adds Fbx Clusters necessary to skin a skeletal mesh to the bones in the BoneNodes list
 	 */
-	void BindMeshToSkeleton(const USkeletalMesh* SkelMesh, FbxNode* MeshRootNode, TArray<FbxNode*>& BoneNodes, int32 LODIndex);
+	UNREALED_API void BindMeshToSkeleton(const USkeletalMesh* SkelMesh, FbxNode* MeshRootNode, TArray<FbxNode*>& BoneNodes, int32 LODIndex);
 
 	/**
 	 * Add a bind pose to the scene based on the FbxMesh and skinning settings of the given node
 	 */
-	void CreateBindPose(FbxNode* MeshRootNode);
+	UNREALED_API void CreateBindPose(FbxNode* MeshRootNode);
 
 	/**
 	 * Add the given skeletal mesh to the Fbx scene in preparation for exporting.  Makes all new nodes a child of the given node
 	 */
-	FbxNode* ExportSkeletalMeshToFbx(const USkeletalMesh* SkelMesh, const UAnimSequence* AnimSeq, const TCHAR* MeshName, FbxNode* ActorRootNode, const TArray<UMaterialInterface*>* OverrideMaterials = nullptr);
+	UNREALED_API FbxNode* ExportSkeletalMeshToFbx(const USkeletalMesh* SkelMesh, const UAnimSequence* AnimSeq, const TCHAR* MeshName, FbxNode* ActorRootNode, const TArray<UMaterialInterface*>* OverrideMaterials = nullptr);
 
 	/** Export SkeletalMeshComponent */
-	void ExportSkeletalMeshComponent(USkeletalMeshComponent* SkelMeshComp, const TCHAR* MeshName, FbxNode* ActorRootNode, INodeNameAdapter& NodeNameAdapter, bool bSaveAnimSeq = true);
+	UNREALED_API void ExportSkeletalMeshComponent(USkeletalMeshComponent* SkelMeshComp, const TCHAR* MeshName, FbxNode* ActorRootNode, INodeNameAdapter& NodeNameAdapter, bool bSaveAnimSeq = true);
 
 	/** Initializing the AnimStack playrate from the AnimSequence */
-	bool SetupAnimStack(const UAnimSequence* AnimSeq);
+	UNREALED_API bool SetupAnimStack(const UAnimSequence* AnimSeq);
 
 	/**
 	 * Add the given animation sequence as rotation and translation tracks to the given list of bone nodes
 	 */
-	void ExportAnimSequenceToFbx(const UAnimSequence* AnimSeq, const USkeletalMesh* SkelMesh, TArray<FbxNode*>& BoneNodes, FbxAnimLayer* AnimLayer,
+	UNREALED_API void ExportAnimSequenceToFbx(const UAnimSequence* AnimSeq, const USkeletalMesh* SkelMesh, TArray<FbxNode*>& BoneNodes, FbxAnimLayer* AnimLayer, FFrameTime StartFrameTime, FFrameTime EndFrameTime, float FrameRateScale, float StartTime);
+
+	UE_DEPRECATED(5.1, "ExportAnimSequenceToFbx is deprecated, use different signature")
+	UNREALED_API void ExportAnimSequenceToFbx(const UAnimSequence* AnimSeq, const USkeletalMesh* SkelMesh, TArray<FbxNode*>& BoneNodes, FbxAnimLayer* AnimLayer,
 		float AnimStartOffset, float AnimEndOffset, float AnimPlayRate, float StartTime);
 
 	/**
 	 * Add the custom Curve data to the FbxAnimCurves passed in parameter by matching their name to the skeletal mesh custom curves.
 	 */
-	void ExportCustomAnimCurvesToFbx(const TMap<FName, FbxAnimCurve*>& CustomCurves, const UAnimSequence* AnimSeq,
+	UNREALED_API void ExportCustomAnimCurvesToFbx(const TMap<FName, FbxAnimCurve*>& CustomCurves, const UAnimSequence* AnimSeq,
+		FFrameTime AnimStartOffset, FFrameTime AnimEndOffset, float FrameRateScale, float StartTime, float ValueScale = 1.f);
+	
+	UE_DEPRECATED(5.1, "ExportCustomAnimCurvesToFbx is deprecated, use different signature")
+	UNREALED_API void ExportCustomAnimCurvesToFbx(const TMap<FName, FbxAnimCurve*>& CustomCurves, const UAnimSequence* AnimSeq,
 		float AnimStartOffset, float AnimEndOffset, float AnimPlayRate, float StartTime, float ValueScale = 1.f);
 
 	/**
 	 * Used internally to reuse the AnimSequence iteration code when exporting various kind of curves.
 	 */
-	void IterateInsideAnimSequence(const UAnimSequence* AnimSeq, float AnimStartOffset, float AnimEndOffset, float AnimPlayRate, float StartTime, TFunctionRef<void(float, FbxTime, bool)> IterationLambda);
+	UNREALED_API void IterateInsideAnimSequence(const UAnimSequence* AnimSeq, FFrameTime StartFrameTime, FFrameTime EndFrameTime, float FrameRateScale, float StartTime, TFunctionRef<void(double, FbxTime, bool)> IterationLambda);
+
+	UE_DEPRECATED(5.1, "IterateInsideAnimSequence is deprecated, use different signature")
+	UNREALED_API void IterateInsideAnimSequence(const UAnimSequence* AnimSeq, float AnimStartOffset, float AnimEndOffset, float AnimPlayRate, float StartTime, TFunctionRef<void(float, FbxTime, bool)> IterationLambda);
 
 	/** 
 	 * The curve code doesn't differentiate between angles and other data, so an interpolation from 179 to -179
 	 * will cause the bone to rotate all the way around through 0 degrees.  So here we make a second pass over the 
 	 * rotation tracks to convert the angles into a more interpolation-friendly format.  
 	 */
-	void CorrectAnimTrackInterpolation( TArray<FbxNode*>& BoneNodes, FbxAnimLayer* AnimLayer );
-
-	/**
-	 * Exports the Matinee movement track into the FBX animation stack.
-	 */
-	void ExportMatineeTrackMove(FbxNode* FbxActor, UInterpTrackInstMove* MoveTrackInst, UInterpTrackMove* MoveTrack, float InterpLength);
-
-	/**
-	 * Exports the Matinee float property track into the FBX animation stack.
-	 */
-	void ExportMatineeTrackFloatProp(FbxNode* FbxActor, UInterpTrackFloatProp* PropTrack);
-
-	/**
-	 * Exports a given interpolation curve into the FBX animation curve.
-	 */
-	void ExportAnimatedVector(FbxAnimCurve* FbxCurve, const ANSICHAR* ChannelName, UInterpTrackMove* MoveTrack, UInterpTrackInstMove* MoveTrackInst, bool bPosCurve, int32 CurveIndex, bool bNegative, float InterpLength);
-	
-	/**
-	 * Exports a movement subtrack to an FBX curve
-	 */
-	void ExportMoveSubTrack(FbxAnimCurve* FbxCurve, const ANSICHAR* ChannelName, UInterpTrackMoveAxis* SubTrack, UInterpTrackInstMove* MoveTrackInst, bool bPosCurve, int32 CurveIndex, bool bNegative, float InterpLength);
-	
-	void ExportAnimatedFloat(FbxProperty* FbxProperty, FInterpCurveFloat* Curve, bool IsCameraFoV);
+	UNREALED_API void CorrectAnimTrackInterpolation( TArray<FbxNode*>& BoneNodes, FbxAnimLayer* AnimLayer );
 
 	/**
 	 * Exports a level sequence 3D transform track into the FBX animation stack.
 	 */
-	void ExportLevelSequence3DTransformTrack(FbxNode* FbxActor, IMovieScenePlayer* MovieScenePlayer, FMovieSceneSequenceIDRef InSequenceID, UMovieScene3DTransformTrack& TransformTrack, UObject* BoundObject, const TRange<FFrameNumber>& InPlaybackRange, const FMovieSceneSequenceTransform& RootToLocalTransform);
+	UNREALED_API void ExportLevelSequence3DTransformTrack(FbxNode* FbxActor, IMovieScenePlayer* MovieScenePlayer, FMovieSceneSequenceIDRef InSequenceID, UMovieScene3DTransformTrack& TransformTrack, UObject* BoundObject, const TRange<FFrameNumber>& InPlaybackRange, const FMovieSceneSequenceTransform& RootToLocalTransform);
 
 	/**
 	 * Exports a level sequence 3D transform track that's getting baked (sample all sections) onto the FBX animation stack.
 	 */
-	void ExportLevelSequenceBaked3DTransformTrack(IAnimTrackAdapter& AnimTrackAdapter, FbxNode* FbxActor, IMovieScenePlayer* MovieScenePlayer, FMovieSceneSequenceIDRef InSequenceID, TArray<TWeakObjectPtr<UMovieScene3DTransformTrack> > TransformTracks, UObject* BoundObject, const TRange<FFrameNumber>& InPlaybackRange, const FMovieSceneSequenceTransform& RootToLocalTransform);
+	UNREALED_API void ExportLevelSequenceBaked3DTransformTrack(IAnimTrackAdapter& AnimTrackAdapter, FbxNode* FbxActor, IMovieScenePlayer* MovieScenePlayer, FMovieSceneSequenceIDRef InSequenceID, TArray<TWeakObjectPtr<UMovieScene3DTransformTrack> > TransformTracks, UObject* BoundObject, const TRange<FFrameNumber>& InPlaybackRange, const FMovieSceneSequenceTransform& RootToLocalTransform);
 
-	/** 
+	/**
 	 * Exports a level sequence property track into the FBX animation stack. 
 	 */
-	void ExportLevelSequenceTrackChannels( FbxNode* FbxActor, UMovieSceneTrack& Track, const TRange<FFrameNumber>& InPlaybackRange, const FMovieSceneSequenceTransform& RootToLocalTransform);
+	UNREALED_API void ExportLevelSequenceTrackChannels( FbxNode* FbxActor, UMovieSceneTrack& Track, const TRange<FFrameNumber>& InPlaybackRange, const FMovieSceneSequenceTransform& RootToLocalTransform, bool bBakeBezierCurves);
+
+	UE_DEPRECATED(5.4, "Use ExportLevelSequenceTrackChannels that indicates whether bezier channels should be baked")
+	UNREALED_API void ExportLevelSequenceTrackChannels(FbxNode* FbxActor, UMovieSceneTrack& Track, const TRange<FFrameNumber>& InPlaybackRange, const FMovieSceneSequenceTransform& RootToLocalTransform) { ExportLevelSequenceTrackChannels(FbxActor, Track, InPlaybackRange, RootToLocalTransform, false); }
 
 	/** Defines value export modes for the EportRichCurveToFbxCurve method. */
 	enum class ERichCurveValueMode
@@ -486,36 +454,56 @@ private:
 		Fov
 	};
 
+	/** Generic implementation of exporting a movie scene bezier curve channel to an fbx animation curve, baked per frame */
+	template<typename ChannelType>
+	void ExportBezierChannelToFbxCurveBaked(FbxAnimCurve& InFbxCurve, const ChannelType& InChannel, FFrameRate TickResolution, const UMovieSceneTrack* Track, ERichCurveValueMode ValueMode, bool bNegative, const FMovieSceneSequenceTransform& RootToLocalTransform);
+
+	/** Generic implementation of exporting a movie scene bezier curve channel to an fbx animation curve */
+	template<typename ChannelType>
+	void ExportBezierChannelToFbxCurve(FbxAnimCurve& InFbxCurve, const ChannelType& InChannel, FFrameRate TickResolution, ERichCurveValueMode ValueMode, bool bNegative, const FMovieSceneSequenceTransform& RootToLocalTransform);
+
 	/** Exports a movie scene float channel to an fbx animation curve. */
-	void ExportChannelToFbxCurve(FbxAnimCurve& InFbxCurve, const FMovieSceneFloatChannel& InChannel, FFrameRate TickResolution, ERichCurveValueMode ValueMode = ERichCurveValueMode::Default, bool bNegative = false, const FMovieSceneSequenceTransform& RootToLocalTransform = FMovieSceneSequenceTransform());
+	UNREALED_API void ExportChannelToFbxCurve(FbxAnimCurve& InFbxCurve, const FMovieSceneFloatChannel& InChannel, FFrameRate TickResolution, ERichCurveValueMode ValueMode = ERichCurveValueMode::Default, bool bNegative = false, const FMovieSceneSequenceTransform& RootToLocalTransform = FMovieSceneSequenceTransform());
+
+	/** Exports a movie scene double channel to an fbx animation curve. */
+	UNREALED_API void ExportChannelToFbxCurve(FbxAnimCurve& InFbxCurve, const FMovieSceneDoubleChannel& InChannel, FFrameRate TickResolution, ERichCurveValueMode ValueMode = ERichCurveValueMode::Default, bool bNegative = false, const FMovieSceneSequenceTransform& RootToLocalTransform = FMovieSceneSequenceTransform());
 
 	/** Exports a movie scene integer channel to an fbx animation curve. */
-	void ExportChannelToFbxCurve(FbxAnimCurve& InFbxCurve, const FMovieSceneIntegerChannel& InChannel, FFrameRate TickResolution, const FMovieSceneSequenceTransform& RootToLocalTransform = FMovieSceneSequenceTransform());
+	UNREALED_API void ExportChannelToFbxCurve(FbxAnimCurve& InFbxCurve, const FMovieSceneIntegerChannel& InChannel, FFrameRate TickResolution, const FMovieSceneSequenceTransform& RootToLocalTransform = FMovieSceneSequenceTransform());
+
+	UNREALED_API void ExportChannelToFbxCurve(FbxAnimCurve& InFbxCurve, const FMovieSceneBoolChannel& InChannel, FFrameRate TickResolution, const FMovieSceneSequenceTransform& RootToLocalTransform);
+	
+	UNREALED_API void ExportChannelToFbxCurve(FbxAnimCurve& InFbxCurve, const FMovieSceneByteChannel& InChannel, FFrameRate TickResolution, const FMovieSceneSequenceTransform& RootToLocalTransform);
+
+	template <class ChannelType, typename T>
+	void ExportConstantChannelToFbxCurve(FbxAnimCurve& InFbxCurve, const ChannelType& InChannel, FFrameRate TickResolution, const FMovieSceneSequenceTransform& RootToLocalTransform);
+
+	UNREALED_API void ExportTransformChannelsToFbxCurve(FbxNode* InFbxNode, TPair<FMovieSceneFloatChannel*, bool> ChannelX, TPair<FMovieSceneFloatChannel*, bool> ChannelY, TPair<FMovieSceneFloatChannel*, bool> ChannelZ, int TmPropertyIndex, const UMovieSceneTrack* Track, const FMovieSceneSequenceTransform& RootToLocalTransform);
 
 	/**
 	 * Finds the given actor in the already-exported list of structures
-	 * @return FbxNode* the FBX node created from the UE4 actor
+	 * @return FbxNode* the FBX node created from the UE actor
 	 */
-	FbxNode* FindActor(AActor* Actor, INodeNameAdapter* NodeNameAdapter = nullptr);
+	UNREALED_API FbxNode* FindActor(AActor* Actor, INodeNameAdapter* NodeNameAdapter = nullptr);
 
 	/** Create fbx node with the given name */
-	FbxNode* CreateNode(const FString& NodeName);
+	UNREALED_API FbxNode* CreateNode(const FString& NodeName);
 
 	/**
 	 * Find bone array of FbxNOdes of the given skeletalmeshcomponent  
 	 */
-	bool FindSkeleton(USkeletalMeshComponent* SkelComp, TArray<FbxNode*>& BoneNodes, INodeNameAdapter* NodeNameAdapter = nullptr);
+	UNREALED_API bool FindSkeleton(USkeletalMeshComponent* SkelComp, TArray<FbxNode*>& BoneNodes, INodeNameAdapter* NodeNameAdapter = nullptr);
 
 	/** recursively get skeleton */
-	void GetSkeleton(FbxNode* RootNode, TArray<FbxNode*>& BoneNodes);
+	UNREALED_API void GetSkeleton(FbxNode* RootNode, TArray<FbxNode*>& BoneNodes);
 
-	bool FillFbxTextureProperty(const char *PropertyName, const FExpressionInput& MaterialInput, FbxSurfaceMaterial* FbxMaterial);
+	UNREALED_API bool FillFbxTextureProperty(const char *PropertyName, const FExpressionInput& MaterialInput, FbxSurfaceMaterial* FbxMaterial);
 	/**
 	 * Exports the profile_COMMON information for a material.
 	 */
-	FbxSurfaceMaterial* ExportMaterial(UMaterialInterface* Material);
+	UNREALED_API FbxSurfaceMaterial* ExportMaterial(UMaterialInterface* Material);
 	
-	FbxSurfaceMaterial* CreateDefaultMaterial();
+	UNREALED_API FbxSurfaceMaterial* CreateDefaultMaterial();
 	
 	/**
 	 * Create user property in Fbx Node.
@@ -530,11 +518,11 @@ private:
 	void CreateAnimatableUserProperty(FbxNode* Node, T Value, const char* Name, const char* Label, FbxDataType DataType = FbxFloatDT);
 
 	/** Exports all the object's FBX metadata to the FBX node */
-	void ExportObjectMetadata(const UObject* ObjectToExport, FbxNode* Node);
+	UNREALED_API void ExportObjectMetadata(const UObject* ObjectToExport, FbxNode* Node);
 
 public:
 	/** Returns currently active FBX export options. Automation or UI dialog based options. */
-	UFbxExportOption* GetExportOptions();
+	UNREALED_API UFbxExportOption* GetExportOptions();
 
 	bool bSceneGlobalTimeLineSet = false;
 };

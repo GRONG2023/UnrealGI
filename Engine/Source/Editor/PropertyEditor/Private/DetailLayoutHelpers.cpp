@@ -10,18 +10,16 @@
 #include "IDetailCustomization.h"
 #include "ObjectPropertyNode.h"
 #include "Modules/ModuleManager.h"
-#include "SPropertyEditorEditInline.h"
+#include "UserInterface/PropertyEditor/SPropertyEditorEditInline.h"
 
 namespace DetailLayoutHelpers
 {
-
 	void UpdateSinglePropertyMapRecursive(FPropertyNode& InNode, FName CurCategory, FComplexPropertyNode* CurObjectNode, FUpdatePropertyMapArgs& InUpdateArgs)
 	{
 		FDetailLayoutData& LayoutData = *InUpdateArgs.LayoutData;
 		FDetailLayoutBuilderImpl& DetailLayout = *LayoutData.DetailLayout;
 
-		FProperty* ParentProperty = InNode.GetProperty();
-		FStructProperty* ParentStructProp = CastField<FStructProperty>(ParentProperty);
+		const FStructProperty* ParentStructProp = CastField<FStructProperty>(InNode.GetProperty());
 		for (int32 ChildIndex = 0; ChildIndex < InNode.GetNumChildNodes(); ++ChildIndex)
 		{
 			//Use the original value for each child
@@ -34,225 +32,186 @@ namespace DetailLayoutHelpers
 			FPropertyNode& ChildNode = *ChildNodePtr;
 			FProperty* Property = ChildNode.GetProperty();
 
+			if (FObjectPropertyNode* ObjNode = ChildNode.AsObjectNode())
 			{
-				FObjectPropertyNode* ObjNode = ChildNode.AsObjectNode();
-				FCategoryPropertyNode* CategoryNode = ChildNode.AsCategoryNode();
-				if (ObjNode)
+				// Currently object property nodes do not provide any useful information other than being a container for its children.  We do not draw anything for them.
+				// When we encounter object property nodes, add their children instead of adding them to the tree.
+				UpdateSinglePropertyMapRecursive(ChildNode, CurCategory, ObjNode, ChildArgs);
+			}
+			else if (FCategoryPropertyNode* CategoryNode = ChildNode.AsCategoryNode())
+			{
+				if (!LocalUpdateFavoriteSystemOnly)
 				{
-					// Currently object property nodes do not provide any useful information other than being a container for its children.  We do not draw anything for them.
-					// When we encounter object property nodes, add their children instead of adding them to the tree.
-					UpdateSinglePropertyMapRecursive(ChildNode, CurCategory, ObjNode, ChildArgs);
+					FName InstanceName = NAME_None;
+					FName CategoryName = CurCategory;
+					FString CategoryDelimiterString;
+					CategoryDelimiterString.AppendChar(FPropertyNodeConstants::CategoryDelimiterChar);
+					if (CurCategory != NAME_None && CategoryNode->GetCategoryName().ToString().Contains(CategoryDelimiterString))
+					{
+						// This property is child of another property so add it to the parent detail category
+						FDetailCategoryImpl& CategoryImpl = DetailLayout.DefaultCategory(CategoryName);
+						CategoryImpl.AddPropertyNode(ChildNodePtr.ToSharedRef(), InstanceName);
+					}
 				}
-				else if (CategoryNode)
+
+				// For category nodes, we just set the current category and recurse through the children
+				UpdateSinglePropertyMapRecursive(ChildNode, CategoryNode->GetCategoryName(), CurObjectNode, ChildArgs);
+			}
+			else
+			{
+				// Whether or not the property can be visible in the default detail layout
+				bool bVisibleByDefault = PropertyEditorHelpers::IsVisibleStandaloneProperty(ChildNode, InNode);
+
+				// Whether or not the property is a struct
+				const FStructProperty* StructProperty = CastField<FStructProperty>(Property);
+				const bool bIsStruct = StructProperty != NULL;
+
+				static FName ShowOnlyInners("ShowOnlyInnerProperties");
+
+				bool bIsCustomizedStruct = false;
+				bool bIsChildOfCustomizedStruct = false;
+
+				const UStruct* Struct = StructProperty ? StructProperty->Struct : NULL;
+				const UStruct* ParentStruct = ParentStructProp ? ParentStructProp->Struct : NULL;
+				if (Struct || ParentStruct)
 				{
+					FPropertyEditorModule& ParentPlugin = FModuleManager::GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
+					if (Struct)
+					{
+						bIsCustomizedStruct = ParentPlugin.IsCustomizedStruct(Struct, *InUpdateArgs.InstancedPropertyTypeToDetailLayoutMap);
+					}
+
+					if (ParentStruct)
+					{
+						bIsChildOfCustomizedStruct = ParentPlugin.IsCustomizedStruct(ParentStruct, *InUpdateArgs.InstancedPropertyTypeToDetailLayoutMap);
+					}
+				}
+
+				// Whether or not to push out struct properties to their own categories or show them inside an expandable struct
+				// This recursively applies for any nested structs that have the ShowOnlyInners metadata 
+				const bool bPushOutStructProps = bIsStruct && !bIsCustomizedStruct && Property->HasMetaData(ShowOnlyInners);
+
+				// Is the property edit inline new 
+				const bool bIsEditInlineNew = ChildNode.HasNodeFlags(EPropertyNodeFlags::ShowInnerObjectProperties) || SPropertyEditorEditInline::Supports(&ChildNode, ChildNode.GetArrayIndex());
+
+				// Is this a property of a container property
+				const bool bIsChildOfContainer = PropertyEditorHelpers::IsChildOfArray(ChildNode) || PropertyEditorHelpers::IsChildOfSet(ChildNode) || PropertyEditorHelpers::IsChildOfMap(ChildNode);
+
+				// Edit inline new properties should be visible by default
+				bVisibleByDefault |= bIsEditInlineNew;
+
+				// Children of arrays are not visible directly,
+				bVisibleByDefault &= !bIsChildOfContainer;
+
+				// Inners of customized in structs should not be taken into consideration for customizing.  They are not designed to be individually customized when their parent is already customized
+				if (!bIsChildOfCustomizedStruct && !LocalUpdateFavoriteSystemOnly)
+				{
+					// Add any object classes with properties so we can ask them for custom property layouts later
+					LayoutData.ClassesWithProperties.Add(Property->GetOwnerStruct());
+				}
+
+				// If there is no outer object then the class is the object root and there is only one instance
+				FName InstanceName = NAME_None;
+				if (CurObjectNode && CurObjectNode->GetParentNode())
+				{
+					InstanceName = CurObjectNode->GetParentNode()->GetProperty()->GetFName();
+				}
+				else if (ParentStructProp)
+				{
+					InstanceName = ParentStructProp->GetFName();
+				}
+
+				// Do not add children of customized in struct properties or arrays
+				if (!bIsChildOfCustomizedStruct && !bIsChildOfContainer && !LocalUpdateFavoriteSystemOnly)
+				{
+					// Get the class property map
+					FClassInstanceToPropertyMap& ClassInstanceMap = LayoutData.ClassToPropertyMap.FindOrAdd(Property->GetOwnerStruct()->GetFName());
+
+					FPropertyNodeMap& PropertyNodeMap = ClassInstanceMap.FindOrAdd(InstanceName);
+
+					if (!PropertyNodeMap.ParentProperty)
+					{
+						PropertyNodeMap.ParentProperty = CurObjectNode;
+					}
+					else
+					{
+						ensure(PropertyNodeMap.ParentProperty == CurObjectNode);
+					}
+
+					checkSlow(!PropertyNodeMap.Contains(Property->GetFName()));
+
+					PropertyNodeMap.Add(Property->GetFName(), ChildNodePtr);
+				}
+
+				if (bVisibleByDefault && !bPushOutStructProps)
+				{
+					FName CategoryName = CurCategory;
+					// For properties inside a struct, add them to their own category unless they just take the name of the parent struct.  
+					// In that case push them to the parent category
+					FName PropertyCategoryName = FObjectEditorUtils::GetCategoryFName(Property);
+					if (!ParentStructProp || (PropertyCategoryName != ParentStructProp->Struct->GetFName()))
+					{
+						CategoryName = PropertyCategoryName;
+					}
+
 					if (!LocalUpdateFavoriteSystemOnly)
 					{
-						FName InstanceName = NAME_None;
-						FName CategoryName = CurCategory;
-						FString CategoryDelimiterString;
-						CategoryDelimiterString.AppendChar(FPropertyNodeConstants::CategoryDelimiterChar);
-						if (CurCategory != NAME_None && CategoryNode->GetCategoryName().ToString().Contains(CategoryDelimiterString))
-						{
-							// This property is child of another property so add it to the parent detail category
-							FDetailCategoryImpl& CategoryImpl = DetailLayout.DefaultCategory(CategoryName);
-							CategoryImpl.AddPropertyNode(ChildNodePtr.ToSharedRef(), InstanceName);
-						}
+						// Add a property to the default category
+						FDetailCategoryImpl& CategoryImpl = DetailLayout.DefaultCategory(CategoryName);
+						CategoryImpl.AddPropertyNode(ChildNodePtr.ToSharedRef(), InstanceName);
 					}
 
-					// For category nodes, we just set the current category and recurse through the children
-					UpdateSinglePropertyMapRecursive(ChildNode, CategoryNode->GetCategoryName(), CurObjectNode, ChildArgs);
+					if (InUpdateArgs.bEnableFavoriteSystem)
+					{
+						if (ChildNodePtr->IsFavorite())
+						{
+							// Find or create the favorite category, we have to duplicate favorite property row under this category
+							static const FName FavoritesCategoryName(TEXT("Favorites"));
+							FDetailCategoryImpl& FavoritesCategory = DetailLayout.DefaultCategory(FavoritesCategoryName);
+
+							if (LocalUpdateFavoriteSystemOnly)
+							{
+								//If the parent has a condition that is not met, mark the child as read-only
+								FDetailLayoutCustomization ParentTmpCustomization;
+								ParentTmpCustomization.PropertyRow = MakeShared<FDetailPropertyRow>(InNode.AsShared(), FavoritesCategory.AsShared());
+								if (ParentTmpCustomization.PropertyRow->GetPropertyEditor()->IsPropertyEditingEnabled() == false)
+								{
+									ChildNode.SetNodeFlags(EPropertyNodeFlags::IsReadOnly, true);
+								}
+							}
+
+							// Add the property to the favorite
+							const FObjectPropertyNode* RootObjectParent = ChildNodePtr->FindRootObjectItemParent();
+							FName RootInstanceName = NAME_None;
+							if (RootObjectParent != nullptr)
+							{
+								RootInstanceName = RootObjectParent->GetObjectBaseClass()->GetFName();
+							}
+
+							// Duplicate the row
+							FavoritesCategory.AddPropertyNode(ChildNodePtr.ToSharedRef(), RootInstanceName);
+						}
+
+						if (bIsStruct)
+						{
+							LocalUpdateFavoriteSystemOnly = true;
+						}
+
+						ChildArgs.bUpdateFavoriteSystemOnly = LocalUpdateFavoriteSystemOnly;
+					}
 				}
-				else
+
+				bool bRecurseIntoChildren =
+					!bIsChildOfCustomizedStruct // Don't recurse into built in struct children, we already know what they are and how to display them
+					&& !bIsCustomizedStruct // Don't recurse into customized structs
+					&& !bIsChildOfContainer // Don't recurse into containers, the children are drawn by the container property parent
+					&& !bIsEditInlineNew // Edit inline new children are not supported for customization yet
+					&& (!bIsStruct || bPushOutStructProps); //  Only recurse into struct properties if they are going to be displayed as standalone properties in categories instead of inside an expandable area inside a category
+
+				if (bRecurseIntoChildren || LocalUpdateFavoriteSystemOnly)
 				{
-					// Whether or not the property can be visible in the default detail layout
-					bool bVisibleByDefault = PropertyEditorHelpers::IsVisibleStandaloneProperty(ChildNode, InNode);
-
-					// Whether or not the property is a struct
-					FStructProperty* StructProperty = CastField<FStructProperty>(Property);
-
-					bool bIsStruct = StructProperty != NULL;
-
-					static FName ShowOnlyInners("ShowOnlyInnerProperties");
-
-					bool bIsChildOfCustomizedStruct = false;
-					bool bIsCustomizedStruct = false;
-
-					const UStruct* Struct = StructProperty ? StructProperty->Struct : NULL;
-					const UStruct* ParentStruct = ParentStructProp ? ParentStructProp->Struct : NULL;
-					if (Struct || ParentStruct)
-					{
-						FPropertyEditorModule& ParentPlugin = FModuleManager::GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
-						if (Struct)
-						{
-							bIsCustomizedStruct = ParentPlugin.IsCustomizedStruct(Struct, *InUpdateArgs.InstancedPropertyTypeToDetailLayoutMap);
-						}
-
-						if (ParentStruct)
-						{
-							bIsChildOfCustomizedStruct = ParentPlugin.IsCustomizedStruct(ParentStruct, *InUpdateArgs.InstancedPropertyTypeToDetailLayoutMap);
-						}
-					}
-
-					// Whether or not to push out struct properties to their own categories or show them inside an expandable struct 
-					bool bPushOutStructProps = bIsStruct && !bIsCustomizedStruct && !ParentStructProp && Property->HasMetaData(ShowOnlyInners);
-
-					// Is the property edit inline new 
-					const bool bIsEditInlineNew = ChildNode.HasNodeFlags(EPropertyNodeFlags::ShowInnerObjectProperties) || SPropertyEditorEditInline::Supports(&ChildNode, ChildNode.GetArrayIndex());
-
-					// Is this a property of a container property
-					bool bIsChildOfContainer = PropertyEditorHelpers::IsChildOfArray(ChildNode) || PropertyEditorHelpers::IsChildOfSet(ChildNode) || PropertyEditorHelpers::IsChildOfMap(ChildNode);
-
-					// Edit inline new properties should be visible by default
-					bVisibleByDefault |= bIsEditInlineNew;
-
-					// Children of arrays are not visible directly,
-					bVisibleByDefault &= !bIsChildOfContainer;
-
-					TArray< TWeakObjectPtr< UObject> > Objects;
-					if (CurObjectNode && CurObjectNode->AsObjectNode())
-					{
-						for (int32 ObjectIndex = 0; ObjectIndex < CurObjectNode->AsObjectNode()->GetNumObjects(); ++ObjectIndex)
-						{
-							Objects.Add(CurObjectNode->AsObjectNode()->GetUObject(ObjectIndex));
-						}
-					}
-
-					TSharedPtr<IPropertyHandle> ChildHandle = PropertyEditorHelpers::GetPropertyHandle(ChildNodePtr.ToSharedRef(), nullptr, nullptr);
-					FPropertyAndParent PropertyAndParent(ChildHandle.ToSharedRef(), Objects);
-					const bool bIsUserVisible = InUpdateArgs.IsPropertyVisible(PropertyAndParent);
-
-					// Inners of customized in structs should not be taken into consideration for customizing.  They are not designed to be individually customized when their parent is already customized
-					if (!bIsChildOfCustomizedStruct && !LocalUpdateFavoriteSystemOnly)
-					{
-						// Add any object classes with properties so we can ask them for custom property layouts later
-						LayoutData.ClassesWithProperties.Add(Property->GetOwnerStruct());
-					}
-
-					// If there is no outer object then the class is the object root and there is only one instance
-					FName InstanceName = NAME_None;
-					if (CurObjectNode && CurObjectNode->GetParentNode())
-					{
-						InstanceName = CurObjectNode->GetParentNode()->GetProperty()->GetFName();
-					}
-					else if (ParentStructProp)
-					{
-						InstanceName = ParentStructProp->GetFName();
-					}
-
-					// Do not add children of customized in struct properties or arrays
-					if (!bIsChildOfCustomizedStruct && !bIsChildOfContainer && !LocalUpdateFavoriteSystemOnly)
-					{
-						// Get the class property map
-						FClassInstanceToPropertyMap& ClassInstanceMap = LayoutData.ClassToPropertyMap.FindOrAdd(Property->GetOwnerStruct()->GetFName());
-
-						FPropertyNodeMap& PropertyNodeMap = ClassInstanceMap.FindOrAdd(InstanceName);
-
-						if (!PropertyNodeMap.ParentProperty)
-						{
-							PropertyNodeMap.ParentProperty = CurObjectNode;
-						}
-						else
-						{
-							ensure(PropertyNodeMap.ParentProperty == CurObjectNode);
-						}
-
-						checkSlow(!PropertyNodeMap.Contains(Property->GetFName()));
-
-						PropertyNodeMap.Add(Property->GetFName(), ChildNodePtr);
-					}
-					bool bCanDisplayFavorite = false;
-					if (bVisibleByDefault && bIsUserVisible && !bPushOutStructProps)
-					{
-						FName CategoryName = CurCategory;
-						// For properties inside a struct, add them to their own category unless they just take the name of the parent struct.  
-						// In that case push them to the parent category
-						FName PropertyCatagoryName = FObjectEditorUtils::GetCategoryFName(Property);
-						if (!ParentStructProp || (PropertyCatagoryName != ParentStructProp->Struct->GetFName()))
-						{
-							CategoryName = PropertyCatagoryName;
-						}
-
-						if (!LocalUpdateFavoriteSystemOnly)
-						{
-							if (InUpdateArgs.IsPropertyReadOnly(PropertyAndParent))
-							{
-								ChildNode.SetNodeFlags(EPropertyNodeFlags::IsReadOnly, true);
-							}
-
-							// Add a property to the default category
-							FDetailCategoryImpl& CategoryImpl = DetailLayout.DefaultCategory(CategoryName);
-							CategoryImpl.AddPropertyNode(ChildNodePtr.ToSharedRef(), InstanceName);
-						}
-
-						bCanDisplayFavorite = true;
-						if (InUpdateArgs.bEnableFavoriteSystem)
-						{
-							if (bIsCustomizedStruct)
-							{
-								bCanDisplayFavorite = false;
-								//CustomizedStruct child are not categorize since they are under an object but we have to put them in favorite category if the user want to favorite them
-								LocalUpdateFavoriteSystemOnly = true;
-							}
-							else if (ChildNodePtr->IsFavorite())
-							{
-								//Find or create the favorite category, we have to duplicate favorite property row under this category
-								FString CategoryFavoritesName = TEXT("Favorites");
-								FName CatFavName = *CategoryFavoritesName;
-								FDetailCategoryImpl& CategoryFavImpl = DetailLayout.DefaultCategory(CatFavName);
-								CategoryFavImpl.SetSortOrder(0);
-								CategoryFavImpl.SetCategoryAsSpecialFavorite();
-
-								//Add the property to the favorite
-								FObjectPropertyNode *RootObjectParent = ChildNodePtr->FindRootObjectItemParent();
-								FName RootInstanceName = NAME_None;
-								if (RootObjectParent != nullptr)
-								{
-									RootInstanceName = RootObjectParent->GetObjectBaseClass()->GetFName();
-								}
-
-								if (LocalUpdateFavoriteSystemOnly)
-								{
-									if (InUpdateArgs.IsPropertyReadOnly(PropertyAndParent))
-									{
-										ChildNode.SetNodeFlags(EPropertyNodeFlags::IsReadOnly, true);
-									}
-									else
-									{
-										//If the parent has a condition that is not met, make the child as readonly
-										FDetailLayoutCustomization ParentTmpCustomization;
-										ParentTmpCustomization.PropertyRow = MakeShareable(new FDetailPropertyRow(InNode.AsShared(), CategoryFavImpl.AsShared()));
-										if (ParentTmpCustomization.PropertyRow->GetPropertyEditor()->IsPropertyEditingEnabled() == false)
-										{
-											ChildNode.SetNodeFlags(EPropertyNodeFlags::IsReadOnly, true);
-										}
-									}
-								}
-
-								//Duplicate the row
-								CategoryFavImpl.AddPropertyNode(ChildNodePtr.ToSharedRef(), RootInstanceName);
-							}
-
-							if (bIsStruct)
-							{
-								LocalUpdateFavoriteSystemOnly = true;
-							}
-						}
-					}
-					ChildNodePtr->SetCanDisplayFavorite(bCanDisplayFavorite);
-
-					bool bRecurseIntoChildren =
-						!bIsChildOfCustomizedStruct // Don't recurse into built in struct children, we already know what they are and how to display them
-						&& !bIsCustomizedStruct // Don't recurse into customized structs
-						&& !bIsChildOfContainer // Do not recurse into containers, the children are drawn by the container property parent
-						&& !bIsEditInlineNew // Edit inline new children are not supported for customization yet
-						&&	bIsUserVisible // Properties must be allowed to be visible by a user if they are not then their children are not visible either
-						&& (!bIsStruct || bPushOutStructProps); //  Only recurse into struct properties if they are going to be displayed as standalone properties in categories instead of inside an expandable area inside a category
-
-					if (bRecurseIntoChildren || LocalUpdateFavoriteSystemOnly)
-					{
-						// Built in struct properties or children of arras 
-						UpdateSinglePropertyMapRecursive(ChildNode, CurCategory, CurObjectNode, ChildArgs);
-					}
+					// Built in struct properties or children of arras 
+					UpdateSinglePropertyMapRecursive(ChildNode, CurCategory, CurObjectNode, ChildArgs);
 				}
 			}
 		}
@@ -363,26 +322,51 @@ namespace DetailLayoutHelpers
 				{
 					UStruct* Class = WeakClass.Get();
 
-					FClassInstanceToPropertyMap& InstancedPropertyMap = LayoutData.ClassToPropertyMap.FindChecked(Class->GetFName());
-					for (FClassInstanceToPropertyMap::TIterator InstanceIt(InstancedPropertyMap); InstanceIt; ++InstanceIt)
+					TSet<FName> ProcessedClasses;
+					bool bHasItemsToProcess = true;
+					while (bHasItemsToProcess)
 					{
-						FName Key = InstanceIt.Key();
-						LayoutData.DetailLayout->SetCurrentCustomizationClass(Class, Key);
+						bHasItemsToProcess = false;
 
-						const FOnGetDetailCustomizationInstance& DetailDelegate = LayoutIt.Value()->DetailLayoutDelegate;
+						// Copy ClassToProperty map since it could be modified during customization (through AddObjectPropertyData for example)
+						FClassInstanceToPropertyMap InstancedPropertyMapCopy = LayoutData.ClassToPropertyMap.FindChecked(Class->GetFName());
 
-						if (DetailDelegate.IsBound())
+						// Stamp this rounds number of item to detect if current map has changed after going through it
+						const int32 InitialCount = InstancedPropertyMapCopy.Num();
+						for (FClassInstanceToPropertyMap::TIterator InstanceIt(InstancedPropertyMapCopy); InstanceIt; ++InstanceIt)
 						{
-							QueriedClasses.Add(Class);
+							// Stamp classes that have been processed to avoid reprocessing them when doing subsequent rounds
+							const FName Key = InstanceIt.Key();
+							if (ProcessedClasses.Contains(Key))
+							{
+								continue;
+							}
+							ProcessedClasses.Add(Key);
 
-							// Create a new instance of the custom detail layout for the current class
-							TSharedRef<IDetailCustomization> CustomizationInstance = DetailDelegate.Execute();
+							LayoutData.DetailLayout->SetCurrentCustomizationClass(Class, Key);
 
-							// Ask for details immediately
-							CustomizationInstance->CustomizeDetails(LayoutData.DetailLayout);
+							const FOnGetDetailCustomizationInstance& DetailDelegate = LayoutIt.Value()->DetailLayoutDelegate;
 
-							// Save the instance from destruction until we refresh
-							LayoutData.CustomizationClassInstances.Add(CustomizationInstance);
+							if (DetailDelegate.IsBound())
+							{
+								QueriedClasses.Add(Class);
+
+								// Create a new instance of the custom detail layout for the current class
+								TSharedRef<IDetailCustomization> CustomizationInstance = DetailDelegate.Execute();
+
+								// Ask for details immediately
+								CustomizationInstance->CustomizeDetails(LayoutData.DetailLayout);
+
+								// Save the instance from destruction until we refresh
+								LayoutData.CustomizationClassInstances.Add(CustomizationInstance);
+							}
+						}
+						
+						// Verify if current mapping has changed after customizations which would require another pass
+						const int32 NewCount = LayoutData.ClassToPropertyMap.FindChecked(Class->GetFName()).Num();
+						if (NewCount > InitialCount)
+						{
+							bHasItemsToProcess = true;
 						}
 					}
 				}

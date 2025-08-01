@@ -11,6 +11,7 @@
 void SScrollBar::Construct(const FArguments& InArgs)
 {
 	OnUserScrolled = InArgs._OnUserScrolled;
+	OnScrollBarVisibilityChanged = InArgs._OnScrollBarVisibilityChanged;
 	Orientation = InArgs._Orientation;
 	DragFocusCause = InArgs._DragFocusCause;
 	UserVisibility = InArgs._Visibility;
@@ -18,10 +19,13 @@ void SScrollBar::Construct(const FArguments& InArgs)
 	check(InArgs._Style);
 	SetStyle(InArgs._Style);
 
+	const TAttribute<FVector2D> Thickness = InArgs._Thickness.IsSet() ? InArgs._Thickness : FVector2D(InArgs._Style->Thickness, InArgs._Style->Thickness);
+
 	EHorizontalAlignment HorizontalAlignment = Orientation == Orient_Vertical ? HAlign_Center : HAlign_Fill;
 	EVerticalAlignment VerticalAlignment = Orientation == Orient_Vertical ? VAlign_Fill : VAlign_Center;
 
 	bHideWhenNotInUse = InArgs._HideWhenNotInUse;
+	bPreventThrottling = InArgs._PreventThrottling;
 	bIsScrolling = false;
 	LastInteractionTime = 0;
 
@@ -38,7 +42,7 @@ void SScrollBar::Construct(const FArguments& InArgs)
 				.BorderImage(BackgroundBrush)
 				.HAlign(HorizontalAlignment)
 				.VAlign(VerticalAlignment)
-				.Padding(0)
+				.Padding(0.f)
 				[
 					SAssignNew(Track, SScrollBarTrack)
 					.Orientation(InArgs._Orientation)
@@ -57,10 +61,10 @@ void SScrollBar::Construct(const FArguments& InArgs)
 						SAssignNew(DragThumb, SBorder)
 						.HAlign(HAlign_Center)
 						.VAlign(VAlign_Center)
-						.Padding(0)
+						.Padding(0.f)
 						[
 							SAssignNew(ThicknessSpacer, SSpacer)
-							.Size(InArgs._Thickness)
+							.Size(Thickness)
 						]
 					]
 					.BottomSlot()
@@ -88,15 +92,25 @@ void SScrollBar::SetOnUserScrolled( const FOnUserScrolled& InHandler )
 	OnUserScrolled = InHandler;
 }
 
-void SScrollBar::SetState( float InOffsetFraction, float InThumbSizeFraction )
+void SScrollBar::SetOnScrollBarVisibilityChanged( const FOnScrollBarVisibilityChanged& InHandler )
+{
+	OnScrollBarVisibilityChanged = InHandler;
+}
+
+void SScrollBar::SetState( float InOffsetFraction, float InThumbSizeFraction, bool bCallOnUserScrolled )
 {
 	if ( Track->DistanceFromTop() != InOffsetFraction || Track->GetThumbSizeFraction() != InThumbSizeFraction )
 	{
 		// Note that the maximum offset depends on how many items fit per screen
 		// It is 1.0f-InThumbSizeFraction.
 		Track->SetSizes(InOffsetFraction, InThumbSizeFraction);
+		GetVisibilityAttribute().UpdateValue();
 
 		LastInteractionTime = FSlateApplication::Get().GetCurrentTime();
+		if (bCallOnUserScrolled)
+		{
+			OnUserScrolled.ExecuteIfBound(InOffsetFraction);
+		}
 	}
 }
 
@@ -143,7 +157,14 @@ FReply SScrollBar::OnMouseButtonDown( const FGeometry& MyGeometry, const FPointe
 
 	if( bDraggingThumb )
 	{
-		return FReply::Handled().CaptureMouse(AsShared()).SetUserFocus(AsShared(), DragFocusCause);
+		FReply ReturnReply = FReply::Handled().CaptureMouse(AsShared()).SetUserFocus(AsShared(), DragFocusCause);
+
+		if (bPreventThrottling)
+		{
+			ReturnReply.PreventThrottling();
+		}
+
+		return ReturnReply;
 	}
 	else
 	{
@@ -219,6 +240,11 @@ float SScrollBar::DistanceFromBottom() const
 	return Track->DistanceFromBottom();
 }
 
+float SScrollBar::ThumbSizeFraction() const
+{
+	return Track->GetThumbSizeFraction();
+}
+
 SScrollBar::SScrollBar()
 	: bDraggingThumb(false)
 	, DragGrabOffset( 0.0f )
@@ -284,7 +310,7 @@ const FSlateBrush* SScrollBar::GetDragThumbImage() const
 	{
 		return DraggedThumbImage;
 	}
-	else if (DragThumb->IsDirectlyHovered())
+	else if (IsHovered())
 	{
 		return HoveredThumbImage;
 	}
@@ -296,18 +322,24 @@ const FSlateBrush* SScrollBar::GetDragThumbImage() const
 
 EVisibility SScrollBar::ShouldBeVisible() const
 {
+	const EVisibility CurrentVisibility = GetVisibility();
+    EVisibility NewVisibility = ScrollbarDisabledVisibility;
+    
 	if ( this->HasMouseCapture() )
 	{
-		return EVisibility::Visible;
+		NewVisibility = EVisibility::Visible;
 	}
 	else if( Track->IsNeeded() )
 	{
-		return UserVisibility.Get();
+		NewVisibility = UserVisibility.Get();
 	}
-	else
+
+	if (NewVisibility != CurrentVisibility)
 	{
-		return EVisibility::Collapsed;
+		OnScrollBarVisibilityChanged.ExecuteIfBound(NewVisibility);
 	}
+	
+	return NewVisibility;
 }
 
 bool SScrollBar::IsScrolling() const
@@ -349,7 +381,12 @@ void SScrollBar::SetStyle(const FScrollBarStyle* InStyle)
 		BottomBrush = &Style->HorizontalBottomSlotImage;
 	}
 
-	Invalidate(EInvalidateWidget::Layout);
+	InvalidateStyle();
+}
+
+void SScrollBar::InvalidateStyle()
+{
+	Invalidate(EInvalidateWidgetReason::Layout);
 }
 
 void SScrollBar::SetDragFocusCause(EFocusCause InDragFocusCause)
@@ -382,6 +419,11 @@ void SScrollBar::SetScrollBarTrackAlwaysVisible(bool InAlwaysVisible)
 {
 	// Doesn't need to be invalidated here, tick updates these values.
 	bAlwaysShowScrollbarTrack = InAlwaysVisible;
+}
+
+SLATE_API void SScrollBar::SetScrollbarDisabledVisibility(EVisibility InVisibility)
+{
+	ScrollbarDisabledVisibility = InVisibility;
 }
 
 bool SScrollBar::AlwaysShowScrollbar() const

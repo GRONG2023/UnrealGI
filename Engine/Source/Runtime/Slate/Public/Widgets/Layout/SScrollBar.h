@@ -21,15 +21,16 @@ DECLARE_DELEGATE_OneParam(
 	FOnUserScrolled,
 	float );	/** ScrollOffset as a fraction between 0 and 1 */
 
+DECLARE_DELEGATE_OneParam(FOnScrollBarVisibilityChanged, EVisibility);	/** changed scroll bar visibility */
 
 class SScrollBarTrack;
 
-class SLATE_API SScrollBar : public SBorder
+class SScrollBar : public SBorder
 {
 public:
 
 	SLATE_BEGIN_ARGS( SScrollBar )
-		: _Style( &FCoreStyle::Get().GetWidgetStyle<FScrollBarStyle>("Scrollbar") )
+		: _Style( &FAppStyle::Get().GetWidgetStyle<FScrollBarStyle>("Scrollbar") )
 		, _OnUserScrolled()
 		, _AlwaysShowScrollbar(false)
 		, _AlwaysShowScrollbarTrack(true)
@@ -38,18 +39,21 @@ public:
 #else
 		, _HideWhenNotInUse(false)
 #endif
+		, _PreventThrottling(false)
 		, _Orientation( Orient_Vertical )
 		, _DragFocusCause( EFocusCause::Mouse )
-		, _Thickness( FVector2D(16.0f, 16.0f) )
+		, _Thickness()
 		, _Padding( 2.0f )
 		{}
 
 		/** The style to use for this scrollbar */
 		SLATE_STYLE_ARGUMENT( FScrollBarStyle, Style )
 		SLATE_EVENT( FOnUserScrolled, OnUserScrolled )
+		SLATE_EVENT( FOnScrollBarVisibilityChanged, OnScrollBarVisibilityChanged )
 		SLATE_ARGUMENT( bool, AlwaysShowScrollbar )
 		SLATE_ARGUMENT( bool, AlwaysShowScrollbarTrack )
 		SLATE_ARGUMENT( bool, HideWhenNotInUse )
+		SLATE_ARGUMENT( bool, PreventThrottling )
 		SLATE_ARGUMENT( EOrientation, Orientation )
 		SLATE_ARGUMENT( EFocusCause, DragFocusCause )
 		/** The thickness of the scrollbar thumb */
@@ -63,14 +67,21 @@ public:
 	 *
 	 * @param	InArgs	The declaration data for this widget
 	 */
-	void Construct(const FArguments& InArgs);
+	SLATE_API void Construct(const FArguments& InArgs);
 
 	/**
 	 * Set the handler to be invoked when the user scrolls.
 	 *
 	 * @param InHandler   Method to execute when the user scrolls the scrollbar
 	 */
-	void SetOnUserScrolled( const FOnUserScrolled& InHandler );
+	SLATE_API void SetOnUserScrolled( const FOnUserScrolled& InHandler );
+
+	/**
+	 * Set the handler to be invoked when scroll bar visibility changes.
+	 *
+	 * @param InHandler   Method to execute when scroll bar visibility changed
+	 */
+	SLATE_API void SetOnScrollBarVisibilityChanged( const FOnScrollBarVisibilityChanged& InHandler );
 
 	/**
 	 * Set the offset and size of the track's thumb.
@@ -79,78 +90,88 @@ public:
 	 *
 	 * @param InOffsetFraction     Offset of the thumbnail from the top as a fraction of the total available scroll space.
 	 * @param InThumbSizeFraction  Size of thumbnail as a fraction of the total available scroll space.
+	 * @param bCallOnUserScrolled  If true, OnUserScrolled will be called with InOffsetFraction
 	 */
-	void SetState( float InOffsetFraction, float InThumbSizeFraction );
+	SLATE_API virtual void SetState( float InOffsetFraction, float InThumbSizeFraction, bool bCallOnUserScrolled = false);
 
 	// SWidget
-	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
-	virtual FReply OnMouseButtonDown( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
-	virtual FReply OnMouseButtonUp( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
-	virtual FReply OnMouseMove( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
-	virtual void OnMouseEnter(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
-	virtual void OnMouseLeave(const FPointerEvent& MouseEvent) override;
+	SLATE_API virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
+	SLATE_API virtual FReply OnMouseButtonDown( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
+	SLATE_API virtual FReply OnMouseButtonUp( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
+	SLATE_API virtual FReply OnMouseMove( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
+	SLATE_API virtual void OnMouseEnter(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
+	SLATE_API virtual void OnMouseLeave(const FPointerEvent& MouseEvent) override;
 	// SWidget
 
 	/** @return true if scrolling is possible; false if the view is big enough to fit all the content */
-	bool IsNeeded() const;
+	SLATE_API bool IsNeeded() const;
 
 	/** @return normalized distance from top */
-	float DistanceFromTop() const;
+	SLATE_API float DistanceFromTop() const;
 
 	/** @return normalized distance from bottom */
-	float DistanceFromBottom() const;
+	SLATE_API float DistanceFromBottom() const;
+
+	/** @return normalized percentage of track covered by thumb bar */
+	SLATE_API float ThumbSizeFraction() const;
 
 	/** @return the scrollbar's visibility as a product of internal rules and user-specified visibility */
-	EVisibility ShouldBeVisible() const;
+	SLATE_API EVisibility ShouldBeVisible() const;
 
 	/** @return True if the user is scrolling by dragging the scroll bar thumb. */
-	bool IsScrolling() const;
+	SLATE_API bool IsScrolling() const;
 
 	/** @return the orientation in which the scrollbar is scrolling. */
-	EOrientation GetOrientation() const; 
+	SLATE_API EOrientation GetOrientation() const; 
 
 	/** Set argument Style */
-	void SetStyle(const FScrollBarStyle* InStyle);
+	SLATE_API void SetStyle(const FScrollBarStyle* InStyle);
+
+	/** Invalidate the style */
+	SLATE_API void InvalidateStyle();
 
 	/** Set UserVisibility attribute */
 	void SetUserVisibility(TAttribute<EVisibility> InUserVisibility) { UserVisibility = InUserVisibility; }
 
 	/** Set DragFocusCause attribute */
-	void SetDragFocusCause(EFocusCause InDragFocusCause);
+	SLATE_API void SetDragFocusCause(EFocusCause InDragFocusCause);
 
 	/** Set Thickness attribute */
-	void SetThickness(TAttribute<FVector2D> InThickness);
+	SLATE_API void SetThickness(TAttribute<FVector2D> InThickness);
 
 	/** Set ScrollBarAlwaysVisible attribute */
-	void SetScrollBarAlwaysVisible(bool InAlwaysVisible);
+	SLATE_API void SetScrollBarAlwaysVisible(bool InAlwaysVisible);
 
 	/** Set ScrollBarTrackAlwaysVisible attribute */
-	void SetScrollBarTrackAlwaysVisible(bool InAlwaysVisible);
+	SLATE_API void SetScrollBarTrackAlwaysVisible(bool InAlwaysVisible);
+
+	/** Set the visibility of the ScrollBar when it is not needed. The default value is EVisibility::Collapsed. */
+	SLATE_API void SetScrollbarDisabledVisibility(EVisibility InVisibility);
 
 	/** Returns True when the scrollbar should always be shown, else False */
-	bool AlwaysShowScrollbar() const;
+	SLATE_API bool AlwaysShowScrollbar() const;
 
 	/** Allows external scrolling panels to notify the scrollbar when scrolling begins. */
-	virtual void BeginScrolling();
+	SLATE_API virtual void BeginScrolling();
 
 	/** Allows external scrolling panels to notify the scrollbar when scrolling ends. */
-	virtual void EndScrolling();
+	SLATE_API virtual void EndScrolling();
 
-	SScrollBar();
+	SLATE_API SScrollBar();
 
 protected:
 	
 	/** Execute the on user scrolled delegate */
-	void ExecuteOnUserScrolled( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent );
+	SLATE_API void ExecuteOnUserScrolled( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent );
 
 	/** We fade the scroll track unless it is being hovered*/
-	FSlateColor GetTrackOpacity() const;
+	SLATE_API FSlateColor GetTrackOpacity() const;
 
 	/** We always show a subtle scroll thumb, but highlight it extra when dragging */
-	FLinearColor GetThumbOpacity() const;
+	SLATE_API FLinearColor GetThumbOpacity() const;
 
 	/** @return the name of an image for the scrollbar thumb based on whether the user is dragging or hovering it. */
-	const FSlateBrush* GetDragThumbImage() const;
+	SLATE_API const FSlateBrush* GetDragThumbImage() const;
 
 	/** The scrollbar's visibility as specified by the user. Will be compounded with internal visibility rules. */
 	TAttribute<EVisibility> UserVisibility;
@@ -162,12 +183,19 @@ protected:
 	bool bDraggingThumb;
 	TSharedPtr<SScrollBarTrack> Track;
 	FOnUserScrolled OnUserScrolled;
+	FOnScrollBarVisibilityChanged OnScrollBarVisibilityChanged;
 	float DragGrabOffset;
 	EOrientation Orientation;
 	bool bAlwaysShowScrollbar;
 	bool bAlwaysShowScrollbarTrack;
 	EFocusCause DragFocusCause;
 	bool bHideWhenNotInUse;
+	EVisibility ScrollbarDisabledVisibility = EVisibility::Collapsed;
+	/*
+	 * Holds whether or not to prevent throttling during mouse capture
+	 * When true, the viewport will be updated with every single change to the value during dragging
+	 */
+	bool bPreventThrottling;
 	bool bIsScrolling;
 	double LastInteractionTime;
 

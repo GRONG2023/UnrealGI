@@ -1,12 +1,22 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SequencerKeyParams.h"
-#include "IKeyArea.h"
-#include "ISequencer.h"
-#include "ISequencerSection.h"
-#include "MovieSceneTrack.h"
 
+#include "Algo/Find.h"
 #include "Algo/IndexOf.h"
+#include "Algo/Sort.h"
+#include "CoreTypes.h"
+#include "IKeyArea.h"
+#include "ISequencerSection.h"
+#include "Math/Range.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/FrameNumber.h"
+#include "MovieSceneCommonHelpers.h"
+#include "MovieSceneSection.h"
+#include "MovieSceneTrack.h"
+#include "Templates/Function.h"
+#include "Templates/Tuple.h"
+#include "Templates/UnrealTemplate.h"
 
 namespace UE
 {
@@ -74,6 +84,11 @@ void FKeyOperation::Populate(UMovieSceneTrack* InTrack, TSharedPtr<ISequencerSec
 {
 	UMovieSceneSection* SectionObject = InSection->GetSectionObject();
 	if (SectionObject->IsReadOnly())
+	{
+		return;
+	}
+
+	if (!MovieSceneHelpers::IsSectionKeyable(SectionObject))
 	{
 		return;
 	}
@@ -151,7 +166,7 @@ void FKeyOperation::FSectionCandidates::FilterOperations(UMovieSceneTrack* Track
 
 				const int32 ThisSectionToKeyIndex = Algo::IndexOfBy(OldOperations, ThisSectionToKey, [](const FKeySectionOperation& In) { return In.Section->GetSectionObject(); });
 				Operations.Add(MoveTemp(OldOperations[ThisSectionToKeyIndex]));
-				OldOperations.RemoveAt(ThisSectionToKeyIndex, 1, false);
+				OldOperations.RemoveAt(ThisSectionToKeyIndex, 1, EAllowShrinking::No);
 			}
 		}
 
@@ -174,7 +189,7 @@ void FKeyOperation::FSectionCandidates::FilterOperations(UMovieSceneTrack* Track
 				{
 					const int32 ThisSectionToKeyIndex = Algo::IndexOfBy(OldOperations, ThisSectionToKey, [](const FKeySectionOperation& In) { return In.Section->GetSectionObject(); });
 					Operations.Add(MoveTemp(OldOperations[ThisSectionToKeyIndex]));
-					OldOperations.RemoveAt(ThisSectionToKeyIndex, 1, false);
+					OldOperations.RemoveAt(ThisSectionToKeyIndex, 1, EAllowShrinking::No);
 				}
 			}
 		}

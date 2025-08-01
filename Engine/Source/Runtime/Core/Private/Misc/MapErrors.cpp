@@ -1,7 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Misc/MapErrors.h"
-	
+
+#include "CoreTypes.h"
+
+FLazyName FMapErrors::MatchingActorGUID(TEXT("MatchingActorGUID"));
 FLazyName FMapErrors::MatchingLightGUID(TEXT("MatchingLightGUID"));
 FLazyName FMapErrors::ActorLargeShadowCaster(TEXT("ActorLargeShadowCaster"));
 FLazyName FMapErrors::NoDamageType(TEXT("NoDamageType"));
@@ -30,9 +33,12 @@ FLazyName FMapErrors::DeprecatedClass(TEXT("DeprecatedClass"));
 FLazyName FMapErrors::FoliageMissingStaticMesh(TEXT("FoliageMissingStaticMesh"));
 FLazyName FMapErrors::FoliageMissingClusterComponent(TEXT("FoliageMissingStaticMesh"));
 FLazyName FMapErrors::FixedUpDeletedLayerWeightmap(TEXT("FixedUpDeletedLayerWeightmap"));
+FLazyName FMapErrors::FixedUpInvalidLandscapeMaterialInstances(TEXT("FixedUpInvalidLandscapeMaterialInstances"));
 FLazyName FMapErrors::FixedUpIncorrectLayerWeightmap(TEXT("FixedUpIncorrectLayerWeightmap"));
 FLazyName FMapErrors::FixedUpSharedLayerWeightmap(TEXT("FixedUpSharedLayerWeightmap"));
 FLazyName FMapErrors::LandscapeComponentPostLoad_Warning(TEXT("LandscapeComponentPostLoad_Warning"));
+FLazyName FMapErrors::LandscapeLazyObjectPtrDeprecation_Warning(TEXT("LandscapeLazyObjectPtrDeprecation_Warning"));
+FLazyName FMapErrors::LandscapeProxyFixupSharedData_Warning(TEXT("LandscapeProxyFixupSharedData_Warning"));
 FLazyName FMapErrors::DuplicateLevelInfo(TEXT("DuplicateLevelInfo"));
 FLazyName FMapErrors::NoKillZ(TEXT("NoKillZ"));
 FLazyName FMapErrors::LightComponentNull(TEXT("LightComponentNull"));
@@ -51,6 +57,7 @@ FLazyName FMapErrors::StaticMeshNull(TEXT("StaticMeshNull"));
 FLazyName FMapErrors::StaticMeshComponent(TEXT("StaticMeshComponent"));
 FLazyName FMapErrors::SimpleCollisionButNonUniformScale(TEXT("SimpleCollisionButNonUniformScale"));
 FLazyName FMapErrors::MoreMaterialsThanReferenced(TEXT("MoreMaterialsThanReferenced"));
+FLazyName FMapErrors::MoreNaniteMaterialsThanReferenced(TEXT("MoreNaniteMaterialsThanReferenced"));
 FLazyName FMapErrors::ElementsWithZeroTriangles(TEXT("ElementsWithZeroTriangles"));
 FLazyName FMapErrors::LevelStreamingVolume(TEXT("LevelStreamingVolume"));
 FLazyName FMapErrors::NoLevelsAssociated(TEXT("NoLevelsAssociated"));
@@ -60,16 +67,18 @@ FLazyName FMapErrors::RepairedPaintedVertexColors(TEXT("RepairedPaintedVertexCol
 FLazyName FMapErrors::LODActorMissingStaticMesh(TEXT("LODActorMissingStaticMesh"));
 FLazyName FMapErrors::LODActorMissingActor(TEXT("LODActorMissingActor"));
 FLazyName FMapErrors::LODActorNoActorFound(TEXT("LODActorNoActor"));
-FLazyName FMapErrors::HLODSystemNotEnabled(TEXT("HLODSystemNotEnabled"));
 FLazyName FMapErrors::InvalidVirtualTextureUsage(TEXT("InvalidVirtualTextureUsage"));
+FLazyName FMapErrors::PrimitiveComponentHasInvalidTranslucentShadowSetting(TEXT("PrimitiveComponentHasInvalidTranslucentShadowSetting"));
+FLazyName FMapErrors::UseFauxOrthoViewPosDeprecation_Warning(TEXT("UseFauxOrthoViewPosDeprecation_Warning"));
 
 namespace
 {
-	constexpr TCHAR MapErrorsPath[] = TEXT("Shared/Editor/MapErrors");
+	const TCHAR* MapErrorsURLPath = TEXT("BuildingWorlds/LevelEditor/MapErrors");
+	const TCHAR* MapErrorsLocalPath = TEXT("Shared/Editor/MapErrors");
 }
 
 FMapErrorToken::FMapErrorToken(const FName& InErrorName)
-	: FDocumentationToken(MapErrorsPath, MapErrorsPath, InErrorName.ToString())
+	: FDocumentationToken(MapErrorsURLPath, MapErrorsLocalPath, InErrorName.ToString())
 {
 }
 

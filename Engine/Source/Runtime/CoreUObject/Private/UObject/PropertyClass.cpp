@@ -8,14 +8,22 @@
 #include "UObject/LinkerPlaceholderClass.h"
 #include "Misc/ConfigCacheIni.h"
 #include "UObject/PropertyHelper.h"
-
-// WARNING: This should always be the last include in any file that needs it (except .generated.h)
-#include "UObject/UndefineUPropertyMacros.h"
+#include "Hash/Blake3.h"
 
 /*-----------------------------------------------------------------------------
 	FClassProperty.
 -----------------------------------------------------------------------------*/
 IMPLEMENT_FIELD(FClassProperty)
+
+FClassProperty::FClassProperty(FFieldVariant InOwner, const UECodeGen_Private::FClassPropertyParams& Prop)
+	: FObjectProperty(InOwner, (const UECodeGen_Private::FObjectPropertyParams&)Prop)
+{
+	if (!PropertyClass)
+	{
+		PropertyClass = UClass::StaticClass();
+	}
+	MetaClass = Prop.MetaClassFunc ? Prop.MetaClassFunc() : nullptr;
+}
 
 #if WITH_EDITORONLY_DATA
 FClassProperty::FClassProperty(UField* InField)
@@ -95,11 +103,12 @@ void FClassProperty::AddReferencedObjects(FReferenceCollector& Collector)
 	Super::AddReferencedObjects( Collector );
 }
 
-const TCHAR* FClassProperty::ImportText_Internal( const TCHAR* Buffer, void* Data, int32 PortFlags, UObject* Parent, FOutputDevice* ErrorText ) const
+const TCHAR* FClassProperty::ImportText_Internal( const TCHAR* Buffer, void* ContainerOrPropertyPtr, EPropertyPointerType PropertyPointerType, UObject* Parent, int32 PortFlags, FOutputDevice* ErrorText ) const
 {
-	const TCHAR* Result = FObjectProperty::ImportText_Internal( Buffer, Data, PortFlags, Parent, ErrorText );
+	const TCHAR* Result = FObjectProperty::ImportText_Internal( Buffer, ContainerOrPropertyPtr, PropertyPointerType, Parent, PortFlags, ErrorText );
 	if( Result )
 	{
+		void* Data = PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType);
 		if (UClass* AssignedPropertyClass = dynamic_cast<UClass*>(GetObjectPropertyValue(Data)))
 		{
 #if USE_CIRCULAR_DEPENDENCY_LOAD_DEFERRING
@@ -124,7 +133,15 @@ const TCHAR* FClassProperty::ImportText_Internal( const TCHAR* Buffer, void* Dat
 			{
 				// the object we imported doesn't implement our interface class
 				ErrorText->Logf(TEXT("Invalid object '%s' specified for property '%s'"), *AssignedPropertyClass->GetFullName(), *GetName());
-				SetObjectPropertyValue(Data, NULL);
+				UObject* NullObj = nullptr;
+				if (PropertyPointerType == EPropertyPointerType::Container && HasSetter())
+				{
+					SetValue_InContainer(ContainerOrPropertyPtr, NullObj);
+				}
+				else
+				{
+					SetObjectPropertyValue(PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType), NullObj);
+				}
 				Result = NULL;
 			}
 		}
@@ -141,15 +158,20 @@ FString FClassProperty::GetCPPType(FString* ExtendedTypeText, uint32 CPPExportFl
 
 FString FClassProperty::GetCPPTypeCustom(FString* ExtendedTypeText, uint32 CPPExportFlags, const FString& InnerNativeTypeName) const
 {
-	if (PropertyFlags & CPF_UObjectWrapper)
+	if (EnumHasAnyFlags(PropertyFlags, CPF_TObjectPtr))
+	{
+		if (!EnumHasAnyFlags((EPropertyExportCPPFlags)CPPExportFlags, CPPF_NoTObjectPtr))
+		{
+			ensure(!InnerNativeTypeName.IsEmpty());
+			return FString::Printf(TEXT("TObjectPtr<%s>"), *InnerNativeTypeName);
+		}
+	}
+	else if (EnumHasAnyFlags(PropertyFlags, CPF_UObjectWrapper))
 	{
 		ensure(!InnerNativeTypeName.IsEmpty());
-		return FString::Printf(TEXT("TSubclassOf<%s> "), *InnerNativeTypeName);
+		return FString::Printf(TEXT("TSubclassOf<%s>"), *InnerNativeTypeName);
 	}
-	else
-	{
-		return TEXT("UClass*");
-	}
+	return TEXT("UClass*");
 }
 
 FString FClassProperty::GetCPPTypeForwardDeclaration() const
@@ -159,6 +181,11 @@ FString FClassProperty::GetCPPTypeForwardDeclaration() const
 
 FString FClassProperty::GetCPPMacroType( FString& ExtendedTypeText ) const
 {
+	if (PropertyFlags & CPF_TObjectPtr)
+	{
+		ExtendedTypeText = FString::Printf(TEXT("TObjectPtr<%s%s>"), PropertyClass->GetPrefixCPP(), *PropertyClass->GetName());
+		return TEXT("OBJECTPTR");
+	}
 	ExtendedTypeText = TEXT("UClass");
 	return TEXT("OBJECT");
 }
@@ -170,12 +197,24 @@ bool FClassProperty::SameType(const FProperty* Other) const
 
 bool FClassProperty::Identical( const void* A, const void* B, uint32 PortFlags ) const
 {
-	UObject* ObjectA = A ? GetObjectPropertyValue(A) : nullptr;
-	UObject* ObjectB = B ? GetObjectPropertyValue(B) : nullptr;
+	TObjectPtr<UObject> ObjectA = A ? GetObjectPtrPropertyValue(A) : TObjectPtr<UObject>();
+	TObjectPtr<UObject> ObjectB = B ? GetObjectPtrPropertyValue(B) : TObjectPtr<UObject>();
 
-	check(ObjectA == nullptr || ObjectA->IsA<UClass>());
-	check(ObjectB == nullptr || ObjectB->IsA<UClass>());
+	check(ObjectA == nullptr || ObjectA.IsA<UClass>());
+	check(ObjectB == nullptr || ObjectB.IsA<UClass>());
 	return (ObjectA == ObjectB);
 }
 
-#include "UObject/DefineUPropertyMacros.h"
+#if WITH_EDITORONLY_DATA
+void FClassProperty::AppendSchemaHash(FBlake3& Builder, bool bSkipEditorOnly) const
+{
+	Super::AppendSchemaHash(Builder, bSkipEditorOnly);
+	if (MetaClass)
+	{
+		// Hash the class's name instead of recursively hashing the class; the class's schema does not impact how we serialize our pointer to it
+		FNameBuilder ObjectPath;
+		MetaClass->GetPathName(nullptr, ObjectPath);
+		Builder.Update(ObjectPath.GetData(), ObjectPath.Len() * sizeof(ObjectPath.GetData()[0]));
+	}
+}
+#endif

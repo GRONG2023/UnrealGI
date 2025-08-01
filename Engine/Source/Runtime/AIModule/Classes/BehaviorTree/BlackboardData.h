@@ -28,7 +28,7 @@ struct FBlackboardEntry
 
 	/** key type and additional properties */
 	UPROPERTY(EditAnywhere, Instanced, Category=Blackboard)
-	UBlackboardKeyType* KeyType;
+	TObjectPtr<UBlackboardKeyType> KeyType;
 
 	/** if set to true then this field will be synchronized across all instances of this blackboard */
 	UPROPERTY(EditAnywhere, Category=Blackboard)
@@ -38,18 +38,18 @@ struct FBlackboardEntry
 		: KeyType(nullptr), bInstanceSynced(0)
 	{}
 
-	bool operator==(const FBlackboardEntry& Other) const;
+	AIMODULE_API bool operator==(const FBlackboardEntry& Other) const;
 };
 
-UCLASS(BlueprintType, AutoExpandCategories=(Blackboard))
-class AIMODULE_API UBlackboardData : public UDataAsset
+UCLASS(BlueprintType, AutoExpandCategories=(Blackboard), MinimalAPI)
+class UBlackboardData : public UDataAsset
 {
 	GENERATED_UCLASS_BODY()
 	DECLARE_MULTICAST_DELEGATE_OneParam(FKeyUpdate, UBlackboardData* /*asset*/);
 
 	/** parent blackboard (keys can be overridden) */
 	UPROPERTY(EditAnywhere, Category=Parent)
-	UBlackboardData* Parent;
+	TObjectPtr<UBlackboardData> Parent;
 
 #if WITH_EDITORONLY_DATA
 	/** all keys inherited from parent chain */
@@ -70,36 +70,38 @@ public:
 	FORCEINLINE bool HasSynchronizedKeys() const { return bHasSynchronizedKeys; }
 
 	/** @return true if the key is instance synced */
-	bool IsKeyInstanceSynced(FBlackboard::FKey KeyID) const;
+	AIMODULE_API bool IsKeyInstanceSynced(FBlackboard::FKey KeyID) const;
 	
 	/** @return key ID from name */
-	FBlackboard::FKey GetKeyID(const FName& KeyName) const;
+	AIMODULE_API FBlackboard::FKey GetKeyID(const FName& KeyName) const;
 
 	/** @return name of key */
-	FName GetKeyName(FBlackboard::FKey KeyID) const;
+	AIMODULE_API FName GetKeyName(FBlackboard::FKey KeyID) const;
 
 	/** @return class of value for given key */
-	TSubclassOf<UBlackboardKeyType> GetKeyType(FBlackboard::FKey KeyID) const;
+	AIMODULE_API TSubclassOf<UBlackboardKeyType> GetKeyType(FBlackboard::FKey KeyID) const;
 
 	/** @return number of defined keys, including parent chain */
-	int32 GetNumKeys() const;
+	AIMODULE_API int32 GetNumKeys() const;
 
 	FORCEINLINE FBlackboard::FKey GetFirstKeyID() const { return FirstKeyID; }
 
+	bool IsValidKey(FBlackboard::FKey KeyID) const { return KeyID != FBlackboard::InvalidKey && (int32)KeyID < GetNumKeys(); }
+
 	/** @return key data */
-	const FBlackboardEntry* GetKey(FBlackboard::FKey KeyID) const;
+	AIMODULE_API const FBlackboardEntry* GetKey(FBlackboard::FKey KeyID) const;
 
 	const TArray<FBlackboardEntry>& GetKeys() const { return Keys; }
 
-	virtual void PostInitProperties() override;
-	virtual void PostLoad() override;
+	AIMODULE_API virtual void PostInitProperties() override;
+	AIMODULE_API virtual void PostLoad() override;
 #if WITH_EDITOR
-	virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
+	AIMODULE_API virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
-	void PropagateKeyChangesToDerivedBlackboardAssets();
+	AIMODULE_API void PropagateKeyChangesToDerivedBlackboardAssets();
 
 	/** @return true if blackboard keys are not conflicting with parent key chain */
-	bool IsValid() const;
+	AIMODULE_API bool IsValid() const;
 
 	/** updates persistent key with given name, depending on currently defined entries and parent chain
 	 *  @return key type of newly created entry for further setup
@@ -124,7 +126,7 @@ public:
 		}
 		else if (KeyID != FBlackboard::InvalidKey && Parent != NULL)
 		{
-			const FBlackboard::FKey KeyIndex = KeyID - FirstKeyID;
+			const FBlackboard::FKey KeyIndex = (int32)KeyID - (int32)FirstKeyID;
 			Keys.RemoveAt(KeyIndex);
 			MarkPackageDirty();
 			PropagateKeyChangesToDerivedBlackboardAssets();
@@ -136,26 +138,26 @@ public:
 #if WITH_EDITOR
 	/** A delegate called on PostEditChangeProperty. Can be used in editor to react to asset changes. */
 	DECLARE_MULTICAST_DELEGATE_OneParam(FBlackboardDataChanged, UBlackboardData* /*Asset*/);
-	static FBlackboardDataChanged OnBlackboardDataChanged;
+	static AIMODULE_API FBlackboardDataChanged OnBlackboardDataChanged;
 #endif
 
 	/** delegate called for every loaded blackboard asset
 	 *  meant for adding game specific persistent keys */
-	static FKeyUpdate OnUpdateKeys;
+	static AIMODULE_API FKeyUpdate OnUpdateKeys;
 
 	/** updates parent key cache for editor */
-	void UpdateParentKeys();
+	AIMODULE_API void UpdateParentKeys();
 
 	/** forces update of FirstKeyID, which depends on parent chain */
-	void UpdateKeyIDs();
+	AIMODULE_API void UpdateKeyIDs();
 
-	void UpdateIfHasSynchronizedKeys();
+	AIMODULE_API void UpdateIfHasSynchronizedKeys();
 
 	/** fix entries with deprecated key types */
-	void UpdateDeprecatedKeys();
+	AIMODULE_API void UpdateDeprecatedKeys();
 
 	/** returns true if OtherAsset is somewhere up the parent chain of this asset. Node that it will return false if *this == OtherAsset */
-	bool IsChildOf(const UBlackboardData& OtherAsset) const;
+	AIMODULE_API bool IsChildOf(const UBlackboardData& OtherAsset) const;
 
 	/** returns true if OtherAsset is equal to *this, or is it's parent, or *this is OtherAsset's parent */
 	bool IsRelatedTo(const UBlackboardData& OtherAsset) const
@@ -176,9 +178,5 @@ protected:
 	FBlackboard::FKey FirstKeyID;
 
 	/** @return key ID from name */
-	FBlackboard::FKey InternalGetKeyID(const FName& KeyName, EKeyLookupMode LookupMode) const;
-
-	/** check if parent chain contains given blackboard data */
-	UE_DEPRECATED(4.14, "This function is deprecated, please use IsChildOf instead.")
-	bool HasParent(const UBlackboardData* TestParent) const;
+	AIMODULE_API FBlackboard::FKey InternalGetKeyID(const FName& KeyName, EKeyLookupMode LookupMode) const;
 };

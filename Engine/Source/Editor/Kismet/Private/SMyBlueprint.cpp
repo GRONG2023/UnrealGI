@@ -2,63 +2,122 @@
 
 
 #include "SMyBlueprint.h"
-#include "UObject/UObjectHash.h"
-#include "UObject/UObjectIterator.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
+
+#include "Animation/AnimClassInterface.h"
+#include "AnimationGraph.h"
+#include "AnimationStateMachineGraph.h"
+#include "AnimationStateMachineSchema.h"
+#include "AnimGraphNode_StateMachineBase.h"
+#include "BPDelegateDragDropAction.h"
+#include "BPFunctionDragDropAction.h"
+#include "BPGraphClipboardData.h"
+#include "BPVariableDragDropAction.h"
+#include "BlueprintEditor.h"
+#include "BlueprintEditorCommands.h"
+#include "BlueprintEditorModule.h"
+#include "BlueprintEditorSettings.h"
+#include "Components/ActorComponent.h"
+#include "Components/TimelineComponent.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "DetailLayoutBuilder.h"
+#include "Dialogs/Dialogs.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphSchema.h"
+#include "EdGraphSchema_K2.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "EditorCategoryUtils.h"
+#include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/MemberReference.h"
+#include "Engine/TimelineTemplate.h"
+#include "Fonts/SlateFontInfo.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/GenericCommands.h"
+#include "Framework/Commands/InputChord.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandInfo.h"
+#include "Framework/Commands/UICommandList.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "GenericPlatform/GenericApplication.h"
+#include "GraphActionNode.h"
+#include "GraphEditorActions.h"
+#include "GraphEditorDragDropAction.h"
+#include "HAL/PlatformApplicationMisc.h"
+#include "HAL/PlatformCrt.h"
+#include "Input/DragAndDrop.h"
+#include "Input/Events.h"
+#include "InputCoreTypes.h"
+#include "K2Node.h"
+#include "K2Node_AddComponent.h"
+#include "K2Node_CallFunction.h"
+#include "K2Node_Composite.h"
+#include "K2Node_CreateDelegate.h"
+#include "K2Node_EditablePinBase.h"
+#include "K2Node_Event.h"
+#include "K2Node_EventNodeInterface.h"
+#include "K2Node_ExternalGraphInterface.h"
+#include "K2Node_FunctionEntry.h"
+#include "K2Node_Tunnel.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Math/Color.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/CString.h"
+#include "Misc/Guid.h"
+#include "ObjectEditorUtils.h"
+#include "SBlueprintPalette.h"
+#include "SGraphActionMenu.h"
+#include "SKismetInspector.h"
+#include "SPositiveActionButton.h"
+#include "SReplaceNodeReferences.h"
+#include "SSubobjectBlueprintEditor.h"
+#include "ScopedTransaction.h"
+#include "SlotBase.h"
+#include "SourceCodeNavigation.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/SlateColor.h"
+#include "Styling/SlateTypes.h"
+#include "Subsystems/AssetEditorSubsystem.h"
+#include "Templates/Casts.h"
+#include "Templates/Less.h"
+#include "Templates/SubclassOf.h"
+#include "Templates/Tuple.h"
+#include "Templates/UnrealTemplate.h"
+#include "Textures/SlateIcon.h"
+#include "Types/ISlateMetaData.h"
+#include "UObject/Class.h"
+#include "UObject/Field.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/PropertyPortFlags.h"
+#include "UObject/Script.h"
+#include "UObject/UObjectBaseUtility.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UObjectIterator.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtr.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SComboButton.h"
-#include "Settings/EditorExperimentalSettings.h"
-#include "Engine/MemberReference.h"
-#include "Components/TimelineComponent.h"
-#include "Engine/TimelineTemplate.h"
-#include "Dialogs/Dialogs.h"
-#include "Kismet2/KismetEditorUtilities.h"
-#include "EdGraphSchema_K2.h"
-#include "K2Node_AddComponent.h"
-#include "K2Node_Event.h"
-#include "K2Node_CallFunction.h"
-#include "K2Node_Tunnel.h"
-#include "K2Node_Composite.h"
-#include "K2Node_CreateDelegate.h"
-#include "K2Node_CustomEvent.h"
-#include "K2Node_FunctionEntry.h"
-#include "K2Node_EventNodeInterface.h"
-#include "ScopedTransaction.h"
-#include "HAL/PlatformApplicationMisc.h"
-
-#include "DetailLayoutBuilder.h"
-
-#include "SKismetInspector.h"
-#include "SSCSEditor.h"
-#include "GraphEditorDragDropAction.h"
-#include "BPFunctionDragDropAction.h"
-#include "BPVariableDragDropAction.h"
-#include "BPDelegateDragDropAction.h"
-#include "SBlueprintPalette.h"
-#include "BlueprintEditorCommands.h"
-#include "GraphEditorActions.h"
-
-#include "AnimationGraph.h"
-
-
-#include "SBlueprintEditorToolbar.h"
-
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "ObjectEditorUtils.h"
-#include "GraphEditor/Private/GraphActionNode.h"
-#include "SourceCodeNavigation.h"
-#include "EditorCategoryUtils.h"
 #include "Widgets/Input/SSearchBox.h"
-#include "Framework/Commands/GenericCommands.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SNullWidget.h"
+#include "Widgets/SWidget.h"
+#include "Widgets/Text/STextBlock.h"
 
-#include "BlueprintEditorSettings.h"
-#include "SReplaceNodeReferences.h"
-#include "ReplaceNodeReferencesHelper.h"
-#include "Animation/AnimClassInterface.h"
-
-#include "BPGraphClipboardData.h"
+struct FGeometry;
+struct FSlateBrush;
 
 #define LOCTEXT_NAMESPACE "MyBlueprint"
 
@@ -74,16 +133,18 @@ void FMyBlueprintCommands::RegisterCommands()
 {
 	UI_COMMAND( OpenGraph, "Open Graph", "Opens up this function, macro, or event graph's graph panel up.", EUserInterfaceActionType::Button, FInputChord() );
 	UI_COMMAND( OpenGraphInNewTab, "Open in New Tab", "Opens up this function, macro, or event graph's graph panel up in a new tab. Hold down Ctrl and double click for shortcut.", EUserInterfaceActionType::Button, FInputChord() );
+	UI_COMMAND( OpenExternalGraph, "Open External Graph", "Opens up this external graph's graph panel in its own asset editor", EUserInterfaceActionType::Button, FInputChord() );
 	UI_COMMAND( FocusNode, "Focus", "Focuses on the associated node", EUserInterfaceActionType::Button, FInputChord() );
 	UI_COMMAND( FocusNodeInNewTab, "Focus in New Tab", "Focuses on the associated node in a new tab", EUserInterfaceActionType::Button, FInputChord() );
 	UI_COMMAND( ImplementFunction, "Implement event", "Implements this overridable function as a new event.", EUserInterfaceActionType::Button, FInputChord() );
-	UI_COMMAND( DeleteEntry, "Delete", "Deletes this function or variable from this blueprint.", EUserInterfaceActionType::Button, FInputChord(EKeys::Platform_Delete));
+	UI_COMMAND( DeleteEntry, "Delete", "Deletes this function or variable from this blueprint.", EUserInterfaceActionType::Button, FInputChord(EKeys::Delete), FInputChord(EKeys::BackSpace));
 	UI_COMMAND( PasteVariable, "Paste Variable", "Pastes the variable to this blueprint.", EUserInterfaceActionType::Button, FInputChord());
 	UI_COMMAND( PasteLocalVariable, "Paste Local Variable", "Pastes the variable to this scope.", EUserInterfaceActionType::Button, FInputChord());
 	UI_COMMAND( PasteFunction, "Paste Function", "Pastes the function to this blueprint.", EUserInterfaceActionType::Button, FInputChord());
 	UI_COMMAND( PasteMacro, "Paste Macro", "Pastes the macro to this blueprint.", EUserInterfaceActionType::Button, FInputChord());
 	UI_COMMAND( GotoNativeVarDefinition, "Goto Code Definition", "Goto the native code definition of this variable", EUserInterfaceActionType::Button, FInputChord() );
-	UI_COMMAND( MoveToParent, "Move to Parent Class", "Moves the variable to its parent class", EUserInterfaceActionType::Button, FInputChord() );
+	UI_COMMAND( MoveVariableToParent, "Move to Parent Class", "Moves the variable to its parent class", EUserInterfaceActionType::Button, FInputChord() );
+	UI_COMMAND( MoveFunctionToParent, "Move to Parent Class", "Moves the function to its parent class", EUserInterfaceActionType::Button, FInputChord() );
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -95,7 +156,7 @@ public:
 
 	virtual void HoverTargetChanged() override
 	{
-		const FSlateBrush* StatusSymbol = FEditorStyle::GetBrush(TEXT("NoBrush")); 
+		const FSlateBrush* StatusSymbol = FAppStyle::GetBrush(TEXT("NoBrush")); 
 		FText Message = DraggedCategory;
 
 		FFormatNamedArguments Args;
@@ -105,26 +166,26 @@ public:
 		{
 			if(HoveredCategoryName.EqualTo(DraggedCategory))
 			{
-				StatusSymbol = FEditorStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Error"));
+				StatusSymbol = FAppStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Error"));
 
 				
 				Message = FText::Format( LOCTEXT("MoveCatOverSelf", "Cannot insert category '{DraggedCategory}' before itself."), Args );
 			}
 			else
 			{
-				StatusSymbol = FEditorStyle::GetBrush(TEXT("Graph.ConnectorFeedback.OK"));
+				StatusSymbol = FAppStyle::GetBrush(TEXT("Graph.ConnectorFeedback.OK"));
 				Args.Add(TEXT("HoveredCategory"), HoveredCategoryName);
 				Message = FText::Format( LOCTEXT("MoveCatOK", "Move category '{DraggedCategory}' before '{HoveredCategory}'"), Args );
 			}
 		}
 		else if (HoveredAction.IsValid())
 		{
-			StatusSymbol = FEditorStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Error"));
+			StatusSymbol = FAppStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Error"));
 			Message = LOCTEXT("MoveCatOverAction", "Can only insert before another category.");
 		}
 		else
 		{
-			StatusSymbol = FEditorStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Error"));
+			StatusSymbol = FAppStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Error"));
 			Message = FText::Format(LOCTEXT("MoveCatAction", "Moving category '{DraggedCategory}'"), Args);
 		}
 
@@ -275,6 +336,11 @@ void SMyBlueprint::Construct(const FArguments& InArgs, TWeakPtr<FBlueprintEditor
 			FCanExecuteAction(), FIsActionChecked(),
 			FIsActionButtonVisible::CreateSP(this, &SMyBlueprint::CanOpenGraph) );
 
+		CommandList->MapAction( FMyBlueprintCommands::Get().OpenExternalGraph,
+			FExecuteAction::CreateSP(this, &SMyBlueprint::OnOpenExternalGraph),
+			FCanExecuteAction(), FIsActionChecked(),
+			FIsActionButtonVisible::CreateSP(this, &SMyBlueprint::CanOpenExternalGraph) );
+		
 		CommandList->MapAction( FMyBlueprintCommands::Get().FocusNode,
 			FExecuteAction::CreateSP(this, &SMyBlueprint::OnFocusNode),
 			FCanExecuteAction(), FIsActionChecked(),
@@ -289,9 +355,34 @@ void SMyBlueprint::Construct(const FArguments& InArgs, TWeakPtr<FBlueprintEditor
 			FExecuteAction::CreateSP(this, &SMyBlueprint::OnImplementFunction),
 			FCanExecuteAction(), FIsActionChecked(),
 			FIsActionButtonVisible::CreateSP(this, &SMyBlueprint::CanImplementFunction) );
-	
+		
 		CommandList->MapAction( FGraphEditorCommands::Get().FindReferences,
-			FExecuteAction::CreateSP(this, &SMyBlueprint::OnFindReference),
+			FExecuteAction::CreateSP(this, &SMyBlueprint::OnFindReference, /*bSearchAllBlueprints=*/false, EGetFindReferenceSearchStringFlags::Legacy),
+			FCanExecuteAction(),
+			FIsActionChecked(),
+			FIsActionButtonVisible::CreateSP(this, &SMyBlueprint::CanFindReference) );
+		
+		CommandList->MapAction( FGraphEditorCommands::Get().FindReferencesByNameLocal,
+			FExecuteAction::CreateSP(this, &SMyBlueprint::OnFindReference, /*bSearchAllBlueprints=*/false, EGetFindReferenceSearchStringFlags::None),
+			FCanExecuteAction(),
+			FIsActionChecked(),
+			FIsActionButtonVisible::CreateSP(this, &SMyBlueprint::CanFindReference) );
+
+		
+		CommandList->MapAction( FGraphEditorCommands::Get().FindReferencesByNameGlobal,
+			FExecuteAction::CreateSP(this, &SMyBlueprint::OnFindReference, /*bSearchAllBlueprints=*/true, EGetFindReferenceSearchStringFlags::None),
+			FCanExecuteAction(),
+			FIsActionChecked(),
+			FIsActionButtonVisible::CreateSP(this, &SMyBlueprint::CanFindReference) );
+		
+		CommandList->MapAction( FGraphEditorCommands::Get().FindReferencesByClassMemberLocal,
+			FExecuteAction::CreateSP(this, &SMyBlueprint::OnFindReference, /*bSearchAllBlueprints=*/false, EGetFindReferenceSearchStringFlags::UseSearchSyntax),
+			FCanExecuteAction(),
+			FIsActionChecked(),
+			FIsActionButtonVisible::CreateSP(this, &SMyBlueprint::CanFindReference) );
+		
+		CommandList->MapAction( FGraphEditorCommands::Get().FindReferencesByClassMemberGlobal,
+			FExecuteAction::CreateSP(this, &SMyBlueprint::OnFindReference, /*bSearchAllBlueprints=*/true, EGetFindReferenceSearchStringFlags::UseSearchSyntax),
 			FCanExecuteAction(),
 			FIsActionChecked(),
 			FIsActionButtonVisible::CreateSP(this, &SMyBlueprint::CanFindReference) );
@@ -312,11 +403,17 @@ void SMyBlueprint::Construct(const FArguments& InArgs, TWeakPtr<FBlueprintEditor
 			FIsActionChecked(),
 			FIsActionButtonVisible::CreateSP(this, &SMyBlueprint::IsDuplicateActionVisible) );
 
-		CommandList->MapAction( FMyBlueprintCommands::Get().MoveToParent,
+		CommandList->MapAction( FMyBlueprintCommands::Get().MoveVariableToParent,
 			FExecuteAction::CreateSP(this, &SMyBlueprint::OnMoveToParent),
 			FCanExecuteAction(),
 			FIsActionChecked(),
-			FIsActionButtonVisible::CreateSP(this, &SMyBlueprint::CanMoveToParent) );
+			FIsActionButtonVisible::CreateSP(this, &SMyBlueprint::CanMoveVariableToParent) );
+
+		CommandList->MapAction( FMyBlueprintCommands::Get().MoveFunctionToParent,
+			 FExecuteAction::CreateSP(this, &SMyBlueprint::OnMoveToParent),
+			 FCanExecuteAction(),
+			 FIsActionChecked(),
+			 FIsActionButtonVisible::CreateSP(this, &SMyBlueprint::CanMoveFunctionToParent) );
 
 		CommandList->MapAction( FMyBlueprintCommands::Get().GotoNativeVarDefinition,
 			FExecuteAction::CreateSP(this, &SMyBlueprint::GotoNativeCodeVarDefinition),
@@ -370,39 +467,13 @@ void SMyBlueprint::Construct(const FArguments& InArgs, TWeakPtr<FBlueprintEditor
 		ToolbarBuilderWidget = SNew(SBox);
 	}
 
-	TSharedPtr<SWidget> AddNewMenu = SNullWidget::NullWidget;
-
-	AddNewMenu = SNew(SComboButton)
-		.ComboButtonStyle(FEditorStyle::Get(), "ToolbarComboButton")
-		.ButtonStyle(FEditorStyle::Get(), "FlatButton.Success")
-		.ForegroundColor(FLinearColor::White)
-		.ToolTipText(LOCTEXT("AddNewToolTip", "Add a new Variable, Graph, Function, Macro, or Event Dispatcher."))
-		.OnGetMenuContent(this, &SMyBlueprint::CreateAddNewMenuWidget)
-		.HasDownArrow(true)
-		.ContentPadding(FMargin(1, 0, 2, 0))
+	TSharedPtr<SWidget> AddNewMenu = SNew(SPositiveActionButton)
 		.AddMetaData<FTagMetaData>(FTagMetaData(TEXT("MyBlueprintAddNewCombo")))
+		.Icon(FAppStyle::Get().GetBrush("Icons.Plus"))
+		.Text(LOCTEXT("AddNewLabel", "Add"))
+		.ToolTipText(LOCTEXT("AddNewToolTip", "Add a new Variable, Graph, Function, Macro, or Event Dispatcher."))
 		.IsEnabled(this, &SMyBlueprint::IsEditingMode)
-		.ButtonContent()
-		[
-			SNew(SHorizontalBox)
-
-			+ SHorizontalBox::Slot()
-		.AutoWidth()
-		.Padding(FMargin(0, 1))
-		[
-			SNew(SImage)
-			.Image(FEditorStyle::GetBrush("Plus"))
-		]
-
-	+ SHorizontalBox::Slot()
-		.VAlign(VAlign_Center)
-		.AutoWidth()
-		.Padding(FMargin(2, 0, 2, 0))
-		[
-			SNew(STextBlock)
-			.Text(LOCTEXT("AddNew", "Add New"))
-		]
-		];
+		.OnGetMenuContent(this, &SMyBlueprint::CreateAddNewMenuWidget);
 
 	FMenuBuilder ViewOptions(true, nullptr);
 
@@ -494,6 +565,8 @@ void SMyBlueprint::Construct(const FArguments& InArgs, TWeakPtr<FBlueprintEditor
 		.OnCanRenameSelectedAction(this, &SMyBlueprint::CanRequestRenameOnActionNode)
 		.OnGetSectionTitle(this, &SMyBlueprint::OnGetSectionTitle)
 		.OnGetSectionWidget(this, &SMyBlueprint::OnGetSectionWidget)
+		.OnActionMatchesName(this, &SMyBlueprint::HandleActionMatchesName)
+		.DefaultRowExpanderBaseIndentLevel(1)
 		.AlphaSortItems(false)
 		.UseSectionStyling(true);
 
@@ -508,7 +581,7 @@ void SMyBlueprint::Construct(const FArguments& InArgs, TWeakPtr<FBlueprintEditor
 		[
 			SNew(SBorder)
 			.Padding(4.0f)
-			.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 			.AddMetaData<FTagMetaData>(FTagMetaData(TEXT("MyBlueprintPanel")))
 			[
 				SNew(SVerticalBox)
@@ -526,7 +599,8 @@ void SMyBlueprint::Construct(const FArguments& InArgs, TWeakPtr<FBlueprintEditor
 
 					+ SHorizontalBox::Slot()
 					.AutoWidth()
-					.Padding(0, 0, 2, 0)
+					.VAlign(VAlign_Center)
+					.Padding(0, 0, 4, 0)
 					[
 						AddNewMenu.ToSharedRef()
 					]
@@ -543,19 +617,19 @@ void SMyBlueprint::Construct(const FArguments& InArgs, TWeakPtr<FBlueprintEditor
 					.Padding(2, 0, 0, 0)
 					[
 						SNew(SComboButton)
-						.ComboButtonStyle(FEditorStyle::Get(), "ToolbarComboButton")
-						.ForegroundColor(FSlateColor::UseForeground())
-						.HasDownArrow(true)
-						.ContentPadding(FMargin(1, 0))
+						.ContentPadding(0.0f)
+						.ComboButtonStyle(&FAppStyle::Get().GetWidgetStyle<FComboButtonStyle>("SimpleComboButton"))
+						.HasDownArrow(false)
 						.AddMetaData<FTagMetaData>(FTagMetaData(TEXT("ViewOptions")))
-						.MenuContent()
-						[
-							ViewOptions.MakeWidget()
-						]
 						.ButtonContent()
 						[
 							SNew(SImage)
-							.Image(FEditorStyle::GetBrush("GenericViewButton"))
+							.ColorAndOpacity(FSlateColor::UseForeground())
+							.Image(FAppStyle::Get().GetBrush("Icons.Settings"))
+						]
+						.MenuContent()
+						[
+							ViewOptions.MakeWidget()
 						]
 					]
 				]
@@ -651,7 +725,7 @@ void SMyBlueprint::OnCategoryNameCommitted(const FText& InNewText, ETextCommit::
 			{
 				FEdGraphSchemaAction_K2LocalVar* LocalVarAction = (FEdGraphSchemaAction_K2LocalVar*)Actions[i].Get();
 
-				FBlueprintEditorUtils::SetBlueprintVariableCategory(GetBlueprintObj(), LocalVarAction->GetVariableName(), LocalVarAction->GetVariableScope(), CategoryName, true);
+				FBlueprintEditorUtils::SetBlueprintVariableCategory(GetBlueprintObj(), LocalVarAction->GetVariableName(), CastChecked<UStruct>(LocalVarAction->GetVariableScope()), CategoryName, true);
 			}
 			else if (Actions[i]->GetTypeId() == FEdGraphSchemaAction_K2Delegate::StaticGetTypeId())
 			{
@@ -668,7 +742,41 @@ void SMyBlueprint::OnCategoryNameCommitted(const FText& InNewText, ETextCommit::
 					// Don't allow changing the category of a graph who's parent is not the current Blueprint
 					if(GraphAction && !FBlueprintEditorUtils::IsPaletteActionReadOnly(Actions[i], BlueprintEditorPtr.Pin()) && FBlueprintEditorUtils::FindBlueprintForGraph(GraphAction->EdGraph) == GetBlueprintObj())
 					{
-						GraphAction->MovePersistentItemToCategory(CategoryName);
+						FReply ReplyBySchema = FReply::Unhandled();
+						if (GraphAction->EdGraph)
+						{
+							if (UEdGraphSchema* Schema = (UEdGraphSchema*)GraphAction->EdGraph->GetSchema())
+							{
+								TArray<FString> CategoryParts;
+								TWeakPtr< FGraphActionNode > CurrentActionNode = InAction;
+								while (CurrentActionNode.IsValid())
+								{
+									FString CurrentDisplayName = CurrentActionNode.Pin()->GetDisplayName().ToString();
+									if (!CurrentDisplayName.IsEmpty())
+									{
+										CategoryParts.Insert(CurrentDisplayName, 0);
+									}
+									CurrentActionNode = CurrentActionNode.Pin()->GetParentNode();
+								}
+
+								FString OldCategoryPath = FString::Join(CategoryParts, TEXT("|"));
+								CategoryParts.Last() = CategoryName.ToString();
+								FString NewCategoryPath = FString::Join(CategoryParts, TEXT("|"));
+
+								FString CurrentCategoryPath = GraphAction->GetCategory().ToString();
+								if (CurrentCategoryPath == OldCategoryPath || CurrentCategoryPath.StartsWith(OldCategoryPath + TEXT("|"), ESearchCase::CaseSensitive))
+								{
+									NewCategoryPath = NewCategoryPath + CurrentCategoryPath.RightChop(OldCategoryPath.Len());
+								}
+
+								ReplyBySchema = Schema->TrySetGraphCategory(GraphAction->EdGraph, FText::FromString(NewCategoryPath));
+							}
+						}
+
+						if (!ReplyBySchema.IsEventHandled())
+						{
+							GraphAction->MovePersistentItemToCategory(CategoryName);
+						}
 					}
 				}
 			}
@@ -681,70 +789,70 @@ void SMyBlueprint::OnCategoryNameCommitted(const FText& InNewText, ETextCommit::
 
 FText SMyBlueprint::OnGetSectionTitle( int32 InSectionID )
 {
-	FText SeperatorTitle;
+	FText SeparatorTitle;
 	/* Setup an appropriate name for the section for this node */
 	switch( InSectionID )
 	{
 	case NodeSectionID::VARIABLE:
-		SeperatorTitle = NSLOCTEXT("GraphActionNode", "Variables", "Variables");
+		SeparatorTitle = NSLOCTEXT("GraphActionNode", "Variables", "Variables");
 		break;
 	case NodeSectionID::COMPONENT:
-		SeperatorTitle = NSLOCTEXT("GraphActionNode", "Components", "Components");
+		SeparatorTitle = NSLOCTEXT("GraphActionNode", "Components", "Components");
 		break;
 	case NodeSectionID::FUNCTION:
 		if ( OverridableFunctionActions.Num() > 0 )
 		{
-			SeperatorTitle = FText::Format(NSLOCTEXT("GraphActionNode", "FunctionsOverridableFormat", "Functions <TinyText.Subdued>({0} Overridable)</>"), FText::AsNumber(OverridableFunctionActions.Num()));
+			SeparatorTitle = FText::Format(NSLOCTEXT("GraphActionNode", "FunctionsOverridableFormat", "Functions <TinyText.Subdued>({0} Overridable)</>"), FText::AsNumber(OverridableFunctionActions.Num()));
 		}
 		else
 		{
-			SeperatorTitle = NSLOCTEXT("GraphActionNode", "Functions", "Functions");
+			SeparatorTitle = NSLOCTEXT("GraphActionNode", "Functions", "Functions");
 		}
 
 		break;
 	case NodeSectionID::FUNCTION_OVERRIDABLE:
-		SeperatorTitle = NSLOCTEXT("GraphActionNode", "OverridableFunctions", "Overridable Functions");
+		SeparatorTitle = NSLOCTEXT("GraphActionNode", "OverridableFunctions", "Overridable Functions");
 		break;
 	case NodeSectionID::MACRO:
-		SeperatorTitle = NSLOCTEXT("GraphActionNode", "Macros", "Macros");
+		SeparatorTitle = NSLOCTEXT("GraphActionNode", "Macros", "Macros");
 		break;
 	case NodeSectionID::INTERFACE:
-		SeperatorTitle = NSLOCTEXT("GraphActionNode", "Interfaces", "Interfaces");
+		SeparatorTitle = NSLOCTEXT("GraphActionNode", "Interfaces", "Interfaces");
 		break;
 	case NodeSectionID::DELEGATE:
-		SeperatorTitle = NSLOCTEXT("GraphActionNode", "EventDispatchers", "Event Dispatchers");
+		SeparatorTitle = NSLOCTEXT("GraphActionNode", "EventDispatchers", "Event Dispatchers");
 		break;	
 	case NodeSectionID::GRAPH:
-		SeperatorTitle = NSLOCTEXT("GraphActionNode", "Graphs", "Graphs");
+		SeparatorTitle = NSLOCTEXT("GraphActionNode", "Graphs", "Graphs");
 		break;
 	case NodeSectionID::ANIMGRAPH:
-		SeperatorTitle = NSLOCTEXT("GraphActionNode", "AnimationGraphs", "Animation Graphs");
+		SeparatorTitle = NSLOCTEXT("GraphActionNode", "AnimationGraphs", "Animation Graphs");
 		break;
 	case NodeSectionID::ANIMLAYER:
-		SeperatorTitle = NSLOCTEXT("GraphActionNode", "AnimationLayers", "Animation Layers");
+		SeparatorTitle = NSLOCTEXT("GraphActionNode", "AnimationLayers", "Animation Layers");
 		break;
 	case NodeSectionID::USER_ENUM:
-		SeperatorTitle = NSLOCTEXT("GraphActionNode", "Userenums", "User Enums");
+		SeparatorTitle = NSLOCTEXT("GraphActionNode", "Userenums", "User Enums");
 		break;	
 	case NodeSectionID::LOCAL_VARIABLE:
 		if ( GetFocusedGraph() )
 		{
-			SeperatorTitle = FText::Format(NSLOCTEXT("GraphActionNode", "LocalVariables_Focused", "Local Variables <TinyText.Subdued>({0})</>"), FText::FromName(GetFocusedGraph()->GetFName()));
+			SeparatorTitle = FText::Format(NSLOCTEXT("GraphActionNode", "LocalVariables_Focused", "Local Variables <TinyText.Subdued>({0})</>"), FText::FromName(GetFocusedGraph()->GetFName()));
 		}
 		else
 		{
-			SeperatorTitle = NSLOCTEXT("GraphActionNode", "LocalVariables", "Local Variables");
+			SeparatorTitle = NSLOCTEXT("GraphActionNode", "LocalVariables", "Local Variables");
 		}
 		break;
 	case NodeSectionID::USER_STRUCT:
-		SeperatorTitle = NSLOCTEXT("GraphActionNode", "Userstructs", "User Structs");
+		SeparatorTitle = NSLOCTEXT("GraphActionNode", "Userstructs", "User Structs");
 		break;	
 	default:
 	case NodeSectionID::NONE:
-		SeperatorTitle = FText::GetEmpty();
+		SeparatorTitle = FText::GetEmpty();
 		break;
 	}
-	return SeperatorTitle;
+	return SeparatorTitle;
 }
 
 TSharedRef<SWidget> SMyBlueprint::OnGetSectionWidget(TSharedRef<SWidget> RowWidget, int32 InSectionID)
@@ -773,23 +881,22 @@ TSharedRef<SWidget> SMyBlueprint::OnGetSectionWidget(TSharedRef<SWidget> RowWidg
 					SAssignNew(FunctionSectionButton, SComboButton)
 					.IsEnabled(this, &SMyBlueprint::IsEditingMode)
 					.Visibility(this, &SMyBlueprint::OnGetSectionTextVisibility, WeakRowWidget, InSectionID)
-					.ButtonStyle(FEditorStyle::Get(), "RoundButton")
-					.ForegroundColor(FEditorStyle::GetSlateColor("DefaultForeground"))
-					.ContentPadding(FMargin(2, 0))
+					.ForegroundColor(FAppStyle::GetSlateColor("DefaultForeground"))
 					.OnGetMenuContent(this, &SMyBlueprint::OnGetFunctionListMenu)
+					.ContentPadding(0.0f)
 					.HasDownArrow(true)
 					.ButtonContent()
 					[
 						SNew(STextBlock)
 						.Font(IDetailLayoutBuilder::GetDetailFontBold())
 						.Text(LOCTEXT("Override", "Override"))
-						.ShadowOffset(FVector2D(1, 1))
 					]
 				]
 
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
-				.Padding(2, 0,0,0)
+				.VAlign(VAlign_Center)
+				.Padding(2,0,0,0)
 				[
 					CreateAddToSectionButton(InSectionID, WeakRowWidget, AddNewText, MetaDataTag)
 				];
@@ -825,37 +932,18 @@ TSharedRef<SWidget> SMyBlueprint::OnGetSectionWidget(TSharedRef<SWidget> RowWidg
 
 TSharedRef<SWidget> SMyBlueprint::CreateAddToSectionButton(int32 InSectionID, TWeakPtr<SWidget> WeakRowWidget, FText AddNewText, FName MetaDataTag)
 {
-	return SNew(SButton)
-		.ButtonStyle(FEditorStyle::Get(), "RoundButton")
-		.ForegroundColor(FEditorStyle::GetSlateColor("DefaultForeground"))
-		.ContentPadding(FMargin(2, 0))
+	return 
+		SNew(SButton)
+		.ButtonStyle(FAppStyle::Get(), "SimpleButton")
 		.OnClicked(this, &SMyBlueprint::OnAddButtonClickedOnSection, InSectionID)
 		.IsEnabled(this, &SMyBlueprint::CanAddNewElementToSection, InSectionID)
-		.HAlign(HAlign_Center)
-		.VAlign(VAlign_Center)
+		.ContentPadding(FMargin(1, 0))
 		.AddMetaData<FTagMetaData>(FTagMetaData(MetaDataTag))
+		.ToolTipText(AddNewText)
 		[
-			SNew(SHorizontalBox)
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(FMargin(0, 1))
-			[
-				SNew(SImage)
-				.Image(FEditorStyle::GetBrush("Plus"))
-			]
-
-			+ SHorizontalBox::Slot()
-			.VAlign(VAlign_Center)
-			.AutoWidth()
-			.Padding(FMargin(2,0,0,0))
-			[
-				SNew(STextBlock)
-				.Font(IDetailLayoutBuilder::GetDetailFontBold())
-				.Text(AddNewText)
-				.Visibility(this, &SMyBlueprint::OnGetSectionTextVisibility, WeakRowWidget, InSectionID)
-				.ShadowOffset(FVector2D(1,1))
-			]
+			SNew(SImage)
+			.Image(FAppStyle::Get().GetBrush("Icons.PlusCircle"))
+			.ColorAndOpacity(FSlateColor::UseForeground())
 		];
 }
 
@@ -924,6 +1012,15 @@ bool SMyBlueprint::CanAddNewElementToSection(int32 InSectionID) const
 	return false;
 }
 
+bool SMyBlueprint::HandleActionMatchesName(FEdGraphSchemaAction* InAction, const FName& InName) const
+{
+	if (BlueprintEditorPtr.IsValid())
+	{
+		return BlueprintEditorPtr.Pin()->OnActionMatchesName(InAction, InName);
+	}
+	return false;
+}
+
 EVisibility SMyBlueprint::OnGetSectionTextVisibility(TWeakPtr<SWidget> RowWidget, int32 InSectionID) const
 {
 	bool ShowText = RowWidget.Pin()->IsHovered();
@@ -939,7 +1036,7 @@ EVisibility SMyBlueprint::OnGetSectionTextVisibility(TWeakPtr<SWidget> RowWidget
 	}
 	else
 	{
-		return EVisibility::Collapsed;
+		return EVisibility::Hidden;
 	}
 }
 
@@ -973,6 +1070,18 @@ void SMyBlueprint::BuildOverridableFunctionsMenu(FMenuBuilder& MenuBuilder)
 	{
 		for (TSharedPtr<FEdGraphSchemaAction_K2Graph>& OverrideAction : OverridableFunctionActions)
 		{
+			// Check if function data is valid and skip this entry if it's a private function
+			if (OverrideAction->FuncName != NAME_None)
+			{
+				if (const UFunction* OverrideActionFunction = FindUField<UFunction>(Blueprint->SkeletonGeneratedClass, OverrideAction->FuncName))
+				{
+					if (OverrideActionFunction->HasAnyFunctionFlags(FUNC_Private))
+					{
+						continue;
+					}
+				}
+			}
+			
 			UClass* const OverrideFuncClass = FBlueprintEditorUtils::GetOverrideFunctionClass(GetBlueprintObj(), OverrideAction->FuncName);
 			
 			// Add the function name and tooltip 
@@ -1036,6 +1145,10 @@ bool SMyBlueprint::CanRequestRenameOnActionNode(TWeakPtr<FGraphActionNode> InSel
 	{
 		check( InSelectedNode.Pin()->Actions.Num() > 0 && InSelectedNode.Pin()->Actions[0].IsValid() );
 		bIsReadOnly = FBlueprintEditorUtils::IsPaletteActionReadOnly(InSelectedNode.Pin()->Actions[0], BlueprintEditorPtr.Pin());
+		if(!bIsReadOnly)
+		{
+			bIsReadOnly = !InSelectedNode.Pin()->Actions[0]->CanBeRenamed();
+		}
 	}
 
 	return IsEditingMode() && !bIsReadOnly;
@@ -1056,7 +1169,7 @@ TSharedRef<SWidget> SMyBlueprint::OnCreateWidgetForAction(FCreateWidgetForAction
 	return BlueprintEditorPtr.IsValid() ? SNew(SBlueprintPaletteItem, InCreateData, BlueprintEditorPtr.Pin()) : SNew(SBlueprintPaletteItem, InCreateData, GetBlueprintObj());
 }
 
-void SMyBlueprint::GetChildGraphs(UEdGraph* InEdGraph, int32 const SectionId, FGraphActionSort& SortList, const FText& ParentCategory)
+void SMyBlueprint::GetChildGraphs(UEdGraph* InEdGraph, int32 const SectionId, FGraphActionSort& SortList, const FText& ParentCategory) const
 {
 	check(InEdGraph);
 
@@ -1071,7 +1184,11 @@ void SMyBlueprint::GetChildGraphs(UEdGraph* InEdGraph, int32 const SectionId, FG
 	// Grab children graphs
 	for (UEdGraph* Graph : InEdGraph->SubGraphs)
 	{
-		check(Graph);
+		if (Graph == nullptr)
+		{
+			ensureMsgf(Graph != nullptr, TEXT("A subgraph of %s was null"), *GetPathNameSafe(InEdGraph));
+			continue;
+		}
 
 		FGraphDisplayInfo ChildGraphDisplayInfo;
 		if (const UEdGraphSchema* ChildSchema = Graph->GetSchema())
@@ -1105,11 +1222,25 @@ void SMyBlueprint::GetChildGraphs(UEdGraph* InEdGraph, int32 const SectionId, FG
 	}
 }
 
-void SMyBlueprint::GetChildEvents(UEdGraph const* InEdGraph, int32 const SectionId, FGraphActionSort& SortList, const FText& ParentCategory) const
+void SMyBlueprint::GetChildEvents(UEdGraph const* InEdGraph, int32 const SectionId, FGraphActionSort& SortList, const FText& ParentCategory, bool bInAddChildGraphs) const
 {
 	if (!ensure(InEdGraph != NULL))
 	{
 		return;
+	}
+
+	// ask the schema first to provide the child events
+	if (UEdGraphSchema const* Schema = InEdGraph->GetSchema())
+	{
+		TArray<TSharedPtr<FEdGraphSchemaAction>> ActionsFromSchema;
+		if(Schema->TryToGetChildEvents(InEdGraph, SectionId, ActionsFromSchema, ParentCategory))
+		{
+			for(TSharedPtr<FEdGraphSchemaAction> ActionFromSchema : ActionsFromSchema)
+			{
+				SortList.AddAction(ActionFromSchema);
+			}
+			return;
+		}
 	}
 
 	// grab the parent graph's name
@@ -1131,11 +1262,36 @@ void SMyBlueprint::GetChildEvents(UEdGraph const* InEdGraph, int32 const Section
 
 	for (UEdGraphNode* GraphNode : InEdGraph->Nodes)
 	{
-		if (GraphNode && GraphNode->GetClass()->ImplementsInterface(UK2Node_EventNodeInterface::StaticClass()))
+		if (GraphNode)
 		{
-			TSharedPtr<FEdGraphSchemaAction> EventNodeAction = CastChecked<IK2Node_EventNodeInterface>(GraphNode)->GetEventNodeAction(ActionCategory);
-			EventNodeAction->SectionID = SectionId;
-			SortList.AddAction(EventNodeAction);
+			TSharedPtr<FEdGraphSchemaAction> EventNodeAction;
+			if(GraphNode->GetClass()->ImplementsInterface(UK2Node_EventNodeInterface::StaticClass()))
+			{
+				EventNodeAction = CastChecked<IK2Node_EventNodeInterface>(GraphNode)->GetEventNodeAction(ActionCategory);
+				EventNodeAction->SectionID = SectionId;
+				SortList.AddAction(EventNodeAction);
+			}
+
+			if(bInAddChildGraphs && GraphNode->GetClass()->ImplementsInterface(UK2Node_ExternalGraphInterface::StaticClass()))
+			{
+				TArray<UEdGraph*> ExternalGraphs = CastChecked<IK2Node_ExternalGraphInterface>(GraphNode)->GetExternalGraphs();
+				for(UEdGraph* ExternalGraph : ExternalGraphs)
+				{
+					FText ExternalGraphCategory;
+					if(EventNodeAction.IsValid())
+					{
+						ExternalGraphCategory = FText::Format(FText::FromString(TEXT("{0}|{1}")), ActionCategory, EventNodeAction->GetMenuDescription());
+					}
+					else
+					{
+						ExternalGraphCategory = ActionCategory;
+					}
+					
+					// Dont add child graphs, to avoid circular references creating infinite recursion
+					const bool bAddChildGraphs = false;
+					AddEventForFunctionGraph(ExternalGraph, SectionId, SortList, ExternalGraphCategory, bAddChildGraphs);
+				}
+			}
 		}
 	}
 }
@@ -1146,21 +1302,18 @@ void SMyBlueprint::GetLocalVariables(FGraphActionSort& SortList) const
 	UEdGraph* TopLevelGraph = FBlueprintEditorUtils::GetTopLevelGraph(GetFocusedGraph());
 	if( TopLevelGraph )
 	{
+		TArray<FBPVariableDescription> LocalVariables;
+		bool bSchemaImplementsGetLocalVariables = false;
+	
 		// grab the parent graph's name
 		FGraphDisplayInfo EdGraphDisplayInfo;
 		if (UEdGraphSchema const* Schema = TopLevelGraph->GetSchema())
 		{
 			Schema->GetGraphDisplayInformation(*TopLevelGraph, EdGraphDisplayInfo);
-		}
 
-		TArray<UK2Node_FunctionEntry*> FunctionEntryNodes;
-		TopLevelGraph->GetNodesOfClass<UK2Node_FunctionEntry>(FunctionEntryNodes);
-
-		// Search in all FunctionEntry nodes for their local variables
-		FText ActionCategory;
-		for (UK2Node_FunctionEntry* const FunctionEntry : FunctionEntryNodes)
-		{
-			for (const FBPVariableDescription& Variable : FunctionEntry->LocalVariables)
+			// Try to get the local variables from the schema
+			bSchemaImplementsGetLocalVariables = Schema->GetLocalVariables(GetFocusedGraph(), LocalVariables);
+			for (const FBPVariableDescription& Variable : LocalVariables)
 			{
 				FText Category = Variable.Category;
 				if (Variable.Category.EqualTo(UEdGraphSchema_K2::VR_DefaultCategory))
@@ -1168,12 +1321,39 @@ void SMyBlueprint::GetLocalVariables(FGraphActionSort& SortList) const
 					Category = FText::GetEmpty();
 				}
 
-				UFunction* Func = FindUField<UFunction>(GetBlueprintObj()->SkeletonGeneratedClass, TopLevelGraph->GetFName());
-				if (Func)
+				TSharedPtr<FEdGraphSchemaAction> Action =  Schema->MakeActionFromVariableDescription(GetFocusedGraph(), Variable);
+				if (Action.IsValid())
 				{
-					TSharedPtr<FEdGraphSchemaAction_K2LocalVar> NewVarAction = MakeShareable(new FEdGraphSchemaAction_K2LocalVar(Category, FText::FromName(Variable.VarName), FText::GetEmpty(), 0, NodeSectionID::LOCAL_VARIABLE));
-					NewVarAction->SetVariableInfo(Variable.VarName, Func, Variable.VarType.PinCategory == UEdGraphSchema_K2::PC_Boolean);
-					SortList.AddAction(NewVarAction);
+					SortList.AddAction(Action);
+				}						
+			}
+		}
+
+		// If the schema did not return any local variables, try to get them from the function entry
+		if (!bSchemaImplementsGetLocalVariables)
+		{
+			TArray<UK2Node_FunctionEntry*> FunctionEntryNodes;
+			TopLevelGraph->GetNodesOfClass<UK2Node_FunctionEntry>(FunctionEntryNodes);
+
+			// Search in all FunctionEntry nodes for their local variables
+			FText ActionCategory;
+			for (UK2Node_FunctionEntry* const FunctionEntry : FunctionEntryNodes)
+			{
+				for (const FBPVariableDescription& Variable : FunctionEntry->LocalVariables)
+				{
+					FText Category = Variable.Category;
+					if (Variable.Category.EqualTo(UEdGraphSchema_K2::VR_DefaultCategory))
+					{
+						Category = FText::GetEmpty();
+					}
+
+					UFunction* Func = FindUField<UFunction>(GetBlueprintObj()->SkeletonGeneratedClass, TopLevelGraph->GetFName());
+					if (Func)
+					{
+						TSharedPtr<FEdGraphSchemaAction_K2LocalVar> NewVarAction = MakeShareable(new FEdGraphSchemaAction_K2LocalVar(Category, FText::FromName(Variable.VarName), FText::GetEmpty(), 0, NodeSectionID::LOCAL_VARIABLE));
+						NewVarAction->SetVariableInfo(Variable.VarName, Func, Variable.VarType.PinCategory == UEdGraphSchema_K2::PC_Boolean);
+						SortList.AddAction(NewVarAction);
+					}
 				}
 			}
 		}
@@ -1194,12 +1374,65 @@ EVisibility SMyBlueprint::GetLocalActionsListVisibility() const
 	return EVisibility::Collapsed;
 }
 
+void SMyBlueprint::AddEventForFunctionGraph(UEdGraph* InEdGraph, int32 const SectionId, FGraphActionSort& SortList, const FText& ParentCategory, bool bAddChildGraphs) const
+{
+	UBlueprint* BlueprintObj = GetBlueprintObj();
+	check(BlueprintObj);
+	
+	FGraphDisplayInfo DisplayInfo;
+	InEdGraph->GetSchema()->GetGraphDisplayInformation(*InEdGraph, DisplayInfo);
+
+	FText FunctionCategory = InEdGraph->GetSchema()->GetGraphCategory(InEdGraph);
+	if (FunctionCategory.IsEmpty() && BlueprintObj->SkeletonGeneratedClass != nullptr)
+	{
+		UFunction* Function = BlueprintObj->SkeletonGeneratedClass->FindFunctionByName(InEdGraph->GetFName());
+		if (Function != nullptr)
+		{
+			FunctionCategory = FObjectEditorUtils::GetCategoryText(Function);
+		}
+	}
+
+	// Default, so place in 'non' category
+	if (FunctionCategory.EqualTo(FText::FromString(BlueprintObj->GetName())) || FunctionCategory.EqualTo(UEdGraphSchema_K2::VR_DefaultCategory))
+	{
+		FunctionCategory = FText::GetEmpty();
+	}
+
+	FText ActionCategory;
+	if (!ParentCategory.IsEmpty())
+	{
+		ActionCategory = FText::Format(FText::FromString(TEXT("{0}|{1}")), ParentCategory, FunctionCategory);
+	}
+	else
+	{
+		ActionCategory = MoveTemp(FunctionCategory);
+	}
+	
+	//@TODO: Should be a bit more generic (or the AnimGraph shouldn't be stored as a FunctionGraph...)
+	const bool bIsConstructionScript = InEdGraph->GetFName() == UEdGraphSchema_K2::FN_UserConstructionScript;
+
+	TSharedPtr<FEdGraphSchemaAction_K2Graph> NewFuncAction = MakeShareable(new FEdGraphSchemaAction_K2Graph(EEdGraphSchemaAction_K2Graph::Function, ActionCategory, DisplayInfo.PlainName, DisplayInfo.Tooltip, bIsConstructionScript ? 2 : 1, SectionId));
+	NewFuncAction->FuncName = InEdGraph->GetFName();
+	NewFuncAction->EdGraph = InEdGraph;
+
+	const FString UserCategoryName = FEditorCategoryUtils::GetCategoryDisplayString(ActionCategory.ToString());
+	SortList.AddAction(UserCategoryName, NewFuncAction);
+
+	if(bAddChildGraphs)
+	{
+		GetChildGraphs(InEdGraph, NewFuncAction->GetSectionID(), SortList, ActionCategory);
+	}
+	GetChildEvents(InEdGraph, NewFuncAction->GetSectionID(), SortList, ActionCategory, bAddChildGraphs);
+}
+
 void SMyBlueprint::CollectAllActions(FGraphActionListBuilderBase& OutAllActions)
 {
 	const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
 
 	UBlueprint* BlueprintObj = GetBlueprintObj();
 	check(BlueprintObj);
+
+	TSharedPtr<FBlueprintEditor> BlueprintEditor = BlueprintEditorPtr.Pin();
 
 	EFieldIteratorFlags::SuperClassFlags FieldIteratorSuperFlag = EFieldIteratorFlags::IncludeSuper;
 	if ( ShowUserVarsOnly() )
@@ -1243,7 +1476,7 @@ void SMyBlueprint::CollectAllActions(FGraphActionListBuilderBase& OutAllActions)
 
 		const FText PropertyTooltip = Property->GetToolTipText();
 		const FName PropertyName = Property->GetFName();
-		const FText PropertyDesc = FText::FromName(PropertyName);
+		const FText PropertyDesc = Property->IsNative() ? Property->GetDisplayNameText() : FText::FromName(PropertyName);
 
 		FText CategoryName = FObjectEditorUtils::GetCategoryText(Property);
 		FText PropertyCategory = FObjectEditorUtils::GetCategoryText(Property);
@@ -1271,7 +1504,7 @@ void SMyBlueprint::CollectAllActions(FGraphActionListBuilderBase& OutAllActions)
 			NewVarAction->SetVariableInfo(PropertyName, BlueprintObj->SkeletonGeneratedClass, CastField<FBoolProperty>(TestProperty) != nullptr);
 			SortList.AddAction( UserCategoryName, NewVarAction );
 		}
-		else if (bShouldShowAsDelegate)
+		else if (bShouldShowAsDelegate && BlueprintEditor.IsValid() && BlueprintEditor->AreDelegatesAllowed())
 		{
 			TSharedPtr<FEdGraphSchemaAction_K2Delegate> NewDelegateAction;
 			// Delegate is visible in MyBlueprint when not-native or its category name is not empty.
@@ -1311,28 +1544,6 @@ void SMyBlueprint::CollectAllActions(FGraphActionListBuilderBase& OutAllActions)
 	{
 		check(Graph);
 
-		FGraphDisplayInfo DisplayInfo;
-		Graph->GetSchema()->GetGraphDisplayInformation(*Graph, DisplayInfo);
-
-		FText FunctionCategory;
-		if (BlueprintObj->SkeletonGeneratedClass != nullptr)
-		{
-			UFunction* Function = BlueprintObj->SkeletonGeneratedClass->FindFunctionByName(Graph->GetFName());
-			if (Function != nullptr)
-			{
-				FunctionCategory = FObjectEditorUtils::GetCategoryText(Function);
-			}
-		}
-
-		// Default, so place in 'non' category
-		if (FunctionCategory.EqualTo(FText::FromString(BlueprintObj->GetName())) || FunctionCategory.EqualTo(UEdGraphSchema_K2::VR_DefaultCategory))
-		{
-			FunctionCategory = FText::GetEmpty();
-		}
-
-		//@TODO: Should be a bit more generic (or the AnimGraph shouldn't be stored as a FunctionGraph...)
-		const bool bIsConstructionScript = Graph->GetFName() == UEdGraphSchema_K2::FN_UserConstructionScript;
-		
 		int32 SectionID = NodeSectionID::FUNCTION;
 
 		if(Graph->IsA<UAnimationGraph>())
@@ -1348,43 +1559,38 @@ void SMyBlueprint::CollectAllActions(FGraphActionListBuilderBase& OutAllActions)
 			}
 		}
 
-		TSharedPtr<FEdGraphSchemaAction_K2Graph> NewFuncAction = MakeShareable(new FEdGraphSchemaAction_K2Graph(EEdGraphSchemaAction_K2Graph::Function, FunctionCategory, DisplayInfo.PlainName, DisplayInfo.Tooltip, bIsConstructionScript ? 2 : 1, SectionID));
-		NewFuncAction->FuncName = Graph->GetFName();
-		NewFuncAction->EdGraph = Graph;
-
-		const FString UserCategoryName = FEditorCategoryUtils::GetCategoryDisplayString(FunctionCategory.ToString());
-		SortList.AddAction(UserCategoryName, NewFuncAction);
-
-		GetChildGraphs(Graph, NewFuncAction->GetSectionID(), SortList, FunctionCategory);
-		GetChildEvents(Graph, NewFuncAction->GetSectionID(), SortList, FunctionCategory);
+		AddEventForFunctionGraph(Graph, SectionID, SortList, FText::GetEmpty(), true);
 
 		ImplementedFunctionCache.Add(Graph->GetFName());
 	}
 
-	// Grab macros implemented by the blueprint
-	for (int32 i = 0; i < BlueprintObj->MacroGraphs.Num(); i++)
+	if(BlueprintEditor.IsValid() && BlueprintEditor->AreMacrosAllowed())
 	{
-		UEdGraph* Graph = BlueprintObj->MacroGraphs[i];
-		check(Graph);
+		// Grab macros implemented by the blueprint
+		for (int32 i = 0; i < BlueprintObj->MacroGraphs.Num(); i++)
+		{
+			UEdGraph* Graph = BlueprintObj->MacroGraphs[i];
+			check(Graph);
 		
-		const FName MacroName = Graph->GetFName();
+			const FName MacroName = Graph->GetFName();
 
-		FGraphDisplayInfo DisplayInfo;
-		Graph->GetSchema()->GetGraphDisplayInformation(*Graph, DisplayInfo);
+			FGraphDisplayInfo DisplayInfo;
+			Graph->GetSchema()->GetGraphDisplayInformation(*Graph, DisplayInfo);
 
-		FText MacroCategory = GetGraphCategory(Graph);
+			FText MacroCategory = GetGraphCategory(Graph);
 
-		TSharedPtr<FEdGraphSchemaAction_K2Graph> NewMacroAction = MakeShareable(new FEdGraphSchemaAction_K2Graph(EEdGraphSchemaAction_K2Graph::Macro, MacroCategory, DisplayInfo.PlainName, DisplayInfo.Tooltip, 1, NodeSectionID::MACRO));
-		NewMacroAction->FuncName = MacroName;
-		NewMacroAction->EdGraph = Graph;
+			TSharedPtr<FEdGraphSchemaAction_K2Graph> NewMacroAction = MakeShareable(new FEdGraphSchemaAction_K2Graph(EEdGraphSchemaAction_K2Graph::Macro, MacroCategory, DisplayInfo.PlainName, DisplayInfo.Tooltip, 1, NodeSectionID::MACRO));
+			NewMacroAction->FuncName = MacroName;
+			NewMacroAction->EdGraph = Graph;
 
-		const FString UserCategoryName = FEditorCategoryUtils::GetCategoryDisplayString(MacroCategory.ToString());
-		SortList.AddAction(UserCategoryName, NewMacroAction);
+			const FString UserCategoryName = FEditorCategoryUtils::GetCategoryDisplayString(MacroCategory.ToString());
+			SortList.AddAction(UserCategoryName, NewMacroAction);
 
-		GetChildGraphs(Graph, NewMacroAction->GetSectionID(), SortList, MacroCategory);
-		GetChildEvents(Graph, NewMacroAction->GetSectionID(), SortList, MacroCategory);
+			GetChildGraphs(Graph, NewMacroAction->GetSectionID(), SortList, MacroCategory);
+			GetChildEvents(Graph, NewMacroAction->GetSectionID(), SortList, MacroCategory);
 
-		ImplementedFunctionCache.Add(MacroName);
+			ImplementedFunctionCache.Add(MacroName);
+		}
 	}
 
 	OverridableFunctionActions.Reset();
@@ -1396,11 +1602,21 @@ void SMyBlueprint::CollectAllActions(FGraphActionListBuilderBase& OutAllActions)
 		const UFunction* Function = *FunctionIt;
 		const FName FunctionName = Function->GetFName();
 
+		UClass *OuterClass = CastChecked<UClass>(Function->GetOuter());
+		// ignore skeleton classes and convert them into their "authoritative" types so they
+		// can be found in the graph
+		if(UBlueprintGeneratedClass *GeneratedOuterClass = Cast<UBlueprintGeneratedClass>(OuterClass))
+		{
+			OuterClass = GeneratedOuterClass->GetAuthoritativeClass();
+		}
+
 		if (    UEdGraphSchema_K2::CanKismetOverrideFunction(Function) 
 			 && !OverridableFunctionNames.Contains(FunctionName) 
 			 && !ImplementedFunctionCache.Contains(FunctionName) 
 			 && !FObjectEditorUtils::IsFunctionHiddenFromClass(Function, ParentClass)
-			 && !FBlueprintEditorUtils::FindOverrideForFunction(BlueprintObj, CastChecked<UClass>(Function->GetOuter()), Function->GetFName()) )
+			 && !FBlueprintEditorUtils::FindOverrideForFunction(BlueprintObj, OuterClass, Function->GetFName())
+			 && Blueprint->AllowFunctionOverride(Function)
+		   )
 		{
 			FText FunctionTooltip = FText::FromString(UK2Node_CallFunction::GetDefaultTooltipForFunction(Function));
 			FText FunctionDesc = K2Schema->GetFriendlySignatureName(Function);
@@ -1489,6 +1705,7 @@ void SMyBlueprint::CollectAllActions(FGraphActionListBuilderBase& OutAllActions)
 					if(bIsAnimFunction && NewFuncAction->EdGraph)
 					{
 						GetChildGraphs(NewFuncAction->EdGraph, NewFuncAction->GetSectionID(), SortList, FunctionCategory);
+						GetChildEvents(NewFuncAction->EdGraph, NewFuncAction->GetSectionID(), SortList, FunctionCategory);
 					}
 				}
 			}
@@ -1531,22 +1748,26 @@ void SMyBlueprint::CollectAllActions(FGraphActionListBuilderBase& OutAllActions)
 		}
 	}
 
-	// Grab ubergraph pages
-	for (int32 i = 0; i < BlueprintObj->UbergraphPages.Num(); i++)
+	
+	if(BlueprintEditor.IsValid() && BlueprintEditor->AreEventGraphsAllowed())
 	{
-		UEdGraph* Graph = BlueprintObj->UbergraphPages[i];
-		check(Graph);
+		// Grab ubergraph pages
+		for (int32 i = 0; i < BlueprintObj->UbergraphPages.Num(); i++)
+		{
+			UEdGraph* Graph = BlueprintObj->UbergraphPages[i];
+			check(Graph);
 		
-		FGraphDisplayInfo DisplayInfo;
-		Graph->GetSchema()->GetGraphDisplayInformation(*Graph, DisplayInfo);
+			FGraphDisplayInfo DisplayInfo;
+			Graph->GetSchema()->GetGraphDisplayInformation(*Graph, DisplayInfo);
 
-		TSharedPtr<FEdGraphSchemaAction_K2Graph> NeUbergraphAction = MakeShareable(new FEdGraphSchemaAction_K2Graph(EEdGraphSchemaAction_K2Graph::Graph, FText::GetEmpty(), DisplayInfo.PlainName, DisplayInfo.Tooltip, 2, NodeSectionID::GRAPH));
-		NeUbergraphAction->FuncName = Graph->GetFName();
-		NeUbergraphAction->EdGraph = Graph;
-		OutAllActions.AddAction(NeUbergraphAction);
+			TSharedPtr<FEdGraphSchemaAction_K2Graph> NeUbergraphAction = MakeShareable(new FEdGraphSchemaAction_K2Graph(EEdGraphSchemaAction_K2Graph::Graph, FText::GetEmpty(), DisplayInfo.PlainName, DisplayInfo.Tooltip, 2, NodeSectionID::GRAPH));
+			NeUbergraphAction->FuncName = Graph->GetFName();
+			NeUbergraphAction->EdGraph = Graph;
+			OutAllActions.AddAction(NeUbergraphAction);
 
-		GetChildGraphs(Graph, NeUbergraphAction->GetSectionID(), SortList);
-		GetChildEvents(Graph, NeUbergraphAction->GetSectionID(), SortList);
+			GetChildGraphs(Graph, NeUbergraphAction->GetSectionID(), SortList);
+			GetChildEvents(Graph, NeUbergraphAction->GetSectionID(), SortList);
+		}
 	}
 
 	// Grab intermediate pages
@@ -1714,36 +1935,70 @@ FReply SMyBlueprint::OnActionDragged( const TArray< TSharedPtr<FEdGraphSchemaAct
 		if(InAction->GetTypeId() == FEdGraphSchemaAction_K2Graph::StaticGetTypeId())
 		{
 			FEdGraphSchemaAction_K2Graph* FuncAction = (FEdGraphSchemaAction_K2Graph*)InAction.Get();
-			
+
+			if (FuncAction->EdGraph)
+			{
+				if (FuncAction->EdGraph->GetSchema()->CanGraphBeDropped(InAction))
+				{
+					return FuncAction->EdGraph->GetSchema()->BeginGraphDragAction(InAction, FPointerEvent());
+				}
+			}
+
 			if (FuncAction->GraphType == EEdGraphSchemaAction_K2Graph::Function ||FuncAction->GraphType == EEdGraphSchemaAction_K2Graph::Interface)
 			{
 				// Callback function to report that the user cannot drop this function in the graph
-				auto CanDragDropAction = [](TSharedPtr<FEdGraphSchemaAction> /*DropAction*/, UEdGraph* /*HoveredGraphIn*/, FText& ImpededReasonOut, bool bIsBlueprintCallableFunction)->bool
+				auto CanDragDropAction = [](TSharedPtr<FEdGraphSchemaAction> /*DropAction*/, UEdGraph* HoveredGraphIn, FText& ImpededReasonOut, int32 FunctionFlags)->bool //bool bIsBlueprintCallableFunction, bool bIsPureFunction)->bool
 				{
-					if (!bIsBlueprintCallableFunction)
+					if ((FunctionFlags & (FUNC_BlueprintCallable | FUNC_BlueprintPure)) == 0)
 					{
 						ImpededReasonOut = LOCTEXT("NonBlueprintCallable", "This function was not marked as Blueprint Callable and cannot be placed in a graph!");
+						return false;
 					}
-					return bIsBlueprintCallableFunction;
+					
+					if (const UEdGraphSchema_K2* K2Schema = Cast<UEdGraphSchema_K2>(HoveredGraphIn->GetSchema()))
+					{
+						if ((FunctionFlags & (FUNC_BlueprintPure)) == 0)
+						{
+							if (K2Schema->DoesGraphSupportImpureFunctions(HoveredGraphIn) == false)
+							{
+								ImpededReasonOut = LOCTEXT("GraphNoSupportImpureF", "The target graph does not support Impure Functions.");
+								return false;
+							}
+						}
+					}
+					else
+					{
+						// TODO : Check if this else has to block everything or just explicit schemas
+						if (const UAnimationStateMachineSchema* AnimationStateMachineSchema = Cast<UAnimationStateMachineSchema>(HoveredGraphIn->GetSchema()))
+						{
+							ImpededReasonOut = LOCTEXT("GraphNoSupportFunctions", "The target graph does not support Functions.");
+							return false;
+						}
+					}
+
+					return true;
 				};
 
-				bool bIsBlueprintCallableFunction = false;
+				int32 FunctionFlags = 0;
+
 				if (FuncAction->EdGraph)
 				{
 					for (UEdGraphNode* GraphNode : FuncAction->EdGraph->Nodes)
 					{
 						if (UK2Node_FunctionEntry* Node = Cast<UK2Node_FunctionEntry>(GraphNode))
 						{
-							// See whether this node is a blueprint callable function
-							if (Node->GetFunctionFlags() & (FUNC_BlueprintCallable|FUNC_BlueprintPure))
-							{
-								bIsBlueprintCallableFunction = true;
-							}
+							FunctionFlags |= Node->GetFunctionFlags();
 						}
 					}
 				}
 
-				return FReply::Handled().BeginDragDrop(FKismetFunctionDragDropAction::New(InAction, FuncAction->FuncName, GetBlueprintObj()->SkeletonGeneratedClass, FMemberReference(), AnalyticsDelegate, FKismetDragDropAction::FCanBeDroppedDelegate::CreateLambda(CanDragDropAction, bIsBlueprintCallableFunction)));
+				return FReply::Handled().BeginDragDrop(FKismetFunctionDragDropAction::New(
+					InAction, 
+					FuncAction->FuncName, 
+					GetBlueprintObj()->SkeletonGeneratedClass, 
+					FMemberReference(), 
+					AnalyticsDelegate, 
+					FKismetDragDropAction::FCanBeDroppedDelegate::CreateLambda(CanDragDropAction, FunctionFlags)));
 			}
 			else if (FuncAction->GraphType == EEdGraphSchemaAction_K2Graph::Macro)
 			{
@@ -1771,7 +2026,7 @@ FReply SMyBlueprint::OnActionDragged( const TArray< TSharedPtr<FEdGraphSchemaAct
 		else if( InAction->GetTypeId() == FEdGraphSchemaAction_K2LocalVar::StaticGetTypeId())
 		{
 			FEdGraphSchemaAction_K2LocalVar* VarAction = (FEdGraphSchemaAction_K2LocalVar*)InAction.Get();
-			if (UStruct* VariableScope = VarAction->GetVariableScope())
+			if (UStruct* VariableScope = Cast<UStruct>(VarAction->GetVariableScope()))
 			{
 				TSharedRef<FKismetVariableDragDropAction> DragOperation = FKismetVariableDragDropAction::New(InAction, VarAction->GetVariableName(), VariableScope, AnalyticsDelegate);
 				DragOperation->SetAltDrag(MouseEvent.IsAltDown());
@@ -1789,6 +2044,15 @@ FReply SMyBlueprint::OnActionDragged( const TArray< TSharedPtr<FEdGraphSchemaAct
 				DragOperation->SetCtrlDrag(MouseEvent.IsLeftControlDown() || MouseEvent.IsRightControlDown());
 				return FReply::Handled().BeginDragDrop(DragOperation);
 			}
+		}
+		else if( InAction->IsA(FEdGraphSchemaAction_BlueprintVariableBase::StaticGetTypeId()))
+		{
+			FEdGraphSchemaAction_BlueprintVariableBase* VarAction = (FEdGraphSchemaAction_BlueprintVariableBase*)InAction.Get();
+
+			if (GetFocusedGraph()->GetSchema()->CanGraphBeDropped(InAction))
+			{
+				return GetFocusedGraph()->GetSchema()->BeginGraphDragAction(InAction, MouseEvent);
+			}		
 		}
 		else if (InAction->GetTypeId() == FEdGraphSchemaAction_K2Event::StaticGetTypeId())
 		{	
@@ -1859,7 +2123,7 @@ void SMyBlueprint::OnActionSelected( const TArray< TSharedPtr<FEdGraphSchemaActi
 	OnActionSelectedHelper(InAction, BlueprintEditorPtr, Blueprint, CurrentInspector.ToSharedRef());
 }
 
-void SMyBlueprint::OnActionSelectedHelper(TSharedPtr<FEdGraphSchemaAction> InAction, TWeakPtr< FBlueprintEditor > InBlueprintEditor, UBlueprint* Blueprint, TSharedRef<SKismetInspector> Inspector)
+void SMyBlueprint::OnActionSelectedHelper(TSharedPtr<FEdGraphSchemaAction> InAction, TWeakPtr< FBlueprintEditor > InBlueprintEditor, UBlueprint* CurrentBlueprint, TSharedRef<SKismetInspector> CurrentInspector)
 {
 	if (InAction.IsValid())
 	{
@@ -1870,8 +2134,10 @@ void SMyBlueprint::OnActionSelectedHelper(TSharedPtr<FEdGraphSchemaAction> InAct
 			if (GraphAction->EdGraph)
 			{
 				FGraphDisplayInfo DisplayInfo;
-				GraphAction->EdGraph->GetSchema()->GetGraphDisplayInformation(*GraphAction->EdGraph, DisplayInfo);
-				Inspector->ShowDetailsForSingleObject(GraphAction->EdGraph, SKismetInspector::FShowDetailsOptions(DisplayInfo.PlainName));
+				const UEdGraphSchema* Schema = GraphAction->EdGraph->GetSchema();
+				check(Schema != nullptr);
+				Schema->GetGraphDisplayInformation(*GraphAction->EdGraph, DisplayInfo);
+				CurrentInspector->ShowDetailsForSingleObject(GraphAction->EdGraph, SKismetInspector::FShowDetailsOptions(DisplayInfo.PlainName));
 			}
 		}
 		else if (InAction->GetTypeId() == FEdGraphSchemaAction_K2Delegate::StaticGetTypeId())
@@ -1879,7 +2145,7 @@ void SMyBlueprint::OnActionSelectedHelper(TSharedPtr<FEdGraphSchemaAction> InAct
 			FEdGraphSchemaAction_K2Delegate* DelegateAction = (FEdGraphSchemaAction_K2Delegate*)InAction.Get();
 			if (FMulticastDelegateProperty* Property = DelegateAction->GetDelegateProperty())
 			{
-				Inspector->ShowDetailsForSingleObject(Property->GetUPropertyWrapper(), SKismetInspector::FShowDetailsOptions(FText::FromString(Property->GetName())));
+				CurrentInspector->ShowDetailsForSingleObject(Property->GetUPropertyWrapper(), SKismetInspector::FShowDetailsOptions(FText::FromString(Property->GetName())));
 			}
 		}
 		else if (InAction->GetTypeId() == FEdGraphSchemaAction_K2Var::StaticGetTypeId())
@@ -1889,7 +2155,9 @@ void SMyBlueprint::OnActionSelectedHelper(TSharedPtr<FEdGraphSchemaAction> InAct
 			SKismetInspector::FShowDetailsOptions Options(FText::FromName(VarAction->GetVariableName()));
 			Options.bForceRefresh = true;
 
-			Inspector->ShowDetailsForSingleObject(VarAction->GetProperty()->GetUPropertyWrapper(), Options);
+			FProperty* Prop = VarAction->GetProperty();
+			UPropertyWrapper* PropWrap = (Prop ? Prop->GetUPropertyWrapper() : nullptr);
+			CurrentInspector->ShowDetailsForSingleObject(PropWrap, Options);
 		}
 		else if (InAction->GetTypeId() == FEdGraphSchemaAction_K2LocalVar::StaticGetTypeId())
 		{
@@ -1899,7 +2167,18 @@ void SMyBlueprint::OnActionSelectedHelper(TSharedPtr<FEdGraphSchemaAction> InAct
 
 			FProperty* Prop = VarAction->GetProperty();
 			UPropertyWrapper* PropWrap = (Prop ? Prop->GetUPropertyWrapper() : nullptr);
-			Inspector->ShowDetailsForSingleObject(PropWrap, Options);
+			CurrentInspector->ShowDetailsForSingleObject(PropWrap, Options);
+		}
+		else if (InAction->IsAVariable())
+		{
+			FEdGraphSchemaAction_BlueprintVariableBase* VarAction = (FEdGraphSchemaAction_BlueprintVariableBase*)InAction.Get();
+			if (UEdGraph* Graph = GetFocusedGraph())
+			{
+				if (BlueprintEditorPtr.IsValid())
+				{
+					BlueprintEditorPtr.Pin()->SelectLocalVariable(Graph, VarAction->GetVariableName());	
+				}
+			}
 		}
 		else if (InAction->GetTypeId() == FEdGraphSchemaAction_K2Enum::StaticGetTypeId())
 		{
@@ -1908,7 +2187,7 @@ void SMyBlueprint::OnActionSelectedHelper(TSharedPtr<FEdGraphSchemaAction> InAct
 			SKismetInspector::FShowDetailsOptions Options(FText::FromName(EnumAction->GetPathName()));
 			Options.bForceRefresh = true;
 
-			Inspector->ShowDetailsForSingleObject(EnumAction->Enum, Options);
+			CurrentInspector->ShowDetailsForSingleObject(EnumAction->Enum, Options);
 		}
 		else if (InAction->GetTypeId() == FEdGraphSchemaAction_K2Struct::StaticGetTypeId())
 		{
@@ -1917,24 +2196,28 @@ void SMyBlueprint::OnActionSelectedHelper(TSharedPtr<FEdGraphSchemaAction> InAct
 			SKismetInspector::FShowDetailsOptions Options(FText::FromName(StructAction->GetPathName()));
 			Options.bForceRefresh = true;
 
-			Inspector->ShowDetailsForSingleObject(StructAction->Struct, Options);
+			CurrentInspector->ShowDetailsForSingleObject(StructAction->Struct, Options);
 		}
 		else if (InAction->GetTypeId() == FEdGraphSchemaAction_K2TargetNode::StaticGetTypeId() ||
 			InAction->GetTypeId() == FEdGraphSchemaAction_K2Event::StaticGetTypeId() ||
 			InAction->GetTypeId() == FEdGraphSchemaAction_K2InputAction::StaticGetTypeId())
 		{
 			FEdGraphSchemaAction_K2TargetNode* TargetNodeAction = (FEdGraphSchemaAction_K2TargetNode*)InAction.Get();
-			SKismetInspector::FShowDetailsOptions Options(TargetNodeAction->NodeTemplate->GetNodeTitle(ENodeTitleType::EditableTitle));
-			Inspector->ShowDetailsForSingleObject(TargetNodeAction->NodeTemplate, Options);
+			
+			UK2Node* NodeTemplate = TargetNodeAction->NodeTemplate.Get();
+			check(NodeTemplate != nullptr)
+
+			SKismetInspector::FShowDetailsOptions Options(NodeTemplate->GetNodeTitle(ENodeTitleType::EditableTitle));
+			CurrentInspector->ShowDetailsForSingleObject(NodeTemplate, Options);
 		}
 		else
 		{
-			Inspector->ShowDetailsForObjects(TArray<UObject*>());
+			CurrentInspector->ShowDetailsForObjects(TArray<UObject*>());
 		}
 	}
 	else
 	{
-		Inspector->ShowDetailsForObjects(TArray<UObject*>());
+		CurrentInspector->ShowDetailsForObjects(TArray<UObject*>());
 	}
 }
 
@@ -1964,7 +2247,27 @@ void SMyBlueprint::ExecuteAction(TSharedPtr<FEdGraphSchemaAction> InAction)
 
 			if (GraphAction->EdGraph)
 			{
-				BlueprintEditorPtr.Pin()->OpenDocument(GraphAction->EdGraph, OpenMode);
+				BlueprintEditorPtr.Pin()->JumpToHyperlink(GraphAction->EdGraph);
+			}
+			else if(IsAnInterfaceEvent(GraphAction))
+			{
+				// Focus it's node in the event graph
+				UFunction* OverrideFunc = nullptr;
+				UClass* const OverrideFuncClass = FBlueprintEditorUtils::GetOverrideFunctionClass(BlueprintObj, GraphAction->FuncName, &OverrideFunc);
+				if (OverrideFunc)
+				{
+					FName EventName = OverrideFunc->GetFName();
+					// check if event has been implemented
+					if (UK2Node_Event* ExistingNode = FBlueprintEditorUtils::FindOverrideForFunction(BlueprintObj, OverrideFuncClass, EventName))
+					{
+						FKismetEditorUtilities::BringKismetToFocusAttentionOnObject(ExistingNode);
+					}
+					else
+					{
+						// if there isn't an associated node, make one and focus it
+						ImplementFunction(GraphAction);
+					}
+				}
 			}
 		}
 		if (InAction->GetTypeId() == FEdGraphSchemaAction_K2Delegate::StaticGetTypeId())
@@ -1973,7 +2276,7 @@ void SMyBlueprint::ExecuteAction(TSharedPtr<FEdGraphSchemaAction> InAction)
 
 			if (DelegateAction->EdGraph)
 			{
-				BlueprintEditorPtr.Pin()->OpenDocument(DelegateAction->EdGraph, OpenMode);
+				BlueprintEditorPtr.Pin()->JumpToHyperlink(DelegateAction->EdGraph);
 			}
 		}
 		else if(InAction->GetTypeId() == FEdGraphSchemaAction_K2Var::StaticGetTypeId())
@@ -1991,7 +2294,7 @@ void SMyBlueprint::ExecuteAction(TSharedPtr<FEdGraphSchemaAction> InAction)
 					// Convert the Timeline's name to a variable name before comparing it to the variable
 					if (BlueprintObj->Timelines[i]->GetVariableName() == VarAction->GetVariableName())
 					{
-						BlueprintEditorPtr.Pin()->OpenDocument(BlueprintObj->Timelines[i], OpenMode);
+						BlueprintEditorPtr.Pin()->JumpToHyperlink(BlueprintObj->Timelines[i]);
 					}
 				}
 			}
@@ -2006,6 +2309,10 @@ void SMyBlueprint::ExecuteAction(TSharedPtr<FEdGraphSchemaAction> InAction)
 		{
 			FEdGraphSchemaAction_K2TargetNode* TargetNodeAction = (FEdGraphSchemaAction_K2TargetNode*)InAction.Get();
 			FKismetEditorUtilities::BringKismetToFocusAttentionOnObject(TargetNodeAction->NodeTemplate);
+		}
+		else
+		{
+			InAction->OnDoubleClick(Blueprint);
 		}
 	}
 }
@@ -2053,6 +2360,22 @@ FEdGraphSchemaAction_K2Var* SMyBlueprint::SelectionAsVar() const
 FEdGraphSchemaAction_K2LocalVar* SMyBlueprint::SelectionAsLocalVar() const
 {
 	return SelectionAsType<FEdGraphSchemaAction_K2LocalVar>(GraphActionMenu);
+}
+
+FEdGraphSchemaAction_BlueprintVariableBase* SMyBlueprint::SelectionAsBlueprintVariable() const
+{
+	TArray<TSharedPtr<FEdGraphSchemaAction> > SelectedActions;
+	GraphActionMenu->GetSelectedActions(SelectedActions);
+
+	FEdGraphSchemaAction_BlueprintVariableBase* Selection = nullptr;
+
+	TSharedPtr<FEdGraphSchemaAction> SelectedAction( SelectedActions.Num() > 0 ? SelectedActions[0] : nullptr );
+	if ( SelectedAction.IsValid() && SelectedAction->IsA(FEdGraphSchemaAction_BlueprintVariableBase::StaticGetTypeId()))
+	{
+		Selection = (FEdGraphSchemaAction_BlueprintVariableBase*)SelectedAction.Get();
+	}
+
+	return Selection;
 }
 
 FEdGraphSchemaAction_K2Delegate* SMyBlueprint::SelectionAsDelegate() const
@@ -2139,28 +2462,50 @@ TSharedPtr<SWidget> SMyBlueprint::OnContextMenuOpening()
 	// Check if the selected action is valid for a context menu
 	if (SelectionHasContextMenu())
 	{
+		FEdGraphSchemaAction_K2Var* Var = SelectionAsVar();
+		FEdGraphSchemaAction_K2Graph* Graph = SelectionAsGraph();
+		FEdGraphSchemaAction_K2Event* Event = SelectionAsEvent();
+		const bool bExpandFindReferences = Graph || Event || Var;
+		
 		MenuBuilder.BeginSection("BasicOperations");
 		{
 			MenuBuilder.AddMenuEntry(FMyBlueprintCommands::Get().OpenGraph);
 			MenuBuilder.AddMenuEntry(FMyBlueprintCommands::Get().OpenGraphInNewTab);
+			MenuBuilder.AddMenuEntry(FMyBlueprintCommands::Get().OpenExternalGraph);
 			MenuBuilder.AddMenuEntry(FMyBlueprintCommands::Get().FocusNode);
 			MenuBuilder.AddMenuEntry(FMyBlueprintCommands::Get().FocusNodeInNewTab);
 			MenuBuilder.AddMenuEntry(FGenericCommands::Get().Rename, NAME_None, LOCTEXT("Rename", "Rename"), LOCTEXT("Rename_Tooltip", "Renames this function or variable from blueprint.") );
 			MenuBuilder.AddMenuEntry(FMyBlueprintCommands::Get().ImplementFunction);
-			MenuBuilder.AddMenuEntry(FGraphEditorCommands::Get().FindReferences);
+
+			// Depending on context, FindReferences can be a button or an expandable menu. For example, the context menu
+			// for functions now lets you choose whether to do search by-name (fast) or by-function (smart).
+			if (!bExpandFindReferences)
+			{
+				// No expandable menu: display the simple 'Find References' action
+				MenuBuilder.AddMenuEntry(FGraphEditorCommands::Get().FindReferences);
+			}
+			else
+			{
+				// Insert "Find References" sub-menu here
+				MenuBuilder.AddSubMenu(
+					LOCTEXT("FindReferences_Label", "Find References"),
+					LOCTEXT("FindReferences_Tooltip", "Options for finding references to class members"),
+					FNewMenuDelegate::CreateStatic(&FGraphEditorCommands::BuildFindReferencesMenu),
+					false,
+					FSlateIcon()
+				);
+			}
+			
 			MenuBuilder.AddMenuEntry(FGraphEditorCommands::Get().FindAndReplaceReferences);
 			MenuBuilder.AddMenuEntry(FMyBlueprintCommands::Get().GotoNativeVarDefinition);
 			MenuBuilder.AddMenuEntry(FGenericCommands::Get().Cut);
 			MenuBuilder.AddMenuEntry(FGenericCommands::Get().Copy);
 			MenuBuilder.AddMenuEntry(FGenericCommands::Get().Duplicate);
-			MenuBuilder.AddMenuEntry(FMyBlueprintCommands::Get().MoveToParent);
+			MenuBuilder.AddMenuEntry(FMyBlueprintCommands::Get().MoveVariableToParent);
+			MenuBuilder.AddMenuEntry(FMyBlueprintCommands::Get().MoveFunctionToParent);
 			MenuBuilder.AddMenuEntry(FMyBlueprintCommands::Get().DeleteEntry);
 		}
 		MenuBuilder.EndSection();
-
-		FEdGraphSchemaAction_K2Var* Var = SelectionAsVar();
-		FEdGraphSchemaAction_K2Graph* Graph = SelectionAsGraph();
-		FEdGraphSchemaAction_K2Event* Event = SelectionAsEvent();
 
 		if ( Var && BlueprintEditorPtr.IsValid() && FBlueprintEditorUtils::DoesSupportEventGraphs(GetBlueprintObj()) )
 		{
@@ -2177,8 +2522,8 @@ TSharedPtr<SWidget> SMyBlueprint::OnContextMenuOpening()
 					// of events appropriate to the component.
 					MenuBuilder.AddSubMenu(	LOCTEXT("AddEventSubMenu", "Add Event"), 
 											LOCTEXT("AddEventSubMenu_ToolTip", "Add Event"), 
-											FNewMenuDelegate::CreateStatic(	&SSCSEditor::BuildMenuEventsSection,
-												BlueprintEditor->GetBlueprintObj(), ComponentProperty->PropertyClass, 
+											FNewMenuDelegate::CreateStatic(	&SSubobjectBlueprintEditor::BuildMenuEventsSection,
+																											BlueprintEditor->GetBlueprintObj(), ComponentProperty->PropertyClass.Get(), 
 												FCanExecuteAction::CreateRaw(this, &SMyBlueprint::IsEditingMode),
 												FGetSelectedObjectsDelegate::CreateSP(this, &SMyBlueprint::GetSelectedItemsForContextMenu)));
 				}
@@ -2282,7 +2627,7 @@ void SMyBlueprint::BuildAddNewMenu(FMenuBuilder& MenuBuilder)
 					FText::GetEmpty(),
 					FNewMenuDelegate::CreateSP(this, &SMyBlueprint::BuildOverridableFunctionsMenu),
 					false,
-					FSlateIcon(FEditorStyle::GetStyleSetName(), "BlueprintEditor.AddNewFunction.Small"));
+					FSlateIcon(FAppStyle::GetAppStyleSetName(), "BlueprintEditor.AddNewFunction.Small"));
 			}
 		}
 
@@ -2316,7 +2661,14 @@ bool SMyBlueprint::CanOpenGraph() const
 	return (bGraph || bDelegate) && BlueprintEditorPtr.IsValid();
 }
 
-void SMyBlueprint::OpenGraph(FDocumentTracker::EOpenDocumentCause InCause)
+bool SMyBlueprint::CanOpenExternalGraph() const 
+{
+	const FEdGraphSchemaAction_K2Graph* GraphAction = SelectionAsGraph();
+	const bool bGraph = GraphAction && GraphAction->EdGraph;
+	return CanOpenGraph() && bGraph && !BlueprintEditorPtr.Pin()->IsGraphInCurrentBlueprint(GraphAction->EdGraph);
+}
+
+void SMyBlueprint::OpenGraph(FDocumentTracker::EOpenDocumentCause InCause, bool bOpenExternalGraphInNewEditor)
 {
 	UEdGraph* GraphToOpen = nullptr;
 
@@ -2344,19 +2696,38 @@ void SMyBlueprint::OpenGraph(FDocumentTracker::EOpenDocumentCause InCause)
 	
 	if (GraphToOpen)
 	{
-		BlueprintEditorPtr.Pin()->OpenDocument(GraphToOpen, InCause);
+		if(bOpenExternalGraphInNewEditor && !BlueprintEditorPtr.Pin()->IsGraphInCurrentBlueprint(GraphToOpen))
+		{
+			if(UBlueprint* OtherBlueprint = FBlueprintEditorUtils::FindBlueprintForGraph(GraphToOpen))
+			{
+				GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->OpenEditorForAsset(OtherBlueprint);
+				if(IBlueprintEditor* OtherBlueprintEditor = static_cast<IBlueprintEditor*>(GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->FindEditorForAsset(OtherBlueprint, true)))
+				{
+					OtherBlueprintEditor->JumpToHyperlink(GraphToOpen, false);
+				}
+			}
+		}
+		else
+		{
+			BlueprintEditorPtr.Pin()->OpenDocument(GraphToOpen, InCause);
+		}
 	}
 }
 
 
 void SMyBlueprint::OnOpenGraph()
 {
-	OpenGraph(FDocumentTracker::OpenNewDocument);	
+	OpenGraph(FDocumentTracker::OpenNewDocument);
 }
 
 void SMyBlueprint::OnOpenGraphInNewTab()
 {
 	OpenGraph(FDocumentTracker::ForceOpenNewDocument);	
+}
+
+void SMyBlueprint::OnOpenExternalGraph()
+{
+	OpenGraph(FDocumentTracker::OpenNewDocument, true);
 }
 
 bool SMyBlueprint::CanFocusOnNode() const
@@ -2522,30 +2893,76 @@ bool SMyBlueprint::IsImplementationDesiredAsFunction(const UFunction* OverrideFu
 	return false;
 }
 
-void SMyBlueprint::OnFindReference()
+void SMyBlueprint::OnFindReference(bool bSearchAllBlueprints, const EGetFindReferenceSearchStringFlags Flags)
 {
-	bool bUseQuotes = true;
 	FString SearchTerm;
+	for(const UEdGraph* UberGraph : GetBlueprintObj()->UbergraphPages)
+	{
+		if(const UEdGraphSchema* Schema = UberGraph->GetSchema())
+		{
+			TArray<TSharedPtr<FEdGraphSchemaAction> > SelectedActions;
+			GraphActionMenu->GetSelectedActions(SelectedActions);
+			if(SelectedActions.Num() == 1)
+			{
+				if (const FEdGraphSchemaAction* GraphAction = SelectedActions[0].Get())
+				{
+					SearchTerm = Schema->GetFindReferenceSearchTerm(GraphAction);
+					if(!SearchTerm.IsEmpty())
+					{
+						BlueprintEditorPtr.Pin()->SummonSearchUI(true, SearchTerm);
+						return;
+					}
+				}
+			}
+		}
+	}
+
+	bool bUseQuotes = true;
+
 	if (FEdGraphSchemaAction_K2Graph* GraphAction = SelectionAsGraph())
 	{
-		SearchTerm = GraphAction->FuncName.ToString();
+		bool bSearchTermGenerated = false;
+		if (EnumHasAnyFlags(Flags, EGetFindReferenceSearchStringFlags::UseSearchSyntax))
+		{
+			// Attempt to resolve function, then attempt to generate search term from it
+			if (const UFunction* Function = GraphAction->GetFunction())
+			{
+				if (FindInBlueprintsHelpers::ConstructSearchTermFromFunction(Function, SearchTerm))
+				{
+					bSearchTermGenerated = true;
+					bUseQuotes = false;	
+				}
+			}
+		}
+
+		// If a search term was not generated yet, just search by name. Either the graph doesn't represent a
+		// function or we failed to resolve a dependency for generating a query.
+		if (!bSearchTermGenerated)
+		{
+			SearchTerm = GraphAction->FuncName.ToString();
+		}
 	}
 	else if (FEdGraphSchemaAction_K2Var* VarAction = SelectionAsVar())
 	{
-		FString GuidTerm;
-		const FGuid Guid = FBlueprintEditorUtils::FindMemberVariableGuidByName(Blueprint, VarAction->GetVariableName());
-		if (Guid.IsValid())
+		bool bSearchTermGenerated = false;
+		if (EnumHasAnyFlags(Flags, EGetFindReferenceSearchStringFlags::UseSearchSyntax))
 		{
-			GuidTerm = FString::Printf(TEXT(" && MemberGuid(A=%i && B=%i && C=%i && D=%i)"), Guid.A, Guid.B, Guid.C, Guid.D);
+			// Attempt to resolve property, then generate search term from it
+			if (const FProperty* Property = VarAction->GetProperty())
+			{
+				FMemberReference MemberReference;
+				MemberReference.SetFromField<FProperty>(Property, true, Property->GetOwnerClass());
+				SearchTerm = MemberReference.GetReferenceSearchString(Property->GetOwnerClass());
+				bSearchTermGenerated = true;
+				bUseQuotes = false;
+			}
 		}
 
-		const FString VariableName = VarAction->GetVariableName().ToString();
-
-		// Search for both an explicit variable reference (finds get/sets of exactly that var, without including related-sounding variables)
-		// and a softer search for (VariableName) to capture bound component/widget event nodes which wouldn't otherwise show up
-		//@TODO: This logic is duplicated in SSCSEditor::OnFindReferences(), keep in sync
-		SearchTerm = FString::Printf(TEXT("Nodes(VariableReference(MemberName=+\"%s\"%s) || Name=\"(%s)\")"), *VariableName, *GuidTerm, *VariableName);
-		bUseQuotes = false;
+		// If a search term was not generated yet, just search by variable name
+		if (!bSearchTermGenerated)
+		{
+			SearchTerm = VarAction->GetVariableName().ToString();
+		}
 	}
 	else if (FEdGraphSchemaAction_K2LocalVar* LocalVarAction = SelectionAsLocalVar())
 	{
@@ -2566,7 +2983,21 @@ void SMyBlueprint::OnFindReference()
 	}
 	else if (FEdGraphSchemaAction_K2Event* EventAction = SelectionAsEvent())
 	{
-		SearchTerm = EventAction->NodeTemplate->GetFindReferenceSearchString();
+		bool bSearchTermGenerated = false;
+		if (EnumHasAnyFlags(Flags, EGetFindReferenceSearchStringFlags::UseSearchSyntax))
+		{
+			if (const UK2Node_Event* EventNode = Cast<UK2Node_Event>(EventAction->NodeTemplate))
+			{
+				SearchTerm = EventNode->GetFindReferenceSearchString(Flags);
+				bSearchTermGenerated = true;
+				bUseQuotes = false;
+			}
+		}
+
+		if (!bSearchTermGenerated)
+		{
+			SearchTerm = EventAction->NodeTemplate->GetFindReferenceSearchString(EGetFindReferenceSearchStringFlags::None);
+		}
 	}
 	else if (FEdGraphSchemaAction_K2InputAction* InputAction = SelectionAsInputAction())
 	{
@@ -2575,13 +3006,15 @@ void SMyBlueprint::OnFindReference()
 			InputAction->GetMenuDescription().ToString();
 	}
 
-	if(!SearchTerm.IsEmpty())
+	if (!SearchTerm.IsEmpty())
 	{
 		if (bUseQuotes)
 		{
 			SearchTerm = FString::Printf(TEXT("\"%s\""), *SearchTerm);
 		}
-		BlueprintEditorPtr.Pin()->SummonSearchUI(true, SearchTerm);
+		
+		const bool bSetFindWithinBlueprint = !bSearchAllBlueprints;
+		BlueprintEditorPtr.Pin()->SummonSearchUI(bSetFindWithinBlueprint, SearchTerm);
 	}
 }
 
@@ -2621,6 +3054,14 @@ void SMyBlueprint::OnDeleteGraph(UEdGraph* InGraph, EEdGraphSchemaAction_K2Graph
 {
 	if (InGraph && InGraph->bAllowDeletion)
 	{
+		if (const UEdGraphSchema* Schema = InGraph->GetSchema())
+		{
+			if (Schema->TryDeleteGraph(InGraph))
+			{
+				return;
+			}
+		}
+
 		const FScopedTransaction Transaction( LOCTEXT("RemoveGraph", "Remove Graph") );
 		GetBlueprintObj()->Modify();
 
@@ -2645,11 +3086,11 @@ void SMyBlueprint::OnDeleteGraph(UEdGraph* InGraph, EEdGraphSchemaAction_K2Graph
 		FBlueprintEditorUtils::RemoveGraph(GetBlueprintObj(), InGraph, EGraphRemoveFlags::Recompile);
 		BlueprintEditorPtr.Pin()->CloseDocumentTab(InGraph);
 
-		for (TObjectIterator<UK2Node_CreateDelegate> It(RF_ClassDefaultObject, /** bIncludeDerivedClasses */ true, /** InternalExcludeFlags */ EInternalObjectFlags::PendingKill); It; ++It)
+		for (TObjectIterator<UK2Node_CreateDelegate> It(RF_ClassDefaultObject, /** bIncludeDerivedClasses */ true, /** InternalExcludeFlags */ EInternalObjectFlags::Garbage); It; ++It)
 		{
 			if (It->GetGraph() != InGraph)
 			{
-				if (!It->IsPendingKill() && It->GetGraph() && !It->GetGraph()->IsPendingKill())
+				if (IsValid(*It) && IsValid(It->GetGraph()))
 				{
 					It->HandleAnyChange();
 				}
@@ -2685,6 +3126,11 @@ bool SMyBlueprint::IsEditingMode() const
 	return BlueprintEditorSPtr.IsValid() && BlueprintEditorSPtr->InEditingMode();
 }
 
+bool SMyBlueprint::IsAnInterfaceEvent(FEdGraphSchemaAction_K2Graph* InAction)
+{
+	return InAction->GraphType == EEdGraphSchemaAction_K2Graph::Interface && !InAction->EdGraph;
+}
+
 void SMyBlueprint::OnDeleteDelegate(FEdGraphSchemaAction_K2Delegate* InDelegateAction)
 {
 	UEdGraph* GraphToActOn = InDelegateAction->EdGraph;
@@ -2700,9 +3146,9 @@ void SMyBlueprint::OnDeleteDelegate(FEdGraphSchemaAction_K2Delegate* InDelegateA
 		FBlueprintEditorUtils::RemoveMemberVariable(BlueprintObj, GraphToActOn->GetFName());
 		FBlueprintEditorUtils::RemoveGraph(BlueprintObj, GraphToActOn, EGraphRemoveFlags::Recompile);
 
-		for (TObjectIterator<UK2Node_CreateDelegate> It(RF_ClassDefaultObject, /** bIncludeDerivedClasses */ true, /** InternalExcludeFlags */ EInternalObjectFlags::PendingKill); It; ++It)
+		for (TObjectIterator<UK2Node_CreateDelegate> It(RF_ClassDefaultObject, /** bIncludeDerivedClasses */ true, /** InternalExcludeFlags */ EInternalObjectFlags::Garbage); It; ++It)
 		{
-			if (!It->IsPendingKill() && It->GetGraph() && !It->GetGraph()->IsPendingKill())
+			if (IsValid(*It) && IsValid(It->GetGraph()))
 			{
 				It->HandleAnyChange();
 			}
@@ -2710,30 +3156,57 @@ void SMyBlueprint::OnDeleteDelegate(FEdGraphSchemaAction_K2Delegate* InDelegateA
 	}
 }
 
+namespace UE::Blueprint::Private
+{
+	// Given a type and value name, display a deletion confirmation warning.
+	// Returns true if the user 'cancelled' the action, interpreted as an early exit prior to deletion.
+	static bool DisplayInUseWarningAndEarlyExit(const FName& DisplayTypeName, const FName& DisplayValueName)
+	{
+		const FText DeleteConfirmationPrompt = FText::Format(LOCTEXT("DeleteConfirmationPrompt", "{0} {1} is in use! Do you really want to delete it?")
+			, { FText::FromName(DisplayTypeName), FText::FromName(DisplayValueName) }
+		);
+		const FText DeleteConfirmationTitle = FText::Format(LOCTEXT("DeleteConfirmationTitle", "Delete {0}")
+			, { FText::FromName(DisplayTypeName) }
+		);
+		const FString DeleteConfirmationIniSetting = FString::Format(TEXT("DeleteConfirmation{0}_Warning"), { DisplayTypeName.ToString() });
+
+		// Warn the user that this may result in data loss
+		FSuppressableWarningDialog::FSetupInfo Info(DeleteConfirmationPrompt, DeleteConfirmationTitle, DeleteConfirmationIniSetting);
+		Info.ConfirmText = LOCTEXT("DeleteConfirmation_Yes", "Yes");
+		Info.CancelText = LOCTEXT("DeleteConfirmation_No", "No");
+
+		FSuppressableWarningDialog DeleteFunctionInUse(Info);
+		return DeleteFunctionInUse.ShowModal() == FSuppressableWarningDialog::Cancel;
+	}
+}
+
 void SMyBlueprint::OnDeleteEntry()
 {
 	if (FEdGraphSchemaAction_K2Graph* GraphAction = SelectionAsGraph())
 	{
+		// Currently only function graphs are supported for in-use detection and deletion warnings
+		if (GraphAction->GraphType == EEdGraphSchemaAction_K2Graph::Function)
+		{
+			if (FBlueprintEditorUtils::IsFunctionUsed(GetBlueprintObj(), GraphAction->FuncName))
+			{
+				if (UE::Blueprint::Private::DisplayInUseWarningAndEarlyExit("Function", GraphAction->FuncName))
+				{
+					return;
+				}
+			}
+		}
+
 		OnDeleteGraph(GraphAction->EdGraph, GraphAction->GraphType);
 	}
 	else if (FEdGraphSchemaAction_K2Delegate* DelegateAction = SelectionAsDelegate())
 	{
 		OnDeleteDelegate(DelegateAction);
 	}
-	else if ( FEdGraphSchemaAction_K2Var* VarAction = SelectionAsVar() )
+	else if (FEdGraphSchemaAction_K2Var* VarAction = SelectionAsVar())
 	{
 		if(FBlueprintEditorUtils::IsVariableUsed(GetBlueprintObj(), VarAction->GetVariableName()))
 		{
-			FText ConfirmDelete = FText::Format(LOCTEXT( "ConfirmDeleteVariableInUse", "Variable {0} is in use! Do you really want to delete it?"),
-				FText::FromName( VarAction->GetVariableName() ) );
-
-			// Warn the user that this may result in data loss
-			FSuppressableWarningDialog::FSetupInfo Info( ConfirmDelete, LOCTEXT("DeleteVar", "Delete Variable"), "DeleteVariableInUse_Warning" );
-			Info.ConfirmText = LOCTEXT( "DeleteVariable_Yes", "Yes");
-			Info.CancelText = LOCTEXT( "DeleteVariable_No", "No");	
-
-			FSuppressableWarningDialog DeleteVariableInUse( Info );
-			if ( DeleteVariableInUse.ShowModal() == FSuppressableWarningDialog::Cancel )
+			if (UE::Blueprint::Private::DisplayInUseWarningAndEarlyExit("Variable", VarAction->GetVariableName()))
 			{
 				return;
 			}
@@ -2744,20 +3217,11 @@ void SMyBlueprint::OnDeleteEntry()
 		GetBlueprintObj()->Modify();
 		FBlueprintEditorUtils::RemoveMemberVariable(GetBlueprintObj(), VarAction->GetVariableName());
 	}
-	else if ( FEdGraphSchemaAction_K2LocalVar* LocalVarAction = SelectionAsLocalVar() )
+	else if (FEdGraphSchemaAction_K2LocalVar* LocalVarAction = SelectionAsLocalVar())
 	{
-		if(FBlueprintEditorUtils::IsVariableUsed(GetBlueprintObj(), LocalVarAction->GetVariableName(), FBlueprintEditorUtils::FindScopeGraph(GetBlueprintObj(), LocalVarAction->GetVariableScope())))
+		if (FBlueprintEditorUtils::IsVariableUsed(GetBlueprintObj(), LocalVarAction->GetVariableName(), FBlueprintEditorUtils::FindScopeGraph(GetBlueprintObj(), CastChecked<UStruct>(LocalVarAction->GetVariableScope()))))
 		{
-			FText ConfirmDelete = FText::Format(LOCTEXT( "ConfirmDeleteLocalVariableInUse", "Local Variable {0} is in use! Do you really want to delete it?"),
-				FText::FromName( LocalVarAction->GetVariableName() ) );
-
-			// Warn the user that this may result in data loss
-			FSuppressableWarningDialog::FSetupInfo Info( ConfirmDelete, LOCTEXT("DeleteVar", "Delete Variable"), "DeleteVariableInUse_Warning" );
-			Info.ConfirmText = LOCTEXT( "DeleteVariable_Yes", "Yes");
-			Info.CancelText = LOCTEXT( "DeleteVariable_No", "No");	
-
-			FSuppressableWarningDialog DeleteVariableInUse( Info );
-			if ( DeleteVariableInUse.ShowModal() == FSuppressableWarningDialog::Cancel )
+			if (UE::Blueprint::Private::DisplayInUseWarningAndEarlyExit("Local Variable", LocalVarAction->GetVariableName()))
 			{
 				return;
 			}
@@ -2773,7 +3237,22 @@ void SMyBlueprint::OnDeleteEntry()
 		check(FunctionEntryNodes.Num() == 1);
 		FunctionEntryNodes[0]->Modify();
 
-		FBlueprintEditorUtils::RemoveLocalVariable(GetBlueprintObj(), LocalVarAction->GetVariableScope(), LocalVarAction->GetVariableName());
+		FBlueprintEditorUtils::RemoveLocalVariable(GetBlueprintObj(), CastChecked<UStruct>(LocalVarAction->GetVariableScope()), LocalVarAction->GetVariableName());
+	}
+	else if (FEdGraphSchemaAction_BlueprintVariableBase* BPVarAction = SelectionAsBlueprintVariable())
+	{
+		if (BPVarAction->IsVariableUsed())
+		{
+			if (UE::Blueprint::Private::DisplayInUseWarningAndEarlyExit("Variable", BPVarAction->GetVariableName()))
+			{
+				return;
+			}
+		}
+
+		const FScopedTransaction Transaction( LOCTEXT( "RemoveLocalVariable", "Remove Local Variable" ) );
+
+		GetBlueprintObj()->Modify();
+		BPVarAction->DeleteVariable();		
 	}
 	else if (FEdGraphSchemaAction_K2Event* EventAction = SelectionAsEvent())
 	{
@@ -2782,7 +3261,7 @@ void SMyBlueprint::OnDeleteEntry()
 		GetBlueprintObj()->Modify();
 		FBlueprintEditorUtils::RemoveNode(GetBlueprintObj(), EventAction->NodeTemplate);
 	}
-	else if ( SelectionIsCategory() )
+	else if (SelectionIsCategory())
 	{
 		TArray<TSharedPtr<FEdGraphSchemaAction>> Actions;
 		GraphActionMenu->GetSelectedCategorySubActions(Actions);
@@ -2837,7 +3316,7 @@ void SMyBlueprint::OnDeleteEntry()
 				{
 					FEdGraphSchemaAction_K2LocalVar* K2LocalVarAction = (FEdGraphSchemaAction_K2LocalVar*)Actions[i].Get();
 
-					FBlueprintEditorUtils::RemoveLocalVariable(GetBlueprintObj(), K2LocalVarAction->GetVariableScope(), K2LocalVarAction->GetVariableName());
+					FBlueprintEditorUtils::RemoveLocalVariable(GetBlueprintObj(), CastChecked<UStruct>(K2LocalVarAction->GetVariableScope()), K2LocalVarAction->GetVariableName());
 					bModified = true;
 				}
 				else if (Actions[i]->GetTypeId() == FEdGraphSchemaAction_K2Graph::StaticGetTypeId())
@@ -2912,6 +3391,10 @@ bool SMyBlueprint::CanDeleteEntry() const
 	{
 		return true;
 	}
+	else if (FEdGraphSchemaAction_BlueprintVariableBase* BPVariable = SelectionAsBlueprintVariable())
+	{
+		return true;
+	}
 	else if (SelectionIsCategory())
 	{
 		// Can't delete categories if they can't be renamed, that means they are native
@@ -2920,6 +3403,11 @@ bool SMyBlueprint::CanDeleteEntry() const
 			return true;
 		}
 	}
+	else if (FEdGraphSchemaAction* Action = SelectionAsType<FEdGraphSchemaAction>(GraphActionMenu))
+	{
+		return Action->CanBeDeleted();
+	}
+
 	return false;
 }
 
@@ -2970,7 +3458,7 @@ bool SMyBlueprint::CanDuplicateAction() const
 		}
 		return true;
 	}
-	else if(SelectionAsLocalVar())
+	else if(SelectionAsBlueprintVariable())
 	{
 		return true;
 	}
@@ -2983,44 +3471,56 @@ void SMyBlueprint::OnDuplicateAction()
 
 	if (FEdGraphSchemaAction_K2Graph* GraphAction = SelectionAsGraph())
 	{
-		const FScopedTransaction Transaction( LOCTEXT( "DuplicateGraph", "Duplicate Graph" ) );
-		GetBlueprintObj()->Modify();
+		// Only StateMachine, function, anim graph and macro duplication is supported
+		EGraphType GraphType = GraphAction->EdGraph->GetSchema()->GetGraphType(GraphAction->EdGraph);
+		check(GraphType == GT_StateMachine || GraphType == GT_Function || GraphType == GT_Macro || GraphType == GT_Animation);
 
-		UEdGraph* DuplicatedGraph = GraphAction->EdGraph->GetSchema()->DuplicateGraph(GraphAction->EdGraph);
-		check(DuplicatedGraph);
-
-		DuplicatedGraph->Modify();
-
-		// Generate new Guids and component templates for all relevant nodes in the graph
-		// *NOTE* this cannot occur during PostDuplicate, node Guids and component templates need to remain static during duplication for Blueprint compilation
-		for (UEdGraphNode* EdGraphNode : DuplicatedGraph->Nodes)
+		if (GraphType == GT_StateMachine)
 		{
-			if (EdGraphNode)
+			// StateMachine is handled using the BlueprintEditor copy / paste functionality
+			if (const UAnimationStateMachineGraph* AnimationStateMachineGraph = Cast<UAnimationStateMachineGraph>(GraphAction->EdGraph))
 			{
-				EdGraphNode->CreateNewGuid();
-
-				if (UK2Node_AddComponent* AddComponentNode = Cast<UK2Node_AddComponent>(EdGraphNode))
-				{
-					AddComponentNode->MakeNewComponentTemplate();
-				}
+				BlueprintEditorPtr.Pin()->SelectAndDuplicateNode(AnimationStateMachineGraph->OwnerAnimGraphNode.Get());
 			}
 		}
-		// Only function, anim graph and macro duplication is supported
-		EGraphType GraphType = DuplicatedGraph->GetSchema()->GetGraphType(GraphAction->EdGraph);
-		check(GraphType == GT_Function || GraphType == GT_Macro || GraphType == GT_Animation);
-
-		if (GraphType == GT_Function || GraphType == GT_Animation)
+		else
 		{
-			GetBlueprintObj()->FunctionGraphs.Add(DuplicatedGraph);
-		}
-		else if (GraphType == GT_Macro)
-		{
-			GetBlueprintObj()->MacroGraphs.Add(DuplicatedGraph);
-		}
-		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(GetBlueprintObj());
+			const FScopedTransaction Transaction(LOCTEXT("DuplicateGraph", "Duplicate Graph"));
+			GetBlueprintObj()->Modify();
 
-		BlueprintEditorPtr.Pin()->OpenDocument(DuplicatedGraph, FDocumentTracker::ForceOpenNewDocument);
-		DuplicateActionName = DuplicatedGraph->GetFName();
+			UEdGraph* DuplicatedGraph = GraphAction->EdGraph->GetSchema()->DuplicateGraph(GraphAction->EdGraph);
+			check(DuplicatedGraph);
+
+			DuplicatedGraph->Modify();
+
+			// Generate new Guids and component templates for all relevant nodes in the graph
+			// *NOTE* this cannot occur during PostDuplicate, node Guids and component templates need to remain static during duplication for Blueprint compilation
+			for (UEdGraphNode* EdGraphNode : DuplicatedGraph->Nodes)
+			{
+				if (EdGraphNode)
+				{
+					EdGraphNode->CreateNewGuid();
+
+					if (UK2Node_AddComponent* AddComponentNode = Cast<UK2Node_AddComponent>(EdGraphNode))
+					{
+						AddComponentNode->MakeNewComponentTemplate();
+					}
+				}
+			}
+
+			if (GraphType == GT_Function || GraphType == GT_Animation)
+			{
+				GetBlueprintObj()->FunctionGraphs.Add(DuplicatedGraph);
+			}
+			else if (GraphType == GT_Macro)
+			{
+				GetBlueprintObj()->MacroGraphs.Add(DuplicatedGraph);
+			}
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(GetBlueprintObj());
+
+			BlueprintEditorPtr.Pin()->OpenDocument(DuplicatedGraph, FDocumentTracker::ForceOpenNewDocument);
+			DuplicateActionName = DuplicatedGraph->GetFName();
+		}
 	}
 	else if (FEdGraphSchemaAction_K2Var* VarAction = SelectionAsVar())
 	{
@@ -3042,7 +3542,7 @@ void SMyBlueprint::OnDuplicateAction()
 		const FScopedTransaction Transaction( LOCTEXT( "Duplicate Local Variable", "Duplicate Local Variable" ) );
 		GetBlueprintObj()->Modify();
 
-		DuplicateActionName = FBlueprintEditorUtils::DuplicateVariable(GetBlueprintObj(), LocalVarAction->GetVariableScope(), LocalVarAction->GetVariableName());
+		DuplicateActionName = FBlueprintEditorUtils::DuplicateVariable(GetBlueprintObj(), Cast<UStruct>(LocalVarAction->GetVariableScope()), LocalVarAction->GetVariableName());
 	}
 
 	// Select and rename the duplicated action
@@ -3107,7 +3607,7 @@ void SMyBlueprint::OnMoveToParent()
 						{
 							// If there is a property for variable, it means the original default value was already copied, so it can be safely overridden
 							VarDesc.DefaultValue.Empty();
-							TargetProperty->ExportTextItem(VarDesc.DefaultValue, OldPropertyAddr, OldPropertyAddr, nullptr, PPF_SerializedAsImportText);
+							TargetProperty->ExportTextItem_Direct(VarDesc.DefaultValue, OldPropertyAddr, OldPropertyAddr, nullptr, PPF_SerializedAsImportText);
 						}
 					}
 				}
@@ -3149,7 +3649,7 @@ void SMyBlueprint::OnMoveToParent()
 	}
 }
 
-bool SMyBlueprint::CanMoveToParent() const
+bool SMyBlueprint::CanMoveVariableToParent() const
 {
 	bool bCanMove = false;
 
@@ -3163,7 +3663,19 @@ bool SMyBlueprint::CanMoveToParent() const
 			int32 VarIndex = FBlueprintEditorUtils::FindNewVariableIndexAndBlueprint(Blueprint, VarAction->GetVariableName(), SourceBlueprint);
 			bCanMove = (VarIndex != INDEX_NONE) && (SourceBlueprint == Blueprint);
 		}
-		else if (FEdGraphSchemaAction_K2Graph* GraphAction = SelectionAsGraph())
+	}
+
+	return bCanMove;
+}
+
+bool SMyBlueprint::CanMoveFunctionToParent() const
+{
+	bool bCanMove = false;
+
+	TSharedPtr<FBlueprintEditor> PinnedEditor = BlueprintEditorPtr.Pin();
+	if (PinnedEditor.IsValid() && PinnedEditor->IsParentClassABlueprint())
+	{
+		if (FEdGraphSchemaAction_K2Graph* GraphAction = SelectionAsGraph())
 		{
 			if (CanDeleteEntry())
 			{
@@ -3199,7 +3711,7 @@ void SMyBlueprint::OnCopy()
 				void* OldPropertyAddr = TargetProperty->ContainerPtrToValuePtr<void>(GeneratedCDO);
 				if (OldPropertyAddr)
 				{
-					TargetProperty->ExportTextItem(Description.DefaultValue, OldPropertyAddr, OldPropertyAddr, nullptr, PPF_SerializedAsImportText);
+					TargetProperty->ExportTextItem_Direct(Description.DefaultValue, OldPropertyAddr, OldPropertyAddr, nullptr, PPF_SerializedAsImportText);
 				}
 			}
 
@@ -3209,7 +3721,7 @@ void SMyBlueprint::OnCopy()
 	}
 	else if (FEdGraphSchemaAction_K2LocalVar* LocalVarAction = SelectionAsLocalVar())
 	{
-		FBPVariableDescription* Description = FBlueprintEditorUtils::FindLocalVariable(Blueprint, LocalVarAction->GetVariableScope(), LocalVarAction->GetVariableName());
+		FBPVariableDescription* Description = FBlueprintEditorUtils::FindLocalVariable(Blueprint, CastChecked<UStruct>(LocalVarAction->GetVariableScope()), LocalVarAction->GetVariableName());
 
 		if (Description)
 		{
@@ -3217,11 +3729,34 @@ void SMyBlueprint::OnCopy()
 			OutputString = VAR_PREFIX + OutputString;
 		}
 	}
+	else if (FEdGraphSchemaAction_BlueprintVariableBase* BPVariable = SelectionAsBlueprintVariable())
+	{
+		if (const UEdGraph* FocusedGraph = Cast<UEdGraph>(BPVariable->GetVariableScope()))
+		{
+			if (const UEdGraphSchema* Schema = FocusedGraph->GetSchema())
+			{
+				TArray<FBPVariableDescription> LocalVariables;
+				Schema->GetLocalVariables(FocusedGraph, LocalVariables);
+				for (const FBPVariableDescription& VariableDescription : LocalVariables)
+				{
+					if (VariableDescription.VarName == BPVariable->GetVariableName())
+					{
+						FBPVariableDescription::StaticStruct()->ExportText(OutputString, &VariableDescription, &VariableDescription, nullptr, 0, nullptr, false);
+						OutputString = VAR_PREFIX + OutputString;
+						break;
+					}
+				}
+			}
+		}
+	}
 	else if (FEdGraphSchemaAction_K2Graph* GraphAction = SelectionAsGraph())
 	{
-		FBPGraphClipboardData FuncData(GraphAction->EdGraph);
-		FBPGraphClipboardData::StaticStruct()->ExportText(OutputString, &FuncData, &FuncData, nullptr, 0, nullptr, false);
-		OutputString = GRAPH_PREFIX + OutputString;
+		if (!Blueprint->ExportGraphToText(GraphAction->EdGraph, OutputString))
+		{
+			FBPGraphClipboardData FuncData(GraphAction->EdGraph);
+			FBPGraphClipboardData::StaticStruct()->ExportText(OutputString, &FuncData, &FuncData, nullptr, 0, nullptr, false);
+			OutputString = GRAPH_PREFIX + OutputString;
+		}
 	}
 
 	if (!OutputString.IsEmpty())
@@ -3236,11 +3771,31 @@ bool SMyBlueprint::CanCopy() const
 	{
 		return FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, VarAction->GetVariableName()) != INDEX_NONE;
 	}
-	if (FEdGraphSchemaAction_K2LocalVar* LocalVarAction = SelectionAsLocalVar())
+	else if (FEdGraphSchemaAction_K2LocalVar* LocalVarAction = SelectionAsLocalVar())
 	{
-		return FBlueprintEditorUtils::FindLocalVariable(Blueprint, LocalVarAction->GetVariableScope(), LocalVarAction->GetVariableName()) != nullptr;
+		return FBlueprintEditorUtils::FindLocalVariable(Blueprint, Cast<UStruct>(LocalVarAction->GetVariableScope()), LocalVarAction->GetVariableName()) != nullptr;
 	}
-	if (FEdGraphSchemaAction_K2Graph* GraphAction = SelectionAsGraph())
+	else if (FEdGraphSchemaAction_BlueprintVariableBase* BPVariable = SelectionAsBlueprintVariable())
+	{
+		if (const UEdGraph* FocusedGraph = Cast<UEdGraph>(BPVariable->GetVariableScope()))
+		{
+			if (const UEdGraphSchema* Schema = FocusedGraph->GetSchema())
+			{
+				TArray<FBPVariableDescription> LocalVariables;
+				Schema->GetLocalVariables(FocusedGraph, LocalVariables);
+
+				for (const FBPVariableDescription& VariableDescription : LocalVariables)
+				{
+					if (VariableDescription.VarName == BPVariable->GetVariableName())
+					{
+						return true;
+					}
+				}
+			}
+		}
+		return false;		
+	}
+	else if (FEdGraphSchemaAction_K2Graph* GraphAction = SelectionAsGraph())
 	{
 		if (GraphAction->GraphType == EEdGraphSchemaAction_K2Graph::Function ||
 			GraphAction->GraphType == EEdGraphSchemaAction_K2Graph::Macro)
@@ -3301,7 +3856,7 @@ void SMyBlueprint::OnPasteVariable()
 	FBPVariableDescription Description;
 	FStringOutputDevice Errors;
 	const TCHAR* Import = ClipboardText.GetCharArray().GetData() + FCString::Strlen(VAR_PREFIX);
-	FBPVariableDescription::StaticStruct()->ImportText(Import, &Description, nullptr, 0, &Errors, FBPVariableDescription::StaticStruct()->GetName());
+	FBPVariableDescription::StaticStruct()->ImportText(Import, &Description, nullptr, PPF_None, &Errors, FBPVariableDescription::StaticStruct()->GetName());
 	if (Errors.IsEmpty())
 	{
 		FBPVariableDescription NewVar = FBlueprintEditorUtils::DuplicateVariableDescription(Blueprint, Description);
@@ -3334,37 +3889,42 @@ void SMyBlueprint::OnPasteLocalVariable()
 			TArray<UK2Node_FunctionEntry*> FunctionEntry;
 			FocusedGraph->GetNodesOfClass<UK2Node_FunctionEntry>(FunctionEntry);
 
-			if (FunctionEntry.Num() == 1)
+			FString ClipboardText;
+			FPlatformApplicationMisc::ClipboardPaste(ClipboardText);
+			if (!ensure(ClipboardText.StartsWith(VAR_PREFIX, ESearchCase::CaseSensitive)))
 			{
-				FString ClipboardText;
-				FPlatformApplicationMisc::ClipboardPaste(ClipboardText);
-				if (!ensure(ClipboardText.StartsWith(VAR_PREFIX, ESearchCase::CaseSensitive)))
-				{
-					return;
-				}
+				return;
+			}
 
-				FBPVariableDescription Description;
-				FStringOutputDevice Errors;
-				const TCHAR* Import = ClipboardText.GetCharArray().GetData() + FCString::Strlen(VAR_PREFIX);
-				FBPVariableDescription::StaticStruct()->ImportText(Import, &Description, nullptr, 0, &Errors, FBPVariableDescription::StaticStruct()->GetName());
-				if (Errors.IsEmpty())
+			FBPVariableDescription Description;
+			FStringOutputDevice Errors;
+			const TCHAR* Import = ClipboardText.GetCharArray().GetData() + FCString::Strlen(VAR_PREFIX);
+			FBPVariableDescription::StaticStruct()->ImportText(Import, &Description, nullptr, 0, &Errors, FBPVariableDescription::StaticStruct()->GetName());
+			if (Errors.IsEmpty())
+			{
+				FBPVariableDescription NewVar = FBlueprintEditorUtils::DuplicateVariableDescription(Blueprint, Description);
+				if (NewVar.VarGuid.IsValid())
 				{
-					FBPVariableDescription NewVar = FBlueprintEditorUtils::DuplicateVariableDescription(Blueprint, Description);
-					if (NewVar.VarGuid.IsValid())
+					FScopedTransaction Transaction(FText::Format(LOCTEXT("PasteLocalVariable", "Paste Local Variable: {0}"), FText::FromName(NewVar.VarName)));
+
+					NewVar.Category = GetPasteCategory();
+
+
+					if (FunctionEntry.Num() == 1)
 					{
-						FScopedTransaction Transaction(FText::Format(LOCTEXT("PasteLocalVariable", "Paste Local Variable: {0}"), FText::FromName(NewVar.VarName)));
-
-						NewVar.Category = GetPasteCategory();
-
 						FunctionEntry[0]->Modify();
 						FunctionEntry[0]->LocalVariables.Add(NewVar);
-
-						// Potentially adjust variable names for any child blueprints
-						FBlueprintEditorUtils::ValidateBlueprintChildVariables(Blueprint, NewVar.VarName);
-						FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
-
-						SelectItemByName(NewVar.VarName);
 					}
+					else
+					{
+						BlueprintEditorPtr.Pin()->OnPasteNewLocalVariable(NewVar);
+					}
+
+					// Potentially adjust variable names for any child blueprints
+					FBlueprintEditorUtils::ValidateBlueprintChildVariables(Blueprint, NewVar.VarName);
+					FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+					SelectItemByName(NewVar.VarName);
 				}
 			}
 		}
@@ -3421,6 +3981,12 @@ void SMyBlueprint::OnPasteFunction()
 {
 	FString ClipboardText;
 	FPlatformApplicationMisc::ClipboardPaste(ClipboardText);
+
+	if (Blueprint->TryImportGraphFromText(ClipboardText))
+	{
+		return;
+	}
+
 	if (!ensure(ClipboardText.StartsWith(GRAPH_PREFIX, ESearchCase::CaseSensitive)))
 	{
 		return;
@@ -3465,6 +4031,12 @@ bool SMyBlueprint::CanPasteFunction() const
 
 	FString ClipboardText;
 	FPlatformApplicationMisc::ClipboardPaste(ClipboardText);
+
+	if (Blueprint->CanImportGraphFromText(ClipboardText))
+	{
+		return true;
+	}
+
 	if (ClipboardText.StartsWith(GRAPH_PREFIX, ESearchCase::CaseSensitive))
 	{
 		FBPGraphClipboardData FuncData;

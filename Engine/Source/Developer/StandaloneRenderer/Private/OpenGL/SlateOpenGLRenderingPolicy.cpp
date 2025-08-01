@@ -63,7 +63,7 @@ void FSlateOpenGLRenderingPolicy::ConditionalInitializeResources()
 
 		// Create a default texture.
 		check( WhiteTexture == NULL );
-		WhiteTexture = TextureManager->CreateColorTexture( TEXT("DefaultWhite"), FColor::White );
+		WhiteTexture = TextureManager->CreateColorTexture( TEXT("DefaultWhite"), FColor::White )->GetSlateResource();
 
 		bIsInitialized = true;
 	}
@@ -212,15 +212,15 @@ void FSlateOpenGLRenderingPolicy::DrawElements( const FMatrix& ViewProjectionMat
 
 		if (EnumHasAllFlags(DrawFlags, ESlateBatchDrawFlag::NoGamma))
 		{
-			ElementProgram.SetGammaValues(FVector2D(1.0f, 1.0f));
+			ElementProgram.SetGammaValues(FVector2f(1.0f, 1.0f));
 		}
 		else
 		{
-			ElementProgram.SetGammaValues(FVector2D(1, 1 / 2.2f));
+			ElementProgram.SetGammaValues(FVector2f(1, 1 / 2.2f));
 		}
 
 		ElementProgram.SetShaderType( static_cast<uint8>(RenderBatch.GetShaderType()) );
-		ElementProgram.SetMarginUVs( RenderBatch.GetShaderParams().PixelParams );
+		ElementProgram.SetShaderParams(RenderBatch.GetShaderParams());
 		ElementProgram.SetDrawEffects( RenderBatch.GetDrawEffects() );
 
 		// Disable stenciling and depth testing by default
@@ -244,11 +244,11 @@ void FSlateOpenGLRenderingPolicy::DrawElements( const FMatrix& ViewProjectionMat
 			}
 #endif
 
-			ElementProgram.SetTexture( ((FSlateOpenGLTexture*)ShaderResource)->GetTypedResource(), RepeatU, RepeatV );
+			ElementProgram.SetTexture( (FSlateOpenGLTexture*)ShaderResource, RepeatU, RepeatV );
 		}
 		else
 		{
-			ElementProgram.SetTexture( WhiteTexture->GetTypedResource(), GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE );
+			ElementProgram.SetTexture( (FSlateOpenGLTexture*)WhiteTexture, GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE );
 		}
 
 		check( RenderBatch.GetNumIndices() > 0 );
@@ -268,18 +268,20 @@ void FSlateOpenGLRenderingPolicy::DrawElements( const FMatrix& ViewProjectionMat
 
 		// Set up offsets into the vertex buffer for each vertex
 		glEnableVertexAttribArray(0);
-		Offset = STRUCT_OFFSET( FSlateVertex, TexCoords );
-		glVertexAttribPointer( 0, 4, GL_FLOAT, GL_FALSE, Stride, BUFFER_OFFSET(Stride*BaseVertexIndex+Offset) );
+		Offset = STRUCT_OFFSET(FSlateVertex, TexCoords);
+		glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, Stride, BUFFER_OFFSET(Stride*BaseVertexIndex+Offset));
 
 		glEnableVertexAttribArray(1);
-		Offset = STRUCT_OFFSET( FSlateVertex, Position );
-		glVertexAttribPointer( 1, 2, GL_FLOAT, GL_FALSE, Stride, BUFFER_OFFSET(Stride*BaseVertexIndex+Offset) );
+		Offset = STRUCT_OFFSET(FSlateVertex, Position);
+		glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, Stride, BUFFER_OFFSET(Stride*BaseVertexIndex+Offset));
 
-		glEnableVertexAttribArray(4);
-		Offset = STRUCT_OFFSET( FSlateVertex, Color );
-		glVertexAttribPointer( 4, 4, GL_UNSIGNED_BYTE, GL_TRUE, Stride, BUFFER_OFFSET(Stride*BaseVertexIndex+Offset) );
+		glEnableVertexAttribArray(2);
+		Offset = STRUCT_OFFSET(FSlateVertex, Color);
+		glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, Stride, BUFFER_OFFSET(Stride*BaseVertexIndex+Offset));
 
-
+		glEnableVertexAttribArray(3);
+		Offset = STRUCT_OFFSET(FSlateVertex, SecondaryColor);
+		glVertexAttribPointer(3, 4, GL_UNSIGNED_BYTE, GL_TRUE, Stride, BUFFER_OFFSET(Stride*BaseVertexIndex+Offset));
 		
 		// Bind the index buffer so glDrawRangeElements knows which one to use
 		IndexBuffer.Bind();
@@ -298,8 +300,8 @@ void FSlateOpenGLRenderingPolicy::DrawElements( const FMatrix& ViewProjectionMat
 
 					glEnable(GL_SCISSOR_TEST);
 					
-					const float ScissorWidth = FVector2D::Distance(ScissorRect.TopLeft, ScissorRect.TopRight);
-					const float ScissorHeight = FVector2D::Distance(ScissorRect.TopLeft, ScissorRect.BottomLeft);
+					const float ScissorWidth = FVector2f::Distance(ScissorRect.TopLeft, ScissorRect.TopRight);
+					const float ScissorHeight = FVector2f::Distance(ScissorRect.TopLeft, ScissorRect.BottomLeft);
 					glScissor(ScissorRect.TopLeft.X, ViewportSize.Y - ScissorRect.BottomLeft.Y, ScissorWidth, ScissorHeight);
 				}
 				else

@@ -12,21 +12,22 @@
 * scalar implementation, so the scalar code is maintained and enabled when vector intrinsics are off.
 */
 //Currently disabled because FBoneAtom became FTransform and we want to iterate quickly on it.
-#define ENABLE_VECTORIZED_FBONEATOM		0 //PLATFORM_ENABLE_VECTORINTRINSICS && !__ARM_NEON__ && 1 // currently no support for VectorPermute needed for the boneatoms
 #define ENABLE_VECTORIZED_TRANSFORM		PLATFORM_ENABLE_VECTORINTRINSICS
 
-#if ENABLE_VECTORIZED_FBONEATOM || ENABLE_VECTORIZED_TRANSFORM		
+#if ENABLE_VECTORIZED_TRANSFORM
 
 /**
 * The ScalarRegister class wraps the concept of a 'float-in-vector', allowing common scalar operations like bone
 * weight calculations to be done in vector registers.  This will avoid some LHS hazards that arise when mixing float
 * and vector math on some platforms.  However, doing the math for four elements is slower if the vector operations are
-* being emulated on a scalar FPU, so ScalarRegister is defined to float when ENABLE_VECTORIZED_FBONEATOM == 0.
+* being emulated on a scalar FPU, so ScalarRegister is defined to float when ENABLE_VECTORIZED_TRANSFORM == 0.
 */
 class ScalarRegister
 {
 public:
-	VectorRegister Value;
+	using RegisterType = VectorRegister4Float;
+
+	RegisterType Value;
 
 	/** default constructor */
 	FORCEINLINE ScalarRegister();
@@ -39,9 +40,9 @@ public:
 
 	/** Constructor
 	 *
-	 * @param VectorRegister float4 vector register type
+	 * @param RegisterType float4 vector register type
 	 */
-	explicit FORCEINLINE ScalarRegister(VectorRegister VectorValue);
+	explicit FORCEINLINE ScalarRegister(RegisterType VectorValue);
 
 	/**
 	 * Gets the result of multiplying a scalar register to this.
@@ -97,14 +98,14 @@ public:
 
 	/** assignment operator
 	 *
-	 * @param RHS a VectorRegister
+	 * @param RHS a RegisterType
 	 */
-	FORCEINLINE ScalarRegister& operator=(const VectorRegister& RHS);
+	FORCEINLINE ScalarRegister& operator=(const RegisterType& RHS);
 
 	/**
-	 * ScalarRegister to VectorRegister conversion operator.
+	 * ScalarRegister to RegisterType conversion operator.
 	 */
-	FORCEINLINE operator VectorRegister() const;
+	FORCEINLINE operator RegisterType() const;
 };
 
 FORCEINLINE ScalarRegister::ScalarRegister()
@@ -121,7 +122,7 @@ FORCEINLINE ScalarRegister::ScalarRegister(const float& ScalarValue)
 	Value = VectorLoadFloat1(&ScalarValue);
 }
 
-FORCEINLINE ScalarRegister::ScalarRegister(VectorRegister VectorValue)
+FORCEINLINE ScalarRegister::ScalarRegister(RegisterType VectorValue)
 {
 	Value = VectorValue;
 }
@@ -160,13 +161,13 @@ FORCEINLINE ScalarRegister& ScalarRegister::operator=(const ScalarRegister& RHS)
 	return *this;
 }
 
-FORCEINLINE ScalarRegister& ScalarRegister::operator=(const VectorRegister& RHS)
+FORCEINLINE ScalarRegister& ScalarRegister::operator=(const RegisterType& RHS)
 {
 	Value = RHS;
 	return *this;
 }
 
-FORCEINLINE ScalarRegister::operator VectorRegister() const
+FORCEINLINE ScalarRegister::operator RegisterType() const
 {
 	return Value;
 }
@@ -190,13 +191,18 @@ FORCEINLINE ScalarRegister ScalarMax(const ScalarRegister& A, const ScalarRegist
 	return ScalarRegister(VectorMax(A.Value, B.Value));
 }
 
-// Specialization of Lerp template that works with scalar (float in vector) registers
-template<> FORCEINLINE ScalarRegister FMath::Lerp(const ScalarRegister& A, const ScalarRegister& B, const ScalarRegister& Alpha)
+// TCustomLerp for FMath::Lerp()
+template<> struct TCustomLerp<ScalarRegister>
 {
-	const VectorRegister Delta = VectorSubtract(B.Value, A.Value);
-	return ScalarRegister(VectorMultiplyAdd(Alpha.Value, Delta, A.Value));
-}
+	constexpr static bool Value = true;
 
+	// Specialization of Lerp template that works with scalar (float in vector) registers
+	FORCEINLINE ScalarRegister Lerp(const ScalarRegister& A, const ScalarRegister& B, const ScalarRegister& Alpha)
+	{
+		const ScalarRegister::RegisterType Delta = VectorSubtract(B.Value, A.Value);
+		return ScalarRegister(VectorMultiplyAdd(Alpha.Value, Delta, A.Value));
+	}
+};
 
 /**
  * Computes the reciprocal of the scalar register (component-wise) and returns the result.

@@ -6,27 +6,6 @@
 
 #pragma once
 
-#if WINVER == 0x0502
-// Windows XP uses Win7 sdk, and in that one winerror.h doesn't include them
-
-#define DXGI_ERROR_INVALID_CALL                 MAKE_DXGI_HRESULT(1)
-#define DXGI_ERROR_NOT_FOUND                    MAKE_DXGI_HRESULT(2)
-#define DXGI_ERROR_MORE_DATA                    MAKE_DXGI_HRESULT(3)
-#define DXGI_ERROR_UNSUPPORTED                  MAKE_DXGI_HRESULT(4)
-#define DXGI_ERROR_DEVICE_REMOVED               MAKE_DXGI_HRESULT(5)
-#define DXGI_ERROR_DEVICE_HUNG                  MAKE_DXGI_HRESULT(6)
-#define DXGI_ERROR_DEVICE_RESET                 MAKE_DXGI_HRESULT(7)
-#define DXGI_ERROR_WAS_STILL_DRAWING            MAKE_DXGI_HRESULT(10)
-#define DXGI_ERROR_FRAME_STATISTICS_DISJOINT    MAKE_DXGI_HRESULT(11)
-#define DXGI_ERROR_GRAPHICS_VIDPN_SOURCE_IN_USE MAKE_DXGI_HRESULT(12)
-#define DXGI_ERROR_DRIVER_INTERNAL_ERROR        MAKE_DXGI_HRESULT(32)
-#define DXGI_ERROR_NONEXCLUSIVE                 MAKE_DXGI_HRESULT(33)
-#define DXGI_ERROR_NOT_CURRENTLY_AVAILABLE      MAKE_DXGI_HRESULT(34)
-#define DXGI_ERROR_REMOTE_CLIENT_DISCONNECTED   MAKE_DXGI_HRESULT(35)
-#define DXGI_ERROR_REMOTE_OUTOFMEMORY           MAKE_DXGI_HRESULT(36)
-
-#endif
-
 #define D3D11RHI_IMMEDIATE_CONTEXT	(GD3D11RHI->GetDeviceContext())
 #define D3D11RHI_DEVICE				(GD3D11RHI->GetDevice())
 
@@ -70,7 +49,7 @@ extern D3D11RHI_API void VerifyD3D11ShaderResult(class FRHIShader* Shader, HRESU
 extern D3D11RHI_API void VerifyD3D11CreateTextureResult(HRESULT D3DResult, int32 UEFormat,const ANSICHAR* Code,const ANSICHAR* Filename,uint32 Line,
 										 uint32 SizeX,uint32 SizeY,uint32 SizeZ,uint8 D3DFormat,uint32 NumMips,uint32 Flags, D3D11_USAGE Usage,
 										 uint32 CPUAccessFlags, uint32 MiscFlags, uint32 SampleCount, uint32 SampleQuality,
-										 const void* SubResPtr, uint32 SubResPitch, uint32 SubResSlicePitch,ID3D11Device* Device);
+										 const void* SubResPtr, uint32 SubResPitch, uint32 SubResSlicePitch, ID3D11Device* Device, const TCHAR* DebugName);
 
 struct FD3D11ResizeViewportState
 {
@@ -83,6 +62,8 @@ struct FD3D11ResizeViewportState
 extern D3D11RHI_API void VerifyD3D11ResizeViewportResult(HRESULT D3DResult, const ANSICHAR* Code, const ANSICHAR* Filename, uint32 Line,
 	const FD3D11ResizeViewportState& OldState, const FD3D11ResizeViewportState& NewState, ID3D11Device* Device);
 
+extern D3D11RHI_API void VerifyD3D11CreateViewResult(HRESULT D3DResult, const ANSICHAR* Code, const ANSICHAR* Filename, uint32 Line, ID3D11Device* Device, FRHITexture* Texture, const D3D11_UNORDERED_ACCESS_VIEW_DESC& Desc);
+extern D3D11RHI_API void VerifyD3D11CreateViewResult(HRESULT D3DResult, const ANSICHAR* Code, const ANSICHAR* Filename, uint32 Line, ID3D11Device* Device, FRHIBuffer* Buffer, const D3D11_UNORDERED_ACCESS_VIEW_DESC& Desc);
 
 /**
  * A macro for using VERIFYD3D11RESULT that automatically passes in the code and filename/line.
@@ -92,8 +73,10 @@ extern D3D11RHI_API void VerifyD3D11ResizeViewportResult(HRESULT D3DResult, cons
 #define VERIFYD3D11RESULT_NOEXIT(x)		{HRESULT hr = x; if (FAILED(hr)) { VerifyD3D11ResultNoExit(hr,#x,__FILE__,__LINE__, 0); }}
 #define VERIFYD3D11SHADERRESULT(Result, Shader, Device) {HRESULT hr = (Result); if (FAILED(hr)) { VerifyD3D11ShaderResult(Shader, hr, #Result,__FILE__,__LINE__, Device); }}
 #define VERIFYD3D11RESULT_NOEXIT(x)		{HRESULT hr = x; if (FAILED(hr)) { VerifyD3D11ResultNoExit(hr,#x,__FILE__,__LINE__, 0); }}
-#define VERIFYD3D11CREATETEXTURERESULT(x,UEFormat,SizeX,SizeY,SizeZ,Format,NumMips,Flags,Usage,CPUAccessFlags,MiscFlags,SampleCount,SampleQuality,SubResPtr,SubResPitch,SubResSlicePitch,Device) {HRESULT hr = x; if (FAILED(hr)) { VerifyD3D11CreateTextureResult(hr, UEFormat,#x,__FILE__,__LINE__,SizeX,SizeY,SizeZ,Format,NumMips,Flags,Usage,CPUAccessFlags,MiscFlags,SampleCount,SampleQuality,SubResPtr,SubResPitch,SubResSlicePitch,Device); }}
+#define VERIFYD3D11CREATETEXTURERESULT(x,UEFormat,SizeX,SizeY,SizeZ,Format,NumMips,Flags,Usage,CPUAccessFlags,MiscFlags,SampleCount,SampleQuality,SubResPtr,SubResPitch,SubResSlicePitch,Device,DebugName) {HRESULT hr = x; if (FAILED(hr)) { VerifyD3D11CreateTextureResult(hr, UEFormat,#x,__FILE__,__LINE__,SizeX,SizeY,SizeZ,Format,NumMips,Flags,Usage,CPUAccessFlags,MiscFlags,SampleCount,SampleQuality,SubResPtr,SubResPitch,SubResSlicePitch,Device,DebugName); }}
 #define VERIFYD3D11RESIZEVIEWPORTRESULT(x, OldState, NewState, Device) { HRESULT hr = x; if (FAILED(hr)) { VerifyD3D11ResizeViewportResult(hr, #x, __FILE__, __LINE__, OldState, NewState, Device); }}
+#define VERIFYD3D11CREATEVIEWRESULT(x, Device, Resource, Desc) {HRESULT hr = x; if (FAILED(hr)) { VerifyD3D11CreateViewResult(hr, #x, __FILE__, __LINE__, Device, Resource, Desc); }}
+
 /**
  * Checks that a COM object has the expected number of references.
  */
@@ -102,9 +85,6 @@ extern D3D11RHI_API void VerifyComRefCount(IUnknown* Object,int32 ExpectedRefs,c
 
 /** Returns a string for the provided error code, can include device removed information if the device is provided. */
 FString GetD3D11ErrorString(HRESULT ErrorCode, ID3D11Device* Device);
-
-/** Returns a string for the provided DXGI format. */
-const TCHAR* GetD3D11TextureFormatString(DXGI_FORMAT TextureFormat);
 
 /**
 * Convert from ECubeFace to D3DCUBEMAP_FACES type
@@ -137,43 +117,33 @@ FORCEINLINE uint32 GetD3D11CubeFace(ECubeFace Face)
 class FD3D11LockedKey
 {
 public:
-	void* SourceObject;
-	uint32 Subresource;
+	ID3D11Resource* SourceObject = nullptr;
+	uint32 Subresource = 0;
 
-public:
-	FD3D11LockedKey() : SourceObject(NULL)
-		, Subresource(0)
+	FD3D11LockedKey() = default;
+
+	FD3D11LockedKey(ID3D11Resource* InSource, uint32 InSubresource = 0)
+		: SourceObject(InSource)
+		, Subresource (InSubresource)
 	{}
-	FD3D11LockedKey(ID3D11Texture2D* source, uint32 subres=0) : SourceObject((void*)source)
-		, Subresource(subres)
-	{}
-	FD3D11LockedKey(ID3D11Texture3D* source, uint32 subres=0) : SourceObject((void*)source)
-		, Subresource(subres)
-	{}
-	FD3D11LockedKey(ID3D11Buffer* source, uint32 subres=0) : SourceObject((void*)source)
-		, Subresource(subres)
-	{}
-	bool operator==( const FD3D11LockedKey& Other ) const
+
+	bool operator == (const FD3D11LockedKey& Other) const
 	{
 		return SourceObject == Other.SourceObject && Subresource == Other.Subresource;
 	}
-	bool operator!=( const FD3D11LockedKey& Other ) const
+
+	bool operator != (const FD3D11LockedKey& Other) const
 	{
 		return SourceObject != Other.SourceObject || Subresource != Other.Subresource;
 	}
-	FD3D11LockedKey& operator=( const FD3D11LockedKey& Other )
-	{
-		SourceObject = Other.SourceObject;
-		Subresource = Other.Subresource;
-		return *this;
-	}
+
 	uint32 GetHash() const
 	{
-		return PointerHash( SourceObject );
+		return PointerHash(SourceObject);
 	}
 
 	/** Hashing function. */
-	friend uint32 GetTypeHash( const FD3D11LockedKey& K )
+	friend uint32 GetTypeHash(const FD3D11LockedKey& K)
 	{
 		return K.GetHash();
 	}
@@ -261,10 +231,10 @@ struct FD3D11RHIGenericCommandString
 };
 template <
 	typename JobType,
-	typename = TEnableIf<TOr<
-	TIsSame<JobType, TFunction<void()>>,
-	TIsSame<JobType, TFunction<void()>&>>::Value>>
-	class TD3D11RHIGenericCommand final : public FRHICommand<TD3D11RHIGenericCommand<JobType>, FD3D11RHIGenericCommandString>
+	typename = TEnableIf<
+	std::is_same_v<JobType, TFunction<void()>> ||
+	std::is_same_v<JobType, TFunction<void()>&>>>
+class TD3D11RHIGenericCommand final : public FRHICommand<TD3D11RHIGenericCommand<JobType>, FD3D11RHIGenericCommandString>
 {
 public:
 	// InRHIJob is supposed to be called on RHIT (don't capture things that can become outdated here)
@@ -296,18 +266,10 @@ inline bool ShouldNotEnqueueRHICommand()
 	return RHICmdList.Bypass() || (IsRunningRHIInSeparateThread() && IsInRHIThread()) || (!IsRunningRHIInSeparateThread() && IsInRenderingThread());
 }
 
-inline void D3D11StallRHIThread()
+struct FScopedD3D11RHIThreadStaller : public FScopedRHIThreadStaller
 {
-	if (IsRunningRHIInSeparateThread() && IsInRenderingThread() && GRHICommandList.IsRHIThreadActive())
+	FScopedD3D11RHIThreadStaller(bool bDoStall = true)
+		: FScopedRHIThreadStaller(FRHICommandListExecutor::GetImmediateCommandList(), bDoStall && IsInRenderingThread() && GRHICommandList.IsRHIThreadActive())
 	{
-		FRHICommandListExecutor::GetImmediateCommandList().StallRHIThread();
 	}
-}
-
-inline void D3D11UnstallRHIThread()
-{
-	if (IsRunningRHIInSeparateThread() && IsInRenderingThread() && FRHICommandListExecutor::GetImmediateCommandList().IsStalled())
-	{
-		FRHICommandListExecutor::GetImmediateCommandList().UnStallRHIThread();
-	}
-}
+};

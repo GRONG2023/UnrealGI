@@ -1,8 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "GameplayDebugger/GameplayDebuggerCategory_EQS.h"
+#include "GameFramework/Pawn.h"
 
-#if WITH_GAMEPLAY_DEBUGGER
+#if WITH_GAMEPLAY_DEBUGGER_MENU
 
 #include "GameFramework/PlayerController.h"
 #include "CanvasItem.h"
@@ -11,12 +12,23 @@
 #include "EnvironmentQuery/EQSRenderingComponent.h"
 #include "DrawDebugHelpers.h"
 
+namespace UE::GameplayDebuggerCategory_EQS::Tweakables
+{
+	float RefreshInterval = 2.0f;
+
+	FAutoConsoleVariableRef CVars[] =
+	{
+		FAutoConsoleVariableRef(TEXT("ai.debug.EQS.RefreshInterval"), Tweakables::RefreshInterval,
+			TEXT("Interval (in seconds) at which data will be collected.")),
+	};
+}
+
 FGameplayDebuggerCategory_EQS::FGameplayDebuggerCategory_EQS()
 {
 	MaxQueries = 5;
 	MaxItemTableRows = 10;
 	ShownQueryIndex = 0;
-	CollectDataInterval = 2.0f;
+	CollectDataInterval = UE::GameplayDebuggerCategory_EQS::Tweakables::RefreshInterval;
 
 	const FGameplayDebuggerInputHandlerConfig CycleConfig(TEXT("CycleQueries"), TEXT("Multiply"));
 	const FGameplayDebuggerInputHandlerConfig DetailsConfig(TEXT("ToggleDetails"), TEXT("Divide"));
@@ -107,6 +119,7 @@ FDebugRenderSceneProxy* FGameplayDebuggerCategory_EQS::CreateDebugSceneProxy(con
 		FEQSSceneProxy* EQSSceneProxy = new FEQSSceneProxy(*InComponent, ViewFlagName, QueryData.SolidSpheres, QueryData.Texts);
 
 		auto* OutDelegateHelper2 = new FEQSRenderingDebugDrawDelegateHelper();
+		OutDelegateHelper2->SetupFromProxy(EQSSceneProxy);
 		OutDelegateHelper2->InitDelegateHelper(EQSSceneProxy);
 		OutDelegateHelper = OutDelegateHelper2;
 
@@ -121,6 +134,11 @@ FDebugRenderSceneProxy* FGameplayDebuggerCategory_EQS::CreateDebugSceneProxy(con
 void FGameplayDebuggerCategory_EQS::DrawData(APlayerController* OwnerPC, FGameplayDebuggerCanvasContext& CanvasContext)
 {
 #if USE_EQS_DEBUGGER
+	UWorld* World = CanvasContext.GetWorld();
+	if (World == nullptr)
+	{
+		return;
+	}
 
 	const FString HeaderDesc = (DataPack.QueryDebugData.Num() > 1) ?
 		FString::Printf(TEXT("Queries: {yellow}%d{white}, press {yellow}[%s]{white} to cycle through"), DataPack.QueryDebugData.Num(), *GetInputHandlerDescription(0)) :
@@ -146,7 +164,7 @@ void FGameplayDebuggerCategory_EQS::DrawData(APlayerController* OwnerPC, FGamepl
 		const EQSDebug::FQueryData& ShownQueryData = DataPack.QueryDebugData[ShownQueryIndex];
 
 		CanvasContext.MoveToNewLine();
-		CanvasContext.Printf(TEXT("Timestamp: {yellow}%.3f (~ %.2fs ago)"), ShownQueryData.Timestamp, OwnerPC->GetWorld()->TimeSince(ShownQueryData.Timestamp));
+		CanvasContext.Printf(TEXT("Timestamp: {yellow}%.3f (~ %.2fs ago)"), ShownQueryData.Timestamp, World->TimeSince(ShownQueryData.Timestamp));
 		
 		FString OptionsDesc(TEXT("Options: "));
 		for (int32 Idx = 0; Idx < ShownQueryData.Options.Num(); Idx++)
@@ -168,7 +186,8 @@ void FGameplayDebuggerCategory_EQS::DrawData(APlayerController* OwnerPC, FGamepl
 #if USE_EQS_DEBUGGER
 int32 FGameplayDebuggerCategory_EQS::DrawLookedAtItem(const EQSDebug::FQueryData& QueryData, APlayerController* OwnerPC, FGameplayDebuggerCanvasContext& CanvasContext) const
 {
-	if (CanvasContext.Canvas == nullptr)
+	UWorld* World = CanvasContext.GetWorld();
+	if (CanvasContext.Canvas == nullptr || World == nullptr)
 	{
 		return INDEX_NONE;
 	}
@@ -177,19 +196,19 @@ int32 FGameplayDebuggerCategory_EQS::DrawLookedAtItem(const EQSDebug::FQueryData
 	const FVector CameraDirection = CanvasContext.Canvas->SceneView->GetViewDirection();
 
 	int32 BestItemIndex = INDEX_NONE;
-	float BestScore = -FLT_MAX;
+	FVector::FReal BestScore = TNumericLimits<FVector::FReal>::Min();
 
 	for (int32 Idx = 0; Idx < QueryData.RenderDebugHelpers.Num(); Idx++)
 	{
 		const EQSDebug::FDebugHelper& ItemInfo = QueryData.RenderDebugHelpers[Idx];
 		const FVector DirToItem = ItemInfo.Location - CameraLocation;
-		float DistToItem = DirToItem.Size();
+		FVector::FReal DistToItem = DirToItem.Size();
 		if (FMath::IsNearlyZero(DistToItem))
 		{
-			DistToItem = 1.0f;
+			DistToItem = 1.;
 		}
 
-		const float ItemScore = FVector::DotProduct(DirToItem, CameraDirection) / DistToItem;
+		const FVector::FReal ItemScore = FVector::DotProduct(DirToItem, CameraDirection) / DistToItem;
 		if (ItemScore > BestScore)
 		{
 			BestItemIndex = Idx;
@@ -200,8 +219,8 @@ int32 FGameplayDebuggerCategory_EQS::DrawLookedAtItem(const EQSDebug::FQueryData
 	if (BestItemIndex != INDEX_NONE)
 	{
 		const EQSDebug::FDebugHelper& DebugHelper = QueryData.RenderDebugHelpers[BestItemIndex];
-		DrawDebugSphere(OwnerPC->GetWorld(), DebugHelper.Location, DebugHelper.Radius, 8, FColor::Red);
-		DrawDebugCone(OwnerPC->GetWorld(), DebugHelper.Location, FVector(0, 0, 1), 100.0f, 0.1f, 0.1f, 8, FColor::Red);
+		DrawDebugSphere(World, DebugHelper.Location, DebugHelper.Radius, 8, FColor::Red);
+		DrawDebugCone(World, DebugHelper.Location, FVector(0, 0, 1), 100.0f, 0.1f, 0.1f, 8, FColor::Red);
 
 		const int32 FailedTestIndex = DebugHelper.FailedTestIndex;
 		if (FailedTestIndex != INDEX_NONE)
@@ -422,8 +441,8 @@ void FGameplayDebuggerCategory_EQS::DrawDetailedItemRow(const EQSDebug::FItemDat
 	BackTileItem.Position.X = PosX + ActiveTileItem.Size.X;
 	BackTileItem.Size.X = FMath::Max(BarWidth * (1.0f - Pct), 0.0f);
 
-	CanvasContext.DrawItem(ActiveTileItem, ActiveTileItem.Position.X, ActiveTileItem.Position.Y);
-	CanvasContext.DrawItem(BackTileItem, BackTileItem.Position.X, BackTileItem.Position.Y);
+	CanvasContext.DrawItem(ActiveTileItem, (float)ActiveTileItem.Position.X, (float)ActiveTileItem.Position.Y);
+	CanvasContext.DrawItem(BackTileItem, (float)BackTileItem.Position.X, (float)BackTileItem.Position.Y);
 
 	CanvasContext.PrintfAt(PosX, PosY, FColor::Yellow, TEXT("%.2f"), TotalScoreNotNormalized);
 	PosX += FEQSDebugTable::ItemScoreWidth;
@@ -465,4 +484,4 @@ void FGameplayDebuggerCategory_EQS::ToggleDetailView()
 	bShowDetails = !bShowDetails;
 }
 
-#endif // ENABLE_GAMEPLAY_DEBUGGER
+#endif // WITH_GAMEPLAY_DEBUGGER_MENU

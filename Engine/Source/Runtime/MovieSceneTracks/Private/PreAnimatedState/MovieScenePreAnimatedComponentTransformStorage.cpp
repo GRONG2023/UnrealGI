@@ -70,31 +70,37 @@ FPreAnimatedComponentTransformStorage::FPreAnimatedComponentTransformStorage()
 	: TPreAnimatedPropertyStorage<FComponentTransformPreAnimatedTraits>(FBuiltInComponentTypes::Get()->PropertyRegistry.GetDefinition(FMovieSceneTracksComponentTypes::Get()->ComponentTransform.CompositeID))
 {}
 
-void FPreAnimatedComponentTransformStorage::CachePreAnimatedTransforms(const FCachePreAnimatedValueParams& Params, TArrayView<UObject* const> BoundObjects)
+void FPreAnimatedComponentTransformStorage::CachePreAnimatedTransforms(const FCachePreAnimatedValueParams& Params, TArrayView<UObject* const> BoundObjects, TOptional<TFunctionRef<bool(int32)>> Predicate)
 {
 	static FMovieScenePropertyBinding PropertyBinding("Transform", TEXT("Transform"));
 
-	for (UObject* BoundObject : BoundObjects)
+	for (int32 Index = 0; Index < BoundObjects.Num(); ++Index)
 	{
+		UObject* BoundObject = BoundObjects[Index];
+		if (!BoundObject || (Predicate && !(*Predicate)(Index)))
+		{
+			continue;
+		}
+
 		TOptional<FResolvedProperty> Property = FPropertyRegistry::ResolveProperty(BoundObject, PropertyBinding, CustomAccessors);
 		if (!Property)
 		{
 			continue;
 		}
 
-		FAnimatedPropertyKey Key{ BoundObject, PropertyBinding.PropertyPath };
+		TTuple<FObjectKey, FName> Key{ BoundObject, PropertyBinding.PropertyPath };
 
-		FPreAnimatedStorageGroupHandle GroupHandle  = ObjectGroupManager->MakeGroupForObject(BoundObject);
-		FPreAnimatedStorageIndex       StorageIndex = Storage.GetOrCreateStorageIndex(Key);
+		FPreAnimatedStorageGroupHandle GroupHandle  = this->Traits.MakeGroup(BoundObject);
+		FPreAnimatedStorageIndex       StorageIndex = this->GetOrCreateStorageIndex(Key);
 
 		FPreAnimatedStateEntry Entry{ GroupHandle, FPreAnimatedStateCachedValueHandle{ StorageID, StorageIndex } };
 
 		ParentExtension->EnsureMetaData(Entry);
 
 		EPreAnimatedStorageRequirement StorageRequirement = ParentExtension->GetStorageRequirement(Entry);
-		if (!Storage.IsStorageRequirementSatisfied(StorageIndex, StorageRequirement))
+		if (!this->IsStorageRequirementSatisfied(StorageIndex, StorageRequirement))
 		{
-			FPreAnimatedProperty NewValue;
+			StorageType NewValue;
 
 			if (const uint16* Fast = Property->TryGet<uint16>())
 			{
@@ -116,12 +122,12 @@ void FPreAnimatedComponentTransformStorage::CachePreAnimatedTransforms(const FCa
 				FComponentTransformPropertyTraits::GetObjectPropertyValue(BoundObject, Bindings.Get(), NewValue.Data);
 			}
 
-			Storage.AssignPreAnimatedValue(StorageIndex, StorageRequirement, MoveTemp(NewValue));
+			this->AssignPreAnimatedValue(StorageIndex, StorageRequirement, MoveTemp(NewValue));
 		}
 
 		if (Params.bForcePersist)
 		{
-			Storage.ForciblyPersistStorage(StorageIndex);
+			this->ForciblyPersistStorage(StorageIndex);
 		}
 	}
 }

@@ -4,6 +4,7 @@
 #include "SceneTypes.h"
 #include "RHIDefinitions.h"
 #include "MaterialShared.h"
+#include "Styling/SlateColor.h"
 
 /** custom resource material class used to mark the resource as used for shader stats extraction */
 class MATERIALEDITOR_API FMaterialResourceStats : public FMaterialResource
@@ -17,8 +18,19 @@ public:
 		return Material;
 	}
 
+	/**
+	 * Should shaders compiled for this material be saved to disk?
+	 */
+	virtual bool IsPersistent() const override { return false; }
+
+	/** Use preview settings when compiling material. Used to avoid culling nodes behind landscape weights. */
+	virtual bool IsPreview() const override { return true; }
+
+	/** Material resource stats never requires a synchronous compilation, otherwise opening up empty (newly created) material instance will block compiling default mat's shaders. */
+	virtual bool RequiresSynchronousCompilation() const override { return false; }
+
 	/** this will enable shader source extraction and pass paths to (eventual) offline shader compilers */
-	virtual void SetupExtaCompilationSettings(const EShaderPlatform Platform, FExtraShaderCompilerSettings& Settings) const override;
+	virtual void SetupExtraCompilationSettings(const EShaderPlatform Platform, FExtraShaderCompilerSettings& Settings) const override;
 };
 
 /** enumeration used to group shader platforms */
@@ -38,15 +50,16 @@ enum class ERepresentativeShader
 	FirstFragmentShader,
 	StationarySurface = FirstFragmentShader,
 	StationarySurfaceCSM,
-	StationarySurface1PointLight,
 	StationarySurfaceNPointLights,
 	DynamicallyLitObject,
+	RuntimeVirtualTextureOutput,
 	UIDefaultFragmentShader,
 	LastFragmentShader = UIDefaultFragmentShader,
 
 	FirstVertexShader,
 	StaticMesh = FirstVertexShader,
 	SkeletalMesh,
+	SkinnedCloth,
 
 	UIDefaultVertexShader,
 	UIInstancedVertexShader,
@@ -63,6 +76,7 @@ public:
 	{
 		ERepresentativeShader ShaderType;
 		FString ShaderDescription;
+		FString ShaderStatisticsString;
 		int32 InstructionCount;
 	};
 
@@ -77,15 +91,9 @@ public:
 		{}
 	};
 
-	static const FLinearColor BlueColor;
-	static const FLinearColor YellowColor;
-	static const FLinearColor GreenColor;
-	static const FLinearColor OrangeColor;
-	static const FLinearColor DefaultGridTextColor;
-
 public:
 	/** call this to create an instance to FMaterialStats */
-	static TSharedPtr<class FMaterialStats> CreateMaterialStats(class IMaterialEditor* MaterialEditor);
+	static TSharedPtr<class FMaterialStats> CreateMaterialStats(class IMaterialEditor* MaterialEditor, const bool bShowMaterialInstancesMenu, const bool bAllowIgnoringCompilationErrors);
 
 	/** utility functions that translate various enum values to strings */
 	static FString MaterialQualityToString(const EMaterialQualityLevel::Type Quality);
@@ -102,12 +110,12 @@ public:
 	static void GetRepresentativeInstructionCounts(TArray<FShaderInstructionsInfo>& Results, const class FMaterialResource* Target);
 
 	MATERIALEDITOR_API static void GetRepresentativeShaderTypesAndDescriptions(TMap<FName, TArray<FRepresentativeShaderInfo>>& OutShaderTypeNameAndDescriptions, const class FMaterial* TargetMaterial);
-	MATERIALEDITOR_API static void ExtractMatertialStatsInfo(struct FShaderStatsInfo& OutInfo, const FMaterialResource* Target);
+	MATERIALEDITOR_API static void ExtractMatertialStatsInfo(EShaderPlatform ShaderPlatform, struct FShaderStatsInfo& OutInfo, const FMaterialResource* Target);
 
 	static FString RepresentativeShaderTypeToString(const ERepresentativeShader ShaderType);
 
-	static FLinearColor QualitySettingColor(const EMaterialQualityLevel::Type QualityType);
-	static FLinearColor PlatformTypeColor(EPlatformCategoryType PlatformType);
+	static FSlateColor QualitySettingColor(const EMaterialQualityLevel::Type QualityType);
+	static FSlateColor PlatformTypeColor(EPlatformCategoryType PlatformType);
 
 	MATERIALEDITOR_API static bool IsPlatformOfflineCompilerAvailable(const EShaderPlatform ShaderPlatform);
 	MATERIALEDITOR_API static FString GetPlatformOfflineCompilerPath(const EShaderPlatform ShaderPlatform);

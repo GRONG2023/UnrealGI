@@ -5,13 +5,9 @@
 	Location-related particle module implementations.
 =============================================================================*/
 
-#include "CoreMinimal.h"
 #include "Misc/MessageDialog.h"
-#include "Stats/Stats.h"
-#include "GameFramework/Actor.h"
 #include "Components/SkeletalMeshComponent.h"
-#include "RawIndexBuffer.h"
-#include "ParticleHelper.h"
+#include "ParticleEmitterInstances.h"
 #include "Particles/ParticleSystemComponent.h"
 #include "Distributions/DistributionFloatConstant.h"
 #include "Distributions/DistributionVectorConstant.h"
@@ -33,12 +29,19 @@
 #include "Particles/Location/ParticleModuleLocationWorldOffset.h"
 #include "Particles/Location/ParticleModuleLocationWorldOffset_Seeded.h"
 #include "Particles/Location/ParticleModuleLocation_Seeded.h"
+#include "Particles/ParticleEmitter.h"
 #include "Particles/TypeData/ParticleModuleTypeDataGpu.h"
 #include "Particles/ParticleLODLevel.h"
+#include "Particles/ParticleModule.h"
 #include "Particles/ParticleModuleRequired.h"
 #include "Animation/SkeletalMeshActor.h"
+#include "Engine/SkeletalMesh.h"
 #include "Engine/SkeletalMeshSocket.h"
+#include "Particles/ParticleSystem.h"
 #include "Rendering/SkeletalMeshRenderData.h"
+#include "Particles/TypeData/ParticleModuleTypeDataBase.h"
+#include "SceneManagement.h"
+#include "UObject/UnrealType.h"
 
 
 UParticleModuleLocationBase::UParticleModuleLocationBase(const FObjectInitializer& ObjectInitializer)
@@ -346,7 +349,7 @@ void UParticleModuleLocationDirect::Update(FParticleEmitterInstance* Owner, int3
 		FVector	ScaleDiffA	 = Diff * Scale.X;
 		FVector	ScaleDiffB	 = Diff * (1.0f - Scale.X);
 		float InvDeltaTime = (DeltaTime > 0.0f) ? 1.0f / DeltaTime : 0.0f;
-		Particle.Velocity	 = ScaleDiffA * InvDeltaTime;
+		Particle.Velocity	 = (FVector3f)ScaleDiffA * InvDeltaTime;
 		Particle.Location	+= ScaleDiffB;
 		ensureMsgf(!Particle.Location.ContainsNaN(), TEXT("NaN in Particle Location. Template: %s, Component: %s"), Owner->Component ? *GetNameSafe(Owner->Component->Template) : TEXT("UNKNOWN"), *GetPathNameSafe(Owner->Component));
 	}
@@ -816,7 +819,7 @@ void UParticleModuleLocationPrimitiveTriangle::SpawnEx(FParticleEmitterInstance*
 	float TriHeight = Height.GetValue(Owner->EmitterTime, Owner->Component, InRandomStream);
 	float TriAngle = Angle.GetValue(Owner->EmitterTime, Owner->Component, InRandomStream);
 	float TriThickness = Thickness.GetValue(Owner->EmitterTime, Owner->Component, InRandomStream);
-	float BaseLength = TriHeight * FMath::Tan(0.5f * TriAngle * PI / 180.0f);
+	float BaseLength = TriHeight * FMath::Tan(0.5f * TriAngle * UE_PI / 180.0f);
 
 	FVector Corners[3];
 	Corners[0] = TriOffset + FVector(+TriHeight * 0.5f, 0.0f, 0.0f);
@@ -832,7 +835,7 @@ void UParticleModuleLocationPrimitiveTriangle::SpawnEx(FParticleEmitterInstance*
 	ZPos = InRandomStream->GetFraction();
 	
 	FVector LocationOffset = FVector::ZeroVector;
-	float Sum = FMath::Max<float>(KINDA_SMALL_NUMBER, BarycentricCoords[0] + BarycentricCoords[1] + BarycentricCoords[2]);
+	float Sum = FMath::Max<float>(UE_KINDA_SMALL_NUMBER, BarycentricCoords[0] + BarycentricCoords[1] + BarycentricCoords[2]);
 	for (int32 i = 0; i < 3; i++)
 	{
 		LocationOffset += (BarycentricCoords[i] / Sum) * Corners[i];
@@ -859,7 +862,7 @@ void UParticleModuleLocationPrimitiveTriangle::Render3DPreview(FParticleEmitterI
 		float TriHeight = Height.GetValue(0.0f, NULL, NULL);
 		float TriAngle = Angle.GetValue(0.0f, NULL, NULL);
 		float TriThickness = Thickness.GetValue(0.0f, NULL, NULL);
-		float BaseLength = TriHeight * FMath::Tan(0.5f * TriAngle * PI / 180.0f);
+		float BaseLength = TriHeight * FMath::Tan(0.5f * TriAngle * UE_PI / 180.0f);
 
 		FVector Corners[3];
 		Corners[0] = TriOffset + FVector(+TriHeight * 0.5f, 0.0f, 0.0f);
@@ -1077,8 +1080,8 @@ void UParticleModuleLocationPrimitiveCylinder::SpawnEx(FParticleEmitterInstance*
 		vVelocity	*= VelocityScale.GetValue(Owner->EmitterTime, Owner->Component, InRandomStream);
 		vVelocity = Owner->EmitterToSimulation.TransformVector(vVelocity);
 
-		Particle.Velocity		+= vVelocity;
-		Particle.BaseVelocity	+= vVelocity;
+		Particle.Velocity		+= (FVector3f)vVelocity;
+		Particle.BaseVelocity	+= (FVector3f)vVelocity;
 	}
 	ensureMsgf(!Particle.Location.ContainsNaN(), TEXT("NaN in Particle Location. Template: %s, Component: %s"), Owner->Component ? *GetNameSafe(Owner->Component->Template) : TEXT("UNKNOWN"), *GetPathNameSafe(Owner->Component));
 	ensureMsgf(!Particle.Velocity.ContainsNaN(), TEXT("NaN in Particle Velocity. Template: %s, Component: %s"), Owner->Component ? *GetNameSafe(Owner->Component->Template) : TEXT("UNKNOWN"), *GetPathNameSafe(Owner->Component));
@@ -1303,8 +1306,8 @@ void UParticleModuleLocationPrimitiveSphere::SpawnEx(FParticleEmitterInstance* O
 	{
 		FVector vVelocity		 = (vOffset - vStartLoc) * VelocityScale.GetValue(Owner->EmitterTime, Owner->Component, InRandomStream);
 		vVelocity = Owner->EmitterToSimulation.TransformVector(vVelocity);
-		Particle.Velocity		+= vVelocity;
-		Particle.BaseVelocity	+= vVelocity;
+		Particle.Velocity		+= (FVector3f)vVelocity;
+		Particle.BaseVelocity	+= (FVector3f)vVelocity;
 	}
 	ensureMsgf(!Particle.Location.ContainsNaN(), TEXT("NaN in Particle Location. Template: %s, Component: %s"), Owner->Component ? *GetNameSafe(Owner->Component->Template) : TEXT("UNKNOWN"), *GetPathNameSafe(Owner->Component));
 	ensureMsgf(!Particle.Velocity.ContainsNaN(), TEXT("NaN in Particle Velocity. Template: %s, Component: %s"), Owner->Component ? *GetNameSafe(Owner->Component->Template) : TEXT("UNKNOWN"), *GetPathNameSafe(Owner->Component));
@@ -1467,7 +1470,7 @@ void UParticleModuleLocationBoneSocket::RegeneratePreSelectedIndices(FModuleLoca
 {
 	if (SourceIndexMode == EBoneSocketSourceIndexMode::PreSelectedIndices)
 	{
-		int32 MaxIndex = SourceType == BONESOCKETSOURCE_Sockets ? SourceComponent->SkeletalMesh->NumSockets() : SourceComponent->GetNumBones();
+		int32 MaxIndex = SourceType == BONESOCKETSOURCE_Sockets ? SourceComponent->GetSkeletalMeshAsset()->NumSockets() : SourceComponent->GetNumBones();
 		for (int32 i = 0; i < NumPreSelectedIndices; ++i)
 		{
 			//Should we provide sequential selection here? Does that make sense for the pre selected list?
@@ -1587,16 +1590,16 @@ void UParticleModuleLocationBoneSocket::Spawn(FParticleEmitterInstance* Owner, i
 			if (InheritingBoneVelocity())
 			{
 				// Set the base velocity for this particle.
-				Particle.BaseVelocity = FMath::Lerp(Particle.BaseVelocity, InstancePayload->BoneSocketVelocities[SourceIndex], InheritVelocityScale);
+				Particle.BaseVelocity = FMath::Lerp<FVector3f>(Particle.BaseVelocity, InstancePayload->BoneSocketVelocities[SourceIndex], InheritVelocityScale);
 				ensureMsgf(!Particle.BaseVelocity.ContainsNaN(), TEXT("NaN in Particle Base Velocity. Template: %s, Component: %s"), Owner->Component ? *GetNameSafe(Owner->Component->Template) : TEXT("UNKNOWN"), *GetPathNameSafe(Owner->Component));
 			}
 			if (bMeshRotationActive) // Note that right now the rotation wil *always* be Identity (see comments above)
 			{
 				FMeshRotationPayloadData* PayloadData = (FMeshRotationPayloadData*)((uint8*)&Particle + MeshRotationOffset);
-				PayloadData->Rotation = RotationQuat.Euler();
+				PayloadData->Rotation = (FVector3f)RotationQuat.Euler();
 				if (Owner->CurrentLODLevel->RequiredModule->bUseLocalSpace == true)
 				{
-					PayloadData->Rotation = Owner->Component->GetComponentTransform().InverseTransformVectorNoScale(PayloadData->Rotation);
+					PayloadData->Rotation = (FVector3f)Owner->Component->GetComponentTransform().InverseTransformVectorNoScale((FVector)PayloadData->Rotation);
 				}
 			}
 		}
@@ -1616,15 +1619,15 @@ void UParticleModuleLocationBoneSocket::UpdatePrevBoneLocationsAndVelocities(FMo
 		if (GetBoneInfoForSourceIndex(InstancePayload, SourceComponent, SourceIndex, WorldBoneTM, Offset) && SourceIndex < InstancePayload->BoneSocketVelocities.Num())
 		{
 			// Calculate the velocity
-			const FVector CurrLocation = WorldBoneTM.GetOrigin();
-			const FVector Diff = CurrLocation - InstancePayload->PrevFrameBoneSocketPositions[SourceIndex];
+			const FVector3f CurrLocation = (FVector3f)WorldBoneTM.GetOrigin();	// LWC_TODO: Precision Loss
+			const FVector3f Diff = CurrLocation - InstancePayload->PrevFrameBoneSocketPositions[SourceIndex];
 			InstancePayload->BoneSocketVelocities[SourceIndex] = Diff * InvDeltaTime;
 			InstancePayload->PrevFrameBoneSocketPositions[SourceIndex] = CurrLocation;
 		}
 		else
 		{
-			InstancePayload->BoneSocketVelocities[SourceIndex] = FVector::ZeroVector;
-			InstancePayload->PrevFrameBoneSocketPositions[SourceIndex] = SourceComponent->GetComponentLocation();
+			InstancePayload->BoneSocketVelocities[SourceIndex] = FVector3f::ZeroVector;
+			InstancePayload->PrevFrameBoneSocketPositions[SourceIndex] = (FVector3f)SourceComponent->GetComponentLocation();
 		}
 	}
 }
@@ -1674,10 +1677,10 @@ void UParticleModuleLocationBoneSocket::Update(FParticleEmitterInstance* Owner, 
 			if (bMeshRotationActive) // Note that right now due to logic above, the rotation will always be identity
 			{
 				FMeshRotationPayloadData* PayloadData = (FMeshRotationPayloadData*)((uint8*)&Particle + MeshRotationOffset);
-				PayloadData->Rotation = RotationQuat.Euler();
+				PayloadData->Rotation = (FVector3f)RotationQuat.Euler();
 				if (Owner->CurrentLODLevel->RequiredModule->bUseLocalSpace == true)
 				{
-					PayloadData->Rotation = OwnerTM.InverseTransformVectorNoScale(PayloadData->Rotation);
+					PayloadData->Rotation = (FVector3f)OwnerTM.InverseTransformVectorNoScale((FVector)PayloadData->Rotation);
 				}
 			}
 		}
@@ -1708,7 +1711,7 @@ void UParticleModuleLocationBoneSocket::FinalUpdate(FParticleEmitterInstance* Ow
 			BEGIN_UPDATE_LOOP;
 			{
 				FModuleLocationBoneSocketParticlePayload* ParticlePayload = (FModuleLocationBoneSocketParticlePayload*)((uint8*)&Particle + Offset);
-				if (SourceComponent && SourceComponent->SkeletalMesh)
+				if (SourceComponent && SourceComponent->GetSkeletalMeshAsset())
 				{
 					USkeletalMeshSocket* Socket;
 					FVector SocketOffset;
@@ -1757,7 +1760,7 @@ uint32 UParticleModuleLocationBoneSocket::RequiredBytesPerInstance()
 
 	//Have to take the max of all variants as lots of code assumes all LODs use the same memory and prep it the same way :(
 	int32 ArraySize = FMath::Max(SourceLocations.Num(), NumPreSelectedIndices);
-	int32 ElemSize = (sizeof(FVector)* 2) + sizeof(int32);
+	int32 ElemSize = (sizeof(FVector3f)* 2) + sizeof(int32);
 	
 	int32 BoneArraySize = ArraySize * ElemSize;
 	
@@ -1916,9 +1919,9 @@ int32 UParticleModuleLocationBoneSocket::GetMaxSourceIndex(FModuleLocationBoneSo
 		{
 			if (SourceType == BONESOCKETSOURCE_Sockets)
 			{
-				if (ensure(SourceComponent->SkeletalMesh))
+				if (ensure(SourceComponent->GetSkeletalMeshAsset()))
 				{
-					return SourceComponent->SkeletalMesh->NumSockets();
+					return SourceComponent->GetSkeletalMeshAsset()->NumSockets();
 				}
 				return 0;
 			}
@@ -1995,9 +1998,9 @@ void UParticleModuleLocationBoneSocket::GetSkeletalMeshComponentSource(FParticle
 
 bool UParticleModuleLocationBoneSocket::GetSocketInfoForSourceIndex(FModuleLocationBoneSocketInstancePayload* InstancePayload, USkeletalMeshComponent* SourceComponent, int32 SourceIndex, USkeletalMeshSocket*& OutSocket, FVector& OutOffset) const
 {
-	if (!ensureMsgf(SourceType == BONESOCKETSOURCE_Sockets, TEXT("Invalid source type %d for %s"), SourceType, *GetPathName()) ||
+	if (!ensureMsgf(SourceType == BONESOCKETSOURCE_Sockets, TEXT("Invalid source type %d for %s"), SourceType.GetIntValue(), *GetPathName()) ||
 		!ensureMsgf(SourceComponent, TEXT("Null SkeletalMeshComponent for %s"), *GetPathName()) ||
-		!ensureMsgf(SourceComponent->SkeletalMesh, TEXT("Null SkeletalMesh on Component %s for %s"), *SourceComponent->GetPathName(), *GetPathName()))
+		!ensureMsgf(SourceComponent->GetSkeletalMeshAsset(), TEXT("Null SkeletalMesh on Component %s for %s"), *SourceComponent->GetPathName(), *GetPathName()))
 	{
 		return false;
 	}
@@ -2008,7 +2011,7 @@ bool UParticleModuleLocationBoneSocket::GetSocketInfoForSourceIndex(FModuleLocat
 		{
 			if (ensureMsgf(SourceLocations.IsValidIndex(SourceIndex), TEXT("Invalid index of %d for %s"), SourceIndex, *GetPathName()))
 			{
-				OutSocket = SourceComponent->SkeletalMesh->FindSocket(SourceLocations[SourceIndex].BoneSocketName);
+				OutSocket = SourceComponent->GetSkeletalMeshAsset()->FindSocket(SourceLocations[SourceIndex].BoneSocketName);
 				OutOffset = SourceLocations[SourceIndex].Offset + UniversalOffset;
 			}
 			else
@@ -2022,7 +2025,7 @@ bool UParticleModuleLocationBoneSocket::GetSocketInfoForSourceIndex(FModuleLocat
 			if (ensureMsgf(InstancePayload, TEXT("Invalid instance payload parameter on GetSocketInfoForSourceIndex %d for %s"), SourceIndex, *GetPathName()) &&
 				ensureMsgf(SourceIndex >= 0 && SourceIndex < InstancePayload->PreSelectedBoneSocketIndices.Num(), TEXT("Invalid index of %d for %s"), SourceIndex, *GetPathName()))
 			{
-				OutSocket = SourceComponent->SkeletalMesh->GetSocketByIndex(InstancePayload->PreSelectedBoneSocketIndices[SourceIndex]);
+				OutSocket = SourceComponent->GetSkeletalMeshAsset()->GetSocketByIndex(InstancePayload->PreSelectedBoneSocketIndices[SourceIndex]);
 				OutOffset = UniversalOffset;
 			} 
 			else
@@ -2034,7 +2037,7 @@ bool UParticleModuleLocationBoneSocket::GetSocketInfoForSourceIndex(FModuleLocat
 		break;
 		case EBoneSocketSourceIndexMode::Direct:
 		{
-			OutSocket = SourceComponent->SkeletalMesh->GetSocketByIndex(SourceIndex);
+			OutSocket = SourceComponent->GetSkeletalMeshAsset()->GetSocketByIndex(SourceIndex);
 			OutOffset = UniversalOffset;
 		}
 		break;
@@ -2098,7 +2101,7 @@ bool UParticleModuleLocationBoneSocket::GetParticleLocation(FModuleLocationBoneS
 
 	if (SourceType == BONESOCKETSOURCE_Sockets)
 	{
-		if (InSkelMeshComponent->SkeletalMesh)
+		if (InSkelMeshComponent->GetSkeletalMeshAsset())
 		{
 			USkeletalMeshSocket* Socket;
 			FVector SocketOffset;
@@ -2205,7 +2208,7 @@ void UParticleModuleLocationSkelVertSurface::PostLoad()
 
 	NormalCheckTolerance = ((1.0f-(NormalCheckToleranceDegrees/180.0f))*2.0f)-1.0f;
 
-	if (GetLinkerUE4Version() < VER_UE4_FIX_SKEL_VERT_ORIENT_MESH_PARTICLES)
+	if (GetLinkerUEVersion() < VER_UE4_FIX_SKEL_VERT_ORIENT_MESH_PARTICLES)
 	{
 		//The code to actually do this hasn't been present ever in UE4 so I'm disabling it for old emitters.
 		//I expect that some users will have this set to true and it will alter the behavior of their emitters under their feet.
@@ -2427,7 +2430,7 @@ void UParticleModuleLocationSkelVertSurface::Spawn(FParticleEmitterInstance* Own
 				{
 					//We have the mesh oriented to the normal of the triangle it's on but this looks fugly as particles on each triangle are facing the same way.
 					//The only valid orientation reference should be the normal. So add an additional random rotation around it.
-					SourceRotation = SourceRotation * FQuat(FVector::UpVector, RandomStream.FRand()*(PI*2.0f));
+					SourceRotation = SourceRotation * FQuat(FVector::UpVector, RandomStream.FRand()*(UE_PI*2.0f));
 				}
 
 				FVector Rot = SourceRotation.Euler();
@@ -2435,8 +2438,8 @@ void UParticleModuleLocationSkelVertSurface::Spawn(FParticleEmitterInstance* Own
 				{
 					Rot = Owner->Component->GetComponentTransform().InverseTransformVectorNoScale(Rot);
 				}
-				PayloadData->Rotation = Rot;
-				PayloadData->InitRotation = Rot;
+				PayloadData->Rotation = (FVector3f)Rot;
+				PayloadData->InitRotation = (FVector3f)Rot;
 			}
 		}
 	}
@@ -2476,7 +2479,7 @@ void UParticleModuleLocationSkelVertSurface::Update(FParticleEmitterInstance* Ow
 			if (BoneIndex != INDEX_NONE)
 			{
 				const FMatrix WorldBoneTM = SourceComponent->GetBoneMatrix(BoneIndex);
-				const FVector Diff = WorldBoneTM.GetOrigin() - InstancePayload->PrevFrameBonePositions[ValidBoneIndex];
+				const FVector3f Diff = (FVector3f)WorldBoneTM.GetOrigin() - InstancePayload->PrevFrameBonePositions[ValidBoneIndex];	// LWC_TODO: Precision Loss
 				InstancePayload->BoneVelocities[ValidBoneIndex] = Diff * InvDeltaTime;
 			}
 		}
@@ -2514,7 +2517,7 @@ void UParticleModuleLocationSkelVertSurface::Update(FParticleEmitterInstance* Ow
 				{
 					//We have the mesh oriented to the normal of the triangle it's on but this looks fugly as particles on each triangle are facing the same way.
 					//The only valid orientation reference should be the normal. So add an additional random rotation around it.
-					SourceRotation = SourceRotation * FQuat(FVector::UpVector, RandomStream.FRand()*(PI*2.0f));
+					SourceRotation = SourceRotation * FQuat(FVector::UpVector, RandomStream.FRand()*(UE_PI*2.0f));
 				}
 
 				FMeshRotationPayloadData* PayloadData = (FMeshRotationPayloadData*)((uint8*)&Particle + MeshRotationOffset);
@@ -2523,7 +2526,7 @@ void UParticleModuleLocationSkelVertSurface::Update(FParticleEmitterInstance* Ow
 				{
 					Rot = OwnerTM.InverseTransformVectorNoScale(Rot);
 				}
-				PayloadData->Rotation = Rot;
+				PayloadData->Rotation = (FVector3f)Rot;
 			}
 		}
 	}
@@ -2553,7 +2556,7 @@ void UParticleModuleLocationSkelVertSurface::FinalUpdate(FParticleEmitterInstanc
 			if (BoneIndex != INDEX_NONE)
 			{
 				const FMatrix WorldBoneTM = SourceComponent->GetBoneMatrix(BoneIndex);
-				InstancePayload->PrevFrameBonePositions[ValidBoneIndex] = WorldBoneTM.GetOrigin();
+				InstancePayload->PrevFrameBonePositions[ValidBoneIndex] = (FVector3f)WorldBoneTM.GetOrigin();
 			}
 		}
 	}
@@ -2583,7 +2586,7 @@ void UParticleModuleLocationSkelVertSurface::UpdateBoneIndicesList(FParticleEmit
 		int32 InsertionIndex = 0;
 		for (int32 FindBoneIdx = 0; FindBoneIdx < ValidAssociatedBones.Num(); FindBoneIdx++)
 		{
-			const int32 BoneIdx = SkelMeshComp->SkeletalMesh->GetRefSkeleton().FindBoneIndex(ValidAssociatedBones[FindBoneIdx]);
+			const int32 BoneIdx = SkelMeshComp->GetSkeletalMeshAsset()->GetRefSkeleton().FindBoneIndex(ValidAssociatedBones[FindBoneIdx]);
 			if (BoneIdx != INDEX_NONE && ValidAssociatedBones.Num() > InsertionIndex)
 			{
 				InstancePayload->ValidAssociatedBoneIndices[InsertionIndex++] = BoneIdx;
@@ -2747,10 +2750,10 @@ void UParticleModuleLocationSkelVertSurface::GetSkeletalMeshComponentSource(FPar
 
 		bool bMeshIsValid = false;
 		int32 MinLOD = INDEX_NONE;
-		if (NewSkelMeshComp && NewSkelMeshComp->GetScene() && NewSkelMeshComp->SkeletalMesh)
+		if (NewSkelMeshComp && NewSkelMeshComp->GetScene() && NewSkelMeshComp->GetSkeletalMeshAsset())
 		{
 			FSkeletalMeshRenderData* SkelMeshResource = NewSkelMeshComp->GetSkeletalMeshRenderData();
-			MinLOD = SkelMeshResource->GetFirstValidLODIdx(NewSkelMeshComp->SkeletalMesh->GetMinLod().GetValue());
+			MinLOD = SkelMeshResource->GetFirstValidLODIdx(NewSkelMeshComp->GetSkeletalMeshAsset()->GetMinLodIdx());
 
 			if (MinLOD != INDEX_NONE)
 			{
@@ -2786,7 +2789,7 @@ void UParticleModuleLocationSkelVertSurface::GetSkeletalMeshComponentSource(FPar
 			UE_LOG(LogParticles, Warning, TEXT("Attempting to use Cascade SkelVertSurface module on mesh without valid data."));
 			UE_LOG(LogParticles, Warning, TEXT("Likely due to CPU side buffers being stripped with r.FreeSkeletalMeshBuffers=1."));
 			UE_LOG(LogParticles, Warning, TEXT("This emitter should probably be culled for this platform using detail mode."));
-			UE_LOG(LogParticles, Warning, TEXT("Mesh: %s"), NewSkelMeshComp ? *NewSkelMeshComp->SkeletalMesh->GetFullName() : TEXT("NULL"));
+			UE_LOG(LogParticles, Warning, TEXT("Mesh: %s"), NewSkelMeshComp ? *NewSkelMeshComp->GetSkeletalMeshAsset()->GetFullName() : TEXT("NULL"));
 			UE_LOG(LogParticles, Warning, TEXT("Comp: %s"), *Owner->Component->GetFullName());
 			UE_LOG(LogParticles, Warning, TEXT("System: %s"), *Owner->Component->Template->GetFullName());
 			UE_LOG(LogParticles, Warning, TEXT("----------------------------------------------------------------------"));
@@ -2820,7 +2823,7 @@ bool UParticleModuleLocationSkelVertSurface::GetParticleLocation(FParticleEmitte
 				return false;
 			}
 
-			FVector VertPos = USkeletalMeshComponent::GetSkinnedVertexPosition(InSkelMeshComponent, InPrimaryVertexIndex, LODData, SkinWeightBuffer);
+			FVector VertPos(USkeletalMeshComponent::GetSkinnedVertexPosition(InSkelMeshComponent, InPrimaryVertexIndex, LODData, SkinWeightBuffer));
 			OutPosition = InSkelMeshComponent->GetComponentTransform().TransformPosition(VertPos);
 			OutRotation = FQuat::Identity;
 		}
@@ -2838,9 +2841,9 @@ bool UParticleModuleLocationSkelVertSurface::GetParticleLocation(FParticleEmitte
 			VertIndex[0] = LODData.MultiSizeIndexContainer.GetIndexBuffer()->Get( InPrimaryVertexIndex );
 			VertIndex[1] = LODData.MultiSizeIndexContainer.GetIndexBuffer()->Get( InPrimaryVertexIndex+1 );
 			VertIndex[2] = LODData.MultiSizeIndexContainer.GetIndexBuffer()->Get( InPrimaryVertexIndex+2 );
-			Verts[0] = InSkelMeshComponent->GetComponentTransform().TransformPosition(USkeletalMeshComponent::GetSkinnedVertexPosition(InSkelMeshComponent, VertIndex[0], LODData, SkinWeightBuffer));
-			Verts[1] = InSkelMeshComponent->GetComponentTransform().TransformPosition(USkeletalMeshComponent::GetSkinnedVertexPosition(InSkelMeshComponent, VertIndex[1], LODData, SkinWeightBuffer));
-			Verts[2] = InSkelMeshComponent->GetComponentTransform().TransformPosition(USkeletalMeshComponent::GetSkinnedVertexPosition(InSkelMeshComponent, VertIndex[2], LODData, SkinWeightBuffer));
+			Verts[0] = InSkelMeshComponent->GetComponentTransform().TransformPosition((FVector)USkeletalMeshComponent::GetSkinnedVertexPosition(InSkelMeshComponent, VertIndex[0], LODData, SkinWeightBuffer));
+			Verts[1] = InSkelMeshComponent->GetComponentTransform().TransformPosition((FVector)USkeletalMeshComponent::GetSkinnedVertexPosition(InSkelMeshComponent, VertIndex[1], LODData, SkinWeightBuffer));
+			Verts[2] = InSkelMeshComponent->GetComponentTransform().TransformPosition((FVector)USkeletalMeshComponent::GetSkinnedVertexPosition(InSkelMeshComponent, VertIndex[2], LODData, SkinWeightBuffer));
 
 			FVector V0ToV2 = (Verts[2] - Verts[0]);
 			V0ToV2.Normalize();
@@ -2949,7 +2952,7 @@ bool UParticleModuleLocationSkelVertSurface::VertInfluencedByActiveBoneTyped(
 	FModuleLocationVertSurfaceInstancePayload* InstancePayload, 
 	int32* OutBoneIndex)
 {
-	const TArray<int32>& MasterBoneMap = InSkelMeshComponent->GetMasterBoneMap();
+	const TArray<int32>& LeaderBoneMap = InSkelMeshComponent->GetLeaderBoneMap();
 	// Get weights on this vertex
 	FSkinWeightVertexBuffer* WeightBuffer = InSkelMeshComponent->GetSkinWeightBuffer(LODIndex);
 	if (WeightBuffer)
@@ -2962,10 +2965,10 @@ bool UParticleModuleLocationSkelVertSurface::VertInfluencedByActiveBoneTyped(
 #endif
 		{
 			int32 BoneIndex = Section.BoneMap[WeightBuffer->GetBoneIndex(Section.GetVertexBufferIndex() + VertIndex, InfluenceIndex)];
-			if (InSkelMeshComponent->MasterPoseComponent.IsValid())
+			if (InSkelMeshComponent->LeaderPoseComponent.IsValid())
 			{
-				check(MasterBoneMap.Num() == InSkelMeshComponent->SkeletalMesh->GetRefSkeleton().GetNum());
-				BoneIndex = MasterBoneMap[BoneIndex];
+				check(LeaderBoneMap.Num() == InSkelMeshComponent->GetSkeletalMeshAsset()->GetRefSkeleton().GetNum());
+				BoneIndex = LeaderBoneMap[BoneIndex];
 			}
 
 			if (!InstancePayload->NumValidAssociatedBoneIndices || InstancePayload->ValidAssociatedBoneIndices.Contains(BoneIndex))

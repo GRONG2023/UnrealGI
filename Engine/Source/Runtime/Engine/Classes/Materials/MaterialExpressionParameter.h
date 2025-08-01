@@ -6,6 +6,7 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "Misc/Guid.h"
+#include "MaterialTypes.h"
 #include "Materials/MaterialExpression.h"
 #include "MaterialExpressionParameter.generated.h"
 
@@ -24,7 +25,6 @@ class UMaterialExpressionParameter : public UMaterialExpression
 	UPROPERTY()
 	FGuid ExpressionGUID;
 
-#if WITH_EDITORONLY_DATA
 	/** The name of the parameter Group to display in MaterialInstance Editor. Default is None group */
 	UPROPERTY(EditAnywhere, Category=MaterialExpressionParameter)
 	FName Group;
@@ -32,7 +32,7 @@ class UMaterialExpressionParameter : public UMaterialExpression
 	/** Controls where the this parameter is displayed in a material instance parameter list.  The lower the number the higher up in the parameter list. */
 	UPROPERTY(EditAnywhere, Category=MaterialExpressionParameter)
 	int32 SortPriority = 32;
-#endif
+
 	static FName ParameterDefaultName;
 
 
@@ -48,17 +48,23 @@ class UMaterialExpressionParameter : public UMaterialExpression
 	virtual FName GetParameterName() const override { return ParameterName; }
 	virtual void SetParameterName(const FName& Name) override { ParameterName = Name; }
 	virtual void ValidateParameterName(const bool bAllowDuplicateName) override;
+
+	virtual bool GetParameterValue(FMaterialParameterMetadata& OutMeta) const override
+	{
+		OutMeta.Description = Desc;
+		OutMeta.ExpressionGuid = ExpressionGUID;
+		OutMeta.Group = Group;
+		OutMeta.SortPriority = SortPriority;
+		OutMeta.AssetPath = GetAssetPathName();
+		return true;
+	}
+
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
 #endif
 	//~ End UMaterialExpression Interface
 
-	ENGINE_API virtual FGuid& GetParameterExpressionId() override
+	virtual FGuid& GetParameterExpressionId() override
 	{
 		return ExpressionGUID;
 	}
-
-	/**
-	 * Get list of parameter names for static parameter sets
-	 */
-	virtual void GetAllParameterInfo(TArray<FMaterialParameterInfo> &OutParameterInfo, TArray<FGuid> &OutParameterIds, const FMaterialParameterInfo& InBaseParameterInfo) const;
-
 };

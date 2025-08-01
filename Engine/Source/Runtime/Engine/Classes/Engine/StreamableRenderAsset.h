@@ -7,15 +7,23 @@
 #include "UObject/Object.h"
 #include "Misc/App.h"
 #include "Engine/TextureStreamingTypes.h"
-#include "Serialization/BulkData2.h"
+#include "Serialization/BulkData.h"
 #include "Templates/RefCounting.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "RenderAssetUpdate.h"
+#endif
 #include "Streaming/StreamableRenderResourceState.h"
+#include "PerQualityLevelProperties.h"
 #include "StreamableRenderAsset.generated.h"
 
 #define STREAMABLERENDERASSET_NODEFAULT(FuncName) LowLevelFatalError(TEXT("UStreamableRenderAsset::%s has no default implementation"), TEXT(#FuncName))
  // Allows yield to lower priority threads
 #define RENDER_ASSET_STREAMING_SLEEP_DT (0.010f)
+
+namespace Nanite
+{
+	class FCoarseMeshStreamingManager;
+}
 
 enum class EStreamableRenderAssetType : uint8
 {
@@ -23,7 +31,8 @@ enum class EStreamableRenderAssetType : uint8
 	Texture,
 	StaticMesh,
 	SkeletalMesh,
-	LandscapeMeshMobile,
+	LandscapeMeshMobile UE_DEPRECATED(5.1, "LandscapeMeshMobile is now deprecated and will be removed."),
+	NaniteCoarseMesh,
 };
 
 UCLASS(Abstract, MinimalAPI)
@@ -32,6 +41,10 @@ class UStreamableRenderAsset : public UObject
 	GENERATED_UCLASS_BODY()
 
 public:
+
+	/** Destructor */
+	ENGINE_API virtual ~UStreamableRenderAsset();
+
 	/** Get an integer representation of the LOD group */
 	virtual int32 GetLODGroupForStreaming() const
 	{
@@ -126,6 +139,17 @@ public:
 	ENGINE_API void RegisterMipLevelChangeCallback(UPrimitiveComponent* Component, int32 LODIdx, float TimeoutSecs, bool bOnStreamIn, FLODStreamingCallback&& Callback);
 
 	/**
+	* Register a set of callbacks to get notified when new mips/LODs start streaming in and when streaming is complete.
+	* If the target mips/LODs are already streamed in, CallbackStreamingDone is called immediately and CallbackStreamingStart is not called.
+	* @param Component The context component
+	* @param TimeoutStartSecs Timeout in seconds for streaming to start
+	* @param CallbackStreamingStart The callback to call when the streamer begins changing LOD/mip target. This callback will not be called if the asset is not streamable, or is already streamed in
+	* @param TimeoutDoneSecs Timeout in seconds for streaming to be done
+	* @param CallbackStreamingDone The callback to call when the desired mip/LOD level has been streamed in or when the timeout period has elapsed. This callback will not be called if the start timeout has expired.
+	*/
+	ENGINE_API void RegisterMipLevelChangeCallback(UPrimitiveComponent* Component, float TimeoutStartSecs, FLODStreamingCallback&& CallbackStreamingStart, float TimeoutDoneSecs, FLODStreamingCallback&& CallbackStreamingDone);
+
+	/**
 	* Remove mip level change callbacks registered by a component.
 	* @param Component The context component
 	*/
@@ -147,15 +171,17 @@ public:
 	* @param Seconds					Duration in seconds
 	* @param CinematicTextureGroups	Bitfield indicating which texture groups that use extra high-resolution mips
 	*/
+	UFUNCTION(BlueprintCallable, Category = "Rendering")
 	ENGINE_API void SetForceMipLevelsToBeResident(float Seconds, int32 CinematicLODGroupMask = 0);
 
 	/**
-	* Returns the cached combined LOD bias based on texture LOD group and LOD bias.
+	* Returns the combined LOD bias based on texture LOD group and LOD bias.
+	* Function name is legacy and incorrect, it is no longer cached
 	* @return	LOD bias
 	*/
-	ENGINE_API int32 GetCachedLODBias() const 
+	virtual int32 GetCachedLODBias() const 
 	{ 
-		return CachedCombinedLODBias; 
+		return 0; 
 	}
 
 	/** Return the streaming state of the render resources. Mirrors the state and lowers cache misses. Cleared if there are no resources. */
@@ -193,6 +219,18 @@ public:
 	ENGINE_API virtual void BeginDestroy() override;
 	ENGINE_API virtual bool IsReadyForFinishDestroy() override;
 
+	const FPerQualityLevelInt& GetNoRefStreamingLODBias() const
+	{
+		return NoRefStreamingLODBias;
+	}
+
+	void SetNoRefStreamingLODBias(FPerQualityLevelInt NewValue)
+	{
+		NoRefStreamingLODBias = MoveTemp(NewValue);
+	}
+
+	ENGINE_API int32 GetCurrentNoRefStreamingLODBias() const;
+
 protected:
 	
 	// Also returns false if the render resource is non existent, to prevent stalling on an event that will never complete.
@@ -203,17 +241,34 @@ protected:
 	struct FLODStreamingCallbackPayload
 	{
 		UPrimitiveComponent* Component;
-		double Deadline;
+		double DeadlineStart;
+		double DeadlineDone;
 		int32 ExpectedResidentMips;
 		bool bOnStreamIn;
-		FLODStreamingCallback Callback;
+		bool bIsExpectedResidentMipPayload;
+		FLODStreamingCallback CallbackStart;
+		FLODStreamingCallback CallbackDone;
 
-		FLODStreamingCallbackPayload(UPrimitiveComponent* InComponent, double InDeadline, int32 InExpectedResidentMips, bool bInOnStreamIn, FLODStreamingCallback&& InCallback)
+		FLODStreamingCallbackPayload(UPrimitiveComponent* InComponent, double InDeadlineDone, int32 ExpectedResidentMips, bool bInOnStreamIn, FLODStreamingCallback&& InCallbackStreamingDone)
 			: Component(InComponent)
-			, Deadline(InDeadline)
-			, ExpectedResidentMips(InExpectedResidentMips)
+			, DeadlineStart(InDeadlineDone)
+			, DeadlineDone(InDeadlineDone)
+			, ExpectedResidentMips(ExpectedResidentMips)
 			, bOnStreamIn(bInOnStreamIn)
-			, Callback(MoveTemp(InCallback))
+			, bIsExpectedResidentMipPayload(true)
+			, CallbackStart()
+			, CallbackDone(MoveTemp(InCallbackStreamingDone))
+		{}
+
+		FLODStreamingCallbackPayload(UPrimitiveComponent* InComponent, double InDeadlineStart, FLODStreamingCallback&& InCallbackStreamingStart, double InDeadlineDone, FLODStreamingCallback&& InCallbackStreamingDone)
+			: Component(InComponent)
+			, DeadlineStart(InDeadlineStart)
+			, DeadlineDone(InDeadlineDone)
+			, ExpectedResidentMips()
+			, bOnStreamIn()
+			, bIsExpectedResidentMipPayload(false)
+			, CallbackStart(MoveTemp(InCallbackStreamingStart))
+			, CallbackDone(MoveTemp(InCallbackStreamingDone))
 		{}
 	};
 
@@ -232,13 +287,12 @@ public:
 	int32 NumCinematicMipLevels;
 
 protected:
+	UPROPERTY()
+	FPerQualityLevelInt NoRefStreamingLODBias;
+
 	/** FStreamingRenderAsset index used by the texture streaming system. */
 	UPROPERTY(transient, duplicatetransient, NonTransactional)
 	int32 StreamingIndex = INDEX_NONE;
-
-	/** Cached combined group and texture LOD bias to use.	*/
-	UPROPERTY(transient)
-	int32 CachedCombinedLODBias;
 
 public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = LevelOfDetail, AssetRegistrySearchable, AdvancedDisplay)
@@ -270,4 +324,5 @@ protected:
 
 	friend struct FRenderAssetStreamingManager;
 	friend struct FStreamingRenderAsset;
+	friend class Nanite::FCoarseMeshStreamingManager;
 };

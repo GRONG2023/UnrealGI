@@ -2,13 +2,14 @@
 
 #include "AssetTypeActions/AssetTypeActions_ForceFeedbackEffect.h"
 #include "ToolMenus.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "GenericPlatform/IInputInterface.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Images/SImage.h"
+#include "GenericPlatform/GenericPlatformInputDeviceMapper.h"
 
 #define LOCTEXT_NAMESPACE "AssetTypeActions"
 
@@ -25,7 +26,7 @@ void FAssetTypeActions_ForceFeedbackEffect::GetActions(const TArray<UObject*>& I
 		"ForceFeedbackEffect_PlayEffect",
 		LOCTEXT("ForceFeedbackEffect_PlayEffect", "Play"),
 		LOCTEXT("ForceFeedbackEffect_PlayEffectTooltip", "Plays the selected force feedback effect."),
-		FSlateIcon(FEditorStyle::GetStyleSetName(), "MediaAsset.AssetActions.Play.Small"),
+		FSlateIcon(FAppStyle::GetAppStyleSetName(), "MediaAsset.AssetActions.Play.Small"),
 		FUIAction(
 			FExecuteAction::CreateSP( this, &FAssetTypeActions_ForceFeedbackEffect::ExecutePlayEffect, Effects ),
 			FCanExecuteAction::CreateSP( this, &FAssetTypeActions_ForceFeedbackEffect::CanExecutePlayCommand, Effects )
@@ -36,7 +37,7 @@ void FAssetTypeActions_ForceFeedbackEffect::GetActions(const TArray<UObject*>& I
 		"ForceFeedbackEffect_StopEffect",
 		LOCTEXT("ForceFeedbackEffect_StopEffect", "Stop"),
 		LOCTEXT("ForceFeedbackEffect_StopEffectTooltip", "Stops the selected force feedback effect."),
-		FSlateIcon(FEditorStyle::GetStyleSetName(), "MediaAsset.AssetActions.Stop.Small"),
+		FSlateIcon(FAppStyle::GetAppStyleSetName(), "MediaAsset.AssetActions.Stop.Small"),
 		FUIAction(
 			FExecuteAction::CreateSP( this, &FAssetTypeActions_ForceFeedbackEffect::ExecuteStopEffect, Effects ),
 			FCanExecuteAction()
@@ -140,6 +141,8 @@ void FAssetTypeActions_ForceFeedbackEffect::PlayEffect(UForceFeedbackEffect* Eff
 	{
 		PreviewForceFeedbackEffect.ForceFeedbackEffect = Effect;
 		PreviewForceFeedbackEffect.PlayTime = 0.f;
+		PreviewForceFeedbackEffect.PlatformUser = IPlatformInputDeviceMapper::Get().GetPrimaryPlatformUser();
+		PreviewForceFeedbackEffect.ActivateDeviceProperties();
 	}
 	else
 	{
@@ -149,6 +152,7 @@ void FAssetTypeActions_ForceFeedbackEffect::PlayEffect(UForceFeedbackEffect* Eff
 
 void FAssetTypeActions_ForceFeedbackEffect::StopEffect() 
 {
+	PreviewForceFeedbackEffect.ResetDeviceProperties();
 	PreviewForceFeedbackEffect.ForceFeedbackEffect = nullptr;
 
 	IInputInterface* InputInterface = FSlateApplication::Get().GetInputInterface();
@@ -164,10 +168,10 @@ TSharedPtr<SWidget> FAssetTypeActions_ForceFeedbackEffect::GetThumbnailOverlay(c
 	{
 		if (IsEffectPlaying(AssetData))
 		{
-			return FEditorStyle::GetBrush("MediaAsset.AssetActions.Stop.Large");
+			return FAppStyle::GetBrush("MediaAsset.AssetActions.Stop.Large");
 		}
 
-		return FEditorStyle::GetBrush("MediaAsset.AssetActions.Play.Large");
+		return FAppStyle::GetBrush("MediaAsset.AssetActions.Play.Large");
 	};
 
 	FAssetTypeActions_ForceFeedbackEffect* MutableThis = const_cast<FAssetTypeActions_ForceFeedbackEffect*>(this);
@@ -211,7 +215,7 @@ TSharedPtr<SWidget> FAssetTypeActions_ForceFeedbackEffect::GetThumbnailOverlay(c
 	};
 
 	TSharedRef<SButton> BoxContent = SNew(SButton)
-		.ButtonStyle(FEditorStyle::Get(), "HoverHintOnly")
+		.ButtonStyle(FAppStyle::Get(), "HoverHintOnly")
 		.ToolTipText_Lambda(OnToolTipTextLambda)
 		.Cursor(EMouseCursor::Default) // The outer widget can specify a DragHand cursor, so we need to override that here
 		.ForegroundColor(FSlateColor::UseForeground())
@@ -220,8 +224,8 @@ TSharedPtr<SWidget> FAssetTypeActions_ForceFeedbackEffect::GetThumbnailOverlay(c
 		.Visibility_Lambda(OnGetVisibilityLambda)
 		[
 			SNew(SBox)
-			.MinDesiredWidth(16)
-			.MinDesiredHeight(16)
+			.MinDesiredWidth(16.f)
+			.MinDesiredHeight(16.f)
 			[
 				SNew(SImage)
 				.Image_Lambda(OnGetDisplayBrushLambda)
@@ -245,6 +249,7 @@ void FPreviewForceFeedbackEffect::Tick( float DeltaTime )
 
 	if (!Update(DeltaTime, ForceFeedbackValues))
 	{
+		ResetDeviceProperties();
 		ForceFeedbackEffect = nullptr;
 	}
 

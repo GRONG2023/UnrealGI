@@ -1,26 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "CoreMinimal.h"
-#include "Misc/Paths.h"
-#include "Misc/CommandLine.h"
-#include "Stats/Stats.h"
-#include "HAL/IConsoleManager.h"
-#include "UObject/UObjectGlobals.h"
-#include "Async/TaskGraphInterfaces.h"
-#include "EngineDefines.h"
 #include "Engine/World.h"
-#include "Physics/PhysicsInterfaceCore.h"
-#include "IPhysXCookingModule.h"
-#include "IPhysXCooking.h"
-#include "Modules/ModuleManager.h"
+#include "Physics/Experimental/PhysInterface_Chaos.h"
 #include "PhysicsInitialization.h"
+#include "Physics/Experimental/PhysScene_Chaos.h"
 #include "PhysicsEngine/PhysicsSettings.h"
 
 #include "ChaosSolversModule.h"
-
-#if PHYSICS_INTERFACE_PHYSX
-	#include "PhysicsEngine/PhysXSupport.h"
-#endif
 
 #include "PhysicsEngine/PhysicsSettings.h"
 #include "Misc/CoreDelegates.h"
@@ -52,10 +38,27 @@ public:
 	{
 
 	}
+
 	virtual float GetMinDeltaVelocityForHitEvents() const override
 	{
 		return GetSettings()->MinDeltaVelocityForHitEvents;
 	}
+
+	virtual bool GetPhysicsPredictionEnabled() const override
+	{
+		return GetSettings()->PhysicsPrediction.bEnablePhysicsPrediction;
+	}
+
+	virtual float GetResimulationErrorThreshold() const override
+	{
+		return GetSettings()->PhysicsPrediction.ResimulationErrorThreshold;
+	}
+
+	virtual int32 GetPhysicsHistoryCount() const override
+	{
+		return GetSettings()->GetPhysicsHistoryCount();
+	}
+
 private:
 
 	const UPhysicsSettings* GetSettings() const
@@ -94,7 +97,7 @@ void UWorld::SetupPhysicsTickFunctions(float DeltaSeconds)
 	EndPhysicsTickFunction.Target = this;
 
 // Chaos ticks solver for trace collisions
-#if (WITH_CHAOS && WITH_EDITOR)
+#if (WITH_EDITOR)
 	bool bEnablePhysics = (bShouldSimulatePhysics || bEnableTraceCollision);
 #else
 	bool bEnablePhysics = bShouldSimulatePhysics;
@@ -143,7 +146,7 @@ void UWorld::SetupPhysicsTickFunctions(float DeltaSeconds)
 	FVector DefaultGravity( 0.f, 0.f, GetGravityZ() );
 
 	static const auto CVar_MaxPhysicsDeltaTime = IConsoleManager::Get().FindTConsoleVariableDataFloat(TEXT("p.MaxPhysicsDeltaTime"));
-	PhysScene->SetUpForFrame(&DefaultGravity, DeltaSeconds, UPhysicsSettings::Get()->MaxPhysicsDeltaTime,
+	PhysScene->SetUpForFrame(&DefaultGravity, DeltaSeconds, UPhysicsSettings::Get()->MinPhysicsDeltaTime, UPhysicsSettings::Get()->MaxPhysicsDeltaTime,
 		UPhysicsSettings::Get()->MaxSubstepDeltaTime, UPhysicsSettings::Get()->MaxSubsteps, UPhysicsSettings::Get()->bSubstepping);
 }
 
@@ -166,11 +169,7 @@ void UWorld::FinishPhysicsSim()
 		return;
 	}
 
-#if WITH_CHAOS
 	PhysScene->EndFrame();
-#else
-	PhysScene->EndFrame(LineBatcher);
-#endif
 }
 
 // the physics tick functions
@@ -225,17 +224,6 @@ void FEndPhysicsTickFunction::ExecuteTick(float DeltaTime, enum ELevelTick TickT
 		// it was already done, so let just do it.
 		Target->FinishPhysicsSim();
 	}
-
-#if PHYSICS_INTERFACE_PHYSX
-#if PHYSX_MEMORY_VALIDATION
-	static int32 Frequency = 0;
-	if (Frequency++ > 10)
-	{
-		Frequency = 0;
-		GPhysXAllocator->ValidateHeaders();
-	}
-#endif
-#endif // WITH_PHYSX 
 }
 
 FString FEndPhysicsTickFunction::DiagnosticMessage()
@@ -302,15 +290,6 @@ void TermGamePhys()
 		GPostInitHandle.Reset();
 	}
 
-#if PHYSICS_INTERFACE_PHYSX
-	// Do nothing if they were never initialized
-	if(GPhysXFoundation == NULL)
-	{
-		FPhysxSharedData::Terminate();	//early out before TermGamePhysCore so kill this - not sure if this is a real case we even care about
-		return;
-	}
-#endif
-
 	if (GPhysCommandHandler != NULL)
 	{
 		GPhysCommandHandler->Flush();	//finish off any remaining commands
@@ -328,118 +307,5 @@ void TermGamePhys()
 */
 void DeferredPhysResourceCleanup()
 {
-#if PHYSICS_INTERFACE_PHYSX
-
-	// Release all tri meshes and reset array
-	for(int32 MeshIdx=0; MeshIdx<GPhysXPendingKillTriMesh.Num(); MeshIdx++)
-	{
-		PxTriangleMesh* PTriMesh = GPhysXPendingKillTriMesh[MeshIdx];
-
-		// Check this as it shouldn't be null, but then gate on it so we can
-		// avoid a crash if we end up in this state in shipping
-		check(PTriMesh);
-		if(PTriMesh)
-		{
-			PTriMesh->release();
-
-			if(GPhysXPendingKillTriMesh.IsValidIndex(MeshIdx))
-			{
-				GPhysXPendingKillTriMesh[MeshIdx] = NULL;
-			}
-			else
-			{
-				UE_LOG(LogPhysics, Warning, TEXT("DeferredPhysResourceCleanup found invalid index into GPhysXPendingKillTriMesh, another thread may have modified the array."), MeshIdx);
-			}
-		}
-		else
-		{
-			UE_LOG(LogPhysics, Warning, TEXT("DeferredPhysResourceCleanup found null PxTriangleMesh in pending kill array, another thread may have modified the array."), MeshIdx);
-		}
-	}
-	GPhysXPendingKillTriMesh.Reset();
-
-	// Release all convex meshes and reset array
-	for(int32 MeshIdx=0; MeshIdx<GPhysXPendingKillConvex.Num(); MeshIdx++)
-	{
-		PxConvexMesh* PConvexMesh = GPhysXPendingKillConvex[MeshIdx];
-
-		// Check this as it shouldn't be null, but then gate on it so we can
-		// avoid a crash if we end up in this state in shipping
-		check(PConvexMesh);
-		if(PConvexMesh)
-		{
-			PConvexMesh->release();
-
-			if(GPhysXPendingKillConvex.IsValidIndex(MeshIdx))
-			{
-				GPhysXPendingKillConvex[MeshIdx] = NULL;
-			}
-			else
-			{
-				UE_LOG(LogPhysics, Warning, TEXT("DeferredPhysResourceCleanup found invalid index into GPhysXPendingKillConvex (%d), another thread may have modified the array."), MeshIdx);
-			}
-		}
-		else
-		{
-			UE_LOG(LogPhysics, Warning, TEXT("DeferredPhysResourceCleanup found null PxConvexMesh in pending kill array (at %d), another thread may have modified the array."), MeshIdx);
-		}
-	}
-	GPhysXPendingKillConvex.Reset();
-
-	// Release all heightfields and reset array
-	for(int32 HfIdx=0; HfIdx<GPhysXPendingKillHeightfield.Num(); HfIdx++)
-	{
-		PxHeightField* PHeightfield = GPhysXPendingKillHeightfield[HfIdx];
-
-		// Check this as it shouldn't be null, but then gate on it so we can
-		// avoid a crash if we end up in this state in shipping
-		check(PHeightfield);
-		if(PHeightfield)
-		{
-			PHeightfield->release();
-
-			if(GPhysXPendingKillHeightfield.IsValidIndex(HfIdx))
-			{
-				GPhysXPendingKillHeightfield[HfIdx] = NULL;
-			}
-			else
-			{
-				UE_LOG(LogPhysics, Warning, TEXT("DeferredPhysResourceCleanup found invalid index into GPhysXPendingKillHeightfield (%d), another thread may have modified the array."), HfIdx);
-			}
-		}
-		else
-		{
-			UE_LOG(LogPhysics, Warning, TEXT("DeferredPhysResourceCleanup found null PxHeightField in pending kill array (at %d), another thread may have modified the array."), HfIdx);
-		}
-	}
-	GPhysXPendingKillHeightfield.Reset();
-
-	// Release all materials and reset array
-	for(int32 MeshIdx=0; MeshIdx<GPhysXPendingKillMaterial.Num(); MeshIdx++)
-	{
-		PxMaterial* PMaterial = GPhysXPendingKillMaterial[MeshIdx];
-
-		// Check this as it shouldn't be null, but then gate on it so we can
-		// avoid a crash if we end up in this state in shipping
-		check(PMaterial);
-		if(PMaterial)
-		{
-			PMaterial->release();
-			if(GPhysXPendingKillMaterial.IsValidIndex(MeshIdx))
-			{
-				GPhysXPendingKillMaterial[MeshIdx] = NULL;
-			}
-			else
-			{
-				UE_LOG(LogPhysics, Warning, TEXT("DeferredPhysResourceCleanup found invalid index into GPhysXPendingKillMaterial(%d), another thread may have modified the array."), MeshIdx);
-			}
-		}
-		else
-		{
-			UE_LOG(LogPhysics, Warning, TEXT("DeferredPhysResourceCleanup found null PxMaterial in pending kill array (at %d), another thread may have modified the array."), MeshIdx);
-		}
-	}
-	GPhysXPendingKillMaterial.Reset();
-#endif
 }
 

@@ -8,7 +8,11 @@
 #include "ToolMenus.h"
 #include "MaterialGraph/MaterialGraphSchema.h"
 #include "Materials/MaterialExpressionComment.h"
+#include "Materials/MaterialFunction.h"
 #include "Framework/Commands/GenericCommands.h"
+#include "GraphEditorActions.h"
+
+#define LOCTEXT_NAMESPACE "MaterialGraphNode_Comment"
 
 /////////////////////////////////////////////////////
 // UMaterialGraphNode_Comment
@@ -79,6 +83,36 @@ void UMaterialGraphNode_Comment::GetNodeContextMenuActions(UToolMenu* Menu, UGra
 			Section.AddMenuEntry(FGenericCommands::Get().Copy);
 			Section.AddMenuEntry(FGenericCommands::Get().Duplicate);
 		}
+		
+		{
+			FToolMenuSection& Section = Menu->AddSection("EdGraphSchemaOrganization", LOCTEXT("OrganizationHeader", "Organization"));
+			Section.AddMenuEntry(FGraphEditorCommands::Get().CollapseNodes);
+			Section.AddMenuEntry(FGraphEditorCommands::Get().ExpandNodes);
+
+			Section.AddSubMenu(
+				"Alignment",
+				LOCTEXT("AlignmentHeader", "Alignment"),
+				FText(),
+				FNewToolMenuDelegate::CreateLambda([](UToolMenu* InMenu)
+				{
+					{
+						FToolMenuSection& SubMenuSection = InMenu->AddSection("EdGraphSchemaAlignment", LOCTEXT("AlignHeader", "Align"));
+						SubMenuSection.AddMenuEntry(FGraphEditorCommands::Get().AlignNodesTop);
+						SubMenuSection.AddMenuEntry(FGraphEditorCommands::Get().AlignNodesMiddle);
+						SubMenuSection.AddMenuEntry(FGraphEditorCommands::Get().AlignNodesBottom);
+						SubMenuSection.AddMenuEntry(FGraphEditorCommands::Get().AlignNodesLeft);
+						SubMenuSection.AddMenuEntry(FGraphEditorCommands::Get().AlignNodesCenter);
+						SubMenuSection.AddMenuEntry(FGraphEditorCommands::Get().AlignNodesRight);
+						SubMenuSection.AddMenuEntry(FGraphEditorCommands::Get().StraightenConnections);
+					}
+
+					{
+						FToolMenuSection& SubMenuSection = InMenu->AddSection("EdGraphSchemaDistribution", LOCTEXT("DistributionHeader", "Distribution"));
+						SubMenuSection.AddMenuEntry(FGraphEditorCommands::Get().DistributeNodesHorizontally);
+						SubMenuSection.AddMenuEntry(FGraphEditorCommands::Get().DistributeNodesVertically);
+					}
+				}));
+		}
 	}
 }
 
@@ -100,6 +134,11 @@ void UMaterialGraphNode_Comment::PostPlacedNewNode()
 		NodeWidth = MaterialExpressionComment->SizeX;
 		NodeHeight = MaterialExpressionComment->SizeY;
 		CommentColor = MaterialExpressionComment->CommentColor;
+		bCommentBubbleVisible_InDetailsPanel = MaterialExpressionComment->bCommentBubbleVisible_InDetailsPanel;
+		bCommentBubbleVisible = MaterialExpressionComment->bCommentBubbleVisible_InDetailsPanel;
+		bCommentBubblePinned = MaterialExpressionComment->bCommentBubbleVisible_InDetailsPanel;
+		MoveMode = MaterialExpressionComment->bGroupMode ? ECommentBoxMode::GroupMovement : ECommentBoxMode::NoGroupMovement;
+		bColorCommentBubble = MaterialExpressionComment->bColorCommentBubble;
 	}
 }
 
@@ -131,6 +170,15 @@ void UMaterialGraphNode_Comment::ResizeNode(const FVector2D& NewSize)
 	MaterialDirtyDelegate.ExecuteIfBound();
 }
 
+int32 UMaterialGraphNode_Comment::GetFontSize() const
+{
+	if (MaterialExpressionComment)
+	{
+		return MaterialExpressionComment->FontSize;
+	}
+	return Super::GetFontSize();
+}
+
 void UMaterialGraphNode_Comment::ResetMaterialExpressionOwner()
 {
 	if (MaterialExpressionComment)
@@ -148,3 +196,6 @@ void UMaterialGraphNode_Comment::ResetMaterialExpressionOwner()
 		MaterialExpressionComment->GraphNode = this;
 	}
 }
+
+
+#undef LOCTEXT_NAMESPACE

@@ -3,11 +3,7 @@
 #include "UnrealFrontendMain.h"
 #include "RequiredProgramMainCPPInclude.h"
 
-#include "DeployCommand.h"
-#include "LaunchCommand.h"
-#include "PackageCommand.h"
 #include "StatsConvertCommand.h"
-#include "StatsDumpMemoryCommand.h"
 #include "UserInterfaceCommand.h"
 #include "LaunchFromProfileCommand.h"
 
@@ -20,6 +16,8 @@ IMPLEMENT_APPLICATION(UnrealFrontend, "UnrealFrontend");
  */
 int32 UnrealFrontendMain( const TCHAR* CommandLine )
 {
+	FTaskTagScope TaskTagScope(ETaskTag::EGameThread);
+
 	// Override the stack size for the thread pool.
 	FQueuedThreadPool::OverrideStackSize = 256 * 1024;
 
@@ -73,25 +71,9 @@ int32 UnrealFrontendMain( const TCHAR* CommandLine )
 	// NOTE - Some commands may require extra command line parameters.
 	if (bRunCommand)
 	{
-		if (Command.Equals(TEXT("PACKAGE"), ESearchCase::IgnoreCase))
-		{
-			FPackageCommand::Run();
-		}
-		else if (Command.Equals(TEXT("DEPLOY"), ESearchCase::IgnoreCase))
-		{
-			Succeeded = FDeployCommand::Run();
-		}
-		else if (Command.Equals(TEXT("LAUNCH"), ESearchCase::IgnoreCase))
-		{
-			Succeeded = FLaunchCommand::Run(Params);
-		}
-		else if (Command.Equals(TEXT("CONVERT"), ESearchCase::IgnoreCase))
+		if (Command.Equals(TEXT("CONVERT"), ESearchCase::IgnoreCase))
 		{
 			FStatsConvertCommand::Run();
-		}
-		else if( Command.Equals( TEXT("MEMORYDUMP"), ESearchCase::IgnoreCase ) )
-		{
-			FStatsMemoryDumpCommand::Run();
 		}
 		// The 'LAUNCHPROFILE' command also needs '-PROFILENAME="MY_PROFILE_NAME"' as a command line parameter.
 		else if (Command.Equals(TEXT("LAUNCHPROFILE"), ESearchCase::IgnoreCase))
@@ -108,12 +90,6 @@ int32 UnrealFrontendMain( const TCHAR* CommandLine )
 	// shut down
 	FEngineLoop::AppPreExit();
 	FModuleManager::Get().UnloadModulesAtShutdown();
-
-#if STATS
-	FThreadStats::StopThread();
-#endif
-
-	FTaskGraphInterface::Shutdown();
 
 	return Succeeded ? 0 : -1;
 }

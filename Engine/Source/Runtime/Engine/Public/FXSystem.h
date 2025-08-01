@@ -10,15 +10,20 @@
 #include "HAL/IConsoleManager.h"
 #include "RenderUtils.h"
 #include "RenderGraphDefinitions.h"
+#include "SceneView.h"
 
 class FCanvas;
-class FGPUSpriteResources;
-class UVectorFieldComponent;
+class FGPUSortManager;
 struct FGPUSpriteEmitterInfo;
 struct FGPUSpriteResourceData;
+class FGPUSpriteResources;
 struct FParticleEmitterInstance;
-class FGPUSortManager;
-
+class FRHIUniformBuffer;
+class FScene;
+class FSceneInterface;
+class UVectorFieldComponent;
+class FGlobalDistanceFieldParameterData;
+class FSceneUniformBuffer;
 /*-----------------------------------------------------------------------------
 	Forward declarations.
 -----------------------------------------------------------------------------*/
@@ -58,7 +63,7 @@ namespace FXConsoleVariables
 	/** Visualize GPU particle simulation. */
 	extern int32 VisualizeGPUSimulation;
 	/** true if GPU emitters are permitted to sort. */
-	extern int32 bAllowGPUSorting;
+	ENGINE_API extern int32 bAllowGPUSorting;
 	/** true if emitters can be culled. */
 	extern int32 bAllowCulling;
 	/** true if GPU particle simulation is frozen. */
@@ -90,7 +95,7 @@ namespace FXConsoleVariables
  */
 inline bool SupportsGPUParticles(EShaderPlatform Platform)
 {
-	return IsFeatureLevelSupported(Platform, ERHIFeatureLevel::ES3_1) || IsPCPlatform(Platform); // For editor mobile preview 
+	return true; // For editor mobile preview 
 }
 
 /*
@@ -104,8 +109,7 @@ inline bool RHISupportsGPUParticles()
 	return FXConsoleVariables::bAllowGPUParticles
 		&& GSupportsWideMRT
 		&& GPixelFormats[PF_G32R32F].Supported 
-		&& GSupportsTexture3D 
-		&& GSupportsResourceView;
+		&& GSupportsTexture3D;
 }
 
 class FFXSystemInterface;
@@ -126,7 +130,7 @@ public:
 	/**
 	 * Create an effects system instance.
 	 */
-	ENGINE_API static FFXSystemInterface* Create(ERHIFeatureLevel::Type InFeatureLevel, EShaderPlatform InShaderPlatform);
+	ENGINE_API static FFXSystemInterface* Create(ERHIFeatureLevel::Type InFeatureLevel, FSceneInterface* Scene);
 
 	/**
 	 * Destroy an effects system instance.
@@ -156,19 +160,19 @@ public:
 	/**
 	 * Gamethread callback when destroy gets called, allows to clean up references.
 	 */
-	ENGINE_API virtual void OnDestroy() { bIsPendingKill = true; }
+	virtual void OnDestroy() { bIsPendingKill = true; }
 
 	/**
 	 * Gamethread callback when destroy gets called, allows to clean up references.
 	 */
-	ENGINE_API virtual void DestroyGPUSimulation() { }
+	virtual void DestroyGPUSimulation() { }
 
 
 	/**
 	 * Tick the effects system.
 	 * @param DeltaSeconds The number of seconds by which to step simulations forward.
 	 */
-	virtual void Tick(float DeltaSeconds) = 0;
+	virtual void Tick(UWorld* World, float DeltaSeconds) = 0;
 
 #if WITH_EDITOR
 	/**
@@ -203,12 +207,18 @@ public:
 	 * @param View The view we are rendering for
 	 * @param Output The output buffer information
 	 */
-	virtual void DrawDebug_RenderThread(class FRDGBuilder& GraphBuilder, const class FViewInfo& View, const struct FScreenPassRenderTarget& Output) {}
+	virtual void DrawDebug_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, const struct FScreenPassRenderTarget& Output) {}
+	
+	UE_DEPRECATED(5.3, "Passing FViewInfo is deprecated in favor of FSceneView. This function will do nothing.")
+	inline void DrawDebug_RenderThread(FRDGBuilder& GraphBuilder, const FViewInfo& View, const struct FScreenPassRenderTarget& Output) {}
 
 	/**
 	 * Call to handle debug drawing to the scene (i.e. where depth is available)
 	 */
-	virtual void DrawSceneDebug_RenderThread(class FRDGBuilder& GraphBuilder, const class FViewInfo& View, FRDGTextureRef SceneColor, FRDGTextureRef SceneDepth) {}
+	virtual void DrawSceneDebug_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, FRDGTextureRef SceneColor, FRDGTextureRef SceneDepth) {}
+
+	UE_DEPRECATED(5.3, "Passing FViewInfo is deprecated in favor of FSceneView. This function will do nothing.")
+	inline void DrawSceneDebug_RenderThread(FRDGBuilder& GraphBuilder, const FViewInfo& View, FRDGTextureRef SceneColor, FRDGTextureRef SceneDepth) {}
 
 	/**
 	 * Add a vector field to the FX system.
@@ -232,9 +242,12 @@ public:
 	 * Notification from the renderer that it is about to perform visibility
 	 * checks on FX belonging to this system.
 	 */
-	virtual void PreInitViews(FRHICommandListImmediate& RHICmdList, bool bAllowGPUParticleUpdate) = 0;
+	virtual void PreInitViews(FRDGBuilder& GraphBuilder, bool bAllowGPUParticleUpdate, const TArrayView<const FSceneViewFamily*>& ViewFamilies, const FSceneViewFamily* CurrentFamily) = 0;
 
-	virtual void PostInitViews(FRHICommandListImmediate& RHICmdList, FRHIUniformBuffer* ViewUniformBuffer, bool bAllowGPUParticleUpdate) = 0;
+	virtual void PostInitViews(FRDGBuilder& GraphBuilder, TConstStridedView<FSceneView> Views, bool bAllowGPUParticleUpdate) = 0;
+
+	UE_DEPRECATED(5.3, "Passing an array of FViewInfo is deprecated in favor of FSceneView. This function will do nothing.")
+	inline void PostInitViews(FRDGBuilder& GraphBuilder, TConstArrayView<FViewInfo> Views, bool bAllowGPUParticleUpdate) {}
 
 	virtual bool UsesGlobalDistanceField() const = 0;
 
@@ -242,37 +255,51 @@ public:
 
 	virtual bool RequiresEarlyViewUniformBuffer() const = 0;
 
+	virtual bool RequiresRayTracingScene() const = 0;
+
 	/**
 	 * Notification from the renderer that it is about to draw FX belonging to
 	 * this system.
 	 */
-	virtual void PreRender(FRHICommandListImmediate& RHICmdList, const class FGlobalDistanceFieldParameterData* GlobalDistanceFieldParameterData, bool bAllowGPUParticleSceneUpdate) = 0;
+	virtual void PreRender(FRDGBuilder& GraphBuilder, TConstStridedView<FSceneView> Views, FSceneUniformBuffer &SceneUniformBuffer, bool bAllowGPUParticleUpdate) = 0;
+
+	UE_DEPRECATED(5.3, "Passing an array of FViewInfo is deprecated in favor of FSceneView. This function will do nothing.")
+	inline void PreRender(FRDGBuilder& GraphBuilder, TConstArrayView<FViewInfo> Views, bool bAllowGPUParticleUpdate) {}
 
 	/**
 	 * Notification from the renderer that opaque primitives have rendered.
 	 */
-	virtual void PostRenderOpaque(
-		FRHICommandListImmediate& RHICmdList, 
-		FRHIUniformBuffer* ViewUniformBuffer,
-		const class FShaderParametersMetadata* SceneTexturesUniformBufferStruct,
-		FRHIUniformBuffer* SceneTexturesUniformBuffer,
-		bool bAllowGPUParticleUpdate) = 0;
+	virtual void PostRenderOpaque(FRDGBuilder& GraphBuilder, TConstStridedView<FSceneView> Views, FSceneUniformBuffer &SceneUniformBuffer, bool bAllowGPUParticleUpdate) = 0;
+
+	UE_DEPRECATED(5.3, "Passing an array of FViewInfo is deprecated in favor of FSceneView. This function will do nothing.")
+	inline void PostRenderOpaque(FRDGBuilder& GraphBuilder, TConstArrayView<FViewInfo> Views, bool bAllowGPUParticleUpdate) {}
 
 	bool IsPendingKill() const { return bIsPendingKill; }
 
 	/** Get the shared SortManager, used in the rendering loop to call FGPUSortManager::OnPreRender() and FGPUSortManager::OnPostRenderOpaque() */
 	virtual FGPUSortManager* GetGPUSortManager() const = 0;
 
+	virtual void SetSceneTexturesUniformBuffer(const TUniformBufferRef<FSceneTextureUniformParameters>& InSceneTexturesUniformParams) {}
+
+	FORCEINLINE FSceneInterface* GetSceneInterface() const { return SceneInterface; }
+	FORCEINLINE void SetSceneInterface(FSceneInterface* InSceneInterface) { SceneInterface = InSceneInterface; }
+
+	FORCEINLINE FScene* GetScene()const { return Scene; }
+	FORCEINLINE void SetScene(FScene* InScene) { Scene = InScene; }
+
 protected:
 	
 	friend class FFXSystemSet;
 
 	/** By making the destructor protected, an instance must be destroyed via FFXSystemInterface::Destroy. */
-	ENGINE_API virtual ~FFXSystemInterface() {}
+	virtual ~FFXSystemInterface() {}
 
 private:
 
 	bool bIsPendingKill = false;
+
+	FSceneInterface* SceneInterface = nullptr;
+	FScene* Scene = nullptr;
 
 	static TMap<FName, FCreateCustomFXSystemDelegate> CreateCustomFXDelegates;
 };

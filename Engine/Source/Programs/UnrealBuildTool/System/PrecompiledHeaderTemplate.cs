@@ -1,11 +1,8 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
-using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using UnrealBuildBase;
 
 namespace UnrealBuildTool
 {
@@ -40,18 +37,25 @@ namespace UnrealBuildTool
 		public List<PrecompiledHeaderInstance> Instances = new List<PrecompiledHeaderInstance>();
 
 		/// <summary>
+		/// All the module dependencies this template has
+		/// </summary>
+		public HashSet<UEBuildModule> ModuleDependencies = new HashSet<UEBuildModule>();
+
+		/// <summary>
 		/// Constructor
 		/// </summary>
 		/// <param name="Module">The module with a valid shared PCH</param>
 		/// <param name="BaseCompileEnvironment">The compile environment to use</param>
 		/// <param name="HeaderFile">The header file to generate a PCH from</param>
 		/// <param name="OutputDir">Output directory for instances of this PCH</param>
-		public PrecompiledHeaderTemplate(UEBuildModuleCPP Module, CppCompileEnvironment BaseCompileEnvironment, FileItem HeaderFile, DirectoryReference OutputDir)
+		/// <param name="ModuleDependencies">All the module dependencies this template has</param>
+		public PrecompiledHeaderTemplate(UEBuildModuleCPP Module, CppCompileEnvironment BaseCompileEnvironment, FileItem HeaderFile, DirectoryReference OutputDir, HashSet<UEBuildModule> ModuleDependencies)
 		{
 			this.Module = Module;
 			this.BaseCompileEnvironment = BaseCompileEnvironment;
 			this.HeaderFile = HeaderFile;
 			this.OutputDir = OutputDir;
+			this.ModuleDependencies = ModuleDependencies;
 		}
 
 		/// <summary>
@@ -61,11 +65,11 @@ namespace UnrealBuildTool
 		/// <returns>True if the template is compatible with the given compile environment</returns>
 		public bool IsValidFor(CppCompileEnvironment CompileEnvironment)
 		{
-			if(CompileEnvironment.bIsBuildingDLL != BaseCompileEnvironment.bIsBuildingDLL)
+			if (CompileEnvironment.bIsBuildingDLL != BaseCompileEnvironment.bIsBuildingDLL)
 			{
 				return false;
 			}
-			if(CompileEnvironment.bIsBuildingLibrary != BaseCompileEnvironment.bIsBuildingLibrary)
+			if (CompileEnvironment.bIsBuildingLibrary != BaseCompileEnvironment.bIsBuildingLibrary)
 			{
 				return false;
 			}

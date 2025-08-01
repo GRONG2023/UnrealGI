@@ -2,16 +2,25 @@
 
 #pragma once
 
-#include "Misc/Optional.h"
-#include "UObject/NameTypes.h"
+#include "Evaluation/MovieSceneEvaluationTemplateInstance.h"
+#include "HAL/Platform.h"
 #include "Internationalization/Text.h"
 #include "Math/Color.h"
-#include "Templates/Function.h"
+#include "Misc/Optional.h"
 #include "MovieSceneCommonHelpers.h"
-#include "Evaluation/MovieSceneEvaluationTemplateInstance.h"
+#include "Templates/Function.h"
+#include "UObject/NameTypes.h"
+
+class FTrackInstancePropertyBindings;
+class UMovieSceneSection;
+class UObject;
+struct FFrameNumber;
+struct FFrameRate;
+struct FMovieSceneRootEvaluationTemplateInstance;
 
 #if WITH_EDITOR
 
+DECLARE_DELEGATE_RetVal_ThreeParams(FText, FGetMovieSceneTooltipText, IMovieScenePlayer*, FGuid, FMovieSceneSequenceID);
 /**
  * Editor meta data for a channel of data within a movie scene section
  */
@@ -41,6 +50,13 @@ struct FMovieSceneChannelMetaData
 	 */
 	MOVIESCENE_API void SetIdentifiers(FName InName, FText InDisplayText, FText InGroup = FText());
 
+	/*
+	 * Get property metadata that corresponds to the given key.
+	 * 
+	 * @param InKey The requested key to get metadata for
+	 */
+	MOVIESCENE_API FString GetPropertyMetaData(const FName& InKey) const;
+
 	/** Whether this channel is enabled or not */
 	uint8 bEnabled : 1;
 	/** True if this channel can be collapsed onto the top level track node */
@@ -49,12 +65,33 @@ struct FMovieSceneChannelMetaData
 	uint32 SortOrder;
 	/** This channel's unique name */
 	FName Name;
+	/**
+	 * Path representation of a sub property relative to the class property (i.e. topmost property) but NOT including the topmost property itself.
+	 * E.g. for FWidgetTransform, a sub-property path for the first channel would be "Translation.X"
+	 */
+	FName SubPropertyPath;
+	/**
+	 * Path representation of a sub-property relative to a class property (i.e. topmost property) but NOT including the topmost property itself.
+	 * This should be used when a Channel can be used by multiple struct sources and happen to have different property names for these.
+	 * The prime example of this is FTransform vs FEulerTransform. FTransform uses "Translation" vs FEulerTransform uses "Location"
+	 */
+	TMap<FName, FName> SubPropertyPathMap;
 	/** Text to display on this channel's key area node */
 	FText DisplayText;
+	/** Delegate to get a dynamic tooltip for the key area node */
+	FGetMovieSceneTooltipText GetTooltipTextDelegate;
 	/** Name to group this channel with others of the same group name */
 	FText Group;
+	/** Delegate to get a dynamic tooltip for the group */
+	FGetMovieSceneTooltipText GetGroupTooltipTextDelegate;
+	/** Intent name */
+	FText IntentName;
+	/* Optional. If unspecified IKeyArea::CreateCurveEditorModel will create a fallback. */
+	FText LongIntentNameFormat;
 	/** Optional color to draw underneath the keys on this channel */
 	TOptional<FLinearColor> Color;
+	/** Property meta data */
+	TMap<FName, FString> PropertyMetaData;
 };
 
 
@@ -106,21 +143,24 @@ struct TMovieSceneExternalValue
 /**
  * Commonly used channel display names and colors
  */
-struct MOVIESCENE_API FCommonChannelData
+struct FCommonChannelData
 {
-	static const FText ChannelX;
-	static const FText ChannelY;
-	static const FText ChannelZ;
-	static const FText ChannelW;
+	static MOVIESCENE_API const FText ChannelX;
+	static MOVIESCENE_API const FText ChannelY;
+	static MOVIESCENE_API const FText ChannelZ;
+	static MOVIESCENE_API const FText ChannelW;
 
-	static const FText ChannelR;
-	static const FText ChannelG;
-	static const FText ChannelB;
-	static const FText ChannelA;
+	static MOVIESCENE_API const FText ChannelR;
+	static MOVIESCENE_API const FText ChannelG;
+	static MOVIESCENE_API const FText ChannelB;
+	static MOVIESCENE_API const FText ChannelA;
 
-	static const FLinearColor RedChannelColor;
-	static const FLinearColor GreenChannelColor;
-	static const FLinearColor BlueChannelColor;
+	static MOVIESCENE_API const FLinearColor RedChannelColor;
+	static MOVIESCENE_API const FLinearColor GreenChannelColor;
+	static MOVIESCENE_API const FLinearColor BlueChannelColor;
+
+	static MOVIESCENE_API const FName TooltipText;
+	static MOVIESCENE_API const FName GroupDisplayName;
 };
 
 

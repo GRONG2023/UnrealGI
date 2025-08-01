@@ -1,37 +1,35 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-/*=============================================================================
-	Property.cpp: FProperty implementation
-=============================================================================*/
+#include "UObject/UnrealType.h"
 
-#include "CoreMinimal.h"
+#include "Hash/Blake3.h"
+#include "Math/Box2D.h"
+#include "Math/InterpCurvePoint.h"
+#include "Math/RandomStream.h"
+#include "Math/Ray.h"
+#include "Math/Sphere.h"
 #include "Misc/AsciiSet.h"
 #include "Misc/Guid.h"
 #include "Misc/StringBuilder.h"
-#include "Math/RandomStream.h"
-#include "Logging/LogScopedCategoryAndVerbosityOverride.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/UObjectGlobals.h"
-#include "UObject/Class.h"
+#include "Serialization/TestUndeclaredScriptStructObjectReferences.h"
 #include "Templates/Casts.h"
-#include "UObject/UnrealType.h"
-#include "UObject/UnrealTypePrivate.h"
-#include "UObject/PropertyHelper.h"
+#include "UObject/Class.h"
+#include "UObject/CoreNetTypes.h"
 #include "UObject/CoreRedirects.h"
+#include "UObject/Package.h"
+#include "UObject/PropertyHelper.h"
+#include "UObject/PropertyTypeName.h"
 #include "UObject/SoftObjectPath.h"
-#include "Math/Box2D.h"
-#include "UObject/ReleaseObjectVersion.h"
-
-// WARNING: This should always be the last include in any file that needs it (except .generated.h)
-#include "UObject/UndefineUPropertyMacros.h"
+#include "UObject/UnrealTypePrivate.h"
+#include "UObject/UObjectGlobals.h"
 
 DEFINE_LOG_CATEGORY(LogProperty);
 
 // List the core ones here as they have already been included (and can be used without CoreUObject!)
-template<>
-struct TStructOpsTypeTraits<FVector> : public TStructOpsTypeTraitsBase2<FVector>
+template<typename T>
+struct TVector3StructOpsTypeTraits : public TStructOpsTypeTraitsBase2<T>
 {
-	enum 
+	enum
 	{
 		WithIdenticalViaEquality = true,
 		WithNoInitConstructor = true,
@@ -39,12 +37,19 @@ struct TStructOpsTypeTraits<FVector> : public TStructOpsTypeTraitsBase2<FVector>
 		WithNetSerializer = true,
 		WithNetSharedSerialization = true,
 		WithStructuredSerializer = true,
+		WithStructuredSerializeFromMismatchedTag = true,
+		WithSerializer = true,
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
-IMPLEMENT_STRUCT(Vector);
+template<> struct TStructOpsTypeTraits<FVector3f> : public TVector3StructOpsTypeTraits<FVector3f> {};
+template<> struct TStructOpsTypeTraits<FVector3d> : public TVector3StructOpsTypeTraits<FVector3d> {};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Vector3f);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Vector3d);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Vector);	// Aliased
 
-template<>
-struct TStructOpsTypeTraits<FIntPoint> : public TStructOpsTypeTraitsBase2<FIntPoint>
+template<typename T>
+struct TIntPointStructOpsTypeTraits : public TStructOpsTypeTraitsBase2<T>
 {
 	enum 
 	{
@@ -52,12 +57,23 @@ struct TStructOpsTypeTraits<FIntPoint> : public TStructOpsTypeTraitsBase2<FIntPo
 		WithNoInitConstructor = true,
 		WithZeroConstructor = true,
 		WithSerializer = true,
+		WithSerializeFromMismatchedTag = true,
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
-IMPLEMENT_STRUCT(IntPoint);
+template<> struct TStructOpsTypeTraits<FInt32Point> : public TIntPointStructOpsTypeTraits<FInt32Point> {};
+template<> struct TStructOpsTypeTraits<FInt64Point> : public TIntPointStructOpsTypeTraits<FInt64Point> {};
+template<> struct TStructOpsTypeTraits<FUint32Point> : public TIntPointStructOpsTypeTraits<FUint32Point> {};
+template<> struct TStructOpsTypeTraits<FUint64Point> : public TIntPointStructOpsTypeTraits<FUint64Point> {};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Int32Point);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Int64Point);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Uint32Point);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Uint64Point);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", IntPoint);		// Aliased
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", UintPoint);		// Aliased
 
-template<>
-struct TStructOpsTypeTraits<FIntVector> : public TStructOpsTypeTraitsBase2<FIntVector>
+template<typename T>
+struct TIntVectorStructOpsTypeTraits : public TStructOpsTypeTraitsBase2<T>
 {
 	enum
 	{
@@ -65,12 +81,45 @@ struct TStructOpsTypeTraits<FIntVector> : public TStructOpsTypeTraitsBase2<FIntV
 		WithNoInitConstructor = true,
 		WithZeroConstructor = true,
 		WithSerializer = true,
+		WithSerializeFromMismatchedTag = true,
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
-IMPLEMENT_STRUCT(IntVector);
+template<> struct TStructOpsTypeTraits<FInt32Vector2> : public TIntVectorStructOpsTypeTraits<FInt32Vector2> {};
+template<> struct TStructOpsTypeTraits<FInt64Vector2> : public TIntVectorStructOpsTypeTraits<FInt64Vector2> {};
+template<> struct TStructOpsTypeTraits<FUint32Vector2> : public TIntVectorStructOpsTypeTraits<FUint32Vector2> {};
+template<> struct TStructOpsTypeTraits<FUint64Vector2> : public TIntVectorStructOpsTypeTraits<FUint64Vector2> {};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Int32Vector2);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Int64Vector2);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Uint32Vector2);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Uint64Vector2);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", IntVector2);		// Aliased
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", UintVector2);	// Aliased
 
-template<>
-struct TStructOpsTypeTraits<FVector2D> : public TStructOpsTypeTraitsBase2<FVector2D>
+template<> struct TStructOpsTypeTraits<FInt32Vector3> : public TIntVectorStructOpsTypeTraits<FInt32Vector3> {};
+template<> struct TStructOpsTypeTraits<FInt64Vector3> : public TIntVectorStructOpsTypeTraits<FInt64Vector3> {};
+template<> struct TStructOpsTypeTraits<FUint32Vector3> : public TIntVectorStructOpsTypeTraits<FUint32Vector3> {};
+template<> struct TStructOpsTypeTraits<FUint64Vector3> : public TIntVectorStructOpsTypeTraits<FUint64Vector3> {};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Int32Vector);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Int64Vector);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Uint32Vector);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Uint64Vector);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", IntVector);		// Aliased
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", UintVector);		// Aliased
+
+template<> struct TStructOpsTypeTraits<FInt32Vector4> : public TIntVectorStructOpsTypeTraits<FInt32Vector4> {};
+template<> struct TStructOpsTypeTraits<FInt64Vector4> : public TIntVectorStructOpsTypeTraits<FInt64Vector4> {};
+template<> struct TStructOpsTypeTraits<FUint32Vector4> : public TIntVectorStructOpsTypeTraits<FUint32Vector4> {};
+template<> struct TStructOpsTypeTraits<FUint64Vector4> : public TIntVectorStructOpsTypeTraits<FUint64Vector4> {};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Int32Vector4);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Int64Vector4);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Uint32Vector4);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Uint64Vector4); 
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", IntVector4);		// Aliased
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", UintVector4);	// Aliased
+
+template<typename T>
+struct TVector2StructOpsTypeTraits : public TStructOpsTypeTraitsBase2<T>
 {
 	enum 
 	{
@@ -80,12 +129,18 @@ struct TStructOpsTypeTraits<FVector2D> : public TStructOpsTypeTraitsBase2<FVecto
 		WithNetSerializer = true,
 		WithNetSharedSerialization = true,
 		WithSerializer = true,
+		WithSerializeFromMismatchedTag = true,
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
-IMPLEMENT_STRUCT(Vector2D);
+template<> struct TStructOpsTypeTraits<FVector2f> : public TVector2StructOpsTypeTraits<FVector2f> {};
+template<> struct TStructOpsTypeTraits<FVector2d> : public TVector2StructOpsTypeTraits<FVector2d> {};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Vector2f);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Vector2d);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Vector2D);
 
-template<>
-struct TStructOpsTypeTraits<FVector4> : public TStructOpsTypeTraitsBase2<FVector4>
+template<typename T>
+struct TVector4StructOpsTypeTraits : public TStructOpsTypeTraitsBase2<T>
 {
 	enum 
 	{
@@ -93,67 +148,61 @@ struct TStructOpsTypeTraits<FVector4> : public TStructOpsTypeTraitsBase2<FVector
 		WithNoInitConstructor = true,
 		WithZeroConstructor = true,
 		WithSerializer = true,
+		WithSerializeFromMismatchedTag = true,
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
-IMPLEMENT_STRUCT(Vector4);
+template<> struct TStructOpsTypeTraits<FVector4f> : public TVector4StructOpsTypeTraits<FVector4f> {};
+template<> struct TStructOpsTypeTraits<FVector4d> : public TVector4StructOpsTypeTraits<FVector4d> {};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Vector4f);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Vector4d);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Vector4);	// Aliased
 
-template<>
-struct TStructOpsTypeTraits<FPlane> : public TStructOpsTypeTraitsBase2<FPlane>
-{
-	enum 
-	{
-		WithIdenticalViaEquality = true,
-		WithNoInitConstructor = true,
-		WithZeroConstructor = true,
-		WithNetSerializer = true,
-		WithNetSharedSerialization = true,
-		WithSerializer = true,
-	};
-};
-IMPLEMENT_STRUCT(Plane);
-
-template<>
-struct TStructOpsTypeTraits<FRotator> : public TStructOpsTypeTraitsBase2<FRotator>
-{
-	enum 
-	{
-		WithIdenticalViaEquality = true,
-		WithNoInitConstructor = true,
-		WithZeroConstructor = true,
-		WithNetSerializer = true,
-		WithNetSharedSerialization = true,
-		WithSerializer = true,
-	};
-};
-IMPLEMENT_STRUCT(Rotator);
-
-template<>
-struct TStructOpsTypeTraits<FBox> : public TStructOpsTypeTraitsBase2<FBox>
-{
-	enum 
-	{
-		WithIdenticalViaEquality = true,
-		WithNoInitConstructor = true,
-		WithZeroConstructor = true,
-		WithSerializer = true,
-	};
-};
-IMPLEMENT_STRUCT(Box);
-
-template<>
-struct TStructOpsTypeTraits<FBox2D> : public TStructOpsTypeTraitsBase2<FBox2D>
+template<typename T>
+struct TPlaneStructOpsTypeTraits : public TStructOpsTypeTraitsBase2<T>
 {
 	enum
 	{
 		WithIdenticalViaEquality = true,
 		WithNoInitConstructor = true,
 		WithZeroConstructor = true,
+		WithNetSerializer = true,
+		WithNetSharedSerialization = true,
+		WithSerializer = true,
+		WithSerializeFromMismatchedTag = true,
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
-IMPLEMENT_STRUCT(Box2D);
+template<> struct TStructOpsTypeTraits<FPlane4f> : public TPlaneStructOpsTypeTraits<FPlane4f> {};
+template<> struct TStructOpsTypeTraits<FPlane4d> : public TPlaneStructOpsTypeTraits<FPlane4d> {};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Plane4f);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Plane4d);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Plane);	// Aliased
 
-template<>
-struct TStructOpsTypeTraits<FMatrix> : public TStructOpsTypeTraitsBase2<FMatrix>
+template<typename T>
+struct TRotatorStructOpsTypeTraits : public TStructOpsTypeTraitsBase2<T>
+{
+	enum
+	{
+		WithIdenticalViaEquality = true,
+		WithNoInitConstructor = true,
+		WithZeroConstructor = true,
+		WithNetSerializer = true,
+		WithNetSharedSerialization = true,
+		WithSerializer = true,
+		WithSerializeFromMismatchedTag = true,
+	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
+};
+
+template<> struct TStructOpsTypeTraits<FRotator3f> : public TRotatorStructOpsTypeTraits<FRotator3f> {};
+template<> struct TStructOpsTypeTraits<FRotator3d> : public TRotatorStructOpsTypeTraits<FRotator3d> {};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Rotator3f);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Rotator3d);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Rotator);	// Aliased
+
+template<typename T>
+struct TBox3StructOpsTypeTraits : public TStructOpsTypeTraitsBase2<T>
 {
 	enum 
 	{
@@ -161,27 +210,75 @@ struct TStructOpsTypeTraits<FMatrix> : public TStructOpsTypeTraitsBase2<FMatrix>
 		WithNoInitConstructor = true,
 		WithZeroConstructor = true,
 		WithSerializer = true,
+		WithSerializeFromMismatchedTag = true,
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
-IMPLEMENT_STRUCT(Matrix);
+template<> struct TStructOpsTypeTraits<FBox3f> : public TBox3StructOpsTypeTraits<FBox3f> {};
+template<> struct TStructOpsTypeTraits<FBox3d> : public TBox3StructOpsTypeTraits<FBox3d> {};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Box3f);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Box3d);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Box);		// Aliased
 
-template<>
-struct TStructOpsTypeTraits<FBoxSphereBounds> : public TStructOpsTypeTraitsBase2<FBoxSphereBounds>
+template<typename T>
+struct TBox2StructOpsTypeTraits : public TStructOpsTypeTraitsBase2<T>
 {
-	enum 
+	enum
 	{
 		WithIdenticalViaEquality = true,
 		WithNoInitConstructor = true,
 		WithZeroConstructor = true,
+		WithSerializeFromMismatchedTag = true,		
 	};
 };
-IMPLEMENT_STRUCT(BoxSphereBounds);
+template<> struct TStructOpsTypeTraits<FBox2f> : public TBox2StructOpsTypeTraits<FBox2f> {};
+template<> struct TStructOpsTypeTraits<FBox2d> : public TBox2StructOpsTypeTraits<FBox2d> {};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Box2f);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Box2d);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Box2D);
+
+template<typename T>
+struct TMatrixStructOpsTypeTraits : public TStructOpsTypeTraitsBase2<T>
+{
+	enum
+	{
+		WithIdenticalViaEquality = true,
+		WithNoInitConstructor = true,
+		WithZeroConstructor = true,
+		WithSerializer = true,
+		WithSerializeFromMismatchedTag = true,
+	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
+};
+
+template<> struct TStructOpsTypeTraits<FMatrix44f> : public TMatrixStructOpsTypeTraits<FMatrix44f> {};
+template<> struct TStructOpsTypeTraits<FMatrix44d> : public TMatrixStructOpsTypeTraits<FMatrix44d> {};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Matrix44f);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Matrix44d);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Matrix);	// Aliased
+
+template<typename T>
+struct TBoxSphereBoundsStructOpsTypeTraits : public TStructOpsTypeTraitsBase2<T>
+{
+	enum
+	{
+		WithIdenticalViaEquality = true,
+		WithNoInitConstructor = true,
+		WithZeroConstructor = true,
+		WithSerializeFromMismatchedTag = true,
+	};
+};
+template<> struct TStructOpsTypeTraits<FBoxSphereBounds3f> : public TBoxSphereBoundsStructOpsTypeTraits<FBoxSphereBounds3f> {};
+template<> struct TStructOpsTypeTraits<FBoxSphereBounds3d> : public TBoxSphereBoundsStructOpsTypeTraits<FBoxSphereBounds3d> {};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", BoxSphereBounds3f);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", BoxSphereBounds3d);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", BoxSphereBounds);	// Aliased
 
 template<>
 struct TStructOpsTypeTraits<FOrientedBox> : public TStructOpsTypeTraitsBase2<FOrientedBox>
 {
 };
-IMPLEMENT_STRUCT(OrientedBox);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", OrientedBox);
 
 template<>
 struct TStructOpsTypeTraits<FLinearColor> : public TStructOpsTypeTraitsBase2<FLinearColor>
@@ -192,9 +289,11 @@ struct TStructOpsTypeTraits<FLinearColor> : public TStructOpsTypeTraitsBase2<FLi
 		WithNoInitConstructor = true,
 		WithZeroConstructor = true,
 		WithStructuredSerializer = true,
+		WithSerializer = true,
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
-IMPLEMENT_STRUCT(LinearColor);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", LinearColor);
 
 template<>
 struct TStructOpsTypeTraits<FColor> : public TStructOpsTypeTraitsBase2<FColor>
@@ -206,12 +305,13 @@ struct TStructOpsTypeTraits<FColor> : public TStructOpsTypeTraitsBase2<FColor>
 		WithZeroConstructor = true,
 		WithSerializer = true,
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
-IMPLEMENT_STRUCT(Color);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Color);
 
 
-template<>
-struct TStructOpsTypeTraits<FQuat> : public TStructOpsTypeTraitsBase2<FQuat>
+template<typename T>
+struct TQuatStructOpsTypeTraits : public TStructOpsTypeTraitsBase2<T>
 {
 	enum 
 	{
@@ -220,9 +320,16 @@ struct TStructOpsTypeTraits<FQuat> : public TStructOpsTypeTraitsBase2<FQuat>
 		WithNetSerializer = true,
 		WithNetSharedSerialization = true,
 		WithIdentical = true,
+		WithSerializer = true,
+		WithSerializeFromMismatchedTag = true,
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
-IMPLEMENT_STRUCT(Quat);
+template<> struct TStructOpsTypeTraits<FQuat4f> : public TQuatStructOpsTypeTraits<FQuat4f> {};
+template<> struct TStructOpsTypeTraits<FQuat4d> : public TQuatStructOpsTypeTraits<FQuat4d> {};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Quat4f);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Quat4d);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Quat);		// Aliased to one of FQuat4f/FQuat4d
 
 template<>
 struct TStructOpsTypeTraits<FTwoVectors> : public TStructOpsTypeTraitsBase2<FTwoVectors>
@@ -234,8 +341,105 @@ struct TStructOpsTypeTraits<FTwoVectors> : public TStructOpsTypeTraitsBase2<FTwo
 		WithSerializer = true,
 		WithNoDestructor = true,
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
-IMPLEMENT_STRUCT(TwoVectors);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", TwoVectors);
+
+
+template<typename T>
+struct TRay3StructOpsTypeTraits : public TStructOpsTypeTraitsBase2<T>
+{
+	enum
+	{
+		WithIdenticalViaEquality = true,
+		WithNoInitConstructor = true,
+		WithZeroConstructor = true,
+		WithSerializeFromMismatchedTag = true,		
+	};
+};
+template<> struct TStructOpsTypeTraits<FRay3f> : public TRay3StructOpsTypeTraits<FRay3f> {};
+template<> struct TStructOpsTypeTraits<FRay3d> : public TRay3StructOpsTypeTraits<FRay3d> {};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Ray3f);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Ray3d);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Ray);
+
+
+template<typename T>
+struct TSphere3StructOpsTypeTraits : public TStructOpsTypeTraitsBase2<T>
+{
+	enum
+	{
+		WithIdenticalViaEquality = true,
+		WithNoInitConstructor = true,
+		WithZeroConstructor = true,
+		WithSerializeFromMismatchedTag = true,
+	};
+};
+template<> struct TStructOpsTypeTraits<FSphere3f> : public TSphere3StructOpsTypeTraits<FSphere3f> {};
+template<> struct TStructOpsTypeTraits<FSphere3d> : public TSphere3StructOpsTypeTraits<FSphere3d> {};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Sphere3f);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Sphere3d);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Sphere); 
+
+template<>
+struct TStructOpsTypeTraits<FInterpCurvePointFloat> : public TStructOpsTypeTraitsBase2<FInterpCurvePointFloat>
+{
+	enum
+	{
+		WithNoInitConstructor = true,
+	};
+};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", InterpCurvePointFloat);
+
+template<>
+struct TStructOpsTypeTraits<FInterpCurvePointVector2D> : public TStructOpsTypeTraitsBase2<FInterpCurvePointVector2D>
+{
+	enum
+	{
+		WithNoInitConstructor = true,
+	};
+};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", InterpCurvePointVector2D);
+
+template<>
+struct TStructOpsTypeTraits<FInterpCurvePointVector> : public TStructOpsTypeTraitsBase2<FInterpCurvePointVector>
+{
+	enum
+	{
+		WithNoInitConstructor = true,
+	};
+};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", InterpCurvePointVector);
+
+template<>
+struct TStructOpsTypeTraits<FInterpCurvePointQuat> : public TStructOpsTypeTraitsBase2<FInterpCurvePointQuat>
+{
+	enum
+	{
+		WithNoInitConstructor = true,
+	};
+};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", InterpCurvePointQuat);
+
+template<>
+struct TStructOpsTypeTraits<FInterpCurvePointTwoVectors> : public TStructOpsTypeTraitsBase2<FInterpCurvePointTwoVectors>
+{
+	enum
+	{
+		WithNoInitConstructor = true,
+	};
+};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", InterpCurvePointTwoVectors);
+
+template<>
+struct TStructOpsTypeTraits<FInterpCurvePointLinearColor> : public TStructOpsTypeTraitsBase2<FInterpCurvePointLinearColor>
+{
+	enum
+	{
+		WithNoInitConstructor = true,
+	};
+};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", InterpCurvePointLinearColor);
 
 template<>
 struct TStructOpsTypeTraits<FGuid> : public TStructOpsTypeTraitsBase2<FGuid>
@@ -249,30 +453,36 @@ struct TStructOpsTypeTraits<FGuid> : public TStructOpsTypeTraitsBase2<FGuid>
 		WithSerializer = true,
 		WithStructuredSerializer = true,
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
-IMPLEMENT_STRUCT(Guid);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Guid);
 
-template<>
-struct TStructOpsTypeTraits<FTransform> : public TStructOpsTypeTraitsBase2<FTransform>
+template<typename T>
+struct TTransformStructOpsTypeTraits : public TStructOpsTypeTraitsBase2<T>
 {
 	enum
 	{
+		//WithSerializer = true,
 		WithIdentical = true,
+		WithSerializeFromMismatchedTag = true,
 	};
 };
-IMPLEMENT_STRUCT(Transform);
+template<> struct TStructOpsTypeTraits<FTransform3f> : public TTransformStructOpsTypeTraits<FTransform3f> {};
+template<> struct TStructOpsTypeTraits<FTransform3d> : public TTransformStructOpsTypeTraits<FTransform3d> {};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Transform3f);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Transform3d);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Transform); // Aliased
 
 template<>
 struct TStructOpsTypeTraits<FRandomStream> : public TStructOpsTypeTraitsBase2<FRandomStream>
 {
 	enum 
 	{
-		WithExportTextItem = true,
 		WithNoInitConstructor = true,
 		WithZeroConstructor = true,
 	};
 };
-IMPLEMENT_STRUCT(RandomStream);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", RandomStream);
 
 template<>
 struct TStructOpsTypeTraits<FDateTime> : public TStructOpsTypeTraitsBase2<FDateTime>
@@ -287,8 +497,9 @@ struct TStructOpsTypeTraits<FDateTime> : public TStructOpsTypeTraitsBase2<FDateT
 		WithZeroConstructor = true,
 		WithIdenticalViaEquality = true,
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
-IMPLEMENT_STRUCT(DateTime);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", DateTime);
 
 template<>
 struct TStructOpsTypeTraits<FTimespan> : public TStructOpsTypeTraitsBase2<FTimespan>
@@ -304,8 +515,9 @@ struct TStructOpsTypeTraits<FTimespan> : public TStructOpsTypeTraitsBase2<FTimes
 		WithZeroConstructor = true,
 		WithIdenticalViaEquality = true,
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
-IMPLEMENT_STRUCT(Timespan);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", Timespan);
 
 template<>
 struct TStructOpsTypeTraits<FFrameNumber> : public TStructOpsTypeTraitsBase2<FFrameNumber>
@@ -315,8 +527,9 @@ struct TStructOpsTypeTraits<FFrameNumber> : public TStructOpsTypeTraitsBase2<FFr
 		WithSerializer = true,
 		WithIdenticalViaEquality = true
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
-IMPLEMENT_STRUCT(FrameNumber);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", FrameNumber);
 
 template<>
 struct TStructOpsTypeTraits<FSoftObjectPath> : public TStructOpsTypeTraitsBase2<FSoftObjectPath>
@@ -331,8 +544,9 @@ struct TStructOpsTypeTraits<FSoftObjectPath> : public TStructOpsTypeTraitsBase2<
 		WithImportTextItem = true,
 		WithStructuredSerializeFromMismatchedTag = true,
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::Soft;
 };
-IMPLEMENT_STRUCT(SoftObjectPath);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", SoftObjectPath);
 
 template<>
 struct TStructOpsTypeTraits<FSoftClassPath> : public TStructOpsTypeTraitsBase2<FSoftClassPath>
@@ -347,8 +561,9 @@ struct TStructOpsTypeTraits<FSoftClassPath> : public TStructOpsTypeTraitsBase2<F
 		WithImportTextItem = true,
 		WithStructuredSerializeFromMismatchedTag = true,
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::Soft;
 };
-IMPLEMENT_STRUCT(SoftClassPath);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", SoftClassPath);
 
 template<>
 struct TStructOpsTypeTraits<FPrimaryAssetType> : public TStructOpsTypeTraitsBase2<FPrimaryAssetType>
@@ -363,7 +578,7 @@ struct TStructOpsTypeTraits<FPrimaryAssetType> : public TStructOpsTypeTraitsBase
 		WithStructuredSerializeFromMismatchedTag = true,
 	};
 };
-IMPLEMENT_STRUCT(PrimaryAssetType);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", PrimaryAssetType);
 
 template<>
 struct TStructOpsTypeTraits<FPrimaryAssetId> : public TStructOpsTypeTraitsBase2<FPrimaryAssetId>
@@ -378,17 +593,47 @@ struct TStructOpsTypeTraits<FPrimaryAssetId> : public TStructOpsTypeTraitsBase2<
 		WithStructuredSerializeFromMismatchedTag = true,
 	};
 };
-IMPLEMENT_STRUCT(PrimaryAssetId);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", PrimaryAssetId);
+
+template<>
+struct TStructOpsTypeTraits<FTestUndeclaredScriptStructObjectReferencesTest> : public TStructOpsTypeTraitsBase2<FTestUndeclaredScriptStructObjectReferencesTest>
+{
+	enum 
+	{
+		WithSerializer = true,
+	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::Strong | EPropertyObjectReferenceType::Weak | EPropertyObjectReferenceType::Soft;
+};
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", TestUndeclaredScriptStructObjectReferencesTest);
+
 
 template<>
 struct TStructOpsTypeTraits<FFallbackStruct> : public TStructOpsTypeTraitsBase2<FFallbackStruct>
 {
 };
-IMPLEMENT_STRUCT(FallbackStruct);
+UE_IMPLEMENT_STRUCT("/Script/CoreUObject", FallbackStruct);
 
 /*-----------------------------------------------------------------------------
 	Helpers.
 -----------------------------------------------------------------------------*/
+
+const TCHAR* LexToString(EPropertyObjectReferenceType Type)
+{
+	switch(Type)
+	{
+	case EPropertyObjectReferenceType::None:
+		return TEXT("None");
+	case EPropertyObjectReferenceType::Strong:
+		return TEXT("Strong");
+	case EPropertyObjectReferenceType::Weak:
+		return TEXT("Weak");
+	case EPropertyObjectReferenceType::Soft:
+		return TEXT("Soft");
+	case EPropertyObjectReferenceType::Conservative:
+		return TEXT("Conservative");
+	}	
+	return TEXT("Unknown");
+}
 
 constexpr FAsciiSet AlphaNumericChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
@@ -401,11 +646,11 @@ FORCEINLINE constexpr FStringView ParsePropertyToken(const TCHAR* Str, bool Dott
 {
 	constexpr FAsciiSet RegularTokenChars = AlphaNumericChars  + '_' + '-' + '+';
 	constexpr FAsciiSet RegularNonTokenChars = ~RegularTokenChars;
-	constexpr FAsciiSet DottedNonTokenChars = ~(RegularTokenChars + '.' + '/' + SUBOBJECT_DELIMITER_CHAR);
+	constexpr FAsciiSet DottedNonTokenChars = ~(RegularTokenChars + '.' + '/' + (char)SUBOBJECT_DELIMITER_CHAR);
 	FAsciiSet CurrentNonTokenChars = DottedNames ? DottedNonTokenChars : RegularNonTokenChars;
 
 	const TCHAR* TokenEnd = FAsciiSet::FindFirstOrEnd(Str, CurrentNonTokenChars);
-	return FStringView(Str, TokenEnd - Str);
+	return FStringView(Str, UE_PTRDIFF_TO_INT32(TokenEnd - Str));
 }
 
 //
@@ -472,6 +717,10 @@ const TCHAR* FPropertyHelpers::ReadToken( const TCHAR* Buffer, FStringBuilderBas
 	FProperty implementation.
 -----------------------------------------------------------------------------*/
 
+#if UE_GAME && UE_FNAME_OUTLINE_NUMBER
+	static_assert(sizeof(FProperty) <= 104, "FProperty was optimized to reduce its size so most of the classes that inherent from it will fall withing 112 bytes bin of MallocBinned3");
+#endif
+
 IMPLEMENT_FIELD(FProperty)
 
 //
@@ -500,6 +749,40 @@ FProperty::FProperty(FFieldVariant InOwner, const FName& InName, EObjectFlags In
 	, RepIndex(0)
 	, BlueprintReplicationCondition(COND_None)
 	, Offset_Internal(InOffset)
+	, PropertyLinkNext(nullptr)
+	, NextRef(nullptr)
+	, DestructorLinkNext(nullptr)
+	, PostConstructLinkNext(nullptr)
+{
+	Init();
+}
+
+FProperty::FProperty(FFieldVariant InOwner, const UECodeGen_Private::FPropertyParamsBaseWithOffset& Prop, EPropertyFlags AdditionalPropertyFlags /*= CPF_None*/)
+	: FField(InOwner, UTF8_TO_TCHAR(Prop.NameUTF8), Prop.ObjectFlags)
+	, ArrayDim(1)
+	, ElementSize(0)
+	, PropertyFlags(Prop.PropertyFlags | AdditionalPropertyFlags)
+	, RepIndex(0)
+	, BlueprintReplicationCondition(COND_None)
+	, Offset_Internal(0)
+	, PropertyLinkNext(nullptr)
+	, NextRef(nullptr)
+	, DestructorLinkNext(nullptr)
+	, PostConstructLinkNext(nullptr)
+{
+	this->Offset_Internal = Prop.Offset;
+
+	Init();
+}
+
+FProperty::FProperty(FFieldVariant InOwner, const UECodeGen_Private::FPropertyParamsBaseWithoutOffset& Prop, EPropertyFlags AdditionalPropertyFlags /*= CPF_None*/)
+	: FField(InOwner, UTF8_TO_TCHAR(Prop.NameUTF8), Prop.ObjectFlags)
+	, ArrayDim(1)
+	, ElementSize(0)
+	, PropertyFlags(Prop.PropertyFlags | AdditionalPropertyFlags)
+	, RepIndex(0)
+	, BlueprintReplicationCondition(COND_None)
+	, Offset_Internal(0)
 	, PropertyLinkNext(nullptr)
 	, NextRef(nullptr)
 	, DestructorLinkNext(nullptr)
@@ -622,6 +905,32 @@ void FProperty::CopyCompleteValueFromScriptVM( void* Dest, void const* Src ) con
 	CopyCompleteValue(Dest, Src);
 }
 
+void FProperty::CopyCompleteValueToScriptVM_InContainer( void* OutValue, void const* InContainer ) const
+{
+	if (HasGetter())
+	{
+		CallGetter(InContainer, OutValue);
+	}
+	else
+	{
+		const void* InObj = ContainerPtrToValuePtr<uint8>(InContainer);
+		CopyCompleteValue(OutValue, InObj);
+	}
+}
+
+void FProperty::CopyCompleteValueFromScriptVM_InContainer( void* OutContainer, void const* InValue ) const
+{
+	if (HasSetter())
+	{
+		CallSetter(OutContainer, InValue);
+	}
+	else
+	{
+		void* OutObj = ContainerPtrToValuePtr<uint8>(OutContainer);
+		CopyCompleteValue(OutObj, InValue);
+	}
+}
+
 void FProperty::ClearValueInternal( void* Data ) const
 {
 	checkf(0, TEXT("%s failed to handle ClearValueInternal, but it was not CPF_NoDestructor | CPF_ZeroConstructor"), *GetFullName());
@@ -683,6 +992,7 @@ bool FProperty::PassCPPArgsByRef() const
 }
 
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void FProperty::ExportCppDeclaration(FOutputDevice& Out, EExportedDeclaration::Type DeclarationType, const TCHAR* ArrayDimOverride, uint32 AdditionalExportCPPFlags
 	, bool bSkipParameterName, const FString* ActualCppType, const FString* ActualExtendedType, const FString* ActualParameterName) const
 {
@@ -744,7 +1054,7 @@ void FProperty::ExportCppDeclaration(FOutputDevice& Out, EExportedDeclaration::T
 		NameCpp = FString(TEXT(", ")) + NameCpp;
 	}
 
-	TCHAR ArrayStr[MAX_SPRINTF]=TEXT("");
+	TCHAR ArrayStr[MAX_SPRINTF] = {};
 	const bool bExportStaticArray = 0 == (CPPF_NoStaticArray & AdditionalExportCPPFlags);
 	if ((ArrayDim != 1) && bExportStaticArray)
 	{
@@ -807,7 +1117,7 @@ void FProperty::ExportCppDeclaration(FOutputDevice& Out, EExportedDeclaration::T
 				else
 				{
 					// export as a pointer if this is an optional out parm, reference if it's just an out parm, standard otherwise...
-					TCHAR ModifierString[2]={0,0};
+					TCHAR ModifierString[2] = { TCHAR('\0'), TCHAR('\0') };
 					if (bCanHaveRef && (HasAnyPropertyFlags(CPF_OutParm | CPF_ReferenceParm) || bIsInterfaceProp))
 					{
 						ModifierString[0] = TEXT('&');
@@ -822,6 +1132,7 @@ void FProperty::ExportCppDeclaration(FOutputDevice& Out, EExportedDeclaration::T
 		}
 	}
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 bool FProperty::ExportText_Direct
 	(
@@ -829,16 +1140,17 @@ bool FProperty::ExportText_Direct
 	const void*	Data,
 	const void*	Delta,
 	UObject*	Parent,
-	int32			PortFlags,
+	int32		PortFlags,
 	UObject*	ExportRootScope
 	) const
 {
 	if( Data==Delta || !Identical(Data,Delta,PortFlags) )
 	{
-		ExportTextItem
+		ExportText_Internal
 			(
 			ValueStr,
 			(uint8*)Data,
+			EPropertyPointerType::Direct,
 			(uint8*)Delta,
 			Parent,
 			PortFlags,
@@ -850,13 +1162,15 @@ bool FProperty::ExportText_Direct
 	return false;
 }
 
-bool FProperty::ShouldSerializeValue( FArchive& Ar ) const
+bool FProperty::ShouldSerializeValue(FArchive& Ar) const
 {
+	// Skip the property if the archive says we should
 	if (Ar.ShouldSkipProperty(this))
 	{
 		return false;
 	}
 
+	// Skip non-SaveGame properties if we're saving game state
 	if (!(PropertyFlags & CPF_SaveGame) && Ar.IsSaveGame())
 	{
 		return false;
@@ -868,16 +1182,50 @@ bool FProperty::ShouldSerializeValue( FArchive& Ar ) const
 		return true;
 	}
 
-	bool Skip =
-			((PropertyFlags & CPF_Transient) && Ar.IsPersistent() && !Ar.IsSerializingDefaults())
-		||	((PropertyFlags & CPF_DuplicateTransient) && (Ar.GetPortFlags() & PPF_Duplicate))
-		||	((PropertyFlags & CPF_NonPIEDuplicateTransient) && !(Ar.GetPortFlags() & PPF_DuplicateForPIE) && (Ar.GetPortFlags() & PPF_Duplicate))
-		||	((PropertyFlags & CPF_NonTransactional) && Ar.IsTransacting())
-		||	((PropertyFlags & CPF_Deprecated) && !Ar.HasAllPortFlags(PPF_UseDeprecatedProperties) && (Ar.IsSaving() || Ar.IsTransacting() || Ar.WantBinaryPropertySerialization()))
-		||  ((PropertyFlags & CPF_SkipSerialization) && (Ar.WantBinaryPropertySerialization() || !Ar.HasAllPortFlags(PPF_ForceTaggedSerialization)))
-		||  (IsEditorOnlyProperty() && Ar.IsFilterEditorOnly());
+	// Skip properties marked Transient when persisting an object, unless we're saving an archetype
+	if ((PropertyFlags & CPF_Transient) && Ar.IsPersistent() && !Ar.IsSerializingDefaults())
+	{
+		return false;
+	}
 
-	return !Skip;
+	// Skip properties marked DuplicateTransient when duplicating
+	if ((PropertyFlags & CPF_DuplicateTransient) && (Ar.GetPortFlags() & PPF_Duplicate))
+	{
+		return false;
+	}
+
+	// Skip properties marked NonPIEDuplicateTransient when duplicating, but not when we're duplicating for PIE
+	if ((PropertyFlags & CPF_NonPIEDuplicateTransient) && !(Ar.GetPortFlags() & PPF_DuplicateForPIE) && (Ar.GetPortFlags() & PPF_Duplicate))
+	{
+		return false;
+	}
+
+	// Skip properties marked NonTransactional when transacting
+	if ((PropertyFlags & CPF_NonTransactional) && Ar.IsTransacting())
+	{
+		return false;
+	}
+
+	// Skip deprecated properties when saving or transacting, unless the archive has explicitly requested them
+	if ((PropertyFlags & CPF_Deprecated) && !Ar.HasAllPortFlags(PPF_UseDeprecatedProperties) && (Ar.IsSaving() || Ar.IsTransacting() || Ar.WantBinaryPropertySerialization()))
+	{
+		return false;
+	}
+
+	// Skip properties marked SkipSerialization, unless the archive is forcing them
+	if ((PropertyFlags & CPF_SkipSerialization) && (Ar.WantBinaryPropertySerialization() || !Ar.HasAllPortFlags(PPF_ForceTaggedSerialization)))
+	{
+		return false;
+	}
+
+	// Skip editor-only properties when the archive is rejecting them
+	if (IsEditorOnlyProperty() && Ar.IsFilterEditorOnly())
+	{
+		return false;
+	}
+
+	// Otherwise serialize!
+	return true;
 }
 
 
@@ -894,6 +1242,16 @@ bool FProperty::SupportsNetSharedSerialization() const
 {
 	return true;
 }
+
+#if WITH_EDITORONLY_DATA
+void FProperty::AppendSchemaHash(FBlake3& Builder, bool bSkipEditorOnly) const
+{
+	AppendHash(Builder, NamePrivate);
+	Builder.Update(&ArrayDim, sizeof(ArrayDim));
+	AppendHash(Builder, GetID());
+}
+#endif
+
 
 //
 // Return whether the property should be exported.
@@ -970,11 +1328,19 @@ void FProperty::LinkInternal(FArchive& Ar)
 	check(0); // Link shouldn't call super...and we should never link an abstract property, like this base class
 }
 
-EConvertFromTypeResult FProperty::ConvertFromType(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct)
+EConvertFromTypeResult FProperty::ConvertFromType(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct, const uint8* Defaults)
 {
 	return EConvertFromTypeResult::UseSerializeItem;
 }
 
+namespace UE::CoreUObject::Private
+{
+	[[noreturn]] void OnInvalidPropertySize(uint32 InvalidPropertySize, const FProperty* Prop) //-V1082
+	{
+		UE_LOG(LogProperty, Fatal, TEXT("Invalid property size %u when linking property %s of size %d"), InvalidPropertySize, *Prop->GetFullName(), Prop->GetSize());
+		for (;;);
+	}
+}
 
 int32 FProperty::SetupOffset()
 {
@@ -988,7 +1354,13 @@ int32 FProperty::SetupOffset()
 	{
 		Offset_Internal = Align(0, GetMinAlignment());
 	}
-	return Offset_Internal + GetSize();
+
+	uint32 UnsignedTotal = (uint32)Offset_Internal + (uint32)GetSize();
+	if (UnsignedTotal >= (uint32)MAX_int32)
+	{
+		UE::CoreUObject::Private::OnInvalidPropertySize(UnsignedTotal, this);
+	}
+	return (int32)UnsignedTotal;
 }
 
 void FProperty::SetOffset_Internal(int32 NewOffset)
@@ -1001,6 +1373,145 @@ bool FProperty::SameType(const FProperty* Other) const
 	return Other && (GetClass() == Other->GetClass());
 }
 
+void* FProperty::AllocateAndInitializeValue() const
+{
+	void* Memory = (uint8*)FMemory::MallocZeroed(GetSize(), GetMinAlignment());
+	if (!HasAnyPropertyFlags(CPF_ZeroConstructor)) // this stuff is already zero
+	{
+		InitializeValue(Memory);
+	}
+	return Memory;
+}
+
+void FProperty::DestroyAndFreeValue(void* InMemory) const
+{
+	if (InMemory)
+	{
+		DestroyValue(InMemory);
+		FMemory::Free(InMemory);
+	}
+}
+
+void* FProperty::GetValueAddressAtIndex_Direct(const FProperty* Inner, void* InValueAddress, int32 Index) const
+{
+	checkf(Inner == nullptr, TEXT("%s should not have an inner property or it's missing specialized GetValueAddressAtIndex_Direct override"), *GetFullName());
+	checkf(Index < ArrayDim && Index >= 0, TEXT("Array index (%d) out of range"), Index);
+	return (uint8*)InValueAddress + ElementSize * Index;
+}
+
+void FProperty::SetSingleValue_InContainer(void* OutContainer, const void* InValue, int32 ArrayIndex) const
+{
+	checkf(ArrayIndex <= ArrayDim, TEXT("ArrayIndex (%d) must be less than the property %s array size (%d)"), ArrayIndex, *GetFullName(), ArrayDim);
+	if (!HasSetter())
+	{
+		// Fast path - direct memory access
+		CopySingleValue(ContainerVoidPtrToValuePtrInternal((void*)OutContainer, ArrayIndex), InValue);
+	}
+	else
+	{
+		if (ArrayDim == 1)
+		{
+			// Slower but no mallocs. We can copy the value directly to the resulting param
+			CallSetter(OutContainer, InValue);
+		}
+		else
+		{
+			// Malloc a temp value that is the size of the array. We will then copy the entire array to the temp value
+			uint8* ValueArray = (uint8*)AllocateAndInitializeValue();
+			GetValue_InContainer(OutContainer, ValueArray);
+			// Replace the value at the specified index in the temp array with the InValue
+			CopySingleValue(ValueArray + ArrayIndex * ElementSize, InValue);
+			// Now call a setter to replace the entire array and then destroy the temp value
+			CallSetter(OutContainer, ValueArray);
+			DestroyAndFreeValue(ValueArray);
+		}
+	}
+}
+
+void FProperty::GetSingleValue_InContainer(const void* InContainer, void* OutValue, int32 ArrayIndex) const
+{
+	checkf(ArrayIndex <= ArrayDim, TEXT("ArrayIndex (%d) must be less than the property %s array size (%d)"), ArrayIndex, *GetFullName(), ArrayDim);
+	if (!HasGetter())
+	{
+		// Fast path - direct memory access
+		CopySingleValue(OutValue, ContainerVoidPtrToValuePtrInternal((void*)InContainer, ArrayIndex));
+	}
+	else
+	{
+		if (ArrayDim == 1)
+		{
+			// Slower but no mallocs. We can copy the value directly to the resulting param
+			CallGetter(InContainer, OutValue);
+		}
+		else
+		{
+			// Malloc a temp value that is the size of the array. Getter will then copy the entire array to the temp value
+			uint8* ValueArray = (uint8*)AllocateAndInitializeValue();
+			GetValue_InContainer(InContainer, ValueArray);
+			// Copy the item we care about and free the temp array
+			CopySingleValue(OutValue, ValueArray + ArrayIndex * ElementSize);
+			DestroyAndFreeValue(ValueArray);
+		}
+	}
+}
+
+void FProperty::PerformOperationWithSetter(void* OutContainer, void* DirectPropertyAddress, TFunctionRef<void(void*)> DirectValueAccessFunc) const
+{
+	if (OutContainer && HasSetterOrGetter()) // If there's a getter we need to allocate a temp value even if there's no setter
+	{
+		// When modifying container or struct properties that have a setter or getter function we first allocate a temp value
+		// that we can operate on directly (add new elements or modify existing ones)
+		void* LocalValuePtr = AllocateAndInitializeValue();
+		// Copy the value to the allocated local (using a getter if present)
+		GetValue_InContainer(OutContainer, LocalValuePtr);
+
+		// Perform operation on the temp value
+		DirectValueAccessFunc(LocalValuePtr);
+
+		// Assign the temp value back to the property using a setter function
+		SetValue_InContainer(OutContainer, LocalValuePtr);
+		// Destroy and free the temp value
+		DestroyAndFreeValue(LocalValuePtr);
+	}
+	else
+	{
+		// When there's no setter or getter present it's ok to perform the operation directly on the container / struct memory
+		if (!DirectPropertyAddress)
+		{
+			checkf(OutContainer, TEXT("Container pointr must be valid if DirectPropertyAddress is not valid"));
+			DirectPropertyAddress = PointerToValuePtr(OutContainer, EPropertyPointerType::Container);
+		}
+		DirectValueAccessFunc(DirectPropertyAddress);
+	}
+}
+
+void FProperty::PerformOperationWithGetter(void* OutContainer, const void* DirectPropertyAddress, TFunctionRef<void(const void*)> DirectValueAccessFunc) const
+{
+	if (OutContainer && HasGetter())
+	{
+		// When modifying container or struct properties that have a getter function we first allocate a temp value
+		// that we can operate on directly (add new elements or modify existing ones)
+		void* LocalValuePtr = AllocateAndInitializeValue();
+		// Copy the value to the allocated local using a getter
+		GetValue_InContainer(OutContainer, LocalValuePtr);
+
+		// Perform read-only operation on the temp value
+		DirectValueAccessFunc(LocalValuePtr);
+
+		// Destroy and free the temp value
+		DestroyAndFreeValue(LocalValuePtr);
+	}
+	else
+	{
+		if (!DirectPropertyAddress)
+		{
+			checkf(OutContainer, TEXT("Container pointr must be valid if DirectPropertyAddress is not valid"));
+			DirectPropertyAddress = PointerToValuePtr(OutContainer, EPropertyPointerType::Container);
+		}
+		DirectValueAccessFunc(DirectPropertyAddress);
+	}
+}
+
 /**
  * Attempts to read an array index (xxx) sequence.  Handles const/enum replacements, etc.
  * @param	ObjectStruct	the scope of the object/struct containing the property we're currently importing
@@ -1008,7 +1519,7 @@ bool FProperty::SameType(const FProperty* Other) const
  * @param	Warn			the output device to send errors/warnings to
  * @return	the array index for this defaultproperties line.  INDEX_NONE if this line doesn't contains an array specifier, or 0 if there was an error parsing the specifier.
  */
-static const int32 ReadArrayIndex(UStruct* ObjectStruct, const TCHAR*& Str, FOutputDevice* Warn)
+static const int32 ReadArrayIndex(const UStruct* ObjectStruct, const TCHAR*& Str, FOutputDevice* Warn)
 {
 	const TCHAR* Start = Str;
 	int32 Index = INDEX_NONE;
@@ -1040,7 +1551,7 @@ static const int32 ReadArrayIndex(UStruct* ObjectStruct, const TCHAR*& Str, FOut
 					if (IndexTokenName != NAME_None)
 					{
 						// Search for the enum in question.
-						Index = UEnum::LookupEnumName(IndexTokenName);
+						Index = IntCastChecked<int32>(UEnum::LookupEnumName(FName(), IndexTokenName, EFindFirstObjectOptions::NativeFirst /* Only native enums can be used as array indices */));
 						if (Index == INDEX_NONE)
 						{
 							Index = 0;
@@ -1101,7 +1612,7 @@ static bool IsPropertyValueSpecified( const TCHAR* Buffer )
 	return Buffer && *Buffer && *Buffer != TCHAR(',') && *Buffer != TCHAR(')');
 }
 
-const TCHAR* FProperty::ImportSingleProperty( const TCHAR* Str, void* DestData, UStruct* ObjectStruct, UObject* SubobjectOuter, int32 PortFlags,
+const TCHAR* FProperty::ImportSingleProperty( const TCHAR* Str, void* DestData, const UStruct* ObjectStruct, UObject* SubobjectOuter, int32 PortFlags,
 											FOutputDevice* Warn, TArray<FDefinedProperty>& DefinedProperties )
 {
 	check(ObjectStruct);
@@ -1111,19 +1622,37 @@ const TCHAR* FProperty::ImportSingleProperty( const TCHAR* Str, void* DestData, 
 
 	// strip leading whitespace
 	const TCHAR* Start = FAsciiSet::Skip(Str, Whitespaces);
-	// find first delimiter
-	Str = FAsciiSet::FindFirstOrEnd(Start, Delimiters);
-	// check if delimiter was found...
-	if (*Str)
+	FName PropertyName;
+	
+	if (*Start == '"')
 	{
-		// strip trailing whitespace
-		int32 Len = Str - Start;
-		while (Len > 0 && Whitespaces.Contains(Start[Len - 1]))
+		int32 OutQuotedLen;
+		FString OutUnquotedString;
+		FParse::QuotedString(Start, OutUnquotedString, &OutQuotedLen);
+		PropertyName = FName(OutUnquotedString);
+		
+		// advance iterator to next delimiter
+		Str = FAsciiSet::FindFirstOrEnd(Start + OutQuotedLen, Delimiters);
+	}
+	else // legacy format requires that we support un-quoted and un-escaped property names
+	{
+		// find first delimiter
+		Str = FAsciiSet::FindFirstOrEnd(Start, Delimiters);
+		// check if delimiter was found...
+		if (*Str)
 		{
-			--Len;
+			// strip trailing whitespace
+			int32 Len = UE_PTRDIFF_TO_INT32(Str - Start);
+			while (Len > 0 && Whitespaces.Contains(Start[Len - 1]))
+			{
+				--Len;
+			}
+			PropertyName = FName(Len, Start);
 		}
-
-		const FName PropertyName(Len, Start);
+	}
+	
+	if (*Str && !PropertyName.IsNone())
+	{
 		FProperty* Property = FindFProperty<FProperty>(ObjectStruct, PropertyName);
 
 		if (Property == nullptr)
@@ -1291,7 +1820,7 @@ const TCHAR* FProperty::ImportSingleProperty( const TCHAR* Str, void* DestData, 
 				{
 					int32	Index = ArrayHelper.AddValue();
 
-					const TCHAR* Result = ArrayProperty->Inner->ImportText(Str, ArrayHelper.GetRawPtr(Index), PortFlags, SubobjectOuter, Warn);
+					const TCHAR* Result = ArrayProperty->Inner->ImportText_Direct(Str, ArrayHelper.GetRawPtr(Index), SubobjectOuter, PortFlags, Warn);
 					if ( Result == NULL || Result == Str )
 					{
 						Warn->Logf(ELogVerbosity::Warning, TEXT("Unable to parse parameter value '%s' in defaultproperties array operation: %s"), Str, Start);
@@ -1310,7 +1839,7 @@ const TCHAR* FProperty::ImportSingleProperty( const TCHAR* Str, void* DestData, 
 					ArrayProperty->Inner->InitializeValue(Temp);
 							
 					// export the value specified to a temporary buffer
-					const TCHAR* Result = ArrayProperty->Inner->ImportText(Str, Temp, PortFlags, SubobjectOuter, Warn);
+					const TCHAR* Result = ArrayProperty->Inner->ImportText_Direct(Str, Temp, SubobjectOuter, PortFlags, Warn);
 					if ( Result == NULL || Result == Str )
 					{
 						Warn->Logf(ELogVerbosity::Error, TEXT("Unable to parse parameter value '%s' in defaultproperties array operation: %s"), Str, Start);
@@ -1430,7 +1959,7 @@ const TCHAR* FProperty::ImportSingleProperty( const TCHAR* Str, void* DestData, 
 					ArrayHelper.ExpandForIndex(Index);
 
 					FStringOutputDevice ImportError;
-					const TCHAR* Result = ArrayProperty->Inner->ImportText(Str, ArrayHelper.GetRawPtr(Index), PortFlags, SubobjectOuter, &ImportError);
+					const TCHAR* Result = ArrayProperty->Inner->ImportText_Direct(Str, ArrayHelper.GetRawPtr(Index), SubobjectOuter, PortFlags, &ImportError);
 					// Spit any error we had while importing property
 					if (ImportError.Len() > 0)
 					{
@@ -1461,7 +1990,7 @@ const TCHAR* FProperty::ImportSingleProperty( const TCHAR* Str, void* DestData, 
 
 					FStringOutputDevice ImportError;
 
-					const TCHAR* Result = Property->ImportText(Str, Property->ContainerPtrToValuePtr<void>(DestData, Index), PortFlags, SubobjectOuter, &ImportError);
+					const TCHAR* Result = Property->ImportText_Direct(Str, Property->ContainerPtrToValuePtr<void>(DestData, Index), SubobjectOuter, PortFlags, &ImportError);
 					
 					// Spit any error we had while importing property
 					if (ImportError.Len() > 0)
@@ -1469,6 +1998,7 @@ const TCHAR* FProperty::ImportSingleProperty( const TCHAR* Str, void* DestData, 
 						TArray<FString> ImportErrors;
 						ImportError.ParseIntoArray(ImportErrors, LINE_TERMINATOR, true);
 
+						Warn->Logf(ELogVerbosity::Warning, TEXT("While importing text for property '%s' in '%s':"), *Property->GetName(), *ObjectStruct->GetName());
 						for ( int32 ErrorIndex = 0; ErrorIndex < ImportErrors.Num(); ErrorIndex++ )
 						{
 							Warn->Logf(ELogVerbosity::Warning, TEXT("%s"), *ImportErrors[ErrorIndex]);
@@ -1490,7 +2020,7 @@ const TCHAR* FProperty::ImportSingleProperty( const TCHAR* Str, void* DestData, 
 	return Str;
 }
 
-FName FProperty::FindRedirectedPropertyName(UStruct* ObjectStruct, FName OldName)
+FName FProperty::FindRedirectedPropertyName(const UStruct* ObjectStruct, FName OldName)
 {
 	DECLARE_SCOPE_CYCLE_COUNTER(TEXT("FProperty::FindRedirectedPropertyName"), STAT_LinkerLoad_FindRedirectedPropertyName, STATGROUP_LoadTimeVerbose);
 
@@ -1569,20 +2099,31 @@ UPropertyWrapper* FProperty::GetUPropertyWrapper()
 }
 #endif //  WITH_EDITORONLY_DATA
 
-void FFloatProperty::ExportTextItem(FString& ValueStr, const void* PropertyValue, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope) const
+bool FProperty::UseBinaryOrNativeSerialization(const FArchive& Ar) const
 {
-	Super::ExportTextItem(ValueStr, PropertyValue, DefaultValue, Parent, PortFlags, ExportRootScope);
-
-	if (0 != (PortFlags & PPF_ExportCpp))
-	{
-		ValueStr += TEXT("f");
-	}
+	return Ar.WantBinaryPropertySerialization();
 }
 
+bool FProperty::LoadTypeName(UE::FPropertyTypeName Type, const FPropertyTag* Tag)
+{
+	return ensureMsgf(GetID() == Type.GetName(),
+		TEXT("Failed to load property '%s' of type '%s' from type name '%s'"),
+		*WriteToString<64>(GetFName()), *WriteToString<64>(GetID()), *WriteToString<64>(Type.GetName()));
+}
+
+void FProperty::SaveTypeName(UE::FPropertyTypeNameBuilder& Type) const
+{
+	Type.AddName(GetID());
+}
+
+bool FProperty::CanSerializeFromTypeName(UE::FPropertyTypeName Type) const
+{
+	return Type.GetName() == GetID();
+}
 
 FProperty* UStruct::FindPropertyByName(FName InName) const
 {
-	for (FProperty* Property = PropertyLink; Property != NULL; Property = Property->PropertyLinkNext)
+	for (FProperty* Property = PropertyLink; Property != nullptr; Property = Property->PropertyLinkNext)
 	{
 		if (Property->GetFName() == InName)
 		{
@@ -1590,8 +2131,5 @@ FProperty* UStruct::FindPropertyByName(FName InName) const
 		}
 	}
 
-	return NULL;
+	return nullptr;
 }
-
-
-#include "UObject/DefineUPropertyMacros.h"

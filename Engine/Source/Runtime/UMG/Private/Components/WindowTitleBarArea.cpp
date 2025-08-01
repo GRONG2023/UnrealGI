@@ -10,6 +10,17 @@
 #include "Widgets/Layout/SWindowTitleBarArea.h"
 #include "Components/WindowTitleBarAreaSlot.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(WindowTitleBarArea)
+
+namespace UE::UMG::Private
+{
+	static TAutoConsoleVariable<bool> CVarForceWindowButtonsHidden(
+		TEXT("WindowTitleBar.ForceWindowButtonsHidden"),
+		false,
+		TEXT("If true, force the window title bar buttons to be hidden."),
+		ECVF_Default);
+}
+
 #define LOCTEXT_NAMESPACE "UMG"
 
 /////////////////////////////////////////////////////
@@ -19,9 +30,10 @@ UWindowTitleBarArea::UWindowTitleBarArea(const FObjectInitializer& ObjectInitial
 	: Super(ObjectInitializer)
 {
 	bIsVariable = false;
-	Visibility = ESlateVisibility::Visible;
-
+	SetVisibilityInternal(ESlateVisibility::Visible);
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	bDoubleClickTogglesFullscreen = false;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 void UWindowTitleBarArea::ReleaseSlateResources(bool bReleaseChildren)
@@ -40,6 +52,7 @@ void UWindowTitleBarArea::ReleaseSlateResources(bool bReleaseChildren)
 TSharedRef<SWidget> UWindowTitleBarArea::RebuildWidget()
 {
 	MyWindowTitleBarArea = SNew(SWindowTitleBarArea);
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	if (bDoubleClickTogglesFullscreen)
 	{
 		WindowActionNotificationHandle = FSlateApplication::Get().RegisterOnWindowActionNotification(BIND_UOBJECT_DELEGATE(FOnWindowAction, HandleWindowAction));
@@ -49,7 +62,7 @@ TSharedRef<SWidget> UWindowTitleBarArea::RebuildWidget()
 		FSlateApplication::Get().UnregisterOnWindowActionNotification(WindowActionNotificationHandle);
 		WindowActionNotificationHandle.Reset();
 	}
-
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	MyWindowTitleBarArea->SetRequestToggleFullscreenCallback(BIND_UOBJECT_DELEGATE(FSimpleDelegate, RequestToggleFullscreen));
 
 	if (GetChildrenCount() > 0)
@@ -62,7 +75,9 @@ TSharedRef<SWidget> UWindowTitleBarArea::RebuildWidget()
 		MyWindowTitleBarArea->SetGameWindow(GEngine->GameViewport->GetWindow());
 	}
 
-	MyWindowTitleBarArea->SetWindowButtonsVisibility(bWindowButtonsEnabled);
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	MyWindowTitleBarArea->SetWindowButtonsVisibility(UE::UMG::Private::CVarForceWindowButtonsHidden.GetValueOnAnyThread() ? false : bWindowButtonsEnabled);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	return MyWindowTitleBarArea.ToSharedRef();
 }
@@ -115,6 +130,42 @@ void UWindowTitleBarArea::SetVerticalAlignment(EVerticalAlignment InVerticalAlig
 		MyWindowTitleBarArea->SetVAlign(InVerticalAlignment);
 	}
 }
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+void UWindowTitleBarArea::SetWindowButtonsEnabled(bool InWindowButtonsEnabled)
+{
+	bWindowButtonsEnabled = InWindowButtonsEnabled;
+	
+	if (MyWindowTitleBarArea.IsValid())
+	{
+		MyWindowTitleBarArea->SetWindowButtonsVisibility(bWindowButtonsEnabled);
+	}
+}
+
+bool UWindowTitleBarArea::IsWindowButtonsEnabled() const
+{
+	return bWindowButtonsEnabled;
+}
+
+void UWindowTitleBarArea::SetDoubleClickTogglesFullscreen(bool InDoubleClickTogglesFullscreen)
+{
+	bDoubleClickTogglesFullscreen = InDoubleClickTogglesFullscreen;
+
+	if (bDoubleClickTogglesFullscreen)
+	{
+		WindowActionNotificationHandle = FSlateApplication::Get().RegisterOnWindowActionNotification(BIND_UOBJECT_DELEGATE(FOnWindowAction, HandleWindowAction));
+	}
+	else if (WindowActionNotificationHandle.IsValid())
+	{
+		FSlateApplication::Get().UnregisterOnWindowActionNotification(WindowActionNotificationHandle);
+		WindowActionNotificationHandle.Reset();
+	}
+}
+
+bool UWindowTitleBarArea::IsDoubleClickTogglesFullscreen() const
+{
+	return bDoubleClickTogglesFullscreen;
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 void UWindowTitleBarArea::PostLoad()
 {
@@ -167,3 +218,4 @@ void UWindowTitleBarArea::RequestToggleFullscreen()
 /////////////////////////////////////////////////////
 
 #undef LOCTEXT_NAMESPACE
+

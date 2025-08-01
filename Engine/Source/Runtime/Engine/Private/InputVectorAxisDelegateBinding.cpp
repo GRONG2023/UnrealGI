@@ -1,8 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/InputVectorAxisDelegateBinding.h"
-#include "GameFramework/Actor.h"
 #include "Components/InputComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(InputVectorAxisDelegateBinding)
 
 
 UInputVectorAxisDelegateBinding::UInputVectorAxisDelegateBinding(const FObjectInitializer& ObjectInitializer)
@@ -10,7 +11,7 @@ UInputVectorAxisDelegateBinding::UInputVectorAxisDelegateBinding(const FObjectIn
 {
 }
 
-void UInputVectorAxisDelegateBinding::BindToInputComponent(UInputComponent* InputComponent) const
+void UInputVectorAxisDelegateBinding::BindToInputComponent(UInputComponent* InputComponent, UObject* ObjectToBindTo) const
 {
 	TArray<FInputVectorAxisBinding> BindsToAdd;
 
@@ -21,7 +22,7 @@ void UInputVectorAxisDelegateBinding::BindToInputComponent(UInputComponent* Inpu
 		FInputVectorAxisBinding VAB( Binding.AxisKey );
 		VAB.bConsumeInput = Binding.bConsumeInput;
 		VAB.bExecuteWhenPaused = Binding.bExecuteWhenPaused;
-		VAB.AxisDelegate.BindDelegate(InputComponent->GetOwner(), Binding.FunctionNameToBind);
+		VAB.AxisDelegate.BindDelegate(ObjectToBindTo, Binding.FunctionNameToBind);
 
 		if (Binding.bOverrideParentBinding)
 		{
@@ -30,7 +31,7 @@ void UInputVectorAxisDelegateBinding::BindToInputComponent(UInputComponent* Inpu
 				const FInputVectorAxisBinding& ExistingBind = InputComponent->VectorAxisBindings[ExistingIndex];
 				if (ExistingBind.AxisKey == VAB.AxisKey)
 				{
-					InputComponent->AxisKeyBindings.RemoveAt(ExistingIndex);
+					InputComponent->VectorAxisBindings.RemoveAt(ExistingIndex);
 				}
 			}
 		}
@@ -44,3 +45,4 @@ void UInputVectorAxisDelegateBinding::BindToInputComponent(UInputComponent* Inpu
 		InputComponent->VectorAxisBindings.Add(BindsToAdd[Index]);
 	}
 }
+

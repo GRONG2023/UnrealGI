@@ -1,10 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "VectorField/VectorFieldVolume.h"
+#include "Async/TaskGraphInterfaces.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Components/BillboardComponent.h"
 #include "Engine/Texture2D.h"
 #include "Components/VectorFieldComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(VectorFieldVolume)
 
 AVectorFieldVolume::AVectorFieldVolume(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -42,4 +45,5 @@ AVectorFieldVolume::AVectorFieldVolume(const FObjectInitializer& ObjectInitializ
 	}
 #endif // WITH_EDITORONLY_DATA
 }
+
 

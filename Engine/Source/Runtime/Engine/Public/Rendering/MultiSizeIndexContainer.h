@@ -26,6 +26,11 @@ public:
 	ENGINE_API ~FMultiSizeIndexContainer();
 
 	/**
+	* SetOwnerName should be called before BeginInitResources for the owner name to be successfully tracked.
+	*/
+	ENGINE_API void SetOwnerName(const FName& OwnerName);
+
+	/**
 	* Initialize the index buffer's render resources.
 	*/
 	void InitResources();
@@ -94,41 +99,15 @@ public:
 
 	friend FArchive& operator<<(FArchive& Ar, FMultiSizeIndexContainer& Buffer);
 
-	FIndexBufferRHIRef CreateRHIBuffer_RenderThread();
-	FIndexBufferRHIRef CreateRHIBuffer_Async();
+	ENGINE_API FBufferRHIRef CreateRHIBuffer(FRHICommandListBase& RHICmdList);
 
-	template <uint32 MaxNumUpdates>
-	void InitRHIForStreaming(FRHIIndexBuffer* IntermediateBuffer, TRHIResourceUpdateBatcher<MaxNumUpdates>& Batcher)
-	{
-		check(!((uint32)!!IntermediateBuffer ^ (uint32)!!IndexBuffer));
-		if (IntermediateBuffer)
-		{
-			if (DataTypeSize == sizeof(uint16))
-			{
-				static_cast<FRawStaticIndexBuffer16or32<uint16>*>(IndexBuffer)->InitRHIForStreaming(IntermediateBuffer, Batcher);
-			}
-			else
-			{
-				static_cast<FRawStaticIndexBuffer16or32<uint32>*>(IndexBuffer)->InitRHIForStreaming(IntermediateBuffer, Batcher);
-			}
-		}
-	}
+	UE_DEPRECATED(5.4, "Use CreateRHIBuffer instead.")
+	ENGINE_API FBufferRHIRef CreateRHIBuffer_RenderThread();
+	UE_DEPRECATED(5.4, "Use CreateRHIBuffer instead.")
+	ENGINE_API FBufferRHIRef CreateRHIBuffer_Async();
 
-	template <uint32 MaxNumUpdates>
-	void ReleaseRHIForStreaming(TRHIResourceUpdateBatcher<MaxNumUpdates>& Batcher)
-	{
-		if (IndexBuffer)
-		{
-			if (DataTypeSize == sizeof(uint16))
-			{
-				static_cast<FRawStaticIndexBuffer16or32<uint16>*>(IndexBuffer)->ReleaseRHIForStreaming(Batcher);
-			}
-			else
-			{
-				static_cast<FRawStaticIndexBuffer16or32<uint32>*>(IndexBuffer)->ReleaseRHIForStreaming(Batcher);
-			}
-		}
-	}
+	void InitRHIForStreaming(FRHIBuffer* IntermediateBuffer, FRHIResourceUpdateBatcher& Batcher);
+	void ReleaseRHIForStreaming(FRHIResourceUpdateBatcher& Batcher);
 
 private:
 	/** Size of the index buffer's index type (should be 2 or 4 bytes) */

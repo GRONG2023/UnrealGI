@@ -13,6 +13,8 @@ PRAGMA_DISABLE_UNSAFE_TYPECAST_WARNINGS
 #include "HAL/MemoryMisc.h"
 #include "HAL/PlatformMisc.h"
 
+#include <limits>
+
 struct FMallocBinnedGPU::FPoolInfoSmall
 {
 	enum ECanary
@@ -581,18 +583,19 @@ void FMallocBinnedGPU::InitMallocBinned()
 		if (Size > ArenaParams.BasePageSize)
 		{
 			check(Size % 4096 == 0); // calculations are done assume 4k is the smallest page size we will ever see
-			SizeTable.Emplace(Size, ArenaParams.AllocationGranularity, Size / 4096, ArenaParams.BasePageSize, ArenaParams.MinimumAlignment);
+			check(Size / 4096 <= std::numeric_limits<uint8>::max())		// Make sure we don't try to allocate more pages than fits in our counter.
+			SizeTable.Emplace(Size, ArenaParams.AllocationGranularity, (uint8)(Size / 4096), ArenaParams.BasePageSize, ArenaParams.MinimumAlignment);
 		}
 		else
 		{
 			// it is difficult to test what would actually make a good bucket size here, wouldn't want a prime number, 33 for example because that would take 33 pages a slab
-			SizeTable.Emplace(Size, ArenaParams.AllocationGranularity, 1, ArenaParams.BasePageSize, ArenaParams.MinimumAlignment);
+			SizeTable.Emplace(Size, ArenaParams.AllocationGranularity, (uint8)1, ArenaParams.BasePageSize, ArenaParams.MinimumAlignment);
 		}
 		ArenaParams.PoolCount++;
 	}
 	if (ArenaParams.AdditionalBlockSizes.Num())
 	{
-		Sort(&SizeTable[0], SizeTable.Num());
+		Algo::Sort(SizeTable);
 	}
 	check(ArenaParams.PoolCount == SizeTable.Num());
 	check(SizeTable.Num() < 256);
@@ -1092,11 +1095,11 @@ void FMallocBinnedGPU::SetupTLSCachesOnCurrentThread()
 	{
 		return;
 	}
-	if (!BinnedGPUTlsSlot)
+	if (!FPlatformTLS::IsValidTlsSlot(BinnedGPUTlsSlot))
 	{
 		BinnedGPUTlsSlot = FPlatformTLS::AllocTlsSlot();
 	}
-	check(BinnedGPUTlsSlot);
+	check(FPlatformTLS::IsValidTlsSlot(BinnedGPUTlsSlot));
 	FPerThreadFreeBlockLists::SetTLS(*this);
 }
 
@@ -1172,7 +1175,7 @@ FMallocBinnedGPU::FBundleNode* FMallocBinnedGPU::FFreeBlockList::PopBundles(uint
 void FMallocBinnedGPU::FPerThreadFreeBlockLists::SetTLS(FMallocBinnedGPU& Allocator)
 {
 	uint32 BinnedGPUTlsSlot = Allocator.BinnedGPUTlsSlot;
-	check(BinnedGPUTlsSlot);
+	check(FPlatformTLS::IsValidTlsSlot(BinnedGPUTlsSlot));
 	FPerThreadFreeBlockLists* ThreadSingleton = (FPerThreadFreeBlockLists*)FPlatformTLS::GetTlsValue(BinnedGPUTlsSlot);
 	if (!ThreadSingleton)
 	{
@@ -1188,7 +1191,7 @@ void FMallocBinnedGPU::FPerThreadFreeBlockLists::SetTLS(FMallocBinnedGPU& Alloca
 int64 FMallocBinnedGPU::FPerThreadFreeBlockLists::ClearTLS(FMallocBinnedGPU& Allocator)
 {
 	uint32 BinnedGPUTlsSlot = Allocator.BinnedGPUTlsSlot;
-	check(BinnedGPUTlsSlot);
+	check(FPlatformTLS::IsValidTlsSlot(BinnedGPUTlsSlot));
 	int64 Result = 0;
 	FPerThreadFreeBlockLists* ThreadSingleton = (FPerThreadFreeBlockLists*)FPlatformTLS::GetTlsValue(BinnedGPUTlsSlot);
 	if (ThreadSingleton)
@@ -1295,4 +1298,4 @@ void FMallocBinnedGPU::DumpAllocatorStats(class FOutputDevice& Ar)
 }
 #endif
 
-PRAGMA_ENABLE_UNSAFE_TYPECAST_WARNINGS
+PRAGMA_RESTORE_UNSAFE_TYPECAST_WARNINGS

@@ -4,21 +4,10 @@
 	RendererSupport.cpp: Central place for various rendering functionality that exists in Engine
 =============================================================================*/
 
-#include "CoreMinimal.h"
-#include "HAL/IConsoleManager.h"
 #include "Misc/FeedbackContext.h"
-#include "Modules/ModuleManager.h"
-#include "UObject/UObjectHash.h"
-#include "EngineGlobals.h"
-#include "RenderingThread.h"
-#include "Containers/List.h"
-#include "Shader.h"
+#include "Engine/Level.h"
 #include "VertexFactory.h"
-#include "SceneTypes.h"
-#include "Materials/MaterialInterface.h"
-#include "MaterialShared.h"
 #include "Materials/Material.h"
-#include "UObject/UObjectIterator.h"
 #include "ComponentReregisterContext.h"
 #include "UnrealEngine.h"
 #include "Framework/Application/SlateApplication.h"
@@ -29,7 +18,6 @@
 #include "EngineModule.h"
 #include "Misc/HotReloadInterface.h"
 #include "ComponentReregisterContext.h"
-#include "Templates/UniquePtr.h"
 #include "ShaderCompiler.h"
 #include "SceneInterface.h"
 
@@ -42,6 +30,9 @@ static void ClearReferencesToRendererModuleClasses(
 	TMap<const FShaderPipelineType*, FHashedName>& ShaderPipelineTypeNames,
 	TMap<FVertexFactoryType*, FHashedName>& VertexFactoryTypeNames)
 {
+	// Destroy scene view states -- must be called before destroying scenes, as scenes may have references to view states
+	FSceneViewStateReference::DestroyAll();
+
 	// Destroy all renderer scenes
 	for (TObjectIterator<UWorld> WorldIt; WorldIt; ++WorldIt)
 	{
@@ -93,7 +84,6 @@ static void ClearReferencesToRendererModuleClasses(
 	}
 
 	// Destroy misc renderer module classes and remove references
-	FSceneViewStateReference::DestroyAll();
 	FSlateApplication::Get().InvalidateAllViewports();
 
 	// Invalidate cached shader type data
@@ -153,14 +143,17 @@ static void RestoreReferencesToRendererModuleClasses(
 
 	IRendererModule& RendererModule = GetRendererModule();
 
-	FSceneViewStateReference::AllocateAll();
+	TMap<UWorld*, bool>::TConstIterator WorldsIt(WorldsToUpdate);
+	const ERHIFeatureLevel::Type FirstFeatureLevel = WorldsIt ? WorldsIt.Key()->GetFeatureLevel() : GMaxRHIFeatureLevel;
+
+	FSceneViewStateReference::AllocateAll(FirstFeatureLevel);
 
 	// Recreate all renderer scenes
 	for (TMap<UWorld*, bool>::TConstIterator It(WorldsToUpdate); It; ++It)
 	{
 		UWorld* World = It.Key();
 
-		RendererModule.AllocateScene(World, World->RequiresHitProxies(), It.Value(), World->FeatureLevel);
+		RendererModule.AllocateScene(World, World->RequiresHitProxies(), It.Value(), World->GetFeatureLevel());
 
 		for (int32 LevelIndex = 0; LevelIndex < World->GetNumLevels(); LevelIndex++)
 		{
@@ -187,6 +180,10 @@ static void RestoreReferencesToRendererModuleClasses(
 	TArray<const FVertexFactoryType*> OutdatedFactoryTypes;
 	TArray<const FShaderPipelineType*> OutdatedShaderPipelineTypes;
 	GetOutdatedShaderTypes(OutdatedShaderTypes, OutdatedShaderPipelineTypes, OutdatedFactoryTypes);
+
+#if WITH_EDITOR
+	UpdateReferencedUniformBufferNames(OutdatedShaderTypes, OutdatedFactoryTypes, OutdatedShaderPipelineTypes);
+#endif
 
 	// Recompile any missing shaders
 	UMaterialInterface::IterateOverActiveFeatureLevels([&](ERHIFeatureLevel::Type FeatureLevel) 

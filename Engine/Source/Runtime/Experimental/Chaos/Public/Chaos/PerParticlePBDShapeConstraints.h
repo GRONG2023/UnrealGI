@@ -1,31 +1,32 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
-#include "Chaos/Array.h"
-#include "Chaos/Map.h"
-#include "Chaos/PBDParticles.h"
-#include "Chaos/PBDShapeConstraintsBase.h"
-#include "Chaos/PerParticleRule.h"
+// HEADER_UNIT_SKIP - This file does not compile anymore (Base ctor not matching)
 
-namespace Chaos
+#include "Chaos/PBDShapeConstraintsBase.h"
+#include "Chaos/Framework/Parallel.h"
+#include "Chaos/PBDSoftsEvolutionFwd.h"
+
+namespace Chaos::Softs
 {
-class FPerParticlePBDShapeConstraints : public FPerParticleRule, public FPBDShapeConstraintsBase
+
+class UE_DEPRECATED(5.0, "Per particle constraint rules are no longer used by the cloth solver. Use FPBDShapeConstraints instead.") FPerParticlePBDShapeConstraints final : public FPBDShapeConstraintsBase
 {
 	typedef FPBDShapeConstraintsBase Base;
 
   public:
-	FPerParticlePBDShapeConstraints(const FReal Stiffness = (FReal)1.)
+	FPerParticlePBDShapeConstraints(const FSolverReal Stiffness = (FSolverReal)1.)
 	    : Base(Stiffness)
 	{
 	}
-	FPerParticlePBDShapeConstraints(const FDynamicParticles& InParticles, const TArray<FVec3>& TargetPositions, const FReal Stiffness = (FReal)1.)
+	FPerParticlePBDShapeConstraints(const FSolverParticles& InParticles, const TArray<FSolverVec3>& TargetPositions, const FSolverReal Stiffness = (FSolverReal)1.)
 	    : Base(InParticles, TargetPositions, Stiffness)
 	{
 	}
-	virtual ~FPerParticlePBDShapeConstraints() {}
+	virtual ~FPerParticlePBDShapeConstraints() override {}
 
 	// TODO(mlentine): We likely need to use time n positions here
-	void Apply(FPBDParticles& InParticles, const FReal Dt, const int32 Index) const override //-V762
+	void Apply(FSolverParticles& InParticles, const FSolverReal Dt, const int32 Index) const
 	{
 		if (InParticles.InvM(Index) > 0)
 		{
@@ -33,11 +34,12 @@ class FPerParticlePBDShapeConstraints : public FPerParticleRule, public FPBDShap
 		}
 	}
 
-	void Apply(FPBDParticles& InParticles, const FReal Dt) const override //-V762
+	void Apply(FSolverParticles& InParticles, const FSolverReal Dt) const
 	{
 		PhysicsParallelFor(InParticles.Size(), [&](int32 Index) {
 			Apply(InParticles, Dt, Index);
 		});
 	}
 };
-}
+
+}  // End namespace Chaos::Softs

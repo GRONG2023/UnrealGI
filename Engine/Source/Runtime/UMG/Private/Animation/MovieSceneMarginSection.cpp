@@ -10,6 +10,8 @@
 #include "Evaluation/MovieScenePropertyTemplate.h"
 #include "Tracks/MovieScenePropertyTrack.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneMarginSection)
+
 #if WITH_EDITOR
 
 struct FMarginSectionEditorData
@@ -17,18 +19,22 @@ struct FMarginSectionEditorData
 	FMarginSectionEditorData()
 	{
 		MetaData[0].SetIdentifiers("Left", NSLOCTEXT("MovieSceneMarginSection", "LeftText", "Left"));
+		MetaData[0].SubPropertyPath = MetaData[0].Name;
 		MetaData[0].SortOrder = 0;
 		MetaData[0].bCanCollapseToTrack = false;
 
 		MetaData[1].SetIdentifiers("Top", NSLOCTEXT("MovieSceneMarginSection", "TopText", "Top"));
+		MetaData[1].SubPropertyPath = MetaData[1].Name;
 		MetaData[1].SortOrder = 1;
 		MetaData[1].bCanCollapseToTrack = false;
 
 		MetaData[2].SetIdentifiers("Right", NSLOCTEXT("MovieSceneMarginSection", "RightText", "Right"));
+		MetaData[2].SubPropertyPath = MetaData[2].Name;
 		MetaData[2].SortOrder = 2;
 		MetaData[2].bCanCollapseToTrack = false;
 
 		MetaData[3].SetIdentifiers("Bottom", NSLOCTEXT("MovieSceneMarginSection", "BottomText", "Bottom"));
+		MetaData[3].SubPropertyPath = MetaData[3].Name;
 		MetaData[3].SortOrder = 3;
 		MetaData[3].bCanCollapseToTrack = false;
 
@@ -111,3 +117,4 @@ void UMovieSceneMarginSection::ImportEntityImpl(UMovieSceneEntitySystemLinker* E
 		.AddConditional(Components->FloatChannel[3], &BottomCurve, BottomCurve.HasAnyData())
 		.Commit(this, Params, OutImportedEntity);
 }
+

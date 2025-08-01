@@ -5,20 +5,15 @@
 =============================================================================*/
 
 #include "WorldCollision.h"
-#include "Misc/CoreMisc.h"
-#include "EngineDefines.h"
-#include "PhysicsEngine/BodyInstance.h"
-#include "Components/SkeletalMeshComponent.h"
-#include "Engine/CollisionProfile.h"
+#include "Components/PrimitiveComponent.h"
+#include "Engine/HitResult.h"
+#include "Engine/OverlapResult.h"
+#include "Engine/World.h"
 #include "Framework/Docking/TabManager.h"
 #include "Collision.h"
-#include "Physics/PhysicsInterfaceCore.h"
-#include "PhysXPublic.h"
-#include "Physics/PhysicsInterfaceTypes.h"
-
-#if WITH_CHAOS
+#include "PhysicsEngine/PhysicsObjectExternalInterface.h"
 #include "Chaos/ImplicitObject.h"
-#endif
+#include "Collision/CollisionConversions.h"
 
 using namespace PhysicsInterfaceTypes;
 
@@ -55,6 +50,7 @@ FCollisionShape					FCollisionShape::LineShape;
 // default being the 0. That isn't invalid, but ObjectQuery param overrides this 
 ECollisionChannel DefaultCollisionChannel = (ECollisionChannel) 0;
 
+//////////////////////////////////////////////////////////////////////////
 
 /* Set functions for each Shape type */
 void FBaseTraceDatum::Set(UWorld * World, const FCollisionShape& InCollisionShape, const FCollisionQueryParams& Param, const struct FCollisionResponseParams &InResponseParam, const struct FCollisionObjectQueryParams& InObjectQueryParam,
@@ -71,6 +67,52 @@ void FBaseTraceDatum::Set(UWorld * World, const FCollisionShape& InCollisionShap
 	PhysWorld = World;
 }
 
+//////////////////////////////////////////////////////////////////////////
+
+FTraceDatum::FTraceDatum() {}
+
+/** Set Trace Datum for each shape type **/
+FTraceDatum::FTraceDatum(UWorld* World, const FCollisionShape& CollisionShape, const FCollisionQueryParams& Param, const struct FCollisionResponseParams& InResponseParam, const struct FCollisionObjectQueryParams& InObjectQueryParam,
+	ECollisionChannel Channel, uint32 InUserData, EAsyncTraceType InTraceType, const FVector& InStart, const FVector& InEnd, const FQuat& InRot, const FTraceDelegate* InDelegate, int32 FrameCounter)
+{
+	Set(World, CollisionShape, Param, InResponseParam, InObjectQueryParam, Channel, InUserData, FrameCounter);
+	Start = InStart;
+	End = InEnd;
+	Rot = InRot;
+	if (InDelegate)
+	{
+		Delegate = *InDelegate;
+	}
+	else
+	{
+		Delegate.Unbind();
+	}
+	OutHits.Reset();
+	TraceType = InTraceType;
+}
+
+//////////////////////////////////////////////////////////////////////////
+
+FOverlapDatum::FOverlapDatum()
+{}
+
+FOverlapDatum::FOverlapDatum(UWorld* World, const FCollisionShape& CollisionShape, const FCollisionQueryParams& Param, const FCollisionResponseParams& InResponseParam,
+	const FCollisionObjectQueryParams& InObjectQueryParam, ECollisionChannel Channel, uint32 InUserData, const FVector& InPos, const FQuat& InRot,
+	const FOverlapDelegate* InDelegate, int32 FrameCounter)
+{
+	Set(World, CollisionShape, Param, InResponseParam, InObjectQueryParam, Channel, InUserData, FrameCounter);
+	Pos = InPos;
+	Rot = InRot;
+	if (InDelegate)
+	{
+		Delegate = *InDelegate;
+	}
+	else
+	{
+		Delegate.Unbind();
+	}
+	OutOverlaps.Reset();
+}
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -324,20 +366,108 @@ bool UWorld::ComponentOverlapMulti(TArray<struct FOverlapResult>& OutOverlaps, c
 	}
 }
 
-bool UWorld::ComponentOverlapMultiByChannel(TArray<struct FOverlapResult>& OutOverlaps, const class UPrimitiveComponent* PrimComp, const FVector& Pos, const FQuat& Quat, ECollisionChannel TraceChannel, const FComponentQueryParams& Params /* = FComponentQueryParams::DefaultComponentQueryParams */, const FCollisionObjectQueryParams& ObjectQueryParams/* =FCollisionObjectQueryParams::DefaultObjectQueryParam */) const
+bool UWorld::ComponentOverlapMultiByChannel(TArray<struct FOverlapResult>& OutOverlaps, const class UPrimitiveComponent* PrimComp, const FVector& Pos, const FQuat& Quat, ECollisionChannel TraceChannel, const FComponentQueryParams& Params, const FCollisionObjectQueryParams& ObjectQueryParams) const
+{
+	if (!GetPhysicsScene())
+	{
+		return false;
+	}
+
+	if (!PrimComp)
+	{
+		UE_LOG(LogCollision, Log, TEXT("ComponentOverlapMultiByChannel : No PrimComp"));
+		return false;
+	}
+
+	FComponentQueryParams ParamsWithSelf = Params;
+	ParamsWithSelf.AddIgnoredComponent_LikelyDuplicatedRoot(PrimComp);
+	OutOverlaps.Reset();
+
+	// Maintains compatibility with previous versions that primarily depended on the body instance.
+	FBodyInstance* BodyInstance = PrimComp->GetBodyInstance();
+	if (BodyInstance)
+	{
+		return BodyInstance->OverlapMulti(OutOverlaps, this, nullptr, Pos, Quat, TraceChannel, ParamsWithSelf, FCollisionResponseParams{ BodyInstance->GetResponseToChannels() }, ObjectQueryParams);
+	}
+
+	// New version that's more generic and relies on the physics object interface.
+	TArray<Chaos::FPhysicsObjectHandle> PhysicsObjects = PrimComp->GetAllPhysicsObjects();
+	FLockedReadPhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockRead(PhysicsObjects);
+
+	// For geometry collections we want to make sure we don't account for disabled particles since that means their parent cluster still hasn't released them yet.
+	// This should be safe for non-geometry collections and not filter out anything.
+	PhysicsObjects = PhysicsObjects.FilterByPredicate(
+		[&Interface](Chaos::FPhysicsObject* Object)
+		{
+			return !Interface->AreAllDisabled({ &Object, 1 });
+		}
+	);
+
+	if (PhysicsObjects.IsEmpty())
+	{
+		UE_LOG(LogCollision, Log, TEXT("UWorld::ComponentOverlapMultiByChannel : (%s) No physics data"), *PrimComp->GetName());
+		return false;
+	}
+
+	bool bHaveBlockingHit = false;
+	FCollisionResponseParams CollisionResponseParams{ PrimComp->GetCollisionResponseToChannels() };
+
+	const FTransform ComponentToTest{ Quat, Pos };
+	const FTransform WorldToComponent = PrimComp->GetComponentToWorld().Inverse();
+
+	TArray<struct FOverlapResult> TempOverlaps;
+	for (Chaos::FPhysicsObjectHandle Object : PhysicsObjects)
+	{
+		TArray<Chaos::FShapeInstanceProxy*> Shapes = Interface->GetAllThreadShapes({&Object, 1});
+
+		// Determine how to convert the local space of this body instance to the test space
+		const FTransform ObjectToWorld = Interface->GetTransform(Object);
+		const FTransform ObjectToTest = ComponentToTest * WorldToComponent * ObjectToWorld;
+
+		for (Chaos::FShapeInstanceProxy* Shape : Shapes)
+		{
+			FPhysicsShapeHandle ShapeRef{ Shape, nullptr };
+
+			// TODO: Add support to be able to check if the shape collision is enabled for the generic physics object interface.
+			/*
+			// Skip this shape if it's CollisionEnabled setting was masked out
+			if (ParamsWithSelf.ShapeCollisionMask && !(ParamsWithSelf.ShapeCollisionMask & BodyInstance->GetShapeCollisionEnabled(ShapeIdx)))
+			{
+				continue;
+			}
+			*/
+			FPhysicsGeometryCollection GeomCollection = FPhysicsInterface::GetGeometryCollection(ShapeRef);
+			if (!ShapeRef.GetGeometry().IsConvex())
+			{
+				continue;	//we skip complex shapes - should this respect ComplexAsSimple?
+			}
+
+			TempOverlaps.Reset();
+			if (FPhysicsInterface::GeomOverlapMulti(this, GeomCollection, ObjectToTest.GetTranslation(), ObjectToTest.GetRotation(), TempOverlaps, TraceChannel, ParamsWithSelf, CollisionResponseParams, ObjectQueryParams))
+			{
+				bHaveBlockingHit = true;
+			}
+			OutOverlaps.Append(TempOverlaps);
+		}
+	}
+
+	return bHaveBlockingHit;
+}
+
+bool UWorld::ComponentSweepMulti(TArray<struct FHitResult>& OutHits, class UPrimitiveComponent* PrimComp, const FVector& Start, const FVector& End, const FQuat& Quat, const FComponentQueryParams& Params) const
 {
 	if (PrimComp)
 	{
-		return PrimComp->ComponentOverlapMulti(OutOverlaps, this, Pos, Quat, TraceChannel, Params, ObjectQueryParams);
+		return ComponentSweepMultiByChannel(OutHits, PrimComp, Start, End, Quat, PrimComp->GetCollisionObjectType(), Params);
 	}
 	else
 	{
-		UE_LOG(LogCollision, Log, TEXT("ComponentOverlapMulti : No PrimComp"));
+		UE_LOG(LogCollision, Log, TEXT("ComponentSweepMulti : No PrimComp"));
 		return false;
 	}
 }
 
-bool UWorld::ComponentSweepMulti(TArray<struct FHitResult>& OutHits, class UPrimitiveComponent* PrimComp, const FVector& Start, const FVector& End, const FQuat& Quat, const FComponentQueryParams& Params) const
+bool UWorld::ComponentSweepMultiByChannel(TArray<struct FHitResult>& OutHits, class UPrimitiveComponent* PrimComp, const FVector& Start, const FVector& End, const FQuat& Rot, ECollisionChannel TraceChannel, const FComponentQueryParams& Params) const
 {
 	OutHits.Reset();
 
@@ -348,11 +478,9 @@ bool UWorld::ComponentSweepMulti(TArray<struct FHitResult>& OutHits, class UPrim
 
 	if (PrimComp == NULL)
 	{
-		UE_LOG(LogCollision, Log, TEXT("ComponentSweepMulti : No PrimComp"));
+		UE_LOG(LogCollision, Log, TEXT("ComponentSweepMultiByChannel : No PrimComp"));
 		return false;
 	}
-
-	ECollisionChannel TraceChannel = PrimComp->GetCollisionObjectType();
 
 	// if extent is 0, do line trace
 	if (PrimComp->IsZeroExtent())
@@ -360,77 +488,74 @@ bool UWorld::ComponentSweepMulti(TArray<struct FHitResult>& OutHits, class UPrim
 		return FPhysicsInterface::RaycastMulti(this, OutHits, Start, End, TraceChannel, Params, FCollisionResponseParams(PrimComp->GetCollisionResponseToChannels()));
 	}
 
+	TArray<Chaos::FPhysicsObject*> PhysicsObjects = PrimComp->GetAllPhysicsObjects();
+	FLockedReadPhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockRead(PhysicsObjects);
 
-	const FBodyInstance* BodyInstance = PrimComp->GetBodyInstance();
-
-	if (!BodyInstance || !BodyInstance->IsValidBodyInstance())
-	{
-		UE_LOG(LogCollision, Log, TEXT("ComponentSweepMulti : (%s) No physics data"), *PrimComp->GetReadableName());
-		return false;
-	}
-
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
-	if(PrimComp->IsA(USkeletalMeshComponent::StaticClass()))
-	{
-		UE_LOG(LogCollision, Log, TEXT("ComponentSweepMulti : SkeletalMeshComponent support only root body (%s) "), *PrimComp->GetReadableName());
-	}
-#endif
+	// For geometry collections we want to make sure we don't account for disabled particles since that means their parent cluster still hasn't released them yet.
+	// This should be safe for non-geometry collections and not filter out anything.
+	PhysicsObjects = PhysicsObjects.FilterByPredicate(
+		[&Interface](Chaos::FPhysicsObject* Object)
+		{
+			return !Interface->AreAllDisabled({ &Object, 1 });
+		}
+	);
 
 	SCOPE_CYCLE_COUNTER(STAT_Collision_GeomSweepMultiple);
 	bool bHaveBlockingHit = false;
 
-	FPhysicsCommand::ExecuteRead(BodyInstance->ActorHandle, [&](const FPhysicsActorHandle& Actor)
+	const FTransform ComponentToStart{ Rot, Start };
+	const FTransform ComponentToEnd{ Rot, End };
+
+	const FTransform WorldToComponent = PrimComp->GetComponentToWorld().Inverse();
+
+	TArray<FHitResult> TempHits;
+	for (Chaos::FPhysicsObjectHandle Object : PhysicsObjects)
 	{
-		if(!FPhysicsInterface::IsValid(Actor))
+		FComponentQueryParams ParamsCopy{ Params };
+		TSet<uint32> ActorsToExclude;
+		for (uint32 ActorID : ParamsCopy.GetIgnoredActors())
 		{
-			return;
+			ActorsToExclude.Add(ActorID);
+		}		
+		ParamsCopy.ClearIgnoredActors(); // This will be populated a bit later
+		// All actors pointed to by shapes should be ignored (This deals with welded Actors)
+		TArray<Chaos::FShapeInstanceProxy*> Shapes = Interface->GetAllThreadShapes({ &Object, 1 });
+		for (Chaos::FShapeInstanceProxy* Shape : Shapes)
+		{
+			FCollisionFilterData ShapeFilter = ChaosInterface::GetQueryFilterData(*Shape);
+			uint32 ShapeActorID = ShapeFilter.Word0; // Unique Actor ID is saved in word 0
+			ActorsToExclude.Add(ShapeActorID);
 		}
 
-		// Get all the shapes from the actor
-		FInlineShapeArray PShapes;
-		const int32 NumShapes = FillInlineShapeArray_AssumesLocked(PShapes, Actor);
-
-		// calculate the test global pose of the actor
-		const FTransform GlobalStartTransform(Quat, Start);
-		const FTransform GlobalEndTransform(Quat, End);
-
-		for(FPhysicsShapeHandle& Shape : PShapes)
+		for (uint32 ActorID : ActorsToExclude)
 		{
-			check(Shape.IsValid());
-			ECollisionShapeType ShapeType = FPhysicsInterface::GetShapeType(Shape);
+			ParamsCopy.AddIgnoredActor(ActorID);
+		}
 
-#if WITH_CHAOS
-			if (!Shape.GetGeometry().IsConvex())
+		for (Chaos::FShapeInstanceProxy* Shape : Shapes)
+		{
+			FPhysicsShapeHandle ShapeHandle{ Shape, nullptr };
+
+			check(ShapeHandle.IsValid());
+			ECollisionShapeType ShapeType = FPhysicsInterface::GetShapeType(ShapeHandle);
+
+			if (!ShapeHandle.GetGeometry().IsConvex())
 			{
 				//We skip complex shapes. Should this respect complex as simple?
 				continue;
 			}
-#else
-			if(ShapeType == ECollisionShapeType::Heightfield || ShapeType == ECollisionShapeType::Trimesh)
-			{
-				//We skip complex shapes. Should this respect complex as simple?
-				continue;
-			}
-#endif
 
-			// Calc shape global pose
-			const FTransform ShapeLocalTransform = FPhysicsInterface::GetLocalTransform(Shape);
-			const FTransform GlobalStartTransform_Shape = ShapeLocalTransform * GlobalStartTransform;
-			FTransform GlobalEndTransform_Shape = ShapeLocalTransform * GlobalEndTransform;
-
-			// consider localshape rotation for shape rotation
-			const FQuat ShapeQuat = Quat * ShapeLocalTransform.GetRotation();
-
-			FPhysicsGeometryCollection GeomCollection = FPhysicsInterface::GetGeometryCollection(Shape);
-			TArray<FHitResult> TmpHits;
-			if(FPhysicsInterface::GeomSweepMulti(this, GeomCollection, ShapeQuat, TmpHits, GlobalStartTransform_Shape.GetTranslation(), GlobalEndTransform_Shape.GetTranslation(), TraceChannel, Params, FCollisionResponseParams(PrimComp->GetCollisionResponseToChannels())))
+			FPhysicsGeometryCollection GeomCollection = FPhysicsInterface::GetGeometryCollection(ShapeHandle);
+			TempHits.Reset();
+			if (FPhysicsInterface::GeomSweepMulti(this, GeomCollection, Rot, TempHits, Start, End, TraceChannel, ParamsCopy, FCollisionResponseParams(PrimComp->GetCollisionResponseToChannels())))
 			{
 				bHaveBlockingHit = true;
 			}
-			OutHits.Append(TmpHits);	//todo: should these be made unique?
+			OutHits.Append(TempHits);	//todo: should these be made unique?
 		}
-	});
+	}
 
+	OutHits.Sort(FCompareFHitResultTime());
 	return bHaveBlockingHit;
 }
 
@@ -439,9 +564,9 @@ bool UWorld::ComponentSweepMulti(TArray<struct FHitResult>& OutHits, class UPrim
 
 static class FCollisionExec : private FSelfRegisteringExec
 {
-public:
+protected:
 	/** Console commands, see embeded usage statement **/
-	virtual bool Exec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar ) override
+	virtual bool Exec_Dev( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar ) override
 	{
 #if ENABLE_COLLISION_ANALYZER
 		if (FParse::Command(&Cmd, TEXT("CANALYZER")))
@@ -456,3 +581,11 @@ public:
 
 #endif // ENABLE_COLLISION_ANALYZER
 
+AsyncTraceData::AsyncTraceData()
+	: NumQueuedTraceData(0)
+	, NumQueuedOverlapData(0)
+	, bAsyncAllowed(false)
+	, bAsyncTasksCompleted(false)
+{}
+
+AsyncTraceData::~AsyncTraceData() = default;

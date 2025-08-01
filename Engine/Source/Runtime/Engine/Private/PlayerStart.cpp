@@ -1,11 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "GameFramework/PlayerStart.h"
+#include "Async/TaskGraphInterfaces.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Components/ArrowComponent.h"
 #include "Engine/Texture2D.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/BillboardComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PlayerStart)
 
 APlayerStart::APlayerStart(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -61,6 +64,8 @@ APlayerStart::APlayerStart(const FObjectInitializer& ObjectInitializer)
 			ArrowComponent->bIsScreenSizeScaled = true;
 		}
 	}
+
+	bIsSpatiallyLoaded = false;
 #endif // WITH_EDITORONLY_DATA
 }
 
@@ -68,3 +73,4 @@ APlayerStart::APlayerStart(const FObjectInitializer& ObjectInitializer)
 /** Returns ArrowComponent subobject **/
 UArrowComponent* APlayerStart::GetArrowComponent() const { return ArrowComponent; }
 #endif
+

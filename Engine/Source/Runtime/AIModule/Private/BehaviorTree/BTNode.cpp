@@ -7,6 +7,9 @@
 #include "BehaviorTree/BehaviorTree.h"
 #include "GameplayTasksComponent.h"
 #include "UObject/Package.h"
+#include "Styling/AppStyle.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BTNode)
 
 //----------------------------------------------------------------------//
 // UBTNode
@@ -87,7 +90,7 @@ void UBTNode::InitializeInSubtree(UBehaviorTreeComponent& OwnerComp, uint8* Node
 		// composite nodes can't be instanced!
 		check(IsA(UBTCompositeNode::StaticClass()) == false);
 
-		UBTNode* NodeInstance = OwnerComp.NodeInstances.IsValidIndex(NextInstancedIndex) ? OwnerComp.NodeInstances[NextInstancedIndex] : NULL;
+		UBTNode* NodeInstance = OwnerComp.NodeInstances.IsValidIndex(NextInstancedIndex) ? ToRawPtr(OwnerComp.NodeInstances[NextInstancedIndex]) : NULL;
 		if (NodeInstance == NULL)
 		{
 			NodeInstance = (UBTNode*)StaticDuplicateObject(this, &OwnerComp);
@@ -105,6 +108,8 @@ void UBTNode::InitializeInSubtree(UBehaviorTreeComponent& OwnerComp, uint8* Node
 		NodeInstance->SetOwner(OwnerComp.GetOwner());
 		NodeInstance->InitializeMemory(OwnerComp, NodeMemory, InitType);
 		check(TreeAsset);
+
+		FScopedBTLoggingContext LogContext(NodeInstance);
 		NodeInstance->InitializeFromAsset(*TreeAsset);
 		NodeInstance->OnInstanceCreated(OwnerComp);
 		NextInstancedIndex++;
@@ -201,6 +206,11 @@ void UBTNode::DescribeRuntimeValues(const UBehaviorTreeComponent& OwnerComp, uin
 
 #if WITH_EDITOR
 
+const ISlateStyle& UBTNode::GetNodeIconStyleSet() const
+{
+	return FAppStyle::Get();
+}
+
 FName UBTNode::GetNodeIconName() const
 {
 	return NAME_None;
@@ -209,6 +219,11 @@ FName UBTNode::GetNodeIconName() const
 bool UBTNode::UsesBlueprint() const
 {
 	return false;
+}
+
+FString UBTNode::GetErrorMessage() const
+{
+	return FString();
 }
 
 #endif
@@ -301,3 +316,4 @@ UBehaviorTreeComponent* UBTNode::GetBTComponentForTask(UGameplayTask& Task) cons
 //----------------------------------------------------------------------//
 // DEPRECATED
 //----------------------------------------------------------------------//
+

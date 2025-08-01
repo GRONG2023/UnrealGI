@@ -11,6 +11,8 @@
 #include "Animation/AnimNotifyQueue.h"
 #include "Serializers/MovieSceneAnimationSerialization.h"
 #include "Misc/QualifiedFrameTime.h"
+#include "Animation/AnimTypes.h"
+#include "AnimationRecorder.generated.h"
 
 class UAnimBoneCompressionSettings;
 class UAnimNotify;
@@ -19,6 +21,32 @@ class UAnimSequence;
 class USkeletalMeshComponent;
 
 DECLARE_LOG_CATEGORY_EXTERN(AnimationSerialization, Verbose, All);
+
+UENUM(BlueprintType)
+enum class ETimecodeBoneMode : uint8
+{
+	All,
+	Root,
+	UserDefined,
+	MAX UMETA(Hidden)
+};
+
+USTRUCT(BlueprintType)
+struct FTimecodeBoneMethod
+{
+	GENERATED_USTRUCT_BODY()
+
+	/** Default constructor, initializing with default values */
+	FTimecodeBoneMethod() : BoneMode(ETimecodeBoneMode::Root) { }
+
+	/** The timecode bone mode */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Timecode")
+	ETimecodeBoneMode BoneMode;
+
+	/** Name of the bone to assign timecode values to */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Timecode")
+	FName BoneName;
+};
 
 //////////////////////////////////////////////////////////////////////////
 // FAnimationRecorder
@@ -31,11 +59,11 @@ private:
 	static const int32 UnBoundedFrameCount = -1;
 
 private:
-	float IntervalTime;
-	int32 MaxFrame;
-	int32 LastFrame;
-	float TimePassed;
-	UAnimSequence* AnimationObject;
+	FFrameRate RecordingRate;
+	FFrameNumber MaxFrame;
+	FFrameNumber LastFrame;
+	double TimePassed;
+	TObjectPtr<UAnimSequence> AnimationObject;
 	TArray<FTransform> PreviousSpacesBases;
 	FBlendedHeapCurve PreviousAnimCurves;
 	FTransform PreviousComponentToWorld;
@@ -43,14 +71,41 @@ private:
 	FTransform InitialRootTransform;
 	int32 SkeletonRootIndex;
 
-	/** Array of currently active notifies that have duration */
-	TArray<TPair<const FAnimNotifyEvent*, bool>> ActiveNotifies;
-
 	/** Unique notifies added to this sequence during recording */
 	TMap<UAnimNotify*, UAnimNotify*> UniqueNotifies;
 
 	/** Unique notify states added to this sequence during recording */
 	TMap<UAnimNotifyState*, UAnimNotifyState*> UniqueNotifyStates;
+
+	struct FRecordedAnimNotify
+	{
+		FRecordedAnimNotify(const FAnimNotifyEvent& InNewNotifyEvent, const FAnimNotifyEvent* InOriginalNotifyEvent, float InAnimNotifyStartTime, float InAnimNotifyEndTime)
+			: NewNotifyEvent(InNewNotifyEvent)
+			, OriginalNotifyEvent(InOriginalNotifyEvent)
+			, AnimNotifyStartTime(InAnimNotifyStartTime)
+			, AnimNotifyEndTime(InAnimNotifyEndTime)
+			, bWasActive(true)
+		{}
+
+		/** Notify which will be added to this sequence */
+		FAnimNotifyEvent NewNotifyEvent;
+
+		/** Notify which was called on the sequence being recorded */
+		const FAnimNotifyEvent* OriginalNotifyEvent;
+
+		/** The time in the recorded animation at which the recorded notify started and ended */
+		float AnimNotifyStartTime;
+		float AnimNotifyEndTime;
+
+		/** Whether this notify was active this frame */
+		bool bWasActive;
+	};
+
+	/** Notify events recorded at any point, processed and inserted into animation when recording has finished */
+	TArray<FRecordedAnimNotify> RecordedAnimNotifies;
+
+	/** Currently recording notify events that have duration */
+	TArray<FRecordedAnimNotify> RecordingAnimNotifies;
 
 	static float DefaultSampleRate;
 
@@ -63,6 +118,10 @@ public:
 
 	// FGCObject interface start
 	virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FAnimationRecorder");
+	}
 	// FGCObject interface end
 
 	/** Starts recording an animation. Prompts for asset path and name via dialog if none provided */
@@ -74,16 +133,16 @@ public:
 	void UpdateRecord(USkeletalMeshComponent* Component, float DeltaTime);
 	UAnimSequence* GetAnimationObject() const { return AnimationObject; }
 	bool InRecording() const { return AnimationObject != nullptr; }
-	float GetTimeRecorded() const { return TimePassed; }
+	double GetTimeRecorded() const { return TimePassed; }
 
 	/** Sets a new sample rate & max length for this recorder. Don't call while recording. */
-	void SetSampleRateAndLength(float SampleRateHz, float LengthInMinutes);
+	void SetSampleRateAndLength(FFrameRate SampleFrameRate, float LengthInSeconds);
 
 	bool SetAnimCompressionScheme(UAnimBoneCompressionSettings* Settings);
 
 	const FTransform& GetInitialRootTransform() const { return InitialRootTransform; }
 
-	void ProcessRecordedTimes(UAnimSequence* AnimSequence, USkeletalMeshComponent* SkeletalMeshComponent, const FString& HoursName, const FString& MinutesName, const FString& SecondsName, const FString& FramesName, const FString& SubFramesName, const FString& SlateName, const FString& Slate);
+	void ProcessRecordedTimes(UAnimSequence* AnimSequence, USkeletalMeshComponent* SkeletalMeshComponent, const FString& HoursName, const FString& MinutesName, const FString& SecondsName, const FString& FramesName, const FString& SubFramesName, const FString& SlateName, const FString& Slate, const FTimecodeBoneMethod& TimecodeBoneMethod);
 
 	/** If true, it will record root to include LocalToWorld */
 	uint8 bRecordLocalToWorld :1;
@@ -93,6 +152,8 @@ public:
 	uint8 bRemoveRootTransform : 1;
 	/** If true we check delta time at beginning of recording */
 	uint8 bCheckDeltaTimeAtBeginning : 1;
+	/** Interpolation type for the recorded sequence */
+	EAnimInterpolationType Interpolation;
 	/** The interpolation mode for the recorded keys */
 	ERichCurveInterpMode InterpMode;
 	/** The tangent mode for the recorded keys*/
@@ -101,10 +162,20 @@ public:
 	FAnimationSerializer* AnimationSerializer;
 	/** Whether or not to record transforms*/
 	uint8 bRecordTransforms : 1;
-	/** Whether or not to record curves*/
-	uint8 bRecordCurves : 1;
+	/** Whether or not to record morph targets*/
+	uint8 bRecordMorphTargets : 1;
+	/** Whether or not to record attribute curves*/
+	uint8 bRecordAttributeCurves : 1;
+	/** Whether or not to record material curves*/
+	uint8 bRecordMaterialCurves : 1;
+	/** Include list */
+	TArray<FString> IncludeAnimationNames;
+	/** Exclude list */
+	TArray<FString> ExcludeAnimationNames;
+	/** Whether or not to transact any IAnimationDataController changes */
+	bool bTransactRecording;
 public:
-	/** Helper function to get space bases depending on master pose component */
+	/** Helper function to get space bases depending on leader pose component */
 	static void GetBoneTransforms(USkeletalMeshComponent* Component, TArray<FTransform>& BoneTransforms);
 
 private:
@@ -112,24 +183,12 @@ private:
 
 	void RecordNotifies(USkeletalMeshComponent* Component, const TArray<FAnimNotifyEventReference>& AnimNotifies, float DeltaTime, float RecordTime);
 
-	void FixupNotifies();
+	void ProcessNotifies();
 
-	// recording curve data 
-	struct FBlendedCurve
-	{
-		template<typename Allocator>
-		FBlendedCurve(TArray<float, Allocator> CW, TBitArray<Allocator> VCW)
-		{
-			CurveWeights = CW;
-			ValidCurveWeights = VCW;
-		}
+	bool ShouldSkipName(const FName& InName) const;
 
-		TArray<float> CurveWeights;
-		TBitArray<> ValidCurveWeights;
-	};
-
-	TArray<FBlendedCurve> RecordedCurves;
-	TArray<uint16> const * UIDToArrayIndexLUT;
+	TArray<FBlendedHeapCurve> RecordedCurves;
+	TArray<FRawAnimSequenceTrack> RawTracks;
 };
 
 //////////////////////////////////////////////////////////////////////////
@@ -148,7 +207,7 @@ public:
 	bool BeginRecording();
 	void Update(float DeltaTime);
 	void FinishRecording(bool bShowMessage = true);
-	void ProcessRecordedTimes(UAnimSequence* AnimSequence, USkeletalMeshComponent* SkeletalMeshComponent, const FString& HoursName, const FString& MinutesName, const FString& SecondsName, const FString& FramesName, const FString& SubFramesName, const FString& SlateName, const FString& Slate);
+	void ProcessRecordedTimes(UAnimSequence* AnimSequence, USkeletalMeshComponent* SkeletalMeshComponent, const FString& HoursName, const FString& MinutesName, const FString& SecondsName, const FString& FramesName, const FString& SubFramesName, const FString& SlateName, const FString& Slate, const FTimecodeBoneMethod& TimecodeBoneMethod);
 
 private:
 	void InitInternal(USkeletalMeshComponent* InComponent, const FAnimationRecordingSettings& Settings, FAnimationSerializer *InAnimationSerializer = nullptr);

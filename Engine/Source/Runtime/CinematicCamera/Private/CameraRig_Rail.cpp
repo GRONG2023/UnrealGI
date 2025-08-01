@@ -5,8 +5,11 @@
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/CollisionProfile.h"
+#include "Engine/World.h"
 #include "Components/SplineComponent.h"
 #include "Components/SplineMeshComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(CameraRig_Rail)
 
 #define LOCTEXT_NAMESPACE "CameraRig_Rail"
 
@@ -85,7 +88,7 @@ void ACameraRig_Rail::UpdatePreviewMeshes()
 		if (PreviewRailStaticMesh)
 		{
 			int32 const NumSplinePoints = RailSplineComponent->GetNumberOfSplinePoints();
-			int32 const NumNeededPreviewMeshes = NumSplinePoints - 1;
+			int32 const NumNeededPreviewMeshes = FMath::Max(0, NumSplinePoints - 1);
 
 			// make sure our preview mesh array is correctly sized and populated
 			{
@@ -125,11 +128,12 @@ void ACameraRig_Rail::UpdatePreviewMeshes()
 				USplineMeshComponent* const SplineMeshComp = PreviewRailMeshSegments[PtIdx];
 				if (SplineMeshComp)
 				{
-					SplineMeshComp->SetVisibility(bShowRailVisualization);
-					SplineMeshComp->SetStartScale(FVector2D(PreviewMeshScale, PreviewMeshScale));
-					SplineMeshComp->SetEndScale(FVector2D(PreviewMeshScale, PreviewMeshScale));
-					SplineMeshComp->SetForwardAxis(ESplineMeshAxis::Z);
-					SplineMeshComp->SetStartAndEnd(StartLoc, StartTangent, EndLoc, EndTangent, true);
+					SplineMeshComp->SetVisibility(bShowRailVisualization,false);
+					SplineMeshComp->SetStartScale(FVector2D(PreviewMeshScale, PreviewMeshScale),false);
+					SplineMeshComp->SetEndScale(FVector2D(PreviewMeshScale, PreviewMeshScale),false);
+					SplineMeshComp->SetForwardAxis(ESplineMeshAxis::Z,false);
+					SplineMeshComp->SetStartAndEnd(StartLoc, StartTangent, EndLoc, EndTangent, false);
+					SplineMeshComp->UpdateMesh();
 				}
 			}
 
@@ -148,9 +152,6 @@ void ACameraRig_Rail::UpdatePreviewMeshes()
 		// make visualization of the mount follow the contour of the rail
 		if (PreviewMesh_Mount)
 		{
-			float const SplineLen = RailSplineComponent->GetSplineLength();
-			FQuat const RailRot = RailSplineComponent->GetQuaternionAtDistanceAlongSpline(CurrentPositionOnRail*SplineLen, ESplineCoordinateSpace::World);
-			PreviewMesh_Mount->SetWorldRotation(RailRot);
 			PreviewMesh_Mount->SetVisibility(bShowRailVisualization);
 			PreviewMesh_Mount->SetWorldScale3D(FVector(PreviewMeshScale, PreviewMeshScale, PreviewMeshScale));
 		}
@@ -184,8 +185,12 @@ void ACameraRig_Rail::UpdateRailComponents()
 #if WITH_EDITOR
 	if (GIsEditor)
 	{
-		// set up preview mesh to match #todo
-		UpdatePreviewMeshes();
+		const UWorld* const MyWorld = GetWorld();
+		if (MyWorld && !MyWorld->IsGameWorld())
+		{
+			// set up preview mesh to match #todo
+			UpdatePreviewMeshes();
+		}
 	}
 #endif
 }
@@ -229,3 +234,4 @@ bool ACameraRig_Rail::ShouldTickIfViewportsOnly() const
 }
 
 #undef LOCTEXT_NAMESPACE
+

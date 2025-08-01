@@ -98,7 +98,7 @@ public:
 	/** Resets internal widget's data to the default one. */
 	void Reset();
 
-	void SetConnection(uint32 GameInstanceIndex, uint32 ConnectionIndex, Trace::ENetProfilerConnectionMode ConnectionMode);
+	void SetConnection(uint32 GameInstanceIndex, uint32 ConnectionIndex, TraceServices::ENetProfilerConnectionMode ConnectionMode);
 
 	SLATE_BEGIN_ARGS(SPacketView)
 	{
@@ -106,7 +106,7 @@ public:
 	}
 	SLATE_END_ARGS()
 
-	void Construct(const FArguments& InArgs, TSharedPtr<SNetworkingProfilerWindow> InProfilerWindow);
+	void Construct(const FArguments& InArgs, TSharedRef<SNetworkingProfilerWindow> InProfilerWindow);
 
 	/**
 	 * Ticks this widget. Override in derived classes, but always call the parent implementation.
@@ -147,15 +147,15 @@ public:
 private:
 	void UpdateSelectedSample();
 
-	bool IsConnectionValid(const Trace::INetProfilerProvider& NetProfilerProvider, const uint32 InGameInstanceIndex, const uint32 InConnectionIndex, const Trace::ENetProfilerConnectionMode InConnectionMode);
+	bool IsConnectionValid(const TraceServices::INetProfilerProvider& NetProfilerProvider, const uint32 InGameInstanceIndex, const uint32 InConnectionIndex, const TraceServices::ENetProfilerConnectionMode InConnectionMode);
 	void UpdateState();
 
 	void DrawHorizontalAxisGrid(FDrawContext& DrawContext, const FSlateBrush* Brush, const FSlateFontInfo& Font) const;
 	void DrawVerticalAxisGrid(FDrawContext& DrawContext, const FSlateBrush* Brush, const FSlateFontInfo& Font) const;
 
 	FNetworkPacketSampleRef GetSample(const int32 InPacketIndex);
-	FNetworkPacketSampleRef GetSampleAtMousePosition(float X, float Y);
-	void SelectSampleAtMousePosition(float X, float Y, const FPointerEvent& MouseEvent);
+	FNetworkPacketSampleRef GetSampleAtMousePosition(double X, double Y);
+	void SelectSampleAtMousePosition(double X, double Y, const FPointerEvent& MouseEvent);
 	void OnSelectionChanged();
 
 	void ShowContextMenu(const FPointerEvent& MouseEvent);
@@ -178,11 +178,13 @@ private:
 	void ZoomHorizontally(const float Delta, const float X);
 
 private:
-	TSharedPtr<SNetworkingProfilerWindow> ProfilerWindow;
+	void UpdateSelectedTimeSpan();
+
+	TWeakPtr<SNetworkingProfilerWindow> ProfilerWindowWeakPtr;
 
 	uint32 GameInstanceIndex;
 	uint32 ConnectionIndex;
-	Trace::ENetProfilerConnectionMode ConnectionMode;
+	TraceServices::ENetProfilerConnectionMode ConnectionMode;
 
 	/** The track's viewport. Encapsulates info about position and scale. */
 	FPacketViewport Viewport;
@@ -229,6 +231,7 @@ private:
 	int32 SelectionStartPacketIndex;
 	int32 SelectionEndPacketIndex;
 	int32 LastSelectedPacketIndex;
+	double SelectedTimeSpan;
 
 	FNetworkPacketSampleRef SelectedSample;
 	FNetworkPacketSampleRef HoveredSample;

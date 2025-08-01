@@ -9,9 +9,12 @@
 #include "Widgets/SCompoundWidget.h"
 #include "ActorPlacementInfo.h"
 #include "IPlacementModeModule.h"
+#include "Widgets/Layout/SUniformWrapPanel.h"
 #include "Widgets/Views/STableViewBase.h"
 #include "Widgets/Views/STableRow.h"
 #include "Misc/TextFilter.h"
+
+class STextBlock;
 
 /**
  * A tile representation of the class or the asset.  These are embedded into the views inside
@@ -50,13 +53,43 @@ private:
 	const FSlateBrush* PressedImage;
 };
 
+class SPlacementAssetMenuEntry : public SCompoundWidget
+{
+public:
+	SLATE_BEGIN_ARGS(SPlacementAssetMenuEntry){}
+	SLATE_END_ARGS()
+
+	void Construct(const FArguments& InArgs, const TSharedPtr<const FPlaceableItem>& InItem);
+
+	virtual FReply OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
+	virtual FReply OnMouseButtonUp(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
+	virtual FReply OnDragDetected(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
+
+	bool IsPressed() const;
+
+	TSharedPtr<const FPlaceableItem> Item;
+
+	virtual FSlateColor GetForegroundColor() const override;
+
+private:
+	const FSlateBrush* GetBorder() const;
+	const FSlateBrush* GetIcon() const;
+
+	bool bIsPressed;
+
+	const FButtonStyle* Style;
+	
+	mutable const FSlateBrush* AssetImage;
+};
+
+
 class SPlacementModeTools : public SCompoundWidget
 {
 public:
 	SLATE_BEGIN_ARGS( SPlacementModeTools ){}
 	SLATE_END_ARGS();
 
-	void Construct( const FArguments& InArgs );
+	void Construct(const FArguments& InArgs, TSharedRef<SDockTab> ParentTab);
 
 	virtual ~SPlacementModeTools();
 
@@ -64,13 +97,9 @@ private:
 
 	// Begin SWidget
 	virtual void Tick( const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime ) override;
-	virtual FReply OnKeyDown( const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent ) override;
 	// End SWidget
 
 private:
-
-	/** Creates a tab widget to show on the left that when clicked sets the currently active tab */
-	TSharedRef< SWidget > CreatePlacementGroupTab( const FPlacementCategoryInfo& Info );
 
 	/** Generates a widget for the specified item */
 	TSharedRef<ITableRow> OnGenerateWidgetForItem(TSharedPtr<FPlaceableItem> InItem, const TSharedRef<STableViewBase>& OwnerTable);
@@ -96,21 +125,20 @@ private:
 	/** Requests a refresh of placeable assets in the All Classes category */
 	void RequestRefreshAllClasses();
 
+	/** Called when the placement module performs a category refresh */
+	void OnCategoryRefresh(FName CategoryName);
+
 	/** Refreshes the list of placement categories */
 	void UpdatePlacementCategories();
 
-private:
-
-	/** Gets the border image for the tab, this is the 'active' orange bar. */
-	const FSlateBrush* PlacementGroupBorderImage( FName CategoryName ) const;
-
 	/** When the tab is clicked we adjust the check state, so that the right style is displayed. */
-	void OnPlacementTabChanged( ECheckBoxState NewState, FName CategoryName );
+	void OnCategoryChanged(const ECheckBoxState NewState, FName InCategory);
+
+	/** Called when the placement mode tools are opened from a tab drawer */
+	void OnTabDrawerOpened();
 
 	/** Gets the tab 'active' state, so that we can show the active style */
 	ECheckBoxState GetPlacementTabCheckedState( FName CategoryName ) const;
-
-private:
 
 	/** Gets the visibility for the failed search text */
 	EVisibility GetFailedSearchVisibility() const;
@@ -151,11 +179,14 @@ private:
 	/* The search box used to update the filter text */
 	TSharedPtr<SSearchBox> SearchBoxPtr;
 
+	/* Category Filter */
+	TSharedPtr<SUniformWrapPanel> CategoryFilterPtr;
+
+	/* Active Category Filter Label */
+	TSharedPtr<STextBlock> FilterLabelPtr;
+
 	/** Array of filtered items to show in the list view */
 	TArray<TSharedPtr<FPlaceableItem>> FilteredItems;
-
-	/** Tabs vertical box */
-	TSharedPtr<SVerticalBox> Tabs;
 
 	/** The name of the currently active tab (where no search is active) */
 	FName ActiveTabName;

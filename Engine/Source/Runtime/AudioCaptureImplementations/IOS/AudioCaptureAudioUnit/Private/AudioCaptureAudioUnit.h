@@ -13,7 +13,7 @@ namespace Audio
 		FAudioCaptureAudioUnitStream();
 
 		virtual bool GetCaptureDeviceInfo(FCaptureDeviceInfo& OutInfo, int32 DeviceIndex) override;
-		virtual bool OpenCaptureStream(const FAudioCaptureDeviceParams& InParams, FOnCaptureFunction InOnCapture, uint32 NumFramesDesired) override;
+		virtual bool OpenAudioCaptureStream(const FAudioCaptureDeviceParams& InParams, FOnAudioCaptureFunction InOnCapture, uint32 NumFramesDesired) override;
 		virtual bool CloseStream() override;
 		virtual bool StartStream() override;
 		virtual bool StopStream() override;
@@ -33,10 +33,12 @@ namespace Audio
 		
 		AudioComponentInstance IOUnit;
 		
-		FOnCaptureFunction OnCapture;
+		FOnAudioCaptureFunction OnCapture;
 		int32 NumChannels;
 		int32 SampleRate;
 		TArray<uint8> CaptureBuffer;
 		int BufferSize = 0;
+		bool bIsStreamOpen;
+		bool bHasCaptureStarted;
 	};
 }

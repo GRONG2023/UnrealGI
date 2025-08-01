@@ -8,7 +8,7 @@
 #include "Widgets/Input/SEditableTextBox.h"
 
 
-FEditableTextBlock::FEditableTextBlock( const FText& InLabel, const FText& InToolTip, const FSlateIcon& InIcon, const TAttribute< FText >& InTextAttribute, bool bInReadOnly, const FOnTextCommitted& InOnTextCommitted, const FOnTextChanged& InOnTextChanged )
+FEditableTextBlock::FEditableTextBlock( const FText& InLabel, const FText& InToolTip, const FSlateIcon& InIcon, const TAttribute< FText >& InTextAttribute, bool bInReadOnly, const FOnTextCommitted& InOnTextCommitted, const FOnTextChanged& InOnTextChanged, const FOnVerifyTextChanged& InOnVerifyTextChanged )
 	: FMultiBlock( FUIAction(), NAME_None, EMultiBlockType::EditableText ),
 	  LabelOverride( InLabel ),
 	  ToolTipOverride( InToolTip ),
@@ -16,9 +16,9 @@ FEditableTextBlock::FEditableTextBlock( const FText& InLabel, const FText& InToo
 	  TextAttribute( InTextAttribute ),
 	  OnTextCommitted( InOnTextCommitted ),
 	  OnTextChanged( InOnTextChanged ),
+	  OnVerifyTextChanged( InOnVerifyTextChanged ),
 	  bReadOnly( bInReadOnly )
 { }
-
 
 bool FEditableTextBlock::HasIcon() const
 {
@@ -78,6 +78,8 @@ void SEditableTextBlock::BuildMultiBlockWidget( const ISlateStyle* StyleSet, con
 		}
 	}
 
+	const float MenuIconSize = StyleSet->GetFloat(StyleName, ".MenuIconSize", 16.f);
+
 	ChildSlot
 	[
 		SNew( SHorizontalBox )
@@ -85,7 +87,7 @@ void SEditableTextBlock::BuildMultiBlockWidget( const ISlateStyle* StyleSet, con
 		.AutoWidth()
 		[
 			SNew(SSpacer)
-			.Size( FVector2D(MultiBoxConstants::MenuCheckBoxSize + 3, MultiBoxConstants::MenuCheckBoxSize) )
+			.Size( FVector2D(MenuIconSize + 3, MenuIconSize) )
 		]
 
 		+ SHorizontalBox::Slot()
@@ -93,14 +95,14 @@ void SEditableTextBlock::BuildMultiBlockWidget( const ISlateStyle* StyleSet, con
 		[
 			SNew( SBox )
 			.Visibility(IconWidget != SNullWidget::NullWidget ? EVisibility::Visible : EVisibility::Collapsed)
-			.WidthOverride( MultiBoxConstants::MenuIconSize + 2 )
-			.HeightOverride( MultiBoxConstants::MenuIconSize )
+			.WidthOverride(MenuIconSize + 2 )
+			.HeightOverride(MenuIconSize)
 			.HAlign(HAlign_Center)
 			.VAlign(VAlign_Center)
 			[
 				SNew( SBox )
-				.WidthOverride( MultiBoxConstants::MenuIconSize )
-				.HeightOverride( MultiBoxConstants::MenuIconSize )
+				.WidthOverride(MenuIconSize)
+				.HeightOverride(MenuIconSize)
 				[
 					IconWidget
 				]
@@ -135,6 +137,7 @@ void SEditableTextBlock::BuildMultiBlockWidget( const ISlateStyle* StyleSet, con
 			.RevertTextOnEscape( true )
 			.MinDesiredWidth( MultiBoxConstants::EditableTextMinWidth )
 			.OnTextChanged( EditableTextBlock->OnTextChanged )
+			.OnVerifyTextChanged( EditableTextBlock->OnVerifyTextChanged )
 			.OnTextCommitted( EditableTextBlock->OnTextCommitted )
 			.ToolTipText( TextBlockToolTip )
 		]

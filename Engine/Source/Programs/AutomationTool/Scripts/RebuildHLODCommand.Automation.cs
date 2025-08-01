@@ -8,7 +8,9 @@ using System.Linq;
 using System.Net.Mail;
 using AutomationTool;
 using UnrealBuildTool;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using UnrealBuildBase;
+using Microsoft.Extensions.Logging;
 
 /// <summary>
 /// Helper command used for rebuilding a projects Hierarchical LODs.
@@ -30,7 +32,7 @@ namespace AutomationScripts.Automation
 	{
 		public override void ExecuteBuild()
 		{
-			LogInformation("********** REBUILD HLODS COMMAND STARTED **********");
+			Logger.LogInformation("********** REBUILD HLODS COMMAND STARTED **********");
             bool DelayCheckin = ParseParam("DelaySubmission");
             int SubmittedCL = 0;
             try
@@ -63,10 +65,10 @@ namespace AutomationScripts.Automation
 
             catch (Exception ProcessEx)
             {
-                LogInformation("********** REBUILD HLODS COMMAND FAILED **********");
-                LogInformation("Error message: {0}", ProcessEx.Message);
+                Logger.LogInformation("********** REBUILD HLODS COMMAND FAILED **********");
+                Logger.LogInformation("Error message: {Arg0}", ProcessEx.Message);
                 HandleFailure(ProcessEx.Message);
-                throw ProcessEx;
+                throw;
             }
 
             // The processes steps have completed successfully.
@@ -79,26 +81,25 @@ namespace AutomationScripts.Automation
                 HandleSuccessNoCheckin(WorkingCL);
             }			
 
-			LogInformation("********** REBUILD HLODS COMMAND COMPLETED **********");
+			Logger.LogInformation("********** REBUILD HLODS COMMAND COMPLETED **********");
 		}
 
 		private void BuildNecessaryTargets()
 		{
-			LogInformation("Running Step:- RebuildHLOD::BuildNecessaryTargets");
-			UE4Build.BuildAgenda Agenda = new UE4Build.BuildAgenda();
-            Agenda.AddTarget("UnrealHeaderTool", UnrealBuildTool.UnrealTargetPlatform.Win64, UnrealBuildTool.UnrealTargetConfiguration.Development);
+			Logger.LogInformation("Running Step:- RebuildHLOD::BuildNecessaryTargets");
+			UnrealBuild.BuildAgenda Agenda = new UnrealBuild.BuildAgenda();
 			Agenda.AddTarget("ShaderCompileWorker", UnrealBuildTool.UnrealTargetPlatform.Win64, UnrealBuildTool.UnrealTargetConfiguration.Development);			
 			Agenda.AddTarget(CommandletTargetName, UnrealBuildTool.UnrealTargetPlatform.Win64, UnrealBuildTool.UnrealTargetConfiguration.Development);
 
 			try
 			{
-				UE4Build Builder = new UE4Build(this);
+				UnrealBuild Builder = new UnrealBuild(this);
 				Builder.Build(Agenda, InDeleteBuildProducts: true, InUpdateVersionFiles: true, InForceNoXGE: false, InChangelistNumberOverride: GetLatestCodeChange());
-				UE4Build.CheckBuildProducts(Builder.BuildProductFiles);
+				UnrealBuild.CheckBuildProducts(Builder.BuildProductFiles);
 			}
 			catch (AutomationException)
 			{
-				LogError("Rebuild HLOD for Maps has failed.");
+				Logger.LogError("Rebuild HLOD for Maps has failed.");
 				throw;
 			}
 		}
@@ -115,23 +116,23 @@ namespace AutomationScripts.Automation
 
 		private void CreateChangelist(ProjectParams Params)
 		{
-			LogInformation("Running Step:- RebuildHLOD::CheckOutMaps");
+			Logger.LogInformation("Running Step:- RebuildHLOD::CheckOutMaps");
 			// Setup a P4 Cl we will use to submit the new HLOD data
 			WorkingCL = P4.CreateChange(P4Env.Client, String.Format("{0} rebuilding HLODs from changelist {1}\n#rb None\n#tests None\n#jira none\n{2}", Params.ShortProjectName, P4Env.Changelist, RobomergeCommand));
-			LogInformation("Working in {0}", WorkingCL);
+			Logger.LogInformation("Working in {WorkingCL}", WorkingCL);
 
 		}
 
 		private void RunRebuildHLODCommandlet(ProjectParams Params)
 		{
-			LogInformation("Running Step:- RebuildHLOD::RunRebuildHLODCommandlet");
+			Logger.LogInformation("Running Step:- RebuildHLOD::RunRebuildHLODCommandlet");
 
 			// Find the commandlet binary
-			string UE4EditorExe = HostPlatform.Current.GetUE4ExePath(Params.UE4Exe);
-			if (!FileExists(UE4EditorExe))
+			string UEEditorExe = HostPlatform.Current.GetUnrealExePath(Params.UnrealExe);
+			if (!FileExists(UEEditorExe))
 			{
-				LogError("Missing " + UE4EditorExe + " executable. Needs to be built first.");
-				throw new AutomationException("Missing " + UE4EditorExe + " executable. Needs to be built first.");
+				Logger.LogError("Missing " + UEEditorExe + " executable. Needs to be built first.");
+				throw new AutomationException("Missing " + UEEditorExe + " executable. Needs to be built first.");
 			}
 
             // Now let's rebuild HLODs for the project
@@ -153,7 +154,7 @@ namespace AutomationScripts.Automation
                 {
                     CommandletParams += String.Format(" -SCCProvider={0} -P4Port={1} -P4User={2} -P4Client={3} -P4Changelist={4} -P4Passwd={5}", "Perforce", P4Env.ServerAndPort, P4Env.User, P4Env.Client, WorkingCL.ToString(), P4.GetAuthenticationToken());
                 }
-                RebuildHLODCommandlet(Params.RawProjectPath, Params.UE4Exe, Params.MapsToRebuildHLODMaps.ToArray(), CommandletParams);
+                RebuildHLODCommandlet(Params.RawProjectPath, Params.UnrealExe, Params.MapsToRebuildHLODMaps.ToArray(), CommandletParams);
 			}
 			catch (Exception Ex)
 			{
@@ -162,11 +163,11 @@ namespace AutomationScripts.Automation
                 if ( AEx != null )
                 {
                     string LogFile = AEx.LogFileName;
-                    Tools.DotNETCommon.Log.TraceWarning("Attempting to load file {0}", LogFile);
+                    Logger.LogWarning("Attempting to load file {File}", LogFile);
                     if ( LogFile != "")
                     {
                         
-                        Tools.DotNETCommon.Log.TraceWarning("Attempting to read file {0}", LogFile);
+                        Logger.LogWarning("Attempting to read file {File}", LogFile);
                         try
                         {
                             string[] AllLogFile = ReadAllLines(LogFile);
@@ -183,27 +184,27 @@ namespace AutomationScripts.Automation
                         catch (Exception)
                         {
                             // we don't care about this because if this is hit then there is no log file the exception probably has more info
-                            LogError("Could not find log file " + LogFile);
+                            Logger.LogError("{Text}", "Could not find log file " + LogFile);
                         }
                     }
                 }
 
 				// Something went wrong with the commandlet. Abandon this run, don't check in any updated files, etc.
-				LogError("Rebuild HLODs has failed. because "+ Ex.ToString());
+				Logger.LogError("{Text}", "Rebuild HLODs has failed. because "+ Ex.ToString());
 				throw new AutomationException(ExitCode.Error_Unknown, Ex, "RebuildHLOD failed. {0}", FinalLogLines);
 			}
 		}
 
 		private void SubmitRebuiltMaps(ref int SubmittedCL)
 		{
-			LogInformation("Running Step:- RebuildHLOD::SubmitRebuiltMaps");
+			Logger.LogInformation("Running Step:- RebuildHLOD::SubmitRebuiltMaps");
 
 			// Check everything in!
 			if (WorkingCL != -1)
 			{
-                LogInformation("Running Step:- Submitting CL " + WorkingCL);
+                Logger.LogInformation("{Text}", "Running Step:- Submitting CL " + WorkingCL);
 				P4.Submit(WorkingCL, out SubmittedCL, true, true);
-				LogInformation("INFO: HLODs successfully submitted in cl " + SubmittedCL.ToString());
+				Logger.LogInformation("{Text}", "INFO: HLODs successfully submitted in cl " + SubmittedCL.ToString());
 			}
 		}
 
@@ -247,11 +248,11 @@ namespace AutomationScripts.Automation
 			}
 			catch (P4Exception P4Ex)
 			{
-				LogError("Failed to clean up P4 changelist: " + P4Ex.Message);
+				Logger.LogError("{Text}", "Failed to clean up P4 changelist: " + P4Ex.Message);
 			}
 			catch (Exception SendMailEx)
 			{
-				LogError("Failed to notify that build failed: " + SendMailEx.Message);
+				Logger.LogError("{Text}", "Failed to notify that build failed: " + SendMailEx.Message);
 			}
 		}
 
@@ -266,7 +267,7 @@ namespace AutomationScripts.Automation
 			}
 			catch (Exception SendMailEx)
 			{
-				LogError("Failed to notify that build succeeded: " + SendMailEx.Message);
+				Logger.LogError("{Text}", "Failed to notify that build succeeded: " + SendMailEx.Message);
 			}
 		}
 
@@ -278,7 +279,7 @@ namespace AutomationScripts.Automation
             }
             catch (Exception SendMailEx)
             {
-                LogError("Failed to notify that build succeeded: " + SendMailEx.Message);
+                Logger.LogError("{Text}", "Failed to notify that build succeeded: " + SendMailEx.Message);
             }
         }
 
@@ -318,14 +319,12 @@ namespace AutomationScripts.Automation
                 Message.Attachments.Add()*/
 			    try
 			    {
-				    #pragma warning disable CS0618 // Mono 4.6.x obsoletes this class
 				    SmtpClient MailClient = new SmtpClient("smtp.epicgames.net");
 				    MailClient.Send(Message);
-				    #pragma warning restore CS0618
 			    }
 			    catch (Exception Ex)
 			    {
-				    LogError("Failed to send notify email to {0} ({1})", String.Join(", ", StakeholdersEmailAddresses.ToArray()), Ex.Message);
+				    Logger.LogError("Failed to send notify email to {Arg0} ({Arg1})", String.Join(", ", StakeholdersEmailAddresses.ToArray()), Ex.Message);
 			    }
 		    }
         }
@@ -360,6 +359,10 @@ namespace AutomationScripts.Automation
 				else if (Command == "all")
 				{
 					return "#ROBOMERGE[ALL] #DisregardExcludedAuthors";
+				}
+				else if (Command == "deadend")
+				{
+					return "#ROBOMERGE " + Command;
 				}
 				else
 				{

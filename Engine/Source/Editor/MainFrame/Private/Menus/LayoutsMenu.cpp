@@ -12,6 +12,7 @@
 #include "Templates/SharedPointer.h"
 // Runtime
 #include "CoreGlobals.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Framework/Commands/UICommandInfo.h"
 #include "Framework/Docking/LayoutService.h"
 #include "Framework/Notifications/NotificationManager.h"
@@ -24,8 +25,8 @@
 #include "DesktopPlatformModule.h"
 #include "ToolMenus.h"
 // Editor
-#include "Classes/EditorStyleSettings.h"
-#include "Dialogs/CustomDialog.h"
+#include "Settings/EditorStyleSettings.h"
+#include "Dialog/SCustomDialog.h"
 #include "Editor/EditorPerProjectUserSettings.h"
 #include "Frame/MainFrameActions.h"
 #include "LevelViewportActions.h"
@@ -98,7 +99,7 @@ public:
 	static void SaveLayoutWithoutRemovingTempLayoutFiles();
 
 	/**
-	 * It simply checks whether PIE, SIE, or any Asset Editor is opened, and ask the user whether he wanna continue closing them or cancel the Editor layout load
+	 * It simply checks whether PIE, SIE, or any Asset Editor is opened, and asks the user whether they want to continue closing them or cancel the Editor layout load
 	 * @return Whether we should continue loading the layout
 	 */
 	static bool CheckAskUserToClosePIESIE(const FText& InitialMessage);
@@ -147,17 +148,23 @@ TArray<FString> FPrivateLayoutsMenu::GetIniFilesInFolderInternal(const FString& 
 bool FPrivateLayoutsMenu::TrySaveLayoutOrWarnInternal(const FString& InSourceFilePath, const FString& InTargetFilePath, const FText& InWhatIsThis,
 	const bool bCleanLayoutNameAndDescriptionFieldsIfNoSameValues, const bool bShouldAskBeforeCleaningLayoutNameAndDescriptionFields, const bool bShowSaveToast)
 {
-	// If desired, ask user whether to keep the LayoutName and LayoutDescription fields
+	// We must re-read configs to avoid the Editor using a previously cached version
+	GConfig->UnloadFile(InSourceFilePath); 
+	GConfig->UnloadFile(InTargetFilePath);
+
 	bool bCleanLayoutNameAndDescriptionFields = false;
+
 	// If we are checking whether to clean the fields, we only want to maintain them if we are saving the file into an existing file that already has the same field values
 	if (bCleanLayoutNameAndDescriptionFieldsIfNoSameValues)
 	{
-		GConfig->UnloadFile(InSourceFilePath); // We must re-read it to avoid the Editor to use a previously cached name and description
+		// read the source name and description
 		const FText LayoutNameSource = FLayoutSaveRestore::LoadSectionFromConfig(InSourceFilePath, "LayoutName");
 		const FText LayoutDescriptionSource = FLayoutSaveRestore::LoadSectionFromConfig(InSourceFilePath, "LayoutDescription");
-		GConfig->UnloadFile(InTargetFilePath); // We must re-read it to avoid the Editor to use a previously cached name and description
+
+		// read the target name and description
 		const FText LayoutNameTarget = FLayoutSaveRestore::LoadSectionFromConfig(InTargetFilePath, "LayoutName");
 		const FText LayoutDescriptionTarget = FLayoutSaveRestore::LoadSectionFromConfig(InTargetFilePath, "LayoutDescription");
+
 		// The output target exists (overriding)
 		// These fields are not empty in source
 		if (!LayoutNameSource.IsEmpty() || !LayoutDescriptionSource.IsEmpty())
@@ -174,6 +181,7 @@ bool FPrivateLayoutsMenu::TrySaveLayoutOrWarnInternal(const FString& InSourceFil
 					const FText TextBody = FText::Format(
 						LOCTEXT("OverrideLayoutNameAndDescriptionFieldBody", "You are saving a layout that contains a custom layout name and/or description. Do you also want to copy these 2 properties?\n - Current layout name: {0}\n - Current layout description: {1}\n\nIf you select \"Preserve Values\", the displayed name and description of the original layout customization will also be copied into the new configuration file.\n\nIf you select \"Clear Values\", these fields will be emptied.\n\nIf you are not sure, select \"Preserve Values\" if you are exporting the layout configuration without making any changes, or \"Clear Values\" if you"" have made or plan to make changes to the layout.\n\n"),
 						LayoutNameSource, LayoutDescriptionSource);
+
 					// Dialog SWidget
 					TSharedRef<SVerticalBox> DialogContents = SNew(SVerticalBox);
 					DialogContents->AddSlot()
@@ -182,14 +190,18 @@ bool FPrivateLayoutsMenu::TrySaveLayoutOrWarnInternal(const FString& InSourceFil
 							SNew(STextBlock)
 							.Text(TextBody)
 						];
+
 					const FText PreserveValuesText = LOCTEXT("PreserveValuesText", "Preserve Values");
 					const FText ClearValuesText = LOCTEXT("ClearValuesText", "Clear Values");
 					const FText CancelText = NSLOCTEXT("Dialogs", "EAppReturnTypeCancel", "Cancel");
 					TSharedRef<SCustomDialog> CustomDialog = SNew(SCustomDialog)
 						.Title(TextTitle)
-						.DialogContent(DialogContents)
-						.Buttons({ SCustomDialog::FButton(PreserveValuesText), SCustomDialog::FButton(ClearValuesText), SCustomDialog::FButton(CancelText) })
-					;
+						.Content()
+						[
+							DialogContents
+						]
+						.Buttons({ SCustomDialog::FButton(PreserveValuesText), SCustomDialog::FButton(ClearValuesText), SCustomDialog::FButton(CancelText) });
+
 					// Returns 0 when "Preserve Values" is pressed, 1 when "Clear Values" is pressed, or 2 when Cancel/Esc is pressed
 					const int32 ButtonPressed = CustomDialog->ShowModal();
 					// Preserve Values
@@ -217,51 +229,53 @@ bool FPrivateLayoutsMenu::TrySaveLayoutOrWarnInternal(const FString& InSourceFil
 			}
 		}
 	}
-	// Copy: Replace main layout with desired one
+
 	const FString TargetAbsoluteFilePath = FPaths::ConvertRelativePathToFull(InTargetFilePath);
-	const bool bShouldReplace = true;
-	const bool bCopyEvenIfReadOnly = true;
-	const bool bCopyAttributes = false; // If true, it could e.g., copy the read-only flag of DefaultLayout.ini and make all the save/load stuff stop working
-	if (COPY_Fail == IFileManager::Get().Copy(*InTargetFilePath, *InSourceFilePath, bShouldReplace, bCopyEvenIfReadOnly, bCopyAttributes))
+	if (!FLayoutSaveRestore::DuplicateConfig(InSourceFilePath, InTargetFilePath))
 	{
+		const FText SourceAbsoluteFilePathText = FText::FromString(FPaths::ConvertRelativePathToFull(InSourceFilePath));		
+		const FText TargetAbsoluteFilePathText = FText::FromString(TargetAbsoluteFilePath);
+
 		FMessageLog EditorErrors("EditorErrors");
 		FText TextBody;
 		FFormatNamedArguments Arguments;
 		Arguments.Add(TEXT("WhatIs"), InWhatIsThis);
+
 		// Source does not exist
 		if (!FPaths::FileExists(InSourceFilePath))
 		{
-			Arguments.Add(TEXT("FileName"), FText::FromString(FPaths::ConvertRelativePathToFull(InSourceFilePath)));
+			Arguments.Add(TEXT("FileName"), SourceAbsoluteFilePathText);
 			TextBody = FText::Format(LOCTEXT("UnsuccessfulSave_NoExist_Notification", "The requested operation ({WhatIs}) was unsuccessful, the desired file does not exist. File path:\n{FileName}"), Arguments);
 			EditorErrors.Warning(TextBody);
 		}
 		// Target is read-only
 		else if (IFileManager::Get().IsReadOnly(*InTargetFilePath))
 		{
-			Arguments.Add(TEXT("FileName"), FText::FromString(TargetAbsoluteFilePath));
+			Arguments.Add(TEXT("FileName"), TargetAbsoluteFilePathText);
 			TextBody = FText::Format(LOCTEXT("UnsuccessfulSave_ReadOnly_Notification", "The requested operation ({WhatIs}) was unsuccessful, the target file path is read-only. File path:\n{FileName}"), Arguments);
 			EditorErrors.Warning(TextBody);
 		}
 		// Target and source are the same
-		else if (TargetAbsoluteFilePath == FPaths::ConvertRelativePathToFull(InSourceFilePath))
+		else if (TargetAbsoluteFilePathText.EqualTo(SourceAbsoluteFilePathText))
 		{
-			Arguments.Add(TEXT("SourceFileName"), FText::FromString(FPaths::ConvertRelativePathToFull(InSourceFilePath)));
-			Arguments.Add(TEXT("FinalFileName"), FText::FromString(TargetAbsoluteFilePath));
+			Arguments.Add(TEXT("SourceFileName"), SourceAbsoluteFilePathText);
+			Arguments.Add(TEXT("FinalFileName"), TargetAbsoluteFilePathText);
 			TextBody = FText::Format(LOCTEXT("UnsuccessfulSave_Identical_Notification", "The requested operation ({WhatIs}) was unsuccessful, target and source layout file paths are the same ({SourceFileName})!\nAre you trying to import or replace a file that is already in the layouts folder? If so, remove the current file first."), Arguments);
 			EditorErrors.Warning(TextBody);
 		}
 		// We don't specifically know why it failed, this is a fallback
 		else
 		{
-			Arguments.Add(TEXT("SourceFileName"), FText::FromString(FPaths::ConvertRelativePathToFull(InSourceFilePath)));
-			Arguments.Add(TEXT("FinalFileName"), FText::FromString(TargetAbsoluteFilePath));
+			Arguments.Add(TEXT("SourceFileName"), SourceAbsoluteFilePathText);
+			Arguments.Add(TEXT("FinalFileName"), TargetAbsoluteFilePathText);
 			TextBody = FText::Format(LOCTEXT("UnsuccessfulSave_Fallback_Notification", "The requested operation ({WhatIs}) was unsuccessful while copying the layout file from\n{SourceFileName}\ninto\n{FinalFileName}\n\nUsually, this occurs when the introduced file name contains unsupported characters or the total path length exceeds the OS limit."), Arguments);
 			EditorErrors.Warning(TextBody);
 		}
 		EditorErrors.Notify(LOCTEXT("LoadUnsuccessful_Title", "Load Unsuccessful!"));
+
 		// Show reason
-		const FText TextTitle = LOCTEXT("UnsuccessfulCopyHeader", "Unsuccessful copy!");
-		FMessageDialog::Open(EAppMsgType::Ok, TextBody, &TextTitle);
+		FMessageDialog::Open(EAppMsgType::Ok, TextBody, LOCTEXT("UnsuccessfulCopyHeader", "Unsuccessful copy!"));
+
 		// Return
 		return false;
 	}
@@ -277,17 +291,21 @@ bool FPrivateLayoutsMenu::TrySaveLayoutOrWarnInternal(const FString& InSourceFil
 			// Update fields
 			FLayoutSaveRestore::SaveSectionToConfig(GEditorLayoutIni, "LayoutName", FText::FromString(""));
 			FLayoutSaveRestore::SaveSectionToConfig(GEditorLayoutIni, "LayoutDescription", FText::FromString(""));
+
 			// Flush file
 			const bool bRead = true;
 			GConfig->Flush(bRead, GEditorLayoutIni);
+
 			// Re-copy file
 			if (TargetAbsoluteFilePath != FPaths::ConvertRelativePathToFull(GEditorLayoutIni))
 			{
-				IFileManager::Get().Copy(*InTargetFilePath, *GEditorLayoutIni, bShouldReplace, bCopyEvenIfReadOnly, bCopyAttributes);
+				const bool bShouldReplace = true;
+				const bool bCopyEvenIfReadOnly = true;
+				const bool bCopyAttributes = false;
+				IFileManager::Get().Copy(*TargetAbsoluteFilePath, *GEditorLayoutIni, bShouldReplace, bCopyEvenIfReadOnly, bCopyAttributes);
 			}
 		}
-		// Unload target file so it can be re-read into cache properly the next time it is used
-		GConfig->UnloadFile(InTargetFilePath); // We must re-read it to avoid the Editor to use a previously cached name and description
+
 		// Display Editor toast to inform the user of the result of the operation
 		if (bShowSaveToast)
 		{
@@ -296,22 +314,23 @@ bool FPrivateLayoutsMenu::TrySaveLayoutOrWarnInternal(const FString& InSourceFil
 			Info.ExpireDuration = 5.0f;
 			Info.bUseSuccessFailIcons = false;
 			Info.bUseLargeFont = false;
+
 			TSharedPtr<SNotificationItem> SaveMessagePtr = FSlateNotificationManager::Get().AddNotification(Info);
 			if (SaveMessagePtr.IsValid())
 			{
-				const FString& HyperLinkString = TargetAbsoluteFilePath;
+				const FString HyperLinkString = TargetAbsoluteFilePath;
 				auto OpenScreenshotFolder = [HyperLinkString]
 				{
-					FPlatformProcess::ExploreFolder(*FPaths::GetPath(HyperLinkString));
+					FPlatformProcess::ExploreFolder(*HyperLinkString);
 				};
 				SaveMessagePtr->SetText(LOCTEXT("SuccessfulSave_Toast", "Editor layout file saved as"));
 				SaveMessagePtr->SetHyperlink(FSimpleDelegate::CreateLambda(OpenScreenshotFolder), FText::FromString(HyperLinkString));
 				SaveMessagePtr->SetCompletionState(SNotificationItem::CS_Success);
 			}
 		}
-		// Return successful copy message
-		return true;
 	}
+
+	return true;
 }
 
 FText FPrivateLayoutsMenu::GetDisplayTextInternal(const FString& InString)
@@ -342,8 +361,8 @@ void FPrivateLayoutsMenu::DisplayLayoutsInternal(FToolMenuSection& InSection, co
 	// If there are Layout ini files, read them
 	for (int32 LayoutIndex = 0; LayoutIndex < InLayoutIniFileNames.Num(); ++LayoutIndex)
 	{
-		const FString LayoutFilePath = IFileManager::Get().ConvertToAbsolutePathForExternalAppForRead(
-			*FPaths::Combine(InLayoutsDirectory, InLayoutIniFileNames[LayoutIndex]));
+		FString LayoutFilePath = FConfigCacheIni::NormalizeConfigIniPath(*FPaths::Combine(InLayoutsDirectory, InLayoutIniFileNames[LayoutIndex]));
+
 		// Make sure it is a layout file
 		GConfig->UnloadFile(LayoutFilePath); // We must re-read it to avoid the Editor to use a previously cached name and description
 		if (FLayoutSaveRestore::IsValidConfig(LayoutFilePath))
@@ -359,21 +378,32 @@ void FPrivateLayoutsMenu::DisplayLayoutsInternal(FToolMenuSection& InSection, co
 			FUIAction UIAction;
 			if (InLayoutsMenu == ELayoutsMenu::Load)
 			{
-				UIAction = FUIAction(FExecuteAction::CreateStatic(&FLayoutsMenuLoad::LoadLayout, LayoutIndex, InLayoutsType),
-					FCanExecuteAction::CreateStatic(&FLayoutsMenuLoad::CanLoadChooseLayout, LayoutIndex, InLayoutsType),
-					FIsActionChecked::CreateStatic(&FLayoutsMenu::IsLayoutChecked, LayoutIndex, InLayoutsType));
+				UIAction = FUIAction(FExecuteAction::CreateStatic(&FLayoutsMenuLoad::LoadLayout, LayoutIndex, InLayoutsType));
 			}
 			else if (InLayoutsMenu == ELayoutsMenu::Save)
 			{
-				UIAction = FUIAction(FExecuteAction::CreateStatic(&FLayoutsMenuSave::OverrideLayout, LayoutIndex, InLayoutsType),
-					FCanExecuteAction::CreateStatic(&FLayoutsMenuSave::CanSaveChooseLayout, LayoutIndex, InLayoutsType),
-					FIsActionChecked::CreateStatic(&FLayoutsMenu::IsLayoutChecked, LayoutIndex, InLayoutsType));
+				if (FPrivateLayoutsMenu::CanChooseLayoutWhenWriteInternal(InLayoutsType))
+				{
+					UIAction = FUIAction(FExecuteAction::CreateStatic(&FLayoutsMenuSave::OverrideLayout, LayoutIndex, InLayoutsType));
+				}
+				else
+				{
+					// Cannot save engine or project layouts
+					continue;
+				}
+
 			}
 			else if (InLayoutsMenu == ELayoutsMenu::Remove)
 			{
-				UIAction = FUIAction(FExecuteAction::CreateStatic(&FLayoutsMenuRemove::RemoveLayout, LayoutIndex, InLayoutsType),
-					FCanExecuteAction::CreateStatic(&FLayoutsMenuRemove::CanRemoveChooseLayout, InLayoutsType),
-					FIsActionChecked::CreateStatic(&FLayoutsMenu::IsLayoutChecked, LayoutIndex, InLayoutsType));
+				if (FPrivateLayoutsMenu::CanChooseLayoutWhenWriteInternal(InLayoutsType))
+				{
+					UIAction = FUIAction(FExecuteAction::CreateStatic(&FLayoutsMenuRemove::RemoveLayout, LayoutIndex, InLayoutsType));
+				}
+				else
+				{
+					// Cannot delete engine or project layouts
+					continue;
+				}
 			}
 			else
 			{
@@ -475,11 +505,6 @@ FText FPrivateLayoutsMenu::GetProjectLayoutSectionName()
 
 void FPrivateLayoutsMenu::MakeXLayoutsMenuInternal(UToolMenu* InToolMenu, const ELayoutsMenu InLayoutsMenu)
 {
-#if !PLATFORM_MAC // On Mac, each time a key is pressed, all menus are re-generated, stalling the Editor given that SaveLayout is slow on Mac because it does not caches as in Windows.
-	// Update GEditorLayoutIni file. Otherwise, we could not track the changes the user did since the layout was loaded
-	FLayoutsMenuSave::SaveLayout();
-#endif
-
 	// Display (if load-only) engine/project layouts and (always)  user layouts
 	const TArray<FLayoutsMenu::ELayoutsType> LayoutSectionTypes = InLayoutsMenu == ELayoutsMenu::Load
 		? TArray<FLayoutsMenu::ELayoutsType>({FLayoutsMenu::ELayoutsType::Engine, FLayoutsMenu::ELayoutsType::Project, FLayoutsMenu::ELayoutsType::User})
@@ -535,13 +560,13 @@ bool FPrivateLayoutsMenu::CheckAskUserToClosePIESIE(const FText& InitialMessage)
 		return true;
 	}
 	// If PIE/SIE are opened
-	// FMessageDialog - Ask the user whether he wants to automatically close them and continue loading the layout
+	// FMessageDialog - Ask the user whether they wants to automatically close them and continue loading the layout
 	const FText TextTitle = LOCTEXT("CheckAskUserToClosePIESIEIfYesHeaderPIE", "Close PIE/SIE?");
 	const FText IfYesText = LOCTEXT("CheckAskUserToClosePIESIEIfYesBodyPIE", "If \"Yes\", your current game instances (PIE or SIE) will be closed. Any unsaved changes in those will also be lost.");
 	const FText IfNoText = LOCTEXT("CheckAskUserToClosePIESIEIfNoBody", "If \"No\", you can manually reload the layout from the \"User Layouts\" section later.");
 	const FText TextBody = FText::Format(LOCTEXT("ClosePIESIEAssetEditorsBody", "{0}\n\n{1}\n\n{2}"), InitialMessage, IfYesText, IfNoText);
 	// Return if the user did not want to close them
-	if (EAppReturnType::Yes != FMessageDialog::Open(EAppMsgType::YesNo, TextBody, &TextTitle))
+	if (EAppReturnType::Yes != FMessageDialog::Open(EAppMsgType::YesNo, TextBody, TextTitle))
 	{
 		return false;
 	}
@@ -620,7 +645,7 @@ void FPrivateLayoutsMenu::SaveExportLayoutCommon(const FString& InDefaultDirecto
 			LayoutDescriptions = SaveLayoutDialogParams->LayoutDescriptions;
 
 			// Update GEditorLayoutIni file if LayoutNames or LayoutDescriptions were modified by the user
-			if (bWasDialogOpened && LayoutNames.Num() > 0 && LayoutDescriptions.Num() > 0 && (LayoutNames[0].ToString().Len() > 0 || LayoutDescriptions[0].ToString().Len() > 0))
+			if (bWereFilesSelected && LayoutNames.Num() > 0 && LayoutDescriptions.Num() > 0 && (LayoutNames[0].ToString().Len() > 0 || LayoutDescriptions[0].ToString().Len() > 0))
 			{
 				checkf(LayoutNames.Num() == LayoutDescriptions.Num(), TEXT("There should be the same number of LayoutNames and LayoutDescriptions."));
 				for (int32 Index = 0; Index < LayoutNames.Num(); ++Index)
@@ -639,7 +664,7 @@ void FPrivateLayoutsMenu::SaveExportLayoutCommon(const FString& InDefaultDirecto
 		// "Export Layout..." (or "Save Layout As..." dialog could not be opened)
 		if (!bWasDialogOpened)
 		{
-			// Open the "save file" dialog so user can save his/her layout configuration file
+			// Open the "save file" dialog so the user can save their layout configuration file
 			const FString DefaultFile = "";
 			bWereFilesSelected = DesktopPlatform->SaveFileDialog(
 				FSlateApplication::Get().FindBestParentWindowHandleForDialogs(nullptr),
@@ -675,13 +700,12 @@ void FPrivateLayoutsMenu::SaveExportLayoutCommon(const FString& InDefaultDirecto
 				else
 				{
 					// Warn the user that the file will not be copied in there
-					const FText Title = LOCTEXT("SaveAsFailedMsg_Title", "Save As Failed");
 					FMessageDialog::Open(
 						EAppMsgType::Ok,
 						FText::Format(
 							LOCTEXT("SaveAsFailedMsg", "In order to save the layout and allow Unreal to use it, you must save it in the predefined folder:\n{0}\n\nNevertheless, you tried to save it in:\n{1}\n\nIf you simply wish to export a copy of the current configuration in {1} (e.g., to later copy it into a different machine), you could use the \"Export Layout...\" functionality. However, Unreal would not be able to load it until you import it with \"Import Layout...\"."),
 							FText::FromString(DefaultDirectoryAbsolute), FText::FromString(LayoutFilePathAbsolute)),
-						&Title);
+						LOCTEXT("SaveAsFailedMsg_Title", "Save As Failed"));
 				}
 			}
 		}
@@ -742,7 +766,7 @@ bool FLayoutsMenuLoad::CanLoadChooseLayout(const int32 InLayoutIndex, const FLay
 
 void FLayoutsMenuLoad::ReloadCurrentLayout()
 {
-	// If PIE, SIE, or any Asset Editors are opened, ask the user whether he wants to automatically close them and continue loading the layout
+	// If PIE, SIE, or any Asset Editors are opened, ask the user whether they want to automatically close them and continue loading the layout
 	if (!FPrivateLayoutsMenu::CheckAskUserToClosePIESIE(LOCTEXT("AreYouSureToLoadHeader", "Are you sure you want to continue loading the selected layout profile?")))
 	{
 		return;
@@ -765,11 +789,13 @@ void FLayoutsMenuLoad::ReloadCurrentLayout()
 	// Disable config saving
 	UAssetEditorSubsystem* AssetEditorSubsystem = (GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr);
 	const bool bAreAssetEditorOpened = (AssetEditorSubsystem ? AssetEditorSubsystem->GetAllEditedAssets().Num() > 0 : false); // Are there asset editors opened?
+	TOptional<bool> bAutoRestoreAndDisableSavingOverride;
 	if (bAreAssetEditorOpened)
 	{
 		// Save open asset editors + disable manual saving (no need to close them with AssetEditorSubsystem->CloseAllAssetEditors)
-		AssetEditorSubsystem->SaveOpenAssetEditors(/*bOnShutdown*/true, /*bCancelIfDebugger*/false);
-		AssetEditorSubsystem->SetAutoRestoreAndDisableSaving(true);
+		AssetEditorSubsystem->SaveOpenAssetEditors(true);
+		bAutoRestoreAndDisableSavingOverride = AssetEditorSubsystem->GetAutoRestoreAndDisableSavingOverride();
+		AssetEditorSubsystem->SetAutoRestoreAndDisableSavingOverride(true);
 	}
 	FUnrealEdMisc::Get().AllowSavingLayoutOnClose(false);
 	// Editor is reset on-the-fly
@@ -781,7 +807,7 @@ void FLayoutsMenuLoad::ReloadCurrentLayout()
 		check(AssetEditorSubsystem);
 		// Restore asset editors + disable manual saving and avoid trying to re-open the asset editors twice
 		AssetEditorSubsystem->RestorePreviouslyOpenAssets();
-		AssetEditorSubsystem->SetAutoRestoreAndDisableSaving(false);
+		AssetEditorSubsystem->SetAutoRestoreAndDisableSavingOverride(bAutoRestoreAndDisableSavingOverride);
 	}
 	// Save layout and create duplicated ini file (DuplicatedEditorLayoutIniFilePath)
 	FPrivateLayoutsMenu::SaveLayoutWithoutRemovingTempLayoutFiles();
@@ -828,7 +854,7 @@ void FLayoutsMenuLoad::ImportLayout()
 	IDesktopPlatform* DesktopPlatform = FDesktopPlatformModule::Get();
 	if (DesktopPlatform)
 	{
-		// Open File Dialog so user can select his/her desired layout configuration files
+		// Open File Dialog so the user can select their desired layout configuration files
 		TArray<FString> LayoutFilePaths;
 		const FString LastDirectory = FPaths::ProjectContentDir();
 		const FString DefaultDirectory = LastDirectory;
@@ -875,10 +901,10 @@ void FLayoutsMenuLoad::ImportLayout()
 					Arguments.Add(TEXT("FileName"), FText::FromString(FPaths::ConvertRelativePathToFull(LayoutFilePath)));
 					const FText TextBody = FText::Format(LOCTEXT("UnsuccessfulImportBody", "Unsuccessful import, {FileName} is not a layout configuration file!"), Arguments);
 					const FText TextTitle = LOCTEXT("UnsuccessfulImportHeader", "Unsuccessful Import!");
-					FMessageDialog::Open(EAppMsgType::Ok, TextBody, &TextTitle);
+					FMessageDialog::Open(EAppMsgType::Ok, TextBody, TextTitle);
 				}
 			}
-			// If PIE, SIE, or any Asset Editors are opened, ask the user whether he wants to automatically close them and continue loading the layout
+			// If PIE, SIE, or any Asset Editors are opened, ask the user whether they wants to automatically close them and continue loading the layout
 			if (!FPrivateLayoutsMenu::CheckAskUserToClosePIESIE(LOCTEXT("LayoutImportClosePIEAndEditorAssetsHeader", "The layout(s) were successfully imported into the \"User Layouts\" section. Do you want to continue loading the selected layout profile?")))
 			{
 				return;
@@ -1054,7 +1080,7 @@ void FLayoutsMenuRemove::RemoveLayout(const int32 InLayoutIndex, const FLayoutsM
 	const FText TextFileNameToRemove = FText::FromString(FPaths::GetBaseFilename(LayoutIniFileNames[InLayoutIndex]));
 	const FText TextBody = FText::Format(LOCTEXT("ActionRemoveMsg", "Are you sure you want to permanently delete the layout profile \"{0}\"? This action cannot be undone."), TextFileNameToRemove);
 	const FText TextTitle = FText::Format(LOCTEXT("RemoveUILayout_Title", "Remove UI Layout \"{0}\"?"), TextFileNameToRemove);
-	if (EAppReturnType::Ok != FMessageDialog::Open(EAppMsgType::OkCancel, TextBody, &TextTitle))
+	if (EAppReturnType::Ok != FMessageDialog::Open(EAppMsgType::OkCancel, TextBody, TextTitle))
 	{
 		return;
 	}
@@ -1074,7 +1100,7 @@ void FLayoutsMenuRemove::RemoveUserLayouts()
 		// Are you sure you want to do this?
 		const FText TextBody = FText::Format(LOCTEXT("ActionRemoveAllUserLayoutMsg", "Are you sure you want to permanently remove {0} layout {0}|plural(one=profile,other=profiles)? This action cannot be undone."), NumberUserLayoutFiles);
 		const FText TextTitle = LOCTEXT("RemoveAllUserLayouts_Title", "Remove All User-Created Layouts?");
-		if (EAppReturnType::Ok != FMessageDialog::Open(EAppMsgType::OkCancel, TextBody, &TextTitle))
+		if (EAppReturnType::Ok != FMessageDialog::Open(EAppMsgType::OkCancel, TextBody, TextTitle))
 		{
 			return;
 		}
@@ -1098,7 +1124,7 @@ void FLayoutsMenuRemove::RemoveUserLayouts()
 		// Show reason
 		const FText TextBody = LOCTEXT("UnsuccessfulRemoveLayoutBody", "There are no layout profile files created by the user, so none could be removed.");
 		const FText TextTitle = LOCTEXT("UnsuccessfulRemoveLayoutHeader", "Unsuccessful Remove All User Layouts!");
-		FMessageDialog::Open(EAppMsgType::Ok, TextBody, &TextTitle);
+		FMessageDialog::Open(EAppMsgType::Ok, TextBody, TextTitle);
 	}
 }
 

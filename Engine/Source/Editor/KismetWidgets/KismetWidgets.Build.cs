@@ -6,8 +6,6 @@ public class KismetWidgets : ModuleRules
 {
 	public KismetWidgets(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateIncludePaths.Add("Editor/KismetWidgets/Private");
-
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
 				"Core", 
@@ -16,10 +14,13 @@ public class KismetWidgets : ModuleRules
 				"Engine",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
+				"EditorFramework",
 				"UnrealEd",
 				"BlueprintGraph",
-				"ClassViewer"
+				"ContentBrowserData",
+				"ClassViewer",
+				"ToolWidgets",
+				"EditorWidgets",
 			}
 		);
 

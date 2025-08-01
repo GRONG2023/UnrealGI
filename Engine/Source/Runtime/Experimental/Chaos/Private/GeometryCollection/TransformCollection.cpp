@@ -12,7 +12,9 @@ const FName FTransformCollection::TransformAttribute = "Transform";
 const FName FTransformCollection::ParentAttribute = "Parent";
 const FName FTransformCollection::ChildrenAttribute = "Children";
 const FName FTransformCollection::ParticlesAttribute = "Particles";
-
+const FName FTransformCollection::LevelAttribute = "Level";
+const FName FTransformCollection::ConvexGroup = "Convex";
+const FName FTransformCollection::ConvexHullAttribute = "ConvexHull";
 
 FTransformCollection::FTransformCollection()
 	: FManagedArrayCollection()
@@ -20,16 +22,30 @@ FTransformCollection::FTransformCollection()
 	Construct();
 }
 
+void FTransformCollection::DefineTransformSchema(FManagedArrayCollection& InCollection)
+{
+	// Hierarchy Group
+	InCollection.AddAttribute<FTransform3f>(FTransformCollection::TransformAttribute, FTransformCollection::TransformGroup);
+	InCollection.AddAttribute<FString>("BoneName", FTransformCollection::TransformGroup);
+	InCollection.AddAttribute<FLinearColor>("BoneColor", FTransformCollection::TransformGroup);
+	InCollection.AddAttribute<int32>(FTransformCollection::ParentAttribute, FTransformCollection::TransformGroup);
+	InCollection.AddAttribute<TSet<int32>>(FTransformCollection::ChildrenAttribute, FTransformCollection::TransformGroup);
+}
+
 void FTransformCollection::Construct()
 {
-	FManagedArrayCollection::FConstructionParameters TransformDependency(FTransformCollection::TransformGroup);
-
 	// Hierarchy Group
-	AddExternalAttribute<FTransform>(FTransformCollection::TransformAttribute, FTransformCollection::TransformGroup, Transform);
+	AddExternalAttribute<FTransform3f>(FTransformCollection::TransformAttribute, FTransformCollection::TransformGroup, Transform);
 	AddExternalAttribute<FString>("BoneName", FTransformCollection::TransformGroup, BoneName);
 	AddExternalAttribute<FLinearColor>("BoneColor", FTransformCollection::TransformGroup, BoneColor);
 	AddExternalAttribute<int32>(FTransformCollection::ParentAttribute, FTransformCollection::TransformGroup, Parent);
 	AddExternalAttribute<TSet<int32>>(FTransformCollection::ChildrenAttribute, FTransformCollection::TransformGroup, Children);
+}
+
+void FTransformCollection::Reset()
+{
+	Super::Reset();
+	Construct();
 }
 
 void FTransformCollection::Serialize(Chaos::FChaosArchive& Ar)
@@ -39,10 +55,10 @@ void FTransformCollection::Serialize(Chaos::FChaosArchive& Ar)
 	if (Ar.IsLoading())
 	{
 		// for backwards compatibility convert old BoneHierarchy struct into split out arrays
-		TManagedArray<FGeometryCollectionBoneNode>* BoneHierarchyPtr = FindAttribute<FGeometryCollectionBoneNode>("BoneHierarchy", FTransformCollection::TransformGroup);
+		const TManagedArray<FGeometryCollectionBoneNode>* BoneHierarchyPtr = FindAttribute<FGeometryCollectionBoneNode>("BoneHierarchy", FTransformCollection::TransformGroup);
 		if (BoneHierarchyPtr)
 		{
-			TManagedArray<FGeometryCollectionBoneNode>& BoneHierarchy = *BoneHierarchyPtr;
+			const TManagedArray<FGeometryCollectionBoneNode>& BoneHierarchy = *BoneHierarchyPtr;
 
 			for (int Idx = 0; Idx < BoneHierarchy.Num(); Idx++)
 			{
@@ -58,16 +74,38 @@ FTransformCollection FTransformCollection::SingleTransform(const FTransform& Tra
 {
 	FTransformCollection TransformCollection;
 	TransformCollection.AddElements(1, FTransformCollection::TransformGroup);
-	TransformCollection.Transform[0] = TransformRoot;
+	TransformCollection.Transform[0] = FTransform3f(TransformRoot);
 	TransformCollection.Parent[0] = Invalid;
 	return TransformCollection;
+}
+
+void FTransformCollection::Append(const FManagedArrayCollection& InCollection)
+{
+	if (const FTransformCollection* InTypedCollection = InCollection.Cast<FTransformCollection>())
+	{
+		int32 Offset = InCollection.NumElements(TransformGroup);
+		Super::Append(InCollection);
+
+		int32 Size = NumElements(TransformGroup);
+		for (int Idx = Offset; Idx < Size; Idx++)
+		{
+			if (Parent[Idx] != INDEX_NONE)
+				Parent[Idx] += Offset;			
+			for (int32& Val : Children[Idx])
+				Val += Offset;
+		}
+	}
+	else
+	{
+		Super::Append(InCollection);
+	}
 }
 
 
 int32 FTransformCollection::AppendTransform(const FTransformCollection & Element, const FTransform& TransformRoot)
 {
 	check(Element.NumElements(FTransformCollection::TransformGroup) > 0);
-	const TManagedArray<FTransform>& ElementTransform = Element.Transform;
+	const TManagedArray<FTransform3f>& ElementTransform = Element.Transform;
 	const TManagedArray<FString>& ElementBoneName = Element.BoneName;
 	const TManagedArray<FLinearColor>& ElementBoneColor = Element.BoneColor;
 	const TManagedArray<int32>& ElementParent = Element.Parent;
@@ -76,14 +114,15 @@ int32 FTransformCollection::AppendTransform(const FTransformCollection & Element
 	int OriginalNumTransforms = NumElements(FTransformCollection::TransformGroup);
 	int NumElements = Element.NumElements(FTransformCollection::TransformGroup);
 	int FirstNewElement = AddElements(NumElements, FTransformCollection::TransformGroup);
+	const FTransform3f TransformRoot3f(TransformRoot);
 	for (int Index = 0; Index < NumElements; Index++)
 	{
 		int ParticleIndex = FirstNewElement + Index;
-		TManagedArray<FTransform>& Transforms = Transform;
+		TManagedArray<FTransform3f>& Transforms = Transform;
 		if (ElementParent[Index] == FTransformCollection::Invalid)
 		{
 			// is root with additional transform
-			Transforms[ParticleIndex] = ElementTransform[Index] * TransformRoot;
+			Transforms[ParticleIndex] = ElementTransform[Index] * TransformRoot3f;
 		}
 		else
 		{
@@ -131,17 +170,19 @@ void FTransformCollection::RelativeTransformation(const int32& Index, const FTra
 	if (ensureMsgf(Index < NumElements(FTransformCollection::TransformGroup), TEXT("Index out of range.")))
 	{
 		TManagedArray<TSet<int32>>& ChildrenArray = Children;
-		TManagedArray<FTransform>& TransformArray = Transform;
+		TManagedArray<FTransform3f>& TransformArray = Transform;
 
+		const FTransform3f LocalOffset3f = FTransform3f(LocalOffset);
 		if (ChildrenArray[Index].Num())
 		{
-			FTransform LocalOffsetInverse = LocalOffset.Inverse();
+			
+			const FTransform3f LocalOffsetInverse = LocalOffset3f.Inverse();
 			for (int32 Child : ChildrenArray[Index])
 			{
-				TransformArray[Child] = TransformArray[Child] * LocalOffset.Inverse();
+				TransformArray[Child] = TransformArray[Child] * LocalOffsetInverse;
 			}
 		}
-		TransformArray[Index] = LocalOffset * TransformArray[Index];
+		TransformArray[Index] = LocalOffset3f * TransformArray[Index];
 	}
 }
 
@@ -155,7 +196,7 @@ void FTransformCollection::RemoveElements(const FName & Group, const TArray<int3
 
 			TManagedArray<int32>& ParentArray = Parent;
 			TManagedArray<TSet<int32>>& ChildrenArray = Children;
-			TManagedArray<FTransform>&  LocalTransform = Transform;
+			TManagedArray<FTransform3f>&  LocalTransform = Transform;
 			for (int32 sdx = 0; sdx < SortedDeletionList.Num(); sdx++)
 			{
 				TArray<FTransform> GlobalTransform;
@@ -179,7 +220,7 @@ void FTransformCollection::RemoveElements(const FName & Group, const TArray<int3
 						ParentTransform = GlobalTransform[ParentID].Inverse();
 					}
 
-					LocalTransform[ChildID] = GlobalTransform[ChildID] * ParentTransform;
+					LocalTransform[ChildID] = FTransform3f(GlobalTransform[ChildID] * ParentTransform);
 				}
 
 				if (0 <= ParentID)

@@ -2,10 +2,17 @@
 
 #pragma once
 
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "HAL/Platform.h"
+#include "Math/Range.h"
+#include "Math/RangeBound.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/FrameNumber.h"
+#include "Misc/FrameTime.h"
 #include "MovieSceneTimeTransform.h"
 #include "UObject/ObjectMacros.h"
-#include "Misc/FrameTime.h"
+
 #include "MovieSceneTimeWarping.generated.h"
 
 /**
@@ -65,7 +72,7 @@ struct FMovieSceneTimeWarping
 		else
 		{
 			const FFrameNumber WarpLength = Length();
-			const FFrameNumber WarpsOffset = WarpLength * WarpCount;
+			const FFrameNumber WarpsOffset = WarpLength * (float)WarpCount;
 			return FMovieSceneTimeTransform(WarpsOffset);
 		}
 	}

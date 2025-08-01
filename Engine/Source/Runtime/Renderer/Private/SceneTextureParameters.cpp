@@ -3,28 +3,33 @@
 #include "SceneTextureParameters.h"
 #include "SceneRendering.h"
 #include "ScenePrivate.h"
-#include "SceneRenderTargets.h"
+#include "SceneTextures.h"
 #include "SystemTextures.h"
 
-FSceneTextureParameters GetSceneTextureParameters(FRDGBuilder& GraphBuilder)
+FSceneTextureParameters GetSceneTextureParameters(FRDGBuilder& GraphBuilder, const FViewInfo& View)
 {
-	const FSceneRenderTargets& SceneContext = FSceneRenderTargets::Get(GraphBuilder.RHICmdList);
+	return GetSceneTextureParameters(GraphBuilder, View.GetSceneTextures());
+}
+
+FSceneTextureParameters GetSceneTextureParameters(FRDGBuilder& GraphBuilder, const FSceneTextures& SceneTextures)
+{
+	const auto& SystemTextures = FRDGSystemTextures::Get(GraphBuilder);
 
 	FSceneTextureParameters Parameters;
 
 	// Should always have a depth buffer around allocated, since early z-pass is first.
-	Parameters.SceneDepthTexture = GraphBuilder.RegisterExternalTexture(SceneContext.SceneDepthZ, ERenderTargetTexture::ShaderResource);
+	Parameters.SceneDepthTexture = SceneTextures.Depth.Resolve;
 	Parameters.SceneStencilTexture = GraphBuilder.CreateSRV(FRDGTextureSRVDesc::CreateWithPixelFormat(Parameters.SceneDepthTexture, PF_X24_G8));
 
 	// Registers all the scene texture from the scene context. No fallback is provided to catch mistake at shader parameter validation time
 	// when a pass is trying to access a resource before any other pass actually created it.
-	Parameters.GBufferVelocityTexture = TryRegisterExternalTexture(GraphBuilder, SceneContext.SceneVelocity);
-	Parameters.GBufferATexture = TryRegisterExternalTexture(GraphBuilder, SceneContext.GBufferA);
-	Parameters.GBufferBTexture = TryRegisterExternalTexture(GraphBuilder, SceneContext.GBufferB);
-	Parameters.GBufferCTexture = TryRegisterExternalTexture(GraphBuilder, SceneContext.GBufferC);
-	Parameters.GBufferDTexture = TryRegisterExternalTexture(GraphBuilder, SceneContext.GBufferD);
-	Parameters.GBufferETexture = TryRegisterExternalTexture(GraphBuilder, SceneContext.GBufferE);
-	Parameters.GBufferFTexture = RegisterExternalTextureWithFallback(GraphBuilder, SceneContext.GBufferF, GSystemTextures.BlackDummy);
+	Parameters.GBufferVelocityTexture = GetIfProduced(SceneTextures.Velocity);
+	Parameters.GBufferATexture = GetIfProduced(SceneTextures.GBufferA);
+	Parameters.GBufferBTexture = GetIfProduced(SceneTextures.GBufferB);
+	Parameters.GBufferCTexture = GetIfProduced(SceneTextures.GBufferC);
+	Parameters.GBufferDTexture = GetIfProduced(SceneTextures.GBufferD);
+	Parameters.GBufferETexture = GetIfProduced(SceneTextures.GBufferE);
+	Parameters.GBufferFTexture = GetIfProduced(SceneTextures.GBufferF, SystemTextures.MidGrey);
 
 	return Parameters;
 }
@@ -59,33 +64,21 @@ FSceneLightingChannelParameters GetSceneLightingChannelParameters(FRDGBuilder& G
 	}
 	else
 	{
-		Parameters.SceneLightingChannels = GraphBuilder.RegisterExternalTexture(GSystemTextures.WhiteDummy);
+		Parameters.SceneLightingChannels = GSystemTextures.GetZeroUIntDummy(GraphBuilder);
 		Parameters.bSceneLightingChannelsValid = false;
 	}
 
 	return Parameters;
 }
 
-FRDGTextureRef GetEyeAdaptationTexture(FRDGBuilder& GraphBuilder, const FSceneView& View)
-{
-	if (View.HasValidEyeAdaptationTexture())
-	{
-		return GraphBuilder.RegisterExternalTexture(View.GetEyeAdaptationTexture(), ERenderTargetTexture::Targetable, ERDGTextureFlags::MultiFrame);
-	}
-	else
-	{
-		return GraphBuilder.RegisterExternalTexture(GSystemTextures.WhiteDummy);
-	}
-}
-
-FRHIShaderResourceView* GetEyeAdaptationBuffer(const FSceneView& View)
+FRDGBufferRef GetEyeAdaptationBuffer(FRDGBuilder& GraphBuilder, const FSceneView& View)
 {
 	if (View.HasValidEyeAdaptationBuffer())
 	{
-		return View.GetEyeAdaptationBuffer()->SRV;
+		return GraphBuilder.RegisterExternalBuffer(View.GetEyeAdaptationBuffer(), ERDGBufferFlags::MultiFrame);
 	}
 	else
 	{
-		return GWhiteVertexBufferWithSRV->ShaderResourceViewRHI;
+		return GSystemTextures.GetDefaultStructuredBuffer(GraphBuilder, sizeof(FVector4f), FVector4f::One());
 	}
 }

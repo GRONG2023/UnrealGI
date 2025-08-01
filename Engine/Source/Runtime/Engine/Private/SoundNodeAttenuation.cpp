@@ -2,9 +2,9 @@
 
 
 #include "Sound/SoundNodeAttenuation.h"
-#include "EngineDefines.h"
-#include "ActiveSound.h"
 #include "AudioDevice.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SoundNodeAttenuation)
 
 /*-----------------------------------------------------------------------------
 	USoundNodeAttenuation implementation.
@@ -17,7 +17,7 @@ USoundNodeAttenuation::USoundNodeAttenuation(const FObjectInitializer& ObjectIni
 
 float USoundNodeAttenuation::GetMaxDistance() const 
 { 
-	float MaxDistance = WORLD_MAX;
+	float MaxDistance = FAudioDevice::GetMaxWorldDistance();
 	const FSoundAttenuationSettings* Settings = GetAttenuationSettingsToApply();
 	if (Settings)
 	{

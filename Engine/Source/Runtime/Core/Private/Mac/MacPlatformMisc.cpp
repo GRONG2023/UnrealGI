@@ -8,7 +8,7 @@
 #include "Misc/App.h"
 #include "HAL/ExceptionHandling.h"
 #include "Misc/SecureHash.h"
-#include "VarargsHelper.h"
+#include "Misc/VarargsHelper.h"
 #include "Mac/CocoaThread.h"
 #include "Misc/EngineVersion.h"
 #include "Mac/MacMallocZone.h"
@@ -22,6 +22,7 @@
 #include "HAL/ThreadManager.h"
 #include "Misc/OutputDeviceError.h"
 #include "Misc/OutputDeviceRedirector.h"
+#include "Misc/StringBuilder.h"
 #include "Misc/FeedbackContext.h"
 #include "Misc/CoreDelegates.h"
 #include "Internationalization/Internationalization.h"
@@ -58,6 +59,11 @@ extern CORE_API bool GIsGPUCrashed;
 #else
 #define MAC_GRAPHICS_SETTINGS TEXT("/Script/MacTargetPlatform.MacTargetSettings")
 #define MAC_GRAPHICS_INI GEngineIni
+#endif
+
+#if MAC_OS_X_VERSION_MAX_ALLOWED < 120000
+	// use old constant on old macos, since kIOMainPortDefault was introduced in macOS 12
+	#define kIOMainPortDefault kIOMasterPortDefault
 #endif
 
 /*------------------------------------------------------------------------------
@@ -160,32 +166,44 @@ static const char* GetClassCode()
 
  CORE_API FMacMallocCrashHandler* GCrashMalloc = nullptr;
 
+// e.g. 13.2.1
 static void MacPlatformGetOSProductVersion(FString &OutOSVersion)
 {
-	SIZE_T OSProductVersionStringSize = 0;
-	if (0 == (sysctlbyname("kern.osproductversion", NULL, &OSProductVersionStringSize, NULL, 0)))
+	static FString OSVersion = TEXT("");
+	if (OSVersion.IsEmpty())
 	{
-		ANSICHAR *OSProductVersionCString = new ANSICHAR[OSProductVersionStringSize];
-		if (0 == (sysctlbyname("kern.osproductversion", OSProductVersionCString, &OSProductVersionStringSize, NULL, 0)))
+		SIZE_T OSProductVersionStringSize = 0;
+		if (0 == (sysctlbyname("kern.osproductversion", NULL, &OSProductVersionStringSize, NULL, 0)))
 		{
-			OutOSVersion = ANSI_TO_TCHAR(OSProductVersionCString);
+			ANSICHAR *OSProductVersionCString = new ANSICHAR[OSProductVersionStringSize];
+			if (0 == (sysctlbyname("kern.osproductversion", OSProductVersionCString, &OSProductVersionStringSize, NULL, 0)))
+			{
+				OSVersion = ANSI_TO_TCHAR(OSProductVersionCString);
+			}
+			delete [] OSProductVersionCString;
 		}
-		delete [] OSProductVersionCString;
 	}
+	OutOSVersion = OSVersion;
 }
 
+// e.g. 22D68
 static void MacPlatformGetOSVersion(FString &OutOSBuild)
 {
-	SIZE_T OSVersionStringSize = 0;
-	if (0 == (sysctlbyname("kern.osversion", NULL, &OSVersionStringSize, NULL, 0)))
+	static FString OSBuild = TEXT("");
+	if (OSBuild.IsEmpty())
 	{
-		ANSICHAR *OSVersionCString = new ANSICHAR[OSVersionStringSize];
-		if (0 == (sysctlbyname("kern.osversion", OSVersionCString, &OSVersionStringSize, NULL, 0)))
+		SIZE_T OSVersionStringSize = 0;
+		if (0 == (sysctlbyname("kern.osversion", NULL, &OSVersionStringSize, NULL, 0)))
 		{
-			OutOSBuild = ANSI_TO_TCHAR(OSVersionCString);
+			ANSICHAR *OSVersionCString = new ANSICHAR[OSVersionStringSize];
+			if (0 == (sysctlbyname("kern.osversion", OSVersionCString, &OSVersionStringSize, NULL, 0)))
+			{
+				OSBuild = ANSI_TO_TCHAR(OSVersionCString);
+			}
+			delete [] OSVersionCString;
 		}
-		delete [] OSVersionCString;
 	}
+	OutOSBuild = OSBuild;
 }
 
 /**
@@ -235,8 +253,7 @@ struct FMacApplicationInfo
 		
 		MacPlatformGetOSVersion(OSBuild);
 
-		OSXVersion = [[NSProcessInfo processInfo] operatingSystemVersion];
-		RunningOnMavericks = OSXVersion.majorVersion == 10 && OSXVersion.minorVersion == 9;
+		OSXVersion = FMacPlatformMisc::GetNSOperatingSystemVersion();
 
 		XcodeVersion.majorVersion = XcodeVersion.minorVersion = XcodeVersion.patchVersion = 0;
 
@@ -275,7 +292,7 @@ struct FMacApplicationInfo
 		ParentProcess = TempSysCtlBuffer;
 		
 		MachineUUID = TEXT("00000000-0000-0000-0000-000000000000");
-		io_service_t PlatformExpert = IOServiceGetMatchingService(kIOMasterPortDefault,IOServiceMatching("IOPlatformExpertDevice"));
+		io_service_t PlatformExpert = IOServiceGetMatchingService(kIOMainPortDefault,IOServiceMatching("IOPlatformExpertDevice"));
 		if(PlatformExpert)
 		{
 			CFTypeRef SerialNumberAsCFString = IORegistryEntryCreateCFProperty(PlatformExpert,CFSTR(kIOPlatformUUIDKey),kCFAllocatorDefault, 0);
@@ -325,7 +342,11 @@ struct FMacApplicationInfo
 		// Cache & create the crash report folder.
 		FString ReportPath = FPaths::ConvertRelativePathToFull(FString::Printf(TEXT("%s"), *(FPaths::GameAgnosticSavedDir() / TEXT("Crashes"))));
 		FCStringAnsi::Strcpy(CrashReportPath, PATH_MAX+1, TCHAR_TO_UTF8(*ReportPath));
+#if WITH_EDITOR
+		FString ReportClient = FPaths::ConvertRelativePathToFull(FPlatformProcess::GenerateApplicationPath(TEXT("CrashReportClientEditor"), EBuildConfiguration::Development));
+#else
 		FString ReportClient = FPaths::ConvertRelativePathToFull(FPlatformProcess::GenerateApplicationPath(TEXT("CrashReportClient"), EBuildConfiguration::Development));
+#endif
 		FCStringAnsi::Strcpy(CrashReportClient, PATH_MAX+1, TCHAR_TO_UTF8(*ReportClient));
 		IFileManager::Get().MakeDirectory(*ReportPath, true);
 		
@@ -474,7 +495,6 @@ struct FMacApplicationInfo
 	bool bIsUnattended;
 	bool bIsSandboxed;
 	bool RunningOnBattery;
-	bool RunningOnMavericks;
 	int32 PowerSourceNotification;
 	int32 NumCores;
 	int64 SystemLogSize;
@@ -553,12 +573,12 @@ void FMacPlatformMisc::PlatformPreInit()
 	}
 	if (Limit.rlim_cur < OPEN_MAX)
 	{
-		UE_LOG(LogInit, Warning, TEXT("Open files limit too small: %llu, should be at least OPEN_MAX (%llu). rlim_max is %llu, kern.maxfilesperproc is %u. UE4 may be unstable."), Limit.rlim_cur, OPEN_MAX, Limit.rlim_max, MaxFilesPerProc);
+		UE_LOG(LogInit, Warning, TEXT("Open files limit too small: %llu, should be at least OPEN_MAX (%llu). rlim_max is %llu, kern.maxfilesperproc is %u. UE may be unstable."), Limit.rlim_cur, OPEN_MAX, Limit.rlim_max, MaxFilesPerProc);
 	}
 	Result = setrlimit(RLIMIT_NOFILE, &Limit);
 	if (Result != 0)
 	{
-		UE_LOG(LogInit, Warning, TEXT("Failed to change open file limit, UE4 may be unstable."));
+		UE_LOG(LogInit, Warning, TEXT("Failed to change open file limit, UE may be unstable."));
 	}
 
 	FApplePlatformSymbolication::EnableCoreSymbolication(!FPlatformProcess::IsSandboxedApplication() && IS_PROGRAM);
@@ -662,7 +682,7 @@ TArray<uint8> FMacPlatformMisc::GetMacAddress()
 		CFDictionarySetValue(MatchingDict, CFSTR(kIOPropertyMatchKey), PropertyMatchDict);
 		CFRelease(PropertyMatchDict);
 
-		if (IOServiceGetMatchingServices(kIOMasterPortDefault, MatchingDict, &InterfaceIterator) != KERN_SUCCESS)
+		if (IOServiceGetMatchingServices(kIOMainPortDefault, MatchingDict, &InterfaceIterator) != KERN_SUCCESS)
 		{
 			UE_LOG(LogMac, Warning, TEXT("GetMacAddress failed - error getting matching services"));
 			return Result;
@@ -693,11 +713,16 @@ TArray<uint8> FMacPlatformMisc::GetMacAddress()
 	return Result;
 }
 
-void FMacPlatformMisc::RequestExit( bool Force )
+void FMacPlatformMisc::RequestExit( bool Force, const TCHAR* CallSite)
 {
-	UE_LOG(LogMac, Log,  TEXT("FPlatformMisc::RequestExit(%i)"), Force );
+	UE_LOG(LogMac, Log,  TEXT("FPlatformMisc::RequestExit(%i, %s)"), Force,
+		CallSite ? CallSite : TEXT("<NoCallSiteInfo>"));
 
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	FCoreDelegates::ApplicationWillTerminateDelegate.Broadcast();
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+	FCoreDelegates::GetApplicationWillTerminateDelegate().Broadcast();
 
 	notify_cancel(GMacAppInfo.PowerSourceNotification);
 	GMacAppInfo.PowerSourceNotification = 0;
@@ -707,9 +732,7 @@ void FMacPlatformMisc::RequestExit( bool Force )
 		// Make sure the log is flushed.
 		if (GLog)
 		{
-			// This may be called from other thread, so set this thread as the master.
-			GLog->SetCurrentThreadAsMasterThread();
-			GLog->TearDown();
+			GLog->Flush();
 		}
 
 
@@ -803,6 +826,15 @@ void FMacPlatformMisc::NormalizePath(FString& InPath)
 	if (InPath.StartsWith(TEXT("~"), ESearchCase::CaseSensitive))	// case sensitive is quicker, and our substring doesn't care
 	{
 		InPath = InPath.Replace(TEXT("~"), FPlatformProcess::UserHomeDir(), ESearchCase::CaseSensitive);
+	}
+}
+
+void FMacPlatformMisc::NormalizePath(FStringBuilderBase& InPath)
+{
+	// only expand if path starts with ~, e.g. ~/ should be expanded, /~ should not
+	if (FStringView(InPath).StartsWith('~'))
+	{
+		InPath.ReplaceAt(0, 1, FPlatformProcess::UserHomeDir());
 	}
 }
 
@@ -1183,7 +1215,7 @@ public:
 		// Enumerate the GPUs via IOKit to avoid dragging in OpenGL
 		io_iterator_t Iterator;
 		CFMutableDictionaryRef MatchDictionary = IOServiceMatching(GetIOServiceMatchingName());
-		if(IOServiceGetMatchingServices(kIOMasterPortDefault, MatchDictionary, &Iterator) == kIOReturnSuccess)
+		if(IOServiceGetMatchingServices(kIOMainPortDefault, MatchDictionary, &Iterator) == kIOReturnSuccess)
 		{
 			uint32 Index = 0;
 			io_registry_entry_t ServiceEntry;
@@ -1269,7 +1301,7 @@ public:
 				CFMutableDictionaryRef MatchDictionary = IORegistryEntryIDMatching(DeviceRegistryID);
 				if(MatchDictionary)
 				{
-					io_registry_entry_t ServiceEntry = IOServiceGetMatchingService(kIOMasterPortDefault, MatchDictionary);
+					io_registry_entry_t ServiceEntry = IOServiceGetMatchingService(kIOMainPortDefault, MatchDictionary);
 					if(ServiceEntry)
 					{
 						io_iterator_t ParentIterator;
@@ -1440,10 +1472,6 @@ FGPUDriverInfo FMacPlatformMisc::GetGPUDriverInfo(const FString& DeviceDescripti
 			{
 				Info.ProviderName = TEXT("Intel");
 			}
-			else if (Info.IsNVIDIA())
-			{
-				Info.ProviderName = TEXT("Nvidia");
-			}
 			else
 			{
 				Info.ProviderName = TEXT("Apple");
@@ -1599,6 +1627,7 @@ FGPUDriverInfo FMacPlatformMisc::GetGPUDriverInfo(const FString& DeviceDescripti
 void FMacPlatformMisc::GetOSVersions( FString& out_OSVersionLabel, FString& out_OSSubVersionLabel )
 {
 	MacPlatformGetOSProductVersion(out_OSVersionLabel);
+	out_OSVersionLabel = FString("macOS ") + out_OSVersionLabel;
 	MacPlatformGetOSVersion(out_OSSubVersionLabel);
 }
 
@@ -1607,6 +1636,21 @@ FString FMacPlatformMisc::GetOSVersion()
 	FString OSVersion;
 	MacPlatformGetOSProductVersion(OSVersion);
 	return OSVersion;
+}
+
+NSOperatingSystemVersion FMacPlatformMisc::GetNSOperatingSystemVersion()
+{
+	FString OSVersionString;
+	NSOperatingSystemVersion SystemVersion = {};
+	MacPlatformGetOSProductVersion(OSVersionString);
+	if (sscanf(TCHAR_TO_ANSI(*OSVersionString), "%ld.%ld.%ld", &SystemVersion.majorVersion, &SystemVersion.minorVersion, &SystemVersion.patchVersion))
+	{
+		return SystemVersion;
+	}
+	else
+	{
+		return {0,0,0};
+	}
 }
 
 bool FMacPlatformMisc::GetDiskTotalAndFreeSpace(const FString& InPath, uint64& TotalNumberOfBytes, uint64& NumberOfFreeBytes)
@@ -1729,11 +1773,6 @@ bool FMacPlatformMisc::IsRunningOnBattery()
 	return GMacAppInfo.RunningOnBattery;
 }
 
-bool FMacPlatformMisc::IsRunningOnMavericks()
-{
-	return GMacAppInfo.RunningOnMavericks;
-}
-
 int32 FMacPlatformMisc::MacOSXVersionCompare(uint8 Major, uint8 Minor, uint8 Revision)
 {
 	uint8 TargetValues[3] = {Major, Minor, Revision};
@@ -1757,7 +1796,7 @@ int32 FMacPlatformMisc::MacOSXVersionCompare(uint8 Major, uint8 Minor, uint8 Rev
 FString FMacPlatformMisc::GetOperatingSystemId()
 {
 	FString Result;
-	io_service_t Entry = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOPlatformExpertDevice"));
+	io_service_t Entry = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPlatformExpertDevice"));
 	if (Entry)
 	{
 		CFTypeRef UUID = IORegistryEntryCreateCFProperty(Entry, CFSTR(kIOPlatformUUIDKey), kCFAllocatorDefault, 0);
@@ -1906,8 +1945,7 @@ static void DefaultCrashHandler(FMacCrashContext const& Context)
 	Context.ReportCrash();
 	if (GLog)
 	{
-		GLog->SetCurrentThreadAsMasterThread();
-		GLog->Flush();
+		GLog->Panic();
 	}
 	if (GWarn)
 	{
@@ -1922,11 +1960,9 @@ static void DefaultCrashHandler(FMacCrashContext const& Context)
 	return Context.GenerateCrashInfoAndLaunchReporter();
 }
 
-/** Number of stack entries to ignore in backtrace */
-static uint32 GMacStackIgnoreDepth = 6;
-
 /** Message for the assert triggered on this thread */
 thread_local const TCHAR* GCrashErrorMessage = nullptr;
+thread_local void* GCrashErrorProgramCounter = nullptr;
 thread_local ECrashContextType GCrashErrorType = ECrashContextType::Crash;
 thread_local uint8* GCrashContextMemory[sizeof(FMacCrashContext)];
 
@@ -1938,21 +1974,24 @@ static void PlatformCrashHandler(int32 Signal, siginfo_t* Info, void* Context)
 
 	ECrashContextType Type;
 	const TCHAR* ErrorMessage;
+	void* ErrorProgramCounter;
 
 	if (GCrashErrorMessage == nullptr)
 	{
 		Type = ECrashContextType::Crash;
 		ErrorMessage = TEXT("Caught signal");
+		ErrorProgramCounter = Info->si_addr;
 	}
 	else
 	{
 		Type = GCrashErrorType;
 		ErrorMessage = GCrashErrorMessage;
+		ErrorProgramCounter = GCrashErrorProgramCounter;
 	}
 
 	FMacCrashContext* CrashContext = new (GCrashContextMemory) FMacCrashContext(Type, ErrorMessage);
-	CrashContext->IgnoreDepth = GMacStackIgnoreDepth;
 	CrashContext->InitFromSignal(Signal, Info, Context);
+	CrashContext->ErrorFrame = ErrorProgramCounter;
 
 	// Switch to crash handler malloc to avoid malloc reentrancy
 	check(GCrashMalloc);
@@ -2010,7 +2049,7 @@ static void GracefulTerminationHandler(int32 Signal, siginfo_t* Info, void* Cont
 	// make sure as much data is written to disk as possible
 	if (GLog)
 	{
-		GLog->Flush();
+		GLog->Panic();
 	}
 	if (GWarn)
 	{
@@ -2082,7 +2121,7 @@ void FMacPlatformMisc::SetCrashHandler(void (* CrashHandler)(const FGenericCrash
 		NSError* Error = nil;
 		if ([FMacApplicationInfo::CrashReporter enableCrashReporterAndReturnError: &Error])
 		{
-			GMacStackIgnoreDepth = 0;
+			/* GMacStackIgnoreDepth = 0; */
 		}
 		else
 		{
@@ -2154,7 +2193,7 @@ void FMacCrashContext::GenerateInfoInFolder(char const* const InfoFolder) const
 		int ReportFile = open(FilePath, O_CREAT|O_WRONLY, 0766);
 		if (ReportFile != -1)
 		{
-			WriteUTF16String(ReportFile, TEXT("GameName UE4-"));
+			WriteUTF16String(ReportFile, TEXT("GameName UE-"));
 			WriteLine(ReportFile, *GMacAppInfo.AppName);
 			
 			WriteUTF16String(ReportFile, TEXT("BuildVersion 1.0."));
@@ -2183,7 +2222,7 @@ void FMacCrashContext::GenerateInfoInFolder(char const* const InfoFolder) const
 		// copy log
 		FCStringAnsi::Strncpy(FilePath, CrashInfoFolder, PATH_MAX);
 		FCStringAnsi::Strcat(FilePath, PATH_MAX, "/");
-		FCStringAnsi::Strcat(FilePath, PATH_MAX, (!GMacAppInfo.AppName.IsEmpty() ? GMacAppInfo.AppNameUTF8 : "UE4"));
+		FCStringAnsi::Strcat(FilePath, PATH_MAX, (!GMacAppInfo.AppName.IsEmpty() ? GMacAppInfo.AppNameUTF8 : "Unreal"));
 		FCStringAnsi::Strcat(FilePath, PATH_MAX, ".log");
 		int LogSrc = open(GMacAppInfo.AppLogPath, O_RDONLY);
 		int LogDst = open(FilePath, O_CREAT|O_WRONLY, 0766);
@@ -2309,6 +2348,8 @@ void FMacCrashContext::GenerateCrashInfoAndLaunchReporter() const
 		GConfig->GetBool(TEXT("/Script/UnrealEd.AnalyticsPrivacySettings"), TEXT("bSendUsageData"), bSendUsageData, GEditorSettingsIni);
 	}
 
+	// NOTE: A blueprint-only game packaged from a vanilla engine downloaded from Epic Game Store isn't considered a 'Licensee' version because the engine was built by Epic.
+	//       There is no way at the moment do distinguish this case properly.
 	if (BuildSettings::IsLicenseeVersion() && !UE_EDITOR)
 	{
 		// do not send unattended reports in licensees' builds except for the editor, where it is governed by the above setting
@@ -2325,9 +2366,12 @@ void FMacCrashContext::GenerateCrashInfoAndLaunchReporter() const
 	if(bCanRunCrashReportClient)
 	{
 		// create a crash-specific directory
-		FString CrashInfoFolder = FString::Printf(TEXT("%s/CrashReport-UE4-%s-pid-%d-%s"), UTF8_TO_TCHAR(GMacAppInfo.CrashReportPath), UTF8_TO_TCHAR(GMacAppInfo.AppNameUTF8), (int32)getpid(), *GMacAppInfo.RunUUID.ToString());
+		FString CrashInfoFolder = FString::Printf(TEXT("%s/CrashReport-UE-%s-pid-%d-%s"), UTF8_TO_TCHAR(GMacAppInfo.CrashReportPath), UTF8_TO_TCHAR(GMacAppInfo.AppNameUTF8), (int32)getpid(), *GMacAppInfo.RunUUID.ToString());
 
-		GenerateInfoInFolder(TCHAR_TO_UTF8(*CrashInfoFolder));
+		// Do not inline this! The lifetime of this object needs to extend over the usage of Argv in posix_spawn() call below.
+		auto CrashInfoFolderUTF8 = TStringConversion<FTCHARToUTF8_Convert>(*CrashInfoFolder);
+
+		GenerateInfoInFolder(CrashInfoFolderUTF8.Get());
 
 		CrashInfoFolder += TEXT("/");
 
@@ -2337,14 +2381,14 @@ void FMacCrashContext::GenerateCrashInfoAndLaunchReporter() const
 		int32		Argc		= 0;
 
 		Argv[Argc++] = "CrashReportClient";
-		Argv[Argc++] = TCHAR_TO_UTF8(*CrashInfoFolder);
+		Argv[Argc++] = CrashInfoFolderUTF8.Get();
 
 		if (bImplicitSend)
 		{
 			Argv[Argc++] = "-Unattended";
 			Argv[Argc++] = "-ImplicitSend";
 		}
-		else if (GMacAppInfo.bIsUnattended)
+		else if(GMacAppInfo.bIsUnattended)
 		{
 			Argv[Argc++] ="-Unattended";
 		}
@@ -2356,28 +2400,44 @@ void FMacCrashContext::GenerateCrashInfoAndLaunchReporter() const
 			}
 		}
 
-		posix_spawn_file_actions_t FileActions;
-		posix_spawn_file_actions_init(&FileActions);
-
-		posix_spawnattr_t SpawnAttr;
-		posix_spawnattr_init(&SpawnAttr);
-
+		// We've generated the crash report above since we were able to,
+		// now we need to make sure CRC actually exists and is executable before
+		// trying to run it.
+		struct stat Stat;
+		stat(GMacAppInfo.CrashReportClient, &Stat);
+		if (!S_ISREG(Stat.st_mode))
 		{
-			uint32 SpawnFlags = POSIX_SPAWN_SETPGROUP;
-			posix_spawnattr_setflags(&SpawnAttr, SpawnFlags);
+			UE_LOG(LogMac, Error, TEXT("Unable to locate CrashReporterClient: %s"), UTF8_TO_TCHAR(GMacAppInfo.CrashReportClient));
 		}
-
-		extern char **environ; // provided by libc
-
-		// Use posix_spawn() as it is async-signal safe, CreateProc can fail in Cocoa.
-		Status = posix_spawn(&CrcPID, GMacAppInfo.CrashReportClient, &FileActions, &SpawnAttr, (char *const *)Argv, environ);
-
-		posix_spawn_file_actions_destroy(&FileActions);
-		posix_spawnattr_destroy(&SpawnAttr);
-
-		if (Status != 0)
+		else if ((Stat.st_mode & S_IXUSR) == 0)
 		{
-			UE_LOG(LogHAL, Fatal, TEXT("FMacPlatformMisc::GenerateCrashInfoAndLaunchReporter: posix_spawn() failed (%d, %s)"), Status, UTF8_TO_TCHAR(strerror(Status)));
+			UE_LOG(LogMac, Error, TEXT("Unable to execute CrashReporterClient, please run: chmod u+x %s"), UTF8_TO_TCHAR(GMacAppInfo.CrashReportClient));
+		}
+		else
+		{
+			posix_spawn_file_actions_t FileActions;
+			posix_spawn_file_actions_init(&FileActions);
+
+			posix_spawnattr_t SpawnAttr;
+			posix_spawnattr_init(&SpawnAttr);
+
+			{
+				uint16 SpawnFlags = POSIX_SPAWN_SETPGROUP;
+				posix_spawnattr_setflags(&SpawnAttr, SpawnFlags);
+			}
+
+			extern char **environ; // provided by libc
+
+			// Use posix_spawn() as it is async-signal safe, CreateProc can fail in Cocoa.
+			Status = posix_spawn(&CrcPID, GMacAppInfo.CrashReportClient, &FileActions, &SpawnAttr, (char *const *)Argv, environ);
+
+			posix_spawn_file_actions_destroy(&FileActions);
+			posix_spawnattr_destroy(&SpawnAttr);
+
+			if (Status != 0)
+			{
+				UE_LOG(LogMac, Error, TEXT("FMacPlatformMisc::GenerateCrashInfoAndLaunchReporter: posix_spawn() failed (%d, %s)"), Status, UTF8_TO_TCHAR(strerror(Status)));
+			}
 		}
 	}
 
@@ -2422,6 +2482,8 @@ void FMacCrashContext::GenerateEnsureInfoAndLaunchReporter() const
 		GConfig->GetBool(TEXT("/Script/UnrealEd.AnalyticsPrivacySettings"), TEXT("bSendUsageData"), bSendUsageData, GEditorSettingsIni);
 	}
 
+	// NOTE: A blueprint-only game packaged from a vanilla engine downloaded from Epic Game Store isn't considered a 'Licensee' version because the engine was built by Epic.
+	//       There is no way at the moment do distinguish this case properly.
 	if (BuildSettings::IsLicenseeVersion() && !UE_EDITOR)
 	{
 		// do not send unattended reports in licensees' builds except for the editor, where it is governed by the above setting
@@ -2530,16 +2592,23 @@ bool FMacCrashContext::GetPlatformAllThreadContextsString(FString& OutStr) const
 	return !OutStr.IsEmpty();
 }
 
-void ReportAssert(const TCHAR* ErrorMessage, int NumStackFramesToIgnore)
+void ReportAssert(const TCHAR* ErrorMessage, void* ErrorProgramCounter)
 {
 	GCrashErrorMessage = ErrorMessage;
+	GCrashErrorProgramCounter = ErrorProgramCounter;
 	GCrashErrorType = ECrashContextType::Assert;
 	FPlatformMisc::RaiseException(1);
 }
 
-void ReportGPUCrash(const TCHAR* ErrorMessage, int NumStackFramesToIgnore)
+void ReportGPUCrash(const TCHAR* ErrorMessage, void* ErrorProgramCounter)
 {
+	if (ErrorProgramCounter == nullptr)
+	{
+		ErrorProgramCounter = PLATFORM_RETURN_ADDRESS();
+	}
+
 	GCrashErrorMessage = ErrorMessage;
+	GCrashErrorProgramCounter = ErrorProgramCounter;
 	GCrashErrorType = ECrashContextType::GPUCrash;
 	FPlatformMisc::RaiseException(1);
 }
@@ -2547,7 +2616,7 @@ void ReportGPUCrash(const TCHAR* ErrorMessage, int NumStackFramesToIgnore)
 static FCriticalSection EnsureLock;
 static bool bReentranceGuard = false;
 
-void ReportEnsure( const TCHAR* ErrorMessage, int NumStackFramesToIgnore )
+void ReportEnsure( const TCHAR* ErrorMessage, void* ErrorProgramCounter )
 {
 	// Simple re-entrance guard.
 	EnsureLock.Lock();
@@ -2565,10 +2634,11 @@ void ReportEnsure( const TCHAR* ErrorMessage, int NumStackFramesToIgnore )
 		siginfo_t Signal;
 		Signal.si_signo = SIGTRAP;
 		Signal.si_code = TRAP_TRACE;
-		Signal.si_addr = __builtin_return_address(0);
+		Signal.si_addr = ErrorProgramCounter;
 		
 		FMacCrashContext EnsureContext(ECrashContextType::Ensure, ErrorMessage);
 		EnsureContext.InitFromSignal(SIGTRAP, &Signal, nullptr);
+		EnsureContext.ErrorFrame = ErrorProgramCounter;
 		EnsureContext.GenerateEnsureInfoAndLaunchReporter();
 	}
 	
@@ -2778,7 +2848,7 @@ T GetMacGPUStat(TMap<FString, float> const& Stats, FString StatName)
 	T Result = (T)0;
 	if(Stats.Contains(StatName))
 	{
-		Result = Stats.FindRef(StatName);
+		Result = (T)Stats.FindRef(StatName);
 	}
 	return Result;
 }

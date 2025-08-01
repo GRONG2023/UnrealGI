@@ -32,12 +32,12 @@ FMessageRpcClient::FMessageRpcClient(FMessageEndpointBuilder&& InEndpointBuilder
 		.Handling<FMessageRpcProgress>(this, &FMessageRpcClient::HandleProgressMessage)
 		.WithCatchall(this, &FMessageRpcClient::HandleRpcMessages);
 
-	TickerHandle = FTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FMessageRpcClient::HandleTicker), MESSAGE_RPC_RETRY_INTERVAL);
+	TickerHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FMessageRpcClient::HandleTicker), MESSAGE_RPC_RETRY_INTERVAL);
 }
 
 FMessageRpcClient::~FMessageRpcClient()
 {
-	FTicker::GetCoreTicker().RemoveTicker(TickerHandle);
+	FTSTicker::GetCoreTicker().RemoveTicker(TickerHandle);
 }
 
 
@@ -112,7 +112,7 @@ void FMessageRpcClient::CancelCall(const FGuid& CallId)
 	
 	if (Calls.RemoveAndCopyValue(CallId, Call))
 	{
-		MessageEndpoint->Send(new FMessageRpcCancel(CallId), ServerAddress);
+		MessageEndpoint->Send(FMessageEndpoint::MakeMessage<FMessageRpcCancel>(CallId), ServerAddress);
 	}
 }
 

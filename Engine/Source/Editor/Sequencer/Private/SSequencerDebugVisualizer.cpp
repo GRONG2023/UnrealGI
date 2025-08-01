@@ -1,8 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SSequencerDebugVisualizer.h"
-#include "CommonMovieSceneTools.h"
-#include "EditorStyleSet.h"
+#include "MVVM/Selection/Selection.h"
+#include "MVVM/ViewModels/SequencerEditorViewModel.h"
+#include "Styling/AppStyle.h"
 #include "Widgets/SToolTip.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Text/STextBlock.h"
@@ -16,6 +17,8 @@
 #include "EntitySystem/MovieSceneEntitySystemLinker.h"
 #include "EntitySystem/EntityAllocationIterator.h"
 #include "EntitySystem/MovieSceneComponentRegistry.h"
+#include "Sequencer.h"
+#include "TimeToPixel.h"
 
 #define LOCTEXT_NAMESPACE "SSequencerDebugVisualizer"
 
@@ -104,8 +107,8 @@ void SSequencerEvaluationTemplateDebugVisualizer::Refresh()
 
 	AverageComplexity /= SegmentComplexity.Num();
 
-	static const FSlateBrush* SectionBackgroundBrush = FEditorStyle::GetBrush("Sequencer.Section.Background");
-	static const FSlateBrush* SectionBackgroundTintBrush = FEditorStyle::GetBrush("Sequencer.Section.BackgroundTint");
+	static const FSlateBrush* SectionBackgroundBrush = FAppStyle::GetBrush("Sequencer.Section.Background");
+	static const FSlateBrush* SectionBackgroundTintBrush = FAppStyle::GetBrush("Sequencer.Section.BackgroundTint");
 
 	UMovieSceneSequence* ActiveSequence = WeakSequencer.Pin()->GetFocusedMovieSceneSequence();
 	const FFrameRate SequenceResolution = ActiveSequence->GetMovieScene()->GetTickResolution();
@@ -161,7 +164,7 @@ FGeometry SSequencerEvaluationTemplateDebugVisualizer::GetSegmentGeometry(const 
 	const FMovieSceneEvaluationField* EvaluationField = GetEvaluationField();
 	if (EvaluationField == nullptr || EvaluationField->GetSignature() != CachedSignature)
 	{
-		return AllottedGeometry.MakeChild(FVector2D(0,0), FVector2D(0,0));
+		return AllottedGeometry.MakeChild(FSlateRenderTransform());
 	}
 
 	TRange<FFrameNumber> SegmentRange = EvaluationField->GetRange(Slot.GetSegmentIndex());
@@ -173,8 +176,8 @@ FGeometry SSequencerEvaluationTemplateDebugVisualizer::GetSegmentGeometry(const 
 	float SectionLength = FMath::Max(MinSectionWidth, PixelEndX - PixelStartX);
 
 	return AllottedGeometry.MakeChild(
-		FVector2D(PixelStartX, 0),
-		FVector2D(SectionLength, FMath::Max(Slot.GetDesiredSize().Y, 20.f))
+		FVector2D(SectionLength, FMath::Max(Slot.GetDesiredSize().Y, 20.f)),
+		FSlateLayoutTransform(FVector2D(PixelStartX, 0))
 		);
 }
 
@@ -264,7 +267,7 @@ void SSequencerEvaluationTemplateDebugVisualizer::OnArrangeChildren( const FGeom
  			{
  				ArrangedChildren.AddWidget( 
  					WidgetVisibility, 
- 					AllottedGeometry.MakeChild(Child, SegmentGeometry.Position, SegmentGeometry.GetLocalSize())
+ 					AllottedGeometry.MakeChild(Child, FVector2D(SegmentGeometry.Position), SegmentGeometry.GetLocalSize())
  					);
  			}
  		}
@@ -304,7 +307,7 @@ class SSequencerDebugComponentSlot : public SBorder
 
 	void Construct(const FArguments& InArgs, const int32 InComponentBitIndex, const FText& InComponentName)
 	{
-		static const FSlateBrush* SectionBackgroundBrush = FEditorStyle::GetBrush("Sequencer.Section.Background");
+		static const FSlateBrush* SectionBackgroundBrush = FAppStyle::GetBrush("Sequencer.Section.Background");
 
 		ComponentBitIndex = InComponentBitIndex;
 
@@ -330,7 +333,7 @@ private:
 
 void SSequencerEntityComponentSystemDebugSlot::Construct(const FArguments& InArgs, TWeakPtr<FSequencer> InWeakSequencer, UMovieSceneSection* InSection)
 {
-	static const FSlateBrush* SectionBackgroundBrush = FEditorStyle::GetBrush("Sequencer.Section.Background");
+	static const FSlateBrush* SectionBackgroundBrush = FAppStyle::GetBrush("Sequencer.Section.Background");
 
 	WeakSequencer = InWeakSequencer;
 	Section = InSection;
@@ -382,19 +385,21 @@ void SSequencerEntityComponentSystemDebugSlot::Refresh()
 		}
 
 		FEntityInfo EntityInfo = Linker->EntityManager.GetEntity(CachedEntityID);
-		for (FComponentHeader ComponentHeader : EntityInfo.Data.Allocation->GetComponentHeaders())
+		for (const FComponentHeader& ComponentHeader : EntityInfo.Data.Allocation->GetComponentHeaders())
 		{
 			const FComponentTypeInfo& ComponentTypeInfo = Linker->GetComponents()->GetComponentTypeChecked(ComponentHeader.ComponentType);
 			const int32 ComponentBitIndex = ComponentHeader.ComponentType.BitIndex();
 
 			if (!PreviousComponentWidgets.Contains(ComponentBitIndex))
 			{
+#if UE_MOVIESCENE_ENTITY_DEBUG
 				// Component was added.
 				Container->AddSlot()
 					[
 						SNew(SSequencerDebugComponentSlot, ComponentBitIndex, 
 								FText::FromString(ComponentTypeInfo.DebugInfo->DebugName))
 					];
+#endif
 			}
 			else
 			{
@@ -453,6 +458,7 @@ void SSequencerEntityComponentSystemDebugVisualizer::Refresh()
 bool SSequencerEntityComponentSystemDebugVisualizer::DoRefresh()
 {
 	using namespace UE::MovieScene;
+	using namespace UE::Sequencer;
 
  	TSharedPtr<FSequencer> Sequencer = WeakSequencer.Pin();
  	if (!Sequencer.IsValid())
@@ -480,9 +486,7 @@ bool SSequencerEntityComponentSystemDebugVisualizer::DoRefresh()
 		return false;
 	}
 
-	TSet<TWeakObjectPtr<UMovieSceneSection>> SelectedSections = Sequencer->GetSelection().GetSelectedSections();
-	CachedSelection = SelectedSections;
-
+	CachedSelectionSerialNumber = Sequencer->GetViewModel()->GetSelection()->GetSerialNumber();
 	CachedSignature = CompiledDataManager->GetEntryRef(CompiledDataID).CompiledSignature;
 
  	const FFrameRate SequenceResolution = ActiveMovieScene->GetTickResolution();
@@ -494,9 +498,9 @@ bool SSequencerEntityComponentSystemDebugVisualizer::DoRefresh()
 		SectionToWidget.Add(Child->GetSection(), Child);
 	}
 
-	for (TWeakObjectPtr<UMovieSceneSection> WeakSection : SelectedSections)
+	for (TViewModelPtr<FSectionModel> SectionModel : Sequencer->GetViewModel()->GetSelection()->TrackArea.Filter<FSectionModel>())
 	{
-		UMovieSceneSection* Section = WeakSection.Get();
+		UMovieSceneSection* Section = SectionModel->GetSection();
 		if (Section != nullptr)
 		{
 			TSharedRef<SSequencerEntityComponentSystemDebugSlot>* ExistingChild = SectionToWidget.Find(Section);
@@ -551,8 +555,8 @@ FGeometry SSequencerEntityComponentSystemDebugVisualizer::GetSegmentGeometry(con
 	float SectionLength = FMath::Max(MinSectionWidth, PixelEndX - PixelStartX);
 
 	return AllottedGeometry.MakeChild(
-		FVector2D(PixelStartX, 0),
-		FVector2D(SectionLength, FMath::Max(Slot.GetDesiredSize().Y, 20.f))
+		FVector2D(SectionLength, FMath::Max(Slot.GetDesiredSize().Y, 20.f)),
+		FSlateLayoutTransform(FVector2D(PixelStartX, 0))
 		);
 }
 
@@ -571,11 +575,7 @@ void SSequencerEntityComponentSystemDebugVisualizer::Tick( const FGeometry& Allo
  	TSharedPtr<FSequencer> Sequencer = WeakSequencer.Pin();
  	if (Sequencer.IsValid())
 	{
-		TSet<TWeakObjectPtr<UMovieSceneSection>> SelectedSections = Sequencer->GetSelection().GetSelectedSections();
-		if (SelectedSections.Difference(CachedSelection).Num() > 0 || CachedSelection.Difference(SelectedSections).Num() > 0)
-		{
-			bSelectionChanged = true;
-		}
+		bSelectionChanged = CachedSelectionSerialNumber != Sequencer->GetViewModel()->GetSelection()->GetSerialNumber();
 
 		UMovieSceneSequence* ActiveSequence = Sequencer->GetFocusedMovieSceneSequence();
 		if (ActiveSequence != nullptr)
@@ -625,7 +625,7 @@ void SSequencerEntityComponentSystemDebugVisualizer::OnArrangeChildren( const FG
  			{
  				ArrangedChildren.AddWidget( 
  					WidgetVisibility, 
- 					AllottedGeometry.MakeChild(Child, SegmentGeometry.Position, SegmentGeometry.GetLocalSize())
+ 					AllottedGeometry.MakeChild(Child, FVector2D(SegmentGeometry.Position), SegmentGeometry.GetLocalSize())
  					);
  			}
  		}

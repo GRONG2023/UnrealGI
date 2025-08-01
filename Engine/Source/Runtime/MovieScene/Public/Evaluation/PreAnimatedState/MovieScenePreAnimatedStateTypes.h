@@ -13,11 +13,11 @@ namespace UE
 namespace MovieScene
 {
 
-struct FEntityAllocationIteratorItem;
+struct FEntityAllocationProxy;
 
 struct FPreAnimatedTrackerParams
 {
-	MOVIESCENE_API FPreAnimatedTrackerParams(FEntityAllocationIteratorItem Item);
+	MOVIESCENE_API FPreAnimatedTrackerParams(FEntityAllocationProxy Item);
 
 	int32 Num;
 	bool bWantsRestoreState;
@@ -161,6 +161,16 @@ struct FPreAnimatedStateEntry
 	/** A handle for the actual storage location of the value */
 	FPreAnimatedStateCachedValueHandle ValueHandle;
 
+	bool IsValid() const
+	{
+		return ValueHandle.StorageIndex.IsValid();
+	}
+
+	explicit operator bool() const
+	{
+		return ValueHandle.StorageIndex.IsValid();
+	}
+
 	friend uint32 GetTypeHash(const FPreAnimatedStateEntry& InEntry)
 	{
 		return GetTypeHash(InEntry.GroupHandle) ^ GetTypeHash(InEntry.ValueHandle);
@@ -181,7 +191,7 @@ struct FPreAnimatedStateMetaData
 	/** The pre-animated state entry */
 	FPreAnimatedStateEntry Entry;
 	/** The instance handle for the root sequence */
-	FInstanceHandle RootInstanceHandle;
+	FRootInstanceHandle RootInstanceHandle;
 	/** True if this entry should be restored when it is removed */
 	bool bWantsRestoreState;
 };

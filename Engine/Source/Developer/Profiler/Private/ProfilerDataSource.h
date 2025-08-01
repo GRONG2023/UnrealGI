@@ -3,6 +3,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
+
+#if STATS
+
 #include "HAL/ThreadSingleton.h"
 #include "Containers/ChunkedArray.h"
 #include "Misc/Guid.h"
@@ -319,7 +322,7 @@ public:
 
 			for( uint32 NewValueIndex = ChunkStartIndex; NewValueIndex < ChunkEndIndex; NewValueIndex++ )
 			{
-				const float SampleStartTimeMS = NewValueIndex * TimeAccuracyMS;
+				const float SampleStartTimeMS = (float)NewValueIndex * TimeAccuracyMS;
 				ThisCacheDataContainer::CachedValues(NewValueIndex) = (Type)static_cast<const ManagerClass*>(this)->GetUncachedValueFromTimeRange( SampleStartTimeMS, SampleStartTimeMS+TimeAccuracyMS );
 			}
 
@@ -988,6 +991,7 @@ public:
 		, _MinInclusiveTimeMS( TNumericLimits<double>::Max() )
 		, _MaxInclusiveTimeMS( TNumericLimits<double>::Min() )
 		, _AvgInclusiveTimeMS( 0.0 )
+		, _AvgExclusiveTimeMS( 0.0 )
 		, _NumCallsPerFrame( 1.0 )
 		, _MinNumCallsPerFrame( TNumericLimits<double>::Max() )
 		, _MaxNumCallsPerFrame( TNumericLimits<double>::Min() )
@@ -1041,6 +1045,7 @@ protected:
 		, _MinInclusiveTimeMS( InInclusiveTimeMS )
 		, _MaxInclusiveTimeMS( InInclusiveTimeMS )
 		, _AvgInclusiveTimeMS( InInclusiveTimeMS )
+		, _AvgExclusiveTimeMS( 0.0f )
 		, _NumCallsPerFrame( InNumCallsPerFrame )
 		, _MinNumCallsPerFrame( InNumCallsPerFrame )
 		, _MaxNumCallsPerFrame( InNumCallsPerFrame )
@@ -1072,6 +1077,7 @@ protected:
 		, _MinInclusiveTimeMS( SourceEvent._MinInclusiveTimeMS )
 		, _MaxInclusiveTimeMS( SourceEvent._MaxInclusiveTimeMS )
 		, _AvgInclusiveTimeMS( SourceEvent._AvgInclusiveTimeMS )
+		, _AvgExclusiveTimeMS(SourceEvent._AvgExclusiveTimeMS)
 		, _NumCallsPerFrame( SourceEvent._NumCallsPerFrame )
 		, _MinNumCallsPerFrame( SourceEvent._MinNumCallsPerFrame )
 		, _MaxNumCallsPerFrame( SourceEvent._MaxNumCallsPerFrame )
@@ -1108,7 +1114,7 @@ public:
 		// Total
 		_InclusiveTimeMS += Other->_InclusiveTimeMS;
 		_NumCallsPerFrame += Other->_NumCallsPerFrame;
-		//_ExclusiveTimeMS += Other->_ExclusiveTimeMS;
+		_ExclusiveTimeMS += Other->_ExclusiveTimeMS;
 
 		// Min/Max
 		_MinInclusiveTimeMS = FMath::Min( _MinInclusiveTimeMS, Other->_MinInclusiveTimeMS );
@@ -1144,6 +1150,7 @@ protected:
 	FORCEINLINE_DEBUGGABLE void CopyAverage( const double NumFrames )
 	{
 		_InclusiveTimeMS = _AvgInclusiveTimeMS;
+		_ExclusiveTimeMS = _AvgExclusiveTimeMS;
 		_NumCallsPerFrame = _AvgNumCallsPerFrame;
 
 		_FrameDurationMS /= NumFrames;
@@ -1183,6 +1190,7 @@ protected:
 				if (IsSelf())
 				{
 					Parent->_ExclusiveTimeMS = _InclusiveTimeMS;
+					Parent->_AvgExclusiveTimeMS = Parent->_ExclusiveTimeMS / NumFrames;
 					Parent->_ExclusiveTimePct = 100.0f * Parent->_ExclusiveTimeMS / Parent->_InclusiveTimeMS;
 				}
 
@@ -1199,6 +1207,7 @@ protected:
 		}
 
 		_AvgInclusiveTimeMS = _InclusiveTimeMS / NumFrames;
+		_AvgExclusiveTimeMS = _ExclusiveTimeMS / NumFrames;
 		_AvgNumCallsPerFrame = _NumCallsPerFrame / NumFrames;
 	}
 
@@ -1232,7 +1241,6 @@ public:
 	template< typename TFunc > 
 	FORCEINLINE_DEBUGGABLE void ExecuteOperationForAllChildren( TFunc FuncToCall )
 	{
-		const bool bAllowShrinking = false;
 		TArray<FEventGraphSample*>& Stack = FProfilerScratchArea::Get().ExecuteOperationArray;
 
 		Stack.Add( &AsShared().Get() );
@@ -1241,7 +1249,7 @@ public:
 		while (Stack.Num() > 0)
 		{
 			// Get the parent and assign events.
-			FEventGraphSample* Current = Stack.Pop( bAllowShrinking );
+			FEventGraphSample* Current = Stack.Pop( EAllowShrinking::No );
 			FuncToCall( Current );
 
 			// Push children onto the stack.
@@ -1261,7 +1269,6 @@ public:
 	template< typename TFunc, typename TArg0 > 
 	FORCEINLINE_DEBUGGABLE void ExecuteOperationForAllChildren( TFunc FuncToCall, TArg0 Arg0 )
 	{
-		const bool bAllowShrinking = false;
 		TArray<FEventGraphSample*>& Stack = FProfilerScratchArea::Get().ExecuteOperationArray;
 
 		Stack.Add( &AsShared().Get() );
@@ -1270,7 +1277,7 @@ public:
 		while (Stack.Num() > 0)
 		{
 			// Get the parent and assign events.
-			FEventGraphSample* Current = Stack.Pop( bAllowShrinking );
+			FEventGraphSample* Current = Stack.Pop( EAllowShrinking::No );
 			FuncToCall( Current, Arg0 );
 
 			// Push children onto the stack.
@@ -1290,7 +1297,6 @@ public:
 	template< typename TFunc, typename TArg0, typename TArg1 >
 	FORCEINLINE_DEBUGGABLE void ExecuteOperationForAllChildren( TFunc FuncToCall, TArg0 Arg0, TArg1 Arg1 )
 	{
-		const bool bAllowShrinking = false;
 		TArray<FEventGraphSample*>& Stack = FProfilerScratchArea::Get().ExecuteOperationArray;
 
 		Stack.Add( &AsShared().Get() );
@@ -1299,7 +1305,7 @@ public:
 		while (Stack.Num() > 0)
 		{
 			// Get the parent and assign events.
-			FEventGraphSample* Current = Stack.Pop( bAllowShrinking );
+			FEventGraphSample* Current = Stack.Pop( EAllowShrinking::No );
 			FuncToCall( Current, Arg0, Arg1 );
 
 			// Push children onto the stack.
@@ -1346,7 +1352,6 @@ protected:
 #if	0
 	FORCEINLINE_DEBUGGABLE void SetRootAndThreadEvents_Iterative( FEventGraphSample* RootEvent, FEventGraphSample* ThreadEvent )
 	{
-		const bool bAllowShrinking = false;
 		TArray<FEventGraphSample*>& Stack = FProfilerScratchArea::Get().ExecuteOperationArray;
 
 		Stack.Add( &AsShared().Get() );
@@ -1355,7 +1360,7 @@ protected:
 		while (Stack.Num() > 0)
 		{
 			// Get the parent and assign events.
-			FEventGraphSample* Current = Stack.Pop( bAllowShrinking );
+			FEventGraphSample* Current = Stack.Pop(EAllowShrinking::No);
 			FSetRootAndThread()(Current, RootEvent, ThreadEvent);
 
 			// Push children onto the stack.
@@ -1775,6 +1780,9 @@ public:
 
 	/** Average inclusive time of all instances for this event, in milliseconds. */
 	double _AvgInclusiveTimeMS;
+
+	/** Average exclusive time of all instances for this event, in milliseconds. */
+	double _AvgExclusiveTimeMS;
 
 	/** Number of times this event was called. */
 	double _NumCallsPerFrame;
@@ -2255,3 +2263,5 @@ protected:
 };
 
 //}//namespace FEventGraphSample
+
+#endif // STATS

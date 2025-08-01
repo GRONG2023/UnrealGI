@@ -11,7 +11,6 @@
 class FExpressionNode;
 class FExpressionToken;
 struct FOperatorFunctionID;
-template< class T > struct TRemoveConst;
 
 namespace Impl
 {
@@ -100,12 +99,12 @@ namespace Impl
 
 	/** Overloaded function that returns an FExpressionResult, regardless of what is passed in */
 	template<typename T>
-	static FExpressionResult ForwardReturnType(T&& Result) 					{ return MakeValue(MoveTemp(Result)); }
-	static FExpressionResult ForwardReturnType(FExpressionResult&& Result) 	{ return MoveTemp(Result); }
+	inline FExpressionResult ForwardReturnType(T&& Result) 			{ return MakeValue(MoveTemp(Result)); }
+	inline FExpressionResult ForwardReturnType(FExpressionResult&& Result) 	{ return MoveTemp(Result); }
 
 	/** Wrapper function for supplied functions of the signature T(A) */
 	template<typename OperandType, typename ContextType, typename FuncType>
-	static typename TEnableIf<Impl::TCallableInfo<FuncType>::NumArgs == 1, typename TOperatorJumpTable<ContextType>::FUnaryFunction>::Type WrapUnaryFunction(FuncType In)
+	inline typename TEnableIf<Impl::TCallableInfo<FuncType>::NumArgs == 1, typename TOperatorJumpTable<ContextType>::FUnaryFunction>::Type WrapUnaryFunction(FuncType In)
 	{
 		// Ignore the context
 		return [=](const FExpressionNode& InOperand, const ContextType* Context) {
@@ -115,7 +114,7 @@ namespace Impl
 
 	/** Wrapper function for supplied functions of the signature T(A, const ContextType* Context) */
 	template<typename OperandType, typename ContextType, typename FuncType>
-	static typename TEnableIf<Impl::TCallableInfo<FuncType>::NumArgs == 2, typename TOperatorJumpTable<ContextType>::FUnaryFunction>::Type WrapUnaryFunction(FuncType In)
+	inline typename TEnableIf<Impl::TCallableInfo<FuncType>::NumArgs == 2, typename TOperatorJumpTable<ContextType>::FUnaryFunction>::Type WrapUnaryFunction(FuncType In)
 	{
 		// Ignore the context
 		return [=](const FExpressionNode& InOperand, const ContextType* Context) {
@@ -125,7 +124,7 @@ namespace Impl
 
 	/** Wrapper function for supplied functions of the signature T(A, B) */
 	template<typename LeftOperandType, typename RightOperandType, typename ContextType, typename FuncType>
-	static typename TEnableIf<Impl::TCallableInfo<FuncType>::NumArgs == 2, typename TOperatorJumpTable<ContextType>::FBinaryFunction>::Type WrapBinaryFunction(FuncType In)
+	inline typename TEnableIf<Impl::TCallableInfo<FuncType>::NumArgs == 2, typename TOperatorJumpTable<ContextType>::FBinaryFunction>::Type WrapBinaryFunction(FuncType In)
 	{
 		// Ignore the context
 		return [=](const FExpressionNode& InLeftOperand, const FExpressionNode& InRightOperand, const ContextType* Context) {
@@ -135,7 +134,7 @@ namespace Impl
 
 	/** Wrapper function for supplied functions of the signature T(A, B, const ContextType* Context) */
 	template<typename LeftOperandType, typename RightOperandType, typename ContextType, typename FuncType>
-	static typename TEnableIf<Impl::TCallableInfo<FuncType>::NumArgs == 3, typename TOperatorJumpTable<ContextType>::FBinaryFunction>::Type WrapBinaryFunction(FuncType In)
+	inline typename TEnableIf<Impl::TCallableInfo<FuncType>::NumArgs == 3, typename TOperatorJumpTable<ContextType>::FBinaryFunction>::Type WrapBinaryFunction(FuncType In)
 	{
 		// Ignore the context
 		return [=](const FExpressionNode& InLeftOperand, const FExpressionNode& InRightOperand, const ContextType* Context) {
@@ -145,7 +144,7 @@ namespace Impl
 
 	/** Wrapper function for supplied functions of the signature bool(A, const ContextType* Context) */
 	template<typename OperandType, typename ContextType, typename FuncType>
-	static typename TEnableIf<Impl::TCallableInfo<FuncType>::NumArgs == 1, typename TOperatorJumpTable<ContextType>::FShortCircuit>::Type WrapShortCircuitFunction(FuncType In)
+	inline typename TEnableIf<Impl::TCallableInfo<FuncType>::NumArgs == 1, typename TOperatorJumpTable<ContextType>::FShortCircuit>::Type WrapShortCircuitFunction(FuncType In)
 	{
 		// Ignore the context
 		return [=](const FExpressionNode& InOperand, const ContextType* Context) {
@@ -155,7 +154,7 @@ namespace Impl
 
 	/** Wrapper function for supplied functions of the signature bool(A, const ContextType* Context) */
 	template<typename OperandType, typename ContextType, typename FuncType>
-	static typename TEnableIf<Impl::TCallableInfo<FuncType>::NumArgs == 2, typename TOperatorJumpTable<ContextType>::FShortCircuit>::Type WrapShortCircuitFunction(FuncType In)
+	inline typename TEnableIf<Impl::TCallableInfo<FuncType>::NumArgs == 2, typename TOperatorJumpTable<ContextType>::FShortCircuit>::Type WrapShortCircuitFunction(FuncType In)
 	{
 		// Ignore the context
 		return [=](const FExpressionNode& InOperand, const ContextType* Context) {
@@ -246,7 +245,7 @@ template<typename ContextType>
 template<typename OperatorType, typename FuncType>
 void TOperatorJumpTable<ContextType>::MapPreUnary(FuncType InFunc)
 {
-	typedef typename TRemoveConst<typename TRemoveReference<typename Impl::TCallableInfo<FuncType>::Arg1>::Type>::Type OperandType;
+	typedef std::remove_const_t<typename TRemoveReference<typename Impl::TCallableInfo<FuncType>::Arg1>::Type> OperandType;
 
 	FOperatorFunctionID ID = {
 		TGetExpressionNodeTypeId<OperatorType>::GetTypeId(),
@@ -261,7 +260,7 @@ template<typename ContextType>
 template<typename OperatorType, typename FuncType>
 void TOperatorJumpTable<ContextType>::MapPostUnary(FuncType InFunc)
 {
-	typedef typename TRemoveConst<typename TRemoveReference<typename Impl::TCallableInfo<FuncType>::Arg1>::Type>::Type OperandType;
+	typedef std::remove_const_t<typename TRemoveReference<typename Impl::TCallableInfo<FuncType>::Arg1>::Type> OperandType;
 
 	FOperatorFunctionID ID = {
 		TGetExpressionNodeTypeId<OperatorType>::GetTypeId(),
@@ -276,8 +275,8 @@ template<typename ContextType>
 template<typename OperatorType, typename FuncType>
 void TOperatorJumpTable<ContextType>::MapBinary(FuncType InFunc)
 {
-	typedef typename TRemoveConst<typename TRemoveReference<typename Impl::TCallableInfo<FuncType>::Arg1>::Type>::Type LeftOperandType;
-	typedef typename TRemoveConst<typename TRemoveReference<typename Impl::TCallableInfo<FuncType>::Arg2>::Type>::Type RightOperandType;
+	typedef std::remove_const_t<typename TRemoveReference<typename Impl::TCallableInfo<FuncType>::Arg1>::Type> LeftOperandType;
+	typedef std::remove_const_t<typename TRemoveReference<typename Impl::TCallableInfo<FuncType>::Arg2>::Type> RightOperandType;
 
 	FOperatorFunctionID ID = {
 		TGetExpressionNodeTypeId<OperatorType>::GetTypeId(),
@@ -292,7 +291,7 @@ template<typename ContextType>
 template<typename OperatorType, typename FuncType>
 void TOperatorJumpTable<ContextType>::MapShortCircuit(FuncType InFunc)
 {
-	typedef typename TRemoveConst<typename TRemoveReference<typename Impl::TCallableInfo<FuncType>::Arg1>::Type>::Type OperandType;
+	typedef std::remove_const_t<typename TRemoveReference<typename Impl::TCallableInfo<FuncType>::Arg1>::Type> OperandType;
 
 	FOperatorFunctionID ID = {
 		TGetExpressionNodeTypeId<OperatorType>::GetTypeId(),

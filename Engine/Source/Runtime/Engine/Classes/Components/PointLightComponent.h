@@ -14,8 +14,8 @@ class FLightSceneProxy;
 /**
  * A light component which emits light from a single point equally in all directions.
  */
-UCLASS(Blueprintable, ClassGroup=(Lights,Common), hidecategories=(Object, LightShafts), editinlinenew, meta=(BlueprintSpawnableComponent))
-class ENGINE_API UPointLightComponent : public ULocalLightComponent
+UCLASS(Blueprintable, ClassGroup=(Lights,Common), hidecategories=(Object, LightShafts), editinlinenew, meta=(BlueprintSpawnableComponent), MinimalAPI)
+class UPointLightComponent : public ULocalLightComponent
 {
 	GENERATED_UCLASS_BODY()
 
@@ -40,61 +40,60 @@ class ENGINE_API UPointLightComponent : public ULocalLightComponent
 	 * Radius of light source shape.
 	 * Note that light sources shapes which intersect shadow casting geometry can cause shadowing artifacts.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Light)
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, interp, Category=Light, meta=(UIMin = "0.0", UIMax = "1000.0", ClampMax = "10000", ShouldShowInViewport = true))
 	float SourceRadius;
 
 	/**
 	* Soft radius of light source shape.
 	* Note that light sources shapes which intersect shadow casting geometry can cause shadowing artifacts.
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Light)
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, interp, Category = Light, meta=(UIMin = "0.0", UIMax = "1000.0", ClampMax = "10000"))
 	float SoftSourceRadius;
 
 	/** 
 	 * Length of light source shape.
 	 * Note that light sources shapes which intersect shadow casting geometry can cause shadowing artifacts.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Light)
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, interp, Category=Light, meta=(UIMin = "0.0", UIMax = "1000.0", ClampMax = "10000"))
 	float SourceLength;
 
-	UFUNCTION(BlueprintCallable, Category="Rendering|Lighting")
-	void SetLightFalloffExponent(float NewLightFalloffExponent);
+	UFUNCTION(BlueprintCallable, Category = "Rendering|Lighting")
+	ENGINE_API void SetUseInverseSquaredFalloff(bool bNewValue);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Lighting")
-	void SetSourceRadius(float bNewValue);
+	ENGINE_API void SetLightFalloffExponent(float NewLightFalloffExponent);
 
 	UFUNCTION(BlueprintCallable, Category = "Rendering|Lighting")
-	void SetSoftSourceRadius(float bNewValue);
+	ENGINE_API void SetInverseExposureBlend(float NewInverseExposureBlend);
 
 	UFUNCTION(BlueprintCallable, Category="Rendering|Lighting")
-	void SetSourceLength(float NewValue);
+	ENGINE_API void SetSourceRadius(float bNewValue);
+
+	UFUNCTION(BlueprintCallable, Category = "Rendering|Lighting")
+	ENGINE_API void SetSoftSourceRadius(float bNewValue);
+
+	UFUNCTION(BlueprintCallable, Category="Rendering|Lighting")
+	ENGINE_API void SetSourceLength(float NewValue);
 
 public:
 
-	virtual float ComputeLightBrightness() const override;
+	ENGINE_API virtual float ComputeLightBrightness() const override;
 #if WITH_EDITOR
-	virtual void SetLightBrightness(float InBrightness) override;
+	ENGINE_API virtual void SetLightBrightness(float InBrightness) override;
 #endif
 
 	//~ Begin ULightComponent Interface.
-	virtual ELightComponentType GetLightType() const override;
-	virtual float GetUniformPenumbraSize() const override;
-	virtual FLightSceneProxy* CreateSceneProxy() const override;
+	ENGINE_API virtual ELightComponentType GetLightType() const override;
+	ENGINE_API virtual float GetUniformPenumbraSize() const override;
+	ENGINE_API virtual FLightSceneProxy* CreateSceneProxy() const override;
 
 	//~ Begin UObject Interface
-	virtual void Serialize(FArchive& Ar) override;
+	ENGINE_API virtual void Serialize(FArchive& Ar) override;
 #if WITH_EDITOR
-	virtual bool CanEditChange(const FProperty* InProperty) const override;
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	ENGINE_API virtual bool CanEditChange(const FProperty* InProperty) const override;
+	ENGINE_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif // WITH_EDITOR
 	//~ End UObject Interface
-
-	/** 
-	 * This is called when property is modified by InterpPropertyTracks
-	 *
-	 * @param PropertyThatChanged	Property that changed
-	 */
-	virtual void PostInterpChange(FProperty* PropertyThatChanged) override;
 };
 
 

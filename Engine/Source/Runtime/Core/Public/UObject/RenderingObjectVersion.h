@@ -5,7 +5,7 @@
 #include "Misc/Guid.h"
 
 // Custom serialization version for changes made in Dev-Rendering stream
-struct CORE_API FRenderingObjectVersion
+struct FRenderingObjectVersion
 {
 	enum Type
 	{
@@ -127,13 +127,22 @@ struct CORE_API FRenderingObjectVersion
 		// Add a new virtual texture to support virtual texture light map on mobile
 		VirtualTexturedLightmapsV3,
 
+		// Added fallback target modes including auto to Nanite builder
+		NaniteFallbackTarget,
+
+		// Added support to force Nanite material usage if Nanite mesh builders are also forced.
+		NaniteForceMaterialUsage,
+
+		// Custom material expression includes are now serialized & used for DDC key generation
+		AddedMaterialExpressionIncludesHash,
+
 		// -----<new versions can be added above this line>-------------------------------------------------
 		VersionPlusOne,
 		LatestVersion = VersionPlusOne - 1
 	};
 
 	// The GUID for this custom version number
-	const static FGuid GUID;
+	CORE_API const static FGuid GUID;
 
 private:
 	FRenderingObjectVersion() {}

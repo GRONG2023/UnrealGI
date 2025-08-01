@@ -2,26 +2,34 @@
 
 #include "TraceServices/AnalysisService.h"
 #include "AnalysisServicePrivate.h"
-#include "Trace/Analyzer.h"
-#include "Trace/Analysis.h"
-#include "Trace/DataStream.h"
-#include "HAL/PlatformFile.h"
-#include "Analyzers/MiscTraceAnalysis.h"
-#include "Analyzers/LogTraceAnalysis.h"
-#include "Math/RandomStream.h"
-#include "ModuleServicePrivate.h"
-#include "Model/LogPrivate.h"
-#include "Model/FramesPrivate.h"
-#include "Model/BookmarksPrivate.h"
-#include "Model/ThreadsPrivate.h"
-#include "Model/CountersPrivate.h"
-#include "Model/NetProfilerProvider.h"
-#include "Model/MemoryPrivate.h"
-#include "Model/Channel.h"
-#include "Model/DiagnosticsPrivate.h"
 
-namespace Trace
+#include "Analyzers/BookmarksTraceAnalysis.h"
+#include "Analyzers/LogTraceAnalysis.h"
+#include "Analyzers/MiscTraceAnalysis.h"
+#include "Analyzers/StringsAnalyzer.h"
+#include "HAL/PlatformFile.h"
+#include "Model/BookmarksPrivate.h"
+#include "Model/Channel.h"
+#include "Model/CountersPrivate.h"
+#include "Model/DefinitionProvider.h"
+#include "Model/FramesPrivate.h"
+#include "Model/LogPrivate.h"
+#include "Model/MemoryPrivate.h"
+#include "Model/NetProfilerProvider.h"
+#include "Model/RegionsPrivate.h"
+#include "Model/ScreenshotProviderPrivate.h"
+#include "Model/ThreadsPrivate.h"
+#include "ModuleServicePrivate.h"
+#include "Trace/Analysis.h"
+#include "Trace/Analyzer.h"
+#include "Trace/DataStream.h"
+
+namespace TraceServices
 {
+
+// if IProvider ever gets member data, it will duplicate state because of "the diamond problem" with multiple inheritance
+// if you hit this you should consider the implications for classes that implement multiple providers
+static_assert(sizeof(IProvider) == sizeof(uintptr_t));
 
 thread_local FAnalysisSessionLock* GThreadCurrentSessionLock;
 thread_local int32 GThreadCurrentReadLockCount;
@@ -79,11 +87,13 @@ void FAnalysisSessionLock::EndEdit()
 	}
 }
 
-FAnalysisSession::FAnalysisSession(const TCHAR* SessionName, TUniquePtr<Trace::IInDataStream>&& InDataStream)
+FAnalysisSession::FAnalysisSession(uint32 InTraceId, const TCHAR* SessionName, TUniquePtr<UE::Trace::IInDataStream>&& InDataStream)
 	: Name(SessionName)
+	, TraceId(InTraceId)
 	, DurationSeconds(0.0)
 	, Allocator(32 << 20)
 	, StringStore(Allocator)
+	, Cache(*Name)
 	, DataStream(MoveTemp(InDataStream))
 {
 }
@@ -94,25 +104,23 @@ FAnalysisSession::~FAnalysisSession()
 	{
 		delete Analyzers[AnalyzerIndex];
 	}
-	for (int32 ProviderIndex = Providers.Num() - 1; ProviderIndex >= 0; --ProviderIndex)
-	{
-		delete Providers[ProviderIndex];
-	}
 }
 
 void FAnalysisSession::Start()
 {
-	FAnalysisContext Context;
-	for (Trace::IAnalyzer* Analyzer : ReadAnalyzers())
+	UE::Trace::FAnalysisContext Context;
+	for (UE::Trace::IAnalyzer* Analyzer : ReadAnalyzers())
 	{
 		Context.AddAnalyzer(*Analyzer);
 	}
+	Context.SetMessageDelegate(UE::Trace::FMessageDelegate::CreateRaw(this, &FAnalysisSession::OnAnalysisMessage));
 	Processor = Context.Process(*DataStream);
 }
 
 void FAnalysisSession::Stop(bool bAndWait) const
 {
 	DataStream->Close();
+	Processor.Stop();
 	if (bAndWait)
 	{
 		Wait();
@@ -124,23 +132,70 @@ void FAnalysisSession::Wait() const
 	Processor.Wait();
 }
 
-void FAnalysisSession::AddAnalyzer(IAnalyzer* Analyzer)
+void FAnalysisSession::EnumerateMetadata(TFunctionRef<void(const FTraceSessionMetadata& Metadata)> Callback) const
+{
+	Lock.ReadAccessCheck();
+	for (const auto& KV : Metadata)
+	{
+		Callback(KV.Value);
+	}
+}
+
+void FAnalysisSession::AddMetadata(FName InName, int64 InValue)
+{
+	Lock.WriteAccessCheck();
+	FTraceSessionMetadata& Value = Metadata.Add(InName);
+	Value.Name = InName;
+	Value.Type = FTraceSessionMetadata::EType::Int64;
+	Value.Int64Value = InValue;
+}
+
+void FAnalysisSession::AddMetadata(FName InName, double InValue)
+{
+	Lock.WriteAccessCheck();
+	FTraceSessionMetadata& Value = Metadata.Add(InName);
+	Value.Name = InName;
+	Value.Type = FTraceSessionMetadata::EType::Double;
+	Value.DoubleValue = InValue;
+}
+
+void FAnalysisSession::AddMetadata(FName InName, FString InValue)
+{
+	Lock.WriteAccessCheck();
+	FTraceSessionMetadata& Value = Metadata.Add(InName);
+	Value.Name = InName;
+	Value.Type = FTraceSessionMetadata::EType::String;
+	Value.StringValue = InValue;
+}
+
+uint32 FAnalysisSession::GetNumPendingMessages() const
+{
+	return PendingMessagesCount.load();
+}
+
+TArray<FAnalysisMessage> FAnalysisSession::DrainPendingMessages() 
+{
+	Lock.WriteAccessCheck();
+	PendingMessagesCount.store(0);
+	return MoveTemp(PendingMessages);
+}
+
+void FAnalysisSession::AddAnalyzer(UE::Trace::IAnalyzer* Analyzer)
 {
 	Analyzers.Add(Analyzer);
 }
 
-void FAnalysisSession::AddProvider(const FName& InName, IProvider* Provider)
+void FAnalysisSession::AddProvider(const FName& InName, TSharedPtr<IProvider> Provider, TSharedPtr<IEditableProvider> EditableProvider)
 {
-	Providers.Add(Provider);
-	ProvidersMap.Add(InName, Provider);
+	Providers.Add(InName, MakeTuple(Provider, EditableProvider));
 }
 
 const IProvider* FAnalysisSession::ReadProviderPrivate(const FName& InName) const
 {
-	IProvider* const* FindIt = ProvidersMap.Find(InName);
+	const auto* FindIt = Providers.Find(InName);
 	if (FindIt)
 	{
-		return *FindIt;
+		return FindIt->Key.Get();
 	}
 	else
 	{
@@ -148,17 +203,33 @@ const IProvider* FAnalysisSession::ReadProviderPrivate(const FName& InName) cons
 	}
 }
 
-IProvider* FAnalysisSession::EditProviderPrivate(const FName& InName)
+IEditableProvider* FAnalysisSession::EditProviderPrivate(const FName& InName)
 {
-	IProvider** FindIt = ProvidersMap.Find(InName);
+	const auto* FindIt = Providers.Find(InName);
 	if (FindIt)
 	{
-		return *FindIt;
+		return FindIt->Value.Get();
 	}
 	else
 	{
 		return nullptr;
 	}
+}
+
+void FAnalysisSession::OnAnalysisMessage(UE::Trace::EAnalysisMessageSeverity InSeverity, FStringView InMessage)
+{
+	EMessageSeverity::Type Severity = EMessageSeverity::Type::Info;
+	switch(InSeverity)
+	{
+	case UE::Trace::EAnalysisMessageSeverity::Error: Severity = EMessageSeverity::Type::Error; break;
+	case UE::Trace::EAnalysisMessageSeverity::Warning: Severity = EMessageSeverity::Type::Warning; break;
+	case UE::Trace::EAnalysisMessageSeverity::Info: Severity = EMessageSeverity::Type::Info; break;
+	}
+	
+	Lock.BeginEdit();
+	PendingMessages.Push(FAnalysisMessage { Severity, FString(InMessage)});
+	PendingMessagesCount.fetch_add(1);
+	Lock.EndEdit();
 }
 
 FAnalysisService::FAnalysisService(FModuleService& InModuleService)
@@ -180,7 +251,7 @@ TSharedPtr<const IAnalysisSession> FAnalysisService::Analyze(const TCHAR* Sessio
 TSharedPtr<const IAnalysisSession> FAnalysisService::StartAnalysis(const TCHAR* SessionUri)
 {
 	struct FFileDataStream
-		: public IInDataStream
+		: public UE::Trace::IInDataStream
 	{
 		virtual int32 Read(void* Data, uint32 Size) override
 		{
@@ -188,14 +259,20 @@ TSharedPtr<const IAnalysisSession> FAnalysisService::StartAnalysis(const TCHAR* 
 			{
 				return 0;
 			}
-
-			Size = (Size < Remaining) ? Size : Remaining;
+			if (Size > Remaining)
+			{
+				Size = static_cast<uint32>(Remaining);
+			}
 			Remaining -= Size;
-			return Handle->Read((uint8*)Data, Size) ? Size : 0;
+			if (!Handle->Read((uint8*)Data, Size))
+			{
+				return 0;
+			}
+			return Size;
 		}
 
 		TUniquePtr<IFileHandle> Handle;
-		int64 Remaining;
+		uint64 Remaining;
 	};
 
 	IPlatformFile& FileSystem = IPlatformFile::GetPlatformPhysical();
@@ -209,45 +286,47 @@ TSharedPtr<const IAnalysisSession> FAnalysisService::StartAnalysis(const TCHAR* 
 	FileStream->Handle = TUniquePtr<IFileHandle>(Handle);
 	FileStream->Remaining = Handle->Size();
 
-	TUniquePtr<IInDataStream> DataStream(FileStream);
-	return StartAnalysis(SessionUri, MoveTemp(DataStream));
+	TUniquePtr<UE::Trace::IInDataStream> DataStream(FileStream);
+	return StartAnalysis(~0, SessionUri, MoveTemp(DataStream));
 }
 
-TSharedPtr<const IAnalysisSession> FAnalysisService::StartAnalysis(const TCHAR* SessionName, TUniquePtr<Trace::IInDataStream>&& DataStream)
+TSharedPtr<const IAnalysisSession> FAnalysisService::StartAnalysis(uint32 TraceId, const TCHAR* SessionName, TUniquePtr<UE::Trace::IInDataStream>&& DataStream)
 {
-	TSharedRef<FAnalysisSession> Session = MakeShared<FAnalysisSession>(SessionName, MoveTemp(DataStream));
+	TSharedRef<FAnalysisSession> Session = MakeShared<FAnalysisSession>(TraceId, SessionName, MoveTemp(DataStream));
 
-	Trace::FAnalysisSessionEditScope _(*Session);
+	FAnalysisSessionEditScope _(*Session);
 
-	FBookmarkProvider* BookmarkProvider = new FBookmarkProvider(*Session);
-	Session->AddProvider(FBookmarkProvider::ProviderName, BookmarkProvider);
+	TSharedPtr<FBookmarkProvider> BookmarkProvider = MakeShared<FBookmarkProvider>(*Session);
+	Session->AddProvider(GetBookmarkProviderName(), BookmarkProvider, BookmarkProvider);
 
-	FLogProvider* LogProvider = new FLogProvider(*Session);
-	Session->AddProvider(FLogProvider::ProviderName, LogProvider);
+	TSharedPtr<FRegionProvider> RegionProvider = MakeShared<FRegionProvider>(*Session);
+	Session->AddProvider(GetRegionProviderName(), RegionProvider, RegionProvider);
 
-	FThreadProvider* ThreadProvider = new FThreadProvider(*Session);
-	Session->AddProvider(FThreadProvider::ProviderName, ThreadProvider);
+	TSharedPtr<FLogProvider> LogProvider = MakeShared<FLogProvider>(*Session);
+	Session->AddProvider(GetLogProviderName(), LogProvider, LogProvider);
 
-	FFrameProvider* FrameProvider = new FFrameProvider(*Session);
-	Session->AddProvider(FFrameProvider::ProviderName, FrameProvider);
+	TSharedPtr<FThreadProvider> ThreadProvider = MakeShared<FThreadProvider>(*Session);
+	Session->AddProvider(GetThreadProviderName(), ThreadProvider, ThreadProvider);
 
-	FCounterProvider* CounterProvider = new FCounterProvider(*Session, *FrameProvider);
-	Session->AddProvider(FCounterProvider::ProviderName, CounterProvider);
+	TSharedPtr<FFrameProvider> FrameProvider = MakeShared<FFrameProvider>(*Session);
+	Session->AddProvider(GetFrameProviderName(), FrameProvider);
 
-	FNetProfilerProvider* NetProfilerProvider = new FNetProfilerProvider(*Session);
-	Session->AddProvider(FNetProfilerProvider::ProviderName, NetProfilerProvider);
+	TSharedPtr<FCounterProvider> CounterProvider = MakeShared<FCounterProvider>(*Session, *FrameProvider);
+	Session->AddProvider(GetCounterProviderName(), CounterProvider, CounterProvider);
 
-	FChannelProvider* ChannelProvider = new FChannelProvider();
-	Session->AddProvider(FChannelProvider::ProviderName, ChannelProvider);
+	TSharedPtr<FChannelProvider> ChannelProvider = MakeShared<FChannelProvider>();
+	Session->AddProvider(GetChannelProviderName(), ChannelProvider);
 
-	FMemoryProvider* MemoryProvider = new FMemoryProvider(*Session);
-	Session->AddProvider(FMemoryProvider::ProviderName, MemoryProvider);
+	TSharedPtr<FScreenshotProvider> ScreenshotProvider = MakeShared<FScreenshotProvider>(*Session);
+	Session->AddProvider(GetScreenshotProviderName(), ScreenshotProvider);
 
-	FDiagnosticsProvider* DiagnosticsProvider = new FDiagnosticsProvider(*Session);
-	Session->AddProvider(FDiagnosticsProvider::ProviderName, DiagnosticsProvider);
+	TSharedPtr<FDefinitionProvider> DefProvider = MakeShared<FDefinitionProvider>(&Session.Get());
+	Session->AddProvider(GetDefinitionProviderName(), DefProvider, DefProvider);
 
-	Session->AddAnalyzer(new FMiscTraceAnalyzer(*Session, *ThreadProvider, *BookmarkProvider, *LogProvider, *FrameProvider, *ChannelProvider));
+	Session->AddAnalyzer(new FMiscTraceAnalyzer(*Session, *ThreadProvider, *LogProvider, *FrameProvider, *ChannelProvider, *ScreenshotProvider, *RegionProvider));
+	Session->AddAnalyzer(new FBookmarksAnalyzer(*Session, *BookmarkProvider, LogProvider.Get()));
 	Session->AddAnalyzer(new FLogTraceAnalyzer(*Session, *LogProvider));
+	Session->AddAnalyzer(new FStringsAnalyzer(*Session));
 
 	ModuleService.OnAnalysisBegin(*Session);
 
@@ -255,4 +334,4 @@ TSharedPtr<const IAnalysisSession> FAnalysisService::StartAnalysis(const TCHAR* 
 	return Session;
 }
 
-}
+} // namespace TraceServices

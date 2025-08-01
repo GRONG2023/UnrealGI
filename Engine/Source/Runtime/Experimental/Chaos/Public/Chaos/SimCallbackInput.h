@@ -5,6 +5,10 @@
 #include "Chaos/Defines.h"
 #include "Chaos/Core.h"
 
+class FNetBitReader;
+class FNetBitWriter;
+class APlayerController;
+
 namespace Chaos
 {
 
@@ -39,9 +43,12 @@ struct FSimCallbackInput
 		NumSteps = InNumSteps;
 	}
 
+	virtual bool NetSendInputCmd(FNetBitWriter& Ar) { return false; }
+	virtual bool NetRecvInputCmd(APlayerController* PC, FNetBitReader& Ar) { return false; }
+
 protected:
 	// Do not delete directly, use FreeInputData_Internal
-	~FSimCallbackInput() = default;
+	virtual ~FSimCallbackInput() = default;
 
 private:
 	int32 NumSteps;	//the number of steps this input belongs to
@@ -63,7 +70,7 @@ struct FSimCallbackNoOutput : public FSimCallbackOutput
 
 /** Handle for output that is automatically cleaned up.
 	NOTE: this should only be used on external thread as the destructor automatically frees into external structures */
-class CHAOS_API FSimCallbackOutputHandle
+class FSimCallbackOutputHandle
 {
 public:
 	FSimCallbackOutputHandle()
@@ -120,7 +127,7 @@ public:
 	const FSimCallbackOutput& operator*() const { return *SimCallbackOutput; }
 private:
 
-	void Free_External();
+	CHAOS_API void Free_External();
 
 	FSimCallbackOutput* SimCallbackOutput;
 	ISimCallbackObject* SimCallbackObject;

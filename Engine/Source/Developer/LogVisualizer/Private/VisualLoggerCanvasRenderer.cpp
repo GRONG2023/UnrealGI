@@ -5,11 +5,12 @@
 #include "CanvasItem.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
+#include "SceneView.h"
 #include "VisualLogger/VisualLogger.h"
 #include "LogVisualizerSettings.h"
 #include "LogVisualizerSessionSettings.h"
 #include "VisualLoggerDatabase.h"
-#include "LogVisualizerPrivate.h"
+#include "LogVisualizerPublic.h"
 #include "VisualLoggerTimeSliderController.h"
 #include "Debug/ReporterGraph.h"
 
@@ -25,7 +26,7 @@ namespace LogVisualizer
 	{
 		if (PointInFrustum(Canvas, WorldLocation))
 		{
-			const FVector ScreenLocation = Canvas->Project(WorldLocation);
+			const FVector3f ScreenLocation = UE::LWC::NarrowWorldPositionChecked(Canvas->Project(WorldLocation));
 			Canvas->DrawText(Font, *TextToDraw, ScreenLocation.X, ScreenLocation.Y);
 		}
 	}
@@ -34,7 +35,7 @@ namespace LogVisualizer
 	{
 		if (PointInFrustum(Canvas, WorldLocation))
 		{
-			const FVector ScreenLocation = Canvas->Project(WorldLocation);
+			const FVector3f ScreenLocation = UE::LWC::NarrowWorldPositionChecked(Canvas->Project(WorldLocation));
 			float TextXL = 0.f;
 			float TextYL = 0.f;
 			Canvas->StrLen(Font, TextToDraw, TextXL, TextYL);
@@ -46,7 +47,7 @@ namespace LogVisualizer
 	{
 		if (PointInFrustum(Canvas, WorldLocation))
 		{
-			const FVector ScreenLocation = Canvas->Project(WorldLocation);
+			const FVector3f ScreenLocation = UE::LWC::NarrowWorldPositionChecked(Canvas->Project(WorldLocation));
 			float TextXL = 0.f;
 			float TextYL = 0.f;
 			Canvas->StrLen(Font, TextToDraw, TextXL, TextYL);
@@ -112,11 +113,11 @@ void FVisualLoggerCanvasRenderer::DrawOnCanvas(class UCanvas* Canvas, class APla
 	if (bDirtyData && FLogVisualizer::Get().GetTimeSliderController().IsValid())
 	{
 		const FVisualLoggerTimeSliderArgs&  TimeSliderArgs = FLogVisualizer::Get().GetTimeSliderController()->GetTimeSliderArgs();
-		TRange<float> LocalViewRange = TimeSliderArgs.ViewRange.Get();
-		const float LocalViewRangeMin = LocalViewRange.GetLowerBoundValue();
-		const float LocalViewRangeMax = LocalViewRange.GetUpperBoundValue();
-		const float LocalSequenceLength = LocalViewRangeMax - LocalViewRangeMin;
-		const float WindowHalfWidth = LocalSequenceLength * TimeSliderArgs.CursorSize.Get() * 0.5f;
+		TRange<double> LocalViewRange = TimeSliderArgs.ViewRange.Get();
+		const double LocalViewRangeMin = LocalViewRange.GetLowerBoundValue();
+		const double LocalViewRangeMax = LocalViewRange.GetUpperBoundValue();
+		const double LocalSequenceLength = LocalViewRangeMax - LocalViewRangeMin;
+		const double WindowHalfWidth = LocalSequenceLength * TimeSliderArgs.CursorSize.Get() * 0.5;
 		const FVector2D TimeStampWindow(SelectedEntry.TimeStamp - WindowHalfWidth, SelectedEntry.TimeStamp + WindowHalfWidth);
 
 		CollectedGraphs.Reset();
@@ -167,7 +168,7 @@ void FVisualLoggerCanvasRenderer::DrawOnCanvas(class UCanvas* Canvas, class APla
 						CollectedGraphData.Max.X = FMath::Max(CollectedGraphData.Max.X, SampleValue.X);
 						CollectedGraphData.Max.Y = FMath::Max(CollectedGraphData.Max.Y, SampleValue.Y);
 
-						const float CurrentTimeStamp = GraphData.TimeStamps[SampleIndex];
+						const double CurrentTimeStamp = GraphData.TimeStamps[SampleIndex];
 						if (CurrentTimeStamp < TimeStampWindow.X)
 						{
 							LineData.LeftExtreme = SampleValue;
@@ -207,17 +208,17 @@ void FVisualLoggerCanvasRenderer::DrawHistogramGraphs(class UCanvas* Canvas, cla
 	if (CollectedGraphs.Num() > 0)
 	{
 		const FVisualLoggerTimeSliderArgs&  TimeSliderArgs = FLogVisualizer::Get().GetTimeSliderController()->GetTimeSliderArgs();
-		TRange<float> LocalViewRange = TimeSliderArgs.ViewRange.Get();
-		const float LocalViewRangeMin = LocalViewRange.GetLowerBoundValue();
-		const float LocalViewRangeMax = LocalViewRange.GetUpperBoundValue();
-		const float LocalSequenceLength = LocalViewRangeMax - LocalViewRangeMin;
-		const float WindowHalfWidth = LocalSequenceLength * TimeSliderArgs.CursorSize.Get() * 0.5f;
+		TRange<double> LocalViewRange = TimeSliderArgs.ViewRange.Get();
+		const double LocalViewRangeMin = LocalViewRange.GetLowerBoundValue();
+		const double LocalViewRangeMax = LocalViewRange.GetUpperBoundValue();
+		const double LocalSequenceLength = LocalViewRangeMax - LocalViewRangeMin;
+		const double WindowHalfWidth = LocalSequenceLength * TimeSliderArgs.CursorSize.Get() * 0.5f;
 		const FVector2D TimeStampWindow(SelectedEntry.TimeStamp - WindowHalfWidth, SelectedEntry.TimeStamp + WindowHalfWidth);
 
 		const FColor GraphsBackgroundColor = ULogVisualizerSettings::StaticClass()->GetDefaultObject<ULogVisualizerSettings>()->GraphsBackgroundColor;
 		const int NumberOfGraphs = CollectedGraphs.Num();
-		const int32 NumberOfColumns = FMath::CeilToInt(FMath::Sqrt(NumberOfGraphs));
-		int32 NumberOfRows = FMath::FloorToInt(NumberOfGraphs / NumberOfColumns);
+		const int32 NumberOfColumns = FMath::CeilToInt(FMath::Sqrt(static_cast<float>(NumberOfGraphs)));
+		int32 NumberOfRows = FMath::FloorToInt((float)NumberOfGraphs / (float)NumberOfColumns);
 		if (NumberOfGraphs - NumberOfRows * NumberOfColumns > 0)
 		{
 			NumberOfRows += 1;
@@ -231,7 +232,7 @@ void FVisualLoggerCanvasRenderer::DrawHistogramGraphs(class UCanvas* Canvas, cla
 		const float YGraphSpacing = 0.2f / (MaxNumberOfGraphs + 1);
 
 		const float StartX = XGraphSpacing;
-		float StartY = 0.5 + (0.5 * NumberOfRows - 1) * (GraphHeight + YGraphSpacing);
+		float StartY = 0.5f + (0.5f * NumberOfRows - 1) * (GraphHeight + YGraphSpacing);
 
 		float CurrentX = StartX;
 		float CurrentY = StartY;
@@ -277,7 +278,7 @@ void FVisualLoggerCanvasRenderer::DrawHistogramGraphs(class UCanvas* Canvas, cla
 					Hue -= FMath::FloorToFloat(Hue);
 				}
 
-				HistogramGraph->GetGraphLine(LineIndex)->Color = FLinearColor::MakeFromHSV8(Hue * 255, 200, 244);
+				HistogramGraph->GetGraphLine(LineIndex)->Color = FLinearColor::MakeFromHSV8(static_cast<uint8>(Hue * 255), 200, 244);
 				HistogramGraph->GetGraphLine(LineIndex)->LineName = DataName;
 				HistogramGraph->GetGraphLine(LineIndex)->Data.Append(LinesIt->Value.Samples);
 				HistogramGraph->GetGraphLine(LineIndex)->LeftExtreme = LinesIt->Value.LeftExtreme;
@@ -295,15 +296,15 @@ void FVisualLoggerCanvasRenderer::DrawHistogramGraphs(class UCanvas* Canvas, cla
 					{
 						if (SampleData.X >= TimeStampWindow.X && SampleData.X <= TimeStampWindow.Y)
 						{
-							It->Value.Min.Y = FMath::Min<float>(It->Value.Min.Y, SampleData.Y);
-							It->Value.Max.Y = FMath::Max<float>(It->Value.Max.Y, SampleData.Y);
+							It->Value.Min.Y = FMath::Min(It->Value.Min.Y, SampleData.Y);
+							It->Value.Max.Y = FMath::Max(It->Value.Max.Y, SampleData.Y);
 						}
 					}
 				}
 			}
 
 			FVector2D GraphSpaceSize;
-			GraphSpaceSize.Y = GraphSpaceSize.X = 0.8f / CollectedGraphs.Num();
+			GraphSpaceSize.Y = GraphSpaceSize.X = 0.8 / CollectedGraphs.Num();
 
 			HistogramGraph->SetGraphScreenSize(CurrentX, CurrentX + GraphWidth, CurrentY, CurrentY + GraphHeight);
 			CurrentX += GraphWidth + XGraphSpacing;
@@ -311,7 +312,7 @@ void FVisualLoggerCanvasRenderer::DrawHistogramGraphs(class UCanvas* Canvas, cla
 
 			HistogramGraph->DrawCursorOnGraph(true);
 			HistogramGraph->UseTinyFont(CollectedGraphs.Num() >= 5);
-			HistogramGraph->SetCursorLocation(SelectedEntry.TimeStamp);
+			HistogramGraph->SetCursorLocation(FloatCastChecked<float>(SelectedEntry.TimeStamp, /* Precision */ 1./16.));
 			HistogramGraph->SetNumThresholds(0);
 			HistogramGraph->SetStyles(EGraphAxisStyle::Grid, EGraphDataStyle::Lines);
 			HistogramGraph->SetBackgroundColor(GraphsBackgroundColor);

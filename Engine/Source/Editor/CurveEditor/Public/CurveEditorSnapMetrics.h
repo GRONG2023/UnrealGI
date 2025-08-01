@@ -2,9 +2,11 @@
 
 #pragma once
 
+#include "Algo/MinElement.h"
+#include "Input/Events.h"
 #include "Misc/FrameRate.h"
 #include "Math/Axis.h"
-#include "Runtime/Core/Public/Algo/MinElement.h"
+#include "Math/Vector2D.h"
 
 struct FCurveSnapMetrics
 {
@@ -79,7 +81,7 @@ struct FCurveEditorAxisSnap
 		RestrictedAxisList = EAxisList::None;
 	}
 
-	FVector2D GetSnappedPosition(FVector2D InitialPosition, FVector2D CurrentPosition, const FPointerEvent& MouseEvent, FSnapState& InOutSnapState, const bool bIgnoreAxisLock = false)
+	FVector2D GetSnappedPosition(FVector2D InitialPosition, FVector2D LastPosition, FVector2D CurrentPosition, const FPointerEvent& MouseEvent, FSnapState& InOutSnapState, const bool bIgnoreAxisLock = false)
 	{
 		check(RestrictedAxisList == EAxisList::Type::None || RestrictedAxisList == EAxisList::Type::X || RestrictedAxisList == EAxisList::Type::Y);
 
@@ -96,7 +98,7 @@ struct FCurveEditorAxisSnap
 			{
 				if (!InOutSnapState.bHasStartPosition)
 				{
-					InOutSnapState.MousePosOnShiftStart = CurrentPosition;
+					InOutSnapState.MousePosOnShiftStart = LastPosition;
 					InOutSnapState.bHasStartPosition = true;
 				}
 				// If they have passed the threshold they should have a lock vector they're snapped to.
@@ -106,7 +108,7 @@ struct FCurveEditorAxisSnap
 					
 					// They have not passed the threshold yet, let's see if they've passed it now.
 					FVector2D DragDelta = CurrentPosition - InOutSnapState.MousePosOnShiftStart;
-					if (DragDelta.Size() > 2.f)
+					if (DragDelta.Size() > 0.001f)
 					{
 						InOutSnapState.bHasPassedThreshold = true;
 						InOutSnapState.MouseLockVector = FVector2D::UnitVector;

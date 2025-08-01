@@ -18,13 +18,13 @@ struct FAnimBlueprintFunction;
 class IAnimClassInterface;
 
 USTRUCT(BlueprintInternalUseOnly)
-struct ENGINE_API FAnimNode_LinkedAnimGraph : public FAnimNode_CustomProperty
+struct FAnimNode_LinkedAnimGraph : public FAnimNode_CustomProperty
 {
 	GENERATED_BODY()
 
 public:
 
-	FAnimNode_LinkedAnimGraph();
+	ENGINE_API FAnimNode_LinkedAnimGraph();
 
 	/** 
 	 *  Input poses for the node, intentionally not accessible because if there's no input
@@ -41,10 +41,11 @@ public:
 	UPROPERTY(EditAnywhere, Category = Settings)
 	TSubclassOf<UAnimInstance> InstanceClass;
 
-	/** Optional tag used to identify this linked instance */
-	UPROPERTY(EditAnywhere, Category = Settings)
-	FName Tag;
-
+#if WITH_EDITORONLY_DATA
+	UPROPERTY()
+	FName Tag_DEPRECATED;
+#endif
+	
 	// The root node of the dynamically-linked graph
 	FAnimNode_Base* LinkedRoot;
 
@@ -55,8 +56,19 @@ public:
 	int32 CachedLinkedNodeIndex;
 
 protected:
-	// Inertial blending duration to request next update
-	float PendingBlendDuration;
+	// Inertial blending duration to request next update (pulled from the prior state's blend out)
+	float PendingBlendOutDuration;
+
+	// Optional blend profile to use during inertial blending (pulled from the prior state's blend out)
+	UPROPERTY(Transient)
+	TObjectPtr<const UBlendProfile> PendingBlendOutProfile;
+
+	// Inertial blending duration to request next update (pulled from the new state's blend in)
+	float PendingBlendInDuration;
+
+	// Optional blend profile to use during inertial blending (pulled from the new state's blend in)
+	UPROPERTY(Transient)
+	TObjectPtr<const UBlendProfile> PendingBlendInProfile;
 
 public:
 	/** Whether named notifies will be received by this linked instance from other instances (outer or other linked instances) */
@@ -68,58 +80,71 @@ public:
 	uint8 bPropagateNotifiesToLinkedInstances : 1;
 
 	/** Dynamically set the anim class of this linked instance */
-	void SetAnimClass(TSubclassOf<UAnimInstance> InClass, const UAnimInstance* InOwningAnimInstance);
+	ENGINE_API void SetAnimClass(TSubclassOf<UAnimInstance> InClass, const UAnimInstance* InOwningAnimInstance);
 
 	/** Get the function name we should be linking with when we call DynamicLink/Unlink */
-	virtual FName GetDynamicLinkFunctionName() const;
+	ENGINE_API virtual FName GetDynamicLinkFunctionName() const;
 
 	/** Get the dynamic link target */
-	virtual UAnimInstance* GetDynamicLinkTarget(UAnimInstance* InOwningAnimInstance) const;
+	ENGINE_API virtual UAnimInstance* GetDynamicLinkTarget(UAnimInstance* InOwningAnimInstance) const;
 
 	// FAnimNode_Base interface
-	virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
-	virtual void CacheBones_AnyThread(const FAnimationCacheBonesContext& Context) override;
-	virtual void Update_AnyThread(const FAnimationUpdateContext& Context) override;
-	virtual void Evaluate_AnyThread(FPoseContext& Output) override;
-	virtual void GatherDebugData(FNodeDebugData& DebugData) override;
+	ENGINE_API virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
+	ENGINE_API virtual void CacheBones_AnyThread(const FAnimationCacheBonesContext& Context) override;
+	ENGINE_API virtual void Update_AnyThread(const FAnimationUpdateContext& Context) override;
+	ENGINE_API virtual void Evaluate_AnyThread(FPoseContext& Output) override;
+	ENGINE_API virtual void GatherDebugData(FNodeDebugData& DebugData) override;
 
 	// Initializes only the sub-graph that this node is linked to
-	void InitializeSubGraph_AnyThread(const FAnimationInitializeContext& Context);
+	ENGINE_API void InitializeSubGraph_AnyThread(const FAnimationInitializeContext& Context);
 
 	// Caches bones only for the sub graph that this node is linked to
-	void CacheBonesSubGraph_AnyThread(const FAnimationCacheBonesContext& Context);
+	ENGINE_API void CacheBonesSubGraph_AnyThread(const FAnimationCacheBonesContext& Context);
 
 protected:
 
-	virtual void OnInitializeAnimInstance(const FAnimInstanceProxy* InProxy, const UAnimInstance* InAnimInstance) override;
+	ENGINE_API virtual void OnInitializeAnimInstance(const FAnimInstanceProxy* InProxy, const UAnimInstance* InAnimInstance) override;
 	virtual bool NeedsOnInitializeAnimInstance() const override { return true; }
 	// End of FAnimNode_Base interface
 
 	// Re-create the linked instances for this node
-	void ReinitializeLinkedAnimInstance(const UAnimInstance* InOwningAnimInstance, UAnimInstance* InNewAnimInstance = nullptr);
+	ENGINE_API void ReinitializeLinkedAnimInstance(const UAnimInstance* InOwningAnimInstance, UAnimInstance* InNewAnimInstance = nullptr);
 
 	// Shutdown the currently running instance
-	void TeardownInstance();
+	ENGINE_API void TeardownInstance(const UAnimInstance* InOwningAnimInstance);
 
-	// Get Target Class
+	// Check if the currently linked instance can be teared down
+	virtual bool CanTeardownLinkedInstance(const UAnimInstance* LinkedInstance) const {return true;}
+
+	// FAnimNode_CustomProperty interface
 	virtual UClass* GetTargetClass() const override 
 	{
 		return *InstanceClass;
 	}
 
+#if WITH_EDITOR
+	ENGINE_API virtual void HandleObjectsReinstanced_Impl(UObject* InSourceObject, UObject* InTargetObject, const TMap<UObject*, UObject*>& OldToNewInstanceMap) override;
+#endif	// #if WITH_EDITOR
+
 	/** Link up pose links dynamically with linked instance */
-	void DynamicLink(UAnimInstance* InOwningAnimInstance);
+	ENGINE_API void DynamicLink(UAnimInstance* InOwningAnimInstance);
 
 	/** Break any pose links dynamically with linked instance */
-	void DynamicUnlink(UAnimInstance* InOwningAnimInstance);
+	ENGINE_API void DynamicUnlink(UAnimInstance* InOwningAnimInstance);
 
 	/** Helper function for finding function inputs when linking/unlinking */
-	int32 FindFunctionInputIndex(const FAnimBlueprintFunction& AnimBlueprintFunction, const FName& InInputName);
+	ENGINE_API int32 FindFunctionInputIndex(const FAnimBlueprintFunction& AnimBlueprintFunction, const FName& InInputName);
 
 	/** Request a blend when the active instance changes */
-	void RequestBlend(const IAnimClassInterface* PriorAnimBPClass, const IAnimClassInterface* NewAnimBPClass);
+	ENGINE_API void RequestBlend(const IAnimClassInterface* PriorAnimBPClass, const IAnimClassInterface* NewAnimBPClass);
 
 	friend class UAnimInstance;
+
+	// Stats
+#if ANIMNODE_STATS_VERBOSE
+	ENGINE_API virtual void InitializeStatID() override;
+#endif
+
 };
 
 UE_DEPRECATED(4.24, "FAnimNode_SubInstance has been renamed to FAnimNode_LinkedAnimGraph")

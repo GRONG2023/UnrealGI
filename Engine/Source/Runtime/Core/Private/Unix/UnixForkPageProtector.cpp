@@ -5,8 +5,10 @@
 #if COMPILE_FORK_PAGE_PROTECTOR
 #include "HAL/PlatformStackWalk.h"
 #include "Misc/Fork.h"
+#include "Misc/ScopeExit.h"
 #include "Misc/ScopeLock.h"
 #include "Unix/UnixPlatformFile.h"
+#include "Unix/UnixPlatformAtomics.h"
 
 #include <fcntl.h>
 #include <pthread.h>
@@ -394,17 +396,6 @@ void FMallocLinked::Free(void* Ptr)
 			}
 		}
 
-		if (CurrentBlock->FreeList && CurrentBlock->FreeList->FreeSize == CurrentBlock->BlockSize)
-		{
-			if (Blocks == CurrentBlock)
-			{
-				Blocks = nullptr;
-			}
-
-			PreviousBlock->Next = CurrentBlock->Next;
-			munmap(CurrentBlock, CurrentBlock->BlockSize + sizeof(FBlock));
-		}
-
 		if (bPtrFreed)
 		{
 			return;
@@ -596,6 +587,7 @@ bool FForkPageProtector::HandleNewCrashAddress(void* CrashAddress)
 		return false;
 	}
 
+	// TODO deal with threading issue
 	if (LastCrashAddress == CrashAddress)
 	{
 		return false;
@@ -605,6 +597,7 @@ bool FForkPageProtector::HandleNewCrashAddress(void* CrashAddress)
 
 	// Align the crash addess to the nearest left most page boundary
 	uint64 PageAlignedAddress = reinterpret_cast<uint64>(CrashAddress) & ~(FPlatformMemory::GetConstants().PageSize - 1);
+	//TODO: check return code here, it can fail to change protection
 	mprotect(reinterpret_cast<void*>(PageAlignedAddress), FPlatformMemory::GetConstants().PageSize, PROT_READ | PROT_WRITE);
 
 	return DumpCallstackInfoToFile();
@@ -661,6 +654,14 @@ bool FForkPageProtector::DumpCallstackInfoToFile()
 	int32 IgnoreCount = 2;
 	FPlatformStackWalk::StackWalkAndDump(StackTrace, StackTraceSize, IgnoreCount);
 	uint64 Hash = CityHash64(StackTrace, FCStringAnsi::Strlen(StackTrace));
+
+	// we can have multiple threads coming into this signal handler, need to make sure
+	// that only 1 thread touches CallstackHashCount at a time.
+	static volatile sig_atomic_t SignalBeingHandled = 0;
+
+	while (!__sync_bool_compare_and_swap(&SignalBeingHandled, 0, 1)) { sched_yield(); }
+
+	ON_SCOPE_EXIT { FPlatformAtomics::InterlockedDecrement(&SignalBeingHandled); };
 
 	CallstackHashData* Data = CallstackHashCount.Find(Hash);
 

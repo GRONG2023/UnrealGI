@@ -9,6 +9,7 @@ FNavigationConfig::FNavigationConfig()
 	: bTabNavigation(true)
 	, bKeyNavigation(true)
 	, bAnalogNavigation(true)
+	, bIgnoreModifiersForNavigationActions(true)
 	, AnalogNavigationHorizontalThreshold(0.50f)
 	, AnalogNavigationVerticalThreshold(0.50f)
 {
@@ -26,6 +27,15 @@ FNavigationConfig::FNavigationConfig()
 
 	KeyEventRules.Emplace(EKeys::Down, EUINavigation::Down);
 	KeyEventRules.Emplace(EKeys::Gamepad_DPad_Down, EUINavigation::Down);
+
+	// By default, enter, space, and gamepad accept are all counted as accept
+	KeyActionRules.Emplace(EKeys::Enter, EUINavigationAction::Accept);
+	KeyActionRules.Emplace(EKeys::SpaceBar, EUINavigationAction::Accept);
+	KeyActionRules.Emplace(EKeys::Virtual_Accept, EUINavigationAction::Accept);
+
+	// By default, escape and gamepad back count as leaving current scope
+	KeyActionRules.Emplace(EKeys::Escape, EUINavigationAction::Back);
+	KeyActionRules.Emplace(EKeys::Virtual_Back, EUINavigationAction::Back);
 }
 
 FNavigationConfig::~FNavigationConfig()
@@ -74,16 +84,17 @@ EUINavigation FNavigationConfig::GetNavigationDirectionFromAnalog(const FAnalogI
 {
 	if (bAnalogNavigation)
 	{
-		EUINavigation DesiredNavigation = GetNavigationDirectionFromAnalogInternal(InAnalogEvent);
+		const EUINavigation DesiredNavigation = GetNavigationDirectionFromAnalogInternal(InAnalogEvent);
 		if (DesiredNavigation != EUINavigation::Invalid)
 		{
 			FUserNavigationState& UserState = UserNavigationState.FindOrAdd(InAnalogEvent.GetUserIndex());
-			FAnalogNavigationState& AnalogState = UserState.AnalogNavigationState.FindOrAdd(DesiredNavigation);
+			FAnalogNavigationState& AnalogState = UserState.AnalogNavigationState.FindOrAdd(FAnalogNavigationKey(InAnalogEvent.GetKey(), DesiredNavigation));
 
-			const float RepeatRate = GetRepeatRateForPressure( FMath::Abs(InAnalogEvent.GetAnalogValue()), FMath::Max(AnalogState.Repeats - 1, 0));
-			if (FApp::GetCurrentTime() - AnalogState.LastNavigationTime > RepeatRate)
+			const float RepeatRate = GetRepeatRateForPressure(FMath::Abs(InAnalogEvent.GetAnalogValue()), FMath::Max(AnalogState.Repeats - 1, 0));
+			const double CurrentTime = FApp::GetCurrentTime();
+			if (CurrentTime - AnalogState.LastNavigationTime > RepeatRate)
 			{
-				AnalogState.LastNavigationTime = FApp::GetCurrentTime();
+				AnalogState.LastNavigationTime = CurrentTime;
 				AnalogState.Repeats++;
 				return DesiredNavigation;
 			}
@@ -96,39 +107,42 @@ EUINavigation FNavigationConfig::GetNavigationDirectionFromAnalog(const FAnalogI
 EUINavigation FNavigationConfig::GetNavigationDirectionFromAnalogInternal(const FAnalogInputEvent& InAnalogEvent)
 {
 	if (bAnalogNavigation)
-	{
+	{	
 		FUserNavigationState& UserState = UserNavigationState.FindOrAdd(InAnalogEvent.GetUserIndex());
-
-		if (InAnalogEvent.GetKey() == AnalogHorizontalKey)
+	
+		const FKey& AnalogKey   = InAnalogEvent.GetKey();
+		const float AnalogValue = InAnalogEvent.GetAnalogValue();
+	
+		if (IsAnalogHorizontalKey(AnalogKey))
 		{
-			if (InAnalogEvent.GetAnalogValue() < -AnalogNavigationHorizontalThreshold)
+			if (AnalogValue < -AnalogNavigationHorizontalThreshold)
 			{
 				return EUINavigation::Left;
 			}
-			else if (InAnalogEvent.GetAnalogValue() > AnalogNavigationHorizontalThreshold)
+			else if (AnalogValue > AnalogNavigationHorizontalThreshold)
 			{
 				return EUINavigation::Right;
 			}
 			else
 			{
-				UserState.AnalogNavigationState.Add(EUINavigation::Left, FAnalogNavigationState());
-				UserState.AnalogNavigationState.Add(EUINavigation::Right, FAnalogNavigationState());
+				UserState.AnalogNavigationState.Add(FAnalogNavigationKey(AnalogKey,EUINavigation::Left), FAnalogNavigationState());
+				UserState.AnalogNavigationState.Add(FAnalogNavigationKey(AnalogKey, EUINavigation::Right), FAnalogNavigationState());
 			}
 		}
-		else if (InAnalogEvent.GetKey() == AnalogVerticalKey)
+		else if (IsAnalogVerticalKey(AnalogKey))
 		{
-			if (InAnalogEvent.GetAnalogValue() > AnalogNavigationVerticalThreshold)
+			if (AnalogValue > AnalogNavigationVerticalThreshold)
 			{
 				return EUINavigation::Up;
 			}
-			else if (InAnalogEvent.GetAnalogValue() < -AnalogNavigationVerticalThreshold)
+			else if (AnalogValue < -AnalogNavigationVerticalThreshold)
 			{
 				return EUINavigation::Down;
 			}
 			else
 			{
-				UserState.AnalogNavigationState.Add(EUINavigation::Up, FAnalogNavigationState());
-				UserState.AnalogNavigationState.Add(EUINavigation::Down, FAnalogNavigationState());
+				UserState.AnalogNavigationState.Add(FAnalogNavigationKey(AnalogKey, EUINavigation::Up), FAnalogNavigationState());
+                UserState.AnalogNavigationState.Add(FAnalogNavigationKey(AnalogKey, EUINavigation::Down), FAnalogNavigationState());
 			}
 		}
 	}
@@ -149,24 +163,81 @@ float FNavigationConfig::GetRepeatRateForPressure(float InPressure, int32 InRepe
 
 EUINavigationAction FNavigationConfig::GetNavigationActionFromKey(const FKeyEvent& InKeyEvent) const
 {
+	const bool bModifierHeld = InKeyEvent.IsControlDown() || InKeyEvent.IsAltDown() || InKeyEvent.IsCommandDown() || InKeyEvent.IsShiftDown();
+	if (bIgnoreModifiersForNavigationActions || !bModifierHeld)
+	{
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	// Call raw key version for back compatibility, subclasses should override this function
-	return GetNavigationActionForKey(InKeyEvent.GetKey());
+		// Call raw key version for back compatibility, subclasses should override this function
+		return GetNavigationActionForKey(InKeyEvent.GetKey());
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+	}
+	return EUINavigationAction::Invalid;
 }
 
 EUINavigationAction FNavigationConfig::GetNavigationActionForKey(const FKey& InKey) const
 {
-	if (InKey == EKeys::Enter || InKey == EKeys::SpaceBar || InKey == EKeys::Virtual_Accept)
+	if (const EUINavigationAction* Action = KeyActionRules.Find(InKey))
 	{
-		// By default, enter, space, and gamepad accept are all counted as accept
-		return EUINavigationAction::Accept;
+		return *Action;
 	}
-	else if (InKey == EKeys::Escape || InKey == EKeys::Virtual_Back)
+	return EUINavigationAction::Invalid;
+}
+
+FString FNavigationConfig::ToString() const
+{
+	TStringBuilder<1024> Builder;
+
+	Builder.Appendf(TEXT("bTabNavigation: %u\n"), bTabNavigation);
+	Builder.Appendf(TEXT("bKeyNavigation: %u\n"), bKeyNavigation);
+	Builder.Appendf(TEXT("bAnalogNavigation: %u\n"), bAnalogNavigation);
+	Builder.Appendf(TEXT("AnalogNavigationHorizontalThreshold: %f\n"), AnalogNavigationHorizontalThreshold);
+	Builder.Appendf(TEXT("AnalogNavigationVerticalThreshold: %f\n"), AnalogNavigationVerticalThreshold);
+	Builder.Appendf(TEXT("AnalogHorizontalKey: %s\n"), *AnalogHorizontalKey.ToString());
+	Builder.Appendf(TEXT("AnalogVerticalKey: %s\n"), *AnalogVerticalKey.ToString());
+
+	Builder.Appendf(TEXT("KeyEventRules: \n"));
+	for (TPair<FKey, EUINavigation> KeyEventRule : KeyEventRules)
 	{
-		// By default, escape and gamepad back count as leaving current scope
-		return EUINavigationAction::Back;
+		Builder.Appendf(TEXT("Pair: %s -> %s\n"), *KeyEventRule.Key.ToString(), *UEnum::GetValueAsString(KeyEventRule.Value));
 	}
 
-	return EUINavigationAction::Invalid;
+	return Builder.ToString();
+}
+
+bool FNavigationConfig::IsAnalogEventBeyondNavigationThreshold(const FAnalogInputEvent& InAnalogEvent) const
+{
+	if (bAnalogNavigation)
+	{
+		const FKey& AnalogKey = InAnalogEvent.GetKey();
+		const float AbsAnalogValue = FMath::Abs(InAnalogEvent.GetAnalogValue());
+	 
+	 	return (IsAnalogHorizontalKey(AnalogKey) && AbsAnalogValue > AnalogNavigationHorizontalThreshold)
+			|| (IsAnalogVerticalKey(AnalogKey) 	 && AbsAnalogValue > AnalogNavigationVerticalThreshold);
+	}
+
+	return false;
+}
+
+FTwinStickNavigationConfig::FTwinStickNavigationConfig()
+{
+	bTabNavigation = false;
+
+	KeyEventRules =
+	{
+		{EKeys::Gamepad_DPad_Left, EUINavigation::Left},
+		{EKeys::Gamepad_DPad_Right, EUINavigation::Right},
+		{EKeys::Gamepad_DPad_Up, EUINavigation::Up},
+		{EKeys::Gamepad_DPad_Down, EUINavigation::Down}
+	};
+}
+
+bool FTwinStickNavigationConfig::IsAnalogHorizontalKey(const FKey& InKey) const
+{
+	return InKey == EKeys::Gamepad_LeftX || InKey == EKeys::Gamepad_RightX;
+}
+
+bool FTwinStickNavigationConfig::IsAnalogVerticalKey(const FKey& InKey) const
+{
+	return InKey == EKeys::Gamepad_LeftY || InKey == EKeys::Gamepad_RightY;
 }

@@ -6,23 +6,44 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "HAL/LowLevelMemTracker.h"
+#include "HAL/PlatformAtomics.h"
+#include "HAL/PlatformMath.h"
+#include "Misc/AssertionMacros.h"
 #include "Stats/Stats.h"
+#include "Stats/Stats2.h"
+#include "UObject/NameTypes.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/UObjectGlobals.h"
-#include "HAL/LowLevelMemTracker.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/ObjectPtr.h"
+
+class UClass;
+class UEnum;
+class UObject;
+class UPackage;
+class UScriptStruct;
+
+// If FName is 4 bytes than we can use padding after it to store internal object list index and use array instead of a hash map for lookup in UObjectHash.cpp
+// This might change the each UClass' object list iteration order
+#if !defined(UE_STORE_OBJECT_LIST_INTERNAL_INDEX)
+#	define UE_STORE_OBJECT_LIST_INTERNAL_INDEX 0
+#endif
 
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("STAT_UObjectsStatGroupTester"), STAT_UObjectsStatGroupTester, STATGROUP_UObjects, COREUOBJECT_API);
 
 /** 
  * Low level implementation of UObject, should not be used directly in game code 
  */
-class COREUOBJECT_API UObjectBase
+class UObjectBase
 {
 	friend class UObjectBaseUtility;
 	friend struct Z_Construct_UClass_UObject_Statics;
 	friend class FUObjectArray; // for access to InternalIndex without revealing it to anyone else
 	friend class FUObjectAllocator; // for access to destructor without revealing it to anyone else
+	friend struct FInternalUObjectBaseUtilityIsValidFlagsChecker; // for access to InternalIndex
 	friend COREUOBJECT_API void UObjectForceRegistration(UObjectBase* Object, bool bCheckForModuleRelease);
 	friend COREUOBJECT_API void InitializePrivateStaticClass(
 		class UClass* TClass_Super_StaticClass,
@@ -33,7 +54,9 @@ class COREUOBJECT_API UObjectBase
 		);
 protected:
 	UObjectBase() :
-		 NamePrivate(NoInit)  // screwy, but the name was already set and we don't want to set it again
+		ClassPrivate(NoInit),
+		NamePrivate(NoInit),  // screwy, but the name was already set and we don't want to set it again
+		OuterPrivate(NoInit)
 	{
 	}
 
@@ -41,7 +64,7 @@ protected:
 	 * Constructor used for bootstrapping
 	 * @param	InFlags			RF_Flags to assign
 	 */
-	UObjectBase( EObjectFlags InFlags );
+	COREUOBJECT_API UObjectBase( EObjectFlags InFlags );
 public:
 
 	/**
@@ -51,18 +74,21 @@ public:
 	 * @param	InInternalFlags EInternalObjectFlags to assign
 	 * @param	InOuter				outer for this object
 	 * @param	InName				name of the new object
+	 * @param	InInternalIndex		internal index to use (if already allocated), negative value means allocate a new index
+	 * @param	InSerialNumber		serial number to re-use (if already allocated)
 	 */
-	UObjectBase( UClass* InClass, EObjectFlags InFlags, EInternalObjectFlags InInternalFlags, UObject *InOuter, FName InName );
+	COREUOBJECT_API UObjectBase(UClass* InClass,
+			EObjectFlags InFlags,
+			EInternalObjectFlags InInternalFlags,
+			UObject *InOuter,
+			FName InName,
+			int32 InInternalIndex = -1,
+			int32 InSerialNumber = 0);
 
 	/**
 	 * Final destructor, removes the object from the object array, and indirectly, from any annotations
 	 **/
-	virtual ~UObjectBase();
-
-	/**
-	 * Emit GC tokens for UObjectBase, this might be UObject::StaticClass or Default__Class
-	 **/
-	static void EmitBaseReferences(UClass *RootClass);
+	COREUOBJECT_API virtual ~UObjectBase();
 
 protected:
 	/**
@@ -71,20 +97,20 @@ protected:
 	 * @param NewName	new name for this object
 	 * @param NewOuter	new outer for this object, if NULL, outer will be unchanged
 	 */
-	void LowLevelRename(FName NewName,UObject *NewOuter = NULL);
+	COREUOBJECT_API void LowLevelRename(FName NewName,UObject *NewOuter = NULL);
 
 	/** Force any base classes to be registered first */
 	virtual void RegisterDependencies() {}
 
 	/** Enqueue the registration for this object. */
-	void Register(const TCHAR* PackageName,const TCHAR* Name);
+	COREUOBJECT_API void Register(const TCHAR* PackageName,const TCHAR* Name);
 	
 	/**
 	 * Convert a boot-strap registered class into a real one, add to uobject array, etc
 	 *
 	 * @param UClassStaticClass Now that it is known, fill in UClass::StaticClass() as the class
 	 */
-	virtual void DeferredRegister(UClass *UClassStaticClass,const TCHAR* PackageName,const TCHAR* Name);
+	COREUOBJECT_API virtual void DeferredRegister(UClass *UClassStaticClass,const TCHAR* PackageName,const TCHAR* Name);
 
 private:
 	/**
@@ -92,15 +118,17 @@ private:
 	 *
 	 * @param Name name to assign to this uobject
 	 * @param InSetInternalFlags Internal object flags to be set on the object once it's been added to the array
+	 * @param InInternalIndex already allocated internal index to use, negative value means allocate a new index
+	 * @param InSerialNumber already allocated serial number to re-use
 	 */
-	void AddObject(FName Name, EInternalObjectFlags InSetInternalFlags);
+	COREUOBJECT_API void AddObject(FName Name, EInternalObjectFlags InSetInternalFlags, int32 InInternalIndex = -1, int32 InSerialNumber = 0);
 
 public:
 	/**
 	 * Checks to see if the object appears to be valid
 	 * @return true if this appears to be a valid object
 	 */
-	bool IsValidLowLevel() const;
+	COREUOBJECT_API bool IsValidLowLevel() const;
 
 	/**
 	 * Faster version of IsValidLowLevel.
@@ -109,7 +137,7 @@ public:
 	 * @param bRecursive true if the Class pointer should be checked with IsValidLowLevelFast
 	 * @return true if this appears to be a valid object
 	 */
-	bool IsValidLowLevelFast(bool bRecursive = true) const;
+	COREUOBJECT_API bool IsValidLowLevelFast(bool bRecursive = true) const;
 
 	/** 
 	 * Returns the unique ID of the object...these are reused so it is only unique while the object is alive.
@@ -138,23 +166,32 @@ public:
 		return NamePrivate;
 	}
 
+	/** Overridable method to return a logical name for identification in stats. */
+	COREUOBJECT_API virtual FName GetFNameForStatID() const;
+
 	/** Removes the class prefix from the given string */
-	static FString RemoveClassPrefix(const TCHAR* ClassName);
+	static COREUOBJECT_API FString RemoveClassPrefix(const TCHAR* ClassName);
 
 	/** Returns the external UPackage associated with this object, if any */
-	UPackage* GetExternalPackage() const;
+	COREUOBJECT_API UPackage* GetExternalPackage() const;
 	
 	/** Associate an external package directly to this object. */
-	void SetExternalPackage(UPackage* InPackage);
+	COREUOBJECT_API void SetExternalPackage(UPackage* InPackage);
 
 	/** Returns the external UPackage for this object, if any, NOT THREAD SAFE, used by internal gc reference collecting. */
-	UPackage* GetExternalPackageInternal() const;
+	COREUOBJECT_API UPackage* GetExternalPackageInternal() const;
+
+	/**
+	 * Marks the object as Reachable if it's currently marked as MaybeUnreachable by incremental GC.
+	*/
+	COREUOBJECT_API void MarkAsReachable() const;
 
 protected:
 	/**
 	 * Set the object flags directly
 	 *
 	 **/
+	UE_DEPRECATED(5.3, "This function is not thread-safe. Use AtomicallySetFlags or AtomicallyClearFlags instead.")
 	FORCEINLINE void SetFlagsTo( EObjectFlags NewFlags )
 	{
 		checkfSlow((NewFlags & ~RF_AllFlags) == 0, TEXT("%s flagged as 0x%x but is trying to set flags to RF_AllFlags"), *GetFName().ToString(), (int)ObjectFlags);
@@ -169,45 +206,54 @@ public:
 	 **/
 	FORCEINLINE EObjectFlags GetFlags() const
 	{
-		checkfSlow((ObjectFlags & ~RF_AllFlags) == 0, TEXT("%s flagged as RF_AllFlags"), *GetFName().ToString());
-		return ObjectFlags;
+		EObjectFlags Flags = (EObjectFlags)GetFlagsInternal();
+		checkfSlow((Flags & ~RF_AllFlags) == 0, TEXT("%s flagged as RF_AllFlags"), *GetFName().ToString());
+		return Flags;
 	}
 
 	/**
 	 *	Atomically adds the specified flags.
-	 *	Do not use unless you know what you are doing.
-	 *	Designed to be used only by parallel GC and UObject loading thread.
 	 */
 	FORCENOINLINE void AtomicallySetFlags( EObjectFlags FlagsToAdd )
 	{
-		int32 OldFlags = 0;
-		int32 NewFlags = 0;
-		do 
+		int32 OldFlags = GetFlagsInternal();
+		int32 NewFlags = OldFlags | FlagsToAdd;
+
+		// Fast path without atomics if already set
+		if (NewFlags == OldFlags)
 		{
-			OldFlags = ObjectFlags;
-			NewFlags = OldFlags | FlagsToAdd;
+			return;
 		}
-		while( FPlatformAtomics::InterlockedCompareExchange( (int32*)&ObjectFlags, NewFlags, OldFlags) != OldFlags );
+
+		FPlatformAtomics::InterlockedOr((int32*)&ObjectFlags, FlagsToAdd);
 	}
 
 	/**
 	 *	Atomically clears the specified flags.
-	 *	Do not use unless you know what you are doing.
-	 *	Designed to be used only by parallel GC and UObject loading thread.
 	 */
 	FORCENOINLINE void AtomicallyClearFlags( EObjectFlags FlagsToClear )
 	{
-		int32 OldFlags = 0;
-		int32 NewFlags = 0;
-		do 
+		int32 OldFlags = GetFlagsInternal();
+		int32 NewFlags = OldFlags & ~FlagsToClear;
+
+		// Fast path without atomics if already cleared
+		if (NewFlags == OldFlags)
 		{
-			OldFlags = ObjectFlags;
-			NewFlags = OldFlags & ~FlagsToClear;
+			return;
 		}
-		while( FPlatformAtomics::InterlockedCompareExchange( (int32*)&ObjectFlags, NewFlags, OldFlags) != OldFlags );
+
+		FPlatformAtomics::InterlockedAnd((int32*)&ObjectFlags, ~FlagsToClear);
 	}
 
+	static void PrefetchClass(UObject* Object) { FPlatformMisc::Prefetch(Object, offsetof(UObjectBase, ClassPrivate)); }
+	static void PrefetchOuter(UObject* Object) { FPlatformMisc::Prefetch(Object, offsetof(UObjectBase, OuterPrivate)); }
+
 private:
+	FORCEINLINE int32 GetFlagsInternal() const
+	{
+		static_assert(sizeof(int32) == sizeof(ObjectFlags), "Flags must be 32-bit for atomics.");
+		return FPlatformAtomics::AtomicRead_Relaxed((int32*)&ObjectFlags);
+	}
 
 	/** Flags used to track and report various object states. This needs to be 8 byte aligned on 32-bit
 	    platforms to reduce memory waste */
@@ -217,24 +263,32 @@ private:
 	int32							InternalIndex;
 
 	/** Class the object belongs to. */
-	UClass*							ClassPrivate;
+	ObjectPtr_Private::TNonAccessTrackedObjectPtr<UClass>							ClassPrivate;
 
 	/** Name of this object */
 	FName							NamePrivate;
 
+#if UE_STORE_OBJECT_LIST_INTERNAL_INDEX
+	/** Internal index into an array that stores all objects.
+	 It's used for registering and unregistering of UObjects in a global hash map.
+	 This optimization uses array instead of a hash map for reduced memory usage
+	*/
+	int32							ObjectListInternalIndex;
+#endif
+
 	/** Object this object resides in. */
-	UObject*						OuterPrivate;
+	ObjectPtr_Private::TNonAccessTrackedObjectPtr<UObject>						OuterPrivate;
 	
 	friend class FBlueprintCompileReinstancer;
+	friend class FVerseObjectClassReplacer;
 	friend class FContextObjectManager;
+	friend void AddToClassMap(class FUObjectHashTables& ThreadHash, UObjectBase* Object);
+	friend void RemoveFromClassMap(class FUObjectHashTables& ThreadHash, UObjectBase* Object);
 
+#if WITH_EDITOR
 	/** This is used by the reinstancer to re-class and re-archetype the current instances of a class before recompiling */
-	void SetClass(UClass* NewClass);
-
-#if HACK_HEADER_GENERATOR
-	// Required by UHT makefiles for internal data serialization.
-	friend struct FObjectBaseArchiveProxy;
-#endif // HACK_HEADER_GENERATOR
+	COREUOBJECT_API void SetClass(UClass* NewClass);
+#endif
 };
 
 /**
@@ -250,136 +304,168 @@ COREUOBJECT_API bool UObjectInitialized();
  */
 COREUOBJECT_API void UObjectForceRegistration(UObjectBase* Object, bool bCheckForModuleRelease = true);
 
-/** 
- * Base class for deferred native class registration
+/**
+ * Structure that represents the registration information for a given class, structure, or enumeration
  */
-struct FFieldCompiledInInfo
+template <typename T, typename V>
+struct TRegistrationInfo
 {
-	FFieldCompiledInInfo(SIZE_T InClassSize, uint32 InCrc)
-		: Size(InClassSize)
-		, Crc(InCrc)
-		, OldClass(nullptr)
-		, bHasChanged(false)
-	{
-	}
+	using TType = T;
+	using TVersion = V;
 
-	/** Registers the native class (constructs a UClass object) */
-	virtual UClass* Register() const = 0;
-
-	/** Return the package the class belongs in */
-	virtual const TCHAR* ClassPackage() const = 0;
-
-	/** Size of the class */
-	SIZE_T Size;
-	/** CRC of the generated code for this class */
-	uint32 Crc;
-	/** Old UClass object */
-	UClass* OldClass;
-	/** True if this class has changed after hot-reload (or new class) */
-	bool bHasChanged;
+	TType* InnerSingleton = nullptr;
+	TType* OuterSingleton = nullptr;
+	TVersion ReloadVersionInfo;
 };
 
 /**
-* Adds a class to deferred registration queue.
-*/
-COREUOBJECT_API void UClassCompiledInDefer(FFieldCompiledInInfo* Class, const TCHAR* Name, SIZE_T ClassSize, uint32 Crc);
-
-/**
- * Specialized version of the deferred class registration structure.
+ * Helper class to perform registration of object information.  It blindly forwards a call to RegisterCompiledInInfo
  */
-template <typename TClass>
-struct TClassCompiledInDefer : public FFieldCompiledInInfo
+struct FRegisterCompiledInInfo
 {
-	TClassCompiledInDefer(const TCHAR* InName, SIZE_T InClassSize, uint32 InCrc)
-	: FFieldCompiledInInfo(InClassSize, InCrc)
+	template <typename ... Args>
+	FRegisterCompiledInInfo(Args&& ... args)
 	{
-		UClassCompiledInDefer(this, InName, InClassSize, InCrc);
-	}
-	virtual UClass* Register() const override
-	{
-        LLM_SCOPE(ELLMTag::UObject);
-		return TClass::StaticClass();
-	}
-	virtual const TCHAR* ClassPackage() const override
-	{
-		return TClass::StaticPackage();
+		RegisterCompiledInInfo(std::forward<Args>(args)...);
 	}
 };
 
 /**
- * Stashes the singleton function that builds a compiled in class. Later, this is executed.
+ * Reload version information for classes
  */
-COREUOBJECT_API void UObjectCompiledInDefer(class UClass *(*InRegister)(), class UClass *(*InStaticClass)(), const TCHAR* Name, const TCHAR* PackageName, bool bDynamic, const TCHAR* DynamicPathName, void (*InInitSearchableValues)(TMap<FName, FName>&));
-
-struct FCompiledInDefer
+struct FClassReloadVersionInfo
 {
-	FCompiledInDefer(class UClass *(*InRegister)(), class UClass *(*InStaticClass)(), const TCHAR* PackageName, const TCHAR* Name, bool bDynamic, const TCHAR* DynamicPackageName = nullptr, const TCHAR* DynamicPathName = nullptr, void (*InInitSearchableValues)(TMap<FName, FName>&) = nullptr)
-	{
-		if (bDynamic)
-		{
-			GetConvertedDynamicPackageNameToTypeName().Add(FName(DynamicPackageName), FName(Name));
-		}
-		UObjectCompiledInDefer(InRegister, InStaticClass, Name, PackageName, bDynamic, DynamicPathName, InInitSearchableValues);
-	}
+#if WITH_RELOAD
+	SIZE_T Size = 0;
+	uint32 Hash = 0;
+#endif
 };
 
 /**
- * Stashes the singleton function that builds a compiled in struct (StaticStruct). Later, this is executed.
+ * Registration information for classes
  */
-COREUOBJECT_API void UObjectCompiledInDeferStruct(class UScriptStruct *(*InRegister)(), const TCHAR* PackageName, const TCHAR* ObjectName, bool bDynamic, const TCHAR* DynamicPathName);
+using FClassRegistrationInfo = TRegistrationInfo<UClass, FClassReloadVersionInfo>;
 
-struct FCompiledInDeferStruct
+/**
+ * Composite class register compiled in info
+ */
+struct FClassRegisterCompiledInInfo
 {
-	FCompiledInDeferStruct(class UScriptStruct *(*InRegister)(), const TCHAR* PackageName, const TCHAR* Name, bool bDynamic, const TCHAR* DynamicPackageName, const TCHAR* DynamicPathName)
-	{
-		if (bDynamic)
-		{
-			GetConvertedDynamicPackageNameToTypeName().Add(FName(DynamicPackageName), FName(Name));
-		}
-		UObjectCompiledInDeferStruct(InRegister, PackageName, Name, bDynamic, DynamicPathName);
-	}
+	class UClass* (*OuterRegister)();
+	class UClass* (*InnerRegister)();
+	const TCHAR* Name;
+	FClassRegistrationInfo* Info;
+	FClassReloadVersionInfo VersionInfo;
 };
 
 /**
- * Either call the passed in singleton, or if this is hot reload, find the existing struct
+ * Adds a class registration and version information. The InInfo parameter must be static.
  */
-COREUOBJECT_API class UScriptStruct *GetStaticStruct(class UScriptStruct *(*InRegister)(), UObject* StructOuter, const TCHAR* StructName, SIZE_T Size, uint32 Crc);
+COREUOBJECT_API void RegisterCompiledInInfo(class UClass* (*InOuterRegister)(), class UClass* (*InInnerRegister)(), const TCHAR* InPackageName, const TCHAR* InName, FClassRegistrationInfo& InInfo, const FClassReloadVersionInfo& InVersionInfo);
 
 /**
- * Stashes the singleton function that builds a compiled in enum. Later, this is executed.
+ * Reload version information for structures
  */
-COREUOBJECT_API void UObjectCompiledInDeferEnum(class UEnum *(*InRegister)(), const TCHAR* PackageName, const TCHAR* ObjectName, bool bDynamic, const TCHAR* DynamicPathName);
-
-struct FCompiledInDeferEnum
+struct FStructReloadVersionInfo
 {
-	FCompiledInDeferEnum(class UEnum *(*InRegister)(), const TCHAR* PackageName, const TCHAR* Name, bool bDynamic, const TCHAR* DynamicPackageName, const TCHAR* DynamicPathName)
-	{
-		if (bDynamic)
-		{
-			GetConvertedDynamicPackageNameToTypeName().Add(FName(DynamicPackageName), FName(Name));
-		}
-		UObjectCompiledInDeferEnum(InRegister, PackageName, Name, bDynamic, DynamicPathName);
-	}
+#if WITH_RELOAD
+	SIZE_T Size = 0;
+	uint32 Hash = 0;
+#endif
 };
 
 /**
- * Either call the passed in singleton, or if this is hot reload, find the existing enum
+ * Registration information for structures
  */
-COREUOBJECT_API class UEnum *GetStaticEnum(class UEnum *(*InRegister)(), UObject* EnumOuter, const TCHAR* EnumName);
+using FStructRegistrationInfo = TRegistrationInfo<UScriptStruct, FStructReloadVersionInfo>;
 
-/** Called during HotReload to hook up an existing structure */
-COREUOBJECT_API class UScriptStruct* FindExistingStructIfHotReloadOrDynamic(UObject* Outer, const TCHAR* StructName, SIZE_T Size, uint32 Crc, bool bIsDynamic);
+/**
+ * Composite structures register compiled in info
+ */
+struct FStructRegisterCompiledInInfo
+{
+	class UScriptStruct* (*OuterRegister)();
+	void* (*CreateCppStructOps)();
+	const TCHAR* Name;
+	FStructRegistrationInfo* Info;
+	FStructReloadVersionInfo VersionInfo;
+};
 
-/** Called during HotReload to hook up an existing enum */
-COREUOBJECT_API class UEnum* FindExistingEnumIfHotReloadOrDynamic(UObject* Outer, const TCHAR* EnumName, SIZE_T Size, uint32 Crc, bool bIsDynamic);
+/**
+ * Adds a struct registration and version information. The InInfo parameter must be static.
+ */
+COREUOBJECT_API void RegisterCompiledInInfo(class UScriptStruct* (*InOuterRegister)(), const TCHAR* InPackageName, const TCHAR* InName, FStructRegistrationInfo& InInfo, const FStructReloadVersionInfo& InVersionInfo);
+
+/**
+ * Invoke the registration method wrapped in notifications.
+ */
+COREUOBJECT_API class UScriptStruct* GetStaticStruct(class UScriptStruct* (*InRegister)(), UObject* StructOuter, const TCHAR* StructName);
+
+/**
+ * Reload version information for enumerations
+ */
+struct FEnumReloadVersionInfo
+{
+#if WITH_RELOAD
+	uint32 Hash = 0;
+#endif
+};
+
+/**
+ * Registration information for enums
+ */
+using FEnumRegistrationInfo = TRegistrationInfo<UEnum, FEnumReloadVersionInfo>;
+
+/**
+ * Composite enumeration register compiled in info
+ */
+struct FEnumRegisterCompiledInInfo
+{
+	class UEnum* (*OuterRegister)();
+	const TCHAR* Name;
+	FEnumRegistrationInfo* Info;
+	FEnumReloadVersionInfo VersionInfo;
+};
+
+/**
+ * Adds a static enum registration and version information. The InInfo parameter must be static.
+ */
+COREUOBJECT_API void RegisterCompiledInInfo(class UEnum* (*InOuterRegister)(), const TCHAR* InPackageName, const TCHAR* InName, FEnumRegistrationInfo& InInfo, const FEnumReloadVersionInfo& InVersionInfo);
+
+/**
+ * Invoke the registration method wrapped in notifications.
+ */
+COREUOBJECT_API class UEnum* GetStaticEnum(class UEnum* (*InRegister)(), UObject* EnumOuter, const TCHAR* EnumName);
+
+/**
+ * Reload version information for packages 
+ */
+struct FPackageReloadVersionInfo
+{
+#if WITH_RELOAD
+	uint32 BodyHash = 0;
+	uint32 DeclarationsHash = 0;
+#endif
+};
+
+/**
+ * Registration information for packages
+ */
+using FPackageRegistrationInfo = TRegistrationInfo<UPackage, FPackageReloadVersionInfo>;
+
+/**
+ * Adds a static package registration and version information. The InInfo parameter must be static.
+ */
+COREUOBJECT_API void RegisterCompiledInInfo(UPackage* (*InOuterRegister)(), const TCHAR* InPackageName, FPackageRegistrationInfo& InInfo, const FPackageReloadVersionInfo& InVersionInfo);
+
+
+/**
+ * Register compiled in information for multiple classes, structures, and enumerations
+ */
+COREUOBJECT_API void RegisterCompiledInInfo(const TCHAR* PackageName, const FClassRegisterCompiledInInfo* ClassInfo, size_t NumClassInfo, const FStructRegisterCompiledInInfo* StructInfo, size_t NumStructInfo, const FEnumRegisterCompiledInInfo* EnumInfo, size_t NumEnumInfo);
 
 /** Must be called after a module has been loaded that contains UObject classes */
 COREUOBJECT_API void ProcessNewlyLoadedUObjects(FName Package = NAME_None, bool bCanProcessNewlyLoadedObjects = true);
-
-#if WITH_HOT_RELOAD
-/** Map of duplicated CDOs for reinstancing during hot-reload purposes. */
-COREUOBJECT_API TMap<UObject*, UObject*>& GetDuplicatedCDOMap();
-#endif // WITH_HOT_RELOAD
 
 /**
  * Final phase of UObject initialization. all auto register objects are added to the main data structures.
@@ -391,3 +477,6 @@ void UObjectBaseInit();
  */
 void UObjectBaseShutdown();
 
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
+#endif

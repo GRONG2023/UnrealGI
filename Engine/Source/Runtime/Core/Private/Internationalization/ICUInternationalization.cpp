@@ -5,12 +5,15 @@
 #include "Misc/ScopeLock.h"
 #include "Misc/Paths.h"
 #include "Internationalization/Culture.h"
+#include "Internationalization/CultureFilter.h"
 #include "Internationalization/Internationalization.h"
 #include "Internationalization/Cultures/LeetCulture.h"
+#include "Internationalization/Cultures/KeysCulture.h"
 #include "Stats/Stats.h"
 #include "Misc/CoreStats.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/App.h"
+#include "Algo/Transform.h"
 
 #if UE_ENABLE_ICU
 
@@ -51,7 +54,7 @@ namespace
 
 		static void* U_CALLCONV Malloc(const void* context, size_t size)
 		{
-			LLM_SCOPE(ELLMTag::Localization);
+			LLM_SCOPE_BYNAME(TEXT("Localization/ICU"));
 			void* Result = FMemory::Malloc(size);
 #if STATS
 			BytesInUseCount += FMemory::GetAllocSize(Result);
@@ -72,7 +75,7 @@ namespace
 
 		static void* U_CALLCONV Realloc(const void* context, void* mem, size_t size)
 		{
-			LLM_SCOPE(ELLMTag::Localization);
+			LLM_SCOPE_BYNAME(TEXT("Localization/ICU"));
 			return FMemory::Realloc(mem, size);
 		}
 
@@ -183,6 +186,7 @@ bool FICUInternationalization::Initialize()
 
 #if ENABLE_LOC_TESTING
 	I18N->AddCustomCulture(MakeShared<FLeetCulture>(I18N->InvariantCulture.ToSharedRef()));
+	I18N->AddCustomCulture(MakeShared<FKeysCulture>(I18N->InvariantCulture.ToSharedRef()));
 #endif
 
 	InitializeTimeZone();
@@ -201,6 +205,7 @@ void FICUInternationalization::Terminate()
 
 	u_cleanup();
 
+	FScopeLock Lock(&PathToCachedFileDataMapCS);
 	for (auto& PathToCachedFileDataPair : PathToCachedFileDataMap)
 	{
 		UE_LOG(LogICUInternationalization, Warning, TEXT("ICU data file '%s' (ref count %d) was still referenced after ICU shutdown. This will likely lead to a crash."), *PathToCachedFileDataPair.Key, PathToCachedFileDataPair.Value.ReferenceCount);
@@ -457,75 +462,11 @@ void FICUInternationalization::ConditionalInitializeAllowedCultures()
 
 	bHasInitializedAllowedCultures = true;
 
-	// Get our current build config string so we can compare it against the config entries
-	FString BuildConfigString;
-	{
-		EBuildConfiguration BuildConfig = FApp::GetBuildConfiguration();
-		if (BuildConfig == EBuildConfiguration::DebugGame)
-		{
-			// Treat DebugGame and Debug as the same for loc purposes
-			BuildConfig = EBuildConfiguration::Debug;
-		}
+	TSet<FString> AvailableCulturesSet;
+	AvailableCulturesSet.Reserve(AllAvailableCulturesMap.Num());
+	Algo::Transform(AllAvailableCulturesMap, AvailableCulturesSet, &TTuple<FString, int32>::Key);
 
-		if (BuildConfig != EBuildConfiguration::Unknown)
-		{
-			BuildConfigString = LexToString(BuildConfig);
-		}
-	}
-
-	// An array of potentially semicolon separated mapping entries: Culture[;BuildConfig[,BuildConfig,BuildConfig]]
-	// No build config(s) implies all build configs
-	auto ProcessCulturesArray = [this, &BuildConfigString](const TArray<FString>& InCulturesArray, TSet<FString>& OutCulturesSet)
-	{
-		OutCulturesSet.Reserve(InCulturesArray.Num());
-		for (const FString& CultureStr : InCulturesArray)
-		{
-			FString CultureName;
-			FString CultureBuildConfigsStr;
-			if (CultureStr.Split(TEXT(";"), &CultureName, &CultureBuildConfigsStr, ESearchCase::CaseSensitive))
-			{
-				// Check to see if any of the build configs matches our current build config
-				TArray<FString> CultureBuildConfigs;
-				if (CultureBuildConfigsStr.ParseIntoArray(CultureBuildConfigs, TEXT(",")))
-				{
-					bool bIsValidBuildConfig = false;
-					for (const FString& CultureBuildConfig : CultureBuildConfigs)
-					{
-						if (BuildConfigString == CultureBuildConfig)
-						{
-							bIsValidBuildConfig = true;
-							break;
-						}
-					}
-
-					if (!bIsValidBuildConfig)
-					{
-						continue;
-					}
-				}
-			}
-			else
-			{
-				CultureName = CultureStr;
-			}
-
-			if (AllAvailableCulturesMap.Contains(CultureName))
-			{
-				OutCulturesSet.Add(MoveTemp(CultureName));
-			}
-			else
-			{
-				UE_LOG(LogICUInternationalization, Warning, TEXT("Culture '%s' is unknown and has been ignored when parsing the enabled/disabled culture list."), *CultureName);
-			}
-		}
-		OutCulturesSet.Compact();
-	};
-
-	const TArray<FString> EnabledCulturesArray = LoadInternationalizationConfigArray(TEXT("EnabledCultures"));
-	ProcessCulturesArray(EnabledCulturesArray, EnabledCultures);
-
-	const TArray<FString> DisabledCulturesArray = LoadInternationalizationConfigArray(TEXT("DisabledCultures"));
-	ProcessCulturesArray(DisabledCulturesArray, DisabledCultures);
+	AllowedCulturesFilter = MakePimpl<FCultureFilter>(&AvailableCulturesSet);
 }
 
 bool FICUInternationalization::IsCultureRemapped(const FString& Name, FString* OutMappedCulture)
@@ -548,7 +489,7 @@ bool FICUInternationalization::IsCultureAllowed(const FString& Name)
 	// Make sure we've loaded the allowed cultures lists (the config system may not have been available when we were first initialized)
 	ConditionalInitializeAllowedCultures();
 
-	return (EnabledCultures.Num() == 0 || EnabledCultures.Contains(Name)) && !DisabledCultures.Contains(Name);
+	return AllowedCulturesFilter->IsCultureAllowed(Name);
 }
 
 void FICUInternationalization::RefreshCultureDisplayNames(const TArray<FString>& InPrioritizedDisplayCultureNames)
@@ -568,8 +509,7 @@ void FICUInternationalization::RefreshCachedConfigData()
 	ConditionalInitializeCultureMappings();
 
 	bHasInitializedAllowedCultures = false;
-	EnabledCultures.Reset();
-	DisabledCultures.Reset();
+	AllowedCulturesFilter.Reset();
 	ConditionalInitializeAllowedCultures();
 }
 
@@ -628,7 +568,7 @@ TArray<FString> FICUInternationalization::GetPrioritizedCultureNames(const FStri
 	};
 
 	// Apply any culture remapping
-	FString GivenCulture = FCulture::GetCanonicalName(Name);
+	FString GivenCulture = FCultureImplementation::GetCanonicalName(Name, *I18N);
 	IsCultureRemapped(Name, &GivenCulture);
 
 	TArray<FString> PrioritizedCultureNames;
@@ -713,7 +653,7 @@ FCulturePtr FICUInternationalization::GetCulture(const FString& Name)
 
 FCulturePtr FICUInternationalization::FindOrMakeCulture(const FString& Name, const EAllowDefaultCultureFallback AllowDefaultFallback)
 {
-	return FindOrMakeCanonizedCulture(FCulture::GetCanonicalName(Name), AllowDefaultFallback);
+	return FindOrMakeCanonizedCulture(FCultureImplementation::GetCanonicalName(Name, *I18N), AllowDefaultFallback);
 }
 
 FCulturePtr FICUInternationalization::FindOrMakeCanonizedCulture(const FString& Name, const EAllowDefaultCultureFallback AllowDefaultFallback)
@@ -828,7 +768,7 @@ UDate FICUInternationalization::UEDateTimeToICUDate(const FDateTime& DateTime)
 
 UBool FICUInternationalization::OpenDataFile(const void* InContext, void** OutFileContext, void** OutContents, const char* InPath)
 {
-	LLM_SCOPE(ELLMTag::Localization);
+	LLM_SCOPE_BYNAME(TEXT("Localization/ICU"));
 
 	FICUInternationalization* This = (FICUInternationalization*)InContext;
 	check(This);
@@ -836,44 +776,47 @@ UBool FICUInternationalization::OpenDataFile(const void* InContext, void** OutFi
 	FString PathStr = StringCast<TCHAR>(InPath).Get();
 	FPaths::NormalizeFilename(PathStr);
 
-	FICUCachedFileData* CachedFileData = nullptr;
-
 	// Skip requests for anything outside the ICU data directory
 	const bool bIsWithinDataDirectory = PathStr.StartsWith(This->ICUDataDirectory);
-	if (bIsWithinDataDirectory)
+	if (!bIsWithinDataDirectory)
 	{
-		CachedFileData = This->PathToCachedFileDataMap.Find(PathStr);
+		*OutFileContext = nullptr;
+		*OutContents = nullptr;
+		return false;
+	}
 
-		// If there's no file context, we might have to load the file.
-		if (!CachedFileData)
-		{
+	FScopeLock Lock(&This->PathToCachedFileDataMapCS);
+	FICUCachedFileData* CachedFileData = This->PathToCachedFileDataMap.Find(PathStr);
+
+	// If there's no file context, we might have to load the file.
+	if (!CachedFileData)
+	{
 #if !UE_BUILD_SHIPPING
-			FScopedLoadingState ScopedLoadingState(*PathStr);
+		FScopedLoadingState ScopedLoadingState(*PathStr);
 #endif
 
-			// Attempt to load the file.
-			FArchive* FileAr = IFileManager::Get().CreateFileReader(*PathStr);
-			if (FileAr)
-			{
-				const int64 FileSize = FileAr->TotalSize();
+		// Attempt to load the file.
+		FArchive* FileAr = IFileManager::Get().CreateFileReader(*PathStr);
+		if (FileAr)
+		{
+			const int64 FileSize = FileAr->TotalSize();
 
-				// Create file data.
-				CachedFileData = &This->PathToCachedFileDataMap.Emplace(PathStr, FICUCachedFileData(FileSize));
+			// Create file data.
+			CachedFileData = &This->PathToCachedFileDataMap.Emplace(PathStr, FICUCachedFileData(FileSize));
 
-				// Load file into buffer.
-				FileAr->Serialize(CachedFileData->Buffer, FileSize);
-				delete FileAr;
+			// Load file into buffer.
+			FileAr->Serialize(CachedFileData->Buffer, FileSize);
+			delete FileAr;
 
-				// Stat tracking.
+			// Stat tracking.
 #if STATS
-				DataFileBytesInUseCount += FMemory::GetAllocSize(CachedFileData->Buffer);
-				if (FThreadStats::IsThreadingReady() && CachedDataFileBytesInUseCount != DataFileBytesInUseCount)
-				{
-					SET_MEMORY_STAT(STAT_MemoryICUDataFileAllocationSize, DataFileBytesInUseCount);
-					CachedDataFileBytesInUseCount = DataFileBytesInUseCount;
-				}
-#endif
+			DataFileBytesInUseCount += FMemory::GetAllocSize(CachedFileData->Buffer);
+			if (FThreadStats::IsThreadingReady() && CachedDataFileBytesInUseCount != DataFileBytesInUseCount)
+			{
+				SET_MEMORY_STAT(STAT_MemoryICUDataFileAllocationSize, DataFileBytesInUseCount);
+				CachedDataFileBytesInUseCount = DataFileBytesInUseCount;
 			}
+#endif
 		}
 	}
 
@@ -912,6 +855,7 @@ void FICUInternationalization::CloseDataFile(const void* InContext, void* const 
 	check(Path);
 
 	// Look up the cached file data so we can maintain references.
+	FScopeLock Lock(&This->PathToCachedFileDataMapCS);
 	FICUCachedFileData* const CachedFileData = This->PathToCachedFileDataMap.Find(*Path);
 	check(CachedFileData);
 	check(CachedFileData->Buffer == InContents);

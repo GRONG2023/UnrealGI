@@ -9,6 +9,9 @@ StaticMeshUpdate.h: Helpers to stream in and out static mesh LODs.
 #include "CoreMinimal.h"
 #include "Engine/StaticMesh.h"
 #include "Async/AsyncFileHandle.h"
+#include "IO/IoDispatcher.h"
+#include "RenderAssetUpdate.h"
+#include "RayTracingGeometry.h"
 
 /**
 * A context used to update or proceed with the next update step.
@@ -73,16 +76,15 @@ protected:
 	/** Correspond to the buffers in FStaticMeshLODResources */
 	struct FIntermediateBuffers
 	{
-		FVertexBufferRHIRef TangentsVertexBuffer;
-		FVertexBufferRHIRef TexCoordVertexBuffer;
-		FVertexBufferRHIRef PositionVertexBuffer;
-		FVertexBufferRHIRef ColorVertexBuffer;
-		FIndexBufferRHIRef IndexBuffer;
-		FIndexBufferRHIRef ReversedIndexBuffer;
-		FIndexBufferRHIRef DepthOnlyIndexBuffer;
-		FIndexBufferRHIRef ReversedDepthOnlyIndexBuffer;
-		FIndexBufferRHIRef WireframeIndexBuffer;
-		FIndexBufferRHIRef AdjacencyIndexBuffer;
+		FBufferRHIRef TangentsVertexBuffer;
+		FBufferRHIRef TexCoordVertexBuffer;
+		FBufferRHIRef PositionVertexBuffer;
+		FBufferRHIRef ColorVertexBuffer;
+		FBufferRHIRef IndexBuffer;
+		FBufferRHIRef ReversedIndexBuffer;
+		FBufferRHIRef DepthOnlyIndexBuffer;
+		FBufferRHIRef ReversedDepthOnlyIndexBuffer;
+		FBufferRHIRef WireframeIndexBuffer;
 
 		void CreateFromCPUData_RenderThread(FStaticMeshLODResources& LODResource);
 		void CreateFromCPUData_Async(FStaticMeshLODResources& LODResource);
@@ -90,11 +92,27 @@ protected:
 		void SafeRelease();
 
 		/** Transfer ownership of buffers to a LOD resource */
-		template <uint32 MaxNumUpdates>
-		void TransferBuffers(FStaticMeshLODResources& LODResource, TRHIResourceUpdateBatcher<MaxNumUpdates>& Batcher);
+		void TransferBuffers(FStaticMeshLODResources& LODResource, FRHIResourceUpdateBatcher& Batcher);
 
 		void CheckIsNull() const;
 	};
+
+#if RHI_RAYTRACING
+	struct FIntermediateRayTracingGeometry
+	{
+	private:
+		FRayTracingGeometryInitializer Initializer;
+		FRayTracingGeometryRHIRef RayTracingGeometryRHI;
+		bool bRequiresBuild = false;
+
+	public:
+		void CreateFromCPUData(FRHICommandList& RHICmdList, FRayTracingGeometry& RayTracingGeometry);
+
+		void SafeRelease();
+
+		void TransferRayTracingGeometry(FRayTracingGeometry& RayTracingGeometry, FRHIResourceUpdateBatcher& Batcher);
+	};
+#endif
 
 	/** Create buffers with new LOD data on render or pooled thread */
 	void CreateBuffers_RenderThread(const FContext& Context);
@@ -111,6 +129,10 @@ protected:
 
 	/** The intermediate buffers created in the update process. */
 	FIntermediateBuffers IntermediateBuffersArray[MAX_MESH_LOD_COUNT];
+	
+#if RHI_RAYTRACING
+	FIntermediateRayTracingGeometry IntermediateRayTracingGeometry[MAX_MESH_LOD_COUNT];
+#endif
 
 private:
 	template <bool bRenderThread>
@@ -166,9 +188,6 @@ protected:
 	typedef FAutoDeleteAsyncTask<FCancelIORequestsTask> FAsyncCancelIORequestsTask;
 	friend class FCancelIORequestsTask;
 
-		/** Set a callback called when IORequest is completed or cancelled */
-	void SetAsyncFileCallback(const FContext& Context);
-
 	/** Create a new async IO request to read in LOD data */
 	void SetIORequest(const FContext& Context);
 
@@ -187,8 +206,12 @@ protected:
 	/** Called by FAsyncCancelIORequestsTask to cancel inflight IO request if any */
 	void CancelIORequest();
 
-	class IBulkDataIORequest* IORequest;
-	FBulkDataIORequestCallBack AsyncFileCallback;
+	/** Handle to bulk data request */;
+	FBulkDataBatchRequest BulkDataRequest;
+
+	/** Bulk data I/O buffer */
+	FIoBuffer BulkData;
+
 	bool bHighPrioIORequest;
 
 	// Whether an IO error was detected (when files do not exists).

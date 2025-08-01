@@ -4,8 +4,8 @@
 
 #include "Analysis/StreamReader.h"
 
-namespace Trace
-{
+namespace UE {
+namespace Trace {
 
 ////////////////////////////////////////////////////////////////////////////////
 class FTransport
@@ -18,9 +18,13 @@ public:
 	template <typename RetType>
 	RetType const*			GetPointer(uint32 BlockSize);
 	virtual void			Advance(uint32 BlockSize);
+	virtual bool			IsEmpty() const { return true; }
+	virtual void			DebugBegin() {}
+	virtual void			DebugEnd() {}
 
 protected:
 	virtual const uint8*	GetPointerImpl(uint32 BlockSize);
+
 	FStreamReader*			Reader;
 };
 
@@ -57,3 +61,4 @@ inline const uint8* FTransport::GetPointerImpl(uint32 BlockSize)
 }
 
 } // namespace Trace
+} // namespace UE

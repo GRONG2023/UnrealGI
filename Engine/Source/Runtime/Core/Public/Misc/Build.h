@@ -2,7 +2,6 @@
 
 #pragma once
 
-
 /*--------------------------------------------------------------------------------
 	Build configuration coming from UBT, do not modify
 --------------------------------------------------------------------------------*/
@@ -45,7 +44,6 @@
 	#error Exactly one of [UE_BUILD_DEBUG UE_BUILD_DEVELOPMENT UE_BUILD_TEST UE_BUILD_SHIPPING] should be defined to be 1
 #endif
 
-
 /*--------------------------------------------------------------------------------
 	Legacy defined we want to make sure don't compile if they came in a merge.
 --------------------------------------------------------------------------------*/
@@ -83,6 +81,13 @@
 	#error UBT should always define WITH_UNREAL_DEVELOPER_TOOLS to be 0 or 1
 #endif
 
+ /**
+  *	Whether we are compiling with developer tools that may use other platforms or external connected devices, etc
+  */
+#ifndef WITH_UNREAL_TARGET_DEVELOPER_TOOLS
+	#define WITH_UNREAL_TARGET_DEVELOPER_TOOLS		WITH_UNREAL_DEVELOPER_TOOLS // a subset of WITH_UNREAL_DEVELOPER_TOOLS, but can be disabled separately
+#endif
+
 /**
  *	Whether we are compiling with plugin support; must be defined by UBT
  */
@@ -103,6 +108,9 @@
 	#define WITH_PERFCOUNTERS		0
 #endif
 
+/** Enable perf counters on dedicated servers */
+#define USE_SERVER_PERF_COUNTERS ((UE_SERVER || UE_EDITOR) && WITH_PERFCOUNTERS)
+
 /** 
  * Whether we are compiling a PGO instrumented build.
  */
@@ -110,18 +118,10 @@
 	#define ENABLE_PGO_PROFILE 0
 #endif
 
-/**
- * Unreal Header Tool requires extra data stored in the structure of a few core files. This enables some ifdef hacks to make this work. 
- * Set via UBT, do not modify directly
- */
-#ifndef HACK_HEADER_GENERATOR
-	#define HACK_HEADER_GENERATOR 0
-#endif
-
 /** Whether we are compiling with automation worker functionality.  Note that automation worker defaults to enabled in
     UE_BUILD_TEST configuration, so that it can be used for performance testing on devices */
 #ifndef WITH_AUTOMATION_WORKER
-	#define WITH_AUTOMATION_WORKER !(UE_BUILD_SHIPPING || HACK_HEADER_GENERATOR)
+	#define WITH_AUTOMATION_WORKER !UE_BUILD_SHIPPING
 #endif
 
 /**
@@ -146,6 +146,18 @@
 #ifndef WITH_HOT_RELOAD
 	#define WITH_HOT_RELOAD (!IS_MONOLITHIC && !UE_BUILD_SHIPPING && !UE_BUILD_TEST && !UE_GAME && !UE_SERVER)
 #endif
+
+/**
+* Make sure that live coding define is available.  Normally this is supplied by UBT
+*/
+#ifndef WITH_LIVE_CODING
+	#define WITH_LIVE_CODING 0
+#endif
+
+/**
+* Whether we support any type of live reloading
+*/
+#define WITH_RELOAD (WITH_HOT_RELOAD || WITH_LIVE_CODING)
 
 /**
 * Whether we include support for text archive formats. Disabling support allows de-virtualizing archive calls
@@ -198,6 +210,11 @@
 	#define FORCE_USE_STATS 0
 #endif
 
+/** Set to true to force an ansi allocator instead of redirecting to FMemory. */
+#ifndef FORCE_ANSI_ALLOCATOR
+	#define FORCE_ANSI_ALLOCATOR 0
+#endif
+
 /**
  *	Optionally enable support for named events from the stat macros without the stat system overhead
  *	This will attempt to disable regular stats system and use named events instead
@@ -233,7 +250,7 @@
 		#define DO_ENSURE										1
 	#endif
 	#ifndef STATS
-		#define STATS											((WITH_UNREAL_DEVELOPER_TOOLS || !WITH_EDITORONLY_DATA || USE_STATS_WITHOUT_ENGINE || USE_MALLOC_PROFILER || FORCE_USE_STATS) && !ENABLE_STATNAMEDEVENTS)
+		#define STATS											((WITH_UNREAL_DEVELOPER_TOOLS || !WITH_EDITORONLY_DATA || USE_STATS_WITHOUT_ENGINE || FORCE_USE_STATS) && !ENABLE_STATNAMEDEVENTS)
 	#endif
 	#ifndef ALLOW_DEBUG_FILES
 		#define ALLOW_DEBUG_FILES								1
@@ -255,7 +272,7 @@
 		#define DO_ENSURE										1
 	#endif
 	#ifndef STATS
-		#define STATS											((WITH_UNREAL_DEVELOPER_TOOLS || !WITH_EDITORONLY_DATA || USE_STATS_WITHOUT_ENGINE || USE_MALLOC_PROFILER || FORCE_USE_STATS) && !ENABLE_STATNAMEDEVENTS)
+		#define STATS											((WITH_UNREAL_DEVELOPER_TOOLS || !WITH_EDITORONLY_DATA || USE_STATS_WITHOUT_ENGINE || FORCE_USE_STATS) && !ENABLE_STATNAMEDEVENTS)
 	#endif
 	#ifndef ALLOW_DEBUG_FILES
 		#define ALLOW_DEBUG_FILES								1
@@ -277,7 +294,7 @@
 		#define DO_ENSURE										USE_ENSURES_IN_SHIPPING
 	#endif
 	#ifndef STATS
-		#define STATS											((USE_MALLOC_PROFILER || FORCE_USE_STATS) && !ENABLE_STATNAMEDEVENTS)
+		#define STATS											(FORCE_USE_STATS && !ENABLE_STATNAMEDEVENTS)
 	#endif
 	#ifndef ALLOW_DEBUG_FILES
 		#define ALLOW_DEBUG_FILES								1
@@ -289,50 +306,26 @@
 		#define NO_LOGGING										!USE_LOGGING_IN_SHIPPING
 	#endif
 #elif UE_BUILD_SHIPPING
-	#if WITH_EDITOR
-		#ifndef DO_GUARD_SLOW
-			#define DO_GUARD_SLOW								0
-		#endif
-		#ifndef DO_CHECK
-			#define DO_CHECK									1
-		#endif
-		#ifndef DO_ENSURE
-			#define DO_ENSURE									1
-		#endif
-		#ifndef STATS
-			#define STATS										1
-		#endif
-		#ifndef ALLOW_DEBUG_FILES
-			#define ALLOW_DEBUG_FILES							1
-		#endif
-		#ifndef ALLOW_CONSOLE
-			#define ALLOW_CONSOLE								0
-		#endif
-		#ifndef NO_LOGGING
-			#define NO_LOGGING									0
-		#endif
-	#else
-		#ifndef DO_GUARD_SLOW
-			#define DO_GUARD_SLOW								0
-		#endif
-		#ifndef DO_CHECK
-			#define DO_CHECK									USE_CHECKS_IN_SHIPPING
-		#endif
-		#ifndef DO_ENSURE
-			#define DO_ENSURE									USE_ENSURES_IN_SHIPPING
-		#endif
-		#ifndef STATS
-			#define STATS										(FORCE_USE_STATS && !ENABLE_STATNAMEDEVENTS)
-		#endif
-		#ifndef ALLOW_DEBUG_FILES
-			#define ALLOW_DEBUG_FILES							0
-		#endif
-		#ifndef ALLOW_CONSOLE
-			#define ALLOW_CONSOLE								ALLOW_CONSOLE_IN_SHIPPING
-		#endif
-		#ifndef NO_LOGGING
-			#define NO_LOGGING									!USE_LOGGING_IN_SHIPPING
-		#endif
+	#ifndef DO_GUARD_SLOW
+		#define DO_GUARD_SLOW								0
+	#endif
+	#ifndef DO_CHECK
+		#define DO_CHECK									USE_CHECKS_IN_SHIPPING
+	#endif
+	#ifndef DO_ENSURE
+		#define DO_ENSURE									USE_ENSURES_IN_SHIPPING
+	#endif
+	#ifndef STATS
+		#define STATS										(FORCE_USE_STATS && !ENABLE_STATNAMEDEVENTS)
+	#endif
+	#ifndef ALLOW_DEBUG_FILES
+		#define ALLOW_DEBUG_FILES							WITH_EDITOR
+	#endif
+	#ifndef ALLOW_CONSOLE
+		#define ALLOW_CONSOLE								ALLOW_CONSOLE_IN_SHIPPING
+	#endif
+	#ifndef NO_LOGGING
+		#define NO_LOGGING									!USE_LOGGING_IN_SHIPPING
 	#endif
 #else
 	#error Exactly one of [UE_BUILD_DEBUG UE_BUILD_DEVELOPMENT UE_BUILD_TEST UE_BUILD_SHIPPING] should be defined to be 1
@@ -362,20 +355,25 @@
 #define USE_NETWORK_PROFILER !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 #endif
 
-/** Enable UberGraphPersistentFrame feature. It can speed up BP compilation (re-instancing) in editor, but introduce an unnecessary overhead in runtime. */
-#define USE_UBER_GRAPH_PERSISTENT_FRAME 1
-
 /** Enable validation of the Uber Graph's persistent frame's layout, this is useful to detect uber graph frame related corruption */
-#define VALIDATE_UBER_GRAPH_PERSISTENT_FRAME (!(UE_BUILD_SHIPPING || UE_BUILD_TEST)) && USE_UBER_GRAPH_PERSISTENT_FRAME
+#ifndef VALIDATE_USER_GRAPH_PERSISTENT_FRAME
+	#define VALIDATE_UBER_GRAPH_PERSISTENT_FRAME (!(UE_BUILD_SHIPPING || UE_BUILD_TEST))
+#endif
 
 /** Enable fast calls for event thunks into an event graph that have no parameters  */
-#define UE_BLUEPRINT_EVENTGRAPH_FASTCALLS 1
+#ifndef UE_BLUEPRINT_EVENTGRAPH_FASTCALLS
+	#define UE_BLUEPRINT_EVENTGRAPH_FASTCALLS 1
+#endif
 
-/** Enable perf counters on dedicated servers */
-#define USE_SERVER_PERF_COUNTERS ((UE_SERVER || UE_EDITOR) && WITH_PERFCOUNTERS)
+/** Enables code required for handling recursive dependencies during blueprint serialization */
+#ifndef USE_CIRCULAR_DEPENDENCY_LOAD_DEFERRING
+	#define USE_CIRCULAR_DEPENDENCY_LOAD_DEFERRING 1
+#endif
 
-#define USE_CIRCULAR_DEPENDENCY_LOAD_DEFERRING 1
-#define USE_DEFERRED_DEPENDENCY_CHECK_VERIFICATION_TESTS (USE_CIRCULAR_DEPENDENCY_LOAD_DEFERRING && 0)
+/** Enable validation of deferred dependencies loaded during blueprint serialization */
+#ifndef USE_DEFERRED_DEPENDENCY_CHECK_VERIFICATION_TESTS
+	#define USE_DEFERRED_DEPENDENCY_CHECK_VERIFICATION_TESTS (USE_CIRCULAR_DEPENDENCY_LOAD_DEFERRING && 0)
+#endif
 
 // 0 (default), set this to 1 to get draw events with "TOGGLEDRAWEVENTS" "r.ShowMaterialDrawEvents" and the "ProfileGPU" command working in test
 #ifndef ALLOW_PROFILEGPU_IN_TEST
@@ -388,6 +386,28 @@
 
 // draw events with "TOGGLEDRAWEVENTS" "r.ShowMaterialDrawEvents" (for ProfileGPU, Pix, Razor, RenderDoc, ...) and the "ProfileGPU" command are normally compiled out for TEST and SHIPPING
 #define WITH_PROFILEGPU (!(UE_BUILD_SHIPPING || UE_BUILD_TEST) || (UE_BUILD_TEST && ALLOW_PROFILEGPU_IN_TEST) || (UE_BUILD_SHIPPING && ALLOW_PROFILEGPU_IN_SHIPPING))
+
+#ifndef ALLOW_DUMPGPU_IN_TEST
+	#define ALLOW_DUMPGPU_IN_TEST 1
+#endif
+
+#ifndef ALLOW_DUMPGPU_IN_SHIPPING
+	#define ALLOW_DUMPGPU_IN_SHIPPING 0
+#endif
+
+// DumpGPU command
+#define WITH_DUMPGPU (!(UE_BUILD_SHIPPING || UE_BUILD_TEST) || (UE_BUILD_TEST && ALLOW_DUMPGPU_IN_TEST) || (UE_BUILD_SHIPPING && ALLOW_DUMPGPU_IN_SHIPPING))
+
+#ifndef ALLOW_GPUDEBUGCRASH_IN_TEST
+#define ALLOW_GPUDEBUGCRASH_IN_TEST 1
+#endif
+
+#ifndef ALLOW_GPUDEBUGCRASH_IN_SHIPPING
+#define ALLOW_GPUDEBUGCRASH_IN_SHIPPING 0
+#endif
+
+// GPUDebugCrash
+#define WITH_GPUDEBUGCRASH (!(UE_BUILD_SHIPPING || UE_BUILD_TEST) || (UE_BUILD_TEST && ALLOW_GPUDEBUGCRASH_IN_TEST) || (UE_BUILD_SHIPPING && ALLOW_GPUDEBUGCRASH_IN_SHIPPING))
 
 #ifndef ALLOW_CHEAT_CVARS_IN_TEST
 	#define ALLOW_CHEAT_CVARS_IN_TEST 1
@@ -437,7 +457,59 @@
 #ifndef GET_DEVICE_ID_UNAVAILABLE
 	#define GET_DEVICE_ID_UNAVAILABLE 0
 #endif
-// Controls whether to enable loading cooked packages from I/O store in editor builds
+
+// Controls whether the executable is compiled with cooked editor functionality
+#ifndef UE_IS_COOKED_EDITOR
+#define UE_IS_COOKED_EDITOR 0
+#endif
+// Controls whether to enable loading cooked packages from I/O store in editor builds. Defaults to UE_IS_COOKED_EDITOR
+// but can be defined separately if needed
 #ifndef WITH_IOSTORE_IN_EDITOR
-#define WITH_IOSTORE_IN_EDITOR 0
+#define WITH_IOSTORE_IN_EDITOR UE_IS_COOKED_EDITOR
+#endif
+
+// Controls if iostore will be forced on
+#ifndef UE_FORCE_USE_IOSTORE
+#define UE_FORCE_USE_IOSTORE 0
+#endif
+
+// Controls if paks will be forced on unless -NoPaks argument is passed
+#ifndef UE_FORCE_USE_PAKS
+#define UE_FORCE_USE_PAKS 0
+#endif
+
+
+// Controls whether Iris networking code is compiled in or not; should normally be defined by UBT
+#ifndef UE_WITH_IRIS
+	#define UE_WITH_IRIS 0
+#endif
+
+// Controls whether or not to make a global object to load COnfig.bin as soon as possible
+#ifndef PRELOAD_BINARY_CONFIG
+	#define PRELOAD_BINARY_CONFIG 1
+#endif
+
+#ifndef WITH_COTF
+	#define WITH_COTF ((WITH_ENGINE) && !(IS_PROGRAM || UE_BUILD_SHIPPING))
+#endif
+
+// Controls if the config system can stores configs for other platforms than the running one
+#define ALLOW_OTHER_PLATFORM_CONFIG		WITH_UNREAL_DEVELOPER_TOOLS
+
+// Controls whether or not process will control OS scheduler priority
+#ifndef WITH_PROCESS_PRIORITY_CONTROL
+	#define WITH_PROCESS_PRIORITY_CONTROL 0
+#endif
+
+// Controls whether or not MemoryProfiler is enabled in STATS system.
+// This functionality is deprecated in UE 5.3.
+// For memory profiling, use instead Trace/MemoryInsights and/or LLM.
+#ifndef UE_STATS_MEMORY_PROFILER_ENABLED
+	#define UE_STATS_MEMORY_PROFILER_ENABLED 0
+#endif
+
+// Controls whether old Profiler (UnrealFrontend/SessionFrontend/Profiler) is enabled or not.
+// Old Profiler is deprecated since UE 5.0. Use Trace/UnrealInsights instead.
+#ifndef UE_DEPRECATED_PROFILER_ENABLED
+	#define UE_DEPRECATED_PROFILER_ENABLED 0
 #endif

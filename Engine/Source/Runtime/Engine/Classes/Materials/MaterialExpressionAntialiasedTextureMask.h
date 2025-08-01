@@ -11,7 +11,7 @@
 class UTexture;
 
 UENUM()
-enum ETextureColorChannel
+enum ETextureColorChannel : int
 {
 	TCC_Red,
 	TCC_Green,
@@ -40,6 +40,7 @@ class UMaterialExpressionAntialiasedTextureMask : public UMaterialExpressionText
 	//~ Begin UMaterialExpression Interface
 	virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
 	virtual void GetCaption(TArray<FString>& OutCaptions) const override;
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
 	//~ End UMaterialExpression Interface
 #endif // WITH_EDITOR
 };

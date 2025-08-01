@@ -116,7 +116,7 @@ static void DumpAccessibilityStatsForwarder()
 	Queue.Push(RootId);
 	while(Queue.Num() > 0)
 	{
-		AccessibleWidgetId CurrentId = Queue.Pop(false);
+		AccessibleWidgetId CurrentId = Queue.Pop(EAllowShrinking::No);
 		FMacAccessibilityElement* CurrentElement = [Cache objectForKey:@(RootId)];
 		if(CurrentElement.ChildIds.Num() == 0)
 		{
@@ -151,7 +151,7 @@ static void DumpAccessibilityStatsForwarder()
 {
 	//This should only be called in ~FMacApplication() in a Main Thread Call
 	check([NSThread isMainThread]);
-	checkf([self IsAccessibilityCacheEmpty], TEXT("Accessibility Manager is being torn down and still has %yu elements!"), [self GetAccessibilityCacheSize]);
+	checkf([self IsAccessibilityCacheEmpty], TEXT("Accessibility Manager is being torn down and still has %u elements!"), [self GetAccessibilityCacheSize]);
 	[Cache release];
 	Cache = Nil;
 	//unregister KVO for Voiceover changes
@@ -227,7 +227,7 @@ static void DumpAccessibilityStatsForwarder()
 				}, NSDefaultRunLoopMode, true);
 			} // if Widget valid
 		} // for Ids loop
-	}, @[ NSDefaultRunLoopMode, UE4IMEEventMode, UE4ShowEventMode, UE4ResizeEventMode, UE4FullscreenEventMode, UE4NilEventMode ], true);
+	}, @[ NSDefaultRunLoopMode, UnrealIMEEventMode, UnrealShowEventMode, UnrealResizeEventMode, UnrealFullscreenEventMode, UnrealNilEventMode ], true);
 }
 
 #if !UE_BUILD_SHIPPING

@@ -3,11 +3,21 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-
 #include "AssetRegistry/IAssetRegistry.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "CoreTypes.h"
 #include "Misc/AssetRegistryInterface.h"
+#include "Modules/ModuleInterface.h"
 #include "Modules/ModuleManager.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
+#endif
+
+class UPackage;
 
 namespace AssetRegistryConstants
 {
@@ -28,6 +38,18 @@ public:
 	virtual IAssetRegistry& Get() const
 	{
 		return IAssetRegistry::GetChecked();
+	}
+
+	/** Reports whether Get is valid to call. Will be true except during engine shutdown. */
+	bool IsValid() const
+	{
+		return IAssetRegistry::Get() != nullptr;
+	}
+
+	/** Returns AssetRegistry pointer if valid, or nullptr. Will be non-null except during engine shutdown. */
+	IAssetRegistry* TryGet() const
+	{
+		return IAssetRegistry::Get();
 	}
 
 	static IAssetRegistry& GetRegistry()
@@ -55,15 +77,22 @@ public:
 		IAssetRegistry::GetChecked().AssetRenamed(RenamedAsset, OldObjectPath);
 	}
 
+	UE_DEPRECATED(5.2, "Use the new AssetsSaved function that takes FAssetData.")
+	static void AssetSaved(const UObject& SavedAsset)
+	{
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+		IAssetRegistry::GetChecked().AssetSaved(SavedAsset);
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+	}
+
+	static void AssetsSaved(TArray<FAssetData>&& SavedAssets)
+	{
+		IAssetRegistry::GetChecked().AssetsSaved(MoveTemp(SavedAssets));
+	}
+
 	static void PackageDeleted(UPackage* DeletedPackage)
 	{
 		IAssetRegistry::GetChecked().PackageDeleted(DeletedPackage);
-	}
-
-	UE_DEPRECATED(4.26, "Use GetDependencies that takes a UE::AssetRegistry::EDependencyCategory instead")
-	void GetDependencies(FName InPackageName, TArray<FName>& OutDependencies, EAssetRegistryDependencyType::Type InDependencyType)
-	{
-		GetDependenciesDeprecated(InPackageName, OutDependencies, InDependencyType);
 	}
 
 	/** Access the dependent package names for a given source package */
@@ -72,13 +101,23 @@ public:
 		IAssetRegistry::GetChecked().GetDependencies(InPackageName, OutDependencies, Category, Flags);
 	}
 
-
-protected:
-	/* This function is a workaround for platforms that don't support disable of deprecation warnings on override functions*/
-	virtual void GetDependenciesDeprecated(FName InPackageName, TArray<FName>& OutDependencies, EAssetRegistryDependencyType::Type InDependencyType) override
+	virtual UE::AssetRegistry::EExists TryGetAssetByObjectPath(const FSoftObjectPath& ObjectPath, FAssetData& OutAssetData) const override
 	{
-		PRAGMA_DISABLE_DEPRECATION_WARNINGS
-		IAssetRegistry::GetChecked().GetDependencies(InPackageName, OutDependencies, InDependencyType);
-		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+		IAssetRegistry* AssetRegistry = IAssetRegistry::Get();
+		if (!AssetRegistry)
+		{
+			return UE::AssetRegistry::EExists::Unknown;
+		}
+		return AssetRegistry->TryGetAssetByObjectPath(ObjectPath, OutAssetData);
+	}
+
+	virtual UE::AssetRegistry::EExists TryGetAssetPackageData(FName PackageName, FAssetPackageData& OutAssetPackageData) const override
+	{
+		IAssetRegistry* AssetRegistry = IAssetRegistry::Get();
+		if (!AssetRegistry)
+		{
+			return UE::AssetRegistry::EExists::Unknown;
+		}
+		return AssetRegistry->TryGetAssetPackageData(PackageName, OutAssetPackageData);
 	}
 };

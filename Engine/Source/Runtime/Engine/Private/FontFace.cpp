@@ -3,43 +3,47 @@
 #include "Engine/FontFace.h"
 #include "Engine/Font.h"
 #include "EditorFramework/AssetImportData.h"
-#include "HAL/FileManager.h"
 #include "Misc/Paths.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Fonts/FontCache.h"
-#include "Misc/FileHelper.h"
+#include "Rendering/SlateRenderer.h"
+#include "UObject/AssetRegistryTagsContext.h"
 #include "UObject/Package.h"
 #include "Misc/PackageName.h"
 #include "UObject/EditorObjectVersion.h"
+#include "UObject/UE5MainStreamObjectVersion.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(FontFace)
 
 DEFINE_LOG_CATEGORY_STATIC(LogFontFace, Log, All);
 
 UFontFace::UFontFace()
-	: FontFaceData(FFontFaceData::MakeFontFaceData())
+	: AscendOverriddenValue(0)
+	, bIsAscendOverridden(false)
+	, DescendOverriddenValue(0)
+	, bIsDescendOverridden(false)
+	, FontFaceData(FFontFaceData::MakeFontFaceData())
+
 {
 }
 
 void UFontFace::Serialize(FArchive& Ar)
 {
+	LLM_SCOPE_BYNAME(TEXT("FontFaceData"));
 	Ar.UsingCustomVersion(FEditorObjectVersion::GUID);
-
-	FString OriginalSourceFilename;
-	if (Ar.IsCooking() && !HasAnyFlags(RF_ClassDefaultObject))
-	{
-		OriginalSourceFilename = MoveTemp(SourceFilename);
-		SourceFilename = GetCookedFilename();
-	}
+	Ar.UsingCustomVersion(FUE5MainStreamObjectVersion::GUID);
 
 	Super::Serialize(Ar);
 
-	if (Ar.IsCooking() && !HasAnyFlags(RF_ClassDefaultObject))
+	bool bCooked = Ar.IsCooking();
+	if (Ar.CustomVer(FUE5MainStreamObjectVersion::GUID) >= FUE5MainStreamObjectVersion::AddedCookedBoolFontFaceAssets)
 	{
-		SourceFilename = MoveTemp(OriginalSourceFilename);
+		Ar << bCooked;
 	}
 
 	if (Ar.IsLoading())
 	{
-		if (FPlatformProperties::RequiresCookedData())
+		if (FPlatformProperties::RequiresCookedData() || bCooked)
 		{
 			SourceFilename = GetCookedFilename();
 		}
@@ -127,11 +131,18 @@ void UFontFace::PostEditUndo()
 
 void UFontFace::GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
 	Super::GetAssetRegistryTags(OutTags);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void UFontFace::GetAssetRegistryTags(FAssetRegistryTagsContext Context) const
+{
+	Super::GetAssetRegistryTags(Context);
 
 	FAssetImportInfo ImportInfo;
 	ImportInfo.Insert(FAssetImportInfo::FSourceFile(SourceFilename));
-	OutTags.Add(FAssetRegistryTag(SourceFileTagName(), ImportInfo.ToJson(), FAssetRegistryTag::TT_Hidden));
+	Context.AddTag(FAssetRegistryTag(SourceFileTagName(), ImportInfo.ToJson(), FAssetRegistryTag::TT_Hidden));
 }
 
 void UFontFace::CookAdditionalFilesOverride(const TCHAR* PackageFilename, const ITargetPlatform* TargetPlatform,
@@ -205,6 +216,26 @@ EFontLayoutMethod UFontFace::GetLayoutMethod() const
 	return LayoutMethod;
 }
 
+bool UFontFace::IsAscendOverridden() const
+{
+	return bIsAscendOverridden;
+}
+
+int32 UFontFace::GetAscendOverriddenValue() const
+{
+	return AscendOverriddenValue;
+}
+
+bool UFontFace::IsDescendOverridden() const
+{
+	return bIsDescendOverridden;
+}
+
+int32 UFontFace::GetDescendOverriddenValue() const
+{
+	return DescendOverriddenValue;
+}
+
 FFontFaceDataConstRef UFontFace::GetFontFaceData() const
 {
 	return FontFaceData;
@@ -214,9 +245,13 @@ FString UFontFace::GetCookedFilename() const
 {
 	// UFontFace assets themselves can't be localized, however that doesn't mean the package they're in isn't localized (ie, when they're upgraded into a UFont asset)
 	FString PackageName = GetOutermost()->GetName();
-	PackageName = FPackageName::GetLocalizedPackagePath(PackageName);
+	if (!GIsEditor)
+	{
+		PackageName = FPackageName::GetLocalizedPackagePath(PackageName);
+	}
 	
 	// Note: This must match the replacement logic in UFontFace::CookAdditionalFiles
 	const FString PackageFilename = FPackageName::LongPackageNameToFilename(PackageName, TEXT(".uasset"));
 	return FPaths::GetPath(PackageFilename) / GetName() + TEXT(".ufont");
 }
+

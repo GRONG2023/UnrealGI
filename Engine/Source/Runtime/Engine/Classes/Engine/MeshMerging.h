@@ -5,15 +5,16 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "Engine/MaterialMerging.h"
-#include "GameFramework/Actor.h"
-#include "Components/InstancedStaticMeshComponent.h"
 #include "MeshMerging.generated.h"
+
+class AActor;
+class UInstancedStaticMeshComponent;
 
 /** The importance of a mesh feature when automatically generating mesh LODs. */
 UENUM()
 namespace EMeshFeatureImportance
 {
-	enum Type
+	enum Type : int
 	{
 		Off,
 		Lowest,
@@ -29,9 +30,9 @@ namespace EMeshFeatureImportance
 UENUM()
 enum class EStaticMeshReductionTerimationCriterion : uint8
 {
-	Triangles,
-	Vertices,
-	Any
+	Triangles UMETA(DisplayName = "Triangles", ToolTip = "Triangle percent criterion will be used for simplification."),
+	Vertices UMETA(DisplayName = "Vertice", ToolTip = "Vertice percent criterion will be used for simplification."),
+	Any UMETA(DisplayName = "First Percent Satisfied", ToolTip = "Simplification will continue until either Triangle or Vertex count criteria is met."),
 };
 
 /** Settings used to reduce a mesh. */
@@ -40,13 +41,21 @@ struct FMeshReductionSettings
 {
 	GENERATED_USTRUCT_BODY()
 
-	/** Percentage of triangles to keep. 1.0 = no reduction, 0.0 = no triangles. */
+	/** Percentage of triangles to keep. 1.0 = no reduction, 0.0 = no triangles. (Triangles criterion properties) */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ReductionSettings)
 	float PercentTriangles;
 
-	/** Percentage of vertices to keep. 1.0 = no reduction, 0.0 = no vertices. */
+	/** The maximum number of triangles to retain when using percentage termination criterion. (Triangles criterion properties) */
+	UPROPERTY(EditAnywhere, Category = ReductionMethod, meta = (DisplayName = "Max Triangle Count", ClampMin = 2, UIMin = "2"))
+	uint32 MaxNumOfTriangles;
+
+	/** Percentage of vertices to keep. 1.0 = no reduction, 0.0 = no vertices. (Vertices criterion properties) */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ReductionSettings)
 	float PercentVertices;
+
+	/** The maximum number of vertices to retain when using percentage termination criterion. (Vertices criterion properties) */
+	UPROPERTY(EditAnywhere, Category = ReductionMethod, meta = (DisplayName = "Max Vertex Count", ClampMin = 4, UIMin = "4"))
+	uint32 MaxNumOfVerts;
 
 	/** The maximum distance in object space by which the reduced mesh may deviate from the original mesh. */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ReductionSettings)
@@ -109,7 +118,9 @@ struct FMeshReductionSettings
 	/** Default settings. */
 	FMeshReductionSettings()
 		: PercentTriangles(1.0f)
+		, MaxNumOfTriangles(MAX_uint32)
 		, PercentVertices(1.0f)
+		, MaxNumOfVerts(MAX_uint32)
 		, MaxDeviation(0.0f)
 		, PixelError(8.0f)
 		, WeldingThreshold(0.0f)
@@ -129,28 +140,6 @@ struct FMeshReductionSettings
 	{
 	}
 
-	FMeshReductionSettings(const FMeshReductionSettings& Other)
-		: PercentTriangles(Other.PercentTriangles)
-		, PercentVertices(Other.PercentVertices)
-		, MaxDeviation(Other.MaxDeviation)
-		, PixelError(Other.PixelError)
-		, WeldingThreshold(Other.WeldingThreshold)
-		, HardAngleThreshold(Other.HardAngleThreshold)
-		, BaseLODModel(Other.BaseLODModel)
-		, SilhouetteImportance(Other.SilhouetteImportance)
-		, TextureImportance(Other.TextureImportance)
-		, ShadingImportance(Other.ShadingImportance)
-		, bRecalculateNormals(Other.bRecalculateNormals)
-		, bGenerateUniqueLightmapUVs(Other.bGenerateUniqueLightmapUVs)
-		, bKeepSymmetry(Other.bKeepSymmetry)
-		, bVisibilityAided(Other.bVisibilityAided)
-		, bCullOccluded(Other.bCullOccluded)
-		, TerminationCriterion(Other.TerminationCriterion)
-		, VisibilityAggressiveness(Other.VisibilityAggressiveness)
-		, VertexColorImportance(Other.VertexColorImportance)
-	{
-	}
-
 	/** Equality operator. */
 	bool operator==(const FMeshReductionSettings& Other) const
 	{
@@ -158,6 +147,8 @@ struct FMeshReductionSettings
 			TerminationCriterion == Other.TerminationCriterion
 			&& PercentVertices == Other.PercentVertices
 			&& PercentTriangles == Other.PercentTriangles
+			&& MaxNumOfTriangles == Other.MaxNumOfTriangles
+			&& MaxNumOfVerts == Other.MaxNumOfVerts
 			&& MaxDeviation == Other.MaxDeviation
 			&& PixelError == Other.PixelError
 			&& WeldingThreshold == Other.WeldingThreshold
@@ -185,7 +176,7 @@ struct FMeshReductionSettings
 UENUM()
 namespace ELandscapeCullingPrecision
 {
-	enum Type
+	enum Type : int
 	{
 		High = 0 UMETA(DisplayName = "High memory intensity and computation time"),
 		Medium = 1 UMETA(DisplayName = "Medium memory intensity and computation time"),
@@ -196,7 +187,7 @@ namespace ELandscapeCullingPrecision
 UENUM()
 namespace EProxyNormalComputationMethod
 {
-	enum Type
+	enum Type : int
 	{
 		AngleWeighted = 0 UMETA(DisplayName = "Angle Weighted"),
 		AreaWeighted = 1 UMETA(DisplayName = "Area  Weighted"),
@@ -214,7 +205,7 @@ struct FMeshProxySettings
 	int32 ScreenSize;
 
 	/** Override when converting multiple meshes for proxy LOD merging. Warning, large geometry with small sampling has very high memory costs*/
-	UPROPERTY(BlueprintReadWrite, EditAnywhere, AdvancedDisplay, Category = ProxySettings, meta = (EditCondition = "bOverrideVoxelSize", ClampMin = "0.1", DisplayName = "Overide Spatial Sampling Distance"))
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, AdvancedDisplay, Category = ProxySettings, meta = (EditCondition = "bOverrideVoxelSize", ClampMin = "0.1", DisplayName = "Override Spatial Sampling Distance"))
 	float VoxelSize;
 
 	/** Material simplification */
@@ -241,6 +232,12 @@ struct FMeshProxySettings
 
 	UPROPERTY()
 	uint8 bBakeVertexData_DEPRECATED:1;
+
+	UPROPERTY()
+	uint8 bGenerateNaniteEnabledMesh_DEPRECATED : 1;
+	
+	UPROPERTY()
+	float NaniteProxyTrianglePercent_DEPRECATED;
 #endif
 
 	/** Distance at which meshes should be merged together, this can close gaps like doors and windows in distant geometry */
@@ -260,7 +257,7 @@ struct FMeshProxySettings
 	float HardAngleThreshold;
 
 	/** Lightmap resolution */
-	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ProxySettings, meta = (ClampMin = 32, ClampMax = 4096, EditCondition = "!bComputeLightMapResolution", DisplayAfter="NormalCalculationMethod"))
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ProxySettings, meta = (ClampMin = 32, ClampMax = 4096, EditCondition = "!bComputeLightMapResolution", DisplayAfter="NormalCalculationMethod", DisplayName="Lightmap Resolution"))
 	int32 LightMapResolution;
 
 	/** Controls the method used to calculate the normal for the simplified geometry */
@@ -288,7 +285,7 @@ struct FMeshProxySettings
 	uint8 bUseHardAngleThreshold:1;
 
 	/** If ticked will compute the lightmap resolution by summing the dimensions for each mesh included for merging */
-	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ProxySettings)
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ProxySettings, meta = (DisplayName="Compute Lightmap Resolution"))
 	uint8 bComputeLightMapResolution:1;
 
 	/** Whether Simplygon should recalculate normals, otherwise the normals channel will be sampled from the original mesh */
@@ -299,9 +296,9 @@ struct FMeshProxySettings
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = LandscapeCulling)
 	uint8 bUseLandscapeCulling:1;
 
-	/** Whether to allow adjacency buffers for tessellation in the merged mesh */
+	/** Whether ray tracing will be supported on this mesh. Disable this to save memory if the generated mesh will only be rendered in the distance. */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ProxySettings)
-	uint8 bAllowAdjacency:1;
+	uint8 bSupportRayTracing : 1;
 
 	/** Whether to allow distance field to be computed for this mesh. Disable this to save memory if the merged mesh will only be rendered in the distance. */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ProxySettings)
@@ -310,6 +307,10 @@ struct FMeshProxySettings
 	/** Whether to attempt to re-use the source mesh's lightmap UVs when baking the material or always generate a new set. */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ProxySettings)
 	uint8 bReuseMeshLightmapUVs:1;
+
+	/** Bake identical meshes (or mesh instances) only once. Can lead to discrepancies with the source mesh visual, especially for materials that are using world position or per instance data. However, this will result in better quality baked textures & greatly reduce baking time. */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ProxySettings)
+	uint8 bGroupIdenticalMeshesForBaking:1;
 
 	/** Whether to generate collision for the merged mesh */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ProxySettings)
@@ -323,6 +324,10 @@ struct FMeshProxySettings
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ProxySettings)
 	uint8 bGenerateLightmapUVs:1;
 
+	/** Settings related to building Nanite data. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = NaniteSettings)
+	FMeshNaniteSettings NaniteSettings;
+
 	/** Default settings. */
 	FMeshProxySettings()
 		: ScreenSize(300)
@@ -335,6 +340,8 @@ struct FMeshProxySettings
 		, bExportRoughnessMap_DEPRECATED(false)
 		, bExportSpecularMap_DEPRECATED(false)
 		, bBakeVertexData_DEPRECATED(false)
+		, bGenerateNaniteEnabledMesh_DEPRECATED(false)
+		, NaniteProxyTrianglePercent_DEPRECATED(100)
 #endif
 		, MergeDistance(0)
 		, UnresolvedGeometryColor(FColor::Black)
@@ -350,9 +357,10 @@ struct FMeshProxySettings
 		, bComputeLightMapResolution(false)
 		, bRecalculateNormals(true)
 		, bUseLandscapeCulling(false)
-		, bAllowAdjacency(false)
+		, bSupportRayTracing(true)
 		, bAllowDistanceField(false)
 		, bReuseMeshLightmapUVs(true)
+		, bGroupIdenticalMeshesForBaking(false)
 		, bCreateCollision(true)
 		, bAllowVertexColors(false)
 		, bGenerateLightmapUVs(false)
@@ -364,17 +372,30 @@ struct FMeshProxySettings
 	bool operator==(const FMeshProxySettings& Other) const
 	{
 		return ScreenSize == Other.ScreenSize
+			&& VoxelSize == Other.VoxelSize
 			&& MaterialSettings == Other.MaterialSettings
-			&& bRecalculateNormals == Other.bRecalculateNormals
-			&& bOverrideTransferDistance == Other.bOverrideTransferDistance
-			&& MaxRayCastDist == Other.MaxRayCastDist
-			&& bUseHardAngleThreshold == Other.bUseHardAngleThreshold
-			&& HardAngleThreshold == Other.HardAngleThreshold
-			&& NormalCalculationMethod == Other.NormalCalculationMethod
 			&& MergeDistance == Other.MergeDistance
 			&& UnresolvedGeometryColor == Other.UnresolvedGeometryColor
+			&& MaxRayCastDist == Other.MaxRayCastDist
+			&& HardAngleThreshold == Other.HardAngleThreshold
+			&& LightMapResolution == Other.LightMapResolution
+			&& NormalCalculationMethod == Other.NormalCalculationMethod
+			&& LandscapeCullingPrecision == Other.LandscapeCullingPrecision
+			&& bCalculateCorrectLODModel == Other.bCalculateCorrectLODModel
 			&& bOverrideVoxelSize == Other.bOverrideVoxelSize
-			&& VoxelSize == Other.VoxelSize;
+			&& bOverrideTransferDistance == Other.bOverrideTransferDistance
+			&& bUseHardAngleThreshold == Other.bUseHardAngleThreshold
+			&& bComputeLightMapResolution == Other.bComputeLightMapResolution
+			&& bRecalculateNormals == Other.bRecalculateNormals
+			&& bUseLandscapeCulling == Other.bUseLandscapeCulling
+			&& bSupportRayTracing == Other.bSupportRayTracing
+			&& bAllowDistanceField == Other.bAllowDistanceField
+			&& bReuseMeshLightmapUVs == Other.bReuseMeshLightmapUVs
+			&& bGroupIdenticalMeshesForBaking == Other.bGroupIdenticalMeshesForBaking
+			&& bCreateCollision == Other.bCreateCollision
+			&& bAllowVertexColors == Other.bAllowVertexColors
+			&& bGenerateLightmapUVs == Other.bGenerateLightmapUVs
+			&& NaniteSettings == Other.NaniteSettings;
 	}
 
 	/** Inequality. */
@@ -385,7 +406,18 @@ struct FMeshProxySettings
 
 #if WITH_EDITORONLY_DATA
 	/** Handles deprecated properties */
-	void PostLoadDeprecated();
+	void PostSerialize(const FArchive& Ar);
+#endif
+};
+
+template<>
+struct TStructOpsTypeTraits<FMeshProxySettings> : public TStructOpsTypeTraitsBase2<FMeshProxySettings>
+{
+#if WITH_EDITORONLY_DATA
+	enum
+	{
+		WithPostSerialize = true,
+	};
 #endif
 };
 
@@ -427,7 +459,7 @@ struct FMeshMergingSettings
 	GENERATED_USTRUCT_BODY()
 
 	/** The lightmap resolution used both for generating lightmap UV coordinates, and also set on the generated static mesh */
-	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadWrite, Category = MeshSettings, meta=(ClampMax = 4096, EditCondition = "!bComputedLightMapResolution", DisplayAfter="bGenerateLightMapUV"))
+	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadWrite, Category = MeshSettings, meta=(ClampMax = 4096, EditCondition = "!bComputedLightMapResolution", DisplayAfter="bGenerateLightMapUV", DisplayName="Target Lightmap Resolution"))
 	int32 TargetLightMapResolution;
 
 	/** Whether to output the specified UV channels into the merged mesh (only if the source meshes contain valid UVs for the specified channel) */
@@ -442,20 +474,20 @@ struct FMeshMergingSettings
 	UPROPERTY(EditAnywhere, Category = MaterialSettings, meta=(DisplayAfter="MaterialSettings"))
 	int32 GutterSize;
 
-	// A given LOD level to export from the source meshes
-	UPROPERTY(EditAnywhere, Category = MeshSettings, BlueprintReadWrite, meta = (DisplayAfter="LODSelectionType", ClampMin = "0", ClampMax = "7", UIMin = "0", UIMax = "7", EnumCondition = 1))
-	int32 SpecificLOD;
-
 	/** Which selection mode should be used when generating the merged static mesh */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = MeshSettings, meta = (DisplayAfter="bBakeVertexDataToMesh"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = MeshSettings, meta = (DisplayAfter="bBakeVertexDataToMesh", DisplayName = "LOD Selection Type"))
 	EMeshLODSelectionType LODSelectionType;
 
+	/** A given LOD level to export from the source meshes, used if LOD Selection Type is set to SpecificLOD */
+	UPROPERTY(EditAnywhere, Category = MeshSettings, BlueprintReadWrite, meta = (DisplayAfter="LODSelectionType", EditCondition = "LODSelectionType == EMeshLODSelectionType::SpecificLOD", ClampMin = "0", ClampMax = "7", UIMin = "0", UIMax = "7", EnumCondition = 1))
+	int32 SpecificLOD;
+
 	/** Whether to generate lightmap UVs for a merged mesh*/
-	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadWrite, Category = MeshSettings)
+	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadWrite, Category = MeshSettings, meta=(DisplayName="Generate Lightmap UV"))
 	uint8 bGenerateLightMapUV:1;
 
 	/** Whether or not the lightmap resolution should be computed by summing the lightmap resolutions for the input Mesh Components */
-	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadWrite, Category = MeshSettings)
+	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadWrite, Category = MeshSettings, meta=(DisplayName="Computed Lightmap Resolution"))
 	uint8 bComputedLightMapResolution:1;
 
 	/** Whether merged mesh should have pivot at world origin, or at first merged component otherwise */
@@ -466,13 +498,13 @@ struct FMeshMergingSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = MeshSettings)
 	uint8 bMergePhysicsData:1;
 
-	/** Whether to merge source materials into one flat material, ONLY available when merging a single LOD level, see LODSelectionType */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = MaterialSettings)
-	uint8 bMergeMaterials:1;
+	/** Whether to merge sockets */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = MeshSettings)
+	uint8 bMergeMeshSockets : 1;
 
-	/** Create a flat material from all source materials, along with a new set of UVs. This material won't be applied to any section by default. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = MaterialSettings)
-	uint8 bCreateMergedMaterial : 1;
+	/** Whether to merge source materials into one flat material, ONLY available when LOD Selection Type is set to LowestDetailLOD */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = MaterialSettings, meta=(EditCondition="LODSelectionType == EMeshLODSelectionType::LowestDetailLOD || LODSelectionType == EMeshLODSelectionType::SpecificLOD"))
+	uint8 bMergeMaterials:1;
 
 	/** Whether or not vertex data such as vertex colours should be baked into the resulting mesh */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = MeshSettings)
@@ -482,7 +514,7 @@ struct FMeshMergingSettings
 	UPROPERTY(EditAnywhere, Category = MaterialSettings, BlueprintReadWrite, meta = (EditCondition = "bMergeMaterials"))
 	uint8 bUseVertexDataForBakingMaterial:1;
 
-	// Whether or not to calculate varying output texture sizes according to their importance in the final atlas texture
+	/** Whether or not to calculate varying output texture sizes according to their importance in the final atlas texture */
 	UPROPERTY(Category = MaterialSettings, EditAnywhere, BlueprintReadWrite, meta = (EditCondition = "bMergeMaterials"))
 	uint8 bUseTextureBinning:1;
 
@@ -502,33 +534,51 @@ struct FMeshMergingSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = MeshSettings)
 	uint8 bIncludeImposters:1;
 
+	/** Whether ray tracing will be supported on this mesh. Disable this to save memory if the generated mesh will only be rendered in the distance. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = MeshSettings)
+	uint8 bSupportRayTracing : 1;
+
 	/** Whether to allow distance field to be computed for this mesh. Disable this to save memory if the merged mesh will only be rendered in the distance. */
 	UPROPERTY(EditAnywhere, Category = MeshSettings)
 	uint8 bAllowDistanceField:1;
 
+	/** Settings related to building Nanite data. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = NaniteSettings)
+	FMeshNaniteSettings NaniteSettings;
+
 #if WITH_EDITORONLY_DATA
-	/** Whether we should import vertex colors into merged mesh */
 	UPROPERTY()
 	uint8 bImportVertexColors_DEPRECATED:1;
+
 	UPROPERTY()
 	uint8 bCalculateCorrectLODModel_DEPRECATED:1;
-	/** Whether to export normal maps for material merging */
+
 	UPROPERTY()
 	uint8 bExportNormalMap_DEPRECATED:1;
-	/** Whether to export metallic maps for material merging */
+
 	UPROPERTY()
 	uint8 bExportMetallicMap_DEPRECATED:1;
-	/** Whether to export roughness maps for material merging */
+
 	UPROPERTY()
 	uint8 bExportRoughnessMap_DEPRECATED:1;
-	/** Whether to export specular maps for material merging */
+
 	UPROPERTY()
 	uint8 bExportSpecularMap_DEPRECATED:1;
-	/** Merged material texture atlas resolution */
+
+	UPROPERTY()
+	uint8 bCreateMergedMaterial_DEPRECATED : 1;
+
 	UPROPERTY()
 	int32 MergedMaterialAtlasResolution_DEPRECATED;
+
 	UPROPERTY()
 	int32 ExportSpecificLOD_DEPRECATED;
+
+	UPROPERTY()
+	uint8 bGenerateNaniteEnabledMesh_DEPRECATED : 1;
+
+	UPROPERTY()
+	float NaniteFallbackTrianglePercent_DEPRECATED;	
 #endif
 
 	EMeshMergeType MergeType;
@@ -537,14 +587,14 @@ struct FMeshMergingSettings
 	FMeshMergingSettings()
 		: TargetLightMapResolution(256)
 		, GutterSize(2)
-		, SpecificLOD(0)
 		, LODSelectionType(EMeshLODSelectionType::CalculateLOD)
+		, SpecificLOD(0)
 		, bGenerateLightMapUV(true)
 		, bComputedLightMapResolution(false)
 		, bPivotPointAtZero(false)
 		, bMergePhysicsData(false)
+		, bMergeMeshSockets(false)
 		, bMergeMaterials(false)
-		, bCreateMergedMaterial(false)
 		, bBakeVertexDataToMesh(false)
 		, bUseVertexDataForBakingMaterial(true)
 		, bUseTextureBinning(false)
@@ -552,6 +602,7 @@ struct FMeshMergingSettings
 		, bMergeEquivalentMaterials(true)
 		, bUseLandscapeCulling(false)
 		, bIncludeImposters(true)
+		, bSupportRayTracing(true)
 		, bAllowDistanceField(false)
 #if WITH_EDITORONLY_DATA
 		, bImportVertexColors_DEPRECATED(false)
@@ -560,8 +611,11 @@ struct FMeshMergingSettings
 		, bExportMetallicMap_DEPRECATED(false)
 		, bExportRoughnessMap_DEPRECATED(false)
 		, bExportSpecularMap_DEPRECATED(false)
+		, bCreateMergedMaterial_DEPRECATED(false)
 		, MergedMaterialAtlasResolution_DEPRECATED(1024)
 		, ExportSpecificLOD_DEPRECATED(0)
+		, bGenerateNaniteEnabledMesh_DEPRECATED(false)
+		, NaniteFallbackTrianglePercent_DEPRECATED(100)
 #endif
 		, MergeType(EMeshMergeType::MeshMergeType_Default)
 	{
@@ -573,7 +627,18 @@ struct FMeshMergingSettings
 
 #if WITH_EDITORONLY_DATA
 	/** Handles deprecated properties */
-	void PostLoadDeprecated();
+	void PostSerialize(const FArchive& Ar);
+#endif
+};
+
+template<>
+struct TStructOpsTypeTraits<FMeshMergingSettings> : public TStructOpsTypeTraitsBase2<FMeshMergingSettings>
+{
+#if WITH_EDITORONLY_DATA
+	enum
+	{
+		WithPostSerialize = true,
+	};
 #endif
 };
 
@@ -603,31 +668,13 @@ struct FSectionInfo
 	}
 };
 
-/** How to replace instanced */
-UENUM()
-enum class EMeshInstancingReplacementMethod : uint8
-{
-	/** Destructive workflow: remove the original actors when replacing with instanced static meshes */
-	RemoveOriginalActors,
-
-	/** Non-destructive workflow: keep the original actors but hide them and set them to be editor-only */
-	KeepOriginalActorsAsEditorOnly
-};
-
 /** Mesh instance-replacement settings */
 USTRUCT(Blueprintable)
 struct FMeshInstancingSettings
 {
 	GENERATED_BODY()
 
-	FMeshInstancingSettings()
-		: ActorClassToUse(AActor::StaticClass())
-		, InstanceReplacementThreshold(2)
-		, MeshReplacementMethod(EMeshInstancingReplacementMethod::KeepOriginalActorsAsEditorOnly)
-		, bSkipMeshesWithVertexColors(true)
-		, bUseHLODVolumes(true)
-		, ISMComponentToUse(UInstancedStaticMeshComponent::StaticClass())
-	{}
+	ENGINE_API FMeshInstancingSettings();
 
 	/** The actor class to attach new instance static mesh components to */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, NoClear, Category="Instancing")
@@ -636,10 +683,6 @@ struct FMeshInstancingSettings
 	/** The number of static mesh instances needed before a mesh is replaced with an instanced version */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category="Instancing", meta=(ClampMin=1))
 	int32 InstanceReplacementThreshold;
-
-	/** How to replace the original actors when instancing */
-	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category="Instancing")
-	EMeshInstancingReplacementMethod MeshReplacementMethod;
 
 	/**
 	 * Whether to skip the conversion to an instanced static mesh for meshes with vertex colors.
@@ -658,6 +701,331 @@ struct FMeshInstancingSettings
 	/**
 	 * Whether to use the Instanced Static Mesh Compoment or the Hierarchical Instanced Static Mesh Compoment
 	 */
-	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Instancing", meta = (DisplayName = "Select the type of Instanced Component", DisallowedClasses = "FoliageInstancedStaticMeshComponent"))
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Instancing", meta = (DisplayName = "Select the type of Instanced Component", DisallowedClasses = "/Script/Foliage.FoliageInstancedStaticMeshComponent"))
 	TSubclassOf<UInstancedStaticMeshComponent> ISMComponentToUse;
+};
+
+
+UENUM()
+enum class EMeshApproximationType : uint8
+{
+	MeshAndMaterials,
+	MeshShapeOnly
+};
+
+UENUM()
+enum class EMeshApproximationBaseCappingType : uint8
+{
+	NoBaseCapping = 0,
+	ConvexPolygon = 1,
+	ConvexSolid = 2
+};
+
+
+UENUM()
+enum class EOccludedGeometryFilteringPolicy : uint8
+{
+	NoOcclusionFiltering = 0,
+	VisibilityBasedFiltering = 1
+};
+
+UENUM()
+enum class EMeshApproximationSimplificationPolicy : uint8
+{
+	FixedTriangleCount = 0,
+	TrianglesPerArea = 1,
+	GeometricTolerance = 2
+};
+
+UENUM()
+enum class EMeshApproximationGroundPlaneClippingPolicy : uint8
+{
+	NoGroundClipping = 0,
+	DiscardWithZPlane = 1,
+	CutWithZPlane = 2,
+	CutAndFillWithZPlane = 3
+};
+
+
+UENUM()
+enum class EMeshApproximationUVGenerationPolicy : uint8
+{
+	PreferUVAtlas = 0,
+	PreferXAtlas = 1,
+	PreferPatchBuilder = 2
+};
+
+
+USTRUCT(Blueprintable)
+struct FMeshApproximationSettings
+{
+	GENERATED_BODY()
+
+	/** Type of output from mesh approximation process */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ShapeSettings)
+	EMeshApproximationType OutputType = EMeshApproximationType::MeshAndMaterials;
+
+
+	//
+	// Mesh Generation Settings
+	//
+
+	/** Approximation Accuracy in Meters, will determine (eg) voxel resolution */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ShapeSettings, meta = (DisplayName = "Approximation Accuracy (meters)", ClampMin = "0.001"))
+	float ApproximationAccuracy = 1.0f;
+
+	/** Maximum allowable voxel count along main directions. This is a limit on ApproximationAccuracy. Max of 1290 (1290^3 is the last integer < 2^31, using a bigger number results in failures in TArray code & probably elsewhere) */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, AdvancedDisplay, Category = ShapeSettings, meta = (ClampMin = "64", ClampMax = "1290"))
+	int32 ClampVoxelDimension = 1024;
+
+	/** if enabled, we will attempt to auto-thicken thin parts or flat sheets */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ShapeSettings)
+	bool bAttemptAutoThickening = true;
+
+	/** Multiplier on Approximation Accuracy used for auto-thickening */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ShapeSettings, meta = (ClampMin = "0.001", EditCondition = "bAttemptAutoThickening"))
+	float TargetMinThicknessMultiplier = 1.5f;
+
+	/** If enabled, tiny parts will be excluded from the mesh merging, which can improve performance */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ShapeSettings)
+	bool bIgnoreTinyParts = true;
+
+	/** Multiplier on Approximation Accuracy used to define tiny-part threshold, using maximum bounding-box dimension */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ShapeSettings, meta = (ClampMin = "0.001", EditCondition = "bIgnoreTinyParts"))
+	float TinyPartSizeMultiplier = 0.05f;
+
+
+	/** Optional methods to attempt to close off the bottom of open meshes */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ShapeSettings)
+	EMeshApproximationBaseCappingType BaseCapping = EMeshApproximationBaseCappingType::NoBaseCapping;
+
+
+	/** Winding Threshold controls hole filling at open mesh borders. Smaller value means "more/rounder" filling */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, AdvancedDisplay, Category = ShapeSettings, meta = (ClampMin = "0.01", ClampMax = "0.99"))
+	float WindingThreshold = 0.5f;
+
+	/** If true, topological expand/contract is used to try to fill small gaps between objects. */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ShapeSettings)
+	bool bFillGaps = true;
+
+	/** Distance in Meters to expand/contract to fill gaps */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = ShapeSettings, meta = (DisplayName = "Gap Filling Distance (meters)", ClampMin = "0.001", EditCondition = "bFillGaps"))
+	float GapDistance = 0.1f;
+
+
+	//
+	// Output Mesh Filtering and Simplification Settings
+	//
+
+	/** Type of hidden geometry removal to apply */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = SimplifySettings)
+	EOccludedGeometryFilteringPolicy OcclusionMethod = EOccludedGeometryFilteringPolicy::VisibilityBasedFiltering;
+
+	/** If true, then the OcclusionMethod computation is configured to try to consider downward-facing "bottom" geometry as occluded */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = SimplifySettings)
+	bool bOccludeFromBottom = true;
+
+	/** Mesh Simplification criteria */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = SimplifySettings)
+	EMeshApproximationSimplificationPolicy SimplifyMethod = EMeshApproximationSimplificationPolicy::GeometricTolerance;
+
+	/** Target triangle count for Mesh Simplification, for SimplifyMethods that use a Count*/
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = SimplifySettings, meta = (ClampMin = "16", EditCondition = "SimplifyMethod == EMeshApproximationSimplificationPolicy::FixedTriangleCount" ))
+	int32 TargetTriCount = 2000;
+
+	/** Approximate Number of triangles per Square Meter, for SimplifyMethods that use such a constraint */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = SimplifySettings, meta = (ClampMin = "0.01", EditCondition = "SimplifyMethod == EMeshApproximationSimplificationPolicy::TrianglesPerArea" ))
+	float TrianglesPerM = 2.0f;
+
+	/** Allowable Geometric Deviation in Meters when SimplifyMethod incorporates a Geometric Tolerance */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = SimplifySettings, meta = (DisplayName = "Geometric Deviation (meters)", ClampMin = "0.0001", EditCondition = "SimplifyMethod == EMeshApproximationSimplificationPolicy::GeometricTolerance"))
+	float GeometricDeviation = 0.1f;
+
+	/** Configure how the final mesh should be clipped with a ground plane, if desired */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = SimplifySettings)
+	EMeshApproximationGroundPlaneClippingPolicy GroundClipping = EMeshApproximationGroundPlaneClippingPolicy::NoGroundClipping;
+
+	/** Z-Height for the ground clipping plane, if enabled */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = SimplifySettings, meta = (EditCondition = "GroundClipping != EMeshApproximationGroundPlaneClippingPolicy::NoGroundClipping"))
+	float GroundClippingZHeight = 0.0f;
+
+
+	//
+	// Mesh Normals and Tangents Settings
+	//
+
+	/** If true, normal angle will be used to estimate hard normals */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = NormalsSettings)
+	bool bEstimateHardNormals = true;
+
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = NormalsSettings, meta = (ClampMin = "0.0", ClampMax = "90.0", EditCondition = "bEstimateHardNormals"))
+	float HardNormalAngle = 60.0f;
+
+
+	//
+	// Mesh UV Generation Settings
+	//
+
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = UVSettings)
+	EMeshApproximationUVGenerationPolicy UVGenerationMethod = EMeshApproximationUVGenerationPolicy::PreferXAtlas;
+
+
+	/** Number of initial patches mesh will be split into before computing island merging */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = UVSettings, AdvancedDisplay, meta = (UIMin = "1", UIMax = "1000", ClampMin = "1", ClampMax = "99999999", EditCondition = "UVGenerationMethod == EMeshApproximationUVGenerationPolicy::PreferPatchBuilder"))
+	int InitialPatchCount = 250;
+
+	/** This parameter controls alignment of the initial patches to creases in the mesh */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = UVSettings, AdvancedDisplay, meta = (UIMin = "0.1", UIMax = "2.0", ClampMin = "0.01", ClampMax = "100.0", EditCondition = "UVGenerationMethod == EMeshApproximationUVGenerationPolicy::PreferPatchBuilder"))
+	float CurvatureAlignment = 1.0f;
+
+	/** Distortion/Stretching Threshold for island merging - larger values increase the allowable UV stretching */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = UVSettings, AdvancedDisplay, meta = (UIMin = "1.0", UIMax = "5.0", ClampMin = "1.0", EditCondition = "UVGenerationMethod == EMeshApproximationUVGenerationPolicy::PreferPatchBuilder"))
+	float MergingThreshold = 1.5f;
+
+	/** UV islands will not be merged if their average face normals deviate by larger than this amount */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = UVSettings, AdvancedDisplay, meta = (UIMin = "0.0", UIMax = "90.0", ClampMin = "0.0", ClampMax = "180.0", EditCondition = "UVGenerationMethod == EMeshApproximationUVGenerationPolicy::PreferPatchBuilder"))
+	float MaxAngleDeviation = 45.0f;
+
+	//
+	// Output Static Mesh Settings
+	//
+
+	/** Whether to generate a nanite-enabled mesh */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = MeshSettings)
+	bool bGenerateNaniteEnabledMesh = false;
+
+	/** Which heuristic to use when generating the Nanite fallback mesh. */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, AdvancedDisplay, Category = MeshSettings, meta = (EditConditionHides, EditCondition = "bGenerateNaniteEnabledMesh"))
+	ENaniteFallbackTarget NaniteFallbackTarget = ENaniteFallbackTarget::Auto;
+
+	/** Percentage of triangles to keep from source Nanite mesh for fallback. 1.0 = no reduction, 0.0 = no triangles. */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, AdvancedDisplay, Category = MeshSettings, meta = (EditConditionHides, EditCondition = "bGenerateNaniteEnabledMesh && NaniteFallbackTarget == ENaniteFallbackTarget::PercentTriangles", ClampMin = 0, ClampMax = 1))
+	float NaniteFallbackPercentTriangles = 1.0f;
+
+	/** Reduce Nanite fallback mesh until at least this amount of error is reached relative to size of the mesh. */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, AdvancedDisplay, Category = MeshSettings, meta = (EditConditionHides, EditCondition = "bGenerateNaniteEnabledMesh && NaniteFallbackTarget == ENaniteFallbackTarget::RelativeError", ClampMin = 0))
+	float NaniteFallbackRelativeError = 1.0f;
+
+	/** Whether ray tracing will be supported on this mesh. Disable this to save memory if the generated mesh will only be rendered in the distance. */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = MeshSettings)
+	bool bSupportRayTracing = true;
+
+	/** Whether to allow distance field to be computed for this mesh. Disable this to save memory if the generated mesh will only be rendered in the distance. */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = MeshSettings)
+	bool bAllowDistanceField = true;
+
+
+	//
+	// Material Baking Settings
+	//
+
+	/** If Value is > 1, Multisample output baked textures by this amount in each direction (eg 4 == 16x supersampling) */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = MaterialSettings, meta = (ClampMin = "0", ClampMax = "8", UIMin = "0", UIMax = "4"))
+	int32 MultiSamplingAA = 0;
+
+	/** If Value is zero, use MaterialSettings resolution, otherwise override the render capture resolution */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = MaterialSettings, meta = (ClampMin = "0"))
+	int32 RenderCaptureResolution = 2048;
+
+	/** Material generation settings */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = MaterialSettings)
+	FMaterialProxySettings MaterialSettings;
+
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, AdvancedDisplay, Category = MaterialSettings, meta = (ClampMin = "5.0", ClampMax = "160.0"))
+	float CaptureFieldOfView = 30.0f;
+
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, AdvancedDisplay, Category = MaterialSettings, meta = (ClampMin = "0.001", ClampMax = "1000.0"))
+	float NearPlaneDist = 1.0f;
+
+
+	//
+	// Performance Settings
+	//
+
+
+	/** If true, LOD0 Render Meshes (or Nanite Fallback meshes) are used instead of Source Mesh data. This can significantly reduce computation time and memory usage, but potentially at the cost of lower quality output. */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = PerformanceSettings)
+	bool bUseRenderLODMeshes = false;
+
+	/** If true, a faster mesh simplfication strategy will be used. This can significantly reduce computation time and memory usage, but potentially at the cost of lower quality output. */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = PerformanceSettings)
+	bool bEnableSimplifyPrePass = true;
+
+	/** If false, texture capture and baking will be done serially after mesh generation, rather than in parallel when possible. This will reduce the maximum memory requirements of the process.  */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = PerformanceSettings)
+	bool bEnableParallelBaking = true;
+
+	//
+	// Debug Output Settings
+	//
+
+
+	/** If true, print out debugging messages */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = DebugSettings)
+	bool bPrintDebugMessages = false;
+
+	/** If true, write the full mesh triangle set (ie flattened, non-instanced) used for mesh generation. Warning: this asset may be extremely large!! */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = DebugSettings)
+	bool bEmitFullDebugMesh = false;
+
+
+	/** Equality operator. */
+	bool operator==(const FMeshApproximationSettings& Other) const
+	{
+		return OutputType == Other.OutputType
+			&& ApproximationAccuracy == Other.ApproximationAccuracy
+			&& ClampVoxelDimension == Other.ClampVoxelDimension
+			&& bAttemptAutoThickening == Other.bAttemptAutoThickening
+			&& TargetMinThicknessMultiplier == Other.TargetMinThicknessMultiplier
+			&& BaseCapping == Other.BaseCapping
+			&& WindingThreshold == Other.WindingThreshold
+			&& bFillGaps == Other.bFillGaps
+			&& GapDistance == Other.GapDistance
+			&& OcclusionMethod == Other.OcclusionMethod
+			&& SimplifyMethod == Other.SimplifyMethod
+			&& TargetTriCount == Other.TargetTriCount
+			&& TrianglesPerM == Other.TrianglesPerM
+			&& GeometricDeviation == Other.GeometricDeviation
+			&& bGenerateNaniteEnabledMesh == Other.bGenerateNaniteEnabledMesh
+			&& NaniteFallbackTarget == Other.NaniteFallbackTarget
+			&& NaniteFallbackPercentTriangles == Other.NaniteFallbackPercentTriangles
+			&& NaniteFallbackRelativeError == Other.NaniteFallbackRelativeError
+			&& bSupportRayTracing == Other.bSupportRayTracing
+			&& bAllowDistanceField == Other.bAllowDistanceField
+			&& MultiSamplingAA == Other.MultiSamplingAA
+			&& RenderCaptureResolution == Other.RenderCaptureResolution
+			&& MaterialSettings == Other.MaterialSettings
+			&& CaptureFieldOfView == Other.CaptureFieldOfView
+			&& NearPlaneDist == Other.NearPlaneDist
+			&& bPrintDebugMessages == Other.bPrintDebugMessages
+			&& bEmitFullDebugMesh == Other.bEmitFullDebugMesh;
+	}
+
+	/** Inequality. */
+	bool operator!=(const FMeshApproximationSettings& Other) const
+	{
+		return !(*this == Other);
+	}
+
+#if WITH_EDITORONLY_DATA
+	/** Handles deprecated properties */
+	void PostSerialize(const FArchive& Ar);
+#endif
+
+private:
+#if WITH_EDITORONLY_DATA
+	UPROPERTY()
+	float NaniteProxyTrianglePercent_DEPRECATED = 0;
+#endif
+};
+
+template<>
+struct TStructOpsTypeTraits<FMeshApproximationSettings> : public TStructOpsTypeTraitsBase2<FMeshApproximationSettings>
+{
+#if WITH_EDITORONLY_DATA
+	enum
+	{
+		WithPostSerialize = true,
+	};
+#endif
 };

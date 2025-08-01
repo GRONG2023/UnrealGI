@@ -7,26 +7,29 @@
 #include "GameFramework/Info.h"
 #include "SkyLight.generated.h"
 
-UCLASS(ClassGroup=Lights, hidecategories=(Input,Collision,Replication,Info), showcategories=("Rendering", "Input|MouseInput", "Input|TouchInput"), ComponentWrapperClass, ConversionRoot, Blueprintable)
-class ENGINE_API ASkyLight : public AInfo
+UCLASS(ClassGroup=Lights, hidecategories=(Input,Collision,Replication,Info), showcategories=(Rendering, DataLayers, "Input|MouseInput", "Input|TouchInput"), ComponentWrapperClass, ConversionRoot, Blueprintable, MinimalAPI)
+class ASkyLight : public AInfo
 {
 	GENERATED_UCLASS_BODY()
 
-	virtual void GetLifetimeReplicatedProps(TArray< FLifetimeProperty > & OutLifetimeProps) const override;
+	ENGINE_API virtual void GetLifetimeReplicatedProps(TArray< FLifetimeProperty > & OutLifetimeProps) const override;
 
 private:
+#if WITH_EDITOR
+	virtual bool ActorTypeSupportsDataLayer() const override { return true; }
+#endif
+
 	/** @todo document */
 	UPROPERTY(Category = Light, VisibleAnywhere, BlueprintReadOnly, meta = (ExposeFunctionCategories = "Light,Rendering,Rendering|Components|SkyLight", AllowPrivateAccess = "true"))
-	class USkyLightComponent* LightComponent;
+	TObjectPtr<class USkyLightComponent> LightComponent;
 public:
-
 	/** replicated copy of LightComponent's bEnabled property */
 	UPROPERTY(replicatedUsing=OnRep_bEnabled)
 	uint32 bEnabled:1;
 
 	/** Replication Notification Callbacks */
 	UFUNCTION()
-	virtual void OnRep_bEnabled();
+	ENGINE_API virtual void OnRep_bEnabled();
 
 	/** Returns LightComponent subobject **/
 	class USkyLightComponent* GetLightComponent() const { return LightComponent; }

@@ -31,7 +31,78 @@ namespace AnalyticsProviderETCvars
 		PreventMultipleFlushesInOneFrame,
 		TEXT("When true, prevents more than one AnalyticsProviderET instance from flushing in the same frame, allowing the flush and HTTP cost to be amortized.")
 	);
+
+	TAutoConsoleVariable<bool> CVarDefaultUserAgentCommentsEnabled(
+		TEXT("AnalyticsET.UserAgentCommentsEnabled"),
+		true,
+		TEXT("Whether comments are supported in the analytics user agent string"),
+		ECVF_SaveForNextBoot
+	);
 }
+
+// Want to avoid putting the project name into the User-Agent, because for some apps (like the editor), the project name is private info.
+// The analytics User-Agent uses the default User-Agent, but with project name removed.
+class FAnalyticsUserAgentCache
+{
+public:
+	FAnalyticsUserAgentCache()
+		: CachedUserAgent()
+		, CachedAgentVersion(0)
+	{
+	}
+
+	FString GetUserAgent()
+	{
+		if (CachedUserAgent.IsEmpty() || CachedAgentVersion != FPlatformHttp::GetDefaultUserAgentVersion())
+		{
+			UpdateUserAgent();
+		}
+
+		return CachedUserAgent;
+	}
+
+private:
+	void UpdateUserAgent()
+	{
+		static TSet<FString> AllowedProjectComments(GetAllowedProjectComments());
+		static TSet<FString> AllowedPlatformComments(GetAllowedPlatformComments());
+
+		FDefaultUserAgentBuilder Builder = FPlatformHttp::GetDefaultUserAgentBuilder();
+		Builder.SetProjectName(TEXT("PROJECTNAME"));
+		CachedUserAgent = Builder.BuildUserAgentString(&AllowedProjectComments, &AllowedPlatformComments);
+		CachedAgentVersion = Builder.GetAgentVersion();
+	}
+
+	static TSet<FString> GetAllowedProjectComments()
+	{
+		TArray<FString> AllowedProjectComments;
+		if (AnalyticsProviderETCvars::CVarDefaultUserAgentCommentsEnabled.GetValueOnAnyThread())
+		{
+			GConfig->GetArray(TEXT("Analytics"), TEXT("AllowedUserAgentProjectComments"), AllowedProjectComments, GEngineIni);
+		}
+		return TSet<FString>(MoveTemp(AllowedProjectComments));
+	}
+
+	static TSet<FString> GetAllowedPlatformComments()
+	{
+		TArray<FString> AllowedPlatformComments;
+		if (AnalyticsProviderETCvars::CVarDefaultUserAgentCommentsEnabled.GetValueOnAnyThread())
+		{
+			GConfig->GetArray(TEXT("Analytics"), TEXT("AllowedUserAgentPlatformComments"), AllowedPlatformComments, GEngineIni);
+		}
+		return TSet<FString>(MoveTemp(AllowedPlatformComments));
+	}
+
+	static TSet<FString> ParseCommentSet(const FString& CommentBlob)
+	{
+		TArray<FString> Comments;
+		CommentBlob.ParseIntoArray(Comments, TEXT(";"));
+		return TSet<FString>(MoveTemp(Comments));
+	}
+
+	FString CachedUserAgent;
+	uint32 CachedAgentVersion;
+};
 
 /**
  * Implementation of analytics for Epic Telemetry.
@@ -45,13 +116,13 @@ namespace AnalyticsProviderETCvars
  */
 class FAnalyticsProviderET :
 	public IAnalyticsProviderET,
-	public FTickerObjectBase,
+	public FTSTickerObjectBase,
 	public TSharedFromThis<FAnalyticsProviderET>
 {
 public:
 	FAnalyticsProviderET(const FAnalyticsET::Config& ConfigValues);
 
-	// FTickerObjectBase
+	// FTSTickerObjectBase
 
 	bool Tick(float DeltaSeconds) override;
 
@@ -78,6 +149,7 @@ public:
 	virtual void SetEventCallback(const OnEventRecorded& Callback) override;
 
 	virtual void SetURLEndpoint(const FString& UrlEndpoint, const TArray<FString>& AltDomains) override;
+	virtual void SetHeader(const FString& HeaderName, const FString& HeaderValue) override;
 	virtual void BlockUntilFlushed(float InTimeoutSec) override;
 	virtual void SetShouldRecordEventFunc(const ShouldRecordEventFunction& InShouldRecordEventFunc) override;
 	virtual ~FAnalyticsProviderET();
@@ -129,6 +201,10 @@ private:
 
 	TSharedPtr<class FHttpRetrySystem::FManager> HttpRetryManager;
 	FHttpRetrySystem::FRetryDomainsPtr RetryServers;
+	/** Http headers to add to requests */
+	TMap<FString, FString> HttpHeaders;
+
+	FAnalyticsUserAgentCache UserAgentCache;
 };
 
 TSharedPtr<IAnalyticsProviderET> FAnalyticsET::CreateAnalyticsProvider(const Config& ConfigValues) const
@@ -182,6 +258,13 @@ FAnalyticsProviderET::FAnalyticsProviderET(const FAnalyticsET::Config& ConfigVal
 		RetryServers = MakeShared<FHttpRetrySystem::FRetryDomains, ESPMode::ThreadSafe>(MoveTemp(TmpAltAPIServers));
 	}
 
+	const bool bTestingMode = FParse::Param(FCommandLine::Get(), TEXT("TELEMETRYTESTING"));
+	if (bTestingMode)
+	{
+		UE_SET_LOG_VERBOSITY(LogAnalytics, VeryVerbose);
+		bShouldCacheEvents = false;
+	}
+
 	// force very verbose logging if we are force-disabling events.
 	bool bForceDisableCaching = FParse::Param(FCommandLine::Get(), TEXT("ANALYTICSDISABLECACHING"));
 	if (bForceDisableCaching)
@@ -200,7 +283,14 @@ FAnalyticsProviderET::FAnalyticsProviderET(const FAnalyticsET::Config& ConfigVal
 		? FString(FApp::GetBuildVersion())
 		: ConfigAppVersion.Replace(TEXT("%VERSION%"), FApp::GetBuildVersion(), ESearchCase::CaseSensitive);
 
-	UE_LOG(LogAnalytics, Display, TEXT("[%s] APIServer = %s. AppVersion = %s"), *Config.APIKeyET, *Config.APIServerET, *Config.AppVersionET);
+	if ( Config.APIEndpointET.IsEmpty() )
+	{
+		// Set a default API Endpoint
+		Config.APIEndpointET = TEXT("datarouter/api/v1/public/data");
+	}
+
+	UE_LOG(LogAnalytics, Display, TEXT("[%s] APIServer = %s%s. AppVersion = %s"), *Config.APIKeyET, *Config.APIServerET, *Config.APIEndpointET, *Config.AppVersionET);
+
 	if (Config.APIServerET.IsEmpty())
 	{
 		UE_LOG(LogAnalytics, Warning, TEXT("AnalyticsET: APIServerET is empty for APIKey (%s), creating as a NULL provider!"), *Config.APIKeyET);
@@ -231,7 +321,9 @@ bool FAnalyticsProviderET::Tick(float DeltaSeconds)
 {
 	QUICK_SCOPE_CYCLE_COUNTER(STAT_FAnalyticsProviderET_Tick);
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	HttpRetryManager->Update();
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	// hold a lock the entire time here because we're making several calls to the event cache that we need to be consistent when we decide to flush.
 	// With more care, we can likely avoid holding this lock the entire time.
@@ -244,7 +336,7 @@ bool FAnalyticsProviderET::Tick(float DeltaSeconds)
 	// On servers where there may be dozens of provider instances, this will spread out the cost a bit.
 	// If caching is disabled, we still want events to be flushed immediately, so we are only guarding the flush calls from tick,
 	// any other calls to flush are allowed to happen in the same frame.
-	static uint32 LastFrameCounterFlushed = 0;
+	static uint64 LastFrameCounterFlushed = 0;
 
 	const bool bHadFlushesQueued = EventCache.HasFlushesQueued();
 	const bool bShouldFlush = bHadFlushesQueued || (EventCache.CanFlush() && Now >= NextEventFlushTime);
@@ -264,7 +356,7 @@ bool FAnalyticsProviderET::Tick(float DeltaSeconds)
 			// try to keep on the same cadence when flushing, since we could miss our window by several frames.
 			if (!bHadFlushesQueued && Now >= NextEventFlushTime)
 			{
-				const float Multiplier = (int)((Now - NextEventFlushTime) / FlushIntervalSec) + 1.f;
+				const double Multiplier = FMath::Floor((Now - NextEventFlushTime) / FlushIntervalSec) + 1.;
 				NextEventFlushTime += Multiplier * FlushIntervalSec;
 			}
 		}
@@ -274,9 +366,10 @@ bool FAnalyticsProviderET::Tick(float DeltaSeconds)
 
 FAnalyticsProviderET::~FAnalyticsProviderET()
 {
-	UE_LOG(LogAnalytics, Verbose, TEXT("[%s] Destroying ET Analytics provider"), *Config.APIKeyET);
+	UE_LOG(LogAnalytics, Display, TEXT("[%s] Destroying ET Analytics provider"), *Config.APIKeyET);
 	bInDestructor = true;
 	EndSession();
+	UE_LOG(LogAnalytics, Display, TEXT("[%s] Destroyed ET Analytics provider"), *Config.APIKeyET);
 }
 
 bool FAnalyticsProviderET::StartSession(FString InSessionID, const TArray<FAnalyticsEventAttribute>& Attributes)
@@ -306,7 +399,9 @@ void FAnalyticsProviderET::EndSession()
 	if (bSessionInProgress)
 	{
 		RecordEvent(TEXT("SessionEnd"), TArray<FAnalyticsEventAttribute>());
+		UE_LOG(LogAnalytics, Display, TEXT("[%s] Ended ET Analytics provider session"), *Config.APIKeyET);
 	}
+
 	FlushEvents();
 	SessionID.Empty();
 
@@ -315,12 +410,21 @@ void FAnalyticsProviderET::EndSession()
 
 TSharedRef<IHttpRequest, ESPMode::ThreadSafe> FAnalyticsProviderET::CreateRequest()
 {
+	if (!ensure(FModuleManager::Get().IsModuleLoaded("HTTP")))
+	{
+		UE_LOG(LogAnalytics, Display, TEXT("[%s] ET Analytics provider tried to create a new HTTP request when HTTP was shutdown"), *Config.APIKeyET);
+	}
+
 	// TODO add config values for retries, for now, using default
 	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> HttpRequest = HttpRetryManager->CreateRequest(FHttpRetrySystem::FRetryLimitCountSetting(),
 		FHttpRetrySystem::FRetryTimeoutRelativeSecondsSetting(),
 		FHttpRetrySystem::FRetryResponseCodes(),
 		FHttpRetrySystem::FRetryVerbs(),
 		RetryServers);
+	for (const TPair<FString, FString>& HttpHeader : HttpHeaders)
+	{
+		HttpRequest->SetHeader(HttpHeader.Key, HttpHeader.Value);
+	}
 
 	return HttpRequest;
 }
@@ -354,7 +458,8 @@ void FAnalyticsProviderET::FlushEventsOnce()
 	{
 		TArray<uint8> Payload = EventCache.FlushCacheUTF8();
 		// UrlEncode NOTE: need to concatenate everything
-		FString URLPath  = TEXT("datarouter/api/v1/public/data?SessionID=") + FPlatformHttp::UrlEncode(SessionID);
+		FString URLPath = Config.APIEndpointET;
+				URLPath += TEXT("?SessionID=") + FPlatformHttp::UrlEncode(SessionID);
 				URLPath += TEXT("&AppID=") + FPlatformHttp::UrlEncode(Config.APIKeyET);
 				URLPath += TEXT("&AppVersion=") + FPlatformHttp::UrlEncode(Config.AppVersionET);
 				URLPath += TEXT("&UserID=") + FPlatformHttp::UrlEncode(UserID);
@@ -369,8 +474,9 @@ void FAnalyticsProviderET::FlushEventsOnce()
 			Payload.Add(TEXT('\0'));
 			// Recreate the URLPath for logging because we do not want to escape the parameters when logging.
 			// We cannot simply UrlEncode the entire Path after logging it because UrlEncode(Params) != UrlEncode(Param1) & UrlEncode(Param2) ...
-			FString LogString = FString::Printf(TEXT("[%s] AnalyticsET URL:datarouter/api/v1/public/data?SessionID=%s&AppID=%s&AppVersion=%s&UserID=%s&AppEnvironment=%s&UploadType=%s. Payload:%s"),
+			FString LogString = FString::Printf(TEXT("[%s] AnalyticsET URL:%s?SessionID=%s&AppID=%s&AppVersion=%s&UserID=%s&AppEnvironment=%s&UploadType=%s. Payload:%s"),
 				*Config.APIKeyET,
+				*Config.APIEndpointET,
 				*SessionID,
 				*Config.APIKeyET,
 				*Config.AppVersionET,
@@ -387,6 +493,9 @@ void FAnalyticsProviderET::FlushEventsOnce()
 			// Create/send Http request for an event
 			TSharedRef<IHttpRequest, ESPMode::ThreadSafe> HttpRequest = CreateRequest();
 			HttpRequest->SetHeader(TEXT("Content-Type"), TEXT("application/json; charset=utf-8"));
+			// Want to avoid putting the project name into the User-Agent, because for some apps (like the editor), the project name is private info.
+			// The analytics User-Agent uses the default User-Agent, but with project name removed.
+			HttpRequest->SetHeader(TEXT("User-Agent"), UserAgentCache.GetUserAgent());
 			HttpRequest->SetURL(Config.APIServerET / URLPath);
 			HttpRequest->SetVerb(TEXT("POST"));
 			HttpRequest->SetContent(MoveTemp(Payload));
@@ -487,6 +596,7 @@ void FAnalyticsProviderET::RecordEvent(FString&& EventName, const TArray<FAnalyt
 		if (!Config.UseLegacyProtocol)
 		{
 			EventCache.AddToCache(MoveTemp(EventName), Attributes);
+
 			// if we aren't caching events, flush immediately. This is really only for debugging as it will significantly affect bandwidth.
 			if (!bShouldCacheEvents)
 			{
@@ -591,6 +701,18 @@ void FAnalyticsProviderET::SetURLEndpoint(const FString& UrlEndpoint, const TArr
 	}
 }
 
+void FAnalyticsProviderET::SetHeader(const FString& HeaderName, const FString& HeaderValue)
+{
+	if (HeaderValue.IsEmpty())
+	{
+		HttpHeaders.Remove(HeaderName);
+	}
+	else
+	{
+		HttpHeaders.Emplace(HeaderName, HeaderValue);
+	}
+}
+
 void FAnalyticsProviderET::BlockUntilFlushed(float InTimeoutSec)
 {
 	FlushEvents();
@@ -645,7 +767,7 @@ void FAnalyticsProviderET::FlushEventLegacy(const FString& EventName, const TArr
 		HttpRequest->SetHeader(TEXT("Content-Type"), TEXT("text/plain"));
 
 		// Don't need to URL encode the APIServer or the EventParams, which are already encoded, and contain parameter separaters that we DON'T want encoded.
-		FString URLPath = Config.APIServerET;
+		FString URLPath = Config.APIServerET+Config.APIEndpointET;
 		URLPath += TEXT("SendEvent.1?SessionID=") + FPlatformHttp::UrlEncode(SessionID);
 		URLPath += TEXT("&AppID=") + FPlatformHttp::UrlEncode(Config.APIKeyET);
 		URLPath += TEXT("&AppVersion=") + FPlatformHttp::UrlEncode(Config.AppVersionET);

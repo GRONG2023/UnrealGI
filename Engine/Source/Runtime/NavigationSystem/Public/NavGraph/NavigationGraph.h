@@ -2,7 +2,9 @@
 
 #pragma once
 
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "CoreMinimal.h"
+#endif
 #include "UObject/ObjectMacros.h"
 #include "NavigationData.h"
 #include "NavigationGraph.generated.h"
@@ -41,7 +43,7 @@ struct FNavGraphNode
 
 	/** Who's this node referring to? This will most commonly point to an actor or a component */
 	UPROPERTY()
-	UObject* Owner;
+	TObjectPtr<UObject> Owner;
 
 	enum {
 		InitialEdgesCount = 4

@@ -5,6 +5,8 @@
 =============================================================================*/
 
 #include "Stats/Stats.h"
+#include "DataDrivenShaderPlatformInfo.h"
+#include "Engine/Engine.h"
 #include "HAL/IConsoleManager.h"
 #include "RHI.h"
 #include "RenderResource.h"
@@ -22,7 +24,7 @@
 #include "ClearQuad.h"
 #include "ScenePrivate.h"
 #include "SpriteIndexBuffer.h"
-#include "SceneFilterRendering.h"
+#include "PostProcess/SceneFilterRendering.h"
 #include "PrecomputedVolumetricLightmap.h"
 
 float GVolumetricLightmapVisualizationRadiusScale = .01f;
@@ -48,7 +50,7 @@ TGlobalResource<FSpriteIndexBuffer<GQuadsPerVisualizeInstance>> GVisualizeQuadIn
 
 BEGIN_SHADER_PARAMETER_STRUCT(FVisualizeVolumetricLightmapParameters, )
 	SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
-	SHADER_PARAMETER(FVector, DiffuseColor)
+	SHADER_PARAMETER(FVector3f, DiffuseColor)
 	SHADER_PARAMETER(float, VisualizationRadiusScale)
 	SHADER_PARAMETER(float, VisualizationMinScreenFraction)
 END_SHADER_PARAMETER_STRUCT()
@@ -94,17 +96,14 @@ IMPLEMENT_GLOBAL_SHADER(FVisualizeVolumetricLightmapPS, "/Engine/Private/Visuali
 
 void FDeferredShadingSceneRenderer::VisualizeVolumetricLightmap(
 	FRDGBuilder& GraphBuilder,
-	FRDGTextureRef SceneColorTexture,
-	FRDGTextureRef SceneDepthTexture)
+	const FSceneTextures& SceneTextures)
 {
 	if (!ViewFamily.EngineShowFlags.VisualizeVolumetricLightmap)
 	{
 		return;
 	}
 
-	const FPrecomputedVolumetricLightmap* VolumetricLightmap = Scene->VolumetricLightmapSceneData.GetLevelVolumetricLightmap();
-
-	if (!VolumetricLightmap)
+	if (!Scene->VolumetricLightmapSceneData.HasData())
 	{
 		return;
 	}
@@ -119,17 +118,15 @@ void FDeferredShadingSceneRenderer::VisualizeVolumetricLightmap(
 
 	RDG_EVENT_SCOPE(GraphBuilder, "VisualizeVolumetricLightmap");
 
-	FSceneRenderTargets& SceneContext = FSceneRenderTargets::Get(GraphBuilder.RHICmdList);
-
 	for (const FViewInfo& View : Views)
 	{
 		auto* PassParameters = GraphBuilder.AllocParameters<FVisualizeVolumetricLightmapPS::FParameters>();
-		PassParameters->RenderTargets.DepthStencil = FDepthStencilBinding(SceneDepthTexture, ERenderTargetLoadAction::ELoad, ERenderTargetLoadAction::ELoad, FExclusiveDepthStencil::DepthWrite_StencilWrite);
-		PassParameters->RenderTargets[0] = FRenderTargetBinding(SceneColorTexture, ERenderTargetLoadAction::ELoad);
+		PassParameters->RenderTargets.DepthStencil = FDepthStencilBinding(SceneTextures.Depth.Target, ERenderTargetLoadAction::ELoad, ERenderTargetLoadAction::ELoad, FExclusiveDepthStencil::DepthWrite_StencilWrite);
+		PassParameters->RenderTargets[0] = FRenderTargetBinding(SceneTextures.Color.Target, ERenderTargetLoadAction::ELoad);
 
-		if (SceneContext.GBufferB)
+		if (SceneTextures.GBufferB)
 		{
-			PassParameters->RenderTargets[1] = FRenderTargetBinding(GraphBuilder.RegisterExternalTexture(SceneContext.GBufferB), ERenderTargetLoadAction::ELoad);
+			PassParameters->RenderTargets[1] = FRenderTargetBinding(SceneTextures.GBufferB, ERenderTargetLoadAction::ELoad);
 		}
 
 		PassParameters->Common.View = View.ViewUniformBuffer;
@@ -137,10 +134,10 @@ void FDeferredShadingSceneRenderer::VisualizeVolumetricLightmap(
 		PassParameters->Common.VisualizationMinScreenFraction = GVolumetricLightmapVisualizationMinScreenFraction;
 
 		{
-			FVector DiffuseColorValue(.18f, .18f, .18f);
+			FVector3f DiffuseColorValue(.18f, .18f, .18f);
 			if (!ViewFamily.EngineShowFlags.Materials)
 			{
-				DiffuseColorValue = FVector(GEngine->LightingOnlyBrightness);
+				DiffuseColorValue = FVector3f(GEngine->LightingOnlyBrightness);
 			}
 			PassParameters->Common.DiffuseColor = DiffuseColorValue;
 		}
@@ -167,7 +164,7 @@ void FDeferredShadingSceneRenderer::VisualizeVolumetricLightmap(
 			GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShader.GetVertexShader();
 			GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
 
-			SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit);
+			SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
 			SetShaderParameters(RHICmdList, VertexShader, VertexShader.GetVertexShader(), PassParameters->Common);
 			SetShaderParameters(RHICmdList, PixelShader, PixelShader.GetPixelShader(), *PassParameters);
 

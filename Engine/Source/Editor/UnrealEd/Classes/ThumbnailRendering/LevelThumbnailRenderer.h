@@ -14,6 +14,7 @@
 
 class FCanvas;
 class FRenderTarget;
+class FSceneView;
 class FSceneViewFamily;
 class ULevel;
 
@@ -28,6 +29,7 @@ class ULevelThumbnailRenderer : public UDefaultSizedThumbnailRenderer
 	// End UThumbnailRenderer Object
 
 private:
-	void GetView(ULevel* Level, FSceneViewFamily* ViewFamily, int32 X, int32 Y, uint32 SizeX, uint32 SizeY) const; 
+	/** Allocates then adds an FSceneView to the ViewFamily. */
+	[[nodiscard]] FSceneView* CreateView(ULevel* Level, FSceneViewFamily* ViewFamily, int32 X, int32 Y, uint32 SizeX, uint32 SizeY) const; 
 };
 

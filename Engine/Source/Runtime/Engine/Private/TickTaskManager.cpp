@@ -4,22 +4,13 @@
 	TickTaskManager.cpp: Manager for ticking tasks
 =============================================================================*/
 
-#include "CoreMinimal.h"
-#include "Stats/Stats.h"
-#include "HAL/IConsoleManager.h"
-#include "Misc/App.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Class.h"
-#include "UObject/Package.h"
-#include "Containers/SortedMap.h"
-#include "Async/TaskGraphInterfaces.h"
-#include "Engine/EngineBaseTypes.h"
-#include "Engine/EngineTypes.h"
+#include "Engine/Level.h"
 #include "Engine/World.h"
+#include "ProfilingDebugging/CsvProfiler.h"
+#include "Stats/StatsTrace.h"
 #include "TickTaskManagerInterface.h"
 #include "Async/ParallelFor.h"
 #include "Misc/TimeGuard.h"
-#include "ProfilingDebugging/CsvProfiler.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogTick, Log, All);
 
@@ -464,7 +455,7 @@ public:
 		{
 			TickTasks[StartTickGroup][EndTickGroup].Add(Task);
 		}
-		new (TickCompletionEvents[EndTickGroup]) FGraphEventRef(Task->GetCompletionEvent());
+		TickCompletionEvents[EndTickGroup].Add(Task->GetCompletionEvent());
 	}
 	/** Add a completion handle to a tick group, parallel version **/
 	FORCEINLINE void AddTickTaskCompletionParallel(ETickingGroup StartTickGroup, ETickingGroup EndTickGroup, TGraphTask<FTickFunctionTask>* Task, bool bHiPri)
@@ -560,6 +551,7 @@ public:
 				CA_SUPPRESS(6385);
 				if (TickCompletionEvents[Block].Num())
 				{
+					TRACE_CPUPROFILER_EVENT_SCOPE(TickCompletionEvents);
 					FTaskGraphInterface::Get().WaitUntilTasksComplete(TickCompletionEvents[Block], ENamedThreads::GameThread);
 					if (SingleThreadedMode() || Block == TG_NewlySpawned || CVarAllowAsyncTickCleanup.GetValueOnGameThread() == 0 || TickCompletionEvents[Block].Num() < 50)
 					{
@@ -668,7 +660,7 @@ private:
 		QUICK_SCOPE_CYCLE_COUNTER(STAT_DispatchTickGroup);
 		for (int32 IndexInner = 0; IndexInner < TG_MAX; IndexInner++)
 		{
-			TArray<TGraphTask<FTickFunctionTask>*>& TickArray = HiPriTickTasks[WorldTickGroup][IndexInner];
+			TArray<TGraphTask<FTickFunctionTask>*>& TickArray = HiPriTickTasks[WorldTickGroup][IndexInner]; //-V781
 			if (IndexInner < WorldTickGroup)
 			{
 				check(TickArray.Num() == 0); // makes no sense to have and end TG before the start TG
@@ -684,7 +676,7 @@ private:
 		}
 		for (int32 IndexInner = 0; IndexInner < TG_MAX; IndexInner++)
 		{
-			TArray<TGraphTask<FTickFunctionTask>*>& TickArray = TickTasks[WorldTickGroup][IndexInner];
+			TArray<TGraphTask<FTickFunctionTask>*>& TickArray = TickTasks[WorldTickGroup][IndexInner]; //-V781
 			if (IndexInner < WorldTickGroup)
 			{
 				check(TickArray.Num() == 0); // makes no sense to have and end TG before the start TG
@@ -1006,20 +998,25 @@ public:
 	{
 		Context.TickGroup = CurrentTickGroup;
 		int32 Num = 0;
-		FTickTaskSequencer& TTS = FTickTaskSequencer::Get();
-		for (TSet<FTickFunction*>::TIterator It(NewlySpawnedTickFunctions); It; ++It)
-		{
-			FTickFunction* TickFunction = *It;
-			TickFunction->QueueTickFunction(TTS, Context);
-			Num++;
 
-			if (TickFunction->TickInterval > 0.f)
+		// Constructing set iterators is not trivial, so avoid the following block if it will have no effect
+		if (NewlySpawnedTickFunctions.Num() != 0)
+		{
+			FTickTaskSequencer& TTS = FTickTaskSequencer::Get();
+			for (TSet<FTickFunction*>::TIterator It(NewlySpawnedTickFunctions); It; ++It)
 			{
-				AllEnabledTickFunctions.Remove(TickFunction);
-				RescheduleForInterval(TickFunction, TickFunction->TickInterval);
+				FTickFunction* TickFunction = *It;
+				TickFunction->QueueTickFunction(TTS, Context);
+				Num++;
+
+				if (TickFunction->TickInterval > 0.f)
+				{
+					AllEnabledTickFunctions.Remove(TickFunction);
+					RescheduleForInterval(TickFunction, TickFunction->TickInterval);
+				}
 			}
+			NewlySpawnedTickFunctions.Empty();
 		}
-		NewlySpawnedTickFunctions.Empty();
 		return Num;
 	}
 	/**
@@ -1146,13 +1143,13 @@ public:
 	}
 	// Interface that is private to FTickFunction
 
-	/** Return true if this tick function is in the master list **/
+	/** Return true if this tick function is in the primary list **/
 	bool HasTickFunction(FTickFunction* TickFunction)
 	{
 		return AllEnabledTickFunctions.Contains(TickFunction) || AllDisabledTickFunctions.Contains(TickFunction) || AllCoolingDownTickFunctions.Contains(TickFunction);
 	}
 
-	/** Add the tick function to the master list **/
+	/** Add the tick function to the primary list **/
 	void AddTickFunction(FTickFunction* TickFunction)
 	{
 		check(!HasTickFunction(TickFunction));
@@ -1199,7 +1196,7 @@ public:
 	/** Dumps all tick functions to output device. */
 	void DumpAllTickFunctions(FOutputDevice& Ar, int32& EnabledCount, int32& DisabledCount, bool bEnabled, bool bDisabled)
 	{
-		UEnum* TickGroupEnum = CastChecked<UEnum>(StaticFindObject(UEnum::StaticClass(), ANY_PACKAGE, TEXT("ETickingGroup"), true));
+		UEnum* TickGroupEnum = CastChecked<UEnum>(StaticFindObject(UEnum::StaticClass(), nullptr, TEXT("/Script/Engine.ETickingGroup"), true));
 		if (bEnabled)
 		{
 			for (TSet<FTickFunction*>::TIterator It(AllEnabledTickFunctions); It; ++It)
@@ -1272,7 +1269,7 @@ public:
 		}
 	}
 
-	/** Remove the tick function from the master list **/
+	/** Remove the tick function from the primary list **/
 	void RemoveTickFunction(FTickFunction* TickFunction)
 	{
 		switch(TickFunction->TickState)
@@ -1406,11 +1403,11 @@ private:
 
 	/** Global Sequencer														*/
 	FTickTaskSequencer&							TickTaskSequencer;
-	/** Master list of enabled tick functions **/
+	/** Primary list of enabled tick functions **/
 	TSet<FTickFunction*>						AllEnabledTickFunctions;
-	/** Master list of enabled tick functions **/
+	/** Primary list of enabled tick functions **/
 	FCoolingDownTickFunctionList				AllCoolingDownTickFunctions;
-	/** Master list of disabled tick functions **/
+	/** Primary list of disabled tick functions **/
 	TSet<FTickFunction*>						AllDisabledTickFunctions;
 	/** Utility array to avoid memory reallocations when collecting functions to reschedule **/
 	TArrayWithThreadsafeAdd<FTickScheduleDetails>				TickFunctionsToReschedule;
@@ -1458,6 +1455,7 @@ public:
 	/** Free a ticking structure for a ULevel **/
 	virtual void FreeTickTaskLevel(FTickTaskLevel* TickTaskLevel) override
 	{
+		check(!LevelList.Contains(TickTaskLevel));
 		delete TickTaskLevel;
 	}
 
@@ -1632,13 +1630,13 @@ public:
 
 	// Interface that is private to FTickFunction
 
-	/** Return true if this tick function is in the master list **/
+	/** Return true if this tick function is in the primary list **/
 	bool HasTickFunction(ULevel* InLevel, FTickFunction* TickFunction)
 	{
 		FTickTaskLevel* Level = TickTaskLevelForLevel(InLevel);
 		return Level->HasTickFunction(TickFunction);
 	}
-	/** Add the tick function to the master list **/
+	/** Add the tick function to the primary list **/
 	void AddTickFunction(ULevel* InLevel, FTickFunction* TickFunction)
 	{
 		check(TickFunction->TickGroup >= 0 && TickFunction->TickGroup < TG_NewlySpawned); // You may not schedule a tick in the newly spawned group...they can only end up there if they are spawned late in a frame.
@@ -1646,7 +1644,7 @@ public:
 		Level->AddTickFunction(TickFunction);
 		TickFunction->InternalData->TickTaskLevel = Level;
 	}
-	/** Remove the tick function from the master list **/
+	/** Remove the tick function from the primary list **/
 	void RemoveTickFunction(FTickFunction* TickFunction)
 	{
 		check(TickFunction->InternalData);
@@ -1837,7 +1835,7 @@ FTickFunction::~FTickFunction()
 
 
 /**
-* Adds the tick function to the master list of tick functions.
+* Adds the tick function to the primary list of tick functions.
 * @param Level - level to place this tick function in
 **/
 void FTickFunction::RegisterTickFunction(ULevel* Level)
@@ -1862,7 +1860,7 @@ void FTickFunction::RegisterTickFunction(ULevel* Level)
 	}
 }
 
-/** Removes the tick function from the master list of tick functions. **/
+/** Removes the tick function from the primary list of tick functions. **/
 void FTickFunction::UnRegisterTickFunction()
 {
 	if (IsTickFunctionRegistered())
@@ -2002,14 +2000,14 @@ void FTickFunction::QueueTickFunction(FTickTaskSequencer& TTS, const struct FTic
 					}
 					else
 					{
-						MaxPrerequisiteTickGroup =  FMath::Max<ETickingGroup>(MaxPrerequisiteTickGroup, Prereq->InternalData->ActualStartTickGroup);
+						MaxPrerequisiteTickGroup =  FMath::Max<ETickingGroup>(MaxPrerequisiteTickGroup, Prereq->InternalData->ActualStartTickGroup.GetValue());
 						TaskPrerequisites.Add(Prereq->GetCompletionHandle());
 					}
 				}
 			}
 
 			// tick group is the max of the prerequisites, the current tick group, and the desired tick group
-			ETickingGroup MyActualTickGroup =  FMath::Max<ETickingGroup>(MaxPrerequisiteTickGroup, FMath::Max<ETickingGroup>(TickGroup,TickContext.TickGroup));
+			ETickingGroup MyActualTickGroup =  FMath::Max<ETickingGroup>(MaxPrerequisiteTickGroup, FMath::Max<ETickingGroup>(TickGroup.GetValue(),TickContext.TickGroup));
 			if (MyActualTickGroup != TickGroup)
 			{
 				// if the tick was "demoted", make sure it ends up in an ordinary tick group.
@@ -2047,7 +2045,7 @@ void FTickFunction::QueueTickFunctionParallel(const struct FTickContext& TickCon
 {
 	bool bProcessTick;
 
-	int32 OldValue = *(volatile int32*)&InternalData->TickVisitedGFrameCounter;
+	int32 OldValue = FPlatformAtomics::AtomicRead_Relaxed(&InternalData->TickVisitedGFrameCounter);
 	if (OldValue != GFrameCounter)
 	{
 		OldValue = FPlatformAtomics::InterlockedCompareExchange(&InternalData->TickVisitedGFrameCounter , GFrameCounter, OldValue);
@@ -2068,9 +2066,7 @@ void FTickFunction::QueueTickFunctionParallel(const struct FTickContext& TickCon
 				for (int32 PrereqIndex = 0; PrereqIndex < Prerequisites.Num(); PrereqIndex++)
 				{
 					FTickFunction* Prereq = Prerequisites[PrereqIndex].Get();
-#if USING_THREAD_SANITISER
-					if (Prereq) { TSAN_AFTER(&Prereq->InternalData->TickQueuedGFrameCounter); }
-#endif
+
 					if (!Prereq)
 					{
 						// stale prereq, delete it
@@ -2090,7 +2086,7 @@ void FTickFunction::QueueTickFunctionParallel(const struct FTickContext& TickCon
 						}
 						else
 						{
-							MaxPrerequisiteTickGroup = FMath::Max<ETickingGroup>(MaxPrerequisiteTickGroup, Prereq->InternalData->ActualStartTickGroup);
+							MaxPrerequisiteTickGroup = FMath::Max<ETickingGroup>(MaxPrerequisiteTickGroup, Prereq->InternalData->ActualStartTickGroup.GetValue());
 							TaskPrerequisites.Add(Prereq->GetCompletionHandle());
 						}
 					}
@@ -2134,21 +2130,16 @@ void FTickFunction::QueueTickFunctionParallel(const struct FTickContext& TickCon
 			}
 		}
 		
-		TSAN_BEFORE(&InternalData->TickQueuedGFrameCounter);
-		FPlatformMisc::MemoryBarrier();
-		
-		// MSVC enforces acq/rel semantics on volatile values, but clang cannot (supports more backend architectures).
-		// consequently on ARM64 you would end up racing
-		FPlatformAtomics::InterlockedExchange(&InternalData->TickQueuedGFrameCounter, GFrameCounter);
+		InternalData->TickQueuedGFrameCounter = GFrameCounter;
 	}
 	else
 	{
 		// if we are not going to process it, we need to at least wait until the other thread finishes it
-		volatile int32* TickQueuedGFrameCounterPtr = &InternalData->TickQueuedGFrameCounter;
-		if (*TickQueuedGFrameCounterPtr != GFrameCounter)
+		std::atomic<int32>& TickQueuedGFrameCounter = InternalData->TickQueuedGFrameCounter;
+		if (TickQueuedGFrameCounter != GFrameCounter)
 		{
 			QUICK_SCOPE_CYCLE_COUNTER(STAT_FTickFunction_QueueTickFunctionParallel_Spin);
-			while (*TickQueuedGFrameCounterPtr != GFrameCounter)
+			while (TickQueuedGFrameCounter != GFrameCounter)
 			{
 				FPlatformProcess::YieldThread();
 			}
@@ -2253,7 +2244,7 @@ static void AddTestTickFunctions(const TArray<FString>& Args, UWorld* InWorld)
 	TestTickFunctions.Reserve(NumTestTickFunctions);
 	for (int32 Index = 0; Index < NumTestTickFunctions; Index++)
 	{
-		(new (TestTickFunctions) FTestTickFunction())->RegisterTickFunction(Level);
+		TestTickFunctions.AddDefaulted_GetRef().RegisterTickFunction(Level);
 	}
 }
 

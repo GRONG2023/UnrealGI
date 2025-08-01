@@ -83,17 +83,17 @@ namespace iPhonePackager
 			if (string.IsNullOrEmpty(CFBundleIdentifier))
 			{
 				// Load Info.plist, which guides nearly everything else
-				string plistFile = Config.EngineBuildDirectory + "/UE4Game-Info.plist";
+				string plistFile = Config.EngineBuildDirectory + "/UnrealGame-Info.plist";
 				if (!string.IsNullOrEmpty(Config.ProjectFile))
 				{
 					plistFile = Path.GetDirectoryName(Config.ProjectFile) + "/Intermediate/" + Config.OSString + "/" + Path.GetFileNameWithoutExtension(Config.ProjectFile) + "-Info.plist";
 
 					if (!File.Exists(plistFile))
 					{
-						plistFile = Config.IntermediateDirectory + "/UE4Game-Info.plist";
+						plistFile = Config.IntermediateDirectory + "/UnrealGame-Info.plist";
 						if (!File.Exists(plistFile))
 						{
-							plistFile = Config.EngineBuildDirectory + "/UE4Game-Info.plist";
+							plistFile = Config.EngineBuildDirectory + "/UnrealGame-Info.plist";
 						}
 					}
 				}
@@ -236,6 +236,7 @@ namespace iPhonePackager
 					CertTool.StartInfo.UseShellExecute = false;
 					CertTool.StartInfo.Arguments = string.Format("find-certificate -a -c \"{0}\" -p", SearchPrefix);
 					CertTool.StartInfo.RedirectStandardOutput = true;
+					CertTool.StartInfo.StandardOutputEncoding = Encoding.UTF8;
 					CertTool.OutputDataReceived += new DataReceivedEventHandler(OutputReceivedCertToolProcessCall);
 					CertTool.Start();
 					CertTool.BeginOutputReadLine();
@@ -418,6 +419,7 @@ namespace iPhonePackager
 				CertTool.StartInfo.UseShellExecute = false;
 				CertTool.StartInfo.Arguments = "find-identity -p codesigning -v";
 				CertTool.StartInfo.RedirectStandardOutput = true;
+				CertTool.StartInfo.StandardOutputEncoding = Encoding.UTF8;
 				CertTool.OutputDataReceived += new DataReceivedEventHandler (OutputReceivedCertToolProcessCall);
 				CertTool.Start ();
 				CertTool.BeginOutputReadLine ();
@@ -745,7 +747,7 @@ namespace iPhonePackager
 		/// Does the actual work of signing the application
 		///   Modifies the following files:
 		///	 Info.plist
-		///	 [Executable] (file name derived from CFBundleExecutable in the Info.plist, e.g., UDKGame)
+		///	 [Executable] (file name derived from CFBundleExecutable in the Info.plist, e.g., UnrealGame)
 		///	 _CodeSignature/CodeResources
 		///	 [ResourceRules] (file name derived from CFBundleResourceSpecification, e.g., CustomResourceRules.plist)
 		/// </summary>
@@ -908,8 +910,11 @@ namespace iPhonePackager
 					if (CodeSigningBlobLC != null)
 					{
 						RequirementsBlob OldRequirements = CodeSigningBlobLC.Payload.GetBlobByMagic(AbstractBlob.CSMAGIC_REQUIREMENTS_TABLE) as RequirementsBlob;
-						RequirementBlob OldRequire = OldRequirements.GetBlobByKey(0x00003) as RequirementBlob;
-						OldExpression = OldRequire.Expression;
+						if (OldRequirements.GetBlobByKey(0x00003) != null)
+						{
+							RequirementBlob OldRequire = OldRequirements.GetBlobByKey(0x00003) as RequirementBlob;
+							OldExpression = OldRequire.Expression;
+						}
 					}
 					FinalRequirementsBlob = RequirementsBlob.CreateEmpty();
 					FinalRequirementsBlob.Add(0x00003, RequirementBlob.CreateFromCertificate(SigningCert, CFBundleIdentifier, OldExpression));

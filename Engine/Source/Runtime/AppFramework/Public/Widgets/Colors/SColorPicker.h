@@ -64,22 +64,18 @@ struct FColorChannels
 	float* Alpha;
 };
 
-
 /**
  * Class for placing a color picker. If all you need is a standalone color picker,
  * use the functions OpenColorPicker and DestroyColorPicker, since they hold a static
  * instance of the color picker.
  */
-class APPFRAMEWORK_API SColorPicker
+class SColorPicker
 	: public SCompoundWidget
 {
 public:
 
 	SLATE_BEGIN_ARGS(SColorPicker)
 		: _TargetColorAttribute(FLinearColor(ForceInit))
-		, _TargetFColors()
-		, _TargetLinearColors()
-		, _TargetColorChannels()
 		, _UseAlpha(true)
 		, _OnlyRefreshOnMouseUp(false)
 		, _OnlyRefreshOnOk(false)
@@ -95,39 +91,41 @@ public:
 		, _DisplayInlineVersion(false)
 		, _OverrideColorPickerCreation(false)
 		, _ExpandAdvancedSection(false)
+		, _ClampValue(false)
 		, _OptionalOwningDetailsView(nullptr)
 	{ }
-		
+
 		/** The color that is being targeted as a TAttribute */
 		SLATE_ATTRIBUTE(FLinearColor, TargetColorAttribute)
-		
+
 		/** An array of color pointers this color picker targets */
-		SLATE_ATTRIBUTE(TArray<FColor*>, TargetFColors)
+		SLATE_ARGUMENT_DEPRECATED(TArray<FColor*>, TargetFColors, 5.2, "TargetFColors is deprecated. Use OnColorCommitted to get the selected color.")
 		
 		/** An array of linear color pointers this color picker targets */
-		SLATE_ATTRIBUTE(TArray<FLinearColor*>, TargetLinearColors)
-		
+		SLATE_ARGUMENT_DEPRECATED(TArray<FLinearColor*>, TargetLinearColors, 5.2, "TargetLinearColors is deprecated. Use OnColorCommitted to get the selected color.")
+
 		/**
 		 * An array of color pointer structs this color picker targets
 		 * Only to keep compatibility with wx. Should be removed once wx is gone.
 		 */
-		SLATE_ATTRIBUTE(TArray<FColorChannels>, TargetColorChannels)
+		SLATE_ARGUMENT_DEPRECATED(TArray<FColorChannels>, TargetColorChannels, 5.2, "TargetColorChannels is deprecated. Use OnColorCommitted to get the selected color.")
 
 		/** Whether the ability to pick the alpha value is enabled */
 		SLATE_ATTRIBUTE(bool, UseAlpha)
-		
+
 		/** Prevents immediate refreshs for performance reasons. */
 		SLATE_ATTRIBUTE(bool, OnlyRefreshOnMouseUp)
 
 		/** Prevents multiple refreshes when requested. */
 		SLATE_ATTRIBUTE(bool, OnlyRefreshOnOk)
-		
+
 		/** The event called when the color is committed */
 		SLATE_EVENT(FOnLinearColorValueChanged, OnColorCommitted)
 
+		UE_DEPRECATED(5.2, "PreColorCommitted is deprecated. Use OnColorCommitted to update your values.")
 		/** The event called before the color is committed */
 		SLATE_EVENT(FOnLinearColorValueChanged, PreColorCommitted)
-		
+
 		/** The event called when the color picker cancel button is pressed */
 		SLATE_EVENT(FOnColorPickerCancelled, OnColorPickerCancelled)
 
@@ -158,16 +156,19 @@ public:
 		/** If true, the Advanced section will be expanded, regardless of the remembered state */
 		SLATE_ARGUMENT(bool, ExpandAdvancedSection)
 
+		/** The LinearColor is expected to be converted to a FColor, set the clamp channel value. */
+		SLATE_ARGUMENT(bool, ClampValue)
+
 		/** Allows a details view to own the color picker so refreshing another details view doesn't close it */
 		SLATE_ATTRIBUTE(TSharedPtr<SWidget>, OptionalOwningDetailsView)
 
 	SLATE_END_ARGS()
 	
 	/** A default window size for the color picker which looks nice */
-	static const FVector2D DEFAULT_WINDOW_SIZE;
+	static APPFRAMEWORK_API const FVector2D DEFAULT_WINDOW_SIZE;
 
 	/**	Destructor. */
-	~SColorPicker();
+	APPFRAMEWORK_API ~SColorPicker();
 
 public:
 
@@ -176,7 +177,7 @@ public:
 	 *
 	 * @param InArgs Declaration from which to construct the widget.
 	 */
-	void Construct(const FArguments& InArgs);
+	APPFRAMEWORK_API void Construct(const FArguments& InArgs);
 
 	/** Gets the (optionally set) owning details view of the current color picker */
 	TSharedPtr<SWidget> GetOptionalOwningDetailsView()
@@ -191,35 +192,23 @@ public:
 		}
 	}
 
-	/** True if enabled attribute is bound, useful since binding dissapears if bound to no-longer valid property */
-	bool IsEnabledAttributeBound() const
-	{
-		return EnabledState.IsBound();
-	}
-
 	/** Delegate to override color picker creation behavior */
 	DECLARE_DELEGATE_OneParam(FOnColorPickerCreationOverride, const TSharedRef<SColorPicker>&);
-	static FOnColorPickerCreationOverride OnColorPickerNonModalCreateOverride;
+	static APPFRAMEWORK_API FOnColorPickerCreationOverride OnColorPickerNonModalCreateOverride;
 
 	/** Delegate to override color picker destruction behavior */
 	DECLARE_DELEGATE(FOnColorPickerDestructionOverride);
-	static FOnColorPickerDestructionOverride OnColorPickerDestroyOverride;
+	static APPFRAMEWORK_API FOnColorPickerDestructionOverride OnColorPickerDestroyOverride;
 
 protected:
 
 	/** Backup all the colors that are being modified */
-	void BackupColors();
+	APPFRAMEWORK_API void BackupColors();
 
-	/** Restore all the modified colors to their original state */
-	void RestoreColors();
+	APPFRAMEWORK_API bool ApplyNewTargetColor(bool bForceUpdate = false);
 
-	/** Set all the colors to this new color */
-	void SetColors(const FLinearColor& InColor);
-
-	bool ApplyNewTargetColor(bool bForceUpdate = false);
-
-	void GenerateDefaultColorPickerContent(bool bAdvancedSectionExpanded);
-	void GenerateInlineColorPickerContent();
+	APPFRAMEWORK_API void GenerateDefaultColorPickerContent(bool bAdvancedSectionExpanded);
+	APPFRAMEWORK_API void GenerateInlineColorPickerContent();
 
 	FLinearColor GetCurrentColor() const
 	{
@@ -227,22 +216,22 @@ protected:
 	}
 
 	/** Calls the user defined delegate for when the color changes are discarded */
-	void DiscardColor();
+	APPFRAMEWORK_API void DiscardColor();
 
 	/** Sets new color in ether RGB or HSV */
-	bool SetNewTargetColorRGB(const FLinearColor& NewValue, bool bForceUpdate = false);
-	bool SetNewTargetColorHSV(const FLinearColor& NewValue, bool bForceUpdate = false);
+	APPFRAMEWORK_API bool SetNewTargetColorRGB(const FLinearColor& NewValue, bool bForceUpdate = false);
+	APPFRAMEWORK_API bool SetNewTargetColorHSV(const FLinearColor& NewValue, bool bForceUpdate = false);
 
-	void UpdateColorPick();
-	void UpdateColorPickMouseUp();
+	APPFRAMEWORK_API void UpdateColorPick();
+	APPFRAMEWORK_API void UpdateColorPickMouseUp();
 
-	void BeginAnimation(FLinearColor Start, FLinearColor End);
+	APPFRAMEWORK_API void BeginAnimation(FLinearColor Start, FLinearColor End);
 
-	void HideSmallTrash();
-	void ShowSmallTrash();
+	APPFRAMEWORK_API void HideSmallTrash();
+	APPFRAMEWORK_API void ShowSmallTrash();
 
 	/** Cycles the color picker's mode. */
-	void CycleMode();
+	APPFRAMEWORK_API void CycleMode();
 
 	/**
 	 * Creates a color slider widget for the specified channel.
@@ -250,7 +239,7 @@ protected:
 	 * @param Channel The color channel to create the widget for.
 	 * @return The new slider.
 	 */
-	TSharedRef<SWidget> MakeColorSlider(EColorPickerChannels Channel) const;
+	APPFRAMEWORK_API TSharedRef<SWidget> MakeColorSlider(EColorPickerChannels Channel) const;
 
 	/**
 	 * Creates a color spin box widget for the specified channel.
@@ -258,124 +247,124 @@ protected:
 	 * @param Channel The color channel to create the widget for.
 	 * @return The new spin box.
 	 */
-	TSharedRef<SWidget> MakeColorSpinBox(EColorPickerChannels Channel) const;
+	APPFRAMEWORK_API TSharedRef<SWidget> MakeColorSpinBox(EColorPickerChannels Channel) const;
 
 	/**
 	 * Creates the color preview box widget.
 	 *
 	 * @return The new color preview box.
 	 */
-	TSharedRef<SWidget> MakeColorPreviewBox() const;
+	APPFRAMEWORK_API TSharedRef<SWidget> MakeColorPreviewBox() const;
 
 private:
 
 	// Callback for the active timer to animate the color post-construct
-	EActiveTimerReturnType AnimatePostConstruct(double InCurrentTime, float InDeltaTime);
+	APPFRAMEWORK_API EActiveTimerReturnType AnimatePostConstruct(double InCurrentTime, float InDeltaTime);
 
 	// Callback for getting the end color of a color spin box gradient.
-	FLinearColor GetGradientEndColor(EColorPickerChannels Channel) const;
+	APPFRAMEWORK_API FLinearColor GetGradientEndColor(EColorPickerChannels Channel) const;
 
 	// Callback for getting the start color of a color spin box gradient.
-	FLinearColor GetGradientStartColor(EColorPickerChannels Channel) const;
+	APPFRAMEWORK_API FLinearColor GetGradientStartColor(EColorPickerChannels Channel) const;
 
 	// Callback for handling expansion of the 'Advanced' area.
-	void HandleAdvancedAreaExpansionChanged(bool Expanded);
+	APPFRAMEWORK_API void HandleAdvancedAreaExpansionChanged(bool Expanded);
 
 	// Callback for getting the visibility of the alpha channel portion in color blocks.
-	EVisibility HandleAlphaColorBlockVisibility() const;
+	APPFRAMEWORK_API EVisibility HandleAlphaColorBlockVisibility() const;
 
 	// Callback for clicking the Cancel button.
-	FReply HandleCancelButtonClicked();
+	APPFRAMEWORK_API FReply HandleCancelButtonClicked();
 
 	// Callback for pressing a mouse button in the color area.
-	FReply HandleColorAreaMouseDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent);
+	APPFRAMEWORK_API FReply HandleColorAreaMouseDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent);
 
 	// Callback for clicking the color picker mode button.
-	FReply HandleColorPickerModeButtonClicked();
+	APPFRAMEWORK_API FReply HandleColorPickerModeButtonClicked();
 
 	// Callback for getting the visibility of the given color picker mode.
-	EVisibility HandleColorPickerModeVisibility(EColorPickerModes Mode) const;
+	APPFRAMEWORK_API EVisibility HandleColorPickerModeVisibility(EColorPickerModes Mode) const;
 
 	// Callback for getting the end color of a color slider.
-	FLinearColor HandleColorSliderEndColor(EColorPickerChannels Channel) const;
+	APPFRAMEWORK_API FLinearColor HandleColorSliderEndColor(EColorPickerChannels Channel) const;
 
 	// Callback for getting the start color of a color slider.
-	FLinearColor HandleColorSliderStartColor(EColorPickerChannels Channel) const;
+	APPFRAMEWORK_API FLinearColor HandleColorSliderStartColor(EColorPickerChannels Channel) const;
 
 	// Callback for value changes in the color spectrum picker.
-	void HandleColorSpectrumValueChanged(FLinearColor NewValue);
+	APPFRAMEWORK_API void HandleColorSpectrumValueChanged(FLinearColor NewValue);
 
 	// Callback for getting the value of a color spin box.
-	float HandleColorSpinBoxValue(EColorPickerChannels Channel) const;
+	APPFRAMEWORK_API float HandleColorSpinBoxValue(EColorPickerChannels Channel) const;
 
 	// Callback for value changes in a color spin box.
-	void HandleColorSpinBoxValueChanged(float NewValue, EColorPickerChannels Channel);
+	APPFRAMEWORK_API void HandleColorSpinBoxValueChanged(float NewValue, EColorPickerChannels Channel);
 
 	// Callback for completed eye dropper interactions.
-	void HandleEyeDropperButtonComplete(bool bCancelled);
+	APPFRAMEWORK_API void HandleEyeDropperButtonComplete(bool bCancelled);
 
 	// Callback for getting the text in the hex linear box.
-	FText HandleHexLinearBoxText() const;
+	APPFRAMEWORK_API FText HandleHexLinearBoxText() const;
 
 	// Callback for getting the text in the hex sRGB box.
-	FText HandleHexSRGBBoxText() const;
+	APPFRAMEWORK_API FText HandleHexSRGBBoxText() const;
 
 	// Callback for committed text in the hex input box (sRGB gamma).
-	void HandleHexSRGBInputTextCommitted(const FText& Text, ETextCommit::Type CommitType);
+	APPFRAMEWORK_API void HandleHexSRGBInputTextCommitted(const FText& Text, ETextCommit::Type CommitType);
 
 	// Callback for committed text in the hex input box (linear gamma).
-	void HandleHexLinearInputTextCommitted(const FText& Text, ETextCommit::Type CommitType);
+	APPFRAMEWORK_API void HandleHexLinearInputTextCommitted(const FText& Text, ETextCommit::Type CommitType);
 
 	// Callback for changing the HSV value of the current color.
-	void HandleHSVColorChanged(FLinearColor NewValue);
+	APPFRAMEWORK_API void HandleHSVColorChanged(FLinearColor NewValue);
 
 	// Callback for when interactive user input begins.
-	void HandleInteractiveChangeBegin();
+	APPFRAMEWORK_API void HandleInteractiveChangeBegin();
 
 	// Callback for when interactive user input ends.
-	void HandleInteractiveChangeEnd();
+	APPFRAMEWORK_API void HandleInteractiveChangeEnd();
 
 	// Callback for when interactive user input ends.
-	void HandleInteractiveChangeEnd(float NewValue);
+	APPFRAMEWORK_API void HandleInteractiveChangeEnd(float NewValue);
 
 	// Callback for clicking the new color preview block.
-	FReply HandleNewColorBlockMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent, bool bCheckAlpha);
+	APPFRAMEWORK_API FReply HandleNewColorBlockMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent, bool bCheckAlpha);
 
 	// Callback for clicking the OK button.
-	FReply HandleOkButtonClicked();
+	APPFRAMEWORK_API FReply HandleOkButtonClicked();
 
 	// Callback for clicking the old color preview block.
-	FReply HandleOldColorBlockMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent, bool bCheckAlpha);
+	APPFRAMEWORK_API FReply HandleOldColorBlockMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent, bool bCheckAlpha);
 
 	// Callback for checking whether sRGB colors should be rendered.
-	bool HandleColorPickerUseSRGB() const;
+	APPFRAMEWORK_API bool HandleColorPickerUseSRGB() const;
 
 	// Callback for when the parent window has been closed.
-	void HandleParentWindowClosed(const TSharedRef<SWindow>& Window);
+	APPFRAMEWORK_API void HandleParentWindowClosed(const TSharedRef<SWindow>& Window);
 
 	// Callback for changing the RGB value of the current color.
-	void HandleRGBColorChanged(FLinearColor NewValue);
+	APPFRAMEWORK_API void HandleRGBColorChanged(FLinearColor NewValue);
 
 	// Callback for changing the checked state of the sRGB check box.
-	void HandleSRGBCheckBoxCheckStateChanged(ECheckBoxState InIsChecked);
+	APPFRAMEWORK_API void HandleSRGBCheckBoxCheckStateChanged(ECheckBoxState InIsChecked);
 
 	// Callback for determining whether the sRGB check box should be checked.
-	ECheckBoxState HandleSRGBCheckBoxIsChecked() const;
+	APPFRAMEWORK_API ECheckBoxState HandleSRGBCheckBoxIsChecked() const;
 
 	// Callback for selecting a color in the color theme bar.
-	void HandleThemeBarColorSelected(FLinearColor NewValue);
+	APPFRAMEWORK_API void HandleThemeBarColorSelected(FLinearColor NewValue);
 
 	// Callback for getting the theme bar's color theme.
-	TSharedPtr<class FColorTheme> HandleThemeBarColorTheme() const;
+	APPFRAMEWORK_API TSharedPtr<class FColorTheme> HandleThemeBarColorTheme() const;
 
 	// Callback for getting the visibility of the theme bar hint text.
-	EVisibility HandleThemeBarHintVisibility() const;
+	APPFRAMEWORK_API EVisibility HandleThemeBarHintVisibility() const;
 
 	// Callback for determining whether the theme bar should display the alpha channel.
-	bool HandleThemeBarUseAlpha() const;
+	APPFRAMEWORK_API bool HandleThemeBarUseAlpha() const;
 
 	// Callback for theme viewer changes.
-	void HandleThemesViewerThemeChanged();
+	APPFRAMEWORK_API void HandleThemesViewerThemeChanged();
 
 private:
 	
@@ -404,31 +393,10 @@ private:
 	float CurrentTime;
 
 	/** The max time allowed for updating before we shut off auto-updating */
-	static const double MAX_ALLOWED_UPDATE_TIME;
+	static APPFRAMEWORK_API const double MAX_ALLOWED_UPDATE_TIME;
 
 	/** If true, then the performance is too bad to have auto-updating */
 	bool bPerfIsTooSlowToUpdate;
-
-	/** An array of color pointers this color picker targets */
-	TArray<FColor*> TargetFColors;
-	
-	/** An array of linear color pointers this color picker targets */
-	TArray<FLinearColor*> TargetLinearColors;
-	
-	/**
-	 * An array of color pointer structs this color picker targets
-	 * Only to keep compatibility with wx. Should be removed once wx is gone.
-	 */
-	TArray<FColorChannels> TargetColorChannels;
-
-	/** Backups of the TargetFColors */
-	TArray<FColor> OldTargetFColors;
-
-	/** Backups of the TargetLinearColors */
-	TArray<FLinearColor> OldTargetLinearColors;
-
-	/** Backups of the TargetColorChannels */
-	TArray<FLinearColor> OldTargetColorChannels;
 
 	/** Whether or not the color uses Alpha or not */
 	TAttribute<bool> bUseAlpha;
@@ -474,14 +442,14 @@ private:
 
 	/** Is true if the color picker creation behavior can be overridden */
 	bool bValidCreationOverrideExists;
+	
+	/** The current display gamma used to correct colors picked from the display. */
+	bool bClampValue;
 
 private:
 
 	/** Invoked when a new value is selected on the color wheel */
 	FOnLinearColorValueChanged OnColorCommitted;
-
-	/** Invoked before a new value is selected on the color wheel */
-	FOnLinearColorValueChanged PreColorCommitted;
 
 	/** Invoked when the color picker cancel button is pressed */
 	FOnColorPickerCancelled OnColorPickerCancelled;
@@ -501,51 +469,58 @@ private:
 private:
 
 	/** A static pointer to the global color themes viewer */
-	static TWeakPtr<SColorThemesViewer> ColorThemesViewer;
+	static APPFRAMEWORK_API TWeakPtr<SColorThemesViewer> ColorThemesViewer;
 };
 
 
 struct FColorPickerArgs
 {
 	/** Whether or not the new color picker is modal. */
-	bool bIsModal;
+	bool bIsModal = false;
 
 	/** The parent for the new color picker window */
 	TSharedPtr<SWidget> ParentWidget;
 
 	/** Whether or not to enable the alpha slider. */
-	bool bUseAlpha;
+	bool bUseAlpha = false;
 
 	/** Whether to disable the refresh except on mouse up for performance reasons. */
-	bool bOnlyRefreshOnMouseUp;
+	bool bOnlyRefreshOnMouseUp = false;
 
 	/** Whether to disable the refresh until the picker closes. */
-	bool bOnlyRefreshOnOk;
+	bool bOnlyRefreshOnOk = false;
 
 	/** Whether to automatically expand the Advanced section. */
-	bool bExpandAdvancedSection;
+	bool bExpandAdvancedSection = true;
 	
 	/** Whether to open the color picker as a menu window. */
-	bool bOpenAsMenu;
+	bool bOpenAsMenu = false;
+
+	/** Set true if values should be max to 1.0. HDR values may go over 1.0. */
+	bool bClampValue = false;
 
 	/** The current display gamma used to correct colors picked from the display. */
-	TAttribute<float> DisplayGamma;
+	TAttribute<float> DisplayGamma = 2.2f;
 
 	/** If set overrides the global option for the desired setting of sRGB mode. */
-	TOptional<bool> sRGBOverride;
+	TOptional<bool> sRGBOverride = TOptional<bool>();
 
+	UE_DEPRECATED(5.2, "ColorArray is deprecated. Use OnColorCommitted to update your values.")
 	/** An array of FColors to target. */
-	const TArray<FColor*>* ColorArray;
+	const TArray<FColor*>* ColorArray = nullptr;
 
+	UE_DEPRECATED(5.2, "LinearColorArray is deprecated. Use OnColorCommitted to update your values.")
 	/** An array of FLinearColors to target. */
-	const TArray<FLinearColor*>* LinearColorArray;
+	const TArray<FLinearColor*>* LinearColorArray = nullptr;
 
+	UE_DEPRECATED(5.2, "ColorChannelsArray is deprecated. Use OnColorCommitted to update your values.")
 	/** An array of FColorChannels to target. (deprecated now that wx is gone?) */
-	const TArray<FColorChannels>* ColorChannelsArray;
+	const TArray<FColorChannels>* ColorChannelsArray = nullptr;
 
 	/** A delegate to be called when the color changes. */
 	FOnLinearColorValueChanged OnColorCommitted;
 
+	UE_DEPRECATED(5.2, "PreColorCommitted is deprecated. Use OnColorCommitted to update your values.")
 	/** A delegate to be called before the color change is committed. */
 	FOnLinearColorValueChanged PreColorCommitted;
 
@@ -561,35 +536,28 @@ struct FColorPickerArgs
 	/** A delegate to be called when a slider drag, color wheel drag or dropper grab finishes */
 	FSimpleDelegate OnInteractivePickEnd;
 
+	UE_DEPRECATED(5.2, "InitialColorOverride is deprecated. Use InitialColor to set the initial color.")
 	/** Overrides the initial color set on the color picker. */
-	FLinearColor InitialColorOverride;
+	FLinearColor InitialColorOverride = FLinearColor::White;
+
+	/** The initial color set on the color picker. */
+	FLinearColor InitialColor = FLinearColor::White;
 
 	/** Allows a details view to own the color picker so refreshing another details view doesn't close it */
 	TSharedPtr<SWidget> OptionalOwningDetailsView;
 
 	/** Default constructor. */
-	FColorPickerArgs()
-		: bIsModal(false)
-		, ParentWidget(nullptr)
-		, bUseAlpha(false)
-		, bOnlyRefreshOnMouseUp(false)
-		, bOnlyRefreshOnOk(false)
-		, bExpandAdvancedSection(true)
-		, bOpenAsMenu(false)
-		, DisplayGamma(2.2f)
-		, sRGBOverride()
-		, ColorArray(nullptr)
-		, LinearColorArray(nullptr)
-		, ColorChannelsArray(nullptr)
-		, OnColorCommitted()
-		, PreColorCommitted()
-		, OnColorPickerWindowClosed()
-		, OnColorPickerCancelled()
-		, OnInteractivePickBegin()
-		, OnInteractivePickEnd()
-		, InitialColorOverride()
-		, OptionalOwningDetailsView(nullptr)
-	{ }
+	FColorPickerArgs() = default;
+
+	FColorPickerArgs(FLinearColor InInitialColor, FOnLinearColorValueChanged InOnColorCommitted)
+		: OnColorCommitted(MoveTemp(InOnColorCommitted))
+		, InitialColor(InInitialColor)
+	{}
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	FColorPickerArgs(const FColorPickerArgs&) = default;
+	FColorPickerArgs(FColorPickerArgs&&) = default;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 };
 
 /** Get a pointer to the static color picker, or nullptr if it does not exist. */

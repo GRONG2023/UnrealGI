@@ -24,11 +24,12 @@ struct FPreInitContext
 	bool bDisableDisregardForGC = false;
 	bool bHasEditorToken = false;
 	bool bIsRegularClient = false;
+	UE_DEPRECATED(5.1, "Use bIsPossiblyUnrecognizedCommandlet instead")
 	bool bTokenDoesNotHaveDash = false;
+	bool bIsPossiblyUnrecognizedCommandlet = false;
 
 	FString Token;
-	const TCHAR* CommandletCommandLine = nullptr;
-	TCHAR* CommandLineCopy = nullptr;
+	FString CommandletCommandLine;
 
 	FScopedSlowTask* SlowTaskPtr = nullptr;
 
@@ -85,6 +86,9 @@ public:
 
 	/** Load core modules. */
 	bool LoadCoreModules();
+
+	/** Allow override of the project module loaded from project file */
+	void OverrideProjectModule(const FString& InOriginalProjectModuleName, const FString& InReplacementProjectModuleName);
 
 	/** Clean up PreInit context. */
 	void CleanupPreInitContext();
@@ -176,6 +180,7 @@ protected:
 #endif //WITH_ENGINE
 
 private:
+
 
 #if WITH_ENGINE
 

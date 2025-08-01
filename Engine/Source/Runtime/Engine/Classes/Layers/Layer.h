@@ -14,7 +14,7 @@ struct FLayerActorStats
 
 	/** A Type of Actor currently associated with the Layer */
 	UPROPERTY()
-	UClass* Type;
+	TObjectPtr<UClass> Type;
 
 	/** The total number of Actors of Type assigned to the Layer */
 	UPROPERTY()
@@ -27,11 +27,24 @@ struct FLayerActorStats
 	}
 };
  
-UCLASS( MinimalAPI )
+UCLASS(MinimalAPI)
 class ULayer : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
+public:
+	ENGINE_API void SetLayerName(FName InName);	
+	ENGINE_API FName GetLayerName() const;
+
+	ENGINE_API void SetVisible(bool bIsVisible);
+	ENGINE_API bool IsVisible() const;
+
+	ENGINE_API const TArray<FLayerActorStats>& GetActorStats() const;
+	ENGINE_API void ClearActorStats();
+	ENGINE_API void AddToStats(AActor* Actor);
+	ENGINE_API bool RemoveFromStats(AActor* Actor);
+
+private:
 	/** The display name of the layer */
 	UPROPERTY()
 	FName LayerName;
@@ -43,6 +56,6 @@ class ULayer : public UObject
 	/** 
 	 * Basic stats regarding the number of Actors and their types currently assigned to the Layer 
 	 */
-	UPROPERTY(transient)
-	TArray< FLayerActorStats > ActorStats;
+	UPROPERTY(Transient)
+	TArray<FLayerActorStats> ActorStats;
 };

@@ -10,7 +10,16 @@
 #include "PhysicsAssetEditorOptions.generated.h"
 
 UENUM()
-enum class EPhysicsAssetEditorRenderMode : uint8
+enum class EPhysicsAssetEditorCollisionViewMode : uint8
+{
+	Solid,
+	Wireframe,
+	SolidWireframe,
+	None
+};
+
+UENUM()
+enum class EPhysicsAssetEditorMeshViewMode : uint8
 {
 	Solid,
 	Wireframe,
@@ -25,8 +34,8 @@ enum class EPhysicsAssetEditorConstraintViewMode : uint8
 	AllLimits
 };
 
-UCLASS(hidecategories=Object, config=EditorPerProjectUserSettings)
-class UNREALED_API UPhysicsAssetEditorOptions : public UObject
+UCLASS(hidecategories=Object, config=EditorPerProjectUserSettings, MinimalAPI)
+class UPhysicsAssetEditorOptions : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
@@ -43,11 +52,11 @@ class UNREALED_API UPhysicsAssetEditorOptions : public UObject
 	TEnumAsByte<EPhysicsTransformUpdateMode::Type> PhysicsUpdateMode;
 
 	/** Time between poking ragdoll and starting to blend back. */
-	UPROPERTY(EditAnywhere, config, Category=Anim)
+	UPROPERTY(EditAnywhere, config, Category=Anim, meta = (ClampMin = 0))
 	float PokePauseTime;
 
 	/** Time taken to blend from physics to animation. */
-	UPROPERTY(EditAnywhere, config, Category=Anim)
+	UPROPERTY(EditAnywhere, config, Category=Anim, meta = (ClampMin = 0))
 	float PokeBlendTime;
 	
 	/** Scale factor for the gravity used in the simulation */
@@ -67,36 +76,48 @@ class UNREALED_API UPhysicsAssetEditorOptions : public UObject
 	int32 MaxFPS;
 
 	/** Linear damping of mouse spring forces */
-	UPROPERTY(EditAnywhere, config, Category=MouseSpring)
+	UPROPERTY(EditAnywhere, config, Category=MouseSpring, meta = (ClampMin = 0))
 	float HandleLinearDamping;
 
 	/** Linear stiffness of mouse spring forces */
-	UPROPERTY(EditAnywhere, config, Category=MouseSpring)
+	UPROPERTY(EditAnywhere, config, Category=MouseSpring, meta = (ClampMin = 0))
 	float HandleLinearStiffness;
 
 	/** Angular damping of mouse spring forces */
-	UPROPERTY(EditAnywhere, config, Category=MouseSpring)
+	UPROPERTY(EditAnywhere, config, Category=MouseSpring, meta = (ClampMin = 0))
 	float HandleAngularDamping;
 
 	/** Angular stiffness of mouse spring forces */
-	UPROPERTY(EditAnywhere, config, Category=MouseSpring)
+	UPROPERTY(EditAnywhere, config, Category=MouseSpring, meta = (ClampMin = 0))
 	float HandleAngularStiffness;
 
 	/** How quickly we interpolate the physics target transform for mouse spring forces */
-	UPROPERTY(EditAnywhere, config, Category=MouseSpring)
+	UPROPERTY(EditAnywhere, config, Category=MouseSpring, meta = (ClampMin = 0))
 	float InterpolationSpeed;
 
 	/** Strength of the impulse used when poking with left mouse button */
 	UPROPERTY(EditAnywhere, config, Category=Poking)
 	float PokeStrength;
 
+	/** Raycast distance when poking or grabbing */
+	UPROPERTY(EditAnywhere, config, Category = Poking, meta = (ClampMin = 0))
+	float InteractionDistance;
+
 	/** Whether to draw constraints as points */
 	UPROPERTY(config)
 	uint32 bShowConstraintsAsPoints:1;
 
+	/** Whether to highlight limits that have been violated */
+	UPROPERTY(config)
+	uint32 bDrawViolatedLimits:1;
+
 	/** Whether to only render selected constraints */
 	UPROPERTY(config)
 	uint32 bRenderOnlySelectedConstraints:1;
+
+	/* Toggle collisions with floor in the simulation */
+	UPROPERTY(config)
+	uint32 bSimulationFloorCollisionEnabled:1;
 
 	/** Controls how large constraints are drawn in Physics Asset Editor */
 	UPROPERTY(config)
@@ -104,11 +125,11 @@ class UNREALED_API UPhysicsAssetEditorOptions : public UObject
 
 	/** View mode for meshes in edit mode */
 	UPROPERTY(config)
-	EPhysicsAssetEditorRenderMode MeshViewMode;
+		EPhysicsAssetEditorMeshViewMode MeshViewMode;
 
 	/** View mode for collision in edit mode */
 	UPROPERTY(config)
-	EPhysicsAssetEditorRenderMode CollisionViewMode;
+	EPhysicsAssetEditorCollisionViewMode CollisionViewMode;
 
 	/** View mode for constraints in edit mode */
 	UPROPERTY(config)
@@ -116,18 +137,18 @@ class UNREALED_API UPhysicsAssetEditorOptions : public UObject
 
 	/** View mode for meshes in simulation mode */
 	UPROPERTY(config)
-	EPhysicsAssetEditorRenderMode SimulationMeshViewMode;
+	EPhysicsAssetEditorMeshViewMode SimulationMeshViewMode;
 
 	/** View mode for collision in simulation mode */
 	UPROPERTY(config)
-	EPhysicsAssetEditorRenderMode SimulationCollisionViewMode;
+	EPhysicsAssetEditorCollisionViewMode SimulationCollisionViewMode;
 
 	/** View mode for constraints in simulation mode */
 	UPROPERTY(config)
 	EPhysicsAssetEditorConstraintViewMode SimulationConstraintViewMode;
 
 	/** Opacity of 'solid' rendering */
-	UPROPERTY(config)
+	UPROPERTY(config, meta = (ClampMin = 0, ClampMax = 1))
 	float CollisionOpacity;
 
 	/** When set, turns opacity of solid rendering for unselected bodies to zero */
@@ -145,4 +166,13 @@ class UNREALED_API UPhysicsAssetEditorOptions : public UObject
 	/** When set, cloth will reset each time simulation is toggled */
 	UPROPERTY(EditAnywhere, config, Category=Clothing)
 	bool bResetClothWhenSimulating;
+
+	// The following are for enabling/disabling controls at runtime.
+	// Some controls use the new "UToolMenu" menus. These are enabled/disabled via json permissions.
+	// Other controls use the legacy FMenuBuilder. These use the following properties to enable/disable.
+	UPROPERTY()
+	bool bExposeLegacyMenuSimulationControls = true;
+
+	UPROPERTY()
+	bool bExposeLegacyMenuConstraintControls = true;
 };

@@ -2,7 +2,7 @@
 
 #include "GameplayDebugger/GameplayDebuggerCategory_Perception.h"
 
-#if WITH_GAMEPLAY_DEBUGGER
+#if WITH_GAMEPLAY_DEBUGGER_MENU
 
 #include "GameFramework/Pawn.h"
 #include "AIController.h"
@@ -23,10 +23,19 @@ void FGameplayDebuggerCategory_Perception::CollectData(APlayerController* OwnerP
 	APawn* MyPawn = Cast<APawn>(DebugActor);
 	if (MyPawn)
 	{
-		AAIController* AIC = Cast<AAIController>(MyPawn->GetController());
-		if (AIC)
+		AController* Controller = MyPawn->GetController();
+		if (AAIController* AIC = Cast<AAIController>(Controller))
 		{
 			PerceptionComponent = AIC->GetPerceptionComponent();
+		}
+		else
+		{
+			PerceptionComponent = MyPawn->FindComponentByClass<UAIPerceptionComponent>();
+			// try the controller if the Pawn doesn't have it
+			if (PerceptionComponent == nullptr && Controller)
+			{
+				PerceptionComponent = Controller->FindComponentByClass<UAIPerceptionComponent>();
+			}
 		}
 	}
 
@@ -41,4 +50,4 @@ void FGameplayDebuggerCategory_Perception::CollectData(APlayerController* OwnerP
 	}
 }
 
-#endif // WITH_GAMEPLAY_DEBUGGER
+#endif // WITH_GAMEPLAY_DEBUGGER_MENU

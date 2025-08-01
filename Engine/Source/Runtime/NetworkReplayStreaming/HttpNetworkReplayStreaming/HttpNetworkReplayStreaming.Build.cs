@@ -12,6 +12,7 @@ namespace UnrealBuildTool.Rules
                 new string[]
 				{
 					"Core",
+					"CoreOnline",
 					"CoreUObject",
                     "Engine",
                     "HTTP",
@@ -24,6 +25,8 @@ namespace UnrealBuildTool.Rules
                 AddEngineThirdPartyPrivateStaticDependencies(Target,"libWebSockets");
                 AddEngineThirdPartyPrivateStaticDependencies(Target,"zlib");
             }
-        }
+
+			UnsafeTypeCastWarningLevel = WarningLevel.Error;
+		}
     }
 }

@@ -31,6 +31,13 @@ float rcSqrt(float x)
 	return sqrtf(x);
 }
 
+//@UE BEGIN Adding support for LWCoords.
+double rcSqrt(double x)
+{
+	return sqrt(x);
+}
+//@UE END
+
 /// @class rcContext
 /// @par
 ///
@@ -154,7 +161,7 @@ void rcFreeContourSet(rcContourSet* cset)
 	rcFree(cset);
 }
 
-//@UE4 BEGIN
+//@UE BEGIN
 #if WITH_NAVMESH_CLUSTER_LINKS
 rcClusterSet* rcAllocClusterSet()
 {
@@ -172,7 +179,7 @@ void rcFreeClusterSet(rcClusterSet* clusters)
 	rcFree(clusters);
 }
 #endif // WITH_NAVMESH_CLUSTER_LINKS
-//@UE4 END
+//@UE END
 
 rcPolyMesh* rcAllocPolyMesh()
 {
@@ -208,20 +215,20 @@ void rcFreePolyMeshDetail(rcPolyMeshDetail* dmesh)
 	rcFree(dmesh);
 }
 
-void rcCalcBounds(const float* verts, int nv, float* bmin, float* bmax)
+void rcCalcBounds(const rcReal* verts, int nv, rcReal* bmin, rcReal* bmax)
 {
 	// Calculate bounding box.
 	rcVcopy(bmin, verts);
 	rcVcopy(bmax, verts);
 	for (int i = 1; i < nv; ++i)
 	{
-		const float* v = &verts[i*3];
+		const rcReal* v = &verts[i*3];
 		rcVmin(bmin, v);
 		rcVmax(bmax, v);
 	}
 }
 
-void rcCalcGridSize(const float* bmin, const float* bmax, float cs, int* w, int* h)
+void rcCalcGridSize(const rcReal* bmin, const rcReal* bmax, rcReal cs, int* w, int* h)
 {
 	*w = (int)((bmax[0] - bmin[0])/cs+0.5f);
 	*h = (int)((bmax[2] - bmin[2])/cs+0.5f);
@@ -233,8 +240,8 @@ void rcCalcGridSize(const float* bmin, const float* bmax, float cs, int* w, int*
 /// 
 /// @see rcAllocHeightfield, rcHeightfield 
 bool rcCreateHeightfield(rcContext* /*ctx*/, rcHeightfield& hf, int width, int height,
-						 const float* bmin, const float* bmax,
-						 float cs, float ch)
+						 const rcReal* bmin, const rcReal* bmax,
+						 rcReal cs, rcReal ch)
 {
 	// TODO: VC complains about unref formal variable, figure out a way to handle this better.
 //	rcAssert(ctx);
@@ -272,8 +279,9 @@ bool rcCreateHeightfield(rcContext* /*ctx*/, rcHeightfield& hf, int width, int h
 	{
 		for (int j = 0; j < hf.width + 2; j++)
 		{
-			hf.tempspans[i * (hf.width + 2) + j].sminmax[0] = 32000;
-			hf.tempspans[i * (hf.width + 2) + j].sminmax[1] = -32000;
+			constexpr int RANGE = INT_MAX;
+			hf.tempspans[i * (hf.width + 2) + j].sminmax[0] = RANGE;
+			hf.tempspans[i * (hf.width + 2) + j].sminmax[1] = -RANGE;
 		}
 	}
 
@@ -305,14 +313,29 @@ void rcResetHeightfield(rcHeightfield& hf)
 	memset(hf.spans, 0, sizeof(rcSpan*)*hf.width*hf.height);
 }
 
-static void calcTriNormal(const float* v0, const float* v1, const float* v2, float* norm)
+static void calcTriNormal(const rcReal* v0, const rcReal* v1, const rcReal* v2, rcReal* norm)
 {
-	float e0[3], e1[3];
+	rcReal e0[3], e1[3];
 	rcVsub(e0, v1, v0);
 	rcVsub(e1, v2, v0);
 	rcVcross(norm, e0, e1);
 	rcVnormalize(norm);
 }
+
+//@UE BEGIN
+void rcCalcTriNormals(const rcReal* verts, const int nv, const int* tris, const int nt, rcReal* norms)
+{
+	for (int i = 0; i < nt; ++i)
+	{
+		const int* tri = &tris[i*3];
+		const rcReal* v0 = &verts[tri[0]*3];
+		const rcReal* v1 = &verts[tri[1]*3];
+		const rcReal* v2 = &verts[tri[2]*3];
+
+		calcTriNormal(v0, v1, v2, &norms[i*3]);
+	}
+}
+//@UE END
 
 /// @par
 ///
@@ -322,24 +345,24 @@ static void calcTriNormal(const float* v0, const float* v1, const float* v2, flo
 /// See the #rcConfig documentation for more information on the configuration parameters.
 /// 
 /// @see rcHeightfield, rcClearUnwalkableTriangles, rcRasterizeTriangles
-void rcMarkWalkableTriangles(rcContext* /*ctx*/, const float walkableSlopeAngle,
-							 const float* verts, int /*nv*/,
+void rcMarkWalkableTriangles(rcContext* /*ctx*/, const rcReal walkableSlopeAngle,
+							 const rcReal* verts, int /*nv*/,
 							 const int* tris, int nt,
 							 unsigned char* areas)
 {
 	// TODO: VC complains about unref formal variable, figure out a way to handle this better.
 //	rcAssert(ctx);
 	
-	const float walkableThr = cosf(walkableSlopeAngle/180.0f*RC_PI);
+	const rcReal walkableThr = rcCos(walkableSlopeAngle/180.0f*RC_PI);
 	rcMarkWalkableTrianglesCos(0, walkableThr, verts, 0, tris, nt, areas);
 }
 
-void rcMarkWalkableTrianglesCos(rcContext* /*ctx*/, const float walkableSlopeCos,
-								const float* verts, int /*nv*/,
+void rcMarkWalkableTrianglesCos(rcContext* /*ctx*/, const rcReal walkableSlopeCos,
+								const rcReal* verts, int /*nv*/,
 								const int* tris, int nt,
 								unsigned char* areas)
 {
-	float norm[3];
+	rcReal norm[3];
 	for (int i = 0; i < nt; ++i)
 	{
 		const int* tri = &tris[i*3];
@@ -358,17 +381,17 @@ void rcMarkWalkableTrianglesCos(rcContext* /*ctx*/, const float walkableSlopeCos
 /// See the #rcConfig documentation for more information on the configuration parameters.
 /// 
 /// @see rcHeightfield, rcClearUnwalkableTriangles, rcRasterizeTriangles
-void rcClearUnwalkableTriangles(rcContext* /*ctx*/, const float walkableSlopeAngle,
-								const float* verts, int /*nv*/,
+void rcClearUnwalkableTriangles(rcContext* /*ctx*/, const rcReal walkableSlopeAngle,
+								const rcReal* verts, int /*nv*/,
 								const int* tris, int nt,
 								unsigned char* areas)
 {
 	// TODO: VC complains about unref formal variable, figure out a way to handle this better.
 //	rcAssert(ctx);
 	
-	const float walkableThr = cosf(walkableSlopeAngle/180.0f*RC_PI);
+	const rcReal walkableThr = rcCos(walkableSlopeAngle/180.0f*RC_PI);
 	
-	float norm[3];
+	rcReal norm[3];
 	
 	for (int i = 0; i < nt; ++i)
 	{
@@ -416,14 +439,14 @@ bool rcBuildCompactHeightfield(rcContext* ctx, const int walkableHeight, const i
 {
 	rcAssert(ctx);
 	
-// @UE4 BEGIN: early-out when no walkable spans 
+// @UE BEGIN: early-out when no walkable spans 
 	const int spanCount = rcGetHeightFieldSpanCount(ctx, hf);
 	if (spanCount == 0)
 	{
 		// no spans to speak of, bail out.
 		return false;
 	}
-// @UE4 END
+// @UE END
 	ctx->startTimer(RC_TIMER_BUILD_COMPACTHEIGHTFIELD);
 	
 	const int w = hf.width;
@@ -464,8 +487,6 @@ bool rcBuildCompactHeightfield(rcContext* ctx, const int walkableHeight, const i
 	}
 	memset(chf.areas, RC_NULL_AREA, sizeof(unsigned char)*spanCount);
 	
-	const int MAX_HEIGHT = 0xffff;
-	
 	// Fill in cells and spans.
 	int idx = 0;
 	for (int y = 0; y < h; ++y)
@@ -482,9 +503,9 @@ bool rcBuildCompactHeightfield(rcContext* ctx, const int walkableHeight, const i
 			{
 				if (s->data.area != RC_NULL_AREA)
 				{
-					const int bot = (int)s->data.smax;
-					const int top = s->next ? (int)s->next->data.smin : MAX_HEIGHT;
-					chf.spans[idx].y = (unsigned short)rcClamp(bot, 0, 0xffff);
+					const rcSpanUInt bot = (int)s->data.smax;
+					const rcSpanUInt top = s->next ? (int)s->next->data.smin : RC_SPAN_MAX_HEIGHT;
+					chf.spans[idx].y = rcClamp(bot, 0, RC_SPAN_MAX_HEIGHT);
 					chf.spans[idx].h = (unsigned char)rcClamp(top - bot, 0, 0xff);
 					chf.areas[idx] = s->data.area;
 					idx++;
@@ -522,12 +543,12 @@ bool rcBuildCompactHeightfield(rcContext* ctx, const int walkableHeight, const i
 					for (int k = (int)nc.index, nk = (int)(nc.index+nc.count); k < nk; ++k)
 					{
 						const rcCompactSpan& ns = chf.spans[k];
-						const int bot = rcMax(s.y, ns.y);
-						const int top = rcMin(s.y+s.h, ns.y+ns.h);
+						const rcSpanUInt bot = rcMax(s.y, ns.y);
+						const rcSpanUInt top = rcMin(s.y+s.h, ns.y+ns.h);
 
 						// Check that the gap between the spans is walkable,
 						// and that the climb height between the gaps is not too high.
-						if ((top - bot) >= walkableHeight && rcAbs((int)ns.y - (int)s.y) <= walkableClimb)
+						if (((int)top - (int)bot) >= walkableHeight && rcAbs((int)ns.y - (int)s.y) <= walkableClimb)
 						{
 							// Mark direction as walkable.
 							const int lidx = k - (int)nc.index;

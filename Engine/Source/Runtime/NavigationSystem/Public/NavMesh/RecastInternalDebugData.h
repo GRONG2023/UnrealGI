@@ -2,24 +2,41 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Math/Color.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector.h"
 #include "NavMesh/RecastHelpers.h"
+
+#if WITH_RECAST
+
 #include "DebugUtils/DebugDraw.h"
 
 struct FRecastInternalDebugData : public duDebugDraw
 {
-	duDebugDrawPrimitives CurrentPrim;
-	int32 FirstVertexIndex;
+	duDebugDrawPrimitives CurrentPrim = DU_DRAW_POINTS;
+	int32 FirstVertexIndex = 0;
 
 	TArray<uint32> TriangleIndices;
 	TArray<FVector> TriangleVertices;
-	TArray<uint32> TriangleColors;
+	TArray<FColor> TriangleColors;
 
 	TArray<FVector> LineVertices;
-	TArray<uint32>  LineColors;
+	TArray<FColor>  LineColors;
 
 	TArray<FVector> PointVertices;
-	TArray<uint32>  PointColors;
+	TArray<FColor>  PointColors;
 
+	TArray<FVector> LabelVertices;
+	TArray<FString> Labels;
+
+	double BuildTime = 0.;
+	double BuildCompressedLayerTime = 0.;
+	double BuildNavigationDataTime = 0.;
+
+	uint32 TriangleCount = 0;
+	unsigned char Resolution = 0;
+	
 	FRecastInternalDebugData() {}
 	virtual ~FRecastInternalDebugData() override {}
 
@@ -32,23 +49,25 @@ struct FRecastInternalDebugData : public duDebugDraw
 		FirstVertexIndex = TriangleVertices.Num();
 	}
 
-	virtual void vertex(const float* pos, unsigned int color) override
+	virtual void vertex(const FVector::FReal* pos, unsigned int color) override
 	{
 		vertex(pos[0], pos[1], pos[2], color, 0.0f, 0.0f);
 	}
 
-	virtual void vertex(const float x, const float y, const float z, unsigned int color) override
+	virtual void vertex(const FVector::FReal x, const FVector::FReal y, const FVector::FReal z, unsigned int color) override
 	{
 		vertex(x, y, z, color, 0.0f, 0.0f);
 	}
 
-	virtual void vertex(const float* pos, unsigned int color, const float* uv) override
+	virtual void vertex(const FVector::FReal* pos, unsigned int color, const FVector::FReal* uv) override
 	{
 		vertex(pos[0], pos[1], pos[2], color, uv[0], uv[1]);
 	}
 
-	virtual void vertex(const float x, const float y, const float z, unsigned int color, const float u, const float v) override;
+	virtual void vertex(const FVector::FReal x, const FVector::FReal y, const FVector::FReal z, unsigned int color, const FVector::FReal u, const FVector::FReal v) override;
+
+	virtual void text(const FVector::FReal x, const FVector::FReal y, const FVector::FReal z, const char* text) override;
 
 	virtual void end() override;
 };
-
+#endif // WITH_RECAST

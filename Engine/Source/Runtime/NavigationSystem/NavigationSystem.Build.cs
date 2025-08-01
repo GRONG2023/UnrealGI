@@ -1,63 +1,39 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using System.IO;
+
 namespace UnrealBuildTool.Rules
 {
     public class NavigationSystem : ModuleRules
     {
         public NavigationSystem(ReadOnlyTargetRules Target) : base(Target)
         {
-            PublicIncludePaths.AddRange(
-                new string[] {
-                    "Runtime/NavigationSystem/Public",
-                }
-                );
-
-            PrivateIncludePaths.AddRange(
-                new string[] {
-                    "Runtime/NavigationSystem/Private",
-                    "Runtime/Engine/Private",
-                    "Developer/DerivedDataCache/Public",
-                }
-                );
-
             PublicDependencyModuleNames.AddRange(
                 new string[] {
-                    "Core",
+					"Chaos",
+					"Core",
                     "CoreUObject",
                     "Engine",
-                }
-                );
-
-            PrivateDependencyModuleNames.AddRange(
-                new string[] {
-                    "RHI",
-                    "RenderCore",
-                }
+					"GeometryCollectionEngine",
+				}
                 );
 
 			PrivateIncludePathModuleNames.AddRange(
 				new string[]
 				{
+					"DerivedDataCache",
 					"TargetPlatform",
 				}
 				);
-            
-            if (!Target.bBuildRequiresCookedData && Target.bCompileAgainstEngine)
-            {
-                DynamicallyLoadedModuleNames.Add("DerivedDataCache");
-            }
 
-            SetupModulePhysicsSupport(Target);
+			PrivateDependencyModuleNames.AddRange(
+				new string[] {
+					"RHI",
+					"RenderCore",
+				}
+				);
 
-			if (Target.bCompileChaos || Target.bUseChaos)
-            {
-                PublicDependencyModuleNames.AddRange(
-                    new string[] {
-						"Chaos",
-                        "GeometryCollectionEngine",
-                    }
-					);
-            }
+			SetupModulePhysicsSupport(Target);
 
             if (Target.bCompileRecast)
             {
@@ -94,6 +70,7 @@ namespace UnrealBuildTool.Rules
             if (Target.bBuildEditor == true)
             {
                 // @todo api: Only public because of WITH_EDITOR and UNREALED_API
+				PublicDependencyModuleNames.Add("EditorFramework");
                 PublicDependencyModuleNames.Add("UnrealEd");
                 CircularlyReferencedDependentModules.Add("UnrealEd");
             }

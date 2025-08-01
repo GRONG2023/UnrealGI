@@ -17,7 +17,7 @@ namespace ChaosTest
 		// Trimesh is from SM_Cattus_POI_Rib, this was a real world failure that is now fixed.
 
 		using namespace Chaos;
-		FParticles TrimeshParticles(
+		FTriangleMeshImplicitObject::ParticlesType TrimeshParticles(
 		{
 			{29.0593967, -5.21321106, -10.2669592},
 			{34.5006638, -3.16600156, -14.5092020},
@@ -852,8 +852,8 @@ namespace ChaosTest
 			Materials.Emplace(0);
 		}
 
-		TUniquePtr<FTriangleMeshImplicitObject> TriangleMesh = MakeUnique<FTriangleMeshImplicitObject>(MoveTemp(TrimeshParticles), MoveTemp(Indices), MoveTemp(Materials));
-		TImplicitObjectScaled<FTriangleMeshImplicitObject> ScaledTriangleMesh = TImplicitObjectScaled<FTriangleMeshImplicitObject>(MakeSerializable(TriangleMesh), FVec3(50,50,50));
+		FTriangleMeshImplicitObjectPtr TriangleMesh( new FTriangleMeshImplicitObject(MoveTemp(TrimeshParticles), MoveTemp(Indices), MoveTemp(Materials)));
+		TImplicitObjectScaled<FTriangleMeshImplicitObject> ScaledTriangleMesh = TImplicitObjectScaled<FTriangleMeshImplicitObject>(TriangleMesh, FVec3(50,50,50));
 
 		const FVec3 X1 = { 0,0,-19.45 };
 		const FVec3 X2 = X1 + FVec3(0, 0, 38.9);
@@ -873,11 +873,12 @@ namespace ChaosTest
 		FVec3 Normal(0.0);
 		FVec3 Position(0.0);
 		int32 FaceIndex = -1;
-		bool bResult = ScaledTriangleMesh.LowLevelSweepGeom(Capsule, CapsuleToTrimesh, Dir, Length, OutTime, Position, Normal, FaceIndex, 0.0f, true);
+		FVec3 FaceNormal(0.0);
+		bool bResult = ScaledTriangleMesh.LowLevelSweepGeom(Capsule, CapsuleToTrimesh, Dir, Length, OutTime, Position, Normal, FaceIndex, FaceNormal, 0.0f, true);
 		FVec3 WorldPosition = TrimeshTransform.TransformPositionNoScale(Position);
 
 		EXPECT_EQ(bResult, true);
-		EXPECT_EQ(FaceIndex, 158);
+		EXPECT_EQ(FaceIndex, 415);
 		EXPECT_NEAR(WorldPosition.X, 763.85413, KINDA_SMALL_NUMBER);
 		EXPECT_NEAR(WorldPosition.Y, 728.80212, KINDA_SMALL_NUMBER);
 		EXPECT_NEAR(WorldPosition.Z, 303.77856, KINDA_SMALL_NUMBER);

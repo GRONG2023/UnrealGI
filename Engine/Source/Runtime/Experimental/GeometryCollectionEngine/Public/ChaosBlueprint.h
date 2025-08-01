@@ -12,6 +12,7 @@
 #include "ChaosCollisionEventFilter.h"
 #include "ChaosBreakingEventFilter.h"
 #include "ChaosTrailingEventFilter.h"
+#include "ChaosRemovalEventFilter.h"
 #include "ChaosBlueprint.generated.h"
 
 class AGeometryCollectionActor;
@@ -31,24 +32,29 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnChaosBreakingEvents, const TArray
 */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnChaosTrailingEvents, const TArray<FChaosTrailingEventData>&, TrailingEvents);
 
+/**
+* Called when new destruction events are available for removals. Removal listening must be enabled to get callbacks on this delegate.
+*/
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnChaosRemovalEvents, const TArray<FChaosRemovalEventData>&, RemovalEvents);
+
 
 /** Object allowing for retrieving Chaos Destruction data. */
-UCLASS(ClassGroup = (Chaos, Common), hidecategories = (Object, ActorComponent, Physics, Rendering, Mobility, LOD), ShowCategories = Trigger, meta = (BlueprintSpawnableComponent))
-class GEOMETRYCOLLECTIONENGINE_API UChaosDestructionListener : public USceneComponent
+UCLASS(ClassGroup = (Chaos), hidecategories = (Object, ActorComponent, Physics, Rendering, Mobility, LOD), ShowCategories = Trigger, meta = (BlueprintSpawnableComponent), MinimalAPI)
+class UChaosDestructionListener : public USceneComponent
 {
 	GENERATED_UCLASS_BODY()
 		
 public:
 	//~ Begin UObject Interface
 #if WITH_EDITOR
-	virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
+	GEOMETRYCOLLECTIONENGINE_API virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
 	//~ End UObject Interface
 	
 	//~ Begin UActorComponent interface
-	virtual void BeginPlay() override;
-	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
-	virtual void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction *ThisTickFunction) override;
+	GEOMETRYCOLLECTIONENGINE_API virtual void BeginPlay() override;
+	GEOMETRYCOLLECTIONENGINE_API virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	GEOMETRYCOLLECTIONENGINE_API virtual void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction *ThisTickFunction) override;
 	//~ End UActorComponent interface
 
 	// Whether or not collision event listening is enabled
@@ -63,6 +69,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Trailing Events")
 	uint8 bIsTrailingEventListeningEnabled : 1;
 
+	// Whether or not removal event listening is enabled
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Removal Events")
+	uint8 bIsRemovalEventListeningEnabled : 1;
+
 	// The settings to use for collision event listening
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Collision Events", meta = (EditCondition = "bIsCollisionEventListeningEnabled"))
 	FChaosCollisionEventRequestSettings CollisionEventRequestSettings;
@@ -75,57 +85,69 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Trailing Events", meta = (EditCondition = "bIsTrailingEventListeningEnabled"))
 	FChaosTrailingEventRequestSettings TrailingEventRequestSettings;
 
+	// The settings to use for removal event listening
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Removal Events", meta = (EditCondition = "bIsRemovalEventListeningEnabled"))
+	FChaosRemovalEventRequestSettings RemovalEventRequestSettings;
+
 	// Which chaos solver actors we're using. If empty, this listener will fallback to the "world" solver.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Solvers")
-	TSet<AChaosSolverActor*> ChaosSolverActors;
+	TSet<TObjectPtr<AChaosSolverActor>> ChaosSolverActors;
 
 	// Which chaos solver actors we're using. If empty, this listener will fallback to the "world" solver.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "GeometryCollections")
-	TSet<AGeometryCollectionActor*> GeometryCollectionActors; // Using TSet automatically blocks if user tries to add same actor twice
+	TSet<TObjectPtr<AGeometryCollectionActor>> GeometryCollectionActors; // Using TSet automatically blocks if user tries to add same actor twice
 
 	// Dynamically adds a chaos solver to the listener
 	UFUNCTION(BlueprintCallable, Category = "Destruction Listener", meta = (WorldContext = "WorldContextObject"))
-	void AddChaosSolverActor(AChaosSolverActor* ChaosSolverActor);
+	GEOMETRYCOLLECTIONENGINE_API void AddChaosSolverActor(AChaosSolverActor* ChaosSolverActor);
 	
 	// Dynamically removes a chaos solver from the listener
 	UFUNCTION(BlueprintCallable, Category = "Destruction Listener", meta = (WorldContext = "WorldContextObject"))
-	void RemoveChaosSolverActor(AChaosSolverActor* ChaosSolverActor);
+	GEOMETRYCOLLECTIONENGINE_API void RemoveChaosSolverActor(AChaosSolverActor* ChaosSolverActor);
 
 	// Dynamically adds a chaos solver to the listener
 	UFUNCTION(BlueprintCallable, Category = "Destruction Listener", meta = (WorldContext = "WorldContextObject"))
-	void AddGeometryCollectionActor(AGeometryCollectionActor* GeometryCollectionActor);
+	GEOMETRYCOLLECTIONENGINE_API void AddGeometryCollectionActor(AGeometryCollectionActor* GeometryCollectionActor);
 
 	// Dynamically removes a chaos solver from the listener
 	UFUNCTION(BlueprintCallable, Category = "Destruction Listener", meta = (WorldContext = "WorldContextObject"))
-	void RemoveGeometryCollectionActor(AGeometryCollectionActor* GeometryCollectionActor);
+	GEOMETRYCOLLECTIONENGINE_API void RemoveGeometryCollectionActor(AGeometryCollectionActor* GeometryCollectionActor);
 
 	// Sets collision event request settings dynamically
 	UFUNCTION(BlueprintCallable, Category = "Destruction Listener", meta = (WorldContext = "WorldContextObject"))
-	void SetCollisionEventRequestSettings(const FChaosCollisionEventRequestSettings& InSettings);
+	GEOMETRYCOLLECTIONENGINE_API void SetCollisionEventRequestSettings(const FChaosCollisionEventRequestSettings& InSettings);
 
 	// Sets breaking event request settings dynamically
 	UFUNCTION(BlueprintCallable, Category = "Destruction Listener", meta = (WorldContext = "WorldContextObject"))
-	void SetBreakingEventRequestSettings(const FChaosBreakingEventRequestSettings& InSettings);
+	GEOMETRYCOLLECTIONENGINE_API void SetBreakingEventRequestSettings(const FChaosBreakingEventRequestSettings& InSettings);
 
 	// Sets trailing event request settings dynamically
 	UFUNCTION(BlueprintCallable, Category = "Destruction Listener", meta = (WorldContext = "WorldContextObject"))
-	void SetTrailingEventRequestSettings(const FChaosTrailingEventRequestSettings& InSettings);
+	GEOMETRYCOLLECTIONENGINE_API void SetTrailingEventRequestSettings(const FChaosTrailingEventRequestSettings& InSettings);
+
+	// Sets removal event request settings dynamically
+	UFUNCTION(BlueprintCallable, Category = "Destruction Listener", meta = (WorldContext = "WorldContextObject"))
+	GEOMETRYCOLLECTIONENGINE_API void SetRemovalEventRequestSettings(const FChaosRemovalEventRequestSettings& InSettings);
 
 	// Enables or disables collision event listening
 	UFUNCTION(BlueprintCallable, Category = "Destruction Listener", meta = (WorldContext = "WorldContextObject"))
-	void SetCollisionEventEnabled(bool bIsEnabled);
+	GEOMETRYCOLLECTIONENGINE_API void SetCollisionEventEnabled(bool bIsEnabled);
 
 	// Enables or disables breaking event listening
 	UFUNCTION(BlueprintCallable, Category = "Destruction Listener", meta = (WorldContext = "WorldContextObject"))
-	void SetBreakingEventEnabled(bool bIsEnabled);
+	GEOMETRYCOLLECTIONENGINE_API void SetBreakingEventEnabled(bool bIsEnabled);
 
-	// Enables or disables breaking event listening
+	// Enables or disables trailing event listening
 	UFUNCTION(BlueprintCallable, Category = "Destruction Listener", meta = (WorldContext = "WorldContextObject"))
-	void SetTrailingEventEnabled(bool bIsEnabled);
+	GEOMETRYCOLLECTIONENGINE_API void SetTrailingEventEnabled(bool bIsEnabled);
+
+	// Enables or disables removal event listening
+	UFUNCTION(BlueprintCallable, Category = "Destruction Listener", meta = (WorldContext = "WorldContextObject"))
+	GEOMETRYCOLLECTIONENGINE_API void SetRemovalEventEnabled(bool bIsEnabled);
 
 	// Returns if the destruction listener is listening to any events
 	UFUNCTION(BlueprintCallable, Category = "Destruction Listener", meta = (WorldContext = "WorldContextObject"))
-	bool IsEventListening() const;
+	GEOMETRYCOLLECTIONENGINE_API bool IsEventListening() const;
 
 	/** Called when new collision events are available. */
 	UPROPERTY(BlueprintAssignable)
@@ -139,27 +161,35 @@ public:
 	UPROPERTY(BlueprintAssignable)
 	FOnChaosTrailingEvents OnTrailingEvents;
 
+	/** Called when new trailing events are available. */
+	UPROPERTY(BlueprintAssignable)
+	FOnChaosRemovalEvents OnRemovalEvents;
+
 	// Sorts collision events according to the given sort method	
 	UFUNCTION(BlueprintCallable, Category = "Destruction Listener", meta = (WorldContext = "WorldContextObject"))
-	void SortCollisionEvents(UPARAM(ref) TArray<FChaosCollisionEventData>& CollisionEvents, EChaosCollisionSortMethod SortMethod);
+	GEOMETRYCOLLECTIONENGINE_API void SortCollisionEvents(UPARAM(ref) TArray<FChaosCollisionEventData>& CollisionEvents, EChaosCollisionSortMethod SortMethod);
 
 	// Sorts breaking events according to the given sort method	
 	UFUNCTION(BlueprintCallable, Category = "Destruction Listener", meta = (WorldContext = "WorldContextObject"))
-	void SortBreakingEvents(UPARAM(ref) TArray<FChaosBreakingEventData>& BreakingEvents, EChaosBreakingSortMethod SortMethod);
+	GEOMETRYCOLLECTIONENGINE_API void SortBreakingEvents(UPARAM(ref) TArray<FChaosBreakingEventData>& BreakingEvents, EChaosBreakingSortMethod SortMethod);
 
 	// Sorts trailing events according to the given sort method	
 	UFUNCTION(BlueprintCallable, Category = "Destruction Listener", meta = (WorldContext = "WorldContextObject"))
-	void SortTrailingEvents(UPARAM(ref) TArray<FChaosTrailingEventData>& TrailingEvents, EChaosTrailingSortMethod SortMethod);
+	GEOMETRYCOLLECTIONENGINE_API void SortTrailingEvents(UPARAM(ref) TArray<FChaosTrailingEventData>& TrailingEvents, EChaosTrailingSortMethod SortMethod);
+
+	// Sorts removal events according to the given sort method	
+	UFUNCTION(BlueprintCallable, Category = "Destruction Listener", meta = (WorldContext = "WorldContextObject"))
+	GEOMETRYCOLLECTIONENGINE_API void SortRemovalEvents(UPARAM(ref) TArray<FChaosRemovalEventData>& RemovalEvents, EChaosRemovalSortMethod SortMethod);
 
 private:
 	// Updates the scene component transform settings
-	void UpdateTransformSettings();
+	GEOMETRYCOLLECTIONENGINE_API void UpdateTransformSettings();
 
 	// Retrieves data from solvers
-	void GetDataFromSolvers();
+	GEOMETRYCOLLECTIONENGINE_API void GetDataFromSolvers();
 
-	void ClearEvents();
-	void UpdateEvents();
+	GEOMETRYCOLLECTIONENGINE_API void ClearEvents();
+	GEOMETRYCOLLECTIONENGINE_API void UpdateEvents();
 
 protected:
 
@@ -181,6 +211,7 @@ protected:
 	Chaos::FCollisionDataArray RawCollisionDataArray;
 	Chaos::FBreakingDataArray RawBreakingDataArray;
 	Chaos::FTrailingDataArray RawTrailingDataArray;
+	Chaos::FRemovalDataArray RawRemovalDataArray;
 
 	FTransform ChaosComponentTransform;
 
@@ -189,6 +220,7 @@ protected:
 	float LastCollisionDataTimeStamp;
 	float LastBreakingDataTimeStamp;
 	float LastTrailingDataTimeStamp;
+	float LastRemovalDataTimeStamp;
 
 	// The list of rigid body solvers, used to retrieve destruction events
 	TSet<Chaos::FPhysicsSolver*> Solvers;
@@ -199,6 +231,7 @@ protected:
 	TSharedPtr<FChaosCollisionEventFilter> ChaosCollisionFilter;
 	TSharedPtr<FChaosBreakingEventFilter> ChaosBreakingFilter;
 	TSharedPtr<FChaosTrailingEventFilter> ChaosTrailingFilter;
+	TSharedPtr<FChaosRemovalEventFilter> ChaosRemovalFilter;
 
 public:
 	void SetCollisionFilter(TSharedPtr<FChaosCollisionEventFilter> InCollisionFilter)
@@ -216,15 +249,21 @@ public:
 		ChaosTrailingFilter = InTrailingFilter;
 	}
 
-	void RegisterChaosEvents(FPhysScene* Scene);
-	void UnregisterChaosEvents(FPhysScene* Scene);
+	void SetRemovalFilter(TSharedPtr<FChaosRemovalEventFilter> InRemovalFilter)
+	{
+		ChaosRemovalFilter = InRemovalFilter;
+	}
 
-	void RegisterChaosEvents(TSharedPtr<FPhysScene_Chaos> Scene);
-	void UnregisterChaosEvents(TSharedPtr<FPhysScene_Chaos> Scene);
+	GEOMETRYCOLLECTIONENGINE_API void RegisterChaosEvents(FPhysScene* Scene);
+	GEOMETRYCOLLECTIONENGINE_API void UnregisterChaosEvents(FPhysScene* Scene);
+
+	GEOMETRYCOLLECTIONENGINE_API void RegisterChaosEvents(TSharedPtr<FPhysScene_Chaos> Scene);
+	GEOMETRYCOLLECTIONENGINE_API void UnregisterChaosEvents(TSharedPtr<FPhysScene_Chaos> Scene);
 
 
 	// Chaos Event Handlers
-	void HandleCollisionEvents(const Chaos::FCollisionEventData& CollisionData);
-	void HandleBreakingEvents(const Chaos::FBreakingEventData& BreakingData);
-	void HandleTrailingEvents(const Chaos::FTrailingEventData& TrailingData);
+	GEOMETRYCOLLECTIONENGINE_API void HandleCollisionEvents(const Chaos::FCollisionEventData& CollisionData);
+	GEOMETRYCOLLECTIONENGINE_API void HandleBreakingEvents(const Chaos::FBreakingEventData& BreakingData);
+	GEOMETRYCOLLECTIONENGINE_API void HandleTrailingEvents(const Chaos::FTrailingEventData& TrailingData);
+	GEOMETRYCOLLECTIONENGINE_API void HandleRemovalEvents(const Chaos::FRemovalEventData& RemovalData);
 };

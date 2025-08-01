@@ -6,7 +6,9 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "MaterialExpressionIO.h"
+#include "MaterialValueType.h"
 #include "Materials/MaterialExpression.h"
+#include "RHIFeatureLevel.h"
 #include "MaterialExpressionFeatureLevelSwitch.generated.h"
 
 UCLASS(collapsecategories, hidecategories=Object, MinimalAPI)
@@ -18,10 +20,8 @@ class UMaterialExpressionFeatureLevelSwitch : public UMaterialExpression
 	UPROPERTY()
 	FExpressionInput Default;
 
-#if WITH_EDITORONLY_DATA
 	UPROPERTY()
 	FExpressionInput Inputs[ERHIFeatureLevel::Num];
-#endif
 
 	//~ Begin UObject Interface.
 	virtual void Serialize(FStructuredArchive::FRecord Record) override;
@@ -32,13 +32,12 @@ class UMaterialExpressionFeatureLevelSwitch : public UMaterialExpression
 	virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
 	virtual void GetCaption(TArray<FString>& OutCaptions) const override;
 
-	virtual const TArray<FExpressionInput*> GetInputs() override;
-	virtual FExpressionInput* GetInput(int32 InputIndex) override;
 	virtual FName GetInputName(int32 InputIndex) const override;
 	virtual bool IsInputConnectionRequired(int32 InputIndex) const override;
 	virtual bool IsResultMaterialAttributes(int32 OutputIndex) override;
 	virtual uint32 GetInputType(int32 InputIndex) override {return MCT_Unknown;}
 	virtual uint32 GetOutputType(int32 OutputIndex) override {return MCT_Unknown;}
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
 #endif // WITH_EDITOR
 	//~ End UMaterialExpression Interface
 };

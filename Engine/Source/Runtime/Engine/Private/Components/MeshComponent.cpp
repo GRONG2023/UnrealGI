@@ -2,13 +2,22 @@
 
 #include "Components/MeshComponent.h"
 #include "Materials/Material.h"
+#include "MaterialDomain.h"
 #include "Engine/Texture2D.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "ContentStreaming.h"
+#include "Materials/MaterialRelevance.h"
 #include "Streaming/TextureStreamingHelpers.h"
 #include "Engine/World.h"
+#include "PSOPrecache.h"
+#include "UObject/UnrealType.h"
+#include "StaticMeshSceneProxyDesc.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MeshComponent)
+
 #if WITH_EDITOR
 #include "Rendering/StaticLightingSystemInterface.h"
+#include "TextureCompiler.h"
 #endif
 
 DEFINE_LOG_CATEGORY_STATIC(LogMaterialParameter, Warning, All);
@@ -25,14 +34,28 @@ UMeshComponent::UMeshComponent(const FObjectInitializer& ObjectInitializer)
 
 UMaterialInterface* UMeshComponent::GetMaterial(int32 ElementIndex) const
 {
+	UMaterialInterface* OutMaterial = nullptr;
+
 	if (OverrideMaterials.IsValidIndex(ElementIndex))
 	{
-		return OverrideMaterials[ElementIndex];
+		OutMaterial = OverrideMaterials[ElementIndex];
 	}
-	else
+
+	if (OutMaterial != nullptr && UseNaniteOverrideMaterials())
 	{
-		return nullptr;
+		UMaterialInterface* NaniteOverride = OutMaterial->GetNaniteOverride();
+		OutMaterial = NaniteOverride != nullptr ? NaniteOverride : OutMaterial;
 	}
+
+	return OutMaterial;
+}
+
+UMaterialInterface* UMeshComponent::GetMaterialByName(FName MaterialSlotName) const
+{
+	int32 MaterialIndex = GetMaterialIndex(MaterialSlotName);
+	if (MaterialIndex < 0)
+		return nullptr;
+	return GetMaterial(MaterialIndex);
 }
 
 void UMeshComponent::SetMaterial(int32 ElementIndex, UMaterialInterface* Material)
@@ -62,9 +85,28 @@ void UMeshComponent::SetMaterial(int32 ElementIndex, UMaterialInterface* Materia
 				}
 			}	
 
+			if (UMaterialInterface* PreviousMaterial = OverrideMaterials[ElementIndex].Get())
+			{
+				PreviousMaterial->OnRemovedAsOverride(this);
+			}
+
 			// Set the material and invalidate things
 			OverrideMaterials[ElementIndex] = Material;
-			MarkRenderStateDirty();			
+
+			if (Material)
+			{
+				Material->OnAssignedAsOverride(this);
+			}
+
+			// Precache PSOs again
+			PrecachePSOs();
+
+			MarkRenderStateDirty();
+			// If MarkRenderStateDirty didn't notify the streamer, do it now
+			if (!bIgnoreStreamingManagerUpdate && OwnerLevelHasRegisteredStaticComponentsInStreamingManager(GetOwner()))
+			{
+				IStreamingManager::Get().NotifyPrimitiveUpdated_Concurrent(this);
+			}
 			if (Material)
 			{
 				Material->AddToCluster(this, true);
@@ -77,10 +119,14 @@ void UMeshComponent::SetMaterial(int32 ElementIndex, UMaterialInterface* Materia
 			}
 
 #if WITH_EDITOR
-			FStaticLightingSystemInterface::OnPrimitiveComponentUnregistered.Broadcast(this);
-			if (HasValidSettingsForStaticLighting(false))
+			// Static Lighting is updated when compilation finishes
+			if (!IsCompiling())
 			{
-				FStaticLightingSystemInterface::OnPrimitiveComponentRegistered.Broadcast(this);
+				FStaticLightingSystemInterface::OnPrimitiveComponentUnregistered.Broadcast(this);
+				if (HasValidSettingsForStaticLighting(false))
+				{
+					FStaticLightingSystemInterface::OnPrimitiveComponentRegistered.Broadcast(this);
+				}
 			}
 #endif
 		}
@@ -96,20 +142,43 @@ void UMeshComponent::SetMaterialByName(FName MaterialSlotName, UMaterialInterfac
 	SetMaterial(MaterialIndex, Material);
 }
 
-FMaterialRelevance UMeshComponent::GetMaterialRelevance(ERHIFeatureLevel::Type InFeatureLevel) const
+template<class T> 
+FMaterialRelevance GetMaterialRelevanceImp(const T& Component, ERHIFeatureLevel::Type InFeatureLevel)
 {
 	// Combine the material relevance for all materials.
 	FMaterialRelevance Result;
-	for(int32 ElementIndex = 0;ElementIndex < GetNumMaterials();ElementIndex++)
+	for(int32 ElementIndex = 0;ElementIndex < Component.GetNumMaterials();ElementIndex++)
 	{
-		UMaterialInterface const* MaterialInterface = GetMaterial(ElementIndex);
+		UMaterialInterface const* MaterialInterface = Component.GetMaterial(ElementIndex);
 		if(!MaterialInterface)
 		{
 			MaterialInterface = UMaterial::GetDefaultMaterial(MD_Surface);
 		}
 		Result |= MaterialInterface->GetRelevance_Concurrent(InFeatureLevel);
 	}
+
+	UMaterialInterface const* OverlayMaterialInterface = Component.GetOverlayMaterial();
+	if (OverlayMaterialInterface != nullptr)
+	{
+		Result |= OverlayMaterialInterface->GetRelevance_Concurrent(InFeatureLevel);
+	}
+
 	return Result;
+}
+
+FMaterialRelevance UMeshComponent::GetMaterialRelevance(ERHIFeatureLevel::Type InFeatureLevel) const
+{
+	return GetMaterialRelevanceImp(*this, InFeatureLevel);	
+}
+
+FMaterialRelevance FStaticMeshSceneProxyDesc::GetMaterialRelevance(ERHIFeatureLevel::Type InFeatureLevel) const
+{
+	if (bUseProvidedMaterialRelevance)
+	{
+		return MaterialRelevance; 
+	}
+
+	return GetMaterialRelevanceImp(*this, InFeatureLevel);	
 }
 
 int32 UMeshComponent::GetNumOverrideMaterials() const
@@ -134,13 +203,24 @@ void UMeshComponent::PostEditChangeChainProperty(FPropertyChangedChainEvent& Pro
 void UMeshComponent::CleanUpOverrideMaterials()
 {
 	bool bUpdated = false;
+	int32 NumMaterials = GetNumMaterials();
+	int32 NumOverrideMaterials = OverrideMaterials.Num();
 
-	//We have to remove material override Ids that are bigger then the material list
-	if (GetNumOverrideMaterials() > GetNumMaterials())
+	// We have to remove material override Ids that are bigger then the material list
+	if (NumOverrideMaterials > NumMaterials)
 	{
 		//Remove the override material id that are superior to the static mesh materials number
-		int32 RemoveCount = GetNumOverrideMaterials() - GetNumMaterials();
-		OverrideMaterials.RemoveAt(GetNumMaterials(), RemoveCount);
+		int32 RemoveCount = NumOverrideMaterials - NumMaterials;
+
+		for (int32 MatIndex = NumMaterials; MatIndex < NumOverrideMaterials; MatIndex++)
+		{
+			if (UMaterialInterface* MatInterface = OverrideMaterials[MatIndex].Get())
+			{
+				MatInterface->OnRemovedAsOverride(this);
+			}
+		}
+
+		OverrideMaterials.RemoveAt(NumMaterials, RemoveCount);
 		bUpdated = true;
 	}
 
@@ -155,9 +235,22 @@ void UMeshComponent::EmptyOverrideMaterials()
 {
 	if (OverrideMaterials.Num())
 	{
+		for (int32 MatIndex = 0; MatIndex < OverrideMaterials.Num(); MatIndex++)
+		{
+			if (UMaterialInterface* MatInterface = OverrideMaterials[MatIndex].Get())
+			{
+				MatInterface->OnRemovedAsOverride(this);
+			}
+		}
+
 		OverrideMaterials.Reset();
 		MarkRenderStateDirty();
 	}
+}
+
+bool UMeshComponent::HasOverrideMaterials()
+{
+	return OverrideMaterials.Num() > 0;
 }
 
 int32 UMeshComponent::GetNumMaterials() const
@@ -174,6 +267,56 @@ void UMeshComponent::GetUsedMaterials(TArray<UMaterialInterface*>& OutMaterials,
 			OutMaterials.Add(MaterialInterface);
 		}
 	}
+
+	UMaterialInterface* OverlayMaterialInterface = GetOverlayMaterial();
+	if (OverlayMaterialInterface != nullptr)
+	{
+		OutMaterials.Add(OverlayMaterialInterface);
+	}
+}
+
+UMaterialInterface* UMeshComponent::GetOverlayMaterial() const
+{
+	if (OverlayMaterial)
+	{ 
+		return OverlayMaterial;
+	}
+	else
+	{
+		return GetDefaultOverlayMaterial();
+	}
+}
+
+void UMeshComponent::SetOverlayMaterial(UMaterialInterface* NewOverlayMaterial)
+{
+	if (OverlayMaterial != NewOverlayMaterial)
+	{
+		OverlayMaterial = NewOverlayMaterial;
+		// Precache PSOs again
+		PrecachePSOs();
+		MarkRenderStateDirty();
+	}
+}
+
+float UMeshComponent::GetOverlayMaterialMaxDrawDistance() const
+{
+	if (OverlayMaterialMaxDrawDistance != 0.f)
+	{ 
+		return OverlayMaterialMaxDrawDistance;
+	}
+	else
+	{
+		return GetDefaultOverlayMaterialMaxDrawDistance();
+	}
+}
+
+void UMeshComponent::SetOverlayMaterialMaxDrawDistance(float InMaxDrawDistance)
+{
+	if (OverlayMaterialMaxDrawDistance != InMaxDrawDistance)
+	{
+		OverlayMaterialMaxDrawDistance = InMaxDrawDistance;
+		MarkRenderStateDirty();
+	}
 }
 
 void UMeshComponent::PrestreamTextures( float Seconds, bool bPrioritizeCharacterTextures, int32 CinematicTextureGroups )
@@ -186,6 +329,10 @@ void UMeshComponent::PrestreamTextures( float Seconds, bool bPrioritizeCharacter
 
 	TArray<UTexture*> Textures;
 	GetUsedTextures(/*out*/ Textures, EMaterialQualityLevel::Num);
+
+#if WITH_EDITOR
+	FTextureCompilingManager::Get().FinishCompilation(Textures);
+#endif
 
 	for (UTexture* Texture : Textures)
 	{
@@ -202,6 +349,12 @@ void UMeshComponent::RegisterLODStreamingCallback(FLODStreamingCallback&& Callba
 	Callback(this, nullptr, ELODStreamingCallbackResult::NotImplemented);
 }
 
+void UMeshComponent::RegisterLODStreamingCallback(FLODStreamingCallback&& CallbackStreamingStart, FLODStreamingCallback&& CallbackStreamingDone, float TimeoutStartSecs, float TimeoutDoneSecs)
+{
+	check(IsInGameThread());
+	CallbackStreamingDone(this, nullptr, ELODStreamingCallbackResult::NotImplemented);
+}
+
 void UMeshComponent::SetTextureForceResidentFlag( bool bForceMiplevelsToBeResident )
 {
 	const int32 CinematicTextureGroups = 0;
@@ -209,6 +362,10 @@ void UMeshComponent::SetTextureForceResidentFlag( bool bForceMiplevelsToBeReside
 
 	TArray<UTexture*> Textures;
 	GetUsedTextures(/*out*/ Textures, EMaterialQualityLevel::Num);
+
+#if WITH_EDITOR
+	FTextureCompilingManager::Get().FinishCompilation(Textures);
+#endif
 
 	for (UTexture* Texture : Textures)
 	{
@@ -238,29 +395,11 @@ TArray<class UMaterialInterface*> UMeshComponent::GetMaterials() const
 	return OutMaterials;
 }
 
-int32 UMeshComponent::GetMaterialIndex(FName MaterialSlotName) const
-{
-	//This function should be override
-	return -1;
-}
-
-TArray<FName> UMeshComponent::GetMaterialSlotNames() const
-{
-	//This function should be override
-	return TArray<FName>();
-}
-
-bool UMeshComponent::IsMaterialSlotNameValid(FName MaterialSlotName) const
-{
-	//This function should be override
-	return false;
-}
-
 void UMeshComponent::SetScalarParameterValueOnMaterials(const FName ParameterName, const float ParameterValue)
 {
 	if (!bEnableMaterialParameterCaching)
 	{
-		const TArray<UMaterialInterface*> MaterialInterfaces = GetMaterials();		
+		const TArray<UMaterialInterface*> MaterialInterfaces = GetMaterials();
 		for (int32 MaterialIndex = 0; MaterialIndex < MaterialInterfaces.Num(); ++MaterialIndex)
 		{
 			UMaterialInterface* MaterialInterface = MaterialInterfaces[MaterialIndex];
@@ -362,6 +501,21 @@ void UMeshComponent::MarkCachedMaterialParameterNameIndicesDirty()
 	bCachedMaterialParameterIndicesAreDirty = true;
 }
 
+void UMeshComponent::BeginDestroy()
+{
+	for (int32 MatIndex = 0; MatIndex < OverrideMaterials.Num(); MatIndex++)
+	{
+		if (UMaterialInterface* MatInterface = OverrideMaterials[MatIndex].Get())
+		{
+			MatInterface->OnRemovedAsOverride(this);
+		}
+
+		OverrideMaterials[MatIndex] = nullptr;
+	}
+
+	Super::BeginDestroy();
+}
+
 void UMeshComponent::CacheMaterialParameterNameIndices()
 {
 	QUICK_SCOPE_CYCLE_COUNTER(STAT_CacheMaterialParameterNameIndices);
@@ -427,6 +581,11 @@ void UMeshComponent::CacheMaterialParameterNameIndices()
 
 void UMeshComponent::GetStreamingTextureInfoInner(FStreamingTextureLevelContext& LevelContext, const TArray<FStreamingTextureBuildInfo>* PreBuiltData, float ComponentScaling, TArray<FStreamingRenderAssetPrimitiveInfo>& OutStreamingTextures) const
 {
+	if (CanSkipGetTextureStreamingRenderAssetInfo())
+	{
+		return;
+	}
+
 	LevelContext.BindBuildData(PreBuiltData);
 
 	const int32 NumMaterials = GetNumMaterials();
@@ -435,7 +594,7 @@ void UMeshComponent::GetStreamingTextureInfoInner(FStreamingTextureLevelContext&
 		FPrimitiveMaterialInfo MaterialData;
 		if (GetMaterialStreamingData(MaterialIndex, MaterialData))
 		{
-			LevelContext.ProcessMaterial(Bounds, MaterialData, ComponentScaling, OutStreamingTextures);
+			LevelContext.ProcessMaterial(Bounds, MaterialData, ComponentScaling, OutStreamingTextures, bIsValidTextureStreamingBuiltData, this);
 		}
 	}
 }
@@ -461,8 +620,8 @@ void UMeshComponent::LogMaterialsAndTextures(FOutputDevice& Ar, int32 Indent) co
 	}
 
 	// Backup the material overrides so we can access the mesh original materials.
-	TArray<class UMaterialInterface*> OverrideMaterialsBackup;
-	FMemory::Memswap(&OverrideMaterialsBackup, &const_cast<UMeshComponent*>(this)->OverrideMaterials, sizeof(OverrideMaterialsBackup));
+	TArray<TObjectPtr<class UMaterialInterface>> OverrideMaterialsBackup;
+	Swap(OverrideMaterialsBackup, const_cast<UMeshComponent*>(this)->OverrideMaterials);
 
 	TArray<UMaterialInterface*> MaterialInterfaces = GetMaterials();
 	for (int32 MaterialIndex = 0; MaterialIndex < MaterialInterfaces.Num(); ++MaterialIndex)
@@ -480,7 +639,8 @@ void UMeshComponent::LogMaterialsAndTextures(FOutputDevice& Ar, int32 Indent) co
 	}
 
 	// Restore the overrides.
-	FMemory::Memswap(&OverrideMaterialsBackup, &const_cast<UMeshComponent*>(this)->OverrideMaterials, sizeof(OverrideMaterialsBackup));
+	Swap(OverrideMaterialsBackup, const_cast<UMeshComponent*>(this)->OverrideMaterials);
 }
 
 #endif
+

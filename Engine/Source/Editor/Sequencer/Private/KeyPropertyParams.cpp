@@ -1,7 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "KeyPropertyParams.h"
+
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Misc/AssertionMacros.h"
 #include "PropertyHandle.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
 
 FPropertyPath PropertyHandleToPropertyPath(const UClass* OwnerClass, const IPropertyHandle& InPropertyHandle)
 {
@@ -38,16 +45,40 @@ FPropertyPath PropertyHandleToPropertyPath(const UClass* OwnerClass, const IProp
 	return PropertyPath;
 }
 
-FCanKeyPropertyParams::FCanKeyPropertyParams(UClass* InObjectClass, const FPropertyPath& InPropertyPath)
+FCanKeyPropertyParams::FCanKeyPropertyParams(const UClass* InObjectClass, const FPropertyPath& InPropertyPath)
 	: ObjectClass(InObjectClass)
 	, PropertyPath(InPropertyPath)
 {
 }
 
-FCanKeyPropertyParams::FCanKeyPropertyParams(UClass* InObjectClass, const IPropertyHandle& InPropertyHandle)
+FCanKeyPropertyParams::FCanKeyPropertyParams(const UClass* InObjectClass, const IPropertyHandle& InPropertyHandle)
 	: ObjectClass(InObjectClass)
 	, PropertyPath(PropertyHandleToPropertyPath(InObjectClass, InPropertyHandle))
 {
+}
+
+const UStruct* FCanKeyPropertyParams::FindPropertyOwner(const FProperty* ForProperty) const
+{
+	check(ForProperty);
+
+	bool bFoundProperty = false;
+	for (int32 Index = PropertyPath.GetNumProperties() - 1; Index >= 0; --Index)
+	{
+		FProperty* Property = PropertyPath.GetPropertyInfo(Index).Property.Get();
+		if (!bFoundProperty)
+		{
+			bFoundProperty = Property == ForProperty;
+			if (bFoundProperty)
+			{
+				return Property->GetOwnerStruct();
+			}
+		}
+		else if (const FStructProperty* StructProperty = CastField<const FStructProperty>(Property))
+		{
+			return StructProperty->Struct;
+		}
+	}
+	return ObjectClass;
 }
 
 const UStruct* FCanKeyPropertyParams::FindPropertyContainer(const FProperty* ForProperty) const

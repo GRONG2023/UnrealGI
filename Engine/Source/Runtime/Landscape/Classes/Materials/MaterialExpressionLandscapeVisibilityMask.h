@@ -12,34 +12,31 @@
 class UTexture;
 struct FMaterialParameterInfo;
 
-UCLASS(collapseCategories, hideCategories=Object)
-class LANDSCAPE_API UMaterialExpressionLandscapeVisibilityMask : public UMaterialExpression
+UCLASS(collapseCategories, hideCategories=Object, MinimalAPI)
+class UMaterialExpressionLandscapeVisibilityMask : public UMaterialExpression
 {
 	GENERATED_UCLASS_BODY()
 
-	/** GUID that should be unique within the material, this is used for parameter renaming. */
-	UPROPERTY()
-	FGuid ExpressionGUID;
-
 public:
 
-	static FName ParameterName;
+	static LANDSCAPE_API FName ParameterName;
 
 	//~ Begin UMaterialExpression Interface
 #if WITH_EDITOR
-	virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
-	virtual void GetCaption(TArray<FString>& OutCaptions) const override;
-#endif
-	virtual UObject* GetReferencedTexture() const override;
-	virtual bool CanReferenceTexture() const override { return true; }
-	//~ End UMaterialExpression Interface
+	LANDSCAPE_API virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
+	LANDSCAPE_API virtual void GetCaption(TArray<FString>& OutCaptions) const override;
 
-	virtual FGuid& GetParameterExpressionId() override;
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
 
 	/**
-	 * Called to get list of parameter names for static parameter sets
+	 * Gets the landscape layer names
 	 */
-	void GetAllParameterInfo(TArray<FMaterialParameterInfo> &OutParameterInfo, TArray<FGuid> &OutParameterIds, const FMaterialParameterInfo& InBaseParameterInfo) const;
+	LANDSCAPE_API virtual void GetLandscapeLayerNames(TArray<FName>& OutLayers) const override;
+#endif
+	LANDSCAPE_API virtual UObject* GetReferencedTexture() const override;
+	LANDSCAPE_API virtual ReferencedTextureArray GetReferencedTextures() const override;
+	virtual bool CanReferenceTexture() const override { return true; }
+	//~ End UMaterialExpression Interface
 };
 
 

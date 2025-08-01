@@ -9,10 +9,13 @@
 #include "RenderingThread.h"
 #include "GameFramework/Controller.h"
 #include "Components/CapsuleComponent.h"
+#include "GameFramework/Pawn.h"
 #include "StaticMeshResources.h"
+#include "StaticMeshSceneProxy.h"
 #include "InteractiveFoliageActor.h"
 #include "InteractiveFoliageComponent.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/DamageEvents.h"
 
 /** Scene proxy class for UInteractiveFoliageComponent. */
 class FInteractiveFoliageSceneProxy final : public FStaticMeshSceneProxy
@@ -31,7 +34,7 @@ public:
 	{}
 
 	/** Accessor used by the rendering thread when setting foliage parameters for rendering. */
-	virtual void GetFoliageParameters(FVector& OutFoliageImpluseDirection, FVector4& OutFoliageNormalizedRotationAxisAndAngle) const
+	void GetFoliageParameters(FVector& OutFoliageImpluseDirection, FVector4& OutFoliageNormalizedRotationAxisAndAngle) const
 	{
 		OutFoliageImpluseDirection = FoliageImpluseDirection;
 		OutFoliageNormalizedRotationAxisAndAngle = FoliageNormalizedRotationAxisAndAngle;
@@ -93,9 +96,9 @@ float AInteractiveFoliageActor::TakeDamage(float DamageAmount, FDamageEvent cons
 	FVector DamageImpulse = ImpulseDir.GetSafeNormal() * DamageAmount * FoliageDamageImpulseScale;
 
 	// Apply force magnitude clamps
-	DamageImpulse.X = FMath::Clamp(DamageImpulse.X, -MaxDamageImpulse, MaxDamageImpulse);
-	DamageImpulse.Y = FMath::Clamp(DamageImpulse.Y, -MaxDamageImpulse, MaxDamageImpulse);
-	DamageImpulse.Z = FMath::Clamp(DamageImpulse.Z, -MaxDamageImpulse, MaxDamageImpulse);
+	DamageImpulse.X = FMath::Clamp<FVector::FReal>(DamageImpulse.X, -MaxDamageImpulse, MaxDamageImpulse);
+	DamageImpulse.Y = FMath::Clamp<FVector::FReal>(DamageImpulse.Y, -MaxDamageImpulse, MaxDamageImpulse);
+	DamageImpulse.Z = FMath::Clamp<FVector::FReal>(DamageImpulse.Z, -MaxDamageImpulse, MaxDamageImpulse);
 
 	FoliageForce += DamageImpulse;
 	
@@ -130,7 +133,8 @@ void AInteractiveFoliageActor::SetupCollisionCylinder()
 		const FVector Scale3D = GetStaticMeshComponent()->GetRelativeScale3D();
 		// Set the cylinder's radius based off of the static mesh's bounds radius
 		// CollisionRadius is in world space so apply the actor's scale
-		CapsuleComponent->SetCapsuleSize(MeshBounds.SphereRadius * .7f * FMath::Max(Scale3D.X, Scale3D.Y), MeshBounds.BoxExtent.Z * Scale3D.Z);
+		CapsuleComponent->SetCapsuleSize(static_cast<float>(MeshBounds.SphereRadius * .7f * FMath::Max(Scale3D.X, Scale3D.Y)), static_cast<float>(MeshBounds.BoxExtent.Z * Scale3D.Z));
+
 
 		// Ensure delegate is bound (just once)
 		CapsuleComponent->OnComponentBeginOverlap.RemoveDynamic(this, &AInteractiveFoliageActor::CapsuleTouched);
@@ -180,9 +184,9 @@ void AInteractiveFoliageActor::Tick(float DeltaSeconds)
 
 					// Scale and clamp the touch force
 					FVector Impulse = ImpulseDirection * FoliageTouchImpulseScale;
-					Impulse.X = FMath::Clamp(Impulse.X, -MaxTouchImpulse, MaxTouchImpulse);
-					Impulse.Y = FMath::Clamp(Impulse.Y, -MaxTouchImpulse, MaxTouchImpulse);
-					Impulse.Z = FMath::Clamp(Impulse.Z, -MaxTouchImpulse, MaxTouchImpulse);
+					Impulse.X = FMath::Clamp<FVector::FReal>(Impulse.X, -MaxTouchImpulse, MaxTouchImpulse);
+					Impulse.Y = FMath::Clamp<FVector::FReal>(Impulse.Y, -MaxTouchImpulse, MaxTouchImpulse);
+					Impulse.Z = FMath::Clamp<FVector::FReal>(Impulse.Z, -MaxTouchImpulse, MaxTouchImpulse);
 					FoliageForce += Impulse;
 				}
 			}
@@ -196,17 +200,17 @@ void AInteractiveFoliageActor::Tick(float DeltaSeconds)
 		// Apply spring damping, which is like air resistance and causes the spring to lose energy over time
 		FoliageForce += -FoliageDamping * FoliageVelocity;
 
-		FoliageForce.X = FMath::Clamp(FoliageForce.X, -MaxForce, MaxForce);
-		FoliageForce.Y = FMath::Clamp(FoliageForce.Y, -MaxForce, MaxForce);
-		FoliageForce.Z = FMath::Clamp(FoliageForce.Z, -MaxForce, MaxForce);
+		FoliageForce.X = FMath::Clamp<FVector::FReal>(FoliageForce.X, -MaxForce, MaxForce);
+		FoliageForce.Y = FMath::Clamp<FVector::FReal>(FoliageForce.Y, -MaxForce, MaxForce);
+		FoliageForce.Z = FMath::Clamp<FVector::FReal>(FoliageForce.Z, -MaxForce, MaxForce);
 
 		FoliageVelocity += FoliageForce * DeltaSeconds;
 		FoliageForce = FVector::ZeroVector;
 
 		const float MaxVelocity = 1000.0f;
-		FoliageVelocity.X = FMath::Clamp(FoliageVelocity.X, -MaxVelocity, MaxVelocity);
-		FoliageVelocity.Y = FMath::Clamp(FoliageVelocity.Y, -MaxVelocity, MaxVelocity);
-		FoliageVelocity.Z = FMath::Clamp(FoliageVelocity.Z, -MaxVelocity, MaxVelocity);
+		FoliageVelocity.X = FMath::Clamp<FVector::FReal>(FoliageVelocity.X, -MaxVelocity, MaxVelocity);
+		FoliageVelocity.Y = FMath::Clamp<FVector::FReal>(FoliageVelocity.Y, -MaxVelocity, MaxVelocity);
+		FoliageVelocity.Z = FMath::Clamp<FVector::FReal>(FoliageVelocity.Z, -MaxVelocity, MaxVelocity);
 
 		FoliagePosition += FoliageVelocity * DeltaSeconds;
 
@@ -215,7 +219,7 @@ void AInteractiveFoliageActor::Tick(float DeltaSeconds)
 		//@todo - derive this height from the static mesh
 		const float IntersectionHeight = 100.0f;
 		// Calculate the rotation angle using Sin(Angle) = Opposite / Hypotenuse
-		const float RotationAngle = -FMath::Asin(FoliagePosition.Size() / IntersectionHeight);
+		const FVector::FReal RotationAngle = -FMath::Asin(FoliagePosition.Size() / IntersectionHeight);
 		// Use a rotation angle perpendicular to the impulse direction and the z axis
 		const FVector NormalizedRotationAxis = FoliagePosition.SizeSquared() > KINDA_SMALL_NUMBER ? 
 			(FoliagePosition ^ FVector(0,0,1)).GetSafeNormal() :

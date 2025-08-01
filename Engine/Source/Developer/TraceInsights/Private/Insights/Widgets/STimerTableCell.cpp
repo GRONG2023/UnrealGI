@@ -2,7 +2,6 @@
 
 #include "STimerTableCell.h"
 
-#include "EditorStyleSet.h"
 #include "SlateOptMacros.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
@@ -38,9 +37,9 @@ void STimerTableCell::Construct(const FArguments& InArgs, const TSharedRef<ITabl
 	SetHoveredCellDelegate = InArgs._OnSetHoveredCell;
 
 	ChildSlot
-		[
-			GenerateWidgetForColumn(InArgs, TableRow)
-		];
+	[
+		GenerateWidgetForColumn(InArgs, TableRow)
+	];
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -84,7 +83,8 @@ TSharedRef<SWidget> STimerTableCell::GenerateWidgetForNameColumn(const FArgument
 			[
 				SNew(SImage)
 				.Visibility(this, &STimerTableCell::GetHotPathIconVisibility)
-				.Image(FEditorStyle::GetBrush(TEXT("Profiler.EventGraph.HotPathSmall")))
+				.ColorAndOpacity(FLinearColor(1.0f, 0.3f, 0.3f, 1.0f))
+				.Image(FInsightsStyle::GetBrush("Icons.HotPath.TreeItem"))
 			]
 
 			// Info icon + tooltip
@@ -92,7 +92,7 @@ TSharedRef<SWidget> STimerTableCell::GenerateWidgetForNameColumn(const FArgument
 			[
 				SNew(SImage)
 				.Visibility(this, &STimerTableCell::GetHintIconVisibility)
-				.Image(FEditorStyle::GetBrush("Profiler.Tooltip.HintIcon10"))
+				.Image(FInsightsStyle::GetBrush("Icons.Hint.TreeItem"))
 				.ToolTip(GetRowToolTip(TableRow))
 			]
 		]
@@ -120,14 +120,29 @@ TSharedRef<SWidget> STimerTableCell::GenerateWidgetForNameColumn(const FArgument
 		+ SHorizontalBox::Slot()
 		.AutoWidth()
 		.VAlign(VAlign_Center)
-		.HAlign(ColumnPtr->GetHorizontalAlignment())
+		.HAlign(HAlign_Left)
 		.Padding(FMargin(2.0f, 0.0f))
 		[
 			SNew(STextBlock)
 			.Text(this, &STimerTableCell::GetDisplayName)
 			.HighlightText(InArgs._HighlightText)
-			.TextStyle(FEditorStyle::Get(), TEXT("Profiler.Tooltip"))
+			.TextStyle(FInsightsStyle::Get(), TEXT("TreeTable.Tooltip"))
 			.ColorAndOpacity(this, &STimerTableCell::GetColorAndOpacity)
+			.ShadowColorAndOpacity(this, &STimerTableCell::GetShadowColorAndOpacity)
+		]
+
+		// Name Suffix
+		+ SHorizontalBox::Slot()
+		.AutoWidth()
+		.VAlign(VAlign_Center)
+		.HAlign(HAlign_Left)
+		.Padding(FMargin(2.0f, 0.0f))
+		[
+			SNew(STextBlock)
+			.Visibility(this, &STimerTableCell::HasExtraDisplayName)
+			.Text(this, &STimerTableCell::GetExtraDisplayName)
+			.TextStyle(FInsightsStyle::Get(), TEXT("TreeTable.Tooltip"))
+			.ColorAndOpacity(this, &STimerTableCell::GetExtraColorAndOpacity)
 			.ShadowColorAndOpacity(this, &STimerTableCell::GetShadowColorAndOpacity)
 		]
 	;
@@ -164,7 +179,7 @@ TSharedRef<SWidget> STimerTableCell::GenerateWidgetForStatsColumn(const FArgumen
 		[
 			SNew(STextBlock)
 			.Text(this, &STimerTableCell::GetValueAsText)
-			.TextStyle(FEditorStyle::Get(), TEXT("Profiler.Tooltip"))
+			.TextStyle(FInsightsStyle::Get(), TEXT("TreeTable.Tooltip"))
 			.ColorAndOpacity(this, &STimerTableCell::GetStatsColorAndOpacity)
 			.ShadowColorAndOpacity(this, &STimerTableCell::GetShadowColorAndOpacity)
 		]

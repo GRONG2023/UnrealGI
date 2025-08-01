@@ -1,13 +1,32 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Tree/SCurveEditorTree.h"
-#include "Tree/CurveEditorTree.h"
-#include "Tree/ICurveEditorTreeItem.h"
 
+#include "Containers/ArrayView.h"
+#include "Containers/Map.h"
 #include "CurveEditor.h"
-
-#include "Widgets/Views/STableRow.h"
+#include "Framework/Views/ITypedTableView.h"
+#include "Input/Events.h"
+#include "InputCoreTypes.h"
+#include "Layout/Margin.h"
+#include "Layout/Visibility.h"
+#include "Misc/Attribute.h"
+#include "SlotBase.h"
+#include "Styling/SlateColor.h"
+#include "Templates/Tuple.h"
+#include "Templates/UnrealTemplate.h"
+#include "Tree/CurveEditorTree.h"
+#include "Tree/CurveEditorTreeTraits.h"
+#include "Tree/ICurveEditorTreeItem.h"
+#include "UObject/NameTypes.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SNullWidget.h"
 #include "Widgets/Views/SExpanderArrow.h"
+#include "Widgets/Views/SHeaderRow.h"
+#include "Widgets/Views/STableRow.h"
+
+class SWidget;
+struct FGeometry;
 
 
 struct SCurveEditorTableRow : SMultiColumnTableRow<FCurveEditorTreeItemID>
@@ -29,8 +48,8 @@ struct SCurveEditorTableRow : SMultiColumnTableRow<FCurveEditorTreeItemID>
 	{
 		TSharedPtr<FCurveEditor> CurveEditor = WeakCurveEditor.Pin();
 
-		const bool bIsMatch = CurveEditor.IsValid() && ( CurveEditor->GetTree()->GetFilterState(TreeItemID) == ECurveEditorTreeFilterState::Match );
-		return bIsMatch ? FSlateColor::UseForeground() : FSlateColor::UseSubduedForeground();
+		const bool bIsMatch = CurveEditor.IsValid() && ((CurveEditor->GetTree()->GetFilterState(TreeItemID) & ECurveEditorTreeFilterState::Match) != ECurveEditorTreeFilterState::NoMatch);
+		return bIsMatch ? GetForegroundBasedOnSelection() : FSlateColor::UseSubduedForeground();
 	}
 
 	virtual TSharedRef<SWidget> GenerateWidgetForColumn(const FName& InColumnName) override
@@ -100,13 +119,17 @@ void SCurveEditorTree::Construct(const FArguments& InArgs, TSharedPtr<FCurveEdit
 		.OnGetChildren(this, &SCurveEditorTree::GetTreeItemChildren)
 		.OnGenerateRow(this, &SCurveEditorTree::GenerateRow)
 		.OnSetExpansionRecursive(this, &SCurveEditorTree::SetItemExpansionRecursive)
+		.OnExpansionChanged(this, &SCurveEditorTree::OnExpansionChanged)
 		.OnMouseButtonDoubleClick(InArgs._OnMouseButtonDoubleClick)
+		.OnContextMenuOpening(InArgs._OnContextMenuOpening)
+		.OnTreeViewScrolled(InArgs._OnTreeViewScrolled)
 		.OnSelectionChanged_Lambda(
 			[this](TListTypeTraits<FCurveEditorTreeItemID>::NullableType InItemID, ESelectInfo::Type Type)
 			{
 				this->OnTreeSelectionChanged(InItemID, Type);
 			}
 		)
+		.AllowInvisibleItemSelection(true)
 	);
 
 	CurveEditor->GetTree()->Events.OnItemsChanged.AddSP(this, &SCurveEditorTree::RefreshTree);
@@ -121,6 +144,8 @@ void SCurveEditorTree::RefreshTree()
 
 	const FCurveEditorTree* CurveEditorTree = CurveEditor->GetTree();
 	const FCurveEditorFilterStates& FilterStates = CurveEditorTree->GetFilterStates();
+	bool bExpansionWasCleared = false;
+	const TArray<FCurveEditorTreeItemID>& CachedExpandedItems = CurveEditor->GetTree()->GetCachedExpandedItems();
 
 	// When changing to/from a filtered state, we save and restore expansion states
 	if (FilterStates.IsActive() && !bFilterWasActive)
@@ -144,12 +169,17 @@ void SCurveEditorTree::RefreshTree()
 
 			while (ParentItem)
 			{
-				PreFilterExpandedItems.Add(ParentItem->GetID());
+				const FCurveEditorTreeItemID ParentID = ParentItem->GetID();
+				if (IsItemExpanded(ParentID))
+				{
+					PreFilterExpandedItems.Add(ParentID);
+				}
 				ParentItem = CurveEditorTree->FindItem(ParentItem->GetParentID());
 			}
 		}
 
 		// Restore expansion states
+		bExpansionWasCleared = true;
 		ClearExpandedItems();
 		for (FCurveEditorTreeItemID ExpandedItem : PreFilterExpandedItems)
 		{
@@ -161,7 +191,7 @@ void SCurveEditorTree::RefreshTree()
 	// Repopulate root tree items based on filters
 	for (FCurveEditorTreeItemID RootItemID : CurveEditor->GetRootTreeItems())
 	{
-		if (FilterStates.Get(RootItemID) != ECurveEditorTreeFilterState::NoMatch)
+		if ((FilterStates.Get(RootItemID) & ECurveEditorTreeFilterState::MatchBitMask) != ECurveEditorTreeFilterState::NoMatch)
 		{
 			RootItems.Add(RootItemID);
 		}
@@ -169,21 +199,39 @@ void SCurveEditorTree::RefreshTree()
 
 	RootItems.Shrink();
 	RequestTreeRefresh();
-
 	if (FilterStates.IsActive())
 	{
-		// If a filter is active, all matched items and their parents are expanded
-		ClearExpandedItems();
-		for (const TTuple<FCurveEditorTreeItemID, FCurveEditorTreeItem>& Pair : CurveEditorTree->GetAllItems())
-		{
-			ECurveEditorTreeFilterState FilterState = FilterStates.Get(Pair.Key);
+		TArray<FCurveEditorTreeItemID> ExpandedItems;
+		ExpandedItems.Reserve(FilterStates.GetNumMatchedImplicitly());
 
-			// Expand any matched items or parents of matched items
-			if (FilterState == ECurveEditorTreeFilterState::Match || FilterState == ECurveEditorTreeFilterState::ImplicitParent)
+		FilterStates.ForEachItemState([&ExpandedItems](const TTuple<FCurveEditorTreeItemID, ECurveEditorTreeFilterState>& FilterState)
 			{
-				SetItemExpansion(Pair.Key, true);
+				if ((FilterState.Value & ECurveEditorTreeFilterState::Expand) != ECurveEditorTreeFilterState::NoMatch)
+				{
+					ExpandedItems.Add(FilterState.Key);
+				}
+			}
+		);
+
+		if (ExpandedItems.Num() > 0)
+		{
+			bExpansionWasCleared = true;
+			ClearExpandedItems();
+			for (const FCurveEditorTreeItemID& ItemID : ExpandedItems)
+			{
+				SetItemExpansion(ItemID, true);
 			}
 		}
+	}
+
+	// at end we reset any cached expansions we still have set
+	if (bExpansionWasCleared == false)
+	{
+		ClearExpandedItems();
+	}
+	for (const FCurveEditorTreeItemID& ItemID : CachedExpandedItems)
+	{
+		SetItemExpansion(ItemID, true);
 	}
 
 	bFilterWasActive = FilterStates.IsActive();
@@ -272,7 +320,7 @@ void SCurveEditorTree::GetTreeItemChildren(FCurveEditorTreeItemID Parent, TArray
 
 	for (FCurveEditorTreeItemID ChildID : CurveEditor->GetTreeItem(Parent).GetChildren())
 	{
-		if (FilterStates.Get(ChildID) != ECurveEditorTreeFilterState::NoMatch)
+		if ((FilterStates.Get(ChildID) & ECurveEditorTreeFilterState::MatchBitMask) != ECurveEditorTreeFilterState::NoMatch)
 		{
 			OutChildren.Add(ChildID);
 		}
@@ -285,6 +333,14 @@ void SCurveEditorTree::OnTreeSelectionChanged(FCurveEditorTreeItemID, ESelectInf
 	{
 		TGuardValue<bool> SelecitonGuard(bUpdatingCurveEditorTreeSelection, true);
 		CurveEditor->GetTree()->SetDirectSelection(GetSelectedItems(), CurveEditor.Get());
+	}
+}
+
+void SCurveEditorTree::OnExpansionChanged(FCurveEditorTreeItemID Model, bool bInExpansionState)
+{
+	if (Model.IsValid())
+	{
+		CurveEditor->GetTree()->SetItemExpansion(Model, bInExpansionState);
 	}
 }
 

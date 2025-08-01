@@ -8,6 +8,11 @@
 #include "VisualLogger/VisualLogger.h"
 #include "EnvironmentQuery/EnvQuery.h"
 #include "EnvironmentQuery/EnvQueryManager.h"
+#include "BehaviorTree/BlackboardComponent.h"
+#include "AISystem.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BTService_RunEQS)
+
 
 UBTService_RunEQS::UBTService_RunEQS(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -16,12 +21,21 @@ UBTService_RunEQS::UBTService_RunEQS(const FObjectInitializer& ObjectInitializer
 
 	bNotifyBecomeRelevant = false;
 	bNotifyCeaseRelevant = true;
+
+#if WITH_EDITORONLY_DATA
+	// Do not expose the option to tick on search start since the request is async and it
+	// requires the node to be relevant to properly manage the request and its delegate.
+	bCanTickOnSearchStartBeExposed = false;
+	bCallTickOnSearchStart = false;
+#endif // WITH_EDITORONLY_DATA
 	
 	// accept only actors and vectors
 	BlackboardKey.AddObjectFilter(this, GET_MEMBER_NAME_CHECKED(UBTService_RunEQS, BlackboardKey), AActor::StaticClass());
 	BlackboardKey.AddVectorFilter(this, GET_MEMBER_NAME_CHECKED(UBTService_RunEQS, BlackboardKey));
 
 	QueryFinishedDelegate = FQueryFinishedSignature::CreateUObject(this, &UBTService_RunEQS::OnQueryFinished);
+
+	bUpdateBBOnFail = GET_AI_CONFIG_VAR(bClearBBEntryOnBTEQSFail);
 }
 
 void UBTService_RunEQS::InitializeFromAsset(UBehaviorTree& Asset)
@@ -82,10 +96,12 @@ void UBTService_RunEQS::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 	}
 
 	FBTEQSServiceMemory* MyMemory = CastInstanceNodeMemory<FBTEQSServiceMemory>(BTComp->GetNodeMemory(this, BTComp->FindInstanceContainingNode(this)));
-	check(MyMemory);
-	ensure(MyMemory->RequestID != INDEX_NONE);
+	if (!ensureMsgf(MyMemory && MyMemory->RequestID != INDEX_NONE, TEXT("%hs called while the BT node is not or no longer active."), __FUNCTION__))
+	{
+		return;
+	}
 
-	bool bSuccess = (Result->Items.Num() >= 1);
+	bool bSuccess = Result->IsSuccessful() && (Result->Items.Num() >= 1);
 	if (bSuccess)
 	{
 		UBlackboardComponent* MyBlackboard = BTComp->GetBlackboardComponent();
@@ -98,6 +114,12 @@ void UBTService_RunEQS::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 				*UEnvQueryTypes::GetShortTypeName(Result->ItemType).ToString(),
 				*UBehaviorTreeTypes::GetShortTypeName(BlackboardKey.SelectedKeyType));
 		}
+	}
+	else if (bUpdateBBOnFail)
+	{
+		UBlackboardComponent* MyBlackboard = BTComp->GetBlackboardComponent();
+		check(MyBlackboard);
+		MyBlackboard->ClearValue(BlackboardKey.GetSelectedKeyID());
 	}
 
 	MyMemory->RequestID = INDEX_NONE;
@@ -127,20 +149,22 @@ void UBTService_RunEQS::OnCeaseRelevant(UBehaviorTreeComponent& OwnerComp, uint8
 
 void UBTService_RunEQS::InitializeMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryInit::Type InitType) const
 {
-	FBTEQSServiceMemory* MyMemory = CastInstanceNodeMemory<FBTEQSServiceMemory>(NodeMemory);
+	FBTEQSServiceMemory* MyMemory = InitializeNodeMemory<FBTEQSServiceMemory>(NodeMemory, InitType);
 	check(MyMemory);
 	MyMemory->RequestID = INDEX_NONE;
 }
 
-#if WITH_EDITOR
-
 void UBTService_RunEQS::CleanupMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryClear::Type CleanupType) const
 {
+#if WITH_EDITOR
 	const FBTEQSServiceMemory* MyMemory = CastInstanceNodeMemory<FBTEQSServiceMemory>(NodeMemory);
 	check(MyMemory);
 	ensure(MyMemory->RequestID == INDEX_NONE);
+#endif // WITH_EDITOR
+	CleanupNodeMemory<FBTEQSServiceMemory>(NodeMemory, CleanupType);
 }
 
+#if WITH_EDITOR
 void UBTService_RunEQS::PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
@@ -153,3 +177,4 @@ void UBTService_RunEQS::PostEditChangeProperty(struct FPropertyChangedEvent& Pro
 }
 
 #endif // WITH_EDITOR
+

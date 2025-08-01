@@ -2,15 +2,20 @@
 
 #include "Actions/PawnAction_Sequence.h"
 #include "Engine/World.h"
+#include "GameFramework/Pawn.h"
 #include "VisualLogger/VisualLogger.h"
 
-UPawnAction_Sequence::UPawnAction_Sequence(const FObjectInitializer& ObjectInitializer)
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PawnAction_Sequence)
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+
+UDEPRECATED_PawnAction_Sequence::UDEPRECATED_PawnAction_Sequence(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 	, SubActionTriggeringPolicy(EPawnSubActionTriggeringPolicy::CopyBeforeTriggering)
 {
 }
 
-UPawnAction_Sequence* UPawnAction_Sequence::CreateAction(UWorld& World, TArray<UPawnAction*>& ActionSequence, EPawnSubActionTriggeringPolicy::Type InSubActionTriggeringPolicy)
+UDEPRECATED_PawnAction_Sequence* UDEPRECATED_PawnAction_Sequence::CreateAction(UWorld& World, TArray<UDEPRECATED_PawnAction*>& ActionSequence, EPawnSubActionTriggeringPolicy::Type InSubActionTriggeringPolicy)
 {
 	ActionSequence.Remove(NULL);
 	if (ActionSequence.Num() <= 0)
@@ -18,12 +23,12 @@ UPawnAction_Sequence* UPawnAction_Sequence::CreateAction(UWorld& World, TArray<U
 		return NULL;
 	}
 
-	UPawnAction_Sequence* Action = UPawnAction::CreateActionInstance<UPawnAction_Sequence>(World);
+	UDEPRECATED_PawnAction_Sequence* Action = UDEPRECATED_PawnAction::CreateActionInstance<UDEPRECATED_PawnAction_Sequence>(World);
 	if (Action)
 	{
-		Action->ActionSequence = ActionSequence;
+		Action->ActionSequence_DEPRECATED = ActionSequence;
 
-		for (const UPawnAction* SubAction : ActionSequence)
+		for (const UDEPRECATED_PawnAction* SubAction : ActionSequence)
 		{
 			if (SubAction && SubAction->ShouldPauseMovement())
 			{
@@ -38,14 +43,14 @@ UPawnAction_Sequence* UPawnAction_Sequence::CreateAction(UWorld& World, TArray<U
 	return Action;
 }
 
-bool UPawnAction_Sequence::Start()
+bool UDEPRECATED_PawnAction_Sequence::Start()
 {
 	bool bResult = Super::Start();
 
 	if (bResult)
 	{
 		UE_VLOG(GetPawn(), LogPawnAction, Log, TEXT("Starting sequence. Items:"), *GetName());
-		for (auto Action : ActionSequence)
+		for (auto Action : ActionSequence_DEPRECATED)
 		{
 			UE_VLOG(GetPawn(), LogPawnAction, Log, TEXT("    %s"), *GetNameSafe(Action));
 		}
@@ -56,7 +61,7 @@ bool UPawnAction_Sequence::Start()
 	return bResult;
 }
 
-bool UPawnAction_Sequence::Resume()
+bool UDEPRECATED_PawnAction_Sequence::Resume()
 {
 	bool bResult = Super::Resume();
 
@@ -68,9 +73,9 @@ bool UPawnAction_Sequence::Resume()
 	return bResult;
 }
 
-void UPawnAction_Sequence::OnChildFinished(UPawnAction& Action, EPawnActionResult::Type WithResult)
+void UDEPRECATED_PawnAction_Sequence::OnChildFinished(UDEPRECATED_PawnAction& Action, EPawnActionResult::Type WithResult)
 {
-	if (RecentActionCopy == &Action)
+	if (RecentActionCopy_DEPRECATED == &Action)
 	{
 		if (WithResult == EPawnActionResult::Success || (WithResult == EPawnActionResult::Failed && ChildFailureHandlingMode == EPawnActionFailHandling::IgnoreFailure))
 		{
@@ -88,22 +93,24 @@ void UPawnAction_Sequence::OnChildFinished(UPawnAction& Action, EPawnActionResul
 	Super::OnChildFinished(Action, WithResult);
 }
 
-bool UPawnAction_Sequence::PushNextActionCopy()
+bool UDEPRECATED_PawnAction_Sequence::PushNextActionCopy()
 {
-	if (CurrentActionIndex >= uint32(ActionSequence.Num()))
+	if (CurrentActionIndex >= uint32(ActionSequence_DEPRECATED.Num()))
 	{
 		Finish(EPawnActionResult::Success);
 		return true;
 	}
 
-	UPawnAction* ActionCopy = SubActionTriggeringPolicy == EPawnSubActionTriggeringPolicy::CopyBeforeTriggering
-		? Cast<UPawnAction>(StaticDuplicateObject(ActionSequence[CurrentActionIndex], this))
-		: ActionSequence[CurrentActionIndex];
+	UDEPRECATED_PawnAction* ActionCopy = SubActionTriggeringPolicy == EPawnSubActionTriggeringPolicy::CopyBeforeTriggering
+		? Cast<UDEPRECATED_PawnAction>(StaticDuplicateObject(ActionSequence_DEPRECATED[CurrentActionIndex], this))
+		: ToRawPtr(ActionSequence_DEPRECATED[CurrentActionIndex]);
 
 	UE_VLOG(GetPawn(), LogPawnAction, Log, TEXT("%s> pushing action %s")
 		, *GetName(), *GetNameSafe(ActionCopy));
 	++CurrentActionIndex;	
 	check(ActionCopy);
-	RecentActionCopy = ActionCopy;
+	RecentActionCopy_DEPRECATED = ActionCopy;
 	return PushChildAction(*ActionCopy);
 }
+
+PRAGMA_ENABLE_DEPRECATION_WARNINGS

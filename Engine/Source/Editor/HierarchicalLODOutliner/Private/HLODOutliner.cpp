@@ -1,57 +1,101 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "HLODOutliner.h"
-#include "GameFramework/Actor.h"
-#include "Widgets/SOverlay.h"
-#include "Engine/GameViewportClient.h"
-#include "Engine/World.h"
-#include "Components/DrawSphereComponent.h"
-#include "Widgets/Layout/SSplitter.h"
-#include "Misc/CoreDelegates.h"
-#include "Modules/ModuleManager.h"
-#include "SlateOptMacros.h"
-#include "Framework/MultiBox/MultiBoxExtender.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "ToolMenus.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Images/SImage.h"
-#include "EditorStyleSet.h"
-#include "Engine/MeshMerging.h"
-#include "GameFramework/WorldSettings.h"
-#include "Engine/Selection.h"
+
+#include "Containers/EnumAsByte.h"
+#include "Containers/IndirectArray.h"
+#include "DetailsViewArgs.h"
+#include "DrawDebugHelpers.h"
 #include "Editor.h"
-
+#include "Editor/EditorEngine.h"
+#include "Engine/Engine.h"
+#include "Engine/EngineTypes.h"
+#include "Engine/HLODProxy.h"
 #include "Engine/LODActor.h"
+#include "Engine/Level.h"
+#include "Engine/World.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandInfo.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Framework/MultiBox/MultiBoxDefs.h"
+#include "Framework/Notifications/NotificationManager.h"
+#include "GameFramework/Actor.h"
+#include "GameFramework/WorldSettings.h"
+#include "HLODOutlinerDragDrop.h"
+#include "HLODTreeWidgetItem.h"
 #include "HierarchicalLOD.h"
-
-#include "EngineGlobals.h"
-#include "PropertyEditorModule.h"
+#include "HierarchicalLODUtilitiesModule.h"
 #include "IDetailsView.h"
-#include "ScopedTransaction.h"
-
+#include "IHierarchicalLODUtilities.h"
+#include "ITreeItem.h"
+#include "Internationalization/Internationalization.h"
 #include "LODActorItem.h"
 #include "LODLevelItem.h"
-#include "StaticMeshActorItem.h"
-#include "HLODTreeWidgetItem.h"
-
+#include "Layout/BasicLayoutWidgetSlot.h"
+#include "Layout/Children.h"
+#include "Layout/Geometry.h"
+#include "Layout/Margin.h"
+#include "Layout/Visibility.h"
 #include "Logging/MessageLog.h"
-
-#include "IHierarchicalLODUtilities.h"
-#include "HierarchicalLODUtilitiesModule.h"
-#include "Widgets/Images/SImage.h"
-#include "DrawDebugHelpers.h"
-#include "Widgets/Layout/SUniformGridPanel.h"
-#include "EditorFontGlyphs.h"
-#include "Widgets/Layout/SScrollBorder.h"
-#include "Widgets/Layout/SWidgetSwitcher.h"
-#include "Widgets/Input/SComboButton.h"
-#include "Widgets/Layout/SWrapBox.h"
-#include "Framework/Notifications/NotificationManager.h"
-#include "Widgets/Notifications/SNotificationList.h"
-
-#include "Engine/HLODProxy.h"
+#include "Math/Box.h"
+#include "Math/Color.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
 #include "Misc/ScopedSlowTask.h"
+#include "Modules/ModuleManager.h"
+#include "PropertyEditorDelegates.h"
+#include "PropertyEditorModule.h"
+#include "ScopedTransaction.h"
+#include "Selection.h"
+#include "SlateOptMacros.h"
+#include "SlotBase.h"
+#include "StaticMeshActorItem.h"
+#include "Styling/AppStyle.h"
+#include "Styling/CoreStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/SlateColor.h"
+#include "Styling/SlateTypes.h"
+#include "Styling/StyleColors.h"
 #include "Subsystems/AssetEditorSubsystem.h"
+#include "Templates/Casts.h"
+#include "Templates/Tuple.h"
+#include "Textures/SlateIcon.h"
+#include "ToolMenuContext.h"
+#include "ToolMenus.h"
+#include "TreeItemID.h"
+#include "Types/WidgetActiveTimerDelegate.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/Package.h"
+#include "UObject/UObjectBase.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UObjectHash.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtr.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SCheckBox.h"
+#include "Widgets/Input/SComboButton.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SScrollBorder.h"
+#include "Widgets/Layout/SSplitter.h"
+#include "Widgets/Layout/SWidgetSwitcher.h"
+#include "Widgets/Notifications/SNotificationList.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Widgets/Views/SHeaderRow.h"
+
+class AHierarchicalLODVolume;
+class FDragDropEvent;
+class ITableRow;
+class SWidget;
+class UToolMenu;
+struct FKeyEvent;
+struct FPointerEvent;
 
 #define LOCTEXT_NAMESPACE "HLODOutliner"
 
@@ -90,7 +134,7 @@ namespace HLODOutliner
 	}
 
 	BEGIN_SLATE_FUNCTION_BUILD_OPTIMIZATION
-		void SHLODOutliner::Construct(const FArguments& InArgs)
+	void SHLODOutliner::Construct(const FArguments& InArgs)
 	{
 		CreateSettingsView();
 
@@ -103,7 +147,7 @@ namespace HLODOutliner
 				.AutoHeight()
 				[
 					SNew(SBorder)
-					.BorderImage(FEditorStyle::GetBrush("SettingsEditor.CheckoutWarningBorder"))
+					.BorderImage(FAppStyle::GetBrush("SettingsEditor.CheckoutWarningBorder"))
 					.BorderBackgroundColor(FColor(166,137,0))							
 					[
 						SNew(SHorizontalBox)
@@ -119,7 +163,7 @@ namespace HLODOutliner
 						.Padding(4.0f, 0.0f, 4.0f, 0.0f)
 						[
 							SNew(SImage)
-							.Image(FEditorStyle::GetBrush("SettingsEditor.WarningIcon"))
+							.Image(FAppStyle::GetBrush("SettingsEditor.WarningIcon"))
 						]
 
 						+SHorizontalBox::Slot()
@@ -147,11 +191,10 @@ namespace HLODOutliner
 
 		MainContentPanel->AddSlot()
 			.AutoHeight()
-			.Padding(0.0f, 0.0f, 0.0f, 4.0f)
 			[
 				SNew(SBorder)
 				.BorderImage(FCoreStyle::Get().GetBrush("ToolPanel.GroupBorder"))
-				.Padding(1.0f)
+				.Padding(FMargin(4.0f, 4.0f, 4.0f, 0.0f))
 				[
 					CreateMainButtonWidgets()
 				]
@@ -161,24 +204,22 @@ namespace HLODOutliner
 
 		TSharedRef<SWidget> ClusterWidgets = 
 			SNew(SBorder)
-			.BorderImage(FCoreStyle::Get().GetBrush("ToolPanel.GroupBorder"))
-			.Padding(1.0f)
+			.BorderImage(&FAppStyle::GetWidgetStyle<FTableRowStyle>("TableView.Row").EvenRowBackgroundBrush)
+			.Padding(0)
 			[
 				SNew(SVerticalBox)
 				+SVerticalBox::Slot()
-				.Padding(2.0f)
+				.AutoHeight()
+				[
+					CreateClusterButtonWidgets()
+				]
+				+SVerticalBox::Slot()
 				.FillHeight(1.0f)
 				[
 					SNew(SScrollBorder, TreeViewWidget)
 					[
 						TreeViewWidget
 					]
-				]
-				+SVerticalBox::Slot()
-				.AutoHeight()
-				.HAlign(HAlign_Right)
-				[
-					CreateClusterButtonWidgets()
 				]
 			];
 
@@ -192,7 +233,7 @@ namespace HLODOutliner
 				.AutoHeight()
 				[
 					SNew(SBorder)
-					.BorderImage(FEditorStyle::GetBrush("SettingsEditor.CheckoutWarningBorder"))
+					.BorderImage(FAppStyle::GetBrush("SettingsEditor.CheckoutWarningBorder"))
 					.BorderBackgroundColor(FColor(166,137,0))							
 					[
 						SNew(SHorizontalBox)
@@ -207,7 +248,7 @@ namespace HLODOutliner
 						.Padding(4.0f, 0.0f, 4.0f, 0.0f)
 						[
 							SNew(SImage)
-							.Image(FEditorStyle::GetBrush("Icons.Warning"))
+							.Image(FAppStyle::GetBrush("Icons.Warning"))
 						]
 
 						+SHorizontalBox::Slot()
@@ -218,6 +259,7 @@ namespace HLODOutliner
 							SNew(STextBlock)
 							.AutoWrapText(true)
 							.Text(LOCTEXT("HLODForcedGlobally", "Project level HLOD Settings forced, changing the HLOD settings is disabled"))
+							.ColorAndOpacity(FSlateColor(EStyleColor::Black))
 						]
 					]
 				]
@@ -236,8 +278,8 @@ namespace HLODOutliner
 				+SWidgetSwitcher::Slot()
 				[
 					SNew(SSplitter)
+					.Style(FAppStyle::Get(), "DetailsView.Splitter")
 					.Orientation(Orient_Horizontal)
-					.Style(FEditorStyle::Get(), "ContentBrowser.Splitter")
 					+ SSplitter::Slot()
 					.Value(0.5)
 					[
@@ -252,8 +294,8 @@ namespace HLODOutliner
 				+SWidgetSwitcher::Slot()
 				[
 					SNew(SSplitter)
+					.Style(FAppStyle::Get(), "DetailsView.Splitter")
 					.Orientation(Orient_Vertical)
-					.Style(FEditorStyle::Get(), "ContentBrowser.Splitter")
 					+ SSplitter::Slot()
 					.Value(0.5)
 					[
@@ -272,7 +314,7 @@ namespace HLODOutliner
 			.Padding(0.0f, 4.0f, 0.0f, 0.0f)
 			[
 				SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush("SettingsEditor.CheckoutWarningBorder"))
+				.BorderImage(FAppStyle::GetBrush("SettingsEditor.CheckoutWarningBorder"))
 				.BorderBackgroundColor(FColor(166,137,0))
 				[
 					SNew(SHorizontalBox)
@@ -287,7 +329,7 @@ namespace HLODOutliner
 					.Padding(4.0f, 0.0f, 4.0f, 0.0f)
 					[
 						SNew(SImage)
-						.Image(FEditorStyle::GetBrush("Icons.Warning"))
+						.Image(FAppStyle::GetBrush("Icons.Warning"))
 					]
 
 					+SHorizontalBox::Slot()
@@ -298,6 +340,26 @@ namespace HLODOutliner
 						SNew(STextBlock)
 						.AutoWrapText(true)
 						.Text(LOCTEXT("HLODNeedsBuild", "Actors represented in HLOD have changed, generate proxy meshes to update."))
+						.ColorAndOpacity(FSlateColor(EStyleColor::Black))
+					]
+				]
+			];
+
+		MainContentPanel->AddSlot()
+			.AutoHeight()
+			[
+				SNew(SBorder)
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+				.Padding(FMargin(8.0f, 8.0f, 0.0f, 8.0f))
+				[
+					SNew(SCheckBox)
+					.Type(ESlateCheckBoxType::CheckBox)
+					.IsChecked_Lambda([this]() { return (CurrentWorldSettings && CurrentWorldSettings->bGenerateSingleClusterForLevel) ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+					.OnCheckStateChanged_Lambda([this](ECheckBoxState NewState) {  if (CurrentWorldSettings) { CurrentWorldSettings->bGenerateSingleClusterForLevel = (NewState == ECheckBoxState::Checked); } })
+					.Content()
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT("GenerateSingleClusterLabel", "Generate Single Cluster for Level"))
 					]
 				]
 			];
@@ -311,110 +373,64 @@ namespace HLODOutliner
 		FEditorDelegates::EndPIE.AddRaw(this, &SHLODOutliner::OnEndPieEvent);
 	}
 
+	TSharedRef<SWidget> SHLODOutliner::MakeToolBar()
+	{
+		FSlimHorizontalToolBarBuilder ToolBarBuilder(nullptr, FMultiBoxCustomization::None);
+
+		ToolBarBuilder.AddToolBarButton(
+			FUIAction(
+				FExecuteAction::CreateLambda([this](){ GenerateClustersFromUI(); })),
+			NAME_None,
+			TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SHLODOutliner::GetRegenerateClustersText)),
+			TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SHLODOutliner::GetRegenerateClustersTooltip)),
+			TAttribute<FSlateIcon>()
+		);
+
+		ToolBarBuilder.AddToolBarButton(
+			FUIAction(
+				FExecuteAction::CreateLambda([this](){ GenerateProxyMeshesFromUI(); }),
+				FCanExecuteAction::CreateSP(this, &SHLODOutliner::CanBuildLODActors)),
+			NAME_None,
+			TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SHLODOutliner::GetBuildText)),
+			TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SHLODOutliner::GetBuildLODActorsTooltipText)),
+			TAttribute<FSlateIcon>()
+		);
+
+		ToolBarBuilder.AddToolBarButton(
+			FUIAction(
+				FExecuteAction::CreateLambda([this] { BuildClustersAndMeshesFromUI(); })),
+			NAME_None,
+			TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SHLODOutliner::GetForceBuildText)),
+			TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SHLODOutliner::GetForceBuildToolTip)),
+			TAttribute<FSlateIcon>()
+		);
+
+		ToolBarBuilder.AddToolBarButton(
+			FUIAction(FExecuteAction::CreateLambda([this]() { HandleSaveAll(); })),
+			NAME_None,
+			FText(),
+			LOCTEXT("SaveAllToolTip", "Saves all external HLOD data: Meshes, materials etc."),
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "AssetEditor.SaveAsset")
+		);
+
+		return ToolBarBuilder.MakeWidget();
+	}
+
 	TSharedRef<SWidget> SHLODOutliner::CreateMainButtonWidgets()
 	{
 		return SNew(SVerticalBox)
 			+SVerticalBox::Slot()
-			.Padding(FMargin(0.0f, 2.0f))
+			.Padding(FMargin(2.0f, 4.0f))
 			[
-				SNew(SWrapBox)
-				.UseAllottedSize(true)
-
-				+ SWrapBox::Slot()
+				SNew(SHorizontalBox)
+				+SHorizontalBox::Slot()
 				.Padding(FMargin(2.0f))
+				.AutoWidth()
 				[
-					SNew(SButton)
-					.ButtonStyle(FEditorStyle::Get(), "FlatButton.Success")
-					.HAlign(HAlign_Center)
-					.OnClicked(this, &SHLODOutliner::HandleBuildLODActors)
-					.IsEnabled(this, &SHLODOutliner::CanBuildLODActors)
-					.ToolTipText(this, &SHLODOutliner::GetBuildLODActorsTooltipText)
-					[
-						SNew( SHorizontalBox )
-						+ SHorizontalBox::Slot()
-						.VAlign(VAlign_Center)
-						.AutoWidth()
-						[
-							SNew(STextBlock)
-							.TextStyle(FEditorStyle::Get(), "ContentBrowser.TopBar.Font")
-							.Font(FEditorStyle::Get().GetFontStyle("FontAwesome.11"))
-							.Text(FEditorFontGlyphs::Building)
-						]
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.VAlign(VAlign_Center)
-						.Padding(4, 0, 0, 0)
-						[
-							SNew( STextBlock )
-							.TextStyle( FEditorStyle::Get(), "ContentBrowser.TopBar.Font" )
-							.Text(this, &SHLODOutliner::GetBuildText)
-						]
-					]
+					MakeToolBar()
 				]
-
-				+ SWrapBox::Slot()
-				.Padding(FMargin(2.0f))
-				[
-					SNew(SButton)
-					.ButtonStyle(FEditorStyle::Get(), "FlatButton.Danger")
-					.HAlign(HAlign_Center)
-					.OnClicked(this, &SHLODOutliner::HandleForceBuildLODActors)
-					.ToolTipText(LOCTEXT("BuildClustersAndMeshesToolTip", "Re-generates clusters and then proxy meshes for each of the generated clusters in the level. This dirties the level."))
-					[
-						SNew( SHorizontalBox )
-						+ SHorizontalBox::Slot()
-						.VAlign(VAlign_Center)
-						.AutoWidth()
-						[
-							SNew(STextBlock)
-							.TextStyle(FEditorStyle::Get(), "ContentBrowser.TopBar.Font")
-							.Font(FEditorStyle::Get().GetFontStyle("FontAwesome.11"))
-							.Text(FEditorFontGlyphs::Recycle)
-						]
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.VAlign(VAlign_Center)
-						.Padding(4, 0, 0, 0)
-						[
-							SNew( STextBlock )
-							.TextStyle( FEditorStyle::Get(), "ContentBrowser.TopBar.Font" )
-							.Text(this, &SHLODOutliner::GetForceBuildText)
-						]
-					]
-				]
-
-				+ SWrapBox::Slot()
-				.Padding(FMargin(2.0f))
-				[
-					SNew(SButton)
-					.ButtonStyle(FEditorStyle::Get(), "FlatButton")
-					.HAlign(HAlign_Center)
-					.OnClicked(this, &SHLODOutliner::HandleSaveAll)
-					.ToolTipText(LOCTEXT("SaveAllToolTip", "Saves all external HLOD data: Meshes, materials etc."))
-					[
-						SNew( SHorizontalBox )
-						+ SHorizontalBox::Slot()
-						.VAlign(VAlign_Center)
-						.AutoWidth()
-						[
-							SNew(STextBlock)
-							.TextStyle(FEditorStyle::Get(), "ContentBrowser.TopBar.Font")
-							.Font(FEditorStyle::Get().GetFontStyle("FontAwesome.11"))
-							.Text(FEditorFontGlyphs::Floppy_O)
-						]
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.VAlign(VAlign_Center)
-						.Padding(4, 0, 0, 0)
-						[
-							SNew( STextBlock )
-							.TextStyle( FEditorStyle::Get(), "ContentBrowser.TopBar.Font" )
-							.Text(LOCTEXT("SaveAll", "Save All"))
-						]
-					]
-				]
-
-				+ SWrapBox::Slot()
+				+SHorizontalBox::Slot()
+				.HAlign(HAlign_Right)
 				.Padding(FMargin(2.0f))
 				[
 					CreateForcedViewWidget()
@@ -426,73 +442,56 @@ namespace HLODOutliner
 	{
 		return SNew(SVerticalBox)
 			+ SVerticalBox::Slot()
-			.Padding(FMargin(0.0f, 2.0f))
+			.Padding(FMargin(0.0f, 0.0f, 0.0f, 2.0f))
 			[
-				SNew(SHorizontalBox)
-
-				+ SHorizontalBox::Slot()
-				.Padding(FMargin(2.0f))
-				.VAlign(VAlign_Center)
-				.AutoWidth()
+				SNew(SBorder)
+				.BorderImage(FAppStyle::GetBrush("DetailsView.CategoryTop"))
 				[
-					SNew(SButton)
-					.ButtonStyle(FEditorStyle::Get(), "FlatButton")
-					.HAlign(HAlign_Center)
-					.OnClicked(this, &SHLODOutliner::HandlePreviewHLODs)
-					.ToolTipText(LOCTEXT("GenerateClusterToolTip", "Generates clusters (but not proxy meshes) for meshes in the level"))
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.HAlign(HAlign_Left)
+					.VAlign(VAlign_Center)
+					.Padding(FMargin(6.0f, 0.0f, 0.0f, 0.0f))
 					[
-						SNew( SHorizontalBox )
-						+ SHorizontalBox::Slot()
-						.VAlign(VAlign_Center)
-						.AutoWidth()
+						SNew(STextBlock)
+						.TextStyle(FAppStyle::Get(), "DialogButtonText")
+						.Text(LOCTEXT("ClustersLabel", "Clusters"))
+					]
+
+					+ SHorizontalBox::Slot()
+					.Padding(FMargin(2.0f))
+					.HAlign(HAlign_Right)
+					.VAlign(VAlign_Center)
+					.AutoWidth()
+					[
+						SNew(SButton)
+						.ButtonStyle(FAppStyle::Get(), "SimpleButton")
+						.ContentPadding(0)
+						.HAlign(HAlign_Center)
+						.OnClicked(this, &SHLODOutliner::GenerateClustersFromUI)
+						.ToolTipText(LOCTEXT("GenerateClusterToolTip", "Generates clusters (but not proxy meshes) for meshes in the level"))
 						[
-							SNew(STextBlock)
-							.TextStyle(FEditorStyle::Get(), "ContentBrowser.TopBar.Font")
-							.Font(FEditorStyle::Get().GetFontStyle("FontAwesome.11"))
-							.Text(FEditorFontGlyphs::List)
-						]
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.VAlign(VAlign_Center)
-						.Padding(4, 0, 0, 0)
-						[
-							SNew( STextBlock )
-							.TextStyle( FEditorStyle::Get(), "ContentBrowser.TopBar.Font" )
-							.Text(LOCTEXT("GenerateClusters", "Generate Clusters"))
+							SNew(SImage)
+							.Image(FAppStyle::Get().GetBrush("Icons.PlusCircle"))
 						]
 					]
-				]
 
-				+ SHorizontalBox::Slot()
-				.Padding(FMargin(2.0f))
-				.VAlign(VAlign_Center)
-				.AutoWidth()
-				[
-					SNew(SButton)
-					.ButtonStyle(FEditorStyle::Get(), "FlatButton")
-					.HAlign(HAlign_Center)
-					.OnClicked(this, &SHLODOutliner::HandleDeleteHLODs)
-					.IsEnabled(this, &SHLODOutliner::CanDeleteHLODs)
-					.ToolTipText(LOCTEXT("DeleteClusterToolTip", "Deletes all clusters in the level"))
+					+ SHorizontalBox::Slot()
+					.Padding(FMargin(2.0f))
+					.HAlign(HAlign_Right)
+					.VAlign(VAlign_Center)
+					.AutoWidth()
 					[
-						SNew( SHorizontalBox )
-						+ SHorizontalBox::Slot()
-						.VAlign(VAlign_Center)
-						.AutoWidth()
+						SNew(SButton)
+						.ButtonStyle(FAppStyle::Get(), "SimpleButton")
+						.ContentPadding(0)
+						.HAlign(HAlign_Center)
+						.OnClicked_Lambda([this]() { return HandleDeleteHLODs(); })
+						.IsEnabled(this, &SHLODOutliner::CanDeleteHLODs)
+						.ToolTipText(LOCTEXT("DeleteClusterToolTip", "Deletes all clusters in the level"))
 						[
-							SNew(STextBlock)
-							.TextStyle(FEditorStyle::Get(), "ContentBrowser.TopBar.Font")
-							.Font(FEditorStyle::Get().GetFontStyle("FontAwesome.11"))
-							.Text(FEditorFontGlyphs::Trash)
-						]
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.VAlign(VAlign_Center)
-						.Padding(4, 0, 0, 0)
-						[
-							SNew( STextBlock )
-							.TextStyle( FEditorStyle::Get(), "ContentBrowser.TopBar.Font" )
-							.Text(LOCTEXT("DeleteClusters", "Delete Clusters"))
+							SNew(SImage)
+							.Image(FAppStyle::Get().GetBrush("Icons.Delete"))
 						]
 					]
 				]
@@ -514,24 +513,29 @@ namespace HLODOutliner
 			(
 				SNew(SHeaderRow)
 				+ SHeaderRow::Column("SceneActorName")
-				.DefaultLabel(LOCTEXT("SceneActorName", "Scene Actor Name"))
+				.DefaultLabel(LOCTEXT("SceneActorName", "Actor Name"))
+				.HeaderContentPadding(FMargin(8.0f, 0.0f, 0.0f, 0.0f))
 				.FillWidth(0.3f)				
 				+ SHeaderRow::Column("RawTriangleCount")
-				.DefaultLabel(LOCTEXT("RawTriangleCount", "Original Triangle Count"))
+				.DefaultLabel(LOCTEXT("RawTriangleCount", "Tri Original"))
 				.DefaultTooltip(LOCTEXT("RawTriangleCountToolTip", "Original Number of Triangles in a LOD Mesh"))
+				.HeaderContentPadding(FMargin(8.0f, 0.0f, 0.0f, 0.0f))
 				.FillWidth(0.2f)
 				+ SHeaderRow::Column("ReducedTriangleCount")
-				.DefaultLabel(LOCTEXT("ReducedTriangleCount", "Reduced Triangle Count"))
+				.DefaultLabel(LOCTEXT("ReducedTriangleCount", "Tri Reduced"))
 				.DefaultTooltip(LOCTEXT("ReducedTriangleCountToolTip", "Reduced Number of Triangles in a LOD Mesh"))
+				.HeaderContentPadding(FMargin(8.0f, 0.0f, 0.0f, 0.0f))
 				.FillWidth(0.2f)
 				+ SHeaderRow::Column("ReductionPercentage")
 				.DefaultLabel(LOCTEXT("ReductionPercentage", "% Retained"))
 				.DefaultTooltip(LOCTEXT("ReductionPercentageToolTip", "Percentage of Triangle Reduction in a LOD Mesh"))
-				.FillWidth(0.1f)
+				.HeaderContentPadding(FMargin(8.0f, 0.0f, 0.0f, 0.0f))
+				.FillWidth(0.2f)
 				+ SHeaderRow::Column("Level")
 				.DefaultLabel(LOCTEXT("Level", "Level"))
 				.DefaultTooltip(LOCTEXT("LevelToolTip", "Persistent Level of a LOD Mesh"))
-				.FillWidth(0.2f)
+				.HeaderContentPadding(FMargin(8.0f, 0.0f, 0.0f, 0.0f))
+				.FillWidth(0.1f)
 			);
 	}
 
@@ -540,15 +544,14 @@ namespace HLODOutliner
 		return SNew(SComboButton)
 				.ContentPadding(FMargin(4.0f, 2.0f))
 				.ForegroundColor(FLinearColor::White)
-				.ButtonStyle(FEditorStyle::Get(), "FlatButton")
-				.ComboButtonStyle(FEditorStyle::Get(), "ToolbarComboButton")
+				.ButtonStyle(FAppStyle::Get(), "FlatButton")
 				.HasDownArrow(true)
 				.OnGetMenuContent(this, &SHLODOutliner::GetForceLevelMenuContent)
 				.ToolTipText(LOCTEXT("ForcedLODButtonTooltip", "Choose the LOD level to view."))
 				.ButtonContent()
 				[
 					SNew(STextBlock)
-					.TextStyle(FEditorStyle::Get(), "ContentBrowser.TopBar.Font")
+					.TextStyle(FAppStyle::Get(), "DialogButtonText")
 					.Text(this, &SHLODOutliner::HandleForceLevelText)
 				];
 	}
@@ -558,16 +561,11 @@ namespace HLODOutliner
 		// Create a property view
 		FPropertyEditorModule& EditModule = FModuleManager::Get().GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
 
-		FNotifyHook* NotifyHook = this;
-		FDetailsViewArgs DetailsViewArgs(
-			/*bUpdateFromSelection=*/ false,
-			/*bLockable=*/ false,
-			/*bAllowSearch=*/ false,
-			FDetailsViewArgs::HideNameArea,
-			/*bHideSelectionTip=*/ true,
-			/*InNotifyHook=*/ NotifyHook,
-			/*InSearchInitialKeyFocus=*/ false,
-			/*InViewIdentifier=*/ NAME_None);
+		FDetailsViewArgs DetailsViewArgs;
+		DetailsViewArgs.bAllowSearch = false;
+		DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+		DetailsViewArgs.bHideSelectionTip = true;
+		DetailsViewArgs.NotifyHook = this;
 		DetailsViewArgs.DefaultsOnlyVisibility = EEditDefaultsOnlyNodeVisibility::Automatic;
 		DetailsViewArgs.bShowOptions = false;
 
@@ -578,14 +576,9 @@ namespace HLODOutliner
 			/** Delegate to show all properties */
 			static bool IsPropertyVisible(const FPropertyAndParent& PropertyAndParent, bool bInShouldShowNonEditable)
 			{
-				if (PropertyAndParent.Property.GetFName() == GET_MEMBER_NAME_CHECKED(AWorldSettings, bEnableHierarchicalLODSystem))
-				{
-					return false;
-				}
-
 				const char* CategoryNames[5] =
 				{
-					"LODSystem",
+					"HLODSystem",
 					"ProxySettings",
 					"LandscapeCulling",
 					"MeshSettings",
@@ -593,12 +586,19 @@ namespace HLODOutliner
 				};
 
 				FString CategoryName = PropertyAndParent.Property.GetMetaData("Category");
+				
+				// Exceptions
+				// This one is shown at the bottom of the windows, outside of the properties
+				if (CategoryName == "HLODSystem" && PropertyAndParent.Property.GetName() == "bGenerateSingleClusterForLevel")
+				{
+					return false;
+				}
+
+				// General case
 				for (uint32 CategoryIndex = 0; CategoryIndex < 5; ++CategoryIndex)
 				{
 					if (CategoryName == CategoryNames[CategoryIndex])
 					{
-
-
 						return true;
 					}
 				}
@@ -666,7 +666,7 @@ namespace HLODOutliner
 
 			// Restore expansion states
 			TreeView->RequestTreeRefresh();		
-		}			
+		}
 
 		bArrangeHorizontally = AllottedGeometry.Size.X > AllottedGeometry.Size.Y;
 	}
@@ -732,27 +732,17 @@ namespace HLODOutliner
 
 	FText SHLODOutliner::GetBuildText() const
 	{
-		return GetDefault<UHierarchicalLODSettings>()->bInvalidateHLODClusters ? LOCTEXT("BuildMeshes", "Generate Proxy Meshes") : LOCTEXT("RebuildMeshes", "Re-generate Proxy Meshes");
+		return LOCTEXT("BuildMeshes", "Generate Proxy Meshes");
 	}
 
 	FText SHLODOutliner::GetForceBuildText() const
 	{
-		return HasHLODActors() ? LOCTEXT("RebuildAllClustersAndMeshes", "Rebuild All") : LOCTEXT("BuildClustersAndMeshes", "Build");
+		return LOCTEXT("RebuildAllClustersAndMeshes", "Build All");
 	}
 
-	FReply SHLODOutliner::HandleBuildHLODs()
+	FText SHLODOutliner::GetForceBuildToolTip() const
 	{
-		CloseOpenAssetEditors();
-
-		if (CurrentWorld.IsValid())
-		{
-			CurrentWorld->HierarchicalLODBuilder->Build();
-		}
-
-		FMessageLog("HLODResults").Open();
-
-		FullRefresh();
-		return FReply::Handled();
+		return LOCTEXT("BuildClustersAndMeshesToolTip", "Re-generates clusters and then proxy meshes for each of the generated clusters in the level. This dirties the level.");
 	}
 
 	FReply SHLODOutliner::HandleDeleteHLODs()
@@ -784,16 +774,6 @@ namespace HLODOutliner
 
 		FMessageLog("HLODResults").Open();
 
-		FullRefresh();
-		return FReply::Handled();
-	}
-
-	FReply SHLODOutliner::HandleDeletePreviewHLODs()
-	{
-		if (CurrentWorld.IsValid())
-		{
-			CurrentWorld->HierarchicalLODBuilder->ClearPreviewBuild();
-		}
 		FullRefresh();
 		return FReply::Handled();
 	}
@@ -883,8 +863,43 @@ namespace HLODOutliner
 
 		return FReply::Handled();
 	}
-
+	
 	END_SLATE_FUNCTION_BUILD_OPTIMIZATION
+
+	FReply SHLODOutliner::GenerateClustersFromUI()
+	{
+		return HandlePreviewHLODs();
+	}
+
+	FReply SHLODOutliner::GenerateProxyMeshesFromUI()
+	{
+		return HandleBuildLODActors();
+	}
+
+	FReply SHLODOutliner::BuildClustersAndMeshesFromUI()
+	{
+		return HandleForceBuildLODActors();
+	}
+
+	FText SHLODOutliner::GetGenerateClustersText() const
+	{
+		return LOCTEXT("GenerateClustersLabel", "Generate Clusters");
+	}
+
+	FText SHLODOutliner::GetGenerateClustersTooltip() const
+	{
+		return LOCTEXT("GenerateClusterToolTip", "Generates clusters (but not proxy meshes) for meshes in the level");
+	}
+
+	FText SHLODOutliner::GetRegenerateClustersText() const
+	{
+		return LOCTEXT("RegenerateClustersLabel", "Regenerate Clusters");
+	}
+
+	FText SHLODOutliner::GetRegenerateClustersTooltip() const
+	{
+		return LOCTEXT("RegenerateClusterToolTip", "Regenerates clusters (but not proxy meshes) for meshes in the level");
+	}
 
 	void SHLODOutliner::OnBeginPieEvent(bool bIsSimulating)
 	{
@@ -2148,12 +2163,7 @@ namespace HLODOutliner
 
 	bool SHLODOutliner::OutlinerEnabled() const
 	{
-		bool bHLODEnabled = false;
-
-		if (CurrentWorldSettings != nullptr)
-		{
-			bHLODEnabled = CurrentWorldSettings->bEnableHierarchicalLODSystem;
-		}
+		bool bHLODEnabled = CurrentWorldSettings != nullptr;
 
 		if (bHLODEnabled && CurrentWorld.IsValid())
 		{

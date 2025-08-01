@@ -2,7 +2,9 @@
 
 #pragma once
 
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "CoreMinimal.h"
+#endif
 #include "Stats/Stats.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/Object.h"
@@ -45,7 +47,7 @@ struct FNavAvoidanceData
 	float Weight;
 
 	/** Weight is treated as a hard 1.0 while this is active. This is set by code. */
-	float OverrideWeightTime;
+	double OverrideWeightTime;
 
 	/** Group data */
 	int32 GroupMask;
@@ -84,8 +86,8 @@ struct FVelocityAvoidanceCone
 	FPlane ConePlane[2];			//Left and right cone planes - these should point in toward each other. Technically, this is a convex hull, it's just unbounded.
 };
 
-UCLASS(config=Engine, Blueprintable)
-class ENGINE_API UAvoidanceManager : public UObject, public FSelfRegisteringExec
+UCLASS(config=Engine, Blueprintable, MinimalAPI)
+class UAvoidanceManager : public UObject, public FSelfRegisteringExec
 {
 	GENERATED_UCLASS_BODY()
 		
@@ -119,19 +121,19 @@ class ENGINE_API UAvoidanceManager : public UObject, public FSelfRegisteringExec
 
 	/** Get the number of avoidance objects currently in the manager. */
 	UFUNCTION(BlueprintCallable, Category="AI")
-	int32 GetObjectCount();
+	ENGINE_API int32 GetObjectCount();
 
 	/** Get appropriate UID for use when reporting to this function or requesting RVO assistance. */
 	UFUNCTION(BlueprintCallable, Category="AI")
-	int32 GetNewAvoidanceUID();
+	ENGINE_API int32 GetNewAvoidanceUID();
 
 	/** Register with the given avoidance manager.
 	 *  @param AvoidanceWeight	When avoiding each other, actors divert course in proportion to their relative weights. Range is 0.0 to 1.0. Special: at 1.0, actor will not divert course at all.
 	 */
 	UFUNCTION(BlueprintCallable, Category="AI")
-	bool RegisterMovementComponent(class UMovementComponent* MovementComp, float AvoidanceWeight = 0.5f);
+	ENGINE_API bool RegisterMovementComponent(class UMovementComponent* MovementComp, float AvoidanceWeight = 0.5f);
 
-	bool RegisterMovementComponent(UCharacterMovementComponent* MovementComp, float AvoidanceWeight = 0.5f);
+	ENGINE_API bool RegisterMovementComponent(UCharacterMovementComponent* MovementComp, float AvoidanceWeight = 0.5f);
 
 	/** Get your latest data. */
 	FNavAvoidanceData* GetAvoidanceObjectForUID(int32 AvoidanceUID) { return AvoidanceObjects.Find(AvoidanceUID); }
@@ -139,65 +141,67 @@ class ENGINE_API UAvoidanceManager : public UObject, public FSelfRegisteringExec
 
 	/** Calculate avoidance velocity for component (avoids collisions with the supplied component) */
 	UFUNCTION(BlueprintCallable, Category="AI")
-	FVector GetAvoidanceVelocityForComponent(UMovementComponent* MovementComp);
+	ENGINE_API FVector GetAvoidanceVelocityForComponent(UMovementComponent* MovementComp);
 
 	/** Fast-track GetAvoidanceVelocityForComponent(UMovementComponent) implementation
 	 *	for most common case of UCharacterMovementComponent*/
-	FVector GetAvoidanceVelocityForComponent(UCharacterMovementComponent* MovementComp);
+	ENGINE_API FVector GetAvoidanceVelocityForComponent(UCharacterMovementComponent* MovementComp);
 
 	/** Only use if you want manual velocity planning. Provide your AvoidanceUID in order to avoid colliding with yourself. */
-	FVector GetAvoidanceVelocityIgnoringUID(const FNavAvoidanceData& AvoidanceData, float DeltaTime, int32 IgnoreThisUID);
+	ENGINE_API FVector GetAvoidanceVelocityIgnoringUID(const FNavAvoidanceData& AvoidanceData, float DeltaTime, int32 IgnoreThisUID);
 
 	/** Only use if you want manual velocity planning. Will not ignore your own volume if you are registered. */
-	FVector GetAvoidanceVelocity(const FNavAvoidanceData& AvoidanceData, float DeltaTime);
+	ENGINE_API FVector GetAvoidanceVelocity(const FNavAvoidanceData& AvoidanceData, float DeltaTime);
 
 	/** Update the RVO avoidance data for the participating UMovementComponent */
-	void UpdateRVO(UMovementComponent* MovementComp);
+	ENGINE_API void UpdateRVO(UMovementComponent* MovementComp);
 
 	/** Fast-track UpdateRVO(UMovementComponent) implementation for most common case of UCharacterMovementComponent*/
-	void UpdateRVO(UCharacterMovementComponent* MovementComp);
+	ENGINE_API void UpdateRVO(UCharacterMovementComponent* MovementComp);
 
 	/** For Duration seconds, set this object to ignore all others. */
-	void OverrideToMaxWeight(int32 AvoidanceUID, float Duration);
+	ENGINE_API void OverrideToMaxWeight(int32 AvoidanceUID, float Duration);
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
-	bool IsDebugOnForUID(int32 AvoidanceUID);
-	bool IsDebugOnForAll();
-	bool IsDebugEnabled(int32 AvoidanceUID);
-	void AvoidanceDebugForUID(int32 AvoidanceUID, bool TurnOn);
-	void AvoidanceDebugForAll(bool TurnOn);
-	static void AvoidanceSystemToggle(bool TurnOn);
+	ENGINE_API bool IsDebugOnForUID(int32 AvoidanceUID);
+	ENGINE_API bool IsDebugOnForAll();
+	ENGINE_API bool IsDebugEnabled(int32 AvoidanceUID);
+	ENGINE_API void AvoidanceDebugForUID(int32 AvoidanceUID, bool TurnOn);
+	ENGINE_API void AvoidanceDebugForAll(bool TurnOn);
+	static ENGINE_API void AvoidanceSystemToggle(bool TurnOn);
 
 	/** Exec command handlers */
-	void HandleToggleDebugAll( const TCHAR* Cmd, FOutputDevice& Ar );
-	void HandleToggleAvoidance( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API void HandleToggleDebugAll( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API void HandleToggleAvoidance( const TCHAR* Cmd, FOutputDevice& Ar );
 #endif
 
-	//~ Begin FExec Interface
-	virtual bool Exec(UWorld* Inworld, const TCHAR* Cmd, FOutputDevice& Ar) override;
-	//~ End FExec Interface
-
-	void SetNavEdgeProvider(INavEdgeProviderInterface* InEdgeProvider);
+	ENGINE_API void SetNavEdgeProvider(INavEdgeProviderInterface* InEdgeProvider);
 
 	/** Used to manually mark data associated with given ID as 'dead' (and reusable) */
-	void RemoveAvoidanceObject(const int32 AvoidanceUID);
+	ENGINE_API void RemoveAvoidanceObject(const int32 AvoidanceUID);
+
+	/** Returns true if the avoidance objects are auto purged in RemoveOutdatedObjects */
+	bool IsAutoPurgeEnabled() const { return bAutoPurgeOutdatedObjects; }
 
 protected:
+	//~ Begin FExec Interface
+	ENGINE_API virtual bool Exec_Dev(UWorld* Inworld,const TCHAR* Cmd,FOutputDevice& Ar) override;
+	//~ End FExec Interface
 
 	/** Handle for efficient management of RemoveOutdatedObjects timer */
 	FTimerHandle TimerHandle_RemoveOutdatedObjects;
 
 	/** Cleanup AvoidanceObjects, called by timer */
-	void RemoveOutdatedObjects();
+	ENGINE_API void RemoveOutdatedObjects();
 
 	/** Try to set a timer for RemoveOutdatedObjects */
-	void RequestUpdateTimer();
+	ENGINE_API void RequestUpdateTimer();
 
 	/** This is called by our blueprint-accessible function after it has packed the data into an object. */
-	void UpdateRVO_Internal(int32 AvoidanceUID, const FNavAvoidanceData& AvoidanceData);
+	ENGINE_API void UpdateRVO_Internal(int32 AvoidanceUID, const FNavAvoidanceData& AvoidanceData);
 
 	/** This is called by our blueprint-accessible functions, and permits the user to ignore self, or not. Important in case the user isn't in the avoidance manager. */
-	FVector GetAvoidanceVelocity_Internal(const FNavAvoidanceData& AvoidanceData, float DeltaTime, int32 *IgnoreThisUID = NULL);
+	ENGINE_API FVector GetAvoidanceVelocity_Internal(const FNavAvoidanceData& AvoidanceData, float DeltaTime, int32 *IgnoreThisUID = NULL);
 
 	/** All objects currently part of the avoidance solution. This is pretty transient stuff. */
 	TMap<int32, FNavAvoidanceData> AvoidanceObjects;
@@ -218,6 +222,9 @@ protected:
 	/** If set then UAvoidanceManager::RemoveOutdatedObjects is responsisble
 	 *	for removing dead entries in AvoidanceObjects. If set to FALSE then the
 	 *	dead agents need to be removed manually with RemoveAvoidanceObject call */
+	uint32 bAutoPurgeOutdatedObjects : 1;
+
+	UE_DEPRECATED(5.3, "Please use bAutoPurgeOutdatedObjects instead.")
 	uint32 bAutoPurceOutdatedObjects : 1;
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
@@ -225,7 +232,7 @@ protected:
 	TArray<int32> DebugUIDs;
 	bool bDebugAll;
 	
-	/** master switch for avoidance system */
-	static bool bSystemActive;
+	/** main switch for avoidance system */
+	static ENGINE_API bool bSystemActive;
 #endif
 };

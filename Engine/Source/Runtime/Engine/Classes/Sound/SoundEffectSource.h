@@ -15,19 +15,24 @@ class FSoundEffectSource;
 class FSoundEffectBase;
 
 /** Preset of a source effect that can be shared between chains. */
-UCLASS(config = Engine, abstract, editinlinenew, BlueprintType)
-class ENGINE_API USoundEffectSourcePreset : public USoundEffectPreset
+UCLASS(config = Engine, abstract, editinlinenew, BlueprintType, MinimalAPI)
+class USoundEffectSourcePreset : public USoundEffectPreset
 {
 	GENERATED_BODY()
+
+public:
+	static constexpr int32 DefaultSupportedChannels = 2;
+
+	virtual int32 GetMaxSupportedChannels() const { return DefaultSupportedChannels; }
 };
 
 USTRUCT(BlueprintType)
-struct ENGINE_API FSourceEffectChainEntry
+struct FSourceEffectChainEntry
 {
 	GENERATED_USTRUCT_BODY()
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SourceEffect")
-	USoundEffectSourcePreset* Preset;
+	TObjectPtr<USoundEffectSourcePreset> Preset;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SourceEffect")
 	uint32 bBypass:1;
@@ -39,8 +44,8 @@ struct ENGINE_API FSourceEffectChainEntry
 };
 
 /** Chain of source effect presets that can be shared between referencing sounds. */
-UCLASS(BlueprintType)
-class ENGINE_API USoundEffectSourcePresetChain : public UObject
+UCLASS(BlueprintType, MinimalAPI)
+class USoundEffectSourcePresetChain : public UObject
 {
 	GENERATED_BODY()
 
@@ -54,12 +59,17 @@ public:
 	UPROPERTY(EditAnywhere, Category = Effects)
 	uint32 bPlayEffectChainTails : 1;
 
-	void AddReferencedEffects(FReferenceCollector& Collector);
+	ENGINE_API void AddReferencedEffects(FReferenceCollector& Collector);
+
+	/**  Get the number of channels this chain supports, which is the lowest channel count of all effects in the chain */
+	int32 ENGINE_API GetSupportedChannelCount() const;
+
+	bool ENGINE_API SupportsChannelCount(const int32 InNumChannels) const;
 
 protected:
 
-#if WITH_EDITORONLY_DATA
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+#if WITH_EDITOR
+	ENGINE_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
 
 };
@@ -105,7 +115,7 @@ struct FSoundEffectSourceInputData
 	}
 };
 
-class ENGINE_API FSoundEffectSource : public FSoundEffectBase
+class FSoundEffectSource : public FSoundEffectBase
 {
 public:
 	virtual ~FSoundEffectSource() = default;

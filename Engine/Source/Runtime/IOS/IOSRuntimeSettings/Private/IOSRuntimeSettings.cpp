@@ -7,29 +7,46 @@
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformApplicationMisc.h"
 
+#if WITH_EDITOR
+#include "Misc/App.h"
+#include "Misc/MessageDialog.h"
+#include "Misc/ScopedSlowTask.h"
+#include "DesktopPlatformModule.h"
+#define LOCTEXT_NAMESPACE "IOSRuntimeSettings"
+#endif
+
 UIOSRuntimeSettings::UIOSRuntimeSettings(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
+	, CacheSizeKB(65536)
+	, MaxSampleRate(48000)
+	, HighSampleRate(32000)
+	, MedSampleRate(24000)
+	, LowSampleRate(12000)
+	, MinSampleRate(8000)
+	, CompressionQualityModifier(1)
 {
 	bEnableGameCenterSupport = true;
 	bEnableCloudKitSupport = false;
-    bRunAsCurrentUser = false;
+	bUserSwitching = false;
 	bSupportsPortraitOrientation = true;
 	bSupportsITunesFileSharing = false;
 	bSupportsFilesApp = false;
-	BundleDisplayName = TEXT("UE4 Game");
-	BundleName = TEXT("MyUE4Game");
+	BundleDisplayName = TEXT("UnrealGame");
+	BundleName = TEXT("MyUnrealGame");
 	BundleIdentifier = TEXT("com.YourCompany.GameNameNoSpaces");
 	VersionInfo = TEXT("1.0.0");
     FrameRateLock = EPowerUsageFrameRateLock::PUFRL_30;
 	bEnableDynamicMaxFPS = false;
 	bSupportsIPad = true;
 	bSupportsIPhone = true;
-	MinimumiOSVersion = EIOSVersion::IOS_12;
+	bEnableSplitView = false;
+	bEnableSimulatorSupport = false;
+	MinimumiOSVersion = EIOSVersion::IOS_Minimum;
     bBuildAsFramework = true;
 	bGeneratedSYMFile = false;
 	bGeneratedSYMBundle = false;
 	bGenerateXCArchive = false;
-	bShipForBitcode = true;
+	bSupportSecondaryMac = false;
 	bUseRSync = true;
 	bCustomLaunchscreenStoryboard = false;
 	AdditionalPlistData = TEXT("");
@@ -37,14 +54,14 @@ UIOSRuntimeSettings::UIOSRuntimeSettings(const FObjectInitializer& ObjectInitial
 	AdditionalShippingLinkerFlags = TEXT("");
     bGameSupportsMultipleActiveControllers = false;
 	bAllowRemoteRotation = true;
-    bUseRemoteAsVirtualJoystick_DEPRECATED = true;
-	bUseRemoteAbsoluteDpadValues = false;
 	bDisableMotionData = false;
     bEnableRemoteNotificationsSupport = false;
     bEnableBackgroundFetch = false;
 	bSupportsMetal = true;
 	bSupportsMetalMRT = false;
+    bSupportHighRefreshRates = false;
 	bDisableHTTPS = false;
+    bSupportsBackgroundAudio = false;
 }
 
 void UIOSRuntimeSettings::PostReloadConfig(class FProperty* PropertyThatWasLoaded)
@@ -77,6 +94,36 @@ void UIOSRuntimeSettings::PostEditChangeProperty(struct FPropertyChangedEvent& P
 		UpdateSinglePropertyInConfigFile(GetClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(UIOSRuntimeSettings, bSupportsMetal)), GetDefaultConfigFilename());
 	}
 
+	// If iOS Simulator setting changed, need to rerun GPF to force xcconfig files to updated the supported platforms
+	if (PropertyChangedEvent.GetPropertyName() == TEXT("bEnableSimulatorSupport") &&
+		PropertyChangedEvent.ChangeType == EPropertyChangeType::ValueSet)
+	{
+		const FText GPFQueryLoc = LOCTEXT("RunGPFQuery", "Xcode Project will refresh. Continue?");
+		if (FMessageDialog::Open(EAppMsgType::OkCancel, GPFQueryLoc) == EAppReturnType::Cancel)
+		{
+			// User canceled, so reset the value
+			bEnableSimulatorSupport = !bEnableSimulatorSupport;
+			UpdateSinglePropertyInConfigFile(GetClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(UIOSRuntimeSettings, bEnableSimulatorSupport)), GetDefaultConfigFilename());
+			return;
+		}
+
+		FScopedSlowTask SlowTask(0, LOCTEXT("UpdatingCodeProject", "Updating code project..."));
+		SlowTask.MakeDialog();
+
+		// Try to generate project files
+		FStringOutputDevice OutputLog;
+		OutputLog.SetAutoEmitLineTerminator(true);
+		GLog->AddOutputDevice(&OutputLog);
+		bool bSuccess = FDesktopPlatformModule::Get()->GenerateProjectFiles(FPaths::RootDir(), FPaths::ProjectDir() + FApp::GetProjectName(), GWarn);
+		GLog->RemoveOutputDevice(&OutputLog);
+
+		if (!bSuccess)
+		{
+			FFormatNamedArguments Args;
+			Args.Add(TEXT("LogOutput"), FText::FromString(OutputLog));
+			FMessageDialog::Open(EAppMsgType::Ok, FText::Format(LOCTEXT("CouldNotGenerateProjectFiles", "Project files could not be generated. Please run GPF manually or revert the setting. Log:\n\n{LogOutput}"), Args));
+		}
+	}
 }
 
 
@@ -89,8 +136,14 @@ void UIOSRuntimeSettings::PostInitProperties()
 	{
 		SSHPrivateKeyLocation = TEXT("");
 
+		FString RealRemoteServerName = RemoteServerName;
+		if(RemoteServerName.Contains(TEXT(":")))
+		{
+			FString RemoteServerPort;
+			RemoteServerName.Split(TEXT(":"),&RealRemoteServerName,&RemoteServerPort);
+		}
 		const FString DefaultKeyFilename = TEXT("RemoteToolChainPrivate.key");
-		const FString RelativeFilePathLocation = FPaths::Combine(TEXT("SSHKeys"), *RemoteServerName, *RSyncUsername, *DefaultKeyFilename);
+		const FString RelativeFilePathLocation = FPaths::Combine(TEXT("SSHKeys"), *RealRemoteServerName, *RSyncUsername, *DefaultKeyFilename);
 
 		FString Path = FPlatformMisc::GetEnvironmentVariable(TEXT("APPDATA"));
 
@@ -115,9 +168,9 @@ void UIOSRuntimeSettings::PostInitProperties()
 		}
 	}
 
-	if (MinimumiOSVersion < EIOSVersion::IOS_12)
+	if ((MinimumiOSVersion < EIOSVersion::IOS_15) && (MinimumiOSVersion != EIOSVersion::IOS_Minimum))
 	{
-		MinimumiOSVersion = EIOSVersion::IOS_12;
+		MinimumiOSVersion = EIOSVersion::IOS_Minimum;
 		UpdateSinglePropertyInConfigFile(GetClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(UIOSRuntimeSettings, MinimumiOSVersion)), GetDefaultConfigFilename());
 	}
 	if (!bSupportsMetal && !bSupportsMetalMRT)
@@ -126,4 +179,7 @@ void UIOSRuntimeSettings::PostInitProperties()
 		UpdateSinglePropertyInConfigFile(GetClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(UIOSRuntimeSettings, bSupportsMetal)), GetDefaultConfigFilename());
 	}
 }
+
+#undef LOCTEXT_NAMESPACE
+
 #endif

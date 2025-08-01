@@ -2,16 +2,35 @@
 
 #pragma once
 
+#include "Concepts/GetTypeHashable.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-
+#include "HAL/PlatformTime.h"
+#include "HAL/UnrealMemory.h"
 #include "LiveLinkRefSkeleton.h"
+#include "Math/Transform.h"
+#include "Math/TransformVectorized.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/AssertionMacros.h"
 #include "Misc/FrameRate.h"
+#include "Misc/FrameTime.h"
+#include "Misc/Guid.h"
 #include "Misc/QualifiedFrameTime.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/StructOnScope.h"
 #include "Serialization/Archive.h"
-#include "Templates/HasGetTypeHash.h"
+#include "Templates/Casts.h"
+#include "Templates/Models.h"
+#include "Templates/RemoveReference.h"
+#include "Templates/UnrealTemplate.h"
+#include "Templates/UnrealTypeTraits.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
 #include "UObject/PropertyPortFlags.h"
+#include "UObject/StructOnScope.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
 
 #include "LiveLinkTypes.generated.h"
 
@@ -45,13 +64,17 @@ public:
 		Ar << InSubjectName.Name;
 		return Ar;
 	}
+	
+	friend inline uint32 GetTypeHash(const FLiveLinkSubjectName& Value)
+	{
+		return GetTypeHash(Value.Name);
+	}
 };
-template <> struct TModels<CGetTypeHashable, FLiveLinkSubjectName> { enum { Value = TModels<CGetTypeHashable, FName>::Value }; };
 
 
 // Structure that identifies an individual subject
 USTRUCT(BlueprintType)
-struct LIVELINKINTERFACE_API FLiveLinkSubjectKey
+struct FLiveLinkSubjectKey
 {
 	GENERATED_BODY()
 
@@ -65,7 +88,6 @@ struct LIVELINKINTERFACE_API FLiveLinkSubjectKey
 
 	FLiveLinkSubjectKey() = default;
 	FLiveLinkSubjectKey(FGuid InSource, FName InSubjectName) : Source(InSource), SubjectName(InSubjectName) {}
-	FLiveLinkSubjectKey(const FLiveLinkSubjectKey& Rhs) : Source(Rhs.Source), SubjectName(Rhs.SubjectName) {}
 
 	bool operator== (const FLiveLinkSubjectKey& Other) const { return SubjectName == Other.SubjectName && Source == Other.Source; }
 	bool operator!=(const FLiveLinkSubjectKey& Other) const	{ return !(*this == Other); }
@@ -147,7 +169,7 @@ private:
 
 
 USTRUCT(BlueprintType)
-struct LIVELINKINTERFACE_API FLiveLinkTime
+struct FLiveLinkTime
 {
 	GENERATED_BODY()
 
@@ -172,7 +194,7 @@ struct LIVELINKINTERFACE_API FLiveLinkTime
 
 
 USTRUCT(BlueprintType)
-struct LIVELINKINTERFACE_API FLiveLinkMetaData
+struct FLiveLinkMetaData
 {
 	GENERATED_BODY()
 
@@ -191,7 +213,7 @@ using FLiveLinkFrameIdentifier = int32;
  * @note subclass can't contains reference to UObject
  */
 USTRUCT(BlueprintType)
-struct LIVELINKINTERFACE_API FLiveLinkBaseFrameData
+struct FLiveLinkBaseFrameData
 {
 	GENERATED_BODY();
 
@@ -224,7 +246,7 @@ struct LIVELINKINTERFACE_API FLiveLinkBaseFrameData
  * @note subclass can't contains reference to UObject
  */
 USTRUCT(BlueprintType)
-struct LIVELINKINTERFACE_API FLiveLinkBaseStaticData
+struct FLiveLinkBaseStaticData
 {
 	GENERATED_BODY()
 
@@ -254,7 +276,7 @@ struct LIVELINKINTERFACE_API FLiveLinkBaseStaticData
  * Can be used to do blueprint facilitator per role
  */
 USTRUCT(BlueprintType)
-struct LIVELINKINTERFACE_API FLiveLinkBaseBlueprintData
+struct FLiveLinkBaseBlueprintData
 {
 	GENERATED_BODY();
 
@@ -449,7 +471,7 @@ protected:
 	{
 		static Type* Cast(const UScriptStruct* ScriptStruct, BaseType* BaseData)
 		{
-			if (TIsSame<Type, BaseType>::Value)
+			if constexpr (std::is_same_v<Type, BaseType>)
 			{
 				return StaticCast<Type*>(BaseData);
 			}
@@ -460,13 +482,12 @@ protected:
 				{
 					return StaticCast<Type*>(BaseData);
 				}
+				return nullptr;
 			}
-
-			return nullptr;
 		}
 		static const Type* ConstCast(const UScriptStruct* ScriptStruct, const BaseType* BaseData)
 		{
-			if (TIsSame<Type, BaseType>::Value)
+			if constexpr (std::is_same_v<Type, BaseType>)
 			{
 				return StaticCast<const Type*>(BaseData);
 			}
@@ -580,8 +601,8 @@ struct
 
 	FLiveLinkTimeCode& operator=(const FQualifiedFrameTime& InFrameTime)
 	{
-		const int32 NumberOfFramesInSecond = FMath::CeilToInt(InFrameTime.Rate.AsDecimal());
-		const int32 NumberOfFrames = FMath::RoundToZero(InFrameTime.Time.AsDecimal());
+		const int32 NumberOfFramesInSecond = FMath::CeilToInt32(InFrameTime.Rate.AsDecimal());
+		const int32 NumberOfFrames = (int32)(FMath::RoundToZero(InFrameTime.Time.AsDecimal()));
 
 		Seconds = (int32)FMath::RoundToZero(NumberOfFrames / (double)NumberOfFramesInSecond);
 		Frames = NumberOfFrames % NumberOfFramesInSecond;

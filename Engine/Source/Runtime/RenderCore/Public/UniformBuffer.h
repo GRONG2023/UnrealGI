@@ -27,6 +27,8 @@ TUniformBufferRef<TBufferStruct> CreateUniformBufferImmediate(const TBufferStruc
 template<typename TBufferStruct>
 class TUniformBuffer : public FRenderResource
 {
+	static_assert(!TIsUECoreVariant<TBufferStruct, double>::Value, "UniformBufferRHIRef cannot be double core variants! Switch to float variant.");
+
 public:
 
 	TUniformBuffer()
@@ -44,20 +46,33 @@ public:
 	}
 
 	/** Sets the contents of the uniform buffer. */
-	void SetContents(const TBufferStruct& NewContents)
+	void SetContents(FRHICommandListBase& RHICmdList, const TBufferStruct& NewContents)
 	{
 		SetContentsNoUpdate(NewContents);
-		UpdateRHI();
+		UpdateRHI(RHICmdList);
 	}
+
+	UE_DEPRECATED(5.4, "SetContents requires a command list.")
+	void SetContents(const TBufferStruct& NewContents)
+	{
+		SetContents(FRenderResource::GetImmediateCommandList(), NewContents);
+	}
+
 	/** Sets the contents of the uniform buffer to all zeros. */
-	void SetContentsToZero()
+	void SetContentsToZero(FRHICommandListBase& RHICmdList)
 	{
 		if (!Contents)
 		{
 			Contents = (uint8*)FMemory::Malloc(sizeof(TBufferStruct), SHADER_PARAMETER_STRUCT_ALIGNMENT);
 		}
 		FMemory::Memzero(Contents, sizeof(TBufferStruct));
-		UpdateRHI();
+		UpdateRHI(RHICmdList);
+	}
+
+	UE_DEPRECATED(5.4, "SetContentsToZero requires a command list.")
+	void SetContentsToZero()
+	{
+		SetContentsToZero(FRenderResource::GetImmediateCommandList());
 	}
 
 	const uint8* GetContents() const 
@@ -66,16 +81,15 @@ public:
 	}
 
 	// FRenderResource interface.
-	virtual void InitDynamicRHI() override
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override
 	{
-		check(IsInRenderingThread());
 		UniformBufferRHI.SafeRelease();
 		if (Contents)
 		{
 			UniformBufferRHI = CreateUniformBufferImmediate<TBufferStruct>(*((const TBufferStruct*)Contents), BufferUsage);
 		}
 	}
-	virtual void ReleaseDynamicRHI() override
+	virtual void ReleaseRHI() override
 	{
 		UniformBufferRHI.SafeRelease();
 	}
@@ -83,7 +97,7 @@ public:
 	// Accessors.
 	FRHIUniformBuffer* GetUniformBufferRHI() const
 	{ 
-		checkSlow(IsInRenderingThread() || IsInParallelRenderingThread());
+		checkSlow(IsInParallelRenderingThread() || IsInRenderingThread());
 		checkf(UniformBufferRHI.GetReference(), TEXT("Attempted to access UniformBufferRHI on a TUniformBuffer that was never filled in with anything")); 
 		check(UniformBufferRHI.GetReference()); // you are trying to use a UB that was never filled with anything
 		return UniformBufferRHI; 
@@ -99,10 +113,9 @@ public:
 
 protected:
 
-	/** Sets the contents of the uniform buffer. Used within calls to InitDynamicRHI */
+	/** Sets the contents of the uniform buffer. Used within calls to InitRHI */
 	void SetContentsNoUpdate(const TBufferStruct& NewContents)
 	{
-		check(IsInRenderingThread());
 		if (!Contents)
 		{
 			Contents = (uint8*)FMemory::Malloc(sizeof(TBufferStruct), SHADER_PARAMETER_STRUCT_ALIGNMENT);
@@ -128,6 +141,6 @@ void BeginSetUniformBufferContents(
 	ENQUEUE_RENDER_COMMAND(SetUniformBufferContents)(
 		[UniformBufferPtr, Struct](FRHICommandListImmediate& RHICmdList)
 		{
-			UniformBufferPtr->SetContents(Struct);
+			UniformBufferPtr->SetContents(RHICmdList, Struct);
 		});
 }

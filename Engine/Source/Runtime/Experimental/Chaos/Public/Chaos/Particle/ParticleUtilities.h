@@ -4,6 +4,14 @@
 #include "Chaos/ParticleHandle.h"
 #include "Chaos/Utilities.h"
 
+//
+// These accessors existed to allow us to switch between particles whose transforms are maintained
+// in center of mass space, versus actor space. The should no longer be needed - we have settled on Actor Space. 
+// See particle handle methods like GetTransformPQ(), SetTransformPQCom() etc.
+//
+// @todo(chaos): deprecate this file and its contents
+//
+
 #define CHAOS_PARTICLE_ACTORTRANSFORM 1
 
 namespace Chaos
@@ -12,16 +20,17 @@ namespace Chaos
 	{
 	public:
 		template<typename T_PARTICLEHANDLE>
-		static inline FVec3& Position(T_PARTICLEHANDLE Particle) { return Particle->X(); }
+		static inline FVec3& Position(T_PARTICLEHANDLE Particle) { return Particle->GetX(); }
 		template<typename T_PARTICLEHANDLE>
-		static inline const FVec3& GetPosition(T_PARTICLEHANDLE Particle) { return Particle->X(); }
+		static inline const FVec3& GetPosition(T_PARTICLEHANDLE Particle) { return Particle->GetX(); }
 		template<typename T_PARTICLEHANDLE>
-		static inline FRotation3& Rotation(T_PARTICLEHANDLE Particle) { return Particle->R(); }
+		UE_DEPRECATED(5.4, "Use Particle->SetR() instead.")
+		static inline FRotation3 Rotation(T_PARTICLEHANDLE Particle) { return Particle->GetR(); }
 		template<typename T_PARTICLEHANDLE>
-		static inline const FRotation3& GetRotation(T_PARTICLEHANDLE Particle) { return Particle->R(); }
+		static inline const FRotation3 GetRotation(T_PARTICLEHANDLE Particle) { return Particle->GetR(); }
 
-		static inline FVec3& Position(TPBDRigidParticles<FReal, 3>& Particles, const int32 Index) { return Particles.X(Index); }
-		static inline FRotation3& Rotation(TPBDRigidParticles<FReal, 3>& Particles, const int32 Index) { return Particles.R(Index); }
+		static inline const FVec3& Position(TPBDRigidParticles<FReal, 3>& Particles, const int32 Index) { return Particles.GetX(Index); }
+		static inline const FRotation3 Rotation(TPBDRigidParticles<FReal, 3>& Particles, const int32 Index) { return Particles.GetR(Index); }
 	};
 
 	class FParticleSpatialAccessorPQ
@@ -30,14 +39,14 @@ namespace Chaos
 		template<typename T_PARTICLEHANDLE>
 		static inline FVec3& Position(T_PARTICLEHANDLE Particle) { return Particle->P(); }
 		template<typename T_PARTICLEHANDLE>
-		static inline const FVec3& GetPosition(T_PARTICLEHANDLE Particle) { return Particle->P(); }
+		static inline const FVec3& GetPosition(T_PARTICLEHANDLE Particle) { return Particle->GetP(); }
 		template<typename T_PARTICLEHANDLE>
-		static inline FRotation3& Rotation(T_PARTICLEHANDLE Particle) { return Particle->Q(); }
+		static inline FRotation3& Rotation(T_PARTICLEHANDLE Particle) { return Particle->GetQ(); }
 		template<typename T_PARTICLEHANDLE>
-		static inline const FRotation3& GetRotation(T_PARTICLEHANDLE Particle) { return Particle->Q(); }
+		static inline const FRotation3 GetRotation(T_PARTICLEHANDLE Particle) { return Particle->GetQ(); }
 
-		static inline FVec3& Position(TPBDRigidParticles<FReal, 3>& Particles, const int32 Index) { return Particles.P(Index); }
-		static inline FRotation3& Rotation(TPBDRigidParticles<FReal, 3>& Particles, const int32 Index) { return Particles.Q(Index); }
+		static inline const FVec3& Position(TPBDRigidParticles<FReal, 3>& Particles, const int32 Index) { return Particles.GetP(Index); }
+		static inline FRotation3 Rotation(TPBDRigidParticles<FReal, 3>& Particles, const int32 Index) { return Particles.GetQ(Index); }
 	};
 
 	/**
@@ -51,7 +60,7 @@ namespace Chaos
 		template<typename T_PARTICLEHANDLE>
 		static inline FRigidTransform3 GetActorWorldTransform(T_PARTICLEHANDLE Particle)
 		{
-			return FRigidTransform3(Particle->X(), Particle->R());
+			return FRigidTransform3(TSpatialAccessor::GetPosition(Particle), TSpatialAccessor::GetRotation(Particle));
 		}
 
 		template<typename T_PARTICLEHANDLE>
@@ -176,141 +185,31 @@ namespace Chaos
 			TSpatialAccessor::Position(Particles, Index) = P;
 			TSpatialAccessor::Rotation(Particles, Index) = Q;
 		}
-	};
-
-	/**
-	 * Particle Space == CoM Space.
-	 * Velocities in CoM Space.
-	 */
-	template <typename TSpatialAccessor>
-	class FParticleUtilities_CoMSpace
-	{
-	public:
+		
 		template<typename T_PARTICLEHANDLE>
-		static inline FRigidTransform3 GetActorWorldTransform(T_PARTICLEHANDLE Particle)
+		static inline void AddForceAtPositionLocal(T_PARTICLEHANDLE Particle, const FVec3& LocalForce, const FVec3& LocalPosition)
 		{
-			FRotation3 ActorQ = TSpatialAccessor::GetRotation(Particle) * Particle->RotationOfMass().Inverse();
-			FVec3 ActorP = TSpatialAccessor::GetPosition(Particle) - ActorQ.RotateVector(Particle->CenterOfMass());
-			return FRigidTransform3(ActorP, ActorQ);
+			const FRigidTransform3 ParticleTransform = GetActorWorldTransform(Particle);
+			const FVec3 WorldPosition = ParticleTransform.TransformPosition(LocalPosition);
+			const FVec3 WorldForce = ParticleTransform.TransformVector(LocalForce);
+
+			AddForceAtPositionWorld(Particle, WorldForce, WorldPosition);
 		}
 
 		template<typename T_PARTICLEHANDLE>
-		static inline void SetActorWorldTransform(T_PARTICLEHANDLE Particle, const FRigidTransform3& ActorWorldT)
+		static inline void AddForceAtPositionWorld(T_PARTICLEHANDLE Particle, const FVec3& Force, const FVec3& Position)
 		{
-			FRotation3 CoMQ = ActorWorldT.GetRotation() * Particle->RotationOfMass();
-			FVec3 CoMP = ActorWorldT.GetTranslation() + ActorWorldT.GetRotation().RotateVector(Particle->CenterOfMass());
-			TSpatialAccessor::Position(Particle) = CoMP;
-			TSpatialAccessor::Rotation(Particle) = CoMQ;
-		}
+			const FVec3 WorldCOM = GetCoMWorldPosition(Particle);
+			const FVec3 Torque = FVec3::CrossProduct(Position - WorldCOM, Force);
 
-		template<typename T_PARTICLEHANDLE>
-		static inline FRigidTransform3 ActorLocalToParticleLocal(T_PARTICLEHANDLE Particle, const FRigidTransform3& ActorLocalT)
-		{
-			return FRigidTransform3(Particle->RotationOfMass().UnrotateVector(ActorLocalT.GetTranslation() - Particle->CenterOfMass()), Particle->RotationOfMass().Inverse() * ActorLocalT.GetRotation());
-		}
-
-		template<typename T_PARTICLEHANDLE>
-		static inline FRigidTransform3 ActorWorldToParticleWorld(T_PARTICLEHANDLE Particle, const FRigidTransform3& ActorWorldT)
-		{
-			FRotation3 CoMQ = ActorWorldT.GetRotation() * Particle->RotationOfMass();
-			FVec3 CoMP = ActorWorldT.GetTranslation() + ActorWorldT.GetRotation().RotateVector(Particle->CenterOfMass());
-			return FRigidTransform3(CoMP, CoMQ);
-		}
-
-		template<typename T_PARTICLEHANDLE>
-		static inline FMatrix33 GetWorldInertia(T_PARTICLEHANDLE Particle)
-		{
-			return Utilities::ComputeWorldSpaceInertia(TSpatialAccessor::Rotation(Particle), Particle->I());
-		}
-
-		template<typename T_PARTICLEHANDLE>
-		static inline FMatrix33 GetWorldInvInertia(T_PARTICLEHANDLE Particle)
-		{
-			return Utilities::ComputeWorldSpaceInertia(TSpatialAccessor::Rotation(Particle), Particle->InvI());
-		}
-
-		template<typename T_PARTICLEHANDLE>
-		static inline const FVec3& ParticleLocalToCoMLocal(T_PARTICLEHANDLE Particle, const FVec3& P)
-		{
-			return P;
-		}
-
-		template<typename T_PARTICLEHANDLE>
-		static inline const FRotation3& ParticleLocalToCoMLocal(T_PARTICLEHANDLE Particle, const FRotation3& Q)
-		{
-			return Q;
-		}
-
-		template<typename T_PARTICLEHANDLE>
-		static inline const FRigidTransform3& ParticleLocalToCoMLocal(T_PARTICLEHANDLE Particle, const FRigidTransform3& T)
-		{
-			return T;
-		}
-
-		template<typename T_PARTICLEHANDLE>
-		static inline FVec3 GetVelocityAtCoMRelativePosition(T_PARTICLEHANDLE Particle, const FVec3& RelPos)
-		{
-			return Particle->V() + FVec3::CrossProduct(Particle->W(), RelPos);
-		}
-
-		template<typename T_PARTICLEHANDLE>
-		static inline FVec3 GetPreviousVelocityAtCoMRelativePosition(T_PARTICLEHANDLE Particle, const FVec3& RelPos)
-		{
-			return Particle->PreV() + FVec3::CrossProduct(Particle->PreW(), RelPos);
-		}
-
-		template<typename T_PARTICLEHANDLE>
-		static inline const FVec3& GetCoMWorldPosition(T_PARTICLEHANDLE Particle)
-		{
-			return TSpatialAccessor::GetPosition(Particle);
-		}
-
-		static inline const FVec3& GetCoMWorldPosition(TPBDRigidParticles<FReal, 3>& Particles, const int32 Index)
-		{
-			return TSpatialAccessor::Position(Particles, Index);
-		}
-
-		template<typename T_PARTICLEHANDLE>
-		static inline const FRotation3& GetCoMWorldRotation(T_PARTICLEHANDLE Particle)
-		{
-			return TSpatialAccessor::GetRotation(Particle);
-		}
-
-		template<typename T_PARTICLEHANDLE>
-		static inline FRigidTransform3 GetCoMWorldTransform(T_PARTICLEHANDLE Particle)
-		{
-			return FRigidTransform3(GetCoMWorldPosition(Particle), GetCoMWorldRotation(Particle));
-		}
-
-		static inline const FRotation3& GetCoMWorldRotation(TPBDRigidParticles<FReal, 3>& Particles, const int32 Index)
-		{
-			return TSpatialAccessor::Rotation(Particles, Index);
-		}
-
-		template<typename T_PARTICLEHANDLE>
-		static inline void SetCoMWorldTransform(T_PARTICLEHANDLE Particle, const FVec3& PCoM, const FRotation3& QCoM)
-		{
-			TSpatialAccessor::Position(Particle) = PCoM;
-			TSpatialAccessor::Rotation(Particle) = QCoM;
-		}
-
-		static inline void SetCoMWorldTransform(TPBDRigidParticles<FReal, 3>& Particles, const int32 Index, const FVec3& PCoM, const FRotation3& QCoM)
-		{
-			TSpatialAccessor::Position(Particles, Index) = PCoM;
-			TSpatialAccessor::Rotation(Particles, Index) = QCoM;
+			Particle->AddForce(Force);
+			Particle->AddTorque(Torque);
 		}
 	};
 
-#if CHAOS_PARTICLE_ACTORTRANSFORM
 	using FParticleUtilitiesPQ = FParticleUtilities_ActorSpace<FParticleSpatialAccessorPQ>;
 	using FParticleUtilitiesXR = FParticleUtilities_ActorSpace<FParticleSpatialAccessorXR>;
 	using FParticleUtilities = FParticleUtilities_ActorSpace<FParticleSpatialAccessorPQ>;
 	using FParticleUtilitiesGT = FParticleUtilities_ActorSpace<FParticleSpatialAccessorXR>;
-#else
-	using FParticleUtilitiesPQ = FParticleUtilities_CoMSpace<FParticleSpatialAccessorPQ>;
-	using FParticleUtilitiesXR = FParticleUtilities_CoMSpace<FParticleSpatialAccessorXR>;
-	using FParticleUtilities = FParticleUtilities_CoMSpace<FParticleSpatialAccessorPQ>;
-	using FParticleUtilitiesGT = FParticleUtilities_CoMSpace<FParticleSpatialAccessorXR>;
-#endif
 
 }

@@ -3,10 +3,12 @@
 #pragma once
 
 #include "CoreTypes.h"
+#include "Internationalization/FastDecimalFormat.h"
+#include "Misc/ExpressionParserTypes.h"
 #include "Misc/Optional.h"
 #include "Templates/ValueOrError.h"
-#include "Misc/ExpressionParserTypes.h"
-#include "Internationalization/FastDecimalFormat.h"
+
+struct FDecimalNumberFormattingRules;
 
 #define DEFINE_EXPRESSION_OPERATOR_NODE(EXPORTAPI, TYPE, ...) \
 namespace ExpressionParser {\
@@ -77,14 +79,14 @@ namespace ExpressionParser
 }
 
 /** A basic math expression evaluator */
-class CORE_API FBasicMathExpressionEvaluator
+class FBasicMathExpressionEvaluator
 {
 public:
 	/** Constructor that sets up the parser's lexer and compiler */
-	FBasicMathExpressionEvaluator();
+	CORE_API FBasicMathExpressionEvaluator();
 
 	/** Evaluate the given expression, resulting in either a double value, or an error */
-	TValueOrError<double, FExpressionError> Evaluate(const TCHAR* InExpression, double InExistingValue = 0) const;
+	CORE_API TValueOrError<double, FExpressionError> Evaluate(const TCHAR* InExpression, double InExistingValue = 0) const;
 	
 private:
 	FTokenDefinitions TokenDefinitions;

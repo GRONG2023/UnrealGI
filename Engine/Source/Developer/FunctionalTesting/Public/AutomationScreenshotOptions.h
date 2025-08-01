@@ -64,7 +64,6 @@ public:
 	uint8 MaxBrightness;
 };
 
-
 USTRUCT(BlueprintType)
 struct FAutomationScreenshotOptions
 {
@@ -74,6 +73,7 @@ public:
 	FAutomationScreenshotOptions()
 		: Resolution(ForceInit)
 		, Delay(0.2f)
+		, FrameDelay(5)
 		, bOverride_OverrideTimeTo(false)
 		, OverrideTimeTo(0.0f)
 		, bDisableNoisyRenderingFeatures(true)
@@ -92,6 +92,7 @@ public:
 	FAutomationScreenshotOptions(EComparisonTolerance InTolerance)
 		: Resolution(ForceInit)
 		, Delay(0.2f)
+		, FrameDelay(5)
 		, bOverride_OverrideTimeTo(false)
 		, OverrideTimeTo(0.0f)
 		, bDisableNoisyRenderingFeatures(true)
@@ -116,10 +117,16 @@ public:
 	FVector2D Resolution;
 
 	/**
-	 * The delay before we take the screenshot.
+	 * The delay before we take the screenshot (measured in seconds). Both this delay and the frame delay must be met before the screenshot is taken.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Screenshot")
 	float Delay;
+
+	/**
+	 * The delay before we take the screenshot (measured in number of frames). Both this frame delay and the time delay must be met before the screenshot is taken.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Screenshot")
+	int32 FrameDelay;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Overrides, meta = (PinHiddenByDefault, InlineEditConditionToggle))
 	bool bOverride_OverrideTimeTo;
@@ -130,21 +137,22 @@ public:
 	 * on the game thread is unaffected.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Screenshot", meta=(editcondition = "bOverride_OverrideTimeTo"))
-	float OverrideTimeTo;
+	double OverrideTimeTo;
 
 	/**
 	 * Disables Anti-Aliasing, Motion Blur, Screen Space Reflections, Eye Adaptation, Tonemapper and Contact
 	 * Shadows, because those features contribute a lot to the noise in the final rendered image.  If you're
-	 * explicitly looking for changes 
+	 * explicitly looking for changes. Unchecking the option will make accessible the Disable Eye Adaptation
+	 * checkbox.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Screenshot")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Screenshot")
 	bool bDisableNoisyRenderingFeatures;
 
 	/**
 	 * Disables Eye Adaptation and sets Tonemapper to fixed gamma curve. Should generally be on unless
-	 * testing tone mapping or other post-processing results
+	 * testing tone mapping or other post-processing results.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Screenshot", meta=(DisplayName = "Fixed Exposure"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Screenshot", meta = (EditCondition = "!bDisableNoisyRenderingFeatures", DisplayName = "Disable Eye Adaptation"))
 	bool bDisableTonemapping;
 
 	/**
@@ -152,7 +160,7 @@ public:
 	 * screenshot.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Screenshot")
-	UAutomationViewSettings* ViewSettings;
+	TObjectPtr<UAutomationViewSettings> ViewSettings;
 
 	/**
 	 * Allows you to screenshot a buffer other than the default final lit scene image.  Useful if you're

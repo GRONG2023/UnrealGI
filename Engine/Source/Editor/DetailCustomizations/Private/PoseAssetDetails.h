@@ -2,17 +2,28 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Input/Reply.h"
-#include "Widgets/SWidget.h"
-#include "SSearchableComboBox.h"
-#include "Animation/Skeleton.h"
-#include "IDetailCustomization.h"
 #include "Animation/PoseAsset.h"
+#include "Animation/Skeleton.h"
+#include "Containers/Array.h"
+#include "Delegates/IDelegateInstance.h"
+#include "HAL/Platform.h"
+#include "IDetailCustomization.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Layout/Visibility.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
-struct FAssetData;
+class FString;
 class IDetailLayoutBuilder;
 class IPropertyHandle;
+class SSearchableComboBox;
+class SWidget;
+struct FAssetData;
 
 class FPoseAssetDetails : public IDetailCustomization
 {
@@ -75,7 +86,7 @@ private:
 	int32 CachedBasePoseIndex;
 	void CachePoseAssetData();
 
-	bool CanApplySettings() const;
+	EVisibility CanApplySettings() const;
 	FReply OnApplyAdditiveSettings();
 
 	TSharedPtr<IPropertyHandle> SourceAnimationPropertyHandle;
@@ -83,6 +94,8 @@ private:
 	void OnSourceAnimationChanged(const FAssetData& AssetData);
 	bool ShouldFilterAsset(const FAssetData& AssetData);
 	FReply OnUpdatePoseSourceAnimation();
+	bool IsUpdateSourceEnabled() const;
+	FText GetAnimationUpdateButtonText() const;
 
 	FText GetButtonText() const;
 };

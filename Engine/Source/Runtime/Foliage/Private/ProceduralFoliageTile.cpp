@@ -5,6 +5,8 @@
 #include "CollisionQueryParams.h"
 #include "ProceduralFoliageSpawner.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ProceduralFoliageTile)
+
 #define LOCTEXT_NAMESPACE "ProceduralFoliage"
 
 UProceduralFoliageTile::UProceduralFoliageTile(const FObjectInitializer& ObjectInitializer)
@@ -60,46 +62,43 @@ bool UProceduralFoliageTile::HandleOverlaps(FProceduralFoliageInstance* Instance
 FProceduralFoliageInstance* UProceduralFoliageTile::NewSeed(const FVector& Location, float Scale, const UFoliageType* Type, float InAge, bool bBlocker)
 {
 	const float InitRadius = Type->GetMaxRadius() * Scale;
+
+	FProceduralFoliageInstance* NewInst = new FProceduralFoliageInstance();
+	NewInst->Location = Location;
+
+	// make a new local random stream to avoid changes to instance randomness changing the position of all other procedural instances
+	FRandomStream LocalStream = RandomStream;
+	RandomStream.GetUnsignedInt(); // advance the parent stream by one
+
+	FRotator Rotation = {0,0,0};
+	Rotation.Yaw   = LocalStream.FRandRange(0, Type->RandomYaw ? 360 : 0);
+	Rotation.Pitch = LocalStream.FRandRange(0, Type->RandomPitchAngle);
+	NewInst->Rotation = FQuat(Rotation);
+	NewInst->Age = InAge;
+	NewInst->Type = Type;
+	NewInst->Normal = FVector(0, 0, 1);
+	NewInst->Scale = Scale;
+	NewInst->bBlocker = bBlocker;
+
+	// Don't add the seed if outside the quadtree TreeBox...
+	bool bSucceedsAgainstAABBCheck = Broadphase.TestAgainstAABB(NewInst);
+	if (bSucceedsAgainstAABBCheck)
 	{
-		FProceduralFoliageInstance* NewInst = new FProceduralFoliageInstance();
-		NewInst->Location = Location;
-
-		// make a new local random stream to avoid changes to instance randomness changing the position of all other procedural instances
-		FRandomStream LocalStream = RandomStream;
-		RandomStream.GetUnsignedInt(); // advance the parent stream by one
-
-		FRotator Rotation = {0,0,0};
-		Rotation.Yaw   = LocalStream.FRandRange(0, Type->RandomYaw ? 360 : 0);
-		Rotation.Pitch = LocalStream.FRandRange(0, Type->RandomPitchAngle);
-		NewInst->Rotation = FQuat(Rotation);
-		NewInst->Age = InAge;
-		NewInst->Type = Type;
-		NewInst->Normal = FVector(0, 0, 1);
-		NewInst->Scale = Scale;
-		NewInst->bBlocker = bBlocker;
-
-		// Don't add the seed if outside the quadtree TreeBox...
-		bool bSucceedsAgainstAABBCheck = Broadphase.TestAgainstAABB(NewInst);
-		if (bSucceedsAgainstAABBCheck)
-		{
-			// Add the seed if possible
-			Broadphase.Insert(NewInst);
-			const bool bSurvived = HandleOverlaps(NewInst);
-			return bSurvived ? NewInst : nullptr;
-		}
-		else
-		{
-			return nullptr;
-		}
+		// Add the seed if possible
+		Broadphase.Insert(NewInst);
+		const bool bSurvived = HandleOverlaps(NewInst);
+		return bSurvived ? NewInst : nullptr;
 	}
-
-	return nullptr;
+	else
+	{
+		return nullptr;
+	}
 }
 
 float GetSeedMinDistance(const FProceduralFoliageInstance* Instance, const float NewInstanceAge, const int32 SimulationStep)
 {
 	const UFoliageType* Type = Instance->Type;
-	const int32 StepsLeft = Type->MaxAge - SimulationStep;
+	const int32 StepsLeft = static_cast<int32>(Type->MaxAge - SimulationStep);
 	const float InstanceMaxAge = Type->GetNextAge(Instance->Age, StepsLeft);
 	const float NewInstanceMaxAge = Type->GetNextAge(NewInstanceAge, StepsLeft);
 
@@ -289,13 +288,13 @@ void UProceduralFoliageTile::AddRandomSeeds(TArray<FProceduralFoliageInstance*>&
 			const float Scale = Type->GetScaleForAge(NewAge);
 
 			FRandomStream& TypeRandomStream = RandomStreamPerType.FindChecked(Type);
-			float InitX = 0.f;
-			float InitY = 0.f;
+			FVector::FReal InitX = 0.f;
+			FVector::FReal InitY = 0.f;
 			float NeededRadius = 0.f;
 
 			if (bSimulateOnlyInShade && LastShadeCastingIndex >= 0)
 			{
-				const int32 InstanceSpawnerIdx = TypeRandomStream.FRandRange(0, LastShadeCastingIndex);
+				const int32 InstanceSpawnerIdx = TypeRandomStream.RandRange(0, LastShadeCastingIndex);
 				const FProceduralFoliageInstance& Spawner = InstancesArray[InstanceSpawnerIdx];
 				InitX = Spawner.Location.X;
 				InitY = Spawner.Location.Y;
@@ -308,13 +307,13 @@ void UProceduralFoliageTile::AddRandomSeeds(TArray<FProceduralFoliageInstance*>&
 				NeededRadius = MaxShadeRadii.FindRef(Type->DistributionSeed);
 			}
 
-			const float Rad = RandomStream.FRandRange(0, PI*2.f);
+			const FVector::FReal Rad = RandomStream.FRandRange(0, PI*2.f);
 			
 			
 			const FVector GlobalOffset = (RandomStream.FRandRange(0, Type->MaxInitialSeedOffset) + NeededRadius) * FVector(FMath::Cos(Rad), FMath::Sin(Rad), 0.f);
 
-			const float X = InitX + GlobalOffset.X;
-			const float Y = InitY + GlobalOffset.Y;
+			const FVector::FReal X = InitX + GlobalOffset.X;
+			const FVector::FReal Y = InitY + GlobalOffset.Y;
 
 			if (FProceduralFoliageInstance* NewInst = NewSeed(FVector(X, Y, 0.f), Scale, Type, NewAge))
 			{
@@ -465,7 +464,7 @@ void UProceduralFoliageTile::BeginDestroy()
 	RemoveInstances();
 }
 
-void UProceduralFoliageTile::ExtractDesiredInstances(TArray<FDesiredFoliageInstance>& OutInstances, const FTransform& WorldTM, const FGuid& ProceduralGuid, const float HalfHeight, const FBodyInstance* VolumeBodyInstance, bool bEmptyTileInfo)
+void UProceduralFoliageTile::ExtractDesiredInstances(TArray<FDesiredFoliageInstance>& OutInstances, const FTransform& WorldTM, const FVector2D& ActorVolumeLocation, FVector::FReal ActorVolumeMaxExtent, const FGuid& ProceduralGuid, const FVector::FReal HalfHeight, const FBodyInstance* VolumeBodyInstance, bool bEmptyTileInfo)
 {
 	InstancesToArray();
 
@@ -480,10 +479,16 @@ void UProceduralFoliageTile::ExtractDesiredInstances(TArray<FDesiredFoliageInsta
 		FVector EndRay = StartRay;
 		EndRay.Z -= (HalfHeight*2.f + 10.f);	//add 10cm to bottom position of raycast. This is needed because volume is usually placed directly on geometry and then you get precision issues
 
-		FDesiredFoliageInstance* DesiredInst = new (OutInstances)FDesiredFoliageInstance(StartRay, EndRay, Instance.GetMaxRadius());
+		// Apply FoliageType's Falloff
+		FVector2D Position(StartRay);
+		if (Instance.Type->DensityFalloff.IsInstanceFiltered(Position, ActorVolumeLocation, ActorVolumeMaxExtent))
+		{
+			continue;
+		}
+		
+		FDesiredFoliageInstance* DesiredInst = new (OutInstances)FDesiredFoliageInstance(StartRay, EndRay, Instance.Type, Instance.GetMaxRadius());
 		DesiredInst->Rotation = Instance.Rotation;
 		DesiredInst->ProceduralGuid = ProceduralGuid;
-		DesiredInst->FoliageType = Instance.Type;
 		DesiredInst->Age = Instance.Age;
 		DesiredInst->ProceduralVolumeBodyInstance = VolumeBodyInstance;
 		DesiredInst->PlacementMode = EFoliagePlacementMode::Procedural;
@@ -588,3 +593,4 @@ void UProceduralFoliageTile::AddInstances(const TArray<FProceduralFoliageInstanc
 }
 
 #undef LOCTEXT_NAMESPACE
+

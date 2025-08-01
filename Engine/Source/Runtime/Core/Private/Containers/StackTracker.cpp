@@ -1,18 +1,46 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Containers/StackTracker.h"
-#include "HAL/PlatformStackWalk.h"
-#include "Logging/LogMacros.h"
+
+#include "Containers/UnrealString.h"
 #include "CoreGlobals.h"
+#include "HAL/PlatformMemory.h"
+#include "HAL/PlatformStackWalk.h"
+#include "HAL/UnrealMemory.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Math/UnrealMathUtility.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/CString.h"
+#include "Misc/Crc.h"
+#include "Misc/OutputDevice.h"
+#include "Templates/UnrealTemplate.h"
 
 
 DEFINE_LOG_CATEGORY_STATIC(LogStackTracker, Log, All);
 
+/** Constructor, initializing all member variables */
+FStackTracker::FStackTracker(StackTrackerUpdateFn InUpdateFn, StackTrackerReportFn InReportFn, StackTrackerDeleteUserDataFn InDeleteUserDataFn, bool bInIsEnabled)
+	: bAvoidCapturing(false)
+	, bIsEnabled(bInIsEnabled)
+	, StartFrameCounter(0)
+	, StopFrameCounter(0)
+	, UpdateFn(InUpdateFn)
+	, ReportFn(InReportFn)
+	, DeleteUserDataFn(InDeleteUserDataFn ? InDeleteUserDataFn : &FStackTracker::DefaultDeleteUserDataFn)
+{
+
+}
+
+void FStackTracker::DefaultDeleteUserDataFn(void* UserData)
+{
+	FMemory::Free(UserData);
+}
 
 /**
  * Captures the current stack and updates stack tracking information.
  * optionally stores a user data pointer that the tracker will take ownership of and delete upon reset
- * you must allocate the memory with FMemory::Malloc()
+ * you must allocate the memory with FMemory::Malloc() or provide a custom delete function
  */
 void FStackTracker::CaptureStackTrace(int32 EntriesToIgnore, void* UserData, int32 StackLen, bool bLookupStringsForAliasRemoval)
 {
@@ -57,7 +85,7 @@ void FStackTracker::CaptureStackTrace(int32 EntriesToIgnore, void* UserData, int
 						int32 Spot = Symbol.Find(TEXT(" - "), ESearchCase::CaseSensitive);
 						if (Spot != INDEX_NONE)
 						{
-							Symbol.RightChopInline(Spot + 3, false);
+							Symbol.RightChopInline(Spot + 3, EAllowShrinking::No);
 						}
 						Existing = StringAliasMap.Find(Symbol);
 						if (Existing)
@@ -92,7 +120,7 @@ void FStackTracker::CaptureStackTrace(int32 EntriesToIgnore, void* UserData, int
 			//and had a chance to update their data inside the above callback
 			if (UserData)
 			{
-				FMemory::Free(UserData);
+				DeleteUserDataFn(UserData);
 			}
 		}
 		// Encountered new call stack, add to array and set index mapping.
@@ -111,6 +139,10 @@ void FStackTracker::CaptureStackTrace(int32 EntriesToIgnore, void* UserData, int
 
 		// We're done capturing.
 		bAvoidCapturing = false;
+	}
+	else if (UserData)
+	{
+		DeleteUserDataFn(UserData);
 	}
 }
 
@@ -198,7 +230,7 @@ void FStackTracker::DumpStackTraces(int32 StackThreshold, FOutputDevice& Ar, flo
 				ANSICHAR AddressInformation[512];
 				AddressInformation[0] = 0;
 				FPlatformStackWalk::ProgramCounterToHumanReadableString( AddressIndex, CallStack.Addresses[AddressIndex], AddressInformation, UE_ARRAY_COUNT(AddressInformation)-1 );
-				CallStackString = CallStackString + LINE_TERMINATOR TEXT(",,,") + FString(AddressInformation);
+				CallStackString = CallStackString + TEXT(LINE_TERMINATOR_ANSI ",,,") + FString(AddressInformation);
 			}
 
 			// Finally log with ',' prefix so "Log:" can easily be discarded as row in Excel.
@@ -231,7 +263,7 @@ void FStackTracker::ResetTracking()
 	{
 		if (CallStacks[i].UserData)
 		{
-			FMemory::Free(CallStacks[i].UserData);
+			DeleteUserDataFn(CallStacks[i].UserData);
 		}
 	}
 

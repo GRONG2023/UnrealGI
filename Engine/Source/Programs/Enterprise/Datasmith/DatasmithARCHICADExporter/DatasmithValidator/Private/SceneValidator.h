@@ -49,7 +49,7 @@ class FSceneValidator : public ISceneValidator
     virtual void CheckTexturesFiles() override;
 
     virtual void CheckMeshFiles() override;
-    
+
     virtual void CheckElementsName() override;
 
     virtual void CheckActorsName(const IDatasmithActorElement& InActor) override;

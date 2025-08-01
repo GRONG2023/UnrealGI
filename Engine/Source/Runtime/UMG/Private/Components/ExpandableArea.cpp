@@ -3,8 +3,12 @@
 #include "Components/ExpandableArea.h"
 #include "Widgets/SNullWidget.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Styling/DefaultStyleCache.h"
+#include "Styling/UMGCoreStyle.h"
 
 #include "Widgets/Layout/SExpandableArea.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ExpandableArea)
 
 #define LOCTEXT_NAMESPACE "UMG"
 
@@ -14,54 +18,46 @@
 static const FName HeaderName(TEXT("Header"));
 static const FName BodyName(TEXT("Body"));
 
-static FExpandableAreaStyle* DefaultExpandableAreaStyle = nullptr;
-static FSlateBrush* DefaultExpandableAreaBorderBrush = nullptr;
-
 UExpandableArea::UExpandableArea(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 	, bIsExpanded(false)
 {
 	bIsVariable = true;
-
-	if (DefaultExpandableAreaStyle == nullptr)
+	
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	Style = UE::Slate::Private::FDefaultStyleCache::GetRuntime().GetExpandableAreaStyle();
+	BorderBrush = UE::Slate::Private::FDefaultStyleCache::GetRuntime().GetExpandableAreaBorderBrush();
+	
+#if WITH_EDITOR 
+	if (IsEditorWidget())
 	{
-		// HACK: THIS SHOULD NOT COME FROM CORESTYLE AND SHOULD INSTEAD BE DEFINED BY ENGINE TEXTURES/PROJECT SETTINGS
-		DefaultExpandableAreaStyle = new FExpandableAreaStyle(FCoreStyle::Get().GetWidgetStyle<FExpandableAreaStyle>("ExpandableArea"));
+		Style = UE::Slate::Private::FDefaultStyleCache::GetEditor().GetExpandableAreaStyle();
+		BorderBrush = UE::Slate::Private::FDefaultStyleCache::GetEditor().GetExpandableAreaBorderBrush();
 
-		// Unlink UMG default colors from the editor settings colors.
-		DefaultExpandableAreaStyle->UnlinkColors();
+		// The CDO isn't an editor widget and thus won't use the editor style, call post edit change to mark difference from CDO
+		PostEditChange();
 	}
-
-	if (DefaultExpandableAreaBorderBrush == nullptr)
-	{
-		// HACK: THIS SHOULD NOT COME FROM CORESTYLE AND SHOULD INSTEAD BE DEFINED BY ENGINE TEXTURES/PROJECT SETTINGS
-		DefaultExpandableAreaBorderBrush = new FSlateBrush(*FCoreStyle::Get().GetBrush("ExpandableArea.Border"));
-
-		// Unlink UMG default colors from the editor settings colors.
-		DefaultExpandableAreaBorderBrush->UnlinkColors();
-	}
-
-	Style = *DefaultExpandableAreaStyle;
-	BorderBrush = *DefaultExpandableAreaBorderBrush;
+#endif // WITH_EDITOR
 
 	BorderColor = FLinearColor::White;
 	AreaPadding = FMargin(1);
 	HeaderPadding = FMargin(4.0f, 2.0f);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 bool UExpandableArea::GetIsExpanded() const
 {
-	if ( MyExpandableArea.IsValid() )
-	{
-		return MyExpandableArea->IsExpanded();
-	}
-
 	return bIsExpanded;
 }
 
 void UExpandableArea::SetIsExpanded(bool IsExpanded)
 {
-	bIsExpanded = IsExpanded;
+	if (bIsExpanded != IsExpanded)
+	{
+		bIsExpanded = IsExpanded;
+		BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::bIsExpanded);
+	}
 	if ( MyExpandableArea.IsValid() )
 	{
 		MyExpandableArea->SetExpanded(IsExpanded);
@@ -70,7 +66,11 @@ void UExpandableArea::SetIsExpanded(bool IsExpanded)
 
 void UExpandableArea::SetIsExpanded_Animated(bool IsExpanded)
 {
-	bIsExpanded = IsExpanded;
+	if (bIsExpanded != IsExpanded)
+	{
+		bIsExpanded = IsExpanded;
+		BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::bIsExpanded);
+	}
 	if (MyExpandableArea.IsValid())
 	{
 		MyExpandableArea->SetExpanded_Animated(IsExpanded);
@@ -129,6 +129,94 @@ void UExpandableArea::SetContentForSlot(FName SlotName, UWidget* Content)
 	}
 }
 
+const FExpandableAreaStyle& UExpandableArea::GetStyle() const
+{
+	return Style;
+}
+
+void UExpandableArea::SetStyle(const FExpandableAreaStyle& InStyle)
+{
+	Style = InStyle;
+	if (MyExpandableArea.IsValid())
+	{
+		MyExpandableArea->InvalidateStyle();
+	}
+}
+
+const FSlateBrush& UExpandableArea::GetBorderBrush() const
+{
+	return BorderBrush;
+}
+
+void UExpandableArea::SetBorderBrush(const FSlateBrush& InBorderBrush)
+{
+	if (BorderBrush != InBorderBrush)
+	{
+		BorderBrush = InBorderBrush;
+		if (MyExpandableArea.IsValid())
+		{
+			MyExpandableArea->SetBorderBrush(&InBorderBrush);
+			MyExpandableArea->InvalidateBorderBrush();
+		}
+	}
+}
+
+const FSlateColor& UExpandableArea::GetBorderColor() const
+{
+	return BorderColor;
+}
+
+void UExpandableArea::SetBorderColor(const FSlateColor& InBorderColor)
+{
+	BorderColor = InBorderColor;
+	if (MyExpandableArea.IsValid())
+	{
+		MyExpandableArea->SetBorderBackgroundColor(InBorderColor);
+	}
+}
+
+float UExpandableArea::GetMaxHeight() const
+{
+	return MaxHeight;
+}
+
+void UExpandableArea::SetMaxHeight(float InMaxHeight)
+{
+	MaxHeight = InMaxHeight;
+	if (MyExpandableArea.IsValid())
+	{
+		MyExpandableArea->SetMaxHeight(MaxHeight);
+	}
+}
+
+FMargin UExpandableArea::GetHeaderPadding() const
+{
+	return HeaderPadding;
+}
+
+void UExpandableArea::SetHeaderPadding(FMargin InHeaderPadding)
+{
+	HeaderPadding = InHeaderPadding;
+	if (MyExpandableArea.IsValid())
+	{
+		MyExpandableArea->SetHeaderPadding(HeaderPadding);
+	}
+}
+
+FMargin UExpandableArea::GetAreaPadding() const
+{
+	return AreaPadding;
+}
+
+void UExpandableArea::SetAreaPadding(FMargin InAreaPadding)
+{
+	AreaPadding = InAreaPadding;
+	if (MyExpandableArea.IsValid())
+	{
+		MyExpandableArea->SetAreaPadding(AreaPadding);
+	}
+}
+
 TSharedRef<SWidget> UExpandableArea::RebuildWidget()
 {
 	TSharedRef<SWidget> HeaderWidget = HeaderContent ? HeaderContent->TakeWidget() : SNullWidget::NullWidget;
@@ -158,13 +246,33 @@ void UExpandableArea::SynchronizeProperties()
 {
 	Super::SynchronizeProperties();
 
+	if (!MyExpandableArea.IsValid())
+	{
+		return;
+	}
+	
+	MyExpandableArea->SetStyle(&Style);
+	MyExpandableArea->InvalidateStyle();
 	MyExpandableArea->SetExpanded(bIsExpanded);
+	MyExpandableArea->SetAreaPadding(AreaPadding);
+	MyExpandableArea->SetHeaderPadding(HeaderPadding);
+	MyExpandableArea->SetBorderBrush(&BorderBrush);
+	MyExpandableArea->InvalidateBorderBrush();
+	MyExpandableArea->SetBorderBackgroundColor(BorderColor);
+	MyExpandableArea->SetMaxHeight(MaxHeight);
+
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 void UExpandableArea::SlateExpansionChanged(bool NewState)
 {
-	bIsExpanded = NewState;
-
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	if (bIsExpanded != NewState)
+	{
+		bIsExpanded = NewState;
+		BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::bIsExpanded);
+	}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	if ( OnExpansionChanged.IsBound() )
 	{
 		OnExpansionChanged.Broadcast(this, NewState);
@@ -193,7 +301,9 @@ void UExpandableArea::OnDescendantDeselectedByDesigner(UWidget* DescendantWidget
 {
 	if ( MyExpandableArea.IsValid() )
 	{
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		MyExpandableArea->SetExpanded(bIsExpanded);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
 }
 
@@ -202,3 +312,4 @@ void UExpandableArea::OnDescendantDeselectedByDesigner(UWidget* DescendantWidget
 /////////////////////////////////////////////////////
 
 #undef LOCTEXT_NAMESPACE
+

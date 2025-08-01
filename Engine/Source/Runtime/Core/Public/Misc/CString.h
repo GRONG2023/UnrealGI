@@ -3,13 +3,14 @@
 #pragma once
 
 #include "CoreTypes.h"
-#include "Misc/VarArgs.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformString.h"
 #include "Misc/AssertionMacros.h"
 #include "Misc/Char.h"
-#include "HAL/PlatformString.h"
+#include "Misc/VarArgs.h"
+#include "Templates/IsArrayOrRefOfTypeByPredicate.h"
 #include "Templates/IsValidVariadicFunctionArg.h"
-#include "Templates/AndOrNot.h"
-#include "Templates/IsArrayOrRefOfType.h"
+#include "Traits/IsCharEncodingCompatibleWith.h"
 
 #define MAX_SPRINTF 1024
 
@@ -40,10 +41,11 @@ namespace ESearchDir
 }
 
 /** Helper class used to convert CString into a boolean value. */
-struct CORE_API FToBoolHelper
+struct FToBoolHelper
 {
-	static bool FromCStringAnsi( const ANSICHAR* String );
-	static bool FromCStringWide( const WIDECHAR* String );
+	static CORE_API bool FromCStringAnsi( const ANSICHAR* String );
+	static CORE_API bool FromCStringWide( const WIDECHAR* String );
+	static CORE_API bool FromCStringUtf8( const UTF8CHAR* String );
 };
 
 /**
@@ -62,8 +64,73 @@ struct TCString
 	 * Returns whether this string contains only pure ansi characters 
 	 * @param Str - string that will be checked
 	 **/
-	static FORCEINLINE bool IsPureAnsi(const CharType* Str);
-	static FORCEINLINE bool IsPureAnsi(const CharType* Str, const SIZE_T StrLen);
+	static bool IsPureAnsi(const CharType* Str)
+	{
+		if constexpr (std::is_same_v<CharType, ANSICHAR>)
+		{
+			return true;
+		}
+		else if constexpr (std::is_same_v<CharType, WIDECHAR>)
+		{
+			for (; *Str; Str++)
+			{
+				if (*Str > 0x7f)
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+		else if constexpr (std::is_same_v<CharType, UTF8CHAR>)
+		{
+			for (; *Str; Str++)
+			{
+				if ((uint8)*Str > 0x7f)
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+		else
+		{
+			static_assert(sizeof(CharType) == 0, "Not supported");
+		}
+	}
+
+	static bool IsPureAnsi(const CharType* Str, const SIZE_T StrLen)
+	{
+		if constexpr (std::is_same_v<CharType, ANSICHAR>)
+		{
+			return true;
+		}
+		else if constexpr (std::is_same_v<CharType, WIDECHAR>)
+		{
+			for (SIZE_T Idx = 0; Idx < StrLen; Idx++, Str++)
+			{
+				if (*Str > 0x7f)
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+		else if constexpr (std::is_same_v<CharType, UTF8CHAR>)
+		{
+			for (SIZE_T Idx = 0; Idx < StrLen; Idx++, Str++)
+			{
+				if ((uint8)*Str > 0x7f)
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+		else
+		{
+			static_assert(sizeof(CharType) == 0, "Not supported");
+		}
+	}
 
 	/**
 	 * Returns whether this string contains only numeric characters 
@@ -256,7 +323,7 @@ struct TCString
 	 * Finds string in string, case insensitive 
 	 * @param Str The string to look through
 	 * @param Find The string to find inside Str
-	 * @return Position in Str if Find was found, otherwise, NULL
+	 * @return Position in Str if Find was found, otherwise, nullptr. If Find is non-null but empty, returns Str.
 	 */
 	static const CharType* Stristr(const CharType* Str, const CharType* Find);
 
@@ -264,9 +331,55 @@ struct TCString
 	 * Finds string in string, case insensitive (non-const version)
 	 * @param Str The string to look through
 	 * @param Find The string to find inside Str
-	 * @return Position in Str if Find was found, otherwise, NULL
+	 * @return Position in Str if Find was found, otherwise, nullptr. If Find is non-null but empty, returns Str.
 	 */
 	static CharType* Stristr(CharType* Str, const CharType* Find) { return (CharType*)Stristr((const CharType*)Str, Find); }
+
+	/**
+	 * Finds string in string, case insensitive
+	 * @param Str The character array to look through
+	 * @param InStrLen The length of the Str array
+	 * @param Find The character array to find inside Str
+	 * @param FindLen The length of the Find array
+	 * @return Position in Str if Find was found, otherwise, nullptr. If FindLen is 0, returns Str.
+	 */
+	static const CharType* Strnistr(const CharType* Str, int32 InStrLen, const CharType* Find, int32 FindLen);
+
+	/**
+	 * Finds string in string, case insensitive (non-const version)
+	 * @param Str The character array to look through
+	 * @param InStrLen The length of the Str array
+	 * @param Find The character array to find inside Str
+	 * @param FindLen The length of the Find array
+	 * @return Position in Str if Find was found, otherwise, nullptr. If FindLen is 0, returns Str.
+	 */
+	static CharType* Strnistr(CharType* Str, int32 InStrLen, const CharType* Find, int32 FindLen)
+	{
+		return (CharType*)Strnistr((const CharType*)Str, InStrLen, Find, FindLen);
+	}
+
+	/**
+	 * Finds string in string, case sensitive
+	 * @param Str The character array to look through
+	 * @param InStrLen The length of the Str array
+	 * @param Find The character array to find inside Str
+	 * @param FindLen The length of the Find array
+	 * @return Position in Str if Find was found, otherwise, nullptr. If FindLen is 0, returns Str.
+	 */
+	static const CharType* Strnstr(const CharType* Str, int32 InStrLen, const CharType* Find, int32 FindLen);
+
+	/**
+	 * Finds string in string, case sensitive (non-const version)
+	 * @param Str The character array to look through
+	 * @param InStrLen The length of the Str array
+	 * @param Find The character array to find inside Str
+	 * @param FindLen The length of the Find array
+	 * @return Position in Str if Find was found, otherwise, nullptr. If FindLen is 0, returns Str.
+	 */
+	static CharType* Strnstr(CharType* Str, int32 InStrLen, const CharType* Find, int32 FindLen)
+	{
+		return (CharType*)Strnstr((const CharType*)Str, InStrLen, Find, FindLen);
+	}
 
 	/**
 	 * strlen wrapper
@@ -342,7 +455,26 @@ struct TCString
 	 *
 	 * @return The boolean value
 	 */
-	static FORCEINLINE bool ToBool( const CharType* String );
+	static bool ToBool(const CharType* String)
+	{
+		if constexpr (std::is_same_v<CharType, ANSICHAR>)
+		{
+			return FToBoolHelper::FromCStringAnsi(String);
+		}
+		else if constexpr (std::is_same_v<CharType, WIDECHAR>)
+		{
+			return FToBoolHelper::FromCStringWide(String);
+		}
+		else if constexpr (std::is_same_v<CharType, UTF8CHAR>)
+		{
+			return FToBoolHelper::FromCStringUtf8(String);
+		}
+		else
+		{
+			static_assert(sizeof(CharType) == 0, "Not supported");
+			return false;
+		}
+	}
 
 	/**
 	 * strtoi wrapper
@@ -368,18 +500,21 @@ private:
 	static int32 VARARGS SprintfImpl(CharType* Dest, const CharType* Fmt, ...);
 	static int32 VARARGS SnprintfImpl(CharType* Dest, int32 DestSize, const CharType* Fmt, ...);
 
+	template <typename SrcEncoding>
+	using TIsCharEncodingCompatibleWithCharType = TIsCharEncodingCompatibleWith<SrcEncoding, CharType>;
+
 public:
-	/** 
+	/**
 	* Standard string formatted print. 
 	* @warning: make sure code using FCString::Sprintf allocates enough (>= MAX_SPRINTF) memory for the destination buffer
 	*/
 	template <typename FmtType, typename... Types>
 	static int32 Sprintf(CharType* Dest, const FmtType& Fmt, Types... Args)
 	{
-		static_assert(TIsArrayOrRefOfType<FmtType, CharType>::Value, "Formatting string must be a literal string of the same character type as template.");
-		static_assert(TAnd<TIsValidVariadicFunctionArg<Types>...>::Value, "Invalid argument(s) passed to TCString::Sprintf");
+		static_assert(TIsArrayOrRefOfTypeByPredicate<FmtType, TIsCharEncodingCompatibleWithCharType>::Value, "Formatting string must be a literal string of a char type compatible with the TCString type.");
+		static_assert((TIsValidVariadicFunctionArg<Types>::Value && ...), "Invalid argument(s) passed to TCString::Sprintf");
 
-		return SprintfImpl(Dest, Fmt, Args...);
+		return SprintfImpl(Dest, (const CharType*)Fmt, Args...);
 	}
 
 	/** 
@@ -388,26 +523,10 @@ public:
 	template <typename FmtType, typename... Types>
 	static int32 Snprintf(CharType* Dest, int32 DestSize, const FmtType& Fmt, Types... Args)
 	{
-		static_assert(TIsArrayOrRefOfType<FmtType, CharType>::Value, "Formatting string must be a literal string of the same character type as template.");
-		static_assert(TAnd<TIsValidVariadicFunctionArg<Types>...>::Value, "Invalid argument(s) passed to TCString::Snprintf");
+		static_assert(TIsArrayOrRefOfTypeByPredicate<FmtType, TIsCharEncodingCompatibleWithCharType>::Value, "Formatting string must be a literal string of a char type compatible with the TCString type.");
+		static_assert((TIsValidVariadicFunctionArg<Types>::Value && ...), "Invalid argument(s) passed to TCString::Snprintf");
 
-		return SnprintfImpl(Dest, DestSize, Fmt, Args...);
-	}
-
-	/**
-	 * Helper function to write formatted output using an argument list
-	 *
-	 * @param Dest - destination string buffer
-	 * @param DestSize - size of destination buffer
-	 * @param Count - number of characters to write (not including null terminating character)
-	 * @param Fmt - string to print
-	 * @param Args - argument list
-	 * @return number of characters written or -1 if truncated
-	 */
-	UE_DEPRECATED(4.22, "GetVarArgs with DestSize and Count arguments has been deprecated - only DestSize should be passed")
-	static FORCEINLINE int32 GetVarArgs(CharType* Dest, SIZE_T DestSize, int32 Count, const CharType*& Fmt, va_list ArgPtr)
-	{
-		return GetVarArgs(Dest, DestSize, Fmt, ArgPtr);
+		return SnprintfImpl(Dest, DestSize, (const CharType*)Fmt, Args...);
 	}
 
 	/**
@@ -425,6 +544,7 @@ public:
 typedef TCString<TCHAR>    FCString;
 typedef TCString<ANSICHAR> FCStringAnsi;
 typedef TCString<WIDECHAR> FCStringWide;
+typedef TCString<UTF8CHAR> FCStringUtf8;
 
 /*-----------------------------------------------------------------------------
 	generic TCString implementations
@@ -434,10 +554,10 @@ template <typename CharType = TCHAR>
 struct TCStringSpcHelper
 {
 	/** Number of characters to be stored in string. */
-	static const int32 MAX_SPACES = 255;
+	static constexpr int32 MAX_SPACES = 255;
 
 	/** Number of tabs to be stored in string. */
-	static const int32 MAX_TABS = 255;
+	static constexpr int32 MAX_TABS = 255;
 
 	static CORE_API const CharType SpcArray[MAX_SPACES + 1];
 	static CORE_API const CharType TabArray[MAX_TABS + 1];
@@ -520,7 +640,7 @@ const typename TCString<T>::CharType* TCString<T>::Strifind( const CharType* Str
 	}
 	
 	bool Alnum  = 0;
-	CharType f = ( *Find < LITERAL(CharType, 'a') || *Find > LITERAL(CharType, 'z') ) ? (*Find) : (*Find + LITERAL(CharType,'A') - LITERAL(CharType,'a'));
+	CharType f = ( *Find < LITERAL(CharType, 'a') || *Find > LITERAL(CharType, 'z') ) ? (*Find) : (CharType)(*Find + LITERAL(CharType,'A') - LITERAL(CharType,'a'));
 	int32 Length = Strlen(Find++)-1;
 	CharType c = *Str++;
 	
@@ -616,19 +736,27 @@ const typename TCString<T>::CharType* TCString<T>::StrfindDelim(const CharType* 
  * Finds string in string, case insensitive 
  * @param Str The string to look through
  * @param Find The string to find inside Str
- * @return Position in Str if Find was found, otherwise, NULL
+ * @return Position in Str if Find was found, otherwise, NULL. If Find is non-null but empty, returns Str.
  */
 template <typename T>
 const typename TCString<T>::CharType* TCString<T>::Stristr(const CharType* Str, const CharType* Find)
 {
+	// Note this implementation is not reducible to Strnistr because we need to avoid calling strlen(Str) to
+	// avoid scanning it twice
+
 	// both strings must be valid
-	if( Find == NULL || Str == NULL )
+	if( Find == nullptr || Str == nullptr )
 	{
-		return NULL;
+		return nullptr;
 	}
 
 	// get upper-case first letter of the find string (to reduce the number of full strnicmps)
 	CharType FindInitial = TChar<CharType>::ToUpper(*Find);
+	if (!FindInitial)
+	{
+		// When searching for the empty string, always return index of the first element of Str even if Str is empty.
+		return Str;
+	}
 	// get length of find string, and increment past first letter
 	int32   Length = Strlen(Find++) - 1;
 	// get the first letter of the search string, and increment past it
@@ -648,8 +776,86 @@ const typename TCString<T>::CharType* TCString<T>::Stristr(const CharType* Str, 
 		StrChar = *Str++;
 	}
 
-	// if nothing was found, return NULL
-	return NULL;
+	// if nothing was found, return nullptr
+	return nullptr;
+}
+
+template <typename T>
+const typename TCString<T>::CharType* TCString<T>::Strnistr(const CharType* Str, int32 InStrLen, const CharType* Find, int32 FindLen)
+{
+	if (FindLen <= 0)
+	{
+		checkf(FindLen >= 0, TEXT("Invalid FindLen: %d"), FindLen);
+		return Str;
+	}
+	if (InStrLen < FindLen)
+	{
+		checkf(InStrLen >= 0, TEXT("Invalid InStrLen: %d"), InStrLen);
+		return nullptr;
+	}
+
+	// get upper-case first letter of the find string (to reduce the number of full strnicmps)
+	CharType FindInitial = TChar<CharType>::ToUpper(*Find);
+	// Set FindSuffix,FindSuffixLength to the characters of Find after the first letter
+	int32 FindSuffixLength = FindLen - 1;
+	const CharType* FindSuffix = Find + 1;
+
+	// while the length of the remaining string is >= FindLen
+	const CharType* StrLastChance = Str + InStrLen - FindLen;
+	while (Str <= StrLastChance)
+	{
+		CharType StrChar = *Str++;
+
+		// make sure it's upper-case
+		StrChar = TChar<CharType>::ToUpper(StrChar);
+		// if it matches the first letter of the find string, do a case-insensitive string compare for the length of the find string
+		if (StrChar == FindInitial && !Strnicmp(Str, FindSuffix, FindSuffixLength))
+		{
+			// if we found the string, then return a pointer to the beginning of it in the search string
+			return Str - 1;
+		}
+	}
+
+	// if nothing was found, return nullptr
+	return nullptr;
+}
+
+template <typename T>
+const typename TCString<T>::CharType* TCString<T>::Strnstr(const CharType* Str, int32 InStrLen, const CharType* Find, int32 FindLen)
+{
+	if (FindLen <= 0)
+	{
+		checkf(FindLen >= 0, TEXT("Invalid FindLen: %d"), FindLen);
+		return Str;
+	}
+	if (InStrLen < FindLen)
+	{
+		checkf(InStrLen >= 0, TEXT("Invalid InStrLen: %d"), InStrLen);
+		return nullptr;
+	}
+
+	// get first letter of the find string (to reduce the number of full strncmps)
+	CharType FindInitial = *Find;
+	// Set FindSuffix,FindSuffixLength to the characters of Find after the first letter
+	int32 FindSuffixLength = FindLen - 1;
+	const CharType* FindSuffix = Find + 1;
+
+	// while the length of the remaining string is >= FindLen
+	const CharType* StrLastChance = Str + InStrLen - FindLen;
+	while (Str <= StrLastChance)
+	{
+		CharType StrChar = *Str++;
+
+		// if it matches the first letter of the find string, do a string compare for the length of the find string
+		if (StrChar == FindInitial && !Strncmp(Str, FindSuffix, FindSuffixLength))
+		{
+			// if we found the string, then return a pointer to the beginning of it in the search string
+			return Str - 1;
+		}
+	}
+
+	// if nothing was found, return nullptr
+	return nullptr;
 }
 
 template <typename T> FORCEINLINE
@@ -811,14 +1017,14 @@ int32 TCString<T>::Strcspn( const CharType* String, const CharType* Mask )
 		{
 			if (*StringIt == *MaskIt)
 			{
-				return StringIt - String;
+				return UE_PTRDIFF_TO_INT32(StringIt - String);
 			}
 		}
 
 		++StringIt;
 	}
 
-	return StringIt - String;
+	return UE_PTRDIFF_TO_INT32(StringIt - String);
 }
 
 template <typename T> FORCEINLINE 
@@ -876,93 +1082,22 @@ int32 TCString<T>::GetVarArgs( CharType* Dest, SIZE_T DestSize, const CharType*&
 	return FPlatformString::GetVarArgs(Dest, DestSize, Fmt, ArgPtr);
 }
 
-
-/*-----------------------------------------------------------------------------
-	TCString<WIDECHAR> specializations
------------------------------------------------------------------------------*/
-template <> FORCEINLINE
-bool TCString<WIDECHAR>::IsPureAnsi(const CharType* Str)
+template <typename T>
+int32 TCString<T>::SprintfImpl(CharType* Dest, const CharType* Fmt, ...)
 {
-	for( ; *Str; Str++ )
-	{
-		if( *Str>0x7f )
-		{
-			return false;
-		}
-	}
-	return true;
-}
+	static_assert(std::is_same_v<CharType, ANSICHAR> || std::is_same_v<CharType, WIDECHAR> || std::is_same_v<CharType, UTF8CHAR>, "Not supported");
 
-
-template <> FORCEINLINE
-bool TCString<WIDECHAR>::IsPureAnsi(const CharType* Str, const SIZE_T StrLen)
-{
-	for (SIZE_T Idx = 0; Idx < StrLen; Idx++, Str++)
-	{
-		if (*Str > 0x7f)
-		{
-			return false;
-		}
-	}
-	return true;
-}
-
-
-template <>
-inline int32 TCString<WIDECHAR>::SprintfImpl(CharType* Dest, const CharType* Fmt, ...)
-{
 	int32	Result = -1;
-	GET_VARARGS_RESULT_WIDE( Dest, MAX_SPRINTF, MAX_SPRINTF-1, Fmt, Fmt, Result );
+	GET_TYPED_VARARGS_RESULT(CharType, Dest, MAX_SPRINTF, MAX_SPRINTF - 1, Fmt, Fmt, Result);
 	return Result;
 }
 
-template <>
-inline int32 TCString<WIDECHAR>::SnprintfImpl(CharType* Dest, int32 DestSize, const CharType* Fmt, ...)
+template <typename T>
+int32 TCString<T>::SnprintfImpl(CharType* Dest, int32 DestSize, const CharType* Fmt, ...)
 {
+	static_assert(std::is_same_v<CharType, ANSICHAR> || std::is_same_v<CharType, WIDECHAR> || std::is_same_v<CharType, UTF8CHAR>, "Not supported");
+
 	int32	Result = -1;
-	GET_VARARGS_RESULT_WIDE( Dest, DestSize, DestSize-1, Fmt, Fmt, Result );
+	GET_TYPED_VARARGS_RESULT(CharType, Dest, DestSize, DestSize - 1, Fmt, Fmt, Result);
 	return Result;
-}
-
-template <> 
-FORCEINLINE bool TCString<TCHAR>::ToBool(const WIDECHAR* Str)
-{
-	return FToBoolHelper::FromCStringWide(Str);
-}
-
-/*-----------------------------------------------------------------------------
-	TCString<ANSICHAR> specializations
------------------------------------------------------------------------------*/
-template <> FORCEINLINE
-bool TCString<ANSICHAR>::IsPureAnsi(const CharType* Str)
-{
-	return true;
-}
-
-template <> FORCEINLINE
-bool TCString<ANSICHAR>::IsPureAnsi(const CharType* Str, const SIZE_T StrLen)
-{
-	return true;
-}
-
-template <>
-inline int32 TCString<ANSICHAR>::SprintfImpl(CharType* Dest, const CharType* Fmt, ...)
-{
-	int32	Result = -1;
-	GET_VARARGS_RESULT_ANSI( Dest, MAX_SPRINTF, MAX_SPRINTF-1, Fmt, Fmt, Result );
-	return Result;
-}
-
-template <>
-inline int32 TCString<ANSICHAR>::SnprintfImpl(CharType* Dest, int32 DestSize, const CharType* Fmt, ...)
-{
-	int32	Result = -1;
-	GET_VARARGS_RESULT_ANSI( Dest, DestSize, DestSize-1, Fmt, Fmt, Result );
-	return Result;
-}
-
-template <> 
-FORCEINLINE bool TCString<ANSICHAR>::ToBool(const ANSICHAR* Str)
-{
-	return FToBoolHelper::FromCStringAnsi(Str);
 }

@@ -7,6 +7,7 @@
 #include "Misc/Guid.h"
 #include "LandscapeInfo.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/SplineComponent.h"
 #include "LandscapeSplinesComponent.generated.h"
 
 class ALandscapeProxy;
@@ -18,6 +19,7 @@ class UMeshComponent;
 class USplineMeshComponent;
 class UStaticMesh;
 class UTexture2D;
+class ILandscapeSplineInterface;
 
 // structs for ForeignWorldSplineDataMap
 // these are editor-only, but we don't have the concept of an editor-only USTRUCT
@@ -31,7 +33,7 @@ struct FForeignControlPointData
 	FGuid ModificationKey;
 
 	UPROPERTY()
-	UControlPointMeshComponent* MeshComponent = nullptr;
+	TObjectPtr<UControlPointMeshComponent> MeshComponent = nullptr;
 
 	UPROPERTY()
 	TLazyObjectPtr<ULandscapeSplineControlPoint> Identifier;
@@ -53,7 +55,7 @@ struct FForeignSplineSegmentData
 	FGuid ModificationKey;
 
 	UPROPERTY()
-	TArray<USplineMeshComponent*> MeshComponents;
+	TArray<TObjectPtr<USplineMeshComponent>> MeshComponents;
 
 	UPROPERTY()
 	TLazyObjectPtr<ULandscapeSplineSegment> Identifier;
@@ -112,11 +114,11 @@ class ULandscapeSplinesComponent : public UPrimitiveComponent
 
 	/** Sprite used to draw control points */
 	UPROPERTY()
-	UTexture2D* ControlPointSprite;
+	TObjectPtr<UTexture2D> ControlPointSprite;
 
 	/** Mesh used to draw splines that have no mesh */
 	UPROPERTY()
-	UStaticMesh* SplineEditorMesh;
+	TObjectPtr<UStaticMesh> SplineEditorMesh;
 
 	/** Whether we are in-editor and showing spline editor meshes */
 	UPROPERTY(NonTransactional, Transient)
@@ -125,10 +127,10 @@ class ULandscapeSplinesComponent : public UPrimitiveComponent
 
 protected:
 	UPROPERTY(TextExportTransient)
-	TArray<ULandscapeSplineControlPoint*> ControlPoints;
+	TArray<TObjectPtr<ULandscapeSplineControlPoint>> ControlPoints;
 
 	UPROPERTY(TextExportTransient)
-	TArray<ULandscapeSplineSegment*> Segments;
+	TArray<TObjectPtr<ULandscapeSplineSegment>> Segments;
 
 #if WITH_EDITORONLY_DATA
 	// Serialized
@@ -143,17 +145,27 @@ protected:
 	// References to components owned by landscape splines in other levels
 	// for cooked build (uncooked keeps references via ForeignWorldSplineDataMap)
 	UPROPERTY(TextExportTransient)
-	TArray<UMeshComponent*> CookedForeignMeshComponents;
+	TArray<TObjectPtr<UMeshComponent>> CookedForeignMeshComponents;
 
 public:
 	/** Get a list of spline mesh components representing this landscape spline (Editor only) */
 	UFUNCTION(BlueprintCallable, Category = LandscapeSplines)
 	TArray<USplineMeshComponent*> GetSplineMeshComponents();
 
+	LANDSCAPE_API ILandscapeSplineInterface* GetSplineOwner();
+
 	void CheckSplinesValid();
 	bool ModifySplines(bool bAlwaysMarkDirty = true);
 
+	const TArray<TObjectPtr<ULandscapeSplineControlPoint>>& GetControlPoints() const { return ControlPoints; }
+	TArray<TObjectPtr<ULandscapeSplineControlPoint>>& GetControlPoints() { return ControlPoints; }
+
+	const TArray<TObjectPtr<ULandscapeSplineSegment>>& GetSegments() const { return Segments; }
+	TArray<TObjectPtr<ULandscapeSplineSegment>>& GetSegments() { return Segments; }
+
 #if WITH_EDITOR
+	void RequestSplineLayerUpdate();
+
 	bool HasAnyControlPointsOrSegments() const { return ControlPoints.Num() > 0 || Segments.Num() > 0; }
 
 	virtual void ShowSplineEditorMesh(bool bShow);
@@ -197,6 +209,16 @@ public:
 	bool IsUsingEditorMesh(const USplineMeshComponent* SplineMeshComponent) const;
 
 	bool IsUsingLayerInfo(const ULandscapeLayerInfoObject* LayerInfo) const;
+
+	// Iterates throug a copy of the ControlPoints list.
+	LANDSCAPE_API void ForEachControlPoint(TFunctionRef<void(ULandscapeSplineControlPoint*)> Func);
+
+	/**
+	 * Converts points along the landscape spline into points on a spline component
+	 * Works best with landscape splines that contain no intersections or splits
+	 * @param SplineComponent Spline component to be populated
+	**/
+	LANDSCAPE_API void CopyToSplineComponent(USplineComponent* SplineComponent);
 #endif
 
 	//~ Begin UObject Interface

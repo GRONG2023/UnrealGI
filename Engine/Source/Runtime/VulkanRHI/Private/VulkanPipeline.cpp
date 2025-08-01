@@ -6,7 +6,7 @@
 
 #include "VulkanRHIPrivate.h"
 #include "VulkanPipeline.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
 #include "Misc/FileHelper.h"
@@ -17,6 +17,7 @@
 #include "GlobalShader.h"
 #include "VulkanLLM.h"
 #include "Misc/ScopeRWLock.h"
+#include "VulkanChunkedPipelineCache.h"
 
 #define LRU_DEBUG 0
 #if !UE_BUILD_SHIPPING
@@ -51,9 +52,6 @@ static TAtomic<uint64> SPipelineGfxCount;
 #endif
 
 static const double HitchTime = 1.0 / 1000.0;
-
-static FCriticalSection FVulkanShaderHandleCS;
-
 
 TAutoConsoleVariable<int32> CVarPipelineDebugForceEvictImmediately(
 	TEXT("r.Vulkan.PipelineDebugForceEvictImmediately"),
@@ -110,7 +108,7 @@ static TAutoConsoleVariable<int32> GEnablePipelineCacheLoadCvar(
 
 static TAutoConsoleVariable<int32> GPipelineCacheFromShaderPipelineCacheCvar(
 	TEXT("r.Vulkan.PipelineCacheFromShaderPipelineCache"),
-	PLATFORM_ANDROID && !(PLATFORM_LUMIN || PLATFORM_LUMINGL4),
+	PLATFORM_ANDROID,
 	TEXT("0 look for a pipeline cache in the normal locations with the normal names.")
 	TEXT("1 tie the vulkan pipeline cache to the shader pipeline cache, use the PSOFC guid as part of the filename, etc."),
 	ECVF_ReadOnly
@@ -126,15 +124,44 @@ static FAutoConsoleVariableRef GEnablePipelineCacheCompressionCvar(
 );
 
 
-static int32 GVulkanPSOForceSingleThreaded = 0;
+enum class ESingleThreadedPSOCreateMode
+{
+	None = 0,
+	All = 1,
+	Precompile = 2,
+	NonPrecompiled = 3,
+};
+
+static int32 GVulkanPSOForceSingleThreaded = (int32)ESingleThreadedPSOCreateMode::None;
 static FAutoConsoleVariableRef GVulkanPSOForceSingleThreadedCVar(
 	TEXT("r.Vulkan.ForcePSOSingleThreaded"),
 	GVulkanPSOForceSingleThreaded,
-	TEXT("Enable to force singlethreaded creation of PSOs. Only intended as a workaround for buggy drivers\n"),
+	TEXT("Enable to force singlethreaded creation of PSOs. Only intended as a workaround for buggy drivers\n")
+	TEXT("0: (default) Allow Async precompile PSO creation.\n")
+	TEXT("1: force singlethreaded creation of all PSOs.\n")
+	TEXT("2: force singlethreaded creation of precompile PSOs only.\n")
+	TEXT("3: force singlethreaded creation of non-precompile PSOs only."),
 	ECVF_ReadOnly | ECVF_RenderThreadSafe
 );
 
+static int32 GVulkanPSOLRUEvictAfterUnusedFrames = 0;
+static FAutoConsoleVariableRef GVulkanPSOLRUEvictAfterUnusedFramesCVar(
+	TEXT("r.Vulkan.PSOLRUEvictAfterUnusedFrames"),
+	GVulkanPSOLRUEvictAfterUnusedFrames,
+	TEXT("0: unused PSOs are not removed from the PSO LRU cache. (default)\n")
+	TEXT(">0: The number of frames an unused PSO can remain in the PSO LRU cache. When this is exceeded the PSO is destroyed and memory returned to the system. This can save memory with the risk of increased hitching.")
+	, ECVF_RenderThreadSafe
+);
 
+
+static int32 GVulkanReleaseShaderModuleWhenEvictingPSO = 0;
+static FAutoConsoleVariableRef GVulkanReleaseShaderModuleWhenEvictingPSOCVar(
+	TEXT("r.Vulkan.ReleaseShaderModuleWhenEvictingPSO"),
+	GVulkanReleaseShaderModuleWhenEvictingPSO,
+	TEXT("0: shader modules remain when a PSO is removed from the PSO LRU cache. (default)\n")
+	TEXT("1: shader modules are destroyed when a PSO is removed from the PSO LRU cache. This can save memory at the risk of increased hitching and cpu cost.")
+	,ECVF_RenderThreadSafe
+);
 
 template <typename TRHIType, typename TVulkanType>
 static inline FSHAHash GetShaderHash(TRHIType* RHIShader)
@@ -158,11 +185,7 @@ static inline FSHAHash GetShaderHashForStage(const FGraphicsPipelineStateInitial
 	case ShaderStage::Vertex:		return GetShaderHash<FRHIVertexShader, FVulkanVertexShader>(PSOInitializer.BoundShaderState.VertexShaderRHI);
 	case ShaderStage::Pixel:		return GetShaderHash<FRHIPixelShader, FVulkanPixelShader>(PSOInitializer.BoundShaderState.PixelShaderRHI);
 #if VULKAN_SUPPORTS_GEOMETRY_SHADERS
-	case ShaderStage::Geometry:		return GetShaderHash<FRHIGeometryShader, FVulkanGeometryShader>(PSOInitializer.BoundShaderState.GeometryShaderRHI);
-#endif
-#if PLATFORM_SUPPORTS_TESSELLATION_SHADERS
-	case ShaderStage::Hull:			return GetShaderHash<FRHIHullShader, FVulkanHullShader>(PSOInitializer.BoundShaderState.HullShaderRHI);
-	case ShaderStage::Domain:		return GetShaderHash<FRHIDomainShader, FVulkanDomainShader>(PSOInitializer.BoundShaderState.DomainShaderRHI);
+	case ShaderStage::Geometry:		return GetShaderHash<FRHIGeometryShader, FVulkanGeometryShader>(PSOInitializer.BoundShaderState.GetGeometryShader());
 #endif
 	default:			check(0);	break;
 	}
@@ -203,12 +226,13 @@ FVulkanComputePipeline::FVulkanComputePipeline(FVulkanDevice* InDevice)
 
 FVulkanComputePipeline::~FVulkanComputePipeline()
 {
+	Device->NotifyDeletedComputePipeline(this);
+	
 	if (ComputeShader)
 	{
 		ComputeShader->Release();
 	}
-
-	Device->NotifyDeletedComputePipeline(this);
+	
 	DEC_DWORD_STAT(STAT_VulkanNumComputePSOs);
 }
 
@@ -229,63 +253,43 @@ FVulkanRHIGraphicsPipelineState::~FVulkanRHIGraphicsPipelineState()
 	}
 
 	Device->PipelineStateCache->NotifyDeletedGraphicsPSO(this);
-	if (bShaderModulesLoaded)
-	{
-		PurgeLoadedShaderModules(Device);
-	}
 }
 
-void FVulkanRHIGraphicsPipelineState::GetOrCreateShaderModules(FVulkanShader*const* Shaders)
+void FVulkanRHIGraphicsPipelineState::GetOrCreateShaderModules(TRefCountPtr<FVulkanShaderModule> (&ShaderModulesOUT)[ShaderStage::NumStages], FVulkanShader*const* Shaders)
 {
-	FScopeLock Lock(&FVulkanShaderHandleCS);
 	for (int32 Index = 0; Index < ShaderStage::NumStages; ++Index)
 	{
+		check(!ShaderModulesOUT[Index].IsValid());
 		FVulkanShader* Shader = Shaders[Index];
 		if (Shader)
 		{
-			ShaderModules[Index] = Shader->GetOrCreateHandle(Desc, Layout, Layout->GetDescriptorSetLayoutHash());
+			ShaderModulesOUT[Index] = Shader->GetOrCreateHandle(Desc, Layout, Layout->GetDescriptorSetLayoutHash());
 		}
 	}
 }
 
+FVulkanShader::FSpirvCode FVulkanRHIGraphicsPipelineState::GetPatchedSpirvCode(FVulkanShader* Shader)
+{
+	check(Shader);
+	return Shader->GetPatchedSpirvCode(Desc, Layout);
+}
+
 void FVulkanRHIGraphicsPipelineState::PurgeShaderModules(FVulkanShader*const* Shaders)
 {
-	check(!bShaderModulesLoaded);
-
 	for (int32 Index = 0; Index < ShaderStage::NumStages; ++Index)
 	{
 		FVulkanShader* Shader = Shaders[Index];
 		if (Shader)
 		{
 			Shader->PurgeShaderModules();
-			ShaderModules[Index] = VK_NULL_HANDLE;
 		}
 	}
 }
-
-void FVulkanRHIGraphicsPipelineState::PurgeLoadedShaderModules(FVulkanDevice* InDevice)
-{
-	check(bShaderModulesLoaded);
-
-	for (int32 Index = 0; Index < ShaderStage::NumStages; ++Index)
-	{
-		if (ShaderModules[Index] != VK_NULL_HANDLE)
-		{
-			VulkanRHI::vkDestroyShaderModule(InDevice->GetInstanceHandle(), ShaderModules[Index], VULKAN_CPU_ALLOCATOR);
-			ShaderModules[Index] = VK_NULL_HANDLE;
-		}
-	}
-
-	bShaderModulesLoaded = false;
-}
-
 
 FVulkanPipelineStateCacheManager::FVulkanPipelineStateCacheManager(FVulkanDevice* InDevice)
 	: Device(InDevice)
 	, bEvictImmediately(false)
-	, bLinkedToPSOFC(false)
-	, bLinkedToPSOFCSucessfulLoaded(false)
-	, PipelineCache(VK_NULL_HANDLE)
+	, bPrecompilingCacheLoadedFromFile(false)
 {
 	bUseLRU = (int32)CVarEnableLRU.GetValueOnAnyThread() != 0;
 	LRUUsedPipelineMax = CVarLRUPipelineCapacity.GetValueOnAnyThread();
@@ -294,18 +298,14 @@ FVulkanPipelineStateCacheManager::FVulkanPipelineStateCacheManager(FVulkanDevice
 
 FVulkanPipelineStateCacheManager::~FVulkanPipelineStateCacheManager()
 {
-
-	if (bLinkedToPSOFC)
+	if (OnShaderPipelineCacheOpenedDelegate.IsValid())
 	{
-		if (OnShaderPipelineCacheOpenedDelegate.IsValid())
-		{
-			FShaderPipelineCache::GetCacheOpenedDelegate().Remove(OnShaderPipelineCacheOpenedDelegate);
-		}
+		FShaderPipelineCache::GetCacheOpenedDelegate().Remove(OnShaderPipelineCacheOpenedDelegate);
+	}
 
-		if (OnShaderPipelineCachePrecompilationCompleteDelegate.IsValid())
-		{
-			FShaderPipelineCache::GetPrecompilationCompleteDelegate().Remove(OnShaderPipelineCachePrecompilationCompleteDelegate);
-		}
+	if (OnShaderPipelineCachePrecompilationCompleteDelegate.IsValid())
+	{
+		FShaderPipelineCache::GetPrecompilationCompleteDelegate().Remove(OnShaderPipelineCachePrecompilationCompleteDelegate);
 	}
 	DestroyCache();
 
@@ -319,12 +319,26 @@ FVulkanPipelineStateCacheManager::~FVulkanPipelineStateCacheManager()
 		VulkanRHI::vkDestroyDescriptorSetLayout(Device->GetInstanceHandle(), Pair.Value.Handle, VULKAN_CPU_ALLOCATOR);
 	}
 
-	VulkanRHI::vkDestroyPipelineCache(Device->GetInstanceHandle(), PipelineCache, VULKAN_CPU_ALLOCATOR);
-	PipelineCache = VK_NULL_HANDLE;
+	{
+		//TODO: Save PSOCache here?!
+		FScopedPipelineCache PipelineCacheExclusive = GlobalPSOCache.Get(EPipelineCacheAccess::Exclusive);
+		VulkanRHI::vkDestroyPipelineCache(Device->GetInstanceHandle(), PipelineCacheExclusive.Get(), VULKAN_CPU_ALLOCATOR);
+	}
+
+	{
+		FScopedPipelineCache PipelineCacheExclusive = CurrentPrecompilingPSOCache.Get(EPipelineCacheAccess::Exclusive);
+		if (PipelineCacheExclusive.Get() != VK_NULL_HANDLE)
+		{
+			//If CurrentOpenedPSOCache is still valid then it has never received OnShaderPipelineCachePrecompilationComplete callback, so we are not going to save it's content to disk as it's most likely is incomplete at this point
+			VulkanRHI::vkDestroyPipelineCache(Device->GetInstanceHandle(), PipelineCacheExclusive.Get(), VULKAN_CPU_ALLOCATOR);
+		}
+	}
 }
 
-bool FVulkanPipelineStateCacheManager::Load(const TArray<FString>& CacheFilenames)
+bool FVulkanPipelineStateCacheManager::Load(const TArray<FString>& CacheFilenames, FPipelineCache& Cache)
 {
+	FScopedPipelineCache PipelineCacheExclusive = Cache.Get(EPipelineCacheAccess::Exclusive);
+
 	bool bResult = false;
 	// Try to load device cache first
 	for (const FString& CacheFilename : CacheFilenames)
@@ -342,17 +356,17 @@ bool FVulkanPipelineStateCacheManager::Load(const TArray<FString>& CacheFilename
 				PipelineCacheInfo.initialDataSize = DeviceCache.Num();
 				PipelineCacheInfo.pInitialData = DeviceCache.GetData();
 
-				if (PipelineCache == VK_NULL_HANDLE)
+				if (PipelineCacheExclusive.Get() == VK_NULL_HANDLE)
 				{
-					// if we don't have one already, then create our main cache (PipelineCache)
-					VERIFYVULKANRESULT(VulkanRHI::vkCreatePipelineCache(Device->GetInstanceHandle(), &PipelineCacheInfo, VULKAN_CPU_ALLOCATOR, &PipelineCache));
+					VERIFYVULKANRESULT(VulkanRHI::vkCreatePipelineCache(Device->GetInstanceHandle(), &PipelineCacheInfo, VULKAN_CPU_ALLOCATOR, &PipelineCacheExclusive.Get()));
 				}
 				else
 				{
-					// if we have one already, create a temp one and merge into the main cache
+					//TODO: assert on reopening the same cache twice?!
+					// if we have one already, create a temp one and merge it
 					VkPipelineCache TempPipelineCache;
 					VERIFYVULKANRESULT(VulkanRHI::vkCreatePipelineCache(Device->GetInstanceHandle(), &PipelineCacheInfo, VULKAN_CPU_ALLOCATOR, &TempPipelineCache));
-					VERIFYVULKANRESULT(VulkanRHI::vkMergePipelineCaches(Device->GetInstanceHandle(), PipelineCache, 1, &TempPipelineCache));
+					VERIFYVULKANRESULT(VulkanRHI::vkMergePipelineCaches(Device->GetInstanceHandle(), PipelineCacheExclusive.Get(), 1, &TempPipelineCache));
 					VulkanRHI::vkDestroyPipelineCache(Device->GetInstanceHandle(), TempPipelineCache, VULKAN_CPU_ALLOCATOR);
 				}
 
@@ -371,6 +385,7 @@ bool FVulkanPipelineStateCacheManager::Load(const TArray<FString>& CacheFilename
 		}
 	}
 
+	//TODO: how to load LRU cache as it will have info about PSOs from multiple caches
 	if(CVarEnableLRU.GetValueOnAnyThread() != 0)
 	{
 		for (const FString& CacheFilename : CacheFilenames)
@@ -408,11 +423,11 @@ bool FVulkanPipelineStateCacheManager::Load(const TArray<FString>& CacheFilename
 	}
 
 	// Lazily create the cache in case the load failed
-	if (PipelineCache == VK_NULL_HANDLE)
+	if (PipelineCacheExclusive.Get() == VK_NULL_HANDLE)
 	{
 		VkPipelineCacheCreateInfo PipelineCacheInfo;
 		ZeroVulkanStruct(PipelineCacheInfo, VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO);
-		VERIFYVULKANRESULT(VulkanRHI::vkCreatePipelineCache(Device->GetInstanceHandle(), &PipelineCacheInfo, VULKAN_CPU_ALLOCATOR, &PipelineCache));
+		VERIFYVULKANRESULT(VulkanRHI::vkCreatePipelineCache(Device->GetInstanceHandle(), &PipelineCacheInfo, VULKAN_CPU_ALLOCATOR, &PipelineCacheExclusive.Get()));
 	}
 
 	return bResult;
@@ -428,29 +443,27 @@ void FVulkanPipelineStateCacheManager::InitAndLoad(const TArray<FString>& CacheF
 	{
 		if (GPipelineCacheFromShaderPipelineCacheCvar.GetValueOnAnyThread() == 0)
 		{
-			Load(CacheFilenames);
+			Load(CacheFilenames, GlobalPSOCache);
 		}
 		else
 		{
-			bLinkedToPSOFC = true;
 			UE_LOG(LogVulkanRHI, Log, TEXT("FVulkanPipelineStateCacheManager will check for loading, etc when ShaderPipelineCache opens its file"));
-
 
 #if PLATFORM_ANDROID && USE_ANDROID_FILE
 			// @todo Lumin: Use that GetPathForExternalWrite or something?
 			// BTW, this is totally bad. We should not platform ifdefs like this, rather the HAL needs to be extended!
 			extern FString GExternalFilePath;
-			LinkedToPSOFCCacheFolderPath = GExternalFilePath / TEXT("VulkanProgramBinaryCache");
+			CompiledPSOCacheTopFolderPath = GExternalFilePath / TEXT("VulkanProgramBinaryCache");
 
 #else
-			LinkedToPSOFCCacheFolderPath = FPaths::ProjectSavedDir() / TEXT("VulkanProgramBinaryCache");
+			CompiledPSOCacheTopFolderPath = FPaths::ProjectSavedDir() / TEXT("VulkanProgramBinaryCache");
 #endif
 
 			// Remove entire ProgramBinaryCache folder if -ClearOpenGLBinaryProgramCache is specified on command line
 			if (FParse::Param(FCommandLine::Get(), TEXT("ClearVulkanBinaryProgramCache")))
 			{
-				UE_LOG(LogVulkanRHI, Log, TEXT("FVulkanPipelineStateCacheManager: Deleting binary program cache folder for -ClearVulkanBinaryProgramCache: %s"), *LinkedToPSOFCCacheFolderPath);
-				FPlatformFileManager::Get().GetPlatformFile().DeleteDirectoryRecursively(*LinkedToPSOFCCacheFolderPath);
+				UE_LOG(LogVulkanRHI, Log, TEXT("FVulkanPipelineStateCacheManager: Deleting binary program cache folder for -ClearVulkanBinaryProgramCache: %s"), *CompiledPSOCacheTopFolderPath);
+				FPlatformFileManager::Get().GetPlatformFile().DeleteDirectoryRecursively(*CompiledPSOCacheTopFolderPath);
 			}
 
 			OnShaderPipelineCacheOpenedDelegate = FShaderPipelineCache::GetCacheOpenedDelegate().AddRaw(this, &FVulkanPipelineStateCacheManager::OnShaderPipelineCacheOpened);
@@ -458,18 +471,48 @@ void FVulkanPipelineStateCacheManager::InitAndLoad(const TArray<FString>& CacheF
 		}
 	}
 
+	FScopedPipelineCache PipelineCacheExclusive = GlobalPSOCache.Get(EPipelineCacheAccess::Exclusive);
 	// Lazily create the cache in case the load failed
-	if (PipelineCache == VK_NULL_HANDLE)
+	if (PipelineCacheExclusive.Get() == VK_NULL_HANDLE)
 	{
 		VkPipelineCacheCreateInfo PipelineCacheInfo;
 		ZeroVulkanStruct(PipelineCacheInfo, VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO);
-		VERIFYVULKANRESULT(VulkanRHI::vkCreatePipelineCache(Device->GetInstanceHandle(), &PipelineCacheInfo, VULKAN_CPU_ALLOCATOR, &PipelineCache));
+		VERIFYVULKANRESULT(VulkanRHI::vkCreatePipelineCache(Device->GetInstanceHandle(), &PipelineCacheInfo, VULKAN_CPU_ALLOCATOR, &PipelineCacheExclusive.Get()));
 	}
 }
 
+void FVulkanPipelineStateCacheManager::Save(const FString& CacheFilename)
+{
+	SavePSOCache(CacheFilename, GlobalPSOCache);
+
+	//TODO: Save LRU cache here
+}
+
+
+#if PLATFORM_ANDROID
+static int32 GNumRemoteProgramCompileServices = 6;
+static FAutoConsoleVariableRef CVarNumRemoteProgramCompileServices(
+	TEXT("Android.Vulkan.NumRemoteProgramCompileServices"),
+	GNumRemoteProgramCompileServices,
+	TEXT("The number of separate processes to make available to compile Vulkan PSOs.\n")
+	TEXT("0 to disable use of separate processes to precompile PSOs\n")
+	TEXT("valid range is 1-8 (4 default).")
+	,
+	ECVF_RenderThreadSafe | ECVF_ReadOnly
+);
+#endif
+
 void FVulkanPipelineStateCacheManager::OnShaderPipelineCacheOpened(FString const& Name, EShaderPlatform Platform, uint32 Count, const FGuid& VersionGuid, FShaderPipelineCache::FShaderCachePrecompileContext& ShaderCachePrecompileContext)
 {
-	check(bLinkedToPSOFC);
+	//TODO: support reloading the same cache
+	if (CompiledPSOCaches.Contains(VersionGuid))
+	{
+		UE_LOG(LogVulkanRHI, Log, TEXT("FVulkanPipelineStateCacheManager::OnShaderPipelineCacheOpened attempts to load a cache that was already loaded before %s %s"), *Name, *VersionGuid.ToString());
+		return;
+	}
+
+	CurrentPrecompilingPSOCacheGuid = VersionGuid;
+
 	UE_LOG(LogVulkanRHI, Log, TEXT("FVulkanPipelineStateCacheManager::OnShaderPipelineCacheOpened %s %d %s"), *Name, Count, *VersionGuid.ToString());
 
 	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
@@ -477,90 +520,115 @@ void FVulkanPipelineStateCacheManager::OnShaderPipelineCacheOpened(FString const
 	const VkPhysicalDeviceProperties& DeviceProperties = Device->GetDeviceProperties();
 	FString BinaryCacheAppendage = FString::Printf(TEXT(".%x.%x"), DeviceProperties.vendorID, DeviceProperties.deviceID);
 
-	LinkedToPSOFCCacheFolderFilename = LinkedToPSOFCCacheFolderPath / TEXT("VulkanPSO_") + VersionGuid.ToString() + BinaryCacheAppendage;
-	FString TempName = LinkedToPSOFCCacheFolderPath / TEXT("TempScanVulkanPSO_") + VersionGuid.ToString() + BinaryCacheAppendage;
+	CompiledPSOCacheFolderName = CompiledPSOCacheTopFolderPath / TEXT("VulkanPSO_") + VersionGuid.ToString() + BinaryCacheAppendage;
+	FString TempName = CompiledPSOCacheTopFolderPath / TEXT("TempScanVulkanPSO_") + VersionGuid.ToString() + BinaryCacheAppendage;
 
-	bool bSuccess = false;
+	{
+		FScopedPipelineCache PipelineCacheExclusive = CurrentPrecompilingPSOCache.Get(EPipelineCacheAccess::Exclusive);
+		checkf(PipelineCacheExclusive.Get() == VK_NULL_HANDLE, TEXT("Trying to open more than one shader pipeline cache"));
 
-	if (PlatformFile.FileExists(*LinkedToPSOFCCacheFolderFilename))
+		VkPipelineCacheCreateInfo PipelineCacheInfo;
+		ZeroVulkanStruct(PipelineCacheInfo, VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO);
+		VERIFYVULKANRESULT(VulkanRHI::vkCreatePipelineCache(Device->GetInstanceHandle(), &PipelineCacheInfo, VULKAN_CPU_ALLOCATOR, &PipelineCacheExclusive.Get()));
+	}
+
+	if (PlatformFile.FileExists(*CompiledPSOCacheFolderName))
 	{
 		// Try to move the file to a temporary filename before the scan, so we won't try to read it again if it's corrupted
 		PlatformFile.DeleteFile(*TempName);
-		PlatformFile.MoveFile(*TempName, *LinkedToPSOFCCacheFolderFilename);
+		PlatformFile.MoveFile(*TempName, *CompiledPSOCacheFolderName);
 
 		TArray<FString> CacheFilenames;
 		CacheFilenames.Add(TempName);
-		bSuccess = Load(CacheFilenames);
 
 		// Rename the file back after a successful scan.
-		if (bSuccess)
+		if (Load(CacheFilenames, CurrentPrecompilingPSOCache))
 		{
-			bLinkedToPSOFCSucessfulLoaded = true;
-			PlatformFile.MoveFile(*LinkedToPSOFCCacheFolderFilename, *TempName);
+			bPrecompilingCacheLoadedFromFile = true;
+			PlatformFile.MoveFile(*CompiledPSOCacheFolderName, *TempName);
 
 			if (CVarPipelineLRUCacheEvictBinary.GetValueOnAnyThread())
 			{
 				bEvictImmediately = true;
 			}
 		}
+		else
+		{
+			UE_LOG(LogVulkanRHI, Log, TEXT("FVulkanPipelineStateCacheManager: PSO cache failed to load, deleting file: %s"), *CompiledPSOCacheFolderName);
+			FPlatformFileManager::Get().GetPlatformFile().DeleteFile(*CompiledPSOCacheFolderName);
+		}
 	}
 	else
 	{
-		UE_LOG(LogVulkanRHI, Log, TEXT("FVulkanPipelineStateCacheManager: %s does not exist."), *LinkedToPSOFCCacheFolderFilename);
-	}
-	if (!bSuccess)
-	{
-		UE_LOG(LogVulkanRHI, Log, TEXT("FVulkanPipelineStateCacheManager: No matching vulkan PSO cache found or it failed to load, deleting binary program cache folder: %s"), *LinkedToPSOFCCacheFolderPath);
-		FPlatformFileManager::Get().GetPlatformFile().DeleteDirectoryRecursively(*LinkedToPSOFCCacheFolderPath);
+		UE_LOG(LogVulkanRHI, Log, TEXT("FVulkanPipelineStateCacheManager: %s does not exist."), *CompiledPSOCacheFolderName);
 	}
 
+
+
+	if (!bPrecompilingCacheLoadedFromFile || (bEvictImmediately && CVarPipelineLRUCacheEvictBinaryPreloadScreen.GetValueOnAnyThread()))
 	{
-		if (!bLinkedToPSOFCSucessfulLoaded || (bEvictImmediately && CVarPipelineLRUCacheEvictBinaryPreloadScreen.GetValueOnAnyThread()))
+		ShaderCachePrecompileContext.SetPrecompilationIsSlowTask();
+#if PLATFORM_ANDROID
+		if (GNumRemoteProgramCompileServices)
 		{
-			ShaderCachePrecompileContext.SetPrecompilationIsSlowTask();
+			FVulkanAndroidPlatform::StartAndWaitForRemoteCompileServices(GNumRemoteProgramCompileServices);
 		}
+#endif
 	}
 }
 
 void FVulkanPipelineStateCacheManager::OnShaderPipelineCachePrecompilationComplete(uint32 Count, double Seconds, const FShaderPipelineCache::FShaderCachePrecompileContext& ShaderCachePrecompileContext)
 {
-	check(bLinkedToPSOFC);
 	UE_LOG(LogVulkanRHI, Log, TEXT("FVulkanPipelineStateCacheManager::OnShaderPipelineCachePrecompilationComplete"));
 
-	bEvictImmediately = false;
-	if (!bLinkedToPSOFCSucessfulLoaded)
+#if PLATFORM_ANDROID
+	if (FVulkanAndroidPlatform::AreRemoteCompileServicesActive())
 	{
-		Save(LinkedToPSOFCCacheFolderFilename, true);
+		FVulkanAndroidPlatform::StopRemoteCompileServices();
+	}
+#endif
+
+	bEvictImmediately = false;
+	if (!bPrecompilingCacheLoadedFromFile)
+	{
+		//Save PSO cache only if it failed to load
+		SavePSOCache(CompiledPSOCacheFolderName, CurrentPrecompilingPSOCache);
 	}
 
-	// Want to ignore any subsequent Shader Pipeline Cache opening/closing, eg when loading modules
-	FShaderPipelineCache::GetCacheOpenedDelegate().Remove(OnShaderPipelineCacheOpenedDelegate);
-	FShaderPipelineCache::GetPrecompilationCompleteDelegate().Remove(OnShaderPipelineCachePrecompilationCompleteDelegate);
-	OnShaderPipelineCacheOpenedDelegate.Reset();
-	OnShaderPipelineCachePrecompilationCompleteDelegate.Reset();
+	if (!CompiledPSOCaches.Contains(CurrentPrecompilingPSOCacheGuid))
+	{
+		CompiledPSOCaches.Add(CurrentPrecompilingPSOCacheGuid);
+
+		//Merge this CurrentOpenedPSOCache with global PSOCache
+		QUICK_SCOPE_CYCLE_COUNTER(STAT_VulkanPSOCacheMerge);
+		FScopedPipelineCache GlobalPipelineCacheExclusive = GlobalPSOCache.Get(EPipelineCacheAccess::Exclusive);
+		FScopedPipelineCache CurrentPipelineCacheExclusive = CurrentPrecompilingPSOCache.Get(EPipelineCacheAccess::Exclusive);
+		VERIFYVULKANRESULT(VulkanRHI::vkMergePipelineCaches(Device->GetInstanceHandle(), GlobalPipelineCacheExclusive.Get(), 1, &CurrentPipelineCacheExclusive.Get()));
+		VulkanRHI::vkDestroyPipelineCache(Device->GetInstanceHandle(), CurrentPipelineCacheExclusive.Get(), VULKAN_CPU_ALLOCATOR);
+
+		CurrentPipelineCacheExclusive.Get() = VK_NULL_HANDLE;
+	}
+
+	bPrecompilingCacheLoadedFromFile = false;
+	CurrentPrecompilingPSOCacheGuid = FGuid();
 }
 
-void FVulkanPipelineStateCacheManager::Save(const FString& CacheFilename, bool bFromPSOFC)
+void FVulkanPipelineStateCacheManager::SavePSOCache(const FString& CacheFilename, FPipelineCache& Cache)
 {
-	if (bLinkedToPSOFC && !bFromPSOFC)
-	{
-		UE_LOG(LogVulkanRHI, Log, TEXT("FVulkanPipelineStateCacheManager: skipped saving because we only save if the PSOFC based one failed to load."));
-		return;
-	}
-	FScopeLock Lock1(&GraphicsPSOLockedCS);
+	FScopedPipelineCache PipelineCacheExclusive = Cache.Get(EPipelineCacheAccess::Exclusive);
+	FScopeLock Lock1(&GraphicsPSOLockedCS);		//TODO: Do we really need this here?!
 	FScopeLock Lock2(&LRUCS);
-
 
 
 	// First save Device Cache
 	size_t Size = 0;
-	VERIFYVULKANRESULT(VulkanRHI::vkGetPipelineCacheData(Device->GetInstanceHandle(), PipelineCache, &Size, nullptr));
+	VERIFYVULKANRESULT(VulkanRHI::vkGetPipelineCacheData(Device->GetInstanceHandle(), PipelineCacheExclusive.Get(), &Size, nullptr));
 	// 16 is HeaderSize + HeaderVersion
 	if (Size >= 16 + VK_UUID_SIZE)
 	{
 		TArray<uint8> DeviceCache;
 		DeviceCache.AddUninitialized(Size);
-		VkResult Result = VulkanRHI::vkGetPipelineCacheData(Device->GetInstanceHandle(), PipelineCache, &Size, DeviceCache.GetData());
+		VkResult Result = VulkanRHI::vkGetPipelineCacheData(Device->GetInstanceHandle(), PipelineCacheExclusive.Get(), &Size, DeviceCache.GetData());
 		if (Result == VK_SUCCESS)
 		{
 			FString BinaryCacheFilename = FVulkanPlatform::CreatePSOBinaryCacheFilename(Device, CacheFilename);
@@ -578,10 +646,11 @@ void FVulkanPipelineStateCacheManager::Save(const FString& CacheFilename, bool b
 		{
 			UE_LOG(LogVulkanRHI, Warning, TEXT("Failed to get Vulkan pipeline cache data. Error %d, %d bytes"), Result, Size);
 
-			VulkanRHI::vkDestroyPipelineCache(Device->GetInstanceHandle(), PipelineCache, VULKAN_CPU_ALLOCATOR);
+			//TODO: Resave it when we shutdown the manager?!
+			VulkanRHI::vkDestroyPipelineCache(Device->GetInstanceHandle(), PipelineCacheExclusive.Get(), VULKAN_CPU_ALLOCATOR);
 			VkPipelineCacheCreateInfo PipelineCacheInfo;
 			ZeroVulkanStruct(PipelineCacheInfo, VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO);
-			VERIFYVULKANRESULT(VulkanRHI::vkCreatePipelineCache(Device->GetInstanceHandle(), &PipelineCacheInfo, VULKAN_CPU_ALLOCATOR, &PipelineCache));
+			VERIFYVULKANRESULT(VulkanRHI::vkCreatePipelineCache(Device->GetInstanceHandle(), &PipelineCacheInfo, VULKAN_CPU_ALLOCATOR, &PipelineCacheExclusive.Get()));
 		}
 		else
 		{
@@ -850,6 +919,23 @@ FArchive& operator << (FArchive& Ar, FGfxPipelineDesc::FRenderTargets::FAttachme
 	return Ar;
 }
 
+void FGfxPipelineDesc::FRenderTargets::FStencilAttachmentRef::ReadFrom(const VkAttachmentReferenceStencilLayout& InState)
+{
+	Layout = (uint64)InState.stencilLayout;
+}
+
+void FGfxPipelineDesc::FRenderTargets::FStencilAttachmentRef::WriteInto(VkAttachmentReferenceStencilLayout& Out) const
+{
+	Out.stencilLayout = (VkImageLayout)Layout;
+}
+
+FArchive& operator << (FArchive& Ar, FGfxPipelineDesc::FRenderTargets::FStencilAttachmentRef& AttachmentRef)
+{
+	// Modify VERSION if serialization changes
+	Ar << AttachmentRef.Layout;
+	return Ar;
+}
+
 void FGfxPipelineDesc::FRenderTargets::FAttachmentDesc::ReadFrom(const VkAttachmentDescription &InState)
 {
 	Format =			(uint32)InState.format;
@@ -892,6 +978,27 @@ FArchive& operator << (FArchive& Ar, FGfxPipelineDesc::FRenderTargets::FAttachme
 	return Ar;
 }
 
+void FGfxPipelineDesc::FRenderTargets::FStencilAttachmentDesc::ReadFrom(const VkAttachmentDescriptionStencilLayout& InState)
+{
+	InitialLayout = (uint64)InState.stencilInitialLayout;
+	FinalLayout = (uint64)InState.stencilFinalLayout;
+}
+
+void FGfxPipelineDesc::FRenderTargets::FStencilAttachmentDesc::WriteInto(VkAttachmentDescriptionStencilLayout& Out) const
+{
+	Out.stencilInitialLayout = (VkImageLayout)InitialLayout;
+	Out.stencilFinalLayout = (VkImageLayout)FinalLayout;
+}
+
+FArchive& operator << (FArchive& Ar, FGfxPipelineDesc::FRenderTargets::FStencilAttachmentDesc& StencilAttachmentDesc)
+{
+	// Modify VERSION if serialization changes
+	Ar << StencilAttachmentDesc.InitialLayout;
+	Ar << StencilAttachmentDesc.FinalLayout;
+
+	return Ar;
+}
+
 void FGfxPipelineDesc::FRenderTargets::ReadFrom(const FVulkanRenderTargetLayout& RTLayout)
 {
 	NumAttachments =			RTLayout.NumAttachmentDescriptions;
@@ -912,13 +1019,14 @@ void FGfxPipelineDesc::FRenderTargets::ReadFrom(const FVulkanRenderTargetLayout&
 	{
 		for (uint32 Index = 0; Index < Count; ++Index)
 		{
-			FGfxPipelineDesc::FRenderTargets::FAttachmentRef* New = new(Dest) FGfxPipelineDesc::FRenderTargets::FAttachmentRef;
-			New->ReadFrom(Source[Index]);
+			FGfxPipelineDesc::FRenderTargets::FAttachmentRef& New = Dest.AddDefaulted_GetRef();
+			New.ReadFrom(Source[Index]);
 		}
 	};
 	CopyAttachmentRefs(ColorAttachments, RTLayout.ColorReferences, UE_ARRAY_COUNT(RTLayout.ColorReferences));
 	CopyAttachmentRefs(ResolveAttachments, RTLayout.ResolveReferences, UE_ARRAY_COUNT(RTLayout.ResolveReferences));
-	DepthStencil.ReadFrom(RTLayout.DepthStencilReference);
+	Depth.ReadFrom(RTLayout.DepthReference);
+	Stencil.ReadFrom(RTLayout.StencilReference);
 	FragmentDensity.ReadFrom(RTLayout.FragmentDensityReference);
 
 	Descriptions.AddZeroed(UE_ARRAY_COUNT(RTLayout.Desc));
@@ -926,6 +1034,7 @@ void FGfxPipelineDesc::FRenderTargets::ReadFrom(const FVulkanRenderTargetLayout&
 	{
 		Descriptions[Index].ReadFrom(RTLayout.Desc[Index]);
 	}
+	StencilDescription.ReadFrom(RTLayout.StencilDesc);
 }
 
 void FGfxPipelineDesc::FRenderTargets::WriteInto(FVulkanRenderTargetLayout& Out) const
@@ -954,7 +1063,8 @@ void FGfxPipelineDesc::FRenderTargets::WriteInto(FVulkanRenderTargetLayout& Out)
 	};
 	CopyAttachmentRefs(ColorAttachments, Out.ColorReferences, UE_ARRAY_COUNT(Out.ColorReferences));
 	CopyAttachmentRefs(ResolveAttachments, Out.ResolveReferences, UE_ARRAY_COUNT(Out.ResolveReferences));
-	DepthStencil.WriteInto(Out.DepthStencilReference);
+	Depth.WriteInto(Out.DepthReference);
+	Stencil.WriteInto(Out.StencilReference);
 	FragmentDensity.WriteInto(Out.FragmentDensityReference);
 
 
@@ -962,6 +1072,7 @@ void FGfxPipelineDesc::FRenderTargets::WriteInto(FVulkanRenderTargetLayout& Out)
 	{
 		Descriptions[Index].WriteInto(Out.Desc[Index]);
 	}
+	StencilDescription.WriteInto(Out.StencilDesc);
 }
 
 FArchive& operator << (FArchive& Ar, FGfxPipelineDesc::FRenderTargets& RTs)
@@ -972,10 +1083,12 @@ FArchive& operator << (FArchive& Ar, FGfxPipelineDesc::FRenderTargets& RTs)
 	Ar << RTs.NumUsedClearValues;
 	Ar << RTs.ColorAttachments;
 	Ar << RTs.ResolveAttachments;
-	Ar << RTs.DepthStencil;
+	Ar << RTs.Depth;
+	Ar << RTs.Stencil;
 	Ar << RTs.FragmentDensity;
 
 	Ar << RTs.Descriptions;
+	Ar << RTs.StencilDescription;
 
 	Ar << RTs.bHasDepthStencil;
 	Ar << RTs.bHasResolveAttachments;
@@ -1016,14 +1129,11 @@ FArchive& operator << (FArchive& Ar, FGfxPipelineDesc& Entry)
 #endif
 	Ar << Entry.RenderTargets;
 
-#if VULKAN_SUPPORTS_COLOR_CONVERSIONS
-	for (uint32 Index = 0; Index < MaxImmutableSamplers; ++Index)
-	{
-		uint64 Sampler = (uint64)Entry.ImmutableSamplers[Index];
-		Ar << Sampler;
-		Entry.ImmutableSamplers[Index] = (SIZE_T)Sampler;
-	}
-#endif
+	uint8 ShadingRate = static_cast<uint8>(Entry.ShadingRate);
+	uint8 Combiner = static_cast<uint8>(Entry.Combiner);
+	
+	Ar << ShadingRate;
+	Ar << Combiner;
 
 	Ar << Entry.UseAlphaToCoverage;
 
@@ -1054,20 +1164,49 @@ FVulkanPSOKey FGfxPipelineDesc::CreateKey2() const
 	return Result;
 }
 
-
-
-bool FVulkanPipelineStateCacheManager::CreateGfxPipelineFromEntry(FVulkanRHIGraphicsPipelineState* PSO, FVulkanShader* Shaders[ShaderStage::NumStages], VkPipeline* Pipeline)
+// Map Unreal VRS combiner operation enums to Vulkan enums.
+static const TMap<uint8, VkFragmentShadingRateCombinerOpKHR> FragmentCombinerOpMap
 {
+	{ VRSRB_Passthrough,	VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR },
+	{ VRSRB_Override,	VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR },
+	{ VRSRB_Min,			VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MIN_KHR },
+	{ VRSRB_Max,			VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MAX_KHR },
+	{ VRSRB_Sum,			VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MAX_KHR },		// No concept of Sum in Vulkan - fall back to max.
+	// @todo: Add "VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MUL_KHR"?
+};
+
+FString FVulkanPipelineStateCacheManager::ShaderHashesToString(FVulkanShader* Shaders[ShaderStage::NumStages])
+{
+	FString ShaderHashes = "";
+	if (Shaders[ShaderStage::Vertex] && Shaders[ShaderStage::Vertex]->Frequency == SF_Vertex)
+	{
+		ShaderHashes += TEXT("VS: ") + static_cast<FVulkanVertexShader*>(Shaders[ShaderStage::Vertex])->GetHash().ToString() + TEXT("\n");
+	}
+	if (Shaders[ShaderStage::Pixel] && Shaders[ShaderStage::Pixel]->Frequency == SF_Pixel)
+	{
+		ShaderHashes += TEXT("PS: ") + static_cast<FVulkanPixelShader*>(Shaders[ShaderStage::Pixel])->GetHash().ToString() + TEXT("\n");
+	}
+#if VULKAN_SUPPORTS_GEOMETRY_SHADERS
+	if (Shaders[ShaderStage::Geometry] && Shaders[ShaderStage::Geometry]->Frequency == SF_Geometry)
+	{
+		ShaderHashes += TEXT("GS: ") + static_cast<FVulkanGeometryShader*>(Shaders[ShaderStage::Geometry])->GetHash().ToString() + TEXT("\n");
+	}
+#endif
+	return ShaderHashes;
+}
+
+bool FVulkanPipelineStateCacheManager::CreateGfxPipelineFromEntry(FVulkanRHIGraphicsPipelineState* PSO, FVulkanShader* Shaders[ShaderStage::NumStages], bool bPrecompile)
+{
+	VkPipeline* Pipeline = &PSO->VulkanPipeline;
 	FGfxPipelineDesc* GfxEntry = &PSO->Desc;
 	if (Shaders[ShaderStage::Pixel] == nullptr && !FVulkanPlatform::SupportsNullPixelShader())
 	{
 		Shaders[ShaderStage::Pixel] = ResourceCast(TShaderMapRef<FNULLPS>(GetGlobalShaderMap(GMaxRHIFeatureLevel)).GetPixelShader());
 	}
 
-	if (!PSO->bShaderModulesLoaded)
-	{
-		PSO->GetOrCreateShaderModules(Shaders);
-	}
+	TRefCountPtr<FVulkanShaderModule> ShaderModules[ShaderStage::NumStages];
+
+	PSO->GetOrCreateShaderModules(ShaderModules, Shaders);
 
 	// Pipeline
 	VkGraphicsPipelineCreateInfo PipelineInfo;
@@ -1119,22 +1258,40 @@ bool FVulkanPipelineStateCacheManager::CreateGfxPipelineFromEntry(FVulkanRHIGrap
 	PipelineInfo.pStages = ShaderStages;
 	// main_00000000_00000000
 	ANSICHAR EntryPoints[ShaderStage::NumStages][24];
-	bool bHasTessellation = false;
+	VkPipelineShaderStageRequiredSubgroupSizeCreateInfo RequiredSubgroupSizeCreateInfo[ShaderStage::NumStages];
 	for (int32 ShaderStage = 0; ShaderStage < ShaderStage::NumStages; ++ShaderStage)
 	{
-		if (!PSO->ShaderModules[ShaderStage])
+		if (!ShaderModules[ShaderStage].IsValid() || (Shaders[ShaderStage] == nullptr))
 		{
 			continue;
 		}
 		const ShaderStage::EStage CurrStage = (ShaderStage::EStage)ShaderStage;
 
 		ShaderStages[PipelineInfo.stageCount].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-		VkShaderStageFlagBits Stage = UEFrequencyToVKStageBit(ShaderStage::GetFrequencyForGfxStage(CurrStage));
+		const VkShaderStageFlagBits Stage = UEFrequencyToVKStageBit(ShaderStage::GetFrequencyForGfxStage(CurrStage));
 		ShaderStages[PipelineInfo.stageCount].stage = Stage;
-		bHasTessellation = bHasTessellation || ((Stage & (VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT)) != 0);
-		ShaderStages[PipelineInfo.stageCount].module = PSO->ShaderModules[CurrStage];
+		ShaderStages[PipelineInfo.stageCount].module = ShaderModules[CurrStage]->GetVkShaderModule();
 		Shaders[ShaderStage]->GetEntryPoint(EntryPoints[PipelineInfo.stageCount], 24);
 		ShaderStages[PipelineInfo.stageCount].pName = EntryPoints[PipelineInfo.stageCount];
+
+		if (Device->GetOptionalExtensions().HasEXTSubgroupSizeControl)
+		{
+			const FVulkanShaderHeader& ShaderHeader = Shaders[ShaderStage]->GetCodeHeader();
+			if (ShaderHeader.WaveSize > 0)
+			{
+				// Check if supported by this stage and Check if requested size is supported
+				const VkPhysicalDeviceSubgroupSizeControlPropertiesEXT& SubgroupSizeControlProperties = Device->GetOptionalExtensionProperties().SubgroupSizeControlProperties;
+				const bool bSupportedStage = (VKHasAllFlags(SubgroupSizeControlProperties.requiredSubgroupSizeStages, Stage));
+				const bool bSupportedSize = ((ShaderHeader.WaveSize >= SubgroupSizeControlProperties.minSubgroupSize) && (ShaderHeader.WaveSize <= SubgroupSizeControlProperties.maxSubgroupSize));
+				if (bSupportedStage && bSupportedSize)
+				{
+				ZeroVulkanStruct(RequiredSubgroupSizeCreateInfo[PipelineInfo.stageCount], VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO);
+				RequiredSubgroupSizeCreateInfo[PipelineInfo.stageCount].requiredSubgroupSize = ShaderHeader.WaveSize;
+				ShaderStages[PipelineInfo.stageCount].pNext = &RequiredSubgroupSizeCreateInfo[PipelineInfo.stageCount];
+			}
+		}
+		}
+
 		PipelineInfo.stageCount++;
 	}
 
@@ -1143,19 +1300,19 @@ bool FVulkanPipelineStateCacheManager::CreateGfxPipelineFromEntry(FVulkanRHIGrap
 	// Vertex Input. The structure is mandatory even without vertex attributes.
 	VkPipelineVertexInputStateCreateInfo VBInfo;
 	ZeroVulkanStruct(VBInfo, VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO);
-	TArray<VkVertexInputBindingDescription> VBBindings;
+	TArray<VkVertexInputBindingDescription, TInlineAllocator<32>> VBBindings;
 	for (const FGfxPipelineDesc::FVertexBinding& SourceBinding : GfxEntry->VertexBindings)
 	{
-		VkVertexInputBindingDescription* Binding = new(VBBindings) VkVertexInputBindingDescription;
-		SourceBinding.WriteInto(*Binding);
+		VkVertexInputBindingDescription& Binding = VBBindings.AddDefaulted_GetRef();
+		SourceBinding.WriteInto(Binding);
 	}
 	VBInfo.vertexBindingDescriptionCount = VBBindings.Num();
 	VBInfo.pVertexBindingDescriptions = VBBindings.GetData();
-	TArray<VkVertexInputAttributeDescription> VBAttributes;
+	TArray<VkVertexInputAttributeDescription, TInlineAllocator<32>> VBAttributes;
 	for (const FGfxPipelineDesc::FVertexAttribute& SourceAttr : GfxEntry->VertexAttributes)
 	{
-		VkVertexInputAttributeDescription* Attr = new(VBAttributes) VkVertexInputAttributeDescription;
-		SourceAttr.WriteInto(*Attr);
+		VkVertexInputAttributeDescription& Attr = VBAttributes.AddDefaulted_GetRef();
+		SourceAttr.WriteInto(Attr);
 	}
 	VBInfo.vertexAttributeDescriptionCount = VBAttributes.Num();
 	VBInfo.pVertexAttributeDescriptions = VBAttributes.GetData();
@@ -1197,79 +1354,36 @@ bool FVulkanPipelineStateCacheManager::CreateGfxPipelineFromEntry(FVulkanRHIGrap
 
 	PipelineInfo.pDynamicState = &DynamicState;
 
-	VkPipelineTessellationStateCreateInfo TessState;
-	if (bHasTessellation)
+	VkPipelineFragmentShadingRateStateCreateInfoKHR PipelineFragmentShadingRate;
+	if (GRHISupportsPipelineVariableRateShading && GRHIVariableRateShadingEnabled && GRHIVariableRateShadingImageDataType == VRSImage_Palette)
 	{
-		ZeroVulkanStruct(TessState, VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO);
-		PipelineInfo.pTessellationState = &TessState;
-		check(InputAssembly.topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST);
-		TessState.patchControlPoints = GfxEntry->ControlPoints;
+		const VkExtent2D FragmentSize = Device->GetBestMatchedFragmentSize(PSO->Desc.ShadingRate);
+		VkFragmentShadingRateCombinerOpKHR PipelineToPrimitiveCombinerOperation = FragmentCombinerOpMap[(uint8)PSO->Desc.Combiner];
+		
+		ZeroVulkanStruct(PipelineFragmentShadingRate, VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR);
+		PipelineFragmentShadingRate.fragmentSize = FragmentSize;
+		PipelineFragmentShadingRate.combinerOps[0] = PipelineToPrimitiveCombinerOperation;
+		PipelineFragmentShadingRate.combinerOps[1] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MAX_KHR;		// @todo: This needs to be specified too.
+
+		PipelineInfo.pNext = (void*)&PipelineFragmentShadingRate;
+	}
+
+	if (Device->SupportsBindless())
+	{
+		PipelineInfo.flags |= VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
 	}
 
 	VkResult Result = VK_ERROR_INITIALIZATION_FAILED;
+
 	double BeginTime = FPlatformTime::Seconds();
-	if(bUseLRU)
-	{
-#if VULKAN_USE_SHADERKEYS
-		const uint64 ShaderHash = GfxEntry->ShaderKeyShared;
-#else
-		const uint64 ShaderHash = GfxEntry->ShaderHashes.Hash;
-#endif
-		FVulkanPipelineSize* Found;
-		{
-			FScopeLock Lock(&LRUCS); 
-			Found = LRU2SizeList.Find(ShaderHash);
-		}
-		size_t PreSize = 0, AfterSize = 0;
-		uint32 FoundSize = 0;
-		if (Found)
-		{
-			FoundSize = Found->PipelineSize;
-		}
-		else
-		{
-			VulkanRHI::vkGetPipelineCacheData(Device->GetInstanceHandle(), PipelineCache, &PreSize, nullptr);
-		}
 
-
-		{
-			SCOPE_CYCLE_COUNTER(STAT_VulkanPSOVulkanCreationTime);
-			Result = VulkanRHI::vkCreateGraphicsPipelines(Device->GetInstanceHandle(), PipelineCache, 1, &PipelineInfo, VULKAN_CPU_ALLOCATOR, Pipeline);
-		}
-
-		if (!Found && Result == VK_SUCCESS)
-		{
-			VulkanRHI::vkGetPipelineCacheData(Device->GetInstanceHandle(), PipelineCache, &AfterSize, nullptr);
-			uint32 Diff = AfterSize - PreSize;
-			if (!Diff)
-			{
-				UE_LOG(LogVulkanRHI, Warning, TEXT("Shader size was computed as zero, using 20k instead."));
-				Diff = 20 * 1024;
-			}
-			FVulkanPipelineSize PipelineSize;
-			PipelineSize.ShaderHash = ShaderHash;
-			PipelineSize.PipelineSize = Diff;
-			{
-				FScopeLock Lock(&LRUCS);
-				LRU2SizeList.Add(ShaderHash, PipelineSize);
-			}
-			FoundSize = Diff;
-		}
-		if(Result == VK_SUCCESS)
-		{
-			PSO->PipelineCacheSize = FoundSize;
-		}
-	}
-	else
-	{
-		SCOPE_CYCLE_COUNTER(STAT_VulkanPSOVulkanCreationTime);
-		Result = VulkanRHI::vkCreateGraphicsPipelines(Device->GetInstanceHandle(), PipelineCache, 1, &PipelineInfo, VULKAN_CPU_ALLOCATOR, Pipeline);
-	}
-
+	Result = CreateVKPipeline(PSO, Shaders, PipelineInfo, bPrecompile);
 
 	if (Result != VK_SUCCESS)
 	{
-		UE_LOG(LogVulkanRHI, Error, TEXT("Failed to create graphics pipeline."));
+		FString ShaderHashes = ShaderHashesToString(Shaders);
+
+		UE_LOG(LogVulkanRHI, Error, TEXT("Failed to create graphics pipeline.\nShaders in pipeline: %s"), *ShaderHashes);
 		return false;
 	}
 
@@ -1284,17 +1398,274 @@ bool FVulkanPipelineStateCacheManager::CreateGfxPipelineFromEntry(FVulkanRHIGrap
 	return true;
 }
 
+#if PLATFORM_ANDROID
+
+VkResult CreatePSOWithExternalService(FVulkanDevice* Device, FVulkanRHIGraphicsPipelineState* PSO, FVulkanShader* Shaders[ShaderStage::NumStages], const VkGraphicsPipelineCreateInfo& PipelineInfo, VkPipelineCache DestPipelineCache, FRWLock& PipelineLock)
+{
+	VkResult Result = VK_ERROR_INITIALIZATION_FAILED;
+	FVulkanShader::FSpirvCode VS = PSO->GetPatchedSpirvCode(Shaders[ShaderStage::Vertex]);
+	FVulkanShader::FSpirvCode PS = PSO->GetPatchedSpirvCode(Shaders[ShaderStage::Pixel]);
+	TArrayView<uint32_t> VSCode = VS.GetCodeView();
+	TArrayView<uint32_t> PSCode = PS.GetCodeView();
+	size_t AfterSize = 0;
+
+	VkPipelineCache LocalPipelineCache = VK_NULL_HANDLE;
+	FGfxPipelineDesc* GfxEntry = &PSO->Desc;
+
+	TArray<uint8> InitialCacheData;
+	{
+		QUICK_SCOPE_CYCLE_COUNTER(STAT_Vulkan_RHICreateGraphicsPipelineState_ExternalInitialCache);
+		FRWScopeLock Lock(PipelineLock, SLT_Write);
+		size_t InitialCacheSize = 0;
+		VulkanRHI::vkGetPipelineCacheData(Device->GetInstanceHandle(), DestPipelineCache, &InitialCacheSize, nullptr);
+		InitialCacheData.SetNumUninitialized(InitialCacheSize);
+		VulkanRHI::vkGetPipelineCacheData(Device->GetInstanceHandle(), DestPipelineCache, &InitialCacheSize, InitialCacheData.GetData());
+	}
+
+	LocalPipelineCache = FVulkanPlatform::PrecompilePSO(Device, InitialCacheData, &PipelineInfo, GfxEntry, &PSO->RenderPass->GetLayout(), VSCode, PSCode, AfterSize);
+
+	if (ensure(LocalPipelineCache != VK_NULL_HANDLE))
+	{
+		{
+			QUICK_SCOPE_CYCLE_COUNTER(STAT_Vulkan_RHICreateGraphicsPipelineState_ExternalMergeResult);
+			FRWScopeLock Lock(PipelineLock, SLT_Write);
+			Result = VK_SUCCESS;
+			VERIFYVULKANRESULT(VulkanRHI::vkMergePipelineCaches(Device->GetInstanceHandle(), DestPipelineCache, 1, &LocalPipelineCache));
+		}
+		VulkanRHI::vkDestroyPipelineCache(Device->GetInstanceHandle(), LocalPipelineCache, VULKAN_CPU_ALLOCATOR);
+	}
+	else
+	{
+  		UE_LOG(LogVulkanRHI, Error, TEXT("Android RemoteCompileServices Failed to create graphics pipeline.\nShaders in pipeline"));
+	}
+	return Result;
+}
+#endif
+
+VkResult FVulkanPipelineStateCacheManager::CreateVKPipeline(FVulkanRHIGraphicsPipelineState* PSO, FVulkanShader* Shaders[ShaderStage::NumStages], const VkGraphicsPipelineCreateInfo& PipelineInfo, bool bIsPrecompileJob)
+{
+	if(FVulkanChunkedPipelineCacheManager::IsEnabled())
+	{
+		QUICK_SCOPE_CYCLE_COUNTER(STAT_Vulkan_RHICreateGraphicsPipelineState_CREATE_VKPIPELINE);
+
+		// Use chunk caching and bypass FVulkanPipelineStateCacheManager's PSO caching
+		// Placeholder PSO size - TODO: remove pipeline cache size stuff.	
+		PSO->PipelineCacheSize = 20 * 1024; // This is only required bUseLRU == true.
+		return FVulkanChunkedPipelineCacheManager::Get().CreatePSO(PSO, bIsPrecompileJob, FVulkanChunkedPipelineCacheManager::FPSOCreateCallbackFunc<FVulkanRHIGraphicsPipelineState>(
+				[&](FVulkanChunkedPipelineCacheManager::FPSOCreateFuncParams<FVulkanRHIGraphicsPipelineState>& Params)
+			{
+				FVulkanRHIGraphicsPipelineState* PSO = Params.PSO;
+				VkPipelineCache& PipelineCache = Params.DestPipelineCache;
+				FVulkanChunkedPipelineCacheManager::EPSOOperation PSOOperation = Params.PSOOperation;
+				
+				check(PSO->VulkanPipeline == 0);
+				check(PSOOperation == FVulkanChunkedPipelineCacheManager::EPSOOperation::CreateAndStorePSO || PSOOperation == FVulkanChunkedPipelineCacheManager::EPSOOperation::CreateIfPresent);
+				VkResult Result;
+
+				if(PSOOperation == FVulkanChunkedPipelineCacheManager::EPSOOperation::CreateIfPresent)
+				{
+					const bool bCanTestForExistence = Device->GetOptionalExtensions().HasEXTPipelineCreationCacheControl;
+					if (bCanTestForExistence)
+					{
+						QUICK_SCOPE_CYCLE_COUNTER(STAT_Vulkan_RHICreateGraphicsPipelineState_TestCreate);
+						FRWScopeLock Lock(Params.DestPipelineCacheLock, SLT_ReadOnly);
+						VkGraphicsPipelineCreateInfo TestPipelineInfo = PipelineInfo;
+						TestPipelineInfo.flags |= VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_EXT;
+						Result = VulkanRHI::vkCreateGraphicsPipelines(Device->GetInstanceHandle(), PipelineCache, 1, &TestPipelineInfo, VULKAN_CPU_ALLOCATOR, &PSO->VulkanPipeline);
+					}
+					else
+					{
+						// if we cant test we must create.
+						Result = VK_PIPELINE_COMPILE_REQUIRED_EXT;
+					}
+					return Result;
+				}
+
+				QUICK_SCOPE_CYCLE_COUNTER(STAT_Vulkan_vkCreateGraphicsPipeline);
+#if PLATFORM_ANDROID
+				if( !FVulkanAndroidPlatform::AreRemoteCompileServicesActive() || !bIsPrecompileJob)
+				{
+#endif
+					QUICK_SCOPE_CYCLE_COUNTER(STAT_Vulkan_RHICreateGraphicsPipelineState_vkCreate);
+					FRWScopeLock Lock(Params.DestPipelineCacheLock, SLT_ReadOnly);
+					Result = VulkanRHI::vkCreateGraphicsPipelines(Device->GetInstanceHandle(), PipelineCache, 1, &PipelineInfo, VULKAN_CPU_ALLOCATOR, &PSO->VulkanPipeline);
+#if PLATFORM_ANDROID
+				}
+				else
+				{
+					QUICK_SCOPE_CYCLE_COUNTER(STAT_Vulkan_RHICreateGraphicsPipelineState_ExternalCreate);
+					Result = CreatePSOWithExternalService(Device, PSO, Shaders, PipelineInfo, PipelineCache, Params.DestPipelineCacheLock);
+				}
+#endif
+				return Result;
+			}));
+	}
+
+	VkPipeline* Pipeline = &PSO->VulkanPipeline;
+
+	FPipelineCache& Cache = bIsPrecompileJob ? CurrentPrecompilingPSOCache : GlobalPSOCache;
+
+	VkPipelineCache LocalPipelineCache = VK_NULL_HANDLE;
+	VkResult Result = VK_ERROR_INITIALIZATION_FAILED;
+	uint32 PSOSize = 0;
+	bool bWantPSOSize = false;
+	FGfxPipelineDesc* GfxEntry = &PSO->Desc;
+	uint64 ShaderHash = 0;
+	bool bValidateServicePSO = false;
+	if (bUseLRU)
+	{
+		QUICK_SCOPE_CYCLE_COUNTER(STAT_VulkanPSOLRUSizeLookup);
+
+#if VULKAN_USE_SHADERKEYS
+		ShaderHash = GfxEntry->ShaderKeyShared;
+#else
+		ShaderHash = GfxEntry->ShaderHashes.Hash;
+#endif
+		{
+			FScopeLock Lock(&LRUCS);
+			FVulkanPipelineSize* Found = LRU2SizeList.Find(ShaderHash);
+			if (Found)
+			{
+				PSOSize = Found->PipelineSize;
+			}
+			else
+			{
+				bWantPSOSize = true;
+			}
+		}
+	}
+
+#if PLATFORM_ANDROID
+	if (bIsPrecompileJob && FVulkanAndroidPlatform::AreRemoteCompileServicesActive() /*&&
+		CVarPipelineLRUCacheEvictBinary.GetValueOnAnyThread()*/)
+	{
+		FVulkanShader::FSpirvCode VS = PSO->GetPatchedSpirvCode(Shaders[ShaderStage::Vertex]);
+		FVulkanShader::FSpirvCode PS = PSO->GetPatchedSpirvCode(Shaders[ShaderStage::Pixel]);
+		TArrayView<uint32_t> VSCode = VS.GetCodeView();
+		TArrayView<uint32_t> PSCode = PS.GetCodeView();
+		size_t AfterSize = 0;
+
+		LocalPipelineCache = FVulkanPlatform::PrecompilePSO(Device, MakeArrayView<uint8>(nullptr,0), &PipelineInfo, GfxEntry, &PSO->RenderPass->GetLayout(), VSCode, PSCode, AfterSize);
+
+		if (ensure(LocalPipelineCache != VK_NULL_HANDLE))
+		{
+			Pipeline[0] = VK_NULL_HANDLE;
+			Result = VK_SUCCESS;
+
+			// enable bValidateServicePSO to compare PSOService result against engine's result.
+			//bValidateServicePSO = true;
+			if(bValidateServicePSO)
+			{
+				Result = VK_ERROR_INITIALIZATION_FAILED;
+				bWantPSOSize = true;
+				VulkanRHI::vkDestroyPipelineCache(Device->GetInstanceHandle(), LocalPipelineCache, VULKAN_CPU_ALLOCATOR);
+				LocalPipelineCache = VK_NULL_HANDLE;
+			}
+
+			if(bWantPSOSize)
+			{
+				PSOSize = AfterSize;
+			}
+		}
+		else
+		{
+			FString ShaderHashes = ShaderHashesToString(Shaders);
+			UE_LOG(LogVulkanRHI, Error, TEXT("Android RemoteCompileServices Failed to create graphics pipeline.\nShaders in pipeline: %s"), *ShaderHashes);
+		}
+	}
+#endif
+	// Disabling 'V547: Expression is always true'
+	// The precompile code above can set Result to success on Android platforms.
+	if(Result != VK_SUCCESS)  //-V547
+	{
+		if (bWantPSOSize)
+		{
+			QUICK_SCOPE_CYCLE_COUNTER(STAT_VulkanPSOCreationTimeLRU);
+
+			// We create a single pipeline cache for this create so we can observe the size for LRU cache's accounting.
+			// measuring deltas from the global PipelineCache is not thread safe.
+			VkPipelineCacheCreateInfo PipelineCacheInfo;
+			ZeroVulkanStruct(PipelineCacheInfo, VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO);
+			VERIFYVULKANRESULT(VulkanRHI::vkCreatePipelineCache(Device->GetInstanceHandle(), &PipelineCacheInfo, VULKAN_CPU_ALLOCATOR, &LocalPipelineCache));
+			Result = VulkanRHI::vkCreateGraphicsPipelines(Device->GetInstanceHandle(), LocalPipelineCache, 1, &PipelineInfo, VULKAN_CPU_ALLOCATOR, Pipeline);
+			if (bValidateServicePSO)
+			{
+				size_t Diff = 0;
+				if (ensure(LocalPipelineCache != VK_NULL_HANDLE))
+				{
+					VulkanRHI::vkGetPipelineCacheData(Device->GetInstanceHandle(), LocalPipelineCache, &Diff, nullptr);
+				}
+				UE_CLOG(Diff != PSOSize, LogVulkanRHI, Warning, TEXT("PSO service size mismatches engine size! [PSOService = %d, Game Process = %d]"), PSOSize, Diff);
+			}
+		}
+		else
+		{
+			SCOPE_CYCLE_COUNTER(STAT_VulkanPSOVulkanCreationTime);
+			FScopedPipelineCache PipelineCacheShared = Cache.Get(EPipelineCacheAccess::Shared);
+			Result = VulkanRHI::vkCreateGraphicsPipelines(Device->GetInstanceHandle(), PipelineCacheShared.Get(), 1, &PipelineInfo, VULKAN_CPU_ALLOCATOR, Pipeline);
+		}
+	}
+
+	if (LocalPipelineCache != VK_NULL_HANDLE)
+	{
+		if (bWantPSOSize)
+		{
+			FScopeLock Lock(&LRUCS);
+			FVulkanPipelineSize* Found = LRU2SizeList.Find(ShaderHash);
+			if (Found == nullptr) // Check we're not beaten to it..
+			{
+				QUICK_SCOPE_CYCLE_COUNTER(STAT_Vulkan_Calc_LRU_Size);
+				size_t Diff = 0;
+
+				if (LocalPipelineCache != VK_NULL_HANDLE)
+				{
+					VulkanRHI::vkGetPipelineCacheData(Device->GetInstanceHandle(), LocalPipelineCache, &Diff, nullptr);
+				}
+
+				if (!Diff)
+				{
+					UE_LOG(LogVulkanRHI, Warning, TEXT("Shader size was computed as zero, using 20k instead."));
+					Diff = 20 * 1024;
+				}
+				FVulkanPipelineSize PipelineSize;
+				PipelineSize.ShaderHash = ShaderHash;
+				PipelineSize.PipelineSize = (uint32)Diff;
+				LRU2SizeList.Add(ShaderHash, PipelineSize);
+				PSOSize = Diff;
+			}
+			else
+			{
+				PSOSize = Found->PipelineSize;
+			}
+		}
+				
+		FScopedPipelineCache PipelineCacheExclusive = Cache.Get(EPipelineCacheAccess::Exclusive);
+		if (PipelineCacheExclusive.Get() != VK_NULL_HANDLE)
+		{
+			QUICK_SCOPE_CYCLE_COUNTER(STAT_VulkanPSOCacheMerge);
+			VERIFYVULKANRESULT(VulkanRHI::vkMergePipelineCaches(Device->GetInstanceHandle(), PipelineCacheExclusive.Get(), 1, &LocalPipelineCache));
+		}
+		VulkanRHI::vkDestroyPipelineCache(Device->GetInstanceHandle(), LocalPipelineCache, VULKAN_CPU_ALLOCATOR);
+	}
+
+	VERIFYVULKANRESULT(Result);
+
+	PSO->PipelineCacheSize = PSOSize;
+
+ 	return Result;
+}
 
 void FVulkanPipelineStateCacheManager::DestroyCache()
 {
 	VkDevice DeviceHandle = Device->GetInstanceHandle();
 
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_Vulkan_DestroyCache_PSOLock);
 	FScopeLock Lock1(&GraphicsPSOLockedCS);
 	int idx = 0;
 	for (auto& Pair : GraphicsPSOLockedMap)
 	{
 		FVulkanRHIGraphicsPipelineState* Pipeline = Pair.Value;
-		LRUPRINT_DEBUG(TEXT("LIVE PSO %05d  REF %d %p :: %p\n"), idx++, Pipeline->GetRefCount(), Pipeline, Pipeline->LRUNode);
+		FPlatformMisc::LowLevelOutputDebugStringf(TEXT("Leaked PSO %05d: RefCount=%d Handle=0x%p\n"), idx++, Pipeline->GetRefCount(), Pipeline);
 	}
 	LRU2SizeList.Reset();
 
@@ -1304,7 +1675,6 @@ void FVulkanPipelineStateCacheManager::DestroyCache()
 
 	// Compute pipelines already deleted...
 	ComputePipelineEntries.Reset();
-	check(GraphicsPSOLockedMap.Num() == 0);
 }
 
 void FVulkanPipelineStateCacheManager::RebuildCache()
@@ -1321,11 +1691,7 @@ FVulkanShaderHashes::FVulkanShaderHashes(const FGraphicsPipelineStateInitializer
 	Stages[ShaderStage::Vertex] = GetShaderHash<FRHIVertexShader, FVulkanVertexShader>(PSOInitializer.BoundShaderState.VertexShaderRHI);
 	Stages[ShaderStage::Pixel] = GetShaderHash<FRHIPixelShader, FVulkanPixelShader>(PSOInitializer.BoundShaderState.PixelShaderRHI);
 #if VULKAN_SUPPORTS_GEOMETRY_SHADERS
-	Stages[ShaderStage::Geometry] = GetShaderHash<FRHIGeometryShader, FVulkanGeometryShader>(PSOInitializer.BoundShaderState.GeometryShaderRHI);
-#endif
-#if PLATFORM_SUPPORTS_TESSELLATION_SHADERS
-	Stages[ShaderStage::Hull] = GetShaderHash<FRHIHullShader, FVulkanHullShader>(PSOInitializer.BoundShaderState.HullShaderRHI);
-	Stages[ShaderStage::Domain] = GetShaderHash<FRHIDomainShader, FVulkanDomainShader>(PSOInitializer.BoundShaderState.DomainShaderRHI);
+	Stages[ShaderStage::Geometry] = GetShaderHash<FRHIGeometryShader, FVulkanGeometryShader>(PSOInitializer.BoundShaderState.GetGeometryShader());
 #endif
 	Finalize();
 }
@@ -1371,110 +1737,22 @@ FVulkanLayout* FVulkanPipelineStateCacheManager::FindOrAddLayout(const FVulkanDe
 	return Layout;
 }
 
-static inline VkPrimitiveTopology UEToVulkanTopologyType(const FVulkanDevice* InDevice, EPrimitiveType PrimitiveType, bool bHasTessellation, uint16& OutControlPoints)
+static inline VkPrimitiveTopology UEToVulkanTopologyType(const FVulkanDevice* InDevice, EPrimitiveType PrimitiveType, uint16& OutControlPoints)
 {
-	if (bHasTessellation)
+	OutControlPoints = 0;
+	switch (PrimitiveType)
 	{
-		switch (PrimitiveType)
-		{
-		case PT_TriangleList:
-			// This is the case for tessellation without AEN or other buffers, so just flip to 3 CPs
-			OutControlPoints = 3;
-			return VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
-		case PT_1_ControlPointPatchList:
-		case PT_2_ControlPointPatchList:
-		case PT_3_ControlPointPatchList:
-		case PT_4_ControlPointPatchList:
-		case PT_5_ControlPointPatchList:
-		case PT_6_ControlPointPatchList:
-		case PT_7_ControlPointPatchList:
-		case PT_8_ControlPointPatchList:
-		case PT_9_ControlPointPatchList:
-		case PT_10_ControlPointPatchList:
-		case PT_12_ControlPointPatchList:
-		case PT_13_ControlPointPatchList:
-		case PT_14_ControlPointPatchList:
-		case PT_15_ControlPointPatchList:
-		case PT_16_ControlPointPatchList:
-		case PT_17_ControlPointPatchList:
-		case PT_18_ControlPointPatchList:
-		case PT_19_ControlPointPatchList:
-		case PT_20_ControlPointPatchList:
-		case PT_22_ControlPointPatchList:
-		case PT_23_ControlPointPatchList:
-		case PT_24_ControlPointPatchList:
-		case PT_25_ControlPointPatchList:
-		case PT_26_ControlPointPatchList:
-		case PT_27_ControlPointPatchList:
-		case PT_28_ControlPointPatchList:
-		case PT_29_ControlPointPatchList:
-		case PT_30_ControlPointPatchList:
-		case PT_31_ControlPointPatchList:
-		case PT_32_ControlPointPatchList:
-			OutControlPoints = (PrimitiveType - PT_1_ControlPointPatchList + 1);
-			checkf(
-				OutControlPoints <= InDevice->GetLimits().maxTessellationPatchSize,
-				TEXT("OutControlPoints (%d) exceeded limit of maximal patch size (%d)"),
-				OutControlPoints,
-				InDevice->GetLimits().maxTessellationPatchSize
-			);
-			return VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
-		default:
-			checkf(false, TEXT("Unsupported tessellation EPrimitiveType %d; probably missing a case in FStaticMeshSceneProxy::GetMeshElement()!"), (uint32)PrimitiveType);
-			break;
-		}
-		OutControlPoints = 0;
-	}
-	else
-	{
-		OutControlPoints = 0;
-		switch (PrimitiveType)
-		{
-		case PT_PointList:
-			return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
-		case PT_LineList:
-			return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
-		case PT_TriangleList:
-			return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-		case PT_TriangleStrip:
-			return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
-		case PT_1_ControlPointPatchList:
-		case PT_2_ControlPointPatchList:
-		case PT_3_ControlPointPatchList:
-		case PT_4_ControlPointPatchList:
-		case PT_5_ControlPointPatchList:
-		case PT_6_ControlPointPatchList:
-		case PT_7_ControlPointPatchList:
-		case PT_8_ControlPointPatchList:
-		case PT_9_ControlPointPatchList:
-		case PT_10_ControlPointPatchList:
-		case PT_12_ControlPointPatchList:
-		case PT_13_ControlPointPatchList:
-		case PT_14_ControlPointPatchList:
-		case PT_15_ControlPointPatchList:
-		case PT_16_ControlPointPatchList:
-		case PT_17_ControlPointPatchList:
-		case PT_18_ControlPointPatchList:
-		case PT_19_ControlPointPatchList:
-		case PT_20_ControlPointPatchList:
-		case PT_22_ControlPointPatchList:
-		case PT_23_ControlPointPatchList:
-		case PT_24_ControlPointPatchList:
-		case PT_25_ControlPointPatchList:
-		case PT_26_ControlPointPatchList:
-		case PT_27_ControlPointPatchList:
-		case PT_28_ControlPointPatchList:
-		case PT_29_ControlPointPatchList:
-		case PT_30_ControlPointPatchList:
-		case PT_31_ControlPointPatchList:
-		case PT_32_ControlPointPatchList:
-			OutControlPoints = (PrimitiveType - PT_1_ControlPointPatchList + 1);
-			checkf(false, TEXT("Missing tessellation shaders, however tried to use EPrimitiveType %d (%d control points)"), (uint32)PrimitiveType, OutControlPoints);
-			break;
-		default:
-			checkf(false, TEXT("Unsupported EPrimitiveType %d"), (uint32)PrimitiveType);
-			break;
-		}
+	case PT_PointList:
+		return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+	case PT_LineList:
+		return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+	case PT_TriangleList:
+		return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+	case PT_TriangleStrip:
+		return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+	default:
+		checkf(false, TEXT("Unsupported EPrimitiveType %d"), (uint32)PrimitiveType);
+		break;
 	}
 
 	return VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
@@ -1490,43 +1768,33 @@ void FVulkanPipelineStateCacheManager::CreateGfxEntry(const FGraphicsPipelineSta
 	FVulkanVertexInputStateInfo VertexInputState;
 	
 	{
+		const FBoundShaderStateInput& BSI = PSOInitializer.BoundShaderState;
 
-			const FBoundShaderStateInput& BSI = PSOInitializer.BoundShaderState;
+		const FVulkanShaderHeader& VSHeader = Shaders[ShaderStage::Vertex]->GetCodeHeader();
+		VertexInputState.Generate(ResourceCast(PSOInitializer.BoundShaderState.VertexDeclarationRHI), VSHeader.InOutMask);
 
-			const FVulkanShaderHeader& VSHeader = Shaders[ShaderStage::Vertex]->GetCodeHeader();
-			VertexInputState.Generate(ResourceCast(PSOInitializer.BoundShaderState.VertexDeclarationRHI), VSHeader.InOutMask);
+		FUniformBufferGatherInfo UBGatherInfo;
 
-			FUniformBufferGatherInfo UBGatherInfo;
+		DescriptorSetLayoutInfo.ProcessBindingsForStage(VK_SHADER_STAGE_VERTEX_BIT, ShaderStage::Vertex, VSHeader, UBGatherInfo);
 
-			DescriptorSetLayoutInfo.ProcessBindingsForStage(VK_SHADER_STAGE_VERTEX_BIT, ShaderStage::Vertex, VSHeader, UBGatherInfo);
-
-			if (Shaders[ShaderStage::Pixel])
-			{
-				const FVulkanShaderHeader& PSHeader = Shaders[ShaderStage::Pixel]->GetCodeHeader();
-				DescriptorSetLayoutInfo.ProcessBindingsForStage(VK_SHADER_STAGE_FRAGMENT_BIT, ShaderStage::Pixel, PSHeader, UBGatherInfo);
-			}
+		if (Shaders[ShaderStage::Pixel])
+		{
+			const FVulkanShaderHeader& PSHeader = Shaders[ShaderStage::Pixel]->GetCodeHeader();
+			DescriptorSetLayoutInfo.ProcessBindingsForStage(VK_SHADER_STAGE_FRAGMENT_BIT, ShaderStage::Pixel, PSHeader, UBGatherInfo);
+		}
 
 #if VULKAN_SUPPORTS_GEOMETRY_SHADERS
-			if (Shaders[ShaderStage::Geometry])
-			{
-				const FVulkanShaderHeader& GSHeader = Shaders[ShaderStage::Geometry]->GetCodeHeader();
-				DescriptorSetLayoutInfo.ProcessBindingsForStage(VK_SHADER_STAGE_GEOMETRY_BIT, ShaderStage::Geometry, GSHeader, UBGatherInfo);
-			}
+		if (Shaders[ShaderStage::Geometry])
+		{
+			const FVulkanShaderHeader& GSHeader = Shaders[ShaderStage::Geometry]->GetCodeHeader();
+			DescriptorSetLayoutInfo.ProcessBindingsForStage(VK_SHADER_STAGE_GEOMETRY_BIT, ShaderStage::Geometry, GSHeader, UBGatherInfo);
+		}
 #endif
 
-#if PLATFORM_SUPPORTS_TESSELLATION_SHADERS
-			if (Shaders[ShaderStage::Hull])
-			{
-				const FVulkanShaderHeader& HSHeader = Shaders[ShaderStage::Hull]->GetCodeHeader();
-				const FVulkanShaderHeader& DSHeader = Shaders[ShaderStage::Domain]->GetCodeHeader();
-				DescriptorSetLayoutInfo.ProcessBindingsForStage(VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, ShaderStage::Hull, HSHeader, UBGatherInfo);
-				DescriptorSetLayoutInfo.ProcessBindingsForStage(VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, ShaderStage::Domain, DSHeader, UBGatherInfo);
-			}
-#endif
-			// Second pass
-			const int32 NumImmutableSamplers = PSOInitializer.ImmutableSamplerState.ImmutableSamplers.Num();
-			TArrayView<FRHISamplerState*> ImmutableSamplers(NumImmutableSamplers > 0 ? &(FRHISamplerState*&)PSOInitializer.ImmutableSamplerState.ImmutableSamplers[0] : nullptr, NumImmutableSamplers);
-			DescriptorSetLayoutInfo.FinalizeBindings<false>(UBGatherInfo, ImmutableSamplers);
+		// Second pass
+		const int32 NumImmutableSamplers = PSOInitializer.ImmutableSamplerState.ImmutableSamplers.Num();
+		TArrayView<FRHISamplerState*> ImmutableSamplers(NumImmutableSamplers > 0 ? &(FRHISamplerState*&)PSOInitializer.ImmutableSamplerState.ImmutableSamplers[0] : nullptr, NumImmutableSamplers);
+		DescriptorSetLayoutInfo.FinalizeBindings<false>(*Device, UBGatherInfo, ImmutableSamplers);
 	}
 
 	FDescriptorSetRemappingInfo& RemappingInfo = DescriptorSetLayoutInfo.RemappingInfo;
@@ -1543,10 +1811,8 @@ void FVulkanPipelineStateCacheManager::CreateGfxEntry(const FGraphicsPipelineSta
 
 	OutGfxEntry->UseAlphaToCoverage = PSOInitializer.NumSamples > 1 && BlendState->Initializer.bUseAlphaToCoverage ? 1 : 0;
 
-	const bool bHasTessellation = (PSOInitializer.BoundShaderState.DomainShaderRHI != nullptr);
-
 	OutGfxEntry->RasterizationSamples = PSOInitializer.NumSamples;
-	OutGfxEntry->Topology = (uint32)UEToVulkanTopologyType(Device, PSOInitializer.PrimitiveType, bHasTessellation, OutGfxEntry->ControlPoints);
+	OutGfxEntry->Topology = (uint32)UEToVulkanTopologyType(Device, PSOInitializer.PrimitiveType, OutGfxEntry->ControlPoints);
 	uint32 NumRenderTargets = PSOInitializer.ComputeNumValidRenderTargets();
 	
 	if (PSOInitializer.SubpassHint == ESubpassHint::DeferredShadingSubpass && PSOInitializer.SubpassIndex >= 2)
@@ -1554,6 +1820,22 @@ void FVulkanPipelineStateCacheManager::CreateGfxEntry(const FGraphicsPipelineSta
 		// GBuffer attachements are not used as output in a shading sub-pass
 		// Only SceneColor is used as a color attachment
 		NumRenderTargets = 1;
+	}
+
+	if (PSOInitializer.SubpassHint == ESubpassHint::DepthReadSubpass && PSOInitializer.SubpassIndex >= 1)
+	{
+		// Only SceneColor is used as a color attachment after the first subpass (not SceneDepthAux)
+		NumRenderTargets = 1;
+	}
+
+	if (PSOInitializer.SubpassHint == ESubpassHint::CustomResolveSubpass)
+	{
+		NumRenderTargets = 1; // This applies to base and depth passes as well. One render target for base and depth, another one for custom resolve.
+		if (PSOInitializer.SubpassIndex >= 2)
+		{ 
+			// the resolve subpass renders to a non MSAA surface
+			OutGfxEntry->RasterizationSamples = 1;
+		}
 	}
 
 	OutGfxEntry->ColorAttachmentStates.AddUninitialized(NumRenderTargets);
@@ -1583,8 +1865,8 @@ void FVulkanPipelineStateCacheManager::CreateGfxEntry(const FGraphicsPipelineSta
 	{
 		for (int32 SubIndex = 0; SubIndex < Layouts[Index].LayoutBindings.Num(); ++SubIndex)
 		{
-			FDescriptorSetLayoutBinding* Binding = new(OutGfxEntry->DescriptorSetLayoutBindings[Index]) FDescriptorSetLayoutBinding;
-			Binding->ReadFrom(Layouts[Index].LayoutBindings[SubIndex]);
+			FDescriptorSetLayoutBinding& Binding = OutGfxEntry->DescriptorSetLayoutBindings[Index].AddDefaulted_GetRef();
+			Binding.ReadFrom(Layouts[Index].LayoutBindings[SubIndex]);
 		}
 	}
 
@@ -1604,8 +1886,10 @@ void FVulkanPipelineStateCacheManager::CreateGfxEntry(const FGraphicsPipelineSta
 		8242695776924673527llu,
 		7556751872809527943llu,
 		8278265491465149053llu,
+		1263027877466626099llu,
+		2698115308251696101llu,
 	};
-	check(sizeof(Primes) / sizeof(Primes[0]) >= ShaderStage::NumStages);
+	static_assert(sizeof(Primes) / sizeof(Primes[0]) >= ShaderStage::NumStages);
 	for (int32 Index = 0; Index < ShaderStage::NumStages; ++Index)
 	{
 		FVulkanShader* Shader = Shaders[Index];
@@ -1637,16 +1921,16 @@ void FVulkanPipelineStateCacheManager::CreateGfxEntry(const FGraphicsPipelineSta
 #endif
 	check(NumShaders > 0);
 
-#if VULKAN_SUPPORTS_COLOR_CONVERSIONS
-	for (uint32 Index = 0; Index < MaxImmutableSamplers; ++Index)
-	{
-		OutGfxEntry->ImmutableSamplers[Index] = reinterpret_cast<SIZE_T>(PSOInitializer.ImmutableSamplerState.ImmutableSamplers[Index]);
-	}
-#endif
-
-
 	FVulkanRenderTargetLayout RTLayout(PSOInitializer);
 	OutGfxEntry->RenderTargets.ReadFrom(RTLayout);
+
+	// Shading rate:
+	OutGfxEntry->ShadingRate = PSOInitializer.ShadingRate;
+	OutGfxEntry->Combiner = EVRSRateCombiner::VRSRB_Max;		// @todo: This needs to be specified twice; from pipeline-to-primitive, and from primitive-to-attachment. 
+																// We don't have per-primitive VRS so that should just be hard-coded to "passthrough" until this is supported; but we should expose 
+																// this setting in the material properies, especially since there's some materials that don't play nicely with 
+																// shading rates other than 1x1, in which case we'll want to use VRSRB_Min to override e.g. the attachment shading rate.
+																// For now, just locked to "max".
 }
 
 
@@ -1667,12 +1951,8 @@ FVulkanRHIGraphicsPipelineState::FVulkanRHIGraphicsPipelineState(FVulkanDevice* 
 
 	FMemory::Memset(VulkanShaders, 0, sizeof(VulkanShaders));
 	VulkanShaders[ShaderStage::Vertex] = static_cast<FVulkanVertexShader*>(PSOInitializer_.BoundShaderState.VertexShaderRHI);
-#if PLATFORM_SUPPORTS_TESSELLATION_SHADERS
-	VulkanShaders[ShaderStage::Hull] = static_cast<FVulkanHullShader*>(PSOInitializer_.BoundShaderState.HullShaderRHI);
-	VulkanShaders[ShaderStage::Domain] = static_cast<FVulkanDomainShader*>(PSOInitializer_.BoundShaderState.DomainShaderRHI);
-#endif
 #if PLATFORM_SUPPORTS_GEOMETRY_SHADERS
-	VulkanShaders[ShaderStage::Geometry] = static_cast<FVulkanGeometryShader*>(PSOInitializer_.BoundShaderState.GeometryShaderRHI);
+	VulkanShaders[ShaderStage::Geometry] = static_cast<FVulkanGeometryShader*>(PSOInitializer_.BoundShaderState.GetGeometryShader());
 #endif
 	VulkanShaders[ShaderStage::Pixel] = static_cast<FVulkanPixelShader*>(PSOInitializer_.BoundShaderState.PixelShaderRHI);
 
@@ -1689,18 +1969,13 @@ FVulkanRHIGraphicsPipelineState::FVulkanRHIGraphicsPipelineState(FVulkanDevice* 
 	VertexShaderRHI = PSOInitializer_.BoundShaderState.VertexShaderRHI;
 	VertexDeclarationRHI = PSOInitializer_.BoundShaderState.VertexDeclarationRHI;
 
-#if PLATFORM_SUPPORTS_TESSELLATION_SHADERS
-	DomainShaderRHI = PSOInitializer_.BoundShaderState.DomainShaderRHI;
-	HullShaderRHI = PSOInitializer_.BoundShaderState.HullShaderRHI;
-#endif 
-
 #if PLATFORM_SUPPORTS_GEOMETRY_SHADERS
 	GeometryShaderRHI = PSOInitializer_.BoundShaderState.GeometryShaderRHI;
 #endif
 
 	PSOInitializer = PSOInitializer_;
 #endif
-	FMemory::Memset(ShaderModules, 0, sizeof(ShaderModules));
+	PrecacheKey = RHIComputePrecachePSOHash(PSOInitializer_);
 	INC_DWORD_STAT(STAT_VulkanNumGraphicsPSOs);
 	INC_DWORD_STAT_BY(STAT_VulkanPSOKeyMemory, this->VulkanKey.GetDataRef().Num());
 }
@@ -1716,7 +1991,6 @@ void FVulkanPipelineStateCacheManager::NotifyDeletedGraphicsPSO(FRHIGraphicsPipe
 		FScopeLock Lock(&GraphicsPSOLockedCS);
 		FVulkanRHIGraphicsPipelineState** Contained = GraphicsPSOLockedMap.Find(Key);
 		check(Contained && *Contained == PSO);
-		GraphicsPSOLockedMap.Remove(Key);
 		VkPSO->bIsRegistered = false;
 		if(bUseLRU)
 		{
@@ -1728,7 +2002,7 @@ void FVulkanPipelineStateCacheManager::NotifyDeletedGraphicsPSO(FRHIGraphicsPipe
 			(*Contained)->DeleteVkPipeline(true);
 			check(VkPSO->GetVulkanPipeline() == 0 );
 		}
-		
+		GraphicsPSOLockedMap.Remove(Key);
 	}
 	else
 	{
@@ -1743,33 +2017,44 @@ void FVulkanPipelineStateCacheManager::NotifyDeletedGraphicsPSO(FRHIGraphicsPipe
 }
 
 
-//Global lock for PSO creation, only enabled if GVulkanPSOForceSingleThreaded is 1
-struct FPSOGlobalLock
+struct FPSOOptionalLock
 {
 	FCriticalSection* CriticalSection;
-	FPSOGlobalLock(FCriticalSection* InSynchObject)
+	FPSOOptionalLock(FCriticalSection* InSynchObject)
 	{
-		
-		CriticalSection = GVulkanPSOForceSingleThreaded ? InSynchObject : nullptr;
+		CriticalSection = InSynchObject;
 		if (CriticalSection)
 		{
 			CriticalSection->Lock();
 		}
 	}
-	~FPSOGlobalLock()
+	~FPSOOptionalLock()
 	{
 		if (CriticalSection)
 		{
 			CriticalSection->Unlock();
 		}
 	}
-
 };
 
-FVulkanRHIGraphicsPipelineState* FVulkanPipelineStateCacheManager::RHICreateGraphicsPipelineState(const FGraphicsPipelineStateInitializer& Initializer)
+static FCriticalSection CreateGraphicsPSOMutex;
+
+FGraphicsPipelineStateRHIRef FVulkanPipelineStateCacheManager::RHICreateGraphicsPipelineState(const FGraphicsPipelineStateInitializer& Initializer)
 {
 	QUICK_SCOPE_CYCLE_COUNTER(STAT_Vulkan_RHICreateGraphicsPipelineState_NEW);
-	FPSOGlobalLock GlobalLock(&GraphicsPSOLockedCS);
+
+	// Optional lock for PSO creation, GVulkanPSOForceSingleThreaded is used to work around driver bugs.
+	// GVulkanPSOForceSingleThreaded == Precompile can be used when the driver internally serializes PSO creation, this option reduces the driver queue size.
+	// We stall precompile PSOs which increases the likelihood for non-precompile PSO to jump the queue.
+	// Not using GraphicsPSOLockedCS as the create could take a long time on some platforms, holding GraphicsPSOLockedCS the whole time could cause hitching.
+	const ESingleThreadedPSOCreateMode ThreadingMode = (ESingleThreadedPSOCreateMode)GVulkanPSOForceSingleThreaded;
+	const bool bIsPrecache = Initializer.bFromPSOFileCache || Initializer.bPSOPrecache;
+	bool bShouldLock = ThreadingMode == ESingleThreadedPSOCreateMode::All
+		|| (ThreadingMode == ESingleThreadedPSOCreateMode::Precompile && bIsPrecache)
+		|| (ThreadingMode == ESingleThreadedPSOCreateMode::NonPrecompiled && !bIsPrecache);
+
+	FPSOOptionalLock PSOSingleThreadedLock(bShouldLock ? &CreateGraphicsPSOMutex : nullptr);
+
 	FVulkanPSOKey Key;
 	FGfxPipelineDesc Desc;
 	FVulkanDescriptorSetsLayoutInfo DescriptorSetLayoutInfo;
@@ -1790,7 +2075,10 @@ FVulkanRHIGraphicsPipelineState* FVulkanPipelineStateCacheManager::RHICreateGrap
 			if(PSO)
 			{
 				check(*PSO);
-				LRUTouch(*PSO);
+				if(!bIsPrecache)
+				{
+					LRUTouch(*PSO);
+				}
 				return *PSO;
 			}
 		}
@@ -1799,6 +2087,15 @@ FVulkanRHIGraphicsPipelineState* FVulkanPipelineStateCacheManager::RHICreateGrap
 
 
 	{
+		// Workers can be creating PSOs while FRHIResource::FlushPendingDeletes is running on the RHI thread
+		// so let it get enqueued for a delete with Release() instead.  Only used for failed or duplicate PSOs...
+		auto DeleteNewPSO = [](FVulkanRHIGraphicsPipelineState* PSOPtr)
+		{
+			PSOPtr->AddRef();
+			const uint32 RefCount = PSOPtr->Release();
+			check(RefCount == 0);
+		};
+
 		SCOPE_CYCLE_COUNTER(STAT_VulkanPSOCreationTime);
 		NewPSO = new FVulkanRHIGraphicsPipelineState(Device, Initializer, Desc, &Key);
 		{
@@ -1822,7 +2119,7 @@ FVulkanRHIGraphicsPipelineState* FVulkanPipelineStateCacheManager::RHICreateGrap
 			const FVulkanShaderHeader& VSHeader = VS->GetCodeHeader();
 			NewPSO->VertexInputState.Generate(ResourceCast(Initializer.BoundShaderState.VertexDeclarationRHI), VSHeader.InOutMask);
 
-			if((!Initializer.bFromPSOFileCache || !LRUEvictImmediately()) 
+			if((!bIsPrecache || !LRUEvictImmediately()) 
 	#if !UE_BUILD_SHIPPING
 				&& 0 == CVarPipelineDebugForceEvictImmediately.GetValueOnAnyThread()
 	#endif
@@ -1843,9 +2140,9 @@ FVulkanRHIGraphicsPipelineState* FVulkanPipelineStateCacheManager::RHICreateGrap
 			
 				QUICK_SCOPE_CYCLE_COUNTER(STAT_Vulkan_RHICreateGraphicsPipelineState_CREATE_PART0);
 
-				if(!CreateGfxPipelineFromEntry(NewPSO, VulkanShaders, &NewPSO->VulkanPipeline))
+				if(!CreateGfxPipelineFromEntry(NewPSO, VulkanShaders, bIsPrecache))
 				{
-					delete NewPSO;
+					DeleteNewPSO(NewPSO);
 					return nullptr;
 				}
 				// Recover if we failed to create the pipeline.
@@ -1860,14 +2157,16 @@ FVulkanRHIGraphicsPipelineState* FVulkanPipelineStateCacheManager::RHICreateGrap
 			FVulkanRHIGraphicsPipelineState** MapPSO = GraphicsPSOLockedMap.Find(Key);
 			if(MapPSO)//another thread could end up creating it.
 			{
-				delete NewPSO;
+				DeleteNewPSO(NewPSO);
 				NewPSO = *MapPSO;
 			}
 			else
 			{
 				GraphicsPSOLockedMap.Add(MoveTemp(Key), NewPSO);
-				if (bUseLRU)
+				if (bUseLRU && NewPSO->VulkanPipeline != VK_NULL_HANDLE)
 				{
+					QUICK_SCOPE_CYCLE_COUNTER(STAT_Vulkan_RHICreateGraphicsPipelineState_LRU_PSOLock);
+					// we add only created pipelines to the LRU
 					FScopeLock LockRU(&LRUCS);
 					NewPSO->bIsRegistered = true;
 					LRUTrim(NewPSO->PipelineCacheSize);
@@ -1877,8 +2176,6 @@ FVulkanRHIGraphicsPipelineState* FVulkanPipelineStateCacheManager::RHICreateGrap
 				{
 					NewPSO->bIsRegistered = true;
 				}
-
-
 			}
 		}
 	}
@@ -1897,8 +2194,22 @@ FGraphicsPipelineStateRHIRef FVulkanDynamicRHI::RHICreateGraphicsPipelineState(c
 	return Device->PipelineStateCache->RHICreateGraphicsPipelineState(PSOInitializer);
 }
 
+FVulkanComputePipeline* FVulkanPipelineStateCacheManager::RHICreateComputePipelineState(FRHIComputeShader* ComputeShaderRHI)
+{
+	FVulkanComputeShader* ComputeShader = ResourceCast(ComputeShaderRHI);
+	return Device->GetPipelineStateCache()->GetOrCreateComputePipeline(ComputeShader);
+}
 
+FComputePipelineStateRHIRef FVulkanDynamicRHI::RHICreateComputePipelineState(FRHIComputeShader* ComputeShader)
+{
+#if VULKAN_ENABLE_AGGRESSIVE_STATS
+	SCOPE_CYCLE_COUNTER(STAT_VulkanGetOrCreatePipeline);
+#endif
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_Vulkan_RHICreateComputePipelineState);
+	LLM_SCOPE_VULKAN(ELLMTagVulkan::VulkanShaders);
 
+	return Device->PipelineStateCache->RHICreateComputePipelineState(ComputeShader);
+}
 
 FVulkanComputePipeline* FVulkanPipelineStateCacheManager::GetOrCreateComputePipeline(FVulkanComputeShader* ComputeShader)
 {
@@ -1947,7 +2258,7 @@ FVulkanComputePipeline* FVulkanPipelineStateCacheManager::CreateComputePipelineF
 	const FVulkanShaderHeader& CSHeader = Shader->GetCodeHeader();
 	FUniformBufferGatherInfo UBGatherInfo;
 	DescriptorSetLayoutInfo.ProcessBindingsForStage(VK_SHADER_STAGE_COMPUTE_BIT, ShaderStage::Compute, CSHeader, UBGatherInfo);
-	DescriptorSetLayoutInfo.FinalizeBindings<true>(UBGatherInfo, TArrayView<FRHISamplerState*>());
+	DescriptorSetLayoutInfo.FinalizeBindings<true>(*Device, UBGatherInfo, TArrayView<FRHISamplerState*>());
 	FVulkanLayout* Layout = FindOrAddLayout(DescriptorSetLayoutInfo, false);
 	FVulkanComputeLayout* ComputeLayout = (FVulkanComputeLayout*)Layout;
 	if (!ComputeLayout->ComputePipelineDescriptorInfo.IsInitialized())
@@ -1955,20 +2266,54 @@ FVulkanComputePipeline* FVulkanPipelineStateCacheManager::CreateComputePipelineF
 		ComputeLayout->ComputePipelineDescriptorInfo.Initialize(Layout->GetDescriptorSetsLayout().RemappingInfo);
 	}
 
-	VkShaderModule ShaderModule = Shader->GetOrCreateHandle(Layout, Layout->GetDescriptorSetLayoutHash());
+	TRefCountPtr<FVulkanShaderModule> ShaderModule = Shader->GetOrCreateHandle(Layout, Layout->GetDescriptorSetLayoutHash());
 
 	VkComputePipelineCreateInfo PipelineInfo;
 	ZeroVulkanStruct(PipelineInfo, VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO);
 	PipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 	PipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-	PipelineInfo.stage.module = ShaderModule;
+	PipelineInfo.stage.module = ShaderModule->GetVkShaderModule();
 	// main_00000000_00000000
 	ANSICHAR EntryPoint[24];
 	Shader->GetEntryPoint(EntryPoint, 24);
 	PipelineInfo.stage.pName = EntryPoint;
 	PipelineInfo.layout = ComputeLayout->GetPipelineLayout();
-		
-	VERIFYVULKANRESULT(VulkanRHI::vkCreateComputePipelines(Device->GetInstanceHandle(), PipelineCache, 1, &PipelineInfo, VULKAN_CPU_ALLOCATOR, &Pipeline->Pipeline));
+
+	if (Device->SupportsBindless())
+	{
+		PipelineInfo.flags |= VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
+	}
+
+	VkPipelineShaderStageRequiredSubgroupSizeCreateInfo RequiredSubgroupSizeCreateInfo;
+	if ((CSHeader.WaveSize > 0) && Device->GetOptionalExtensions().HasEXTSubgroupSizeControl)
+	{
+		// Check if supported by this stage
+		const VkPhysicalDeviceSubgroupSizeControlPropertiesEXT& SubgroupSizeControlProperties = Device->GetOptionalExtensionProperties().SubgroupSizeControlProperties;
+		if (VKHasAllFlags(SubgroupSizeControlProperties.requiredSubgroupSizeStages, VK_SHADER_STAGE_COMPUTE_BIT))
+		{
+			// Check if requested size is supported
+			if ((CSHeader.WaveSize >= SubgroupSizeControlProperties.minSubgroupSize) && (CSHeader.WaveSize <= SubgroupSizeControlProperties.maxSubgroupSize))
+			{
+				ZeroVulkanStruct(RequiredSubgroupSizeCreateInfo, VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO);
+				RequiredSubgroupSizeCreateInfo.requiredSubgroupSize = CSHeader.WaveSize;
+				PipelineInfo.stage.pNext = &RequiredSubgroupSizeCreateInfo;
+			}
+		}
+	}
+
+	VkResult Result;
+	{
+		QUICK_SCOPE_CYCLE_COUNTER(STAT_VulkanComputePSOCreate);
+		FScopedPipelineCache PipelineCacheShared = GlobalPSOCache.Get(EPipelineCacheAccess::Shared);
+		Result = VulkanRHI::vkCreateComputePipelines(Device->GetInstanceHandle(), PipelineCacheShared.Get(), 1, &PipelineInfo, VULKAN_CPU_ALLOCATOR, &Pipeline->Pipeline);
+	}
+
+	if (Result != VK_SUCCESS)
+	{
+		FString ComputeHash = Shader->GetHash().ToString();
+		UE_LOG(LogVulkanRHI, Error, TEXT("Failed to create compute pipeline.\nShaders in pipeline: CS: %s"), *ComputeHash);
+		Pipeline->SetValid(false);
+	}
 
 	Pipeline->Layout = ComputeLayout;
 
@@ -1977,17 +2322,34 @@ FVulkanComputePipeline* FVulkanPipelineStateCacheManager::CreateComputePipelineF
 	return Pipeline;
 }
 
+void FVulkanPipelineStateCacheManager::NotifyDeletedComputePipeline(FVulkanComputePipeline* Pipeline)
+{
+	if (Pipeline->ComputeShader)
+	{
+		const uint64 Key = Pipeline->ComputeShader->GetShaderKey();
+		FRWScopeLock ScopeLock(ComputePipelineLock, SLT_Write); 
+		ComputePipelineEntries.Remove(Key);
+	}
+}
+
 template<typename T>
-static void SerializeArray(FArchive& Ar, TArray<T>& Array)
+static bool SerializeArray(FArchive& Ar, TArray<T>& Array)
 {
 	int32 Num = Array.Num();
 	Ar << Num;
 	if (Ar.IsLoading())
 	{
-		Array.SetNum(Num);
-		for (int32 Index = 0; Index < Num; ++Index)
+		if (Num < 0)
 		{
-			Ar << Array[Index];
+			return false;
+		}
+		else
+		{
+			Array.SetNum(Num);
+			for (int32 Index = 0; Index < Num; ++Index)
+			{
+				Ar << Array[Index];
+			}
 		}
 	}
 	else
@@ -1997,6 +2359,7 @@ static void SerializeArray(FArchive& Ar, TArray<T>& Array)
 			Ar << Array[Index];
 		}
 	}
+	return true;
 }
 
 
@@ -2026,7 +2389,12 @@ bool FVulkanPipelineStateCacheManager::FVulkanLRUCacheFile::Load(FArchive& Ar)
 		return false;
 	}
 
-	SerializeArray(Ar, PipelineSizes);
+	if (!SerializeArray(Ar, PipelineSizes))
+	{
+		UE_LOG(LogVulkanRHI, Warning, TEXT("Unable to load lru pipeline cache due to invalid archive data!"));
+		return false;
+	}
+
 	return true;
 }
 
@@ -2043,31 +2411,14 @@ void GetVulkanShaders(const FBoundShaderStateInput& BSI, FVulkanShader* OutShade
 		OutShaders[ShaderStage::Pixel] = ResourceCast(BSI.PixelShaderRHI);
 	}
 
-#if PLATFORM_SUPPORTS_GEOMETRY_SHADERS
-	if (BSI.GeometryShaderRHI)
+	if (BSI.GetGeometryShader())
 	{
 #if VULKAN_SUPPORTS_GEOMETRY_SHADERS
-		OutShaders[ShaderStage::Geometry] = ResourceCast(BSI.GeometryShaderRHI);
+		OutShaders[ShaderStage::Geometry] = ResourceCast(BSI.GetGeometryShader());
 #else
 		ensureMsgf(0, TEXT("Geometry not supported!"));
 #endif
 	}
-#endif
-
-#if PLATFORM_SUPPORTS_TESSELLATION_SHADERS
-	if (BSI.HullShaderRHI)
-	{
-		// Can't have Hull w/o Domain
-		check(BSI.DomainShaderRHI);
-		OutShaders[ShaderStage::Hull] = ResourceCast(BSI.HullShaderRHI);
-		OutShaders[ShaderStage::Domain] = ResourceCast(BSI.DomainShaderRHI);
-	}
-	else
-	{
-		// Can't have Domain w/o Hull
-		check(BSI.DomainShaderRHI == nullptr);
-	}
-#endif
 }
 
 void GetVulkanShaders(FVulkanDevice* Device, const FVulkanRHIGraphicsPipelineState& GfxPipelineState, FVulkanShader* OutShaders[ShaderStage::NumStages])
@@ -2076,6 +2427,39 @@ void GetVulkanShaders(FVulkanDevice* Device, const FVulkanRHIGraphicsPipelineSta
 	Device->GetShaderFactory().LookupShaders(GfxPipelineState.ShaderKeys, OutShaders);
 }
 
+void FVulkanPipelineStateCacheManager::TickLRU()
+{
+	if(FVulkanChunkedPipelineCacheManager::IsEnabled())
+	{
+		FVulkanChunkedPipelineCacheManager::Get().Tick();
+	}
+
+	if (!bUseLRU || GVulkanPSOLRUEvictAfterUnusedFrames == 0)
+	{
+		return;
+	}
+
+	FScopeLock Lock(&LRUCS);
+	const int MaxEvictsPerTick = 5;
+	for(int i = 0 ; i<MaxEvictsPerTick; i++)
+	{
+		uint32 tid = FPlatformTLS::GetCurrentThreadId();
+		FVulkanRHIGraphicsPipelineStateLRUNode* Node = LRU.GetTail();
+		check(Node != 0);
+		TRefCountPtr<FVulkanRHIGraphicsPipelineState> PSO = Node->GetValue();
+
+		bool bTimeToDie = PSO->LRUFrame + GVulkanPSOLRUEvictAfterUnusedFrames < GFrameNumberRenderThread;
+		if (bTimeToDie)
+		{
+			LRUPRINT_DEBUG(TEXT("Evicting after %d frames of unuse (%d : %d) %d\n"), GVulkanPSOLRUEvictAfterUnusedFrames, PSO->LRUFrame, GFrameNumberRenderThread, PSO->PipelineCacheSize);
+			LRURemove(PSO);
+		}
+		else
+		{
+			return;
+		}
+	}
+}
 
 
 void FVulkanPipelineStateCacheManager::LRUDump()
@@ -2155,7 +2539,7 @@ void FVulkanPipelineStateCacheManager::LRUAdd(FVulkanRHIGraphicsPipelineState* P
 	LRU.AddHead(PSO);
 	PSO->LRUNode = LRU.GetHead();
 	PSO->LRUFrame = GFrameNumberRenderThread;
-	LRUPRINT_DEBUG(TEXT("LRUADD %p .. Frame %d :: %d    VKPSO %08x\n"), PSO, PSO->LRUFrame, GFrameNumberRenderThread, PSO->GetVulkanPipeline());
+	LRUPRINT_DEBUG(TEXT("LRUADD %p .. Frame %d :: %d    VKPSO %08x, cache size %d\n"), PSO, PSO->LRUFrame, GFrameNumberRenderThread, PSO->GetVulkanPipeline(), PSOSize);
 
 }
 
@@ -2167,7 +2551,7 @@ void FVulkanPipelineStateCacheManager::LRUTouch(FVulkanRHIGraphicsPipelineState*
 	}
 	FScopeLock Lock(&LRUCS);
 	check((PSO->GetVulkanPipeline() == 0) == (PSO->LRUNode == 0));
-	
+
 	if(PSO->LRUNode)
 	{
 		check(PSO->GetVulkanPipeline());
@@ -2189,9 +2573,9 @@ void FVulkanPipelineStateCacheManager::LRUTouch(FVulkanRHIGraphicsPipelineState*
 
 			GetVulkanShaders(Device, *PSO, VulkanShaders);
 
-			QUICK_SCOPE_CYCLE_COUNTER(STAT_Vulkan_RHICreateGraphicsPipelineState_CREATE_PART0);
+			QUICK_SCOPE_CYCLE_COUNTER(STAT_Vulkan_LRUMiss);
 
-			if (!CreateGfxPipelineFromEntry(PSO, VulkanShaders, &PSO->VulkanPipeline))
+			if (!CreateGfxPipelineFromEntry(PSO, VulkanShaders, false))
 			{
 				check(0);
 			}
@@ -2232,6 +2616,7 @@ void FVulkanRHIGraphicsPipelineState::DeleteVkPipeline(bool bImmediate)
 
 	Device->PipelineStateCache->LRUCheckNotInside(this);
 }
+
 void FVulkanPipelineStateCacheManager::LRUCheckNotInside(FVulkanRHIGraphicsPipelineState* PSO)
 {
 	FScopeLock Lock(&LRUCS);
@@ -2267,6 +2652,16 @@ void FVulkanPipelineStateCacheManager::LRURemove(FVulkanRHIGraphicsPipelineState
 		LRUUsedPipelineCount--;
 
 		PSO->DeleteVkPipeline(bImmediate);
+		if (GVulkanReleaseShaderModuleWhenEvictingPSO)
+		{
+	        for (int ShaderStageIndex = 0; ShaderStageIndex < ShaderStage::NumStages; ShaderStageIndex++)
+	        {
+				if (PSO->VulkanShaders[ShaderStageIndex] != nullptr)
+				{
+					PSO->VulkanShaders[ShaderStageIndex]->PurgeShaderModules();
+				}
+			}
+		}
 		SET_DWORD_STAT(STAT_VulkanNumPSOLRUSize, LRUUsedPipelineSize);
 		SET_DWORD_STAT(STAT_VulkanNumPSOLRU, LRUUsedPipelineCount);
 	}

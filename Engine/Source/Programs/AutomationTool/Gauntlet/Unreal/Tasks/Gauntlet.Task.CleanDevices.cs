@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using UnrealBuildBase;
 using UnrealBuildTool;
 
 namespace Gauntlet
@@ -30,7 +31,7 @@ namespace Gauntlet
 		public int MaxDays;
 
 
-		public override AutomationTool.ExitCode Execute()
+		public override ExitCode Execute()
 		{
 			AutoParam.ApplyParamsAndDefaults(this, Environment.GetCommandLineArgs());
 
@@ -45,7 +46,7 @@ namespace Gauntlet
 			DevicePool.Instance.SetLocalOptions(TempDir, false, DeviceURL);
 			DevicePool.Instance.AddDevices(UnrealTargetPlatform.Win64, Devices, false);
 
-			UnrealTargetPlatform[] SupportedPlatforms = { UnrealTargetPlatform.PS4, UnrealTargetPlatform.Win64 };
+			IEnumerable<UnrealTargetPlatform> SupportedPlatforms = UnrealTargetPlatform.GetValidPlatforms();
 
 			foreach (UnrealTargetPlatform Platform in SupportedPlatforms)
 			{
@@ -67,7 +68,7 @@ namespace Gauntlet
 			DevicePool.Instance.Dispose();
 
 
-			return AutomationTool.ExitCode.Success;
+			return ExitCode.Success;
 		}
 
 		protected void CleanDevice(ITargetDevice Device)
@@ -92,11 +93,6 @@ namespace Gauntlet
 				Gauntlet.Log.Warning("Failed to connect to {0}", Device.Name);
 				return;
 			}
-
-			/*if (Device is TargetDevicePS4)
-			{
-				CleanPS4(Device as TargetDevicePS4);
-			}*/
 
 			// disconnect and power down
 			Gauntlet.Log.Info("Powering down and disconnecting from {0}", Device.Name);

@@ -5,11 +5,15 @@
 =============================================================================*/
 
 #include "Components/PointLightComponent.h"
+#include "RenderUtils.h"
 #include "UObject/ConstructorHelpers.h"
-#include "RenderingThread.h"
 #include "Engine/Texture2D.h"
-#include "SceneManagement.h"
 #include "PointLightSceneProxy.h"
+#include "UObject/UnrealType.h"
+#include "SceneInterface.h"
+#include "SceneView.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PointLightComponent)
 
 int32 GAllowPointLightCubemapShadows = 1;
 static FAutoConsoleVariableRef CVarAllowPointLightCubemapShadows(
@@ -29,23 +33,34 @@ void FLocalLightSceneProxy::UpdateRadius_GameThread(float ComponentRadius)
 }
 
 /** Accesses parameters needed for rendering the light. */
-void FPointLightSceneProxy::GetLightShaderParameters(FLightShaderParameters& LightParameters) const
+void FPointLightSceneProxy::GetLightShaderParameters(FLightRenderParameters& LightParameters, uint32 Flags) const
 {
-	LightParameters.Position = GetOrigin();
+	LightParameters.WorldPosition = GetOrigin();
 	LightParameters.InvRadius = InvRadius;
-	LightParameters.Color = FVector(GetColor());
+	LightParameters.Color = GetColor();
 	LightParameters.FalloffExponent = FalloffExponent;
 
-	LightParameters.Direction = -GetDirection();
-	LightParameters.Tangent = FVector(WorldToLight.M[0][2], WorldToLight.M[1][2], WorldToLight.M[2][2]);
-	LightParameters.SpotAngles = FVector2D( -2.0f, 1.0f );
+	// TODO LWC - GetDirection() seems like it needs to be normalized, somehow accumulating error with large-scale position values
+	LightParameters.Direction = (FVector3f)-GetDirection(); // LWC_TODO: Precision Loss
+	LightParameters.Tangent = FVector3f(WorldToLight.M[0][2], WorldToLight.M[1][2], WorldToLight.M[2][2]);
+	LightParameters.SpotAngles = FVector2f( -2.0f, 1.0f );
 	LightParameters.SpecularScale = SpecularScale;
 	LightParameters.SourceRadius = SourceRadius;
 	LightParameters.SoftSourceRadius = SoftSourceRadius;
 	LightParameters.SourceLength = SourceLength;
-	LightParameters.SourceTexture = GWhiteTexture->TextureRHI;
 	LightParameters.RectLightBarnCosAngle = 0.0f;
 	LightParameters.RectLightBarnLength = -2.0f;
+	LightParameters.RectLightAtlasUVOffset = FVector2f::ZeroVector;
+	LightParameters.RectLightAtlasUVScale = FVector2f::ZeroVector;
+	LightParameters.RectLightAtlasMaxLevel = FLightRenderParameters::GetRectLightAtlasInvalidMIPLevel();
+	LightParameters.IESAtlasIndex = INDEX_NONE;
+	LightParameters.InverseExposureBlend = InverseExposureBlend;
+	LightParameters.LightFunctionAtlasLightIndex = GetLightFunctionAtlasLightIndex();
+
+	if (IESAtlasId != ~0)
+	{
+		GetSceneInterface()->GetLightIESAtlasSlot(this, &LightParameters);
+	}
 }
 
 /**
@@ -60,15 +75,12 @@ bool FPointLightSceneProxy::GetWholeSceneProjectedShadowInitializer(const FScene
 		FWholeSceneProjectedShadowInitializer& OutInitializer = *new(OutInitializers) FWholeSceneProjectedShadowInitializer;
 		OutInitializer.PreShadowTranslation = -GetLightToWorld().GetOrigin();
 		OutInitializer.WorldToLight = GetWorldToLight().RemoveTranslation();
-		OutInitializer.Scales = FVector(1, 1, 1);
-		OutInitializer.FaceDirection = FVector(0,0,1);
+		OutInitializer.Scales = FVector2D(1, 1);
 		OutInitializer.SubjectBounds = FBoxSphereBounds(FVector(0, 0, 0),FVector(Radius,Radius,Radius),Radius);
 		OutInitializer.WAxis = FVector4(0,0,1,0);
 		OutInitializer.MinLightW = 0.1f;
 		OutInitializer.MaxDistanceToCastInLightW = Radius;
-
-		bool bSupportsGeometryShaders = RHISupportsGeometryShaders(GShaderPlatformForFeatureLevel[ViewFamily.GetFeatureLevel()]) || RHISupportsVertexShaderLayer(ViewFamily.GetShaderPlatform());
-		OutInitializer.bOnePassPointLightShadow = bSupportsGeometryShaders;
+		OutInitializer.bOnePassPointLightShadow = true;
 
 		OutInitializer.bRayTracedDistanceField = UseRayTracedDistanceFieldShadows() && DoesPlatformSupportDistanceFieldShadowing(ViewFamily.GetShaderPlatform());
 		return true;
@@ -107,9 +119,7 @@ static bool IsPointLightSupported(const UPointLightComponent* InLight)
 		if (!IsMobileDeferredShadingEnabled(GMaxRHIShaderPlatform))
 		{
 			// if project does not support dynamic point lights on mobile do not add them to the renderer 
-			static auto* CVarPointLights = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.MobileNumDynamicPointLights"));
-			const bool bPointLights = CVarPointLights->GetValueOnAnyThread() > 0;
-			return bPointLights;
+			return MobileForwardEnableLocalLights(GMaxRHIShaderPlatform);
 		}
 	}
 	return true;
@@ -124,12 +134,32 @@ FLightSceneProxy* UPointLightComponent::CreateSceneProxy() const
 	return nullptr;
 }
 
+void UPointLightComponent::SetUseInverseSquaredFalloff(bool bNewValue)
+{
+	if (AreDynamicDataChangesAllowed()
+		&& bUseInverseSquaredFalloff != bNewValue)
+	{
+		bUseInverseSquaredFalloff = bNewValue;
+		MarkRenderStateDirty();
+	}
+}
+
 void UPointLightComponent::SetLightFalloffExponent(float NewLightFalloffExponent)
 {
 	if (AreDynamicDataChangesAllowed()
 		&& NewLightFalloffExponent != LightFalloffExponent)
 	{
 		LightFalloffExponent = NewLightFalloffExponent;
+		MarkRenderStateDirty();
+	}
+}
+
+void UPointLightComponent::SetInverseExposureBlend(float NewInverseExposureBlend)
+{
+	if (AreDynamicDataChangesAllowed()
+		&& NewInverseExposureBlend != InverseExposureBlend)
+	{
+		InverseExposureBlend = NewInverseExposureBlend;
 		MarkRenderStateDirty();
 	}
 }
@@ -176,7 +206,11 @@ float UPointLightComponent::ComputeLightBrightness() const
 		}
 		else if (IntensityUnits == ELightUnits::Lumens)
 		{
-			LightBrightness *= (100.f * 100.f / 4 / PI); // Conversion from cm2 to m2 and 4PI from the sphere area in the 1/r2 attenuation
+			LightBrightness *= (100.f * 100.f / 4 / UE_PI); // Conversion from cm2 to m2 and 4PI from the sphere area in the 1/r2 attenuation
+		}
+		else if (IntensityUnits == ELightUnits::EV)
+		{
+			LightBrightness = EV100ToLuminance(LightBrightness) * (100.f * 100.f);
 		}
 		else
 		{
@@ -197,7 +231,11 @@ void UPointLightComponent::SetLightBrightness(float InBrightness)
 		}
 		else if (IntensityUnits == ELightUnits::Lumens)
 		{
-			Super::SetLightBrightness(InBrightness / (100.f * 100.f / 4 / PI)); // Conversion from cm2 to m2 and 4PI from the sphere area in the 1/r2 attenuation
+			Super::SetLightBrightness(InBrightness / (100.f * 100.f / 4 / UE_PI)); // Conversion from cm2 to m2 and 4PI from the sphere area in the 1/r2 attenuation
+		}
+		else if (IntensityUnits == ELightUnits::EV)
+		{
+			Super::SetLightBrightness(LuminanceToEV100(InBrightness / (100.f * 100.f)));
 		}
 		else
 		{
@@ -237,12 +275,12 @@ void UPointLightComponent::Serialize(FArchive& Ar)
 {
 	Super::Serialize(Ar);
 
-	if (Ar.UE4Ver() < VER_UE4_INVERSE_SQUARED_LIGHTS_DEFAULT)
+	if (Ar.UEVer() < VER_UE4_INVERSE_SQUARED_LIGHTS_DEFAULT)
 	{
 		bUseInverseSquaredFalloff = InverseSquaredFalloff_DEPRECATED;
 	}
 	// Reorient old light tubes that didn't use an IES profile
-	else if(Ar.UE4Ver() < VER_UE4_POINTLIGHT_SOURCE_ORIENTATION && SourceLength > KINDA_SMALL_NUMBER && IESTexture == nullptr)
+	else if(Ar.UEVer() < VER_UE4_POINTLIGHT_SOURCE_ORIENTATION && SourceLength > UE_KINDA_SMALL_NUMBER && IESTexture == nullptr)
 	{
 		AddLocalRotation( FRotator(-90.f, 0.f, 0.f) );
 	}
@@ -281,10 +319,11 @@ bool UPointLightComponent::CanEditChange(const FProperty* InProperty) const
 void UPointLightComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	// Make sure exponent is > 0.
-	LightFalloffExponent = FMath::Max( (float) KINDA_SMALL_NUMBER, LightFalloffExponent );
+	LightFalloffExponent = FMath::Max( (float)UE_KINDA_SMALL_NUMBER, LightFalloffExponent );
 	SourceRadius = FMath::Max(0.0f, SourceRadius);
 	SoftSourceRadius = FMath::Max(0.0f, SoftSourceRadius);
 	SourceLength = FMath::Max(0.0f, SourceLength);
+	InverseExposureBlend = FMath::Clamp(InverseExposureBlend, 0.0f, 1.0f);
 
 	if (!bUseInverseSquaredFalloff)
 	{
@@ -295,17 +334,3 @@ void UPointLightComponent::PostEditChangeProperty(FPropertyChangedEvent& Propert
 }
 #endif // WITH_EDITOR
 
-void UPointLightComponent::PostInterpChange(FProperty* PropertyThatChanged)
-{
-	static FName LightFalloffExponentName(TEXT("LightFalloffExponent"));
-	FName PropertyName = PropertyThatChanged->GetFName();
-
-	if (PropertyName == LightFalloffExponentName)
-	{
-		MarkRenderStateDirty();
-	}
-	else
-	{
-		Super::PostInterpChange(PropertyThatChanged);
-	}
-}

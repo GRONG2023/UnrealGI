@@ -1,8 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Misc/Timespan.h"
-#include "Templates/TypeHash.h"
+
+#include "Containers/Array.h"
 #include "Containers/UnrealString.h"
+#include "HAL/PlatformString.h"
+#include "Misc/CString.h"
+#include "Serialization/Archive.h"
+#include "Templates/TypeHash.h"
 #include "UObject/PropertyPortFlags.h"
 
 
@@ -11,12 +16,6 @@
 
 bool FTimespan::ExportTextItem(FString& ValueStr, FTimespan const& DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope) const
 {
-	if ((PortFlags & EPropertyPortFlags::PPF_ExportCpp) != 0)
-	{
-		ValueStr += FString::Printf(TEXT("FTimespan(0x%016X)"), Ticks);
-		return true;
-	}
-
 	ValueStr += ToString(TEXT("%D.%h:%m:%s.%n"));
 
 	return true;
@@ -132,7 +131,7 @@ bool FTimespan::Parse(const FString& TimespanString, FTimespan& OutTimespan)
 		Tokens.AddDefaulted();
 	}
 
-	// poor man's token verification
+	// token verification
 	for (const FString& Token : Tokens)
 	{
 		if (!Token.IsEmpty() && !Token.IsNumeric())
@@ -158,7 +157,7 @@ bool FTimespan::Parse(const FString& TimespanString, FTimespan& OutTimespan)
 
 		if (FractionalLen > 9)
 		{
-			Tokens[4].LeftInline(9, false);
+			Tokens[4].LeftInline(9, EAllowShrinking::No);
 		}
 		else if (FractionalLen < 9)
 		{

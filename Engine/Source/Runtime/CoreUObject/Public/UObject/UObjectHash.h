@@ -6,16 +6,30 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "CoreTypes.h"
 #include "Stats/Stats.h"
+#include "Stats/Stats2.h"
+#include "Templates/Function.h"
+#include "UObject/NameTypes.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/UObjectArray.h"
+#include "UObject/UnrealNames.h"
+
+class FOutputDevice;
+class UClass;
+class UObject;
+class UPackage;
 
 DECLARE_STATS_GROUP_VERBOSE(TEXT("UObject Hash"), STATGROUP_UObjectHash, STATCAT_Advanced);
 
-#if UE_GC_TRACK_OBJ_AVAILABLE
+#if !UE_BUILD_TEST && !UE_BUILD_SHIPPING
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("NumObjects"), STAT_Hash_NumObjects, STATGROUP_UObjectHash, COREUOBJECT_API);
-#endif
+#endif // !UE_BUILD_TEST && !UE_BUILD_SHIPPING
 
 /**
  * Private internal version of StaticFindObjectFast that allows using 0 exclusion flags.
@@ -29,7 +43,46 @@ DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("NumObjects"), STAT_Hash_NumObjects, STAT
  * @param	ExclusiveInternalFlags	Ignores objects that contain any of the specified internal exclusive flags
  * @return	Returns a pointer to the found object or NULL if none could be found
  */
-UObject* StaticFindObjectFastInternal(const UClass* Class, const UObject* InOuter, FName InName, bool ExactClass = false, bool AnyPackage = false, EObjectFlags ExclusiveFlags = RF_NoFlags, EInternalObjectFlags ExclusiveInternalFlags = EInternalObjectFlags::None);
+UE_DEPRECATED(5.1, "Support for searching for objects in ANY_PACKAGE has been deprecated. Please provide the actual Outer of an object you want to find.")
+COREUOBJECT_API UObject* StaticFindObjectFastInternal(const UClass* Class, const UObject* InOuter, FName InName, bool ExactClass, bool AnyPackage, EObjectFlags ExclusiveFlags = RF_NoFlags, EInternalObjectFlags ExclusiveInternalFlags = EInternalObjectFlags::None);
+
+/**
+ * Private internal version of StaticFindObjectFast that allows using 0 exclusion flags.
+ *
+ * @param	Class			The to be found object's class
+ * @param	InOuter			The to be found object's outer
+ * @param	InName			The to be found object's class
+ * @param	ExactClass		Whether to require an exact match with the passed in class
+ * @param	ExclusiveFlags	Ignores objects that contain any of the specified exclusive flags
+ * @param	ExclusiveInternalFlags	Ignores objects that contain any of the specified internal exclusive flags
+ * @return	Returns a pointer to the found object or NULL if none could be found
+ */
+COREUOBJECT_API UObject* StaticFindObjectFastInternal(const UClass* Class, const UObject* InOuter, FName InName, bool ExactClass = false, EObjectFlags ExclusiveFlags = RF_NoFlags, EInternalObjectFlags ExclusiveInternalFlags = EInternalObjectFlags::None);
+
+/**
+ * Private internal version of StaticFindAllObjectsFast that allows using 0 exclusion flags.
+ *
+ * @param	OutFoundObjects	Array of objects matching the specified search parameters
+ * @param	ObjectClass		The to be found object's class
+ * @param	ObjectName		The to be found object's name
+ * @param	bExactClass		Whether to require an exact match with the passed in class
+ * @param	ExcludeFlags	Ignores objects that contain any of the specified exclusive flags
+ * @param	ExclusiveInternalFlags	Ignores objects that contain any of the specified internal exclusive flags
+ * @return	Returns true if any objects were found, false otherwise
+ */
+COREUOBJECT_API bool StaticFindAllObjectsFastInternal(TArray<UObject*>& OutFoundObjects, const UClass* ObjectClass, FName ObjectName, bool bExactClass, EObjectFlags ExcludeFlags = RF_NoFlags, EInternalObjectFlags ExclusiveInternalFlags = EInternalObjectFlags::None);
+
+/**
+ * Private internal version of StaticFindFirstObject that allows using 0 exclusion flags.
+ *
+ * @param	ObjectClass		The to be found object's class
+ * @param	ObjectName		The to be found object's name
+ * @param	bExactClass		Whether to require an exact match with the passed in class
+ * @param	ExcludeFlag		Ignores objects that contain any of the specified exclusive flags
+ * @param	ExclusiveInternalFlags	Ignores objects that contain any of the specified internal exclusive flags
+ * @return	Returns first object with the specified name and class, null if not found
+ */
+COREUOBJECT_API UObject* StaticFindFirstObjectFastInternal(const UClass* ObjectClass, FName ObjectName, bool bExactClass, EObjectFlags ExcludeFlag = RF_NoFlags, EInternalObjectFlags ExclusiveInternalFlags = EInternalObjectFlags::None);
 
 /**
  * Variation of StaticFindObjectFast that uses explicit path.
@@ -55,7 +108,20 @@ UObject* StaticFindObjectFastExplicit(const UClass* ObjectClass, FName ObjectNam
 COREUOBJECT_API void GetObjectsWithOuter(const class UObjectBase* Outer, TArray<UObject *>& Results, bool bIncludeNestedObjects = true, EObjectFlags ExclusionFlags = RF_NoFlags, EInternalObjectFlags ExclusionInternalFlags = EInternalObjectFlags::None);
 
 /**
+ * Performs an operation on objects with a given outer, with the possibility to break iteration
+ * Note that the operation must not modify the UObject hash maps so it can not create, rename or destroy UObjects.
+ *
+ * @param	Outer						Outer to search for
+ * @param	Operation					Function to be called for each object, returning if we want to continue iteration or not
+ * @param	bIncludeNestedObjects		If true, then things whose outers directly or indirectly have Outer as an outer are included, these are the nested objects.
+ * @param	ExclusionFlags				Specifies flags to use as a filter for which objects to return
+ * @param	ExclusiveInternalFlags	Specifies internal flags to use as a filter for which objects to return
+ */
+COREUOBJECT_API void ForEachObjectWithOuterBreakable(const class UObjectBase* Outer, TFunctionRef<bool(UObject*)> Operation, bool bIncludeNestedObjects = true, EObjectFlags ExclusionFlags = RF_NoFlags, EInternalObjectFlags ExclusionInternalFlags = EInternalObjectFlags::None);
+
+/**
  * Performs an operation on all objects with a given outer
+ * Note that the operation must not modify UObject hash maps so it can not create, rename or destroy UObjects.
  *
  * @param	Outer						Outer to search for
  * @param	Operation					Function to be called for each object
@@ -63,7 +129,10 @@ COREUOBJECT_API void GetObjectsWithOuter(const class UObjectBase* Outer, TArray<
  * @param	ExclusionFlags				Specifies flags to use as a filter for which objects to return
  * @param	ExclusiveInternalFlags	Specifies internal flags to use as a filter for which objects to return
  */
-COREUOBJECT_API void ForEachObjectWithOuter(const class UObjectBase* Outer, TFunctionRef<void(UObject*)> Operation, bool bIncludeNestedObjects = true, EObjectFlags ExclusionFlags = RF_NoFlags, EInternalObjectFlags ExclusionInternalFlags = EInternalObjectFlags::None);
+inline void ForEachObjectWithOuter(const class UObjectBase* Outer, TFunctionRef<void(UObject*)> Operation, bool bIncludeNestedObjects = true, EObjectFlags ExclusionFlags = RF_NoFlags, EInternalObjectFlags ExclusionInternalFlags = EInternalObjectFlags::None)
+{
+	ForEachObjectWithOuterBreakable(Outer, [Operation](UObject* Object) { Operation(Object); return true; }, bIncludeNestedObjects, ExclusionFlags, ExclusionInternalFlags);
+}
 
 /**
  * Find an objects with a given name and or class within an outer
@@ -87,6 +156,7 @@ COREUOBJECT_API void GetObjectsWithPackage(const class UPackage* Outer, TArray<U
 
 /**
  * Performs an operation on all objects found within a given package
+ * Note that the operation must not modify UObject hash maps so it can not create, rename or destroy UObjects.
  *
  * @param	Package						Package to iterate into
  * @param	Operation					Function to be called for each object, return false to break out of the iteration
@@ -109,6 +179,7 @@ COREUOBJECT_API void GetObjectsOfClass(const UClass* ClassToLookFor, TArray<UObj
 
 /**
  * Performs an operation on all objects of the provided class
+ * Note that the operation must not modify UObject hash maps so it can not create, rename or destroy UObjects.
  *
  * @param	Outer						UObject class to loop over instances of
  * @param	Operation					Function to be called for each object
@@ -119,13 +190,14 @@ COREUOBJECT_API void ForEachObjectOfClass(const UClass* ClassToLookFor, TFunctio
 
 /**
  * Performs an operation on all objects of the provided classes
+ * Note that the operation must not modify UObject hash maps so it can not create, rename or destroy UObjects.
  *
  * @param	Classes						UObject Classes to loop over instances of
  * @param	Operation					Function to be called for each object
  * @param	bIncludeDerivedClasses		If true, the results will include objects of child classes as well.
  * @param	AdditionalExcludeFlags		Objects with any of these flags will be excluded from the results.
  */
-COREUOBJECT_API void ForEachObjectOfClasses(TArrayView<const UClass*> ClassesToLookFor, TFunctionRef<void(UObject*)> Operation, EObjectFlags ExcludeFlags = RF_ClassDefaultObject, EInternalObjectFlags ExclusionInternalFlags = EInternalObjectFlags::None);
+COREUOBJECT_API void ForEachObjectOfClasses(TArrayView<const UClass* const> ClassesToLookFor, TFunctionRef<void(UObject*)> Operation, EObjectFlags ExcludeFlags = RF_ClassDefaultObject, EInternalObjectFlags ExclusionInternalFlags = EInternalObjectFlags::None);
 
 /**
  * Returns an array of classes that were derived from the specified class.
@@ -135,6 +207,9 @@ COREUOBJECT_API void ForEachObjectOfClasses(TArrayView<const UClass*> ClassesToL
  * @param	bRecursive					If true, the results will include children of the children classes, recursively. Otherwise, only direct decedents will be included.
  */
 COREUOBJECT_API void GetDerivedClasses(const UClass* ClassToLookFor, TArray<UClass *>& Results, bool bRecursive = true);
+
+/** Get all base classes and their direct subclasses */
+COREUOBJECT_API TMap<UClass*, TSet<UClass*>> GetAllDerivedClasses();
 
 /**
  * Returns true if any instances of the class in question are currently being async loaded.
@@ -199,6 +274,13 @@ COREUOBJECT_API void ShrinkUObjectHashTables();
 COREUOBJECT_API uint64 GetRegisteredClassesVersionNumber();
 
 /**
+* Get a version number representing the current state of registered native classes.
+*
+* Can be stored and then compared to invalidate external caching of native classes hierarchy whenever it changes.
+*/
+COREUOBJECT_API uint64 GetRegisteredNativeClassesVersionNumber();
+
+/**
  * Logs out information about the object hash for debug purposes
  *
  * @param Ar the archive to write the log data to
@@ -244,3 +326,7 @@ public:
 		UnlockUObjectHashTables();
 	}
 };
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
+#endif

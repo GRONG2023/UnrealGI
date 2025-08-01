@@ -2,6 +2,7 @@
 
 #include "ProfilerDataProvider.h"
 
+#if STATS
 
 /*-----------------------------------------------------------------------------
 	IDataProvider
@@ -50,7 +51,7 @@ const uint32 IDataProvider::AdvanceFrame(const float DeltaTimeMS)
 	FrameIndices.Add(FIntPoint(FrameIndex, SampleEndIndex));
 
 	FrameTimes.Add(DeltaTimeMS);
-	ElapsedFrameTimes.Add(ElapsedTimeMS);
+	ElapsedFrameTimes.Add(static_cast<float>(ElapsedTimeMS));
 
 	// Update the values.
 	FrameCounters.Last() = LastSecondFrameCounter;
@@ -119,9 +120,9 @@ const uint32 FArrayDataProvider::AddHierarchicalSample(
 	if(FProfilerSample::IsIndexValid(InParentIndex))
 	{
 		FProfilerSample& Parent = Collection[ InParentIndex ];
-		const uint32 InitialMemUsage = Parent.ChildrenIndices().GetAllocatedSize();
+		const SIZE_T InitialMemUsage = Parent.ChildrenIndices().GetAllocatedSize();
 		Parent.AddChild(HierSampleIndex);
-		const uint32 AccumulatedMemoryUsage = Parent.ChildrenIndices().GetAllocatedSize() - InitialMemUsage;
+		const SIZE_T AccumulatedMemoryUsage = Parent.ChildrenIndices().GetAllocatedSize() - InitialMemUsage;
 		ChildrenIndicesMemoryUsage += AccumulatedMemoryUsage;
 	}
 
@@ -167,3 +168,5 @@ const SIZE_T FArrayDataProvider::GetMemoryUsage() const
 	MemoryUsage += ChildrenIndicesMemoryUsage;
 	return MemoryUsage;
 }
+
+#endif // STATS

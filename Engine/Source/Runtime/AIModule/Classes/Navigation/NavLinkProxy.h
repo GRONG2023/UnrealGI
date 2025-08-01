@@ -20,8 +20,18 @@ struct FNavigationRelevantData;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams( FSmartLinkReachedSignature, AActor*, MovingActor, const FVector&, DestinationPoint );
 
-UCLASS(Blueprintable, autoCollapseCategories=(SmartLink, Actor), hideCategories=(Input))
-class AIMODULE_API ANavLinkProxy : public AActor, public INavLinkHostInterface, public INavRelevantInterface
+/** 
+ *  ANavLinkProxy connects areas of Navmesh that don't have a direct navigation path.
+ *  It directly supports Simple Links (see PointLinks array). There can be multiple Simple links per ANavLinkProxy instance.
+ *  Simple links are designed to statically link areas of Navmesh and are associated with a particular area class that the link provides.
+ *  Smart Link functionality is provided via UNavLinkCustomComponent, see SmartLinkComp. They are designed to be able to be dynamically toggled
+ *  between enabled and disabled and provide different area classes for both cases. The area classes can be dynamically modified 
+ *  without navmesh rebuilds.
+ *  There can only be at most one smart link per ANavLinkProxy instance.
+ *  Both simple and smart links on a single ANavLinkProxy instance, can be set / enabled at once, as well as either or neither of them.
+ */
+UCLASS(Blueprintable, autoCollapseCategories=(SmartLink, Actor), hideCategories=(Input), MinimalAPI)
+class ANavLinkProxy : public AActor, public INavLinkHostInterface, public INavRelevantInterface
 {
 	GENERATED_UCLASS_BODY()
 
@@ -37,7 +47,7 @@ class AIMODULE_API ANavLinkProxy : public AActor, public INavLinkHostInterface, 
 private:
 	/** Smart link: can affect path following */
 	UPROPERTY(VisibleAnywhere, Category=SmartLink)
-	UNavLinkCustomComponent* SmartLinkComp;
+	TObjectPtr<UNavLinkCustomComponent> SmartLinkComp;
 public:
 
 	/** Smart link: toggle relevancy */
@@ -48,70 +58,72 @@ public:
 private:
 	/** Editor Preview */
 	UPROPERTY()
-	UNavLinkRenderingComponent* EdRenderComp;
+	TObjectPtr<UNavLinkRenderingComponent> EdRenderComp;
 
 	UPROPERTY()
-	UBillboardComponent* SpriteComponent;
+	TObjectPtr<UBillboardComponent> SpriteComponent;
 public:
 #endif // WITH_EDITORONLY_DATA
 
 	// BEGIN INavRelevantInterface
-	virtual void GetNavigationData(FNavigationRelevantData& Data) const override;
-	virtual FBox GetNavigationBounds() const override;
-	virtual bool IsNavigationRelevant() const override;
+	AIMODULE_API virtual void GetNavigationData(FNavigationRelevantData& Data) const override;
+	AIMODULE_API virtual FBox GetNavigationBounds() const override;
+	AIMODULE_API virtual bool IsNavigationRelevant() const override;
 	// END INavRelevantInterface
 
 	// BEGIN INavLinkHostInterface
-	virtual bool GetNavigationLinksClasses(TArray<TSubclassOf<UNavLinkDefinition> >& OutClasses) const override;
-	virtual bool GetNavigationLinksArray(TArray<FNavigationLink>& OutLink, TArray<FNavigationSegmentLink>& OutSegments) const override;
+	AIMODULE_API virtual bool GetNavigationLinksClasses(TArray<TSubclassOf<UNavLinkDefinition> >& OutClasses) const override;
+	AIMODULE_API virtual bool GetNavigationLinksArray(TArray<FNavigationLink>& OutLink, TArray<FNavigationSegmentLink>& OutSegments) const override;
 	// END INavLinkHostInterface
 
 #if WITH_EDITOR
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
-	virtual void PostEditUndo() override;
-	virtual void PostEditImport() override;
+	AIMODULE_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	AIMODULE_API virtual void PostEditUndo() override;
+	AIMODULE_API virtual void PostEditImport() override;
 #endif // WITH_EDITOR
-	virtual void PostRegisterAllComponents() override;
-	virtual void PostLoad() override;
+	AIMODULE_API virtual void PostInitProperties() override;
+	AIMODULE_API virtual void BeginDestroy() override;
+
+	AIMODULE_API virtual void PostRegisterAllComponents() override;
+	AIMODULE_API virtual void PostLoad() override;
 
 #if ENABLE_VISUAL_LOG
 protected:
-	virtual void BeginPlay() override;
-
+	AIMODULE_API virtual void BeginPlay() override;
 public:
 #endif // ENABLE_VISUAL_LOG
 
-	virtual FBox GetComponentsBoundingBox(bool bNonColliding = false, bool bIncludeFromChildActors = false) const override;
+	AIMODULE_API virtual FBox GetComponentsBoundingBox(bool bNonColliding = false, bool bIncludeFromChildActors = false) const override;
 
 	//////////////////////////////////////////////////////////////////////////
 	// Blueprint interface for smart links
 
 	/** called when agent reaches smart link during path following, use ResumePathFollowing() to give control back */
 	UFUNCTION(BlueprintImplementableEvent)
-	void ReceiveSmartLinkReached(AActor* Agent, const FVector& Destination);
+	AIMODULE_API void ReceiveSmartLinkReached(AActor* Agent, const FVector& Destination);
 
 	/** resume normal path following */
 	UFUNCTION(BlueprintCallable, Category="AI|Navigation")
-	void ResumePathFollowing(AActor* Agent);
+	AIMODULE_API void ResumePathFollowing(AActor* Agent);
 
 	/** check if smart link is enabled */
 	UFUNCTION(BlueprintCallable, Category="AI|Navigation")
-	bool IsSmartLinkEnabled() const;
+	AIMODULE_API bool IsSmartLinkEnabled() const;
 
 	/** change state of smart link */
 	UFUNCTION(BlueprintCallable, Category="AI|Navigation")
-	void SetSmartLinkEnabled(bool bEnabled);
+	AIMODULE_API void SetSmartLinkEnabled(bool bEnabled);
 
 	/** check if any agent is moving through smart link right now */
 	UFUNCTION(BlueprintCallable, Category="AI|Navigation")
-	bool HasMovingAgents() const;
+	AIMODULE_API bool HasMovingAgents() const;
 
 #if WITH_EDITOR
 	/** Copies navlink end points from the first entry in PointLinks array. This 
 	 *	function is a helper function making up for smart links not drawing
 	 *	the FVector widgets in the editor. */
 	UFUNCTION(CallInEditor, Category = SmartLink, meta = (DisplayName="CopyEndPointsFromSimpleLink"))
-	void CopyEndPointsFromSimpleLinkToSmartLink();
+	AIMODULE_API void CopyEndPointsFromSimpleLinkToSmartLink();
 #endif // WITH_EDITOR
 
 protected:
@@ -119,7 +131,12 @@ protected:
 	UPROPERTY(BlueprintAssignable)
 	FSmartLinkReachedSignature OnSmartLinkReached;
 
-	void NotifySmartLinkReached(UNavLinkCustomComponent* LinkComp, UObject* PathingAgent, const FVector& DestPoint);
+	AIMODULE_API void NotifySmartLinkReached(UNavLinkCustomComponent* LinkComp, UObject* PathingAgent, const FVector& DestPoint);
+
+#if WITH_EDITOR
+	AIMODULE_API void OnNavAreaRegistered(const UWorld& World, const UClass* NavAreaClass);
+	AIMODULE_API void OnNavAreaUnregistered(const UWorld& World, const UClass* NavAreaClass);
+#endif // WITH_EDITOR
 
 public:
 	/** Returns SmartLinkComp subobject **/
@@ -130,4 +147,10 @@ public:
 	/** Returns SpriteComponent subobject **/
 	UBillboardComponent* GetSpriteComponent() const { return SpriteComponent; }
 #endif
+
+protected:
+#if WITH_EDITOR
+	FDelegateHandle OnNavAreaRegisteredDelegateHandle;
+	FDelegateHandle OnNavAreaUnregisteredDelegateHandle;
+#endif // WITH_EDITOR
 };

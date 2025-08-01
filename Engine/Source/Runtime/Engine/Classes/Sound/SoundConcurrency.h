@@ -24,11 +24,12 @@ using FSoundOwnerObjectID = uint32;
 /** Sound instance (USoundBase) object ID. */
 using FSoundObjectID = uint32;
 
+ENGINE_API DECLARE_LOG_CATEGORY_EXTERN(LogAudioConcurrency, Log, All);
 
 UENUM()
 namespace EMaxConcurrentResolutionRule
 {
-	enum Type
+	enum Type : int
 	{
 		/** When Max Concurrent sounds are active do not start a new sound. */
 		PreventNew,
@@ -69,7 +70,7 @@ enum class EConcurrencyVolumeScaleMode
 };
 
 USTRUCT(BlueprintType)
-struct ENGINE_API FSoundConcurrencySettings
+struct FSoundConcurrencySettings
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -79,7 +80,13 @@ struct ENGINE_API FSoundConcurrencySettings
 
 	/* Whether or not to limit the concurrency to per sound owner (i.e. the actor that plays the sound). If the sound doesn't have an owner, it falls back to global concurrency. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Concurrency)
-	uint32 bLimitToOwner:1;
+	uint8 bLimitToOwner:1;
+
+	/**
+	 * Whether or not volume scaling can recover volume ducking behavior when concurrency group sounds stop (default scale mode only).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Scaling", meta = (DisplayName = "Can Recover", EditCondition = "VolumeScaleMode == EConcurrencyVolumeScaleMode::Default"))
+	uint8 bVolumeScaleCanRelease:1;
 
 	/** Which concurrency resolution policy to use if max voice count is reached. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Concurrency)
@@ -93,6 +100,8 @@ private:
 	/**
 	 * Ducking factor to apply per older voice instance (generation), which compounds based on scaling mode
 	 * and (optionally) revives them as they stop according to the provided attack/release times.
+	 * 
+	 * Note: This is not applied until after StopQuietest rules are evaluated, in order to avoid thrashing sounds.
 	 *
 	 * AppliedVolumeScale = Math.Pow(DuckingScale, VoiceGeneration)
 	 */
@@ -111,12 +120,6 @@ public:
 	float VolumeScaleAttackTime;
 
 	/**
-	 * Whether or not volume scaling can recover volume ducking behavior when concurrency group sounds stop (default scale mode only).
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Scaling", meta = (DisplayName = "Can Recover", EditCondition = "VolumeScaleMode == EConcurrencyVolumeScaleMode::Default"))
-	uint32 bVolumeScaleCanRelease:1;
-
-	/**
 	 * Time taken to recover volume scalar duck.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Scaling", meta = (DisplayName = "Recover Time", EditCondition = "bVolumeScaleCanRelease && VolumeScaleMode == EConcurrencyVolumeScaleMode::Default", UIMin = "0.0", ClampMin = "0.0", UIMax = "10.0", ClampMax="1000000.0"))
@@ -132,12 +135,12 @@ public:
 	FSoundConcurrencySettings()
 		: MaxCount(16)
 		, bLimitToOwner(0)
+		, bVolumeScaleCanRelease(0)
 		, ResolutionRule(EMaxConcurrentResolutionRule::StopFarthestThenOldest)
 		, RetriggerTime(0.0f)
 		, VolumeScale(1.0f)
 		, VolumeScaleMode(EConcurrencyVolumeScaleMode::Default)
 		, VolumeScaleAttackTime(0.01f)
-		, bVolumeScaleCanRelease(0)
 		, VolumeScaleReleaseTime(0.5f)
 		, VoiceStealReleaseTime(0.0f)
 	{}
@@ -145,13 +148,13 @@ public:
 	/**
 	 * Retrieves the volume scale
 	 */
-	float GetVolumeScale() const;
+	ENGINE_API float GetVolumeScale() const;
 
 	/** Whether or not ResolutionRule supports eviction, wherein eviction is the ability to keep a sound
 	  * from playing prior to start and culling is the requirement of a sound to initialize and actively parse
 	  * prior to being removed from a concurrency group.
 	  */
-	bool IsEvictionSupported() const;
+	ENGINE_API bool IsEvictionSupported() const;
 };
 
 UCLASS(BlueprintType, hidecategories=Object, editinlinenew, MinimalAPI)
@@ -231,6 +234,9 @@ class FConcurrencyGroup
 	FConcurrencyObjectID ObjectID;
 	FSoundConcurrencySettings Settings;
 
+	/** When a sound last played on this concurrency group. */
+	float LastTimePlayed = 0.0f;
+
 public:
 	/** Constructor for the max concurrency active sound entry. */
 	FConcurrencyGroup(FConcurrencyGroupID GroupID, const FConcurrencyHandle& ConcurrencyHandle);
@@ -269,6 +275,13 @@ public:
 
 	/** Sorts the active sound if concurrency settings require culling post playback */
 	void CullSoundsDueToMaxConcurrency();
+
+	/** Sets when the last time a sound was played on this concurrency group. */
+	void SetLastTimePlayed(float InLastTimePlayed) { LastTimePlayed = InLastTimePlayed; }
+
+	/** Whether or not a sound would be rate limited if it tried to play right now. */
+	bool CanPlaySoundNow(float InCurrentTime) const;
+
 };
 
 typedef TMap<FConcurrencyGroupID, FConcurrencyGroup*> FConcurrencyGroups;
@@ -285,9 +298,6 @@ struct FSoundInstanceEntry
 
 /** Type for mapping an object id to a concurrency entry. */
 typedef TMap<FConcurrencyObjectID, FConcurrencyGroupID> FConcurrencyMap;
-
-/** Type for mapping concurrency group id to when the group last played. */
-typedef TMap<FConcurrencyGroupID, float> FLastTimePlayedMap;
 
 struct FOwnerConcurrencyMapEntry
 {
@@ -331,8 +341,6 @@ public:
 	void UpdateSoundsToCull();
 
 private: // Methods
-	/** Returns whether or not the sound is rate-limited using retrigger threshold */
-	bool IsRateLimited(const FConcurrencyHandle& InHandle);
 
 	/** Evaluates whether or not the sound can play given the concurrency group's rules. Appends permissible
 	sounds to evict in order for sound to play (if required) and returns the desired concurrency group. */
@@ -364,9 +372,6 @@ private: // Methods
 private: // Data
 	/** Owning audio device ptr for the concurrency manager. */
 	FAudioDevice* AudioDevice;
-
-	/** A map of when a sound last played on the concurrency group. */
-	FLastTimePlayedMap LastTimePlayedMap;
 
 	/** Global concurrency map that maps individual sounds instances to shared USoundConcurrency UObjects. */
 	FConcurrencyMap ConcurrencyMap;

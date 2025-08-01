@@ -1,24 +1,46 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ObjectDetails.h"
-#include "ScopedTransaction.h"
-#include "Engine/EngineBaseTypes.h"
-#include "UObject/UnrealType.h"
-#include "EditorStyleSet.h"
-#include "Widgets/SBoxPanel.h"
-#include "Widgets/Layout/SWrapBox.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Images/SImage.h"
-#include "Widgets/Input/SButton.h"
+
+#include "Containers/ContainerAllocationPolicies.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "DetailCategoryBuilder.h"
 #include "DetailLayoutBuilder.h"
 #include "DetailWidgetRow.h"
-#include "DetailCategoryBuilder.h"
-#include "IDetailsView.h"
 #include "EdGraphSchema_K2.h"
+#include "Editor/EditorEngine.h"
+#include "Engine/Blueprint.h"
+#include "Framework/SlateDelegates.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "K2Node_CallFunction.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "Widgets/SToolTip.h"
-#include "IDocumentation.h"
+#include "Layout/Margin.h"
+#include "Math/NumericLimits.h"
+#include "Misc/Attribute.h"
+#include "Misc/CString.h"
 #include "ObjectEditorUtils.h"
+#include "Reflection/FunctionUtils.h"
+#include "Settings/BlueprintEditorProjectSettings.h"
+#include "SWarningOrErrorBox.h"
+#include "ScopedTransaction.h"
+#include "SlotBase.h"
+#include "Templates/Casts.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/Script.h"
+#include "UObject/StrongObjectPtr.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SWrapBox.h"
 
 #define LOCTEXT_NAMESPACE "ObjectDetails"
 
@@ -47,44 +69,43 @@ void FObjectDetails::AddExperimentalWarningCategory(IDetailLayoutBuilder& Detail
 		const FText WarningText = bBaseClassIsExperimental ? FText::Format( LOCTEXT("ExperimentalClassWarning", "Uses experimental class: {0}") , FText::FromString(MostDerivedDevelopmentClassName) )
 			: FText::Format( LOCTEXT("EarlyAccessClassWarning", "Uses beta class {0}"), FText::FromString(MostDerivedDevelopmentClassName) );
 		const FText SearchString = WarningText;
-		const FText Tooltip = bBaseClassIsExperimental ? LOCTEXT("ExperimentalClassTooltip", "Here be dragons!  Uses one or more unsupported 'experimental' classes") : LOCTEXT("EarlyAccessClassTooltip", "Uses one or more 'beta' classes");
-		const FString ExcerptName = bBaseClassIsExperimental ? TEXT("ObjectUsesExperimentalClass") : TEXT("ObjectUsesEarlyAccessClass");
-		const FSlateBrush* WarningIcon = FEditorStyle::GetBrush(bBaseClassIsExperimental ? "PropertyEditor.ExperimentalClass" : "PropertyEditor.EarlyAccessClass");
 
 		IDetailCategoryBuilder& WarningCategory = DetailBuilder.EditCategory(CategoryName, CategoryDisplayName, ECategoryPriority::Transform);
 
 		FDetailWidgetRow& WarningRow = WarningCategory.AddCustomRow(SearchString)
 			.WholeRowContent()
 			[
-				SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush("SettingsEditor.CheckoutWarningBorder"))
-				.BorderBackgroundColor(FColor (166,137,0))
+				SNew(SBox)
+				.Padding(FMargin(0.f, 4.f))
 				[
-					SNew(SHorizontalBox)
-					.ToolTip(IDocumentation::Get()->CreateToolTip(Tooltip, nullptr, TEXT("Shared/LevelEditor"), ExcerptName))
-					.Visibility(EVisibility::Visible)
-
-					+ SHorizontalBox::Slot()
-					.VAlign(VAlign_Center)
-					.AutoWidth()
-					.Padding(4.0f, 0.0f, 0.0f, 0.0f)
-					[
-						SNew(SImage)
-						.Image(WarningIcon)
-					]
-
-					+SHorizontalBox::Slot()
-					.VAlign(VAlign_Center)
-					.AutoWidth()
-					.Padding(4.0f, 0.0f, 0.0f, 0.0f)
-					[
-						SNew(STextBlock)
-						.Text(WarningText)
-						.Font(IDetailLayoutBuilder::GetDetailFont())
-					]
+					SNew(SWarningOrErrorBox)
+					.MessageStyle(EMessageStyle::Warning)
+					.Message(WarningText)
 				]
 			];
 	}
+}
+
+static bool CanCallFunctionBasedOnParams(const UFunction* TestFunction)
+{
+	bool bCanCall = TestFunction->GetBoolMetaData(FBlueprintMetadata::MD_CallInEditor) && (TestFunction->ParmsSize == 0); // no params required, we can call it!
+
+	// else - if the function only takes a world context object we can use the editor's
+	// world context - but only if the blueprint is editor only:
+	if (UClass* TestFunctionOwnerClass = TestFunction->GetOwnerClass())
+	{
+		if (UBlueprint* Blueprint = Cast<UBlueprint>(TestFunctionOwnerClass->ClassGeneratedBy))
+		{
+			if (FBlueprintEditorUtils::IsEditorUtilityBlueprint(Blueprint) && Blueprint->BlueprintType == BPTYPE_FunctionLibrary)
+			{
+				using namespace UE::Reflection;
+				return TestFunction->HasMetaData(FBlueprintMetadata::MD_WorldContext) &&
+					DoesStaticFunctionSignatureMatch<void(TObjectPtr<UObject>)>(TestFunction);
+			}
+		}
+	}
+
+	return bCanCall;
 }
 
 void FObjectDetails::AddCallInEditorMethods(IDetailLayoutBuilder& DetailBuilder)
@@ -92,30 +113,36 @@ void FObjectDetails::AddCallInEditorMethods(IDetailLayoutBuilder& DetailBuilder)
 	// metadata tag for defining sort order of function buttons within a Category
 	static const FName NAME_DisplayPriority("DisplayPriority");
 
+	const bool bDisallowEditorUtilityBlueprintFunctions = GetDefault<UBlueprintEditorProjectSettings>()->bDisallowEditorUtilityBlueprintFunctionsInDetailsView;
+
 	// Get all of the functions we need to display (done ahead of time so we can sort them)
 	TArray<UFunction*, TInlineAllocator<8>> CallInEditorFunctions;
 	for (TFieldIterator<UFunction> FunctionIter(DetailBuilder.GetBaseClass(), EFieldIteratorFlags::IncludeSuper); FunctionIter; ++FunctionIter)
 	{
 		UFunction* TestFunction = *FunctionIter;
 
-		if (TestFunction->GetBoolMetaData(FBlueprintMetadata::MD_CallInEditor) && (TestFunction->ParmsSize == 0))
+		if (CanCallFunctionBasedOnParams(TestFunction))
 		{
+			bool bAllowFunction = true;
 			if (UClass* TestFunctionOwnerClass = TestFunction->GetOwnerClass())
 			{
 				if (UBlueprint* Blueprint = Cast<UBlueprint>(TestFunctionOwnerClass->ClassGeneratedBy))
 				{
 					if (FBlueprintEditorUtils::IsEditorUtilityBlueprint(Blueprint))
 					{
-						// Skip Blutilities as these are handled by FEditorUtilityInstanceDetails
-						continue;
+						// Skip Blutilities if disabled via project settings
+						bAllowFunction = !bDisallowEditorUtilityBlueprintFunctions;
 					}
 				}
 			}
 
-			const FName FunctionName = TestFunction->GetFName();
-			if (!CallInEditorFunctions.FindByPredicate([&FunctionName](const UFunction* Func) { return Func->GetFName() == FunctionName; }))
+			if (bAllowFunction)
 			{
-				CallInEditorFunctions.Add(*FunctionIter);
+				const FName FunctionName = TestFunction->GetFName();
+				if (!CallInEditorFunctions.FindByPredicate([&FunctionName](const UFunction* Func) { return Func->GetFName() == FunctionName; }))
+				{
+					CallInEditorFunctions.Add(*FunctionIter);
+				}
 			}
 		}
 	}
@@ -125,9 +152,16 @@ void FObjectDetails::AddCallInEditorMethods(IDetailLayoutBuilder& DetailBuilder)
 		// Copy off the objects being customized so we can invoke a function on them later, removing any that are a CDO
 		DetailBuilder.GetObjectsBeingCustomized(/*out*/ SelectedObjectsList);
 		SelectedObjectsList.RemoveAllSwap([](TWeakObjectPtr<UObject> ObjPtr) { UObject* Obj = ObjPtr.Get(); return (Obj == nullptr) || Obj->HasAnyFlags(RF_ArchetypeObject); });
+
 		if (SelectedObjectsList.Num() == 0)
 		{
-			return;
+			// remove all non-static functions - no objects to call them on
+			CallInEditorFunctions.RemoveAllSwap([](const UFunction* Function) { return !Function->HasAnyFunctionFlags(FUNC_Static);});
+
+			if (CallInEditorFunctions.Num() == 0)
+			{
+				return;
+			}
 		}
 
 		// Sort the functions by category and then by DisplayPriority meta tag, and then by name
@@ -161,13 +195,23 @@ void FObjectDetails::AddCallInEditorMethods(IDetailLayoutBuilder& DetailBuilder)
 		struct FCategoryEntry
 		{
 			FName CategoryName;
+			FName RowTag;
 			TSharedPtr<SWrapBox> WrapBox;
 			FTextBuilder FunctionSearchText;
 
 			FCategoryEntry(FName InCategoryName)
 				: CategoryName(InCategoryName)
 			{
-				WrapBox = SNew(SWrapBox).UseAllottedSize(true);
+				WrapBox = SNew(SWrapBox)
+					// Setting the preferred size here (despite using UseAllottedSize) is a workaround for an issue
+					// when contained in a scroll box: prior to the first tick, the wrap box will use preferred size
+					// instead of allotted, and if preferred size is set small, it will cause the box to wrap a lot and
+					// request too much space from the scroll box. On next tick, SWrapBox is updated but the scroll box
+					// does not realize that it needs to show more elements, until it is scrolled.
+					// Setting a large value here means that the SWrapBox will request too little space prior to tick,
+					// which will cause the scroll box to virtualize more elements at the start, but this is less broken.
+					.PreferredSize(2000)
+					.UseAllottedSize(true);
 			}
 		};
 
@@ -189,14 +233,12 @@ void FObjectDetails::AddCallInEditorMethods(IDetailLayoutBuilder& DetailBuilder)
 			}
 			FCategoryEntry& CategoryEntry = CategoryList.Last();
 
-			//@TODO: Expose the code in UK2Node_CallFunction::GetUserFacingFunctionName / etc...
-			const FText ButtonCaption = FText::FromString(FName::NameToDisplayString(*Function->GetName(), false));
+			const FText ButtonCaption = UK2Node_CallFunction::GetUserFacingFunctionName(Function);
 			FText FunctionTooltip = Function->GetToolTipText();
 			if (FunctionTooltip.IsEmpty())
 			{
-				FunctionTooltip = FText::FromString(Function->GetName());
+				FunctionTooltip = ButtonCaption;
 			}
-			
 
 			TWeakObjectPtr<UFunction> WeakFunctionPtr(Function);
 			CategoryEntry.WrapBox->AddSlot()
@@ -205,11 +247,17 @@ void FObjectDetails::AddCallInEditorMethods(IDetailLayoutBuilder& DetailBuilder)
 				SNew(SButton)
 				.Text(ButtonCaption)
 				.OnClicked(FOnClicked::CreateSP(this, &FObjectDetails::OnExecuteCallInEditorFunction, WeakFunctionPtr))
-				.ToolTipText(FText::Format(LOCTEXT("CallInEditorTooltip", "Call an event on the selected object(s)\n\n\n{0}"), FunctionTooltip))
+				.ToolTipText(FunctionTooltip.IsEmptyOrWhitespace() ? LOCTEXT("CallInEditorTooltip", "Call an event on the selected object(s)") : FunctionTooltip)
 			];
 
+			CategoryEntry.RowTag = Function->GetFName();
 			CategoryEntry.FunctionSearchText.AppendLine(ButtonCaption);
 			CategoryEntry.FunctionSearchText.AppendLine(FunctionTooltip);
+
+			if (ButtonCaption.ToString() != Function->GetName())
+			{
+				CategoryEntry.FunctionSearchText.AppendLine(FText::FromString(Function->GetName()));
+			}
 		}
 		
 		// Now edit the categories, adding the button strips to the details panel
@@ -217,6 +265,7 @@ void FObjectDetails::AddCallInEditorMethods(IDetailLayoutBuilder& DetailBuilder)
 		{
 			IDetailCategoryBuilder& CategoryBuilder = DetailBuilder.EditCategory(CategoryEntry.CategoryName);
 			CategoryBuilder.AddCustomRow(CategoryEntry.FunctionSearchText.ToText())
+			.RowTag(CategoryEntry.RowTag)
 			[
 				CategoryEntry.WrapBox.ToSharedRef()
 			];
@@ -226,19 +275,37 @@ void FObjectDetails::AddCallInEditorMethods(IDetailLayoutBuilder& DetailBuilder)
 
 FReply FObjectDetails::OnExecuteCallInEditorFunction(TWeakObjectPtr<UFunction> WeakFunctionPtr)
 {
+	using namespace UE::Reflection;
 	if (UFunction* Function = WeakFunctionPtr.Get())
 	{
 		//@TODO: Consider naming the transaction scope after the fully qualified function name for better UX
 		FScopedTransaction Transaction(LOCTEXT("ExecuteCallInEditorMethod", "Call In Editor Action"));
+		TStrongObjectPtr<UFunction> CallingFunction(Function);
 
-		FEditorScriptExecutionGuard ScriptGuard;
-		for (TWeakObjectPtr<UObject> SelectedObjectPtr : SelectedObjectsList)
+		if (Function->HasMetaData(FBlueprintMetadata::MD_WorldContext) &&
+			DoesStaticFunctionSignatureMatch<void(TObjectPtr<UObject>)>(Function))
 		{
-			if (UObject* Object = SelectedObjectPtr.Get())
+			FEditorScriptExecutionGuard ScriptGuard;
+			extern ENGINE_API class UEngine* GEngine;
+			UEditorEngine* EditorEngine = Cast<UEditorEngine>(GEngine);
+			UObject* WorldContextObject = EditorEngine->GetEditorWorldContext().World();
+			TStrongObjectPtr<UObject> CDO(Function->GetOwnerClass()->ClassDefaultObject);
+			CDO->ProcessEvent(Function, &WorldContextObject);
+		}
+		else
+		{
+			FEditorScriptExecutionGuard ScriptGuard;
+			for (TWeakObjectPtr<UObject> SelectedObjectPtr : SelectedObjectsList)
 			{
-				Object->ProcessEvent(Function, nullptr);
+				if (UObject* Object = SelectedObjectPtr.Get())
+				{
+					ensure(Function->ParmsSize == 0);
+					TStrongObjectPtr<UObject> ObjectStrong(Object);
+					Object->ProcessEvent(Function, nullptr);
+				}
 			}
 		}
+
 	}
 
 	return FReply::Handled();

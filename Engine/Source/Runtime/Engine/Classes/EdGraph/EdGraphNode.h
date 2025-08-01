@@ -33,7 +33,7 @@ enum class EPropertyLocalizationGathererTextFlags : uint8;
   * a structure, rather than implicitly defining names for containers.
   */
 USTRUCT()
-struct ENGINE_API FEdGraphTerminalType
+struct FEdGraphTerminalType
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -72,14 +72,28 @@ struct ENGINE_API FEdGraphTerminalType
 	bool bTerminalIsUObjectWrapper;
 
 	/** Creates a TerminalType from the primary portion of the PinType */
-	static FEdGraphTerminalType FromPinType(const FEdGraphPinType& PinType);
+	static ENGINE_API FEdGraphTerminalType FromPinType(const FEdGraphPinType& PinType);
 
 	friend FArchive& operator<<(FArchive& Ar, FEdGraphTerminalType& P);
+
+	friend inline bool operator!= (const FEdGraphTerminalType& A, const FEdGraphTerminalType& B)
+	{
+		return A.TerminalCategory != B.TerminalCategory
+			|| A.TerminalSubCategory != B.TerminalSubCategory
+			|| A.TerminalSubCategoryObject != B.TerminalSubCategoryObject
+			|| A.bTerminalIsConst != B.bTerminalIsConst
+			|| A.bTerminalIsWeakPointer != B.bTerminalIsWeakPointer;
+	}
+
+	friend inline bool operator==(const FEdGraphTerminalType& A, const FEdGraphTerminalType& B)
+	{
+		return !(A != B);
+	}
 };
 
 /** Enum used to define which way data flows into or out of this pin. */
 UENUM()
-enum EEdGraphPinDirection
+enum EEdGraphPinDirection : int
 {
 	EGPD_Input,
 	EGPD_Output,
@@ -116,7 +130,7 @@ enum class EPinContainerType : uint8
 UENUM()
 namespace ENodeTitleType
 {
-	enum Type
+	enum Type : int
 	{
 		/** The full title, may be multiple lines. */
 		FullTitle,
@@ -135,7 +149,7 @@ namespace ENodeTitleType
 UENUM()
 namespace ENodeAdvancedPins
 {
-	enum Type
+	enum Type : int
 	{
 		/** No advanced pins. */
 		NoPins,
@@ -185,37 +199,37 @@ enum class ESaveOrphanPinMode : uint8
 };
 
 /** Holds metadata keys, so as to discourage text duplication throughout the engine. */
-struct ENGINE_API FNodeMetadata
+struct FNodeMetadata
 {
 	/** Identifies nodes that are added to populate new graphs by default (helps determine if a graph has any user-placed nodes). */
-	static const FName DefaultGraphNode;
+	static ENGINE_API const FName DefaultGraphNode;
 private: 
 	FNodeMetadata() {}
 };
 
 /** This is the context for GetContextMenuActions and GetNodeContextMenuActions calls. */
-UCLASS()
-class ENGINE_API UGraphNodeContextMenuContext : public UObject
+UCLASS(MinimalAPI)
+class UGraphNodeContextMenuContext : public UObject
 {
 	GENERATED_BODY()
 
 public:
 
-	UGraphNodeContextMenuContext();
+	ENGINE_API UGraphNodeContextMenuContext();
 
-	void Init(const UEdGraph* InGraph, const UEdGraphNode* InNode, const UEdGraphPin* InPin, bool bInDebuggingMode);
+	ENGINE_API void Init(const UEdGraph* InGraph, const UEdGraphNode* InNode, const UEdGraphPin* InPin, bool bInDebuggingMode);
 
 	/** The blueprint associated with this context; may be NULL for non-Kismet related graphs. */
 	UPROPERTY()
-	const UBlueprint* Blueprint;
+	TObjectPtr<const UBlueprint> Blueprint;
 
 	/** The graph associated with this context. */
 	UPROPERTY()
-	const UEdGraph* Graph;
+	TObjectPtr<const UEdGraph> Graph;
 
 	/** The node associated with this context. */
 	UPROPERTY()
-	const UEdGraphNode* Node;
+	TObjectPtr<const UEdGraphNode> Node;
 
 	/** The pin associated with this context; may be NULL when over a node. */
 	const UEdGraphPin* Pin;
@@ -255,8 +269,21 @@ struct FEdGraphNodeDeprecationResponse
 	FText MessageText;
 };
 
-UCLASS()
-class ENGINE_API UEdGraphNode : public UObject
+/** Options when getting a Find References search string from a node. */
+enum class EGetFindReferenceSearchStringFlags : int8
+{
+	/** No options. */
+	None = 0,
+	/** Use search behavior from before there were different Find References options. */
+	Legacy = 1 << 0,
+	/** Use search syntax to do exact search. */
+	UseSearchSyntax = 1 << 1,
+};
+
+ENUM_CLASS_FLAGS(EGetFindReferenceSearchStringFlags);
+
+UCLASS(MinimalAPI)
+class UEdGraphNode : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
@@ -265,7 +292,7 @@ public:
 
 	/** List of connector pins */
 	UPROPERTY()
-	TArray<class UEdGraphPin_Deprecated*> DeprecatedPins;
+	TArray<TObjectPtr<class UEdGraphPin_Deprecated>> DeprecatedPins;
 
 	/** X position of node in the editor */
 	UPROPERTY()
@@ -308,18 +335,13 @@ private:
 	UPROPERTY()
 	uint8 bUserSetEnabledState:1;
 
-protected:
-	/** (DEPRECATED) Value used for AllowSplitPins(). Do not override. */
-	uint8 bAllowSplitPins_DEPRECATED:1;
-
-private:
+#if WITH_EDITORONLY_DATA
 	/** (DEPRECATED) FALSE if the node is a disabled, which eliminates it from being compiled */
 	UPROPERTY()
 	uint8 bIsNodeEnabled_DEPRECATED:1;
 
 public:
 
-#if WITH_EDITORONLY_DATA
 	/** If true, this node can be resized and should be drawn with a resize handle */
 	UPROPERTY()
 	uint8 bCanResizeNode:1;
@@ -328,6 +350,7 @@ public:
 
 private:
 	/** Whether the node was created as part of an expansion step */
+	UPROPERTY()
 	uint8 bIsIntermediateNode : 1;
 
 #if WITH_EDITORONLY_DATA
@@ -390,7 +413,7 @@ public:
 	}
 
 	/** If true, this node can be renamed in the editor */
-	virtual bool GetCanRenameNode() const;
+	ENGINE_API virtual bool GetCanRenameNode() const;
 
 	/** Returns the specific sort of enable state this node wants */
 	ENodeEnabledState GetDesiredEnabledState() const
@@ -437,33 +460,40 @@ public:
 #endif
 
 	/** Determines whether or not the node will compile in development mode. */
-	virtual bool IsInDevelopmentMode() const;
+	ENGINE_API virtual bool IsInDevelopmentMode() const;
 
 	/** Returns true if this is a disabled automatically placed ghost node (see the DefaultEventNodes ini section) */
-	bool IsAutomaticallyPlacedGhostNode() const;
+	ENGINE_API bool IsAutomaticallyPlacedGhostNode() const;
 
 	/** Marks this node as an automatically placed ghost node (see the DefaultEventNodes ini section) */
-	void MakeAutomaticallyPlacedGhostNode();
+	ENGINE_API void MakeAutomaticallyPlacedGhostNode();
 
 	// UObject interface
-	virtual void Serialize(FArchive& Ar) override;
+	ENGINE_API virtual void Serialize(FArchive& Ar) override;
+#if WITH_EDITORONLY_DATA
+	static ENGINE_API void DeclareCustomVersions(FArchive& Ar, const UClass* SpecificSubclass);
+#endif
 	// End of UObject interface
 
 #if WITH_EDITOR
 
 private:
-	static TArray<UEdGraphPin*> PooledPins;
+	static ENGINE_API TArray<UEdGraphPin*> PooledPins;
 
 public:
 	// UObject interface
-	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
-	virtual void PreSave(const class ITargetPlatform* TargetPlatform) override;
-	virtual void PostLoad() override;
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
-	virtual void PostEditUndo() override;
-	virtual void ExportCustomProperties(FOutputDevice& Out, uint32 Indent) override;
-	virtual void ImportCustomProperties(const TCHAR* SourceText, FFeedbackContext* Warn) override;
-	virtual void BeginDestroy() override;
+	static ENGINE_API void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS // Suppress compiler warning on override of deprecated function
+	UE_DEPRECATED(5.0, "Use version that takes FObjectPreSaveContext instead.")
+	ENGINE_API virtual void PreSave(const class ITargetPlatform* TargetPlatform) override;
+	ENGINE_API PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	virtual void PreSave(FObjectPreSaveContext ObjectSaveContext) override;
+	ENGINE_API virtual void PostLoad() override;
+	ENGINE_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	ENGINE_API virtual void PostEditUndo() override;
+	ENGINE_API virtual void ExportCustomProperties(FOutputDevice& Out, uint32 Indent) override;
+	ENGINE_API virtual void ImportCustomProperties(const TCHAR* SourceText, FFeedbackContext* Warn) override;
+	ENGINE_API virtual void BeginDestroy() override;
 	// End of UObject interface
 
 	/** widget representing this node if it exists; Note: This is not safe to use in general and will be removed in the future, as there is no guarantee that only one graph editor/panel is viewing a given graph */
@@ -484,38 +514,8 @@ public:
 		FName NameParameter;
 	};
 
-	/** Create a new pin on this node using the supplied info, and return the new pin */
-	UE_DEPRECATED(4.19, "Use version that supplies Pin Category, SubCategory, and Name as an FName and uses PinContainerType instead of separate booleans for array, set, and map.")
-	UEdGraphPin* CreatePin(
-		EEdGraphPinDirection Dir, 
-		const FNameParameterHelper PinCategory, 
-		const FNameParameterHelper PinSubCategory, 
-		UObject* PinSubCategoryObject, 
-		bool bIsArray, 
-		bool bIsReference, 
-		const FNameParameterHelper PinName, 
-		bool bIsConst = false, 
-		int32 Index = INDEX_NONE, 
-		bool bIsSet = false, 
-		bool bIsMap = false,
-		const FEdGraphTerminalType& ValueTerminalType = FEdGraphTerminalType());
-
-	/** Create a new pin on this node using the supplied info, and return the new pin */
-	UE_DEPRECATED(4.19, "Use version that supplies Pin Category, SubCategory, and Name as an FName and uses a parameter structure for optional paramaters.")
-	UEdGraphPin* CreatePin(
-		EEdGraphPinDirection Dir,
-		const FNameParameterHelper PinCategory,
-		const FNameParameterHelper PinSubCategory,
-		UObject* PinSubCategoryObject,
-		const FNameParameterHelper PinName,
-		EPinContainerType PinContainerType = EPinContainerType::None,
-		bool bIsReference = false,
-		bool bIsConst = false,
-		int32 Index = INDEX_NONE,
-		const FEdGraphTerminalType& ValueTerminalType = FEdGraphTerminalType());
-
 	/** Parameter struct of less common options for CreatePin */
-	struct ENGINE_API FCreatePinParams
+	struct FCreatePinParams
 	{
 		FCreatePinParams()
 			: ContainerType(EPinContainerType::None)
@@ -525,7 +525,7 @@ public:
 		{
 		}
 
-		FCreatePinParams(const FEdGraphPinType& PinType);
+		ENGINE_API FCreatePinParams(const FEdGraphPinType& PinType);
 
 		EPinContainerType ContainerType;
 		bool bIsReference;
@@ -550,17 +550,11 @@ public:
 		return CreatePin(Dir, PinCategory, NAME_None, PinSubCategoryObject, PinName, PinParams);
 	}
 
-	UEdGraphPin* CreatePin(EEdGraphPinDirection Dir, const FName PinCategory, const FName PinSubCategory, UObject* PinSubCategoryObject, const FName PinName, const FCreatePinParams& PinParams = FCreatePinParams());
+	ENGINE_API UEdGraphPin* CreatePin(EEdGraphPinDirection Dir, const FName PinCategory, const FName PinSubCategory, UObject* PinSubCategoryObject, const FName PinName, const FCreatePinParams& PinParams = FCreatePinParams());
 
 	/** Create a new pin on this node using the supplied pin type, and return the new pin */
-	UEdGraphPin* CreatePin(EEdGraphPinDirection Dir, const FEdGraphPinType& InPinType, const FName PinName, int32 Index = INDEX_NONE);
+	ENGINE_API UEdGraphPin* CreatePin(EEdGraphPinDirection Dir, const FEdGraphPinType& InPinType, const FName PinName, int32 Index = INDEX_NONE);
 
-	/** Create a new pin on this node using the supplied pin type, and return the new pin */
-	UE_DEPRECATED(4.19, "Use version that passes PinName as FName instead.")
-	UEdGraphPin* CreatePin(EEdGraphPinDirection Dir, const FEdGraphPinType& InPinType, const FString& PinName, int32 Index = INDEX_NONE)
-	{
-		return CreatePin(Dir, InPinType, FName(*PinName), Index);
-	}
 
 	/** Create a new pin on this node using the supplied pin type, and return the new pin */
 	//UE_DEPRECATED(4.19, "Remove when removing FString version. Exists just to resolve ambiguity")
@@ -570,10 +564,10 @@ public:
 	}
 
 	/** Destroys the specified pin, does not modify its owning pin's Pins list */
-	static void DestroyPin(UEdGraphPin* Pin);
+	static ENGINE_API void DestroyPin(UEdGraphPin* Pin);
 
 	/** Find a pin on this node with the supplied name and optional direction */
-	UEdGraphPin* FindPin(const FName PinName, const EEdGraphPinDirection Direction = EGPD_MAX) const;
+	ENGINE_API UEdGraphPin* FindPin(const FName PinName, const EEdGraphPinDirection Direction = EGPD_MAX) const;
 
 	/** Find a pin on this node with the supplied name and optional direction and assert if it is not present */
 	UEdGraphPin* FindPinChecked(const FName PinName, const EEdGraphPinDirection Direction = EGPD_MAX) const
@@ -596,7 +590,7 @@ public:
 	}
 
 	/** Find a pin on this node with the supplied name and optional direction */
-	UEdGraphPin* FindPin(const TCHAR* PinName, const EEdGraphPinDirection Direction = EGPD_MAX) const;
+	ENGINE_API UEdGraphPin* FindPin(const TCHAR* PinName, const EEdGraphPinDirection Direction = EGPD_MAX) const;
 
 	/** Find a pin on this node with the supplied name and optional direction and assert if it is not present */
 	UEdGraphPin* FindPinChecked(const TCHAR* PinName, const EEdGraphPinDirection Direction = EGPD_MAX) const
@@ -607,13 +601,16 @@ public:
 	}
 
 	/** Find the pin on this node with the supplied guid */
-	UEdGraphPin* FindPinById(const FGuid PinId) const;
+	ENGINE_API UEdGraphPin* FindPinById(const FGuid PinId) const;
 
 	/** Find the pin on this node with the supplied guid and assert if it is not present */
-	UEdGraphPin* FindPinByIdChecked(const FGuid PinId) const;
+	ENGINE_API UEdGraphPin* FindPinByIdChecked(const FGuid PinId) const;
 
+	/** Find a pin using a user-defined predicate */
+	ENGINE_API UEdGraphPin* FindPinByPredicate(TFunctionRef<bool(UEdGraphPin* InPin)> InFunction) const;
+	
 	/** Find a pin on this node with the supplied name and remove it, returns TRUE if successful */
-	bool RemovePin(UEdGraphPin* Pin);
+	ENGINE_API bool RemovePin(UEdGraphPin* Pin);
 
 	/** Returns whether the node was created by UEdGraph::CreateIntermediateNode. */
 	bool IsIntermediateNode() const { return bIsIntermediateNode; }
@@ -622,22 +619,13 @@ public:
 	virtual bool ShouldOverridePinNames() const { return false; }
 
 	/** Whether or not struct pins belonging to this node should be allowed to be split or not. */
-	UE_DEPRECATED(4.14, "Please call CanSplitPin and provide the specific Pin to split.")
-	virtual bool AllowSplitPins() const { return bAllowSplitPins_DEPRECATED; }
-
-	/** Whether or not struct pins belonging to this node should be allowed to be split or not. */
-	virtual bool CanSplitPin(const UEdGraphPin* Pin) const 
-	{
-		PRAGMA_DISABLE_DEPRECATION_WARNINGS
-		return AllowSplitPins();
-		PRAGMA_ENABLE_DEPRECATION_WARNINGS
-	}
+	virtual bool CanSplitPin(const UEdGraphPin* Pin) const { return false; }
 
 	/** Gets the overridden name for the specified pin, if any */
 	virtual FText GetPinNameOverride(const UEdGraphPin& Pin) const { return FText::GetEmpty(); }
 
 	/** Gets the display name for a pin */
-	virtual FText GetPinDisplayName(const UEdGraphPin* Pin) const;
+	ENGINE_API virtual FText GetPinDisplayName(const UEdGraphPin* Pin) const;
 
 	/**
 	 * Fetch the hover text for a pin when the graph is being edited.
@@ -645,28 +633,37 @@ public:
 	 * @param   Pin				The pin to fetch hover text for (should belong to this node)
 	 * @param   HoverTextOut	This will get filled out with the requested text
 	 */
-	virtual void GetPinHoverText(const UEdGraphPin& Pin, FString& HoverTextOut) const;
+	ENGINE_API virtual void GetPinHoverText(const UEdGraphPin& Pin, FString& HoverTextOut) const;
 
 	/** Gets the index for a pin */
-	int32 GetPinIndex(UEdGraphPin* Pin) const;
+	ENGINE_API int32 GetPinIndex(UEdGraphPin* Pin) const;
 
 	/** Gets the pin at a given index 
 	* @param Index The zero-based index of the pin to access.
 	* @return The pin found at this location or nullptr if invalid index.
 	*/
-	UEdGraphPin* GetPinAt(int32 Index) const;
+	ENGINE_API UEdGraphPin* GetPinAt(int32 Index) const;
+
+	/** Gets the pin with the given direction, at the given index. Pins of each direction are indexed separately for the purposes of this method */
+	ENGINE_API UEdGraphPin* GetPinWithDirectionAt(int32 Index, EEdGraphPinDirection PinDirection) const;
 
 	/** Break all links on this node */
-	void BreakAllNodeLinks();
+	ENGINE_API void BreakAllNodeLinks();
 
 	/** Snap this node to a specified grid size */
-	void SnapToGrid(float GridSnapSize);
+	ENGINE_API void SnapToGrid(uint32 GridSnapSize);
 
 	/** Clear error flag */
 	void ClearCompilerMessage()
 	{
 		bHasCompilerMessage = false;
 	}
+
+	/** If true, this node whill show the Visual Warning message */
+	ENGINE_API virtual bool ShowVisualWarning() const;
+
+	/** Visual Warning tooltip message to show */
+	ENGINE_API virtual FText GetVisualWarningTooltipText() const;
 
 	/** Generate a unique pin name, trying to stick close to a passed in name */
 	virtual FName CreateUniquePinName(FName SourcePinName) const
@@ -684,7 +681,10 @@ public:
 	}
 
 	/** Returns the graph that contains this node */
-	class UEdGraph* GetGraph() const;
+	ENGINE_API class UEdGraph* GetGraph() const;
+
+	/** @returns any sub graphs (graphs that have this node as an outer) that this node might contain (e.g. composite, animation state machine etc.).*/
+	virtual TArray<UEdGraph*> GetSubGraphs() const { return TArray<UEdGraph*>(); }
 
 	/**
 	 * Allocate default pins for a given node, based only the NodeType, which should already be filled in.
@@ -694,7 +694,7 @@ public:
 	virtual void AllocateDefaultPins() {}
 
 	/** Destroy the specified node */
-	virtual void DestroyNode();
+	ENGINE_API virtual void DestroyNode();
 
 	/**
 	 * Refresh the connectors on a node, preserving as many connections as it can.
@@ -704,7 +704,7 @@ public:
 	/**
 	 * Removes the specified pin from the node, preserving remaining pin ordering.
 	 */
-	virtual void RemovePinAt(const int32 PinIndex, const EEdGraphPinDirection PinDirection);
+	ENGINE_API virtual void RemovePinAt(const int32 PinIndex, const EEdGraphPinDirection PinDirection);
 
 	/**
 	 * Perform any steps necessary prior to copying a node into the paste buffer
@@ -724,7 +724,7 @@ public:
 	/**
 	 * Determine if a node of this type can be created for the specified graph.
      */
-	virtual bool IsCompatibleWithGraph(UEdGraph const* Graph) const;
+	ENGINE_API virtual bool IsCompatibleWithGraph(UEdGraph const* Graph) const;
 
 	/**
 	 * Perform any fixups (deep copies of associated data, etc...) necessary after a node has been pasted in the editor
@@ -732,37 +732,53 @@ public:
 	virtual void PostPasteNode() {}
 
 	/** Gets the name of this node, shown in title bar */
-	virtual FText GetNodeTitle(ENodeTitleType::Type TitleType) const;
+	ENGINE_API virtual FText GetNodeTitle(ENodeTitleType::Type TitleType) const;
 
 	/** Gets the search string to find references to this node */
-	virtual FString GetFindReferenceSearchString() const;
+	UE_DEPRECATED(5.3, "GetFindReferenceSearchString() signature changed. Call the version with flags instead and override the _Impl version.")
+	ENGINE_API virtual FString GetFindReferenceSearchString() const;
 
+	/**
+	 * Gets the search string to find references to this node
+	 * @param InFlags Options for the requested search string, such as whether to use Find-in-Blueprints class member search syntax
+	 */
+	ENGINE_API FString GetFindReferenceSearchString(EGetFindReferenceSearchStringFlags InFlags) const;
+
+protected:
+	virtual FString GetFindReferenceSearchString_Impl(EGetFindReferenceSearchStringFlags InFlags) const
+	{
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		return GetFindReferenceSearchString();
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	}
+
+public:
 	/** 
 	 * Gets the draw color of a node's title bar
 	 */
-	virtual FLinearColor GetNodeTitleColor() const;
+	ENGINE_API virtual FLinearColor GetNodeTitleColor() const;
 
 	/**
 	 * Get the draw color for a node's comment popup
 	 */
-	virtual FLinearColor GetNodeCommentColor() const;
+	ENGINE_API virtual FLinearColor GetNodeCommentColor() const;
 
 	/**
 	 * Gets the draw color of a node's body tine
 	 */
-	virtual FLinearColor GetNodeBodyTintColor() const;
+	ENGINE_API virtual FLinearColor GetNodeBodyTintColor() const;
 
 	/**
 	 * Gets the tooltip to display when over the node
 	 */
-	virtual FText GetTooltipText() const;
+	ENGINE_API virtual FText GetTooltipText() const;
 
 	/**
 	 * Returns the keywords that should be used when searching for this node
 	 *
 	 * @TODO: Should search keywords be localized? Probably.
 	 */
-	virtual FText GetKeywords() const;
+	ENGINE_API virtual FText GetKeywords() const;
 	 
 	/**
 	 * Returns the link used for external documentation for the graph node
@@ -773,14 +789,10 @@ public:
 	 * Returns the name of the excerpt to display from the specified external documentation link for the graph node
 	 * Default behavior is to return the class name (including prefix)
 	 */
-	virtual FString GetDocumentationExcerptName() const;
+	ENGINE_API virtual FString GetDocumentationExcerptName() const;
 
 	/** @return Icon to use in menu or on node */
-	UE_DEPRECATED(4.13, "Please override 'virtual FSlateIcon GetIconAndTint(FLinearColor& OutColor) const;' instead.")
-	virtual FName GetPaletteIcon(FLinearColor& OutColor) const { return NAME_None; }
-
-	/** @return Icon to use in menu or on node */
-	virtual FSlateIcon GetIconAndTint(FLinearColor& OutColor) const;
+	ENGINE_API virtual FSlateIcon GetIconAndTint(FLinearColor& OutColor) const;
 
 	/** Should we show the Palette Icon for this node on the node title */
 	virtual bool ShowPaletteIconOnNode() const { return false; }
@@ -814,52 +826,50 @@ public:
 	virtual void NodeConnectionListChanged() {}
 
 	/** Shorthand way to access the schema of the graph that owns this node */
-	const UEdGraphSchema* GetSchema() const;
+	ENGINE_API const UEdGraphSchema* GetSchema() const;
 
 	/** Whether or not this node can be safely duplicated (via copy/paste, etc...) in the graph */
-	virtual bool CanDuplicateNode() const;
+	ENGINE_API virtual bool CanDuplicateNode() const;
 
 	/** Whether or not this node can be deleted by user action */
-	virtual bool CanUserDeleteNode() const;
+	ENGINE_API virtual bool CanUserDeleteNode() const;
 
 	/** Whether or not this node allows users to edit the advanced view flag of pins (actually edit the property, not the same as show/hide advanced pins). */
 	virtual bool CanUserEditPinAdvancedViewFlag() const { return false; }
 
 	/** Tries to come up with a descriptive name for the compiled output */
-	virtual FString GetDescriptiveCompiledName() const;
+	ENGINE_API virtual FString GetDescriptiveCompiledName() const;
 
 	/** Update node size to new value */
 	virtual void ResizeNode(const FVector2D& NewSize) {}
 
+	/**
+	 * Returns whether or not this node has dependencies on an external structure
+	 * If OptionalOutput isn't null, it should be filled with the known dependencies objects (Classes, Structures, Functions, etc).
+	 */
+	virtual bool HasExternalDependencies(TArray<class UStruct*>* OptionalOutput = nullptr) const { return false; }
+
 	// Returns true if this node is deprecated
-	virtual bool IsDeprecated() const;
+	ENGINE_API virtual bool IsDeprecated() const;
 
 	// Returns true if this node references a deprecated type or member
 	virtual bool HasDeprecatedReference() const { return false; }
 
 	// Returns the response to use when reporting a deprecation
-	virtual FEdGraphNodeDeprecationResponse GetDeprecationResponse(EEdGraphNodeDeprecationType DeprecationType) const;
-
-	// Returns true if this node should produce a compiler warning on deprecation
-	UE_DEPRECATED(4.23, "Use GetDeprecationResponse instead.")
-	virtual bool ShouldWarnOnDeprecation() const;
-
-	// Returns the string to use when reporting the deprecation
-	UE_DEPRECATED(4.23, "Use GetDeprecationResponse instead.")
-	virtual FString GetDeprecationMessage() const;
+	ENGINE_API virtual FEdGraphNodeDeprecationResponse GetDeprecationResponse(EEdGraphNodeDeprecationType DeprecationType) const;
 
 	// Returns the object that should be focused when double-clicking on this node
 	// (the object can be an actor, which selects it in the world, or a node/graph/pin)
-	virtual UObject* GetJumpTargetForDoubleClick() const;
+	ENGINE_API virtual UObject* GetJumpTargetForDoubleClick() const;
 
 	// Returns true if it is possible to jump to the definition of this node (e.g., if it's a variable get or a function call)
-	virtual bool CanJumpToDefinition() const;
+	ENGINE_API virtual bool CanJumpToDefinition() const;
 
 	// Jump to the definition of this node (should only be called if CanJumpToDefinition() return true)
-	virtual void JumpToDefinition() const;
+	ENGINE_API virtual void JumpToDefinition() const;
 
 	/** Create a new unique Guid for this node */
-	void CreateNewGuid();
+	ENGINE_API void CreateNewGuid();
 
 	/** Gets a list of actions that can be done to this particular node */
 	virtual void GetNodeContextMenuActions(class UToolMenu* Menu, class UGraphNodeContextMenuContext* Context) const {}
@@ -871,7 +881,7 @@ public:
 	virtual void ValidateNodeDuringCompilation(class FCompilerResultsLog& MessageLog) const {}
 
 	/** Gives the node the option to customize how diffs are discovered within it.  */
-	virtual void FindDiffs(class UEdGraphNode* OtherNode, FDiffResults& Results);
+	ENGINE_API virtual void FindDiffs(class UEdGraphNode* OtherNode, FDiffResults& Results);
 
 	// This function gets menu items that can be created using this node given the specified context
 	virtual void GetMenuEntries(struct FGraphContextMenuBuilder& ContextMenuBuilder) const {}
@@ -883,7 +893,7 @@ public:
 	virtual void OnRenameNode(const FString& NewName) {}
 
 	// called to replace this nodes comment text
-	virtual void OnUpdateCommentText( const FString& NewComment );
+	ENGINE_API virtual void OnUpdateCommentText( const FString& NewComment );
 
 	// returns true if this node supports comment bubbles
 	virtual bool SupportsCommentBubble() const { return true; }
@@ -900,14 +910,14 @@ public:
 	* @param OutOutputPinIndex The index in the pins array associated with the control point output pin.
 	* @return Whether or not to draw this node as a control point.
 	*/
-	virtual bool ShouldDrawNodeAsControlPointOnly(int32& OutInputPinIndex, int32& OutOutputPinIndex) const;
+	ENGINE_API virtual bool ShouldDrawNodeAsControlPointOnly(int32& OutInputPinIndex, int32& OutOutputPinIndex) const;
 
 	/**
 	 * Add's node data to the search metadata, override to collect more data that may be desirable to search for
 	 *
 	 * @param OutTaggedMetaData		Built array of tagged meta data for the node
 	 */
-	virtual void AddSearchMetaDataInfo(TArray<struct FSearchTagDataPair>& OutTaggedMetaData) const;
+	ENGINE_API virtual void AddSearchMetaDataInfo(TArray<struct FSearchTagDataPair>& OutTaggedMetaData) const;
 
 	/**
 	 * Adds node pin data to the search metadata, override to collect more data that may be desirable to search for
@@ -915,7 +925,7 @@ public:
 	 * @param Pin					The pin for which to gather search meta data
 	 * @param OutTaggedMetaData		Built array of tagged meta data for the given pin
 	 */
-	virtual void AddPinSearchMetaDataInfo(const UEdGraphPin* Pin, TArray<struct FSearchTagDataPair>& OutTaggedMetaData) const;
+	ENGINE_API virtual void AddPinSearchMetaDataInfo(const UEdGraphPin* Pin, TArray<struct FSearchTagDataPair>& OutTaggedMetaData) const;
 
 	/** Return the requested metadata for the pin if there is any */
 	virtual FString GetPinMetaData(FName InPinName, FName InKey) { return FString(); }
@@ -936,41 +946,41 @@ public:
 	virtual TSharedPtr<SWidget> CreateNodeImage() const { return TSharedPtr<SWidget>(); }
 
 	/** Adds an upgrade note to this node */
-	void AddNodeUpgradeNote(FText InUpgradeNote);
+	ENGINE_API void AddNodeUpgradeNote(FText InUpgradeNote);
 
 	/** If the comment bubble needs to be made visible immediately */
-	bool ShouldMakeCommentBubbleVisible() const;
+	ENGINE_API bool ShouldMakeCommentBubbleVisible() const;
 
 	/** Sets a flag if the comment bubble needs to be made visible immediately */
-	void SetMakeCommentBubbleVisible(bool MakeVisible);
+	ENGINE_API void SetMakeCommentBubbleVisible(bool MakeVisible);
 
 	/** Execute a provided function once for each node that is directly connected to this node, will not include the node itself */
-	void ForEachNodeDirectlyConnected(TFunctionRef<void(UEdGraphNode*)> Func);
+	ENGINE_API void ForEachNodeDirectlyConnected(TFunctionRef<void(UEdGraphNode*)> Func);
 	
 	/** 
 	 * Often we are only interested in a subset of our connections (e.g. only output pins, or only output pins except our exec pin)
 	 * This function provides the ability to execute a provided function once for each node that is directly connected to this node, 
 	 * but first filters out which of this node's pins to consider:
 	 */
-	void ForEachNodeDirectlyConnectedIf(TFunctionRef<bool(const UEdGraphPin* Pin)> Filter, TFunctionRef<void(UEdGraphNode*)> Func);
+	ENGINE_API void ForEachNodeDirectlyConnectedIf(TFunctionRef<bool(const UEdGraphPin* Pin)> Filter, TFunctionRef<void(UEdGraphNode*)> Func);
 
 	/** 
 	 * Execute a provided function once for each node that is directly connected to this node's input pins, will not include the node itself
 	 * Implementation provides an example usage of ForEachNodeDirectlyConnectedIf.
 	 */
-	void ForEachNodeDirectlyConnectedToInputs(TFunctionRef<void(UEdGraphNode*)> Func);
+	ENGINE_API void ForEachNodeDirectlyConnectedToInputs(TFunctionRef<void(UEdGraphNode*)> Func);
 
 	/** 
 	 * Execute a provided function once for each node that is directly connected to this node's output pins, will not include the node itself
 	 * Implementation provides an example usage of ForEachNodeDirectlyConnectedIf.
 	 */
-	void ForEachNodeDirectlyConnectedToOutputs(TFunctionRef<void(UEdGraphNode*)> Func);
+	ENGINE_API void ForEachNodeDirectlyConnectedToOutputs(TFunctionRef<void(UEdGraphNode*)> Func);
 	
 protected:
 #if WITH_EDITORONLY_DATA
 	/** Internal function used to gather pins from a graph node for localization */
 	friend void GatherGraphNodeForLocalization(const UObject* const Object, FPropertyLocalizationDataGatherer& PropertyLocalizationDataGatherer, const EPropertyLocalizationGathererTextFlags GatherTextFlags);
-	virtual void GatherForLocalization(FPropertyLocalizationDataGatherer& PropertyLocalizationDataGatherer, const EPropertyLocalizationGathererTextFlags GatherTextFlags) const;
+	ENGINE_API virtual void GatherForLocalization(FPropertyLocalizationDataGatherer& PropertyLocalizationDataGatherer, const EPropertyLocalizationGathererTextFlags GatherTextFlags) const;
 #endif
 
 	/**
@@ -983,7 +993,7 @@ protected:
 	 * @param Results The Results where differences are stored
 	 * @param Diff The single result with default parameters setup
 	 */
-	virtual void DiffProperties(UClass* StructA, UClass* StructB, UObject* DataA, UObject* DataB, FDiffResults& Results, FDiffSingleResult& Diff) const;
+	ENGINE_API virtual void DiffProperties(UClass* StructA, UClass* StructB, UObject* DataA, UObject* DataB, FDiffResults& Results, FDiffSingleResult& Diff) const;
 
 	/**
 	 * Finds the difference in properties of node instance, for arbitrary UStructs
@@ -995,10 +1005,10 @@ protected:
 	 * @param Results The Results where differences are stored
 	 * @param Diff The single result with default parameters setup
 	 */
-	virtual void DiffProperties(UStruct* StructA, UStruct* StructB, uint8* DataA, uint8* DataB, FDiffResults& Results, FDiffSingleResult& Diff) const;
+	ENGINE_API virtual void DiffProperties(UStruct* StructA, UStruct* StructB, uint8* DataA, uint8* DataB, FDiffResults& Results, FDiffSingleResult& Diff) const;
 
 	// Returns a human-friendly description of the property in the form "PropertyName: Value"
-	virtual FString GetPropertyNameAndValueForDiff(const FProperty* Prop, const uint8* PropertyAddr) const;
+	ENGINE_API virtual FString GetPropertyNameAndValueForDiff(const FProperty* Prop, const uint8* PropertyAddr) const;
 
 #endif // WITH_EDITOR
 

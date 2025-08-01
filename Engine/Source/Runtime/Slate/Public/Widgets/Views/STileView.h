@@ -41,7 +41,6 @@ public:
 	SLATE_BEGIN_ARGS(STileView<ItemType>)
 		: _OnGenerateTile()
 		, _OnTileReleased()
-		, _ListItemsSource(static_cast<TArray<ItemType>*>(nullptr)) //@todo Slate Syntax: Initializing from nullptr without a cast
 		, _ItemHeight(128)
 		, _ItemWidth(128)
 		, _ItemAlignment(EListItemAlignment::EvenlyDistributed)
@@ -58,6 +57,8 @@ public:
 		, _ScrollbarVisibility(EVisibility::Visible)
 		, _ScrollbarDragFocusCause(EFocusCause::Mouse)
 		, _AllowOverscroll(EAllowOverscroll::Yes)
+		, _ScrollBarStyle(&FAppStyle::Get().GetWidgetStyle<FScrollBarStyle>("ScrollBar"))
+		, _ScrollbarDisabledVisibility(EVisibility::Collapsed)
 		, _ConsumeMouseWheel(EConsumeMouseWheel::WhenScrollingPossible)
 		, _WheelScrollMultiplier(GetGlobalScrollAmount())
 		, _HandleGamepadEvents(true)
@@ -78,7 +79,7 @@ public:
 
 		SLATE_EVENT( FOnItemScrolledIntoView, OnItemScrolledIntoView )
 
-		SLATE_ARGUMENT( const TArray<ItemType>* , ListItemsSource )
+		SLATE_ITEMS_SOURCE_ARGUMENT( ItemType, ListItemsSource )
 
 		SLATE_ATTRIBUTE( float, ItemHeight )
 
@@ -114,6 +115,10 @@ public:
 
 		SLATE_ARGUMENT( EAllowOverscroll, AllowOverscroll );
 
+		SLATE_STYLE_ARGUMENT( FScrollBarStyle, ScrollBarStyle );
+
+		SLATE_ARGUMENT( EVisibility, ScrollbarDisabledVisibility );
+
 		SLATE_ARGUMENT( EConsumeMouseWheel, ConsumeMouseWheel );
 
 		SLATE_ARGUMENT( float, WheelScrollMultiplier );
@@ -146,7 +151,7 @@ public:
 		this->OnRowReleased = InArgs._OnTileReleased;
 		this->OnItemScrolledIntoView = InArgs._OnItemScrolledIntoView;
 		
-		this->ItemsSource = InArgs._ListItemsSource;
+		this->SetItemsSource(InArgs.MakeListItemsSource(this->SharedThis(this)));
 		this->OnContextMenuOpening = InArgs._OnContextMenuOpening;
 		this->OnClick = InArgs._OnMouseButtonClick;
 		this->OnDoubleClick = InArgs._OnMouseButtonDoubleClick;
@@ -158,7 +163,6 @@ public:
 
 		this->AllowOverscroll = InArgs._AllowOverscroll;
 		this->ConsumeMouseWheel = InArgs._ConsumeMouseWheel;
-
 		this->WheelScrollMultiplier = InArgs._WheelScrollMultiplier;
 
 		this->bHandleGamepadEvents = InArgs._HandleGamepadEvents;
@@ -183,7 +187,7 @@ public:
 				ErrorString += TEXT("Please specify an OnGenerateTile. \n");
 			}
 
-			if ( this->ItemsSource == nullptr )
+			if ( !this->HasValidItemsSource() )
 			{
 				ErrorString += TEXT("Please specify a ListItemsSource. \n");
 			}
@@ -193,21 +197,22 @@ public:
 		{
 			// Let the coder know what they forgot
 			this->ChildSlot
-			.HAlign(HAlign_Center)
-			.VAlign(VAlign_Center)
-			[
-				SNew(STextBlock)
-				.Text(FText::FromString(ErrorString))
-			];
+				.HAlign(HAlign_Center)
+				.VAlign(VAlign_Center)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(ErrorString))
+				];
 		}
 		else
 		{
 			// Make the TableView
-			this->ConstructChildren(InArgs._ItemWidth, InArgs._ItemHeight, InArgs._ItemAlignment, TSharedPtr<SHeaderRow>(), InArgs._ExternalScrollbar, InArgs._Orientation, InArgs._OnTileViewScrolled);
+			this->ConstructChildren(InArgs._ItemWidth, InArgs._ItemHeight, InArgs._ItemAlignment, TSharedPtr<SHeaderRow>(), InArgs._ExternalScrollbar, InArgs._Orientation, InArgs._OnTileViewScrolled, InArgs._ScrollBarStyle);
 			if (this->ScrollBar.IsValid())
 			{
 				this->ScrollBar->SetDragFocusCause(InArgs._ScrollbarDragFocusCause);
 				this->ScrollBar->SetUserVisibility(InArgs._ScrollbarVisibility);
+				this->ScrollBar->SetScrollbarDisabledVisibility(InArgs._ScrollbarDisabledVisibility);
 			}
 			this->AddMetadata(MakeShared<TTableViewMetadata<ItemType>>(this->SharedThis(this)));
 		}
@@ -224,9 +229,9 @@ public:
 
 	virtual FNavigationReply OnNavigation(const FGeometry& MyGeometry, const FNavigationEvent& InNavigationEvent) override
 	{
-		if (this->ItemsSource && this->bHandleDirectionalNavigation && (this->bHandleGamepadEvents || InNavigationEvent.GetNavigationGenesis() != ENavigationGenesis::Controller))
+		if (this->HasValidItemsSource() && this->bHandleDirectionalNavigation && (this->bHandleGamepadEvents || InNavigationEvent.GetNavigationGenesis() != ENavigationGenesis::Controller))
 		{
-			const TArray<ItemType>& ItemsSourceRef = (*this->ItemsSource);
+			const TArrayView<const ItemType>& ItemsSourceRef = this->GetItems();
 
 			const int32 NumItemsPerLine = GetNumItemsPerLine();
 			const int32 CurSelectionIndex = (!TListTypeTraits<ItemType>::IsPtrValid(this->SelectorItem)) ? 0 : ItemsSourceRef.Find(TListTypeTraits<ItemType>::NullableItemTypeConvertToItemType(this->SelectorItem));
@@ -268,14 +273,14 @@ public:
 		// Clear all the items from our panel. We will re-add them in the correct order momentarily.
 		this->ClearWidgets();
 		
-		const TArray<ItemType>* SourceItems = this->ItemsSource;
-		if (SourceItems && SourceItems->Num() > 0)
+		const TArrayView<const ItemType> Items = this->GetItems();
+		if (Items.Num() > 0)
 		{
 			// Item width and height is constant by design.
 			FTableViewDimensions TileDimensions = GetTileDimensions();
 			FTableViewDimensions AllottedDimensions(this->Orientation, MyGeometry.GetLocalSize());
 
-			const int32 NumItems = SourceItems->Num();
+			const int32 NumItems = Items.Num();
 			const int32 NumItemsPerLine = GetNumItemsPerLine();
 			const int32 NumItemsPaddedToFillLastLine = (NumItems % NumItemsPerLine != 0)
 				? NumItems + NumItemsPerLine - NumItems % NumItemsPerLine
@@ -290,7 +295,7 @@ public:
 			FTableViewDimensions DimensionsUsedSoFar(this->Orientation);
 			
 			// Index of the item at which we start generating based on how far scrolled down we are
-			int32 StartIndex = FMath::Max( 0, FMath::FloorToInt(ClampedScrollOffset / NumItemsPerLine) * NumItemsPerLine);
+			int32 StartIndex = FMath::Max( 0, FMath::FloorToInt32(ClampedScrollOffset / NumItemsPerLine) * NumItemsPerLine);
 
 			// Let the WidgetGenerator know that we are starting a pass so that it can keep track of data items and widgets.
 			this->WidgetGenerator.OnBeginGenerationPass();
@@ -303,7 +308,7 @@ public:
 			double NumLinesShownOnScreen = 0;
 			for( int32 ItemIndex = StartIndex; !bHasFilledAvailableArea && ItemIndex < NumItems; ++ItemIndex )
 			{
-				const ItemType& CurItem = (*SourceItems)[ItemIndex];
+				const ItemType& CurItem = Items[ItemIndex];
 
 				if (bNewLine)
 				{
@@ -313,7 +318,7 @@ public:
 					if (bFirstLine)
 					{
 						bFirstLine = false;
-						LineFraction -= FMath::Fractional(ClampedScrollOffset / NumItemsPerLine);
+						LineFraction -= (float)FMath::Fractional(ClampedScrollOffset / NumItemsPerLine);
 					}
 
 					DimensionsUsedSoFar.ScrollAxis += TileDimensions.ScrollAxis * LineFraction;
@@ -353,7 +358,7 @@ public:
 			// We have completed the generation pass. The WidgetGenerator will clean up unused Widgets.
 			this->WidgetGenerator.OnEndGenerationPass();
 
-			const float TotalGeneratedLineAxisSize = FMath::CeilToFloat(NumLinesShownOnScreen) * TileDimensions.ScrollAxis;
+			const float TotalGeneratedLineAxisSize = (float)(FMath::CeilToFloat(NumLinesShownOnScreen) * TileDimensions.ScrollAxis);
 			return STableViewBase::FReGenerateResults(ClampedScrollOffset, TotalGeneratedLineAxisSize, NumLinesShownOnScreen, bIsAtEndOfList && !bHasFilledAvailableArea);
 		}
 
@@ -363,7 +368,7 @@ public:
 
 	virtual int32 GetNumItemsBeingObserved() const override
 	{
-		const int32 NumItemsBeingObserved = this->ItemsSource == nullptr ? 0 : this->ItemsSource->Num();
+		const int32 NumItemsBeingObserved = this->GetItems().Num();
 		const int32 NumItemsPerLine = GetNumItemsPerLine();
 		
 		int32 NumEmptySpacesAtEnd = 0;
@@ -391,7 +396,7 @@ protected:
 		const bool bWholeListVisible = this->DesiredScrollOffset == 0 && this->bWasAtEndOfList;
 		if (InAllowOverscroll == EAllowOverscroll::Yes && this->Overscroll.ShouldApplyOverscroll(this->DesiredScrollOffset == 0, this->bWasAtEndOfList, ScrollByAmountInSlateUnits))
 		{
-			const float UnclampedScrollDelta = ScrollByAmountInSlateUnits / GetNumItemsPerLine();
+			const float UnclampedScrollDelta = ScrollByAmountInSlateUnits / (float)GetNumItemsPerLine();
 			const float ActuallyScrolledBy = this->Overscroll.ScrollBy(MyGeometry, UnclampedScrollDelta);
 			if (ActuallyScrolledBy != 0.0f)
 			{
@@ -401,9 +406,9 @@ protected:
 		}
 		else if (!bWholeListVisible)
 		{
-			const double NewScrollOffset = this->DesiredScrollOffset + ((ScrollByAmountInSlateUnits * GetNumItemsPerLine()) / GetTileDimensions().ScrollAxis);
+			const double NewScrollOffset = this->DesiredScrollOffset + ((ScrollByAmountInSlateUnits * (float)GetNumItemsPerLine()) / GetTileDimensions().ScrollAxis);
 
-			return this->ScrollTo( NewScrollOffset );
+			return this->ScrollTo( (float)NewScrollOffset );
 		}
 
 		return 0.f;
@@ -425,14 +430,14 @@ protected:
 	 */
 	virtual typename SListView<ItemType>::EScrollIntoViewResult ScrollIntoView(const FGeometry& ListViewGeometry) override
 	{
-		if (TListTypeTraits<ItemType>::IsPtrValid(this->ItemToScrollIntoView) && this->ItemsSource != nullptr)
+		if (TListTypeTraits<ItemType>::IsPtrValid(this->ItemToScrollIntoView) && this->HasValidItemsSource())
 		{
-			const int32 IndexOfItem = this->ItemsSource->Find(TListTypeTraits<ItemType>::NullableItemTypeConvertToItemType(this->ItemToScrollIntoView));
+			const int32 IndexOfItem = this->GetItems().Find(TListTypeTraits<ItemType>::NullableItemTypeConvertToItemType(this->ItemToScrollIntoView));
 			if (IndexOfItem != INDEX_NONE)
 			{
 				const float NumLinesInView = FTableViewDimensions(this->Orientation, ListViewGeometry.GetLocalSize()).ScrollAxis / GetTileDimensions().ScrollAxis;
 
-				float NumLiveWidgets = this->GetNumLiveWidgets();
+				double NumLiveWidgets = this->GetNumLiveWidgets();
 				if (NumLiveWidgets == 0 && this->IsPendingRefresh())
 				{
 					// Use the last number of widgets on screen to estimate if we actually need to scroll.
@@ -451,8 +456,8 @@ protected:
 				// Only scroll the item into view if it's not already in the visible range
 				const int32 NumItemsPerLine = GetNumItemsPerLine();
 				const double ScrollLineOffset = this->GetTargetScrollOffset() / NumItemsPerLine;
-				const int32 LineOfItem = FMath::FloorToInt(IndexOfItem / NumItemsPerLine);
-				const int32 NumFullLinesInView = FMath::FloorToInt(ScrollLineOffset + NumLinesInView) - FMath::CeilToInt(ScrollLineOffset);
+				const int32 LineOfItem = FMath::FloorToInt((float)IndexOfItem / (float)NumItemsPerLine);
+				const int32 NumFullLinesInView = FMath::FloorToInt32(ScrollLineOffset + NumLinesInView) - FMath::CeilToInt32(ScrollLineOffset);
 				
 				const double MinDisplayedLine = this->bNavigateOnScrollIntoView ? FMath::FloorToDouble(ScrollLineOffset) : FMath::CeilToDouble(ScrollLineOffset);
 				const double MaxDisplayedLine = this->bNavigateOnScrollIntoView ? FMath::CeilToDouble(ScrollLineOffset + NumFullLinesInView) : FMath::FloorToDouble(ScrollLineOffset + NumFullLinesInView);
@@ -460,15 +465,15 @@ protected:
 				if (LineOfItem < MinDisplayedLine || LineOfItem > MaxDisplayedLine)
 				{
 					// Set the line with the item at the beginning of the view area
-					float NewLineOffset = LineOfItem;
+					float NewLineOffset = (float)LineOfItem;
 					// Center the line in the view area
 					NewLineOffset -= NumLinesInView * 0.5f;
 					// Convert the line offset into an item offset
-					double NewScrollOffset = NewLineOffset * NumItemsPerLine;
+					double NewScrollOffset = NewLineOffset * (double)NumItemsPerLine;
 					// And clamp the scroll offset within the allowed limits
-					NewScrollOffset = FMath::Clamp(NewScrollOffset, 0., (double)(GetNumItemsBeingObserved() - NumItemsPerLine * NumLinesInView));
+					NewScrollOffset = FMath::Clamp(NewScrollOffset, 0., (double)GetNumItemsBeingObserved() - (double)NumItemsPerLine * NumLinesInView);
 
-					this->SetScrollOffset(NewScrollOffset);
+					this->SetScrollOffset((float)NewScrollOffset);
 				}
 				else if (this->bNavigateOnScrollIntoView)
 				{
@@ -476,14 +481,14 @@ protected:
 					if (LineOfItem == MinDisplayedLine)
 					{
 						// This line is clipped at the top/left, so set it as the new offset
-						this->SetScrollOffset(LineOfItem * NumItemsPerLine - (this->FixedLineScrollOffset.IsSet() && LineOfItem > 0 ? 0.f : this->NavigationScrollOffset));
+						this->SetScrollOffset((float)(LineOfItem * NumItemsPerLine) - (this->FixedLineScrollOffset.IsSet() && LineOfItem > 0 ? 0.f : this->NavigationScrollOffset));
 					}
 					else if (LineOfItem == MaxDisplayedLine)
 					{
 						// This line is clipped at the end, so we need to advance just enough to bring it fully into view
 						// Since all tiles are required to be of the same size, this is straightforward
-						const float NewLineOffset = LineOfItem - NumLinesInView + 1.f + (this->FixedLineScrollOffset.IsSet() ? 0.f : this->NavigationScrollOffset);
-						this->SetScrollOffset(NewLineOffset * NumItemsPerLine);
+						const float NewLineOffset = (float)LineOfItem - NumLinesInView + 1.f + (this->FixedLineScrollOffset.IsSet() ? 0.f : this->NavigationScrollOffset);
+						this->SetScrollOffset(NewLineOffset * (float)NumItemsPerLine);
 					}
 				}
 

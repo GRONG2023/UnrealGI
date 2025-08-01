@@ -2,12 +2,17 @@
 
 #pragma once
 
-#include "Interfaces/IBackgroundHttpManager.h"
-#include "Interfaces/IBackgroundHttpResponse.h"
-
 #include "BackgroundHttpFileHashHelper.h"
-
+#include "Containers/Array.h"
 #include "Containers/Ticker.h"
+#include "Containers/UnrealString.h"
+#include "HAL/CriticalSection.h"
+#include "HAL/Platform.h"
+#include "Interfaces/IBackgroundHttpManager.h"
+#include "Interfaces/IBackgroundHttpRequest.h"
+#include "Interfaces/IBackgroundHttpResponse.h"
+#include "Logging/LogMacros.h"
+#include "Templates/Atomic.h"
 
 DECLARE_LOG_CATEGORY_EXTERN(LogBackgroundHttpManager, Log, All)
 
@@ -18,54 +23,55 @@ class FBackgroundHttpFileHashHelper;
  */
 class FBackgroundHttpManagerImpl 
 	: public IBackgroundHttpManager
-	, public FTickerObjectBase
+	, public FTSTickerObjectBase
 {
 public:
-	FBackgroundHttpManagerImpl();
-	virtual ~FBackgroundHttpManagerImpl();
+	BACKGROUNDHTTP_API FBackgroundHttpManagerImpl();
+	BACKGROUNDHTTP_API virtual ~FBackgroundHttpManagerImpl();
 
-	virtual void AddRequest(const FBackgroundHttpRequestPtr Request) override;
-	virtual void RemoveRequest(const FBackgroundHttpRequestPtr Request) override;
+	BACKGROUNDHTTP_API virtual void AddRequest(const FBackgroundHttpRequestPtr Request) override;
+	BACKGROUNDHTTP_API virtual void RemoveRequest(const FBackgroundHttpRequestPtr Request) override;
 
-	virtual void Initialize() override;
-	virtual void Shutdown() override;
+	BACKGROUNDHTTP_API virtual void Initialize() override;
+	BACKGROUNDHTTP_API virtual void Shutdown() override;
 
-	virtual void DeleteAllTemporaryFiles() override;
+	BACKGROUNDHTTP_API virtual void DeleteAllTemporaryFiles() override;
 	
-	virtual int GetMaxActiveDownloads() const override;
-	virtual void SetMaxActiveDownloads(int MaxActiveDownloads) override;
+	BACKGROUNDHTTP_API virtual int GetMaxActiveDownloads() const override;
+	BACKGROUNDHTTP_API virtual void SetMaxActiveDownloads(int MaxActiveDownloads) override;
 
 	
-	virtual FString GetTempFileLocationForURL(const FString& URL) override;
+	BACKGROUNDHTTP_API virtual FString GetTempFileLocationForURL(const FString& URL) override;
 	
-	virtual void CleanUpDataAfterCompletingRequest(const FBackgroundHttpRequestPtr Request) override;
+	BACKGROUNDHTTP_API virtual void CleanUpDataAfterCompletingRequest(const FBackgroundHttpRequestPtr Request) override;
+	BACKGROUNDHTTP_API virtual void SetCellularPreference(int32 Value) override;
 	
-	//FTickerObjectBase implementation
-	virtual bool Tick(float DeltaTime) override;
+	//FTSTickerObjectBase implementation
+	BACKGROUNDHTTP_API virtual bool Tick(float DeltaTime) override;
 	
 protected:
-	virtual bool AssociateWithAnyExistingRequest(const FBackgroundHttpRequestPtr Request) override;
+	BACKGROUNDHTTP_API virtual bool AssociateWithAnyExistingRequest(const FBackgroundHttpRequestPtr Request) override;
 
-	virtual bool CheckForExistingCompletedDownload(const FBackgroundHttpRequestPtr Request, FString& ExistingFilePathOut, int64& ExistingFileSizeOut);
-	virtual void ActivatePendingRequests();
+	BACKGROUNDHTTP_API virtual bool CheckForExistingCompletedDownload(const FBackgroundHttpRequestPtr Request, FString& ExistingFilePathOut, int64& ExistingFileSizeOut);
+	BACKGROUNDHTTP_API virtual void ActivatePendingRequests();
 	
-	//Different from DeleteAllTemporaryFiles as this doesn't nuke all files but rather cleans up specific bad files that have gone stale
-	virtual void DeleteStaleTempFiles();
+	//Different from DeleteAllTemporaryFiles as this doesn't delete all files but rather cleans up specific bad files that have gone stale
+	BACKGROUNDHTTP_API virtual void DeleteStaleTempFiles();
 	
 	//Gets a list of full filenames for all temp files.
-	virtual void GatherAllTempFilenames(TArray<FString>& OutAllTempFilenames, bool bOutputAsFullPaths = false) const;
+	BACKGROUNDHTTP_API virtual void GatherAllTempFilenames(TArray<FString>& OutAllTempFilenames, bool bOutputAsFullPaths = false) const;
 	
 	//Helper function that converts the supplied list of Temp folder filenames to a list that is always all full paths.
-	virtual void ConvertAllTempFilenamesToFullPaths(TArray<FString>& OutFilenamesAsFullPaths, const TArray<FString>& FilenamesToConvertToFullPaths) const;
+	BACKGROUNDHTTP_API virtual void ConvertAllTempFilenamesToFullPaths(TArray<FString>& OutFilenamesAsFullPaths, const TArray<FString>& FilenamesToConvertToFullPaths) const;
 	
 	//Gather a list of any temp files that have timed out of our BackgroundHTTP settings.
 	//SecondsToConsiderOld should be a double representing how many seconds old a temp file needs to be to be returned by this function
 	//If OptionalFileListToCheck is empty will check all temp files in the backgroundhttp temp file folder. If supplied only the given file paths are checked
-	virtual void GatherTempFilesOlderThen(TArray<FString>& OutTimedOutTempFilenames,double SecondsToConsiderOld, TArray<FString>* OptionalFileList = nullptr) const;
+	BACKGROUNDHTTP_API virtual void GatherTempFilesOlderThen(TArray<FString>& OutTimedOutTempFilenames,double SecondsToConsiderOld, TArray<FString>* OptionalFileList = nullptr) const;
 	
 	//Gather a list of any temp files that have no corresponding URL Mapping entry
 	//If OptionalFileListToCheck is empty will check all temp files in the backgroundhttp temp file folder. If supplied only the given file paths are checked
-	virtual void GatherTempFilesWithoutURLMappings(TArray<FString>& OutTempFilesMissingURLMappings, TArray<FString>* OptionalFileList = nullptr) const;
+	BACKGROUNDHTTP_API virtual void GatherTempFilesWithoutURLMappings(TArray<FString>& OutTempFilesMissingURLMappings, TArray<FString>* OptionalFileList = nullptr) const;
 	
 	//Gets our FileHashHelper to compute temp file mappings
 	virtual BackgroundHttpFileHashHelperRef GetFileHashHelper(){ return FileHashHelper; }

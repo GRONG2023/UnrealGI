@@ -10,8 +10,6 @@
 class UMeshPaintSettings;
 class UPaintBrushSettings;
 class UMeshComponent;
-class UViewportInteractor;
-class UVREditorInteractor;
 class IMeshPaintGeometryAdapter;
 class FScopedTransaction;
 class FUICommandList;
@@ -20,6 +18,8 @@ class FPrimitiveDrawInterface;
 class FEditorViewportClient;
 class FSceneView;
 class AActor;
+
+struct FHitResult;
 
 enum class EMeshPaintAction : uint8;
 
@@ -50,9 +50,6 @@ public:
 
 	/** 'Normal' painting functionality, called when the user tries to paint on a mesh using the mouse */
 	virtual bool Paint(FViewport* Viewport, const FVector& InCameraOrigin, const TArrayView<TPair<FVector, FVector>>& Rays);
-
-	/** VR painting functionality, called when the user tries to paint on a mesh using a VR controller */
-	virtual bool PaintVR(FViewport* Viewport, const FVector& InCameraOrigin, const FVector& InRayOrigin, const FVector& InRayDirection, UVREditorInteractor* VREditorInteractor);
 
 	/** Allows painter to act on specific key actions */
 	virtual bool InputKey(FEditorViewportClient* InViewportClient, FViewport* InViewport, FKey InKey, EInputEvent InEvent);
@@ -97,9 +94,7 @@ protected:
 
 	/** Functionality for rendering the interactor widget given its positional information and paint action */
 	virtual void RenderInteractorWidget(const FVector& InCameraOrigin, const FVector& InRayOrigin, const FVector& InRayDirection, FPrimitiveDrawInterface* PDI, EMeshPaintAction PaintAction, bool bRenderVertices, ESceneDepthPriorityGroup DepthGroup = SDPG_World);
-protected:
-	/** When painting in VR, this is viewport interactor we are using */
-	UViewportInteractor* CurrentViewportInteractor;	
+
 protected:
 	/** Flag for whether or not we are currently painting */
 	bool bArePainting;

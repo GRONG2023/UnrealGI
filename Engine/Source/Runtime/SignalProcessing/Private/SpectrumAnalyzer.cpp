@@ -1,11 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "DSP/SpectrumAnalyzer.h"
-#include "DSP/FFTAlgorithm.h"
-#include "DSP/ConstantQ.h"
-#include "SignalProcessingModule.h"
-#include "Algo/MinElement.h"
+
 #include "Algo/MaxElement.h"
+#include "Algo/MinElement.h"
+#include "DSP/ConstantQ.h"
+#include "DSP/FFTAlgorithm.h"
+#include "DSP/FloatArrayMath.h"
+#include "SignalProcessingModule.h"
 
 namespace Audio
 {
@@ -37,7 +39,7 @@ namespace Audio
 				,	OutIndex(InOutIndex)
 				,	PowerSpectrumScale(1.f)
 				{
-					Update(InSettings, InSpectrumSettings);
+					FBandSpec::Update(InSettings, InSpectrumSettings);
 				}
 
 				virtual ~FBandSpec() {}
@@ -232,10 +234,10 @@ namespace Audio
 				int32 StartIndex;
 
 				// Weights (offset by start index) to apply to power spectrum
-				AlignedFloatBuffer Weights;
+				FAlignedFloatBuffer Weights;
 
 				// Internal buffer used when calculating band.
-				mutable AlignedFloatBuffer WorkBuffer;
+				mutable FAlignedFloatBuffer WorkBuffer;
 
 				virtual void Update(const FSpectrumBandExtractorSettings& InSettings, const FSpectrumBandExtractorSpectrumSettings& InSpectrumSettings) override
 				{
@@ -466,7 +468,7 @@ namespace Audio
 
 
 			// Extract band from input.
-			virtual void ExtractBands(const AlignedFloatBuffer& InComplexBuffer, double InTimestamp, TArray<float>& OutValues) override
+			virtual void ExtractBands(const FAlignedFloatBuffer& InComplexBuffer, double InTimestamp, TArray<float>& OutValues) override
 			{
 				const int32 NumComplex = InComplexBuffer.Num();
 
@@ -525,8 +527,9 @@ namespace Audio
 				int32 OutIndex = GetNumBands();
 
 				T BandSpec(InBandSettings, Settings, SpectrumSettings, OutIndex);
+				BandSpec.Update(Settings, SpectrumSettings);
 
-				return InBandSpecs.Add_GetRef(BandSpec);
+				return InBandSpecs.Add_GetRef(MoveTemp(BandSpec));
 			}
 
 			// Calls update on all band specs in the array.
@@ -549,7 +552,7 @@ namespace Audio
 			}
 
 			template<typename T>
-			void ExtractBands(const AlignedFloatBuffer& InPowerSpectrum, const TArray<T>& InBandSpecs, TArray<float>& OutValues) const
+			void ExtractBands(const FAlignedFloatBuffer& InPowerSpectrum, const TArray<T>& InBandSpecs, TArray<float>& OutValues) const
 			{
 				float* OutData = OutValues.GetData();
 				int32 OutNum = OutValues.Num();
@@ -609,7 +612,7 @@ namespace Audio
 			FSpectrumBandExtractorSpectrumSettings SpectrumSettings;
 			double LastTimestamp;
 
-			AlignedFloatBuffer PowerSpectrum;
+			FAlignedFloatBuffer PowerSpectrum;
 
 			TArray<FNNBandSpec> NNBandSpecs;
 			TArray<FLerpBandSpec> LerpBandSpecs;
@@ -762,7 +765,7 @@ namespace Audio
 		bSettingsWereUpdated = false;
 	}
 
-	void FSpectrumAnalyzer::PerformInterpolation(const AlignedFloatBuffer& InComplexBuffer, FSpectrumAnalyzer::EPeakInterpolationMethod InMethod, const float InFreq, float& OutReal, float& OutImag)
+	void FSpectrumAnalyzer::PerformInterpolation(const FAlignedFloatBuffer& InComplexBuffer, FSpectrumAnalyzer::EPeakInterpolationMethod InMethod, const float InFreq, float& OutReal, float& OutImag)
 	{
 		const float* InComplexData = InComplexBuffer.GetData();
 		const int32 VectorLength = InComplexBuffer.Num();
@@ -857,7 +860,7 @@ namespace Audio
 			return 0.f;
 		}
 
-		const AlignedFloatBuffer* OutVector = nullptr;
+		const FAlignedFloatBuffer* OutVector = nullptr;
 		bool bShouldUnlockBuffer = true;
 
 		if (LockedFrequencyVector)
@@ -912,7 +915,7 @@ namespace Audio
 			return 0.f;
 		}
 
-		const AlignedFloatBuffer* OutVector = nullptr;
+		const FAlignedFloatBuffer* OutVector = nullptr;
 		bool bShouldUnlockBuffer = true;
 
 		if (LockedFrequencyVector)
@@ -958,7 +961,7 @@ namespace Audio
 			return;
 		}
 
-		const AlignedFloatBuffer* AnalysisBuffer = nullptr;
+		const FAlignedFloatBuffer* AnalysisBuffer = nullptr;
 		bool bShouldUnlockBuffer = true;
 
 		FSpectrumBandExtractorSpectrumSettings ExtractorSettings;
@@ -1051,11 +1054,12 @@ namespace Audio
 		}
 
 
-		AlignedFloatBuffer& FFTOutput = FrequencyBuffer.StartWorkOnBuffer();
+		FAlignedFloatBuffer& FFTOutput = FrequencyBuffer.StartWorkOnBuffer();
 
 		// If we have enough audio pushed to the spectrum analyzer and we have an available buffer to work in,
 		// we can start analyzing.
-		if (InputQueue.Num() >= ((uint32)FFTSize))
+		uint32 RequiredSize = FMath::Max(FFTSize, HopInSamples);
+		if (InputQueue.Num() >= RequiredSize)
 		{
 			int64 WindowSampleCenterIndex = 0;
 
@@ -1063,16 +1067,22 @@ namespace Audio
 
 			if (bUseLatestAudio)
 			{
+				WindowSampleCenterIndex = SampleCounter.GetValue() - (FFTSize / 2);
+
 				// If we are only using the latest audio, scrap the oldest audio in the InputQueue:
 				InputQueue.SetNum((uint32)FFTSize);
+				InputQueue.Pop(TimeDomainBuffer, FFTSize);
 			}
-			WindowSampleCenterIndex = SampleCounter.GetValue() - InputQueue.Num() + FFTSize / 2;
-			double Timestamp = static_cast<double>(WindowSampleCenterIndex) / FMath::Max(SampleRate, 1.f);
+			else
+			{
+				WindowSampleCenterIndex = SampleCounter.GetValue() - InputQueue.Num() + (FFTSize / 2);
+				
+				// Perform pop/peek here based on FFT size and hop amount.
+				InputQueue.Peek(TimeDomainBuffer, FFTSize);
+				InputQueue.Pop(HopInSamples);
+			}
 
-			// Perform pop/peek here based on FFT size and hop amount.
-			const int32 PeekAmount = FFTSize - HopInSamples;
-			InputQueue.Pop(TimeDomainBuffer, HopInSamples);
-			InputQueue.Peek(TimeDomainBuffer + HopInSamples, PeekAmount);
+			double Timestamp = static_cast<double>(WindowSampleCenterIndex) / FMath::Max(SampleRate, 1.f);
 
 			// apply window if necessary.
 			Window.ApplyToBuffer(TimeDomainBuffer);
@@ -1132,7 +1142,7 @@ namespace Audio
 
 		for (int32 Index = 0; Index < SpectrumAnalyzerBufferSize; Index++)
 		{
-			AlignedFloatBuffer& Buffer = ComplexBuffers.Emplace_GetRef();
+			FAlignedFloatBuffer& Buffer = ComplexBuffers.Emplace_GetRef();
 
 			if (InNum > 0)
 			{
@@ -1173,7 +1183,7 @@ namespace Audio
 		check(InputIndex != OutputIndex);
 	}
 
-	AlignedFloatBuffer& FSpectrumAnalyzerBuffer::StartWorkOnBuffer()
+	FAlignedFloatBuffer& FSpectrumAnalyzerBuffer::StartWorkOnBuffer()
 	{
 		return ComplexBuffers[InputIndex];
 	}
@@ -1184,13 +1194,13 @@ namespace Audio
 		IncrementInputIndex();
 	}
 
-	const AlignedFloatBuffer& FSpectrumAnalyzerBuffer::LockMostRecentBuffer(double& OutTimestamp) const
+	const FAlignedFloatBuffer& FSpectrumAnalyzerBuffer::LockMostRecentBuffer(double& OutTimestamp) const
 	{
 		OutTimestamp = Timestamps[OutputIndex];
 		return ComplexBuffers[OutputIndex];
 	}
 
-	const AlignedFloatBuffer& FSpectrumAnalyzerBuffer::LockMostRecentBuffer() const
+	const FAlignedFloatBuffer& FSpectrumAnalyzerBuffer::LockMostRecentBuffer() const
 	{
 		return ComplexBuffers[OutputIndex];
 	}

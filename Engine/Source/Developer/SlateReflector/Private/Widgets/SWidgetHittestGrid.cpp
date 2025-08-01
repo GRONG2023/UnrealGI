@@ -27,7 +27,7 @@
 #include "Widgets/SWindow.h"
 
 #if WITH_EDITOR
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #endif
 
 #define LOCTEXT_NAMESPACE "SWidgetHittestGrid"
@@ -152,7 +152,6 @@ void SWidgetHittestGrid::Construct(const FArguments& InArgs, TSharedPtr<const SW
 				.Padding(4.f, 0.f, 0.f, 0.f)
 				[
 					SNew(SComboButton)
-					.ButtonStyle(FWidgetReflectorStyle::Get(), "Button")
 					.HAlign(HAlign_Center)
 					.VAlign(VAlign_Center)
 					.ContentPadding(FMargin(6.0f, 2.0f))
@@ -176,7 +175,6 @@ void SWidgetHittestGrid::Construct(const FArguments& InArgs, TSharedPtr<const SW
 				.Padding(4.f, 0.f, 0.f, 0.f)
 				[
 					SNew(SComboButton)
-					.ButtonStyle(FWidgetReflectorStyle::Get(), "Button")
 					.HAlign(HAlign_Center)
 					.VAlign(VAlign_Center)
 					.ContentPadding(FMargin(6.0f, 2.0f))
@@ -199,7 +197,6 @@ void SWidgetHittestGrid::Construct(const FArguments& InArgs, TSharedPtr<const SW
 				.Padding(8.f, 0.f, 0.f, 0.f)
 				[
 					SNew(SCheckBox)
-					.Style(FWidgetReflectorStyle::Get(), "CheckBox")
 					.ForegroundColor(FSlateColor::UseForeground())
 					.ToolTipText(LOCTEXT("PickOnNavigateTooltip", "Attempt to pick the widget in the Widget Reflector when navigation via the hit test grid occurred."))
 					.IsChecked(this, &SWidgetHittestGrid::HandleGetVisualizeOnNavigationChecked)
@@ -221,7 +218,6 @@ void SWidgetHittestGrid::Construct(const FArguments& InArgs, TSharedPtr<const SW
 				.Padding(8.f, 0.f, 0.f, 0.f)
 				[
 					SNew(SCheckBox)
-					.Style(FWidgetReflectorStyle::Get(), "CheckBox")
 					.ForegroundColor(FSlateColor::UseForeground())
 					.ToolTipText(LOCTEXT("RejectWidgetReflectorTooltip", "Reject navigation event originated from the Widget Reflector."))
 					.IsChecked(this, &SWidgetHittestGrid::HandleGetRejectWidgetReflectorChecked)
@@ -282,13 +278,13 @@ void SWidgetHittestGrid::Construct(const FArguments& InArgs, TSharedPtr<const SW
 		+SVerticalBox::Slot()
 		[
 			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("SettingsEditor.CheckoutWarningBorder"))
+			.BorderImage(FAppStyle::GetBrush("SettingsEditor.CheckoutWarningBorder"))
 			.BorderBackgroundColor(FColor(166, 137, 0))
 			.Visibility_Lambda([](){ return GSlateHitTestGridDebugging ? EVisibility::Visible : EVisibility::Collapsed; })
 			[
 				SNew(STextBlock)
 				.Text(LOCTEXT("GSlateHitTestGridDebuggingEnabled", "The console variable GSlateHitTestGridDebugging is enabled. That will prevent the Widget Reflector to control how the debug information is displayed."))
-				.Font(FEditorStyle::GetFontStyle("PropertyWindow.NormalFont"))
+				.Font(FAppStyle::GetFontStyle("PropertyWindow.NormalFont"))
 				.ShadowColorAndOpacity(FLinearColor::Black.CopyWithNewOpacity(0.3f))
 				.ShadowOffset(FVector2D::UnitVector)
 			]
@@ -652,14 +648,7 @@ TSharedRef<SWidget> SWidgetHittestGrid::GetFlagsMenuContent()
 
 void SWidgetHittestGrid::HandleDisplayFlagsButtonClicked(FHittestGrid::EDisplayGridFlags Flag)
 {
-	if (EnumHasAnyFlags(DisplayGridFlags, Flag))
-	{
-		DisplayGridFlags &= ~Flag;
-	}
-	else
-	{
-		DisplayGridFlags |= Flag;
-	}
+	DisplayGridFlags ^= Flag;
 
 	SaveSettings();
 }

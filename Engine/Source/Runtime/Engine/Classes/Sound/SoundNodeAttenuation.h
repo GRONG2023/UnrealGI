@@ -22,7 +22,7 @@ class USoundNodeAttenuation : public USoundNode
 	GENERATED_UCLASS_BODY()
 
 	UPROPERTY(EditAnywhere, Category=Attenuation, meta=(EditCondition="!bOverrideAttenuation"))
-	USoundAttenuation* AttenuationSettings;
+	TObjectPtr<USoundAttenuation> AttenuationSettings;
 
 	UPROPERTY(EditAnywhere, Category=Attenuation, meta=(EditCondition="bOverrideAttenuation"))
 	FSoundAttenuationSettings AttenuationOverrides;
@@ -34,6 +34,7 @@ public:
 	//~ Begin USoundNode Interface. 
 	virtual void ParseNodes( class FAudioDevice* AudioDevice, const UPTRINT NodeWaveInstanceHash, FActiveSound& ActiveSound, const FSoundParseParameters& ParseParams, TArray<FWaveInstance*>& WaveInstances ) override;
 	virtual float GetMaxDistance() const override;
+	virtual bool HasAttenuationNode() const override { return true; }
 	//~ End USoundNode Interface. 
 
 	ENGINE_API const FSoundAttenuationSettings* GetAttenuationSettingsToApply() const;

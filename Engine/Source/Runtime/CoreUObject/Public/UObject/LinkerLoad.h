@@ -2,18 +2,59 @@
 
 #pragma once
 
+#include "Async/Mutex.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "CoreGlobals.h"
 #include "CoreMinimal.h"
+#include "HAL/LowLevelMemTracker.h"
+#include "HAL/PlatformMath.h"
+#include "HAL/ThreadSafeCounter.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Optional.h"
+#include "Misc/PackagePath.h"
+#include "Serialization/Archive.h"
 #include "Serialization/ArchiveUObject.h"
+#include "Serialization/StructuredArchive.h"
+#include "Serialization/StructuredArchiveFwd.h"
+#include "Serialization/StructuredArchiveSlots.h"
+#include "Templates/UniquePtr.h"
 #include "UObject/LazyObjectPtr.h"
-#include "UObject/SoftObjectPtr.h"
-#include "UObject/ObjectResource.h"
 #include "UObject/Linker.h"
+#include "UObject/LinkerInstancingContext.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectHandle.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectResource.h"
+#include "UObject/PackageResourceManager.h"
+#include "UObject/PersistentObjectPtr.h"
+#include "UObject/SoftObjectPath.h"
+#include "UObject/SoftObjectPtr.h"
+#include "UObject/UnrealNames.h"
 
+class FBulkData;
+class FLinkerLoad;
 class FLinkerPlaceholderBase;
+class FPackageIndex;
+class FStructuredArchiveChildReader;
 class IPakFile;
+class UClass;
 class ULinkerPlaceholderExportObject;
+class UObject;
+class UPackage;
+class UStruct;
+namespace UE::Serialization{ class FEditorBulkData; }
+namespace UE::BulkData::Private{ class FBulkMetaData; }
+namespace UE{ class FPackageTrailer; }
+struct FObjectPtr;
+struct FOpenPackageResult;
 struct FScopedSlowTask;
-struct FUntypedBulkData;
+struct FUObjectSerializeContext;
+template <typename FuncType> class TFunction;
+
+LLM_DECLARE_TAG(UObject_Linker);
 
 /*----------------------------------------------------------------------------
 	FLinkerLoad.
@@ -84,6 +125,7 @@ class FLinkerLoad
 	friend class UPackageMap;
 	friend struct FAsyncPackage;
 	friend struct FAsyncPackage2;
+	friend class FAsyncLoadingThread2;
 	friend struct FResolvingExportTracker;
 protected:
 	/** Linker loading status. */
@@ -122,8 +164,6 @@ public:
 	uint32					LoadFlags;
 	/** Indicates whether the imports for this loader have been verified													*/
 	bool					bHaveImportsBeenVerified;
-	/** Indicates that this linker was created for a dynamic class package and will not use Loader */
-	bool					bDynamicClassLinker;
 
 	UObject*				TemplateForGetArchetypeFromLoader;
 	bool					bForceSimpleIndexToObject;
@@ -136,15 +176,42 @@ public:
 		return bIsAsyncLoader ? (FAsyncArchive*)Loader : nullptr;
 	}
 
+	virtual FString GetDebugName() const override
+	{
+		return GetPackagePath().GetDebugName();
+	}
+
+	/** Get the PackagePath being loaded. For linkers created from LoadPackage this will be a mounted and extension-specified path, but it may be unmounted and unspecified for other linkers */
+	const FPackagePath& GetPackagePath() const
+	{
+		return PackagePath;
+	}
+
 	FORCEINLINE const FLinkerInstancingContext& GetInstancingContext() const
 	{
 		return InstancingContext;
 	}
 
+	const UE::FPackageTrailer* GetPackageTrailer() const
+	{
+		return PackageTrailer.Get();
+	}
+
+#if WITH_EDITOR
+	bool IsPackageRelocated() const
+	{
+		return bIsPackageRelocated;
+	}
+#endif
+
 private:
 
 	/** True if the linker is currently deleting loader */
 	bool					bIsDestroyingLoader;
+#if WITH_EDITOR
+	/** Tracks if DetachLoader has been called or not */
+	bool					bDetachedLoader;
+#endif // WITH_EDITOR
 
 	/** Structured archive interface. Wraps underlying loader to provide contextual metadata to the values being written
 	 *  which ultimately allows text based serialization of the data
@@ -153,6 +220,11 @@ private:
 	FArchiveFormatterType* StructuredArchiveFormatter;
 	TOptional<FStructuredArchive::FRecord> StructuredArchiveRootRecord;
 	TArray<FStructuredArchiveChildReader*> ExportReaders;
+	/** The packagepath being loaded */
+	FPackagePath		PackagePath;
+
+	/** Set the packagepath being loaded */
+	void SetPackagePath(const FPackagePath& PackagePath);
 
 	/** The archive that actually reads the raw data from disk.																*/
 	FArchive*				Loader;
@@ -160,17 +232,24 @@ private:
 	/** The linker instancing context. */
 	FLinkerInstancingContext InstancingContext;
 
+	/** The trailer for the package */
+	TUniquePtr<UE::FPackageTrailer> PackageTrailer;
+
+	/** Set of imports that require additional verification at creation time. */
+	TSet<int32> ImportsToVerifyOnCreate;
+
 	// Helper function to access the InstancingContext IsInstanced, 
-	// returns false if WITH_EDITOR isn't defined.
 	bool IsContextInstanced() const;
 
-	// Helper function to access the InstancingContext, 
-	// return ObjectName directly  if WITH_EDITOR isn't defined.
-	FName InstancingContextRemap(FName ObjectName) const;
+	// Helper function to query if we should do any SoftObjectPath fixup
+	bool IsSoftObjectRemappingEnabled() const;
+
+	/** Remaps SoftObjectPaths using InstancingContextRemap. */
+	void FixupSoftObjectPathForInstancedPackage(FSoftObjectPath& InOutSoftObjectPath);
 
 protected:
 
-	void SetLoader(FArchive* InLoader);
+	void SetLoader(FArchive* InLoader, bool bInLoaderNeedsEngineVersionChecks);
 	FArchive* GetLoader() const { return Loader; }
 
 public:
@@ -191,21 +270,39 @@ public:
 
 	void DestroyLoader();
 
+	/**
+	 * Detaches all bulkdata currently attached to the FLinkerLoad followed by destroying the internal loader.
+	 * This is a fairly dangerous method to call as it will leave the FLinkerLoad in a state where using it as
+	 * a FArchive will cause an assert/crash. It is intended as a short/medium term fix to an internal engine
+	 * issue and will be deprecated as soon as possible. 
+	 */
+	COREUOBJECT_API void DetachLoader();
+
 	FORCEINLINE bool IsDestroyingLoader() const
 	{
 		return bIsDestroyingLoader;
 	}
 
 	/** The async package associated with this linker */
-	struct FAsyncPackage* AsyncRoot;
+	void* AsyncRoot;
+
 #if WITH_EDITOR
-	/** Bulk data that does not need to be loaded when the linker is loaded.												*/
-	TArray<FUntypedBulkData*> BulkDataLoaders;
+	/** Used when accessing BulkDataLoaders/EditorBulkDataLoaders to ensure thread safety */
+	UE::FMutex BulkDataMutex;
+
+	/** Bulk data that use the FLinkerLoad to track the state of the file on disk */
+	TSet<FBulkData*> BulkDataLoaders;
+	TSet<UE::Serialization::FEditorBulkData*> EditorBulkDataLoaders;
 #endif // WITH_EDITOR
 
 	/** Hash table for exports.																								*/
 	static constexpr int32 ExportHashCount = 256;
 	TUniquePtr<int32[]> ExportHash;
+
+	FORCEINLINE static int32 GetHashBucket(FName Object)
+	{
+		return GetTypeHash(Object.GetComparisonIndex()) & (ExportHashCount - 1);
+	}
 
 	/**
 	* List of imports and exports that must be serialized before other exports...all packed together, see FirstExportDependency
@@ -223,14 +320,30 @@ public:
 	 * @param bIsInstance If true, we're an instance, so check instance only maps as well
 	 * @return Names without path of all classes that were redirected to this name. Empty if none found.
 	 */
-	COREUOBJECT_API static TArray<FName> FindPreviousNamesForClass(FString CurrentClassPath, bool bIsInstance);
+	COREUOBJECT_API static TArray<FName> FindPreviousNamesForClass(const FString& CurrentClassPath, bool bIsInstance);
+
+	/**
+	 * Utility functions to query the object name redirects list for previous names for a class
+	 * @param CurrentClassPath The current name of the class, with a full path
+	 * @param bIsInstance If true, we're an instance, so check instance only maps as well
+	 * @param bIncludeShortNames If true, also include short names without a package
+	 * @return Full object paths of all classes that were redirected to this name. Empty if none found.
+	 */
+	COREUOBJECT_API static TArray<FString> FindPreviousPathNamesForClass(const FString& CurrentClassPath, bool bIsInstance, bool bIncludeShortNames = false);
 
 	/** 
 	 * Utility functions to query the object name redirects list for the current name for a class
 	 * @param OldClassName An old class name, without path
-	 * @return Current full path of the class. It will be None if no redirect found
+	 * @return Current name of the class. It will be None if no redirect found
 	 */
 	COREUOBJECT_API static FName FindNewNameForClass(FName OldClassName, bool bIsInstance);
+
+	/**
+	 * Utility functions to query the object name redirects list for the current name for a class
+	 * @param OldClassNameOrPathName An old class name or pathname
+	 * @return Current full path of the class. It will be empty if no redirect found
+	 */
+	COREUOBJECT_API static FString FindNewPathNameForClass(const FString& OldClassNameOrPathName, bool bIsInstance);
 
 	/** 
 	* Utility functions to query the enum name redirects list for the current name for an enum
@@ -265,6 +378,16 @@ public:
 	COREUOBJECT_API static bool RemoveKnownMissingPackage(FName PackageName);
 
 	/**
+	 * Determines if imports can be lazily loaded.  This relies on compile-time enabling of UE_WITH_OBJECT_HANDLE_LATE_RESOLVE from ObjectHandle.h as well as other factors.
+	 * @return true if imports can be lazily loaded
+	 */
+	#if UE_WITH_OBJECT_HANDLE_LATE_RESOLVE
+	COREUOBJECT_API static bool IsImportLazyLoadEnabled();
+	#else
+	inline static bool IsImportLazyLoadEnabled() { return false; }
+	#endif // UE_WITH_OBJECT_HANDLE_LATE_RESOLVE
+
+	/**
 	 * 
 	 */
 	COREUOBJECT_API static void OnNewFileAdded(const FString& Filename);
@@ -281,10 +404,16 @@ public:
 	 */
 	COREUOBJECT_API static void AddGameNameRedirect(const FName OldName, const FName NewName);
 
+	virtual bool SerializeBulkData(FBulkData& BulkData, const FBulkDataSerializationParams& Params) override;
+
 private:
+
+	void SerializeBulkMeta(UE::BulkData::Private::FBulkMetaData& Meta, int64& DuplicateSerialOffset, int32 ElementSize);
 
 	// Variables used during async linker creation.
 
+	/** Current index into soft object path list, used by async linker creation for spreading out serializing soft object path entries.	*/
+	int32						SoftObjectPathListIndex;
 	/** Current index into gatherable text data map, used by async linker creation for spreading out serializing text entries.	*/
 	int32						GatherableTextDataMapIndex;
 	/** Current index into import map, used by async linker creation for spreading out serializing importmap entries.			*/
@@ -299,14 +428,20 @@ private:
 
 	/** Whether we already serialized the package file summary.																*/
 	bool					bHasSerializedPackageFileSummary:1;
-	/** Whether we have already reconstructed the import/export tables for a text asset */
-	bool					bHasReconstructedImportAndExportMap:1;
+	/** Whether we already serialized the package trailer.																	*/
+	bool					bHasSerializedPackageTrailer : 1;
+	/** Whether we have already constructed the exports readers																*/
+	bool					bHasConstructedExportsReaders:1;
 	/** Whether we already serialized preload dependencies.																	*/
 	bool					bHasSerializedPreloadDependencies:1;
 	/** Whether we already fixed up import map.																				*/
 	bool					bHasFixedUpImportMap:1;
-	/** Whether we already fixed up import map.																				*/
+	/** Whether we already populated the instancing context.																*/
 	bool					bHasPopulatedInstancingContext:1;
+	/** Whether we already relocated references.																			*/
+	bool					bHasRelocatedReferences:1;
+	/** Whether we already applied the instancing context to the soft object list.											*/
+	bool					bHasAppliedInstancingContext : 1;
 	/** Used for ActiveClassRedirects functionality */
 	bool					bFixupExportMapDone:1;
 	/** Whether we already matched up existing exports.																		*/
@@ -321,17 +456,29 @@ private:
 	bool					bUseTimeLimit:1;
 	/** Whether to use the full time limit, even if we're blocked on I/O													*/
 	bool					bUseFullTimeLimit:1;
+	/** Whether the loader needs version and correctness checks (see OpenReadPackage)										*/
+	bool					bLoaderNeedsEngineVersionChecks : 1;
+
+#if WITH_EDITOR
+	/** Check to avoid multiple export duplicate fixups in case we don't save asset. */
+	bool bExportsDuplicatesFixed : 1;
+
+	/** Cache if the package is relocated or not */
+	bool bIsPackageRelocated : 1;
+
+	/** Set when the loader is serializing to a property bag placeholder object.											*/
+	bool bIsLoadingToPropertyBagObject : 1;
+
+	/** TRUE when the loader is actively serializing an object's script properties data.									*/
+	bool bIsSerializingScriptProperties : 1;
+#endif // WITH_EDITOR
+
 	/** Call count of IsTimeLimitExceeded.																					*/
 	int32					IsTimeLimitExceededCallCount;
 	/** Current time limit to use if bUseTimeLimit is true.																	*/
 	float					TimeLimit;
 	/** Time at begin of Tick function. Used for time limit determination.													*/
 	double					TickStartTime;
-
-#if WITH_EDITOR
-	/** Check to avoid multiple export duplicate fixups in case we don't save asset. */
-	bool bExportsDuplicatesFixed;
-#endif // WITH_EDITOR
 	/** Id of the thread that created this linker. This is to guard against using this linker on other threads than the one it was created on **/
 	int32					OwnerThread;
 
@@ -368,9 +515,6 @@ private:
 	};
 
 private:
-
-	/** Allows access to UTexture2D::StaticClass() without linking Core with Engine											*/
-	static UClass* UTexture2DStaticClass;
 
 	static FName NAME_LoadErrors;
 
@@ -409,11 +553,6 @@ private:
 public:
 
 	/**
-	 * Initialize the static variables
-	 */
-	COREUOBJECT_API static void StaticInit(UClass* InUTexture2DStaticClass);
-
-	/**
 	 * Add redirects to FLinkerLoad static map
 	 */
 	static void CreateActiveRedirectsMap(const FString& GEngineIniName);
@@ -427,6 +566,8 @@ public:
 	 * Locates package index for a UPackage import
 	 */
 	COREUOBJECT_API bool FindImportPackage(FName PackageName, FPackageIndex& PackageIdx);
+	/* Locates package index for a given name in an outer. */
+	COREUOBJECT_API bool FindImport(FPackageIndex OuterIndex, FName ObjectName, FPackageIndex& OutObjectIndex);
 
 	/**
 	 * Locates the class adjusted index and its package adjusted index for a given class name in the import map
@@ -471,13 +612,15 @@ public:
 	 * Creates and returns a FLinkerLoad object.
 	 *
 	 * @param	Parent				Parent object to load into, can be NULL (most likely case)
-	 * @param	Filename			Name of file on disk to load
+	 * @param	PackagePath			Path of the package on disk to load
 	 * @param	LoadFlags			Load flags determining behavior
 	 * @param	InLoader			Loader archive override
 	 * @param	InstancingContext	Context to remap package name when loading a package on disk into a package with a different name
 	 *
 	 * @return	new FLinkerLoad object for Parent/ Filename
 	 */
+	COREUOBJECT_API static FLinkerLoad* CreateLinker(FUObjectSerializeContext* LoadContext, UPackage* Parent, const FPackagePath& PackagePath, uint32 LoadFlags, FArchive* InLoader = nullptr, const FLinkerInstancingContext* InstancingContext = nullptr);
+	UE_DEPRECATED(5.0, "Use version that takes an FPackagePath instead")
 	COREUOBJECT_API static FLinkerLoad* CreateLinker(FUObjectSerializeContext* LoadContext, UPackage* Parent, const TCHAR* Filename, uint32 LoadFlags, FArchive* InLoader = nullptr, const FLinkerInstancingContext* InstancingContext = nullptr);
 
 	void Verify();
@@ -535,19 +678,19 @@ public:
 	 * @return	ObjectName for the FObjectResource at ResourceIndex, or NAME_None if not found
 	 */
 	FName ResolveResourceName( FPackageIndex ResourceIndex );
+
+	/**
+	 * Returns the Object associated with the resource indicated.
+	 *
+	 * @param	ResourceIndex	location of the object resource
+	 *
+	 * @return	The UObject at ResourceIndex, or nullptr if not found
+	 */
+	UObject* ResolveResource(FPackageIndex ResourceIndex);
 	
 	int32 FindExportIndex( FName ClassName, FName ClassPackage, FName ObjectName, FPackageIndex ExportOuterIndex );
-	
-	/**
-	 * Function to create the instance of, or verify the presence of, an object as found in this Linker.
-	 *
-	 * @param ObjectClass	The class of the object
-	 * @param ObjectName	The name of the object
-	 * @param Outer			Optional outer that this object must be in (for finding objects in a specific group when there are multiple groups with the same name)
-	 * @param LoadFlags		Flags used to determine if the object is being verified or should be created
-	 * @param Checked		Whether or not a failure will throw an error
-	 * @return The created object, or (UObject*)-1 if this is just verifying
-	 */
+
+	UE_DEPRECATED(5.0, "Create was only used for the now-deprecated Conform argument to UPackage::Save. Contact Epic via UDN if you still need this function.")
 	UObject* Create( UClass* ObjectClass, FName ObjectName, UObject* Outer, uint32 InLoadFlags, bool Checked );
 
 	/**
@@ -649,12 +792,11 @@ public:
 	 */
 	COREUOBJECT_API static void InvalidateExport(UObject* OldObject);
 
-	/** Used by Matinee to fixup component renaming */
-	COREUOBJECT_API static FName FindSubobjectRedirectName(const FName& Name, UClass* Class);
-
 #if WITH_EDITOR
 	COREUOBJECT_API static bool GetPreloadingEnabled();
 	COREUOBJECT_API static void SetPreloadingEnabled(bool bEnabled);
+	COREUOBJECT_API static bool TryGetPreloadedLoader(const FPackagePath& InPackagePath, FOpenPackageResult& OutResult);
+	UE_DEPRECATED(5.0, "Use version that takes a PackagePath instead")
 	COREUOBJECT_API static bool TryGetPreloadedLoader(FArchive*& OutLoader, const TCHAR* FileName);
 	private:
 		static bool bPreloadingEnabled;
@@ -690,6 +832,15 @@ private:
 
 #endif // WITH_EDITOR
 
+
+	/**
+	 * Validate if the current linker may reference a certain package
+	 * Checks if the reference to a certain package from this linker is legal if that package isn't externally referenceable (i.e private outiside its plugin)
+	 * @param InPackage the package to validate
+	 * @returns true if the package can be referenced from this linker
+	 */
+	bool IsPackageReferenceAllowed(UPackage* InPackage);
+
 	UObject* CreateExport( int32 Index );
 
 	/**
@@ -710,6 +861,18 @@ private:
 	 * @return The class that the specified export's ClassIndex references.
 	 */
 	UClass* GetExportLoadClass(int32 ExportIndex);
+
+#if WITH_EDITOR
+	/**
+	 * Utility function to create a placeholder type for the specified export.
+	 * This will be called if the export could not resolve its LoadClass import.
+	 * In that case, its data might still be serializable (into a property bag).
+	 *
+	 * @param  ExportIndex    Index of the export that's missing its type.
+	 * @return The placeholder type that will be used to load the export's data.
+	 */
+	UClass* TryCreatePlaceholderTypeForExport(int32 ExportIndex);
+#endif
 
 #if WITH_EDITORONLY_DATA
 	/** 
@@ -751,27 +914,6 @@ private:
 
 	void DetachExport( int32 i );
 
-	// FArchive interface.
-	/**
-	 * Hint the archive that the region starting at passed in offset and spanning the passed in size
-	 * is going to be read soon and should be precached.
-	 *
-	 * The function returns whether the precache operation has completed or not which is an important
-	 * hint for code knowing that it deals with potential async I/O. The archive is free to either not 
-	 * implement this function or only partially precache so it is required that given sufficient time
-	 * the function will return true. Archives not based on async I/O should always return true.
-	 *
-	 * This function will not change the current archive position.
-	 *
-	 * @param	PrecacheOffset	Offset at which to begin precaching.
-	 * @param	PrecacheSize	Number of bytes to precache
-	 * @return	false if precache operation is still pending, true otherwise
-	 */
-	FORCEINLINE virtual bool Precache(int64 PrecacheOffset, int64 PrecacheSize) override
-	{
-		return bDynamicClassLinker || Loader->Precache(PrecacheOffset, PrecacheSize);
-	}
-
 #if WITH_EDITOR
 	/**
 	 * Attaches/ associates the passed in bulk data object with the linker.
@@ -779,14 +921,16 @@ private:
 	 * @param	Owner		UObject owning the bulk data
 	 * @param	BulkData	Bulk data object to associate
 	 */
-	virtual void AttachBulkData(UObject* Owner, FUntypedBulkData* BulkData) override;
+	virtual void AttachBulkData(UObject* Owner, FBulkData* BulkData) override;
+	virtual void AttachBulkData(UE::Serialization::FEditorBulkData* BulkData) override;
 	/**
 	 * Detaches the passed in bulk data object from the linker.
 	 *
 	 * @param	BulkData	Bulk data object to detach
 	 * @param	bEnsureBulkDataIsLoaded	Whether to ensure that the bulk data is loaded before detaching
 	 */
-	virtual void DetachBulkData(FUntypedBulkData* BulkData, bool bEnsureBulkDataIsLoaded) override;
+	virtual void DetachBulkData(FBulkData* BulkData, bool bEnsureBulkDataIsLoaded) override;
+	virtual void DetachBulkData(UE::Serialization::FEditorBulkData* BulkData, bool bEnsureBulkDataIsLoaded) override;
 	/**
 	 * Detaches all attached bulk  data objects.
 	 *
@@ -802,22 +946,72 @@ public:
 	COREUOBJECT_API void LoadAndDetachAllBulkData();
 
 	/**
-	* Detaches linker from bulk data/ exports and removes itself from array of loaders.
-	*/
+	 * Detaches linker from bulk data and exports and removes itself from array of loaders.
+	 */
 	COREUOBJECT_API void Detach();
+
+	/**
+	 * Only detaches the linker from its exports and the reset their cached state in the linker without touching bulkdata or underlying loader
+	 */
+	COREUOBJECT_API void DetachExports();
+
+	/** Should bulkdata identifiers should be regenerated as they are loaded or not */
+	bool ShouldRegenerateGuids() const
+	{
+		return (LoadFlags & LOAD_RegenerateBulkDataGuids) != 0;
+	}
 
 private:
 
+	// FArchive interface.
+	/**
+	 * Hint the archive that the region starting at passed in offset and spanning the passed in size
+	 * is going to be read soon and should be precached.
+	 *
+	 * The function returns whether the precache operation has completed or not which is an important
+	 * hint for code knowing that it deals with potential async I/O. The archive is free to either not
+	 * implement this function or only partially precache so it is required that given sufficient time
+	 * the function will return true. Archives not based on async I/O should always return true.
+	 *
+	 * This function will not change the current archive position.
+	 *
+	 * @param	PrecacheOffset	Offset at which to begin precaching.
+	 * @param	PrecacheSize	Number of bytes to precache
+	 * @return	false if precache operation is still pending, true otherwise
+	 */
+	FORCEINLINE virtual bool Precache(int64 PrecacheOffset, int64 PrecacheSize) override
+	{
+#if WITH_EDITOR
+		checkf(!bDetachedLoader, TEXT("Attempting to call ::Precache on a FLinkerLoad that has previously called ::DetachLoader"));
+#endif // WITH_EDITOR
+
+		return Loader->Precache(PrecacheOffset, PrecacheSize);
+	}
+
 	FORCEINLINE virtual void Seek(int64 InPos) override
 	{
+#if WITH_EDITOR
+		checkf(!bDetachedLoader, TEXT("Attempting to call ::Seek on a FLinkerLoad that has previously called ::DetachLoader"));
+#endif // WITH_EDITOR
+
 		Loader->Seek(InPos);
 	}
+
 	FORCEINLINE virtual int64 Tell() override
 	{
+#if WITH_EDITOR
+		checkf(!bDetachedLoader, TEXT("Attempting to call ::Tell on a FLinkerLoad that has previously called ::DetachLoader"));
+#endif // WITH_EDITOR
+
 		return Loader->Tell();
 	}
+
 	FORCEINLINE virtual int64 TotalSize() override
 	{
+#if WITH_EDITOR
+		checkf(!bDetachedLoader, TEXT("Attempting to call ::TotalSize on a FLinkerLoad that has previously called ::DetachLoader"));
+#endif // WITH_EDITOR
+
 		return Loader->TotalSize();
 	}
 
@@ -825,11 +1019,25 @@ private:
 	using FLinker::Serialize;
 	FORCEINLINE virtual void Serialize(void* V, int64 Length) override
 	{
+#if WITH_EDITOR
+		checkf(!bDetachedLoader, TEXT("Attempting to call ::Serialize on a FLinkerLoad that has previously called ::DetachLoader"));
+#endif // WITH_EDITOR
+
 		checkSlow(FPlatformTLS::GetCurrentThreadId() == OwnerThread);
 #if WITH_EDITOR
 		Loader->SetSerializedProperty(GetSerializedProperty());
+
+		// This handles the case where we're only serializing to a property bag and we don't immediately know where the script
+		// property data starts/ends in the object's data stream. Allows for loading from packages saved with an older version.
+		if (UNLIKELY(bIsLoadingToPropertyBagObject && !bIsSerializingScriptProperties))
+		{
+			Loader->Seek(Tell() + Length);
+		}
+		else
 #endif
-		Loader->Serialize(V, Length);
+		{
+			Loader->Serialize(V, Length);
+		}
 	}
 	using FArchiveUObject::operator<<; // For visibility of the overloads we don't override
 	virtual FArchive& operator<<(UObject*& Object) override;
@@ -842,15 +1050,12 @@ private:
 		return Ar;
 	}
 
-	FORCEINLINE virtual FArchive& operator<<(FSoftObjectPtr& Value) override
-	{
-		FArchive& Ar = *this;
-		FSoftObjectPath ID;
-		ID.Serialize(Ar);
-		Value = ID;
-		return Ar;
-	}
+	virtual FArchive& operator<<(FObjectPtr& ObjectPtr) override;
+	virtual FArchive& operator<<(FSoftObjectPath& Value) override;
+
+	void BadSoftObjectPathError(int32 SoftObjIndex);
 	void BadNameIndexError(int32 NameIndex);
+
 	FORCEINLINE virtual FArchive& operator<<(FName& Name) override
 	{
 		FArchive& Ar = *this;
@@ -898,13 +1103,13 @@ private:
 	 * true in which case the returned linker object has finished the async creation process.
 	 *
 	 * @param	Parent				Parent object to load into, can be NULL (most likely case)
-	 * @param	Filename			Name of file on disk to load
+	 * @param	PackagePath			Path of the package data to load
 	 * @param	LoadFlags			Load flags determining behavior
 	 * @param	InstancingContext	Context to remap package name when loading a package on disk into a package with a different name
 	 *
 	 * @return	new FLinkerLoad object for Parent/ Filename
 	 */
-	COREUOBJECT_API static FLinkerLoad* CreateLinkerAsync(FUObjectSerializeContext* LoadContext, UPackage* Parent, const TCHAR* Filename, uint32 LoadFlags, const FLinkerInstancingContext* InstancingContext
+	COREUOBJECT_API static FLinkerLoad* CreateLinkerAsync(FUObjectSerializeContext* LoadContext, UPackage* Parent, const FPackagePath& PackagePath, uint32 LoadFlags, const FLinkerInstancingContext* InstancingContext
 		, TFunction<void()>&& InSummaryReadyCallback
 	);
 
@@ -925,11 +1130,11 @@ protected: // Daniel L: Made this protected so I can override the constructor an
 	 * Private constructor, passing arguments through from CreateLinker.
 	 *
 	 * @param	Parent				Parent object to load into, can be NULL (most likely case)
-	 * @param	Filename			Name of file on disk to load
+	 * @param	PackagePath			Path of the package data to load
 	 * @param	LoadFlags			Load flags determining behavior
 	 * @param	InstancingContext	The instancing context for remapping imports if needed.
 	 */
-	FLinkerLoad(UPackage* InParent, const TCHAR* InFilename, uint32 InLoadFlags, FLinkerInstancingContext InstancingContext = FLinkerInstancingContext());
+	FLinkerLoad(UPackage* InParent, const FPackagePath& PackagePath, uint32 InLoadFlags, FLinkerInstancingContext InstancingContext = FLinkerInstancingContext());
 private:
 	/**
 	 * Returns whether the time limit allotted has been exceeded, if enabled.
@@ -948,6 +1153,8 @@ protected: // Daniel L: Made this protected so I can override the constructor an
 		TFunction<void()>&& InSummaryReadyCallback
 	);
 private:
+	ELinkerStatus ProcessPackageSummary(TMap<TPair<FName, FPackageIndex>, FPackageIndex>* ObjectNameWithOuterToExportMap);
+
 	/**
 	 * Start the process of serializing the package file summary if needed
 	 */
@@ -962,11 +1169,21 @@ private:
 	 * Updates the linker, loader and root package with data from the package file summary.
 	 * */
 	ELinkerStatus UpdateFromPackageFileSummary();
+	
+	/** 
+	 * Serializes the header for the package trailer, allowing us to identify the payloads of the package 
+	 */
+	ELinkerStatus SerializePackageTrailer();
 
 	/**
 	 * Serializes the name map.
 	 */
 	ELinkerStatus SerializeNameMap();
+
+	/**
+	 * Serializes the soft object map.
+	 */
+	ELinkerStatus SerializeSoftObjectPathList();
 
 	/**
 	 * Serializes the import map.
@@ -983,6 +1200,10 @@ private:
 	 */
 	ELinkerStatus PopulateInstancingContext();
 
+	ELinkerStatus RelocateReferences();
+
+	ELinkerStatus ApplyInstancingContext();
+
 	/**
 	 * Serializes the export map.
 	 */
@@ -990,24 +1211,28 @@ private:
 
 #if WITH_TEXT_ARCHIVE_SUPPORT
 	/**
-	 * Create an import and export table when loading a text asset.
+	 * Create the export readers.
 	 */
-	ELinkerStatus ReconstructImportAndExportMap();
+	ELinkerStatus ConstructExportsReaders();
 #endif
 
+	/**
+	 * Serializes the depends map.
+	 */
 	ELinkerStatus SerializeDependsMap();
 
+	/**
+	 * Serializes the preload dependencies.
+	 */
 	ELinkerStatus SerializePreloadDependencies();
+	
+	/**
+	 * Serializes the data resource map.
+	 */
+	ELinkerStatus SerializeDataResourceMap();
 
 	/** Sets the basic linker archive info */
 	void ResetStatusInfo();
-
-	/** For a given full object path, find or create the associated import or export table record. Used when loading text assets which only store object paths */
-	FPackageIndex FindOrCreateImportOrExport(const FString& InFullPath);
-
-	/** For the given object and class info, find or create an associated import record. Used when loading text assets which only store object paths */
-	FPackageIndex FindOrCreateImport(const FName InObjectName, const FName InClassName, const FName InClassPackageName);
-
 public:
 	/**
 	 * Serializes the gatherable text data container.
@@ -1042,11 +1267,12 @@ public:
 	 * NOTE: For now, this will only produce UClass placeholders, as that is the 
 	 *       only type we've identified needing.
 	 * 
+	 * @param  Property		 The property for which you want to defer loading the value.
 	 * @param  ObjectType    The expected type of the object you want to defer loading of.
 	 * @param  ObjectPath    The full object/package path for the expected object.
 	 * @return A FLinkerPlaceholderBase UObject that can be used in place of the import dependency.
 	 */
-	UObject* RequestPlaceholderValue(UClass* ObjectType, const TCHAR* ObjectPath);
+	UObject* RequestPlaceholderValue(const FProperty* Property, const UClass* ObjectType, const TCHAR* ObjectPath);
 
 private:
 	/**
@@ -1200,10 +1426,7 @@ private:
 	/** Finds import, tries to fall back to dynamic class if the object could not be found */
 	UObject* FindImport(UClass* ImportClass, UObject* ImportOuter, const TCHAR* Name);
 	/** Finds import, tries to fall back to dynamic class if the object could not be found */
-	static UObject* FindImportFast(UClass* ImportClass, UObject* ImportOuter, FName Name, bool bAnyPackage = false);
-
-	/** Fills all necessary information for constructing dynamic type package linker */
-	void CreateDynamicTypeLoader();
+	static UObject* FindImportFast(UClass* ImportClass, UObject* ImportOuter, FName Name, bool bFindObjectbyName = false);
 
 #if	USE_CIRCULAR_DEPENDENCY_LOAD_DEFERRING
 	/** 
@@ -1260,9 +1483,6 @@ private:
 private:
 
 #if WITH_TEXT_ARCHIVE_SUPPORT
-	// Cache of the export names in a text asset. Allows us to enter those export slots by index rather than needing to reconstruct the name
-	TArray<FName> OriginalExportNames;
-
 	// Function to get a slot for a given export
 	FStructuredArchiveSlot GetExportSlot(FPackageIndex InExportIndex);
 #endif
@@ -1282,6 +1502,7 @@ enum class ENotifyRegistrationType
 	NRT_Struct,
 	NRT_Enum,
 	NRT_Package,
+	NRT_NoExportObject,
 };
 
 enum class ENotifyRegistrationPhase
@@ -1291,5 +1512,6 @@ enum class ENotifyRegistrationPhase
 	NRP_Finished,
 };
 
-COREUOBJECT_API void NotifyRegistrationEvent(const TCHAR* PackageName, const TCHAR* Name, ENotifyRegistrationType NotifyRegistrationType, ENotifyRegistrationPhase NotifyRegistrationPhase, UObject *(*InRegister)() = nullptr, bool InbDynamic = false);
+COREUOBJECT_API void NotifyRegistrationEvent(const TCHAR* PackageName, const TCHAR* Name, ENotifyRegistrationType NotifyRegistrationType, ENotifyRegistrationPhase NotifyRegistrationPhase, UObject *(*InRegister)() = nullptr, bool InbDynamic = false, UObject* FinishedObject = nullptr);
 COREUOBJECT_API void NotifyRegistrationComplete();
+COREUOBJECT_API bool IsEnforcePackageCompatibleVersionCheck();

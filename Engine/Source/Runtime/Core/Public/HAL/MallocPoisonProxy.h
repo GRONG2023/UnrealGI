@@ -114,10 +114,12 @@ public:
 		return UsedMalloc->ValidateHeap();
 	}
 
+#if UE_ALLOW_EXEC_COMMANDS
 	virtual bool Exec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar ) override
 	{
 		return UsedMalloc->Exec(InWorld, Cmd, Ar);
 	}
+#endif // UE_ALLOW_EXEC_COMMANDS
 
 	virtual bool GetAllocationSize(void *Original, SIZE_T &SizeOut) override
 	{
@@ -142,6 +144,22 @@ public:
 	virtual void ClearAndDisableTLSCachesOnCurrentThread() override
 	{
 		UsedMalloc->ClearAndDisableTLSCachesOnCurrentThread();
+	}
+
+	virtual void OnMallocInitialized() override
+	{
+		UsedMalloc->OnMallocInitialized();
+	}
+
+	virtual void OnPreFork() override
+	{
+		UsedMalloc->OnPreFork();
+	}
+
+
+	virtual void OnPostFork() override
+	{
+		UsedMalloc->OnPostFork();
 	}
 
 	// FMalloc interface end

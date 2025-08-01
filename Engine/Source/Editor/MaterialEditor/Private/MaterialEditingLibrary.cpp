@@ -1,12 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "MaterialEditingLibrary.h"
+#include "Engine/Texture.h"
 #include "Editor.h"
 #include "MaterialEditor.h"
 #include "MaterialInstanceEditor.h"
 #include "MaterialEditorUtilities.h"
 #include "MaterialShared.h"
 #include "MaterialGraph/MaterialGraphNode.h"
+#include "Materials/MaterialFunction.h"
 #include "Materials/MaterialInstance.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInstanceConstant.h"
@@ -27,9 +29,13 @@
 #include "EditorSupportDelegates.h"
 #include "Misc/RuntimeErrors.h"
 #include "SceneTypes.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "DebugViewModeHelpers.h"
 #include "Subsystems/AssetEditorSubsystem.h"
+#include "ShaderCompiler.h"
+#include "UObject/UObjectIterator.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MaterialEditingLibrary)
 
 DEFINE_LOG_CATEGORY_STATIC(LogMaterialEditingLibrary, Warning, All);
 
@@ -39,7 +45,7 @@ static FExpressionInput* GetExpressionInputByName(UMaterialExpression* Expressio
 	check(Expression);
 	FExpressionInput* Result = nullptr;
 
-	TArray<FExpressionInput*> Inputs = Expression->GetInputs();
+	TArrayView<FExpressionInput*> Inputs = Expression->GetInputsView();
 
 	// Return first input if no name specified
 	if (InputName.IsNone())
@@ -178,7 +184,7 @@ namespace MaterialEditingLibraryImpl
 
 		MaterialExpressionsToLayout.Add( MaterialExpression ) = MoveTemp( LayoutInfo );
 
-		for ( FExpressionInput* ExpressionInput : MaterialExpression->GetInputs() )
+		for ( FExpressionInput* ExpressionInput : MaterialExpression->GetInputsView() )
 		{
 			LayoutMaterialExpression( ExpressionInput->Expression, MaterialExpression, MaterialExpressionsToLayout, Row, Depth + 1 );
 		}
@@ -389,7 +395,7 @@ int32 UMaterialEditingLibrary::GetNumMaterialExpressions(const UMaterial* Materi
 	int32 Result = 0;
 	if (Material)
 	{
-		Result = Material->Expressions.Num();
+		Result = Material->GetExpressions().Num();
 	}
 	return Result;
 }
@@ -398,8 +404,7 @@ void UMaterialEditingLibrary::DeleteAllMaterialExpressions(UMaterial* Material)
 {
 	if (Material)
 	{
-		TArray<UMaterialExpression*> AllExpressions = Material->Expressions;
-		for (UMaterialExpression* Expression : AllExpressions)
+		for (UMaterialExpression* Expression : Material->GetExpressions())
 		{
 			DeleteMaterialExpression(Material, Expression);
 		}
@@ -407,7 +412,7 @@ void UMaterialEditingLibrary::DeleteAllMaterialExpressions(UMaterial* Material)
 }
 
 /** Util to iterate over list of expressions, and break any links to specified expression */
-static void BreakLinksToExpression(TArray<UMaterialExpression*>& Expressions, UMaterialExpression* Expression)
+static void BreakLinksToExpression(TConstArrayView<TObjectPtr<UMaterialExpression>> Expressions, UMaterialExpression* Expression)
 {
 	// Need to find any other expressions which are connected to this one, and break link
 	for (UMaterialExpression* TestExp : Expressions)
@@ -415,7 +420,7 @@ static void BreakLinksToExpression(TArray<UMaterialExpression*>& Expressions, UM
 		// Don't check myself, though that shouldn't really matter...
 		if (TestExp != Expression)
 		{
-			TArray<FExpressionInput*> Inputs = TestExp->GetInputs();
+			TArrayView<FExpressionInput*> Inputs = TestExp->GetInputsView();
 			for (FExpressionInput* Input : Inputs)
 			{
 				if (Input->Expression == Expression)
@@ -432,7 +437,7 @@ void UMaterialEditingLibrary::DeleteMaterialExpression(UMaterial* Material, UMat
 	if (Material && Expression && Expression->GetOuter() == Material)
 	{
 		// Break any links to this expression
-		BreakLinksToExpression(Material->Expressions, Expression);
+		BreakLinksToExpression(Material->GetExpressions(), Expression);
 
 		// Check material parameter inputs, to make sure expression is not connected to it
 		for (int32 InputIndex = 0; InputIndex < MP_MAX; InputIndex++)
@@ -446,9 +451,9 @@ void UMaterialEditingLibrary::DeleteMaterialExpression(UMaterial* Material, UMat
 
 		Material->RemoveExpressionParameter(Expression);
 
-		Material->Expressions.Remove(Expression);
+		Material->GetExpressionCollection().RemoveExpression(Expression);
 
-		Expression->MarkPendingKill();
+		Expression->MarkAsGarbage();
 
 		Material->MarkPackageDirty();
 	}
@@ -460,13 +465,51 @@ UMaterialExpression* UMaterialEditingLibrary::CreateMaterialExpression(UMaterial
 	return CreateMaterialExpressionEx(Material, nullptr, ExpressionClass, nullptr, NodePosX, NodePosY);
 }
 
+UMaterialExpression* UMaterialEditingLibrary::DuplicateMaterialExpression(UMaterial* Material, UMaterialFunction* MaterialFunction, UMaterialExpression* Expression)
+{
+	UMaterialExpression* NewExpression = nullptr;
+	if (Material || MaterialFunction)
+	{
+		UObject* ExpressionOuter = Material;
+		if (MaterialFunction)
+		{
+			ExpressionOuter = MaterialFunction;
+		}
+
+		NewExpression = DuplicateObject(Expression, ExpressionOuter);
+
+		if (Material)
+		{
+			Material->GetExpressionCollection().AddExpression(NewExpression);
+			NewExpression->Material = Material;
+		}
+
+		if (MaterialFunction && !Material)
+		{
+			MaterialFunction->GetExpressionCollection().AddExpression(NewExpression);
+		}
+
+		// Create a GUID for the node
+		NewExpression->UpdateMaterialExpressionGuid(true, true);
+
+		if (Material)
+		{
+			Material->AddExpressionParameter(NewExpression, Material->EditorParameters);
+		}
+
+		NewExpression->MarkPackageDirty();
+	}
+	return NewExpression;
+}
+
 UMaterialExpression* UMaterialEditingLibrary::CreateMaterialExpressionInFunction(UMaterialFunction* MaterialFunction, TSubclassOf<UMaterialExpression> ExpressionClass, int32 NodePosX, int32 NodePosY)
 {
 	return CreateMaterialExpressionEx(nullptr, MaterialFunction, ExpressionClass, nullptr, NodePosX, NodePosY);
 }
 
 
-UMaterialExpression* UMaterialEditingLibrary::CreateMaterialExpressionEx(UMaterial* Material, UMaterialFunction* MaterialFunction, TSubclassOf<UMaterialExpression> ExpressionClass, UObject* SelectedAsset, int32 NodePosX, int32 NodePosY)
+UMaterialExpression* UMaterialEditingLibrary::CreateMaterialExpressionEx(UMaterial* Material, UMaterialFunction* MaterialFunction, TSubclassOf<UMaterialExpression> ExpressionClass,
+	UObject* SelectedAsset, int32 NodePosX, int32 NodePosY, bool bAllowMarkingPackageDirty)
 {
 	UMaterialExpression* NewExpression = nullptr;
 	if (Material || MaterialFunction)
@@ -481,20 +524,20 @@ UMaterialExpression* UMaterialEditingLibrary::CreateMaterialExpressionEx(UMateri
 
 		if (Material)
 		{
-			Material->Expressions.Add(NewExpression);
+			Material->GetExpressionCollection().AddExpression(NewExpression);
 			NewExpression->Material = Material;
 		}
 
 		if (MaterialFunction && !Material)
 		{
-			MaterialFunction->FunctionExpressions.Add(NewExpression);
+			MaterialFunction->GetExpressionCollection().AddExpression(NewExpression);
 		}
 
 		NewExpression->MaterialExpressionEditorX = NodePosX;
 		NewExpression->MaterialExpressionEditorY = NodePosY;
 
 		// Create a GUID for the node
-		NewExpression->UpdateMaterialExpressionGuid(true, true);
+		NewExpression->UpdateMaterialExpressionGuid(true, bAllowMarkingPackageDirty);
 
 		if (SelectedAsset)
 		{
@@ -536,7 +579,7 @@ UMaterialExpression* UMaterialEditingLibrary::CreateMaterialExpressionEx(UMateri
 			FunctionOutput->ValidateName();
 		}
 
-		NewExpression->UpdateParameterGuid(true, true);
+		NewExpression->UpdateParameterGuid(true, bAllowMarkingPackageDirty);
 
 		if (NewExpression->HasAParameterName())
 		{
@@ -581,7 +624,10 @@ UMaterialExpression* UMaterialEditingLibrary::CreateMaterialExpressionEx(UMateri
 			Material->AddExpressionParameter(NewExpression, Material->EditorParameters);
 		}
 
-		NewExpression->MarkPackageDirty();
+		if (bAllowMarkingPackageDirty)
+		{
+			NewExpression->MarkPackageDirty();
+		}
 	}
 	return NewExpression;
 }
@@ -759,18 +805,134 @@ UMaterialExpression* UMaterialEditingLibrary::GetMaterialPropertyInputNode(UMate
 	return nullptr;
 }
 
+static FString GetExpressionOutputName(const FExpressionOutput& Output)
+{
+	if (!Output.OutputName.IsNone())
+	{
+		return Output.OutputName.ToString();
+	}
+	else if (Output.Mask)
+	{
+		if (Output.MaskR && !Output.MaskG && !Output.MaskB && !Output.MaskA)
+		{
+			return TEXT("R");
+		}
+		else if (!Output.MaskR && Output.MaskG && !Output.MaskB && !Output.MaskA)
+		{
+			return TEXT("G");
+		}
+		else if (!Output.MaskR && !Output.MaskG && Output.MaskB && !Output.MaskA)
+		{
+			return TEXT("B");
+		}
+		else if (!Output.MaskR && !Output.MaskG && !Output.MaskB && Output.MaskA)
+		{
+			return TEXT("A");
+		}
+	}
+	return FString();
+}
+
+FString UMaterialEditingLibrary::GetMaterialPropertyInputNodeOutputName(UMaterial* Material, EMaterialProperty Property)
+{
+	if (Material)
+	{
+		FExpressionInput* ExpressionInput = Material->GetExpressionInputForProperty(Property);
+		if (ExpressionInput->OutputIndex != INDEX_NONE
+			&& ExpressionInput->Expression
+			&& ExpressionInput->OutputIndex < ExpressionInput->Expression->Outputs.Num())
+		{
+			FExpressionOutput& Output = ExpressionInput->Expression->Outputs[ExpressionInput->OutputIndex];
+			return GetExpressionOutputName(Output);
+		}
+	}
+	return FString();
+}
+
+TArray<FString> UMaterialEditingLibrary::GetMaterialExpressionInputNames(UMaterialExpression* MaterialExpression)
+{
+	TArray<FString> InputNames;
+
+	TArrayView<FExpressionInput*> Inputs = MaterialExpression->GetInputsView();
+	for (int32 InputIdx = 0; InputIdx < Inputs.Num(); InputIdx++)
+	{
+		FName Name;
+		if (UMaterialExpressionMaterialFunctionCall* FuncCall = Cast<UMaterialExpressionMaterialFunctionCall>(MaterialExpression))
+		{
+			// If a function call, don't want to compare string with type postfix
+			Name = FuncCall->GetInputNameWithType(InputIdx, false);
+		}
+		else
+		{
+			const FName ExpressionInputName = MaterialExpression->GetInputName(InputIdx);
+			Name = UMaterialGraphNode::GetShortenPinName(ExpressionInputName);
+		}
+
+		InputNames.Add(Name.ToString());
+	}
+	return InputNames;
+}
+
+TArray<int32> UMaterialEditingLibrary::GetMaterialExpressionInputTypes(UMaterialExpression* MaterialExpression)
+{
+	TArray<int32> InputTypes;
+
+	TArrayView<FExpressionInput*> Inputs = MaterialExpression->GetInputsView();
+	for (int32 InputIdx = 0; InputIdx < Inputs.Num(); InputIdx++)
+	{
+		FExpressionInput* Input = Inputs[InputIdx];
+		UMaterialExpression* Expression = Input != nullptr ? Input->Expression : nullptr;
+		if (Expression != nullptr)
+		{
+			InputTypes.Add(Expression->GetOutputType(Input->OutputIndex));
+		}
+		else
+		{
+			InputTypes.Add(MaterialExpression->GetInputType(InputIdx));
+		}
+	}
+	return InputTypes;
+}
+
 TArray<UMaterialExpression*> UMaterialEditingLibrary::GetInputsForMaterialExpression(UMaterial* Material, UMaterialExpression* MaterialExpression)
 {
 	TArray<UMaterialExpression*> MaterialExpressions;
 	if (Material)
 	{
-		for (const FExpressionInput* Input : MaterialExpression->GetInputs())
+		for (const FExpressionInput* Input : MaterialExpression->GetInputsView())
 		{
 			MaterialExpressions.Add(Input->Expression);
 		}
 	}
 
 	return MaterialExpressions;
+}
+
+bool UMaterialEditingLibrary::GetInputNodeOutputNameForMaterialExpression(UMaterialExpression* MaterialExpression, UMaterialExpression* InputNode, FString& OutputName)
+{
+	OutputName = TEXT("");
+	for (const FExpressionInput* Input : MaterialExpression->GetInputsView())
+	{
+		if (Input->Expression == InputNode)
+		{
+			if(Input->OutputIndex != INDEX_NONE && Input->OutputIndex < InputNode->Outputs.Num())
+			{
+				FExpressionOutput& Output = InputNode->Outputs[Input->OutputIndex];
+				OutputName = GetExpressionOutputName(Output);
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+void UMaterialEditingLibrary::GetMaterialExpressionNodePosition(UMaterialExpression* MaterialExpression, int32& NodePosX, int32& NodePosY)
+{
+	if (MaterialExpression)
+	{
+		NodePosX = MaterialExpression->MaterialExpressionEditorX;
+		NodePosY = MaterialExpression->MaterialExpressionEditorY;
+	}
 }
 
 TArray<UTexture*> UMaterialEditingLibrary::GetUsedTextures(UMaterial* Material)
@@ -787,7 +949,7 @@ int32 UMaterialEditingLibrary::GetNumMaterialExpressionsInFunction(const UMateri
 	int32 Result = 0;
 	if (MaterialFunction)
 	{
-		Result = MaterialFunction->FunctionExpressions.Num();
+		Result = MaterialFunction->GetExpressions().Num();
 	}
 	return Result;
 }
@@ -796,8 +958,7 @@ void UMaterialEditingLibrary::DeleteAllMaterialExpressionsInFunction(UMaterialFu
 {
 	if (MaterialFunction)
 	{
-		TArray<UMaterialExpression*> AllExpressions = MaterialFunction->FunctionExpressions;
-		for (UMaterialExpression* Expression : AllExpressions)
+		for (UMaterialExpression* Expression : MaterialFunction->GetExpressions())
 		{
 			DeleteMaterialExpressionInFunction(MaterialFunction, Expression);
 		}
@@ -810,11 +971,11 @@ void UMaterialEditingLibrary::DeleteMaterialExpressionInFunction(UMaterialFuncti
 	if (MaterialFunction && Expression && Expression->GetOuter() == MaterialFunction)
 	{
 		// Break any links to this expression
-		BreakLinksToExpression(MaterialFunction->FunctionExpressions, Expression);
+		BreakLinksToExpression(MaterialFunction->GetExpressions(), Expression);
 
-		MaterialFunction->FunctionExpressions.Remove(Expression);
+		MaterialFunction->GetExpressionCollection().RemoveExpression(Expression);
 
-		Expression->MarkPendingKill();
+		Expression->MarkAsGarbage();
 
 		MaterialFunction->MarkPackageDirty();
 	}
@@ -823,106 +984,51 @@ void UMaterialEditingLibrary::DeleteMaterialExpressionInFunction(UMaterialFuncti
 
 void UMaterialEditingLibrary::UpdateMaterialFunction(UMaterialFunctionInterface* MaterialFunction, UMaterial* PreviewMaterial)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UMaterialEditingLibrary::UpdateMaterialFunction)
+
 	if (MaterialFunction)
 	{
-		// mark the function as changed
-		MaterialFunction->PreEditChange(nullptr);
-		MaterialFunction->PostEditChange();
-		MaterialFunction->MarkPackageDirty();
-
 		// Create a material update context so we can safely update materials using this function.
 		{
 			FMaterialUpdateContext UpdateContext;
 
-			// Go through all function instances in memory and update them if they are children
-			for (TObjectIterator<UMaterialFunctionInstance> It; It; ++It)
+			// mark the function as changed
+			MaterialFunction->ForceRecompileForRendering(UpdateContext, PreviewMaterial);
+			MaterialFunction->MarkPackageDirty();
+
 			{
-				UMaterialFunctionInstance* FunctionInstance = *It;
+				TRACE_CPUPROFILER_EVENT_SCOPE(UpdateAllMaterialInstances)
 
-				TArray<UMaterialFunctionInterface*> Functions;
-				FunctionInstance->GetDependentFunctions(Functions);
-				if (Functions.Contains(MaterialFunction))
+				// Go through all function instances in memory and recompile them if they are children
+				for (TObjectIterator<UMaterialFunctionInstance> It; It; ++It)
 				{
-					FunctionInstance->UpdateParameterSet();
-					FunctionInstance->MarkPackageDirty();
-				}
-			}
+					UMaterialFunctionInstance* FunctionInstance = *It;
 
-			// Go through all materials in memory and recompile them if they use this material function
-			for (TObjectIterator<UMaterial> It; It; ++It)
-			{
-				UMaterial* CurrentMaterial = *It;
-				if (CurrentMaterial != PreviewMaterial)
-				{
-					bool bRecompile = false;
-
-					// Preview materials often use expressions for rendering that are not in their Expressions array, 
-					// And therefore their MaterialFunctionInfos are not up to date.
-					// However we don't want to trigger this if the Material is a preview material itself. This can now be the case with thumbnail preview materials for material functions.
-					if (CurrentMaterial->bIsPreviewMaterial && (PreviewMaterial != nullptr) && !PreviewMaterial->bIsPreviewMaterial)
-					{
-						bRecompile = true;
-					}
-					else
-					{
-						TArray<UMaterialFunctionInterface*> Functions;
-						CurrentMaterial->GetDependentFunctions(Functions);
-						if (Functions.Contains(MaterialFunction))
-						{
-							bRecompile = true;
-						}
-					}
-
-					if (bRecompile)
-					{
-						UpdateContext.AddMaterial(CurrentMaterial);
-
-						// Propagate the function change to this material
-						CurrentMaterial->PreEditChange(nullptr);
-						CurrentMaterial->PostEditChange();
-						CurrentMaterial->MarkPackageDirty();
-
-						if (CurrentMaterial->MaterialGraph)
-						{
-							CurrentMaterial->MaterialGraph->RebuildGraph();
-						}
-
-						// if this instance was opened in an editor notify the change
-						if (IMaterialEditor* MaterialEditor = MaterialEditingLibraryImpl::FindMaterialEditorForAsset(CurrentMaterial))
-						{
-							MaterialEditor->NotifyExternalMaterialChange();
-						}
-					}
-				}
-			}
-
-			// Go through all material instances in memory and recompile them if they use this material function
-			for (TObjectIterator<UMaterialInstance> It; It; ++It)
-			{
-				UMaterialInstance* CurrentInstance = *It;
-				if (CurrentInstance->GetBaseMaterial())
-				{
 					TArray<UMaterialFunctionInterface*> Functions;
-					CurrentInstance->GetDependentFunctions(Functions);
+					FunctionInstance->GetDependentFunctions(Functions);
 					if (Functions.Contains(MaterialFunction))
 					{
-						UpdateContext.AddMaterialInstance(CurrentInstance);
-						CurrentInstance->PreEditChange(nullptr);
-						CurrentInstance->PostEditChange();
+						FunctionInstance->UpdateParameterSet();
+						FunctionInstance->ForceRecompileForRendering(UpdateContext, PreviewMaterial);
 
-						// if this instance was opened in an editor notify the change
-						if (IMaterialEditor* MaterialEditor = MaterialEditingLibraryImpl::FindMaterialEditorForAsset(CurrentInstance))
-						{
-							MaterialEditor->NotifyExternalMaterialChange();
-						}
+						// ForceRecompileForRendering will update StateId, so need to mark the package as dirty
+						FunctionInstance->MarkPackageDirty();
 					}
+				}
+			}
+
+			// Notify material editor for any materials that we are updating
+			for (UMaterialInterface* CurrentMaterial : UpdateContext.GetUpdatedMaterials())
+			{
+				if (IMaterialEditor* MaterialEditor = MaterialEditingLibraryImpl::FindMaterialEditorForAsset(CurrentMaterial))
+				{
+					MaterialEditor->NotifyExternalMaterialChange();
 				}
 			}
 		}
 
 		// update the world's viewports	
-		UMaterialFunctionInstance* FunctionAsInstance = Cast<UMaterialFunctionInstance>(MaterialFunction);
-		UMaterialFunction* BaseFunction = Cast<UMaterialFunction>(FunctionAsInstance ? FunctionAsInstance->GetBaseFunction() : MaterialFunction);
+		UMaterialFunction* BaseFunction = MaterialFunction->GetBaseFunction();
 
 		UMaterialEditingLibrary::RebuildMaterialInstanceEditors(BaseFunction);
 		FEditorDelegates::RefreshEditor.Broadcast();
@@ -953,76 +1059,133 @@ void UMaterialEditingLibrary::ClearAllMaterialInstanceParameters(UMaterialInstan
 }
 
 
-float UMaterialEditingLibrary::GetMaterialInstanceScalarParameterValue(UMaterialInstanceConstant* Instance, FName ParameterName)
+float UMaterialEditingLibrary::GetMaterialInstanceScalarParameterValue(UMaterialInstanceConstant* Instance, FName ParameterName, EMaterialParameterAssociation Association)
 {
 	float Result = 0.f;
 	if (Instance)
 	{
-		Instance->GetScalarParameterValue(ParameterName, Result);
+		Instance->GetScalarParameterValue(FHashedMaterialParameterInfo(ParameterName, Association, Association == EMaterialParameterAssociation::LayerParameter ? 0 : INDEX_NONE), Result);
 	}
 	return Result;
 }
 
-bool UMaterialEditingLibrary::SetMaterialInstanceScalarParameterValue(UMaterialInstanceConstant* Instance, FName ParameterName, float Value)
+bool UMaterialEditingLibrary::SetMaterialInstanceScalarParameterValue(UMaterialInstanceConstant* Instance, FName ParameterName, float Value, EMaterialParameterAssociation Association)
 {
 	bool bResult = false;
 	if (Instance)
 	{
-		Instance->SetScalarParameterValueEditorOnly(ParameterName, Value);
+		Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(ParameterName, Association, Association == EMaterialParameterAssociation::LayerParameter ? 0 : INDEX_NONE), Value);
 	}
 	return bResult;
 }
 
 
-UTexture* UMaterialEditingLibrary::GetMaterialInstanceTextureParameterValue(UMaterialInstanceConstant* Instance, FName ParameterName)
+UTexture* UMaterialEditingLibrary::GetMaterialInstanceTextureParameterValue(UMaterialInstanceConstant* Instance, FName ParameterName, EMaterialParameterAssociation Association)
 {
 	UTexture* Result = nullptr;
 	if (Instance)
 	{
-		Instance->GetTextureParameterValue(ParameterName, Result);
+		Instance->GetTextureParameterValue(FHashedMaterialParameterInfo(ParameterName, Association, Association == EMaterialParameterAssociation::LayerParameter ? 0 : INDEX_NONE), Result);
 	}
 	return Result;
 }
 
-bool UMaterialEditingLibrary::SetMaterialInstanceTextureParameterValue(UMaterialInstanceConstant* Instance, FName ParameterName, UTexture* Value)
+bool UMaterialEditingLibrary::SetMaterialInstanceTextureParameterValue(UMaterialInstanceConstant* Instance, FName ParameterName, UTexture* Value, EMaterialParameterAssociation Association)
 {
 	bool bResult = false;
 	if (Instance)
 	{
-		Instance->SetTextureParameterValueEditorOnly(ParameterName, Value);
+		Instance->SetTextureParameterValueEditorOnly(FMaterialParameterInfo(ParameterName, Association, Association == EMaterialParameterAssociation::LayerParameter ? 0 : INDEX_NONE), Value);
 	}
 	return bResult;
 }
 
 
-FLinearColor UMaterialEditingLibrary::GetMaterialInstanceVectorParameterValue(UMaterialInstanceConstant* Instance, FName ParameterName)
+URuntimeVirtualTexture* UMaterialEditingLibrary::GetMaterialInstanceRuntimeVirtualTextureParameterValue(UMaterialInstanceConstant* Instance, FName ParameterName, EMaterialParameterAssociation Association)
+{
+	URuntimeVirtualTexture* Result = nullptr;
+	if (Instance)
+	{
+		Instance->GetRuntimeVirtualTextureParameterValue(FHashedMaterialParameterInfo(ParameterName, Association, Association == EMaterialParameterAssociation::LayerParameter ? 0 : INDEX_NONE), Result);
+	}
+	return Result;
+}
+
+bool UMaterialEditingLibrary::SetMaterialInstanceRuntimeVirtualTextureParameterValue(UMaterialInstanceConstant* Instance, FName ParameterName, URuntimeVirtualTexture* Value, EMaterialParameterAssociation Association)
+{
+	bool bResult = false;
+	if (Instance)
+	{
+		Instance->SetRuntimeVirtualTextureParameterValueEditorOnly(FMaterialParameterInfo(ParameterName, Association, Association == EMaterialParameterAssociation::LayerParameter ? 0 : INDEX_NONE), Value);
+	}
+	return bResult;
+}
+
+
+USparseVolumeTexture* UMaterialEditingLibrary::GetMaterialInstanceSparseVolumeTextureParameterValue(UMaterialInstanceConstant* Instance, FName ParameterName, EMaterialParameterAssociation Association)
+{
+	USparseVolumeTexture* Result = nullptr;
+	if (Instance)
+	{
+		Instance->GetSparseVolumeTextureParameterValue(FHashedMaterialParameterInfo(ParameterName, Association, Association == EMaterialParameterAssociation::LayerParameter ? 0 : INDEX_NONE), Result);
+	}
+	return Result;
+}
+
+bool UMaterialEditingLibrary::SetMaterialInstanceSparseVolumeTextureParameterValue(UMaterialInstanceConstant* Instance, FName ParameterName, USparseVolumeTexture* Value, EMaterialParameterAssociation Association)
+{
+	bool bResult = false;
+	if (Instance)
+	{
+		Instance->SetSparseVolumeTextureParameterValueEditorOnly(FMaterialParameterInfo(ParameterName, Association, Association == EMaterialParameterAssociation::LayerParameter ? 0 : INDEX_NONE), Value);
+	}
+	return bResult;
+}
+
+
+FLinearColor UMaterialEditingLibrary::GetMaterialInstanceVectorParameterValue(UMaterialInstanceConstant* Instance, FName ParameterName, EMaterialParameterAssociation Association)
 {
 	FLinearColor Result = FLinearColor::Black;
 	if (Instance)
 	{
-		Instance->GetVectorParameterValue(ParameterName, Result);
+		Instance->GetVectorParameterValue(FHashedMaterialParameterInfo(ParameterName, Association, Association == EMaterialParameterAssociation::LayerParameter ? 0 : INDEX_NONE), Result);
 	}
 	return Result;
 }
 
-bool UMaterialEditingLibrary::SetMaterialInstanceVectorParameterValue(UMaterialInstanceConstant* Instance, FName ParameterName, FLinearColor Value)
+bool UMaterialEditingLibrary::SetMaterialInstanceVectorParameterValue(UMaterialInstanceConstant* Instance, FName ParameterName, FLinearColor Value, EMaterialParameterAssociation Association)
 {
 	bool bResult = false;
 	if (Instance)
 	{
-		Instance->SetVectorParameterValueEditorOnly(ParameterName, Value);
+		Instance->SetVectorParameterValueEditorOnly(FMaterialParameterInfo(ParameterName, Association, Association == EMaterialParameterAssociation::LayerParameter ? 0 : INDEX_NONE), Value);
 	}
 	return bResult;
 }
 
 
-bool UMaterialEditingLibrary::GetMaterialInstanceStaticSwitchParameterValue(UMaterialInstanceConstant* Instance, FName ParameterName)
+bool UMaterialEditingLibrary::GetMaterialInstanceStaticSwitchParameterValue(UMaterialInstanceConstant* Instance, FName ParameterName, EMaterialParameterAssociation Association)
 {
 	bool bResult = false;
 	if (Instance)
 	{
 		FGuid OutGuid;
-		Instance->GetStaticSwitchParameterValue(ParameterName, bResult, OutGuid);
+		Instance->GetStaticSwitchParameterValue(FHashedMaterialParameterInfo(ParameterName, Association, Association == EMaterialParameterAssociation::LayerParameter ? 0 : INDEX_NONE), bResult, OutGuid);
+	}
+	return bResult;
+}
+
+bool UMaterialEditingLibrary::SetMaterialInstanceStaticSwitchParameterValue(UMaterialInstanceConstant* Instance, FName ParameterName, bool Value, EMaterialParameterAssociation Association)
+{
+	bool bResult = false;
+	if (Instance)
+	{
+		Instance->SetStaticSwitchParameterValueEditorOnly(FMaterialParameterInfo(ParameterName, Association, Association == EMaterialParameterAssociation::LayerParameter ? 0 : INDEX_NONE), Value);
+
+		// The material instance editor window puts MaterialLayersParameters into our StaticParameters, if we don't do this, our settings could get wiped out on first launch of the material editor.
+		// If there's ever a cleaner and more isolated way of populating MaterialLayersParameters, we should do that instead.
+		UMaterialEditorInstanceConstant* MaterialEditorInstance = NewObject<UMaterialEditorInstanceConstant>(GetTransientPackage(), NAME_None, RF_Transactional);
+		MaterialEditorInstance->SetSourceInstance(Instance);
 	}
 	return bResult;
 }
@@ -1198,6 +1361,10 @@ FMaterialStatistics UMaterialEditingLibrary::GetStatistics(class UMaterialInterf
 	FMaterialResource* Resource = Material ? Material->GetMaterialResource(GMaxRHIFeatureLevel) : nullptr;
 	if (Resource)
 	{
+		if (!Resource->IsGameThreadShaderMapComplete())
+		{
+			Resource->SubmitCompileJobs_GameThread(EShaderCompileJobPriority::High);
+		}
 		Resource->FinishCompilation();
 
 		TArray<FMaterialStatsUtils::FShaderInstructionsInfo> InstructionInfos;
@@ -1231,4 +1398,9 @@ FMaterialStatistics UMaterialEditingLibrary::GetStatistics(class UMaterialInterf
 	}
 
 	return Result;
+}
+
+UMaterialInterface* UMaterialEditingLibrary::GetNaniteOverrideMaterial(UMaterialInterface* Material)
+{
+	return Material->GetNaniteOverride();
 }

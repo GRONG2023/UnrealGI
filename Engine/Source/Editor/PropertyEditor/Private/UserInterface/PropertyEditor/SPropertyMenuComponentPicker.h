@@ -11,7 +11,7 @@ class UActorComponent;
 
 namespace SceneOutliner
 {
-	struct ITreeItem;
+	struct ISceneOutlinerTreeItem;
 }
 
 class SPropertyMenuComponentPicker : public SCompoundWidget
@@ -65,9 +65,9 @@ private:
 
 	/**
 	 * Delegate for handling selection by the actor picker.
-	 * @param	InActor	The chosen actor
+	 * @param	Component The chosen component
 	 */
-	void OnItemSelected(TSharedRef<SceneOutliner::ITreeItem> InItem);
+	void OnItemSelected(UActorComponent* Component);
 
 	/**
 	 * Set the value of the asset referenced by this property editor.

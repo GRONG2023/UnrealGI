@@ -2,14 +2,19 @@
 
 #include "AnimNodes/AnimNode_AimOffsetLookAt.h"
 #include "Animation/AnimInstanceProxy.h"
+#include "Animation/AnimStats.h"
 #include "AnimationRuntime.h"
-#include "Animation/BlendSpaceBase.h"
+#include "Animation/BlendSpace.h"
 #include "Animation/BlendSpace1D.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Engine/SkeletalMesh.h"
 #include "Engine/SkeletalMeshSocket.h"
 #include "DrawDebugHelpers.h"
 #include "EngineGlobals.h"
 #include "Engine/Engine.h"
 #include "Animation/AnimTrace.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNode_AimOffsetLookAt)
 
 TAutoConsoleVariable<int32> CVarAimOffsetLookAtEnable(TEXT("a.AnimNode.AimOffsetLookAt.Enable"), 1, TEXT("Enable/Disable LookAt AimOffset"));
 TAutoConsoleVariable<int32> CVarAimOffsetLookAtDebug(TEXT("a.AnimNode.AimOffsetLookAt.Debug"), 0, TEXT("Toggle LookAt AimOffset debug"));
@@ -31,12 +36,17 @@ void FAnimNode_AimOffsetLookAt::OnInitializeAnimInstance(const FAnimInstanceProx
 	SocketBoneReference.BoneName = NAME_None;
 	if (USkeletalMeshComponent* SkelMeshComp = InAnimInstance->GetSkelMeshComponent())
 	{
-		if (USkeletalMesh* SkelMesh = SkelMeshComp->SkeletalMesh)
+		if (USkeletalMesh* SkelMesh = SkelMeshComp->GetSkeletalMeshAsset())
 		{
 			if (const USkeletalMeshSocket* Socket = SkelMesh->FindSocket(SourceSocketName))
 			{
 				SocketLocalTransform = Socket->GetSocketLocalTransform();
 				SocketBoneReference.BoneName = Socket->BoneName;
+			}
+			else if (SkelMeshComp->GetBoneIndex(SourceSocketName) != INDEX_NONE)
+			{
+				SocketLocalTransform.SetIdentity();
+				SocketBoneReference.BoneName = SourceSocketName;
 			}
 
 			if (const USkeletalMeshSocket* Socket = SkelMesh->FindSocket(PivotSocketName))
@@ -44,24 +54,22 @@ void FAnimNode_AimOffsetLookAt::OnInitializeAnimInstance(const FAnimInstanceProx
 				PivotSocketLocalTransform = Socket->GetSocketLocalTransform();
 				PivotSocketBoneReference.BoneName = Socket->BoneName;
 			}
+			else if (SkelMeshComp->GetBoneIndex(PivotSocketName) != INDEX_NONE)
+			{
+				PivotSocketLocalTransform.SetIdentity();
+				PivotSocketBoneReference.BoneName = PivotSocketName;
+			}
 		}
 	}
 }
 
 void FAnimNode_AimOffsetLookAt::UpdateAssetPlayer(const FAnimationUpdateContext& Context)
 {
-	GetEvaluateGraphExposedInputs().Execute(Context);
-
 	bIsLODEnabled = IsLODEnabled(Context.AnimInstanceProxy);
-
-	// We don't support ticking and advancing time, because Inputs are determined during Evaluate.
-	// it may be possible to advance time there (is it a problem with notifies?)
-	// But typically AimOffsets contain single frame poses, so time doesn't matter.
-
-// 	if (bIsLODEnabled)
-// 	{
-// 		FAnimNode_BlendSpacePlayer::UpdateAssetPlayer(Context);
-// 	}
+ 	if (bIsLODEnabled)
+ 	{
+ 		FAnimNode_BlendSpacePlayer::UpdateAssetPlayer(Context);
+ 	}
 
 	BasePose.Update(Context);
 
@@ -80,6 +88,8 @@ void FAnimNode_AimOffsetLookAt::CacheBones_AnyThread(const FAnimationCacheBonesC
 
 void FAnimNode_AimOffsetLookAt::Evaluate_AnyThread(FPoseContext& Context)
 {
+	ANIM_MT_SCOPE_CYCLE_COUNTER_VERBOSE(AimOffsetLookAt, !IsInGameThread());
+
 	// Evaluate base pose
 	BasePose.Evaluate(Context);
 
@@ -103,10 +113,10 @@ void FAnimNode_AimOffsetLookAt::Evaluate_AnyThread(FPoseContext& Context)
 
 void FAnimNode_AimOffsetLookAt::UpdateFromLookAtTarget(FPoseContext& LocalPoseContext)
 {
-	FVector BlendInput(X, Y, Z);
+	UBlendSpace* CurrentBlendSpace = GetBlendSpace();
 
 	const FBoneContainer& RequiredBones = LocalPoseContext.Pose.GetBoneContainer();
-	if (BlendSpace && SocketBoneReference.IsValidToEvaluate(RequiredBones))
+	if (CurrentBlendSpace && SocketBoneReference.IsValidToEvaluate(RequiredBones))
 	{
 		FCSPose<FCompactPose> GlobalPose;
 		GlobalPose.InitPose(LocalPoseContext.Pose);
@@ -125,8 +135,8 @@ void FAnimNode_AimOffsetLookAt::UpdateFromLookAtTarget(FPoseContext& LocalPoseCo
 
 		FAnimInstanceProxy* AnimProxy = LocalPoseContext.AnimInstanceProxy;
 		check(AnimProxy);
-		const FTransform SourceWorldTransform = SourceComponentTransform * AnimProxy->GetSkelMeshCompLocalToWorld();
-		const FTransform ActorTransform = AnimProxy->GetSkelMeshCompOwnerTransform();
+		const FTransform SourceWorldTransform = SourceComponentTransform * AnimProxy->GetComponentTransform();
+		const FTransform ActorTransform = AnimProxy->GetActorTransform();
 
 		// Convert Target to Actor Space
 		const FTransform TargetWorldTransform(LookAtLocation);
@@ -140,8 +150,8 @@ void FAnimNode_AimOffsetLookAt::UpdateFromLookAtTarget(FPoseContext& LocalPoseCo
 
 		const FVector2D CurrentCoords = FMath::GetAzimuthAndElevation(CurrentDirection, AxisX, AxisY, AxisZ);
 		const FVector2D TargetCoords = FMath::GetAzimuthAndElevation(DirectionToTarget, AxisX, AxisY, AxisZ);
-		BlendInput.X = FRotator::NormalizeAxis(FMath::RadiansToDegrees(TargetCoords.X - CurrentCoords.X));
-		BlendInput.Y = FRotator::NormalizeAxis(FMath::RadiansToDegrees(TargetCoords.Y - CurrentCoords.Y));
+		CurrentBlendInput.X = FRotator::NormalizeAxis(FMath::RadiansToDegrees(TargetCoords.X - CurrentCoords.X));
+		CurrentBlendInput.Y = FRotator::NormalizeAxis(FMath::RadiansToDegrees(TargetCoords.Y - CurrentCoords.Y));
 
 #if ENABLE_DRAW_DEBUG
 		if (CVarAimOffsetLookAtDebug.GetValueOnAnyThread() == 1)
@@ -155,21 +165,22 @@ void FAnimNode_AimOffsetLookAt::UpdateFromLookAtTarget(FPoseContext& LocalPoseCo
 				, FMath::RadiansToDegrees(CurrentCoords.Y)
 				, FMath::RadiansToDegrees(TargetCoords.X)
 				, FMath::RadiansToDegrees(TargetCoords.Y)
-				, BlendInput.X
-				, BlendInput.Y);
+				, CurrentBlendInput.X
+				, CurrentBlendInput.Y);
 			AnimProxy->AnimDrawDebugOnScreenMessage(DebugString, FColor::Red);
 		}
 #endif // ENABLE_DRAW_DEBUG
 	}
 
-	// Set X and Y, so ticking next frame is based on correct weights.
-	X = BlendInput.X;
-	Y = BlendInput.Y;
-
-	// Generate BlendSampleDataCache from inputs.
-	if (BlendSpace)
+	// Update Blend Space, including the smoothing/filtering, and put the result into BlendSampleDataCache.
+	if (CurrentBlendSpace)
 	{
-		BlendSpace->GetSamplesFromBlendInput(BlendInput, BlendSampleDataCache);
+		const FVector BlendSpacePosition(CurrentBlendInput.X, CurrentBlendInput.Y, 0.f);
+		const FVector FilteredBlendInput = CurrentBlendSpace->FilterInput(
+			&BlendFilter, BlendSpacePosition, DeltaTimeRecord.Delta);
+
+		CurrentBlendSpace->UpdateBlendSamples(
+			FilteredBlendInput, DeltaTimeRecord.Delta, BlendSampleDataCache, CachedTriangulationIndex);
 	}
 }
 
@@ -184,6 +195,12 @@ void FAnimNode_AimOffsetLookAt::GatherDebugData(FNodeDebugData& DebugData)
 	BasePose.GatherDebugData(DebugData);
 }
 
+FVector FAnimNode_AimOffsetLookAt::GetPosition() const
+{
+	// Use our calculated coordinates rather than the folded values
+	return CurrentBlendInput;
+}
+
 FAnimNode_AimOffsetLookAt::FAnimNode_AimOffsetLookAt()
 	: SocketLocalTransform(FTransform::Identity)
 	, PivotSocketLocalTransform(FTransform::Identity)
@@ -193,6 +210,8 @@ FAnimNode_AimOffsetLookAt::FAnimNode_AimOffsetLookAt()
 	, LookAtLocation(ForceInitToZero)
 	, SocketAxis(1.0f, 0.0f, 0.0f)
 	, Alpha(1.f)
+	, CurrentBlendInput(FVector::ZeroVector)
 	, bIsLODEnabled(false)
 {
 }
+

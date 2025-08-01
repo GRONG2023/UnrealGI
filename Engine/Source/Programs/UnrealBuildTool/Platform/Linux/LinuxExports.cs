@@ -1,11 +1,7 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
 
 namespace UnrealBuildTool
 {
@@ -19,10 +15,19 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="SourceFile"></param>
 		/// <param name="TargetFile"></param>
-		public static void StripSymbols(FileReference SourceFile, FileReference TargetFile)
+		/// <param name="Logger">Logger for output</param>
+		public static void StripSymbols(FileReference SourceFile, FileReference TargetFile, ILogger Logger)
 		{
-			LinuxToolChain ToolChain = new LinuxToolChain(LinuxPlatform.DefaultHostArchitecture, new LinuxPlatformSDK());
-			ToolChain.StripSymbols(SourceFile, TargetFile);
+			LinuxPlatformSDK? LinuxSDK = UEBuildPlatformSDK.GetSDKForPlatform("Linux") as LinuxPlatformSDK;
+
+			if (LinuxSDK == null)
+			{
+				LinuxSDK = new LinuxPlatformSDK(Logger);
+				UEBuildPlatformSDK.RegisterSDKForPlatform(LinuxSDK, "Linux", true);
+			}
+
+			LinuxToolChain ToolChain = new LinuxToolChain(LinuxPlatform.DefaultHostArchitecture, LinuxSDK, ClangToolChainOptions.None, Logger);
+			ToolChain.StripSymbols(SourceFile, TargetFile, Logger);
 		}
 	}
 }

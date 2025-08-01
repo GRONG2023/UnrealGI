@@ -3,9 +3,10 @@
 #pragma once
 
 #include "CoreTypes.h"
+#include "HAL/CriticalSection.h"
 #include "Internationalization/ILocalizedTextSource.h"
-#include "Internationalization/PolyglotTextData.h"
 #include "Internationalization/LocKeyFuncs.h"
+#include "Internationalization/PolyglotTextData.h" // IWYU pragma: keep
 
 /**
  * Implementation of a localized text source that stores literal polyglot data registered at runtime.
@@ -56,4 +57,9 @@ private:
 	 * Mapping from a "{Namespace}::{Key}" string to a polyglot text data instance.
 	 */
 	TMap<FTextId, FPolyglotTextData> PolyglotTextDataMap;
+
+	/**
+	 * Critical section preventing concurrent access to the above data.
+	 */
+	mutable FCriticalSection PolyglotDataCS;
 };

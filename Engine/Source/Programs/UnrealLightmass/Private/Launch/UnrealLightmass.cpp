@@ -7,21 +7,19 @@
 #include "CPUSolver.h"
 #include "UnitTest.h"
 #include "LightmassSwarm.h"
-#include "Runtime/Core/Public/HAL/ExceptionHandling.h"
+#include "HAL/ExceptionHandling.h"
 #include "RequiredProgramMainCPPInclude.h"
 #include "LMDebug.h"
 #include "LMHelpers.h"
 #include "ImportExport.h"
 #include "HAL/PlatformApplicationMisc.h"
+#if PLATFORM_LINUX
+#include "HAL/PlatformStackWalk.h"
+#include "Unix/UnixPlatformCrashContext.h"
+#endif
 
 #if USE_LOCAL_SWARM_INTERFACE
 #include "IMessagingModule.h"
-#endif
-
-#if PLATFORM_WINDOWS
-#include "Windows/AllowWindowsPlatformTypes.h"
-	#include <d3dx9.h>
-#include "Windows/HideWindowsPlatformTypes.h"
 #endif
 
 DEFINE_LOG_CATEGORY(LogLightmass);
@@ -86,6 +84,12 @@ int LightmassMain(int argc, ANSICHAR* argv[])
 		CommandLine += TEXT(" -Messaging");
 	}
 
+	// Don't spew all log messages to console (unless user has specified "-stdout" on command line)
+	if (!FParse::Param(*CommandLine, TEXT("-stdout")))
+	{
+		CommandLine += TEXT(" -nostdout");
+	}
+
 	GEngineLoop.PreInit(*CommandLine);
 
 	// Tell the module manager is may now process newly-loaded UObjects when new C++ modules are loaded
@@ -94,7 +98,20 @@ int LightmassMain(int argc, ANSICHAR* argv[])
 	FModuleManager::LoadModuleChecked<IMessagingModule>("Messaging");
 	FModuleManager::Get().LoadModule(TEXT("Settings"));
 	IPluginManager::Get().LoadModulesForEnabledPlugins(ELoadingPhase::PreDefault);
-#endif
+	IPluginManager::Get().LoadModulesForEnabledPlugins(ELoadingPhase::PostDefault);
+
+	ON_SCOPE_EXIT
+	{
+		FEngineLoop::AppPreExit();
+		FModuleManager::Get().UnloadModulesAtShutdown();
+
+		// Similar to CL 16324633. If we shut down FTaskGraphInterface right here, in AppExit
+		//   FThreadStats::StopThread could get called and that will try and execute some stats
+		//   commands which use FTaskGraphInterface and --> crashes. FEngineLoop::AppExit() calls
+		//   FTaskGraphInterface::Shutdown() after calling FThreadStats::StopThread() if needed.
+		FEngineLoop::AppExit();
+	};
+#endif // USE_LOCAL_SWARM_INTERFACE
 
 	UE_LOG(LogLightmass, Display,  TEXT("Lightmass %s started on: %s. Command-line: %s"), FPlatformMisc::GetUBTPlatform(), FPlatformProcess::ComputerName(), FCommandLine::Get() );
 
@@ -248,12 +265,6 @@ int LightmassMain(int argc, ANSICHAR* argv[])
 			FPlatformProcess::Sleep(1.0f);
 		} while (FPlatformTime::Seconds() - StartTime < 5.0f);
 	}
-
-	FEngineLoop::AppPreExit();
-	FModuleManager::Get().UnloadModulesAtShutdown();
-
-	FTaskGraphInterface::Shutdown();
-	FEngineLoop::AppExit();
 #endif
 
 	return 0;
@@ -433,31 +444,6 @@ void CriticalErrorCallback()
 }
 
 #if PLATFORM_WINDOWS
-/**
- * Verifies that the correct version of DirectX is installed.
- * @return	true if everything looks correct
- */
-bool VerifyD3D()
-{
-	bool bD3DInstalledCorrectly = false;
-	IDirect3D9* D3D = NULL;
-	__try
-	{
-		D3D = Direct3DCreate9(D3D_SDK_VERSION);
-		bD3DInstalledCorrectly = (D3D != NULL) && D3DXCheckVersion(D3D_SDK_VERSION, D3DX_SDK_VERSION);
-	}
-	__except( EXCEPTION_EXECUTE_HANDLER )
-	{
-		bD3DInstalledCorrectly = false;
-	}
-	if ( !bD3DInstalledCorrectly )
-	{
-		UE_LOG(LogLightmass, Display,  TEXT("DirectX run-time isn't installed or it's using the incorrect version!\nLightmass requires D3D_SDK_VERSION %d and D3DX_SDK_VERSION %d."), D3D_SDK_VERSION, D3DX_SDK_VERSION );
-		return false;
-	}
-	D3D->Release();
-	return true;
-}
 
 bool VerifyDLL( const TCHAR* DLLFilename )
 {
@@ -480,7 +466,36 @@ void SendSwarmCriticalErrorMessage()
 	GSwarm->SendAlertMessage(NSwarm::ALERT_LEVEL_ERROR, FGuid(), SOURCEOBJECTTYPE_Unknown, *ErrorLog);
 }
 
-#endif
+#elif PLATFORM_LINUX
+
+static void UnrealLightmassUnixCrashHandler(const FGenericCrashContext& GenericContext)
+{
+	const uint32 DumpCallstackSize = 2047;
+	ANSICHAR DumpCallstack[DumpCallstackSize] = { 0 };
+	const FUnixCrashContext& Context = static_cast< const FUnixCrashContext& >( GenericContext );
+
+	FPlatformStackWalk::StackWalkAndDump(DumpCallstack, DumpCallstackSize, 2);
+
+	GSwarm->SendTextMessage(TEXT("\n=== Lightmass crashed (Signal=%d): ==="), Context.Signal);
+	GSwarm->SendTextMessage(TEXT("Callstack:\n%s"), UTF8_TO_TCHAR(DumpCallstack));
+	GSwarm->SendTextMessage(TEXT("*** CRITICAL ERROR! Machine: %s"), FPlatformProcess::ComputerName() );
+	GSwarm->SendTextMessage(TEXT("*** CRITICAL ERROR! Logfile: %s"), FLightmassLog::Get()->GetLogFilename() );
+	GLog->Flush();
+
+	// remove the handler for this signal and re-raise it (which should generate the proper core dump)
+	// print message to stdout directly, it may be too late for the log (doesn't seem to be printed during a crash in the thread) 
+	fprintf(stderr, "UnrealLightmass re-raising signal %d for the default handler. Good bye.\n", Context.Signal);
+
+	struct sigaction ResetToDefaultAction;
+	FMemory::Memzero(ResetToDefaultAction);
+	ResetToDefaultAction.sa_handler = SIG_DFL;
+	sigfillset(&ResetToDefaultAction.sa_mask);
+	sigaction(Context.Signal, &ResetToDefaultAction, nullptr);
+
+	raise(Context.Signal);
+}
+
+#endif // PLATFORM_LINUX
 
 } // namespace Lightmass
 
@@ -496,15 +511,14 @@ int main(int argc, ANSICHAR* argv[])
 	// Set the error mode to avoid popping up dialog boxes on crashes
 	SetErrorMode( SEM_NOGPFAULTERRORBOX | SEM_NOGPFAULTERRORBOX );
 
-	// Verify the installed DirectX run-time and other required DLLs
-	if ( !Lightmass::VerifyD3D() ||
-		 !Lightmass::VerifyDLL(TEXT("dbghelp.dll")) )
+	// Verify the required DLLs
+	if ( !Lightmass::VerifyDLL(TEXT("dbghelp.dll")) )
 	{
 		return 1;
 	}
 #endif
 
-#if PLATFORM_MAC || PLATFORM_LINUX
+#if PLATFORM_MAC
  	if ( true )
 #else
 	if ( FPlatformMisc::IsDebuggerPresent() )
@@ -513,7 +527,17 @@ int main(int argc, ANSICHAR* argv[])
 		// Don't use exception handling when a debugger is attached to exactly trap the crash.
 		ErrorLevel = Lightmass::LightmassMain(argc, argv);
 	}
-#if PLATFORM_WINDOWS
+#if PLATFORM_LINUX
+	else
+	{
+		FPlatformMisc::SetCrashHandler(Lightmass::UnrealLightmassUnixCrashHandler);
+
+		GIsGuarded = true;
+		// Run the guarded code.
+		ErrorLevel = Lightmass::LightmassMain(argc, argv);
+		GIsGuarded = false;
+	}
+#elif PLATFORM_WINDOWS
 	else
 	{
 		// Use structured exception handling to trap any crashes, walk the the stack and display a crash dialog box.

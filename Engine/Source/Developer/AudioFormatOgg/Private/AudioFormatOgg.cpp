@@ -5,8 +5,7 @@
 #include "Modules/ModuleManager.h"
 #include "Interfaces/IAudioFormat.h"
 #include "Interfaces/IAudioFormatModule.h"
-#include "VorbisAudioInfo.h"
-
+#include "Decoders/VorbisAudioInfo.h"
 
 #if WITH_OGGVORBIS
 	#pragma pack(push, 8)
@@ -32,13 +31,13 @@ class FAudioFormatOgg : public IAudioFormat
 	enum
 	{
 		/** Version for OGG format, this becomes part of the DDC key. */
-		UE_AUDIO_OGG_VER = 4,
+		UE_AUDIO_OGG_VER = 6,
 	};
 
 public:
 	virtual bool AllowParallelBuild() const override
 	{
-		return false;
+		return true;
 	}
 
 	virtual uint16 GetVersion(FName Format) const override
@@ -55,6 +54,7 @@ public:
 
 	virtual bool Cook(FName Format, const TArray<uint8>& SrcBuffer, FSoundQualityInfo& QualityInfo, TArray<uint8>& CompressedDataStore) const override
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(FAudioFormatOgg::Cook);
 		check(Format == NAME_OGG);
 #if WITH_OGGVORBIS
 		{
@@ -206,6 +206,7 @@ public:
 
 	virtual bool CookSurround(FName Format, const TArray<TArray<uint8> >& SrcBuffers, FSoundQualityInfo& QualityInfo, TArray<uint8>& CompressedDataStore) const override
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(FAudioFormatOgg::CookSurround);
 		check(Format == NAME_OGG);
 #if WITH_OGGVORBIS
 		{
@@ -509,7 +510,7 @@ public:
 	// Add a new chunk and reserve ChunkSize bytes in it
 	void AddNewChunk(TArray<TArray<uint8>>& OutBuffers, int32 ChunkReserveSize) const
 	{
-		TArray<uint8>& NewBuffer = *new (OutBuffers) TArray<uint8>;
+		TArray<uint8>& NewBuffer = OutBuffers.AddDefaulted_GetRef();
 		NewBuffer.Empty(ChunkReserveSize);
 	}
 	

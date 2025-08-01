@@ -1,10 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "CoreMinimal.h"
+#include "Engine/World.h"
 #include "Misc/AutomationTest.h"
-#include "EngineGlobals.h"
-#include "Engine/EngineBaseTypes.h"
-#include "Engine/EngineTypes.h"
 #include "TimerManager.h"
 #include "Engine/Engine.h"
 
@@ -99,7 +96,7 @@ bool TimerManagerTest_ValidTimer_HandleWithDelegate(UWorld* World, FAutomationTe
 	Test->TestTrue(TIMER_TEST_TEXT("GetTimerRemaining called with a pending timer"), (TimerManager.GetTimerRemaining(Handle) == Rate));
 
 	// small tick to move the timer from the pending list to the active list, the timer will start counting time after this tick
-	TimerTest_TickWorld(World, KINDA_SMALL_NUMBER);
+	TimerTest_TickWorld(World, UE_KINDA_SMALL_NUMBER);
 
 	Test->TestTrue(TIMER_TEST_TEXT("TimerExists called with a pending timer"), TimerManager.TimerExists(Handle));
 	Test->TestTrue(TIMER_TEST_TEXT("IsTimerActive called with an active timer"), TimerManager.IsTimerActive(Handle));
@@ -107,8 +104,8 @@ bool TimerManagerTest_ValidTimer_HandleWithDelegate(UWorld* World, FAutomationTe
 
 	TimerTest_TickWorld(World);
 
-	Test->TestTrue(TIMER_TEST_TEXT("GetTimerElapsed called with an active timer after one step"), (FMath::IsNearlyEqual(TimerManager.GetTimerElapsed(Handle), 1.f, KINDA_SMALL_NUMBER)));
-	Test->TestTrue(TIMER_TEST_TEXT("GetTimerRemaining called with an active timer after one step"), (FMath::IsNearlyEqual(TimerManager.GetTimerRemaining(Handle), Rate - 1.f, KINDA_SMALL_NUMBER)));
+	Test->TestTrue(TIMER_TEST_TEXT("GetTimerElapsed called with an active timer after one step"), (FMath::IsNearlyEqual(TimerManager.GetTimerElapsed(Handle), 1.f, UE_KINDA_SMALL_NUMBER)));
+	Test->TestTrue(TIMER_TEST_TEXT("GetTimerRemaining called with an active timer after one step"), (FMath::IsNearlyEqual(TimerManager.GetTimerRemaining(Handle), Rate - 1.f, UE_KINDA_SMALL_NUMBER)));
 
 	TimerManager.PauseTimer(Handle);
 
@@ -122,8 +119,8 @@ bool TimerManagerTest_ValidTimer_HandleWithDelegate(UWorld* World, FAutomationTe
 	Test->TestFalse(TIMER_TEST_TEXT("IsTimerActive called with a paused timer"), TimerManager.IsTimerActive(Handle));
 	Test->TestTrue(TIMER_TEST_TEXT("IsTimerPaused called with a paused timer"), TimerManager.IsTimerPaused(Handle));
 
-	Test->TestTrue(TIMER_TEST_TEXT("GetTimerElapsed called with a paused timer after one step"), (FMath::IsNearlyEqual(TimerManager.GetTimerElapsed(Handle), 1.f, KINDA_SMALL_NUMBER)));
-	Test->TestTrue(TIMER_TEST_TEXT("GetTimerRemaining called with a paused timer after one step"), (FMath::IsNearlyEqual(TimerManager.GetTimerRemaining(Handle), Rate - 1.f, KINDA_SMALL_NUMBER)));
+	Test->TestTrue(TIMER_TEST_TEXT("GetTimerElapsed called with a paused timer after one step"), (FMath::IsNearlyEqual(TimerManager.GetTimerElapsed(Handle), 1.f, UE_KINDA_SMALL_NUMBER)));
+	Test->TestTrue(TIMER_TEST_TEXT("GetTimerRemaining called with a paused timer after one step"), (FMath::IsNearlyEqual(TimerManager.GetTimerRemaining(Handle), Rate - 1.f, UE_KINDA_SMALL_NUMBER)));
 
 	TimerManager.UnPauseTimer(Handle);
 
@@ -146,7 +143,7 @@ bool TimerManagerTest_ValidTimer_HandleWithDelegate(UWorld* World, FAutomationTe
 	// Test looping timers
 	Dummy.Reset();
 	TimerManager.SetTimer(Handle, Delegate, Rate, true);
-	TimerTest_TickWorld(World, KINDA_SMALL_NUMBER);
+	TimerTest_TickWorld(World, UE_KINDA_SMALL_NUMBER);
 
 	TimerTest_TickWorld(World, 2.f);
 
@@ -154,14 +151,14 @@ bool TimerManagerTest_ValidTimer_HandleWithDelegate(UWorld* World, FAutomationTe
 	Test->TestTrue(TIMER_TEST_TEXT("IsTimerActive called with a looping timer"), TimerManager.IsTimerActive(Handle));
 
 	Test->TestTrue(TIMER_TEST_TEXT("Count of callback executions"), Dummy.Count == 1);
-	Test->TestTrue(TIMER_TEST_TEXT("GetTimerElapsed called with a looping timer"), (FMath::IsNearlyEqual(TimerManager.GetTimerElapsed(Handle), 2.f - (Rate * Dummy.Count), KINDA_SMALL_NUMBER)));
-	Test->TestTrue(TIMER_TEST_TEXT("GetTimerRemaining called with a looping timer"), (FMath::IsNearlyEqual(TimerManager.GetTimerRemaining(Handle), Rate * (Dummy.Count + 1) - 2.f, KINDA_SMALL_NUMBER)));
+	Test->TestTrue(TIMER_TEST_TEXT("GetTimerElapsed called with a looping timer"), (FMath::IsNearlyEqual(TimerManager.GetTimerElapsed(Handle), 2.f - (Rate * Dummy.Count), UE_KINDA_SMALL_NUMBER)));
+	Test->TestTrue(TIMER_TEST_TEXT("GetTimerRemaining called with a looping timer"), (FMath::IsNearlyEqual(TimerManager.GetTimerRemaining(Handle), Rate * (Dummy.Count + 1) - 2.f, UE_KINDA_SMALL_NUMBER)));
 
 	TimerTest_TickWorld(World, 2.f);
 
 	Test->TestTrue(TIMER_TEST_TEXT("Count of callback executions"), Dummy.Count == 2);
-	Test->TestTrue(TIMER_TEST_TEXT("GetTimerElapsed called with a looping timer"), (FMath::IsNearlyEqual(TimerManager.GetTimerElapsed(Handle), 4.f - (Rate * Dummy.Count), KINDA_SMALL_NUMBER)));
-	Test->TestTrue(TIMER_TEST_TEXT("GetTimerRemaining called with a looping timer"), (FMath::IsNearlyEqual(TimerManager.GetTimerRemaining(Handle), Rate * (Dummy.Count + 1) - 4.f, KINDA_SMALL_NUMBER)));
+	Test->TestTrue(TIMER_TEST_TEXT("GetTimerElapsed called with a looping timer"), (FMath::IsNearlyEqual(TimerManager.GetTimerElapsed(Handle), 4.f - (Rate * Dummy.Count), UE_KINDA_SMALL_NUMBER)));
+	Test->TestTrue(TIMER_TEST_TEXT("GetTimerRemaining called with a looping timer"), (FMath::IsNearlyEqual(TimerManager.GetTimerRemaining(Handle), Rate * (Dummy.Count + 1) - 4.f, UE_KINDA_SMALL_NUMBER)));
 
 	TimerManager.SetTimer(Handle, 0.f, false);
 
@@ -205,20 +202,20 @@ bool TimerManagerTest_ValidTimer_HandleLoopingSetDuringExecute(UWorld* World, FA
 	FLoopingTestFunc::Handle = &Handle;
 	FLoopingTestFunc::TimerCalled = 0;
 
-	Test->TestTrue(TIMER_TEST_TEXT("Timer called count starts at 0"), FLoopingTestFunc::TimerCalled == 0);
+	Test->TestTrue(TIMER_TEST_TEXT("Timer called count starts at 0"), FLoopingTestFunc::TimerCalled == 0); //-V547
 
 	TimerManager.SetTimer(Handle, FTimerDelegate::CreateStatic(FLoopingTestFunc::TimerExecute), Rate, true);
 
 	// small tick to move the timer from the pending list to the active list, the timer will start counting time after this tick
-	TimerTest_TickWorld(World, KINDA_SMALL_NUMBER);
+	TimerTest_TickWorld(World, UE_KINDA_SMALL_NUMBER);
 
 	TimerTest_TickWorld(World, 3.0f);
-	Test->TestTrue(TIMER_TEST_TEXT("Timer was called first time"), FLoopingTestFunc::TimerCalled == 1);
+	Test->TestTrue(TIMER_TEST_TEXT("Timer was called first time"), FLoopingTestFunc::TimerCalled == 1); //-V547
 	Test->TestTrue(TIMER_TEST_TEXT("Timer was readded"), TimerManager.IsTimerActive(Handle));
 	Test->TestTrue(TIMER_TEST_TEXT("Timer was readded with correct time"), FMath::IsNearlyEqual(TimerManager.GetTimerRemaining(Handle), FLoopingTestFunc::NewTime, 1e-2f));
 
 	TimerTest_TickWorld(World, 1.1f);
-	Test->TestTrue(TIMER_TEST_TEXT("Timer was called second time"), FLoopingTestFunc::TimerCalled == 2);
+	Test->TestTrue(TIMER_TEST_TEXT("Timer was called second time"), FLoopingTestFunc::TimerCalled == 2); //-V547
 	Test->TestFalse(TIMER_TEST_TEXT("Timer handle no longer active"), TimerManager.IsTimerActive(Handle));
 
 	return true;
@@ -236,19 +233,19 @@ bool TimerManagerTest_LoopingTimers_DifferentHandles(UWorld* World, FAutomationT
 
 	FTimerHandle Handle;
 	TimerManager.SetTimer(Handle, Delegate, 1.0f, false);
-	TimerTest_TickWorld(World, KINDA_SMALL_NUMBER);
+	TimerTest_TickWorld(World, UE_KINDA_SMALL_NUMBER);
 
 	Test->TestTrue(TIMER_TEST_TEXT("First delegate time remaining is 1.0f"),
-		FMath::IsNearlyEqual(TimerManager.GetTimerRemaining(Handle), 1.0f, KINDA_SMALL_NUMBER));
+		FMath::IsNearlyEqual(TimerManager.GetTimerRemaining(Handle), 1.0f, UE_KINDA_SMALL_NUMBER));
 	
 	TimerManager.SetTimer(Handle, Delegate, 5.0f, false);
-	TimerTest_TickWorld(World, KINDA_SMALL_NUMBER);
+	TimerTest_TickWorld(World, UE_KINDA_SMALL_NUMBER);
 	Test->TestTrue(TIMER_TEST_TEXT("Reset delegate time remaining is 5.0f"),
-		FMath::IsNearlyEqual(TimerManager.GetTimerRemaining(Handle), 5.0f, KINDA_SMALL_NUMBER));
+		FMath::IsNearlyEqual(TimerManager.GetTimerRemaining(Handle), 5.0f, UE_KINDA_SMALL_NUMBER));
 
 	TimerManager.SetTimer(HandleOne, Delegate, 1.0f, true);
 	TimerManager.SetTimer(HandleTwo, Delegate, 1.5f, true);
-	TimerTest_TickWorld(World, KINDA_SMALL_NUMBER);
+	TimerTest_TickWorld(World, UE_KINDA_SMALL_NUMBER);
 
 	Test->TestTrue(TIMER_TEST_TEXT("Handle One is active"), TimerManager.IsTimerActive(HandleOne));
 	Test->TestTrue(TIMER_TEST_TEXT("Handle Two is active"), TimerManager.IsTimerActive(HandleTwo));

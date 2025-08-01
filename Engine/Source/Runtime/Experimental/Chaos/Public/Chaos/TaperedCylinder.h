@@ -9,7 +9,7 @@ namespace Chaos
 {
 	struct FTaperedCylinderSpecializeSamplingHelper;
 
-	class CHAOS_API FTaperedCylinder : public FImplicitObject
+	class FTaperedCylinder : public FImplicitObject
 	{
 	public:
 		FTaperedCylinder()
@@ -66,7 +66,7 @@ namespace Chaos
 		 * \p IncludeEndCaps determines whether or not points are generated on the 
 		 *    end caps of the cylinder.
 		 */
-		TArray<FVec3> ComputeLocalSamplePoints(const int32 NumPoints, const bool IncludeEndCaps = true) const;
+		CHAOS_API TArray<FVec3> ComputeLocalSamplePoints(const int32 NumPoints, const bool IncludeEndCaps = true) const;
 
 		/** 
 		 * Returns sample points centered about the origin. 
@@ -86,7 +86,7 @@ namespace Chaos
 		 * \p IncludeEndCaps determines whether or not points are generated on the 
 		 *    end caps of the cylinder.
 		 */
-		TArray<FVec3> ComputeSamplePoints(const int32 NumPoints, const bool IncludeEndCaps = true) const;
+		CHAOS_API TArray<FVec3> ComputeSamplePoints(const int32 NumPoints, const bool IncludeEndCaps = true) const;
 
 		/** 
 		 * Returns sample points at the current location of the cylinder.
@@ -105,7 +105,7 @@ namespace Chaos
 		{
 			const FVec3& Normal1 = MPlane1.Normal();
 			const FReal Distance1 = MPlane1.SignedDistance(x);
-			if (Distance1 < SMALL_NUMBER)
+			if (Distance1 < UE_SMALL_NUMBER)
 			{
 				ensure(MPlane2.SignedDistance(x) > (FReal)0.);
 				const FVec3 v = x - FVec3(Normal1 * Distance1 + MPlane1.X());
@@ -124,7 +124,7 @@ namespace Chaos
 			}
 			const FVec3& Normal2 = MPlane2.Normal();  // Used to be Distance2 = MPlane2.PhiWithNormal(x, Normal2); but that would trigger 
 			const FReal Distance2 = MHeight - Distance1;          // the ensure on Distance2 being slightly larger than MHeight in some border cases
-			if (Distance2 < SMALL_NUMBER)
+			if (Distance2 < UE_SMALL_NUMBER)
 			{
 				const FVec3 v = x - FVec3(Normal2 * Distance2 + MPlane2.X());
 				if (v.Size() > MRadius2)
@@ -142,7 +142,7 @@ namespace Chaos
 			}
 			ensure(Distance1 <= MHeight && Distance2 <= MHeight);
 			const FVec3 SideVector = (x - FVec3(Normal1 * Distance1 + MPlane1.X()));
-			const FReal SideDistance = SideVector.Size() - GetRadius(Distance1);
+			const FReal SideDistance = SideVector.Size() - GetRadiusAtDistance(Distance1);
 			if (SideDistance < 0.)
 			{
 				const FReal TopDistance = Distance1 < Distance2 ? Distance1 : Distance2;
@@ -181,7 +181,7 @@ namespace Chaos
 			FReal theta = atan2(BaseRadius, (Top - BaseCenter).Size());
 			FReal costheta = cos(theta);
 			FReal cossqtheta = costheta * costheta;
-			check(theta > 0 && theta < PI / 2);
+			check(theta > 0 && theta < UE_PI / 2);
 			FVec3 Direction = EndPoint - StartPoint;
 			FReal Length = Direction.Size();
 			Direction = Direction.GetSafeNormal();
@@ -229,10 +229,10 @@ namespace Chaos
 			}
 			auto Plane1Intersection = MPlane1.FindClosestIntersection(StartPoint, EndPoint, Thickness);
 			if (Plane1Intersection.Second)
-				Intersections.Add(MakePair((Plane1Intersection.First - StartPoint).Size(), Plane1Intersection.First));
+				Intersections.Add(MakePair((FReal)(Plane1Intersection.First - StartPoint).Size(), Plane1Intersection.First));
 			auto Plane2Intersection = MPlane2.FindClosestIntersection(StartPoint, EndPoint, Thickness);
 			if (Plane2Intersection.Second)
-				Intersections.Add(MakePair((Plane2Intersection.First - StartPoint).Size(), Plane2Intersection.First));
+				Intersections.Add(MakePair((FReal)(Plane2Intersection.First - StartPoint).Size(), Plane2Intersection.First));
 			Intersections.Sort([](const Pair<FReal, FVec3>& Elem1, const Pair<FReal, FVec3>& Elem2) { return Elem1.First < Elem2.First; });
 			for (const auto& Elem : Intersections)
 			{
@@ -261,14 +261,14 @@ namespace Chaos
 			const FReal R1R1 = MRadius1 * MRadius1;
 			const FReal R2R2 = MRadius2 * MRadius2;
 			const FReal R1R2 = MRadius1 * MRadius2;
-			return FVec3(0, 0, MHeight*(R1R1 + 2.*R1R2 + 3.*R2R2) / 4.*(R1R1 + R1R2 + R2R2));
+			return FVec3(0, 0, static_cast<FReal>(MHeight*(R1R1 + 2.*R1R2 + 3.*R2R2) / 4.*(R1R1 + R1R2 + R2R2)));
 		}
 		FVec3 GetAxis() const { return (MPlane2.X() - MPlane1.X()).GetSafeNormal(); }
 
 		FReal GetArea(const bool IncludeEndCaps = true) const { return GetArea(MHeight, MRadius1, MRadius2, IncludeEndCaps); }
 		static FReal GetArea(const FReal Height, const FReal Radius1, const FReal Radius2, const bool IncludeEndCaps)
 		{
-			static const FReal TwoPI = PI * 2;
+			static const FReal TwoPI = UE_PI * 2;
 			if (Radius1 == Radius2)
 			{
 				const FReal TwoPIR1 = TwoPI * Radius1;
@@ -279,9 +279,9 @@ namespace Chaos
 			else
 			{
 				const FReal R1_R2 = Radius1 - Radius2;
-				const FReal CylArea = PI * (Radius1 + Radius2) * FMath::Sqrt((R1_R2 * R1_R2) + (Height * Height));
+				const FReal CylArea = UE_PI * (Radius1 + Radius2) * FMath::Sqrt((R1_R2 * R1_R2) + (Height * Height));
 				return IncludeEndCaps ?
-				    CylArea + PI * Radius1 * Radius1 + PI * Radius2 * Radius2 :
+				    CylArea + UE_PI * Radius1 * Radius1 + UE_PI * Radius2 * Radius2 :
 				    CylArea;
 			}
 		}
@@ -289,7 +289,7 @@ namespace Chaos
 		FReal GetVolume() const { return GetVolume(MHeight, MRadius1, MRadius2); }
 		static FReal GetVolume(const FReal Height, const FReal Radius1, const FReal Radius2)
 		{
-			static const FReal PI_3 = PI / 3;
+			static const FReal PI_3 = UE_PI / 3;
 			return PI_3 * Height * (Radius1 * Radius1 + Radius1 * Radius2 + Radius2 * Radius2);
 		}
 
@@ -304,12 +304,12 @@ namespace Chaos
 			const FReal R1R2 = R1 * R2;
 			const FReal R2R2 = R2 * R2;
 
-			const FReal Num1 = 2. * HH * (R1R1 + 3. * R1R2 + 6. * R2R2); // 2H^2 * (R1^2 + 3R1R2 + 6R2^2)
-			const FReal Num2 = 3. * (R1R1 * R1R1 + R1R1 * R1R2 + R1R2 * R1R2 + R1R2 * R2R2 + R2R2 * R2R2); // 3 * (R1^4 + R1^3R2 + R1^2R2^2 + R1R2^3 + R2^4)
-			const FReal Den1 = PI * (R1R1 + R1R2 + R2R2); // PI * (R1^2 + R1R2 + R2^2)
+			const FReal Num1 = static_cast<FReal>(2. * HH * (R1R1 + 3. * R1R2 + 6. * R2R2)); // 2H^2 * (R1^2 + 3R1R2 + 6R2^2)
+			const FReal Num2 = static_cast<FReal>(3. * (R1R1 * R1R1 + R1R1 * R1R2 + R1R2 * R1R2 + R1R2 * R2R2 + R2R2 * R2R2)); // 3 * (R1^4 + R1^3R2 + R1^2R2^2 + R1R2^3 + R2^4)
+			const FReal Den1 = UE_PI * (R1R1 + R1R2 + R2R2); // PI * (R1^2 + R1R2 + R2^2)
 
-			const FReal Diag12 = Mass * (Num1 + Num2) / (20. * Den1);
-			const FReal Diag3 = Mass * Num2 / (10. * Den1);
+			const FReal Diag12 = Mass * (Num1 + Num2) / (static_cast<FReal>(20.) * Den1);
+			const FReal Diag3 = Mass * Num2 / (static_cast<FReal>(10.) * Den1);
 
 			return FMatrix33(Diag12, Diag12, Diag3);
 		}
@@ -330,31 +330,51 @@ namespace Chaos
 			return HashCombine(PlaneHashes, PropertyHash);
 		}
 
+#if INTEL_ISPC
+		// See PerParticlePBDCollisionConstraint.cpp
+		// ISPC code has matching structs for interpreting FImplicitObjects.
+		// This is used to verify that the structs stay the same.
+		struct FISPCDataVerifier
+		{
+			static constexpr int32 OffsetOfMPlane1() { return offsetof(FTaperedCylinder, MPlane1); }
+			static constexpr int32 SizeOfMPlane1() { return sizeof(FTaperedCylinder::MPlane1); }
+			static constexpr int32 OffsetOfMPlane2() { return offsetof(FTaperedCylinder, MPlane2); }
+			static constexpr int32 SizeOfMPlane2() { return sizeof(FTaperedCylinder::MPlane2); }
+			static constexpr int32 OffsetOfMHeight() { return offsetof(FTaperedCylinder, MHeight); }
+			static constexpr int32 SizeOfMHeight() { return sizeof(FTaperedCylinder::MHeight); }
+			static constexpr int32 OffsetOfMRadius1() { return offsetof(FTaperedCylinder, MRadius1); }
+			static constexpr int32 SizeOfMRadius1() { return sizeof(FTaperedCylinder::MRadius1); }
+			static constexpr int32 OffsetOfMRadius2() { return offsetof(FTaperedCylinder, MRadius2); }
+			static constexpr int32 SizeOfMRadius2() { return sizeof(FTaperedCylinder::MRadius2); }
+		};
+		friend FISPCDataVerifier;
+#endif // #if INTEL_ISPC
+
 	private:
 		//Phi is distance from closest point on plane1
-		FReal GetRadius(const FReal& Phi) const
+		FReal GetRadiusAtDistance(const FReal& Phi) const
 		{
 			const FReal Alpha = Phi / MHeight;
-			return MRadius1 * (1. - Alpha) + MRadius2 * Alpha;
+			return MRadius1 * (static_cast<FReal>(1.) - Alpha) + MRadius2 * Alpha;
 		}
 
-		TPlane<FReal, 3> MPlane1, MPlane2;
+		TPlaneConcrete<FReal, 3> MPlane1, MPlane2;
 		FReal MHeight, MRadius1, MRadius2;
 		FAABB3 MLocalBoundingBox;
 	};
 
-	struct CHAOS_API FTaperedCylinderSpecializeSamplingHelper
+	struct FTaperedCylinderSpecializeSamplingHelper
 	{
 		static FORCEINLINE void ComputeSamplePoints(
 		    TArray<FVec3>& Points, const FTaperedCylinder& Cylinder,
 		    const int32 NumPoints, const bool IncludeEndCaps = true)
 		{
 			if (NumPoints <= 1 ||
-			    (Cylinder.GetRadius1() <= KINDA_SMALL_NUMBER &&
-			        Cylinder.GetRadius2() <= KINDA_SMALL_NUMBER))
+			    (Cylinder.GetRadius1() <= UE_KINDA_SMALL_NUMBER &&
+			        Cylinder.GetRadius2() <= UE_KINDA_SMALL_NUMBER))
 			{
 				const int32 Offset = Points.Num();
-				if (Cylinder.GetHeight() <= KINDA_SMALL_NUMBER)
+				if (Cylinder.GetHeight() <= UE_KINDA_SMALL_NUMBER)
 				{
 					Points.SetNumUninitialized(Offset + 1);
 					Points[Offset] = Cylinder.GetCenter();
@@ -412,7 +432,7 @@ namespace Chaos
 		    int32 SpiralSeed = 0)
 		{
 			// Axis should be normalized.
-			checkSlow(FMath::Abs(Axis.Size() - 1.0) < KINDA_SMALL_NUMBER);
+			checkSlow(FMath::Abs(Axis.Size() - 1.0) < UE_KINDA_SMALL_NUMBER);
 
 			const int32 Offset = Points.Num();
 			ComputeGoldenSpiralPointsUnoriented(Points, Radius1, Radius2, Height, NumPoints, IncludeEndCaps, SpiralSeed);
@@ -421,7 +441,7 @@ namespace Chaos
 			// along the Z axis.  Transform them to where they should be.
 			const FReal HalfHeight = Height / 2;
 			const FRotation3 Rotation = FRotation3::FromRotatedVector(FVec3(0, 0, 1), Axis);
-			checkSlow(((Origin + Axis * Height) - (Rotation.RotateVector(FVec3(0, 0, Height)) + Origin)).Size() < KINDA_SMALL_NUMBER);
+			checkSlow(((Origin + Axis * Height) - (Rotation.RotateVector(FVec3(0, 0, Height)) + Origin)).Size() < UE_KINDA_SMALL_NUMBER);
 			for (int32 i = Offset; i < Points.Num(); i++)
 			{
 				FVec3& Point = Points[i];
@@ -474,16 +494,16 @@ namespace Chaos
 			int32 NumPointsCylinder;
 			if (IncludeEndCaps)
 			{
-				const FReal Cap1Area = PI * Radius1 * Radius1;
-				const FReal Cap2Area = PI * Radius2 * Radius2;
+				const FReal Cap1Area = UE_PI * Radius1 * Radius1;
+				const FReal Cap2Area = UE_PI * Radius2 * Radius2;
 				const FReal CylArea =
-				    PI * Radius2 * (Radius2 + FMath::Sqrt(Height * Height + Radius2 * Radius2)) -
-				    PI * Radius1 * (Radius1 + FMath::Sqrt(Height * Height + Radius1 * Radius1));
+				    UE_PI * Radius2 * (Radius2 + FMath::Sqrt(Height * Height + Radius2 * Radius2)) -
+				    UE_PI * Radius1 * (Radius1 + FMath::Sqrt(Height * Height + Radius1 * Radius1));
 				const FReal AllArea = CylArea + Cap1Area + Cap2Area;
-				if (AllArea > KINDA_SMALL_NUMBER)
+				if (AllArea > UE_KINDA_SMALL_NUMBER)
 				{
-					NumPointsEndCap1 = static_cast<int32>(round(Cap1Area / AllArea * NumPoints));
-					NumPointsEndCap2 = static_cast<int32>(round(Cap2Area / AllArea * NumPoints));
+					NumPointsEndCap1 = static_cast<int32>(round(Cap1Area / AllArea * static_cast<FReal>(NumPoints)));
+					NumPointsEndCap2 = static_cast<int32>(round(Cap2Area / AllArea * static_cast<FReal>(NumPoints)));
 					NumPointsCylinder = NumPoints - NumPointsEndCap1 - NumPointsEndCap2;
 				}
 				else
@@ -513,7 +533,7 @@ namespace Chaos
 				for (int32 i = 0; i < Points2D.Num(); i++)
 				{
 					const FVec2& Pt = Points2D[i];
-					checkSlow(Pt.Size() < Radius1 + KINDA_SMALL_NUMBER);
+					checkSlow(Pt.Size() < Radius1 + UE_KINDA_SMALL_NUMBER);
 					Points[i + Offset] = FVec3(Pt[0], Pt[1], -HalfHeight);
 				}
 				// Advance the SpiralSeed by the number of points generated.
@@ -527,18 +547,18 @@ namespace Chaos
 			}
 			else
 			{
-				static const FReal Increment = PI * (1.0 + sqrt(5));
+				static const FRealSingle Increment = UE_PI * (1.0f + FMath::Sqrt(5.0f));
 				for (int32 i = 0; i < NumPointsCylinder; i++)
 				{
 					// In the 2D sphere (disc) case, we vary R so it increases monotonically,
 					// which spreads points out across the disc:
 					//     const FReal R = FMath::Sqrt((0.5 + Index) / NumPoints) * Radius;
 					// But we're mapping to a cylinder, which means we want to keep R constant.
-					const FReal R = FMath::Lerp(Radius1, Radius2, static_cast<FReal>(i) / (NumPointsCylinder - 1));
-					const FReal Theta = Increment * (0.5 + i + SpiralSeed);
+					const FReal R = FMath::Lerp(Radius1, Radius2, static_cast<FReal>(i) / static_cast<FReal>(NumPointsCylinder - 1));
+					const FReal Theta = Increment * (0.5f + static_cast<FReal>(i + SpiralSeed));
 
 					// Map polar coordinates to Cartesian, and vary Z by [-HalfHeight, HalfHeight].
-					const FReal Z = FMath::LerpStable(-HalfHeight, HalfHeight, static_cast<FReal>(i) / (NumPointsCylinder - 1));
+					const FReal Z = FMath::LerpStable(-HalfHeight, HalfHeight, static_cast<FReal>(i) / static_cast<FReal>(NumPointsCylinder - 1));
 					Points[i + Offset] =
 					    FVec3(
 					        R * FMath::Cos(Theta),
@@ -560,7 +580,7 @@ namespace Chaos
 				for (int32 i = 0; i < Points2D.Num(); i++)
 				{
 					const FVec2& Pt = Points2D[i];
-					checkSlow(Pt.Size() < Radius2 + KINDA_SMALL_NUMBER);
+					checkSlow(Pt.Size() < Radius2 + UE_KINDA_SMALL_NUMBER);
 					Points[i + Offset] = FVec3(Pt[0], Pt[1], HalfHeight);
 				}
 			}

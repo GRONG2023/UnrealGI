@@ -94,62 +94,36 @@ enum class EMetalBufferFormat : uint8
 	RG11B10Half 			=51,
 	
 	R5G6B5Unorm         	=52,
-	
-	Max						=53
-};
+	B5G5R5A1Unorm           =53,
 
-struct FMetalShaderResourceTable : public FBaseShaderResourceTable
-{
-	/** Mapping of bound Textures to their location in resource tables. */
-	TArray<uint32> TextureMap;
-	friend bool operator==(const FMetalShaderResourceTable &A, const FMetalShaderResourceTable& B)
-	{
-		if (!(((FBaseShaderResourceTable&)A) == ((FBaseShaderResourceTable&)B)))
-		{
-			return false;
-		}
-		if (A.TextureMap.Num() != B.TextureMap.Num())
-		{
-			return false;
-		}
-		if (FMemory::Memcmp(A.TextureMap.GetData(), B.TextureMap.GetData(), A.TextureMap.GetTypeSize()*A.TextureMap.Num()) != 0)
-		{
-			return false;
-		}
-		return true;
-	}
+	Max						=54
 };
-
-inline FArchive& operator<<(FArchive& Ar, FMetalShaderResourceTable& SRT)
-{
-	Ar << ((FBaseShaderResourceTable&)SRT);
-	Ar << SRT.TextureMap;
-	return Ar;
-}
 
 struct FMetalShaderBindings
 {
 	TArray<TArray<CrossCompiler::FPackedArrayInfo>>	PackedUniformBuffers;
 	TArray<CrossCompiler::FPackedArrayInfo>			PackedGlobalArrays;
-	FMetalShaderResourceTable				ShaderResourceTable;
-	TMap<uint8, TArray<uint8>>				ArgumentBufferMasks;
+	FShaderResourceTable							ShaderResourceTable;
+	TMap<uint8, TArray<uint8>>						ArgumentBufferMasks;
+	CrossCompiler::FShaderBindingInOutMask			InOutMask;
+    FString                                         IRConverterReflectionJSON;
+    uint32                                          RSNumCBVs;
+    uint32                                          OutputSizeVS;
+    uint32                                          MaxInputPrimitivesPerMeshThreadgroupGS;
 
-    uint32  LinearBuffer;
-	uint32	TypedBuffers;
 	uint32 	ConstantBuffers;
 	uint32  ArgumentBuffers;
-	uint16	InOutMask;
 	uint8	NumSamplers;
 	uint8	NumUniformBuffers;
 	uint8	NumUAVs;
 	bool	bDiscards;
 
 	FMetalShaderBindings() :
-		LinearBuffer(0),
-        TypedBuffers(0),
+        RSNumCBVs(0),
+        OutputSizeVS(0),
+        MaxInputPrimitivesPerMeshThreadgroupGS(0),
 		ConstantBuffers(0),
 		ArgumentBuffers(0),
-		InOutMask(0),
 		NumSamplers(0),
 		NumUniformBuffers(0),
 		NumUAVs(0),
@@ -164,8 +138,6 @@ inline FArchive& operator<<(FArchive& Ar, FMetalShaderBindings& Bindings)
 	Ar << Bindings.PackedGlobalArrays;
 	Ar << Bindings.ShaderResourceTable;
 	Ar << Bindings.ArgumentBufferMasks;
-    Ar << Bindings.LinearBuffer;
-    Ar << Bindings.TypedBuffers;
 	Ar << Bindings.ConstantBuffers;
 	Ar << Bindings.ArgumentBuffers;
 	Ar << Bindings.InOutMask;
@@ -173,6 +145,10 @@ inline FArchive& operator<<(FArchive& Ar, FMetalShaderBindings& Bindings)
 	Ar << Bindings.NumUniformBuffers;
 	Ar << Bindings.NumUAVs;
 	Ar << Bindings.bDiscards;
+    Ar << Bindings.IRConverterReflectionJSON;
+    Ar << Bindings.RSNumCBVs;
+    Ar << Bindings.OutputSizeVS;
+    Ar << Bindings.MaxInputPrimitivesPerMeshThreadgroupGS;
 	return Ar;
 }
 
@@ -198,6 +174,28 @@ enum class EMetalComponentType : uint8
 	Float,
 	Bool,
 	Max
+};
+
+struct FMetalRayTracingHeader
+{
+	uint32 InstanceIndexBuffer;
+
+	bool IsValid() const
+	{
+		return InstanceIndexBuffer != UINT32_MAX;
+	}
+
+	FMetalRayTracingHeader()
+		: InstanceIndexBuffer(UINT32_MAX)
+	{
+
+	}
+
+	friend FArchive& operator<<(FArchive& Ar, FMetalRayTracingHeader& Header)
+	{
+		Ar << Header.InstanceIndexBuffer;
+		return Ar;
+	}
 };
 
 struct FMetalAttribute
@@ -229,101 +227,10 @@ struct FMetalAttribute
 	}
 };
 
-struct FMetalTessellationOutputs
-{
-	TArray<FMetalAttribute> HSIn;
-	TArray<FMetalAttribute> HSOut;
-	TArray<FMetalAttribute> PatchControlPointOut;
-	uint32 HSOutSize;
-	uint32 HSTFOutSize;
-	uint32 PatchControlPointOutSize;
-	
-	FMetalTessellationOutputs()
-	: HSOutSize(0)
-	, HSTFOutSize(0)
-	, PatchControlPointOutSize(0)
-	{
-		
-	}
-	
-	friend FArchive& operator<<(FArchive& Ar, FMetalTessellationOutputs& Attrs)
-	{
-		Ar << Attrs.HSIn;
-		Ar << Attrs.HSOut;
-		Ar << Attrs.PatchControlPointOut;
-		Ar << Attrs.HSOutSize;
-		Ar << Attrs.HSTFOutSize;
-		Ar << Attrs.PatchControlPointOutSize;
-		return Ar;
-	}
-};
-
-struct FMetalTessellationHeader
-{
-	FMetalTessellationOutputs TessellationOutputAttribs;
-	
-	uint32 TessellationOutputControlPoints;
-	uint32 TessellationDomain; // 3 = tri, 4 = quad // TODO unused
-	uint32 TessellationInputControlPoints; // TODO unused
-	uint32 TessellationPatchesPerThreadGroup;
-	uint32 TessellationPatchCountBuffer;
-	uint32 TessellationIndexBuffer;
-	uint32 TessellationHSOutBuffer;
-	uint32 TessellationHSTFOutBuffer;
-	uint32 TessellationControlPointOutBuffer;
-	uint32 TessellationControlPointIndexBuffer;
-	float  TessellationMaxTessFactor;
-	
-	EMetalOutputWindingMode TessellationOutputWinding;
-	EMetalPartitionMode TessellationPartitioning;
-	
-	FMetalTessellationHeader()
-	: TessellationOutputControlPoints(0)
-	, TessellationDomain(0)
-	, TessellationInputControlPoints(0)
-	, TessellationPatchesPerThreadGroup(0)
-	, TessellationPatchCountBuffer(~0u)
-	, TessellationIndexBuffer(~0u)
-	, TessellationHSOutBuffer(~0u)
-	, TessellationHSTFOutBuffer(~0u)
-	, TessellationControlPointOutBuffer(~0u)
-	, TessellationControlPointIndexBuffer(~0u)
-	, TessellationMaxTessFactor(0)
-	, TessellationOutputWinding(EMetalOutputWindingMode::Clockwise)
-	, TessellationPartitioning(EMetalPartitionMode::Pow2)
-	{
-		
-	}
-	
-	friend FArchive& operator<<(FArchive& Ar, FMetalTessellationHeader& Header)
-	{
-		Ar << Header.TessellationOutputAttribs;
-		
-		Ar << Header.TessellationOutputControlPoints;
-		Ar << Header.TessellationDomain;
-		Ar << Header.TessellationInputControlPoints;
-		Ar << Header.TessellationPatchesPerThreadGroup;
-		Ar << Header.TessellationMaxTessFactor;
-		
-		Ar << Header.TessellationPatchCountBuffer;
-		Ar << Header.TessellationIndexBuffer;
-		Ar << Header.TessellationHSOutBuffer;
-		Ar << Header.TessellationHSTFOutBuffer;
-		Ar << Header.TessellationControlPointOutBuffer;
-		Ar << Header.TessellationControlPointIndexBuffer;
-		
-		Ar << Header.TessellationOutputWinding;
-		Ar << Header.TessellationPartitioning;
-		return Ar;
-	}
-};
-
 struct FMetalCodeHeader
 {
 	FMetalShaderBindings Bindings;
 	TArray<CrossCompiler::FUniformBufferCopyInfo> UniformBuffersCopyInfo;
-	TArray<FMetalTessellationHeader> Tessellation;
-	FString ShaderName;
 
 	uint64 CompilerBuild;
 	uint32 CompilerVersion;
@@ -334,10 +241,11 @@ struct FMetalCodeHeader
 	uint32 NumThreadsZ;
 	uint32 CompileFlags;
 	uint8 Frequency;
-	uint8 Version;
+	uint32 Version;
 	int8 SideTable;
 	bool bDeviceFunctionConstants;
-	
+	FMetalRayTracingHeader RayTracing;
+
 	FMetalCodeHeader()
 	: CompilerBuild(0)
 	, CompilerVersion(0)
@@ -379,9 +287,6 @@ inline FArchive& operator<<(FArchive& Ar, FMetalCodeHeader& Header)
 		}
 	}
 	
-	Ar << Header.Tessellation;
-	Ar << Header.ShaderName;
-
 	Ar << Header.CompilerBuild;
 	Ar << Header.CompilerVersion;
 	Ar << Header.SourceLen;
@@ -394,7 +299,7 @@ inline FArchive& operator<<(FArchive& Ar, FMetalCodeHeader& Header)
 	Ar << Header.Version;
 	Ar << Header.SideTable;
 	Ar << Header.bDeviceFunctionConstants;
-
+	Ar << Header.RayTracing;
     return Ar;
 }
 

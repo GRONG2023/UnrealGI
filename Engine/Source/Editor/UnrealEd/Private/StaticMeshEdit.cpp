@@ -7,6 +7,7 @@
 #include "CoreMinimal.h"
 #include "Misc/CoreMisc.h"
 #include "Misc/FeedbackContext.h"
+#include "CoreGlobals.h" // GUndo
 #include "Engine/EngineTypes.h"
 #include "Model.h"
 #include "EditorFramework/AssetImportData.h"
@@ -26,6 +27,7 @@
 #include "FbxImporter.h"
 #include "Misc/ScopedSlowTask.h"
 
+#include "MaterialDomain.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/Material.h"
 #include "PerPlatformProperties.h"
@@ -122,7 +124,7 @@ void MergeStaticMesh(UStaticMesh* DestMesh, UStaticMesh* SourceMesh, const FMerg
 //	FVerticesEqual
 //
 
-inline bool FVerticesEqual(FVector& V1,FVector& V2)
+inline bool FVerticesEqual(FVector3f& V1,FVector3f& V2)
 {
 	if(FMath::Abs(V1.X - V2.X) > THRESH_POINTS_ARE_SAME * 4.0f)
 	{
@@ -144,18 +146,18 @@ inline bool FVerticesEqual(FVector& V1,FVector& V2)
 
 void GetBrushMesh(ABrush* Brush, UModel* Model, FMeshDescription& MeshDescription, TArray<FStaticMaterial>& OutMaterials)
 {
-	TVertexAttributesRef<FVector> VertexPositions = MeshDescription.VertexAttributes().GetAttributesRef<FVector>(MeshAttribute::Vertex::Position);
-	TVertexInstanceAttributesRef<FVector> VertexInstanceNormals = MeshDescription.VertexInstanceAttributes().GetAttributesRef<FVector>(MeshAttribute::VertexInstance::Normal);
-	TVertexInstanceAttributesRef<FVector> VertexInstanceTangents = MeshDescription.VertexInstanceAttributes().GetAttributesRef<FVector>(MeshAttribute::VertexInstance::Tangent);
-	TVertexInstanceAttributesRef<float> VertexInstanceBinormalSigns = MeshDescription.VertexInstanceAttributes().GetAttributesRef<float>(MeshAttribute::VertexInstance::BinormalSign);
-	TVertexInstanceAttributesRef<FVector4> VertexInstanceColors = MeshDescription.VertexInstanceAttributes().GetAttributesRef<FVector4>(MeshAttribute::VertexInstance::Color);
-	TVertexInstanceAttributesRef<FVector2D> VertexInstanceUVs = MeshDescription.VertexInstanceAttributes().GetAttributesRef<FVector2D>(MeshAttribute::VertexInstance::TextureCoordinate);
-	TEdgeAttributesRef<bool> EdgeHardnesses = MeshDescription.EdgeAttributes().GetAttributesRef<bool>(MeshAttribute::Edge::IsHard);
-	TEdgeAttributesRef<float> EdgeCreaseSharpnesses = MeshDescription.EdgeAttributes().GetAttributesRef<float>(MeshAttribute::Edge::CreaseSharpness);
-	TPolygonGroupAttributesRef<FName> PolygonGroupImportedMaterialSlotNames = MeshDescription.PolygonGroupAttributes().GetAttributesRef<FName>(MeshAttribute::PolygonGroup::ImportedMaterialSlotName);
+	FStaticMeshAttributes Attributes(MeshDescription);
+	TVertexAttributesRef<FVector3f> VertexPositions = Attributes.GetVertexPositions();
+	TVertexInstanceAttributesRef<FVector3f> VertexInstanceNormals = Attributes.GetVertexInstanceNormals();
+	TVertexInstanceAttributesRef<FVector3f> VertexInstanceTangents = Attributes.GetVertexInstanceTangents();
+	TVertexInstanceAttributesRef<float> VertexInstanceBinormalSigns = Attributes.GetVertexInstanceBinormalSigns();
+	TVertexInstanceAttributesRef<FVector4f> VertexInstanceColors = Attributes.GetVertexInstanceColors();
+	TVertexInstanceAttributesRef<FVector2f> VertexInstanceUVs = Attributes.GetVertexInstanceUVs();
+	TEdgeAttributesRef<bool> EdgeHardnesses = Attributes.GetEdgeHardnesses();
+	TPolygonGroupAttributesRef<FName> PolygonGroupImportedMaterialSlotNames = Attributes.GetPolygonGroupMaterialSlotNames();
 	
 	//Make sure we have one UVChannel
-	VertexInstanceUVs.SetNumIndices(1);
+	VertexInstanceUVs.SetNumChannels(1);
 	
 	// Calculate the local to world transform for the source brush.
 	FMatrix	ActorToWorld = Brush ? Brush->ActorToWorld().ToMatrixWithScale() : FMatrix::Identity;
@@ -177,7 +179,7 @@ void GetBrushMesh(ABrush* Brush, UModel* Model, FMeshDescription& MeshDescriptio
 		}
 
 		int32 MaterialIndex = OutMaterials.AddUnique(FStaticMaterial(Material, Material->GetFName(), Material->GetFName()));
-		FPolygonGroupID CurrentPolygonGroupID = FPolygonGroupID::Invalid;
+		FPolygonGroupID CurrentPolygonGroupID = INDEX_NONE;
 		for (const FPolygonGroupID PolygonGroupID : MeshDescription.PolygonGroups().GetElementIDs())
 		{
 			if (Material->GetFName() == PolygonGroupImportedMaterialSlotNames[PolygonGroupID])
@@ -186,24 +188,24 @@ void GetBrushMesh(ABrush* Brush, UModel* Model, FMeshDescription& MeshDescriptio
 				break;
 			}
 		}
-		if (CurrentPolygonGroupID == FPolygonGroupID::Invalid)
+		if (CurrentPolygonGroupID == INDEX_NONE)
 		{
 			CurrentPolygonGroupID = MeshDescription.CreatePolygonGroup();
 			PolygonGroupImportedMaterialSlotNames[CurrentPolygonGroupID] = Material->GetFName();
 		}
 
 		// Cache the texture coordinate system for this polygon.
-		FVector	TextureBase = Polygon.Base - (Brush ? Brush->GetPivotOffset() : FVector::ZeroVector),
+		FVector3f	TextureBase = Polygon.Base - (Brush ? (FVector3f)Brush->GetPivotOffset() : FVector3f::ZeroVector),
 			TextureX = Polygon.TextureU / UModel::GetGlobalBSPTexelScale(),
 			TextureY = Polygon.TextureV / UModel::GetGlobalBSPTexelScale();
 		// For each vertex after the first two vertices...
 		for (int32 VertexIndex = 2; VertexIndex < Polygon.Vertices.Num(); VertexIndex++)
 		{
-			FVector Positions[3];
-			Positions[ReverseVertices ? 0 : 2] = ActorToWorld.TransformPosition(Polygon.Vertices[0]) - PostSub;
-			Positions[1] = ActorToWorld.TransformPosition(Polygon.Vertices[VertexIndex - 1]) - PostSub;
-			Positions[ReverseVertices ? 2 : 0] = ActorToWorld.TransformPosition(Polygon.Vertices[VertexIndex]) - PostSub;
-			FVertexID VertexID[3] = { FVertexID::Invalid, FVertexID::Invalid, FVertexID::Invalid };
+			FVector3f Positions[3];
+			Positions[ReverseVertices ? 0 : 2] = FVector4f(ActorToWorld.TransformPosition((FVector)Polygon.Vertices[0]) - PostSub);
+			Positions[1] = FVector4f(ActorToWorld.TransformPosition((FVector)Polygon.Vertices[VertexIndex - 1]) - PostSub);
+			Positions[ReverseVertices ? 2 : 0] = FVector4f(ActorToWorld.TransformPosition((FVector)Polygon.Vertices[VertexIndex]) - PostSub);
+			FVertexID VertexID[3] = { INDEX_NONE, INDEX_NONE, INDEX_NONE };
 			for (FVertexID IterVertexID : MeshDescription.Vertices().GetElementIDs())
 			{
 				if (FVerticesEqual(Positions[0], VertexPositions[IterVertexID]))
@@ -226,13 +228,13 @@ void GetBrushMesh(ABrush* Brush, UModel* Model, FMeshDescription& MeshDescriptio
 
 			for (int32 CornerIndex = 0; CornerIndex < 3; ++CornerIndex)
 			{
-				if (VertexID[CornerIndex] == FVertexID::Invalid)
+				if (VertexID[CornerIndex] == INDEX_NONE)
 				{
 					VertexID[CornerIndex] = MeshDescription.CreateVertex();
 					VertexPositions[VertexID[CornerIndex]] = Positions[CornerIndex];
 				}
 				VertexInstanceIDs[CornerIndex] = MeshDescription.CreateVertexInstance(VertexID[CornerIndex]);
-				VertexInstanceUVs.Set(VertexInstanceIDs[CornerIndex], 0, FVector2D(
+				VertexInstanceUVs.Set(VertexInstanceIDs[CornerIndex], 0, FVector2f(
 					(Positions[CornerIndex] - TextureBase) | TextureX,
 					(Positions[CornerIndex] - TextureBase) | TextureY));
 			}
@@ -256,6 +258,13 @@ void GetBrushMesh(ABrush* Brush, UModel* Model, FMeshDescription& MeshDescriptio
 
 UStaticMesh* CreateStaticMeshFromBrush(UObject* Outer, FName Name, ABrush* Brush, UModel* Model)
 {
+	// MINOR HACK: Make sure we don't transact static mesh object creation because we are currently
+	// unable to undo it properly, where undoing it places the asset in a broken state that can cause
+	// crashes. Instead, temporarily disconnect the current transaction object, if any.
+	ITransaction* UndoState = GUndo;
+	GUndo = nullptr; // Pretend we're not in a transaction
+	ON_SCOPE_EXIT{ GUndo = UndoState; }; // Revert
+
 	FScopedSlowTask SlowTask(0.0f, NSLOCTEXT("UnrealEd", "CreatingStaticMeshE", "Creating static mesh..."));
 	SlowTask.MakeDialog();
 
@@ -299,24 +308,24 @@ UStaticMesh* CreateStaticMeshFromBrush(UObject* Outer, FName Name, ABrush* Brush
 
 // Accepts a triangle (XYZ and UV values for each point) and returns a poly base and UV vectors
 // NOTE : the UV coords should be scaled by the texture size
-static inline void FTexCoordsToVectors(const FVector& V0, const FVector& UV0,
-									   const FVector& V1, const FVector& InUV1,
-									   const FVector& V2, const FVector& InUV2,
-									   FVector* InBaseResult, FVector* InUResult, FVector* InVResult )
+static inline void FTexCoordsToVectors(const FVector3f& V0, const FVector3f& UV0,
+									   const FVector3f& V1, const FVector3f& InUV1,
+									   const FVector3f& V2, const FVector3f& InUV2,
+									   FVector3f* InBaseResult, FVector3f* InUResult, FVector3f* InVResult )
 {
 	// Create polygon normal.
-	FVector PN = FVector((V0-V1) ^ (V2-V0));
+	FVector3f PN = FVector3f((V0-V1) ^ (V2-V0));
 	PN = PN.GetSafeNormal();
 
-	FVector UV1( InUV1 );
-	FVector UV2( InUV2 );
+	FVector3f UV1( InUV1 );
+	FVector3f UV2( InUV2 );
 
 	// Fudge UV's to make sure no infinities creep into UV vector math, whenever we detect identical U or V's.
 	if( ( UV0.X == UV1.X ) || ( UV2.X == UV1.X ) || ( UV2.X == UV0.X ) ||
 		( UV0.Y == UV1.Y ) || ( UV2.Y == UV1.Y ) || ( UV2.Y == UV0.Y ) )
 	{
-		UV1 += FVector(0.004173f,0.004123f,0.0f);
-		UV2 += FVector(0.003173f,0.003123f,0.0f);
+		UV1 += FVector3f(0.004173f,0.004123f,0.0f);
+		UV2 += FVector3f(0.003173f,0.003123f,0.0f);
 	}
 
 	//
@@ -324,28 +333,28 @@ static inline void FTexCoordsToVectors(const FVector& V0, const FVector& UV0,
 	// into a 3x3 matrix , one for  u(t) = TU dot (x(t)-x(o) + u(o) and one for v(t)=  TV dot (.... , 
 	// then the third assumes we're perpendicular to the normal. 
 	//
-	FMatrix TexEqu = FMatrix::Identity;
-	TexEqu.SetAxis( 0, FVector(	V1.X - V0.X, V1.Y - V0.Y, V1.Z - V0.Z ) );
-	TexEqu.SetAxis( 1, FVector( V2.X - V0.X, V2.Y - V0.Y, V2.Z - V0.Z ) );
-	TexEqu.SetAxis( 2, FVector( PN.X,        PN.Y,        PN.Z        ) );
+	FMatrix44f TexEqu = FMatrix44f::Identity;
+	TexEqu.SetAxis( 0, FVector3f(	V1.X - V0.X, V1.Y - V0.Y, V1.Z - V0.Z ) );
+	TexEqu.SetAxis( 1, FVector3f( V2.X - V0.X, V2.Y - V0.Y, V2.Z - V0.Z ) );
+	TexEqu.SetAxis( 2, FVector3f( PN.X,        PN.Y,        PN.Z        ) );
 	TexEqu = TexEqu.InverseFast();
 
-	const FVector UResult( UV1.X-UV0.X, UV2.X-UV0.X, 0.0f );
-	const FVector TUResult = TexEqu.TransformVector( UResult );
+	const FVector3f UResult( UV1.X-UV0.X, UV2.X-UV0.X, 0.0f );
+	const FVector3f TUResult = TexEqu.TransformVector( UResult );
 
-	const FVector VResult( UV1.Y-UV0.Y, UV2.Y-UV0.Y, 0.0f );
-	const FVector TVResult = TexEqu.TransformVector( VResult );
+	const FVector3f VResult( UV1.Y-UV0.Y, UV2.Y-UV0.Y, 0.0f );
+	const FVector3f TVResult = TexEqu.TransformVector( VResult );
 
 	//
 	// Adjust the BASE to account for U0 and V0 automatically, and force it into the same plane.
 	//				
-	FMatrix BaseEqu = FMatrix::Identity;
+	FMatrix44f BaseEqu = FMatrix44f::Identity;
 	BaseEqu.SetAxis( 0, TUResult );
 	BaseEqu.SetAxis( 1, TVResult ); 
-	BaseEqu.SetAxis( 2, FVector( PN.X, PN.Y, PN.Z ) );
+	BaseEqu.SetAxis( 2, FVector3f( PN.X, PN.Y, PN.Z ) );
 	BaseEqu = BaseEqu.InverseFast();
 
-	const FVector BResult = FVector( UV0.X - ( TUResult|V0 ), UV0.Y - ( TVResult|V0 ),  0.0f );
+	const FVector3f BResult = FVector3f( UV0.X - ( TUResult|V0 ), UV0.Y - ( TVResult|V0 ),  0.0f );
 
 	*InBaseResult = - 1.0f *  BaseEqu.TransformVector( BResult );
 	*InUResult = TUResult;
@@ -379,15 +388,15 @@ void CreateModelFromStaticMesh(UModel* Model,AStaticMeshActor* StaticMeshActor)
 			Polygon->PolyFlags = PF_DefaultFlags;
 			Polygon->SmoothingMask = Triangle.SmoothingMask;
 
-			new(Polygon->Vertices) FVector(ActorToWorld.TransformPosition(Triangle.Vertices[2]));
-			new(Polygon->Vertices) FVector(ActorToWorld.TransformPosition(Triangle.Vertices[1]));
-			new(Polygon->Vertices) FVector(ActorToWorld.TransformPosition(Triangle.Vertices[0]));
+			new(Polygon->Vertices) FVector3f(ActorToWorld.TransformPosition(Triangle.Vertices[2]));
+			new(Polygon->Vertices) FVector3f(ActorToWorld.TransformPosition(Triangle.Vertices[1]));
+			new(Polygon->Vertices) FVector3f(ActorToWorld.TransformPosition(Triangle.Vertices[0]));
 
 			Polygon->CalcNormal(1);
 			Polygon->Finalize(NULL,0);
-			FTexCoordsToVectors(Polygon->Vertices[2],FVector(Triangle.UVs[0][0].X * UModel::GetGlobalBSPTexelScale(),Triangle.UVs[0][0].Y * UModel::GetGlobalBSPTexelScale(),1),
-								Polygon->Vertices[1],FVector(Triangle.UVs[1][0].X * UModel::GetGlobalBSPTexelScale(),Triangle.UVs[1][0].Y * UModel::GetGlobalBSPTexelScale(),1),
-								Polygon->Vertices[0],FVector(Triangle.UVs[2][0].X * UModel::GetGlobalBSPTexelScale(),Triangle.UVs[2][0].Y * UModel::GetGlobalBSPTexelScale(),1),
+			FTexCoordsToVectors(Polygon->Vertices[2],FVector3f(Triangle.UVs[0][0].X * UModel::GetGlobalBSPTexelScale(),Triangle.UVs[0][0].Y * UModel::GetGlobalBSPTexelScale(),1),
+								Polygon->Vertices[1],FVector3f(Triangle.UVs[1][0].X * UModel::GetGlobalBSPTexelScale(),Triangle.UVs[1][0].Y * UModel::GetGlobalBSPTexelScale(),1),
+								Polygon->Vertices[0],FVector3f(Triangle.UVs[2][0].X * UModel::GetGlobalBSPTexelScale(),Triangle.UVs[2][0].Y * UModel::GetGlobalBSPTexelScale(),1),
 								&Polygon->Base,&Polygon->TextureU,&Polygon->TextureV);
 		}
 	}
@@ -397,22 +406,6 @@ void CreateModelFromStaticMesh(UModel* Model,AStaticMeshActor* StaticMeshActor)
 	FBSPOps::bspValidateBrush(Model,0,1);
 	Model->BuildBound();
 #endif // #if TODO_STATICMESH
-}
-
-static void TransformPolys(UPolys* Polys,const FMatrix& Matrix)
-{
-	for(int32 PolygonIndex = 0;PolygonIndex < Polys->Element.Num();PolygonIndex++)
-	{
-		FPoly&	Polygon = Polys->Element[PolygonIndex];
-
-		for(int32 VertexIndex = 0;VertexIndex < Polygon.Vertices.Num();VertexIndex++)
-			Polygon.Vertices[VertexIndex] = Matrix.TransformPosition( Polygon.Vertices[VertexIndex] );
-
-		Polygon.Base		= Matrix.TransformPosition( Polygon.Base		);
-		Polygon.TextureU	= Matrix.TransformPosition( Polygon.TextureU );
-		Polygon.TextureV	= Matrix.TransformPosition( Polygon.TextureV	);
-	}
-
 }
 
 #undef LOCTEXT_NAMESPACE

@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Fonts/SlateFontInfo.h"
+#include "Framework/Commands/Commands.h"
 #include "TraceServices/Model/Frames.h"
 
 // Insights
@@ -17,6 +18,19 @@ class FTimingEventSearchParameters;
 class FFrameTimingTrack;
 class STimingView;
 struct FSlateBrush;
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+class FFrameTimingViewCommands : public TCommands<FFrameTimingViewCommands>
+{
+public:
+	FFrameTimingViewCommands();
+	virtual ~FFrameTimingViewCommands();
+	virtual void RegisterCommands() override;
+
+public:
+	TSharedPtr<FUICommandInfo> ShowHideAllFrameTracks;
+};
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -35,10 +49,12 @@ public:
 
 	virtual void OnBeginSession(Insights::ITimingViewSession& InSession) override;
 	virtual void OnEndSession(Insights::ITimingViewSession& InSession) override;
-	virtual void Tick(Insights::ITimingViewSession& InSession, const Trace::IAnalysisSession& InAnalysisSession) override;
-	virtual void ExtendFilterMenu(Insights::ITimingViewSession& InSession, FMenuBuilder& InMenuBuilder) override;
+	virtual void Tick(Insights::ITimingViewSession& InSession, const TraceServices::IAnalysisSession& InAnalysisSession) override;
+	virtual void ExtendOtherTracksFilterMenu(Insights::ITimingViewSession& InSession, FMenuBuilder& InMenuBuilder) override;
 
 	//////////////////////////////////////////////////
+
+	void BindCommands();
 
 	bool IsAllFrameTracksToggleOn() const { return bShowHideAllFrameTracks; }
 	void SetAllFrameTracksToggle(bool bOnOff);
@@ -64,7 +80,6 @@ class FFrameTimingTrack : public FTimingEventsTrack
 public:
 	explicit FFrameTimingTrack(FFrameSharedState& InSharedState, const FString& InName, uint32 InFrameType)
 		: FTimingEventsTrack(InName)
-		, SharedState(InSharedState)
 		, FrameType(InFrameType)
 		, Header(*this)
 	{
@@ -90,7 +105,7 @@ public:
 	//////////////////////////////////////////////////
 	// FBaseTimingTrack/FTimingEventsTrack overrides
 
-	virtual void Reset() override;
+	virtual void Reset() override final;
 
 	virtual void BuildDrawState(ITimingEventsTrackDrawStateBuilder& Builder, const ITimingTrackUpdateContext& Context) override;
 	virtual void BuildFilteredDrawState(ITimingEventsTrackDrawStateBuilder& Builder, const ITimingTrackUpdateContext& Context) override;
@@ -117,18 +132,16 @@ public:
 private:
 	void DrawSelectedEventInfo(const FTimingEvent& SelectedEvent, const FTimingTrackViewport& Viewport, const FDrawContext& DrawContext, const FSlateBrush* WhiteBrush, const FSlateFontInfo& Font) const;
 
-	bool FindFrame(const FTimingEvent& InTimingEvent, TFunctionRef<void(double, double, uint32, const Trace::FFrame&)> InFoundPredicate) const;
-	bool FindFrame(const FTimingEventSearchParameters& InParameters, TFunctionRef<void(double, double, uint32, const Trace::FFrame&)> InFoundPredicate) const;
+	bool FindFrame(const FTimingEvent& InTimingEvent, TFunctionRef<void(double, double, uint32, const TraceServices::FFrame&)> InFoundPredicate) const;
+	bool FindFrame(const FTimingEventSearchParameters& InParameters, TFunctionRef<void(double, double, uint32, const TraceServices::FFrame&)> InFoundPredicate) const;
 
 private:
-	FFrameSharedState& SharedState;
-
 	uint32 FrameType; // ETraceFrameType
 
 	FTrackHeader Header;
 
 	// Search cache
-	mutable TTimingEventSearchCache<Trace::FFrame> SearchCache;
+	mutable TTimingEventSearchCache<TraceServices::FFrame> SearchCache;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

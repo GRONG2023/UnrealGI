@@ -13,7 +13,9 @@ namespace Audio
 	{
 
 		// Get all IFFTAlgorithm factories. 
+		IModularFeatures::Get().LockModularFeatureList();
 		TArray<IFFTAlgorithmFactory*> Factories = IModularFeatures::Get().GetModularFeatureImplementations<IFFTAlgorithmFactory>(IFFTAlgorithmFactory::GetModularFeatureName());
+		IModularFeatures::Get().UnlockModularFeatureList();
 
 		// Remove null factories
 		Factories = Factories.FilterByPredicate([InAlgorithmFactoryName](const IFFTAlgorithmFactory* Factory) 
@@ -139,7 +141,7 @@ namespace Audio
 
 			if (!FFTAlgorithm.IsValid())
 			{
-				UE_LOG(LogSignalProcessing, Warning, TEXT("IFFTAlgorithmFactory \"%s\" failed to create IFFTAlgorithm despite supporting FFT Settings."));
+				UE_LOG(LogSignalProcessing, Warning, TEXT("IFFTAlgorithmFactory failed to create IFFTAlgorithm despite supporting FFT Settings."));
 			}
 			else
 			{

@@ -3,13 +3,18 @@
 
 #include "Chaos/Core.h"
 #include "Chaos/ArrayCollectionArray.h"
+#include "Chaos/Collision/CollisionApplyType.h"
+#include "Chaos/Evolution/ConstraintGroupSolver.h"
 #include "Chaos/Evolution/SimulationSpace.h"
+#include "Chaos/Evolution/SolverBodyContainer.h"
+#include "Chaos/Evolution/IterationSettings.h"
 #include "Chaos/ParticleHandleFwd.h"
 
 
 namespace Chaos
 {
-	class FParticlePairCollisionDetector;
+	class FBasicCollisionDetector;
+	class FConstraintContainerSolver;
 	class FPBDCollisionConstraints;
 	class FSimpleConstraintRule;
 	class FPBDRigidsSOAs;
@@ -22,30 +27,41 @@ namespace Chaos
 	 *
 	 * It is single-threaded and does not use a constraint graph or partition the particles into islands.
 	 */
-	class CHAOS_API FPBDMinEvolution
+	class FPBDMinEvolution
 	{
 	public:
-		// @todo(ccaulfield): make it so that CollisionDetection is plugged in with a constraint rule...
-
-		using FCollisionDetector = FParticlePairCollisionDetector;
+		using FCollisionDetector = FBasicCollisionDetector;
 		using FEvolutionCallback = TFunction<void()>;
 		using FRigidParticleSOAs = FPBDRigidsSOAs;
 
-		FPBDMinEvolution(FRigidParticleSOAs& InParticles, TArrayCollectionArray<FVec3>& InPrevX, TArrayCollectionArray<FRotation3>& InPrevR, FCollisionDetector& InCollisionDetector, const FReal InBoundsExtension);
+		CHAOS_API FPBDMinEvolution(FRigidParticleSOAs& InParticles, TArrayCollectionArray<FVec3>& InPrevX, TArrayCollectionArray<FRotation3>& InPrevR, FCollisionDetector& InCollisionDetector);
+		CHAOS_API ~FPBDMinEvolution();
 
-		void AddConstraintRule(FSimpleConstraintRule* Rule);
+		CHAOS_API void AddConstraintContainer(FPBDConstraintContainer& InContainer, const int32 Priority = 0);
+		CHAOS_API void SetConstraintContainerPriority(const int32 ContainerId, const int32 Priority);
 
-		void Advance(const FReal StepDt, const int32 NumSteps, const FReal RewindDt);
-		void AdvanceOneTimeStep(const FReal Dt, const FReal StepFraction);
+		CHAOS_API void Advance(const FReal StepDt, const int32 NumSteps, const FReal RewindDt);
+		CHAOS_API void AdvanceOneTimeStep(const FReal Dt, const FReal StepFraction);
 
-		void SetNumIterations(const int32 NumIts)
+		void SetNumPositionIterations(const int32 NumIts)
 		{
-			NumApplyIterations = NumIts;
+			Private::FIterationSettings Iterations = ConstraintSolver.GetIterationSettings();
+			Iterations.SetNumPositionIterations(NumIts);
+			ConstraintSolver.SetIterationSettings(Iterations);
 		}
 
-		void SetNumPushOutIterations(const int32 NumIts)
+		void SetNumVelocityIterations(const int32 NumIts)
 		{
-			NumApplyPushOutIterations = NumIts;
+			Private::FIterationSettings Iterations = ConstraintSolver.GetIterationSettings();
+			Iterations.SetNumVelocityIterations(NumIts);
+			ConstraintSolver.SetIterationSettings(Iterations);
+		}
+
+		void SetNumProjectionIterations(const int32 NumIts)
+		{
+			Private::FIterationSettings Iterations = ConstraintSolver.GetIterationSettings();
+			Iterations.SetNumProjectionIterations(NumIts);
+			ConstraintSolver.SetIterationSettings(Iterations);
 		}
 
 		void SetGravity(const FVec3& G)
@@ -53,29 +69,9 @@ namespace Chaos
 			Gravity = G;
 		}
 
-		void SetBoundsExtension(const FReal InBoundsExtension)
+		void SetRewindVelocities(bool InRewindVelocities)
 		{
-			BoundsExtension = InBoundsExtension;
-		}
-
-		void SetPostIntegrateCallback(const FEvolutionCallback& Cb)
-		{
-			PostIntegrateCallback = Cb;
-		}
-
-		void SetPostDetectCollisionsCallback(const FEvolutionCallback& Cb)
-		{
-			PostDetectCollisionsCallback = Cb;
-		}
-
-		void SetPostApplyCallback(const FEvolutionCallback& Cb)
-		{
-			PostApplyCallback = Cb;
-		}
-
-		void SetPostApplyPushOutCallback(const FEvolutionCallback& Cb)
-		{
-			PostApplyPushOutCallback = Cb;
+			bRewindVelocities = InRewindVelocities;
 		}
 
 		void SetSimulationSpace(const FSimulationSpace& InSimulationSpace)
@@ -98,22 +94,30 @@ namespace Chaos
 			SimulationSpaceSettings = InSimulationSpaceSettings;
 		}
 
+
+		UE_DEPRECATED(5.2, "InBoundsExtension parameter has been removed")
+		FPBDMinEvolution(FRigidParticleSOAs& InParticles, TArrayCollectionArray<FVec3>& InPrevX, TArrayCollectionArray<FRotation3>& InPrevR, FCollisionDetector& InCollisionDetector, const FReal InBoundsExtension)
+			: FPBDMinEvolution(InParticles, InPrevX, InPrevR, InCollisionDetector)
+		{
+		}
+
+		UE_DEPRECATED(5.2, "BoundsExtension has been removed")
+		void SetBoudsExtension(const FReal Unused)
+		{
+		}
+
 	private:
-		void PrepareTick();
-		void UnprepareTick();
-		void Rewind(FReal Dt, FReal RewindDt);
-		void Integrate(FReal Dt);
-		void IntegrateImpl(FReal Dt);
-		void IntegrateImpl2(FReal Dt);
-		void IntegrateImplISPC(FReal Dt);
-		void ApplyKinematicTargets(FReal Dt, FReal StepFraction);
-		void DetectCollisions(FReal Dt);
-		void PrepareIteration(FReal Dt);
-		void UnprepareIteration(FReal Dt);
-		void ApplyConstraints(FReal Dt);
-		void UpdateVelocities(FReal Dt);
-		void ApplyPushOutConstraints(FReal Dt);
-		void UpdatePositions(FReal Dt);
+		CHAOS_API void PrepareTick();
+		CHAOS_API void UnprepareTick();
+		CHAOS_API void Rewind(FReal Dt, FReal RewindDt);
+		CHAOS_API void Integrate(FReal Dt);
+		CHAOS_API void ApplyKinematicTargets(FReal Dt, FReal StepFraction);
+		CHAOS_API void DetectCollisions(FReal Dt);
+		CHAOS_API void GatherInput(FReal Dt);
+		CHAOS_API void ScatterOutput(FReal Dt);
+		CHAOS_API void ApplyConstraintsPhase1(FReal Dt);
+		CHAOS_API void ApplyConstraintsPhase2(FReal Dt);
+		CHAOS_API void ApplyConstraintsPhase3(FReal Dt);
 
 		FRigidParticleSOAs& Particles;
 		FCollisionDetector& CollisionDetector;
@@ -121,19 +125,12 @@ namespace Chaos
 		TArrayCollectionArray<FVec3>& ParticlePrevXs;
 		TArrayCollectionArray<FRotation3>& ParticlePrevRs;
 
-		TArray<FSimpleConstraintRule*> ConstraintRules;
-		TArray<FSimpleConstraintRule*> PrioritizedConstraintRules;
+		TArray<FPBDConstraintContainer*> ConstraintContainers;
+		Private::FPBDSceneConstraintGroupSolver ConstraintSolver;
 
-		int32 NumApplyIterations;
-		int32 NumApplyPushOutIterations;
-		FReal BoundsExtension;
 		FVec3 Gravity;
 		FSimulationSpaceSettings SimulationSpaceSettings;
 		FSimulationSpace SimulationSpace;
-
-		FEvolutionCallback PostIntegrateCallback;
-		FEvolutionCallback PostDetectCollisionsCallback;
-		FEvolutionCallback PostApplyCallback;
-		FEvolutionCallback PostApplyPushOutCallback;
+		bool bRewindVelocities;
 	};
 }

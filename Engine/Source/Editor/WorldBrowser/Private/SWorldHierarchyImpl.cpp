@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SWorldHierarchyImpl.h"
+
 #include "SLevelsTreeWidget.h"
 #include "SWorldHierarchyItem.h"
 #include "SWorldHierarchy.h"
@@ -11,11 +12,14 @@
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "ToolMenus.h"
+#include "UObject/ObjectSaveContext.h"
 #include "Widgets/Layout/SSeparator.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SComboButton.h"
 #include "Widgets/Input/SSearchBox.h"
 #include "Widgets/Input/SButton.h"
+#include "SSimpleComboButton.h"
+#include "SSimpleButton.h"
 
 #include "WorldTreeItemTypes.h"
 #include "LevelFolders.h"
@@ -59,7 +63,7 @@ SWorldHierarchyImpl::~SWorldHierarchyImpl()
 		LevelFolders.OnFolderDelete.RemoveAll(this);
 	}
 
-	FEditorDelegates::PostSaveWorld.RemoveAll(this);
+	FEditorDelegates::PostSaveWorldWithContext.RemoveAll(this);
 }
 
 void SWorldHierarchyImpl::Construct(const FArguments& InArgs)
@@ -122,7 +126,7 @@ void SWorldHierarchyImpl::Construct(const FArguments& InArgs)
 		/** Lighting Scenario column */
 		+ SHeaderRow::Column(HierarchyColumns::ColumnID_LightingScenario)
 			.Visibility(bFoldersOnlyMode ? EVisibility::Collapsed : EVisibility::Visible)
-			.FixedWidth( 18.0f )
+			.FixedWidth( 24.0f )
 			.HeaderContent()
 			[
 				SNew(STextBlock)
@@ -157,7 +161,7 @@ void SWorldHierarchyImpl::Construct(const FArguments& InArgs)
 			.HeaderContent()
 			[
 				SNew(STextBlock)
-					.ToolTipText(NSLOCTEXT("WorldBrowser", "SCCStatus", "Status in Source Control"))
+					.ToolTipText(NSLOCTEXT("WorldBrowser", "SCCStatus", "Status in Revision Control"))
 			]
 
 		/** Level save column */
@@ -190,18 +194,16 @@ void SWorldHierarchyImpl::Construct(const FArguments& InArgs)
 	TSharedRef<SWidget> CreateNewFolderButton = SNullWidget::NullWidget;
 	if (!bFoldersOnlyMode)
 	{
-		CreateNewFolderButton = SNew(SButton)
-			.ButtonStyle(FEditorStyle::Get(), "HoverHintOnly")
+		CreateNewFolderButton = 
+			SNew(SSimpleButton)
 			.ToolTipText(LOCTEXT("CreateFolderTooltip", "Create a new folder containing the current selection"))
 			.OnClicked(this, &SWorldHierarchyImpl::OnCreateFolderClicked)
 			.Visibility(WorldModel->HasFolderSupport() ? EVisibility::Visible : EVisibility::Collapsed)
-			[
-				SNew(SImage)
-				.Image(FEditorStyle::GetBrush("WorldBrowser.NewFolderIcon"))
-			];
+			.Icon(FAppStyle::Get().GetBrush("WorldBrowser.NewFolderIcon"));
 	}
 
 	ChildSlot
+	.Padding(8.f, 0.f, 8.f, 0.f)
 	[
 		SNew(SVerticalBox)
 		// Hierarchy Toolbar
@@ -223,9 +225,21 @@ void SWorldHierarchyImpl::Construct(const FArguments& InArgs)
 			// Create New Folder icon
 			+ SHorizontalBox::Slot()
 			.AutoWidth()
-			.Padding(4.0f, 0.0f, 0.0f, 0.0f)
+			.VAlign(VAlign_Center)
+			.Padding(2.0f, 0.0f, 0.0f, 0.0f)
 			[
 				CreateNewFolderButton
+			]
+
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(2.0f, 0.0f, 0.0f, 0.0f)
+			[
+				SNew(SSimpleComboButton)
+				.OnGetMenuContent( this, &SWorldHierarchyImpl::GetViewButtonContent )
+				.Icon(FAppStyle::Get().GetBrush("Icons.Settings"))
+
 			]
 		]
 		// Empty Label
@@ -241,18 +255,24 @@ void SWorldHierarchyImpl::Construct(const FArguments& InArgs)
 		// Hierarchy
 		+SVerticalBox::Slot()
 		.FillHeight(1.f)
+		.Padding(0.f, 4.f, 0.f, 0.f)
 		[
-			SAssignNew(TreeWidget, SLevelsTreeWidget, WorldModel, SharedThis(this))
-			.TreeItemsSource(&RootTreeItems)
-			.SelectionMode(ESelectionMode::Multi)
-			.OnGenerateRow(this, &SWorldHierarchyImpl::GenerateTreeRow)
-			.OnGetChildren(this, &SWorldHierarchyImpl::GetChildrenForTree)
-			.OnSelectionChanged(this, &SWorldHierarchyImpl::OnSelectionChanged)
-			.OnExpansionChanged(this, &SWorldHierarchyImpl::OnExpansionChanged)
-			.OnMouseButtonDoubleClick(this, &SWorldHierarchyImpl::OnTreeViewMouseButtonDoubleClick)
-			.OnContextMenuOpening(ContextMenuEvent)
-			.OnItemScrolledIntoView(this, &SWorldHierarchyImpl::OnTreeItemScrolledIntoView)
-			.HeaderRow(HeaderRowWidget.ToSharedRef())
+			SNew(SBorder)
+			.BorderImage(FAppStyle::Get().GetBrush("Brushes.Recessed"))
+			.Padding(FMargin(0.f, 4.f, 0.f, 0.f))
+			[
+				SAssignNew(TreeWidget, SLevelsTreeWidget, WorldModel, SharedThis(this))
+				.TreeItemsSource(&RootTreeItems)
+				.SelectionMode(ESelectionMode::Multi)
+				.OnGenerateRow(this, &SWorldHierarchyImpl::GenerateTreeRow)
+				.OnGetChildren(this, &SWorldHierarchyImpl::GetChildrenForTree)
+				.OnSelectionChanged(this, &SWorldHierarchyImpl::OnSelectionChanged)
+				.OnExpansionChanged(this, &SWorldHierarchyImpl::OnExpansionChanged)
+				.OnMouseButtonDoubleClick(this, &SWorldHierarchyImpl::OnTreeViewMouseButtonDoubleClick)
+				.OnContextMenuOpening(ContextMenuEvent)
+				.OnItemScrolledIntoView(this, &SWorldHierarchyImpl::OnTreeItemScrolledIntoView)
+				.HeaderRow(HeaderRowWidget.ToSharedRef())
+			]
 		]
 
 		// Separator
@@ -275,41 +295,11 @@ void SWorldHierarchyImpl::Construct(const FArguments& InArgs)
 			+SHorizontalBox::Slot()
 			.FillWidth(1.f)
 			.VAlign(VAlign_Center)
-			.Padding(8, 0)
+			.Padding(8.f)
 			[
 				SNew( STextBlock )
 				.Text( this, &SWorldHierarchyImpl::GetFilterStatusText )
 				.ColorAndOpacity( this, &SWorldHierarchyImpl::GetFilterStatusTextColor )
-			]
-
-			// View mode combo button
-			+SHorizontalBox::Slot()
-			.AutoWidth()
-			[
-				SAssignNew( ViewOptionsComboButton, SComboButton )
-				.ContentPadding(0)
-				.ForegroundColor( this, &SWorldHierarchyImpl::GetViewButtonForegroundColor )
-				.ButtonStyle( FEditorStyle::Get(), "ToggleButton" ) // Use the tool bar item style for this button
-				.OnGetMenuContent( this, &SWorldHierarchyImpl::GetViewButtonContent )
-				.ButtonContent()
-				[
-					SNew(SHorizontalBox)
-
-					+SHorizontalBox::Slot()
-					.AutoWidth()
-					.VAlign(VAlign_Center)
-					[
-						SNew(SImage).Image( FEditorStyle::GetBrush("GenericViewButton") )
-					]
-
-					+SHorizontalBox::Slot()
-					.AutoWidth()
-					.Padding(2, 0, 0, 0)
-					.VAlign(VAlign_Center)
-					[
-						SNew(STextBlock).Text( LOCTEXT("ViewButton", "View Options") )
-					]
-				]
 			]
 		]
 	];
@@ -323,7 +313,7 @@ void SWorldHierarchyImpl::Construct(const FArguments& InArgs)
 
 		if (!bFoldersOnlyMode)
 		{
-			FEditorDelegates::PostSaveWorld.AddSP(this, &SWorldHierarchyImpl::OnWorldSaved);
+			FEditorDelegates::PostSaveWorldWithContext.AddSP(this, &SWorldHierarchyImpl::OnWorldSaved);
 		}
 	}
 
@@ -361,7 +351,7 @@ void SWorldHierarchyImpl::Tick( const FGeometry& AllotedGeometry, const double I
 	}
 }
 
-void SWorldHierarchyImpl::OnWorldSaved(uint32 SaveFlags, UWorld* World, bool bSuccess)
+void SWorldHierarchyImpl::OnWorldSaved(UWorld* World, FObjectPostSaveContext ObjectSaveContext)
 {
 	if (FLevelFolders::IsAvailable())
 	{
@@ -482,7 +472,7 @@ TSharedPtr<SWidget> SWorldHierarchyImpl::ConstructLevelContextMenu() const
 			RootTreeItems[0]->GenerateContextMenu(Menu, *this);
 		}
 
-		Menu->AddDynamicSection("HierarchyDynamicSection", FNewToolMenuDelegateLegacy::CreateLambda([=](FMenuBuilder& MenuBuilder, UToolMenu* Menu)
+		Menu->AddDynamicSection("HierarchyDynamicSection", FNewToolMenuDelegateLegacy::CreateLambda([this](FMenuBuilder& MenuBuilder, UToolMenu* Menu)
 		{
 			WorldModel->BuildHierarchyMenu(MenuBuilder);
 		}));
@@ -546,7 +536,7 @@ void SWorldHierarchyImpl::FillFoldersSubmenu(FMenuBuilder& MenuBuilder)
 	MenuBuilder.AddMenuEntry(
 		LOCTEXT("CreateNewFolder", "Create New Folder"),
 		LOCTEXT("CreateNewFolder_Tooltip", "Move the selection to a new folder"),
-		FSlateIcon(FEditorStyle::GetStyleSetName(), "WorldBrowser.NewFolderIcon"),
+		FSlateIcon(FAppStyle::GetAppStyleSetName(), "WorldBrowser.NewFolderIcon"),
 		FExecuteAction::CreateSP(this, &SWorldHierarchyImpl::CreateFolder, RootItem, RootPath, /*bMoveSelected*/ true)
 	);
 
@@ -1085,6 +1075,12 @@ void SWorldHierarchyImpl::Populate()
 			if (TreeItemMap.Contains(ID))
 			{
 				WorldHierarchy::FWorldTreeItemPtr Item = TreeItemMap[ID];
+
+				for (WorldHierarchy::FWorldTreeItemPtr ItemParent = Item->GetParent(); ItemParent.IsValid(); ItemParent = ItemParent->GetParent())
+				{
+					TreeWidget->SetItemExpansion(ItemParent, true);
+				}
+
 				TreeWidget->SetItemSelection(Item, true);
 
 				if (!bScrolledIntoView)
@@ -1618,14 +1614,6 @@ TSharedRef<SWidget> SWorldHierarchyImpl::GetViewButtonContent()
 	MenuBuilder.EndSection();
 
 	return MenuBuilder.MakeWidget();
-}
-
-FSlateColor SWorldHierarchyImpl::GetViewButtonForegroundColor() const
-{
-	static const FName InvertedForegroundName("InvertedForeground");
-	static const FName DefaultForegroundName("DefaultForeground");
-
-	return ViewOptionsComboButton->IsHovered() ? FEditorStyle::GetSlateColor(InvertedForegroundName) : FEditorStyle::GetSlateColor(DefaultForegroundName);
 }
 
 bool SWorldHierarchyImpl::GetDisplayPathsState() const

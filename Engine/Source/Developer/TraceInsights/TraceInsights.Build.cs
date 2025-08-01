@@ -6,28 +6,23 @@ public class TraceInsights : ModuleRules
 {
 	public TraceInsights(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateIncludePaths.AddRange
-		(
-			new string[] {
-				"Developer/TraceInsights/Private",
-			}
-		);
+		UnsafeTypeCastWarningLevel = WarningLevel.Error;
 
-		PublicDependencyModuleNames.AddRange
-		(
+		PublicDependencyModuleNames.AddRange(
 			new string[] {
 				"AppFramework", // for SColorPicker
 				"ApplicationCore",
+				"AutomationDriver",
 				"Cbor",
 				"Core",
 				"CoreUObject",
 				"DesktopPlatform",
-				"EditorStyle",
 				"InputCore",
 				"RenderCore",
 				"RHI",
 				"Slate",
 				"Sockets",
+				"SourceCodeAccess",
 				"TraceAnalysis",
 				"TraceLog",
 				"TraceServices",
@@ -60,13 +55,16 @@ public class TraceInsights : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
+				"ImageCore",
 				"SlateCore",
+				"ToolWidgets"
 			}
 		);
 
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
 				"Messaging",
+				"MessageLog",
 			}
 		);
 	}

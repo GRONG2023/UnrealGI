@@ -20,15 +20,20 @@
 #include "Materials/MaterialFunction.h"
 #include "MaterialGraph/MaterialGraph.h"
 #include "Engine/Texture.h"
+#include "SparseVolumeTexture/SparseVolumeTexture.h"
 #include "MaterialGraph/MaterialGraphNode_Base.h"
+#include "MaterialGraph/MaterialGraphNode_Comment.h"
 #include "MaterialGraph/MaterialGraphNode.h"
 #include "MaterialGraph/MaterialGraphNode_Root.h"
 #include "Materials/MaterialParameterCollection.h"
 
 #include "Materials/MaterialExpressionCollectionParameter.h"
 #include "Materials/MaterialExpressionComment.h"
+#include "Materials/MaterialExpressionComposite.h"
+#include "Materials/MaterialExpressionPinBase.h"
 #include "Materials/MaterialExpressionFunctionInput.h"
 #include "Materials/MaterialExpressionTextureSample.h"
+#include "Materials/MaterialExpressionSparseVolumeTextureSample.h"
 #include "Materials/MaterialExpressionFunctionOutput.h"
 #include "Materials/MaterialExpressionReroute.h"
 #include "Materials/MaterialExpressionNamedReroute.h"
@@ -36,9 +41,12 @@
 #include "ScopedTransaction.h"
 #include "MaterialEditorUtilities.h"
 #include "GraphEditorActions.h"
-#include "AssetRegistryModule.h"
+#include "GraphEditorSettings.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "IAssetTools.h"
 #include "MaterialEditorActions.h"
 #include "MaterialGraphNode_Knot.h"
+#include "RenderUtils.h"
 
 #define LOCTEXT_NAMESPACE "MaterialGraphSchema"
 
@@ -107,8 +115,14 @@ void FMaterialGraphSchemaAction_NewNode::SetFunctionInputType(UMaterialExpressio
 	case MCT_StaticBool:
 		FunctionInput->InputType = FunctionInput_StaticBool;
 		break;
+	case MCT_Bool:
+		FunctionInput->InputType = FunctionInput_Bool;
+		break;
 	case MCT_MaterialAttributes:
 		FunctionInput->InputType = FunctionInput_MaterialAttributes;
+		break;
+	case MCT_Substrate:
+		FunctionInput->InputType = FunctionInput_Substrate;
 		break;
 	default:
 		break;
@@ -145,6 +159,28 @@ UEdGraphNode* FMaterialGraphSchemaAction_NewFunctionCall::PerformAction(class UE
 	}
 
 	return NULL;
+}
+
+/////////////////////////////////////////////
+// FMaterialGraphSchemaAction_NewComposite //
+
+UEdGraphNode* FMaterialGraphSchemaAction_NewComposite::PerformAction(UEdGraph* ParentGraph, UEdGraphPin* FromPin, const FVector2D Location, bool bSelectNewNode)
+{
+	return SpawnNode(ParentGraph, Location);
+}
+
+UEdGraphNode* FMaterialGraphSchemaAction_NewComposite::SpawnNode(UEdGraph* ParentGraph, const FVector2D Location)
+{
+	const FScopedTransaction Transaction(NSLOCTEXT("UnrealEd", "MaterialEditorNewComposite", "Material Editor: New Composite"));
+
+	UMaterialExpressionComposite* NewComposite = FMaterialEditorUtilities::CreateNewMaterialExpressionComposite(ParentGraph, Location);
+
+	if (NewComposite)
+	{
+		return NewComposite->GraphNode;
+	}
+
+	return nullptr;
 }
 
 ///////////////////////////////////////////
@@ -203,12 +239,24 @@ const FName UMaterialGraphSchema::PC_Mask(TEXT("mask"));
 const FName UMaterialGraphSchema::PC_Required(TEXT("required"));
 const FName UMaterialGraphSchema::PC_Optional(TEXT("optional"));
 const FName UMaterialGraphSchema::PC_MaterialInput(TEXT("materialinput"));
+const FName UMaterialGraphSchema::PC_Exec(TEXT("exec"));
+const FName UMaterialGraphSchema::PC_Void(TEXT("void"));
+const FName UMaterialGraphSchema::PC_ValueType(TEXT("value"));
 
 const FName UMaterialGraphSchema::PSC_Red(TEXT("red"));
 const FName UMaterialGraphSchema::PSC_Green(TEXT("green"));
 const FName UMaterialGraphSchema::PSC_Blue(TEXT("blue"));
 const FName UMaterialGraphSchema::PSC_Alpha(TEXT("alpha"));
 const FName UMaterialGraphSchema::PSC_RGBA(TEXT("rgba"));
+const FName UMaterialGraphSchema::PSC_RGB(TEXT("rgb"));
+const FName UMaterialGraphSchema::PSC_RG(TEXT("rg"));
+const FName UMaterialGraphSchema::PSC_Int(TEXT("int"));
+const FName UMaterialGraphSchema::PSC_Byte(TEXT("byte"));
+const FName UMaterialGraphSchema::PSC_Bool(TEXT("bool"));
+const FName UMaterialGraphSchema::PSC_Float(TEXT("float"));
+const FName UMaterialGraphSchema::PSC_Vector4(TEXT("vector4"));
+
+const FName UMaterialGraphSchema::PN_Execute("execute");
 
 const FLinearColor UMaterialGraphSchema::ActivePinColor = FLinearColor::White;
 const FLinearColor UMaterialGraphSchema::InactivePinColor = FLinearColor(0.05f, 0.05f, 0.05f);
@@ -326,15 +374,15 @@ void UMaterialGraphSchema::GetPaletteActions(FGraphActionMenuBuilder& ActionMenu
 
 bool UMaterialGraphSchema::ConnectionCausesLoop(const UEdGraphPin* InputPin, const UEdGraphPin* OutputPin) const
 {
-	// Only nodes representing Expressions have outputs
-	UMaterialGraphNode* OutputNode = CastChecked<UMaterialGraphNode>(OutputPin->GetOwningNode());
-
-	TArray<UMaterialExpression*> InputExpressions;
-	OutputNode->MaterialExpression->GetAllInputExpressions(InputExpressions);
-
-	if (UMaterialGraphNode* InputNode = Cast<UMaterialGraphNode>(InputPin->GetOwningNode()))
+	if (UMaterialGraphNode* OutputNode = Cast<UMaterialGraphNode>(OutputPin->GetOwningNode()))
 	{
-		return InputExpressions.Contains(InputNode->MaterialExpression);
+		TArray<UMaterialExpression*> InputExpressions;
+		OutputNode->MaterialExpression->GetAllInputExpressions(InputExpressions);
+
+		if (UMaterialGraphNode* InputNode = Cast<UMaterialGraphNode>(InputPin->GetOwningNode()))
+		{
+			return InputExpressions.Contains(InputNode->MaterialExpression);
+		}
 	}
 
 	// Simple connection to root node
@@ -345,6 +393,14 @@ bool UMaterialGraphSchema::ArePinsCompatible_Internal(const UEdGraphPin* InputPi
 {
 	uint32 InputType = GetMaterialValueType(InputPin);
 	uint32 OutputType = GetMaterialValueType(OutputPin);
+
+	if (InputPin->bNotConnectable)
+	{
+		FFormatNamedArguments Args;
+		Args.Add(TEXT("PinName"), FText::FromName(InputPin->PinName));
+		ResponseMessage = FText::Format(LOCTEXT("PinNotConnectable", "Pin '{PinName}' is not connectable"), Args);	
+		return false;
+	}
 
 	bool bPinsCompatible = CanConnectMaterialValueTypes(InputType, OutputType);
 	if (!bPinsCompatible)
@@ -384,14 +440,13 @@ bool UMaterialGraphSchema::ArePinsCompatible_Internal(const UEdGraphPin* InputPi
 
 uint32 UMaterialGraphSchema::GetMaterialValueType(const UEdGraphPin* MaterialPin)
 {
+	const UMaterialGraphNode_Base* OwningNode = CastChecked<UMaterialGraphNode_Base>(MaterialPin->GetOwningNode());
 	if (MaterialPin->Direction == EGPD_Output)
 	{
-		UMaterialGraphNode* OwningNode = CastChecked<UMaterialGraphNode>(MaterialPin->GetOwningNode());
 		return OwningNode->GetOutputType(MaterialPin);
 	}
 	else
 	{
-		UMaterialGraphNode_Base* OwningNode = CastChecked<UMaterialGraphNode_Base>(MaterialPin->GetOwningNode());
 		return OwningNode->GetInputType(MaterialPin);
 	}
 }
@@ -533,23 +588,50 @@ const FPinConnectionResponse UMaterialGraphSchema::CanCreateConnection(const UEd
 		return FPinConnectionResponse(CONNECT_RESPONSE_DISALLOW, ResponseMessage);
 	}
 
-	// Break existing connections on inputs only - multiple output connections are acceptable
+	// For non-exec pins, break existing connections on inputs only - multiple output connections are acceptable
 	if (InputPin->LinkedTo.Num() > 0)
 	{
-		ECanCreateConnectionResponse ReplyBreakOutputs;
-		if (InputPin == A)
+		const uint32 InputType = GetMaterialValueType(InputPin);
+		if (!(InputType & MCT_Execution))
 		{
-			ReplyBreakOutputs = CONNECT_RESPONSE_BREAK_OTHERS_A;
+			ECanCreateConnectionResponse ReplyBreakOutputs;
+			if (InputPin == A)
+			{
+				ReplyBreakOutputs = CONNECT_RESPONSE_BREAK_OTHERS_A;
+			}
+			else
+			{
+				ReplyBreakOutputs = CONNECT_RESPONSE_BREAK_OTHERS_B;
+			}
+			if (ResponseMessage.IsEmpty())
+			{
+				ResponseMessage = LOCTEXT("ConnectionReplace", "Replace existing connections");
+			}
+			return FPinConnectionResponse(ReplyBreakOutputs, ResponseMessage);
 		}
-		else
+	}
+
+	// For exec pins, reverse is true - multiple input connections are acceptable
+	if (OutputPin->LinkedTo.Num() > 0)
+	{
+		const uint32 OutputType = GetMaterialValueType(InputPin);
+		if (OutputType & MCT_Execution)
 		{
-			ReplyBreakOutputs = CONNECT_RESPONSE_BREAK_OTHERS_B;
+			ECanCreateConnectionResponse ReplyBreakInputs;
+			if (OutputPin == A)
+			{
+				ReplyBreakInputs = CONNECT_RESPONSE_BREAK_OTHERS_A;
+			}
+			else
+			{
+				ReplyBreakInputs = CONNECT_RESPONSE_BREAK_OTHERS_B;
+			}
+			if (ResponseMessage.IsEmpty())
+			{
+				ResponseMessage = LOCTEXT("ConnectionReplace", "Replace existing connections");
+			}
+			return FPinConnectionResponse(ReplyBreakInputs, ResponseMessage);
 		}
-		if (ResponseMessage.IsEmpty())
-		{
-			ResponseMessage = LOCTEXT("ConnectionReplace", "Replace existing connections");
-		}
-		return FPinConnectionResponse(ReplyBreakOutputs, ResponseMessage);
 	}
 
 	return FPinConnectionResponse(CONNECT_RESPONSE_MAKE, ResponseMessage);
@@ -566,6 +648,56 @@ bool UMaterialGraphSchema::TryCreateConnection(UEdGraphPin* A, UEdGraphPin* B) c
 
 	return bModified;
 }
+
+namespace Private
+{
+FLinearColor GetColorForConnectionType(const UGraphEditorSettings* Settings, UE::Shader::EValueType ConnectionType)
+{
+	using namespace UE::Shader;
+	if (ConnectionType == EValueType::Any)
+	{
+		return Settings->WildcardPinTypeColor;
+	}
+	else if (ConnectionType == EValueType::Struct)
+	{
+		return Settings->StructPinTypeColor;
+	}
+	else if (ConnectionType == EValueType::Object)
+	{
+		return Settings->ObjectPinTypeColor;
+	}
+	else
+	{
+		const FValueTypeDescription TypeDesc = GetValueTypeDescription(ConnectionType);
+		if (TypeDesc.ComponentType == EValueComponentType::Float ||
+			TypeDesc.ComponentType == EValueComponentType::Numeric)
+		{
+			if (TypeDesc.NumComponents == 1)
+			{
+				return Settings->FloatPinTypeColor;
+			}
+			else
+			{
+				return Settings->VectorPinTypeColor;
+			}
+		}
+		else if (TypeDesc.ComponentType == EValueComponentType::Double)
+		{
+			return Settings->DoublePinTypeColor;
+		}
+		else if (TypeDesc.ComponentType == EValueComponentType::Bool)
+		{
+			return Settings->BooleanPinTypeColor;
+		}
+		else if (TypeDesc.ComponentType == EValueComponentType::Int)
+		{
+			return Settings->IntPinTypeColor;
+		}
+	}
+
+	return Settings->DefaultPinTypeColor;
+}
+} // namespace Private
 
 FLinearColor UMaterialGraphSchema::GetPinTypeColor(const FEdGraphPinType& PinType) const
 {
@@ -593,6 +725,16 @@ FLinearColor UMaterialGraphSchema::GetPinTypeColor(const FEdGraphPinType& PinTyp
 		return ActivePinColor;
 	}
 	else if (PinType.PinCategory == PC_Optional)
+	{
+		return InactivePinColor;
+	}
+	else if (PinType.PinCategory == PC_ValueType)
+	{
+		const UE::Shader::EValueType ValueType = UE::Shader::FindValueType(PinType.PinSubCategory);
+		const UGraphEditorSettings* Settings = GetDefault<UGraphEditorSettings>();
+		return Private::GetColorForConnectionType(Settings, ValueType);
+	}
+	else if (PinType.PinCategory == PC_Void)
 	{
 		return InactivePinColor;
 	}
@@ -666,6 +808,22 @@ void UMaterialGraphSchema::BreakSinglePinLink(UEdGraphPin* SourcePin, UEdGraphPi
 	}
 }
 
+bool UMaterialGraphSchema::CanEncapuslateNode(UEdGraphNode const& TestNode) const
+{
+	if (TestNode.IsA(UMaterialGraphNode_Comment::StaticClass()))
+	{
+		return true;
+	}
+
+	// Disallow output nodes from encapsulation, everything else (including parameters) is fair game for materials.
+	const UMaterialGraphNode* MaterialGraphNode = Cast<UMaterialGraphNode>(&TestNode);
+
+	return  MaterialGraphNode && MaterialGraphNode->MaterialExpression 
+		&& !MaterialGraphNode->MaterialExpression->IsA(UMaterialExpressionFunctionOutput::StaticClass())
+		&& !MaterialGraphNode->MaterialExpression->IsA(UMaterialExpressionPinBase::StaticClass())
+		&& !TestNode.IsA(UMaterialGraphNode_Root::StaticClass());
+}
+
 void UMaterialGraphSchema::DroppedAssetsOnGraph(const TArray<struct FAssetData>& Assets, const FVector2D& GraphPosition, UEdGraph* Graph) const
 {
 	UMaterialGraph* MaterialGraph = CastChecked<UMaterialGraph>(Graph);
@@ -680,6 +838,7 @@ void UMaterialGraphSchema::DroppedAssetsOnGraph(const TArray<struct FAssetData>&
 		UClass* MaterialExpressionClass = Cast<UClass>(Asset);
 		UMaterialFunctionInterface* Func = Cast<UMaterialFunctionInterface>(Asset);
 		UTexture* Tex = Cast<UTexture>(Asset);
+		USparseVolumeTexture* SparseVolumeTexture = Cast<USparseVolumeTexture>(Asset);
 		UMaterialParameterCollection* ParameterCollection = Cast<UMaterialParameterCollection>(Asset);
 		
 		if (MaterialExpressionClass && MaterialExpressionClass->IsChildOf(UMaterialExpression::StaticClass()))
@@ -721,6 +880,16 @@ void UMaterialGraphSchema::DroppedAssetsOnGraph(const TArray<struct FAssetData>&
 
 			bAddedNode = true;
 		}
+		else if ( SparseVolumeTexture )
+		{
+			UMaterialExpressionSparseVolumeTextureSample* SparseVolumeTextureSampleNode = CastChecked<UMaterialExpressionSparseVolumeTextureSample>(
+				FMaterialEditorUtilities::CreateNewMaterialExpression(Graph, UMaterialExpressionSparseVolumeTextureSample::StaticClass(), ExpressionPosition, true, true));
+			SparseVolumeTextureSampleNode->SparseVolumeTexture = SparseVolumeTexture;
+
+			FMaterialEditorUtilities::ForceRefreshExpressionPreviews(Graph);
+
+			bAddedNode = true;
+		}
 		else if ( ParameterCollection )
 		{
 			UMaterialExpressionCollectionParameter* CollectionParameterNode = CastChecked<UMaterialExpressionCollectionParameter>(
@@ -738,6 +907,21 @@ void UMaterialGraphSchema::DroppedAssetsOnGraph(const TArray<struct FAssetData>&
 			ExpressionPosition.Y += LocOffsetBetweenNodes;
 		}
 	}
+}
+
+void UMaterialGraphSchema::UpdateMaterialOnDefaultValueChanged(const UEdGraph* Graph) const
+{
+	FMaterialEditorUtilities::UpdateMaterialAfterGraphChange(Graph);
+}
+
+void UMaterialGraphSchema::MarkMaterialDirty(const UEdGraph* Graph) const
+{
+	FMaterialEditorUtilities::MarkMaterialDirty(Graph);
+}
+
+void UMaterialGraphSchema::UpdateDetailView(const UEdGraph* Graph) const
+{
+	FMaterialEditorUtilities::UpdateDetailView(Graph);
 }
 
 int32 UMaterialGraphSchema::GetNodeSelectionCount(const UEdGraph* Graph) const
@@ -761,10 +945,11 @@ void UMaterialGraphSchema::GetMaterialFunctionActions(FGraphActionMenuBuilder& A
 
 	// Load the asset registry module
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+	IAssetTools& AssetTools = IAssetTools::Get();
 
 	// Collect a full list of assets with the specified class
 	TArray<FAssetData> AssetDataList;
-	AssetRegistryModule.Get().GetAssetsByClass(UMaterialFunction::StaticClass()->GetFName(), AssetDataList);
+	AssetRegistryModule.Get().GetAssetsByClass(UMaterialFunction::StaticClass()->GetClassPathName(), AssetDataList);
 
 	for (const FAssetData& AssetData : AssetDataList)
 	{
@@ -781,10 +966,15 @@ void UMaterialGraphSchema::GetMaterialFunctionActions(FGraphActionMenuBuilder& A
 				}
 			}
 
+			if (!AssetTools.IsAssetVisible(AssetData))
+			{
+				continue;
+			}
+
 			if (!ActionMenuBuilder.FromPin || HasCompatibleConnection(AssetData, FromPinType, ActionMenuBuilder.FromPin->Direction))
 			{
 				// Gather the relevant information from the asset data
-				const FString FunctionPathName = AssetData.ObjectPath.ToString();
+				const FString FunctionPathName = AssetData.GetObjectPathString();
 				const FText Description = AssetData.GetTagValueRef<FText>("Description");
 				TArray<FString> LibraryCategories;
 				{
@@ -794,7 +984,7 @@ void UMaterialGraphSchema::GetMaterialFunctionActions(FGraphActionMenuBuilder& A
 						if (FArrayProperty* LibraryCategoriesProperty = FindFieldChecked<FArrayProperty>(UMaterialFunction::StaticClass(), TEXT("LibraryCategories")))
 						{
 							uint8* DestAddr = (uint8*)(&LibraryCategories);
-							LibraryCategoriesProperty->ImportText(*LibraryCategoriesString, DestAddr, PPF_None, NULL, GWarn);
+							LibraryCategoriesProperty->ImportText_Direct(*LibraryCategoriesString, DestAddr, NULL, PPF_None, GWarn);
 						}
 					}
 				}
@@ -805,7 +995,7 @@ void UMaterialGraphSchema::GetMaterialFunctionActions(FGraphActionMenuBuilder& A
 					{
 						FArrayProperty* LibraryCategoriesProperty = FindFieldChecked<FArrayProperty>(UMaterialFunction::StaticClass(), GET_MEMBER_NAME_CHECKED(UMaterialFunction, LibraryCategoriesText));
 						uint8* DestAddr = (uint8*)(&LibraryCategoriesText);
-						LibraryCategoriesProperty->ImportText(*LibraryCategoriesString, DestAddr, PPF_None, NULL, GWarn);
+						LibraryCategoriesProperty->ImportText_Direct(*LibraryCategoriesString, DestAddr, NULL, PPF_None, GWarn);
 					}
 
 					for (const FString& Category : LibraryCategories)
@@ -825,15 +1015,41 @@ void UMaterialGraphSchema::GetMaterialFunctionActions(FGraphActionMenuBuilder& A
 					{
 						LibraryCategoriesText.Add( LOCTEXT("UncategorizedMaterialFunction", "Uncategorized") );
 					}
+
+					// When Substrate is disabled, skip all material function related to Substrate
+					// SUBSTRATE_TODO: remove this when Substrate becomes the only shading path
+					bool bSkipMaterialFunction = false;
+					for (const FText& Category : LibraryCategoriesText)
+					{
+						if (Category.ToString().Contains("Substrate"))
+						{
+							bSkipMaterialFunction = !Substrate::IsSubstrateEnabled();
+							break;
+						}
+					}
+					if (bSkipMaterialFunction)
+					{
+						continue;
+					}
 				}
 
-				// Extract the object name from the path
 				FString FunctionName = FunctionPathName;
-				int32 PeriodIndex = FunctionPathName.Find(TEXT("."), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
 
-				if (PeriodIndex != INDEX_NONE)
+				const FString UserExposedCaption = AssetData.GetTagValueRef<FString>("UserExposedCaption");
+				if (!UserExposedCaption.IsEmpty())
 				{
-					FunctionName = FunctionPathName.Right(FunctionPathName.Len() - PeriodIndex - 1);
+					// If the UI user exposed name name is not empty, use it directly
+					FunctionName = UserExposedCaption;
+				}
+				else
+				{
+					// Extract the object name from the path
+					int32 PeriodIndex = FunctionPathName.Find(TEXT("."), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+
+					if (PeriodIndex != INDEX_NONE)
+					{
+						FunctionName = FunctionPathName.Right(FunctionPathName.Len() - PeriodIndex - 1);
+					}
 				}
 
 				// For each category the function should belong to...
@@ -848,6 +1064,18 @@ void UMaterialGraphSchema::GetMaterialFunctionActions(FGraphActionMenuBuilder& A
 				}
 			}
 		}
+	}
+}
+
+void UMaterialGraphSchema::GetCompositeAction(FGraphActionMenuBuilder& ActionMenuBuilder, const UEdGraph* CurrentGraph) const
+{
+	if (!ActionMenuBuilder.FromPin)
+	{
+		const bool bIsManyNodesSelected = CurrentGraph ? (FMaterialEditorUtilities::GetNumberOfSelectedNodes(CurrentGraph) > 0) : false;
+		const FText CompositeDesc = LOCTEXT("CompositeDesc", "New Composite");
+		const FText CompositeToolTip = LOCTEXT("CompositeToolTip", "Create a composite node that holds a subgraph.");
+		TSharedPtr<FMaterialGraphSchemaAction_NewComposite> NewAction(new FMaterialGraphSchemaAction_NewComposite(FText::GetEmpty(), CompositeDesc, CompositeToolTip, 0));
+		ActionMenuBuilder.AddAction(NewAction);
 	}
 }
 
@@ -873,7 +1101,7 @@ void UMaterialGraphSchema::GetNamedRerouteActions(FGraphActionMenuBuilder& Actio
 		{
 			if (auto* MaterialGraphNode = Cast<UMaterialGraphNode>(GraphNode))
 			{
-				if (auto* Declaration = Cast<UMaterialExpressionNamedRerouteDeclaration>(MaterialGraphNode->MaterialExpression))
+				if (auto Declaration = Cast<UMaterialExpressionNamedRerouteDeclaration>(MaterialGraphNode->MaterialExpression))
 				{
 					static const FText Category = LOCTEXT("NamedRerouteCategory", "Named Reroutes");
 					const FText Name = FText::FromString(Declaration->Name.ToString());
@@ -950,9 +1178,8 @@ void UMaterialGraphSchema::OnPinConnectionDoubleCicked(UEdGraphPin* PinA, UEdGra
 	// Create a new knot
 	UEdGraph* ParentGraph = PinA->GetOwningNode()->GetGraph();
 
+	if (UMaterialExpression* Expression = FMaterialEditorUtilities::CreateNewMaterialExpression(ParentGraph, UMaterialExpressionReroute::StaticClass(), KnotTopLeft, true, true))
 	{
-		UMaterialExpression* Expression = FMaterialEditorUtilities::CreateNewMaterialExpression(ParentGraph, UMaterialExpressionReroute::StaticClass(), KnotTopLeft, true, true);
-
 		// Move the connections across (only notifying the knot, as the other two didn't really change)
 		PinA->BreakLinkTo(PinB);
 		PinA->MakeLinkTo((PinA->Direction == EGPD_Output) ? CastChecked<UMaterialGraphNode_Knot>(Expression->GraphNode)->GetInputPin() : CastChecked<UMaterialGraphNode_Knot>(Expression->GraphNode)->GetOutputPin());
@@ -984,6 +1211,7 @@ void UMaterialGraphSchema::GetAssetsGraphHoverMessage(const TArray<FAssetData>& 
 		UClass* MaterialExpressionClass = Cast<UClass>(Asset);
 		UMaterialFunctionInterface* Func = Cast<UMaterialFunctionInterface>(Asset);
 		UTexture* Tex = Cast<UTexture>(Asset);
+		USparseVolumeTexture* SparseVolumeTexture = Cast<USparseVolumeTexture>(Asset);
 		UMaterialParameterCollection* ParameterCollection = Cast<UMaterialParameterCollection>(Asset);
 
 		if (MaterialExpressionClass && MaterialExpressionClass->IsChildOf(UMaterialExpression::StaticClass()))
@@ -998,11 +1226,191 @@ void UMaterialGraphSchema::GetAssetsGraphHoverMessage(const TArray<FAssetData>& 
 		{
 			OutOkIcon = true;
 		}
+		else if (SparseVolumeTexture)
+		{
+			OutOkIcon = true;
+		}
 		else if (ParameterCollection)
 		{
 			OutOkIcon = true;
 		}
 	}
 }
+
+#if WITH_EDITORONLY_DATA
+//////////////////////////////////////////////////////////////////////////
+/** CVars for tweaking how the material editor context menu search picks the best match */
+namespace MaterialEditorContextMenuConsoleVariables
+{
+	/** How much weight the node's title has */
+	static float NodeTitleWeight = 20.0f;
+	static FAutoConsoleVariableRef CVarNodeTitleWeight(
+		TEXT("r.MaterialEditor.ContextMenu.NodeTitleWeight"), NodeTitleWeight,
+		TEXT("The amount of weight placed on the search items title"),
+		ECVF_Default);
+
+	/** Weight used to prefer keywords of actions  */
+	static float KeywordWeight = 30.0f;
+	static FAutoConsoleVariableRef CVarKeywordWeight(
+		TEXT("r.MaterialEditor.ContextMenu.KeywordWeight"), KeywordWeight,
+		TEXT("The amount of weight placed on search items keyword"),
+		ECVF_Default);
+
+	/** Weight that a match to a description search has */
+	static float DescriptionWeight = 4.0f;
+	static FAutoConsoleVariableRef CVarDescriptionWeight(
+		TEXT("r.MaterialEditor.ContextMenu.DescriptionWeight"), DescriptionWeight,
+		TEXT("The amount of weight placed on description that match what the user has typed in"),
+		ECVF_Default);
+
+	/** Weight that a match to a category search has */
+	static float CategoryWeight = 4.0f;
+	static FAutoConsoleVariableRef CVarCategoryWeight(
+		TEXT("r.MaterialEditor.ContextMenu.CategoryWeight"), CategoryWeight,
+		TEXT("The amount of weight placed on categories that match what the user has typed in"),
+		ECVF_Default);
+
+	/** The multiplier given if there is an exact localized match to the search term */
+	static float WholeMatchLocalizedWeightMultiplier = 0.5f;
+	static FAutoConsoleVariableRef CVarWholeMatchLocalizedWeightMultiplier(
+		TEXT("r.MaterialEditor.ContextMenu.WholeMatchLocalizedWeightMultiplier"), WholeMatchLocalizedWeightMultiplier,
+		TEXT("The multiplier given if there is an exact localized match to the search term"),
+		ECVF_Default);
+
+	/** The multiplier given if there is an exact match to the search term */
+	static float WholeMatchWeightMultiplier = 0.5f;
+	static FAutoConsoleVariableRef CVarWholeMatchWeightMultiplier(
+		TEXT("r.MaterialEditor.ContextMenu.WholeMatchWeightMultiplier"), WholeMatchWeightMultiplier,
+		TEXT("The multiplier given if there is an exact match to the search term"),
+		ECVF_Default);
+
+	/** The multiplier given if the keyword starts with a term the user typed in */
+	static float StartsWithBonusWeightMultiplier = 4.0f;
+	static FAutoConsoleVariableRef CVarStartsWithBonusWeightMultiplier(
+		TEXT("r.MaterialEditor.ContextMenu.StartsWithBonusWeightMultiplier"), StartsWithBonusWeightMultiplier,
+		TEXT("The multiplier given if the keyword starts with a term the user typed in"),
+		ECVF_Default);
+
+	/** Increasing this will prefer whole percentage matches when comparing the keyword to what the user has typed in */
+	static float PercentageMatchWeightMultiplier = 1.0f;
+	static FAutoConsoleVariableRef CVarPercentageMatchWeightMultiplier(
+		TEXT("r.MaterialEditor.ContextMenu.PercentageMatchWeightMultiplier"), PercentageMatchWeightMultiplier,
+		TEXT("A multiplier for how much weight to give something based on the percentage match it is"),
+		ECVF_Default);
+
+	/** Increasing this weight will give a bonus to shorter matching words */
+	static float ShorterMatchWeight = 10.0f;
+	static FAutoConsoleVariableRef CVarShorterWeight(
+		TEXT("r.MaterialEditor.ContextMenu.ShorterMatchWeight"), ShorterMatchWeight,
+		TEXT("Increasing this weight will make shorter words preferred"),
+		ECVF_Default);
+}
+
+FGraphSchemaSearchWeightModifiers UMaterialGraphSchema::GetSearchWeightModifiers() const
+{
+	FGraphSchemaSearchWeightModifiers Modifiers;
+	Modifiers.NodeTitleWeight = MaterialEditorContextMenuConsoleVariables::NodeTitleWeight;
+	Modifiers.KeywordWeight = MaterialEditorContextMenuConsoleVariables::KeywordWeight;
+	Modifiers.DescriptionWeight = MaterialEditorContextMenuConsoleVariables::DescriptionWeight;
+	Modifiers.CategoryWeight = MaterialEditorContextMenuConsoleVariables::DescriptionWeight;
+	Modifiers.WholeMatchLocalizedWeightMultiplier = MaterialEditorContextMenuConsoleVariables::WholeMatchLocalizedWeightMultiplier;
+	Modifiers.WholeMatchWeightMultiplier = MaterialEditorContextMenuConsoleVariables::WholeMatchWeightMultiplier;
+	Modifiers.StartsWithBonusWeightMultiplier = MaterialEditorContextMenuConsoleVariables::StartsWithBonusWeightMultiplier;
+	Modifiers.PercentageMatchWeightMultiplier = MaterialEditorContextMenuConsoleVariables::PercentageMatchWeightMultiplier;
+	Modifiers.ShorterMatchWeight = MaterialEditorContextMenuConsoleVariables::ShorterMatchWeight;
+	return Modifiers;
+}
+
+float UMaterialGraphSchema::GetActionFilteredWeight(const FGraphActionListBuilderBase::ActionGroup& InCurrentAction, const TArray<FString>& InFilterTerms, const TArray<FString>& InSanitizedFilterTerms, const TArray<UEdGraphPin*>& DraggedFromPins) const
+{
+	// The overall 'weight'
+	float TotalWeight = 0.0f;
+
+	// Setup an array of arrays so we can do a weighted search			
+	TArray<FGraphSchemaSearchTextWeightInfo> WeightedArrayList;
+	FGraphSchemaSearchTextDebugInfo DebugInfo;
+
+	int32 Action = 0;
+	if (InCurrentAction.Actions[Action].IsValid() == true)
+	{
+		FGraphSchemaSearchWeightModifiers WeightModifiers = GetSearchWeightModifiers();
+		int32 NonLocalizedFirstIndex = CollectSearchTextWeightInfo(InCurrentAction, WeightModifiers, WeightedArrayList, &DebugInfo);
+
+		// Now iterate through all the filter terms and calculate a 'weight' using the values and multipliers
+		for (int32 FilterIndex = 0; FilterIndex < InFilterTerms.Num(); ++FilterIndex)
+		{
+			const FString& EachTerm = InFilterTerms[FilterIndex];
+			const FString& EachTermSanitized = InSanitizedFilterTerms[FilterIndex];
+			// Now check the weighted lists
+			for (int32 iFindCount = 0; iFindCount < WeightedArrayList.Num(); iFindCount++)
+			{
+				float WeightPerList = 0.0f;
+				const TArray<FString>& WordArray = *WeightedArrayList[iFindCount].Array;
+				float ArrayWeight = WeightedArrayList[iFindCount].WeightModifier;
+				int32 WholeMatchCount = 0;
+				float WholeMatchMultiplier = (iFindCount < NonLocalizedFirstIndex) ? MaterialEditorContextMenuConsoleVariables::WholeMatchLocalizedWeightMultiplier : MaterialEditorContextMenuConsoleVariables::WholeMatchWeightMultiplier;
+
+				// Count of how many words in this array contain a search term that the user has typed in
+				int32 WordMatchCount = 0;
+				// The number of characters in the best matching word
+				int32 BestMatchCharLength = 0;
+
+				for (int32 iEachWord = 0; iEachWord < WordArray.Num(); iEachWord++)
+				{
+					float WeightPerWord = 0.0f;
+
+					// If a word contains the search phrase that the user has typed in, then give it weight					
+					if (WordArray[iEachWord].Contains(EachTermSanitized, ESearchCase::CaseSensitive) || WordArray[iEachWord].Contains(EachTerm, ESearchCase::CaseSensitive))
+					{
+						++WordMatchCount;
+						WeightPerWord += ArrayWeight * WholeMatchMultiplier;
+
+						// If the word starts with the search term, give it extra boost of weight
+						if (WordArray[iEachWord].StartsWith(EachTermSanitized, ESearchCase::CaseSensitive) || WordArray[iEachWord].StartsWith(EachTerm, ESearchCase::CaseSensitive))
+						{
+							WeightPerWord += ArrayWeight * MaterialEditorContextMenuConsoleVariables::StartsWithBonusWeightMultiplier;
+						}
+					}
+
+					if (WeightPerWord > WeightPerList)
+					{
+						// Use the best word match weight, we don't want to count similar words more than one
+						WeightPerList = WeightPerWord;
+						BestMatchCharLength = WordArray[iEachWord].Len();
+					}
+				}
+
+				if (BestMatchCharLength > 0 && WeightPerList > 0)
+				{
+					// Higher number of matching words contributes to higher weight
+					float PercentMatch = (float)WordMatchCount / (float)WordArray.Num();
+					float PercentMatchWeight = (WeightPerList * PercentMatch * MaterialEditorContextMenuConsoleVariables::PercentageMatchWeightMultiplier);
+					WeightPerList += PercentMatchWeight;
+					DebugInfo.PercentMatchWeight += PercentMatchWeight;
+					DebugInfo.PercentMatch += PercentMatch;
+
+					// The shorter the best matched word, the larger bonus it gets
+					float ShorterMatchFactor = (float)EachTerm.Len() / (float)BestMatchCharLength;
+					float ShorterMatchWeight = ShorterMatchFactor * MaterialEditorContextMenuConsoleVariables::ShorterMatchWeight;
+					WeightPerList += ShorterMatchWeight;
+					DebugInfo.ShorterMatchWeight += ShorterMatchWeight;
+				}
+
+				if (WeightedArrayList[iFindCount].DebugWeight)
+				{
+					*WeightedArrayList[iFindCount].DebugWeight += WeightPerList;
+				}
+
+				TotalWeight += WeightPerList;
+			}
+		}
+
+		DebugInfo.TotalWeight = TotalWeight;
+		PrintSearchTextDebugInfo(InFilterTerms, InCurrentAction, &DebugInfo);
+	}
+
+	return TotalWeight;
+}
+#endif // WITH_EDITORONLY_DATA
 
 #undef LOCTEXT_NAMESPACE

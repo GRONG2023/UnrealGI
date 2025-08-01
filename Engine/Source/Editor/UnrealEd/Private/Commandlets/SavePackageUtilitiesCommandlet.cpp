@@ -11,8 +11,11 @@
 #include "Misc/FeedbackContext.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+#include "UObject/ArchiveCookContext.h"
 #include "UObject/LinkerDiff.h"
+#include "UObject/LinkerSave.h"
 #include "UObject/Package.h"
+#include "UObject/SavePackage.h"
 #include "UObject/UObjectGlobals.h"
 #include "UObject/UObjectHash.h"
 
@@ -25,32 +28,28 @@ int32 USavePackageUtilitiesCommandlet::Main(const FString& Params)
 {
 	InitParameters(Params);
 
-	auto GetPackageAsset = [](UPackage* InPackage) -> UObject*
-	{
-		UObject* Asset = nullptr;
-		ForEachObjectWithPackage(InPackage, [&Asset](UObject* Object)
-			{
-				if (Object->IsAsset())
-				{
-					Asset = Object;
-					return false;
-				}
-				return true;
-			}, /*bIncludeNestedObjects*/ false);
-		return Asset;
-	};
-
 	for (const FString& PackageName : PackageNames)
 	{
 		// Load Package
 		UPackage* Package = LoadPackage(nullptr, *PackageName, LOAD_None);
-		UObject* Asset = GetPackageAsset(Package);
+		UObject* Asset = Package->FindAssetInPackage();
 		FString Filename = FPaths::CreateTempFilename(*FPaths::ProjectSavedDir());
+
+		// CookData should only be nonzero if we are cooking.
+		TOptional<FArchiveCookContext> CookContext;
+		TOptional<FArchiveCookData> CookData;
+		if (TargetPlatform != nullptr)
+		{
+			CookContext.Emplace(Package, UE::Cook::ECookType::Unknown,
+				UE::Cook::ECookingDLC::Unknown, TargetPlatform);
+			CookData.Emplace(*TargetPlatform, *CookContext);
+		}
 
 		FSavePackageArgs SaveArgs;
 		SaveArgs.TopLevelFlags = RF_Public;
 		SaveArgs.SaveFlags = SAVE_CompareLinker;
-		SaveArgs.TargetPlatform = TargetPlatform;
+		SaveArgs.ArchiveCookData = CookData.GetPtrOrNull();
+		SaveArgs.bSlowTask = false;
 
 		// if not cooking add RF_Standalone to the top level flags
 		if (TargetPlatform == nullptr)
@@ -58,39 +57,16 @@ int32 USavePackageUtilitiesCommandlet::Main(const FString& Params)
 			SaveArgs.TopLevelFlags |= RF_Standalone;
 		}
 
-		static IConsoleVariable* EnableNewSave = IConsoleManager::Get().FindConsoleVariable(TEXT("SavePackage.EnableNewSave"));
-		int32 EnableNewSavePreviousValue = EnableNewSave->GetInt();
-
-		// Do the new save package first in case, number of serialization has a by product during saving
-		// New Save Package
-		FSavePackageResultStruct NewResult;
-		{
-			EnableNewSave->Set(1);
-			NewResult = GEditor->Save(Package, Asset, SaveArgs.TopLevelFlags, *Filename,
-				GError, nullptr, false, true, SaveArgs.SaveFlags, SaveArgs.TargetPlatform,
-				FDateTime::MinValue(), false, /*DiffMap*/ nullptr,
-				nullptr);
-
-		}
-
-		// Old Save Package
-		FSavePackageResultStruct OldResult;
-		{
-			EnableNewSave->Set(0);
-			OldResult = GEditor->Save(Package, Asset, SaveArgs.TopLevelFlags, *Filename,
-				GError, nullptr, false, true, SaveArgs.SaveFlags, SaveArgs.TargetPlatform,
-				FDateTime::MinValue(), false, /*DiffMap*/ nullptr,
-				nullptr);
-		}
-		EnableNewSave->Set(EnableNewSavePreviousValue);
-
-		if (OldResult.LinkerSave && NewResult.LinkerSave)
+		FSavePackageResultStruct FirstResult = GEditor->Save(Package, Asset, *Filename, SaveArgs);
+		FSavePackageResultStruct SecondResult = GEditor->Save(Package, Asset, *Filename, SaveArgs);
+	
+		if (FirstResult.LinkerSave && SecondResult.LinkerSave)
 		{
 			// Compare Linker Save info
-			FLinkerDiff LinkerDiff = FLinkerDiff::CompareLinkers(OldResult.LinkerSave.Get(), NewResult.LinkerSave.Get());
+			FLinkerDiff LinkerDiff = FLinkerDiff::CompareLinkers(FirstResult.LinkerSave.Get(), SecondResult.LinkerSave.Get());
 			LinkerDiff.PrintDiff(*GWarn);
 		}
-		
+
 		// Delete the temp filename
 		IFileManager::Get().Delete(*Filename);
 	}

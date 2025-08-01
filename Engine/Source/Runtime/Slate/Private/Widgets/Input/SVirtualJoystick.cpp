@@ -4,7 +4,7 @@
 #include "Rendering/DrawElements.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Framework/Application/SlateApplication.h"
-
+#include "GenericPlatform/GenericPlatformInputDeviceMapper.h"
 
 const float OPACITY_LERP_RATE = 3.f;
 
@@ -72,7 +72,7 @@ bool SVirtualJoystick::ShouldDisplayTouchInterface()
 	return FPlatformMisc::GetUseVirtualJoysticks() || bAlwaysShowTouchInterface || (FSlateApplication::Get().IsFakingTouchEvents() && FPlatformMisc::ShouldDisplayTouchInterfaceOnFakingTouchEvents());
 }
 
-static int32 ResolveRelativePosition(float Position, float RelativeTo, float ScaleFactor)
+static float ResolveRelativePosition(float Position, float RelativeTo, float ScaleFactor)
 {
 	// absolute from edge
 	if (Position < -1.0f)
@@ -125,8 +125,9 @@ int32 SVirtualJoystick::OnPaint(const FPaintArgs& Args, const FGeometry& Allotte
 					OutDrawElements,
 					RetLayerId++,
 					AllottedGeometry.ToPaintGeometry(
-					Control.VisualCenter - FVector2D(Control.CorrectedVisualSize.X * 0.5f, Control.CorrectedVisualSize.Y * 0.5f),
-					Control.CorrectedVisualSize),
+						Control.CorrectedVisualSize,
+						FSlateLayoutTransform(Control.VisualCenter - FVector2D(Control.CorrectedVisualSize.X * 0.5f, Control.CorrectedVisualSize.Y * 0.5f))
+					),
 					Control.Info.Image2->GetSlateBrush(),
 					ESlateDrawEffect::None,
 					ColorAndOpacitySRGB
@@ -139,8 +140,9 @@ int32 SVirtualJoystick::OnPaint(const FPaintArgs& Args, const FGeometry& Allotte
 					OutDrawElements,
 					RetLayerId++,
 					AllottedGeometry.ToPaintGeometry(
-					Control.VisualCenter + Control.ThumbPosition - FVector2D(Control.CorrectedThumbSize.X * 0.5f, Control.CorrectedThumbSize.Y * 0.5f),
-					Control.CorrectedThumbSize),
+						Control.CorrectedThumbSize,
+						FSlateLayoutTransform(Control.VisualCenter + Control.ThumbPosition - FVector2D(Control.CorrectedThumbSize.X * 0.5f, Control.CorrectedThumbSize.Y * 0.5f))
+					),
 					Control.Info.Image1->GetSlateBrush(),
 					ESlateDrawEffect::None,
 					ColorAndOpacitySRGB
@@ -390,6 +392,9 @@ void SVirtualJoystick::Tick(const FGeometry& AllottedGeometry, const double InCu
 
 		if (Control.CapturedPointerIndex >= 0 || Control.bSendOneMoreEvent)
 		{
+			// cache the key released state so we can send input pressed/released events later
+			bool bButtonPressed = !Control.bSendOneMoreEvent;
+
 			Control.bSendOneMoreEvent = false;
 
 			// Get the corrected thumb offset scale (now allows ellipse instead of assuming square)
@@ -415,9 +420,46 @@ void SVirtualJoystick::Tick(const FGeometry& AllottedGeometry, const double InCu
 			const FGamepadKeyNames::Type YAxis = (Control.Info.AltInputKey.IsValid() ? Control.Info.AltInputKey.GetFName() : (ControlIndex == 0 ? FGamepadKeyNames::LeftAnalogY : FGamepadKeyNames::RightAnalogY));
 
 			FSlateApplication::Get().SetAllUserFocusToGameViewport();
-			FSlateApplication::Get().OnControllerAnalog(XAxis, 0, NormalizedOffset.X);
-			FSlateApplication::Get().OnControllerAnalog(YAxis, 0, -NormalizedOffset.Y);
+			
+			FInputDeviceId PrimaryInputDevice = IPlatformInputDeviceMapper::Get().GetPrimaryInputDeviceForUser(FSlateApplicationBase::SlateAppPrimaryPlatformUser);
+
+			auto ApplyInput = [PrimaryInputDevice](const FGamepadKeyNames::Type KeyName, float Delta, bool bTreatAsButton, bool bPressed)
+			{
+				FKey Key(KeyName);
+				if (Key.IsAnalog())
+				{
+					FSlateApplication::Get().OnControllerAnalog(KeyName, FSlateApplicationBase::SlateAppPrimaryPlatformUser, PrimaryInputDevice, Delta);
+				}
+				else if (bTreatAsButton)
+				{
+					if (bPressed)
+					{
+						FSlateApplication::Get().OnControllerButtonPressed(KeyName, FSlateApplicationBase::SlateAppPrimaryPlatformUser, PrimaryInputDevice, false);
+					}
+					else
+					{
+						FSlateApplication::Get().OnControllerButtonReleased(KeyName, FSlateApplicationBase::SlateAppPrimaryPlatformUser, PrimaryInputDevice, false);
+					}
+				}
+				else if (Delta != 0.0f)
+				{
+					FSlateApplication::Get().OnControllerButtonPressed(KeyName, FSlateApplicationBase::SlateAppPrimaryPlatformUser, PrimaryInputDevice, false);
+				}
+				else
+				{
+					FSlateApplication::Get().OnControllerButtonReleased(KeyName, FSlateApplicationBase::SlateAppPrimaryPlatformUser, PrimaryInputDevice, false);
+				}
+			};
+
+			ApplyInput(XAxis, NormalizedOffset.X, Control.Info.bTreatAsButton, bButtonPressed);
+
+			// ignore the Y axis if this is a button
+			if (!Control.Info.bTreatAsButton)
+			{
+				ApplyInput(YAxis, -NormalizedOffset.Y, false, bButtonPressed);
+			}
 		}
+		
 
 		// is this active?
 		if (Control.CapturedPointerIndex != -1)
@@ -519,8 +561,8 @@ void SVirtualJoystick::SetJoystickVisibility(const bool bInVisible, const bool b
 
 void SVirtualJoystick::AddControl(const FControlInfo& Control)
 {
-	FControlData* ControlData = new (Controls) FControlData;
-	ControlData->Info = Control;
+	FControlData& ControlData = Controls.AddDefaulted_GetRef();
+	ControlData.Info = Control;
 }
 
 void SVirtualJoystick::ClearControls()

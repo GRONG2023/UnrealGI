@@ -7,6 +7,8 @@
 #include "BehaviorTree/BTDecorator.h"
 #include "BehaviorTree/BTService.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BTCompositeNode)
+
 UBTCompositeNode::UBTCompositeNode(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
 	NodeName = "UnknownComposite";
@@ -118,15 +120,15 @@ void UBTCompositeNode::OnChildActivation(FBehaviorTreeSearchData& SearchData, in
 	}
 
 	// update active node in current context: child node
-	NodeMemory->CurrentChild = ChildIndex;
+	NodeMemory->CurrentChild = IntCastChecked<int8>(ChildIndex);
 }
 
-void UBTCompositeNode::OnChildDeactivation(FBehaviorTreeSearchData& SearchData, const UBTNode& ChildNode, EBTNodeResult::Type& NodeResult) const
+void UBTCompositeNode::OnChildDeactivation(FBehaviorTreeSearchData& SearchData, const UBTNode& ChildNode, EBTNodeResult::Type& NodeResult, const bool bRequestedFromValidInstance) const
 {
-	OnChildDeactivation(SearchData, GetChildIndex(SearchData, ChildNode), NodeResult);
+	OnChildDeactivation(SearchData, GetChildIndex(SearchData, ChildNode), NodeResult, bRequestedFromValidInstance);
 }
 
-void UBTCompositeNode::OnChildDeactivation(FBehaviorTreeSearchData& SearchData, int32 ChildIndex, EBTNodeResult::Type& NodeResult) const
+void UBTCompositeNode::OnChildDeactivation(FBehaviorTreeSearchData& SearchData, int32 ChildIndex, EBTNodeResult::Type& NodeResult, const bool bRequestedFromValidInstance) const
 {
 	const FBTCompositeChild& ChildInfo = Children[ChildIndex];
 
@@ -149,7 +151,7 @@ void UBTCompositeNode::OnChildDeactivation(FBehaviorTreeSearchData& SearchData, 
 	const bool bCanNotify = !bUseDecoratorsDeactivationCheck || CanNotifyDecoratorsOnDeactivation(SearchData, ChildIndex, NodeResult);
 	if (bCanNotify)
 	{
-		NotifyDecoratorsOnDeactivation(SearchData, ChildIndex, NodeResult);
+		NotifyDecoratorsOnDeactivation(SearchData, ChildIndex, NodeResult, bRequestedFromValidInstance);
 	}
 }
 
@@ -247,7 +249,7 @@ void UBTCompositeNode::NotifyDecoratorsOnActivation(FBehaviorTreeSearchData& Sea
 	}
 }
 
-void UBTCompositeNode::NotifyDecoratorsOnDeactivation(FBehaviorTreeSearchData& SearchData, int32 ChildIdx, EBTNodeResult::Type& NodeResult) const
+void UBTCompositeNode::NotifyDecoratorsOnDeactivation(FBehaviorTreeSearchData& SearchData, int32 ChildIdx, EBTNodeResult::Type& NodeResult, const bool bRequestedFromValidInstance) const
 {
 	const FBTCompositeChild& ChildInfo = Children[ChildIdx];
 	if (NodeResult == EBTNodeResult::Aborted)
@@ -270,14 +272,21 @@ void UBTCompositeNode::NotifyDecoratorsOnDeactivation(FBehaviorTreeSearchData& S
 			DecoratorOb->WrappedOnNodeProcessed(SearchData, NodeResult);
 			DecoratorOb->WrappedOnNodeDeactivation(SearchData, NodeResult);
 
-			// leaving child branch: 
-			if (DecoratorOb->GetFlowAbortMode() == EBTFlowAbortMode::Self)
+			if (!bRequestedFromValidInstance)
 			{
+				UE_VLOG(SearchData.OwnerComp.GetOwner(), LogBehaviorTree, Verbose, TEXT("Removing decorator(%s) as request is not in active instance"), *UBehaviorTreeTypes::DescribeNodeHelper(this));
+				SearchData.AddUniqueUpdate(FBehaviorTreeSearchUpdate(DecoratorOb, SearchData.OwnerComp.GetActiveInstanceIdx(), EBTNodeUpdateMode::Remove));
+			}
+			// leaving child branch: 
+			else if (DecoratorOb->GetFlowAbortMode() == EBTFlowAbortMode::Self)
+			{
+				UE_VLOG(SearchData.OwnerComp.GetOwner(), LogBehaviorTree, Verbose, TEXT("Removing out of scope decorator(%s) because of self abort type"), *UBehaviorTreeTypes::DescribeNodeHelper(this));
 				// - observers with mode "Self" are now out of scope, remove them
 				SearchData.AddUniqueUpdate(FBehaviorTreeSearchUpdate(DecoratorOb, SearchData.OwnerComp.GetActiveInstanceIdx(), EBTNodeUpdateMode::Remove));
 			}
 			else if (DecoratorOb->GetFlowAbortMode() == EBTFlowAbortMode::LowerPriority)
 			{
+				UE_VLOG(SearchData.OwnerComp.GetOwner(), LogBehaviorTree, Verbose, TEXT("Reactivating decorator(%s) because of lower priority abort type"), *UBehaviorTreeTypes::DescribeNodeHelper(this));
 				// - observers with mode "Lower Priority" will try to reactivate themselves ("Both" is not removed on node activation)
 				SearchData.AddUniqueUpdate(FBehaviorTreeSearchUpdate(DecoratorOb, SearchData.OwnerComp.GetActiveInstanceIdx(), EBTNodeUpdateMode::Add));
 			}
@@ -411,7 +420,7 @@ static bool UpdateOperationStack(const UBehaviorTreeComponent& OwnerComp, FStrin
 		UE_VLOG(OwnerComp.GetOwner(), LogBehaviorTree, Verbose, TEXT("%s%s finished: %s"), *Indent,
 			*DescribeLogicOp(CurrentOp.Op),
 			bTestResult ? TEXT("allowed") : TEXT("forbidden"));
-		Indent.LeftChopInline(2, false);
+		Indent.LeftChopInline(2, EAllowShrinking::No);
 
 		Stack.RemoveAt(Stack.Num() - 1);
 		return UpdateOperationStack(OwnerComp, Indent, Stack, bTestResult, FailedDecoratorIdx, NodeDecoratorIdx, bShouldStoreNodeIndex);
@@ -420,7 +429,7 @@ static bool UpdateOperationStack(const UBehaviorTreeComponent& OwnerComp, FStrin
 	return bTestResult;
 }
 
-bool UBTCompositeNode::DoDecoratorsAllowExecution(UBehaviorTreeComponent& OwnerComp, int32 InstanceIdx, int32 ChildIdx) const
+bool UBTCompositeNode::DoDecoratorsAllowExecution(UBehaviorTreeComponent& OwnerComp, const int32 InstanceIdx, const int32 ChildIdx) const
 {
 	ensure(Children.IsValidIndex(ChildIdx));
 	if (Children.IsValidIndex(ChildIdx) == false)
@@ -440,6 +449,8 @@ bool UBTCompositeNode::DoDecoratorsAllowExecution(UBehaviorTreeComponent& OwnerC
 
 	FBehaviorTreeInstance& MyInstance = OwnerComp.InstanceStack[InstanceIdx];
 
+	const uint16 InstanceIdxUint16 = IntCastChecked<uint16>(InstanceIdx);
+
 	if (ChildInfo.DecoratorOps.Num() == 0)
 	{
 		// simple check: all decorators must agree
@@ -447,7 +458,7 @@ bool UBTCompositeNode::DoDecoratorsAllowExecution(UBehaviorTreeComponent& OwnerC
 		{
 			const UBTDecorator* TestDecorator = ChildInfo.Decorators[DecoratorIndex];
 			const bool bIsAllowed = TestDecorator ? TestDecorator->WrappedCanExecute(OwnerComp, TestDecorator->GetNodeMemory<uint8>(MyInstance)) : false;
-			OwnerComp.StoreDebuggerSearchStep(TestDecorator, InstanceIdx, bIsAllowed);
+			OwnerComp.StoreDebuggerSearchStep(TestDecorator, InstanceIdxUint16, bIsAllowed);
 
 			const UBTNode* ChildNode = GetChildNode(ChildIdx);
 
@@ -518,7 +529,7 @@ bool UBTCompositeNode::DoDecoratorsAllowExecution(UBehaviorTreeComponent& OwnerC
 					UE_VLOG(OwnerComp.GetOwner(), LogBehaviorTree, Verbose, TEXT("finished execution test: %s"),
 						bResult ? TEXT("allowed") : TEXT("forbidden"));
 
-					OwnerComp.StoreDebuggerSearchStep(ChildInfo.Decorators[FMath::Max(0, FailedDecoratorIdx)], InstanceIdx, bResult);
+					OwnerComp.StoreDebuggerSearchStep(ChildInfo.Decorators[FMath::Max(0, FailedDecoratorIdx)], InstanceIdxUint16, bResult);
 					break;
 				}
 			}
@@ -636,7 +647,7 @@ uint16 UBTCompositeNode::GetChildExecutionIndex(int32 Index, EBTChildIndex Child
 			}
 		}
 
-		return ChildNode->GetExecutionIndex() - Offset;
+		return IntCastChecked<uint16>(ChildNode->GetExecutionIndex() - Offset);
 	}
 
 	return (LastExecutionIndex + 1);
@@ -692,3 +703,15 @@ uint16 UBTCompositeNode::GetInstanceMemorySize() const
 {
 	return sizeof(FBTCompositeMemory);
 }
+
+void UBTCompositeNode::InitializeMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryInit::Type InitType) const
+{
+	InitializeNodeMemory<FBTCompositeMemory>(NodeMemory, InitType);
+}
+
+void UBTCompositeNode::CleanupMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryClear::Type CleanupType) const
+{
+	CleanupNodeMemory<FBTCompositeMemory>(NodeMemory, CleanupType);
+}
+
+

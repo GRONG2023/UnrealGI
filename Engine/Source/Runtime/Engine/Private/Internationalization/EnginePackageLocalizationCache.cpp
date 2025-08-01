@@ -1,12 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Internationalization/EnginePackageLocalizationCache.h"
-#include "Misc/ScopeLock.h"
 #include "Modules/ModuleManager.h"
 #include "Misc/PackageName.h"
-#include "AssetData.h"
-#include "ARFilter.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/ARFilter.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 
 FEnginePackageLocalizationCache::FEnginePackageLocalizationCache()
 	: bIsScanningPath(false)
@@ -24,25 +23,48 @@ FEnginePackageLocalizationCache::~FEnginePackageLocalizationCache()
 	if (FModuleManager::Get().IsModuleLoaded(TEXT("AssetRegistry")))
 	{
 		FAssetRegistryModule& AssetRegistryModule = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-		IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
-
-		AssetRegistry.OnAssetAdded().RemoveAll(this);
-		AssetRegistry.OnAssetRemoved().RemoveAll(this);
-		AssetRegistry.OnAssetRenamed().RemoveAll(this);
+		IAssetRegistry* AssetRegistry = AssetRegistryModule.TryGet();
+		if (AssetRegistry)
+		{
+			AssetRegistry->OnAssetAdded().RemoveAll(this);
+			AssetRegistry->OnAssetRemoved().RemoveAll(this);
+			AssetRegistry->OnAssetRenamed().RemoveAll(this);
+		}
 	}
 }
 
-void FEnginePackageLocalizationCache::FindLocalizedPackages(const FString& InSourceRoot, const FString& InLocalizedRoot, TMap<FName, TArray<FName>>& InOutSourcePackagesToLocalizedPackages)
+void FEnginePackageLocalizationCache::FindLocalizedPackages(const TMap<FString, TArray<FString>>& NewSourceToLocalizedPaths, TMap<FName, TArray<FName>>& InOutSourcePackagesToLocalizedPackages)
 {
+	if (NewSourceToLocalizedPaths.Num() == 0)
+	{
+		return;
+	}
+
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+
+	int32 NumElementsPerKeyGuess = NewSourceToLocalizedPaths.CreateConstIterator()->Value.Num();
+	int32 SizeGuess = NewSourceToLocalizedPaths.Num() * NumElementsPerKeyGuess;
+#if WITH_EDITOR
+	TArray<FString> LocalizedPackagePaths;
+	LocalizedPackagePaths.Reserve(SizeGuess);
+#endif
+	TArray<FName> LocalizedPackagePathFNames;
+	LocalizedPackagePathFNames.Reserve(SizeGuess);
+	for (const TPair<FString, TArray<FString>>& Pair : NewSourceToLocalizedPaths)
+	{
+		for (const FString& LocalizedRoot : Pair.Value)
+		{
+#if WITH_EDITOR
+			LocalizedPackagePaths.Add(LocalizedRoot);
+#endif
+			LocalizedPackagePathFNames.Add(*LocalizedRoot);
+		}
+	}
 
 #if WITH_EDITOR
 	// Make sure the asset registry has the data we need
 	{
-		TArray<FString> LocalizedPackagePaths;
-		LocalizedPackagePaths.Add(InLocalizedRoot);
-
 		// Set bIsScanningPath to avoid us processing newly added assets from this scan
 		TGuardValue<bool> SetIsScanningPath(bIsScanningPath, true);
 		AssetRegistry.ScanPathsSynchronous(LocalizedPackagePaths);
@@ -52,7 +74,7 @@ void FEnginePackageLocalizationCache::FindLocalizedPackages(const FString& InSou
 	TArray<FAssetData> LocalizedAssetDataArray;
 	bool bIncludeOnlyOnDiskAssets = !GIsEditor;
 	bool bRecursive = true;
-	AssetRegistry.GetAssetsByPath(*InLocalizedRoot, LocalizedAssetDataArray, bRecursive, bIncludeOnlyOnDiskAssets);
+	AssetRegistry.GetAssetsByPaths(MoveTemp(LocalizedPackagePathFNames), LocalizedAssetDataArray, bRecursive, bIncludeOnlyOnDiskAssets);
 
 	for (const FAssetData& LocalizedAssetData : LocalizedAssetDataArray)
 	{
@@ -63,7 +85,7 @@ void FEnginePackageLocalizationCache::FindLocalizedPackages(const FString& InSou
 	}
 }
 
-void FEnginePackageLocalizationCache::FindAssetGroupPackages(const FName InAssetGroupName, const FName InAssetClassName)
+void FEnginePackageLocalizationCache::FindAssetGroupPackages(const FName InAssetGroupName, const FTopLevelAssetPath& InAssetClassName)
 {
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
@@ -92,7 +114,7 @@ void FEnginePackageLocalizationCache::FindAssetGroupPackages(const FName InAsset
 		Filter.PackagePaths.Add(*LocalizedRootPath);
 	}
 	Filter.bIncludeOnlyOnDiskAssets = false;
-	Filter.ClassNames.Add(InAssetClassName);
+	Filter.ClassPaths.Add(InAssetClassName);
 	Filter.bRecursiveClasses = false;
 
 	TArray<FAssetData> LocalizedAssetsOfClass;
@@ -113,26 +135,32 @@ void FEnginePackageLocalizationCache::HandleAssetAdded(const FAssetData& InAsset
 		return;
 	}
 
+	// Convert the string outside the lock and loop	as this is called often while loading
+	const FString PackagePath = InAssetData.PackageName.ToString();
+
 	FScopeLock Lock(&LocalizedCachesCS);
 
 	for (auto& CultureCachePair : AllCultureCaches)
 	{
-		bPackageNameToAssetGroupDirty |= CultureCachePair.Value->AddPackage(InAssetData.PackageName.ToString());
+		bPackageNameToAssetGroupDirty |= CultureCachePair.Value->AddPackage(PackagePath);
 	}
 }
 
 void FEnginePackageLocalizationCache::HandleAssetRemoved(const FAssetData& InAssetData)
 {
+	const FString PackagePath = InAssetData.PackageName.ToString();
+
 	FScopeLock Lock(&LocalizedCachesCS);
 
 	for (auto& CultureCachePair : AllCultureCaches)
 	{
-		bPackageNameToAssetGroupDirty |= CultureCachePair.Value->RemovePackage(InAssetData.PackageName.ToString());
+		bPackageNameToAssetGroupDirty |= CultureCachePair.Value->RemovePackage(PackagePath);
 	}
 }
 
 void FEnginePackageLocalizationCache::HandleAssetRenamed(const FAssetData& InAssetData, const FString& InOldObjectPath)
 {
+	const FString PackagePath = InAssetData.PackageName.ToString();
 	const FString OldPackagePath = FPackageName::ObjectPathToPackageName(InOldObjectPath);
 
 	FScopeLock Lock(&LocalizedCachesCS);
@@ -140,6 +168,6 @@ void FEnginePackageLocalizationCache::HandleAssetRenamed(const FAssetData& InAss
 	for (auto& CultureCachePair : AllCultureCaches)
 	{
 		bPackageNameToAssetGroupDirty |= CultureCachePair.Value->RemovePackage(OldPackagePath);
-		bPackageNameToAssetGroupDirty |= CultureCachePair.Value->AddPackage(InAssetData.PackageName.ToString());
+		bPackageNameToAssetGroupDirty |= CultureCachePair.Value->AddPackage(PackagePath);
 	}
 }

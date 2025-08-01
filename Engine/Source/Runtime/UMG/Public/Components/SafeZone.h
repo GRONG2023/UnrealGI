@@ -25,52 +25,68 @@
  *   1: Display the overlay for the title safe zone.
  *   2: Display the overlay for the action safe zone.
  */
-UCLASS()
-class UMG_API USafeZone : public UContentWidget
+UCLASS(MinimalAPI)
+class USafeZone : public UContentWidget
 {
 	GENERATED_BODY()
 public:
-	USafeZone();
+	UMG_API USafeZone();
 
 #if WITH_EDITOR
-	virtual const FText GetPaletteCategory() override;
+	UMG_API virtual const FText GetPaletteCategory() override;
 
-	virtual void OnDesignerChanged(const FDesignerChangedEventArgs& EventArgs) override;
+	UMG_API virtual void OnDesignerChanged(const FDesignerChangedEventArgs& EventArgs) override;
 #endif
 
-	virtual void OnSlotAdded( UPanelSlot* Slot ) override;
-	virtual void OnSlotRemoved( UPanelSlot* Slot ) override;
-	virtual UClass* GetSlotClass() const override;
+	UMG_API virtual void OnSlotAdded( UPanelSlot* Slot ) override;
+	UMG_API virtual void OnSlotRemoved( UPanelSlot* Slot ) override;
+	UMG_API virtual UClass* GetSlotClass() const override;
 
-	void UpdateWidgetProperties();
+	UMG_API void UpdateWidgetProperties();
 
 	UFUNCTION(BlueprintCallable, Category = "SafeZone")
-	void SetSidesToPad(bool InPadLeft, bool InPadRight, bool InPadTop, bool InPadBottom);
+	UMG_API void SetSidesToPad(bool InPadLeft, bool InPadRight, bool InPadTop, bool InPadBottom);
 
 public:
 
+	UE_DEPRECATED(5.2, "Direct access to PadLeft is deprecated. Please use the getter or setter.")
 	/** If this safe zone should pad for the left side of the screen's safe zone */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SafeZone")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, Category = "SafeZone")
 	bool PadLeft;
 
+	UE_DEPRECATED(5.2, "Direct access to PadRight is deprecated. Please use the getter or setter.")
 	/** If this safe zone should pad for the right side of the screen's safe zone */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SafeZone")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, Category = "SafeZone")
 	bool PadRight;
 
+	UE_DEPRECATED(5.2, "Direct access to PadTop is deprecated. Please use the getter or setter.")
 	/** If this safe zone should pad for the top side of the screen's safe zone */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SafeZone")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, Category = "SafeZone")
 	bool PadTop;
 
+	UE_DEPRECATED(5.2, "Direct access to PadBottom is deprecated. Please use the getter or setter.")
 	/** If this safe zone should pad for the bottom side of the screen's safe zone */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SafeZone")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, Category = "SafeZone")
 	bool PadBottom;
 
 protected:
 	// UWidget interface
-	virtual TSharedRef<SWidget> RebuildWidget() override;
+	UMG_API virtual TSharedRef<SWidget> RebuildWidget() override;
 	// End of UWidget interface
 
-	virtual void ReleaseSlateResources(bool bReleaseChildren) override;
+	UMG_API virtual void ReleaseSlateResources(bool bReleaseChildren) override;
+
+	UMG_API void SetPadLeft(bool InPadLeft);
+	UMG_API bool GetPadLeft() const;
+
+	UMG_API void SetPadRight(bool InPadRight);
+	UMG_API bool GetPadRight() const;
+
+	UMG_API void SetPadTop(bool InPadTop);
+	UMG_API bool GetPadTop() const;
+
+	UMG_API void SetPadBottom(bool InPadBottom);
+	UMG_API bool GetPadBottom() const;
 
 	TSharedPtr< class SSafeZone > MySafeZone;
 

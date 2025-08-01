@@ -1,6 +1,20 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #include "FiBSearchInstance.h"
 
+#include "Containers/SparseArray.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "ImaginaryBlueprintData.h"
+#include "Internationalization/Text.h"
+#include "Misc/CString.h"
+#include "Misc/ExpressionParserTypes.h"
+#include "ProfilingDebugging/CsvProfiler.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/Tuple.h"
+#include "Templates/UnrealTemplate.h"
+#include "Templates/ValueOrError.h"
+#include "UObject/NameTypes.h"
+
 /** All operators when evaluating FiB searched expressions must return this token, it helps to manage
  *	the results from functions as well as the specific components that were matched, and allows
  *	for combining those results through complex operator combinations that may eliminate entire sections
@@ -279,17 +293,33 @@ bool FFiBSearchInstance::OnFilterFunction(const FTextFilterString& A, ESearchQue
 		// Proceed to doing a sub-search
 		if (SubSearchInstance->PendingSearchables.Num() > 0)
 		{
+			// Make a copy of results so far. We'll intersect with sub-search results.
+			TSet<FImaginaryFiBData*> InitialResultsCopy;
+			for (const FImaginaryFiBDataWeakPtr& ResultCopy : SubSearchInstance->PendingSearchables)
+			{
+				if (ResultCopy.IsValid())
+				{
+					InitialResultsCopy.Add(ResultCopy.Pin().Get());
+				}
+			}
+
 			bSearchSuccess = SubSearchInstance->DoSearchQuery(A.AsString(), InSearchQueryFilter == ESearchQueryFilter::AllFilter);
 			if (bSearchSuccess)
 			{
-				for (auto& MatchesItem : SubSearchInstance->MatchesSearchQuery)
+				for (const FImaginaryFiBData* MatchesItem : SubSearchInstance->MatchesSearchQuery)
 				{
-					LastFunctionResultMatchesSearchQuery.AddUnique(MatchesItem);
+					if (InitialResultsCopy.Contains(MatchesItem))
+					{
+						LastFunctionResultMatchesSearchQuery.AddUnique(MatchesItem);
+					}
 				}
 
-				for (auto& MatchesItem : SubSearchInstance->MatchingSearchComponents)
+				for (const TPair<const FImaginaryFiBData*, FComponentUniqueDisplay>& MatchesItem : SubSearchInstance->MatchingSearchComponents)
 				{
-					LastFunctionMatchingSearchComponents.AddUnique(MatchesItem.Key, MatchesItem.Value);
+					if (InitialResultsCopy.Contains(MatchesItem.Key))
+					{
+						LastFunctionMatchingSearchComponents.AddUnique(MatchesItem.Key, MatchesItem.Value);
+					}
 				}
 			}
 		}

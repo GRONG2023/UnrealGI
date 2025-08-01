@@ -2,14 +2,16 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/SWindow.h"
+#include "IDetailsView.h"
+#include "IPropertyTypeCustomization.h"
+#include "PropertyEditorDelegates.h"
+
 #include "Modules/ModuleInterface.h"
 #include "UObject/StructOnScope.h"
-#include "Toolkits/IToolkitHost.h"
-#include "IDetailsView.h"
-#include "PropertyEditorDelegates.h"
-#include "IPropertyTypeCustomization.h"
+#include "Widgets/SWidget.h"
+#include "Widgets/SWindow.h"
+
+#include "Misc/Optional.h"
 
 class FAssetEditorToolkit;
 class FNotifyHook;
@@ -20,6 +22,12 @@ class ISinglePropertyView;
 class SDetailsView;
 class SPropertyTreeViewImpl;
 class SSingleProperty;
+class UToolMenu;
+
+namespace UE::PropertyEditor
+{
+	static FName RowContextMenuName = TEXT("PropertyEditor.RowContextMenu");
+}
 
 /**
  * The location of a property name relative to its editor widget                   
@@ -59,11 +67,14 @@ namespace FPropertyAccess
 
 
 class IPropertyHandle;
+class IPropertyTableCell;
 class SPropertyTreeViewImpl;
 class SWindow;
 class IPropertyTableCellPresenter;
 class IPropertyTypeCustomization;
 class IDetailsView;
+class IToolkitHost;
+class FAssetEditorToolkit;
 
 /**
  * Base class for adding an extra data to identify a custom property type
@@ -110,11 +121,113 @@ struct FStructureDetailsViewArgs
 	bool bShowInterfaces : 1;
 };
 
+/** 
+ * A property section is a group of categories with a name, eg. "Rendering" might contain "Materials" and "Lighting".
+ * Categories may belong to zero or more sections. 
+ */
+class FPropertySection
+{
+public:
+
+	/**
+	 * @param InName		The internal name of this section.
+	 * @param InDisplayName	The localizable display name to show to the user.
+	 */
+	FPropertySection(FName InName, FText InDisplayName) : 
+		Name(InName),
+		DisplayName(InDisplayName)
+	{
+	}
+
+	FPropertySection(const FPropertySection&) = default;
+	virtual ~FPropertySection() = default;
+
+	/** Add a category to this section. */
+	virtual void AddCategory(FName CategoryName);
+
+	/** Remove a category from this section. */
+	virtual void RemoveCategory(FName CategoryName);
+
+	/** Does this section add the given category? */
+	virtual bool HasAddedCategory(FName CategoryName) const;
+
+	/** Does this section remove the given category? */
+	virtual bool HasRemovedCategory(FName CategoryName) const;
+
+	/** Get the internal name of this property section. */
+	virtual FName GetName() const { return Name; }
+
+	/** Get the display name of this section. */
+	virtual FText GetDisplayName() const { return DisplayName; }
+
+private:
+
+	/** The internal name to use for this section. */
+	FName Name;
+
+	/** The display name to use for this section. */
+	FText DisplayName;
+	
+	/** The set of categories that are added to this section. */
+	TSet<FName> AddedCategories;
+
+	/** 
+	 * The set of categories that are removed from this section. 
+	 * This exists to allow users to prevent sections from being crowded when inheriting.
+	 */
+	TSet<FName> RemovedCategories;
+};
+
+/** A mapping of categories to section names for a given class. */
+class FClassSectionMapping
+{
+public:
+	FClassSectionMapping(FName ClassName);
+	FClassSectionMapping(const FClassSectionMapping&) = default;
+
+	/**
+	 * Find or add a section of the given name.
+	 */
+	TSharedPtr<FPropertySection> FindSection(FName SectionName) const;
+
+	/**
+	 * Find or add a section of the given name.
+	 */
+	TSharedRef<FPropertySection> FindOrAddSection(FName SectionName, FText DisplayName);
+
+	/** 
+	 * Remove a section of the given name.
+	 */
+	void RemoveSection(FName SectionName);
+
+	/** 
+	 * Get the sections that the given category belongs to and append them to OutSections. 
+	 * @param CategoryName	The category name to search for.
+	 * @param OutSections	The array to append any found sections. The array will not be cleared.
+	 * @return				true if any sections were found, false otherwise.
+	 */
+	bool GetSectionsForCategory(FName CategoryName, TArray<TSharedPtr<FPropertySection>>& OutSections) const;
+
+private:
+
+	friend class FPropertyEditorModule;
+
+	FName ClassName;
+
+	/** The sections defined for this class. */
+	TMap<FName, TSharedPtr<FPropertySection>> DefinedSections;
+};
+
+
+struct FRegisterCustomClassLayoutParams
+{
+	/* Optional order to register this class layout with. Registration order is used when not specified. Lower values are added first */
+	TOptional<int32> OptionalOrder;
+};
 
 class FPropertyEditorModule : public IModuleInterface
 {
 public:
-	
 	/**
 	 * Called right after the module has been loaded                   
 	 */
@@ -157,7 +270,7 @@ public:
 	 * @param ClassName	The name of the class that the custom detail layout is for
 	 * @param DetailLayoutDelegate	The delegate to call when querying for custom detail layouts for the classes properties
 	 */
-	virtual void RegisterCustomClassLayout( FName ClassName, FOnGetDetailCustomizationInstance DetailLayoutDelegate );
+	virtual void RegisterCustomClassLayout( FName ClassName, FOnGetDetailCustomizationInstance DetailLayoutDelegate, FRegisterCustomClassLayoutParams Params = FRegisterCustomClassLayoutParams());
 
 	/**
 	 * Unregisters a custom detail layout delegate for a specific class name
@@ -165,12 +278,6 @@ public:
 	 * @param ClassName	The class name with the custom detail layout delegate to remove
 	 */
 	virtual void UnregisterCustomClassLayout( FName ClassName );
-
-	UE_DEPRECATED(4.18, "This version of RegisterCustomPropertyTypeLayout has been deprecated.  For per-details instance customization call IDetailsView::RegisterInstancedCustomPropertyTypeLayout")
-	virtual void RegisterCustomPropertyTypeLayout(FName PropertyTypeName, FOnGetPropertyTypeCustomizationInstance PropertyTypeLayoutDelegate, TSharedPtr<IPropertyTypeIdentifier> Identifier, TSharedPtr<IDetailsView> ForSpecificInstance);
-
-	UE_DEPRECATED(4.18, "This version of UnregisterCustomPropertyTypeLayout has been deprecated.  For per-details instance customization call IDetailsView::UnregisterInstancedCustomPropertyTypeLayout")
-	virtual void UnregisterCustomPropertyTypeLayout(FName PropertyTypeName, TSharedPtr<IPropertyTypeIdentifier> InIdentifier, TSharedPtr<IDetailsView> ForSpecificInstance);
 
 	/**
 	 * Registers a property type customization
@@ -183,12 +290,43 @@ public:
 	virtual void RegisterCustomPropertyTypeLayout( FName PropertyTypeName, FOnGetPropertyTypeCustomizationInstance PropertyTypeLayoutDelegate, TSharedPtr<IPropertyTypeIdentifier> Identifier = nullptr);
 
 	/**
-	 * Unregisters a custom detail layout for a properrty type
+	 * Unregisters a custom detail layout for a property type
 	 *
 	 * @param PropertyTypeName 	The name of the property type that was registered
 	 * @param Identifier 		An identifier to use to differentiate between two customizations on the same type
 	 */
 	virtual void UnregisterCustomPropertyTypeLayout( FName PropertyTypeName, TSharedPtr<IPropertyTypeIdentifier> InIdentifier = nullptr);
+
+	/**
+	 * Find an existing section or create a section for a class.
+	 * 
+	 * @param ClassName		The class to add a section mapping for.
+	 * @param SectionName	The section to find or create.
+	 * @param DisplayName	The display name to use for the section. If the section already exists for this class, the display name will not be replaced.
+	 * @return				A new section, or the existing one. 
+	 */
+	virtual TSharedRef<FPropertySection> FindOrCreateSection(FName ClassName, FName SectionName, FText DisplayName);
+
+	/** 
+	 * Find the section that the given category in the given struct should be a part of. 
+	 * @param Struct		The struct to start searching from. Note: all super-structs of the given struct will also be searched.
+	 * @param CategoryName	The category to search for.
+	 */
+	virtual TArray<TSharedPtr<FPropertySection>> FindSectionsForCategory(const UStruct* Struct, FName CategoryName) const;
+
+	/** 
+	 * Get all registered sections for the given struct (including the default section). 
+	 * @param Struct		The struct to fetch sections for.
+	 * @param OutSections	Sections will be appended to this parameter. The array will not be cleared beforehand.
+	 */
+	virtual void GetAllSections(const UStruct* Struct, TArray<TSharedPtr<FPropertySection>>& OutSections) const;
+
+	/**
+	 * Remove a given section from the given class.
+	 * @param ClassName		The class to remove the section from.
+	 * @param SectionName	The section to remove.
+	 */
+	virtual void RemoveSection(FName ClassName, FName SectionName);
 
 	/**
 	 * Customization modules should call this when that module has been unloaded, loaded, etc...
@@ -222,7 +360,7 @@ public:
 	virtual TSharedRef<SWindow> CreateFloatingDetailsView( const TArray< UObject* >& InObjects, bool bIsLockable );
 
 	/**
-	 * Creates a standalone widget for a single property
+	 * Creates a standalone widget for a single object property
 	 *
 	 * @param InObject			The object to view
 	 * @param InPropertyName	The name of the property to display
@@ -230,6 +368,16 @@ public:
 	 * @return The new property if valid or null
 	 */
 	virtual TSharedPtr<class ISinglePropertyView> CreateSingleProperty( UObject* InObject, FName InPropertyName, const struct FSinglePropertyParams& InitParams );
+
+	/**
+	 * Creates a standalone widget for a single struct property
+	 *
+	 * @param InStruct			The struct containing the property to view
+	 * @param InPropertyName	The name of the property to display
+	 * @param InitParams		Optional init params for a single property
+	 * @return The new property if valid or null
+	 */
+	virtual TSharedPtr<class ISinglePropertyView> CreateSingleProperty(const TSharedPtr<class IStructureDataProvider>& InStruct, FName InPropertyName, const struct FSinglePropertyParams& InitParams);
 
 	virtual TSharedRef<class IStructureDetailsView> CreateStructureDetailView(const struct FDetailsViewArgs& DetailsViewArgs, const FStructureDetailsViewArgs& StructureDetailsViewArgs, TSharedPtr<class FStructOnScope> StructData, const FText& CustomName = FText::GetEmpty());
 
@@ -251,7 +399,7 @@ public:
 	virtual TSharedRef< class IPropertyTableWidgetHandle > CreatePropertyTableWidgetHandle( const TSharedRef< IPropertyTable >& PropertyTable, const TArray< TSharedRef< class IPropertyTableCustomColumn > >& Customizations );
 
 	virtual TSharedRef< IPropertyTableCellPresenter > CreateTextPropertyCellPresenter( const TSharedRef< class FPropertyNode >& InPropertyNode, const TSharedRef< class IPropertyTableUtilities >& InPropertyUtilities, 
-		const FSlateFontInfo* InFontPtr = NULL);
+		const FSlateFontInfo* InFontPtr = NULL, const TSharedPtr< IPropertyTableCell >& InCell = nullptr);
 
 	/**
 	 * Register a floating struct on scope so that the details panel may use it as a property
@@ -264,9 +412,9 @@ public:
 	/**
 	 *
 	 */
-	virtual TSharedRef< FAssetEditorToolkit > CreatePropertyEditorToolkit( const EToolkitMode::Type Mode, const TSharedPtr< class IToolkitHost >& InitToolkitHost, UObject* ObjectToEdit );
-	virtual TSharedRef< FAssetEditorToolkit > CreatePropertyEditorToolkit( const EToolkitMode::Type Mode, const TSharedPtr< IToolkitHost >& InitToolkitHost, const TArray< UObject* >& ObjectsToEdit );
-	virtual TSharedRef< FAssetEditorToolkit > CreatePropertyEditorToolkit( const EToolkitMode::Type Mode, const TSharedPtr< IToolkitHost >& InitToolkitHost, const TArray< TWeakObjectPtr< UObject > >& ObjectsToEdit );
+	virtual TSharedRef< FAssetEditorToolkit > CreatePropertyEditorToolkit(const TSharedPtr< class IToolkitHost >& InitToolkitHost, UObject* ObjectToEdit );
+	virtual TSharedRef< FAssetEditorToolkit > CreatePropertyEditorToolkit(const TSharedPtr< IToolkitHost >& InitToolkitHost, const TArray< UObject* >& ObjectsToEdit );
+	virtual TSharedRef< FAssetEditorToolkit > CreatePropertyEditorToolkit(const TSharedPtr< IToolkitHost >& InitToolkitHost, const TArray< TWeakObjectPtr< UObject > >& ObjectsToEdit );
 
 	FPropertyTypeLayoutCallback GetPropertyTypeCustomization(const FProperty* InProperty,const IPropertyHandle& PropertyHandle, const FCustomPropertyTypeLayoutMap& InstancedPropertyTypeLayoutMap);
 	FPropertyTypeLayoutCallback FindPropertyTypeLayoutCallback(FName PropertyTypeName, const IPropertyHandle& PropertyHandle, const FCustomPropertyTypeLayoutMap& InstancedPropertyTypeLayoutMapp);
@@ -279,6 +427,12 @@ public:
 
 	/** Get the global row extension generators. */
 	FOnGenerateGlobalRowExtension& GetGlobalRowExtensionDelegate() { return OnGenerateGlobalRowExtension; }
+
+	const bool GetCanUsePropertyMatrix() const { return bCanUsePropertyMatrixOverride; } 
+	void SetCanUsePropertyMatrix(const bool bInCanUsePropertyMatrix) 
+	{ 
+		bCanUsePropertyMatrixOverride = bInCanUsePropertyMatrix; 
+	} 
 
 private:
 
@@ -298,6 +452,18 @@ private:
 	virtual TSharedRef<SPropertyTreeViewImpl> CreatePropertyView( UObject* InObject, bool bAllowFavorites, bool bIsLockable, bool bHiddenPropertyVisibility, bool bAllowSearch, bool ShowTopLevelNodes, FNotifyHook* InNotifyHook, float InNameColumnWidth, FOnPropertySelectionChanged OnPropertySelectionChanged, FOnPropertyClicked OnPropertyMiddleClicked, FConstructExternalColumnHeaders ConstructExternalColumnHeaders, FConstructExternalColumnCell ConstructExternalColumnCell );
 
 	TSharedPtr<FAssetThumbnailPool> GetThumbnailPool();
+
+	void GetAllSectionsHelper(const UStruct* Struct, TArray<TSharedPtr<FPropertySection>>& OutSections, TSet<const UStruct*>& ProcessedStructs) const;
+	void FindSectionsForCategoryHelper(const UStruct* Struct, FName CategoryName, TArray<TSharedPtr<FPropertySection>>& OutSections, TSet<const UStruct*>& SearchedStructs) const;
+
+	TSharedPtr<class ISinglePropertyView> CreateSinglePropertyImpl(UObject* InObject, const TSharedPtr<IStructureDataProvider>& InStruct, FName InPropertyName, const struct FSinglePropertyParams& InitParams);
+	void CompactSinglePropertyViewArray();
+
+	/** Register Menu extension points */
+	void RegisterMenus();
+
+	static void PopulateRowContextMenu(UToolMenu* InToolMenu);
+
 private:
 	/** All created detail views */
 	TArray< TWeakPtr<class SDetailsView> > AllDetailViews;
@@ -307,6 +473,8 @@ private:
 	FCustomDetailLayoutNameMap ClassNameToDetailLayoutNameMap;
 	/** A mapping of property names to property type layout delegates, called when querying for custom property layouts */
 	FCustomPropertyTypeLayoutMap GlobalPropertyTypeToLayoutMap;
+	/** A mapping of class names to section mappings. */
+	TMap<FName, TSharedPtr<FClassSectionMapping>> ClassSectionMappings;
 	/** Event to be called when a property editor is opened */
 	FPropertyEditorOpenedEvent PropertyEditorOpened;
 	/** Mapping of registered floating UStructs to their struct proxy so they show correctly in the details panel */
@@ -317,4 +485,6 @@ private:
 	UStruct* StructOnScopePropertyOwner;
 	/** Delegate called to extend the name column widget on a property row. */
 	FOnGenerateGlobalRowExtension OnGenerateGlobalRowExtension;
+	/** Override for if the Property Matrix is availabe */
+	bool bCanUsePropertyMatrixOverride = true;
 };

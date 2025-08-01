@@ -2,15 +2,24 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "Templates/SubclassOf.h"
 #include "Camera/CameraShakeBase.h"
+#include "Containers/Array.h"
+#include "CoreMinimal.h"
+#include "CoreTypes.h"
+#include "Internationalization/Text.h"
 #include "Misc/InlineValue.h"
 #include "MovieSceneNameableTrack.h"
-#include "Compilation/IMovieSceneTrackTemplateProducer.h"
+#include "MovieSceneSection.h"
+#include "Templates/SubclassOf.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "MovieSceneCameraShakeTrack.generated.h"
 
+class UCameraShakeBase;
+class UObject;
+struct FFrameNumber;
 struct FMovieSceneEvaluationTrack;
 struct FMovieSceneSegmentCompilerRules;
 
@@ -18,7 +27,7 @@ struct FMovieSceneSegmentCompilerRules;
  * 
  */
 UCLASS(MinimalAPI)
-class UMovieSceneCameraShakeTrack : public UMovieSceneNameableTrack, public IMovieSceneTrackTemplateProducer
+class UMovieSceneCameraShakeTrack : public UMovieSceneNameableTrack
 {
 	GENERATED_BODY()
 
@@ -39,9 +48,6 @@ public:
 	virtual UMovieSceneSection* CreateNewSection() override;
 	virtual void RemoveAllAnimationData() override;
 	
-	// ~IMovieSceneTrackTemplateProducer interface
-	virtual FMovieSceneEvalTemplatePtr CreateTemplateForSection(const UMovieSceneSection& InSection) const override;
-
 #if WITH_EDITORONLY_DATA
 	virtual FText GetDisplayName() const override;
 #endif
@@ -49,6 +55,6 @@ public:
 private:
 	/** List of all sections */
 	UPROPERTY()
-	TArray<UMovieSceneSection*> CameraShakeSections;
+	TArray<TObjectPtr<UMovieSceneSection>> CameraShakeSections;
 
 };

@@ -2,8 +2,20 @@
 
 #pragma once
 
+#include "Algo/BinarySearch.h"
+#include "Algo/Sort.h"
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMath.h"
+#include "Misc/AssertionMacros.h"
 #include "Serialization/ArchiveUObject.h"
+
+class FArchive;
+class UObject;
 
 /*----------------------------------------------------------------------------
 	FFindReferencersArchive.
@@ -21,7 +33,7 @@ public:
 	 * @param	InTargetObjects			array of objects to search for references to
 	 * @param	bFindAlsoWeakReferences should we also look into weak references?
 	 */
-	COREUOBJECT_API FFindReferencersArchive(class UObject* PotentialReferencer, const TArray<class UObject*>& InTargetObjects, bool bFindAlsoWeakReferences = false);
+	COREUOBJECT_API FFindReferencersArchive(class UObject* PotentialReferencer, TArrayView<class UObject*> InTargetObjects, bool bFindAlsoWeakReferences = false);
 
 	/**
 	 * Retrieves the number of references from PotentialReferencer to the object specified.
@@ -44,6 +56,9 @@ public:
 	 */
 	COREUOBJECT_API int32 GetReferenceCounts( TMap<class UObject*, int32>& out_ReferenceCounts ) const;
 
+	/** GetReferenceCounts without empyting out map */
+	COREUOBJECT_API int32 AppendReferenceCounts( TMap<class UObject*, int32>& out_ReferenceCounts ) const;
+
 	/**
 	 * Retrieves the number of references from PotentialReferencer list of TargetObjects
 	 *
@@ -60,7 +75,7 @@ public:
 	 *
 	 * This is overridden for the specific Archive Types
 	 **/
-	COREUOBJECT_API virtual FString GetArchiveName() const { return TEXT("FFindReferencersArchive"); }
+	virtual FString GetArchiveName() const { return TEXT("FFindReferencersArchive"); }
 
 	/**
 	 * Resets the reference counts.  Keeps the same target objects but sets up everything to test a new potential referencer.
@@ -117,7 +132,7 @@ protected:
 
 			if (ExistingIndex >= RefCounts.Num())
 			{
-				RefCounts.SetNumZeroed(ExistingIndex+1, false);
+				RefCounts.SetNumZeroed(ExistingIndex+1, EAllowShrinking::No);
 			}
 
 			return &RefCounts[ExistingIndex];

@@ -2,21 +2,26 @@
 
 #pragma once 
 
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "CoreMinimal.h"
+#endif
 #include "UObject/ObjectMacros.h"
 #include "Templates/SubclassOf.h"
 #include "AI/Navigation/NavRelevantInterface.h"
+#include "AI/Navigation/NavigationTypes.h"
 #include "NavAreas/NavArea.h"
 #include "GameFramework/Volume.h"
 #include "NavModifierVolume.generated.h"
+
+enum class ENavigationDataResolution : uint8;
 
 struct FNavigationRelevantData;
 
 /** 
  *	Allows applying selected AreaClass to navmesh, using Volume's shape
  */
-UCLASS(hidecategories=(Navigation))
-class NAVIGATIONSYSTEM_API ANavModifierVolume : public AVolume, public INavRelevantInterface
+UCLASS(hidecategories=(Navigation), MinimalAPI)
+class ANavModifierVolume : public AVolume, public INavRelevantInterface
 {
 	GENERATED_BODY()
 
@@ -28,20 +33,42 @@ protected:
 	UPROPERTY(EditAnywhere, Category = Default, AdvancedDisplay)
 	bool bMaskFillCollisionUnderneathForNavmesh;
 
+	/** Experimental: When not set to None, the navmesh tiles touched by the navigation modifier volume will be built
+	 * using the highest resolution found. */
+	UPROPERTY(EditAnywhere, Category = Default, AdvancedDisplay)
+	ENavigationDataResolution NavMeshResolution;
+
+#if WITH_EDITOR
+	FDelegateHandle OnNavAreaRegisteredDelegateHandle;
+	FDelegateHandle OnNavAreaUnregisteredDelegateHandle;
+#endif
+
 public:
-	ANavModifierVolume(const FObjectInitializer& ObjectInitializer);
+	NAVIGATIONSYSTEM_API ANavModifierVolume(const FObjectInitializer& ObjectInitializer);
 
 	UFUNCTION(BlueprintCallable, Category = "AI|Navigation")
-	void SetAreaClass(TSubclassOf<UNavArea> NewAreaClass = nullptr);
+	NAVIGATIONSYSTEM_API void SetAreaClass(TSubclassOf<UNavArea> NewAreaClass = nullptr);
 
 	TSubclassOf<UNavArea> GetAreaClass() const { return AreaClass; }
 
-	virtual void GetNavigationData(FNavigationRelevantData& Data) const override;
-	virtual FBox GetNavigationBounds() const override;
-	virtual void RebuildNavigationData() override;
+	NAVIGATIONSYSTEM_API virtual void GetNavigationData(FNavigationRelevantData& Data) const override;
+	NAVIGATIONSYSTEM_API virtual FBox GetNavigationBounds() const override;
+	NAVIGATIONSYSTEM_API virtual void RebuildNavigationData() override;
 
 #if WITH_EDITOR
-	virtual void PostEditUndo() override;
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	NAVIGATIONSYSTEM_API virtual void PostEditUndo() override;
+	NAVIGATIONSYSTEM_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
+
+protected:
+	NAVIGATIONSYSTEM_API virtual void PostInitProperties() override;
+	NAVIGATIONSYSTEM_API virtual void BeginDestroy() override;
+
+#if WITH_EDITOR
+	NAVIGATIONSYSTEM_API virtual void PostRegisterAllComponents() override;
+	NAVIGATIONSYSTEM_API virtual void PostUnregisterAllComponents() override;
+
+	NAVIGATIONSYSTEM_API void OnNavAreaRegistered(const UWorld& World, const UClass* NavAreaClass);
+	NAVIGATIONSYSTEM_API void OnNavAreaUnregistered(const UWorld& World, const UClass* NavAreaClass);
 #endif
 };

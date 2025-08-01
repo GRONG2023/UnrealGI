@@ -2,31 +2,38 @@
 
 #pragma once
 
-#include "CoreTypes.h"
 #include "Containers/Array.h"
-#include "Math/Color.h"
 #include "Containers/ArrayView.h"
-#include "Curves/RichCurve.h"
+#include "Containers/UnrealString.h"
+#include "Containers/Map.h"
+#include "CoreTypes.h"
 #include "CurveEditorTypes.h"
+#include "Curves/RichCurve.h"
+#include "Delegates/Delegate.h"
+#include "IBufferedCurveModel.h"
+#include "Internationalization/Text.h"
+#include "Math/Color.h"
 #include "Math/TransformCalculus2D.h"
 #include "Misc/Attribute.h"
+#include "Misc/Optional.h"
+#include "Templates/Tuple.h"
+#include "Templates/UniquePtr.h"
+#include "UObject/UnrealType.h"
 
-#include "IBufferedCurveModel.h"
-
-struct FKeyHandle;
-struct FKeyDrawInfo;
-struct FCurveDrawParams;
-struct FKeyPosition;
-struct FKeyAttributes;
+class FCurveEditor;
+class FName;
+class IBufferedCurveModel;
+class SCurveEditorView;
+class SWidget;
+class UObject;
 struct FCurveAttributes;
+struct FCurveDrawParams;
 struct FCurveEditorScreenSpace;
 struct FCurveModelID;
-
-class FName;
-class SWidget;
-class FCurveEditor;
-class UObject;
-class SCurveEditorView;
+struct FKeyAttributes;
+struct FKeyDrawInfo;
+struct FKeyHandle;
+struct FKeyPosition;
 
 enum class ECurvePointType : uint8;
 
@@ -38,7 +45,7 @@ class CURVEEDITOR_API FCurveModel
 public:
 
 	FCurveModel()
-		: Color(FLinearColor::White)
+		: Color(0.2f,0.2f,0.2f)
 		, bKeyDrawEnabled(true)
 		, SupportedViews(ECurveEditorViewID::ANY_BUILT_IN)
 	{}
@@ -131,6 +138,16 @@ public:
 	*/
 	virtual void GetValueRange(double& MinValue, double& MaxValue) const = 0;
 
+	/** Get range of output value based on specified input times. By default will just get the range
+	* without a specified time
+	* @param MinTime Minimum Time
+	* @param MaxTime Maximium Time
+	* @param MinValue Minimum Value
+	* @param MaxValue Minimum Value
+	*/
+	virtual void GetValueRange(double InMinTime, double InMaxTime, double& MinValue, double& MaxValue) const { GetValueRange(MinValue, MaxValue); }
+
+
 	/** Get the number of keys
 	* @param The number of keys
 	*/
@@ -143,6 +160,18 @@ public:
      * @param OutNextKeyHandle The next key handle
 	 */
 	virtual void GetNeighboringKeys(const FKeyHandle InKeyHandle, TOptional<FKeyHandle>& OutPreviousKeyHandle, TOptional<FKeyHandle>& OutNextKeyHandle) const = 0;
+
+	/**
+	 * Get the interpolation mode to use at a specified time
+	 *
+	 * @param InTime						The time we are looking for an interpolation mode
+	 * @param DefaultInterpolationMode		Current default interpolation mode, returned if other keys not found or interpolation not supported
+	 * @return Interpolation mode to use at that frame
+	 */
+	virtual TPair<ERichCurveInterpMode, ERichCurveTangentMode> GetInterpolationMode(const double& InTime, ERichCurveInterpMode DefaultInterpolationMode, ERichCurveTangentMode DefaultTangentMode) const 
+	{
+		return TPair<ERichCurveInterpMode, ERichCurveTangentMode>(DefaultInterpolationMode, DefaultTangentMode);
+	}
 
 	/**
 	 * Evaluate this curve at the specified time
@@ -240,6 +269,22 @@ public:
 	{
 		return nullptr;
 	}
+
+	/** Get if has changed and then reset it, this can be used for caching*/
+	virtual bool HasChangedAndResetTest()
+	{
+		return true;
+	}
+
+	/**
+	* Get the Object and the name to be used to store the curve model color (see UCurveEditorSettings). By default
+	* this is the owning object and the intent name, but it can be overriden, for example for Sequencer it may be the bound object
+	*/
+	virtual void GetCurveColorObjectAndName(UObject** OutObject, FString& OutName) const
+	{
+		*OutObject = GetOwningObject();
+		OutName = GetIntentionName();
+	}
 	/**
 	 * Helper function for assigning a the same attributes to a number of keys
 	 */
@@ -329,11 +374,35 @@ public:
 		IntentionName = InIntentionName;
 	}
 
+	FORCEINLINE void SetLongIntentionName(const FString& InIntentionName)
+	{
+		LongIntentionName = InIntentionName;
+	}
+
+	FORCEINLINE FString GetLongIntentionName() const
+	{
+		return LongIntentionName;
+	}
+
+	FORCEINLINE void SetChannelName(const FName& InChannelName)
+	{
+		ChannelName = InChannelName;
+	}
+
+	FORCEINLINE FName GetChannelName() const
+	{
+		return ChannelName;
+	}
+
 	/**
 	 */
-	FORCEINLINE void SetColor(const FLinearColor& InColor)
+	FORCEINLINE void SetColor(const FLinearColor& InColor, bool bInModify = true)
 	{
 		Color = InColor;
+		if (bInModify)
+		{
+			Modify(); //will make sure the cache get's recreated
+		}
 	}
 
 	/**
@@ -368,8 +437,19 @@ protected:
 	/** This curve's long display name. Used in situations where the UI doesn't provide enough context about what the curve is otherwise (such as "Floor.Transform.X") */
 	FText LongDisplayName;
 
-	/** This curve's intention (such as Transform.X or Scale.X). Used internally to match up curves when saving/restoring curves between different objects. */
+	/** This curve's short intention (such as Transform.X or Scale.X). Used internally to match up curves when saving/restoring curves between different objects. */
 	FString IntentionName;
+	
+	/** 
+	* This curve's long intention (such as foot_fk_l.Transform.X or foot_fk_r.Scale.X). Used internally to match up curves when saving/restoring curves between different objects.
+	* Long intention names have priority in copy/paste over short intention names, but we fall back to short intention if it's unclear what the user is trying to do.
+	*/
+	FString LongIntentionName;
+
+	/**
+	* The original channel name, used mostly to make sure names match with BP/Scripting
+	*/
+	FName ChannelName;
 
 	/** This curve's display color */
 	FLinearColor Color;

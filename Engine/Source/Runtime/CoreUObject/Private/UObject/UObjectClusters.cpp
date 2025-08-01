@@ -37,7 +37,8 @@ static FAutoConsoleVariableRef CVarAssetClustreringEnabled(
 	ECVF_Default
 );
 
-int32 GMinGCClusterSize = 5;
+// By default cluster anything that asks to be clustered with its containing package.
+int32 GMinGCClusterSize = 2;
 static FAutoConsoleVariableRef CMinGCClusterSize(
 	TEXT("gc.MinGCClusterSize"),
 	GMinGCClusterSize,
@@ -57,7 +58,7 @@ int32 FUObjectClusterContainer::AllocateCluster(int32 InRootObjectIndex)
 	int32 ClusterIndex = INDEX_NONE;
 	if (FreeClusterIndices.Num())
 	{
-		ClusterIndex = FreeClusterIndices.Pop(false);
+		ClusterIndex = FreeClusterIndices.Pop(EAllowShrinking::No);
 	}
 	else
 	{
@@ -97,6 +98,9 @@ void FUObjectClusterContainer::FreeCluster(int32 InClusterIndex)
 	Cluster.MutableObjects.Reset();
 	Cluster.ReferencedClusters.Reset();
 	Cluster.ReferencedByClusters.Reset();
+#if WITH_VERSE_VM || defined(__INTELLISENSE__)
+	Cluster.MutableCells.Reset();
+#endif
 	Cluster.bNeedsDissolving = false;
 	FreeClusterIndices.Add(InClusterIndex);
 	NumAllocatedClusters--;
@@ -144,7 +148,7 @@ void FUObjectClusterContainer::DissolveCluster(FUObjectCluster& Cluster)
 	TArray<int32> ReferencedByClusters = MoveTemp(Cluster.ReferencedByClusters);
 
 	// Unreachable clusters will be removed by GC during BeginDestroy phase (unhashing)
-	if (!RootObjectItem->IsUnreachable())
+	if (!RootObjectItem->IsMaybeUnreachable())
 	{
 #if UE_GCCLUSTER_VERBOSE_LOGGING
 		UObject* ClusterRootObject = static_cast<UObject*>(RootObjectItem->Object);
@@ -189,8 +193,8 @@ void FUObjectClusterContainer::DissolveClusterAndMarkObjectsAsUnreachable(FUObje
 	{
 		FUObjectItem* ClusterObjectItem = GUObjectArray.IndexToObjectUnsafeForGC(ClusterObjectIndex);
 		ClusterObjectItem->SetOwnerIndex(0);
-			ClusterObjectItem->SetFlags(EInternalObjectFlags::Unreachable);
-		}
+		ClusterObjectItem->SetMaybeUnreachable();
+	}
 
 #if !UE_GCCLUSTER_VERBOSE_LOGGING
 	UObject* ClusterRootObject = static_cast<UObject*>(RootObjectItem->Object);
@@ -205,7 +209,7 @@ void FUObjectClusterContainer::DissolveClusterAndMarkObjectsAsUnreachable(FUObje
 		FUObjectItem* ReferencedByClusterRootItem = GUObjectArray.IndexToObjectUnsafeForGC(ReferencedByClusterRootIndex);
 		if (ReferencedByClusterRootItem->HasAnyFlags(EInternalObjectFlags::ClusterRoot))
 		{
-				ReferencedByClusterRootItem->SetFlags(EInternalObjectFlags::Unreachable);
+			ReferencedByClusterRootItem->SetMaybeUnreachable();
 			DissolveClusterAndMarkObjectsAsUnreachable(ReferencedByClusterRootItem);
 		}
 	}
@@ -254,7 +258,7 @@ static void ParseObjectNameArrayForClusters(TArray<int32>& OutIndexArray, const 
 {
 	for (const FString& ObjectName : InNameArray)
 	{
-		UObject* Res = StaticFindObject(UObject::StaticClass(), ANY_PACKAGE, *ObjectName);
+		UObject* Res = StaticFindFirstObject(UObject::StaticClass(), *ObjectName, EFindFirstObjectOptions::NativeFirst, ELogVerbosity::Warning, TEXT("ParseObjectNameArrayForClusters"));
 		if (Res)
 		{
 			int32 ObjectIndex = GUObjectArray.ObjectToIndex(Res);
@@ -303,7 +307,13 @@ void DumpClusterToLog(const FUObjectCluster& Cluster, bool bHierarchy, bool bInd
 
 	FUObjectItem* RootItem = GUObjectArray.IndexToObjectUnsafeForGC(Cluster.RootIndex);
 	UObject* RootObject = static_cast<UObject*>(RootItem->Object);
-	UE_LOG(LogObj, Display, TEXT("%s (Index: %d), Size: %d, ReferencedClusters: %d"), *RootObject->GetFullName(), Cluster.RootIndex, Cluster.Objects.Num(), Cluster.ReferencedClusters.Num());
+#if WITH_VERSE_VM || defined(__INTELLISENSE__)
+	FString ExtraDetail = FString::Printf(TEXT(", MutableCells: %d"), Cluster.MutableCells.Num());
+#else
+	FString ExtraDetail;
+#endif
+	UE_LOG(LogObj, Display, TEXT("%s (Index: %d), Size: %d, ReferencedClusters: %d, MutableObjects: %d%s, ReferencedByClusters: %d"),
+		*RootObject->GetFullName(), Cluster.RootIndex, Cluster.Objects.Num(), Cluster.ReferencedClusters.Num(), Cluster.MutableObjects.Num(), *ExtraDetail, Cluster.ReferencedByClusters.Num());
 	if (bHierarchy)
 	{
 		int32 Index = 0;
@@ -362,6 +372,13 @@ void DumpClusterToLog(const FUObjectCluster& Cluster, bool bHierarchy, bool bInd
 				UE_LOG(LogObj, Display, TEXT("    => nullptr"));
 			}
 		}
+#if WITH_VERSE_VM || defined(__INTELLISENSE__)
+		UE_LOG(LogObj, Display, TEXT("  External (mutable) cells: %d"), Cluster.MutableCells.Num());
+		for (Verse::VCell* Cell : Cluster.MutableCells)
+		{
+			UE_LOG(LogObj, Display, TEXT("    => %p"), Cell);
+		}
+#endif
 	}
 }
 
@@ -407,6 +424,15 @@ void ListClusters(const TArray<FString>& Args)
 				return A->MutableObjects.Num();
 			});
 		}
+#if WITH_VERSE_VM || defined(__INTELLISENSE__)
+		else if (Arg == TEXT("SortByMutableCellCount"))
+		{
+			Algo::SortBy(AllClusters, [](FUObjectCluster* A)
+				{
+					return A->MutableCells.Num();
+				});
+		}
+#endif
 		else if (Arg == TEXT("SortByReferencedClustersCount"))
 		{
 			Algo::SortBy(AllClusters, [](FUObjectCluster* A)
@@ -450,6 +476,7 @@ void ListClusters(const TArray<FString>& Args)
 	UE_LOG(LogObj, Display, TEXT("Maximum cluster size: %d"), MaxClusterSize);
 	UE_LOG(LogObj, Display, TEXT("Average cluster size: %d"), AllClusters.Num() ? (TotalClusterObjects / AllClusters.Num()) : 0);
 	UE_LOG(LogObj, Display, TEXT("Number of objects in GC clusters: %d"), TotalClusterObjects);
+	UE_LOG(LogObj, Display, TEXT("Max number of gc objects: %d"), GUObjectArray.GetObjectArrayNumPermanent());
 	UE_LOG(LogObj, Display, TEXT("Maximum number of custer-to-cluster references: %d"), MaxInterClusterReferences);
 	UE_LOG(LogObj, Display, TEXT("Average number of custer-to-cluster references: %d"), AllClusters.Num() ? (TotalInterClusterReferences / AllClusters.Num()) : 0);
 }
@@ -470,17 +497,7 @@ void FindStaleClusters(const TArray<FString>& Args)
 			UObject* ClusterRootObject = static_cast<UObject*>(ObjectItem->Object);
 			FReferenceChainSearch SearchRefs(ClusterRootObject, EReferenceChainSearchMode::ExternalOnly);
 			
-			bool bReferenced = false;
-			if (SearchRefs.GetReferenceChains().Num() > 0)
-			{
-				for (const FReferenceChainSearch::FReferenceChain* ReferenceChain : SearchRefs.GetReferenceChains())
-					{
-					UObject* ReferencingObj = ReferenceChain->GetRootNode()->Object;
-						bReferenced = true;
-						break;
-					}
-				}
-			if (!bReferenced)
+			if (SearchRefs.GetReferenceChains().Num() == 0)
 			{
 				NumStaleClusters++;
 				UE_LOG(LogObj, Display, TEXT("Cluster %s has no external references:"), *ClusterRootObject->GetFullName());
@@ -543,6 +560,8 @@ void DumpRefsToCluster(const TArray<FString>& Args)
 	}
 }
 
+static void SuggestClusters(const TArray<FString>& Args);
+
 
 static FAutoConsoleCommand ListClustersCommand(
 	TEXT("gc.ListClusters"),
@@ -562,6 +581,12 @@ static FAutoConsoleCommand DumpRefsToClusterCommand(
 	FConsoleCommandWithArgsDelegate::CreateStatic(DumpRefsToCluster)
 );
 
+static FAutoConsoleCommand SuggestClustersCommand(
+	TEXT("gc.SuggestClusters"),
+	TEXT("Searches for assets which contain many internal objects which are not clustered."),
+	FConsoleCommandWithArgsDelegate::CreateStatic(SuggestClusters)
+);
+
 #endif // !UE_BUILD_SHIPPING
 
 /**
@@ -571,12 +596,14 @@ class FClusterReferenceProcessor : public FSimpleReferenceProcessorBase
 {
 	int32 ClusterRootIndex;
 	FUObjectCluster& Cluster;
+	UObject* Outermost;
 
 public:
 
-	FClusterReferenceProcessor(int32 InClusterRootIndex, FUObjectCluster& InCluster)
+	FClusterReferenceProcessor(int32 InClusterRootIndex, FUObjectCluster& InCluster, UObject* InOutermost)
 		: ClusterRootIndex(InClusterRootIndex)
 		, Cluster(InCluster)
+		, Outermost(InOutermost)
 	{}
 
 	static FString LoadFlagsToString(UObject* Obj)
@@ -615,10 +642,10 @@ public:
 	 * @param ObjectIndex UObject index in GUObjectArray
 	 * @param ObjectItem UObject's entry in GUObjectArray
 	 * @param Obj The object to add to cluster
-	 * @param ObjectsToSerialize An array of remaining objects to serialize (Obj must be added to it if Obj can be added to cluster)
+	* @param Context Context of the reference collection
 	 * @param bOuterAndClass If true, the Obj's Outer and Class will also be added to the cluster
 	 */
-	void AddObjectToCluster(int32 ObjectIndex, FUObjectItem* ObjectItem, UObject* Obj, TArray<UObject*>& ObjectsToSerialize, bool bOuterAndClass)
+	void AddObjectToCluster(int32 ObjectIndex, FUObjectItem* ObjectItem, UObject* Obj, FWorkerContext& Context, bool bOuterAndClass)
 	{
 		// If we haven't finished loading, we can't be sure we know all the references
 		checkf(!Obj->HasAnyFlags(RF_NeedLoad), TEXT("%s hasn't been loaded (%s) but is being added to cluster %s"), 
@@ -630,7 +657,7 @@ public:
 		check(Obj->CanBeInCluster());
 		if (ObjectIndex != ClusterRootIndex && ObjectItem->GetOwnerIndex() == 0 && !GUObjectArray.IsDisregardForGC(Obj) && !Obj->IsRooted())
 		{
-			ObjectsToSerialize.Add(Obj);
+			Context.ObjectsToSerialize.Add<Options>(Obj);
 			check(!ObjectItem->HasAnyFlags(EInternalObjectFlags::ClusterRoot));
 			ObjectItem->SetOwnerIndex(ClusterRootIndex);
 			Cluster.Objects.Add(ObjectIndex);
@@ -640,14 +667,14 @@ public:
 				UObject* ObjOuter = Obj->GetOuter();
 				if (ObjOuter)
 				{
-					HandleTokenStreamObjectReference(ObjectsToSerialize, Obj, ObjOuter, INDEX_NONE, true);
+					HandleTokenStreamObjectReference(Context, Obj, ObjOuter, UE::GC::EMemberlessId::Outer, EOrigin::Other, true);
 				}
 				if (!Obj->GetClass()->HasAllClassFlags(CLASS_Native))
 				{
 					UObject* ObjectClass = Obj->GetClass();
-					HandleTokenStreamObjectReference(ObjectsToSerialize, Obj, ObjectClass, INDEX_NONE, true);
+					HandleTokenStreamObjectReference(Context, Obj, ObjectClass, UE::GC::EMemberlessId::Class, EOrigin::Other, true);
 					UObject* ObjectClassOuter = Obj->GetClass()->GetOuter();
-					HandleTokenStreamObjectReference(ObjectsToSerialize, Obj, ObjectClassOuter, INDEX_NONE, true);
+					HandleTokenStreamObjectReference(Context, Obj, ObjectClassOuter, UE::GC::EMemberlessId::ClassOuter, EOrigin::Other, true);
 				}
 			}
 		}
@@ -656,67 +683,171 @@ public:
 	/**
 	* Handles UObject reference from the token stream. Performance is critical here so we're FORCEINLINING this function.
 	*
-	* @param ObjectsToSerialize An array of remaining objects to serialize (Obj must be added to it if Obj can be added to cluster)
+	* @param Context Context of the reference collection
 	* @param ReferencingObject Object referencing the object to process.
-	* @param TokenIndex Index to the token stream where the reference was found.
+	* @param Object Object being processed
+	* @param MemberId Index to the token stream where the reference was found.
+	* @param Origin Declares if a schema represents a blueprint generated type
 	* @param bAllowReferenceElimination True if reference elimination is allowed (ignored when constructing clusters).
 	*/
-	FORCEINLINE void HandleTokenStreamObjectReference(TArray<UObject*>& ObjectsToSerialize, UObject* ReferencingObject, UObject*& Object, const int32 TokenIndex, bool bAllowReferenceElimination)
+	FORCEINLINE void HandleTokenStreamObjectReference(FWorkerContext& Context, UObject* ReferencingObject, UObject*& Object, FMemberId MemberId, EOrigin Origin, bool bAllowReferenceElimination)
 	{
-		if (Object)
+		if (!Object)
 		{
-			// If we haven't finished loading, we can't be sure we know all the references so the object will be added as mutable reference
-			UE_CLOG(Object->HasAnyFlags(RF_NeedLoad), LogObj, Log, TEXT("%s hasn't been loaded (%s) but is being added to cluster %s"),
-				*Object->GetFullName(),
-				*LoadFlagsToString(Object),
-				*GetClusterRoot()->GetFullName());
+			return;
+		}
 
-			FUObjectItem* ObjectItem = GUObjectArray.ObjectToObjectItem(Object);
+		FUObjectItem* ObjectItem = GUObjectArray.ObjectToObjectItem(Object);
+		// Add encountered object reference to list of to be serialized objects if it hasn't already been added.
+		if (ObjectItem->GetOwnerIndex() == ClusterRootIndex)
+		{
+			return;
+		}
 
-			// Add encountered object reference to list of to be serialized objects if it hasn't already been added.
-			if (ObjectItem->GetOwnerIndex() != ClusterRootIndex)
+		// If we haven't finished loading, we can't be sure we know all the references so the object will be added as mutable reference
+		UE_CLOG(Object->HasAnyFlags(RF_NeedLoad | RF_NeedPostLoad), LogObj, Log, TEXT("%s hasn't been loaded (%s) but is being added to cluster %s"),
+			*Object->GetFullName(),
+			*LoadFlagsToString(Object),
+			*GetClusterRoot()->GetFullName());
+
+		if (ObjectItem->HasAnyFlags(EInternalObjectFlags::ClusterRoot) || ObjectItem->GetOwnerIndex() != 0)
+		{					
+			// Simply reference this cluster and all clusters it's referencing
+			const int32 OtherClusterRootIndex = ObjectItem->HasAnyFlags(EInternalObjectFlags::ClusterRoot) ? GUObjectArray.ObjectToIndex(Object) : ObjectItem->GetOwnerIndex();
+			FUObjectItem* OtherClusterRootItem = GUObjectArray.IndexToObject(OtherClusterRootIndex);
+			const int32 OtherClusterIndex = OtherClusterRootItem->GetClusterIndex();
+			FUObjectCluster& OtherCluster = GUObjectClusters[OtherClusterIndex];
+			Cluster.ReferencedClusters.AddUnique(OtherClusterRootIndex);
+			OtherCluster.ReferencedByClusters.AddUnique(ClusterRootIndex);
+
+			for (int32 OtherClusterReferencedCluster : OtherCluster.ReferencedClusters)
 			{
-				if (ObjectItem->HasAnyFlags(EInternalObjectFlags::ClusterRoot) || ObjectItem->GetOwnerIndex() != 0)
-				{					
-					// Simply reference this cluster and all clusters it's referencing
-					const int32 OtherClusterRootIndex = ObjectItem->HasAnyFlags(EInternalObjectFlags::ClusterRoot) ? GUObjectArray.ObjectToIndex(Object) : ObjectItem->GetOwnerIndex();
-					FUObjectItem* OtherClusterRootItem = GUObjectArray.IndexToObject(OtherClusterRootIndex);
-					const int32 OtherClusterIndex = OtherClusterRootItem->GetClusterIndex();
-					FUObjectCluster& OtherCluster = GUObjectClusters[OtherClusterIndex];
-					Cluster.ReferencedClusters.AddUnique(OtherClusterRootIndex);
-					OtherCluster.ReferencedByClusters.AddUnique(ClusterRootIndex);
-
-					for (int32 OtherClusterReferencedCluster : OtherCluster.ReferencedClusters)
-					{
-						if (OtherClusterReferencedCluster != ClusterRootIndex)
-						{
-							Cluster.ReferencedClusters.AddUnique(OtherClusterReferencedCluster);
-						}
-					}
-					for (int32 OtherClusterReferencedMutableObjectIndex : OtherCluster.MutableObjects)
-					{
-						Cluster.MutableObjects.AddUnique(OtherClusterReferencedMutableObjectIndex);
-					}
-				}
-				else if (!GUObjectArray.IsDisregardForGC(Object)) // We know that disregard for GC objects will never be GC'd so no reference is necessary
+				if (OtherClusterReferencedCluster != ClusterRootIndex)
 				{
-					check(ObjectItem->GetOwnerIndex() == 0);
-
-					// New object, add it to the cluster.
-					if (Object->CanBeInCluster() && !Object->HasAnyFlags(RF_NeedLoad | RF_NeedPostLoad) && !Object->IsRooted())
-					{
-						AddObjectToCluster(GUObjectArray.ObjectToIndex(Object), ObjectItem, Object, ObjectsToSerialize, true);
-					}
-					else
-					{
-						// If the object can't be in a cluster or is being loaded, adding to the mutable objects list (and we won't be processing it further)
-						Cluster.MutableObjects.AddUnique(GUObjectArray.ObjectToIndex(Object));
-					}
+					Cluster.ReferencedClusters.AddUnique(OtherClusterReferencedCluster);
 				}
 			}
+			for (int32 OtherClusterReferencedMutableObjectIndex : OtherCluster.MutableObjects)
+			{
+				Cluster.MutableObjects.AddUnique(OtherClusterReferencedMutableObjectIndex);
+			}
+		}
+		else if (GUObjectArray.IsDisregardForGC(Object)) 
+		{
+			// We know that disregard for GC objects will never be GC'd so no reference is necessary
+		}
+		else if (!Object->CanBeInCluster() || Object->HasAnyFlags(RF_NeedLoad | RF_NeedPostLoad) || Object->IsRooted())
+		{
+			// This object may change state in ways which would invalidate the cluster, so keep it in a list of objects to fully explore when this cluster is encountered during GC		
+			Cluster.MutableObjects.AddUnique(GUObjectArray.ObjectToIndex(Object));
+		}
+		else if (!Object->IsIn(Outermost) && Object != Outermost)
+		{
+			// This object is in a different package so we don't want it to be part of this cluster 
+			// TODO: Consider exploring this object to find if it is part of a package containing an object which may add it to a cluster, so we can add a cluster ref instead of a mutable object ref 
+			Cluster.MutableObjects.AddUnique(GUObjectArray.ObjectToIndex(Object));
+		}
+		else 
+		{
+			check(ObjectItem->GetOwnerIndex() == 0);
+
+			// New object in the same package, add it to the cluster.
+			AddObjectToCluster(GUObjectArray.ObjectToIndex(Object), ObjectItem, Object, Context, true);
 		}
 	}
+
+#if WITH_VERSE_VM || defined(__INTELLISENSE__)
+	/**
+	* Handles VCell reference from the token stream. Performance is critical here so we're FORCEINLINING this function.
+	*
+	* @param Context Context of the reference collection
+	* @param ReferencingObject Object referencing the object to process.
+	* @param Cell Cell being processed
+	* @param MemberId Index to the token stream where the reference was found.
+	* @param Origin Declares if a schema represents a blueprint generated type
+	*/
+	FORCEINLINE void HandleTokenStreamVerseCellReference(FWorkerContext& Context, UObject* ReferencingObject, Verse::VCell* Cell, FMemberId MemberId, EOrigin Origin)
+	{
+		// As with mutable objects, we assume that the cell is mutable but the pointer to the cell is not.  If the cell pointer needs to be modified,
+		// then the underlying object must be mutable.
+		if (Cell)
+		{
+			Cluster.MutableCells.AddUnique(Cell);
+		}
+	}
+#endif
 };
+
+static void SuggestClusters(const TArray<FString>& Args)
+{
+	struct FStats 
+	{
+		int32 NumAssets = 0;
+		int32 NumObjects = 0;
+		int32 NumClusterRefs = 0;
+		int32 NumObjectRefs = 0;
+	};
+	TMap<UClass*, FStats> SuggestedClasses;
+	for (TObjectIterator<UPackage> It; It; ++It)
+	{
+		bool FoundCluster = false;
+
+		// If this package contains a cluster, the package should have been added to it
+		if (GUObjectClusters.GetObjectCluster(*It) != nullptr)
+		{
+			continue;
+		}
+
+		ForEachObjectWithOuter(*It, [&](UObject* Obj)
+		{
+			if (Obj->HasAllFlags(RF_Standalone))
+			{
+				FUObjectItem* RootItem = GUObjectArray.ObjectToObjectItem(Obj);
+				const int32 InternalIndex = GUObjectArray.ObjectToIndex(Obj);
+				const int32 ClusterIndex = GUObjectClusters.AllocateCluster(InternalIndex);
+				FUObjectCluster& Cluster = GUObjectClusters[ClusterIndex];
+				Cluster.Objects.Reserve(64);
+
+				FClusterReferenceProcessor Processor(InternalIndex, Cluster, *It);
+				FGCArrayStruct ArrayStruct;
+				TArray<UObject*> ObjectsToProcess = {Obj};
+				ArrayStruct.SetInitialObjectsUnpadded(ObjectsToProcess);
+				CollectReferences(Processor, ArrayStruct);
+				RootItem->SetClusterIndex(ClusterIndex);
+				RootItem->SetFlags(EInternalObjectFlags::ClusterRoot);
+
+				if (Cluster.Objects.Num() >= GUObjectClusters.GetMinClusterSize())
+				{
+					UE_LOG(LogObj, Display, TEXT("Potential cluster root %s with no cluster, %d internal objects, %d cluster refs, %d object refs."), 
+						*Obj->GetPathName(),
+						Cluster.Objects.Num(),
+						Cluster.ReferencedClusters.Num(),
+						Cluster.MutableObjects.Num()
+					);
+					FStats& Stats = SuggestedClasses.FindOrAdd(Obj->GetClass());
+					Stats.NumAssets++;
+					Stats.NumObjects += Cluster.Objects.Num();
+					Stats.NumClusterRefs += Cluster.ReferencedClusters.Num();
+					Stats.NumObjectRefs += Cluster.MutableObjects.Num();
+				}
+				for (int32 ClusterObjectIndex : Cluster.Objects)
+				{
+					FUObjectItem* ClusterObjectItem = GUObjectArray.IndexToObjectUnsafeForGC(ClusterObjectIndex);
+					ClusterObjectItem->SetOwnerIndex(0);
+				}
+				GUObjectClusters.FreeCluster(ClusterIndex);
+			}
+		});
+	}
+	SuggestedClasses.ValueSort([](const FStats& A, const FStats& B) { return A.NumObjects > B.NumObjects; });
+	for (const TPair<UClass*, FStats>& Pair : SuggestedClasses)
+	{
+		UClass* Class = Pair.Key;
+		FStats Stats = Pair.Value;
+		UE_LOG(LogObj, Display, TEXT("Suggested cluster class: %s - %d assets - %d objects - %d cluster refs - %d object refs"), 
+			*Class->GetPathName(), Stats.NumAssets, Stats.NumObjects, Stats.NumClusterRefs, Stats.NumObjectRefs);
+	}
+}
 
 bool CanCreateObjectClusters()
 {
@@ -748,26 +879,16 @@ void UObjectBaseUtility::AddToCluster(UObjectBaseUtility* ClusterRootOrObjectFro
 		const int32 ClusterRootIndex = Cluster->RootIndex;
 		if (!bAddAsMutableObject)
 		{
-			FClusterReferenceProcessor Processor(ClusterRootIndex, *Cluster);
-			TFastReferenceCollector<
-				FClusterReferenceProcessor, 
-				TDefaultReferenceCollector<FClusterReferenceProcessor>, 
-				FGCArrayPool, 
-				EFastReferenceCollectorOptions::AutogenerateTokenStream | EFastReferenceCollectorOptions::ProcessNoOpTokens
-			> ReferenceCollector(Processor, FGCArrayPool::Get());
-			FGCArrayStruct ArrayStruct;
-			TArray<UObject*>& ObjectsToProcess = ArrayStruct.ObjectsToSerialize;
+			UObject* ClusterRootObject = static_cast<UObject*>(GUObjectArray.IndexToObjectUnsafeForGC(Cluster->RootIndex)->Object);
+			FClusterReferenceProcessor Processor(ClusterRootIndex, *Cluster, ClusterRootObject->GetOutermost());
 			UObject* ThisObject = static_cast<UObject*>(this);
-			Processor.HandleTokenStreamObjectReference(ObjectsToProcess, static_cast<UObject*>(ClusterRootOrObjectFromCluster), ThisObject, INDEX_NONE, true);
-			if (ObjectsToProcess.Num())
-			{
-				ReferenceCollector.CollectReferences(ArrayStruct);
-			}
+			UObject** ThisObjPtr = &ThisObject;
+			FGCArrayStruct ArrayStruct;
+			ArrayStruct.InitialNativeReferences = TConstArrayView<UObject**>( &ThisObjPtr, 1 );
+			CollectReferences(Processor, ArrayStruct);
 
 #if UE_GCCLUSTER_VERBOSE_LOGGING
-			UObject* ClusterRootObject = static_cast<UObject*>(GUObjectArray.IndexToObjectUnsafeForGC(Cluster->RootIndex)->Object);
 			UE_LOG(LogObj, Log, TEXT("Added %s to cluster %s:"), *ThisObject->GetFullName(), *ClusterRootObject->GetFullName());
-
 			DumpClusterToLog(*Cluster, true, false);
 #endif
 		}
@@ -821,20 +942,11 @@ void UObjectBaseUtility::CreateCluster()
 	Cluster.Objects.Reserve(64);
 
 	// Collect all objects referenced by cluster root and by all objects it's referencing
-	FClusterReferenceProcessor Processor(InternalIndex, Cluster);
-	TFastReferenceCollector<
-		FClusterReferenceProcessor, 
-		TDefaultReferenceCollector<FClusterReferenceProcessor>, 
-		FGCArrayPool, 
-		EFastReferenceCollectorOptions::AutogenerateTokenStream | EFastReferenceCollectorOptions::ProcessNoOpTokens
-	> ReferenceCollector(Processor, FGCArrayPool::Get());
+	FClusterReferenceProcessor Processor(InternalIndex, Cluster, GetOutermost());
 	FGCArrayStruct ArrayStruct;
-	TArray<UObject*>& ObjectsToProcess = ArrayStruct.ObjectsToSerialize;
-	ObjectsToProcess.Add(static_cast<UObject*>(this));
-	ReferenceCollector.CollectReferences(ArrayStruct);
-#if UE_BUILD_DEBUG
-	FGCArrayPool::Get().CheckLeaks();
-#endif
+	TArray<UObject*> ObjectsToProcess = {static_cast<UObject*>(this)};
+	ArrayStruct.SetInitialObjectsUnpadded(ObjectsToProcess);
+	CollectReferences(Processor, ArrayStruct);
 
 	check(RootItem->GetOwnerIndex() == 0);
 	RootItem->SetClusterIndex(ClusterIndex);
@@ -845,17 +957,33 @@ void UObjectBaseUtility::CreateCluster()
 		// Add new cluster to the global cluster map.
 		Cluster.Objects.Sort();
 		Cluster.ReferencedClusters.Sort();		
-		Cluster.MutableObjects.Sort();		
+		Cluster.MutableObjects.Sort();
 
 #if UE_GCCLUSTER_VERBOSE_LOGGING
-		UE_LOG(LogObj, Log, TEXT("Created Cluster (%d) with %d objects, %d referenced clusters and %d mutable objects."),
-			ClusterIndex, Cluster.Objects.Num(), Cluster.ReferencedClusters.Num(), Cluster.MutableObjects.Num());
+#if WITH_VERSE_VM || defined(__INTELLISENSE__)
+		FString ExtraDetail = FString::Printf(TEXT(", %d verse cells"), Cluster.MutableCells.Num());
+#else
+		FString ExtraDetail;
+#endif
+		UE_LOG(LogObj, Log, TEXT("Created cluster (%d) with %d objects, %d referenced clusters%s and %d mutable objects."),
+			ClusterIndex, Cluster.Objects.Num(), Cluster.ReferencedClusters.Num(), *ExtraDetail, Cluster.MutableObjects.Num());
 
 		DumpClusterToLog(Cluster, true, false);
 #endif
 	}
 	else
 	{
+#if UE_GCCLUSTER_VERBOSE_LOGGING
+#if WITH_VERSE_VM || defined(__INTELLISENSE__)
+		FString ExtraDetail = FString::Printf(TEXT(", %d verse cells"), Cluster.MutableCells.Num());
+#else
+		FString ExtraDetail;
+#endif
+		UE_LOG(LogObj, Log, TEXT("Not creating cluster (%d) with %d objects, %d referenced clusters%s and %d mutable objects."),
+			ClusterIndex, Cluster.Objects.Num(), Cluster.ReferencedClusters.Num(), *ExtraDetail, Cluster.MutableObjects.Num());
+
+		DumpClusterToLog(Cluster, true, false);
+#endif
 		for (int32 ClusterObjectIndex : Cluster.Objects)
 		{
 			FUObjectItem* ClusterObjectItem = GUObjectArray.IndexToObjectUnsafeForGC(ClusterObjectIndex);

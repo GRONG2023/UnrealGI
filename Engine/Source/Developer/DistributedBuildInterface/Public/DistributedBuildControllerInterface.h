@@ -15,8 +15,11 @@ struct FDistributedBuildTaskResult
 struct FTaskCommandData
 {	
 	FString Command;
-	FString CommandArgs;
+	FString WorkingDirectory;
 	FString InputFileName;
+	FString OutputFileName;
+	FString ExtraCommandArgs;
+	uint32 DispatcherPID = 0;
 	TArray<FString> Dependencies;
 };
 
@@ -43,14 +46,18 @@ class IDistributedBuildController : public IModuleInterface, public IModularFeat
 {
 public:
 	virtual bool SupportsDynamicReloading() override { return false; }
+	
+	virtual bool RequiresRelativePaths() { return false; }
 
 	virtual void InitializeController() = 0;
 	
 	// Returns true if the controller may be used.
 	virtual bool IsSupported() = 0;
 
-	// Returns the name of the controller. Used for logging propuses.
+	// Returns the name of the controller. Used for logging purposes.
 	virtual const FString GetName() = 0;
+
+	virtual FString RemapPath(const FString& SourcePath) const { return SourcePath; }
 
 	virtual void Tick(float DeltaSeconds){}
 

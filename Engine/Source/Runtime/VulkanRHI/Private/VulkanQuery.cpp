@@ -9,15 +9,19 @@
 #include "VulkanContext.h"
 #include "VulkanCommandBuffer.h"
 #include "EngineGlobals.h"
+#include "RenderCore.h"
 
 #if VULKAN_QUERY_CALLSTACK
 #include "HAL/PlatformStackwalk.h"
 #endif
 
-TAutoConsoleVariable<int32> GSubmitOcclusionBatchCmdBufferCVar(
-	TEXT("r.Vulkan.SubmitOcclusionBatchCmdBuffer"),
-	1,
-	TEXT("1 to submit the cmd buffer after end occlusion query batch (default)"),
+static uint32 GTimestampQueryStage = 0;
+TAutoConsoleVariable<int32> GTimestampQueryStageCVar(
+	TEXT("r.Vulkan.TimestampQueryStage"),
+	GTimestampQueryStage,
+	TEXT("Defines which pipeline stage is used for timestamp queries.\n")
+	TEXT(" 0: Use VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, less precise measures but less likely to alter performance (default)\n")
+	TEXT(" 1: Use VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, more precise measures but may alter performance on some platforms"),
 	ECVF_RenderThreadSafe
 );
 
@@ -47,7 +51,12 @@ FVulkanQueryPool::FVulkanQueryPool(FVulkanDevice* InDevice, FVulkanCommandBuffer
 
 	VERIFYVULKANRESULT(VulkanRHI::vkCreateQueryPool(Device->GetInstanceHandle(), &PoolCreateInfo, VULKAN_CPU_ALLOCATOR, &QueryPool));
 	
-	if (bInShouldAddReset && CommandBufferManager)
+	// If host query resets are supported, reset all new query pools on creation
+	if (Device->GetOptionalExtensions().HasEXTHostQueryReset)
+	{
+		VulkanRHI::vkResetQueryPoolEXT(Device->GetInstanceHandle(), QueryPool, 0, MaxQueries);
+	}
+	else if (bInShouldAddReset && CommandBufferManager)
 	{
 		CommandBufferManager->AddQueryPoolForReset(QueryPool, InMaxQueries);
 	}
@@ -95,7 +104,7 @@ bool FVulkanOcclusionQueryPool::InternalTryGetResults(bool bWait)
 	if (VulkanRHI::vkGetEventStatus(Device->GetInstanceHandle(), ResetEvent) == VK_EVENT_SET)
 	{
 		Result = VulkanRHI::vkGetQueryPoolResults(Device->GetInstanceHandle(), QueryPool, 0, NumUsedQueries, NumUsedQueries * sizeof(uint64), QueryOutput.GetData(), sizeof(uint64), VK_QUERY_RESULT_64_BIT);
-				if (Result == VK_SUCCESS)
+		if (Result == VK_SUCCESS)
 		{
 			State = EState::RT_PostGetResults;
 			return true;
@@ -106,8 +115,7 @@ bool FVulkanOcclusionQueryPool::InternalTryGetResults(bool bWait)
 	{
 		if (bWait)
 		{
-			uint32 IdleStart = FPlatformTime::Cycles();
-
+			FRenderThreadIdleScope IdleScope(ERenderThreadIdleTypes::WaitingForGPUQuery);
 			SCOPE_CYCLE_COUNTER(STAT_VulkanWaitQuery);
 
 			// We'll do manual wait
@@ -164,9 +172,6 @@ bool FVulkanOcclusionQueryPool::InternalTryGetResults(bool bWait)
 
 				++NumLoops;
 			}
-
-			GRenderThreadIdle[ERenderThreadIdleTypes::WaitingForGPUQuery] += FPlatformTime::Cycles() - IdleStart;
-			GRenderThreadNumIdle[ERenderThreadIdleTypes::WaitingForGPUQuery]++;
 
 			State = EState::RT_PostGetResults;
 			return true;
@@ -346,14 +351,6 @@ void FVulkanCommandListContext::EndOcclusionQueryBatch(FVulkanCmdBuffer* CmdBuff
 	checkf(CurrentOcclusionQueryPool, TEXT("EndOcclusionQueryBatch called without corresponding BeginOcclusionQueryBatch!"));
 	CurrentOcclusionQueryPool->EndBatch(CmdBuffer);
 	CurrentOcclusionQueryPool = nullptr;
-	LayoutManager.EndRenderPass(CmdBuffer);
-
-	// Sync point
-	if (GSubmitOcclusionBatchCmdBufferCVar.GetValueOnAnyThread())
-	{
-		RequestSubmitCurrentCommands();
-		SafePointSubmit();
-	}
 }
 
 
@@ -409,7 +406,7 @@ void FVulkanCommandListContext::ReadAndCalculateGPUFrameTime()
 		const double Frequency = double(FVulkanGPUTiming::GetTimingFrequency());
 		GGPUFrameTime = FMath::TruncToInt(double(Delta) / Frequency / SecondsPerCycle);
 	}
-	else
+	else if(!FVulkanPlatform::HasCustomFrameTiming())
 	{
 		GGPUFrameTime = 0;
 	}
@@ -475,6 +472,19 @@ bool FVulkanDynamicRHI::RHIGetRenderQueryResult(FRHIRenderQuery* QueryRHI, uint6
 	else if (BaseQuery->QueryType == RQT_AbsoluteTime)
 	{
 		FVulkanTimingQuery* Query = static_cast<FVulkanTimingQuery*>(BaseQuery);
+		if (Query->Pool == nullptr)
+		{
+			// RHIEndRenderQuery hasn't been executed yet for this query, so it's not ready yet. If it's a non-blocking wait, we can return false right away.
+			if (!bWait)
+			{
+				return false;
+			}
+
+			// Blocking was requested, so, we need to wait for the RHI thread to catch up.
+			FRHICommandListExecutor::GetImmediateCommandList().ImmediateFlush(EImmediateFlushType::FlushRHIThread);
+			check(Query->Pool != nullptr);
+		}
+
 		check(Query->Pool->CurrentTimestamp < Query->Pool->BufferSize);
 		int32 TimestampIndex = Query->Pool->CurrentTimestamp;
 		if (!bWait)
@@ -486,7 +496,7 @@ bool FVulkanDynamicRHI::RHIGetRenderQueryResult(FRHIRenderQuery* QueryRHI, uint6
 				if (StartQuerySyncPoint.FenceCounter < StartQuerySyncPoint.CmdBuffer->GetFenceSignaledCounter())
 				{
 					Query->Pool->ResultsBuffer->InvalidateMappedMemory();
-					uint64* Data = (uint64*)Query->Pool->ResultsBuffer->GetMappedPointer();
+					const uint64* Data = Query->Pool->MappedPointer;
 					OutNumPixels = ToMicroseconds(Data[TimestampIndex]);
 					return true;
 				}
@@ -502,34 +512,33 @@ bool FVulkanDynamicRHI::RHIGetRenderQueryResult(FRHIRenderQuery* QueryRHI, uint6
 			// This really only happens if occlusion and frame sync event queries are disabled, otherwise those will block until the GPU catches up to 1 frame behind
 
 			const bool bBlocking = (Query->Pool->NumIssuedTimestamps == Query->Pool->BufferSize) || bWait;
-			const uint32 IdleStart = FPlatformTime::Cycles();
-
-			SCOPE_CYCLE_COUNTER(STAT_RenderQueryResultTime);
-
-			if (bBlocking)
 			{
-				const FVulkanTimingQueryPool::FCmdBufferFence& StartQuerySyncPoint = Query->Pool->TimestampListHandles[TimestampIndex];
-				bool bWaitForStart = StartQuerySyncPoint.FenceCounter == StartQuerySyncPoint.CmdBuffer->GetFenceSignaledCounter();
-				if (bWaitForStart)
-				{
-					FRHICommandListExecutor::GetImmediateCommandList().ImmediateFlush(EImmediateFlushType::FlushRHIThread);
+				FRenderThreadIdleScope IdleScope(ERenderThreadIdleTypes::WaitingForGPUQuery);
+				SCOPE_CYCLE_COUNTER(STAT_RenderQueryResultTime);
 
-					// Need to submit the open command lists.
-					Device->SubmitCommandsAndFlushGPU();
+				if (bBlocking)
+				{
+					const FVulkanTimingQueryPool::FCmdBufferFence& StartQuerySyncPoint = Query->Pool->TimestampListHandles[TimestampIndex];
+					bool bWaitForStart = StartQuerySyncPoint.FenceCounter == StartQuerySyncPoint.CmdBuffer->GetFenceSignaledCounter();
+					if (bWaitForStart)
+					{
+						FRHICommandListExecutor::GetImmediateCommandList().ImmediateFlush(EImmediateFlushType::FlushRHIThread);
+
+						// Need to submit the open command lists.
+						Device->SubmitCommandsAndFlushGPU();
+					}
+
+					// CPU wait for query results to be ready.
+					if (bWaitForStart && StartQuerySyncPoint.FenceCounter == StartQuerySyncPoint.CmdBuffer->GetFenceSignaledCounter())
+					{
+						Device->GetImmediateContext().GetCommandBufferManager()->WaitForCmdBuffer(StartQuerySyncPoint.CmdBuffer);
+					}
 				}
 
-				// CPU wait for query results to be ready.
-				if (bWaitForStart && StartQuerySyncPoint.FenceCounter == StartQuerySyncPoint.CmdBuffer->GetFenceSignaledCounter())
-				{
-					Device->GetImmediateContext().GetCommandBufferManager()->WaitForCmdBuffer(StartQuerySyncPoint.CmdBuffer);
-				}
+				Query->Pool->ResultsBuffer->InvalidateMappedMemory();
 			}
 
-			Query->Pool->ResultsBuffer->InvalidateMappedMemory();
-			GRenderThreadIdle[ERenderThreadIdleTypes::WaitingForGPUQuery] += FPlatformTime::Cycles() - IdleStart;
-			GRenderThreadNumIdle[ERenderThreadIdleTypes::WaitingForGPUQuery]++;
-
-			uint64* Data = (uint64*)Query->Pool->ResultsBuffer->GetMappedPointer();
+			const uint64* Data = Query->Pool->MappedPointer;
 			OutNumPixels = ToMicroseconds(Data[TimestampIndex]);
 			return true;
 		}
@@ -600,17 +609,29 @@ void FVulkanCommandListContext::RHIEndRenderQuery(FRHIRenderQuery* QueryRHI)
 		{
 			Query->Pool = new FVulkanTimingQueryPool(Device, CommandBufferManager, 4);
 			Query->Pool->ResultsBuffer = Device->GetStagingManager().AcquireBuffer(Query->Pool->BufferSize * sizeof(uint64), VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+			Query->Pool->MappedPointer = (uint64*)Query->Pool->ResultsBuffer->GetMappedPointer();
 		}
 
 		Query->Pool->CurrentTimestamp = (Query->Pool->CurrentTimestamp + 1) % Query->Pool->BufferSize;
 		const uint32 QueryEndIndex = Query->Pool->CurrentTimestamp;
+		const VkPipelineStageFlagBits QueryPipelineStage = GTimestampQueryStage ? VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
 		FVulkanCmdBuffer* CmdBuffer = CommandBufferManager->GetActiveCmdBuffer();
-		VulkanRHI::vkCmdWriteTimestamp(CmdBuffer->GetHandle(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, Query->Pool->GetHandle(), QueryEndIndex);
+		VulkanRHI::vkCmdWriteTimestamp(CmdBuffer->GetHandle(), QueryPipelineStage, Query->Pool->GetHandle(), QueryEndIndex);
 		CmdBuffer->AddPendingTimestampQuery(QueryEndIndex, 1, Query->Pool->GetHandle(), Query->Pool->ResultsBuffer->GetHandle(), true);
 		Query->Pool->TimestampListHandles[QueryEndIndex].CmdBuffer = CmdBuffer;
 		Query->Pool->TimestampListHandles[QueryEndIndex].FenceCounter = CmdBuffer->GetFenceSignaledCounter();
 		Query->Pool->TimestampListHandles[QueryEndIndex].FrameCount = GetFrameCounter();
 		Query->Pool->NumIssuedTimestamps = FMath::Min<uint32>(Query->Pool->NumIssuedTimestamps + 1, Query->Pool->BufferSize);
+	}
+}
+
+void FVulkanCommandListContext::RHICalibrateTimers(FRHITimestampCalibrationQuery* CalibrationQuery)
+{
+	if (Device->GetOptionalExtensions().HasEXTCalibratedTimestamps)
+	{
+		FGPUTimingCalibrationTimestamp CalibrationTimestamp = Device->GetCalibrationTimestamp();
+		CalibrationQuery->CPUMicroseconds[0] = CalibrationTimestamp.CPUMicroseconds;
+		CalibrationQuery->GPUMicroseconds[0] = CalibrationTimestamp.GPUMicroseconds;
 	}
 }
 

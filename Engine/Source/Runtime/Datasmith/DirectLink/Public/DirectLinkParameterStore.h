@@ -2,13 +2,19 @@
 
 #pragma once
 
+#include "Algo/Transform.h"
+#include "Containers/Array.h"
+#include "CoreMinimal.h"
+#include "DirectLinkCommon.h"
 #include "DirectLinkSceneGraphNode.h"
 #include "DirectLinkSerialMethods.h"
-
-#include "Algo/Transform.h"
-#include "CoreMinimal.h"
+#include "HAL/Platform.h"
 #include "Logging/LogMacros.h"
+#include "Misc/AssertionMacros.h"
 #include "Serialization/MemoryReader.h"
+#include "UObject/NameTypes.h"
+
+class FArchive;
 
 
 namespace DirectLink
@@ -23,19 +29,15 @@ public:
 		: NativeValue(InitialValue)
 	{}
 
-	const T& Get(const FParameterStore& InStore) const { return NativeValue; }
-	T& Edit(const FParameterStore& InStore) { return NativeValue; }
+	const T& Get() const { return NativeValue; }
+	T& Get() { return NativeValue; }
 	operator const T&() const { return NativeValue; }
+	operator T&() { return NativeValue; }
 
 	T& operator=(const T& InValue)
 	{
 		NativeValue = InValue;
 		return NativeValue;
-	}
-
-	void Set(FParameterStore& InStore, const T& InValue)
-	{
-		NativeValue = InValue;
 	}
 
 private:
@@ -103,6 +105,13 @@ private:
 class DIRECTLINK_API FParameterStore
 {
 public:
+	FParameterStore();
+	~FParameterStore();
+	FParameterStore(const FParameterStore&);
+	FParameterStore& operator=(const FParameterStore&);
+	FParameterStore(FParameterStore&&);
+	FParameterStore& operator=(FParameterStore&&);
+
 	template<typename T, typename S>
 	TStoreKey<T, S>& RegisterParameter(TStoreKey<T, S>& Key, FName Name)
 	{

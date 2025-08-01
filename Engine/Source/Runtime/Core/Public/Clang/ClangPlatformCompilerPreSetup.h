@@ -2,43 +2,22 @@
 
 #pragma once
 
-#ifndef DISABLE_DEPRECATION
-	#pragma clang diagnostic warning "-Wdeprecated-declarations"
+// HEADER_UNIT_UNSUPPORTED - Clang not supporting header units
 
-	/**
-	 * Macro for marking up deprecated code, functions and types.
-	 *
-	 * Features that are marked as deprecated are scheduled to be removed from the code base
-	 * in a future release. If you are using a deprecated feature in your code, you should
-	 * replace it before upgrading to the next release. See the Upgrade Notes in the release
-	 * notes for the release in which the feature was marked deprecated.
-	 *
-	 * Sample usage (note the slightly different syntax for classes and structures):
-	 *
-	 *		DEPRECATED(4.xx, "Message")
-	 *		void Function();
-	 *
-	 *		struct DEPRECATED(4.xx, "Message") MODULE_API MyStruct
-	 *		{
-	 *			// StructImplementation
-	 *		};
-	 *		class DEPRECATED(4.xx, "Message") MODULE_API MyClass
-	 *		{
-	 *			// ClassImplementation
-	 *		};
-	 *
-	 * @param VERSION The release number in which the feature was marked deprecated.
-	 * @param MESSAGE A message containing upgrade notes.
-	 */
-	#define DEPRECATED(VERSION, MESSAGE) DEPRECATED_MACRO(4.22, "The DEPRECATED macro has been deprecated in favor of UE_DEPRECATED().") __attribute__((deprecated(MESSAGE " Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.")))
+#ifdef __clang__
 
+#pragma clang diagnostic warning "-Wdeprecated-declarations"
+
+#ifndef PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	#define PRAGMA_DISABLE_DEPRECATION_WARNINGS \
 		_Pragma("clang diagnostic push") \
 		_Pragma("clang diagnostic ignored \"-Wdeprecated-declarations\"")
+#endif // PRAGMA_DISABLE_DEPRECATION_WARNINGS
 
+#ifndef PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	#define PRAGMA_ENABLE_DEPRECATION_WARNINGS \
 		_Pragma("clang diagnostic pop")
-#endif // DISABLE_DEPRECATION
+#endif // PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 #ifndef PRAGMA_DISABLE_OVERLOADED_VIRTUAL_WARNINGS
 	#define PRAGMA_DISABLE_OVERLOADED_VIRTUAL_WARNINGS \
@@ -73,16 +52,37 @@
 		_Pragma("clang diagnostic pop")
 #endif // PRAGMA_ENABLE_SHADOW_VARIABLE_WARNINGS
 
+// Unreachable not being evaluated on clang... yet
+#ifndef PRAGMA_DISABLE_UNREACHABLE_CODE_WARNINGS
+	#define PRAGMA_DISABLE_UNREACHABLE_CODE_WARNINGS
+#endif // PRAGMA_DISABLE_UNREACHABLE_CODE_WARNINGS
+
+#ifndef PRAGMA_RESTORE_UNREACHABLE_CODE_WARNINGS
+	#define PRAGMA_RESTORE_UNREACHABLE_CODE_WARNINGS
+#endif // PRAGMA_RESTORE_UNREACHABLE_CODE_WARNINGS
+
 #if __has_warning("-Wimplicit-float-conversion")
 #define DISABLE_IMPLICIT_FLOAT_CONVERSION_FRAGMENT _Pragma("clang diagnostic ignored \"-Wimplicit-float-conversion\"")
 #else
 #define DISABLE_IMPLICIT_FLOAT_CONVERSION_FRAGMENT
 #endif
 
+#if __has_warning("-Wimplicit-float-conversion")
+#define FORCE_IMPLICIT_FLOAT_CONVERSION_FRAGMENT _Pragma("clang diagnostic warning \"-Wimplicit-float-conversion\"")
+#else
+#define FORCE_IMPLICIT_FLOAT_CONVERSION_FRAGMENT
+#endif
+
 #if __has_warning("-Wimplicit-int-conversion")
 #define DISABLE_IMPLICIT_INT_CONVERSION_FRAGMENT _Pragma("clang diagnostic ignored \"-Wimplicit-int-conversion\"")
 #else
 #define DISABLE_IMPLICIT_INT_CONVERSION_FRAGMENT
+#endif
+
+#if __has_warning("-Wimplicit-int-conversion")
+#define FORCE_IMPLICIT_INT_CONVERSION_FRAGMENT _Pragma("clang diagnostic warning \"-Wimplicit-int-conversion\"")
+#else
+#define FORCE_IMPLICIT_INT_CONVERSION_FRAGMENT
 #endif
 
 #ifndef PRAGMA_DISABLE_UNSAFE_TYPECAST_WARNINGS
@@ -96,8 +96,39 @@
 
 #ifndef PRAGMA_ENABLE_UNSAFE_TYPECAST_WARNINGS
 	#define PRAGMA_ENABLE_UNSAFE_TYPECAST_WARNINGS \
-		_Pragma("clang diagnostic pop")
+		UE_DEPRECATED_MACRO(5.0, "The PRAGMA_ENABLE_UNSAFE_TYPECAST_WARNINGS macro has been deprecated in favor of PRAGMA_RESTORE_UNSAFE_TYPECAST_WARNINGS. To force enable warnings use PRAGMA_FORCE_UNSAFE_TYPECAST_WARNINGS.")
 #endif // PRAGMA_ENABLE_UNSAFE_TYPECAST_WARNINGS
+
+#ifndef PRAGMA_FORCE_UNSAFE_TYPECAST_WARNINGS
+	#define PRAGMA_FORCE_UNSAFE_TYPECAST_WARNINGS \
+		_Pragma("clang diagnostic push") \
+		_Pragma("clang diagnostic warning \"-Wfloat-conversion\"") \
+		FORCE_IMPLICIT_FLOAT_CONVERSION_FRAGMENT \
+		FORCE_IMPLICIT_INT_CONVERSION_FRAGMENT \
+		_Pragma("clang diagnostic warning \"-Wc++11-narrowing\"")
+#endif // PRAGMA_DISABLE_UNSAFE_TYPECAST_WARNINGS
+
+#ifndef PRAGMA_RESTORE_UNSAFE_TYPECAST_WARNINGS
+	#define PRAGMA_RESTORE_UNSAFE_TYPECAST_WARNINGS \
+	_Pragma("clang diagnostic pop")
+#endif // PRAGMA_RESTORE_UNSAFE_TYPECAST_WARNINGS
+
+#if __has_warning("-Wordered-compare-function-pointers")
+#define DISABLE_ORDERED_COMPARE_FUNCTION_POINTERS _Pragma("clang diagnostic ignored \"-Wordered-compare-function-pointers\"")
+#else
+#define DISABLE_ORDERED_COMPARE_FUNCTION_POINTERS
+#endif
+
+#ifndef PRAGMA_DISABLE_ORDERED_COMPARE_FUNCTION_POINTERS
+	#define PRAGMA_DISABLE_ORDERED_COMPARE_FUNCTION_POINTERS \
+		_Pragma("clang diagnostic push") \
+		DISABLE_ORDERED_COMPARE_FUNCTION_POINTERS
+#endif // PRAGMA_DISABLE_ORDERED_COMPARE_FUNCTION_POINTERS
+
+#ifndef PRAGMA_ENABLE_ORDERED_COMPARE_FUNCTION_POINTERS
+	#define PRAGMA_ENABLE_ORDERED_COMPARE_FUNCTION_POINTERS \
+	_Pragma("clang diagnostic pop")
+#endif // PRAGMA_ENABLE_ORDERED_COMPARE_FUNCTION_POINTERS
 
 #ifndef PRAGMA_DISABLE_UNDEFINED_IDENTIFIER_WARNINGS
 	#define PRAGMA_DISABLE_UNDEFINED_IDENTIFIER_WARNINGS \
@@ -149,6 +180,17 @@
 		_Pragma("clang diagnostic ignored \"-Wmacro-redefined\"")
 #endif // PRAGMA_DISABLE_MACRO_REDEFINED_WARNINGS
 
+#ifndef PRAGMA_DISABLE_UNUSED_PRIVATE_FIELDS_WARNINGS
+#define PRAGMA_DISABLE_UNUSED_PRIVATE_FIELDS_WARNINGS \
+		_Pragma("clang diagnostic push") \
+		_Pragma("clang diagnostic ignored \"-Wunused-private-field\"")
+#endif // PRAGMA_DISABLE_UNUSED_PRIVATE_FIELDS_WARNINGS
+
+#ifndef PRAGMA_ENABLE_UNUSED_PRIVATE_FIELDS_WARNINGS
+#define PRAGMA_ENABLE_UNUSED_PRIVATE_FIELDS_WARNINGS \
+		_Pragma("clang diagnostic pop")
+#endif // PRAGMA_ENABLE_UNUSED_PRIVATE_FIELDS_WARNINGS
+
 #ifndef PRAGMA_ENABLE_MACRO_REDEFINED_WARNINGS
 	#define PRAGMA_ENABLE_MACRO_REDEFINED_WARNINGS \
 		_Pragma("clang diagnostic pop")
@@ -171,6 +213,41 @@
 		_Pragma("clang diagnostic pop")
 #endif // PRAGMA_ENABLE_UNINITIALIZED_CONST_REFERENCE_WARNINGS
 
+#if __has_warning("-Wenum-constexpr-conversion")
+#define DISABLE_ENUM_CONSTEXPR_CONVERSION _Pragma("clang diagnostic ignored \"-Wenum-constexpr-conversion\"")
+#else
+#define DISABLE_ENUM_CONSTEXPR_CONVERSION
+#endif
+
+#ifndef PRAGMA_DISABLE_ENUM_CONSTEXPR_CONVERSION_WARNINGS
+#define PRAGMA_DISABLE_ENUM_CONSTEXPR_CONVERSION_WARNINGS \
+		_Pragma("clang diagnostic push") \
+        DISABLE_ENUM_CONSTEXPR_CONVERSION
+#endif // PRAGMA_DISABLE_ENUM_CONSTEXPR_CONVERSION_WARNINGS
+
+#ifndef PRAGMA_ENABLE_ENUM_CONSTEXPR_CONVERSION_WARNINGS
+#define PRAGMA_ENABLE_ENUM_CONSTEXPR_CONVERSION_WARNINGS \
+		_Pragma("clang diagnostic pop")
+#endif // PRAGMA_ENABLE_ENUM_CONSTEXPR_CONVERSION_WARNINGS
+
+#if __has_warning("-Wdeprecated-copy-with-user-provided-copy")
+#define DISABLE_DEPRECATED_COPY_WITH_USER_DEFINED_COPY _Pragma("clang diagnostic ignored \"-Wdeprecated-copy-with-user-provided-copy\"")
+#else
+#define DISABLE_DEPRECATED_COPY_WITH_USER_DEFINED_COPY
+#endif
+
+#ifndef PRAGMA_DISABLE_DEPRECATED_COPY_WITH_USER_DEFINED_COPY_WARNINGS
+#define PRAGMA_DISABLE_DEPRECATED_COPY_WITH_USER_DEFINED_COPY_WARNINGS \
+		_Pragma("clang diagnostic push") \
+        DISABLE_DEPRECATED_COPY_WITH_USER_DEFINED_COPY
+#endif // PRAGMA_DISABLE_DEPRECATED_COPY_WITH_USER_DEFINED_COPY_WARNINGS
+
+#ifndef PRAGMA_ENABLE_DEPRECATED_COPY_WITH_USER_DEFINED_COPY_WARNINGS
+#define PRAGMA_ENABLE_DEPRECATED_COPY_WITH_USER_DEFINED_COPY_WARNINGS \
+		_Pragma("clang diagnostic pop")
+#endif // PRAGMA_ENABLE_DEPRECATED_COPY_WITH_USER_DEFINED_COPY_WARNINGS
+
+
 #ifndef PRAGMA_POP
 	#define PRAGMA_POP \
 		_Pragma("clang diagnostic pop")
@@ -188,3 +265,40 @@
 	#define EMIT_CUSTOM_WARNING_AT_LINE(Line, Warning) \
 		_Pragma(PREPROCESSOR_TO_STRING(message(Warning)))
 #endif // EMIT_CUSTOM_WARNING_AT_LINE
+
+#ifndef EMIT_CUSTOM_ERROR_AT_LINE
+	#define EMIT_CUSTOM_ERROR_AT_LINE(Line, Error) \
+		_Pragma(PREPROCESSOR_TO_STRING(message(Error)))
+#endif // EMIT_CUSTOM_ERROR_AT_LINE
+
+#ifndef UE_COMPILER_THIRD_PARTY_INCLUDES_START
+	#define UE_COMPILER_THIRD_PARTY_INCLUDES_START \
+		PRAGMA_DISABLE_REORDER_WARNINGS \
+		PRAGMA_DISABLE_SHADOW_VARIABLE_WARNINGS \
+		PRAGMA_DISABLE_UNDEFINED_IDENTIFIER_WARNINGS \
+		PRAGMA_DISABLE_MISSING_VIRTUAL_DESTRUCTOR_WARNINGS \
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS \
+		PRAGMA_DISABLE_OVERLOADED_VIRTUAL_WARNINGS \
+		PRAGMA_DISABLE_MISSING_BRACES_WARNINGS \
+		PRAGMA_DISABLE_UNINITIALIZED_CONST_REFERENCE_WARNINGS \
+		PRAGMA_DISABLE_UNREACHABLE_CODE_WARNINGS \
+		PRAGMA_DISABLE_ORDERED_COMPARE_FUNCTION_POINTERS \
+		PRAGMA_DISABLE_DEPRECATED_COPY_WITH_USER_DEFINED_COPY_WARNINGS
+#endif
+
+#ifndef UE_COMPILER_THIRD_PARTY_INCLUDES_END
+	#define UE_COMPILER_THIRD_PARTY_INCLUDES_END \
+		PRAGMA_ENABLE_DEPRECATED_COPY_WITH_USER_DEFINED_COPY_WARNINGS \
+		PRAGMA_ENABLE_ORDERED_COMPARE_FUNCTION_POINTERS \
+		PRAGMA_RESTORE_UNREACHABLE_CODE_WARNINGS \
+		PRAGMA_ENABLE_UNINITIALIZED_CONST_REFERENCE_WARNINGS \
+		PRAGMA_ENABLE_MISSING_BRACES_WARNINGS \
+		PRAGMA_ENABLE_OVERLOADED_VIRTUAL_WARNINGS \
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS \
+		PRAGMA_ENABLE_MISSING_VIRTUAL_DESTRUCTOR_WARNINGS \
+		PRAGMA_ENABLE_UNDEFINED_IDENTIFIER_WARNINGS \
+		PRAGMA_ENABLE_SHADOW_VARIABLE_WARNINGS \
+		PRAGMA_ENABLE_REORDER_WARNINGS
+#endif
+
+#endif // __clang__

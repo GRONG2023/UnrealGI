@@ -1,42 +1,36 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using System;
+using System.Linq;
 using UnrealBuildTool;
 
 public class UnrealFrontend : ModuleRules
 {
-	public UnrealFrontend( ReadOnlyTargetRules Target ) : base(Target)
+	public UnrealFrontend(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PublicIncludePaths.AddRange(
-            new string[] {
-                "Runtime/Launch/Public",
-            }
-        );
+		PublicIncludePathModuleNames.Add("Launch");
 
 		PrivateIncludePaths.AddRange(
 			new string[] {
-				"Programs/UnrealFrontend/Private",
 				"Programs/UnrealFrontend/Private/Commands",
-				"Runtime/Launch/Private",					// for LaunchEngineLoop.cpp include
 			}
 		);
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
+				"ApplicationCore",
 				"AutomationController",
 				"Core",
-				"ApplicationCore",
 				"CoreUObject",
 				"DeviceManager",
 				"LauncherServices",
 				"Messaging",
-                "OutputLog",
-				"Profiler",
-				"ProfilerClient",
-                "ProjectLauncher",
+				"OutputLog",
+				"ProjectLauncher",
 				"Projects",
 				"SessionFrontend",
-				"SessionServices",                
-                "Slate",
+				"SessionServices",
+				"Slate",
 				"SlateCore",
 				"SourceCodeAccess",
 				"StandaloneRenderer",
@@ -77,10 +71,11 @@ public class UnrealFrontend : ModuleRules
 		// @todo: allow for better plug-in support in standalone Slate apps
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
+				"DirectoryWatcher",
 				"Networking",
 				"Sockets",
+				"TcpMessaging",
 				"UdpMessaging",
-                "TcpMessaging",
 			}
 		);
 
@@ -89,5 +84,15 @@ public class UnrealFrontend : ModuleRules
 				"Messaging",
 			}
 		);
+
+		if (Target.GlobalDefinitions.Contains("UE_DEPRECATED_PROFILER_ENABLED=1"))
+		{
+			PrivateDependencyModuleNames.AddRange(
+				new string[] {
+					"Profiler",
+					"ProfilerClient",
+				}
+			);
+		}
 	}
 }

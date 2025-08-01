@@ -2,28 +2,70 @@
 
 
 #include "SBlueprintActionMenu.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/SBoxPanel.h"
-#include "Widgets/Layout/SBox.h"
-#include "SGraphActionMenu.h"
-#include "Framework/Application/SlateApplication.h"
-#include "Widgets/Images/SImage.h"
-#include "Widgets/Input/SComboButton.h"
-#include "Widgets/Input/SCheckBox.h"
-#include "EditorStyleSet.h"
-#include "Editor/EditorPerProjectUserSettings.h"
-#include "EdGraphSchema_K2.h"
-#include "SBlueprintPalette.h"
-#include "BlueprintEditor.h"
-#include "SMyBlueprint.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "BlueprintActionMenuBuilder.h"
+
 #include "BlueprintActionFilter.h"
+#include "BlueprintActionMenuBuilder.h"
 #include "BlueprintActionMenuUtils.h"
+#include "BlueprintEditor.h"
+#include "BlueprintEditorSettings.h"
+#include "BlueprintNamespaceUtilities.h"
 #include "BlueprintPaletteFavorites.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/SparseArray.h"
+#include "CoreGlobals.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphSchema.h"
+#include "EdGraphSchema_K2.h"
+#include "EdGraphSchema_K2_Actions.h"
+#include "Editor/EditorPerProjectUserSettings.h"
+#include "Engine/Blueprint.h"
+#include "Fonts/SlateFontInfo.h"
+#include "Framework/Application/SlateApplication.h"
+#include "HAL/PlatformCrt.h"
 #include "IDocumentation.h"
-#include "SSCSEditor.h"
+#include "Internationalization/Internationalization.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Layout/Children.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/ConfigCacheIni.h"
 #include "SBlueprintContextTargetMenu.h"
+#include "SBlueprintNamespaceEntry.h"
+#include "SBlueprintPalette.h"
+#include "SGraphActionMenu.h"
+#include "SMyBlueprint.h"
+#include "SSubobjectEditor.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateColor.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/SlateStructs.h"
+#include "UObject/Class.h"
+#include "UObject/Field.h"
+#include "UObject/GarbageCollection.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Input/SCheckBox.h"
+#include "Widgets/Input/SComboButton.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Notifications/SProgressBar.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/SNullWidget.h"
+#include "Widgets/SPanel.h"
+#include "Widgets/SToolTip.h"
+#include "Widgets/Text/STextBlock.h"
+
+class SWidget;
+struct FSlateBrush;
 
 #define LOCTEXT_NAMESPACE "SBlueprintGraphContextMenu"
 
@@ -48,7 +90,7 @@ struct FBlueprintAction_PromoteVariable : public FEdGraphSchemaAction
 			UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraph(ParentGraph);
 			if( ( MyBlueprintEditor.IsValid() == true ) && ( Blueprint != NULL ) )
 			{
-				MyBlueprintEditor.Pin()->DoPromoteToVariable( Blueprint, FromPin, bToMemberVariable );
+				MyBlueprintEditor.Pin()->DoPromoteToVariable( Blueprint, FromPin, bToMemberVariable, &Location );
 			}
 		}
 		return NULL;		
@@ -106,11 +148,11 @@ public:
 				.FillWidth(1.0)
 			[
 				SNew( SCheckBox )
-					.Visibility(this, &SBlueprintActionFavoriteToggle::IsVisibile)
+					.Visibility(this, &SBlueprintActionFavoriteToggle::IsVisible)
 					.ToolTipText(this, &SBlueprintActionFavoriteToggle::GetToolTipText)
 					.IsChecked(this, &SBlueprintActionFavoriteToggle::GetFavoritedState)
 					.OnCheckStateChanged(this, &SBlueprintActionFavoriteToggle::OnFavoriteToggled)
-					.Style(FEditorStyle::Get(), "Kismet.Palette.FavoriteToggleStyle")
+					.Style(FAppStyle::Get(), "Kismet.Palette.FavoriteToggleStyle")
 			]
 		];
 	}
@@ -122,7 +164,7 @@ private:
 	 *
 	 * @return True if this toggle switch should be showing, false if not.
 	 */
-	EVisibility IsVisibile() const
+	EVisibility IsVisible() const
 	{
 		bool bNoFavorites = false;
 		GConfig->GetBool(TEXT("BlueprintEditor.Palette"), TEXT("bUseLegacyLayout"), bNoFavorites, GEditorIni);
@@ -241,34 +283,66 @@ void SBlueprintActionMenu::Construct( const FArguments& InArgs, TSharedPtr<FBlue
 		{
 			// Get the type color and icon
 			TypeColor = Schema->GetPinTypeColor(OnePin->PinType);
-			ContextIcon = FEditorStyle::GetBrush( OnePin->PinType.IsArray() ? TEXT("Graph.ArrayPin.Connected") : TEXT("Graph.Pin.Connected") );
+			ContextIcon = FAppStyle::GetBrush( OnePin->PinType.IsArray() ? TEXT("Graph.ArrayPin.Connected") : TEXT("Graph.Pin.Connected") );
 		}
 	}
 
 	FBlueprintActionContext MenuContext;
 	ConstructActionContext(MenuContext);
 
+	TSharedPtr<SWidget> AddImportTargetContent = SNullWidget::NullWidget;
+	if (GetDefault<UBlueprintEditorSettings>()->bEnableNamespaceImportingFeatures)
+	{
+		SAssignNew(AddImportTargetContent, SBox)
+			.ToolTipText(LOCTEXT("ImportActionLabelTooltip", "Choose a namespace to import and load additional actions."))
+		[
+			SNew(SHorizontalBox)
+			+SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(LOCTEXT("ImportActionButtonLabel", "Import Actions From:"))
+			]
+			+SHorizontalBox::Slot()
+				.AutoWidth()
+				.Padding(4.f, 0.f)
+			[
+				SNew(SBlueprintNamespaceEntry)
+					.AllowTextEntry(false)
+					.OnNamespaceSelected(this, &SBlueprintActionMenu::OnNamespaceSelectedForImport)
+					.OnGetNamespacesToExclude(this, &SBlueprintActionMenu::OnGetNamespacesToExcludeFromImportMenu)
+					.ExcludedNamespaceTooltipText(LOCTEXT("CannotSelectNamespaceForImport", "This namespace has already been imported by this Blueprint."))
+			]
+		];
+	}
+
 	TSharedPtr<SComboButton> TargetContextSubMenuButton;
 	// @TODO: would be nice if we could use a checkbox style for this, and have a different state for open/closed
 	SAssignNew(TargetContextSubMenuButton, SComboButton)
 		.MenuPlacement(MenuPlacement_MenuRight)
 		.HasDownArrow(false)
-		.ButtonStyle(FEditorStyle::Get(), "BlueprintEditor.ContextMenu.TargetsButton")
+		.ButtonStyle(FAppStyle::Get(), "BlueprintEditor.ContextMenu.TargetsButton")
+		.ContentPadding(FMargin(5))
 		.MenuContent()
 		[
 			SAssignNew(ContextTargetSubMenu, SBlueprintContextTargetMenu, MenuContext)
 				.OnTargetMaskChanged(this, &SBlueprintActionMenu::OnContextTargetsChanged)
+				.CustomTargetContent()
+				[
+					AddImportTargetContent.ToSharedRef()
+				]
 		];
 
 	// Build the widget layout
 	SBorder::Construct( SBorder::FArguments()
-		.BorderImage( FEditorStyle::GetBrush("Menu.Background") )
-		.Padding(5)
+		.BorderImage( FAppStyle::GetBrush("Menu.Background") )
+		.Padding(5.0f)
 		[
 			// Achieving fixed width by nesting items within a fixed width box.
 			SNew(SBox)
-			.WidthOverride(400)
-			.HeightOverride(400)
+			.WidthOverride(400.0f)
+			.HeightOverride(400.0f)
 			[
 				SNew(SVerticalBox)
 
@@ -283,7 +357,7 @@ void SBlueprintActionMenu::Construct( const FArguments& InArgs, TSharedPtr<FBlue
 					+SHorizontalBox::Slot()
 					.AutoWidth()
 					.VAlign(VAlign_Center)
-					.Padding(0, 0, (ContextIcon != NULL) ? 5 : 0, 0)
+					.Padding(0.0f, 0.0f, (ContextIcon != nullptr) ? 5.0f : 0.0f, 0.0f)
 					[
 						SNew(SImage)
 						.ColorAndOpacity(TypeColor)
@@ -293,24 +367,25 @@ void SBlueprintActionMenu::Construct( const FArguments& InArgs, TSharedPtr<FBlue
 
 					// Search context description
 					+SHorizontalBox::Slot()
-					.AutoWidth()
+					.FillWidth(1.f)
 					.VAlign(VAlign_Center)
 					[
 						SNew(STextBlock)
 						.Text(this, &SBlueprintActionMenu::GetSearchContextDesc)
-						.Font(FEditorStyle::GetFontStyle(FName("BlueprintEditor.ActionMenu.ContextDescriptionFont")))
+						.Font(FAppStyle::GetFontStyle(FName("BlueprintEditor.ActionMenu.ContextDescriptionFont")))
 						.ToolTip(IDocumentation::Get()->CreateToolTip(
 							LOCTEXT("BlueprintActionMenuContextTextTooltip", "Describes the current context of the action list"),
 							NULL,
 							TEXT("Shared/Editors/BlueprintEditor"),
 							TEXT("BlueprintActionMenuContextText")))
-						.WrapTextAt(280)
+						.AutoWrapText(true)
 					]
 
 					// Context Toggle
 					+SHorizontalBox::Slot()
 					.HAlign(HAlign_Right)
 					.VAlign(VAlign_Center)
+					.AutoWidth()
 					[
 						SNew(SCheckBox)
 						.OnCheckStateChanged(this, &SBlueprintActionMenu::OnContextToggleChanged)
@@ -342,10 +417,30 @@ void SBlueprintActionMenu::Construct( const FArguments& InArgs, TSharedPtr<FBlue
 					SAssignNew(GraphActionMenu, SGraphActionMenu)
 						.OnActionSelected(this, &SBlueprintActionMenu::OnActionSelected)
 						.OnCreateWidgetForAction(SGraphActionMenu::FOnCreateWidgetForAction::CreateSP(this, &SBlueprintActionMenu::OnCreateWidgetForAction))
-						.OnCollectAllActions(this, &SBlueprintActionMenu::CollectAllActions)
+						.OnGetActionList(this, &SBlueprintActionMenu::OnGetActionList)
 						.OnCreateCustomRowExpander_Static(&CreateCustomBlueprintActionExpander)
 						.DraggedFromPins(DraggedFromPins)
 						.GraphObj(GraphObj)
+				]
+
+				// PROGRESS BAR
+				+SVerticalBox::Slot()
+				.AutoHeight()
+				[
+					SNew(SBox)
+					.HeightOverride(2)
+					.Visibility_Lambda([this]()
+					{
+						return ContextMenuBuilder.IsValid() && ContextMenuBuilder->GetNumPendingActions() > 0 ? EVisibility::SelfHitTestInvisible : EVisibility::Collapsed;
+					})
+					[
+						SNew(SProgressBar)
+						.BorderPadding(FVector2D(0, 0))
+						.Percent_Lambda([this]()
+						{
+							return ContextMenuBuilder.IsValid() ? ContextMenuBuilder->GetPendingActionsProgress() : 0.0f;
+						})
+					]
 				]
 			]
 		]
@@ -432,7 +527,7 @@ ECheckBoxState SBlueprintActionMenu::ContextToggleIsChecked() const
 	return EditorPtr.Pin()->GetIsContextSensitive() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
 }
 
-void SBlueprintActionMenu::CollectAllActions(FGraphActionListBuilderBase& OutAllActions)
+TSharedRef<FGraphActionListBuilderBase> SBlueprintActionMenu::OnGetActionList()
 {	
 	check(EditorPtr.IsValid());
 	TSharedPtr<FBlueprintEditor> BlueprintEditor = EditorPtr.Pin();
@@ -446,17 +541,31 @@ void SBlueprintActionMenu::CollectAllActions(FGraphActionListBuilderBase& OutAll
 
 	FBlueprintActionContext FilterContext;
 	ConstructActionContext(FilterContext);
-	
-	FBlueprintActionMenuBuilder MenuBuilder(EditorPtr);
-	// NOTE: cannot call GetGraphContextActions() during serialization and GC due to its use of FindObject()
-	if(!GIsSavingPackage && !IsGarbageCollecting() && FilterContext.Blueprints.Num() > 0)
+
+	FBlueprintActionMenuBuilder::EConfigFlags ConfigFlags = FBlueprintActionMenuBuilder::DefaultConfig;
+	if (GetDefault<UBlueprintEditorSettings>()->bEnableContextMenuTimeSlicing)
 	{
-		FBlueprintActionMenuUtils::MakeContextMenu(FilterContext, bIsContextSensitive, ContextTargetMask, MenuBuilder);
+		ConfigFlags |= FBlueprintActionMenuBuilder::UseTimeSlicing;
 	}
-	// copy the added options back to the main list
-	OutAllActions.Append(MenuBuilder); // @TODO: Avoid this copy
+
+	ContextMenuBuilder = MakeShared<FBlueprintActionMenuBuilder>(ConfigFlags);
+
+	// NOTE: cannot call GetGraphContextActions() during serialization and GC due to its use of FindObject()
+	if (!GIsSavingPackage && !IsGarbageCollecting() && FilterContext.Blueprints.Num() > 0)
+	{
+		FBlueprintActionMenuUtils::MakeContextMenu(FilterContext, bIsContextSensitive, ContextTargetMask, *ContextMenuBuilder);
+	}
+	
 	// also try adding promote to variable if we can do so.
-	TryInsertPromoteToVariable(FilterContext, OutAllActions);
+	TryInsertPromoteToVariable(FilterContext, *ContextMenuBuilder);
+
+	// give the schema the opportunity to add another action
+	if (const UEdGraphSchema* Schema = Cast<const UEdGraphSchema>(GraphObj->GetSchema()))
+	{
+		Schema->InsertAdditionalActions(FilterContext.Blueprints, FilterContext.Graphs, FilterContext.Pins, *ContextMenuBuilder);
+	}
+
+	return ContextMenuBuilder.ToSharedRef();
 }
 
 void SBlueprintActionMenu::ConstructActionContext(FBlueprintActionContext& ContextDescOut)
@@ -478,6 +587,7 @@ void SBlueprintActionMenu::ConstructActionContext(FBlueprintActionContext& Conte
 		return;
 	}
 
+	ContextDescOut.EditorPtr = EditorPtr;
 	ContextDescOut.Blueprints.Add(Blueprint);
 
 	if (bIsContextSensitive)
@@ -491,10 +601,10 @@ void SBlueprintActionMenu::ConstructActionContext(FBlueprintActionContext& Conte
 			ContextDescOut.SelectedObjects.Add(SelectedVar->GetProperty());
 		}
 		// If the selection come from the SCS editor, add it to the filter context.
-		else if (Blueprint->SkeletonGeneratedClass && BlueprintEditor->GetSCSEditor().IsValid())
+		else if (Blueprint->SkeletonGeneratedClass && BlueprintEditor->GetSubobjectEditor().IsValid())
 		{
-			TArray<FSCSEditorTreeNodePtrType> Nodes = BlueprintEditor->GetSCSEditor()->GetSelectedNodes();
-			if (Nodes.Num() == 1 && Nodes[0]->GetNodeType() == FSCSEditorTreeNode::ComponentNode)
+			TArray<FSubobjectEditorTreeNodePtrType> Nodes = BlueprintEditor->GetSubobjectEditor()->GetSelectedNodes();
+			if (Nodes.Num() == 1 && Nodes[0]->IsComponentNode())
 			{
 				FName PropertyName = Nodes[0]->GetVariableName();
 				FObjectProperty* VariableProperty = FindFProperty<FObjectProperty>(Blueprint->SkeletonGeneratedClass, PropertyName);
@@ -522,7 +632,7 @@ void SBlueprintActionMenu::OnActionSelected( const TArray< TSharedPtr<FEdGraphSc
 	{
 		for ( int32 ActionIndex = 0; ActionIndex < SelectedAction.Num(); ActionIndex++ )
 		{
-			if ( SelectedAction[ActionIndex].IsValid() && GraphObj != NULL )
+			if ( SelectedAction[ActionIndex].IsValid() && GraphObj != nullptr )
 			{
 				// Don't dismiss when clicking on dummy action
 				if ( !bActionExecuted && (SelectedAction[ActionIndex]->GetTypeId() != FEdGraphSchemaAction_Dummy::StaticGetTypeId()))
@@ -533,9 +643,32 @@ void SBlueprintActionMenu::OnActionSelected( const TArray< TSharedPtr<FEdGraphSc
 
 				UEdGraphNode* ResultNode = SelectedAction[ActionIndex]->PerformAction(GraphObj, DraggedFromPins, NewNodePosition);
 
-				if ( ResultNode != NULL )
+				if ( ResultNode != nullptr )
 				{
 					NewNodePosition.Y += UEdGraphSchema_K2::EstimateNodeHeight( ResultNode );
+
+					TSharedPtr<FBlueprintEditor> BlueprintEditorPtr = EditorPtr.Pin();
+					if (BlueprintEditorPtr.IsValid())
+					{
+						// Determine which namespace(s) to import, based on the node's external dependencies.
+						TSet<FString> NamespacesToImport;
+						TArray<UStruct*> ExternalDependencies;
+						if (ResultNode->HasExternalDependencies(&ExternalDependencies))
+						{
+							for (const UStruct* ExternalDependency : ExternalDependencies)
+							{
+								FBlueprintNamespaceUtilities::GetDefaultImportsForObject(ExternalDependency, NamespacesToImport);
+							}
+						}
+
+						if (NamespacesToImport.Num() > 0)
+						{
+							// Auto-import the namespace(s) gathered above. Additional type objects within the imported scope may be loaded here.
+							FBlueprintEditor::FImportNamespaceExParameters Params;
+							Params.NamespacesToImport = MoveTemp(NamespacesToImport);
+							BlueprintEditorPtr->ImportNamespaceEx(Params);
+						}
+					}
 				}
 			}
 		}
@@ -561,6 +694,51 @@ void SBlueprintActionMenu::TryInsertPromoteToVariable(FBlueprintActionContext co
 			LocalPromoteAction->MyBlueprintEditor = EditorPtr;
 			OutAllActions.AddAction( LocalPromoteAction );
 		}
+	}
+}
+
+void SBlueprintActionMenu::OnGetNamespacesToExcludeFromImportMenu(TSet<FString>& OutNamespacesToExclude)
+{
+	FBlueprintActionContext MenuContext;
+	ConstructActionContext(MenuContext);
+
+	FBlueprintNamespaceUtilities::GetSharedGlobalImports(OutNamespacesToExclude);
+
+	for (const UBlueprint* Blueprint : MenuContext.Blueprints)
+	{
+		FBlueprintNamespaceUtilities::GetDefaultImportsForObject(Blueprint, OutNamespacesToExclude);
+		OutNamespacesToExclude.Append(Blueprint->ImportedNamespaces);
+	}
+}
+
+void SBlueprintActionMenu::OnNamespaceSelectedForImport(const FString& InNamespace)
+{
+	TSharedPtr<FBlueprintEditor> BlueprintEditorPtr = EditorPtr.Pin();
+	if (BlueprintEditorPtr.IsValid())
+	{
+		FBlueprintEditor::FImportNamespaceExParameters Params;
+		Params.NamespacesToImport.Add(InNamespace);
+		Params.OnPostImportCallback = FSimpleDelegate::CreateLambda([GraphActionMenu = this->GraphActionMenu]()
+		{
+			// Now that additional types have been loaded/imported, update the menu to include any additional action(s).
+			const bool bPreserveExpansion = true;
+			const bool bHandleOnSelectionEvent = false;
+			GraphActionMenu->RefreshAllActions(bPreserveExpansion, bHandleOnSelectionEvent);
+		});
+
+		// Auto-import the namespace into the current editor context. This may load additional type assets.
+		BlueprintEditorPtr->ImportNamespaceEx(Params);
+	}
+}
+
+void SBlueprintActionMenu::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
+{
+	SBorder::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
+
+	int32 NewIdxStart = ContextMenuBuilder->GetNumActions();
+	if (ContextMenuBuilder.IsValid() && ContextMenuBuilder->ProcessPendingActions())
+	{
+		GraphActionMenu->UpdateForNewActions(NewIdxStart);
 	}
 }
 

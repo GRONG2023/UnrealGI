@@ -27,7 +27,7 @@ namespace BuildPatchServices
 		virtual int32 GetResponseCode() const override;
 		virtual const TArray<uint8>& GetContent() const override;
 		virtual FString GetContentAsString() const override;
-		virtual int32 GetContentLength() const override;
+		virtual uint64 GetContentLength() const override;
 
 	public:
 		TArray<uint8> Data;
@@ -38,7 +38,7 @@ namespace BuildPatchServices
 		: public FMockHttpManager
 	{
 	public:
-		FFakeHttpManager(FTicker& Ticker);
+		FFakeHttpManager(FTSTicker& Ticker);
 		virtual TSharedRef<IHttpRequest, ESPMode::ThreadSafe> CreateRequest() override;
 		virtual bool Tick(float Delta);
 		virtual bool OnProcessRequest(FFakeHttpRequest* FakeHttpRequest);
@@ -73,12 +73,12 @@ namespace BuildPatchServices
 		return UTF8_TO_TCHAR(ZeroTerminatedPayload.GetData());
 	}
 
-	int32 FFakeHttpResponse::GetContentLength() const
+	uint64 FFakeHttpResponse::GetContentLength() const
 	{
 		return Data.Num();
 	}
 
-	FFakeHttpManager::FFakeHttpManager(FTicker& Ticker)
+	FFakeHttpManager::FFakeHttpManager(FTSTicker& Ticker)
 	{
 		Ticker.AddTicker(FTickerDelegate::CreateRaw(this, &FFakeHttpManager::Tick));
 	}

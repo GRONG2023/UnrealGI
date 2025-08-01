@@ -4,8 +4,9 @@
 
 #pragma once
 
+#include "D3D12RHICommon.h"
+
 class FD3D12RootSignature; // forward-declare
-class FD3D12BoundShaderState; // forward-declare
 struct FD3D12ComputePipelineStateDesc;
 struct FD3D12LowLevelGraphicsPipelineStateDesc;
 
@@ -37,6 +38,31 @@ struct FD3D12_GRAPHICS_PIPELINE_STATE_STREAM
 	//CD3DX12_PIPELINE_STATE_STREAM_VIEW_INSTANCING ViewInstancingDesc;
 };
 
+#if PLATFORM_SUPPORTS_MESH_SHADERS
+struct FD3D12_MESH_PIPELINE_STATE_STREAM
+{
+	// Note: Unused members are currently commented out to exclude them from the stream.
+	// This results in a smaller struct and thus fewer tokens to parse at runtime. Feel free to add/change as necessary.
+
+	//CD3DX12_PIPELINE_STATE_STREAM_FLAGS Flags;
+	CD3DX12_PIPELINE_STATE_STREAM_NODE_MASK NodeMask;
+	CD3DX12_PIPELINE_STATE_STREAM_ROOT_SIGNATURE pRootSignature;
+	CD3DX12_PIPELINE_STATE_STREAM_PRIMITIVE_TOPOLOGY PrimitiveTopologyType;
+	CD3DX12_PIPELINE_STATE_STREAM_MS MS;
+	CD3DX12_PIPELINE_STATE_STREAM_AS AS;
+	CD3DX12_PIPELINE_STATE_STREAM_PS PS;
+	CD3DX12_PIPELINE_STATE_STREAM_BLEND_DESC BlendState;
+	CD3DX12_PIPELINE_STATE_STREAM_DEPTH_STENCIL1 DepthStencilState;
+	CD3DX12_PIPELINE_STATE_STREAM_DEPTH_STENCIL_FORMAT DSVFormat;
+	CD3DX12_PIPELINE_STATE_STREAM_RASTERIZER RasterizerState;
+	CD3DX12_PIPELINE_STATE_STREAM_RENDER_TARGET_FORMATS RTVFormats;
+	CD3DX12_PIPELINE_STATE_STREAM_SAMPLE_DESC SampleDesc;
+	CD3DX12_PIPELINE_STATE_STREAM_SAMPLE_MASK SampleMask;
+	CD3DX12_PIPELINE_STATE_STREAM_CACHED_PSO CachedPSO;
+	//CD3DX12_PIPELINE_STATE_STREAM_VIEW_INSTANCING ViewInstancingDesc;
+};
+#endif
+
 // Compute pipeline stream struct that represents the latest version of PSO subobjects currently used by the RHI.
 struct FD3D12_COMPUTE_PIPELINE_STATE_STREAM
 {
@@ -53,7 +79,7 @@ struct FD3D12_COMPUTE_PIPELINE_STATE_STREAM
 struct ComputePipelineCreationArgs_POD;
 struct GraphicsPipelineCreationArgs_POD;
 
-#include "../D3D12PipelineState.h"
+#include "D3D12PipelineState.h"
 
 void SaveByteCode(D3D12_SHADER_BYTECODE& ByteCode);
 
@@ -84,10 +110,10 @@ struct GraphicsPipelineCreationArgs_POD
 		Library = InArgs.Library;
 
 		SaveByteCode(Desc.Desc.VS);
+		SaveByteCode(Desc.Desc.MS);
+		SaveByteCode(Desc.Desc.AS);
 		SaveByteCode(Desc.Desc.PS);
 		SaveByteCode(Desc.Desc.GS);
-		SaveByteCode(Desc.Desc.HS);
-		SaveByteCode(Desc.Desc.DS);
 	}
 
 	void Destroy();
@@ -182,7 +208,7 @@ public:
 	using FD3D12PipelineStateCacheBase::FindInLoadedCache;
 	using FD3D12PipelineStateCacheBase::CreateAndAdd;
 #endif
-	void RebuildFromDiskCache(ID3D12RootSignature* GraphicsRootSignature, ID3D12RootSignature* ComputeRootSignature);
+	void RebuildFromDiskCache();
 
 	void Close();
 

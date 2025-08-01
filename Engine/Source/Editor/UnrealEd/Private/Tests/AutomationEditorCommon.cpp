@@ -12,6 +12,7 @@
 #include "Editor/UnrealEdEngine.h"
 #include "Factories/Factory.h"
 #include "Factories/TextureFactory.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Engine/StaticMesh.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Serialization/ArchiveReplaceObjectRef.h"
@@ -22,9 +23,10 @@
 #include "EditorModes.h"
 #include "FileHelpers.h"
 #include "UnrealEdGlobals.h"
-#include "ARFilter.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/ARFilter.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Tests/AutomationCommon.h"
+#include "IAssetViewport.h"
 
 #include "LevelEditor.h"
 #include "Interfaces/IMainFrameModule.h"
@@ -39,7 +41,9 @@
 #include "Bookmarks/IBookmarkTypeTools.h"
 #include "GameMapsSettings.h"
 #include "Editor/EditorPerformanceSettings.h"
+#include "TextureCompiler.h"
 
+#if WITH_AUTOMATION_TESTS
 
 #define COOK_TIMEOUT 3600
 
@@ -48,12 +52,6 @@ DEFINE_LOG_CATEGORY_STATIC(LogAutomationEditorCommon, Log, All);
 
 UWorld* FAutomationEditorCommonUtils::CreateNewMap()
 {
-	// Change out of Matinee when opening new map, so we avoid editing data in the old one.
-	if ( GLevelEditorModeTools().IsModeActive(FBuiltinEditorModes::EM_InterpEdit) )
-	{
-		GLevelEditorModeTools().DeactivateMode(FBuiltinEditorModes::EM_InterpEdit);
-	}
-
 	// Also change out of Landscape mode to ensure all references are cleared.
 	if ( GLevelEditorModeTools().IsModeActive(FBuiltinEditorModes::EM_Landscape) )
 	{
@@ -175,7 +173,7 @@ void FAutomationEditorCommonUtils::NullReferencesToObject(UObject* InObject)
 		UObject* CurReplaceObj = MapIter.Key();
 		const TArray<FProperty*>& RefPropArray = MapIter.Value();
 
-		FArchiveReplaceObjectRef<UObject> ReplaceAr(CurReplaceObj, ReplacementMap, false, true, false);
+		FArchiveReplaceObjectRef<UObject> ReplaceAr(CurReplaceObj, ReplacementMap, EArchiveReplaceObjectFlags::IgnoreOuterRef);
 
 		for (TArray<FProperty*>::TConstIterator RefPropIter(RefPropArray); RefPropIter; ++RefPropIter)
 		{
@@ -240,7 +238,7 @@ void FAutomationEditorCommonUtils::ApplyCustomFactorySetting(UObject* InObject, 
 	{
 		if (PropertyChain.Num() == 0)
 		{
-			TargetProperty->ImportText(*Value, TargetProperty->ContainerPtrToValuePtr<uint8>(InObject), 0, InObject);
+			TargetProperty->ImportText_InContainer(*Value, InObject, InObject, 0);
 		}
 		else
 		{
@@ -318,10 +316,10 @@ void FAutomationEditorCommonUtils::ApplyCustomFactorySettings(UFactory* InFactor
 * @param InTestName is the folder that has the same name as the test. (For Example: "Performance").
 * @param InItemBeingTested is the name for the thing that is being tested. (For Example: "MapName").
 * @param InFileName is the name of the file with an extension
-* @param InNumberToBeWritten is the float number that is expected to be written to the file.
+* @param InEntry is the double-precision number that is expected to be written to the file.
 * @param Delimiter is the delimiter to be used. TEXT(",")
 */
-void FAutomationEditorCommonUtils::WriteToTextFile(const FString& InTestName, const FString& InTestItem, const FString& InFileName, const float& InEntry, const FString& Delimiter)
+void FAutomationEditorCommonUtils::WriteToTextFile(const FString& InTestName, const FString& InTestItem, const FString& InFileName, const double& InEntry, const FString& Delimiter)
 {
 	//Performance file locations and setups.
 	FString FileSaveLocation = FPaths::Combine(*FPaths::AutomationLogDir(), *InTestName, *InTestItem, *InFileName);
@@ -398,7 +396,7 @@ void FAutomationEditorCommonUtils::CreateArrayFromFile(const FString& InFileLoca
 {
 	FString RawData;
 
-	if (FPaths::FileExists(*InFileLocation))
+	if (FPaths::FileExists(InFileLocation))
 	{
 		UE_LOG(LogEditorAutomationTests, VeryVerbose, TEXT("Loading and parsing the data from '%s' into an array."), *InFileLocation);
 		FFileHelper::LoadFileToString(RawData, *InFileLocation);
@@ -500,6 +498,23 @@ bool FAutomationEditorCommonUtils::SetOrthoViewportView(const FVector& ViewLocat
 	return false;
 }
 
+bool FAutomationEditorCommonUtils::SetPlaySessionStartToActiveViewport(FRequestPlaySessionParams& OutParams)
+{
+	FLevelEditorModule& LevelEditorModule = FModuleManager::GetModuleChecked<FLevelEditorModule>(TEXT("LevelEditor"));
+	TSharedPtr<IAssetViewport> ActiveLevelViewport = LevelEditorModule.GetFirstActiveViewport();
+	// Make sure we can find a path to the view port.
+	if (ActiveLevelViewport.IsValid() &&
+		FSlateApplication::Get().FindWidgetWindow(ActiveLevelViewport->AsWidget()).IsValid())
+	{
+		// Start the player where the camera is if not forcing from player start
+		OutParams.StartLocation = ActiveLevelViewport->GetAssetViewportClient().GetViewLocation();
+		OutParams.StartRotation = ActiveLevelViewport->GetAssetViewportClient().GetViewRotation();
+		return true;
+	}
+
+	return false;
+}
+
 //////////////////////////////////////////////////////////////////////
 //Asset Path Commands
 
@@ -513,6 +528,8 @@ FString FAutomationEditorCommonUtils::ConvertPackagePathToAssetPath(const FStrin
 	const FString Filename = FPaths::ConvertRelativePathToFull(PackagePath);
 	FString EngineFileName = Filename;
 	FString GameFileName = Filename;
+	FString ProjectPluginFileName = Filename;
+	FString EnginePluginFileName = Filename;
 	if (FPaths::MakePathRelativeTo(EngineFileName, *FPaths::EngineContentDir()) && !EngineFileName.Contains(TEXT("../")))
 	{
 		const FString ShortName = FPaths::GetBaseFilename(EngineFileName);
@@ -525,6 +542,22 @@ FString FAutomationEditorCommonUtils::ConvertPackagePathToAssetPath(const FStrin
 		const FString ShortName = FPaths::GetBaseFilename(GameFileName);
 		const FString PathName = FPaths::GetPath(GameFileName);
 		const FString AssetName = FString::Printf(TEXT("/Game/%s/%s.%s"), *PathName, *ShortName, *ShortName);
+		return AssetName;
+	}
+	else if (FPaths::MakePathRelativeTo(ProjectPluginFileName, *FPaths::ProjectPluginsDir()) && !ProjectPluginFileName.Contains(TEXT("../")))
+	{
+		const FString ShortName = FPaths::GetBaseFilename(ProjectPluginFileName);
+		const FString FullPathName = FPaths::GetPath(ProjectPluginFileName);
+		const FString CleanedPathName = FullPathName.Replace(TEXT("Content/"), TEXT(""));
+		const FString AssetName = FString::Printf(TEXT("/%s/%s.%s"), *CleanedPathName, *ShortName, *ShortName);
+		return AssetName;
+	}
+	else if (FPaths::MakePathRelativeTo(EnginePluginFileName, *FPaths::EnginePluginsDir()) && !EnginePluginFileName.Contains(TEXT("../")))
+	{
+		const FString ShortName = FPaths::GetBaseFilename(EnginePluginFileName);
+		const FString FullPathName = FPaths::GetPath(EnginePluginFileName);
+		const FString CleanedPathName = FullPathName.Replace(TEXT("Content/"), TEXT(""));
+		const FString AssetName = FString::Printf(TEXT("/%s/%s.%s"), *CleanedPathName, *ShortName, *ShortName);
 		return AssetName;
 	}
 	else
@@ -545,7 +578,7 @@ FAssetData FAutomationEditorCommonUtils::GetAssetDataFromPackagePath(const FStri
 	if (AssetPath.Len() > 0)
 	{
 		IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
-		return AssetRegistry.GetAssetByObjectPath(*AssetPath);
+		return AssetRegistry.GetAssetByObjectPath(FSoftObjectPath(AssetPath));
 	}
 
 	return FAssetData();
@@ -562,7 +595,7 @@ void FAutomationEditorCommonUtils::CollectTestsByClass(UClass * Class, TArray<FS
 {
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 	TArray<FAssetData> ObjectList;
-	AssetRegistryModule.Get().GetAssetsByClass(Class->GetFName(), ObjectList);
+	AssetRegistryModule.Get().GetAssetsByClass(Class->GetClassPathName(), ObjectList);
 
 	for (TObjectIterator<UClass> AllClassesIt; AllClassesIt; ++AllClassesIt)
 	{
@@ -573,14 +606,14 @@ void FAutomationEditorCommonUtils::CollectTestsByClass(UClass * Class, TArray<FS
 	for (auto ObjIter = ObjectList.CreateConstIterator(); ObjIter; ++ObjIter)
 	{
 		const FAssetData& Asset = *ObjIter;
-		FString Filename = Asset.ObjectPath.ToString();
+		FString Filename = Asset.GetObjectPathString();
 		//convert to full paths
 		Filename = FPackageName::LongPackageNameToFilename(Filename);
 		if (FAutomationTestFramework::Get().ShouldTestContent(Filename))
 		{
 			FString BeautifiedFilename = Asset.AssetName.ToString();
 			OutBeautifiedNames.Add(BeautifiedFilename);
-			OutTestCommands.Add(Asset.ObjectPath.ToString());
+			OutTestCommands.Add(Asset.GetObjectPathString());
 		}
 	}
 }
@@ -600,7 +633,7 @@ void FAutomationEditorCommonUtils::CollectGameContentTestsByClass(UClass * Class
 
 	//Generating the list of assets.
 	//This list is being filtered by the game folder and class type.  The results are placed into the ObjectList variable.
-	AssetFilter.ClassNames.Add(Class->GetFName());
+	AssetFilter.ClassPaths.Add(Class->GetClassPathName());
 
 	//removed path as a filter as it causes two large lists to be sorted.  Filtering on "game" directory on iteration
 	//AssetFilter.PackagePaths.Add("/Game");
@@ -612,7 +645,7 @@ void FAutomationEditorCommonUtils::CollectGameContentTestsByClass(UClass * Class
 	for (auto ObjIter = ObjectList.CreateConstIterator(); ObjIter; ++ObjIter)
 	{
 		const FAssetData& Asset = *ObjIter;
-		FString Filename = Asset.ObjectPath.ToString();
+		FString Filename = Asset.GetObjectPathString();
 
 		if (Filename.StartsWith("/Game"))
 		{
@@ -622,7 +655,7 @@ void FAutomationEditorCommonUtils::CollectGameContentTestsByClass(UClass * Class
 			{
 				FString BeautifiedFilename = Asset.AssetName.ToString();
 				OutBeautifiedNames.Add(BeautifiedFilename);
-				OutTestCommands.Add(Asset.ObjectPath.ToString());
+				OutTestCommands.Add(Asset.GetObjectPathString());
 			}
 		}
 	}
@@ -678,11 +711,11 @@ void FAutomationEditorCommonUtils::CollectGameContentTests(TArray<FString>& OutB
 		if (Asset.GetClass() == nullptr)
 		{
 			// a nullptr class is bad !
-			UE_LOG(LogAutomationEditorCommon, Warning, TEXT("GetClass for %s (%s) returned nullptr. Asset ignored"), *Asset.AssetName.ToString(), *Asset.ObjectPath.ToString());
+			UE_LOG(LogAutomationEditorCommon, Warning, TEXT("GetClass for %s (%s) returned nullptr. Asset ignored"), *Asset.AssetName.ToString(), *Asset.GetObjectPathString());
 		}
 		else 
 		{
-			FString Filename = Asset.ObjectPath.ToString();
+			FString Filename = Asset.GetObjectPathString();
 
 			if (Filename.StartsWith("/Game"))
 			{
@@ -690,9 +723,9 @@ void FAutomationEditorCommonUtils::CollectGameContentTests(TArray<FString>& OutB
 				Filename = FPackageName::LongPackageNameToFilename(Filename);
 				if (FAutomationTestFramework::Get().ShouldTestContent(Filename))
 				{
-					FString BeautifiedFilename = FString::Printf(TEXT("%s.%s"), *Asset.GetClass()->GetFName().ToString(), *Asset.AssetName.ToString());
+					FString BeautifiedFilename = FString::Printf(TEXT("%s.%s"), *Asset.AssetClassPath.ToString(), *Asset.AssetName.ToString());
 					OutBeautifiedNames.Add(BeautifiedFilename);
-					OutTestCommands.Add(Asset.ObjectPath.ToString());
+					OutTestCommands.Add(Asset.GetObjectPathString());
 				}
 			}
 		}
@@ -735,7 +768,17 @@ bool FOpenEditorForAssetCommand::Update()
 	UObject* Object = StaticLoadObject(UObject::StaticClass(), NULL, *AssetName);
 	if ( Object )
 	{
+		// Some assets (like UWorlds) may be destroyed and recreated as part of opening. To protect against this, keep the path to the asset and try to re-find it if it disappeared.
+		TWeakObjectPtr<UObject> WeakObject = Object;
+
 		GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->OpenEditorForAsset(Object);
+
+		// If the object was destroyed, attempt to find it if it was recreated
+		if (!WeakObject.IsValid() && !AssetName.IsEmpty())
+		{
+			Object = FindObject<UObject>(nullptr, *AssetName);
+		}
+
 		//This checks to see if the asset sub editor is loaded.
 		if ( GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->FindEditorForAsset(Object, true) != NULL )
 		{
@@ -782,6 +825,12 @@ bool FStartPIECommand::Update()
 	if (bSimulateInEditor)
 	{
 		Params.WorldType = EPlaySessionWorldType::SimulateInEditor;
+	}
+
+	// Make sure the player start location is a valid location.
+	if (GUnrealEd->CheckForPlayerStart() == nullptr)
+	{
+		FAutomationEditorCommonUtils::SetPlaySessionStartToActiveViewport(Params);
 	}
 
 	GUnrealEd->RequestPlaySession(Params);
@@ -833,7 +882,49 @@ bool FEditorLoadMap::Update()
 */
 bool FWaitForShadersToFinishCompiling::Update()
 {
-	UE_LOG(LogEditorAutomationTests, Log, TEXT("Waiting for %i shaders to finish."), GShaderCompilingManager->GetNumRemainingJobs());
+	static double TimeShadersFinishedCompiling = 0;
+	static double LastReportTime = FPlatformTime::Seconds();
+	const double TimeToWaitForJobs = 2.0;
+
+	bool ShadersCompiling = GShaderCompilingManager && GShaderCompilingManager->IsCompiling();
+	bool TexturesCompiling = FTextureCompilingManager::Get().GetNumRemainingTextures() > 0;
+
+	double TimeNow = FPlatformTime::Seconds();
+
+	if (ShadersCompiling || TexturesCompiling)
+	{
+		if (TimeNow - LastReportTime > 5.0)
+		{
+			LastReportTime = TimeNow;
+
+			if (ShadersCompiling)
+			{
+				UE_LOG(LogEditorAutomationTests, Log, TEXT("Waiting for %i shaders to finish."), GShaderCompilingManager->GetNumRemainingJobs() + GShaderCompilingManager->GetNumPendingJobs());
+			}
+
+			if (TexturesCompiling)
+			{
+				UE_LOG(LogEditorAutomationTests, Log, TEXT("Waiting for %i texures to finish."), FTextureCompilingManager::Get().GetNumRemainingTextures());
+			}
+		}
+
+		TimeShadersFinishedCompiling = 0;
+
+		return false;
+	}
+
+	// Current jobs are done, but things may still come in on subsequent frames..
+	if (TimeShadersFinishedCompiling == 0)
+	{
+		TimeShadersFinishedCompiling = FPlatformTime::Seconds();
+	}
+
+	if (FPlatformTime::Seconds() - TimeShadersFinishedCompiling < TimeToWaitForJobs)
+	{
+		return false;
+	}
+
+	// may not be necessary, but just double-check everything is finished and ready
 	GShaderCompilingManager->FinishAllCompilation();
 	UE_LOG(LogEditorAutomationTests, Log, TEXT("Done waiting for shaders to finish."));
 	return true;
@@ -977,22 +1068,22 @@ bool FWaitToFinishCookByTheBookCommand::Update()
 
 bool FDeleteDirCommand::Update()
 {
-	FString FullFolderPath = FPaths::ConvertRelativePathToFull(*InFolderLocation);
-	if ( IFileManager::Get().DirectoryExists(*FullFolderPath) )
-	{
-		IFileManager::Get().DeleteDirectory(*FullFolderPath, false, true);
-	}
-	return true;
+FString FullFolderPath = FPaths::ConvertRelativePathToFull(*InFolderLocation);
+if (IFileManager::Get().DirectoryExists(*FullFolderPath))
+{
+	IFileManager::Get().DeleteDirectory(*FullFolderPath, false, true);
+}
+return true;
 }
 
 bool FWaitToFinishBuildDeployCommand::Update()
 {
-	if ( GEditor->LauncherWorker->GetStatus() == ELauncherWorkerStatus::Completed )
+	if (GEditor->LauncherWorker->GetStatus() == ELauncherWorkerStatus::Completed)
 	{
 		UE_LOG(LogEditorAutomationTests, Log, TEXT("The build game and deploy operation has finished."));
 		return true;
 	}
-	else if ( GEditor->LauncherWorker->GetStatus() == ELauncherWorkerStatus::Canceled || GEditor->LauncherWorker->GetStatus() == ELauncherWorkerStatus::Canceling )
+	else if (GEditor->LauncherWorker->GetStatus() == ELauncherWorkerStatus::Canceled || GEditor->LauncherWorker->GetStatus() == ELauncherWorkerStatus::Canceling)
 	{
 		UE_LOG(LogEditorAutomationTests, Warning, TEXT("The build was canceled."));
 		return true;
@@ -1035,7 +1126,9 @@ bool FWaitForSpecifiedPIEMapToEndCommand::Update()
 		return true;
 	}
 
+	// remove any paths or extensions to match the name of the world
 	FString ShortMapName = FPackageName::GetShortName(MapName);
+	ShortMapName = FPaths::GetBaseFilename(ShortMapName);
 
 	// Handle both ways the user may have specified this
 	if (TestWorld->GetName() != ShortMapName)
@@ -1048,9 +1141,9 @@ bool FWaitForSpecifiedPIEMapToEndCommand::Update()
 
 // agrant-todo: Move this into BasicTests.cpp for 4.27
 /**
- * Generic Pie Test for projects. 
+ * Generic Pie Test for projects.
  * By default this test will PIE the lit of MapsToPIETest from automation settings. if that is empty it will PIE the default editor and game (if they're different)
- * maps. 
+ * maps.
  *
  * If the editor session was started with a map on the command line then that's the only map that will be PIE'd. This allows project to set up tests that PIE
  * a list of maps from an external source.
@@ -1063,7 +1156,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FProjectMapsPIETest, "Project.Maps.PIE", EAutom
  * @param Parameters - Unused for this test
  * @return	TRUE if the test was successful, FALSE otherwise
  */
-bool FProjectMapsPIETest::RunTest(const FString& Parameters)
+	bool FProjectMapsPIETest::RunTest(const FString& Parameters)
 {
 	UAutomationTestSettings const* AutomationTestSettings = GetDefault<UAutomationTestSettings>();
 	check(AutomationTestSettings);
@@ -1072,13 +1165,20 @@ bool FProjectMapsPIETest::RunTest(const FString& Parameters)
 
 	// If the user has specified a map on the command line then that is what we'll PIE
 
-	// Taken from FUnrealEdMisc::OnInit which determines if there's a map on the command line
 	const TCHAR* ParsedCmdLine = FCommandLine::Get();
-
 	FString ParsedMapName;
-	// Check the first arg if it's not a parameter
-	if (FParse::Token(ParsedCmdLine, ParsedMapName, false) && ParsedMapName.StartsWith(TEXT("-")) == false)
+	bool FirstMapAlreadyLoaded = false;
+
+	// If there is an explicit list of maps on the command line via -map or -maps the use those.
+	if (FParse::Value(FCommandLine::Get(), TEXT("-maps="), ParsedMapName) || FParse::Value(FCommandLine::Get(), TEXT("-map="), ParsedMapName))
 	{
+		ParsedMapName.ParseIntoArray(PIEMaps, TEXT("+"), true);
+
+		UE_LOG(LogEditorAutomationTests, Display, TEXT("Found Maps %s on command line. PIE Test will use these maps"), *ParsedMapName);
+	}
+	else if (FParse::Token(ParsedCmdLine, ParsedMapName, false) && ParsedMapName.StartsWith(TEXT("-")) == false)
+	{
+		// If the user specified a map as the first param after the project, we'll PIE that
 		FString InitialMapName;
 
 		// If the specified package exists
@@ -1087,11 +1187,12 @@ bool FProjectMapsPIETest::RunTest(const FString& Parameters)
 			FPaths::GetExtension(InitialMapName, /*bIncludeDot=*/true) == FPackageName::GetMapPackageExtension())
 		{
 			PIEMaps.Add(InitialMapName);
-			UE_LOG(LogEditorAutomationTests, Display, TEXT("Found Map %s on command line. PIE Test will be restructed to this map"), *InitialMapName);
+			FirstMapAlreadyLoaded = true;
+			UE_LOG(LogEditorAutomationTests, Display, TEXT("Found Map %s on command line. PIE Test will be restricted to this map"), *InitialMapName);
 		}
 	}
 
-	// If there was no command line map then default to the project settings
+	// Ok, at this point there were no command line maps so default to the project settings. We PIE the editor startup map and the game startup map
 	if (PIEMaps.Num() == 0)
 	{
 		// If the project has maps configured for PIE then use those
@@ -1124,7 +1225,7 @@ bool FProjectMapsPIETest::RunTest(const FString& Parameters)
 	// Uh-oh
 	if (PIEMaps.Num() == 0)
 	{
-		UE_LOG(LogEditorAutomationTests, Error, TEXT("No automation or default maps are configured for PIE!"));
+		UE_LOG(LogEditorAutomationTests, Fatal, TEXT("No automation or default maps are configured for PIE!"));
 	}
 
 	// Don't want these settings affecting metrics
@@ -1135,29 +1236,45 @@ bool FProjectMapsPIETest::RunTest(const FString& Parameters)
 	
 	for (const FString& Map : PIEMaps)
 	{
-		FString MapPackageName = FPackageName::ObjectPathToPackageName(Map);
+		// Accept any of...
+		// - MyMap
+		// - /Game/MyMap
+		// - /Game/MyMap.MyMap
+		FString MapPackageName = Map;
 
-		if (!FPackageName::IsValidObjectPath(MapPackageName))
+		if (FPackageName::IsValidObjectPath(Map))
 		{
-			if (!FPackageName::SearchForPackageOnDisk(MapPackageName, NULL, &MapPackageName))
-			{
-				UE_LOG(LogEditorAutomationTests, Error, TEXT("Couldn't resolve map for PIE test from %s to valid package name!"), *MapPackageName);
-				continue;
-			}
-		}		
+			MapPackageName = FPackageName::ObjectPathToPackageName(Map);
+		}
+
+		if (!FPackageName::SearchForPackageOnDisk(Map, NULL, &MapPackageName))
+		{
+			UE_LOG(LogEditorAutomationTests, Error, TEXT("Couldn't resolve map for PIE test from %s to valid package name!"), *MapPackageName);
+			continue;
+		}
+
+		UE_LOG(LogEditorAutomationTests, Display, TEXT("Queueing Map %s for PIE Automation"), *MapPackageName);
 		
 		AddCommand(new FEditorAutomationLogCommand(FString::Printf(TEXT("LoadMap-Begin: %s"), *MapPackageName)));
-		AddCommand(new FEditorLoadMap(Map));
+		if (!FirstMapAlreadyLoaded)
+		{
+			AddCommand(new FEditorLoadMap(MapPackageName));
+		}
+		AddCommand(new FWaitLatentCommand(1.0f));
 		AddCommand(new FEditorAutomationLogCommand(FString::Printf(TEXT("LoadMap-End: %s"), *MapPackageName)));
 		AddCommand(new FEditorAutomationLogCommand(FString::Printf(TEXT("PIE-Begin: %s"), *MapPackageName)));
 		AddCommand(new FStartPIECommand(false));
-		AddCommand(new FWaitForShadersToFinishCompiling());
 		AddCommand(new FWaitForSpecifiedMapToLoadCommand(MapPackageName));  // need at least some frames before starting & ending PIE
+		AddCommand(new FWaitForInteractiveFrameRate());	// wait until the editor reaches something vaguely usable
 		AddCommand(new FWaitLatentCommand(AutomationTestSettings->PIETestDuration));
 		AddCommand(new FEndPlayMapCommand());
 		AddCommand(new FWaitForSpecifiedPIEMapToEndCommand(MapPackageName));  // need at least some frames before starting & ending PIE
-		AddCommand(new FEditorAutomationLogCommand(FString::Printf(TEXT("PIE-End: %s"), *Map)));
+		AddCommand(new FEditorAutomationLogCommand(FString::Printf(TEXT("PIE-End: %s"), *MapPackageName)));
+
+		FirstMapAlreadyLoaded = false;
 	}
 
 	return true;
 }
+
+#endif

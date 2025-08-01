@@ -132,9 +132,6 @@ struct FEncryptionKeyResponse
 	EEncryptionResponse Response;
 	/** Error message related to the response */
 	FString ErrorMsg;
-	/** Encryption key */
-	UE_DEPRECATED(4.24, "Use EncryptionData struct instead.")
-	TArray<uint8> EncryptionKey;
 	/** Encryption data */
 	FEncryptionData EncryptionData;
 
@@ -148,6 +145,17 @@ struct FEncryptionKeyResponse
 		, ErrorMsg(InErrorMsg)
 	{
 	}
+};
+
+/** Specifies how to handle encryption failures */
+enum class EEncryptionFailureAction : uint8
+{
+	/** Default handling of encryption failures - net.AllowEncryption determines whether to reject or accept, with exceptions for PIE etc. */
+	Default,
+	/** Reject the connection */
+	RejectConnection,
+	/** Allow the connection */
+	AllowConnection
 };
 
 /** Types of punishment to apply to a cheating client */
@@ -227,7 +235,7 @@ struct FNetSyncLoadReport
 	const UObject* LoadedObject;
 };
 
-class ENGINE_API FNetDelegates
+class FNetDelegates
 {
 
 public:
@@ -241,7 +249,7 @@ public:
 	 * @param Delegate delegate that MUST be fired after retrieving the encryption key in order to complete the connection handshake
 	 */
 	DECLARE_DELEGATE_TwoParams(FReceivedNetworkEncryptionToken, const FString& /*EncryptionToken*/, const FOnEncryptionKeyResponse& /*Delegate*/);
-	static FReceivedNetworkEncryptionToken OnReceivedNetworkEncryptionToken;
+	static ENGINE_API FReceivedNetworkEncryptionToken OnReceivedNetworkEncryptionToken;
 
 	/**
 	 * Delegate fired when encryption has been setup and acknowledged by the host.  The client should setup their connection to continue future communication via encryption
@@ -251,7 +259,19 @@ public:
 	 * @param Delegate delegate that MUST be fired after retrieving the encryption key in order to complete the connection handshake
 	 */
 	DECLARE_DELEGATE_OneParam(FReceivedNetworkEncryptionAck, const FOnEncryptionKeyResponse& /*Delegate*/);
-	static FReceivedNetworkEncryptionAck OnReceivedNetworkEncryptionAck;
+	static ENGINE_API FReceivedNetworkEncryptionAck OnReceivedNetworkEncryptionAck;
+
+	/**
+	 * Delegate fired when encryption has failed for a specific connection (client OR server) - allowing gameplay code to override how this is handled
+	 * (e.g. to accept connections without encryption in development environments, and reject them in shipping environments).
+	 *
+	 * Binding to this delegate overrides UGameInstance's handling of encryption (@see ReceivedNetworkEncryptionFailure)
+	 *
+	 * @param Connection	The server or client NetConnection which failed encryption.
+	 * @return				Returns how to handle the encryption failure.
+	 */
+	DECLARE_DELEGATE_RetVal_OneParam(EEncryptionFailureAction, FReceivedNetworkEncryptionFailure, UNetConnection* /* Connection */);
+	static ENGINE_API FReceivedNetworkEncryptionFailure OnReceivedNetworkEncryptionFailure;
 
 
 	/**
@@ -263,7 +283,7 @@ public:
 	 * @param InfoStr extra info about the punishment to be applied (eg. ban received, etc)
 	 */
 	DECLARE_DELEGATE_FourParams(FNetworkCheatDetected, const class FUniqueNetId& /*PlayerId*/, ECheatPunishType /*PunishType*/, const FString& /*ReasonStr*/, const FString& /*InfoStr*/);
-	static FNetworkCheatDetected OnNetworkCheatDetected;
+	static ENGINE_API FNetworkCheatDetected OnNetworkCheatDetected;
 
 	/**
 	 * Delegate fired when a pending net game has created a UNetConnection to the server but hasn't sent the initial join message yet.
@@ -271,7 +291,7 @@ public:
 	 * @param PendingNetGame pointer to the PendingNetGame that is initializing its connection to a server.
 	 */
 	DECLARE_MULTICAST_DELEGATE_OneParam(FOnPendingNetGameConnectionCreated, UPendingNetGame* /*PendingNetGame*/);
-	static FOnPendingNetGameConnectionCreated OnPendingNetGameConnectionCreated;
+	static ENGINE_API FOnPendingNetGameConnectionCreated OnPendingNetGameConnectionCreated;
 
 	/**
 	 * Delegate fired when net.ReportSyncLoads is enabled and the replication system has determined which property or object caused the load.
@@ -281,5 +301,5 @@ public:
 	 * @param SyncLoadReport struct containing information about a sync load that occurred.
 	 */
 	DECLARE_MULTICAST_DELEGATE_OneParam(FOnSyncLoadDetected, const FNetSyncLoadReport& /* SyncLoadReport */);
-	static FOnSyncLoadDetected OnSyncLoadDetected;
+	static ENGINE_API FOnSyncLoadDetected OnSyncLoadDetected;
 };

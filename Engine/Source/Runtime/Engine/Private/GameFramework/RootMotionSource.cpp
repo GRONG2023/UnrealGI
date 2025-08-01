@@ -2,12 +2,16 @@
 
 #include "GameFramework/RootMotionSource.h"
 #include "DrawDebugHelpers.h"
+#include "Engine/World.h"
 #include "GameFramework/Character.h"
+#include "EngineLogs.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Curves/CurveVector.h"
 #include "Curves/CurveFloat.h"
 #include "Engine/Engine.h"
 #include "GameFramework/PlayerController.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(RootMotionSource)
 
 #if ROOT_MOTION_DEBUG
 TAutoConsoleVariable<int32> RootMotionSourceDebug::CVarDebugRootMotionSources(
@@ -66,7 +70,27 @@ void RootMotionSourceDebug::PrintOnScreenServerMsg(const FString& InString)
 #endif // !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 
 
-const float RootMotionSource_InvalidStartTime = -BIG_NUMBER;
+const float RootMotionSource_InvalidStartTime = -UE_BIG_NUMBER;
+
+
+static float EvaluateFloatCurveAtFraction(const UCurveFloat& Curve, const float Fraction)
+{
+	float MinCurveTime(0.f);
+	float MaxCurveTime(1.f);
+
+	Curve.GetTimeRange(MinCurveTime, MaxCurveTime);
+	return Curve.GetFloatValue(FMath::GetRangeValue(FVector2f(MinCurveTime, MaxCurveTime), Fraction));
+}
+
+static FVector EvaluateVectorCurveAtFraction(const UCurveVector& Curve, const float Fraction)
+{
+	float MinCurveTime(0.f);
+	float MaxCurveTime(1.f);
+
+	Curve.GetTimeRange(MinCurveTime, MaxCurveTime);
+	return Curve.GetVectorValue(FMath::GetRangeValue(FVector2f(MinCurveTime, MaxCurveTime), Fraction));
+}
+
 
 //
 // FRootMotionServerToLocalIDMapping
@@ -208,10 +232,11 @@ bool FRootMotionSource::Matches(const FRootMotionSource* Other) const
 {
 	return Other != nullptr && 
 		GetScriptStruct() == Other->GetScriptStruct() && 
-		Priority == Other->Priority && 
+		Priority == Other->Priority &&
+		AccumulateMode == Other->AccumulateMode &&
 		bInLocalSpace == Other->bInLocalSpace &&
 		InstanceName == Other->InstanceName &&
-		FMath::IsNearlyEqual(Duration, Other->Duration, SMALL_NUMBER);
+		FMath::IsNearlyEqual(Duration, Other->Duration, UE_SMALL_NUMBER);
 }
 
 bool FRootMotionSource::MatchesAndHasSameState(const FRootMotionSource* Other) const
@@ -402,7 +427,7 @@ void FRootMotionSource_ConstantForce::PrepareRootMotion
 	//     To catch up with server state we need to apply
 	//     3 seconds of this root motion in 1 second of
 	//     movement tick time -> we apply 600 cm for this frame
-	const float Multiplier = (MovementTickTime > SMALL_NUMBER) ? (SimulationTime / MovementTickTime) : 1.f;
+	const float Multiplier = (MovementTickTime > UE_SMALL_NUMBER) ? (SimulationTime / MovementTickTime) : 1.f;
 	NewTransform.ScaleTranslation(Multiplier);
 
 #if ROOT_MOTION_DEBUG
@@ -491,8 +516,8 @@ bool FRootMotionSource_RadialForce::Matches(const FRootMotionSource* Other) cons
 		StrengthOverTime == OtherCast->StrengthOverTime &&
 		(LocationActor == OtherCast->LocationActor ||
 		FVector::PointsAreNear(Location, OtherCast->Location, 1.0f)) &&
-		FMath::IsNearlyEqual(Radius, OtherCast->Radius, SMALL_NUMBER) &&
-		FMath::IsNearlyEqual(Strength, OtherCast->Strength, SMALL_NUMBER) &&
+		FMath::IsNearlyEqual(Radius, OtherCast->Radius, UE_SMALL_NUMBER) &&
+		FMath::IsNearlyEqual(Strength, OtherCast->Strength, UE_SMALL_NUMBER) &&
 		FixedWorldDirection.Equals(OtherCast->FixedWorldDirection, 3.0f);
 }
 
@@ -580,7 +605,7 @@ void FRootMotionSource_RadialForce::PrepareRootMotion
 	//     To catch up with server state we need to apply
 	//     3 seconds of this root motion in 1 second of
 	//     movement tick time -> we apply 600 cm for this frame
-	if (SimulationTime != MovementTickTime && MovementTickTime > SMALL_NUMBER)
+	if (SimulationTime != MovementTickTime && MovementTickTime > UE_SMALL_NUMBER)
 	{
 		const float Multiplier = SimulationTime / MovementTickTime;
 		NewTransform.ScaleTranslation(Multiplier);
@@ -693,12 +718,12 @@ void FRootMotionSource_MoveToForce::SetTime(float NewTime)
 	// TODO-RootMotionSource: Check if reached destination?
 }
 
-FVector FRootMotionSource_MoveToForce::GetPathOffsetInWorldSpace(float MoveFraction) const
+FVector FRootMotionSource_MoveToForce::GetPathOffsetInWorldSpace(const float MoveFraction) const
 {
 	if (PathOffsetCurve)
 	{
 		// Calculate path offset
-		const FVector PathOffsetInFacingSpace = PathOffsetCurve->GetVectorValue(MoveFraction);
+		const FVector PathOffsetInFacingSpace = EvaluateVectorCurveAtFraction(*PathOffsetCurve, MoveFraction);
 		FRotator FacingRotation((TargetLocation-StartLocation).Rotation());
 		FacingRotation.Pitch = 0.f; // By default we don't include pitch in the offset, but an option could be added if necessary
 		return FacingRotation.RotateVector(PathOffsetInFacingSpace);
@@ -717,7 +742,7 @@ void FRootMotionSource_MoveToForce::PrepareRootMotion
 {
 	RootMotionParams.Clear();
 
-	if (Duration > SMALL_NUMBER && MovementTickTime > SMALL_NUMBER)
+	if (Duration > UE_SMALL_NUMBER && MovementTickTime > UE_SMALL_NUMBER)
 	{
 		const float MoveFraction = (GetTime() + SimulationTime) / Duration;
 
@@ -728,7 +753,7 @@ void FRootMotionSource_MoveToForce::PrepareRootMotion
 
 		FVector Force = (CurrentTargetLocation - CurrentLocation) / MovementTickTime;
 
-		if (bRestrictSpeedToExpected && !Force.IsNearlyZero(KINDA_SMALL_NUMBER))
+		if (bRestrictSpeedToExpected && !Force.IsNearlyZero(UE_KINDA_SMALL_NUMBER))
 		{
 			// Calculate expected current location (if we didn't have collision and moved exactly where our velocity should have taken us)
 			const float PreviousMoveFraction = GetTime() / Duration;
@@ -774,7 +799,7 @@ void FRootMotionSource_MoveToForce::PrepareRootMotion
 	}
 	else
 	{
-		checkf(Duration > SMALL_NUMBER, TEXT("FRootMotionSource_MoveToForce prepared with invalid duration."));
+		checkf(Duration > UE_SMALL_NUMBER, TEXT("FRootMotionSource_MoveToForce prepared with invalid duration."));
 	}
 
 	SetTime(GetTime() + SimulationTime);
@@ -860,8 +885,12 @@ bool FRootMotionSource_MoveToDynamicForce::MatchesAndHasSameState(const FRootMot
 	{
 		return false;
 	}
+	
+	// We can cast safely here since in FRootMotionSource::Matches() we ensured ScriptStruct equality
+	const FRootMotionSource_MoveToDynamicForce* OtherCast = static_cast<const FRootMotionSource_MoveToDynamicForce*>(Other);
 
-	return true; // MoveToDynamicForce has no unique state
+	return (StartLocation.Equals(OtherCast->StartLocation) &&
+			TargetLocation.Equals(OtherCast->TargetLocation));
 }
 
 bool FRootMotionSource_MoveToDynamicForce::UpdateStateFrom(const FRootMotionSource* SourceToTakeStateFrom, bool bMarkForSimulatedCatchup)
@@ -871,7 +900,13 @@ bool FRootMotionSource_MoveToDynamicForce::UpdateStateFrom(const FRootMotionSour
 		return false;
 	}
 
-	return true; // MoveToDynamicForce has no unique state other than Time which is handled by FRootMotionSource
+	// We can cast safely here since in FRootMotionSource::UpdateStateFrom() we ensured ScriptStruct equality
+	const FRootMotionSource_MoveToDynamicForce* OtherCast = static_cast<const FRootMotionSource_MoveToDynamicForce*>(SourceToTakeStateFrom);
+
+	StartLocation = OtherCast->StartLocation;
+	TargetLocation = OtherCast->TargetLocation;
+
+	return true;
 }
 
 void FRootMotionSource_MoveToDynamicForce::SetTime(float NewTime)
@@ -881,12 +916,12 @@ void FRootMotionSource_MoveToDynamicForce::SetTime(float NewTime)
 	// TODO-RootMotionSource: Check if reached destination?
 }
 
-FVector FRootMotionSource_MoveToDynamicForce::GetPathOffsetInWorldSpace(float MoveFraction) const
+FVector FRootMotionSource_MoveToDynamicForce::GetPathOffsetInWorldSpace(const float MoveFraction) const
 {
 	if (PathOffsetCurve)
 	{
 		// Calculate path offset
-		const FVector PathOffsetInFacingSpace = PathOffsetCurve->GetVectorValue(MoveFraction);
+		const FVector PathOffsetInFacingSpace = EvaluateVectorCurveAtFraction(*PathOffsetCurve, MoveFraction);
 		FRotator FacingRotation((TargetLocation-StartLocation).Rotation());
 		FacingRotation.Pitch = 0.f; // By default we don't include pitch in the offset, but an option could be added if necessary
 		return FacingRotation.RotateVector(PathOffsetInFacingSpace);
@@ -905,12 +940,13 @@ void FRootMotionSource_MoveToDynamicForce::PrepareRootMotion
 {
 	RootMotionParams.Clear();
 
-	if (Duration > SMALL_NUMBER && MovementTickTime > SMALL_NUMBER)
+	if (Duration > UE_SMALL_NUMBER && MovementTickTime > UE_SMALL_NUMBER)
 	{
 		float MoveFraction = (GetTime() + SimulationTime) / Duration;
+		
 		if (TimeMappingCurve)
 		{
-			MoveFraction = TimeMappingCurve->GetFloatValue(MoveFraction);
+			MoveFraction = EvaluateFloatCurveAtFraction(*TimeMappingCurve, MoveFraction);
 		}
 
 		FVector CurrentTargetLocation = FMath::Lerp<FVector, float>(StartLocation, TargetLocation, MoveFraction);
@@ -920,10 +956,15 @@ void FRootMotionSource_MoveToDynamicForce::PrepareRootMotion
 
 		FVector Force = (CurrentTargetLocation - CurrentLocation) / MovementTickTime;
 
-		if (bRestrictSpeedToExpected && !Force.IsNearlyZero(KINDA_SMALL_NUMBER))
+		if (bRestrictSpeedToExpected && !Force.IsNearlyZero(UE_KINDA_SMALL_NUMBER))
 		{
 			// Calculate expected current location (if we didn't have collision and moved exactly where our velocity should have taken us)
-			const float PreviousMoveFraction = GetTime() / Duration;
+			float PreviousMoveFraction = GetTime() / Duration;
+			if (TimeMappingCurve)
+			{
+				PreviousMoveFraction = EvaluateFloatCurveAtFraction(*TimeMappingCurve, PreviousMoveFraction);
+			}
+
 			FVector CurrentExpectedLocation = FMath::Lerp<FVector, float>(StartLocation, TargetLocation, PreviousMoveFraction);
 			CurrentExpectedLocation += GetPathOffsetInWorldSpace(PreviousMoveFraction);
 
@@ -966,7 +1007,7 @@ void FRootMotionSource_MoveToDynamicForce::PrepareRootMotion
 	}
 	else
 	{
-		checkf(Duration > SMALL_NUMBER, TEXT("FRootMotionSource_MoveToDynamicForce prepared with invalid duration."));
+		checkf(Duration > UE_SMALL_NUMBER, TEXT("FRootMotionSource_MoveToDynamicForce prepared with invalid duration."));
 	}
 
 	SetTime(GetTime() + SimulationTime);
@@ -1057,8 +1098,8 @@ bool FRootMotionSource_JumpForce::Matches(const FRootMotionSource* Other) const
 	return bDisableTimeout == OtherCast->bDisableTimeout &&
 		PathOffsetCurve == OtherCast->PathOffsetCurve &&
 		TimeMappingCurve == OtherCast->TimeMappingCurve &&
-		FMath::IsNearlyEqual(Distance, OtherCast->Distance, SMALL_NUMBER) &&
-		FMath::IsNearlyEqual(Height, OtherCast->Height, SMALL_NUMBER) &&
+		FMath::IsNearlyEqual(Distance, OtherCast->Distance, UE_SMALL_NUMBER) &&
+		FMath::IsNearlyEqual(Height, OtherCast->Height, UE_SMALL_NUMBER) &&
 		Rotation.Equals(OtherCast->Rotation, 1.0f);
 }
 
@@ -1083,13 +1124,13 @@ bool FRootMotionSource_JumpForce::UpdateStateFrom(const FRootMotionSource* Sourc
 	return true; // JumpForce has no unique state other than Time which is handled by FRootMotionSource
 }
 
-FVector FRootMotionSource_JumpForce::GetPathOffset(float MoveFraction) const
+FVector FRootMotionSource_JumpForce::GetPathOffset(const float MoveFraction) const
 {
 	FVector PathOffset(FVector::ZeroVector);
 	if (PathOffsetCurve)
 	{
 		// Calculate path offset
-		PathOffset = PathOffsetCurve->GetVectorValue(MoveFraction);
+		PathOffset = EvaluateVectorCurveAtFraction(*PathOffsetCurve, MoveFraction);
 	}
 	else
 	{
@@ -1131,7 +1172,7 @@ void FRootMotionSource_JumpForce::PrepareRootMotion
 {
 	RootMotionParams.Clear();
 
-	if (Duration > SMALL_NUMBER && MovementTickTime > SMALL_NUMBER && SimulationTime > SMALL_NUMBER)
+	if (Duration > UE_SMALL_NUMBER && MovementTickTime > UE_SMALL_NUMBER && SimulationTime > UE_SMALL_NUMBER)
 	{
 		float CurrentTimeFraction = GetTime() / Duration;
 		float TargetTimeFraction = (GetTime() + SimulationTime) / Duration;
@@ -1150,8 +1191,8 @@ void FRootMotionSource_JumpForce::PrepareRootMotion
 
 		if (TimeMappingCurve)
 		{
-			CurrentMoveFraction = TimeMappingCurve->GetFloatValue(CurrentTimeFraction);
-			TargetMoveFraction = TimeMappingCurve->GetFloatValue(TargetTimeFraction);
+			CurrentMoveFraction = EvaluateFloatCurveAtFraction(*TimeMappingCurve, CurrentMoveFraction);
+			TargetMoveFraction  = EvaluateFloatCurveAtFraction(*TimeMappingCurve, TargetMoveFraction);
 		}
 
 		const FVector CurrentRelativeLocation = GetRelativeLocation(CurrentMoveFraction);
@@ -1217,7 +1258,7 @@ void FRootMotionSource_JumpForce::PrepareRootMotion
 	}
 	else
 	{
-		checkf(Duration > SMALL_NUMBER, TEXT("FRootMotionSource_JumpForce prepared with invalid duration."));
+		checkf(Duration > UE_SMALL_NUMBER, TEXT("FRootMotionSource_JumpForce prepared with invalid duration."));
 	}
 
 	SetTime(GetTime() + SimulationTime);
@@ -1341,14 +1382,14 @@ void FRootMotionSourceGroup::CleanUpInvalidRootMotion(float DeltaTime, const ACh
 			{
 				// For Z, only clamp positive values to prevent shooting off, we don't want to slow down a fall.
 				MoveComponent.Velocity = MoveComponent.Velocity.GetClampedToMaxSize2D(RootSource->FinishVelocityParams.ClampVelocity);
-				MoveComponent.Velocity.Z = FMath::Min(MoveComponent.Velocity.Z, RootSource->FinishVelocityParams.ClampVelocity);
+				MoveComponent.Velocity.Z = FMath::Min<FVector::FReal>(MoveComponent.Velocity.Z, RootSource->FinishVelocityParams.ClampVelocity);
 
 				// if we have additive velocity applied, LastPreAdditiveVelocity will stomp velocity, so make sure it gets clamped too.
 				if (bIsAdditiveVelocityApplied)
 				{
 					// For Z, only clamp positive values to prevent shooting off, we don't want to slow down a fall.
 					LastPreAdditiveVelocity = LastPreAdditiveVelocity.GetClampedToMaxSize2D(RootSource->FinishVelocityParams.ClampVelocity);
-					LastPreAdditiveVelocity.Z = FMath::Min(LastPreAdditiveVelocity.Z, RootSource->FinishVelocityParams.ClampVelocity);
+					LastPreAdditiveVelocity.Z = FMath::Min<FVector::FReal>(LastPreAdditiveVelocity.Z, RootSource->FinishVelocityParams.ClampVelocity);
 				}
 			}
 			else if (RootSource->FinishVelocityParams.Mode == ERootMotionFinishVelocityMode::SetVelocity)
@@ -1552,7 +1593,7 @@ void FRootMotionSourceGroup::PrepareRootMotion(float DeltaTime, const ACharacter
 								// Upcoming tick will go beyond the intended duration, if we kept
 								// SimulationTime unchanged we would get more movement than was
 								// intended so we clamp it to duration
-								SimulationTime = Duration - RootMotionSource->GetTime() + KINDA_SMALL_NUMBER; // Plus a little to make sure we push it over Duration
+								SimulationTime = Duration - RootMotionSource->GetTime() + UE_KINDA_SMALL_NUMBER; // Plus a little to make sure we push it over Duration
 								UE_LOG(LogRootMotion, VeryVerbose, TEXT("Adjusting SimulationTime due to Duration reachable partway through tick before Preparing RootMotionSource %s from %f to %f"), 
 									*RootMotionSource->ToSimpleString(), PreviousSimulationTime, SimulationTime);
 							}
@@ -1970,14 +2011,26 @@ void FRootMotionSourceGroup::UpdateStateFrom(const FRootMotionSourceGroup& Group
 	}
 }
 
-void FRootMotionSourceGroup::NetSerializeRMSArray(FArchive& Ar, class UPackageMap* Map, bool& bOutSuccess, TArray< TSharedPtr<FRootMotionSource> >& RootMotionSourceArray)
+struct FRootMotionSourceDeleter
+{
+	FORCEINLINE void operator()(FRootMotionSource* Object) const
+	{
+		check(Object);
+		UScriptStruct* ScriptStruct = Object->GetScriptStruct();
+		check(ScriptStruct);
+		ScriptStruct->DestroyStruct(Object);
+		FMemory::Free(Object);
+	}
+};
+
+void FRootMotionSourceGroup::NetSerializeRMSArray(FArchive& Ar, class UPackageMap* Map, bool& bOutSuccess, TArray< TSharedPtr<FRootMotionSource> >& RootMotionSourceArray, uint8 MaxNumRootMotionSourcesToSerialize/* = MAX_uint8*/)
 {
 	uint8 SourcesNum;
 	if (Ar.IsSaving())
 	{
-		UE_CLOG(RootMotionSourceArray.Num() > MAX_uint8, LogRootMotion, Warning, TEXT("Too many root motion sources (%d!) to net serialize. Clamping to %d"), 
-			RootMotionSourceArray.Num(), MAX_uint8);
-		SourcesNum = FMath::Min<int32>(RootMotionSourceArray.Num(), MAX_uint8);
+		UE_CLOG(RootMotionSourceArray.Num() > MaxNumRootMotionSourcesToSerialize, LogRootMotion, Warning, TEXT("Too many root motion sources (%d!) to net serialize. Clamping to %d"),
+			RootMotionSourceArray.Num(), MaxNumRootMotionSourcesToSerialize);
+		SourcesNum = FMath::Min<int32>(RootMotionSourceArray.Num(), MaxNumRootMotionSourcesToSerialize);
 	}
 	Ar << SourcesNum;
 	if (Ar.IsLoading())
@@ -2027,7 +2080,7 @@ void FRootMotionSourceGroup::NetSerializeRMSArray(FArchive& Ar, class UPackageMa
 						FRootMotionSource* NewSource = (FRootMotionSource*)FMemory::Malloc(ScriptStruct->GetCppStructOps()->GetSize());
 						ScriptStruct->InitializeStruct(NewSource);
 
-						RootMotionSourceArray[i] = TSharedPtr<FRootMotionSource>(NewSource);
+						RootMotionSourceArray[i] = TSharedPtr<FRootMotionSource>(NewSource, FRootMotionSourceDeleter());
 					}
 				}
 
@@ -2059,7 +2112,7 @@ void FRootMotionSourceGroup::NetSerializeRMSArray(FArchive& Ar, class UPackageMa
 
 }
 
-bool FRootMotionSourceGroup::NetSerialize(FArchive& Ar, class UPackageMap* Map, bool& bOutSuccess)
+bool FRootMotionSourceGroup::NetSerialize(FArchive& Ar, class UPackageMap* Map, bool& bOutSuccess, uint8 MaxNumRootMotionSourcesToSerialize/* = MAX_uint8*/)
 {
 	FArchive_Serialize_BitfieldBool(Ar, bHasAdditiveSources);
 	FArchive_Serialize_BitfieldBool(Ar, bHasOverrideSources);
@@ -2068,8 +2121,10 @@ bool FRootMotionSourceGroup::NetSerialize(FArchive& Ar, class UPackageMap* Map, 
 	FArchive_Serialize_BitfieldBool(Ar, bIsAdditiveVelocityApplied);
 	Ar << LastAccumulatedSettings.Flags;
 
-	NetSerializeRMSArray(Ar, Map, bOutSuccess, RootMotionSources);
-	NetSerializeRMSArray(Ar, Map, bOutSuccess, PendingAddRootMotionSources);
+	uint8 NumRootMotionSourcesToSerialize = FMath::Min<int32>(RootMotionSources.Num(), MaxNumRootMotionSourcesToSerialize);
+	uint8 NumPendingAddRootMotionSourcesToSerialize = NumRootMotionSourcesToSerialize < MaxNumRootMotionSourcesToSerialize ? MaxNumRootMotionSourcesToSerialize - NumRootMotionSourcesToSerialize : 0;
+	NetSerializeRMSArray(Ar, Map, bOutSuccess, RootMotionSources, NumRootMotionSourcesToSerialize);
+	NetSerializeRMSArray(Ar, Map, bOutSuccess, PendingAddRootMotionSources, NumPendingAddRootMotionSourcesToSerialize);
 
 	if (Ar.IsError())
 	{
@@ -2230,9 +2285,9 @@ bool FRootMotionSourceGroup::operator!=(const FRootMotionSourceGroup& Other) con
 	return !(FRootMotionSourceGroup::operator==(Other));
 }
 
-void FRootMotionSourceGroup::AddStructReferencedObjects(class FReferenceCollector& Collector)
+void FRootMotionSourceGroup::AddStructReferencedObjects(FReferenceCollector& Collector) const
 {
-	for (TSharedPtr<FRootMotionSource>& RootMotionSource : RootMotionSources)
+	for (const TSharedPtr<FRootMotionSource>& RootMotionSource : RootMotionSources)
 	{
 		if (RootMotionSource.IsValid())
 		{
@@ -2240,7 +2295,7 @@ void FRootMotionSourceGroup::AddStructReferencedObjects(class FReferenceCollecto
 		}
 	}
 
-	for (TSharedPtr<FRootMotionSource>& RootMotionSource : PendingAddRootMotionSources)
+	for (const TSharedPtr<FRootMotionSource>& RootMotionSource : PendingAddRootMotionSources)
 	{
 		if (RootMotionSource.IsValid())
 		{
@@ -2248,3 +2303,4 @@ void FRootMotionSourceGroup::AddStructReferencedObjects(class FReferenceCollecto
 		}
 	}
 }
+

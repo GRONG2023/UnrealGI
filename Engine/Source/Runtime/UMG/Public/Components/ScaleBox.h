@@ -17,63 +17,76 @@
  * * Single Child
  * * Aspect Ratio
  */
-UCLASS(config=Engine)
-class UMG_API UScaleBox : public UContentWidget
+UCLASS(config=Engine, MinimalAPI)
+class UScaleBox : public UContentWidget
 {
 	GENERATED_UCLASS_BODY()
 
 public:
 
+	UE_DEPRECATED(5.2, "Direct access to Stretch is deprecated. Please use the getter or setter.")
 	/** The stretching rule to apply when content is stretched */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Stretching")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Setter, Getter, BlueprintSetter = "SetStretch", Category = "Stretching")
 	TEnumAsByte<EStretch::Type> Stretch;
 
+	UE_DEPRECATED(5.2, "Direct access to StretchDirection is deprecated. Please use the getter or setter.")
 	/** Controls in what direction content can be scaled */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Stretching")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Setter, Getter, BlueprintSetter = "SetStretchDirection", Category = "Stretching")
 	TEnumAsByte<EStretchDirection::Type> StretchDirection;
 
+	UE_DEPRECATED(5.2, "Direct access to UserSpecifiedScale is deprecated. Please use the getter or setter.")
 	/** Optional scale that can be specified by the User. Used only for UserSpecified stretching. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Stretching")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Setter, Getter, BlueprintSetter = "SetUserSpecifiedScale", Category = "Stretching")
 	float UserSpecifiedScale;
 
+	UE_DEPRECATED(5.2, "Direct access to IgnoreInheritedScale is deprecated. Please use the getter or setter.")
 	/** Optional bool to ignore the inherited scale. Applies inverse scaling to counteract parents before applying the local scale operation. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Stretching")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Setter, Getter = "IsIgnoreInheritedScale", BlueprintSetter = "SetIgnoreInheritedScale", Category = "Stretching")
 	bool IgnoreInheritedScale;
 
 public:
 	UFUNCTION(BlueprintCallable, Category = "Appearance")
-	void SetStretch(EStretch::Type InStretch);
+	UMG_API void SetStretch(EStretch::Type InStretch);
+
+	UMG_API EStretch::Type GetStretch() const;
 
 	UFUNCTION(BlueprintCallable, Category = "Appearance")
-	void SetStretchDirection(EStretchDirection::Type InStretchDirection);
+	UMG_API void SetStretchDirection(EStretchDirection::Type InStretchDirection);
+
+	UMG_API EStretchDirection::Type GetStretchDirection() const;
 
 	UFUNCTION(BlueprintCallable, Category = "Appearance")
-	void SetUserSpecifiedScale(float InUserSpecifiedScale);
+	UMG_API void SetUserSpecifiedScale(float InUserSpecifiedScale);
+
+	UMG_API float GetUserSpecifiedScale() const;
 
 	UFUNCTION(BlueprintCallable, Category = "Appearance")
-	void SetIgnoreInheritedScale(bool bInIgnoreInheritedScale);
+	UMG_API void SetIgnoreInheritedScale(bool bInIgnoreInheritedScale);
+
+	UMG_API bool IsIgnoreInheritedScale() const;
+
 public:
 
 	// UWidget interface
-	virtual void SynchronizeProperties() override;
+	UMG_API virtual void SynchronizeProperties() override;
 	// End of UWidget interface
 
-	virtual void ReleaseSlateResources(bool bReleaseChildren) override;
+	UMG_API virtual void ReleaseSlateResources(bool bReleaseChildren) override;
 
 #if WITH_EDITOR
-	virtual const FText GetPaletteCategory() override;
-	virtual bool CanEditChange(const FProperty* InProperty) const override;
-	virtual void OnDesignerChanged(const FDesignerChangedEventArgs& EventArgs) override;
+	UMG_API virtual const FText GetPaletteCategory() override;
+	UMG_API virtual bool CanEditChange(const FProperty* InProperty) const override;
+	UMG_API virtual void OnDesignerChanged(const FDesignerChangedEventArgs& EventArgs) override;
 #endif
 
-	virtual void Serialize(FArchive& Ar) override;
+	UMG_API virtual void Serialize(FArchive& Ar) override;
 
 protected:
 
 	// UPanelWidget
-	virtual UClass* GetSlotClass() const override;
-	virtual void OnSlotAdded(UPanelSlot* Slot) override;
-	virtual void OnSlotRemoved(UPanelSlot* Slot) override;
+	UMG_API virtual UClass* GetSlotClass() const override;
+	UMG_API virtual void OnSlotAdded(UPanelSlot* Slot) override;
+	UMG_API virtual void OnSlotRemoved(UPanelSlot* Slot) override;
 	// End UPanelWidget
 
 protected:
@@ -85,6 +98,6 @@ protected:
 
 protected:
 	// UWidget interface
-	virtual TSharedRef<SWidget> RebuildWidget() override;
+	UMG_API virtual TSharedRef<SWidget> RebuildWidget() override;
 	// End of UWidget interface
 };

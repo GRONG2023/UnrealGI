@@ -7,12 +7,18 @@
 #include "Components/SceneComponent.h"
 #include "Curves/KeyHandle.h"
 #include "MovieSceneSection.h"
+#include "MovieSceneConstrainedSection.h"
 #include "MovieSceneKeyStruct.h"
+#include "Channels/MovieSceneDoubleChannel.h"
 #include "Channels/MovieSceneFloatChannel.h"
+#include "Channels/MovieSceneSectionChannelOverrideRegistry.h"
+#include "Channels/IMovieSceneChannelOverrideProvider.h"
 #include "EntitySystem/IMovieSceneEntityProvider.h"
 #include "TransformData.h"
+#include "Misc/LargeWorldCoordinates.h"
+#include "ConstraintsManager.h"
+#include "ConstraintChannel.h"
 #include "MovieScene3DTransformSection.generated.h"
-
 
 #if WITH_EDITORONLY_DATA
 /** Visibility options for 3d trajectory. */
@@ -24,7 +30,6 @@ enum class EShow3DTrajectory : uint8
 	EST_Never UMETA(DisplayName="Never"),
 };
 #endif
-
 
 
 /**
@@ -85,7 +90,7 @@ struct FMovieScene3DScaleKeyStruct
 
 	/** The key's scale value. */
 	UPROPERTY(EditAnywhere, Category=Key)
-	FVector Scale = FVector::OneVector;
+	FVector3f Scale = FVector3f::OneVector;
 
 	/** The key's time. */
 	UPROPERTY(EditAnywhere, Category=Key)
@@ -117,7 +122,7 @@ struct FMovieScene3DTransformKeyStruct
 
 	/** The key's scale value. */
 	UPROPERTY(EditAnywhere, Category=Key)
-	FVector Scale = FVector::OneVector;
+	FVector3f Scale = FVector3f::OneVector;
 
 	/** The key's time. */
 	UPROPERTY(EditAnywhere, Category=Key)
@@ -129,31 +134,7 @@ struct FMovieScene3DTransformKeyStruct
 };
 template<> struct TStructOpsTypeTraits<FMovieScene3DTransformKeyStruct> : public TStructOpsTypeTraitsBase2<FMovieScene3DTransformKeyStruct> { enum { WithCopy = false }; };
 
-enum class EMovieSceneTransformChannel : uint32
-{
-	None			= 0x000,
 
-	TranslationX 	= 0x001,
-	TranslationY 	= 0x002,
-	TranslationZ 	= 0x004,
-	Translation 	= TranslationX | TranslationY | TranslationZ,
-
-	RotationX 		= 0x008,
-	RotationY 		= 0x010,
-	RotationZ 		= 0x020,
-	Rotation 		= RotationX | RotationY | RotationZ,
-
-	ScaleX 			= 0x040,
-	ScaleY 			= 0x080,
-	ScaleZ 			= 0x100,
-	Scale 			= ScaleX | ScaleY | ScaleZ,
-
-	AllTransform	= Translation | Rotation | Scale,
-
-	Weight 			= 0x200,
-
-	All				= Translation | Rotation | Scale | Weight,
-};
 ENUM_CLASS_FLAGS(EMovieSceneTransformChannel)
 
 USTRUCT()
@@ -208,21 +189,58 @@ private:
 };
 
 /**
+* This object contains information needed for constraint channels on the transform section
+*/
+UCLASS(MinimalAPI)
+class UMovieScene3DTransformSectionConstraints : public UObject
+{
+	GENERATED_BODY()
+
+public:
+
+	/** Constraint Channels*/
+	UPROPERTY()
+	TArray<FConstraintAndActiveChannel> ConstraintsChannels;
+
+	/** When undo/redoing we need to recreate channel proxies after we are done*/
+#if WITH_EDITOR
+	MOVIESCENETRACKS_API virtual void PostEditUndo() override;
+#endif
+};
+
+/**
  * A 3D transform section
  */
 UCLASS(MinimalAPI)
 class UMovieScene3DTransformSection
 	: public UMovieSceneSection
+	, public IMovieSceneConstrainedSection
 	, public IMovieSceneEntityProvider
+	, public IMovieSceneChannelOverrideProvider
 {
 	GENERATED_UCLASS_BODY()
 
 public:
 
+	virtual void PostLoad() override;
+
+#if WITH_EDITOR
+	/* From UObject*/
+	virtual bool Modify(bool bAlwaysMarkDirty = true) override;
+	virtual void PostDuplicate(bool bDuplicateForPIE) override;
+#endif
+
 	/* From UMovieSection*/
 	
-	virtual bool ShowCurveForChannel(const void *Channel) const override;
-	virtual void SetBlendType(EMovieSceneBlendType InBlendType) override;
+	MOVIESCENETRACKS_API virtual bool ShowCurveForChannel(const void *Channel) const override;
+	MOVIESCENETRACKS_API virtual void SetBlendType(EMovieSceneBlendType InBlendType) override;
+	MOVIESCENETRACKS_API virtual void OnBindingIDsUpdated(const TMap<UE::MovieScene::FFixedObjectBindingID, UE::MovieScene::FFixedObjectBindingID>& OldFixedToNewFixedMap, FMovieSceneSequenceID LocalSequenceID, const FMovieSceneSequenceHierarchy* Hierarchy, IMovieScenePlayer& Player) override;
+	MOVIESCENETRACKS_API virtual void GetReferencedBindings(TArray<FGuid>& OutBindings) override;
+	MOVIESCENETRACKS_API virtual void PreSave(FObjectPreSaveContext SaveContext) override;
+
+#if WITH_EDITOR
+	MOVIESCENETRACKS_API virtual void PostPaste() override;
+#endif
 
 public:
 
@@ -253,16 +271,27 @@ public:
 
 protected:
 
-	virtual TSharedPtr<FStructOnScope> GetKeyStruct(TArrayView<const FKeyHandle> KeyHandles) override;
-	virtual EMovieSceneChannelProxyType CacheChannelProxy() override;
+	MOVIESCENETRACKS_API virtual TSharedPtr<FStructOnScope> GetKeyStruct(TArrayView<const FKeyHandle> KeyHandles) override;
+	MOVIESCENETRACKS_API virtual EMovieSceneChannelProxyType CacheChannelProxy() override;
 
 private:
 
-	virtual void ImportEntityImpl(UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity) override;
-	virtual void InterrogateEntityImpl(UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity) override;
+	MOVIESCENETRACKS_API virtual bool PopulateEvaluationFieldImpl(const TRange<FFrameNumber>& EffectiveRange, const FMovieSceneEvaluationFieldEntityMetaData& InMetaData, FMovieSceneEntityComponentFieldBuilder* OutFieldBuilder) override;
+	MOVIESCENETRACKS_API virtual void ImportEntityImpl(UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity) override;
+	MOVIESCENETRACKS_API virtual void InterrogateEntityImpl(UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity) override;
 
 	template<typename BaseBuilderType>
-	void BuildEntity(BaseBuilderType& InBaseBuilder, UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity);
+	void BuildEntity(BaseBuilderType& InBaseBuilder, UMovieSceneEntitySystemLinker* Linker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity);
+	void PopulateConstraintEntities(const TRange<FFrameNumber>& EffectiveRange, const FMovieSceneEvaluationFieldEntityMetaData& InMetaData, FMovieSceneEntityComponentFieldBuilder* OutFieldBuilder);
+	void ImportConstraintEntity(UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity);
+
+private:
+
+	static UE::MovieScene::FChannelOverrideNames ChannelOverrideNames;
+
+	UMovieSceneSectionChannelOverrideRegistry* GetChannelOverrideRegistry(bool bCreateIfMissing) override;
+	UE::MovieScene::FChannelOverrideProviderTraitsHandle GetChannelOverrideProviderTraits() const override;
+	void OnChannelOverridesChanged() override;
 
 private:
 
@@ -271,25 +300,71 @@ private:
 
 	/** Translation curves */
 	UPROPERTY()
-	FMovieSceneFloatChannel Translation[3];
+	FMovieSceneDoubleChannel Translation[3];
 	
 	/** Rotation curves */
 	UPROPERTY()
-	FMovieSceneFloatChannel Rotation[3];
+	FMovieSceneDoubleChannel Rotation[3];
 
 	/** Scale curves */
 	UPROPERTY()
-	FMovieSceneFloatChannel Scale[3];
+	FMovieSceneDoubleChannel Scale[3];
 
 	/** Manual weight curve */
 	UPROPERTY()
 	FMovieSceneFloatChannel ManualWeight;
 
-	/** Whether to use a quaternion linear interpolation between keys. This finds the 'shortest' distance between keys */
+	/** Optional pointer to a "channels override" container object. This object would only be allocated if any channels are overridden with a non-standard channel 	*/
+	UPROPERTY()
+	TObjectPtr<UMovieSceneSectionChannelOverrideRegistry> OverrideRegistry;
+
+	/** Optional pointer to constraint channels*/
+	UPROPERTY()
+	TObjectPtr<UMovieScene3DTransformSectionConstraints> Constraints;
+
+	/** Whether to use a quaternion linear interpolation between keys. This finds the 'shortest' rotation between keyed orientations. */
 	UPROPERTY(EditAnywhere, DisplayName = "Use Quaternion Interpolation", Category = "Rotation")
 	bool bUseQuaternionInterpolation;
 
 public:
+	//IMovieSceneConstrainedSection overrides
+
+	/*
+	* If it has that constraint with that Name
+	*/
+	virtual  bool HasConstraintChannel(const FGuid& InGuid) const override;
+
+	/*
+	* Get constraint with that name
+	*/
+	virtual FConstraintAndActiveChannel* GetConstraintChannel(const FGuid& InConstraintGuid) override;
+
+	/*
+	*  Add Constraint channel
+	*/
+	virtual void AddConstraintChannel(UTickableConstraint* InConstraint) override;
+	
+	/*
+	*  Remove Constraint channel
+	*/
+	virtual void RemoveConstraintChannel(const UTickableConstraint* InConstraint) override;
+
+	/*
+	*  Get The channels by value
+	*/
+	virtual TArray<FConstraintAndActiveChannel>& GetConstraintsChannels()  override;
+
+	/*
+	*  Replace the constraint with the specified name with the new one
+	*/
+	virtual void ReplaceConstraint(const FName InConstraintName, UTickableConstraint* InConstraint)  override;
+
+	/*
+	* Clear proxy if changed
+	*/
+	virtual void OnConstraintsChanged() override;
+
+private:
 
 #if WITH_EDITORONLY_DATA
 
@@ -298,12 +373,12 @@ public:
 	/**
 	 * Return the trajectory visibility
 	 */
-	MOVIESCENETRACKS_API EShow3DTrajectory GetShow3DTrajectory() const { return Show3DTrajectory; }
+	EShow3DTrajectory GetShow3DTrajectory() const { return Show3DTrajectory; }
 
 	/**
 	 * Return the trajectory visibility
 	 */
-	MOVIESCENETRACKS_API void SetShow3DTrajectory(EShow3DTrajectory InShow3DTrajectory) { Show3DTrajectory = InShow3DTrajectory; }
+	void SetShow3DTrajectory(EShow3DTrajectory InShow3DTrajectory) { Show3DTrajectory = InShow3DTrajectory; }
 
 private:
 

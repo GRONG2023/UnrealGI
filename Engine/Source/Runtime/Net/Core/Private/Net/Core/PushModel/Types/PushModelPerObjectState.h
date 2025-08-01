@@ -13,7 +13,7 @@
 #include "Containers/SparseArray.h"
 #include "UObject/ObjectKey.h"
 
-namespace UE4PushModelPrivate
+namespace UEPushModelPrivate
 {
 	/**
 	 * This is a "state" for a given Object that is being tracked by a Push Model Object Manager.
@@ -32,6 +32,7 @@ namespace UE4PushModelPrivate
 		FPushModelPerObjectState(const FObjectKey InObjectKey, const uint16 InNumberOfProperties)
 			: ObjectKey(InObjectKey)
 			, DirtiedThisFrame(true, InNumberOfProperties)
+			, bHasDirtyProperties(true)
 		{
 		}
 
@@ -39,7 +40,9 @@ namespace UE4PushModelPrivate
 			: ObjectKey(Other.ObjectKey)
 			, DirtiedThisFrame(MoveTemp(Other.DirtiedThisFrame))
 			, PerNetDriverStates(MoveTemp(Other.PerNetDriverStates))
+			, bHasDirtyProperties(Other.bHasDirtyProperties)
 		{
+			Other.bHasDirtyProperties = false;
 		}
 
 		FPushModelPerObjectState(const FPushModelPerObjectState& Other) = delete;
@@ -61,6 +64,7 @@ namespace UE4PushModelPrivate
 		void MarkPropertyDirty(const uint16 RepIndex)
 		{
 			DirtiedThisFrame[RepIndex] = true;
+			bHasDirtyProperties = true;
 		}
 		
 		/**
@@ -69,7 +73,7 @@ namespace UE4PushModelPrivate
 		 */
 		void PushDirtyStateToNetDrivers()
 		{
-			if (AreAnyBitsSet(DirtiedThisFrame))
+			if (bHasDirtyProperties)
 			{
 				for (FPushModelPerNetDriverState& NetDriverObject : PerNetDriverStates)
 				{
@@ -77,6 +81,7 @@ namespace UE4PushModelPrivate
 				}
 
 				ResetBitArray(DirtiedThisFrame);
+				bHasDirtyProperties = false;
 			}
 		}
 
@@ -84,11 +89,16 @@ namespace UE4PushModelPrivate
 		{
 			return PerNetDriverStates[DriverId];
 		}
+
+		const FPushModelPerNetDriverState& GetPerNetDriverState(FNetPushPerNetDriverId DriverId) const
+		{
+			return PerNetDriverStates[DriverId];
+		}
 		
 		FNetPushPerNetDriverId AddPerNetDriverState()
 		{
 			FSparseArrayAllocationInfo AllocationInfo = PerNetDriverStates.AddUninitialized();
-			new (AllocationInfo.Pointer) FPushModelPerNetDriverState(DirtiedThisFrame.Num());
+			new (AllocationInfo.Pointer) FPushModelPerNetDriverState(static_cast<uint16>(DirtiedThisFrame.Num()));
 			
 			return AllocationInfo.Index;
 		}
@@ -123,6 +133,11 @@ namespace UE4PushModelPrivate
 			return ObjectKey;
 		}
 
+		bool HasDirtyProperties() const
+		{
+			return bHasDirtyProperties;
+		}
+
 	private:
 	
 		//! A unique ID for the object.
@@ -135,6 +150,8 @@ namespace UE4PushModelPrivate
 
 		//! Set of NetDriver states that have been requested and are currently tracking the object.
 		TSparseArray<FPushModelPerNetDriverState> PerNetDriverStates;
+
+		uint8 bHasDirtyProperties : 1;
 	};
 }
 

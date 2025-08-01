@@ -13,6 +13,7 @@
 
 #include "Sockets.h"
 #include "SocketSubsystem.h"
+#include "Stats/Stats.h"
 #include "Containers/Array.h"
 
 DEFINE_LOG_CATEGORY(LogHttpConnection)
@@ -26,6 +27,8 @@ FHttpConnection::FHttpConnection(FSocket* InSocket, TSharedPtr<FHttpRouter> InRo
 	,WriteContext(InSocket)
 {
 	check(nullptr != Socket);
+
+	Config = FHttpServerConfig::GetConnectionConfig();
 }
 
 FHttpConnection::~FHttpConnection()
@@ -35,6 +38,7 @@ FHttpConnection::~FHttpConnection()
 
 void FHttpConnection::Tick(float DeltaTime)
 {
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_FHttpConnection_Tick);
 	const float AwaitReadTimeout = bKeepAlive ?
 		ConnectionKeepAliveTimeout : ConnectionTimeout;
 
@@ -82,7 +86,7 @@ void FHttpConnection::ChangeState(EHttpConnectionState NewState)
 	check(NewState != State);
 
 	UE_LOG(LogHttpConnection, Verbose,
-		TEXT("ChangingState: %d => %d"), State, NewState);
+				 TEXT("ChangingState: %d => %d"), int(State), int(NewState));
 	State = NewState;
 }
 
@@ -95,7 +99,8 @@ void FHttpConnection::TransferState(EHttpConnectionState CurrentState, EHttpConn
 
 void FHttpConnection::BeginRead(float DeltaTime)
 {
-	const FTimespan WaitTime = FTimespan::FromMilliseconds(1);
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_FHttpConnection_BeginRead);
+	const FTimespan WaitTime = FTimespan::FromMilliseconds(Config.BeginReadWaitTimeMS);
 	if (!Socket->Wait(ESocketWaitConditions::WaitForRead, WaitTime))
 	{
 		const float SecondsPollingSocketThisFrame = WaitTime.GetTotalSeconds();
@@ -105,6 +110,10 @@ void FHttpConnection::BeginRead(float DeltaTime)
 	}
 	else
 	{
+		UE_LOG(LogHttpConnection, Verbose,
+			TEXT("SecondsWaitingForReadableSocket\t [%d][%u]-%u : %f"),
+				OriginPort, ConnectionId, LastRequestNumber, ReadContext.GetSecondsWaitingForReadableSocket());
+
 		ReadContext.ResetSecondsWaitingForReadableSocket();
 
 		// The socket is reachable, however there may not be data in the pipe
@@ -125,6 +134,7 @@ void FHttpConnection::BeginRead(float DeltaTime)
 
 void FHttpConnection::ContinueRead(float DeltaTime)
 {
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_FHttpConnection_ContinueRead);
 	check(State == EHttpConnectionState::Reading);
 
 	auto ReaderState = ReadContext.ReadStream(DeltaTime);
@@ -146,7 +156,8 @@ void FHttpConnection::ContinueRead(float DeltaTime)
 
 void FHttpConnection::CompleteRead(const TSharedPtr<FHttpServerRequest>& Request)
 {
-	TArray<FString>* ConnectionHeaders = Request->Headers.Find(FHttpServerHeaderKeys::CONNECTION);
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_FHttpConnection_CompleteRead);
+	TArray<FString>* ConnectionHeaders = Request->Headers.Find(UE_HTTP_SERVER_HEADER_KEYS_CONNECTION);
 	if (ConnectionHeaders)
 	{
 		bKeepAlive = ResolveKeepAlive(Request->HttpVersion, *ConnectionHeaders);
@@ -166,7 +177,7 @@ void FHttpConnection::CompleteRead(const TSharedPtr<FHttpServerRequest>& Request
 		{
 			UE_LOG(LogHttpConnection, Verbose,
 				TEXT("EndProcessRequest\t [%d][%u]-%u : %u"), 
-				OriginPortCapture, ConnectionIdCapture, LastRequestNumberCapture, Response->Code);
+						 OriginPortCapture, ConnectionIdCapture, LastRequestNumberCapture, int(Response->Code));
 
 			// Ensure this result callback was called once
 			check(EHttpConnectionState::AwaitingProcessing == SharedThisPtr->GetState());
@@ -182,6 +193,7 @@ void FHttpConnection::CompleteRead(const TSharedPtr<FHttpServerRequest>& Request
 
 void FHttpConnection::ProcessRequest(const TSharedPtr<FHttpServerRequest>& Request, const FHttpResultCallback& OnProcessingComplete)
 {
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_FHttpConnection_ProcessRequest);
 	TransferState(EHttpConnectionState::Reading, EHttpConnectionState::AwaitingProcessing);
 
 	UE_LOG(LogHttpConnection, Verbose,
@@ -190,10 +202,15 @@ void FHttpConnection::ProcessRequest(const TSharedPtr<FHttpServerRequest>& Reque
 
 	bool bRequestHandled = false;
 	auto RequestHandlerIterator = Router->CreateRequestHandlerIterator(Request);
-	while (const auto& RequestHandlerPtr = RequestHandlerIterator.Next())
+	while (const FHttpRequestHandler* RequestHandlerPtr = RequestHandlerIterator.Next())
 	{
-		(*RequestHandlerPtr).CheckCallable();
-		bRequestHandled = (*RequestHandlerPtr)(*Request, OnProcessingComplete);
+		if (!RequestHandlerPtr->IsBound())
+		{
+			UE_LOG(LogHttpConnection, Verbose, TEXT("Skipping an unbound FHttpRequestHandler."));
+			continue;
+		}
+
+		bRequestHandled = RequestHandlerPtr->Execute(*Request, OnProcessingComplete);
 		if (bRequestHandled)
 		{
 			break;
@@ -204,14 +221,14 @@ void FHttpConnection::ProcessRequest(const TSharedPtr<FHttpServerRequest>& Reque
 
 	if (!bRequestHandled)
 	{
-		const FString& ResponseError(FHttpServerErrorStrings::NotFound);
-		auto Response = FHttpServerResponse::Error(EHttpServerResponseCodes::NotFound, ResponseError);
+		auto Response = FHttpServerResponse::Error(EHttpServerResponseCodes::NotFound, UE_HTTP_SERVER_ERROR_STR_ROUTE_HANDLER_NOT_FOUND);
 		OnProcessingComplete(MoveTemp(Response));
 	}
 }
 
 void FHttpConnection::BeginWrite(TUniquePtr<FHttpServerResponse>&& Response, uint32 RequestNumber)
 {
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_FHttpConnection_BeginWrite);
 	// Ensure the passed-in request number is the one we expect
 	check(RequestNumber == LastRequestNumber);
 
@@ -221,7 +238,7 @@ void FHttpConnection::BeginWrite(TUniquePtr<FHttpServerResponse>&& Response, uin
 	{
 		FString KeepAliveTimeoutStr = FString::Printf(TEXT("timeout=%f"), ConnectionKeepAliveTimeout);
 		TArray<FString> KeepAliveTimeoutValue = { MoveTemp(KeepAliveTimeoutStr) };
-		Response->Headers.Add(FHttpServerHeaderKeys::KEEP_ALIVE, MoveTemp(KeepAliveTimeoutValue));
+		Response->Headers.Add(UE_HTTP_SERVER_HEADER_KEYS_KEEP_ALIVE, MoveTemp(KeepAliveTimeoutValue));
 	}
 
 	WriteContext.ResetContext(MoveTemp(Response));
@@ -230,6 +247,7 @@ void FHttpConnection::BeginWrite(TUniquePtr<FHttpServerResponse>&& Response, uin
 
 void FHttpConnection::ContinueWrite(float DeltaTime)
 {
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_FHttpConnection_ContinueWrite);
 	check(State == EHttpConnectionState::Writing);
 
 	auto WriterState = WriteContext.WriteStream(DeltaTime);
@@ -250,6 +268,7 @@ void FHttpConnection::ContinueWrite(float DeltaTime)
 
 void FHttpConnection::CompleteWrite()
 {
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_FHttpConnection_CompleteWrite);
 	check(EHttpConnectionState::Writing == State);
 
 	if (bKeepAlive && !bGracefulDestroyRequested)
@@ -303,7 +322,18 @@ void FHttpConnection::HandleReadError(EHttpServerResponseCodes ErrorCode, const 
 
 	// Forcibly Reply
 	bKeepAlive = false;
-	auto Response = FHttpServerResponse::Error(ErrorCode, ErrorCodeStr);
+	TUniquePtr<FHttpServerResponse> Response = FHttpServerResponse::Error(ErrorCode, ErrorCodeStr);
+	TSharedPtr<FHttpServerRequest> Request = ReadContext.GetRequest();
+	if (Request.IsValid())
+	{
+		Response->HttpVersion = Request->HttpVersion;
+	}
+	else
+	{
+		UE_LOG(LogHttpConnection, Verbose, TEXT("Http Request is null, unable to parse version."));
+		Response->HttpVersion = HttpVersion::EHttpServerHttpVersion::HTTP_VERSION_UNKNOWN;
+	}
+
 	BeginWrite(MoveTemp(Response), LastRequestNumber);
 }
 
@@ -328,5 +358,4 @@ bool FHttpConnection::ResolveKeepAlive(HttpVersion::EHttpServerHttpVersion HttpV
 	{
 		return ConnectionHeaders.Contains(TEXT("Keep-Alive"));
 	}
-	return true;
 }

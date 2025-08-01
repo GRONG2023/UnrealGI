@@ -11,9 +11,9 @@
 #include "IDocumentation.h"
 
 #include "AnimPreviewInstance.h"
-#include "Animation/BlendSpaceBase.h"
-#include "AnimModel.h"
-#include "SAnimTimeline.h"
+#include "Animation/BlendSpace.h"
+#include "AnimTimeline/AnimModel.h"
+#include "AnimTimeline/SAnimTimeline.h"
 
 #define LOCTEXT_NAMESPACE "AnimEditorBase"
 
@@ -25,7 +25,7 @@ TSharedRef<SWidget> SAnimEditorBase::CreateDocumentAnchor()
 	return IDocumentation::Get()->CreateAnchor(TEXT("Engine/Animation/Sequences"));
 }
 
-void SAnimEditorBase::Construct(const FArguments& InArgs, const TSharedRef<class IPersonaPreviewScene>& InPreviewScene)
+void SAnimEditorBase::Construct(const FArguments& InArgs, const TSharedPtr<class IPersonaPreviewScene>& InPreviewScene)
 {
 	PreviewScenePtr = InPreviewScene;
 	OnObjectsSelected = InArgs._OnObjectsSelected;
@@ -74,20 +74,26 @@ void SAnimEditorBase::Construct(const FArguments& InArgs, const TSharedRef<class
 			+SHorizontalBox::Slot()
 			.FillWidth(1)
 			[
-				ConstructAnimScrubPanel()
+				ConstructAnimScrubPanel(InArgs._DisplayAnimScrubBarEditing)
 			]
 		];
 	}
 }
 
-TSharedRef<class SAnimationScrubPanel> SAnimEditorBase::ConstructAnimScrubPanel()
+TSharedRef<SWidget> SAnimEditorBase::ConstructAnimScrubPanel(bool bDisplayAnimScrubBarEditing)
 {
-	return SAssignNew( AnimScrubPanel, SAnimationScrubPanel, PreviewScenePtr.Pin().ToSharedRef() )
-		.LockedSequence(Cast<UAnimSequenceBase>(GetEditorObject()))
-		.ViewInputMin(this, &SAnimEditorBase::GetViewMinInput)
-		.ViewInputMax(this, &SAnimEditorBase::GetViewMaxInput)
-		.OnSetInputViewRange(this, &SAnimEditorBase::SetInputViewRange)
-		.bAllowZoom(true);
+	if(PreviewScenePtr.IsValid())
+	{
+		return SAssignNew( AnimScrubPanel, SAnimationScrubPanel, PreviewScenePtr.Pin().ToSharedRef() )
+			.LockedSequence(Cast<UAnimSequenceBase>(GetEditorObject()))
+			.ViewInputMin(this, &SAnimEditorBase::GetViewMinInput)
+			.ViewInputMax(this, &SAnimEditorBase::GetViewMaxInput)
+			.bDisplayAnimScrubBarEditing(bDisplayAnimScrubBarEditing)
+			.OnSetInputViewRange(this, &SAnimEditorBase::SetInputViewRange)
+			.bAllowZoom(true);
+	}
+
+	return SNullWidget::NullWidget;
 }
 
 void SAnimEditorBase::AddReferencedObjects( FReferenceCollector& Collector )
@@ -134,47 +140,6 @@ FText SAnimEditorBase::GetEditorObjectName() const
 	}
 }
 
-void SAnimEditorBase::RecalculateSequenceLength()
-{
-	// Remove Gaps and update Montage Sequence Length
-	if(UAnimCompositeBase* Composite = Cast<UAnimCompositeBase>(GetEditorObject()))
-	{
-		Composite->InvalidateRecursiveAsset();
-
-		float NewSequenceLength = CalculateSequenceLengthOfEditorObject();
-		if (NewSequenceLength != GetSequenceLength())
-		{
-			ClampToEndTime(NewSequenceLength);
-
-			Composite->SetSequenceLength(NewSequenceLength);
-
-			// Reset view if we changed length (note: has to be done after ->SetSequenceLength)!
-			SetInputViewRange(0.f, NewSequenceLength);
-
-			UAnimSingleNodeInstance * PreviewInstance = GetPreviewInstance();
-			if (PreviewInstance)
-			{
-				// Re-set the position, so instance is clamped properly
-				PreviewInstance->SetPosition(PreviewInstance->GetCurrentTime(), false); 
-			}
-		}
-	}
-
-	if(UAnimSequenceBase* Sequence = Cast<UAnimSequenceBase>(GetEditorObject()))
-	{
-		Sequence->ClampNotifiesAtEndOfSequence();
-	}
-}
-
-bool SAnimEditorBase::ClampToEndTime(float NewEndTime)
-{
-	float SequenceLength = GetSequenceLength();
-
-	//if we had a valid sequence length before and our new end time is shorter
-	//then we need to clamp.
-	return (SequenceLength > 0.f && NewEndTime < SequenceLength);
-}
-
 void SAnimEditorBase::OnSelectionChanged(const TArray<UObject*>& SelectedItems)
 {
 	OnObjectsSelected.ExecuteIfBound(SelectedItems);
@@ -205,76 +170,13 @@ void SAnimEditorBase::SetInputViewRange(float InViewMinInput, float InViewMaxInp
 	ViewMinInput = FMath::Max<float>(InViewMinInput, 0.f);
 }
 
-FText SAnimEditorBase::GetCurrentSequenceTime() const
-{
-	UAnimSingleNodeInstance * PreviewInstance = GetPreviewInstance();
-	float CurTime = 0.f;
-	float TotalTime = GetSequenceLength();
-
-	if (PreviewInstance)
-	{
-		CurTime = PreviewInstance->GetCurrentTime();
-	}
-
-	static const FNumberFormattingOptions FractionNumberFormat = FNumberFormattingOptions()
-		.SetMinimumFractionalDigits(3)
-		.SetMaximumFractionalDigits(3);
-	return FText::Format(LOCTEXT("FractionSecondsFmt", "{0} / {1} (second(s))"), FText::AsNumber(CurTime, &FractionNumberFormat), FText::AsNumber(TotalTime, &FractionNumberFormat));
-}
-
-float SAnimEditorBase::GetPercentageInternal() const
-{
-	UAnimSingleNodeInstance * PreviewInstance = GetPreviewInstance();
-	float Percentage = 0.f;
-	if (PreviewInstance)
-	{
-		float SequenceLength = GetSequenceLength();
-		if (SequenceLength > 0.f)
-		{
-			Percentage = PreviewInstance->GetCurrentTime() / SequenceLength;
-		}
-		else
-		{
-			Percentage = 0.f;
-		}
-	}
-
-	return Percentage;
-}
-
-FText SAnimEditorBase::GetCurrentPercentage() const
-{
-	float Percentage = GetPercentageInternal();
-
-	static const FNumberFormattingOptions PercentNumberFormat = FNumberFormattingOptions()
-		.SetMinimumFractionalDigits(2)
-		.SetMaximumFractionalDigits(2);
-	return FText::AsPercent(Percentage, &PercentNumberFormat);
-}
-
-FText SAnimEditorBase::GetCurrentFrame() const
-{
-	float Percentage = GetPercentageInternal();
-	float LastFrame = 0;
-	
-	if (UAnimSequenceBase* AnimSeqBase = Cast<UAnimSequenceBase>(GetEditorObject()))
-	{
-		LastFrame = FMath::Max(AnimSeqBase->GetNumberOfFrames() - 1, 0);
-	}
-
-	static const FNumberFormattingOptions FractionNumberFormat = FNumberFormattingOptions()
-		.SetMinimumFractionalDigits(2)
-		.SetMaximumFractionalDigits(2);
-	return FText::Format(LOCTEXT("FractionKeysFmt", "{0} / {1} Frame"), FText::AsNumber(LastFrame * Percentage, &FractionNumberFormat), FText::AsNumber((int32)LastFrame));
-}
-
 float SAnimEditorBase::GetSequenceLength() const
 {
 	if (UAnimSequenceBase* AnimSeqBase = Cast<UAnimSequenceBase>(GetEditorObject()))
 	{
-		return AnimSeqBase->SequenceLength;
+		return AnimSeqBase->GetPlayLength();
 	}
-	else if (UBlendSpaceBase* BlendSpaceBase = Cast<UBlendSpaceBase>(GetEditorObject()))
+	else if (UBlendSpace* BlendSpaceBase = Cast<UBlendSpace>(GetEditorObject()))
 	{
 		// Blendspaces use normalized time, so we just return 1 here
 		return 1.0f;

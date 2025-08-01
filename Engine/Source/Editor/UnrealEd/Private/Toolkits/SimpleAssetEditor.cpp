@@ -2,14 +2,16 @@
 
 #include "Toolkits/SimpleAssetEditor.h"
 #include "Modules/ModuleManager.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "PropertyEditorModule.h"
 #include "IDetailsView.h"
+#include "EditorClassUtils.h"
 #include "Editor.h"
-#include "Widgets/Input/SHyperlink.h"
-#include "SourceCodeNavigation.h"
-
+#include "Widgets/Layout/SSpacer.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Images/SImage.h"
 
 #define LOCTEXT_NAMESPACE "GenericEditor"
 
@@ -25,7 +27,7 @@ void FSimpleAssetEditor::RegisterTabSpawners(const TSharedRef<class FTabManager>
 	InTabManager->RegisterTabSpawner( PropertiesTabId, FOnSpawnTab::CreateSP(this, &FSimpleAssetEditor::SpawnPropertiesTab) )
 		.SetDisplayName( LOCTEXT("PropertiesTab", "Details") )
 		.SetGroup(WorkspaceMenuCategory.ToSharedRef())
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.Tabs.Details"));
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Details"));
 }
 
 void FSimpleAssetEditor::UnregisterTabSpawners(const TSharedRef<class FTabManager>& InTabManager)
@@ -40,37 +42,26 @@ const FName FSimpleAssetEditor::SimpleEditorAppIdentifier( TEXT( "GenericEditorA
 FSimpleAssetEditor::~FSimpleAssetEditor()
 {
 	GEditor->GetEditorSubsystem<UImportSubsystem>()->OnAssetPostImport.RemoveAll(this);
-	GEditor->OnObjectsReplaced().RemoveAll(this);
+	FCoreUObjectDelegates::OnObjectsReplaced.RemoveAll(this);
 
 	DetailsView.Reset();
-	PropertiesTab.Reset();
 }
 
 
 void FSimpleAssetEditor::InitEditor( const EToolkitMode::Type Mode, const TSharedPtr< class IToolkitHost >& InitToolkitHost, const TArray<UObject*>& ObjectsToEdit, FGetDetailsViewObjects GetDetailsViewObjects )
 {
-	const bool bIsUpdatable = false;
-	const bool bAllowFavorites = true;
-	const bool bIsLockable = false;
-
 	EditingObjects = ObjectsToEdit;
 	GEditor->GetEditorSubsystem<UImportSubsystem>()->OnAssetPostImport.AddSP(this, &FSimpleAssetEditor::HandleAssetPostImport);
-	GEditor->OnObjectsReplaced().AddSP(this, &FSimpleAssetEditor::OnObjectsReplaced);
+	FCoreUObjectDelegates::OnObjectsReplaced.AddSP(this, &FSimpleAssetEditor::OnObjectsReplaced);
 
 	FPropertyEditorModule& PropertyEditorModule = FModuleManager::GetModuleChecked<FPropertyEditorModule>( "PropertyEditor" );
-	const FDetailsViewArgs DetailsViewArgs( bIsUpdatable, bIsLockable, true, FDetailsViewArgs::ObjectsUseNameArea, false );
+	FDetailsViewArgs DetailsViewArgs;
+	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
 	DetailsView = PropertyEditorModule.CreateDetailView( DetailsViewArgs );
-	const TSharedRef<FTabManager::FLayout> StandaloneDefaultLayout = FTabManager::NewLayout( "Standalone_SimpleAssetEditor_Layout_v3" )
+	const TSharedRef<FTabManager::FLayout> StandaloneDefaultLayout = FTabManager::NewLayout( "Standalone_SimpleAssetEditor_Layout_v4" )
 	->AddArea
 	(
 		FTabManager::NewPrimaryArea() ->SetOrientation(Orient_Vertical)
-		->Split
-		(
-			FTabManager::NewStack()
-			->SetSizeCoefficient(0.1f)
-			->SetHideTabWell( true )
-			->AddTab(GetToolbarTabId(), ETabState::OpenedTab)
-		)
 		->Split
 		(
 			FTabManager::NewSplitter()
@@ -95,7 +86,7 @@ void FSimpleAssetEditor::InitEditor( const EToolkitMode::Type Mode, const TShare
 		SpawnToolkitTab(GetToolbarTabId(), FString(), EToolkitTabSpot::ToolBar);
 		PropertiesTab = SpawnToolkitTab( PropertiesTabId, TabInitializationPayload, EToolkitTabSpot::Details );
 	}*/
-	
+
 	// Get the list of objects to edit the details of
 	const TArray<UObject*> ObjectsToEditInDetailsView = ( GetDetailsViewObjects.IsBound() ) ? GetDetailsViewObjects.Execute( ObjectsToEdit ) : ObjectsToEdit;
 
@@ -124,7 +115,7 @@ FText FSimpleAssetEditor::GetBaseToolkitName() const
 
 FText FSimpleAssetEditor::GetToolkitName() const
 {
-	const TArray<UObject*>& EditingObjs = GetEditingObjects();
+	const auto& EditingObjs = GetEditingObjects();
 
 	check( EditingObjs.Num() > 0 );
 
@@ -175,7 +166,7 @@ FText FSimpleAssetEditor::GetToolkitName() const
 
 FText FSimpleAssetEditor::GetToolkitToolTipText() const
 {
-	const TArray<UObject*>& EditingObjs = GetEditingObjects();
+	const auto& EditingObjs = GetEditingObjects();
 
 	check( EditingObjs.Num() > 0 );
 
@@ -246,9 +237,9 @@ TSharedRef<SDockTab> FSimpleAssetEditor::SpawnPropertiesTab( const FSpawnTabArgs
 	check( Args.GetTabId() == PropertiesTabId );
 
 	return SNew(SDockTab)
-		.Icon( FEditorStyle::GetBrush("GenericEditor.Tabs.Properties") )
 		.Label( LOCTEXT("GenericDetailsTitle", "Details") )
 		.TabColorScale( GetTabColorScale() )
+		.OnCanCloseTab_Lambda([]() { return false; })
 		[
 			DetailsView.ToSharedRef()
 		];
@@ -309,6 +300,27 @@ TSharedRef<FSimpleAssetEditor> FSimpleAssetEditor::CreateEditor( const EToolkitM
 	return NewEditor;
 }
 
+FReply FSimpleAssetEditor::OnFindParentClassInContentBrowserClicked(TObjectPtr<UObject> SyncToClass) const
+{
+	if (SyncToClass)
+	{
+		TArray<UObject*> ObjectList { SyncToClass };
+		GEditor->SyncBrowserToObjects(ObjectList);
+	}
+
+	return FReply::Handled();
+}
+
+FReply FSimpleAssetEditor::OnEditParentClassClicked(TObjectPtr<UObject> EditClass) const
+{
+	if (EditClass)
+	{
+		GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->OpenEditorForAsset(EditClass);
+	}
+
+	return FReply::Handled();
+}
+
 void FSimpleAssetEditor::PostRegenerateMenusAndToolbars()
 {
 	// Find the common denominator class of the assets we're editing
@@ -325,43 +337,107 @@ void FSimpleAssetEditor::PostRegenerateMenusAndToolbars()
 	// Provide a hyperlink to view that native class
 	if (CommonDenominatorClass)
 	{
-		TWeakObjectPtr<UClass> WeakClassPtr(CommonDenominatorClass);
-		auto OnNavigateToClassCode = [WeakClassPtr]()
+		// If the common denominator is a blueprint generated class, link to the BP instead of an inaccessible _c class
+		if (CommonDenominatorClass->ClassGeneratedBy)
 		{
-			if (UClass* StrongClassPtr = WeakClassPtr.Get())
-			{
-				if (FSourceCodeNavigation::CanNavigateToClass(StrongClassPtr))
-				{
-					FSourceCodeNavigation::NavigateToClass(StrongClassPtr);
-				}
-			}
-		};
-
-		// build and attach the menu overlay
-		TSharedRef<SHorizontalBox> MenuOverlayBox = SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.VAlign(VAlign_Center)
-			[
-				SNew(STextBlock)
-				.ColorAndOpacity(FSlateColor::UseSubduedForeground())
-				.ShadowOffset(FVector2D::UnitVector)
-				.Text(bNotAllSame ? LOCTEXT("SimpleAssetEditor_AssetType_Varied", "Common Asset Type: ") : LOCTEXT("SimpleAssetEditor_AssetType", "Asset Type: "))
-			]
-			+SHorizontalBox::Slot()
-			.AutoWidth()
-			.VAlign(VAlign_Center)
-			.Padding(0.0f, 0.0f, 8.0f, 0.0f)
-			[
-				SNew(SHyperlink)
-				.Style(FEditorStyle::Get(), "Common.GotoNativeCodeHyperlink")
-				.OnNavigate_Lambda(OnNavigateToClassCode)
-				.Text(FText::FromName(CommonDenominatorClass->GetFName()))
-				.ToolTipText(FText::Format(LOCTEXT("GoToCode_ToolTip", "Click to open this source file in {0}"), FSourceCodeNavigation::GetSelectedSourceCodeIDE()))
-			];
-	
-		SetMenuOverlay(MenuOverlayBox);
+			// build and attach the menu overlay
+			TSharedRef<SHorizontalBox> MenuOverlayBox = SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				[
+					SNew(STextBlock)
+					.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+					.ShadowOffset(FVector2D::UnitVector)
+					.Text(LOCTEXT("BlueprintEditor_ParentClass", "Parent class: "))
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				[
+					SNew(SSpacer)
+					.Size(FVector2D(2.0f, 1.0f))
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				[
+					SNew(STextBlock)
+					.ShadowOffset(FVector2D::UnitVector)
+					.Text(FText::FromName(CommonDenominatorClass->ClassGeneratedBy->GetFName()))
+					.TextStyle(FAppStyle::Get(), "Common.InheritedFromBlueprintTextStyle")
+					.ToolTipText(LOCTEXT("ParentClassToolTip", "The class that the current Blueprint is based on. The parent provides the base definition, which the current Blueprint extends."))
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				[
+					SNew(SButton)
+					.VAlign(VAlign_Center)
+					.ButtonStyle(FAppStyle::Get(), "HoverHintOnly")
+					.OnClicked(this, &FSimpleAssetEditor::OnFindParentClassInContentBrowserClicked, CommonDenominatorClass->ClassGeneratedBy)
+					.ToolTipText(LOCTEXT("FindParentInCBToolTip", "Find parent in Content Browser"))
+					.ContentPadding(4.0f)
+					.ForegroundColor(FSlateColor::UseForeground())
+					[
+						SNew(SImage)
+						.Image(FAppStyle::GetBrush("Icons.Search"))
+					]
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				[
+					SNew(SButton)
+					.VAlign(VAlign_Center)
+					.ButtonStyle(FAppStyle::Get(), "HoverHintOnly")
+					.OnClicked(this, &FSimpleAssetEditor::OnEditParentClassClicked, CommonDenominatorClass->ClassGeneratedBy)
+					.ToolTipText(LOCTEXT("EditParentClassToolTip", "Open parent in editor"))
+					.ContentPadding(4.0f)
+					.ForegroundColor(FSlateColor::UseForeground())
+					[
+						SNew(SImage)
+						.Image(FAppStyle::GetBrush("Icons.Edit"))
+					]
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				[
+					SNew(SSpacer)
+					.Size(FVector2D(8.0f, 1.0f))
+				]
+				;
+			SetMenuOverlay(MenuOverlayBox);
+		}
+		else
+		{
+			// build and attach the menu overlay
+			TSharedRef<SHorizontalBox> MenuOverlayBox = SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				[
+					SNew(STextBlock)
+					.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+					.ShadowOffset(FVector2D::UnitVector)
+					.Text(bNotAllSame ? LOCTEXT("SimpleAssetEditor_AssetType_Varied", "Common Asset Type: ") : LOCTEXT("SimpleAssetEditor_AssetType", "Asset Type: "))
+				]
+				+SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				.Padding(0.0f, 0.0f, 8.0f, 0.0f)
+				[
+					FEditorClassUtils::GetSourceLink(CommonDenominatorClass)
+				];
+		
+			SetMenuOverlay(MenuOverlayBox);
+		}
 	}
+}
+
+FName FSimpleAssetEditor::GetEditingAssetTypeName() const
+{
+	// We want the global recent assets menu for simple asset editors so we report our editing asset type as none
+	return NAME_None;
 }
 
 #undef LOCTEXT_NAMESPACE

@@ -7,6 +7,8 @@
 #include "Templates/Atomic.h"
 #include "Misc/CString.h"
 #include "Misc/Crc.h"
+#include "Async/UniqueLock.h"
+#include "Async/WordMutex.h"
 #include "Containers/UnrealString.h"
 #include "Containers/StringConv.h"
 #include "GenericPlatform/GenericPlatformStackWalk.h"
@@ -23,6 +25,7 @@
 #include "Misc/CoreDelegates.h"
 #include "HAL/ExceptionHandling.h"
 #include "HAL/ThreadHeartBeat.h"
+#include "HAL/IConsoleManager.h"
 
 namespace 
 {
@@ -31,15 +34,39 @@ namespace
 	TAtomic<SIZE_T> NumEnsureFailures {0};
 	int32 ActiveEnsureCount = 0;
 
-	/** Lock used to synchronize the fail debug calls. */
-	static FCriticalSection& GetFailDebugCriticalSection()
+	// Lock used to synchronize the fail debug calls.
+	// Using FWordMutex because it is zero-initialized and has no destructor.
+	static UE::FWordMutex FailDebugMutex;
+
+	struct FTempCommandLineScope
 	{
-		static FCriticalSection FailDebugCriticalSection;
-		return FailDebugCriticalSection;
-	}	
+		// The code which is run when an assert or ensure fails (without a
+		// debugger attached) calls FCommandLine::Get() *a lot*. If the failed
+		// assert is before a command line has been set then the many Get()
+		// calls will in turn throw asserts.  It is impractical to chase these
+		// and guard against calling Get() and inappropriate in many instances.
+		FTempCommandLineScope()
+		{
+			if (!FCommandLine::IsInitialized())
+			{
+				FCommandLine::Set(TEXT(""));
+				bShouldReset = true;
+			}
+		}
+
+		~FTempCommandLineScope()
+		{
+			if (bShouldReset)
+			{
+				FCommandLine::Reset();
+			}
+		}
+
+		bool bShouldReset = false;
+	};
 }
 
-#define FILE_LINE_DESC TEXT(" [File:%s] [Line: %i] ")
+#define FILE_LINE_DESC_ANSI " [File:%hs] [Line: %i] "
 
 /*
 	Ensure behavior
@@ -47,7 +74,7 @@ namespace
 	* ensure() macro calls OptionallyLogFormattedEnsureMessageReturningFalse 
 	* OptionallyLogFormattedEnsureMessageReturningFalse calls EnsureFailed()
 	* EnsureFailed() -
-		* Formats the ensure failure and calls StaticFailDebug to populate the global error info (without callstack)
+		* Formats the ensure failure and calls StaticFailDebugV to populate the global error info (without callstack)
 		* Prints the script callstack (if any)
 		* Halts if a debugger is attached 
 		* If not, logs the callstack and attempts to submit an error report
@@ -56,8 +83,8 @@ namespace
 	Check behavior
 
 	* check() macro calls LogAssertFailedMessage
-	* LogAssertFailedMessage formats the assertion message and calls StaticFailDebug
-	* StaticFailDebug populates global error info with the failure message and if supported (AllowsCallStackDumpDuringAssert) the callstack
+	* LogAssertFailedMessage formats the assertion message and calls StaticFailDebugV
+	* StaticFailDebugV populates global error info with the failure message and if supported (AllowsCallStackDumpDuringAssert) the callstack
 	* If a debugger is attached execution halts
 	* If not FDebug::AssertFailed is called
 	* FDebug::AssertFailed logs the assert message and description to GError
@@ -68,12 +95,29 @@ namespace
 	Fatal-error behavior
 
 	* The UE_LOG macro calls FMsg::Logf which checks for "Fatal" verbosity
-	* FMsg::Logf formats the failure message and calls StaticFailDebug
-	* StaticFailDebug populates global error info with the failure message and if supported (AllowsCallStackDumpDuringAssert) the callstack
+	* FMsg::Logf formats the failure message and calls StaticFailDebugV
+	* StaticFailDebugV populates global error info with the failure message and if supported (AllowsCallStackDumpDuringAssert) the callstack
 	* FDebug::AssertFailed is then called, and from this point behavior is identical to an assert but with a different message
 
 */
 
+/** 
+ * Use this CVar to control whether ensures count as errors or warnings. 
+ * Errors will fail certain processes like cooks, whereas warnings will not.
+ */
+int32 GEnsuresAreErrors = 1;
+FAutoConsoleVariableRef CVarEnsuresAreErrors(
+	TEXT("core.EnsuresAreErrors"),
+	GEnsuresAreErrors,
+	TEXT("True means failed ensures are logged as errors. False means they are logged as warnings."),
+	ECVF_Default);
+
+bool GEnsureAlwaysEnabled = true;
+FAutoConsoleVariableRef CVarEnsureAlwaysEnabled(
+	TEXT("core.EnsureAlwaysEnabled"),
+	GEnsureAlwaysEnabled,
+	TEXT("Set to false to turn ensureAlways into regular ensure"),
+	ECVF_Default);
 
 
 CORE_API void (*GPrintScriptCallStackFn)() = nullptr;
@@ -86,70 +130,134 @@ void PrintScriptCallstack()
 	}
 }
 
-static void AssertFailedImplV(const ANSICHAR* Expr, const ANSICHAR* File, int32 Line, const TCHAR* Format, va_list Args)
+static void AssertFailedImplV(const ANSICHAR* Expr, const ANSICHAR* File, int32 Line, void* ProgramCounter, const TCHAR* Format, va_list Args)
 {
+	FTempCommandLineScope TempCommandLine;
+
 	// This is not perfect because another thread might crash and be handled before this assert
 	// but this static variable will report the crash as an assert. Given complexity of a thread
 	// aware solution, this should be good enough. If crash reports are obviously wrong we can
 	// look into fixing this.
 	bHasAsserted = true;
 
-	TCHAR DescriptionString[4096];
-	FCString::GetVarArgs(DescriptionString, UE_ARRAY_COUNT(DescriptionString), Format, Args);
-
-	TCHAR ErrorString[MAX_SPRINTF];
-	FCString::Sprintf(ErrorString, TEXT("%s"), ANSI_TO_TCHAR(Expr));
 	if (GError)
 	{
-		GError->Logf(TEXT("Assertion failed: %s") FILE_LINE_DESC TEXT("\n%s\n"), ErrorString, ANSI_TO_TCHAR(File), Line, DescriptionString);
+		TCHAR DescriptionString[4096];
+		FCString::GetVarArgs(DescriptionString, UE_ARRAY_COUNT(DescriptionString), Format, Args);
+		GError->SetErrorProgramCounter(ProgramCounter);
+		GError->Logf(TEXT("Assertion failed: %hs" FILE_LINE_DESC_ANSI "\n%s\n"), Expr, File, Line, DescriptionString);
 	}
 }
 
-/**
- *	Prints error to the debug output, 
- *	prompts for the remote debugging if there is not debugger, breaks into the debugger 
- *	and copies the error into the global error message.
- */
-FORCENOINLINE void StaticFailDebug( const TCHAR* Error, const ANSICHAR* File, int32 Line, const TCHAR* Description, bool bIsEnsure, int NumStackFramesToIgnore )
+class FErrorHistWriter
 {
-	// Print out the blueprint callstack
-	PrintScriptCallstack();
+public:
+	UE_NONCOPYABLE(FErrorHistWriter);
 
-	TCHAR DescriptionAndTrace[4096];
-
-	FCString::Strncpy(DescriptionAndTrace, Description, UE_ARRAY_COUNT(DescriptionAndTrace) - 1);
-
-	// some platforms (Windows, Mac, Linux) generate this themselves by throwing an exception and capturing
-	// the backtrace later on
-	if (FPlatformProperties::AllowsCallStackDumpDuringAssert() && bIsEnsure == false)
+	inline FErrorHistWriter()
 	{
-		ANSICHAR StackTrace[4096];
-		if (StackTrace != NULL)
-		{
-			StackTrace[0] = 0;
-			FPlatformStackWalk::StackWalkAndDump(StackTrace, UE_ARRAY_COUNT(StackTrace), NumStackFramesToIgnore + 1);
+		FailDebugMutex.Lock();
+	}
 
-			FCString::Strncat(DescriptionAndTrace, TEXT("\n"), UE_ARRAY_COUNT(DescriptionAndTrace) - 1);
-			FCString::Strncat(DescriptionAndTrace, ANSI_TO_TCHAR(StackTrace), UE_ARRAY_COUNT(DescriptionAndTrace) - 1);
+	inline ~FErrorHistWriter()
+	{
+		Terminate();
+		FailDebugMutex.Unlock();
+	}
+
+	inline void Terminate()
+	{
+		GErrorHist[Index] = TCHAR(0);
+	}
+
+	template <typename CharType>
+	void Append(const CharType* Text)
+	{
+		const int32 TextLen = TCString<CharType>::Strlen(Text);
+		const int32 RequiredLen = FPlatformString::ConvertedLength<TCHAR>(Text, TextLen);
+		if (Index + RequiredLen < Capacity)
+		{
+			FPlatformString::Convert(GErrorHist + Index, RequiredLen, Text, TextLen);
+			Index += RequiredLen;
 		}
 	}
 
-	FScopeLock Lock( &GetFailDebugCriticalSection());
-	FPlatformMisc::LowLevelOutputDebugStringf(TEXT("%s") FILE_LINE_DESC TEXT("\n%s\n"), Error, ANSI_TO_TCHAR(File), Line, Description);
-
-	// Copy the detailed error into the error message.
-	TCHAR ErrorMessage[4096];
-	if (FCString::Snprintf( ErrorMessage, UE_ARRAY_COUNT( ErrorMessage ), TEXT( "%s" ) FILE_LINE_DESC TEXT( "\n%s\n" ), Error, ANSI_TO_TCHAR( File ), Line, DescriptionAndTrace) < 0)
+	void AppendV(const TCHAR* Format, va_list Args)
 	{
-		// Description and callstack was too long to fit in GErrorMessage. Use only description
-		FCString::Snprintf( ErrorMessage, UE_ARRAY_COUNT( ErrorMessage ), TEXT( "%s" ) FILE_LINE_DESC TEXT( "\n%s\n<< callstack too long >>" ), Error, ANSI_TO_TCHAR( File ), Line, Description);
+		const int32 Len = FPlatformString::GetVarArgs(GErrorHist + Index, Capacity - Index, Format, Args);
+		Index = FMath::Clamp(Index, Index + Len, Capacity - 1);
 	}
 
-	// Copy the error message to the error history.
-	FCString::Strncpy( GErrorHist, ErrorMessage, UE_ARRAY_COUNT( GErrorHist ) );
-	FCString::Strncat( GErrorHist, TEXT( "\r\n\r\n" ), UE_ARRAY_COUNT( GErrorHist ) );
+	void Appendf(const TCHAR* Format, ...)
+	{
+		va_list Args;
+		va_start(Args, Format);
+		AppendV(Format, Args);
+		va_end(Args);
+	}
+
+private:
+	int32 Index = 0;
+
+	static constexpr int32 Capacity = UE_ARRAY_COUNT(GErrorHist);
+};
+
+/**
+ * Prints error to the debug output and copies the error into the global error message.
+ */
+FORCENOINLINE void StaticFailDebugV(
+	const TCHAR* Error,
+	const ANSICHAR* Expression,
+	const ANSICHAR* File,
+	int32 Line,
+	bool bIsEnsure,
+	void* ProgramCounter,
+	const TCHAR* DescriptionFormat,
+	va_list DescriptionArgs)
+{
+	PrintScriptCallstack();
+
+	// some platforms (Windows, Mac, Linux) generate this themselves by throwing an exception and capturing
+	// the backtrace later on
+	ANSICHAR StackTrace[4096] = "";
+	if (FPlatformProperties::AllowsCallStackDumpDuringAssert() && !bIsEnsure)
+	{
+		FPlatformStackWalk::StackWalkAndDump(StackTrace, UE_ARRAY_COUNT(StackTrace), ProgramCounter);
+	}
+
+	FErrorHistWriter Writer;
+	Writer.Append(Error);
+	Writer.Append(Expression);
+	Writer.Appendf(TEXT(FILE_LINE_DESC_ANSI "\n"), File, Line);
+	Writer.AppendV(DescriptionFormat, DescriptionArgs);
+	Writer.Append(TEXT("\n"));
+	Writer.Terminate();
+
+	FPlatformMisc::LowLevelOutputDebugString(GErrorHist);
+
+	if (*StackTrace)
+	{
+		Writer.Append(StackTrace);
+		Writer.Append(TEXT("\n"));
+	}
+
+	Writer.Append(TEXT("\r\n\r\n"));
+	Writer.Terminate();
+
+	if (GError)
+	{
+		GError->SetErrorProgramCounter(ProgramCounter);
+	}
 }
 
+FORCENOINLINE void VARARGS StaticFailDebug(const TCHAR* Error, const ANSICHAR* Expression, const ANSICHAR* File, int32 Line,
+	bool bIsEnsure, void* ProgramCounter, const TCHAR* DescriptionFormat, ...)
+{
+	va_list DescriptionArgs;
+	va_start(DescriptionArgs, DescriptionFormat);
+	StaticFailDebugV(Error, Expression, File, Line, bIsEnsure, ProgramCounter, DescriptionFormat, DescriptionArgs);
+	va_end(DescriptionArgs);
+}
 
 /// track thread asserts
 bool FDebug::HasAsserted()
@@ -205,7 +313,7 @@ void FDebug::LogFormattedMessageWithCallstack(const FName& InLogName, const ANSI
 		}
 
 		// cap it
-		*SingleLineWritePos = 0;
+		*SingleLineWritePos = TEXT('\0');
 
 		// prefix function lines with [Callstack] for parsing tools
 		const TCHAR* Prefix = (FCString::Strnicmp(LineStart, TEXT("0x"), 2) == 0) ? TEXT("[Callstack] ") : TEXT("");
@@ -242,28 +350,35 @@ void FDebug::LogFormattedMessageWithCallstack(const FName& InLogName, const ANSI
 //warning: May be called at library startup time.
 //
 
-FORCENOINLINE void FDebug::LogAssertFailedMessageImpl(const ANSICHAR* Expr, const ANSICHAR* File, int32 Line, const TCHAR* Fmt, ...)
+FORCENOINLINE void FDebug::LogAssertFailedMessageImpl(const ANSICHAR* Expr, const ANSICHAR* File, int32 Line, void* ProgramCounter, const TCHAR* Fmt, ...)
 {
 	va_list Args;
 	va_start(Args, Fmt);
-	LogAssertFailedMessageImplV(Expr, File, Line, Fmt, Args);
+	LogAssertFailedMessageImplV(Expr, File, Line, ProgramCounter, Fmt, Args);
 	va_end(Args);
 }
 
-void FDebug::LogAssertFailedMessageImplV(const ANSICHAR* Expr, const ANSICHAR* File, int32 Line, const TCHAR* Fmt, va_list Args)
+void FDebug::LogAssertFailedMessageImplV(const ANSICHAR* Expr, const ANSICHAR* File, int32 Line, void* ProgramCounter, const TCHAR* Fmt, va_list Args)
 {
 	// Ignore this assert if we're already forcibly shutting down because of a critical error.
 	if( !GIsCriticalError )
 	{
-		TCHAR DescriptionString[4096];
-		FCString::GetVarArgs( DescriptionString, UE_ARRAY_COUNT(DescriptionString), Fmt, Args );
-
-		TCHAR ErrorString[MAX_SPRINTF];
-		FCString::Sprintf( ErrorString, TEXT( "Assertion failed: %s" ), ANSI_TO_TCHAR( Expr ) );
-
-		const int32 NumStackFramesToIgnore = 1;
-		StaticFailDebug( ErrorString, File, Line, DescriptionString, false, NumStackFramesToIgnore );
+		StaticFailDebugV(TEXT("Assertion failed: "), Expr, File, Line, /*bIsEnsure*/ false, ProgramCounter, Fmt, Args);
 	}
+}
+
+thread_local TFunction<bool(const FEnsureHandlerArgs& Args)> EnsureHandler = nullptr;
+
+TFunction<bool(const FEnsureHandlerArgs& Args)> SetEnsureHandler(TFunction<bool(const FEnsureHandlerArgs& Args)> Handler)
+{
+	TFunction<bool(const FEnsureHandlerArgs& Args)> OldHandler = EnsureHandler;
+	EnsureHandler = MoveTemp(Handler);
+	return OldHandler;
+}
+
+TFunction<bool(const FEnsureHandlerArgs& Args)> GetEnsureHandler()
+{
+	return EnsureHandler;
 }
 
 /**
@@ -275,8 +390,14 @@ void FDebug::LogAssertFailedMessageImplV(const ANSICHAR* Expr, const ANSICHAR* F
  * @param	Msg		Informative error message text
  * @param	NumStackFramesToIgnore	Number of stack frames to ignore in the callstack
  */
-FORCENOINLINE void FDebug::EnsureFailed(const ANSICHAR* Expr, const ANSICHAR* File, int32 Line, const TCHAR* Msg, int NumStackFramesToIgnore)
+FORCENOINLINE void FDebug::EnsureFailed(const ANSICHAR* Expr, const ANSICHAR* File, int32 Line, void* ProgramCounter, const TCHAR* Msg)
 {
+	if (UNLIKELY(EnsureHandler && EnsureHandler({ Expr, Msg })))
+	{
+		return;
+	}
+	FTempCommandLineScope TempCommandLine;
+
 	// if time isn't ready yet, we better not continue
 	if (FPlatformTime::GetSecondsPerCycle() == 0.0)
 	{
@@ -295,24 +416,27 @@ FORCENOINLINE void FDebug::EnsureFailed(const ANSICHAR* Expr, const ANSICHAR* Fi
 	if( bShouldCrash )
 	{
 		// Just trigger a regular assertion which will crash via GError->Logf()
-		FDebug::LogAssertFailedMessageImpl( Expr, File, Line, TEXT("%s"), Msg );
+		FDebug::LogAssertFailedMessageImpl( Expr, File, Line, ProgramCounter, TEXT("%s"), Msg );
 		return;
 	}
 
 	// Should we spin here?
 	FPlatformAtomics::InterlockedIncrement(&ActiveEnsureCount);
 
-	// Print initial debug message for this error
-	TCHAR ErrorString[MAX_SPRINTF];
-	FCString::Sprintf(ErrorString,TEXT("Ensure condition failed: %s"),ANSI_TO_TCHAR(Expr));
-
-	StaticFailDebug( ErrorString, File, Line, Msg, true, NumStackFramesToIgnore + 1 );
+	StaticFailDebug(TEXT("Ensure condition failed: "), Expr, File, Line, /*bIsEnsure*/ true, ProgramCounter, TEXT("%s"), Msg);
 
 	// Is there a debugger attached?  If not we'll submit an error report.
 	if (FPlatformMisc::IsDebuggerPresent() && !GAlwaysReportCrash)
 	{
 #if !NO_LOGGING
-		UE_LOG(LogOutputDevice, Error, TEXT("%s") FILE_LINE_DESC TEXT("\n%s\n"), ErrorString, ANSI_TO_TCHAR(File), Line, Msg);
+		if (GEnsuresAreErrors)
+		{
+			UE_LOG(LogOutputDevice, Error, TEXT("Ensure condition failed: %hs" FILE_LINE_DESC_ANSI "\n%s\n"), Expr, File, Line, Msg);
+		}
+		else
+		{
+			UE_LOG(LogOutputDevice, Warning, TEXT("Ensure condition failed: %hs" FILE_LINE_DESC_ANSI "\n%s\n"), Expr, File, Line, Msg);
+		}
 #endif
 	}
 	else
@@ -322,7 +446,7 @@ FORCENOINLINE void FDebug::EnsureFailed(const ANSICHAR* Expr, const ANSICHAR* Fi
 
 		// Create a final string that we'll output to the log (and error history buffer)
 		TCHAR ErrorMsg[16384];
-		FCString::Snprintf(ErrorMsg, UE_ARRAY_COUNT(ErrorMsg), TEXT("Ensure condition failed: %s [File:%s] [Line: %i]") LINE_TERMINATOR TEXT("%s") LINE_TERMINATOR TEXT("Stack: ") LINE_TERMINATOR, ANSI_TO_TCHAR(Expr), ANSI_TO_TCHAR(File), Line, Msg);
+		FCString::Snprintf(ErrorMsg, UE_ARRAY_COUNT(ErrorMsg), TEXT("Ensure condition failed: %hs " FILE_LINE_DESC_ANSI LINE_TERMINATOR_ANSI "%s" LINE_TERMINATOR_ANSI "Stack: " LINE_TERMINATOR_ANSI), Expr, File, Line, Msg);
 
 		// No debugger attached, so generate a call stack and submit a crash report
 		// Walk the stack and dump it to the allocated memory.
@@ -342,7 +466,7 @@ FORCENOINLINE void FDebug::EnsureFailed(const ANSICHAR* Expr, const ANSICHAR* Fi
 				SCOPE_LOG_TIME_IN_SECONDS(*StackWalkPerfMessage, nullptr)
 #endif
 				StackTrace[0] = 0;
-				FPlatformStackWalk::StackWalkAndDumpEx(StackTrace, StackTraceSize, NumStackFramesToIgnore + 1, FGenericPlatformStackWalk::EStackWalkFlags::FlagsUsedWhenHandlingEnsure);
+				FPlatformStackWalk::StackWalkAndDumpEx(StackTrace, StackTraceSize, ProgramCounter, FGenericPlatformStackWalk::EStackWalkFlags::FlagsUsedWhenHandlingEnsure);
 			}
 
 			// Also append the stack trace
@@ -351,10 +475,22 @@ FORCENOINLINE void FDebug::EnsureFailed(const ANSICHAR* Expr, const ANSICHAR* Fi
 
 			// Dump the error and flush the log.
 #if !NO_LOGGING
-			FDebug::LogFormattedMessageWithCallstack(LogOutputDevice.GetCategoryName(), __FILE__, __LINE__, TEXT("=== Handled ensure: ==="), ErrorMsg, ELogVerbosity::Error);
+			FDebug::LogFormattedMessageWithCallstack(LogOutputDevice.GetCategoryName(), __FILE__, __LINE__, TEXT("=== Handled ensure: ==="), ErrorMsg, (GEnsuresAreErrors ? ELogVerbosity::Error : ELogVerbosity::Warning));
 #endif
 			GLog->Flush();
 
+			// Trace the error
+#if !NO_LOGGING
+			if (GEnsuresAreErrors)
+			{
+				TRACE_LOG_MESSAGE(LogOutputDevice, Error, TEXT("%s"), ErrorMsg);
+			}
+			else
+			{
+				TRACE_LOG_MESSAGE(LogOutputDevice, Warning, TEXT("%s"), ErrorMsg);
+			}
+#endif
+			
 			// Submit the error report to the server! (and display a balloon in the system tray)
 			{
 				// How many unique previous errors we should keep track of
@@ -394,7 +530,7 @@ FORCENOINLINE void FDebug::EnsureFailed(const ANSICHAR* Expr, const ANSICHAR* Fi
 						SCOPE_LOG_TIME_IN_SECONDS(*SubmitErrorReporterfMessage, nullptr)
 #endif
 
-							FCoreDelegates::OnHandleSystemEnsure.Broadcast();
+						FCoreDelegates::OnHandleSystemEnsure.Broadcast();
 
 						FPlatformMisc::SubmitErrorReport(ErrorMsg, EErrorReportMode::Balloon);
 
@@ -411,7 +547,14 @@ FORCENOINLINE void FDebug::EnsureFailed(const ANSICHAR* Expr, const ANSICHAR* Fi
 
 			// Add message to log even without stacktrace. It is useful for testing fail on ensure.
 #if !NO_LOGGING
-			UE_LOG(LogOutputDevice, Error, TEXT("%s [File:%s] [Line: %i]"), ErrorString, ANSI_TO_TCHAR(File), Line);
+			if (GEnsuresAreErrors)
+			{
+				UE_LOG(LogOutputDevice, Error, TEXT("Ensure condition failed: %hs " FILE_LINE_DESC_ANSI), Expr, File, Line);
+			}
+			else
+			{
+				UE_LOG(LogOutputDevice, Warning, TEXT("Ensure condition failed: %hs " FILE_LINE_DESC_ANSI), Expr, File, Line);
+			}
 #endif
 		}
 
@@ -422,13 +565,12 @@ FORCENOINLINE void FDebug::EnsureFailed(const ANSICHAR* Expr, const ANSICHAR* Fi
 			SCOPE_LOG_TIME_IN_SECONDS(*SendNewReportMessage, nullptr)
 #endif
 
-#if PLATFORM_DESKTOP
-			FScopeLock Lock(&GetFailDebugCriticalSection());
+#if PLATFORM_USE_REPORT_ENSURE
+			UE::TUniqueLock Lock(FailDebugMutex);
+			ReportEnsure(ErrorMsg, ProgramCounter);
 
-			ReportEnsure(ErrorMsg, NumStackFramesToIgnore + 1);
-
-			GErrorHist[0] = 0;
-			GErrorExceptionDescription[0] = 0;
+			GErrorHist[0] = TEXT('\0');
+			GErrorExceptionDescription[0] = TEXT('\0');
 #endif
 		}
 	}
@@ -437,27 +579,81 @@ FORCENOINLINE void FDebug::EnsureFailed(const ANSICHAR* Expr, const ANSICHAR* Fi
 	FPlatformAtomics::InterlockedDecrement(&ActiveEnsureCount);
 }
 
-void FORCENOINLINE FDebug::CheckVerifyFailedImpl(
+bool FORCENOINLINE FDebug::CheckVerifyFailedImpl(
 	const ANSICHAR* Expr,
 	const ANSICHAR* File,
-	const int Line,
+	int32 Line,
+	void* ProgramCounter,
 	const TCHAR* Format,
 	...)
 {
 	va_list Args;
 
 	va_start(Args, Format);
-	FDebug::LogAssertFailedMessageImplV(Expr, File, Line, Format, Args);
+	FDebug::LogAssertFailedMessageImplV(Expr, File, Line, ProgramCounter, Format, Args);
 	va_end(Args);
+
+	if (GLog)
+	{
+		// Flushing the logs here increases the likelihood that recent messages will be written to the log file, stdout and the debugger console.
+		// Without this, some of the recent messages may not be reported when debugger stops due to an assertion failure.
+		GLog->Flush();
+	}
 
 	if (!FPlatformMisc::IsDebuggerPresent())
 	{
 		FPlatformMisc::PromptForRemoteDebugging(false);
 
 		va_start(Args, Format);
-		AssertFailedImplV(Expr, File, Line, Format, Args);
+		AssertFailedImplV(Expr, File, Line, ProgramCounter, Format, Args);
 		va_end(Args);
+
+		return false;
 	}
+
+#if UE_BUILD_SHIPPING
+	return true;
+#else
+	return !GIgnoreDebugger;
+#endif
+}
+
+bool FORCENOINLINE FDebug::CheckVerifyFailedImpl2(
+	const ANSICHAR* Expr,
+	const ANSICHAR* File,
+	int32 Line,
+	const TCHAR* Format,
+	...)
+{
+	va_list Args;
+
+	va_start(Args, Format);
+	FDebug::LogAssertFailedMessageImplV(Expr, File, Line, PLATFORM_RETURN_ADDRESS(), Format, Args);
+	va_end(Args);
+
+	if (GLog)
+	{
+		// Flushing the logs here increases the likelihood that recent messages will be written to the log file, stdout and the debugger console.
+		// Without this, some of the recent messages may not be reported when debugger stops due to an assertion failure.
+		GLog->Flush();
+	}
+
+	if (!FPlatformMisc::IsDebuggerPresent())
+	{
+		FPlatformMisc::PromptForRemoteDebugging(false);
+
+		va_start(Args, Format);
+		AssertFailedImplV(Expr, File, Line, PLATFORM_RETURN_ADDRESS(), Format, Args);
+		va_end(Args);
+
+		return false;
+	}
+
+#if UE_BUILD_SHIPPING
+	return true;
+#else
+	return !GIgnoreDebugger;
+#endif
 }
 
 #endif // DO_CHECK || DO_GUARD_SLOW || DO_ENSURE
@@ -466,11 +662,16 @@ void VARARGS FDebug::AssertFailed(const ANSICHAR* Expr, const ANSICHAR* File, in
 {
 	va_list Args;
 	va_start(Args, Format);
-	AssertFailedImplV(Expr, File, Line, Format, Args);
+	AssertFailedImplV(Expr, File, Line, nullptr, Format, Args);
 	va_end(Args);
 }
 
-void FDebug::ProcessFatalError()
+void FDebug::AssertFailedV(const ANSICHAR* Expr, const ANSICHAR* File, int32 Line, const TCHAR* Format, va_list Args)
+{
+	AssertFailedImplV(Expr, File, Line, nullptr, Format, Args);
+}
+
+void FDebug::ProcessFatalError(void* ProgramCounter)
 {
 	// This is not perfect because another thread might crash and be handled before this assert
 	// but this static variable will report the crash as an assert. Given complexity of a thread
@@ -478,33 +679,50 @@ void FDebug::ProcessFatalError()
 	// look into fixing this.
 	bHasAsserted = true;
 
+	GError->SetErrorProgramCounter(ProgramCounter);
 	GError->Logf(TEXT("%s"), GErrorHist);
 }
 
 #if DO_CHECK || DO_GUARD_SLOW || DO_ENSURE
-FORCENOINLINE bool VARARGS FDebug::OptionallyLogFormattedEnsureMessageReturningFalseImpl( bool bLog, const ANSICHAR* Expr, const ANSICHAR* File, int32 Line, const TCHAR* FormattedMsg, ... )
+FORCENOINLINE bool VARARGS FDebug::OptionallyLogFormattedEnsureMessageReturningFalseImpl( bool bLog, const ANSICHAR* Expr, const ANSICHAR* File, int32 Line, void* ProgramCounter, const TCHAR* FormattedMsg, ... )
+{
+	va_list Args;
+	va_start(Args, FormattedMsg);
+	OptionallyLogFormattedEnsureMessageReturningFalseImpl(bLog, Expr, File, Line, ProgramCounter, FormattedMsg, Args);
+	va_end(Args);
+
+	return false;
+}
+
+namespace AssertionMacros_Private
+{
+	const int32 FormatBufferSize = 65535;
+	TCHAR FormatBuffer[FormatBufferSize];
+	UE::FWordMutex FormatMutex;
+}
+
+FORCENOINLINE bool FDebug::OptionallyLogFormattedEnsureMessageReturningFalseImpl(bool bLog, const ANSICHAR* Expr, const ANSICHAR* File, int32 Line, void* ProgramCounter, const TCHAR* FormattedMsg, va_list Args)
 {
 	if (bLog)
 	{
-		const int32 TempStrSize = 4096;
-		TCHAR TempStr[ TempStrSize ];
-		GET_VARARGS( TempStr, TempStrSize, TempStrSize - 1, FormattedMsg, FormattedMsg );
-
-		const int32 NumStackFramesToIgnore = 1; // Just ignore this frame
-		EnsureFailed( Expr, File, Line, TempStr, NumStackFramesToIgnore );
+		UE::TUniqueLock Lock(AssertionMacros_Private::FormatMutex);
+		FCString::GetVarArgs(AssertionMacros_Private::FormatBuffer, AssertionMacros_Private::FormatBufferSize, FormattedMsg, Args);
+		EnsureFailed(Expr, File, Line, ProgramCounter, AssertionMacros_Private::FormatBuffer);
 	}
-	
+
 	return false;
 }
 #endif
 
-FORCENOINLINE void VARARGS LowLevelFatalErrorHandler(const ANSICHAR* File, int32 Line, const TCHAR* Format, ...)
+FORCENOINLINE void UE_DEBUG_SECTION VARARGS LowLevelFatalErrorHandler(const ANSICHAR* File, int32 Line, const TCHAR* Format, ...)
 {
-	TCHAR DescriptionString[4096];
-	GET_VARARGS( DescriptionString, UE_ARRAY_COUNT(DescriptionString), UE_ARRAY_COUNT(DescriptionString)-1, Format, Format );
+	va_list Args;
+	va_start(Args, Format);
+	StaticFailDebugV(TEXT("LowLevelFatalError"), "", File, Line, /*bIsEnsure*/ false, PLATFORM_RETURN_ADDRESS(), Format, Args);
+	va_end(Args);
 
-	const int32 NumStackFramesToIgnore = 1; // Just ignore this frame
-	StaticFailDebug(TEXT("LowLevelFatalError"), File, Line, DescriptionString, false, NumStackFramesToIgnore);
+	UE_DEBUG_BREAK_AND_PROMPT_FOR_REMOTE();
+	FDebug::ProcessFatalError(PLATFORM_RETURN_ADDRESS());
 }
 
 void FDebug::DumpStackTraceToLog(const ELogVerbosity::Type LogVerbosity)
@@ -537,3 +755,55 @@ FORCENOINLINE void FDebug::DumpStackTraceToLog(const TCHAR* Heading, const ELogV
 	FMemory::SystemFree(StackTrace);
 #endif
 }
+
+#if DO_ENSURE && !USING_CODE_ANALYSIS
+bool UE_DEBUG_SECTION VARARGS CheckVerifyImpl(std::atomic<bool>& bExecuted, bool bAlways, const ANSICHAR* File, int32 Line, void* ProgramCounter, const ANSICHAR* Expr, const TCHAR* Format, va_list Args)
+{
+	FDebug::OptionallyLogFormattedEnsureMessageReturningFalse(true, Expr, File, Line, ProgramCounter, Format, Args);
+
+	if (!FPlatformMisc::IsDebuggerPresent())
+	{
+		FPlatformMisc::PromptForRemoteDebugging(true);
+		return false;
+	}
+
+#if UE_BUILD_SHIPPING
+	return true;
+#else
+	return !GIgnoreDebugger;
+#endif
+}
+
+bool UE_DEBUG_SECTION UE::Assert::Private::ExecCheckImplInternal(std::atomic<bool>& bExecuted, bool bAlways, const ANSICHAR* File, int32 Line, const ANSICHAR* Expr)
+{
+	if (((bAlways && GEnsureAlwaysEnabled) || !bExecuted.load(std::memory_order_relaxed)) && FPlatformMisc::IsEnsureAllowed())
+	{
+		if (bExecuted.exchange(true, std::memory_order_release) && !bAlways)
+		{
+			return false;
+		}
+
+		va_list Args = {};
+		return CheckVerifyImpl(bExecuted, bAlways, File, Line, PLATFORM_RETURN_ADDRESS(), Expr, TEXT(""), Args);
+	}
+
+	return false;
+}
+
+bool UE_DEBUG_SECTION VARARGS UE::Assert::Private::EnsureFailed(std::atomic<bool>& bExecuted, const FStaticEnsureRecord* Ensure, ...)
+{
+	if (bExecuted.exchange(true, std::memory_order_release) && !(Ensure->bAlways && GEnsureAlwaysEnabled))
+	{
+		return false;
+	}
+
+	va_list Args;
+	va_start(Args, Ensure);
+	const bool bResult = CheckVerifyImpl(bExecuted, Ensure->bAlways, Ensure->File, Ensure->Line, PLATFORM_RETURN_ADDRESS(), Ensure->Expression, Ensure->Format, Args);
+	va_end(Args);
+
+	return bResult;
+}
+#endif
+
+#undef FILE_LINE_DESC_ANSI

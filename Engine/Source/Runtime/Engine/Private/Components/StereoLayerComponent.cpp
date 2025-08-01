@@ -2,15 +2,15 @@
 
 #include "Components/StereoLayerComponent.h"
 #include "UObject/VRObjectVersion.h"
-#include "EngineGlobals.h"
 #include "Engine/Engine.h"
 #include "TextureResource.h"
 #include "Engine/Texture.h"
-#include "IStereoLayers.h"
-#include "StereoLayerShapes.h"
 #include "StereoRendering.h"
+#include "StereoLayerAdditionalFlagsManager.h"
 #if WITH_EDITOR
 #include "SceneManagement.h"
+#else
+#include "StereoRendering.h"
 #endif
 
 UStereoLayerComponent::UStereoLayerComponent(const FObjectInitializer& ObjectInitializer)
@@ -25,9 +25,9 @@ UStereoLayerComponent::UStereoLayerComponent(const FObjectInitializer& ObjectIni
 	, UVRect(FBox2D(FVector2D(0.0f, 0.0f), FVector2D(1.0f, 1.0f)))
 	, StereoLayerType(SLT_FaceLocked)
 	, Priority(0)
+	, LayerId(IStereoLayers::FLayerDesc::INVALID_LAYER_ID)
 	, bIsDirty(true)
 	, bTextureNeedsUpdate(false)
-	, LayerId(0)
 	, LastTransform(FTransform::Identity)
 	, bLastVisible(false)
 	, bNeedsPostLoadFixup(false)
@@ -38,15 +38,23 @@ UStereoLayerComponent::UStereoLayerComponent(const FObjectInitializer& ObjectIni
 	//Shape = ObjectInitializer.CreateDefaultSubobject<UStereoLayerShapeQuad>(this, TEXT("Shape"));
 }
 
-void UStereoLayerComponent::BeginDestroy()
+void UStereoLayerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	Super::BeginDestroy();
+	if (EndPlayReason == EEndPlayReason::EndPlayInEditor || EndPlayReason == EEndPlayReason::Quit)
+	{
+		FStereoLayerAdditionalFlagsManager::Destroy();
+	}
+}
+
+void UStereoLayerComponent::OnUnregister()
+{
+	Super::OnUnregister();
 
 	IStereoLayers* StereoLayers;
 	if (LayerId && GEngine->StereoRenderingDevice.IsValid() && (StereoLayers = GEngine->StereoRenderingDevice->GetStereoLayers()) != nullptr)
 	{
 		StereoLayers->DestroyLayer(LayerId);
-		LayerId = 0;
+		LayerId = IStereoLayers::FLayerDesc::INVALID_LAYER_ID;
 	}
 }
 
@@ -132,7 +140,7 @@ void UStereoLayerComponent::TickComponent(float DeltaTime, enum ELevelTick TickT
 	}
 
 	bool bCurrVisible = GetVisibleFlag();
-	if (!Texture || !Texture->Resource)
+	if (!Texture || !Texture->GetResource())
 	{
 		bCurrVisible = false;
 	}
@@ -148,13 +156,13 @@ void UStereoLayerComponent::TickComponent(float DeltaTime, enum ELevelTick TickT
 		if (Texture)
 		{
 			Texture->SetForceMipLevelsToBeResident(30.0f);
-			LayerDesc.Texture = Texture->Resource->TextureRHI;
+			LayerDesc.Texture = Texture->GetResource()->TextureRHI;
 			LayerDesc.Flags |= (Texture->GetMaterialType() == MCT_TextureExternal) ? IStereoLayers::LAYER_FLAG_TEX_EXTERNAL : 0;
 		}
 		if (LeftTexture)
 		{
 			Texture->SetForceMipLevelsToBeResident(30.0f);
-			LayerDesc.LeftTexture = LeftTexture->Resource->TextureRHI;
+			LayerDesc.LeftTexture = LeftTexture->GetResource()->TextureRHI;
 		}
 				
 		LayerDesc.Flags |= (bLiveTexture) ? IStereoLayers::LAYER_FLAG_TEX_CONTINUOUS_UPDATE : 0;
@@ -162,6 +170,12 @@ void UStereoLayerComponent::TickComponent(float DeltaTime, enum ELevelTick TickT
 		LayerDesc.Flags |= (bQuadPreserveTextureRatio) ? IStereoLayers::LAYER_FLAG_QUAD_PRESERVE_TEX_RATIO : 0;
 		LayerDesc.Flags |= (bSupportsDepth) ? IStereoLayers::LAYER_FLAG_SUPPORT_DEPTH : 0;
 		LayerDesc.Flags |= (!bCurrVisible) ? IStereoLayers::LAYER_FLAG_HIDDEN : 0;
+
+		TSharedPtr<FStereoLayerAdditionalFlagsManager> FlagsManager = FStereoLayerAdditionalFlagsManager::Get();
+		for (FName& Flag : AdditionalFlags)
+		{
+			LayerDesc.Flags |= FlagsManager->GetFlagValue(Flag);
+		}
 
 		switch (StereoLayerType)
 		{
@@ -268,6 +282,7 @@ void UStereoLayerShapeEquirect::SetEquirectProps(FEquirectProps InEquirectProps)
 	RightScale = InEquirectProps.RightScale;
 	LeftBias = InEquirectProps.LeftBias;
 	RightBias = InEquirectProps.RightBias;
+	Radius = InEquirectProps.Radius;
 
 	MarkStereoLayerDirty();
 }
@@ -344,7 +359,7 @@ void UStereoLayerShapeCubemap::ApplyShape(IStereoLayers::FLayerDesc& LayerDesc)
 
 void UStereoLayerShapeEquirect::ApplyShape(IStereoLayers::FLayerDesc& LayerDesc)
 {
-	LayerDesc.SetShape<FEquirectLayer>(LeftUVRect, RightUVRect, LeftScale, RightScale, LeftBias, RightBias);
+	LayerDesc.SetShape<FEquirectLayer>(LeftUVRect, RightUVRect, LeftScale, RightScale, LeftBias, RightBias, Radius);
 }
 
 void UStereoLayerShapeQuad::ApplyShape(IStereoLayers::FLayerDesc& LayerDesc)
@@ -379,15 +394,15 @@ void UStereoLayerShapeCylinder::DrawShapeVisualization(const class FSceneView* V
 	check(GetOuter()->IsA<UStereoLayerComponent>());
 
 	auto StereoLayerComp = Cast<UStereoLayerComponent>(GetOuter());
-	float ArcAngle = OverlayArc * 180 / (Radius * PI);
+	float ArcAngle = OverlayArc * 180 / (Radius * UE_PI);
 
 	FVector X = StereoLayerComp->GetComponentTransform().GetUnitAxis(EAxis::Type::X);
 	FVector Y = StereoLayerComp->GetComponentTransform().GetUnitAxis(EAxis::Type::Y);
 	FVector Base = StereoLayerComp->GetComponentTransform().GetLocation();
 	FVector HalfHeight = FVector(0, 0, Height / 2);
 
-	FVector LeftVertex = Base + Radius * (FMath::Cos(ArcAngle / 2 * (PI / 180.0f)) * X + FMath::Sin(ArcAngle / 2 * (PI / 180.0f)) * Y);
-	FVector RightVertex = Base + Radius * (FMath::Cos(-ArcAngle / 2 * (PI / 180.0f)) * X + FMath::Sin(-ArcAngle / 2 * (PI / 180.0f)) * Y);
+	FVector LeftVertex = Base + Radius * (FMath::Cos(ArcAngle / 2 * (UE_PI / 180.0f)) * X + FMath::Sin(ArcAngle / 2 * (UE_PI / 180.0f)) * Y);
+	FVector RightVertex = Base + Radius * (FMath::Cos(-ArcAngle / 2 * (UE_PI / 180.0f)) * X + FMath::Sin(-ArcAngle / 2 * (UE_PI / 180.0f)) * Y);
 
 	DrawArc(PDI, Base + HalfHeight, X, Y, -ArcAngle / 2, ArcAngle / 2, Radius, 10, YellowColor, 0);
 
@@ -397,15 +412,32 @@ void UStereoLayerShapeCylinder::DrawShapeVisualization(const class FSceneView* V
 
 	PDI->DrawLine(RightVertex - HalfHeight, RightVertex + HalfHeight, YellowColor, 0);
 }
+
+void UStereoLayerShapeEquirect::DrawShapeVisualization(const class FSceneView* View, class FPrimitiveDrawInterface* PDI)
+{
+	FLinearColor YellowColor = FColor(231, 239, 0, 255);
+	check(GetOuter()->IsA<UStereoLayerComponent>());
+
+	auto StereoLayerComp = Cast<UStereoLayerComponent>(GetOuter());
+
+	DrawWireSphere(PDI, StereoLayerComp->GetComponentTransform().GetTranslation(), YellowColor, (double) Radius, 32, 0);
+}
 #endif
 
 
 bool FEquirectProps::operator==(const class UStereoLayerShapeEquirect& Other) const
 {
-	return (LeftUVRect == Other.LeftUVRect) && (RightUVRect == Other.RightUVRect) && (LeftScale == Other.LeftScale) && (RightScale == Other.RightScale) && (LeftBias == Other.LeftBias) && (RightBias == Other.RightBias);
+	return (LeftUVRect == Other.LeftUVRect) && (RightUVRect == Other.RightUVRect) && (LeftScale == Other.LeftScale) && (RightScale == Other.RightScale) && (LeftBias == Other.LeftBias) && (RightBias == Other.RightBias) && (Radius == Other.Radius);
 }
 
 bool FEquirectProps::operator==(const FEquirectProps& Other) const
 {
-	return (LeftUVRect == Other.LeftUVRect) && (RightUVRect == Other.RightUVRect) && (LeftScale == Other.LeftScale) && (RightScale == Other.RightScale) && (LeftBias == Other.LeftBias) && (RightBias == Other.RightBias);
+	return (LeftUVRect == Other.LeftUVRect) && (RightUVRect == Other.RightUVRect) && (LeftScale == Other.LeftScale) && (RightScale == Other.RightScale) && (LeftBias == Other.LeftBias) && (RightBias == Other.RightBias) && (Radius == Other.Radius);
+}
+
+TArray<FName> UEditorFlagCollector::GetFlagNames()
+{
+	TSet<FName> UniqueFlags;
+	FStereoLayerAdditionalFlagsManager::CollectFlags(UniqueFlags);
+	return UniqueFlags.Array();
 }

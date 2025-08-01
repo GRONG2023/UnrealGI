@@ -66,6 +66,8 @@ public:
 		return KeyToActionMap;
 	}
 
+	virtual TMap<FViewportActionKeyInput, TArray<FKey>> GetKnownActionMappings(EControllerHand InHand = EControllerHand::AnyHand, FName InHMDDeviceType = NAME_None) const;
+
 	/** Initialize default values */
 	UFUNCTION( BlueprintNativeEvent, CallInEditor, Category = "UVREditorInteractor" )
 	void Init( class UVREditorMode* InVRMode );
@@ -74,10 +76,11 @@ public:
 	UFUNCTION( BlueprintNativeEvent, CallInEditor, Category = "UVREditorInteractor" )
 	void SetupComponent( AActor* OwningActor );
 
+
 	// ViewportInteractorInterface overrides
 	virtual void Shutdown_Implementation() override;
 	virtual void Tick_Implementation( const float DeltaTime ) override;
-	virtual void CalculateDragRay( float& InOutDragRayLength, float& InOutDragRayVelocity ) override;
+	virtual void CalculateDragRay( double& InOutDragRayLength, double& InOutDragRayVelocity ) override;
 
 	/** @return Returns the type of HMD we're dealing with */
 	UFUNCTION( BlueprintCallable, Category = "UVREditorInteractor" )
@@ -90,12 +93,10 @@ public:
 	virtual void PreviewInputKey( class FEditorViewportClient& ViewportClient, FViewportActionKeyInput& Action, const FKey Key, const EInputEvent Event, bool& bOutWasHandled ) override;
 	virtual void HandleInputKey( class FEditorViewportClient& ViewportClient, FViewportActionKeyInput& Action, const FKey Key, const EInputEvent Event, bool& bOutWasHandled ) override;
 	virtual bool GetTransformAndForwardVector( FTransform& OutHandTransform, FVector& OutForwardVector ) const override;
-
-
-	void HandleInputAxis( FEditorViewportClient& ViewportClient, FViewportActionKeyInput& Action, const FKey Key, const float Delta, const float DeltaTime, bool& bOutWasHandled );
+	virtual void HandleInputAxis( FEditorViewportClient& ViewportClient, FViewportActionKeyInput& Action, const FKey Key, const float Delta, const float DeltaTime, bool& bOutWasHandled ) override;
 
 	/** Toggles whether or not this controller is being used to scrub sequencer */
-	void ToggleSequencerScrubbingMode();;
+	void ToggleSequencerScrubbingMode();
 
 	/** Returns whether or not this controller is being used to scrub sequencer */
 	bool IsScrubbingSequencer() const;
@@ -253,7 +254,9 @@ public:
 
 	/** Replace the default VR controller mesh with a custom one. */
 	UFUNCTION(BlueprintCallable, Category = "VREditorInteractor")
-	void ReplaceHandMeshComponent(UStaticMesh* NewMesh);
+	void ReplaceHandMeshComponent(UStaticMesh* NewMesh, FVector MeshScale = FVector(1.f, 1.f, 1.f));
+
+	bool IsActionKeyPressed(FName ActionName) const;
 
 protected:
 
@@ -266,7 +269,11 @@ protected:
 
 	/** Motion controller component which handles late-frame transform updates of all parented sub-components */
 	UPROPERTY()
-	class UMotionControllerComponent* MotionControllerComponent;
+	TObjectPtr<class UMotionControllerComponent> MotionControllerComponent;
+
+	/** Separate motion controller component set to the "aim" pose motion source, used for the laser pointer. */
+	UPROPERTY()
+	TObjectPtr<class UMotionControllerComponent> LaserMotionControllerComponent;
 
 	//
 	// Graphics
@@ -274,42 +281,48 @@ protected:
 
 	/** Access to the current handmesh. Use ReplaceHandMeshComponent() to update the entire StaticMeshComponent. */
 	UPROPERTY(BlueprintReadWrite, Category = "VREditorInteractor")
-	class UStaticMeshComponent* HandMeshComponent;
+	TObjectPtr<class UStaticMeshComponent> HandMeshComponent;
+
+	UFUNCTION(BlueprintNativeEvent)
+	void UpdateHandMeshRelativeTransform();
+
+	FVector3d HandMeshBaseScale;
+	FTransform HandMeshGripTransform;
 
 
 private:
 
 	/** Spline for this hand's laser pointer */
 	UPROPERTY()
-	class USplineComponent* LaserSplineComponent;
+	TObjectPtr<class USplineComponent> LaserSplineComponent;
 
 	/** Spline meshes for curved laser */
 	UPROPERTY()
-	TArray<class USplineMeshComponent*> LaserSplineMeshComponents;
+	TArray<TObjectPtr<class USplineMeshComponent>> LaserSplineMeshComponents;
 
 	/** MID for laser pointer material (opaque parts) */
 	UPROPERTY()
-	class UMaterialInstanceDynamic* LaserPointerMID;
+	TObjectPtr<class UMaterialInstanceDynamic> LaserPointerMID;
 
 	/** MID for laser pointer material (translucent parts) */
 	UPROPERTY()
-	class UMaterialInstanceDynamic* TranslucentLaserPointerMID;
+	TObjectPtr<class UMaterialInstanceDynamic> TranslucentLaserPointerMID;
 
 	/** Hover impact indicator mesh */
 	UPROPERTY()
-	class UStaticMeshComponent* HoverMeshComponent;
+	TObjectPtr<class UStaticMeshComponent> HoverMeshComponent;
 
 	/** Hover point light */
 	UPROPERTY()
-	class UPointLightComponent* HoverPointLightComponent;
+	TObjectPtr<class UPointLightComponent> HoverPointLightComponent;
 
 	/** MID for hand mesh */
 	UPROPERTY()
-	class UMaterialInstanceDynamic* HandMeshMID;
+	TObjectPtr<class UMaterialInstanceDynamic> HandMeshMID;
 
 	/** Avatar actor that we're attached to. Cached so that we can change the HandMeshComponent via BP at runtime. */
 	UPROPERTY()
-	AActor* OwningAvatar;
+	TObjectPtr<AActor> OwningAvatar;
 
 	/** True if this hand has a motion controller (or both!) */
 	bool bHaveMotionController;
@@ -323,7 +336,11 @@ private:
 	static const FName MotionController_Left_PressedTriggerAxis;
 	static const FName MotionController_Right_PressedTriggerAxis;
 
+	/** Is the button for the specified action currently held down? */
+	TMap<FName, bool> ActionKeysPressed;
+
 	/** Is the Modifier button held down? */
+	UE_DEPRECATED(5.1, "Use IsActionKeyPressed(VRActionTypes::Modifier) instead.")
 	bool bIsModifierPressed;
 
 	/** Current trigger pressed amount for 'select and move' (0.0 - 1.0) */
@@ -413,9 +430,11 @@ protected:
 	//
 
 	/** True if the trackpad is actively being touched */
+	UE_DEPRECATED(5.1, "Use IsActionKeyPressed(VRActionTypes::Touch) instead.")
 	bool bIsTouchingTrackpad;
 
 	/** True if pressing trackpad button (or analog stick button is down) */
+	UE_DEPRECATED(5.1, "Use IsActionKeyPressed(VRActionTypes::ConfirmRadialSelection) instead.")
 	bool bIsPressingTrackpad;
 
 	/** Position of the touched trackpad */
@@ -487,5 +506,5 @@ protected:
 
 	/** The mode that owns this interactor */
 	UPROPERTY()
-	class UVREditorMode* VRMode;
+	TObjectPtr<class UVREditorMode> VRMode;
 };

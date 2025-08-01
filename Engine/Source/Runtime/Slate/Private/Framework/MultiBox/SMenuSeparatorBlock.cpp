@@ -2,7 +2,7 @@
 
 #include "Framework/MultiBox/SMenuSeparatorBlock.h"
 #include "Widgets/SBoxPanel.h"
-#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SSeparator.h"
 
 
 /**
@@ -46,20 +46,15 @@ void SMenuSeparatorBlock::BuildMultiBlockWidget(const ISlateStyle* StyleSet, con
 	ChildSlot
 	[
 		SNew( SVerticalBox )
-			+SVerticalBox::Slot()
-				.AutoHeight()
 
-				// Add some empty space before the line, and a tiny bit after it
-				.Padding( 0.0f, 4.0f, 0.0f, 2.0f )
-				[
-					SNew( SBorder )
-
-						// We'll use the border's padding to actually create the horizontal line
-						.Padding( StyleSet->GetMargin( StyleName, ".Separator.Padding" ) )
-
-						// Separator graphic
-						.BorderImage( StyleSet->GetBrush( StyleName, ".Separator" ) )
-				]
+		+SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(StyleSet->GetMargin(StyleName, ".Separator.Padding"))
+		[
+			SNew( SSeparator )
+			.SeparatorImage(StyleSet->GetBrush(StyleName, ".Separator"))
+			.Thickness(1.0f)
+		]
 	];
 
 	// Add this widget to the search list of the multibox and hide it

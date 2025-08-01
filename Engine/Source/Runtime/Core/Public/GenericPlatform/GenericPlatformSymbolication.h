@@ -2,15 +2,17 @@
 
 #pragma once
 
-#include "CoreTypes.h"
-#include "Templates/UnrealTypeTraits.h"
 #include "Containers/Array.h"
-#include "Containers/UnrealString.h"
 #include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "CoreTypes.h"
 #include "GenericPlatform/GenericPlatformStackWalk.h"
+#include "Serialization/Archive.h"
+#include "Templates/UnrealTypeTraits.h"
 
-template <typename T> struct TCallTraits;
+struct FProgramCounterSymbolInfo;
 template< typename InElementType, typename KeyFuncs , typename Allocator > class TSet;
+template <typename T> struct TCallTraits;
 
 /**
  * File & line info for a debug symbol region
@@ -114,12 +116,15 @@ struct FGenericPlatformSymbolDatabaseKeyFuncs
 typedef TSet<FGenericPlatformSymbolDatabase, FGenericPlatformSymbolDatabaseKeyFuncs> FGenericPlatformSymbolDatabaseSet;
 
 
-struct CORE_API FGenericPlatformSymbolication
+struct FGenericPlatformSymbolication
 {
-	static bool LoadSymbolDatabaseForBinary(FString SourceFolder, FString BinaryPath, FString BinarySignature, FGenericPlatformSymbolDatabase& OutDatabase);
-	static bool SaveSymbolDatabaseForBinary(FString TargetFolder, FString Name, FGenericPlatformSymbolDatabase& Database);
+	/**
+	 * @param Architecture Specify the architecture in case of universal binary, currently unused
+	 */
+	static CORE_API bool LoadSymbolDatabaseForBinary(FString SourceFolder, FString BinaryPath, FString BinarySignature, TOptional<FString> Architecture, FGenericPlatformSymbolDatabase& OutDatabase);
+	static CORE_API bool SaveSymbolDatabaseForBinary(FString TargetFolder, FString Name, FGenericPlatformSymbolDatabase& Database);
 	
-	static bool SymbolInfoForStrippedSymbol(FGenericPlatformSymbolDatabase const& Database, uint64 ProgramCounter, uint64 ModuleOffset, FString ModuleSignature, FProgramCounterSymbolInfo& Info);
+	static CORE_API bool SymbolInfoForStrippedSymbol(FGenericPlatformSymbolDatabase const& Database, uint64 ProgramCounter, uint64 ModuleOffset, FString ModuleSignature, FProgramCounterSymbolInfo& Info);
 	
 	static bool SymbolInfoForAddress(uint64 ProgramCounter, FProgramCounterSymbolInfo& Info) { return false; }
 };

@@ -2,17 +2,19 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "PropertyNode.h"
 #include "PropertyHandle.h"
-#include "Editor/SceneOutliner/Public/SceneOutlinerFwd.h"
+#include "SceneOutlinerFwd.h"
 
 class FEditConditionExpression;
 class FEditConditionContext;
+class FPropertyNode;
+class IPropertyHandle;
+class IPropertyUtilities;
 
-class FPropertyEditor : public TSharedFromThis< FPropertyEditor >	
+class FPropertyEditor : public TSharedFromThis<FPropertyEditor>	
 {
 public:
-	static TSharedRef< FPropertyEditor > Create( const TSharedRef< class FPropertyNode >& InPropertyNode, const TSharedRef<class IPropertyUtilities >& InPropertyUtilities );
+	static TSharedRef<FPropertyEditor> Create(const TSharedRef<FPropertyNode>& InPropertyNode, const TSharedRef<IPropertyUtilities>& InPropertyUtilities);
 
 	/** @return The String containing the value of the property */
 	FString GetValueAsString() const;
@@ -40,11 +42,14 @@ public:
 
 	void RequestRefresh();
 
-	bool SupportsEditConditionToggle() const;
-	void ToggleEditConditionState();
-
 	/**	@return Whether the property is editconst */
 	bool IsEditConst() const;
+
+	/** @return Whether this property should have an edit condition toggle. */
+	bool SupportsEditConditionToggle() const;
+
+	/** Toggle the current state of the edit condition if this SupportsEditConditionToggle() */
+	void ToggleEditConditionState();
 
 	/**	@return Whether the property has a condition which must be met before allowing editing of it's value */
 	bool HasEditCondition() const;
@@ -70,10 +75,6 @@ public:
 	/**	@return Whether the property passes the current filter restrictions. If no there are no filter restrictions false will be returned. */
 	bool DoesPassFilterRestrictions() const;
 
-	void AddPropertyEditorChild( const TSharedRef<FPropertyEditor>& Child );
-	void RemovePropertyEditorChild( const TSharedRef<FPropertyEditor>& Child );
-	const TArray< TSharedRef< FPropertyEditor > >& GetPropertyEditorChildren() const;
-
 	void UseSelected();
 	void AddItem();
 	void AddGivenItem(const FString& InGivenItem);
@@ -87,19 +88,28 @@ public:
 	void OnGetClassesForAssetPicker( TArray<const UClass*>& OutClasses );
 	void OnAssetSelected( const FAssetData& AssetData );
 	void OnActorSelected( AActor* InActor );
-	void OnGetActorFiltersForSceneOutliner( TSharedPtr<SceneOutliner::FOutlinerFilters>& OutFilters );
+	void OnGetActorFiltersForSceneOutliner( TSharedPtr<FSceneOutlinerFilters>& OutFilters );
 	void EditConfigHierarchy();
+	
+	/**	
+	* If this is an editor of an optional, set that optional to the passed in value.
+	* If nullptr is passed in, the optional is set and default-initialized.
+	*/
+	void SetOptionalItem(FProperty* NewValue);
+
+	/**	If this is an editor of an optional, unset that optional. */
+	void ClearOptionalItem();
 
 	/**	In an ideal world we wouldn't expose these */
-	TSharedRef< FPropertyNode > GetPropertyNode() const;
+	TSharedRef<FPropertyNode> GetPropertyNode() const;
 	const FProperty* GetProperty() const;
-	TSharedRef< IPropertyHandle > GetPropertyHandle() const;
+	TSharedRef<IPropertyHandle> GetPropertyHandle() const;
 
-	static void SyncToObjectsInNode( const TWeakPtr< FPropertyNode >& WeakPropertyNode );
+	static void SyncToObjectsInNode( const TWeakPtr<FPropertyNode>& WeakPropertyNode );
 
 	static const FString MultipleValuesDisplayName;
 private:
-	FPropertyEditor( const TSharedRef< class FPropertyNode >& InPropertyNode, const TSharedRef<class IPropertyUtilities >& InPropertyUtilities );
+	FPropertyEditor( const TSharedRef<FPropertyNode>& InPropertyNode, const TSharedRef<IPropertyUtilities>& InPropertyUtilities );
 
 	void OnUseSelected();
 	void OnAddItem();
@@ -110,21 +120,17 @@ private:
 	void OnDuplicateItem();
 	void OnBrowseTo();
 	void OnEmptyArray();
+	void OnSetOptionalValue(FProperty* NewValue);
+	void OnClearOptionalValue();
 
 private:
 
-	TArray< TSharedRef< FPropertyEditor > >	ChildPropertyEditors;
-
 	/** Property handle for actually reading/writing the value of a property */
-	TSharedPtr< class IPropertyHandle > PropertyHandle;
+	TSharedPtr<IPropertyHandle> PropertyHandle;
 
 	/** pointer to the property node. */
-	TSharedRef< class FPropertyNode > PropertyNode;
+	TSharedRef<FPropertyNode> PropertyNode;
 	 
 	/** The property view where this widget resides */
-	TSharedRef< class IPropertyUtilities > PropertyUtilities;
-
-	/** Edit condition expression used to determine if this property editor can modify its property */
-	TSharedPtr<FEditConditionExpression> EditConditionExpression;
-	TSharedPtr<FEditConditionContext> EditConditionContext;
+	TSharedRef<IPropertyUtilities> PropertyUtilities;
 };

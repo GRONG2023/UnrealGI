@@ -11,6 +11,7 @@
 #include "Input/HittestGrid.h"
 #include "Widgets/Layout/SBox.h"
 #include "GlobalShader.h"
+#include "MoviePlayerProxy.h"
 #include "MoviePlayerThreading.h"
 #include "MoviePlayerSettings.h"
 #include "ShaderCompiler.h"
@@ -22,6 +23,8 @@
 #include "Widgets/SVirtualWindow.h"
 #include "Rendering/SlateDrawBuffer.h"
 #include "HAL/PlatformApplicationMisc.h"
+#include "Http.h"
+#include "HttpManager.h"
 #include "Widgets/Layout/SDPIScaler.h"
 #include "Engine/UserInterfaceSettings.h"
 
@@ -113,6 +116,11 @@ FDefaultGameMoviePlayer::FDefaultGameMoviePlayer()
 	, LoadingScreenAttributes()
 	, LastPlayTime(0.0)
 	, bInitialized(false)
+	, bIsPlayOnBlockingEnabled(false)
+	, bIsSlateThreadAllowed(true)
+	, ViewportDPIScale(1.0f)
+	, BlockingRefCount(0)
+	, LastBlockingTickTime(0.0)
 {
 	FCoreDelegates::IsLoadingMovieCurrentlyPlaying.BindRaw(this, &FDefaultGameMoviePlayer::IsMovieCurrentlyPlaying);
     FCoreDelegates::RegisterMovieStreamerDelegate.AddRaw(this, &FDefaultGameMoviePlayer::RegisterMovieStreamer);
@@ -157,6 +165,7 @@ void FDefaultGameMoviePlayer::Initialize(FSlateRenderer& InSlateRenderer, TShare
 		return;
 	}
 
+	LLM_SCOPE_BYNAME(TEXT("SlateMoviePlayer"));
 	UE_LOG(LogMoviePlayer, Log, TEXT("Initializing movie player"));
 
 	FDefaultGameMoviePlayer* InMoviePlayer = this;
@@ -227,12 +236,6 @@ void FDefaultGameMoviePlayer::Initialize(FSlateRenderer& InSlateRenderer, TShare
 	MovieViewportWeakPtr = MovieViewport;
 	MovieViewport->SetActive(true);
 
-	// Register the movie viewport so that it can receive user input.
-	if (!FPlatformProperties::SupportsWindowedMode())
-	{
-		FSlateApplication::Get().RegisterGameViewport( MovieViewport.ToSharedRef() );
-	}
-
 	MainWindow = GameWindow;
 
 	GameWindow->GetOnWindowClosedEvent().AddRaw(this, &FDefaultGameMoviePlayer::OnMainWindowClosed);
@@ -247,6 +250,7 @@ void FDefaultGameMoviePlayer::Shutdown()
 {
 	UE_LOG(LogMoviePlayer, Log, TEXT("Shutting down movie player"));
 
+	FMoviePlayerProxy::UnregisterServer();
 	TSharedPtr<SWindow> MainWindowShared = MainWindow.Pin();
 	if (MainWindowShared.IsValid())
 	{
@@ -379,7 +383,26 @@ bool FDefaultGameMoviePlayer::PlayMovie()
 			UserWidgetHolder->SetContent(LoadingScreenAttributes.WidgetLoadingScreen.IsValid() ? LoadingScreenAttributes.WidgetLoadingScreen.ToSharedRef() : SNullWidget::NullWidget);
 			VirtualRenderWindow->Resize(MainWindow.Pin()->GetClientSizeInScreen());
 			VirtualRenderWindow->SetContent(LoadingScreenContents.ToSharedRef());
-		
+
+			// Register the movie viewport so that it can receive user input.
+			// There is only a valid viewport if we have a movie streamer as the streamer sets it.
+			if ((!FPlatformProperties::SupportsWindowedMode()) && (ActiveMovieStreamer.IsValid()))
+			{
+				TSharedPtr<SViewport> MovieViewport = MovieViewportWeakPtr.Pin();
+				if (MovieViewport.IsValid())
+				{
+					// Let the streamer know about the previous viewport interface.
+					TSharedPtr<SViewport> GameViewport = FSlateApplication::Get().GetGameViewport();
+					if (GameViewport.IsValid())
+					{
+						TSharedPtr<ISlateViewport> ViewportInterface = GameViewport->GetViewportInterface().Pin();
+						ActiveMovieStreamer->PreviousViewportInterface(ViewportInterface);
+					}
+
+					FSlateApplication::Get().RegisterGameViewport(MovieViewport.ToSharedRef());
+				}
+			}
+
 			{
 				FScopeLock SyncMechanismLock(&SyncMechanismCriticalSection);
 				SyncMechanism = new FSlateLoadingSynchronizationMechanism(WidgetRenderer, ActiveMovieStreamer);
@@ -387,6 +410,8 @@ bool FDefaultGameMoviePlayer::PlayMovie()
 			}
 
 			bBeganPlaying = true;
+			LastBlockingTickTime = FPlatformTime::Seconds();
+			OnAsyncLoadingFlushUpdateDelegateHandle = FCoreDelegates::OnAsyncLoadingFlushUpdate.AddRaw(this, &FDefaultGameMoviePlayer::BlockingTick);
 		}
 
 		//Allow anything that set up this LoadingScreenAttribute to know the loading screen is now displaying
@@ -436,10 +461,10 @@ void FDefaultGameMoviePlayer::WaitForMovieToFinish(bool bAllowEngineTick)
 			LoadingIsDone.Set(1);
 		}
 		
-        if (MainWindow.IsValid())
+        if (TSharedPtr<SWindow> MainWindowPtr = MainWindow.Pin())
         {
             // Transfer the content to the main window
-            MainWindow.Pin()->SetContent(LoadingScreenContents.ToSharedRef());
+			MainWindowPtr->SetContent(LoadingScreenContents.ToSharedRef());
         }
         if (VirtualRenderWindow.IsValid())
         {
@@ -544,8 +569,14 @@ void FDefaultGameMoviePlayer::WaitForMovieToFinish(bool bAllowEngineTick)
 			}
 		}
 
+		if (UserWidgetHolder.IsValid())
+		{
+			UserWidgetHolder->SetContent(SNullWidget::NullWidget);
+		}
 		LoadingIsDone.Set(1);
 		IsMoviePlaying = false;
+		FCoreDelegates::OnAsyncLoadingFlushUpdate.Remove(OnAsyncLoadingFlushUpdateDelegateHandle);
+		OnAsyncLoadingFlushUpdateDelegateHandle.Reset();
 
 		IXRLoadingScreen* LoadingScreen;
 		if (GEngine && GEngine->XRSystem.IsValid() && (LoadingScreen = GEngine->XRSystem->GetLoadingScreen()) != nullptr && SyncMechanism == nullptr)
@@ -600,6 +631,73 @@ bool FDefaultGameMoviePlayer::IsMovieCurrentlyPlaying() const
 bool FDefaultGameMoviePlayer::IsMovieStreamingFinished() const
 {
 	return MovieStreamingIsDone.GetValue() != 0;
+}
+
+void FDefaultGameMoviePlayer::BlockingStarted()
+{
+	if ((bIsPlayOnBlockingEnabled) && (bIsSlateThreadAllowed))
+	{
+		UE_LOG(LogMoviePlayer, Verbose, TEXT("BlockingStarted %d"), BlockingRefCount);
+		BlockingRefCount++;
+		PlayMovie();
+	}
+}
+
+void FDefaultGameMoviePlayer::BlockingTick()
+{
+	check(IsInGameThread());
+	if (IsMovieCurrentlyPlaying())
+	{
+		// Has enough time passed since the last tick?
+		double Time = FPlatformTime::Seconds();
+		double DeltaTime = Time - LastBlockingTickTime;
+		if (DeltaTime > 0.1f)
+		{
+			// Yes. Time for another tick.
+			LastBlockingTickTime = Time;
+			
+			// Call HTTP manager.
+			FHttpManager& HttpManager = FHttpModule::Get().GetHttpManager();
+			HttpManager.Tick(0.0f);
+
+			// Callbacks.
+			OnMoviePlaybackTick().Broadcast((float)DeltaTime);
+
+			UE_LOG(LogMoviePlayer, VeryVerbose, TEXT("BlockingTick deltatime:%f"), DeltaTime);
+		}
+	}
+}
+
+void FDefaultGameMoviePlayer::BlockingFinished()
+{
+	if (bIsPlayOnBlockingEnabled)
+	{
+		// Only call WaitForMovieToFinish if we are playing a movie,
+		// as WaitForMovieToFinish has side effects if a movie is not playing,
+		// and this can cause a hang.
+		if (LoadingScreenIsPrepared() && IsMovieCurrentlyPlaying())
+		{
+			UE_LOG(LogMoviePlayer, Verbose, TEXT("BlockingFinished. Refcount: %d."), BlockingRefCount);
+			WaitForMovieToFinish();
+		}
+		
+		BlockingRefCount = 0;
+	}
+}
+
+void FDefaultGameMoviePlayer::SetIsSlateThreadAllowed(bool bInIsSlateThreadAllowed)
+{
+	if (bIsSlateThreadAllowed != bInIsSlateThreadAllowed)
+	{
+		bIsSlateThreadAllowed = bInIsSlateThreadAllowed;
+
+		// Can we use the Slate thread?
+		if (bIsSlateThreadAllowed == false)
+		{
+			// Nope. Make sure its no longer running.
+			BlockingFinished();
+		}
+	}
 }
 
 void FDefaultGameMoviePlayer::Tick( float DeltaTime )
@@ -727,6 +825,17 @@ void FDefaultGameMoviePlayer::SetupLoadingScreenFromIni()
 	}
 }
 
+void FDefaultGameMoviePlayer::SetViewportDPIScale(float InViewportDPIScale)
+{
+	ViewportDPIScale = InViewportDPIScale;
+
+	// Turn off scale in the renderer as we have our own scale.
+	if (WidgetRenderer != nullptr)
+	{
+		WidgetRenderer->EnableDPIScale(false);
+	}
+}
+
 bool FDefaultGameMoviePlayer::MovieStreamingIsPrepared() const
 {
 	return MovieStreamers.Num() > 0 && LoadingScreenAttributes.MoviePaths.Num() > 0;
@@ -737,8 +846,8 @@ FVector2D FDefaultGameMoviePlayer::GetMovieSize() const
 	const FVector2D ScreenSize = MainWindow.Pin()->GetClientSizeInScreen();
 	if (MovieStreamingIsPrepared() && ActiveMovieStreamer.IsValid())
 	{
-		const float MovieAspectRatio = ActiveMovieStreamer->GetAspectRatio();
-		const float ScreenAspectRatio = ScreenSize.X / ScreenSize.Y;
+		const double MovieAspectRatio = ActiveMovieStreamer->GetAspectRatio();
+		const double ScreenAspectRatio = ScreenSize.X / ScreenSize.Y;
 		if (MovieAspectRatio < ScreenAspectRatio)
 		{
 			return FVector2D(ScreenSize.Y * MovieAspectRatio, ScreenSize.Y);
@@ -755,12 +864,12 @@ FVector2D FDefaultGameMoviePlayer::GetMovieSize() const
 
 FOptionalSize FDefaultGameMoviePlayer::GetMovieWidth() const
 {
-	return GetMovieSize().X;
+	return (float)GetMovieSize().X;
 }
 
 FOptionalSize FDefaultGameMoviePlayer::GetMovieHeight() const
 {
-	return GetMovieSize().Y;
+	return (float)GetMovieSize().Y;
 }
 
 EVisibility FDefaultGameMoviePlayer::GetSlateBackgroundVisibility() const
@@ -807,20 +916,28 @@ FReply FDefaultGameMoviePlayer::OnAnyDown()
 
 void FDefaultGameMoviePlayer::OnPreLoadMap(const FString& LevelName)
 {
-	FCoreUObjectDelegates::PostLoadMapWithWorld.RemoveAll(this);
-
-	if( PlayMovie() )
+	if (bIsPlayOnBlockingEnabled == false)
 	{
-		FCoreUObjectDelegates::PostLoadMapWithWorld.AddRaw(this, &FDefaultGameMoviePlayer::OnPostLoadMap );
+		UE_LOG(LogMoviePlayer, Verbose, TEXT("PreLoadMap"));
+		FCoreUObjectDelegates::PostLoadMapWithWorld.RemoveAll(this);
+
+		if (PlayMovie())
+		{
+			FCoreUObjectDelegates::PostLoadMapWithWorld.AddRaw(this, &FDefaultGameMoviePlayer::OnPostLoadMap);
+		}
 	}
 }
 
 void FDefaultGameMoviePlayer::OnPostLoadMap(UWorld* LoadedWorld)
 {
-	if (!LoadingScreenAttributes.bAllowEngineTick)
+	if (bIsPlayOnBlockingEnabled == false)
 	{
-		// If engine tick is enabled, we don't want to tick here and instead want to run from the WaitForMovieToFinish call in LaunchEngineLoop
-		WaitForMovieToFinish();
+		UE_LOG(LogMoviePlayer, Verbose, TEXT("PostLoadMap"));
+		if (!LoadingScreenAttributes.bAllowEngineTick)
+		{
+			// If engine tick is enabled, we don't want to tick here and instead want to run from the WaitForMovieToFinish call in LaunchEngineLoop
+			WaitForMovieToFinish();
+		}
 	}
 }
 
@@ -851,8 +968,14 @@ FMoviePlayerWidgetRenderer::FMoviePlayerWidgetRenderer(TSharedPtr<SWindow> InMai
 	: MainWindow(InMainWindow.Get())
 	, VirtualRenderWindow(InVirtualRenderWindow.ToSharedRef())
 	, SlateRenderer(InRenderer)
+	, bIsDPIScaleEnabled(true)
 {
 	HittestGrid = MakeShareable(new FHittestGrid);
+}
+
+void FMoviePlayerWidgetRenderer::EnableDPIScale(bool bShouldEnable)
+{
+	bIsDPIScaleEnabled = bShouldEnable;
 }
 
 void FMoviePlayerWidgetRenderer::DrawWindow(float DeltaTime)
@@ -863,8 +986,12 @@ void FMoviePlayerWidgetRenderer::DrawWindow(float DeltaTime)
 		// as we don't want Slate to submit any more draw calls until we Resume.
 		return;
 	}
-
-	const float Scale = FSlateApplication::Get().GetApplicationScale() * MainWindow->GetDPIScaleFactor();
+	float Scale = FSlateApplication::Get().GetApplicationScale();
+	if (bIsDPIScaleEnabled)
+	{
+		Scale *= MainWindow->GetDPIScaleFactor();
+	}
+	
 	FVector2D DrawSize = VirtualRenderWindow->GetClientSizeInScreen() / Scale;
 
 	FSlateApplication::Get().Tick(ESlateTickType::Time);
@@ -878,34 +1005,35 @@ void FMoviePlayerWidgetRenderer::DrawWindow(float DeltaTime)
 	HittestGrid->SetHittestArea(VirtualRenderWindow->GetPositionInScreen(), VirtualRenderWindow->GetViewportSize());
 	HittestGrid->Clear();
 
-	// Get the free buffer & add our virtual window
-	FSlateDrawBuffer& DrawBuffer = SlateRenderer->GetDrawBuffer();
-	FSlateWindowElementList& WindowElementList = DrawBuffer.AddWindowElementList(VirtualRenderWindow);
-
-	WindowElementList.SetRenderTargetWindow(MainWindow);
-
-	int32 MaxLayerId = 0;
 	{
-		FPaintArgs PaintArgs(nullptr, *HittestGrid, FVector2D::ZeroVector, FSlateApplication::Get().GetCurrentTime(), FSlateApplication::Get().GetDeltaTime());
+		// Get the free buffer & add our virtual window
+		FSlateRenderer::FScopedAcquireDrawBuffer ScopedDrawBuffer{ *SlateRenderer };
+		FSlateWindowElementList& WindowElementList = ScopedDrawBuffer.GetDrawBuffer().AddWindowElementList(VirtualRenderWindow);
 
-		// Paint the window
-		MaxLayerId = VirtualRenderWindow->Paint(
-			PaintArgs,
-			WindowGeometry, ClipRect,
-			WindowElementList,
-			0,
-			FWidgetStyle(),
-			VirtualRenderWindow->IsEnabled());
+		WindowElementList.SetRenderTargetWindow(MainWindow);
+
+		int32 MaxLayerId = 0;
+		{
+			FPaintArgs PaintArgs(nullptr, *HittestGrid, FVector2D::ZeroVector, FSlateApplication::Get().GetCurrentTime(), FSlateApplication::Get().GetDeltaTime());
+
+			// Paint the window
+			MaxLayerId = VirtualRenderWindow->Paint(
+				PaintArgs,
+				WindowGeometry, ClipRect,
+				WindowElementList,
+				0,
+				FWidgetStyle(),
+				VirtualRenderWindow->IsEnabled());
+		}
+
+		SlateRenderer->DrawWindows(ScopedDrawBuffer.GetDrawBuffer());
+		ScopedDrawBuffer.GetDrawBuffer().ViewOffset = FVector2D::ZeroVector;
 	}
-
-	SlateRenderer->DrawWindows(DrawBuffer);
-
-	DrawBuffer.ViewOffset = FVector2D::ZeroVector;
 }
 
 float FDefaultGameMoviePlayer::GetViewportDPIScale() const
 {
-	return 1.f;
+	return ViewportDPIScale;
 }
 void FDefaultGameMoviePlayer::ForceCompletion()
 {
@@ -931,6 +1059,24 @@ void FDefaultGameMoviePlayer::Resume()
 	if (ActiveMovieStreamer.IsValid())
 	{
 		ActiveMovieStreamer->Resume();
+	}
+}
+
+void FDefaultGameMoviePlayer::SetIsPlayOnBlockingEnabled(bool bIsEnabled)
+{
+	if (bIsPlayOnBlockingEnabled != bIsEnabled)
+	{
+		bIsPlayOnBlockingEnabled = bIsEnabled;
+
+		if (bIsPlayOnBlockingEnabled)
+		{
+			FMoviePlayerProxy::RegisterServer(this);
+		}
+		else
+		{
+			BlockingFinished();
+			FMoviePlayerProxy::UnregisterServer();
+		}
 	}
 }
 

@@ -2,37 +2,42 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Object.h"
-
 #include "LiveLinkRole.h"
+#include "Misc/FrameRate.h"
+#include "Templates/SubclassOf.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
 
 #include "LiveLinkSubjectSettings.generated.h"
 
 class ULiveLinkFrameInterpolationProcessor;
 class ULiveLinkFramePreProcessor;
 class ULiveLinkFrameTranslator;
+class ULiveLinkRole;
 
 
 // Base class for live link subject settings
-UCLASS()
-class LIVELINKINTERFACE_API ULiveLinkSubjectSettings : public UObject
+UCLASS(MinimalAPI)
+class ULiveLinkSubjectSettings : public UObject
 {
 public:
 	GENERATED_BODY()
 
 	/** List of available preprocessor the subject will use. */
 	UPROPERTY(EditAnywhere, Instanced, Category = "LiveLink", meta = (DisplayName = "Pre Processors"))
-	TArray<ULiveLinkFramePreProcessor*> PreProcessors;
+	TArray<TObjectPtr<ULiveLinkFramePreProcessor>> PreProcessors;
 
 	/** The interpolation processor the subject will use. */
 	UPROPERTY(EditAnywhere, Instanced, Category = "LiveLink", meta = (DisplayName = "Interpolation"))
-	ULiveLinkFrameInterpolationProcessor* InterpolationProcessor;
+	TObjectPtr<ULiveLinkFrameInterpolationProcessor> InterpolationProcessor;
 
 	/** List of available translator the subject can use. */
 	UPROPERTY(EditAnywhere, Instanced, Category = "LiveLink", meta = (DisplayName = "Translators"))
-	TArray<ULiveLinkFrameTranslator*> Translators;
+	TArray<TObjectPtr<ULiveLinkFrameTranslator>> Translators;
 
 	UPROPERTY()
 	TSubclassOf<ULiveLinkRole> Role;
@@ -48,7 +53,7 @@ public:
 public:
 	//~ Begin UObject interface
 #if WITH_EDITOR
-	virtual void PostEditChangeChainProperty(struct FPropertyChangedChainEvent& PropertyChangedEvent) override;
+	LIVELINKINTERFACE_API virtual void PostEditChangeChainProperty(struct FPropertyChangedChainEvent& PropertyChangedEvent) override;
 #endif
 	//~ End UObject interface
 };

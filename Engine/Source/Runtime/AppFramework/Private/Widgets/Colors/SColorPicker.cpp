@@ -63,14 +63,10 @@ void SColorPicker::Construct( const FArguments& InArgs )
 	CurrentColorHSV = OldColor = TargetColorAttribute.Get().LinearRGBToHSV();
 	CurrentColorRGB = TargetColorAttribute.Get();
 	CurrentMode = EColorPickerModes::Wheel;
-	TargetFColors = InArgs._TargetFColors.Get();
-	TargetLinearColors = InArgs._TargetLinearColors.Get();
-	TargetColorChannels = InArgs._TargetColorChannels.Get();
 	bUseAlpha = InArgs._UseAlpha;
 	bOnlyRefreshOnMouseUp = InArgs._OnlyRefreshOnMouseUp.Get();
 	bOnlyRefreshOnOk = InArgs._OnlyRefreshOnOk.Get();
 	OnColorCommitted = InArgs._OnColorCommitted;
-	PreColorCommitted = InArgs._PreColorCommitted;
 	OnColorPickerCancelled = InArgs._OnColorPickerCancelled;
 	OnInteractivePickBegin = InArgs._OnInteractivePickBegin;
 	OnInteractivePickEnd = InArgs._OnInteractivePickEnd;
@@ -79,6 +75,7 @@ void SColorPicker::Construct( const FArguments& InArgs )
 	DisplayGamma = InArgs._DisplayGamma;
 	bClosedViaOkOrCancel = false;
 	bValidCreationOverrideExists = InArgs._OverrideColorPickerCreation;
+	bClampValue = InArgs._ClampValue;
 	OptionalOwningDetailsView = InArgs._OptionalOwningDetailsView.Get().IsValid() ? InArgs._OptionalOwningDetailsView.Get() : nullptr;
 
 	if ( InArgs._sRGBOverride.IsSet() )
@@ -98,15 +95,12 @@ void SColorPicker::Construct( const FArguments& InArgs )
 	bColorPickerIsInlineVersion = InArgs._DisplayInlineVersion;
 	bIsInteractive = false;
 	bPerfIsTooSlowToUpdate = false;
-	
-
-	BackupColors();
 
 	BeginAnimation(FLinearColor(ForceInit), CurrentColorHSV);
 
 	bool bAdvancedSectionExpanded = false;
 
-	if (!FPaths::FileExists(GEditorPerProjectIni))
+	if (FPaths::FileExists(GEditorPerProjectIni))
 	{
 		bool WheelMode = true;
 
@@ -133,115 +127,12 @@ void SColorPicker::Construct( const FArguments& InArgs )
 /* SColorPicker implementation
  *****************************************************************************/
 
-void SColorPicker::BackupColors()
-{
-	OldTargetFColors.Empty();
-	for (int32 i = 0; i < TargetFColors.Num(); ++i)
-	{
-		OldTargetFColors.Add( *TargetFColors[i] );
-	}
-
-	OldTargetLinearColors.Empty();
-	for (int32 i = 0; i < TargetLinearColors.Num(); ++i)
-	{
-		OldTargetLinearColors.Add( *TargetLinearColors[i] );
-	}
-
-	OldTargetColorChannels.Empty();
-	for (int32 i = 0; i < TargetColorChannels.Num(); ++i)
-	{
-		// Remap the color channel as a linear color for ease
-		const FColorChannels& Channel = TargetColorChannels[i];
-		const FLinearColor Color( Channel.Red ? *Channel.Red : 0.f, Channel.Green ? *Channel.Green : 0.f, Channel.Blue ? *Channel.Blue : 0.f, Channel.Alpha ? *Channel.Alpha : 0.f );
-		OldTargetColorChannels.Add( Color );
-	}
-}
-
-
-void SColorPicker::RestoreColors()
-{
-	check(TargetFColors.Num() == OldTargetFColors.Num());
-
-	for (int32 i = 0; i < TargetFColors.Num(); ++i)
-	{
-		*TargetFColors[i] = OldTargetFColors[i];
-	}
-
-	check(TargetLinearColors.Num() == OldTargetLinearColors.Num());
-
-	for (int32 i = 0; i < TargetLinearColors.Num(); ++i)
-	{
-		*TargetLinearColors[i] = OldTargetLinearColors[i];
-	}
-
-	check(TargetColorChannels.Num() == OldTargetColorChannels.Num());
-
-	for (int32 i = 0; i < TargetColorChannels.Num(); ++i)
-	{
-		// Copy back out of the linear to the color channel
-		FColorChannels& Channel = TargetColorChannels[i];
-		const FLinearColor& OldChannel = OldTargetColorChannels[i];
-		if (Channel.Red)
-		{
-			*Channel.Red = OldChannel.R;
-		}
-		if (Channel.Green)
-		{
-			*Channel.Green = OldChannel.G;
-		}
-		if (Channel.Blue)
-		{
-			*Channel.Blue = OldChannel.B;
-		}
-		if (Channel.Alpha)
-		{
-			*Channel.Alpha = OldChannel.A;
-		}
-	}
-}
-
-
-void SColorPicker::SetColors(const FLinearColor& InColor)
-{
-	for (int32 i = 0; i < TargetFColors.Num(); ++i)
-	{
-		*TargetFColors[i] = InColor.ToFColor(true);
-	}
-
-	for (int32 i = 0; i < TargetLinearColors.Num(); ++i)
-	{
-		*TargetLinearColors[i] = InColor;
-	}
-
-	for (int32 i = 0; i < TargetColorChannels.Num(); ++i)
-	{
-		// Only set those channels who have a valid ptr
-		FColorChannels& Channel = TargetColorChannels[i];
-		if (Channel.Red)
-		{
-			*Channel.Red = InColor.R;
-		}
-		if (Channel.Green)
-		{
-			*Channel.Green = InColor.G;
-		}
-		if (Channel.Blue)
-		{
-			*Channel.Blue = InColor.B;
-		}
-		if (Channel.Alpha)
-		{
-			*Channel.Alpha = InColor.A;
-		}
-	}
-}
-
 
 BEGIN_SLATE_FUNCTION_BUILD_OPTIMIZATION
 void SColorPicker::GenerateDefaultColorPickerContent( bool bAdvancedSectionExpanded )
 {	
 	// The height of the gradient bars beneath the sliders
-	const FSlateFontInfo SmallLayoutFont = FCoreStyle::Get().GetFontStyle("ColorPicker.Font");
+	const FSlateFontInfo SmallLayoutFont = FAppStyle::Get().GetFontStyle("ColorPicker.Font");
 
 	TSharedPtr<SColorThemesViewer> ThemesViewer = ColorThemesViewer.Pin();
 
@@ -257,9 +148,13 @@ void SColorPicker::GenerateDefaultColorPickerContent( bool bAdvancedSectionExpan
 
 	// The standard button to open the color themes can temporarily become a trash for colors
 	ColorThemeComboButton = SNew(SComboButton)
-		.ContentPadding(3.0f)
-		.MenuPlacement(MenuPlacement_ComboBox)
-		.ToolTipText(LOCTEXT("OpenThemeManagerToolTip", "Open Color Theme Manager"));
+		.ComboButtonStyle(FAppStyle::Get(), "SimpleComboButton")
+		.VAlign(VAlign_Center)
+		.ButtonContent()
+		[
+			SNew(SImage)
+			.Image(FAppStyle::Get().GetBrush("ColorPicker.ColorThemes"))
+		];
 
 	ColorThemeComboButton->SetMenuContent(ThemesViewer.ToSharedRef());
 
@@ -285,9 +180,9 @@ void SColorPicker::GenerateDefaultColorPickerContent( bool bAdvancedSectionExpan
 					.Padding(0.0f, 1.0f, 20.0f, 1.0f)
 					[
 						SNew(SHorizontalBox)
-
+						
 						+ SHorizontalBox::Slot()
-							.FillWidth(1.0f)
+							.FillWidth(0.91f)
 							.Padding(0.0f, 1.0f)
 							[
 								SNew(SOverlay)
@@ -318,7 +213,7 @@ void SColorPicker::GenerateDefaultColorPickerContent( bool bAdvancedSectionExpan
 							]
 
 						+ SHorizontalBox::Slot()
-							.AutoWidth()
+							.FillWidth(0.09f)
 							[
 								// color theme selector
 								SAssignNew(ColorThemeButtonOrSmallTrash, SBorder)
@@ -346,7 +241,7 @@ void SColorPicker::GenerateDefaultColorPickerContent( bool bAdvancedSectionExpan
 					.Padding(0.0f, 8.0f, 20.0f, 0.0f)
 					[
 						SNew(SBorder)
-							.BorderImage(FCoreStyle::Get().GetBrush("NoBorder"))
+							.BorderImage(FAppStyle::Get().GetBrush("NoBorder"))
 							.Padding(0.0f)
 							.OnMouseButtonDown(this, &SColorPicker::HandleColorAreaMouseDown)
 							[
@@ -436,7 +331,7 @@ void SColorPicker::GenerateDefaultColorPickerContent( bool bAdvancedSectionExpan
 											.Content()
 											[
 												SNew(SImage)
-													.Image(FCoreStyle::Get().GetBrush("ColorPicker.Mode"))
+													.Image(FAppStyle::Get().GetBrush("ColorPicker.Mode"))
 													.ToolTipText(LOCTEXT("ColorPickerModeEToolTip", "Toggle between color wheel and color spectrum."))
 											]									
 									]
@@ -551,10 +446,10 @@ void SColorPicker::GenerateDefaultColorPickerContent( bool bAdvancedSectionExpan
 
 										+ SHorizontalBox::Slot()
 											.AutoWidth()
-											.MaxWidth(72.0f)
+											.MaxWidth(90.0f)
 											[
 												SNew(SEditableTextBox)
-													.MinDesiredWidth(72.0f)
+													.MinDesiredWidth(90.0f)
 													.Text(this, &SColorPicker::HandleHexLinearBoxText)
 													.OnTextCommitted(this, &SColorPicker::HandleHexLinearInputTextCommitted)
 											]
@@ -580,10 +475,10 @@ void SColorPicker::GenerateDefaultColorPickerContent( bool bAdvancedSectionExpan
 
 										+ SHorizontalBox::Slot()
 											.AutoWidth()
-											.MaxWidth(72.0f)
+											.MaxWidth(90.0f)
 											[
 												SNew(SEditableTextBox)
-												.MinDesiredWidth(72.0f)
+												.MinDesiredWidth(90.0f)
 												.Text(this, &SColorPicker::HandleHexSRGBBoxText)
 												.OnTextCommitted(this, &SColorPicker::HandleHexSRGBInputTextCommitted)
 											]
@@ -596,20 +491,19 @@ void SColorPicker::GenerateDefaultColorPickerContent( bool bAdvancedSectionExpan
 		+ SVerticalBox::Slot()
 			.AutoHeight()
 			.HAlign(HAlign_Right)
-			.VAlign(VAlign_Center)
 			.Padding(0.0f, 12.0f, 0.0f, 0.0f)
 			[
 				SNew(SUniformGridPanel)
-					.MinDesiredSlotHeight(FCoreStyle::Get().GetFloat("StandardDialog.MinDesiredSlotHeight"))
-					.MinDesiredSlotWidth(FCoreStyle::Get().GetFloat("StandardDialog.MinDesiredSlotWidth"))
-					.SlotPadding(FCoreStyle::Get().GetMargin("StandardDialog.SlotPadding"))
+					.MinDesiredSlotHeight(FAppStyle::Get().GetFloat("StandardDialog.MinDesiredSlotHeight"))
+					.MinDesiredSlotWidth(FAppStyle::Get().GetFloat("StandardDialog.MinDesiredSlotWidth"))
+					.SlotPadding(FAppStyle::Get().GetMargin("StandardDialog.SlotPadding"))
 					.Visibility((ParentWindowPtr.IsValid() || bValidCreationOverrideExists) ? EVisibility::Visible : EVisibility::Collapsed)
 
 				+ SUniformGridPanel::Slot(0, 0)
 					[
 						// ok button
 						SNew(SButton)
-							.ContentPadding( FCoreStyle::Get().GetMargin("StandardDialog.ContentPadding") )
+							.ContentPadding(FAppStyle::Get().GetMargin("StandardDialog.ContentPadding") )
 							.HAlign(HAlign_Center)
 							.Text(LOCTEXT("OKButton", "OK"))
 							.OnClicked(this, &SColorPicker::HandleOkButtonClicked)
@@ -619,7 +513,7 @@ void SColorPicker::GenerateDefaultColorPickerContent( bool bAdvancedSectionExpan
 					[
 						// cancel button
 						SNew(SButton)
-							.ContentPadding( FCoreStyle::Get().GetMargin("StandardDialog.ContentPadding") )
+							.ContentPadding(FAppStyle::Get().GetMargin("StandardDialog.ContentPadding") )
 							.HAlign(HAlign_Center)
 							.Text(LOCTEXT("CancelButton", "Cancel"))
 							.OnClicked(this, &SColorPicker::HandleCancelButtonClicked)
@@ -723,7 +617,6 @@ void SColorPicker::DiscardColor()
 	else
 	{	
 		SetNewTargetColorHSV(OldColor, true);
-		RestoreColors();
 	}
 }
 
@@ -782,9 +675,6 @@ void SColorPicker::UpdateColorPick()
 	bPerfIsTooSlowToUpdate = false;
 	FLinearColor OutColor = CurrentColorRGB;
 
-	PreColorCommitted.ExecuteIfBound(OutColor);
-
-	SetColors(OutColor);
 	OnColorCommitted.ExecuteIfBound(OutColor);
 	
 	// This callback is only necessary for wx backwards compatibility
@@ -881,7 +771,7 @@ TSharedRef<SWidget> SColorPicker::MakeColorSlider( EColorPickerChannels Channel 
 				.EndColor(this, &SColorPicker::HandleColorSliderEndColor, Channel)
 				.StartColor(this, &SColorPicker::HandleColorSliderStartColor, Channel)
 				.Orientation(Orient_Horizontal)
-				.UseSRGB(SharedThis(this), &SColorPicker::HandleColorPickerUseSRGB)
+				//.UseSRGB(SharedThis(this), &SColorPicker::HandleColorPickerUseSRGB)
 		]
 
 	+ SOverlay::Slot()
@@ -890,7 +780,7 @@ TSharedRef<SWidget> SColorPicker::MakeColorSlider( EColorPickerChannels Channel 
 				.IndentHandle(false)
 				.Orientation(Orient_Vertical)
 				.SliderBarColor(FLinearColor::Transparent)
-				.Style(&FCoreStyle::Get().GetWidgetStyle<FSliderStyle>("ColorPicker.Slider"))
+				.Style(&FAppStyle::Get().GetWidgetStyle<FSliderStyle>("ColorPicker.Slider"))
 				.Value(this, &SColorPicker::HandleColorSpinBoxValue, Channel)
 				.OnMouseCaptureBegin(const_cast<SColorPicker*>(this), &SColorPicker::HandleInteractiveChangeBegin)
 				.OnMouseCaptureEnd(const_cast<SColorPicker*>(this), &SColorPicker::HandleInteractiveChangeEnd)
@@ -907,8 +797,8 @@ TSharedRef<SWidget> SColorPicker::MakeColorSpinBox( EColorPickerChannels Channel
 	}
 
 	const int32 GradientHeight = 6;
-	const float HDRMaxValue = (TargetFColors.Num()) ? 1.f : FLT_MAX;
-	const FSlateFontInfo SmallLayoutFont = FCoreStyle::Get().GetFontStyle("ColorPicker.Font");
+	const float HDRMaxValue = bClampValue ? 1.f : FLT_MAX;
+	const FSlateFontInfo SmallLayoutFont = FAppStyle::Get().GetFontStyle("ColorPicker.Font");
 
 	// create gradient widget
 	TSharedPtr<SWidget> GradientWidget;
@@ -930,8 +820,8 @@ TSharedRef<SWidget> SColorPicker::MakeColorSpinBox( EColorPickerChannels Channel
 		GradientWidget = SNew(SSimpleGradient)
 			.StartColor(this, &SColorPicker::GetGradientStartColor, Channel)
 			.EndColor(this, &SColorPicker::GetGradientEndColor, Channel)
-			.HasAlphaBackground(Channel == EColorPickerChannels::Alpha)
-			.UseSRGB(SharedThis(this), &SColorPicker::HandleColorPickerUseSRGB);
+			.HasAlphaBackground(Channel == EColorPickerChannels::Alpha);
+			//.UseSRGB(SharedThis(this), &SColorPicker::HandleColorPickerUseSRGB);
 	}
 	
 	// create spin box
@@ -1062,7 +952,7 @@ TSharedRef<SWidget> SColorPicker::MakeColorPreviewBox() const
 							// old color
 							SNew(SColorBlock) 
 								.ColorIsHSV(true) 
-								.IgnoreAlpha(true)
+								.AlphaDisplayMode(EColorBlockAlphaDisplayMode::Ignore)
 								.ToolTipText(LOCTEXT("OldColorToolTip", "Old color without alpha (drag to theme bar to save)"))
 								.Color(OldColor) 
 								.OnMouseButtonDown(const_cast<SColorPicker*>(this), &SColorPicker::HandleOldColorBlockMouseButtonDown, false)
@@ -1094,7 +984,7 @@ TSharedRef<SWidget> SColorPicker::MakeColorPreviewBox() const
 							// new color
 							SNew(SColorBlock) 
 								.ColorIsHSV(true) 
-								.IgnoreAlpha(true)
+								.AlphaDisplayMode(EColorBlockAlphaDisplayMode::Ignore)
 								.ToolTipText(LOCTEXT("NewColorToolTip", "New color without alpha (drag to theme bar to save)"))
 								.Color(this, &SColorPicker::GetCurrentColor)
 								.OnMouseButtonDown(const_cast<SColorPicker*>(this), &SColorPicker::HandleNewColorBlockMouseButtonDown, false)
@@ -1140,7 +1030,7 @@ TSharedRef<SWidget> SColorPicker::MakeColorPreviewBox() const
 						.WidthOverride(4.0f)
 						[
 							SNew(SBorder)
-								.BorderImage(FCoreStyle::Get().GetBrush("ColorPicker.Separator"))
+								.BorderImage(FAppStyle::Get().GetBrush("ColorPicker.Separator"))
 								.Padding(0.0f)
 						]
 				]
@@ -1154,7 +1044,7 @@ TSharedRef<SWidget> SColorPicker::MakeColorPreviewBox() const
 						.WidthOverride(4.0f)
 						[
 							SNew(SBorder)
-								.BorderImage(FCoreStyle::Get().GetBrush("ColorPicker.Separator"))
+								.BorderImage(FAppStyle::Get().GetBrush("ColorPicker.Separator"))
 								.Padding(0.0f)
 						]
 				]
@@ -1267,6 +1157,15 @@ FLinearColor SColorPicker::HandleColorSliderStartColor( EColorPickerChannels Cha
 
 void SColorPicker::HandleColorSpectrumValueChanged( FLinearColor NewValue )
 {
+	// In this color, R = H, G = S, B = V
+	if (FMath::IsNearlyZero(NewValue.B))
+	{
+		NewValue.B = 1.0f;
+	}
+	if (!bUseAlpha.Get() || FMath::IsNearlyZero(NewValue.A))
+	{
+		NewValue.A = 1.0f;
+	}
 	SetNewTargetColorHSV(NewValue);
 }
 
@@ -1332,7 +1231,6 @@ void SColorPicker::HandleEyeDropperButtonComplete(bool bCancelled)
 	if (bCancelled)
 	{
 		SetNewTargetColorHSV(OldColor, true);
-		RestoreColors();
 	}
 
 	if (bOnlyRefreshOnMouseUp || bPerfIsTooSlowToUpdate)
@@ -1649,27 +1547,8 @@ bool OpenColorPicker(const FColorPickerArgs& Args)
 
 	// Consoles do not support opening new windows
 #if PLATFORM_DESKTOP
-	FLinearColor OldColor = Args.InitialColorOverride;
-
-	if (Args.ColorArray && Args.ColorArray->Num() > 0)
-	{
-		OldColor = FLinearColor(*(*Args.ColorArray)[0]);
-	}
-	else if (Args.LinearColorArray && Args.LinearColorArray->Num() > 0)
-	{
-		OldColor = *(*Args.LinearColorArray)[0];
-	}
-	else if (Args.ColorChannelsArray && Args.ColorChannelsArray->Num() > 0)
-	{
-		OldColor.R = (*Args.ColorChannelsArray)[0].Red ? *(*Args.ColorChannelsArray)[0].Red : 0.0f;
-		OldColor.G = (*Args.ColorChannelsArray)[0].Green ? *(*Args.ColorChannelsArray)[0].Green : 0.0f;
-		OldColor.B = (*Args.ColorChannelsArray)[0].Blue ? *(*Args.ColorChannelsArray)[0].Blue : 0.0f;
-		OldColor.A = (*Args.ColorChannelsArray)[0].Alpha ? *(*Args.ColorChannelsArray)[0].Alpha : 0.0f;
-	}
-	else
-	{
-		check(Args.OnColorCommitted.IsBound());
-	}
+	FLinearColor OldColor = Args.InitialColor;
+	ensureMsgf(Args.OnColorCommitted.IsBound(), TEXT("OnColorCommitted should be bound to set the color."));
 		
 	// Determine the position of the window so that it will spawn near the mouse, but not go off the screen.
 	FVector2D CursorPos = FSlateApplication::Get().GetCursorPos();
@@ -1684,7 +1563,7 @@ bool OpenColorPicker(const FColorPickerArgs& Args)
 
 	TSharedPtr<SWindow> Window = nullptr;
 	TSharedRef<SBorder> WindowContent = SNew(SBorder)
-			.BorderImage(FCoreStyle::Get().GetBrush("ToolPanel.GroupBorder"))
+			.BorderImage(FAppStyle::Get().GetBrush("Brushes.Panel"))
 			.Padding(FMargin(8.0f, 8.0f));
 	
 	bool bNeedToAddWindow = true;
@@ -1722,15 +1601,11 @@ bool OpenColorPicker(const FColorPickerArgs& Args)
 
 	TSharedRef<SColorPicker> CreatedColorPicker = SNew(SColorPicker)
 		.TargetColorAttribute(OldColor)
-		.TargetFColors(Args.ColorArray ? *Args.ColorArray : TArray<FColor*>())
-		.TargetLinearColors(Args.LinearColorArray ? *Args.LinearColorArray : TArray<FLinearColor*>())
-		.TargetColorChannels(Args.ColorChannelsArray ? *Args.ColorChannelsArray : TArray<FColorChannels>())
 		.UseAlpha(Args.bUseAlpha)
 		.ExpandAdvancedSection(Args.bExpandAdvancedSection)
 		.OnlyRefreshOnMouseUp(Args.bOnlyRefreshOnMouseUp && !Args.bIsModal)
 		.OnlyRefreshOnOk(Args.bOnlyRefreshOnOk || Args.bIsModal)
 		.OnColorCommitted(Args.OnColorCommitted)
-		.PreColorCommitted(Args.PreColorCommitted)
 		.OnColorPickerCancelled(Args.OnColorPickerCancelled)
 		.OnInteractivePickBegin(Args.OnInteractivePickBegin)
 		.OnInteractivePickEnd(Args.OnInteractivePickEnd)

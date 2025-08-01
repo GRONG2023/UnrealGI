@@ -6,21 +6,23 @@
 
 #include "ImageWrapperBase.h"
 
+#if WITH_UNREALEXR || WITH_UNREALEXR_MINIMAL
+
 #if WITH_UNREALEXR
-
 THIRD_PARTY_INCLUDES_START
-	#include "OpenEXR/include/ImfIO.h"
-	#include "OpenEXR/include/ImathBox.h"
-	#include "OpenEXR/include/ImfChannelList.h"
-	#include "OpenEXR/include/ImfInputFile.h"
-	#include "OpenEXR/include/ImfOutputFile.h"
-	#include "OpenEXR/include/ImfArray.h"
-	#include "OpenEXR/include/ImfHeader.h"
-	#include "OpenEXR/include/ImfStdIO.h"
-	#include "OpenEXR/include/ImfChannelList.h"
-	#include "OpenEXR/include/ImfRgbaFile.h"
+	#include "Imath/ImathBox.h"
+	#include "OpenEXR/ImfArray.h"
+	#include "OpenEXR/ImfChannelList.h"
+	#include "OpenEXR/ImfHeader.h"
+	#include "OpenEXR/ImfIO.h"
+	#include "OpenEXR/ImfInputFile.h"
+	#include "OpenEXR/ImfOutputFile.h"
+	#include "OpenEXR/ImfRgbaFile.h"
+	#include "OpenEXR/ImfStandardAttributes.h"
+	#include "OpenEXR/ImfStdIO.h"
+	#include "OpenEXR/ImfVersion.h"
 THIRD_PARTY_INCLUDES_END
-
+#endif
 
 /**
  * OpenEXR implementation of the helper class
@@ -39,23 +41,22 @@ public:
 
 	//~ FImageWrapper interface
 
+	virtual bool SetCompressed(const void* InCompressedData, int64 InCompressedSize) override;
 	virtual void Compress(int32 Quality) override;
 	virtual void Uncompress(const ERGBFormat InFormat, int32 InBitDepth) override;
-	virtual bool SetCompressed(const void* InCompressedData, int64 InCompressedSize) override;
+	
+	virtual bool CanSetRawFormat(const ERGBFormat InFormat, const int32 InBitDepth) const override;
+	virtual ERawImageFormat::Type GetSupportedRawFormat(const ERawImageFormat::Type InFormat) const override;
 
-protected:
-
-	template <Imf::PixelType OutputFormat, typename sourcetype>
-	void WriteFrameBufferChannel(Imf::FrameBuffer& ImfFrameBuffer, const char* ChannelName, const sourcetype* SrcData, TArray64<uint8>& ChannelBuffer);
-
-	template <Imf::PixelType OutputFormat, typename sourcetype>
-	void CompressRaw(const sourcetype* SrcData, bool bIgnoreAlpha);
-
-	const char* GetRawChannelName(int ChannelIndex) const;
-
-private:
-
-	bool bUseCompression;
+	typedef TUniquePtr<char[]> FUniqueCString;
+	FUniqueCString MakeUniqueCString(const char *str)
+	{
+		size_t num = strlen(str)+1;
+		FUniqueCString Ret = MakeUnique<char[]>( num );
+		memcpy(Ret.Get(),str,num);
+		return Ret;
+	}
+	TArray< FUniqueCString > FileChannelNames;
 };
 
 #endif // WITH_UNREALEXR

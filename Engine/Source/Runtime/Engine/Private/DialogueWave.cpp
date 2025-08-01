@@ -1,17 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Sound/DialogueWave.h"
-#include "Internationalization/InternationalizationMetadata.h"
 #include "Internationalization/GatherableTextData.h"
+#include "Misc/StringFormatArg.h"
 #include "Serialization/PropertyLocalizationDataGathering.h"
-#include "Engine/EngineTypes.h"
-#include "Engine/Engine.h"
 #include "ActiveSound.h"
-#include "Sound/AudioSettings.h"
 #include "Sound/SoundWave.h"
 #include "Sound/DialogueSoundWaveProxy.h"
 #include "Sound/DialogueVoice.h"
 #include "SubtitleManager.h"
+#include "UObject/AssetRegistryTagsContext.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(DialogueWave)
 
 const FString FDialogueConstants::DialogueNamespace						= TEXT("Dialogue");
 const FString FDialogueConstants::DialogueNotesNamespace				= TEXT("DialogueNotes");
@@ -433,7 +433,7 @@ float UDialogueSoundWaveProxy::GetMaxDistance() const
 	return SoundWave->GetMaxDistance();
 }
 
-float UDialogueSoundWaveProxy::GetDuration()
+float UDialogueSoundWaveProxy::GetDuration() const
 {
 	return SoundWave->GetDuration();
 }
@@ -540,7 +540,14 @@ FString UDialogueWave::GetDesc()
 
 void UDialogueWave::GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
 	Super::GetAssetRegistryTags(OutTags);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void UDialogueWave::GetAssetRegistryTags(FAssetRegistryTagsContext Context) const
+{
+	Super::GetAssetRegistryTags(Context);
 }
 
 void UDialogueWave::PostDuplicate(bool bDuplicateForPIE)
@@ -845,3 +852,4 @@ void UDialogueWave::CopySoundBasePropertiesToProxy(const USoundBase* InSoundBase
 	Proxy->BusSends = InSoundBase->BusSends;
 	Proxy->PreEffectBusSends = InSoundBase->PreEffectBusSends;
 }
+

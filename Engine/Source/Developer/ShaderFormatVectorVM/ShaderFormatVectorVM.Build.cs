@@ -6,26 +6,23 @@ public class ShaderFormatVectorVM : ModuleRules
 {
 	public ShaderFormatVectorVM(ReadOnlyTargetRules Target) : base(Target)
 	{
-        
-        PrivateIncludePathModuleNames.AddRange(
-            new string[] {
-                "TargetPlatform",
-                }
-            );
-
-
-        PrivateDependencyModuleNames.AddRange(
+		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
-				"Core",
-                "CoreUObject",                
-                "RenderCore",
-				"ShaderCompilerCommon",
-				"ShaderPreprocessor",
-            	"VectorVM",
-                }
+				"TargetPlatform",
+				}
 			);
 
-		AddEngineThirdPartyPrivateStaticDependencies(Target, 
+		PrivateDependencyModuleNames.AddRange(
+			new string[] {
+				"Core",
+				"RenderCore",
+				"ShaderCompilerCommon",
+				"ShaderPreprocessor",
+				"VectorVM",
+				}
+			);
+
+		AddEngineThirdPartyPrivateStaticDependencies(Target,
 			"HLSLCC"
 			);
 	}

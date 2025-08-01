@@ -2,17 +2,21 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "CoreTypes.h"
 #include "Modules/ModuleInterface.h"
+#include "Templates/SubclassOf.h"
 
 class FBlueprintCompileReinstancer;
 class FCompilerResultsLog;
 class UBlueprint;
 class UBlueprintGeneratedClass;
+class UClass;
 class UUserDefinedEnum;
 class UUserDefinedStruct;
 struct FKismetCompilerOptions;
-struct FCompilerNativizationOptions;
 
 #define KISMET_COMPILER_MODULENAME "KismetCompiler"
 
@@ -85,16 +89,20 @@ public:
 	 */
 	virtual TArray<IBlueprintCompiler*>& GetCompilers() = 0;
 
+	/** Facilities for establishing mappings between UClasses, UBlueprints, and UBlueprintGenerated Classes*/
+	virtual void OverrideBPTypeForClass(UClass* Class, TSubclassOf<UBlueprint> BlueprintType) = 0;
+	UE_DEPRECATED(5.4, "Conditional overrides in editor have been deprecated - make a new sentinel type if required to keep UBlueprint mappings unambiguous")
+	virtual void OverrideBPTypeForClassInEditor(UClass* Class, TSubclassOf<UBlueprint> BlueprintType) = 0;
+	virtual void OverrideBPGCTypeForBPType(TSubclassOf<UBlueprint> BlueprintType, TSubclassOf<UBlueprintGeneratedClass> BPGCType) = 0;
+
+	virtual void ValidateBPAndClassType(UBlueprint* BP, FCompilerResultsLog& OutResults) = 0;
+
 	/**
 	 * Get the blueprint class and generated blueprint class for a particular class type.  Not every
 	 * blueprint is a normal UBlueprint, like UUserWidget blueprints should be UWidgetBlueprints.
 	 */
 	virtual void GetBlueprintTypesForClass(UClass* ParentClass, UClass*& OutBlueprintClass, UClass*& OutBlueprintGeneratedClass) const = 0;
-
-	virtual void GenerateCppCodeForEnum(UUserDefinedEnum* UDEnum, const FCompilerNativizationOptions& NativizationOptions, FString& OutHeaderCode, FString& OutCPPCode) = 0;
-	virtual void GenerateCppCodeForStruct(UUserDefinedStruct* UDStruct, const FCompilerNativizationOptions& NativizationOptions, FString& OutHeaderCode, FString& OutCPPCode) = 0;
-	// Generate a wrapper class, that helps accessing non-native properties and calling non-native functions
-	virtual FString GenerateCppWrapper(UBlueprintGeneratedClass* BPGC, const FCompilerNativizationOptions& NativizationOptions) = 0;
+	virtual void GetSubclassesWithDifferingBlueprintTypes(UClass* Class, TSet<const UClass*>& OutMismatchedSubclasses) const = 0;
 };
 
 

@@ -196,15 +196,15 @@ public:
 				{
 					Chaos::FAABB3 BoxIJ = BoxI.GetIntersection(BoxJ);
 					const Chaos::FReal VolIJ = BoxIJ.GetVolume();
-					if (VolIJ > KINDA_SMALL_NUMBER)
+					if (VolIJ > UE_KINDA_SMALL_NUMBER)
 					{
 						const Chaos::FReal VolI = BoxI.GetVolume();
 						const Chaos::FReal VolJ = BoxJ.GetVolume();
-						const Chaos::FReal PctOverlapI = VolI > KINDA_SMALL_NUMBER ? VolIJ / VolI : 0.;
-						const Chaos::FReal PctOverlapJ = VolJ > KINDA_SMALL_NUMBER ? VolIJ / VolJ : 0.;
+						const Chaos::FReal PctOverlapI = VolI > UE_KINDA_SMALL_NUMBER ? VolIJ / VolI : 0.f;
+						const Chaos::FReal PctOverlapJ = VolJ > UE_KINDA_SMALL_NUMBER ? VolIJ / VolJ : 0.f;
 						// Split the overlapping volume between i and j
-						MPArray[i].Volume *= (1.0 - PctOverlapI / 2);
-						MPArray[j].Volume *= (1.0 - PctOverlapJ / 2);
+						MPArray[i].Volume *= static_cast<Chaos::FReal>(1.0 - PctOverlapI / 2.0);
+						MPArray[j].Volume *= static_cast<Chaos::FReal>(1.0 - PctOverlapJ / 2.0);
 					}
 				}
 			}
@@ -425,7 +425,7 @@ public:
 			else
 			{
 				// Make a copy and transfer ownership to the transformed implicit.
-				TUniquePtr<Chaos::FImplicitObject> ObjPtr(TransferImplicitObj(0));
+				Chaos::FImplicitObjectPtr ObjPtr(TransferImplicitObj(0));
 				return new Chaos::TImplicitObjectTransformed<Chaos::FReal, 3, true>(
 					MoveTemp(ObjPtr),
 					Chaos::FRigidTransform3(Transforms[0]));
@@ -435,11 +435,11 @@ public:
 		{
 			// Make copies of the implicits owned by transformed immplicits, and 
 			// transfer ownership of the transformed implicits to the implicit union.
-			TArray<TUniquePtr<Chaos::FImplicitObject>> ImplicitObjects;
+			TArray<Chaos::FImplicitObjectPtr> ImplicitObjects;
 			ImplicitObjects.Reserve(Num);
 			for (int i = 0; i < Num; i++)
 			{
-				TUniquePtr<Chaos::FImplicitObject> ObjPtr(TransferImplicitObj(i));
+				Chaos::FImplicitObjectPtr ObjPtr(TransferImplicitObj(i));
 
 				const FTransform &Xf = Transforms[i];
 				if (Xf.Equals(FTransform::Identity))
@@ -451,7 +451,7 @@ public:
 				else
 				{
 					ImplicitObjects.Add(
-						TUniquePtr<Chaos::FImplicitObject>(
+						Chaos::FImplicitObjectPtr(
 							new Chaos::TImplicitObjectTransformed<Chaos::FReal, 3, true>(
 								MoveTemp(ObjPtr),
 								Chaos::FRigidTransform3(Xf))));

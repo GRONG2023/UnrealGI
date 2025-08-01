@@ -10,6 +10,7 @@
 #include "Widgets/Notifications/SNotificationList.h"
 
 bool UActorGroupingUtils::bGroupingActive = true;
+TMap<FName, UActorGroupingUtils::FCanGroupActors> UActorGroupingUtils::CanGroupActorsDelegates;
 
 void UActorGroupingUtils::SetGroupingActive(bool bInGroupingActive)
 {
@@ -22,9 +23,9 @@ UActorGroupingUtils* UActorGroupingUtils::Get()
 	return GEditor->GetActorGroupingUtils();
 }
 
-void UActorGroupingUtils::GroupSelected()
+AGroupActor* UActorGroupingUtils::GroupSelected()
 {
-	if (IsGroupingActive())
+	if (IsGroupingActive() && CanGroupSelectedActors())
 	{
 		TArray<AActor*> ActorsToAdd;
 		for (FSelectionIterator It(GEditor->GetSelectedActorIterator()); It; ++It)
@@ -34,14 +35,23 @@ void UActorGroupingUtils::GroupSelected()
 
 		if (ActorsToAdd.Num() > 0)
 		{
-			GroupActors(ActorsToAdd);
+			const FScopedTransaction Transaction(NSLOCTEXT("UnrealEd", "Group_Selected", "Group Selected"));
+
+			AGroupActor* GroupActor = GroupActors(ActorsToAdd);
+			if (GroupActor)
+			{
+				GEditor->SelectActor(GroupActor, /*bIsSelected*/true, /*bNotify*/false);
+			}
+			return GroupActor;
 		}
 	}
+
+	return nullptr;
 }
 
-void UActorGroupingUtils::GroupActors(const TArray<AActor*>& ActorsToGroup)
+AGroupActor* UActorGroupingUtils::GroupActors(const TArray<AActor*>& ActorsToGroup)
 {
-	if(IsGroupingActive())
+	if(IsGroupingActive() && CanGroupActors(ActorsToGroup))
 	{
 		ULevel* ActorLevel = nullptr;
 		TArray<AActor*> FinalActorList;
@@ -80,7 +90,6 @@ void UActorGroupingUtils::GroupActors(const TArray<AActor*>& ActorsToGroup)
 
 					FActorSpawnParameters SpawnInfo;
 					SpawnInfo.OverrideLevel = ActorLevel;
-					SpawnInfo.bCreateActorPackage = true;
 					AGroupActor* SpawnedGroupActor = World->SpawnActor<AGroupActor>(SpawnInfo);
 
 					bool bActorsInSameFolder = true;
@@ -106,7 +115,10 @@ void UActorGroupingUtils::GroupActors(const TArray<AActor*>& ActorsToGroup)
 
 					SpawnedGroupActor->SetFolderPath(FolderPath);
 					SpawnedGroupActor->CenterGroupLocation();
+					SpawnedGroupActor->SetActorRotation(FinalActorList.Last()->GetActorRotation());
 					SpawnedGroupActor->Lock();
+
+					return SpawnedGroupActor;
 				}
 			}
 		}
@@ -118,6 +130,8 @@ void UActorGroupingUtils::GroupActors(const TArray<AActor*>& ActorsToGroup)
 			FSlateNotificationManager::Get().AddNotification(Info);
 		}
 	}
+
+	return nullptr;
 }
 
 void UActorGroupingUtils::UngroupSelected()
@@ -134,6 +148,8 @@ void UActorGroupingUtils::UngroupSelected()
 
 		if (ActorsToUngroup.Num())
 		{
+			const FScopedTransaction Transaction(NSLOCTEXT("UnrealEd", "Ungroup_Selected", "Ungroup Selected"));
+
 			UngroupActors(ActorsToUngroup);
 		}
 	}
@@ -191,7 +207,7 @@ void UActorGroupingUtils::UnlockSelectedGroups()
 
 void UActorGroupingUtils::AddSelectedToGroup()
 {
-	if (IsGroupingActive())
+	if (IsGroupingActive() && CanGroupSelectedActors())
 	{
 		AGroupActor::AddSelectedActorsToSelectedGroup();
 	}
@@ -263,4 +279,44 @@ void UActorGroupingUtils::RemoveSelectedFromGroup()
 		}
 	}
 
+}
+
+void UActorGroupingUtils::AddCanGroupActorsDelegate(const FName& Owner, const FCanGroupActors& InGroupActorsFilter)
+{
+	CanGroupActorsDelegates.Emplace(Owner, InGroupActorsFilter);
+}
+
+void UActorGroupingUtils::RemoveCanGroupActorsDelegate(const FName& Owner)
+{
+	CanGroupActorsDelegates.Remove(Owner);
+}
+
+bool UActorGroupingUtils::CanGroupActors(const TArray<AActor*>& ActorsToGroup) const
+{
+	for(const TPair<FName, FCanGroupActors>& Filter : CanGroupActorsDelegates)
+	{
+		if(!Filter.Value.Execute(ActorsToGroup))
+		{
+			return false;
+		}
+	}
+	
+	return true;
+}
+
+bool UActorGroupingUtils::CanGroupSelectedActors() const
+{
+	USelection* ActorSelection = GEditor->GetSelectedActors();
+	TArray<AActor*> Actors;
+	ActorSelection->GetSelectedObjects(Actors);
+	
+	for(const TPair<FName, FCanGroupActors>& Filter : CanGroupActorsDelegates)
+	{
+		if(!Filter.Value.Execute(Actors))
+		{
+			return false;
+		}
+	}
+
+	return true;
 }

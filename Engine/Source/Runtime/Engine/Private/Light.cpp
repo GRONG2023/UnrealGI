@@ -2,8 +2,9 @@
 
 
 #include "Engine/Light.h"
+#include "Engine/Level.h"
+#include "Engine/SpotLight.h"
 #include "Engine/World.h"
-#include "Components/LightComponent.h"
 #include "Components/ArrowComponent.h"
 #include "Engine/PointLight.h"
 #include "Engine/DirectionalLight.h"
@@ -12,6 +13,8 @@
 #include "Net/UnrealNetwork.h"
 #include "Components/DirectionalLightComponent.h"
 #include "Components/PointLightComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(Light)
 
 ALight::ALight(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -168,6 +171,16 @@ void ALight::SetAffectTranslucentLighting(bool bNewValue)
 	LightComponent->SetAffectTranslucentLighting(bNewValue);
 }
 
+void ALight::PostLoad()
+{
+	Super::PostLoad();
+
+	if (LightComponent && LightComponent->Mobility == EComponentMobility::Static)
+	{
+		LightComponent->ClearLightFunctionMaterial();
+	}
+}
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 APointLight::APointLight(const FObjectInitializer& ObjectInitializer)
@@ -179,22 +192,12 @@ APointLight::APointLight(const FObjectInitializer& ObjectInitializer)
 	RootComponent = PointLightComponent;
 }
 
-void APointLight::PostLoad()
-{
-	Super::PostLoad();
-
-	if (GetLightComponent()->Mobility == EComponentMobility::Static)
-	{
-		GetLightComponent()->LightFunctionMaterial = NULL;
-	}
-}
-
 #if WITH_EDITOR
 void APointLight::LoadedFromAnotherClass(const FName& OldClassName)
 {
 	Super::LoadedFromAnotherClass(OldClassName);
 
-	if(GetLinkerUE4Version() < VER_UE4_REMOVE_LIGHT_MOBILITY_CLASSES)
+	if(GetLinkerUEVersion() < VER_UE4_REMOVE_LIGHT_MOBILITY_CLASSES)
 	{
 		static FName PointLightStatic_NAME(TEXT("PointLightStatic"));
 		static FName PointLightMovable_NAME(TEXT("PointLightMovable"));
@@ -259,6 +262,8 @@ ADirectionalLight::ADirectionalLight(const FObjectInitializer& ObjectInitializer
 		ArrowComponent->bLightAttachment = true;
 		ArrowComponent->bIsScreenSizeScaled = true;
 	}
+
+	bIsSpatiallyLoaded = false;
 #endif // WITH_EDITORONLY_DATA
 
 }
@@ -267,10 +272,6 @@ void ADirectionalLight::PostLoad()
 {
 	Super::PostLoad();
 
-	if (GetLightComponent()->Mobility == EComponentMobility::Static)
-	{
-		GetLightComponent()->LightFunctionMaterial = NULL;
-	}
 #if WITH_EDITORONLY_DATA
 	if(ArrowComponent != nullptr)
 	{
@@ -284,7 +285,7 @@ void ADirectionalLight::LoadedFromAnotherClass(const FName& OldClassName)
 {
 	Super::LoadedFromAnotherClass(OldClassName);
 
-	if(GetLinkerUE4Version() < VER_UE4_REMOVE_LIGHT_MOBILITY_CLASSES)
+	if(GetLinkerUEVersion() < VER_UE4_REMOVE_LIGHT_MOBILITY_CLASSES)
 	{
 		static FName DirectionalLightStatic_NAME(TEXT("DirectionalLightStatic"));
 		static FName DirectionalLightMovable_NAME(TEXT("DirectionalLightMovable"));
@@ -359,4 +360,5 @@ bool ALight::IsToggleable() const
 {
 	return !LightComponent->HasStaticLighting();
 }
+
 

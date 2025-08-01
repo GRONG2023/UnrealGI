@@ -2,8 +2,9 @@
 
 #include "Tracks/MovieSceneCameraShakeSourceTriggerTrack.h"
 #include "Sections/MovieSceneCameraShakeSourceTriggerSection.h"
-#include "Evaluation/MovieSceneCameraShakeSourceTriggerTemplate.h"
 #include "Evaluation/MovieSceneEvaluationTrack.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneCameraShakeSourceTriggerTrack)
 
 #define LOCTEXT_NAMESPACE "MovieSceneCameraShakeSourceTrigger"
 
@@ -65,16 +66,6 @@ const TArray<UMovieSceneSection*>& UMovieSceneCameraShakeSourceTriggerTrack::Get
 	return Sections;
 }
 
-FMovieSceneEvalTemplatePtr UMovieSceneCameraShakeSourceTriggerTrack::CreateTemplateForSection(const UMovieSceneSection& InSection) const
-{
-	return FMovieSceneCameraShakeSourceTriggerSectionTemplate(*CastChecked<const UMovieSceneCameraShakeSourceTriggerSection>(&InSection));
-}
-
-void UMovieSceneCameraShakeSourceTriggerTrack::PostCompile(FMovieSceneEvaluationTrack& Track, const FMovieSceneTrackCompilerArgs& Args) const
-{
-	Track.SetEvaluationMethod(EEvaluationMethod::Swept);
-}
-
 #if WITH_EDITORONLY_DATA
 
 FText UMovieSceneCameraShakeSourceTriggerTrack::GetDisplayName() const
@@ -85,4 +76,5 @@ FText UMovieSceneCameraShakeSourceTriggerTrack::GetDisplayName() const
 #endif
 
 #undef LOCTEXT_NAMESPACE
+
 

@@ -24,8 +24,10 @@
 #include "SlateMaterialResource.h"
 #include "Slate/SlateTextureAtlasInterface.h"
 #include "SlateAtlasedTextureResource.h"
+#include "Types/SlateVector2.h"
 #include "ImageUtils.h"
 #include "Async/ParallelFor.h"
+#include "Rendering/SlateVectorGraphicsCache.h"
 
 #define LOCTEXT_NAMESPACE "Slate"
 
@@ -39,6 +41,58 @@ static TAutoConsoleVariable<bool> CVarSlateRHIResourceManagerLockWhenGCing(
 	true,
 	TEXT("Lock the Slate RHI Resource Manager when GCing and when the loading screen has ownership to prevent multithreaded access to the resources."));
 
+class FSlateRHITextureAtlasFactory : public ISlateTextureAtlasFactory
+{
+public:
+	virtual TUniquePtr<FSlateTextureAtlas> CreateTextureAtlas(int32 AtlasSize, int32 AtlasStride, ESlateTextureAtlasPaddingStyle PaddingStyle, bool bUpdatesAfterInitialization) const
+	{
+		return CreateTextureAtlasInternal(AtlasSize, AtlasStride, PaddingStyle, bUpdatesAfterInitialization);
+	}
+
+	virtual TUniquePtr<FSlateShaderResource> CreateNonAtlasedTexture(const uint32 InWidth, const uint32 InHeight, const TArray<uint8>& InRawData) const
+	{
+		uint32 MaxSize = FMath::Max(InWidth, InHeight);
+
+		const uint32 MaxTextureDimension = FMath::Min(MaxSize, GetMax2DTextureDimension());
+		if (InWidth <= MaxTextureDimension && InHeight <= MaxTextureDimension)
+		{
+			TSharedPtr<FSlateTextureData, ESPMode::ThreadSafe> TextureData = MakeShared<FSlateTextureData, ESPMode::ThreadSafe>(InWidth, InHeight, GPixelFormats[PF_B8G8R8A8].BlockBytes, InRawData);
+
+			TUniquePtr<FSlateTexture2DRHIRef> NewTexture = MakeUnique<FSlateTexture2DRHIRef>(InWidth, InHeight, PF_B8G8R8A8, TextureData, TexCreate_SRGB | TexCreate_ShaderResource);
+			BeginInitResource(NewTexture.Get());
+
+			return NewTexture;
+		}
+
+		return nullptr;
+	}
+
+	virtual void ReleaseTextureAtlases(const TArray<TUniquePtr<FSlateTextureAtlas>>& InTextureAtlases, const TArray<TUniquePtr<FSlateShaderResource>>& InNonAtlasedTextures, const bool bWaitForRelease) const
+	{
+		for (const TUniquePtr<FSlateTextureAtlas>& Atlas : InTextureAtlases)
+		{
+			Atlas->ReleaseResources();
+		}
+
+		for (const TUniquePtr<FSlateShaderResource>& Texture : InNonAtlasedTextures)
+		{
+			FSlateTexture2DRHIRef* RHITexture = static_cast<FSlateTexture2DRHIRef*>(Texture.Get());
+			BeginReleaseResource(RHITexture);
+		}
+
+		if (bWaitForRelease)
+		{
+			FRenderCommandFence Fence;
+			Fence.BeginFence();
+			Fence.Wait();
+		}
+	}
+
+	static TUniquePtr<FSlateTextureAtlasRHI> CreateTextureAtlasInternal(int32 AtlasSize, int32 AtlasStride, ESlateTextureAtlasPaddingStyle PaddingStyle, bool bUpdatesAfterInitialization)
+	{
+		return MakeUnique<FSlateTextureAtlasRHI>(AtlasSize, AtlasSize, PaddingStyle, bUpdatesAfterInitialization);
+	}
+};
 
 FDynamicResourceMap::FDynamicResourceMap()
 {
@@ -180,7 +234,7 @@ void FDynamicResourceMap::RemoveExpiredMaterialResources(TArray< TSharedPtr<FSla
 	for (FMaterialResourceMap::TIterator It(MaterialMap); It; ++It)
 	{
 		FMaterialKey& Key = It.Key();
-		if (!Key.Material.IsValid())
+		if (Key.Material.ResolveObjectPtr() == nullptr)
 		{
 			RemovedMaterials.Push(It.Value());
 			It.Value()->ResetMaterial();
@@ -226,6 +280,8 @@ FSlateRHIResourceManager::FSlateRHIResourceManager()
 			MaxAltasedTextureSize.Y = FMath::Clamp<int32>(MaxAtlasedTextureHeight, 0, AtlasSize);
 		}
 	}
+
+	CreateVectorGraphicsCache();
 }
 
 FSlateRHIResourceManager::~FSlateRHIResourceManager()
@@ -240,6 +296,11 @@ FSlateRHIResourceManager::~FSlateRHIResourceManager()
 
 		DeleteResources();
 	}
+}
+
+void FSlateRHIResourceManager::CreateVectorGraphicsCache()
+{
+	VectorGraphicsCache = MakeUnique<FSlateVectorGraphicsCache>(MakeShared<FSlateRHITextureAtlasFactory>());
 }
 
 void FSlateRHIResourceManager::OnPreGarbageCollect()
@@ -303,12 +364,12 @@ void FSlateRHIResourceManager::CleanupExpiredResources()
 
 int32 FSlateRHIResourceManager::GetNumAtlasPages() const
 {
-	return TextureAtlases.Num();
+	return PrecachedTextureAtlases.Num() + VectorGraphicsCache->GetNumAtlasPages();
 }
 
 FSlateShaderResource* FSlateRHIResourceManager::GetAtlasPageResource(const int32 InIndex) const
 {
-	return TextureAtlases[InIndex]->GetAtlasTexture();
+	return InIndex < PrecachedTextureAtlases.Num() ? PrecachedTextureAtlases[InIndex]->GetAtlasTexture() : VectorGraphicsCache->GetAtlasPageResource(InIndex - PrecachedTextureAtlases.Num());
 }
 
 bool FSlateRHIResourceManager::IsAtlasPageResourceAlphaOnly(const int32 InIndex) const
@@ -319,24 +380,33 @@ bool FSlateRHIResourceManager::IsAtlasPageResourceAlphaOnly(const int32 InIndex)
 #if WITH_ATLAS_DEBUGGING
 FAtlasSlotInfo FSlateRHIResourceManager::GetAtlasSlotInfoAtPosition(FIntPoint InPosition, int32 AtlasIndex) const
 {
-	if (TextureAtlases.IsValidIndex(AtlasIndex))
-	{
-		FAtlasSlotInfo NewInfo;
+	const FSlateTextureAtlas* Atlas = nullptr;
 
-		const FAtlasedTextureSlot* Slot = TextureAtlases[AtlasIndex]->GetSlotAtPosition(InPosition);
+	bool bIsPrecachedTextureAtlases = PrecachedTextureAtlases.IsValidIndex(AtlasIndex);
+	if (bIsPrecachedTextureAtlases)
+	{
+		Atlas = PrecachedTextureAtlases[AtlasIndex];
+	}
+	else
+	{
+		Atlas = VectorGraphicsCache->GetAtlas(AtlasIndex - PrecachedTextureAtlases.Num());
+	}
+
+	FAtlasSlotInfo NewInfo;
+	if (Atlas)
+	{
+		const FAtlasedTextureSlot* Slot = Atlas->GetSlotAtPosition(InPosition);
 		if (Slot)
 		{
-			NewInfo.AtlasSlotRect = FSlateRect(FVector2D(Slot->X, Slot->Y), FVector2D(Slot->X + Slot->Width, Slot->Y + Slot->Height));
-
-			NewInfo.TextureName = AtlasDebugData.FindRef(Slot);
-
-			return NewInfo;
+			NewInfo.AtlasSlotRect = FSlateRect(FVector2f((float)Slot->X, (float)Slot->Y), FVector2f((float)(Slot->X + Slot->Width), (float)(Slot->Y + Slot->Height)));
+			NewInfo.TextureName = bIsPrecachedTextureAtlases ? AtlasDebugData.FindRef(Slot) : VectorGraphicsCache->GetAtlasDebugData(Slot);
 		}
 	}
 
-	return FAtlasSlotInfo();
+	return NewInfo;
 }
 #endif
+
 void FSlateRHIResourceManager::Tick(float DeltaSeconds)
 {
 	TryToCleanupExpiredResources(false);
@@ -357,7 +427,7 @@ void FSlateRHIResourceManager::CreateTextures( const TArray< const FSlateBrush* 
 	{
 		const FSlateBrush& Brush = *Resources[ResourceIndex];
 		const FName TextureName = Brush.GetResourceName();
-		if( TextureName != NAME_None && !Brush.HasUObject() && !Brush.IsDynamicallyLoaded() && !ResourceMap.Contains(TextureName) )
+		if(Brush.GetImageType() != ESlateBrushImageType::Vector && TextureName != NAME_None && !Brush.HasUObject() && !Brush.IsDynamicallyLoaded() && !ResourceMap.Contains(TextureName) )
 		{
 			// Find the texture or add it if it doesn't exist (only load the texture once)
 			FLoadTextureInfo& Info = TextureInfoMap.FindOrAdd( TextureName );
@@ -452,7 +522,7 @@ bool FSlateRHIResourceManager::LoadTexture( const FName& TextureName, const FStr
 		{
 			ImageFormat = EImageFormat::PNG;
 		}
-		TSharedPtr<IImageWrapper> ImageWrapper = ImageWrapperModule.CreateImageWrapper(ImageFormat);
+		TSharedPtr<IImageWrapper> ImageWrapper = ImageWrapperModule.CreateImageWrapper(ImageFormat, *ResourcePath);
 
 		if ( ImageWrapper.IsValid() && ImageWrapper->SetCompressed( RawFileData.GetData(), RawFileData.Num()) )
 		{
@@ -493,9 +563,9 @@ FSlateShaderResourceProxy* FSlateRHIResourceManager::GenerateTextureResource( co
 		FSlateTextureAtlasRHI* Atlas = NULL;
 
 		// See if any atlases can hold the texture
-		for( int32 AtlasIndex = 0; AtlasIndex < TextureAtlases.Num() && !NewSlot; ++AtlasIndex )
+		for( int32 AtlasIndex = 0; AtlasIndex < PrecachedTextureAtlases.Num() && !NewSlot; ++AtlasIndex )
 		{
-			Atlas = TextureAtlases[AtlasIndex];
+			Atlas = PrecachedTextureAtlases[AtlasIndex];
 			NewSlot = Atlas->AddTexture( Width, Height, Info.TextureData->GetRawBytes() );
 		}
 
@@ -505,8 +575,8 @@ FSlateShaderResourceProxy* FSlateRHIResourceManager::GenerateTextureResource( co
 
 			bool bCanUpdateAfterInitialization = GIsEditor;
 			Atlas = new FSlateTextureAtlasRHI( AtlasSize, AtlasSize, ESlateTextureAtlasPaddingStyle::DilateBorder, bCanUpdateAfterInitialization);
-			TextureAtlases.Add( Atlas );
-			NewSlot = TextureAtlases.Last()->AddTexture( Width, Height, Info.TextureData->GetRawBytes() );
+			PrecachedTextureAtlases.Add( Atlas );
+			NewSlot = PrecachedTextureAtlases.Last()->AddTexture( Width, Height, Info.TextureData->GetRawBytes() );
 		}
 		
 		check( Atlas && NewSlot );
@@ -519,8 +589,8 @@ FSlateShaderResourceProxy* FSlateRHIResourceManager::GenerateTextureResource( co
 		NewProxy = new FSlateShaderResourceProxy;
 		NewProxy->Resource = Atlas->GetAtlasTexture();
 		const uint32 Padding = NewSlot->Padding;
-		NewProxy->StartUV = FVector2D((float)(NewSlot->X + Padding) / Atlas->GetWidth(), (float)(NewSlot->Y + Padding) / Atlas->GetHeight());
-		NewProxy->SizeUV = FVector2D( (float)(NewSlot->Width-Padding*2) / Atlas->GetWidth(), (float)(NewSlot->Height-Padding*2) / Atlas->GetHeight() );
+		NewProxy->StartUV = FVector2f((float)(NewSlot->X + Padding) / Atlas->GetWidth(), (float)(NewSlot->Y + Padding) / Atlas->GetHeight());
+		NewProxy->SizeUV = FVector2f( (float)(NewSlot->Width-Padding*2) / Atlas->GetWidth(), (float)(NewSlot->Height-Padding*2) / Atlas->GetHeight() );
 		NewProxy->ActualSize = FIntPoint( Width, Height );
 	}
 	else
@@ -538,8 +608,8 @@ FSlateShaderResourceProxy* FSlateRHIResourceManager::GenerateTextureResource( co
 
 		// The texture proxy only contains a single texture
 		NewProxy->Resource = Texture;
-		NewProxy->StartUV = FVector2D(0.0f, 0.0f);
-		NewProxy->SizeUV = FVector2D(1.0f, 1.0f);
+		NewProxy->StartUV = FVector2f::ZeroVector;
+		NewProxy->SizeUV = FVector2f::UnitVector;
 		NewProxy->ActualSize = FIntPoint( Width, Height );
 	}
 
@@ -576,7 +646,7 @@ static void LoadUObjectForBrush( const FSlateBrush& InBrush )
 	}
 }
 
-FSlateShaderResourceProxy* FSlateRHIResourceManager::GetShaderResource( const FSlateBrush& InBrush )
+FSlateShaderResourceProxy* FSlateRHIResourceManager::GetShaderResource(const FSlateBrush& InBrush, FVector2f LocalSize, float DrawScale)
 {
 	SCOPE_CYCLE_COUNTER( STAT_SlateGetResourceTime );
 
@@ -585,13 +655,17 @@ FSlateShaderResourceProxy* FSlateRHIResourceManager::GetShaderResource( const FS
 	UObject* ResourceObject = InBrush.GetResourceObject();
 	FSlateShaderResourceProxy* Resource = nullptr;
 
-	if (ResourceObject != nullptr && (ResourceObject->IsPendingKillOrUnreachable() || ResourceObject->HasAnyFlags(RF_BeginDestroyed)))
+	if (ResourceObject != nullptr && (!IsValidChecked(ResourceObject) || ResourceObject->IsUnreachable() || ResourceObject->HasAnyFlags(RF_BeginDestroyed)))
 	{
 		UE_LOG(LogSlate, Warning, TEXT("Attempted to access resource for %s which is pending kill, unreachable or pending destroy"), *ResourceObject->GetName());
 	}
 	else
 	{
-		if(!InBrush.IsDynamicallyLoaded() && !InBrush.HasUObject())
+		if (InBrush.GetImageType() == ESlateBrushImageType::Vector)
+		{
+			Resource = GetVectorResource(InBrush, LocalSize, DrawScale);
+		}
+		else if(!InBrush.IsDynamicallyLoaded() && !InBrush.HasUObject())
 		{
 			Resource = ResourceMap.FindRef(InBrush.GetResourceName());
 		}
@@ -645,7 +719,7 @@ TSharedPtr<FSlateDynamicTextureResource> FSlateRHIResourceManager::MakeDynamicTe
 	// Get a resource from the free list if possible
 	if(DynamicTextureFreeList.Num() > 0)
 	{
-		TextureResource = DynamicTextureFreeList.Pop(/*bAllowShrinking=*/ false);
+		TextureResource = DynamicTextureFreeList.Pop(EAllowShrinking::No);
 	}
 	else
 	{
@@ -669,7 +743,7 @@ TSharedPtr<FSlateDynamicTextureResource> FSlateRHIResourceManager::MakeDynamicTe
 			}
 
 			// Initialize and link the rendering resource
-			InTextureResource->RHIRefTexture->InitResource();
+			InTextureResource->RHIRefTexture->InitResource(RHICmdList);
 		});
 
 	// Map the new resource so we don't have to load again
@@ -712,7 +786,7 @@ TSharedPtr<FSlateUTextureResource> FSlateRHIResourceManager::MakeDynamicUTexture
 		// Get a resource from the free list if possible
 		if (UTextureFreeList.Num() > 0)
 		{
-			TextureResource = UTextureFreeList.Pop(/*bAllowShrinking=*/ false);
+			TextureResource = UTextureFreeList.Pop(EAllowShrinking::No);
 			TextureResource->UpdateTexture(InTextureObject);
 		}
 		else
@@ -721,7 +795,7 @@ TSharedPtr<FSlateUTextureResource> FSlateRHIResourceManager::MakeDynamicUTexture
 			TextureResource = MakeShareable(new FSlateUTextureResource(InTextureObject));
 		}
 
-		TextureResource->Proxy->ActualSize = FIntPoint(InTextureObject->GetSurfaceWidth(), InTextureObject->GetSurfaceHeight());
+		TextureResource->Proxy->ActualSize = FIntPoint(FMath::TruncToInt32(InTextureObject->GetSurfaceWidth()), FMath::TruncToInt32(InTextureObject->GetSurfaceHeight()));
 	}
 	else
 	{
@@ -757,7 +831,7 @@ FSlateShaderResourceProxy* FSlateRHIResourceManager::FindOrCreateDynamicTextureR
 					}
 				}
 
-				if ( TextureResource.IsValid() && TextureResource->GetTextureObject() && TextureResource->GetTextureObject()->Resource )
+				if ( TextureResource.IsValid() && TextureResource->GetTextureObject() && TextureResource->GetTextureObject()->GetResource())
 				{
 					TextureResource->UpdateTexture(TextureObject);
 					return TextureResource->Proxy;
@@ -833,7 +907,7 @@ FSlateMaterialResource* FSlateRHIResourceManager::GetMaterialResource(const UObj
 
 	const UMaterialInterface* Material = CastChecked<UMaterialInterface>(InMaterial);
 
-	FVector2D ImageSize = InBrush ? InBrush->ImageSize : FVector2D::ZeroVector;
+	FVector2f ImageSize = InBrush ? UE::Slate::CastToVector2f(InBrush->ImageSize) : FVector2f::ZeroVector;
 	FMaterialKey Key(Material, ImageSize, InMaskKey);
 
 	TSharedPtr<FSlateMaterialResource> MaterialResource = DynamicResourceMap.GetMaterialResource(Key);
@@ -859,6 +933,11 @@ FSlateMaterialResource* FSlateRHIResourceManager::GetMaterialResource(const UObj
 	}
 
 	return MaterialResource.Get();
+}
+
+FSlateShaderResourceProxy* FSlateRHIResourceManager::GetVectorResource(const FSlateBrush& Brush, FVector2f LocalSize, float DrawScale)
+{
+	return VectorGraphicsCache->GetShaderResource(Brush, LocalSize, DrawScale);
 }
 
 void FSlateRHIResourceManager::OnAppExit()
@@ -908,7 +987,7 @@ void FSlateRHIResourceManager::ReleaseDynamicResource( const FSlateBrush& InBrus
 			{
 				UMaterialInterface* Material = Cast<UMaterialInterface>(ResourceObject);
 
-				FMaterialKey Key(Material, InBrush.ImageSize, 0);
+				FMaterialKey Key(Material, UE::Slate::CastToVector2f(InBrush.ImageSize), 0);
 
 				TSharedPtr<FSlateMaterialResource> MaterialResource = DynamicResourceMap.GetMaterialResource(Key);
 				
@@ -960,20 +1039,27 @@ void FSlateRHIResourceManager::LoadStyleResources( const ISlateStyle& Style )
 
 void FSlateRHIResourceManager::UpdateTextureAtlases()
 {
-	for( int32 AtlasIndex = 0; AtlasIndex < TextureAtlases.Num(); ++AtlasIndex )
+	for( int32 AtlasIndex = 0; AtlasIndex < PrecachedTextureAtlases.Num(); ++AtlasIndex )
 	{
-		TextureAtlases[AtlasIndex]->ConditionalUpdateTexture();
+		PrecachedTextureAtlases[AtlasIndex]->ConditionalUpdateTexture();
 	}
+
+	VectorGraphicsCache->UpdateCache();
 }
 
+
+void FSlateRHIResourceManager::ConditionalFlushAtlases()
+{
+	VectorGraphicsCache->ConditionalFlushCache();
+}
 
 void FSlateRHIResourceManager::ReleaseResources()
 {
 	checkSlow( IsThreadSafeForSlateRendering() );
 
-	for( int32 AtlasIndex = 0; AtlasIndex < TextureAtlases.Num(); ++AtlasIndex )
+	for( int32 AtlasIndex = 0; AtlasIndex < PrecachedTextureAtlases.Num(); ++AtlasIndex )
 	{
-		TextureAtlases[AtlasIndex]->ReleaseAtlasTexture();
+		PrecachedTextureAtlases[AtlasIndex]->ReleaseResources();
 	}
 
 	for( int32 ResourceIndex = 0; ResourceIndex < NonAtlasedTextures.Num(); ++ResourceIndex )
@@ -982,6 +1068,8 @@ void FSlateRHIResourceManager::ReleaseResources()
 	}
 
 	DynamicResourceMap.ReleaseResources();
+
+	VectorGraphicsCache->ReleaseResources();
 
 	// Note the base class has texture proxies only which do not need to be released
 }
@@ -999,9 +1087,9 @@ void FSlateRHIResourceManager::DeleteResources()
 {
 	FScopeLock ScopeLock(&ResourceCriticalSection);
 
-	for( int32 AtlasIndex = 0; AtlasIndex < TextureAtlases.Num(); ++AtlasIndex )
+	for( int32 AtlasIndex = 0; AtlasIndex < PrecachedTextureAtlases.Num(); ++AtlasIndex )
 	{
-		delete TextureAtlases[AtlasIndex];
+		delete PrecachedTextureAtlases[AtlasIndex];
 	}
 
 	for( int32 ResourceIndex = 0; ResourceIndex < NonAtlasedTextures.Num(); ++ResourceIndex )
@@ -1013,9 +1101,11 @@ void FSlateRHIResourceManager::DeleteResources()
 	SET_DWORD_STAT(STAT_SlateNumTextureAtlases, 0);
 	SET_DWORD_STAT(STAT_SlateNumDynamicTextures, 0);
 
-	TextureAtlases.Empty();
+	PrecachedTextureAtlases.Empty();
 	NonAtlasedTextures.Empty();
 	DynamicTextureFreeList.Empty();
+
+	VectorGraphicsCache.Reset();
 
 	// Clean up mapping to texture
 	ClearTextureMap();
@@ -1043,6 +1133,8 @@ void FSlateRHIResourceManager::ReloadTextures()
 
 	// Delete allocated resources (cpu)
 	DeleteResources();
+
+	CreateVectorGraphicsCache();
 
 	// Reload everything
 	LoadUsedTextures();

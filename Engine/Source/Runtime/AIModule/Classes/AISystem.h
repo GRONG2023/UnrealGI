@@ -22,20 +22,23 @@ class UNavLocalGridManager;
 
 #define GET_AI_CONFIG_VAR(a) (GetDefault<UAISystem>()->a)
 
-UCLASS(config=Engine, defaultconfig)
-class AIMODULE_API UAISystem : public UAISystemBase
+UCLASS(config=Engine, defaultconfig, MinimalAPI)
+class UAISystem : public UAISystemBase
 {
 	GENERATED_BODY()
 
 protected:
 	/** Class that will be used to spawn the perception system, can be game-specific */
-	UPROPERTY(globalconfig, EditAnywhere, Category = "AISystem", meta = (MetaClass = "AIPerceptionSystem", DisplayName = "Perception System Class"))
+	UPROPERTY(globalconfig, EditAnywhere, Category = "AISystem", meta = (MetaClass = "/Script/AIModule.AIPerceptionSystem", DisplayName = "Perception System Class"))
 	FSoftClassPath PerceptionSystemClassName;
 
 	/** Class that will be used to spawn the hot spot manager, can be game-specific */
-	UPROPERTY(globalconfig, EditAnywhere, Category = "AISystem", meta = (MetaClass = "AIHotSpotManager", DisplayName = "AIHotSpotManager Class"))
+	UPROPERTY(globalconfig, EditAnywhere, Category = "AISystem", meta = (MetaClass = "/Script/AIModule.AIHotSpotManager", DisplayName = "AIHotSpotManager Class"))
 	FSoftClassPath HotSpotManagerClassName;
 
+	/** Class that will be used to spawn the env query manager, can be game-specific */
+	UPROPERTY(globalconfig, EditAnywhere, Category = "AISystem", meta = (MetaClass = "/Script/AIModule.EnvQueryManager", DisplayName = "EnvQueryManager Class"))
+	FSoftClassPath EnvQueryManagerClassName;
 public:
 	/** Default AI movement's acceptance radius used to determine whether 
  	 * AI reached path's end */
@@ -64,13 +67,6 @@ public:
 	UPROPERTY(globalconfig, EditDefaultsOnly, Category = "Movement")
 	bool bAllowStrafing;
 
-	/** 
-	 * Whether or not to enable Gameplay Tasks for move tasks
-     * this property is just a transition-time flag - in the end we're going to switch over to Gameplay Tasks anyway, that's the goal. 
-	 */
-	UPROPERTY(globalconfig, EditDefaultsOnly, Category = "Gameplay Tasks")
-	bool bEnableBTAITasks;
-
 	/** if enable will make EQS not complaint about using Controllers as queriers. Default behavior (false) will 
 	 *	in places automatically convert controllers to pawns, and complain if code user bypasses the conversion or uses
 	 *	pawn-less controller */
@@ -92,6 +88,17 @@ public:
 	UPROPERTY(globalconfig, EditDefaultsOnly, Category = "Blackboard")
 	bool bAddBlackboardSelfKey = true;
 
+	UPROPERTY(globalconfig, EditDefaultsOnly, Category = "Behavior Tree")
+	bool bClearBBEntryOnBTEQSFail = true;
+	
+	/** If enabled, blackboard based decorators will set key to 'Invalid' on creation or when selected key no longer exists (instead of using the first key of the blackboard). */
+	UPROPERTY(globalconfig, EditDefaultsOnly, Category = "Behavior Tree")
+	bool bBlackboardKeyDecoratorAllowsNoneAsValue = false;
+
+	/** If set, new BTs will use this BB as default. */
+	UPROPERTY(globalconfig, EditDefaultsOnly, Category = "Behavior Tree")
+	TSoftObjectPtr<UBlackboardData> DefaultBlackboard;
+
 	/** Which collision channel to use for sight checks by default */
 	UPROPERTY(globalconfig, EditDefaultsOnly, Category = "PerceptionSystem")
 	TEnumAsByte<ECollisionChannel> DefaultSightCollisionChannel;
@@ -99,23 +106,23 @@ public:
 protected:
 	/** Behavior tree manager used by game */
 	UPROPERTY(Transient)
-	UBehaviorTreeManager* BehaviorTreeManager;
+	TObjectPtr<UBehaviorTreeManager> BehaviorTreeManager;
 
 	/** Environment query manager used by game */
 	UPROPERTY(Transient)
-	UEnvQueryManager* EnvironmentQueryManager;
+	TObjectPtr<UEnvQueryManager> EnvironmentQueryManager;
 
 	UPROPERTY(Transient)
-	UAIPerceptionSystem* PerceptionSystem;
+	TObjectPtr<UAIPerceptionSystem> PerceptionSystem;
 
 	UPROPERTY(Transient)
-	TArray<UAIAsyncTaskBlueprintProxy*> AllProxyObjects;
+	TArray<TObjectPtr<UAIAsyncTaskBlueprintProxy>> AllProxyObjects;
 
 	UPROPERTY(Transient)
-	UAIHotSpotManager* HotSpotManager;
+	TObjectPtr<UAIHotSpotManager> HotSpotManager;
 
 	UPROPERTY(Transient)
-	UNavLocalGridManager* NavLocalGrids;
+	TObjectPtr<UNavLocalGridManager> NavLocalGrids;
 
 	typedef TMultiMap<TWeakObjectPtr<UBlackboardData>, TWeakObjectPtr<UBlackboardComponent> > FBlackboardDataToComponentsMap;
 
@@ -124,21 +131,25 @@ protected:
 
 	FDelegateHandle ActorSpawnedDelegateHandle;
 
+	FDelegateHandle PawnBeginPlayDelegateHandle;
+
 	/** random number stream to be used by all things AI. WIP */
-	static FRandomStream RandomStream;
+	static AIMODULE_API FRandomStream RandomStream;
 	
 public:
-	UAISystem(const FObjectInitializer& ObjectInitializer);
+	AIMODULE_API UAISystem(const FObjectInitializer& ObjectInitializer);
 
-	virtual void BeginDestroy() override;
+	AIMODULE_API virtual void BeginDestroy() override;
 	
-	virtual void PostInitProperties() override;
+	AIMODULE_API virtual void PostInitProperties() override;
 
 	// UAISystemBase begin		
-	virtual void InitializeActorsForPlay(bool bTimeGotReset) override;
-	virtual void WorldOriginLocationChanged(FIntVector OldOriginLocation, FIntVector NewOriginLocation) override;
-	virtual void CleanupWorld(bool bSessionEnded = true, bool bCleanupResources = true, UWorld* NewWorld = NULL) override;
-	virtual void StartPlay() override;
+	AIMODULE_API virtual void InitializeActorsForPlay(bool bTimeGotReset) override;
+	AIMODULE_API virtual void WorldOriginLocationChanged(FIntVector OldOriginLocation, FIntVector NewOriginLocation) override;
+	AIMODULE_API virtual void CleanupWorld(bool bSessionEnded = true, bool bCleanupResources = true) override;
+	UE_DEPRECATED(5.1, "NewWorld was unused and not always calculated correctly and we expect it is not needed; let us know on UDN if it is necessary.")
+	AIMODULE_API virtual void CleanupWorld(bool bSessionEnded, bool bCleanupResources, UWorld* NewWorld) override;
+	AIMODULE_API virtual void StartPlay() override;
 	// UAISystemBase end
 
 	/** Behavior tree manager getter */
@@ -182,13 +193,13 @@ public:
 	// cheats
 	//----------------------------------------------------------------------//
 	UFUNCTION(exec)
-	virtual void AIIgnorePlayers();
+	AIMODULE_API virtual void AIIgnorePlayers();
 
 	UFUNCTION(exec)
-	virtual void AILoggingVerbose();
+	AIMODULE_API virtual void AILoggingVerbose();
 
 	/** insta-runs EQS query for given Target */
-	void RunEQS(const FString& QueryName, UObject* Target);
+	AIMODULE_API void RunEQS(const FString& QueryName, UObject* Target);
 
 	/**
 	* Iterator for traversing all UBlackboardComponent instances associated
@@ -246,28 +257,30 @@ public:
 	* (i.e. InitializeComponent). The user is responsible for calling
 	* UnregisterBlackboardComponent (i.e. UninitializeComponent).
 	*/
-	void RegisterBlackboardComponent(class UBlackboardData& BlackboardAsset, class UBlackboardComponent& BlackboardComp);
+	AIMODULE_API void RegisterBlackboardComponent(class UBlackboardData& BlackboardAsset, class UBlackboardComponent& BlackboardComp);
 
 	/**
 	* Unregisters a UBlackboardComponent instance with this blackboard data
 	* asset. This should be called before the component has been uninitialized
 	* (i.e. UninitializeComponent).
 	*/
-	void UnregisterBlackboardComponent(class UBlackboardData& BlackboardAsset, class UBlackboardComponent& BlackboardComp);
+	AIMODULE_API void UnregisterBlackboardComponent(class UBlackboardData& BlackboardAsset, class UBlackboardComponent& BlackboardComp);
 
 	/**
 	* Creates a forward only iterator for that will iterate all
 	* UBlackboardComponent instances that reference the specified
 	* BlackboardAsset and it's parents.
 	*/
-	FBlackboardDataToComponentsIterator CreateBlackboardDataToComponentsIterator(class UBlackboardData& BlackboardAsset);
+	AIMODULE_API FBlackboardDataToComponentsIterator CreateBlackboardDataToComponentsIterator(class UBlackboardData& BlackboardAsset);
 
-	virtual void ConditionalLoadDebuggerPlugin();
+	AIMODULE_API virtual void ConditionalLoadDebuggerPlugin();
 
 	static const FRandomStream& GetRandomStream() { return RandomStream; }
 	static void SeedRandomStream(const int32 Seed) { return RandomStream.Initialize(Seed); }
 
 protected:
-	virtual void OnActorSpawned(AActor* SpawnedActor);
-	void LoadDebuggerPlugin();
+	AIMODULE_API virtual void OnActorSpawned(AActor* SpawnedActor);
+	AIMODULE_API virtual void OnPawnBeginPlay(APawn* Pawn);
+
+	AIMODULE_API void LoadDebuggerPlugin();
 };

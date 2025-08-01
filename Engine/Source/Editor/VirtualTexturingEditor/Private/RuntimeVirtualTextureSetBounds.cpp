@@ -29,11 +29,29 @@ namespace RuntimeVirtualTexture
 		LocalTransform.SetComponents(TargetRotation, TargetPosition, FVector::OneVector);
 		FTransform WorldToLocal = LocalTransform.Inverse();
 
+		// Special case where if the bounds align actor is a landscape we want to automatically include all associated landscape components.
+		FGuid BoundsAlignLandscapeGuid;
+		if (BoundsAlignActor.IsValid())
+		{
+			if (ALandscape const* LandscapeProxy = Cast<ALandscape>(BoundsAlignActor.Get()))
+			{
+				BoundsAlignLandscapeGuid = LandscapeProxy->GetLandscapeGuid();
+			}
+		}
+
 		// Expand bounds for the BoundsAlignActor and all primitive components that write to this virtual texture.
 		FBox Bounds(ForceInit);
-		for (TObjectIterator<UPrimitiveComponent> It(RF_ClassDefaultObject, true, EInternalObjectFlags::PendingKill); It; ++It)
+		for (TObjectIterator<UPrimitiveComponent> It(RF_ClassDefaultObject, true, EInternalObjectFlags::Garbage); It; ++It)
 		{
-			bool bUseBounds = It->GetOwner() == BoundsAlignActor.Get();
+			bool bUseBounds = BoundsAlignActor.IsValid() && It->GetOwner() == BoundsAlignActor.Get();
+
+			if (BoundsAlignLandscapeGuid.IsValid())
+			{
+				if (ALandscapeProxy const* LandscapeProxy = Cast<ALandscapeProxy>(It->GetOwner()))
+				{
+					bUseBounds |= LandscapeProxy->GetLandscapeGuid() == BoundsAlignLandscapeGuid;
+				}
+			}
 
 			TArray<URuntimeVirtualTexture*> const& VirtualTextures = It->GetRuntimeVirtualTextures();
 			for (int32 Index = 0; !bUseBounds && Index < VirtualTextures.Num(); ++Index) 
@@ -54,7 +72,14 @@ namespace RuntimeVirtualTexture
 			}
 		}
 
-		// Calulcate the transform to fit the bounds.
+		// Expand bounds.
+		const float ExpandBounds = InComponent->GetExpandBounds();
+		if (Bounds.IsValid && ExpandBounds > 0)
+		{
+			Bounds = Bounds.ExpandBy(ExpandBounds);
+		}
+
+		// Calculate the transform to fit the bounds.
 		FTransform Transform;
 		const FVector LocalPosition = Bounds.Min;
 		const FVector WorldPosition = LocalTransform.TransformPosition(LocalPosition);

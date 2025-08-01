@@ -2,13 +2,11 @@
 
 
 #include "Sound/SoundNodeQualityLevel.h"
-#include "EngineGlobals.h"
 #include "ActiveSound.h"
+#include "EdGraph/EdGraph.h"
 #include "Sound/AudioSettings.h"
 #include "Sound/SoundCue.h"
-#include "Sound/SoundNode.h"
-#include "GameFramework/GameUserSettings.h"
-#include "Engine/Engine.h"
+#include "Sound/SoundNodeWavePlayer.h"
 #include "AudioCompressionSettingsUtils.h"
 
 #if WITH_EDITORONLY_DATA
@@ -16,6 +14,8 @@
 #include "Editor.h"
 #endif
 #include "Interfaces/ITargetPlatform.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SoundNodeQualityLevel)
 
 #if WITH_EDITOR
 
@@ -77,6 +77,26 @@ void USoundNodeQualityLevel::ReleaseRetainerOnChildWavePlayers(bool bRecurse)
 	ForCurrentQualityLevel([bRecurse](USoundNode* Node) { Node->ReleaseRetainerOnChildWavePlayers(bRecurse); });
 }
 
+void USoundNodeQualityLevel::LoadChildWavePlayers(bool bAddToRoot, bool bRecurse)
+{
+	ForCurrentQualityLevel([bAddToRoot, bRecurse](USoundNode* Node) 
+	{ 
+		if (Node)
+		{
+			// If this node is a wave player node, load it, otherwise load children 
+			// (a wave player node cannot have children)
+			if (USoundNodeWavePlayer* WavePlayerNode = Cast<USoundNodeWavePlayer>(Node))
+			{
+				WavePlayerNode->LoadAsset(bAddToRoot);
+			}
+			else
+			{
+				Node->LoadChildWavePlayerAssets(bAddToRoot, bRecurse);
+			}
+		}
+	});
+}
+
 int32 USoundNodeQualityLevel::GetMaxChildNodes() const
 {
 	return GetDefault<UAudioSettings>()->QualityLevels.Num();
@@ -117,7 +137,7 @@ void USoundNodeQualityLevel::ParseNodes( FAudioDevice* AudioDevice, const UPTRIN
 	int32 QualityLevel = USoundCue::GetCachedQualityLevel();
 	
 	// If CookedQualityLevelIndex has been set, we will have a *single* quality level.
-	if (CookedQualityLevelIndex >= 0)
+	if (CookedQualityLevelIndex >= 0 && ChildNodes.Num() == 1)
 	{	
 		// Remap to index 0 (as all other levels have been removed by cooker).
 		QualityLevel = 0;
@@ -148,14 +168,26 @@ void USoundNodeQualityLevel::Serialize(FArchive& Ar)
 				CookedQualityLevelIndex = CookOverrides->SoundCueCookQualityIndex;
 
 				// Move out all nodes.
-				TArray<USoundNode*> ChildNodesBackup;
+				TArray<TObjectPtr<class USoundNode>> ChildNodesBackup;
 				ChildNodesBackup = MoveTemp(ChildNodes);
-
+				check(ChildNodes.Num() == 0);
+			
 				// Put *just* the node we care about in our child array to be serialized by the Super
 				if (ChildNodesBackup.IsValidIndex(CookedQualityLevelIndex))
 				{
 					ChildNodes.Add(ChildNodesBackup[CookedQualityLevelIndex]);
 				}
+
+				int32 BranchesPruned = ChildNodesBackup.Num() - ChildNodes.Num();
+				UE_CLOG(
+					BranchesPruned > 0,
+					LogAudio,
+					Display,
+					TEXT("Pruning '%s' of '%d' quality branches, as it's cooked at '%s' quality."),
+					*GetFullNameSafe(this),
+					BranchesPruned,
+					*GetDefault<UAudioSettings>()->FindQualityNameByIndex(CookedQualityLevelIndex)
+				);
 
 				// Call base serialize that will walk all properties and serialize them.
 				Super::Serialize(Ar);
@@ -190,7 +222,7 @@ void USoundNodeQualityLevel::ForCurrentQualityLevel(TFunction<void(USoundNode*)>
 #endif
 
 	// If CookedQualityLevelIndex has been set, we will have a *single* quality level.
-	if (CookedQualityLevelIndex >= 0)
+	if (CookedQualityLevelIndex >= 0 && ChildNodes.Num() == 1)
 	{
 		// Remap to index 0 (as all other levels have been removed by cooker).
 		QualityLevel = 0;
@@ -201,3 +233,4 @@ void USoundNodeQualityLevel::ForCurrentQualityLevel(TFunction<void(USoundNode*)>
 		Lambda(ChildNodes[QualityLevel]);
 	}
 }
+

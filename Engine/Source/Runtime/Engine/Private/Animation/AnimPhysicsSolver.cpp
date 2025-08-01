@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-// This code is based upon and adapted to UE4 from the code 
+// This code is based upon and adapted to Unreal from the code 
 // provided in the Sandbox project here:
 // https://github.com/melax/sandbox
 
@@ -29,7 +29,10 @@ SOFTWARE.
 */
 
 #include "Animation/AnimPhysicsSolver.h"
+#include "HAL/IConsoleManager.h"
+#include "Math/QuatRotationTranslationMatrix.h"
 #include "PhysicsEngine/PhysicsSettings.h"
+#include "Stats/Stats.h"
 
 DEFINE_STAT(STAT_AnimDynamicsUpdate);
 DEFINE_STAT(STAT_AnimDynamicsLinearPre);
@@ -59,22 +62,22 @@ FAnimPhysShape::FAnimPhysShape(TArray<FVector>& InVertices, TArray<FIntVector>& 
 	CenterOfMass = FAnimPhys::CalculateCenterOfMass(Vertices, Triangles);
 }
 
-FAnimPhysShape FAnimPhysShape::MakeBox(FVector& Extents)
+FAnimPhysShape FAnimPhysShape::MakeBox(const FVector& Extents)
 {
+	FVector HalfExtents = Extents / 2.0f;
+
 	// A box of zero size will introduce NaNs into the simulation so we stomp it here and log
 	// if we encounter it.
-	if(Extents.SizeSquared() <= SMALL_NUMBER)
+	if (Extents.SizeSquared() <= UE_SMALL_NUMBER)
 	{
 // 		UE_LOG(LogAnimation, Warning, TEXT("AnimDynamics: Attempted to create a simulation box with 0 volume, this introduces NaNs into the simulation. Adjusting box extents to (1.0f,1.0f,1.0f)"));
-		Extents = FVector(1.0f);
+		HalfExtents = FVector(0.5f);
 	}
 
 	TArray<FVector> Verts;
 	TArray<FIntVector> Tris;
 	Verts.Reserve(8);
-	Tris.Reserve(12);
-
-	FVector HalfExtents = Extents / 2.0f;
+	Tris.Reserve(12);	
 
 	// Front Verts
 	Verts.Add(FVector(-HalfExtents.X, -HalfExtents.Y, HalfExtents.Z));
@@ -511,7 +514,7 @@ void FAnimPhys::ConstrainAlongDirection(float DeltaTime, TArray<FAnimPhysLinearL
 
 	float Distance = FVector::DotProduct(Position1 - Position0, AxisToConstrain);
 
-	if (FMath::Abs(Limits.X - Limits.Y) < SMALL_NUMBER)
+	if (FMath::Abs(Limits.X - Limits.Y) < UE_SMALL_NUMBER)
 	{
 		// Fully locked axis, just generate one limit
 		LimitContainer.Add(FAnimPhysLinearLimit(FirstBody, SecondBody, FirstPosition, SecondPosition, AxisToConstrain, Distance / DeltaTime, Distance / DeltaTime, FVector2D(MinimumForce, MaximumForce)));
@@ -588,17 +591,17 @@ void FAnimPhys::ConstrainPositionPrismatic(float DeltaTime, TArray<FAnimPhysLine
 	{
 		FVector TargetAxisSpeeds = (Position1 - Target) / DeltaTime;
 
-		if (FMath::Abs(TargetAxisSpeeds.X) > SMALL_NUMBER)
+		if (FMath::Abs(TargetAxisSpeeds.X) > UE_SMALL_NUMBER)
 		{
 			LimitContainer.Add(FAnimPhysLinearLimit(FirstBody, SecondBody, FirstPosition, SecondPosition, FVector(1.0f, 0.0f, 0.0f), TargetAxisSpeeds.X));
 		}
 
-		if (FMath::Abs(TargetAxisSpeeds.Y) > SMALL_NUMBER)
+		if (FMath::Abs(TargetAxisSpeeds.Y) > UE_SMALL_NUMBER)
 		{
 			LimitContainer.Add(FAnimPhysLinearLimit(FirstBody, SecondBody, FirstPosition, SecondPosition, FVector(0.0f, 1.0f, 0.0f), TargetAxisSpeeds.Y));
 		}
 
-		if (FMath::Abs(TargetAxisSpeeds.Z) > SMALL_NUMBER)
+		if (FMath::Abs(TargetAxisSpeeds.Z) > UE_SMALL_NUMBER)
 		{
 			LimitContainer.Add(FAnimPhysLinearLimit(FirstBody, SecondBody, FirstPosition, SecondPosition, FVector(0.0f, 0.0f, 1.0f), TargetAxisSpeeds.Z));
 		}
@@ -861,7 +864,7 @@ void FAnimPhys::InitializeBodyVelocity(float DeltaTime, FAnimPhysRigidBody *InBo
 		// Wind velocity in body space
 		FVector WindVelocity = InBody->WindData.WindDirection * InBody->WindData.WindSpeed * WindUnitScale * InBody->WindData.BodyWindScale;
 
-		if(WindVelocity.SizeSquared() > SMALL_NUMBER)
+		if(WindVelocity.SizeSquared() > UE_SMALL_NUMBER)
 		{
 			Force += WindVelocity * InBody->WindData.WindAdaption;
 		}
@@ -929,7 +932,7 @@ void FAnimPhys::PhysicsUpdate(float DeltaTime, TArray<FAnimPhysRigidBody*>& Bodi
 	{
 		for (FAnimPhysRigidBody* Body : Bodies)
 		{
-			if (Body->InverseMass > KINDA_SMALL_NUMBER)
+			if (Body->InverseMass > UE_KINDA_SMALL_NUMBER)
 			{
 				Body->LinearMomentum += ((ExternalLinearAcc / Body->InverseMass) * DeltaTime); // need to scale by mass to go from acc to momentum
 			}

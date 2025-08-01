@@ -6,7 +6,7 @@
 #include "NvTriStrip.h"
 #include "forsythtriangleorderoptimizer.h"
 
-#ifdef __clang__
+#ifndef _SILENCE_STDEXT_HASH_DEPRECATION_WARNINGS
 #define _SILENCE_STDEXT_HASH_DEPRECATION_WARNINGS 1
 #endif
 
@@ -197,14 +197,14 @@ namespace BuildOptimizationThirdParty
 
 			check(Index < PositionVertexBuffer.GetNumVertices());
 
-			const FVector& Position = PositionVertexBuffer.VertexPosition(Index);
+			const FVector3f& Position = PositionVertexBuffer.VertexPosition(Index);
 			Vertex.pos.x = Position.X;
 			Vertex.pos.y = Position.Y;
 			Vertex.pos.z = Position.Z;
 
 			if (VertexBuffer.GetNumTexCoords())
 			{
-				const FVector2D UV = VertexBuffer.GetVertexUV(Index, 0);
+				const FVector2f UV = VertexBuffer.GetVertexUV(Index, 0);
 				Vertex.uv.x = UV.X;
 				Vertex.uv.y = UV.Y;
 			}

@@ -4,6 +4,8 @@
 #include "PostProcess/PostProcessTonemap.h"
 #include "Curves/CurveFloat.h"
 #include "UnrealEngine.h"
+#include "DataDrivenShaderPlatformInfo.h"
+#include "SceneRendering.h"
 
 extern bool IsExtendLuminanceRangeEnabled();
 
@@ -15,18 +17,23 @@ public:
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
-		SHADER_PARAMETER_STRUCT(FEyeAdaptationParameters, EyeAdaptation)
-		SHADER_PARAMETER_STRUCT_INCLUDE(FMobileFilmTonemapParameters, MobileTonemap)
 		SHADER_PARAMETER_STRUCT_INCLUDE(FTonemapperOutputDeviceParameters, OutputDevice)
 		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Input)
 		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Output)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, HDRSceneColorTexture)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneColorTexture)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, HistogramTexture)
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, EyeAdaptationTexture)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, EyeAdaptationBuffer)
 		SHADER_PARAMETER_SAMPLER(SamplerState, HDRSceneColorSampler)
 		SHADER_PARAMETER_SAMPLER(SamplerState, SceneColorSampler)
 		SHADER_PARAMETER_TEXTURE(Texture2D, MiniFontTexture)
+		SHADER_PARAMETER_STRUCT(FEyeAdaptationParameters, EyeAdaptation)
+		SHADER_PARAMETER(float, FilmSlope)
+		SHADER_PARAMETER(float, FilmToe)
+		SHADER_PARAMETER(float, FilmShoulder)
+		SHADER_PARAMETER(float, FilmBlackClip)
+		SHADER_PARAMETER(float, FilmWhiteClip)
+		SHADER_PARAMETER(float, IlluminanceMeterEnabled)
 		RENDER_TARGET_BINDING_SLOTS()
 	END_SHADER_PARAMETER_STRUCT()
 
@@ -42,17 +49,25 @@ public:
 		OutEnvironment.SetDefine(TEXT("USE_SHADOW_TINT"), 1);
 		OutEnvironment.SetDefine(TEXT("USE_CONTRAST"), 1);
 		OutEnvironment.SetDefine(TEXT("USE_APPROXIMATE_SRGB"), (uint32)0);
+
+		// This shader takes a very long time to compile with FXC, so we pre-compile it with DXC first and then forward the optimized HLSL to FXC.
+		OutEnvironment.CompilerFlags.Add(CFLAG_PrecompileWithDXC);
 	}
 };
 
 IMPLEMENT_GLOBAL_SHADER(FVisualizeHDRPS, "/Engine/Private/PostProcessVisualizeHDR.usf", "MainPS", SF_Pixel);
+
+bool IsIlluminanceMeterSupportedByView(const FViewInfo& View)
+{
+	return !IsForwardShadingEnabled(View.GetShaderPlatform()) && !View.Family->EngineShowFlags.PathTracing;
+}
 
 FScreenPassTexture AddVisualizeHDRPass(FRDGBuilder& GraphBuilder, const FViewInfo& View, const FVisualizeHDRInputs& Inputs)
 {
 	check(Inputs.SceneColor.IsValid());
 	check(Inputs.SceneColorBeforeTonemap.IsValid());
 	check(Inputs.HistogramTexture);
-	check(Inputs.EyeAdaptationTexture);
+	check(Inputs.EyeAdaptationBuffer);
 	check(Inputs.EyeAdaptationParameters);
 
 	FScreenPassRenderTarget Output = Inputs.OverrideOutput;
@@ -67,6 +82,8 @@ FScreenPassTexture AddVisualizeHDRPass(FRDGBuilder& GraphBuilder, const FViewInf
 
 	FRHISamplerState* BilinearClampSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 
+	const FPostProcessSettings& Settings = View.FinalPostProcessSettings;
+
 	FVisualizeHDRPS::FParameters* PassParameters = GraphBuilder.AllocParameters<FVisualizeHDRPS::FParameters>();
 	PassParameters->RenderTargets[0] = Output.GetRenderTargetBinding();
 	PassParameters->View = View.ViewUniformBuffer;
@@ -77,15 +94,17 @@ FScreenPassTexture AddVisualizeHDRPass(FRDGBuilder& GraphBuilder, const FViewInf
 	PassParameters->HDRSceneColorTexture = Inputs.SceneColorBeforeTonemap.Texture;
 	PassParameters->HDRSceneColorSampler = BilinearClampSampler;
 	PassParameters->HistogramTexture = Inputs.HistogramTexture;
-	PassParameters->EyeAdaptationTexture = Inputs.EyeAdaptationTexture;
+	PassParameters->EyeAdaptationBuffer = GraphBuilder.CreateSRV(Inputs.EyeAdaptationBuffer);
 	PassParameters->EyeAdaptation = *Inputs.EyeAdaptationParameters;
 	PassParameters->OutputDevice = GetTonemapperOutputDeviceParameters(*View.Family);
-	PassParameters->MobileTonemap = GetMobileFilmTonemapParameters(
-		View.FinalPostProcessSettings,
-		/* UseColorMatrix = */ true,
-		/* UseShadowTint = */ true,
-		/* UseContrast = */ true);
 	PassParameters->MiniFontTexture = GetMiniFontTexture();
+	PassParameters->FilmSlope = Settings.FilmSlope;
+	PassParameters->FilmToe = Settings.FilmToe;
+	PassParameters->FilmShoulder = Settings.FilmShoulder;
+	PassParameters->FilmBlackClip = Settings.FilmBlackClip;
+	PassParameters->FilmWhiteClip = Settings.FilmWhiteClip;
+	PassParameters->IlluminanceMeterEnabled = IsIlluminanceMeterSupportedByView(View) ? 1.0f : 0.0f;
+	
 
 	TShaderMapRef<FVisualizeHDRPS> PixelShader(View.ShaderMap);
 
@@ -98,6 +117,8 @@ FScreenPassTexture AddVisualizeHDRPass(FRDGBuilder& GraphBuilder, const FViewInf
 	AddDrawCanvasPass(GraphBuilder, RDG_EVENT_NAME("Overlay"), View, Output,
 		[Output, &View](FCanvas& Canvas)
 	{
+		const float DPIScale = Canvas.GetDPIScale();
+
 		const EAutoExposureMethod AutoExposureMethod = GetAutoExposureMethod(View);
 		const bool bExtendedLuminanceRange = IsExtendLuminanceRangeEnabled();
 
@@ -115,25 +136,6 @@ FScreenPassTexture AddVisualizeHDRPass(FRDGBuilder& GraphBuilder, const FViewInf
 
 		Y += 160;
 
-		float MinX = Output.ViewRect.Min.X + 64 + 10;
-		float MaxY = Output.ViewRect.Max.Y - 64;
-		float SizeX = Output.ViewRect.Size().X - 64 * 2 - 20;
-
-		for (uint32 i = 0; i <= 4; ++i)
-		{
-			int XAdd = (int)(i * SizeX / 4);
-			float HistogramPosition = i / 4.0f;
-			float EV100Value = FMath::Lerp(View.FinalPostProcessSettings.HistogramLogMin, View.FinalPostProcessSettings.HistogramLogMax, HistogramPosition);
-			if (!bExtendedLuminanceRange)
-			{
-				// In this case the post process settings are actually Log2 values.
-				EV100Value = Log2ToEV100(LuminanceMax,EV100Value);
-			}
-
-			Line = FString::Printf(TEXT("%.2g"), EV100Value);
-			Canvas.DrawShadowedString(MinX + XAdd - 5, MaxY + YStep, *Line, GetStatsFont(), FLinearColor(1, 0.3f, 0.3f));
-		}
-		Y += 3 * YStep;
 		switch (AutoExposureMethod)
 		{
 		case EAutoExposureMethod::AEM_Basic:
@@ -199,7 +201,52 @@ FScreenPassTexture AddVisualizeHDRPass(FRDGBuilder& GraphBuilder, const FViewInf
 			Canvas.DrawShadowedString(X, Y += YStep, TEXT("Exposure Compensation (Curve):"), GetStatsFont(), FLinearColor(1, 1, 1));
 			Canvas.DrawShadowedString(X + ColumnWidth, Y, *Line, GetStatsFont(), FLinearColor(1, 1, 1));
 
+			const float ScreenCenterX = Output.ViewRect.Min.X + Output.ViewRect.Width() * 0.5f;
+			const float ScreenCenterY = Output.ViewRect.Min.Y + Output.ViewRect.Height() * 0.5f;
+
+			const float IlluminanceMeterTextX = (ScreenCenterX - 10.0f) / DPIScale;
+			const float IlluminanceMeterTextY = (ScreenCenterY - 140.0f) / DPIScale;
+			if(IsIlluminanceMeterSupportedByView(View))
+			{
+				Canvas.DrawShadowedString(IlluminanceMeterTextX, IlluminanceMeterTextY   , TEXT("Illuminance meter - over the hemisphere of the surface patch"), GetStatsFont(), FLinearColor(1, 1, 1));
+				Canvas.DrawShadowedString(IlluminanceMeterTextX, IlluminanceMeterTextY+15, TEXT("                    (Forced to be a perfect white diffuse only surface)"), GetStatsFont(), FLinearColor(1, 1, 1));
+			}
+			else
+			{
+				Canvas.DrawShadowedString(IlluminanceMeterTextX, IlluminanceMeterTextY, TEXT("Illuminance meter - not available with Forward Shading"), GetStatsFont(), FLinearColor(1, 1, 1));
+			}
+
+			const float LuminanceMeterTextX = (ScreenCenterX - 10.0f) / DPIScale;
+			const float LuminanceMeterTextY = (ScreenCenterY - 40.0f) / DPIScale;
+			Canvas.DrawShadowedString(LuminanceMeterTextX, LuminanceMeterTextY, TEXT("Luminance meter"), GetStatsFont(), FLinearColor(1, 1, 1));
+
 			AutoExposureBias += CurveExposureBias;
+		}
+
+		// Draw EV100 values at the bottom of the histogram
+		{
+			const float MinX = Output.ViewRect.Min.X + 64 + 8;
+			const float MaxY = Output.ViewRect.Max.Y - 68;
+			const float SizeX = Output.ViewRect.Width() - 64 * 2 - 20;
+
+			for (uint32 i = 0; i <= 4; ++i)
+			{
+				int XAdd = (int)(i * SizeX / 4);
+				float HistogramPosition = i / 4.0f;
+				float EV100Value = FMath::Lerp(View.FinalPostProcessSettings.HistogramLogMin, View.FinalPostProcessSettings.HistogramLogMax, HistogramPosition);
+				if (!bExtendedLuminanceRange)
+				{
+					// In this case the post process settings are actually Log2 values.
+					EV100Value = Log2ToEV100(LuminanceMax, EV100Value);
+				}
+
+				Line = FString::Printf(TEXT("%.2g"), EV100Value);
+
+				const float PosX = (MinX + XAdd - 5) / DPIScale;
+				const float PosY = (MaxY + YStep) / DPIScale;
+
+				Canvas.DrawShadowedString(PosX, PosY, *Line, GetStatsFont(), FLinearColor(1, 0.3f, 0.3f));
+			}
 		}
 
 		Line = FString::Printf(TEXT("%.3g"), AutoExposureBias);

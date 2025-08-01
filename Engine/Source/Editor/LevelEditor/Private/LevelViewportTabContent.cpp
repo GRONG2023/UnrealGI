@@ -2,176 +2,178 @@
 
 #include "LevelViewportTabContent.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Framework/Docking/LayoutService.h"
 #include "Modules/ModuleManager.h"
 #include "LevelEditor.h"
-#include "LevelViewportLayout2x2.h"
-#include "LevelViewportLayoutOnePane.h"
-#include "LevelViewportLayoutTwoPanes.h"
-#include "LevelViewportLayoutThreePanes.h"
-#include "LevelViewportLayoutFourPanes.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "LevelViewportLayout.h"
+#include "LevelEditorViewport.h"
+#include "LevelViewportActions.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandList.h"
+#include "ToolMenus.h"
+#include "ViewportTypeDefinition.h"
+#include "Templates/SharedPointer.h"
 
 
 // FLevelViewportTabContent ///////////////////////////
 
-TSharedPtr< class FLevelViewportLayout > FLevelViewportTabContent::ConstructViewportLayoutByTypeName(const FName& TypeName, bool bSwitchingLayouts)
+TSharedPtr< FEditorViewportLayout > FLevelViewportTabContent::FactoryViewportLayout(bool bIsSwitchingLayouts)
 {
-	TSharedPtr< class FLevelViewportLayout > ViewportLayout;
-
-	// The items in these ifs should match the names in namespace LevelViewportConfigurationNames
-	if (TypeName == LevelViewportConfigurationNames::FourPanes2x2) ViewportLayout = MakeShareable(new FLevelViewportLayout2x2);
-	else if (TypeName == LevelViewportConfigurationNames::TwoPanesVert) ViewportLayout = MakeShareable(new FLevelViewportLayoutTwoPanesVert);
-	else if (TypeName == LevelViewportConfigurationNames::TwoPanesHoriz) ViewportLayout = MakeShareable(new FLevelViewportLayoutTwoPanesHoriz);
-	else if (TypeName == LevelViewportConfigurationNames::ThreePanesLeft) ViewportLayout = MakeShareable(new FLevelViewportLayoutThreePanesLeft);
-	else if (TypeName == LevelViewportConfigurationNames::ThreePanesRight) ViewportLayout = MakeShareable(new FLevelViewportLayoutThreePanesRight);
-	else if (TypeName == LevelViewportConfigurationNames::ThreePanesTop) ViewportLayout = MakeShareable(new FLevelViewportLayoutThreePanesTop);
-	else if (TypeName == LevelViewportConfigurationNames::ThreePanesBottom) ViewportLayout = MakeShareable(new FLevelViewportLayoutThreePanesBottom);
-	else if (TypeName == LevelViewportConfigurationNames::FourPanesLeft) ViewportLayout = MakeShareable(new FLevelViewportLayoutFourPanesLeft);
-	else if (TypeName == LevelViewportConfigurationNames::FourPanesRight) ViewportLayout = MakeShareable(new FLevelViewportLayoutFourPanesRight);
-	else if (TypeName == LevelViewportConfigurationNames::FourPanesBottom) ViewportLayout = MakeShareable(new FLevelViewportLayoutFourPanesBottom);
-	else if (TypeName == LevelViewportConfigurationNames::FourPanesTop) ViewportLayout = MakeShareable(new FLevelViewportLayoutFourPanesTop);
-	else if (TypeName == LevelViewportConfigurationNames::OnePane) ViewportLayout = MakeShareable(new FLevelViewportLayoutOnePane);
-
-	if (!ensure(ViewportLayout.IsValid()))
-	{
-		ViewportLayout = MakeShareable(new FLevelViewportLayoutOnePane);
-	}
-	ViewportLayout->SetIsReplacement(bSwitchingLayouts);
+	TSharedPtr<FLevelViewportLayout> ViewportLayout = MakeShareable(new FLevelViewportLayout);
+	ViewportLayout->SetIsReplacement(bIsSwitchingLayouts);
 	return ViewportLayout;
 }
 
-void FLevelViewportTabContent::Initialize(TSharedPtr<ILevelEditor> InParentLevelEditor, TSharedPtr<SDockTab> InParentTab, const FString& InLayoutString)
+FName FLevelViewportTabContent::GetLayoutTypeNameFromLayoutString() const
 {
-	ParentTab = InParentTab;
-	ParentLevelEditor = InParentLevelEditor;
-	LayoutString = InLayoutString;
-
-	InParentTab->SetOnPersistVisualState( SDockTab::FOnPersistVisualState::CreateSP(this, &FLevelViewportTabContent::SaveConfig) );
-
 	const FString& IniSection = FLayoutSaveRestore::GetAdditionalLayoutConfigIni();
 
 	FString LayoutTypeString;
-	if(LayoutString.IsEmpty() ||
-		!GConfig->GetString(*IniSection, *(InLayoutString + TEXT(".LayoutType")), LayoutTypeString, GEditorPerProjectIni))
+	if (LayoutString.IsEmpty() ||
+		!GConfig->GetString(*IniSection, *(LayoutString + TEXT(".LayoutType")), LayoutTypeString, GEditorPerProjectIni))
 	{
-		LayoutTypeString = LevelViewportConfigurationNames::FourPanes2x2.ToString();
-	}
-	FName LayoutType(*LayoutTypeString);
-	SetViewportConfiguration(LayoutType);
-}
-
-
-bool FLevelViewportTabContent::IsVisible() const
-{
-	if (ActiveViewportLayout.IsValid())
-	{
-		TSharedPtr<FLevelViewportLayout> ViewportLayout = StaticCastSharedPtr<FLevelViewportLayout>(ActiveViewportLayout);
-		return ViewportLayout->IsVisible();
-	}
-	return false;
-}
-
-const TMap< FName, TSharedPtr< IEditorViewportLayoutEntity > >* FLevelViewportTabContent::GetViewports() const
-{
-	if (ActiveViewportLayout.IsValid())
-	{
-		return &ActiveViewportLayout->GetViewports();
-	}
-	return nullptr;
-}
-
-void FLevelViewportTabContent::SetViewportConfiguration(const FName& ConfigurationName)
-{
-	bool bSwitchingLayouts = ActiveViewportLayout.IsValid();
-
-	if (bSwitchingLayouts)
-	{
-		SaveConfig();
-		ActiveViewportLayout.Reset();
+		return EditorViewportConfigurationNames::FourPanes2x2;
 	}
 
-	ActiveViewportLayout = ConstructViewportLayoutByTypeName(ConfigurationName, bSwitchingLayouts);
-	check (ActiveViewportLayout.IsValid());
-
-	UpdateViewportTabWidget();
+	return *LayoutTypeString;
 }
 
-void FLevelViewportTabContent::SaveConfig() const
+FLevelViewportTabContent::~FLevelViewportTabContent()
 {
-	if (ActiveViewportLayout.IsValid())
+	if (GEditor)
 	{
-		if (!LayoutString.IsEmpty())
+		GEditor->OnLevelViewportClientListChanged().RemoveAll(this);
+	}
+}
+
+void FLevelViewportTabContent::Initialize(AssetEditorViewportFactoryFunction Func, TSharedPtr<SDockTab> InParentTab, const FString& InLayoutString)
+{
+	check(InParentTab.IsValid());
+	InParentTab->SetOnPersistVisualState( SDockTab::FOnPersistVisualState::CreateSP(this, &FLevelViewportTabContent::SaveConfig) );
+
+	OnViewportTabContentLayoutStartChangeEvent.AddSP(this, &FLevelViewportTabContent::OnLayoutStartChange);
+	OnViewportTabContentLayoutChangedEvent.AddSP(this, &FLevelViewportTabContent::OnLayoutChanged);
+
+	FEditorViewportTabContent::Initialize(Func, InParentTab, InLayoutString);
+}
+
+void FLevelViewportTabContent::BindViewportLayoutCommands(FUICommandList& InOutCommandList, FName ViewportConfigKey)
+{
+	FEditorViewportTabContent::BindViewportLayoutCommands(InOutCommandList, ViewportConfigKey);
+
+	FLevelViewportCommands& ViewportActions = FLevelViewportCommands::Get();
+
+	auto AddViewportConfigurationAction = [&InOutCommandList, this](const TSharedPtr<FUICommandInfo>& InCommandInfo, FName InLayoutType)
+	{
+		InOutCommandList.MapAction(
+			InCommandInfo,
+			FExecuteAction::CreateSP(this, &FLevelViewportTabContent::OnUIActionSetViewportConfiguration, InLayoutType),
+			FCanExecuteAction(),
+			FIsActionChecked::CreateSP(this, &FLevelViewportTabContent::IsViewportConfigurationChecked, InLayoutType));
+	};
+
+	AddViewportConfigurationAction(ViewportActions.ViewportConfig_OnePane, LevelViewportConfigurationNames::OnePane);
+	AddViewportConfigurationAction(ViewportActions.ViewportConfig_TwoPanesH, LevelViewportConfigurationNames::TwoPanesHoriz);
+	AddViewportConfigurationAction(ViewportActions.ViewportConfig_TwoPanesV, LevelViewportConfigurationNames::TwoPanesVert);
+	AddViewportConfigurationAction(ViewportActions.ViewportConfig_ThreePanesLeft, LevelViewportConfigurationNames::ThreePanesLeft);
+	AddViewportConfigurationAction(ViewportActions.ViewportConfig_ThreePanesRight, LevelViewportConfigurationNames::ThreePanesRight);
+	AddViewportConfigurationAction(ViewportActions.ViewportConfig_ThreePanesTop, LevelViewportConfigurationNames::ThreePanesTop);
+	AddViewportConfigurationAction(ViewportActions.ViewportConfig_ThreePanesBottom, LevelViewportConfigurationNames::ThreePanesBottom);
+	AddViewportConfigurationAction(ViewportActions.ViewportConfig_FourPanesLeft, LevelViewportConfigurationNames::FourPanesLeft);
+	AddViewportConfigurationAction(ViewportActions.ViewportConfig_FourPanesRight, LevelViewportConfigurationNames::FourPanesRight);
+	AddViewportConfigurationAction(ViewportActions.ViewportConfig_FourPanesTop, LevelViewportConfigurationNames::FourPanesTop);
+	AddViewportConfigurationAction(ViewportActions.ViewportConfig_FourPanesBottom, LevelViewportConfigurationNames::FourPanesBottom);
+	AddViewportConfigurationAction(ViewportActions.ViewportConfig_FourPanes2x2, LevelViewportConfigurationNames::FourPanes2x2);
+
+	auto ProcessViewportTypeActions = [&InOutCommandList, ViewportConfigKey, this](FName InViewportTypeName, const FViewportTypeDefinition& InDefinition) {
+		if (InDefinition.ActivationCommand.IsValid())
 		{
-			FString LayoutTypeString = ActiveViewportLayout->GetLayoutTypeName().ToString();
-
-			const FString& IniSection = FLayoutSaveRestore::GetAdditionalLayoutConfigIni();
-			GConfig->SetString(*IniSection, *(LayoutString + TEXT(".LayoutType")), *LayoutTypeString, GEditorPerProjectIni);
+			InOutCommandList.MapAction(InDefinition.ActivationCommand, FUIAction(
+				FExecuteAction::CreateSP(this, &FLevelViewportTabContent::OnUIActionSetViewportTypeWithinLayout, ViewportConfigKey, InViewportTypeName),
+				FCanExecuteAction(),
+				FIsActionChecked::CreateSP(this, &FLevelViewportTabContent::IsViewportTypeWithinLayoutEqual, ViewportConfigKey, InViewportTypeName)
+			));
 		}
-
-		ActiveViewportLayout->SaveLayoutString(LayoutString);
-	}
+	};
+	FLevelEditorModule& LevelEditorModule = FModuleManager::GetModuleChecked<FLevelEditorModule>(TEXT("LevelEditor"));
+	LevelEditorModule.IterateViewportTypes(ProcessViewportTypeActions);
 }
 
-void FLevelViewportTabContent::RefreshViewportConfiguration()
+void FLevelViewportTabContent::OnLayoutStartChange(bool bSwitchingLayouts)
 {
-	check(ActiveViewportLayout.IsValid());
+	GCurrentLevelEditingViewportClient = nullptr;
+	GLastKeyLevelEditingViewportClient = nullptr;
+}
 
-	FName ConfigurationName = ActiveViewportLayout->GetLayoutTypeName();
-	for (auto& Pair : ActiveViewportLayout->GetViewports())
+void FLevelViewportTabContent::OnLayoutChanged()
+{
+	// Set the global level editor to the first, valid perspective viewport found
+	if (GEditor)
 	{
-		if (Pair.Value->AsWidget()->HasFocusedDescendants())
+		const TArray<FLevelEditorViewportClient*>& LevelViewportClients = GEditor->GetLevelViewportClients();
+		for (FLevelEditorViewportClient* LevelViewport : LevelViewportClients)
 		{
-			PreviouslyFocusedViewport = Pair.Key;
-			break;
-		}
-	}
-
-	ActiveViewportLayout.Reset();
-
-	bool bSwitchingLayouts = false;
-	ActiveViewportLayout = ConstructViewportLayoutByTypeName(ConfigurationName, bSwitchingLayouts);
-	check(ActiveViewportLayout.IsValid());
-
-	UpdateViewportTabWidget();
-}
-
-
-bool FLevelViewportTabContent::IsViewportConfigurationSet(const FName& ConfigurationName) const
-{
-	if (ActiveViewportLayout.IsValid())
-	{
-		return ActiveViewportLayout->GetLayoutTypeName() == ConfigurationName;
-	}
-	return false;
-}
-
-bool FLevelViewportTabContent::BelongsToTab(TSharedRef<class SDockTab> InParentTab) const
-{
-	TSharedPtr<SDockTab> ParentTabPinned = ParentTab.Pin();
-	return ParentTabPinned == InParentTab;
-}
-
-void FLevelViewportTabContent::UpdateViewportTabWidget()
-{
-	TSharedPtr<SDockTab> ParentTabPinned = ParentTab.Pin();
-	if (ParentTabPinned.IsValid() && ActiveViewportLayout.IsValid())
-	{
-
-		TSharedRef<SWidget> LayoutWidget = StaticCastSharedPtr<FLevelViewportLayout>(ActiveViewportLayout)->BuildViewportLayout(ParentTabPinned, SharedThis(this), LayoutString, ParentLevelEditor);
-		ParentTabPinned->SetContent(LayoutWidget);
-
-		if (PreviouslyFocusedViewport.IsSet())
-		{
-			TSharedPtr<IEditorViewportLayoutEntity> ViewportToFocus = ActiveViewportLayout->GetViewports().FindRef(PreviouslyFocusedViewport.GetValue());
-			if (ViewportToFocus.IsValid())
+			if (LevelViewport->IsPerspective())
 			{
-				ViewportToFocus->SetKeyboardFocus();
+				LevelViewport->SetCurrentViewport();
+				break;
 			}
-			PreviouslyFocusedViewport = TOptional<FName>();
+		}
+		// Otherwise just make sure it's set to something
+		if (!GCurrentLevelEditingViewportClient && LevelViewportClients.Num())
+		{
+			GCurrentLevelEditingViewportClient = LevelViewportClients[0];
 		}
 	}
+
 	FLevelEditorModule& LevelEditorModule = FModuleManager::LoadModuleChecked<FLevelEditorModule>("LevelEditor");
 	LevelEditorModule.OnTabContentChanged().Broadcast();
+}
+
+void FLevelViewportTabContent::OnUIActionSetViewportConfiguration(FName InConfigurationName)
+{
+	SetViewportConfiguration(InConfigurationName);
+
+	FSlateApplication::Get().DismissAllMenus();
+	UToolMenus::Get()->CleanupStaleWidgetsNextTick(true);
+}
+
+FName FLevelViewportTabContent::GetViewportTypeWithinLayout(FName InConfigKey) const
+{
+	if (ActiveViewportLayout && !InConfigKey.IsNone())
+	{
+		if (TSharedPtr<IEditorViewportLayoutEntity> LayoutEntity = ActiveViewportLayout->GetViewports().FindRef(InConfigKey))
+		{
+			return LayoutEntity->GetType();
+		}
+	}
+
+	return "Default";
+}
+
+void FLevelViewportTabContent::OnUIActionSetViewportTypeWithinLayout(FName InConfigKey, FName InLayoutType)
+{
+	if (!IsViewportTypeWithinLayoutEqual(InConfigKey, InLayoutType))
+	{
+		SaveConfig();
+
+		const FString& IniSection = FLayoutSaveRestore::GetAdditionalLayoutConfigIni();
+		GConfig->SetString(*IniSection, *(InConfigKey.ToString() + TEXT(".TypeWithinLayout")), *InLayoutType.ToString(), GEditorPerProjectIni);
+
+		// Force a refresh of the tab content and clear all menus
+		RefreshViewportConfiguration();
+		FSlateApplication::Get().DismissAllMenus();
+	}
+}
+
+bool FLevelViewportTabContent::IsViewportTypeWithinLayoutEqual(FName InConfigKey, FName InLayoutType) const
+{
+	return (GetViewportTypeWithinLayout(InConfigKey) == InLayoutType);
+}
+
+bool FLevelViewportTabContent::IsViewportConfigurationChecked(FName InLayoutType) const
+{
+	return IsViewportConfigurationSet(InLayoutType);
 }

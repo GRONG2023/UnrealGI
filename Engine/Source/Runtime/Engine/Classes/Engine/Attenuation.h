@@ -26,7 +26,7 @@ enum class EAttenuationDistanceModel : uint8
 UENUM(BlueprintType)
 namespace EAttenuationShape
 {
-	enum Type
+	enum Type : int
 	{
 		Sphere,
 		Capsule,
@@ -53,7 +53,7 @@ enum class ENaturalSoundFalloffMode : uint8
 * Base class for attenuation settings.
 */
 USTRUCT(BlueprintType)
-struct ENGINE_API FBaseAttenuationSettings
+struct FBaseAttenuationSettings
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -67,15 +67,15 @@ struct ENGINE_API FBaseAttenuationSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category= AttenuationDistance)
 	TEnumAsByte<enum EAttenuationShape::Type> AttenuationShape;
 
-	/* The attenuation volume at the falloff distance in decibels (Only for 'Natural Sound' Distance Algorithm). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category= AttenuationDistance, meta=(DisplayName = "Attenuation At Max (dB)", ClampMin = "-60", ClampMax = "0"))
-	float dBAttenuationAtMax;
-
 	// Whether to continue attenuating, go silent, or hold last volume value when beyond falloff bounds and 
 	// 'Attenuation At Max (dB)' is set to a value greater than -60dB.
 	// (Only for 'Natural Sound' Distance Algorithm). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category= AttenuationDistance)
 	ENaturalSoundFalloffMode FalloffMode;
+
+	/* The attenuation volume at the falloff distance in decibels (Only for 'Natural Sound' Distance Algorithm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category= AttenuationDistance, meta=(DisplayName = "Attenuation At Max (dB)", ClampMin = "-60", ClampMax = "0"))
+	float dBAttenuationAtMax;
 
 	/* The dimensions to use for the attenuation shape. Interpretation of the values differ per shape.
 	   Sphere  - X is Sphere Radius. Y and Z are unused
@@ -94,28 +94,38 @@ struct ENGINE_API FBaseAttenuationSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category= AttenuationDistance, meta=(ClampMin = "0"))
 	float FalloffDistance;
 
+	/* An optional attenuation radius (sphere) that extends from the cone origin. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationDistance, meta = (ClampMin = "0"))
+	float ConeSphereRadius;
+
+	/* The distance over which volume attenuation occurs for the optional sphere shape. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AttenuationDistance, meta = (ClampMin = "0"))
+	float ConeSphereFalloffDistance;
+
 	/* The custom volume attenuation curve to use. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category= AttenuationDistance)
 	FRuntimeFloatCurve CustomAttenuationCurve;
 
-	FBaseAttenuationSettings();
+	ENGINE_API FBaseAttenuationSettings();
 
 	struct AttenuationShapeDetails
 	{
 		FVector Extents;
 		float Falloff;
 		float ConeOffset;
+		float ConeSphereRadius;
+		float ConeSphereFalloff;
 	};
 
-	virtual void CollectAttenuationShapesForVisualization(TMultiMap<EAttenuationShape::Type, AttenuationShapeDetails>& ShapeDetailsMap) const;
-	float GetMaxDimension() const;
+	ENGINE_API virtual void CollectAttenuationShapesForVisualization(TMultiMap<EAttenuationShape::Type, AttenuationShapeDetails>& ShapeDetailsMap) const;
+	ENGINE_API float GetMaxDimension() const;
 
-	float GetMaxFalloffDistance() const;
+	ENGINE_API float GetMaxFalloffDistance() const;
 
-	float Evaluate(const FTransform& Origin, FVector Location, float DistanceScale = 1.f) const;
+	ENGINE_API float Evaluate(const FTransform& Origin, FVector Location, float DistanceScale = 1.f) const;
 
-	float AttenuationEval(float Distance, float Falloff, float DistanceScale = 1.f) const;
-	float AttenuationEvalBox(const FTransform& Origin, FVector Location, float DistanceScale = 1.f) const;
-	float AttenuationEvalCapsule(const FTransform& Origin, FVector Location, float DistanceScale = 1.f) const;
-	float AttenuationEvalCone(const FTransform& Origin, FVector Location, float DistanceScale = 1.f) const;
+	ENGINE_API float AttenuationEval(float Distance, float Falloff, float DistanceScale = 1.f) const;
+	ENGINE_API float AttenuationEvalBox(const FTransform& Origin, FVector Location, float DistanceScale = 1.f) const;
+	ENGINE_API float AttenuationEvalCapsule(const FTransform& Origin, FVector Location, float DistanceScale = 1.f) const;
+	ENGINE_API float AttenuationEvalCone(const FTransform& Origin, FVector Location, float DistanceScale = 1.f) const;
 };

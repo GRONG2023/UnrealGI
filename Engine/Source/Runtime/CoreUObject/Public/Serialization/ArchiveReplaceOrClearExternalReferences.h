@@ -24,8 +24,23 @@ public:
 		( UObject* InSearchObject
 		, const TMap<T*, T*>& InReplacementMap
 		, UPackage* InDestPackage
-		, bool bDelayStart = false )
-		: TSuper(InSearchObject, InReplacementMap, false, false, false, true)
+		, EArchiveReplaceObjectFlags Flags = EArchiveReplaceObjectFlags::None)
+		: TSuper(InSearchObject, InReplacementMap, EArchiveReplaceObjectFlags::DelayStart | Flags)
+		, DestPackage(InDestPackage)
+	{
+		if (!(Flags & EArchiveReplaceObjectFlags::DelayStart))
+		{
+			this->SerializeSearchObject();
+		}
+	}
+
+	UE_DEPRECATED(5.0, "Use version that passes Flags instead of just bDelayStart")
+	FArchiveReplaceOrClearExternalReferences
+		( UObject* InSearchObject
+		, const TMap<T*, T*>& InReplacementMap
+		, UPackage* InDestPackage
+		, bool bDelayStart)
+		: TSuper(InSearchObject, InReplacementMap, EArchiveReplaceObjectFlags::DelayStart)
 		, DestPackage(InDestPackage)
 	{
 		if (!bDelayStart)
@@ -41,19 +56,16 @@ public:
 		// if Resolved is a private object in another package just clear the reference:
 		if (Resolved)
 		{
-			UObject* Outermost = Resolved->GetOutermost();
-			if (Outermost)
+			UPackage* ObjPackage = Resolved->GetPackage();
+			if (ObjPackage)
 			{
-				UPackage* ObjPackage = dynamic_cast<UPackage*>(Outermost);
-				if (ObjPackage)
+				CA_SUPPRESS(6011);
+				if (ObjPackage != Obj && 
+					DestPackage != ObjPackage && 
+					Obj->GetOutermostObject() != TSuper::GetSearchObject()->GetOutermostObject() &&
+					!Obj->HasAnyFlags(RF_Public))
 				{
-					CA_SUPPRESS(6011);
-					if (ObjPackage != Obj && 
-						DestPackage != ObjPackage && 
-						!Obj->HasAnyFlags(RF_Public))
-					{
-						Resolved = nullptr;
-					}
+					Resolved = nullptr;
 				}
 			}
 		}

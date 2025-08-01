@@ -9,17 +9,18 @@
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "GameFramework/Actor.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Editor.h"
-#include "Editor/SceneOutliner/Public/SceneOutlinerPublicTypes.h"
-#include "Editor/SceneOutliner/Public/SceneOutlinerModule.h"
-#include "AssetRegistryModule.h"
+#include "SceneOutlinerPublicTypes.h"
+#include "SceneOutlinerModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "UserInterface/PropertyEditor/PropertyEditorAssetConstants.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "SceneOutlinerPublicTypes.h"
-#include "ITreeItem.h"
+#include "ActorTreeItem.h"
+#include "ComponentTreeItem.h"
 
 #define LOCTEXT_NAMESPACE "PropertyEditor"
 
@@ -79,25 +80,59 @@ void SPropertyMenuComponentPicker::Construct(const FArguments& InArgs)
 
 		FSceneOutlinerModule& SceneOutlinerModule = FModuleManager::Get().LoadModuleChecked<FSceneOutlinerModule>(TEXT("SceneOutliner"));
 
-		SceneOutliner::FInitializationOptions InitOptions;
-		InitOptions.Mode = ESceneOutlinerMode::ComponentPicker;
+		FSceneOutlinerInitializationOptions InitOptions;
 		InitOptions.bFocusSearchBoxWhenOpened = true;
 
-		TSharedRef<SceneOutliner::FOutlinerPredicateFilter> Filter = MakeShareable(new SceneOutliner::FOutlinerPredicateFilter(ActorFilter, SceneOutliner::EDefaultFilterBehaviour::Fail));
-		Filter->ComponentPred = ComponentFilter;
+		struct FPickerFilter : public FSceneOutlinerFilter
+		{
+			FPickerFilter(const FOnShouldFilterActor& InActorFilter, const FOnShouldFilterComponent& InComponentFilter)
+				: FSceneOutlinerFilter(FSceneOutlinerFilter::EDefaultBehaviour::Fail)
+				, ActorFilter(InActorFilter)
+				, ComponentFilter(InComponentFilter)
+			{}
+
+			virtual bool PassesFilter(const ISceneOutlinerTreeItem& InItem) const override
+			{
+				if (const FActorTreeItem* ActorItem = InItem.CastTo<FActorTreeItem>())
+				{
+					return ActorItem->IsValid() && ActorFilter.Execute(ActorItem->Actor.Get());
+				}
+				else if (const FComponentTreeItem* ComponentItem = InItem.CastTo<FComponentTreeItem>())
+				{
+					return ComponentItem->IsValid() && ComponentFilter.Execute(ComponentItem->Component.Get());
+				}
+
+				return DefaultBehaviour == FSceneOutlinerFilter::EDefaultBehaviour::Pass;
+			}
+
+			virtual bool GetInteractiveState(const ISceneOutlinerTreeItem& InItem) const override
+			{
+				// All components which pass the filter are interactive
+				if (const FComponentTreeItem* ComponentItem = InItem.CastTo<FComponentTreeItem>())
+				{
+					return true;
+				}
+				return DefaultBehaviour == FSceneOutlinerFilter::EDefaultBehaviour::Pass;
+			}
+
+			FOnShouldFilterActor ActorFilter;
+			FOnShouldFilterComponent ComponentFilter;
+		};
+
+		TSharedRef<FSceneOutlinerFilter> Filter = MakeShared<FPickerFilter>(ActorFilter, ComponentFilter);
 		InitOptions.Filters->Add(Filter);
 
-		InitOptions.ColumnMap.Add(SceneOutliner::FBuiltInColumnTypes::Label(), SceneOutliner::FColumnInfo(SceneOutliner::EColumnVisibility::Visible, 0));
+		InitOptions.ColumnMap.Add(FSceneOutlinerBuiltInColumnTypes::Label(), FSceneOutlinerColumnInfo(ESceneOutlinerColumnVisibility::Visible, 0));
 
 		MenuContent =
 			SNew(SBox)
-			.WidthOverride(PropertyEditorAssetConstants::SceneOutlinerWindowSize.X)
-			.HeightOverride(PropertyEditorAssetConstants::SceneOutlinerWindowSize.Y)
+			.WidthOverride(static_cast<float>(PropertyEditorAssetConstants::SceneOutlinerWindowSize.X))
+			.HeightOverride(static_cast<float>(PropertyEditorAssetConstants::SceneOutlinerWindowSize.Y))
 			[
 				SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush("Menu.Background"))
+				.BorderImage(FAppStyle::GetBrush("Menu.Background"))
 				[
-					SceneOutlinerModule.CreateSceneOutliner(InitOptions, FOnSceneOutlinerItemPicked::CreateSP(this, &SPropertyMenuComponentPicker::OnItemSelected))
+					SceneOutlinerModule.CreateComponentPicker(InitOptions, FOnComponentPicked::CreateSP(this, &SPropertyMenuComponentPicker::OnItemSelected))
 				]
 			];
 
@@ -181,7 +216,7 @@ bool SPropertyMenuComponentPicker::CanPaste()
 		bCanPaste = !Class.IsEmpty() && !PossibleObjectPath.IsEmpty();
 		if (bCanPaste)
 		{
-			bCanPaste = LoadClass<UActorComponent>(nullptr, *Class) != nullptr;
+			bCanPaste = LoadClass<UActorComponent>(nullptr, *Class, nullptr, LOAD_Quiet | LOAD_NoWarn) != nullptr;
 		}
 		if (bCanPaste)
 		{
@@ -198,17 +233,9 @@ void SPropertyMenuComponentPicker::OnClear()
 	OnClose.ExecuteIfBound();
 }
 
-void SPropertyMenuComponentPicker::OnItemSelected(TSharedRef<SceneOutliner::ITreeItem> InItem)
+void SPropertyMenuComponentPicker::OnItemSelected(UActorComponent* Component)
 {
-	InItem->Visit(
-		SceneOutliner::FFunctionalVisitor()
-		.Component([&](const SceneOutliner::FComponentTreeItem& ComponentItem)
-		{
-			if (UActorComponent* Component = ComponentItem.Component.Get())
-			{
-				SetValue(Component);
-			}
-		}));
+	SetValue(Component);
 	OnClose.ExecuteIfBound();
 }
 

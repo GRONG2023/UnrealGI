@@ -2,13 +2,35 @@
 
 
 #include "SNodePanel.h"
-#include "Rendering/DrawElements.h"
+
+#include "Delegates/Delegate.h"
+#include "DiffResults.h"
 #include "Fonts/FontMeasure.h"
+#include "Fonts/SlateFontInfo.h"
 #include "Framework/Application/SlateApplication.h"
-#include "Classes/EditorStyleSettings.h"
-#include "Settings/LevelEditorViewportSettings.h"
-#include "ScopedTransaction.h"
+#include "Framework/MarqueeRect.h"
+#include "GenericPlatform/GenericApplication.h"
+#include "GenericPlatform/GenericApplicationMessageHandler.h"
+#include "GenericPlatform/ICursor.h"
 #include "GraphEditorSettings.h"
+#include "Input/Events.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Internationalization.h"
+#include "Math/IntPoint.h"
+#include "Misc/AssertionMacros.h"
+#include "Rendering/DrawElements.h"
+#include "Rendering/RenderingCommon.h"
+#include "Rendering/SlateRenderer.h"
+#include "ScopedTransaction.h"
+#include "Settings/EditorStyleSettings.h"
+#include "Settings/LevelEditorViewportSettings.h"
+#include "Styling/SlateBrush.h"
+#include "Templates/RemoveReference.h"
+#include "Types/WidgetActiveTimerDelegate.h"
+#include "UObject/Object.h"
+#include "UObject/UObjectGlobals.h"
+
+class FWidgetStyle;
 
 struct FZoomLevelEntry
 {
@@ -104,7 +126,7 @@ const TCHAR* XSymbol=TEXT("\xD7");
 
 const FGraphPanelSelectionSet& FGraphSelectionManager::GetSelectedNodes() const
 {
-	return SelectedNodes;
+	return ObjectPtrDecay(SelectedNodes);
 }
 
 void FGraphSelectionManager::SelectSingleNode(SelectedItemType Node)
@@ -119,15 +141,15 @@ void FGraphSelectionManager::ClearSelectionSet()
 	if (SelectedNodes.Num())
 	{
 		SelectedNodes.Empty();
-		OnSelectionChanged.ExecuteIfBound(SelectedNodes);
+		OnSelectionChanged.ExecuteIfBound(ObjectPtrDecay(SelectedNodes));
 	}
 }
 
 // Changes the selection set to contain exactly all of the passed in nodes
 void FGraphSelectionManager::SetSelectionSet(FGraphPanelSelectionSet& NewSet)
 {
-	SelectedNodes = NewSet;
-	OnSelectionChanged.ExecuteIfBound(SelectedNodes);
+	SelectedNodes = ObjectPtrWrap(NewSet);
+	OnSelectionChanged.ExecuteIfBound(ObjectPtrDecay(SelectedNodes));
 }
 
 void FGraphSelectionManager::SetNodeSelection(SelectedItemType Node, bool bSelect)
@@ -136,12 +158,12 @@ void FGraphSelectionManager::SetNodeSelection(SelectedItemType Node, bool bSelec
 	if (bSelect)
 	{
 		SelectedNodes.Add(Node);
-		OnSelectionChanged.ExecuteIfBound(SelectedNodes);
+		OnSelectionChanged.ExecuteIfBound(ObjectPtrDecay(SelectedNodes));
 	}
 	else
 	{
 		SelectedNodes.Remove(Node);
-		OnSelectionChanged.ExecuteIfBound(SelectedNodes);
+		OnSelectionChanged.ExecuteIfBound(ObjectPtrDecay(SelectedNodes));
 	}
 }
 
@@ -203,6 +225,60 @@ namespace NodePanelDefs
 	// Scaling factor to reduce speed of mouse zooming
 	static const float MouseZoomScaling = 0.04f;
 };
+
+
+void SNodePanel::SNode::FNodeSlot::Construct(const FChildren& SlotOwner, FSlotArguments&& InArgs)
+{
+	TSlotBase<FNodeSlot>::Construct(SlotOwner, MoveTemp(InArgs));
+	TAlignmentWidgetSlotMixin<FNodeSlot>::ConstructMixin(SlotOwner, MoveTemp(InArgs));
+
+	if (InArgs._Padding.IsSet())
+	{
+		SlotPadding = MoveTemp(InArgs._Padding);
+	}
+	if (InArgs._SlotOffset.IsSet())
+	{
+		Offset = MoveTemp(InArgs._SlotOffset);
+	}
+	if (InArgs._SlotSize.IsSet())
+	{
+		Size = MoveTemp(InArgs._SlotSize);
+	}
+	if (InArgs._AllowScaling.IsSet())
+	{
+		AllowScale = MoveTemp(InArgs._AllowScaling);
+	}
+}
+
+TArray<SNodePanel::SNode::DiffHighlightInfo> SNodePanel::SNode::GetDiffHighlights(
+	const FDiffSingleResult& DiffResult) const
+{
+	FLinearColor BackgroundColor = DiffResult.GetDisplayColor();
+	BackgroundColor.A = 1.f; // give highlight some transparency so it's not so 'in your face'
+		
+	FLinearColor ShadingColorHSV = BackgroundColor.LinearRGBToHSV();
+	ShadingColorHSV.R -= 15.f; // shift hue
+	if (ShadingColorHSV.R < 0.f)
+	{
+		ShadingColorHSV.R += 360.f;
+	}
+	ShadingColorHSV.B *= 0.2f; // darken
+
+	const FSlateBrush* BackgroundBrush;
+	const FSlateBrush* ForegroundBrush;
+	GetDiffHighlightBrushes(BackgroundBrush, ForegroundBrush);
+
+	return {
+		{
+			BackgroundBrush,
+			BackgroundColor
+		},
+		{
+			ForegroundBrush,
+			ShadingColorHSV.HSVToLinearRGB()
+		},
+	};
+}
 
 SNodePanel::SNodePanel()
 	: Children(this)
@@ -285,11 +361,20 @@ FVector2D SNodePanel::GetViewOffset() const
 	return ViewOffset;
 }
 
+bool SNodePanel::GetZoomTargetRect(FVector2D& TopLeft, FVector2D& BottomRight) const
+{
+	TopLeft = ZoomTargetTopLeft;
+	BottomRight = ZoomTargetBottomRight;
+	
+	// if the zoom target rect is all zeroed out, then notify caller that there is no target
+	return !(ZoomTargetTopLeft == FVector2D::ZeroVector && ZoomTargetBottomRight == FVector2D::ZeroVector);
+}
+
 void SNodePanel::Construct()
 {
 	if (!ZoomLevels)
 	{
-		ZoomLevels = MakeUnique<FFixedZoomLevelsContainer>();
+		SetZoomLevelsContainer<FFixedZoomLevelsContainer>();
 	}
 	ZoomLevel = ZoomLevels->GetDefaultZoomLevel();
 	PreviousZoomLevel = ZoomLevels->GetDefaultZoomLevel();
@@ -347,19 +432,19 @@ FVector2D SNodePanel::ComputeEdgePanAmount(const FGeometry& MyGeometry, const FV
 	// Start panning before we reach the edge of the graph panel.
 	static const float EdgePanForgivenessZone = 30.0f;
 
-	const FVector2D LocalCursorPos = MyGeometry.AbsoluteToLocal( TargetPosition );
+	const FVector2f LocalCursorPos = FVector2f(MyGeometry.AbsoluteToLocal( TargetPosition ));
 
 	// If the mouse is outside of the graph area, then we want to pan in that direction.
 	// The farther out the mouse is, the more we want to pan.
 
-	FVector2D EdgePanThisTick(0,0);
+	FVector2f EdgePanThisTick(0,0);
 	if ( LocalCursorPos.X <= EdgePanForgivenessZone )
 	{
 		EdgePanThisTick.X += FMath::Max( -MaxPanSpeed, EdgePanSpeedCoefficient * -FMath::Pow(EdgePanForgivenessZone - LocalCursorPos.X, EdgePanSpeedPower) );
 	}
 	else if( LocalCursorPos.X >= MyGeometry.GetLocalSize().X - EdgePanForgivenessZone )
 	{
-		EdgePanThisTick.X = FMath::Min( MaxPanSpeed, EdgePanSpeedCoefficient * FMath::Pow(LocalCursorPos.X - MyGeometry.GetLocalSize().X + EdgePanForgivenessZone, EdgePanSpeedPower) );
+		EdgePanThisTick.X = FMath::Min( MaxPanSpeed, EdgePanSpeedCoefficient * FMath::Pow(LocalCursorPos.X - float(MyGeometry.GetLocalSize().X) + EdgePanForgivenessZone, EdgePanSpeedPower) );
 	}
 
 	if ( LocalCursorPos.Y <= EdgePanForgivenessZone )
@@ -368,10 +453,10 @@ FVector2D SNodePanel::ComputeEdgePanAmount(const FGeometry& MyGeometry, const FV
 	}
 	else if( LocalCursorPos.Y >= MyGeometry.GetLocalSize().Y - EdgePanForgivenessZone )
 	{
-		EdgePanThisTick.Y = FMath::Min( MaxPanSpeed, EdgePanSpeedCoefficient * FMath::Pow(LocalCursorPos.Y - MyGeometry.GetLocalSize().Y + EdgePanForgivenessZone, EdgePanSpeedPower) );
+		EdgePanThisTick.Y = FMath::Min( MaxPanSpeed, EdgePanSpeedCoefficient * FMath::Pow(LocalCursorPos.Y - float(MyGeometry.GetLocalSize().Y) + EdgePanForgivenessZone, EdgePanSpeedPower) );
 	}
 
-	return EdgePanThisTick;
+	return FVector2D(EdgePanThisTick);
 }
 
 void SNodePanel::UpdateViewOffset (const FGeometry& MyGeometry, const FVector2D& TargetPosition)
@@ -573,10 +658,10 @@ FReply SNodePanel::OnMouseButtonDown( const FGeometry& MyGeometry, const FPointe
 				if ( Marquee.IsValid() )
 				{
 					auto PreviouslySelectedNodes = SelectionManager.SelectedNodes;
-					ApplyMarqueeSelection(Marquee, PreviouslySelectedNodes, SelectionManager.SelectedNodes);
+					ApplyMarqueeSelection(Marquee, ObjectPtrDecay(PreviouslySelectedNodes), SelectionManager.SelectedNodes);
 					if (SelectionManager.SelectedNodes.Num() > 0 || PreviouslySelectedNodes.Num() > 0)
 					{
-						SelectionManager.OnSelectionChanged.ExecuteIfBound(SelectionManager.SelectedNodes);
+						SelectionManager.OnSelectionChanged.ExecuteIfBound(ObjectPtrDecay(SelectionManager.SelectedNodes));
 					}
 				}
 
@@ -788,7 +873,7 @@ FReply SNodePanel::OnMouseMove(const FGeometry& MyGeometry, const FPointerEvent&
 
 							// 2. Deffer actual move transactions to mouse release or focus lost
 							bool bStoreOriginalNodePositions = OriginalNodePositions.Num() == 0;
-							for (FGraphPanelSelectionSet::TIterator NodeIt(SelectionManager.SelectedNodes); NodeIt; ++NodeIt)
+							for (decltype(SelectionManager.SelectedNodes)::TIterator NodeIt(SelectionManager.SelectedNodes); NodeIt; ++NodeIt)
 							{
 								if (TSharedRef<SNode>* pWidget = NodeToWidgetLookup.Find(*NodeIt))
 								{
@@ -923,6 +1008,12 @@ FReply SNodePanel::OnMouseButtonUp( const FGeometry& MyGeometry, const FPointerE
 
 				// We're done interacting with this node.
 				NodeUnderMousePtr.Reset();
+
+				if (OnNodeSingleClicked.IsBound())
+				{
+					OnNodeSingleClicked.Execute(NodeWidgetUnderMouse->GetObjectBeingDisplayed());
+				}
+
 			}
 			else if (this->HasMouseCapture())
 			{
@@ -940,10 +1031,10 @@ FReply SNodePanel::OnMouseButtonUp( const FGeometry& MyGeometry, const FPointerE
 		else if ( Marquee.IsValid() )
 		{
 			auto PreviouslySelectedNodes = SelectionManager.SelectedNodes;
-			ApplyMarqueeSelection(Marquee, PreviouslySelectedNodes, SelectionManager.SelectedNodes);
+			ApplyMarqueeSelection(Marquee, ObjectPtrDecay(PreviouslySelectedNodes), SelectionManager.SelectedNodes);
 			if (SelectionManager.SelectedNodes.Num() > 0 || PreviouslySelectedNodes.Num() > 0)
 			{
-				SelectionManager.OnSelectionChanged.ExecuteIfBound(SelectionManager.SelectedNodes);
+				SelectionManager.OnSelectionChanged.ExecuteIfBound(ObjectPtrDecay(SelectionManager.SelectedNodes));
 			}
 		}
 
@@ -1106,26 +1197,26 @@ void SNodePanel::FindNodesAffectedByMarquee( FGraphPanelSelectionSet& OutAffecte
 	}	
 }
 
-void SNodePanel::ApplyMarqueeSelection( const FMarqueeOperation& InMarquee, const FGraphPanelSelectionSet& CurrentSelection, FGraphPanelSelectionSet& OutNewSelection )
+void SNodePanel::ApplyMarqueeSelection( const FMarqueeOperation& InMarquee, const FGraphPanelSelectionSet& CurrentSelection, TSet<TObjectPtr<UObject>>& OutNewSelection )
 {
 	switch (InMarquee.Operation )
 	{
 	default:
 	case FMarqueeOperation::Replace:
 		{
-			OutNewSelection = InMarquee.AffectedNodes;
+			OutNewSelection = ObjectPtrWrap(InMarquee.AffectedNodes);
 		}
 		break;
 
 	case FMarqueeOperation::Remove:
 		{
-			OutNewSelection = CurrentSelection.Difference(InMarquee.AffectedNodes);
+			OutNewSelection = ObjectPtrWrap(CurrentSelection.Difference(InMarquee.AffectedNodes));
 		}
 		break;
 
 	case FMarqueeOperation::Add:
 		{
-			OutNewSelection = CurrentSelection.Union(InMarquee.AffectedNodes);
+			OutNewSelection = ObjectPtrWrap(CurrentSelection.Union(InMarquee.AffectedNodes));
 		}
 		break; 
 
@@ -1134,8 +1225,8 @@ void SNodePanel::ApplyMarqueeSelection( const FMarqueeOperation& InMarquee, cons
 			// ToAdd = items in AffectedNodes that aren't in CurrentSelection (new selections)
 			FGraphPanelSelectionSet ToAdd = InMarquee.AffectedNodes.Difference(CurrentSelection);
 			// remove AffectedNodes that were already selected
-			OutNewSelection = CurrentSelection.Difference(InMarquee.AffectedNodes);
-			OutNewSelection.Append(ToAdd);
+			OutNewSelection = ObjectPtrWrap(CurrentSelection.Difference(InMarquee.AffectedNodes));
+			OutNewSelection.Append(ObjectPtrWrap(ToAdd));
 		}
 		break;
 	}
@@ -1177,17 +1268,31 @@ void SNodePanel::RemoveAllNodes()
 
 void SNodePanel::PopulateVisibleChildren(const FGeometry& AllottedGeometry)
 {
-	VisibleChildren.Empty();
+	bool bRequiresSort = false;
 	for (int32 ChildIndex = 0; ChildIndex < Children.Num(); ++ChildIndex)
 	{
 		const TSharedRef<SNode>& SomeChild = Children[ChildIndex];
 		if ( !IsNodeCulled(SomeChild, AllottedGeometry) )
 		{
-			VisibleChildren.Add(SomeChild);
+			if(VisibleChildren.Find(SomeChild) == INDEX_NONE)
+			{
+				VisibleChildren.Add(SomeChild);
+				bRequiresSort = true;
+			}
+		}
+		else
+		{
+			if(VisibleChildren.Find(SomeChild) != INDEX_NONE)
+			{
+				VisibleChildren.Remove(SomeChild);
+				bRequiresSort = true;
+			}
+			
 		}
 	}
+	
 	// Depth Sort Nodes
-	if( VisibleChildren.Num() > 0 )
+	if( bRequiresSort && (VisibleChildren.Num() > 0) )
 	{
 		struct SNodeLessThanSort
 		{
@@ -1232,7 +1337,7 @@ void SNodePanel::RestoreViewSettings(const FVector2D& InViewOffset, float InZoom
 	CurrentBookmarkGuid = InBookmarkGuid;
 }
 
-float SNodePanel::GetSnapGridSize()
+uint32 SNodePanel::GetSnapGridSize()
 {
 	return GetDefault<UEditorStyleSettings>()->GridSnapSize;
 }
@@ -1246,7 +1351,7 @@ void SNodePanel::PaintBackgroundAsLines(const FSlateBrush* BackgroundImage, cons
 {
 	const bool bAntialias = false;
 
-	const int32 RulePeriod = (int32)FEditorStyle::GetFloat("Graph.Panel.GridRulePeriod");
+	const int32 RulePeriod = (int32)FAppStyle::GetFloat("Graph.Panel.GridRulePeriod");
 	check(RulePeriod > 0);
 
 	const FLinearColor GraphBackGroundImageColor(BackgroundImage->TintColor.GetSpecifiedColor());
@@ -1367,8 +1472,8 @@ void SNodePanel::PaintMarquee(const FGeometry& AllottedGeometry, const FSlateRec
 		FSlateDrawElement::MakeBox(
 			OutDrawElements,
 			DrawLayerId,
-			AllottedGeometry.ToPaintGeometry( GraphCoordToPanelCoord(Marquee.Rect.GetUpperLeft()), Marquee.Rect.GetSize()*GetZoomAmount() ),
-			FEditorStyle::GetBrush(TEXT("MarqueeSelection"))
+			AllottedGeometry.ToPaintGeometry( Marquee.Rect.GetSize()*GetZoomAmount(), FSlateLayoutTransform(GraphCoordToPanelCoord(Marquee.Rect.GetUpperLeft())) ),
+			FAppStyle::GetBrush(TEXT("MarqueeSelection"))
 		);
 	}
 }
@@ -1381,12 +1486,12 @@ void SNodePanel::PaintSoftwareCursor(const FGeometry& AllottedGeometry, const FS
 	}
 
 	// Get appropriate software cursor, depending on whether we're panning or zooming
-	const FSlateBrush* Brush = FEditorStyle::GetBrush(bIsPanning ? TEXT("SoftwareCursor_Grab") : TEXT("SoftwareCursor_UpDown"));
+	const FSlateBrush* Brush = FAppStyle::GetBrush(bIsPanning ? TEXT("SoftwareCursor_Grab") : TEXT("SoftwareCursor_UpDown"));
 
 	FSlateDrawElement::MakeBox(
 		OutDrawElements,
 		DrawLayerId,
-		AllottedGeometry.ToPaintGeometry( GraphCoordToPanelCoord( SoftwareCursorPosition ) - ( Brush->ImageSize / 2 ), Brush->ImageSize ),
+		AllottedGeometry.ToPaintGeometry( Brush->ImageSize, FSlateLayoutTransform(GraphCoordToPanelCoord( SoftwareCursorPosition ) - ( Brush->ImageSize / 2 )) ),
 		Brush
 	);
 }
@@ -1395,11 +1500,11 @@ void SNodePanel::PaintComment(const FString& CommentText, const FGeometry& Allot
 {
 	//@TODO: Ideally we don't need to grab these resources for every comment being drawn
 	// Get resources/settings for drawing comment bubbles
-	const FSlateBrush* CommentCalloutArrow = FEditorStyle::GetBrush(TEXT("Graph.Node.CommentArrow"));
-	const FSlateBrush* CommentCalloutBubble = FEditorStyle::GetBrush(TEXT("Graph.Node.CommentBubble"));
-	const FSlateFontInfo CommentFont = FEditorStyle::GetFontStyle( TEXT("Graph.Node.CommentFont") );
-	const FSlateColor CommentTextColor = FEditorStyle::GetColor( TEXT("Graph.Node.Comment.TextColor") );
-	const FVector2D CommentBubblePadding = FEditorStyle::GetVector( TEXT("Graph.Node.Comment.BubblePadding") );
+	const FSlateBrush* CommentCalloutArrow = FAppStyle::GetBrush(TEXT("Graph.Node.CommentArrow"));
+	const FSlateBrush* CommentCalloutBubble = FAppStyle::GetBrush(TEXT("Graph.Node.CommentBubble"));
+	const FSlateFontInfo CommentFont = FAppStyle::GetFontStyle( TEXT("Graph.Node.CommentFont") );
+	const FSlateColor CommentTextColor = FAppStyle::GetColor( TEXT("Graph.Node.Comment.TextColor") );
+	const FVector2D CommentBubblePadding = FAppStyle::GetVector( TEXT("Graph.Node.Comment.BubblePadding") );
 
 	const TSharedRef< FSlateFontMeasure > FontMeasureService = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
 	FVector2D CommentTextSize = FontMeasureService->Measure( CommentText, CommentFont ) + (CommentBubblePadding * 2);
@@ -1414,7 +1519,7 @@ void SNodePanel::PaintComment(const FString& CommentText, const FGeometry& Allot
 	FSlateDrawElement::MakeBox(
 		OutDrawElements,
 		DrawLayerId-1,
-		AllottedGeometry.ToPaintGeometry(CommentBubbleOffset, CommentTextSize),
+		AllottedGeometry.ToPaintGeometry(CommentTextSize, FSlateLayoutTransform(CommentBubbleOffset)),
 		CommentCalloutBubble,
 		ESlateDrawEffect::None,
 		CommentTinting
@@ -1423,7 +1528,7 @@ void SNodePanel::PaintComment(const FString& CommentText, const FGeometry& Allot
 	FSlateDrawElement::MakeBox(
 		OutDrawElements,
 		DrawLayerId-1,
-		AllottedGeometry.ToPaintGeometry( CommentBubbleArrowOffset, CommentCalloutArrow->ImageSize ),
+		AllottedGeometry.ToPaintGeometry( CommentCalloutArrow->ImageSize, FSlateLayoutTransform(CommentBubbleArrowOffset) ),
 		CommentCalloutArrow,
 		ESlateDrawEffect::None,
 		CommentTinting
@@ -1433,7 +1538,7 @@ void SNodePanel::PaintComment(const FString& CommentText, const FGeometry& Allot
 	FSlateDrawElement::MakeText(
 		OutDrawElements,
 		DrawLayerId,
-		AllottedGeometry.ToPaintGeometry( CommentBubbleOffset + CommentBubblePadding, CommentTextSize ),
+		AllottedGeometry.ToPaintGeometry( CommentTextSize, FSlateLayoutTransform(CommentBubbleOffset + CommentBubblePadding) ),
 		CommentText,
 		CommentFont,
 		ESlateDrawEffect::None,
@@ -1702,6 +1807,11 @@ bool SNodePanel::HasDeferredObjectFocus() const
 	return DeferredMovementTargetObject != nullptr;
 }
 
+bool SNodePanel::HasDeferredZoomDestination() const
+{
+	return HasDeferredObjectFocus() || bDeferredZoomToSelection || bDeferredZoomToNodeExtents;
+}
+
 void SNodePanel::FinalizeNodeMovements()
 {
 	// Process moved nodes on focus lost
@@ -1710,7 +1820,7 @@ void SNodePanel::FinalizeNodeMovements()
 		// Build up all the current positions
 		TMap<SNode*, FVector2D> CurrentNodePositions;
 
-		for (FGraphPanelSelectionSet::TIterator NodeIt(SelectionManager.SelectedNodes); NodeIt; ++NodeIt)
+		for (decltype(SelectionManager.SelectedNodes)::TIterator NodeIt(SelectionManager.SelectedNodes); NodeIt; ++NodeIt)
 		{
 			TSharedRef<SNode>* pWidget = NodeToWidgetLookup.Find(*NodeIt);
 			if (pWidget != nullptr)
@@ -1771,6 +1881,10 @@ void SNodePanel::CancelZoomToFit()
 {
 	if (ActiveTimerHandle.IsValid())
 	{
+		// Reset Zoom destination
+		ZoomPadding = NodePanelDefs::DefaultZoomPadding;
+		ZoomTargetTopLeft = FVector2D::ZeroVector;
+		ZoomTargetBottomRight = FVector2D::ZeroVector;
 		UnRegisterActiveTimer(ActiveTimerHandle.Pin().ToSharedRef());
 	}
 }

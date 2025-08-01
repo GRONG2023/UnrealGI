@@ -2,8 +2,12 @@
 
 #pragma once
 
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "HAL/Platform.h"
 #include "Interfaces/IPv4/IPv4SubnetMask.h"
+#include "Internationalization/Text.h"
+#include "Serialization/Archive.h"
 
 /**
  * Implements an IPv4 address.
@@ -211,14 +215,14 @@ public:
 	 *
 	 * Site local addresses have one of the following forms:
 	 *		10.x.x.x
-	 *		172.16.x.x
+	 *		172.16-31.x.x
 	 *		192.168.x.x
 	 *
 	 * @return true if it is a site local address, false otherwise.
 	 */
 	bool IsSiteLocalAddress() const
 	{
-		return ((A == 10) || ((A == 172) && (B == 16)) || ((A == 192) && (B == 168)));
+		return ((A == 10) || ((A == 172) && ((B >= 16) && (B <= 31))) || ((A == 192) && (B == 168)));
 	}
 
 	/**

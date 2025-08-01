@@ -5,10 +5,10 @@
 =============================================================================*/
 
 #include "PrecomputedLightVolume.h"
-#include "Stats/Stats.h"
-#include "EngineDefines.h"
+#include "SceneInterface.h"
 #include "UObject/RenderingObjectVersion.h"
 #include "SceneManagement.h"
+#include "Stats/StatsTrace.h"
 #include "UnrealEngine.h"
 #include "Engine/MapBuildDataRegistry.h"
 #include "Interfaces/ITargetPlatform.h"
@@ -75,12 +75,12 @@ FArchive& operator<<(FArchive& Ar, TVolumeLightingSample<2>& Sample)
 	Ar << Sample.Radius;
 	Ar << Sample.Lighting;
 
-	if (Ar.UE4Ver() >= VER_UE4_SKY_BENT_NORMAL)
+	if (Ar.UEVer() >= VER_UE4_SKY_BENT_NORMAL)
 	{
 		Ar << Sample.PackedSkyBentNormal;
 	}
 
-	if (Ar.UE4Ver() >= VER_UE4_VOLUME_SAMPLE_LOW_QUALITY_SUPPORT)
+	if (Ar.UEVer() >= VER_UE4_VOLUME_SAMPLE_LOW_QUALITY_SUPPORT)
 	{
 		Ar << Sample.DirectionalLightShadowing;
 	}
@@ -187,7 +187,7 @@ FArchive& operator<<(FArchive& Ar,FPrecomputedLightVolumeData& Volume)
 
 			TArray<FVolumeLightingSample> LowQualitySamples;
 
-			if (Ar.UE4Ver() >= VER_UE4_VOLUME_SAMPLE_LOW_QUALITY_SUPPORT)
+			if (Ar.UEVer() >= VER_UE4_VOLUME_SAMPLE_LOW_QUALITY_SUPPORT)
 			{
 				LoadVolumeLightSamples(Ar, NumSHSamples, LowQualitySamples);
 			}
@@ -399,7 +399,7 @@ void FPrecomputedLightVolume::InterpolateIncidentRadiancePoint(
 		// Iterate over the octree nodes containing the query point.
 		OctreeForRendering->FindElementsWithBoundsTest(BoundingBox, [&AccumulatedIncidentRadiance, &SkyBentNormal, &AccumulatedDirectionalLightShadowing, &AccumulatedWeight, &WorldPosition](const FVolumeLightingSample& VolumeSample)
 		{
-			const float DistanceSquared = (VolumeSample.Position - WorldPosition).SizeSquared();
+			const float DistanceSquared = ((FVector)VolumeSample.Position - WorldPosition).SizeSquared();
 			const float RadiusSquared = FMath::Square(VolumeSample.Radius);
 
 			if (DistanceSquared < RadiusSquared)
@@ -460,7 +460,7 @@ void FPrecomputedLightVolume::InterpolateIncidentRadianceBlock(
 			const float WeightBase  = 1.0f / RadiusSquared;
 			const float WeightMultiplier = -1.0f / (RadiusSquared * RadiusSquared);
 				
-			const FVector BaseTranslationFromSample = BoundingBox.Center - BoundingBox.Extent - VolumeSample.Position;
+			const FVector BaseTranslationFromSample = BoundingBox.Center - BoundingBox.Extent - FVector4((FVector)VolumeSample.Position);
 			const FVector QuerySteps = BoundingBox.Extent / FVector(QueryCellDimensions) * 2;
 			FVector TranslationFromSample = BaseTranslationFromSample;
 
@@ -504,9 +504,9 @@ void FPrecomputedLightVolume::DebugDrawSamples(FPrimitiveDrawInterface* PDI, boo
 	{
 		const FLinearColor AverageColor = bDrawDirectionalShadowing
 			? FLinearColor(VolumeSample.DirectionalLightShadowing, VolumeSample.DirectionalLightShadowing, VolumeSample.DirectionalLightShadowing)
-			: VolumeSample.Lighting.CalcIntegral() / (FSHVector2::ConstantBasisIntegral * PI);
+			: VolumeSample.Lighting.CalcIntegral() / (FSHVector2::ConstantBasisIntegral * UE_PI);
 		
-		FVector SamplePosition = VolumeSample.Position + WorldOriginOffset; //relocate from volume to world space
+		FVector SamplePosition = (FVector)VolumeSample.Position + WorldOriginOffset; //relocate from volume to world space
 		PDI->DrawPoint(SamplePosition, AverageColor, 10, SDPG_World);
 	});
 }

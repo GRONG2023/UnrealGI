@@ -1,12 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Animation/AnimNotifies/AnimNotifyState_Trail.h"
-#include "GameFramework/Actor.h"
-#include "UObject/UObjectHash.h"
+#include "Animation/AnimSequenceBase.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Engine/World.h"
 #include "ParticleEmitterInstances.h"
+#include "Particles/ParticleSystem.h"
 #include "Particles/ParticleSystemComponent.h"
 #include "Particles/TypeData/ParticleModuleTypeDataAnimTrail.h"
 #include "Animation/AnimInstance.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNotifyState_Trail)
 
 #define LOCTEXT_NAMESPACE "AnimNotifyState_Trail"
 
@@ -29,7 +33,7 @@ static void GetCandidateSystems(USkeletalMeshComponent& MeshComp, ParticleSystem
 			{
 				Components.Add(ChildPSC);
 			}
-		}, false, RF_NoFlags, EInternalObjectFlags::PendingKill);
+		}, false, RF_NoFlags, EInternalObjectFlags::Garbage);
 	}
 }
 
@@ -75,8 +79,15 @@ float UAnimNotifyState_Trail::GetCurveWidth(USkeletalMeshComponent* MeshComp) co
 	return Width;
 }
 
-void UAnimNotifyState_Trail::NotifyBegin(class USkeletalMeshComponent * MeshComp, class UAnimSequenceBase * Animation, float TotalDuration)
+void UAnimNotifyState_Trail::NotifyBegin(class USkeletalMeshComponent* MeshComp, class UAnimSequenceBase* Animation, float TotalDuration)
 {
+}
+
+void UAnimNotifyState_Trail::NotifyBegin(class USkeletalMeshComponent * MeshComp, class UAnimSequenceBase * Animation, float TotalDuration, const FAnimNotifyEventReference& EventReference)
+{
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+    NotifyBegin(MeshComp, Animation, TotalDuration);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	bool bError = ValidateInput(MeshComp);
 
 	if (MeshComp->GetWorld()->GetNetMode() == NM_DedicatedServer)
@@ -195,11 +206,18 @@ void UAnimNotifyState_Trail::NotifyBegin(class USkeletalMeshComponent * MeshComp
 		}
 	}
 
-	Received_NotifyBegin(MeshComp, Animation, TotalDuration);
+	Received_NotifyBegin(MeshComp, Animation, TotalDuration, EventReference);
 }
 
-void UAnimNotifyState_Trail::NotifyTick(class USkeletalMeshComponent * MeshComp, class UAnimSequenceBase * Animation, float FrameDeltaTime)
+void UAnimNotifyState_Trail::NotifyTick(class USkeletalMeshComponent* MeshComp, class UAnimSequenceBase* Animation, float FrameDeltaTime)
 {
+}
+
+void UAnimNotifyState_Trail::NotifyTick(class USkeletalMeshComponent * MeshComp, class UAnimSequenceBase * Animation, float FrameDeltaTime, const FAnimNotifyEventReference& EventReference)
+{
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+    NotifyTick(MeshComp, Animation, FrameDeltaTime);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	bool bError = ValidateInput(MeshComp, true);
 
 	if (MeshComp->GetWorld()->GetNetMode() == NM_DedicatedServer)
@@ -236,11 +254,19 @@ void UAnimNotifyState_Trail::NotifyTick(class USkeletalMeshComponent * MeshComp,
 		}
 	}
 
-	Received_NotifyTick(MeshComp, Animation, FrameDeltaTime);
+	Received_NotifyTick(MeshComp, Animation, FrameDeltaTime, EventReference);
 }
 
-void UAnimNotifyState_Trail::NotifyEnd(class USkeletalMeshComponent * MeshComp, class UAnimSequenceBase * Animation)
+void UAnimNotifyState_Trail::NotifyEnd(class USkeletalMeshComponent* MeshComp, class UAnimSequenceBase* Animation)
 {
+}
+
+void UAnimNotifyState_Trail::NotifyEnd(class USkeletalMeshComponent * MeshComp, class UAnimSequenceBase * Animation, const FAnimNotifyEventReference& EventReference)
+{
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	NotifyEnd(MeshComp, Animation);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
 	if (MeshComp->GetWorld()->GetNetMode() == NM_DedicatedServer)
 	{
 		return;
@@ -262,7 +288,7 @@ void UAnimNotifyState_Trail::NotifyEnd(class USkeletalMeshComponent * MeshComp, 
 		}
 	}
 
-	Received_NotifyEnd(MeshComp, Animation);
+	Received_NotifyEnd(MeshComp, Animation, EventReference);
 }
 
 UParticleSystemComponent* UAnimNotifyState_Trail::GetParticleSystemComponent(USkeletalMeshComponent* MeshComp) const
@@ -348,3 +374,4 @@ bool UAnimNotifyState_Trail::ValidateInput(class USkeletalMeshComponent * MeshCo
 }
 
 #undef LOCTEXT_NAMESPACE
+

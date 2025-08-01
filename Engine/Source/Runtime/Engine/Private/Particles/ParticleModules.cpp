@@ -4,40 +4,34 @@
 	ParticleModules.cpp: Particle module implementation.
 =============================================================================*/
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Object.h"
-#include "Serialization/ArchiveUObject.h"
-#include "UObject/UnrealType.h"
-#include "HAL/IConsoleManager.h"
-#include "HAL/LowLevelMemTracker.h"
+#include "Distributions/DistributionFloatParameterBase.h"
 #include "UObject/RenderingObjectVersion.h"
-#include "UObject/UObjectHash.h"
+#include "Distributions/DistributionVectorParameterBase.h"
 #include "UObject/Package.h"
-#include "Misc/App.h"
 #include "GameFramework/WorldSettings.h"
+#include "Math/InterpCurve.h"
 #include "Particles/ParticleSystem.h"
-#include "ParticleHelper.h"
-#include "Distributions.h"
 #include "Distributions/Distribution.h"
-#include "Distributions/DistributionFloat.h"
-#include "Distributions/DistributionVector.h"
+#include "MeshParticleVertexFactory.h"
 #include "Particles/ParticleModule.h"
+#include "Particles/Location/ParticleModuleLocationBase.h"
 #include "Particles/Orientation/ParticleModuleOrientationBase.h"
 #include "Particles/Orientation/ParticleModuleOrientationAxisLock.h"
 #include "ParticleEmitterInstances.h"
+#include "Particles/ParticleSpriteEmitter.h"
 #include "Particles/ParticleSystemComponent.h"
 #include "Distributions/DistributionFloatConstant.h"
 #include "Distributions/DistributionFloatUniform.h"
 #include "Distributions/DistributionVectorConstant.h"
 #include "Distributions/DistributionVectorUniform.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/Texture2D.h"
+#include "SceneInterface.h"
 #include "UnrealEngine.h"
 #include "Distributions/DistributionFloatParticleParameter.h"
 #include "Distributions/DistributionVectorParticleParameter.h"
 #include "Distributions/DistributionVectorConstantCurve.h"
 #include "Distributions/DistributionVectorUniformCurve.h"
-#include "FXSystem.h"
 #include "Particles/Acceleration/ParticleModuleAccelerationBase.h"
 #include "Particles/Acceleration/ParticleModuleAcceleration.h"
 #include "Particles/Acceleration/ParticleModuleAccelerationConstant.h"
@@ -76,7 +70,6 @@
 #include "Particles/RotationRate/ParticleModuleMeshRotationRateOverLife.h"
 #include "Particles/SubUV/ParticleModuleSubUVBase.h"
 #include "Particles/ParticleEmitter.h"
-#include "ProfilingDebugging/CookStats.h"
 #include "Particles/SubUVAnimation.h"
 #include "Particles/SubUV/ParticleModuleSubUV.h"
 #include "Particles/SubUV/ParticleModuleSubUVMovie.h"
@@ -93,12 +86,17 @@
 #include "Components/PointLightComponent.h"
 #include "Particles/Collision/ParticleModuleCollisionGPU.h"
 #include "DerivedDataCacheInterface.h"
+#include "StaticMeshResources.h"
+
+static TAutoConsoleVariable<bool> CVarFxCascadeUseVelocityForMotionBlur(
+	TEXT("fx.Cascade.UseVelocityForMotionBlur"),
+	true,
+	TEXT("When enabled velocity will be used to approximate velocity for vertex factories that support this.")
+);
 
 /*-----------------------------------------------------------------------------
 	Abstract base modules used for categorization.
 -----------------------------------------------------------------------------*/
-
-
 
 /*-----------------------------------------------------------------------------
 	Helper functions.
@@ -1031,7 +1029,7 @@ void UParticleModuleOrientationAxisLock::PostEditChangeProperty(FPropertyChanged
 		check(Emitter);
 		OuterObj = Emitter->GetOuter();
 	}
-	UParticleSystem* PartSys = PartSys = CastChecked<UParticleSystem>(OuterObj);
+	UParticleSystem* PartSys = CastChecked<UParticleSystem>(OuterObj);
 
 	FProperty* PropertyThatChanged = PropertyChangedEvent.Property;
 	if (PropertyThatChanged)
@@ -1074,6 +1072,7 @@ UParticleModuleRequired::UParticleModuleRequired(const FObjectInitializer& Objec
 	NormalsSphereCenter = FVector(0.0f, 0.0f, 100.0f);
 	NormalsCylinderDirection = FVector(0.0f, 0.0f, 1.0f);
 	bUseLegacyEmitterTime = true;
+	bSupportLargeWorldCoordinates = true;
 	UVFlippingMode = EParticleUVFlipMode::None;
 	BoundingMode = BVC_EightVertices;
 	AlphaThreshold = 0.1f;
@@ -1124,7 +1123,7 @@ void UParticleModuleRequired::Serialize(FStructuredArchive::FRecord Record)
 
 		if (bCooked)
 		{
-			DerivedData.Serialize(Record.EnterField(SA_FIELD_NAME(TEXT("DerivedData"))));
+			DerivedData.Serialize(Record.EnterField(TEXT("DerivedData")));
 		}
 	}
 }
@@ -1299,21 +1298,30 @@ void UParticleModuleRequired::CacheDerivedData()
 	if (GetDerivedDataCacheRef().GetSynchronous(*KeyString, Data, GetPathName()))
 	{
 		COOK_STAT(Timer.AddHit(Data.Num()));
-		DerivedData.BoundingGeometry.Empty(Data.Num() / sizeof(FVector2D));
-		DerivedData.BoundingGeometry.AddUninitialized(Data.Num() / sizeof(FVector2D));
+		DerivedData.BoundingGeometry.Empty(Data.Num() / sizeof(FVector2f));
+		DerivedData.BoundingGeometry.AddUninitialized(Data.Num() / sizeof(FVector2f));
 		FPlatformMemory::Memcpy(DerivedData.BoundingGeometry.GetData(), Data.GetData(), Data.Num() * Data.GetTypeSize());
 	}
 	else
 	{
 		DerivedData.Build(CutoutTexture, SubImages_Horizontal, SubImages_Vertical, BoundingMode, AlphaThreshold, OpacitySourceMode);
 
-		Data.Empty(DerivedData.BoundingGeometry.Num() * sizeof(FVector2D));
-		Data.AddUninitialized(DerivedData.BoundingGeometry.Num() * sizeof(FVector2D));
+		Data.Empty(DerivedData.BoundingGeometry.Num() * sizeof(FVector2f));
+		Data.AddUninitialized(DerivedData.BoundingGeometry.Num() * sizeof(FVector2f));
 		FPlatformMemory::Memcpy(Data.GetData(), DerivedData.BoundingGeometry.GetData(), DerivedData.BoundingGeometry.Num() * DerivedData.BoundingGeometry.GetTypeSize());
 		GetDerivedDataCacheRef().Put(*KeyString, Data, GetPathName());
 		COOK_STAT(Timer.AddMiss(Data.Num()));
 	}
 #endif
+}
+
+bool UParticleModuleRequired::ShouldUseVelocityForMotionBlur() const
+{
+	if ( bOverrideUseVelocityForMotionBlur )
+	{
+		return bUseVelocityForMotionBlur;
+	}
+	return CVarFxCascadeUseVelocityForMotionBlur.GetValueOnAnyThread();
 }
 
 void UParticleModuleRequired::InitBoundingGeometryBuffer()
@@ -1425,7 +1433,7 @@ void UParticleModuleMeshRotation::SpawnEx(FParticleEmitterInstance* Owner, int32
 			//PayloadData->Rotation.X	+= Rotation.X * 360.0f;
 			//PayloadData->Rotation.Y	+= Rotation.Y * 360.0f;
 			//PayloadData->Rotation.Z	+= Rotation.Z * 360.0f;
-			PayloadData->InitRotation = Rotation * 360.0f;
+			PayloadData->InitRotation = FVector3f(Rotation) * 360.0f;
 			PayloadData->Rotation += PayloadData->InitRotation;
 		}
 	}
@@ -1510,7 +1518,7 @@ void UParticleModuleMeshRotationRate::SpawnEx(FParticleEmitterInstance* Owner, i
 		if (MeshRotationOffset)
 		{
 			FVector StartRate = StartRotationRate.GetValue(Owner->EmitterTime, Owner->Component, 0, InRandomStream);// * ((float)PI/180.f);
-			FVector StartValue;
+			FVector3f StartValue;
 			StartValue.X = StartRate.X * 360.0f;
 			StartValue.Y = StartRate.Y * 360.0f;
 			StartValue.Z = StartRate.Z * 360.0f;
@@ -1596,7 +1604,7 @@ void UParticleModuleMeshRotationRateMultiplyLife::Spawn(FParticleEmitterInstance
 		SPAWN_INIT;
 		{
 			FMeshRotationPayloadData* PayloadData = (FMeshRotationPayloadData*)((uint8*)&Particle + MeshRotationOffset);
-			FVector RateScale = LifeMultiplier.GetValue(Particle.RelativeTime, Owner->Component);
+			FVector3f RateScale(LifeMultiplier.GetValue(Particle.RelativeTime, Owner->Component));
 			PayloadData->RotationRate *= RateScale;
 		}
 	}
@@ -1610,7 +1618,7 @@ void UParticleModuleMeshRotationRateMultiplyLife::Update(FParticleEmitterInstanc
 		BEGIN_UPDATE_LOOP;
 		{
 			FMeshRotationPayloadData* PayloadData = (FMeshRotationPayloadData*)((uint8*)&Particle + MeshRotationOffset);
-			FVector RateScale = LifeMultiplier.GetValue(Particle.RelativeTime, Owner->Component);
+			FVector3f RateScale(LifeMultiplier.GetValue(Particle.RelativeTime, Owner->Component));
 			PayloadData->RotationRate *= RateScale;
 		}
 		END_UPDATE_LOOP;
@@ -1671,7 +1679,7 @@ void UParticleModuleMeshRotationRateOverLife::Spawn(FParticleEmitterInstance* Ow
 		SPAWN_INIT;
 		{
 			FMeshRotationPayloadData* PayloadData = (FMeshRotationPayloadData*)((uint8*)&Particle + MeshRotationOffset);
-			FVector RateValue = RotRate.GetValue(Particle.RelativeTime, Owner->Component);// * ((float)PI/180.f);
+			FVector3f RateValue(RotRate.GetValue(Particle.RelativeTime, Owner->Component));// * ((float)PI/180.f);
 			RateValue.X = RateValue.X * 360.0f;
 			RateValue.Y = RateValue.Y * 360.0f;
 			RateValue.Z = RateValue.Z * 360.0f;
@@ -1704,7 +1712,7 @@ void UParticleModuleMeshRotationRateOverLife::Update(FParticleEmitterInstance* O
 				RateValue.X = RateValue.X * 360.0f;
 				RateValue.Y = RateValue.Y * 360.0f;
 				RateValue.Z = RateValue.Z * 360.0f;
-				PayloadData->RotationRate += RateValue;
+				PayloadData->RotationRate += FVector3f(RateValue);
 			}
 			END_UPDATE_LOOP;
 		}
@@ -1717,7 +1725,7 @@ void UParticleModuleMeshRotationRateOverLife::Update(FParticleEmitterInstance* O
 				RateValue.X = RateValue.X * 360.0f;
 				RateValue.Y = RateValue.Y * 360.0f;
 				RateValue.Z = RateValue.Z * 360.0f;
-				PayloadData->RotationRate *= RateValue;
+				PayloadData->RotationRate *= FVector3f(RateValue);
 			}
 			END_UPDATE_LOOP;
 		}
@@ -1781,7 +1789,7 @@ void UParticleModuleRotation::SpawnEx(FParticleEmitterInstance* Owner, int32 Off
 {
 	SPAWN_INIT;
 	{
-		Particle.Rotation += (PI/180.f) * 360.0f * StartRotation.GetValue(Owner->EmitterTime, Owner->Component, InRandomStream);
+		Particle.Rotation += (UE_PI/180.f) * 360.0f * StartRotation.GetValue(Owner->EmitterTime, Owner->Component, InRandomStream);
 	}
 }
 
@@ -1860,7 +1868,7 @@ void UParticleModuleRotationRate::SpawnEx(FParticleEmitterInstance* Owner, int32
 {
 	SPAWN_INIT;
 	{
-		float StartRotRate = (PI/180.f) * 360.0f * StartRotationRate.GetValue(Owner->EmitterTime, Owner->Component, InRandomStream);
+		float StartRotRate = (UE_PI/180.f) * 360.0f * StartRotationRate.GetValue(Owner->EmitterTime, Owner->Component, InRandomStream);
 		Particle.RotationRate += StartRotRate;
 		Particle.BaseRotationRate += StartRotRate;
 	}
@@ -1942,7 +1950,7 @@ void UParticleModuleRotationOverLifetime::Update(FParticleEmitterInstance* Owner
 		{
 			float Rotation = RotationOverLife.GetValue(Particle.RelativeTime, Owner->Component);
 			// For now, we are just using the X-value
-			Particle.Rotation = (Particle.Rotation * (Rotation * (PI/180.f) * 360.0f));
+			Particle.Rotation = (Particle.Rotation * (Rotation * (UE_PI/180.f) * 360.0f));
 		}
 		END_UPDATE_LOOP;
 	}
@@ -1952,7 +1960,7 @@ void UParticleModuleRotationOverLifetime::Update(FParticleEmitterInstance* Owner
 		{
 			float Rotation = RotationOverLife.GetValue(Particle.RelativeTime, Owner->Component);
 			// For now, we are just using the X-value
-			Particle.Rotation = (Particle.Rotation + (Rotation * (PI/180.f) * 360.0f));
+			Particle.Rotation = (Particle.Rotation + (Rotation * (UE_PI/180.f) * 360.0f));
 		}
 		END_UPDATE_LOOP;
 	}
@@ -2488,16 +2496,16 @@ void UParticleModuleAccelerationConstant::Spawn(FParticleEmitterInstance* Owner,
 	check(LODLevel);
 	if (bAlwaysInWorldSpace && LODLevel->RequiredModule->bUseLocalSpace)
 	{
-		FVector LocalAcceleration = Owner->Component->GetComponentTransform().InverseTransformVector(Acceleration);
+		FVector3f LocalAcceleration(Owner->Component->GetComponentTransform().InverseTransformVector(Acceleration));
 		Particle.Velocity		+= LocalAcceleration * SpawnTime;
 		Particle.BaseVelocity	+= LocalAcceleration * SpawnTime;
 	}
 	else
 	{
-		FVector LocalAcceleration = Acceleration;
+		FVector3f LocalAcceleration(Acceleration);
 		if (LODLevel->RequiredModule->bUseLocalSpace)
 		{
-			LocalAcceleration = Owner->EmitterToSimulation.TransformVector(LocalAcceleration);
+			LocalAcceleration = FVector4f(Owner->EmitterToSimulation.TransformVector((FVector)LocalAcceleration));
 		}
 		Particle.Velocity		+= LocalAcceleration * SpawnTime;
 		Particle.BaseVelocity	+= LocalAcceleration * SpawnTime;
@@ -2518,7 +2526,7 @@ void UParticleModuleAccelerationConstant::Update(FParticleEmitterInstance* Owner
 	if (bAlwaysInWorldSpace && LODLevel->RequiredModule->bUseLocalSpace)
 	{
 		FTransform Mat = Owner->Component->GetComponentTransform();
-		FVector LocalAcceleration = Mat.InverseTransformVector(Acceleration);
+		FVector3f LocalAcceleration(Mat.InverseTransformVector(Acceleration));
 		BEGIN_UPDATE_LOOP;
 		{
 			FPlatformMisc::Prefetch(ParticleData, (ParticleIndices[i+1] * ParticleStride));
@@ -2530,10 +2538,10 @@ void UParticleModuleAccelerationConstant::Update(FParticleEmitterInstance* Owner
 	}
 	else
 	{
-		FVector LocalAcceleration = Acceleration;
+		FVector3f LocalAcceleration(Acceleration);
 		if (LODLevel->RequiredModule->bUseLocalSpace)
 		{
-			LocalAcceleration = Owner->EmitterToSimulation.TransformVector(LocalAcceleration);
+			LocalAcceleration = FVector4f(Owner->EmitterToSimulation.TransformVector((FVector)LocalAcceleration));
 		}
 		BEGIN_UPDATE_LOOP;
 		{
@@ -2620,7 +2628,7 @@ void UParticleModuleAccelerationDrag::Update(FParticleEmitterInstance* Owner, in
 {
 	BEGIN_UPDATE_LOOP;
 	{
-		FVector Drag  = Particle.Velocity * -DragCoefficientRaw.GetValue(Particle.RelativeTime, Owner->Component);
+		FVector3f Drag  = Particle.Velocity * -DragCoefficientRaw.GetValue(Particle.RelativeTime, Owner->Component);
 		Particle.Velocity		+= Drag * DeltaTime;
 		Particle.BaseVelocity	+= Drag * DeltaTime;
 	}
@@ -2807,18 +2815,18 @@ void UParticleModuleAcceleration::PostEditChangeProperty(FPropertyChangedEvent& 
 void UParticleModuleAcceleration::Spawn(FParticleEmitterInstance* Owner, int32 Offset, float SpawnTime, FBaseParticle* ParticleBase)
 {
 	SPAWN_INIT;
-	PARTICLE_ELEMENT(FVector, UsedAcceleration);
-	UsedAcceleration = Acceleration.GetValue(Owner->EmitterTime, Owner->Component);
+	PARTICLE_ELEMENT(FVector3f, UsedAcceleration);
+	UsedAcceleration = FVector3f(Acceleration.GetValue(Owner->EmitterTime, Owner->Component));
 	if ((bApplyOwnerScale == true) && Owner && Owner->Component)
 	{
-		FVector Scale = Owner->Component->GetComponentTransform().GetScale3D();
+		FVector3f Scale(Owner->Component->GetComponentTransform().GetScale3D());
 		UsedAcceleration *= Scale;
 	}
 	UParticleLODLevel* LODLevel	= Owner->SpriteTemplate->GetCurrentLODLevel(Owner);
 	check(LODLevel);
 	if (bAlwaysInWorldSpace && LODLevel->RequiredModule->bUseLocalSpace)
 	{
-		FVector TempUsedAcceleration = Owner->Component->GetComponentTransform().InverseTransformVector(UsedAcceleration);
+		FVector3f TempUsedAcceleration = (FVector3f)Owner->Component->GetComponentTransform().InverseTransformVector(FVector(UsedAcceleration));
 		Particle.Velocity		+= TempUsedAcceleration * SpawnTime;
 		Particle.BaseVelocity	+= TempUsedAcceleration * SpawnTime;
 	}
@@ -2826,7 +2834,7 @@ void UParticleModuleAcceleration::Spawn(FParticleEmitterInstance* Owner, int32 O
 	{
 		if (LODLevel->RequiredModule->bUseLocalSpace)
 		{
-			UsedAcceleration = Owner->EmitterToSimulation.TransformVector(UsedAcceleration);
+			UsedAcceleration = (FVector4f)Owner->EmitterToSimulation.TransformVector(FVector(UsedAcceleration));
 		}
 		Particle.Velocity		+= UsedAcceleration * SpawnTime;
 		Particle.BaseVelocity	+= UsedAcceleration * SpawnTime;
@@ -2849,8 +2857,8 @@ void UParticleModuleAcceleration::Update(FParticleEmitterInstance* Owner, int32 
 		FTransform Mat = Owner->Component->GetComponentTransform();
 		BEGIN_UPDATE_LOOP;
 		{
-			FVector& UsedAcceleration = *((FVector*)(ParticleBase + CurrentOffset));																\
-			FVector TransformedUsedAcceleration = Mat.InverseTransformVector(UsedAcceleration);
+			FVector3f& UsedAcceleration = *((FVector3f*)(ParticleBase + CurrentOffset));																\
+			FVector3f TransformedUsedAcceleration = (FVector3f)Mat.InverseTransformVector((FVector)UsedAcceleration);
 			FPlatformMisc::Prefetch(ParticleData, (ParticleIndices[i+1] * ParticleStride));
 			FPlatformMisc::Prefetch(ParticleData, (ParticleIndices[i+1] * ParticleStride) + PLATFORM_CACHE_LINE_SIZE);
 			Particle.Velocity		+= TransformedUsedAcceleration * DeltaTime;
@@ -2862,7 +2870,7 @@ void UParticleModuleAcceleration::Update(FParticleEmitterInstance* Owner, int32 
 	{
 		BEGIN_UPDATE_LOOP;
 		{
-			FVector& UsedAcceleration = *((FVector*)(ParticleBase + CurrentOffset));																\
+			FVector3f& UsedAcceleration = *((FVector3f*)(ParticleBase + CurrentOffset));																\
 			FPlatformMisc::Prefetch(ParticleData, (ParticleIndices[i+1] * ParticleStride));
 			FPlatformMisc::Prefetch(ParticleData, (ParticleIndices[i+1] * ParticleStride) + PLATFORM_CACHE_LINE_SIZE);
 			Particle.Velocity		+= UsedAcceleration * DeltaTime;
@@ -2874,8 +2882,8 @@ void UParticleModuleAcceleration::Update(FParticleEmitterInstance* Owner, int32 
 
 uint32 UParticleModuleAcceleration::RequiredBytes(UParticleModuleTypeDataBase* TypeData)
 {
-	// FVector UsedAcceleration
-	return sizeof(FVector);
+	// FVector3f UsedAcceleration
+	return sizeof(FVector3f);
 }
 
 #if WITH_EDITOR
@@ -2941,8 +2949,8 @@ void UParticleModuleAccelerationOverLifetime::Update(FParticleEmitterInstance* O
 			// Acceleration should always be in world space...
 			FVector Accel = AccelOverLife.GetValue(Particle.RelativeTime, Owner->Component);
 			Accel = Mat.InverseTransformVector(Accel);
-			Particle.Velocity		+= Accel * DeltaTime;
-			Particle.BaseVelocity	+= Accel * DeltaTime;
+			Particle.Velocity		+= (FVector3f)Accel * DeltaTime;
+			Particle.BaseVelocity	+= (FVector3f)Accel * DeltaTime;
 		END_UPDATE_LOOP;
 	}
 	else
@@ -2950,8 +2958,8 @@ void UParticleModuleAccelerationOverLifetime::Update(FParticleEmitterInstance* O
 		BEGIN_UPDATE_LOOP;
 		// Acceleration should always be in world space...
 		FVector Accel = AccelOverLife.GetValue(Particle.RelativeTime, Owner->Component);
-		Particle.Velocity		+= Accel * DeltaTime;
-		Particle.BaseVelocity	+= Accel * DeltaTime;
+		Particle.Velocity		+= (FVector3f)Accel * DeltaTime;
+		Particle.BaseVelocity	+= (FVector3f)Accel * DeltaTime;
 		END_UPDATE_LOOP;
 	}
 }
@@ -3037,6 +3045,13 @@ static TAutoConsoleVariable<int32> CVarParticleLightQuality(
 	ECVF_Scalability
 	);
 
+static TAutoConsoleVariable<int32> CVarParticleDefaultLightInverseExposureBlend(
+	TEXT("fx.ParticleDefaultLightInverseExposureBlend"),
+	0.0f,
+	TEXT("Blend Factor used to blend between Intensity and Intensity / Exposure."),
+	ECVF_Default
+);
+
 void UParticleModuleLight::SpawnEx(FParticleEmitterInstance* Owner, int32 Offset, float SpawnTime, struct FRandomStream* InRandomStream, FBaseParticle* ParticleBase)
 {
 	int32 ParticleLightQuality = CVarParticleLightQuality.GetValueOnAnyThread();
@@ -3045,10 +3060,11 @@ void UParticleModuleLight::SpawnEx(FParticleEmitterInstance* Owner, int32 Offset
 		SPAWN_INIT;
 		PARTICLE_ELEMENT(FLightParticlePayload, LightData);
 		const float Brightness = BrightnessOverLife.GetValue(Particle.RelativeTime, Owner->Component, InRandomStream);
-		LightData.ColorScale = ColorScaleOverLife.GetValue(Particle.RelativeTime, Owner->Component, 0, InRandomStream) * Brightness;
+		LightData.ColorScale = (FVector3f)ColorScaleOverLife.GetValue(Particle.RelativeTime, Owner->Component, 0, InRandomStream) * Brightness;
 		LightData.RadiusScale = RadiusScale.GetValue(Owner->EmitterTime, Owner->Component, InRandomStream);
 		// Exponent of 0 is interpreted by renderer as inverse squared falloff
 		LightData.LightExponent = bUseInverseSquaredFalloff ? 0 : LightExponent.GetValue(Owner->EmitterTime, Owner->Component, InRandomStream);
+		LightData.InverseExposureBlend = bOverrideInverseExposureBlend ? InverseExposureBlend : CVarParticleDefaultLightInverseExposureBlend.GetValueOnAnyThread();
 		const float RandomNumber = InRandomStream->GetFraction();
 		LightData.bValid = RandomNumber < SpawnFraction;
 		LightData.bAffectsTranslucency = bAffectsTranslucency;
@@ -3125,7 +3141,7 @@ void UParticleModuleLight::UpdateHQLight(UPointLightComponent* PointLightCompone
 		PointLightComponent->SetWorldLocation(Particle.Location);
 	}
 	
-	FLinearColor DesiredFinalColor = FVector(Particle.Color) * Particle.Color.A * Payload.ColorScale;
+	FLinearColor DesiredFinalColor = FLinearColor(FVector3f(Particle.Color) * Particle.Color.A * Payload.ColorScale);
 	if (bUseInverseSquaredFalloff)
 	{
 		// For compatibility reasons, the default units are ELightUnits::Unitless. If this change, this needs to be updated.
@@ -3139,7 +3155,7 @@ void UParticleModuleLight::UpdateHQLight(UPointLightComponent* PointLightCompone
 
 	//light color on HQ lights is just a uint32 and our light scalars can be huge.  To preserve the color control and range from the particles we need to normalize
 	//around the full range multiplied value, and set the scalar intensity such that it will bring things back into line later.
-	FVector AdjustedColor(DesiredFinalColor.R, DesiredFinalColor.G, DesiredFinalColor.B);
+	FVector3f AdjustedColor(DesiredFinalColor.R, DesiredFinalColor.G, DesiredFinalColor.B);
 	float Intensity = AdjustedColor.Size();
 	AdjustedColor.Normalize();	
 	
@@ -3162,6 +3178,7 @@ void UParticleModuleLight::UpdateHQLight(UPointLightComponent* PointLightCompone
 	PointLightComponent->SetLightColor(NormalizedColor);
 	PointLightComponent->SetAttenuationRadius(Radius);
 	PointLightComponent->SetLightFalloffExponent(Payload.LightExponent);
+	PointLightComponent->SetInverseExposureBlend(Payload.InverseExposureBlend);
 
 	if (OwnerScene && bDoRTUpdate)
 	{
@@ -3204,7 +3221,7 @@ void UParticleModuleLight::Update(FParticleEmitterInstance* Owner, int32 Offset,
 	{
 		PARTICLE_ELEMENT(FLightParticlePayload,	Data);
 		const float Brightness = BrightnessOverLife.GetValue(Particle.RelativeTime, Owner->Component);
-		Data.ColorScale = ColorScaleOverLife.GetValue(Particle.RelativeTime, Owner->Component) * Brightness;
+		Data.ColorScale = (FVector3f)ColorScaleOverLife.GetValue(Particle.RelativeTime, Owner->Component) * Brightness;
 
 		if (bHighQualityLights && (Data.LightId != 0))
 		{
@@ -3301,8 +3318,8 @@ void UParticleModuleLight::Render3DPreview(FParticleEmitterInstance* Owner, cons
 
 			if (LightPayload->bValid)
 			{
-				const FVector LightPosition = bLocalSpace ? FVector(LocalToWorld.TransformPosition(Particle.Location)) : Particle.Location;
-				const FVector Size = Scale * Particle.Size;
+				const FVector LightPosition = bLocalSpace ? FVector(LocalToWorld.TransformPosition(Particle.Location)) : FVector(Particle.Location);
+				const FVector Size = Scale * (FVector)Particle.Size;
 				const float LightRadius = LightPayload->RadiusScale * (Size.X + Size.Y) / 2.0f;
 
 				DrawWireSphere(PDI, LightPosition, FColor::White, LightRadius, 18, SDPG_World);
@@ -3399,6 +3416,37 @@ FParticleEmitterInstance* UParticleModuleTypeDataMesh::CreateInstance(UParticleE
 	return Instance;
 }
 
+const FVertexFactoryType* UParticleModuleTypeDataMesh::GetVertexFactoryType() const
+{
+	return &FMeshParticleVertexFactory::StaticType;
+}
+
+extern void InitMeshParticleVertexFactoryComponents(FMeshParticleVertexFactory* InVertexFactory, const FStaticMeshLODResources& LODResources, FMeshParticleVertexFactory::FDataType& Data);
+
+void UParticleModuleTypeDataMesh::CollectPSOPrecacheData(const UParticleEmitter* Emitter, FPSOPrecacheParams& OutParams)
+{
+	if (Mesh != nullptr)
+	{
+		FStaticMeshRenderData* RenderData = Mesh->GetRenderData();
+		// Assuming here that all LOD use same vertex decl
+		int32 MeshLODIdx = Mesh->GetMinLODIdx();
+		if (RenderData->LODResources.IsValidIndex(MeshLODIdx))
+		{
+			bool bUsesDynamicParameter = (Emitter->DynamicParameterDataOffset > 0);
+			int32 DynamicVertexStride = sizeof(FMeshParticleInstanceVertex);
+			int32 DynamicParameterVertexStride = bUsesDynamicParameter ? sizeof(FMeshParticleInstanceVertexDynamicParameter) : 0;
+						
+			FVertexDeclarationElementList Elements;
+			FMeshParticleVertexFactory::FDataType Data;
+			InitMeshParticleVertexFactoryComponents(nullptr, RenderData->LODResources[MeshLODIdx], Data);
+			FMeshParticleVertexFactory::GetVertexElements(GMaxRHIFeatureLevel, DynamicVertexStride, DynamicParameterVertexStride, Data, Elements);
+			const FVertexFactoryType* VFType = &FMeshParticleVertexFactory::StaticType;
+			OutParams.PrimitiveType = GetPrimitiveType();
+			OutParams.VertexFactoryDataList.Add(FPSOPrecacheVertexFactoryData(VFType, Elements));
+		}
+	}
+}
+
 void UParticleModuleTypeDataMesh::SetToSensibleDefaults(UParticleEmitter* Owner)
 {
 	if ((Mesh == NULL) && GIsEditor )
@@ -3410,7 +3458,7 @@ void UParticleModuleTypeDataMesh::SetToSensibleDefaults(UParticleEmitter* Owner)
 void UParticleModuleTypeDataMesh::Serialize(FArchive& Ar)
 {
 	Super::Serialize(Ar);
-	if (Ar.IsLoading() && Ar.UE4Ver() < VER_UE4_MESH_EMITTER_INITIAL_ORIENTATION_DISTRIBUTION)
+	if (Ar.IsLoading() && Ar.UEVer() < VER_UE4_MESH_EMITTER_INITIAL_ORIENTATION_DISTRIBUTION)
 	{
 		FVector oldOrient(0.0f, 0.0f, 0.0f);
 		CreateDistribution();
@@ -3419,7 +3467,7 @@ void UParticleModuleTypeDataMesh::Serialize(FArchive& Ar)
 		RPYDistribution->Max = oldOrient;
 		RPYDistribution->bIsDirty = true;
 	}
-	if (Ar.IsLoading() && Ar.UE4Ver() < VER_UE4_MESH_PARTICLE_COLLISIONS_CONSIDER_PARTICLE_SIZE)
+	if (Ar.IsLoading() && Ar.UEVer() < VER_UE4_MESH_PARTICLE_COLLISIONS_CONSIDER_PARTICLE_SIZE)
 	{
 		bCollisionsConsiderPartilceSize = false;//Old data should default to the old behavior of not considering particle size.
 	}
@@ -3972,7 +4020,7 @@ void UParticleModuleAttractorLine::Update(FParticleEmitterInstance* Owner, int32
 	// if both end points are the same, we end up with NaNs in the results of the update
 	if (Line.SizeSquared() == 0.0f)
 	{
-		Line = FVector(SMALL_NUMBER, SMALL_NUMBER, SMALL_NUMBER);
+		Line = FVector(UE_SMALL_NUMBER, UE_SMALL_NUMBER, UE_SMALL_NUMBER);
 	}
 
 	FVector LineNorm = Line;
@@ -4029,7 +4077,7 @@ void UParticleModuleAttractorLine::Update(FParticleEmitterInstance* Owner, int32
 				float AttractorStrength = Strength.GetValue((AttractorRange - Distance) / AttractorRange, Owner->Component);
 				FVector Direction = LineToPoint^Line;
 				// Adjust the VELOCITY of the particle based on the attractor... 
-				Particle.Velocity += Direction * AttractorStrength * DeltaTime;
+				Particle.Velocity += (FVector3f)Direction * AttractorStrength * DeltaTime;
 			}
 		}
 	END_UPDATE_LOOP;
@@ -4286,11 +4334,11 @@ void UParticleModuleAttractorParticle::Update(FParticleEmitterInstance* Owner, i
 
 			// Adjust the VELOCITY of the particle based on the attractor... 
 			Dir.Normalize();
-			Particle.Velocity	+= Dir * AttractorStrength * DeltaTime;
+			Particle.Velocity	+= (FVector3f)Dir * AttractorStrength * DeltaTime;
 			Data.SourceVelocity	 = Source->Velocity;
 			if (bAffectBaseVelocity)
 			{
-				Particle.BaseVelocity	+= Dir * AttractorStrength * DeltaTime;
+				Particle.BaseVelocity	+= (FVector3f)Dir * AttractorStrength * DeltaTime;
 			}
 		}
 	}
@@ -4431,10 +4479,10 @@ void UParticleModuleAttractorPoint::Update(FParticleEmitterInstance* Owner, int3
 
 			// Adjust the VELOCITY of the particle based on the attractor...
 			Dir = ClampVector(Dir,MinNormalizedDir,MaxNormalizedDir);
-			Particle.Velocity	+= Dir * AttractorStrength * DeltaTime;
+			Particle.Velocity	+= (FVector3f)Dir * AttractorStrength * DeltaTime;
 			if (bAffectBaseVelocity)
 			{
-				Particle.BaseVelocity	+= Dir * AttractorStrength * DeltaTime;
+				Particle.BaseVelocity	+= (FVector3f)Dir * AttractorStrength * DeltaTime;
 			}
 		}
 	END_UPDATE_LOOP;
@@ -4545,7 +4593,7 @@ void UParticleModuleTypeDataGpu::PostLoad()
 	Super::PostLoad();
 	//EmitterInfo.Resources = BeginCreateGPUSpriteResources( ResourceData );
 
-	if (GetLinkerUE4Version() < VER_UE4_OPTIONALLY_CLEAR_GPU_EMITTERS_ON_INIT)
+	if (GetLinkerUEVersion() < VER_UE4_OPTIONALLY_CLEAR_GPU_EMITTERS_ON_INIT)
 	{
 		//Force old emitters to clear their particles on Init() to maintain old behaviour.
 		//New emitters are defaulted to false so they behave like other emitter types.
@@ -4566,319 +4614,319 @@ void UParticleModuleTypeDataGpu::BeginDestroy()
 void UParticleModuleTypeDataGpu::Build( FParticleEmitterBuildInfo& EmitterBuildInfo )
 {
 #if WITH_EDITOR
-	if (GetOutermost()->bIsCookedForEditor)
+	if (!GetOutermost()->bIsCookedForEditor)
 	{
-		return;
-	}
+		FVector4Distribution Curve;
+		FComposableFloatDistribution ZeroDistribution;
+		FComposableFloatDistribution OneDistribution;
+		FVectorDistribution VectorDistribution;
+		FVector MinValue,MaxValue;
+		ZeroDistribution.InitializeWithConstant(0.0f);
+		OneDistribution.InitializeWithConstant(1.0f);
 
-	FVector4Distribution Curve;
-	FComposableFloatDistribution ZeroDistribution;
-	FComposableFloatDistribution OneDistribution;
-	FVectorDistribution VectorDistribution;
-	FVector MinValue,MaxValue;
-	ZeroDistribution.InitializeWithConstant(0.0f);
-	OneDistribution.InitializeWithConstant(1.0f);
+		// Store off modules and properties required for simulation.
+		EmitterInfo.RequiredModule = EmitterBuildInfo.RequiredModule;
+		EmitterInfo.SpawnModule = EmitterBuildInfo.SpawnModule;
+		EmitterInfo.SpawnPerUnitModule = EmitterBuildInfo.SpawnPerUnitModule;
+		EmitterInfo.SpawnModules = EmitterBuildInfo.SpawnModules;
 
-	// Store off modules and properties required for simulation.
-	EmitterInfo.RequiredModule = EmitterBuildInfo.RequiredModule;
-	EmitterInfo.SpawnModule = EmitterBuildInfo.SpawnModule;
-	EmitterInfo.SpawnPerUnitModule = EmitterBuildInfo.SpawnPerUnitModule;
-	EmitterInfo.SpawnModules = EmitterBuildInfo.SpawnModules;
+		// Store the inverse of max size.
+		EmitterInfo.InvMaxSize.X = EmitterBuildInfo.MaxSize.X > UE_KINDA_SMALL_NUMBER ? (1.0f / EmitterBuildInfo.MaxSize.X) : 1.0f;
+		EmitterInfo.InvMaxSize.Y = EmitterBuildInfo.MaxSize.Y > UE_KINDA_SMALL_NUMBER ? (1.0f / EmitterBuildInfo.MaxSize.Y) : 1.0f;
 
-	// Store the inverse of max size.
-	EmitterInfo.InvMaxSize.X = EmitterBuildInfo.MaxSize.X > KINDA_SMALL_NUMBER ? (1.0f / EmitterBuildInfo.MaxSize.X) : 1.0f;
-	EmitterInfo.InvMaxSize.Y = EmitterBuildInfo.MaxSize.Y > KINDA_SMALL_NUMBER ? (1.0f / EmitterBuildInfo.MaxSize.Y) : 1.0f;
+		// Compute the value by which to scale rotation rate.
+		const float RotationRateScale = EmitterBuildInfo.MaxRotationRate * EmitterBuildInfo.MaxLifetime;
 
-	// Compute the value by which to scale rotation rate.
-	const float RotationRateScale = EmitterBuildInfo.MaxRotationRate * EmitterBuildInfo.MaxLifetime;
+		// Store the maximum rotation rate (make sure it is never zero).
+		EmitterInfo.InvRotationRateScale = (RotationRateScale > UE_KINDA_SMALL_NUMBER || RotationRateScale < -UE_KINDA_SMALL_NUMBER) ?
+			1.0f / RotationRateScale : 1.0f;
 
-	// Store the maximum rotation rate (make sure it is never zero).
-	EmitterInfo.InvRotationRateScale = (RotationRateScale > KINDA_SMALL_NUMBER || RotationRateScale < -KINDA_SMALL_NUMBER) ?
-		1.0f / RotationRateScale : 1.0f;
+		// A particle's initial size is stored as 1 / MaxSize, so scale by MaxSize.
+		EmitterBuildInfo.SizeScale.ScaleByConstantVector( FVector( EmitterBuildInfo.MaxSize.X, EmitterBuildInfo.MaxSize.Y, 0.0f ) );
 
-	// A particle's initial size is stored as 1 / MaxSize, so scale by MaxSize.
-	EmitterBuildInfo.SizeScale.ScaleByConstantVector( FVector( EmitterBuildInfo.MaxSize.X, EmitterBuildInfo.MaxSize.Y, 0.0f ) );
+		// Build and store the color curve.
+		EmitterBuildInfo.ColorScale.Resample(0.0f, 1.0f);
+		EmitterBuildInfo.AlphaScale.Resample(0.0f, 1.0f);
+		FComposableDistribution::BuildVector4(
+			Curve,
+			EmitterBuildInfo.ColorScale,
+			EmitterBuildInfo.AlphaScale );
+		FComposableDistribution::QuantizeVector4(
+			ResourceData.QuantizedColorSamples,
+			ResourceData.ColorScale,
+			ResourceData.ColorBias,
+			Curve );
 
-	// Build and store the color curve.
-	EmitterBuildInfo.ColorScale.Resample(0.0f, 1.0f);
-	EmitterBuildInfo.AlphaScale.Resample(0.0f, 1.0f);
-	FComposableDistribution::BuildVector4(
-		Curve,
-		EmitterBuildInfo.ColorScale,
-		EmitterBuildInfo.AlphaScale );
-	FComposableDistribution::QuantizeVector4(
-		ResourceData.QuantizedColorSamples,
-		ResourceData.ColorScale,
-		ResourceData.ColorBias,
-		Curve );
+		// The misc curve is laid out as: R:SizeX G:SizeY B:SubImageIndex A:Unused.
+		EmitterBuildInfo.SizeScale.Resample(0.0f, 1.0f);
+		EmitterBuildInfo.SubImageIndex.Resample(0.0f, 1.0f);
+		FComposableDistribution::BuildVector4(
+			Curve, 
+			EmitterBuildInfo.SizeScale, 
+			EmitterBuildInfo.SubImageIndex, 
+			ZeroDistribution );
+		FComposableDistribution::QuantizeVector4(
+			ResourceData.QuantizedMiscSamples,
+			ResourceData.MiscScale,
+			ResourceData.MiscBias,
+			Curve );
 
-	// The misc curve is laid out as: R:SizeX G:SizeY B:SubImageIndex A:Unused.
-	EmitterBuildInfo.SizeScale.Resample(0.0f, 1.0f);
-	EmitterBuildInfo.SubImageIndex.Resample(0.0f, 1.0f);
-	FComposableDistribution::BuildVector4(
-		Curve, 
-		EmitterBuildInfo.SizeScale, 
-		EmitterBuildInfo.SubImageIndex, 
-		ZeroDistribution );
-	FComposableDistribution::QuantizeVector4(
-		ResourceData.QuantizedMiscSamples,
-		ResourceData.MiscScale,
-		ResourceData.MiscBias,
-		Curve );
+		// Resilience.
+		bool bBounceOnCollision = EmitterBuildInfo.CollisionResponse == EParticleCollisionResponse::Bounce;
+		FComposableFloatDistribution NormalizedResilience(
+			bBounceOnCollision ? EmitterBuildInfo.Resilience : ZeroDistribution
+			);
+		NormalizedResilience.Normalize(&ResourceData.ResilienceScale, &ResourceData.ResilienceBias);
+		FComposableDistribution::BuildFloat(EmitterInfo.Resilience, NormalizedResilience);
 
-	// Resilience.
-	bool bBounceOnCollision = EmitterBuildInfo.CollisionResponse == EParticleCollisionResponse::Bounce;
-	FComposableFloatDistribution NormalizedResilience(
-		bBounceOnCollision ? EmitterBuildInfo.Resilience : ZeroDistribution
-		);
-	NormalizedResilience.Normalize(&ResourceData.ResilienceScale, &ResourceData.ResilienceBias);
-	FComposableDistribution::BuildFloat(EmitterInfo.Resilience, NormalizedResilience);
+		// The simulation attributes curve is: R:DragScale G:VelocityFieldScale B:Resilience A:OrbitRandom.
+		EmitterBuildInfo.VectorFieldScaleOverLife.Resample(0.0f, 1.0f);
+		EmitterBuildInfo.DragScale.Resample(0.0f, 1.0f);
+		EmitterBuildInfo.ResilienceScaleOverLife.Resample(0.0f, 1.0f);
+		FComposableDistribution::BuildVector4(
+			Curve,
+			EmitterBuildInfo.DragScale,
+			EmitterBuildInfo.VectorFieldScaleOverLife,
+			EmitterBuildInfo.ResilienceScaleOverLife,
+			OneDistribution );
+		FComposableDistribution::QuantizeVector4(
+			ResourceData.QuantizedSimulationAttrSamples,
+			ResourceData.SimulationAttrCurveScale,
+			ResourceData.SimulationAttrCurveBias,
+			Curve );
 
-	// The simulation attributes curve is: R:DragScale G:VelocityFieldScale B:Resilience A:OrbitRandom.
-	EmitterBuildInfo.VectorFieldScaleOverLife.Resample(0.0f, 1.0f);
-	EmitterBuildInfo.DragScale.Resample(0.0f, 1.0f);
-	EmitterBuildInfo.ResilienceScaleOverLife.Resample(0.0f, 1.0f);
-	FComposableDistribution::BuildVector4(
-		Curve,
-		EmitterBuildInfo.DragScale,
-		EmitterBuildInfo.VectorFieldScaleOverLife,
-		EmitterBuildInfo.ResilienceScaleOverLife,
-		OneDistribution );
-	FComposableDistribution::QuantizeVector4(
-		ResourceData.QuantizedSimulationAttrSamples,
-		ResourceData.SimulationAttrCurveScale,
-		ResourceData.SimulationAttrCurveBias,
-		Curve );
-
-	// Friction used during collision.
-	if (bBounceOnCollision)
-	{
-		ResourceData.OneMinusFriction = 1.0f - EmitterBuildInfo.Friction;
-		ResourceData.CollisionRandomSpread = EmitterBuildInfo.CollisionRandomSpread;
-		ResourceData.CollisionRandomDistribution = EmitterBuildInfo.CollisionRandomDistribution;
-	}
-	else
-	{
-		ResourceData.OneMinusFriction = 0.0f;
-		ResourceData.CollisionRandomSpread = 0.0f;
-		ResourceData.CollisionRandomDistribution = 1.0f;
-	}
-
-	// Collision time bias, used to kill particles on collision if desired.
-	if (EmitterBuildInfo.CollisionResponse == EParticleCollisionResponse::Kill)
-	{
-		// By adding 1.1 to relative time it will kill the particle.
-		ResourceData.CollisionTimeBias = 1.1f;
-	}
-	else
-	{
-		ResourceData.CollisionTimeBias = 0.0f;
-	}
-
-	// Parameters used to derive the collision radius from the size of the sprite.
-	// Note that the sprite size is the diameter, so bake a 1/2 in to the radius
-	// scale to convert to radius.
-	ResourceData.CollisionRadiusScale = EmitterBuildInfo.CollisionRadiusScale * 0.5f;
-	ResourceData.CollisionRadiusBias = EmitterBuildInfo.CollisionRadiusBias;
-
-	// If appropriate, set up the sub-image size parameter.
-	EParticleSubUVInterpMethod InterpMethod = EmitterBuildInfo.RequiredModule->InterpolationMethod;
-	if ( InterpMethod == PSUVIM_Linear || InterpMethod == PSUVIM_Linear_Blend )
-	{
-		ResourceData.SubImageSize.X = EmitterBuildInfo.RequiredModule->SubImages_Horizontal;
-		ResourceData.SubImageSize.Y = EmitterBuildInfo.RequiredModule->SubImages_Vertical;
-		ResourceData.SubImageSize.Z = 1.0f / ResourceData.SubImageSize.X;
-		ResourceData.SubImageSize.W = 1.0f / ResourceData.SubImageSize.Y;
-	}
-	else
-	{
-		ResourceData.SubImageSize = FVector4( 1.0f, 1.0f, 1.0f, 1.0f );
-	}
-
-	// Store the size-by-speed parameters.
-	ResourceData.SizeBySpeed.X = FMath::Max<float>(EmitterBuildInfo.SizeScaleBySpeed.X, 0.0f);
-	ResourceData.SizeBySpeed.Y = FMath::Max<float>(EmitterBuildInfo.SizeScaleBySpeed.Y, 0.0f);
-	ResourceData.SizeBySpeed.Z = FMath::Max<float>(EmitterBuildInfo.MaxSizeScaleBySpeed.X, 0.0f);
-	ResourceData.SizeBySpeed.W = FMath::Max<float>(EmitterBuildInfo.MaxSizeScaleBySpeed.Y, 0.0f);
-
-	// Point attractor.
-	{
-		float RadiusSq = EmitterBuildInfo.PointAttractorRadius *
-			EmitterBuildInfo.PointAttractorRadius;
-		EmitterBuildInfo.PointAttractorStrength.ScaleByConstant(RadiusSq);
-		FComposableDistribution::BuildFloat(
-			EmitterInfo.PointAttractorStrength,
-			EmitterBuildInfo.PointAttractorStrength );
-		EmitterInfo.PointAttractorPosition = EmitterBuildInfo.PointAttractorPosition;
-		EmitterInfo.PointAttractorRadiusSq = RadiusSq;
-	}
-
-	// Store the constant acceleration to apply to particles.
-	ResourceData.ConstantAcceleration = EmitterBuildInfo.ConstantAcceleration;
-	EmitterInfo.ConstantAcceleration = EmitterBuildInfo.ConstantAcceleration;
-
-	// Compute the orbit offset amount.
-	FComposableDistribution::BuildVector(VectorDistribution, EmitterBuildInfo.OrbitOffset);
-	VectorDistribution.GetRange(&MinValue, &MaxValue);
-
-	// One half required due to integration in the shader.
-	MinValue *= 0.5f;
-	MaxValue *= 0.5f;
-
-	// Store the orbit offset range.
-	ResourceData.OrbitOffsetBase = MinValue;
-	ResourceData.OrbitOffsetRange = MaxValue - MinValue;
-
-	// Compute the orbit frequencies.
-	FComposableDistribution::BuildVector(VectorDistribution, EmitterBuildInfo.OrbitRotationRate);
-	VectorDistribution.GetRange(&MinValue, &MaxValue);
-
-	// # rotations to radians. Flip Z to be consistent with CPU orbit.
-	MinValue *= (2.0f * PI);
-	MaxValue *= (2.0f * PI);
-	MinValue.Z *= -1.0f;
-	MaxValue.Z *= -1.0f;
-
-	// Store the orbit frequency range.
-	ResourceData.OrbitFrequencyBase = MinValue;
-	ResourceData.OrbitFrequencyRange = MaxValue - MinValue;
-
-	// Compute the orbit phase.
-	FComposableDistribution::BuildVector(VectorDistribution, EmitterBuildInfo.OrbitInitialRotation);
-	VectorDistribution.GetRange(&MinValue, &MaxValue);
-
-	// # rotations to radians. Flip Z to be consistent with CPU orbit.
-	MinValue *= (2.0f * PI);
-	MaxValue *= (2.0f * PI);
-	MinValue.Z *= -1.0f;
-	MaxValue.Z *= -1.0f;
-
-	// Store the orbit phase range.
-	ResourceData.OrbitPhaseBase = MinValue;
-	ResourceData.OrbitPhaseRange = MaxValue - MinValue;
-
-	// Determine around which axes particles are orbiting.
-	const float OrbitX = (ResourceData.OrbitFrequencyBase.X != 0.0f || ResourceData.OrbitFrequencyRange.X != 0.0f || ResourceData.OrbitPhaseBase.X != 0.0f || ResourceData.OrbitPhaseRange.X != 0.0f) ? 1.0f : 0.0f;
-	const float OrbitY = (ResourceData.OrbitFrequencyBase.Y != 0.0f || ResourceData.OrbitFrequencyRange.Y != 0.0f || ResourceData.OrbitPhaseBase.Y != 0.0f || ResourceData.OrbitPhaseRange.Y != 0.0f) ? 1.0f : 0.0f;
-	const float OrbitZ = (ResourceData.OrbitFrequencyBase.Z != 0.0f || ResourceData.OrbitFrequencyRange.Z != 0.0f || ResourceData.OrbitPhaseBase.Z != 0.0f || ResourceData.OrbitPhaseRange.Z != 0.0f) ? 1.0f : 0.0f;
-
-	// Make some adjustments to mimic CPU orbit as much as possible.
-	if (OrbitX != 0.0f)
-	{
-		ResourceData.OrbitPhaseBase.X += (0.5f * PI);
-	}
-
-	if (OrbitZ != 0.0f)
-	{
-		ResourceData.OrbitPhaseBase.Z += (0.5f * PI);
-	}
-
-	// Compute an offset to position the particle at the beginning of its orbit.
-	EmitterInfo.OrbitOffsetBase.X = 2.0f * ResourceData.OrbitOffsetBase.X * (OrbitY * FMath::Cos(ResourceData.OrbitPhaseBase.Y) + OrbitZ * FMath::Sin(ResourceData.OrbitPhaseBase.Z));
-	EmitterInfo.OrbitOffsetBase.Y = 2.0f * ResourceData.OrbitOffsetBase.Y * (OrbitZ * FMath::Cos(ResourceData.OrbitPhaseBase.Z) + OrbitX * FMath::Sin(ResourceData.OrbitPhaseBase.X));
-	EmitterInfo.OrbitOffsetBase.Z = 2.0f * ResourceData.OrbitOffsetBase.Z * (OrbitX * FMath::Cos(ResourceData.OrbitPhaseBase.X) + OrbitY * FMath::Sin(ResourceData.OrbitPhaseBase.Y));
-	EmitterInfo.OrbitOffsetRange.X = -EmitterInfo.OrbitOffsetBase.X + 2.0f * (ResourceData.OrbitOffsetBase.X + ResourceData.OrbitOffsetRange.X)
-		* (OrbitY * FMath::Cos(ResourceData.OrbitPhaseBase.Y + ResourceData.OrbitPhaseRange.Y) + OrbitZ * FMath::Sin(ResourceData.OrbitPhaseBase.Z + ResourceData.OrbitPhaseRange.Z));
-	EmitterInfo.OrbitOffsetRange.Y = -EmitterInfo.OrbitOffsetBase.Y + 2.0f * (ResourceData.OrbitOffsetBase.Y + ResourceData.OrbitOffsetRange.Y)
-		* (OrbitZ * FMath::Cos(ResourceData.OrbitPhaseBase.Z + ResourceData.OrbitPhaseRange.Z) + OrbitX * FMath::Sin(ResourceData.OrbitPhaseBase.X + ResourceData.OrbitPhaseRange.X));
-	EmitterInfo.OrbitOffsetRange.Z = -EmitterInfo.OrbitOffsetBase.Z + 2.0f * (ResourceData.OrbitOffsetBase.Z + ResourceData.OrbitOffsetRange.Z)
-		* (OrbitX * FMath::Cos(ResourceData.OrbitPhaseBase.X + ResourceData.OrbitPhaseRange.X) + OrbitY * FMath::Sin(ResourceData.OrbitPhaseBase.Y + ResourceData.OrbitPhaseRange.Y));
-
-	// Local vector field.
-	EmitterInfo.LocalVectorField.Field = EmitterBuildInfo.LocalVectorField;
-	EmitterInfo.LocalVectorField.Transform = EmitterBuildInfo.LocalVectorFieldTransform;
-	EmitterInfo.LocalVectorField.MinInitialRotation = FRotator::MakeFromEuler(
-		EmitterBuildInfo.LocalVectorFieldMinInitialRotation * 360.0f );
-	EmitterInfo.LocalVectorField.MaxInitialRotation = FRotator::MakeFromEuler(
-		EmitterBuildInfo.LocalVectorFieldMaxInitialRotation * 360.0f );
-	EmitterInfo.LocalVectorField.RotationRate = FRotator::MakeFromEuler(
-		EmitterBuildInfo.LocalVectorFieldRotationRate * 360.0f );
-	EmitterInfo.LocalVectorField.Intensity = EmitterBuildInfo.LocalVectorFieldIntensity;
-	EmitterInfo.LocalVectorField.Tightness = EmitterBuildInfo.LocalVectorFieldTightness;
-	EmitterInfo.LocalVectorField.bIgnoreComponentTransform = EmitterBuildInfo.bLocalVectorFieldIgnoreComponentTransform;
-	EmitterInfo.LocalVectorField.bTileX = EmitterBuildInfo.bLocalVectorFieldTileX;
-	EmitterInfo.LocalVectorField.bTileY = EmitterBuildInfo.bLocalVectorFieldTileY;
-	EmitterInfo.LocalVectorField.bTileZ = EmitterBuildInfo.bLocalVectorFieldTileZ;
-	EmitterInfo.LocalVectorField.bUseFixDT = EmitterBuildInfo.bLocalVectorFieldUseFixDT;
-
-	// Vector field scales.
-	FComposableFloatDistribution NormalizedVectorFieldScale(EmitterBuildInfo.VectorFieldScale);
-	NormalizedVectorFieldScale.Normalize(&ResourceData.PerParticleVectorFieldScale, &ResourceData.PerParticleVectorFieldBias);
-	FComposableDistribution::BuildFloat(EmitterInfo.VectorFieldScale, NormalizedVectorFieldScale);
-
-	if (EmitterBuildInfo.RequiredModule->bUseLocalSpace)
-	{
-		ResourceData.GlobalVectorFieldScale = 0.0f;
-		ResourceData.GlobalVectorFieldTightness = -1;
-	}
-	else
-	{
-		ResourceData.GlobalVectorFieldScale = EmitterBuildInfo.GlobalVectorFieldScale;
-		ResourceData.GlobalVectorFieldTightness = EmitterBuildInfo.GlobalVectorFieldTightness;
-	}
-
-	// Drag coefficient.
-	FComposableFloatDistribution NormalizedDragCoefficient(EmitterBuildInfo.DragCoefficient);
-	NormalizedDragCoefficient.Normalize(&ResourceData.DragCoefficientScale, &ResourceData.DragCoefficientBias);
-	FComposableDistribution::BuildFloat(EmitterInfo.DragCoefficient, NormalizedDragCoefficient);
-
-	// Set the scale by which rotation rate must be multiplied.
-	ResourceData.RotationRateScale = RotationRateScale;
-
-	// Camera motion blur.
-	ResourceData.CameraMotionBlurAmount = this->CameraMotionBlurAmount;
-
-	// Compute the maximum lifetime of particles in this emitter. */
-	EmitterInfo.MaxLifetime = 0.0f;
-	for (int32 ModuleIndex = 0; ModuleIndex < EmitterInfo.SpawnModules.Num(); ++ModuleIndex)
-	{
-		UParticleModuleLifetimeBase* LifetimeModule = Cast<UParticleModuleLifetimeBase>(EmitterInfo.SpawnModules[ModuleIndex]);
-		if (LifetimeModule)
+		// Friction used during collision.
+		if (bBounceOnCollision)
 		{
-			EmitterInfo.MaxLifetime += LifetimeModule->GetMaxLifetime();
+			ResourceData.OneMinusFriction = 1.0f - EmitterBuildInfo.Friction;
+			ResourceData.CollisionRandomSpread = EmitterBuildInfo.CollisionRandomSpread;
+			ResourceData.CollisionRandomDistribution = EmitterBuildInfo.CollisionRandomDistribution;
 		}
-	}
+		else
+		{
+			ResourceData.OneMinusFriction = 0.0f;
+			ResourceData.CollisionRandomSpread = 0.0f;
+			ResourceData.CollisionRandomDistribution = 1.0f;
+		}
 
-	// Compute the maximum number of particles allowed for this emitter.
-	EmitterInfo.MaxParticleCount = FMath::Max<int32>( 1, EmitterBuildInfo.EstimatedMaxActiveParticleCount );
+		// Collision time bias, used to kill particles on collision if desired.
+		if (EmitterBuildInfo.CollisionResponse == EParticleCollisionResponse::Kill)
+		{
+			// By adding 1.1 to relative time it will kill the particle.
+			ResourceData.CollisionTimeBias = 1.1f;
+		}
+		else
+		{
+			ResourceData.CollisionTimeBias = 0.0f;
+		}
 
-	// Store screen alignment for particles.
-	EmitterInfo.ScreenAlignment = EmitterBuildInfo.RequiredModule->ScreenAlignment;
-	ResourceData.ScreenAlignment = EmitterBuildInfo.RequiredModule->ScreenAlignment;
+		// Parameters used to derive the collision radius from the size of the sprite.
+		// Note that the sprite size is the diameter, so bake a 1/2 in to the radius
+		// scale to convert to radius.
+		ResourceData.CollisionRadiusScale = EmitterBuildInfo.CollisionRadiusScale * 0.5f;
+		ResourceData.CollisionRadiusBias = EmitterBuildInfo.CollisionRadiusBias;
 
-	EmitterInfo.bRemoveHMDRoll = EmitterBuildInfo.RequiredModule->bRemoveHMDRoll;
-	EmitterInfo.MinFacingCameraBlendDistance = EmitterBuildInfo.RequiredModule->MinFacingCameraBlendDistance;
-	EmitterInfo.MaxFacingCameraBlendDistance = EmitterBuildInfo.RequiredModule->MaxFacingCameraBlendDistance;
+		// If appropriate, set up the sub-image size parameter.
+		EParticleSubUVInterpMethod InterpMethod = EmitterBuildInfo.RequiredModule->InterpolationMethod;
+		if ( InterpMethod == PSUVIM_Linear || InterpMethod == PSUVIM_Linear_Blend )
+		{
+			ResourceData.SubImageSize.X = EmitterBuildInfo.RequiredModule->SubImages_Horizontal;
+			ResourceData.SubImageSize.Y = EmitterBuildInfo.RequiredModule->SubImages_Vertical;
+			ResourceData.SubImageSize.Z = 1.0f / ResourceData.SubImageSize.X;
+			ResourceData.SubImageSize.W = 1.0f / ResourceData.SubImageSize.Y;
+		}
+		else
+		{
+			ResourceData.SubImageSize = FVector4( 1.0f, 1.0f, 1.0f, 1.0f );
+		}
+
+		// Store the size-by-speed parameters.
+		ResourceData.SizeBySpeed.X = FMath::Max<float>(EmitterBuildInfo.SizeScaleBySpeed.X, 0.0f);
+		ResourceData.SizeBySpeed.Y = FMath::Max<float>(EmitterBuildInfo.SizeScaleBySpeed.Y, 0.0f);
+		ResourceData.SizeBySpeed.Z = FMath::Max<float>(EmitterBuildInfo.MaxSizeScaleBySpeed.X, 0.0f);
+		ResourceData.SizeBySpeed.W = FMath::Max<float>(EmitterBuildInfo.MaxSizeScaleBySpeed.Y, 0.0f);
+
+		// Point attractor.
+		{
+			float RadiusSq = EmitterBuildInfo.PointAttractorRadius *
+				EmitterBuildInfo.PointAttractorRadius;
+			EmitterBuildInfo.PointAttractorStrength.ScaleByConstant(RadiusSq);
+			FComposableDistribution::BuildFloat(
+				EmitterInfo.PointAttractorStrength,
+				EmitterBuildInfo.PointAttractorStrength );
+			EmitterInfo.PointAttractorPosition = EmitterBuildInfo.PointAttractorPosition;
+			EmitterInfo.PointAttractorRadiusSq = RadiusSq;
+		}
+
+		// Store the constant acceleration to apply to particles.
+		ResourceData.ConstantAcceleration = EmitterBuildInfo.ConstantAcceleration;
+		EmitterInfo.ConstantAcceleration = EmitterBuildInfo.ConstantAcceleration;
+
+		// Compute the orbit offset amount.
+		FComposableDistribution::BuildVector(VectorDistribution, EmitterBuildInfo.OrbitOffset);
+		VectorDistribution.GetRange(&MinValue, &MaxValue);
+
+		// One half required due to integration in the shader.
+		MinValue *= 0.5f;
+		MaxValue *= 0.5f;
+
+		// Store the orbit offset range.
+		ResourceData.OrbitOffsetBase = MinValue;
+		ResourceData.OrbitOffsetRange = MaxValue - MinValue;
+
+		// Compute the orbit frequencies.
+		FComposableDistribution::BuildVector(VectorDistribution, EmitterBuildInfo.OrbitRotationRate);
+		VectorDistribution.GetRange(&MinValue, &MaxValue);
+
+		// # rotations to radians. Flip Z to be consistent with CPU orbit.
+		MinValue *= (2.0f * UE_PI);
+		MaxValue *= (2.0f * UE_PI);
+		MinValue.Z *= -1.0f;
+		MaxValue.Z *= -1.0f;
+
+		// Store the orbit frequency range.
+		ResourceData.OrbitFrequencyBase = MinValue;
+		ResourceData.OrbitFrequencyRange = MaxValue - MinValue;
+
+		// Compute the orbit phase.
+		FComposableDistribution::BuildVector(VectorDistribution, EmitterBuildInfo.OrbitInitialRotation);
+		VectorDistribution.GetRange(&MinValue, &MaxValue);
+
+		// # rotations to radians. Flip Z to be consistent with CPU orbit.
+		MinValue *= (2.0f * UE_PI);
+		MaxValue *= (2.0f * UE_PI);
+		MinValue.Z *= -1.0f;
+		MaxValue.Z *= -1.0f;
+
+		// Store the orbit phase range.
+		ResourceData.OrbitPhaseBase = MinValue;
+		ResourceData.OrbitPhaseRange = MaxValue - MinValue;
+
+		// Determine around which axes particles are orbiting.
+		const float OrbitX = (ResourceData.OrbitFrequencyBase.X != 0.0f || ResourceData.OrbitFrequencyRange.X != 0.0f || ResourceData.OrbitPhaseBase.X != 0.0f || ResourceData.OrbitPhaseRange.X != 0.0f) ? 1.0f : 0.0f;
+		const float OrbitY = (ResourceData.OrbitFrequencyBase.Y != 0.0f || ResourceData.OrbitFrequencyRange.Y != 0.0f || ResourceData.OrbitPhaseBase.Y != 0.0f || ResourceData.OrbitPhaseRange.Y != 0.0f) ? 1.0f : 0.0f;
+		const float OrbitZ = (ResourceData.OrbitFrequencyBase.Z != 0.0f || ResourceData.OrbitFrequencyRange.Z != 0.0f || ResourceData.OrbitPhaseBase.Z != 0.0f || ResourceData.OrbitPhaseRange.Z != 0.0f) ? 1.0f : 0.0f;
+
+		// Make some adjustments to mimic CPU orbit as much as possible.
+		if (OrbitX != 0.0f)
+		{
+			ResourceData.OrbitPhaseBase.X += (0.5f * UE_PI);
+		}
+
+		if (OrbitZ != 0.0f)
+		{
+			ResourceData.OrbitPhaseBase.Z += (0.5f * UE_PI);
+		}
+
+		// Compute an offset to position the particle at the beginning of its orbit.
+		EmitterInfo.OrbitOffsetBase.X = 2.0f * ResourceData.OrbitOffsetBase.X * (OrbitY * FMath::Cos(ResourceData.OrbitPhaseBase.Y) + OrbitZ * FMath::Sin(ResourceData.OrbitPhaseBase.Z));
+		EmitterInfo.OrbitOffsetBase.Y = 2.0f * ResourceData.OrbitOffsetBase.Y * (OrbitZ * FMath::Cos(ResourceData.OrbitPhaseBase.Z) + OrbitX * FMath::Sin(ResourceData.OrbitPhaseBase.X));
+		EmitterInfo.OrbitOffsetBase.Z = 2.0f * ResourceData.OrbitOffsetBase.Z * (OrbitX * FMath::Cos(ResourceData.OrbitPhaseBase.X) + OrbitY * FMath::Sin(ResourceData.OrbitPhaseBase.Y));
+		EmitterInfo.OrbitOffsetRange.X = -EmitterInfo.OrbitOffsetBase.X + 2.0f * (ResourceData.OrbitOffsetBase.X + ResourceData.OrbitOffsetRange.X)
+			* (OrbitY * FMath::Cos(ResourceData.OrbitPhaseBase.Y + ResourceData.OrbitPhaseRange.Y) + OrbitZ * FMath::Sin(ResourceData.OrbitPhaseBase.Z + ResourceData.OrbitPhaseRange.Z));
+		EmitterInfo.OrbitOffsetRange.Y = -EmitterInfo.OrbitOffsetBase.Y + 2.0f * (ResourceData.OrbitOffsetBase.Y + ResourceData.OrbitOffsetRange.Y)
+			* (OrbitZ * FMath::Cos(ResourceData.OrbitPhaseBase.Z + ResourceData.OrbitPhaseRange.Z) + OrbitX * FMath::Sin(ResourceData.OrbitPhaseBase.X + ResourceData.OrbitPhaseRange.X));
+		EmitterInfo.OrbitOffsetRange.Z = -EmitterInfo.OrbitOffsetBase.Z + 2.0f * (ResourceData.OrbitOffsetBase.Z + ResourceData.OrbitOffsetRange.Z)
+			* (OrbitX * FMath::Cos(ResourceData.OrbitPhaseBase.X + ResourceData.OrbitPhaseRange.X) + OrbitY * FMath::Sin(ResourceData.OrbitPhaseBase.Y + ResourceData.OrbitPhaseRange.Y));
+
+		// Local vector field.
+		EmitterInfo.LocalVectorField.Field = EmitterBuildInfo.LocalVectorField;
+		EmitterInfo.LocalVectorField.Transform = EmitterBuildInfo.LocalVectorFieldTransform;
+		EmitterInfo.LocalVectorField.MinInitialRotation = FRotator::MakeFromEuler(
+			EmitterBuildInfo.LocalVectorFieldMinInitialRotation * 360.0f );
+		EmitterInfo.LocalVectorField.MaxInitialRotation = FRotator::MakeFromEuler(
+			EmitterBuildInfo.LocalVectorFieldMaxInitialRotation * 360.0f );
+		EmitterInfo.LocalVectorField.RotationRate = FRotator::MakeFromEuler(
+			EmitterBuildInfo.LocalVectorFieldRotationRate * 360.0f );
+		EmitterInfo.LocalVectorField.Intensity = EmitterBuildInfo.LocalVectorFieldIntensity;
+		EmitterInfo.LocalVectorField.Tightness = EmitterBuildInfo.LocalVectorFieldTightness;
+		EmitterInfo.LocalVectorField.bIgnoreComponentTransform = EmitterBuildInfo.bLocalVectorFieldIgnoreComponentTransform;
+		EmitterInfo.LocalVectorField.bTileX = EmitterBuildInfo.bLocalVectorFieldTileX;
+		EmitterInfo.LocalVectorField.bTileY = EmitterBuildInfo.bLocalVectorFieldTileY;
+		EmitterInfo.LocalVectorField.bTileZ = EmitterBuildInfo.bLocalVectorFieldTileZ;
+		EmitterInfo.LocalVectorField.bUseFixDT = EmitterBuildInfo.bLocalVectorFieldUseFixDT;
+
+		// Vector field scales.
+		FComposableFloatDistribution NormalizedVectorFieldScale(EmitterBuildInfo.VectorFieldScale);
+		NormalizedVectorFieldScale.Normalize(&ResourceData.PerParticleVectorFieldScale, &ResourceData.PerParticleVectorFieldBias);
+		FComposableDistribution::BuildFloat(EmitterInfo.VectorFieldScale, NormalizedVectorFieldScale);
+
+		if (EmitterBuildInfo.RequiredModule->bUseLocalSpace)
+		{
+			ResourceData.GlobalVectorFieldScale = 0.0f;
+			ResourceData.GlobalVectorFieldTightness = -1;
+		}
+		else
+		{
+			ResourceData.GlobalVectorFieldScale = EmitterBuildInfo.GlobalVectorFieldScale;
+			ResourceData.GlobalVectorFieldTightness = EmitterBuildInfo.GlobalVectorFieldTightness;
+		}
+
+		// Drag coefficient.
+		FComposableFloatDistribution NormalizedDragCoefficient(EmitterBuildInfo.DragCoefficient);
+		NormalizedDragCoefficient.Normalize(&ResourceData.DragCoefficientScale, &ResourceData.DragCoefficientBias);
+		FComposableDistribution::BuildFloat(EmitterInfo.DragCoefficient, NormalizedDragCoefficient);
+
+		// Set the scale by which rotation rate must be multiplied.
+		ResourceData.RotationRateScale = RotationRateScale;
+
+		// Camera motion blur.
+		ResourceData.CameraMotionBlurAmount = this->CameraMotionBlurAmount;
+
+		// Compute the maximum lifetime of particles in this emitter. */
+		EmitterInfo.MaxLifetime = 0.0f;
+		for (int32 ModuleIndex = 0; ModuleIndex < EmitterInfo.SpawnModules.Num(); ++ModuleIndex)
+		{
+			UParticleModuleLifetimeBase* LifetimeModule = Cast<UParticleModuleLifetimeBase>(EmitterInfo.SpawnModules[ModuleIndex]);
+			if (LifetimeModule)
+			{
+				EmitterInfo.MaxLifetime += LifetimeModule->GetMaxLifetime();
+			}
+		}
+
+		// Compute the maximum number of particles allowed for this emitter.
+		EmitterInfo.MaxParticleCount = FMath::Max<int32>( 1, EmitterBuildInfo.EstimatedMaxActiveParticleCount );
+
+		EmitterInfo.bUseVelocityForMotionBlur = EmitterBuildInfo.RequiredModule->ShouldUseVelocityForMotionBlur();
+		ResourceData.bUseVelocityForMotionBlur = EmitterBuildInfo.RequiredModule->ShouldUseVelocityForMotionBlur();
+
+		// Store screen alignment for particles.
+		EmitterInfo.ScreenAlignment = EmitterBuildInfo.RequiredModule->ScreenAlignment;
+		ResourceData.ScreenAlignment = EmitterBuildInfo.RequiredModule->ScreenAlignment;
+
+		EmitterInfo.bRemoveHMDRoll = EmitterBuildInfo.RequiredModule->bRemoveHMDRoll;
+		EmitterInfo.MinFacingCameraBlendDistance = EmitterBuildInfo.RequiredModule->MinFacingCameraBlendDistance;
+		EmitterInfo.MaxFacingCameraBlendDistance = EmitterBuildInfo.RequiredModule->MaxFacingCameraBlendDistance;
 	
-	ResourceData.bRemoveHMDRoll = EmitterBuildInfo.RequiredModule->bRemoveHMDRoll;
-	ResourceData.MinFacingCameraBlendDistance = EmitterBuildInfo.RequiredModule->MinFacingCameraBlendDistance;
-	ResourceData.MaxFacingCameraBlendDistance = EmitterBuildInfo.RequiredModule->MaxFacingCameraBlendDistance;
+		ResourceData.bRemoveHMDRoll = EmitterBuildInfo.RequiredModule->bRemoveHMDRoll;
+		ResourceData.MinFacingCameraBlendDistance = EmitterBuildInfo.RequiredModule->MinFacingCameraBlendDistance;
+		ResourceData.MaxFacingCameraBlendDistance = EmitterBuildInfo.RequiredModule->MaxFacingCameraBlendDistance;
 
-	// Particle axis lock
-	for (int32 ModuleIndex = 0; ModuleIndex < EmitterInfo.SpawnModules.Num(); ++ModuleIndex)
-	{
-		UParticleModuleOrientationAxisLock* AxisLockModule = Cast<UParticleModuleOrientationAxisLock>(EmitterInfo.SpawnModules[ModuleIndex]);
-		if (AxisLockModule)
+		// Particle axis lock
+		for (int32 ModuleIndex = 0; ModuleIndex < EmitterInfo.SpawnModules.Num(); ++ModuleIndex)
 		{
-			EmitterInfo.LockAxisFlag = AxisLockModule->LockAxisFlags;
-			ResourceData.LockAxisFlag = AxisLockModule->LockAxisFlags;
-			break;
+			UParticleModuleOrientationAxisLock* AxisLockModule = Cast<UParticleModuleOrientationAxisLock>(EmitterInfo.SpawnModules[ModuleIndex]);
+			if (AxisLockModule)
+			{
+				EmitterInfo.LockAxisFlag = AxisLockModule->LockAxisFlags;
+				ResourceData.LockAxisFlag = AxisLockModule->LockAxisFlags;
+				break;
+			}
 		}
+
+		ResourceData.PivotOffset = EmitterBuildInfo.PivotOffset;
+
+		// Store color and scale when using particle parameters.
+		EmitterInfo.DynamicColor = EmitterBuildInfo.DynamicColor;
+		EmitterInfo.DynamicAlpha= EmitterBuildInfo.DynamicAlpha;
+		EmitterInfo.DynamicColorScale = EmitterBuildInfo.DynamicColorScale;
+		EmitterInfo.DynamicAlphaScale = EmitterBuildInfo.DynamicAlphaScale;
+
+		// Collision flag.
+		EmitterInfo.bEnableCollision = EmitterBuildInfo.bEnableCollision;
+		EmitterInfo.CollisionMode = (EParticleCollisionMode::Type)EmitterBuildInfo.CollisionMode;
 	}
-
-	ResourceData.PivotOffset = EmitterBuildInfo.PivotOffset;
-
-	// Store color and scale when using particle parameters.
-	EmitterInfo.DynamicColor = EmitterBuildInfo.DynamicColor;
-	EmitterInfo.DynamicAlpha= EmitterBuildInfo.DynamicAlpha;
-	EmitterInfo.DynamicColorScale = EmitterBuildInfo.DynamicColorScale;
-	EmitterInfo.DynamicAlphaScale = EmitterBuildInfo.DynamicAlphaScale;
-
-	// Collision flag.
-	EmitterInfo.bEnableCollision = EmitterBuildInfo.bEnableCollision;
-	EmitterInfo.CollisionMode = (EParticleCollisionMode::Type)EmitterBuildInfo.CollisionMode;
 #endif
-
 
 	// Create or update GPU resources.
 	if ( EmitterInfo.Resources )
@@ -4912,6 +4960,16 @@ FParticleEmitterInstance* UParticleModuleTypeDataGpu::CreateInstance(UParticleEm
 	return Instance;
 }
 
+const FVertexFactoryType* UParticleModuleTypeDataGpu::GetVertexFactoryType() const
+{
+	return &FGPUSpriteVertexFactory::StaticType;
+}
+
+void UParticleModuleTypeDataGpu::CollectPSOPrecacheData(const UParticleEmitter* Emitter, FPSOPrecacheParams& OutParams)
+{
+	OutParams.VertexFactoryDataList.Add(FPSOPrecacheVertexFactoryData(GetVertexFactoryType()));
+	OutParams.PrimitiveType = GetPrimitiveType();
+}
 
 /*-----------------------------------------------------------------------------
 	UParticleModulePivotOffset implementation.

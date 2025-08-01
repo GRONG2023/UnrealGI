@@ -2,6 +2,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "IPropertyTable.h"
 #include "Widgets/SNullWidget.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Layout/Margin.h"
@@ -11,7 +12,8 @@
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/SToolTip.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
+#include "Styling/StyleColors.h"
 #include "IPropertyTableCell.h"
 #include "Widgets/Layout/SBox.h"
 #include "IPropertyTableCellPresenter.h"
@@ -35,7 +37,7 @@ public:
 	{
 		return SNew( SBox )
 			.VAlign( VAlign_Center)
-			.Padding( FMargin( 2, 0, 2, 0 ) )
+			.Padding( FMargin( 4, 0, 2, 0 ) )
 			[
 				ConstructNameWidget( PropertyTableConstants::NormalFontStyle )
 			]
@@ -57,7 +59,7 @@ public:
 			[
 				SAssignNew( NewFocusWidget, SEditableTextBox )
 				.Text( Cell, &IPropertyTableCell::GetValueAsText )
-				.Font( FEditorStyle::GetFontStyle( PropertyTableConstants::NormalFontStyle ) )
+				.Font( FAppStyle::GetFontStyle( PropertyTableConstants::NormalFontStyle ) )
 				.IsReadOnly( true )
 			];
 
@@ -93,8 +95,9 @@ private:
 				.AutoWidth()
 				[
 					SNew( STextBlock )
-					.Font( FEditorStyle::GetFontStyle( TextFontStyle ) )
+					.Font( FAppStyle::GetFontStyle( TextFontStyle ) )
 					.Text( FText::FromString(DisplayNamePieces[ Index ]) )
+					.ColorAndOpacity(this, &FObjectNameTableCellPresenter::GetTextForegroundColor)
 				];
 
 			if ( Index < DisplayNamePieces.Num() - 1 )
@@ -106,7 +109,7 @@ private:
 					[
 						SNew( SImage )
 						.ColorAndOpacity( FSlateColor::UseForeground() )
-						.Image( FEditorStyle::GetBrush( "PropertyTable.HeaderRow.Column.PathDelimiter" ) )
+						.Image( FAppStyle::GetBrush( "PropertyTable.HeaderRow.Column.PathDelimiter" ) )
 					];
 			}
 		}
@@ -114,6 +117,15 @@ private:
 		return NameBox;
 	}
 
+	FSlateColor GetTextForegroundColor() const
+	{
+		if(Cell->GetTable()->GetSelectedCells().Contains( Cell ))
+		{
+			return FStyleColors::White;
+		}
+
+		return FSlateColor::UseForeground();
+	}
 
 private:
 

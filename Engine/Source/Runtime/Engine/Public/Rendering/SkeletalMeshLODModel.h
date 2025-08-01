@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #pragma once
+#include "Animation/SkeletalMeshVertexAttribute.h"
 
 #if WITH_EDITOR
 
@@ -23,27 +24,27 @@
 
 struct FSoftSkinVertex
 {
-	FVector			Position;
+	FVector3f			Position;
 
 	// Tangent, U-direction
-	FVector			TangentX;
+	FVector3f			TangentX;
 	// Binormal, V-direction
-	FVector			TangentY;
+	FVector3f			TangentY;
 	// Normal
-	FVector4		TangentZ;
+	FVector4f			TangentZ;
 
 	// UVs
-	FVector2D		UVs[MAX_TEXCOORDS];
+	FVector2f		UVs[MAX_TEXCOORDS];
 	// VertexColor
 	FColor			Color;
 	FBoneIndexType	InfluenceBones[MAX_TOTAL_INFLUENCES];
-	uint8			InfluenceWeights[MAX_TOTAL_INFLUENCES];
+	uint16			InfluenceWeights[MAX_TOTAL_INFLUENCES];
 
 	/** If this vert is rigidly weighted to a bone, return true and the bone index. Otherwise return false. */
 	ENGINE_API bool GetRigidWeightBone(FBoneIndexType& OutBoneIndex) const;
 
 	/** Returns the maximum weight of any bone that influences this vertex. */
-	ENGINE_API uint8 GetMaximumWeight() const;
+	ENGINE_API uint16 GetMaximumWeight() const;
 
 	/**
 	* Serializer
@@ -77,11 +78,14 @@ struct FSkelMeshSection
 	/** This section will recompute tangent in runtime */
 	bool bRecomputeTangent;
 
-	/** Vertex color channel to mask recompute tangents. R=0,G=1 (default),B=2 */
+	/** Vertex color channel to mask recompute tangents. R=0,G=1,B=2,A=None=3 */
 	ESkinVertexColorChannel RecomputeTangentsVertexMaskChannel;
 
 	/** This section will cast shadow */
 	bool bCastShadow;
+	
+	/** If true, this section will be visible in ray tracing effects. Turning this off will remove it from ray traced reflections, shadows, etc. */
+	bool bVisibleInRayTracing;
 
 	/** This is set for old 'duplicate' sections that need to get removed on load */
 	bool bLegacyClothingSection_DEPRECATED;
@@ -98,8 +102,16 @@ struct FSkelMeshSection
 	/** The soft vertices of this section. */
 	TArray<FSoftSkinVertex> SoftVertices;
 
-	/** The extra vertex data for mapping to an APEX clothing simulation mesh. */
-	TArray<FMeshToMeshVertData> ClothMappingData;
+	/**
+	 * The cloth deformer mapping data to each required cloth LOD.
+	 * Raytracing may require a different deformer LOD to the one being simulated/rendered.
+	 * The outer array indexes the LOD bias to this LOD. The inner array indexes the vertex mapping data.
+	 * For example, if this LODModel is LOD3, then ClothMappingDataLODs[1] will point to defomer data that are using cloth LOD2.
+	 * Then ClothMappingDataLODs[2] will point to defomer data that are using cloth LOD1, ...etc.
+	 * ClothMappingDataLODs[0] will always point to defomer data that are using the same cloth LOD as this section LOD,
+	 * this is convenient for cases where the cloth LOD bias is not known/required.
+	 */
+	TArray<TArray<FMeshToMeshVertData>> ClothMappingDataLODs;
 
 	/** The bones which are used by the vertices of this section. Indices of bones in the USkeletalMesh::RefSkeleton array */
 	TArray<FBoneIndexType> BoneMap;
@@ -155,8 +167,9 @@ struct FSkelMeshSection
 		, NumTriangles(0)
 		, bSelected(false)
 		, bRecomputeTangent(false)
-		, RecomputeTangentsVertexMaskChannel(ESkinVertexColorChannel::Green)
+		, RecomputeTangentsVertexMaskChannel(ESkinVertexColorChannel::None)
 		, bCastShadow(true)
+		, bVisibleInRayTracing(true)
 		, bLegacyClothingSection_DEPRECATED(false)
 		, CorrespondClothSectionIndex_DEPRECATED(-1)
 		, BaseVertexIndex(0)
@@ -194,7 +207,8 @@ struct FSkelMeshSection
 	*/
 	FORCEINLINE bool HasClothingData() const
 	{
-		return (ClothMappingData.Num() > 0);
+		constexpr int32 ClothLODBias = 0;  // Must at least have the mapping for the matching cloth LOD
+		return ClothMappingDataLODs.Num() && ClothMappingDataLODs[ClothLODBias].Num();
 	}
 
 	/**
@@ -219,6 +233,7 @@ struct FSkelMeshSection
 
 	// Serialization.
 	friend FArchive& operator<<(FArchive& Ar, FSkelMeshSection& S);
+	static void DeclareCustomVersions(FArchive& Ar);
 };
 
 /**
@@ -237,6 +252,9 @@ struct FSkelMeshSourceSectionUserData
 
 	/** This section will cast shadow */
 	bool bCastShadow;
+
+	/** If true, this section will be visible in ray tracing effects. Turning this off will remove it from ray traced reflections, shadows, etc. */
+	bool bVisibleInRayTracing;
 
 	// INDEX_NONE if not set
 	int16 CorrespondClothAssetIndex;
@@ -264,8 +282,9 @@ struct FSkelMeshSourceSectionUserData
 
 	FSkelMeshSourceSectionUserData()
 		: bRecomputeTangent(false)
-		, RecomputeTangentsVertexMaskChannel(ESkinVertexColorChannel::Green)
+		, RecomputeTangentsVertexMaskChannel(ESkinVertexColorChannel::None)
 		, bCastShadow(true)
+		, bVisibleInRayTracing(true)
 		, CorrespondClothAssetIndex(INDEX_NONE)
 		, bDisabled(false)
 		, GenerateUpToLodIndex(INDEX_NONE)
@@ -287,6 +306,7 @@ struct FSkelMeshSourceSectionUserData
 			//If the UserSectionData do not exist add it and copy from the section data
 			UserSectionData = &UserSectionsData.Add(Section.OriginalDataSectionIndex);
 			UserSectionData->bCastShadow = Section.bCastShadow;
+			UserSectionData->bVisibleInRayTracing = Section.bVisibleInRayTracing;			
 			UserSectionData->bDisabled = Section.bDisabled;
 			UserSectionData->bRecomputeTangent = Section.bRecomputeTangent;
 			UserSectionData->RecomputeTangentsVertexMaskChannel = Section.RecomputeTangentsVertexMaskChannel;
@@ -342,17 +362,32 @@ public:
 	/** Set of skin weight profile, identified by a FName which matches FSkinWeightProfileInfo.Name in the owning Skeletal Mesh*/
 	TMap<FName, FImportedSkinWeightProfileData> SkinWeightProfiles;
 
+	/** Set of vertex attributes identified by an FName */
+	TMap<FName, FSkeletalMeshModelVertexAttribute> VertexAttributes;
+
 	/** Mapping from final mesh vertex index to raw import vertex index. Needed for vertex animation, which only stores positions for import verts. */
 	TArray<int32>				MeshToImportVertexMap;
 	/** The max index in MeshToImportVertexMap, ie. the number of imported (raw) verts. */
 	int32						MaxImportVertex;
 
-	/** Editor only data: array of the original point (wedge) indices for each of the vertices in a FSkeletalMeshLODModel */
-	FIntBulkData				RawPointIndices;
-	FWordBulkData				LegacyRawPointIndices;
+	/** Accessor for the RawPointIndice which is editor only data: array of the original point (wedge) indices for each of the vertices in a FSkeletalMeshLODModel */
+	const TArray<uint32>& GetRawPointIndices() const
+	{
+		return RawPointIndices2;
+	}
 
-	/** Imported raw mesh data. Optional, only the imported mesh LOD has this, generated LOD or old asset will be null. */
-	FRawSkeletalMeshBulkData	RawSkeletalMeshBulkData_DEPRECATED;
+	/** Accessor for the RawPointIndice which is editor only data: array of the original point (wedge) indices for each of the vertices in a FSkeletalMeshLODModel */
+	TArray<uint32>& GetRawPointIndices()
+	{
+		return RawPointIndices2;
+	}
+	
+	UE_DEPRECATED(5.0, "Please do not access this function anymore. This data is not use anymore.")
+	FRawSkeletalMeshBulkData& GetRawSkeletalMeshBulkData_DEPRECATED()
+	{
+		return RawSkeletalMeshBulkData_DEPRECATED;
+	}
+
 	/** This ID is use to create the DDC key, it must be set when we save the FRawSkeletalMeshBulkData. */
 	FString						RawSkeletalMeshBulkDataID;
 	bool						bIsBuildDataAvailable;
@@ -393,6 +428,36 @@ public:
 	}
 
 private:
+	friend struct FSkeletalMeshSourceModel;
+	
+	struct FSkelMeshImportedMeshInfo
+	{
+		FName Name;	// The name of the mesh.
+		int32 NumVertices;	// The number of imported (dcc) vertices that are part of this mesh. This is a value of 8 for a cube. So NOT the number of render vertices.
+		int32 StartImportedVertex;	// The first index of imported (dcc) vertices in the mesh. So this NOT an index into the render vertex buffer. In range of 0..7 for a cube.
+
+		void Serialize(FArchive& Ar)
+		{
+			Ar << Name;
+			Ar << NumVertices;
+			Ar << StartImportedVertex;
+		}
+	};
+	friend FArchive& operator<<(FArchive& Ar, FSkelMeshImportedMeshInfo& Info)
+	{
+		Info.Serialize(Ar);
+		return Ar;
+	}
+
+	TArray<FSkelMeshImportedMeshInfo> ImportedMeshInfos;
+
+	/** Editor only data: array of the original point (wedge) indices for each of the vertices in a FSkeletalMeshLODModel */
+	TArray<uint32>				RawPointIndices2;
+
+	FIntBulkData				RawPointIndices_DEPRECATED;
+	FWordBulkData				LegacyRawPointIndices_DEPRECATED;
+	FRawSkeletalMeshBulkData	RawSkeletalMeshBulkData_DEPRECATED;
+
 	//Mutex use by the CopyStructure function. It's a pointer because FCriticalSection privatize the operator= function, which will prevent this class operator= to use the default.
 	//We want to avoid having a custom equal operator that will get deprecated if dev forget to add the new member in this class
 	//The CopyStructure function will copy everything but make sure the destination mutex is set to a new mutex pointer.
@@ -416,6 +481,7 @@ public:
 	* @param	Idx		Index of current array entry being serialized
 	*/
 	void Serialize(FArchive& Ar, UObject* Owner, int32 Idx);
+	static void DeclareCustomVersions(FArchive& Ar);
 
 	/**
 	* Fill array with vertex position and tangent data from skel mesh chunks.
@@ -429,7 +495,7 @@ public:
 	*
 	* @param MappingData Array to fill.
 	*/
-	void GetClothMappingData(TArray<FMeshToMeshVertData>& MappingData, TArray<uint64>& OutClothIndexMapping) const;
+	void GetClothMappingData(TArray<FMeshToMeshVertData>& MappingData, TArray<FClothBufferIndexMapping>& OutClothIndexMapping) const;
 
 
 
@@ -490,12 +556,18 @@ public:
 	* Create a new FSkeletalMeshLODModel on the heap. Copy data from the "FSkeletalMeshLODModel* Other" to the just created LODModel return the heap allocated LODModel.
 	* This function is thread safe since its use the thread safe CopyStructure function to copy the data from Other.
 	*/
-	static ENGINE_API FSkeletalMeshLODModel* CreateCopy(const FSkeletalMeshLODModel* Other)
+	static FSkeletalMeshLODModel* CreateCopy(const FSkeletalMeshLODModel* Other)
 	{
 		FSkeletalMeshLODModel* Destination = new FSkeletalMeshLODModel();
 		FSkeletalMeshLODModel::CopyStructure(Destination, Other);
 		return Destination;
 	}
+
+	/**
+	 * Fills in a representation of this model into the given mesh description object. Existing
+	 * mesh description data is emptied.
+	 */
+	void ENGINE_API GetMeshDescription(const USkeletalMesh *InSkeletalMesh, const int32 InLODIndex, FMeshDescription& OutMeshDescription) const;
 };
 
 #endif // WITH_EDITOR

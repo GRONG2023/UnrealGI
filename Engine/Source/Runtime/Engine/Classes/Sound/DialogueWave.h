@@ -20,40 +20,40 @@ class USoundBase;
 class USoundWave;
 struct FPropertyChangedChainEvent;
 
-struct ENGINE_API FDialogueConstants
+struct FDialogueConstants
 {
-	static const FString DialogueNamespace;
-	static const FString DialogueNotesNamespace;
-	static const FString SubtitleKeySuffix;
+	static ENGINE_API const FString DialogueNamespace;
+	static ENGINE_API const FString DialogueNotesNamespace;
+	static ENGINE_API const FString SubtitleKeySuffix;
 #if WITH_EDITORONLY_DATA
-	static const FString ActingDirectionKeySuffix;
-	static const FString PropertyName_AudioFile;
-	static const FString PropertyName_VoiceActorDirection;
-	static const FString PropertyName_Speaker;
-	static const FString PropertyName_Targets;
-	static const FString PropertyName_GrammaticalGender;
-	static const FString PropertyName_GrammaticalPlurality;
-	static const FString PropertyName_TargetGrammaticalGender;
-	static const FString PropertyName_TargetGrammaticalNumber;
-	static const FString PropertyName_DialogueContext;
-	static const FString PropertyName_IsMature;
+	static ENGINE_API const FString ActingDirectionKeySuffix;
+	static ENGINE_API const FString PropertyName_AudioFile;
+	static ENGINE_API const FString PropertyName_VoiceActorDirection;
+	static ENGINE_API const FString PropertyName_Speaker;
+	static ENGINE_API const FString PropertyName_Targets;
+	static ENGINE_API const FString PropertyName_GrammaticalGender;
+	static ENGINE_API const FString PropertyName_GrammaticalPlurality;
+	static ENGINE_API const FString PropertyName_TargetGrammaticalGender;
+	static ENGINE_API const FString PropertyName_TargetGrammaticalNumber;
+	static ENGINE_API const FString PropertyName_DialogueContext;
+	static ENGINE_API const FString PropertyName_IsMature;
 #endif //WITH_EDITORONLY_DATA
 };
 
 USTRUCT()
-struct ENGINE_API FDialogueContextMapping
+struct FDialogueContextMapping
 {
 	GENERATED_USTRUCT_BODY()
 
-	FDialogueContextMapping();
+	ENGINE_API FDialogueContextMapping();
 
 	/** The context of the dialogue. */
 	UPROPERTY(EditAnywhere, Category=DialogueContextMapping )
 	FDialogueContext Context;
 
 	/** The soundwave to play for this dialogue. */
-	UPROPERTY(EditAnywhere, Category=DialogueContextMapping )
-	USoundWave* SoundWave;
+	UPROPERTY(EditAnywhere, Category=DialogueContextMapping, meta = (DisallowedClasses= "/Script/MetasoundEngine.MetaSoundSource, /Script/Engine.SoundSourceBus"))
+	TObjectPtr<USoundWave> SoundWave;
 
 	/**
 	 * The format string to use when generating the localization key for this context. This must be unique within the owner dialogue wave.
@@ -65,11 +65,11 @@ struct ENGINE_API FDialogueContextMapping
 
 	/** Cached object for playing the soundwave with subtitle information included. */
 	UPROPERTY(Transient)
-	UDialogueSoundWaveProxy* Proxy;
+	TObjectPtr<UDialogueSoundWaveProxy> Proxy;
 
 	/** Gets the localization key to use for this context mapping */
-	FString GetLocalizationKey() const;
-	FString GetLocalizationKey(const FString& InOwnerDialogueWaveKey) const;
+	ENGINE_API FString GetLocalizationKey() const;
+	ENGINE_API FString GetLocalizationKey(const FString& InOwnerDialogueWaveKey) const;
 };
 
 ENGINE_API bool operator==(const FDialogueContextMapping& LHS, const FDialogueContextMapping& RHS);
@@ -77,7 +77,7 @@ ENGINE_API bool operator!=(const FDialogueContextMapping& LHS, const FDialogueCo
 
 class UDialogueWaveFactory;
 
-UCLASS(hidecategories=Object, editinlinenew, MinimalAPI, BlueprintType)
+UCLASS(hidecategories=Object, editinlinenew, MinimalAPI, BlueprintType, Meta = (LoadBehavior = "LazyOnDemand"))
 class UDialogueWave : public UObject
 {
 	GENERATED_UCLASS_BODY()
@@ -116,6 +116,8 @@ public:
 	virtual void Serialize( FArchive& Ar ) override;
 	virtual bool IsReadyForFinishDestroy() override;
 	virtual FString GetDesc() override;
+	virtual void GetAssetRegistryTags(FAssetRegistryTagsContext Context) const override;
+	UE_DEPRECATED(5.4, "Implement the version that takes FAssetRegistryTagsContext instead.")
 	virtual void GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const override;
 
 	virtual void PostDuplicate(bool bDuplicateForPIE) override;

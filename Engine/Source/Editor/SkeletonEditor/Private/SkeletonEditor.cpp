@@ -1,10 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SkeletonEditor.h"
+
+#include "DetailLayoutBuilder.h"
 #include "Modules/ModuleManager.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Animation/DebugSkelMeshComponent.h"
-#include "AssetData.h"
+#include "Toolkits/AssetEditorToolkit.h"
+#include "AssetRegistry/AssetData.h"
 #include "EdGraph/EdGraphSchema.h"
 #include "Editor/EditorEngine.h"
 #include "EngineGlobals.h"
@@ -13,6 +16,7 @@
 #include "IPersonaToolkit.h"
 #include "PersonaModule.h"
 #include "SkeletonEditorMode.h"
+#include "IAnimationSequenceBrowser.h"
 #include "IPersonaPreviewScene.h"
 #include "SkeletonEditorCommands.h"
 #include "IAssetFamily.h"
@@ -20,6 +24,10 @@
 #include "IEditableSkeleton.h"
 #include "ISkeletonTreeItem.h"
 #include "Algo/Transform.h"
+#include "PersonaToolMenuContext.h"
+#include "ToolMenus.h"
+#include "ToolMenuMisc.h"
+#include "SkeletonToolMenuContext.h"
 
 const FName SkeletonEditorAppIdentifier = FName(TEXT("SkeletonEditorApp"));
 
@@ -28,11 +36,14 @@ const FName SkeletonEditorModes::SkeletonEditorMode(TEXT("SkeletonEditorMode"));
 const FName SkeletonEditorTabs::DetailsTab(TEXT("DetailsTab"));
 const FName SkeletonEditorTabs::SkeletonTreeTab(TEXT("SkeletonTreeView"));
 const FName SkeletonEditorTabs::ViewportTab(TEXT("Viewport"));
+const FName SkeletonEditorTabs::AssetBrowserTab(TEXT("SequenceBrowser"));
 const FName SkeletonEditorTabs::AnimNotifiesTab(TEXT("SkeletonAnimNotifies"));
-const FName SkeletonEditorTabs::CurveNamesTab(TEXT("AnimCurveViewerTab"));
+const FName SkeletonEditorTabs::CurveMetadataTab(TEXT("AnimCurveMetadataEditorTab"));
+const FName SkeletonEditorTabs::CurveDebuggerTab("AnimCurveViewerTab");
 const FName SkeletonEditorTabs::AdvancedPreviewTab(TEXT("AdvancedPreviewTab"));
 const FName SkeletonEditorTabs::RetargetManagerTab(TEXT("RetargetManager"));
 const FName SkeletonEditorTabs::SlotNamesTab("SkeletonSlotNames");
+const FName SkeletonEditorTabs::FindReplaceTab("FindReplaceTab");
 
 DEFINE_LOG_CATEGORY(LogSkeletonEditor);
 
@@ -54,6 +65,16 @@ FSkeletonEditor::~FSkeletonEditor()
 	{
 		Editor->UnregisterForUndo(this);
 	}
+	if (PersonaToolkit.IsValid())
+	{
+		constexpr bool bSetPreviewMeshInAsset = false;
+		PersonaToolkit->SetPreviewMesh(nullptr, bSetPreviewMeshInAsset);
+	}
+}
+
+void FSkeletonEditor::HandleOpenNewAsset(UObject* InNewAsset)
+{
+	GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->OpenEditorForAsset(InNewAsset);
 }
 
 void FSkeletonEditor::RegisterTabSpawners(const TSharedRef<class FTabManager>& InTabManager)
@@ -71,14 +92,16 @@ void FSkeletonEditor::UnregisterTabSpawners(const TSharedRef<class FTabManager>&
 void FSkeletonEditor::InitSkeletonEditor(const EToolkitMode::Type Mode, const TSharedPtr<IToolkitHost>& InitToolkitHost, USkeleton* InSkeleton)
 {
 	Skeleton = InSkeleton;
+	
+	FPersonaToolkitArgs PersonaToolkitArgs;
+	PersonaToolkitArgs.OnPreviewSceneSettingsCustomized = FOnPreviewSceneSettingsCustomized::FDelegate::CreateSP(this, &FSkeletonEditor::HandleOnPreviewSceneSettingsCustomized);
 
 	FPersonaModule& PersonaModule = FModuleManager::LoadModuleChecked<FPersonaModule>("Persona");
-	PersonaToolkit = PersonaModule.CreatePersonaToolkit(InSkeleton);
+	PersonaToolkit = PersonaModule.CreatePersonaToolkit(InSkeleton, PersonaToolkitArgs);
 
 	PersonaToolkit->GetPreviewScene()->SetDefaultAnimationMode(EPreviewSceneDefaultAnimationMode::ReferencePose);
 
-	TSharedRef<IAssetFamily> AssetFamily = PersonaModule.CreatePersonaAssetFamily(InSkeleton);
-	AssetFamily->RecordAssetOpened(FAssetData(InSkeleton));
+	PersonaModule.RecordAssetOpened(FAssetData(InSkeleton));
 
 	FSkeletonTreeArgs SkeletonTreeArgs;
 	SkeletonTreeArgs.OnSelectionChanged = FOnSkeletonTreeSelectionChanged::CreateSP(this, &FSkeletonEditor::HandleSelectionChanged);
@@ -103,6 +126,8 @@ void FSkeletonEditor::InitSkeletonEditor(const EToolkitMode::Type Mode, const TS
 	ExtendMenu();
 	ExtendToolbar();
 	RegenerateMenusAndToolbars();
+
+	PersonaToolkit->GetPreviewScene()->SetAllowMeshHitProxies(false);
 }
 
 FName FSkeletonEditor::GetToolkitFName() const
@@ -125,6 +150,19 @@ FLinearColor FSkeletonEditor::GetWorldCentricTabColorScale() const
 	return FLinearColor(0.3f, 0.2f, 0.5f, 0.5f);
 }
 
+void FSkeletonEditor::InitToolMenuContext(FToolMenuContext& MenuContext)
+{
+	FAssetEditorToolkit::InitToolMenuContext(MenuContext);
+
+	UPersonaToolMenuContext* PersonaContext = NewObject<UPersonaToolMenuContext>();
+	PersonaContext->SetToolkit(GetPersonaToolkit());
+	MenuContext.AddObject(PersonaContext);
+
+	USkeletonToolMenuContext* SkeletonContext = NewObject<USkeletonToolMenuContext>();
+	SkeletonContext->SkeletonEditor = SharedThis(this);
+	MenuContext.AddObject(SkeletonContext);
+}
+
 void FSkeletonEditor::BindCommands()
 {
 	FSkeletonEditorCommands::Register();
@@ -133,8 +171,8 @@ void FSkeletonEditor::BindCommands()
 		FExecuteAction::CreateSP(this, &FSkeletonEditor::RemoveUnusedBones),
 		FCanExecuteAction::CreateSP(this, &FSkeletonEditor::CanRemoveBones));
 
-	ToolkitCommands->MapAction(FSkeletonEditorCommands::Get().TestSkeletonCurveNamesForUse,
-		FExecuteAction::CreateSP(this, &FSkeletonEditor::TestSkeletonCurveNamesForUse));
+	ToolkitCommands->MapAction(FSkeletonEditorCommands::Get().TestSkeletonCurveMetaDataForUse,
+		FExecuteAction::CreateSP(this, &FSkeletonEditor::TestSkeletonCurveMetaDataForUse));
 
 	ToolkitCommands->MapAction(FSkeletonEditorCommands::Get().UpdateSkeletonRefPose,
 		FExecuteAction::CreateSP(this, &FSkeletonEditor::UpdateSkeletonRefPose));
@@ -152,8 +190,49 @@ void FSkeletonEditor::BindCommands()
 		FExecuteAction::CreateRaw(&GetPersonaToolkit()->GetPreviewScene().Get(), &IPersonaPreviewScene::TogglePlayback));
 }
 
+TSharedPtr<FSkeletonEditor> FSkeletonEditor::GetSkeletonEditor(const FToolMenuContext& InMenuContext)
+{
+	if (USkeletonToolMenuContext* Context = InMenuContext.FindContext<USkeletonToolMenuContext>())
+	{
+		if (Context->SkeletonEditor.IsValid())
+		{
+			return StaticCastSharedPtr<FSkeletonEditor>(Context->SkeletonEditor.Pin());
+		}
+	}
+
+	return TSharedPtr<FSkeletonEditor>();
+}
+
 void FSkeletonEditor::ExtendToolbar()
 {
+	FToolMenuOwnerScoped OwnerScoped(this);
+
+	// Add in Editor Specific functionality
+	FName ParentName;
+	static const FName MenuName = GetToolMenuToolbarName(ParentName);
+
+	UToolMenu* ToolMenu = UToolMenus::Get()->ExtendMenu(MenuName);
+	const FToolMenuInsert SectionInsertLocation("Asset", EToolMenuInsertType::After);
+
+	{
+		ToolMenu->AddDynamicSection("Persona", FNewToolMenuDelegate::CreateLambda([](UToolMenu* InToolMenu)
+		{
+			TSharedPtr<FSkeletonEditor> SkeletonEditor = GetSkeletonEditor(InToolMenu->Context);
+			if (SkeletonEditor.IsValid() && SkeletonEditor->PersonaToolkit.IsValid())
+			{
+				FPersonaModule& PersonaModule = FModuleManager::LoadModuleChecked<FPersonaModule>("Persona");
+				PersonaModule.AddCommonToolbarExtensions(InToolMenu);
+			}
+		}), SectionInsertLocation);
+	}
+
+	{
+		FToolMenuSection& SkeletonSection = ToolMenu->AddSection("Skeleton", LOCTEXT("ToolbarSkeletonSectionLabel", "Skeleton"), SectionInsertLocation);
+		SkeletonSection.AddEntry(FToolMenuEntry::InitToolBarButton(FSkeletonEditorCommands::Get().AnimNotifyWindow));
+		SkeletonSection.AddEntry(FToolMenuEntry::InitToolBarButton(FSkeletonEditorCommands::Get().RetargetManager, LOCTEXT("Toolbar_RetargetManager", "Retarget Manager")));
+		SkeletonSection.AddEntry(FToolMenuEntry::InitToolBarButton(FSkeletonEditorCommands::Get().ImportMesh));
+	}
+
 	// If the ToolbarExtender is valid, remove it before rebuilding it
 	if (ToolbarExtender.IsValid())
 	{
@@ -185,16 +264,6 @@ void FSkeletonEditor::ExtendToolbar()
 		FToolBarExtensionDelegate::CreateLambda([this](FToolBarBuilder& ToolbarBuilder)
 		{
 			FPersonaModule& PersonaModule = FModuleManager::LoadModuleChecked<FPersonaModule>("Persona");
-			PersonaModule.AddCommonToolbarExtensions(ToolbarBuilder, PersonaToolkit.ToSharedRef());
-
-			ToolbarBuilder.BeginSection("Skeleton");
-			{
-				ToolbarBuilder.AddToolBarButton(FSkeletonEditorCommands::Get().AnimNotifyWindow);
-				ToolbarBuilder.AddToolBarButton(FSkeletonEditorCommands::Get().RetargetManager, NAME_None, LOCTEXT("Toolbar_RetargetManager", "Retarget Manager"));
-				ToolbarBuilder.AddToolBarButton(FSkeletonEditorCommands::Get().ImportMesh);
-			}
-			ToolbarBuilder.EndSection();
-
 			TSharedRef<class IAssetFamily> AssetFamily = PersonaModule.CreatePersonaAssetFamily(Skeleton);
 			AddToolbarWidget(PersonaModule.CreateAssetFamilyShortcutWidget(SharedThis(this), AssetFamily));
 		}	
@@ -214,7 +283,7 @@ void FSkeletonEditor::ExtendMenu()
 			{
 				MenuBuilder.AddMenuEntry(FSkeletonEditorCommands::Get().RemoveUnusedBones);
 				MenuBuilder.AddMenuEntry(FSkeletonEditorCommands::Get().UpdateSkeletonRefPose);
-				MenuBuilder.AddMenuEntry(FSkeletonEditorCommands::Get().TestSkeletonCurveNamesForUse);
+				MenuBuilder.AddMenuEntry(FSkeletonEditorCommands::Get().TestSkeletonCurveMetaDataForUse);
 			}
 			MenuBuilder.EndSection();
 		}
@@ -287,7 +356,7 @@ TStatId FSkeletonEditor::GetStatId() const
 bool FSkeletonEditor::CanRemoveBones() const
 {
 	UDebugSkelMeshComponent* PreviewMeshComponent = PersonaToolkit->GetPreviewMeshComponent();
-	return PreviewMeshComponent && PreviewMeshComponent->SkeletalMesh;
+	return PreviewMeshComponent && PreviewMeshComponent->GetSkeletalMeshAsset();
 }
 
 void FSkeletonEditor::RemoveUnusedBones()
@@ -295,17 +364,17 @@ void FSkeletonEditor::RemoveUnusedBones()
 	GetSkeletonTree()->GetEditableSkeleton()->RemoveUnusedBones();
 }
 
-void FSkeletonEditor::TestSkeletonCurveNamesForUse() const
+void FSkeletonEditor::TestSkeletonCurveMetaDataForUse() const
 {
 	FPersonaModule& PersonaModule = FModuleManager::LoadModuleChecked<FPersonaModule>("Persona");
-	PersonaModule.TestSkeletonCurveNamesForUse(GetSkeletonTree()->GetEditableSkeleton());
+	PersonaModule.TestSkeletonCurveMetaDataForUse(GetSkeletonTree()->GetEditableSkeleton());
 }
 
 void FSkeletonEditor::UpdateSkeletonRefPose()
 {
-	if (PersonaToolkit->GetPreviewMeshComponent()->SkeletalMesh)
+	if (PersonaToolkit->GetPreviewMeshComponent()->GetSkeletalMeshAsset())
 	{
-		GetSkeletonTree()->GetEditableSkeleton()->UpdateSkeletonReferencePose(PersonaToolkit->GetPreviewMeshComponent()->SkeletalMesh);
+		GetSkeletonTree()->GetEditableSkeleton()->UpdateSkeletonReferencePose(PersonaToolkit->GetPreviewMeshComponent()->GetSkeletalMeshAsset());
 	}
 }
 
@@ -325,9 +394,24 @@ void FSkeletonEditor::OnImportAsset()
 	PersonaModule.ImportNewAsset(Skeleton, FBXIT_SkeletalMesh);
 }
 
+void FSkeletonEditor::HandleOnPreviewSceneSettingsCustomized(IDetailLayoutBuilder& DetailBuilder)
+{
+	DetailBuilder.HideCategory("Animation Blueprint");
+}
+
 void FSkeletonEditor::HandleDetailsCreated(const TSharedRef<IDetailsView>& InDetailsView)
 {
 	DetailsView = InDetailsView;
+}
+
+void FSkeletonEditor::HandleAnimationSequenceBrowserCreated(const TSharedRef<IAnimationSequenceBrowser>& InSequenceBrowser)
+{
+	SequenceBrowser = InSequenceBrowser;
+}
+
+IAnimationSequenceBrowser* FSkeletonEditor::GetAssetBrowser() const
+{
+	return SequenceBrowser.Pin().Get();
 }
 
 #undef LOCTEXT_NAMESPACE

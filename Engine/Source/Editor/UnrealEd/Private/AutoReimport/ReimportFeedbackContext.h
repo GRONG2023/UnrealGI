@@ -2,16 +2,21 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Widgets/SWidget.h"
+#include "Delegates/Delegate.h"
+#include "HAL/Platform.h"
+#include "Logging/LogVerbosity.h"
 #include "Logging/MessageLog.h"
-#include "Widgets/Notifications/SNotificationList.h"
+#include "Logging/TokenizedMessage.h"
 #include "Misc/FeedbackContext.h"
 #include "Misc/ScopedSlowTask.h"
-#include "Widgets/Text/STextBlock.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UniquePtr.h"
+#include "UObject/NameTypes.h"
 #include "Widgets/Notifications/INotificationWidget.h"
+#include "Widgets/Notifications/SNotificationList.h"
 
-class SReimportFeedback;
+class FText;
+class SWidget;
 
 /** Feedback context that overrides GWarn for import operations to prevent popup spam */
 class FReimportFeedbackContext : public FFeedbackContext, public INotificationWidget, public TSharedFromThis<FReimportFeedbackContext>
@@ -36,7 +41,9 @@ public:
 	void AddWidget(const TSharedRef<SWidget>& Widget);
 
 	/** INotificationWidget and FFeedbackContext overrides */
-	virtual void Serialize( const TCHAR* V, ELogVerbosity::Type Verbosity, const class FName& Category ) override {}
+	virtual void Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const FName& Category) override {}
+	virtual void Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const FName& Category, double Time) override {}
+	virtual void SerializeRecord(const UE::FLogRecord& Record) override {}
 	virtual void OnSetCompletionState(SNotificationItem::ECompletionState State) override {}
 	virtual TSharedRef<SWidget> AsWidget() override;
 	virtual void StartSlowTask(const FText& Task, bool bShowCancelButton=false) override;

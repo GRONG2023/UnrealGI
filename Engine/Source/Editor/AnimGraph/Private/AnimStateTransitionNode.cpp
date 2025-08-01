@@ -7,16 +7,23 @@
 #include "AnimStateTransitionNode.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Animation/AnimInstance.h"
+#include "AnimationStateGraph.h"
 #include "AnimationTransitionGraph.h"
 #include "AnimationTransitionSchema.h"
 #include "AnimationCustomTransitionGraph.h"
 #include "AnimationCustomTransitionSchema.h"
+#include "AnimGraphNode_BlendSpacePlayer.h"
+#include "AnimGraphNode_SequencePlayer.h"
+#include "AnimGraphNode_StateResult.h"
 #include "AnimGraphNode_TransitionResult.h"
+#include "AnimStateAliasNode.h"
+#include "AnimStateConduitNode.h"
 #include "Kismet2/CompilerResultsLog.h"
 #include "EdGraphUtilities.h"
 #include "Kismet2/Kismet2NameValidators.h"
 #include "ScopedTransaction.h"
 #include "Animation/BlendProfile.h"
+#include "UObject/UE5MainStreamObjectVersion.h"
 
 //////////////////////////////////////////////////////////////////////////
 // IAnimStateTransitionNodeSharedDataHelper
@@ -72,6 +79,8 @@ UAnimStateTransitionNode::UAnimStateTransitionNode(const FObjectInitializer& Obj
 
 	CrossfadeDuration = 0.2f;
 	BlendMode = EAlphaBlendOption::HermiteCubic;
+	bAutomaticRuleBasedOnSequencePlayerInState = false;
+	AutomaticRuleTriggerTime = -1.f;
 	bSharedRules = false;
 	SharedRulesGuid.Invalidate();
 	bSharedCrossfade = false;
@@ -111,7 +120,7 @@ void UAnimStateTransitionNode::PostLoad()
 		FAnimStateTransitionNodeSharedCrossfadeHelper().MakeSureGuidExists(this);
 	}
 
-	if(GetLinkerUE4Version() < VER_UE4_ADDED_NON_LINEAR_TRANSITION_BLENDS)
+	if(GetLinkerUEVersion() < VER_UE4_ADDED_NON_LINEAR_TRANSITION_BLENDS)
 	{
 		switch(CrossfadeMode_DEPRECATED)
 		{
@@ -195,7 +204,7 @@ void UAnimStateTransitionNode::PostPasteNode()
 	Super::PostPasteNode();
 
 	// We don't want to paste nodes in that aren't fully linked (transition nodes have fixed pins as they
-	// really describle the connection between two other nodes). If we find one missing link, get rid of the node.
+	// really describe the connection between two other nodes). If we find one missing link, get rid of the node.
 	for(UEdGraphPin* Pin : Pins)
 	{
 		if(Pin->LinkedTo.Num() == 0)
@@ -301,6 +310,86 @@ void UAnimStateTransitionNode::CreateConnections(UAnimStateNodeBase* PreviousSta
 
 	NextState->GetInputPin()->Modify();
 	Pins[1]->MakeLinkTo(NextState->GetInputPin());
+}
+
+void UAnimStateTransitionNode::RelinkHead(UAnimStateNodeBase* NewTargetState)
+{
+	UAnimStateNodeBase* SourceState = GetPreviousState();
+	UAnimStateNodeBase* TargetStateBeforeRelinking = GetNextState();
+
+	// Remove the incoming transition from the previous target state
+	TargetStateBeforeRelinking->GetInputPin()->Modify();
+	TargetStateBeforeRelinking->GetInputPin()->BreakLinkTo(SourceState->GetOutputPin());
+
+	// Add the new incoming transition to the new target state
+	NewTargetState->GetInputPin()->Modify();
+	NewTargetState->GetInputPin()->MakeLinkTo(SourceState->GetOutputPin());
+
+	// Relink the target state of the transition node
+	Pins[1]->Modify();
+	Pins[1]->BreakLinkTo(TargetStateBeforeRelinking->GetInputPin());
+	Pins[1]->MakeLinkTo(NewTargetState->GetInputPin());
+}
+
+TArray<UAnimStateTransitionNode*> UAnimStateTransitionNode::GetListTransitionNodesToRelink(UEdGraphPin* SourcePin, UEdGraphPin* OldTargetPin, const TArray<UEdGraphNode*>& InSelectedGraphNodes)
+{
+	UAnimStateNodeBase* SourceState = Cast<UAnimStateNodeBase>(SourcePin->GetOwningNode());
+	if (SourceState == nullptr || SourceState->GetInputPin() == nullptr || SourceState->GetOutputPin() == nullptr)
+	{
+		return {};
+	}
+
+	// Collect all transition nodes starting at the source state
+	TArray<UAnimStateTransitionNode*> TransitionNodeCandidates;
+	SourceState->GetTransitionList(TransitionNodeCandidates);
+
+	// Remove the transition nodes from the candidates that are linked to a different target state.
+	for (int i = TransitionNodeCandidates.Num() - 1; i >= 0; i--)
+	{
+		UAnimStateTransitionNode* CurrentTransition = TransitionNodeCandidates[i];
+
+		// Get the actual target states from the transition nodes
+		UEdGraphNode* TransitionTargetNode = CurrentTransition->GetNextState();
+		UAnimStateTransitionNode* CastedOldTarget = Cast<UAnimStateTransitionNode>(OldTargetPin->GetOwningNode());
+		UEdGraphNode* OldTargetNode = CastedOldTarget->GetNextState();
+
+		// Compare the target states rather than comparing against the transition nodes
+		if (TransitionTargetNode != OldTargetNode)
+		{
+			TransitionNodeCandidates.Remove(CurrentTransition);
+		}
+	}
+
+	// Collect the subset of selected transitions from the list of possible transitions to be relinked
+	TSet<UAnimStateTransitionNode*> SelectedTransitionNodes;
+	for (UEdGraphNode* GraphNode : InSelectedGraphNodes)
+	{
+		UAnimStateTransitionNode* TransitionNode = Cast<UAnimStateTransitionNode>(GraphNode);
+		if (!TransitionNode)
+		{
+			continue;
+		}
+
+		if (TransitionNodeCandidates.Find(TransitionNode) != INDEX_NONE)
+		{
+			SelectedTransitionNodes.Add(TransitionNode);
+		}
+	}
+
+	TArray<UAnimStateTransitionNode*> Result;
+	Result.Reserve(TransitionNodeCandidates.Num());
+	for (UAnimStateTransitionNode* TransitionNode : TransitionNodeCandidates)
+	{
+		// Only relink the selected transitions. If none are selected, relink them all.
+		if (!SelectedTransitionNodes.IsEmpty() && SelectedTransitionNodes.Find(TransitionNode) == nullptr)
+		{
+			continue;
+		}
+
+		Result.Add(TransitionNode);
+	}
+
+	return Result;
 }
 
 void UAnimStateTransitionNode::PrepareForCopying()
@@ -546,6 +635,7 @@ void UAnimStateTransitionNode::Serialize(FArchive& Ar)
 {
 	Super::Serialize(Ar);
 	Ar.UsingCustomVersion(FAnimPhysObjectVersion::GUID);
+	Ar.UsingCustomVersion(FUE5MainStreamObjectVersion::GUID);
 }
 
 void UAnimStateTransitionNode::DestroyNode()
@@ -570,18 +660,22 @@ void UAnimStateTransitionNode::DestroyNode()
 }
 
 /** Returns true if this nodes BoundGraph is shared with another node in the parent graph */
-bool UAnimStateTransitionNode::IsBoundGraphShared()
+bool UAnimStateTransitionNode::IsBoundGraphShared() const
 {
 	if (BoundGraph)
 	{
-		//@TODO: O(N) search
-		UEdGraph* ParentGraph = GetGraph();
-		for (int32 NodeIdx = 0; NodeIdx < ParentGraph->Nodes.Num(); NodeIdx++)
+		if (UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraph(GetGraph()))
 		{
-			UAnimStateNodeBase* AnimNode = Cast<UAnimStateNodeBase>(ParentGraph->Nodes[NodeIdx]);
-			if ((AnimNode != NULL) && (AnimNode != this) && (AnimNode->GetBoundGraph() == BoundGraph))
+			TArray<UAnimStateNodeBase*> StateNodes;
+			FBlueprintEditorUtils::GetAllNodesOfClassEx<UAnimStateNodeBase>(Blueprint, StateNodes);
+
+			for (int32 NodeIdx = 0; NodeIdx < StateNodes.Num(); NodeIdx++)
 			{
-				return true;
+				UAnimStateNodeBase* AnimNode = Cast<UAnimStateNodeBase>(StateNodes[NodeIdx]);
+				if ((AnimNode != NULL) && (AnimNode != this) && (AnimNode->GetBoundGraph() == BoundGraph))
+				{
+					return true;
+				}
 			}
 		}
 	}
@@ -598,7 +692,56 @@ void UAnimStateTransitionNode::ValidateNodeDuringCompilation(class FCompilerResu
 		UAnimGraphNode_TransitionResult* ResultNode = TransGraph->GetResultNode();
 		check(ResultNode);
 
-		if (ResultNode->PropertyBindings.Num() > 0 && ResultNode->PropertyBindings.CreateIterator()->Value.bIsBound)
+		if (bAutomaticRuleBasedOnSequencePlayerInState)
+		{
+			// Check for automatic transition rules that are being triggered from looping asset players, as these can often be symptomatic of logic errors
+			if (UAnimStateNodeBase* PreviousState = GetPreviousState())
+			{
+				// Deal with alias state nodes. Only single source aliases are valid
+				if (UAnimStateAliasNode* AliasState = Cast<UAnimStateAliasNode>(PreviousState))
+				{
+					PreviousState = AliasState->GetAliasedState();
+					if (!PreviousState)
+					{
+						MessageLog.Note(TEXT("Transition @@ is using an automatic transition rule but its source is an Alias node which aliases more than one State"), this);
+						return;
+					}
+				}
+				
+				UAnimationStateGraph* PreviousStateGraph = Cast<UAnimationStateGraph>(PreviousState->GetBoundGraph());
+				if (!PreviousStateGraph)
+				{
+					MessageLog.Note(TEXT("Transition @@ is using an automatic transition rule but source @@ is not a valid State. Check if the transit is connected to a Conduit"), this, PreviousState);
+					return;
+				}
+				
+				if (UAnimGraphNode_StateResult* PreviousStateGraphResultNode = PreviousStateGraph->GetResultNode())
+				{
+					for (UEdGraphPin* TestPin : PreviousStateGraphResultNode->Pins)
+					{
+						// Warn for the trivial but common case of a looping asset player connected directly to the result node
+						if ((TestPin->Direction == EGPD_Input) && (TestPin->LinkedTo.Num() == 1))
+						{
+							if (UAnimGraphNode_SequencePlayer* SequencePlayer = Cast<UAnimGraphNode_SequencePlayer>(TestPin->LinkedTo[0]->GetOwningNode()))
+							{
+								if (SequencePlayer->Node.IsLooping())
+								{
+									MessageLog.Note(TEXT("Transition @@ is using an automatic transition rule but the source @@ is set as looping.  Please clear the 'Loop Animation' flag"), this, SequencePlayer);
+								}
+							}
+							else if (UAnimGraphNode_BlendSpacePlayer* BlendSpacePlayer = Cast<UAnimGraphNode_BlendSpacePlayer>(TestPin->LinkedTo[0]->GetOwningNode()))
+							{
+								if (BlendSpacePlayer->Node.IsLooping())
+								{
+									MessageLog.Note(TEXT("Transition @@ is using an automatic transition rule but the source @@ is set as looping.  Please clear the 'Loop' flag"), this, BlendSpacePlayer);
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		else if (ResultNode->HasBinding(GET_MEMBER_NAME_CHECKED(FAnimNode_TransitionResult, bCanEnterTransition)))
 		{
 			// Rule is bound so nothing more to check
 		}
@@ -637,6 +780,23 @@ void UAnimStateTransitionNode::ValidateNodeDuringCompilation(class FCompilerResu
 	{
 		MessageLog.Error(TEXT("@@ contains an invalid or NULL BoundGraph.  Please delete and recreate the transition."), this);
 	}
+}
+
+UObject* UAnimStateTransitionNode::GetJumpTargetForDoubleClick() const
+{
+	// Our base class uses GetSubGraphs. Since we explicitly ignore a shared bound graph, use BoundGraph directly instead.
+	return BoundGraph;
+}
+
+TArray<UEdGraph*> UAnimStateTransitionNode::GetSubGraphs() const
+{ 
+	TArray<UEdGraph*> SubGraphs;
+	if(!IsBoundGraphShared())
+	{
+		SubGraphs.Add(BoundGraph);
+	}
+	SubGraphs.Add(CustomTransitionGraph);
+	return SubGraphs; 
 }
 
 //////////////////////////////////////////////////////////////////////////

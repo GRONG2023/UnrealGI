@@ -8,6 +8,8 @@
 #include "EnvironmentQuery/Items/EnvQueryItemType_VectorBase.h"
 #include "EnvironmentQuery/Contexts/EnvQueryContext_Querier.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(EnvQueryTest_Overlap)
+
 #define LOCTEXT_NAMESPACE "EnvQueryGenerator"
 
 UEnvQueryTest_Overlap::UEnvQueryTest_Overlap(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
@@ -37,11 +39,11 @@ void UEnvQueryTest_Overlap::RunTest(FEnvQueryInstance& QueryInstance) const
 			break;
 
 		case EEnvOverlapShape::Sphere:
-			CollisionShape = FCollisionShape::MakeSphere(TraceExtent.X);
+			CollisionShape = FCollisionShape::MakeSphere(FloatCastChecked<float>(TraceExtent.X, UE::LWC::DefaultFloatPrecision));
 			break;
 
 		case EEnvOverlapShape::Capsule:
-			CollisionShape = FCollisionShape::MakeCapsule(TraceExtent.X, TraceExtent.Z);
+			CollisionShape = FCollisionShape::MakeCapsule(FloatCastChecked<float>(TraceExtent.X, UE::LWC::DefaultFloatPrecision), FloatCastChecked<float>(TraceExtent.Z, UE::LWC::DefaultFloatPrecision));
 			break;
 
 		default:
@@ -66,7 +68,7 @@ void UEnvQueryTest_Overlap::RunTest(FEnvQueryInstance& QueryInstance) const
 		const bool bHit = (this->*OverlapFunc)(ItemLocation + OverlapData.ShapeOffset, CollisionShape, IgnoredActors, QueryInstance.World, OverlapCollisionChannel, OverlapParams);
 		It.SetScore(TestPurpose, FilterType, bHit, bWantsHit);
 		
-		IgnoredActors.Pop(/*bAllowShrinking=*/false);
+		IgnoredActors.Pop(EAllowShrinking::No);
 	}
 }
 
@@ -111,20 +113,6 @@ FText UEnvQueryTest_Overlap::GetDescriptionDetails() const
 	return FText::FromString(FString::Printf(TEXT("Using a %s where %s in channel: %s"), *ShapeDesc, *SizeDesc, *ChannelDesc));
 }
 
-bool UEnvQueryTest_Overlap::RunOverlap(const FVector& ItemPos, const FCollisionShape& CollisionShape, AActor* ItemActor, UWorld* World, enum ECollisionChannel Channel, const FCollisionQueryParams& Params)
-{
-	TArray<AActor*> Actors;
-	Actors.Add(ItemActor);
-	return const_cast<UEnvQueryTest_Overlap*>(this)->RunOverlap(ItemPos, CollisionShape, Actors, World, Channel, Params);
-}
-
-bool UEnvQueryTest_Overlap::RunOverlapBlocking(const FVector& ItemPos, const FCollisionShape& CollisionShape, AActor* ItemActor, UWorld* World, enum ECollisionChannel Channel, const FCollisionQueryParams& Params)
-{
-	TArray<AActor*> Actors;
-	Actors.Add(ItemActor);
-	return const_cast<UEnvQueryTest_Overlap*>(this)->RunOverlapBlocking(ItemPos, CollisionShape, Actors, World, Channel, Params);
-}
-
 bool UEnvQueryTest_Overlap::RunOverlap(const FVector& ItemPos, const FCollisionShape& CollisionShape, const TArray<AActor*>& IgnoredActors, UWorld* World, enum ECollisionChannel Channel, const FCollisionQueryParams& Params) const
 {
 	FCollisionQueryParams OverlapParams(Params);
@@ -144,3 +132,4 @@ bool UEnvQueryTest_Overlap::RunOverlapBlocking(const FVector& ItemPos, const FCo
 }
 
 #undef LOCTEXT_NAMESPACE
+

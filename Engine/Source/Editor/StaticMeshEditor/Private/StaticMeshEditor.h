@@ -12,6 +12,7 @@
 #include "TickableEditorObject.h"
 #include "SEditorViewport.h"
 #include "AdvancedPreviewSceneModule.h"
+#include "AssetEditorViewportLayout.h"
 
 // Set USE_ASYNC_DECOMP to zero to go back to the fully synchronous; blocking version of V-HACD
 #ifndef USE_ASYNC_DECOMP
@@ -27,7 +28,6 @@ class FEditorViewportClient;
 class IDetailsView;
 class SConvexDecomposition;
 class SDockTab;
-class SDockableTab;
 class SStaticMeshEditorViewport;
 class UStaticMesh;
 class UStaticMeshComponent;
@@ -35,6 +35,7 @@ class UStaticMeshSocket;
 class FViewportTabContent;
 struct FPropertyChangedEvent;
 struct FTabSpawnerEntry;
+class FStaticMeshEditorModeUILayer;
 
 /**
  * StaticMesh Editor class
@@ -69,9 +70,15 @@ private:
 	/** Initializes the editor to use a static mesh. Should be the first thing called. */
 	void InitEditorForStaticMesh(UStaticMesh* ObjectToEdit);
 
+	virtual void PostInitAssetEditor() override;
+
 public:
 	virtual void RegisterTabSpawners(const TSharedRef<class FTabManager>& TabManager) override;
 	virtual void UnregisterTabSpawners(const TSharedRef<class FTabManager>& TabManager) override;
+
+	// IToolkitHost Interface
+	void OnToolkitHostingStarted(const TSharedRef<IToolkit>& Toolkit) override;
+	void OnToolkitHostingFinished(const TSharedRef<IToolkit>& Toolkit) override;
 
 	/**
 	 * Edits the specified static mesh object
@@ -87,6 +94,10 @@ public:
 
 	//~ Begin FGCObject Interface
 	virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FStaticMeshEditor");
+	}
 	//~ End FGCObject Interface
 
 	/** IToolkit interface */
@@ -120,6 +131,8 @@ public:
 	virtual bool IsSelectedPrim(const FPrimData& InPrimData) const override;
 	virtual void ClearSelectedPrims() override;
 	virtual void DuplicateSelectedPrims(const FVector* InOffset) override;
+	virtual int32 CopySelectedPrims() const override;
+	virtual int32 PasteCopiedPrims() override;
 	virtual void TranslateSelectedPrims(const FVector& InDrag) override;
 	virtual void RotateSelectedPrims(const FRotator& InRot) override;
 	virtual void ScaleSelectedPrims(const FVector& InScale) override;
@@ -213,6 +226,21 @@ public:
 	/** Returns the stat ID for this tickable class */
 	virtual TStatId GetStatId() const final;
 
+	/** Add a widget to the StaticMeshViewport's ViewportOverlay */
+	void AddViewportOverlayWidget(TSharedRef<SWidget> InOverlaidWidget) override;
+
+	/** Remove a widget from the StaticMeshViewport's ViewportOverlay */
+	void RemoveViewportOverlayWidget(TSharedRef<SWidget> InViewportOverlayWidget) override;
+
+	void CreateEditorModeManager() override;
+
+	/**	The tab ids for all the tabs used */
+	static const FName ViewportTabId;
+	static const FName PropertiesTabId;
+	static const FName SocketManagerTabId;
+	static const FName CollisionTabId;
+	static const FName PreviewSceneSettingsTabId;
+	static const FName SecondaryToolbarTabId;
 
 private:
 	TSharedRef<SDockTab> SpawnTab_Viewport(const FSpawnTabArgs& Args);
@@ -304,6 +332,9 @@ private:
 	/** Callback for checking the draw additional data flag. */
 	bool IsDrawAdditionalDataChecked() const;
 
+	/** Bake out Materials for give LOD(s). **/
+	void BakeMaterials();
+
 private:
 
 
@@ -394,13 +425,16 @@ private:
 	void OnSaveGeneratedLODs();
 
 	/** Rebuilds the UV Channel combo list and attempts to set it to the same channel. */
-	TSharedRef<SWidget> GenerateUVChannelComboList();
+	void GenerateUVChannelComboList(UToolMenu* InMenu);
 
 	/** Delete whats currently selected */
 	void DeleteSelected();
 
 	/** Whether we currently have any selected that can be deleted */
 	bool CanDeleteSelected() const;
+
+	/** Init SocketManager (does nothing if it already exists) */
+	void InitSocketManager();
 
 	/** Delete the currently selected sockets */
 	void DeleteSelectedSockets();
@@ -413,6 +447,18 @@ private:
 
 	/** Whether we currently have any selected that can be duplicated */
 	bool CanDuplicateSelected() const;
+
+	/** Copy what's currently selected to the clipboard */
+	void CopySelected();
+
+	/** Whether we currently have anything selected that can be copied to the clipboard */
+	bool CanCopySelected() const;
+
+	/** Paste what's current on the clipboard */
+	void PasteCopied();
+
+	/** Whether we can paste what's currently on the clipboard */
+	bool CanPasteCopied() const;
 
 	/** Whether we currently have any selected that can be renamed */
 	bool CanRenameSelected() const;
@@ -430,7 +476,9 @@ private:
 	void OnConvexDecomposition();
 
 	//~ Begin FAssetEditorToolkit Interface.
-	virtual bool OnRequestClose() override;
+	virtual bool OnRequestClose(EAssetEditorCloseReason InCloseReason) override;
+	virtual void SetupReadOnlyMenuProfiles(FReadOnlyAssetEditorCustomization& OutReadOnlyCustomization) override;
+
 	//~ End FAssetEditorToolkit Interface.
 
 	//~ Begin FEditorUndoClient Interface
@@ -471,9 +519,6 @@ private:
 	// Tracking the active viewports in this editor.
 	TSharedPtr<class FEditorViewportTabContent> ViewportTabContent;
 
-	/** List of open tool panels; used to ensure only one exists at any one time */
-	TMap< FName, TWeakPtr<class SDockableTab> > SpawnedToolPanels;
-
 	/** Property View */
 	TSharedPtr<class IDetailsView> StaticMeshDetailsView;
 
@@ -487,7 +532,7 @@ private:
 	TWeakPtr<class FStaticMeshDetails> StaticMeshDetails;
 
 	/** The currently viewed Static Mesh. */
-	UStaticMesh* StaticMesh;
+	TObjectPtr<UStaticMesh> StaticMesh;
 
 	/** The number of triangles associated with the static mesh LOD. */
 	TArray<int32> NumTriangles;
@@ -523,14 +568,6 @@ private:
 	IDecomposeMeshToHullsAsync        *DecomposeMeshToHullsAsync{ nullptr };
 #endif
 
-	/**	The tab ids for all the tabs used */
-	static const FName ViewportTabId;
-	static const FName PropertiesTabId;
-	static const FName SocketManagerTabId;
-	static const FName CollisionTabId;
-	static const FName PreviewSceneSettingsTabId;
-	static const FName SecondaryToolbarTabId;
-
 	/** Allow custom data for this editor */
 	TMap<int32, int32> CustomEditorData;
 
@@ -556,7 +593,7 @@ private:
 	FText SecondaryToolbarDisplayName;
 	
 	/** Storage for our viewport creation function that will be passed to the viewport layout system*/
-	TFunction<TSharedRef<SEditorViewport>(void)> MakeViewportFunc;
+	AssetEditorViewportFactoryFunction MakeViewportFunc;
 
 	/** Toolbar toggles */
 	bool bDrawNormals;
@@ -572,4 +609,6 @@ private:
 	bool bDrawWireframes;
 	bool bDrawVertexColors;
 	bool bDrawAdditionalData;
+
+	TSharedPtr<FStaticMeshEditorModeUILayer> ModeUILayer;
 };

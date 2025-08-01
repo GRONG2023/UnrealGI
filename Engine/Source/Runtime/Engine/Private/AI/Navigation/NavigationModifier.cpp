@@ -1,28 +1,43 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AI/NavigationModifier.h"
+#include "Math/ConvexHull2d.h"
 #include "UObject/UnrealType.h"
 #include "EngineStats.h"
-#include "GameFramework/Actor.h"
 #include "Components/BrushComponent.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "AI/NavigationSystemBase.h"
 #include "AI/Navigation/NavAreaBase.h"
+#include "PhysicsEngine/BoxElem.h"
+#include "PhysicsEngine/ConvexElem.h"
+#include "PhysicsEngine/SphereElem.h"
+#include "PhysicsEngine/SphylElem.h"
 
 // if square distance between two points is less than this the those points
 // will be considered identical when calculating convex hull
 // should be less than voxel size (recast navmesh)
-static const float CONVEX_HULL_POINTS_MIN_DISTANCE_SQ = 4.0f * 4.0f;
+static const FVector::FReal CONVEX_HULL_POINTS_MIN_DISTANCE_SQ = 4.0f * 4.0f;
+
+bool FCompositeNavModifier::bEnableNavMeshResolutions = true;
+
+namespace UE::Navigation::Private
+{
+	FAutoConsoleVariableRef CVarEnableNavMeshResolutions(TEXT("ai.nav.EnableNavMeshResolutions"), FCompositeNavModifier::bEnableNavMeshResolutions, TEXT("When set to false, navmesh resoutions will be ignored."), ECVF_Default);
+}
 
 //----------------------------------------------------------------------//
 // FNavigationLinkBase
 //----------------------------------------------------------------------//
 FNavigationLinkBase::FNavigationLinkBase() 
-	: LeftProjectHeight(0.0f), MaxFallDownLength(1000.0f), UserId(InvalidUserId), SnapRadius(30.f), SnapHeight(50.0f),
+	: LeftProjectHeight(0.0f), MaxFallDownLength(1000.0f), SnapRadius(30.f), SnapHeight(50.0f),
 	  Direction(ENavLinkDirection::BothWays), bUseSnapHeight(false), bSnapToCheapestArea(true),
 	  bCustomFlag0(false), bCustomFlag1(false), bCustomFlag2(false), bCustomFlag3(false), bCustomFlag4(false),
 	  bCustomFlag5(false), bCustomFlag6(false), bCustomFlag7(false)
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	UserId = InvalidUserId;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
 	AreaClass = nullptr;
 	SupportedAgentsBits = 0xFFFFFFFF;
 }
@@ -55,7 +70,7 @@ bool FNavigationLinkBase::HasMetaArea() const
 #if WITH_EDITORONLY_DATA
 void FNavigationLinkBase::PostSerialize(const FArchive& Ar)
 {
-	if (Ar.IsLoading() && Ar.UE4Ver() < VER_UE4_NAVIGATION_AGENT_SELECTOR)
+	if (Ar.IsLoading() && Ar.UEVer() < VER_UE4_NAVIGATION_AGENT_SELECTOR)
 	{
 		SupportedAgents.bSupportsAgent0 = bSupportsAgent0;
 		SupportedAgents.bSupportsAgent1 = bSupportsAgent1;
@@ -294,16 +309,16 @@ FAreaNavModifier::FAreaNavModifier(float Radius, float Height, const FTransform&
 	Init(InAreaClass);
 	
 	FVector Scale3D = LocalToWorld.GetScale3D().GetAbs();
-	Radius *= FMath::Max(Scale3D.X, Scale3D.Y);
-	Height *= Scale3D.Z;
+	const FVector::FReal RadiusScaled = Radius * FMath::Max(Scale3D.X, Scale3D.Y);
+	const FVector::FReal HeightScaled = Height * Scale3D.Z;
 
 	Points.SetNumUninitialized(2);
 	Points[0] = LocalToWorld.GetLocation();
-	Points[1].X = Radius;
-	Points[1].Z = Height;
+	Points[1].X = RadiusScaled;
+	Points[1].Z = HeightScaled;
 	ShapeType = ENavigationShapeType::Cylinder;
 
-	Bounds = FBox::BuildAABB(LocalToWorld.GetLocation(), FVector(Radius, Radius, Height));
+	Bounds = FBox::BuildAABB(LocalToWorld.GetLocation(), FVector(RadiusScaled, RadiusScaled, HeightScaled));
 }
 
 FAreaNavModifier::FAreaNavModifier(const FVector& Extent, const FTransform& LocalToWorld, const TSubclassOf<UNavAreaBase> InAreaClass)
@@ -345,7 +360,7 @@ void FAreaNavModifier::InitializeConvex(const TNavStatArray<FVector>& InPoints, 
 	check(InPoints.IsValidIndex(FirstIndex) && InPoints.IsValidIndex(LastIndex-1));
 
 	Init(InAreaClass);
-	SetConvex(InPoints.GetData(), FirstIndex, LastIndex, ENavigationCoordSystem::Unreal, LocalToWorld);
+	SetConvex(UE::LWC::ConvertArrayType<FVector>(InPoints).GetData(), FirstIndex, LastIndex, ENavigationCoordSystem::Unreal, LocalToWorld);	// LWC_TODO: Perf pessimization
 }
 
 void FAreaNavModifier::InitializePerInstanceConvex(const TNavStatArray<FVector>& InPoints, const int32 FirstIndex, const int32 LastIndex, const TSubclassOf<UNavAreaBase> InAreaClass)
@@ -353,7 +368,7 @@ void FAreaNavModifier::InitializePerInstanceConvex(const TNavStatArray<FVector>&
 	check(InPoints.IsValidIndex(FirstIndex) && InPoints.IsValidIndex(LastIndex - 1));
 
 	Init(InAreaClass);
-	SetPerInstanceConvex(InPoints.GetData(), FirstIndex, LastIndex);
+	SetPerInstanceConvex(UE::LWC::ConvertArrayType<FVector>(InPoints).GetData(), FirstIndex, LastIndex);	// LWC_TODO: Perf pessimization
 }
 
 FAreaNavModifier::FAreaNavModifier(const UBrushComponent* BrushComponent, const TSubclassOf<UNavAreaBase> InAreaClass)
@@ -381,8 +396,8 @@ void FAreaNavModifier::GetCylinder(FCylinderNavAreaData& Data) const
 {
 	check(Points.Num() == 2 && ShapeType == ENavigationShapeType::Cylinder);
 	Data.Origin = Points[0];
-	Data.Radius = Points[1].X;
-	Data.Height = Points[1].Z;
+	Data.Radius = FloatCastChecked<float>(Points[1].X, UE::LWC::DefaultFloatPrecision);
+	Data.Height = FloatCastChecked<float>(Points[1].Z, UE::LWC::DefaultFloatPrecision);
 }
 
 void FAreaNavModifier::GetBox(FBoxNavAreaData& Data) const
@@ -445,8 +460,17 @@ void FAreaNavModifier::SetAreaClassToReplace(const TSubclassOf<UNavAreaBase> InA
 	bHasMetaAreas = (AreaClass1 && IsMetaAreaClass(*AreaClass1))
 		|| (AreaClass2 && IsMetaAreaClass(*AreaClass2));
 
-	bIsLowAreaModifier = (AreaClass2 && AreaClass2->GetDefaultObject<UNavAreaBase>()->IsLowArea());
-	ApplyMode = bIsLowAreaModifier ? ENavigationAreaMode::ReplaceInLowPass : AreaClass2 ? ENavigationAreaMode::Replace : ENavigationAreaMode::Apply;
+	if (AreaClass2)
+	{
+		bIsLowAreaModifier = AreaClass2->GetDefaultObject<UNavAreaBase>()->IsLowArea();
+		ApplyMode = bIsLowAreaModifier ? ENavigationAreaMode::ReplaceInLowPass : ENavigationAreaMode::Replace;
+	}
+	else if (ApplyMode == ENavigationAreaMode::ReplaceInLowPass || ApplyMode == ENavigationAreaMode::Replace)
+	{
+		// since we no longer have ReplaceAreaClass the new value of ApplyMode and bIsLowAreaModifier should depend on previous value of ApplyMode
+		bIsLowAreaModifier = ApplyMode == ENavigationAreaMode::ReplaceInLowPass;
+		ApplyMode = ApplyMode == ENavigationAreaMode::ReplaceInLowPass ? ENavigationAreaMode::ApplyInLowPass : ENavigationAreaMode::Apply;		
+	}
 }
 
 void FAreaNavModifier::SetApplyMode(ENavigationAreaMode::Type InApplyMode)
@@ -455,7 +479,7 @@ void FAreaNavModifier::SetApplyMode(ENavigationAreaMode::Type InApplyMode)
 	bIsLowAreaModifier = (InApplyMode == ENavigationAreaMode::ApplyInLowPass) || (InApplyMode == ENavigationAreaMode::ReplaceInLowPass);
 }
 
-bool IsAngleMatching(float Angle)
+bool IsAngleMatching(FRotator::FReal Angle)
 {
 	const float AngleThreshold = 1.0f; // degrees
 	return (Angle < AngleThreshold) || ((90.0f - Angle) < AngleThreshold);
@@ -475,9 +499,9 @@ void FAreaNavModifier::SetBox(const FBox& Box, const FTransform& LocalToWorld)
 
 	// check if it can be used as AABB
 	const FRotator Rotation = LocalToWorld.GetRotation().Rotator();
-	const float PitchMod = FMath::Fmod(FMath::Abs(Rotation.Pitch), 90.0f);
-	const float YawMod = FMath::Fmod(FMath::Abs(Rotation.Yaw), 90.0f);
-	const float RollMod = FMath::Fmod(FMath::Abs(Rotation.Roll), 90.0f);
+	const FRotator::FReal PitchMod = FMath::Fmod(FMath::Abs(Rotation.Pitch), 90.0f);
+	const FRotator::FReal YawMod = FMath::Fmod(FMath::Abs(Rotation.Yaw), 90.0f);
+	const FRotator::FReal RollMod = FMath::Fmod(FMath::Abs(Rotation.Roll), 90.0f);
 	if (IsAngleMatching(PitchMod) && IsAngleMatching(YawMod) && IsAngleMatching(RollMod))
 	{
 		Bounds = FBox(ForceInit);
@@ -501,8 +525,8 @@ void FAreaNavModifier::FillConvexNavAreaData(const FVector* InPoints, const int3
 {
 	OutBounds = FBox(ForceInit);
 	OutConvexData.Points.Reset();
-	OutConvexData.MinZ = MAX_FLT;
-	OutConvexData.MaxZ = -MAX_FLT;
+	OutConvexData.MinZ = UE_MAX_FLT;
+	OutConvexData.MaxZ = -UE_MAX_FLT;
 
 	if (InNumPoints <= 0)
 	{
@@ -645,7 +669,7 @@ void FSimpleLinkNavModifier::SetSegmentLinks(const TArray<FNavigationSegmentLink
 	for (int32 Idx = 0; Idx < SegmentLinks.Num(); Idx++)
 	{
 		FNavigationSegmentLink& LinkData = SegmentLinks[Idx];
-		LinkData.UserId = UserId;
+		LinkData.NavLinkId = NavLinkId;
 
 		bHasMetaAreasSegment |= LinkData.HasMetaArea();
 		bHasFallDownLinks |= LinkData.MaxFallDownLength > 0.f;
@@ -678,7 +702,7 @@ void FSimpleLinkNavModifier::AppendSegmentLinks(const TArray<FNavigationSegmentL
 	for (int32 Idx = 0; Idx < InLinks.Num(); Idx++)
 	{
 		FNavigationSegmentLink& LinkData = SegmentLinks[LinkBase + Idx];
-		LinkData.UserId = UserId;
+		LinkData.NavLinkId = NavLinkId;
 
 		bHasMetaAreasSegment |= LinkData.HasMetaArea();
 		bHasFallDownLinks |= LinkData.MaxFallDownLength > 0.f;
@@ -703,7 +727,7 @@ void FSimpleLinkNavModifier::AddSegmentLink(const FNavigationSegmentLink& InLink
 	const int32 LinkIdx = SegmentLinks.Add(InLink);
 
 	FNavigationSegmentLink& LinkData = SegmentLinks[LinkIdx];
-	LinkData.UserId = UserId;
+	LinkData.NavLinkId = NavLinkId;
 
 	bHasMetaAreasSegment |= LinkData.HasMetaArea();
 	bHasFallDownLinks |= LinkData.MaxFallDownLength > 0.f;
@@ -746,6 +770,7 @@ void FCompositeNavModifier::Reset()
 	bIsPerInstanceModifier = false;
 	bFillCollisionUnderneathForNavmesh = false;
 	bMaskFillCollisionUnderneathForNavmesh = false;
+	NavMeshResolution = ENavigationDataResolution::Invalid;
 }
 
 void FCompositeNavModifier::Empty()
@@ -757,6 +782,7 @@ void FCompositeNavModifier::Empty()
 	bAdjustHeight = false;
 	bFillCollisionUnderneathForNavmesh = false;
 	bMaskFillCollisionUnderneathForNavmesh = false;
+	NavMeshResolution = ENavigationDataResolution::Invalid;
 }
 
 FCompositeNavModifier FCompositeNavModifier::GetInstantiatedMetaModifier(const FNavAgentProperties* NavAgent, TWeakObjectPtr<UObject> WeakOwnerPtr) const
@@ -773,8 +799,21 @@ FCompositeNavModifier FCompositeNavModifier::GetInstantiatedMetaModifier(const F
 	{
 		return Result;
 	}
+	
+	auto FindActorOwner = [](UObject* Obj) -> const AActor*
+	{
+		while (Obj)
+		{
+			if (const AActor* ActorOwner = Cast<AActor>(Obj->GetOuter()))
+			{
+				return ActorOwner;
+			}
+			Obj = Obj->GetOuter();
+		}
+		return nullptr;
+	};
 
-	const AActor* ActorOwner = Cast<AActor>(ObjectOwner) ? (AActor*)ObjectOwner : Cast<AActor>(ObjectOwner->GetOuter());
+	const AActor* ActorOwner = Cast<AActor>(ObjectOwner) ? (AActor*)ObjectOwner : FindActorOwner(ObjectOwner);
 	if (ActorOwner == NULL)
 	{
 		return Result;
@@ -784,6 +823,7 @@ FCompositeNavModifier FCompositeNavModifier::GetInstantiatedMetaModifier(const F
 	Result = *this;
 
 	{
+		Result.bHasMetaAreas = false;
 		FAreaNavModifier* Area = Result.Areas.GetData();
 		for (int32 Index = 0; Index < Result.Areas.Num(); ++Index, ++Area)
 		{
@@ -791,6 +831,7 @@ FCompositeNavModifier FCompositeNavModifier::GetInstantiatedMetaModifier(const F
 			{
 				Area->SetAreaClass(UNavAreaBase::PickAreaClassForAgent(Area->GetAreaClass(), *ActorOwner, *NavAgent));
 				Area->SetAreaClassToReplace(UNavAreaBase::PickAreaClassForAgent(Area->GetAreaClassToReplace(), *ActorOwner, *NavAgent));
+				Result.bHasMetaAreas = -1;
 			}
 		}
 	}
@@ -856,7 +897,7 @@ FCompositeNavModifier FCompositeNavModifier::GetInstantiatedMetaModifier(const F
 					NavLink.SetAreaClass(UNavAreaBase::PickAreaClassForAgent(NavLink.GetAreaClass(), *ActorOwner, *NavAgent));
 				}
 
-				Result.CustomLinks.RemoveAtSwap(Index, 1, false);
+				Result.CustomLinks.RemoveAtSwap(Index, 1, EAllowShrinking::No);
 			}
 		}
 	}
@@ -893,9 +934,15 @@ void FCompositeNavModifier::CreateAreaModifiers(const UPrimitiveComponent* PrimC
 	for (int32 Idx = 0; Idx < BodySetup->AggGeom.ConvexElems.Num(); Idx++)
 	{
 		const FKConvexElem& ConvexElem = BodySetup->AggGeom.ConvexElems[Idx];
-		
-		FAreaNavModifier AreaMod(ConvexElem.VertexData, 0, ConvexElem.VertexData.Num(), ENavigationCoordSystem::Unreal, PrimComp->GetComponentTransform(), AreaClass);
-		Add(AreaMod);
+		if (ConvexElem.VertexData.Num() > 0)
+		{
+			FAreaNavModifier AreaMod(UE::LWC::ConvertArrayType<FVector>(ConvexElem.VertexData), 0, ConvexElem.VertexData.Num(), ENavigationCoordSystem::Unreal, PrimComp->GetComponentTransform(), AreaClass);
+			Add(AreaMod);
+		}
+		else
+		{
+			UE_LOG(LogNavigation, Warning, TEXT("CreateAreaModifiers called for component %s whose BodySetup contains ConvexElem with no vertex data at index %d. Not adding nav modifier."), *GetPathNameSafe(PrimComp), Idx);
+		}
 	}
 	
 	for (int32 Idx = 0; Idx < BodySetup->AggGeom.SphereElems.Num(); Idx++)
@@ -941,7 +988,7 @@ void FCompositeNavModifier::CreateAreaModifiers(const FCollisionShape& Collision
 
 uint32 FCompositeNavModifier::GetAllocatedSize() const
 {
-	uint32 MemUsed = Areas.GetAllocatedSize() + SimpleLinks.GetAllocatedSize() + CustomLinks.GetAllocatedSize();
+	SIZE_T MemUsed = Areas.GetAllocatedSize() + SimpleLinks.GetAllocatedSize() + CustomLinks.GetAllocatedSize();
 
 	const FSimpleLinkNavModifier* SimpleLink = SimpleLinks.GetData();
 	for (int32 Index = 0; Index < SimpleLinks.Num(); ++Index, ++SimpleLink)
@@ -949,7 +996,7 @@ uint32 FCompositeNavModifier::GetAllocatedSize() const
 		MemUsed += SimpleLink->Links.GetAllocatedSize();
 	}
 
-	return MemUsed;
+	return IntCastChecked<uint32>(MemUsed);
 }
 
 bool FCompositeNavModifier::HasPerInstanceTransforms() const

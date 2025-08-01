@@ -1,9 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/DataAsset.h"
+
 #include "Misc/PackageName.h"
+#include "UObject/ObjectSaveContext.h"
 #include "UObject/Package.h"
 #include "Engine/AssetManager.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(DataAsset)
+
 UDataAsset::UDataAsset(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
@@ -16,7 +21,7 @@ void UDataAsset::Serialize(FStructuredArchive::FRecord Record)
 	FArchive& UnderlyingArchive = Record.GetUnderlyingArchive();
 	Super::Serialize(Record);
 
-	if (UnderlyingArchive.IsLoading() && (UnderlyingArchive.UE4Ver() < VER_UE4_ADD_TRANSACTIONAL_TO_DATA_ASSETS))
+	if (UnderlyingArchive.IsLoading() && (UnderlyingArchive.UEVer() < VER_UE4_ADD_TRANSACTIONAL_TO_DATA_ASSETS))
 	{
 		SetFlags(RF_Transactional);
 	}
@@ -25,7 +30,7 @@ void UDataAsset::Serialize(FStructuredArchive::FRecord Record)
 void UPrimaryDataAsset::UpdateAssetBundleData()
 {
 	// By default parse the metadata
-	if (UAssetManager::IsValid())
+	if (UAssetManager::IsInitialized())
 	{
 		AssetBundleData.Reset();
 		UAssetManager::Get().InitializeAssetBundlesFromMetadata(this, AssetBundleData);
@@ -34,11 +39,18 @@ void UPrimaryDataAsset::UpdateAssetBundleData()
 
 void UPrimaryDataAsset::PreSave(const class ITargetPlatform* TargetPlatform)
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
 	Super::PreSave(TargetPlatform);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void UPrimaryDataAsset::PreSave(FObjectPreSaveContext ObjectSaveContext)
+{
+	Super::PreSave(ObjectSaveContext);
 
 	UpdateAssetBundleData();
 
-	if (UAssetManager::IsValid())
+	if (UAssetManager::IsInitialized())
 	{
 		// Bundles may have changed, refresh
 		UAssetManager::Get().RefreshAssetData(this);
@@ -106,10 +118,11 @@ void UPrimaryDataAsset::PostLoad()
 	
 	UpdateAssetBundleData();
 
-	if (UAssetManager::IsValid() && OldData != AssetBundleData)
+	if (UAssetManager::IsInitialized() && OldData != AssetBundleData)
 	{
 		// Bundles changed, refresh
 		UAssetManager::Get().RefreshAssetData(this);
 	}
 #endif
 }
+

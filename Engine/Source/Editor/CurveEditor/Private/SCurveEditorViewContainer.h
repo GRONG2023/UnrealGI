@@ -2,16 +2,32 @@
 
 #pragma once
 
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SCompoundWidget.h"
-
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
+#include "HAL/Platform.h"
 #include "ICurveEditorDragOperation.h"
-#include "CurveEditor.h"
-#include "CurveEditorTypes.h"
+#include "Input/CursorReply.h"
+#include "Input/Reply.h"
+#include "Layout/Margin.h"
+#include "Math/Vector2D.h"
+#include "Misc/Optional.h"
+#include "Templates/SharedPointer.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SBoxPanel.h"
 
-class SScrollBox;
-class SCurveEditorView;
+class FCurveEditor;
+class FPaintArgs;
+class FSlateRect;
+class FSlateWindowElementList;
+class FWidgetStyle;
 class ITimeSliderController;
+class SCurveEditorView;
+class SRetainerWidget;
+struct FCurveEditorToolID;
+struct FFocusEvent;
+struct FGeometry;
+struct FKeyEvent;
+struct FPointerEvent;
 
 /**
  * Curve editor widget that reflects the state of an FCurveEditor
@@ -60,6 +76,7 @@ private:
 
 	virtual bool SupportsKeyboardFocus() const override { return true; }
 	virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
+	virtual FReply OnKeyUp(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
 
 private:
 
@@ -68,6 +85,8 @@ private:
 	void OnCurveEditorToolChanged(FCurveEditorToolID InToolId);
 
 	void ExpandInputBounds(float NewWidth);
+
+	bool IsScrubTimeKeyEvent(const FKeyEvent& InKeyEvent);
 
 private:
 
@@ -80,8 +99,11 @@ private:
 	/** (Optional) the current drag operation */
 	TOptional<FCurveEditorDelayedDrag> DragOperation;
 
-	/** Array of views that may need their height updating on tick. */
+	/** Array of views whose cache may need to be updated and may need their height updating on tick. */
 	TArray<TSharedPtr<SCurveEditorView>> Views;
+
+	/** Possible pointer to a retainer widget that we may need to force update*/
+	TSharedPtr<SRetainerWidget> RetainerWidget;
 
 	/** 
 	 * Whether or not this widget caught an OnMouseDown notification 
@@ -91,4 +113,7 @@ private:
 
 	/** The minimum height for this container panel. **/
 	float MinimumPanelHeight;
+
+	/** Whether or not we are scrubbing time*/
+	bool bIsScrubbingTime = false;
 };

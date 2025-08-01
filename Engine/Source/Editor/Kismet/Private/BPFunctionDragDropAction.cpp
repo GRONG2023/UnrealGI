@@ -1,18 +1,40 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BPFunctionDragDropAction.h"
+
+#include "BlueprintEditor.h"
+#include "BlueprintFunctionNodeSpawner.h"
+#include "BlueprintNodeBinder.h"
 #include "EdGraph/EdGraph.h"
-#include "EditorStyleSet.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphSchema.h"
 #include "EdGraphSchema_K2.h"
 #include "EdGraphSchema_K2_Actions.h"
-#include "K2Node_CustomEvent.h"
+#include "Engine/Blueprint.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "K2Node.h"
+#include "K2Node_Event.h"
 #include "K2Node_MacroInstance.h"
-#include "Kismet2/KismetEditorUtilities.h"
-
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "BlueprintNodeBinder.h"
-#include "BlueprintFunctionNodeSpawner.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Math/Color.h"
+#include "Misc/AssertionMacros.h"
 #include "ScopedTransaction.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "UObject/Class.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/Script.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
+
+class SWidget;
+class UEdGraphPin;
+struct FSlateBrush;
 
 #define LOCTEXT_NAMESPACE "FunctionDragDropAction"
 
@@ -108,7 +130,7 @@ void FKismetDragDropAction::HoverTargetChanged()
 	FText CannotDropReason = FText::GetEmpty();
 	if (ActionWillShowExistingNode())
 	{
-		FSlateBrush const* ShowsExistingIcon = FEditorStyle::GetBrush(TEXT("Graph.ConnectorFeedback.ShowNode"));
+		FSlateBrush const* ShowsExistingIcon = FAppStyle::GetBrush(TEXT("Graph.ConnectorFeedback.ShowNode"));
 		FText DragingText = FText::Format(LOCTEXT("ShowExistingNode", "Show '{0}'"), SourceAction->GetMenuDescription());
 		SetSimpleFeedbackMessage(ShowsExistingIcon, FLinearColor::White, DragingText);
 	}
@@ -232,44 +254,48 @@ FReply FKismetFunctionDragDropAction::DroppedOnPin(FVector2D ScreenPosition, FVe
 	FReply Reply = FReply::Unhandled();
 
 	UEdGraph* Graph = GetHoveredGraph();
-	check(Graph); 
 
-	// The ActionNode set during construction points to the Graph, this is suitable for displaying the mouse decorator but needs to be more complete based on the current graph
-	UBlueprintFunctionNodeSpawner* FunctionNodeSpawner = GetDropAction(*Graph);
-
-	if (FunctionNodeSpawner)
+	// In certain cases, mouse movement messages can jump the event queue and process OnDragLeave before us.
+	// This ends up setting our graph pointer to null, so we need to guard against that.
+	if (Graph != nullptr)
 	{
-		FText CannotDropReason = FText::GetEmpty();
-		if (!CanBeDroppedDelegate.IsBound() || CanBeDroppedDelegate.Execute(nullptr, Graph, CannotDropReason))
+		// The ActionNode set during construction points to the Graph, this is suitable for displaying the mouse decorator but needs to be more complete based on the current graph
+		UBlueprintFunctionNodeSpawner* FunctionNodeSpawner = GetDropAction(*Graph);
+
+		if (FunctionNodeSpawner)
 		{
-			UFunction const* Function = GetFunctionProperty();
-			if ((Function != nullptr) && UEdGraphSchema_K2::CanUserKismetCallFunction(Function))
+			FText CannotDropReason = FText::GetEmpty();
+			if (!CanBeDroppedDelegate.IsBound() || CanBeDroppedDelegate.Execute(nullptr, Graph, CannotDropReason))
 			{
-				AnalyticCallback.ExecuteIfBound();
-
-				const FScopedTransaction Transaction(LOCTEXT("KismetFunction_DroppedOnPanel", "Function Dropped on Graph"));
-
-				IBlueprintNodeBinder::FBindingSet Bindings;
-				UEdGraphNode* ResultNode = FunctionNodeSpawner->Invoke(Graph, Bindings, GraphPosition);
-
-				// Autowire the node if we were dragging on top of a pin
-				if (ResultNode != nullptr)
+				UFunction const* Function = GetFunctionProperty();
+				if ((Function != nullptr) && UEdGraphSchema_K2::CanUserKismetCallFunction(Function))
 				{
-					if (UEdGraphPin* FromPin = GetHoveredPin())
-					{
-						ResultNode->AutowireNewNode(FromPin);
-					}
-				}
+					AnalyticCallback.ExecuteIfBound();
 
-				Reply = FReply::Handled();
+					const FScopedTransaction Transaction(LOCTEXT("KismetFunction_DroppedOnPanel", "Function Dropped on Graph"));
+
+					IBlueprintNodeBinder::FBindingSet Bindings;
+					UEdGraphNode* ResultNode = FunctionNodeSpawner->Invoke(Graph, Bindings, GraphPosition);
+
+					// Autowire the node if we were dragging on top of a pin
+					if (ResultNode != nullptr)
+					{
+						if (UEdGraphPin* FromPin = GetHoveredPin())
+						{
+							ResultNode->AutowireNewNode(FromPin);
+						}
+					}
+
+					Reply = FReply::Handled();
+				}
 			}
 		}
-	}
-	else if (SourceAction->GetTypeId() == FEdGraphSchemaAction_K2Event::StaticGetTypeId())
-	{
-		if (FEdGraphSchemaAction_K2Event* FuncAction = (FEdGraphSchemaAction_K2Event*)SourceAction.Get())
+		else if (SourceAction->GetTypeId() == FEdGraphSchemaAction_K2Event::StaticGetTypeId())
 		{
-			FKismetEditorUtilities::BringKismetToFocusAttentionOnObject(FuncAction->NodeTemplate);
+			if (FEdGraphSchemaAction_K2Event* FuncAction = (FEdGraphSchemaAction_K2Event*)SourceAction.Get())
+			{
+				FKismetEditorUtilities::BringKismetToFocusAttentionOnObject(FuncAction->NodeTemplate);
+			}
 		}
 	}
 

@@ -1,11 +1,7 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
 using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace UnrealGameSync
 {
@@ -29,8 +25,8 @@ namespace UnrealGameSync
 			void ActivateTab(IntPtr hWnd);
 			void SetActiveAlt(IntPtr hWnd);
 			void MarkFullscreenWindow(IntPtr hWnd, int fFullscreen);
-			void SetProgressValue(IntPtr hWnd, UInt64 ullCompleted, UInt64 ullTotal);
-			void SetProgressState(IntPtr hWnd, TaskbarState State);
+			void SetProgressValue(IntPtr hWnd, ulong ullCompleted, ulong ullTotal);
+			void SetProgressState(IntPtr hWnd, TaskbarState state);
 		}
 
 		[ComImport, Guid("56FDF344-FD6D-11d0-958A-006097C9A090"), ClassInterfaceAttribute(ClassInterfaceType.None)]
@@ -38,23 +34,27 @@ namespace UnrealGameSync
 		{
 		}
 
-		static ITaskbarList3 Interface;
+		static readonly ITaskbarList3? _interface = CreateTaskbarListInterface();
 
-		static Taskbar()
+		static ITaskbarList3? CreateTaskbarListInterface()
 		{
-			if(Environment.OSVersion.Version >= new Version(6, 1))
+			if (Environment.OSVersion.Version >= new Version(6, 1))
 			{
-				Interface = new TaskbarList3() as ITaskbarList3;
+				return new TaskbarList3() as ITaskbarList3;
+			}
+			else
+			{
+				return null;
 			}
 		}
 
-		public static void SetState(IntPtr WindowHandle, TaskbarState State)
+		public static void SetState(IntPtr windowHandle, TaskbarState state)
 		{
-			if(Interface != null)
+			if (_interface != null)
 			{
 				try
 				{
-					Interface.SetProgressState(WindowHandle, State);
+					_interface.SetProgressState(windowHandle, state);
 				}
 				catch
 				{
@@ -62,13 +62,13 @@ namespace UnrealGameSync
 			}
 		}
 
-		public static void SetProgress(IntPtr WindowHandle, ulong Completed, ulong Total)
+		public static void SetProgress(IntPtr windowHandle, ulong completed, ulong total)
 		{
-			if(Interface != null)
+			if (_interface != null)
 			{
 				try
 				{
-					Interface.SetProgressValue(WindowHandle, Completed, Total);
+					_interface.SetProgressValue(windowHandle, completed, total);
 				}
 				catch
 				{

@@ -7,6 +7,7 @@
 #include "Containers/Queue.h"
 #include "IMessageContext.h"
 #include "IMessageTracer.h"
+#include "Containers/Ticker.h"
 
 class IMessageInterceptor;
 class IMessageReceiver;
@@ -35,7 +36,7 @@ public:
 	 * @param Interceptor The added interceptor.
 	 * @param MessageType The type of messages being intercepted.
 	 */
-	void TraceAddedInterceptor(const TSharedRef<IMessageInterceptor, ESPMode::ThreadSafe>& Interceptor, const FName& MessageType);
+	void TraceAddedInterceptor(const TSharedRef<IMessageInterceptor, ESPMode::ThreadSafe>& Interceptor, const FTopLevelAssetPath& MessageType);
 
 	/**
 	 * Notifies the tracer that a message recipient has been added to the message bus.
@@ -83,7 +84,7 @@ public:
 	 * @param Interceptor The removed interceptor.
 	 * @param MessageType The type of messages that is no longer being intercepted.
 	 */
-	void TraceRemovedInterceptor(const TSharedRef<IMessageInterceptor, ESPMode::ThreadSafe>& Interceptor, const FName& MessageType);
+	void TraceRemovedInterceptor(const TSharedRef<IMessageInterceptor, ESPMode::ThreadSafe>& Interceptor, const FTopLevelAssetPath& MessageType);
 
 	/**
 	 * Notifies the tracer that a recipient has been removed from the message bus.
@@ -98,7 +99,7 @@ public:
 	 * @param Subscriber The removed subscriber.
 	 * @param MessageType The type of messages no longer being subscribed to.
 	 */
-	void TraceRemovedSubscription(const TSharedRef<IMessageSubscription, ESPMode::ThreadSafe>& Subscription, const FName& MessageType);
+	void TraceRemovedSubscription(const TSharedRef<IMessageSubscription, ESPMode::ThreadSafe>& Subscription, const FTopLevelAssetPath& MessageType);
 
 	/**
 	 * Notifies the tracer that a message has been routed.
@@ -186,7 +187,7 @@ private:
 	TMap<TSharedPtr<IMessageContext, ESPMode::ThreadSafe>, TSharedPtr<FMessageTracerMessageInfo>> MessageInfos;
 
 	/** Holds the collection of known message types. */
-	TMap<FName, TSharedPtr<FMessageTracerTypeInfo>> MessageTypes;
+	TMap<FTopLevelAssetPath, TSharedPtr<FMessageTracerTypeInfo>> MessageTypes;
 
 	/** Holds a flag indicating whether a reset is pending. */
 	bool ResetPending;
@@ -195,7 +196,7 @@ private:
 	bool Running;
 
 	/** Handle to the registered TickDelegate. */
-	FDelegateHandle TickDelegateHandle;
+	FTSTicker::FDelegateHandle TickDelegateHandle;
 
 	/** Holds the trace actions queue. */
 	TQueue<TFunction<void()>, EQueueMode::Mpsc> Traces;

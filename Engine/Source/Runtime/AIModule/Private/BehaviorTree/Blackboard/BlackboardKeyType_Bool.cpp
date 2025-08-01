@@ -2,6 +2,8 @@
 
 #include "BehaviorTree/Blackboard/BlackboardKeyType_Bool.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BlackboardKeyType_Bool)
+
 const UBlackboardKeyType_Bool::FDataType UBlackboardKeyType_Bool::InvalidValue = false;
 
 UBlackboardKeyType_Bool::UBlackboardKeyType_Bool(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
@@ -29,6 +31,11 @@ EBlackboardCompare::Type UBlackboardKeyType_Bool::CompareValues(const UBlackboar
 	return (MyValue == OtherValue) ? EBlackboardCompare::Equal : EBlackboardCompare::NotEqual;
 }
 
+void UBlackboardKeyType_Bool::InitializeMemory(UBlackboardComponent& OwnerComp, uint8* MemoryBlock)
+{
+	SetValue(this, MemoryBlock, bDefaultValue);
+}
+
 FString UBlackboardKeyType_Bool::DescribeValue(const UBlackboardComponent& OwnerComp, const uint8* RawData) const
 {
 	return GetValue(this, RawData) ? TEXT("true") : TEXT("false");
@@ -39,3 +46,4 @@ bool UBlackboardKeyType_Bool::TestBasicOperation(const UBlackboardComponent& Own
 	const bool Value = GetValue(this, MemoryBlock);
 	return (Op == EBasicKeyOperation::Set) ? Value : !Value;
 }
+

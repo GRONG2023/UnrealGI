@@ -1,16 +1,18 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Internationalization/StringTable.h"
+#include "Internationalization/GatherableTextData.h"
 #include "Internationalization/StringTableCore.h"
 #include "Internationalization/StringTableRegistry.h"
-#include "UObject/SoftObjectPtr.h"
 #include "Misc/PackageName.h"
 #include "UObject/Package.h"
 #include "UObject/GCObject.h"
-#include "Misc/ScopeLock.h"
 #include "Templates/Casts.h"
 #include "Application/SlateApplicationBase.h"
 #include "Serialization/PropertyLocalizationDataGathering.h"
+#include "UObject/SoftObjectPath.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(StringTable)
 
 #if WITH_EDITORONLY_DATA
 namespace
@@ -292,7 +294,7 @@ private:
 			int32 DotIndex = INDEX_NONE;
 			if (StringTablePackageName.FindChar(TEXT('.'), DotIndex))
 			{
-				StringTablePackageName.LeftInline(DotIndex, false);
+				StringTablePackageName.LeftInline(DotIndex, EAllowShrinking::No);
 			}
 		}
 
@@ -331,7 +333,7 @@ private:
 	mutable FCriticalSection AsyncLoadingStringTablesCS;
 
 	/** Array of string table assets that have been loaded and should be kept alive */
-	TArray<UStringTable*> KeepAliveStringTables;
+	TArray<TObjectPtr<UStringTable>> KeepAliveStringTables;
 	/** Critical section preventing concurrent modification of KeepAliveStringTables */
 	mutable FCriticalSection KeepAliveStringTablesCS;
 };
@@ -419,3 +421,4 @@ FStringTableRef UStringTable::GetMutableStringTable() const
 {
 	return StringTable.ToSharedRef();
 }
+

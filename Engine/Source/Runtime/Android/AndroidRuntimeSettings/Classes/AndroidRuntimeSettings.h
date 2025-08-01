@@ -17,7 +17,7 @@ namespace EAndroidScreenOrientation
 {
 	// IF THIS CHANGES, MAKE SURE TO UPDATE UEDeployAndroid.cs, ConvertOrientationIniValue()!
 
-	enum Type
+	enum Type : int
 	{
 		/** Portrait orientation (the display is taller than it is wide). */
 		Portrait,
@@ -51,7 +51,7 @@ namespace EAndroidDepthBufferPreference
 {
 	// IF THIS CHANGES, MAKE SURE TO UPDATE UEDeployAndroid.cs, ConvertDepthBufferIniValue()!
 
-	enum Type
+	enum Type : int
 	{
 		Default = 0 UMETA(DisplayName = "Default"),
 		Bits16 = 16 UMETA(DisplayName = "16-bit"),
@@ -64,7 +64,7 @@ namespace EAndroidDepthBufferPreference
 UENUM()
 namespace EAndroidInstallLocation
 {
-	enum Type
+	enum Type : int
 	{
 		/** Install your app only on internal device storage */
 		InternalOnly,
@@ -79,7 +79,7 @@ namespace EAndroidInstallLocation
 UENUM()
 namespace EOculusMobileDevice
 {
-	enum Type
+	enum Type : int
 	{
 		// 0 was the deprecated OculusGo
 
@@ -88,6 +88,43 @@ namespace EOculusMobileDevice
 
 		/** Package for Oculus Quest 2*/
 		Quest2 = 2 UMETA(DisplayName = "Oculus Quest 2"),
+	};
+}
+
+/** AdMob TagForChildDirectedTreament  */
+UENUM()
+namespace ETagForChildDirectedTreatment
+{
+	enum Type : int
+	{
+		TAG_FOR_CHILD_DIRECTED_TREATMENT_UNSPECIFIED = 0,
+		TAG_FOR_CHILD_DIRECTED_TREATMENT_TRUE = 1,
+		TAG_FOR_CHILD_DIRECTED_TREATMENT_FALSE = 2,
+	};
+}
+
+/** AdMob TagForChildDirectedTreament  */
+UENUM()
+namespace ETagForUnderAgeOfConsent
+{
+	enum Type : int
+	{
+		TAG_FOR_UNDER_AGE_OF_CONSENT_UNSPECIFIED = 0,
+		TAG_FOR_UNDER_AGE_OF_CONSENT_TRUE = 1,
+		TAG_FOR_UNDER_AGE_OF_CONSENT_FALSE = 2,
+	};
+}
+
+/** AdMob MaxAdContentRating  */
+UENUM()
+namespace EMaxAdContentRating
+{
+	enum Type : int
+	{
+		MAX_AD_CONTENT_RATING_G = 0,
+		MAX_AD_CONTENT_RATING_PG = 1,
+		MAX_AD_CONTENT_RATING_T = 2,
+		MAX_AD_CONTENT_RATING_MA = 2,
 	};
 }
 
@@ -128,7 +165,7 @@ struct FGooglePlayLeaderboardMapping
 UENUM()
 namespace EAndroidAudio
 {
-	enum Type
+	enum Type : int
 	{
 		Default = 0 UMETA(DisplayName = "Default", ToolTip = "This option selects the default encoder."),
 		OGG = 1 UMETA(DisplayName = "Ogg Vorbis", ToolTip = "Selects Ogg Vorbis encoding."),
@@ -137,50 +174,13 @@ namespace EAndroidAudio
 }
 
 UENUM()
-namespace EGoogleVRMode
-{
-	enum Type
-	{
-		Cardboard = 0 UMETA(DisplayName = "Cardboard", ToolTip = "Configure GoogleVR to run in Cardboard-only mode."),
-		Daydream = 1 UMETA(DisplayName = "Daydream", ToolTip = "Configure GoogleVR to run in Daydream-only mode. In this mode, app won't be able to run on Non Daydream-ready phone."),
-		DaydreamAndCardboard = 2 UMETA(DisplayName = "Daydream & Cardboard", ToolTip = "Configure GoogleVR to run in Daydream mode on Daydream-ready phone and fallback to Cardboard mode on Non Daydream-ready phone.")
-	};
-}
-
-UENUM()
-namespace EGoogleVRCaps
-{
-	enum Type
-	{
-		Cardboard = 0 UMETA(DisplayName = "Cardboard", ToolTip = "Head orientation, no controller."),
-		Daydream33 = 1 UMETA(DisplayName = "Daydream (3.3 DoF)", ToolTip = "Head orientation, controller orientation. Daydream without positional tracking."),
-		Daydream63 = 2 UMETA(DisplayName = "Daydream (6.3 DoF)", ToolTip = "Head position and orientation, controller orientation. Daydream with positional tracking."),
-		Daydream66 = 3 UMETA(DisplayName = "Daydream (6.6 DoF)", ToolTip = "Head position and orientation, 2 controllers with position and orientation. Daydream with positional tracking.")
-	};
-}
-
-UENUM()
 namespace EAndroidGraphicsDebugger
 {
-	enum Type
+	enum Type : int
 	{
 		None = 0 UMETA(DisplayName = "None"),
 		Mali = 1 UMETA(DisplayName = "Mali Graphics Debugger", ToolTip = "Configure for Mali Graphics Debugger."),
 		Adreno = 2 UMETA(DisplayName = "Adreno Profiler", ToolTip = "Configure for Adreno Profiler."),
-	};
-}
-
-UENUM()
-namespace EClangSanitizer
-{
-	enum Type
-	{
-		None = 0 UMETA(DisplayName = "None"),
-		Address = 1 UMETA(DisplayName = "Address Sanitizer"),
-		HwAddress = 2 UMETA(DisplayName = "Hardware Address Sanitizer. For flashed Pixel devices only!"),
-		UndefinedBehavior = 3 UMETA(DisplayName = "Undefined Behavior Sanitizer"),
-		UndefinedBehaviorMinimal = 4 UMETA(DisplayName = "Minimal Undefined Behavior Sanitizer"),
-		//Thread = 5 UMETA(DisplayName = "Thread Sanitizer"),
 	};
 }
 
@@ -202,10 +202,6 @@ public:
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", Meta = (DisplayName = "Store Version (1-2147483647)", ClampMin="1", ClampMax="2147483647"))
 	int32 StoreVersion;
 
-	// Offset to add to store version for APKs generated for armv7
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", meta = (DisplayName = "Store Version offset (armv7)"))
-	int32 StoreVersionOffsetArmV7;
-
 	// Offset to add to store version for APKs generated for arm64
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", meta = (DisplayName = "Store Version offset (arm64)"))
 	int32 StoreVersionOffsetArm64;
@@ -222,21 +218,17 @@ public:
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", Meta = (DisplayName = "Version Display Name (usually x.y)"))
 	FString VersionDisplayName;
 
-	// What OS version the app is allowed to be installed on (do not set this lower than 19)
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", Meta = (DisplayName = "Minimum SDK Version (19=KitKat, 21=Lollipop)"))
+	// What OS version the app is allowed to be installed on (do not set this lower than 26)
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", Meta = (DisplayName = "Minimum SDK Version (26=8.0.0, 27=8.1.0, 28=9, 29=10, 30=11, 31=12)"))
 	int32 MinSDKVersion;
 	
-	// What OS version the app is expected to run on (do not set this lower than 19)
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", Meta = (DisplayName = "Target SDK Version (19=KitKat, 21=Lollipop)"))
+	// What OS version the app is expected to run on (do not set this lower than 26)
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", Meta = (DisplayName = "Target SDK Version (26=8.0.0, 27=8.1.0, 28=9, 29=10, 30=11, 31=12)"))
 	int32 TargetSDKVersion;
 
 	// Preferred install location for the application
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging")
 	TEnumAsByte<EAndroidInstallLocation::Type> InstallLocation;
-
-	// Use Gradle instead of Ant for Java compiling and APK generation
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", Meta = (DisplayName = "Enable Gradle instead of Ant"))
-	bool bEnableGradle;
 
 	// Enable -Xlint:unchecked and -Xlint:depreciation for Java compiling (Gradle only)
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", Meta = (DisplayName = "Enable Lint depreciation checks"))
@@ -270,12 +262,15 @@ public:
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", Meta = (DisplayName = "Allow overflow OBB files."))
 	bool bAllowOverflowOBBFiles;
 
-	// If checked, UE4Game files will be placed in ExternalFilesDir which is removed on uninstall.
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", Meta = (DisplayName = "Don't bundle libraries into .apk for quicker iteration [Experimental]"))
+	bool bDontBundleLibrariesInAPK;
+
+	// If checked, UnrealGame files will be placed in ExternalFilesDir which is removed on uninstall.
 	// You should also check this if you need to save you game progress without requesting runtime WRITE_EXTERNAL_STORAGE permission in android api 23+
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", Meta = (DisplayName = "Use ExternalFilesDir for UE4Game files?"))
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", Meta = (DisplayName = "Use ExternalFilesDir for UnrealGame files?"))
 	bool bUseExternalFilesDir;
 
-	// If checked, log files will always be placed in a publicly available directory (either /sdcard/Android or /sdcard/UE4Game).
+	// If checked, log files will always be placed in a publicly available directory (either /sdcard/Android or /sdcard/UnrealGame).
 	// You may require WRITE_EXTERNAL_STORAGE permission if you do not use ExternalFilesDir checkbox in android api 23+
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", Meta = (DisplayName = "Make log files always publicly accessible?"))
 	bool bPublicLogFiles;
@@ -291,6 +286,14 @@ public:
 	// Enables use of the display cutout area on Android 9+
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", Meta = (DisplayName = "Use display cutout region?"))
 	bool bUseDisplayCutout;
+
+	// Allow resizing of the window on Android devices with splitscreen
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", Meta = (DisplayName = "Allow splitscreen resizing?"))
+	bool bAllowResizing;
+
+	// Allow support for size change when foldable and flip devices change screen or layout on Android 10+
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", Meta = (DisplayName = "Allow fold/flip size changes?"))
+	bool bSupportSizeChanges;
 
 	// Should we restore scheduled local notifications on reboot? This will add a receiver for boot complete and a permission to the manifest.
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", Meta = (DisplayName = "Restore scheduled notifications on reboot"))
@@ -310,6 +313,14 @@ public:
 	// Verifies the device supports at least one of the cooked texture formats at runtime
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", Meta = (DisplayName = "Validate texture formats"))
 	bool bValidateTextureFormats;
+
+	// When building for MinSDKVersion >= 23 gradle will leave native libs uncompressed in the apk. This flag might be helpful for builds that are not intended to be distributed via Google Play
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", Meta = (DisplayName = "Force Gradle to compress native libs irregardless of MinSDKVersion setting"))
+	bool bForceCompressNativeLibs;
+
+	// Generates Android binary with RELR and APS2 relocation tables when building for MinSDKVersion >= 28 or just APS2 when building for MinSDKVersion >= 23
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = "APK Packaging", Meta = (DisplayName = "Enable compression of relocation tables (and more). Depends on MinSDKVersion setting"))
+	bool bEnableAdvancedBinaryCompression;
 
 	// Enables generating AAB bundle
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = "App Bundles", Meta = (DisplayName = "Generate bundle (AAB)"))
@@ -339,12 +350,12 @@ public:
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Advanced APK Packaging", Meta = (DisplayName = "Extra Tags for <application> node"))
 	TArray<FString> ExtraApplicationNodeTags;
 
-	// Any extra tags for the com.epicgames.UE4.GameActivity <activity> node
+	// Any extra tags for the com.epicgames.unreal.GameActivity <activity> node
 	// Any extra settings for the <application> section (an optional file <Project>/Build/Android/ManifestApplicationAdditions.txt will also be included)
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Advanced APK Packaging", Meta = (DisplayName = "Extra Settings for <application> section (\\n to separate lines)"))
 	FString ExtraApplicationSettings;
 
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Advanced APK Packaging", Meta = (DisplayName = "Extra Tags for UE4.GameActivity <activity> node"))
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Advanced APK Packaging", Meta = (DisplayName = "Extra Tags for com.epicgames.unreal.GameActivity <activity> node"))
 	TArray<FString> ExtraActivityNodeTags;
 
 	// Any extra settings for the main <activity> section (an optional file <Project>/Build/Android/ManifestApplicationActivtyAdditions.txt will also be included)
@@ -360,21 +371,25 @@ public:
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Advanced APK Packaging", Meta = (DisplayName = "Add permissions to support Voice chat (RECORD_AUDIO)"))
 	bool bAndroidVoiceEnabled;
 
+	// Request permission at startup (SplashActivity) for Voice chat (RECORD_AUDIO)
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Advanced APK Packaging", Meta = (DisplayName = "Request permission at startup for Voice chat (RECORD_AUDIO)", EditCondition = "bAndroidVoiceEnabled"))
+	bool bRecordPermissionAtStartupEnabled;
+
+	// Add required permission and support to allow multicast/broadcast Wi-Fi traffic through network interface
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Advanced APK Packaging", Meta = (DisplayName = "Add support for multicast Wi-Fi traffic (CHANGE_WIFI_MULTICAST_STATE)"))
+	bool bEnableMulticastSupport;
+
 	// Package for an Oculus Mobile device
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Advanced APK Packaging", Meta = (DisplayName = "Package for Oculus Mobile devices"))
+	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "Use the \"Package for Meta Quest devices\" checkbox instead"))
 	TArray<TEnumAsByte<EOculusMobileDevice::Type>> PackageForOculusMobile;
+
+	// Package for Oculus Mobile devices. When enabled, it will enable build support for arm64 and vulkan, and disable build support for x86_64, Vulkan Desktop, and OpenGL.
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Advanced APK Packaging", Meta = (DisplayName = "Package for Meta Quest devices."))
+	bool bPackageForMetaQuest;
 
 	// Removes Oculus Signature Files (osig) from APK if Quest/Go APK signed for distribution and enables entitlement checker
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Advanced APK Packaging", Meta = (DisplayName = "Remove Oculus Signature Files from Distribution APK"))
 	bool bRemoveOSIG;
-
-	// Configure AndroidManifest.xml to support specific hardward configurations, position and orientation of the head and controller.
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Advanced APK Packaging", Meta = (DisplayName = "Configure GoogleVR to support specific hardware configurations"))
-	TArray<TEnumAsByte<EGoogleVRCaps::Type>> GoogleVRCaps;
-
-	// Configure the Android to run in sustained performance with lower max speeds, but no FPS fluctuations due to temperature
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Advanced APK Packaging", Meta = (DisplayName = "Configure GoogleVR for sustained-performance mode"))
-	bool bGoogleVRSustainedPerformance;
 
 	// This is the file that keytool outputs, specified with the -keystore parameter (file should be in <Project>/Build/Android)
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = DistributionSigning, Meta = (DisplayName = "Key Store (output of keytool, placed in <Project>/Build/Android)"))
@@ -392,20 +407,16 @@ public:
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = DistributionSigning, Meta = (DisplayName = "Key Password (leave blank to use Key Store Password)"))
 	FString KeyPassword;
 
-	// Enable ArmV7 support? (this will be used if all type are unchecked)
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Support armv7 [aka armeabi-v7a]"))
-	bool bBuildForArmV7;
-
 	// Enable Arm64 support?
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Support arm64 [aka arm64-v8a]"))
 	bool bBuildForArm64;
 
 	// Enable x86-64 support? [CURRENTLY FOR FULL SOURCE GAMES ONLY]
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Support x86_64 [aka x64]"))
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Support x86_64 [aka x64]", EditCondition = "!bPackageForMetaQuest"))
 	bool bBuildForX8664;
 
-	// Include shaders for devices supporting OpenGL ES 3.1 and above (default)
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Support OpenGL ES3.1"))
+	// Include shaders for devices supporting OpenGL ES 3.2 and above (default)
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Support OpenGL ES3.2", EditCondition = "!bPackageForMetaQuest"))
 	bool bBuildForES31;
 
 	// Support the Vulkan RHI and include Vulkan shaders
@@ -413,12 +424,20 @@ public:
 	bool bSupportsVulkan;
 
 	// Enable Vulkan SM5 rendering support
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Support Vulkan Desktop [Experimental]"))
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Support Vulkan Desktop [Experimental]", EditCondition = "!bPackageForMetaQuest"))
 	bool bSupportsVulkanSM5;
 
-	// Select a Clang's sanitizer to build the project with
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build)
-	TEnumAsByte<EClangSanitizer::Type> ClangSanitizer;
+	/** Directory for Debug Vulkan Layers to package */
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Debug Vulkan Layer Directory"))
+	FDirectoryPath DebugVulkanLayerDirectory;
+
+	/** Debug Vulkan Device Layers to enable */
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Debug Vulkan Device Layers"))
+	TArray<FString> DebugVulkanDeviceLayers;
+
+	/** Debug Vulkan Instance Layers to enable */
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Debug Vulkan Instance Layers"))
+	TArray<FString> DebugVulkanInstanceLayers;
 
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = Build, meta = (DisplayName = "Support Backbuffer Sampling on OpenGL",
 	ToolTip = "Whether to render to an offscreen surface instead of render to backbuffer directly on android opengl platform. Enable it if you'd like to support UMG background blur on android opengl."))
@@ -429,16 +448,27 @@ public:
 	bool bDetectVulkanByDefault;
 
 	// Build the shipping config with hidden visibility by default. Results in smaller .so file but will also removes symbols used to display callstack dumps.
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = AdvancedBuild, meta = (DisplayName = "Build with hidden symbol visibility in shipping config. [Experimental]"))
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = AdvancedBuild, meta = (DisplayName = "Build with hidden symbol visibility in shipping config."))
 	bool bBuildWithHiddenSymbolVisibility;
 
+	// Disables extra checks for buffer overflows, comes with perf improvement, but might make tracing stack corruptions in production harder. Note that _FORTIFY_SOURCE=2 is still enabled by the toolchain providing lightweight stack checks
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = AdvancedBuild, meta = (DisplayName = "Disable extra checks for buffer overflows"))
+	bool bDisableStackProtector;
+
+	// Disable libc++_shared dependency validation in all .so files linked with libUnreal.so
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = AdvancedBuild, meta = (DisplayName = "Disable libc++_shared dependency validation in all dependencies"))
+	bool bDisableLibCppSharedDependencyValidation;
+
 	// Always save .so file with symbols allowing use of addr2line on raw callstack addresses.
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = AdvancedBuild, meta = (DisplayName = "Always save a copy of the libUE4.so with symbols. [Experimental]"))
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = AdvancedBuild, meta = (DisplayName = "Always save a copy of the libUnreal.so with symbols. [Experimental]"))
 	bool bSaveSymbols;
 
-	// Use legacy ld instead of new lld linker.
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = AdvancedBuild, meta = (DisplayName = "Force linking to use ld instead of lld"))
-	bool bForceLDLinker;
+	// Strip shader reflection information under Android to avoid issues on older drivers
+	UPROPERTY(config, EditAnywhere, Category = AdvancedBuild, meta = (
+	DisplayName = "Strip shader reflection information",
+	ToolTip = "If true, strip shader reflection information under Android",
+	ConfigRestartRequired = true))
+	bool bStripShaderReflection;
 
 	// If selected, the checked architectures will be split into separate .apk files [CURRENTLY FOR FULL SOURCE GAMES ONLY]
 	// @todo android fat binary: Currently, there isn't much utility in merging multiple .so's into a single .apk except for debugging,
@@ -451,9 +481,14 @@ public:
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = GooglePlayServices)
 	bool bEnableGooglePlaySupport;
 
-	// Enabling this adds GET_ACCOUNTS to manifest and user must give permission.  Required for reset achievements.
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = GooglePlayServices, meta = (DisplayName = "Request Access Token On Connect"))
-	bool bUseGetAccounts;
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = GooglePlayServices, meta = (DisplayName = "Request code for showing GooglePlay Games activities"), meta = (ToolTip = "This request code is reported in onActivityResult when Achievements or Leaderboards UIs are closed"))
+	int RequestCodeForPlayGamesActivities;
+
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = GooglePlayServices, meta = (DisplayName = "GooglePlay Games Oauth Client ID registered for game server"), meta = (ToolTip = "No auth code will be requested on login if empty. Setting up Server-side API Access (see https://developers.google.com/games/services/android/offline-access)"))
+	FString PlayGamesClientId;
+
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = GooglePlayServices, meta = (DisplayName = "Enable GooglePlay Games offline access"), meta = (ToolTip = "Include refresh token when Auth code is exchanged. Setting up Server-side API Access (see https://developers.google.com/games/services/android/offline-access)"))
+	bool bForceRefreshToken;
 
 	// The app id obtained from the Google Play Developer Console
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = GooglePlayServices)
@@ -467,13 +502,25 @@ public:
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = GooglePlayServices)
 	TArray<FGooglePlayLeaderboardMapping> LeaderboardMap;
 
-	// Enabling this requests snapshots support for saved games during Google Play login.
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = GooglePlayServices, meta = (DisplayName = "Enable Snapshots on Google Play login [Experimental]"))
-	bool bEnableSnapshots;
-
 	// Enabling this includes the AdMob SDK and will be detected by Google Play Console on upload of APK.  Disable if you do not need ads to remove this warning.
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = GooglePlayServices, meta = (DisplayName = "Include AdMob support for ads"))
 	bool bSupportAdMob;
+
+	// AdMob Application ID
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = GooglePlayServices, meta = (DisplayName = "AdMob App ID"), meta = (EditCondition = "bSupportAdMob"), meta = (ToolTip = "AdMob Application ID (see https://support.google.com/admob/answer/7356431)"))
+	FString AdMobAppID;
+
+	// Admob TagForChildDirectedTreatment (see https://developers.google.com/admob/android/targeting)
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = GooglePlayServices, meta = (DisplayName = "AdMob Tag For Child-Directed Treatment"), meta = (EditCondition = "bSupportAdMob"), meta = (ToolTip = "Admob TagForChildDirectedTreatment (see https://developers.google.com/admob/android/targeting)"))
+	TEnumAsByte<ETagForChildDirectedTreatment::Type> TagForChildDirectedTreatment;
+
+	// Admob TagForUnderAgeOfConsent (see https://developers.google.com/admob/android/targeting)
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = GooglePlayServices, meta = (DisplayName = "AdMob Tag For Under Age Of Consent"), meta = (EditCondition = "bSupportAdMob"), meta = (ToolTip = "Admob TagForUnderAgeOfConsent (see https://developers.google.com/admob/android/targeting)"))
+	TEnumAsByte<ETagForUnderAgeOfConsent::Type> TagForUnderAgeOfConsent;
+
+	// Admob MaxAdContentRating (see https://developers.google.com/admob/android/targeting)
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = GooglePlayServices, meta = (DisplayName = "AdMob Max ad content rating"), meta = (EditCondition = "bSupportAdMob"), meta = (ToolTip = "Admob MaxAdContentRating (see https://developers.google.com/admob/android/targeting)"))
+	TEnumAsByte<EMaxAdContentRating::Type> MaxAdContentRating;
 
 	// The unique identifier for the ad obtained from AdMob.
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = GooglePlayServices)
@@ -535,25 +582,25 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Audio", meta = (ClampMin = "0", UIMin = "0", DisplayName = "Number of Source Workers"))
 	int32 AudioNumSourceWorkers;
 
-	/** Which of the currently enabled spatialization plugins to use on Windows. */
+	/** Which of the currently enabled spatialization plugins to use. */
 	UPROPERTY(config, EditAnywhere, Category = "Audio")
 	FString SpatializationPlugin;
 
-	/** Which of the currently enabled reverb plugins to use on Windows. */
+	/** Which of the currently enabled source data override plugins to use. */
+	UPROPERTY(config, EditAnywhere, Category = "Audio")
+	FString SourceDataOverridePlugin;
+
+	/** Which of the currently enabled reverb plugins to use. */
 	UPROPERTY(config, EditAnywhere, Category = "Audio")
 	FString ReverbPlugin;
 
-	/** Which of the currently enabled occlusion plugins to use on Windows. */
+	/** Which of the currently enabled occlusion plugins to use. */
 	UPROPERTY(config, EditAnywhere, Category = "Audio")
 	FString OcclusionPlugin;
 
 	/** Various overrides for how this platform should handle compression and decompression */
 	UPROPERTY(config, EditAnywhere, Category = "Audio")
 	FPlatformRuntimeAudioCompressionOverrides CompressionOverrides;
-
-	/** When this is enabled, Actual compressed data will be separated from the USoundWave, and loaded into a cache. */
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Audio|CookOverrides", meta = (DisplayName = "Use Stream Caching (Experimental)"))
-	bool bUseAudioStreamCaching;
 
 	/** This determines the max amount of memory that should be used for the cache at any given time. If set low (<= 8 MB), it lowers the size of individual chunks of audio during cook. */
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Audio|CookOverrides|Stream Caching", meta = (DisplayName = "Max Cache Size (KB)"))
@@ -592,7 +639,7 @@ public:
 	float CompressionQualityModifier;
 
 	// When set to anything beyond 0, this will ensure any SoundWaves longer than this value, in seconds, to stream directly off of the disk.
-	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Audio|CookOverrides", meta = (DisplayName = "Stream All Soundwaves Longer Than: "))
+	UPROPERTY(GlobalConfig)
 	float AutoStreamingThreshold;
 
 	// Several Android graphics debuggers require configuration changes to be made to your application in order to operate. Choosing an option from this menu will configure your project to work with that graphics debugger. 
@@ -640,7 +687,11 @@ public:
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Project SDK Override", Meta = (DisplayName = "NDK API Level (specific version or 'latest' - see tooltip)"))
 	FString NDKAPILevelOverride;
 
-	/** Whether to enable LOD streaming for landscape visual meshes. Only supported on feature level ES3.1 or above. */
+	// Which build-tools to package with (a specific version or (without quotes) 'latest' for latest version on disk).
+	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Project SDK Override", Meta = (DisplayName = "Build-Tools Version (specific version or 'latest')"))
+	FString BuildToolsOverride;
+
+	/** Whether to enable LOD streaming for landscape visual meshes. Only supported on feature level Mobile or above. */
 	UPROPERTY(GlobalConfig, EditAnywhere, Category = "Misc", Meta = (DisplayName = "Stream landscape visual mesh LODs"))
 	bool bStreamLandscapeMeshLODs;
 
@@ -661,6 +712,8 @@ private:
 	virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
 	virtual void PostInitProperties() override;
 	void HandlesRGBHWSupport();
+	void HandleMetaQuestSupport();
+	void RemoveExtraApplicationTag(FString TagToRemove);
 	
 	// End of UObject interface
 	void EnsureValidGPUArch();

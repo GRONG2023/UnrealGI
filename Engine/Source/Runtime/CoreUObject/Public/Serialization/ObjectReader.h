@@ -2,15 +2,24 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "CoreGlobals.h"
 #include "CoreMinimal.h"
-#include "UObject/Object.h"
-#include "Serialization/MemoryArchive.h"
+#include "HAL/Platform.h"
+#include "HAL/UnrealMemory.h"
+#include "Internationalization/TextNamespaceFwd.h"
 #include "Internationalization/TextPackageNamespaceUtil.h"
+#include "Serialization/MemoryArchive.h"
+#include "UObject/Object.h"
 #include "UObject/PropertyPortFlags.h"
 
+class FArchive;
+class FName;
 struct FLazyObjectPtr;
-struct FSoftObjectPtr;
+struct FObjectPtr;
 struct FSoftObjectPath;
+struct FSoftObjectPtr;
 struct FWeakObjectPtr;
 
 /**
@@ -51,7 +60,7 @@ public:
 			// Only serialize if we have the requested amount of data
 			if (Offset + Num <= TotalSize())
 			{
-				FMemory::Memcpy(Data, &Bytes[Offset], Num);
+				FMemory::Memcpy(Data, &Bytes[IntCastChecked<int32>(Offset)], Num);
 				Offset += Num;
 			}
 			else
@@ -63,6 +72,7 @@ public:
 
 	COREUOBJECT_API virtual FArchive& operator<<(FName& N) override;
 	COREUOBJECT_API virtual FArchive& operator<<(UObject*& Res) override;
+	COREUOBJECT_API virtual FArchive& operator<<(FObjectPtr& Value) override;
 	COREUOBJECT_API virtual FArchive& operator<<(FLazyObjectPtr& LazyObjectPtr) override;
 	COREUOBJECT_API virtual FArchive& operator<<(FSoftObjectPtr& Value) override;
 	COREUOBJECT_API virtual FArchive& operator<<(FSoftObjectPath& Value) override;
@@ -71,8 +81,6 @@ public:
 	//~ End FArchive Interface
 
 
-
-protected:
 	FObjectReader(const TArray<uint8>& InBytes)
 		: Bytes(InBytes)
 	{
@@ -81,6 +89,8 @@ protected:
 		ArIgnoreClassRef = false;
 		ArIgnoreArchetypeRef = false;
 	}
+
+protected:
 
 	const TArray<uint8>& Bytes;
 };

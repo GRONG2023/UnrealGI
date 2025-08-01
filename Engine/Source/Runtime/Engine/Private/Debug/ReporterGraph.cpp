@@ -1,10 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Debug/ReporterGraph.h"
-#include "EngineGlobals.h"
 #include "Engine/Engine.h"
-#include "CanvasItem.h"
 #include "Engine/Canvas.h"
+#include "GlobalRenderResources.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ReporterGraph)
 
 UReporterGraph::UReporterGraph(const FObjectInitializer& ObjectInitializer) :
 	Super(ObjectInitializer)
@@ -472,3 +473,4 @@ UFont* UReporterGraph::GetDefaultFont()
 
 	return GEngine->GetSmallFont();
 }
+

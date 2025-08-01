@@ -6,12 +6,16 @@
 
 #include "LocalLightSceneProxy.h"
 #include "Components/LocalLightComponent.h"
+#include "Math/InverseRotationMatrix.h"
+#include "SceneManagement.h"
+#include "SceneView.h"
 
 /** Initialization constructor. */
 FLocalLightSceneProxy::FLocalLightSceneProxy(const ULocalLightComponent* Component)
 	: FLightSceneProxy(Component)
 	, MaxDrawDistance(Component->MaxDrawDistance)
 	, FadeRange(Component->MaxDistanceFadeRange)
+	, InverseExposureBlend(Component->InverseExposureBlend)
 {
 	UpdateRadius(Component->AttenuationRadius);
 }
@@ -85,6 +89,15 @@ FSphere FLocalLightSceneProxy::GetBoundingSphere() const
 	return FSphere(GetPosition(), GetRadius());
 }
 
+float FLocalLightSceneProxy::GetEffectiveScreenRadius(const FViewMatrices& ShadowViewMatrices, const FIntPoint& CameraViewRectSize) const
+{
+	const FVector2D& ProjectionScale = ShadowViewMatrices.GetProjectionScale();
+	const float ScreenScale = FMath::Max(CameraViewRectSize.X * 0.5f * ProjectionScale.X, CameraViewRectSize.Y * 0.5f * ProjectionScale.Y);
+
+	const float LightDistance = (GetOrigin() - ShadowViewMatrices.GetViewOrigin()).Size();
+	return ScreenScale * GetRadius() / FMath::Max(LightDistance, 1.0f);
+}
+
 float FLocalLightSceneProxy::GetEffectiveScreenRadius(const FViewMatrices& ShadowViewMatrices) const
 {
 	// Use the distance from the view origin to the light to approximate perspective projection
@@ -126,8 +139,7 @@ bool FLocalLightSceneProxy::GetPerObjectProjectedShadowInitializer(const FBoxSph
 
 	OutInitializer.PreShadowTranslation = -LightPosition;
 	OutInitializer.WorldToLight = FInverseRotationMatrix((LightVector / LightDistance).Rotation());
-	OutInitializer.Scales = FVector(1.0f, 1.0f / SilhouetteRadius, 1.0f / SilhouetteRadius);
-	OutInitializer.FaceDirection = FVector(1, 0, 0);
+	OutInitializer.Scales = FVector2D(1.0f / SilhouetteRadius, 1.0f / SilhouetteRadius);
 	OutInitializer.SubjectBounds = FBoxSphereBounds(SubjectBounds.Origin - LightPosition, SubjectBounds.BoxExtent, SubjectBounds.SphereRadius);
 	OutInitializer.WAxis = FVector4(0, 0, 1, 0);
 	OutInitializer.MinLightW = 0.1f;
@@ -142,6 +154,9 @@ void FLocalLightSceneProxy::UpdateRadius(float ComponentRadius)
 
 	// Min to avoid div by 0 (NaN in InvRadius)
 	InvRadius = 1.0f / FMath::Max(0.00001f, ComponentRadius);
+}
 
-	bMobileMovablePointLightUniformBufferNeedsUpdate = true;
+bool FLocalLightSceneProxy::IsLocalLight() const
+{
+	return true;
 }

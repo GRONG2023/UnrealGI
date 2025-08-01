@@ -6,8 +6,9 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 using UnrealBuildTool;
+using Microsoft.Extensions.Logging;
 
 namespace AutomationTool
 {
@@ -22,12 +23,12 @@ namespace AutomationTool
 				RawProjectPath: ProjectPath
 			);
 
-			LogInformation("********** CRYPTOKEYS COMMAND STARTED **********");
+			Logger.LogInformation("********** CRYPTOKEYS COMMAND STARTED **********");
 
-			string UE4EditorExe = HostPlatform.Current.GetUE4ExePath(Params.UE4Exe);
-			if (!FileExists(UE4EditorExe))
+			string UEEditorExe = HostPlatform.Current.GetUnrealExePath(Params.UnrealExe);
+			if (!FileExists(UEEditorExe))
 			{
-				throw new AutomationException("Missing " + UE4EditorExe + " executable. Needs to be built first.");
+				throw new AutomationException("Missing " + UEEditorExe + " executable. Needs to be built first.");
 			}
 
 			bool bCycleAllKeys = ParseParam("updateallkeys");
@@ -87,7 +88,7 @@ namespace AutomationTool
 			}
 			else
 			{
-				LogInformation(ChangeDescription);
+				Logger.LogInformation("{Text}", ChangeDescription);
 				FileReference.MakeWriteable(OutputFile);
 			}
 
@@ -96,7 +97,7 @@ namespace AutomationTool
 			else if (bCycleEncryptionKey) CommandletParams = "-updateencryptionkey";
 			else if (bCycleSigningKey) CommandletParams = "-updatesigningkey";
 
-			RunCommandlet(ProjectPath, UE4EditorExe, "CryptoKeys", CommandletParams);
+			RunCommandlet(ProjectPath, UEEditorExe, "CryptoKeys", CommandletParams);
 
 			if (DestinationFile != OutputFile)
 			{
@@ -120,57 +121,7 @@ namespace AutomationTool
 			{
 				if (ProjectFullPath == null)
 				{
-					var bForeign = ParseParam("foreign");
-					var bForeignCode = ParseParam("foreigncode");
-					if (bForeign)
-					{
-						var DestSample = ParseParamValue("DestSample", "CopiedHoverShip");
-						var Dest = ParseParamValue("ForeignDest", CombinePaths(@"C:\testue4\foreign\", DestSample + "_ _Dir"));
-						ProjectFullPath = new FileReference(CombinePaths(Dest, DestSample + ".uproject"));
-					}
-					else if (bForeignCode)
-					{
-						var DestSample = ParseParamValue("DestSample", "PlatformerGame");
-						var Dest = ParseParamValue("ForeignDest", CombinePaths(@"C:\testue4\foreign\", DestSample + "_ _Dir"));
-						ProjectFullPath = new FileReference(CombinePaths(Dest, DestSample + ".uproject"));
-					}
-					else
-					{
-						var OriginalProjectName = ParseParamValue("project", "");
-
-						if (string.IsNullOrEmpty(OriginalProjectName))
-						{
-							throw new AutomationException("No project file specified. Use -project=<project>.");
-						}
-
-						var ProjectName = OriginalProjectName;
-						ProjectName = ProjectName.Trim(new char[] { '\"' });
-						if (ProjectName.IndexOfAny(new char[] { '\\', '/' }) < 0)
-						{
-							ProjectName = CombinePaths(CmdEnv.LocalRoot, ProjectName, ProjectName + ".uproject");
-						}
-						else if (!FileExists_NoExceptions(ProjectName))
-						{
-							ProjectName = CombinePaths(CmdEnv.LocalRoot, ProjectName);
-						}
-						if (FileExists_NoExceptions(ProjectName))
-						{
-							ProjectFullPath = new FileReference(ProjectName);
-						}
-						else
-						{
-							var Branch = new BranchInfo();
-							var GameProj = Branch.FindGame(OriginalProjectName);
-							if (GameProj != null)
-							{
-								ProjectFullPath = GameProj.FilePath;
-							}
-							if (ProjectFullPath == null || !FileExists_NoExceptions(ProjectFullPath.FullName))
-							{
-								throw new AutomationException("Could not find a project file {0}.", ProjectName);
-							}
-						}
-					}
+					ProjectFullPath = ParseProjectParam();
 				}
 				return ProjectFullPath;
 			}

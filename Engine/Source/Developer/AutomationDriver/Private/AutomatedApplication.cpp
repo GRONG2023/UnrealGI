@@ -19,7 +19,10 @@ public:
 		{
 			if (RealCursor.IsValid())
 			{
-				FakePosition = RealCursor->GetPosition();
+				if (!bOverrideRealCursor)
+				{
+					FakePosition = RealCursor->GetPosition();
+				}
 			}
 			else
 			{
@@ -132,9 +135,15 @@ public:
 		bAllowMessageHandling = bValue;
 	}
 
+	void SetOverrideRealCursorCoordinates(bool bOverride)
+	{
+		bOverrideRealCursor = bOverride;
+	}
+
 	FAutomatedCursor(const TSharedPtr<ICursor>& InRealCursor)
 		: RealCursor(InRealCursor)
 		, bAllowMessageHandling(false)
+		, bOverrideRealCursor(false)
 	{
 		if (RealCursor.IsValid())
 		{
@@ -156,6 +165,7 @@ private:
 	const TSharedPtr<ICursor> RealCursor;
 
 	bool bAllowMessageHandling;
+	bool bOverrideRealCursor;
 
 	mutable FVector2D FakePosition;
 	mutable EMouseCursor::Type FakeMouseType;
@@ -201,6 +211,29 @@ public:
 		}
 	}
 
+	virtual bool IsHandlingMessages() const override
+	{
+		if (!PassThroughMessageHandler.IsValid() || !PassThroughMessageHandler->IsHandlingMessages())
+		{
+			return false;
+		}
+
+		if (!AutomatedCursor.IsValid() || !AutomatedCursor->IsHandlingMessages())
+		{
+			return false;
+		}
+
+		return true;
+	}
+
+	virtual void SetOverrideRealCursorCoordinates(bool bOverride) override
+	{
+		if (AutomatedCursor.IsValid())
+		{
+			AutomatedCursor->SetOverrideRealCursorCoordinates(bOverride);
+		}
+	}
+
 	virtual void SetMessageHandler(const TSharedRef<FGenericApplicationMessageHandler>& InMessageHandler) override
 	{
 		RealMessageHandler = InMessageHandler;
@@ -242,17 +275,17 @@ public:
 
 	virtual void SetCapture(const TSharedPtr<FGenericWindow>& Window) override
 	{
-		if (!PassThroughMessageHandler.IsValid() || PassThroughMessageHandler->IsHandlingMessages())
+		if (IsHandlingMessages())
 		{
-			RealApplication->SetCapture(Window);
+			FakeCapture = Window;
 		}
 
-		FakeCapture = Window;
+		RealApplication->SetCapture(Window);
 	}
 
 	virtual void* GetCapture(void) const override
 	{
-		if (!PassThroughMessageHandler.IsValid() || !PassThroughMessageHandler->IsHandlingMessages())
+		if (IsHandlingMessages())
 		{
 			return (void*)FakeCapture.Get();
 		}
@@ -262,7 +295,7 @@ public:
 
 	virtual FModifierKeysState GetModifierKeys() const override
 	{
-		if (!PassThroughMessageHandler.IsValid() || !PassThroughMessageHandler->IsHandlingMessages())
+		if (IsHandlingMessages())
 		{
 			return FakeModifierKeys;
 		}
@@ -296,7 +329,7 @@ public:
 
 	virtual bool IsCursorDirectlyOverSlateWindow() const override
 	{
-		if (PassThroughMessageHandler.IsValid() && !PassThroughMessageHandler->IsHandlingMessages())
+		if (IsHandlingMessages())
 		{
 			return InternalGetWindowUnderCursor().IsValid();
 		}
@@ -306,7 +339,7 @@ public:
 
 	virtual TSharedPtr<FGenericWindow> GetWindowUnderCursor() override
 	{
-		if (PassThroughMessageHandler.IsValid() && !PassThroughMessageHandler->IsHandlingMessages())
+		if (IsHandlingMessages())
 		{
 			TSharedPtr<SWindow> Window = InternalGetWindowUnderCursor();
 			if (Window.IsValid())

@@ -19,12 +19,13 @@ class UBlendSpaceFactory1D : public UFactory
 {
 	GENERATED_UCLASS_BODY()
 
-	UPROPERTY()
-	class USkeleton*	TargetSkeleton;
+	/** Target skeleton for the created blendspace */
+	UPROPERTY(BlueprintReadWrite, Category=BlendSpaceFactory)
+	TObjectPtr<class USkeleton>	TargetSkeleton;
 
-	/** The preview mesh to use with this animation */
-	UPROPERTY()
-	class USkeletalMesh* PreviewSkeletalMesh;
+	/** The preview mesh to use for the created blendspace */
+	UPROPERTY(BlueprintReadWrite, Category=BlendSpaceFactory)
+	TObjectPtr<class USkeletalMesh> PreviewSkeletalMesh;
 
 	//~ Begin UFactory Interface
 	virtual bool ConfigureProperties() override;

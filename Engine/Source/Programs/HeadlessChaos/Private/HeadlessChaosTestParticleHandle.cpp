@@ -19,6 +19,22 @@ namespace ChaosTest {
 		Five->AddParticles(5);
 		auto Two = MakeUnique<FGeometryParticles>();
 		Two->AddParticles(2);
+
+		TArray<TUniquePtr<FGeometryParticleHandle>> HandleStorage;
+		auto CreateHandlesHelper = [&HandleStorage](auto& SOA)
+		{
+			//Create a handle with just the bare minimum that we need so that handle iterator uses real handles that are linked with SOA
+			for(int32 ParticleIdx = 0; (unsigned)ParticleIdx < SOA->Size(); ++ParticleIdx)
+			{
+				TUniquePtr<FGeometryParticleHandle> NewParticleHandle = FGeometryParticleHandle::CreateParticleHandle(MakeSerializable(SOA), ParticleIdx, HandleStorage.Num());
+				SOA->SetHandle(ParticleIdx, NewParticleHandle.Get());
+				HandleStorage.Add(MoveTemp(NewParticleHandle));
+			}
+		};
+
+		CreateHandlesHelper(Five);
+		CreateHandlesHelper(Two);
+
 		//empty soa in the start
 		{
 			TArray<FGeometryParticleHandle*> Handles;
@@ -30,13 +46,31 @@ namespace ChaosTest {
 			}
 			EXPECT_EQ(Handles.Num(), 7);
 
+			//disable first middle and last
+			Five->LightWeightDisabled(0) = true;
+			Five->LightWeightDisabled(2) = true;
+			Five->LightWeightDisabled(4) = true;
+			Two->LightWeightDisabled(1) = true;
+
+			int32 NonDisabledCount = 0;
+			for (auto& Particle : View)
+			{
+				++NonDisabledCount;
+			}
+			EXPECT_EQ(NonDisabledCount, 3);
+
 			THandleView<FGeometryParticles> HandleView = MakeHandleView(Handles);
 			int32 Count = 0;
 			for (auto& Handle : HandleView)
 			{
 				++Count;
 			}
-			EXPECT_EQ(Count, 7);
+			EXPECT_EQ(Count, 3);	//3 because 4 are disabled
+
+			Five->LightWeightDisabled(0) = false;
+			Five->LightWeightDisabled(2) = false;
+			Five->LightWeightDisabled(4) = false;
+			Two->LightWeightDisabled(1) = false;
 		}
 
 		//empty soa in the middle
@@ -70,13 +104,31 @@ namespace ChaosTest {
 			}
 			EXPECT_EQ(Handles.Num(), 7);
 
+			//disable first middle and last
+			Five->LightWeightDisabled(0) = true;
+			Five->LightWeightDisabled(2) = true;
+			Five->LightWeightDisabled(4) = true;
+			Two->LightWeightDisabled(1) = true;
+
+			int32 NonDisabledCount = 0;
+			for (auto& Particle : View)
+			{
+				++NonDisabledCount;
+			}
+			EXPECT_EQ(NonDisabledCount, 3);
+
 			THandleView<FGeometryParticles> HandleView = MakeHandleView(Handles);
 			int32 Count = 0;
 			for (auto& Handle : HandleView)
 			{
 				++Count;
 			}
-			EXPECT_EQ(Count, 7);
+			EXPECT_EQ(Count, 3);	//3 because 4 are disabled
+
+			Five->LightWeightDisabled(0) = false;
+			Five->LightWeightDisabled(2) = false;
+			Five->LightWeightDisabled(4) = false;
+			Two->LightWeightDisabled(1) = false;
 		}
 
 		//parallel for
@@ -131,6 +183,73 @@ namespace ChaosTest {
 					EXPECT_TRUE(Val);
 				}
 			}
+
+
+			//disable first middle and last
+			Five->LightWeightDisabled(0) = true;
+			Five->LightWeightDisabled(2) = true;
+			Five->LightWeightDisabled(4) = true;
+			Two->LightWeightDisabled(1) = true;
+
+			{
+				TArray<bool> AuxArray;
+				AuxArray.SetNumZeroed(View.Num());
+				bool DoubleWrite = false;
+				View.ParallelFor([&AuxArray, &DoubleWrite](const auto& Particle, int32 Idx)
+					{
+						if (AuxArray[Idx])
+						{
+							DoubleWrite = true;
+						}
+						AuxArray[Idx] = true;
+					});
+
+				EXPECT_FALSE(DoubleWrite);
+
+				for (int32 Idx = 0; Idx < AuxArray.Num(); ++Idx)
+				{
+					if(Idx == 0 || Idx == 2 || Idx == 4 || Idx == 6)
+					{
+						//didn't write because disabled
+						EXPECT_FALSE(AuxArray[Idx]);
+					}
+					else
+					{
+						EXPECT_TRUE(AuxArray[Idx]);
+					}
+					
+				}
+			}
+
+			{
+				TArray<bool> AuxArray;
+				AuxArray.SetNumZeroed(View.Num());
+				bool DoubleWrite = false;
+				HandleView.ParallelFor([&AuxArray, &DoubleWrite](const auto& Particle, int32 Idx)
+					{
+						if (AuxArray[Idx])
+						{
+							DoubleWrite = true;
+						}
+						AuxArray[Idx] = true;
+					});
+
+				EXPECT_FALSE(DoubleWrite);
+
+				for (int32 Idx = 0; Idx < AuxArray.Num(); ++Idx)
+				{
+					if (Idx == 0 || Idx == 2 || Idx == 4 || Idx == 6)
+					{
+						//didn't write because disabled
+						EXPECT_FALSE(AuxArray[Idx]);
+					}
+					else
+					{
+						EXPECT_TRUE(AuxArray[Idx]);
+					}
+
+				}
+			}
 		}
 	}
 
@@ -154,26 +273,26 @@ namespace ChaosTest {
 	template <typename TGeometry, typename TKinematicGeometry, typename TPBDRigid>
 	void ParticleHandleTestHelper(TGeometry* Geometry, TKinematicGeometry* KinematicGeometry, TPBDRigid* PBDRigid)
 	{
-		EXPECT_EQ(Geometry->X()[0], 0);	//default constructor
-		EXPECT_EQ(Geometry->X()[1], 0);
-		EXPECT_EQ(Geometry->X()[2], 0);
+		EXPECT_EQ(Geometry->GetX()[0], 0);	//default constructor
+		EXPECT_EQ(Geometry->GetX()[1], 0);
+		EXPECT_EQ(Geometry->GetX()[2], 0);
 
-		EXPECT_EQ(KinematicGeometry->V()[0], 0);	//default constructor
-		EXPECT_EQ(KinematicGeometry->V()[1], 0);
-		EXPECT_EQ(KinematicGeometry->V()[2], 0);
+		EXPECT_EQ(KinematicGeometry->GetV()[0], 0);	//default constructor
+		EXPECT_EQ(KinematicGeometry->GetV()[1], 0);
+		EXPECT_EQ(KinematicGeometry->GetV()[2], 0);
 
-		EXPECT_EQ(PBDRigid->X()[0], 0);	//default constructor of base
-		EXPECT_EQ(PBDRigid->X()[1], 0);
-		EXPECT_EQ(PBDRigid->X()[2], 0);
-		EXPECT_EQ(PBDRigid->V()[0], 0);
-		EXPECT_EQ(PBDRigid->V()[1], 0);
-		EXPECT_EQ(PBDRigid->V()[2], 0);
+		EXPECT_EQ(PBDRigid->GetX()[0], 0);	//default constructor of base
+		EXPECT_EQ(PBDRigid->GetX()[1], 0);
+		EXPECT_EQ(PBDRigid->GetX()[2], 0);
+		EXPECT_EQ(PBDRigid->GetV()[0], 0);
+		EXPECT_EQ(PBDRigid->GetV()[1], 0);
+		EXPECT_EQ(PBDRigid->GetV()[2], 0);
 		EXPECT_EQ(PBDRigid->M(), 1);
 
 		PBDRigid->SetX(FVec3(1, 2, 3));
-		EXPECT_EQ(PBDRigid->X()[0], 1);
+		EXPECT_EQ(PBDRigid->GetX()[0], 1);
 		KinematicGeometry->SetV(FVec3(3, 3, 3));
-		EXPECT_EQ(KinematicGeometry->V()[0], 3);
+		EXPECT_EQ(KinematicGeometry->GetV()[0], 3);
 
 		EXPECT_EQ(Geometry->ObjectState(), EObjectStateType::Static);
 		EXPECT_EQ(KinematicGeometry->ObjectState(), EObjectStateType::Kinematic);
@@ -182,7 +301,7 @@ namespace ChaosTest {
 
 		TGeometry* DynamicAsStatic = PBDRigid;
 		EXPECT_EQ(DynamicAsStatic->ObjectState(), EObjectStateType::Dynamic);
-		EXPECT_EQ(DynamicAsStatic->X()[0], 1);
+		EXPECT_EQ(DynamicAsStatic->GetX()[0], 1);
 
 		//more polymorphism
 		ParticleHandleTestHelperObjectState(PBDRigid);
@@ -191,7 +310,8 @@ namespace ChaosTest {
 	void ParticleLifetimeAndThreading()
 	{
 		{
-			FPBDRigidsSOAs SOAs;
+			FParticleUniqueIndicesMultithreaded UniqueIndices;
+			FPBDRigidsSOAs SOAs(UniqueIndices);
 
 			TArray<TUniquePtr<FPBDRigidParticle>> GTRawParticles;
 			for (int i = 0; i < 3; ++i)
@@ -213,7 +333,7 @@ namespace ChaosTest {
 				//fake step and write to physics side
 				for (auto& Particle : SOAs.GetAllParticlesView())
 				{
-					Particle.X() = FVec3(Count);
+					Particle.SetX(FVec3(Count));
 					Count += 1;
 				}
 			}
@@ -222,7 +342,7 @@ namespace ChaosTest {
 			{
 				for (const auto& Particle : SOAs.GetAllParticlesView())
 				{
-					Particle.GTGeometryParticle()->SetX(Particle.X());
+					Particle.GTGeometryParticle()->SetX(Particle.GetX());
 				}
 			}
 
@@ -253,7 +373,7 @@ namespace ChaosTest {
 
 			for (auto& Particle : SOAs.GetAllParticlesView())
 			{
-				EXPECT_TRUE(Particle.X()[0] != 1);
+				EXPECT_TRUE(Particle.GetX()[0] != 1);
 			}
 		}
 	}
@@ -261,13 +381,14 @@ namespace ChaosTest {
 	void ParticleDestroyOrdering()
 	{
 		{
-			FPBDRigidsSOAs SOAs;
+			FParticleUniqueIndicesMultithreaded UniqueIndices;
+			FPBDRigidsSOAs SOAs(UniqueIndices);
 			SOAs.CreateDynamicParticles(10);
 			FReal Count = 0;
 			FGeometryParticleHandle* ThirdParticle = nullptr;
 			for (auto& Particle : SOAs.GetAllParticlesView())
 			{
-				Particle.X() = FVec3(Count);
+				Particle.SetX(FVec3(Count));
 				if (Count == 2)
 				{
 					ThirdParticle = Particle.Handle();
@@ -275,7 +396,7 @@ namespace ChaosTest {
 
 				Count += 1;
 			}
-			EXPECT_EQ(ThirdParticle->X()[0], 2);
+			EXPECT_EQ(ThirdParticle->GetX()[0], 2);
 
 			SOAs.DestroyParticle(ThirdParticle);
 			//default behavior is swap dynamics at end
@@ -284,11 +405,11 @@ namespace ChaosTest {
 			{
 				if (Count == 2)
 				{
-					EXPECT_EQ(Particle.X()[0], 9);
+					EXPECT_EQ(Particle.GetX()[0], 9);
 				}
 				else
 				{
-					EXPECT_EQ(Particle.X()[0], Count);
+					EXPECT_EQ(Particle.GetX()[0], Count);
 				}
 
 				Count += 1;
@@ -297,13 +418,14 @@ namespace ChaosTest {
 
 		//now test non swapping remove
 		{
-			FPBDRigidsSOAs SOAs;
+			FParticleUniqueIndicesMultithreaded UniqueIndices;
+			FPBDRigidsSOAs SOAs(UniqueIndices);
 			SOAs.CreateClusteredParticles(10);
 			FReal Count = 0;
 			FGeometryParticleHandle* ThirdParticle = nullptr;
 			for (auto& Particle : SOAs.GetAllParticlesView())
 			{
-				Particle.X() = FVec3(Count);
+				Particle.SetX(FVec3(Count));
 				if (Count == 2)
 				{
 					ThirdParticle = Particle.Handle();
@@ -311,7 +433,7 @@ namespace ChaosTest {
 
 				Count += 1;
 			}
-			EXPECT_EQ(ThirdParticle->X()[0], 2);
+			EXPECT_EQ(ThirdParticle->GetX()[0], 2);
 
 			/*
 			//For now we're just disabling removing clustered all together
@@ -339,7 +461,8 @@ namespace ChaosTest {
 	{
 		FWeakParticleHandle WeakHandle;
 		{
-			FPBDRigidsSOAs SOAs;
+			FParticleUniqueIndicesMultithreaded UniqueIndices;
+			FPBDRigidsSOAs SOAs(UniqueIndices);
 			SOAs.CreateStaticParticles(1);
 			for(auto& Particle : SOAs.GetAllParticlesView())
 			{
@@ -383,7 +506,7 @@ namespace ChaosTest {
 				for (auto Itr = MakeParticleIterator(SOAViews); Itr; ++Itr)
 				{
 					//set X back to 0 for all particles
-					Itr->X() = FVec3(0);
+					Itr->SetX(FVec3(0));
 					EXPECT_EQ(Itr->Handle(), GeomHandles[Count]);
 					//implicit const
 					TConstParticleIterator<FGeometryParticles>& ConstItr = Itr;
@@ -394,7 +517,7 @@ namespace ChaosTest {
 				for (auto Itr = MakeConstParticleIterator(SOAViews); Itr; ++Itr)
 				{
 					//check Xs are back to 0
-					EXPECT_EQ(Itr->X()[0], 0);
+					EXPECT_EQ(Itr->GetX()[0], 0);
 				}
 
 				Count = 0;
@@ -419,21 +542,22 @@ namespace ChaosTest {
 				for (auto Itr = MakeParticleIterator(MoveTemp(SOAViews)); Itr; ++Itr)
 				{
 					//set P to 1,1,1
-					Itr->P() = FVec3(1);
+					Itr->SetP(FVec3(1));
 					EXPECT_EQ(Itr->Handle(), PBDRigidHandles[Count++]);
-					EXPECT_EQ(Itr->Handle()->P()[0], Itr->P()[0]);	//handle type is deduced from iterator type
+					EXPECT_EQ(Itr->Handle()->GetP()[0], Itr->GetP()[0]);	//handle type is deduced from iterator type
 				}
 				EXPECT_EQ(Count, 1);
 			}
 
 			//Use an SOA with an active list
 			{
-				FPBDRigidsSOAs SOAsWithHandles;	//todo: create a mock object so we can more easily create handles
+				FParticleUniqueIndicesMultithreaded UniqueIndices;
+				FPBDRigidsSOAs SOAsWithHandles(UniqueIndices);	//todo: create a mock object so we can more easily create handles
 				auto PartialDynamics = SOAsWithHandles.CreateDynamicParticles(10);
 
 				TArray<FPBDRigidParticleHandle*> ActiveParticles = { PartialDynamics[3], PartialDynamics[5] };
-				PartialDynamics[3]->X() = FVec3(3);
-				PartialDynamics[5]->X() = FVec3(5);
+				PartialDynamics[3]->SetX(FVec3(3));
+				PartialDynamics[5]->SetX(FVec3(5));
 				
 				TArray<TSOAView<FPBDRigidParticles>> SOAViews = { PBDRigidParticles.Get(), &ActiveParticles, PBDRigidParticles.Get() };
 				int32 Count = 0;
@@ -441,12 +565,12 @@ namespace ChaosTest {
 				{
 					if (Count == 1)
 					{
-						EXPECT_EQ(Itr->X()[0], 3);
+						EXPECT_EQ(Itr->GetX()[0], 3);
 					}
 
 					if (Count == 2)
 					{
-						EXPECT_EQ(Itr->X()[0], 5);
+						EXPECT_EQ(Itr->GetX()[0], 5);
 					}
 					++Count;
 				}
@@ -464,7 +588,8 @@ namespace ChaosTest {
 
 		{
 			// try using SOA manager
-			FPBDRigidsSOAs SOAs;
+			FParticleUniqueIndicesMultithreaded UniqueIndices;
+			FPBDRigidsSOAs SOAs(UniqueIndices);
 			SOAs.CreateStaticParticles(3);
 			auto KinematicParticles = SOAs.CreateKinematicParticles(3);
 			SOAs.CreateDynamicParticles(3);
@@ -475,7 +600,7 @@ namespace ChaosTest {
 			FReal Count = 0;
 			for (auto& Kinematic : KinematicParticles)
 			{
-				Kinematic->X() = FVec3(Count);
+				Kinematic->SetX(FVec3(Count));
 				SOAs.DisableParticle(Kinematic);
 				Count += 1;
 			}
@@ -483,9 +608,9 @@ namespace ChaosTest {
 			EXPECT_EQ(SOAs.GetNonDisabledView().Num(), 6);
 
 			//values are still set
-			EXPECT_EQ(KinematicParticles[0]->X()[0], 0);
-			EXPECT_EQ(KinematicParticles[1]->X()[0], 1);
-			EXPECT_EQ(KinematicParticles[2]->X()[0], 2);
+			EXPECT_EQ(KinematicParticles[0]->GetX()[0], 0);
+			EXPECT_EQ(KinematicParticles[1]->GetX()[0], 1);
+			EXPECT_EQ(KinematicParticles[2]->GetX()[0], 2);
 
 			//move to enabled
 			for (auto& Kinematic : KinematicParticles)
@@ -567,7 +692,8 @@ namespace ChaosTest {
 
 	void HandleObjectStateChangeTest()
 	{
-		FPBDRigidsSOAs SOAs;
+		FParticleUniqueIndicesMultithreaded UniqueIndices;
+		FPBDRigidsSOAs SOAs(UniqueIndices);
 
 		// Lambda for adding a particle to the dynamic-backed kinematic SOA
 		const auto CreateDynamicKinematic = [&]()

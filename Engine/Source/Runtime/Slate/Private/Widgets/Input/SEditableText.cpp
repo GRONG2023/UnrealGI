@@ -5,6 +5,8 @@
 #include "Framework/Text/PlainTextLayoutMarshaller.h"
 #include "Widgets/Text/SlateEditableTextLayout.h"
 #include "Types/ReflectionMetadata.h"
+#include "Types/TrackedMetaData.h"
+
 #if WITH_ACCESSIBILITY
 #include "Widgets/Accessibility/SlateAccessibleWidgets.h"
 #endif
@@ -51,7 +53,7 @@ void SEditableText::Construct( const FArguments& InArgs )
 	BackgroundImageSelected = InArgs._BackgroundImageSelected;
 
 	// We use the given style when creating the text layout as it may not be safe to call the override delegates until we've finished being constructed
-	// The first call to SyncronizeTextStyle will apply the correct overrides, and that will happen before the first paint
+	// The first call to SynchronizeTextStyle will apply the correct overrides, and that will happen before the first paint
 	check(InArgs._Style);
 	FTextBlockStyle TextStyle = FCoreStyle::Get().GetWidgetStyle<FTextBlockStyle>("NormalText");
 	TextStyle.Font = InArgs._Style->Font;
@@ -71,10 +73,13 @@ void SEditableText::Construct( const FArguments& InArgs )
 	EditableTextLayout->SetCompositionBrush(InArgs._BackgroundImageComposing.IsSet() ? InArgs._BackgroundImageComposing : &InArgs._Style->BackgroundImageComposing);
 	EditableTextLayout->SetDebugSourceInfo(TAttribute<FString>::Create(TAttribute<FString>::FGetter::CreateLambda([this]{ return FReflectionMetaData::GetWidgetDebugInfo(this); })));
 	EditableTextLayout->SetJustification(InArgs._Justification);
+	EditableTextLayout->SetOverflowPolicy(InArgs._OverflowPolicy);
 
 	// build context menu extender
 	MenuExtender = MakeShareable(new FExtender());
 	MenuExtender->AddMenuExtension("EditText", EExtensionHook::Before, TSharedPtr<FUICommandList>(), InArgs._ContextMenuExtender);
+
+	AddMetadata(MakeShared<FTrackedMetaData>(this, FName(TEXT("EditableText"))));
 }
 
 void SEditableText::SetText( const TAttribute< FText >& InNewText )
@@ -90,6 +95,31 @@ FText SEditableText::GetText() const
 void SEditableText::SetFont( const TAttribute< FSlateFontInfo >& InNewFont )
 {
 	Font = InNewFont;
+
+	Invalidate(EInvalidateWidgetReason::Layout);
+}
+
+FSlateFontInfo SEditableText::GetFont() const
+{
+	return Font.Get();
+}
+
+void SEditableText::SetTextStyle( const FEditableTextStyle& InNewTextStyle )
+{
+	Font = InNewTextStyle.Font;
+	ColorAndOpacity = InNewTextStyle.ColorAndOpacity;
+	BackgroundImageSelected = &InNewTextStyle.BackgroundImageSelected;
+
+	Invalidate(EInvalidateWidgetReason::Layout);
+}
+
+void SEditableText::SetTextBlockStyle(const FTextBlockStyle* InTextStyle)
+{
+	if (InTextStyle)
+	{
+		EditableTextLayout->SetTextStyle(*InTextStyle);
+		Invalidate(EInvalidateWidgetReason::Layout); //Using Layout as changing text block size can affect the size.
+	}
 }
 
 void SEditableText::Tick( const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime )
@@ -369,6 +399,11 @@ void SEditableText::SetTextFlowDirection(const TOptional<ETextFlowDirection>& In
 	EditableTextLayout->SetTextFlowDirection(InTextFlowDirection);
 }
 
+void SEditableText::SetOverflowPolicy(TOptional<ETextOverflowPolicy> InOverflowPolicy)
+{
+	EditableTextLayout->SetOverflowPolicy(InOverflowPolicy);
+}
+
 bool SEditableText::AnyTextSelected() const
 {
 	return EditableTextLayout->AnyTextSelected();
@@ -417,6 +452,11 @@ void SEditableText::BeginSearch(const FText& InSearchText, const ESearchCase::Ty
 void SEditableText::AdvanceSearch(const bool InReverse)
 {
 	EditableTextLayout->AdvanceSearch(InReverse);
+}
+
+void SEditableText::EnableTextInputMethodContext()
+{
+	EditableTextLayout->EnableTextInputMethodContext();
 }
 
 void SEditableText::SynchronizeTextStyle()

@@ -98,4 +98,29 @@ public:
 	 * @param DeltaTime Delta time (in seconds) since the last call to Tick
 	 */
 	virtual void Tick(const float DeltaTime) = 0;
+
+	/**
+	 * Get the icon that represents opening this source code editor
+	 * @return the default source code editor icon
+	 */
+	virtual FName GetOpenIconName() const
+	{
+		return FName("MainFrame.OpenSourceCodeEditor"); // Default Open Source Code Editor Icon
+	}
+
+	/**
+	 * Get the icon that represents refreshing this source code editor
+	 * @return the default source code editor icon
+	 */
+	virtual FName GetRefreshIconName() const
+	{
+		return FName("MainFrame.RefreshSourceCodeEditor"); // Default Refresh Source Code Editor Icon
+	}
+	
+	/**
+	 * Get the style set where custom icons for the editors are defined.
+	 * By default uses FAppStyle::GetAppStyleSetName() == "CoreStyle"
+	 * @return the default style set for icons
+	 */
+	SOURCECODEACCESS_API virtual FName GetStyleSet() const;
 };

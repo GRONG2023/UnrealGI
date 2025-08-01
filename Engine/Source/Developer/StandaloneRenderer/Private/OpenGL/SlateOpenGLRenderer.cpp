@@ -3,6 +3,7 @@
 #include "OpenGL/SlateOpenGLRenderer.h"
 #include "Fonts/FontTypes.h"
 #include "Fonts/FontCache.h"
+#include "Types/SlateVector2.h"
 #include "Widgets/SWindow.h"
 #include "OpenGL/SlateOpenGLTextures.h"
 
@@ -12,6 +13,8 @@
 
 #if PLATFORM_LINUX
 	#include "HAL/PlatformApplicationMisc.h"
+#elif PLATFORM_MAC
+	#include "Mac/CocoaThread.h"
 #endif
 
 class FSlateOpenGLFontAtlasFactory : public ISlateFontAtlasFactory
@@ -21,24 +24,34 @@ public:
 	{
 	}
 
-	virtual FIntPoint GetAtlasSize(const bool InIsGrayscale) const override
+	virtual FIntPoint GetAtlasSize(ESlateFontAtlasContentType InContentType) const override
 	{
-		return InIsGrayscale 
-			? FIntPoint(GrayscaleTextureSize, GrayscaleTextureSize)
-			: FIntPoint(ColorTextureSize, ColorTextureSize);
+		switch (InContentType)
+		{
+			case ESlateFontAtlasContentType::Alpha:
+				return FIntPoint(GrayscaleTextureSize, GrayscaleTextureSize);
+			case ESlateFontAtlasContentType::Color:
+				return FIntPoint(ColorTextureSize, ColorTextureSize);
+			case ESlateFontAtlasContentType::Msdf:
+				return FIntPoint(SdfTextureSize, SdfTextureSize);
+			default:
+				checkNoEntry();
+				// Default to COLOR
+				return FIntPoint(ColorTextureSize, ColorTextureSize);
+		}
 	}
 
-	virtual TSharedRef<FSlateFontAtlas> CreateFontAtlas(const bool InIsGrayscale) const override
+	virtual TSharedRef<FSlateFontAtlas> CreateFontAtlas(ESlateFontAtlasContentType InContentType) const override
 	{
-		const FIntPoint AtlasSize = GetAtlasSize(InIsGrayscale);
+		const FIntPoint AtlasSize = GetAtlasSize(InContentType);
 
-		TSharedRef<FSlateFontTextureOpenGL> FontTexture = MakeShareable(new FSlateFontTextureOpenGL(AtlasSize.X, AtlasSize.Y, InIsGrayscale));
+		TSharedRef<FSlateFontTextureOpenGL> FontTexture = MakeShareable(new FSlateFontTextureOpenGL(AtlasSize.X, AtlasSize.Y, InContentType));
 		FontTexture->CreateFontTexture();
 
 		return FontTexture;
 	}
 
-	virtual TSharedPtr<ISlateFontTexture> CreateNonAtlasedTexture(const uint32 InWidth, const uint32 InHeight, const bool InIsGrayscale, const TArray<uint8>& InRawData) const override
+	virtual TSharedPtr<ISlateFontTexture> CreateNonAtlasedTexture(const uint32 InWidth, const uint32 InHeight, ESlateFontAtlasContentType InContentType, const TArray<uint8>& InRawData) const override
 	{
 		return nullptr;
 	}
@@ -48,6 +61,7 @@ private:
 	/** Size of each font texture, width and height */
 	static const uint32 GrayscaleTextureSize = 1024;
 	static const uint32 ColorTextureSize = 512;
+	static const uint32 SdfTextureSize = 1024;
 };
 
 TSharedRef<FSlateFontServices> CreateOpenGLFontServices()
@@ -77,11 +91,21 @@ FSlateOpenGLRenderer::~FSlateOpenGLRenderer()
 }
 
 /** Returns a draw buffer that can be used by Slate windows to draw window elements */
-FSlateDrawBuffer& FSlateOpenGLRenderer::GetDrawBuffer()
+FSlateDrawBuffer& FSlateOpenGLRenderer::AcquireDrawBuffer()
 {
+	ensureMsgf(!DrawBuffer.IsLocked(), TEXT("The DrawBuffer is already locked. Make sure to ReleaseDrawBuffer the DrawBuffer"));
+	DrawBuffer.Lock();
+
 	// Clear out the buffer each time its accessed
 	DrawBuffer.ClearBuffer();
+
 	return DrawBuffer;
+}
+
+void FSlateOpenGLRenderer::ReleaseDrawBuffer(FSlateDrawBuffer& InWindowDrawBuffer)
+{
+	ensureMsgf(&DrawBuffer == &InWindowDrawBuffer, TEXT("It release a DrawBuffer that is not a member of the SlateNullRenderer"));
+	InWindowDrawBuffer.Unlock();
 }
 
 bool FSlateOpenGLRenderer::Initialize()
@@ -114,8 +138,6 @@ bool FSlateOpenGLRenderer::Initialize()
  */
 void FSlateOpenGLRenderer::DrawWindows( FSlateDrawBuffer& InWindowDrawBuffer )
 {
-	FMemMark MemMark(FMemStack::Get());
-
 	const TSharedRef<FSlateFontCache> FontCache = SlateFontServices->GetFontCache();
 
 	// Draw each window.  For performance.  All elements are batched before anything is rendered
@@ -140,16 +162,20 @@ void FSlateOpenGLRenderer::DrawWindows( FSlateDrawBuffer& InWindowDrawBuffer )
 				{
 					//@todo implement fullscreen
 					const bool bFullscreen = false;
-					Private_ResizeViewport( WindowSize, *Viewport, bFullscreen );
+					Private_ResizeViewport( UE::Slate::CastToVector2f(WindowSize), *Viewport, bFullscreen );
 				}
 
 				Viewport->MakeCurrent();
 
+				// Update texture cache of pending requests before the resources are accessed during batching
+				TextureManager->UpdateCache();
+
 				// Batch elements.  Note that we must set the current viewport before doing this so we have a valid rendering context when calling OpenGL functions
 				ElementBatcher->AddElements(ElementList);
 
-				// Update the font cache with new text before elements are batched
+				// Update the font cache with new text after elements are batched
 				FontCache->UpdateCache();
+			
 
 				//@ todo Slate: implement for opengl
 				bool bRequiresStencilTest = false;
@@ -180,6 +206,7 @@ void FSlateOpenGLRenderer::DrawWindows( FSlateDrawBuffer& InWindowDrawBuffer )
 
 	// flush the cache if needed
 	FontCache->ConditionalFlushCache();
+	TextureManager->ConditionalFlushCache();
 
 	// Safely release the references now that we are finished rendering with the dynamic brushes
 	DynamicBrushesToRemove.Empty();
@@ -218,7 +245,7 @@ void FSlateOpenGLRenderer::RequestResize( const TSharedPtr<SWindow>& InWindow, u
 	// @todo implement.  Viewports are currently resized in DrawWindows
 }
 
-void FSlateOpenGLRenderer::Private_ResizeViewport( const FVector2D& WindowSize, FSlateOpenGLViewport& InViewport, bool bFullscreen )
+void FSlateOpenGLRenderer::Private_ResizeViewport( FVector2f WindowSize, FSlateOpenGLViewport& InViewport, bool bFullscreen )
 {
 	uint32 Width = FMath::TruncToInt(WindowSize.X);
 	uint32 Height = FMath::TruncToInt(WindowSize.Y);
@@ -238,7 +265,7 @@ void FSlateOpenGLRenderer::UpdateFullscreenState( const TSharedRef<SWindow> InWi
 //		uint32 ResX = OverrideResX ? OverrideResX : GSystemResolution.ResX;
 //		uint32 ResY = OverrideResY ? OverrideResY : GSystemResolution.ResY;
 
-		Private_ResizeViewport( FVector2D( Viewport->ViewportRect.Right, Viewport->ViewportRect.Bottom ), *Viewport, bFullscreen );
+		Private_ResizeViewport( FVector2f( Viewport->ViewportRect.Right, Viewport->ViewportRect.Bottom ), *Viewport, bFullscreen );
 	}
 }
 
@@ -254,9 +281,15 @@ bool FSlateOpenGLRenderer::GenerateDynamicImageResource(FName ResourceName, uint
 	return TextureManager->CreateDynamicTextureResource(ResourceName, Width, Height, Bytes) != NULL;
 }
 
-FSlateResourceHandle FSlateOpenGLRenderer::GetResourceHandle( const FSlateBrush& Brush )
+bool FSlateOpenGLRenderer::GenerateDynamicImageResource(FName ResourceName, FSlateTextureDataRef TextureData)
 {
-	return TextureManager->GetResourceHandle( Brush );
+	return GenerateDynamicImageResource(ResourceName, TextureData->GetWidth(), TextureData->GetHeight(), TextureData->GetRawBytes());
+}
+
+
+FSlateResourceHandle FSlateOpenGLRenderer::GetResourceHandle(const FSlateBrush& Brush, FVector2f LocalSize, float DrawScale)
+{
+	return TextureManager->GetResourceHandle(Brush, LocalSize, DrawScale);
 }
 
 void FSlateOpenGLRenderer::RemoveDynamicBrushResource( TSharedPtr<FSlateDynamicImageBrush> BrushToRemove )
@@ -279,6 +312,13 @@ FSlateUpdatableTexture* FSlateOpenGLRenderer::CreateUpdatableTexture(uint32 Widt
 	RawData.AddZeroed(Width * Height * 4);
 	FSlateOpenGLTexture* NewTexture = new FSlateOpenGLTexture(Width, Height);
 	NewTexture->Init(GL_RGBA, RawData);
+	return NewTexture;
+}
+
+FSlateUpdatableTexture* FSlateOpenGLRenderer::CreateSharedHandleTexture(void* SharedHandle)
+{
+	FSlateOpenGLTexture* NewTexture = new FSlateOpenGLTexture();
+	NewTexture->Init(SharedHandle);
 	return NewTexture;
 }
 

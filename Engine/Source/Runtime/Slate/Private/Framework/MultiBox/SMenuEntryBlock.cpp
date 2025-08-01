@@ -8,10 +8,12 @@
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SLinkedBox.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/SToolTip.h"
 #include "Widgets/Colors/SColorBlock.h"
 #include "Widgets/Input/SCheckBox.h"
+#include "Styling/StyleColors.h"
 
 
 FMenuEntryBlock::FMenuEntryBlock( const FName& InExtensionHook, const TSharedPtr< const FUICommandInfo > InCommand, TSharedPtr< const FUICommandList > InCommandList, const TAttribute<FText>& InLabelOverride, const TAttribute<FText>& InToolTipOverride, const FSlateIcon& InIconOverride, bool bInCloseSelfOnly, bool bInShouldCloseWindowAfterMenuSelection)
@@ -20,6 +22,7 @@ FMenuEntryBlock::FMenuEntryBlock( const FName& InExtensionHook, const TSharedPtr
 	, ToolTipOverride( InToolTipOverride )
 	, IconOverride( InIconOverride )
 	, bIsSubMenu( false )
+	, bIsRecursivelySearchable( true )
 	, bOpenSubMenuOnClick( false )
 	, UserInterfaceActionType( EUserInterfaceActionType::Button )
 	, bCloseSelfOnly( bInCloseSelfOnly )
@@ -35,6 +38,7 @@ FMenuEntryBlock::FMenuEntryBlock( const FName& InExtensionHook, const TAttribute
 	, IconOverride( InIcon )
 	, EntryBuilder( InEntryBuilder )
 	, bIsSubMenu( bInSubMenu )
+	, bIsRecursivelySearchable( true )
 	, bOpenSubMenuOnClick( bInSubMenuOnClick )
 	, UserInterfaceActionType( InUserInterfaceActionType )
 	, bCloseSelfOnly( bInCloseSelfOnly )
@@ -50,6 +54,7 @@ FMenuEntryBlock::FMenuEntryBlock( const FName& InExtensionHook, const TAttribute
 	, ToolTipOverride( InToolTip )
 	, IconOverride( InIcon )
 	, bIsSubMenu( false )
+	, bIsRecursivelySearchable( true )
 	, bOpenSubMenuOnClick( false )
 	, UserInterfaceActionType( InUserInterfaceActionType )
 	, bCloseSelfOnly( bInCloseSelfOnly )
@@ -65,6 +70,7 @@ FMenuEntryBlock::FMenuEntryBlock( const FName& InExtensionHook, const TAttribute
 	, IconOverride( InIcon )
 	, EntryBuilder( InEntryBuilder )
 	, bIsSubMenu( bInSubMenu )
+	, bIsRecursivelySearchable( true )
 	, bOpenSubMenuOnClick( bInSubMenuOnClick )
 	, UserInterfaceActionType( EUserInterfaceActionType::Button )
 	, bCloseSelfOnly( bInCloseSelfOnly )
@@ -81,6 +87,7 @@ FMenuEntryBlock::FMenuEntryBlock( const FName& InExtensionHook, const TAttribute
 	, IconOverride( InIcon )
 	, MenuBuilder( InMenuBuilder )
 	, bIsSubMenu( bInSubMenu )
+	, bIsRecursivelySearchable( true )
 	, bOpenSubMenuOnClick( bInSubMenuOnClick )
 	, UserInterfaceActionType( EUserInterfaceActionType::Button )
 	, bCloseSelfOnly( bInCloseSelfOnly )
@@ -97,6 +104,7 @@ FMenuEntryBlock::FMenuEntryBlock( const FName& InExtensionHook, const TAttribute
 	, IconOverride( InIcon )
 	, EntryWidget( InEntryWidget )
 	, bIsSubMenu( bInSubMenu )
+	, bIsRecursivelySearchable( true )
 	, bOpenSubMenuOnClick( bInSubMenuOnClick )
 	, UserInterfaceActionType( EUserInterfaceActionType::Button )
 	, bCloseSelfOnly( bInCloseSelfOnly )
@@ -110,6 +118,7 @@ FMenuEntryBlock::FMenuEntryBlock( const FName& InExtensionHook, const FUIAction&
 	, ToolTipOverride( InToolTip )
 	, EntryWidget( Contents )
 	, bIsSubMenu( false )
+	, bIsRecursivelySearchable( true )
 	, bOpenSubMenuOnClick( false )
 	, UserInterfaceActionType( InUserInterfaceActionType )
 	, bCloseSelfOnly( bInCloseSelfOnly )
@@ -123,6 +132,7 @@ FMenuEntryBlock::FMenuEntryBlock( const FName& InExtensionHook, const TSharedRef
 	, EntryBuilder( InEntryBuilder )
 	, EntryWidget( Contents )
 	, bIsSubMenu( bInSubMenu )
+	, bIsRecursivelySearchable( true )
 	, bOpenSubMenuOnClick( bInSubMenuOnClick )
 	, UserInterfaceActionType( EUserInterfaceActionType::Button )
 	, bCloseSelfOnly( bInCloseSelfOnly )
@@ -137,6 +147,7 @@ FMenuEntryBlock::FMenuEntryBlock( const FName& InExtensionHook, const FUIAction&
 	, EntryBuilder( InEntryBuilder )
 	, EntryWidget( Contents )
 	, bIsSubMenu( bInSubMenu )
+	, bIsRecursivelySearchable( true )
 	, bOpenSubMenuOnClick( false )
 	, UserInterfaceActionType( EUserInterfaceActionType::Button )
 	, bCloseSelfOnly( bInCloseSelfOnly )
@@ -152,11 +163,31 @@ FMenuEntryBlock::FMenuEntryBlock( const FName& InExtensionHook, const FUIAction&
 	, IconOverride( InIcon )
 	, MenuBuilder( InMenuBuilder )
 	, bIsSubMenu( bInSubMenu )
+	, bIsRecursivelySearchable( true )
 	, bOpenSubMenuOnClick( bInSubMenuOnClick )
 	, UserInterfaceActionType( EUserInterfaceActionType::Button )
 	, bCloseSelfOnly( bInCloseSelfOnly )
 	, Extender( InExtender )
 	, bShouldCloseWindowAfterMenuSelection( bInShouldCloseWindowAfterMenuSelection )
+{
+}
+
+FMenuEntryBlock::FMenuEntryBlock(const FMenuEntryParams& InMenuEntryParams)
+	: FMultiBlock(InMenuEntryParams)
+	, LabelOverride(InMenuEntryParams.LabelOverride)
+	, ToolTipOverride(InMenuEntryParams.ToolTipOverride)
+	, InputBindingOverride(InMenuEntryParams.InputBindingOverride)
+	, IconOverride(InMenuEntryParams.IconOverride)
+	, EntryBuilder(InMenuEntryParams.EntryBuilder)
+	, MenuBuilder(InMenuEntryParams.MenuBuilder)
+	, EntryWidget(InMenuEntryParams.EntryWidget)
+	, bIsSubMenu(InMenuEntryParams.bIsSubMenu)
+	, bIsRecursivelySearchable(InMenuEntryParams.bIsRecursivelySearchable)
+	, bOpenSubMenuOnClick(InMenuEntryParams.bOpenSubMenuOnClick)
+	, UserInterfaceActionType(InMenuEntryParams.UserInterfaceActionType)
+	, bCloseSelfOnly(InMenuEntryParams.bCloseSelfOnly)
+	, Extender(InMenuEntryParams.Extender)
+	, bShouldCloseWindowAfterMenuSelection(InMenuEntryParams.bShouldCloseWindowAfterMenuSelection)
 {
 }
 
@@ -202,6 +233,8 @@ void SMenuEntryBlock::Construct( const FArguments& InArgs )
 	/*TimeToSubMenuOpen = 0.0f;*/
 	//SubMenuRequestState = Idle;
 
+	MenuBarButtonStyle = nullptr;
+
 	// No images by default
 	CheckedImage = nullptr;
 	UncheckedImage = nullptr;
@@ -220,13 +253,8 @@ TSharedRef< SWidget> SMenuEntryBlock::BuildMenuBarWidget( const FMenuEntryBuildP
 	const ISlateStyle* const StyleSet = InBuildParams.StyleSet;
 	const FName& StyleName = InBuildParams.StyleName;
 
-	/* Style for menu bar button with sub menu opened */
-	MenuBarButtonBorderSubmenuOpen = StyleSet->GetBrush(StyleName, ".Button.SubMenuOpen");
-	/* Style for menu bar button with no sub menu opened */
-	MenuBarButtonBorderSubmenuClosed = FCoreStyle::Get().GetBrush("NoBorder");
-
 	TSharedPtr< SMenuAnchor > NewMenuAnchor;
-
+	MenuBarButtonStyle = &StyleSet->GetWidgetStyle<FButtonStyle>(ISlateStyle::Join(StyleName, ".Button"));
 
 	// Create a menu bar button within a pop-up anchor
 	TSharedRef<SWidget> Widget =
@@ -237,20 +265,20 @@ TSharedRef< SWidget> SMenuEntryBlock::BuildMenuBarWidget( const FMenuEntryBuildP
 		[
 			SNew(SBorder)
 			.BorderImage(this, &SMenuEntryBlock::GetMenuBarButtonBorder)
-			.Padding(0)
+			.Padding(0.0f)
 			[
 				// Create a button
 				SNew(SButton)
 				// Use the menu bar item style for this button
-				.ButtonStyle(StyleSet, ISlateStyle::Join(StyleName, ".Button"))
+				.ButtonStyle(StyleSet, "NoBorder")
 				// Pull-down menu bar items always activate on mouse-down, not mouse-up
 				.ClickMethod(EButtonClickMethod::MouseDown)
 				// Pass along the block's tool-tip string
 				.ToolTipText(this, &SMenuEntryBlock::GetFilteredToolTipText, EntryToolTip)
 				// Add horizontal padding between the edge of the button and the content.  Also add a bit of vertical
 				// padding to push the text down from the top of the menu bar a bit.
-				.ContentPadding(FMargin(10.0f, 2.0f))
-				.ForegroundColor(FSlateColor::UseForeground())
+				.ContentPadding(StyleSet->GetMargin(StyleName, ".MenuBar.Padding"))
+				.ForegroundColor(this, &SMenuEntryBlock::GetMenuBarForegroundColor)
 				.VAlign(VAlign_Center)
 				[
 					SNew(STextBlock)
@@ -336,6 +364,8 @@ public:
 	SLATE_STYLE_ARGUMENT(FButtonStyle, ButtonStyle)
 	/** Sets the rules to use for determining whether the button was clicked.  This is an advanced setting and generally should be left as the default. */
 	SLATE_ARGUMENT(EButtonClickMethod::Type, ClickMethod)
+	/** Spacing between button's border and the content. */
+	SLATE_ARGUMENT(FMargin, ContentPadding)
 	/** Called when the button is clicked */
 	SLATE_EVENT(FOnClicked, OnClicked)
 
@@ -354,8 +384,8 @@ public:
 		ButtonArgs.ButtonStyle(InArgs._ButtonStyle);
 		ButtonArgs.ClickMethod(InArgs._ClickMethod);
 		ButtonArgs.ToolTip(InArgs._ToolTip);
-		ButtonArgs.ContentPadding(FMargin(0, 2));
-		ButtonArgs.ForegroundColor(FSlateColor::UseForeground());
+		ButtonArgs.ContentPadding(InArgs._ContentPadding);
+		ButtonArgs.ForegroundColor(FSlateColor::UseStyle());
 		ButtonArgs.OnClicked(InArgs._OnClicked)
 		[
 			InArgs._Content.Widget
@@ -392,12 +422,13 @@ public:
 	{
 		if (ResponseToMouseUp == EResponseToMouseUp::Handle)
 		{
-			bIsPressed = true;
+			if (IsEnabled())
+			{
+				Press();
+			}
 		}
 
 		FReply Reply = SButton::OnMouseButtonUp(MyGeometry, MouseEvent);
-
-		bIsHovered = true;
 
 		return Reply;
 	}
@@ -409,7 +440,7 @@ public:
 			ResponseToMouseUp = EResponseToMouseUp::Handle;
 		}
 
-		bIsPressed = false;
+		Release();
 
 		SButton::OnMouseLeave(MouseEvent);
 	}
@@ -418,10 +449,16 @@ private:
 	EResponseToMouseUp ResponseToMouseUp;
 };
 
+void FMenuEntryBlock::SetCheckBoxStyle(FName InCheckBoxStyle)
+{
+	this->CheckBoxStyle = InCheckBoxStyle;
+}
+
 TSharedRef< SWidget > SMenuEntryBlock::BuildMenuEntryWidget( const FMenuEntryBuildParams& InBuildParams )
 {
 	const TAttribute<FText>& Label = InBuildParams.Label;
 	const TAttribute<FText>& EntryToolTip = InBuildParams.ToolTip;
+	const TAttribute<FText>& InputBinding = InBuildParams.InputBinding;
 	const TSharedPtr< const FMenuEntryBlock > MenuEntryBlock = InBuildParams.MenuEntryBlock;
 	const TSharedPtr< const FMultiBox > MultiBox = InBuildParams.MultiBox;
 	const TSharedPtr< const FUICommandInfo >& UICommand = InBuildParams.UICommand;
@@ -437,9 +474,6 @@ TSharedRef< SWidget > SMenuEntryBlock::BuildMenuEntryWidget( const FMenuEntryBui
 	const ISlateStyle* const StyleSet = InBuildParams.StyleSet;
 	const FName& StyleName = InBuildParams.StyleName;
 
-	// Grab the friendly text name for this action's input binding
-	FText InputBindingText = UICommand.IsValid() ? UICommand->GetInputText() : FText::GetEmpty();
-
 	// Allow menu item buttons to be triggered on mouse-up events if the menu is configured to be
 	// dismissed automatically after clicking.  This preserves the behavior people expect for context
 	// menus and pull-down menus
@@ -454,11 +488,13 @@ TSharedRef< SWidget > SMenuEntryBlock::BuildMenuEntryWidget( const FMenuEntryBui
 		const FSlateBrush* IconBrush = ActualIcon.GetIcon();
 		if( IconBrush->GetResourceName() != NAME_None )
 		{
-			IconWidget =
-				SNew( SImage )
+			IconWidget = SNew( SImage )
+				.ColorAndOpacity( FSlateColor::UseSubduedForeground() )
 				.Image( IconBrush );
 		}
 	}
+
+	const float MenuIconSize = StyleSet->GetFloat(StyleName, ".MenuIconSize", 16.f);
 
 	if (bSectionContainsIcons && (IconWidget == SNullWidget::NullWidget))
 	{
@@ -467,7 +503,7 @@ TSharedRef< SWidget > SMenuEntryBlock::BuildMenuEntryWidget( const FMenuEntryBui
 		{
 			IconWidget = SNew(SColorBlock)
 				.Color(FColorList::Magenta)
-				.Size(FVector2D(MultiBoxConstants::MenuIconSize, MultiBoxConstants::MenuIconSize))
+				.Size(FVector2D(MenuIconSize, MenuIconSize))
 				.ToolTipText(NSLOCTEXT("SMenuEntryBlock", "MissingIconInMenu", "This menu entry is missing an icon and should be fixed (consistency within each section is required, either every entry in the section has an icon or no entries have an icon)"));
 		}
 		else
@@ -491,7 +527,7 @@ TSharedRef< SWidget > SMenuEntryBlock::BuildMenuEntryWidget( const FMenuEntryBui
 			UserInterfaceType == EUserInterfaceActionType::RadioButton ||
 			UserInterfaceType == EUserInterfaceActionType::Check ) ?
 				EVisibility::Visible :
-				EVisibility::Hidden;
+				EVisibility::Collapsed;
 
 	// Collapse (rather than Hide) the checkbox when using a custom menu widget with a button action, otherwise we add additional padding around the user defined widget
 	if ((MenuEntryBlock->EntryWidget.IsValid() && UserInterfaceType == EUserInterfaceActionType::Button) ||
@@ -502,20 +538,25 @@ TSharedRef< SWidget > SMenuEntryBlock::BuildMenuEntryWidget( const FMenuEntryBui
 	else if (MultiBox->IsInEditMode())
 	{
 		// Hide but keep spacing to avoid confusing user during editing
-		CheckBoxVisibility = EVisibility::Hidden;
+		CheckBoxVisibility = EVisibility::Collapsed;
 	}
 
-	TAttribute<FSlateColor> CheckBoxForegroundColor = FSlateColor::UseForeground();
+	TAttribute<FSlateColor> CheckBoxForegroundColor = FSlateColor::UseStyle();
 	FName CheckBoxStyle = ISlateStyle::Join( StyleName, ".CheckBox" );
-	if (UserInterfaceType == EUserInterfaceActionType::Check)
+
+	if (MenuEntryBlock->CheckBoxStyle != NAME_None)
+	{
+		CheckBoxStyle = MenuEntryBlock->CheckBoxStyle;
+	}
+	else if (UserInterfaceType == EUserInterfaceActionType::Check)
 	{
 		CheckBoxStyle = ISlateStyle::Join( StyleName, ".Check" );
 	}
 	else if (UserInterfaceType == EUserInterfaceActionType::RadioButton)
 	{
 		CheckBoxStyle = ISlateStyle::Join( StyleName, ".RadioButton" );
-		CheckBoxForegroundColor = TAttribute<FSlateColor>::Create( TAttribute<FSlateColor>::FGetter::CreateRaw( this, &SMenuEntryBlock::TintOnHover ) );
 	}
+
 
 	// If there is custom menu widget, set it
 	// If there isn't, create it
@@ -527,18 +568,18 @@ TSharedRef< SWidget > SMenuEntryBlock::BuildMenuEntryWidget( const FMenuEntryBui
 		// Whatever we have in the icon area goes first
 		+ SHorizontalBox::Slot()
 		.AutoWidth()
-		.Padding(FMargin(2, 0, 2, 0))
+		.Padding(FMargin(2, 0, 6, 0))
 		[
 			SNew( SBox )
 			.Visibility(IconWidget != SNullWidget::NullWidget ? EVisibility::Visible : EVisibility::Collapsed)
-			.WidthOverride( MultiBoxConstants::MenuIconSize + 2 )
-			.HeightOverride( MultiBoxConstants::MenuIconSize )
+			.WidthOverride(MenuIconSize + 2 )
+			.HeightOverride(MenuIconSize)
 			.HAlign(HAlign_Center)
 			.VAlign(VAlign_Center)
 			[
 				SNew( SBox )
-				.WidthOverride( MultiBoxConstants::MenuIconSize )
-				.HeightOverride( MultiBoxConstants::MenuIconSize )
+				.WidthOverride(MenuIconSize)
+				.HeightOverride(MenuIconSize)
 				[
 					IconWidget
 				]
@@ -556,40 +597,39 @@ TSharedRef< SWidget > SMenuEntryBlock::BuildMenuEntryWidget( const FMenuEntryBui
 		]
 		+ SHorizontalBox::Slot()
 		.AutoWidth()
+		.Padding(FMargin(25,0,0,0))
 		.VAlign( VAlign_Center )
 		.HAlign( HAlign_Right )
 		[
 			SNew( SBox )
-			.Visibility(InputBindingText.IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible)
+			.Visibility(InputBinding.Get().IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible)
 			.Padding(FMargin(16,0,4,0))
 			[
 				SNew( STextBlock )
 				.TextStyle( StyleSet, ISlateStyle::Join( StyleName, ".Keybinding" ) )
 				.ColorAndOpacity( FSlateColor::UseSubduedForeground() )
-				.Text( InputBindingText )
+				.Text( InputBinding )
 			]
 		];
 	}
 
 	// Create a wrapper containing the checkbox, and the generated button content
-	TSharedPtr< SWidget > CheckBoxAndButtonContent = 
+	TSharedRef< SWidget > CheckBoxAndButtonContent = 
 		SNew( SHorizontalBox )
 		+SHorizontalBox::Slot()
+		.Padding(FMargin(2, 0, 8, 0))
 		.AutoWidth()
 		[
-			SNew(SBox)
-			.Visibility(CheckBoxVisibility)
-			.WidthOverride( MultiBoxConstants::MenuCheckBoxSize )
-			.HeightOverride( MultiBoxConstants::MenuCheckBoxSize )
-			.HAlign(HAlign_Center)
-			.VAlign(VAlign_Center)
+			SNew(SLinkedBox, OwnerMultiBoxWidget.Pin()->GetLinkedBoxManager())
 			[
 				// For check style menus, use an image instead of a CheckBox because it can't really be checked.
 				UserInterfaceType == EUserInterfaceActionType::Check
 					? StaticCastSharedRef<SWidget>(SNew(SImage)
+						.Visibility(CheckBoxVisibility)
 						.ColorAndOpacity(FSlateColor::UseForeground())
 						.Image(this, &SMenuEntryBlock::GetCheckBoxImageBrushFromStyle, &StyleSet->GetWidgetStyle<FCheckBoxStyle>(CheckBoxStyle)))
 					: StaticCastSharedRef<SWidget>(SNew(SCheckBox)
+						.Visibility(CheckBoxVisibility)
 						.ForegroundColor( CheckBoxForegroundColor )
 						.IsChecked( this, &SMenuEntryBlock::IsChecked )
 						.Style( StyleSet, CheckBoxStyle )
@@ -597,6 +637,7 @@ TSharedRef< SWidget > SMenuEntryBlock::BuildMenuEntryWidget( const FMenuEntryBui
 			]
 		]
 		+SHorizontalBox::Slot()
+		.Padding(FMargin(2, 0, 0, 0))
 		[
 			ButtonContent.ToSharedRef()
 		];
@@ -607,12 +648,13 @@ TSharedRef< SWidget > SMenuEntryBlock::BuildMenuEntryWidget( const FMenuEntryBui
 		.ButtonStyle( StyleSet, ISlateStyle::Join( StyleName, ".Button" ) )
 		// Set our click method for this menu item.  It will be different for pull-down/context menus.
 		.ClickMethod( ButtonClickMethod )
+		.ContentPadding(StyleSet->GetMargin(StyleName,".Block.Padding"))
 		// Pass along the block's tool-tip string
 		.ToolTip( FMultiBoxSettings::ToolTipConstructor.Execute(EntryToolTip, nullptr, UICommand ) )
 		// Bind the button's "on clicked" event to our object's method for this
 		.OnClicked(this, &SMenuEntryBlock::OnMenuItemButtonClicked)
 		[
-			CheckBoxAndButtonContent.ToSharedRef()
+			CheckBoxAndButtonContent
 		];
 
 	return MenuEntryWidget.ToSharedRef();
@@ -641,24 +683,29 @@ public:
 		SLATE_ATTRIBUTE( bool, ShouldAppearHovered )
 		/** The style to use */
 		SLATE_STYLE_ARGUMENT( FButtonStyle, ButtonStyle )
+		/** Spacing between button's border and the content. */
+		SLATE_ARGUMENT(FMargin, ContentPadding)
 	SLATE_END_ARGS()
 
 	void Construct( const FArguments& InArgs )
 	{
+		bHovered = false;
 		ShouldAppearHovered = InArgs._ShouldAppearHovered;
+
+		SetHover(TAttribute<bool>::CreateSP(this, &SSubMenuButton::HandleShouldAppearHovered));
 
 		SButton::FArguments ButtonArgs;
 		ButtonArgs.Text(InArgs._Label);
 		ButtonArgs.ForegroundColor( this, &SSubMenuButton::InvertOnHover );
 		ButtonArgs.HAlign(HAlign_Fill);
 		ButtonArgs.VAlign(VAlign_Fill);
-		ButtonArgs.ContentPadding(FMargin(0,2));
+		ButtonArgs.ContentPadding(InArgs._ContentPadding);
 
 		if ( InArgs._ButtonStyle )
 		{
 			ButtonArgs.ButtonStyle( InArgs._ButtonStyle );
 		}
-
+	
 		ButtonArgs.OnClicked(InArgs._OnClicked);
 		ButtonArgs.ClickMethod(EButtonClickMethod::MouseDown)
 		[
@@ -668,28 +715,42 @@ public:
 		SButton::Construct( ButtonArgs );
 	}
 
-	virtual bool IsHovered() const override
+	virtual void OnMouseEnter(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override
 	{
-		// Submenu widgets which have been opened should remain as if hovered, even if the cursor is outside them
-		return SWidget::IsHovered() || ShouldAppearHovered.Get();
+		bHovered = true;
+		SButton::OnMouseEnter(MyGeometry, MouseEvent);
+	}
+
+	virtual void OnMouseLeave(const FPointerEvent& MouseEvent) override
+	{
+		bHovered = false;
+		SButton::OnMouseLeave(MouseEvent);
 	}
 
 private:
+	bool HandleShouldAppearHovered() const
+	{
+		// Submenu widgets which have been opened should remain as if hovered, even if the cursor is outside them
+		return bHovered || ShouldAppearHovered.Get();
+	}
+
 	FSlateColor InvertOnHover() const
 	{
 		if ( this->IsHovered() )
 		{
-			return FLinearColor::Black;
+			return FStyleColors::ForegroundHover;
 		}
 		else
 		{
-			return FSlateColor::UseForeground();
+			return FSlateColor::UseStyle();
 		}
 	}
 
 private:
 	/** Attribute to indicate if the sub-menu is open or not */
 	TAttribute<bool> ShouldAppearHovered;
+	/** Keep an internal IsHovered flag*/
+	bool bHovered;
 };
 
 
@@ -729,6 +790,7 @@ TSharedRef< SWidget> SMenuEntryBlock::BuildSubMenuWidget( const FMenuEntryBuildP
 		{
 			IconWidget =
 				SNew( SImage )
+				.ColorAndOpacity( FSlateColor::UseSubduedForeground() )
 				.Image( IconBrush );
 		}
 	}
@@ -746,7 +808,7 @@ TSharedRef< SWidget> SMenuEntryBlock::BuildSubMenuWidget( const FMenuEntryBuildP
 			UserInterfaceType == EUserInterfaceActionType::RadioButton ||
 			UserInterfaceType == EUserInterfaceActionType::Check ) ?
 				EVisibility::Visible :
-				EVisibility::Hidden;
+				EVisibility::Collapsed;
 
 	TAttribute<FSlateColor> CheckBoxForegroundColor = FSlateColor::UseForeground();
 	FName CheckBoxStyle = ISlateStyle::Join( StyleName, ".CheckBox" );
@@ -760,6 +822,8 @@ TSharedRef< SWidget> SMenuEntryBlock::BuildSubMenuWidget( const FMenuEntryBuildP
 		CheckBoxForegroundColor = TAttribute<FSlateColor>::Create( TAttribute<FSlateColor>::FGetter::CreateRaw( this, &SMenuEntryBlock::TintOnHover ) );
 	}
 
+	const float MenuIconSize = StyleSet->GetFloat(StyleName, ".MenuIconSize", 16.f);
+
 	TSharedPtr< SWidget > ButtonContent = MenuEntryBlock->EntryWidget;
 	if ( !ButtonContent.IsValid() )
 	{
@@ -768,39 +832,18 @@ TSharedRef< SWidget> SMenuEntryBlock::BuildSubMenuWidget( const FMenuEntryBuildP
 		// Whatever we have in the icon area goes first
 		+ SHorizontalBox::Slot()
 		.AutoWidth()
-		[
-			SNew(SBox)
-			.Visibility(CheckBoxVisibility)
-			.WidthOverride( MultiBoxConstants::MenuCheckBoxSize )
-			.HeightOverride( MultiBoxConstants::MenuCheckBoxSize )
-			.HAlign(HAlign_Center)
-			.VAlign(VAlign_Center)
-			[
-				// For check style menus, use an image instead of a CheckBox because it can't really be checked.
-				UserInterfaceType == EUserInterfaceActionType::Check
-					? StaticCastSharedRef<SWidget>(SNew( SImage )
-						.Image(this, &SMenuEntryBlock::GetCheckBoxImageBrushFromStyle, &StyleSet->GetWidgetStyle<FCheckBoxStyle>(CheckBoxStyle)))
-					: StaticCastSharedRef<SWidget>(SNew( SCheckBox )
-						.ForegroundColor( CheckBoxForegroundColor )
-						.IsChecked( this, &SMenuEntryBlock::IsChecked )
-						.Style( StyleSet, CheckBoxStyle )
-						.OnCheckStateChanged( this, &SMenuEntryBlock::OnCheckStateChanged ))
-			]
-		]
-		+ SHorizontalBox::Slot()
-		.AutoWidth()
-		.Padding(FMargin(2, 0, 2, 0))
+		.Padding(FMargin(2, 0, 6, 0))
 		[
 			SNew( SBox )
 			.Visibility(IconWidget != SNullWidget::NullWidget ? EVisibility::Visible : EVisibility::Collapsed)
-			.WidthOverride( MultiBoxConstants::MenuIconSize + 2 )
-			.HeightOverride( MultiBoxConstants::MenuIconSize )
+			.WidthOverride(MenuIconSize + 2)
+			.HeightOverride(MenuIconSize)
 			.HAlign(HAlign_Center)
 			.VAlign(VAlign_Center)
 			[
 				SNew( SBox )
-				.WidthOverride( MultiBoxConstants::MenuIconSize )
-				.HeightOverride( MultiBoxConstants::MenuIconSize )
+				.WidthOverride(MenuIconSize)
+				.HeightOverride(MenuIconSize)
 				[
 					IconWidget
 				]
@@ -818,6 +861,35 @@ TSharedRef< SWidget> SMenuEntryBlock::BuildSubMenuWidget( const FMenuEntryBuildP
 		];
 	}
 
+	// Create a wrapper containing the checkbox, and the generated button content
+	TSharedRef< SWidget > CheckBoxAndButtonContent =
+		SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot()
+		.Padding(FMargin(2, 0, 8, 0))
+		.AutoWidth()
+		[
+			SNew(SLinkedBox, OwnerMultiBoxWidget.Pin()->GetLinkedBoxManager())
+			[
+				// For check style menus, use an image instead of a CheckBox because it can't really be checked.
+				UserInterfaceType == EUserInterfaceActionType::Check
+				? StaticCastSharedRef<SWidget>(SNew(SImage)
+					.Visibility(CheckBoxVisibility)
+					.ColorAndOpacity(FSlateColor::UseForeground())
+					.Image(this, &SMenuEntryBlock::GetCheckBoxImageBrushFromStyle, &StyleSet->GetWidgetStyle<FCheckBoxStyle>(CheckBoxStyle)))
+				: StaticCastSharedRef<SWidget>(SNew(SCheckBox)
+					.ForegroundColor(CheckBoxForegroundColor)
+					.Visibility(CheckBoxVisibility)
+					.IsChecked(this, &SMenuEntryBlock::IsChecked)
+					.Style(StyleSet, CheckBoxStyle)
+					.OnCheckStateChanged(this, &SMenuEntryBlock::OnCheckStateChanged))
+			]
+		]
+		+ SHorizontalBox::Slot()
+		.Padding(FMargin(2, 0, 0, 0))
+		[
+			ButtonContent.ToSharedRef()
+		];
+
 	TSharedPtr< SMenuAnchor > NewMenuAnchorPtr;
 	TSharedRef< SWidget > Widget = 
 	SAssignNew( NewMenuAnchorPtr, SMenuAnchor )
@@ -828,9 +900,10 @@ TSharedRef< SWidget> SMenuEntryBlock::BuildSubMenuWidget( const FMenuEntryBuildP
 			// Create a button
 			SNew( SSubMenuButton )
 			// Pass along the block's tool-tip string
-			.ToolTipText( EntryToolTip )
+			.ToolTip( FMultiBoxSettings::ToolTipConstructor.Execute(EntryToolTip, nullptr, UICommand ) )
 			// Style to use
 			.ButtonStyle( &StyleSet->GetWidgetStyle<FButtonStyle>( ISlateStyle::Join( StyleName, ".Button" ) ) )
+			.ContentPadding(StyleSet->GetMargin(StyleName, ".Block.Padding"))
 			// Allow the button to change its state depending on the state of the submenu
 			.ShouldAppearHovered( this, &SMenuEntryBlock::ShouldSubMenuAppearHovered )
 			[
@@ -838,7 +911,7 @@ TSharedRef< SWidget> SMenuEntryBlock::BuildSubMenuWidget( const FMenuEntryBuildP
 				+ SHorizontalBox::Slot()
 				.FillWidth( 1.0f )
 				[
-					ButtonContent.ToSharedRef()
+					CheckBoxAndButtonContent
 				]
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
@@ -933,7 +1006,17 @@ void SMenuEntryBlock::BuildMultiBlockWidget(const ISlateStyle* StyleSet, const F
 	else
 	{
 		BuildParams.ToolTip = BuildParams.UICommand.IsValid() ? BuildParams.UICommand->GetDescription() : FText::GetEmpty();
-	}	
+	}
+
+	// Input bindings are optional so if the binding override is empty and there is no UI command just use the empty tool tip.
+	if (MenuEntryBlock->InputBindingOverride.IsSet())
+	{
+		BuildParams.InputBinding = MenuEntryBlock->InputBindingOverride.Get().ToUpper();
+	}
+	else
+	{
+		BuildParams.InputBinding = BuildParams.UICommand.IsValid() ? BuildParams.UICommand->GetInputText().ToUpper() : FText::GetEmpty();
+	}
 
 	if (bIsEditing)
 	{
@@ -962,7 +1045,10 @@ void SMenuEntryBlock::BuildMultiBlockWidget(const ISlateStyle* StyleSet, const F
 		// Menu bar items cannot be submenus
 		check( !MenuEntryBlock->bIsSubMenu );
 		
-		ChildSlot[ BuildMenuBarWidget( BuildParams ) ];
+		ChildSlot
+		[ 
+			BuildMenuBarWidget( BuildParams ) 
+		];
 	}
 
 	if (!bIsEditing)
@@ -1100,6 +1186,9 @@ void SMenuEntryBlock::OnClicked( bool bCheckBoxClicked )
 
 					// Also tell the multibox about this open pull-down menu, so it can be closed later if we need to
 					OwnerMultiBoxWidget.Pin()->SetSummonedMenu(PinnedMenuAnchor.ToSharedRef());
+
+					// Make any clicked menu appear as old as possible (so they always pass the clobber min lifetime)
+					OwnerMultiBoxWidget.Pin()->SetSummonedMenuTime(0.0);
 				}
 			}
 		}
@@ -1244,10 +1333,14 @@ void SMenuEntryBlock::OnMouseEnter( const FGeometry& MyGeometry, const FPointerE
 	TSharedPtr< SMultiBoxWidget > PinnedOwnerMultiBoxWidget( OwnerMultiBoxWidget.Pin() );
 	check( PinnedOwnerMultiBoxWidget.IsValid() );
 
-	// Never dismiss another entry's submenu while the cursor is potentially moving toward that menu.  It's
+	// (Almost) never dismiss another entry's submenu while the cursor is potentially moving toward that menu.  It's
 	// not fun to try to keep the mouse in the menu entry bounds while moving towards the actual menu!
+	// We will, hoever, dismiss another entry's submenu if the lifetime of the submenu hasn't passed the clobber
+	// min lifetime yet. This is so that the user can sweep over multiple entries with submenus, landing on the desired
+	// entry without the first submenu being "sticky".
 	const TSharedPtr< const SMenuAnchor > OpenedMenuAnchor( PinnedOwnerMultiBoxWidget->GetOpenMenu() );
-	const bool bSubMenuAlreadyOpen = ( OpenedMenuAnchor.IsValid() && OpenedMenuAnchor->IsOpen() );
+	const bool bSubMenuAlreadyOpen = ( OpenedMenuAnchor.IsValid() && OpenedMenuAnchor->IsOpen());
+	const bool bClobberMinLifetimeElapsed = FPlatformTime::Seconds() > PinnedOwnerMultiBoxWidget->GetSummonedMenuTime() + MultiBoxConstants::SubMenuClobberMinLifetime;
 	bool bMouseEnteredTowardSubMenu = false;
 	{
 		if( bSubMenuAlreadyOpen )
@@ -1271,7 +1364,7 @@ void SMenuEntryBlock::OnMouseEnter( const FGeometry& MyGeometry, const FPointerE
 			{
 				if( PinnedOwnerMultiBoxWidget->GetOpenMenu() != PinnedMenuAnchor )
 				{
-					const bool bClobber = bSubMenuAlreadyOpen && bMouseEnteredTowardSubMenu;
+					const bool bClobber = bSubMenuAlreadyOpen && bMouseEnteredTowardSubMenu && bClobberMinLifetimeElapsed;
 					RequestSubMenuToggle( true, bClobber );
 				}
 			}
@@ -1287,7 +1380,10 @@ void SMenuEntryBlock::OnMouseEnter( const FGeometry& MyGeometry, const FPointerE
 				PinnedMenuAnchor->SetIsOpen( true );
 
 				// Also tell the multibox about this open pull-down menu, so it can be closed later if we need to
-				PinnedOwnerMultiBoxWidget->SetSummonedMenu( PinnedMenuAnchor.ToSharedRef() );
+				PinnedOwnerMultiBoxWidget->SetSummonedMenu( PinnedMenuAnchor.ToSharedRef());
+
+				// Make open pull-downs appear old as possible (so they always pass the clobber min lifetime)
+				PinnedOwnerMultiBoxWidget->SetSummonedMenuTime(0.0);
 			}
 		}
 		
@@ -1295,8 +1391,8 @@ void SMenuEntryBlock::OnMouseEnter( const FGeometry& MyGeometry, const FPointerE
 	else if( bSubMenuAlreadyOpen )
 	{
 		// Hovering over a menu item that is not a sub-menu, we need to close any sub-menus that are open
-		const bool bClobber = bSubMenuAlreadyOpen && bMouseEnteredTowardSubMenu;
-		RequestSubMenuToggle( false, bClobber );
+		const bool bClobber = bSubMenuAlreadyOpen && bMouseEnteredTowardSubMenu && bClobberMinLifetimeElapsed;
+		RequestSubMenuToggle( false, bClobber);
 	}
 	
 }
@@ -1409,6 +1505,10 @@ EActiveTimerReturnType SMenuEntryBlock::UpdateSubMenuState(double InCurrentTime,
 
 			// Also tell the multibox about this open pull-down menu, so it can be closed later if we need to
 			PinnedOwnerMultiBoxWidget->SetSummonedMenu(PinnedMenuAnchor.ToSharedRef());
+
+			// If there was a delay before summoning this menu, use the initial time before the delay to record the menu's lifetime.
+			// This makes it so that the new menu will, in turn, require a delay to clobber.
+			PinnedOwnerMultiBoxWidget->SetSummonedMenuTime(InCurrentTime - InDeltaTime);
 		}
 	}
 	else
@@ -1454,10 +1554,16 @@ TSharedRef< SWidget > SMenuEntryBlock::MakeNewMenuWidget() const
 			}
 		}
 
-		FMenuBuilder MenuBuilder(MenuEntryBlock->bShouldCloseWindowAfterMenuSelection, MultiBlock->GetActionList(), MenuEntryBlock->Extender, bCloseSelfOnly, StyleSet, /* searchable */ true, SubMenuCustomizationName );
-		{
-			MenuEntryBlock->EntryBuilder.Execute( MenuBuilder );
-		}
+		FMenuBuilder MenuBuilder(MenuEntryBlock->bShouldCloseWindowAfterMenuSelection,
+		                         MultiBlock->GetActionList(),
+		                         MenuEntryBlock->Extender,
+		                         bCloseSelfOnly,
+		                         StyleSet,
+		                         /*Searchable*/true, // Best guess default. This could be changed by the EntryBuilder delegate where more context is available.
+		                         SubMenuCustomizationName,
+		                         MenuEntryBlock->IsRecursivelySearchable()); // Best guess default. This could be changed by the EntryBuilder delegate where more context is available.
+
+		MenuEntryBlock->EntryBuilder.Execute( MenuBuilder );
 
 		return MenuBuilder.MakeWidget();
 	}
@@ -1488,16 +1594,41 @@ TSharedRef< SWidget > SMenuEntryBlock::MakeNewMenuWidget() const
  *
  * @return	The appropriate border to use
  */
+
 const FSlateBrush* SMenuEntryBlock::GetMenuBarButtonBorder( ) const
 {
 	TSharedPtr<SMenuAnchor> MenuAnchorSharedPtr = MenuAnchor.Pin();
 
 	if (MenuAnchorSharedPtr.IsValid() && MenuAnchorSharedPtr->IsOpen())
 	{
-		return MenuBarButtonBorderSubmenuOpen;
+		return &MenuBarButtonStyle->Pressed;
 	}
+	else if (IsHovered())
+	{
+		return &MenuBarButtonStyle->Hovered;
+	}
+	else
+	{
+		return &MenuBarButtonStyle->Normal;
+	}
+}
 
-	return MenuBarButtonBorderSubmenuClosed;
+FSlateColor SMenuEntryBlock::GetMenuBarForegroundColor() const
+{
+	TSharedPtr<SMenuAnchor> MenuAnchorSharedPtr = MenuAnchor.Pin();
+
+	if (MenuAnchorSharedPtr.IsValid() && MenuAnchorSharedPtr->IsOpen())
+	{
+		return MenuBarButtonStyle->PressedForeground;
+	}
+	else if (IsHovered())
+	{
+		return MenuBarButtonStyle->HoveredForeground;
+	}
+	else
+	{
+		return MenuBarButtonStyle->NormalForeground;
+	}
 }
 
 FSlateColor SMenuEntryBlock::TintOnHover() const
@@ -1520,13 +1651,17 @@ FSlateColor SMenuEntryBlock::TintOnHover() const
 
 FSlateColor SMenuEntryBlock::InvertOnHover() const
 {
-	if ( this->IsHovered() )
+	if (ShouldSubMenuAppearHovered())
 	{
 		return FLinearColor::Black;
 	}
+	else if (this->IsHovered())
+	{
+		return FSlateColor::UseStyle();
+	}
 	else
 	{
-		return FSlateColor::UseForeground();
+		return FSlateColor::UseStyle();
 	}
 }
 
@@ -1540,10 +1675,22 @@ FSlateColor SMenuEntryBlock::InvertOnHover() const
  */
 const FSlateBrush* SMenuEntryBlock::GetCheckBoxImageBrushFromStyle(const FCheckBoxStyle* Style) const
 {
-	switch (IsChecked())
+	if (IsHovered()) 
 	{
-	case ECheckBoxState::Checked: return &Style->CheckedImage;
-	case ECheckBoxState::Unchecked: return &Style->UncheckedImage;
-	default: return &Style->UndeterminedImage;
+		switch (IsChecked())
+		{
+			case ECheckBoxState::Checked: return &Style->CheckedHoveredImage;
+			case ECheckBoxState::Unchecked: return &Style->UncheckedHoveredImage;
+			default: return &Style->UndeterminedHoveredImage;
+		}
+	}
+	else
+	{
+		switch (IsChecked())
+		{
+			case ECheckBoxState::Checked: return &Style->CheckedImage;
+			case ECheckBoxState::Unchecked: return &Style->UncheckedImage;
+			default: return &Style->UndeterminedImage;
+		}
 	}
 }

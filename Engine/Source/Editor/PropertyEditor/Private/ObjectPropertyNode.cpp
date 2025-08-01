@@ -8,6 +8,7 @@
 #include "ObjectEditorUtils.h"
 #include "EditorCategoryUtils.h"
 #include "PropertyEditorHelpers.h"
+#include "UObject/PropertyBagRepository.h"
 
 #if WITH_EDITORONLY_DATA
 #include "Engine/Blueprint.h"
@@ -54,13 +55,21 @@ const UPackage* FObjectPropertyNode::GetUPackage(int32 InIndex) const
 // Adds a new object to the list.
 void FObjectPropertyNode::AddObject( UObject* InObject )
 {
+	UE::FPropertyBagRepository& Repository = UE::FPropertyBagRepository::Get();
+	if (UObject* Found = Repository.FindInstanceDataObject(InObject))
+	{
+		InObject = Found;
+	}
 	Objects.Add( InObject );
 }
 
 // Adds new objects to the list.
 void FObjectPropertyNode::AddObjects(const TArray<UObject*>& InObjects)
 {
-	Objects.Append( InObjects );
+	for (UObject* Object : InObjects)
+	{
+		AddObject(Object);
+	}
 }
 
 // Removes an object from the list.
@@ -71,6 +80,14 @@ void FObjectPropertyNode::RemoveObject( UObject* InObject )
 	if( idx != INDEX_NONE )
 	{
 		Objects.RemoveAt( idx, 1 );
+	}
+	else
+	{
+		UE::FPropertyBagRepository& Repository = UE::FPropertyBagRepository::Get();
+		if (UObject* Found = Repository.FindInstanceDataObject(InObject))
+		{
+			RemoveObject(Found);
+		}
 	}
 }
 
@@ -91,22 +108,22 @@ void FObjectPropertyNode::ClearObjectPackageOverrides()
 }
 
 // Purges any objects marked pending kill from the object list
-void FObjectPropertyNode::PurgeKilledObjects()
+bool FObjectPropertyNode::PurgeKilledObjects()
 {
-	// Purge any objects that are marked pending kill from the object list
-	for (int32 Index = 0; Index < Objects.Num(); )
-	{
-		TWeakObjectPtr<UObject> Object = Objects[Index];
+	bool bDidPurgeObjects = false;
 
-		if ( !Object.IsValid() || Object->IsPendingKill() )
+	// Purge any objects that are marked pending kill from the object list
+	for (auto It = Objects.CreateIterator(); It; ++It)
+	{
+		const TWeakObjectPtr<UObject>& Object = *It;
+		if (Object.IsStale())
 		{
-			Objects.RemoveAt(Index, 1);
-		}
-		else
-		{
-			++Index;
+			bDidPurgeObjects = true;
+			It.RemoveCurrent();
 		}
 	}
+
+	return bDidPurgeObjects;
 }
 
 // Called when the object list is finalized, Finalize() finishes the property window setup.
@@ -428,7 +445,7 @@ bool FObjectPropertyNode::GetReadAddressUncached(const FPropertyNode& InNode, FR
 	return true;
 }
 
-uint8* FObjectPropertyNode::GetValueBaseAddress(uint8* StartAddress, bool bIsSparseData) const
+uint8* FObjectPropertyNode::GetValueBaseAddress(uint8* StartAddress, bool bIsSparseData, bool bIsStruct) const
 {
 	uint8* Result = StartAddress;
 
@@ -506,7 +523,7 @@ void FObjectPropertyNode::GetCategoryProperties(const TSet<UClass*>& ClassesToCo
 		{
 			if (!CategoriesFromBlueprints.Contains(CategoryName) && !CategoriesFromProperties.Contains(CategoryName))
 			{
-				SortedCategories.Add(CategoryName);
+				SortedCategories.AddUnique(CategoryName);
 			}
 			CategoriesFromProperties.Add(CategoryName);
 		}
@@ -545,6 +562,7 @@ void FObjectPropertyNode::InternalInitChildNodes( FName SinglePropertyName )
 	// Create a merged list of user-enforced sorted info, hidden category info, etc...
 	TSet<FName> CategoriesFromBlueprints, CategoriesFromProperties;
 	TArray<FName> SortedCategories;
+	TArray<FName> PrioritizeCategories;
 
 #if WITH_EDITORONLY_DATA
 	for (UClass* Class : ClassesToConsider)
@@ -556,9 +574,18 @@ void FObjectPropertyNode::InternalInitChildNodes( FName SinglePropertyName )
 				if (!CategoriesFromBlueprints.Contains(TestCategory))
 				{
 					CategoriesFromBlueprints.Add(TestCategory);
-					SortedCategories.Add(TestCategory);
+					SortedCategories.AddUnique(TestCategory);
 				}
 			}
+		}
+
+		TArray<FString> ClassPrioritizeCategories;
+		Class->GetPrioritizeCategories(ClassPrioritizeCategories);
+		for (const FString& ClassPrioritizeCategory : ClassPrioritizeCategories)
+		{
+			FName PrioritizeCategoryName = FName(ClassPrioritizeCategory);
+			SortedCategories.AddUnique(PrioritizeCategoryName);
+			PrioritizeCategories.AddUnique(PrioritizeCategoryName);
 		}
 	}
 #endif
@@ -566,34 +593,39 @@ void FObjectPropertyNode::InternalInitChildNodes( FName SinglePropertyName )
 	const bool bShouldShowHiddenProperties = !!HasNodeFlags(EPropertyNodeFlags::ShouldShowHiddenProperties);
 	const bool bShouldShowDisableEditOnInstance = !!HasNodeFlags(EPropertyNodeFlags::ShouldShowDisableEditOnInstance);
 
-	for (TFieldIterator<FProperty> It(BaseClass.Get()); It; ++It)
+	if (UClass* ResolvedBaseClass = BaseClass.Get())
 	{
-		GetCategoryProperties(ClassesToConsider, *It, bShouldShowDisableEditOnInstance, bShouldShowHiddenProperties, CategoriesFromBlueprints, CategoriesFromProperties, SortedCategories);
-	}
-
-	for (UClass* Class : ClassesToConsider)
+		for (TFieldIterator<FProperty> It(ResolvedBaseClass); It; ++It)
 		{
-		if (Class)
+			GetCategoryProperties(ClassesToConsider, *It, bShouldShowDisableEditOnInstance, bShouldShowHiddenProperties, CategoriesFromBlueprints, CategoriesFromProperties, SortedCategories);
+		}
+
+		if (UScriptStruct* SparseClassDataStruct = ResolvedBaseClass->GetSparseClassDataStruct())
+		{
+			SparseClassDataInstances.Add(ResolvedBaseClass, TTuple<UScriptStruct*, void*>(SparseClassDataStruct, ResolvedBaseClass->GetOrCreateSparseClassData()));
+		
+			for (TFieldIterator<FProperty> It(SparseClassDataStruct); It; ++It)
 			{
-			UScriptStruct* SparseClassDataStruct = Class->GetSparseClassDataStruct();
-			if (SparseClassDataStruct)
-		{
-				SparseClassDataInstances.Add(Class, TTuple<UScriptStruct*, void*>(SparseClassDataStruct, Class->GetOrCreateSparseClassData()));
-
-				for (TFieldIterator<FProperty> It(SparseClassDataStruct); It; ++It)
-		{
-		 			GetCategoryProperties(ClassesToConsider, *It, bShouldShowDisableEditOnInstance, bShouldShowHiddenProperties, CategoriesFromBlueprints, CategoriesFromProperties, SortedCategories);
-				}
+				GetCategoryProperties(ClassesToConsider, *It, bShouldShowDisableEditOnInstance, bShouldShowHiddenProperties, CategoriesFromBlueprints, CategoriesFromProperties, SortedCategories);
 			}
 		}
-	}
 
-	// Categories from the Blueprint class may include categories with no associated properties, so remove those ones
-	for ( const FName& CategoryName : CategoriesFromBlueprints )
-	{
-		if ( !CategoriesFromProperties.Contains(CategoryName) )
+		// Categories from the Blueprint class may include categories with no associated properties, so remove those ones
+		for (const FName& CategoryName : CategoriesFromBlueprints)
 		{
-			SortedCategories.Remove(CategoryName);
+			if (!CategoriesFromProperties.Contains(CategoryName))
+			{
+				SortedCategories.Remove(CategoryName);
+			}
+		}
+
+		// Remove any prioritized categories that don't actually exist
+		for (const FName& PrioritizeCategory : PrioritizeCategories)
+		{
+			if (!CategoriesFromProperties.Contains(PrioritizeCategory))
+			{
+				SortedCategories.Remove(PrioritizeCategory);
+			}
 		}
 	}
 
@@ -679,18 +711,17 @@ void FObjectPropertyNode::InternalInitChildNodes( FName SinglePropertyName )
 		// Iterate over all fields, creating items.
 		for( TFieldIterator<FProperty> It(BaseClass.Get()); It; ++It )
 		{
-			if (PropertyEditorHelpers::ShouldBeVisible(*this, *It))
-			{
-				FProperty* CurProp = *It;
-				if( SinglePropertyName == NAME_None || CurProp->GetFName() == SinglePropertyName )
-				{
-					SortedProperties.Add(CurProp);
+			FProperty* CurProp = *It;
 
-					if( SinglePropertyName != NAME_None )
-					{
-						// Generate no other children
-						break;
-					}
+			// if a SinglePropertyName was provided, bypass the 'property visibility check' and always include it
+			if ((SinglePropertyName == NAME_None && PropertyEditorHelpers::ShouldBeVisible(*this, CurProp)) || CurProp->GetFName() == SinglePropertyName)
+			{
+				SortedProperties.Add(CurProp);
+
+				if( SinglePropertyName != NAME_None )
+				{
+					// Generate no other children
+					break;
 				}
 			}
 		}
@@ -742,7 +773,7 @@ TSharedPtr<FPropertyNode> FObjectPropertyNode::GenerateSingleChild( FName ChildP
 		return ChildNodes[0];
 	}
 
-	return NULL;
+	return nullptr;
 }
 
 bool FObjectPropertyNode::IsSparseDataStruct(const UScriptStruct* Struct) const
@@ -765,17 +796,19 @@ bool FObjectPropertyNode::IsSparseDataStruct(const UScriptStruct* Struct) const
 bool FObjectPropertyNode::GetQualifiedName(FString& PathPlusIndex, bool bWithArrayIndex, const FPropertyNode* StopParent, bool bIgnoreCategories ) const
 {
 	bool bAddedAnything = false;
-	if( ParentNode && ParentNode != StopParent )
+	const TSharedPtr<FPropertyNode> ParentNode = ParentNodeWeakPtr.Pin();
+	if (ParentNode && StopParent != ParentNode.Get())
 	{
 		bAddedAnything = ParentNode->GetQualifiedName(PathPlusIndex, bWithArrayIndex, StopParent, bIgnoreCategories);
-		if( bAddedAnything )
-		{
-			PathPlusIndex += TEXT(".");
-		}
 	}
 
-	bAddedAnything = true;
+	if (bAddedAnything)
+	{
+		PathPlusIndex += TEXT(".");
+	}
+
 	PathPlusIndex += TEXT("Object");
+	bAddedAnything = true;
 
 	return bAddedAnything;
 }

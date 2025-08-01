@@ -2,16 +2,24 @@
 
 #pragma once
 
+#include "AnalyticsBuildType.h"
+#include "AnalyticsProviderConfigurationDelegate.h"
+#include "Containers/UnrealString.h"
+#include "CoreGlobals.h"
 #include "CoreMinimal.h"
+#include "Delegates/Delegate.h"
+#include "HAL/Platform.h"
+#include "Logging/LogMacros.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Modules/ModuleInterface.h"
 #include "Modules/ModuleManager.h"
-#include "AnalyticsProviderConfigurationDelegate.h"
-#include "AnalyticsBuildType.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
 
 ANALYTICS_API DECLARE_LOG_CATEGORY_EXTERN(LogAnalytics, Display, All);
 
 class IAnalyticsProvider;
+class IAnalyticsTracer;
 
 /**
  * The public interface for interacting with analytics.
@@ -68,6 +76,7 @@ public:
 	 */
 	virtual TSharedPtr<IAnalyticsProvider> CreateAnalyticsProvider(const FName& ProviderModuleName, const FAnalyticsProviderConfigurationDelegate& GetConfigValue);
 
+	virtual TSharedPtr<IAnalyticsTracer> CreateAnalyticsTracer();
 	/**
 	 * Creates an instance of the default configured analytics provider.
 	 * Default is determined by GetDefaultProviderModuleName and a default constructed ConfigFromIni instance.
@@ -185,8 +194,8 @@ public:
 	 * Helper for writing configuration values from to an INI file (which will be a common scenario). 
 	 */
 	virtual void WriteConfigValueToIni(const FString& IniName, const FString& SectionName, const FString& KeyName, const FString& Value);
+
 private:
 	virtual void StartupModule() override;
 	virtual void ShutdownModule() override;
 };
-

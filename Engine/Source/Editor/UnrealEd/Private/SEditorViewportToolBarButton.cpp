@@ -2,12 +2,22 @@
 
 
 #include "SEditorViewportToolBarButton.h"
+
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateBrush.h"
+#include "Styling/SlateColor.h"
 #include "Styling/SlateTypes.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
 #include "Widgets/Images/SImage.h"
-#include "Widgets/Layout/SBox.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SCheckBox.h"
-#include "EditorStyleSet.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/SNullWidget.h"
+
+class SWidget;
 
 
 void SEditorViewportToolBarButton::Construct( const FArguments& Declaration)
@@ -27,7 +37,7 @@ void SEditorViewportToolBarButton::Construct( const FArguments& Declaration)
 
 	if( ButtonType == EUserInterfaceActionType::Button )
 	{
-		const FSlateBrush* Brush = FEditorStyle::GetBrush( ImageStyleName );
+		const FSlateBrush* Brush = FAppStyle::GetBrush( ImageStyleName );
 
 		ButtonWidget =
 			SNew( SButton )
@@ -35,7 +45,7 @@ void SEditorViewportToolBarButton::Construct( const FArguments& Declaration)
 			.OnClicked( OnClickedDelegate )
 			.HAlign( HAlign_Center )
 			.VAlign( VAlign_Center )
-			.ForegroundColor( FSlateColor::UseForeground() )
+			.ContentPadding(FMargin(4.f, 0.f))
 			[
 				// If we have a content override use it instead of the default image
 				bContentOverride
@@ -46,8 +56,8 @@ void SEditorViewportToolBarButton::Construct( const FArguments& Declaration)
 	else
 	{
 		// Cache off checked/unchecked image states
-		NormalBrush = FEditorStyle::GetBrush( ImageStyleName, ".Normal" );
-		CheckedBrush = FEditorStyle::GetBrush( ImageStyleName, ".Checked" );
+		NormalBrush = FAppStyle::GetBrush( ImageStyleName, ".Normal" );
+		CheckedBrush = FAppStyle::GetBrush( ImageStyleName, ".Checked" );
 
 		if( CheckedBrush->GetResourceName() == FName("Default") )
 		{
@@ -64,12 +74,13 @@ void SEditorViewportToolBarButton::Construct( const FArguments& Declaration)
 				bContentOverride ? ContentSlotWidget :
 				TSharedRef<SWidget>(
 					SNew( SBox )
-					.Padding(1.0f)
+					.Padding(0.0f)
 					.VAlign( VAlign_Center )
 					.HAlign( HAlign_Center )
 					[
 						SNew( SImage )
 						.Image( this, &SEditorViewportToolBarButton::OnGetButtonImage )
+						.ColorAndOpacity(FSlateColor::UseForeground())
 					])
 			];
 	}
@@ -91,11 +102,11 @@ void SEditorViewportToolBarButton::OnCheckStateChanged( ECheckBoxState NewChecke
 
 const FSlateBrush* SEditorViewportToolBarButton::OnGetButtonImage() const
 {
-	return IsChecked.Get() == true ? CheckedBrush : NormalBrush;
+	return IsChecked.Get() ? CheckedBrush : NormalBrush;
 }
 
 ECheckBoxState SEditorViewportToolBarButton::OnIsChecked() const
 {
-	return IsChecked.Get() == true ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+	return IsChecked.Get() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
 }
 

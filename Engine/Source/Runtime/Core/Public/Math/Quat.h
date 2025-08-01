@@ -11,8 +11,15 @@
 #include "Math/VectorRegister.h"
 #include "Math/Rotator.h"
 #include "Math/Matrix.h"
+#include "Misc/LargeWorldCoordinatesSerializer.h"
+#include "UObject/ObjectVersion.h"
 
 class Error;
+
+namespace UE
+{
+namespace Math
+{
 
 /**
  * Floating point quaternion that can represent a rotation about an axis in 3-D space.
@@ -25,38 +32,46 @@ class Error;
  * Example: LocalToWorld = (LocalToWorld * DeltaRotation) will change rotation in local space by DeltaRotation.
  * Example: LocalToWorld = (DeltaRotation * LocalToWorld) will change rotation in world space by DeltaRotation.
  */
-MS_ALIGN(16) struct FQuat 
+
+template<typename T>
+struct alignas(16) TQuat
 {
+	// Can't have a TEMPLATE_REQUIRES in the declaration because of the forward declarations, so check for allowed types here.
+	static_assert(TIsFloatingPoint<T>::Value, "TQuat only supports float and double types.");
+
 public:
+	/** Type of the template param (float or double) */
+	using FReal = T;
+	using QuatVectorRegister = TVectorRegisterType<T>;
 
 	/** The quaternion's X-component. */
-	float X;
+	T X;
 
 	/** The quaternion's Y-component. */
-	float Y;
+	T Y;
 
 	/** The quaternion's Z-component. */
-	float Z;
+	T Z;
 
 	/** The quaternion's W-component. */
-	float W;
+	T W;
 
 public:
 
 	/** Identity quaternion. */
-	static CORE_API const FQuat Identity;
+	CORE_API static const TQuat<T> Identity;
 
 public:
 
 	/** Default constructor (no initialization). */
-	FORCEINLINE FQuat() { }
+	FORCEINLINE TQuat() { }
 
 	/**
 	 * Creates and initializes a new quaternion, with the W component either 0 or 1.
 	 *
 	 * @param EForceInit Force init enum: if equal to ForceInitToZero then W is 0, otherwise W = 1 (creating an identity transform)
 	 */
-	explicit FORCEINLINE FQuat(EForceInit);
+	explicit FORCEINLINE TQuat(EForceInit);
 
 	/**
 	 * Constructor.
@@ -66,28 +81,45 @@ public:
 	 * @param InZ Z component of the quaternion
 	 * @param InW W component of the quaternion
 	 */
-	FORCEINLINE FQuat(float InX, float InY, float InZ, float InW);
+	FORCEINLINE TQuat(T InX, T InY, T InZ, T InW);
 
 	/**
-	 * Creates and initializes a new quaternion from the XYZW values in the given VectorRegister.
-	 *
-	 * @param V XYZW components of the quaternion packed into a single VectorRegister
+	 * Initializes all elements to V
 	 */
-	explicit FORCEINLINE FQuat(const VectorRegister& V);
+	template<TEMPLATE_REQUIRES(std::is_arithmetic<T>::value)>
+	explicit FORCEINLINE TQuat(T V)
+	: X(V), Y(V), Z(V), W(V)
+	{
+		DiagnosticCheckNaN();
+	}
 
+protected:
 	/**
-	 * Creates and initializes a new quaternion from the given matrix.
+	 * Creates and initializes a new quaternion from the XYZW values in the given VectorRegister4Float.
 	 *
-	 * @param M The rotation matrix to initialize from.
+	 * @param V XYZW components of the quaternion packed into a single VectorRegister4Float
 	 */
-	explicit FQuat(const FMatrix& M);	
+	explicit TQuat(const QuatVectorRegister& V);
+
+public:
+
+	FORCEINLINE static TQuat<T> MakeFromVectorRegister(const QuatVectorRegister& V) { return TQuat<T>(V); }
 
 	/**
 	 * Creates and initializes a new quaternion from the given rotator.
 	 *
 	 * @param R The rotator to initialize from.
 	 */
-	explicit FQuat(const FRotator& R);
+	explicit TQuat(const TRotator<T>& R);
+
+	FORCEINLINE static TQuat<T> MakeFromRotator(const TRotator<T>& R) { return TQuat<T>(R); }
+
+	/**
+	 * Creates and initializes a new quaternion from the given matrix.
+	 *
+	 * @param M The rotation matrix to initialize from.
+	 */
+	explicit TQuat(const TMatrix<T>& M);
 
 	/**
 	 * Creates and initializes a new quaternion from the a rotation around the given axis.
@@ -95,18 +127,9 @@ public:
 	 * @param Axis assumed to be a normalized vector
 	 * @param Angle angle to rotate above the given axis (in radians)
 	 */
-	FQuat(FVector Axis, float AngleRad);
+	TQuat(TVector<T> Axis, T AngleRad);
 
 public:
-
-#ifdef IMPLEMENT_ASSIGNMENT_OPERATOR_MANUALLY
-	/**
-	 * Copy another FQuat into this one
-	 *
-	 * @return reference to this FQuat
-	 */
-	FORCEINLINE FQuat& operator=(const FQuat& Other);
-#endif
 
 	/**
 	 * Gets the result of adding a Quaternion to this.
@@ -115,7 +138,7 @@ public:
 	 * @param Q The Quaternion to add.
 	 * @return The result of addition.
 	 */
-	FORCEINLINE FQuat operator+(const FQuat& Q) const;
+	FORCEINLINE TQuat<T> operator+(const TQuat<T>& Q) const;
 
 	/**
 	 * Adds to this quaternion.
@@ -124,7 +147,7 @@ public:
 	 * @param Other The quaternion to add to this.
 	 * @return Result after addition.
 	 */
-	FORCEINLINE FQuat operator+=(const FQuat& Q);
+	FORCEINLINE TQuat<T> operator+=(const TQuat<T>& Q);
 
 	/**
 	 * Gets the result of subtracting a Quaternion to this.
@@ -133,7 +156,14 @@ public:
 	 * @param Q The Quaternion to subtract.
 	 * @return The result of subtraction.
 	 */
-	FORCEINLINE FQuat operator-(const FQuat& Q) const;
+	FORCEINLINE TQuat<T> operator-(const TQuat<T>& Q) const;
+
+	/**
+	* Negates the quaternion. Note that this represents the same rotation.
+	*
+	* @return The result of negation.
+	*/
+	FORCEINLINE TQuat<T> operator-() const;
 
 	/**
 	 * Checks whether another Quaternion is equal to this, within specified tolerance.
@@ -142,7 +172,7 @@ public:
 	 * @param Tolerance Error tolerance for comparison with other Quaternion.
 	 * @return true if two Quaternions are equal, within specified tolerance, otherwise false.
 	 */
-	FORCEINLINE bool Equals(const FQuat& Q, float Tolerance=KINDA_SMALL_NUMBER) const;
+	FORCEINLINE bool Equals(const TQuat<T>& Q, T Tolerance=UE_KINDA_SMALL_NUMBER) const;
 
 	/**
 	 * Checks whether this Quaternion is an Identity Quaternion.
@@ -151,7 +181,7 @@ public:
 	 * @param Tolerance Error tolerance for comparison with Identity Quaternion.
 	 * @return true if Quaternion is a normalized Identity Quaternion.
 	 */
-	FORCEINLINE bool IsIdentity(float Tolerance=SMALL_NUMBER) const;
+	FORCEINLINE bool IsIdentity(T Tolerance=UE_SMALL_NUMBER) const;
 
 	/**
 	 * Subtracts another quaternion from this.
@@ -160,7 +190,7 @@ public:
 	 * @param Q The other quaternion.
 	 * @return reference to this after subtraction.
 	 */
-	FORCEINLINE FQuat operator-=(const FQuat& Q);
+	FORCEINLINE TQuat<T> operator-=(const TQuat<T>& Q);
 
 	/**
 	 * Gets the result of multiplying this by another quaternion (this * Q).
@@ -171,7 +201,7 @@ public:
 	 * @param Q The Quaternion to multiply this by.
 	 * @return The result of multiplication (this * Q).
 	 */
-	FORCEINLINE FQuat operator*(const FQuat& Q) const;
+	FORCEINLINE TQuat<T> operator*(const TQuat<T>& Q) const;
 
 	/**
 	 * Multiply this by a quaternion (this = this * Q).
@@ -182,7 +212,7 @@ public:
 	 * @param Q the quaternion to multiply this by.
 	 * @return The result of multiplication (this * Q).
 	 */
-	FORCEINLINE FQuat operator*=(const FQuat& Q);
+	FORCEINLINE TQuat<T> operator*=(const TQuat<T>& Q);
 
 	/**
 	 * Rotate a vector by this quaternion.
@@ -191,7 +221,7 @@ public:
 	 * @return vector after rotation
 	 * @see RotateVector
 	 */
-	FVector operator*(const FVector& V) const;
+	TVector<T> operator*(const TVector<T>& V) const;
 
 	/** 
 	 * Multiply this by a matrix.
@@ -202,7 +232,7 @@ public:
 	 * @param M Matrix to multiply by.
 	 * @return Matrix result after multiplication.
 	 */	
-	FMatrix operator*(const FMatrix& M) const;
+	CORE_API TMatrix<T> operator*(const TMatrix<T>& M) const;
 	
 	/**
 	 * Multiply this quaternion by a scaling factor.
@@ -210,7 +240,23 @@ public:
 	 * @param Scale The scaling factor.
 	 * @return a reference to this after scaling.
 	 */
-	FORCEINLINE FQuat operator*=(const float Scale);
+	template<typename FArg, TEMPLATE_REQUIRES(std::is_arithmetic<FArg>::value)>
+	FORCEINLINE TQuat<T> operator*=(const FArg Scale)
+	{
+#if PLATFORM_ENABLE_VECTORINTRINSICS
+		QuatVectorRegister A = VectorLoadAligned(this);
+		QuatVectorRegister B = VectorSetFloat1(Scale);
+		VectorStoreAligned(VectorMultiply(A, B), this);
+#else
+		X *= Scale;
+		Y *= Scale;
+		Z *= Scale;
+		W *= Scale;
+#endif // PLATFORM_ENABLE_VECTORINTRINSICS
+
+		DiagnosticCheckNaN();
+		return *this;
+	}
 
 	/**
 	 * Get the result of scaling this quaternion.
@@ -218,7 +264,17 @@ public:
 	 * @param Scale The scaling factor.
 	 * @return The result of scaling.
 	 */
-	FORCEINLINE FQuat operator*(const float Scale) const;
+	template<typename FArg, TEMPLATE_REQUIRES(std::is_arithmetic<FArg>::value)>
+	FORCEINLINE TQuat<T> operator*(const FArg Scale) const
+	{
+#if PLATFORM_ENABLE_VECTORINTRINSICS
+		QuatVectorRegister A = VectorLoadAligned(this);
+		QuatVectorRegister B = VectorSetFloat1((T)Scale);
+		return TQuat(VectorMultiply(A, B));
+#else
+		return TQuat(Scale * X, Scale * Y, Scale * Z, Scale * W);
+#endif // PLATFORM_ENABLE_VECTORINTRINSICS
+	}
 	
 	/**
 	 * Divide this quaternion by scale.
@@ -226,7 +282,24 @@ public:
 	 * @param Scale What to divide by.
 	 * @return a reference to this after scaling.
 	 */
-	FORCEINLINE FQuat operator/=(const float Scale);
+	template<typename FArg, TEMPLATE_REQUIRES(std::is_arithmetic<FArg>::value)>
+	FORCEINLINE TQuat<T> operator/=(const FArg Scale)
+	{
+#if PLATFORM_ENABLE_VECTORINTRINSICS
+		QuatVectorRegister A = VectorLoadAligned(this);
+		QuatVectorRegister B = VectorSetFloat1((T)Scale);
+		VectorStoreAligned(VectorDivide(A, B), this);
+#else
+		const T Recip = T(1.0f) / Scale;
+		X *= Recip;
+		Y *= Recip;
+		Z *= Recip;
+		W *= Recip;
+#endif // PLATFORM_ENABLE_VECTORINTRINSICS
+
+		DiagnosticCheckNaN();
+		return *this;
+	}
 
 	/**
 	 * Divide this quaternion by scale.
@@ -234,13 +307,24 @@ public:
 	 * @param Scale What to divide by.
 	 * @return new Quaternion of this after division by scale.
 	 */
-	FORCEINLINE FQuat operator/(const float Scale) const;
+	template<typename FArg, TEMPLATE_REQUIRES(std::is_arithmetic<FArg>::value)>
+	FORCEINLINE TQuat<T> operator/(const FArg Scale) const
+	{
+#if PLATFORM_ENABLE_VECTORINTRINSICS
+		QuatVectorRegister A = VectorLoadAligned(this);
+		QuatVectorRegister B = VectorSetFloat1(Scale);
+		return TQuat(VectorDivide(A, B));
+#else
+		const T Recip = 1.0f / Scale;
+		return TQuat(X * Recip, Y * Recip, Z * Recip, W * Recip);
+#endif // PLATFORM_ENABLE_VECTORINTRINSICS
+	}
 
 	/**
-	 * Identical implementation for FQuat properties. 
+	 * Identical implementation for TQuat properties. 
 	 * Avoids intrinsics to remain consistent with previous per-property comparison.
 	 */
-	bool Identical(const FQuat* Q, const uint32 PortFlags) const;
+	bool Identical(const TQuat* Q, const uint32 PortFlags) const;
 
  	/**
 	 * Checks whether two quaternions are identical.
@@ -251,7 +335,7 @@ public:
 	 * @return true if two quaternion are identical, otherwise false.
 	 * @see Equals
 	 */
-	bool operator==(const FQuat& Q) const;
+	bool operator==(const TQuat<T>& Q) const;
 
  	/**
 	 * Checks whether two quaternions are not identical.
@@ -259,7 +343,7 @@ public:
 	 * @param Q The other quaternion.
 	 * @return true if two quaternion are not identical, otherwise false.
 	 */
-	bool operator!=(const FQuat& Q) const;
+	bool operator!=(const TQuat<T>& Q) const;
 
 	/**
 	 * Calculates dot product of two quaternions.
@@ -267,7 +351,7 @@ public:
 	 * @param Q The other quaternions.
 	 * @return The dot product.
 	 */
-	float operator|(const FQuat& Q) const;
+	T operator|(const TQuat<T>& Q) const;
 
 public:
 
@@ -275,12 +359,12 @@ public:
 	 * Convert a vector of floating-point Euler angles (in degrees) into a Quaternion.
 	 * 
 	 * @param Euler the Euler angles
-	 * @return constructed FQuat
+	 * @return constructed TQuat
 	 */
-	static CORE_API FQuat MakeFromEuler(const FVector& Euler);
+	static CORE_API TQuat<T> MakeFromEuler(const TVector<T>& Euler);
 
 	/** Convert a Quaternion into floating-point Euler angles (in degrees). */
-	CORE_API FVector Euler() const;
+	CORE_API TVector<T> Euler() const;
 
 	/**
 	 * Normalize this quaternion if it is large enough.
@@ -288,7 +372,7 @@ public:
 	 *
 	 * @param Tolerance Minimum squared length of quaternion for normalization.
 	 */
-	FORCEINLINE void Normalize(float Tolerance = SMALL_NUMBER);
+	FORCEINLINE void Normalize(T Tolerance = UE_SMALL_NUMBER);
 
 	/**
 	 * Get a normalized copy of this quaternion.
@@ -296,7 +380,7 @@ public:
 	 *
 	 * @param Tolerance Minimum squared length of quaternion for normalization.
 	 */
-	FORCEINLINE FQuat GetNormalized(float Tolerance = SMALL_NUMBER) const;
+	FORCEINLINE TQuat<T> GetNormalized(T Tolerance = UE_SMALL_NUMBER) const;
 
 	// Return true if this quaternion is normalized
 	bool IsNormalized() const;
@@ -306,27 +390,43 @@ public:
 	 *
 	 * @return The length of this quaternion.
 	 */
-	FORCEINLINE float Size() const;
+	FORCEINLINE T Size() const;
 
 	/**
 	 * Get the length squared of this quaternion.
 	 *
 	 * @return The length of this quaternion.
 	 */
-	FORCEINLINE float SizeSquared() const;
+	FORCEINLINE T SizeSquared() const;
 
 
-	/** Get the angle of this quaternion */
-	FORCEINLINE float GetAngle() const;
+	/** Get the angle in radians of this quaternion */
+	FORCEINLINE T GetAngle() const;
 
 	/** 
 	 * get the axis and angle of rotation of this quaternion
 	 *
-	 * @param Axis{out] vector of axis of the quaternion
-	 * @param Angle{out] angle of the quaternion
-	 * @warning : assumes normalized quaternions.
+	 * @param Axis{out] Normalized rotation axis of the quaternion
+	 * @param Angle{out] Angle of the quaternion in radians
+	 * @warning : Requires this quaternion to be normalized.
 	 */
-	void ToAxisAndAngle(FVector& Axis, float& Angle) const;
+	void ToAxisAndAngle(TVector<T>& Axis, float& Angle) const;
+	void ToAxisAndAngle(TVector<T>& Axis, double& Angle) const;
+
+	/**
+	 * Get the rotation vector corresponding to this quaternion. 
+	 * The direction of the vector represents the rotation axis, 
+	 * and the magnitude the angle in radians.
+	 * @warning : Requires this quaternion to be normalized.
+	 */
+	TVector<T> ToRotationVector() const;
+
+	/**
+	 * Constructs a quaternion corresponding to the rotation vector. 
+	 * The direction of the vector represents the rotation axis, 
+	 * and the magnitude the angle in radians.
+	 */
+	static TQuat<T> MakeFromRotationVector(const TVector<T>& RotationVector);
 
 	/** 
 	 * Get the swing and twist decomposition for a specified axis
@@ -336,7 +436,7 @@ public:
 	 * @param OutTwist Twist component quaternion
 	 * @warning assumes normalized quaternion and twist axis
 	 */
-	CORE_API void ToSwingTwist(const FVector& InTwistAxis, FQuat& OutSwing, FQuat& OutTwist) const;
+	CORE_API void ToSwingTwist(const TVector<T>& InTwistAxis, TQuat<T>& OutSwing, TQuat<T>& OutTwist) const;
 
 	/**
 	 * Get the twist angle (in radians) for a specified axis
@@ -345,7 +445,7 @@ public:
 	 * @return Twist angle (in radians)
 	 * @warning assumes normalized quaternion and twist axis
 	 */
-	CORE_API float GetTwistAngle(const FVector& TwistAxis) const;
+	CORE_API T GetTwistAngle(const TVector<T>& TwistAxis) const;
 
 	/**
 	 * Rotate a vector by this quaternion.
@@ -353,7 +453,7 @@ public:
 	 * @param V the vector to be rotated
 	 * @return vector after rotation
 	 */
-	FVector RotateVector(FVector V) const;
+	TVector<T> RotateVector(TVector<T> V) const;
 	
 	/**
 	 * Rotate a vector by the inverse of this quaternion.
@@ -361,64 +461,71 @@ public:
 	 * @param V the vector to be rotated
 	 * @return vector after rotation by the inverse of this quaternion.
 	 */
-	FVector UnrotateVector(FVector V) const;
+	TVector<T> UnrotateVector(TVector<T> V) const;
 
 	/**
 	 * @return quaternion with W=0 and V=theta*v.
 	 */
-	CORE_API FQuat Log() const;
+	CORE_API TQuat<T> Log() const;
 
 	/**
 	 * @note Exp should really only be used after Log.
 	 * Assumes a quaternion with W=0 and V=theta*v (where |v| = 1).
 	 * Exp(q) = (sin(theta)*v, cos(theta))
 	 */
-	CORE_API FQuat Exp() const;
+	CORE_API TQuat<T> Exp() const;
 
 	/**
 	 * @return inverse of this quaternion
+	 * @warning : Requires this quaternion to be normalized.
 	 */
-	FORCEINLINE FQuat Inverse() const;
+	FORCEINLINE TQuat<T> Inverse() const;
 
 	/**
 	 * Enforce that the delta between this Quaternion and another one represents
 	 * the shortest possible rotation angle
 	 */
-	void EnforceShortestArcWith(const FQuat& OtherQuat);
+	void EnforceShortestArcWith(const TQuat<T>& OtherQuat);
 	
 	/** Get the forward direction (X axis) after it has been rotated by this Quaternion. */
-	FORCEINLINE FVector GetAxisX() const;
+	FORCEINLINE TVector<T> GetAxisX() const;
 
 	/** Get the right direction (Y axis) after it has been rotated by this Quaternion. */
-	FORCEINLINE FVector GetAxisY() const;
+	FORCEINLINE TVector<T> GetAxisY() const;
 
 	/** Get the up direction (Z axis) after it has been rotated by this Quaternion. */
-	FORCEINLINE FVector GetAxisZ() const;
+	FORCEINLINE TVector<T> GetAxisZ() const;
 
 	/** Get the forward direction (X axis) after it has been rotated by this Quaternion. */
-	FORCEINLINE FVector GetForwardVector() const;
+	FORCEINLINE TVector<T> GetForwardVector() const;
 
 	/** Get the right direction (Y axis) after it has been rotated by this Quaternion. */
-	FORCEINLINE FVector GetRightVector() const;
+	FORCEINLINE TVector<T> GetRightVector() const;
 
 	/** Get the up direction (Z axis) after it has been rotated by this Quaternion. */
-	FORCEINLINE FVector GetUpVector() const;
+	FORCEINLINE TVector<T> GetUpVector() const;
 
 	/** Convert a rotation into a unit vector facing in its direction. Equivalent to GetForwardVector(). */
-	FORCEINLINE FVector Vector() const;
+	FORCEINLINE TVector<T> Vector() const;
 
-	/** Get the FRotator representation of this Quaternion. */
-	CORE_API FRotator Rotator() const;
+	/** Get the TRotator<T> representation of this Quaternion. */
+	CORE_API TRotator<T> Rotator() const;
+
+	/** Get the TMatrix<T> representation of this Quaternion. */
+	FORCEINLINE TMatrix<T> ToMatrix() const;
+
+	/** Get the TMatrix<T> representation of this Quaternion and store it in Mat */
+	CORE_API void ToMatrix(TMatrix<T>& Mat) const;
 
 	/**
 	 * Get the axis of rotation of the Quaternion.
 	 * This is the axis around which rotation occurs to transform the canonical coordinate system to the target orientation.
-	 * For the identity Quaternion which has no such rotation, FVector(1,0,0) is returned.
+	 * For the identity Quaternion which has no such rotation, TVector<T>(1,0,0) is returned.
 	 */
-	FORCEINLINE FVector GetRotationAxis() const;
+	FORCEINLINE TVector<T> GetRotationAxis() const;
 
 	/** Find the angular distance between two rotation quaternions (in radians) */
-	FORCEINLINE float AngularDistance(const FQuat& Q) const;
+	FORCEINLINE T AngularDistance(const TQuat<T>& Q) const;
 
 	/**
 	 * Serializes the vector compressed for e.g. network transmission.
@@ -442,12 +549,12 @@ public:
 	FString ToString() const;
 
 	/**
-	 * Initialize this FQuat from a FString. 
+	 * Initialize this TQuat from a FString. 
 	 * The string is expected to contain X=, Y=, Z=, W=, otherwise 
-	 * this FQuat will have indeterminate (invalid) values.
+	 * this TQuat will have indeterminate (invalid) values.
 	 *
 	 * @param InSourceString FString containing the quaternion values.
-	 * @return true if the FQuat was initialized; false otherwise.
+	 * @return true if the TQuat was initialized; false otherwise.
 	 */
 	bool InitFromString(const FString& InSourceString);
 
@@ -458,8 +565,8 @@ public:
 	{
 		if (ContainsNaN())
 		{
-			logOrEnsureNanError(TEXT("FQuat contains NaN: %s"), *ToString());
-			*const_cast<FQuat*>(this) = FQuat::Identity;
+			logOrEnsureNanError(TEXT("Quat contains NaN: %s"), *ToString());
+			*const_cast<TQuat*>(this) = TQuat<T>(0.f, 0.f, 0.f, 1.f);
 		}
 	}
 
@@ -467,8 +574,8 @@ public:
 	{
 		if (ContainsNaN())
 		{
-			logOrEnsureNanError(TEXT("%s: FQuat contains NaN: %s"), Message, *ToString());
-			*const_cast<FQuat*>(this) = FQuat::Identity;
+			logOrEnsureNanError(TEXT("%s: Quat contains NaN: %s"), Message, *ToString());
+			*const_cast<TQuat*>(this) = TQuat<T>(0.f, 0.f, 0.f, 1.f);
 		}
 	}
 #else
@@ -481,7 +588,7 @@ public:
 	/**
 	 * Generates the 'smallest' (geodesic) rotation between two vectors of arbitrary length.
 	 */
-	static FORCEINLINE FQuat FindBetween(const FVector& Vector1, const FVector& Vector2)
+	static FORCEINLINE TQuat<T> FindBetween(const TVector<T>& Vector1, const TVector<T>& Vector2)
 	{
 		return FindBetweenVectors(Vector1, Vector2);
 	}
@@ -489,43 +596,43 @@ public:
 	/**
 	 * Generates the 'smallest' (geodesic) rotation between two normals (assumed to be unit length).
 	 */
-	static CORE_API FQuat FindBetweenNormals(const FVector& Normal1, const FVector& Normal2);
+	static CORE_API TQuat<T> FindBetweenNormals(const TVector<T>& Normal1, const TVector<T>& Normal2);
 
 	/**
 	 * Generates the 'smallest' (geodesic) rotation between two vectors of arbitrary length.
 	 */
-	static CORE_API FQuat FindBetweenVectors(const FVector& Vector1, const FVector& Vector2);
+	static CORE_API TQuat<T> FindBetweenVectors(const TVector<T>& Vector1, const TVector<T>& Vector2);
 
 	/**
 	 * Error measure (angle) between two quaternions, ranged [0..1].
 	 * Returns the hypersphere-angle between two quaternions; alignment shouldn't matter, though 
 	 * @note normalized input is expected.
 	 */
-	static FORCEINLINE float Error(const FQuat& Q1, const FQuat& Q2);
+	static FORCEINLINE T Error(const TQuat<T>& Q1, const TQuat<T>& Q2);
 
 	/**
-	 * FQuat::Error with auto-normalization.
+	 * TQuat<T>::Error with auto-normalization.
 	 */
-	static FORCEINLINE float ErrorAutoNormalize(const FQuat& A, const FQuat& B);
+	static FORCEINLINE T ErrorAutoNormalize(const TQuat<T>& A, const TQuat<T>& B);
 
 	/** 
 	 * Fast Linear Quaternion Interpolation.
 	 * Result is NOT normalized.
 	 */
-	static FORCEINLINE FQuat FastLerp(const FQuat& A, const FQuat& B, const float Alpha);
+	static FORCEINLINE TQuat<T> FastLerp(const TQuat<T>& A, const TQuat<T>& B, const T Alpha);
 
 	/** 
 	 * Bi-Linear Quaternion interpolation.
 	 * Result is NOT normalized.
 	 */
-	static FORCEINLINE FQuat FastBilerp(const FQuat& P00, const FQuat& P10, const FQuat& P01, const FQuat& P11, float FracX, float FracY);
+	static FORCEINLINE TQuat<T> FastBilerp(const TQuat<T>& P00, const TQuat<T>& P10, const TQuat<T>& P01, const TQuat<T>& P11, T FracX, T FracY);
 
 
 	/** Spherical interpolation. Will correct alignment. Result is NOT normalized. */
-	static CORE_API FQuat Slerp_NotNormalized(const FQuat &Quat1, const FQuat &Quat2, float Slerp);
+	static CORE_API TQuat<T> Slerp_NotNormalized(const TQuat<T>& Quat1, const TQuat<T>& Quat2, T Slerp);
 
 	/** Spherical interpolation. Will correct alignment. Result is normalized. */
-	static FORCEINLINE FQuat Slerp(const FQuat &Quat1, const FQuat &Quat2, float Slerp)
+	static FORCEINLINE TQuat<T> Slerp(const TQuat<T>& Quat1, const TQuat<T>& Quat2, T Slerp)
 	{
 		return Slerp_NotNormalized(Quat1, Quat2, Slerp).GetNormalized();
 	}
@@ -535,14 +642,14 @@ public:
 	 * We need this for the cubic interpolation stuff so that the multiple Slerps dont go in different directions.
 	 * Result is NOT normalized.
 	 */
-	static CORE_API FQuat SlerpFullPath_NotNormalized(const FQuat &quat1, const FQuat &quat2, float Alpha);
+	static CORE_API TQuat<T> SlerpFullPath_NotNormalized(const TQuat<T>& quat1, const TQuat<T>& quat2, T Alpha);
 
 	/**
 	 * Simpler Slerp that doesn't do any checks for 'shortest distance' etc.
 	 * We need this for the cubic interpolation stuff so that the multiple Slerps dont go in different directions.
 	 * Result is normalized.
 	 */
-	static FORCEINLINE FQuat SlerpFullPath(const FQuat &quat1, const FQuat &quat2, float Alpha)
+	static FORCEINLINE TQuat<T> SlerpFullPath(const TQuat<T>& quat1, const TQuat<T>& quat2, T Alpha)
 	{
 		return SlerpFullPath_NotNormalized(quat1, quat2, Alpha).GetNormalized();
 	}
@@ -551,13 +658,13 @@ public:
 	 * Given start and end quaternions of quat1 and quat2, and tangents at those points tang1 and tang2, calculate the point at Alpha (between 0 and 1) between them. Result is normalized.
 	 * This will correct alignment by ensuring that the shortest path is taken.
 	 */
-	static CORE_API FQuat Squad(const FQuat& quat1, const FQuat& tang1, const FQuat& quat2, const FQuat& tang2, float Alpha);
+	static CORE_API TQuat<T> Squad(const TQuat<T>& quat1, const TQuat<T>& tang1, const TQuat<T>& quat2, const TQuat<T>& tang2, T Alpha);
 
 	/**
 	 * Simpler Squad that doesn't do any checks for 'shortest distance' etc.
 	 * Given start and end quaternions of quat1 and quat2, and tangents at those points tang1 and tang2, calculate the point at Alpha (between 0 and 1) between them. Result is normalized.
 	 */
-	static CORE_API FQuat SquadFullPath(const FQuat& quat1, const FQuat& tang1, const FQuat& quat2, const FQuat& tang2, float Alpha);
+	static CORE_API TQuat<T> SquadFullPath(const TQuat<T>& quat1, const TQuat<T>& tang1, const TQuat<T>& quat2, const TQuat<T>& tang2, T Alpha);
 
 	/**
 	 * Calculate tangents between given points
@@ -568,70 +675,98 @@ public:
 	 * @param Tension @todo document
 	 * @param OutTan Out control point
 	 */
-	static CORE_API void CalcTangents(const FQuat& PrevP, const FQuat& P, const FQuat& NextP, float Tension, FQuat& OutTan);
+	static CORE_API void CalcTangents(const TQuat<T>& PrevP, const TQuat<T>& P, const TQuat<T>& NextP, T Tension, TQuat<T>& OutTan);
 
 public:
 
-	/**
-	 * Serializes the quaternion.
-	 *
-	 * @param Ar Reference to the serialization archive.
-	 * @param F Reference to the quaternion being serialized.
-	 * @return Reference to the Archive after serialization.
-	 */
-	friend FArchive& operator<<(FArchive& Ar, FQuat& F)
-	{
-		return Ar << F.X << F.Y << F.Z << F.W;
-	}
-
 	bool Serialize(FArchive& Ar)
 	{
-		Ar << *this;
+		Ar << (TQuat<T>&)*this;
 		return true;
 	}
 
-} GCC_ALIGN(16);
+	bool SerializeFromMismatchedTag(FName StructTag, FArchive& Ar);
 
+	// Conversion to other type.
+	template<typename FArg, TEMPLATE_REQUIRES(!std::is_same_v<T, FArg>)>
+	explicit TQuat(const TQuat<FArg>& From) : TQuat<T>((T)From.X, (T)From.Y, (T)From.Z, (T)From.W) {}
+};
 
-/* FQuat inline functions
+/**
+ * Serializes the quaternion.
+ *
+ * @param Ar Reference to the serialization archive.
+ * @param F Reference to the quaternion being serialized.
+ * @return Reference to the Archive after serialization.
+ */
+inline FArchive& operator<<(FArchive& Ar, TQuat<float>& F)
+{
+	return Ar << F.X << F.Y << F.Z << F.W;
+}
+
+inline FArchive& operator<<(FArchive& Ar, TQuat<double>& F)
+{
+	if (Ar.UEVer() >= EUnrealEngineObjectUE5Version::LARGE_WORLD_COORDINATES)
+	{
+		return Ar << F.X << F.Y << F.Z << F.W;
+	}
+	else
+	{
+		checkf(Ar.IsLoading(), TEXT("float -> double conversion applied outside of load!"));
+		// Stored as floats, so serialize float and copy.
+		float X, Y, Z, W;
+		Ar << X << Y << Z << W;
+		if(Ar.IsLoading())
+		{
+			F = TQuat<double>(X, Y, Z, W);
+		}
+	}
+	return Ar;
+}
+
+#if !defined(_MSC_VER) || defined(__clang__)  // MSVC can't forward declare explicit specializations
+template<> CORE_API const FQuat4f FQuat4f::Identity;
+template<> CORE_API const FQuat4d FQuat4d::Identity;
+#endif
+/* TQuat inline functions
  *****************************************************************************/
-
-inline FQuat::FQuat(const FMatrix& M)
+template<typename T>
+inline TQuat<T>::TQuat(const UE::Math::TMatrix<T>& M)
 {
 	// If Matrix is NULL, return Identity quaternion. If any of them is 0, you won't be able to construct rotation
 	// if you have two plane at least, we can reconstruct the frame using cross product, but that's a bit expensive op to do here
 	// for now, if you convert to matrix from 0 scale and convert back, you'll lose rotation. Don't do that. 
 	if (M.GetScaledAxis(EAxis::X).IsNearlyZero() || M.GetScaledAxis(EAxis::Y).IsNearlyZero() || M.GetScaledAxis(EAxis::Z).IsNearlyZero())
 	{
-		*this = FQuat::Identity;
+		*this = TQuat<T>::Identity;
 		return;
 	}
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 	// Make sure the Rotation part of the Matrix is unit length.
 	// Changed to this (same as RemoveScaling) from RotDeterminant as using two different ways of checking unit length matrix caused inconsistency. 
-	if (!ensure((FMath::Abs(1.f - M.GetScaledAxis(EAxis::X).SizeSquared()) <= KINDA_SMALL_NUMBER) && (FMath::Abs(1.f - M.GetScaledAxis(EAxis::Y).SizeSquared()) <= KINDA_SMALL_NUMBER) && (FMath::Abs(1.f - M.GetScaledAxis(EAxis::Z).SizeSquared()) <= KINDA_SMALL_NUMBER)))
+	if (!ensure((FMath::Abs(1.f - M.GetScaledAxis(EAxis::X).SizeSquared()) <= UE_KINDA_SMALL_NUMBER) && (FMath::Abs(1.f - M.GetScaledAxis(EAxis::Y).SizeSquared()) <= UE_KINDA_SMALL_NUMBER) && (FMath::Abs(1.f - M.GetScaledAxis(EAxis::Z).SizeSquared()) <= UE_KINDA_SMALL_NUMBER)))
 	{
-		*this = FQuat::Identity;
+		*this = TQuat<T>::Identity;
 		return;
 	}
 #endif
 
 	//const MeReal *const t = (MeReal *) tm;
-	float	s;
+	T s;
 
 	// Check diagonal (trace)
-	const float tr = M.M[0][0] + M.M[1][1] + M.M[2][2];
+	const T tr = M.M[0][0] + M.M[1][1] + M.M[2][2];
 
 	if (tr > 0.0f) 
 	{
-		float InvS = FMath::InvSqrt(tr + 1.f);
-		this->W = 0.5f * (1.f / InvS);
-		s = 0.5f * InvS;
+		T InvS = FMath::InvSqrt(tr + T(1.f));
+		this->W = T(T(0.5f) * (T(1.f) / InvS));
+		s = T(0.5f) * InvS;
 
-		this->X = (M.M[1][2] - M.M[2][1]) * s;
-		this->Y = (M.M[2][0] - M.M[0][2]) * s;
-		this->Z = (M.M[0][1] - M.M[1][0]) * s;
+		this->X = ((M.M[1][2] - M.M[2][1]) * s);
+		this->Y = ((M.M[2][0] - M.M[0][2]) * s);
+		this->Z = ((M.M[0][1] - M.M[1][0]) * s);
 	} 
 	else 
 	{
@@ -644,18 +779,18 @@ inline FQuat::FQuat(const FMatrix& M)
 		if (M.M[2][2] > M.M[i][i])
 			i = 2;
 
-		static const int32 nxt[3] = { 1, 2, 0 };
+		static constexpr int32 nxt[3] = { 1, 2, 0 };
 		const int32 j = nxt[i];
 		const int32 k = nxt[j];
  
-		s = M.M[i][i] - M.M[j][j] - M.M[k][k] + 1.0f;
+		s = M.M[i][i] - M.M[j][j] - M.M[k][k] + T(1.0f);
 
-		float InvS = FMath::InvSqrt(s);
+		T InvS = FMath::InvSqrt(s);
 
-		float qt[4];
-		qt[i] = 0.5f * (1.f / InvS);
+		T qt[4];
+		qt[i] = T(0.5f) * (T(1.f) / InvS);
 
-		s = 0.5f * InvS;
+		s = T(0.5f) * InvS;
 
 		qt[3] = (M.M[j][k] - M.M[k][j]) * s;
 		qt[j] = (M.M[i][j] + M.M[j][i]) * s;
@@ -671,70 +806,54 @@ inline FQuat::FQuat(const FMatrix& M)
 }
 
 
-FORCEINLINE FQuat::FQuat(const FRotator& R)
+template<typename T>
+FORCEINLINE TQuat<T>::TQuat(const TRotator<T>& R)
 {
 	*this = R.Quaternion();
 	DiagnosticCheckNaN();
 }
 
-
-FORCEINLINE FVector FQuat::operator*(const FVector& V) const
+template<typename T>
+FORCEINLINE TVector<T> TQuat<T>::operator*(const TVector<T>& V) const
 {
 	return RotateVector(V);
 }
 
-
-inline FMatrix FQuat::operator*(const FMatrix& M) const
-{
-	FMatrix Result;
-	FQuat VT, VR;
-	FQuat Inv = Inverse();
-	for (int32 I=0; I<4; ++I)
-	{
-		FQuat VQ(M.M[I][0], M.M[I][1], M.M[I][2], M.M[I][3]);
-		VectorQuaternionMultiply(&VT, this, &VQ);
-		VectorQuaternionMultiply(&VR, &VT, &Inv);
-		Result.M[I][0] = VR.X;
-		Result.M[I][1] = VR.Y;
-		Result.M[I][2] = VR.Z;
-		Result.M[I][3] = VR.W;
-	}
-
-	return Result;
-}
-
-
-/* FQuat inline functions
+/* TQuat inline functions
  *****************************************************************************/
 
-FORCEINLINE FQuat::FQuat(EForceInit ZeroOrNot)
+template<typename T>
+FORCEINLINE TQuat<T>::TQuat(EForceInit ZeroOrNot)
 	:	X(0), Y(0), Z(0), W(ZeroOrNot == ForceInitToZero ? 0.0f : 1.0f)
 { }
 
-
-FORCEINLINE FQuat::FQuat(float InX, float InY, float InZ, float InW)
+template<typename T>
+FORCEINLINE TQuat<T>::TQuat(T InX, T InY, T InZ, T InW)
 	: X(InX)
 	, Y(InY)
 	, Z(InZ)
 	, W(InW)
 {
+	static_assert(TIsFloatingPoint<T>::Value);
 	DiagnosticCheckNaN();
 }
 
-
-FORCEINLINE FQuat::FQuat(const VectorRegister& V)
+template<typename T>
+FORCEINLINE TQuat<T>::TQuat(const QuatVectorRegister& V)
 {
 	VectorStoreAligned(V, this);
 	DiagnosticCheckNaN();
 }
 
 
-FORCEINLINE FString FQuat::ToString() const
+template<typename T>
+FORCEINLINE FString TQuat<T>::ToString() const
 {
 	return FString::Printf(TEXT("X=%.9f Y=%.9f Z=%.9f W=%.9f"), X, Y, Z, W);
 }
 
-inline bool FQuat::InitFromString(const FString& InSourceString)
+template<typename T>
+inline bool TQuat<T>::InitFromString(const FString& InSourceString)
 {
 	X = Y = Z = 0.f;
 	W = 1.f;
@@ -748,23 +867,11 @@ inline bool FQuat::InitFromString(const FString& InSourceString)
 	return bSuccess;
 }
 
-#ifdef IMPLEMENT_ASSIGNMENT_OPERATOR_MANUALLY
-FORCEINLINE FQuat& FQuat::operator=(const FQuat& Other)
+template<typename T>
+FORCEINLINE TQuat<T>::TQuat(TVector<T> Axis, T AngleRad)
 {
-	this->X = Other.X;
-	this->Y = Other.Y;
-	this->Z = Other.Z;
-	this->W = Other.W;
-
-	return *this;
-}
-#endif
-
-
-FORCEINLINE FQuat::FQuat(FVector Axis, float AngleRad)
-{
-	const float half_a = 0.5f * AngleRad;
-	float s, c;
+	const T half_a = 0.5f * AngleRad;
+	T s, c;
 	FMath::SinCos(&s, &c, half_a);
 
 	X = s * Axis.X;
@@ -776,23 +883,25 @@ FORCEINLINE FQuat::FQuat(FVector Axis, float AngleRad)
 }
 
 
-FORCEINLINE FQuat FQuat::operator+(const FQuat& Q) const
+template<typename T>
+FORCEINLINE TQuat<T> TQuat<T>::operator+(const TQuat<T>& Q) const
 {
 #if PLATFORM_ENABLE_VECTORINTRINSICS
-	VectorRegister A = VectorLoadAligned(this);
-	VectorRegister B = VectorLoadAligned(&Q);
-	return FQuat(VectorAdd(A, B));
+	QuatVectorRegister A = VectorLoadAligned(this);
+	QuatVectorRegister B = VectorLoadAligned(&Q);
+	return TQuat(VectorAdd(A, B));
 #else
-	return FQuat(X + Q.X, Y + Q.Y, Z + Q.Z, W + Q.W);
+	return TQuat(X + Q.X, Y + Q.Y, Z + Q.Z, W + Q.W);
 #endif // PLATFORM_ENABLE_VECTORINTRINSICS
 }
 
 
-FORCEINLINE FQuat FQuat::operator+=(const FQuat& Q)
+template<typename T>
+FORCEINLINE TQuat<T> TQuat<T>::operator+=(const TQuat<T>& Q)
 {
 #if PLATFORM_ENABLE_VECTORINTRINSICS
-	VectorRegister A = VectorLoadAligned(this);
-	VectorRegister B = VectorLoadAligned(&Q);
+	QuatVectorRegister A = VectorLoadAligned(this);
+	QuatVectorRegister B = VectorLoadAligned(&Q);
 	VectorStoreAligned(VectorAdd(A, B), this);
 #else
 	this->X += Q.X;
@@ -807,27 +916,38 @@ FORCEINLINE FQuat FQuat::operator+=(const FQuat& Q)
 }
 
 
-FORCEINLINE FQuat FQuat::operator-(const FQuat& Q) const
+template<typename T>
+FORCEINLINE TQuat<T> TQuat<T>::operator-(const TQuat<T>& Q) const
 {
 #if PLATFORM_ENABLE_VECTORINTRINSICS
-	VectorRegister A = VectorLoadAligned(this);
-	VectorRegister B = VectorLoadAligned(&Q);
-	return FQuat(VectorSubtract(A, B));
+	QuatVectorRegister A = VectorLoadAligned(this);
+	QuatVectorRegister B = VectorLoadAligned(&Q);
+	return TQuat(VectorSubtract(A, B));
 #else
-	return FQuat(X - Q.X, Y - Q.Y, Z - Q.Z, W - Q.W);
+	return TQuat(X - Q.X, Y - Q.Y, Z - Q.Z, W - Q.W);
 #endif // PLATFORM_ENABLE_VECTORINTRINSICS
 }
 
-
-FORCEINLINE bool FQuat::Equals(const FQuat& Q, float Tolerance) const
+template<typename T>
+FORCEINLINE TQuat<T> TQuat<T>::operator-() const
 {
 #if PLATFORM_ENABLE_VECTORINTRINSICS
-	const VectorRegister ToleranceV = VectorLoadFloat1(&Tolerance);
-	const VectorRegister A = VectorLoadAligned(this);
-	const VectorRegister B = VectorLoadAligned(&Q);
+	return TQuat(VectorNegate(VectorLoadAligned(this)));
+#else
+	return TQuat(-X, -Y, -Z, -W);
+#endif
+}
 
-	const VectorRegister RotationSub = VectorAbs(VectorSubtract(A, B));
-	const VectorRegister RotationAdd = VectorAbs(VectorAdd(A, B));
+template<typename T>
+FORCEINLINE bool TQuat<T>::Equals(const TQuat<T>& Q, T Tolerance) const
+{
+#if PLATFORM_ENABLE_VECTORINTRINSICS
+	const QuatVectorRegister ToleranceV = VectorLoadFloat1(&Tolerance);
+	const QuatVectorRegister A = VectorLoadAligned(this);
+	const QuatVectorRegister B = VectorLoadAligned(&Q);
+
+	const QuatVectorRegister RotationSub = VectorAbs(VectorSubtract(A, B));
+	const QuatVectorRegister RotationAdd = VectorAbs(VectorAdd(A, B));
 	return !VectorAnyGreaterThan(RotationSub, ToleranceV) || !VectorAnyGreaterThan(RotationAdd, ToleranceV);
 #else
 	return (FMath::Abs(X - Q.X) <= Tolerance && FMath::Abs(Y - Q.Y) <= Tolerance && FMath::Abs(Z - Q.Z) <= Tolerance && FMath::Abs(W - Q.W) <= Tolerance)
@@ -835,16 +955,18 @@ FORCEINLINE bool FQuat::Equals(const FQuat& Q, float Tolerance) const
 #endif // PLATFORM_ENABLE_VECTORINTRINSICS
 }
 
-FORCEINLINE bool FQuat::IsIdentity(float Tolerance) const
+template<typename T>
+FORCEINLINE bool TQuat<T>::IsIdentity(T Tolerance) const
 {
-	return Equals(FQuat::Identity, Tolerance);
+	return Equals(TQuat<T>::Identity, Tolerance);
 }
 
-FORCEINLINE FQuat FQuat::operator-=(const FQuat& Q)
+template<typename T>
+FORCEINLINE TQuat<T> TQuat<T>::operator-=(const TQuat<T>& Q)
 {
 #if PLATFORM_ENABLE_VECTORINTRINSICS
-	VectorRegister A = VectorLoadAligned(this);
-	VectorRegister B = VectorLoadAligned(&Q);
+	QuatVectorRegister A = VectorLoadAligned(this);
+	QuatVectorRegister B = VectorLoadAligned(&Q);
 	VectorStoreAligned(VectorSubtract(A, B), this);
 #else
 	this->X -= Q.X;
@@ -859,9 +981,10 @@ FORCEINLINE FQuat FQuat::operator-=(const FQuat& Q)
 }
 
 
-FORCEINLINE FQuat FQuat::operator*(const FQuat& Q) const
+template<typename T>
+FORCEINLINE TQuat<T> TQuat<T>::operator*(const TQuat<T>& Q) const
 {
-	FQuat Result;
+	TQuat<T> Result;
 	VectorQuaternionMultiply(&Result, this, &Q);
 	
 	Result.DiagnosticCheckNaN();
@@ -870,11 +993,12 @@ FORCEINLINE FQuat FQuat::operator*(const FQuat& Q) const
 }
 
 
-FORCEINLINE FQuat FQuat::operator*=(const FQuat& Q)
+template<typename T>
+FORCEINLINE TQuat<T> TQuat<T>::operator*=(const TQuat<T>& Q)
 {
-	VectorRegister A = VectorLoadAligned(this);
-	VectorRegister B = VectorLoadAligned(&Q);
-	VectorRegister Result;
+	QuatVectorRegister A = VectorLoadAligned(this);
+	QuatVectorRegister B = VectorLoadAligned(&Q);
+	QuatVectorRegister Result;
 	VectorQuaternionMultiply(&Result, &A, &B);
 	VectorStoreAligned(Result, this);
 
@@ -884,79 +1008,32 @@ FORCEINLINE FQuat FQuat::operator*=(const FQuat& Q)
 }
 
 
-FORCEINLINE FQuat FQuat::operator*=(const float Scale)
+// Global operator for (float * Quat)
+template<typename T>
+FORCEINLINE TQuat<T> operator*(const float Scale, const TQuat<T>& Q)
 {
-#if PLATFORM_ENABLE_VECTORINTRINSICS
-	VectorRegister A = VectorLoadAligned(this);
-	VectorRegister B = VectorSetFloat1(Scale);
-	VectorStoreAligned(VectorMultiply(A, B), this);
-#else
-	X *= Scale;
-	Y *= Scale;
-	Z *= Scale;
-	W *= Scale;
-#endif // PLATFORM_ENABLE_VECTORINTRINSICS
-
-	DiagnosticCheckNaN();
-
-	return *this;
+	return Q.operator*(Scale);
 }
 
-
-FORCEINLINE FQuat FQuat::operator*(const float Scale) const
+// Global operator for (double * Quat)
+template<typename T>
+FORCEINLINE TQuat<T> operator*(const double Scale, const TQuat<T>& Q)
 {
-#if PLATFORM_ENABLE_VECTORINTRINSICS
-	VectorRegister A = VectorLoadAligned(this);
-	VectorRegister B = VectorSetFloat1(Scale);
-	return FQuat(VectorMultiply(A, B));
-#else
-	return FQuat(Scale * X, Scale * Y, Scale * Z, Scale * W);
-#endif // PLATFORM_ENABLE_VECTORINTRINSICS
+	return Q.operator*(Scale);
 }
 
-
-FORCEINLINE FQuat FQuat::operator/=(const float Scale)
-{
-#if PLATFORM_ENABLE_VECTORINTRINSICS
-	VectorRegister A = VectorLoadAligned(this);
-	VectorRegister B = VectorSetFloat1(Scale);
-	VectorStoreAligned(VectorDivide(A, B), this);
-#else
-	const float Recip = 1.0f / Scale;
-	X *= Recip;
-	Y *= Recip;
-	Z *= Recip;
-	W *= Recip;
-#endif // PLATFORM_ENABLE_VECTORINTRINSICS
-
-	DiagnosticCheckNaN();
-
-	return *this;
-}
-
-
-FORCEINLINE FQuat FQuat::operator/(const float Scale) const
-{
-#if PLATFORM_ENABLE_VECTORINTRINSICS
-	VectorRegister A = VectorLoadAligned(this);
-	VectorRegister B = VectorSetFloat1(Scale);
-	return FQuat(VectorDivide(A, B));
-#else
-	const float Recip = 1.0f / Scale;
-	return FQuat(X * Recip, Y * Recip, Z * Recip, W * Recip);
-#endif // PLATFORM_ENABLE_VECTORINTRINSICS
-}
-
-FORCEINLINE bool FQuat::Identical(const FQuat* Q, const uint32 PortFlags) const
+template<typename T>
+FORCEINLINE bool TQuat<T>::Identical(const TQuat* Q, const uint32 PortFlags) const
 {
 	return X == Q->X && Y == Q->Y && Z == Q->Z && W == Q->W;
 }
 
-FORCEINLINE bool FQuat::operator==(const FQuat& Q) const
+template<typename T>
+FORCEINLINE bool TQuat<T>::operator==(const TQuat<T>& Q) const
 {
 #if PLATFORM_ENABLE_VECTORINTRINSICS
-	const VectorRegister A = VectorLoadAligned(this);
-	const VectorRegister B = VectorLoadAligned(&Q);
+	const QuatVectorRegister A = VectorLoadAligned(this);
+	const QuatVectorRegister B = VectorLoadAligned(&Q);
 	return VectorMaskBits(VectorCompareEQ(A, B)) == 0x0F;
 #else
 	return X == Q.X && Y == Q.Y && Z == Q.Z && W == Q.W;
@@ -964,11 +1041,12 @@ FORCEINLINE bool FQuat::operator==(const FQuat& Q) const
 }
 
 
-FORCEINLINE bool FQuat::operator!=(const FQuat& Q) const
+template<typename T>
+FORCEINLINE bool TQuat<T>::operator!=(const TQuat<T>& Q) const
 {
 #if PLATFORM_ENABLE_VECTORINTRINSICS
-	const VectorRegister A = VectorLoadAligned(this);
-	const VectorRegister B = VectorLoadAligned(&Q);
+	const QuatVectorRegister A = VectorLoadAligned(this);
+	const QuatVectorRegister B = VectorLoadAligned(&Q);
 	return VectorMaskBits(VectorCompareNE(A, B)) != 0x00;
 #else
 	return X != Q.X || Y != Q.Y || Z != Q.Z || W != Q.W;
@@ -976,30 +1054,32 @@ FORCEINLINE bool FQuat::operator!=(const FQuat& Q) const
 }
 
 
-FORCEINLINE float FQuat::operator|(const FQuat& Q) const
+template<typename T>
+FORCEINLINE T TQuat<T>::operator|(const TQuat<T>& Q) const
 {
 	return X * Q.X + Y * Q.Y + Z * Q.Z + W * Q.W;
 }
 
 
-FORCEINLINE void FQuat::Normalize(float Tolerance)
+template<typename T>
+FORCEINLINE void TQuat<T>::Normalize(T Tolerance)
 {
 #if PLATFORM_ENABLE_VECTORINTRINSICS
-	const VectorRegister Vector = VectorLoadAligned(this);
+	const QuatVectorRegister Vector = VectorLoadAligned(this);
 
-	const VectorRegister SquareSum = VectorDot4(Vector, Vector);
-	const VectorRegister NonZeroMask = VectorCompareGE(SquareSum, VectorLoadFloat1(&Tolerance));
-	const VectorRegister InvLength = VectorReciprocalSqrtAccurate(SquareSum);
-	const VectorRegister NormalizedVector = VectorMultiply(InvLength, Vector);
-	VectorRegister Result = VectorSelect(NonZeroMask, NormalizedVector, GlobalVectorConstants::Float0001);
+	const QuatVectorRegister SquareSum = VectorDot4(Vector, Vector);
+	const QuatVectorRegister NonZeroMask = VectorCompareGE(SquareSum, VectorLoadFloat1(&Tolerance));
+	const QuatVectorRegister InvLength = VectorReciprocalSqrtAccurate(SquareSum);
+	const QuatVectorRegister NormalizedVector = VectorMultiply(InvLength, Vector);
+	QuatVectorRegister Result = VectorSelect(NonZeroMask, NormalizedVector, GlobalVectorConstants::Float0001);
 
 	VectorStoreAligned(Result, this);
 #else
-	const float SquareSum = X * X + Y * Y + Z * Z + W * W;
+	const T SquareSum = X * X + Y * Y + Z * Z + W * W;
 
 	if (SquareSum >= Tolerance)
 	{
-		const float Scale = FMath::InvSqrt(SquareSum);
+		const T Scale = FMath::InvSqrt(SquareSum);
 
 		X *= Scale; 
 		Y *= Scale; 
@@ -1008,83 +1088,112 @@ FORCEINLINE void FQuat::Normalize(float Tolerance)
 	}
 	else
 	{
-		*this = FQuat::Identity;
+		*this = TQuat<T>::Identity;
 	}
 #endif // PLATFORM_ENABLE_VECTORINTRINSICS
 }
 
 
-FORCEINLINE FQuat FQuat::GetNormalized(float Tolerance) const
+template<typename T>
+FORCEINLINE TQuat<T> TQuat<T>::GetNormalized(T Tolerance) const
 {
-	FQuat Result(*this);
+	TQuat<T> Result(*this);
 	Result.Normalize(Tolerance);
 	return Result;
 }
 
 
-
-FORCEINLINE bool FQuat::IsNormalized() const
+template<typename T>
+FORCEINLINE bool TQuat<T>::IsNormalized() const
 {
 #if PLATFORM_ENABLE_VECTORINTRINSICS
-	VectorRegister A = VectorLoadAligned(this);
-	VectorRegister TestValue = VectorAbs(VectorSubtract(VectorOne(), VectorDot4(A, A)));
+	QuatVectorRegister A = VectorLoadAligned(this);
+	QuatVectorRegister TestValue = VectorAbs(VectorSubtract(VectorOne(), VectorDot4(A, A)));
 	return !VectorAnyGreaterThan(TestValue, GlobalVectorConstants::ThreshQuatNormalized);
 #else
-	return (FMath::Abs(1.f - SizeSquared()) < THRESH_QUAT_NORMALIZED);
+	return (FMath::Abs(1.f - SizeSquared()) < UE_THRESH_QUAT_NORMALIZED);
 #endif // PLATFORM_ENABLE_VECTORINTRINSICS
 }
 
 
-FORCEINLINE float FQuat::Size() const
+template<typename T>
+FORCEINLINE T TQuat<T>::Size() const
 {
 	return FMath::Sqrt(X * X + Y * Y + Z * Z + W * W);
 }
 
-
-FORCEINLINE float FQuat::SizeSquared() const
+template<typename T>
+FORCEINLINE T TQuat<T>::SizeSquared() const
 {
 	return (X * X + Y * Y + Z * Z + W * W);
 }
 
-FORCEINLINE float FQuat::GetAngle() const
+template<typename T>
+FORCEINLINE T TQuat<T>::GetAngle() const
 {
-	return 2.f * FMath::Acos(W);
+	return T(2.0) * FMath::Acos(W);
 }
 
 
-FORCEINLINE void FQuat::ToAxisAndAngle(FVector& Axis, float& Angle) const
+template<typename T>
+FORCEINLINE void TQuat<T>::ToAxisAndAngle(TVector<T>& Axis, float& Angle) const
 {
-	Angle = GetAngle();
+	Angle = (float)GetAngle();
 	Axis = GetRotationAxis();
 }
 
-FORCEINLINE FVector FQuat::GetRotationAxis() const
+template<typename T>
+FORCEINLINE void TQuat<T>::ToAxisAndAngle(TVector<T>& Axis, double& Angle) const
+{
+	Angle = (double)GetAngle();
+	Axis = GetRotationAxis();
+}
+
+template<typename T>
+FORCEINLINE TVector<T> TQuat<T>::ToRotationVector() const
+{
+	checkSlow(IsNormalized());
+	TQuat<T> RotQ = Log();
+	return TVector<T>(RotQ.X * 2.0f, RotQ.Y * 2.0f, RotQ.Z * 2.0f);
+}
+
+template<typename T>
+FORCEINLINE TQuat<T> TQuat<T>::MakeFromRotationVector(const TVector<T>& RotationVector)
+{
+	TQuat<T> RotQ(RotationVector.X * 0.5f, RotationVector.Y * 0.5f, RotationVector.Z * 0.5f, 0.0f);
+	return RotQ.Exp();
+}
+
+template<typename T>
+FORCEINLINE TVector<T> TQuat<T>::GetRotationAxis() const
 {
 #if PLATFORM_ENABLE_VECTORINTRINSICS
-	FVector V;
-	VectorRegister A = VectorLoadAligned(this);
-	VectorRegister R = VectorNormalizeSafe(VectorSet_W0(A), GlobalVectorConstants::Float1000);
+	TVector<T> V;
+	QuatVectorRegister A = VectorLoadAligned(this);
+	QuatVectorRegister R = VectorNormalizeSafe(VectorSet_W0(A), GlobalVectorConstants::Float1000);
 	VectorStoreFloat3(R, &V);
 	return V;
 #else
-	const float SquareSum = X * X + Y * Y + Z * Z;
-	if (SquareSum < SMALL_NUMBER)
+	const T SquareSum = X * X + Y * Y + Z * Z;
+	if (SquareSum < UE_SMALL_NUMBER)
 	{
-		return FVector::XAxisVector;
+		return TVector<T>::XAxisVector;
 	}
-	const float Scale = FMath::InvSqrt(SquareSum);
-	return FVector(X * Scale, Y * Scale, Z * Scale);
+	const T Scale = FMath::InvSqrt(SquareSum);
+	return TVector<T>(X * Scale, Y * Scale, Z * Scale);
 #endif // PLATFORM_ENABLE_VECTORINTRINSICS
 }
 
-float FQuat::AngularDistance(const FQuat& Q) const
+template<typename T>
+T TQuat<T>::AngularDistance(const TQuat<T>& Q) const
 {
-	float InnerProd = X*Q.X + Y*Q.Y + Z*Q.Z + W*Q.W;
+	T InnerProd = X*Q.X + Y*Q.Y + Z*Q.Z + W*Q.W;
 	return FMath::Acos((2 * InnerProd * InnerProd) - 1.f);
 }
 
 
-FORCEINLINE FVector FQuat::RotateVector(FVector V) const
+template<typename T>
+FORCEINLINE TVector<T> TQuat<T>::RotateVector(TVector<T> V) const
 {	
 	// http://people.csail.mit.edu/bkph/articles/Quaternions.pdf
 	// V' = V + 2w(Q x V) + (2Q x (Q x V))
@@ -1093,37 +1202,39 @@ FORCEINLINE FVector FQuat::RotateVector(FVector V) const
 	// T = 2(Q x V);
 	// V' = V + w*(T) + (Q x T)
 
-	const FVector Q(X, Y, Z);
-	const FVector T = 2.f * FVector::CrossProduct(Q, V);
-	const FVector Result = V + (W * T) + FVector::CrossProduct(Q, T);
+	const TVector<T> Q(X, Y, Z);
+	const TVector<T> TT = 2.f * TVector<T>::CrossProduct(Q, V);
+	const TVector<T> Result = V + (W * TT) + TVector<T>::CrossProduct(Q, TT);
 	return Result;
 }
 
-FORCEINLINE FVector FQuat::UnrotateVector(FVector V) const
+template<typename T>
+FORCEINLINE TVector<T> TQuat<T>::UnrotateVector(TVector<T> V) const
 {	
-	const FVector Q(-X, -Y, -Z); // Inverse
-	const FVector T = 2.f * FVector::CrossProduct(Q, V);
-	const FVector Result = V + (W * T) + FVector::CrossProduct(Q, T);
+	const TVector<T> Q(-X, -Y, -Z); // Inverse
+	const TVector<T> TT = 2.f * TVector<T>::CrossProduct(Q, V);
+	const TVector<T> Result = V + (W * TT) + TVector<T>::CrossProduct(Q, TT);
 	return Result;
 }
 
 
-FORCEINLINE FQuat FQuat::Inverse() const
+template<typename T>
+FORCEINLINE TQuat<T> TQuat<T>::Inverse() const
 {
 	checkSlow(IsNormalized());
 
 #if PLATFORM_ENABLE_VECTORINTRINSICS
-	return FQuat(VectorQuaternionInverse(VectorLoadAligned(this)));
+	return TQuat(VectorQuaternionInverse(VectorLoadAligned(this)));
 #else
-	return FQuat(-X, -Y, -Z, W);
+	return TQuat(-X, -Y, -Z, W);
 #endif // PLATFORM_ENABLE_VECTORINTRINSICS
 }
 
-
-FORCEINLINE void FQuat::EnforceShortestArcWith(const FQuat& OtherQuat)
+template<typename T>
+FORCEINLINE void TQuat<T>::EnforceShortestArcWith(const TQuat<T>& OtherQuat)
 {
-	const float DotResult = (OtherQuat | *this);
-	const float Bias = FMath::FloatSelect(DotResult, 1.0f, -1.0f);
+	const T DotResult = (OtherQuat | *this);
+	const T Bias = FMath::FloatSelect(DotResult, T(1.0f), T(-1.0f));
 
 	X *= Bias;
 	Y *= Bias;
@@ -1131,88 +1242,107 @@ FORCEINLINE void FQuat::EnforceShortestArcWith(const FQuat& OtherQuat)
 	W *= Bias;
 }
 
-	
-FORCEINLINE FVector FQuat::GetAxisX() const
+
+template<typename T>
+FORCEINLINE TVector<T> TQuat<T>::GetAxisX() const
 {
-	return RotateVector(FVector(1.f, 0.f, 0.f));
+	return RotateVector(TVector<T>(1.f, 0.f, 0.f));
 }
 
 
-FORCEINLINE FVector FQuat::GetAxisY() const
+template<typename T>
+FORCEINLINE TVector<T> TQuat<T>::GetAxisY() const
 {
-	return RotateVector(FVector(0.f, 1.f, 0.f));
+	return RotateVector(TVector<T>(0.f, 1.f, 0.f));
 }
 
 
-FORCEINLINE FVector FQuat::GetAxisZ() const
+template<typename T>
+FORCEINLINE TVector<T> TQuat<T>::GetAxisZ() const
 {
-	return RotateVector(FVector(0.f, 0.f, 1.f));
+	return RotateVector(TVector<T>(0.f, 0.f, 1.f));
 }
 
 
-FORCEINLINE FVector FQuat::GetForwardVector() const
+template<typename T>
+FORCEINLINE TVector<T> TQuat<T>::GetForwardVector() const
 {
 	return GetAxisX();
 }
 
-FORCEINLINE FVector FQuat::GetRightVector() const
+template<typename T>
+FORCEINLINE TVector<T> TQuat<T>::GetRightVector() const
 {
 	return GetAxisY();
 }
 
-FORCEINLINE FVector FQuat::GetUpVector() const
+template<typename T>
+FORCEINLINE TVector<T> TQuat<T>::GetUpVector() const
 {
 	return GetAxisZ();
 }
 
-FORCEINLINE FVector FQuat::Vector() const
+template<typename T>
+FORCEINLINE TVector<T> TQuat<T>::Vector() const
 {
 	return GetAxisX();
 }
 
-
-FORCEINLINE float FQuat::Error(const FQuat& Q1, const FQuat& Q2)
+template<typename T>
+FORCEINLINE TMatrix<T> TQuat<T>::ToMatrix() const
 {
-	const float cosom = FMath::Abs(Q1.X * Q2.X + Q1.Y * Q2.Y + Q1.Z * Q2.Z + Q1.W * Q2.W);
-	return (FMath::Abs(cosom) < 0.9999999f) ? FMath::Acos(cosom)*(1.f / PI) : 0.0f;
+	TMatrix<T> R;
+	ToMatrix(R);
+	return R;
+}
+
+template<typename T>
+FORCEINLINE T TQuat<T>::Error(const TQuat<T>& Q1, const TQuat<T>& Q2)
+{
+	const T cosom = FMath::Abs(Q1.X * Q2.X + Q1.Y * Q2.Y + Q1.Z * Q2.Z + Q1.W * Q2.W);
+	return (FMath::Abs(cosom) < 0.9999999f) ? FMath::Acos(cosom)*(1.f / UE_PI) : 0.0f;
 }
 
 
-FORCEINLINE float FQuat::ErrorAutoNormalize(const FQuat& A, const FQuat& B)
+template<typename T>
+FORCEINLINE T TQuat<T>::ErrorAutoNormalize(const TQuat<T>& A, const TQuat<T>& B)
 {
-	FQuat Q1 = A;
+	TQuat<T> Q1 = A;
 	Q1.Normalize();
 
-	FQuat Q2 = B;
+	TQuat<T> Q2 = B;
 	Q2.Normalize();
 
-	return FQuat::Error(Q1, Q2);
+	return TQuat<T>::Error(Q1, Q2);
 }
 
 /**
  * Fast Linear Quaternion Interpolation.
  * Result is NOT normalized.
  */
-FORCEINLINE FQuat FQuat::FastLerp(const FQuat& A, const FQuat& B, const float Alpha)
+template<typename T>
+FORCEINLINE TQuat<T> TQuat<T>::FastLerp(const TQuat<T>& A, const TQuat<T>& B, const T Alpha)
 {
 	// To ensure the 'shortest route', we make sure the dot product between the both rotations is positive.
-	const float DotResult = (A | B);
-	const float Bias = FMath::FloatSelect(DotResult, 1.0f, -1.0f);
+	const T DotResult = (A | B);
+	const T Bias = FMath::FloatSelect(DotResult, T(1.0f), T(-1.0f));
 	return (B * Alpha) + (A * (Bias * (1.f - Alpha)));
 }
 
 
-FORCEINLINE FQuat FQuat::FastBilerp(const FQuat& P00, const FQuat& P10, const FQuat& P01, const FQuat& P11, float FracX, float FracY)
+template<typename T>
+FORCEINLINE TQuat<T> TQuat<T>::FastBilerp(const TQuat<T>& P00, const TQuat<T>& P10, const TQuat<T>& P01, const TQuat<T>& P11, T FracX, T FracY)
 {
-	return FQuat::FastLerp(
-		FQuat::FastLerp(P00,P10,FracX),
-		FQuat::FastLerp(P01,P11,FracX),
+	return TQuat<T>::FastLerp(
+		TQuat<T>::FastLerp(P00,P10,FracX),
+		TQuat<T>::FastLerp(P01,P11,FracX),
 		FracY
 	);
 }
 
 
-FORCEINLINE bool FQuat::ContainsNaN() const
+template<typename T>
+FORCEINLINE bool TQuat<T>::ContainsNaN() const
 {
 	return (!FMath::IsFinite(X) ||
 			!FMath::IsFinite(Y) ||
@@ -1220,36 +1350,88 @@ FORCEINLINE bool FQuat::ContainsNaN() const
 			!FMath::IsFinite(W)
 	);
 }
+	
+/**
+ * Creates a hash value from an FQuat.
+ *
+ * @param Quat the quat to create a hash value for
+ * @return The hash value from the components
+ */
+template<typename T>
+FORCEINLINE uint32 GetTypeHash(const TQuat<T>& Quat)
+{
+	// Note: this assumes there's no padding in Quat that could contain uncompared data.
+	static_assert(sizeof(TQuat<T>) == sizeof(T[4]), "Unexpected padding in TQuat");
+	return FCrc::MemCrc_DEPRECATED(&Quat, sizeof(Quat));
+}
+
+} // namespace UE::Math
+} // namespace UE
+
+UE_DECLARE_LWC_TYPE(Quat, 4);
+
+template<> struct TIsPODType<FQuat4f> { enum { Value = true }; };
+template<> struct TIsPODType<FQuat4d> { enum { Value = true }; };
+template<> struct TIsUECoreVariant<FQuat4f> { enum { Value = true }; };
+template<> struct TIsUECoreVariant<FQuat4d> { enum { Value = true }; };
+template<> struct TCanBulkSerialize<FQuat4f> { enum { Value = true }; };
+template<> struct TCanBulkSerialize<FQuat4d> { enum { Value = true }; };
+DECLARE_INTRINSIC_TYPE_LAYOUT(FQuat4f);
+DECLARE_INTRINSIC_TYPE_LAYOUT(FQuat4d);
+
+// Forward declare all explicit specializations (in UnrealMath.cpp)
+template<> CORE_API FRotator3f FQuat4f::Rotator() const;
+template<> CORE_API FRotator3d FQuat4d::Rotator() const;
 
 
-template<> struct TIsPODType<FQuat> { enum { Value = true }; };
+
+template<>
+inline bool FQuat4f::SerializeFromMismatchedTag(FName StructTag, FArchive& Ar)
+{
+	return UE_SERIALIZE_VARIANT_FROM_MISMATCHED_TAG(Ar, Quat, Quat4f, Quat4d);
+}
+
+template<>
+inline bool FQuat4d::SerializeFromMismatchedTag(FName StructTag, FArchive& Ar)
+{
+	return UE_SERIALIZE_VARIANT_FROM_MISMATCHED_TAG(Ar, Quat, Quat4d, Quat4f);
+}
+
 
 /* FMath inline functions
  *****************************************************************************/
-
-template<class U>
-FORCEINLINE_DEBUGGABLE FQuat FMath::Lerp( const FQuat& A, const FQuat& B, const U& Alpha)
+ 
+ // TCustomLerp for FMath::Lerp()
+template<typename T>
+struct TCustomLerp< UE::Math::TQuat<T> >
 {
-	return FQuat::Slerp(A, B, Alpha);
-}
+	constexpr static bool Value = true;
+	using QuatType = UE::Math::TQuat<T>;
 
-template<class U>
-FORCEINLINE_DEBUGGABLE FQuat FMath::BiLerp(const FQuat& P00, const FQuat& P10, const FQuat& P01, const FQuat& P11, float FracX, float FracY)
-{
-	FQuat Result;
+	template<class U>
+	static FORCEINLINE_DEBUGGABLE QuatType Lerp(const QuatType& A, const QuatType& B, const U& Alpha)
+	{
+		return QuatType::Slerp(A, B, (T)Alpha);
+	}
 
-	Result = Lerp(
-		FQuat::Slerp_NotNormalized(P00,P10,FracX),
-		FQuat::Slerp_NotNormalized(P01,P11,FracX),
-		FracY
+	template<class U>
+	static FORCEINLINE_DEBUGGABLE QuatType BiLerp(const QuatType& P00, const QuatType& P10, const QuatType& P01, const QuatType& P11, const U& FracX, const U& FracY)
+	{
+		QuatType Result;
+
+		Result = Lerp(
+			QuatType::Slerp_NotNormalized(P00, P10, (T)FracX),
+			QuatType::Slerp_NotNormalized(P01, P11, (T)FracX),
+			(T)FracY
 		);
 
-	return Result;
-}
+		return Result;
+	}
 
-template<class U>
-FORCEINLINE_DEBUGGABLE FQuat FMath::CubicInterp( const FQuat& P0, const FQuat& T0, const FQuat& P1, const FQuat& T1, const U& A)
-{
-	return FQuat::Squad(P0, T0, P1, T1, A);
-}
+	template<class U>
+	static FORCEINLINE_DEBUGGABLE QuatType CubicInterp(const QuatType& P0, const QuatType& T0, const QuatType& P1, const QuatType& T1, const U& A)
+	{
+		return QuatType::Squad(P0, T0, P1, T1, (T)A);
+	}
 
+};

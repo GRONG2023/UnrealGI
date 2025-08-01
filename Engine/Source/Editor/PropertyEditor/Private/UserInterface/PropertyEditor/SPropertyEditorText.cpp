@@ -1,9 +1,30 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "UserInterface/PropertyEditor/SPropertyEditorText.h"
+
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "GenericPlatform/GenericApplication.h"
+#include "Input/Events.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Layout/Children.h"
+#include "Misc/CString.h"
+#include "Presentation/PropertyEditor/PropertyEditor.h"
+#include "PropertyEditorModule.h"
+#include "PropertyHandle.h"
+#include "PropertyNode.h"
+#include "SlotBase.h"
+#include "UObject/NameTypes.h"
 #include "UObject/TextProperty.h"
-#include "Widgets/Input/SMultiLineEditableTextBox.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
 #include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Input/SMultiLineEditableTextBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SWidget.h"
+
+struct FGeometry;
 
 #define LOCTEXT_NAMESPACE "PropertyEditor"
 
@@ -11,11 +32,22 @@ void SPropertyEditorText::Construct( const FArguments& InArgs, const TSharedRef<
 {
 	PropertyEditor = InPropertyEditor;
 
-	bIsFNameProperty = InPropertyEditor->PropertyIsA(FNameProperty::StaticClass());
-	bIsMultiLine = InPropertyEditor->GetPropertyHandle()->GetMetaDataProperty()->GetBoolMetaData("MultiLine");
+	static const FName NAME_MaxLength = "MaxLength";
+	static const FName NAME_MultiLine = "MultiLine";
+	static const FName NAME_PasswordField = "PasswordField";
+	static const FName NAME_AllowedCharacters = "AllowedCharacters";
 
-	const bool bIsPassword = InPropertyEditor->GetPropertyHandle()->GetMetaDataProperty()->GetBoolMetaData("PasswordField");
-	
+	bIsMultiLine = InPropertyEditor->GetPropertyHandle()->GetBoolMetaData(NAME_MultiLine);
+
+	MaxLength = InPropertyEditor->GetPropertyHandle()->GetIntMetaData(NAME_MaxLength);
+	if (InPropertyEditor->PropertyIsA(FNameProperty::StaticClass()))
+	{
+		MaxLength = MaxLength <= 0 ? NAME_SIZE - 1 : FMath::Min(MaxLength, NAME_SIZE - 1);
+	}
+
+	const bool bIsPassword = InPropertyEditor->GetPropertyHandle()->GetBoolMetaData(NAME_PasswordField);
+	AllowedCharacters.InitializeFromString(InPropertyEditor->GetPropertyHandle()->GetMetaData(NAME_AllowedCharacters));
+
 	TSharedPtr<SHorizontalBox> HorizontalBox;
 	if(bIsMultiLine)
 	{
@@ -31,7 +63,7 @@ void SPropertyEditorText::Construct( const FArguments& InArgs, const TSharedRef<
 				.SelectAllTextWhenFocused(false)
 				.ClearKeyboardFocusOnCommit(false)
 				.OnTextCommitted(this, &SPropertyEditorText::OnTextCommitted)
-				.OnTextChanged(this, &SPropertyEditorText::OnMultiLineTextChanged)
+				.OnVerifyTextChanged(this, &SPropertyEditorText::OnVerifyTextChanged)
 				.SelectAllTextOnCommit(false)
 				.IsReadOnly(this, &SPropertyEditorText::IsReadOnly)
 				.AutoWrapText(true)
@@ -56,7 +88,7 @@ void SPropertyEditorText::Construct( const FArguments& InArgs, const TSharedRef<
 				.SelectAllTextWhenFocused( true )
 				.ClearKeyboardFocusOnCommit(false)
 				.OnTextCommitted( this, &SPropertyEditorText::OnTextCommitted )
-				.OnTextChanged( this, &SPropertyEditorText::OnSingleLineTextChanged )
+				.OnVerifyTextChanged( this, &SPropertyEditorText::OnVerifyTextChanged )
 				.SelectAllTextOnCommit( true )
 				.IsReadOnly(this, &SPropertyEditorText::IsReadOnly)
 				.IsPassword( bIsPassword )
@@ -123,33 +155,36 @@ void SPropertyEditorText::OnTextCommitted( const FText& NewText, ETextCommit::Ty
 	}
 }
 
-static FText ValidateNameLength( const FText& Text )
+bool SPropertyEditorText::OnVerifyTextChanged(const FText& Text, FText& OutError)
 {
-	if( Text.ToString().Len() >= NAME_SIZE )
+	const FString& TextString = Text.ToString();
+
+	if (MaxLength > 0 && TextString.Len() > MaxLength)
 	{
-		static FText ErrorString = FText::Format( LOCTEXT("NamePropertySizeTooLongError", "Name properties may only be a maximum of {0} characters"), FText::AsNumber( NAME_SIZE ) );
-		return ErrorString;
+		OutError = FText::Format(LOCTEXT("PropertyTextTooLongError", "This value is too long ({0}/{1} characters)"), TextString.Len(), MaxLength);
+		return false;
 	}
 
-	return FText::GetEmpty();
-}
-
-void SPropertyEditorText::OnMultiLineTextChanged( const FText& NewText )
-{
-	if( bIsFNameProperty )
+	if (!AllowedCharacters.IsEmpty())
 	{
-		FText ErrorMessage = ValidateNameLength( NewText );
-		MultiLineWidget->SetError( ErrorMessage );
+		if (!TextString.IsEmpty() && !AllowedCharacters.AreAllCharsIncluded(TextString))
+		{
+			TSet<TCHAR> InvalidCharacters = AllowedCharacters.FindCharsNotIncluded(TextString);
+			FString InvalidCharactersString;
+			for (TCHAR Char : InvalidCharacters)
+			{
+				if (!InvalidCharactersString.IsEmpty())
+				{
+					InvalidCharactersString.AppendChar(TEXT(' '));
+				}
+				InvalidCharactersString.AppendChar(Char);
+			}
+			OutError = FText::Format(LOCTEXT("PropertyTextCharactersNotAllowedError", "The value may not contain the following characters: {0}"), FText::FromString(InvalidCharactersString));
+			return false;
+		}
 	}
-}
 
-void SPropertyEditorText::OnSingleLineTextChanged( const FText& NewText )
-{
-	if( bIsFNameProperty )
-	{
-		FText ErrorMessage = ValidateNameLength( NewText );
-		SingleLineWidget->SetError( ErrorMessage );
-	}
+	return true;
 }
 
 bool SPropertyEditorText::SupportsKeyboardFocus() const

@@ -6,14 +6,14 @@
 #include "Misc/MessageDialog.h"
 #include "Misc/App.h"
 #include "Modules/ModuleManager.h"
+#include "Null/NullPlatformApplicationMisc.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Framework/MultiBox/MultiBoxExtender.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Widgets/Input/SSpinBox.h"
 #include "Framework/Docking/TabManager.h"
-#include "EditorStyleSet.h"
-#include "Classes/EditorStyleSettings.h"
+#include "Styling/AppStyle.h"
 #include "GameFramework/Actor.h"
 #include "Settings/LevelEditorPlaySettings.h"
 #include "Editor/UnrealEdEngine.h"
@@ -39,10 +39,13 @@
 #include "Interfaces/IAnalyticsProvider.h"
 
 #include "GameProjectGenerationModule.h"
+#if WITH_UNREAL_TARGET_DEVELOPER_TOOLS
 #include "Interfaces/IProjectTargetPlatformEditorModule.h"
+#endif
 #include "PlatformInfo.h"
 
 #include "IHeadMountedDisplay.h"
+#include "IVREditorModule.h"
 #include "IXRTrackingSystem.h"
 #include "Editor.h"
 
@@ -60,10 +63,8 @@
 #include "PIEPreviewDeviceProfileSelectorModule.h"
 #include "IDesktopPlatform.h"
 #include "DesktopPlatformModule.h"
-#include "IAndroidDeviceDetectionModule.h"
-#include "IAndroidDeviceDetection.h"
 #include "CookerSettings.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "SourceControlHelpers.h"
 #include "ISourceControlModule.h"
 #include "Framework/Notifications/NotificationManager.h"
@@ -71,9 +72,38 @@
 
 #include "ToolMenus.h"
 #include "SBlueprintEditorToolbar.h"
-#include "SEnumCombobox.h"
+#include "SEnumCombo.h"
+#include "Dialogs/Dialogs.h"
+
+#include "Misc/DataDrivenPlatformInfoRegistry.h"
+#include "IUATHelperModule.h"
+#include "ISettingsEditorModule.h"
+#include "Async/Async.h"
+#include "Misc/FileHelper.h"
+#include "Interfaces/ITurnkeySupportModule.h"
+#include "Settings/ProjectPackagingSettings.h"
+
 
 #define LOCTEXT_NAMESPACE "DebuggerCommands"
+
+DEFINE_LOG_CATEGORY_STATIC(LogDebuggerCommands, Log, All);
+
+namespace DebuggerCommands
+{
+	static bool bAllowPlayWorldFeature = true;
+	static FAutoConsoleVariableRef AllowPlayWorldFeatureCVar(TEXT("Editor.AllowPlayWorldFeature"), bAllowPlayWorldFeature, TEXT("When true play world is allowed."));
+	static bool AllowPlayWorldFeature();
+
+	static bool IsVREditorActive()
+	{
+		if (IVREditorModule::IsAvailable() && IVREditorModule::Get().GetVRModeBase() != nullptr)
+		{
+			return true;
+		}
+
+		return false;
+	}
+}
 
 void SGlobalPlayWorldActions::Construct(const FArguments& InArgs)
 {
@@ -142,23 +172,7 @@ public:
 
 	static void PlayInSettings_Clicked();
 
-	// Launch On
-	static void HandleLaunchOnDeviceActionExecute(FString DevicedId, FString DeviceName);
-	static bool HandleLaunchOnDeviceActionCanExecute(FString DeviceName);
-	static bool HandleLaunchOnDeviceActionIsChecked(FString DeviceName);
-
-	// No Device
-	static void HandleNoDeviceFoundActionExecute() {}
-	static bool HandleNoDeviceFoundActionCanExecute() { return false; }
-
 	static void HandleShowSDKTutorial(FString PlatformName, FString NotInstalledDocLink);
-
-	static void RepeatLastLaunch_Clicked();
-	static bool RepeatLastLaunch_CanExecute();
-	static FText GetRepeatLastLaunchToolTip();
-	static FSlateIcon GetRepeatLastLaunchIcon();
-	static void OpenProjectLauncher_Clicked();
-	static void OpenDeviceManager_Clicked();
 
 	static FSlateIcon GetResumePlaySessionImage();
 	static FText GetResumePlaySessionToolTip();
@@ -167,6 +181,8 @@ public:
 	static void SingleFrameAdvance_Clicked();
 
 	static void ShowCurrentStatement_Clicked();
+	static void AbortExecution_Clicked();
+	static void ContinueExecution_Clicked();
 	static void StepInto_Clicked();
 	static void StepOver_Clicked();
 	static void StepOut_Clicked();
@@ -186,6 +202,7 @@ public:
 	static bool CanShowLateJoinButton();
 
 	static bool IsStoppedAtBreakpoint();
+	static bool IsStoppedAtBreakpoint_InEngineMode();
 
 	static bool CanShowNonPlayWorldOnlyActions();
 	static bool CanShowVulkanNonPlayWorldOnlyActions();
@@ -195,7 +212,7 @@ public:
 	static void SetNumberOfClients(int32 NumClients, ETextCommit::Type CommitInfo = ETextCommit::Default);
 
 	static int32 GetNetPlayMode();
-	static void SetNetPlayMode(int32 Value, ESelectInfo::Type CommitInfo);
+	static void SetNetPlayMode(int32 Value);
 
 protected:
 
@@ -225,7 +242,7 @@ protected:
 	 *
 	 * @param PlatformName - The name of the platform to play the game on.
 	 */
-	static void LaunchOnDevice(const FString& DeviceId, const FString& DeviceName);
+	static void LaunchOnDevice(const FString& DeviceId, const FString& DeviceName, bool bUseTurnkey);
 
 	/** Get the player start location to use when starting PIE */
 	static EPlayModeLocations GetPlayModeLocation();
@@ -234,16 +251,20 @@ protected:
 	static bool IsReadyToLaunchOnDevice(FString DeviceId);
 };
 
+namespace DebuggerCommands
+{
+	bool AllowPlayWorldFeature()
+	{
+		return bAllowPlayWorldFeature && !FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint_InEngineMode();
+	}
+}
 
 /**
  * Called to leave K2 debugging mode
  */
 static void LeaveDebuggingMode()
 {
-	if (GUnrealEd->PlayWorld != NULL)
-	{
-		GUnrealEd->PlayWorld->bDebugPauseExecution = false;
-	}
+	GUnrealEd->SetPIEWorldsPaused(false);
 
 	// Determine whether or not we are resuming play.
 	const bool bIsResumingPlay = !FKismetDebugUtilities::IsSingleStepping() && !GEditor->ShouldEndPlayMap();
@@ -262,7 +283,7 @@ static void LeaveDebuggingMode()
 //////////////////////////////////////////////////////////////////////////
 // FPlayWorldCommands
 
-TSharedPtr<FUICommandList> FPlayWorldCommands::GlobalPlayWorldActions;
+TSharedPtr<FUICommandList> FPlayWorldCommands::GlobalPlayWorldActions(new FUICommandList());
 
 TWeakPtr<SGlobalPlayWorldActions> FPlayWorldCommands::ActiveGlobalPlayWorldActionsWidget;
 
@@ -277,7 +298,7 @@ void FPlayWorldCommands::SetActiveGlobalPlayWorldActionsWidget(TWeakPtr<SGlobalP
 }
 
 FPlayWorldCommands::FPlayWorldCommands()
-	: TCommands<FPlayWorldCommands>("PlayWorld", LOCTEXT("PlayWorld", "Play World (PIE/SIE)"), "MainFrame", FEditorStyle::GetStyleSetName())
+	: TCommands<FPlayWorldCommands>("PlayWorld", LOCTEXT("PlayWorld", "Play World (PIE/SIE)"), "MainFrame", FAppStyle::GetAppStyleSetName())
 {
 	ULevelEditorPlaySettings* PlaySettings = GetMutableDefault<ULevelEditorPlaySettings>();
 
@@ -287,21 +308,17 @@ FPlayWorldCommands::FPlayWorldCommands()
 		FString RunningPlatformName = GetTargetPlatformManagerRef().GetRunningTargetPlatform()->PlatformName();
 		FString PlayPlatformName;
 
-		if (RunningPlatformName == TEXT("Windows"))
+		if (RunningPlatformName == TEXT("WindowsEditor"))
 		{
-			PlayPlatformName = TEXT("WindowsNoEditor");
+			PlayPlatformName = TEXT("Windows");
 		}
-		else if (RunningPlatformName == TEXT("Mac"))
+		else if (RunningPlatformName == TEXT("MacEditor"))
 		{
-			PlayPlatformName = TEXT("MacNoEditor");
+			PlayPlatformName = TEXT("Mac");
 		}
-		else if (RunningPlatformName == TEXT("Linux"))
+		else if (RunningPlatformName == TEXT("LinuxEditor"))
 		{
-			PlayPlatformName = TEXT("LinuxNoEditor");
-		}
-		else if (RunningPlatformName == TEXT("LinuxAArch64"))
-		{
-			PlayPlatformName = TEXT("LinuxAArch64NoEditor");
+			PlayPlatformName = TEXT("Linux");
 		}
 
 		if (!PlayPlatformName.IsEmpty())
@@ -334,8 +351,8 @@ void FPlayWorldCommands::RegisterCommands()
 	UI_COMMAND(PlayInViewport, "Selected Viewport", "Play this level in the active level editor viewport", EUserInterfaceActionType::Check, FInputChord());
 	UI_COMMAND(PlayInEditorFloating, "New Editor Window (PIE)", "Play this level in a new window", EUserInterfaceActionType::Check, FInputChord());
 	UI_COMMAND(PlayInVR, "VR Preview", "Play this level in VR", EUserInterfaceActionType::Check, FInputChord());
-	UI_COMMAND(PlayInMobilePreview, "Mobile Preview ES3.1 (PIE)", "Play this level as a mobile device preview in ES3.1 mode (runs in its own process)", EUserInterfaceActionType::Check, FInputChord());
-	UI_COMMAND(PlayInVulkanPreview, "Vulkan Mobile Preview (PIE)", "Play this level using mobile Vulkan rendering (runs in its own process)", EUserInterfaceActionType::Check, FInputChord());
+	UI_COMMAND(PlayInMobilePreview, "Standalone Game Mobile", "Play this level as a mobile device preview in Mobile mode (runs in its own process)", EUserInterfaceActionType::Check, FInputChord());
+	UI_COMMAND(PlayInVulkanPreview, "Standalone Game Vulkan Mobile", "Play this level using mobile Vulkan rendering (runs in its own process)", EUserInterfaceActionType::Check, FInputChord());
 	UI_COMMAND(PlayInNewProcess, "Standalone Game", "Play this level in a new window that runs in its own process", EUserInterfaceActionType::Check, FInputChord());
 	UI_COMMAND(PlayInCameraLocation, "Current Camera Location", "Spawn the player at the current camera location", EUserInterfaceActionType::RadioButton, FInputChord());
 	UI_COMMAND(PlayInDefaultPlayerStart, "Default Player Start", "Spawn the player at the map's default player start", EUserInterfaceActionType::RadioButton, FInputChord());
@@ -352,14 +369,11 @@ void FPlayWorldCommands::RegisterCommands()
 	UI_COMMAND(TogglePlayPauseOfPlaySession, "Toggle Play/Pause", "Resume playing if paused, or pause if playing", EUserInterfaceActionType::Button, FInputChord(EKeys::Pause));
 	UI_COMMAND(PossessEjectPlayer, "Possess or Eject Player", "Possesses or ejects the player from the camera", EUserInterfaceActionType::Button, FInputChord(EKeys::F8));
 	UI_COMMAND(ShowCurrentStatement, "Locate", "Locate the currently active node", EUserInterfaceActionType::Button, FInputChord());
+	UI_COMMAND(AbortExecution, "Abort", "Abort the execution", EUserInterfaceActionType::Button, FInputChord());
+	UI_COMMAND(ContinueExecution, "Continue", "Continue the execution", EUserInterfaceActionType::Button, FInputChord(EModifierKey::Alt | EModifierKey::Shift, EKeys::F10));
 	UI_COMMAND(StepInto, "Step Into", "Step Into the next node to be executed", EUserInterfaceActionType::Button, PLATFORM_MAC ? FInputChord(EModifierKey::Control, EKeys::F11) : FInputChord(EKeys::F11));
 	UI_COMMAND(StepOver, "Step Over", "Step to the next node to be executed in the current graph", EUserInterfaceActionType::Button, FInputChord(EKeys::F10));
 	UI_COMMAND(StepOut, "Step Out", "Step Out to the next node to be executed in the parent graph", EUserInterfaceActionType::Button, FInputChord(EModifierKey::Alt | EModifierKey::Shift, EKeys::F11));
-
-	// Launch
-	UI_COMMAND(RepeatLastLaunch, "Launch", "Launches the game on the device as the last session launched from the dropdown next to the Play on Device button on the level editor toolbar", EUserInterfaceActionType::Button, FInputChord(EKeys::P, EModifierKey::Alt | EModifierKey::Shift))
-		UI_COMMAND(OpenProjectLauncher, "Project Launcher...", "Open the Project Launcher for advanced packaging, deploying and launching of your projects", EUserInterfaceActionType::Button, FInputChord());
-	UI_COMMAND(OpenDeviceManager, "Device Manager...", "View and manage connected devices.", EUserInterfaceActionType::Button, FInputChord());
 
 	// PIE mobile preview devices.
 	AddPIEPreviewDeviceCommands();
@@ -386,7 +400,7 @@ void FPlayWorldCommands::AddPIEPreviewDeviceCommands()
 				FName(*CommandLabel.ToString()),
 				CommandLabel,
 				CommandDesc,
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "PlayWorld.PlayInMobilePreview"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "PlayWorld.PlayInMobilePreview"),
 				EUserInterfaceActionType::Check,
 				FInputChord());
 		}
@@ -395,9 +409,9 @@ void FPlayWorldCommands::AddPIEPreviewDeviceCommands()
 
 void FPlayWorldCommands::BindGlobalPlayWorldCommands()
 {
-	check(!GlobalPlayWorldActions.IsValid());
-
-	GlobalPlayWorldActions = MakeShareable(new FUICommandList);
+	static bool bInitializedGlobalPlayWorldCommands = false;
+	check(!bInitializedGlobalPlayWorldCommands);
+	bInitializedGlobalPlayWorldCommands = true;
 
 	const FPlayWorldCommands& Commands = FPlayWorldCommands::Get();
 	FUICommandList& ActionList = *GlobalPlayWorldActions;
@@ -478,29 +492,13 @@ void FPlayWorldCommands::BindGlobalPlayWorldCommands()
 		FExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::PlayInSettings_Clicked)
 	);
 
-	// Launch
-	ActionList.MapAction(Commands.OpenProjectLauncher,
-		FExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::OpenProjectLauncher_Clicked)
-	);
-
-	ActionList.MapAction(Commands.OpenDeviceManager,
-		FExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::OpenDeviceManager_Clicked)
-	);
-
-	ActionList.MapAction(Commands.RepeatLastLaunch,
-		FExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::RepeatLastLaunch_Clicked),
-		FCanExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::RepeatLastLaunch_CanExecute),
-		FIsActionChecked(),
-		FIsActionButtonVisible::CreateStatic(&FInternalPlayWorldCommandCallbacks::CanShowNonPlayWorldOnlyActions)
-	);
-
 
 	// Stop play session
 	ActionList.MapAction(Commands.StopPlaySession,
 		FExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::StopPlaySession_Clicked),
 		FCanExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::HasPlayWorld),
 		FIsActionChecked(),
-		FIsActionButtonVisible::CreateStatic(&FInternalPlayWorldCommandCallbacks::HasPlayWorld)
+		FIsActionButtonVisible::CreateStatic(&DebuggerCommands::AllowPlayWorldFeature)
 	);
 
 	// Late join session
@@ -530,7 +528,7 @@ void FPlayWorldCommands::BindGlobalPlayWorldCommands()
 		FExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::SingleFrameAdvance_Clicked),
 		FCanExecuteAction::CreateStatic(&FPlayWorldCommandCallbacks::HasPlayWorldAndPaused),
 		FIsActionChecked(),
-		FIsActionChecked::CreateStatic(&FPlayWorldCommandCallbacks::HasPlayWorldAndPaused)
+		FIsActionButtonVisible::CreateStatic(&DebuggerCommands::AllowPlayWorldFeature)
 	);
 
 	ActionList.MapAction(Commands.TogglePlayPauseOfPlaySession,
@@ -545,7 +543,7 @@ void FPlayWorldCommands::BindGlobalPlayWorldCommands()
 		FExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::GetMouseControlExecute),
 		FCanExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::HasPlayWorld),
 		FIsActionChecked(),
-		FIsActionChecked::CreateStatic(&FInternalPlayWorldCommandCallbacks::HasPlayWorld)
+		FIsActionButtonVisible::CreateStatic(&FInternalPlayWorldCommandCallbacks::HasPlayWorld)
 	);
 
 	// Toggle PIE/SIE, Eject (PIE->SIE), and Possess (SIE->PIE)
@@ -553,7 +551,7 @@ void FPlayWorldCommands::BindGlobalPlayWorldCommands()
 		FExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::PossessEjectPlayer_Clicked),
 		FCanExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::CanPossessEjectPlayer),
 		FIsActionChecked(),
-		FIsActionButtonVisible::CreateStatic(&FInternalPlayWorldCommandCallbacks::CanPossessEjectPlayer)
+		FIsActionButtonVisible::CreateStatic(&DebuggerCommands::AllowPlayWorldFeature)
 	);
 
 	// Breakpoint-only commands
@@ -561,28 +559,42 @@ void FPlayWorldCommands::BindGlobalPlayWorldCommands()
 		FExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::ShowCurrentStatement_Clicked),
 		FCanExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint),
 		FIsActionChecked(),
-		FIsActionChecked::CreateStatic(&FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint)
+		FIsActionButtonVisible::CreateStatic(&FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint)
 	);
 
+	ActionList.MapAction(Commands.AbortExecution,
+		FExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::AbortExecution_Clicked),
+		FCanExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint_InEngineMode),
+		FIsActionChecked(),
+		FIsActionButtonVisible::CreateStatic(&FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint_InEngineMode)
+	);
+
+	ActionList.MapAction(Commands.ContinueExecution,
+		FExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::ContinueExecution_Clicked),
+		FCanExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint),
+		FIsActionChecked(),
+		FIsActionButtonVisible::CreateStatic(&FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint)
+	);
+	
 	ActionList.MapAction(Commands.StepInto,
 		FExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::StepInto_Clicked),
 		FCanExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint),
 		FIsActionChecked(),
-		FIsActionChecked::CreateStatic(&FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint)
+		FIsActionButtonVisible::CreateStatic(&FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint)
 	);
 
 	ActionList.MapAction(Commands.StepOver,
 		FExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::StepOver_Clicked),
 		FCanExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint),
 		FIsActionChecked(),
-		FIsActionChecked::CreateStatic(&FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint)
+		FIsActionButtonVisible::CreateStatic(&FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint)
 	);
 
 	ActionList.MapAction(Commands.StepOut,
 		FExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::StepOut_Clicked),
 		FCanExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint),
 		FIsActionChecked(),
-		FIsActionChecked::CreateStatic(&FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint)
+		FIsActionButtonVisible::CreateStatic(&FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint)
 	);
 
 	AddPIEPreviewDeviceActions(Commands, ActionList);
@@ -610,155 +622,109 @@ void FPlayWorldCommands::AddPIEPreviewDeviceActions(const FPlayWorldCommands &Co
 
 void FPlayWorldCommands::BuildToolbar(FToolMenuSection& InSection, bool bIncludeLaunchButtonAndOptions)
 {
+	FToolMenuEntry PlayMenuEntry =
+		FToolMenuEntry::InitToolBarButton(
+			FPlayWorldCommands::Get().RepeatLastPlay,
+			TAttribute<FText>(),
+			TAttribute< FText >::Create(TAttribute< FText >::FGetter::CreateStatic(&FInternalPlayWorldCommandCallbacks::GetRepeatLastPlayToolTip)),
+			TAttribute< FSlateIcon >::Create(TAttribute< FSlateIcon >::FGetter::CreateStatic(&FInternalPlayWorldCommandCallbacks::GetRepeatLastPlayIcon)),
+			FName(TEXT("LevelToolbarPlay")));
+	PlayMenuEntry.StyleNameOverride = FName("Toolbar.BackplateLeftPlay");
+
 	// Play
-	InSection.AddEntry(FToolMenuEntry::InitToolBarButton(
-		FPlayWorldCommands::Get().RepeatLastPlay,
-		LOCTEXT("RepeatLastPlay", "Play"),
-		TAttribute< FText >::Create( TAttribute< FText >::FGetter::CreateStatic( &FInternalPlayWorldCommandCallbacks::GetRepeatLastPlayToolTip ) ),
-		TAttribute< FSlateIcon >::Create(TAttribute< FSlateIcon >::FGetter::CreateStatic(&FInternalPlayWorldCommandCallbacks::GetRepeatLastPlayIcon)),
-		FName(TEXT("LevelToolbarPlay"))
-	));
-
-	// Play combo box
-	FUIAction SpecialPIEOptionsMenuAction;
-	SpecialPIEOptionsMenuAction.IsActionVisibleDelegate = FIsActionButtonVisible::CreateStatic(&FInternalPlayWorldCommandCallbacks::CanShowNonPlayWorldOnlyActions);
-
-	InSection.AddEntry(FToolMenuEntry::InitComboButton(
-		"PlayCombo",
-		SpecialPIEOptionsMenuAction,
-		FOnGetContent::CreateStatic(&GeneratePlayMenuContent, GlobalPlayWorldActions.ToSharedRef()),
-		LOCTEXT("PlayCombo_Label", "Active Play Mode"),
-		LOCTEXT("PIEComboToolTip", "Change Play Mode and Play Settings"),
-		FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.RepeatLastPlay"),
-		true
-	));
-
-	if (bIncludeLaunchButtonAndOptions)
-	{
-		InSection.AddDynamicEntry("LaunchButtons", FNewToolMenuSectionDelegate::CreateLambda([](FToolMenuSection& InDynamicSection)
-		{
-			if (GetDefault<UEditorStyleSettings>()->bShowLaunchMenus)
-			{
-				// Launch
-				InDynamicSection.AddEntry(FToolMenuEntry::InitToolBarButton(
-					FPlayWorldCommands::Get().RepeatLastLaunch,
-					LOCTEXT("RepeatLastLaunch", "Launch"),
-					TAttribute< FText >::Create(TAttribute< FText >::FGetter::CreateStatic(&FInternalPlayWorldCommandCallbacks::GetRepeatLastLaunchToolTip)),
-					TAttribute< FSlateIcon >::Create(TAttribute< FSlateIcon >::FGetter::CreateStatic(&FInternalPlayWorldCommandCallbacks::GetRepeatLastLaunchIcon)),
-					FName(TEXT("RepeatLastLaunch"))
-				));
-
-				// Launch combo box
-				FUIAction LaunchMenuAction;
-				LaunchMenuAction.IsActionVisibleDelegate = FIsActionButtonVisible::CreateStatic(&FInternalPlayWorldCommandCallbacks::CanShowNonPlayWorldOnlyActions);
-
-				InDynamicSection.AddEntry(FToolMenuEntry::InitComboButton(
-					"LaunchCombo",
-					LaunchMenuAction,
-					FOnGetContent::CreateStatic(&GenerateLaunchMenuContent, GlobalPlayWorldActions.ToSharedRef()),
-					LOCTEXT("LaunchCombo_Label", "Launch Options"),
-					LOCTEXT("PODComboToolTip", "Options for launching on a device"),
-					FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.RepeatLastLaunch"),
-					true
-				));
-			}
-		}));
-	}
+	InSection.AddEntry(PlayMenuEntry);
 
 	// Resume/pause toggle (only one will be visible, and only in PIE/SIE)
-	InSection.AddEntry(FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().ResumePlaySession, TAttribute<FText>(),
+	FToolMenuEntry ResumeEntry = FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().ResumePlaySession, TAttribute<FText>(),
 		TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateStatic(&FInternalPlayWorldCommandCallbacks::GetResumePlaySessionToolTip)),
 		TAttribute<FSlateIcon>::Create(TAttribute<FSlateIcon>::FGetter::CreateStatic(&FInternalPlayWorldCommandCallbacks::GetResumePlaySessionImage)),
-		FName(TEXT("ResumePlaySession"))
-	));
+		FName(TEXT("ResumePlaySession")));
+	ResumeEntry.StyleNameOverride = FName("Toolbar.BackplateLeftPlay");
 
-	InSection.AddEntry(FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().PausePlaySession, TAttribute<FText>(), TAttribute<FText>(), TAttribute<FSlateIcon>(), FName(TEXT("PausePlaySession"))));
-	InSection.AddEntry(FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().SingleFrameAdvance, TAttribute<FText>(), TAttribute<FText>(), TAttribute<FSlateIcon>(), FName(TEXT("SingleFrameAdvance"))));
+	FToolMenuEntry PauseEntry = FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().PausePlaySession, TAttribute<FText>(), TAttribute<FText>(), TAttribute<FSlateIcon>(), FName(TEXT("PausePlaySession")));
+	PauseEntry.StyleNameOverride = FName("Toolbar.BackplateLeft");
+
+	InSection.AddEntry(ResumeEntry);
+	InSection.AddEntry(PauseEntry);
+	
+	FToolMenuEntry SingleFrameAdvanceEntry = FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().SingleFrameAdvance, TAttribute<FText>(), TAttribute<FText>(), TAttribute<FSlateIcon>(), FName(TEXT("SingleFrameAdvance")));
+	SingleFrameAdvanceEntry.StyleNameOverride = FName("Toolbar.BackplateCenter");
+	InSection.AddEntry(SingleFrameAdvanceEntry);
 
 	// Stop
-	InSection.AddEntry(FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().StopPlaySession, TAttribute<FText>(), TAttribute<FText>(), TAttribute<FSlateIcon>(), FName(TEXT("StopPlaySession"))));
+	FToolMenuEntry StopEntry = FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().StopPlaySession, TAttribute<FText>(), TAttribute<FText>(), TAttribute<FSlateIcon>(), FName(TEXT("StopPlaySession")));
+	StopEntry.StyleNameOverride = FName("Toolbar.BackplateCenterStop");
+
+	InSection.AddEntry(StopEntry);
 
 	// Late Join
-	InSection.AddEntry(FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().LateJoinSession, TAttribute<FText>(), TAttribute<FText>(), TAttribute<FSlateIcon>(), FName(TEXT("LateJoinSession"))));
+	FToolMenuEntry LateJoinEntry = FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().LateJoinSession, TAttribute<FText>(), TAttribute<FText>(), TAttribute<FSlateIcon>(), FName(TEXT("LateJoinSession")));
+	LateJoinEntry.StyleNameOverride = FName("Toolbar.BackplateCenter");
+	InSection.AddEntry(LateJoinEntry);
 
 	// Eject/possess toggle
-	InSection.AddEntry(FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().PossessEjectPlayer,
+
+	FToolMenuEntry EjectMenuEntry =
+	FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().PossessEjectPlayer,
 		TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateStatic(&FInternalPlayWorldCommandCallbacks::GetPossessEjectLabel)),
 		TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateStatic(&FInternalPlayWorldCommandCallbacks::GetPossessEjectTooltip)),
 		TAttribute<FSlateIcon>::Create(TAttribute<FSlateIcon>::FGetter::CreateStatic(&FInternalPlayWorldCommandCallbacks::GetPossessEjectImage)),
-		FName(TEXT("PossessEjectPlayer"))
-	));
+		FName(TEXT("PossessEjectPlayer")));
+	EjectMenuEntry.StyleNameOverride = FName("Toolbar.BackplateCenter");
+
+	// Play combo box
+	/*EjectMenuEntry.AddOptionsDropdown(
+		SpecialPIEOptionsMenuAction,
+		FOnGetContent::CreateStatic(&GeneratePlayMenuContent, GlobalPlayWorldActions.ToSharedRef()),
+		LOCTEXT("PIEComboToolTip", "Change Play Mode and Play Settings")
+	);*/
+
+	InSection.AddEntry(EjectMenuEntry);
+
+	FUIAction SpecialPIEOptionsMenuAction;
+	SpecialPIEOptionsMenuAction.CanExecuteAction = FCanExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::CanShowNonPlayWorldOnlyActions);
+	SpecialPIEOptionsMenuAction.IsActionVisibleDelegate = FIsActionButtonVisible::CreateStatic(&DebuggerCommands::AllowPlayWorldFeature);
+
+	FToolMenuEntry PIEComboEntry = FToolMenuEntry::InitComboButton("PIECombo", SpecialPIEOptionsMenuAction, FOnGetContent::CreateStatic(&GeneratePlayMenuContent, GlobalPlayWorldActions.ToSharedRef()), LOCTEXT("PIEComboLabel","Play Options"), LOCTEXT("PIEComboToolTip", "Change Play Mode and Play Settings"));
+	PIEComboEntry.StyleNameOverride = FName("Toolbar.BackplateRightCombo");
+
+	InSection.AddEntry(PIEComboEntry);
 
 	// Single-stepping only buttons
-	InSection.AddEntry(FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().ShowCurrentStatement, TAttribute<FText>(), TAttribute<FText>(), TAttribute<FSlateIcon>(), FName(TEXT("ShowCurrentStatement"))));
-	InSection.AddEntry(FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().StepInto, TAttribute<FText>(), TAttribute<FText>(), TAttribute<FSlateIcon>(), FName(TEXT("StepInto"))));
-	InSection.AddEntry(FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().StepOver, TAttribute<FText>(), TAttribute<FText>(), TAttribute<FSlateIcon>(), FName(TEXT("StepOver"))));
-	InSection.AddEntry(FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().StepOut, TAttribute<FText>(), TAttribute<FText>(), TAttribute<FSlateIcon>(), FName(TEXT("StepOut"))));
-}
 
-// function will enumerate available Android devices that can export their profile to a json file
-// called (below) from AddAndroidConfigExportMenu()
-static void AddAndroidConfigExportSubMenus(FMenuBuilder& InMenuBuilder)
-{
-	IAndroidDeviceDetection* DeviceDetection = FModuleManager::LoadModuleChecked<IAndroidDeviceDetectionModule>("AndroidDeviceDetection").GetAndroidDeviceDetection();
+	InSection.AddSeparator(NAME_None).StyleNameOverride = FName("Toolbar.BackplateRight");
+	
+	FToolMenuEntry ShowCurrentStatementEntry = FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().ShowCurrentStatement, TAttribute<FText>(), TAttribute<FText>(), TAttribute<FSlateIcon>(), FName(TEXT("ShowCurrentStatement")));
+	ShowCurrentStatementEntry.StyleNameOverride = FName("Toolbar.BackplateLeft");
 
-	TMap<FString, FAndroidDeviceInfo> AndroidDeviceMap;
+	FToolMenuEntry ContinueEntry = FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().ContinueExecution, TAttribute<FText>(), TAttribute<FText>(), TAttribute<FSlateIcon>(), FName(TEXT("ContinueExecution")));
+	ContinueEntry.StyleNameOverride = FName("Toolbar.BackplateCenter");
 
-	// lock device map and copy its contents
+	FToolMenuEntry AbortEntry = FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().AbortExecution, TAttribute<FText>(), TAttribute<FText>(), TAttribute<FSlateIcon>(), FName(TEXT("AbortExecution")));
+	AbortEntry.StyleNameOverride = FName("Toolbar.BackplateCenter");
+	
+	FToolMenuEntry StepIntoEntry = FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().StepInto, TAttribute<FText>(), TAttribute<FText>(), TAttribute<FSlateIcon>(), FName(TEXT("StepInto")));
+	StepIntoEntry.StyleNameOverride = FName("Toolbar.BackplateCenter");
+
+	FToolMenuEntry StepOverEntry = FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().StepOver, TAttribute<FText>(), TAttribute<FText>(), TAttribute<FSlateIcon>(), FName(TEXT("StepOver")));
+	StepOverEntry.StyleNameOverride = FName("Toolbar.BackplateCenter");
+
+	FToolMenuEntry StepOutEntry = FToolMenuEntry::InitToolBarButton(FPlayWorldCommands::Get().StepOut, TAttribute<FText>(), TAttribute<FText>(), TAttribute<FSlateIcon>(), FName(TEXT("StepOut")));
+	StepOutEntry.StyleNameOverride = FName("Toolbar.BackplateRight");
+
+	InSection.AddEntry(ShowCurrentStatementEntry);
+	InSection.AddEntry(ContinueEntry);
+	InSection.AddEntry(AbortEntry);
+	InSection.AddEntry(StepIntoEntry);	
+	InSection.AddEntry(StepOverEntry);	
+	InSection.AddEntry(StepOutEntry);
+
+#if UE_WITH_TURNKEY_SUPPORT
+	if (bIncludeLaunchButtonAndOptions)
 	{
-		FCriticalSection* DeviceLock = DeviceDetection->GetDeviceMapLock();
-		FScopeLock Lock(DeviceLock);
-		AndroidDeviceMap = DeviceDetection->GetDeviceMap();
+		ITurnkeySupportModule::Get().MakeTurnkeyMenu(InSection);
 	}
-
-	for (auto& Pair : AndroidDeviceMap)
-	{
-		FAndroidDeviceInfo& DeviceInfo = Pair.Value;
-
-		FString ModelName = DeviceInfo.Model + TEXT("[") + DeviceInfo.DeviceBrand + TEXT("]");
-
-		// lambda function called to open the save dialog and trigger device export
-		auto LambdaSaveConfigFile = [DeviceName = Pair.Key, DefaultFileName = ModelName, DeviceDetection]()
-		{
-			TArray<FString> OutputFileName;
-			FString DefaultFolder = FPaths::EngineContentDir() + TEXT("Editor/PIEPreviewDeviceSpecs/Android/");
-
-			bool bResult = FDesktopPlatformModule::Get()->SaveFileDialog(
-				FSlateApplication::Get().FindBestParentWindowHandleForDialogs(nullptr),
-				LOCTEXT("PackagePluginDialogTitle", "Save platform configuration...").ToString(),
-				DefaultFolder,
-				DefaultFileName,
-				TEXT("Json config file (*.json)|*.json"),
-				0,
-				OutputFileName);
-
-			if (bResult && OutputFileName.Num())
-			{
-				DeviceDetection->ExportDeviceProfile(OutputFileName[0], DeviceName);
-			}
-		};
-
-		InMenuBuilder.AddMenuEntry(
-			FText::FromString(ModelName),
-			FText(),
-			FSlateIcon(FEditorStyle::GetStyleSetName(), "AssetEditor.SaveAsset"),
-			FUIAction(FExecuteAction::CreateLambda(LambdaSaveConfigFile))
-		);
-	}
-}
-
-// function adds a sub-menu that will enumerate Android devices whose profiles can be exported json files
-static void AddAndroidConfigExportMenu(FMenuBuilder& InMenuBuilder)
-{
-	InMenuBuilder.AddMenuSeparator();
-
-	InMenuBuilder.AddSubMenu(
-		LOCTEXT("loc_AddAndroidConfigExportMenu", "Export device settings"),
-		LOCTEXT("loc_tip_AddAndroidConfigExportMenu", "Export device settings to a Json file."),
-		FNewMenuDelegate::CreateStatic(&AddAndroidConfigExportSubMenus),
-		false,
-		FSlateIcon(FEditorStyle::GetStyleSetName(), "MainFrame.SaveAll")
-	);
+#endif
 }
 
 static void MakePreviewDeviceMenu(FMenuBuilder& MenuBuilder)
@@ -775,29 +741,9 @@ static void MakePreviewDeviceMenu(FMenuBuilder& MenuBuilder)
 				MenuBuilderIn.AddMenuEntry(TargetedMobilePreviewDeviceCommands[Device]);
 			}
 
-			static FText AndroidCategory = FText::FromString(TEXT("Android"));
-			static FText IOSCategory = FText::FromString(TEXT("IOS"));
-
-			// Android devices can export their profile to a json file which then can be used for PIE device simulations
-			const FText& CategoryDisplayName = PreviewDeviceCategory->GetCategoryDisplayName();
-			if (CategoryDisplayName.CompareToCaseIgnored(AndroidCategory) == 0)
-			{
-				// check to see if we have any connected devices
-				bool bHasAndroidDevices = false;
-				{
-					IAndroidDeviceDetection* DeviceDetection = FModuleManager::LoadModuleChecked<IAndroidDeviceDetectionModule>("AndroidDeviceDetection").GetAndroidDeviceDetection();
-					FCriticalSection* DeviceLock = DeviceDetection->GetDeviceMapLock();
-
-					FScopeLock Lock(DeviceLock);
-					bHasAndroidDevices = DeviceDetection->GetDeviceMap().Num() > 0;
-				}
-
-				// add the config. export menu
-				if (bHasAndroidDevices)
-				{
-					AddAndroidConfigExportMenu(MenuBuilderIn);
-				}
-			}
+			// let other classes add to this menu
+			FPIEPreviewDeviceModule* PIEPreviewDeviceModule = FModuleManager::LoadModulePtr<FPIEPreviewDeviceModule>(TEXT("PIEPreviewDeviceProfileSelector"));
+			PIEPreviewDeviceModule->AddToDevicePreviewMenuDelegates.Broadcast(PreviewDeviceCategory->GetCategoryDisplayName(), MenuBuilderIn);
 
 			for (TSharedPtr<FPIEPreviewDeviceContainerCategory> SubCategory : PreviewDeviceCategory->GetSubCategories())
 			{
@@ -819,6 +765,33 @@ static void MakePreviewDeviceMenu(FMenuBuilder& MenuBuilder)
 		FLocal::AddDevicePreviewSubCategories(MenuBuilder, DeviceContainer.GetRootCategory());
 		MenuBuilder.EndSection();
 	}
+}
+
+void SetLastExecutedPlayMode(EPlayModeType PlayMode)
+{
+	ULevelEditorPlaySettings* PlaySettings = GetMutableDefault<ULevelEditorPlaySettings>();
+	PlaySettings->LastExecutedPlayModeType = PlayMode;
+
+	FPropertyChangedEvent PropChangeEvent(ULevelEditorPlaySettings::StaticClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(ULevelEditorPlaySettings, LastExecutedPlayModeType)));
+	PlaySettings->PostEditChangeProperty(PropChangeEvent);
+
+	PlaySettings->SaveConfig();
+}
+
+
+static void RememberQuickLaunch(FString DeviceId)
+{
+	// remember that clicking Play should launch
+	SetLastExecutedPlayMode(EPlayModeType::PlayMode_QuickLaunch);
+
+	// store the device name in the play settings for next click/run
+	ULevelEditorPlaySettings* PlaySettings = GetMutableDefault<ULevelEditorPlaySettings>();
+
+	PlaySettings->LastExecutedLaunchName = DeviceId;
+
+	FPropertyChangedEvent PropChangeEvent(ULevelEditorPlaySettings::StaticClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(ULevelEditorPlaySettings, LastExecutedLaunchName)));
+	PlaySettings->PostEditChangeProperty(PropChangeEvent);
+	PlaySettings->SaveConfig();
 }
 
 TSharedRef< SWidget > FPlayWorldCommands::GeneratePlayMenuContent(TSharedRef<FUICommandList> InCommandList)
@@ -877,35 +850,45 @@ TSharedRef< SWidget > FPlayWorldCommands::GeneratePlayMenuContent(TSharedRef<FUI
 		{
 			FToolMenuSection& Section = Menu->AddSection("LevelEditorPlayModes", LOCTEXT("PlayButtonModesSection", "Modes"));
 			FLocal::AddPlayModeMenuEntry(Section, PlayMode_InViewPort);
-			FLocal::AddPlayModeMenuEntry(Section, PlayMode_InMobilePreview);
+			FLocal::AddPlayModeMenuEntry(Section, PlayMode_InEditorFloating);
+			FLocal::AddPlayModeMenuEntry(Section, PlayMode_InVR);
 
 			if (GetDefault<UEditorExperimentalSettings>()->bMobilePIEPreviewDeviceLaunch)
 			{
 				Section.AddSubMenu(
 					"TargetedMobilePreview",
-					LOCTEXT("TargetedMobilePreviewSubMenu", "Mobile Preview (PIE)"),
+					LOCTEXT("TargetedMobilePreviewSubMenu", "Standalone Game Target Device Mobile"),
 					LOCTEXT("TargetedMobilePreviewSubMenu_ToolTip", "Play this level using a specified mobile device preview (runs in its own process)"),
 					FNewMenuDelegate::CreateStatic(&MakePreviewDeviceMenu), false,
-					FSlateIcon(FEditorStyle::GetStyleSetName(), "PlayWorld.PlayInMobilePreview")
+					FSlateIcon(FAppStyle::GetAppStyleSetName(), "PlayWorld.PlayInMobilePreview")
 				);
 			}
 
+			FLocal::AddPlayModeMenuEntry(Section, PlayMode_InMobilePreview);
 			FLocal::AddPlayModeMenuEntry(Section, PlayMode_InVulkanPreview);
-			FLocal::AddPlayModeMenuEntry(Section, PlayMode_InEditorFloating);
-			FLocal::AddPlayModeMenuEntry(Section, PlayMode_InVR);
 			FLocal::AddPlayModeMenuEntry(Section, PlayMode_InNewProcess);
 			FLocal::AddPlayModeMenuEntry(Section, PlayMode_Simulate);
 		}
 
+#if UE_WITH_TURNKEY_SUPPORT
+		// quick launch on devices
+		ITurnkeySupportModule::Get().MakeQuickLaunchItems(Menu, FOnQuickLaunchSelected::CreateStatic(&RememberQuickLaunch));
+#endif
+
 		// tip section
 		{
 			FToolMenuSection& Section = Menu->AddSection("LevelEditorPlayTip");
+			Section.AddSeparator(NAME_None);
 			Section.AddEntry(FToolMenuEntry::InitWidget(
 				"PlayIn",
-				SNew(STextBlock)
-				.ColorAndOpacity(FSlateColor::UseSubduedForeground())
-				.Text(LOCTEXT("PlayInTip", "Launching a game preview with a different mode will change your default 'Play' mode in the toolbar"))
-				.WrapTextAt(250),
+				SNew(SBox)
+				.Padding(FMargin(16.0f, 3.0f))
+				[
+					SNew(STextBlock)
+					.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+					.Text(LOCTEXT("PlayInTip", "Launching a game (preview or on device) with a different mode will change your default 'Play' mode in the toolbar"))
+					.WrapTextAt(250)
+				],
 				FText::GetEmpty()));
 		}
 
@@ -937,17 +920,24 @@ TSharedRef< SWidget > FPlayWorldCommands::GeneratePlayMenuContent(TSharedRef<FUI
 			}
 			// Net Mode
 			{
-				const UEnum* PlayNetModeEnum = FindObject<UEnum>(ANY_PACKAGE, TEXT("EPlayNetMode"));
-			
-				TSharedRef<SWidget> NetMode = SNew(SEnumComboBox, PlayNetModeEnum)
-					.CurrentValue(TAttribute<int32>::Create(TAttribute<int32>::FGetter::CreateStatic(&FInternalPlayWorldCommandCallbacks::GetNetPlayMode)))
-					.ButtonStyle(FEditorStyle::Get(), "FlatButton.Light")
-					.ContentPadding(FMargin(2, 0))
-					.Font(FEditorStyle::GetFontStyle("Sequencer.AnimationOutliner.RegularFont"))
-					.OnEnumSelectionChanged(SEnumComboBox::FOnEnumSelectionChanged::CreateStatic(&FInternalPlayWorldCommandCallbacks::SetNetPlayMode))
-					.ToolTipText(LOCTEXT("NetworkModeToolTip", "Which network mode should the clients launch in? A server will automatically be started if needed."));
+				Section.AddSubMenu(
+					"NetMode",
+					LOCTEXT("NetworkModeMenu", "Net Mode"),
+					LOCTEXT("NetworkModeToolTip", "Which network mode should the clients launch in? A server will automatically be started if needed."),
+					FNewMenuDelegate::CreateLambda([](FMenuBuilder& InMenuBuilder)
+						{
+							const UEnum* PlayNetModeEnum = FindObject<UEnum>(nullptr, TEXT("/Script/UnrealEd.EPlayNetMode"));
 
-				Section.AddEntry(FToolMenuEntry::InitWidget("NetMode", NetMode, LOCTEXT("NetworkModeMenuWidget", "Net Mode")));
+							for (int32 i = 0; i < PlayNetModeEnum->NumEnums() - 1; i++)
+							{
+								if (PlayNetModeEnum->HasMetaData(TEXT("Hidden"), i) == false)
+								{
+									FUIAction Action(FExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::SetNetPlayMode, i), FCanExecuteAction(), FIsActionChecked::CreateLambda([](int32 Index) {return FInternalPlayWorldCommandCallbacks::GetNetPlayMode() == Index; }, i));
+									InMenuBuilder.AddMenuEntry(PlayNetModeEnum->GetDisplayNameTextByIndex(i), PlayNetModeEnum->GetToolTipTextByIndex(i), FSlateIcon(), Action, NAME_None, EUserInterfaceActionType::RadioButton);
+								}
+							}
+						})
+						,false);
 			}
 		}
 
@@ -965,394 +955,37 @@ TSharedRef< SWidget > FPlayWorldCommands::GeneratePlayMenuContent(TSharedRef<FUI
 	return UToolMenus::Get()->GenerateWidget(MenuName, MenuContext);
 }
 
-/*
- * Create an All_<platform>_devices_on_<host> submenu
- * can be extended to any othe All <Platform> aggregate proxy
-*/
-static void MakeAllDevicesSubMenu(FMenuBuilder& InMenuBuilder, const PlatformInfo::FPlatformInfo* InPlatformInfo, const TSharedPtr<ITargetDeviceProxy> DeviceProxy)
-{
-	ITargetDeviceServicesModule* TargetDeviceServicesModule = static_cast<ITargetDeviceServicesModule*>(FModuleManager::Get().LoadModule(TEXT("TargetDeviceServices")));
-	IProjectTargetPlatformEditorModule& ProjectTargetPlatformEditorModule = FModuleManager::LoadModuleChecked<IProjectTargetPlatformEditorModule>("ProjectTargetPlatformEditor");
-
-	TArray<FName> PlatformVariants;
-	DeviceProxy->GetVariants(PlatformVariants);
-	for (auto It = PlatformVariants.CreateIterator(); It; ++It)
-	{
-		FName Variant = *It;
-
-		// for an aggregate (All_<platform>_devices_on_<host>) proxy, allow only the "Android_<texture_compression>" variants
-		const PlatformInfo::FPlatformInfo* platformInfo = PlatformInfo::FindPlatformInfo(Variant);
-		if (DeviceProxy->IsAggregated() && platformInfo != NULL &&
-			(Variant == platformInfo->VanillaPlatformName || platformInfo->PlatformType != EBuildTargetType::Game))
-		{
-			continue;
-		}
-
-		FString DeviceListStr;
-		bool bVariantHasDevices = false;
-
-		const TSet<FString>& TargetDeviceIds = DeviceProxy->GetTargetDeviceIds(Variant);
-		for (TSet<FString>::TConstIterator ItDeviceId(TargetDeviceIds); ItDeviceId; ++ItDeviceId)
-		{
-			TSharedPtr<ITargetDeviceProxy> PhysicalDeviceProxy = TargetDeviceServicesModule->GetDeviceProxyManager()->FindProxyDeviceForTargetDevice(*ItDeviceId);
-
-			if (PhysicalDeviceProxy.IsValid())
-			{
-				DeviceListStr.AppendChar('\n');
-				DeviceListStr.Append(*PhysicalDeviceProxy->GetName());
-				bVariantHasDevices = true;
-			}
-		}
-
-		if (!bVariantHasDevices)
-		{
-			continue;
-		}
-
-		FString PlatformVariantStr = Variant.ToString();
-		FString PlatformId = PlatformVariantStr + TEXT("@") + PlatformVariantStr;
-
-		// create an action
-		FUIAction LaunchDeviceAction(
-			FExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::HandleLaunchOnDeviceActionExecute, PlatformId, PlatformVariantStr),
-			FCanExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::HandleLaunchOnDeviceActionCanExecute, PlatformVariantStr),
-			FIsActionChecked::CreateStatic(&FInternalPlayWorldCommandCallbacks::HandleLaunchOnDeviceActionIsChecked, PlatformVariantStr)
-		);
-
-		// generate display label
-		FText Label = FText::FromString(PlatformVariantStr);
-
-		// generate tooltip text with the devices' list
-		FFormatNamedArguments TooltipArguments;
-		TooltipArguments.Add(TEXT("DeviceList"), FText::FromString(DeviceListStr));
-		FText Tooltip = FText::Format(LOCTEXT("LaunchDeviceToolTipText_LaunchOn", "Launch the game on:\n {DeviceList}"), TooltipArguments);
-
-		// add a submenu entry
-		InMenuBuilder.AddMenuEntry(
-			LaunchDeviceAction,
-			ProjectTargetPlatformEditorModule.MakePlatformMenuItemWidget(*InPlatformInfo, true, Label),
-			NAME_None,
-			Tooltip,
-			EUserInterfaceActionType::Check
-		);
-	}
-}
-
-void PopulateLaunchMenu(UToolMenu* Menu)
-{
-	TArray<PlatformInfo::FVanillaPlatformEntry> VanillaPlatforms = PlatformInfo::BuildPlatformHierarchy(PlatformInfo::EPlatformFilter::All);
-
-	VanillaPlatforms.Sort([](const PlatformInfo::FVanillaPlatformEntry& One, const PlatformInfo::FVanillaPlatformEntry& Two) -> bool
-	{
-		return One.PlatformInfo->DisplayName.CompareTo(Two.PlatformInfo->DisplayName) < 0;
-	});
-
-	// shared devices section
-	ITargetDeviceServicesModule* TargetDeviceServicesModule = static_cast<ITargetDeviceServicesModule*>(FModuleManager::Get().LoadModule(TEXT("TargetDeviceServices")));
-	IProjectTargetPlatformEditorModule& ProjectTargetPlatformEditorModule = FModuleManager::LoadModuleChecked<IProjectTargetPlatformEditorModule>("ProjectTargetPlatformEditor");
-
-	TArray<FString> PlatformsToMaybeInstallLinksFor;
-	PlatformsToMaybeInstallLinksFor.Add(TEXT("Android"));
-	PlatformsToMaybeInstallLinksFor.Add(TEXT("IOS"));
-	PlatformsToMaybeInstallLinksFor.Add(TEXT("Linux"));
-	PlatformsToMaybeInstallLinksFor.Add(TEXT("Lumin"));
-	TArray<FString> PlatformsToCheckFlavorsFor;
-	PlatformsToCheckFlavorsFor.Add(TEXT("Android"));
-	PlatformsToCheckFlavorsFor.Add(TEXT("IOS"));
-	TArray<FName> PlatformsWithNoDevices;
-	TArray<PlatformInfo::FPlatformInfo> PlatformsToAddInstallLinksFor;
-	EProjectType ProjectType = FGameProjectGenerationModule::Get().ProjectHasCodeFiles() ? EProjectType::Code : EProjectType::Content;
-
-	{
-		FToolMenuSection& Section = Menu->AddSection("LevelEditorLaunchDevices", LOCTEXT("LaunchButtonDevicesSection", "Devices"));
-		for (const PlatformInfo::FVanillaPlatformEntry& VanillaPlatform : VanillaPlatforms)
-		{
-			// for the Editor we are only interested in launching standalone games
-			if (VanillaPlatform.PlatformInfo->PlatformType != EBuildTargetType::Game || !VanillaPlatform.PlatformInfo->bEnabledForUse || !FInstalledPlatformInfo::Get().CanDisplayPlatform(VanillaPlatform.PlatformInfo->BinaryFolderName, ProjectType))
-			{
-				continue;
-			}
-
-			if (VanillaPlatform.PlatformInfo->SDKStatus == PlatformInfo::EPlatformSDKStatus::Installed)
-			{
-				// for each platform...
-				TArray<TSharedPtr<ITargetDeviceProxy>> DeviceProxies;
-				// the list of proxies include the "Al_Android" entry
-				TargetDeviceServicesModule->GetDeviceProxyManager()->GetAllProxies(VanillaPlatform.PlatformInfo->VanillaPlatformName, DeviceProxies);
-
-				// if this platform had no devices, but we want to show an extra option if not installed right
-				if (DeviceProxies.Num() == 0)
-				{
-					if (PlatformsWithNoDevices.Find(VanillaPlatform.PlatformInfo->VanillaPlatformName) == INDEX_NONE)
-					{
-						// add an entry with a no devices found
-						PlatformsWithNoDevices.Add(VanillaPlatform.PlatformInfo->VanillaPlatformName);
-					}
-				}
-				else
-				{
-					// for each proxy...
-					for (auto DeviceProxyIt = DeviceProxies.CreateIterator(); DeviceProxyIt; ++DeviceProxyIt)
-					{
-						TSharedPtr<ITargetDeviceProxy> DeviceProxy = *DeviceProxyIt;
-
-						// create an All_<platform>_devices_on_<host> submenu
-						if (DeviceProxy->IsAggregated())
-						{
-							FString AggregateDevicedName(FString::Printf(TEXT("  %s"), *DeviceProxy->GetName())); //align with the other menu entries
-							FSlateIcon AggregateDeviceIcon(FEditorStyle::GetStyleSetName(), VanillaPlatform.PlatformInfo->GetIconStyleName(PlatformInfo::EPlatformIconSize::Normal));
-
-							Section.AddSubMenu(
-								NAME_None,
-								FText::FromString(AggregateDevicedName),
-								FText::FromString(AggregateDevicedName),
-								FNewMenuDelegate::CreateStatic(&MakeAllDevicesSubMenu, VanillaPlatform.PlatformInfo, DeviceProxy),
-								false, AggregateDeviceIcon, true
-							);
-							continue;
-						}
-
-						// ... create an action...
-						FUIAction LaunchDeviceAction(
-							FExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::HandleLaunchOnDeviceActionExecute, DeviceProxy->GetTargetDeviceId(NAME_None), DeviceProxy->GetName()),
-							FCanExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::HandleLaunchOnDeviceActionCanExecute, DeviceProxy->GetName()),
-							FIsActionChecked::CreateStatic(&FInternalPlayWorldCommandCallbacks::HandleLaunchOnDeviceActionIsChecked, DeviceProxy->GetName())
-						);
-
-						// ... generate display label...
-						FFormatNamedArguments LabelArguments;
-						LabelArguments.Add(TEXT("DeviceName"), FText::FromString(DeviceProxy->GetName()));
-
-						if (!DeviceProxy->IsConnected())
-						{
-							LabelArguments.Add(TEXT("HostUser"), LOCTEXT("DisconnectedHint", " [Disconnected]"));
-						}
-						else if (DeviceProxy->GetHostUser() != FPlatformProcess::UserName(false))
-						{
-							LabelArguments.Add(TEXT("HostUser"), FText::FromString(DeviceProxy->GetHostUser()));
-						}
-						else
-						{
-							LabelArguments.Add(TEXT("HostUser"), FText::GetEmpty());
-						}
-
-						FText Label = FText::Format(LOCTEXT("LaunchDeviceLabel", "{DeviceName}{HostUser}"), LabelArguments);
-
-						// ... generate tooltip text
-						FFormatNamedArguments TooltipArguments;
-						TooltipArguments.Add(TEXT("DeviceID"), FText::FromString(DeviceProxy->GetName()));
-						TooltipArguments.Add(TEXT("DisplayName"), VanillaPlatform.PlatformInfo->DisplayName);
-						FText Tooltip = FText::Format(LOCTEXT("LaunchDeviceToolTipText_ThisDevice", "Launch the game on this {DisplayName} device ({DeviceID})"), TooltipArguments);
-						if (!DeviceProxy->IsAuthorized())
-						{
-							Tooltip = FText::Format(LOCTEXT("LaunchDeviceToolTipText_UnauthorizedOrLocked", "{DisplayName} device ({DeviceID}) is unauthorized or locked"), TooltipArguments);
-						}
-
-						FProjectStatus ProjectStatus;
-						if (IProjectManager::Get().QueryStatusForCurrentProject(ProjectStatus) && !ProjectStatus.IsTargetPlatformSupported(VanillaPlatform.PlatformInfo->VanillaPlatformName))
-						{
-							FText TooltipLine2 = FText::Format(LOCTEXT("LaunchDevicePlatformWarning", "{DisplayName} is not listed as a target platform for this project, so may not run as expected."), TooltipArguments);
-							Tooltip = FText::Format(FText::FromString(TEXT("{0}\n\n{1}")), Tooltip, TooltipLine2);
-						}
-
-						// ... and add a menu entry
-						FToolMenuEntry& Entry = Section.AddEntry(FToolMenuEntry::InitMenuEntry(
-							NAME_None,
-							LaunchDeviceAction,
-							ProjectTargetPlatformEditorModule.MakePlatformMenuItemWidget(*VanillaPlatform.PlatformInfo, true, Label)
-						));
-						Entry.ToolTip = Tooltip;
-						Entry.UserInterfaceActionType = EUserInterfaceActionType::Check;
-					}
-				}
-			}
-			else
-			{
-				// if the platform wasn't installed, we'll add a menu item later (we never care about code in this case, since we don't compile)
-				if (PlatformsToMaybeInstallLinksFor.Find(VanillaPlatform.PlatformInfo->VanillaPlatformName.ToString()) != INDEX_NONE)
-				{
-					PlatformsToAddInstallLinksFor.Add(*(VanillaPlatform.PlatformInfo));
-				}
-			}
-		}
-	}
-
-	TWeakObjectPtr<UCookerSettings> CookerSettings = GetMutableDefault<UCookerSettings>();
-
-	{
-		FToolMenuSection& Section = Menu->AddSection("CookerSettings");
-
-		FUIAction UIAction;
-		UIAction.ExecuteAction = FExecuteAction::CreateLambda([CookerSettings]
-		{
-			CookerSettings->bCookOnTheFlyForLaunchOn = !CookerSettings->bCookOnTheFlyForLaunchOn;
-			CookerSettings->Modify(true);
-
-			// Update source control
-
-			FString ConfigPath = FPaths::ConvertRelativePathToFull(CookerSettings->GetDefaultConfigFilename());
-
-			if (FPlatformFileManager::Get().GetPlatformFile().FileExists(*ConfigPath))
-			{
-				if (ISourceControlModule::Get().IsEnabled())
-				{
-					FText ErrorMessage;
-
-					if (!SourceControlHelpers::CheckoutOrMarkForAdd(ConfigPath, FText::FromString(ConfigPath), NULL, ErrorMessage))
-					{
-						FNotificationInfo Info(ErrorMessage);
-						Info.ExpireDuration = 3.0f;
-						FSlateNotificationManager::Get().AddNotification(Info);
-					}
-				}
-				else
-				{
-					if (!FPlatformFileManager::Get().GetPlatformFile().SetReadOnly(*ConfigPath, false))
-					{
-						FNotificationInfo Info(FText::Format(LOCTEXT("FailedToMakeWritable", "Could not make {0} writable."), FText::FromString(ConfigPath)));
-						Info.ExpireDuration = 3.0f;
-						FSlateNotificationManager::Get().AddNotification(Info);
-					}
-				}
-			}
-
-			// Save settings
-			CookerSettings->UpdateSinglePropertyInConfigFile(CookerSettings->GetClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(UCookerSettings, bCookOnTheFlyForLaunchOn)), CookerSettings->GetDefaultConfigFilename());
-		});
-
-		UIAction.GetActionCheckState = FGetActionCheckState::CreateLambda([CookerSettings]
-		{
-			return CookerSettings->bCookOnTheFlyForLaunchOn ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
-		});
-
-		Section.AddMenuEntry(
-			"CookOnTheFlyOnLaunch",
-			LOCTEXT("CookOnTheFlyOnLaunch", "Enable cooking on the fly"),
-			LOCTEXT("CookOnTheFlyOnLaunchDescription", "Cook on the fly instead of cooking upfront when launching"),
-			FSlateIcon(),
-			UIAction,
-			EUserInterfaceActionType::ToggleButton
-		);
-	}
-
-	if (PlatformsWithNoDevices.Num() > 0)
-	{
-		{
-			FToolMenuSection& Section = Menu->AddSection("NoDevices");
-			for (int32 PlatformIndex = 0; PlatformIndex < PlatformsWithNoDevices.Num(); PlatformIndex++)
-			{
-				const PlatformInfo::FPlatformInfo* PlatformInfo = PlatformInfo::FindVanillaPlatformInfo(PlatformsWithNoDevices[PlatformIndex]);
-
-				// ... generate display label...
-				FFormatNamedArguments LabelArguments;
-				LabelArguments.Add(TEXT("DisplayName"), PlatformInfo->DisplayName);
-
-				FText Label = FText::Format(LOCTEXT("NoDeviceLabel", "{DisplayName} - No Devices Found"), LabelArguments);
-
-				// ... create an action...
-				FUIAction NoDeviceAction(
-					FExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::HandleNoDeviceFoundActionExecute),
-					FCanExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::HandleNoDeviceFoundActionCanExecute)
-				);
-
-				// ... generate tooltip text
-				FFormatNamedArguments TooltipArguments;
-				TooltipArguments.Add(TEXT("DisplayName"), PlatformInfo->DisplayName);
-				FText Tooltip = FText::Format(LOCTEXT("LaunchNoDevicesToolTipText", "Found no connected devices for {DisplayName}"), TooltipArguments);
-
-				// ... and add a menu entry
-				FToolMenuEntry& Entry = Section.AddEntry(FToolMenuEntry::InitMenuEntry(
-					NAME_None,
-					NoDeviceAction,
-					ProjectTargetPlatformEditorModule.MakePlatformMenuItemWidget(*PlatformInfo, true, Label)
-				));
-				Entry.ToolTip = Tooltip;
-				Entry.UserInterfaceActionType = EUserInterfaceActionType::Check;
-			}
-		}
-	}
-
-	// tip section
-	{
-		FToolMenuSection& Section = Menu->AddSection("LevelEditorLaunchHint");
-		Section.AddEntry(FToolMenuEntry::InitWidget(
-			"LevelEditorLaunchHint",
-			SNew(STextBlock)
-			.ColorAndOpacity(FSlateColor::UseSubduedForeground())
-			.Text(LOCTEXT("ZoomToFitHorizontal", "Launching a game on a different device will change your default 'Launch' device in the toolbar"))
-			.WrapTextAt(250),
-			FText::GetEmpty()
-		));
-	}
-
-	if (PlatformsToAddInstallLinksFor.Num() > 0)
-	{
-		{
-			FToolMenuSection& Section = Menu->AddSection("SDKUninstalledTutorials");
-			for (int32 PlatformIndex = 0; PlatformIndex < PlatformsToAddInstallLinksFor.Num(); PlatformIndex++)
-			{
-				const PlatformInfo::FPlatformInfo& Platform = PlatformsToAddInstallLinksFor[PlatformIndex];
-
-				FUIAction Action(FExecuteAction::CreateStatic(&FInternalPlayWorldCommandCallbacks::HandleShowSDKTutorial, Platform.DisplayName.ToString(), Platform.SDKTutorial));
-
-				FFormatNamedArguments LabelArguments;
-				LabelArguments.Add(TEXT("PlatformName"), Platform.DisplayName);
-				FText Label = FText::Format(LOCTEXT("LaunchPlatformLabel", "{PlatformName} Support"), LabelArguments);
-
-
-				Section.AddMenuEntry(
-					NAME_None,
-					Label,
-					LOCTEXT("PlatformSDK", "Show information on setting up the platform tools"),
-					FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.BrowseDocumentation"),
-					Action,
-					EUserInterfaceActionType::Button);
-			}
-		}
-	}
-
-	// options section
-	{
-		FToolMenuSection& Section = Menu->AddSection("LevelEditorLaunchOptions");
-		Section.AddMenuEntry(FPlayWorldCommands::Get().OpenProjectLauncher,
-			TAttribute<FText>(),
-			TAttribute<FText>(),
-			FSlateIcon(FEditorStyle::GetStyleSetName(), "Launcher.TabIcon")
-		);
-
-		Section.AddMenuEntry(FPlayWorldCommands::Get().OpenDeviceManager,
-			TAttribute<FText>(),
-			TAttribute<FText>(),
-			FSlateIcon(FEditorStyle::GetStyleSetName(), "DeviceDetails.TabIcon")
-		);
-
-		Section.AddDynamicEntry("OpenProjectTargetPlatform", FNewToolMenuDelegateLegacy::CreateLambda([](FMenuBuilder& MenuBuilder, UToolMenu* ToolMenu)
-		{
-			FModuleManager::LoadModuleChecked<IProjectTargetPlatformEditorModule>("ProjectTargetPlatformEditor").AddOpenProjectTargetPlatformEditorMenuItem(MenuBuilder);
-		}));
-	}
-}
-
-TSharedRef< SWidget > FPlayWorldCommands::GenerateLaunchMenuContent(TSharedRef<FUICommandList> InCommandList)
-{
-	static const FName MenuName("UnrealEd.PlayWorldCommands.LaunchMenu");
-
-	if (!UToolMenus::Get()->IsMenuRegistered(MenuName))
-	{
-		UToolMenu* Menu = UToolMenus::Get()->RegisterMenu(MenuName);
-		Menu->AddDynamicSection("DynamicSection", FNewToolMenuDelegate::CreateStatic(&PopulateLaunchMenu));
-	}
-
-	FToolMenuContext MenuContext(InCommandList);
-	return UToolMenus::Get()->GenerateWidget(MenuName, MenuContext);
-}
-
 
 //////////////////////////////////////////////////////////////////////////
 // FPlayWorldCommandCallbacks
 
 void FPlayWorldCommandCallbacks::StartPlayFromHere()
 {
+	// Figure out the start location of the player
+	UClass* const PlayerStartClass = GUnrealEd->PlayFromHerePlayerStartClass ? (UClass*)GUnrealEd->PlayFromHerePlayerStartClass : APlayerStart::StaticClass();
+	UCapsuleComponent* DefaultCollisionComponent = CastChecked<UCapsuleComponent>(PlayerStartClass->GetDefaultObject<AActor>()->GetRootComponent());
+	FVector	CollisionExtent = FVector(DefaultCollisionComponent->GetScaledCapsuleRadius(), DefaultCollisionComponent->GetScaledCapsuleRadius(), DefaultCollisionComponent->GetScaledCapsuleHalfHeight());
+	FVector StartLocation = GEditor->UnsnappedClickLocation + GEditor->ClickPlane * (FVector::BoxPushOut(GEditor->ClickPlane, CollisionExtent) + 0.1f);
+	TOptional<FRotator> StartRotation;
+	FLevelEditorModule& LevelEditorModule = FModuleManager::GetModuleChecked<FLevelEditorModule>("LevelEditor");
+
+	TSharedPtr<IAssetViewport> ActiveLevelViewport = LevelEditorModule.GetFirstActiveViewport();
+
+	if (ActiveLevelViewport.IsValid() && ActiveLevelViewport->GetAssetViewportClient().IsPerspective())
+	{
+		StartRotation = ActiveLevelViewport->GetAssetViewportClient().GetViewRotation();
+	}
+
+	StartPlayFromHere(StartLocation, StartRotation, ActiveLevelViewport);
+}
+
+void FPlayWorldCommandCallbacks::StartPlayFromHere(const TOptional<FVector>& Location, const TOptional<FRotator>& Rotation, const TSharedPtr<IAssetViewport>& ActiveLevelViewport)
+{
+	if (FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint_InEngineMode() || DebuggerCommands::IsVREditorActive())
+	{
+		return;
+	}
+
 	// Is a PIE session already running?  If so we close it first
 	if (GUnrealEd->PlayWorld != NULL)
 	{
@@ -1360,24 +993,15 @@ void FPlayWorldCommandCallbacks::StartPlayFromHere()
 	}
 
 	FRequestPlaySessionParams SessionParams;
-
-	UClass* const PlayerStartClass = GUnrealEd->PlayFromHerePlayerStartClass ? (UClass*)GUnrealEd->PlayFromHerePlayerStartClass : APlayerStart::StaticClass();
-
-	// Figure out the start location of the player
-	UCapsuleComponent*	DefaultCollisionComponent = CastChecked<UCapsuleComponent>(PlayerStartClass->GetDefaultObject<AActor>()->GetRootComponent());
-	FVector	CollisionExtent = FVector(DefaultCollisionComponent->GetScaledCapsuleRadius(), DefaultCollisionComponent->GetScaledCapsuleRadius(), DefaultCollisionComponent->GetScaledCapsuleHalfHeight());
-	SessionParams.StartLocation = GEditor->UnsnappedClickLocation + GEditor->ClickPlane * (FVector::BoxPushOut(GEditor->ClickPlane, CollisionExtent) + 0.1f);
+	SessionParams.StartLocation = Location;
+	SessionParams.StartRotation = Rotation;
 
 	FLevelEditorModule& LevelEditorModule = FModuleManager::GetModuleChecked<FLevelEditorModule>("LevelEditor");
-
-	TSharedPtr<IAssetViewport> ActiveLevelViewport = LevelEditorModule.GetFirstActiveViewport();
-
 
 	if (ActiveLevelViewport.IsValid() && ActiveLevelViewport->GetAssetViewportClient().IsPerspective())
 	{
 		// If there is no level viewport, a new window will be spawned to play in.
 		SessionParams.DestinationSlateViewport = ActiveLevelViewport;
-		SessionParams.StartRotation = ActiveLevelViewport->GetAssetViewportClient().GetViewRotation();
 	}
 
 	GUnrealEd->RequestPlaySession(SessionParams);
@@ -1386,6 +1010,11 @@ void FPlayWorldCommandCallbacks::StartPlayFromHere()
 
 void FPlayWorldCommandCallbacks::ResumePlaySession_Clicked()
 {
+	if (FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint_InEngineMode())
+	{
+		return;
+	}
+
 	if (HasPlayWorld())
 	{
 		LeaveDebuggingMode();
@@ -1398,11 +1027,17 @@ void FPlayWorldCommandCallbacks::ResumePlaySession_Clicked()
 
 void FPlayWorldCommandCallbacks::PausePlaySession_Clicked()
 {
+	if (FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint_InEngineMode())
+	{
+		return;
+	}
+
 	if (HasPlayWorld())
 	{
-		GUnrealEd->PlayWorld->bDebugPauseExecution = true;
+		GUnrealEd->SetPIEWorldsPaused(true);
 		GUnrealEd->PlaySessionPaused();
-		if (IsInPIE()) {
+		if (IsInPIE())
+		{
 			FSlateApplication::Get().ClearKeyboardFocus(EFocusCause::SetDirectly);
 			FSlateApplication::Get().ResetToDefaultInputSettings();
 
@@ -1419,6 +1054,11 @@ void FPlayWorldCommandCallbacks::PausePlaySession_Clicked()
 
 void FPlayWorldCommandCallbacks::SingleFrameAdvance_Clicked()
 {
+	if (FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint_InEngineMode())
+	{
+		return;
+	}
+
 	if (HasPlayWorld())
 	{
 		FInternalPlayWorldCommandCallbacks::SingleFrameAdvance_Clicked();
@@ -1506,23 +1146,24 @@ FText FInternalPlayWorldCommandCallbacks::GetPossessEjectTooltip()
 
 FSlateIcon FInternalPlayWorldCommandCallbacks::GetPossessEjectImage()
 {
-	if (IsInPIE())
+	if (IsInSIE())
 	{
-		return FSlateIcon(FEditorStyle::GetStyleSetName(), "PlayWorld.EjectFromPlayer");
-	}
-	else if (IsInSIE())
-	{
-		return FSlateIcon(FEditorStyle::GetStyleSetName(), "PlayWorld.PossessPlayer");
+		return FSlateIcon(FAppStyle::GetAppStyleSetName(), "PlayWorld.PossessPlayer");
 	}
 	else
 	{
-		return FSlateIcon();
+		return FSlateIcon(FAppStyle::GetAppStyleSetName(), "PlayWorld.EjectFromPlayer");
 	}
 }
 
 
 bool FInternalPlayWorldCommandCallbacks::CanLateJoin()
 {
+	if (FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint_InEngineMode())
+	{
+		return false;
+	}
+
 	return HasPlayWorld();
 }
 
@@ -1531,20 +1172,14 @@ bool FInternalPlayWorldCommandCallbacks::CanShowLateJoinButton()
 	return GetDefault<UEditorExperimentalSettings>()->bAllowLateJoinInPIE && HasPlayWorld();
 }
 
-void SetLastExecutedPlayMode(EPlayModeType PlayMode)
-{
-	ULevelEditorPlaySettings* PlaySettings = GetMutableDefault<ULevelEditorPlaySettings>();
-	PlaySettings->LastExecutedPlayModeType = PlayMode;
-
-	FPropertyChangedEvent PropChangeEvent(ULevelEditorPlaySettings::StaticClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(ULevelEditorPlaySettings, LastExecutedPlayModeType)));
-	PlaySettings->PostEditChangeProperty(PropChangeEvent);
-
-	PlaySettings->SaveConfig();
-}
-
 
 void FInternalPlayWorldCommandCallbacks::Simulate_Clicked()
 {
+	if (IsStoppedAtBreakpoint_InEngineMode() || DebuggerCommands::IsVREditorActive())
+	{
+		return;
+	}
+
 	// Is a simulation session already running?  If so, do nothing
 	if (HasPlayWorld() && GUnrealEd->bIsSimulatingInEditor)
 	{
@@ -1580,6 +1215,11 @@ void FInternalPlayWorldCommandCallbacks::Simulate_Clicked()
 
 bool FInternalPlayWorldCommandCallbacks::Simulate_CanExecute()
 {
+	if (IsStoppedAtBreakpoint_InEngineMode() || DebuggerCommands::IsVREditorActive())
+	{
+		return false;
+	}
+
 	// Can't simulate while already simulating; PIE is fine as we toggle to simulate
 	return !(HasPlayWorld() && GUnrealEd->bIsSimulatingInEditor) && !GEditor->IsLightingBuildCurrentlyRunning();
 }
@@ -1732,38 +1372,90 @@ void SetLastExecutedLaunchMode(ELaunchModeType LaunchMode)
 
 void FInternalPlayWorldCommandCallbacks::RepeatLastPlay_Clicked()
 {
-	// Let a game have a go at settings before we play
+	if (!DebuggerCommands::AllowPlayWorldFeature())
+	{
+		return;
+	}
+
 	ULevelEditorPlaySettings* PlaySettings = GetMutableDefault<ULevelEditorPlaySettings>();
 	PlaySettings->PostEditChange();
 
-	// Grab the play command and execute it
-	TSharedRef<FUICommandInfo> LastCommand = GetLastPlaySessionCommand();
-	UE_LOG(LogTemp, Log, TEXT("Repeating last play command: %s"), *LastCommand->GetLabel().ToString());
+	// hand over to Turnkey module
+	if (PlaySettings->LastExecutedPlayModeType == EPlayModeType::PlayMode_QuickLaunch)
+	{
+#if UE_WITH_TURNKEY_SUPPORT
+		ITurnkeySupportModule::Get().RepeatQuickLaunch(PlaySettings->LastExecutedLaunchName);
+#endif
+	}
+	else
+	{
+		// Grab the play command and execute it
+		TSharedRef<FUICommandInfo> LastCommand = GetLastPlaySessionCommand();
+		UE_LOG(LogDebuggerCommands, Log, TEXT("Repeating last play command: %s"), *LastCommand->GetLabel().ToString());
 
-	FPlayWorldCommands::GlobalPlayWorldActions->ExecuteAction(LastCommand);
+		FPlayWorldCommands::GlobalPlayWorldActions->ExecuteAction(LastCommand);
+	}
 }
 
 
 bool FInternalPlayWorldCommandCallbacks::RepeatLastPlay_CanExecute()
 {
+	if (!DebuggerCommands::AllowPlayWorldFeature())
+	{
+		return false;
+	}
+
+	const ULevelEditorPlaySettings* PlaySettings = GetDefault<ULevelEditorPlaySettings>();
+	if (PlaySettings->LastExecutedPlayModeType == EPlayModeType::PlayMode_QuickLaunch)
+	{
+		// return true, and let Turnkey module determine if it's still usable, and show an error if not
+		return true;
+	}
+
 	return FPlayWorldCommands::GlobalPlayWorldActions->CanExecuteAction(GetLastPlaySessionCommand());
 }
 
 
 FText FInternalPlayWorldCommandCallbacks::GetRepeatLastPlayToolTip()
 {
+	const ULevelEditorPlaySettings* PlaySettings = GetDefault<ULevelEditorPlaySettings>();
+	if (PlaySettings->LastExecutedPlayModeType == EPlayModeType::PlayMode_QuickLaunch)
+	{
+		// @todo make a proper tooltip!
+		return FText::FromString(PlaySettings->LastExecutedLaunchName);
+	}
+
 	return GetLastPlaySessionCommand()->GetDescription();
 }
 
 
 FSlateIcon FInternalPlayWorldCommandCallbacks::GetRepeatLastPlayIcon()
 {
+	// get platform icon for Quick Launch mode
+	const ULevelEditorPlaySettings* PlaySettings = GetDefault<ULevelEditorPlaySettings>();
+	if (PlaySettings->LastExecutedPlayModeType == EPlayModeType::PlayMode_QuickLaunch)
+	{
+		FTargetDeviceId DeviceId;
+		FTargetDeviceId::Parse(PlaySettings->LastExecutedLaunchName, DeviceId);
+
+		// get platform name from DeviceId
+		
+		return FSlateIcon(FAppStyle::GetAppStyleSetName(), FDataDrivenPlatformInfoRegistry::GetPlatformInfo(DeviceId.GetPlatformName()).GetIconStyleName(EPlatformIconSize::Normal));
+	}
+
 	return GetLastPlaySessionCommand()->GetIcon();
 }
 
 
 void FInternalPlayWorldCommandCallbacks::PlayInViewport_Clicked()
 {
+	if (IsStoppedAtBreakpoint_InEngineMode() || DebuggerCommands::IsVREditorActive())
+	{
+		return;
+	}
+
+	TRACE_BOOKMARK(TEXT("PIE"));
+
 	FLevelEditorModule& LevelEditorModule = FModuleManager::GetModuleChecked<FLevelEditorModule>(TEXT("LevelEditor"));
 
 	/** Set PlayInViewPort as the last executed play command */
@@ -1809,6 +1501,11 @@ void FInternalPlayWorldCommandCallbacks::PlayInViewport_Clicked()
 
 bool FInternalPlayWorldCommandCallbacks::PlayInViewport_CanExecute()
 {
+	if (IsStoppedAtBreakpoint_InEngineMode() || DebuggerCommands::IsVREditorActive())
+	{
+		return false;
+	}
+
 	// Disallow PIE when compiling in the editor
 	if (GEditor->bIsCompiling)
 	{
@@ -1822,6 +1519,11 @@ bool FInternalPlayWorldCommandCallbacks::PlayInViewport_CanExecute()
 
 void FInternalPlayWorldCommandCallbacks::PlayInEditorFloating_Clicked()
 {
+	if (IsStoppedAtBreakpoint_InEngineMode() || DebuggerCommands::IsVREditorActive())
+	{
+		return;
+	}
+
 	FLevelEditorModule& LevelEditorModule = FModuleManager::GetModuleChecked<FLevelEditorModule>(TEXT("LevelEditor"));
 
 	SetLastExecutedPlayMode(PlayMode_InEditorFloating);
@@ -1863,11 +1565,21 @@ void FInternalPlayWorldCommandCallbacks::PlayInEditorFloating_Clicked()
 
 bool FInternalPlayWorldCommandCallbacks::PlayInEditorFloating_CanExecute()
 {
+	if (IsStoppedAtBreakpoint_InEngineMode() || DebuggerCommands::IsVREditorActive())
+	{
+		return false;
+	}
+
 	return (!HasPlayWorld() || !GUnrealEd->bIsSimulatingInEditor) && !GEditor->IsLightingBuildCurrentlyRunning();
 }
 
 void FInternalPlayWorldCommandCallbacks::PlayInVR_Clicked()
 {
+	if (IsStoppedAtBreakpoint_InEngineMode() || DebuggerCommands::IsVREditorActive())
+	{
+		return;
+	}
+
 	FLevelEditorModule& LevelEditorModule = FModuleManager::GetModuleChecked<FLevelEditorModule>(TEXT("LevelEditor"));
 
 	SetLastExecutedPlayMode(PlayMode_InVR);
@@ -1905,7 +1617,13 @@ void FInternalPlayWorldCommandCallbacks::PlayInVR_Clicked()
 
 bool FInternalPlayWorldCommandCallbacks::PlayInVR_CanExecute()
 {
-	return (!HasPlayWorld() || !GUnrealEd->bIsSimulatingInEditor) && !GEditor->IsLightingBuildCurrentlyRunning() && GEngine && GEngine->XRSystem.IsValid();
+	if (IsStoppedAtBreakpoint_InEngineMode() || DebuggerCommands::IsVREditorActive())
+	{
+		return false;
+	}
+
+	return (!HasPlayWorld() || !GUnrealEd->bIsSimulatingInEditor) && !GEditor->IsLightingBuildCurrentlyRunning() &&
+		GEngine && GEngine->XRSystem.IsValid() && GEngine->XRSystem->GetHMDDevice() && GEngine->XRSystem->GetHMDDevice()->IsHMDConnected();
 }
 
 void SetLastExecutedPIEPreviewDevice(FString PIEPreviewDevice)
@@ -1927,6 +1645,11 @@ void FInternalPlayWorldCommandCallbacks::PlayInNewProcess_Clicked(EPlayModeType 
 {
 	check(PlayModeType == PlayMode_InNewProcess || PlayModeType == PlayMode_InMobilePreview
 		|| PlayModeType == PlayMode_InTargetedMobilePreview || PlayModeType == PlayMode_InVulkanPreview);
+
+	if (IsStoppedAtBreakpoint_InEngineMode() || DebuggerCommands::IsVREditorActive())
+	{
+		return;
+	}
 
 	SetLastExecutedPlayMode(PlayModeType);
 	FRequestPlaySessionParams SessionParams;
@@ -1976,6 +1699,15 @@ void FInternalPlayWorldCommandCallbacks::PlayInNewProcess_Clicked(EPlayModeType 
 
 bool FInternalPlayWorldCommandCallbacks::PlayInNewProcess_CanExecute()
 {
+	if (IsStoppedAtBreakpoint_InEngineMode() || DebuggerCommands::IsVREditorActive())
+	{
+		return false;
+	}
+	else if (FNullPlatformApplicationMisc::IsUsingNullApplication())
+	{
+		return false;
+	}
+
 	return true;
 }
 
@@ -1993,6 +1725,11 @@ bool FInternalPlayWorldCommandCallbacks::PlayInModeIsChecked(EPlayModeType PlayM
 
 bool FInternalPlayWorldCommandCallbacks::PlayInLocation_CanExecute(EPlayModeLocations Location)
 {
+	if (IsStoppedAtBreakpoint_InEngineMode() || DebuggerCommands::IsVREditorActive())
+	{
+		return false;
+	}
+
 	switch (Location)
 	{
 	case PlayLocation_CurrentCameraLocation:
@@ -2036,270 +1773,8 @@ void FInternalPlayWorldCommandCallbacks::PlayInSettings_Clicked()
 	FModuleManager::LoadModuleChecked<ISettingsModule>("Settings").ShowViewer("Editor", "LevelEditor", "PlayIn");
 }
 
-void FInternalPlayWorldCommandCallbacks::OpenProjectLauncher_Clicked()
-{
-	FGlobalTabmanager::Get()->TryInvokeTab(FTabId("ProjectLauncher"));
-}
-
-void FInternalPlayWorldCommandCallbacks::OpenDeviceManager_Clicked()
-{
-	FGlobalTabmanager::Get()->TryInvokeTab(FTabId("DeviceManager"));
-}
-
-void FInternalPlayWorldCommandCallbacks::RepeatLastLaunch_Clicked()
-{
-	const ULevelEditorPlaySettings* PlaySettings = GetDefault<ULevelEditorPlaySettings>();
-
-	switch (PlaySettings->LastExecutedLaunchModeType)
-	{
-	case LaunchMode_OnDevice:
-		if (IsReadyToLaunchOnDevice(PlaySettings->LastExecutedLaunchDevice))
-		{
-			LaunchOnDevice(PlaySettings->LastExecutedLaunchDevice, PlaySettings->LastExecutedLaunchName);
-		}
-		break;
-
-	default:
-		break;
-	}
-}
 
 
-bool FInternalPlayWorldCommandCallbacks::RepeatLastLaunch_CanExecute()
-{
-	const ULevelEditorPlaySettings* PlaySettings = GetDefault<ULevelEditorPlaySettings>();
-
-	switch (PlaySettings->LastExecutedLaunchModeType)
-	{
-	case LaunchMode_OnDevice:
-		return CanLaunchOnDevice(PlaySettings->LastExecutedLaunchName);
-
-	default:
-		return false;
-	}
-}
-
-
-FText FInternalPlayWorldCommandCallbacks::GetRepeatLastLaunchToolTip()
-{
-	const ULevelEditorPlaySettings* PlaySettings = GetDefault<ULevelEditorPlaySettings>();
-
-	switch (PlaySettings->LastExecutedLaunchModeType)
-	{
-	case LaunchMode_OnDevice:
-		if (CanLaunchOnDevice(PlaySettings->LastExecutedLaunchName))
-		{
-			FFormatNamedArguments Arguments;
-			Arguments.Add(TEXT("DeviceName"), FText::FromString(PlaySettings->LastExecutedLaunchName));
-
-			return FText::Format(LOCTEXT("RepeatLaunchTooltip", "Launch this level on {DeviceName}"), Arguments);
-		}
-
-		break;
-
-	default:
-		break;
-	}
-
-	return LOCTEXT("RepeatLaunchSelectOptionToolTip", "Select a play-on target from the combo menu");
-}
-
-
-FSlateIcon FInternalPlayWorldCommandCallbacks::GetRepeatLastLaunchIcon()
-{
-	const ULevelEditorPlaySettings* PlaySettings = GetDefault<ULevelEditorPlaySettings>();
-
-	// @todo gmp: add play mode specific icons
-	switch (PlaySettings->LastExecutedLaunchModeType)
-	{
-	case LaunchMode_OnDevice:
-		break;
-	}
-
-	static FName RepeatLastLaunchIcon("PlayWorld.RepeatLastLaunch");
-
-	return FSlateIcon(FEditorStyle::GetStyleSetName(), RepeatLastLaunchIcon);
-}
-
-bool FInternalPlayWorldCommandCallbacks::IsReadyToLaunchOnDevice(FString DeviceId)
-{
-	int32 Index = 0;
-	DeviceId.FindChar(TEXT('@'), Index);
-	FString PlatformName = DeviceId.Left(Index);
-
-	const PlatformInfo::FPlatformInfo* const PlatformInfo = PlatformInfo::FindPlatformInfo(FName(*PlatformName));
-	checkf(PlatformInfo, TEXT("Unable to find PlatformInfo for %s"), *PlatformName);
-
-	FGameProjectGenerationModule& GameProjectModule = FModuleManager::LoadModuleChecked<FGameProjectGenerationModule>(TEXT("GameProjectGeneration"));
-	bool bHasCode = GameProjectModule.Get().ProjectHasCodeFiles();
-
-	if (PlatformInfo->SDKStatus == PlatformInfo::EPlatformSDKStatus::NotInstalled)
-	{
-		IMainFrameModule& MainFrameModule = FModuleManager::GetModuleChecked<IMainFrameModule>(TEXT("MainFrame"));
-		MainFrameModule.BroadcastMainFrameSDKNotInstalled(PlatformInfo->TargetPlatformName.ToString(), PlatformInfo->SDKTutorial);
-		TArray<FAnalyticsEventAttribute> ParamArray;
-		ParamArray.Add(FAnalyticsEventAttribute(TEXT("Time"), 0.0));
-		FEditorAnalytics::ReportEvent(TEXT("Editor.LaunchOn.Failed"), PlatformInfo->TargetPlatformName.ToString(), bHasCode, EAnalyticsErrorCodes::SDKNotFound, ParamArray);
-		return false;
-	}
-
-	const ITargetPlatform* Platform = GetTargetPlatformManager()->FindTargetPlatform(PlatformName);
-	if (Platform)
-	{
-		FString NotInstalledTutorialLink;
-		FString DocumentationLink;
-		FText CustomizedLogMessage;
-
-		EBuildConfiguration BuildConfiguration = GetDefault<ULevelEditorPlaySettings>()->GetLaunchBuildConfiguration();
-		bool bEnableAssetNativization = false;
-		int32 Result = Platform->CheckRequirements(bHasCode, BuildConfiguration, bEnableAssetNativization, NotInstalledTutorialLink, DocumentationLink, CustomizedLogMessage);
-
-		// report to analytics
-		FEditorAnalytics::ReportBuildRequirementsFailure(TEXT("Editor.LaunchOn.Failed"), PlatformName, bHasCode, Result);
-
-		// report to message log
-		bool UnrecoverableError = false;
-
-		if ((Result & ETargetPlatformReadyStatus::SDKNotFound) != 0)
-		{
-			AddMessageLog(
-				LOCTEXT("SdkNotFoundMessage", "Software Development Kit (SDK) not found."),
-				CustomizedLogMessage.IsEmpty() ? FText::Format(LOCTEXT("SdkNotFoundMessageDetail", "Please install the SDK for the {0} target platform!"), Platform->DisplayName()) : CustomizedLogMessage,
-				NotInstalledTutorialLink,
-				DocumentationLink
-			);
-
-			UnrecoverableError = true;
-		}
-
-		if ((Result & ETargetPlatformReadyStatus::LicenseNotAccepted) != 0)
-		{
-			AddMessageLog(
-				LOCTEXT("LicenseNotAcceptedMessage", "License not accepted."),
-				CustomizedLogMessage.IsEmpty() ? LOCTEXT("LicenseNotAcceptedMessageDetail", "License must be accepted in project settings to deploy your app to the device.") : CustomizedLogMessage,
-				NotInstalledTutorialLink,
-				DocumentationLink
-			);
-
-			UnrecoverableError = true;
-		}
-
-		if ((Result & ETargetPlatformReadyStatus::ProvisionNotFound) != 0)
-		{
-			AddMessageLog(
-				LOCTEXT("ProvisionNotFoundMessage", "Provision not found."),
-				CustomizedLogMessage.IsEmpty() ? LOCTEXT("ProvisionNotFoundMessageDetail", "A provision is required for deploying your app to the device.") : CustomizedLogMessage,
-				NotInstalledTutorialLink,
-				DocumentationLink
-			);
-
-			UnrecoverableError = true;
-		}
-
-		if ((Result & ETargetPlatformReadyStatus::SigningKeyNotFound) != 0)
-		{
-			AddMessageLog(
-				LOCTEXT("SigningKeyNotFoundMessage", "Signing key not found."),
-				CustomizedLogMessage.IsEmpty() ? LOCTEXT("SigningKeyNotFoundMessageDetail", "The app could not be digitally signed, because the signing key is not configured.") : CustomizedLogMessage,
-				NotInstalledTutorialLink,
-				DocumentationLink
-			);
-
-			UnrecoverableError = true;
-		}
-
-		if ((Result & ETargetPlatformReadyStatus::ManifestNotFound) != 0)
-		{
-			AddMessageLog(
-				LOCTEXT("ManifestNotFound", "Manifest not found."),
-				CustomizedLogMessage.IsEmpty() ? LOCTEXT("ManifestNotFoundMessageDetail", "The generated application manifest could not be found.") : CustomizedLogMessage,
-				NotInstalledTutorialLink,
-				DocumentationLink
-			);
-
-			UnrecoverableError = true;
-		}
-
-		if ((Result & ETargetPlatformReadyStatus::RemoveServerNameEmpty) != 0
-			&& (bHasCode || (Result & ETargetPlatformReadyStatus::CodeBuildRequired)
-				|| (!FApp::GetEngineIsPromotedBuild() && !FApp::IsEngineInstalled())))
-		{
-			AddMessageLog(
-				LOCTEXT("RemoveServerNameNotFound", "Remote compiling requires a server name. "),
-				CustomizedLogMessage.IsEmpty() ? LOCTEXT("RemoveServerNameNotFoundDetail", "Please specify one in the Remote Server Name settings field.") : CustomizedLogMessage,
-				NotInstalledTutorialLink,
-				DocumentationLink
-			);
-			UnrecoverableError = true;
-		}
-
-		if (UnrecoverableError)
-		{
-			return false;
-		}
-
-		// report to main frame
-		if ((Result & ETargetPlatformReadyStatus::CodeUnsupported) != 0)
-		{
-			// show the message
-			FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("NotSupported_CodeBased", "Sorry, launching a code-based project for the selected platform is currently not supported. This feature may be available in a future release."));
-			return false;
-		}
-		if ((Result & ETargetPlatformReadyStatus::PluginsUnsupported) != 0)
-		{
-			// show the message
-			FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("NotSupported_Plugins", "Sorry, launching a project with third-party plugins is currently not supported for the selected platform. This feature may be available in a future release."));
-			return false;
-		}
-	}
-	else
-	{
-		IMainFrameModule& MainFrameModule = FModuleManager::GetModuleChecked<IMainFrameModule>(TEXT("MainFrame"));
-		MainFrameModule.BroadcastMainFrameSDKNotInstalled(PlatformInfo->TargetPlatformName.ToString(), PlatformInfo->SDKTutorial);
-		return false;
-	}
-
-	return true;
-}
-
-void FInternalPlayWorldCommandCallbacks::HandleLaunchOnDeviceActionExecute(FString DeviceId, FString DeviceName)
-{
-	if (IsReadyToLaunchOnDevice(DeviceId))
-	{
-		ULevelEditorPlaySettings* PlaySettings = GetMutableDefault<ULevelEditorPlaySettings>();
-
-		PlaySettings->LastExecutedLaunchModeType = LaunchMode_OnDevice;
-		PlaySettings->LastExecutedLaunchDevice = DeviceId;
-		PlaySettings->LastExecutedLaunchName = DeviceName;
-
-		PlaySettings->PostEditChange();
-
-		PlaySettings->SaveConfig();
-
-		LaunchOnDevice(DeviceId, DeviceName);
-	}
-
-}
-
-
-bool FInternalPlayWorldCommandCallbacks::HandleLaunchOnDeviceActionCanExecute(FString DeviceName)
-{
-	return CanLaunchOnDevice(DeviceName);
-}
-
-
-bool FInternalPlayWorldCommandCallbacks::HandleLaunchOnDeviceActionIsChecked(FString DeviceName)
-{
-	return (DeviceName == GetDefault<ULevelEditorPlaySettings>()->LastExecutedLaunchName);
-}
-
-
-void FInternalPlayWorldCommandCallbacks::HandleShowSDKTutorial(FString PlatformName, FString NotInstalledDocLink)
-{
-	// broadcast this, and assume someone will pick it up
-	IMainFrameModule& MainFrameModule = FModuleManager::GetModuleChecked<IMainFrameModule>(TEXT("MainFrame"));
-	MainFrameModule.BroadcastMainFrameSDKNotInstalled(PlatformName, NotInstalledDocLink);
-}
 
 void FInternalPlayWorldCommandCallbacks::GetMouseControlExecute()
 {
@@ -2320,11 +1795,11 @@ FSlateIcon FInternalPlayWorldCommandCallbacks::GetResumePlaySessionImage()
 {
 	if (IsInPIE())
 	{
-		return FSlateIcon(FEditorStyle::GetStyleSetName(), "PlayWorld.ResumePlaySession");
+		return FSlateIcon(FAppStyle::GetAppStyleSetName(), "PlayWorld.ResumePlaySession");
 	}
 	else if (IsInSIE())
 	{
-		return FSlateIcon(FEditorStyle::GetStyleSetName(), "PlayWorld.Simulate");
+		return FSlateIcon(FAppStyle::GetAppStyleSetName(), "PlayWorld.Simulate");
 	}
 	else
 	{
@@ -2352,6 +1827,11 @@ FText FInternalPlayWorldCommandCallbacks::GetResumePlaySessionToolTip()
 
 void FInternalPlayWorldCommandCallbacks::SingleFrameAdvance_Clicked()
 {
+	if (IsStoppedAtBreakpoint_InEngineMode())
+	{
+		return;
+	}
+
 	// We want to function just like Single stepping where we will stop at a breakpoint if one is encountered but we also want to stop after 1 tick if a breakpoint is not encountered.
 	FKismetDebugUtilities::RequestSingleStepIn();
 	if (HasPlayWorld())
@@ -2365,6 +1845,11 @@ void FInternalPlayWorldCommandCallbacks::SingleFrameAdvance_Clicked()
 
 void FInternalPlayWorldCommandCallbacks::StopPlaySession_Clicked()
 {
+	if (IsStoppedAtBreakpoint_InEngineMode())
+	{
+		return;
+	}
+
 	if (HasPlayWorld())
 	{
 		GEditor->RequestEndPlayMap();
@@ -2389,35 +1874,42 @@ void FInternalPlayWorldCommandCallbacks::ShowCurrentStatement_Clicked()
 	}
 }
 
-
-void FInternalPlayWorldCommandCallbacks::StepInto_Clicked()
+void FInternalPlayWorldCommandCallbacks::ContinueExecution_Clicked()
 {
-	FKismetDebugUtilities::RequestSingleStepIn();
-	if (HasPlayWorld())
+	if (FKismetDebugUtilities::GetCurrentDebuggingWorld())
 	{
 		LeaveDebuggingMode();
 		GUnrealEd->PlaySessionSingleStepped();
 	}
+	else
+	{
+		const bool bIsResumingPlay = !FKismetDebugUtilities::IsSingleStepping();
+		FSlateApplication::Get().LeaveDebuggingMode(!bIsResumingPlay);
+	}
+}
+
+void FInternalPlayWorldCommandCallbacks::AbortExecution_Clicked()
+{
+	FKismetDebugUtilities::RequestAbortingExecution();
+	ContinueExecution_Clicked();
+}
+
+void FInternalPlayWorldCommandCallbacks::StepInto_Clicked()
+{
+	FKismetDebugUtilities::RequestSingleStepIn();
+	ContinueExecution_Clicked();
 }
 
 void FInternalPlayWorldCommandCallbacks::StepOver_Clicked()
 {
 	FKismetDebugUtilities::RequestStepOver();
-	if (HasPlayWorld())
-	{
-		LeaveDebuggingMode();
-		GUnrealEd->PlaySessionSingleStepped();
-	}
+	ContinueExecution_Clicked();
 }
 
 void FInternalPlayWorldCommandCallbacks::StepOut_Clicked()
 {
 	FKismetDebugUtilities::RequestStepOut();
-	if (HasPlayWorld())
-	{
-		LeaveDebuggingMode();
-		GUnrealEd->PlaySessionSingleStepped();
-	}
+	ContinueExecution_Clicked();
 }
 
 void FInternalPlayWorldCommandCallbacks::TogglePlayPause_Clicked()
@@ -2433,9 +1925,10 @@ void FInternalPlayWorldCommandCallbacks::TogglePlayPause_Clicked()
 		}
 		else
 		{
-			GUnrealEd->PlayWorld->bDebugPauseExecution = true;
+			GUnrealEd->SetPIEWorldsPaused(true);
 			GUnrealEd->PlaySessionPaused();
-			if (IsInPIE()) {
+			if (IsInPIE()) 
+			{
 				FSlateApplication::Get().ClearKeyboardFocus(EFocusCause::SetDirectly);
 				FSlateApplication::Get().ResetToDefaultInputSettings();
 
@@ -2452,17 +1945,17 @@ void FInternalPlayWorldCommandCallbacks::TogglePlayPause_Clicked()
 
 bool FInternalPlayWorldCommandCallbacks::CanShowNonPlayWorldOnlyActions()
 {
-	return !HasPlayWorld();
+	return !HasPlayWorld() && DebuggerCommands::AllowPlayWorldFeature();
 }
 
 bool FInternalPlayWorldCommandCallbacks::CanShowVulkanNonPlayWorldOnlyActions()
 {
-	return !HasPlayWorld() && GetDefault<UEditorExperimentalSettings>()->bAllowVulkanPreview && FModuleManager::Get().ModuleExists(TEXT("VulkanRHI"));
+	return !HasPlayWorld() && GetDefault<UEditorExperimentalSettings>()->bAllowVulkanPreview && FModuleManager::Get().ModuleExists(TEXT("VulkanRHI")) && DebuggerCommands::AllowPlayWorldFeature();
 }
 
 bool FInternalPlayWorldCommandCallbacks::CanShowVROnlyActions()
 {
-	return !HasPlayWorld();
+	return !HasPlayWorld() && DebuggerCommands::AllowPlayWorldFeature();
 }
 
 int32 FInternalPlayWorldCommandCallbacks::GetNumberOfClients()
@@ -2480,7 +1973,11 @@ void FInternalPlayWorldCommandCallbacks::SetNumberOfClients(int32 NumClients, ET
 	PlayInSettings->SetPlayNumberOfClients(NumClients);
 
 	PlayInSettings->PostEditChange();
-	PlayInSettings->SaveConfig();
+	// ETextCommit::Default is used when the value is changed during an interactive event like mouse drag or mouse wheel, vs. when the value is actually committed
+	if(CommitInfo != ETextCommit::Default)
+	{
+		PlayInSettings->SaveConfig();
+	}
 }
 
 
@@ -2493,7 +1990,7 @@ int32 FInternalPlayWorldCommandCallbacks::GetNetPlayMode()
 	return (int32)NetMode;
 }
 
-void FInternalPlayWorldCommandCallbacks::SetNetPlayMode(int32 Value, ESelectInfo::Type CommitInfo)
+void FInternalPlayWorldCommandCallbacks::SetNetPlayMode(int32 Value)
 {
 	ULevelEditorPlaySettings* PlayInSettings = GetMutableDefault<ULevelEditorPlaySettings>();
 	PlayInSettings->SetPlayNetMode((EPlayNetMode)Value);
@@ -2506,6 +2003,11 @@ void FInternalPlayWorldCommandCallbacks::SetNetPlayMode(int32 Value, ESelectInfo
 bool FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint()
 {
 	return GIntraFrameDebuggingGameThread;
+}
+
+bool FInternalPlayWorldCommandCallbacks::IsStoppedAtBreakpoint_InEngineMode()
+{
+	return GIntraFrameDebuggingGameThread && FKismetDebugUtilities::GetCurrentDebuggingWorld() == nullptr;
 }
 
 
@@ -2547,85 +2049,6 @@ void FInternalPlayWorldCommandCallbacks::AddMessageLog(const FText& Text, const 
 }
 
 
-bool FInternalPlayWorldCommandCallbacks::CanLaunchOnDevice(const FString& DeviceName)
-{
-	if (!GUnrealEd->IsPlayingViaLauncher())
-	{
-		static TWeakPtr<ITargetDeviceProxyManager> DeviceProxyManagerPtr;
-
-		if (!DeviceProxyManagerPtr.IsValid())
-		{
-			ITargetDeviceServicesModule* TargetDeviceServicesModule = FModuleManager::Get().LoadModulePtr<ITargetDeviceServicesModule>(TEXT("TargetDeviceServices"));
-			if (TargetDeviceServicesModule)
-			{
-				DeviceProxyManagerPtr = TargetDeviceServicesModule->GetDeviceProxyManager();
-			}
-		}
-
-		TSharedPtr<ITargetDeviceProxyManager> DeviceProxyManager = DeviceProxyManagerPtr.Pin();
-		if (DeviceProxyManager.IsValid())
-		{
-			TSharedPtr<ITargetDeviceProxy> DeviceProxy = DeviceProxyManager->FindProxy(DeviceName);
-			if (DeviceProxy.IsValid() && DeviceProxy->IsConnected() && DeviceProxy->IsAuthorized())
-			{
-				return true;
-			}
-
-			// check if this is an aggregate proxy
-			TArray<TSharedPtr<ITargetDeviceProxy>> Devices;
-			DeviceProxyManager->GetProxies(FName(*DeviceName), false, Devices);
-
-			// returns true if the game can be launched al least on 1 device
-			for (auto DevicesIt = Devices.CreateIterator(); DevicesIt; ++DevicesIt)
-			{
-				TSharedPtr<ITargetDeviceProxy> DeviceAggregateProxy = *DevicesIt;
-				if (DeviceAggregateProxy.IsValid() && DeviceAggregateProxy->IsConnected() && DeviceAggregateProxy->IsAuthorized())
-				{
-					return true;
-				}
-			}
-
-		}
-	}
-
-	return false;
-}
-
-
-void FInternalPlayWorldCommandCallbacks::LaunchOnDevice(const FString& DeviceId, const FString& DeviceName)
-{
-	FTargetDeviceId TargetDeviceId;
-	if (FTargetDeviceId::Parse(DeviceId, TargetDeviceId))
-	{
-		const PlatformInfo::FPlatformInfo* const PlatformInfo = PlatformInfo::FindPlatformInfo(*TargetDeviceId.GetPlatformName());
-		check(PlatformInfo);
-
-		if (FInstalledPlatformInfo::Get().IsPlatformMissingRequiredFile(PlatformInfo->BinaryFolderName))
-		{
-			if (!FInstalledPlatformInfo::OpenInstallerOptions())
-			{
-				FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("MissingPlatformFilesLaunch", "Missing required files to launch on this platform."));
-			}
-			return;
-		}
-
-		if (FModuleManager::LoadModuleChecked<IProjectTargetPlatformEditorModule>("ProjectTargetPlatformEditor").ShowUnsupportedTargetWarning(*TargetDeviceId.GetPlatformName()))
-		{
-			GUnrealEd->CancelPlayingViaLauncher();
-
-			FRequestPlaySessionParams::FLauncherDeviceInfo DeviceInfo;
-			DeviceInfo.DeviceId = DeviceId;
-			DeviceInfo.DeviceName = DeviceName;
-
-			FRequestPlaySessionParams SessionParams;
-			SessionParams.SessionDestination = EPlaySessionDestinationType::Launcher;
-			SessionParams.LauncherTargetDevice = DeviceInfo;
-
-			GUnrealEd->RequestPlaySession(SessionParams);
-		}
-	}
-}
-
 
 EPlayModeLocations FInternalPlayWorldCommandCallbacks::GetPlayModeLocation()
 {
@@ -2635,4 +2058,22 @@ EPlayModeLocations FInternalPlayWorldCommandCallbacks::GetPlayModeLocation()
 		: PlayLocation_CurrentCameraLocation;
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 #undef LOCTEXT_NAMESPACE
+

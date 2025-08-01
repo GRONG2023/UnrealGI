@@ -1,8 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
+
 #include "BufferVisualizationData.h"
-#include "HAL/IConsoleManager.h"
-#include "Materials/Material.h"
+
+#include "Materials/MaterialInterface.h"
 #include "Misc/ConfigCacheIni.h"
+#include "ShaderCore.h"
 
 #define LOCTEXT_NAMESPACE "FBufferVisualizationData"
 
@@ -33,11 +35,11 @@ void FBufferVisualizationData::Initialize()
 			check(MaterialMap.Num() == 0);
 			check(MaterialMapFromMaterialName.Num() == 0);
 
-			FConfigSection* MaterialSection = GConfig->GetSectionPrivate( TEXT("Engine.BufferVisualizationMaterials"), false, true, GEngineIni );
+			const FConfigSection* MaterialSection = GConfig->GetSection( TEXT("Engine.BufferVisualizationMaterials"), false, GEngineIni );
 
 			if (MaterialSection != NULL)
 			{
-				for (FConfigSection::TIterator It(*MaterialSection); It; ++It)
+				for (FConfigSection::TConstIterator It(*MaterialSection); It; ++It)
 				{
 					FString EnabledCVar;
 					if (FParse::Value(*It.Value().GetValue(), TEXT("Display="), EnabledCVar, true))
@@ -56,13 +58,19 @@ void FBufferVisualizationData::Initialize()
 			
 						if (Material)
 						{
+							FText DisplayName;
+							FParse::Value(*It.Value().GetValue(), TEXT("Name="), DisplayName, TEXT("Engine.BufferVisualizationMaterials"));
+
+							bool bApplyAutoExposure = false;
+							FParse::Bool(*It.Value().GetValue(), TEXT("ApplyAutoExposure="), bApplyAutoExposure);
+
 							Material->AddToRoot();
 							Record& Rec = MaterialMap.Add(It.Key(), Record());
 							Rec.Name = It.Key().GetPlainNameString();
 							Rec.Material = Material;
-							FText DisplayName;
-							FParse::Value( *It.Value().GetValue(), TEXT("Name="), DisplayName, TEXT("Engine.BufferVisualizationMaterials") );
+							Rec.bApplyAutoExposure = bApplyAutoExposure;
 							Rec.DisplayName = DisplayName;
+
 							MaterialMapFromMaterialName.Add(Material->GetFName(), Rec);
 						}
 					}
@@ -118,20 +126,20 @@ void FBufferVisualizationData::ConfigureConsoleCommand()
 		);
 }
 
-UMaterialInterface* FBufferVisualizationData::GetMaterial(FName InMaterialName)
+const FBufferVisualizationData::Record* FBufferVisualizationData::GetRecord(FName InMaterialName) const
 {
 	// Get UMaterial from the TMaterialMap FName
 	if (const Record* Result = MaterialMap.Find(InMaterialName))
 	{
-		return Result->Material;
+		return Result;
 	}
 	// Get UMaterial from the UMaterial FName
 	// Almost all BufferVisualizationData variables contain a FMaterial with its same FName.
-	// But not all, e.g., ShadingModel uses the FMaterial LightingModel. This could confuse the developer depending on which one he is using
+	// But not all, e.g., ShadingModel uses the FMaterial LightingModel. This could confuse the developer depending on which one they are using
 	// This "else if" case handles the case in which we look for "LightingModel" rather than "ShadingModel", returning the same value
 	else if (const Record* ResultFromMaterialName = MaterialMapFromMaterialName.Find(InMaterialName))
 	{
-		return ResultFromMaterialName->Material;
+		return ResultFromMaterialName;
 	}
 	// Not found
 	else
@@ -140,22 +148,36 @@ UMaterialInterface* FBufferVisualizationData::GetMaterial(FName InMaterialName)
 	}
 }
 
+UMaterialInterface* FBufferVisualizationData::GetMaterial(FName InMaterialName) const
+{
+	if (const Record* Result = GetRecord(InMaterialName))
+	{
+		return Result->Material;
+	}
+	else
+	{
+		return nullptr;
+	}
+}
+
+bool FBufferVisualizationData::GetMaterialApplyAutoExposure(FName InMaterialName) const
+{
+	if (const Record* Result = GetRecord(InMaterialName))
+	{
+		return Result->bApplyAutoExposure;
+	}
+	else
+	{
+		return false;
+	}
+}
+
 FText FBufferVisualizationData::GetMaterialDisplayName(FName InMaterialName) const
 {
-	// Get UMaterial from the TMaterialMap FName
-	if (const Record* Result = MaterialMap.Find(InMaterialName))
+	if (const Record* Result = GetRecord(InMaterialName))
 	{
 		return Result->DisplayName;
 	}
-	// Get UMaterial from the UMaterial FName
-	// Almost all BufferVisualizationData variables contain a FMaterial with its same FName.
-	// But not all, e.g., ShadingModel uses the FMaterial LightingModel. This could confuse the developer depending on which one he is using
-	// This "else if" case handles the case in which we look for "LightingModel" rather than "ShadingModel", returning the same value
-	else if (const Record* ResultFromMaterialName = MaterialMapFromMaterialName.Find(InMaterialName))
-	{
-		return ResultFromMaterialName->DisplayName;
-	}
-	// Not found
 	else
 	{
 		return FText::GetEmpty();

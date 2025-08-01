@@ -1,19 +1,35 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "ShaderCompiler.h"
+#include "DistributedBuildControllerInterface.h"
+#include "Async/Future.h"
 #include "HAL/FileManager.h"
-#include "DistributedBuildInterface/Public/DistributedBuildControllerInterface.h"
+#include "Misc/CommandLine.h"
+#include "ShaderCompiler.h"
 
 namespace DistributedShaderCompilerVariables
 {
-	//TODO: Remove XGE from the name after ensuring that we are not breaking existing configs by doing so.
-	int32 MinBatchSize = 20;
+	//TODO: Remove the XGE doublet
+	int32 MinBatchSize = 50;
 	FAutoConsoleVariableRef CVarXGEShaderCompileMinBatchSize(
         TEXT("r.XGEShaderCompile.MinBatchSize"),
         MinBatchSize,
-        TEXT("Minimum number of shaders to compile with XGE.\n")
-        TEXT("Smaller number of shaders will compile locally."),
+        TEXT("This CVar is deprecated, please use r.ShaderCompiler.DistributedMinBatchSize"),
         ECVF_Default);
+
+	FAutoConsoleVariableRef CVarDistributedMinBatchSize(
+		TEXT("r.ShaderCompiler.DistributedMinBatchSize"),
+		MinBatchSize,
+		TEXT("Minimum number of shaders to compile with a distributed controller.\n")
+		TEXT("Smaller number of shaders will compile locally."),
+		ECVF_Default);
+
+	static int32 GDistributedControllerTimeout = 15 * 60;
+	static FAutoConsoleVariableRef CVarDistributedControllerTimeout(
+		TEXT("r.ShaderCompiler.DistributedControllerTimeout"),
+		GDistributedControllerTimeout,
+		TEXT("Maximum number of seconds we expect to pass between getting distributed controller complete a task (this is used to detect problems with the distribution controllers).")
+	);
+
 }
 
 bool FShaderCompileDistributedThreadRunnable_Interface::IsSupported()
@@ -42,6 +58,8 @@ public:
 FShaderCompileDistributedThreadRunnable_Interface::FShaderCompileDistributedThreadRunnable_Interface(class FShaderCompilingManager* InManager, IDistributedBuildController& InController)
 	: FShaderCompileThreadRunnableBase(InManager)
 	, NumDispatchedJobs(0)
+	, LastTimeTaskCompleted(FPlatformTime::Seconds())
+	, bIsHung(false)
 	, CachedController(InController)
 {
 }
@@ -52,25 +70,16 @@ FShaderCompileDistributedThreadRunnable_Interface::~FShaderCompileDistributedThr
 
 void FShaderCompileDistributedThreadRunnable_Interface::DispatchShaderCompileJobsBatch(TArray<FShaderCommonCompileJobPtr>& JobsToSerialize)
 {
-	FString InputFilePath = CachedController.CreateUniqueFilePath();
-	FString OutputFilePath = CachedController.CreateUniqueFilePath();
+	const FString BaseFilePath = CachedController.CreateUniqueFilePath();
+	FString InputFilePath = BaseFilePath + TEXT(".in");
+	FString OutputFilePath = BaseFilePath + TEXT(".out");
 
 	const FString WorkingDirectory = FPaths::GetPath(InputFilePath);
-	const FString InputFileName = FPaths::GetCleanFilename(InputFilePath);
-	const FString OutputFileName = FPaths::GetCleanFilename(OutputFilePath);
-
-	const FString WorkerParameters = FString::Printf(TEXT("\"%s/\" %d 0 \"%s\" \"%s\" -xge_int %s%s"),
-		*WorkingDirectory,
-		Manager->ProcessId,
-		*InputFileName,
-		*OutputFileName,
-		*FCommandLine::GetSubprocessCommandline(),
-		GIsBuildMachine ? TEXT(" -buildmachine") : TEXT("")
-	);
 
 	// Serialize the jobs to the input file
+	GShaderCompilerStats->RegisterJobBatch(JobsToSerialize.Num(), FShaderCompilerStats::EExecutionType::Distributed);
 	FArchive* InputFileAr = IFileManager::Get().CreateFileWriter(*InputFilePath, FILEWRITE_EvenIfReadOnly | FILEWRITE_NoFail);
-	FShaderCompileUtilities::DoWriteTasks(JobsToSerialize, *InputFileAr);
+	FShaderCompileUtilities::DoWriteTasks(JobsToSerialize, *InputFileAr, &CachedController, CachedController.RequiresRelativePaths());
 	delete InputFileAr;
 
 	// Kick off the job
@@ -78,8 +87,11 @@ void FShaderCompileDistributedThreadRunnable_Interface::DispatchShaderCompileJob
 
 	FTaskCommandData TaskCommandData;
 	TaskCommandData.Command = Manager->ShaderCompileWorkerName;
-	TaskCommandData.CommandArgs = WorkerParameters;
+	TaskCommandData.WorkingDirectory = WorkingDirectory;
+	TaskCommandData.DispatcherPID = Manager->ProcessId;
 	TaskCommandData.InputFileName = InputFilePath;
+	TaskCommandData.OutputFileName = OutputFilePath;
+	TaskCommandData.ExtraCommandArgs = FString::Printf(TEXT("%s%s"), *FCommandLine::GetSubprocessCommandline(), GIsBuildMachine ? TEXT(" -buildmachine") : TEXT(""));
 	TaskCommandData.Dependencies = GetDependencyFilesForJobs(JobsToSerialize);
 	
 	DispatchedTasks.Add(
@@ -96,8 +108,8 @@ TArray<FString> FShaderCompileDistributedThreadRunnable_Interface::GetDependency
 	TArray<FShaderCommonCompileJobPtr>& Jobs)
 {
 	TArray<FString> Dependencies;
-	uint64 ShaderPlatformMask = 0;
-	static_assert(EShaderPlatform::SP_NumPlatforms <= sizeof(ShaderPlatformMask) * 8, "Insufficient bits in ShaderPlatformMask.");
+	TBitArray<> ShaderPlatformMask;
+	ShaderPlatformMask.Init(false, EShaderPlatform::SP_NumPlatforms);
 	for (const FShaderCommonCompileJobPtr& Job : Jobs)
 	{
 		EShaderPlatform ShaderPlatform = EShaderPlatform::SP_PCD3D_SM5;
@@ -129,9 +141,9 @@ TArray<FString> FShaderCompileDistributedThreadRunnable_Interface::GetDependency
 			}
 		}
 		// Add base dependencies for the platform only once.
-		if (!(ShaderPlatformMask & (static_cast<uint64>(1) << ShaderPlatform)))
+		if (!(ShaderPlatformMask[(int)ShaderPlatform]))
 		{
-			ShaderPlatformMask |= (static_cast<uint64>(1) << ShaderPlatform);
+			ShaderPlatformMask[(int)ShaderPlatform] = true;
 			TArray<FString>& ShaderPlatformCacheEntry = PlatformShaderInputFilesCache.FindOrAdd(ShaderPlatform);
 			if (!ShaderPlatformCacheEntry.Num())
 			{
@@ -157,29 +169,44 @@ TArray<FString> FShaderCompileDistributedThreadRunnable_Interface::GetDependency
 int32 FShaderCompileDistributedThreadRunnable_Interface::CompilingLoop()
 {
 	TArray<FShaderCommonCompileJobPtr> PendingJobs;
-	for (int32 PriorityIndex = MaxPriorityIndex; PriorityIndex >= MinPriorityIndex; --PriorityIndex)
+	//if (LIKELY(!bIsHung))	// stop accepting jobs if we're hung - TODO: re-enable this after lockup detection logic is proved reliable and/or we have job resubmission in place
 	{
-		// Grab as many jobs from the job queue as we can
-		const EShaderCompileJobPriority Priority = (EShaderCompileJobPriority)PriorityIndex;
-		const int32 MinBatchSize = (Priority == EShaderCompileJobPriority::Low) ? 1 : DistributedShaderCompilerVariables::MinBatchSize;
-		const int32 NumJobs = Manager->AllJobs.GetPendingJobs(EShaderCompilerWorkerType::XGE, Priority, MinBatchSize, INT32_MAX, PendingJobs);
-		if (NumJobs > 0)
+		for (int32 PriorityIndex = MaxPriorityIndex; PriorityIndex >= MinPriorityIndex; --PriorityIndex)
 		{
-			UE_LOG(LogShaderCompilers, Display, TEXT("Started %d 'XGE' shader compile jobs with '%s' priority"),
-				NumJobs,
-				ShaderCompileJobPriorityToString((EShaderCompileJobPriority)PriorityIndex));
+			// Grab as many jobs from the job queue as we can
+			const EShaderCompileJobPriority Priority = (EShaderCompileJobPriority)PriorityIndex;
+			const int32 MinBatchSize = (Priority == EShaderCompileJobPriority::Low) ? 1 : DistributedShaderCompilerVariables::MinBatchSize;
+			const int32 NumJobs = Manager->AllJobs.GetPendingJobs(EShaderCompilerWorkerType::Distributed, Priority, MinBatchSize, INT32_MAX, PendingJobs);
+			if (NumJobs > 0)
+			{
+				UE_LOG(LogShaderCompilers, Verbose, TEXT("Started %d 'Distributed' shader compile jobs with '%s' priority"),
+					NumJobs,
+					ShaderCompileJobPriorityToString((EShaderCompileJobPriority)PriorityIndex));
+			}
+			if (PendingJobs.Num() >= DistributedShaderCompilerVariables::MinBatchSize)
+			{
+				break;
+			}
 		}
-		if (PendingJobs.Num() >= DistributedShaderCompilerVariables::MinBatchSize)
-		{
-			break;
-		}
+	}
+
+	// if we don't have any dispatched jobs, reset the completion timer
+	if (DispatchedTasks.Num() == 0)
+	{
+		LastTimeTaskCompleted = FPlatformTime::Seconds();
 	}
 
 	if (PendingJobs.Num() > 0)
 	{
 		// Increase the batch size when more jobs are queued/in flight.
-		const uint32 JobsPerBatch = FMath::Max(1, FMath::FloorToInt(FMath::LogX(2, PendingJobs.Num() + NumDispatchedJobs)));
-		UE_LOG(LogShaderCompilers, Verbose, TEXT("Current jobs: %d, Batch size: %d, Num Already Dispatched: %d"), PendingJobs.Num(), JobsPerBatch, NumDispatchedJobs);
+
+		// Build farm is much more prone to pool oversubscription, so make sure the jobs are submitted in batches of at least MinBatchSize
+		int MinJobsPerBatch = GIsBuildMachine ? DistributedShaderCompilerVariables::MinBatchSize : 1;
+
+		// Just to provide typical numbers: the number of total jobs is usually in tens of thousands at most, oftentimes in low thousands. Thus JobsPerBatch when calculated as a log2 rarely reaches the value of 16,
+		// and that seems to be a sweet spot: lowering it does not result in faster completion, while increasing the number of jobs per batch slows it down.
+		const uint32 JobsPerBatch = FMath::Max(MinJobsPerBatch, FMath::FloorToInt(FMath::LogX(2.f, PendingJobs.Num() + NumDispatchedJobs)));
+		UE_LOG(LogShaderCompilers, Log, TEXT("Current jobs: %d, Batch size: %d, Num Already Dispatched: %d"), PendingJobs.Num(), JobsPerBatch, NumDispatchedJobs);
 
 
 		struct FJobBatch
@@ -285,6 +312,7 @@ int32 FShaderCompileDistributedThreadRunnable_Interface::CompilingLoop()
 
 		FDistributedBuildTaskResult Result = Task->Future.Get();
 		NumDispatchedJobs -= Task->ShaderJobs.Num();
+		LastTimeTaskCompleted = FPlatformTime::Seconds();
 
 		if (Result.ReturnCode != 0)
 		{
@@ -294,21 +322,24 @@ int32 FShaderCompileDistributedThreadRunnable_Interface::CompilingLoop()
 		if (Result.bCompleted)
 		{
 			// Check the output file exists. If it does, attempt to open it and serialize in the completed jobs.
+			bool bCompileJobsSucceeded = false;
+
 			if (IFileManager::Get().FileExists(*Task->OutputFilePath))
 			{
-				FArchive* OutputFileAr = IFileManager::Get().CreateFileReader(*Task->OutputFilePath, FILEREAD_Silent);
-				if (OutputFileAr)
+				if (TUniquePtr<FArchive> OutputFileAr = TUniquePtr<FArchive>(IFileManager::Get().CreateFileReader(*Task->OutputFilePath, FILEREAD_Silent)))
 				{
 					bOutputFileReadFailed = false;
-					FShaderCompileUtilities::DoReadTaskResults(Task->ShaderJobs, *OutputFileAr);
-					delete OutputFileAr;
+					if (FShaderCompileUtilities::DoReadTaskResults(Task->ShaderJobs, *OutputFileAr) == FSCWErrorCode::Success)
+					{
+						bCompileJobsSucceeded = true;
+					}
 				}
 			}
 
-			if (bOutputFileReadFailed)
+			if (!bCompileJobsSucceeded)
 			{
 				// Reading result from XGE job failed, so recompile shaders in current job batch locally
-				UE_LOG(LogShaderCompilers, Log, TEXT("Rescheduling shader compilation to run locally after XGE job failed: %s"), *Task->OutputFilePath);
+				UE_LOG(LogShaderCompilers, Log, TEXT("Rescheduling shader compilation to run locally after distributed job failed: %s"), *Task->OutputFilePath);
 
 				for (FShaderCommonCompileJobPtr Job : Task->ShaderJobs)
 				{
@@ -352,6 +383,23 @@ int32 FShaderCompileDistributedThreadRunnable_Interface::CompilingLoop()
 	// Yield for a short while to stop this thread continuously polling the disk.
 	FPlatformProcess::Sleep(0.01f);
 
+	// normally we expect to have at least one task in 5 minutes, although there could be edge cases
+	double TimeSinceLastCompletedTask = FPlatformTime::Seconds() - LastTimeTaskCompleted;
+	if (TimeSinceLastCompletedTask >= DistributedShaderCompilerVariables::GDistributedControllerTimeout)
+	{
+		if (!bIsHung)
+		{
+			UE_LOG(LogShaderCompilers, Warning, TEXT("Distributed compilation controller didn't receive a completed task in %f seconds!"), TimeSinceLastCompletedTask);
+			bIsHung = true;
+			// TODO: resubmit the hung jobs
+		}
+	}
+
 	// Return true if there is more work to be done.
 	return Manager->AllJobs.GetNumOutstandingJobs() > 0;
+}
+
+const TCHAR* FShaderCompileDistributedThreadRunnable_Interface::GetThreadName() const
+{
+	return TEXT("ShaderCompilingThread-Distributed");
 }

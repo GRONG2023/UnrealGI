@@ -2,15 +2,21 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "InputCoreTypes.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Factories/FbxImportUI.h"
+#include "HAL/PlatformCrt.h"
+#include "Input/Events.h"
 #include "Input/Reply.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Text.h"
+#include "Misc/Optional.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateEnums.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/SWindow.h"
-#include "Factories/FbxImportUI.h"
 
 class SButton;
+struct FGeometry;
 
 class SFbxOptionWindow : public SCompoundWidget
 {
@@ -92,7 +98,7 @@ public:
 	{}
 		
 private:
-
+	EActiveTimerReturnType SetFocusPostConstruct(double InCurrentTime, float InDeltaTime);
 	bool CanImport() const;
 	FReply OnResetToDefaultClick() const;
 	FText GetImportTypeDisplayText() const;
@@ -101,7 +107,7 @@ private:
 	UFbxImportUI*	ImportUI;
 	TSharedPtr<class IDetailsView> DetailsView;
 	TWeakPtr< SWindow > WidgetWindow;
-	TSharedPtr< SButton > ImportButton;
+	TSharedPtr<SButton> ImportAllButton;
 	bool			bShouldImport;
 	bool			bShouldImportAll;
 	bool			bIsObjFormat;

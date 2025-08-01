@@ -1,16 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 using AutomationTool;
+using EpicGames.BuildGraph;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Xml;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 using UnrealBuildTool;
 
-namespace BuildGraph.Tasks
+namespace AutomationTool.Tasks
 {
 	/// <summary>
 	/// Parameters for a ModifyConfig task
@@ -52,7 +53,7 @@ namespace BuildGraph.Tasks
 	/// Modifies a config file
 	/// </summary>
 	[TaskElement("ModifyConfig", typeof(ModifyConfigTaskParameters))]
-	public class ModifyConfigTask : CustomTask
+	public class ModifyConfigTask : BgTaskImpl
 	{
 		/// <summary>
 		/// Parameters for this task
@@ -74,7 +75,7 @@ namespace BuildGraph.Tasks
 		/// <param name="Job">Information about the current job</param>
 		/// <param name="BuildProducts">Set of build products produced by this node.</param>
 		/// <param name="TagNameToFileSet">Mapping from tag names to the set of files they include</param>
-		public override void Execute(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
+		public override Task ExecuteAsync(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
 		{
 			FileReference ConfigFileLocation = ResolveFile(Parameters.File);
 
@@ -103,6 +104,7 @@ namespace BuildGraph.Tasks
 
 			// Add the archive to the set of build products
 			BuildProducts.Add(ConfigFileLocation);
+			return Task.CompletedTask;
 		}
 
 		/// <summary>

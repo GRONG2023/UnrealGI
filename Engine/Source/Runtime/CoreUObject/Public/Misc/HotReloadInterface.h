@@ -27,7 +27,7 @@ enum class ERecompileModuleFlags : uint8
 	// Report failure if UHT-generated code changes as a result of the recompile
 	FailIfGeneratedCodeChanges = 0x02,
 
-	// Even if this is not code-based project compile with game project as the target for UBT (do not use UE4Editor target)
+	// Even if this is not code-based project compile with game project as the target for UBT (do not use UnrealEditor target)
 	ForceCodeProject = 0x04,
 };
 ENUM_CLASS_FLAGS(ERecompileModuleFlags)
@@ -82,6 +82,7 @@ public:
 	/**
 	 * Adds a function to re-map after hot-reload.
 	 */
+	UE_DEPRECATED(5.0, "AddHotReloadFunctionRemap has been deprecated, use ReloadNotifyFunctionRemap in Reload.h instead")
 	virtual void AddHotReloadFunctionRemap(FNativeFuncPtr NewFunctionPointer, FNativeFuncPtr OldFunctionPointer) = 0;
 
 	/**
@@ -109,6 +110,7 @@ public:
 	 * @param	bWasTriggeredAutomatically	True if the hot reload was invoked automatically by the hot reload system after detecting a changed DLL
 	 */
 	DECLARE_MULTICAST_DELEGATE_OneParam(FHotReloadEvent, bool /* bWasTriggeredAutomatically */ );
+	UE_DEPRECATED(5.0, "OnHotReload has been deprecated, use FCoreUObjectDelegates::ReloadCompleteDelegate.")
 	virtual FHotReloadEvent& OnHotReload() = 0;
 
 	/**

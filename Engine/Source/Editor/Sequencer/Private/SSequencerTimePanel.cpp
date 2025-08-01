@@ -9,17 +9,19 @@
 #include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Input/SComboBox.h"
 #include "Widgets/Input/SButton.h"
+#include "SPrimaryButton.h"
 #include "MovieSceneSequence.h"
 #include "MovieScene.h"
 #include "MovieSceneTimeHelpers.h"
 #include "ScopedTransaction.h"
 #include "Sequencer.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "MovieSceneToolHelpers.h"
-
+#include "MovieSceneSequenceVisitor.h"
+#include "Framework/Notifications/NotificationManager.h"
+#include "Widgets/Notifications/SNotificationList.h"
 
 #define LOCTEXT_NAMESPACE "SSequencerTimePanel"
-
 
 void SSequencerTimePanel::Construct(const FArguments& InArgs, TWeakPtr<FSequencer> InSequencer)
 {
@@ -36,206 +38,172 @@ void SSequencerTimePanel::Construct(const FArguments& InArgs, TWeakPtr<FSequence
 		TickResolutionRates.Add(FCommonFrameRateInfo{ FFrameRate(120000, 1), LOCTEXT("120000_Name", "120000 fps (all common rates)"),                 LOCTEXT("120000_Description", "A very high framerate that allows frame-accurate evaluation of all common integer and NTSC frame rates.") });
 	}
 
-	FText Description = LOCTEXT("Description", "Sequences store section start times and keys at points in time called 'ticks'.\n\nThe size of a single tick is defined per-sequence; it is recommended that you choose a tick-interval that fits into your desired display rate or content frame rates. Increasing the resolution will reduce the total supported time range.");
+	FText Description = LOCTEXT("Description", "Sequences stores section start times and keys at points in time called 'ticks'.\n\nThe size of a single tick is defined per-sequence; it is recommended that you choose a tick-interval that fits into your desired display rate or content frame rates. Increasing the resolution will reduce the total supported time range.");
 
-	static float VerticalGridPadding = 5.f;
+	static float VerticalGridPadding = 15.f;
 	static float HorizontalGridPadding = 10.f;
 
 	static FMargin Col1Padding(0.f, 0.f, HorizontalGridPadding, VerticalGridPadding);
 	static FMargin Col2Padding(HorizontalGridPadding, 0.f, 0.f, VerticalGridPadding);
+	bIsRecursive = true;
 
 	static FLinearColor WarningColor(FColor(0xffbbbb44));
-	int32 CurrentRow = 0;
 	ChildSlot
 	[
 		SNew(SBorder)
-		.OnMouseButtonUp(this, &SSequencerTimePanel::OnBorderFadeClicked)
-		.BorderImage(FEditorStyle::GetBrush("BlackBrush"))
-		.BorderBackgroundColor(FLinearColor(1.f, 1.f, 1.f, 0.5f))
-		.HAlign(HAlign_Center)
-		.VAlign(VAlign_Center)
+		.BorderImage(FAppStyle::Get().GetBrush("Brushes.Panel"))
+		.Padding(16.f)
 		[
-			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("Sequencer.OverlayPanel.Background"))
-			.Padding(FMargin(20.f))
+			SNew(SVerticalBox)
+
+			+SVerticalBox::Slot()
+			.AutoHeight()
 			[
-				SNew(SOverlay)
+				SNew(STextBlock)
+				.AutoWrapText(true)
+				.Text(Description)
+			]
 
-				+ SOverlay::Slot()
+			+SVerticalBox::Slot()
+			.FillHeight(1.0f)
+			.Padding(0.0f, 10.0f)
+			[
+				SNew(SBorder)
+				.Padding(FMargin(10.0f, 10.0f))
+				.BorderImage(FAppStyle::Get().GetBrush("Brushes.Recessed"))
 				[
-					SNew(SBorder)
-					.OnMouseButtonUp_Lambda([](const FGeometry&, const FPointerEvent&){ return FReply::Handled(); })
-					.BorderImage(FEditorStyle::GetBrush("None"))
-					.Padding(FMargin(10.f))
+					SNew(SGridPanel)
+					.FillColumn(1, 1.f)
+
+					+ SGridPanel::Slot(0, 0)
+					.Padding(Col1Padding)
+					.HAlign(HAlign_Right)
 					[
-						SNew(SVerticalBox)
+						SNew(STextBlock)
+						.Text(LOCTEXT("NewTickInterval", "Desired Tick Interval"))
+					]
+					+ SGridPanel::Slot(1, 0)
+					.HAlign(HAlign_Left)
+					.Padding(Col2Padding)
+					[
+						SNew(SFrameRatePicker)
+						.RecommendedText(LOCTEXT("CompatibleWithDisplayRate", "Compatible with this sequence"))
+						.NotRecommendedText(LOCTEXT("NotCompatibleWithDisplayRate", "Other"))
+						.NotRecommendedToolTip(LOCTEXT("NotCompatibleWithDisplayRate_Tip", "All other preset frame rates that are not compatible with the current display and tick rate"))
+						.IsPresetRecommended(this, &SSequencerTimePanel::IsRecommendedResolution)
+						.PresetValues(MoveTemp(TickResolutionRates))
+						.Value(this, &SSequencerTimePanel::GetCurrentTickResolution)
+						.OnValueChanged(this, &SSequencerTimePanel::OnSetTickResolution)
+					]
 
-						+ SVerticalBox::Slot()
-						.AutoHeight()
-						[
-							SNew(STextBlock)
-							.TextStyle(FEditorStyle::Get(), "LargeText")
-							.Text(LOCTEXT("Title", "Advanced Time Properties"))
-						]
+					+ SGridPanel::Slot(0, 1)
+					.HAlign(HAlign_Right)
+					.Padding(FMargin(0, 0, HorizontalGridPadding, 0))
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT("ApplyRecursively", "Apply Recursively"))
+						.ToolTipText(LOCTEXT("ApplyRecursively_Tooltip", "If true then the tick rate change will propagate to all child sub-sequences of the current sequence. The UI warnings only apply to the top level sequence."))
+					]
+					+ SGridPanel::Slot(1, 1)
+					.HAlign(HAlign_Left)
+					.Padding(FMargin(HorizontalGridPadding, 0, 0, 0))
+					[
+						SNew(SCheckBox)
+						.IsChecked(this, &SSequencerTimePanel::GetIsRecursive)
+						.OnCheckStateChanged(this, &SSequencerTimePanel::OnSetIsRecursive)
+					]
 
-						+ SVerticalBox::Slot()
-						[
-							SNew(SBox)
-							.MaxDesiredWidth(600.f)
-							[
-								SNew(SScrollBox)
+					+ SGridPanel::Slot(0, 2)
+					.ColumnSpan(2)
+					.Padding(FMargin(0.f, VerticalGridPadding, 0.f, VerticalGridPadding))
+					.HAlign(HAlign_Left)
+					.VAlign(VAlign_Top)
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT("NewTickInterval_Tip", "Sequence will have the following properties if applied:"))
+					]
 
-								+ SScrollBox::Slot()
-								.Padding(FMargin(0.f, 0.f, 0.f, 10.f))
-								[
-									SNew(STextBlock)
-									.AutoWrapText(true)
-									.TextStyle(FEditorStyle::Get(), "SmallText")
-									.Text(Description)
-								]
+					+ SGridPanel::Slot(0, 3)
+					.Padding(Col1Padding)
+					.HAlign(HAlign_Right)
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT("ResultingRange", "Time Range"))
+					]
+					+ SGridPanel::Slot(1, 3)
+					.Padding(Col2Padding)
+					[
+						SNew(STextBlock)
+						.Text(this, &SSequencerTimePanel::GetSupportedTimeRange)
+					]
 
-								+ SScrollBox::Slot()
-								.HAlign(HAlign_Center)
-								[
-									SNew(SGridPanel)
-									.FillColumn(1, 1.f)
-
-									+ SGridPanel::Slot(0, 0)
-									.Padding(Col1Padding)
-									.HAlign(HAlign_Left)
-									[
-										SNew(STextBlock)
-										.TextStyle(FEditorStyle::Get(), "NormalText.Important")
-										.Text(LOCTEXT("NewTickInterval", "Desired Tick Interval"))
-									]
-									+ SGridPanel::Slot(1, 0)
-									.HAlign(HAlign_Left)
-									.Padding(Col2Padding)
-									[
-										SNew(SFrameRatePicker)
-										.RecommendedText(LOCTEXT("CompatibleWithDisplayRate", "Compatible with this sequence"))
-										.NotRecommendedText(LOCTEXT("NotCompatibleWithDisplayRate", "Other"))
-										.NotRecommendedToolTip(LOCTEXT("NotCompatibleWithDisplayRate_Tip", "All other preset frame rates that are not compatible with the current display and tick rate"))
-										.IsPresetRecommended(this, &SSequencerTimePanel::IsRecommendedResolution)
-										.PresetValues(MoveTemp(TickResolutionRates))
-										.Value(this, &SSequencerTimePanel::GetCurrentTickResolution)
-										.OnValueChanged(this, &SSequencerTimePanel::OnSetTickResolution)
-									]
-
-									+ SGridPanel::Slot(0, 1)
-									.ColumnSpan(2)
-									.Padding(FMargin(0.f, VerticalGridPadding*2, 0.f, VerticalGridPadding))
-									.HAlign(HAlign_Left)
-									.VAlign(VAlign_Top)
-									[
-										SNew(STextBlock)
-										.Text(LOCTEXT("NewTickInterval_Tip", "Sequence will have the following properties if applied:"))
-										.TextStyle(FEditorStyle::Get(), "TinyText")
-									]
-
-									+ SGridPanel::Slot(0, 2)
-									.Padding(Col1Padding)
-									.HAlign(HAlign_Left)
-									[
-										SNew(STextBlock)
-										.TextStyle(FEditorStyle::Get(), "NormalText.Important")
-										.Text(LOCTEXT("ResultingRange", "Time Range"))
-									]
-									+ SGridPanel::Slot(1, 2)
-									.Padding(Col2Padding)
-									[
-										SNew(STextBlock)
-										.Text(this, &SSequencerTimePanel::GetSupportedTimeRange)
-									]
-
-									+ SGridPanel::Slot(0, 3)
-									.Padding(Col1Padding)
-									.HAlign(HAlign_Left)
-									[
-										SNew(STextBlock)
-										.TextStyle(FEditorStyle::Get(), "NormalText.Important")
-										.Text(LOCTEXT("SupportedFrameRates", "Supported Rates"))
-									]
-									+ SGridPanel::Slot(1, 3)
-									.Padding(Col2Padding)
-									[
-										SAssignNew(CommonFrameRates, SVerticalBox)
-									]
-								]
-							]
-						]
-
-						+ SVerticalBox::Slot()
-						.AutoHeight()
-						.Padding(5.f)
-						.HAlign(HAlign_Center)
-						.VAlign(VAlign_Center)
-						[
-							SNew(SHorizontalBox)
-							.Visibility(this, &SSequencerTimePanel::GetWarningVisibility)
-
-							+ SHorizontalBox::Slot()
-							.Padding(FMargin(0.f, 0.f, 7.f, 0.f))
-							.AutoWidth()
-							[
-								SNew(STextBlock)
-								.TextStyle(FEditorStyle::Get(), "TextBlock.ShadowedTextWarning")
-								.ColorAndOpacity(WarningColor)
-								.Font(FEditorStyle::Get().GetFontStyle("FontAwesome.11"))
-								.Text(FText::FromString(FString(TEXT("\xf071"))) /*fa-exclamation-triangle*/)
-							]
-
-							+ SHorizontalBox::Slot()
-							.AutoWidth()
-							[
-								SNew(STextBlock)
-								.TextStyle(FEditorStyle::Get(), "TextBlock.ShadowedTextWarning")
-								.ColorAndOpacity(WarningColor)
-								.Text(LOCTEXT("ApplyWarning", "Applying these settings may result in changes to key positions or section boundaries."))
-							]
-						]
-
-						+ SVerticalBox::Slot()
-						.AutoHeight()
-						.Padding(5.f)
-						.HAlign(HAlign_Center)
-						.VAlign(VAlign_Center)
-						[
-							SNew(SHorizontalBox)
-
-							+SHorizontalBox::Slot()
-							.Padding(FMargin(0, 0, 2, 0))
-							.AutoWidth()
-							[
-								SNew(SButton)
-								.OnClicked(this, &SSequencerTimePanel::Apply)
-								[
-									SNew(STextBlock)
-									.Text(LOCTEXT("ApplyButtonText", "Apply"))
-								]
-							]
-
-							+SHorizontalBox::Slot()
-							.Padding(FMargin(2, 0, 0, 0))
-							.AutoWidth()
-							[
-								SNew(SButton)
-								.OnClicked(this, &SSequencerTimePanel::Close)
-								[
-									SNew(STextBlock)
-									.Text(LOCTEXT("CancelButtonText", "Cancel"))
-								]
-							]
-						]
+					+ SGridPanel::Slot(0, 4)
+					.Padding(Col1Padding)
+					.HAlign(HAlign_Right)
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT("SupportedFrameRates", "Supported Rates"))
+					]
+					+ SGridPanel::Slot(1, 4)
+					.Padding(Col2Padding)
+					[
+						SAssignNew(CommonFrameRates, SVerticalBox)
 					]
 				]
+			]
 
-				+ SOverlay::Slot()
-				.HAlign(HAlign_Right)
-				.VAlign(VAlign_Top)
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(5.f)
+			.HAlign(HAlign_Center)
+			.VAlign(VAlign_Center)
+			[
+				SNew(SHorizontalBox)
+				.Visibility(this, &SSequencerTimePanel::GetWarningVisibility)
+
+				+ SHorizontalBox::Slot()
+				.Padding(FMargin(0.f, 0.f, 7.f, 0.f))
+				.AutoWidth()
+				[
+					SNew(STextBlock)
+					.ColorAndOpacity(WarningColor)
+					.Font(FAppStyle::Get().GetFontStyle("FontAwesome.11"))
+					.Text(FText::FromString(FString(TEXT("\xf071"))) /*fa-exclamation-triangle*/)
+				]
+
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				[
+					SNew(STextBlock)
+					.ColorAndOpacity(WarningColor)
+					.Text(LOCTEXT("ApplyWarning", "Applying these settings may result in changes to key positions or section boundaries."))
+				]
+			]
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.HAlign(HAlign_Right)
+			.VAlign(VAlign_Bottom)
+			.Padding(0.0f, 3.0f)
+			[
+				SNew(SHorizontalBox)
+
+				+SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Bottom)
+				.Padding(8, 0)
+				[
+					SNew(SPrimaryButton)
+					.Text(LOCTEXT("ApplyButtonText", "Apply"))
+					.OnClicked(this, &SSequencerTimePanel::Apply)
+				]
+
+				+SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Bottom)
 				[
 					SNew(SButton)
-					.ButtonStyle(&FEditorStyle::Get().GetWidgetStyle< FButtonStyle >("Sequencer.Transport.CloseButton"))
+					.Text(LOCTEXT("CancelButtonText", "Cancel"))
 					.OnClicked(this, &SSequencerTimePanel::Close)
 				]
 			]
@@ -245,15 +213,11 @@ void SSequencerTimePanel::Construct(const FArguments& InArgs, TWeakPtr<FSequence
 	UpdateCommonFrameRates();
 }
 
-FReply SSequencerTimePanel::OnBorderFadeClicked(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
-{
-	return Close();
-}
-
 FReply SSequencerTimePanel::Close()
 {
 	CurrentTickResolution.Reset();
-	SetVisibility(EVisibility::Collapsed);
+	TSharedRef<SWindow> ParentWindow = FSlateApplication::Get().FindWidgetWindow( AsShared() ).ToSharedRef();
+	FSlateApplication::Get().RequestDestroyWindow( ParentWindow );
 	return FReply::Handled();
 }
 
@@ -266,10 +230,51 @@ FReply SSequencerTimePanel::Apply()
 	{
 		FFrameRate Src = MovieScene->GetTickResolution();
 		FFrameRate Dst = GetCurrentTickResolution();
+		bool bRecursive = GetIsRecursive() == ECheckBoxState::Checked;
 
 		FScopedTransaction ScopedTransaction(FText::Format(LOCTEXT("MigrateFrameTimes", "Convert sequence tick interval from {0} to {1}"), Src.ToPrettyText(), Dst.ToPrettyText()));
 
-		UE::MovieScene::TimeHelpers::MigrateFrameTimes(Src, Dst, MovieScene);
+		// We quickly iterate through the sequence hierarchy to check for any readonly sequences. If we find a read-only sequence we're going to just warn the user
+		// that we automatically unlocked, edited, and re-locked the sequence (as there should be no data change apparent to the user). We're doing this here to avoid
+		// firing off the warning for every sequence, though we will print in the output log which ones were unlocked.
+		{
+			struct FSequenceReadOnlyVisitor : UE::MovieScene::ISequenceVisitor
+			{
+				virtual void VisitSubSequence(UMovieSceneSequence* InSequence, const FGuid&, const UE::MovieScene::FSubSequenceSpace& LocalSpace) 
+				{
+					if (InSequence->GetMovieScene()->IsReadOnly())
+					{
+						ReadOnlyMovieScenes.Add(InSequence->GetMovieScene());
+					}
+				}
+				TArray<UMovieScene*> ReadOnlyMovieScenes;
+			};
+
+			UE::MovieScene::FSequenceVisitParams Params;
+			Params.bVisitRootTracks = true;
+			Params.bVisitSubSequences = true;
+			FSequenceReadOnlyVisitor ReadOnlyVisitor;
+			VisitSequence(Sequence, Params, ReadOnlyVisitor);
+
+			for (UMovieScene* ReadOnlyMovieScene : ReadOnlyVisitor.ReadOnlyMovieScenes)
+			{
+				UE_LOG(LogMovieScene, Log, TEXT("The following sequence was read-only but had its tick resolution adjusted automatically. No action is required. %s"), *ReadOnlyMovieScene->GetPathName());
+			}
+
+			if (ReadOnlyVisitor.ReadOnlyMovieScenes.Num() > 0)
+			{
+				FNotificationInfo Info(LOCTEXT("ReadOnlyScenesEdited", "Edited read-only sequence, see output log for details. No action is required."));
+				Info.bFireAndForget = true;
+				Info.FadeOutDuration = 0.5f;
+				Info.ExpireDuration = 5.0f;
+
+				TSharedPtr<SNotificationItem> NotificationPtr = FSlateNotificationManager::Get().AddNotification(Info);
+				NotificationPtr->SetCompletionState(SNotificationItem::CS_Success);
+			}
+
+		}
+
+		UE::MovieScene::TimeHelpers::MigrateFrameTimes(Src, Dst, MovieScene, bRecursive);
 	}
 
 	return Close();
@@ -353,7 +358,15 @@ void SSequencerTimePanel::OnSetTickResolution(FFrameRate InTickResolution)
 }
 
 
+ECheckBoxState SSequencerTimePanel::GetIsRecursive() const
+{
+	return bIsRecursive ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
 
+void SSequencerTimePanel::OnSetIsRecursive(ECheckBoxState InCheckBoxState)
+{
+	bIsRecursive = InCheckBoxState == ECheckBoxState::Checked;
+}
 
 
 #undef LOCTEXT_NAMESPACE

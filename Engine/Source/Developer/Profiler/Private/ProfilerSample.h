@@ -3,8 +3,12 @@
 #pragma once
 
 #include "CoreMinimal.h"
+
+#if STATS
+
 #include "Containers/ChunkedArray.h"
 #include "Stats/Stats.h"
+
 
 /*-----------------------------------------------------------------------------
 	Type definitions
@@ -272,3 +276,5 @@ public:
 	virtual int32 GetCount(float MinVal, float MaxVal) = 0;
 	virtual int32 GetTotalCount() = 0;
 };
+
+#endif // STATS

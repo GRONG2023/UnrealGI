@@ -6,18 +6,6 @@ namespace UnrealBuildTool.Rules
 	{
 		public SequenceRecorder(ReadOnlyTargetRules Target) : base(Target)
 		{
-			PublicIncludePaths.AddRange(
-				new string[] {
-				}
-				);
-
-			PrivateIncludePaths.AddRange(
-				new string[] {
-					"Editor/SequenceRecorder/Private",
-					"Editor/SequenceRecorder/Private/Sections",
-				}
-				);
-
 			PublicDependencyModuleNames.AddRange(
 				new string[]
 				{
@@ -36,6 +24,7 @@ namespace UnrealBuildTool.Rules
 					"Slate",
 					"InputCore",
 					"Engine",
+					"EditorFramework",
 					"UnrealEd",
 					"EditorStyle",
 					"Projects",
@@ -51,7 +40,7 @@ namespace UnrealBuildTool.Rules
                     "EditorWidgets",
                     "Kismet",
                     "LiveLinkInterface",
-                    "SerializedRecorderInterface",
+					"SceneOutliner",
                 }
                 );
 
@@ -69,7 +58,7 @@ namespace UnrealBuildTool.Rules
                 }
 				);
 
-			if (Target.Platform == UnrealTargetPlatform.Win64 || Target.Platform == UnrealTargetPlatform.Win32)
+			if (Target.Platform == UnrealTargetPlatform.Win64)
 			{
 				// Add __WINDOWS_WASAPI__ so that RtAudio compiles with WASAPI
 				PublicDefinitions.Add("__WINDOWS_WASAPI__");

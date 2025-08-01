@@ -5,11 +5,20 @@
 =============================================================================*/
 
 #include "Serialization/CustomVersion.h"
-#include "Serialization/StructuredArchive.h"
+
 #include "Algo/Sort.h"
+#include "Containers/ContainerAllocationPolicies.h"
 #include "Containers/Map.h"
+#include "HAL/CriticalSection.h"
+#include "Misc/AssertionMacros.h"
 #include "Misc/ScopeRWLock.h"
-#include "CoreGlobals.h"
+#include "Serialization/Archive.h"
+#include "Serialization/StructuredArchive.h"
+#include "Serialization/StructuredArchiveAdapters.h"
+#include "Serialization/StructuredArchiveNameHelpers.h"
+#include "Serialization/StructuredArchiveSlots.h"
+#include "UObject/UnrealNames.h"
+#include "AutoRTFM/AutoRTFM.h"
 
 namespace
 {
@@ -276,14 +285,17 @@ void FCustomVersionContainer::SortByKey()
 
 FString FCustomVersionContainer::ToString(const FString& Indent) const
 {
-	FString VersionsAsString;
+	TStringBuilder<2048> VersionsAsString;
 	for (const FCustomVersion& SomeVersion : Versions)
 	{
-		VersionsAsString += Indent;
-		VersionsAsString += FString::Printf(TEXT("Key=%s  Version=%d  Friendly Name=%s \n"), *SomeVersion.Key.ToString(), SomeVersion.Version, *SomeVersion.GetFriendlyName().ToString() );
+		VersionsAsString << Indent
+			<< TEXTVIEW("Key=") << SomeVersion.Key
+			<< TEXTVIEW(" Version = ") << SomeVersion.Version
+			<< TEXTVIEW(" Friendly Name = ") << SomeVersion.GetFriendlyName()
+			<< TEXTVIEW("\n");
 	}
 
-	return VersionsAsString;
+	return FString(VersionsAsString);
 }
 
 FArchive& operator<<(FArchive& Ar, FCustomVersion& Version)
@@ -387,5 +399,41 @@ void FCustomVersionContainer::SetVersion(FGuid CustomKey, int32 Version, FName F
 	else
 	{
 		Versions.Add(FCustomVersion(CustomKey, Version, FriendlyName));
+	}
+}
+
+void FCustomVersionContainer::SetVersionUsingRegistry(FGuid CustomKey, ESetCustomVersionFlags Options)
+{
+	if (CustomKey == UnusedCustomVersionKey)
+	{
+		return;
+	}
+
+	if (FCustomVersion* Found = Versions.FindByKey(CustomKey))
+	{
+		if (EnumHasAnyFlags(Options, ESetCustomVersionFlags::SkipUpdateExistingVersion))
+		{
+			return;
+		}
+
+		TOptional<FCustomVersion> RegisteredVersion;
+		UE_AUTORTFM_OPEN({
+			RegisteredVersion = FCurrentCustomVersions::Get(CustomKey);
+		});
+		checkf(RegisteredVersion, TEXT("Attempted to set a version that is not registered"));
+
+		Found->Version      = RegisteredVersion->Version;
+		Found->FriendlyName = RegisteredVersion->FriendlyName;
+	}
+	else
+	{
+		TOptional<FCustomVersion> RegisteredVersion;
+		UE_AUTORTFM_OPEN({
+			RegisteredVersion = FCurrentCustomVersions::Get(CustomKey);
+		});
+
+		checkf(RegisteredVersion, TEXT("Attempted to set a version that is not registered"));
+
+		Versions.Emplace(FCustomVersion(CustomKey, RegisteredVersion->Version, RegisteredVersion->FriendlyName));
 	}
 }

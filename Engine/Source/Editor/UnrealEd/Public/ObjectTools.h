@@ -10,10 +10,11 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "Serialization/ArchiveUObject.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "UObject/GCObject.h"
 #include "CollectionManagerTypes.h"
 
+class FNamePermissionList;
 class FTextureRenderTargetResource;
 class SWindow;
 class UExporter;
@@ -133,6 +134,12 @@ namespace ObjectTools
 		CancelNotAllowed
 	};
 
+	enum class EAllowCancelDuringPrivatize : uint8
+	{
+		AllowCancel,
+		CancelNotAllowed
+	};
+
 	/**
 	 * Handles fully loading packages for a set of passed in objects.
 	 *
@@ -158,14 +165,15 @@ namespace ObjectTools
 	 *
 	 * @param	Object									The objects to delete.
 	 * @param	PGN										The new package, group, and name of the object.
-	 * @param	InOutPackagesUserRefusedToFullyLoad		A set of packages the user opted out of fully loading. This is used internally to prevent asking multiple times.\
+	 * @param	InOutPackagesUserRefusedToFullyLoad		A set of packages the user opted out of fully loading. This is used internally to prevent asking multiple times.
 	 * @param	bPromptToOverwrite						If true the user will be prompted to overwrite if duplicating to an existing object.  If false, the duplication will always happen
+	 * @param	DuplicatedObjects						If non-null, the map is filled with all objects (including sub-objects) that were duplicated with their source object as key
 	 * @retun	The duplicated object or NULL if a failure occurred.
 	 */
-	UNREALED_API UObject* DuplicateSingleObject(UObject* Object, const FPackageGroupName& PGN, TSet<UPackage*>& InOutPackagesUserRefusedToFullyLoad, bool bPromptToOverwrite = true);
+	UNREALED_API UObject* DuplicateSingleObject(UObject* Object, const FPackageGroupName& PGN, TSet<UPackage*>& InOutPackagesUserRefusedToFullyLoad, bool bPromptToOverwrite = true, TMap<TSoftObjectPtr<UObject>, TSoftObjectPtr<UObject>>* DuplicatedObjects = nullptr);
 
 	/** Helper struct to detail the results of a consolidation operation */
-	struct UNREALED_API FConsolidationResults : public FGCObject
+	struct FConsolidationResults : public FGCObject
 	{
 		/** FGCObject interface; Serialize any object references */
 		virtual void AddReferencedObjects( FReferenceCollector& Collector ) override
@@ -174,15 +182,26 @@ namespace ObjectTools
 			Collector.AddReferencedObjects( InvalidConsolidationObjs );
 			Collector.AddReferencedObjects( FailedConsolidationObjs );
 		}
+		virtual FString GetReferencerName() const override
+		{
+			return TEXT("ObjectTools::FConsolidationResults");
+		}
 
 		/** Packages dirtied by a consolidation operation */
-		TArray<UPackage*>	DirtiedPackages;
+		TArray<TObjectPtr<UPackage>>	DirtiedPackages;
 
 		/** Objects which were not valid for consolidation */
-		TArray<UObject*>	InvalidConsolidationObjs;
+		TArray<TObjectPtr<UObject>>	InvalidConsolidationObjs;
 
 		/** Objects which failed consolidation (partially consolidated) */
-		TArray<UObject*>	FailedConsolidationObjs;
+		TArray<TObjectPtr<UObject>>	FailedConsolidationObjs;
+	};
+
+	/** Helper struct for batch replacements where Old references get replaced with New */
+	struct FReplaceRequest
+	{
+		UObject* New = nullptr;
+		TArrayView<UObject*> Old; 
 	};
 
 	/**
@@ -193,15 +212,19 @@ namespace ObjectTools
 	 *
 	 * @param	ObjectToConsolidateTo	Object to which all references of the "objects to consolidate" will instead refer to after this operation completes
 	 * @param	ObjectsToConsolidate	Objects which all references of which will be replaced with references to the "object to consolidate to"; each will also be deleted
+	 * @param	Requests				Batch of consolidations. All objects consilidated to, i.e. FReplaceRequest::New, must be non-null.
 	 *
 	 * @note	This function performs NO type checking, by design. It is potentially dangerous to replace references of one type with another, so utilize caution.
 	 * @note	The "objects to consolidate" are DELETED by this function.
 	 *
 	 * @return	Structure of consolidation results, specifying which packages were dirtied, which objects failed consolidation (if any), etc.
 	 */
-	UNREALED_API FConsolidationResults ConsolidateObjects( UObject* ObjectToConsolidateTo, TArray<UObject*>& ObjectsToConsolidate, bool bShowDeleteConfirmation = true );
+	UNREALED_API FConsolidationResults ConsolidateObjects(UObject* ObjectToConsolidateTo, TArray<UObject*>& ObjectsToConsolidate, bool bShowDeleteConfirmation = true );
 	UNREALED_API FConsolidationResults ConsolidateObjects(UObject* ObjectToConsolidateTo, TArray<UObject*>& ObjectsToConsolidate, TSet<UObject*>& ObjectsToConsolidateWithin, TSet<UObject*>& ObjectsToNotConsolidateWithin, bool bShouldDeleteAfterConsolidate, bool bWarnAboutRootSet = true);
-	UNREALED_API void CompileBlueprintsAfterRefUpdate(TArray<UObject*>& ObjectsConsolidatedWithin);
+	UNREALED_API FConsolidationResults ConsolidateObjects(TArrayView<FReplaceRequest> Requests, TSet<UObject*>& ObjectsToConsolidateWithin, TSet<UObject*>& ObjectsToNotConsolidateWithin, bool bShouldDeleteAfterConsolidate, bool bWarnAboutRootSet = true);
+
+	
+	UNREALED_API void CompileBlueprintsAfterRefUpdate(const TArray<UObject*>& ObjectsConsolidatedWithin);
 	/**
 	 * Copies references for selected generic browser objects to the clipboard.
 	 */
@@ -274,11 +297,22 @@ namespace ObjectTools
 	 * Deletes the list of objects
 	 *
 	 * @param	ObjectsToDelete		The list of objects to delete
-	 * @param	bShowConfirmation	True when a dialog should prompt the user that he/she is about to delete something
+	 * @param	bShowConfirmation	True when a dialog should prompt the user that they are about to delete something
 	 *
 	 * @return The number of objects successfully deleted
 	 */
 	UNREALED_API int32 DeleteObjects( const TArray< UObject* >& ObjectsToDelete, bool bShowConfirmation = true, EAllowCancelDuringDelete AllowCancelDuringDelete = EAllowCancelDuringDelete::AllowCancel);
+
+	/**
+	* Privatizes the list of objects (marks their packages as NotExternallyReferencable)
+	* 
+	* @param InObjectsToPrivatize The list of objects to privatize
+	* @param bShowConfirmation True when the dialog should prompt the user that they are about to privatize something and doing so would break references
+	* @param AllowCancelDuringPrivatize Whether or not canceling is allowed when not showing the confirmation dialog
+	* 
+	* @return The number of objects successfully privatized
+	*/
+	UNREALED_API int32 PrivatizeObjects(const TArray<UObject*>& InObjectsToPrivatize, bool bShowConfirmation = true, EAllowCancelDuringPrivatize AllowCancelDuringPrivatize = EAllowCancelDuringPrivatize::AllowCancel);
 
 	/**
 	* Deletes the list of objects without checking if they are still being used.  This should not be called directly
@@ -294,11 +328,21 @@ namespace ObjectTools
 	* Deletes the list of objects
 	*
 	* @param	AssetsToDelete		The list of assets to delete
-	* @param	bShowConfirmation	True when a dialog should prompt the user that he/she is about to delete something
+	* @param	bShowConfirmation	True when a dialog should prompt the user that they are about to delete something
 	*
 	* @return The number of assets successfully deleted
 	*/
 	UNREALED_API int32 DeleteAssets( const TArray<FAssetData>& AssetsToDelete, bool bShowConfirmation = true );
+	
+	/**
+	* Privatizes the list of Assets (marks their packages as NotExternallyReferenceable)
+	* 
+	* @param AssetsToPrivatize The list of assets to privatize
+	* @param bShowConfirmation True when a dialog should prompt the user that they are about to privatize something and going to break references
+	* 
+	* @return The number of assets successfully privatized
+	*/
+	UNREALED_API int32 PrivatizeAssets(const TArray<FAssetData>& AssetsToPrivatize, bool bShowConfirmation = true);
 
 	/**
 	 * Delete a single object
@@ -324,9 +368,11 @@ namespace ObjectTools
 	 *
 	 * @param ObjectToReplaceWith	Any references found to 'ObjectsToReplace' will be replaced with this object.  If the object is nullptr references will be nulled.
 	 * @param ObjectsToReplace		An array of objects that should be replaced with 'ObjectToReplaceWith'
+	 * @param Requests				Batch of replacements where all FReplaceRequest::Old are replaced with FReplaceRequest::New for each request
 	 */
 	UNREALED_API void ForceReplaceReferences(UObject* ObjectToReplaceWith, TArray<UObject*>& ObjectsToReplace);
 	UNREALED_API void ForceReplaceReferences(UObject* ObjectToReplaceWith, TArray<UObject*>& ObjectsToReplace, TSet<UObject*>& ObjectsToReplaceWithin);
+	UNREALED_API void ForceReplaceReferences(TArrayView<FReplaceRequest> Requests, TSet<UObject*>& ObjectsToReplaceWithin);
 
 	/**
 	 * Gathers additional objects to delete such as map built data
@@ -443,8 +489,12 @@ namespace ObjectTools
 	 * @param	InFactory		Factory whose supported file types and extensions should be retrieved
 	 * @param	out_Filetypes	File types supported by the provided factory, concatenated into a string
 	 * @param	out_Extensions	Extensions supported by the provided factory, concatenated into a string
+	 * @param   SupportedExtensions			If not null only extension in the list can be added
 	 */
-	UNREALED_API void GenerateFactoryFileExtensions( const UFactory* InFactory, FString& out_Filetypes, FString& out_Extensions, TMultiMap<uint32, UFactory*>& out_FilterIndexToFactory );
+	UNREALED_API void GenerateFactoryFileExtensions( const UFactory* InFactory
+		, FString& out_Filetypes
+		, FString& out_Extensions
+		, TMultiMap<uint32, UFactory*>& out_FilterIndexToFactory);
 
 	/**
 	 * Populates two strings with all of the file types and extensions the provided factories support.
@@ -452,14 +502,46 @@ namespace ObjectTools
 	 * @param	InFactories		Factories whose supported file types and extensions should be retrieved
 	 * @param	out_Filetypes	File types supported by the provided factory, concatenated into a string
 	 * @param	out_Extensions	Extensions supported by the provided factory, concatenated into a string
+	 * @param   SupportedExtensions			If not null only extension in the list can be added
 	 */
-	UNREALED_API void GenerateFactoryFileExtensions( const TArray<UFactory*>& InFactories, FString& out_Filetypes, FString& out_Extensions, TMultiMap<uint32, UFactory*>& out_FilterIndexToFactory );
+	UNREALED_API void GenerateFactoryFileExtensions( const TArray<UFactory*>& InFactories
+		, FString& out_Filetypes
+		, FString& out_Extensions
+		, TMultiMap<uint32, UFactory*>& out_FilterIndexToFactory);
 
 	/**
 	 * Generates a list of file types for a given class.
+	 * @param   SupportedExtensions			If not null only extension in the list can be added
 	 */
-	UNREALED_API void AppendFactoryFileExtensions( UFactory* InFactory, FString& out_Filetypes, FString& out_Extensions );
+	UNREALED_API void AppendFactoryFileExtensions( UFactory* InFactory
+		, FString& out_Filetypes
+		, FString& out_Extensions);
 
+	/**
+	 * Populates two strings with all of the file types and extensions the format list provides.
+	 *
+	 * @param	InFormats		Array of supported file types. Each entry needs to be of the form "ext;Description" where ext is the file extension. 
+	 * @param	out_FileTypes	File types supported by the provided array of formats, concatenated into a string
+	 * @param	out_Extensions	Extensions supported by the provided array of formats, concatenated into a string
+	 * @param   SupportedExtensions			If not null only extension in the list can be added
+	 */
+	UNREALED_API void AppendFormatsFileExtensions(const TArray<FString>& InFormats
+		, FString& out_FileTypes
+		, FString& out_Extensions);
+
+	/**
+	 * Populates two strings with all of the file types and extensions the format list provides.
+	 *
+	 * @param	InFormats		Array of supported file types. Each entry needs to be of the form "ext;Description" where ext is the file extension.
+	 * @param	out_FileTypes	File types supported by the provided array of formats, concatenated into a string
+	 * @param	out_Extensions	Extensions supported by the provided array of formats, concatenated into a string
+	 * @param	out_FilterIndexToFactory	Add INDEX_NONE entry for all provided Formats
+	 * @param   SupportedExtensions			If not null only extension in the list can be added
+	 */
+	UNREALED_API void AppendFormatsFileExtensions(const TArray<FString>& InFormats
+		, FString& out_FileTypes
+		, FString& out_Extensions
+		, TMultiMap<uint32, UFactory*>& out_FilterIndexToFactory);
 
 	/**
 	 * Iterates over all classes and assembles a list of non-abstract UExport-derived type instances.
@@ -471,19 +553,6 @@ namespace ObjectTools
 	 */
 	UNREALED_API void GetDirectoryFromObjectPath(const UObject* Obj, FString& OutResult);
 
-
-	/**
-	 * Exports the specified objects to file.
-	 *
-	 * @param	ObjectsToExport					The set of objects to export.
-	 * @param	bPromptIndividualFilenames		If true, prompt individually for filenames.  If false, bulk export to a single directory.
-	 * @param	ExportPath						receives the value of the path the user chose for exporting.
-	 * @param	bUseProvidedExportPath			If true and out_ExportPath is specified, use the value in out_ExportPath as the export path w/o prompting for a directory when applicable
-	 */
-	UE_DEPRECATED(4.17, "ObjectTools::ExportObjects is deprecated.  Use AssetTools::ExportObjects instead")
-	UNREALED_API void ExportObjects( const TArray<UObject*>& ObjectsToExport, bool bPromptIndividualFilenames, FString* ExportPath = NULL, bool bUseProvidedExportPath = false );
-
-
 	/** Options for in use object tagging */
 	enum EInUseSearchOption
 	{
@@ -492,12 +561,20 @@ namespace ObjectTools
 		SO_LoadedLevels // Searches for in use objects referenced by all loaded levels
 	};
 
+	enum class EInUseSearchFlags : uint32
+	{
+		None = 0,
+		SkipCompilingAssets = 1, // Skip serialization of assets still being compiled, some data might be missing.
+	};
+	ENUM_CLASS_FLAGS(EInUseSearchFlags);
+
 	/**
 	 * Tags objects which are in use by levels specified by the search option
 	 *
-	 * @param SearchOption	 The search option for finding in use objects
+	 * @param SearchOption                  The search option for finding in use objects
+	 * @param bShouldSkipCompilingAssets    Whether to avoid stalls on assets still being compiled.
 	 */
-	UNREALED_API void TagInUseObjects( EInUseSearchOption SearchOption );
+	UNREALED_API void TagInUseObjects( EInUseSearchOption SearchOption, EInUseSearchFlags InUseSearchFlags = EInUseSearchFlags::None);
 
 	/**
 	 * Opens a property window for the selected objects
@@ -514,14 +591,7 @@ namespace ObjectTools
 	 */
 	UNREALED_API void RemoveDeletedObjectsFromPropertyWindows( TArray<UObject*>& DeletedObjects );
 
-	/**
-	 * Determines if the asset is placeable in a world.
-	 *
-	 * @param InWorld	The world.
-	 * @param ObjectPath	Object path.
-	 *
-	 * @return true if the asset can be placed in the world.
-	 */
+	UE_DEPRECATED(5.1, "No longer used.")
 	UNREALED_API bool IsAssetValidForPlacing(UWorld* InWorld, const FString& ObjectPath);
 
 	/**
@@ -580,6 +650,30 @@ namespace ObjectTools
 	* @param OutObjectsAndSubobjects	The complete list of objects and any subobjects that should have references replaced
 	*/
 	UNREALED_API void GatherSubObjectsForReferenceReplacement(TSet<UObject*>& InObjects, TSet<UObject*>& ObjectsToExclude, TSet<UObject*>& OutObjectsAndSubObjects);
+
+	/**
+	 * Given a SourceObject and ObjectToSearchFor will attempt to find the ObjectToSearchFor on the given object.
+	 * If the ObjectToSearchFor is found this will report back properties needed to traverse to find this pointer.
+	 * This is useful to find out where a reference is being pulled in from.
+	 * 
+	 * Uses the CVar ObjectTools.MaxTimesToCheckSameObject to configure how many times the same object should be checked and traversed. This is to help avoid circular dependencies.
+	 * 
+	 * @param SourceObject - which object we will scan the properties on to attempt to find the given ObjectToSearchFor
+	 * @param ObjectToSearchFor - which object we will look for on each property of the SourceObject
+	 * @param OutFoundPropertyChains - an array of strings for which properties to traverse to find the ObjectToSearchFor
+	 * @return true when the ObjectToSearchFor is found, otherwise false.
+	 */
+	UNREALED_API bool GatherPropertyChainsToObject(const UObject* SourceObject, const UObject* ObjectToSearchFor, TArray<FString>& OutFoundPropertyChains);
+
+
+	/**
+	 * Batch version of UObject::GetArchetypeInstances.  Can be considerably faster in large worlds when querying multiple objects with the
+	 * same UClass, as it only traverses the world once per UClass.  Null pointers are allowed for InObjects, returning an empty output.
+	 *
+	 * @param	InObjects		list of objects to query for archetype instances
+	 * @param	OutInstances	per InObjects array element, receives the list of objects which have the given object in its archetype chain
+	 */
+	UNREALED_API void BatchGetArchetypeInstances(TArrayView<UObject*> InObjects, TArray<TArray<UObject*>>& OutInstances);
 }
 
 
@@ -642,7 +736,10 @@ namespace ThumbnailTools
 	/** Returns the thumbnail for the specified object or NULL if one doesn't exist yet */
 	UNREALED_API FObjectThumbnail* GetThumbnailForObject( UObject* InObject );
 
-	/** Loads thumbnails from the specified package file name */
+	/** Loads the thumbnail of an asset from the specified package file name (or from the external thumbnail cache file if it exists) */
+	UNREALED_API bool LoadThumbnailFromPackage(const FAssetData& AssetData, FObjectThumbnail& OutThumbnail);
+
+	/** Loads thumbnails from the specified package file name (or from the external thumbnail cache file if it exists) */
 	UNREALED_API bool LoadThumbnailsFromPackage( const FString& InPackageFileName, const TSet<FName>& InObjectFullNames, FThumbnailMap& InOutThumbnails );
 
 	/** Loads thumbnails from a package unless they're already cached in that package's thumbnail map */
@@ -650,8 +747,9 @@ namespace ThumbnailTools
 
 	/** Loads thumbnails for the specified objects (or copies them from a cache, if they're already loaded.) */
 	UNREALED_API bool ConditionallyLoadThumbnailsForObjects( const TArray< FName >& InObjectFullNames, FThumbnailMap& InOutThumbnails );
+
 	/** Standard thumbnail height setting used by generation */
-	const int32 DefaultThumbnailSize=256;
+	inline const int32 DefaultThumbnailSize=256;
 
 	/** Returns true if the given asset has a custom thumbnail cached or on the disk. */
 	UNREALED_API bool AssetHasCustomThumbnail(const FString& InAssetDataFullName);

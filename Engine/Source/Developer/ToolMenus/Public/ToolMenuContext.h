@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Containers/SortedMap.h"
 
 #include "ToolMenuContext.generated.h"
 
@@ -33,8 +34,12 @@ struct TOOLMENUS_API FToolMenuContext
 	GENERATED_BODY()
 public:
 
-	FToolMenuContext();
+	using FContextObjectCleanup = TFunction<void(UObject*)>;
+	using FContextCleanup = TFunction<void()>;
+
+	FToolMenuContext() = default;
 	FToolMenuContext(UObject* InContext);
+	FToolMenuContext(UObject* InContext, FContextObjectCleanup&& InCleanup);
 	FToolMenuContext(TSharedPtr<FUICommandList> InCommandList, TSharedPtr<FExtender> InExtender = TSharedPtr<FExtender>(), UObject* InContext = nullptr);
 
 	template <typename TContextType>
@@ -52,17 +57,10 @@ public:
 	}
 
 	template <typename TContextType>
+	UE_DEPRECATED(4.27, "Find is deprecated. Use the FindContext instead.")
 	TContextType* Find() const
 	{
-		for (UObject* Object : ContextObjects)
-		{
-			if (TContextType* Result = Cast<TContextType>(Object))
-			{
-				return Result;
-			}
-		}
-
-		return nullptr;
+		return FindContext<TContextType>();
 	}
 
 	UObject* FindByClass(UClass* InClass) const;
@@ -74,26 +72,35 @@ public:
 
 	void AddExtender(const TSharedPtr<FExtender>& InExtender);
 	TSharedPtr<FExtender> GetAllExtenders() const;
-	void ReplaceExtenders(const TSharedPtr<FExtender>& InExtender);
 	void ResetExtenders();
 
 	void AppendObjects(const TArray<UObject*>& InObjects);
 	void AddObject(UObject* InObject);
+	void AddObject(UObject* InObject, FContextObjectCleanup&& InCleanup);
+
+	void AddCleanup(FContextCleanup&& InCleanup);
+
+	void CleanupObjects();
 
 	friend class UToolMenus;
 	friend class UToolMenu;
 	friend struct FToolMenuEntry;
 
 	bool IsEditing() const { return bIsEditing; }
-
-	bool bIsEditing;
+	void SetIsEditing(bool InIsEditing) { bIsEditing = InIsEditing; }
 
 private:
 
 	void Empty();
 
+	bool bIsEditing = false;
+
 	UPROPERTY()
-	TArray<UObject*> ContextObjects;
+	TArray<TObjectPtr<UObject>> ContextObjects;
+
+	TSortedMap<TObjectPtr<UObject>, FContextObjectCleanup> ContextObjectCleanupFuncs;
+
+	TArray<FContextCleanup> ContextCleanupFuncs;
 
 	TArray<TSharedPtr<FUICommandList>> CommandLists;
 
@@ -101,4 +108,3 @@ private:
 
 	TArray<TSharedPtr<FExtender>> Extenders;
 };
-

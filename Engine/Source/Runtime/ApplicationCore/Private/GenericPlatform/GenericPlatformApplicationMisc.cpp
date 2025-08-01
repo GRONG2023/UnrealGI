@@ -2,6 +2,7 @@
 
 #include "GenericPlatform/GenericPlatformApplicationMisc.h"
 #include "GenericPlatform/GenericApplication.h"
+#include "GenericPlatform/GenericPlatformInputDeviceMapper.h"
 #include "Misc/OutputDeviceAnsiError.h"
 #include "HAL/FeedbackContextAnsi.h"
 #include "Math/Color.h"
@@ -23,6 +24,15 @@ FAutoConsoleVariableRef FGenericPlatformApplicationMisc::CVarEnableHighDPIAwaren
 	TEXT("EnableHighDPIAwareness"),
 	bEnableHighDPIAwareness,
 	TEXT("Enables or disables high dpi mode"),
+	ECVF_ReadOnly
+);
+
+static bool bAllowVirtualKeyboard  = false;
+
+FAutoConsoleVariableRef FGenericPlatformApplicationMisc::CVarAllowVirtualKeyboard(
+	TEXT("AllowVirtualKeyboard"),
+	bAllowVirtualKeyboard,
+	TEXT("Allow the use of a virtual keyboard despite platform main screen being non-touch"),
 	ECVF_ReadOnly
 );
 
@@ -61,6 +71,11 @@ class FFeedbackContext* FGenericPlatformApplicationMisc::GetFeedbackContext()
 	return FPlatformOutputDevices::GetFeedbackContext();
 }
 
+IPlatformInputDeviceMapper* FGenericPlatformApplicationMisc::CreatePlatformInputDeviceManager()
+{
+	return new FGenericPlatformInputDeviceMapper(/* bUsingControllerIdAsUserId = */ true, /* bShouldBroadcastLegacyDelegates = */ true);
+}
+
 GenericApplication* FGenericPlatformApplicationMisc::CreateApplication()
 {
 	return new GenericApplication( nullptr );
@@ -76,7 +91,12 @@ bool FGenericPlatformApplicationMisc::IsThisApplicationForeground()
 	return false;
 }
 
-FLinearColor FGenericPlatformApplicationMisc::GetScreenPixelColor(const struct FVector2D& InScreenPos, float InGamma)
+bool FGenericPlatformApplicationMisc::RequiresVirtualKeyboard()
+{
+	return PLATFORM_HAS_TOUCH_MAIN_SCREEN || bAllowVirtualKeyboard;
+}
+
+FLinearColor FGenericPlatformApplicationMisc::GetScreenPixelColor(const FVector2D& InScreenPos, float InGamma)
 { 
 	return FLinearColor::Black;
 }
@@ -111,40 +131,6 @@ EScreenPhysicalAccuracy FGenericPlatformApplicationMisc::GetPhysicalScreenDensit
 
 	ScreenDensity = CachedPhysicalScreenDensity;
 	return CachedPhysicalScreenAccuracy;
-}
-
-EScreenPhysicalAccuracy FGenericPlatformApplicationMisc::ConvertInchesToPixels(float Inches, float& OutPixels)
-{
-	int32 ScreenDensity = 0;
-	const EScreenPhysicalAccuracy Accuracy = GetPhysicalScreenDensity(ScreenDensity);
-
-	if (ScreenDensity != 0)
-	{
-		OutPixels = Inches * ScreenDensity;
-	}
-	else
-	{
-		OutPixels = 0;
-	}
-
-	return Accuracy;
-}
-
-EScreenPhysicalAccuracy FGenericPlatformApplicationMisc::ConvertPixelsToInches(float Pixels, float& OutInches)
-{
-	int32 ScreenDensity = 0;
-	const EScreenPhysicalAccuracy Accuracy = GetPhysicalScreenDensity(ScreenDensity);
-
-	if (ScreenDensity != 0)
-	{
-		OutInches = Pixels / (float)ScreenDensity;
-	}
-	else
-	{
-		OutInches = 0;
-	}
-
-	return Accuracy;
 }
 
 EScreenPhysicalAccuracy FGenericPlatformApplicationMisc::ComputePhysicalScreenDensity(int32& ScreenDensity)

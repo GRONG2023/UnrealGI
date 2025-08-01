@@ -1,5 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using EpicGames.Core;
+using OpenTracing;
+using OpenTracing.Util;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -7,13 +10,15 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
-using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Xml;
 using System.Xml.Serialization;
 using UnrealBuildTool;
-using AutomationTool;
-using Tools.DotNETCommon;
+using Microsoft.Extensions.Logging;
+
+using static AutomationTool.CommandUtils;
 
 namespace AutomationTool
 {
@@ -159,7 +164,7 @@ namespace AutomationTool
 			{
 				if(Message != null)
 				{
-					CommandUtils.LogInformation(Message);
+					Logger.LogInformation("{Text}", Message);
 				}
 				return true;
 			}
@@ -167,7 +172,7 @@ namespace AutomationTool
 			{
 				if(Message != null)
 				{
-					CommandUtils.LogError(Message);
+					Logger.LogError("{Text}", Message);
 				}
 				return false;
 			}
@@ -260,7 +265,7 @@ namespace AutomationTool
 		/// <returns>True to generate a digest for this file, rather than relying on timestamps</returns>
 		bool GenerateDigest()
 		{
-			return RelativePath.EndsWith(".modules", StringComparison.OrdinalIgnoreCase);
+			return RelativePath.EndsWith(".version", StringComparison.OrdinalIgnoreCase) || RelativePath.EndsWith(".modules", StringComparison.OrdinalIgnoreCase);
 		}
 
 		/// <summary>
@@ -377,10 +382,10 @@ namespace AutomationTool
 		/// <summary>
 		/// Load a manifest from disk
 		/// </summary>
-		/// <param name="File">File to load</param>
-		static public TempStorageManifest Load(FileReference File)
+		/// <param name="file">File to load</param>
+		static public TempStorageManifest Load(FileReference file)
 		{
-			using(StreamReader Reader = new StreamReader(File.FullName))
+			using (StreamReader Reader = new(file.FullName))
 			{
 				return (TempStorageManifest)Serializer.Deserialize(Reader);
 			}
@@ -394,7 +399,11 @@ namespace AutomationTool
 		{
 			using(StreamWriter Writer = new StreamWriter(File.FullName))
 			{
-				Serializer.Serialize(Writer, this);
+				XmlWriterSettings WriterSettings = new() { Indent = true };
+				using (XmlWriter XMLWriter = XmlWriter.Create(Writer, WriterSettings))
+				{
+					Serializer.Serialize(XMLWriter, this);
+				}
 			}
 		}
 	}
@@ -402,7 +411,8 @@ namespace AutomationTool
 	/// <summary>
 	/// Stores the contents of a tagged file set
 	/// </summary>
-	public class TempStorageFileList
+	[XmlRoot(ElementName = "TempStorageFileList")]
+	public class TempStorageTagManifest
 	{
 		/// <summary>
 		/// List of files that are in this tag set, relative to the root directory
@@ -426,14 +436,21 @@ namespace AutomationTool
 		public TempStorageBlock[] Blocks;
 
 		/// <summary>
+		/// List of keys for published artifacts
+		/// </summary>
+		[XmlArray]
+		[XmlArrayItem("ArtifactKey")]
+		public string[] ArtifactKeys;
+
+		/// <summary>
 		/// Construct a static Xml serializer to avoid throwing an exception searching for the reflection info at runtime
 		/// </summary>
-		static XmlSerializer Serializer = XmlSerializer.FromTypes(new Type[]{ typeof(TempStorageFileList) })[0];
+		static XmlSerializer Serializer = XmlSerializer.FromTypes(new Type[]{ typeof(TempStorageTagManifest) })[0];
 
 		/// <summary>
 		/// Construct an empty file list for deserialization
 		/// </summary>
-		private TempStorageFileList()
+		private TempStorageTagManifest()
 		{
 		}
 
@@ -443,7 +460,8 @@ namespace AutomationTool
 		/// <param name="InFiles">List of full file paths</param>
 		/// <param name="RootDir">Root folder for all the files. All files must be relative to this RootDir.</param>
 		/// <param name="InBlocks">Referenced storage blocks required for these files</param>
-		public TempStorageFileList(IEnumerable<FileReference> InFiles, DirectoryReference RootDir, IEnumerable<TempStorageBlock> InBlocks)
+		/// <param name="InArtifactKeys">Keys for published artifacts</param>
+		public TempStorageTagManifest(IEnumerable<FileReference> InFiles, DirectoryReference RootDir, IEnumerable<TempStorageBlock> InBlocks, IEnumerable<string> InArtifactKeys)
 		{
 			List<string> NewLocalFiles = new List<string>();
 			List<string> NewExternalFiles = new List<string>();
@@ -462,17 +480,18 @@ namespace AutomationTool
 			ExternalFiles = NewExternalFiles.ToArray();
 
 			Blocks = InBlocks.ToArray();
+			ArtifactKeys = InArtifactKeys.ToArray();
 		}
 
 		/// <summary>
 		/// Load this list of files from disk
 		/// </summary>
 		/// <param name="File">File to load</param>
-		static public TempStorageFileList Load(FileReference File)
+		static public TempStorageTagManifest Load(FileReference File)
 		{
 			using(StreamReader Reader = new StreamReader(File.FullName))
 			{
-				return (TempStorageFileList)Serializer.Deserialize(Reader);
+				return (TempStorageTagManifest)Serializer.Deserialize(Reader);
 			}
 		}
 
@@ -482,9 +501,13 @@ namespace AutomationTool
 		/// <param name="File">File to save</param>
 		public void Save(FileReference File)
 		{
-			using(StreamWriter Writer = new StreamWriter(File.FullName))
+			using (StreamWriter Writer = new StreamWriter(File.FullName))
 			{
-				Serializer.Serialize(Writer, this);
+				XmlWriterSettings WriterSettings = new() { Indent = true };
+				using (XmlWriter XMLWriter = XmlWriter.Create(Writer, WriterSettings))
+				{
+					Serializer.Serialize(XMLWriter, this);
+				}
 			}
 		}
 
@@ -657,15 +680,16 @@ namespace AutomationTool
 
 					// Check the manifests are identical, byte by byte
 					byte[] LocalManifestBytes = File.ReadAllBytes(LocalFileListLocation.FullName);
-					byte[] SharedManifestBytes = File.ReadAllBytes(SharedFileListLocation.FullName);
-					if(!LocalManifestBytes.SequenceEqual(SharedManifestBytes))
+					byte[] SharedManifestBytes = null;
+					PerformActionWithRetries(() => SharedManifestBytes = File.ReadAllBytes(SharedFileListLocation.FullName), 3, TimeSpan.FromSeconds(1));
+					if (!LocalManifestBytes.SequenceEqual(SharedManifestBytes))
 					{
 						return false;
 					}
 				}
 
 				// Read the manifest and add the referenced blocks to be checked
-				TempStorageFileList LocalFileList = TempStorageFileList.Load(LocalFileListLocation);
+				TempStorageTagManifest LocalFileList = TempStorageTagManifest.Load(LocalFileListLocation);
 				Blocks.UnionWith(LocalFileList.Blocks);
 			}
 
@@ -691,7 +715,8 @@ namespace AutomationTool
 
 					// Check the manifests are identical, byte by byte
 					byte[] LocalManifestBytes = File.ReadAllBytes(LocalManifestFile.FullName);
-					byte[] SharedManifestBytes = File.ReadAllBytes(SharedManifestFile.FullName);
+					byte[] SharedManifestBytes = null;
+					PerformActionWithRetries(() => SharedManifestBytes = File.ReadAllBytes(SharedManifestFile.FullName), 3, TimeSpan.FromSeconds(1));
 					if(!LocalManifestBytes.SequenceEqual(SharedManifestBytes))
 					{
 						return false;
@@ -700,9 +725,6 @@ namespace AutomationTool
 
 				// Read the manifest and check the files
 				TempStorageManifest LocalManifest = TempStorageManifest.Load(LocalManifestFile);
-
-
-
 				if(LocalManifest.Files.Any(x => !x.Compare(RootDir)))
 				{
 					return false;
@@ -717,16 +739,16 @@ namespace AutomationTool
 		/// <param name="NodeName">Name of the node which produced the tag set</param>
 		/// <param name="TagName">Name of the tag, with a '#' prefix</param>
 		/// <returns>The set of files</returns>
-		public TempStorageFileList ReadFileList(string NodeName, string TagName)
+		public TempStorageTagManifest ReadFileList(string NodeName, string TagName)
 		{
-			TempStorageFileList FileList;
+			TempStorageTagManifest FileList = null;
 
 			// Try to read the tag set from the local directory
 			FileReference LocalFileListLocation = GetTaggedFileListLocation(LocalDir, NodeName, TagName);
 			if(FileReference.Exists(LocalFileListLocation))
 			{
-				CommandUtils.LogInformation("Reading local file list from {0}", LocalFileListLocation.FullName);
-				FileList = TempStorageFileList.Load(LocalFileListLocation);
+				Logger.LogInformation("Reading local file list from {Arg0}", LocalFileListLocation.FullName);
+				FileList = TempStorageTagManifest.Load(LocalFileListLocation);
 			}
 			else
 			{
@@ -736,20 +758,35 @@ namespace AutomationTool
 					throw new AutomationException("Missing local file list - {0}", LocalFileListLocation.FullName);
 				}
 
-				// Make sure the manifest exists
-				FileReference SharedFileListLocation = GetTaggedFileListLocation(SharedDir, NodeName, TagName);
-				if(!FileReference.Exists(SharedFileListLocation))
+				// Make sure the manifest exists. Try up to 5 times with a 5s wait between to harden against network hiccups.
+				int Attempts = 5;
+				FileReference SharedFileListLocation;
+				SharedFileListLocation = GetTaggedFileListLocation(SharedDir, NodeName, TagName);
+				PerformActionWithRetries(() =>
 				{
-					throw new AutomationException("Missing local or shared file list - {0}", SharedFileListLocation.FullName);
-				}
+					if (!FileReference.Exists(SharedFileListLocation))
+					{
+						throw new AutomationException("Missing local or shared file list - {0}", SharedFileListLocation.FullName);
+					}
+				}, Attempts, TimeSpan.FromSeconds(5));
 
-				// Read the shared manifest
-				CommandUtils.LogInformation("Copying shared tag set from {0} to {1}", SharedFileListLocation.FullName, LocalFileListLocation.FullName);
-				FileList = TempStorageFileList.Load(SharedFileListLocation);
+				try
+				{
+					PerformActionWithRetries(() =>
+					{
+						// Read the shared manifest
+						Logger.LogInformation("Copying shared tag set from {Arg0} to {Arg1}", SharedFileListLocation.FullName, LocalFileListLocation.FullName);
+						FileList = TempStorageTagManifest.Load(SharedFileListLocation);
+					}, Attempts, TimeSpan.FromSeconds(5));
+				}
+				catch
+				{
+					throw new AutomationException("Local or shared file list {0} was found but failed to be read", SharedFileListLocation.FullName);
+				}
 
 				// Save the manifest locally
 				DirectoryReference.CreateDirectory(LocalFileListLocation.Directory);
-				FileList.Save(LocalFileListLocation);
+				FileList?.Save(LocalFileListLocation);
 			}
 			return FileList;
 		}
@@ -761,25 +798,36 @@ namespace AutomationTool
 		/// <param name="TagName">Name of the tag, with a '#' prefix</param>
 		/// <param name="Files">List of files in this set</param>
 		/// <param name="Blocks">List of referenced storage blocks</param>
+		/// <param name="ArtifactKeys">Keys for published artifacts</param>
 		/// <returns>The set of files</returns>
-		public void WriteFileList(string NodeName, string TagName, IEnumerable<FileReference> Files, IEnumerable<TempStorageBlock> Blocks)
+		public void WriteFileList(string NodeName, string TagName, IEnumerable<FileReference> Files, IEnumerable<TempStorageBlock> Blocks, IEnumerable<string> ArtifactKeys)
 		{
 			// Create the file list
-			TempStorageFileList FileList = new TempStorageFileList(Files, RootDir, Blocks);
+			TempStorageTagManifest FileList = new TempStorageTagManifest(Files, RootDir, Blocks, ArtifactKeys);
 
 			// Save the set of files to the local and shared locations
 			FileReference LocalFileListLocation = GetTaggedFileListLocation(LocalDir, NodeName, TagName);
 			if(SharedDir != null && bWriteToSharedStorage)
 			{
 				FileReference SharedFileListLocation = GetTaggedFileListLocation(SharedDir, NodeName, TagName);
-				CommandUtils.LogInformation("Saving file list to {0} and {1}", LocalFileListLocation.FullName, SharedFileListLocation.FullName);
 
-				DirectoryReference.CreateDirectory(SharedFileListLocation.Directory);
-				FileList.Save(SharedFileListLocation);
+				try
+				{
+					PerformActionWithRetries(() =>
+					{
+						Logger.LogInformation("Saving file list to {Arg0} and {Arg1}", LocalFileListLocation.FullName, SharedFileListLocation.FullName);
+						DirectoryReference.CreateDirectory(SharedFileListLocation.Directory);
+						FileList.Save(SharedFileListLocation);
+					}, 3, TimeSpan.FromSeconds(5));
+				}
+				catch (Exception ex)
+				{
+					throw new AutomationException("Failed to save file list {0} to {1}, exception: {2}", LocalFileListLocation, SharedFileListLocation, ex);
+				}
 			}
 			else
 			{
-				CommandUtils.LogInformation("Saving file list to {0}", LocalFileListLocation.FullName);
+				Logger.LogInformation("Saving file list to {Arg0}", LocalFileListLocation.FullName);
 			}
 
 			// Save the local file list
@@ -797,7 +845,7 @@ namespace AutomationTool
 		/// <returns>The created manifest instance (which has already been saved to disk).</returns>
 		public TempStorageManifest Archive(string NodeName, string BlockName, FileReference[] BuildProducts, bool bPushToRemote = true)
 		{
-			using(TelemetryStopwatch TelemetryStopwatch = new TelemetryStopwatch("StoreToTempStorage"))
+			using (IScope Scope = GlobalTracer.Instance.BuildSpan("StoreToTempStorage").StartActive())
 			{
 				// Create a manifest for the given build products
 				FileInfo[] Files = BuildProducts.Select(x => new FileInfo(x.FullName)).ToArray();
@@ -820,18 +868,22 @@ namespace AutomationTool
 					Manifest.ZipFiles = ZipFiles.Select(x => new TempStorageZipFile(x)).ToArray();
 
 					// Save the shared manifest
-					CommandUtils.LogInformation("Saving shared manifest to {0}", SharedManifestFile.FullName);
-					Manifest.Save(SharedManifestFile);
+					Logger.LogInformation("Saving shared manifest to {Arg0}", SharedManifestFile.FullName);
+					PerformActionWithRetries(() => Manifest.Save(SharedManifestFile), 3, TimeSpan.FromSeconds(5));
 				}
 
 				// Save the local manifest
 				FileReference LocalManifestFile = GetManifestLocation(LocalDir, NodeName, BlockName);
-				CommandUtils.LogInformation("Saving local manifest to {0}", LocalManifestFile.FullName);
+				Logger.LogInformation("Saving local manifest to {Arg0}", LocalManifestFile.FullName);
 				Manifest.Save(LocalManifestFile);
 
 				// Update the stats
 				long ZipFilesTotalSize = (Manifest.ZipFiles == null)? 0 : Manifest.ZipFiles.Sum(x => x.Length);
-				TelemetryStopwatch.Finish(string.Format("StoreToTempStorage.{0}.{1}.{2}.{3}.{4}.{5}.{6}", Files.Length, Manifest.GetTotalSize(), ZipFilesTotalSize, bRemote? "Remote" : "Local", 0, 0, BlockName));
+				Scope.Span.SetTag("numFiles", Files.Length);
+				Scope.Span.SetTag("manifestSize", Manifest.GetTotalSize());
+				Scope.Span.SetTag("manifestZipFilesSize", ZipFilesTotalSize);
+				Scope.Span.SetTag("isRemote", bRemote);
+				Scope.Span.SetTag("blockName", BlockName);
 				return Manifest;
 			}
 		}
@@ -842,19 +894,19 @@ namespace AutomationTool
 		/// <param name="NodeName">The node which created the storage block</param>
 		/// <param name="OutputName">Name of the block to retrieve. May be null or empty.</param>
 		/// <returns>Manifest of the files retrieved</returns>
-		public TempStorageManifest Retreive(string NodeName, string OutputName)
+		public TempStorageManifest Retrieve(string NodeName, string OutputName)
 		{
-			using(var TelemetryStopwatch = new TelemetryStopwatch("RetrieveFromTempStorage"))
+			using (IScope Scope = GlobalTracer.Instance.BuildSpan("RetrieveFromTempStorage").StartActive())
 			{
 				// Get the path to the local manifest
 				FileReference LocalManifestFile = GetManifestLocation(LocalDir, NodeName, OutputName);
 				bool bLocal = FileReference.Exists(LocalManifestFile);
 
 				// Read the manifest, either from local storage or shared storage
-				TempStorageManifest Manifest;
+				TempStorageManifest Manifest = null;
 				if(bLocal)
 				{
-					CommandUtils.LogInformation("Reading shared manifest from {0}", LocalManifestFile.FullName);
+					Logger.LogInformation("Reading shared manifest from {Arg0}", LocalManifestFile.FullName);
 					Manifest = TempStorageManifest.Load(LocalManifestFile);
 				}
 				else
@@ -875,22 +927,24 @@ namespace AutomationTool
 					}
 
 					// Read the shared manifest
-					CommandUtils.LogInformation("Copying shared manifest from {0} to {1}", SharedManifestFile.FullName, LocalManifestFile.FullName);
-					Manifest = TempStorageManifest.Load(SharedManifestFile);
+					Logger.LogInformation("Copying shared manifest from {Arg0} to {Arg1}", SharedManifestFile.FullName, LocalManifestFile.FullName);
+					PerformActionWithRetries(() => Manifest = TempStorageManifest.Load(SharedManifestFile), 3, TimeSpan.FromSeconds(5));
 
 					// Unzip all the build products
 					DirectoryReference SharedNodeDir = GetDirectoryForNode(SharedDir, NodeName);
 					FileInfo[] ZipFiles = Manifest.ZipFiles.Select(x => new FileInfo(FileReference.Combine(SharedNodeDir, x.Name).FullName)).ToArray();
-					ParallelUnzipFiles(ZipFiles, RootDir);
+					string Result = ParallelUnzipFiles(ZipFiles, RootDir);
+					if (!string.IsNullOrWhiteSpace(Result))
+					{
+						string LogPath = CommandUtils.CombinePaths(RootDir.FullName, "Engine/Programs/AutomationTool/Saved/Logs", $"Copy Manifest - {NodeName}.log");
+						Logger.LogInformation("Saving copy log to {LogPath}", LogPath);
+						File.WriteAllText(LogPath, Result);
+					}
 
-					// Fix any Unix permissions/chmod issues, and update the timestamps to match the manifest. Zip files only use local time, and there's no guarantee it matches the local clock.
+					// Update the timestamps to match the manifest. Zip files only use local time, and there's no guarantee it matches the local clock.
 					foreach(TempStorageFile ManifestFile in Manifest.Files)
 					{
 						FileReference File = ManifestFile.ToFileReference(RootDir);
-						if (Utils.IsRunningOnMono)
-						{
-							CommandUtils.FixUnixFilePermissions(File.FullName);
-						}
 						System.IO.File.SetLastWriteTimeUtc(File.FullName, new DateTime(ManifestFile.LastWriteTimeUtcTicks, DateTimeKind.Utc));
 					}
 
@@ -911,8 +965,33 @@ namespace AutomationTool
 				}
 
 				// Update the stats and return
-				TelemetryStopwatch.Finish(string.Format("RetrieveFromTempStorage.{0}.{1}.{2}.{3}.{4}.{5}.{6}", Manifest.Files.Length, Manifest.Files.Sum(x => x.Length), bLocal? 0 : Manifest.ZipFiles.Sum(x => x.Length), bLocal? "Local" : "Remote", 0, 0, OutputName));
+				Scope.Span.SetTag("numFiles", Manifest.Files.Length);
+				Scope.Span.SetTag("manifestSize", Manifest.Files.Sum(x => x.Length));
+				Scope.Span.SetTag("manifestZipFilesSize", bLocal? 0 : Manifest.ZipFiles.Sum(x => x.Length));
+				Scope.Span.SetTag("isRemote", !bLocal);
+				Scope.Span.SetTag("outputName", OutputName);
 				return Manifest;
+			}
+		}
+
+		static void PerformActionWithRetries(Action retryAction, int retryCount, TimeSpan waitTime)
+		{
+			while (retryCount-- > 0)
+			{
+				try
+				{
+					retryAction();
+					break;
+				}
+				catch
+				{
+					if (retryCount == 0)
+					{
+						throw;
+					}
+
+					Thread.Sleep(waitTime);
+				}
 			}
 		}
 
@@ -929,7 +1008,7 @@ namespace AutomationTool
 		/// This function tries to zip the files in parallel as fast as it can. It makes no guarantees about how many zip files will be created or which files will be in which zip,
 		/// but it does try to reasonably balance the file sizes.
 		/// </remarks>
-		private static FileInfo[] ParallelZipFiles(FileInfo[] InputFiles, DirectoryReference RootDir, DirectoryReference OutputDir, DirectoryReference StagingDir, string ZipBaseName)
+		static FileInfo[] ParallelZipFiles(FileInfo[] InputFiles, DirectoryReference RootDir, DirectoryReference OutputDir, DirectoryReference StagingDir, string ZipBaseName)
 		{
 			// First get the sizes of all the files. We won't parallelize if there isn't enough data to keep the number of zips down.
 			var FilesInfo = InputFiles
@@ -938,105 +1017,83 @@ namespace AutomationTool
 
 			// Profiling results show that we can zip 100MB quite fast and it is not worth parallelizing that case and creating a bunch of zips that are relatively small.
 			const long MinFileSizeToZipInParallel = 1024 * 1024 * 100L;
-			var bZipInParallel = FilesInfo.Sum(FileInfo => FileInfo.FileSize) >= MinFileSizeToZipInParallel;
+			bool bZipInParallel = FilesInfo.Sum(FileInfo => FileInfo.FileSize) >= MinFileSizeToZipInParallel;
 
 			// order the files in descending order so our threads pick up the biggest ones first.
 			// We want to end with the smaller files to more effectively fill in the gaps
-			var FilesToZip = new ConcurrentQueue<FileReference>(FilesInfo.OrderByDescending(FileInfo => FileInfo.FileSize).Select(FileInfo => FileInfo.File));
+			ConcurrentQueue<FileReference> FilesToZip = new(FilesInfo.OrderByDescending(FileInfo => FileInfo.FileSize).Select(FileInfo => FileInfo.File));
+
+			ConcurrentBag<FileInfo> ZipFiles = new ConcurrentBag<FileInfo>();
+
+			DirectoryReference ZipDir = StagingDir ?? OutputDir;
 
 			// We deliberately avoid Parallel.ForEach here because profiles have shown that dynamic partitioning creates
 			// too many zip files, and they can be of too varying size, creating uneven work when unzipping later,
 			// as ZipFile cannot unzip files in parallel from a single archive.
 			// We can safely assume the build system will not be doing more important things at the same time, so we simply use all our logical cores,
 			// which has shown to be optimal via profiling, and limits the number of resulting zip files to the number of logical cores.
-			// 
-			// Sadly, mono implementation of System.IO.Compression is really poor (as of 2015/Aug), causing OOM when parallel zipping a large set of files.
-			// However, Ionic is MUCH slower than .NET's native implementation (2x+ slower in our build farm), so we stick to the faster solution on PC.
-			// The code duplication in the threadprocs is unfortunate here, and hopefully we can settle on .NET's implementation on both platforms eventually.
-			List<Thread> ZipThreads;
-
-			ConcurrentBag<FileInfo> ZipFiles = new ConcurrentBag<FileInfo>();
-
-			DirectoryReference ZipDir = StagingDir ?? OutputDir;
-			if (Utils.IsRunningOnMono)
-			{
-				ZipThreads = (
-					from CoreNum in Enumerable.Range(0, bZipInParallel ? Environment.ProcessorCount : 1)
-					let ZipFileName = FileReference.Combine(ZipDir, string.Format("{0}{1}.zip", ZipBaseName, bZipInParallel ? "-" + CoreNum.ToString("00") : ""))
-					select new Thread(() =>
+			List<Thread> ZipThreads = (
+				from CoreNum in Enumerable.Range(0, bZipInParallel ? Environment.ProcessorCount : 1)
+				select new Thread((object indexObject) =>
+				{
+					int index = (int)indexObject;
+					FileReference ZipFileName = FileReference.Combine(ZipDir, string.Format("{0}{1}.zip", ZipBaseName, bZipInParallel ? "-" + index.ToString("00") : ""));
+					// don't create the zip unless we have at least one file to add
+					FileReference File;
+					if (FilesToZip.TryDequeue(out File))
 					{
-						// don't create the zip unless we have at least one file to add
-						FileReference File;
-						if (FilesToZip.TryDequeue(out File))
+						try
 						{
 							// Create one zip per thread using the given basename
-							using (var ZipArchive = new Ionic.Zip.ZipFile(ZipFileName.FullName) { CompressionLevel = Ionic.Zlib.CompressionLevel.BestSpeed })
+							using (ZipArchive ZipArchive = ZipFile.Open(ZipFileName.FullName, ZipArchiveMode.Create))
 							{
-								ZipArchive.UseZip64WhenSaving = Ionic.Zip.Zip64Option.AsNecessary;
-
 								// pull from the queue until we are out of files.
 								do
 								{
 									// use fastest compression. In our best case we are CPU bound, so this is a good tradeoff,
 									// cutting overall time by 2/3 while only modestly increasing the compression ratio (22.7% -> 23.8% for RootEditor PDBs).
 									// This is in cases of a super hot cache, so the operation was largely CPU bound.
-									ZipArchive.AddFile(File.FullName, CommandUtils.ConvertSeparators(PathSeparator.Slash, File.Directory.MakeRelativeTo(RootDir)));
+									ZipArchiveExtensions.CreateEntryFromFile_CrossPlatform(ZipArchive, File.FullName, CommandUtils.ConvertSeparators(PathSeparator.Slash, File.MakeRelativeTo(RootDir)), CompressionLevel.Fastest);
 								} while (FilesToZip.TryDequeue(out File));
-								ZipArchive.Save();
 							}
-							// if we are using a staging dir, copy to the final location and delete the staged copy.
-							FileInfo ZipFile = new FileInfo(ZipFileName.FullName);
-							if (StagingDir != null)
-							{
-								FileInfo NewZipFile = ZipFile.CopyTo(CommandUtils.MakeRerootedFilePath(ZipFile.FullName, StagingDir.FullName, OutputDir.FullName));
-								ZipFile.Delete();
-								ZipFile = NewZipFile;
-							}
-							ZipFiles.Add(ZipFile);
 						}
-					})).ToList();
-			}
-			else
-			{
-				ZipThreads = (
-					from CoreNum in Enumerable.Range(0, bZipInParallel ? Environment.ProcessorCount : 1)
-					let ZipFileName = FileReference.Combine(ZipDir, string.Format("{0}{1}.zip", ZipBaseName, bZipInParallel ? "-" + CoreNum.ToString("00") : ""))
-					select new Thread(() =>
-					{
-						// don't create the zip unless we have at least one file to add
-						FileReference File;
-						if (FilesToZip.TryDequeue(out File))
+						catch (IOException)
 						{
-							// Create one zip per thread using the given basename
-							using (var ZipArchive = System.IO.Compression.ZipFile.Open(ZipFileName.FullName, System.IO.Compression.ZipArchiveMode.Create))
-							{
-
-								// pull from the queue until we are out of files.
-								do
-								{
-									// use fastest compression. In our best case we are CPU bound, so this is a good tradeoff,
-									// cutting overall time by 2/3 while only modestly increasing the compression ratio (22.7% -> 23.8% for RootEditor PDBs).
-									// This is in cases of a super hot cache, so the operation was largely CPU bound.
-									// Also, sadly, mono appears to have a bug where nothing you can do will properly set the LastWriteTime on the created entry,
-									// so we have to ignore timestamps on files extracted from a zip, since it may have been created on a Mac.
-									ZipFileExtensions.CreateEntryFromFile(ZipArchive, File.FullName, CommandUtils.ConvertSeparators(PathSeparator.Slash, File.MakeRelativeTo(RootDir)), System.IO.Compression.CompressionLevel.Fastest);
-								} while (FilesToZip.TryDequeue(out File));
-							}
-							// if we are using a staging dir, copy to the final location and delete the staged copy.
-							FileInfo ZipFile = new FileInfo(ZipFileName.FullName);
-							if (StagingDir != null)
-							{
-								FileInfo NewZipFile = ZipFile.CopyTo(CommandUtils.MakeRerootedFilePath(ZipFile.FullName, StagingDir.FullName, OutputDir.FullName));
-								ZipFile.Delete();
-								ZipFile = NewZipFile;
-							}
-							ZipFiles.Add(ZipFile);
+							Logger.LogError("Unable to open file for TempStorage zip: \"{Arg0}\"", ZipFileName.FullName);
+							throw new AutomationException("Unable to open file {0}", ZipFileName.FullName);
 						}
-					})).ToList();
+
+						ZipFiles.Add(new FileInfo(ZipFileName.FullName));
+					}
+				})).ToList();
+
+			for (int index = 0; index < ZipThreads.Count; index++)
+			{
+				Thread thread = ZipThreads[index];
+				thread.Start(index);
 			}
-			ZipThreads.ForEach(thread => thread.Start());
+
 			ZipThreads.ForEach(thread => thread.Join());
-			
+
+			if (ZipFiles.Any() && !string.IsNullOrWhiteSpace(StagingDir.FullName))
+			{
+				try
+				{
+					string CopyResult = CopyDirectory(ZipDir, OutputDir);
+					string LogPath = CommandUtils.CombinePaths(RootDir.FullName, "Engine/Programs/AutomationTool/Saved/Logs", $"Copy Files to Temp Storage.log");
+					Logger.LogInformation("Saving copy log to {LogPath}", LogPath);
+					Directory.CreateDirectory(Path.GetDirectoryName(LogPath));
+					File.WriteAllText(LogPath, string.Join(Environment.NewLine, CopyResult));
+					Parallel.ForEach(ZipFiles, (z) => z.Delete());
+					ZipFiles = new ConcurrentBag<FileInfo>(ZipFiles.Select(z => new FileInfo(CommandUtils.MakeRerootedFilePath(z.FullName, StagingDir.FullName, OutputDir.FullName))));
+				}
+				catch (IOException Ex)
+				{
+					Logger.LogError("Unable to copy staging directory {Arg0} to {Arg1}, Ex: {Ex}", ZipDir.FullName, OutputDir.FullName, Ex);
+					throw new AutomationException(Ex, "Unable to copy staging directory {0} to {1}", ZipDir.FullName, OutputDir.FullName);
+				}
+			}
+
 			return ZipFiles.OrderBy(x => x.Name).ToArray();
 		}
 
@@ -1049,123 +1106,108 @@ namespace AutomationTool
 		/// <remarks>
 		/// The code is expected to be the used as the symmetrical inverse of <see cref="ParallelZipFiles"/>, but could be used independently, as long as the files in the zip do not overlap.
 		/// </remarks>
-		private static void ParallelUnzipFiles(FileInfo[] ZipFiles, DirectoryReference RootDir)
+		private static string ParallelUnzipFiles(FileInfo[] ZipFiles, DirectoryReference RootDir)
 		{
-			// Sadly, mono implemention of System.IO.Compression is really poor (as of 2015/Aug), causing OOM when parallel zipping a large set of files.
-			// However, Ionic is MUCH slower than .NET's native implementation (2x+ slower in our build farm), so we stick to the faster solution on PC.
-			// The code duplication in the threadprocs is unfortunate here, and hopefully we can settle on .NET's implementation on both platforms eventually.
-			if (Utils.IsRunningOnMono)
-			{
-				Parallel.ForEach(ZipFiles,
-					(ZipFile) =>
-					{
-						// unzip the files manually instead of caling ZipFile.ExtractToDirectory() because we need to overwrite readonly files. Because of this, creating the directories is up to us as well.
-						List<string> ExtractedPaths = new List<string>();
-						int UnzipFileAttempts = 3;
-						while (UnzipFileAttempts-- > 0)
-						{
-							try
-							{
-								int Retries = 3;
-								while (true)
-								{
-									try
-									{
-										using (var ZipArchive = Ionic.Zip.ZipFile.Read(ZipFile.FullName))
-										{
-											// Overwrite silently is failing in some cases, so try to clear out any existing files in advance of extracting.
-											foreach (string EntryFileName in ZipArchive.EntryFileNames)
-											{
-												string ExtractedFilePath = Path.Combine(RootDir.FullName, EntryFileName);
-												if (File.Exists(ExtractedFilePath))
-												{
-													File.Delete(ExtractedFilePath);
-												}
-											}
-											ZipArchive.ExtractAll(RootDir.FullName, Ionic.Zip.ExtractExistingFileAction.OverwriteSilently);
-										}
-										break;
-									}
-									catch (Exception Ex)
-									{
-										if (Retries-- == 0)
-										{
-											throw new AutomationException(Ex, "Failed to unzip '{0}' to '{1}'.", ZipFile.FullName, RootDir.FullName);
-										}
+			ConcurrentBag<string> CopyResults = new ConcurrentBag<string>();
+			Parallel.ForEach(ZipFiles,
+				(ZipFile) =>
+				{
+					// Copy the ZIP to the local drive before unzipping to harden against network issues.
+					CopyResults.Add(CopyFile(ZipFile, RootDir));
+					string LocalZipFile = CommandUtils.CombinePaths(RootDir.FullName, ZipFile.Name);
 
-										Log.TraceLog("Exception encountered while unzipped '{0}', {1} retries remain: {2}", ZipFile.FullName, Retries, Ex);
-										Thread.Sleep(TimeSpan.FromSeconds(5));
-									}
-								}
-							}
-							catch (Exception Ex)
-							{
-								if (UnzipFileAttempts == 0)
-								{
-									throw;
-								}
-
-								// Some exceptions may be caused by networking hiccups. We want to retry in those cases.
-								if ((Ex is IOException || Ex is InvalidDataException))
-								{
-									Log.TraceWarning("Failed to unzip entries from '{0}' to '{1}', retrying.. (Error: {2})", ZipFile.FullName, RootDir.FullName, Ex.Message);
-								}
-							}
-						}
-					});
-			}
-			else
-			{
-				Parallel.ForEach(ZipFiles,
-					(ZipFile) =>
+					// unzip the files manually instead of caling ZipFile.ExtractToDirectory() because we need to overwrite readonly files. Because of this, creating the directories is up to us as well.
+					List<string> ExtractedPaths = new List<string>();
+					int UnzipFileAttempts = 3;
+					while (UnzipFileAttempts-- > 0)
 					{
-						// unzip the files manually instead of caling ZipFile.ExtractToDirectory() because we need to overwrite readonly files. Because of this, creating the directories is up to us as well.
-						using (var ZipArchive = System.IO.Compression.ZipFile.OpenRead(ZipFile.FullName))
+						try
 						{
-							foreach (var Entry in ZipArchive.Entries)
+							using (ZipArchive ZipArchive = System.IO.Compression.ZipFile.OpenRead(LocalZipFile))
 							{
-								// Use CommandUtils.CombinePaths to ensure directory separators get converted correctly. On mono on *nix, if the path has backslashes it will not convert it.
-								var ExtractedFilename = CommandUtils.CombinePaths(RootDir.FullName, Entry.FullName);
-								// Zips can contain empty dirs. Ours usually don't have them, but we should support it.
-								if (Path.GetFileName(ExtractedFilename).Length == 0)
+								foreach (ZipArchiveEntry Entry in ZipArchive.Entries)
 								{
-									Directory.CreateDirectory(ExtractedFilename);
-								}
-								else
-								{
-									// We must delete any existing file, even if it's readonly. .Net does not do this by default.
-									if (File.Exists(ExtractedFilename))
+									// Use CommandUtils.CombinePaths to ensure directory separators get converted correctly.
+									string ExtractedFilename = CommandUtils.CombinePaths(RootDir.FullName, Entry.FullName);
+
+									// Skip this if it's already been extracted.
+									if (ExtractedPaths.Contains(ExtractedFilename))
 									{
-										InternalUtils.SafeDeleteFile(ExtractedFilename, true);
+										continue;
+									}
+
+									// Zips can contain empty dirs. Ours usually don't have them, but we should support it.
+									if (Path.GetFileName(ExtractedFilename).Length == 0)
+									{
+										Directory.CreateDirectory(ExtractedFilename);
+										ExtractedPaths.Add(ExtractedFilename);
 									}
 									else
 									{
-										Directory.CreateDirectory(Path.GetDirectoryName(ExtractedFilename));
-									}
-
-									int UnzipAttempts = 3;
-									while (UnzipAttempts-- > 0)
-									{
-										try
+										// We must delete any existing file, even if it's readonly. .Net does not do this by default.
+										if (File.Exists(ExtractedFilename))
 										{
-											Entry.ExtractToFile(ExtractedFilename, true);
-											break;
+											InternalUtils.SafeDeleteFile(ExtractedFilename, true);
 										}
-										catch (IOException IOEx)
+										else
 										{
-											if (UnzipAttempts == 0)
-											{
-												throw;
-											}
+											Directory.CreateDirectory(Path.GetDirectoryName(ExtractedFilename));
+										}
 
-											Log.TraceWarning("Failed to unzip '{0}' from '{1}' to '{2}', retrying.. (Error: {3})", Entry.FullName, ZipFile.FullName, ExtractedFilename, IOEx.Message);
+
+										int UnzipEntryAttempts = 3;
+										while (UnzipEntryAttempts-- > 0)
+										{
+											try
+											{
+												Entry.ExtractToFile_CrossPlatform(ExtractedFilename, true);
+												ExtractedPaths.Add(ExtractedFilename);
+												break;
+											}
+											catch (IOException IOEx)
+											{
+												if (UnzipEntryAttempts == 0)
+												{
+													throw;
+												}
+
+												Log.Logger.LogWarning(IOEx, "Failed to unzip '{File}' from '{LocalZipFile}' to '{ExtractedFilename}', retrying.. (Error: {Message})", Entry.FullName, LocalZipFile, ExtractedFilename, IOEx.Message);
+											}
 										}
 									}
 								}
 							}
+
+							break;
 						}
-					});
-			}
+						catch (Exception Ex)
+						{
+							if (UnzipFileAttempts == 0)
+							{
+								Log.Logger.LogError(Ex, "All retries exhausted attempting to unzip entries from '{LocalZipFile}'. Terminating.", LocalZipFile);
+								string LogPath = CommandUtils.CombinePaths(RootDir.FullName, "Engine/Programs/AutomationTool/Saved/Logs", $"Copy Manifest - {ZipFile.Name}.log");
+								Logger.LogInformation("Saving copy log to {LogPath}", LogPath);
+								File.WriteAllText(LogPath, string.Join(Environment.NewLine, CopyResults));
+								throw;
+							}
+
+							// Some exceptions may be caused by networking hiccups. We want to retry in those cases.
+							if ((Ex is IOException || Ex is InvalidDataException))
+							{
+								Log.Logger.LogWarning(Ex, "Failed to unzip entries from '{LocalZipFile}' to '{TargetDir}', retrying.. (Error: {Message})", LocalZipFile, RootDir.FullName, Ex.Message);
+							}
+						}
+						finally
+						{
+							if (File.Exists(LocalZipFile))
+							{
+								File.Delete(LocalZipFile);
+							}
+						}
+					}
+				});
+
+			return string.Join(Environment.NewLine, CopyResults);
 		}
 
 		/// <summary>
@@ -1213,7 +1255,7 @@ namespace AutomationTool
 		}
 
 		/// <summary>
-		/// Checks whether the given path is whitelisted as a build product that can be produced by more than one node (timestamps may be modified, etc..). Used to suppress
+		/// Checks whether the given path is allowed as a build product that can be produced by more than one node (timestamps may be modified, etc..). Used to suppress
 		/// warnings about build products being overwritten.
 		/// </summary>
 		/// <param name="LocalFile">File name to check</param>
@@ -1237,11 +1279,11 @@ namespace AutomationTool
 			{
 				return true;
 			}
-			if (FileName.Equals("tbb.dll", StringComparison.OrdinalIgnoreCase) || FileName.Equals("libtbb.dylib", StringComparison.OrdinalIgnoreCase))
+			if (FileName.Equals("tbb.dll", StringComparison.OrdinalIgnoreCase) || FileName.Equals("tbb.pdb", StringComparison.OrdinalIgnoreCase) || FileName.Equals("libtbb.dylib", StringComparison.OrdinalIgnoreCase) || FileName.Equals("tbb.psym", StringComparison.OrdinalIgnoreCase))
 			{
 				return true;
 			}
-			if (FileName.Equals("tbbmalloc.dll", StringComparison.OrdinalIgnoreCase) || FileName.Equals("libtbbmalloc.dylib", StringComparison.OrdinalIgnoreCase))
+			if (FileName.Equals("tbbmalloc.dll", StringComparison.OrdinalIgnoreCase) || FileName.Equals("tbbmalloc.pdb", StringComparison.OrdinalIgnoreCase) || FileName.Equals("libtbbmalloc.dylib", StringComparison.OrdinalIgnoreCase) || FileName.Equals("tbbmalloc.psym", StringComparison.OrdinalIgnoreCase))
 			{
 				return true;
 			}
@@ -1253,11 +1295,140 @@ namespace AutomationTool
 			{
 				return true;
 			}
+			if (FileName.StartsWith("lib", StringComparison.OrdinalIgnoreCase) && FileName.EndsWith(".so", StringComparison.OrdinalIgnoreCase))
+			{
+				return true;
+			}
+			if (FileName.StartsWith("lib", StringComparison.OrdinalIgnoreCase) && FileName.Contains(".so.", StringComparison.OrdinalIgnoreCase))
+			{
+				// e.g. a Unix shared library with a version number suffix.
+				return true;
+			}
 			if (FileName.Equals("plugInfo.json", StringComparison.OrdinalIgnoreCase))
 			{
 				return true;
 			}
+			if ((FileName.Equals("info.plist", StringComparison.OrdinalIgnoreCase) || FileName.Equals("coderesources", StringComparison.OrdinalIgnoreCase)) && LocalFile.FullName.Contains(".app/"))
+			{
+				// xcode can generate plist files and coderesources differently in different stages of compile/cook/stage/package/etc. only allow ones inside a .app bundle
+				return true;
+			}
 			return false;
+		}
+		
+		/// <summary>
+		/// Copy a temp storage .zip file to directory.
+		/// Uses Robocopy on Windows, rsync on Linux/macOS and native .NET API when under Wine.
+		/// </summary>
+		/// <param name="ZipFile">.zip file to copy</param>
+		/// <param name="RootDir">Destination dir</param>
+		/// <returns>Output from the copy operation</returns>
+		static string CopyFile(FileInfo ZipFile, DirectoryReference RootDir)
+		{
+			if (BuildHostPlatform.Current.IsRunningOnWine())
+			{
+				string sourceFile = ZipFile.FullName;
+				string destFile = Path.Join(RootDir.FullName, ZipFile.Name);
+				File.Copy(sourceFile, destFile, true);
+				return $".NET file copy. Source='{sourceFile}' Dest='{destFile}'";
+			}
+			else if (HostPlatform.Current.HostEditorPlatform == UnrealTargetPlatform.Win64)
+			{
+				return CommandUtils.RunAndLog(GetRoboCopyExe(), $"\"{ZipFile.DirectoryName}\" \"{RootDir}\" \"{ZipFile.Name}\" /w:5 /r:10", MaxSuccessCode: 3, Options: CommandUtils.ERunOptions.AppMustExist | CommandUtils.ERunOptions.NoLoggingOfRunCommand);
+			}
+			else
+			{
+				return CommandUtils.RunAndLog("rsync", $"-v \"{ZipFile.DirectoryName}/{ZipFile.Name}\" \"{RootDir}/{ZipFile.Name}\"", Options: CommandUtils.ERunOptions.AppMustExist | CommandUtils.ERunOptions.NoLoggingOfRunCommand);
+			}
+		}
+
+		/// <summary>
+		/// Copy a directory using the most suitable option
+		/// </summary>
+		/// <param name="SourceDir">Source directory</param>
+		/// <param name="DestinationDir">Directory directory</param>
+		/// <returns>Output from directory copy operation</returns>
+		/// <exception cref="DirectoryNotFoundException">If source directory wasn't found</exception>
+		static string CopyDirectory(DirectoryReference SourceDir, DirectoryReference DestinationDir)
+		{
+			if (BuildHostPlatform.Current.IsRunningOnWine())
+			{
+				return CopyDirectoryDotNet(SourceDir, DestinationDir);
+			}
+			else
+			{
+				return CopyDirectoryExternalTool(SourceDir, DestinationDir);
+			}
+		}
+
+		/// <summary>
+		/// Copy a directory using an external tool native to OS
+		/// Robocopy Windows and rsync for Linux and macOS.
+		/// </summary>
+		/// <param name="SourceDir">Source directory</param>
+		/// <param name="DestinationDir">Directory directory</param>
+		/// <returns>Output from directory copy operation</returns>
+		/// <exception cref="DirectoryNotFoundException">If source directory wasn't found</exception>
+		static string CopyDirectoryExternalTool(DirectoryReference SourceDir, DirectoryReference DestinationDir)
+		{
+			if (HostPlatform.Current.HostEditorPlatform == UnrealTargetPlatform.Win64)
+			{
+				return CommandUtils.RunAndLog(GetRoboCopyExe(), $"\"{SourceDir}\" \"{DestinationDir}\" * /S /w:5 /r:10", MaxSuccessCode: 3, Options: CommandUtils.ERunOptions.AppMustExist | CommandUtils.ERunOptions.NoLoggingOfRunCommand);
+			}
+			else
+			{
+				return CommandUtils.RunAndLog("rsync", $"-vam --include=\"**\" \"{SourceDir}/\" \"{DestinationDir}/\"", Options: CommandUtils.ERunOptions.AppMustExist | CommandUtils.ERunOptions.NoLoggingOfRunCommand);
+			}
+		}
+		
+		/// <summary>
+		/// Copy a directory using .NET SDK directory and file copy API
+		/// </summary>
+		/// <param name="SourceDir">Source directory</param>
+		/// <param name="DestinationDir">Directory directory</param>
+		/// <returns>Output from directory copy operation</returns>
+		/// <exception cref="DirectoryNotFoundException">If source directory wasn't found</exception>
+		static string CopyDirectoryDotNet(DirectoryReference SourceDir, DirectoryReference DestinationDir)
+		{
+			DirectoryInfo dir = new (SourceDir.FullName);
+
+			if (!dir.Exists)
+			{
+				throw new DirectoryNotFoundException($"Source directory not found: {dir.FullName}");
+			}
+
+			DirectoryInfo[] dirs = dir.GetDirectories();
+			Directory.CreateDirectory(DestinationDir.FullName);
+
+			foreach (FileInfo file in dir.GetFiles())
+			{
+				string targetFilePath = Path.Combine(DestinationDir.FullName, file.Name);
+				file.CopyTo(targetFilePath);
+			}
+
+			foreach (DirectoryInfo subDir in dirs)
+			{
+				string newDestinationDir = Path.Combine(DestinationDir.FullName, subDir.Name);
+				CopyDirectoryDotNet(new DirectoryReference(subDir.FullName), new DirectoryReference(newDestinationDir));
+			}
+
+			return ".NET directory copy";
+		}
+
+		static string GetRoboCopyExe()
+		{
+			var Result = CommandUtils.CombinePaths(Environment.SystemDirectory, "robocopy.exe");
+			if (!CommandUtils.FileExists(Result))
+			{
+				// Use Regex.Replace so we can do a case-insensitive replacement of System32
+				var SysNativeDirectory = Regex.Replace(Environment.SystemDirectory, "System32", "Sysnative", RegexOptions.IgnoreCase);
+				var SysNativeExe = CommandUtils.CombinePaths(SysNativeDirectory, "robocopy.exe");
+				if (CommandUtils.FileExists(SysNativeExe))
+				{
+					Result = SysNativeExe;
+				}
+			}
+			return Result;
 		}
 	}
 
@@ -1304,23 +1475,23 @@ namespace AutomationTool
 			TempStore.Archive("TestNode", "NamedOutput", NamedOutput.Keys.ToArray(), true);
 			
 			// Check both outputs are still ok
-			TempStorageManifest DefaultManifest = TempStore.Retreive("TestNode", null);
+			TempStorageManifest DefaultManifest = TempStore.Retrieve("TestNode", null);
 			CheckManifest(WorkingDir, DefaultManifest, DefaultOutput);
 
-			TempStorageManifest NamedManifest = TempStore.Retreive("TestNode", "NamedOutput");
+			TempStorageManifest NamedManifest = TempStore.Retrieve("TestNode", "NamedOutput");
 			CheckManifest(WorkingDir, NamedManifest, NamedOutput);
 
 			// Delete local temp storage and the working directory and try again
-			CommandUtils.LogInformation("Clearing local folders...");
+			Logger.LogInformation("Clearing local folders...");
 			CommandUtils.DeleteDirectoryContents(WorkingDir.FullName);
 			CommandUtils.DeleteDirectoryContents(LocalDir.FullName);
 
 			// First output should fail
-			CommandUtils.LogInformation("Checking default manifest is now unavailable...");
+			Logger.LogInformation("Checking default manifest is now unavailable...");
 			bool bGotManifest = false;
 			try
 			{
-				TempStore.Retreive("TestNode", null);
+				TempStore.Retrieve("TestNode", null);
 				bGotManifest = true;
 			}
 			catch
@@ -1333,7 +1504,7 @@ namespace AutomationTool
 			}
 
 			// Second one should be fine
-			TempStorageManifest NamedManifestFromShared = TempStore.Retreive("TestNode", "NamedOutput");
+			TempStorageManifest NamedManifestFromShared = TempStore.Retrieve("TestNode", "NamedOutput");
 			CheckManifest(WorkingDir, NamedManifestFromShared, NamedOutput);
 		}
 
@@ -1411,6 +1582,12 @@ namespace AutomationTool
 				throw new AutomationException("Missing -TempStorageDir parameter");
 			}
 
+			if (!Directory.Exists(TempStorageDir))
+			{
+				Logger.LogInformation("Temp Storage folder '{TempStorageDir}' does not exist, no work to do.", TempStorageDir);
+				return;
+			}
+
 			string Days = ParseParamValue("Days", null);
 			if (Days == null)
 			{
@@ -1426,34 +1603,64 @@ namespace AutomationTool
 			DateTime RetainTime = DateTime.UtcNow - TimeSpan.FromDays(DaysValue);
 
 			// Enumerate all the build directories
-			CommandUtils.LogInformation("Scanning {0}...", TempStorageDir);
+			Logger.LogInformation("Scanning {TempStorageDir}...", TempStorageDir);
 			int NumBuilds = 0;
 			List<DirectoryInfo> BuildsToDelete = new List<DirectoryInfo>();
 			foreach (DirectoryInfo StreamDirectory in new DirectoryInfo(TempStorageDir).EnumerateDirectories().OrderBy(x => x.Name))
 			{
-				CommandUtils.LogInformation("Scanning {0}...", StreamDirectory.FullName);
-				foreach (DirectoryInfo BuildDirectory in StreamDirectory.EnumerateDirectories())
+				Logger.LogInformation("Scanning {Arg0}...", StreamDirectory.FullName);
+				try
 				{
-					if(!BuildDirectory.EnumerateFiles("*", SearchOption.AllDirectories).Any(x => x.LastWriteTimeUtc > RetainTime))
+					foreach (DirectoryInfo BuildDirectory in StreamDirectory.EnumerateDirectories())
 					{
-						BuildsToDelete.Add(BuildDirectory);
+						try
+						{
+							if (!BuildDirectory.EnumerateFiles("*", SearchOption.AllDirectories).Any(x => x.LastWriteTimeUtc > RetainTime))
+							{
+								BuildsToDelete.Add(BuildDirectory);
+							}
+							NumBuilds++;
+						}
+						catch (Exception Ex)
+						{
+							Logger.LogError(Ex, "Exception while trying to scan files under {BuildDirectory}: {Ex}", BuildDirectory, Ex);
+						}
 					}
-					NumBuilds++;
+				}
+				catch (Exception Ex)
+				{
+					Logger.LogError(Ex, "Exception while trying to scan {StreamDirectory}: {Ex}", StreamDirectory, Ex);
 				}
 			}
-			CommandUtils.LogInformation("Found {0} builds; {1} to delete.", NumBuilds, BuildsToDelete.Count);
+			Logger.LogInformation("Found {NumBuilds} builds; {Arg1} to delete.", NumBuilds, BuildsToDelete.Count);
 
 			// Loop through them all, checking for files older than the delete time
-			for (int Idx = 0; Idx < BuildsToDelete.Count; Idx++)
+			int Idx = BuildsToDelete.Count;
+			while (Idx-- > 0)
 			{
 				try
 				{
-					CommandUtils.LogInformation("[{0}/{1}] Deleting {2}...", Idx + 1, BuildsToDelete.Count, BuildsToDelete[Idx].FullName);
+					// Done if something already cleaned up this folder.
+					if (!BuildsToDelete[Idx].Exists)
+					{
+						continue;
+					}
+
+					// Check if there is a marker file, if so skip this folder unless it has been twenty minutes.
+					FileInfo DeleteInProgressFile = BuildsToDelete[Idx].GetFiles("DeleteInProgress.tmp").FirstOrDefault();
+					if (DeleteInProgressFile != null && DeleteInProgressFile.LastWriteTimeUtc < (DateTimeOffset.UtcNow - TimeSpan.FromMinutes(20)))
+					{
+						Logger.LogInformation("[{Arg0}/{Arg1}] {Arg2} flagged as delete in progress, skipping...", BuildsToDelete.Count - Idx, BuildsToDelete.Count, BuildsToDelete[Idx].FullName);
+						continue;
+					}
+
+					File.WriteAllBytes(Path.Combine(BuildsToDelete[Idx].FullName, "DeleteInProgress.tmp"), Array.Empty<byte>());
+					Logger.LogInformation("[{Arg0}/{Arg1}] Deleting {Arg2}...", BuildsToDelete.Count - Idx, BuildsToDelete.Count, BuildsToDelete[Idx].FullName);
 					BuildsToDelete[Idx].Delete(true);
 				}
 				catch (Exception Ex)
 				{
-					CommandUtils.LogWarning("Failed to delete old manifest folder; will try one file at a time: {0}", Ex);
+					Logger.LogWarning("Failed to delete old manifest folder; will try one file at a time: {Ex}", Ex);
 					CommandUtils.DeleteDirectory_NoExceptions(true, BuildsToDelete[Idx].FullName);
 				}
 			}
@@ -1461,20 +1668,27 @@ namespace AutomationTool
 			// Try to delete any empty branch folders
 			foreach (DirectoryInfo StreamDirectory in new DirectoryInfo(TempStorageDir).EnumerateDirectories())
 			{
-				if(StreamDirectory.EnumerateDirectories().Count() == 0 && StreamDirectory.EnumerateFiles().Count() == 0)
+				try
 				{
-					try
+					if (StreamDirectory.EnumerateDirectories().Count() == 0 && StreamDirectory.EnumerateFiles().Count() == 0)
 					{
-						StreamDirectory.Delete();
+						try
+						{
+							StreamDirectory.Delete();
+						}
+						catch (IOException)
+						{
+							// only catch "directory is not empty type exceptions, if possible. Best we can do is check for IOException.
+						}
+						catch (Exception Ex)
+						{
+							Logger.LogWarning("Unexpected failure trying to delete (potentially empty) stream directory {Arg0}: {Ex}", StreamDirectory.FullName, Ex);
+						}
 					}
-					catch (IOException)
-					{
-						// only catch "directory is not empty type exceptions, if possible. Best we can do is check for IOException.
-					}
-					catch (Exception Ex)
-					{
-						CommandUtils.LogWarning("Unexpected failure trying to delete (potentially empty) stream directory {0}: {1}", StreamDirectory.FullName, Ex);
-					}
+				}
+				catch (Exception Ex)
+				{
+					Logger.LogError(Ex, "Exception while trying to delete {StreamDirectory}: {Ex}", StreamDirectory, Ex);
 				}
 			}
 		}

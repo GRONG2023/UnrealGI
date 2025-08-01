@@ -57,20 +57,20 @@ enum class EWidgetClipping : uint8
 /**
  * The Clipping Zone represents some arbitrary plane segment that can be used to clip the geometry in Slate.
  */
-class SLATECORE_API FSlateClippingZone
+class FSlateClippingZone
 {
 public:
 
-	FVector2D TopLeft;
-	FVector2D TopRight;
-	FVector2D BottomLeft;
-	FVector2D BottomRight;
+	FVector2f TopLeft;
+	FVector2f TopRight;
+	FVector2f BottomLeft;
+	FVector2f BottomRight;
 
-	explicit FSlateClippingZone(const FShortRect& AxisAlignedRect);
-	explicit FSlateClippingZone(const FSlateRect& AxisAlignedRect);
-	explicit FSlateClippingZone(const FGeometry& BoundingGeometry);
-	explicit FSlateClippingZone(const FPaintGeometry& PaintingGeometry);
-	FSlateClippingZone(const FVector2D& InTopLeft, const FVector2D& InTopRight, const FVector2D& InBottomLeft, const FVector2D& InBottomRight);
+	SLATECORE_API explicit FSlateClippingZone(const FShortRect& AxisAlignedRect);
+	SLATECORE_API explicit FSlateClippingZone(const FSlateRect& AxisAlignedRect);
+	SLATECORE_API explicit FSlateClippingZone(const FGeometry& BoundingGeometry);
+	SLATECORE_API explicit FSlateClippingZone(const FPaintGeometry& PaintingGeometry);
+	SLATECORE_API FSlateClippingZone(const UE::Slate::FDeprecateVector2DParameter& InTopLeft, const UE::Slate::FDeprecateVector2DParameter& InTopRight, const UE::Slate::FDeprecateVector2DParameter& InBottomLeft, const UE::Slate::FDeprecateVector2DParameter& InBottomRight);
 	FSlateClippingZone() {}
 
 	/**  */
@@ -111,7 +111,7 @@ public:
 	{
 		if (bIsAxisAligned)
 		{
-			FVector2D Difference = TopLeft - BottomRight;
+			FVector2f Difference = TopLeft - BottomRight;
 			return FMath::IsNearlyZero(Difference.X) || FMath::IsNearlyZero(Difference.Y);
 		}
 
@@ -119,18 +119,18 @@ public:
 	}
 
 	/** Is a point inside the clipping zone? */
-	bool IsPointInside(const FVector2D& Point) const;
+	SLATECORE_API bool IsPointInside(const UE::Slate::FDeprecateVector2DParameter& Point) const;
 
 	/**
 	 * Intersects two clipping zones and returns the new clipping zone that would need to be used.
 	 * This can only be called between two axis aligned clipping zones.
 	 */
-	FSlateClippingZone Intersect(const FSlateClippingZone& Other) const;
+	SLATECORE_API FSlateClippingZone Intersect(const FSlateClippingZone& Other) const;
 
 	/**
 	 * Gets the bounding box of the points making up this clipping zone.
 	 */
-	FSlateRect GetBoundingBox() const;
+	SLATECORE_API FSlateRect GetBoundingBox() const;
 
 	bool operator==(const FSlateClippingZone& Other) const
 	{
@@ -151,7 +151,7 @@ public:
 		);
 	}
 
-	FSlateClippingZone ConvertRelativeToAbsolute(const FVector2D& WindowOffset) const
+	FSlateClippingZone ConvertRelativeToAbsolute(const UE::Slate::FDeprecateVector2DParameter& WindowOffset) const
 	{
 		FSlateClippingZone Absolute(TopLeft + WindowOffset, TopRight + WindowOffset, BottomLeft + WindowOffset, BottomRight + WindowOffset);
 		Absolute.bIsAxisAligned = bIsAxisAligned;
@@ -161,7 +161,7 @@ public:
 		return Absolute;
 	}
 private:
-	void InitializeFromArbitraryPoints(const FVector2D& InTopLeft, const FVector2D& InTopRight, const FVector2D& InBottomLeft, const FVector2D& InBottomRight);
+	SLATECORE_API void InitializeFromArbitraryPoints(const UE::Slate::FDeprecateVector2DParameter& InTopLeft, const UE::Slate::FDeprecateVector2DParameter& InTopRight, const UE::Slate::FDeprecateVector2DParameter& InBottomLeft, const UE::Slate::FDeprecateVector2DParameter& InBottomRight);
 
 private:
 	/** Is the clipping zone axis aligned?  Axis aligned clipping zones are much cheaper. */
@@ -170,12 +170,12 @@ private:
 	uint8 bIntersect : 1;
 	/** Should this clipping zone always clip, even if another zone wants to ignore intersection? */
 	uint8 bAlwaysClip : 1;
-};
 
-FORCEINLINE uint32 GetTypeHash(const FSlateClippingZone& Zone)
-{
-	return Zone.ComputeHash();
-}
+	friend FORCEINLINE uint32 GetTypeHash(const FSlateClippingZone& Zone)
+	{
+		return Zone.ComputeHash();
+	}
+};
 
 template<> struct TIsPODType<FSlateClippingZone> { enum { Value = true }; };
 
@@ -203,17 +203,15 @@ ENUM_CLASS_FLAGS(EClippingFlags)
 /**
  * Captures everything about a single draw calls clipping state.
  */
-class SLATECORE_API FSlateClippingState
+class FSlateClippingState
 {
 public:
-	FSlateClippingState(EClippingFlags InFlags = EClippingFlags::None);
+	SLATECORE_API FSlateClippingState(EClippingFlags InFlags = EClippingFlags::None);
 	
-	FSlateClippingState(const FSlateClippingState& Other);
-
 	/** Is a point inside the clipping state? */
-	bool IsPointInside(const FVector2D& Point) const;
+	SLATECORE_API bool IsPointInside(const UE::Slate::FDeprecateVector2DParameter& Point) const;
 
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#if WITH_SLATE_DEBUGGING
 	/** Set the state index that this clipping state originated from.  We just do this for debugging purposes. */
 	FORCEINLINE void SetDebuggingStateIndex(int32 InStateIndex) const
 	{
@@ -341,28 +339,28 @@ public:
 /**
  * The clipping manager maintain the running clip state.  This is used for both maintain and for hit testing.
  */
-class SLATECORE_API FSlateClippingManager
+class FSlateClippingManager
 {
 public:
-	FSlateClippingManager();
+	SLATECORE_API FSlateClippingManager();
 
-	int32 PushClip(const FSlateClippingZone& InClippingZone);
-	int32 PushClippingState(const FSlateClippingState& InClipState);
-	int32 GetClippingIndex() const;
-	TOptional<FSlateClippingState> GetActiveClippingState() const;
+	SLATECORE_API int32 PushClip(const FSlateClippingZone& InClippingZone);
+	SLATECORE_API int32 PushClippingState(const FSlateClippingState& InClipState);
+	SLATECORE_API int32 GetClippingIndex() const;
+	SLATECORE_API TOptional<FSlateClippingState> GetActiveClippingState() const;
 	const TArray<int32>& GetClippingStack() const { return ClippingStack; }
-	const TArray<FSlateClippingState>& GetClippingStates() const;
-	void PopClip();
-	void PopToStackIndex(int32 Index);
+	SLATECORE_API const TArray<FSlateClippingState>& GetClippingStates() const;
+	SLATECORE_API void PopClip();
+	SLATECORE_API void PopToStackIndex(int32 Index);
 	int32 GetClippingIndexAtStackIndex(int32 StackIndex) const { return ClippingStack.IsValidIndex(StackIndex) ? ClippingStack[StackIndex] : INDEX_NONE; }
 	int32 GetStackDepth() const { return ClippingStack.Num(); }
-	const FSlateClippingState* GetPreviousClippingState(bool bWillIntersectWithParent) const;
+	SLATECORE_API const FSlateClippingState* GetPreviousClippingState(bool bWillIntersectWithParent) const;
 
-	void ResetClippingState();
+	SLATECORE_API void ResetClippingState();
 
 private:
 
-	FSlateClippingState CreateClippingState(const FSlateClippingZone& InClipRect) const;
+	SLATECORE_API FSlateClippingState CreateClippingState(const FSlateClippingZone& InClipRect) const;
 
 private:
 	/** Maintains the current clipping stack, with the indexes in the array of clipping states.  Pushed and popped throughout the drawing process. */

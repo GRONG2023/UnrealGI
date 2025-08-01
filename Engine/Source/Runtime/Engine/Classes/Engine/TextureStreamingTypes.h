@@ -15,7 +15,7 @@
 class ULevel;
 class UMaterialInterface;
 class UPrimitiveComponent;
-class UTexture2D;
+class UTexture;
 struct FMaterialTextureInfo;
 struct FMeshUVChannelInfo;
 struct FSlowTask;
@@ -24,7 +24,6 @@ struct FStreamingTextureBuildInfo;
 ENGINE_API DECLARE_LOG_CATEGORY_EXTERN(TextureStreamingBuild, Log, All);
 
 class UTexture;
-class UTexture2D;
 class UStreamableRenderAsset;
 struct FStreamingTextureBuildInfo;
 struct FMaterialTextureInfo;
@@ -39,7 +38,7 @@ struct FStreamingRenderAssetPrimitiveInfo
 	GENERATED_USTRUCT_BODY()
 
 	UPROPERTY()
-	UStreamableRenderAsset* RenderAsset;
+	TObjectPtr<UStreamableRenderAsset> RenderAsset;
 
 	/** 
 	 * The streaming bounds of the texture/mesh, usually the component material bounds. 
@@ -66,12 +65,17 @@ struct FStreamingRenderAssetPrimitiveInfo
 	UPROPERTY(Transient)
 	uint32 bAllowInvalidTexelFactorWhenUnregistered : 1;
 
+	/** Mesh texel factors aren't uv density and shouldn't be affected by component scales */
+	UPROPERTY(Transient)
+	uint32 bAffectedByComponentScale : 1;
+
 	FStreamingRenderAssetPrimitiveInfo() : 
 		RenderAsset(nullptr),
 		Bounds(ForceInit), 
 		TexelFactor(1.0f),
 		PackedRelativeBox(0),
-		bAllowInvalidTexelFactorWhenUnregistered(false)
+		bAllowInvalidTexelFactorWhenUnregistered(false),
+		bAffectedByComponentScale(true)
 	{
 	}
 
@@ -80,21 +84,38 @@ struct FStreamingRenderAssetPrimitiveInfo
 		const FBoxSphereBounds& InBounds,
 		float InTexelFactor,
 		uint32 InPackedRelativeBox = 0,
-		bool bInAllowInvalidTexelFactorWhenUnregistered = false) :
+		bool bInAllowInvalidTexelFactorWhenUnregistered = false,
+		bool bInAffectedByComponentScale = true) :
 		RenderAsset(InAsset),
 		Bounds(InBounds), 
 		TexelFactor(InTexelFactor),
 		PackedRelativeBox(InPackedRelativeBox),
-		bAllowInvalidTexelFactorWhenUnregistered(bInAllowInvalidTexelFactorWhenUnregistered)
+		bAllowInvalidTexelFactorWhenUnregistered(bInAllowInvalidTexelFactorWhenUnregistered),
+		bAffectedByComponentScale(bInAffectedByComponentScale)
 	{
 	}
 
 	bool CanBeStreamedByDistance(bool bOwningCompRegistered) const
 	{
-		return (TexelFactor > SMALL_NUMBER || (!bOwningCompRegistered && bAllowInvalidTexelFactorWhenUnregistered))
-			&& (Bounds.SphereRadius > SMALL_NUMBER || !bOwningCompRegistered)
+		return (TexelFactor > UE_SMALL_NUMBER || (!bOwningCompRegistered && bAllowInvalidTexelFactorWhenUnregistered))
+			&& (Bounds.SphereRadius > UE_SMALL_NUMBER || !bOwningCompRegistered)
 			&& ensure(FMath::IsFinite(TexelFactor));
 	}
+};
+
+// Invalid streamable texture registration index
+static const uint16 InvalidRegisteredStreamableTexture = (uint16)INDEX_NONE;
+
+/**
+ * Interface for texture streaming container
+ */
+struct ITextureStreamingContainer
+{
+#if WITH_EDITOR
+	virtual void InitializeTextureStreamingContainer(uint32 InPackedTextureStreamingQualityLevelFeatureLevel) = 0;
+	virtual uint16 RegisterStreamableTexture(UTexture* InTexture) = 0;
+	virtual bool GetStreamableTexture(uint16 InTextureIndex, FString& OutTextureName, FGuid& OutTextureGuid) const { return false; }
+#endif
 };
 
 /** 
@@ -139,15 +160,19 @@ struct FStreamingTextureBuildInfo
 	{
 	}
 
+#if WITH_EDITOR
 	/**
 	 *	Set this struct to match the unpacked params.
 	 *
-	 *	@param	LevelTextures	[in,out]	The list of textures referred by all component of a level. The array index maps to UTexture2D::LevelIndex.
-	 *	@param	RefBounds		[in]		The reference bounds used to compute the packed relative box.
-	 *	@param	Info			[in]		The unpacked params.
+	 *	@param	TextureStreamingContainer	[in,out]	Contains the list of registered streamable textures referred by components.
+	 *	@param	RefBounds					[in]		The reference bounds used to compute the packed relative box.
+	 *	@param	Info						[in]		The unpacked params.
 	 */
-	ENGINE_API void PackFrom(ULevel* Level, const FBoxSphereBounds& RefBounds, const FStreamingRenderAssetPrimitiveInfo& Info);
+	ENGINE_API void PackFrom(ITextureStreamingContainer* TextureStreamingContainer, const FBoxSphereBounds& RefBounds, const FStreamingRenderAssetPrimitiveInfo& Info);
 
+	/** Returns hash of content. */
+	ENGINE_API uint32 ComputeHash() const;
+#endif
 };
 
 // The max number of uv channels processed in the texture streaming build.
@@ -178,6 +203,7 @@ struct FPrimitiveMaterialInfo
 enum ETextureStreamingBuildType
 {
 	TSB_MapBuild,
+	TSB_ActorBuild,
 	TSB_ValidationOnly,
 	TSB_ViewMode
 };
@@ -207,18 +233,21 @@ class FStreamingTextureLevelContext
 	/** The last bound component texture streaming build data. */
 	const TArray<FStreamingTextureBuildInfo>* ComponentBuildData;
 
+	/** Level's StreamingTextures array resolved version of FName to UTexture*. */
+	TArray<UTexture*> LevelStreamingTextures;
+
 	struct FTextureBoundState
 	{
 		FTextureBoundState() {}
 
-		FTextureBoundState(UTexture2D* InTexture) : BuildDataTimestamp(0), BuildDataIndex(0), Texture(InTexture) {}
+		FTextureBoundState(UTexture* InTexture) : BuildDataTimestamp(0), BuildDataIndex(0), Texture(InTexture) {}
 
 		/** The timestamp of the build data to indentify whether BuildDataIndex is valid or not. */
 		int32 BuildDataTimestamp;
 		/** The ComponentBuildData Index referring this texture. */
 		int32 BuildDataIndex;
 		/**  The texture relative to this entry. */
-		UTexture2D* Texture;
+		UTexture* Texture;
 	};
 
 	/*
@@ -229,19 +258,23 @@ class FStreamingTextureLevelContext
 
 	EMaterialQualityLevel::Type QualityLevel;
 	ERHIFeatureLevel::Type FeatureLevel;
+	bool bIsBuiltDataValid;
 
-	int32* GetBuildDataIndexRef(UTexture2D* Texture2D);
+	ENGINE_API int32* GetBuildDataIndexRef(UTexture* Texture, bool bForceUpdate = false);
+	ENGINE_API void UpdateQualityAndFeatureLevel(EMaterialQualityLevel::Type InQualityLevel, ERHIFeatureLevel::Type InFeatureLevel, const ULevel* InLevel = nullptr);
 
 public:
 
 	// Needs InLevel to use precomputed data from 
-	FStreamingTextureLevelContext(EMaterialQualityLevel::Type InQualityLevel, const ULevel* InLevel = nullptr, const TMap<FGuid, int32>* InTextureGuidToLevelIndex = nullptr);
-	FStreamingTextureLevelContext(EMaterialQualityLevel::Type InQualityLevel, ERHIFeatureLevel::Type InFeatureLevel, bool InUseRelativeBoxes);
-	FStreamingTextureLevelContext(EMaterialQualityLevel::Type InQualityLevel, const UPrimitiveComponent* Primitive);
-	~FStreamingTextureLevelContext();
+	ENGINE_API FStreamingTextureLevelContext(EMaterialQualityLevel::Type InQualityLevel, const ULevel* InLevel = nullptr, const TMap<FGuid, int32>* InTextureGuidToLevelIndex = nullptr);
+	ENGINE_API FStreamingTextureLevelContext(EMaterialQualityLevel::Type InQualityLevel, ERHIFeatureLevel::Type InFeatureLevel, bool InUseRelativeBoxes);
+	ENGINE_API FStreamingTextureLevelContext(EMaterialQualityLevel::Type InQualityLevel, const UPrimitiveComponent* Primitive);
+	ENGINE_API ~FStreamingTextureLevelContext();
 
-	void BindBuildData(const TArray<FStreamingTextureBuildInfo>* PreBuiltData);
-	void ProcessMaterial(const FBoxSphereBounds& ComponentBounds, const FPrimitiveMaterialInfo& MaterialData, float ComponentScaling, TArray<FStreamingRenderAssetPrimitiveInfo>& OutStreamingTextures);
+	ENGINE_API void UpdateContext(EMaterialQualityLevel::Type InQualityLevel, const ULevel* InLevel, const TMap<FGuid, int32>* InTextureGuidToLevelIndex);
+	ENGINE_API void BindBuildData(const TArray<FStreamingTextureBuildInfo>* PreBuiltData);
+	ENGINE_API void ProcessMaterial(const FBoxSphereBounds& ComponentBounds, const FPrimitiveMaterialInfo& MaterialData, float ComponentScaling, TArray<FStreamingRenderAssetPrimitiveInfo>& OutStreamingTextures, bool bIsComponentBuildDataValid = false, const UPrimitiveComponent* DebugComponent = nullptr);
+	ENGINE_API bool CanUseTextureStreamingBuiltData() const;
 
 	EMaterialQualityLevel::Type GetQualityLevel() { return QualityLevel; }
 	ERHIFeatureLevel::Type GetFeatureLevel() { return FeatureLevel; }
@@ -270,6 +303,20 @@ typedef TMap<UMaterialInterface*, TArray<FMaterialTextureInfo> > FTexCoordScaleM
 
 /** A mapping between used material and levels for refering primitives. */
 typedef TMap<UMaterialInterface*, TArray<ULevel*> > FMaterialToLevelsMap;
+
+#if WITH_EDITOR
+/** Build the texture streaming component data for an actor and save common data in a UActorTextureStreamingBuildDataComponent. */
+ENGINE_API void BuildActorTextureStreamingData(AActor* InActor, EMaterialQualityLevel::Type InQualityLevel, ERHIFeatureLevel::Type InFeatureLevel);
+
+/** Build the texture streaming component data for a level based on actor's UActorTextureStreamingBuildDataComponent. */
+ENGINE_API bool BuildLevelTextureStreamingComponentDataFromActors(ULevel* InLevel);
+
+/** Resolves whether a texture is streamable independent of compression speed, and avoids unnecessary build settings generation work. */
+ENGINE_API bool GetTextureIsStreamable(const UTexture& Texture);
+
+/** Resolves whether a texture is streamable on the given platform, independent of compression speed, and avoids unnecessary build settings generation work. */
+ENGINE_API bool GetTextureIsStreamableOnPlatform(const UTexture& Texture, const ITargetPlatform& TargetPlatform);
+#endif
 
 /** Build the shaders required for the texture streaming build. Returns whether or not the action was successful. */
 ENGINE_API bool BuildTextureStreamingComponentData(UWorld* InWorld, EMaterialQualityLevel::Type QualityLevel, ERHIFeatureLevel::Type FeatureLevel, bool bFullRebuild, FSlowTask& BuildTextureStreamingTask);

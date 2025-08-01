@@ -2,17 +2,20 @@
 
 #include "TraceServices/ModuleService.h"
 #include "ModuleServicePrivate.h"
-#include "UObject/NameTypes.h"
-#include "Features/IModularFeatures.h"
 
-namespace Trace
+#include "Features/IModularFeatures.h"
+#include "HAL/LowLevelMemTracker.h"
+#include "UObject/NameTypes.h"
+
+LLM_DECLARE_TAG(Insights_TraceServices);
+
+namespace TraceServices
 {
 
 const FName ModuleFeatureName("TraceModuleFeature");
 
 FModuleService::FModuleService()
 {
-
 }
 
 void FModuleService::Initialize()
@@ -21,12 +24,17 @@ void FModuleService::Initialize()
 	{
 		return;
 	}
+
 	TArray<IModule*> Modules = IModularFeatures::Get().GetModularFeatureImplementations<IModule>(ModuleFeatureName);
 	for (IModule* Module : Modules)
 	{
 		FModuleInfo ModuleInfo;
 		Module->GetModuleInfo(ModuleInfo);
 		ModulesMap.Add(ModuleInfo.Name, Module);
+		if (Module->ShouldBeEnabledByDefault())
+		{
+			EnabledModules.Add(Module);
+		}
 	}
 
 	bIsInitialized = true;
@@ -40,16 +48,37 @@ void FModuleService::GetAvailableModules(TArray<FModuleInfo>& OutModules)
 	for (const auto& KV : ModulesMap)
 	{
 		IModule* Module = KV.Value;
-		TArray<const TCHAR*> ModuleLoggers;
-		Module->GetLoggers(ModuleLoggers);
-		if (ModuleLoggers.Num())
-		{
-			FModuleInfo& ModuleInfo = OutModules.AddDefaulted_GetRef();
-			Module->GetModuleInfo(ModuleInfo);
-		}
+		FModuleInfo& ModuleInfo = OutModules.AddDefaulted_GetRef();
+		Module->GetModuleInfo(ModuleInfo);
 	}
 }
-	
+
+void FModuleService::GetAvailableModulesEx(TArray<FModuleInfoEx>& OutModules)
+{
+	FScopeLock Lock(&CriticalSection);
+	Initialize();
+	OutModules.Empty(ModulesMap.Num());
+	for (const auto& KV : ModulesMap)
+	{
+		IModule* Module = KV.Value;
+		FModuleInfoEx& ModuleInfoEx = OutModules.AddDefaulted_GetRef();
+		Module->GetModuleInfo(ModuleInfoEx.Info);
+		ModuleInfoEx.bIsEnabled = EnabledModules.Contains(Module);
+	}
+}
+
+void FModuleService::GetEnabledModules(TArray<FModuleInfo>& OutModules)
+{
+	FScopeLock Lock(&CriticalSection);
+	Initialize();
+	OutModules.Empty(ModulesMap.Num());
+	for (IModule* Module : EnabledModules)
+	{
+		FModuleInfo& ModuleInfo = OutModules.AddDefaulted_GetRef();
+		Module->GetModuleInfo(ModuleInfo);
+	}
+}
+
 void FModuleService::SetModuleEnabled(const FName& ModuleName, bool bEnabled)
 {
 	FScopeLock Lock(&CriticalSection);
@@ -76,11 +105,11 @@ void FModuleService::SetModuleEnabled(const FName& ModuleName, bool bEnabled)
 
 void FModuleService::OnAnalysisBegin(IAnalysisSession& Session)
 {
+	LLM_SCOPE_BYTAG(Insights_TraceServices);
 	FScopeLock Lock(&CriticalSection);
 	Initialize();
-	for (const auto& KV : ModulesMap)
+	for (IModule* Module : EnabledModules)
 	{
-		IModule* Module = KV.Value;
 		Module->OnAnalysisBegin(Session);
 	}
 }
@@ -126,11 +155,10 @@ void FModuleService::GenerateReports(const IAnalysisSession& Session, const TCHA
 {
 	FScopeLock Lock(&CriticalSection);
 	Initialize();
-	for (const auto& KV : ModulesMap)
+	for (IModule* Module : EnabledModules)
 	{
-		IModule* Module = KV.Value;
 		Module->GenerateReports(Session, CmdLine, OutputDirectory);
 	}
 }
 
-}
+} // namespace TraceServices

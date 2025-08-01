@@ -2,17 +2,29 @@
 
 #pragma once
 
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "Misc/Attribute.h"
-#include "Layout/Visibility.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Styling/SlateColor.h"
-#include "Input/CursorReply.h"
-#include "Widgets/SCompoundWidget.h"
-#include "SNodePanel.h"
+#include "Delegates/Delegate.h"
 #include "Framework/SlateDelegates.h"
+#include "HAL/PlatformCrt.h"
+#include "Input/CursorReply.h"
+#include "Internationalization/Text.h"
+#include "Layout/Visibility.h"
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
+#include "Misc/Attribute.h"
+#include "SNodePanel.h"
+#include "Styling/SlateColor.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateEnums.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
 
 class SMultiLineEditableTextBox;
+class UEdGraphNode;
+struct FGeometry;
+struct FPointerEvent;
 
 DECLARE_DELEGATE_RetVal( bool, FIsGraphNodeHovered );
 DECLARE_DELEGATE_OneParam( FOnCommentBubbleToggled, bool );
@@ -133,18 +145,15 @@ protected:
 	/** Returns the color of the main bubble */
 	FSlateColor GetBubbleColor() const;
 
-	/** Returns the current background color for the textbox */
-	FSlateColor GetTextBackgroundColor() const;
-	
-	/** Returns the current foreground color for the textbox */
-	FSlateColor GetTextForegroundColor() const;
-
 	/** Returns the foreground color for the text and buttons, taking into account the bubble color */
-	FSlateColor GetForegroundColor() const override { return ForegroundColor; }
+	FSlateColor GetForegroundColor() const override { return CalculatedForegroundColor; }
 
 	/** Called when the comment text is committed */
 	void OnCommentTextCommitted( const FText& NewText, ETextCommit::Type CommitInfo );
 
+	FSlateColor GetTextBackgroundColor() const;
+	FSlateColor GetTextForegroundColor() const;
+	FSlateColor GetReadOnlyTextForegroundColor() const;
 	/** Returns bubble toggle check state */
 	ECheckBoxState GetToggleButtonCheck() const;
 
@@ -180,7 +189,9 @@ protected:
 	FIsGraphNodeHovered IsGraphNodeHovered;
 
 	/** Current Foreground Color */
-	FLinearColor ForegroundColor;
+	FSlateColor CalculatedForegroundColor;
+	/** The luminance (R + G + B) of the bubble's color, used to control text foreground color */
+	float BubbleLuminance;
 	/** Allow pin behaviour */
 	bool bAllowPinning;
 	/** Allow in bubble controls */

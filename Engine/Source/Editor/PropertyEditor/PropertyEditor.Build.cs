@@ -8,41 +8,22 @@ public class PropertyEditor : ModuleRules
 	{
 		PublicDependencyModuleNames.AddRange(
 			new string[] {
+				"EditorConfig",
+				"EditorFramework",
 				"UnrealEd",
                 "ActorPickerMode",
                 "SceneDepthPickerMode",
-			}
-		);
-		
-        PublicIncludePathModuleNames.AddRange(
-            new string[] {                
-                "IntroTutorials"
-            }
-        );
-
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				"Editor/PropertyEditor/Private",
-				"Editor/PropertyEditor/Private/Presentation",
-				"Editor/PropertyEditor/Private/Presentation/PropertyTable",
-				"Editor/PropertyEditor/Private/Presentation/PropertyEditor",
-				"Editor/PropertyEditor/Private/UserInterface",
-				"Editor/PropertyEditor/Private/UserInterface/PropertyTable",
-				"Editor/PropertyEditor/Private/UserInterface/PropertyEditor",
-				"Editor/PropertyEditor/Private/UserInterface/PropertyTree",
-				"Editor/PropertyEditor/Private/UserInterface/PropertyDetails",
 			}
 		);
 
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
 				"MainFrame",
-                "AssetRegistry",
+               	"AssetRegistry",
                 "AssetTools",
 				"ClassViewer",
 				"StructViewer",
 				"ContentBrowser",
-				"ConfigEditor",
 			}
 		);
 
@@ -59,12 +40,15 @@ public class PropertyEditor : ModuleRules
 				"SlateCore",
 				"EditorWidgets",
 				"Documentation",
-                "RHI",
 				"ConfigEditor",
                 "SceneOutliner",
 				"DesktopPlatform",
 				"PropertyPath",
-            }
+				"ToolWidgets",
+				"WidgetRegistration",
+				"Json",
+				"ToolMenus"
+			}
         );
 
 		DynamicallyLoadedModuleNames.AddRange(

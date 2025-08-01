@@ -6,10 +6,33 @@
 #include "Animation/WidgetAnimation.h"
 #include "MovieSceneTimeHelpers.h"
 #include "Evaluation/MovieScenePlayback.h"
+#include "EntitySystem/MovieSceneEntitySystemRunner.h"
 #include "EntitySystem/MovieSceneEntitySystemLinker.h"
 #include "Animation/UMGSequenceTickManager.h"
+#include "ProfilingDebugging/CsvProfiler.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(UMGSequencePlayer)
 
 extern TAutoConsoleVariable<bool> CVarUserWidgetUseParallelAnimation;
+
+namespace UE::UMG
+{
+
+	bool GAsyncAnimationControlFlow = true;
+	FAutoConsoleVariableRef CVarAsyncAnimationControlFlow(
+		TEXT("UMG.AsyncAnimationControlFlow"),
+		GAsyncAnimationControlFlow,
+		TEXT("(Default: true) Whether to perform animation control flow functions (Play, Pause, Stop etc) asynchronously.")
+	);
+
+	bool GVarAnimationMarkers = false;
+	FAutoConsoleVariableRef CVarAnimationMarkers(
+		TEXT("UMG.AnimationMarkers"),
+		GVarAnimationMarkers,
+		TEXT("(Default: false) Whether to emit profiling frame markers for starting and stopping UMG animations.")
+	);
+
+} // namespace UE::UMG
 
 UUMGSequencePlayer::UUMGSequencePlayer(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -19,9 +42,11 @@ UUMGSequencePlayer::UUMGSequencePlayer(const FObjectInitializer& ObjectInitializ
 	PlaybackSpeed = 1;
 	bRestoreState = false;
 	Animation = nullptr;
-	bIsEvaluating = false;
+	bIsStopping = false;
+	bIsBeginningPlay = false;
 	bCompleteOnPostEvaluation = false;
 	UserTag = NAME_None;
+	BlockedDeltaTimeCompensation = 0.f;
 }
 
 void UUMGSequencePlayer::InitSequencePlayer(UWidgetAnimation& InAnimation, UUserWidget& InUserWidget)
@@ -53,11 +78,25 @@ UMovieSceneEntitySystemLinker* UUMGSequencePlayer::ConstructEntitySystemLinker()
 		return Widget->AnimationTickManager->GetLinker();
 	}
 
-	return UMovieSceneEntitySystemLinker::CreateLinker(Widget ? Widget->GetWorld() : nullptr);
+	return UMovieSceneEntitySystemLinker::CreateLinker(Widget ? Widget->GetWorld() : nullptr, UE::MovieScene::EEntitySystemLinkerRole::UMG);
 }
 
 void UUMGSequencePlayer::Tick(float DeltaTime)
 {
+	if (IsEvaluating())
+	{
+		BlockedDeltaTimeCompensation += DeltaTime;
+		return;
+	}
+
+	if (bIsStopping || bIsBeginningPlay)
+	{
+		return;
+	}
+
+	DeltaTime += BlockedDeltaTimeCompensation;
+	BlockedDeltaTimeCompensation = 0.f;
+
 	if ( PlayerStatus == EMovieScenePlayerStatus::Playing )
 	{
 		FFrameTime DeltaFrameTime = (bIsPlayingForward ? DeltaTime * PlaybackSpeed : -DeltaTime * PlaybackSpeed) * AnimationResolution;
@@ -66,7 +105,7 @@ void UUMGSequencePlayer::Tick(float DeltaTime)
 		TimeCursorPosition += DeltaFrameTime;
 
 		// Check if we crossed over bounds
-		const bool bCrossedLowerBound = TimeCursorPosition < 0;
+		const bool bCrossedLowerBound = TimeCursorPosition < FFrameTime(0);
 		const bool bCrossedUpperBound = TimeCursorPosition >= FFrameTime(Duration);
 		const bool bCrossedEndTime = bIsPlayingForward
 			? LastTimePosition < EndTime && EndTime <= TimeCursorPosition
@@ -81,7 +120,9 @@ void UUMGSequencePlayer::Tick(float DeltaTime)
 		// Did the animation complete
 		const bool bCompleted = NumLoopsToPlay != 0 && NumLoopsCompleted >= NumLoopsToPlay;
 
-		// Handle Times
+		// Handle times and see if we need to loop or ping-pong. If looping/ping-ponging,
+		// we update the sequence for the last little bit before it happens.
+		const FFrameTime LastValidFrame(Duration-1, 0.99999994f);
 		if (bCrossedLowerBound)
 		{
 			if (bCompleted)
@@ -90,37 +131,41 @@ void UUMGSequencePlayer::Tick(float DeltaTime)
 			}
 			else
 			{
+				UpdateInternal(LastTimePosition, FFrameTime(0), false);
+
 				if (PlayMode == EUMGSequencePlayMode::PingPong)
 				{
 					bIsPlayingForward = !bIsPlayingForward;
 					TimeCursorPosition = FMath::Abs(TimeCursorPosition);
+					LastTimePosition = FFrameTime(0);
 				}
 				else
 				{
 					TimeCursorPosition += FFrameTime(Duration);
-					LastTimePosition = TimeCursorPosition;
+					LastTimePosition = LastValidFrame;
 				}
 			}
 		}
 		else if (bCrossedUpperBound)
 		{
-			FFrameTime LastValidFrame(Duration-1, 0.99999994f);
-
 			if (bCompleted)
 			{
 				TimeCursorPosition = LastValidFrame;
 			}
 			else
 			{
+				UpdateInternal(LastTimePosition, LastValidFrame, false);
+
 				if (PlayMode == EUMGSequencePlayMode::PingPong)
 				{
 					bIsPlayingForward = !bIsPlayingForward;
 					TimeCursorPosition = LastValidFrame - (TimeCursorPosition - FFrameTime(Duration));
+					LastTimePosition = LastValidFrame;
 				}
 				else
 				{
 					TimeCursorPosition = TimeCursorPosition - FFrameTime(Duration);
-					LastTimePosition = TimeCursorPosition;
+					LastTimePosition = FFrameTime(0);
 				}
 			}
 		}
@@ -134,54 +179,45 @@ void UUMGSequencePlayer::Tick(float DeltaTime)
 
 		bCompleteOnPostEvaluation = bCompleted;
 
-		if (RootTemplateInstance.IsValid())
+		const bool bHasJumped = (bCrossedLowerBound || bCrossedUpperBound || bCrossedEndTime);
+		UpdateInternal(LastTimePosition, TimeCursorPosition, bHasJumped);
+	}
+}
+
+void UUMGSequencePlayer::UpdateInternal(FFrameTime LastTimePosition, FFrameTime NextTimePosition, bool bHasJumped)
+{
+	if (RootTemplateInstance.IsValid())
+	{
+		UMovieScene* MovieScene = Animation->GetMovieScene();
+
+		FMovieSceneContext Context(
+				FMovieSceneEvaluationRange(
+					AbsolutePlaybackStart + TimeCursorPosition,
+					AbsolutePlaybackStart + LastTimePosition,
+					AnimationResolution),
+				PlayerStatus);
+		Context.SetHasJumped(bHasJumped);
+
+		TSharedPtr<FMovieSceneEntitySystemRunner> Runner = RootTemplateInstance.GetRunner();
+		if (Runner)
 		{
-			UMovieScene* MovieScene = Animation->GetMovieScene();
+			UE::MovieScene::ERunnerUpdateFlags UpdateFlags = UE::MovieScene::ERunnerUpdateFlags::None;
+			FSimpleDelegate OnComplete;
 
-			FMovieSceneContext Context(
-					FMovieSceneEvaluationRange(
-						AbsolutePlaybackStart + TimeCursorPosition,
-						AbsolutePlaybackStart + LastTimePosition,
-						AnimationResolution),
-					PlayerStatus);
-			Context.SetHasJumped(bCrossedLowerBound || bCrossedUpperBound || bCrossedEndTime);
-
-			UMovieSceneSequence* MovieSceneSequence = RootTemplateInstance.GetSequence(MovieSceneSequenceID::Root);
-			const bool bIsSequenceBlocking = EnumHasAnyFlags(MovieSceneSequence->GetFlags(), EMovieSceneSequenceFlags::BlockingEvaluation);
-
-			const bool bIsRunningTickManager = CVarUserWidgetUseParallelAnimation.GetValueOnGameThread();
-
-			if (bIsRunningTickManager)
+			if (bCompleteOnPostEvaluation)
 			{
-				UUserWidget* Widget = UserWidget.Get();
-				UUMGSequenceTickManager* TickManager = Widget ? Widget->AnimationTickManager : nullptr;
+				bIsStopping = true;
+				bCompleteOnPostEvaluation = false;
 
-				if (!TickManager)
-				{
-					return;
-				}
-
-				if (!bIsSequenceBlocking)
-				{
-					// Queue an evaluation of this player's widget animation, to be evaluated later by our
-					// global tick manager as part of a glorious multi-threaded job fest.
-					FMovieSceneEntitySystemRunner& Runner = TickManager->GetRunner();
-					Runner.QueueUpdate(Context, RootTemplateInstance.GetRootInstanceHandle());
-					// WARNING: the evalution hasn't run yet so don't run any stateful code after this point
-					// unless you know it's OK to do so. Most likely, you want to run stateful code in the
-					// PostEvaluation method, or queue up a latent action.
-				}
-				else
-				{
-					// Synchronous evaluation. Sucks for performance.
-					RootTemplateInstance.Evaluate(Context, *this);
-					// The latent actions will be run by the tick manager.
-				}
+				OnComplete = FSimpleDelegate::CreateUObject(this, &UUMGSequencePlayer::HandleLatentStop);
+				UpdateFlags = UE::MovieScene::ERunnerUpdateFlags::Flush;
 			}
-			else
+
+			Runner->QueueUpdate(Context, RootTemplateInstance.GetRootInstanceHandle(), MoveTemp(OnComplete), UpdateFlags);
+
+			if (Runner == SynchronousRunner || !UE::UMG::GAsyncAnimationControlFlow)
 			{
-				// Synchronous evaluation. Sucks for performance.
-				RootTemplateInstance.Evaluate(Context, *this);
+				Runner->Flush();
 				ApplyLatentActions();
 			}
 		}
@@ -190,13 +226,29 @@ void UUMGSequencePlayer::Tick(float DeltaTime)
 
 void UUMGSequencePlayer::PlayInternal(double StartAtTime, double EndAtTime, int32 InNumLoopsToPlay, EUMGSequencePlayMode::Type InPlayMode, float InPlaybackSpeed, bool bInRestoreState)
 {
-	RootTemplateInstance.Initialize(*Animation, *this, nullptr);
+	UUserWidget* Widget = UserWidget.Get();
+	UUMGSequenceTickManager* TickManager = Widget ? ToRawPtr(Widget->AnimationTickManager) : nullptr;
+
+	if (UE::UMG::GVarAnimationMarkers && Animation && Widget)
+	{
+		CSV_EVENT_GLOBAL(TEXT("Play Animation [%s::%s]"), *Widget->GetName(), *Animation->GetName());
+	}
+
+	TSharedPtr<FMovieSceneEntitySystemRunner> RunnerToUse = TickManager ? TickManager->GetRunner() : nullptr;
+	if (EnumHasAnyFlags(Animation->GetFlags(), EMovieSceneSequenceFlags::BlockingEvaluation))
+	{
+		SynchronousRunner = MakeShared<FMovieSceneEntitySystemRunner>();
+		RunnerToUse = SynchronousRunner;
+	}
+
+	RootTemplateInstance.Initialize(*Animation, *this, nullptr, RunnerToUse);
 
 	if (bInRestoreState)
 	{
 		RootTemplateInstance.EnableGlobalPreAnimatedStateCapture();
 	}
 
+	bIsBeginningPlay = true;
 	bRestoreState = bInRestoreState;
 	PlaybackSpeed = FMath::Abs(InPlaybackSpeed);
 	PlayMode = InPlayMode;
@@ -232,19 +284,24 @@ void UUMGSequencePlayer::PlayInternal(double StartAtTime, double EndAtTime, int3
 
 	PlayerStatus = EMovieScenePlayerStatus::Playing;
 
-	UUserWidget* Widget = UserWidget.Get();
-	UUMGSequenceTickManager* TickManager = Widget ? Widget->AnimationTickManager : nullptr;
-
 	// Playback assumes the start frame has already been evaulated, so we also want to evaluate any events on the start frame here.
-	if (TickManager && RootTemplateInstance.IsValid())
+	if (RunnerToUse)
 	{
 		const FMovieSceneContext Context(FMovieSceneEvaluationRange(AbsolutePlaybackStart + TimeCursorPosition, AbsolutePlaybackStart + TimeCursorPosition, AnimationResolution), PlayerStatus);
 
+		auto OnBegunPlay = [this]
+		{
+			this->bIsBeginningPlay = false;
+		};
+
 		// We queue an update instead of immediately flushing the entire linker so that we don't incur a cascade of flushes on frames when multiple animations are played
 		// In rare cases where the linker must be flushed immediately PreTick, the queue should be manually flushed 
+		RunnerToUse->QueueUpdate(Context, RootTemplateInstance.GetRootInstanceHandle(), FSimpleDelegate::CreateWeakLambda(this, OnBegunPlay), UE::MovieScene::ERunnerUpdateFlags::Flush);
 
-		FMovieSceneEntitySystemRunner& Runner = TickManager->GetRunner();
-		Runner.QueueUpdate(Context, RootTemplateInstance.GetRootInstanceHandle());
+		if (RunnerToUse == SynchronousRunner || !UE::UMG::GAsyncAnimationControlFlow)
+		{
+			RunnerToUse->Flush();
+		}
 	}
 }
 
@@ -284,16 +341,15 @@ void UUMGSequencePlayer::Pause()
 	PlayerStatus = EMovieScenePlayerStatus::Stopped;
 
 	// Evaluate the sequence at its current time, with a status of 'stopped' to ensure that animated state pauses correctly. (ie. audio sounds should stop/pause)
-	const FMovieSceneContext Context(FMovieSceneEvaluationRange(AbsolutePlaybackStart + TimeCursorPosition, AbsolutePlaybackStart + TimeCursorPosition, AnimationResolution), PlayerStatus);
-	if (RootTemplateInstance.HasEverUpdated())
+	TSharedPtr<FMovieSceneEntitySystemRunner> RunnerToUpdate = RootTemplateInstance.HasEverUpdated() ? RootTemplateInstance.GetRunner() : nullptr;
+	if (RunnerToUpdate)
 	{
-		UUserWidget* Widget = UserWidget.Get();
-		UUMGSequenceTickManager* TickManager = Widget ? Widget->AnimationTickManager : nullptr;
+		const FMovieSceneContext Context(FMovieSceneEvaluationRange(AbsolutePlaybackStart + TimeCursorPosition, AbsolutePlaybackStart + TimeCursorPosition, AnimationResolution), PlayerStatus);
+		RunnerToUpdate->QueueUpdate(Context, RootTemplateInstance.GetRootInstanceHandle(), UE::MovieScene::ERunnerUpdateFlags::Flush);
 
-		if (TickManager)
+		if (RunnerToUpdate == SynchronousRunner || !UE::UMG::GAsyncAnimationControlFlow)
 		{
-			FMovieSceneEntitySystemRunner& Runner = TickManager->GetRunner();
-			Runner.QueueUpdate(Context, RootTemplateInstance.GetRootInstanceHandle());
+			RunnerToUpdate->Flush();
 		}
 	}
 }
@@ -308,42 +364,101 @@ void UUMGSequencePlayer::Reverse()
 
 void UUMGSequencePlayer::Stop()
 {
+	using namespace UE::MovieScene;
+
 	if (NeedsQueueLatentAction())
 	{
 		QueueLatentAction(FMovieSceneSequenceLatentActionDelegate::CreateUObject(this, &UUMGSequencePlayer::Stop));
 		return;
 	}
 
+	if (PlayerStatus == EMovieScenePlayerStatus::Stopped)
+	{
+		return;
+	}
+
 	PlayerStatus = EMovieScenePlayerStatus::Stopped;
 
-	UUserWidget* Widget = UserWidget.Get();
-	UUMGSequenceTickManager* TickManager = Widget ? Widget->AnimationTickManager : nullptr;
+	UMovieSceneSequence* MovieSceneSequence = RootTemplateInstance.GetSequence(MovieSceneSequenceID::Root);
+	const bool bIsRunningWithTickManager = CVarUserWidgetUseParallelAnimation.GetValueOnGameThread();
+	const bool bIsSequenceBlocking = EnumHasAnyFlags(MovieSceneSequence->GetFlags(), EMovieSceneSequenceFlags::BlockingEvaluation);
+	const bool bIsAsync = bIsRunningWithTickManager && !bIsSequenceBlocking && UE::UMG::GAsyncAnimationControlFlow == true;
 
-	if (TickManager && RootTemplateInstance.IsValid())
+	UUserWidget* Widget = UserWidget.Get();
+	UUMGSequenceTickManager* TickManager = Widget ? ToRawPtr(Widget->AnimationTickManager) : nullptr;
+
+	TimeCursorPosition = FFrameTime(0);
+
+	if (!TickManager || !RootTemplateInstance.IsValid())
 	{
-		if (RootTemplateInstance.HasEverUpdated())
-		{
-			const FMovieSceneContext Context(FMovieSceneEvaluationRange(AbsolutePlaybackStart, AnimationResolution), PlayerStatus);
-			RootTemplateInstance.Evaluate(Context, *this);
-		}
-		else
-		{
-			TickManager->ClearLatentActions(this);
-			LatentActions.Empty();
-		}
-		RootTemplateInstance.Finish(*this);
+		HandleLatentStop();
+		return;
 	}
+
+	if (!RootTemplateInstance.HasEverUpdated())
+	{
+		TickManager->ClearLatentActions(this);
+		LatentActions.Empty();
+		HandleLatentStop();
+		return;
+	}
+
+	const FMovieSceneContext Context(FMovieSceneEvaluationRange(AbsolutePlaybackStart, AnimationResolution), PlayerStatus);
+
+	// Prevent any other updates
+	bIsStopping = true;
+
+	if (TSharedPtr<FMovieSceneEntitySystemRunner> Runner = RootTemplateInstance.GetRunner())
+	{
+		// It would be better if we did not have to actively re-evaluate the animation at the start time when Stop is called
+		// so we don't have to queue an additional update, but this has to be included for legacy reasons.
+		Runner->QueueUpdate(Context, RootTemplateInstance.GetRootInstanceHandle(), FSimpleDelegate::CreateUObject(this, &UUMGSequencePlayer::HandleLatentStop), UE::MovieScene::ERunnerUpdateFlags::Flush);
+
+		if (Runner == SynchronousRunner || !UE::UMG::GAsyncAnimationControlFlow)
+		{
+			Runner->Flush();
+		}
+	}
+}
+
+void UUMGSequencePlayer::HandleLatentStop()
+{
+	if (TSharedPtr<FMovieSceneEntitySystemRunner> Runner = RootTemplateInstance.GetRunner())
+	{
+		Runner->QueueFinalUpdate(RootTemplateInstance.GetRootInstanceHandle());
+
+		// Even if our request to Finish the instance was queued, we can wait until the next flush for those effects to be seen
+		// This will most likely happen immediately anyway since the runner will keep looping until its queue is empty,
+		// And we are already inside an active evaluation
+	}
+
+	PlayerStatus = EMovieScenePlayerStatus::Stopped;
+
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	RootTemplateInstance.ResetDirectorInstances();
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	if (bRestoreState)
 	{
 		RestorePreAnimatedState();
 	}
 
-	UserWidget->OnAnimationFinishedPlaying(*this);
-	OnSequenceFinishedPlayingEvent.Broadcast(*this);
+	bIsStopping = false;
 
-	TimeCursorPosition = FFrameTime(0);
+	UUserWidget* Widget = UserWidget.Get();
+	if (Widget)
+	{
+		if (UE::UMG::GVarAnimationMarkers && Animation)
+		{
+			CSV_EVENT_GLOBAL(TEXT("Stop Animation [%s::%s]"), *Widget->GetName(), *Animation->GetName());
+		}
+
+		Widget->OnAnimationFinishedPlaying(*this);
+	}
+
+	OnSequenceFinishedPlayingEvent.Broadcast(*this);
 }
+
 
 void UUMGSequencePlayer::SetNumLoopsToPlay(int32 InNumLoopsToPlay)
 {
@@ -387,39 +502,14 @@ void UUMGSequencePlayer::SetPlaybackStatus(EMovieScenePlayerStatus::Type InPlayb
 	PlayerStatus = InPlaybackStatus;
 }
 
-void UUMGSequencePlayer::PreEvaluation(const FMovieSceneContext& Context)
+void UUMGSequencePlayer::PopulateUpdateFlags(UE::MovieScene::ESequenceInstanceUpdateFlags& OutFlags)
 {
-	bIsEvaluating = true;
-}
-
-void UUMGSequencePlayer::PostEvaluation(const FMovieSceneContext& Context)
-{
-	bIsEvaluating = false;
-
-	if (bCompleteOnPostEvaluation)
-	{
-		bCompleteOnPostEvaluation = false;
-
-		PlayerStatus = EMovieScenePlayerStatus::Stopped;
-		
-		if (RootTemplateInstance.IsValid())
-		{
-			RootTemplateInstance.Finish(*this);
-		}
-
-		if (bRestoreState)
-		{
-			RestorePreAnimatedState();
-		}
-
-		UserWidget->OnAnimationFinishedPlaying(*this);
-		OnSequenceFinishedPlayingEvent.Broadcast(*this);
-	}
+	// Leave empty so Pre and PostEvaluation are not called
 }
 
 bool UUMGSequencePlayer::NeedsQueueLatentAction() const
 {
-	return bIsEvaluating;
+	return IsEvaluating();
 }
 
 void UUMGSequencePlayer::QueueLatentAction(FMovieSceneSequenceLatentActionDelegate Delegate)
@@ -427,7 +517,7 @@ void UUMGSequencePlayer::QueueLatentAction(FMovieSceneSequenceLatentActionDelega
 	if (CVarUserWidgetUseParallelAnimation.GetValueOnGameThread())
 	{
 		UUserWidget* Widget = UserWidget.Get();
-		UUMGSequenceTickManager* TickManager = Widget ? Widget->AnimationTickManager : nullptr;
+		UUMGSequenceTickManager* TickManager = Widget ? ToRawPtr(Widget->AnimationTickManager) : nullptr;
 
 		if (ensure(TickManager))
 		{
@@ -445,7 +535,7 @@ void UUMGSequencePlayer::ApplyLatentActions()
 	if (CVarUserWidgetUseParallelAnimation.GetValueOnGameThread())
 	{
 		UUserWidget* Widget = UserWidget.Get();
-		UUMGSequenceTickManager* TickManager = Widget ? Widget->AnimationTickManager : nullptr;
+		UUMGSequenceTickManager* TickManager = Widget ? ToRawPtr(Widget->AnimationTickManager) : nullptr;
 		if (TickManager)
 		{
 			TickManager->RunLatentActions();
@@ -462,15 +552,55 @@ void UUMGSequencePlayer::ApplyLatentActions()
 	}
 }
 
+void UUMGSequencePlayer::RemoveEvaluationData()
+{
+	using namespace UE::MovieScene;
+
+	UMovieSceneEntitySystemLinker* Linker           = RootTemplateInstance.GetEntitySystemLinker();
+	FSequenceInstance*             SequenceInstance = RootTemplateInstance.FindInstance(MovieSceneSequenceID::Root);
+
+	if (SequenceInstance && Linker)
+	{
+		TSharedPtr<FMovieSceneEntitySystemRunner> Runner = RootTemplateInstance.GetRunner();
+		if (Runner && Runner->IsCurrentlyEvaluating())
+		{
+			Runner->FlushOutstanding();
+		}
+
+		SequenceInstance->Ledger.UnlinkEverything(Linker);
+		SequenceInstance->InvalidateCachedData();
+	}
+
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	RootTemplateInstance.ResetDirectorInstances();
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+}
+
 void UUMGSequencePlayer::TearDown()
 {
-	RootTemplateInstance.BeginDestroy();
+	RootTemplateInstance.TearDown();
 }
 
 void UUMGSequencePlayer::BeginDestroy()
 {
-	RootTemplateInstance.BeginDestroy();
+	RootTemplateInstance.TearDown();
+
+	// Remove any latent actions added by this player.
+	if (CVarUserWidgetUseParallelAnimation.GetValueOnGameThread())
+	{
+		UUserWidget* Widget = UserWidget.Get();
+		UUMGSequenceTickManager* TickManager = Widget ? ToRawPtr(Widget->AnimationTickManager) : nullptr;
+		if (TickManager)
+		{
+			TickManager->ClearLatentActions(this);
+		}
+	}
+	else
+	{
+		LatentActions.Empty();
+	}
 
 	Super::BeginDestroy();
 }
+
 

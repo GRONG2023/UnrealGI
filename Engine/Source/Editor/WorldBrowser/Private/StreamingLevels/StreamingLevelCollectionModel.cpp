@@ -24,6 +24,7 @@
 #include "StreamingLevels/StreamingLevelModel.h"
 #include "Engine/Selection.h"
 #include "Engine/LevelStreamingVolume.h"
+#include "GameFramework/WorldSettings.h"
 
 #define LOCTEXT_NAMESPACE "WorldBrowser"
 
@@ -72,7 +73,7 @@ void FStreamingLevelCollectionModel::OnLevelsCollectionChanged()
 	// Add models for each streaming level in the world
 	for (ULevelStreaming* StreamingLevel : CurrentWorld->GetStreamingLevels())
 	{
-		if (StreamingLevel)
+		if (StreamingLevel && StreamingLevel->ShowInLevelCollection())
 		{
 			TSharedPtr<FStreamingLevelModel> LevelModel = MakeShareable(new FStreamingLevelModel(*this, StreamingLevel));
 			AllLevelsList.Add(LevelModel);
@@ -124,16 +125,6 @@ void FStreamingLevelCollectionModel::UnloadLevels(const FLevelModelList& InLevel
 		{
 			// this level is dirty and can be removed from the world
 			bHaveDirtyLevels = true;
-		}
-
-		if (const ULevel* Level = LevelModel->GetLevelObject())
-		{
-			if (Level->IsPartitionSubLevel())
-			{
-				// this level is a partition sublevel and cannot be removed from the world
-				FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("RemoveLevel_PartitionSubLevel", "Cannot remove a level which is part of a partition. Delete the top level instead."));
-				return;
-			}
 		}
 	}
 
@@ -303,7 +294,7 @@ void FStreamingLevelCollectionModel::BuildHierarchyMenu(FMenuBuilder& InMenuBuil
 			FNewMenuDelegate::CreateSP(const_cast<FStreamingLevelCollectionModel*>(this), &FStreamingLevelCollectionModel::FillLockSubMenu ) );
 		
 		// Level streaming specific commands
-		if (AreAnyLevelsSelected() && !(IsOneLevelSelected() && GetSelectedLevels()[0]->IsPersistent()))
+		if (AreAllSelectedLevelsUserManaged() && !(IsOneLevelSelected() && GetSelectedLevels()[0]->IsPersistent()))
 		{
 			InMenuBuilder.AddMenuEntry(Commands.World_RemoveSelectedLevels);
 			//
@@ -348,8 +339,11 @@ void FStreamingLevelCollectionModel::BuildHierarchyMenu(FMenuBuilder& InMenuBuil
 			InMenuBuilder.AddMenuEntry( Commands.MoveFoliageToSelected );
 		}
 
-		InMenuBuilder.AddMenuEntry(Commands.ConvertLevelToExternalActors);
-		InMenuBuilder.AddMenuEntry(Commands.ConvertLevelToInternalActors);
+		if (AreAllSelectedLevelsUserManaged())
+		{
+			InMenuBuilder.AddMenuEntry(Commands.ConvertLevelToExternalActors);
+			InMenuBuilder.AddMenuEntry(Commands.ConvertLevelToInternalActors);
+		}
 
 		if (AreAnyLevelsSelected() && !(IsOneLevelSelected() && SelectedLevelsList[0]->IsPersistent()))
 		{
@@ -426,9 +420,11 @@ const FLevelModelList& FStreamingLevelCollectionModel::GetInvalidSelectedLevels(
 void FStreamingLevelCollectionModel::CreateNewLevel_Executed()
 {
 	FString TemplateMapPackageName;
+	bool bOutIsPartitionedWorld = false;
+	const bool bShowPartitionedTemplates = false;
 	FNewLevelDialogModule& NewLevelDialogModule = FModuleManager::LoadModuleChecked<FNewLevelDialogModule>("NewLevelDialog");
 	IMainFrameModule& MainFrameModule = FModuleManager::LoadModuleChecked<IMainFrameModule>(TEXT("MainFrame"));
-	if (NewLevelDialogModule.CreateAndShowNewLevelDialog(MainFrameModule.GetParentWindow(), TemplateMapPackageName))
+	if (NewLevelDialogModule.CreateAndShowNewLevelDialog(MainFrameModule.GetParentWindow(), TemplateMapPackageName, bShowPartitionedTemplates, bOutIsPartitionedWorld))
 	{
 		UPackage* TemplatePackage = TemplateMapPackageName.Len() ? LoadPackage(nullptr, *TemplateMapPackageName, LOAD_None) : nullptr;
 		UWorld* TemplateWorld = TemplatePackage ? UWorld::FindWorldInPackage(TemplatePackage) : nullptr;
@@ -465,21 +461,36 @@ void FStreamingLevelCollectionModel::HandleAddExistingLevelSelected(const TArray
 	TArray<FString> PackageNames;
 	for (const FAssetData& AssetData : SelectedAssets)
 	{
-		PackageNames.Add(AssetData.PackageName.ToString());
+		if (ULevel::GetIsLevelPartitionedFromPackage(AssetData.PackageName))
+		{
+			const FText MessageText = FText::Format(NSLOCTEXT("UnrealEd", "LevelIsPartitioned", "Level ({0}) is partitioned, can't add."), FText::FromName(AssetData.PackageName));
+
+			FSuppressableWarningDialog::FSetupInfo Info(MessageText, LOCTEXT("AddLevelToWorld_Title", "Add Level"), "LevelIsPartitionedWarning");
+			Info.ConfirmText = LOCTEXT("IsPartitioned_Ok", "Ok");
+			FSuppressableWarningDialog RemoveLevelWarning(Info);
+			RemoveLevelWarning.ShowModal();
+		}
+		else
+		{
+			PackageNames.Add(AssetData.PackageName.ToString());
+		}
 	}
 
-	// Save or selected list, adding a new level will clean it up
-	FLevelModelList SavedInvalidSelectedLevels = InvalidSelectedLevels;
-
-	EditorLevelUtils::AddLevelsToWorld(CurrentWorld.Get(), MoveTemp(PackageNames), AddedLevelStreamingClass);
-
-	// Force a cached level list rebuild
-	PopulateLevelsList();
-
-	if (bRemoveInvalidSelectedLevelsAfter)
+	if (PackageNames.Num())
 	{
-		InvalidSelectedLevels = SavedInvalidSelectedLevels;
-		RemoveInvalidSelectedLevels_Executed();
+		// Save or selected list, adding a new level will clean it up
+		FLevelModelList SavedInvalidSelectedLevels = InvalidSelectedLevels;
+
+		EditorLevelUtils::AddLevelsToWorld(CurrentWorld.Get(), MoveTemp(PackageNames), AddedLevelStreamingClass);
+
+		// Force a cached level list rebuild
+		PopulateLevelsList();
+
+		if (bRemoveInvalidSelectedLevelsAfter)
+		{
+			InvalidSelectedLevels = SavedInvalidSelectedLevels;
+			RemoveInvalidSelectedLevels_Executed();
+		}
 	}
 }
 
@@ -591,7 +602,7 @@ bool FStreamingLevelCollectionModel::AreAllSelectedLevelsRemovable() const
 {
 	for (const TSharedPtr<FLevelModel>& LevelModel : SelectedLevelsList)
 	{
-		if (LevelModel->IsLocked() || LevelModel->IsPersistent())
+		if (LevelModel->IsLocked() || LevelModel->IsPersistent() || !LevelModel->IsUserManaged())
 		{
 			return false;
 		}

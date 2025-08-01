@@ -11,8 +11,6 @@
 
 #if OPENGL_GL3
 
-bool FOpenGL3::bSupportsTessellation = false;
-bool FOpenGL3::bSupportsSeparateShaderObjects = false;
 bool FOpenGL3::bAndroidGLESCompatibilityMode = false;
 
 GLsizei FOpenGL3::NextTextureName = OPENGL_NAME_CACHE_SIZE;
@@ -33,21 +31,6 @@ void FOpenGL3::ProcessQueryGLInt()
 
 	GET_GL_INT(GL_MAX_GEOMETRY_TEXTURE_IMAGE_UNITS, 0, MaxGeometryTextureImageUnits);
 	GET_GL_INT(GL_MAX_VARYING_VECTORS, 0, MaxVaryingVectors);
-
-	if (bSupportsTessellation)
-	{
-		GET_GL_INT(GL_MAX_TESS_CONTROL_UNIFORM_COMPONENTS, 0, MaxHullUniformComponents);
-		GET_GL_INT(GL_MAX_TESS_EVALUATION_UNIFORM_COMPONENTS, 0, MaxDomainUniformComponents);
-		GET_GL_INT(GL_MAX_TESS_CONTROL_TEXTURE_IMAGE_UNITS, 0, MaxHullTextureImageUnits);
-		GET_GL_INT(GL_MAX_TESS_EVALUATION_TEXTURE_IMAGE_UNITS, 0, MaxDomainTextureImageUnits);
-	}
-	else
-	{
-		MaxHullUniformComponents = 0;
-		MaxDomainUniformComponents = 0;
-		MaxHullTextureImageUnits = 0;
-		MaxDomainTextureImageUnits = 0;
-	}
 
 #if !defined(__GNUC__) && !defined(__clang__)
 #define LOG_AND_GET_GL_QUERY_INT(IntEnum, Default, Dest) do { if (IntEnum) {glGetQueryiv(IntEnum, GL_QUERY_COUNTER_BITS, &Dest);} else {Dest = Default;} /*FPlatformMisc::LowLevelOutputDebugStringf(TEXT(" GL_QUERY_COUNTER_BITS: ") ## TEXT(#IntEnum) ## TEXT(": %d"), Dest);*/ } while(0)
@@ -73,10 +56,6 @@ void FOpenGL3::ProcessExtensions( const FString& ExtensionsString )
 	}
 	check(MajorVersion!=0);
 
-	// 3.3+ may expose this as an extension, 4.0+ should have this. 
-	// https://www.opengl.org/registry/specs/ARB/tessellation_shader.txt
-	bSupportsTessellation = ExtensionsString.Contains(TEXT("GL_ARB_tessellation_shader")) || ((MajorVersion >= 4));
-
 	ProcessQueryGLInt();
 	FOpenGLBase::ProcessExtensions(ExtensionsString);
 
@@ -97,11 +76,6 @@ void FOpenGL3::ProcessExtensions( const FString& ExtensionsString )
 		glDeleteTextures(1, &VolumeTexture);
 		glDeleteFramebuffers(1, &FrameBuffer);
 	}
-	
-	static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("OpenGL.UseSeparateShaderObjects"));
-	bool const bUseSeparateShaderObjects = (CVar ? (CVar->GetValueOnRenderThread() == 1) : false) && OpenGLShaderPlatformSeparable(GetShaderPlatform());
-	
-	bSupportsSeparateShaderObjects = bUseSeparateShaderObjects && (ExtensionsString.Contains(TEXT("GL_ARB_separate_shader_objects")) || (MajorVersion == 4 && MinorVersion >= 4));
 
 	bAndroidGLESCompatibilityMode = GetFeatureLevel() == ERHIFeatureLevel::ES3_1 && ExtensionsString.Contains(TEXT("GL_ARB_ES3_1_compatibility")) && FParse::Param(FCommandLine::Get(), TEXT("GLESCompat"));
 }

@@ -2,16 +2,27 @@
 
 #include "UserInterface/PropertyEditor/SPropertyEditorBool.h"
 
+#include "Delegates/Delegate.h"
+#include "Input/Events.h"
+#include "InputCoreTypes.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Misc/Attribute.h"
+#include "Presentation/PropertyEditor/PropertyEditor.h"
+#include "PropertyEditorModule.h"
+#include "PropertyHandle.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/Input/SCheckBox.h"
+
+struct FGeometry;
+
 void SPropertyEditorBool::Construct( const FArguments& InArgs, const TSharedRef< class FPropertyEditor >& InPropertyEditor )
 {
 	PropertyEditor = InPropertyEditor;
 
-	static const FName DefaultForegroundName("DefaultForeground");
-
 	CheckBox = SNew( SCheckBox )
 		.OnCheckStateChanged( this, &SPropertyEditorBool::OnCheckStateChanged )
 		.IsChecked( this, &SPropertyEditorBool::OnGetCheckState )
-		.ForegroundColor( FEditorStyle::GetSlateColor(DefaultForegroundName) )
 		.Padding(0.0f);
 
 	ChildSlot

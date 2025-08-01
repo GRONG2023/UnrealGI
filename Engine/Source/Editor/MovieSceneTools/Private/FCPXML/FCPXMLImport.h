@@ -11,9 +11,9 @@
 
 struct FFCPXMLImportAudioTrackListItem
 {
-	FFCPXMLImportAudioTrackListItem(TSharedPtr<FMovieSceneImportAudioMasterTrackData> InAudioTrackData, int InRowIndex) : AudioTrackData(InAudioTrackData), RowIndex(InRowIndex) {}
+	FFCPXMLImportAudioTrackListItem(TSharedPtr<FMovieSceneImportAudioData> InAudioTrackData, int InRowIndex) : AudioTrackData(InAudioTrackData), RowIndex(InRowIndex) {}
 
-	TSharedPtr<FMovieSceneImportAudioMasterTrackData> AudioTrackData;
+	TSharedPtr<FMovieSceneImportAudioData> AudioTrackData;
 	int32 RowIndex;
 };
 
@@ -75,7 +75,7 @@ private:
 	/** Query which channel audio clipitem node represents */
 	int32 GetAudioClipItemNodeChannel(TSharedRef<FFCPXMLClipItemNode> InClipItemNode, const FString& InClipItemId);
 
-	/** Construct list of master tracks and row indexes */
+	/** Construct list of audio tracks and row indexes */
 	bool ConstructAudioTrackList();
 
 	/** Add entry to master cinematic clip section name map */
@@ -92,7 +92,7 @@ private:
 	/** Get audio metadata object based on log note and master clip id */
 	TSharedPtr<FFCPXMLImportAudioMetadata> GetAudioMetadataObject(const FString& InLogNote, const FString& InMasterClipId);
 	/** Get next audio section based on audio metadata */
-	bool GetNextAudioSection(TSharedPtr<FFCPXMLImportAudioMetadata> InAudioMetadata, TSharedPtr<FMovieSceneImportAudioMasterTrackData>& OutAudioMasterTrackData, TSharedPtr<FMovieSceneImportAudioSectionData>& OutAudioSectionData);
+	bool GetNextAudioSection(TSharedPtr<FFCPXMLImportAudioMetadata> InAudioMetadata, TSharedPtr<FMovieSceneImportAudioData>& OutAudioData, TSharedPtr<FMovieSceneImportAudioSectionData>& OutAudioSectionData);
 
 	/** Add entry to metadata map */
 	bool AddMasterClipLoggingNode(const FString& InMasterClipIdName, TSharedPtr<FFCPXMLNode> InLoggingInfoNode);
@@ -108,13 +108,13 @@ private:
 	bool ParseMetadata(const FString& InMetadata, const FString& InKey, FString& OutValue, FString& OutMetadata) const;
 	/** parse metadata of the format "[tag=value]", whitespace ok. */
 	bool ParseMetadata(const FString& InMetadata, const FString& InKey, FString& OutValue) const;
-	/** Get sequencer section id from section metadata. Format is "[UE4ShotSection=sectionobjectname]", whitespace ok. */
+	/** Get sequencer section id from section metadata. Format is "[UEShotSection=sectionobjectname]", whitespace ok. */
 	bool GetCinematicSectionPathNameFromMetadata(const FString& InMetadata, FString& OutSectionObjectName) const;
-	/** Get sequencer shot handle frames from section metadata. Format is "[UE4ShotHandleFrames=handleframes]", whitespace ok. */
+	/** Get sequencer shot handle frames from section metadata. Format is "[UEShotHandleFrames=handleframes]", whitespace ok. */
 	bool GetCinematicSectionHandleFramesFromMetadata(const FString& InMetadata, int32& OutHandleFrames) const;
-	/** Get sequencer shot start offset frame from section metadata. Format is "[UE4ShotStartOffset=startoffset]", whitespace ok. */
+	/** Get sequencer shot start offset frame from section metadata. Format is "[UEShotStartOffset=startoffset]", whitespace ok. */
 	bool GetCinematicSectionStartOffsetFromMetadata(const FString& InMetadata, int32& OutStartOffset) const;
-	/** Get sequencer sound wave id and audio section ids from metadata. Format is "[UE4SoundWave=trackobjectname][UE4AudioSectionTopLevel=toplevelobjectname][UE4AudioSection=audiosectionobjectname]", whitespace ok. */
+	/** Get sequencer sound wave id and audio section ids from metadata. Format is "[UESoundWave=trackobjectname][UEAudioSectionTopLevel=toplevelobjectname][UEAudioSection=audiosectionobjectname]", whitespace ok. */
 	bool GetAudioFromMetadata(const FString& InMetadata, TSharedPtr<FFCPXMLImportAudioMetadata>& OutAudioMetadata) const;
 	
 public:
@@ -135,7 +135,7 @@ private:
 	/** Map of masterclip names to logging info nodes */
 	TMap<FString, TSharedPtr<FFCPXMLNode>> MasterClipLoggingNodeMap;
 
-	/** List of existing master tracks including row index */
+	/** List of existing audio tracks including row index */
 	TArray< TSharedPtr<FFCPXMLImportAudioTrackListItem> > AudioTrackList;
 
 	/** Traversal state variables */
@@ -147,7 +147,7 @@ private:
 
 	int32 CurrVideoTrackRowIndex;
 	int32 CurrAudioTrackListIndex;
-	TSharedPtr<FMovieSceneImportAudioMasterTrackData> CurrAudioMasterTrack;
+	TSharedPtr<FMovieSceneImportAudioData> CurrAudioData;
 	int32 CurrAudioTrackRowIndex;
 	bool bCurrImportAudioTrackIsStereoChannel;
 

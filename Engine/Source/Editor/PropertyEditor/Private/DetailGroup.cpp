@@ -13,9 +13,10 @@ FDetailGroup::FDetailGroup( const FName InGroupName, TSharedRef<FDetailCategoryI
 	, LocalizedDisplayName( InLocalizedDisplayName )
 	, GroupName( InGroupName )
 	, bStartExpanded( bInStartExpanded )
-	, ResetEnabled(false)
+	, bResetEnabled( false )
+	, DisplayMode( EDetailGroupDisplayMode::Group )
+	, PasteFromTextDelegate(MakeShared<FOnPasteFromText>())
 {
-
 }
 
 FDetailWidgetRow& FDetailGroup::HeaderRow()
@@ -102,6 +103,20 @@ bool FDetailGroup::GetExpansionState() const
 	return false;
 }
 
+TOptional<FResetToDefaultOverride> FDetailGroup::GetCustomResetToDefault() const
+{
+	if (HeaderCustomization.IsValid())
+	{
+		return HeaderCustomization->PropertyRow->GetCustomResetToDefault();
+	}
+	return TOptional<FResetToDefaultOverride>();
+}
+
+void FDetailGroup::SetDisplayMode(EDetailGroupDisplayMode Mode)
+{
+	DisplayMode = Mode;
+}
+
 TSharedPtr<FDetailPropertyRow> FDetailGroup::GetHeaderPropertyRow() const
 {
 	return HeaderCustomization.IsValid() ? HeaderCustomization->PropertyRow : nullptr;
@@ -174,26 +189,8 @@ FDetailWidgetRow FDetailGroup::GetWidgetRow()
 		[
 			MakeNameWidget()
 		];
-		Row.ValueContent()
-		[
-			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot()
-			.VAlign(VAlign_Center)
-			.AutoWidth()
-			[
-				SNew(SButton)
-				.OnClicked(this, &FDetailGroup::OnResetClicked)
-				.Visibility(this, &FDetailGroup::GetResetVisibility)
-				.ContentPadding(FMargin(5.f, 0.f))
-				.ToolTipText(LOCTEXT("ResetToDefaultToolTip", "Reset to Default"))
-				.ButtonStyle(FEditorStyle::Get(), "NoBorder")
-				.Content()
-				[
-					SNew(SImage)
-					.Image(FEditorStyle::GetBrush("PropertyWindow.DiffersFromDefault"))
-				]
-			]
-		];
+
+		Row.OverrideResetToDefault(FResetToDefaultOverride::Create(TAttribute<bool>(this, &FDetailGroup::IsResetVisible), FSimpleDelegate::CreateSP(this, &FDetailGroup::OnResetClicked)));
 
 		return Row;
 	}
@@ -232,8 +229,8 @@ TSharedRef<SWidget> FDetailGroup::MakeNameWidget()
 {
 	return
 		SNew( SButton )
-		.ButtonStyle( FEditorStyle::Get(), "NoBorder" )
-		.ContentPadding(FMargin(0,2,2,2))
+		.ButtonStyle( FAppStyle::Get(), "NoBorder" )
+		.ContentPadding(FMargin(0,2,0,2))
 		.OnClicked( this, &FDetailGroup::OnNameClicked )				
 		.ForegroundColor( FSlateColor::UseForeground() )
 		.Content()
@@ -244,9 +241,9 @@ TSharedRef<SWidget> FDetailGroup::MakeNameWidget()
 		];
 }
 
-FReply FDetailGroup::OnResetClicked()
+void FDetailGroup::OnResetClicked()
 {
-	if (ResetEnabled)
+	if (bResetEnabled)
 	{
 		TArray<TSharedPtr<IPropertyHandle>> PropertyHandles;
 
@@ -260,13 +257,11 @@ FReply FDetailGroup::OnResetClicked()
 			OnDetailGroupReset.Broadcast();
 		}
 	}
-
-	return FReply::Handled();
 }
 
-EVisibility FDetailGroup::GetResetVisibility() const
+bool FDetailGroup::IsResetVisible() const
 {
-	if (ResetEnabled)
+	if (bResetEnabled)
 	{
 		TArray<TSharedPtr<IPropertyHandle>> PropertyHandles;
 
@@ -276,18 +271,18 @@ EVisibility FDetailGroup::GetResetVisibility() const
 			{
 				if (PropertyHandle->DiffersFromDefault())
 				{
-					return EVisibility::Visible;
+					return true;
 				}
 			}
 		}
 	}
 
-	return EVisibility::Hidden;
+	return false;
 }
 
 void FDetailGroup::EnableReset(bool InValue)
 {
-	ResetEnabled = InValue;
+	bResetEnabled = InValue;
 }
 
 bool FDetailGroup::GetAllChildrenPropertyHandles(TArray<TSharedPtr<IPropertyHandle>>& PropertyHandles) const

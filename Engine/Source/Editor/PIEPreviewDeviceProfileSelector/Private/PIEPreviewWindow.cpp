@@ -2,13 +2,15 @@
 
 #include "PIEPreviewWindow.h"
 
+#if WITH_EDITOR
+
 #include "HAL/IConsoleManager.h"
 #include "ImageUtils.h"
 #include "Engine/Texture2D.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "Widgets/SWindow.h"
 #include "Framework/Application/SlateApplication.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "SEditorViewportToolBarMenu.h"
 #include "Widgets/Input/SMenuAnchor.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
@@ -17,9 +19,10 @@
 #include "Slate/SGameLayerManager.h"
 #include "UnrealEngine.h"
 #include "PIEPreviewSettings.h"
+#include "PIEPreviewDevice.h"
+#include "PIEPreviewDeviceSpecification.h"
+#include "PIEPreviewWindowTitleBar.h"
 
-
-#if WITH_EDITOR
 //***********************************************************************************
 //SPIEPreviewWindow Implementation
 //***********************************************************************************
@@ -49,8 +52,8 @@ void SPIEPreviewWindow::ComputeBezelOrientation()
 {
 	if (BezelImage.IsValid())
 	{
- 		float Width = Device->GetWindowClientWidth();
- 		float Height = Device->GetWindowClientHeight();
+ 		float Width = (float)Device->GetWindowClientWidth();
+ 		float Height = (float)Device->GetWindowClientHeight();
 
 		bool bBezelRotated = Device->IsDeviceFlipped();
 
@@ -321,8 +324,8 @@ void SPIEPreviewWindow::CreatePIEPreviewBezelOverlay(UTexture2D* pBezelImage)
 
 void SPIEPreviewWindow::ValidatePosition(FVector2D& WindowPos)
 {
-	WindowPos.X = FMath::CeilToInt(WindowPos.X);
-	WindowPos.Y = FMath::CeilToInt(WindowPos.Y);
+	WindowPos.X = FMath::CeilToInt32(WindowPos.X);
+	WindowPos.Y = FMath::CeilToInt32(WindowPos.Y);
 
 	FDisplayMetrics DisplayMetrics;
 	FDisplayMetrics::RebuildDisplayMetrics(DisplayMetrics);
@@ -352,7 +355,7 @@ void SPIEPreviewWindow::PrepareWindow(FVector2D WindowPosition, const float Init
 
 	// update display resolution
 	const int32 ClientWidth = Device->GetWindowWidth();
-	const int32 ClientHeight = Device->GetWindowHeight() - GetTitleBarSize().Get();
+	const int32 ClientHeight = Device->GetWindowHeight() - FMath::TruncToInt32(GetTitleBarSize().Get());
 	FSystemResolution::RequestResolutionChange(ClientWidth, ClientHeight, EWindowMode::Windowed);
 	IConsoleManager::Get().CallAllConsoleVariableSinks();
 
@@ -427,8 +430,8 @@ void SPIEPreviewWindow::OnWindowMoved(const TSharedRef<SWindow>& Window)
 	FVector2D WindowPos = GetPositionInScreen();
 
 	auto* Settings = GetMutableDefault<UPIEPreviewSettings>();
-	Settings->WindowPosX = FMath::CeilToInt(WindowPos.X);
-	Settings->WindowPosY = FMath::CeilToInt(WindowPos.Y);
+	Settings->WindowPosX = FMath::CeilToInt32(WindowPos.X);
+	Settings->WindowPosY = FMath::CeilToInt32(WindowPos.Y);
 	Settings->SaveConfig();
 }
 
@@ -441,10 +444,10 @@ void SPIEPreviewWindow::OnDisplayDPIChanged(TSharedRef<SWindow> Window)
 float SPIEPreviewWindow::ComputeDPIScaleFactor()
 {
 	FVector2D WindowPos = GetPositionInScreen();
-	int32 PointX = FMath::RoundToInt(WindowPos.X);
-	int32 PointY = FMath::RoundToInt(WindowPos.Y);
+	int32 PointX = FMath::RoundToInt32(WindowPos.X);
+	int32 PointY = FMath::RoundToInt32(WindowPos.Y);
 
-	float DPIFactor = FPlatformApplicationMisc::GetDPIScaleFactorAtPoint(PointX, PointY);
+	float DPIFactor = FPlatformApplicationMisc::GetDPIScaleFactorAtPoint((float)PointX, (float)PointY);
 
 	return DPIFactor;
 }
@@ -457,8 +460,8 @@ float SPIEPreviewWindow::ComputeScaleToDeviceSizeFactor() const
 	FDisplayMetrics::RebuildDisplayMetrics(DisplayMetrics);
 
 	FVector2D WindowPos = GetPositionInScreen();
-	int32 PointX = FMath::RoundToInt(WindowPos.X);
-	int32 PointY = FMath::RoundToInt(WindowPos.Y);
+	int32 PointX = FMath::RoundToInt32(WindowPos.X);
+	int32 PointY = FMath::RoundToInt32(WindowPos.Y);
 
 	FPlatformRect& VirtualDisplayRect = DisplayMetrics.VirtualDisplayRect;
 	PointX = FMath::Clamp(PointX, VirtualDisplayRect.Left, VirtualDisplayRect.Right);
@@ -565,14 +568,14 @@ void SPIEPreviewWindow::UpdateWindow()
 
 	if (PosY + Device->GetWindowHeight() > DisplayMetrics.VirtualDisplayRect.Bottom)
 	{
-		PosY = DisplayMetrics.VirtualDisplayRect.Bottom - Device->GetWindowHeight() - SWindowDefs::DefaultTitleBarSize;
+		PosY = DisplayMetrics.VirtualDisplayRect.Bottom - Device->GetWindowHeight() - FMath::TruncToInt32(SWindowDefs::DefaultTitleBarSize);
 	}
 	PosY = FMath::Max(DisplayMetrics.VirtualDisplayRect.Top, PosY);
 
 	ReshapeWindow(FVector2D(PosX, PosY), FVector2D(Device->GetWindowWidth(), Device->GetWindowHeight()));
 
 	// offset the viewport widget into its correct location
-	ContentSlot->SlotPadding = Device->GetViewportMargin();
+	ContentSlot->SetPadding(Device->GetViewportMargin());
 
 	// bezel orientation depends on the window size so we need to call it after ReshapeWindow()
 	ComputeBezelOrientation();
@@ -613,7 +616,7 @@ void SPIEPreviewWindow::PrepareShutdown()
 
 int32 SPIEPreviewWindow::GetDefaultTitleBarSize()
 {
-	return SWindowDefs::DefaultTitleBarSize;
+	return FMath::TruncToInt32(SWindowDefs::DefaultTitleBarSize);
 }
 
 void SPIEPreviewWindow::SetGameLayerManagerWidget(TSharedPtr<class SGameLayerManager> GameLayerManager)

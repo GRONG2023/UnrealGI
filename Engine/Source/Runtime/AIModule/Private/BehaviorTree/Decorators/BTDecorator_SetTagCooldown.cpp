@@ -2,16 +2,18 @@
 
 #include "BehaviorTree/Decorators/BTDecorator_SetTagCooldown.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BTDecorator_SetTagCooldown)
+
 UBTDecorator_SetTagCooldown::UBTDecorator_SetTagCooldown(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
 	NodeName = "Set Tag Cooldown";
+	INIT_DECORATOR_NODE_NOTIFY_FLAGS();
 	CooldownDuration = 5.0f;
 	bAddToExistingDuration = false;
 
 	bAllowAbortNone = false;
 	bAllowAbortLowerPri = false;
 	bAllowAbortChildNodes = false;
-	bNotifyDeactivation = true;
 	FlowAbortMode = EBTFlowAbortMode::None;
 }
 
@@ -34,3 +36,4 @@ FName UBTDecorator_SetTagCooldown::GetNodeIconName() const
 }
 
 #endif	// WITH_EDITOR6
+

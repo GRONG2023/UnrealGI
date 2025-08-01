@@ -3,24 +3,55 @@
 #pragma once
 
 #include "Compilation/MovieSceneSegmentCompiler.h"
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
 #include "CoreMinimal.h"
+#include "CoreTypes.h"
+#include "Evaluation/Blending/MovieSceneBlendType.h"
 #include "Evaluation/MovieSceneEvaluationField.h"
-#include "Misc/CoreMiscDefines.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
+#include "Math/Color.h"
+#include "Misc/AssertionMacros.h"
 #include "Misc/EnumClassFlags.h"
 #include "Misc/Guid.h"
 #include "Misc/InlineValue.h"
-#include "MovieSceneSection.h"
 #include "MovieSceneSignedObject.h"
 #include "MovieSceneTrackEvaluationField.h"
+#include "Templates/SubclassOf.h"
+#include "UObject/NameTypes.h"
 #include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
+
+#if WITH_EDITOR
+#include "Styling/SlateColor.h"
+#endif
+
 #include "MovieSceneTrack.generated.h"
 
+class UMovieSceneSection;
+class UObject;
 struct FMovieSceneEvaluationTrack;
-struct FMovieSceneTrackSegmentBlender;
 struct FMovieSceneTrackRowSegmentBlender;
+struct FMovieSceneTrackSegmentBlender;
 struct IMovieSceneTemplateGenerator;
-
 template<typename> struct TMovieSceneEvaluationTree;
+
+/** Flags used to perform cook-time optimization of movie scene data */
+enum class ECookOptimizationFlags
+{
+	/** Perform no cook optimization */
+	None 			= 0,
+	/** Remove this track since its of no consequence to runtime */
+	RemoveTrack		= 1 << 0,
+	/** Remove this track's object since its of no consequence to runtime */
+	RemoveObject	= 1 << 1,
+	/** Remove this section's object since its of no consequence to runtime */
+	RemoveSection	= 1 << 2,
+};
+ENUM_CLASS_FLAGS(ECookOptimizationFlags)
 
 /** Generic evaluation options for any track */
 USTRUCT()
@@ -125,6 +156,15 @@ enum class EMovieSceneSectionMovedResult
 	SectionsChanged = 1
 };
 ENUM_CLASS_FLAGS(EMovieSceneSectionMovedResult);
+
+/** Parameters for helping to determine dynamic label color/tooltip*/
+struct FMovieSceneLabelParams
+{
+	class IMovieScenePlayer* Player = nullptr;
+	FGuid BindingID;
+	FMovieSceneSequenceID SequenceID;
+	bool bIsDimmed = false;
+};
 #endif
 
 /**
@@ -139,6 +179,7 @@ class UMovieSceneTrack
 public:
 
 	MOVIESCENE_API UMovieSceneTrack(const FObjectInitializer& InInitializer);
+	~UMovieSceneTrack() {};
 
 public:
 
@@ -231,6 +272,11 @@ protected:
 
 	ETreePopulationMode BuiltInTreePopulationMode;
 
+protected:
+
+	/** Forcibly update this evaluation tree without updating the signature. Does not invalidated any compiled data! */
+	MOVIESCENE_API void ForceUpdateEvaluationTree();
+
 private:
 
 	/** Sub-classes can override this method to perforum custom evaluation tree population logic. */
@@ -242,13 +288,7 @@ private:
 	/** Sub-classes can override this method to perform custom pre-compilation logic. */
 	virtual void PreCompileImpl(FMovieSceneTrackPreCompileResult& OutPreCompileResult)
 	{
-		PRAGMA_DISABLE_DEPRECATION_WARNINGS
-		PreCompileImpl();
-		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
-
-	UE_DEPRECATED(4.27, "Please override the PreCompileImpl method that takes a parameter")
-	virtual void PreCompileImpl() {}
 
 private:
 
@@ -319,16 +359,19 @@ public:
 	 */
 	MOVIESCENE_API bool FixRowIndices();
 
+	/** Called when row indices have been fixed up */
+	virtual void OnRowIndicesChanged(const TMap<int32, int32>& NewToOldRowIndices) {}
+
 	/**
 	* @return Whether evaluation of this track should be disabled due to mute/solo settings
 	*/
-	MOVIESCENE_API bool IsEvalDisabled() const { return bIsEvalDisabled; }
+	bool IsEvalDisabled() const { return bIsEvalDisabled; }
 	MOVIESCENE_API bool IsRowEvalDisabled(int32 RowIndex) const;
 
 	/**
 	* Called by Sequencer to set whether evaluation of this track should be disabled due to mute/solo settings
 	*/
-	MOVIESCENE_API void SetEvalDisabled(bool bEvalDisabled) { bIsEvalDisabled = bEvalDisabled; }
+	void SetEvalDisabled(bool bEvalDisabled) { bIsEvalDisabled = bEvalDisabled; }
 	MOVIESCENE_API void SetRowEvalDisabled(bool bEvalDisabled, int32 RowIndex);
 
 public:
@@ -346,7 +389,7 @@ public:
 	 *
 	 * @param Section The section to add.
 	 */
-	virtual void AddSection(UMovieSceneSection& Section) PURE_VIRTUAL(UMovieSceneSection::AddSection,);
+	virtual void AddSection(UMovieSceneSection& Section) PURE_VIRTUAL(UMovieSceneTrack::AddSection,);
 
 	/**
 	 * Generates a new section suitable for use with this track.
@@ -368,21 +411,38 @@ public:
 	 * @param Section The section to query for.
 	 * @return True if the section is in this track.
 	 */
-	virtual bool HasSection(const UMovieSceneSection& Section) const PURE_VIRTUAL(UMovieSceneSection::HasSection, return false;);
+	virtual bool HasSection(const UMovieSceneSection& Section) const PURE_VIRTUAL(UMovieSceneTrack::HasSection, return false;);
 
 	/**
 	 * Removes a section from this track.
 	 *
 	 * @param Section The section to remove.
 	 */
-	virtual void RemoveSection(UMovieSceneSection& Section) PURE_VIRTUAL(UMovieSceneSection::RemoveSection, );
+	virtual void RemoveSection(UMovieSceneSection& Section) PURE_VIRTUAL(UMovieSceneTrack::RemoveSection, );
 
 	/**
 	 * Removes a section from this track at a particular index
 	 *
 	 * @param SectionIndex The section index to remove.
 	 */
-	virtual void RemoveSectionAt(int32 SectionIndex) PURE_VIRTUAL(UMovieSceneSection::RemoveSectionAt, );
+	virtual void RemoveSectionAt(int32 SectionIndex) PURE_VIRTUAL(UMovieSceneTrack::RemoveSectionAt, );
+
+#if WITH_EDITOR
+
+	/**
+	 * Called when this track's movie scene is being cooked to determine if/how this track should be cooked.
+	 * @return ECookOptimizationFlags detailing how to optimize this track
+	 */
+	MOVIESCENE_API virtual ECookOptimizationFlags GetCookOptimizationFlags() const;
+
+	/**
+	 * Called when this track should be removed for cooking
+	 */
+	MOVIESCENE_API virtual void RemoveForCook();
+
+	static bool RemoveMutedTracksOnCook();
+
+#endif
 
 #if WITH_EDITORONLY_DATA
 
@@ -392,6 +452,27 @@ public:
 	 * @return Display name text.
 	 */
 	virtual FText GetDisplayName() const PURE_VIRTUAL(UMovieSceneTrack::GetDisplayName, return FText::FromString(TEXT("Unnamed Track")););
+
+	/**
+	 * Get the track row's display name.
+	 *
+	 * @return Display name text.
+	 */
+	virtual FText GetTrackRowDisplayName(int32 RowIndex) const { return FText::FromString(TEXT("Unnamed Track")); }
+
+	/**
+	 * Get the track's display tooltip text to be shown on the track's name.
+	 *
+	 * @return Display tooltip text.
+	 */
+	virtual FText GetDisplayNameToolTipText(const FMovieSceneLabelParams& LabelParams) const { return FText::GetEmpty(); }
+
+	/**
+	 * Gets the track label's color.
+	 * 
+	 * @return Track label color.
+	 */
+	virtual FSlateColor GetLabelColor(const FMovieSceneLabelParams& LabelParams) const { return FSlateColor::UseForeground(); }
 
 	/**
 	 * Get this track's color tint.

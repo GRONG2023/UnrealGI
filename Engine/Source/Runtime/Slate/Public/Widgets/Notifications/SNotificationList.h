@@ -20,7 +20,7 @@ class SWindow;
  * Interface class for an item in the event message list.
  * Real implementation is found in SEventMessageItemImpl
  */
-class SLATE_API SNotificationItem
+class SNotificationItem
 	: public SCompoundWidget
 {
 public:
@@ -32,11 +32,14 @@ public:
 		CS_Fail,
 	};
 
-	/** Sets the text for message element */
-	virtual void SetText( const TAttribute< FText >& InText ) = 0;
+	/** Sets the text for the notification element */
+	virtual void SetText(const TAttribute< FText >& InText) = 0;
+	
+	/** Sets the subtext the notification item. Sub text is used for longer text and is a smaller font */
+	virtual void SetSubText(const TAttribute<FText>& InSubText) = 0;
 
 	/** Sets the text and delegate for the hyperlink */
-	virtual void SetHyperlink( const FSimpleDelegate& InHyperlink, const TAttribute< FText >& InHyperlinkText = TAttribute< FText >() ) = 0;
+	virtual void SetHyperlink(const FSimpleDelegate& InHyperlink, const TAttribute< FText >& InHyperlinkText = TAttribute< FText >()) = 0;
 
 	/** Sets the ExpireDuration */
 	virtual void SetExpireDuration(float ExpireDuration) = 0;
@@ -107,9 +110,10 @@ struct FNotificationInfo
 	 *
 	 * @param	InText	Text string to display for this notification
 	 */
-	FNotificationInfo( const FText& InText )
+	FNotificationInfo(const FText& InText)
 		: ContentWidget(),
 		Text(InText),
+		SubText(),
 		ButtonDetails(),
 		Image(nullptr),
 		FadeInDuration(0.5f),
@@ -118,7 +122,7 @@ struct FNotificationInfo
 		bUseThrobber(true),
 		bUseSuccessFailIcons(true),
 		bUseLargeFont(true),
-		WidthOverride(),
+		WidthOverride(320.0f),
 		bFireAndForget(true),
 		CheckBoxState(ECheckBoxState::Unchecked),
 		CheckBoxStateChanged(),
@@ -136,6 +140,7 @@ struct FNotificationInfo
 	FNotificationInfo(TSharedPtr<INotificationWidget> InContentWidget)
 		: ContentWidget(InContentWidget),
 		Text(),
+		SubText(),
 		ButtonDetails(),
 		Image(nullptr),
 		FadeInDuration(0.5f),
@@ -144,7 +149,7 @@ struct FNotificationInfo
 		bUseThrobber(false),
 		bUseSuccessFailIcons(false),
 		bUseLargeFont(false),
-		WidthOverride(),
+		WidthOverride(320.0f),
 		bFireAndForget(true),
 		CheckBoxState(ECheckBoxState::Unchecked),
 		CheckBoxStateChanged(),
@@ -154,11 +159,20 @@ struct FNotificationInfo
 		bAllowThrottleWhenFrameRateIsLow(true)
 	{ };
 
+	/**
+	 * Shows a "Copy to Clipboard" hyperlink that when clicked copies the text and sub-text to the operating system clipboard
+	 * @note Text and SubText must be set prior to calling this method for them to be included
+	 */
+	SLATE_API void ShowCopyToClipboadHyperlink();
+
 	/** If set, overrides the entire content of the notification with this widget */
 	TSharedPtr<INotificationWidget> ContentWidget;
 
-	/** The text displayed in this text block */
-	FText Text;
+	/** The text displayed in this notification. Suitable for short notifications and titles. */
+	TAttribute<FText> Text;
+
+	/** Optional subtext displayed in this notification. Subtext is smaller than the default text field and is better for long descriptions.*/
+	TAttribute<FText> SubText;
 
 	/** Setup information for the buttons on the notification */ 
 	TArray<FNotificationButtonInfo> ButtonDetails;
@@ -191,19 +205,22 @@ struct FNotificationInfo
 	bool bFireAndForget;
 
 	/** When set this will display a check box on the notification; handles getting the current check box state */
-	TAttribute< ECheckBoxState > CheckBoxState;
+	TAttribute<ECheckBoxState> CheckBoxState;
 
 	/** When set this will display a check box on the notification; handles setting the new check box state */
 	FOnCheckStateChanged CheckBoxStateChanged;
 
 	/** Text to display for the check box message */
-	TAttribute< FText > CheckBoxText;
+	TAttribute<FText> CheckBoxText;
 
 	/** When set this will display as a hyperlink on the right side of the notification. */
 	FSimpleDelegate Hyperlink;
 
 	/** Text to display for the hyperlink message */
-	TAttribute< FText > HyperlinkText;
+	TAttribute<FText> HyperlinkText;
+
+	/** A specific window to put the notification in. If this is null, the root window of the application will be used */
+	TSharedPtr<SWindow> ForWindow;
 
 	/** True if we should throttle the editor while the notification is transitioning and performance is poor, to make sure the user can see the animation */
 	bool bAllowThrottleWhenFrameRateIsLow;
@@ -213,7 +230,7 @@ struct FNotificationInfo
 /**
  * A list of non-intrusive messages about the status of currently active work.
  */
-class SLATE_API SNotificationList
+class SNotificationList
 	: public SCompoundWidget
 {
 	friend class SNotificationExtendable;
@@ -222,8 +239,6 @@ class SLATE_API SNotificationList
 public:
 
 	SLATE_BEGIN_ARGS( SNotificationList ){}
-		/** Sets the font used to draw the text */
-		SLATE_ATTRIBUTE(FSlateFontInfo, Font)
 	SLATE_END_ARGS()
 	
 	/**
@@ -231,14 +246,14 @@ public:
 	 *
 	 * @param InArgs    Declaration from which to construct the widget.
 	 */
-	void Construct( const FArguments& InArgs );
+	SLATE_API void Construct( const FArguments& InArgs );
 
 	/**
 	 * Adds a floating notification.
 	 *
 	 * @param Info 		Contains various settings used to initialize the notification.
 	 */
-	virtual TSharedRef<SNotificationItem> AddNotification(const FNotificationInfo& Info);
+	SLATE_API virtual TSharedRef<SNotificationItem> AddNotification(const FNotificationInfo& Info);
 
 protected:
 
@@ -247,7 +262,7 @@ protected:
 	 *
 	 * @param NotificationItem The item which finished fading out.
 	 */
-	virtual void NotificationItemFadedOut (const TSharedRef<SNotificationItem>& NotificationItem);
+	SLATE_API virtual void NotificationItemFadedOut (const TSharedRef<SNotificationItem>& NotificationItem);
 
 protected:
 
@@ -256,9 +271,6 @@ protected:
 
 	/** The parent window of this list. */
 	TWeakPtr<SWindow> ParentWindowPtr;
-
-	/** Holds passed in font */
-	TAttribute<FSlateFontInfo> Font;
 
 	/** Flag to auto-destroy this list. */
 	bool bDone;

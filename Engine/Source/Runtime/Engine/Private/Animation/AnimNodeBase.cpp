@@ -1,45 +1,89 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Animation/AnimNodeBase.h"
-#include "Animation/AnimClassInterface.h"
 #include "Animation/AnimInstanceProxy.h"
-#include "Animation/AnimTrace.h"
-#include "UObject/CoreObjectVersion.h"
-#include "PropertyAccess.h"
+#include "Animation/AnimAttributes.h"
+#include "Animation/AnimNodeFunctionRef.h"
+#include "Animation/AnimSubsystem_Base.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNodeBase)
+
+namespace UE::Anim::Private
+{
+#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+	// Don't inline this function to keep the stack usage down
+	FORCENOINLINE void ValidatePose(const FCompactPose& Pose, const FAnimInstanceProxy* AnimInstanceProxy, const FAnimNode_Base* LinkedNode)
+	{
+		if (Pose.ContainsNaN())
+		{
+			// Show bone transform with some useful debug info
+			const auto& Bones = Pose.GetBones();
+			for (int32 CPIndex = 0; CPIndex < Bones.Num(); ++CPIndex)
+			{
+				const FTransform& Bone = Bones[CPIndex];
+				if (Bone.ContainsNaN())
+				{
+					const FBoneContainer& BoneContainer = Pose.GetBoneContainer();
+					const FReferenceSkeleton& RefSkel = BoneContainer.GetReferenceSkeleton();
+					const FMeshPoseBoneIndex MeshBoneIndex = BoneContainer.MakeMeshPoseIndex(FCompactPoseBoneIndex(CPIndex));
+					ensureMsgf(!Bone.ContainsNaN(), TEXT("Bone (%s) contains NaN from AnimInstance:[%s] Node:[%s] Value:[%s]"),
+						*RefSkel.GetBoneName(MeshBoneIndex.GetInt()).ToString(),
+						*AnimInstanceProxy->GetAnimInstanceName(), LinkedNode ? *LinkedNode->StaticStruct()->GetName() : TEXT("NULL"),
+						*Bone.ToString());
+				}
+			}
+		}
+
+		if (!Pose.IsNormalized())
+		{
+			// Show bone transform with some useful debug info
+			const auto& Bones = Pose.GetBones();
+			for (int32 CPIndex = 0; CPIndex < Bones.Num(); ++CPIndex)
+			{
+				const FTransform& Bone = Bones[CPIndex];
+				if (!Bone.IsRotationNormalized())
+				{
+					const FBoneContainer& BoneContainer = Pose.GetBoneContainer();
+					const FReferenceSkeleton& RefSkel = BoneContainer.GetReferenceSkeleton();
+					const FMeshPoseBoneIndex MeshBoneIndex = BoneContainer.MakeMeshPoseIndex(FCompactPoseBoneIndex(CPIndex));
+					ensureMsgf(Bone.IsRotationNormalized(), TEXT("Bone (%s) Rotation not normalized from AnimInstance:[%s] Node:[%s] Rotation:[%s]"),
+						*RefSkel.GetBoneName(MeshBoneIndex.GetInt()).ToString(),
+						*AnimInstanceProxy->GetAnimInstanceName(), LinkedNode ? *LinkedNode->StaticStruct()->GetName() : TEXT("NULL"),
+						*Bone.GetRotation().ToString());
+				}
+			}
+		}
+	}
+#endif
+}
 
 /////////////////////////////////////////////////////
 // FAnimationBaseContext
 
 FAnimationBaseContext::FAnimationBaseContext()
 	: AnimInstanceProxy(nullptr)
-#if ANIM_TRACE_ENABLED
+	, SharedContext(nullptr)
 	, CurrentNodeId(INDEX_NONE)
 	, PreviousNodeId(INDEX_NONE)
-#endif
 {
 }
 
-FAnimationBaseContext::FAnimationBaseContext(FAnimInstanceProxy* InAnimInstanceProxy)
+FAnimationBaseContext::FAnimationBaseContext(FAnimInstanceProxy* InAnimInstanceProxy, FAnimationUpdateSharedContext* InSharedContext)
 	: AnimInstanceProxy(InAnimInstanceProxy)
-#if ANIM_TRACE_ENABLED
+	, SharedContext(InSharedContext)
 	, CurrentNodeId(INDEX_NONE)
 	, PreviousNodeId(INDEX_NONE)
-#endif
-{
-}
-
-FAnimationBaseContext::FAnimationBaseContext(const FAnimationBaseContext& InContext)
-	: AnimInstanceProxy(InContext.AnimInstanceProxy)
-#if ANIM_TRACE_ENABLED
-	, CurrentNodeId(InContext.CurrentNodeId)
-	, PreviousNodeId(InContext.PreviousNodeId)
-#endif
 {
 }
 
 IAnimClassInterface* FAnimationBaseContext::GetAnimClass() const
 {
 	return AnimInstanceProxy ? AnimInstanceProxy->GetAnimClassInterface() : nullptr;
+}
+
+UObject* FAnimationBaseContext::GetAnimInstanceObject() const 
+{
+	return AnimInstanceProxy ? AnimInstanceProxy->GetAnimInstanceObject() : nullptr;
 }
 
 #if WITH_EDITORONLY_DATA
@@ -49,15 +93,17 @@ UAnimBlueprint* FAnimationBaseContext::GetAnimBlueprint() const
 }
 #endif //WITH_EDITORONLY_DATA
 
-void FAnimationBaseContext::LogMessageInternal(FName InLogType, EMessageSeverity::Type InSeverity, FText InMessage) const
+void FAnimationBaseContext::LogMessageInternal(FName InLogType, const TSharedRef<FTokenizedMessage>& InMessage) const
 {
-	AnimInstanceProxy->LogMessage(InLogType, InSeverity, InMessage);
+	AnimInstanceProxy->LogMessage(InLogType, InMessage);
 }
 /////////////////////////////////////////////////////
 // FPoseContext
 
-void FPoseContext::Initialize(FAnimInstanceProxy* InAnimInstanceProxy)
+void FPoseContext::InitializeImpl(FAnimInstanceProxy* InAnimInstanceProxy)
 {
+	AnimInstanceProxy = InAnimInstanceProxy;
+
 	checkSlow(AnimInstanceProxy && AnimInstanceProxy->GetRequiredBones().IsValid());
 	const FBoneContainer& RequiredBone = AnimInstanceProxy->GetRequiredBones();
 	Pose.SetBoneContainer(&RequiredBone);
@@ -78,50 +124,24 @@ void FComponentSpacePoseContext::ResetToRefPose()
 /////////////////////////////////////////////////////
 // FAnimNode_Base
 
-PRAGMA_DISABLE_DEPRECATION_WARNINGS
-void FAnimNode_Base::Initialize(const FAnimationInitializeContext& Context)
-{
-}
-PRAGMA_ENABLE_DEPRECATION_WARNINGS
-
 void FAnimNode_Base::Initialize_AnyThread(const FAnimationInitializeContext& Context)
 {
-	// Call legacy implementation for backwards compatibility
-	PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	Initialize(Context);
-	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 void FAnimNode_Base::CacheBones_AnyThread(const FAnimationCacheBonesContext& Context)
 {
-	// Call legacy implementation for backwards compatibility
-	PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	CacheBones(Context);
-	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 void FAnimNode_Base::Update_AnyThread(const FAnimationUpdateContext& Context)
 {
-	// Call legacy implementation for backwards compatibility
-	PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	Update(Context);
-	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 void FAnimNode_Base::Evaluate_AnyThread(FPoseContext& Output)
 {
-	// Call legacy implementation for backwards compatibility
-	PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	Evaluate(Output);
-	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 void FAnimNode_Base::EvaluateComponentSpace_AnyThread(FComponentSpacePoseContext& Output)
 {
-	// Call legacy implementation for backwards compatibility
-	PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	EvaluateComponentSpace(Output);
-	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 bool FAnimNode_Base::IsLODEnabled(FAnimInstanceProxy* AnimInstanceProxy)
@@ -132,10 +152,6 @@ bool FAnimNode_Base::IsLODEnabled(FAnimInstanceProxy* AnimInstanceProxy)
 
 void FAnimNode_Base::OnInitializeAnimInstance(const FAnimInstanceProxy* InProxy, const UAnimInstance* InAnimInstance)
 {
-	// Call legacy implementation for backwards compatibility
-	PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	RootInitialize(InProxy);
-	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 void FAnimNode_Base::ResetDynamics(ETeleportType InTeleportType)
@@ -146,6 +162,20 @@ void FAnimNode_Base::ResetDynamics(ETeleportType InTeleportType)
 	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
+const FAnimNodeFunctionRef& FAnimNode_Base::GetInitialUpdateFunction() const
+{
+	return GET_ANIM_NODE_DATA(FAnimNodeFunctionRef, InitialUpdateFunction);
+}
+
+const FAnimNodeFunctionRef& FAnimNode_Base::GetBecomeRelevantFunction() const
+{
+	return GET_ANIM_NODE_DATA(FAnimNodeFunctionRef, BecomeRelevantFunction);
+}
+
+const FAnimNodeFunctionRef& FAnimNode_Base::GetUpdateFunction() const
+{
+	return GET_ANIM_NODE_DATA(FAnimNodeFunctionRef, UpdateFunction);
+}
 
 /////////////////////////////////////////////////////
 // FPoseLinkBase
@@ -153,7 +183,7 @@ void FAnimNode_Base::ResetDynamics(ETeleportType InTeleportType)
 void FPoseLinkBase::AttemptRelink(const FAnimationBaseContext& Context)
 {
 	// Do the linkage
-	if ((LinkedNode == NULL) && (LinkID != INDEX_NONE))
+	if ((LinkedNode == nullptr) && (LinkID != INDEX_NONE))
 	{
 		IAnimClassInterface* AnimBlueprintClass = Context.GetAnimClass();
 		check(AnimBlueprintClass);
@@ -169,27 +199,30 @@ void FPoseLinkBase::AttemptRelink(const FAnimationBaseContext& Context)
 	}
 }
 
-void FPoseLinkBase::Initialize(const FAnimationInitializeContext& Context)
+void FPoseLinkBase::Initialize(const FAnimationInitializeContext& InContext)
 {
 #if DO_CHECK
 	checkf(!bProcessed, TEXT("Initialize already in progress, circular link for AnimInstance [%s] Blueprint [%s]"), \
-		*Context.AnimInstanceProxy->GetAnimInstanceName(), *GetFullNameSafe(IAnimClassInterface::GetActualAnimClass(Context.AnimInstanceProxy->GetAnimClassInterface())));
+		*InContext.AnimInstanceProxy->GetAnimInstanceName(), *GetFullNameSafe(IAnimClassInterface::GetActualAnimClass(InContext.AnimInstanceProxy->GetAnimClassInterface())));
 	TGuardValue<bool> CircularGuard(bProcessed, true);
 #endif
 
-	AttemptRelink(Context);
+	AttemptRelink(InContext);
 
 #if ENABLE_ANIMGRAPH_TRAVERSAL_DEBUG
-	InitializationCounter.SynchronizeWith(Context.AnimInstanceProxy->GetInitializationCounter());
+	InitializationCounter.SynchronizeWith(InContext.AnimInstanceProxy->GetInitializationCounter());
 
 	// Initialization will require update to be called before an evaluate.
 	UpdateCounter.Reset();
 #endif
 
 	// Do standard initialization
-	if (LinkedNode != NULL)
+	if (LinkedNode != nullptr)
 	{
-		LinkedNode->Initialize_AnyThread(Context);
+		FAnimationInitializeContext LinkContext(InContext);
+		LinkContext.SetNodeId(LinkID);
+		TRACE_SCOPED_ANIM_NODE(LinkContext);
+		LinkedNode->Initialize_AnyThread(LinkContext);
 	}
 }
 
@@ -224,40 +257,42 @@ FAnimNode_Base* FPoseLinkBase::GetLinkNode()
 	return LinkedNode;
 }
 
-const FExposedValueHandler& FAnimNode_Base::GetEvaluateGraphExposedInputs()
+// Don't inline this function to keep the stack usage down
+FORCENOINLINE const FExposedValueHandler& FAnimNode_Base::GetEvaluateGraphExposedInputs() const
 {
-	// Inverting control (entering via the immutable data rather than the mutable data) would allow
-	// us to remove this static local. Would also allow us to remove the vtable from FAnimNode_Base.
-	static const FExposedValueHandler Default;
-	if(ExposedValueHandler)
+	if(NodeData)
 	{
-		return *ExposedValueHandler;
+		const int32 NodeIndex = NodeData->GetNodeIndex();
+		return NodeData->GetAnimClassInterface().GetSubsystem<FAnimSubsystem_Base>().GetExposedValueHandlers()[NodeIndex];
 	}
 	else
 	{
+		// Inverting control (entering via the immutable data rather than the mutable data) would allow
+		// us to remove this static local. Would also allow us to remove the vtable from FAnimNode_Base.
+		static const FExposedValueHandler Default;	
 		return Default;
 	}
 }
 
-void FPoseLinkBase::CacheBones(const FAnimationCacheBonesContext& Context) 
+void FPoseLinkBase::CacheBones(const FAnimationCacheBonesContext& InContext) 
 {
 #if DO_CHECK
 	checkf( !bProcessed, TEXT( "CacheBones already in progress, circular link for AnimInstance [%s] Blueprint [%s]" ), \
-		*Context.AnimInstanceProxy->GetAnimInstanceName(), *GetFullNameSafe(IAnimClassInterface::GetActualAnimClass(Context.AnimInstanceProxy->GetAnimClassInterface())));
+		*InContext.AnimInstanceProxy->GetAnimInstanceName(), *GetFullNameSafe(IAnimClassInterface::GetActualAnimClass(InContext.AnimInstanceProxy->GetAnimClassInterface())));
 	TGuardValue<bool> CircularGuard(bProcessed, true);
 #endif
 
 #if ENABLE_ANIMGRAPH_TRAVERSAL_DEBUG
-	CachedBonesCounter.SynchronizeWith(Context.AnimInstanceProxy->GetCachedBonesCounter());
+	CachedBonesCounter.SynchronizeWith(InContext.AnimInstanceProxy->GetCachedBonesCounter());
 #endif
 
-	if (LinkedNode != NULL)
+	if (LinkedNode != nullptr)
 	{
-		LinkedNode->CacheBones_AnyThread(Context);
+		LinkedNode->CacheBones_AnyThread(InContext);
 	}
 }
 
-void FPoseLinkBase::Update(const FAnimationUpdateContext& Context)
+void FPoseLinkBase::Update(const FAnimationUpdateContext& InContext)
 {
 #if ENABLE_VERBOSE_ANIM_PERF_TRACKING
 	QUICK_SCOPE_CYCLE_COUNTER(STAT_FPoseLinkBase_Update);
@@ -265,54 +300,54 @@ void FPoseLinkBase::Update(const FAnimationUpdateContext& Context)
 
 #if DO_CHECK
 	checkf( !bProcessed, TEXT( "Update already in progress, circular link for AnimInstance [%s] Blueprint [%s]" ), \
-		*Context.AnimInstanceProxy->GetAnimInstanceName(), *GetFullNameSafe(IAnimClassInterface::GetActualAnimClass(Context.AnimInstanceProxy->GetAnimClassInterface())));
+		*InContext.AnimInstanceProxy->GetAnimInstanceName(), *GetFullNameSafe(IAnimClassInterface::GetActualAnimClass(InContext.AnimInstanceProxy->GetAnimClassInterface())));
 	TGuardValue<bool> CircularGuard(bProcessed, true);
 #endif
 
 #if WITH_EDITOR
 	if (GIsEditor)
 	{
-		if (LinkedNode == NULL)
+		if (LinkedNode == nullptr)
 		{
 			//@TODO: Should only do this when playing back
-			AttemptRelink(Context);
+			AttemptRelink(InContext);
 		}
 
 		// Record the node line activation
-		if (LinkedNode != NULL)
+		if (LinkedNode != nullptr)
 		{
-			if (Context.AnimInstanceProxy->IsBeingDebugged())
+			if (InContext.AnimInstanceProxy->IsBeingDebugged())
 			{
-				Context.AnimInstanceProxy->RecordNodeVisit(LinkID, SourceLinkID, Context.GetFinalBlendWeight());
+				InContext.AnimInstanceProxy->RecordNodeVisit(LinkID, SourceLinkID, InContext.GetFinalBlendWeight());
 			}
 		}
 	}
 #endif
 
 #if ENABLE_ANIMGRAPH_TRAVERSAL_DEBUG
-	checkf(InitializationCounter.IsSynchronized_Counter(Context.AnimInstanceProxy->GetInitializationCounter()), TEXT("Calling Update without initialization!"));
-	UpdateCounter.SynchronizeWith(Context.AnimInstanceProxy->GetUpdateCounter());
+	checkf(InitializationCounter.IsSynchronized_Counter(InContext.AnimInstanceProxy->GetInitializationCounter()), TEXT("Calling Update without initialization!"));
+	UpdateCounter.SynchronizeWith(InContext.AnimInstanceProxy->GetUpdateCounter());
 #endif
 
-	if (LinkedNode != NULL)
+	if (LinkedNode != nullptr)
 	{
-#if ANIM_TRACE_ENABLED
+		FAnimationUpdateContext LinkContext(InContext.WithNodeId(LinkID));
+		TRACE_SCOPED_ANIM_NODE(LinkContext);
+		if(LinkedNode->NodeData && LinkedNode->NodeData->HasNodeAnyFlags(EAnimNodeDataFlags::AllFunctions))
 		{
-			FAnimationUpdateContext LinkContext(Context.WithNodeId(LinkID));
-			TRACE_SCOPED_ANIM_NODE(LinkContext);
-			LinkedNode->Update_AnyThread(LinkContext);
+			UE::Anim::FNodeFunctionCaller::InitialUpdate(LinkContext, *LinkedNode);
+			UE::Anim::FNodeFunctionCaller::BecomeRelevant(LinkContext, *LinkedNode);
+			UE::Anim::FNodeFunctionCaller::Update(LinkContext, *LinkedNode);
 		}
-#else
-		LinkedNode->Update_AnyThread(Context);
-#endif
+		LinkedNode->Update_AnyThread(LinkContext);
 	}
 }
 
-void FPoseLinkBase::GatherDebugData(FNodeDebugData& DebugData)
+void FPoseLinkBase::GatherDebugData(FNodeDebugData& InDebugData)
 {
-	if(LinkedNode != NULL)
+	if(LinkedNode != nullptr)
 	{
-		LinkedNode->GatherDebugData(DebugData);
+		LinkedNode->GatherDebugData(InDebugData);
 	}
 }
 
@@ -328,7 +363,7 @@ void FPoseLink::Evaluate(FPoseContext& Output)
 #endif
 
 #if WITH_EDITOR
-	if ((LinkedNode == NULL) && GIsEditor)
+	if ((LinkedNode == nullptr) && GIsEditor)
 	{
 		//@TODO: Should only do this when playing back
 		AttemptRelink(Output);
@@ -342,26 +377,50 @@ void FPoseLink::Evaluate(FPoseContext& Output)
 	EvaluationCounter.SynchronizeWith(Output.AnimInstanceProxy->GetEvaluationCounter());
 #endif
 
-	if (LinkedNode != NULL)
+	if (LinkedNode != nullptr)
 	{
 #if ENABLE_ANIMNODE_POSE_DEBUG
 		CurrentPose.ResetToAdditiveIdentity();
 #endif
 
+		int32 SourceID = Output.GetCurrentNodeId();
+
 		{
-#if ANIM_TRACE_ENABLED
 			Output.SetNodeId(LinkID);
 			TRACE_SCOPED_ANIM_NODE(Output);
-#endif
 			LinkedNode->Evaluate_AnyThread(Output);
+			TRACE_ANIM_NODE_BLENDABLE_ATTRIBUTES(Output, SourceID, LinkID);
 		}
+
+#if WITH_EDITORONLY_DATA
+		if (Output.AnimInstanceProxy->IsBeingDebugged())
+		{
+			if(Output.CustomAttributes.ContainsData())
+			{
+				Output.AnimInstanceProxy->RecordNodeAttribute(*Output.AnimInstanceProxy, SourceID, LinkID, UE::Anim::FAttributes::Attributes);
+
+				TArray<FName, TInlineAllocator<8>> AttributeKeyNames;
+				if (Output.CustomAttributes.GetAllKeyNames(AttributeKeyNames))
+				{
+					for (const FName& AttributeKeyName : AttributeKeyNames)
+					{
+						Output.AnimInstanceProxy->RecordNodeAttribute(*Output.AnimInstanceProxy, SourceID, LinkID, AttributeKeyName);
+					}
+				}
+			}
+			if(Output.Curve.Num() > 0)
+			{
+				Output.AnimInstanceProxy->RecordNodeAttribute(*Output.AnimInstanceProxy, SourceID, LinkID, UE::Anim::FAttributes::Curves);
+			}
+		}
+#endif
 
 #if ENABLE_ANIMNODE_POSE_DEBUG
 		CurrentPose.CopyBonesFrom(Output.Pose);
 #endif
 
 #if WITH_EDITOR
-		Output.AnimInstanceProxy->RegisterWatchedPose(Output.Pose, LinkID);
+		Output.AnimInstanceProxy->RegisterWatchedPose(Output.Pose, Output.Curve, LinkID);
 #endif
 	}
 	else
@@ -372,45 +431,7 @@ void FPoseLink::Evaluate(FPoseContext& Output)
 
 	// Detect non valid output
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
-	if (Output.ContainsNaN())
-	{
-		// Show bone transform with some useful debug info
-		const auto& Bones = Output.Pose.GetBones();
-		for (int32 CPIndex = 0; CPIndex < Bones.Num(); ++CPIndex)
-		{
-			const FTransform& Bone = Bones[CPIndex];
-			if (Bone.ContainsNaN())
-			{
-				const FBoneContainer& BoneContainer = Output.Pose.GetBoneContainer();
-				const FReferenceSkeleton& RefSkel = BoneContainer.GetReferenceSkeleton();
-				const FMeshPoseBoneIndex MeshBoneIndex = BoneContainer.MakeMeshPoseIndex(FCompactPoseBoneIndex(CPIndex));
-				ensureMsgf(!Bone.ContainsNaN(), TEXT("Bone (%s) contains NaN from AnimInstance:[%s] Node:[%s] Value:[%s]"),
-					*RefSkel.GetBoneName(MeshBoneIndex.GetInt()).ToString(),
-					*Output.AnimInstanceProxy->GetAnimInstanceName(), LinkedNode ? *LinkedNode->StaticStruct()->GetName() : TEXT("NULL"), 
-					*Bone.ToString());
-			}
-		}
-	}
-
-	if (!Output.IsNormalized())
-	{
-		// Show bone transform with some useful debug info
-		const auto& Bones = Output.Pose.GetBones();
-		for (int32 CPIndex = 0; CPIndex < Bones.Num(); ++CPIndex)
-		{
-			const FTransform& Bone = Bones[CPIndex];
-			if (!Bone.IsRotationNormalized())
-			{
-				const FBoneContainer& BoneContainer = Output.Pose.GetBoneContainer();
-				const FReferenceSkeleton& RefSkel = BoneContainer.GetReferenceSkeleton();
-				const FMeshPoseBoneIndex MeshBoneIndex = BoneContainer.MakeMeshPoseIndex(FCompactPoseBoneIndex(CPIndex));
-				ensureMsgf(Bone.IsRotationNormalized(), TEXT("Bone (%s) Rotation not normalized from AnimInstance:[%s] Node:[%s] Rotation:[%s]"), 
-					*RefSkel.GetBoneName(MeshBoneIndex.GetInt()).ToString(),
-					*Output.AnimInstanceProxy->GetAnimInstanceName(), LinkedNode ? *LinkedNode->StaticStruct()->GetName() : TEXT("NULL"), 
-					*Bone.GetRotation().ToString());
-			}
-		}
-	}
+	UE::Anim::Private::ValidatePose(Output.Pose, Output.AnimInstanceProxy, LinkedNode);
 #endif
 }
 
@@ -432,18 +453,42 @@ void FComponentSpacePoseLink::EvaluateComponentSpace(FComponentSpacePoseContext&
 	EvaluationCounter.SynchronizeWith(Output.AnimInstanceProxy->GetEvaluationCounter());
 #endif
 
-	if (LinkedNode != NULL)
+	if (LinkedNode != nullptr)
 	{
+		int32 SourceID = Output.GetCurrentNodeId();
+
 		{
-#if ANIM_TRACE_ENABLED
 			Output.SetNodeId(LinkID);
 			TRACE_SCOPED_ANIM_NODE(Output);
-#endif
 			LinkedNode->EvaluateComponentSpace_AnyThread(Output);
+			TRACE_ANIM_NODE_BLENDABLE_ATTRIBUTES(Output, SourceID, LinkID);
 		}
 
+#if WITH_EDITORONLY_DATA
+		if (Output.AnimInstanceProxy->IsBeingDebugged())
+		{
+			if(Output.CustomAttributes.ContainsData())
+			{
+				Output.AnimInstanceProxy->RecordNodeAttribute(*Output.AnimInstanceProxy, SourceID, LinkID, UE::Anim::FAttributes::Attributes);
+
+				TArray<FName, TInlineAllocator<8>> AttributeKeyNames;
+				if (Output.CustomAttributes.GetAllKeyNames(AttributeKeyNames))
+				{
+					for (const FName& AttributeKeyName : AttributeKeyNames)
+					{
+						Output.AnimInstanceProxy->RecordNodeAttribute(*Output.AnimInstanceProxy, SourceID, LinkID, AttributeKeyName);
+					}
+				}
+			}
+			if(Output.Curve.Num() > 0)
+			{
+				Output.AnimInstanceProxy->RecordNodeAttribute(*Output.AnimInstanceProxy, SourceID, LinkID, UE::Anim::FAttributes::Curves);
+			}
+		}
+#endif
+
 #if WITH_EDITOR
-		Output.AnimInstanceProxy->RegisterWatchedPose(Output.Pose, LinkID);
+		Output.AnimInstanceProxy->RegisterWatchedPose(Output.Pose, Output.Curve, LinkID);
 #endif
 	}
 	else
@@ -454,31 +499,7 @@ void FComponentSpacePoseLink::EvaluateComponentSpace(FComponentSpacePoseContext&
 
 	// Detect non valid output
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
-	if (Output.ContainsNaN())
-	{
-		// Show bone transform with some useful debug info
-		for (const FTransform& Bone : Output.Pose.GetPose().GetBones())
-		{
-			if (Bone.ContainsNaN())
-			{
-				ensureMsgf(!Bone.ContainsNaN(), TEXT("Bone transform contains NaN from AnimInstance:[%s] Node:[%s] Value:[%s]")
-					, *Output.AnimInstanceProxy->GetAnimInstanceName(), LinkedNode ? *LinkedNode->StaticStruct()->GetName() : TEXT("NULL"), *Bone.ToString());
-			}
-		}
-	}
-
-	if (!Output.IsNormalized())
-	{
-		// Show bone transform with some useful debug info
-		for (const FTransform& Bone : Output.Pose.GetPose().GetBones())
-		{
-			if (!Bone.IsRotationNormalized())
-			{
-				ensureMsgf(Bone.IsRotationNormalized(), TEXT("Bone Rotation not normalized from AnimInstance:[%s] Node:[%s] Value:[%s]")
-					, *Output.AnimInstanceProxy->GetAnimInstanceName(), LinkedNode ? *LinkedNode->StaticStruct()->GetName() : TEXT("NULL"), *Bone.ToString());
-			}
-		}
-	}
+	UE::Anim::Private::ValidatePose(Output.Pose.GetPose(), Output.AnimInstanceProxy, LinkedNode);
 #endif
 }
 
@@ -553,87 +574,3 @@ void FNodeDebugData::GetFlattenedDebugData(TArray<FFlattenedDebugData>& Flattene
 	}
 }
 
-void FExposedValueHandler::DynamicClassInitialization(TArray<FExposedValueHandler>& InHandlers, UDynamicClass* InDynamicClass)
-{
-	const FPropertyAccessLibrary& PropertyAccessLibrary = IAnimClassInterface::GetFromClass(InDynamicClass)->GetPropertyAccessLibrary();
-
-	for(FExposedValueHandler& Handler : InHandlers)
-	{
-		Handler.Initialize(InDynamicClass, PropertyAccessLibrary);
-	}
-}
-
-void FExposedValueHandler::ClassInitialization(TArray<FExposedValueHandler>& InHandlers, UObject* InClassDefaultObject)
-{
-	UClass* Class = InClassDefaultObject->GetClass();
-	const FPropertyAccessLibrary& PropertyAccessLibrary = IAnimClassInterface::GetFromClass(Class)->GetPropertyAccessLibrary();
-
-	for(FExposedValueHandler& Handler : InHandlers)
-	{
-		FAnimNode_Base* AnimNode = Handler.ValueHandlerNodeProperty->ContainerPtrToValuePtr<FAnimNode_Base>(InClassDefaultObject);
-		check(AnimNode);
-		AnimNode->SetExposedValueHandler(&Handler);
-		Handler.Initialize(Class, PropertyAccessLibrary);
-	}
-}
-
-void FExposedValueHandler::Initialize(UClass* InClass, const FPropertyAccessLibrary& InPropertyAccessLibrary)
-{
-	// bInitialized may no longer be necessary, but leaving alone for now:
-	if (bInitialized)
-	{
-		return;
-	}
-
-	if (BoundFunction != NAME_None)
-	{
-		// This cached function is NULL when the CDO is initially serialized, or (in editor) when the class has been
-		// recompiled and any instances have been re-instanced. When new instances are spawned, this function is
-		// duplicated (it is a FProperty) onto those instances so we dont pay the cost of the FindFunction() call
-#if !WITH_EDITOR
-		if (Function == nullptr)
-#endif
-		{
-			// we cant call FindFunction on anything but the game thread as it accesses a shared map in the object's class
-			check(IsInGameThread());
-			Function = InClass->FindFunctionByName(BoundFunction);
-			check(Function);
-		}
-	}
-	else
-	{
-		Function = NULL;
-	}
-
-	// Cache property access library
-	PropertyAccessLibrary = &InPropertyAccessLibrary;
-
-	bInitialized = true;
-}
-
-void FExposedValueHandler::Execute(const FAnimationBaseContext& Context) const
-{
-	if (Function != nullptr)
-	{
-		Context.AnimInstanceProxy->GetAnimInstanceObject()->ProcessEvent(Function, NULL);
-	}
-
-	if(CopyRecords.Num() > 0)
-	{
-		if(PropertyAccessLibrary != nullptr)
-		{
-			UObject* AnimInstanceObject = Context.AnimInstanceProxy->GetAnimInstanceObject();
-			for(const FExposedValueCopyRecord& CopyRecord : CopyRecords)
-			{
-				PropertyAccess::ProcessCopy(AnimInstanceObject, *PropertyAccessLibrary, EPropertyAccessCopyBatch::InternalUnbatched, CopyRecord.CopyIndex, [&CopyRecord](const FProperty* InProperty, void* InAddress)
-				{
-					if(CopyRecord.PostCopyOperation == EPostCopyOperation::LogicalNegateBool)
-					{
-						bool bValue = static_cast<const FBoolProperty*>(InProperty)->GetPropertyValue(InAddress);
-						static_cast<const FBoolProperty*>(InProperty)->SetPropertyValue(InAddress, !bValue);
-					}
-				});
-			}
-		}
-	}
-}

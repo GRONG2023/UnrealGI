@@ -2,12 +2,18 @@
 
 #pragma once
 
+#include "Containers/Map.h"
+#include "Containers/SparseArray.h"
+#include "DirectLinkCommon.h"
 #include "DirectLinkDeltaConsumer.h"
 #include "DirectLinkSceneGraphNode.h"
-
+#include "Templates/SharedPointer.h"
+#include "Templates/UniquePtr.h"
 
 class IDatasmithElement;
 class IDatasmithScene;
+namespace DirectLink { class FElementSnapshot; }
+namespace DirectLink { class FSceneSnapshot; }
 
 /**
  * This class receives DirectLink scene snapshots, and convert them into a DatasmithScene.
@@ -35,10 +41,14 @@ public:
 	void SetChangeListener(ISceneChangeListener* Listener) { ChangeListener = Listener; }
 
 	// Get the reconstructed DatasmithScene. Can be null.
-	TSharedPtr<IDatasmithScene> GetScene();
+	TSharedPtr<IDatasmithScene> GetScene() const;
 
 private: // DirectLink::ISceneReceiver API
 	virtual void FinalSnapshot(const DirectLink::FSceneSnapshot& SceneSnapshot) override;
+
+	struct FSceneState;
+
+	TUniquePtr<FSceneState> ParseSnapshot(const DirectLink::FSceneSnapshot& SceneSnapshot);
 
 private:
 	struct FDatasmithElementPointers : public DirectLink::IReferenceResolutionProvider

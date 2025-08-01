@@ -2,10 +2,23 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "MovieSceneFwd.h"
-#include "Misc/FrameTime.h"
 #include "Evaluation/MovieSceneSequenceTransform.h"
+#include "Evaluation/MovieSceneTimeTransform.h"
+#include "Evaluation/MovieSceneTimeWarping.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Math/NumericLimits.h"
+#include "Math/Range.h"
+#include "Math/RangeBound.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/FrameNumber.h"
+#include "Misc/FrameRate.h"
+#include "Misc/FrameTime.h"
+#include "Misc/Optional.h"
+#include "MovieSceneFwd.h"
+#include "MovieSceneTimeHelpers.h"
 
 
 /** Enumeration specifying whether we're playing forwards or backwards */
@@ -16,32 +29,32 @@ enum class EPlayDirection
 
 
 /** MovieScene evaluation context. Should remain bitwise copyable, and contain no external state since this has the potential to be used on a thread */
-struct MOVIESCENE_API FMovieSceneEvaluationRange
+struct FMovieSceneEvaluationRange
 {
 	/**
 	 * Construct this range from a single fixed time
 	 */
-	FMovieSceneEvaluationRange(FFrameTime InTime, FFrameRate InFrameRate);
+	MOVIESCENE_API FMovieSceneEvaluationRange(FFrameTime InTime, FFrameRate InFrameRate);
 
 	/**
 	 * Construct this range from a raw range and a direction
 	 */
-	FMovieSceneEvaluationRange(TRange<FFrameTime> InRange, FFrameRate InFrameRate, EPlayDirection InDirection);
+	MOVIESCENE_API FMovieSceneEvaluationRange(TRange<FFrameTime> InRange, FFrameRate InFrameRate, EPlayDirection InDirection);
 
 	/**
 	 * Construct this range from 2 times, and whether the range should include the previous time or not
 	 */
-	FMovieSceneEvaluationRange(FFrameTime InCurrentTime, FFrameTime InPreviousTime, FFrameRate InFrameRate, bool bInclusivePreviousTime = false);
+	MOVIESCENE_API FMovieSceneEvaluationRange(FFrameTime InCurrentTime, FFrameTime InPreviousTime, FFrameRate InFrameRate, bool bInclusivePreviousTime = false);
 
 	/**
 	 * Convert a frame time range to a frame number range comprising all the frame numbers traversed in the range
 	 */
-	static TRange<FFrameNumber> TimeRangeToNumberRange(const TRange<FFrameTime>& InFrameTimeRange);
+	static MOVIESCENE_API TRange<FFrameNumber> TimeRangeToNumberRange(const TRange<FFrameTime>& InFrameTimeRange);
 
 	/**
 	 * Convert a frame number range to a frame time range
 	 */
-	static TRange<FFrameTime> NumberRangeToTimeRange(const TRange<FFrameNumber>& InFrameTimeRange);
+	static MOVIESCENE_API TRange<FFrameTime> NumberRangeToTimeRange(const TRange<FFrameNumber>& InFrameTimeRange);
 
 	/**
 	 * Get the range that we should be evaluating
@@ -63,7 +76,7 @@ struct MOVIESCENE_API FMovieSceneEvaluationRange
 	 * Get the range of frame numbers traversed over this evaluation range by flooring the lower bound, and ceiling the upper bound.
 	 * For example: a time range of [1.5, 5.6] will yield the equivalent of [1, 6). A time range of (2.0, 2.9) will yield the equivalent of [2,3).
 	 */
-	TRange<FFrameNumber> GetTraversedFrameNumberRange() const;
+	MOVIESCENE_API TRange<FFrameNumber> GetTraversedFrameNumberRange() const;
 
 	/**
 	 * Get the direction to evaluate our range
@@ -84,6 +97,24 @@ struct MOVIESCENE_API FMovieSceneEvaluationRange
 		}
 
 		return Direction == EPlayDirection::Forwards ? EvaluationRange.GetUpperBoundValue() : EvaluationRange.GetLowerBoundValue();
+	}
+
+	/**
+	 * Get the current time to use for looking up within an evaluation field.
+	 * Subtly different from GetTime in that it returns the previous tick for exclusive boundaries
+	 */
+	FORCEINLINE FFrameNumber GetEvaluationFieldTime() const
+	{
+		TRange<FFrameNumber> Range = GetFrameNumberRange();
+
+		if (Direction == EPlayDirection::Forwards)
+		{
+			return UE::MovieScene::DiscreteExclusiveUpper(Range)-1;
+		}
+		else
+		{
+			return UE::MovieScene::DiscreteInclusiveLower(Range);
+		}
 	}
 
 	/**
@@ -127,6 +158,11 @@ struct MOVIESCENE_API FMovieSceneEvaluationRange
 	{
 		return CurrentFrameRate;
 	}
+
+	/**
+	 * Reset this range to a new range while retaining the current framerate and direction
+	 */
+	MOVIESCENE_API void ResetRange(const TRange<FFrameTime>& NewRange);
 
 protected:
 
@@ -237,9 +273,24 @@ struct FMovieSceneContext : FMovieSceneEvaluationRange
 	/**
 	 * Get the inverse transform of the current sub sequence, to transform local times back to root times.
 	 */
+	UE_DEPRECATED(5.4, "Please use GetSequenceToRootSequenceTransform instead.")
 	FORCEINLINE FMovieSceneTimeTransform GetSequenceToRootTransform() const
 	{
-		return RootToSequenceTransform.InverseFromWarp(RootToSequenceWarpCounter);
+		FMovieSceneSequenceTransform SequenceTransform = RootToSequenceTransform.InverseFromLoop(RootToSequenceWarpCounter);
+		FMovieSceneTimeTransform ReturnTransform = SequenceTransform.LinearTransform;
+		for (int i = 0; i < SequenceTransform.NestedTransforms.Num(); ++i)
+		{
+			ReturnTransform = ReturnTransform * SequenceTransform.NestedTransforms[i].LinearTransform;
+		}
+		return ReturnTransform;
+	}
+
+	/**
+	 * Get the inverse sequence transform of the current sub sequence, to transform local times back to root times.
+	 */
+	FORCEINLINE FMovieSceneSequenceTransform GetSequenceToRootSequenceTransform() const
+	{
+		return RootToSequenceTransform.InverseFromLoop(RootToSequenceWarpCounter);
 	}
 
 	/**
@@ -309,7 +360,7 @@ public:
 		NewContext.RootToSequenceTransform.TransformTime(GetTime(), TransformedTime_Unused, WarpCounter);
 		NewContext.RootToSequenceWarpCounter = WarpCounter;
 
-		if (InTransform.IsWarping())
+		if (InTransform.IsLooping())
 		{
 			// If we have some looping, the transformed range might extend past the end of a loop and into
 			// the beginning of another. In that case, technically, the evaluation range ends up being a
@@ -320,7 +371,7 @@ public:
 			//       actually make contexts have an array of evaluation ranges.
 			TRangeBound<FFrameTime> UpperEvalutionRangeBound = NewContext.EvaluationRange.GetUpperBound();
 			const FMovieSceneNestedSequenceTransform& LeafTransform = InTransform.NestedTransforms.Last();
-			if (UpperEvalutionRangeBound.IsClosed() && LeafTransform.IsWarping())
+			if (UpperEvalutionRangeBound.IsClosed() && LeafTransform.IsLooping())
 			{
 				const FFrameNumber LeafWarpLength = LeafTransform.Warping.Length();
 				// Below: use strictly greater than comparison so that if the evalution range ends on the
@@ -493,7 +544,7 @@ protected:
 };
 
 /** Helper class designed to abstract the complexity of calculating evaluation ranges for previous times and fixed time intervals */
-struct MOVIESCENE_API FMovieScenePlaybackPosition
+struct FMovieScenePlaybackPosition
 {
 	FMovieScenePlaybackPosition()
 		: InputRate(0,0), OutputRate(0,0), EvaluationType(EMovieSceneEvaluationType::WithSubFrames)
@@ -532,13 +583,13 @@ public:
 	 * @param InOutputRate          The framerate to use when returning any frame range from this class
 	 * @param InputEvaluationType   Whether we're using frame-locked or sub-frame evaluation
 	 */
-	void SetTimeBase(FFrameRate InInputRate, FFrameRate InOutputRate, EMovieSceneEvaluationType InputEvaluationType);
+	MOVIESCENE_API void SetTimeBase(FFrameRate InInputRate, FFrameRate InOutputRate, EMovieSceneEvaluationType InputEvaluationType);
 
 	/**
 	 * Reset this position to the specified time.
 	 * @note Future calls to 'PlayTo' will include this time in its resulting evaluation range
 	 */
-	void Reset(FFrameTime StartPos);
+	MOVIESCENE_API void Reset(FFrameTime StartPos);
 
 	/**
 	 * Get the last position that was set, in InputRate space
@@ -559,7 +610,7 @@ public:
 	 * @param NewPosition         The new frame time to set, in InputRate space
 	 * @return A range encompassing only the specified time, in OutputRate space.
 	 */
-	FMovieSceneEvaluationRange JumpTo(FFrameTime NewPosition);
+	MOVIESCENE_API FMovieSceneEvaluationRange JumpTo(FFrameTime NewPosition);
 
 	/**
 	 * Play from the previously evaluated play time, to the specified time
@@ -567,26 +618,26 @@ public:
 	 * @param NewPosition         The new frame time to set, in InputRate space
 	 * @return An evaluation range from the previously evaluated time to the specified time, in OutputRate space.
 	 */
-	FMovieSceneEvaluationRange PlayTo(FFrameTime NewPosition);
+	MOVIESCENE_API FMovieSceneEvaluationRange PlayTo(FFrameTime NewPosition);
 
 	/**
 	 * Get a range that encompasses the last evaluated range in OutputRate space.
 	 * @return An optional evaluation range in OutputRate space.
 	 */
-	TOptional<FMovieSceneEvaluationRange> GetLastRange() const;
+	MOVIESCENE_API TOptional<FMovieSceneEvaluationRange> GetLastRange() const;
 
 	/**
 	 * Get a range encompassing only the current time, if available (in OutputRate space)
 	 * @return An optional evaluation range in OutputRate space.
 	 */
-	FMovieSceneEvaluationRange GetCurrentPositionAsRange() const;
+	MOVIESCENE_API FMovieSceneEvaluationRange GetCurrentPositionAsRange() const;
 
 private:
 
 	/**
 	 * Check this class's invariants
 	 */
-	void CheckInvariants() const;
+	MOVIESCENE_API void CheckInvariants() const;
 
 private:
 

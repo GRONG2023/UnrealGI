@@ -206,14 +206,12 @@ int32 SDesignSurface::OnPaint(const FPaintArgs& Args, const FGeometry& AllottedG
 {
 	OnPaintBackground(AllottedGeometry, MyCullingRect, OutDrawElements, LayerId);
 
-	SCompoundWidget::OnPaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
-
-	return LayerId;
+	return SCompoundWidget::OnPaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
 }
 
 void SDesignSurface::OnPaintBackground(const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId) const
 {
-	const FSlateBrush* BackgroundImage = FEditorStyle::GetBrush(TEXT("Graph.Panel.SolidBackground"));
+	const FSlateBrush* BackgroundImage = FAppStyle::GetBrush(TEXT("Graph.Panel.SolidBackground"));
 	PaintBackgroundAsLines(BackgroundImage, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId);
 }
 
@@ -265,12 +263,12 @@ FReply SDesignSurface::OnMouseMove(const FGeometry& MyGeometry, const FPointerEv
 		const bool bShouldZoom = bIsRightMouseButtonDown && (bIsLeftMouseButtonDown || bIsMiddleMouseButtonDown || ModifierKeysState.IsAltDown() || FSlateApplication::Get().IsUsingTrackpad());
 		if ( bShouldZoom )
 		{
-			const float MouseZoomScaling = 0.04f;
+			const double MouseZoomScaling = 0.04f;
 			FReply ReplyState = FReply::Handled();
 
 			TotalMouseDelta += CursorDelta.X + CursorDelta.Y;
 
-			const int32 ZoomLevelDelta = FMath::RoundToInt(TotalMouseDelta * MouseZoomScaling);
+			const int32 ZoomLevelDelta = FMath::RoundToInt32(TotalMouseDelta * MouseZoomScaling);
 
 			// Get rid of mouse movement that's been 'used up' by zooming
 			if (ZoomLevelDelta != 0)
@@ -315,10 +313,10 @@ FReply SDesignSurface::OnMouseWheel(const FGeometry& MyGeometry, const FPointerE
 FReply SDesignSurface::OnTouchGesture(const FGeometry& MyGeometry, const FPointerEvent& GestureEvent)
 {
 	const EGestureEvent GestureType = GestureEvent.GetGestureType();
-	const FVector2D& GestureDelta = GestureEvent.GetGestureDelta();
+	const FVector2D GestureDelta = GestureEvent.GetGestureDelta();
 	if ( GestureType == EGestureEvent::Magnify )
 	{
-		TotalGestureMagnify += GestureDelta.X;
+		TotalGestureMagnify += static_cast<float>(GestureDelta.X);
 		if ( FMath::Abs(TotalGestureMagnify) > 0.07f )
 		{
 			// We want to zoom into this point; i.e. keep it the same fraction offset into the panel
@@ -379,7 +377,7 @@ void SDesignSurface::ChangeZoomLevel(int32 ZoomLevelDelta, const FVector2D& Widg
 		// If they are already zoomed in past 1:1, user may zoom freely
 		( ZoomLevel > DefaultZoomLevel );
 
-	const float OldZoomLevel = ZoomLevel;
+	const int32 OldZoomLevel = ZoomLevel;
 
 	if ( bAllowFullZoomRange )
 	{
@@ -400,15 +398,7 @@ void SDesignSurface::ChangeZoomLevel(int32 ZoomLevelDelta, const FVector2D& Widg
 
 		// Re-center the screen so that it feels like zooming around the cursor.
 		{
-			FSlateRect GraphBounds = ComputeSensibleBounds();
-
-			// Make sure we are not zooming into/out into emptiness; otherwise the user will get lost..
-			const FVector2D ClampedPointToMaintainGraphSpace(
-				FMath::Clamp(PointToMaintainGraphSpace.X, GraphBounds.Left, GraphBounds.Right),
-				FMath::Clamp(PointToMaintainGraphSpace.Y, GraphBounds.Top, GraphBounds.Bottom)
-				);
-
-			const FVector2D NewViewOffset = ClampedPointToMaintainGraphSpace - WidgetSpaceZoomOrigin / GetZoomAmount();
+			const FVector2D NewViewOffset = PointToMaintainGraphSpace - WidgetSpaceZoomOrigin / GetZoomAmount();
 
 			// If we're panning while zooming we need to update the viewoffset start.
 			ViewOffsetStart += (NewViewOffset - ViewOffset);
@@ -549,7 +539,7 @@ FVector2D SDesignSurface::PanelCoordToGraphCoord(const FVector2D& PanelSpaceCoor
 
 int32 SDesignSurface::GetGraphRulePeriod() const
 {
-	return (int32)FEditorStyle::GetFloat("Graph.Panel.GridRulePeriod");
+	return (int32)FAppStyle::GetFloat("Graph.Panel.GridRulePeriod");
 }
 
 float SDesignSurface::GetGridScaleAmount() const
@@ -564,9 +554,9 @@ void SDesignSurface::PaintBackgroundAsLines(const FSlateBrush* BackgroundImage, 
 	const int32 RulePeriod = GetGraphRulePeriod();
 	check(RulePeriod > 0);
 
-	const FLinearColor RegularColor(FEditorStyle::GetColor("Graph.Panel.GridLineColor"));
-	const FLinearColor RuleColor(FEditorStyle::GetColor("Graph.Panel.GridRuleColor"));
-	const FLinearColor CenterColor(FEditorStyle::GetColor("Graph.Panel.GridCenterColor"));
+	const FLinearColor RegularColor(FAppStyle::GetColor("Graph.Panel.GridLineColor"));
+	const FLinearColor RuleColor(FAppStyle::GetColor("Graph.Panel.GridRuleColor"));
+	const FLinearColor CenterColor(FAppStyle::GetColor("Graph.Panel.GridCenterColor"));
 	const float GraphSmallestGridSize = 8.0f;
 	const float RawZoomFactor = GetZoomAmount();
 	const float NominalGridSize = GetSnapGridSize() * GetGridScaleAmount();
@@ -580,7 +570,7 @@ void SDesignSurface::PaintBackgroundAsLines(const FSlateBrush* BackgroundImage, 
 
 	const float GridCellSize = NominalGridSize * ZoomFactor * Inflation;
 
-	FVector2D LocalGridOrigin = AllottedGeometry.AbsoluteToLocal(GridOrigin);
+	FVector2f LocalGridOrigin = AllottedGeometry.AbsoluteToLocal(GridOrigin);
 
 	float ImageOffsetX = LocalGridOrigin.X - ((GridCellSize*RulePeriod) * FMath::Max(FMath::CeilToInt(LocalGridOrigin.X / (GridCellSize*RulePeriod)), 0));
 	float ImageOffsetY = LocalGridOrigin.Y - ((GridCellSize*RulePeriod) * FMath::Max(FMath::CeilToInt(LocalGridOrigin.Y / (GridCellSize*RulePeriod)), 0));

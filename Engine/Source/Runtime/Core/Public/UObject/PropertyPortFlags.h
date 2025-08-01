@@ -71,9 +71,18 @@ enum EPropertyPortFlags
 	/** Indicates that object property values should be exported without the package or class information */
 	PPF_SimpleObjectText			= 0x00002000,
 
-	/** parsing default properties - allow text for transient properties to be imported - also modifies ObjectProperty importing slightly for subobjects */
-	PPF_ParsingDefaultProperties	= 0x00008000,
+	/** Set if this export is going to be used for diffing and may want to omit certain data that doesn't make sense for comparison */
+	PPF_ForDiff						= 0x00004000,
+	
+	/**
+	 * Set if this export is going to be used for diffing and may want to omit certain data related to CDOs/archetypes that doesn't make sense when comparing an instance of an object/property/value.
+	 * Requires PPF_ForDiff to also be set.
+	 */
+	PPF_ForDiffInstanceOnly			= 0x00008000,
 
+	/** parsing default properties - allow text for transient properties to be imported - also modifies ObjectProperty importing slightly for subobjects */
+	PPF_ParsingDefaultProperties	= 0x00010000,
+	
 	/** indicates that non-categorized transient properties should be exported (by default, they would not be) */
 	PPF_IncludeTransient			= 0x00020000,
 
@@ -106,12 +115,13 @@ enum EPropertyPortFlags
 	/** Ignores CPF_Deprecated flag */
 	PPF_UseDeprecatedProperties		= 0x08000000,
 
-	/** Export in C++ form */
-	PPF_ExportCpp					= 0x10000000,
+	//								= 0x10000000,
 
 	/** Ignores CPF_SkipSerialization flag when using tagged serialization */
 	PPF_ForceTaggedSerialization	= 0x20000000,
 
 	/** Set when duplicating objects verbatim (doesn't reset unique IDs) */
 	PPF_DuplicateVerbatim			= 0x40000000,
+
+	//								= 0x80000000,
 };

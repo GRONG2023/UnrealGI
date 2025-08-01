@@ -2,9 +2,11 @@
 #pragma once
 
 #if PLATFORM_WINDOWS
-	#include "Windows/MinWindows.h"
-#elif PLATFORM_HOLOLENS
-	#include "HoloLens/MinWindows.h"
+	#include "Windows/MinWindows.h" // HEADER_UNIT_IGNORE
 #else
+	#if !defined(WINDOWS_H_WRAPPER_GUARD)
+	#pragma message("WARNING: do not include Microsoft/MinWindows.h directly. Use Microsoft/WindowsHWrapper.h instead")
+	#endif
+
 	#include "Microsoft/MinWindowsPrivate.h"
 #endif

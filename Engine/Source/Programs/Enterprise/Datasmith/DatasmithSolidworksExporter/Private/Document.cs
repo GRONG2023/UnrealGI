@@ -7,65 +7,53 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
+using DatasmithSolidworks.Names;
+using static DatasmithSolidworks.Addin;
 
 namespace DatasmithSolidworks
 {
-	/**
-	 * Base document class.
-	 */
-	public abstract class FDocument
+
+	// Build DatasmithScene from Solidworks Document, supporting scene changes/modifications
+	// Doesn't incorporate change notifications callbacks/handlers(i.e. notification handlers call into this class to tell what was changed and it updates Datasmith scene accordingly)
+	public abstract class FDocumentTracker
 	{
-		public ModelDoc2 SwDoc = null;
-		public bool bDirectLinkAutoSync { get; set; } = false;
-		public int DirectLinkSyncCount { get; private set; } = 0;
-		public ConcurrentDictionary<int, FMaterial> ExportedMaterialsMap = new ConcurrentDictionary<int, FMaterial>();
-		
-		protected FDatasmithFacadeScene DatasmithScene = null;
-		protected FDatasmithExporter Exporter = null;
-		protected int DocId = -1;
-		protected bool bDirectLinkSyncInProgress = false;
-		protected bool bFileExportInProgress = false;
+		public readonly FDocument Doc;  // Top Document that is tracked/exported
+		public ModelDoc2 SwDoc => Doc.SwDoc;
 
-		private string DirectLinkPath = "";
-		private FDatasmithFacadeDirectLink DatasmithDirectLink = null;
-		private bool bDocumentIsDirty = true;
-		private string DatasmithFileExportPath = "";
-		private ManualResetEvent DirectLinkSyncEvent = new ManualResetEvent(false);
-		private ManualResetEvent ExportToFileEvent = new ManualResetEvent(false);
-		private ManualResetEvent ExitExportThreadEvent = new ManualResetEvent(false);
-		private Thread SceneExportThread = null;
-		private Thread MaterialCheckerThread = null;
-		private ManualResetEvent MaterialCheckerEvent = null;
-		private bool bExitMaterialUpdateThread = false;
-		private uint FaceCounter = 1; // Face Id generator
+		public Dictionary<int, FMaterial> ExportedMaterialsMap = new Dictionary<int, FMaterial>();
+		public bool bHasConfigurations = false;
 
-		public FDocument(int InDocId, ModelDoc2 InSwDoc, FDatasmithExporter InExporter)
+		public FDatasmithFacadeScene DatasmithScene = null;
+		public FDatasmithExporter Exporter = null;
+
+		public bool bDocumentIsDirty = true;
+		public string DatasmithFileExportPath = "";
+
+		public uint FaceCounter = 1; // Face Id generator
+
+		protected FDocumentTracker(FDocument InDoc, FDatasmithExporter InExporter)
 		{
-			DocId = InDocId;
-			SwDoc = InSwDoc;
-			DatasmithScene = new FDatasmithFacadeScene("Solidworks", "Solidworks", "Solidworks", "2021");
-			DatasmithScene.SetName(InSwDoc.GetTitle());
+			Doc = InDoc;
 
-			DirectLinkPath = Path.Combine(Path.GetTempPath(), "sw_dl_" + Guid.NewGuid().ToString());
+			DatasmithScene = new FDatasmithFacadeScene("StdMaterial", "Solidworks", "Solidworks", "");
+			DatasmithScene.SetName(InDoc.SwDoc.GetTitle());
 
-			if (!Directory.Exists(DirectLinkPath))
-			{
-				Directory.CreateDirectory(DirectLinkPath);
-			}
-
-			if (InExporter != null)
-			{
-				Exporter = InExporter;
-			}
-			else
-			{
-				Exporter = new FDatasmithExporter(DatasmithScene);
-			}
+			Exporter = InExporter ?? new FDatasmithExporter(DatasmithScene);
 		}
 
-		public static bool IsValidFaceId(uint InFaceId)
+		public string GetPathName()
 		{
-			return (InFaceId >> 24 == 0xAA);
+			return SwDoc.GetPathName();
+		}
+
+		public bool GetDirty()
+		{
+			return bDocumentIsDirty;
+		}
+
+		public virtual void SetDirty(bool bInDirty)
+		{
+			bDocumentIsDirty = bInDirty;
 		}
 
 		public uint GetFaceId(IFace2 InFace)
@@ -80,199 +68,276 @@ namespace DatasmithSolidworks
 			return FaceId;
 		}
 
-		protected bool GetDirty()
+		public static bool IsValidFaceId(uint InFaceId)
 		{
-			return bDocumentIsDirty;
+			return (InFaceId >> 24 == 0xAA);
 		}
 
-		protected virtual void SetDirty(bool bInDirty)
+		public bool IsUpdateInProgress()
 		{
-			bDocumentIsDirty = bInDirty;
+			return Doc.bDirectLinkSyncInProgress || Doc.bFileExportInProgress;
 		}
 
-		protected void SetExportStatus(string InMessage)
+		public void SetExportStatus(string InMessage)
 		{
-			if (bDirectLinkSyncInProgress)
-			{
-				Addin.Instance.LogStatusBarMessage($"DirectLink sync...{InMessage}");
-			}
-			else if (bFileExportInProgress)
-			{
-				string FileName = Path.GetFileName(DatasmithFileExportPath);
-				Addin.Instance.LogStatusBarMessage($"Exporting file {FileName}...{InMessage}");
-			}
+			Doc.SetExportStatus(InMessage);
 		}
 
-		private void CheckForMaterialUpdatesProc()
+		private void ExportConfigurations(List<FConfigurationData> Configs)
 		{
-			while (!bExitMaterialUpdateThread)
+			// Remove any existing Datasmith LevelVariantSets as we'll re-add data
+			while (DatasmithScene.GetLevelVariantSetsCount() > 0)
 			{
-				MaterialCheckerEvent.WaitOne();
-
-				// Only check for material updates when we are not current exporting
-				if (!bDirectLinkSyncInProgress && !bFileExportInProgress)
+				for (int Index = 0; Index < DatasmithScene.GetLevelVariantSetsCount(); Index++)
 				{
-					bool bSketchMode = false;
-					try
-					{
-						bSketchMode = (SwDoc.SketchManager?.ActiveSketch != null);
-					}
-					catch { }
-				
-					if (!bSketchMode && HasMaterialUpdates())
-					{
-						SetDirty(true);
-					}
+					DatasmithScene.RemoveLevelVariantSets(DatasmithScene.GetLevelVariantSets(Index));
 				}
-				Thread.Sleep(600);
+			}
+
+			Dictionary<FDatasmithFacadeActorBinding, int> MaterialBindings = null;
+
+			if (Configs != null)
+			{
+				MaterialBindings = new Dictionary<FDatasmithFacadeActorBinding, int>();
+				Exporter.ExportLevelVariantSets(Configs, MaterialBindings);
+			}
+
+			// Export materials after processing variants - so that any material used in variant is registered and exported
+			ExportMaterials();
+
+			// Assign exported datasmith material instances to bindings
+			foreach (KeyValuePair<FDatasmithFacadeActorBinding, int> KVP in MaterialBindings)
+			{
+				FDatasmithFacadeActorBinding Binding = KVP.Key;
+				int MaterialId = KVP.Value;
+
+				if (Exporter.GetDatasmithMaterial(MaterialId, out FDatasmithFacadeMaterialInstance DatasmithMaterial))
+				{
+					Binding.AddMaterialCapture(DatasmithMaterial);
+				}					
 			}
 		}
 
-		private void SceneExportProc()
+		public void ExportMaterials()
 		{
-			while (true)
+			Exporter.ExportMaterials(ExportedMaterialsMap);
+		}
+
+		private void ExportLights()
+		{
+			List<FLight> Lights  = FLightExporter.ExportLights(SwDoc);
+
+			foreach (FLight Light in Lights)
 			{
-				int EventIndex = WaitHandle.WaitAny(new WaitHandle[] { ExitExportThreadEvent, DirectLinkSyncEvent, ExportToFileEvent });
+				Exporter.ExportLight(Light);
+			}
+		}
 
-				if (EventIndex == 0)
-				{
-					return;
-				}
+		public abstract FMeshes GetMeshes(string ActiveConfigName);
 
-				if (EventIndex == 1)
-				{
-					// DirectLink sync
+		public void Export()
+		{
+			string OutDir = Path.GetDirectoryName(DatasmithFileExportPath);
+			string CleanFileName = Path.GetFileNameWithoutExtension(DatasmithFileExportPath);
 
-					bDirectLinkSyncInProgress = true;
+			// Save/restore scene and exporter in order not to mess up DirectLink state
+			FDatasmithFacadeScene OldScene = DatasmithScene;
+			FDatasmithExporter OldExporter = Exporter;
 
-					DatasmithScene.SetName(SwDoc.GetTitle());
-					DatasmithScene.SetOutputPath(DirectLinkPath);
+			DatasmithScene = new FDatasmithFacadeScene("StdMaterial", "Solidworks", "Solidworks", "");
+			DatasmithScene.SetName(CleanFileName);
+			DatasmithScene.SetOutputPath(OutDir);
+
+			Exporter = new FDatasmithExporter(DatasmithScene);
+
+			ConfigurationManager ConfigManager = SwDoc.ConfigurationManager;
+			string[] ConfigurationNames = SwDoc?.GetConfigurationNames();
+			string ActiveConfigurationName = ConfigManager.ActiveConfiguration.Name;
+
+
+			FMeshes Meshes = new FMeshes(ActiveConfigurationName);
+
+			FConfigurationExporter ConfigurationExporter = new FConfigurationExporter(Meshes, ConfigurationNames, ActiveConfigurationName, bInExportDisplayStates: true, bInExportExplodedViews: true);
+
+			List<FConfigurationData> Configs = ConfigurationExporter.ExportConfigurations(this);
+
+			bHasConfigurations = (Configs != null) && (Configs.Count != 0);
+
+			ExportToDatasmithScene(ConfigurationExporter, new FVariantName(ConfigManager.ActiveConfiguration));
+
+			ExportLights();
+			ExportConfigurations(Configs);
+
+			DatasmithScene.PreExport();
+			DatasmithScene.ExportScene(DatasmithFileExportPath);
+
+			DatasmithScene = OldScene;
+			Exporter = OldExporter;
+		}
+
+		public void Sync(string InOutputPath)
+		{
+			LogDebug($"Sync('{InOutputPath}')");
+			LogIndent();
+
+			DatasmithScene.SetName(SwDoc.GetTitle());
+			DatasmithScene.SetOutputPath(InOutputPath);
 
 #if DEBUG
-					Stopwatch Watch = Stopwatch.StartNew();
+			Stopwatch Watch = Stopwatch.StartNew();
 #endif
+			ConfigurationManager ConfigManager = SwDoc.ConfigurationManager;
+			string ActiveConfigurationName = ConfigManager.ActiveConfiguration.Name;
 
-					ExportToDatasmithScene();
+			FMeshes Meshes = GetMeshes(ActiveConfigurationName);
+			FConfigurationExporter ConfigurationExporter = new FConfigurationExporter(Meshes, new []{ ActiveConfigurationName }, ActiveConfigurationName, bInExportDisplayStates: false, bInExportExplodedViews: false);
+			List<FConfigurationData> Configs = ConfigurationExporter.ExportConfigurations(this);
+			bHasConfigurations = (Configs != null) && (Configs.Count != 0);
+			ExportToDatasmithScene(ConfigurationExporter, new FVariantName(ConfigManager.ActiveConfiguration));
+
+
+			ExportLights();
 
 #if DEBUG
-					Watch.Stop();
-					Debug.WriteLine($"EXPORT TIME: {(double)Watch.ElapsedMilliseconds / 1000.0}");
+			Watch.Stop();
+			Debug.WriteLine($"EXPORT TIME: {(double)Watch.ElapsedMilliseconds / 1000.0}");
 #endif
-
-					DatasmithDirectLink.UpdateScene(DatasmithScene);
-
-					DirectLinkSyncEvent.Reset();
-				}
-				else
-				{
-					// Export to file
-
-					bFileExportInProgress = true;
-
-					string OutDir = Path.GetDirectoryName(DatasmithFileExportPath);
-					string CleanFileName = Path.GetFileNameWithoutExtension(DatasmithFileExportPath);
-
-					// Save/restore scene and exporter in order not to mess up DirectLink state
-					FDatasmithFacadeScene OldScene = DatasmithScene;
-					FDatasmithExporter OldExporter = Exporter;
-
-					DatasmithScene = new FDatasmithFacadeScene("Solidworks", "Solidworks", "Solidworks", "2021");
-					DatasmithScene.SetName(CleanFileName);
-					DatasmithScene.SetOutputPath(OutDir);
-
-					Exporter = new FDatasmithExporter(DatasmithScene);
-
-					ExportToDatasmithScene();
-
-					DatasmithScene.PreExport();
-					DatasmithScene.ExportScene(DatasmithFileExportPath);
-
-					DatasmithScene = OldScene;
-					Exporter = OldExporter;
-
-					ExportToFileEvent.Reset();
-				}
-				
-				SetExportStatus("Done");
-
-				SetDirty(false);
-
-				bDirectLinkSyncInProgress = false;
-				bFileExportInProgress = false;
-
-				// Kickoff material checker thread after first export
-				if (MaterialCheckerThread == null)
-				{
-					MaterialCheckerThread = new Thread(CheckForMaterialUpdatesProc);
-					MaterialCheckerEvent = new ManualResetEvent(false);
-					MaterialCheckerThread.Start();
-					MaterialCheckerEvent.Set();
-				}
-			}
+			LogDedent();
 		}
 
-		public abstract bool HasMaterialUpdates();
-		public abstract void ExportToDatasmithScene();
-
-		public virtual void Init()
+		// todo: make abstract
+		public virtual void ExportToDatasmithScene(FConfigurationExporter ConfigurationExporter, FVariantName ActiveVariantName)
 		{
+			throw new NotImplementedException();
 		}
+
+		public virtual bool NeedExportComponent(FConfigurationTree.FComponentTreeNode InComponent,
+			FConfigurationTree.FComponentConfig ActiveComponentConfig)
+		{
+			return true;
+		}
+
+		public virtual void AddPartDocument(FConfigurationTree.FComponentTreeNode InNode){}
+
+		public virtual void AddCollectedComponent(FConfigurationTree.FComponentTreeNode InNode) {}
+
+		public abstract Dictionary<FComponentName, FObjectMaterials> LoadDocumentMaterials(HashSet<FComponentName> ComponentNamesToExportSet);
+		public abstract void AddComponentMaterials(FComponentName ComponentName, FObjectMaterials Materials);
+		public abstract FObjectMaterials GetComponentMaterials(Component2 Comp);
+
+
+		// Record which meshes are used aby a component
+		public abstract void AddMeshForComponent(FComponentName ComponentName, FMeshName MeshName);
+		public abstract void ReleaseComponentMeshes(FComponentName CompName);
+
+		// Remove unused meshes from Datasmith scene
+		public abstract void CleanupComponentMeshes();
 
 		public virtual void Destroy()
 		{
-			ExitExportThreadEvent.Set();
-			bExitMaterialUpdateThread = true;
-
-			if (SceneExportThread != null && !SceneExportThread.Join(1500))
-			{
-				SceneExportThread.Abort();
-			}
-			if (MaterialCheckerThread != null && !MaterialCheckerThread.Join(500))
-			{
-				MaterialCheckerThread.Abort();
-			}
 		}
 
-		public string GetPathName()
-		{
-			return SwDoc.GetPathName();
-		}
+		public abstract FMeshData ExtractComponentMeshData(Component2 Comp);
 
-		public void MakeActive(bool bInActive)
+
+		// Extracts meshes used for the assembly configuration
+		public void ProcessConfigurationMeshes(List<FDatasmithExporter.FMeshExportInfo> MeshExportInfos, FMeshes.FConfiguration MeshesConfiguration)
 		{
-			if (bInActive)
+			
+			// Extract meshes data and prepare for parallel datasmith export
+			// note: mesh data need to be extracted from the component when required configuration is active(i.e. can't move it outside of configuration enumeration loop)
+			foreach (Component2 Comp in MeshesConfiguration.EnumerateComponents())
 			{
-				if (DatasmithDirectLink == null)
+				FMeshData MeshData = ExtractComponentMeshData(Comp);
+				FComponentName ComponentName = new FComponentName(Comp);
+				
+				if (MeshData != null)
 				{
-					DatasmithDirectLink = new FDatasmithFacadeDirectLink();
-					if (!DatasmithDirectLink.InitializeForScene(DatasmithScene))
+					MeshesConfiguration.AddMesh(ComponentName, MeshData, out FMeshName MeshName);
+					MeshExportInfos.Add(new FDatasmithExporter.FMeshExportInfo()
 					{
-						throw new Exception("DirectLink: failed to initialize");
-					}
+						ComponentName = ComponentName,
+						MeshName = MeshName,
+						MeshData = MeshData
+					});
 				}
-
-				if (SceneExportThread == null)
-				{
-					SceneExportThread = new Thread(SceneExportProc);
-					SceneExportThread.Start();
-				}
-
-				MaterialCheckerEvent?.Set();
-			}
-			else
-			{
-				// Suspend material checker
-				MaterialCheckerEvent?.Reset();
-
-				DatasmithDirectLink?.Dispose();
-				DatasmithDirectLink = null;
 			}
 		}
 
-		public void OnExportToFile(string InFilePath)
+		public void AssignMaterialsToDatasmithMeshes(List<FDatasmithExporter.FMeshExportInfo> CreatedMeshes)
 		{
-			DatasmithFileExportPath = InFilePath;
-			ExportToFileEvent.Set();
+			Exporter.AssignMaterialsToDatasmithMeshes(CreatedMeshes);
+		}
+	};
+
+
+	// Controls Syncing of a tracked Document, handling all events
+	public interface IDocumentSyncer
+	{
+
+		// Make Datasmith Scene up to date with the Solidworks Document
+		void Sync(string InOutputPath);
+
+		// Indicate that change handling should start(after first Sync)
+		void Start();
+
+		// Resume all change tracking(after document was made active, foreground in Solidworks)
+		void Resume();
+
+		// Pause all change tracking(when document deactivated, background)
+		void Pause();
+
+		// Is any changes pending(simple test for AutoSync)
+		bool GetDirty();
+
+		FDocumentTracker GetTracker();
+
+		// After Sync
+		// todo: Probably not needed at all(i.e. all SetDirty(false) is only deep inside in notifiers, and with false can be moved  into Sync?)
+		void SetDirty(bool bInDirty);  
+
+		FDatasmithFacadeScene GetDatasmithScene();
+
+		// Explicit immediate release of resources(line event handlers)
+		void Destroy();
+
+		void Idle();
+	}
+
+	/**
+	 * Base document class.
+	 */
+	public abstract class FDocument
+	{
+		public int DocId = -1;
+		public ModelDoc2 SwDoc = null;
+
+		// Datasmith scene synced with the Solidworks document
+		public IDocumentSyncer DocumentSyncer;
+
+		// DirectLink
+		public FDatasmithFacadeDirectLink DatasmithDirectLink = null;
+		public string DirectLinkPath;
+		public bool bDirectLinkAutoSync { get; set; } = false;
+		public int DirectLinkSyncCount { get; private set; } = 0;
+
+		// Sync/Export 
+		public bool bDirectLinkSyncInProgress = false;
+		public bool bFileExportInProgress = false;
+		public string DatasmithFileExportPath = null;
+
+
+		public FDocument(int InDocId, ModelDoc2 InSwDoc)
+		{
+			DocId = InDocId;
+			SwDoc = InSwDoc;
+
+			DirectLinkPath = Path.Combine(Path.GetTempPath(), "sw_dl_" + Guid.NewGuid().ToString());
+
+			if (!Directory.Exists(DirectLinkPath))
+			{
+				Directory.CreateDirectory(DirectLinkPath);
+			}
 		}
 
 		public void OnDirectLinkSync()
@@ -285,16 +350,102 @@ namespace DatasmithSolidworks
 			}
 
 			DirectLinkSyncCount++;
-			DirectLinkSyncEvent.Set();
+			
+			bDirectLinkSyncInProgress = true;
+
+			DocumentSyncer.Sync(DirectLinkPath);
+			DatasmithDirectLink.UpdateScene(DocumentSyncer.GetDatasmithScene());
+			DocumentSyncer.SetDirty(false);
+
+			bDirectLinkSyncInProgress = false;
+
+			SetExportStatus("Done");
+
+			DocumentSyncer.Start();
+		}
+
+		public void ToggleDirectLinkAutoSync()
+		{
+			bDirectLinkAutoSync = !bDirectLinkAutoSync;
+
+			if (bDirectLinkAutoSync && DirectLinkSyncCount == 0)
+			{
+				// Run first sync
+				OnDirectLinkSync();
+			}
 		}
 
 		public void OnIdle()
 		{
-			bool bSceneIsDirty = GetDirty();
-			if (bSceneIsDirty && bDirectLinkAutoSync)
+			DocumentSyncer.Idle();
+			if (bDirectLinkAutoSync && DocumentSyncer.GetDirty())
 			{
 				OnDirectLinkSync();
 			}
 		}
+
+		public void OnExportToFile(string InFilePath)
+		{
+			bFileExportInProgress = true;
+			DatasmithFileExportPath = InFilePath;  // For status
+			Export(InFilePath);
+			bFileExportInProgress = false;
+		}
+
+		// Toggle if this document is synced with DirectLink
+		public void MakeActive(bool bInActive)
+		{
+			if (bInActive)
+			{
+				if (DatasmithDirectLink == null)
+				{
+					DatasmithDirectLink = new FDatasmithFacadeDirectLink();
+					if (!DatasmithDirectLink.InitializeForScene(DocumentSyncer.GetDatasmithScene()))
+					{
+						throw new Exception("DirectLink: failed to initialize");
+					}
+				}
+
+				DocumentSyncer.Resume();
+			}
+			else
+			{
+				// Suspend material checker(while it's a heavy threaded procedure)
+				// other event handling is not suspended to register changes in the model
+				DocumentSyncer?.Pause();
+
+				DatasmithDirectLink?.CloseCurrentSource();
+				DatasmithDirectLink?.Dispose();  // aka 'Close DirectLink Connection'
+				DatasmithDirectLink = null;
+			}
+		}
+
+		public abstract void Export(string InFilePath);
+
+		public string GetPathName()
+		{
+			return SwDoc.GetPathName();
+		}
+
+		// Dispose all resources explicitly
+		// todo: DatasmithDirectLink should be disposed here too?
+		public virtual void Destroy()
+		{
+			DocumentSyncer?.Destroy();
+		}
+
+		public void SetExportStatus(string InMessage)
+		{
+			if (bDirectLinkSyncInProgress)
+			{
+				Addin.Instance.LogStatusBarMessage($"DirectLink sync...{InMessage}");
+			}
+			else if (bFileExportInProgress)
+			{
+				string FileName = Path.GetFileName(DatasmithFileExportPath);
+				Addin.Instance.LogStatusBarMessage($"Exporting file {FileName}...{InMessage}");
+			}
+		}
+
 	}
 }

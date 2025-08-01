@@ -9,25 +9,10 @@
 #include "ScenePrivate.h"
 #include "SceneUtils.h"
 #include "LightRendering.h"
-#include "SceneFilterRendering.h"
-#include "PostProcessing.h"
-#include "RHI/Public/PipelineStateCache.h"
-
-int GVolumetricFogLightFunctionResolution = 128;
-FAutoConsoleVariableRef CVarVolumetricFogLightFunctionResolution(
-	TEXT("r.VolumetricFog.LightFunction.Resolution"),
-	GVolumetricFogLightFunctionResolution,
-	TEXT("The resolution of all light functions generated to be sampled when rendering volumetric fog."),
-	ECVF_Scalability | ECVF_RenderThreadSafe
-	);
-
-int GVolumetricFogLightFunctionCount = 16;
-FAutoConsoleVariableRef CVarVolumetricFogLightFunctionCount(
-	TEXT("r.VolumetricFog.LightFunction.LightFunctionCount"),
-	GVolumetricFogLightFunctionCount,
-	TEXT("The maximum light function that can be rendered per frame."),
-	ECVF_Scalability | ECVF_RenderThreadSafe
-	);
+#include "PostProcess/SceneFilterRendering.h"
+#include "PostProcess/PostProcessing.h"
+#include "PipelineStateCache.h"
+#include "ShadowRendering.h"
 
 float GVolumetricFogLightFunctionDirectionalLightSupersampleScale = 2.0f;
 FAutoConsoleVariableRef CVarVolumetricFogLightFunctionSupersampleScale(
@@ -43,159 +28,134 @@ static bool inline LocalLightLighFunctionsEnabled()
 	return GVolumetricFogLightFunction > 0;
 }
 
-static int32 GetVolumetricFogLightFunctionResolution()
-{
-	const int32 VolumetricFogLightFunctionResolution = FMath::Clamp(GVolumetricFogLightFunctionResolution, 32, 256); // Clamp to reasonable values
-	return VolumetricFogLightFunctionResolution;
-}
-
 class FVolumetricFogLightFunctionPS : public FMaterialShader
 {
-	DECLARE_SHADER_TYPE(FVolumetricFogLightFunctionPS,Material);
-	
-	class FLightType : SHADER_PERMUTATION_INT("LIGHT_TYPE", 3);
-	using FPermutationDomain = TShaderPermutationDomain< FLightType >;
-public:
+	DECLARE_SHADER_TYPE(FVolumetricFogLightFunctionPS, Material);
 
-	static bool ShouldCompilePermutation(const FMaterialShaderPermutationParameters& Parameters)
-	{
-		return Parameters.MaterialParameters.MaterialDomain == MD_LightFunction && DoesPlatformSupportVolumetricFog(Parameters.Platform);
-	}
+	class FLightType : SHADER_PERMUTATION_INT("LIGHT_TYPE", 4);
+	using FPermutationDomain = TShaderPermutationDomain< FLightType >;
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(FMatrix44f, LightFunctionTranslatedWorldToLight)
+		SHADER_PARAMETER(FMatrix44f, ShadowToTranslatedWorld)
+		SHADER_PARAMETER(FVector4f, LightFunctionParameters)
+		SHADER_PARAMETER(FVector3f, LightFunctionParameters2)
+		SHADER_PARAMETER(FVector3f, LightTranslatedWorldPosition)
+		SHADER_PARAMETER(FVector2f, LightFunctionTexelSize)
+	END_SHADER_PARAMETER_STRUCT()
 
 	FVolumetricFogLightFunctionPS() {}
 	FVolumetricFogLightFunctionPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
 		: FMaterialShader(Initializer)
 	{
-		LightFunctionParameters.Bind(Initializer.ParameterMap);
-		LightFunctionWorldToLight.Bind(Initializer.ParameterMap,TEXT("LightFunctionWorldToLight"));
-		LightFunctionParameters2.Bind(Initializer.ParameterMap,TEXT("LightFunctionParameters2"));
-		LightFunctionTexelSize.Bind(Initializer.ParameterMap,TEXT("LightFunctionTexelSize"));
-		ShadowToWorld.Bind(Initializer.ParameterMap,TEXT("ShadowToWorld"));
-		LightWorldPositionParam.Bind(Initializer.ParameterMap, TEXT("LightWorldPosition"));
+		Bindings.BindForLegacyShaderParameters(
+			this,
+			Initializer.PermutationId,
+			Initializer.ParameterMap,
+			*FParameters::FTypeInfo::GetStructMetadata(),
+			// Don't require full bindings, we use FMaterialShader::SetParameters
+			false);
 	}
 
-	void SetParameters(
-		FRHICommandList& RHICmdList, 
+	static bool ShouldCompilePermutation(const FMaterialShaderPermutationParameters& Parameters)
+	{
+		return Parameters.MaterialParameters.MaterialDomain == MD_LightFunction;
+	}
+
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const FSceneView& View, const FMaterialRenderProxy* MaterialProxy)
+	{
+		const FMaterial& Material = MaterialProxy->GetMaterialWithFallback(View.GetFeatureLevel(), MaterialProxy);
+		FMaterialShader::SetViewParameters(BatchedParameters, View, View.ViewUniformBuffer);
+		FMaterialShader::SetParameters(BatchedParameters, MaterialProxy, Material, View);
+	}
+
+	FParameters GetParameters(
 		const FSceneView& View, 
 		const FLightSceneInfo* LightSceneInfo, 
-		const FMaterialRenderProxy* MaterialProxy,
-		FVector2D LightFunctionTexelSizeValue,
-		const FMatrix& ShadowToWorldValue)
+		const FVector2D& LightFunctionTexelSizeValue,
+		const FMatrix44f& ShadowToTranslatedWorldValue)
 	{
-		FRHIPixelShader* ShaderRHI = RHICmdList.GetBoundPixelShader();
+		FParameters PS;
 
-		const FMaterial& Material = MaterialProxy->GetMaterialWithFallback(View.GetFeatureLevel(), MaterialProxy);
-		FMaterialShader::SetViewParameters(RHICmdList, ShaderRHI, View, View.ViewUniformBuffer);
-		FMaterialShader::SetParameters(RHICmdList, ShaderRHI, MaterialProxy, Material, View);
-
-		LightFunctionParameters.Set(RHICmdList, ShaderRHI, LightSceneInfo, 1.0f);
-
-		SetShaderValue(RHICmdList, ShaderRHI, LightFunctionParameters2, FVector(
-			LightSceneInfo->Proxy->GetLightFunctionFadeDistance(), 
+		PS.LightFunctionParameters = FLightFunctionSharedParameters::GetLightFunctionSharedParameters(LightSceneInfo, 1.0f);
+		PS.LightFunctionParameters2 = FVector3f(
+			LightSceneInfo->Proxy->GetLightFunctionFadeDistance(),
 			LightSceneInfo->Proxy->GetLightFunctionDisabledBrightness(),
-			0.0f));
+			0.0f);
 
-		if (LightFunctionWorldToLight.IsBound())
 		{
 			const FVector Scale = LightSceneInfo->Proxy->GetLightFunctionScale();
 			// Switch x and z so that z of the user specified scale affects the distance along the light direction
-			const FVector InverseScale = FVector( 1.f / Scale.Z, 1.f / Scale.Y, 1.f / Scale.X );
-			const FMatrix WorldToLight = LightSceneInfo->Proxy->GetWorldToLight() * FScaleMatrix(FVector(InverseScale));	
+			const FVector InverseScale = FVector(1.f / Scale.Z, 1.f / Scale.Y, 1.f / Scale.X);
+			const FMatrix WorldToLight = LightSceneInfo->Proxy->GetWorldToLight() * FScaleMatrix(FVector(InverseScale));
+			const FMatrix TranslatedWorldToWorld = FTranslationMatrix(-View.ViewMatrices.GetPreViewTranslation());
 
-			SetShaderValue(RHICmdList, ShaderRHI, LightFunctionWorldToLight, WorldToLight);
+			PS.LightFunctionTranslatedWorldToLight = FMatrix44f(TranslatedWorldToWorld * WorldToLight);
 		}
 
-		SetShaderValue(RHICmdList, ShaderRHI, LightFunctionTexelSize, LightFunctionTexelSizeValue);
-		
-		SetShaderValue(RHICmdList, ShaderRHI, ShadowToWorld, ShadowToWorldValue);
-		SetShaderValue(RHICmdList, ShaderRHI, LightWorldPositionParam, FVector(LightSceneInfo->Proxy->GetPosition()));
-	}
+		PS.LightFunctionTexelSize = FVector2f(LightFunctionTexelSizeValue);
+		PS.ShadowToTranslatedWorld = ShadowToTranslatedWorldValue;
+		PS.LightTranslatedWorldPosition = FVector4f(LightSceneInfo->Proxy->GetPosition() + View.ViewMatrices.GetPreViewTranslation());
 
-private:
-	LAYOUT_FIELD(FLightFunctionSharedParameters, LightFunctionParameters);
-	LAYOUT_FIELD(FShaderParameter, LightFunctionParameters2);
-	LAYOUT_FIELD(FShaderParameter, LightFunctionWorldToLight);
-	LAYOUT_FIELD(FShaderParameter, LightFunctionTexelSize);
-	LAYOUT_FIELD(FShaderParameter, ShadowToWorld);
-	LAYOUT_FIELD(FShaderParameter, LightWorldPositionParam);
+		return PS;
+	}
 };
 
-IMPLEMENT_MATERIAL_SHADER_TYPE(,FVolumetricFogLightFunctionPS,TEXT("/Engine/Private/VolumetricFogLightFunction.usf"),TEXT("Main"),SF_Pixel);
+IMPLEMENT_MATERIAL_SHADER_TYPE(, FVolumetricFogLightFunctionPS, TEXT("/Engine/Private/VolumetricFogLightFunction.usf"), TEXT("Main"), SF_Pixel);
 
 BEGIN_SHADER_PARAMETER_STRUCT(FVolumetricFogLightFunctionParameters, )
 	SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSceneTextureUniformParameters, SceneTextures)
 	RENDER_TARGET_BINDING_SLOTS()
 END_SHADER_PARAMETER_STRUCT()
 
-
-
-void FDeferredShadingSceneRenderer::RenderLightFunctionForVolumetricFog(
+void FSceneRenderer::RenderLightFunctionForVolumetricFog(
 	FRDGBuilder& GraphBuilder,
 	FViewInfo& View,
-	TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTextures,
+	const FSceneTextures& SceneTextures,
 	FIntVector VolumetricFogGridSize,
 	float VolumetricFogMaxDistance,
-	FMatrix& OutDirectionalLightFunctionWorldToShadow,
+	FMatrix44f& OutDirectionalLightFunctionTranslatedWorldToShadow,
 	FRDGTexture*& OutDirectionalLightFunctionTexture,
-	bool& bOutUseDirectionalLightShadowing)
+	bool& bOutUseDirectionalLightShadowing,
+	FLightSceneInfo*& OutDirectionalLightSceneInfo)
 {
-	TMap<FLightSceneInfo*, FVolumetricFogLocalLightFunctionInfo>& LocalLightFunctionData = View.VolumetricFogResources.LocalLightFunctionData;
-	LocalLightFunctionData.Reset();
-	TArray<FLightSceneInfo*> LocalLightsToEvaluate;
-
 	// The only directional light we can accept in the volumetric fog because we use the forward lighting data in the Scattering compute shader.
-	const FLightSceneProxy* SelectedForwardDirectionalLightProxy = View.ForwardLightingResources ? View.ForwardLightingResources->SelectedForwardDirectionalLightProxy : NULL;
+	const FLightSceneProxy* SelectedForwardDirectionalLightProxy = View.ForwardLightingResources.SelectedForwardDirectionalLightProxy;
 	// Default directional light properties
-	OutDirectionalLightFunctionWorldToShadow = FMatrix::Identity;
+	OutDirectionalLightFunctionTranslatedWorldToShadow = FMatrix44f::Identity;
 	bOutUseDirectionalLightShadowing = false;
-	FLightSceneInfo* DirectionalLightSceneInfo = NULL;
+	OutDirectionalLightSceneInfo = NULL;
 
 	// Gather lights that need to evaluate light functions
-	for (TSparseArray<FLightSceneInfoCompact>::TConstIterator LightIt(Scene->Lights); LightIt; ++LightIt)
+	for (auto LightIt = Scene->Lights.CreateConstIterator(); LightIt; ++LightIt)
 	{
 		const FLightSceneInfoCompact& LightSceneInfoCompact = *LightIt;
 		FLightSceneInfo* LightSceneInfo = LightSceneInfoCompact.LightSceneInfo;
 
-		if (ViewFamily.EngineShowFlags.LightFunctions
-			&& LightSceneInfo
+		if (   LightSceneInfo
 			&& LightSceneInfo->Proxy
 			// Band-aid fix for extremely rare case that light scene proxy contains NaNs.
 			&& !LightSceneInfo->Proxy->GetDirection().ContainsNaN()
 			&& LightSceneInfo->ShouldRenderLightViewIndependent()
 			&& LightSceneInfo->ShouldRenderLight(View))
 		{
-			if (DirectionalLightSceneInfo == NULL && LightSceneInfo->Proxy == SelectedForwardDirectionalLightProxy &&
+			if (OutDirectionalLightSceneInfo == NULL && LightSceneInfo->Proxy == SelectedForwardDirectionalLightProxy &&
 				LightSceneInfo->Proxy->GetLightType() == LightType_Directional)
 			{
 				// We only take the first directional light into account
 				bOutUseDirectionalLightShadowing = LightSceneInfo->Proxy->CastsVolumetricShadow();
 
-				if (CheckForLightFunction(LightSceneInfo))
+				if (CheckForLightFunction(LightSceneInfo) && ViewFamily.EngineShowFlags.LightFunctions)
 				{
-					DirectionalLightSceneInfo = LightSceneInfo;
-				}
-			}
-			else if (LocalLightLighFunctionsEnabled() && CheckForLightFunction(LightSceneInfo))
-			{
-				const FMaterialRenderProxy* MaterialProxy = LightSceneInfo->Proxy->GetLightFunctionMaterial();
-				if (!MaterialProxy || !MaterialProxy->GetIncompleteMaterialWithFallback(Scene->GetFeatureLevel()).IsLightFunction())
-				{
-					continue;
-				}
-
-				if (LightSceneInfo->Proxy->GetLightType() == LightType_Spot 
-					|| LightSceneInfo->Proxy->GetLightType() == LightType_Point)
-				{
-					LocalLightsToEvaluate.Add(LightSceneInfo);
+					OutDirectionalLightSceneInfo = LightSceneInfo;
+					break;	// we only deal with the directional light function so we directly stop now
 				}
 			}
 		}
 	}
 
-
-
-	// Now bake the light function into a 2d transient texture for the special single directional light we have selected
-	if (DirectionalLightSceneInfo)
+	// Now bake the directional light function into a 2d transient texture for the special single directional light we have selected
+	if (OutDirectionalLightSceneInfo)
 	{
 		RDG_EVENT_SCOPE(GraphBuilder, "DirectionalLightFunction");
 
@@ -207,7 +167,7 @@ void FDeferredShadingSceneRenderer::RenderLightFunctionForVolumetricFog(
 			const FVector ViewUp = View.ViewMatrices.GetOverriddenTranslatedViewMatrix().GetColumn(1);
 			const FVector ViewRight = View.ViewMatrices.GetOverriddenTranslatedViewMatrix().GetColumn(0);
 
-			const FVector LightDirection = DirectionalLightSceneInfo->Proxy->GetDirection().GetSafeNormal();
+			const FVector LightDirection = OutDirectionalLightSceneInfo->Proxy->GetDirection().GetSafeNormal();
 			FVector AxisWeights;
 			AxisWeights.X = FMath::Abs(LightDirection | ViewRight) * VolumetricFogGridSize.X;
 			AxisWeights.Y = FMath::Abs(LightDirection | ViewUp) * VolumetricFogGridSize.Y;
@@ -243,15 +203,14 @@ void FDeferredShadingSceneRenderer::RenderLightFunctionForVolumetricFog(
 			FWholeSceneProjectedShadowInitializer ShadowInitializer;
 
 			check(VolumetricFogMaxDistance > 0);
-			FSphere Bounds = DirectionalLightSceneInfo->Proxy->GetShadowSplitBoundsDepthRange(View, View.ViewMatrices.GetViewOrigin(), 0, VolumetricFogMaxDistance, NULL);
+			FSphere Bounds = OutDirectionalLightSceneInfo->Proxy->GetShadowSplitBoundsDepthRange(View, View.ViewMatrices.GetViewOrigin(), 0, VolumetricFogMaxDistance, NULL);
 			check(Bounds.W > 0);
 
 			const float ShadowExtent = Bounds.W / FMath::Sqrt(3.0f);
 			const FBoxSphereBounds SubjectBounds(Bounds.Center, FVector(ShadowExtent, ShadowExtent, ShadowExtent), Bounds.W);
 			ShadowInitializer.PreShadowTranslation = -Bounds.Center;
 			ShadowInitializer.WorldToLight = FInverseRotationMatrix(LightDirection.Rotation());
-			ShadowInitializer.Scales = FVector(1.0f, 1.0f / Bounds.W, 1.0f / Bounds.W);
-			ShadowInitializer.FaceDirection = FVector(1, 0, 0);
+			ShadowInitializer.Scales = FVector2D(1.0f / Bounds.W, 1.0f / Bounds.W);
 			ShadowInitializer.SubjectBounds = FBoxSphereBounds(FVector::ZeroVector, SubjectBounds.BoxExtent, SubjectBounds.SphereRadius);
 			ShadowInitializer.WAxis = FVector4(0, 0, 0, 1);
 			ShadowInitializer.MinLightW = -HALF_WORLD_MAX;
@@ -262,16 +221,17 @@ void FDeferredShadingSceneRenderer::RenderLightFunctionForVolumetricFog(
 			ShadowInitializer.CascadeSettings.bFarShadowCascade = false;
 
 			ProjectedShadowInfo.SetupWholeSceneProjection(
-				DirectionalLightSceneInfo,
+				OutDirectionalLightSceneInfo,
 				&View,
 				ShadowInitializer,
 				LightFunctionResolution.X,
 				LightFunctionResolution.Y,
-				0,
-				false
+				LightFunctionResolution.X,
+				LightFunctionResolution.Y,
+				0
 			);
 
-			OutDirectionalLightFunctionWorldToShadow = FTranslationMatrix(ProjectedShadowInfo.PreShadowTranslation) * ProjectedShadowInfo.SubjectAndReceiverMatrix;
+			OutDirectionalLightFunctionTranslatedWorldToShadow = ProjectedShadowInfo.TranslatedWorldToClipInnerMatrix;
 		}
 
 		// Now render the texture
@@ -279,22 +239,22 @@ void FDeferredShadingSceneRenderer::RenderLightFunctionForVolumetricFog(
 			FRDGTextureDesc LightFunctionTextureDesc = FRDGTextureDesc::Create2D(LightFunctionResolution, PF_G8, FClearValueBinding::None, TexCreate_ShaderResource | TexCreate_RenderTargetable);
 			LightFunctionTextureDesc.Flags |= GFastVRamConfig.VolumetricFog;
 
-			FRDGTexture* LightFunctionTexture = GraphBuilder.CreateTexture(LightFunctionTextureDesc, TEXT("VolumetricFogDirectionalLight_LightFunctionTexture"));
+			FRDGTexture* LightFunctionTexture = GraphBuilder.CreateTexture(LightFunctionTextureDesc, TEXT("VolumetricFog.LightFunction"));
 			OutDirectionalLightFunctionTexture = LightFunctionTexture;
 
-			const FMaterialRenderProxy* MaterialProxyForRendering = DirectionalLightSceneInfo->Proxy->GetLightFunctionMaterial();
+			const FMaterialRenderProxy* MaterialProxyForRendering = OutDirectionalLightSceneInfo->Proxy->GetLightFunctionMaterial();
 			const FMaterial& Material = MaterialProxyForRendering->GetMaterialWithFallback(Scene->GetFeatureLevel(), MaterialProxyForRendering);
 
 			FVolumetricFogLightFunctionParameters* PassParameters = GraphBuilder.AllocParameters<FVolumetricFogLightFunctionParameters>();
 			PassParameters->RenderTargets[0] = FRenderTargetBinding(LightFunctionTexture, ERenderTargetLoadAction::ENoAction);
-			PassParameters->SceneTextures = SceneTextures;
+			PassParameters->SceneTextures = SceneTextures.UniformBuffer;
 
-			FMatrix LightFunctionWorldToShadowMatrix = OutDirectionalLightFunctionWorldToShadow;
+			FMatrix44f LightFunctionTranslatedWorldToShadowMatrix = OutDirectionalLightFunctionTranslatedWorldToShadow;
 			GraphBuilder.AddPass(
 				RDG_EVENT_NAME("LightFunction %ux%u Material=%s", LightFunctionResolution.X, LightFunctionResolution.Y, *(Material.GetFriendlyName())),
 				PassParameters,
 				ERDGPassFlags::Raster,
-				[PassParameters, &View, MaterialProxyForRendering, &Material, LightFunctionResolution, DirectionalLightSceneInfo, LightFunctionWorldToShadowMatrix](FRHICommandListImmediate& RHICmdList)
+				[PassParameters, &View, MaterialProxyForRendering, &Material, LightFunctionResolution, OutDirectionalLightSceneInfo, LightFunctionTranslatedWorldToShadowMatrix](FRHICommandList& RHICmdList)
 				{
 					RHICmdList.SetViewport(0.f, 0.f, 0.f, LightFunctionResolution.X, LightFunctionResolution.Y, 1.f);
 
@@ -308,19 +268,21 @@ void FDeferredShadingSceneRenderer::RenderLightFunctionForVolumetricFog(
 					const FMaterialShaderMap* MaterialShaderMap = Material.GetRenderingThreadShaderMap();
 					TShaderMapRef<FPostProcessVS> VertexShader(View.ShaderMap);
 
-					check(DirectionalLightSceneInfo->Proxy->GetLightType() == LightType_Directional)
+					check(OutDirectionalLightSceneInfo->Proxy->GetLightType() == LightType_Directional)
 					FVolumetricFogLightFunctionPS::FPermutationDomain PermutationVector;
-					PermutationVector.Set<FVolumetricFogLightFunctionPS::FLightType>(2);
+					PermutationVector.Set<FVolumetricFogLightFunctionPS::FLightType>(3);
 					TShaderRef<FVolumetricFogLightFunctionPS> PixelShader = MaterialShaderMap->GetShader<FVolumetricFogLightFunctionPS>(PermutationVector);
 
 					GraphicsPSOInit.BoundShaderState.VertexDeclarationRHI = GFilterVertexDeclaration.VertexDeclarationRHI;
 					GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShader.GetVertexShader();
 					GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
 
-					SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit);
+					SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
 
-					VertexShader->SetParameters(RHICmdList, View.ViewUniformBuffer);
-					PixelShader->SetParameters(RHICmdList, View, DirectionalLightSceneInfo, MaterialProxyForRendering, FVector2D(1.0f / LightFunctionResolution.X, 1.0f / LightFunctionResolution.Y), LightFunctionWorldToShadowMatrix.Inverse());
+					FVolumetricFogLightFunctionPS::FParameters PS = PixelShader->GetParameters(View, OutDirectionalLightSceneInfo, FVector2D(1.0f / LightFunctionResolution.X, 1.0f / LightFunctionResolution.Y), LightFunctionTranslatedWorldToShadowMatrix.Inverse());
+
+					ClearUnusedGraphResources(PixelShader, &PS);
+					SetShaderParametersMixedPS(RHICmdList, PixelShader, PS, View, MaterialProxyForRendering);
 
 					DrawRectangle(
 						RHICmdList,
@@ -335,182 +297,4 @@ void FDeferredShadingSceneRenderer::RenderLightFunctionForVolumetricFog(
 			);
 		}
 	}
-
-	if (!LocalLightsToEvaluate.Num())
-	{
-		return; // Do not run atlas operation if no light needs it
-	}
-
-	// We are going to render local light LightFunction so we allocate the atlas.
-	View.VolumetricFogResources.TransientLightFunctionTextureAtlas = new (GraphBuilder.Alloc(sizeof(FTransientLightFunctionTextureAtlas), alignof(FTransientLightFunctionTextureAtlas))) FTransientLightFunctionTextureAtlas(GraphBuilder);
-
-	// Conpute all the data required by the lights
-	for (FLightSceneInfo* LightSceneInfo : LocalLightsToEvaluate)
-	{
-		const bool bIsPointLight = LightSceneInfo->Proxy->GetLightType() == LightType_Point;
-		const FVector LightDirection = LightSceneInfo->Proxy->GetDirection().GetSafeNormal();
-		const FIntPoint LightFunctionResolution = GetVolumetricFogLightFunctionResolution();
-		FMatrix WorldToShadowMatrix = FMatrix::Identity;
-
-		// Spotlights needs to utilize their shadow projection when rendering the light function 
-		if (!bIsPointLight)
-		{
-			TArray<FWholeSceneProjectedShadowInitializer, TInlineAllocator<6>> Initializers;
-			LightSceneInfo->Proxy->GetWholeSceneProjectedShadowInitializer(*View.Family, Initializers);
-
-			FWholeSceneProjectedShadowInitializer ShadowInitializer = Initializers[0];
-			FProjectedShadowInfo ProjectedShadowInfo;
-			ProjectedShadowInfo.SetupWholeSceneProjection(
-
-				LightSceneInfo,
-				&View,
-				ShadowInitializer,
-				LightFunctionResolution.X,
-				LightFunctionResolution.Y,
-				0,
-				false
-			);
-
-			FVector4 ShadowmapMinMaxValue;
-			WorldToShadowMatrix = ProjectedShadowInfo.GetWorldToShadowMatrix(ShadowmapMinMaxValue, &LightFunctionResolution);
-		}
-
-		FVolumetricFogLocalLightFunctionInfo& LightFunctionData = LocalLightFunctionData.Add(LightSceneInfo);
-		LightFunctionData.AtlasTile = View.VolumetricFogResources.TransientLightFunctionTextureAtlas->AllocateAtlasTile();
-
-		// Pass the World To Light when light type is Point because we need it instead of the World To Shadow. 
-		LightFunctionData.LightFunctionMatrix = (bIsPointLight) ? LightSceneInfo->Proxy->GetWorldToLight() : WorldToShadowMatrix;
-	}
-
-	// And now process all the local lights, allocated atlas tile and generate the tile as needed
-	FVolumetricFogLightFunctionParameters* PassParameters = GraphBuilder.AllocParameters<FVolumetricFogLightFunctionParameters>();
-	PassParameters->RenderTargets[0] = FRenderTargetBinding(View.VolumetricFogResources.TransientLightFunctionTextureAtlas->GetTransientLightFunctionAtlasTexture(), ERenderTargetLoadAction::ENoAction);
-	PassParameters->SceneTextures = SceneTextures;
-	GraphBuilder.AddPass(
-		RDG_EVENT_NAME("Local Lights LightFunctions"),
-		PassParameters,
-		ERDGPassFlags::Raster,
-		[PassParameters, &View, &Scene = Scene](FRHICommandListImmediate& RHICmdList)
-		{
-			uint32 AtlasTextureWidth = View.VolumetricFogResources.TransientLightFunctionTextureAtlas->GetAtlasTextureWidth();
-			uint32 LightFunctionResolution = GetVolumetricFogLightFunctionResolution();
-			for (auto& Itr : View.VolumetricFogResources.LocalLightFunctionData)
-			{
-				FLightSceneInfo* LightSceneInfo = Itr.Key;
-				FVolumetricFogLocalLightFunctionInfo& LightFunctionInfo = Itr.Value;
-
-				if (!LightFunctionInfo.AtlasTile.bIsDefault)
-				{
-					const FMaterialRenderProxy* MaterialProxyForRendering = LightSceneInfo->Proxy->GetLightFunctionMaterial();
-					const FMaterial& Material = MaterialProxyForRendering->GetMaterialWithFallback(Scene->GetFeatureLevel(), MaterialProxyForRendering);
-
-					RHICmdList.SetViewport(0.f, 0.f, 0.f, AtlasTextureWidth, AtlasTextureWidth, 1.f);
-
-					FGraphicsPipelineStateInitializer GraphicsPSOInit;
-					RHICmdList.ApplyCachedRenderTargets(GraphicsPSOInit);
-					GraphicsPSOInit.RasterizerState = TStaticRasterizerState<FM_Solid, CM_None>::GetRHI();
-					GraphicsPSOInit.BlendState = TStaticBlendState<>::GetRHI();
-					GraphicsPSOInit.DepthStencilState = TStaticDepthStencilState<false, CF_Always>::GetRHI();
-					GraphicsPSOInit.PrimitiveType = PT_TriangleList;
-
-					const FMaterialShaderMap* MaterialShaderMap = Material.GetRenderingThreadShaderMap();
-					TShaderMapRef<FPostProcessVS> VertexShader(View.ShaderMap);
-
-					FVolumetricFogLightFunctionPS::FPermutationDomain PermutationVector;
-					switch (LightSceneInfo->Proxy->GetLightType())
-					{
-					case LightType_Point:
-					case LightType_Rect:
-						PermutationVector.Set<FVolumetricFogLightFunctionPS::FLightType>(0);
-						break;
-					case LightType_Spot:
-						PermutationVector.Set<FVolumetricFogLightFunctionPS::FLightType>(1);
-						break;
-					default:
-						check(false)
-					}
-					TShaderRef<FVolumetricFogLightFunctionPS> PixelShader = MaterialShaderMap->GetShader<FVolumetricFogLightFunctionPS>(PermutationVector);
-
-					GraphicsPSOInit.BoundShaderState.VertexDeclarationRHI = GFilterVertexDeclaration.VertexDeclarationRHI;
-					GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShader.GetVertexShader();
-					GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
-
-					SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit);
-
-					VertexShader->SetParameters(RHICmdList, View.ViewUniformBuffer);
-					PixelShader->SetParameters(RHICmdList, View, LightSceneInfo, MaterialProxyForRendering, 
-						FVector2D(1.0f / LightFunctionResolution, 1.0f / LightFunctionResolution), LightFunctionInfo.LightFunctionMatrix.Inverse());
-
-					FIntPoint RectSize = LightFunctionInfo.AtlasTile.RectBound.Size();
-					DrawRectangle(
-						RHICmdList,
-						LightFunctionInfo.AtlasTile.RectBound.Min.X, LightFunctionInfo.AtlasTile.RectBound.Min.Y,
-						RectSize.X, RectSize.Y,
-						LightFunctionInfo.AtlasTile.RectBound.Min.X, LightFunctionInfo.AtlasTile.RectBound.Min.Y,
-						RectSize.X, RectSize.Y,
-						AtlasTextureWidth,
-						LightFunctionResolution,
-						VertexShader);
-				}
-			}
-		}
-	);
-}
-
-
-
-FTransientLightFunctionTextureAtlas::FTransientLightFunctionTextureAtlas(FRDGBuilder& GraphBuilder)
-	: AtlasItemWidth(0)
-	, AtlasTextureWidth(0)
-	, AllocatedAtlasTiles(0)
-	, HalfTexelSize(0.0f)
-{
-	AtlasItemWidth = FMath::Clamp(FMath::CeilToInt(FMath::Sqrt(float(GVolumetricFogLightFunctionCount))), 2, 16); // Clamp to reasonable values
-
-	AtlasTextureWidth = AtlasItemWidth * GetVolumetricFogLightFunctionResolution();
-	HalfTexelSize = 0.5f / float(AtlasTextureWidth);
-
-	FRDGTextureDesc LightFunctionTextureDesc = FRDGTextureDesc::Create2D(FIntPoint(AtlasTextureWidth, AtlasTextureWidth), PF_G8, FClearValueBinding::None, TexCreate_ShaderResource | TexCreate_RenderTargetable);
-	TransientLightFunctionAtlasTexture = GraphBuilder.CreateTexture(LightFunctionTextureDesc, TEXT("TransientLightFunctionAtlasTexture"));
-	DefaultLightFunctionAtlasItemTexture = GSystemTextures.GetWhiteDummy(GraphBuilder);
-}
-
-FTransientLightFunctionTextureAtlas::~FTransientLightFunctionTextureAtlas()
-{
-	//
-}
-
-FTransientLightFunctionTextureAtlasTile FTransientLightFunctionTextureAtlas::AllocateAtlasTile()
-{
-	FTransientLightFunctionTextureAtlasTile AtlasTile;
-
-	if (AllocatedAtlasTiles < AtlasItemWidth * AtlasItemWidth)
-	{
-		const uint32 LightFunctionResolution = GetVolumetricFogLightFunctionResolution();
-		const FIntPoint TileCoord(AllocatedAtlasTiles % AtlasItemWidth, AllocatedAtlasTiles / AtlasItemWidth);
-		const FIntPoint PixelCoord = TileCoord * LightFunctionResolution;
-
-		AtlasTile.bIsDefault = false;
-		AtlasTile.Texture = TransientLightFunctionAtlasTexture;
-
-		AtlasTile.RectBound = FIntRect(PixelCoord, PixelCoord + FIntPoint(LightFunctionResolution, LightFunctionResolution));
-
-		const float InvAtlasTextureWidthFloat = 1.0f / float(AtlasTextureWidth);
-		const float MinX = float(AtlasTile.RectBound.Min.X) * InvAtlasTextureWidthFloat + HalfTexelSize;
-		const float MinY = float(AtlasTile.RectBound.Min.Y) * InvAtlasTextureWidthFloat + HalfTexelSize;
-		const float MaxX = float(AtlasTile.RectBound.Max.X) * InvAtlasTextureWidthFloat - HalfTexelSize;
-		const float MaxY = float(AtlasTile.RectBound.Max.Y) * InvAtlasTextureWidthFloat - HalfTexelSize;
-		AtlasTile.MinMaxUvBound = FVector4(MinX, MinY, MaxX, MaxY);
-
-		AllocatedAtlasTiles++;
-	}
-	else
-	{
-		AtlasTile.bIsDefault = true;
-		AtlasTile.Texture = DefaultLightFunctionAtlasItemTexture;
-		AtlasTile.RectBound = FIntRect(0, 0, 1, 1);
-		AtlasTile.MinMaxUvBound = FVector4(0.0f, 0.0f, 1.0f, 1.0f);
-	}
-
-	return AtlasTile;
 }

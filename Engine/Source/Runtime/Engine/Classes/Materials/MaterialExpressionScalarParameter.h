@@ -15,7 +15,7 @@ class UMaterialExpressionScalarParameter : public UMaterialExpressionParameter
 {
 	GENERATED_UCLASS_BODY()
 
-	UPROPERTY(EditAnywhere, Category=MaterialExpressionScalarParameter)
+	UPROPERTY(EditAnywhere, Category=MaterialExpressionScalarParameter, Meta = (ShowAsInputPin = "Primary"))
 	float DefaultValue;
 
 	UPROPERTY(EditAnywhere, Category=CustomPrimitiveData)
@@ -23,8 +23,6 @@ class UMaterialExpressionScalarParameter : public UMaterialExpressionParameter
 
 	UPROPERTY(EditAnywhere, Category=CustomPrimitiveData, meta=(ClampMin="0"))
 	uint8 PrimitiveDataIndex = 0;
-
-#if WITH_EDITORONLY_DATA
 	/** 
 	 * Sets the lower bound for the slider on this parameter in the material instance editor. 
 	 */
@@ -37,30 +35,52 @@ class UMaterialExpressionScalarParameter : public UMaterialExpressionParameter
 	 */
 	UPROPERTY(EditAnywhere, Category=MaterialExpressionScalarParameter)
 	float SliderMax;
-#endif
 
 	//~ Begin UMaterialExpression Interface
 #if WITH_EDITOR
 	virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
 	virtual void GetCaption(TArray<FString>& OutCaptions) const override;
+	virtual bool GetParameterValue(FMaterialParameterMetadata& OutMeta) const override
+	{
+		OutMeta.Value = DefaultValue;
+		
+		if (bUseCustomPrimitiveData)
+		{
+			OutMeta.PrimitiveDataIndex = PrimitiveDataIndex;
+		}
+
+		OutMeta.ScalarMin = SliderMin;
+		OutMeta.ScalarMax = SliderMax;
+		return Super::GetParameterValue(OutMeta);
+	}
+	virtual bool SetParameterValue(const FName& Name, const FMaterialParameterMetadata& Meta, EMaterialExpressionSetParameterValueFlags Flags) override
+	{
+		if (Meta.Value.Type == EMaterialParameterType::Scalar)
+		{
+			if (SetParameterValue(Name, Meta.Value.AsScalar(), Flags))
+			{
+				if (EnumHasAnyFlags(Flags, EMaterialExpressionSetParameterValueFlags::AssignGroupAndSortPriority))
+				{
+					Group = Meta.Group;
+					SortPriority = Meta.SortPriority;
+				}
+				return true;
+			}
+		}
+		return false;
+	}
 #endif
 	//~ End UMaterialExpression Interface
 
-	/** Return whether this is the named parameter, and fill in its value */
-	bool IsNamedParameter(const FHashedMaterialParameterInfo& ParameterInfo, float& OutValue) const;
-
 #if WITH_EDITOR
-	bool SetParameterValue(FName InParameterName, float InValue);
+	bool SetParameterValue(FName InParameterName, float InValue, EMaterialExpressionSetParameterValueFlags Flags = EMaterialExpressionSetParameterValueFlags::None);
 
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 	virtual void ValidateParameterName(const bool bAllowDuplicateName) override;
 	virtual bool HasClassAndNameCollision(UMaterialExpression* OtherExpression) const override;
-	virtual void SetValueToMatchingExpression(UMaterialExpression* OtherExpression) override;
 #endif
 
 	virtual bool IsUsedAsAtlasPosition() const { return false; }
-
-	virtual void GetAllParameterInfo(TArray<FMaterialParameterInfo> &OutParameterInfo, TArray<FGuid> &OutParameterIds, const FMaterialParameterInfo& InBaseParameterInfo) const override;
 };
 
 

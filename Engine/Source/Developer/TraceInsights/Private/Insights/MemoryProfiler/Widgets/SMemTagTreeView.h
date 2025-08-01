@@ -25,7 +25,7 @@ class FMenuBuilder;
 class FMemoryGraphTrack;
 class SMemoryProfilerWindow;
 
-namespace Trace
+namespace TraceServices
 {
 	class IAnalysisSession;
 }
@@ -62,6 +62,15 @@ public:
 	SLATE_END_ARGS()
 
 	/**
+	 * Converts profiler window weak pointer to a shared pointer and returns it.
+	 * Make sure the returned pointer is valid before trying to dereference it.
+	 */
+	TSharedPtr<SMemoryProfilerWindow> GetProfilerWindow() const
+	{
+		return ProfilerWindowWeakPtr.Pin();
+	}
+
+	/**
 	 * Construct this widget
 	 * @param InArgs - The declaration data for this widget
 	 */
@@ -84,6 +93,12 @@ public:
 	void SelectMemTagNode(Insights::FMemoryTagId MemTagId);
 
 private:
+	TSharedRef<SWidget> MakeTrackersMenu();
+	void CreateTrackersMenuSection(FMenuBuilder& MenuBuilder);
+	TSharedRef<SWidget> ConstructTagsFilteringWidgetArea();
+	TSharedRef<SWidget> ConstructTagsGroupingWidgetArea();
+	TSharedRef<SWidget> ConstructTracksMiniToolbar();
+
 	void UpdateTree();
 
 	void UpdateStatsInternal();
@@ -159,11 +174,11 @@ private:
 	void FilterOutZeroCountMemTags_OnCheckStateChanged(ECheckBoxState NewRadioState);
 	ECheckBoxState FilterOutZeroCountMemTags_IsChecked() const;
 
-	void FilterByTracker_OnCheckStateChanged(ECheckBoxState NewRadioState);
-	ECheckBoxState FilterByTracker_IsChecked() const;
-
 	bool SearchBox_IsEnabled() const;
 	void SearchBox_OnTextChanged(const FText& InFilterText);
+
+	void ToggleTracker(Insights::FMemoryTrackerId InTrackerId);
+	bool IsTrackerChecked(Insights::FMemoryTrackerId InTrackerId) const;
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Grouping
@@ -243,22 +258,10 @@ private:
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////
 
-	const TArray<TSharedPtr<Insights::FMemoryTracker>>* GetAvailableTrackers();
-	void Tracker_OnSelectionChanged(TSharedPtr<Insights::FMemoryTracker> InTracker, ESelectInfo::Type SelectInfo);
-	TSharedRef<SWidget> Tracker_OnGenerateWidget(TSharedPtr<Insights::FMemoryTracker> InTracker);
-	void Tracker_OnCheckStateChanged(ECheckBoxState CheckType, TSharedPtr<Insights::FMemoryTracker> InTracker);
-	ECheckBoxState Tracker_IsChecked(TSharedPtr<Insights::FMemoryTracker> InTracker) const;
-	FText Tracker_GetSelectedText() const;
-	FText Tracker_GetTooltipText() const;
-
 	FReply ShowAllTracks_OnClicked();
 	FReply HideAllTracks_OnClicked();
 
 	FReply LoadReportXML_OnClicked();
-
-	FReply AllTracksSmallHeight_OnClicked();
-	FReply AllTracksMediumHeight_OnClicked();
-	FReply AllTracksLargeHeight_OnClicked();
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -277,10 +280,6 @@ private:
 	// Remove memory graph tracks for selected LLM tag(s)
 	bool CanRemoveGraphTracksForSelectedMemTags() const;
 	void RemoveGraphTracksForSelectedMemTags();
-
-	// Remove memory graph tracks for LLM tags not used by the current tracker
-	bool CanRemoveGraphTracksForUnusedMemTags() const;
-	void RemoveGraphTracksForUnusedMemTags();
 
 	// Remove all memory graph tracks
 	bool CanRemoveAllGraphTracks() const;
@@ -310,13 +309,14 @@ private:
 	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
 
 private:
-	TSharedPtr<SMemoryProfilerWindow> ProfilerWindow;
+	/** A weak pointer to the Memory Insights window. */
+	TWeakPtr<SMemoryProfilerWindow> ProfilerWindowWeakPtr;
 
 	/** Table view model. */
 	TSharedPtr<Insights::FTable> Table;
 
-	/** A weak pointer to the profiler session used to populate this widget. */
-	TSharedPtr<const Trace::IAnalysisSession>/*Weak*/ Session;
+	/** The analysis session used to populate this widget. */
+	TSharedPtr<const TraceServices::IAnalysisSession> Session;
 
 	//////////////////////////////////////////////////
 	// Tree View, Columns
@@ -383,8 +383,8 @@ private:
 	/** Filter out the LLM tags having zero total instance count (aggregated stats). */
 	bool bFilterOutZeroCountMemTags;
 
-	/** Filter the LLM tags to show only the ones used by the current tracker. */
-	bool bFilterByTracker;
+	/** Filter the LLM tags by tracker. */
+	uint64 TrackersFilter;
 
 	//////////////////////////////////////////////////
 	// Grouping

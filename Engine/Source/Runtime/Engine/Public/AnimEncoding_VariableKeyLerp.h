@@ -197,9 +197,9 @@ FORCEINLINE_DEBUGGABLE void AEFVariableKeyLerp<FORMAT>::GetBoneAtomRotation(FTra
 	if (NumRotKeys == 1)
 	{
 		// For a rotation track of n=1 keys, the single key is packed as an FQuatFloat96NoW.
-		FQuat R0;
+		FQuat4f R0;
 		DecompressRotation<ACF_Float96NoW>( R0 , RotStream, RotStream );
-		OutAtom.SetRotation(R0);
+		OutAtom.SetRotation(FQuat(R0));
 	}
 	else
 	{
@@ -209,7 +209,7 @@ FORCEINLINE_DEBUGGABLE void AEFVariableKeyLerp<FORMAT>::GetBoneAtomRotation(FTra
 
 		int32 Index0;
 		int32 Index1;
-		float Alpha = TimeToIndex(DecompContext.Interpolation, AnimData.CompressedNumberOfFrames, FrameTable, DecompContext.RelativePos, NumRotKeys, Index0, Index1);
+		float Alpha = TimeToIndex(DecompContext.Interpolation, AnimData.CompressedNumberOfKeys, FrameTable, DecompContext.GetRelativePosition(), NumRotKeys, Index0, Index1);
 
 
 		if (Index0 != Index1)
@@ -217,25 +217,25 @@ FORCEINLINE_DEBUGGABLE void AEFVariableKeyLerp<FORMAT>::GetBoneAtomRotation(FTra
 			// unpack and lerp between the two nearest keys
 			const uint8* RESTRICT KeyData0= RotStream + RotationStreamOffset +(Index0*CompressedRotationStrides[FORMAT]*CompressedRotationNum[FORMAT]);
 			const uint8* RESTRICT KeyData1= RotStream + RotationStreamOffset +(Index1*CompressedRotationStrides[FORMAT]*CompressedRotationNum[FORMAT]);
-			FQuat R0;
-			FQuat R1;
+			FQuat4f R0;
+			FQuat4f R1;
 			DecompressRotation<FORMAT>( R0, RotStream, KeyData0 );
 			DecompressRotation<FORMAT>( R1, RotStream, KeyData1 );
 
 			// Fast linear quaternion interpolation.
-			FQuat RLerped = FQuat::FastLerp(R0, R1, Alpha);
+			FQuat4f RLerped = FQuat4f::FastLerp(R0, R1, Alpha);
 			RLerped.Normalize();
-			OutAtom.SetRotation(RLerped);
+			OutAtom.SetRotation(FQuat(RLerped));
 		}
 		else // (Index0 == Index1)
 		{
 			// unpack a single key
 			const uint8* RESTRICT KeyData= RotStream + RotationStreamOffset +(Index0*CompressedRotationStrides[FORMAT]*CompressedRotationNum[FORMAT]);
 
-			FQuat R0;
+			FQuat4f R0;
 			DecompressRotation<FORMAT>( R0, RotStream, KeyData );
 
-			OutAtom.SetRotation(R0);
+			OutAtom.SetRotation(FQuat(R0));
 		}
 	}
 
@@ -258,31 +258,31 @@ FORCEINLINE_DEBUGGABLE void AEFVariableKeyLerp<FORMAT>::GetBoneAtomTranslation(F
 	int32 NumTransKeys = TrackData[1];
 	const uint8* RESTRICT TransStream = AnimData.CompressedByteStream.GetData() + TransKeysOffset;
 
-	const uint8* RESTRICT FrameTable= TransStream +(NumTransKeys*CompressedTranslationStrides[FORMAT]*CompressedTranslationNum[FORMAT]);
+	const int32 TransStreamOffset = ((FORMAT == ACF_IntervalFixed32NoW) && NumTransKeys > 1) ? (sizeof(float) * 6) : 0; // offset past Min and Range data
+	const uint8* RESTRICT FrameTable = TransStream + TransStreamOffset + (NumTransKeys * CompressedTranslationStrides[FORMAT] * CompressedTranslationNum[FORMAT]);
 	FrameTable= Align(FrameTable, 4);
 
 	int32 Index0;
 	int32 Index1;
-	float Alpha = TimeToIndex(DecompContext.Interpolation, AnimData.CompressedNumberOfFrames, FrameTable, DecompContext.RelativePos, NumTransKeys, Index0, Index1);
-	const int32 TransStreamOffset = ((FORMAT == ACF_IntervalFixed32NoW) && NumTransKeys > 1) ? (sizeof(float)*6) : 0; // offset past Min and Range data
+	float Alpha = TimeToIndex(DecompContext.Interpolation, AnimData.CompressedNumberOfKeys, FrameTable, DecompContext.GetRelativePosition(), NumTransKeys, Index0, Index1);
 
 	if (Index0 != Index1)
 	{
-		FVector P0;
-		FVector P1;
+		FVector3f P0;
+		FVector3f P1;
 		const uint8* RESTRICT KeyData0 = TransStream + TransStreamOffset + Index0*CompressedTranslationStrides[FORMAT]*CompressedTranslationNum[FORMAT];
 		const uint8* RESTRICT KeyData1 = TransStream + TransStreamOffset + Index1*CompressedTranslationStrides[FORMAT]*CompressedTranslationNum[FORMAT];
 		DecompressTranslation<FORMAT>( P0, TransStream, KeyData0 );
 		DecompressTranslation<FORMAT>( P1, TransStream, KeyData1 );
-		OutAtom.SetTranslation( FMath::Lerp( P0, P1, Alpha ) );
+		OutAtom.SetTranslation( (FVector)FMath::Lerp( P0, P1, Alpha ) );
 	}
 	else // (Index0 == Index1)
 	{
 		// unpack a single key
-		FVector P0;
+		FVector3f P0;
 		const uint8* RESTRICT KeyData = TransStream + TransStreamOffset + Index0*CompressedTranslationStrides[FORMAT]*CompressedTranslationNum[FORMAT];
 		DecompressTranslation<FORMAT>( P0, TransStream, KeyData);
-		OutAtom.SetTranslation( P0 );
+		OutAtom.SetTranslation( (FVector)P0 );
 	}
 }
 
@@ -302,30 +302,30 @@ FORCEINLINE_DEBUGGABLE void AEFVariableKeyLerp<FORMAT>::GetBoneAtomScale(FTransf
 	const int32 NumScaleKeys = AnimData.CompressedScaleOffsets.GetOffsetData(TrackIndex, 1);
 	const uint8* RESTRICT ScaleStream = AnimData.CompressedByteStream.GetData() + ScaleKeysOffset;
 
-	const uint8* RESTRICT FrameTable= ScaleStream +(NumScaleKeys*CompressedScaleStrides[FORMAT]*CompressedScaleNum[FORMAT]);
+	const int32 ScaleStreamOffset = ((FORMAT == ACF_IntervalFixed32NoW) && NumScaleKeys > 1) ? (sizeof(float) * 6) : 0; // offset past Min and Range data
+	const uint8* RESTRICT FrameTable = ScaleStream + ScaleStreamOffset + (NumScaleKeys * CompressedScaleStrides[FORMAT] * CompressedScaleNum[FORMAT]);
 	FrameTable= Align(FrameTable, 4);
 
 	int32 Index0;
 	int32 Index1;
-	float Alpha = TimeToIndex(DecompContext.Interpolation, AnimData.CompressedNumberOfFrames, FrameTable, DecompContext.RelativePos, NumScaleKeys, Index0, Index1);
-	const int32 ScaleStreamOffset = ((FORMAT == ACF_IntervalFixed32NoW) && NumScaleKeys > 1) ? (sizeof(float)*6) : 0; // offset past Min and Range data
+	float Alpha = TimeToIndex(DecompContext.Interpolation, AnimData.CompressedNumberOfKeys, FrameTable, DecompContext.GetRelativePosition(), NumScaleKeys, Index0, Index1);
 
 	if (Index0 != Index1)
 	{
-		FVector P0;
-		FVector P1;
+		FVector3f P0;
+		FVector3f P1;
 		const uint8* RESTRICT KeyData0 = ScaleStream + ScaleStreamOffset + Index0*CompressedScaleStrides[FORMAT]*CompressedScaleNum[FORMAT];
 		const uint8* RESTRICT KeyData1 = ScaleStream + ScaleStreamOffset + Index1*CompressedScaleStrides[FORMAT]*CompressedScaleNum[FORMAT];
 		DecompressScale<FORMAT>( P0, ScaleStream, KeyData0 );
 		DecompressScale<FORMAT>( P1, ScaleStream, KeyData1 );
-		OutAtom.SetScale3D( FMath::Lerp( P0, P1, Alpha ) );
+		OutAtom.SetScale3D( (FVector)FMath::Lerp( P0, P1, Alpha ) );
 	}
 	else // (Index0 == Index1)
 	{
 		// unpack a single key
-		FVector P0;
+		FVector3f P0;
 		const uint8* RESTRICT KeyData = ScaleStream + ScaleStreamOffset + Index0*CompressedScaleStrides[FORMAT]*CompressedScaleNum[FORMAT];
 		DecompressScale<FORMAT>( P0, ScaleStream, KeyData);
-		OutAtom.SetScale3D( P0 );
+		OutAtom.SetScale3D( (FVector)P0 );
 	}
 }

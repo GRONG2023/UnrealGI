@@ -2,11 +2,15 @@
 
 #pragma once
 
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
+#include "Math/NumericLimits.h"
+#include "Math/Range.h"
+#include "Math/RangeBound.h"
+#include "Math/UnrealMathUtility.h"
+#include "Misc/ExpressionParserTypes.h"
 #include "Misc/FrameNumber.h"
 #include "Misc/FrameTime.h"
-#include "Internationalization/Text.h"
-#include "Math/Range.h"
-#include "Misc/ExpressionParserTypes.h"
 #include "Templates/ValueOrError.h"
 
 struct FExpressionError;
@@ -26,12 +30,6 @@ struct FFrameRate
 	FFrameRate(uint32 InNumerator, uint32 InDenominator)
 		: Numerator(InNumerator), Denominator(InDenominator)
 	{}
-
-	friend bool operator==(const FFrameRate& A, const FFrameRate& B);
-	friend bool operator!=(const FFrameRate& A, const FFrameRate& B);
-
-	friend FFrameRate operator*(FFrameRate A, FFrameRate B);
-	friend FFrameRate operator/(FFrameRate A, FFrameRate B);
 
 	/**
 	 * The numerator of the framerate represented as a number of frames per second (e.g. 60 for 60 fps)
@@ -149,6 +147,75 @@ struct FFrameRate
 	{
 		return FFrameRate(Denominator, Numerator);
 	}
+
+	friend inline bool operator==(const FFrameRate& A, const FFrameRate& B)
+	{
+		return A.Numerator == B.Numerator && A.Denominator == B.Denominator;
+	}
+
+	friend inline bool operator!=(const FFrameRate& A, const FFrameRate& B)
+	{
+		return A.Numerator != B.Numerator || A.Denominator != B.Denominator;
+	}
+
+	friend inline FFrameRate operator*(FFrameRate A, FFrameRate B)
+	{
+		return FFrameRate(A.Numerator * B.Numerator, A.Denominator * B.Denominator);
+	}
+
+	friend inline FFrameRate operator/(FFrameRate A, FFrameRate B)
+	{
+		return FFrameRate(A.Numerator * B.Denominator, A.Denominator * B.Numerator);
+	}
+
+	friend inline double operator/(FFrameNumber Frame, FFrameRate Rate)
+	{
+		return Rate.AsSeconds(FFrameTime(Frame));
+	}
+
+	friend inline TRange<double> operator/(const TRange<FFrameNumber>& FrameRange, FFrameRate Rate)
+	{
+		TRangeBound<FFrameNumber> LowerBound = FrameRange.GetLowerBound();
+		TRangeBound<FFrameNumber> UpperBound = FrameRange.GetUpperBound();
+
+		return TRange<double>(
+			LowerBound.IsOpen()
+				? TRangeBound<double>::Open()
+				: LowerBound.IsInclusive()
+					? TRangeBound<double>::Inclusive(Rate.AsSeconds(LowerBound.GetValue()))
+					: TRangeBound<double>::Inclusive(Rate.AsSeconds(LowerBound.GetValue()+1)),
+
+			UpperBound.IsOpen()
+				? TRangeBound<double>::Open()
+				: UpperBound.IsInclusive()
+					? TRangeBound<double>::Exclusive(Rate.AsSeconds(UpperBound.GetValue()+1))
+					: TRangeBound<double>::Exclusive(Rate.AsSeconds(UpperBound.GetValue()))
+			);
+	}
+
+	friend inline double operator/(FFrameTime FrameTime, FFrameRate Rate)
+	{
+		return Rate.AsSeconds(FrameTime);
+	}
+
+	friend inline FFrameTime operator*(double TimeInSeconds, FFrameRate Rate)
+	{
+		return Rate.AsFrameTime(TimeInSeconds);
+	}
+
+	friend inline FFrameTime operator*(float TimeInSeconds, FFrameRate Rate)
+	{
+		return Rate.AsFrameTime(TimeInSeconds);
+	}
+
+	friend inline uint32 GetTypeHash(const FFrameRate& Rate)
+	{
+		return HashCombine(GetTypeHash(Rate.Numerator), GetTypeHash(Rate.Denominator));
+	}
+	
+	friend CORE_API FArchive& operator<<(FArchive& Ar, FFrameRate& FrameRate);
+
+	CORE_API bool Serialize(FArchive& Ar);
 };
 
 inline double FFrameRate::AsInterval() const
@@ -169,15 +236,16 @@ inline double FFrameRate::AsSeconds(FFrameTime FrameTime) const
 	return (double(IntegerPart) + FloatPart) / Numerator;
 }
 
-
-
 inline FFrameTime FFrameRate::AsFrameTime(double TimeInSeconds) const
 {
 	// @todo: sequencer-timecode: proper large number integer multiplication/division before coercion to float ?
-	const double       TimeAsFrame = (TimeInSeconds * Numerator) / Denominator;
-	const FFrameNumber FrameNumber = static_cast<int32>(FMath::FloorToDouble(TimeAsFrame));
+	const double TimeAsFrame = (TimeInSeconds * Numerator) / Denominator;
+	FFrameNumber FrameNumber = static_cast<int32>(FMath::Clamp(FMath::FloorToDouble(TimeAsFrame), static_cast<double>(TNumericLimits<int32>::Min()), static_cast<double>(TNumericLimits<int32>::Max())));
 
 	float SubFrame = static_cast<float>(TimeAsFrame - FMath::FloorToDouble(TimeAsFrame));
+	const int32 TruncatedSubFrame = FMath::TruncToInt(SubFrame);
+	SubFrame -= static_cast<float>(TruncatedSubFrame);
+	FrameNumber.Value += TruncatedSubFrame;
 	if (SubFrame > 0.f)
 	{
 		SubFrame = FMath::Min(SubFrame, FFrameTime::MaxSubframe);
@@ -189,68 +257,8 @@ inline FFrameTime FFrameRate::AsFrameTime(double TimeInSeconds) const
 inline FFrameNumber FFrameRate::AsFrameNumber(double TimeInSeconds) const
 {
 	// @todo: sequencer-timecode: proper large number integer multiplication/division before coercion to float ?
-	const double       TimeAsFrame = (double(TimeInSeconds) * Numerator) / Denominator;
-	return static_cast<int32>(FMath::FloorToDouble(TimeAsFrame));
-}
-
-inline bool operator==(const FFrameRate& A, const FFrameRate& B)
-{
-	return A.Numerator == B.Numerator && A.Denominator == B.Denominator;
-}
-
-inline bool operator!=(const FFrameRate& A, const FFrameRate& B)
-{
-	return A.Numerator != B.Numerator || A.Denominator != B.Denominator;
-}
-
-inline FFrameRate operator*(FFrameRate A, FFrameRate B)
-{
-	return FFrameRate(A.Numerator * B.Numerator, A.Denominator * B.Denominator);
-}
-
-inline FFrameRate operator/(FFrameRate A, FFrameRate B)
-{
-	return FFrameRate(A.Numerator * B.Denominator, A.Denominator * B.Numerator);
-}
-
-inline double operator/(FFrameNumber Frame, FFrameRate Rate)
-{
-	return Rate.AsSeconds(FFrameTime(Frame));
-}
-
-inline TRange<double> operator/(const TRange<FFrameNumber>& FrameRange, FFrameRate Rate)
-{
-	TRangeBound<FFrameNumber> LowerBound = FrameRange.GetLowerBound();
-	TRangeBound<FFrameNumber> UpperBound = FrameRange.GetUpperBound();
-
-	return TRange<double>(
-		LowerBound.IsOpen()
-			? TRangeBound<double>::Open()
-			: LowerBound.IsInclusive()
-				? TRangeBound<double>::Inclusive(Rate.AsSeconds(LowerBound.GetValue()))
-				: TRangeBound<double>::Inclusive(Rate.AsSeconds(LowerBound.GetValue()+1)),
-
-		UpperBound.IsOpen()
-			? TRangeBound<double>::Open()
-			: UpperBound.IsInclusive()
-				? TRangeBound<double>::Exclusive(Rate.AsSeconds(UpperBound.GetValue()+1))
-				: TRangeBound<double>::Exclusive(Rate.AsSeconds(UpperBound.GetValue()))
-		);
-}
-
-inline double operator/(FFrameTime FrameTime, FFrameRate Rate)
-{
-	return Rate.AsSeconds(FrameTime);
-}
-
-inline FFrameTime operator*(double TimeInSeconds, FFrameRate Rate)
-{
-	return Rate.AsFrameTime(TimeInSeconds);
-}
-
-inline FFrameTime operator*(float TimeInSeconds, FFrameRate Rate)
-{
-	return Rate.AsFrameTime(TimeInSeconds);
+	const double TimeAsFrame = (static_cast<double>(TimeInSeconds) * Numerator) / Denominator;
+	return static_cast<int32>(FMath::Clamp(FMath::FloorToDouble(TimeAsFrame + static_cast<double>(FMath::TruncToInt(static_cast<float>(TimeAsFrame - FMath::FloorToDouble(TimeAsFrame))))), static_cast<double>(TNumericLimits<int32>::Min()), static_cast<double>(TNumericLimits<int32>::Max())));
 }
 
 inline FFrameTime ConvertFrameTime(FFrameTime SourceTime, FFrameRate SourceRate, FFrameRate DestinationRate)

@@ -1,16 +1,24 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "FoliageTypeDetails.h"
+
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "DetailCategoryBuilder.h"
+#include "DetailLayoutBuilder.h"
+#include "FoliageTypeCustomizationHelpers.h"
+#include "HAL/PlatformCrt.h"
+#include "IDetailGroup.h"
+#include "IDetailPropertyRow.h"
+#include "Internationalization/Text.h"
 #include "Layout/Visibility.h"
 #include "Misc/Attribute.h"
-#include "Settings/EditorExperimentalSettings.h"
-#include "UObject/UnrealType.h"
 #include "PropertyHandle.h"
-#include "IDetailPropertyRow.h"
-#include "DetailLayoutBuilder.h"
-#include "IDetailGroup.h"
-#include "DetailCategoryBuilder.h"
-#include "FoliageTypeCustomizationHelpers.h"
+#include "Settings/EditorExperimentalSettings.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealType.h"
 
 TSharedRef<IDetailCustomization> FFoliageTypeDetails::MakeInstance()
 {
@@ -89,8 +97,8 @@ void FFoliageTypeDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 	const static FName InstanceSettingsName("InstanceSettings");
 
 	FFoliageTypeCustomizationHelpers::HideFoliageCategory(DetailBuilder, ReapplyName);
-	FFoliageTypeCustomizationHelpers::HideFoliageCategory(DetailBuilder, PaintingName);
 
+	AddSubcategoryProperties(DetailBuilder, PaintingName);
 	AddSubcategoryProperties(DetailBuilder, PlacementName);
 
 	// If enabled, show the properties for procedural placement

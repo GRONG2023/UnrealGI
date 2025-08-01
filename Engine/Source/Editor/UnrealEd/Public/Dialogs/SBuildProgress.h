@@ -11,7 +11,7 @@
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Layout/SBorder.h"
 
-class SBuildProgressWidget : public SBorder
+class SBuildProgressWidget : public SCompoundWidget
 {
 public:
 	SLATE_BEGIN_ARGS( SBuildProgressWidget ) {}
@@ -40,14 +40,18 @@ public:
 		BUILDTYPE_Lighting,
 		/** Paths are being built. */
 		BUILDTYPE_Paths,
-		/** LODs are being built */
-		BUILDTYPE_LODs, 
+		/** HLODs are being built */
+		BUILDTYPE_HLODs,
+		/** Minimap is being built */
+		BUILDTYPE_Minimap,
+		/** Landscape Spline Meshes are being built */
+		BUILDTYPE_LandscapeSplineMeshes,
 		/** Texture streaming data is being built */
 		BUILDTYPE_TextureStreaming, 
 		/** Virtual texture data is being built */
 		BUILDTYPE_VirtualTexture,
-		/** Grass maps are being built */
-		BUILDTYPE_GrassMaps,
+		/** All Landscape is being built*/
+		BUILDTYPE_AllLandscape,
 	};
 
 	/** The various issues that can occur. */

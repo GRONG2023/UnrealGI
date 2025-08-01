@@ -14,7 +14,7 @@ class UStaticMeshComponent;
 
 /** Enum defining the object sets for this stats object */
 UENUM()
-enum EStaticMeshLightingInfoObjectSets
+enum EStaticMeshLightingInfoObjectSets : int
 {
 	StaticMeshLightingInfoObjectSets_CurrentLevel		UMETA( DisplayName = "Current Level" , ToolTip = "View static mesh lighting info for the current level" ),
 	StaticMeshLightingInfoObjectSets_SelectedLevels		UMETA( DisplayName = "Selected Levels" , ToolTip = "View lighting info for selected levels" ),
@@ -81,6 +81,10 @@ class UStaticMeshLightingInfo : public UObject
 	/** Number of lights generating shadow maps on the primitive. */
 	UPROPERTY(VisibleAnywhere, AssetRegistrySearchable, Category="Stats", meta=( DisplayName = "Num SM", ShowTotal = "true", ColumnWidth = "102" ) )
 	int32 ShadowMapLightCount;
+
+	/** The lighting texture names that the static mesh component references. */
+	UPROPERTY(VisibleAnywhere, AssetRegistrySearchable, Category = "Stats", meta = (DisplayName = "Lightmap Names", ColumnWidth = "300"))
+	TArray<FString> LightmapTextureNames;
 
 public:
 

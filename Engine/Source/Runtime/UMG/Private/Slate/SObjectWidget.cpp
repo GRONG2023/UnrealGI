@@ -40,7 +40,7 @@ SObjectWidget::~SObjectWidget(void)
 		// This is only a concern during a running game - design-time instances can be destroyed from GC quite often when recompiling
 		if (!WidgetObject || !WidgetObject->IsDesignTime())
 		{
-			ensureMsgf(!IsGarbageCollecting(), TEXT("SObjectWidget for '%s' destroyed while collecting garbage.  This can lead to multiple GCs being required to cleanup the object.  Possible causes might be,\n1) ReleaseSlateResources not being implemented for the owner of this pointer.\n2) You may just be holding onto some slate pointers on an actor that don't get reset until the actor is Garbage Collected.  You should avoid doing this, and instead reset those references when the actor is Destroyed."), *DebugName);
+			ensureMsgf(GExitPurge || !IsGarbageCollecting(), TEXT("SObjectWidget for '%s' destroyed while collecting garbage.  This can lead to multiple GCs being required to cleanup the object.  Possible causes might be,\n1) ReleaseSlateResources not being implemented for the owner of this pointer.\n2) You may just be holding onto some slate pointers on an actor that don't get reset until the actor is Garbage Collected.  You should avoid doing this, and instead reset those references when the actor is Destroyed."), *DebugName);
 		}
 	}
 #endif
@@ -52,6 +52,8 @@ void SObjectWidget::ResetWidget()
 {
 	if ( UObjectInitialized() && WidgetObject )
 	{
+		UnregisterGCObject();
+
 		if ( CanRouteEvent() )
 		{
 			WidgetObject->NativeDestruct();
@@ -81,12 +83,23 @@ void SObjectWidget::ResetWidget()
 
 FString SObjectWidget::GetReferencerName() const
 {
-	return FString("SObjectWidget( ") + WidgetObject->GetName() + FString(" )");
+	TStringBuilder<512> Builder;
+	Builder << TEXT("SObjectWidget(");
+	if (WidgetObject)
+	{
+		Builder << WidgetObject->GetFName();
+	}
+	else
+	{
+		Builder << TEXT("nullptr");
+	}		
+	Builder << TEXT(")");
+	return Builder.ToString();
 }
 
 void SObjectWidget::AddReferencedObjects(FReferenceCollector& Collector)
 {
-	Collector.AddReferencedObject(WidgetObject);
+	Collector.AddStableReference(&WidgetObject);
 }
 
 void SObjectWidget::SetPadding(const TAttribute<FMargin>& InMargin)

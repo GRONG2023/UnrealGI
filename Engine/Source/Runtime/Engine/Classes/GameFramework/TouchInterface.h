@@ -17,17 +17,19 @@ struct FTouchInputControl
 	GENERATED_USTRUCT_BODY()
 
 	// basically mirroring SVirtualJoystick::FControlInfo but as an editable class
+	UPROPERTY(EditAnywhere, Category="Control", meta=(ToolTip="Set this to true to treat the joystick as a simple button"))
+	bool bTreatAsButton = false;
 	UPROPERTY(EditAnywhere, Category="Control", meta=(ToolTip="For sticks, this is the Thumb"))
-	UTexture2D* Image1;
+	TObjectPtr<UTexture2D> Image1;
 	UPROPERTY(EditAnywhere, Category="Control", meta=(ToolTip="For sticks, this is the Background"))
-	UTexture2D* Image2;
-	UPROPERTY(EditAnywhere, Category="Control", meta=(ToolTip="The center point of the control (if <= 1.0, it's relative to screen, > 1.0 is absolute)"))
+	TObjectPtr<UTexture2D> Image2;
+	UPROPERTY(EditAnywhere, Category="Control", meta=(ToolTip="The initial center point of the control. If Time Until Reset is < 0, control resets back to here.\nUse negative numbers to invert positioning from top to bottom, left to right. (if <= 1.0, it's relative to screen, > 1.0 is absolute)"))
 	FVector2D Center;
 	UPROPERTY(EditAnywhere, Category="Control", meta=(ToolTip="The size of the control (if <= 1.0, it's relative to screen, > 1.0 is absolute)"))
 	FVector2D VisualSize;
 	UPROPERTY(EditAnywhere, Category="Control", meta=(ToolTip="For sticks, the size of the thumb (if <= 1.0, it's relative to screen, > 1.0 is absolute)"))
 	FVector2D ThumbSize;
-	UPROPERTY(EditAnywhere, Category="Control", meta=(ToolTip="The interactive size of the control (if <= 1.0, it's relative to screen, > 1.0 is absolute)"))
+	UPROPERTY(EditAnywhere, Category="Control", meta=(ToolTip="The interactive size of the control. Measured outward from Center. (if <= 1.0, it's relative to screen, > 1.0 is absolute)"))
 	FVector2D InteractionSize;
 	UPROPERTY(EditAnywhere, Category = "Control", meta = (ToolTip = "The scale for control input"))
 	FVector2D InputScale;
@@ -37,7 +39,8 @@ struct FTouchInputControl
 	FKey AltInputKey;
 
 	FTouchInputControl()
-		: Image1(nullptr)
+		: bTreatAsButton(false)
+		, Image1(nullptr)
 		, Image2(nullptr)
 		, Center(ForceInitToZero)
 		, VisualSize(ForceInitToZero)
@@ -52,8 +55,8 @@ struct FTouchInputControl
 /**
  * Defines an interface by which touch input can be controlled using any number of buttons and virtual joysticks
  */
-UCLASS(Blueprintable, BlueprintType)
-class ENGINE_API UTouchInterface : public UObject
+UCLASS(Blueprintable, BlueprintType, MinimalAPI)
+class UTouchInterface : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
@@ -75,12 +78,12 @@ class ENGINE_API UTouchInterface : public UObject
 	UPROPERTY(EditAnywhere, Category="TouchInterface", meta=(ToolTip="How long after joystick enabled for touch (0.0 will disable this feature)"))
 	float ActivationDelay;
 
-	UPROPERTY(EditAnywhere, Category="TouchInterface", meta=(ToolTip="Whether to prevent joystick re-center"))
+	UPROPERTY(EditAnywhere, Category="TouchInterface", meta=(ToolTip="Prevent joystick re-centering and moving from Center through user taps"))
 	bool bPreventRecenter;
 
 	UPROPERTY(EditAnywhere, Category = "TouchInterface", meta = (ToolTip = "Delay at startup before virtual joystick is drawn"))
 	float StartupDelay;
 
 	/** Make this the active set of touch controls */
-	virtual void Activate(TSharedPtr<SVirtualJoystick> VirtualJoystick);
+	ENGINE_API virtual void Activate(TSharedPtr<SVirtualJoystick> VirtualJoystick);
 };

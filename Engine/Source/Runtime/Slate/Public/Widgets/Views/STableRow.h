@@ -3,29 +3,30 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Misc/Attribute.h"
 #include "InputCoreTypes.h"
-#include "Styling/SlateColor.h"
-#include "Layout/Geometry.h"
-#include "Input/Events.h"
-#include "Input/DragAndDrop.h"
-#include "Input/Reply.h"
-#include "Widgets/SNullWidget.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SWidget.h"
-#include "Layout/Margin.h"
-#include "Styling/SlateTypes.h"
-#include "Styling/CoreStyle.h"
-#include "Widgets/Layout/SBorder.h"
+#include "ITableRow.h"
 #include "Framework/Views/ITypedTableView.h"
-#include "Widgets/Views/STableViewBase.h"
+#include "Framework/Views/TableViewTypeTraits.h"
+#include "Input/DragAndDrop.h"
+#include "Input/Events.h"
+#include "Input/Reply.h"
+#include "Layout/Geometry.h"
+#include "Layout/Margin.h"
+#include "Misc/Attribute.h"
 #include "Rendering/DrawElements.h"
+#include "Styling/CoreStyle.h"
+#include "Styling/SlateColor.h"
+#include "Styling/SlateTypes.h"
 #include "Types/SlateStructs.h"
-#include "Widgets/SBoxPanel.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SNullWidget.h"
+#include "Widgets/SWidget.h"
 #include "Widgets/Views/SExpanderArrow.h"
 #include "Widgets/Views/SHeaderRow.h"
-#include "Framework/Views/TableViewTypeTraits.h"
+#include "Widgets/Views/STableViewBase.h"
 #if WITH_ACCESSIBILITY
 #include "GenericPlatform/Accessibility/GenericAccessibleInterfaces.h"
 #include "Widgets/Accessibility/SlateCoreAccessibleWidgets.h"
@@ -34,68 +35,6 @@
 #endif
 
 template <typename ItemType> class SListView;
-
-/**
- * Interface for table views to talk to their rows.
- */
-class SLATE_API ITableRow
-{
-	public:
-
-		/**
-		 * Called when the row has been generated and associated with an item in the owning table.
-		 * Any attempts to access the item associated with the row prior to this (i.e. in Construct()) will fail, as the association is not yet established in the owning table.
-		 */
-		virtual void InitializeRow() = 0;
-
-		/**
-		 * Called when the row has been released from the owning table and is no longer associated with any items therein.
-		 * Only relevant if the row widgets are pooled or otherwise referenced/kept alive outside the owning table. Otherwise, the row is destroyed.
-		 */
-		virtual void ResetRow() = 0;
-
-		/**
-		 * @param InIndexInList  The index of the item for which this widget was generated
-		 */
-		virtual void SetIndexInList( int32 InIndexInList ) = 0;
-
-		/** @return true if the corresponding item is expanded; false otherwise*/
-		virtual bool IsItemExpanded() const = 0;
-
-		/** Toggle the expansion of the item associated with this row */
-		virtual void ToggleExpansion() = 0;
-
-		/** @return True if the corresponding item is selected; false otherwise */
-		virtual bool IsItemSelected() const = 0;
-
-		/** @return how nested the item associated with this row when it is in a TreeView */
-		virtual int32 GetIndentLevel() const = 0;
-
-		/** @return Does this item have children? */
-		virtual int32 DoesItemHaveChildren() const = 0;
-
-		/** @return BitArray where each entry corresponds to whether this item needs a vertical wire draw for that depth. */
-		virtual TBitArray<> GetWiresNeededByDepth() const = 0;
-
-		/** @return true if this item is the last direct descendant of its parent. */
-		virtual bool IsLastChild() const = 0;
-		
-		/** @return this table row as a widget */
-		virtual TSharedRef<SWidget> AsWidget() = 0;
-
-		/** @return the content of this table row */
-		virtual TSharedPtr<SWidget> GetContent() = 0;
-
-		/** Called when the expander arrow for this row is shift+clicked */
-		virtual void Private_OnExpanderArrowShiftClicked() = 0;
-
-		/** @return the size for the specified column name */
-		virtual FVector2D GetRowSizeForColumn(const FName& InColumnName) const = 0;
-
-	protected:
-		/** Called to query the selection mode for the row */
-		virtual ESelectionMode::Type GetSelectionMode() const = 0;
-};
 
 /**
  * When the table row should signal the owner widget that the selection changed.
@@ -138,14 +77,15 @@ DECLARE_DELEGATE_RetVal_OneParam(FReply, FOnTableRowDrop, FDragDropEvent const&)
 template<typename ItemType>
 class STableRow : public ITableRow, public SBorder
 {
-	static_assert(TIsValidListItem<ItemType>::Value, "Item type T must be UObjectBase*, TSharedRef<>, or TSharedPtr<>.");
+	static_assert(TIsValidListItem<ItemType>::Value, "Item type T must be UObjectBase*, TObjectPtr<>, TWeakObjectPtr<>, TSharedRef<>, or TSharedPtr<>.");
 
 public:
 	/** Delegate signature for querying whether this FDragDropEvent will be handled by the drop target of type ItemType. */
 	DECLARE_DELEGATE_RetVal_ThreeParams(TOptional<EItemDropZone>, FOnCanAcceptDrop, const FDragDropEvent&, EItemDropZone, ItemType);
 	/** Delegate signature for handling the drop of FDragDropEvent onto target of type ItemType */
 	DECLARE_DELEGATE_RetVal_ThreeParams(FReply, FOnAcceptDrop, const FDragDropEvent&, EItemDropZone, ItemType);
-
+	/** Delegate signature for painting drop indicators. */
+	DECLARE_DELEGATE_RetVal_EightParams(int32, FOnPaintDropIndicator, EItemDropZone, const FPaintArgs&, const FGeometry&, const FSlateRect&, FSlateWindowElementList&, int32, const FWidgetStyle&, bool);
 public:
 
 	SLATE_BEGIN_ARGS( STableRow< ItemType > )
@@ -154,6 +94,7 @@ public:
 		, _Padding( FMargin(0) )
 		, _ShowSelection( true )
 		, _ShowWires( false )
+		, _bAllowPreselectedItemActivation(false)
 		, _SignalSelectionMode( ETableRowSignalSelectionMode::Deferred )
 		, _Content()
 		{}
@@ -180,6 +121,11 @@ public:
 		 */
 		SLATE_EVENT( FOnAcceptDrop,    OnAcceptDrop )
 
+		/**
+		 * Used for painting drop indicators
+		 */
+		SLATE_EVENT( FOnPaintDropIndicator, OnPaintDropIndicator )
+
 		// Low level DragAndDrop
 		SLATE_EVENT( FOnDragDetected,      OnDragDetected )
 		SLATE_EVENT( FOnTableRowDragEnter, OnDragEnter )
@@ -190,6 +136,7 @@ public:
 	
 		SLATE_ARGUMENT( bool, ShowSelection )
 		SLATE_ARGUMENT( bool, ShowWires)
+		SLATE_ARGUMENT( bool, bAllowPreselectedItemActivation)
 
 		/**
 		 * The Signal Selection mode affect when the owner table gets notified that the selection has changed.
@@ -228,18 +175,14 @@ public:
 
 		if ( InOwnerTableMode == ETableViewMode::List || InOwnerTableMode == ETableViewMode::Tile )
 		{
-			// -- Row is in a ListView or the user --
-			FSimpleSlot* InnerContentSlotNativePtr = nullptr;
-
 			// We just need to hold on to this row's content.
 			this->ChildSlot
-			.Expose( InnerContentSlotNativePtr )
 			.Padding( InPadding )
 			[
 				InContent
 			];
 
-			InnerContentSlot = InnerContentSlotNativePtr;
+			InnerContentSlot = &ChildSlot.AsSlot();
 		}
 		else
 		{
@@ -256,7 +199,7 @@ public:
 				.HAlign(HAlign_Right)
 				.VAlign(VAlign_Fill)
 				[
-					SNew(SExpanderArrow, SharedThis(this) )
+					SAssignNew(ExpanderArrowWidget, SExpanderArrow, SharedThis(this) )
 					.StyleSet(ExpanderStyleSet)
 					.ShouldDrawWires(bShowWires)
 				]
@@ -308,7 +251,7 @@ public:
 					TSharedRef< ITypedTableView<ItemType> > OwnerTable = TableRow->OwnerTablePtr.Pin().ToSharedRef();
 					const bool bIsActive = OwnerTable->AsWidget()->HasKeyboardFocus();
 
-					if (const ItemType* MyItemPtr = TableRow->GetItemForThis(OwnerTable))
+					if (const TObjectPtrWrapTypeOf<ItemType>* MyItemPtr = TableRow->GetItemForThis(OwnerTable))
 					{
 						const ItemType& MyItem = *MyItemPtr;
 						const bool bIsSelected = OwnerTable->Private_IsItemSelected(MyItem);
@@ -366,18 +309,30 @@ public:
 	}
 #endif
 
-	virtual int32 OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const override
+	/** Retrieves a brush for rendering a drop indicator for the specified drop zone */
+	const FSlateBrush* GetDropIndicatorBrush(EItemDropZone InItemDropZone) const
+	{
+		switch (InItemDropZone)
+		{
+			case EItemDropZone::AboveItem: return &Style->DropIndicator_Above; break;
+			default:
+			case EItemDropZone::OntoItem: return &Style->DropIndicator_Onto; break;
+			case EItemDropZone::BelowItem: return &Style->DropIndicator_Below; break;
+		};
+	}
+
+	int32 PaintSelection( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const
 	{
 		TSharedRef< ITypedTableView<ItemType> > OwnerTable = OwnerTablePtr.Pin().ToSharedRef();
 		const bool bIsActive = OwnerTable->AsWidget()->HasKeyboardFocus();
 
-		if (const ItemType* MyItemPtr = GetItemForThis(OwnerTable))
+		if (const TObjectPtrWrapTypeOf<ItemType>* MyItemPtr = GetItemForThis(OwnerTable))
 		{
 			if (bIsActive && OwnerTable->Private_UsesSelectorFocus() && OwnerTable->Private_HasSelectorFocus(*MyItemPtr))
 			{
 				FSlateDrawElement::MakeBox(
 					OutDrawElements,
-					LayerId,
+					LayerId++,
 					AllottedGeometry.ToPaintGeometry(),
 					&Style->SelectorFocusedBrush,
 					ESlateDrawEffect::None,
@@ -385,55 +340,77 @@ public:
 				);
 			}
 		}
-
-		LayerId = SBorder::OnPaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
-
+		return LayerId;
+	}
+	int32 PaintBorder( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const
+	{
+		return SBorder::OnPaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
+	}
+	int32 PaintDropIndicator( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const
+	{
 		if (ItemDropZone.IsSet())
 		{
-			// Draw feedback for user dropping an item above, below, or onto a row.
-			const FSlateBrush* DropIndicatorBrush = [&]()
+			if (PaintDropIndicatorEvent.IsBound())
 			{
-				switch (ItemDropZone.GetValue())
-				{
-					case EItemDropZone::AboveItem: return &Style->DropIndicator_Above; break;
-					default:
-					case EItemDropZone::OntoItem: return &Style->DropIndicator_Onto; break;
-					case EItemDropZone::BelowItem: return &Style->DropIndicator_Below; break;
-				};
-			}();
-
-			if (OwnerTable->Private_GetOrientation() == Orient_Vertical)
-			{
-				FSlateDrawElement::MakeBox
-				(
-					OutDrawElements,
-					LayerId++,
-					AllottedGeometry.ToPaintGeometry(),
-					DropIndicatorBrush,
-					ESlateDrawEffect::None,
-					DropIndicatorBrush->GetTint(InWidgetStyle) * InWidgetStyle.GetColorAndOpacityTint()
-				);
+				return PaintDropIndicatorEvent.Execute(ItemDropZone.GetValue(), Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
 			}
 			else
 			{
-				// Reuse the drop indicator asset for horizontal, by rotating the drawn box 90 degrees.
-				const FVector2D LocalSize(AllottedGeometry.GetLocalSize());
-				const FVector2D Pivot(LocalSize * 0.5f);
-				const FVector2D RotatedLocalSize(LocalSize.Y, LocalSize.X);
-				FSlateLayoutTransform RotatedTransform(Pivot - RotatedLocalSize * 0.5f);	// Make the box centered to the alloted geometry, so that it can be rotated around the center.
-
-				FSlateDrawElement::MakeRotatedBox(
-					OutDrawElements,
-					LayerId++,
-					AllottedGeometry.ToPaintGeometry(RotatedLocalSize, RotatedTransform),
-					DropIndicatorBrush,
-					ESlateDrawEffect::None,
-					-HALF_PI,	// 90 deg CCW
-					RotatedLocalSize * 0.5f,	// Relative center to the flipped
-					FSlateDrawElement::RelativeToElement,
-					DropIndicatorBrush->GetTint(InWidgetStyle) * InWidgetStyle.GetColorAndOpacityTint()
-				);
+				return OnPaintDropIndicator(ItemDropZone.GetValue(), Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
 			}
+		}
+
+		return LayerId;
+	}
+
+
+	virtual int32 OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const override
+	{
+		LayerId = PaintSelection(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
+		LayerId = PaintBorder(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
+		LayerId = PaintDropIndicator(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
+
+		return LayerId;
+	}
+
+	virtual int32 OnPaintDropIndicator( EItemDropZone InItemDropZone, const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const
+	{
+		TSharedRef< ITypedTableView<ItemType> > OwnerTable = OwnerTablePtr.Pin().ToSharedRef();
+
+		// Draw feedback for user dropping an item above, below, or onto a row.
+		const FSlateBrush* DropIndicatorBrush = GetDropIndicatorBrush(InItemDropZone);
+
+		if (OwnerTable->Private_GetOrientation() == Orient_Vertical)
+		{
+			FSlateDrawElement::MakeBox
+			(
+				OutDrawElements,
+				LayerId++,
+				AllottedGeometry.ToPaintGeometry(),
+				DropIndicatorBrush,
+				ESlateDrawEffect::None,
+				DropIndicatorBrush->GetTint(InWidgetStyle) * InWidgetStyle.GetColorAndOpacityTint()
+			);
+		}
+		else
+		{
+			// Reuse the drop indicator asset for horizontal, by rotating the drawn box 90 degrees.
+			const FVector2f LocalSize(AllottedGeometry.GetLocalSize());
+			const FVector2f Pivot(LocalSize * 0.5f);
+			const FVector2f RotatedLocalSize(LocalSize.Y, LocalSize.X);
+			FSlateLayoutTransform RotatedTransform(Pivot - RotatedLocalSize * 0.5f);	// Make the box centered to the alloted geometry, so that it can be rotated around the center.
+
+			FSlateDrawElement::MakeRotatedBox(
+				OutDrawElements,
+				LayerId++,
+				AllottedGeometry.ToPaintGeometry(RotatedLocalSize, RotatedTransform),
+				DropIndicatorBrush,
+				ESlateDrawEffect::None,
+				-UE_HALF_PI,	// 90 deg CCW
+				RotatedLocalSize * 0.5f,	// Relative center to the flipped
+				FSlateDrawElement::RelativeToElement,
+				DropIndicatorBrush->GetTint(InWidgetStyle) * InWidgetStyle.GetColorAndOpacityTint()
+			);
 		}
 
 		return LayerId;
@@ -453,7 +430,7 @@ public:
 			TSharedRef< ITypedTableView<ItemType> > OwnerTable = OwnerTablePtr.Pin().ToSharedRef();
 
 			// Only one item can be double-clicked
-			if (const ItemType* MyItemPtr = GetItemForThis(OwnerTable))
+			if (const TObjectPtrWrapTypeOf<ItemType>* MyItemPtr = GetItemForThis(OwnerTable))
 			{
 				// If we're configured to route double-click messages to the owner of the table, then
 				// do that here.  Otherwise, we'll toggle expansion.
@@ -488,23 +465,14 @@ public:
 			const ESelectionMode::Type SelectionMode = GetSelectionMode();
 			if (SelectionMode != ESelectionMode::None)
 			{
-				if (const ItemType* MyItemPtr = GetItemForThis(OwnerTable))
+				if (const TObjectPtrWrapTypeOf<ItemType>* MyItemPtr = GetItemForThis(OwnerTable))
 				{
 					const ItemType& MyItem = *MyItemPtr;
 					const bool bIsSelected = OwnerTable->Private_IsItemSelected(MyItem);
 
 					if (SelectionMode == ESelectionMode::Multi)
 					{
-						if (MouseEvent.IsControlDown())
-						{
-							OwnerTable->Private_SetItemSelection(MyItem, !bIsSelected, true);
-							bChangedSelectionOnMouseDown = true;
-							if (SignalSelectionMode == ETableRowSignalSelectionMode::Instantaneous)
-							{
-								OwnerTable->Private_SignalSelectionChanged(ESelectInfo::OnMouseClick);
-							}
-						}
-						else if (MouseEvent.IsShiftDown())
+						if (MouseEvent.IsShiftDown())
 						{
 							OwnerTable->Private_SelectRangeFromCurrentTo(MyItem);
 							bChangedSelectionOnMouseDown = true;
@@ -513,9 +481,18 @@ public:
 								OwnerTable->Private_SignalSelectionChanged(ESelectInfo::OnMouseClick);
 							}
 						}
+						else if (MouseEvent.IsControlDown())
+						{
+							OwnerTable->Private_SetItemSelection(MyItem, !bIsSelected, true);
+							bChangedSelectionOnMouseDown = true;
+							if (SignalSelectionMode == ETableRowSignalSelectionMode::Instantaneous)
+							{
+								OwnerTable->Private_SignalSelectionChanged(ESelectInfo::OnMouseClick);
+							}
+						}
 					}
 
-					if (!bIsSelected && !bChangedSelectionOnMouseDown)
+					if ((bAllowPreselectedItemActivation || !bIsSelected) && !bChangedSelectionOnMouseDown)
 					{
 						OwnerTable->Private_ClearSelection();
 						OwnerTable->Private_SetItemSelection(MyItem, true, true);
@@ -583,7 +560,7 @@ public:
 						{
 							if ( !bChangedSelectionOnMouseDown && !MouseEvent.IsControlDown() && !MouseEvent.IsShiftDown() )
 							{
-								if (const ItemType* MyItemPtr = GetItemForThis(OwnerTable))
+								if (const TObjectPtrWrapTypeOf<ItemType>* MyItemPtr = GetItemForThis(OwnerTable))
 								{
 									const bool bIsSelected = OwnerTable->Private_IsItemSelected(*MyItemPtr);
 									if (bIsSelected && OwnerTable->Private_GetNumSelectedItems() > 1)
@@ -604,7 +581,7 @@ public:
 					}
 				}
 
-				if (const ItemType* MyItemPtr = GetItemForThis(OwnerTable))
+				if (const TObjectPtrWrapTypeOf<ItemType>* MyItemPtr = GetItemForThis(OwnerTable))
 				{
 					if (OwnerTable->Private_OnItemClicked(*MyItemPtr))
 					{
@@ -632,7 +609,7 @@ public:
 			case ESelectionMode::Multi:
 				{
 					// Only one item can be selected at a time
-					if (const ItemType* MyItemPtr = GetItemForThis(OwnerTable))
+					if (const TObjectPtrWrapTypeOf<ItemType>* MyItemPtr = GetItemForThis(OwnerTable))
 					{
 						const bool bIsSelected = OwnerTable->Private_IsItemSelected(*MyItemPtr);
 
@@ -675,7 +652,7 @@ public:
 		{
 			bProcessingSelectionTouch = false;
 			const TSharedRef<ITypedTableView<ItemType>> OwnerTable = OwnerTablePtr.Pin().ToSharedRef();
-			if (const ItemType* MyItemPtr = GetItemForThis(OwnerTable))
+			if (const TObjectPtrWrapTypeOf<ItemType>* MyItemPtr = GetItemForThis(OwnerTable))
 			{
 				ESelectionMode::Type SelectionMode = GetSelectionMode();
 				if (SelectionMode != ESelectionMode::None)
@@ -761,7 +738,7 @@ public:
 	}
 
 	/** @return the zone (above, onto, below) based on where the user is hovering over within the row */
-	EItemDropZone ZoneFromPointerPosition(FVector2D LocalPointerPos, FVector2D LocalSize, EOrientation Orientation)
+	EItemDropZone ZoneFromPointerPosition(UE::Slate::FDeprecateVector2DParameter LocalPointerPos, UE::Slate::FDeprecateVector2DParameter LocalSize, EOrientation Orientation)
 	{
 		const float PointerPos = Orientation == EOrientation::Orient_Horizontal ? LocalPointerPos.X : LocalPointerPos.Y;
 		const float Size = Orientation == EOrientation::Orient_Horizontal ? LocalSize.X : LocalSize.Y;
@@ -786,13 +763,13 @@ public:
 		if ( OnCanAcceptDrop.IsBound() )
 		{
 			const TSharedRef< ITypedTableView<ItemType> > OwnerTable = OwnerTablePtr.Pin().ToSharedRef();
-			const FVector2D LocalPointerPos = MyGeometry.AbsoluteToLocal(DragDropEvent.GetScreenSpacePosition());
+			const FVector2f LocalPointerPos = MyGeometry.AbsoluteToLocal(DragDropEvent.GetScreenSpacePosition());
 			const EItemDropZone ItemHoverZone = ZoneFromPointerPosition(LocalPointerPos, MyGeometry.GetLocalSize(), OwnerTable->Private_GetOrientation());
 
 			ItemDropZone = [ItemHoverZone, DragDropEvent, this]()
 			{
 				TSharedRef< ITypedTableView<ItemType> > OwnerTable = OwnerTablePtr.Pin().ToSharedRef();
-				if (const ItemType* MyItemPtr = GetItemForThis(OwnerTable))
+				if (const TObjectPtrWrapTypeOf<ItemType>* MyItemPtr = GetItemForThis(OwnerTable))
 				{
 					return OnCanAcceptDrop.Execute(DragDropEvent, ItemHoverZone, *MyItemPtr);
 				}
@@ -821,10 +798,10 @@ public:
 				ItemDropZone = TOptional<EItemDropZone>();
 
 				// Find item associated with this widget.
-				if (const ItemType* MyItemPtr = GetItemForThis(OwnerTable))
+				if (const TObjectPtrWrapTypeOf<ItemType>* MyItemPtr = GetItemForThis(OwnerTable))
 				{
 					// Which physical drop zone is the drop about to be performed onto?
-					const FVector2D LocalPointerPos = MyGeometry.AbsoluteToLocal(DragDropEvent.GetScreenSpacePosition());
+					const FVector2f LocalPointerPos = MyGeometry.AbsoluteToLocal(DragDropEvent.GetScreenSpacePosition());
 					const EItemDropZone HoveredZone = ZoneFromPointerPosition(LocalPointerPos, MyGeometry.GetLocalSize(), OwnerTable->Private_GetOrientation());
 
 					// The row gets final say over which zone to drop onto regardless of physical location.
@@ -866,10 +843,15 @@ public:
 		IndexInList = InIndexInList;
 	}
 
+	virtual int32 GetIndexInList() override
+	{
+		return IndexInList;
+	}
+
 	virtual bool IsItemExpanded() const override
 	{
 		TSharedRef< ITypedTableView<ItemType> > OwnerTable = OwnerTablePtr.Pin().ToSharedRef();
-		if (const ItemType* MyItemPtr = GetItemForThis(OwnerTable))
+		if (const TObjectPtrWrapTypeOf<ItemType>* MyItemPtr = GetItemForThis(OwnerTable))
 		{
 			return OwnerTable->Private_IsItemExpanded(*MyItemPtr);
 		}
@@ -885,7 +867,7 @@ public:
 		// Nothing to expand if row being clicked on doesn't have children
 		if( bItemHasChildren )
 		{
-			if (const ItemType* MyItemPtr = GetItemForThis(OwnerTable))
+			if (const TObjectPtrWrapTypeOf<ItemType>* MyItemPtr = GetItemForThis(OwnerTable))
 			{
 				const bool bIsItemExpanded = bItemHasChildren && OwnerTable->Private_IsItemExpanded(*MyItemPtr);
 				OwnerTable->Private_SetItemExpansion(*MyItemPtr, !bIsItemExpanded);
@@ -896,7 +878,7 @@ public:
 	virtual bool IsItemSelected() const override
 	{
 		TSharedRef<ITypedTableView<ItemType>> OwnerTable = OwnerTablePtr.Pin().ToSharedRef();
-		if (const ItemType* MyItemPtr = GetItemForThis(OwnerTable))
+		if (const TObjectPtrWrapTypeOf<ItemType>* MyItemPtr = GetItemForThis(OwnerTable))
 		{
 			return OwnerTable->Private_IsItemSelected(*MyItemPtr);
 		}
@@ -973,7 +955,7 @@ public:
 		// Nothing to expand if row being clicked on doesn't have children
 		if( bItemHasChildren )
 		{
-			if (const ItemType* MyItemPtr = GetItemForThis(OwnerTable))
+			if (const TObjectPtrWrapTypeOf<ItemType>* MyItemPtr = GetItemForThis(OwnerTable))
 			{
 				const bool IsItemExpanded = bItemHasChildren && OwnerTable->Private_IsItemExpanded(*MyItemPtr);
 				OwnerTable->Private_OnExpanderArrowShiftClicked(*MyItemPtr, !IsItemExpanded);
@@ -988,12 +970,14 @@ public:
 
 		const bool bIsActive = OwnerTable->AsWidget()->HasKeyboardFocus();
 
+		const bool bItemHasChildren = OwnerTable->Private_DoesItemHaveChildren( IndexInList );
+
 		static FName GenericWhiteBoxBrush("GenericWhiteBox");
 
 		// @todo: Slate Style - make this part of the widget style
 		const FSlateBrush* WhiteBox = FCoreStyle::Get().GetBrush(GenericWhiteBoxBrush);
 
-		if (const ItemType* MyItemPtr = GetItemForThis(OwnerTable))
+		if (const TObjectPtrWrapTypeOf<ItemType>* MyItemPtr = GetItemForThis(OwnerTable))
 		{
 			const bool bIsSelected = OwnerTable->Private_IsItemSelected(*MyItemPtr);
 			const bool bIsHighlighted = OwnerTable->Private_IsItemHighlighted(*MyItemPtr);
@@ -1030,6 +1014,12 @@ public:
 						? (bEvenEntryIndex ? &Style->EvenRowBackgroundHoveredBrush : &Style->OddRowBackgroundHoveredBrush)
 						: &Style->InactiveHighlightedBrush;
 				}
+			}
+			else if (bItemHasChildren && Style->bUseParentRowBrush && GetIndentLevel() == 0)
+			{
+				return IsHovered() 
+				? &Style->ParentRowBackgroundHoveredBrush	
+				: &Style->ParentRowBackgroundBrush;	
 			}
 			else
 			{
@@ -1068,7 +1058,7 @@ public:
 			return false;
 		}
 
-		if (const ItemType* MyItemPtr = GetItemForThis(OwnerTable))
+		if (const TObjectPtrWrapTypeOf<ItemType>* MyItemPtr = GetItemForThis(OwnerTable))
 		{
 			return OwnerTable->Private_IsItemSelected(*MyItemPtr);
 		}
@@ -1085,9 +1075,26 @@ public:
 	{
 		TSharedRef< ITypedTableView< ItemType > > OwnerTable = OwnerTablePtr.Pin().ToSharedRef();
 
-		if (const ItemType* MyItemPtr = GetItemForThis(OwnerTable))
+		if (const TObjectPtrWrapTypeOf<ItemType>* MyItemPtr = GetItemForThis(OwnerTable))
 		{
 			return OwnerTable->Private_IsItemSelected(*MyItemPtr);
+		}
+
+		return false;
+	}
+
+	/**
+	 * Callback to determine if the row is highlighted or not
+	 *
+	 * @return		true if highlighted by owning widget.
+	 */
+	bool IsHighlighted() const
+	{
+		TSharedRef< ITypedTableView< ItemType > > OwnerTable = OwnerTablePtr.Pin().ToSharedRef();
+
+		if (const TObjectPtrWrapTypeOf<ItemType>* MyItemPtr = GetItemForThis(OwnerTable))
+		{
+			return OwnerTable->Private_IsItemHighlighted(*MyItemPtr);
 		}
 
 		return false;
@@ -1097,6 +1104,14 @@ public:
 	virtual FVector2D GetRowSizeForColumn(const FName& InColumnName) const override
 	{
 		return FVector2D::ZeroVector;
+	}
+
+	void SetExpanderArrowVisibility(const EVisibility InExpanderArrowVisibility)
+	{
+		if(ExpanderArrowWidget)
+		{
+			ExpanderArrowWidget->SetVisibility(InExpanderArrowVisibility);
+		}
 	}
 
 	/** Protected constructor; SWidgets should only be instantiated via declarative syntax. */
@@ -1135,9 +1150,9 @@ protected:
 		check(InArgs._ExpanderStyleSet);
 		ExpanderStyleSet = InArgs._ExpanderStyleSet;
 
-		this->BorderImage = FInvalidatableBrushAttribute(TAttribute<const FSlateBrush*>(this, &STableRow::GetBorder));
+		SetBorderImage(TAttribute<const FSlateBrush*>(this, &STableRow::GetBorder));
 
-		this->ForegroundColor = TAttribute<FSlateColor>( this, &STableRow::GetForegroundBasedOnSelection );
+		this->SetForegroundColor(TAttribute<FSlateColor>( this, &STableRow::GetForegroundBasedOnSelection ));
 
 		this->OnCanAcceptDrop = InArgs._OnCanAcceptDrop;
 		this->OnAcceptDrop = InArgs._OnAcceptDrop;
@@ -1154,6 +1169,8 @@ protected:
 		this->SignalSelectionMode = InArgs._SignalSelectionMode;
 
 		this->bShowWires = InArgs._ShowWires;
+
+		this->bAllowPreselectedItemActivation = InArgs._bAllowPreselectedItemActivation;
 	}
 
 	void SetOwnerTableView( TSharedPtr<STableViewBase> OwnerTableView )
@@ -1176,7 +1193,7 @@ protected:
 			return NonSelectedForeground;
 		}
 
-		if (const ItemType* MyItemPtr = GetItemForThis(OwnerTable.ToSharedRef()))
+		if (const TObjectPtrWrapTypeOf<ItemType>* MyItemPtr = GetItemForThis(OwnerTable.ToSharedRef()))
 		{
 			const bool bIsSelected = OwnerTable->Private_IsItemSelected(*MyItemPtr);
 
@@ -1194,9 +1211,9 @@ protected:
 		return OwnerTable->Private_GetSelectionMode();
 	}
 
-	const ItemType* GetItemForThis(const TSharedRef<ITypedTableView<ItemType>>& OwnerTable) const
+	const TObjectPtrWrapTypeOf<ItemType>* GetItemForThis(const TSharedRef<ITypedTableView<ItemType>>& OwnerTable) const
 	{
-		const ItemType* MyItemPtr = OwnerTable->Private_ItemFromWidget(this);
+		const TObjectPtrWrapTypeOf<ItemType>* MyItemPtr = OwnerTable->Private_ItemFromWidget(this);
 		if (MyItemPtr)
 		{
 			return MyItemPtr;
@@ -1229,11 +1246,17 @@ protected:
 	/** The slate style to use with the expander */
 	const ISlateStyle* ExpanderStyleSet;
 
+	/** A pointer to the expander arrow on the row (if it exists) */
+	TSharedPtr<SExpanderArrow> ExpanderArrowWidget;
+
 	/** @see STableRow's OnCanAcceptDrop event */
 	FOnCanAcceptDrop OnCanAcceptDrop;
 
 	/** @see STableRow's OnAcceptDrop event */
 	FOnAcceptDrop OnAcceptDrop;
+
+	/** Optional delegate for painting drop indicators */
+	FOnPaintDropIndicator PaintDropIndicatorEvent;
 
 	/** Are we currently dragging/dropping over this item? */
 	TOptional<EItemDropZone> ItemDropZone;
@@ -1262,6 +1285,9 @@ protected:
 
 	/** Did the current a touch interaction start in this item?*/
 	bool bProcessingSelectionTouch;
+
+	/** When activating an item via mouse button, we generally don't allow pre-selected items to be activated */
+	bool bAllowPreselectedItemActivation;
 
 private:
 	bool bShowWires;
@@ -1368,7 +1394,7 @@ protected:
 					TAttribute<float> WidthBinding;
 					WidthBinding.BindRaw(&Column, &SHeaderRow::FColumn::GetWidth);
 
-					SHorizontalBox::FSlot& NewSlot = Box->AddSlot()
+					Box->AddSlot()
 					.HAlign(Column.CellHAlignment)
 					.VAlign(Column.CellVAlignment)
 					.FillWidth(WidthBinding)
@@ -1396,6 +1422,7 @@ protected:
 				break;
 
 				case EColumnSizeMode::Manual:
+				case EColumnSizeMode::FillSized:
 				{
 					auto GetColumnWidthAsOptionalSize = [&Column]() -> FOptionalSize
 					{
@@ -1422,6 +1449,7 @@ protected:
 				break;
 
 				default:
+					ensure(false);
 					break;
 				}
 

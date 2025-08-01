@@ -1,19 +1,23 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Misc/ConfigManifest.h"
-#include "Misc/EngineVersionBase.h"
+
+#include "Containers/Map.h"
+#include "Containers/StringConv.h"
 #include "Containers/UnrealString.h"
 #include "GenericPlatform/GenericPlatformFile.h"
-#include "HAL/PlatformFilemanager.h"
-#include "Containers/StringConv.h"
 #include "HAL/FileManager.h"
-#include "Misc/Paths.h"
-#include "Misc/ConfigCacheIni.h"
+#include "HAL/PlatformFileManager.h"
+#include "HAL/PlatformProcess.h"
+#include "HAL/PlatformProperties.h"
 #include "Misc/App.h"
-
+#include "Misc/ConfigCacheIni.h"
 #include "Misc/EngineVersion.h"
-
+#include "Misc/EngineVersionBase.h"
+#include "Misc/Paths.h"
 #include "Runtime/Launch/Resources/Version.h"
+#include "Templates/Tuple.h"
+#include "Templates/UnrealTemplate.h"
 
 enum class EConfigManifestVersion
 {
@@ -149,9 +153,9 @@ void MigrateToAgnosticIni(const TCHAR* SrcIniName, const TCHAR* DstIniName)
 	const FString OldIni = ProjectSpecificIniPath(SrcIniName);
 	const FString NewIni = ProjectAgnosticIniPath(DstIniName);
 
-	if (FPaths::FileExists(*OldIni))
+	if (FPaths::FileExists(OldIni))
 	{
-		if (!FPaths::FileExists(*NewIni))
+		if (!FPaths::FileExists(NewIni))
 		{
 			IFileManager::Get().Move(*NewIni, *OldIni);
 		}
@@ -258,17 +262,17 @@ EConfigManifestVersion FConfigManifest::UpgradeFromVersion(EConfigManifestVersio
 
 void FConfigManifest::MigrateConfigSection(FConfigFile& ConfigFile, const TCHAR* OldSectionName, const TCHAR* NewSectionName)
 {
-	const FConfigSection* OldSection = ConfigFile.Find(OldSectionName);
+	const FConfigSection* OldSection = ConfigFile.FindSection(OldSectionName);
 	if (OldSection)
 	{
-		FConfigSection* NewSection = ConfigFile.Find(NewSectionName);
+		const FConfigSection* NewSection = ConfigFile.FindSection(NewSectionName);
 		if (NewSection)
 		{
 			for (auto& Setting : *OldSection)
 			{
 				if (!NewSection->Contains(Setting.Key))
 				{
-					NewSection->Add(Setting.Key, Setting.Value);
+					ConfigFile.AddToSection(NewSectionName, Setting.Key, Setting.Value.GetSavedValue());
 				}
 			}
 		}

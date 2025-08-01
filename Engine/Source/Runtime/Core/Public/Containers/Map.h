@@ -5,6 +5,7 @@
 #include "CoreTypes.h"
 
 #include "Algo/Reverse.h"
+#include "Containers/ContainerElementTypeCompatibility.h"
 #include "Containers/Set.h"
 #include "Containers/UnrealString.h"
 #include "Misc/AssertionMacros.h"
@@ -14,6 +15,7 @@
 #include "Templates/Tuple.h"
 #include "Templates/UnrealTemplate.h"
 #include "Templates/UnrealTypeTraits.h"
+#include <type_traits>
 
 #define ExchangeB(A,B) {bool T=A; A=B; B=T;}
 
@@ -25,8 +27,8 @@ template <typename KeyInitType, typename ValueInitType>
 class TPairInitializer
 {
 public:
-	typename TRValueToLValueReference<KeyInitType  >::Type Key;
-	typename TRValueToLValueReference<ValueInitType>::Type Value;
+	std::conditional_t<std::is_rvalue_reference_v<KeyInitType>,   KeyInitType&,   KeyInitType>   Key;
+	std::conditional_t<std::is_rvalue_reference_v<ValueInitType>, ValueInitType&, ValueInitType> Value;
 
 	/** Initialization constructor. */
 	FORCEINLINE TPairInitializer(KeyInitType InKey, ValueInitType InValue)
@@ -56,12 +58,13 @@ template <typename KeyInitType>
 class TKeyInitializer
 {
 public:
-	typename TRValueToLValueReference<KeyInitType>::Type Key;
+	std::conditional_t<std::is_rvalue_reference_v<KeyInitType>, KeyInitType&, KeyInitType> Key;
 
 	/** Initialization constructor. */
 	FORCEINLINE explicit TKeyInitializer(KeyInitType InKey)
 		: Key(InKey)
-	{ }
+	{
+	}
 
 	template <typename KeyType, typename ValueType>
 	operator TPair<KeyType, ValueType>() const
@@ -133,11 +136,7 @@ class TMapBase
 	template <typename OtherKeyType, typename OtherValueType, typename OtherSetAllocator, typename OtherKeyFuncs>
 	friend class TMapBase;
 
-	friend struct TContainerTraits<TMapBase>;
-
 public:
-	static const bool SupportsFreezeMemoryImage = TAllocatorTraits<SetAllocator>::SupportsFreezeMemoryImage;
-
 	typedef typename TTypeTraits<KeyType  >::ConstPointerType KeyConstPointerType;
 	typedef typename TTypeTraits<KeyType  >::ConstInitType    KeyInitType;
 	typedef typename TTypeTraits<ValueType>::ConstInitType    ValueInitType;
@@ -179,15 +178,6 @@ protected:
 	}
 
 public:
-	// Legacy comparison operators.  Note that these also test whether the map's key-value pairs were added in the same order!
-	friend bool LegacyCompareEqual(const TMapBase& A, const TMapBase& B)
-	{
-		return LegacyCompareEqual(A.Pairs, B.Pairs);
-	}
-	friend bool LegacyCompareNotEqual(const TMapBase& A, const TMapBase& B)
-	{
-		return LegacyCompareNotEqual(A.Pairs, B.Pairs);
-	}
 
 	/**
 	 * Compare this map with another for equality. Does not make any assumptions about Key order.
@@ -266,10 +256,49 @@ public:
 		Pairs.Reserve(Number);
 	}
 
+	/**
+	 * Returns true if the map is empty and contains no elements. 
+	 *
+	 * @returns True if the map is empty.
+	 * @see Num
+	 */
+	bool IsEmpty() const
+	{
+		return Pairs.IsEmpty();
+	}
+
 	/** @return The number of elements in the map. */
 	FORCEINLINE int32 Num() const
 	{
 		return Pairs.Num();
+	}
+
+	/** @return The max valid index of the elements in the sparse storage. */
+	[[nodiscard]] FORCEINLINE int32 GetMaxIndex() const
+	{
+		return Pairs.GetMaxIndex();
+	}
+
+	/**
+	 * Checks whether an element id is valid.
+	 * @param Id - The element id to check.
+	 * @return true if the element identifier refers to a valid element in this map.
+	 */
+	[[nodiscard]] FORCEINLINE bool IsValidId(FSetElementId Id) const
+	{
+		return Pairs.IsValidId(Id);
+	}
+
+	/** Return a mapped pair by internal identifier. Element must be valid (see @IsValidId). */
+	[[nodiscard]] FORCEINLINE ElementType& Get(FSetElementId Id)
+	{
+		return Pairs[Id];
+	}
+
+	/** Return a mapped pair by internal identifier.  Element must be valid (see @IsValidId).*/
+	[[nodiscard]] FORCEINLINE const ElementType& Get(FSetElementId Id) const
+	{
+		return Pairs[Id];
 	}
 
 	/**
@@ -286,7 +315,7 @@ public:
 		VisitedKeys.Reserve(Num());
 
 		// Presize the array if we know there are supposed to be no duplicate keys
-		if (!KeyFuncs::bAllowDuplicateKeys)
+		if constexpr (!KeyFuncs::bAllowDuplicateKeys)
 		{
 			OutKeys.Reserve(Num());
 		}
@@ -336,7 +365,7 @@ public:
 	 * @return Number of bytes allocated by this container.
 	 * @see CountBytes
 	 */
-	FORCEINLINE uint32 GetAllocatedSize() const
+	FORCEINLINE SIZE_T GetAllocatedSize() const
 	{
 		return Pairs.GetAllocatedSize();
 	}
@@ -398,7 +427,7 @@ public:
 	 * @param InKey The key to associate the value with.
 	 * @param InValue The value to associate with the key.
 	 * @return A reference to the value as stored in the map. The reference is only valid until the next change to any key in the map.	 */
-	template <typename InitKeyType, typename InitValueType>
+	template <typename InitKeyType = KeyType, typename InitValueType = ValueType>
 	ValueType& Emplace(InitKeyType&& InKey, InitValueType&& InValue)
 	{
 		const FSetElementId PairId = Pairs.Emplace(TPairInitializer<InitKeyType&&, InitValueType&&>(Forward<InitKeyType>(InKey), Forward<InitValueType>(InValue)));
@@ -407,7 +436,7 @@ public:
 	}
 
 	/** See Emplace() and class documentation section on ByHash() functions */
-	template <typename InitKeyType, typename InitValueType>
+	template <typename InitKeyType = KeyType, typename InitValueType = ValueType>
 	ValueType& EmplaceByHash(uint32 KeyHash, InitKeyType&& InKey, InitValueType&& InValue)
 	{
 		const FSetElementId PairId = Pairs.EmplaceByHash(KeyHash, TPairInitializer<InitKeyType&&, InitValueType&&>(Forward<InitKeyType>(InKey), Forward<InitValueType>(InValue)));
@@ -421,7 +450,7 @@ public:
 	 * @param InKey The key to associate the value with.
 	 * @return A reference to the value as stored in the map. The reference is only valid until the next change to any key in the map.
 	 */
-	template <typename InitKeyType>
+	template <typename InitKeyType = KeyType>
 	ValueType& Emplace(InitKeyType&& InKey)
 	{
 		const FSetElementId PairId = Pairs.Emplace(TKeyInitializer<InitKeyType&&>(Forward<InitKeyType>(InKey)));
@@ -430,7 +459,7 @@ public:
 	}
 
 	/** See Emplace() and class documentation section on ByHash() functions */
-	template <typename InitKeyType>
+	template <typename InitKeyType = KeyType>
 	ValueType& EmplaceByHash(uint32 KeyHash, InitKeyType&& InKey)
 	{
 		const FSetElementId PairId = Pairs.EmplaceByHash(KeyHash, TKeyInitializer<InitKeyType&&>(Forward<InitKeyType>(InKey)));
@@ -488,9 +517,9 @@ public:
 	 *          the subset of elements for which the functor returns true.
 	 */
 	template <typename Predicate>
-	TMap<KeyType, ValueType> FilterByPredicate(Predicate Pred) const
+	TMap<KeyType, ValueType, SetAllocator, KeyFuncs> FilterByPredicate(Predicate Pred) const
 	{
-		TMap<KeyType, ValueType> FilterResults;
+		TMap<KeyType, ValueType, SetAllocator, KeyFuncs> FilterResults;
 		FilterResults.Reserve(Pairs.Num());
 		for (const ElementType& Pair : Pairs)
 		{
@@ -661,6 +690,23 @@ public:
 	}
 
 	/**
+	 * Find the value associated with a specified key.
+	 *
+	 * @param Key The key to search for.
+	 * @param DefaultValue The fallback value if the key is not found.
+	 * @return The value associated with the specified key, or DefaultValue if the key isn't contained in this map.
+	 */
+	FORCEINLINE ValueType FindRef(KeyConstPointerType Key, ValueType DefaultValue) const
+	{
+		if (const auto* Pair = Pairs.Find(Key))
+		{
+			return Pair->Value;
+		}
+
+		return DefaultValue;
+	}
+
+	/**
 	 * Check if map contains the specified key.
 	 *
 	 * @param Key The key to check for.
@@ -678,6 +724,12 @@ public:
 		return Pairs.ContainsByHash(KeyHash, Key);
 	}
 
+	/** Copy the key/value pairs in this map into an array. */
+	TArray<ElementType> Array() const
+	{
+		return Pairs.Array();
+	}
+
 	/**
 	 * Generate an array from the keys in this map.
 	 *
@@ -688,7 +740,7 @@ public:
 		OutArray.Empty(Pairs.Num());
 		for (typename ElementSetType::TConstIterator PairIt(Pairs); PairIt; ++PairIt)
 		{
-			new(OutArray) KeyType(PairIt->Key);
+			OutArray.Add(PairIt->Key);
 		}
 	}
 
@@ -702,52 +754,7 @@ public:
 		OutArray.Empty(Pairs.Num());
 		for (typename ElementSetType::TConstIterator PairIt(Pairs); PairIt; ++PairIt)
 		{
-			new(OutArray) ValueType(PairIt->Value);
-		}
-	}
-
-	/** Serializer. */
-	FORCEINLINE friend FArchive& operator<<(FArchive& Ar, TMapBase& Map)
-	{
-		return Ar << Map.Pairs;
-	}
-
-	/** Structured archive serializer. */
-	FORCEINLINE friend void operator<<(FStructuredArchive::FSlot Slot, TMapBase& InMap)
-	{
-		/*
-		if (Slot.GetUnderlyingArchive().IsTextFormat())
-		{
-			int32 Num = InMap.Num();
-			FStructuredArchive::FMap Map = Slot.EnterMap(Num);
-
-			if (Slot.GetUnderlyingArchive().IsLoading())
-			{
-				FString KeyString;
-				KeyType Key;
-
-				for (int32 Index = 0; Index < Num; ++Index)
-				{
-					FStructuredArchive::FSlot ValueSlot = Map.EnterElement(KeyString);
-					LexFromString(Key, *KeyString);
-					ValueSlot << InMap.Add(Key);
-				}
-			}
-			else
-			{
-				FString StringK;
-				for (TMapBase::TIterator It(InMap); It; ++It)
-				{
-					StringK = LexToString(It->Key);
-					FStructuredArchive::FSlot ValueSlot = Map.EnterElement(StringK);
-					ValueSlot << It->Value;
-				}
-			}
-		}
-		else
-		*/
-		{
-			Slot << InMap.Pairs;
+			OutArray.Add(PairIt->Value);
 		}
 	}
 
@@ -769,16 +776,16 @@ protected:
 	class TBaseIterator
 	{
 	public:
-		typedef typename TChooseClass<
+		typedef std::conditional_t<
 			bConst,
-			typename TChooseClass<bRangedFor, typename ElementSetType::TRangedForConstIterator, typename ElementSetType::TConstIterator>::Result,
-			typename TChooseClass<bRangedFor, typename ElementSetType::TRangedForIterator, typename ElementSetType::TIterator     >::Result
-		>::Result PairItType;
+			std::conditional_t<bRangedFor, typename ElementSetType::TRangedForConstIterator, typename ElementSetType::TConstIterator>,
+			std::conditional_t<bRangedFor, typename ElementSetType::TRangedForIterator, typename ElementSetType::TIterator     >
+		> PairItType;
 	private:
-		typedef typename TChooseClass<bConst, const TMapBase, TMapBase>::Result MapType;
-		typedef typename TChooseClass<bConst, const KeyType, KeyType>::Result ItKeyType;
-		typedef typename TChooseClass<bConst, const ValueType, ValueType>::Result ItValueType;
-		typedef typename TChooseClass<bConst, const typename ElementSetType::ElementType, typename ElementSetType::ElementType>::Result PairType;
+		typedef std::conditional_t<bConst, const TMapBase, TMapBase> MapType;
+		typedef std::conditional_t<bConst, const KeyType, KeyType> ItKeyType;
+		typedef std::conditional_t<bConst, const ValueType, ValueType> ItValueType;
+		typedef std::conditional_t<bConst, const typename ElementSetType::ElementType, typename ElementSetType::ElementType> PairType;
 
 	public:
 		FORCEINLINE TBaseIterator(const PairItType& InElementIt)
@@ -803,11 +810,16 @@ protected:
 			return !(bool)*this;
 		}
 
-		FORCEINLINE friend bool operator==(const TBaseIterator& Lhs, const TBaseIterator& Rhs) { return Lhs.PairIt == Rhs.PairIt; }
-		FORCEINLINE friend bool operator!=(const TBaseIterator& Lhs, const TBaseIterator& Rhs) { return Lhs.PairIt != Rhs.PairIt; }
+		FORCEINLINE bool operator==(const TBaseIterator& Rhs) const { return PairIt == Rhs.PairIt; }
+		FORCEINLINE bool operator!=(const TBaseIterator& Rhs) const { return PairIt != Rhs.PairIt; }
 
 		FORCEINLINE ItKeyType&   Key()   const { return PairIt->Key; }
 		FORCEINLINE ItValueType& Value() const { return PairIt->Value; }
+
+		[[nodiscard]] FORCEINLINE FSetElementId GetId() const
+		{
+			return PairIt.GetId();
+		}
 
 		FORCEINLINE PairType& operator* () const { return  *PairIt; }
 		FORCEINLINE PairType* operator->() const { return &*PairIt; }
@@ -821,9 +833,9 @@ protected:
 	class TBaseKeyIterator
 	{
 	private:
-		typedef typename TChooseClass<bConst, typename ElementSetType::TConstKeyIterator, typename ElementSetType::TKeyIterator>::Result SetItType;
-		typedef typename TChooseClass<bConst, const KeyType, KeyType>::Result ItKeyType;
-		typedef typename TChooseClass<bConst, const ValueType, ValueType>::Result ItValueType;
+		typedef std::conditional_t<bConst, typename ElementSetType::TConstKeyIterator, typename ElementSetType::TKeyIterator> SetItType;
+		typedef std::conditional_t<bConst, const KeyType, KeyType> ItKeyType;
+		typedef std::conditional_t<bConst, const ValueType, ValueType> ItValueType;
 
 	public:
 		/** Initialization constructor. */
@@ -849,8 +861,15 @@ protected:
 			return !(bool)*this;
 		}
 
+		[[nodiscard]] FORCEINLINE FSetElementId GetId() const
+		{
+			return SetIt.GetId();
+		}
 		FORCEINLINE ItKeyType&   Key() const { return SetIt->Key; }
 		FORCEINLINE ItValueType& Value() const { return SetIt->Value; }
+
+		FORCEINLINE decltype(auto) operator* () const { return SetIt.operator* (); }
+		FORCEINLINE decltype(auto) operator->() const { return SetIt.operator->(); }
 
 	protected:
 		SetItType SetIt;
@@ -898,7 +917,10 @@ public:
 			}
 		}
 
-		/** Removes the current pair from the map. */
+		/** Removes the current pair from the map without losing the iteration
+		 * position. Increment before using the iterator again, but after that
+		 * it will point at the element that was after the removed element.
+		 */
 		FORCEINLINE void RemoveCurrent()
 		{
 			TBaseIterator<false>::PairIt.RemoveCurrent();
@@ -986,6 +1008,8 @@ public:
 		return TConstKeyIterator(*this, InKey);
 	}
 
+	friend struct TMapPrivateFriend;
+
 public:
 	/**
 	 * DO NOT USE DIRECTLY
@@ -1001,8 +1025,6 @@ public:
 template <typename KeyType, typename ValueType, typename SetAllocator, typename KeyFuncs>
 class TSortableMapBase : public TMapBase<KeyType, ValueType, SetAllocator, KeyFuncs>
 {
-	friend struct TContainerTraits<TSortableMapBase>;
-
 protected:
 	typedef TMapBase<KeyType, ValueType, SetAllocator, KeyFuncs> Super;
 
@@ -1083,6 +1105,15 @@ public:
 		Super::Pairs.StableSort(FValueComparisonClass<PREDICATE_CLASS>(Predicate));
 	}
 
+	/**
+	 * Sort the free element list so that subsequent additions will occur in the lowest available
+	 * TSet index resulting in tighter packing without moving any existing items. Also useful for
+	 * some types of determinism. @see TSparseArray::SortFreeList() for more info.
+	 */
+	void SortFreeList()
+	{
+		Super::Pairs.SortFreeList();
+	}
 
 private:
 
@@ -1127,17 +1158,20 @@ template <typename AllocatorType, typename InDerivedType = void>
 class TScriptMap;
 
 /** A TMapBase specialization that only allows a single value associated with each key.*/
-template<typename KeyType, typename ValueType, typename SetAllocator /*= FDefaultSetAllocator*/, typename KeyFuncs /*= TDefaultMapHashableKeyFuncs<KeyType,ValueType,false>*/>
-class TMap : public TSortableMapBase<KeyType, ValueType, SetAllocator, KeyFuncs>
+template<typename InKeyType, typename InValueType, typename SetAllocator /*= FDefaultSetAllocator*/, typename KeyFuncs /*= TDefaultMapHashableKeyFuncs<KeyType,ValueType,false>*/>
+class TMap : public TSortableMapBase<InKeyType, InValueType, SetAllocator, KeyFuncs>
 {
-	friend struct TContainerTraits<TMap>;
-
 	template <typename, typename>
 	friend class TScriptMap;
 
 	static_assert(!KeyFuncs::bAllowDuplicateKeys, "TMap cannot be instantiated with a KeyFuncs which allows duplicate keys");
 
 public:
+	typedef InKeyType      KeyType;
+	typedef InValueType    ValueType;
+	typedef SetAllocator   SetAllocatorType;
+	typedef KeyFuncs       KeyFuncsType;
+
 	typedef TSortableMapBase<KeyType, ValueType, SetAllocator, KeyFuncs> Super;
 	typedef typename Super::KeyInitType KeyInitType;
 	typedef typename Super::KeyConstPointerType KeyConstPointerType;
@@ -1211,13 +1245,30 @@ public:
 	{
 		const FSetElementId PairId = Super::Pairs.FindId(Key);
 		if (!PairId.IsValidId())
+		{
 			return false;
+		}
 
 		OutRemovedValue = MoveTempIfPossible(Super::Pairs[PairId].Value);
 		Super::Pairs.Remove(PairId);
 		return true;
 	}
 	
+	/** See RemoveAndCopyValue() and class documentation section on ByHash() functions */
+	template<typename ComparableKey>
+	FORCEINLINE bool RemoveAndCopyValueByHash(uint32 KeyHash, const ComparableKey& Key, ValueType& OutRemovedValue)
+	{
+		const FSetElementId PairId = Super::Pairs.FindIdByHash(KeyHash, Key);
+		if (!PairId.IsValidId())
+		{
+			return false;
+		}
+
+		OutRemovedValue = MoveTempIfPossible(Super::Pairs[PairId].Value);
+		Super::Pairs.Remove(PairId);
+		return true;
+	}
+
 	/**
 	 * Find a pair with the specified key, removes it from the map, and returns the value part of the pair.
 	 *
@@ -1282,9 +1333,10 @@ namespace Freeze
 	}
 
 	template <typename KeyType, typename ValueType, typename SetAllocator, typename KeyFuncs>
-	void IntrinsicUnfrozenCopy(const FMemoryUnfreezeContent& Context, const TMap<KeyType, ValueType, SetAllocator, KeyFuncs>& Object, void* OutDst)
+	uint32 IntrinsicUnfrozenCopy(const FMemoryUnfreezeContent& Context, const TMap<KeyType, ValueType, SetAllocator, KeyFuncs>& Object, void* OutDst)
 	{
 		Object.CopyUnfrozen(Context, OutDst);
+		return sizeof(Object);
 	}
 
 	template <typename KeyType, typename ValueType, typename SetAllocator, typename KeyFuncs>
@@ -1301,8 +1353,6 @@ DECLARE_TEMPLATE_INTRINSIC_TYPE_LAYOUT((template <typename KeyType, typename Val
 template<typename KeyType, typename ValueType, typename SetAllocator /* = FDefaultSetAllocator */, typename KeyFuncs /*= TDefaultMapHashableKeyFuncs<KeyType,ValueType,true>*/>
 class TMultiMap : public TSortableMapBase<KeyType, ValueType, SetAllocator, KeyFuncs>
 {
-	friend struct TContainerTraits<TMultiMap>;
-
 	static_assert(KeyFuncs::bAllowDuplicateKeys, "TMultiMap cannot be instantiated with a KeyFuncs which disallows duplicate keys");
 
 public:
@@ -1379,7 +1429,7 @@ public:
 	{
 		for (typename Super::ElementSetType::TConstKeyIterator It(Super::Pairs, Key); It; ++It)
 		{
-			new(OutValues) ValueType(It->Value);
+			OutValues.Add(It->Value);
 		}
 
 		if (bMaintainOrder)
@@ -1616,9 +1666,10 @@ namespace Freeze
 	}
 
 	template <typename KeyType, typename ValueType, typename SetAllocator, typename KeyFuncs>
-	void IntrinsicUnfrozenCopy(const FMemoryUnfreezeContent& Context, const TMultiMap<KeyType, ValueType, SetAllocator, KeyFuncs>& Object, void* OutDst)
+	uint32 IntrinsicUnfrozenCopy(const FMemoryUnfreezeContent& Context, const TMultiMap<KeyType, ValueType, SetAllocator, KeyFuncs>& Object, void* OutDst)
 	{
 		Object.CopyUnfrozen(Context, OutDst);
+		return sizeof(Object);
 	}
 
 	template <typename KeyType, typename ValueType, typename SetAllocator, typename KeyFuncs>
@@ -1646,7 +1697,7 @@ struct FScriptMapLayout
 template <typename AllocatorType, typename InDerivedType>
 class TScriptMap
 {
-	using DerivedType = typename TChooseClass<TIsVoidType<InDerivedType>::Value, TScriptMap, InDerivedType>::Result;
+	using DerivedType = std::conditional_t<std::is_void_v<InDerivedType>, TScriptMap, InDerivedType>;
 
 public:
 	static FScriptMapLayout GetScriptLayout(int32 KeySize, int32 KeyAlignment, int32 ValueSize, int32 ValueAlignment)
@@ -1673,11 +1724,17 @@ public:
 		return Pairs.IsValidIndex(Index);
 	}
 
+	bool IsEmpty() const
+	{
+		return Pairs.IsEmpty();
+	}
+
 	int32 Num() const
 	{
 		return Pairs.Num();
 	}
 
+	/** @return The max valid index of the elements in the sparse storage. */
 	int32 GetMaxIndex() const
 	{
 		return Pairs.GetMaxIndex();
@@ -1856,6 +1913,16 @@ struct TIsZeroConstructType<TScriptMap<AllocatorType>>
 	enum { Value = true };
 };
 
+/**
+ * Traits class which determines whether or not a type is a TMap.
+ */
+template <typename T> struct TIsTMap { enum { Value = false }; };
+
+template <typename KeyType, typename ValueType, typename SetAllocator, typename KeyFuncs> struct TIsTMap<               TMap<KeyType, ValueType, SetAllocator, KeyFuncs>> { enum { Value = true }; };
+template <typename KeyType, typename ValueType, typename SetAllocator, typename KeyFuncs> struct TIsTMap<const          TMap<KeyType, ValueType, SetAllocator, KeyFuncs>> { enum { Value = true }; };
+template <typename KeyType, typename ValueType, typename SetAllocator, typename KeyFuncs> struct TIsTMap<      volatile TMap<KeyType, ValueType, SetAllocator, KeyFuncs>> { enum { Value = true }; };
+template <typename KeyType, typename ValueType, typename SetAllocator, typename KeyFuncs> struct TIsTMap<const volatile TMap<KeyType, ValueType, SetAllocator, KeyFuncs>> { enum { Value = true }; };
+
 class FScriptMap : public TScriptMap<FDefaultSetAllocator, FScriptMap>
 {
 	using Super = TScriptMap<FDefaultSetAllocator, FScriptMap>;
@@ -1864,15 +1931,83 @@ public:
 	using Super::Super;
 };
 
-template <typename KeyType, typename ValueType, typename SetAllocator, typename KeyFuncs>
-struct TContainerTraits<TMap<KeyType, ValueType, SetAllocator, KeyFuncs>> : public TContainerTraitsBase<TMap<KeyType, ValueType, SetAllocator, KeyFuncs>>
+struct TMapPrivateFriend
 {
-	enum { MoveWillEmptyContainer = TContainerTraits<typename TMap<KeyType, ValueType, SetAllocator, KeyFuncs>::ElementSetType>::MoveWillEmptyContainer };
+	template <typename KeyType, typename ValueType, typename SetAllocator, typename KeyFuncs>
+	FORCEINLINE static FArchive& Serialize(FArchive& Ar, TMapBase<KeyType, ValueType, SetAllocator, KeyFuncs>& Map)
+	{
+		Ar << Map.Pairs;
+		return Ar;
+	}
+
+	template <typename KeyType, typename ValueType, typename SetAllocator, typename KeyFuncs>
+	FORCEINLINE static void SerializeStructured(FStructuredArchive::FSlot Slot, TMapBase<KeyType, ValueType, SetAllocator, KeyFuncs>& InMap)
+	{
+		/*
+		if (Slot.GetUnderlyingArchive().IsTextFormat())
+		{
+			int32 Num = InMap.Num();
+			FStructuredArchive::FMap Map = Slot.EnterMap(Num);
+
+			if (Slot.GetUnderlyingArchive().IsLoading())
+			{
+				FString KeyString;
+				KeyType Key;
+
+				for (int32 Index = 0; Index < Num; ++Index)
+				{
+					FStructuredArchive::FSlot ValueSlot = Map.EnterElement(KeyString);
+					LexFromString(Key, *KeyString);
+					ValueSlot << InMap.Add(Key);
+				}
+			}
+			else
+			{
+				FString StringK;
+				for (TMapBase::TIterator It(InMap); It; ++It)
+				{
+					StringK = LexToString(It->Key);
+					FStructuredArchive::FSlot ValueSlot = Map.EnterElement(StringK);
+					ValueSlot << It->Value;
+				}
+			}
+		}
+		else
+		*/
+		{
+			Slot << InMap.Pairs;
+		}
+	}
+
+	template <typename KeyType, typename ValueType, typename SetAllocator, typename KeyFuncs>
+	static bool LegacyCompareEqual(const TMapBase<KeyType, ValueType, SetAllocator, KeyFuncs>& A, const TMapBase<KeyType, ValueType, SetAllocator, KeyFuncs>& B)
+	{
+		return TSetPrivateFriend::LegacyCompareEqual(A.Pairs, B.Pairs);
+	}
 };
 
-
+/** Serializer. */
 template <typename KeyType, typename ValueType, typename SetAllocator, typename KeyFuncs>
-struct TContainerTraits<TMultiMap<KeyType, ValueType, SetAllocator, KeyFuncs>> : public TContainerTraitsBase<TMultiMap<KeyType, ValueType, SetAllocator, KeyFuncs>>
+FORCEINLINE FArchive& operator<<(FArchive& Ar, TMapBase<KeyType, ValueType, SetAllocator, KeyFuncs>& Map)
 {
-	enum { MoveWillEmptyContainer = TContainerTraits<typename TMultiMap<KeyType, ValueType, SetAllocator, KeyFuncs>::ElementSetType>::MoveWillEmptyContainer };
-};
+	return TMapPrivateFriend::Serialize(Ar, Map);
+}
+
+/** Structured archive serializer. */
+template <typename KeyType, typename ValueType, typename SetAllocator, typename KeyFuncs>
+FORCEINLINE void operator<<(FStructuredArchive::FSlot Slot, TMapBase<KeyType, ValueType, SetAllocator, KeyFuncs>& InMap)
+{
+	TMapPrivateFriend::SerializeStructured(Slot, InMap);
+}
+
+// Legacy comparison operators.  Note that these also test whether the map's key-value pairs were added in the same order!
+template <typename KeyType, typename ValueType, typename SetAllocator, typename KeyFuncs>
+bool LegacyCompareEqual(const TMapBase<KeyType, ValueType, SetAllocator, KeyFuncs>& A, const TMapBase<KeyType, ValueType, SetAllocator, KeyFuncs>& B)
+{
+	return TMapPrivateFriend::LegacyCompareEqual(A, B);
+}
+template <typename KeyType, typename ValueType, typename SetAllocator, typename KeyFuncs>
+bool LegacyCompareNotEqual(const TMapBase<KeyType, ValueType, SetAllocator, KeyFuncs>& A, const TMapBase<KeyType, ValueType, SetAllocator, KeyFuncs>& B)
+{
+	return !TMapPrivateFriend::LegacyCompareEqual(A, B);
+}

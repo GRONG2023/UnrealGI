@@ -3,6 +3,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
+
+#if STATS
+
 #include "HAL/ThreadSafeCounter.h"
 #include "Containers/IndirectArray.h"
 #include "Containers/ChunkedArray.h"
@@ -24,7 +27,7 @@ struct FInclusiveTime
 	/** Number of recursion. */
 	int32 Recursion;
 	FInclusiveTime()
-		: DurationCycles( 0.0 )
+		: DurationCycles( 0 )
 		, CallCount( 0 )
 		, Recursion( 0 )
 	{}
@@ -563,3 +566,4 @@ protected:
 	}
 };
 
+#endif // STATS

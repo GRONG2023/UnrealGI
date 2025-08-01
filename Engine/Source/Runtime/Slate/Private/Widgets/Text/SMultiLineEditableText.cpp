@@ -11,6 +11,7 @@
 #include "Framework/Text/PlainTextLayoutMarshaller.h"
 #include "Widgets/Text/SlateEditableTextLayout.h"
 #include "Types/ReflectionMetadata.h"
+#include "Types/TrackedMetaData.h"
 
 SMultiLineEditableText::SMultiLineEditableText()
 	: bSelectAllTextWhenFocused(false)
@@ -84,21 +85,33 @@ void SMultiLineEditableText::Construct( const FArguments& InArgs )
 	EditableTextLayout->SetJustification(InArgs._Justification);
 	EditableTextLayout->SetLineHeightPercentage(InArgs._LineHeightPercentage);
 	EditableTextLayout->SetDebugSourceInfo(TAttribute<FString>::Create(TAttribute<FString>::FGetter::CreateLambda([this]{ return FReflectionMetaData::GetWidgetDebugInfo(this); })));
+	EditableTextLayout->SetOverflowPolicy(InArgs._OverflowPolicy);
 
 	// build context menu extender
 	MenuExtender = MakeShareable(new FExtender);
 	MenuExtender->AddMenuExtension("EditText", EExtensionHook::Before, TSharedPtr<FUICommandList>(), InArgs._ContextMenuExtender);
-}
 
+	AddMetadata(MakeShared<FTrackedMetaData>(this, FName(TEXT("EditableText"))));
+}
 
 void SMultiLineEditableText::GetCurrentTextLine(FString& OutTextLine) const
 {
 	EditableTextLayout->GetCurrentTextLine(OutTextLine);
 }
 
+void SMultiLineEditableText::GetTextLine(const int32 InLineIndex, FString& OutTextLine) const
+{
+	EditableTextLayout->GetTextLine(InLineIndex, OutTextLine);
+}
+
 void SMultiLineEditableText::SetText(const TAttribute< FText >& InText)
 {
 	EditableTextLayout->SetText(InText);
+}
+
+int32 SMultiLineEditableText::GetTextLineCount()
+{
+	return EditableTextLayout->GetTextLineCount();
 }
 
 FText SMultiLineEditableText::GetText() const
@@ -131,6 +144,16 @@ FText SMultiLineEditableText::GetSearchText() const
 	return EditableTextLayout->GetSearchText();
 }
 
+int32 SMultiLineEditableText::GetSearchResultIndex() const
+{
+	return EditableTextLayout->GetSearchResultIndex();
+}
+
+int32 SMultiLineEditableText::GetNumSearchResults() const
+{
+	return EditableTextLayout->GetNumSearchResults();
+}
+
 void SMultiLineEditableText::SetTextStyle(const FTextBlockStyle* InTextStyle)
 {
 	if (InTextStyle)
@@ -150,6 +173,12 @@ void SMultiLineEditableText::SetFont(const TAttribute< FSlateFontInfo >& InNewFo
 	FTextBlockStyle TextStyle = EditableTextLayout->GetTextStyle();
 	TextStyle.SetFont(InNewFont.Get());
 	EditableTextLayout->SetTextStyle(TextStyle);
+}
+
+FSlateFontInfo SMultiLineEditableText::GetFont() const
+{
+	FTextBlockStyle TextStyle = EditableTextLayout->GetTextStyle();
+	return TextStyle.Font;
 }
 
 void SMultiLineEditableText::SetTextShapingMethod(const TOptional<ETextShapingMethod>& InTextShapingMethod)
@@ -182,6 +211,11 @@ void SMultiLineEditableText::SetLineHeightPercentage(const TAttribute<float>& In
 	EditableTextLayout->SetLineHeightPercentage(InLineHeightPercentage);
 }
 
+void SMultiLineEditableText::SetApplyLineHeightToBottomLine(const TAttribute<bool>& InApplyLineHeightToBottomLine)
+{
+	EditableTextLayout->SetApplyLineHeightToBottomLine(InApplyLineHeightToBottomLine);
+}
+
 void SMultiLineEditableText::SetMargin(const TAttribute<FMargin>& InMargin)
 {
 	EditableTextLayout->SetMargin(InMargin);
@@ -190,6 +224,11 @@ void SMultiLineEditableText::SetMargin(const TAttribute<FMargin>& InMargin)
 void SMultiLineEditableText::SetJustification(const TAttribute<ETextJustify::Type>& InJustification)
 {
 	EditableTextLayout->SetJustification(InJustification);
+}
+
+void SMultiLineEditableText::SetOverflowPolicy(TOptional<ETextOverflowPolicy> InOverflowPolicy)
+{
+	EditableTextLayout->SetOverflowPolicy(InOverflowPolicy);
 }
 
 void SMultiLineEditableText::SetAllowContextMenu(const TAttribute< bool >& InAllowContextMenu)
@@ -425,6 +464,16 @@ float SMultiLineEditableText::UpdateAndClampVerticalScrollBar(const float InView
 	return EditableTextLayout->GetScrollOffset().Y;
 }
 
+void SMultiLineEditableText::BeginEditTransaction()
+{
+	EditableTextLayout->BeginEditTransation();
+}
+
+void SMultiLineEditableText::EndEditTransaction()
+{
+	EditableTextLayout->EndEditTransaction();
+}
+
 FReply SMultiLineEditableText::OnFocusReceived( const FGeometry& MyGeometry, const FFocusEvent& InFocusEvent )
 {
 	EditableTextLayout->HandleFocusReceived(InFocusEvent);
@@ -447,6 +496,11 @@ void SMultiLineEditableText::SelectAllText()
 	EditableTextLayout->SelectAllText();
 }
 
+void SMultiLineEditableText::SelectText(const FTextLocation& InSelectionStart, const FTextLocation& InCursorLocation)
+{
+	EditableTextLayout->SelectText(InSelectionStart, InCursorLocation);
+}
+
 void SMultiLineEditableText::ClearSelection()
 {
 	EditableTextLayout->ClearSelection();
@@ -455,6 +509,16 @@ void SMultiLineEditableText::ClearSelection()
 FText SMultiLineEditableText::GetSelectedText() const
 {
 	return EditableTextLayout->GetSelectedText();
+}
+
+FTextSelection SMultiLineEditableText::GetSelection() const
+{
+	return EditableTextLayout->GetSelection();
+}
+
+void SMultiLineEditableText::DeleteSelectedText()
+{
+	EditableTextLayout->DeleteSelectedText();
 }
 
 void SMultiLineEditableText::InsertTextAtCursor(const FText& InText)
@@ -517,6 +581,16 @@ TArray<TSharedRef<const IRun>> SMultiLineEditableText::GetSelectedRuns() const
 	return EditableTextLayout->GetSelectedRuns();
 }
 
+FTextLocation SMultiLineEditableText::GetCursorLocation() const
+{
+	return EditableTextLayout->GetCursorLocation();
+}
+
+TCHAR SMultiLineEditableText::GetCharacterAt(const FTextLocation& Location) const
+{
+	return EditableTextLayout->GetCharacterAt(Location);
+}
+
 TSharedPtr<const SScrollBar> SMultiLineEditableText::GetHScrollBar() const
 {
 	return HScrollBar;
@@ -535,7 +609,7 @@ void SMultiLineEditableText::Refresh()
 void SMultiLineEditableText::ForceScroll(int32 UserIndex, float ScrollAxisMagnitude)
 {
 	const FGeometry& CachedGeom = GetCachedGeometry();
-	FVector2D ScrollPos = (CachedGeom.LocalToAbsolute(FVector2D::ZeroVector) + CachedGeom.LocalToAbsolute(CachedGeom.GetLocalSize())) * 0.5f;
+	FVector2f ScrollPos = (CachedGeom.LocalToAbsolute(FVector2f::ZeroVector) + CachedGeom.LocalToAbsolute(CachedGeom.GetLocalSize())) * 0.5f;
 	TSet<FKey> PressedKeys;
 
 	OnMouseWheel(CachedGeom, FPointerEvent(UserIndex, 0, ScrollPos, ScrollPos, PressedKeys, EKeys::Invalid, ScrollAxisMagnitude, FModifierKeysState()));
@@ -566,11 +640,12 @@ int32 SMultiLineEditableText::OnPaint( const FPaintArgs& Args, const FGeometry& 
 	if (bIsSoftwareCursor)
 	{
 		const FSlateBrush* Brush = FCoreStyle::Get().GetBrush(TEXT("SoftwareCursor_Grab"));
+		const FVector2f CursorSize = Brush->ImageSize / AllottedGeometry.Scale;
 
 		FSlateDrawElement::MakeBox(
 			OutDrawElements,
 			++LayerId,
-			AllottedGeometry.ToPaintGeometry(SoftwareCursorPosition - (Brush->ImageSize / 2), Brush->ImageSize),
+			AllottedGeometry.ToPaintGeometry(CursorSize, FSlateLayoutTransform(SoftwareCursorPosition - (CursorSize *.5f))),
 			Brush
 			);
 	}
@@ -665,7 +740,7 @@ FReply SMultiLineEditableText::OnMouseButtonUp( const FGeometry& MyGeometry, con
 		if (bWasRightClickScrolling)
 		{
 			bIsSoftwareCursor = false;
-			const FVector2D CursorPosition = MyGeometry.LocalToAbsolute(SoftwareCursorPosition);
+			const FVector2f CursorPosition = MyGeometry.LocalToAbsolute(SoftwareCursorPosition);
 			const FIntPoint OriginalMousePos(CursorPosition.X, CursorPosition.Y);
 			return FReply::Handled().ReleaseMouseCapture().SetMousePos(OriginalMousePos);
 		}
@@ -686,9 +761,9 @@ FReply SMultiLineEditableText::OnMouseMove( const FGeometry& MyGeometry, const F
 
 		if (IsRightClickScrolling())
 		{
-			const FVector2D PreviousScrollOffset = EditableTextLayout->GetScrollOffset();
+			const FVector2f PreviousScrollOffset = EditableTextLayout->GetScrollOffset();
 
-			FVector2D NewScrollOffset = PreviousScrollOffset;
+			FVector2f NewScrollOffset = PreviousScrollOffset;
 			NewScrollOffset.Y -= ScrollByAmount;
 			EditableTextLayout->SetScrollOffset(NewScrollOffset, MyGeometry);
 
@@ -719,9 +794,9 @@ FReply SMultiLineEditableText::OnMouseWheel( const FGeometry& MyGeometry, const 
 	{
 		const float ScrollAmount = -MouseEvent.GetWheelDelta() * GetGlobalScrollAmount();
 
-		const FVector2D PreviousScrollOffset = EditableTextLayout->GetScrollOffset();
+		const FVector2f PreviousScrollOffset = EditableTextLayout->GetScrollOffset();
 		
-		FVector2D NewScrollOffset = PreviousScrollOffset;
+		FVector2f NewScrollOffset = PreviousScrollOffset;
 		NewScrollOffset.Y += ScrollAmount;
 		EditableTextLayout->SetScrollOffset(NewScrollOffset, MyGeometry);
 

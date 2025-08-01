@@ -19,6 +19,4 @@ namespace AnimationCore
 
 		return !NewRotator.Equals(DeltaRotator);
 	}
-
 }
-

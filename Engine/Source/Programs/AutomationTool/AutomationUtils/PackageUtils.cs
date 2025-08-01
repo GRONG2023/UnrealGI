@@ -11,9 +11,12 @@ using AutomationTool;
 using EpicGames.MCP.Automation;
 using UnrealBuildTool;
 using System.Diagnostics;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 using System.Reflection;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+
+using static AutomationTool.CommandUtils;
 
 namespace AutomationTool
 {
@@ -23,7 +26,7 @@ namespace AutomationTool
 		{
 			if (!CommandUtils.DirectoryExists(SourceDirectory))
 			{
-				CommandUtils.LogError("Pak file directory {0} doesn't exist.", SourceDirectory);
+				Logger.LogError("Pak file directory {SourceDirectory} doesn't exist.", SourceDirectory);
 				return;
 			}
 

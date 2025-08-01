@@ -19,7 +19,7 @@
 #include "HAL/FileManager.h"
 #include "Factories/FbxSceneImportFactory.h"
 
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 
 //Windows dialog popup
 #include "Widgets/DeclarativeSyntaxSupport.h"
@@ -32,6 +32,7 @@
 //Meshes includes
 #include "MeshUtilities.h"
 #include "RawMesh.h"
+#include "MaterialDomain.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/Material.h"
 #include "GeomFitUtils.h"
@@ -48,6 +49,7 @@
 //Skeletal mesh includes
 #include "Animation/Skeleton.h"
 #include "Engine/SkeletalMesh.h"
+#include "Engine/SkinnedAssetCommon.h"
 #include "Components/SkinnedMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "AnimEncoding.h"
@@ -147,12 +149,12 @@ void FFbxImporter::ShowFbxSkeletonConflictWindow(USkeletalMesh* SkeletalMesh, US
 				for (const FName& AssetDependencyName : AllDependencies)
 				{
 					const FString PackageString = AssetDependencyName.ToString();
-					const FString FullAssetPathName = FString::Printf(TEXT("%s.%s"), *PackageString, *FPackageName::GetLongPackageAssetName(PackageString));
+					const FSoftObjectPath FullAssetPath(*PackageString, *FPackageName::GetLongPackageAssetName(PackageString), {});
 					
-					FAssetData AssetData = AssetRegistryModule.Get().GetAssetByObjectPath(FName(*FullAssetPathName));
+					FAssetData AssetData = AssetRegistryModule.Get().GetAssetByObjectPath(FullAssetPath);
 					if (AssetData.GetClass() != nullptr)
 					{
-						TSharedPtr<FString> AssetReferencing = MakeShareable(new FString(AssetData.AssetClass.ToString() + TEXT(" ") + FullAssetPathName));
+						TSharedPtr<FString> AssetReferencing = MakeShareable(new FString(AssetData.AssetClassPath.ToString() + TEXT(" ") + FullAssetPath.ToString()));
 						AssetReferencingSkeleton.Add(AssetReferencing);
 					}
 				}

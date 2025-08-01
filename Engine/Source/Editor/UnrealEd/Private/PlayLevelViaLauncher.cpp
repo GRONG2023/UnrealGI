@@ -1,25 +1,32 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Editor/EditorEngine.h"
-#include "ITargetDeviceServicesModule.h"
-#include "ILauncherServicesModule.h"
-#include "EditorAnalytics.h"
+#include "Algo/AllOf.h"
 #include "AnalyticsEventAttribute.h"
-#include "Widgets/Notifications/SNotificationList.h"
-#include "Interfaces/ITargetPlatform.h"
-#include "Misc/CoreMisc.h"
-#include "GameProjectGenerationModule.h"
-#include "CookerSettings.h"
-#include "UnrealEdMisc.h"
-#include "Interfaces/ITargetPlatformManagerModule.h"
-#include "Settings/ProjectPackagingSettings.h"
-#include "Framework/Notifications/NotificationManager.h"
-#include "PlayLevel.h"
 #include "Async/Async.h"
-#include "Logging/MessageLog.h"
-#include "TargetReceipt.h"
+#include "CookerSettings.h"
 #include "DesktopPlatformModule.h"
+#include "Editor/EditorEngine.h"
+#include "Editor/EditorPerProjectUserSettings.h"
+#include "EditorAnalytics.h"
+#include "Experimental/ZenServerInterface.h"
+#include "Framework/Docking/TabManager.h"
+#include "Framework/Notifications/NotificationManager.h"
+#include "GameProjectGenerationModule.h"
+#include "ILauncherServicesModule.h"
+#include "Interfaces/ITargetPlatform.h"
+#include "Interfaces/ITargetPlatformManagerModule.h"
+#include "ITargetDeviceServicesModule.h"
+#include "Logging/MessageLog.h"
+#include "Misc/CoreMisc.h"
 #include "PlatformInfo.h"
+#include "PlayLevel.h"
+#include "Settings/EditorExperimentalSettings.h"
+#include "Settings/LevelEditorPlaySettings.h"
+#include "Settings/ProjectPackagingSettings.h"
+#include "Settings/PlatformsMenuSettings.h"
+#include "TargetReceipt.h"
+#include "UnrealEdMisc.h"
+#include "Widgets/Notifications/SNotificationList.h"
 
 #define LOCTEXT_NAMESPACE "PlayLevel"
 
@@ -40,15 +47,15 @@ static void HandleOutputReceived(const FString& InMessage)
 {
 	if (InMessage.Contains(TEXT("Error:")))
 	{
-		UE_LOG(LogPlayLevel, Error, TEXT("%s"), *InMessage);
+		UE_LOG(LogPlayLevel, Error, TEXT("UAT: %s"), *InMessage);
 	}
 	else if (InMessage.Contains(TEXT("Warning:")))
 	{
-		UE_LOG(LogPlayLevel, Warning, TEXT("%s"), *InMessage);
+		UE_LOG(LogPlayLevel, Warning, TEXT("UAT: %s"), *InMessage);
 	}
 	else
 	{
-		UE_LOG(LogPlayLevel, Log, TEXT("%s"), *InMessage);
+		UE_LOG(LogPlayLevel, Log, TEXT("UAT: %s"), *InMessage);
 	}
 }
 
@@ -82,11 +89,13 @@ void UEditorEngine::StartPlayUsingLauncherSession(FRequestPlaySessionParams& InR
 	FString LaunchPlatformName = LastPlayUsingLauncherDeviceId.Left(LastPlayUsingLauncherDeviceId.Find(TEXT("@")));
 	FString LaunchPlatformNameFromID = LastPlayUsingLauncherDeviceId.Right(LastPlayUsingLauncherDeviceId.Find(TEXT("@")));
 	ITargetPlatform* LaunchPlatform = GetTargetPlatformManagerRef().FindTargetPlatform(LaunchPlatformName);
+	FString IniPlatformName = LaunchPlatformName;
 
 	// create a temporary device group and launcher profile
 	ILauncherDeviceGroupRef DeviceGroup = LauncherServicesModule.CreateDeviceGroup(FGuid::NewGuid(), TEXT("PlayOnDevices"));
 	if (LaunchPlatform != nullptr)
 	{
+		IniPlatformName = LaunchPlatform->IniPlatformName();
 		if (LaunchPlatformNameFromID.Equals(LaunchPlatformName))
 		{
 			// create a temporary list of devices for the target platform
@@ -130,7 +139,7 @@ void UEditorEngine::StartPlayUsingLauncherSession(FRequestPlaySessionParams& InR
 	}
 
 	// set the build/launch configuration 
-	EBuildConfiguration BuildConfiguration;
+	EBuildConfiguration BuildConfiguration = EBuildConfiguration::Development;
 	const ULevelEditorPlaySettings* EditorPlaySettings = PlaySessionRequest->EditorPlaySettings;
 	switch (EditorPlaySettings->LaunchConfiguration)
 	{
@@ -147,9 +156,36 @@ void UEditorEngine::StartPlayUsingLauncherSession(FRequestPlaySessionParams& InR
 		BuildConfiguration = EBuildConfiguration::Shipping;
 		break;
 	default:
-		// same as the running editor
-		BuildConfiguration = FApp::GetBuildConfiguration();
+	{
+		const UProjectPackagingSettings* AllPlatformPackagingSettings = GetDefault<UProjectPackagingSettings>();
+		const UPlatformsMenuSettings* PlatformsSettings = GetDefault<UPlatformsMenuSettings>();
+
+		EProjectPackagingBuildConfigurations BuildConfig = PlatformsSettings->GetBuildConfigurationForPlatform(*IniPlatformName);
+		// if PPBC_MAX is set, then the project default should be used instead of the per platform build config
+		if (BuildConfig == EProjectPackagingBuildConfigurations::PPBC_MAX)
+		{
+			BuildConfig = AllPlatformPackagingSettings->BuildConfiguration;
+		}
+
+		switch (BuildConfig)
+		{
+		case EProjectPackagingBuildConfigurations::PPBC_Debug:
+		case EProjectPackagingBuildConfigurations::PPBC_DebugGame:
+			BuildConfiguration = EBuildConfiguration::Debug;
+			break;
+		case EProjectPackagingBuildConfigurations::PPBC_Development:
+			BuildConfiguration = EBuildConfiguration::Development;
+			break;
+		case EProjectPackagingBuildConfigurations::PPBC_Test:
+			BuildConfiguration = EBuildConfiguration::Test;
+			break;
+		case EProjectPackagingBuildConfigurations::PPBC_Shipping:
+			BuildConfiguration = EBuildConfiguration::Shipping;
+			break;
+		}
+
 		break;
+	}
 	}
 
 	// does the project have any code?
@@ -178,44 +214,100 @@ void UEditorEngine::StartPlayUsingLauncherSession(FRequestPlaySessionParams& InR
 	ILauncherProfileRef LauncherProfile = LauncherServicesModule.CreateProfile(TEXT("Launch On Device"));
 	LauncherProfile->SetBuildMode(BuildMode);
 	LauncherProfile->SetBuildConfiguration(BuildConfiguration);
+	if (InRequestParams.EditorPlaySettings && !InRequestParams.EditorPlaySettings->AdditionalLaunchParameters.IsEmpty())
+	{
+		LauncherProfile->SetAdditionalCommandLineParameters(InRequestParams.EditorPlaySettings->AdditionalLaunchParameters);
+	}
+
+	LauncherProfile->AddCookedPlatform(LaunchPlatformName);
+
+	LauncherProfile->SetDeviceIsASimulator(InRequestParams.LauncherTargetDevice->bIsSimulator);
 
 	// select the quickest cook mode based on which in editor cook mode is enabled
-	bool bIncrimentalCooking = true;
-	LauncherProfile->AddCookedPlatform(LaunchPlatformName);
+	const UCookerSettings& CookerSettings = *GetDefault<UCookerSettings>();
+	const UEditorExperimentalSettings& ExperimentalSettings = *GetDefault<UEditorExperimentalSettings>();
+
+	bool bInEditorCooking = false;
+	bool bCookOnTheFly = false;
 	ELauncherProfileCookModes::Type CurrentLauncherCookMode = ELauncherProfileCookModes::ByTheBook;
-	bool bCanCookByTheBookInEditor = true;
-	bool bCanCookOnTheFlyInEditor = true;
-	for (const FString& PlatformName : LauncherProfile->GetCookedPlatforms())
+	if (!CookerSettings.bCookOnTheFlyForLaunchOn)
 	{
-		if (CanCookByTheBookInEditor(PlatformName) == false)
+		bInEditorCooking = Algo::AllOf(LauncherProfile->GetCookedPlatforms(),
+			[this](const FString& PlatformName) { return CanCookByTheBookInEditor(PlatformName); });
+		CurrentLauncherCookMode = bInEditorCooking ? ELauncherProfileCookModes::ByTheBookInEditor: ELauncherProfileCookModes::ByTheBook;
+	}
+	else
+	{
+		bCookOnTheFly = true;
+		bInEditorCooking = Algo::AllOf(LauncherProfile->GetCookedPlatforms(),
+			[this](const FString& PlatformName) { return CanCookOnTheFlyInEditor(PlatformName); });
+		CurrentLauncherCookMode = bInEditorCooking ? ELauncherProfileCookModes::OnTheFlyInEditor : ELauncherProfileCookModes::OnTheFly;
+	}
+
+	bool bIncrementalCooking = (CookerSettings.bIterativeCookingForLaunchOn || ExperimentalSettings.bSharedCookedBuilds) && !bCookOnTheFly;
+
+	if (CurrentLauncherCookMode == ELauncherProfileCookModes::OnTheFlyInEditor ||
+		CurrentLauncherCookMode == ELauncherProfileCookModes::ByTheBookInEditor)
+	{
+		// For now World Partition doesn't support InEditor cooking because its cooking is destructive -
+		// it moves UObjects out of the generator package into the streaming packages. To allow cooking it in
+		// the editor process, we will need to make it non-destructive or restore the package afterwards.
+		FWorldContext& EditorContext = GetEditorWorldContext();
+		if (EditorContext.World()->IsPartitionedWorld())
 		{
-			bCanCookByTheBookInEditor = false;
+			FString ErrorMsg = FString::Printf(TEXT("Error launching map %s : Quick launch with WorldPartition doesn't yet support cooking in the editor process.\n")
+				TEXT("To launch this map using Quick launch, set EditorPerProjectUserSettings.ini:[/Script/UnrealEd.EditorExperimentalSettings]:bDisableCookInEditor=true and relaunch the editor."),
+				*EditorContext.World()->GetOutermost()->GetName());
+			UE_LOG(LogPlayLevel, Error, TEXT("%s"), *ErrorMsg);
+			FMessageLog("EditorErrors").Error(FText::FromString(ErrorMsg));
+			FMessageLog("EditorErrors").Open();
+			CancelRequestPlaySession();
+			return;
 		}
-		if (CanCookOnTheFlyInEditor(PlatformName) == false)
+	}
+
+	TStringBuilder<256> CookOptions;
+	CookOptions << LauncherProfile->GetCookOptions();
+	ensure(CookOptions.Len() == 0);
+	auto SetCookOption = [&CookOptions](FStringView Option, bool bOptionOn)
+	{
+		ensure(CookOptions.ToView().Find(Option) == INDEX_NONE);
+		if (bOptionOn)
 		{
-			bCanCookOnTheFlyInEditor = false;
+			CookOptions << (CookOptions.Len() > 0 ? TEXTVIEW(" ") : TEXTVIEW(""));
+			CookOptions << Option;
 		}
-	}
-	if (bCanCookByTheBookInEditor)
+	};
+
+	// content only projects won't have multiple targets to pick from, and pasing -target=UnrealGame will fail if what C++ thinks
+	// is a content only project needs a temporary target.cs file in UBT, 
+	// only set the BuildTarget in code-based projects
+	if (LauncherSessionInfo->bPlayUsingLauncherHasCode)
 	{
-		CurrentLauncherCookMode = ELauncherProfileCookModes::ByTheBookInEditor;
-	}
-	if (bCanCookOnTheFlyInEditor)
-	{
-		CurrentLauncherCookMode = ELauncherProfileCookModes::OnTheFlyInEditor;
-		bIncrimentalCooking = false;
-	}
-	if (GetDefault<UCookerSettings>()->bCookOnTheFlyForLaunchOn)
-	{
-		CurrentLauncherCookMode = ELauncherProfileCookModes::OnTheFly;
-		bIncrimentalCooking = false;
+		const FTargetInfo* TargetInfo = GetDefault<UPlatformsMenuSettings>()->GetLaunchOnTargetInfo();
+		if (TargetInfo != nullptr)
+		{
+			LauncherProfile->SetBuildTarget(TargetInfo->Name);
+			LauncherProfile->SetBuildTargetSpecified(true);
+		}
 	}
 	LauncherProfile->SetCookMode(CurrentLauncherCookMode);
-	LauncherProfile->SetUnversionedCooking(!bIncrimentalCooking);
-	LauncherProfile->SetIncrementalCooking(bIncrimentalCooking);
+	LauncherProfile->SetUnversionedCooking(!bIncrementalCooking); // Unversioned cooking is not allowed with incremental cooking
+	LauncherProfile->SetIncrementalCooking(bIncrementalCooking);
+	SetCookOption(TEXTVIEW("-IgnoreIniSettingsOutOfDate"), bIncrementalCooking && CookerSettings.bIgnoreIniSettingsOutOfDateForIteration);
+	SetCookOption(TEXTVIEW("-IgnoreScriptPackagesOutOfDate"), bIncrementalCooking && CookerSettings.bIgnoreScriptPackagesOutOfDateForIteration);
+	SetCookOption(TEXTVIEW("-IterateSharedCookedbuild"), bIncrementalCooking && ExperimentalSettings.bSharedCookedBuilds);
 	LauncherProfile->SetDeployedDeviceGroup(DeviceGroup);
-	LauncherProfile->SetIncrementalDeploying(bIncrimentalCooking);
+	LauncherProfile->SetIncrementalDeploying(bIncrementalCooking);
 	LauncherProfile->SetEditorExe(FUnrealEdMisc::Get().GetExecutableForCommandlets());
+	LauncherProfile->SetShouldUpdateDeviceFlash(InRequestParams.LauncherTargetDevice->bUpdateDeviceFlash);
+	LauncherProfile->SetCookOptions(*CookOptions);
+	
+	if (LauncherProfile->IsBuildingUAT() && !GetDefault<UEditorPerProjectUserSettings>()->bAlwaysBuildUAT && bUATSuccessfullyCompiledOnce)
+	{
+		// UAT was built on a first launch and there's no need to rebuild it any more
+		LauncherProfile->SetBuildUAT(false);
+	}
 
 	const FString DummyIOSDeviceName(FString::Printf(TEXT("All_iOS_On_%s"), FPlatformProcess::ComputerName()));
 	const FString DummyTVOSDeviceName(FString::Printf(TEXT("All_tvOS_On_%s"), FPlatformProcess::ComputerName()));
@@ -226,7 +318,16 @@ void UEditorEngine::StartPlayUsingLauncherSession(FRequestPlaySessionParams& InR
 		LauncherProfile->SetLaunchMode(ELauncherProfileLaunchModes::DefaultRole);
 	}
 
-	if (LauncherProfile->GetCookMode() == ELauncherProfileCookModes::OnTheFlyInEditor || LauncherProfile->GetCookMode() == ELauncherProfileCookModes::OnTheFly)
+	const bool bUseZenStore = GetDefault<UProjectPackagingSettings>()->bUseZenStore;
+	LauncherProfile->SetUseZenStore(bUseZenStore);
+#if UE_WITH_ZEN
+	if (bUseZenStore)
+	{
+		static UE::Zen::FScopeZenService EditorStaticZenService;
+	}
+#endif
+
+	if (bUseZenStore || LauncherProfile->GetCookMode() == ELauncherProfileCookModes::OnTheFlyInEditor || LauncherProfile->GetCookMode() == ELauncherProfileCookModes::OnTheFly)
 	{
 		LauncherProfile->SetDeploymentMode(ELauncherProfileDeploymentModes::FileServer);
 	}
@@ -304,7 +405,7 @@ void UEditorEngine::StartPlayUsingLauncherSession(FRequestPlaySessionParams& InR
 	FText LaunchingText = LOCTEXT("LauncherTaskInProgressNotificationNoDevice", "Launching...");
 	FNotificationInfo Info(LaunchingText);
 
-	Info.Image = FEditorStyle::GetBrush(TEXT("MainFrame.CookContent"));
+	Info.Image = FAppStyle::GetBrush(TEXT("MainFrame.CookContent"));
 	Info.bFireAndForget = false;
 	Info.ExpireDuration = 10.0f;
 	Info.Hyperlink = FSimpleDelegate::CreateStatic(HandleHyperlinkNavigate);
@@ -330,15 +431,23 @@ void UEditorEngine::StartPlayUsingLauncherSession(FRequestPlaySessionParams& InR
 	}
 
 	// analytics for launch on
-	int32 ErrorCode = 0;
-	FEditorAnalytics::ReportEvent(TEXT("Editor.LaunchOn.Started"), LastPlayUsingLauncherDeviceId.Left(LastPlayUsingLauncherDeviceId.Find(TEXT("@"))), LauncherSessionInfo->bPlayUsingLauncherHasCode);
+	TArray<FAnalyticsEventAttribute> AnalyticsParamArray;
+	if (LaunchPlatform != nullptr)
+	{
+		LaunchPlatform->GetPlatformSpecificProjectAnalytics(AnalyticsParamArray);
+	}
+	FEditorAnalytics::ReportEvent(TEXT("Editor.LaunchOn.Started"), LaunchPlatformName, LauncherSessionInfo->bPlayUsingLauncherHasCode, AnalyticsParamArray);
+
 
 	NotificationItem->SetCompletionState(SNotificationItem::CS_Pending);
 
 	TWeakPtr<SNotificationItem> NotificationItemPtr(NotificationItem);
 	if (GEditor->LauncherWorker.IsValid() && GEditor->LauncherWorker->GetStatus() != ELauncherWorkerStatus::Completed)
 	{
-		GEditor->PlayEditorSound(TEXT("/Engine/EditorSounds/Notifications/CompileStart_Cue.CompileStart_Cue"));
+		if (EditorPlaySettings->EnablePIEEnterAndExitSounds)
+		{
+			GEditor->PlayEditorSound(TEXT("/Engine/EditorSounds/Notifications/CompileStart_Cue.CompileStart_Cue"));
+		}
 		GEditor->LauncherWorker->OnOutputReceived().AddStatic(HandleOutputReceived);
 		GEditor->LauncherWorker->OnStageStarted().AddUObject(this, &UEditorEngine::HandleStageStarted, NotificationItemPtr);
 		GEditor->LauncherWorker->OnStageCompleted().AddUObject(this, &UEditorEngine::HandleStageCompleted, LauncherSessionInfo->bPlayUsingLauncherHasCode, NotificationItemPtr);
@@ -348,7 +457,10 @@ void UEditorEngine::StartPlayUsingLauncherSession(FRequestPlaySessionParams& InR
 	else
 	{
 		GEditor->LauncherWorker.Reset();
-		GEditor->PlayEditorSound(TEXT("/Engine/EditorSounds/Notifications/CompileFailed_Cue.CompileFailed_Cue"));
+		if (EditorPlaySettings->EnablePIEEnterAndExitSounds)
+		{
+			GEditor->PlayEditorSound(TEXT("/Engine/EditorSounds/Notifications/CompileFailed_Cue.CompileFailed_Cue"));
+		}
 
 		NotificationItem->SetText(LOCTEXT("LauncherTaskFailedNotification", "Failed to launch task!"));
 		NotificationItem->SetCompletionState(SNotificationItem::CS_Fail);
@@ -369,22 +481,6 @@ void UEditorEngine::CancelPlayingViaLauncher()
 	{
 		LauncherWorker->CancelAndWait();
 	}
-}
-
-// Deprecated, just formats a RequestPlaySession instead.
-void UEditorEngine::AutomationPlayUsingLauncher(const FString& InLauncherDeviceId)
-{
-	FRequestPlaySessionParams::FLauncherDeviceInfo LaunchedDeviceInfo;
-	LaunchedDeviceInfo.DeviceId = InLauncherDeviceId;
-	LaunchedDeviceInfo.DeviceName = InLauncherDeviceId.Right(InLauncherDeviceId.Find(TEXT("@")));
-
-	FRequestPlaySessionParams Params;
-	Params.LauncherTargetDevice = LaunchedDeviceInfo;
-
-	RequestPlaySession(Params);
-
-	// Immediately start our requested play session
-	StartQueuedPlaySessionRequest();
 }
 
 /** 
@@ -422,13 +518,17 @@ public:
 	{
 		if (NotificationItemPtr.IsValid())
 		{
-			if (CompletionState == SNotificationItem::CS_Fail)
+			const ULevelEditorPlaySettings* EditorPlaySettings = GetDefault<ULevelEditorPlaySettings>();
+			if (EditorPlaySettings->EnablePIEEnterAndExitSounds)
 			{
-				GEditor->PlayEditorSound(TEXT("/Engine/EditorSounds/Notifications/CompileFailed_Cue.CompileFailed_Cue"));
-			}
-			else if (CompletionState == SNotificationItem::CS_Success)
-			{
-				GEditor->PlayEditorSound(TEXT("/Engine/EditorSounds/Notifications/CompileSuccess_Cue.CompileSuccess_Cue"));
+				if (CompletionState == SNotificationItem::CS_Fail)
+				{
+					GEditor->PlayEditorSound(TEXT("/Engine/EditorSounds/Notifications/CompileFailed_Cue.CompileFailed_Cue"));
+				}
+				else if (CompletionState == SNotificationItem::CS_Success)
+				{
+					GEditor->PlayEditorSound(TEXT("/Engine/EditorSounds/Notifications/CompileSuccess_Cue.CompileSuccess_Cue"));
+				}
 			}
 
 			TSharedPtr<SNotificationItem> NotificationItem = NotificationItemPtr.Pin();
@@ -470,20 +570,14 @@ void UEditorEngine::HandleStageStarted(const FString& InStage, TWeakPtr<SNotific
 	if (InStage.Contains(TEXT("Cooking")) || InStage.Contains(TEXT("Cook Task")))
 	{
 		FString PlatformName = LastPlayUsingLauncherDeviceId.Left(LastPlayUsingLauncherDeviceId.Find(TEXT("@")));
-		if (PlatformName.Contains(TEXT("NoEditor")))
-		{
-			PlatformName = PlatformName.Left(PlatformName.Find(TEXT("NoEditor")));
-		}
+		PlatformName = PlatformInfo::FindPlatformInfo(*PlatformName)->VanillaInfo->Name.ToString();
 		Arguments.Add(TEXT("PlatformName"), FText::FromString(PlatformName));
 		NotificationText = FText::Format(LOCTEXT("LauncherTaskProcessingNotification", "Processing Assets for {PlatformName}..."), Arguments);
 	}
 	else if (InStage.Contains(TEXT("Build Task")))
 	{
 		FString PlatformName = LastPlayUsingLauncherDeviceId.Left(LastPlayUsingLauncherDeviceId.Find(TEXT("@")));
-		if (PlatformName.Contains(TEXT("NoEditor")))
-		{
-			PlatformName = PlatformName.Left(PlatformName.Find(TEXT("NoEditor")));
-		}
+		PlatformName = PlatformInfo::FindPlatformInfo(*PlatformName)->VanillaInfo->Name.ToString();
 		Arguments.Add(TEXT("PlatformName"), FText::FromString(PlatformName));
 		if (!LauncherSessionInfo->bPlayUsingLauncherBuild)
 		{
@@ -590,6 +684,8 @@ void UEditorEngine::HandleLaunchCompleted(bool Succeeded, double TotalTime, int3
 		FEditorAnalytics::ReportEvent(TEXT( "Editor.LaunchOn.Completed" ), LastPlayUsingLauncherDeviceId.Left(LastPlayUsingLauncherDeviceId.Find(TEXT("@"))), bHasCode, ParamArray);
 
 		UE_LOG(LogPlayLevel, Log, TEXT("Launch On Completed. Time: %f"), TotalTime);
+
+		bUATSuccessfullyCompiledOnce = true;
 	}
 	else
 	{
@@ -633,18 +729,6 @@ void UEditorEngine::HandleLaunchCompleted(bool Succeeded, double TotalTime, int3
 FString UEditorEngine::GetPlayOnTargetPlatformName() const
 {
 	return LastPlayUsingLauncherDeviceId.Left(LastPlayUsingLauncherDeviceId.Find(TEXT("@")));
-}
-
-void UEditorEngine::PlayUsingLauncher()
-{
-	// Deprecated, just a wrapper around RequestPlaySession now.
-	FRequestPlaySessionParams::FLauncherDeviceInfo DeviceInfo;
-	DeviceInfo.DeviceId = LastPlayUsingLauncherDeviceId;
-
-	FRequestPlaySessionParams Params;
-	Params.LauncherTargetDevice = DeviceInfo;
-	
-	RequestPlaySession(Params);
 }
 
 #undef LOCTEXT_NAMESPACE // "PlayLevel"

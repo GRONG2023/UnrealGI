@@ -37,6 +37,7 @@ void FPackageLocalizationCultureCache::ConditionalUpdateCache_NoLock()
 	SCOPED_BOOT_TIMING("FPackageLocalizationCultureCache::ConditionalUpdateCache_NoLock");
 	const double CacheStartTime = FPlatformTime::Seconds();
 
+	TMap<FString, TArray<FString>> NewSourceToLocalizedPaths;
 	for (const FString& SourceRootPath : PendingSourceRootPathsToSearch)
 	{
 		TArray<FString>& LocalizedRootPaths = SourcePathsToLocalizedPaths.FindOrAdd(SourceRootPath);
@@ -46,10 +47,11 @@ void FPackageLocalizationCultureCache::ConditionalUpdateCache_NoLock()
 			if (!LocalizedRootPaths.Contains(LocalizedRootPath))
 			{
 				LocalizedRootPaths.Add(LocalizedRootPath);
-				OwnerCache->FindLocalizedPackages(SourceRootPath, LocalizedRootPath, SourcePackagesToLocalizedPackages);
+				NewSourceToLocalizedPaths.FindOrAdd(SourceRootPath).Add(LocalizedRootPath);
 			}
 		}
 	}
+	OwnerCache->FindLocalizedPackages(NewSourceToLocalizedPaths, SourcePackagesToLocalizedPackages);
 
 	UE_LOG(LogPackageLocalizationCache, Log, TEXT("Processed %d localized package path(s) for %d prioritized culture(s) in %0.6f seconds"), PendingSourceRootPathsToSearch.Num(), PrioritizedCultureNames.Num(), FPlatformTime::Seconds() - CacheStartTime);
 
@@ -177,21 +179,21 @@ FPackageLocalizationCache::FPackageLocalizationCache()
 		auto ReadAssetGroupClassSettings = [this](const TCHAR* InConfigLogName, const FString& InConfigFilename)
 		{
 			// The config is Group=Class, but we want Class=Group
-			if (const FConfigSection* AssetGroupClassesSection = GConfig->GetSectionPrivate(TEXT("Internationalization.AssetGroupClasses"), false, true, InConfigFilename))
+			if (const FConfigSection* AssetGroupClassesSection = GConfig->GetSection(TEXT("Internationalization.AssetGroupClasses"), false, InConfigFilename))
 			{
 				for (const auto& SectionEntryPair : *AssetGroupClassesSection)
 				{
 					const FName GroupName = SectionEntryPair.Key;
-					const FName ClassName = *SectionEntryPair.Value.GetValue();
-
-					const auto* AssetClassGroupPair = AssetClassesToAssetGroups.FindByPredicate([&](const TTuple<FName, FName>& InAssetClassToAssetGroup)
+					const FTopLevelAssetPath ClassName = UClass::TryConvertShortTypeNameToPathName<UStruct>(SectionEntryPair.Value.GetValue(), ELogVerbosity::Fatal, TEXT("ReadAssetGroupClassSettings"));
+					
+					const auto* AssetClassGroupPair = AssetClassesToAssetGroups.FindByPredicate([&](const TTuple<FTopLevelAssetPath, FName>& InAssetClassToAssetGroup)
 					{
 						return InAssetClassToAssetGroup.Key == ClassName;
 					});
 
 					if (AssetClassGroupPair)
 					{
-						UE_CLOG(AssetClassGroupPair->Value != ClassName, LogPackageLocalizationCache, Warning, TEXT("Class '%s' was already assigned to asset group '%s', ignoring request to assign it to '%s' from the %s configuration."), *ClassName.ToString(), *AssetClassGroupPair->Value.ToString(), *GroupName.ToString(), InConfigLogName);
+						UE_CLOG(AssetClassGroupPair->Value != ClassName.GetAssetName(), LogPackageLocalizationCache, Warning, TEXT("Class '%s' was already assigned to asset group '%s', ignoring request to assign it to '%s' from the %s configuration."), *ClassName.ToString(), *AssetClassGroupPair->Value.ToString(), *GroupName.ToString(), InConfigLogName);
 					}
 					else
 					{

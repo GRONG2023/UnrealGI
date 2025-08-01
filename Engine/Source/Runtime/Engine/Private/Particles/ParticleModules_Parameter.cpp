@@ -5,21 +5,20 @@
 	Parameter-related particle module implementations.
 =============================================================================*/
 
-#include "CoreMinimal.h"
-#include "Materials/Material.h"
-#include "ParticleHelper.h"
+#include "ParticleEmitterInstances.h"
 #include "Particles/ParticleModule.h"
 #include "Distributions/DistributionFloatConstant.h"
-#include "Materials/MaterialExpressionDynamicParameter.h"
-#include "Materials/MaterialInstanceConstant.h"
+#include "MaterialCachedData.h"
 #include "Particles/Parameter/ParticleModuleParameterBase.h"
 #include "Particles/Parameter/ParticleModuleParameterDynamic.h"
 #include "Particles/Parameter/ParticleModuleParameterDynamic_Seeded.h"
+#include "Particles/ParticleEmitter.h"
 #include "Particles/TypeData/ParticleModuleTypeDataMesh.h"
 #include "Particles/ParticleLODLevel.h"
 #include "Particles/ParticleModuleRequired.h"
 #include "Particles/Material/ParticleModuleMeshMaterial.h"
 #include "Engine/InterpCurveEdSetup.h"
+#include "Particles/TypeData/ParticleModuleTypeDataBase.h"
 
 UParticleModuleParameterBase::UParticleModuleParameterBase(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -400,42 +399,9 @@ void UParticleModuleParameterDynamic::GetParticleParametersUtilized(TArray<FStri
 {
 }
 
-/**
- *	Helper function for retriving the material from interface...
- */
-UMaterial* UParticleModuleParameterDynamic_RetrieveMaterial(UMaterialInterface* InMaterialInterface)
-{
-	UMaterial* Material = Cast<UMaterial>(InMaterialInterface);
-	UMaterialInstanceConstant* MIC = Cast<UMaterialInstanceConstant>(InMaterialInterface);
-
-	if (MIC)
-	{
-		UMaterialInterface* Parent = MIC->Parent;
-		Material = Cast<UMaterial>(Parent);
-		while (!Material && Parent)
-		{
-			MIC = Cast<UMaterialInstanceConstant>(Parent);
-			if (MIC)
-			{
-				Parent = MIC->Parent;
-			}
-
-			Material = Cast<UMaterial>(Parent);
-		}
-	}
-
-	return Material;
-}
-
 void UParticleModuleParameterDynamic::UpdateParameterNames(UMaterialInterface* InMaterialInterface)
 {
-	UMaterial* Material = UParticleModuleParameterDynamic_RetrieveMaterial(InMaterialInterface);
-	if (Material == NULL)
-	{
-		return;
-	}
-
-	const TArray<FName>& ParamNames = Material->GetCachedExpressionData().DynamicParameterNames;
+	const TArray<FName>& ParamNames = InMaterialInterface->GetCachedExpressionData().DynamicParameterNames;
 	check(DynamicParams.Num() == 4);
 	for (int32 ParamIndex = 0; ParamIndex < 4; ParamIndex++)
 	{

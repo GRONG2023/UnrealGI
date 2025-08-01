@@ -7,6 +7,8 @@
 #include "Serialization/CustomVersion.h"
 #include "Async/Async.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ProceduralFoliageSpawner)
+
 #define LOCTEXT_NAMESPACE "ProceduralFoliage"
 
 UProceduralFoliageSpawner::UProceduralFoliageSpawner(const FObjectInitializer& ObjectInitializer)
@@ -75,12 +77,12 @@ const UProceduralFoliageTile* UProceduralFoliageSpawner::GetRandomTile(int32 X, 
 		FRandomStream HashStream;	
 		
 		HashStream.Initialize(X);
-		const double XRand = HashStream.FRand();
+		const float XRand = HashStream.FRand();
 		
 		HashStream.Initialize(Y);
-		const double YRand = HashStream.FRand();
+		const float YRand = HashStream.FRand();
 		
-		const int32 RandomNumber = (RAND_MAX * XRand / (YRand + 0.01));
+		const int32 RandomNumber = static_cast<int32>(static_cast<float>(RAND_MAX) * XRand / (YRand + 0.01));
 		const int32 Idx = FMath::Clamp(RandomNumber % PrecomputedTiles.Num(), 0, PrecomputedTiles.Num() - 1);
 		return PrecomputedTiles[Idx].Get();
 	}
@@ -104,7 +106,7 @@ void UProceduralFoliageSpawner::Simulate(int32 NumSteps)
 		const int32 RandomNumber = GetRandomNumber();
 		const int32 LastCancelInit = LastCancel.GetValue();
 
-		Futures.Add(Async(EAsyncExecution::ThreadPool, [=]()
+		Futures.Add(Async(EAsyncExecution::ThreadPool, [this, NewTile, RandomNumber, NumSteps, LastCancelInit]()
 		{
 			NewTile->Simulate(this, RandomNumber, NumSteps, LastCancelInit);
 			return NewTile;
@@ -151,7 +153,8 @@ void UProceduralFoliageSpawner::Simulate(int32 NumSteps)
 
 int32 UProceduralFoliageSpawner::GetRandomNumber()
 {
-	return RandomStream.FRand() * float(RAND_MAX);
+	return static_cast<int32>(RandomStream.FRand() * float(RAND_MAX));
 }
 
 #undef LOCTEXT_NAMESPACE
+

@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "CurveEditorTypes.h"
 #include "UObject/GCObject.h"
 #include "CurveEditorKeyProxy.h"
 
@@ -22,7 +23,11 @@ struct FCurveEditorEditObjectContainer : FGCObject
 			Collector.AddReferencedObjects(Pair.Value);
 		}
 	}
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FCurveEditorEditObjectContainer");
+	}
 
 	/**  */
-	TMap<FCurveModelID, TMap<FKeyHandle, UObject*> > CurveIDToKeyProxies;
+	TMap<FCurveModelID, TMap<FKeyHandle, TObjectPtr<UObject>> > CurveIDToKeyProxies;
 };

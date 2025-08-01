@@ -3,6 +3,7 @@
 #include "VertexSnapping.h"
 #include "GameFramework/Actor.h"
 #include "Misc/App.h"
+#include "Model.h"
 #include "SceneView.h"
 #include "Components/PrimitiveComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -20,8 +21,8 @@
 
 namespace VertexSnappingConstants
 {
-	const float MaxSnappingDistance = 300;
-	const float MaxSquaredDistanceFromCamera = FMath::Square( 5000 );
+	const float MaxSnappingDistance = 300.0f;
+	const float MaxSquaredDistanceFromCamera = FMath::Square( 5000.0f );
 	const float FadeTime = 0.15f;
 	const FLinearColor VertexHelperColor = FColor(  17, 105, 238, 255 );
 };
@@ -77,8 +78,8 @@ public:
 	FStaticMeshVertexIterator( UStaticMeshComponent* SMC )
 		: ComponentToWorldIT( SMC->GetComponentTransform().ToInverseMatrixWithScale().GetTransposed() )
 		, StaticMeshComponent( SMC )
-		, PositionBuffer( SMC->GetStaticMesh()->GetRenderData()->LODResources[0].VertexBuffers.PositionVertexBuffer )
-		, VertexBuffer( SMC->GetStaticMesh()->GetRenderData()->LODResources[0].VertexBuffers.StaticMeshVertexBuffer )
+		, PositionBuffer( SMC->GetStaticMesh()->GetRenderData()->GetCurrentFirstLOD(SMC->GetStaticMesh()->GetMinLODIdx())->VertexBuffers.PositionVertexBuffer )
+		, VertexBuffer( SMC->GetStaticMesh()->GetRenderData()->GetCurrentFirstLOD(SMC->GetStaticMesh()->GetMinLODIdx())->VertexBuffers.StaticMeshVertexBuffer )
 		, CurrentVertexIndex( 0 )
 	{
 
@@ -87,12 +88,12 @@ public:
 	/** FVertexIterator interface */
 	virtual FVector Position() const override
 	{
-		return StaticMeshComponent->GetComponentTransform().TransformPosition( PositionBuffer.VertexPosition( CurrentVertexIndex ) );	
+		return StaticMeshComponent->GetComponentTransform().TransformPosition( (FVector)PositionBuffer.VertexPosition( CurrentVertexIndex ) );
 	}
 
 	virtual FVector Normal() const override
 	{
-		return ComponentToWorldIT.TransformVector( VertexBuffer.VertexTangentZ( CurrentVertexIndex ) );
+		return ComponentToWorldIT.TransformVector( FVector4(VertexBuffer.VertexTangentZ( CurrentVertexIndex )) );
 	}
 
 protected:
@@ -109,11 +110,11 @@ private:
 	/** Component To World Inverse Transpose matrix */
 	FMatrix ComponentToWorldIT;
 	/** Component containing the mesh that we are getting vertices from */
-	UStaticMeshComponent* StaticMeshComponent;
+	const UStaticMeshComponent* StaticMeshComponent;
 	/** The static meshes position vertex buffer */
-	FPositionVertexBuffer& PositionBuffer;
+	const FPositionVertexBuffer& PositionBuffer;
 	/** The static meshes vertex buffer for normals */
-	FStaticMeshVertexBuffer& VertexBuffer;
+	const FStaticMeshVertexBuffer& VertexBuffer;
 	/** Current vertex index */
 	uint32 CurrentVertexIndex;
 };
@@ -135,7 +136,7 @@ public:
 			FPoly& Poly = Model->Polys->Element[PolyIndex];
 			for( int32 VertexIndex = 0;VertexIndex < Poly.Vertices.Num();++VertexIndex )
 			{
-				Vertices.Add( Poly.Vertices[VertexIndex] );
+				Vertices.Add( (FVector)Poly.Vertices[VertexIndex] );
 			}
 		}
 	}
@@ -190,7 +191,7 @@ public:
 	/** FVertexIterator interface */
 	virtual FVector Position() const override
 	{
-		const FVector VertPos = LODData.StaticVertexBuffers.PositionVertexBuffer.VertexPosition(VertexIndex);
+		const FVector VertPos = (FVector)LODData.StaticVertexBuffers.PositionVertexBuffer.VertexPosition(VertexIndex);
 		return SkinnedMeshComponent->GetComponentTransform().TransformPosition(VertPos);
 	}
 
@@ -242,7 +243,7 @@ static TSharedPtr<FVertexIterator> MakeVertexIterator( UPrimitiveComponent* Comp
 	}
 
 	USkinnedMeshComponent* SkinnedComponent = Cast<USkinnedMeshComponent>( Component );
-	if( SkinnedComponent && SkinnedComponent->SkeletalMesh && SkinnedComponent->MeshObject )
+	if( SkinnedComponent && SkinnedComponent->GetSkinnedAsset() && SkinnedComponent->MeshObject )
 	{
 		return MakeShareable( new FSkeletalMeshVertexIterator( SkinnedComponent ) );
 	}
@@ -354,7 +355,7 @@ struct FVertexSnappingArgs
 bool FVertexSnappingImpl::GetClosestVertexOnComponent( const FSnapActor& SnapActor, UPrimitiveComponent* Component, const FVertexSnappingArgs& InArgs, FSnappingVertex& OutClosestLocation )
 {
 	// Current closest distance 
-	float ClosestDistance = FLT_MAX;
+	double ClosestDistance = std::numeric_limits<double>::max();
 	bool bHasAnyVerts = false;
 
 	const FPlane& ActorPlane = InArgs.ActorPlane;
@@ -386,8 +387,8 @@ bool FVertexSnappingImpl::GetClosestVertexOnComponent( const FSnapActor& SnapAct
 			// Ignore backface vertices when translating in screen space
 			bool bIsBackface = false;
 			bool bOutside = false;
-			float Distance = 0;
-			float DistanceFromCamera = 0;
+			double Distance = 0.0;
+			double DistanceFromCamera = 0.0;
 			if( CurrentAxis != EAxisList::Screen )
 			{
 				// Compute the distance to the plane the actor is on
@@ -415,7 +416,7 @@ bool FVertexSnappingImpl::GetClosestVertexOnComponent( const FSnapActor& SnapAct
 
 					if( !bOutside )
 					{
-						DistanceFromCamera = View->IsPerspectiveProjection() ? FVector::DistSquared( Position, View->ViewMatrices.GetViewOrigin() ) : 0;
+						DistanceFromCamera = View->IsPerspectiveProjection() ? FVector::DistSquared( Position, View->ViewMatrices.GetViewOrigin() ) : 0.0;
 						Distance = FVector::DistSquared( FVector( MousePosition, 0 ), FVector( PixelPos, 0 ) );
 					}
 				}
@@ -432,7 +433,7 @@ bool FVertexSnappingImpl::GetClosestVertexOnComponent( const FSnapActor& SnapAct
 				// Vertex cannot be outside the view
 				&& !bOutside 
 				// In screen space the distance of the vertex must not be too far from the camera.  In any other axis the vertex cannot be beind the actor
-				&& ( ( CurrentAxis == EAxisList::Screen && DistanceFromCamera <= VertexSnappingConstants::MaxSquaredDistanceFromCamera ) || ( CurrentAxis != EAxisList::Screen && !FMath::IsNegativeFloat( Distance ) ) )
+				&& ( ( CurrentAxis == EAxisList::Screen && DistanceFromCamera <= VertexSnappingConstants::MaxSquaredDistanceFromCamera ) || ( CurrentAxis != EAxisList::Screen && !( Distance < 0.0f ) ) )
 				// The vertex must be closer than the current closest vertex
 				&& Distance < ClosestDistance )
 			{
@@ -451,7 +452,7 @@ bool FVertexSnappingImpl::GetClosestVertexOnComponent( const FSnapActor& SnapAct
 FSnappingVertex FVertexSnappingImpl::GetClosestVertex( const TArray<FSnapActor>& Actors, const FVertexSnappingArgs& InArgs )
 {
 	// The current closest distance
-	float ClosestDistance = FLT_MAX;
+	double ClosestDistance = std::numeric_limits<double>::max();
 
 	const FPlane& ActorPlane = InArgs.ActorPlane;
 	EAxisList::Type CurrentAxis = InArgs.CurrentAxis;
@@ -484,7 +485,7 @@ FSnappingVertex FVertexSnappingImpl::GetClosestVertex( const TArray<FSnapActor>&
 				ClosestLocationOnComponent.Normal = FVector::ZeroVector;
 			}
 
-			float Distance = 0;
+			double Distance = 0.0;
 			if( CurrentAxis != EAxisList::Screen )
 			{
 				// Compute the distance from the point being snapped.  When not in screen space we snap to the plane created by the current closest vertex
@@ -506,7 +507,7 @@ FSnappingVertex FVertexSnappingImpl::GetClosestVertex( const TArray<FSnapActor>&
 				// we must have made some movement
 				&& !FMath::IsNearlyZero(Distance) 
 				// If not in screen space the vertex cannot be behind the point being snapped
-				&& ( CurrentAxis == EAxisList::Screen || !FMath::IsNegativeFloat( Distance ) )
+				&& ( CurrentAxis == EAxisList::Screen || !( Distance < 0.0f ) )
 				// The vertex must be closer than the current closest vertex
 				&& Distance < ClosestDistance )
 			{
@@ -601,7 +602,7 @@ bool FVertexSnappingImpl::SnapLocationToNearestVertex( FVector& Location, const 
 
 	GetPossibleSnapActors( AllowedSnappingBox, MouseLocation.IntPoint(), ViewportClient, View, EAxisList::Screen, ActorsToIgnore, ActorsInBox );
 
-	FViewportCursorLocation Cursor(View, ViewportClient, MouseLocation.X, MouseLocation.Y );
+	FViewportCursorLocation Cursor(View, ViewportClient, static_cast<int32>(MouseLocation.X), static_cast<int32>(MouseLocation.Y));
 
 	FPlane ActorPlane( Location, Cursor.GetDirection() );
 
@@ -752,7 +753,7 @@ void FVertexSnappingImpl::SnapDragDelta( FVertexSnappingArgs& InArgs, const FVec
 		FVector ClosestPoint = GetClosestVertex( PossibleSnapPointActors, InArgs ).Position;
 
 		FVector PrevDragDelta = DragDelta;
-		float Distance = 0;
+		double Distance = 0;
 		if( CurrentAxis != EAxisList::Screen )
 		{
 			// Compute a distance from the stat location to the snap point.  
@@ -778,10 +779,10 @@ void FVertexSnappingImpl::SnapDragDelta( FVertexSnappingArgs& InArgs, const FVec
 		if( ViewportClient->IsPerspective() )
 		{
 			// Distance from start location to the location the actor would be in without snapping
-			float DistFromPreSnapToDesiredUnsnapped = FVector::DistSquared( PreSnapLocation, DesiredUnsnappedLocation );
+			double DistFromPreSnapToDesiredUnsnapped = FVector::DistSquared( PreSnapLocation, DesiredUnsnappedLocation );
 
 			// Distance from the new location of the actor without snapping to the location with snapping
-			float DistFromDesiredUnsnappedToSnapped = FVector::DistSquared( DesiredUnsnappedLocation, SnappedLocation );
+			double DistFromDesiredUnsnappedToSnapped = FVector::DistSquared( DesiredUnsnappedLocation, SnappedLocation );
 
 			// Only snap if the distance to the snapped location is less than the distance to the unsnapped location.  
 			// This allows the user to control the speed of snapping based on how fast they move the mouse and also avoids jerkiness when the mouse is behind the snap location
@@ -802,8 +803,8 @@ void FVertexSnappingImpl::SnapDragDelta( FVertexSnappingArgs& InArgs, const FVec
 			FVector2D PStoML = MousePosition-PreSnapLocationPixel;
 
 			// Only snap if the distance to the snapped location is less than the distance to the unsnapped location
-			float Dist2 = PStoML.SizeSquared();
-			float Dist1 = SLtoML.SizeSquared();
+			double Dist2 = PStoML.SizeSquared();
+			double Dist1 = SLtoML.SizeSquared();
 			if( Dist1 >= Dist2 || ClosestPoint == DesiredUnsnappedLocation )
 			{
 				DragDelta = FVector::ZeroVector;

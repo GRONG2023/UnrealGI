@@ -23,6 +23,7 @@
 #define DETOURDEBUGDRAW_H
 
 #include "CoreMinimal.h"
+#include "Detour/DetourLargeWorldCoordinates.h"
 #include "Detour/DetourNavMesh.h"
 
 class dtNavMeshQuery;
@@ -45,23 +46,23 @@ NAVMESH_API void duDebugDrawNavMeshPortals(struct duDebugDraw* dd, const dtNavMe
 NAVMESH_API void duDebugDrawNavMeshPolysWithFlags(struct duDebugDraw* dd, const dtNavMesh& mesh, const unsigned short polyFlags, const unsigned int col);
 NAVMESH_API void duDebugDrawNavMeshPoly(struct duDebugDraw* dd, const dtNavMesh& mesh, dtPolyRef ref, const unsigned int col);
 
-//@UE4 BEGIN
+//@UE BEGIN
 #if WITH_NAVMESH_CLUSTER_LINKS
 NAVMESH_API void duDebugDrawNavMeshClusters(struct duDebugDraw* dd, const dtNavMesh& mesh);
 NAVMESH_API void duDebugDrawNavMeshCluster(struct duDebugDraw* dd, const dtNavMesh& mesh, dtClusterRef ref, const unsigned int col);
 
 NAVMESH_API void duDebugDrawTileCacheClusters(duDebugDraw* dd, const struct dtTileCacheClusterSet& lclusters);
 #endif // WITH_NAVMESH_CLUSTER_LINKS
-//@UE4 END
+//@UE END
 
-NAVMESH_API void duDebugDrawTileCacheLayerAreas(struct duDebugDraw* dd, const dtTileCacheLayer& layer, const float cs, const float ch);
+NAVMESH_API void duDebugDrawTileCacheLayerAreas(struct duDebugDraw* dd, const dtTileCacheLayer& layer, const dtReal cs, const dtReal ch);
 NAVMESH_API void duDebugDrawTileCacheLayerDistance(struct duDebugDraw* dd, const dtTileCacheLayer& layer,
-									   const dtTileCacheDistanceField& dfield, const float cs, const float ch);
-NAVMESH_API void duDebugDrawTileCacheLayerRegions(struct duDebugDraw* dd, const dtTileCacheLayer& layer, const float cs, const float ch);
+									   const dtTileCacheDistanceField& dfield, const dtReal cs, const dtReal ch);
+NAVMESH_API void duDebugDrawTileCacheLayerRegions(struct duDebugDraw* dd, const dtTileCacheLayer& layer, const dtReal cs, const dtReal ch);
 NAVMESH_API void duDebugDrawTileCacheContours(duDebugDraw* dd, const struct dtTileCacheContourSet& lcset,
-								  const float* orig, const float cs, const float ch);
+								  const int32 layerIdx, const dtReal* orig, const dtReal cs, const dtReal ch);
 NAVMESH_API void duDebugDrawTileCachePolyMesh(duDebugDraw* dd, const struct dtTileCachePolyMesh& lmesh,
-								  const float* orig, const float cs, const float ch);
+								  const dtReal* orig, const dtReal cs, const dtReal ch);
 NAVMESH_API void duDebugDrawTileCacheDetailMesh(duDebugDraw* dd, const struct dtTileCachePolyMeshDetail& dmesh);
 
 #endif // DETOURDEBUGDRAW_H

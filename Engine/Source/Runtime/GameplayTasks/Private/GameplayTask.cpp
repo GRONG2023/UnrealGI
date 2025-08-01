@@ -7,6 +7,12 @@
 #include "GameplayTaskResource.h"
 #include "GameplayTasksComponent.h"
 
+#if UE_WITH_IRIS
+#include "Iris/ReplicationSystem/ReplicationFragmentUtil.h"
+#endif // UE_WITH_IRIS
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(GameplayTask)
+
 UGameplayTask::UGameplayTask(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
@@ -146,7 +152,7 @@ void UGameplayTask::TaskOwnerEnded()
 	if (TaskState != EGameplayTaskState::Finished)
 	{
 		bOwnerFinished = true;
-		if (IsPendingKill() == false)
+		if (IsValid(this))
 		{
 			OnDestroy(true);
 		}
@@ -166,7 +172,7 @@ void UGameplayTask::EndTask()
 
 	if (TaskState != EGameplayTaskState::Finished)
 	{
-		if (IsPendingKill() == false)
+		if (IsValid(this))
 		{
 			OnDestroy(false);
 		}
@@ -201,7 +207,11 @@ void UGameplayTask::ExternalCancel()
 
 void UGameplayTask::OnDestroy(bool bInOwnerFinished)
 {
-	ensure(TaskState != EGameplayTaskState::Finished && !IsPendingKill());
+	if (ensureMsgf(IsValid(this), TEXT("OnDestroy called on invalid gameplay task")))
+	{
+		const FString OwnerName = TaskOwner.IsValid() ? TaskOwner.GetObject()->GetName() : TEXT("Invalid GameplayTask Owner");
+		ensureMsgf(TaskState != EGameplayTaskState::Finished, TEXT("%s OnDestroy called, current state: %i, owner name: %s"), *GetName(), TaskState, *OwnerName);
+	}
 	TaskState = EGameplayTaskState::Finished;
 
 	if (UGameplayTasksComponent* TasksPtr = TasksComponent.Get())
@@ -209,7 +219,7 @@ void UGameplayTask::OnDestroy(bool bInOwnerFinished)
 		TasksPtr->OnGameplayTaskDeactivated(*this);
 	}
 
-	MarkPendingKill();
+	MarkAsGarbage();
 }
 
 FString UGameplayTask::GetDebugString() const
@@ -462,3 +472,11 @@ void UGameplayTask::OnGameplayTaskInitialized(UGameplayTask& Task)
 
 	ChildTask = &Task;
 }
+
+#if UE_WITH_IRIS
+void UGameplayTask::RegisterReplicationFragments(UE::Net::FFragmentRegistrationContext& Context, UE::Net::EFragmentRegistrationFlags RegistrationFlags)
+{
+	// Build descriptors and allocate PropertyReplicationFragments for this object.
+	UE::Net::FReplicationFragmentUtil::CreateAndRegisterFragmentsForObject(this, Context, RegistrationFlags);
+}
+#endif // UE_WITH_IRIS

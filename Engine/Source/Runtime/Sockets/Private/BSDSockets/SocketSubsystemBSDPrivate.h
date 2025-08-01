@@ -6,7 +6,6 @@
 #include "SocketSubsystem.h"
 
 #if PLATFORM_HAS_BSD_SOCKET_FEATURE_WINSOCKETS
-	#include "Windows/WindowsHWrapper.h"
 	#include "Windows/AllowWindowsPlatformTypes.h"
 
 	#include <winsock2.h>
@@ -25,6 +24,9 @@
 	#include <fcntl.h>
 	#include <sys/types.h>
 	#include <sys/ioctl.h>
+#endif
+#if PLATFORM_HAS_BSD_SOCKET_FEATURE_POLL
+	#include <poll.h>
 #endif
 	#include <netinet/in.h>
 	#include <arpa/inet.h>

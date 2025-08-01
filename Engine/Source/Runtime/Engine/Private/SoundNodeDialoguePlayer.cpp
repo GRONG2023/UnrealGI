@@ -1,10 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Sound/SoundNodeDialoguePlayer.h"
-#include "Audio.h"
 #include "ActiveSound.h"
-#include "Sound/SoundBase.h"
 #include "Sound/DialogueWave.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SoundNodeDialoguePlayer)
 
 #define LOCTEXT_NAMESPACE "SoundNodeDialoguePlayer"
 
@@ -97,3 +97,4 @@ UDialogueWave* USoundNodeDialoguePlayer::GetDialogueWave() const
 }
 
 #undef LOCTEXT_NAMESPACE
+

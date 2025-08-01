@@ -7,16 +7,32 @@
 #include "UObject/ObjectMacros.h"
 #include "UObject/Object.h"
 #include "AlphaBlend.h"
+#include "BlendProfile.h"
 #include "AnimStateMachineTypes.generated.h"
 
-class UBlendProfile;
 class UCurveFloat;
+class UAnimStateTransitionNode;
+
+UENUM(BlueprintType)
+enum class ETransitionRequestQueueMode : uint8
+{
+	Shared			UMETA(ToolTip = "Only one transition can handle this request"),
+	Unique			UMETA(ToolTip = "Allows multiple transitions to handle the same request"),
+};
+
+UENUM(BlueprintType)
+enum class ETransitionRequestOverwriteMode : uint8
+{
+	Append			UMETA(ToolTip = "This request is added whether or not another with the same name is already queued"),
+	Ignore			UMETA(ToolTip = "This request is ignored if another request with the same name is already queued"),
+	Overwrite		UMETA(ToolTip = "This request overwrites another request with the same name if one exists")
+};
 
 //@TODO: Document
 UENUM()
 namespace ETransitionBlendMode
 {
-	enum Type
+	enum Type : int
 	{
 		TBM_Linear UMETA(DisplayName="Linear"),
 		TBM_Cubic UMETA(DisplayName="Cubic")
@@ -27,13 +43,67 @@ namespace ETransitionBlendMode
 UENUM()
 namespace ETransitionLogicType
 {
-	enum Type
+	enum Type : int
 	{
 		TLT_StandardBlend UMETA(DisplayName="Standard Blend"),
 		TLT_Inertialization UMETA(DisplayName = "Inertialization"),
 		TLT_Custom UMETA(DisplayName="Custom")
 	};
 }
+
+struct FTransitionEvent
+{
+	TArray<int32, TInlineAllocator<8>> ConsumedTransitions;
+	double CreationTime;
+	double TimeToLive;
+	FName EventName;
+	ETransitionRequestQueueMode QueueMode;
+	ETransitionRequestOverwriteMode OverwriteMode;
+
+	FTransitionEvent(const FName& InEventName, const double InTimeToLive, const ETransitionRequestQueueMode& InQueueMode, const ETransitionRequestOverwriteMode& InOverwriteMode)
+		: TimeToLive(InTimeToLive)
+		, EventName(InEventName)
+		, QueueMode(InQueueMode)
+		, OverwriteMode(InOverwriteMode)
+	{
+		CreationTime = FPlatformTime::Seconds();
+	}
+
+	bool IsValidRequest() const
+	{
+		return TimeToLive > 0.0;
+	}
+
+	double GetRemainingTime() const
+	{
+		return TimeToLive - (FPlatformTime::Seconds() - CreationTime);
+	}
+
+	bool HasExpired() const
+	{
+		return GetRemainingTime() <= 0.0;
+	}
+
+	bool ToBeConsumed() const
+	{
+		if (QueueMode == ETransitionRequestQueueMode::Shared && ConsumedTransitions.Num() > 0)
+		{
+			return true;
+		}
+		return false;
+	}
+
+	bool HasBeenHandled() const
+	{
+		return ConsumedTransitions.Num() > 0;
+	}
+
+	FString ToDebugString() const
+	{
+		FString HandledByString = *FString::JoinBy(ConsumedTransitions, TEXT(", "), [](const int32& TransitionIndex) { return FString::Printf(TEXT("%d"), TransitionIndex); });
+		return FString::Printf(TEXT("%s (%.2fs) [Handled by: %s]"), *EventName.ToString(), GetRemainingTime(), *HandledByString);
+	}
+};
 
 // This structure represents a baked transition rule inside a state
 USTRUCT()
@@ -141,10 +211,10 @@ struct FAnimationTransitionBetweenStates : public FAnimationStateBase
 	EAlphaBlendOption BlendMode;
 
 	UPROPERTY()
-	UCurveFloat* CustomCurve;
+	TObjectPtr<UCurveFloat> CustomCurve;
 
 	UPROPERTY()
-	UBlendProfile* BlendProfile;
+	TObjectPtr<UBlendProfile> BlendProfile;
 
 	UPROPERTY()
 	TEnumAsByte<ETransitionLogicType::Type> LogicType;
@@ -197,7 +267,17 @@ struct FBakedStateExitTransition
 	// Automatic Transition Rule based on animation remaining time.
 	UPROPERTY()
 	bool bAutomaticRemainingTimeRule;
-	
+
+	// Automatic Transition Rule triggering time:
+	//  < 0 means trigger the transition 'Crossfade Duration' seconds before the end of the asset player, so a standard blend would finish just as the asset player ends
+	// >= 0 means trigger the transition 'Automatic Rule Trigger Time' seconds before the end of the asset player
+	UPROPERTY()
+	float AutomaticRuleTriggerTime;
+
+	// Additional rule around SyncGroup requiring Valid Markers
+	UPROPERTY()
+	FName SyncGroupNameToRequireValidMarkersRule;
+
 	UPROPERTY()
 	TArray<int32> PoseEvaluatorLinks;
 
@@ -207,6 +287,8 @@ struct FBakedStateExitTransition
 		, TransitionIndex(INDEX_NONE)
 		, bDesiredTransitionReturnValue(true)
 		, bAutomaticRemainingTimeRule(false)
+		, AutomaticRuleTriggerTime(-1.f)
+		, SyncGroupNameToRequireValidMarkersRule(NAME_None)
 	{
 	}
 };

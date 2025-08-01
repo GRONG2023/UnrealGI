@@ -114,7 +114,7 @@ class FChunkCacheWorker : public FRunnable
 	/** Thread to run the worker FRunnable on */
 	FRunnableThread* Thread;
 	/** Archive reader */
-	FArchive* Reader;
+	TUniquePtr<FArchive> Reader;
 	/** Cached and verified chunks. */
 	FChunkBuffer CachedChunks[MaxCachedChunks];
 	/** Queue of chunks to cache */
@@ -174,7 +174,7 @@ class FChunkCacheWorker : public FRunnable
 
 public:
 
-	FChunkCacheWorker(FArchive* InReader, const TCHAR* Filename);
+	FChunkCacheWorker(TUniquePtr<FArchive> InReader, const TCHAR* Filename);
 	virtual ~FChunkCacheWorker();
 
 	//~ Begin FRunnable Interface.
@@ -206,7 +206,7 @@ public:
 
 	/**
 	* Indicates that this chunk worker is valid. If the signature file couldn't be loaded or if it failed
-	* the master table check, this will be false
+	* the principal table check, this will be false
 	*/
 	bool IsValid() const;
 
@@ -220,12 +220,6 @@ public:
  */
 class FSignedArchiveReader : public FArchive
 {
-	enum
-	{
-		/** Number of chunks to pre-cache.*/
-		PrecacheLength = 0
-	};
-
 	struct FReadInfo
 	{
 		FChunkRequest* Request;
@@ -236,7 +230,7 @@ class FSignedArchiveReader : public FArchive
 	};
 
 	/** Number of chunks in the archive */
-	int32 ChunkCount;	
+	int64 ChunkCount;	
 	/** Reader archive */
 	FArchive* PakReader;
 	/** Size of the archive on disk */
@@ -253,9 +247,9 @@ class FSignedArchiveReader : public FArchive
 	/** 
 	 * Calculate index of a chunk that contains the specified offset 
 	 */
-	FORCEINLINE int32 CalculateChunkIndex(int64 ReadOffset) const
+	FORCEINLINE int64 CalculateChunkIndex(int64 ReadOffset) const
 	{
-		return (int32)(ReadOffset / FPakInfo::MaxChunkDataSize);
+		return (ReadOffset / FPakInfo::MaxChunkDataSize);
 	}	
 
 	/** 
@@ -275,7 +269,7 @@ class FSignedArchiveReader : public FArchive
 	 */
 	FORCEINLINE int64 CalculateChunkOffset(int64 ReadOffset, int64& OutDataOffset) const
 	{
-		const int32 ChunkIndex = CalculateChunkIndex(ReadOffset);
+		const int64 ChunkIndex = CalculateChunkIndex(ReadOffset);
 		OutDataOffset = ReadOffset;
 		return CalculateChunkOffsetFromIndex(ChunkIndex);
 	}

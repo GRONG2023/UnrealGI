@@ -6,11 +6,6 @@ namespace UnrealBuildTool.Rules
 	{
 		public NetworkFileSystem(ReadOnlyTargetRules Target) : base(Target)
 		{
-			PrivateIncludePaths.AddRange(
-				new string[] {
-					"Runtime/NetworkFileSystem/Private",
-				});
-
 			PrivateDependencyModuleNames.AddRange(
 				new string[]
 				{
@@ -19,11 +14,9 @@ namespace UnrealBuildTool.Rules
 					"Projects",
 					"SandboxFile",
 					"TargetPlatform",
-				});
-
-			PublicIncludePaths.AddRange(
-				new string[] {
-					"Runtime/NetworkFileSystem/Public",
+					"DesktopPlatform",
+					"CookOnTheFly",
+					"CookOnTheFlyNetServer"
 				});
 
 			PublicDependencyModuleNames.AddRange(
@@ -45,6 +38,8 @@ namespace UnrealBuildTool.Rules
 			}
 
 			PrecompileForTargets = PrecompileTargetsType.Editor;
+
+			UnsafeTypeCastWarningLevel = WarningLevel.Error;
 		}
 	}
 }

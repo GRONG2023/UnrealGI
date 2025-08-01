@@ -3,6 +3,10 @@
 #include "AnimNodes/AnimNode_PoseSnapshot.h"
 #include "Animation/AnimInstanceProxy.h"
 #include "Animation/AnimTrace.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Engine/SkeletalMesh.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNode_PoseSnapshot)
 
 /////////////////////////////////////////////////////
 // FAnimNode_PoseSnapshot
@@ -22,7 +26,7 @@ void FAnimNode_PoseSnapshot::PreUpdate(const UAnimInstance* InAnimInstance)
 	USkeletalMesh* CurrentSkeletalMesh = nullptr;
 	if (InAnimInstance->GetSkelMeshComponent() && InAnimInstance->GetSkelMeshComponent()->IsRegistered())
 	{
-		CurrentSkeletalMesh = InAnimInstance->GetSkelMeshComponent()->SkeletalMesh;
+		CurrentSkeletalMesh = InAnimInstance->GetSkelMeshComponent()->GetSkeletalMeshAsset();
 	}
 
 	if (CurrentSkeletalMesh)
@@ -142,3 +146,4 @@ void FAnimNode_PoseSnapshot::CacheBoneMapping(FName InSourceMeshName, FName InTa
 		MappedTargetMeshName = InTargetMeshName;
 	}
 }
+

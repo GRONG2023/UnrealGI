@@ -19,7 +19,7 @@
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Views/SListView.h"
 #include "Widgets/Images/SImage.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Widgets/Input/SCheckBox.h"
 #include "PlatformInfo.h"
 #include "Widgets/Shared/SProjectLauncherVariantSelector.h"
@@ -114,8 +114,8 @@ public:
 				.AutoWidth()
 				[
 					SNew(SBox)
-						.WidthOverride(24)
-						.HeightOverride(24)
+						.WidthOverride(24.f)
+						.HeightOverride(24.f)
 						[
 							SNew(SImage)
 								.Image(this, &SProjectLauncherDeployTargetListRow::HandleDeviceImage)
@@ -271,10 +271,10 @@ private:
 	{
 		if (DeviceProxy->HasVariant(NAME_None))
 		{
-			const PlatformInfo::FPlatformInfo* const PlatformInfo = PlatformInfo::FindPlatformInfo(*DeviceProxy->GetTargetPlatformName(NAME_None));
+			const PlatformInfo::FTargetPlatformInfo* const PlatformInfo = PlatformInfo::FindPlatformInfo(*DeviceProxy->GetTargetPlatformName(NAME_None));
 			if (PlatformInfo)
 			{
-				FEditorStyle::GetBrush(PlatformInfo->GetIconStyleName(PlatformInfo::EPlatformIconSize::Normal));
+				FAppStyle::GetBrush(PlatformInfo->GetIconStyleName(EPlatformIconSize::Normal));
 			}
 		}
 		return FStyleDefaults::GetNoBrush();

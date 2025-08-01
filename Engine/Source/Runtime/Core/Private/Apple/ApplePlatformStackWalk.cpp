@@ -367,7 +367,7 @@ void FApplePlatformStackWalk::ThreadStackWalkAndDump(ANSICHAR* HumanReadableStri
 #endif
 }
 
-uint32 FApplePlatformStackWalk::CaptureThreadStackBackTrace(uint64 ThreadId, uint64* BackTrace, uint32 MaxDepth)
+uint32 FApplePlatformStackWalk::CaptureThreadStackBackTrace(uint64 ThreadId, uint64* BackTrace, uint32 MaxDepth, void* Context)
 {
 // Consider this for iOS
 #ifdef PLATFORM_MAC
@@ -446,7 +446,7 @@ int32 ReportCrash(ucontext_t *Context, int32 Signal, struct __siginfo* Info)
 		StackTrace[0] = 0;
 		
 		// Walk the stack and dump it to the allocated memory.
-		FPlatformStackWalk::StackWalkAndDump( StackTrace, StackTraceSize, 0, Context );
+		FPlatformStackWalk::StackWalkAndDump( StackTrace, StackTraceSize, Info->si_addr, Context );
 #if WITH_EDITORONLY_DATA
         FCString::Strncat( GErrorHist, ANSI_TO_TCHAR(StackTrace), UE_ARRAY_COUNT(GErrorHist) - 1 );
 		CreateExceptionInfoString(Signal, Info);

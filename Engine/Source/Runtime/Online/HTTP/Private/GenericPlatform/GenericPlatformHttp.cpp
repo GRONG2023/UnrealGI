@@ -1,10 +1,24 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "GenericPlatform/GenericPlatformHttp.h"
+
+#include "Algo/Transform.h"
+#include "Containers/Array.h"
 #include "GenericPlatform/HttpRequestImpl.h"
+#include "HAL/CriticalSection.h"
+#include "HAL/IConsoleManager.h"
 #include "Misc/Paths.h"
 #include "Misc/EngineVersion.h"
 #include "Misc/App.h"
+#include "Misc/ScopeRWLock.h"
+#include "String/BytesToHex.h"
+
+TAutoConsoleVariable<bool> CVarDefaultUserAgentCommentsEnabled(
+	TEXT("http.DefaultUserAgentCommentsEnabled"),
+	true,
+	TEXT("Whether comments are supported in the defualt user agent string"),
+	ECVF_SaveForNextBoot
+);
 
 namespace
 {
@@ -86,7 +100,7 @@ public:
 	virtual FString GetHeader(const FString& HeaderName) const override { return TEXT(""); }
 	virtual TArray<FString> GetAllHeaders() const override { return TArray<FString>(); }
 	virtual FString GetContentType() const override { return TEXT(""); }
-	virtual int32 GetContentLength() const override { return 0; }
+	virtual uint64 GetContentLength() const override { return 0; }
 	virtual const TArray<uint8>& GetContent() const override { static TArray<uint8> Temp; return Temp; }
 
 	// IHttpRequest
@@ -98,18 +112,193 @@ public:
 	virtual void SetContentAsString(const FString& ContentString) override {}
 	virtual bool SetContentAsStreamedFile(const FString& Filename) override { return false; }
 	virtual bool SetContentFromStream(TSharedRef<FArchive, ESPMode::ThreadSafe> Stream) override { return false; }
+	virtual bool SetResponseBodyReceiveStream(TSharedRef<FArchive> Stream) override { return false; }
 	virtual void SetHeader(const FString& HeaderName, const FString& HeaderValue) override {}
 	virtual void AppendToHeader(const FString& HeaderName, const FString& AdditionalHeaderValue) override {}
 	virtual bool ProcessRequest() override { return false; }
 	virtual void CancelRequest() override {}
 	virtual EHttpRequestStatus::Type GetStatus() const override { return EHttpRequestStatus::NotStarted; }
+	virtual EHttpFailureReason GetFailureReason() const override { return EHttpFailureReason::None; }
+	virtual const FString& GetEffectiveURL() const override { return EffectiveURL; }
 	virtual const FHttpResponsePtr GetResponse() const override { return nullptr; }
 	virtual void Tick(float DeltaSeconds) override {}
 	virtual float GetElapsedTime() const override { return 0.0f; }
+	virtual void SetDelegateThreadPolicy(EHttpRequestDelegateThreadPolicy InDelegateThreadPolicy) override {}
+	virtual EHttpRequestDelegateThreadPolicy GetDelegateThreadPolicy() const override { return EHttpRequestDelegateThreadPolicy::CompleteOnGameThread; }
+	virtual void SetTimeout(float InTimeoutSecs) override {}
+	virtual void ClearTimeout() override {}
+	virtual TOptional<float> GetTimeout() const override { return TOptional<float>(); }
+	virtual void SetActivityTimeout(float InTimeoutSecs) override {}
+	virtual void ProcessRequestUntilComplete() override {}
+
+private:
+	FString EffectiveURL;
+};
+
+FDefaultUserAgentBuilder::FDefaultUserAgentBuilder()
+	: ProjectName(FApp::GetProjectName())
+	, ProjectVersion(FApp::GetBuildVersion())
+	, ProjectComments()
+	, PlatformName(FString(FPlatformProperties::IniPlatformName()))
+	, PlatformVersion(FPlatformMisc::GetOSVersion())
+	, PlatformComments()
+	, AgentVersion(1)
+{
+}
+
+FString FDefaultUserAgentBuilder::BuildUserAgentString(const TSet<FString>* AllowedProjectCommentsFilter, const TSet<FString>* AllowedPlatformCommentsFilter) const
+{
+	// strip/escape slashes and whitespace from components
+	return FString::Printf(TEXT("%s/%s%s %s/%s%s"),
+		*FGenericPlatformHttp::EscapeUserAgentString(ProjectName),
+		*FGenericPlatformHttp::EscapeUserAgentString(ProjectVersion),
+		*BuildCommentString(ProjectComments, AllowedProjectCommentsFilter),
+		*FGenericPlatformHttp::EscapeUserAgentString(PlatformName),
+		*FGenericPlatformHttp::EscapeUserAgentString(PlatformVersion),
+		*BuildCommentString(PlatformComments, AllowedPlatformCommentsFilter));
+}
+
+void FDefaultUserAgentBuilder::SetProjectName(const FString& InProjectName)
+{
+	ProjectName = InProjectName;
+	++AgentVersion;
+}
+
+void FDefaultUserAgentBuilder::SetProjectVersion(const FString& InProjectVersion)
+{
+	ProjectVersion = InProjectVersion;
+	++AgentVersion;
+}
+
+void FDefaultUserAgentBuilder::AddProjectComment(const FString& InComment)
+{
+	ProjectComments.AddUnique(InComment);
+	++AgentVersion;
+}
+
+void FDefaultUserAgentBuilder::SetPlatformName(const FString& InPlatformName)
+{
+	PlatformName = InPlatformName;
+	++AgentVersion;
+}
+
+void FDefaultUserAgentBuilder::SetPlatformVersion(const FString& InPlatformVersion)
+{
+	PlatformVersion = InPlatformVersion;
+	++AgentVersion;
+}
+
+void FDefaultUserAgentBuilder::AddPlatformComment(const FString& InComment)
+{
+	PlatformComments.AddUnique(InComment);
+	++AgentVersion;
+}
+
+uint32 FDefaultUserAgentBuilder::GetAgentVersion() const
+{
+	return AgentVersion;
+}
+
+FString FDefaultUserAgentBuilder::BuildCommentString(const TArray<FString>& Comments, const TSet<FString>* AllowedCommentsFilter)
+{
+	TArray<FString> FilteredComments;
+	Algo::TransformIf(Comments, FilteredComments,
+		[AllowedCommentsFilter](const FString& Comment) -> bool
+		{
+			return !AllowedCommentsFilter || AllowedCommentsFilter->Contains(Comment);
+		},
+		[](const FString& UnsanitizedComment)
+		{
+			FString SanitizedComment = UnsanitizedComment;
+			SanitizedComment.ReplaceInline(TEXT("("), TEXT(""));
+			SanitizedComment.ReplaceInline(TEXT(")"), TEXT(""));
+			SanitizedComment.ReplaceInline(TEXT(";"), TEXT(""));
+			return SanitizedComment;
+		}
+	);
+
+	return !FilteredComments.IsEmpty() ? FString::Printf(TEXT(" (%s)"), *FString::Join(FilteredComments, TEXT("; "))) : FString();
+}
+
+class FUserAgentImpl final
+{
+public:
+	static FUserAgentImpl& Get()
+	{
+		static FUserAgentImpl Instance;
+		return Instance;
+	}
+
+	FUserAgentImpl()
+		: RWLock()
+		, bCachedCommentsEnabled(false)
+	{
+		CachedUserAgent = BuildUserAgentString();
+		CVarDefaultUserAgentCommentsEnabled->OnChangedDelegate().AddRaw(this, &FUserAgentImpl::OnCommentsEnabledChanged);
+	}
+
+	void AddProjectComment(const FString& Comment)
+	{
+		FRWScopeLock WriteLock(RWLock, SLT_Write);
+		Builder.AddProjectComment(Comment);
+		CachedUserAgent = BuildUserAgentString();
+	}
+
+	void AddPlatformComment(const FString& Comment)
+	{
+		FRWScopeLock WriteLock(RWLock, SLT_Write);
+		Builder.AddPlatformComment(Comment);
+		CachedUserAgent = BuildUserAgentString();
+	}
+
+	FString GetUserAgent()
+	{
+		FRWScopeLock ReadLock(RWLock, SLT_ReadOnly);
+		return CachedUserAgent;
+	}
+
+	FDefaultUserAgentBuilder GetBuilder()
+	{
+		FRWScopeLock ReadLock(RWLock, SLT_ReadOnly);
+		return Builder;
+	}
+
+	uint32 GetAgentVersion()
+	{
+		return Builder.GetAgentVersion();
+	}
+
+private:
+	FString BuildUserAgentString()
+	{
+		if (CVarDefaultUserAgentCommentsEnabled.GetValueOnAnyThread())
+		{
+			return Builder.BuildUserAgentString();
+		}
+		else
+		{
+			// Build the user agent string without any comments.
+			TSet<FString> AllowedCommentsFilter;
+			return Builder.BuildUserAgentString(&AllowedCommentsFilter, &AllowedCommentsFilter);
+		}
+	}
+
+	void OnCommentsEnabledChanged(IConsoleVariable*)
+	{
+		FRWScopeLock WriteLock(RWLock, SLT_Write);
+		CachedUserAgent = BuildUserAgentString();
+	}
+
+	FRWLock RWLock;
+	FDefaultUserAgentBuilder Builder;
+	FString CachedUserAgent;
+	bool bCachedCommentsEnabled;
 };
 
 void FGenericPlatformHttp::Init()
 {
+	// Call during init to instantiate the user agent cache.
+	FUserAgentImpl::Get();
 }
 
 void FGenericPlatformHttp::Shutdown()
@@ -121,12 +310,12 @@ IHttpRequest* FGenericPlatformHttp::ConstructRequest()
 	return new FGenericPlatformHttpRequest();
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 bool FGenericPlatformHttp::UsesThreadedHttp()
 {
-	// Many platforms use libcurl.  Our libcurl implementation uses threading.
-	// Platforms that don't use libcurl but have threading will need to override UsesThreadedHttp to return true for their platform.
-	return WITH_LIBCURL;
+	return true;
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 static bool IsAllowedChar(UTF8CHAR LookupChar)
 {
@@ -151,28 +340,37 @@ static bool IsAllowedChar(UTF8CHAR LookupChar)
 
 FString FGenericPlatformHttp::UrlEncode(const FStringView UnencodedString)
 {
-	FTCHARToUTF8 Converter(UnencodedString.GetData(), UnencodedString.Len());	//url encoding must be encoded over each utf-8 byte
-	const UTF8CHAR* UTF8Data = (UTF8CHAR*) Converter.Get();	//converter uses ANSI instead of UTF8CHAR - not sure why - but other code seems to just do this cast. In this case it really doesn't matter
-	FString EncodedString = TEXT("");
-	
-	TCHAR Buffer[2] = { 0, 0 };
+	FString EncodedString;
+	EncodedString.Reserve(UnencodedString.Len()); // This is a minimum bound. Some characters might be outside the ascii set and require %hh encoding. Some characters might be multi-byte and require several %hh%hh%hh
 
-	for (int32 ByteIdx = 0, Length = Converter.Length(); ByteIdx < Length; ++ByteIdx)
+	UTF8CHAR Utf8ConvertedChar[4] = {};
+	TCHAR HexChars[3] = { TCHAR('%') };
+
+	for (const TCHAR& InChar : UnencodedString)
 	{
-		UTF8CHAR ByteToEncode = UTF8Data[ByteIdx];
-		
-		if (IsAllowedChar(ByteToEncode))
+		verify(FPlatformString::Convert(Utf8ConvertedChar, sizeof(Utf8ConvertedChar), &InChar, 1));
+		for (int32 ByteIdx = 0; ByteIdx < sizeof(Utf8ConvertedChar); ++ByteIdx)
 		{
-			Buffer[0] = ByteToEncode;
-			FString TmpString = Buffer;
-			EncodedString += TmpString;
-		}
-		else if (ByteToEncode != '\0')
-		{
-			EncodedString += TEXT("%");
-			EncodedString += FString::Printf(TEXT("%.2X"), ByteToEncode);
+			UTF8CHAR ByteToEncode = Utf8ConvertedChar[ByteIdx];
+			Utf8ConvertedChar[ByteIdx] = UTF8CHAR('\0');
+			if (ByteToEncode == '\0')
+			{
+				break;
+			}
+			else if (IsAllowedChar(ByteToEncode))
+			{
+				// We use InChar here as it is the same value ByteToEncode would convert back to anyway
+				// Note this relies on the fact that IsAllowedChar is only possible to be true for single-byte UTF8 characters.
+				EncodedString.AppendChar(InChar);
+			}
+			else
+			{
+				UE::String::BytesToHex(MakeArrayView((uint8*)&ByteToEncode, 1), &HexChars[1]);
+				EncodedString.AppendChars(HexChars, 3);
+			}
 		}
 	}
+
 	return EncodedString;
 }
 
@@ -181,7 +379,7 @@ FString FGenericPlatformHttp::UrlDecode(const FStringView EncodedString)
 	FTCHARToUTF8 Converter(EncodedString.GetData(), EncodedString.Len());
 	const UTF8CHAR* UTF8Data = (UTF8CHAR*)Converter.Get();	
 	
-	TArray<ANSICHAR> Data;
+	TArray<UTF8CHAR> Data;
 	Data.Reserve(EncodedString.Len());
 
 	for (int32 CharIdx = 0; CharIdx < Converter.Length();)
@@ -189,9 +387,9 @@ FString FGenericPlatformHttp::UrlDecode(const FStringView EncodedString)
 		if (UTF8Data[CharIdx] == '%')
 		{
 			int32 Value = 0;
-			if (UTF8Data[CharIdx + 1] == 'u')
+			if (CharIdx < Converter.Length() - 1 && UTF8Data[CharIdx + 1] == 'u')
 			{
-				if (CharIdx + 6 <= Converter.Length())
+				if (CharIdx <= Converter.Length() - 6)
 				{
 					// Treat all %uXXXX as code point
 					Value = FParse::HexDigit(UTF8Data[CharIdx + 2]) << 12;
@@ -200,12 +398,13 @@ FString FGenericPlatformHttp::UrlDecode(const FStringView EncodedString)
 					Value += FParse::HexDigit(UTF8Data[CharIdx + 5]);
 					CharIdx += 6;
 
-					ANSICHAR Buffer[8] = { 0 };
-					ANSICHAR* BufferPtr = Buffer;
+					UTF8CHAR Buffer[8] = {};
+					UTF8CHAR* BufferPtr = Buffer;
 					const int32 Len = UE_ARRAY_COUNT(Buffer);
-					const int32 WrittenChars = FTCHARToUTF8_Convert::Utf8FromCodepoint(Value, BufferPtr, Len);
+					const UTF8CHAR* BufferEnd = FPlatformString::Convert(BufferPtr, Len, (UTF32CHAR*)&Value, 1);
+					check(BufferEnd);
 
-					Data.Append(Buffer, WrittenChars);
+					Data.Append(Buffer, (int32)(BufferEnd - BufferPtr));
 				}
 				else
 				{
@@ -214,13 +413,13 @@ FString FGenericPlatformHttp::UrlDecode(const FStringView EncodedString)
 					continue;
 				}
 			}
-			else if(CharIdx + 3 <= Converter.Length())
+			else if(CharIdx <= Converter.Length() - 3)
 			{
 				// Treat all %XX as straight byte
 				Value = FParse::HexDigit(UTF8Data[CharIdx + 1]) << 4;
 				Value += FParse::HexDigit(UTF8Data[CharIdx + 2]);
 				CharIdx += 3;
-				Data.Add((ANSICHAR)(Value));
+				Data.Add((UTF8CHAR)(Value));
 			}
 			else
 			{
@@ -237,7 +436,7 @@ FString FGenericPlatformHttp::UrlDecode(const FStringView EncodedString)
 		}
 	}
 
-	Data.Add('\0');
+	Data.Add(UTF8TEXT('\0'));
 	return FString(UTF8_TO_TCHAR(Data.GetData()));
 }
 
@@ -285,7 +484,6 @@ FString FGenericPlatformHttp::GetUrlDomainAndPort(const FStringView Url)
 	return FString(DomainAndPort);
 }
 
-
 FString FGenericPlatformHttp::GetUrlDomain(const FStringView Url)
 {
 	FStringView Protocol;
@@ -307,6 +505,22 @@ FString FGenericPlatformHttp::GetUrlDomain(const FStringView Url)
 	}
 
 	return FString(Domain);
+}
+
+FString FGenericPlatformHttp::GetUrlBase(const FStringView Url)
+{
+	FStringView UrlBase = Url;
+	for (int32 Index = Url.Find(TEXT("://")) + 3; Index < Url.Len(); ++Index)
+	{
+		const TCHAR Character = Url[Index];
+		if (Character == TEXT('/') || Character == TEXT('?') || Character == TEXT('#'))
+		{
+			UrlBase.LeftInline(Index);
+			break;
+		}
+	}
+
+	return FString(UrlBase);
 }
 
 FString FGenericPlatformHttp::GetMimeType(const FString& FilePath)
@@ -361,13 +575,27 @@ FString FGenericPlatformHttp::GetMimeType(const FString& FilePath)
 
 FString FGenericPlatformHttp::GetDefaultUserAgent()
 {
-	//** strip/escape slashes and whitespace from components
-	static FString CachedUserAgent = FString::Printf(TEXT("%s/%s %s/%s"),
-		*EscapeUserAgentString(FApp::GetProjectName()),
-		*EscapeUserAgentString(FApp::GetBuildVersion()),
-		*EscapeUserAgentString(FString(FPlatformProperties::IniPlatformName())),
-		*EscapeUserAgentString(FPlatformMisc::GetOSVersion()));
-	return CachedUserAgent;
+	return FUserAgentImpl::Get().GetUserAgent();
+}
+
+void FGenericPlatformHttp::AddDefaultUserAgentProjectComment(const FString& Comment)
+{
+	FUserAgentImpl::Get().AddProjectComment(Comment);
+}
+
+void FGenericPlatformHttp::AddDefaultUserAgentPlatformComment(const FString& Comment)
+{
+	FUserAgentImpl::Get().AddPlatformComment(Comment);
+}
+
+uint32 FGenericPlatformHttp::GetDefaultUserAgentVersion()
+{
+	return FUserAgentImpl::Get().GetAgentVersion();
+}
+
+FDefaultUserAgentBuilder FGenericPlatformHttp::GetDefaultUserAgentBuilder()
+{
+	return FUserAgentImpl::Get().GetBuilder();
 }
 
 FString FGenericPlatformHttp::EscapeUserAgentString(const FString& UnescapedString)

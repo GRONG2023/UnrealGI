@@ -2,13 +2,23 @@
 
 #include "Components/ForceFeedbackComponent.h"
 #include "Components/BillboardComponent.h"
+#include "Engine/World.h"
 #include "GameFramework/ForceFeedbackEffect.h"
 #include "Engine/Canvas.h"
 #include "GenericPlatform/IInputInterface.h"
 #include "Engine/Texture2D.h"
+#include "UObject/ICookInfo.h"
+#include "UObject/SoftObjectPath.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ForceFeedbackComponent)
 
 TArray<FForceFeedbackManager*> FForceFeedbackManager::PerWorldForceFeedbackManagers;
 FDelegateHandle FForceFeedbackManager::OnWorldCleanupHandle;
+
+#if WITH_EDITORONLY_DATA
+static const TCHAR* GForceFeedbackSpriteAssetNameAutoActivate = TEXT("/Engine/EditorResources/S_ForceFeedbackComponent_AutoActivate.S_ForceFeedbackComponent_AutoActivate");
+static const TCHAR* GForceFeedbackSpriteAssetName = TEXT("/Engine/EditorResources/S_ForceFeedbackComponent.S_ForceFeedbackComponent");
+#endif
 
 FForceFeedbackManager* FForceFeedbackManager::Get(UWorld* World, bool bCreateIfMissing)
 {
@@ -45,7 +55,7 @@ void FForceFeedbackManager::OnWorldCleanup(UWorld* World, bool bSessionEnded, bo
 		if (ForceFeedbackManager->World == World)
 		{
 			delete ForceFeedbackManager;
-			PerWorldForceFeedbackManagers.RemoveAtSwap(Index, 1, false);
+			PerWorldForceFeedbackManagers.RemoveAtSwap(Index, 1, EAllowShrinking::No);
 			break;
 		}
 	}
@@ -53,12 +63,12 @@ void FForceFeedbackManager::OnWorldCleanup(UWorld* World, bool bSessionEnded, bo
 
 void FForceFeedbackManager::AddActiveComponent(UForceFeedbackComponent* ForceFeedbackComponent)
 {
-	ActiveForceFeedbackComponents.AddUnique(ForceFeedbackComponent);
+	ActiveForceFeedbackComponents.AddUnique(ObjectPtrWrap(ForceFeedbackComponent));
 }
 
 void FForceFeedbackManager::RemoveActiveComponent(UForceFeedbackComponent* ForceFeedbackComponent)
 {
-	ActiveForceFeedbackComponents.RemoveSwap(ForceFeedbackComponent);
+	ActiveForceFeedbackComponents.RemoveSwap(ObjectPtrWrap(ForceFeedbackComponent));
 }
 
 void FForceFeedbackManager::AddReferencedObjects(FReferenceCollector& Collector)
@@ -86,13 +96,13 @@ void FForceFeedbackManager::Tick(float DeltaTime)
 		{
 			if (!FFC->Advance(DeltaTime))
 			{
-				ActiveForceFeedbackComponents.RemoveAtSwap(Index, 1, false);
+				ActiveForceFeedbackComponents.RemoveAtSwap(Index, 1, EAllowShrinking::No);
 				FFC->StopInternal(false);
 			}
 		}
 		else
 		{
-			ActiveForceFeedbackComponents.RemoveAtSwap(Index, 1, false);
+			ActiveForceFeedbackComponents.RemoveAtSwap(Index, 1, EAllowShrinking::No);
 		}
 	}
 
@@ -103,25 +113,25 @@ void FForceFeedbackManager::Tick(float DeltaTime)
 	}
 }
 
-void FForceFeedbackManager::Update(const FVector Location, FForceFeedbackValues& Values) const
+void FForceFeedbackManager::Update(const FVector Location, FForceFeedbackValues& Values, const FPlatformUserId UserId) const
 {
 	for (UForceFeedbackComponent* FFC : ActiveForceFeedbackComponents)
 	{
 		if (FFC)
 		{
-			FFC->Update(Location, Values);
+			FFC->Update(Location, Values, UserId);
 		}
 	}
 }
 
-void FForceFeedbackManager::DrawDebug(const FVector Location, FDisplayDebugManager& DisplayDebugManager) const
+void FForceFeedbackManager::DrawDebug(const FVector Location, FDisplayDebugManager& DisplayDebugManager, const FPlatformUserId UserId) const
 {
 	for (UForceFeedbackComponent* FFC : ActiveForceFeedbackComponents)
 	{
 		if (FFC && FFC->ForceFeedbackEffect)
 		{
 			FForceFeedbackValues ActiveValues;
-			FFC->Update(Location, ActiveValues);
+			FFC->Update(Location, ActiveValues, UserId);
 
 			const FString ActiveEntry = FString::Printf(TEXT("%s %s %.2f %.2f %s %.2f - LL: %.2f LS: %.2f RL: %.2f RS: %.2f"), 
 				*FFC->ForceFeedbackEffect->GetFName().ToString(), 
@@ -167,6 +177,21 @@ void UForceFeedbackComponent::PostEditChangeProperty(FPropertyChangedEvent& Prop
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 }
 
+void UForceFeedbackComponent::Serialize(FArchive& Ar)
+{
+	Super::Serialize(Ar);
+	if (Ar.IsSaving() && Ar.IsObjectReferenceCollector() && !Ar.IsCooking())
+	{
+		FSoftObjectPathSerializationScope EditorOnlyScope(ESoftObjectPathCollectType::EditorOnlyCollect);
+		FSoftObjectPath SpriteAssets[]{ FSoftObjectPath(GForceFeedbackSpriteAssetNameAutoActivate), FSoftObjectPath(GForceFeedbackSpriteAssetName) };
+		for (FSoftObjectPath& AssetPath : SpriteAssets)
+		{
+			Ar << AssetPath;
+		}
+	}
+}
+
+
 void UForceFeedbackComponent::UpdateSpriteTexture()
 {
 	if (SpriteComponent)
@@ -174,13 +199,14 @@ void UForceFeedbackComponent::UpdateSpriteTexture()
 		SpriteComponent->SpriteInfo.Category = TEXT("Misc");
 		SpriteComponent->SpriteInfo.DisplayName = NSLOCTEXT("SpriteCategory", "Misc", "Misc");
 
+		FCookLoadScope EditorOnlyScope(ECookLoadType::EditorOnly);
 		if (bAutoActivate)
 		{
-			SpriteComponent->SetSprite(LoadObject<UTexture2D>(nullptr, TEXT("/Engine/EditorResources/S_ForceFeedbackComponent_AutoActivate.S_ForceFeedbackComponent_AutoActivate")));
+			SpriteComponent->SetSprite(LoadObject<UTexture2D>(nullptr, GForceFeedbackSpriteAssetNameAutoActivate));
 		}
 		else
 		{
-			SpriteComponent->SetSprite(LoadObject<UTexture2D>(nullptr, TEXT("/Engine/EditorResources/S_ForceFeedbackComponent.S_ForceFeedbackComponent")));
+			SpriteComponent->SetSprite(LoadObject<UTexture2D>(nullptr, GForceFeedbackSpriteAssetName));
 		}
 	}
 }
@@ -290,6 +316,11 @@ void UForceFeedbackComponent::Stop()
 
 void UForceFeedbackComponent::StopInternal(const bool bRemoveFromManager)
 {
+	if (OnForceFeedbackFinished.IsBound())
+	{
+		OnForceFeedbackFinished.Broadcast(this);	
+	}
+	
 	// Set this to immediately be inactive
 	SetActiveFlag(false);
 	PlayTime = 0.f;
@@ -370,7 +401,7 @@ bool UForceFeedbackComponent::Advance(const float DeltaTime)
 	return true;
 }
 
-void UForceFeedbackComponent::Update(FVector Location, FForceFeedbackValues& Values) const
+void UForceFeedbackComponent::Update(FVector Location, FForceFeedbackValues& Values, const FPlatformUserId UserId) const
 {
 	if (ForceFeedbackEffect)
 	{
@@ -389,7 +420,8 @@ void UForceFeedbackComponent::Update(FVector Location, FForceFeedbackValues& Val
 
 		if (ValueMultiplier > 0.f)
 		{
-			ForceFeedbackEffect->GetValues(EvalTime, Values, ValueMultiplier);
+			ForceFeedbackEffect->GetValues(EvalTime, Values, UserId, ValueMultiplier);
 		}
 	}
 }
+

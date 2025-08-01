@@ -1,12 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "PhysicsEngine/PhysicsThruster.h"
-#include "UObject/ConstructorHelpers.h"
-#include "Components/PrimitiveComponent.h"
+#include "Async/TaskGraphInterfaces.h"
 #include "Components/ArrowComponent.h"
 #include "Components/BillboardComponent.h"
 #include "Engine/Texture2D.h"
 #include "PhysicsEngine/PhysicsThrusterComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PhysicsThruster)
 
 #define LOCTEXT_NAMESPACE "PhysicsThrusterComponent"
 
@@ -84,3 +85,4 @@ APhysicsThruster::APhysicsThruster(const FObjectInitializer& ObjectInitializer)
 }
 
 #undef LOCTEXT_NAMESPACE
+

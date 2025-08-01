@@ -39,6 +39,10 @@ public:
 
 	//~ FGCObject
 	virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FSkeletalAnimationTrackEditor");
+	}
 
 	/**
 	 * Creates an instance of this class.  Called by a sequencer 
@@ -60,6 +64,7 @@ public:
 	virtual void BuildObjectBindingTrackMenu(FMenuBuilder& MenuBuilder, const TArray<FGuid>& ObjectBindings, const UClass* ObjectClass) override;
 	virtual bool HandleAssetAdded(UObject* Asset, const FGuid& TargetObjectGuid) override;
 	virtual TSharedRef<ISequencerSection> MakeSectionInterface( UMovieSceneSection& SectionObject, UMovieSceneTrack& Track, FGuid ObjectBinding ) override;
+	virtual bool SupportsSequence(UMovieSceneSequence* InSequence) const override;
 	virtual bool SupportsType( TSubclassOf<UMovieSceneTrack> Type ) const override;
 	virtual void BuildTrackContextMenu( FMenuBuilder& MenuBuilder, UMovieSceneTrack* Track ) override;
 	virtual TSharedPtr<SWidget> BuildOutlinerEditWidget(const FGuid& ObjectBinding, UMovieSceneTrack* Track, const FBuildEditWidgetParams& Params) override;
@@ -73,6 +78,9 @@ private:
 	/** Animation sub menu */
 	TSharedRef<SWidget> BuildAnimationSubMenu(FGuid ObjectBinding, USkeleton* Skeleton, UMovieSceneTrack* Track);
 	void AddAnimationSubMenu(FMenuBuilder& MenuBuilder, TArray<FGuid> ObjectBindings, USkeleton* Skeleton, UMovieSceneTrack* Track);
+
+	/** Filter only compatible skeletons */
+	bool FilterAnimSequences(const FAssetData& AssetData, USkeleton* Skeleton);
 
 	/** Animation sub menu filter function */
 	bool ShouldFilterAsset(const FAssetData& AssetData);
@@ -89,7 +97,7 @@ private:
 	/** Construct the binding menu*/
 	void ConstructObjectBindingTrackMenu(FMenuBuilder& MenuBuilder, TArray<FGuid> ObjectBindings);
 
-	/** Callback to Create the Animation Asset, pop open the dialolg*/
+	/** Callback to Create the Animation Asset, pop open the dialog */
 	void HandleCreateAnimationSequence(USkeletalMeshComponent* SkelMeshComp, USkeleton* Skeleton, FGuid Binding, bool bCeateSoftLink);
 
 	/** Callback to Creae the Animation Asset after getting the name*/
@@ -110,15 +118,16 @@ private:
 
 private:
 	/* For Anim Sequence UI Option with be gc'd*/
-	UAnimSeqExportOption* AnimSeqExportOption;
+	TObjectPtr<UAnimSeqExportOption> AnimSeqExportOption;
 
 
 private:
 	/* Delegate to handle sequencer changes for auto baking of anim sequences*/
 	FDelegateHandle SequencerSavedHandle;
 	void OnSequencerSaved(ISequencer& InSequence);
-
-
+	FDelegateHandle SequencerChangedHandle;
+	void OnSequencerDataChanged(EMovieSceneDataChangeType DataChangeType);
+	void OnPostPropertyChanged(UObject* InObject, struct FPropertyChangedEvent& InPropertyChangedEvent);
 };
 
 
@@ -142,7 +151,8 @@ public:
 	virtual UMovieSceneSection* GetSectionObject() override;
 	virtual FText GetSectionTitle() const override;
 	virtual FText GetSectionToolTip() const override;
-	virtual float GetSectionHeight() const override;
+	virtual TOptional<FFrameTime> GetSectionTime(FSequencerSectionPainter& InPainter) const override;
+	virtual float GetSectionHeight(const UE::Sequencer::FViewDensityInfo& ViewDensity) const override;
 	virtual FMargin GetContentPadding() const override;
 	virtual int32 OnPaintSection( FSequencerSectionPainter& Painter ) const override;
 	virtual void BeginResizeSection() override;

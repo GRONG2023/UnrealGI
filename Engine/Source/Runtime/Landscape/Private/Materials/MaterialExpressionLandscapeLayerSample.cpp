@@ -6,6 +6,13 @@
 #include "EngineGlobals.h"
 #include "MaterialCompiler.h"
 #include "Materials/Material.h"
+#include "LandscapeUtils.h"
+
+#if WITH_EDITOR
+#include "MaterialHLSLGenerator.h"
+#endif
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MaterialExpressionLandscapeLayerSample)
 
 #define LOCTEXT_NAMESPACE "Landscape"
 
@@ -27,24 +34,16 @@ UMaterialExpressionLandscapeLayerSample::UMaterialExpressionLandscapeLayerSample
 		}
 	};
 	static FConstructorStatics ConstructorStatics;
-
-	bIsParameterExpression = true;
-
 #if WITH_EDITORONLY_DATA
 	MenuCategories.Add(ConstructorStatics.NAME_Landscape);
 #endif
 }
 
-
-FGuid& UMaterialExpressionLandscapeLayerSample::GetParameterExpressionId()
-{
-	return ExpressionGUID;
-}
-
 #if WITH_EDITOR
 int32 UMaterialExpressionLandscapeLayerSample::Compile(class FMaterialCompiler* Compiler, int32 OutputIndex)
 {
-	const int32 WeightCode = Compiler->StaticTerrainLayerWeight(ParameterName, Compiler->Constant(PreviewWeight));
+	const bool bTextureArrayEnabled = UE::Landscape::UseWeightmapTextureArray(Compiler->GetShaderPlatform());
+	const int32 WeightCode = Compiler->StaticTerrainLayerWeight(ParameterName, Compiler->Constant(PreviewWeight), bTextureArrayEnabled);
 	if (WeightCode == INDEX_NONE)
 	{
 		// layer is not used in this component, sample value is 0.
@@ -55,6 +54,13 @@ int32 UMaterialExpressionLandscapeLayerSample::Compile(class FMaterialCompiler* 
 		return WeightCode;
 	}
 }
+
+bool UMaterialExpressionLandscapeLayerSample::GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const
+{
+	const bool bTextureArrayEnabled = UE::Landscape::IsMobileWeightmapTextureArrayEnabled();
+	return GenerateStaticTerrainLayerWeightExpression(ParameterName, PreviewWeight, bTextureArrayEnabled, Generator, OutExpression);
+}
+
 #endif // WITH_EDITOR
 
 UObject* UMaterialExpressionLandscapeLayerSample::GetReferencedTexture() const
@@ -62,10 +68,26 @@ UObject* UMaterialExpressionLandscapeLayerSample::GetReferencedTexture() const
 	return GEngine->WeightMapPlaceholderTexture;
 }
 
+UMaterialExpression::ReferencedTextureArray UMaterialExpressionLandscapeLayerSample::GetReferencedTextures() const
+{
+	return { GEngine->WeightMapPlaceholderTexture, GEngine->WeightMapArrayPlaceholderTexture };
+}
+
 #if WITH_EDITOR
+FString UMaterialExpressionLandscapeLayerSample::GetEditableName() const
+{
+	return ParameterName.ToString();
+}
+
+void UMaterialExpressionLandscapeLayerSample::SetEditableName(const FString& NewName)
+{
+	ParameterName = *NewName;
+}
+
 void UMaterialExpressionLandscapeLayerSample::GetCaption(TArray<FString>& OutCaptions) const
 {
-	OutCaptions.Add(FString::Printf(TEXT("Sample '%s'"), *ParameterName.ToString()));
+	OutCaptions.Add(TEXT("Landscape Layer Sample"));
+	OutCaptions.Add(FString::Printf(TEXT("'%s'"), *ParameterName.ToString()));
 }
 
 bool UMaterialExpressionLandscapeLayerSample::MatchesSearchQuery(const TCHAR* SearchQuery)
@@ -83,18 +105,11 @@ bool UMaterialExpressionLandscapeLayerSample::MatchesSearchQuery(const TCHAR* Se
 	return Super::MatchesSearchQuery(SearchQuery);
 }
 
+void UMaterialExpressionLandscapeLayerSample::GetLandscapeLayerNames(TArray<FName>& OutLayers) const
+{
+	OutLayers.AddUnique(ParameterName);
+}
 #endif // WITH_EDITOR
 
-void UMaterialExpressionLandscapeLayerSample::GetAllParameterInfo(TArray<FMaterialParameterInfo> &OutParameterInfo, TArray<FGuid> &OutParameterIds, const FMaterialParameterInfo& InBaseParameterInfo) const
-{
-	int32 CurrentSize = OutParameterInfo.Num();
-	FMaterialParameterInfo NewParameter(ParameterName, InBaseParameterInfo.Association, InBaseParameterInfo.Index);
-	OutParameterInfo.AddUnique(NewParameter);
-
-	if (CurrentSize != OutParameterInfo.Num())
-	{
-		OutParameterIds.Add(ExpressionGUID);
-	}
-}
-
 #undef LOCTEXT_NAMESPACE
+

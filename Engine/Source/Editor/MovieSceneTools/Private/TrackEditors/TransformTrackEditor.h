@@ -15,10 +15,13 @@
 #include "Tracks/MovieScene3DTransformTrack.h"
 #include "Sections/MovieScene3DTransformSection.h"
 #include "SequencerKeyParams.h"
+#include "EditorUndoClient.h"
 
 class AActor;
 struct FAssetData;
+class FLevelEditorViewportClient;
 class SHorizontalBox;
+class UTickableTransformConstraint;
 
 namespace UE { namespace MovieScene { struct FIntermediate3DTransform; } }
 
@@ -26,7 +29,7 @@ namespace UE { namespace MovieScene { struct FIntermediate3DTransform; } }
  * Tools for animatable transforms
  */
 class F3DTransformTrackEditor
-	: public FKeyframeTrackEditor<UMovieScene3DTransformTrack>
+	: public FKeyframeTrackEditor<UMovieScene3DTransformTrack>, public FEditorUndoClient
 {
 public:
 
@@ -52,7 +55,7 @@ public:
 
 	// ISequencerTrackEditor interface
 	virtual void ProcessKeyOperation(FFrameNumber InKeyTime, const UE::Sequencer::FKeyOperation& Operation, ISequencer& InSequencer) override;
-	virtual void BuildObjectBindingEditButtons(TSharedPtr<SHorizontalBox> EditBox, const FGuid& ObjectBinding, const UClass* ObjectClass) override;
+	virtual void BuildObjectBindingColumnWidgets(TFunctionRef<TSharedRef<SHorizontalBox>()> GetEditBox, const UE::Sequencer::TViewModelPtr<UE::Sequencer::FObjectBindingModel>& ObjectBinding, const UE::Sequencer::FCreateOutlinerViewParams& InParams, const FName& InColumnName) override;
 	virtual void BuildObjectBindingTrackMenu(FMenuBuilder& MenuBuilder, const TArray<FGuid>& ObjectBindinsg, const UClass* ObjectClass) override;
 	virtual TSharedRef<ISequencerSection> MakeSectionInterface( UMovieSceneSection& SectionObject, UMovieSceneTrack& Track, FGuid ObjectBinding ) override;
 	virtual void OnRelease() override;
@@ -61,8 +64,20 @@ public:
 	virtual bool HasTransformKeyBindings() const override { return true; }
 	virtual bool CanAddTransformKeysForSelectedObjects() const override;
 	virtual void OnAddTransformKeysForSelectedObjects(EMovieSceneTransformChannel Channel) override;
+	virtual void OnPreSaveWorld(UWorld* World) override;
+	virtual void OnPostSaveWorld(UWorld* World) override;
+
+	//FEditorUndoClient Interface
+	virtual bool MatchesContext(const FTransactionContext& InContext, const TArray<TPair<UObject*, FTransactionObjectEvent>>& TransactionObjects) const override;
+	virtual void PostUndo(bool bSuccess) override;
+	virtual void PostRedo(bool bSuccess) override { PostUndo(bSuccess); }
 
 private:
+	EPropertyKeyedStatus GetKeyedStatusInSection(const UMovieScene3DTransformSection& Section, const TRange<FFrameNumber>& Range, EMovieSceneTransformChannel TransformChannel, TConstArrayView<int32> ChannelIndices) const;
+
+	EPropertyKeyedStatus GetPropertyKeyedStatus(const IPropertyHandle& PropertyHandle, EMovieSceneTransformChannel TransformChannel) const;
+
+	void OnTransformPropertyChanged(const FPropertyChangedParams& PropertyChangedParams, EMovieSceneTransformChannel TransformChannel);
 
 	void ProcessKeyOperation(UObject* ObjectToKey, TArrayView<const UE::Sequencer::FKeySectionOperation> SectionsToKey, ISequencer& InSequencer, FFrameNumber KeyTime);
 
@@ -114,19 +129,21 @@ private:
 	/** Delegate for locked camera button */
 	void OnLockCameraClicked(ECheckBoxState CheckBoxState, FGuid ObjectGuid);
 
-	/** Clear locked cameras */
-	void ClearLockedCameras(AActor* LockedActor);
-
 	/** Delegate for camera button lock tooltip */
 	FText GetLockCameraToolTip(FGuid ObjectGuid) const; 
 
+	/** Implementation of checking if a camera is locked */
+	bool IsCameraBindingLocked(FGuid ObjectGuid) const; 
 
+	/** Toggle whether a camera is locked in the given viewport (or the active viewport if not provided) */
+	void LockCameraBinding(bool bLock, FGuid ObjectGuid, FLevelEditorViewportClient* ViewportClient = nullptr, bool bRemoveCinematicLock = true);
 
 	/** Generates transform keys based on the last transform, the current transform, and other options. 
 		One transform key is generated for each individual key to be added to the section. */
 	void GetTransformKeys( const TOptional<FTransformData>& LastTransform, const FTransformData& CurrentTransform, EMovieSceneTransformChannel ChannelsToKey, UObject* Object, UMovieSceneSection* Section, FGeneratedTrackKeys& OutGeneratedKeys );
 
-
+	/** Transform origin which may be set for the current level sequence */
+	FTransform GetTransformOrigin() const;
 
 	/** 
 	 * Adds transform keys to an object represented by a handle.
@@ -166,6 +183,17 @@ private:
 	/** Import an animation sequence's root transforms into a transform section */
 	static void ImportAnimSequenceTransformsEnterPressed(const TArray<FAssetData>& Asset, TSharedRef<class ISequencer> Sequencer, UMovieScene3DTransformTrack* TransformTrack);
 
+	/** ConstraintChannel Delegates*/
+	FDelegateHandle OnSceneComponentConstrainedHandle;
+	void HandleOnConstraintAdded(IMovieSceneConstrainedSection* InSection, FMovieSceneConstraintChannel* InConstraintChannel);
+	void HandleConstraintKeyDeleted(IMovieSceneConstrainedSection* InSection, const FMovieSceneConstraintChannel* InConstraintChannel,
+		const TArray<FKeyAddOrDeleteEventItem>& InDeletedItems) const;
+	void HandleConstraintKeyMoved(IMovieSceneConstrainedSection* InSection, const FMovieSceneConstraintChannel* InConstraintChannel,
+		const TArray<FKeyMoveEventItem>& InMovedItems);
+	void HandleConstraintRemoved(IMovieSceneConstrainedSection* InSection);
+	void HandleConstraintPropertyChanged(UTickableTransformConstraint* InConstraint, const FPropertyChangedEvent& InPropertyChangedEvent) const;
+	
+	void ClearOutConstraintDelegates();
 private:
 
 	static FName TransformPropertyName;
@@ -173,7 +201,23 @@ private:
 	/** Mapping of objects to their existing transform data (for comparing against new transform data) */
 	TMap< TWeakObjectPtr<UObject>, FTransformData > ObjectToExistingTransform;
 
+	struct FTransformPropertyInfo
+	{
+		const FProperty* Property;
+		EMovieSceneTransformChannel TransformChannel;
+	};
+	/** Array of transform property info for the scene component transform properties for explicit support */
+	TArray<FTransformPropertyInfo, TFixedAllocator<3>> TransformProperties;
+
 	/** Command Bindings added by the Transform Track Editor to Sequencer and curve editor. */
 	TSharedPtr<FUICommandList> CommandBindings;
 
+	/** List of locked cameras to restore after save */
+	TMap<FLevelEditorViewportClient*, FGuid> LockedCameraBindings;
+
+	/** Array of sections that are getting undone, we need to recreate any constraint channel add, move key delegates to them*/
+	mutable TArray<TWeakObjectPtr<UMovieScene3DTransformSection>> SectionsGettingUndone;
+
+	/** Set of delegate handles we have added delegate's too, need to clear them*/
+	TSet<FDelegateHandle> ConstraintHandlesToClear;
 };

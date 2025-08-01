@@ -10,6 +10,7 @@
 #include "BlueprintPlatformLibrary.generated.h"
 
 class ILocalNotificationService;
+enum class EDeviceScreenOrientation : uint8;
 
 /**
  * The list of possible device/screen orientation for mobile devices
@@ -17,7 +18,7 @@ class ILocalNotificationService;
 UENUM(BlueprintType)
 namespace EScreenOrientation
 {
-	enum Type
+	enum Type : int
 	{
 		/** The orientation is not known */
 		Unknown,
@@ -38,7 +39,16 @@ namespace EScreenOrientation
 		FaceUp,
 
 		/** The orientation is as if place on a desk with the screen downward */
-		FaceDown
+		FaceDown,
+
+		/** The orientation is portrait, oriented upright with the sensor */
+		PortraitSensor,
+
+		/** The orientation is landscape, oriented upright with the sensor */
+		LandscapeSensor,
+
+		/** The orientation is no longer locked and adjusts according to the sensor */
+		FullSensor
 	};
 }
 
@@ -46,7 +56,7 @@ namespace EScreenOrientation
 UENUM(BlueprintType)
 namespace EApplicationState
 {
-	enum Type
+	enum Type : int
 	{
 		/** The Application was in an unknown state when receiving the notification */
 		Unknown,
@@ -63,8 +73,8 @@ namespace EApplicationState
 }
 
 /** UObject based class for handling mobile events. Having this object as an option gives the app lifetime access to these global delegates. The component UApplicationLifecycleComponent is destroyed at level loads */
-UCLASS(Blueprintable, BlueprintType, ClassGroup=Mobile)
-class ENGINE_API UPlatformGameInstance : public UGameInstance
+UCLASS(Blueprintable, BlueprintType, ClassGroup=Mobile, MinimalAPI)
+class UPlatformGameInstance : public UGameInstance
 {
 	GENERATED_BODY()
 
@@ -139,14 +149,18 @@ public:
 
 public:
 
-    virtual void PostInitProperties() override;
-    virtual void BeginDestroy() override;
+    ENGINE_API virtual void PostInitProperties() override;
+    ENGINE_API virtual void BeginDestroy() override;
 
 private:
 	/** Native handlers that get registered with the actual FCoreDelegates, and then proceed to broadcast to the delegates above */
 	void ApplicationWillDeactivateDelegate_Handler() { ApplicationWillDeactivateDelegate.Broadcast(); }
 	void ApplicationHasReactivatedDelegate_Handler() { ApplicationHasReactivatedDelegate.Broadcast(); }
-	void ApplicationWillEnterBackgroundDelegate_Handler() { ApplicationWillEnterBackgroundDelegate.Broadcast(); }
+	void ApplicationWillEnterBackgroundDelegate_Handler() 
+	{ 
+		SCOPED_ENTER_BACKGROUND_EVENT(STAT_UPlatformGameInstance_ApplicationWillEnterBackground);
+		ApplicationWillEnterBackgroundDelegate.Broadcast();
+	}
 	void ApplicationHasEnteredForegroundDelegate_Handler() { ApplicationHasEnteredForegroundDelegate.Broadcast(); }
 	void ApplicationWillTerminateDelegate_Handler() { ApplicationWillTerminateDelegate.Broadcast(); }
 	void ApplicationShouldUnloadResourcesDelegate_Handler() { ApplicationShouldUnloadResourcesDelegate.Broadcast(); }
@@ -160,18 +174,18 @@ private:
 
 };
 
-UCLASS(meta=(ScriptName="PlatformLibrary"))
-class ENGINE_API UBlueprintPlatformLibrary : public UBlueprintFunctionLibrary
+UCLASS(meta=(ScriptName="PlatformLibrary"), MinimalAPI)
+class UBlueprintPlatformLibrary : public UBlueprintFunctionLibrary
 {
 	GENERATED_UCLASS_BODY()
 	
-	static ILocalNotificationService*	platformService;
+	static ENGINE_API ILocalNotificationService*	platformService;
 	
 public:
         
 	/** Clear all pending local notifications. Typically this will be done before scheduling new notifications when going into the background */
 	UFUNCTION(BlueprintCallable, Category="Platform|LocalNotification")
-	static void ClearAllLocalNotifications();
+	static ENGINE_API void ClearAllLocalNotifications();
 
 	/** Schedule a local notification at a specific time, inLocalTime specifies the current local time or if UTC time should be used 
 	 * @param FireDateTime The time at which to fire the local notification
@@ -182,7 +196,7 @@ public:
 	 * @param ActivationEvent A string that is passed in the delegate callback when the app is brought into the foreground from the user activating the notification
 	*/
 	UFUNCTION(BlueprintCallable, Category="Platform|LocalNotification")
-	static int32 ScheduleLocalNotificationAtTime(const FDateTime& FireDateTime, bool LocalTime, const FText& Title, const FText& Body, const FText& Action, const FString& ActivationEvent);
+	static ENGINE_API int32 ScheduleLocalNotificationAtTime(const FDateTime& FireDateTime, bool LocalTime, const FText& Title, const FText& Body, const FText& Action, const FString& ActivationEvent);
 
 	/** Schedule a local notification to fire inSecondsFromNow from now 
 	 * @param inSecondsFromNow The seconds until the notification should fire
@@ -193,7 +207,7 @@ public:
 	 * @param ActivationEvent A string that is passed in the delegate callback when the app is brought into the foreground from the user activating the notification
 	*/
 	UFUNCTION(BlueprintCallable, Category="Platform|LocalNotification")
-	static int32 ScheduleLocalNotificationFromNow(int32 inSecondsFromNow, const FText& Title, const FText& Body, const FText& Action, const FString& ActivationEvent);
+	static ENGINE_API int32 ScheduleLocalNotificationFromNow(int32 inSecondsFromNow, const FText& Title, const FText& Body, const FText& Action, const FString& ActivationEvent);
 
 	/** Schedule a local notification badge at a specific time, inLocalTime specifies the current local time or if UTC time should be used
 	 * @param FireDateTime The time at which to fire the local notification
@@ -201,26 +215,26 @@ public:
 	 * @param ActivationEvent A string that is passed in the delegate callback when the app is brought into the foreground from the user activating the notification
 	*/
 	UFUNCTION(BlueprintCallable, Category = "Platform|LocalNotification")
-	static int32 ScheduleLocalNotificationBadgeAtTime(const FDateTime& FireDateTime, bool LocalTime, const FString& ActivationEvent);
+	static ENGINE_API int32 ScheduleLocalNotificationBadgeAtTime(const FDateTime& FireDateTime, bool LocalTime, const FString& ActivationEvent);
 	
 	/** Schedule a local notification badge to fire inSecondsFromNow from now
 	 * @param inSecondsFromNow The seconds until the notification should fire
 	 * @param ActivationEvent A string that is passed in the delegate callback when the app is brought into the foreground from the user activating the notification
 	*/
 	UFUNCTION(BlueprintCallable, Category = "Platform|LocalNotification")
-	static void ScheduleLocalNotificationBadgeFromNow(int32 inSecondsFromNow, const FString& ActivationEvent);
+	static ENGINE_API void ScheduleLocalNotificationBadgeFromNow(int32 inSecondsFromNow, const FString& ActivationEvent);
 
 	/** Cancel a local notification given the ActivationEvent
 	 * @param ActivationEvent The string passed into the Schedule call for the notification to be cancelled
 	*/
 	UFUNCTION(BlueprintCallable, Category="Platform|LocalNotification")
-	static void CancelLocalNotification(const FString& ActivationEvent);
+	static ENGINE_API void CancelLocalNotification(const FString& ActivationEvent);
 
 	/** Cancel a local notification given the ActivationEvent
 	 * @param NotificationId The Id returned from one of the ScheduleLocalNotification* functions
 	 */
 	UFUNCTION(BlueprintCallable, Category="Platform|LocalNotification")
-	static void CancelLocalNotificationById(int32 NotificationId);
+	static ENGINE_API void CancelLocalNotificationById(int32 NotificationId);
 
 	/** Get the local notification that was used to launch the app
 	 * @param NotificationLaunchedApp Return true if a notification was used to launch the app
@@ -228,11 +242,36 @@ public:
 	 * @param FireDate Returns the time the notification was activated
 	*/
 	UFUNCTION(BlueprintCallable, Category="Platform|LocalNotification")
-	static void GetLaunchNotification(bool& NotificationLaunchedApp, FString& ActivationEvent, int32& FireDate);
+	static ENGINE_API void GetLaunchNotification(bool& NotificationLaunchedApp, FString& ActivationEvent, int32& FireDate);
 
 	/**
-	 * @return the current device orientation
+	 * Returns the current orientation of the device: will be either Portrait, LandscapeLeft, PortraitUpsideDown or LandscapeRight.
+	 *
+	 * @return An EDeviceScreenOrientation value.
 	 */
 	UFUNCTION(BlueprintPure, Category="Platform|LocalNotification")
-	static EScreenOrientation::Type GetDeviceOrientation();
+	static ENGINE_API EScreenOrientation::Type GetDeviceOrientation();
+
+	/**
+	 * Returns the allowed orientation of the device. This is NOT the same as GetDeviceOrientation, which only returns Portrait, LandscapeLeft,
+	 * PortraitUpsideDown or LandscapeRight. The allowed orientation limits what orientation your device can have. So if you set the allowed orientation
+	 * to LandscapeLeft, GetDeviceOrientation will only ever return LandscapeLeft. But if you set the allowed orientation to LandscapeSensor, you are actually
+	 * restricting the allowed orientations to LandscapeLeft OR LandscapeRight (depending on the sensor), so GetDeviceOrientation might return LandscapeLeft OR LandscapeRight.
+	 *
+	 * @return An EDeviceScreenOrientation value.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Platform|LocalNotification")
+	static ENGINE_API EScreenOrientation::Type GetAllowedDeviceOrientation();
+
+	/**
+	 * Set the allowed orientation of the device.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Platform|LocalNotification")
+	static ENGINE_API void SetAllowedDeviceOrientation(EScreenOrientation::Type NewAllowedDeviceOrientation);
+
+private:
+
+	static EScreenOrientation::Type ConvertToScreenOrientation(EDeviceScreenOrientation DeviceScreenOrientation);
+
+	static EDeviceScreenOrientation ConvertToDeviceScreenOrientation(EScreenOrientation::Type ScreenOrientation);
 };

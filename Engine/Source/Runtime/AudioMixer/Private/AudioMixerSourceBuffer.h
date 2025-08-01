@@ -46,11 +46,26 @@ namespace Audio
 
 	using FMixerSourceBufferPtr = TSharedPtr<class FMixerSourceBuffer, ESPMode::ThreadSafe>;
 
+	struct FMixerSourceBufferInitArgs
+	{
+		FDeviceId AudioDeviceID = 0;
+		uint64 AudioComponentID = 0;
+		uint32 InstanceID = 0;
+		int32 SampleRate = 0;
+		int32 AudioMixerNumOutputFrames = 0;
+		FMixerBuffer* Buffer = nullptr;
+		USoundWave* SoundWave = nullptr;
+		ELoopingMode LoopingMode = ELoopingMode::LOOP_Never;
+		bool bIsSeeking = false;
+		bool bForceSyncDecode = false;
+		bool bIsPreviewSound = false;
+	};
+
 	/** Class which handles decoding audio for a particular source buffer. */
 	class FMixerSourceBuffer : public ISoundWaveClient
 	{
-	public:		
-		static FMixerSourceBufferPtr Create(int32 InSampleRate, FMixerBuffer& InBuffer, USoundWave& InWave, ELoopingMode InLoopingMode, bool bInIsSeeking, bool bInForceSyncDecode = false);
+	public:
+		static FMixerSourceBufferPtr Create(FMixerSourceBufferInitArgs& InArgs, TArray<FAudioParameter>&& InDefaultParams=TArray<FAudioParameter>());
 
 		~FMixerSourceBuffer();
 
@@ -89,6 +104,16 @@ namespace Audio
 		// Returns true if the async task is done
 		bool IsAsyncTaskDone() const;
 
+		// Returns some diagnostic state
+		struct FDiagnosticState
+		{
+			FName WaveName;
+			float RunTimeInSecs=0.f;
+			bool bInFlight=false;
+			bool bProcedural=false;
+		};
+		void GetDiagnosticState(FDiagnosticState& OutState);
+
 		// Ensures the async task finishes
 		void EnsureAsyncTaskFinishes();
 
@@ -96,12 +121,19 @@ namespace Audio
 		void OnBeginGenerate();
 		void OnEndGenerate();
 		void ClearWave() { SoundWave = nullptr; }
+
+		// Returns whether or not generator is finished (returns false if generator is invalid)
+		bool IsGeneratorFinished() const;
+#if ENABLE_AUDIO_DEBUG
+		double GetCPUCoreUtilization() const;
+#endif // ENABLE_AUDIO_DEBUG
+
 	private:
-		FMixerSourceBuffer(int32 InSampleRate, FMixerBuffer& InBuffer, USoundWave& InWave, ELoopingMode InLoopingMode, bool bInIsSeeking, bool bInForceSyncDecode = false);
+		FMixerSourceBuffer(FMixerSourceBufferInitArgs& InArgs, TArray<FAudioParameter>&& InDefaultParams);
 
 		void SubmitInitialPCMBuffers();
 		void SubmitInitialRealtimeBuffers();
-		void SubmitRealTimeSourceData(const bool bLooped);
+		void SubmitRealTimeSourceData(const bool bFinishedOrLooped);
 		void ProcessRealTimeSource();
 		void SubmitBuffer(TSharedPtr<FMixerSourceVoiceBuffer, ESPMode::ThreadSafe> InSourceVoiceBuffer);
 		void DeleteDecoder();
@@ -122,7 +154,16 @@ namespace Audio
 		int32 NumChannels;
 		Audio::EBufferType::Type BufferType;
 		int32 NumPrecacheFrames;
+		Audio::FDeviceId AuioDeviceID;
 		TArray<uint8> CachedRealtimeFirstBuffer;
+		FName WaveName;
+		uint64 AsyncTaskStartTimeInCycles=0;
+
+#if ENABLE_AUDIO_DEBUG
+		int32 SampleRate = 0;
+		std::atomic<double> CPUCoreUtilization = 0.0;
+		void UpdateCPUCoreUtilization(double InCPUTime, double InAudioTime);
+#endif // ENABLE_AUDIO_DEBUG
 
 		mutable FCriticalSection SoundWaveCritSec;
 		mutable FCriticalSection DecodeTaskCritSec;

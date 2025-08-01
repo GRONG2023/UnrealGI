@@ -1,40 +1,64 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "LevelSequence.h"
-#include "ILevelSequenceMetaData.h"
+#include "IMovieSceneMetaData.h"
+#include "MovieSceneMetaData.h"
 #include "Engine/EngineTypes.h"
 #include "HAL/IConsoleManager.h"
+#include "UniversalObjectLocator.h"
+#include "UniversalObjectLocatorFragmentType.h"
+#include "UniversalObjectLocatorResolveParameterBuffer.inl"
+#include "UniversalObjectLocators/ActorLocatorFragment.h"
+#include "WorldPartition/IWorldPartitionObjectResolver.h"
+#include "LegacyLazyObjectPtrFragment.h"
+#include "SubObjectLocator.h"
 #include "Components/ActorComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Actor.h"
 #include "LevelSequenceDirector.h"
 #include "Engine/Engine.h"
 #include "MovieScene.h"
 #include "MovieSceneCommonHelpers.h"
+#include "UObject/AssetRegistryTagsContext.h"
 #include "UObject/Package.h"
 #include "UObject/UObjectHash.h"
 #include "Animation/AnimInstance.h"
 #include "LevelSequenceModule.h"
 #include "MovieSceneSpawnableAnnotation.h"
+#include "Tracks/MovieScene3DAttachTrack.h"
+#include "Tracks/MovieScene3DPathTrack.h"
 #include "Tracks/MovieSceneAudioTrack.h"
 #include "Tracks/MovieSceneCameraCutTrack.h"
 #include "Tracks/MovieSceneCinematicShotTrack.h"
 #include "Tracks/MovieSceneEventTrack.h"
 #include "Tracks/MovieSceneFadeTrack.h"
 #include "Tracks/MovieSceneLevelVisibilityTrack.h"
+#include "Tracks/MovieSceneDataLayerTrack.h"
 #include "Tracks/MovieSceneMaterialParameterCollectionTrack.h"
+#include "Tracks/MovieSceneSkeletalAnimationTrack.h"
 #include "Tracks/MovieSceneSlomoTrack.h"
 #include "Tracks/MovieSceneSpawnTrack.h"
 #include "Tracks/MovieSceneSubTrack.h"
+#include "Tracks/MovieSceneCVarTrack.h"
+#include "Tracks/MovieSceneBindingLifetimeTrack.h"
 #include "Modules/ModuleManager.h"
 #include "LevelSequencePlayer.h"
 #include "Compilation/MovieSceneCompiledDataManager.h"
 #include "Evaluation/MovieSceneEvaluationTemplateInstance.h"
+#include "UniversalObjectLocators/AnimInstanceLocatorFragment.h"
 #include "Engine/AssetUserData.h"
+#include "Misc/App.h"
+#include "Misc/DateTime.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(LevelSequence)
 
 
 #if WITH_EDITOR
 	#include "UObject/SequencerObjectVersion.h"
 	#include "UObject/ObjectRedirector.h"
+
+ULevelSequence::FPostDuplicateEvent ULevelSequence::PostDuplicateEvent;
+
 #endif
 
 static TAutoConsoleVariable<int32> CVarDefaultLockEngineToDisplayRate(
@@ -86,6 +110,12 @@ void ULevelSequence::Initialize()
 
 	int32 ClockSource = CVarDefaultClockSource.GetValueOnGameThread();
 	MovieScene->SetClockSource((EUpdateClockSource)ClockSource);
+
+#if WITH_EDITOR
+	UMovieSceneMetaData* MetaData = FindOrAddMetaData<UMovieSceneMetaData>();
+	MetaData->SetCreated(FDateTime::UtcNow());
+	MetaData->SetAuthor(FApp::GetSessionOwner());
+#endif
 }
 
 UObject* ULevelSequence::MakeSpawnableTemplateFromInstance(UObject& InSourceObject, FName ObjectName)
@@ -102,16 +132,27 @@ bool ULevelSequence::CanAnimateObject(UObject& InObject) const
 
 ETrackSupport ULevelSequence::IsTrackSupported(TSubclassOf<class UMovieSceneTrack> InTrackClass) const
 {
-	if (InTrackClass == UMovieSceneAudioTrack::StaticClass() ||
+	if (!UMovieScene::IsTrackClassAllowed(InTrackClass))
+	{
+		return ETrackSupport::NotSupported;
+	}
+
+	if (InTrackClass == UMovieScene3DAttachTrack::StaticClass() ||
+		InTrackClass == UMovieScene3DPathTrack::StaticClass() ||
+		InTrackClass == UMovieSceneAudioTrack::StaticClass() ||
 		InTrackClass == UMovieSceneCameraCutTrack::StaticClass() ||
 		InTrackClass == UMovieSceneCinematicShotTrack::StaticClass() ||
 		InTrackClass == UMovieSceneEventTrack::StaticClass() ||
 		InTrackClass == UMovieSceneFadeTrack::StaticClass() ||
 		InTrackClass == UMovieSceneLevelVisibilityTrack::StaticClass() ||
+		InTrackClass == UMovieSceneDataLayerTrack::StaticClass() ||
 		InTrackClass == UMovieSceneMaterialParameterCollectionTrack::StaticClass() ||
+		InTrackClass == UMovieSceneSkeletalAnimationTrack::StaticClass() ||
 		InTrackClass == UMovieSceneSlomoTrack::StaticClass() ||
 		InTrackClass == UMovieSceneSpawnTrack::StaticClass() ||
-		InTrackClass == UMovieSceneSubTrack::StaticClass())
+		InTrackClass == UMovieSceneSubTrack::StaticClass() ||
+		InTrackClass == UMovieSceneCVarTrack::StaticClass() ||
+		InTrackClass == UMovieSceneBindingLifetimeTrack::StaticClass())
 	{
 		return ETrackSupport::Supported;
 	}
@@ -121,30 +162,45 @@ ETrackSupport ULevelSequence::IsTrackSupported(TSubclassOf<class UMovieSceneTrac
 
 void ULevelSequence::GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+	Super::GetAssetRegistryTags(OutTags);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void ULevelSequence::GetAssetRegistryTags(FAssetRegistryTagsContext Context) const
+{
 #if WITH_EDITORONLY_DATA
 	if (DirectorBlueprint)
 	{
-		DirectorBlueprint->GetAssetRegistryTags(OutTags);
+		DirectorBlueprint->GetAssetRegistryTags(Context);
 	}
 #endif
 
 	for (UObject* MetaData : MetaDataObjects)
 	{
-		ILevelSequenceMetaData* MetaDataInterface = Cast<ILevelSequenceMetaData>(MetaData);
+		IMovieSceneMetaDataInterface* MetaDataInterface = Cast<IMovieSceneMetaDataInterface>(MetaData);
 		if (MetaDataInterface)
 		{
-			MetaDataInterface->ExtendAssetRegistryTags(OutTags);
+			PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+			TArray<UObject::FAssetRegistryTag> DeprecatedFunctionTags;
+			MetaDataInterface->ExtendAssetRegistryTags(DeprecatedFunctionTags);
+			for (UObject::FAssetRegistryTag& Tag : DeprecatedFunctionTags)
+			{
+				Context.AddTag(MoveTemp(Tag));
+			}
+			PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+			MetaDataInterface->ExtendAssetRegistryTags(Context);
 		}
 	}
 
-	Super::GetAssetRegistryTags(OutTags);
+	Super::GetAssetRegistryTags(Context);
 }
 
 void ULevelSequence::GetAssetRegistryTagMetadata(TMap<FName, FAssetRegistryTagMetadata>& OutMetadata) const
 {
 	for (UObject* MetaData : MetaDataObjects)
 	{
-		ILevelSequenceMetaData* MetaDataInterface = Cast<ILevelSequenceMetaData>(MetaData);
+		IMovieSceneMetaDataInterface* MetaDataInterface = Cast<IMovieSceneMetaDataInterface>(MetaData);
 		if (MetaDataInterface)
 		{
 			MetaDataInterface->ExtendAssetRegistryTagMetaData(OutMetadata);
@@ -152,6 +208,14 @@ void ULevelSequence::GetAssetRegistryTagMetadata(TMap<FName, FAssetRegistryTagMe
 	}
 
 	Super::GetAssetRegistryTagMetadata(OutMetadata);
+}
+
+void ULevelSequence::PostLoadAssetRegistryTags(const FAssetData& InAssetData, TArray<FAssetRegistryTag>& OutTagsAndValuesToUpdate) const
+{
+	Super::PostLoadAssetRegistryTags(InAssetData, OutTagsAndValuesToUpdate);
+
+	// GetAssetRegistryTags appends the DirectorBlueprint tags to the World's tags, so we also have to run the Blueprint PostLoadAssetRegistryTags
+	UBlueprint::PostLoadBlueprintAssetRegistryTags(InAssetData, OutTagsAndValuesToUpdate);
 }
 
 void PurgeLegacyBlueprints(UObject* InObject, UPackage* Package)
@@ -228,6 +292,20 @@ void ULevelSequence::PostDuplicate(bool bDuplicateForPIE)
 		DirectorClass = nullptr;
 	}
 #endif
+
+#if WITH_EDITOR
+	if (PostDuplicateEvent.IsBound())
+	{
+		PostDuplicateEvent.Execute(this);
+	}
+#endif
+
+#if WITH_EDITOR
+	UMovieSceneMetaData* MetaData = FindOrAddMetaData<UMovieSceneMetaData>();
+	MetaData->SetCreated(FDateTime::UtcNow());
+	MetaData->SetAuthor(FApp::GetSessionOwner());
+	MetaData->SetNotes(FString()); // Intentionally clear the notes
+#endif
 }
 
 void ULevelSequence::PostLoad()
@@ -235,6 +313,23 @@ void ULevelSequence::PostLoad()
 	Super::PostLoad();
 
 #if WITH_EDITOR
+	if (MovieScene)
+	{
+		// Remove any invalid object bindings. This was moved from PostInitProperties
+		//   because it has to happen after the asset has actually been serialized.
+		TSet<FGuid> ValidObjectBindings;
+		for (int32 Index = 0; Index < MovieScene->GetSpawnableCount(); ++Index)
+		{
+			ValidObjectBindings.Add(MovieScene->GetSpawnable(Index).GetGuid());
+		}
+		for (int32 Index = 0; Index < MovieScene->GetPossessableCount(); ++Index)
+		{
+			ValidObjectBindings.Add(MovieScene->GetPossessable(Index).GetGuid());
+		}
+
+		BindingReferences.RemoveInvalidBindings(ValidObjectBindings);
+	}
+
 	if (!DirectorBlueprint)
 	{
 		UBlueprint* PhantomDirector = FindObject<UBlueprint>(this, TEXT("SequenceDirector"));
@@ -251,31 +346,39 @@ void ULevelSequence::PostLoad()
 		// Remove the binding for the director blueprint recompilation and re-add it to be sure there is only one entry in the list
 		DirectorBlueprint->OnCompiled().RemoveAll(this);
 		DirectorBlueprint->OnCompiled().AddUObject(this, &ULevelSequence::OnDirectorRecompiled);
+
+		if (DirectorBlueprint->Rename(*GetDirectorBlueprintName(), nullptr, (REN_NonTransactional|REN_ForceNoResetLoaders|REN_DoNotDirty|REN_Test|REN_DontCreateRedirectors)))
+		{
+			DirectorBlueprint->Rename(*GetDirectorBlueprintName(), nullptr, (REN_NonTransactional|REN_ForceNoResetLoaders|REN_DoNotDirty|REN_DontCreateRedirectors));
+		}
 	}
 
-	TSet<FGuid> InvalidSpawnables;
-
-	for (int32 Index = 0; Index < MovieScene->GetSpawnableCount(); ++Index)
+	if (MovieScene)
 	{
-		FMovieSceneSpawnable& Spawnable = MovieScene->GetSpawnable(Index);
-		if (!Spawnable.GetObjectTemplate())
-		{
-			if (Spawnable.GeneratedClass_DEPRECATED && Spawnable.GeneratedClass_DEPRECATED->ClassGeneratedBy)
-			{
-				const FName TemplateName = MakeUniqueObjectName(MovieScene, UObject::StaticClass(), Spawnable.GeneratedClass_DEPRECATED->ClassGeneratedBy->GetFName());
+		TSet<FGuid> InvalidSpawnables;
 
-				UObject* NewTemplate = NewObject<UObject>(MovieScene, Spawnable.GeneratedClass_DEPRECATED->GetSuperClass(), TemplateName);
-				if (NewTemplate)
+		for (int32 Index = 0; Index < MovieScene->GetSpawnableCount(); ++Index)
+		{
+			FMovieSceneSpawnable& Spawnable = MovieScene->GetSpawnable(Index);
+			if (!Spawnable.GetObjectTemplate())
+			{
+				if (Spawnable.GeneratedClass_DEPRECATED && Spawnable.GeneratedClass_DEPRECATED->ClassGeneratedBy)
 				{
-					Spawnable.CopyObjectTemplate(*NewTemplate, *this);
+					const FName TemplateName = MakeUniqueObjectName(MovieScene, UObject::StaticClass(), Spawnable.GeneratedClass_DEPRECATED->ClassGeneratedBy->GetFName());
+
+					UObject* NewTemplate = NewObject<UObject>(MovieScene, Spawnable.GeneratedClass_DEPRECATED->GetSuperClass(), TemplateName);
+					if (NewTemplate)
+					{
+						Spawnable.CopyObjectTemplate(*NewTemplate, *this);
+					}
 				}
 			}
-		}
 
-		if (!Spawnable.GetObjectTemplate())
-		{
-			InvalidSpawnables.Add(Spawnable.GetGuid());
-			UE_LOG(LogLevelSequence, Warning, TEXT("Spawnable '%s' with ID '%s' does not have a valid object template"), *Spawnable.GetName(), *Spawnable.GetGuid().ToString());
+			if (!Spawnable.GetObjectTemplate())
+			{
+				InvalidSpawnables.Add(Spawnable.GetGuid());
+				UE_LOG(LogLevelSequence, Warning, TEXT("Spawnable '%s' with ID '%s' does not have a valid object template"), *Spawnable.GetName(), *Spawnable.GetGuid().ToString());
+			}
 		}
 	}
 
@@ -291,22 +394,39 @@ void ULevelSequence::PostLoad()
 				PurgeLegacyBlueprints(ObjectInPackage, Package);
 			}
 		}
-
-		// Remove any invalid object bindings
-		TSet<FGuid> ValidObjectBindings;
-		for (int32 Index = 0; Index < MovieScene->GetSpawnableCount(); ++Index)
-		{
-			ValidObjectBindings.Add(MovieScene->GetSpawnable(Index).GetGuid());
-		}
-		for (int32 Index = 0; Index < MovieScene->GetPossessableCount(); ++Index)
-		{
-			ValidObjectBindings.Add(MovieScene->GetPossessable(Index).GetGuid());
-		}
-
-		BindingReferences.RemoveInvalidBindings(ValidObjectBindings);
 	}
 
+	for (TPair<FGuid, FLevelSequenceLegacyObjectReference>& Pair : ObjectReferences_DEPRECATED.Map)
+	{
+		if (Pair.Value.ObjectId.IsValid())
+		{
+			FUniversalObjectLocator NewLocator;
+			NewLocator.AddFragment<FLegacyLazyObjectPtrFragment>(Pair.Value.ObjectId.GetGuid());
+			BindingReferences.FMovieSceneBindingReferences::AddBinding(Pair.Key, MoveTemp(NewLocator));
+		}
+		else if (Pair.Value.ObjectPath.Len() > 0)
+		{
+			FUniversalObjectLocator NewLocator;
+			NewLocator.AddFragment<FSubObjectLocator>(Pair.Value.ObjectPath);
+			BindingReferences.FMovieSceneBindingReferences::AddBinding(Pair.Key, MoveTemp(NewLocator));
+		}
+	}
+	ObjectReferences_DEPRECATED.Map.Empty();
+
 #endif
+}
+
+#if WITH_EDITORONLY_DATA
+void ULevelSequence::DeclareConstructClasses(TArray<FTopLevelAssetPath>& OutConstructClasses, const UClass* SpecificSubclass)
+{
+	Super::DeclareConstructClasses(OutConstructClasses, SpecificSubclass);
+	OutConstructClasses.Add(FTopLevelAssetPath(UObjectRedirector::StaticClass()));
+}
+#endif
+
+void ULevelSequence::PostInitProperties()
+{
+	Super::PostInitProperties();
 }
 
 bool ULevelSequence::Rename(const TCHAR* NewName, UObject* NewOuter, ERenameFlags Flags)
@@ -316,32 +436,11 @@ bool ULevelSequence::Rename(const TCHAR* NewName, UObject* NewOuter, ERenameFlag
 #if WITH_EDITOR
 	if (DirectorBlueprint)
 	{
-		DirectorBlueprint->Rename(*DirectorBlueprint->GetName(), this, Flags);
+		DirectorBlueprint->Rename(*GetDirectorBlueprintName(), this, Flags);
 	}
 #endif
 
 	return bRetVal;
-}
-
-void ULevelSequence::ConvertPersistentBindingsToDefault(UObject* FixupContext)
-{
-	if (PossessedObjects_DEPRECATED.Num() == 0)
-	{
-		return;
-	}
-
-	MarkPackageDirty();
-	for (auto& Pair : PossessedObjects_DEPRECATED)
-	{
-		UObject* Object = Pair.Value.GetObject();
-		if (Object)
-		{
-			FGuid ObjectId;
-			FGuid::Parse(Pair.Key, ObjectId);
-			BindingReferences.AddBinding(ObjectId, Object, FixupContext);
-		}
-	}
-	PossessedObjects_DEPRECATED.Empty();
 }
 
 void ULevelSequence::BindPossessableObject(const FGuid& ObjectId, UObject& PossessedObject, UObject* Context)
@@ -354,36 +453,53 @@ void ULevelSequence::BindPossessableObject(const FGuid& ObjectId, UObject& Posse
 
 bool ULevelSequence::CanPossessObject(UObject& Object, UObject* InPlaybackContext) const
 {
-	return Object.IsA<AActor>() || Object.IsA<UActorComponent>() || Object.IsA<UAnimInstance>();
+	return true;
 }
 
-void ULevelSequence::LocateBoundObjects(const FGuid& ObjectId, UObject* Context, TArray<UObject*, TInlineAllocator<1>>& OutObjects) const
+void ULevelSequence::LocateBoundObjects(const FGuid& ObjectId, UObject* Context, const FLevelSequenceBindingReference::FResolveBindingParams& InResolveBindingParams, TArray<UObject*, TInlineAllocator<1>>& OutObjects) const
 {
-	LocateBoundObjects(ObjectId, Context, NAME_None, OutObjects);
+	using namespace UE::UniversalObjectLocator;
+
+	TResolveParamsWithBuffer<128> ResolveParams;
+
+	ResolveParams.AddParameter(FActorLocatorFragmentResolveParameter::ParameterType,
+		InResolveBindingParams.StreamingWorld,
+		InResolveBindingParams.WorldPartitionResolveData ? InResolveBindingParams.WorldPartitionResolveData->ContainerID : FActorContainerID(),
+		InResolveBindingParams.WorldPartitionResolveData ? InResolveBindingParams.WorldPartitionResolveData->SourceWorldAssetPath : InResolveBindingParams.StreamedLevelAssetPath
+		);
+
+	LocateBoundObjects(ObjectId, ResolveParams, OutObjects);
 }
 
-void ULevelSequence::LocateBoundObjects(const FGuid& ObjectId, UObject* Context, FName StreamedLevelAssetPath, TArray<UObject*, TInlineAllocator<1>>& OutObjects) const
+FGuid ULevelSequence::FindBindingFromObject(UObject* InObject, UObject* Context) const
 {
-	// Handle legacy object references
-	UObject* Object = Context ? ObjectReferences.ResolveBinding(ObjectId, Context) : nullptr;
-	if (Object)
-	{
-		OutObjects.Add(Object);
-	}
-
-	BindingReferences.ResolveBinding(ObjectId, Context, StreamedLevelAssetPath, OutObjects);
+	return BindingReferences.FindBindingFromObject(InObject, Context);
 }
 
 void ULevelSequence::GatherExpiredObjects(const FMovieSceneObjectCache& InObjectCache, TArray<FGuid>& OutInvalidIDs) const
 {
-	for (const FGuid& ObjectId : BindingReferences.GetBoundAnimInstances())
+	using namespace UE::UniversalObjectLocator;
+
+	TArrayView<const FMovieSceneBindingReference> References = BindingReferences.GetAllReferences();
+	for (int32 Index = 0; Index < References.Num(); ++Index)
 	{
-		for (TWeakObjectPtr<> WeakObject : InObjectCache.IterateBoundObjects(ObjectId))
+		const FMovieSceneBindingReference& Reference = References[Index];
+		
+		if (Reference.Locator.GetLastFragmentTypeHandle() == FAnimInstanceLocatorFragment::FragmentType)
 		{
-			UAnimInstance* AnimInstance = Cast<UAnimInstance>(WeakObject.Get());
-			if (!AnimInstance || !AnimInstance->GetOwningComponent() || AnimInstance->GetOwningComponent()->GetAnimInstance() != AnimInstance)
+			for (TWeakObjectPtr<> WeakObject : InObjectCache.IterateBoundObjects(Reference.ID))
 			{
-				OutInvalidIDs.Add(ObjectId);
+				UAnimInstance* AnimInstance = Cast<UAnimInstance>(WeakObject.Get());
+				if (!AnimInstance || !AnimInstance->GetOwningComponent() || AnimInstance->GetOwningComponent()->GetAnimInstance() != AnimInstance)
+				{
+					OutInvalidIDs.Add(Reference.ID);
+				}
+			}
+
+			// Skip over subsequent matched IDs
+			while (Index < References.Num()-1 && References[Index+1].ID == Reference.ID)
+			{
+				++Index;
 			}
 		}
 	}
@@ -414,6 +530,12 @@ UObject* ULevelSequence::GetParentObject(UObject* Object) const
 
 bool ULevelSequence::AllowsSpawnableObjects() const
 {
+#if WITH_EDITOR
+	if (!UMovieScene::IsTrackClassAllowed(UMovieSceneSpawnTrack::StaticClass()))
+	{
+		return false;
+	}
+#endif
 	return true;
 }
 
@@ -425,9 +547,6 @@ bool ULevelSequence::CanRebindPossessable(const FMovieScenePossessable& InPosses
 void ULevelSequence::UnbindPossessableObjects(const FGuid& ObjectId)
 {
 	BindingReferences.RemoveBinding(ObjectId);
-
-	// Legacy object references
-	ObjectReferences.Map.Remove(ObjectId);
 }
 
 void ULevelSequence::UnbindObjects(const FGuid& ObjectId, const TArray<UObject*>& InObjects, UObject* InContext)
@@ -440,11 +559,21 @@ void ULevelSequence::UnbindInvalidObjects(const FGuid& ObjectId, UObject* InCont
 	BindingReferences.RemoveInvalidObjects(ObjectId, InContext);
 }
 
+const FMovieSceneBindingReferences* ULevelSequence::GetBindingReferences() const
+{
+	return &BindingReferences;
+}
+
 #if WITH_EDITOR
 
 UBlueprint* ULevelSequence::GetDirectorBlueprint() const
 {
 	return DirectorBlueprint;
+}
+
+FString ULevelSequence::GetDirectorBlueprintName() const
+{
+	return GetDisplayName().ToString() + "_DirectorBP";
 }
 
 void ULevelSequence::SetDirectorBlueprint(UBlueprint* NewDirectorBlueprint)
@@ -479,6 +608,8 @@ void ULevelSequence::OnDirectorRecompiled(UBlueprint* InCompiledBlueprint)
 
 FGuid ULevelSequence::FindOrAddBinding(UObject* InObject)
 {
+	using namespace UE::MovieScene;
+
 	UObject* PlaybackContext = InObject ? InObject->GetWorld() : nullptr;
 	if (!InObject || !PlaybackContext)
 	{
@@ -486,9 +617,6 @@ FGuid ULevelSequence::FindOrAddBinding(UObject* InObject)
 	}
 
 	AActor* Actor = Cast<AActor>(InObject);
-	// @todo: sequencer-python: need to figure out how we go from a spawned object to an object binding without the spawn register or any IMovieScenePlayer interface
-	// Normally this process would happen through sequencer, since it has more context than just the level sequence asset.
-	// For now we cannot possess spawnables or anything within them since we have no way of retrieving the spawnable from the object
 	if (Actor && Actor->ActorHasTag("SequencerActor"))
 	{
 		TOptional<FMovieSceneSpawnableAnnotation> Annotation = FMovieSceneSpawnableAnnotation::Find(Actor);
@@ -496,9 +624,9 @@ FGuid ULevelSequence::FindOrAddBinding(UObject* InObject)
 		{
 			return Annotation->ObjectBindingID;
 		}
-
-		UE_LOG(LogLevelSequence, Error, TEXT("Unable to possess object '%s' since it is, or is part of a spawnable that is not in this sequence."), *InObject->GetName());
-		return FGuid();
+		
+		// If this actor is a spawnable and is not in the same originating sequence, it's likely a spawnable that will be possessed. 
+		// SetSpawnableObjectBindingID will need to be called on that possessable.
 	}
 
 	UObject* ParentObject = GetParentObject(InObject);
@@ -512,21 +640,15 @@ FGuid ULevelSequence::FindOrAddBinding(UObject* InObject)
 
 	// Perform a potentially slow lookup of every possessable binding in the sequence to see if we already have this
 	{
-		class FTransientPlayer : public IMovieScenePlayer
-		{
-		public:
-			FMovieSceneRootEvaluationTemplateInstance Template;
-			virtual FMovieSceneRootEvaluationTemplateInstance& GetEvaluationTemplate() override { check(false); return Template; }
-			virtual void UpdateCameraCut(UObject* CameraObject, const EMovieSceneCameraCutParams& CameraCutParams) override {}
-			virtual void SetViewportSettings(const TMap<FViewportClient*, EMovieSceneViewportParams>& ViewportParamsMap) override {}
-			virtual void GetViewportSettings(TMap<FViewportClient*, EMovieSceneViewportParams>& ViewportParamsMap) const override {}
-			virtual EMovieScenePlayerStatus::Type GetPlaybackStatus() const { return EMovieScenePlayerStatus::Stopped; }
-			virtual void SetPlaybackStatus(EMovieScenePlayerStatus::Type InPlaybackStatus) override {}
-		} Player;
+		FSharedPlaybackStateCreateParams CreateParams;
+		CreateParams.PlaybackContext = PlaybackContext;
+		TSharedRef<FSharedPlaybackState> TransientPlaybackState = MakeShared<FSharedPlaybackState>(*this, CreateParams);
 
-		Player.State.AssignSequence(MovieSceneSequenceID::Root, *this, Player);
+		FMovieSceneEvaluationState State;
+		TransientPlaybackState->AddCapabilityRaw(&State);
+		State.AssignSequence(MovieSceneSequenceID::Root, *this, TransientPlaybackState);
 
-		FGuid ExistingID = Player.FindObjectId(*InObject, MovieSceneSequenceID::Root);
+		FGuid ExistingID = State.FindObjectId(*InObject, MovieSceneSequenceID::Root, TransientPlaybackState);
 		if (ExistingID.IsValid())
 		{
 			return ExistingID;
@@ -552,7 +674,7 @@ FGuid ULevelSequence::FindOrAddBinding(UObject* InObject)
 		FMovieScenePossessable* ChildPossessable = MovieScene->FindPossessable(NewGuid);
 		if (ensure(ChildPossessable))
 		{
-			ChildPossessable->SetParent(ParentGuid);
+			ChildPossessable->SetParent(ParentGuid, MovieScene);
 		}
 
 		FMovieSceneSpawnable* ParentSpawnable = MovieScene->FindSpawnable(ParentGuid);
@@ -601,6 +723,8 @@ FGuid ULevelSequence::CreateSpawnable(UObject* ObjectToSpawn)
 			UMovieSceneSpawnTrack* NewSpawnTrack = MovieScene->AddTrack<UMovieSceneSpawnTrack>(NewGuid);
 			if (NewSpawnTrack)
 			{
+				NewSpawnTrack->Modify();
+
 				NewSpawnTrack->AddSection(*NewSpawnTrack->CreateNewSection());
 			}
 			return NewGuid;
@@ -612,10 +736,17 @@ FGuid ULevelSequence::CreateSpawnable(UObject* ObjectToSpawn)
 
 #endif // WITH_EDITOR
 
-UObject* ULevelSequence::CreateDirectorInstance(IMovieScenePlayer& Player, FMovieSceneSequenceID SequenceID)
+UObject* ULevelSequence::CreateDirectorInstance(TSharedRef<const FSharedPlaybackState> SharedPlaybackState, FMovieSceneSequenceID SequenceID)
 {
-	ULevelSequencePlayer* LevelSequencePlayer = Cast<ULevelSequencePlayer>(Player.AsUObject());
-	UObject*              DirectorOuter       = LevelSequencePlayer ? LevelSequencePlayer : Player.GetPlaybackContext();
+	UObject* DirectorOuter = SharedPlaybackState->GetPlaybackContext();
+	IMovieScenePlayer* OptionalPlayer = UE::MovieScene::FPlayerIndexPlaybackCapability::GetPlayer(SharedPlaybackState);
+
+#if WITH_EDITOR
+	if (!UMovieScene::IsTrackClassAllowed(ULevelSequenceDirector::StaticClass()))
+	{
+		return nullptr;
+	}
+#endif
 
 	if (DirectorClass && DirectorOuter && DirectorClass->IsChildOf(ULevelSequenceDirector::StaticClass()))
 	{
@@ -626,10 +757,19 @@ UObject* ULevelSequence::CreateDirectorInstance(IMovieScenePlayer& Player, FMovi
 		DirectorName = MakeUniqueObjectName(DirectorOuter, DirectorClass, *(GetFName().ToString() + TEXT("_Director")));
 #endif
 
+		ULevelSequencePlayer* LevelSequencePlayer = nullptr;
+		if (OptionalPlayer)
+		{
+			LevelSequencePlayer = Cast<ULevelSequencePlayer>(OptionalPlayer->AsUObject());
+		}
+
 		ULevelSequenceDirector* NewDirector = NewObject<ULevelSequenceDirector>(DirectorOuter, DirectorClass, DirectorName, RF_Transient);
-		NewDirector->Player = LevelSequencePlayer;
-		NewDirector->MovieScenePlayerIndex = Player.GetUniqueIndex();
 		NewDirector->SubSequenceID = SequenceID.GetInternalValue();
+		NewDirector->WeakLinker = SharedPlaybackState->GetLinker();
+		NewDirector->InstanceID = SharedPlaybackState->GetRootInstanceHandle().InstanceID;
+		NewDirector->InstanceSerial = SharedPlaybackState->GetRootInstanceHandle().InstanceSerial;
+		NewDirector->Player = LevelSequencePlayer;
+		NewDirector->MovieScenePlayerIndex = OptionalPlayer ? OptionalPlayer->GetUniqueIndex() : INDEX_NONE;
 		NewDirector->OnCreated();
 		return NewDirector;
 	}
@@ -678,5 +818,6 @@ void ULevelSequence::RemoveUserDataOfClass(TSubclassOf<UAssetUserData> InUserDat
 
 const TArray<UAssetUserData*>* ULevelSequence::GetAssetUserDataArray() const
 {
-	return &AssetUserData;
+	return &ToRawPtrTArrayUnsafe(AssetUserData);
 }
+

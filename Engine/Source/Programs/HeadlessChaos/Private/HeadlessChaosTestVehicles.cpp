@@ -13,6 +13,7 @@
 #include "SuspensionSystem.h"
 #include "SuspensionUtility.h"
 #include "SteeringUtility.h"
+#include "TransmissionUtility.h"
 
 // for Simulation Tests
 #include "Chaos/PBDRigidsEvolutionGBF.h"
@@ -30,6 +31,53 @@ namespace ChaosTest
 {
 	using namespace Chaos;
 
+	GTEST_TEST(AllTraits, VehicleTest_VehicleUtilityGraph)
+	{
+		Chaos::FGraph Graph;
+
+		Graph.Add(FVector2D(10.f, 0.f));
+		Graph.Add(FVector2D(20.f, 30.f));
+		Graph.Add(FVector2D(30.f, 40.f));
+		Graph.Add(FVector2D(40.f, 60.f));
+		Graph.Add(FVector2D(50.f, 90.f));
+
+		float Tolerance = 0.001f;
+		EXPECT_NEAR(Graph.EvaluateY(-5.f), 0.f, Tolerance);
+		EXPECT_NEAR(Graph.EvaluateY(5.f), 0.f, Tolerance);
+		EXPECT_NEAR(Graph.EvaluateY(10.f), 0.f, Tolerance);
+		EXPECT_NEAR(Graph.EvaluateY(15.f), 15.f, Tolerance);
+		EXPECT_NEAR(Graph.EvaluateY(40.f), 60.f, Tolerance);
+		EXPECT_NEAR(Graph.EvaluateY(25.f), 35.f, Tolerance);
+		EXPECT_NEAR(Graph.EvaluateY(45.f), 75.f, Tolerance);
+		EXPECT_NEAR(Graph.EvaluateY(50.f), 90.f, Tolerance);
+		EXPECT_NEAR(Graph.EvaluateY(55.f), 90.f, Tolerance);
+		EXPECT_NEAR(Graph.EvaluateY(60.f), 90.f, Tolerance);
+		EXPECT_NEAR(Graph.EvaluateY(1.0E21f), 90.f, Tolerance);
+		EXPECT_NEAR(Graph.EvaluateY(-1.0E21f), 0.f, Tolerance);
+	}
+
+	GTEST_TEST(AllTraits, VehicleTest_CalculateSlipAngle)
+	{
+		float SlipAngleFwds = FVehicleUtility::CalculateSlipAngle(0, 5);
+		float SlipAngleReverse = FVehicleUtility::CalculateSlipAngle(0, -5);
+
+		EXPECT_NEAR(SlipAngleFwds, 0.0f, 0.001f);
+		EXPECT_NEAR(SlipAngleFwds, SlipAngleReverse, 0.001f);
+
+		float SlipAngleFwdsSide = FVehicleUtility::CalculateSlipAngle(1, 5);
+		float SlipAngleReverseSide = FVehicleUtility::CalculateSlipAngle(1, -5);
+		float SlipAngleFwdsSide2 = FVehicleUtility::CalculateSlipAngle(-1, 5);
+		float SlipAngleReverseSide2 = FVehicleUtility::CalculateSlipAngle(-1, -5);
+		EXPECT_NEAR(SlipAngleFwdsSide, SlipAngleReverseSide, 0.001f);
+		EXPECT_NEAR(SlipAngleFwdsSide, SlipAngleFwdsSide2, 0.001f);
+		EXPECT_NEAR(SlipAngleFwdsSide, SlipAngleReverseSide2, 0.001f);
+
+		float SlipAngleSide1 = FVehicleUtility::CalculateSlipAngle(2, 0);
+		float SlipAngleSide2 = FVehicleUtility::CalculateSlipAngle(-2, 0);
+		EXPECT_NEAR(SlipAngleSide1, HALF_PI, 0.001f);
+		EXPECT_NEAR(SlipAngleSide1, SlipAngleSide2, 0.001f);
+
+	}
 
 	GTEST_TEST(AllTraits, VehicleTest_SteeringUtilityTurnRadius)
 	{
@@ -185,6 +233,153 @@ namespace ChaosTest
 		EXPECT_GT(H, 0.f);
 		EXPECT_GT(H, 0.f);
 	}
+
+
+	GTEST_TEST(AllTraits, VehicleTest_TransmissionUtilityIsWheelPowered)
+	{
+		TArray<FSimpleWheelSim> Wheels;
+
+		for (int I = 0; I < 2; I++)
+		{
+			FSimpleWheelConfig SetupFront;
+			SetupFront.AxleType = FSimpleWheelConfig::EAxleType::Front;
+			SetupFront.EngineEnabled = false;
+			FSimpleWheelSim WheelFront(&SetupFront);
+			Wheels.Add(WheelFront);
+		}
+
+		for (int I = 0; I < 4; I++)
+		{
+			FSimpleWheelConfig SetupRear;
+			SetupRear.AxleType = FSimpleWheelConfig::EAxleType::Rear;
+			SetupRear.EngineEnabled = true;
+			FSimpleWheelSim WheelRear(&SetupRear);
+			Wheels.Add(WheelRear);
+		}
+
+		EXPECT_EQ(FTransmissionUtility::GetNumWheelsOnAxle(FSimpleWheelConfig::EAxleType::Front, Wheels), 2);
+		EXPECT_EQ(FTransmissionUtility::GetNumWheelsOnAxle(FSimpleWheelConfig::EAxleType::Rear, Wheels), 4);
+
+		EXPECT_EQ(FTransmissionUtility::IsWheelPowered(EDifferentialType::AllWheelDrive, Wheels[0]), true); // front
+		EXPECT_EQ(FTransmissionUtility::IsWheelPowered(EDifferentialType::AllWheelDrive, Wheels[1]), true); // front
+		EXPECT_EQ(FTransmissionUtility::IsWheelPowered(EDifferentialType::AllWheelDrive, Wheels[2]), true); // rear
+		EXPECT_EQ(FTransmissionUtility::IsWheelPowered(EDifferentialType::AllWheelDrive, Wheels[5]), true); // rear
+
+		EXPECT_EQ(FTransmissionUtility::IsWheelPowered(EDifferentialType::FrontWheelDrive, Wheels[0]), true); // front
+		EXPECT_EQ(FTransmissionUtility::IsWheelPowered(EDifferentialType::FrontWheelDrive, Wheels[1]), true); // front
+		EXPECT_EQ(FTransmissionUtility::IsWheelPowered(EDifferentialType::FrontWheelDrive, Wheels[2]), false); // rear
+		EXPECT_EQ(FTransmissionUtility::IsWheelPowered(EDifferentialType::FrontWheelDrive, Wheels[5]), false); // rear
+
+		EXPECT_EQ(FTransmissionUtility::IsWheelPowered(EDifferentialType::RearWheelDrive, Wheels[0]), false); // front
+		EXPECT_EQ(FTransmissionUtility::IsWheelPowered(EDifferentialType::RearWheelDrive, Wheels[1]), false); // front
+		EXPECT_EQ(FTransmissionUtility::IsWheelPowered(EDifferentialType::RearWheelDrive, Wheels[2]), true); // rear
+		EXPECT_EQ(FTransmissionUtility::IsWheelPowered(EDifferentialType::RearWheelDrive, Wheels[5]), true); // rear
+
+		EXPECT_EQ(FTransmissionUtility::IsWheelPowered(EDifferentialType::UndefinedDrive, Wheels[0]), false); // front
+		EXPECT_EQ(FTransmissionUtility::IsWheelPowered(EDifferentialType::UndefinedDrive, Wheels[1]), false); // front
+		EXPECT_EQ(FTransmissionUtility::IsWheelPowered(EDifferentialType::UndefinedDrive, Wheels[2]), true); // rear
+		EXPECT_EQ(FTransmissionUtility::IsWheelPowered(EDifferentialType::UndefinedDrive, Wheels[5]), true); // rear
+
+	}
+
+	GTEST_TEST(AllTraits, VehicleTest_TransmissionUtilityGetTorqueRatioForWheel)
+	{
+		TArray<FSimpleWheelSim> Wheels;
+
+		for (int I=0; I < 2; I++)
+		{
+			FSimpleWheelConfig SetupFront;
+			SetupFront.AxleType = FSimpleWheelConfig::EAxleType::Front;
+			SetupFront.EngineEnabled = false;
+			FSimpleWheelSim WheelFront(&SetupFront);
+			Wheels.Add(WheelFront);
+		}
+
+		for (int I = 0; I < 4; I++)	
+		{
+			FSimpleWheelConfig SetupRear;
+			SetupRear.AxleType = FSimpleWheelConfig::EAxleType::Rear;
+			SetupRear.EngineEnabled = true;
+			FSimpleWheelSim WheelRear(&SetupRear);
+			Wheels.Add(WheelRear);
+		}
+
+		EXPECT_EQ(FTransmissionUtility::GetNumWheelsOnAxle(FSimpleWheelConfig::EAxleType::Front, Wheels), 2);
+		EXPECT_EQ(FTransmissionUtility::GetNumWheelsOnAxle(FSimpleWheelConfig::EAxleType::Rear, Wheels), 4);
+
+		FSimpleDifferentialConfig DiffSetup;
+		DiffSetup.FrontRearSplit = 0.5f;
+		FSimpleDifferentialSim Differential(&DiffSetup);
+		
+		float Error = 0.01f;
+
+		DiffSetup.DifferentialType = EDifferentialType::AllWheelDrive;
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 0, Wheels), 0.25f, Error); // front
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 1, Wheels), 0.25f, Error); // front
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 2, Wheels), 0.125f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 3, Wheels), 0.125f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 4, Wheels), 0.125f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 5, Wheels), 0.125f, Error); // rear
+
+		DiffSetup.DifferentialType = EDifferentialType::FrontWheelDrive;
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 0, Wheels), 0.5f, Error); // front
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 1, Wheels), 0.5f, Error); // front
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 2, Wheels), 0.0f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 3, Wheels), 0.0f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 4, Wheels), 0.0f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 5, Wheels), 0.0f, Error); // rear
+
+		DiffSetup.DifferentialType = EDifferentialType::RearWheelDrive;
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 0, Wheels), 0.0f, Error); // front
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 1, Wheels), 0.0f, Error); // front
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 2, Wheels), 0.25f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 3, Wheels), 0.25f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 4, Wheels), 0.25f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 5, Wheels), 0.25f, Error); // rear
+
+		DiffSetup.DifferentialType = EDifferentialType::UndefinedDrive;
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 0, Wheels), 0.0f, Error); // front
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 1, Wheels), 0.0f, Error); // front
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 2, Wheels), 0.25f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 3, Wheels), 0.25f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 4, Wheels), 0.25f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 5, Wheels), 0.25f, Error); // rear
+
+		Differential.FrontRearSplit = 0.8f; // more torque to the rear
+		DiffSetup.DifferentialType = EDifferentialType::AllWheelDrive;
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 0, Wheels), 0.1f, Error); // front
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 1, Wheels), 0.1f, Error); // front
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 2, Wheels), 0.2f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 3, Wheels), 0.2f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 4, Wheels), 0.2f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 5, Wheels), 0.2f, Error); // rear
+
+		for (int I = 0; I < 6; I++)
+		{
+			Wheels[I].AccessSetup().AxleType = FSimpleWheelConfig::EAxleType::UndefinedAxle;
+		}
+		// front 2 have SetupFront.EngineEnabled = false, the rest are true
+		EXPECT_EQ(FTransmissionUtility::GetNumDrivenWheels(Wheels), 4);
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 0, Wheels), 0.f, Error); // front
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 1, Wheels), 0.f, Error); // front
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 2, Wheels), 1.f / 4.f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 3, Wheels), 1.f / 4.f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 4, Wheels), 1.f / 4.f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 5, Wheels), 1.f / 4.f, Error); // rear
+
+		// now turn off torque to the rear two
+		Wheels[4].EngineEnabled = false;
+		Wheels[5].EngineEnabled = false;
+		EXPECT_EQ(FTransmissionUtility::GetNumDrivenWheels(Wheels), 2);
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 0, Wheels), 0.f, Error); // front
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 1, Wheels), 0.f, Error); // front
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 2, Wheels), 1.f / 2.f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 3, Wheels), 1.f / 2.f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 4, Wheels), 0.f, Error); // rear
+		EXPECT_NEAR(FTransmissionUtility::GetTorqueRatioForWheel(Differential, 5, Wheels), 0.f, Error); // rear
+
+	}
+
 
 	GTEST_TEST(AllTraits, VehicleTest_SystemTemplate)
 	{
@@ -418,6 +613,7 @@ namespace ChaosTest
 			Setup.ForwardRatios.Add(2.f);
 			Setup.ForwardRatios.Add(1.f);
 			Setup.ReverseRatios.Add(3.f);
+			Setup.ReverseRatios.Add(6.f);
 			Setup.FinalDriveRatio = 4.f;
 			Setup.ChangeUpRPM = 3000;
 			Setup.ChangeDownRPM = 1200;
@@ -453,7 +649,16 @@ namespace ChaosTest
 		EXPECT_EQ(Transmission.GetCurrentGear(), -1);
 
 		Transmission.ChangeDown();
+		EXPECT_EQ(Transmission.GetCurrentGear(), -2);
+
+		Transmission.ChangeDown();
+		EXPECT_EQ(Transmission.GetCurrentGear(), -2);
+
+		Transmission.ChangeUp();
 		EXPECT_EQ(Transmission.GetCurrentGear(), -1);
+
+		Transmission.ChangeUp();
+		EXPECT_EQ(Transmission.GetCurrentGear(), 0);
 
 		Transmission.SetGear(1);
 
@@ -488,6 +693,7 @@ namespace ChaosTest
 			Setup.ForwardRatios.Add(2.f);
 			Setup.ForwardRatios.Add(1.f);
 			Setup.ReverseRatios.Add(3.f);
+			Setup.ReverseRatios.Add(6.f);
 			Setup.FinalDriveRatio = 4.f;
 			Setup.ChangeUpRPM = 3000;
 			Setup.ChangeDownRPM = 1200;
@@ -519,6 +725,31 @@ namespace ChaosTest
 		Transmission.SetEngineRPM(1000);
 		Transmission.Simulate(0.25f);
 		EXPECT_EQ(Transmission.GetCurrentGear(), 1);
+
+		// stays in first, doesn't change to neutral
+		Transmission.SetEngineRPM(1000);
+		Transmission.Simulate(0.25f);
+		EXPECT_EQ(Transmission.GetCurrentGear(), 1);
+
+		Transmission.SetGear(-2, true);
+
+		Transmission.SetEngineRPM(3000);
+		Transmission.Simulate(0.25f);
+		EXPECT_EQ(Transmission.GetCurrentGear(), -2);
+
+		Transmission.SetEngineRPM(1000);
+		Transmission.Simulate(0.25f);
+		EXPECT_EQ(Transmission.GetCurrentGear(), -1);
+
+		// stays in reverse first, doesn't change to neutral
+		Transmission.SetEngineRPM(1000);
+		Transmission.Simulate(0.25f);
+		EXPECT_EQ(Transmission.GetCurrentGear(), -1);
+
+		// changes to next reverse gear
+		Transmission.SetEngineRPM(3000);
+		Transmission.Simulate(0.25f);
+		EXPECT_EQ(Transmission.GetCurrentGear(), -2);
 
 	}
 
@@ -621,16 +852,17 @@ namespace ChaosTest
 
 	// Wheel
 	void SimulateBraking(FSimpleWheelSim& Wheel
-		, float VehicleSpeedMPH
+		, const float Gravity
+		, float VehicleSpeed
 		, float DeltaTime
 		, float& StoppingDistanceOut
 		, float& SimulationTimeOut
+		, bool bLoggingEnabled = false
 		)
 	{
 		StoppingDistanceOut = 0.f;
 		SimulationTimeOut = 0.f;
 		
-		const float Gravity = 9.8f;
 		float MaxSimTime = 15.0f;
 		float VehicleMass = 1300.f;
 		float VehicleMassPerWheel = 1300.f / 4.f;
@@ -639,10 +871,15 @@ namespace ChaosTest
 		Wheel.SetMassPerWheel(VehicleMassPerWheel);
 
 		// Road speed
-		FVector Velocity = FVector(MPHToMS(VehicleSpeedMPH), 0.f, 0.f);
+		FVector Velocity = FVector(VehicleSpeed, 0.f, 0.f);
 
 		// wheel rolling speed matches road speed
 		Wheel.SetMatchingSpeed(Velocity.X);
+
+		if (bLoggingEnabled)
+		{
+			UE_LOG(LogChaos, Warning, TEXT("--------------------START---------------------"));
+		}
 
 		while (SimulationTimeOut < MaxSimTime)
 		{
@@ -654,7 +891,11 @@ namespace ChaosTest
 			Velocity += DeltaTime * Wheel.GetForceFromFriction() / VehicleMassPerWheel;
 			StoppingDistanceOut += Velocity.X * DeltaTime;
 
-			// #todo: make this better remove the 2.0f
+			if (bLoggingEnabled)
+			{
+				UE_LOG(LogChaos, Warning, TEXT("Wheel.GetForceFromFriction() %s"), *Wheel.GetForceFromFriction().ToString());
+			}
+
 			if (FMath::Abs(Velocity.X) < 0.05f)
 			{
 				Velocity.X = 0.f;
@@ -663,11 +904,18 @@ namespace ChaosTest
 
 			SimulationTimeOut += DeltaTime;
 		}
+
+		if (bLoggingEnabled)
+		{
+			UE_LOG(LogChaos, Warning, TEXT("---------------------END----------------------"));
+		}
+
+
 	}
 
 	void SimulateAccelerating(FSimpleWheelSim& Wheel
 		, const float Gravity
-		, float FinalVehicleSpeedMPH
+		, float FinalVehicleSpeed
 		, float DeltaTime
 		, float& DistanceTravelledOut
 		, float& SimulationTimeOut
@@ -699,7 +947,7 @@ namespace ChaosTest
 
 			SimulationTimeOut += DeltaTime;
 
-			if (FMath::Abs(Velocity.X) >= MPHToMS(FinalVehicleSpeedMPH))
+			if (FMath::Abs(Velocity.X) >= FinalVehicleSpeed)
 			{
 				break; // time is up
 			}
@@ -714,7 +962,10 @@ namespace ChaosTest
 		Setup.TractionControlEnabled = false;
 		Setup.BrakeEnabled = true;
 		Setup.EngineEnabled = true;
-		Setup.WheelRadius = 30.0f;
+		Setup.WheelRadius = 0.3f;
+		Setup.FrictionMultiplier = 1.0f;
+		Setup.CorneringStiffness = 1000.0f;
+		Setup.SideSlipModifier = 0.7f;
 
 		FSimpleWheelSim Wheel(&Setup);
 
@@ -722,7 +973,9 @@ namespace ChaosTest
 		// So using a range 10-20 to ensure we are in the correct ballpark.
 		// If specified more accurately in the test, then modifying the code would break the test all the time.
 
-		float StoppingDistanceTolerance = 0.5f; // meters
+		// units meters
+		float Gravity = 9.8f;
+		float StoppingDistanceTolerance = 0.5f;
 		float DeltaTime = 1.f / 30.f;
 		float StoppingDistanceA = 0.f;
 		float SimulationTime = 0.0f;
@@ -730,62 +983,69 @@ namespace ChaosTest
 
 		// reasonably ideal stopping distance - traveling forwards
 		Wheel.SetBrakeTorque(650);
-		float VehicleSpeedMPH = 30.f;
-		SimulateBraking(Wheel, VehicleSpeedMPH, DeltaTime, StoppingDistanceA, SimulationTime);
-		//UE_LOG(LogChaos, Warning, TEXT("Braking Distance %3.2fm"), StoppingDistanceB);
+		SimulateBraking(Wheel, Gravity, MPHToMS(30.f), DeltaTime, StoppingDistanceA, SimulationTime);
 		EXPECT_GT(StoppingDistanceA, 10.f);
 		EXPECT_LT(StoppingDistanceA, 20.f);
 
 		// traveling backwards stops just the same
 		float StoppingDistanceReverseDir = 0.f;
 		Wheel.SetBrakeTorque(650);
-		VehicleSpeedMPH = -30.f;
-		SimulateBraking(Wheel, VehicleSpeedMPH, DeltaTime, StoppingDistanceReverseDir, SimulationTime);
+		SimulateBraking(Wheel, Gravity, MPHToMS(-30.f), DeltaTime, StoppingDistanceReverseDir, SimulationTime);
 		EXPECT_GT(StoppingDistanceReverseDir, -20.f);
 		EXPECT_LT(StoppingDistanceReverseDir, -10.f);
 		EXPECT_LT(StoppingDistanceA - FMath::Abs(StoppingDistanceReverseDir), StoppingDistanceTolerance);
 
+		// Changing to units of Cm should yield the same results
+		float MToCm = 100.0f;
+		float StoppingDistanceCm = 0.f;
+		Wheel.SetBrakeTorque(650 * MToCm * MToCm);
+		Wheel.SetWheelRadius(0.3f * MToCm);
+		SimulateBraking(Wheel, Gravity * MToCm, MPHToCmS(30.f), DeltaTime, StoppingDistanceCm, SimulationTime);
+		EXPECT_NEAR(StoppingDistanceCm, StoppingDistanceA * MToCm, 1.0f);
+
 		// Similar results with different delta time
 		float StoppingDistanceDiffDT = 0.f;
-		VehicleSpeedMPH = 30.f;
-		SimulateBraking(Wheel, VehicleSpeedMPH, DeltaTime * 0.25f, StoppingDistanceDiffDT, SimulationTime);
+		Wheel.SetWheelRadius(0.3f);
+		SimulateBraking(Wheel, Gravity, MPHToMS(30.f), DeltaTime * 0.25f, StoppingDistanceDiffDT, SimulationTime);
 		EXPECT_LT(StoppingDistanceA - StoppingDistanceDiffDT, StoppingDistanceTolerance);
 
 		// barely touching the brake - going to take longer to stop
 		float StoppingDistanceLightBraking = 0.f;
 		Wheel.SetBrakeTorque(150);
-		VehicleSpeedMPH = 30.f;
-		SimulateBraking(Wheel, VehicleSpeedMPH, DeltaTime, StoppingDistanceLightBraking, SimulationTime);
+		SimulateBraking(Wheel, Gravity, MPHToMS(30.f), DeltaTime, StoppingDistanceLightBraking, SimulationTime);
 		EXPECT_GT(StoppingDistanceLightBraking, StoppingDistanceA);
 
 		// locking the wheels / too much brake torque -> dynamic friction rather than static friction -> going to take longer to stop
 		float StoppingDistanceTooHeavyBreaking = 0.f;
 		Wheel.SetBrakeTorque(5000);
-		VehicleSpeedMPH = 30.f;
-		SimulateBraking(Wheel, VehicleSpeedMPH, DeltaTime, StoppingDistanceTooHeavyBreaking, SimulationTime);
-
+		SimulateBraking(Wheel, Gravity, MPHToMS(30.f), DeltaTime, StoppingDistanceTooHeavyBreaking, SimulationTime);
 		EXPECT_GT(StoppingDistanceTooHeavyBreaking, StoppingDistanceA);
+
+		// Would have locked the wheels but ABS prevents skidding
+		Wheel.ABSEnabled = true;
+		float StoppingDistanceTooHeavyBreakingABS = 0.f;
+		Wheel.SetBrakeTorque(5000);
+		SimulateBraking(Wheel, Gravity, MPHToMS(30.f), DeltaTime, StoppingDistanceTooHeavyBreakingABS, SimulationTime);
+		EXPECT_LT(StoppingDistanceTooHeavyBreakingABS, StoppingDistanceTooHeavyBreaking);
+		Wheel.ABSEnabled = false;
 
 		// lower initial speed - stops more quickly
 		float StoppingDistanceLowerSpeed = 0.f;
 		Wheel.SetBrakeTorque(650);
-		VehicleSpeedMPH = 20.f;
-		SimulateBraking(Wheel, VehicleSpeedMPH, DeltaTime, StoppingDistanceLowerSpeed, SimulationTime);
+		SimulateBraking(Wheel, Gravity, MPHToMS(20.f), DeltaTime, StoppingDistanceLowerSpeed, SimulationTime);
 		EXPECT_LT(StoppingDistanceLowerSpeed, StoppingDistanceA);
 
 		// higher initial speed - stops more slowly
 		float StoppingDistanceHigherSpeed = 0.f;
 		Wheel.SetBrakeTorque(650);
-		VehicleSpeedMPH = 60.f;
-		SimulateBraking(Wheel, VehicleSpeedMPH, DeltaTime, StoppingDistanceHigherSpeed, SimulationTime);
+		SimulateBraking(Wheel, Gravity, MPHToMS(60.f), DeltaTime, StoppingDistanceHigherSpeed, SimulationTime);
 		EXPECT_GT(StoppingDistanceHigherSpeed, StoppingDistanceA);
 
 		// slippy surface - stops more slowly
 		float StoppingDistanceLowFriction = 0.f;
 		Wheel.SetSurfaceFriction(0.3f);
 		Wheel.SetBrakeTorque(650);
-		VehicleSpeedMPH = 30.f;
-		SimulateBraking(Wheel, VehicleSpeedMPH, DeltaTime, StoppingDistanceLowFriction, SimulationTime);
+		SimulateBraking(Wheel, Gravity, MPHToMS(30.f), DeltaTime, StoppingDistanceLowFriction, SimulationTime);
 		EXPECT_GT(StoppingDistanceLowFriction, StoppingDistanceA);
 	}
 
@@ -796,8 +1056,11 @@ namespace ChaosTest
 		Setup.TractionControlEnabled = false;
 		Setup.BrakeEnabled = true;
 		Setup.EngineEnabled = true;
+		Setup.WheelRadius = 0.3f;
+		Setup.FrictionMultiplier = 1.0f;
+		Setup.CorneringStiffness = 1000.0f;
+		Setup.SideSlipModifier = 0.7f;
 
-		Setup.WheelRadius = 30.0f;
 		FSimpleWheelSim Wheel(&Setup);
 
 		// There could be one frame extra computation on the acceleration since the last frame of brake is not using the full 
@@ -815,13 +1078,13 @@ namespace ChaosTest
 
 		// How far & what time does it take to stop from 30MPH to rest
 		Wheel.SetBrakeTorque(650);
-		SimulateBraking(Wheel, 30.0f, DeltaTime, StoppingDistanceA, SimulationTimeBrake);
+		SimulateBraking(Wheel, Gravity, MPHToMS(30.0f), DeltaTime, StoppingDistanceA, SimulationTimeBrake);
 
 		// How far and what time does it take to accelerate from rest to 30MPH
 		float SimulationTimeAccel = 0.0f;
 		float DrivingDistanceA = 0.f;
 		Wheel.SetDriveTorque(650);
-		SimulateAccelerating(Wheel, Gravity, 30.0f, DeltaTime, DrivingDistanceA, SimulationTimeAccel);
+		SimulateAccelerating(Wheel, Gravity, MPHToMS(30.0f), DeltaTime, DrivingDistanceA, SimulationTimeAccel);
 
 		// 0-30 MPH and 30-0 MPH should be the same if there's no slipping and accel torque was same as the brake torque run
 		EXPECT_LT(DrivingDistanceA - StoppingDistanceA, AccelerationResultsTolerance);
@@ -833,16 +1096,18 @@ namespace ChaosTest
 
 		// Unreal units cm - Note for the same results the radius needs to remain at 0.3m and not also be scaled to 30(cm)
 		float SimulationTimeAccelCM = 0.0f;
-		float MtoCm = 100.0f;
+		float MToCm = 100.0f;
 		float DrivingDistanceCM = 0.f;
-		Wheel.SetDriveTorque(650 * MtoCm);
-		SimulateAccelerating(Wheel, Gravity * MtoCm, 30.0f * MtoCm, DeltaTime, DrivingDistanceCM, SimulationTimeAccelCM);
-		EXPECT_GT(DrivingDistanceCM, 10.f * MtoCm);
-		EXPECT_LT(DrivingDistanceCM, 20.f * MtoCm);
-		EXPECT_LT(SimulationTimeAccel - SimulationTimeAccelCM, AccelerationResultsTolerance);
+		Wheel.SetDriveTorque(650.0f * MToCm * MToCm);
+		Wheel.SetWheelRadius(0.3f * MToCm);
+		SimulateAccelerating(Wheel, Gravity * MToCm, MPHToCmS(30.0f), DeltaTime, DrivingDistanceCM, SimulationTimeAccelCM);
+		EXPECT_GT(DrivingDistanceCM, 10.f * MToCm);
+		EXPECT_LT(DrivingDistanceCM, 20.f * MToCm);
+		EXPECT_NEAR(DrivingDistanceCM, DrivingDistanceA * MToCm, AccelerationResultsTolerance);
 
 		float SimulationTimeAccelSpin = 0.0f;
 		float DrivingDistanceWheelspin = 0.f;
+		Wheel.SetWheelRadius(0.3f);
 		Wheel.SetDriveTorque(5000); // definitely cause wheel spin
 		SimulateAccelerating(Wheel, Gravity, 30.0f, DeltaTime, DrivingDistanceWheelspin, SimulationTimeAccelSpin);
 
@@ -851,6 +1116,20 @@ namespace ChaosTest
 
 		// takes longer to reach the same speed
 		EXPECT_GT(SimulationTimeAccelSpin, SimulationTimeAccel);
+
+		// Enable traction control should be better than both of the above
+		float SimulationTimeAccelTC = 0.0f;
+		float DrivingDistanceTC = 0.f;
+		Wheel.TractionControlEnabled = true;
+		Wheel.SetDriveTorque(5000); // definitely cause wheel spin
+		SimulateAccelerating(Wheel, Gravity, MPHToMS(30.0f), DeltaTime, DrivingDistanceTC, SimulationTimeAccelTC);
+
+		// reaches target speed in a shorter distance
+		EXPECT_LT(DrivingDistanceTC, DrivingDistanceWheelspin);
+
+		// reaches speed quicker with TC on when wheel would be slipping from drive torque
+		EXPECT_LT(SimulationTimeAccelTC, SimulationTimeAccelSpin);
+
 	}
 
 	GTEST_TEST(AllTraits, DISABLED_VehicleTest_WheelLateralSlip)
@@ -1141,9 +1420,9 @@ namespace ChaosTest
 	}
 
 	float PlaneZPos = 1.0f;
-	bool RayCastPlane(FVec3& RayStart, FVec3& Direction, float Length, float& OutTime, FVec3& OutPosition, FVec3& OutNormal)
+	bool RayCastPlane(FVec3& RayStart, FVec3& Direction, float Length, FReal& OutTime, FVec3& OutPosition, FVec3& OutNormal)
 	{
-		TPlane<float, 3> Plane(FVec3(1), FVec3(0, 0, PlaneZPos));
+		TPlane<FReal, 3> Plane(FVec3(1), FVec3(0, 0, PlaneZPos));
 		int32 FaceIndex;
 
 		return Plane.Raycast(RayStart, Direction, Length, 0, OutTime, OutPosition, OutNormal, FaceIndex);
@@ -1151,35 +1430,36 @@ namespace ChaosTest
 
 	void AddForceAtPosition(FPBDRigidsEvolutionGBF& Evolution, TPBDRigidParticleHandle<FReal, 3>* Rigid, const FVector& InForce, const FVector& InPosition)
 	{
-		const Chaos::FVec3& CurrentForce = Rigid->F();
-		const Chaos::FVec3& CurrentTorque = Rigid->Torque();
 		const Chaos::FVec3 WorldCOM = FParticleUtilitiesGT::GetCoMWorldPosition(Rigid);
 
 		Evolution.SetParticleObjectState(Rigid, EObjectStateType::Dynamic);
 
 		const Chaos::FVec3 WorldTorque = Chaos::FVec3::CrossProduct(InPosition - WorldCOM, InForce);
-		Rigid->SetF(CurrentForce + InForce);
-		Rigid->SetTorque(CurrentTorque + WorldTorque);
+		Rigid->AddForce(InForce);
+		Rigid->AddTorque(WorldTorque);
 
 	}
 
 	FVector WorldVelocityAtPoint(TPBDRigidParticleHandle<FReal, 3>* Rigid, const FVector& InPoint)
 	{
-		const Chaos::FVec3 COM = Rigid ? Chaos::FParticleUtilitiesGT::GetCoMWorldPosition(Rigid) : Chaos::FParticleUtilitiesGT::GetActorWorldTransform(Rigid).GetTranslation();
+		check(Rigid);
+		const Chaos::FVec3 COM = Chaos::FParticleUtilitiesGT::GetCoMWorldPosition(Rigid);
 		const Chaos::FVec3 Diff = InPoint - COM;
-		return Rigid->V() - Chaos::FVec3::CrossProduct(Diff, Rigid->W());
-
+		const Chaos::FVec3 V = Rigid->GetV();
+		const Chaos::FVec3 W = Rigid->GetW();
+		return V - Chaos::FVec3::CrossProduct(Diff, W);
 	}
 
 	// #todo: break out vehicle simulation setup so it can be used across number of tests
 	GTEST_TEST(AllEvolutions, VehicleTest_SuspensionSpringLoad)
 	{
-		FPBDRigidsSOAs Particles;
+		FParticleUniqueIndicesMultithreaded UniqueIndices;
+		FPBDRigidsSOAs Particles(UniqueIndices);
 		THandleArray<FChaosPhysicsMaterial> PhysicalMaterials;
 		FPBDRigidsEvolutionGBF Evolution(Particles, PhysicalMaterials);
 
 		float BodyMass = 1000.0f;
-		float Gravity = FMath::Abs(Evolution.GetGravityForces().GetAcceleration().Z);
+		float Gravity = FMath::Abs(Evolution.GetGravityForces().GetAcceleration(0).Z);
 
 		FSimpleSuspensionConfig Setup;
 		Setup.MaxLength = 20.0f;
@@ -1236,23 +1516,25 @@ namespace ChaosTest
 		TUniquePtr<FChaosPhysicsMaterial> PhysicsMaterial = MakeUnique<FChaosPhysicsMaterial>();
 		PhysicsMaterial->SleepCounterThreshold = 2;
 
-		TUniquePtr<FImplicitObject> Box(new TSphere<FReal, 3>(FVec3(0, 0, 0), 50));
-		Dynamic->SetGeometry(MakeSerializable(Box));
+		Chaos::FImplicitObjectPtr Box(new TSphere<FReal, 3>(FVec3(0, 0, 0), 50));
+		Dynamic->SetGeometry(Box);
 
 		Evolution.SetPhysicsMaterial(Dynamic, MakeSerializable(PhysicsMaterial));
 
-		Dynamic->X() = FVec3(10, 10, 20);
+		Dynamic->SetX(FVec3(10, 10, 20));
 		Dynamic->M() = BodyMass;
 		Dynamic->InvM() = 1.0f / BodyMass;
-		Dynamic->I() = FMatrix33(100000.0f, 100000.0f, 100000.0f);
-		Dynamic->InvI() = FMatrix33(1.0f / 100000.0f, 1.0f / 100000.0f, 1.0f / 100000.0f);
+		Dynamic->I() = TVec3<FRealSingle>(100000.0f);
+		Dynamic->InvI() = TVec3<FRealSingle>(1.0f / 100000.0f);
+
+		Evolution.EnableParticle(Dynamic);
 
 		float AccumulatedTime = 0.f;
 		const FReal Dt = 1 / 30.f;
 		for (int i = 0; i < 500; ++i)
 		{
 			// latest body transform
-			const FTransform BodyTM(Dynamic->R(), Dynamic->X());
+			const FTransform BodyTM(Dynamic->GetR(), Dynamic->GetX());
 
 			for (int SpringIdx = 0; SpringIdx < 4; SpringIdx++)
 			{
@@ -1263,7 +1545,7 @@ namespace ChaosTest
 				// raycast
 				FVec3 Start = Trace.Start;
 				FVec3 Dir = Trace.TraceDir();
-				float CurrentLength = Suspension.Setup().MaxLength;
+				FReal CurrentLength = Suspension.Setup().MaxLength;
 
 				FVec3 Position(0,0,0);
 				FVec3 Normal(0,0,0);
@@ -1287,19 +1569,113 @@ namespace ChaosTest
 
 		float Tolerance = 0.5f; // half cm
 		float ExpectedRestingPosition = (10.f + PlaneZPos + WheelRadius);
-		EXPECT_LT(Dynamic->X().Z - ExpectedRestingPosition, Tolerance);
+		EXPECT_LT(Dynamic->GetX().Z - ExpectedRestingPosition, Tolerance);
 	}
 
-	//GTEST_TEST(AllTraits, VehicleTest_SuspensionNaturalFrequency)
-	//{
-	//	float SprungMass = 250.f;
-	//	float SpringStiffness = 250.0f;
-	//	float SpringDamping = 0.5f;
+	GTEST_TEST(AllTraits, VehicleTest_WheelAcceleratingLongitudinalSlip_VaryingDelta)
+	{
+		FSimpleWheelConfig Setup;
+		Setup.ABSEnabled = false;
+		Setup.TractionControlEnabled = false;
+		Setup.BrakeEnabled = true;
+		Setup.EngineEnabled = true;
+		Setup.WheelRadius = 0.3f;
+		Setup.FrictionMultiplier = 1.0f;
+		Setup.CorneringStiffness = 1000.0f;
+		Setup.SideSlipModifier = 0.7f;
+
+		FSimpleWheelSim Wheel(&Setup);
+
+		// units meters
+		float Gravity = 9.8f;
+		float VehicleMassPerWheel = 100.f;
+		float ResultsTolerance = 0.01f;
+
+		Wheel.SetSurfaceFriction(RealWorldConsts::DryRoadFriction());
+		Wheel.SetWheelLoadForce(VehicleMassPerWheel * Gravity);
+		Wheel.SetMassPerWheel(VehicleMassPerWheel);
+
+		// Road speed
+		FVector Velocity = FVector(10.f, 0.f, 0.f);
+
+		// start from stationary
+		Wheel.SetMatchingSpeed(Velocity.X);
+		Wheel.SetVehicleGroundSpeed(Velocity);
+		Wheel.SetDriveTorque(100.0f);
+
+		float DeltaTime = 1.f / 30.f;
+		Wheel.Simulate(DeltaTime);
+		FVector ForceGenerated30FPS = Wheel.GetForceFromFriction();
+
+		Wheel.Simulate(DeltaTime);
+		FVector ForceGenerated30FPS_2 = Wheel.GetForceFromFriction();
+
+		DeltaTime = 1.f / 60.f;
+		Wheel.Simulate(DeltaTime);
+
+		FVector ForceGenerated60FPS = Wheel.GetForceFromFriction();
+
+		DeltaTime = 1.f / 50.f;
+		Wheel.Simulate(DeltaTime);
+
+		FVector ForceGenerated50FPS = Wheel.GetForceFromFriction();
+
+		EXPECT_NEAR(ForceGenerated30FPS.X, ForceGenerated30FPS_2.X, ResultsTolerance);
+		EXPECT_NEAR(ForceGenerated30FPS.X, ForceGenerated60FPS.X, ResultsTolerance);
+		EXPECT_NEAR(ForceGenerated30FPS.X, ForceGenerated60FPS.X, ResultsTolerance);
 
 
+		Wheel.SetMatchingSpeed(Velocity.X);
+		Wheel.SetVehicleGroundSpeed(Velocity);
+		Wheel.SetDriveTorque(100.0f);
+	}
 
-	//}
+	GTEST_TEST(AllTraits, VehicleTest_Suspension_VaryingDelta)
+	{
+		FSimpleSuspensionConfig Setup;
+		Setup.MaxLength = 20.0f;
+		Setup.DampingRatio = 0.5f;
+		Setup.SpringPreload = 100.0f;
+		Setup.SpringRate = 100.0f;
+		Setup.SuspensionAxis = FVector(0.f, 0.f, -1.f);
+		Setup.RestingForce = 50.0f;
 
+		FSimpleSuspensionSim Suspension(&Setup);
+
+		// units meters
+		float Gravity = 9.8f;
+		float VehicleMassPerWheel = 100.f;
+		float WheelRadius = 32.0f;
+		float CurrentLength = 5.0f;
+
+		float DeltaTime = 1.0f / 30.0f;
+		float ResultsTolerance = 0.01f;
+
+		Suspension.SetSuspensionLength(CurrentLength, WheelRadius);
+		Suspension.SetLocalVelocity(FVector(0.f,0.f,-8.f));
+
+		// first one has to adjust for sudden change in length
+		Suspension.Simulate(DeltaTime);
+
+		Suspension.Simulate(DeltaTime);
+		float Force30FPS = Suspension.GetSuspensionForce();
+
+		Suspension.Simulate(DeltaTime);
+		float Force30FPS_2 = Suspension.GetSuspensionForce();
+
+		DeltaTime = 60.0f;
+		Suspension.Simulate(DeltaTime);
+		float Force60FPS = Suspension.GetSuspensionForce();
+
+		DeltaTime = 50.0f; 
+		Suspension.Simulate(DeltaTime);
+		float Force50FPS = Suspension.GetSuspensionForce();
+
+		EXPECT_NEAR(Force30FPS, Force30FPS_2, ResultsTolerance);
+		EXPECT_NEAR(Force30FPS, Force60FPS, ResultsTolerance);
+		EXPECT_NEAR(Force30FPS, Force50FPS, ResultsTolerance);
+
+	}
 }
 
 

@@ -1,10 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+// HEADER_UNIT_SKIP - Not included directly
+
 // #TODO: redirect to platform-agnostic version for the time being. Eventually this will become an error
 #include "HAL/Platform.h"
-#if !PLATFORM_WINDOWS && !PLATFORM_HOLOLENS
+#if !PLATFORM_WINDOWS
 	#include "Microsoft/PostWindowsApi.h"
 #else
+
+// this file should only be included from WindowsHWrapper.h
+#if !defined(WINDOWS_H_WRAPPER_GUARD) 
+#pragma message("WARNING: do not include Windows/PostWindowsApi.h directly. Use Windows/WindowsHWrapper.h or Windows/HideWindowsPlatformTypes.h instead") 
+#endif
 
 // Re-enable warnings
 THIRD_PARTY_INCLUDES_END
@@ -23,56 +30,57 @@ THIRD_PARTY_INCLUDES_END
 #undef float
 #undef CDECL
 #undef PF_MAX
-#undef PlaySound
-#undef DrawText
 #undef CaptureStackBackTrace
-#undef MemoryBarrier
-#undef DeleteFile
-#undef MoveFile
 #undef CopyFile
-#undef CreateDirectory
-#undef GetCurrentTime
-#undef SendMessage
-#undef LoadString
-#undef UpdateResource
-#undef FindWindow
-#undef GetObject
-#undef GetEnvironmentVariable
-#undef CreateFont
 #undef CreateDesktop
-#undef GetMessage
-#undef PostMessage
+#undef CreateDirectory
+#undef CreateFont
+#undef DeleteFile
+#undef DrawText
+#undef FindWindow
+#undef GetClassInfo
+#undef GetClassName
 #undef GetCommandLine
+#undef GetCurrentTime
+#undef GetEnvironmentVariable
+#undef GetFileAttributes
+#undef GetFreeSpace
+#undef GetMessage
+#undef GetNextSibling
+#undef GetObject
 #undef GetProp
+#undef GetTempFileName
+#undef IMediaEventSink
+#undef IsMaximized
+#undef IsMinimized
+#undef LoadString
+#undef MemoryBarrier
+#undef MoveFile
+#undef PlaySound
+#undef PostMessage
+#undef ReportEvent
+#undef SendMessage
 #undef SetPort
 #undef SetProp
-#undef GetFileAttributes
-#undef ReportEvent
-#undef GetClassName
-#undef GetClassInfo
+#undef UpdateResource
 #undef Yield
-#undef IMediaEventSink
-#undef GetTempFileName
-#undef GetFreeSpace
 
 // Undefine all the atomics. AllowWindowsPlatformAtomics/HideWindowsPlatformAtomics temporarily defining these macros.
-#if PLATFORM_WINDOWS || PLATFORM_HOLOLENS
-	#undef InterlockedIncrement
-	#undef InterlockedDecrement
-	#undef InterlockedAdd
-	#undef InterlockedExchange
-	#undef InterlockedExchangeAdd
-	#undef InterlockedCompareExchange
-	#undef InterlockedCompareExchangePointer
-	#undef InterlockedExchange64
-	#undef InterlockedExchangeAdd64
-	#undef InterlockedCompareExchange64
-	#undef InterlockedIncrement64
-	#undef InterlockedDecrement64
-	#undef InterlockedAnd
-	#undef InterlockedOr
-	#undef InterlockedXor
-#endif
+#undef InterlockedIncrement
+#undef InterlockedDecrement
+#undef InterlockedAdd
+#undef InterlockedExchange
+#undef InterlockedExchangeAdd
+#undef InterlockedCompareExchange
+#undef InterlockedCompareExchangePointer
+#undef InterlockedExchange64
+#undef InterlockedExchangeAdd64
+#undef InterlockedCompareExchange64
+#undef InterlockedIncrement64
+#undef InterlockedDecrement64
+#undef InterlockedAnd
+#undef InterlockedOr
+#undef InterlockedXor
 
 // Restore any previously defined macros
 #pragma pop_macro("MAX_uint8")
@@ -85,11 +93,6 @@ THIRD_PARTY_INCLUDES_END
 
 // Restore the struct packing setting
 PRAGMA_POP_PLATFORM_DEFAULT_PACKING
-
-// Restore the warning that the pack size is changed in this header.
-#ifdef __clang__
-	#pragma clang diagnostic pop
-#endif	// __clang__
 
 // Redefine CDECL to our version of the #define.  <AJS> Is this really necessary?
 #define CDECL	    __cdecl					/* Standard C function */

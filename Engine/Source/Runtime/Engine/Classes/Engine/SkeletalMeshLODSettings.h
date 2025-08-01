@@ -9,6 +9,7 @@
 #include "SkeletalMeshReductionSettings.h"
 #include "DataAsset.h"
 #include "PerPlatformProperties.h"
+#include "PerQualityLevelProperties.h"
 #include "SkeletalMeshLODSettings.generated.h"
 
 UENUM()
@@ -41,7 +42,7 @@ struct FBoneFilter
 	 * You can't remove joint without children removed, and you can't keep without your parents 
 	 */
 	UPROPERTY(EditAnywhere, Category = FBoneFilter)
-	bool bExcludeSelf=false;
+	bool bExcludeSelf = false;
 
 	/* Name of Bone Name */
 	UPROPERTY(EditAnywhere, Category = FBoneFilter)
@@ -93,21 +94,29 @@ struct FSkeletalMeshLODGroupSettings
 	UPROPERTY(EditAnywhere, Category = Reduction)
 	TArray<FBoneFilter> BoneList;
 
-	/** Bones which should be prioritized for the quality, this will be weighted toward keeping source data. */
+	/** Bones which should be prioritized for the quality, this will be weighted toward keeping source data. Use WeightOfPrioritization to control the value. */
 	UPROPERTY(EditAnywhere, Category = Reduction)
 	TArray<FName> BonesToPrioritize;
 
-	/** Weight of how much consider for BonesToPrioritize. 0 means nothing, and 1 means take all source */
-	UPROPERTY(EditAnywhere, Category = Reduction, meta = (UIMin = "0.0", UIMax = "1.0", ClampMin = "0.0", ClampMax = "1.0"))
+	/** Sections which should be prioritized for the quality, this will be weighted toward keeping source data. Use WeightOfPrioritization to control the value. */
+	UPROPERTY(EditAnywhere, Category = Reduction)
+	TArray<int32> SectionsToPrioritize;
+
+	/** How much to consideration to give BonesToPrioritize and SectionsToPrioritize.  The weight is an additional vertex simplification penalty where 0 means nothing. */
+	UPROPERTY(EditAnywhere, Category = Reduction, meta = (UIMin = "0.0", ClampMin = "0.0"))
 	float WeightOfPrioritization;
 
 	/** Pose which should be used to reskin vertex influences for which the bones will be removed in this LOD level, uses ref-pose by default */
 	UPROPERTY(EditAnywhere, Category = Reduction)
-	class UAnimSequence* BakePose;
+	TObjectPtr<class UAnimSequence> BakePose;
 
 	/** The optimization settings to use for the respective LOD level */
 	UPROPERTY(EditAnywhere, Category = Reduction)
 	FSkeletalMeshOptimizationSettings ReductionSettings;
+
+	/** Whether a Mesh Deformer applied to the mesh asset or Skinned Mesh Component should be used on this LOD or not */
+	UPROPERTY(EditAnywhere, Category = LODSetting)
+	bool bAllowMeshDeformer = true;
 };
 
 UCLASS(config = Engine, defaultconfig, BlueprintType, MinimalAPI)
@@ -115,8 +124,11 @@ class USkeletalMeshLODSettings : public UDataAsset
 {
 	GENERATED_UCLASS_BODY()
 protected:
+	/** Minimum Quality Level LOD to render. Can be overridden per mesh as well as set here for all mesh instances */
+	UPROPERTY(globalconfig, EditAnywhere, Category = LODGroups, meta = (DisplayName = "Quality Level Minimum LOD"))
+	FPerQualityLevelInt MinQualityLevelLod;
 
-	/** Minimum LOD to render. Can be overridden per component as well as set here for all mesh instances here */
+	/** Minimum LOD to render. Can be overridden per mesh as well as set here for all mesh instances */
 	UPROPERTY(globalconfig, EditAnywhere, Category=LODGroups, meta = (DisplayName = "Minimum LOD"))
 	FPerPlatformInt MinLod;
 
@@ -143,12 +155,13 @@ protected:
 	UPROPERTY(globalconfig, EditAnywhere, Category=LODGroups)
 	TArray<FSkeletalMeshLODGroupSettings> LODGroups;
 
+	friend class FSkeletalMeshReductionSettingsDetails;
 public:
 	/** Retrieves the Skeletal mesh LOD group settings for the given name */
 	ENGINE_API const FSkeletalMeshLODGroupSettings& GetSettingsForLODLevel(const int32 LODIndex) const;
 
 	/** Returns whether or not valid settings were retrieved from the ini file */
-	ENGINE_API const bool HasValidSettings() const
+	const bool HasValidSettings() const
 	{
 		return LODGroups.Num() > 0;
 	}

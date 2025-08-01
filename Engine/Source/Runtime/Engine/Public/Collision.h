@@ -6,10 +6,17 @@
 
 #pragma once
 
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "CoreMinimal.h"
+#endif // UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
+#include "Math/Vector.h"
 #include "Stats/Stats.h"
-#include "Engine/EngineTypes.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
+#include "Engine/HitResult.h"
+#endif // UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "EngineDefines.h"
+
+struct FHitResult;
 
 /**
  * Collision stats
@@ -40,7 +47,7 @@ DECLARE_CYCLE_STAT_EXTERN(TEXT("PreFilter"), STAT_Collision_PreFilter, STATGROUP
 //	FSeparatingAxisPointCheck - Checks for intersection between an AABB and a convex polygon.
 //
 
-class ENGINE_API FSeparatingAxisPointCheck
+class FSeparatingAxisPointCheck
 {
 public:
 	/** The normal of the separating axis that the bounding box is penetrating the least */
@@ -77,31 +84,6 @@ public:
 		bHit = (PolyVertices.Num() == 3) ? FindSeparatingAxisTriangle() : FindSeparatingAxisGeneric();
 	}
 
-	/**
-	 *	Legacy constructor for the class (deprecated)
-	 */
-	FSeparatingAxisPointCheck(
-		const FVector& InV0,
-		const FVector& InV1,
-		const FVector& InV2,
-		const FVector& InBoxCenter,
-		const FVector& InBoxExtent,
-		float InBestDist
-		)
-		: HitNormal(FVector::ZeroVector),
-		  BestDist(InBestDist),
-		  PolyVertices(TriangleVertices),
-		  BoxCenter(InBoxCenter),
-		  BoxExtent(InBoxExtent),
-		  bCalcLeastPenetration(true)
-	{
-		TriangleVertices.Empty(3);
-		TriangleVertices[0] = InV0;
-		TriangleVertices[1] = InV1;
-		TriangleVertices[2] = InV2;
-		bHit = FindSeparatingAxisTriangle();
-	}
-
 private:
 
 	/**
@@ -113,7 +95,7 @@ private:
 	 *	@param	ProjectedPolyMin	The minimum polygon point, projected onto the separating axis.
 	 *	@param	ProjectedPolyMax	The maximum polygon point, projected onto the separating axis.
 	 */
-	bool TestSeparatingAxisCommon(const FVector& Axis, float ProjectedPolyMin, float ProjectedPolyMax);
+	ENGINE_API bool TestSeparatingAxisCommon(const FVector& Axis, float ProjectedPolyMin, float ProjectedPolyMax);
 
 	/**
 	 *	Determines whether the bounding box encroaches on the triangle along the given axis.
@@ -122,7 +104,7 @@ private:
 	 *
 	 *	@return	True if the bounding box encroaches on the triangle along the given axis.
 	 */
-	bool TestSeparatingAxisTriangle(const FVector& Axis);
+	ENGINE_API bool TestSeparatingAxisTriangle(const FVector& Axis);
 
 	/**
 	 *	Determines whether the bounding box encroaches on the convex polygon along the given axis.
@@ -131,21 +113,21 @@ private:
 	 *
 	 *	@return	True if the bounding box encroaches on the triangle along the given axis.
 	 */
-	bool TestSeparatingAxisGeneric(const FVector& Axis);
+	ENGINE_API bool TestSeparatingAxisGeneric(const FVector& Axis);
 
 	/**
 	 *	Determines whether the bounding box encroaches on the triangle, checking all relevant axes.
 	 *
 	 *	@return	True if the bounding box encroaches on the triangle.
 	 */
-	bool FindSeparatingAxisTriangle();
+	ENGINE_API bool FindSeparatingAxisTriangle();
 
 	/**
 	 *	Determines whether the bounding box encroaches on the convex polygon, checking all relevant axes.
 	 *
 	 *	@return	True if the bounding box encroaches on the convex polygon.
 	 */
-	bool FindSeparatingAxisGeneric();
+	ENGINE_API bool FindSeparatingAxisGeneric();
 
 	/** Array of vertices defining the convex polygon being checked. */
 	const TArray<FVector>& PolyVertices;
@@ -158,9 +140,6 @@ private:
 
 	/** Flag specifying whether the least penetration should be calculated. */
 	bool bCalcLeastPenetration;
-
-	/** Array into which triangle vertices are placed (legacy use only) */
-	static TArray<FVector> TriangleVertices;
 };
 
 /**
@@ -168,44 +147,5 @@ private:
  *	Algorithm based on "Fast, Minimum Storage Ray/Triangle Intersection"
  *	Returns true if the line segment does hit the triangle
  */
-FORCEINLINE bool LineCheckWithTriangle(FHitResult& Result,const FVector& V1,const FVector& V2,const FVector& V3,const FVector& Start,const FVector& End,const FVector& Direction)
-{
-	FVector	Edge1 = V3 - V1,
-		Edge2 = V2 - V1,
-		P = Direction ^ Edge2;
-	float	Determinant = Edge1 | P;
-
-	if(Determinant < DELTA)
-	{
-		return false;
-	}
-
-	FVector	T = Start - V1;
-	float	U = T | P;
-
-	if(U < 0.0f || U > Determinant)
-	{
-		return false;
-	}
-
-	FVector	Q = T ^ Edge1;
-	float	V = Direction | Q;
-
-	if(V < 0.0f || U + V > Determinant)
-	{
-		return false;
-	}
-
-	float	Time = (Edge2 | Q) / Determinant;
-
-	if(Time < 0.0f || Time > Result.Time)
-	{
-		return false;
-	}
-
-	Result.Normal = ((V3-V2)^(V2-V1)).GetSafeNormal();
-	Result.Time = ((V1 - Start)|Result.Normal) / (Result.Normal|Direction);
-
-	return true;
-}
+ENGINE_API bool LineCheckWithTriangle(FHitResult& Result,const FVector& V1,const FVector& V2,const FVector& V3,const FVector& Start,const FVector& End,const FVector& Direction);
 

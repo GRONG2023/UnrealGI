@@ -1,23 +1,20 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "GameFramework/GameModeBase.h"
+#include "Blueprint/BlueprintSupport.h"
+#include "Engine/GameInstance.h"
+#include "Engine/ServerStatReplicator.h"
 #include "GameFramework/GameNetworkManager.h"
-#include "Matinee/MatineeActor.h"
+#include "Engine/GameViewportClient.h"
 #include "Engine/LevelScriptActor.h"
-#include "Engine/World.h"
 #include "Misc/CommandLine.h"
-#include "UObject/Package.h"
 #include "Misc/PackageName.h"
 #include "Net/OnlineEngineInterface.h"
 #include "GameFramework/GameStateBase.h"
-#include "PhysicsEngine/BodyInstance.h"
-#include "GameFramework/DefaultPawn.h"
 #include "GameFramework/SpectatorPawn.h"
 #include "GameFramework/HUD.h"
 #include "GameFramework/PlayerState.h"
 #include "GameFramework/GameSession.h"
-#include "GameFramework/PlayerStart.h"
-#include "GameFramework/WorldSettings.h"
 #include "Engine/NetConnection.h"
 #include "Engine/ChildConnection.h"
 #include "Engine/PlayerStartPIE.h"
@@ -26,6 +23,8 @@
 #include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
 #include "Engine/LevelStreaming.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(GameModeBase)
 
 #if WITH_EDITOR
 	#include "IMovieSceneCapture.h"
@@ -41,6 +40,25 @@ FGameModeEvents::FGameModePreLoginEvent FGameModeEvents::GameModePreLoginEvent;
 FGameModeEvents::FGameModePostLoginEvent FGameModeEvents::GameModePostLoginEvent;
 FGameModeEvents::FGameModeLogoutEvent FGameModeEvents::GameModeLogoutEvent;
 FGameModeEvents::FGameModeMatchStateSetEvent FGameModeEvents::GameModeMatchStateSetEvent;
+
+namespace UE::GameModeBase::Private
+{
+	static bool bAllowPIESeamlessTravel = false;
+	static FAutoConsoleVariableRef CVarAllowPIESeamlessTravel(
+		TEXT("net.AllowPIESeamlessTravel"),
+		bAllowPIESeamlessTravel,
+		TEXT("When true, allow seamless travels in single process PIE.")
+	);
+
+	// Fixed in UE5.4
+	static bool bAllowListenParamSentToClient = false;
+	static FAutoConsoleVariableRef CVarAllowListenParamSentToClient(
+		TEXT("net.fix.AllowListenParamSentToClient"),
+		bAllowListenParamSentToClient,
+		TEXT("When true, allow '?listen' sent to the client during Travel. This would confuse the client and cause crashes with RPCs.")
+	);
+}
+
 
 AGameModeBase::AGameModeBase(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.DoNotCreateDefaultSubobject(TEXT("Sprite")))
@@ -234,13 +252,13 @@ bool AGameModeBase::ClearPause()
 			const bool bResult = CanUnpauseCriteriaMet.Execute();
 			if (bResult)
 			{
-				Pausers.RemoveAtSwap(Index, 1, false);
+				Pausers.RemoveAtSwap(Index, 1, EAllowShrinking::No);
 				bPauseCleared = true;
 			}
 		}
 		else
 		{
-			Pausers.RemoveAtSwap(Index, 1, false);
+			Pausers.RemoveAtSwap(Index, 1, EAllowShrinking::No);
 			bPauseCleared = true;
 		}
 	}
@@ -346,7 +364,7 @@ void AGameModeBase::ResetLevel()
 	for (FActorIterator It(GetWorld()); It; ++It)
 	{
 		AActor* A = *It;
-		if (A && !A->IsPendingKill() && A != this && !A->IsA<AController>() && ShouldReset(A))
+		if (IsValid(A) && A != this && !A->IsA<AController>() && ShouldReset(A))
 		{
 			A->Reset();
 		}
@@ -371,7 +389,7 @@ void AGameModeBase::ReturnToMainMenuHost()
 	}
 }
 
-APlayerController* AGameModeBase::ProcessClientTravel(FString& FURL, FGuid NextMapGuid, bool bSeamless, bool bAbsolute)
+APlayerController* AGameModeBase::ProcessClientTravel(FString& FURL, bool bSeamless, bool bAbsolute)
 {
 	// We call PreClientTravel directly on any local PlayerPawns (ie listen server)
 	APlayerController* LocalPlayerController = nullptr;
@@ -381,10 +399,18 @@ APlayerController* AGameModeBase::ProcessClientTravel(FString& FURL, FGuid NextM
 		{
 			if (Cast<UNetConnection>(PlayerController->Player) != nullptr)
 			{
+				FString ClientUrl = FURL;
+				if (!UE::GameModeBase::Private::bAllowListenParamSentToClient)
+				{
+					// We are going to lop off the listen option when sending to the client, so they don't think they're the server.
+					// That sounds silly, but in GetNetMode, we will eventually arrive at AttemptDeriveFromURL in certain circumstances (such as during travel!)
+					// The client would then think that they're supposed to execute things locally rather than RPC them based on the listen param.
+					ClientUrl = FURL.Replace(TEXT("?listen?"), TEXT("?"));
+					ClientUrl.RemoveFromEnd(TEXT("?listen"));
+				}
+
 				// Remote player
-				PRAGMA_DISABLE_DEPRECATION_WARNINGS
-				PlayerController->ClientTravel(FURL, TRAVEL_Relative, bSeamless, NextMapGuid);
-				PRAGMA_ENABLE_DEPRECATION_WARNINGS
+				PlayerController->ClientTravel(ClientUrl, TRAVEL_Relative, bSeamless);
 			}
 			else
 			{
@@ -403,14 +429,6 @@ bool AGameModeBase::CanServerTravel(const FString& FURL, bool bAbsolute)
 	UWorld* World = GetWorld();
 
 	check(World);
-
-	// NOTE - This is a temp check while we work on a long term fix
-	// There are a few issues with seamless travel using single process PIE, so we're disabling that for now while working on a fix
-	if (World->WorldType == EWorldType::PIE && bUseSeamlessTravel && !FParse::Param(FCommandLine::Get(), TEXT("MultiprocessOSS")))
-	{
-		UE_LOG(LogGameMode, Warning, TEXT("CanServerTravel: Seamless travel currently NOT supported in single process PIE."));
-		return false;
-	}
 
 	if (FURL.Contains(TEXT("%")))
 	{
@@ -456,21 +474,35 @@ void AGameModeBase::ProcessServerTravel(const FString& URL, bool bAbsolute)
 	check(World);
 	FWorldContext& WorldContext = GEngine->GetWorldContextFromWorldChecked(World);
 
-	// Force an old style load screen if the server has been up for a long time so that TimeSeconds doesn't overflow and break everything
+	// Use game mode setting but default to full load screen if the server has been up for a long time so that TimeSeconds doesn't overflow and break everything
 	bool bSeamless = (bUseSeamlessTravel && GetWorld()->TimeSeconds < 172800.0f); // 172800 seconds == 48 hours
 
 	// Compute the next URL, and pull the map out of it. This handles short->long package name conversion
 	FURL NextURL = FURL(&WorldContext.LastURL, *URL, bAbsolute ? TRAVEL_Absolute : TRAVEL_Relative);
 
-	PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	FGuid NextMapGuid = UEngine::GetPackageGuid(FName(*NextURL.Map), GetWorld()->IsPlayInEditor());
-	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	// Override based on URL parameters
+	if (NextURL.HasOption(TEXT("SeamlessTravel")))
+	{
+		bSeamless = true;
+	}
+	else if (NextURL.HasOption(TEXT("NoSeamlessTravel")))
+	{
+		bSeamless = false;
+	}
+
+	// There are some issues with seamless travel in PIE, so fall back to hard travel unless it is supported
+	if (World->WorldType == EWorldType::PIE && bSeamless && !FParse::Param(FCommandLine::Get(), TEXT("MultiprocessOSS")))
+	{
+		if (!UE::GameModeBase::Private::bAllowPIESeamlessTravel)
+		{
+			UE_LOG(LogGameMode, Warning, TEXT("ProcessServerTravel: Seamless travel is disabled in PIE, set net.AllowPIESeamlessTravel=1 to enable."));
+			bSeamless = false;
+		}
+	}
 
 	// Notify clients we're switching level and give them time to receive.
 	FString URLMod = NextURL.ToString();
-	PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	APlayerController* LocalPlayer = ProcessClientTravel(URLMod, NextMapGuid, bSeamless, bAbsolute);
-	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	APlayerController* LocalPlayer = ProcessClientTravel(URLMod, bSeamless, bAbsolute);
 
 	World->NextURL = URLMod;
 	ENetMode NetMode = GetNetMode();
@@ -480,10 +512,16 @@ void AGameModeBase::ProcessServerTravel(const FString& URL, bool bAbsolute)
 		World->SeamlessTravel(World->NextURL, bAbsolute);
 		World->NextURL = TEXT("");
 	}
-	// Switch immediately if not networking.
-	else if (NetMode != NM_DedicatedServer && NetMode != NM_ListenServer)
+	else
 	{
-		World->NextSwitchCountdown = 0.0f;
+		// Switch immediately if not networking.
+		if (NetMode != NM_DedicatedServer && NetMode != NM_ListenServer)
+		{
+			World->NextSwitchCountdown = 0.0f;
+		}
+
+		GEngine->IncrementGlobalNetTravelCount();
+		GEngine->SaveConfig();
 	}
 #endif // WITH_SERVER_CODE
 }
@@ -512,7 +550,7 @@ void AGameModeBase::GetSeamlessTravelActorList(bool bToTransition, TArray<AActor
 
 void AGameModeBase::SwapPlayerControllers(APlayerController* OldPC, APlayerController* NewPC)
 {
-	if (OldPC != nullptr && !OldPC->IsPendingKill() && NewPC != nullptr && !NewPC->IsPendingKill() && OldPC->Player != nullptr)
+	if (IsValid(OldPC) && IsValid(NewPC) && OldPC->Player != nullptr)
 	{
 		// move the Player to the new PC
 		UPlayer* Player = OldPC->Player;
@@ -636,7 +674,7 @@ void AGameModeBase::GameWelcomePlayer(UNetConnection* Connection, FString& Redir
 void AGameModeBase::PreLogin(const FString& Options, const FString& Address, const FUniqueNetIdRepl& UniqueId, FString& ErrorMessage)
 {
 	// Login unique id must match server expected unique id type OR No unique id could mean game doesn't use them
-	const bool bUniqueIdCheckOk = (!UniqueId.IsValid() || UOnlineEngineInterface::Get()->IsCompatibleUniqueNetId(*UniqueId));
+	const bool bUniqueIdCheckOk = (!UniqueId.IsValid() || UOnlineEngineInterface::Get()->IsCompatibleUniqueNetId(UniqueId));
 	if (bUniqueIdCheckOk)
 	{
 		ErrorMessage = GameSession->ApproveLogin(Options);
@@ -647,6 +685,13 @@ void AGameModeBase::PreLogin(const FString& Options, const FString& Address, con
 	}
 
 	FGameModeEvents::GameModePreLoginEvent.Broadcast(this, UniqueId, ErrorMessage);
+}
+
+void AGameModeBase::PreLoginAsync(const FString& Options, const FString& Address, const FUniqueNetIdRepl& UniqueId, const FOnPreLoginCompleteDelegate& OnComplete)
+{
+	FString ErrorMessage;
+	PreLogin(Options, Address, UniqueId, ErrorMessage);
+	OnComplete.ExecuteIfBound(ErrorMessage);
 }
 
 APlayerController* AGameModeBase::Login(UPlayer* NewPlayer, ENetRole InRemoteRole, const FString& Portal, const FString& Options, const FUniqueNetIdRepl& UniqueId, FString& ErrorMessage)
@@ -739,24 +784,14 @@ FString AGameModeBase::InitNewPlayer(APlayerController* NewPlayerController, con
 		return FString(TEXT("PlayerState is null"));
 	}
 
-	FString ErrorMessage;
-
 	// Register the player with the session
-	GameSession->RegisterPlayer(NewPlayerController, UniqueId.GetUniqueNetId(), UGameplayStatics::HasOption(Options, TEXT("bIsFromInvite")));
+	GameSession->RegisterPlayer(NewPlayerController, UniqueId, UGameplayStatics::HasOption(Options, TEXT("bIsFromInvite")));
 
 	// Find a starting spot
-	AActor* const StartSpot = FindPlayerStart(NewPlayerController, Portal);
-	if (StartSpot != nullptr)
+	FString ErrorMessage;
+	if (!UpdatePlayerStartSpot(NewPlayerController, Portal, ErrorMessage))
 	{
-		// Set the player controller / camera in this new location
-		FRotator InitialControllerRot = StartSpot->GetActorRotation();
-		InitialControllerRot.Roll = 0.f;
-		NewPlayerController->SetInitialLocationAndRotation(StartSpot->GetActorLocation(), InitialControllerRot);
-		NewPlayerController->StartSpot = StartSpot;
-	}
-	else
-	{
-		ErrorMessage = FString::Printf(TEXT("Failed to find PlayerStart"));
+		UE_LOG(LogGameMode, Warning, TEXT("InitNewPlayer: %s"), *ErrorMessage);
 	}
 
 	// Set up spectating
@@ -781,20 +816,12 @@ FString AGameModeBase::InitNewPlayer(APlayerController* NewPlayerController, con
 void AGameModeBase::InitSeamlessTravelPlayer(AController* NewController)
 {
 	APlayerController* NewPC = Cast<APlayerController>(NewController);
-	// Find a start spot
-	AActor* StartSpot = FindPlayerStart(NewController);
 
-	if (StartSpot == nullptr)
+	FString ErrorMessage;
+	if (!UpdatePlayerStartSpot(NewController, TEXT(""), ErrorMessage))
 	{
-		UE_LOG(LogGameMode, Warning, TEXT("InitSeamlessTravelPlayer: Could not find a starting spot"));
+		UE_LOG(LogGameMode, Warning, TEXT("InitSeamlessTravelPlayer: %s"), *ErrorMessage);
 	}
-	else
-	{
-		FRotator StartRotation(0, StartSpot->GetActorRotation().Yaw, 0);
-		NewController->SetInitialLocationAndRotation(StartSpot->GetActorLocation(), StartRotation);
-	}
-
-	NewController->StartSpot = StartSpot;
 
 	if (NewPC != nullptr)
 	{
@@ -811,6 +838,25 @@ void AGameModeBase::InitSeamlessTravelPlayer(AController* NewController)
 			NewPC->ClientGotoState(NAME_Spectating);
 		}
 	}
+}
+
+bool AGameModeBase::UpdatePlayerStartSpot(AController* Player, const FString& Portal, FString& OutErrorMessage)
+{
+	OutErrorMessage.Reset();
+
+	AActor* const StartSpot = FindPlayerStart(Player, Portal);
+	if (StartSpot != nullptr)
+	{
+		FRotator StartRotation(0, StartSpot->GetActorRotation().Yaw, 0);
+		Player->SetInitialLocationAndRotation(StartSpot->GetActorLocation(), StartRotation);
+
+		Player->StartSpot = StartSpot;
+
+		return true;
+	}
+
+	OutErrorMessage = FString::Printf(TEXT("Could not find a starting spot"));
+	return false;
 }
 
 bool AGameModeBase::ShouldStartInCinematicMode(APlayerController* Player, bool& OutHidePlayer, bool& OutHideHUD, bool& OutDisableMovement, bool& OutDisableTurning)
@@ -889,7 +935,7 @@ void AGameModeBase::ReplicateStreamingStatus(APlayerController* PC)
 			TArray<FUpdateLevelStreamingLevelStatus> LevelStatuses;
 			for (ULevelStreaming* TheLevel : MyWorld->GetStreamingLevels())
 			{
-				if (TheLevel != nullptr)
+				if (TheLevel && TheLevel->CanReplicateStreamingStatus())
 				{
 					const ULevel* LoadedLevel = TheLevel->GetLoadedLevel();
 
@@ -909,6 +955,7 @@ void AGameModeBase::ReplicateStreamingStatus(APlayerController* PC)
 					LevelStatus.bNewShouldBeLoaded = bTheLevelShouldBeLoaded;
 					LevelStatus.bNewShouldBeVisible = bTheLevelShouldBeVisible;
 					LevelStatus.bNewShouldBlockOnLoad = TheLevel->bShouldBlockOnLoad;
+					LevelStatus.bNewShouldBlockOnUnload = TheLevel->bShouldBlockOnUnload;
 					LevelStatus.LODIndex = TheLevel->GetLevelLODIndex();
 				}
 			}
@@ -948,18 +995,10 @@ void AGameModeBase::GenericPlayerInitialization(AController* C)
 
 		bool HidePlayer = false, HideHUD = false, DisableMovement = false, DisableTurning = false;
 
-		// Check to see if we should start in cinematic mode (matinee movie capture)
+		// Check to see if we should start in cinematic mode
 		if (ShouldStartInCinematicMode(PC, HidePlayer, HideHUD, DisableMovement, DisableTurning))
 		{
 			PC->SetCinematicMode(true, HidePlayer, HideHUD, DisableMovement, DisableTurning);
-		}
-
-		// Add the player to any matinees running so that it gets in on any cinematics already running, etc
-		TArray<AMatineeActor*> AllMatineeActors;
-		GetWorld()->GetMatineeActors(AllMatineeActors);
-		for (int32 i = 0; i < AllMatineeActors.Num(); i++)
-		{
-			AllMatineeActors[i]->AddPlayerToDirectorTracks(PC);
 		}
 	}
 }
@@ -982,9 +1021,9 @@ void AGameModeBase::PostLogin(APlayerController* NewPlayer)
 	}
 	else
 	{
-		// If NewPlayer is not only a spectator and has a valid ID, add him as a user to the replay.
+		// If NewPlayer is not only a spectator and has a valid ID, add it as a user to the replay.
 		const FUniqueNetIdRepl& NewPlayerStateUniqueId = NewPlayer->PlayerState->GetUniqueId();
-		if (NewPlayerStateUniqueId.IsValid())
+		if (NewPlayerStateUniqueId.IsValid() && NewPlayerStateUniqueId.IsV1())
 		{
 			GetGameInstance()->AddUserToReplay(NewPlayerStateUniqueId.ToString());
 		}
@@ -995,12 +1034,21 @@ void AGameModeBase::PostLogin(APlayerController* NewPlayer)
 		GameSession->PostLogin(NewPlayer);
 	}
 
-	// Notify Blueprints that a new player has logged in.  Calling it here, because this is the first time that the PlayerController can take RPCs
-	K2_PostLogin(NewPlayer);
-	FGameModeEvents::GameModePostLoginEvent.Broadcast(this, NewPlayer);
+	DispatchPostLogin(NewPlayer);
 
 	// Now that initialization is done, try to spawn the player's pawn and start match
 	HandleStartingNewPlayer(NewPlayer);
+}
+
+void AGameModeBase::DispatchPostLogin(AController* NewPlayer)
+{
+	if (APlayerController* NewPC = Cast<APlayerController>(NewPlayer))
+	{
+		K2_PostLogin(NewPC);
+		FGameModeEvents::GameModePostLoginEvent.Broadcast(this, NewPC);
+	}
+
+	OnPostLogin(NewPlayer);
 }
 
 void AGameModeBase::Logout(AController* Exiting)
@@ -1247,12 +1295,16 @@ void AGameModeBase::RestartPlayerAtPlayerStart(AController* NewPlayer, AActor* S
 	else if (GetDefaultPawnClassForController(NewPlayer) != nullptr)
 	{
 		// Try to create a pawn to use of the default class for this player
-		NewPlayer->SetPawn(SpawnDefaultPawnFor(NewPlayer, StartSpot));
+		APawn* NewPawn = SpawnDefaultPawnFor(NewPlayer, StartSpot);
+		if (IsValid(NewPawn))
+		{
+			NewPlayer->SetPawn(NewPawn);
+		}
 	}
-
-	if (NewPlayer->GetPawn() == nullptr)
+	
+	if (!IsValid(NewPlayer->GetPawn()))
 	{
-		NewPlayer->FailedToSpawnPawn();
+		FailedToRestartPlayer(NewPlayer);
 	}
 	else
 	{
@@ -1288,12 +1340,16 @@ void AGameModeBase::RestartPlayerAtTransform(AController* NewPlayer, const FTran
 	else if (GetDefaultPawnClassForController(NewPlayer) != nullptr)
 	{
 		// Try to create a pawn to use of the default class for this player
-		NewPlayer->SetPawn(SpawnDefaultPawnAtTransform(NewPlayer, SpawnTransform));
+		APawn* NewPawn = SpawnDefaultPawnAtTransform(NewPlayer, SpawnTransform);
+		if (IsValid(NewPawn))
+		{
+			NewPlayer->SetPawn(NewPawn);
+		}
 	}
 
-	if (NewPlayer->GetPawn() == nullptr)
+	if (!IsValid(NewPlayer->GetPawn()))
 	{
-		NewPlayer->FailedToSpawnPawn();
+		FailedToRestartPlayer(NewPlayer);
 	}
 	else
 	{
@@ -1301,14 +1357,19 @@ void AGameModeBase::RestartPlayerAtTransform(AController* NewPlayer, const FTran
 	}
 }
 
+void AGameModeBase::FailedToRestartPlayer(AController* NewPlayer)
+{
+	NewPlayer->FailedToSpawnPawn();
+}
+
 void AGameModeBase::FinishRestartPlayer(AController* NewPlayer, const FRotator& StartRotation)
 {
 	NewPlayer->Possess(NewPlayer->GetPawn());
 
 	// If the Pawn is destroyed as part of possession we have to abort
-	if (NewPlayer->GetPawn() == nullptr)
+	if (!IsValid(NewPlayer->GetPawn()))
 	{
-		NewPlayer->FailedToSpawnPawn();
+		FailedToRestartPlayer(NewPlayer);
 	}
 	else
 	{
@@ -1406,3 +1467,4 @@ bool AGameModeBase::SpawnPlayerFromSimulate(const FVector& NewLocation, const FR
 #endif
 	return true;
 }
+

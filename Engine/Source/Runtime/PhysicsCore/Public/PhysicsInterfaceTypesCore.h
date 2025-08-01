@@ -18,20 +18,17 @@ struct FActorCreationParams
 		, bStatic(false)
 		, bQueryOnly(false)
 		, bEnableGravity(false)
+		, bUpdateKinematicFromSimulation(false)
 		, bSimulatePhysics(false)
 		, bStartAwake(true)
 		, DebugName(nullptr)
 	{}
-
-#if WITH_CHAOS
 	FChaosScene* Scene;
-#else
-	FPhysScene* Scene;
-#endif
 	FTransform InitialTM;
 	bool bStatic;
 	bool bQueryOnly;
 	bool bEnableGravity;
+	bool bUpdateKinematicFromSimulation;
 	bool bSimulatePhysics;
 	bool bStartAwake;
 	char* DebugName;
@@ -74,12 +71,14 @@ struct FBodyCollisionFlags
 		: bEnableSimCollisionSimple(false)
 		, bEnableSimCollisionComplex(false)
 		, bEnableQueryCollision(false)
+		, bEnableProbeCollision(false)
 	{
 	}
 
 	bool bEnableSimCollisionSimple;
 	bool bEnableSimCollisionComplex;
 	bool bEnableQueryCollision;
+	bool bEnableProbeCollision;
 };
 
 
@@ -90,7 +89,7 @@ struct FBodyCollisionData
 	FBodyCollisionFlags CollisionFlags;
 };
 
-static void SetupNonUniformHelper(FVector InScale3D, float& OutMinScale, float& OutMinScaleAbs, FVector& OutScale3DAbs)
+static void SetupNonUniformHelper(FVector InScale3D, double& OutMinScale, double& OutMinScaleAbs, FVector& OutScale3DAbs)
 {
 	// if almost zero, set min scale
 	// @todo fixme
@@ -113,6 +112,15 @@ static void SetupNonUniformHelper(FVector InScale3D, float& OutMinScale, float& 
 	}
 }
 
+static void SetupNonUniformHelper(FVector InScale3D, float& OutMinScale, float& OutMinScaleAbs, FVector& OutScale3DAbs)
+{
+	double OutMinScaleD, OutMinScaleAbsD;
+	SetupNonUniformHelper(InScale3D, OutMinScaleD, OutMinScaleAbsD, OutScale3DAbs);
+	OutMinScale = static_cast<float>(OutMinScaleD);	// LWC_TODO: Precision loss?
+	OutMinScaleAbs = static_cast<float>(OutMinScaleAbsD);
+}
+
+
 /** Util to determine whether to use NegX version of mesh, and what transform (rotation) to apply. */
 static bool CalcMeshNegScaleCompensation(const FVector& InScale3D, FTransform& OutTransform)
 {
@@ -127,7 +135,7 @@ static bool CalcMeshNegScaleCompensation(const FVector& InScale3D, FTransform& O
 		else
 		{
 			// y pos, z neg
-			OutTransform.SetRotation(FQuat(FVector(0.0f, 1.0f, 0.0f), PI));
+			OutTransform.SetRotation(FQuat(FVector(0.0f, 1.0f, 0.0f), UE_PI));
 			//OutTransform.q = PxQuat(PxPi, PxVec3(0,1,0));
 		}
 	}
@@ -137,13 +145,13 @@ static bool CalcMeshNegScaleCompensation(const FVector& InScale3D, FTransform& O
 		{
 			// y neg, z pos
 			//OutTransform.q = PxQuat(PxPi, PxVec3(0,0,1));
-			OutTransform.SetRotation(FQuat(FVector(0.0f, 0.0f, 1.0f), PI));
+			OutTransform.SetRotation(FQuat(FVector(0.0f, 0.0f, 1.0f), UE_PI));
 		}
 		else
 		{
 			// y neg, z neg
 			//OutTransform.q = PxQuat(PxPi, PxVec3(1,0,0));
-			OutTransform.SetRotation(FQuat(FVector(1.0f, 0.0f, 0.0f), PI));
+			OutTransform.SetRotation(FQuat(FVector(1.0f, 0.0f, 0.0f), UE_PI));
 		}
 	}
 
@@ -155,9 +163,7 @@ static bool CalcMeshNegScaleCompensation(const FVector& InScale3D, FTransform& O
 // TODO: Fixup types, these are more or less the PhysX types renamed as a temporary solution.
 // Probably should move to different header as well.
 
-#if !PHYSICS_INTERFACE_PHYSX
-const uint32 AggregateMaxSize = 128;
-#endif
+inline const uint32 AggregateMaxSize = 128;
 
 class UPhysicalMaterial;
 class UPrimitiveComponent;
@@ -168,6 +174,8 @@ struct FKShapeElem;
 /** Forward declarations */
 struct FKShapeElem;
 struct FCustomChaosPayload;
+struct FPhysicsObject;
+struct FChaosUserEntityAppend;
 
 namespace EChaosUserDataType
 {
@@ -180,6 +188,8 @@ namespace EChaosUserDataType
 		ConstraintInstance,
 		PrimitiveComponent,
 		AggShape,
+		PhysicsObject,    // This will replace BodyInstances in the future
+		ChaosUserEntity,  // This is used for adding custom user entities (unknown to UE)
 		CustomPayload,	//This is intended for plugins
 	};
 };
@@ -199,6 +209,8 @@ public:
 	FChaosUserData(FConstraintInstance* InPayload)		:Type(EChaosUserDataType::ConstraintInstance), Payload(InPayload) {}
 	FChaosUserData(UPrimitiveComponent* InPayload)		:Type(EChaosUserDataType::PrimitiveComponent), Payload(InPayload) {}
 	FChaosUserData(FKShapeElem* InPayload)				:Type(EChaosUserDataType::AggShape), Payload(InPayload) {}
+	FChaosUserData(FPhysicsObject* InPayload)			:Type(EChaosUserDataType::PhysicsObject), Payload(InPayload) {}
+	FChaosUserData(FChaosUserEntityAppend* InPayload)	:Type(EChaosUserDataType::ChaosUserEntity), Payload(InPayload) {}
 	FChaosUserData(FCustomChaosPayload* InPayload)		:Type(EChaosUserDataType::CustomPayload), Payload(InPayload) {}
 	
 	template <class T> static T* Get(void* UserData);
@@ -208,14 +220,8 @@ public:
 	static bool IsGarbage(void* UserData){ return ((FChaosUserData*)UserData)->Type < EChaosUserDataType::Invalid || ((FChaosUserData*)UserData)->Type > EChaosUserDataType::CustomPayload; }
 };
 
-#if PHYSICS_INTERFACE_PHYSX
-using FUserData = FPhysxUserData;
-using FPhysicsQueryFlag = physx::PxQueryFlag;
-#else
 using FUserData = FChaosUserData;
 using FPhysicsQueryFlag = FChaosQueryFlag;
-#endif
-
 
 template <> FORCEINLINE FBodyInstance* FChaosUserData::Get(void* UserData)			{ if (!UserData || ((FChaosUserData*)UserData)->Type != EChaosUserDataType::BodyInstance) { return nullptr; } return (FBodyInstance*)((FChaosUserData*)UserData)->Payload; }
 template <> FORCEINLINE UPhysicalMaterial* FChaosUserData::Get(void* UserData)		{ if (!UserData || ((FChaosUserData*)UserData)->Type != EChaosUserDataType::PhysicalMaterial) { return nullptr; } return (UPhysicalMaterial*)((FChaosUserData*)UserData)->Payload; }
@@ -223,6 +229,8 @@ template <> FORCEINLINE FPhysScene* FChaosUserData::Get(void* UserData)				{ if 
 template <> FORCEINLINE FConstraintInstance* FChaosUserData::Get(void* UserData)	{ if (!UserData || ((FChaosUserData*)UserData)->Type != EChaosUserDataType::ConstraintInstance) { return nullptr; } return (FConstraintInstance*)((FChaosUserData*)UserData)->Payload; }
 template <> FORCEINLINE UPrimitiveComponent* FChaosUserData::Get(void* UserData)	{ if (!UserData || ((FChaosUserData*)UserData)->Type != EChaosUserDataType::PrimitiveComponent) { return nullptr; } return (UPrimitiveComponent*)((FChaosUserData*)UserData)->Payload; }
 template <> FORCEINLINE FKShapeElem* FChaosUserData::Get(void* UserData)	{ if (!UserData || ((FChaosUserData*)UserData)->Type != EChaosUserDataType::AggShape) { return nullptr; } return (FKShapeElem*)((FChaosUserData*)UserData)->Payload; }
+template <> FORCEINLINE FPhysicsObject* FChaosUserData::Get(void* UserData) { if (!UserData || ((FChaosUserData*)UserData)->Type != EChaosUserDataType::PhysicsObject) { return nullptr; } return (FPhysicsObject*)((FChaosUserData*)UserData)->Payload; }
+template <> FORCEINLINE FChaosUserEntityAppend* FChaosUserData::Get(void* UserData) { if (!UserData || ((FChaosUserData*)UserData)->Type != EChaosUserDataType::ChaosUserEntity) { return nullptr; } return (FChaosUserEntityAppend*)((FChaosUserData*)UserData)->Payload; }
 template <> FORCEINLINE FCustomChaosPayload* FChaosUserData::Get(void* UserData) { if (!UserData || ((FChaosUserData*)UserData)->Type != EChaosUserDataType::CustomPayload) { return nullptr; } return (FCustomChaosPayload*)((FChaosUserData*)UserData)->Payload; }
 
 template <> FORCEINLINE void FChaosUserData::Set(void* UserData, FBodyInstance* Payload)			{ check(UserData); ((FChaosUserData*)UserData)->Type = EChaosUserDataType::BodyInstance; ((FChaosUserData*)UserData)->Payload = Payload; }
@@ -231,6 +239,8 @@ template <> FORCEINLINE void FChaosUserData::Set(void* UserData, FPhysScene* Pay
 template <> FORCEINLINE void FChaosUserData::Set(void* UserData, FConstraintInstance* Payload)		{ check(UserData); ((FChaosUserData*)UserData)->Type = EChaosUserDataType::ConstraintInstance; ((FChaosUserData*)UserData)->Payload = Payload; }
 template <> FORCEINLINE void FChaosUserData::Set(void* UserData, UPrimitiveComponent* Payload)		{ check(UserData); ((FChaosUserData*)UserData)->Type = EChaosUserDataType::PrimitiveComponent; ((FChaosUserData*)UserData)->Payload = Payload; }
 template <> FORCEINLINE void FChaosUserData::Set(void* UserData, FKShapeElem* Payload)	{ check(UserData); ((FChaosUserData*)UserData)->Type = EChaosUserDataType::AggShape; ((FChaosUserData*)UserData)->Payload = Payload; }
+template <> FORCEINLINE void FChaosUserData::Set(void* UserData, FPhysicsObject* Payload) { check(UserData); ((FChaosUserData*)UserData)->Type = EChaosUserDataType::PhysicsObject; ((FChaosUserData*)UserData)->Payload = Payload; }
+template <> FORCEINLINE void FChaosUserData::Set(void* UserData, FChaosUserEntityAppend* Payload) { check(UserData); ((FChaosUserData*)UserData)->Type = EChaosUserDataType::ChaosUserEntity; ((FChaosUserData*)UserData)->Payload = Payload; }
 template <> FORCEINLINE void FChaosUserData::Set(void* UserData, FCustomChaosPayload* Payload) { check(UserData); ((FChaosUserData*)UserData)->Type = EChaosUserDataType::CustomPayload; ((FChaosUserData*)UserData)->Payload = Payload; }
 
 struct FChaosFilterData
@@ -349,7 +359,7 @@ typedef ChaosFlags<FChaosQueryFlag::Enum, uint16> FChaosQueryFlags;
 
 inline FChaosQueryFlags U2CQueryFlags(FQueryFlags Flags)
 {
-	uint32 Result = 0;
+	uint16 Result = 0;
 	if (Flags & EQueryFlags::PreFilter)
 	{
 		Result |= FChaosQueryFlag::ePREFILTER;

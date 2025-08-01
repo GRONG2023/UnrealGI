@@ -9,6 +9,9 @@
 #include "SceneCore.h"
 #include "ScenePrivate.h"
 #include "DistanceFieldLightingShared.h"
+#include "Misc/LargeWorldRenderPosition.h"
+#include "LocalLightSceneProxy.h"
+#include "ShadowRendering.h"
 
 int32 GWholeSceneShadowUnbuiltInteractionThreshold = 500;
 static FAutoConsoleVariableRef CVarWholeSceneShadowUnbuiltInteractionThreshold(
@@ -39,7 +42,8 @@ void FLightSceneInfoCompact::Init(FLightSceneInfo* InLightSceneInfo)
 	bStaticLighting = InLightSceneInfo->Proxy->HasStaticLighting();
 	bAffectReflection = InLightSceneInfo->Proxy->AffectReflection();
 	bAffectGlobalIllumination = InLightSceneInfo->Proxy->AffectGlobalIllumination();
-	bCastRaytracedShadow = InLightSceneInfo->Proxy->CastsRaytracedShadow();
+	bIsMovable = InLightSceneInfo->Proxy->IsMovable();
+	CastRaytracedShadow = InLightSceneInfo->Proxy->CastsRaytracedShadow();
 }
 
 FLightSceneInfo::FLightSceneInfo(FLightSceneProxy* InProxy, bool InbVisible)
@@ -48,8 +52,6 @@ FLightSceneInfo::FLightSceneInfo(FLightSceneProxy* InProxy, bool InbVisible)
 	, DynamicInteractionStaticPrimitiveList(NULL)
 	, Proxy(InProxy)
 	, Id(INDEX_NONE)
-	, TileIntersectionResources(nullptr)
-	, HeightFieldTileIntersectionResources(nullptr)
 	, DynamicShadowMapChannel(-1)
 	, bPrecomputedLightingIsValid(InProxy->GetLightComponent()->IsPrecomputedLightingValid())
 	, bVisible(InbVisible)
@@ -65,12 +67,6 @@ FLightSceneInfo::FLightSceneInfo(FLightSceneProxy* InProxy, bool InbVisible)
 	// Only visible lights can be added in game
 	check(bVisible || GIsEditor);
 
-	BeginInitResource(this);
-}
-
-FLightSceneInfo::~FLightSceneInfo()
-{
-	ReleaseResource();
 }
 
 void FLightSceneInfo::AddToScene()
@@ -78,12 +74,10 @@ void FLightSceneInfo::AddToScene()
 	const FLightSceneInfoCompact& LightSceneInfoCompact = Scene->Lights[Id];
 
 	bool bIsValidLightTypeMobile = false;
-	if (Scene->GetShadingPath() == EShadingPath::Mobile && Proxy->IsMovable())
+	if (Scene->GetShadingPath() == EShadingPath::Mobile && ShouldRenderLightViewIndependent())
 	{
-		static const auto MobileEnableMovableSpotLightsVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.Mobile.EnableMovableSpotLights"));
 		const uint8 LightType = Proxy->GetLightType();
-		bIsValidLightTypeMobile = LightType == LightType_Rect || LightType == LightType_Point
-			|| (LightType == LightType_Spot && MobileEnableMovableSpotLightsVar->GetValueOnRenderThread());
+		bIsValidLightTypeMobile = LightType == LightType_Rect || LightType == LightType_Point || LightType == LightType_Spot;
 	}
 
 	// Only need to create light interactions for lights that can cast a shadow,
@@ -95,8 +89,6 @@ void FLightSceneInfo::AddToScene()
 		// Mobile path supports dynamic point/spot lights in the base pass using forward rendering, so we need to know the primitives
 		|| bIsValidLightTypeMobile)
 	{
-		Scene->FlushAsyncLightPrimitiveInteractionCreation();
-		
 		// Directional lights have no finite extent and cannot meaningfully be in the LocalShadowCastingLightOctree
 		if (LightSceneInfoCompact.LightType == LightType_Directional)
 		{
@@ -104,7 +96,6 @@ void FLightSceneInfo::AddToScene()
 			Scene->DirectionalShadowCastingLightIDs.Add(Id);
 
 			// All primitives may interact with a directional light
-			FMemMark MemStackMark(FMemStack::Get());
 			for (FPrimitiveSceneInfo *PrimitiveSceneInfo : Scene->Primitives)
 			{
 				CreateLightPrimitiveInteraction(LightSceneInfoCompact, PrimitiveSceneInfo);
@@ -114,19 +105,11 @@ void FLightSceneInfo::AddToScene()
 		{
 			// Add the light to the scene's light octree.
 			Scene->LocalShadowCastingLightOctree.AddElement(LightSceneInfoCompact);
-			// Find primitives that the light affects in the primitive octree.
-			FMemMark MemStackMark(FMemStack::Get());
 
 			Scene->PrimitiveOctree.FindElementsWithBoundsTest(GetBoundingBox(), [&LightSceneInfoCompact, this](const FPrimitiveSceneInfoCompact& PrimitiveSceneInfoCompact)
 			{
 				CreateLightPrimitiveInteraction(LightSceneInfoCompact, PrimitiveSceneInfoCompact);
 			});
-
-			if (bIsValidLightTypeMobile)
-			{
-				Proxy->MobileMovablePointLightUniformBuffer = TUniformBufferRef<FMobileMovablePointLightUniformShaderParameters>::CreateUniformBufferImmediate(GetDummyMovablePointLightUniformShaderParameters(), UniformBuffer_MultiFrame);
-				Proxy->bMobileMovablePointLightUniformBufferNeedsUpdate = true;
-			}
 		}
 	}
 }
@@ -139,7 +122,7 @@ void FLightSceneInfo::AddToScene()
  */
 void FLightSceneInfo::CreateLightPrimitiveInteraction(const FLightSceneInfoCompact& LightSceneInfoCompact, const FPrimitiveSceneInfoCompact& PrimitiveSceneInfoCompact)
 {
-	if(	LightSceneInfoCompact.AffectsPrimitive(PrimitiveSceneInfoCompact.Bounds, PrimitiveSceneInfoCompact.Proxy))
+	if(	!Scene->IsPrimitiveBeingRemoved(PrimitiveSceneInfoCompact.PrimitiveSceneInfo) && LightSceneInfoCompact.AffectsPrimitive(FBoxSphereBounds(PrimitiveSceneInfoCompact.Bounds), PrimitiveSceneInfoCompact.Proxy))
 	{
 		// create light interaction and add to light/primitive lists
 		FLightPrimitiveInteraction::Create(this,PrimitiveSceneInfoCompact.PrimitiveSceneInfo);
@@ -149,12 +132,11 @@ void FLightSceneInfo::CreateLightPrimitiveInteraction(const FLightSceneInfoCompa
 
 void FLightSceneInfo::RemoveFromScene()
 {
-	Scene->FlushAsyncLightPrimitiveInteractionCreation();
-
 	if (OctreeId.IsValidId())
 	{
 		// Remove the light from the octree.
 		Scene->LocalShadowCastingLightOctree.RemoveElement(OctreeId);
+		OctreeId = FOctreeElementId2();
 	}
 	else
 	{
@@ -185,12 +167,18 @@ void FLightSceneInfo::Detach()
 	}
 }
 
-bool FLightSceneInfo::ShouldRenderLight(const FViewInfo& View) const
+FBoxCenterAndExtent FLightSceneInfo::GetBoundingBox() const
+{
+	FSphere BoundingSphere = Proxy->GetBoundingSphere();
+	return FBoxCenterAndExtent(BoundingSphere.Center, FVector(BoundingSphere.W, BoundingSphere.W, BoundingSphere.W));
+}
+
+bool FLightSceneInfo::ShouldRenderLight(const FViewInfo& View, bool bOffscreen) const
 {
 	// Only render the light if it is in the view frustum
-	bool bLocalVisible = bVisible ? View.VisibleLightInfos[Id].bInViewFrustum : true;
+	bool bLocalVisible = bVisible && (bOffscreen ? View.VisibleLightInfos[Id].bInDrawRange : View.VisibleLightInfos[Id].bInViewFrustum);
 
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#if !UE_BUILD_SHIPPING
 	ELightComponentType Type = (ELightComponentType)Proxy->GetLightType();
 
 	switch(Type)
@@ -226,7 +214,29 @@ bool FLightSceneInfo::ShouldRenderLight(const FViewInfo& View) const
 		// Only render lights with static shadowing for reflection captures, since they are only captured at edit time
 		&& (!View.bStaticSceneOnly || Proxy->HasStaticShadowing())
 		// Only render lights in the default channel, or if there are any primitives outside the default channel
-		&& (Proxy->GetLightingChannelMask() & GetDefaultLightingChannelMask() || View.bUsesLightingChannels);
+		&& (Proxy->GetLightingChannelMask() & GetDefaultLightingChannelMask() || View.bUsesLightingChannels || bOffscreen);
+}
+
+bool FLightSceneInfo::ShouldRenderLightViewIndependent() const
+{
+	return !Proxy->GetColor().IsAlmostBlack()
+		// Only render lights with dynamic lighting or unbuilt static lights
+		&& (!Proxy->HasStaticLighting() || !IsPrecomputedLightingValid());
+}
+
+bool FLightSceneInfo::ShouldRenderViewIndependentWholeSceneShadows() const
+{
+	bool bShouldRenderLight = ShouldRenderLightViewIndependent();
+	bool bCastDynamicShadow = Proxy->CastsDynamicShadow();
+
+	// Also create a whole scene shadow for lights with precomputed shadows that are unbuilt
+	const bool bCreateShadowToPreviewStaticLight =
+		Proxy->HasStaticShadowing()
+		&& bCastDynamicShadow
+		&& !IsPrecomputedLightingValid();
+
+	bool bShouldRenderShadow = bShouldRenderLight && bCastDynamicShadow && (!Proxy->HasStaticLighting() || bCreateShadowToPreviewStaticLight);
+	return bShouldRenderShadow;
 }
 
 bool FLightSceneInfo::IsPrecomputedLightingValid() const
@@ -234,178 +244,155 @@ bool FLightSceneInfo::IsPrecomputedLightingValid() const
 	return (bPrecomputedLightingIsValid && NumUnbuiltInteractions < GWholeSceneShadowUnbuiltInteractionThreshold) || !Proxy->HasStaticShadowing();
 }
 
-const TArray<FLightPrimitiveInteraction*>* FLightSceneInfo::GetInteractionShadowPrimitives(bool bSync) const
+void FLightSceneInfo::SetDynamicShadowMapChannel(int32 NewChannel)
 {
-	if (bSync)
+	if (Proxy->HasStaticShadowing())
 	{
-		Scene->FlushAsyncLightPrimitiveInteractionCreation();
+		// This ensure would trigger if several static shadowing light intersects eachother and have the same channel.
+		// ensure(Proxy->GetPreviewShadowMapChannel() == NewChannel);
 	}
+	else
+	{
+		DynamicShadowMapChannel = NewChannel;
+	}
+}
+
+int32 FLightSceneInfo::GetDynamicShadowMapChannel() const
+{
+	if (Proxy->HasStaticShadowing())
+	{
+		// Stationary lights get a channel assigned by ReassignStationaryLightChannels
+		return Proxy->GetPreviewShadowMapChannel();
+	}
+
+	// Movable lights get a channel assigned when they are added to the scene
+	return DynamicShadowMapChannel;
+}
+
+const TArray<FLightPrimitiveInteraction*>* FLightSceneInfo::GetInteractionShadowPrimitives() const
+{
 	return bRecordInteractionShadowPrimitives ? &InteractionShadowPrimitives : nullptr;
 }
 
-FLightPrimitiveInteraction* FLightSceneInfo::GetDynamicInteractionOftenMovingPrimitiveList(bool bSync) const
+FLightPrimitiveInteraction* FLightSceneInfo::GetDynamicInteractionOftenMovingPrimitiveList() const
 {
-	if (bSync)
-	{
-		Scene->FlushAsyncLightPrimitiveInteractionCreation();
-	}
 	return DynamicInteractionOftenMovingPrimitiveList;
 }
 
-FLightPrimitiveInteraction* FLightSceneInfo::GetDynamicInteractionStaticPrimitiveList(bool bSync) const
+FLightPrimitiveInteraction* FLightSceneInfo::GetDynamicInteractionStaticPrimitiveList() const
 {
-	if (bSync)
-	{
-		Scene->FlushAsyncLightPrimitiveInteractionCreation();
-	}
 	return DynamicInteractionStaticPrimitiveList;
 }
 
-void FLightSceneInfo::ReleaseRHI()
+bool FLightSceneInfo::SetupMobileMovableLocalLightShadowParameters(const FViewInfo& View, TConstArrayView<FVisibleLightInfo> VisibleLightInfos, FMobileMovableLocalLightShadowParameters& MobileMovableLocalLightShadowParameters) const
 {
-	if (TileIntersectionResources)
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_FLightSceneProxy_SetupMobileMovableLocalLightShadowParameters);
+
+	check(Proxy->IsLocalLight());
+	const uint8 LightType = Proxy->GetLightType();
+
+	FLightRenderParameters LightParameters;
+	Proxy->GetLightShaderParameters(LightParameters);
+
+	bool bShouldCastShadow = View.Family->EngineShowFlags.DynamicShadows
+		&& GetShadowQuality() > 0
+		&& LightType == LightType_Spot
+		&& VisibleLightInfos[Id].AllProjectedShadows.Num() > 0
+		&& VisibleLightInfos[Id].AllProjectedShadows.Last()->bAllocated;
+
+	if (bShouldCastShadow)
 	{
-		TileIntersectionResources->Release();
+		FProjectedShadowInfo* ProjectedShadowInfo = VisibleLightInfos[Id].AllProjectedShadows.Last();
+		checkSlow(ProjectedShadowInfo && ProjectedShadowInfo->CacheMode != SDCM_StaticPrimitivesOnly);
+
+		const float TransitionSize = ProjectedShadowInfo->ComputeTransitionSize();
+		checkSlow(TransitionSize > 0.0f);
+
+		float SoftTransitionScale = 1.0f / TransitionSize;
+		float ShadowFadeFraction = ProjectedShadowInfo->FadeAlphas[0];
+
+		MobileMovableLocalLightShadowParameters.SpotLightShadowSharpenAndFadeFractionAndReceiverDepthBiasAndSoftTransitionScale = FVector4f(Proxy->GetShadowSharpen() * 7.0f + 1.0f, ShadowFadeFraction, ProjectedShadowInfo->GetShaderReceiverDepthBias(), SoftTransitionScale);
+
+		const FMatrix WorldToShadowMatrix = ProjectedShadowInfo->GetWorldToShadowMatrix(MobileMovableLocalLightShadowParameters.SpotLightShadowmapMinMax);
+		MobileMovableLocalLightShadowParameters.SpotLightShadowWorldToShadowMatrix = FMatrix44f(FTranslationMatrix(LightParameters.WorldPosition) * WorldToShadowMatrix);
+
+		const FIntPoint ShadowBufferResolution = ProjectedShadowInfo->GetShadowBufferResolution();
+		MobileMovableLocalLightShadowParameters.LocalLightShadowBufferSize = FVector4f(ShadowBufferResolution.X, ShadowBufferResolution.Y, 1.0f / ShadowBufferResolution.X, 1.0f / ShadowBufferResolution.Y);
+		MobileMovableLocalLightShadowParameters.LocalLightShadowTexture = ProjectedShadowInfo->RenderTargets.DepthTarget->GetRHI();
+		MobileMovableLocalLightShadowParameters.LocalLightShadowSampler = TStaticSamplerState<SF_Point, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 	}
 
-	ShadowCapsuleShapesVertexBuffer.SafeRelease();
-	ShadowCapsuleShapesSRV.SafeRelease();
+	return bShouldCastShadow;
 }
 
-void FLightSceneInfo::ConditionalUpdateMobileMovablePointLightUniformBuffer(const FSceneRenderer* SceneRenderer)
+bool FLightSceneInfo::ShouldRecordShadowSubjectsForMobile() const
 {
-	QUICK_SCOPE_CYCLE_COUNTER(STAT_FLightSceneProxy_UpdateMobileMovablePointLightUniformBuffer);
-
-	static auto* MobileNumDynamicPointLightsCVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.MobileNumDynamicPointLights"));
-	const int32 MobileNumDynamicPointLights = MobileNumDynamicPointLightsCVar->GetValueOnRenderThread();
-
-	static auto* MobileEnableMovableSpotlightsCVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.Mobile.EnableMovableSpotlights"));
-	const int32 MobileEnableMovableSpotlights = MobileEnableMovableSpotlightsCVar->GetValueOnRenderThread();
-
-	static auto* EnableMovableSpotlightsShadowCVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.Mobile.EnableMovableSpotlightsShadow"));
-	const int32 EnableMovableSpotlightsShadow = EnableMovableSpotlightsShadowCVar->GetValueOnRenderThread();
-
-	checkSlow(MobileNumDynamicPointLights > 0 && SceneRenderer);
-
-	FVector4 LightPositionAndInvRadius;
-	FVector4 LightColorAndFalloffExponent;
-	FVector4 SpotLightDirectionAndSpecularScale;
-	FVector4 SpotLightAnglesAndSoftTransitionScaleAndLightShadowType;
-	FVector4 SpotLightShadowSharpenAndShadowFadeFraction;
-	FVector4 SpotLightShadowmapMinMax;
-	FMatrix SpotLightWorldToShadowMatrix;
-
-	bool bShouldBeRender = false;
-	bool bShouldCastShadow = false;
-
-	for (int32 ViewIndex = 0; ViewIndex < SceneRenderer->Views.Num(); ++ViewIndex)
+	if (Proxy == nullptr)
 	{
-		bShouldBeRender = ShouldRenderLight(SceneRenderer->Views[ViewIndex]);
-
-		if (bShouldBeRender)
-		{
-			break;
-		}
+		return false;
 	}
 
-	if (bShouldBeRender)
-	{
-		const uint8 LightType = Proxy->GetLightType();
-
-		const bool bIsValidLightType =
-			LightType == LightType_Point
-			|| LightType == LightType_Rect
-			|| (LightType == LightType_Spot && MobileEnableMovableSpotlights);
-
-		checkSlow(bIsValidLightType && Proxy->IsMovable());
-
-		FLightShaderParameters LightParameters;
-		Proxy->GetLightShaderParameters(LightParameters);
-
-		float LightFadeFactor = 0.0f;
-
-		for (int32 ViewIndex = 0; ViewIndex < SceneRenderer->Views.Num(); ++ViewIndex)
-		{
-			LightFadeFactor = FMath::Max(LightFadeFactor, GetLightFadeFactor(SceneRenderer->Views[ViewIndex], Proxy));
-		}
-
-		LightParameters.Color *= LightFadeFactor;
-
-		if (Proxy->IsInverseSquared())
-		{
-			LightParameters.FalloffExponent = 0;
-		}
-
-		uint32 LightShadowType = LightType == LightType_Spot ? 2 : 1;
-
-		bShouldCastShadow = SceneRenderer->ViewFamily.EngineShowFlags.DynamicShadows
-			&& !IsSimpleForwardShadingEnabled(SceneRenderer->ShaderPlatform)
-			&& GetShadowQuality() > 0
-			&& EnableMovableSpotlightsShadow != 0
-			&& LightType == LightType_Spot
-			&& SceneRenderer->VisibleLightInfos[Id].AllProjectedShadows.Num() > 0
-			&& SceneRenderer->VisibleLightInfos[Id].AllProjectedShadows.Last()->bAllocated;
-
-		LightShadowType |= bShouldCastShadow ? 4 : 0;
-
-		float SoftTransitionScale = 0.0f;
-		float ShadowFadeFraction = 0.0f;
-
-		if (bShouldCastShadow)
-		{
-			FProjectedShadowInfo *ProjectedShadowInfo = SceneRenderer->VisibleLightInfos[Id].AllProjectedShadows.Last();
-			checkSlow(ProjectedShadowInfo && ProjectedShadowInfo->CacheMode != SDCM_StaticPrimitivesOnly);
-			
-			const float TransitionSize = ProjectedShadowInfo->ComputeTransitionSize();
-			checkSlow(TransitionSize > 0.0f);
-
-			SoftTransitionScale = 1.0f / TransitionSize;
-			
-			for (int32 ViewIndex = 0; ViewIndex < SceneRenderer->Views.Num(); ++ViewIndex)
-			{
-				ShadowFadeFraction = FMath::Max(ShadowFadeFraction, ProjectedShadowInfo->FadeAlphas[ViewIndex]);
-			}
-
-			SpotLightShadowSharpenAndShadowFadeFraction = FVector4(Proxy->GetShadowSharpen() * 7.0f + 1.0f, ShadowFadeFraction, 0.0f, 0.0f);
-			SpotLightWorldToShadowMatrix = ProjectedShadowInfo->GetWorldToShadowMatrix(SpotLightShadowmapMinMax);
-		}
+	// record shadow casters if CSM culling is enabled for the light's mobility type and the culling mode requires the list of casters.
+	const bool bCombinedStaticAndCSMEnabled = FReadOnlyCVARCache::MobileEnableStaticAndCSMShadowReceivers();
+	const bool bMobileEnableMovableLightCSMShaderCulling = FReadOnlyCVARCache::MobileEnableMovableLightCSMShaderCulling();
 		
-		LightPositionAndInvRadius = FVector4(LightParameters.Position, LightParameters.InvRadius);
-		LightColorAndFalloffExponent = FVector4(LightParameters.Color, LightParameters.FalloffExponent);
-		SpotLightDirectionAndSpecularScale = FVector4(LightParameters.Direction.X, LightParameters.Direction.Y, LightParameters.Direction.Z, Proxy->GetSpecularScale());
-		SpotLightAnglesAndSoftTransitionScaleAndLightShadowType = FVector4(LightParameters.SpotAngles.X, LightParameters.SpotAngles.Y, SoftTransitionScale, LightShadowType);
-	}
+	static auto* CVarMobileCSMShaderCullingMethod = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.Mobile.Shadow.CSMShaderCullingMethod"));
+	const uint32 MobileCSMCullingMode = CVarMobileCSMShaderCullingMethod->GetValueOnAnyThread() & 0xF;
 
-	if (bShouldBeRender != Proxy->bMobileMovablePointLightShouldBeRender || 
-		bShouldCastShadow != Proxy->bMobileMovablePointLightShouldCastShadow ||
-		SpotLightShadowmapMinMax != Proxy->MobileMovablePointLightShadowmapMinMax)
+	const FLightSceneProxy* LightSceneProxy = Proxy;
+
+	bool bRenderMovableDirectionalLightCSM = LightSceneProxy->IsMovable() && ShouldRenderViewIndependentWholeSceneShadows();
+
+	bool bLightHasCombinedStaticAndCSMEnabled = bCombinedStaticAndCSMEnabled && LightSceneProxy->UseCSMForDynamicObjects();
+	bool bMovableLightUsingCSM = bMobileEnableMovableLightCSMShaderCulling && bRenderMovableDirectionalLightCSM;
+
+	bool bShouldRecordShadowSubjectsForMobile = (MobileCSMCullingMode == 2 || MobileCSMCullingMode == 3) && (bLightHasCombinedStaticAndCSMEnabled || bMovableLightUsingCSM);
+
+	return bShouldRecordShadowSubjectsForMobile;
+}
+
+uint32 FLightSceneInfo::PackLightTypeAndShadowMapChannelMask(bool bAllowStaticLighting, bool bLightFunction) const
+{
+	uint32 Result = 0;
+
+	// Light type and shadow map
+	int32 ShadowMapChannel = Proxy->GetShadowMapChannel();
+	int32 CurrentDynamicShadowMapChannel = GetDynamicShadowMapChannel();
+
+	if (!bAllowStaticLighting)
 	{
-		Proxy->bMobileMovablePointLightUniformBufferNeedsUpdate = true;
-
-		Proxy->bMobileMovablePointLightShouldBeRender = bShouldBeRender;
-
-		Proxy->bMobileMovablePointLightShouldCastShadow = bShouldCastShadow;
-
-		Proxy->MobileMovablePointLightShadowmapMinMax = SpotLightShadowmapMinMax;
+		ShadowMapChannel = INDEX_NONE;
 	}
 
-	if (Proxy->bMobileMovablePointLightUniformBufferNeedsUpdate)
-	{
-		const FMobileMovablePointLightUniformShaderParameters MobileMovablePointLightUniformShaderParameters =
-			GetMovablePointLightUniformShaderParameters(
-				LightPositionAndInvRadius,
-				LightColorAndFalloffExponent,
-				SpotLightDirectionAndSpecularScale,
-				SpotLightAnglesAndSoftTransitionScaleAndLightShadowType,
-				SpotLightShadowSharpenAndShadowFadeFraction,
-				SpotLightShadowmapMinMax,
-				SpotLightWorldToShadowMatrix
-			);
+	// Static shadowing uses ShadowMapChannel, dynamic shadows are packed into light attenuation using DynamicShadowMapChannel
+	Result =
+		(ShadowMapChannel == 0 ? 1 : 0) |
+		(ShadowMapChannel == 1 ? 2 : 0) |
+		(ShadowMapChannel == 2 ? 4 : 0) |
+		(ShadowMapChannel == 3 ? 8 : 0) |
+		(CurrentDynamicShadowMapChannel == 0 ? 16 : 0) |
+		(CurrentDynamicShadowMapChannel == 1 ? 32 : 0) |
+		(CurrentDynamicShadowMapChannel == 2 ? 64 : 0) |
+		(CurrentDynamicShadowMapChannel == 3 ? 128 : 0);
 
-		Proxy->MobileMovablePointLightUniformBuffer.UpdateUniformBufferImmediate(MobileMovablePointLightUniformShaderParameters);
+	uint32 BitOffset = 8;
 
-		Proxy->bMobileMovablePointLightUniformBufferNeedsUpdate = false;
-	}
+	Result |= Proxy->GetLightingChannelMask() << BitOffset;				BitOffset += 8;					// This could be 3 bits
+
+	// pack light type in this uint32 as well
+	Result |= ((uint32)Proxy->GetLightType()) << BitOffset;				BitOffset += LightType_NumBits;
+
+	const uint32 CastShadows = Proxy->CastsDynamicShadow() ? 1 : 0;
+	Result |= CastShadows << BitOffset;									BitOffset += 1;
+
+	uint32 HasLightFunction = bLightFunction ? 1 : 0;
+	Result |= HasLightFunction << BitOffset;							BitOffset += 1;
+
+	Result |= Proxy->LightFunctionAtlasLightIndex << (BitOffset);		BitOffset += 8;
+
+	// 28 bits used, 4 bits free
+
+	return Result;
 }
 
 /** Determines whether two bounding spheres intersect. */

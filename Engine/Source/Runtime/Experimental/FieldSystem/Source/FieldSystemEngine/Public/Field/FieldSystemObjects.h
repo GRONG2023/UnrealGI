@@ -11,6 +11,7 @@
 #include "Field/FieldSystemNodes.h"
 #include "Math/Vector.h"
 #include "Components/PrimitiveComponent.h"
+#include "PhysicsField/PhysicsFieldComponent.h"
 
 #include "FieldSystemObjects.generated.h"
 
@@ -18,8 +19,8 @@
 * Context :
 *   Contexts are used to pass extra data into the field evaluation.
 */
-UCLASS()
-class FIELDSYSTEMENGINE_API UFieldSystemMetaData : public UActorComponent
+UCLASS(MinimalAPI)
+class UFieldSystemMetaData : public UActorComponent
 {
 	GENERATED_BODY()
 
@@ -30,10 +31,10 @@ public:
 };
 
 /*
-* UFieldSystemMetaDataIteration
+* UFieldSystemMetaDataIteration : Not used anymore, just hiding it right now but will probably be deprecated if not used in the future
 */
-UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Disabled for now (WIP)"), ShowCategories = ("Field"), DisplayName = "MetaDataIteration")
-class FIELDSYSTEMENGINE_API UFieldSystemMetaDataIteration : public UFieldSystemMetaData
+UCLASS(MinimalAPI)
+class UFieldSystemMetaDataIteration : public UFieldSystemMetaData
 {
 	GENERATED_BODY()
 
@@ -41,14 +42,14 @@ public:
 	virtual ~UFieldSystemMetaDataIteration() {}
 	virtual FFieldSystemMetaData::EMetaType Type() const override { return  FFieldSystemMetaData::EMetaType::ECommandData_Iteration; }
 
-	virtual FFieldSystemMetaData* NewMetaData() const override;
+	FIELDSYSTEMENGINE_API virtual FFieldSystemMetaData* NewMetaData() const override;
 
 	/**
 	 * Set the number of iteration type
 	 * @param    Iterations Number of iterations (WIP)
 	 */
 	UFUNCTION(BlueprintPure, Category = "Field", meta = (Iterations = "1"))
-	UFieldSystemMetaDataIteration* SetMetaDataIteration(UPARAM(DisplayName = "Iteration Count") int Iterations);
+	FIELDSYSTEMENGINE_API UFieldSystemMetaDataIteration* SetMetaDataIteration(UPARAM(DisplayName = "Iteration Count") int Iterations);
 
 	/** Number of iterations (WIP) */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Field", DisplayName = "Iteration Count")
@@ -58,22 +59,22 @@ public:
 /*
 * UFieldSystemMetaDataProcessingResolution
 */
-UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Control the set of particles on which the field will be applied"), ShowCategories = ("Field"), DisplayName = "MetaDataResolution")
-class FIELDSYSTEMENGINE_API UFieldSystemMetaDataProcessingResolution : public UFieldSystemMetaData
+UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Control the set of particles on which the field will be applied"), ShowCategories = ("Field"), DisplayName = "MetaDataResolution", MinimalAPI)
+class UFieldSystemMetaDataProcessingResolution : public UFieldSystemMetaData
 {
 	GENERATED_BODY()
 
 public:
 	virtual ~UFieldSystemMetaDataProcessingResolution() {}
 	virtual FFieldSystemMetaData::EMetaType Type() const override { return  FFieldSystemMetaData::EMetaType::ECommandData_ProcessingResolution; }
-	virtual FFieldSystemMetaData* NewMetaData() const override;
+	FIELDSYSTEMENGINE_API virtual FFieldSystemMetaData* NewMetaData() const override;
 
 	/**
 	 * Set the processing resolution type
 	 * @param    ResolutionType Type of processing resolution used to select the particles on which the field will be applied
 	 */
 	UFUNCTION(BlueprintPure, Category = "Field", DisplayName = "Set Meta Data Resolution")
-	UFieldSystemMetaDataProcessingResolution* SetMetaDataaProcessingResolutionType(EFieldResolutionType ResolutionType);
+	FIELDSYSTEMENGINE_API UFieldSystemMetaDataProcessingResolution* SetMetaDataaProcessingResolutionType(EFieldResolutionType ResolutionType);
 
 	/** Precessing resolution type used to select the particles on which the field will be applied */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Field")
@@ -83,34 +84,45 @@ public:
 /*
 * UFieldSystemMetaDataFilter
 */
-UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Filter the particles on which the field will be applied"), ShowCategories = ("Field"), DisplayName = "MetaDataFilter")
-class FIELDSYSTEMENGINE_API UFieldSystemMetaDataFilter : public UFieldSystemMetaData
+UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Filter the particles on which the field will be applied"), ShowCategories = ("Field"), DisplayName = "MetaDataFilter", MinimalAPI)
+class UFieldSystemMetaDataFilter : public UFieldSystemMetaData
 {
 	GENERATED_BODY()
 
 public:
 	virtual ~UFieldSystemMetaDataFilter() {}
 	virtual FFieldSystemMetaData::EMetaType Type() const override { return  FFieldSystemMetaData::EMetaType::ECommandData_Filter; }
-	virtual FFieldSystemMetaData* NewMetaData() const override;
+	FIELDSYSTEMENGINE_API virtual FFieldSystemMetaData* NewMetaData() const override;
 
 	/**
 	 * Set the particles filter type
-	 * @param    FilterType Type of filter used to select the particles on whidh the field will be applied
+	 * @param    FilterType State type used to select the state particles on which the field will be applied
+	 * @param    ObjectType Object type used to select the type of objects(rigid, cloth...) on which the field will be applied
+	 * @param    PositionType Position type used to compute the samples positions
 	 */
 	UFUNCTION(BlueprintPure, Category = "Field", DisplayName = "Set Meta Data Filter")
-	UFieldSystemMetaDataFilter* SetMetaDataFilterType(EFieldFilterType FilterType);
+	FIELDSYSTEMENGINE_API UFieldSystemMetaDataFilter* SetMetaDataFilterType(UPARAM(DisplayName = "State Type") EFieldFilterType FilterType, 
+													  UPARAM(DisplayName = "Object Type") EFieldObjectType ObjectType,
+													  UPARAM(DisplayName = "Position Type") EFieldPositionType PositionType );
 
-	/** Filter type used to select the particles on which the field will be applied */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Field")
+	/** Filter state type used to select the particles on which the field will be applied */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Field", DisplayName = "State Type")
 	TEnumAsByte<EFieldFilterType> FilterType;
-};
 
+	/** Filter object type used to select the particles on which the field will be applied */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Field", DisplayName = "Object Type")
+	TEnumAsByte<EFieldObjectType> ObjectType;
+
+	/** Specify which position type will be used for the field evaluation*/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Field", DisplayName = "Position Type")
+	TEnumAsByte<EFieldPositionType> PositionType;
+};
 
 /**
 * Field Evaluation
 */
-UCLASS()
-class FIELDSYSTEMENGINE_API UFieldNodeBase : public UActorComponent
+UCLASS(MinimalAPI)
+class UFieldNodeBase : public UActorComponent
 {
 	GENERATED_BODY()
 
@@ -125,8 +137,8 @@ public:
 /**
 * FieldNodeInt
 */
-UCLASS()
-class FIELDSYSTEMENGINE_API UFieldNodeInt : public UFieldNodeBase
+UCLASS(MinimalAPI)
+class UFieldNodeInt : public UFieldNodeBase
 {
 	GENERATED_BODY()
 
@@ -138,8 +150,8 @@ public:
 /**
 * FieldNodeFloat
 */
-UCLASS()
-class FIELDSYSTEMENGINE_API UFieldNodeFloat : public UFieldNodeBase
+UCLASS(MinimalAPI)
+class UFieldNodeFloat : public UFieldNodeBase
 {
 	GENERATED_BODY()
 
@@ -151,8 +163,8 @@ public:
 /**
 * FieldNodeVector
 */
-UCLASS()
-class FIELDSYSTEMENGINE_API UFieldNodeVector : public UFieldNodeBase
+UCLASS(MinimalAPI)
+class UFieldNodeVector : public UFieldNodeBase
 {
 	GENERATED_BODY()
 public:
@@ -164,8 +176,8 @@ public:
 /**
 * UUniformInteger
 **/
-UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Set a uniform integer value independently of the sample position. The output is equal to magnitude"), ShowCategories = ("Field"))
-class FIELDSYSTEMENGINE_API UUniformInteger : public UFieldNodeInt
+UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Set a uniform integer value independently of the sample position. The output is equal to magnitude"), ShowCategories = ("Field"), MinimalAPI)
+class UUniformInteger : public UFieldNodeInt
 {
 	GENERATED_BODY()
 public:
@@ -177,14 +189,14 @@ public:
 
 	virtual ~UUniformInteger() {}
 
-	virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
+	FIELDSYSTEMENGINE_API virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
 
 	/**
 	 * Set a uniform integer value independently of the sample position. The output is equal to magnitude
 	 * @param    Magnitude The field output will be equal the magnitude
 	 */
 	UFUNCTION(BlueprintPure, Category = "Field", meta = (Magnitude = "0"))
-	UUniformInteger* SetUniformInteger(UPARAM(DisplayName = "Field Magnitude") int32 Magnitude);
+	FIELDSYSTEMENGINE_API UUniformInteger* SetUniformInteger(UPARAM(DisplayName = "Field Magnitude") int32 Magnitude);
 
 	/** The field output will be equal the magnitude */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Field", DisplayName = "Field Magnitude")
@@ -195,8 +207,8 @@ public:
 /**
 * URadialIntMask
 */
-UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "This function first defines a radial integer field equal to Interior-value inside a sphere / Exterior-value outside. This field will be used alongside the particle input value and the mask condition to compute the particle output value."), ShowCategories = ("Field"))
-class FIELDSYSTEMENGINE_API URadialIntMask : public UFieldNodeInt
+UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "This function first defines a radial integer field equal to Interior-value inside a sphere / Exterior-value outside. This field will be used alongside the particle input value and the mask condition to compute the particle output value."), ShowCategories = ("Field"), MinimalAPI)
+class URadialIntMask : public UFieldNodeInt
 {
 	GENERATED_BODY()
 public:
@@ -205,13 +217,13 @@ public:
 		: Super()
 		, Radius(0)
 		, Position(FVector(0, 0, 0))
-		, InteriorValue(1.0)
-		, ExteriorValue(0.0)
+		, InteriorValue(1)
+		, ExteriorValue(0)
 		, SetMaskCondition(ESetMaskConditionType::Field_Set_Always)
 	{}
 	virtual ~URadialIntMask() {}
 
-	virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
+	FIELDSYSTEMENGINE_API virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
 
 	/**
 	* This function first defines a radial integer field equal to Interior-value inside a sphere / Exterior-value outside. This field will be used alongside the particle input value and the mask condition to compute the particle output value.
@@ -225,7 +237,7 @@ public:
 	 * @param    SetMaskConditionIn If the mask condition is set to always the output value will be the intermediate one. If set to not interior/exterior the output value will be the intermediate one if the input is different from the interior/exterior value
 	 */
 	UFUNCTION(BlueprintPure, Category = "Field", meta = (InteriorValue = "1"), DisplayName = "Set Radial Mask")
-	URadialIntMask* SetRadialIntMask(UPARAM(DisplayName = "Mask Radius") float Radius,
+	FIELDSYSTEMENGINE_API URadialIntMask* SetRadialIntMask(UPARAM(DisplayName = "Mask Radius") float Radius,
 			UPARAM(DisplayName = "Center Position") FVector Position,
 			UPARAM(DisplayName = "Interior Value") int32 InteriorValue,
 			UPARAM(DisplayName = "Exterior Value") int32 ExteriorValue,
@@ -256,8 +268,8 @@ public:
 /**
 * UUniformScalar
 **/
-UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Set a uniform scalar value independently of the sample position. The output is equal to magnitude"), ShowCategories = ("Field"))
-class FIELDSYSTEMENGINE_API UUniformScalar : public UFieldNodeFloat
+UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Set a uniform scalar value independently of the sample position. The output is equal to magnitude"), ShowCategories = ("Field"), MinimalAPI)
+class UUniformScalar : public UFieldNodeFloat
 {
 	GENERATED_BODY()
 public:
@@ -269,14 +281,14 @@ public:
 
 	virtual ~UUniformScalar() {}
 
-	virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
+	FIELDSYSTEMENGINE_API virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
 
 	/**
 	 * Set a uniform scalar value independently of the sample position. The output is equal to magnitude
 	 * @param    Magnitude The field output will be equal the magnitude
 	 */
 	UFUNCTION(BlueprintPure, Category = "Field", meta = (Magnitude = "1.0"))
-	UUniformScalar* SetUniformScalar(UPARAM(DisplayName = "Field Magnitude") float Magnitude);
+	FIELDSYSTEMENGINE_API UUniformScalar* SetUniformScalar(UPARAM(DisplayName = "Field Magnitude") float Magnitude);
 
 	/** The field output will be equal the magnitude */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Field", DisplayName = "Field Magnitude")
@@ -287,8 +299,8 @@ public:
 /**
 * UWaveScalar
 **/
-UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Set a temporal wave scalar value according to the sample distance from the field position."), ShowCategories = ("Field"))
-class FIELDSYSTEMENGINE_API UWaveScalar : public UFieldNodeFloat
+UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Set a temporal wave scalar value according to the sample distance from the field position."), ShowCategories = ("Field"), MinimalAPI)
+class UWaveScalar : public UFieldNodeFloat
 {
 	GENERATED_BODY()
 public:
@@ -305,7 +317,7 @@ public:
 
 	virtual ~UWaveScalar() {}
 
-	virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
+	FIELDSYSTEMENGINE_API virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
 
 	/**
 	 * Set a temporal wave scalar value according to the sample distance from the field position.
@@ -317,7 +329,7 @@ public:
 	 * @param    Falloff Type of falloff function used if the falloff function is picked
 	 */
 	UFUNCTION(BlueprintPure, Category = "Field", meta = (Magnitude = "1.0", Wavelength = "1000", Period = "1", HidePin = "Time"), DisplayName = "Set Wave Scalar")
-	UWaveScalar* SetWaveScalar(UPARAM(DisplayName = "Field Magnitude") float Magnitude,
+	FIELDSYSTEMENGINE_API UWaveScalar* SetWaveScalar(UPARAM(DisplayName = "Field Magnitude") float Magnitude,
 			UPARAM(DisplayName = "Center Position") FVector Position,
 			UPARAM(DisplayName = "Wave Length") float Wavelength,
 			UPARAM(DisplayName = "Wave Period") float Period,
@@ -355,8 +367,8 @@ public:
 /**
 * RadialFalloff
 */
-UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Sphere scalar field that will be defined only within a sphere"), ShowCategories = ("Field"))
-class FIELDSYSTEMENGINE_API URadialFalloff : public UFieldNodeFloat
+UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Sphere scalar field that will be defined only within a sphere"), ShowCategories = ("Field"), MinimalAPI)
+class URadialFalloff : public UFieldNodeFloat
 {
 	GENERATED_BODY()
 public:
@@ -374,7 +386,7 @@ public:
 
 	virtual ~URadialFalloff() {}
 
-	virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
+	FIELDSYSTEMENGINE_API virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
 
 	/**
 	 * Sphere scalar field that will be defined only within a sphere
@@ -387,7 +399,7 @@ public:
 	 * @param    Falloff Type of falloff function used if the falloff function is picked
 	 */
 	UFUNCTION(BlueprintPure, Category = "Field", meta = (Magnitude = "1.0", MinRange = "0.0", MaxRange = "1.0"), DisplayName = "Set Radial Falloff")
-	URadialFalloff* SetRadialFalloff(UPARAM(DisplayName = "Field Magnitude") float Magnitude,
+	FIELDSYSTEMENGINE_API URadialFalloff* SetRadialFalloff(UPARAM(DisplayName = "Field Magnitude") float Magnitude,
 			UPARAM(DisplayName = "Min Range") float MinRange,
 			UPARAM(DisplayName = "Max Range") float MaxRange,
 			UPARAM(DisplayName = "Default Value") float Default,
@@ -427,8 +439,8 @@ public:
 /**
 * PlaneFalloff
 */
-UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Plane scalar field that will be defined only within a distance from a plane"), ShowCategories = ("Field"))
-class FIELDSYSTEMENGINE_API UPlaneFalloff : public UFieldNodeFloat
+UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Plane scalar field that will be defined only within a distance from a plane"), ShowCategories = ("Field"), MinimalAPI)
+class UPlaneFalloff : public UFieldNodeFloat
 {
 	GENERATED_BODY()
 
@@ -448,7 +460,7 @@ public:
 
 	virtual ~UPlaneFalloff() {}
 
-	virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
+	FIELDSYSTEMENGINE_API virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
 
 	/**
 	 * Plane scalar field that will be defined only within a distance from a plane
@@ -462,7 +474,7 @@ public:
 	 * @param    Falloff Type of falloff function used to model the evolution of the field from the plane surface to the distance isosurface
 	 */
 	UFUNCTION(BlueprintPure, Category = "Field", meta = (Magnitude = "1.0", MinRange = "0.0", MaxRange = "1.0"))
-	UPlaneFalloff* SetPlaneFalloff(UPARAM(DisplayName = "Field Magnitude") float Magnitude,
+	FIELDSYSTEMENGINE_API UPlaneFalloff* SetPlaneFalloff(UPARAM(DisplayName = "Field Magnitude") float Magnitude,
 			UPARAM(DisplayName = "Min Range") float MinRange,
 			UPARAM(DisplayName = "Max Range") float MaxRange,
 			UPARAM(DisplayName = "Default Value") float Default,
@@ -507,8 +519,8 @@ public:
 /**
 * BoxFalloff
 */
-UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Box scalar field that will be defined only within a box"), ShowCategories = ("Field"))
-class FIELDSYSTEMENGINE_API UBoxFalloff : public UFieldNodeFloat
+UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Box scalar field that will be defined only within a box"), ShowCategories = ("Field"), MinimalAPI)
+class UBoxFalloff : public UFieldNodeFloat
 {
 	GENERATED_BODY()
 
@@ -526,7 +538,7 @@ public:
 
 	virtual ~UBoxFalloff() {}
 
-	virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
+	FIELDSYSTEMENGINE_API virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
 
 	/**
 	 * Box scalar field that will be defined only within a box
@@ -538,7 +550,7 @@ public:
 	 * @param    Falloff Type of falloff function used to model the evolution of the field from the box surface to the sample position
 	 */
 	UFUNCTION(BlueprintPure, Category = "Field", meta = (Magnitude = "1.0", MinRange = "0.0", MaxRange = "1.0"))
-	UBoxFalloff* SetBoxFalloff(UPARAM(DisplayName = "Field Magnitude")  float Magnitude,
+	FIELDSYSTEMENGINE_API UBoxFalloff* SetBoxFalloff(UPARAM(DisplayName = "Field Magnitude")  float Magnitude,
 			UPARAM(DisplayName = "Min Range")  float MinRange,
 			UPARAM(DisplayName = "Max Range")  float MaxRange,
 			UPARAM(DisplayName = "Default Value")  float Default,
@@ -574,8 +586,8 @@ public:
 /**
 * NoiseField
 */
-UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Defines a perlin noise scalar value if the sample is within a box"), ShowCategories = ("Field"))
-class FIELDSYSTEMENGINE_API UNoiseField : public UFieldNodeFloat
+UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Defines a perlin noise scalar value if the sample is within a box"), ShowCategories = ("Field"), MinimalAPI)
+class UNoiseField : public UFieldNodeFloat
 {
 	GENERATED_BODY()
 
@@ -590,7 +602,7 @@ public:
 
 	virtual ~UNoiseField() {}
 
-	virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
+	FIELDSYSTEMENGINE_API virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
 
 	/**
 	 * Defines a perlin noise scalar value if the sample is within a box
@@ -599,7 +611,7 @@ public:
 	 * @param    Transform Transform of the box in which the perlin noise will be defined
 	 */
 	UFUNCTION(BlueprintPure, Category = "Field", meta = (MinRange = "0.0", MaxRange = "1.0"), DisplayName = "Set Noise Field")
-	UNoiseField* SetNoiseField(UPARAM(DisplayName = "Min Range") float MinRange,
+	FIELDSYSTEMENGINE_API UNoiseField* SetNoiseField(UPARAM(DisplayName = "Min Range") float MinRange,
 			UPARAM(DisplayName = "Max Range") float MaxRange,
 			UPARAM(DisplayName = "Noise Transform")  FTransform Transform);
 
@@ -619,8 +631,8 @@ public:
 /**
 * UniformVector
 **/
-UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Set a uniform vector value independently of the sample position.The output is equal to magnitude * direction"), ShowCategories = ("Field"))
-class FIELDSYSTEMENGINE_API UUniformVector : public UFieldNodeVector
+UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Set a uniform vector value independently of the sample position.The output is equal to magnitude * direction"), ShowCategories = ("Field"), MinimalAPI)
+class UUniformVector : public UFieldNodeVector
 {
 	GENERATED_BODY()
 public:
@@ -633,7 +645,7 @@ public:
 
 	virtual ~UUniformVector() {}
 
-	virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
+	FIELDSYSTEMENGINE_API virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
 
 	/**
 	 * Set a uniform vector value independently of the sample position.The output is equal to magnitude * direction
@@ -641,7 +653,7 @@ public:
 	 * @param    Direction Normalized direction of the uniform vector field
 	 */
 	UFUNCTION(BlueprintPure, Category = "Field", meta = (Magnitude = "1.0"))
-	UUniformVector* SetUniformVector(UPARAM(DisplayName = "Field Magnitude") float Magnitude,
+	FIELDSYSTEMENGINE_API UUniformVector* SetUniformVector(UPARAM(DisplayName = "Field Magnitude") float Magnitude,
 			UPARAM(DisplayName = "Uniform Direction") FVector Direction);
 
 	/** Magnitude of the uniform vector field */
@@ -657,8 +669,8 @@ public:
 /**
 * RadialVector
 */
-UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Set a radial vector value, the direction being the vector from the sample position to the field one. The output is equal to magnitude * direction"), ShowCategories = ("Field"))
-class FIELDSYSTEMENGINE_API URadialVector : public UFieldNodeVector
+UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Set a radial vector value, the direction being the vector from the sample position to the field one. The output is equal to magnitude * direction"), ShowCategories = ("Field"), MinimalAPI)
+class URadialVector : public UFieldNodeVector
 {
 	GENERATED_BODY()
 public:
@@ -671,7 +683,7 @@ public:
 
 	virtual ~URadialVector() {}
 
-	virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
+	FIELDSYSTEMENGINE_API virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
 
 	/**
 	 * Set a radial vector value. The direction is the normalized vector from the field position to the sample one. The output is equal to this direction * magnitude.
@@ -679,7 +691,7 @@ public:
 	 * @param    Position Center position of the radial vector field
 	 */
 	UFUNCTION(BlueprintPure, Category = "Field", meta = (Magnitude = "1.0"))
-	URadialVector* SetRadialVector(UPARAM(DisplayName = "Field Magnitude") float Magnitude,
+	FIELDSYSTEMENGINE_API URadialVector* SetRadialVector(UPARAM(DisplayName = "Field Magnitude") float Magnitude,
 								   UPARAM(DisplayName = "Center Position") FVector Position);
 
 	/** Magnitude of the radial vector field */
@@ -694,8 +706,8 @@ public:
 /**
 * URandomVector
 */
-UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Set a random vector value independently of the sample position. The output is equal to magnitude * random direction "), ShowCategories = ("Field"))
-class FIELDSYSTEMENGINE_API URandomVector : public UFieldNodeVector
+UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Set a random vector value independently of the sample position. The output is equal to magnitude * random direction "), ShowCategories = ("Field"), MinimalAPI)
+class URandomVector : public UFieldNodeVector
 {
 	GENERATED_BODY()
 public:
@@ -707,14 +719,14 @@ public:
 
 	virtual ~URandomVector() {}
 
-	virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
+	FIELDSYSTEMENGINE_API virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
 
 	/**
 	 * Set a random vector value independently of the sample position. The output is equal to magnitude * random direction
 	 * @param    Magnitude Magnitude of the random vector field
 	 */
 	UFUNCTION(BlueprintPure, Category = "Field", meta = (Magnitude = "1.0"))
-	URandomVector* SetRandomVector(UPARAM(DisplayName = "Field Magnitude") float Magnitude);
+	FIELDSYSTEMENGINE_API URandomVector* SetRandomVector(UPARAM(DisplayName = "Field Magnitude") float Magnitude);
 
 	/** Magnitude of the random vector field*/
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Field", DisplayName = "Field Magnitude")
@@ -725,8 +737,8 @@ public:
 /**
 * UOperatorField
 */
-UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Compute an operation between 2 incoming fields"), ShowCategories = ("Field"))
-class FIELDSYSTEMENGINE_API UOperatorField : public UFieldNodeBase
+UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Compute an operation between 2 incoming fields"), ShowCategories = ("Field"), MinimalAPI)
+class UOperatorField : public UFieldNodeBase
 {
 	GENERATED_BODY()
 public:
@@ -741,10 +753,10 @@ public:
 
 	virtual ~UOperatorField() {}
 
-	virtual FFieldNodeBase::EFieldType Type() const;
+	FIELDSYSTEMENGINE_API virtual FFieldNodeBase::EFieldType Type() const;
 	virtual bool ResultsExpector() const override { return true; }
 
-	virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
+	FIELDSYSTEMENGINE_API virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
 
 	/**
 	 * Compute an operation between 2 incoming fields
@@ -754,7 +766,7 @@ public:
 	 * @param    Operation Type of math operation you want to perform between the 2 fields
 	 */
 	UFUNCTION(BlueprintPure, Category = "Field", meta = (Magnitude = "1.0"))
-	UOperatorField* SetOperatorField(UPARAM(DisplayName = "Field Magnitude") float Magnitude,
+	FIELDSYSTEMENGINE_API UOperatorField* SetOperatorField(UPARAM(DisplayName = "Field Magnitude") float Magnitude,
 			UPARAM(DisplayName = "Left Field") const UFieldNodeBase* LeftField,
 			UPARAM(DisplayName = "Right Field") const UFieldNodeBase* RightField,
 			UPARAM(DisplayName = "Field Operation") EFieldOperationType Operation);
@@ -764,12 +776,12 @@ public:
 	float Magnitude;
 
 	/** Right field to be processed */
-	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Field", DisplayName = "Input Field A")
-	const UFieldNodeBase* RightField;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Field", DisplayName = "Right Field")
+	TObjectPtr<const UFieldNodeBase> RightField;
 
 	/** Left field to be processed */
-	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Field", DisplayName = "Input Field B")
-	const UFieldNodeBase* LeftField;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Field", DisplayName = "Left Field")
+	TObjectPtr<const UFieldNodeBase> LeftField;
 
 	/** Type of operation you want to perform between the 2 fields */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Field", DisplayName = "Field Operation")
@@ -779,8 +791,8 @@ public:
 /**
 * UToIntegerField
 */
-UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Convert a scalar field to a integer one"), ShowCategories = ("Field"))
-class FIELDSYSTEMENGINE_API UToIntegerField : public UFieldNodeInt
+UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Convert a scalar field to a integer one"), ShowCategories = ("Field"), MinimalAPI)
+class UToIntegerField : public UFieldNodeInt
 {
 	GENERATED_BODY()
 public:
@@ -792,25 +804,25 @@ public:
 
 	virtual ~UToIntegerField() {}
 
-	virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
+	FIELDSYSTEMENGINE_API virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
 
 	/**
 	 * Convert a float field to a integer one
 	 * @param    FloatField Float field to be converted to an an integer one
 	 */
 	UFUNCTION(BlueprintPure, Category = "Field", DisplayName = "Set To Integer Field")
-	UToIntegerField* SetToIntegerField(UPARAM(DisplayName = "Float Field") const UFieldNodeFloat* FloatField);
+	FIELDSYSTEMENGINE_API UToIntegerField* SetToIntegerField(UPARAM(DisplayName = "Float Field") const UFieldNodeFloat* FloatField);
 
 	/** Scalar field to be converted to an an integer one */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Field", DisplayName = "Float Field")
-	const UFieldNodeFloat* FloatField;
+	TObjectPtr<const UFieldNodeFloat> FloatField;
 };
 
 /**
 * UToFloatField
 */
-UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Convert an integer field to a scalar one"), ShowCategories = ("Field"))
-class FIELDSYSTEMENGINE_API UToFloatField : public UFieldNodeFloat
+UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Convert an integer field to a scalar one"), ShowCategories = ("Field"), MinimalAPI)
+class UToFloatField : public UFieldNodeFloat
 {
 	GENERATED_BODY()
 public:
@@ -822,25 +834,25 @@ public:
 
 	virtual ~UToFloatField() {}
 
-	virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
+	FIELDSYSTEMENGINE_API virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
 
 	/**
 	 * Convert an integer field to a float one
 	 * @param    IntegerField Integer field to be converted to an a float one
 	 */
 	UFUNCTION(BlueprintPure, Category = "Field", DisplayName = "Set To Float Field")
-	UToFloatField* SetToFloatField(UPARAM(DisplayName = "Integer Field") const UFieldNodeInt* IntegerField);
+	FIELDSYSTEMENGINE_API UToFloatField* SetToFloatField(UPARAM(DisplayName = "Integer Field") const UFieldNodeInt* IntegerField);
 
 	/** Integer field to be converted to an a scalar one */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Field", DisplayName = "Integer Field")
-	const UFieldNodeInt* IntField;
+	TObjectPtr<const UFieldNodeInt> IntField;
 };
 
 /**
 * UCullingField
 */
-UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Evaluate the input field according to the result of the culling field"), ShowCategories = ("Field"))
-class FIELDSYSTEMENGINE_API UCullingField : public UFieldNodeBase
+UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Evaluate the input field according to the result of the culling field"), ShowCategories = ("Field"), MinimalAPI)
+class UCullingField : public UFieldNodeBase
 {
 	GENERATED_BODY()
 public:
@@ -854,28 +866,29 @@ public:
 
 	virtual ~UCullingField() {}
 
-	virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
+	FIELDSYSTEMENGINE_API virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
 
-	virtual FFieldNodeBase::EFieldType Type() const override;
+	FIELDSYSTEMENGINE_API virtual FFieldNodeBase::EFieldType Type() const override;
 
 	/**
-	 * Evaluate the input field according to the result of the culling field
-	 * @param    Culling Culling field to be used
-	 * @param    Field Input field that will be evaluated according to the culling field result
-	 * @param    Operation Evaluate the input field if the result of the culling field is equal to 0 (Inside) or different from 0 (Outside)
+	 * Evaluate the input field according to the result of the culling field.
+	 * 
+	 * @param    Culling Culling field to be used.
+	 * @param    Field Input field that will be evaluated according to the culling field result.
+	 * @param    Operation Evaluate the input field if the result of the culling field is equal to 0 (Inside) or different from 0 (Outside).
 	 */
 	UFUNCTION(BlueprintPure, Category = "Field")
-	UCullingField* SetCullingField(UPARAM(DisplayName = "Culling Field") const UFieldNodeBase* Culling,
+	FIELDSYSTEMENGINE_API UCullingField* SetCullingField(UPARAM(DisplayName = "Culling Field") const UFieldNodeBase* Culling,
 			UPARAM(DisplayName = "Input Field") const UFieldNodeBase* Field,
 			UPARAM(DisplayName = "Culling Operation") EFieldCullingOperationType Operation);
 
 	/** Culling field to be used */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Field", DisplayName = "Culling Field")
-	const UFieldNodeBase* Culling;
+	TObjectPtr<const UFieldNodeBase> Culling;
 
 	/** Input field that will be evaluated according to the culling field result */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Field", DisplayName = "Input Field")
-	const UFieldNodeBase* Field;
+	TObjectPtr<const UFieldNodeBase> Field;
 
 	/** Evaluate the input field if the result of the culling field is equal to 0 (Inside) or different from 0 (Outside) */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Field", DisplayName = "Culling Operation")
@@ -885,8 +898,8 @@ public:
 /**
 * UReturnResultsField
 */
-UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Terminal field of a graph"), ShowCategories = ("Field"))
-class FIELDSYSTEMENGINE_API UReturnResultsTerminal : public UFieldNodeBase
+UCLASS(ClassGroup = "Field", meta = (BlueprintSpawnableComponent, ToolTip = "Terminal field of a graph"), ShowCategories = ("Field"), MinimalAPI)
+class UReturnResultsTerminal : public UFieldNodeBase
 {
 	GENERATED_BODY()
 public:
@@ -896,12 +909,12 @@ public:
 
 	virtual ~UReturnResultsTerminal() {}
 
-	virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
+	FIELDSYSTEMENGINE_API virtual FFieldNodeBase* NewEvaluationGraph(TArray<const UFieldNodeBase*>& Nodes) const override;
 	virtual FFieldNodeBase::EFieldType Type() const override { return  FFieldNodeBase::EFieldType::EField_Results; }
 
 	/** Terminal field of a graph */
 	UFUNCTION(BlueprintPure, Category = "Field", DisplayName = "Set Terminal Field")
-	UReturnResultsTerminal* SetReturnResultsTerminal();
+	FIELDSYSTEMENGINE_API UReturnResultsTerminal* SetReturnResultsTerminal();
 
 };
 
@@ -909,7 +922,7 @@ public:
 * Field Commands container that will be stored in the construction script
 */
 USTRUCT(BlueprintType)
-struct FIELDSYSTEMENGINE_API FFieldObjectCommands
+struct FFieldObjectCommands
 {
 	GENERATED_BODY()
 
@@ -943,13 +956,13 @@ struct FIELDSYSTEMENGINE_API FFieldObjectCommands
 		return TargetNames.Num();
 	}
 
-	/** Create a FFieldCommand from a given target + node + metadata + transform */
-	static FFieldSystemCommand CreateFieldCommand(const FName& TargetName, UFieldNodeBase* RootNode, UFieldSystemMetaData* MetaData)
+	/** Create a FFieldCommand from a given target + Unode + metadata  */
+	static FFieldSystemCommand CreateFieldCommand(const EFieldPhysicsType PhysicsType, UFieldNodeBase* RootNode, UFieldSystemMetaData* MetaData)
 	{
 		if (RootNode)
 		{
 			TArray<const UFieldNodeBase*> Nodes;
-			FFieldSystemCommand Command = { TargetName, RootNode->NewEvaluationGraph(Nodes) };
+			FFieldSystemCommand Command = { PhysicsType, RootNode->NewEvaluationGraph(Nodes) };
 			if (ensureMsgf(Command.RootNode,
 				TEXT("Failed to generate physics field command for target attribute.")))
 			{
@@ -964,12 +977,30 @@ struct FIELDSYSTEMENGINE_API FFieldObjectCommands
 						Command.MetaData.Add(FFieldSystemMetaData::EMetaType::ECommandData_Iteration).Reset(new FFieldSystemMetaDataIteration(static_cast<UFieldSystemMetaDataIteration*>(MetaData)->Iterations));
 						break;
 					case FFieldSystemMetaData::EMetaType::ECommandData_Filter:
-						Command.MetaData.Add(FFieldSystemMetaData::EMetaType::ECommandData_Filter).Reset(new FFieldSystemMetaDataFilter(static_cast<UFieldSystemMetaDataFilter*>(MetaData)->FilterType));
+						Command.MetaData.Add(FFieldSystemMetaData::EMetaType::ECommandData_Filter).Reset(new FFieldSystemMetaDataFilter(static_cast<UFieldSystemMetaDataFilter*>(MetaData)->FilterType, 
+							static_cast<UFieldSystemMetaDataFilter*>(MetaData)->ObjectType, static_cast<UFieldSystemMetaDataFilter*>(MetaData)->PositionType));
 						break;
 					}
 				}
-				ensure(!Command.TargetAttribute.IsEqual("None"));
+				ensure(Command.PhysicsType != EFieldPhysicsType::Field_None);
 			}
+			UPhysicsFieldComponent::BuildCommandBounds(Command);
+			return Command;
+		}
+		else
+		{
+			return FFieldSystemCommand();
+		}
+	}
+
+	/** Create a FFieldCommand from a given target + Fnode */
+	static FFieldSystemCommand CreateFieldCommand(const EFieldPhysicsType PhysicsType, FFieldNodeBase* RootNode)
+	{
+		if (RootNode)
+		{
+			FFieldSystemCommand Command = { PhysicsType, RootNode };
+			ensure(Command.PhysicsType != EFieldPhysicsType::Field_None);
+			UPhysicsFieldComponent::BuildCommandBounds(Command);
 			return Command;
 		}
 		else
@@ -981,7 +1012,7 @@ struct FIELDSYSTEMENGINE_API FFieldObjectCommands
 	/** Build the FFieldCommand from one item in the container */
 	FFieldSystemCommand BuildFieldCommand(const int32 CommandIndex) const
 	{
-		return (CommandIndex < GetNumCommands()) ? CreateFieldCommand(TargetNames[CommandIndex], RootNodes[CommandIndex], MetaDatas[CommandIndex]) : FFieldSystemCommand();
+		return (CommandIndex < GetNumCommands()) ? CreateFieldCommand(GetFieldPhysicsType(TargetNames[CommandIndex]), RootNodes[CommandIndex], MetaDatas[CommandIndex]) : FFieldSystemCommand();
 	}
 
 	/**Commands Target Name */
@@ -990,11 +1021,11 @@ struct FIELDSYSTEMENGINE_API FFieldObjectCommands
 
 	/** Commands Root Node */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Field", DisplayName = "Root Nodes")
-	TArray<UFieldNodeBase*> RootNodes;
+	TArray<TObjectPtr<UFieldNodeBase>> RootNodes;
 
 	/** Commands Meta Data*/
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Field", DisplayName = "Meta Datas")
-	TArray<UFieldSystemMetaData*> MetaDatas;
+	TArray<TObjectPtr<UFieldSystemMetaData>> MetaDatas;
 };
 
 

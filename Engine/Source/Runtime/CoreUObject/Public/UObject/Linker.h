@@ -2,15 +2,38 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectResource.h"
+#include "CoreTypes.h"
 #include "Internationalization/GatherableTextData.h"
-#include "UObject/PackageFileSummary.h"
-#include "UObject/LinkerInstancingContext.h"
-#include "UObject/SavePackage.h"
+#include "Logging/LogMacros.h"
+#include "Misc/AssertionMacros.h"
+#include "Serialization/StructuredArchive.h"
+#include "Serialization/StructuredArchiveSlots.h"
 #include "Templates/RefCounting.h"
+#include "UObject/LinkerInstancingContext.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectResource.h"
+#include "UObject/PackageFileSummary.h"
 
+class FArchive;
+class FLinkerInstancingContext;
+class FLinkerLoad;
+class FPackagePath;
 class FReferenceCollector;
+class UObject;
+class UPackage;
+class UPackageMap;
+struct FGatherableTextData;
+struct FGuid;
+struct FPackageSaveInfo;
+struct FUObjectSerializeContext;
+template <typename FuncType> class TFunctionRef;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogLinker, Log, All);
 
@@ -129,7 +152,7 @@ public:
 			check(ImportMap.IsValidIndex(Index.ToImport()));
 			return &ImportMap[Index.ToImport()];
 		}
-		return NULL;
+		return nullptr;
 	}
 
 	/**
@@ -159,166 +182,26 @@ public:
 			check(ExportMap.IsValidIndex(Index.ToExport()));
 			return &ExportMap[Index.ToExport()];
 		}
-		return NULL;
+		return nullptr;
 	}
 
 	/** Serializes the searchable name map */
 	COREUOBJECT_API void SerializeSearchableNamesMap(FArchive &Ar);
 	COREUOBJECT_API void SerializeSearchableNamesMap(FStructuredArchive::FSlot Slot);
-};
-
-
-struct UE_DEPRECATED(4.23, "Outdated since display index replaced FName as key") FLinkerNamePairKeyFuncs : DefaultKeyFuncs<FName, false>
-{
-	static FORCEINLINE bool Matches(FName A, FName B)
-	{
-		// The linker requires that FNames preserve case, but the numeric suffix can be ignored since
-		// that is stored separately for each FName instance saved
-		return A.GetDisplayIndex() == B.GetDisplayIndex();
-	}
-
-	static FORCEINLINE uint32 GetKeyHash(FName Key)
-	{
-		return GetTypeHash(Key.GetDisplayIndex());
-	}
-};
-
-
-template<typename ValueType>
-struct UE_DEPRECATED(4.23, "Outdated since display indexes replaced FNames as keys") TLinkerNameMapKeyFuncs : TDefaultMapKeyFuncs<FName, ValueType, false>
-{
-	static FORCEINLINE bool Matches(FName A, FName B)
-	{
-		// The linker requires that FNames preserve case, but the numeric suffix can be ignored since
-		// that is stored separately for each FName instance saved
-		return A.GetDisplayIndex() == B.GetDisplayIndex();
-	}
-
-	static FORCEINLINE uint32 GetKeyHash(FName Key)
-	{
-		return GetTypeHash(Key.GetDisplayIndex());
-	}
-};
-
-
-/*----------------------------------------------------------------------------
-	FLinker.
-----------------------------------------------------------------------------*/
-namespace ELinkerType
-{
-	enum Type
-	{
-		None,
-		Load,
-		Save
-	};
-}
-
-/**
- * Manages the data associated with an Unreal package.  Acts as the bridge between
- * the file on disk and the UPackage object in memory for all Unreal package types.
- */
-class FLinker : public FLinkerTables
-{
-private:	
-
-	ELinkerType::Type LinkerType;
-
-public:
-
-	/** The top-level UPackage object for the package associated with this linker */
-	UPackage*				LinkerRoot;
-
-	/** Table of contents for this package's file */
-	FPackageFileSummary		Summary;
-
-	/** Names used by objects contained within this package */
-	TArray<FNameEntryId>	NameMap;
-
-	/** Gatherable text data contained within this package */
-	TArray<FGatherableTextData> GatherableTextDataMap;
-
-	/** The name of the file for this package */
-	FString					Filename;
-
-	/** If true, filter out exports that are for clients but not servers */
-	bool					FilterClientButNotServer;
-
-	/** If true, filter out exports that are for servers but not clients */
-	bool					FilterServerButNotClient;
-
-	/** The SHA1 key generator for this package, if active */
-	class FSHA1*			ScriptSHA;
-
-	/** Constructor. */
-	FLinker(ELinkerType::Type InType, UPackage* InRoot, const TCHAR* InFilename);
-
-	virtual ~FLinker();
-
-	/** Gets the class name for the specified index in the export map. */
-	COREUOBJECT_API FName GetExportClassName(int32 ExportIdx);
-	/** Gets the class name for the specified index in the import map. */
-	FName GetExportClassName(FPackageIndex PackageIndex)
-	{
-		if (PackageIndex.IsExport())
-		{
-			return GetExportClassName(PackageIndex.ToExport());
-		}
-		return NAME_None;
-	}
-	/** Gets the class name for the specified index in the import map. */
-	FName GetImportClassName(int32 ImportIdx)
-	{
-		return ImportMap[ImportIdx].ClassName;
-	}
-	/** Gets the class name for the specified index in the import map. */
-	FName GetImportClassName(FPackageIndex PackageIndex)
-	{
-		if (PackageIndex.IsImport())
-		{
-			return GetImportClassName(PackageIndex.ToImport());
-		}
-		return NAME_None;
-	}
-	/** Gets the class name for the specified package index. */
-	FName GetClassName(FPackageIndex PackageIndex)
-	{
-		if (PackageIndex.IsImport())
-		{
-			return GetImportClassName(PackageIndex);
-		}
-		else if (PackageIndex.IsExport())
-		{
-			return GetExportClassName(PackageIndex);
-		}
-		return NAME_None;
-	}
-
-	FORCEINLINE ELinkerType::Type GetType() const
-	{
-		return LinkerType;
-	}
 
 	/**
-	 * I/O function
-	*
-	 * @param	Ar	the archive to read/write into
-	 */
-	void Serialize(FArchive& Ar);
-	void AddReferencedObjects(FReferenceCollector& Collector);
-	/**
-	 * Return the path name of the UObject represented by the specified import. 
+	 * Return the path name of the UObject represented by the specified import.
 	 * (can be used with StaticFindObject)
-	 * 
+	 *
 	 * @param	ImportIndex	index into the ImportMap for the resource to get the name for
 	 *
 	 * @return	the path name of the UObject represented by the resource at ImportIndex
 	 */
 	COREUOBJECT_API FString GetImportPathName(int32 ImportIndex);
 	/**
-	 * Return the path name of the UObject represented by the specified import. 
+	 * Return the path name of the UObject represented by the specified import.
 	 * (can be used with StaticFindObject)
-	 * 
+	 *
 	 * @param	PackageIndex	package index for the resource to get the name for
 	 *
 	 * @return	the path name of the UObject represented by the resource at PackageIndex, or the empty string if this isn't an import
@@ -334,66 +217,28 @@ public:
 	/**
 	 * Return the path name of the UObject represented by the specified export.
 	 * (can be used with StaticFindObject)
-	 * 
-	 * @param	ExportIndex				index into the ExportMap for the resource to get the name for
-	 * @param	FakeRoot				Optional name to replace use as the root package of this object instead of the linker
+	 *
+	 * @param	RootPackagePath			Name of the root package for this export
+	 * @param	ExportIndex				index into the ExportMap for the resource to get the name for	 
 	 * @param	bResolveForcedExports	if true, the package name part of the return value will be the export's original package,
 	 *									not the name of the package it's currently contained within.
 	 *
 	 * @return	the path name of the UObject represented by the resource at ExportIndex
 	 */
-	COREUOBJECT_API FString GetExportPathName(int32 ExportIndex, const TCHAR* FakeRoot=NULL,bool bResolveForcedExports=false);
-	/**
-	 * Return the path name of the UObject represented by the specified export.
-	 * (can be used with StaticFindObject)
-	 * 
-	 * @param	PackageIndex			package index for the resource to get the name for
-	 * @param	FakeRoot				Optional name to replace use as the root package of this object instead of the linker
-	 * @param	bResolveForcedExports	if true, the package name part of the return value will be the export's original package,
-	 *									not the name of the package it's currently contained within.
-	 *
-	 * @return	the path name of the UObject represented by the resource at PackageIndex, or the empty string if this isn't an export
-	 */
-	FString GetExportPathName(FPackageIndex PackageIndex, const TCHAR* FakeRoot=NULL,bool bResolveForcedExports=false)
-	{
-		if (PackageIndex.IsExport())
-		{
-			return GetExportPathName(PackageIndex.ToExport(), FakeRoot, bResolveForcedExports);
-		}
-		return FString();
-	}
+	COREUOBJECT_API FString GetExportPathName(const FString& RootPackagePath, int32 ExportIndex, bool bResolveForcedExports = false);
 
 	/**
-	 * Return the path name of the UObject represented by the specified import. 
-	 * (can be used with StaticFindObject)
-	 * 
-	 * @param	PackageIndex	package index
-	 *
-	 * @return	the path name of the UObject represented by the resource at PackageIndex, or the empty string if this is null
-	 */
-	FString GetPathName(FPackageIndex PackageIndex)
-	{
-		if (PackageIndex.IsImport())
-		{
-			return GetImportPathName(PackageIndex);
-		}
-		else if (PackageIndex.IsExport())
-		{
-			return GetExportPathName(PackageIndex);
-		}
-		return FString();
-	}
-	/**
 	 * Return the full name of the UObject represented by the specified import.
-	 * 
+	 *
 	 * @param	ImportIndex	index into the ImportMap for the resource to get the name for
 	 *
 	 * @return	the full name of the UObject represented by the resource at ImportIndex
 	 */
+
 	COREUOBJECT_API FString GetImportFullName(int32 ImportIndex);
 	/**
 	 * Return the full name of the UObject represented by the specified package index
-	 * 
+	 *
 	 * @param	PackageIndex	package index for the resource to get the name for
 	 *
 	 * @return	the full name of the UObject represented by the resource at PackageIndex
@@ -409,53 +254,15 @@ public:
 
 	/**
 	 * Return the full name of the UObject represented by the specified export.
-	 * 
+	 *
+	 * @param	RootPackagePath			Name of the root package for this export
 	 * @param	ExportIndex				index into the ExportMap for the resource to get the name for
-	 * @param	FakeRoot				Optional name to replace use as the root package of this object instead of the linker
 	 * @param	bResolveForcedExports	if true, the package name part of the return value will be the export's original package,
 	 *									not the name of the package it's currently contained within.
 	 *
 	 * @return	the full name of the UObject represented by the resource at ExportIndex
 	 */
-	COREUOBJECT_API FString GetExportFullName(int32 ExportIndex, const TCHAR* FakeRoot=NULL,bool bResolveForcedExports=false);
-	/**
-	 * Return the full name of the UObject represented by the specified package index
-	 * 
-	 * @param	PackageIndex			package index for the resource to get the name for
-	 * @param	FakeRoot				Optional name to replace use as the root package of this object instead of the linker
-	 * @param	bResolveForcedExports	if true, the package name part of the return value will be the export's original package,
-	 *									not the name of the package it's currently contained within.
-	 *
-	 * @return	the full name of the UObject represented by the resource at PackageIndex
-	 */
-	FString GetExportFullName(FPackageIndex PackageIndex, const TCHAR* FakeRoot=NULL,bool bResolveForcedExports=false)
-	{
-		if (PackageIndex.IsExport())
-		{
-			return GetExportFullName(PackageIndex.ToExport(), FakeRoot, bResolveForcedExports);
-		}
-		return FString();
-	}
-
-	/**
-	 * Return the full name of the UObject represented by the specified export.
-	 * 
-	 * @param	PackageIndex	package index
-	 *
-	 * @return	the path name of the UObject represented by the resource at PackageIndex, or the empty string if this is null
-	 */
-	FString GetFullImpExpName(FPackageIndex PackageIndex)
-	{
-		if (PackageIndex.IsImport())
-		{
-			return GetImportFullName(PackageIndex);
-		}
-		else if (PackageIndex.IsExport())
-		{
-			return GetExportFullName(PackageIndex);
-		}
-		return FString();
-	}
+	COREUOBJECT_API FString GetExportFullName(const FString& RootPackagePath, int32 ExportIndex, bool bResolveForcedExports = false);
 
 	/**
 	 * Return the outermost resource package index of the resource pointed by LinkerIndex
@@ -500,7 +307,254 @@ public:
 	 * @reutrn true if any export share the same outer has the import
 	 */
 	bool AnyExportShareOuterWithImport(int32 ImportIndex) const;
+
+	/** 
+	 * Gets the class name for the specified index in the export map.
+	 * @param ExportIdx			Export index
+	 * @return Class name of the export at specified index
+	 */
+	COREUOBJECT_API FName GetExportClassName(int32 ExportIdx);
+	/** 
+	 * Gets the class name for the specified index in the export map.
+	 * @param PackageIndex		PackageIndex that represents the export index
+	 * @return Class name of the export at specified PackageIndex if the PackageIndex represents an export. Otherwise NAME_None
+	 */
+	FName GetExportClassName(FPackageIndex PackageIndex)
+	{
+		if (PackageIndex.IsExport())
+		{
+			return GetExportClassName(PackageIndex.ToExport());
+		}
+		return FName();
+	}
+	/** 
+	 * Gets the class name for the specified index in the import map.
+	 * @param ImportIdx			Import index
+	 * @return Class name of the import at specified index
+	 */
+	FName GetImportClassName(int32 ImportIdx)
+	{
+		return ImportMap[ImportIdx].ClassName;
+	}
+	/** 
+	 * Gets the class name for the specified index in the import map.
+	 * @param ImportIdx			Import PackageIndex
+	 * @return Class name of the import at specified PackageIndex if the PackageIndex represents an import. Otherwise NAME_None
+	 */
+	FName GetImportClassName(FPackageIndex PackageIndex)
+	{
+		if (PackageIndex.IsImport())
+		{
+			return GetImportClassName(PackageIndex.ToImport());
+		}
+		return FName();
+	}
+	/** 
+	 * Gets the class name for the specified PackageIndex.
+	 * @param RootPackagePath	Name of the root package these linker tables represent
+	 * @param PackageIndex		PackageIndex for the entry in the linker tables (import or export)
+	 * @return Class name of the export at specified PackageIndex if the PackageIndex is non-null. Otherwise NAME_None
+	 */
+	FName GetClassName(FPackageIndex PackageIndex)
+	{
+		if (PackageIndex.IsImport())
+		{
+			return GetImportClassName(PackageIndex);
+		}
+		else if (PackageIndex.IsExport())
+		{
+			return GetExportClassName(PackageIndex);
+		}
+		return FName();
+	}
+
+	/** Returns the amount of memory allocated by this container, not including sizeof(*this). */
+	COREUOBJECT_API SIZE_T GetAllocatedSize() const;
+};
+
+/*----------------------------------------------------------------------------
+	FLinker.
+----------------------------------------------------------------------------*/
+namespace ELinkerType
+{
+	enum Type
+	{
+		None,
+		Load,
+		Save
+	};
+}
+
+/**
+ * Manages the data associated with an Unreal package.  Acts as the bridge between
+ * the file on disk and the UPackage object in memory for all Unreal package types.
+ */
+class FLinker : public FLinkerTables
+{
+private:	
+
+	ELinkerType::Type LinkerType;
+
+public:
+
+	/** The top-level UPackage object for the package associated with this linker */
+	UPackage*				LinkerRoot;
+
+	/** Table of contents for this package's file */
+	FPackageFileSummary		Summary;
+
+	/** Names used by objects contained within this package */
+	TArray<FNameEntryId>	NameMap;
+
+	/** List of SoftObjectPath contained in this package,  */
+	TArray<FSoftObjectPath> SoftObjectPathList;
+
+	/** Gatherable text data contained within this package */
+	TArray<FGatherableTextData> GatherableTextDataMap;
 	
+	/** Raw/bulk data references */
+	TArray<FObjectDataResource> DataResourceMap;
+	
+	/** The name of the file for this package */
+	UE_DEPRECATED(5.0, "Use GetDebugName for logging identifiers. For other purposes, use GetPackagePath on LinkerLoad and GetFilename on LinkerSave.")
+	FString					Filename;
+
+	/** If true, filter out exports that are for clients but not servers */
+	bool					FilterClientButNotServer;
+
+	/** If true, filter out exports that are for servers but not clients */
+	bool					FilterServerButNotClient;
+
+	/** The SHA1 key generator for this package, if active */
+	class FSHA1*			ScriptSHA;
+
+	/** Constructor. */
+	FLinker(ELinkerType::Type InType, UPackage* InRoot);
+	UE_DEPRECATED(5.0, "Linker's filename is deprecated; subclasses should create their own filename if required")
+	FLinker(ELinkerType::Type InType, UPackage* InRoot, const TCHAR* InFilename);
+
+	virtual ~FLinker();
+
+	FORCEINLINE ELinkerType::Type GetType() const
+	{
+		return LinkerType;
+	}
+
+	/** Returns a descriptor of the PackagePath this Linker is reading from or writing to, usable for an identifier in warning and log messages */
+	virtual FString GetDebugName() const;
+
+	/**
+	 * I/O function
+	*
+	 * @param	Ar	the archive to read/write into
+	 */
+	void Serialize(FArchive& Ar);
+	
+	/**
+	 * Return the path name of the UObject represented by the specified export.
+	 * (can be used with StaticFindObject)
+	 *
+	 * @param	ExportIndex				index into the ExportMap for the resource to get the name for
+	 * @param	FakeRoot				Optional name to replace use as the root package of this object instead of the linker
+	 * @param	bResolveForcedExports	if true, the package name part of the return value will be the export's original package,
+	 *									not the name of the package it's currently contained within.
+	 *
+	 * @return	the path name of the UObject represented by the resource at ExportIndex
+	 */
+	COREUOBJECT_API FString GetExportPathName(int32 ExportIndex, const TCHAR* FakeRoot = nullptr, bool bResolveForcedExports = false);
+
+	/**
+	 * Return the path name of the UObject represented by the specified export.
+	 * (can be used with StaticFindObject)
+	 *
+	 * @param	PackageIndex			package index for the resource to get the name for
+	 * @param	FakeRoot				Optional name to replace use as the root package of this object instead of the linker
+	 * @param	bResolveForcedExports	if true, the package name part of the return value will be the export's original package,
+	 *									not the name of the package it's currently contained within.
+	 *
+	 * @return	the path name of the UObject represented by the resource at PackageIndex, or the empty string if this isn't an export
+	 */
+	FString GetExportPathName(FPackageIndex PackageIndex, const TCHAR* FakeRoot = nullptr, bool bResolveForcedExports = false)
+	{
+		if (PackageIndex.IsExport())
+		{
+			return GetExportPathName(PackageIndex.ToExport(), FakeRoot, bResolveForcedExports);
+		}
+		return FString();
+	}
+
+	/**
+	 * Return the path name of the UObject represented by the specified import.
+	 * (can be used with StaticFindObject)
+	 *
+	 * @param	PackageIndex	package index
+	 *
+	 * @return	the path name of the UObject represented by the resource at PackageIndex, or the empty string if this is null
+	 */
+	FString GetPathName(FPackageIndex PackageIndex)
+	{
+		if (PackageIndex.IsImport())
+		{
+			return GetImportPathName(PackageIndex);
+		}
+		else if (PackageIndex.IsExport())
+		{
+			return GetExportPathName(PackageIndex);
+		}
+		return FString();
+	}
+
+	/**
+	 * Return the full name of the UObject represented by the specified export.
+	 *
+	 * @param	ExportIndex				index into the ExportMap for the resource to get the name for
+	 * @param	FakeRoot				Optional name to replace use as the root package of this object instead of the linker
+	 * @param	bResolveForcedExports	if true, the package name part of the return value will be the export's original package,
+	 *									not the name of the package it's currently contained within.
+	 *
+	 * @return	the full name of the UObject represented by the resource at ExportIndex
+	 */
+	COREUOBJECT_API FString GetExportFullName(int32 ExportIndex, const TCHAR* FakeRoot = nullptr, bool bResolveForcedExports = false);
+
+	/**
+	 * Return the full name of the UObject represented by the specified package index
+	 *
+	 * @param	PackageIndex			package index for the resource to get the name for
+	 * @param	FakeRoot				Optional name to replace use as the root package of this object instead of the linker
+	 * @param	bResolveForcedExports	if true, the package name part of the return value will be the export's original package,
+	 *									not the name of the package it's currently contained within.
+	 *
+	 * @return	the full name of the UObject represented by the resource at PackageIndex
+	 */
+	FString GetExportFullName(FPackageIndex PackageIndex, const TCHAR* FakeRoot = nullptr, bool bResolveForcedExports = false)
+	{
+		if (PackageIndex.IsExport())
+		{
+			return GetExportFullName(PackageIndex.ToExport(), FakeRoot, bResolveForcedExports);
+		}
+		return FString();
+	}
+
+	/**
+	 * Return the full name of the UObject represented by the specified export.
+	 *
+	 * @param	PackageIndex	package index
+	 *
+	 * @return	the path name of the UObject represented by the resource at PackageIndex, or the empty string if this is null
+	 */
+	FString GetFullImpExpName(FPackageIndex PackageIndex)
+	{
+		if (PackageIndex.IsImport())
+		{
+			return GetImportFullName(PackageIndex);
+		}
+		else if (PackageIndex.IsExport())
+		{
+			return GetExportFullName(PackageIndex);
+		}
+		return FString();
+	}
+
 	/**
 	 * Tell this linker to start SHA calculations
 	 */
@@ -602,23 +656,10 @@ typedef uint32 ELazyLoaderFlags;
 	Global functions
 -----------------------------------------------------------------------------*/
 
-/**
- * Remove references to the linker for the given package and delete the linker. 
- * Can be called after the package has finished loading.
- * Flushes async loading.
- */
-COREUOBJECT_API void ResetLoaders( UObject* InOuter );
-
-/** Deletes all linkers that have finished loading */
-COREUOBJECT_API void DeleteLoaders();
-
-/** Queues linker for deletion */
-COREUOBJECT_API void DeleteLoader(FLinkerLoad* Loader);
-
 /** 
  * Loads a linker for a package and returns it without loading any objects.
  * @param InOuter Package if known, can be null
- * @param InLongPackageName Name of the package to load
+ * @param PackagePath Package resource to load, must not be empty
  * @param LoadFlags Flags to pass to the new linker
  * @param Sandbox Additional sandbox for loading
  * @param CompatibleGuid Net GUID
@@ -626,13 +667,20 @@ COREUOBJECT_API void DeleteLoader(FLinkerLoad* Loader);
  * @param LinkerLoadedCallback Callback when the linker is loaded (or not found)
  * @return Pointer to the loaded linker or null if the file didn't exist
  */
+UE_DEPRECATED(5.4, "Use GetPackageLinker instead")
+COREUOBJECT_API FLinkerLoad* LoadPackageLinker(UPackage* InOuter, const FPackagePath& PackagePath, uint32 LoadFlags, UPackageMap* Sandbox, FArchive* InReaderOverride, TFunctionRef<void(FLinkerLoad* LoadedLinker)> LinkerLoadedCallback);
+UE_DEPRECATED(5.4, "Use GetPackageLinker instead")
+COREUOBJECT_API FLinkerLoad* LoadPackageLinker(UPackage* InOuter, const FPackagePath& PackagePath, uint32 LoadFlags = LOAD_None, UPackageMap* Sandbox = nullptr, FArchive* InReaderOverride = nullptr);
+
+UE_DEPRECATED(5.0, "Use version that takes a FPackagePath without a FGuid instead")
 COREUOBJECT_API FLinkerLoad* LoadPackageLinker(UPackage* InOuter, const TCHAR* InLongPackageName, uint32 LoadFlags, UPackageMap* Sandbox, FGuid* CompatibleGuid, FArchive* InReaderOverride, TFunctionRef<void(FLinkerLoad* LoadedLinker)> LinkerLoadedCallback);
+UE_DEPRECATED(5.0, "Use version that takes a FPackagePath without a FGuid instead")
 COREUOBJECT_API FLinkerLoad* LoadPackageLinker(UPackage* InOuter, const TCHAR* InLongPackageName, uint32 LoadFlags = LOAD_None, UPackageMap* Sandbox = nullptr, FGuid* CompatibleGuid = nullptr, FArchive* InReaderOverride = nullptr);
 
 /** 
- * Gets a linker for a package and returns it without loading any objects. This call must be preceeded by BeginLoad and followed by EndLoad calls
+ * Gets a linker for a package and returns it without loading any objects.
  * @param InOuter Package if known, can be null
- * @param InLongPackageName Name of the package to load
+ * @param PackagePath Package resource to load, must not be empty
  * @param LoadFlags Flags to pass to the new linker
  * @param Sandbox Additional sandbox for loading
  * @param CompatibleGuid Net GUID
@@ -642,14 +690,34 @@ COREUOBJECT_API FLinkerLoad* LoadPackageLinker(UPackage* InOuter, const TCHAR* I
  * @param InstancingContext Optional instancing context to pass in if a linker is created
  * @return Pointer to the loaded linker or null if the file didn't exist
  */
+COREUOBJECT_API FLinkerLoad* GetPackageLinker(UPackage* InOuter, const FPackagePath& PackagePath, uint32 LoadFlags, UPackageMap* Sandbox, FArchive* InReaderOverride = nullptr, FUObjectSerializeContext** InOutLoadContext = nullptr, FLinkerLoad* ImportLinker = nullptr, const FLinkerInstancingContext* InstancingContext = nullptr);
+
+UE_DEPRECATED(5.0, "Use version that takes a FPackagePath without a FGuid instead")
 COREUOBJECT_API FLinkerLoad* GetPackageLinker(UPackage* InOuter, const TCHAR* InLongPackageName, uint32 LoadFlags, UPackageMap* Sandbox, FGuid* CompatibleGuid, FArchive* InReaderOverride = nullptr, FUObjectSerializeContext** InOutLoadContext = nullptr, FLinkerLoad* ImportLinker = nullptr, const FLinkerInstancingContext* InstancingContext = nullptr);
 
+COREUOBJECT_API FString GetPrestreamPackageLinkerName(const TCHAR* InLongPackageName, bool bSkipIfExists = true);
+
+/**
+ * Reset the linker exports associated with the package
+ * @note, this might flush async loading if the linker is owned by the loading thread
+ */
+COREUOBJECT_API void ResetLinkerExports(UPackage* InPackage);
+
+/**
+ * Remove references to the linker for the given package and delete the linker.
+ * Can be called after the package has finished loading.
+ * Flushes async loading.
+ */
+COREUOBJECT_API void ResetLoaders(UObject* InOuter);
+COREUOBJECT_API void ResetLoaders(TArrayView<UObject*> InOuters);
 
 
-COREUOBJECT_API FString GetPrestreamPackageLinkerName(const TCHAR* InLongPackageName, bool bExistSkip = true);
-
-UE_DEPRECATED(4.25, "No longer used; use version that takes a UPackage* and call EnsureLoadingComplete separately.")
-COREUOBJECT_API void ResetLoadersForSave(UObject* InOuter, const TCHAR *Filename);
+/**
+ *  Conditionally flush async loading for a specific package if there's any pending async requests
+ * 
+ * @param InPackage		The package to flush for
+ */
+COREUOBJECT_API void ConditionalFlushAsyncLoadingForSave(UPackage* InPackage);
 
 /**
  *
@@ -667,6 +735,12 @@ COREUOBJECT_API void ResetLoadersForSave(UPackage* Package, const TCHAR* Filenam
  * @param	InPackage			The package we are saving along with their filename
  */
 COREUOBJECT_API void ResetLoadersForSave(TArrayView<FPackageSaveInfo> InPackages);
+
+/** Deletes all linkers that have finished loading */
+COREUOBJECT_API void DeleteLoaders();
+
+/** Queues linker for deletion */
+COREUOBJECT_API void DeleteLoader(FLinkerLoad* Loader);
 
 /*
  * Ensure all data that can be loaded from the linker (thumbnails, bulk data) is loaded, in preparation for saving out the given package

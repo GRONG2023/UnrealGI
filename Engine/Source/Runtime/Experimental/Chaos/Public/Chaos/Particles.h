@@ -4,6 +4,7 @@
 #include "Chaos/ArrayCollection.h"
 #include "Chaos/ArrayCollectionArray.h"
 #include "Chaos/Core.h"
+#include "Chaos/Particle/ObjectState.h"
 #include "Chaos/Vector.h"
 #include "ChaosArchive.h"
 #include "HAL/LowLevelMemTracker.h"
@@ -96,7 +97,7 @@ namespace Chaos
 
 		void Resize(const int32 Num)
 		{
-			AddParticles(Num - Size());
+			ResizeHelper(Num);
 			IncrementDirtyValidation();
 		}
 
@@ -134,20 +135,37 @@ namespace Chaos
 		{
 			return MX;
 		}
+
+		TArrayCollectionArray<TVector<T, d>>& XArray()
+		{
+			return MX;
+		}
 		
+		UE_DEPRECATED(5.4, "Use GetX instead")
 		const TVector<T, d>& X(const int32 Index) const
 		{
 			return MX[Index];
 		}
 
+		UE_DEPRECATED(5.4, "Use GetX or SetX instead")
 		TVector<T, d>& X(const int32 Index)
 		{
 			return MX[Index];
 		}
 
+		const TVector<T, d>& GetX(const int32 Index) const
+		{
+			return MX[Index];
+		}
+
+		void SetX(const int32 Index, const TVector<T, d>& InX)
+		{
+			MX[Index] = InX;
+		}
+
 		FString ToString(int32 index) const
 		{
-			return FString::Printf(TEXT("MX:%s"), *X(index).ToString());
+			return FString::Printf(TEXT("MX:%s"), *GetX(index).ToString());
 		}
 
 		uint32 GetTypeHash() const
@@ -157,15 +175,20 @@ namespace Chaos
 
 			if(NumXEntries > 0)
 			{
-				OutHash = ::GetTypeHash(MX[0]);
+				OutHash = UE::Math::GetTypeHash(MX[0]);
 
 				for(int32 XIndex = 1; XIndex < NumXEntries; ++XIndex)
 				{
-					OutHash = HashCombine(OutHash, ::GetTypeHash(MX[XIndex]));
+					OutHash = HashCombine(OutHash, UE::Math::GetTypeHash(MX[XIndex]));
 				}
 			}
 
 			return OutHash;
+		}
+
+		SIZE_T GetAllocatedSize() const
+		{
+			return MX.GetAllocatedSize();
 		}
 
 #if PARTICLE_ITERATOR_RANGED_FOR_CHECK
@@ -191,8 +214,7 @@ namespace Chaos
 #endif
 		}
 
-		template<typename operator_T, int operator_d>
-		friend FArchive& operator<<(FArchive& Ar, TParticles<operator_T, operator_d>& InParticles)
+		inline friend FArchive& operator<<(FArchive& Ar, TParticles<T, d>& InParticles)
 		{
 			InParticles.Serialize(Ar);
 			return Ar;
@@ -205,18 +227,7 @@ namespace Chaos
 		return InParticles.GetTypeHash();
 	}
 	
-	enum class EObjectStateType: int8
-	{
-		Uninitialized = 0,
-		Sleeping = 1,
-		Kinematic = 2,
-		Static = 3,
-		Dynamic = 4,
-
-		Count
-	};
-
-	enum EChaosCollisionTraceFlag
+	enum class EChaosCollisionTraceFlag : int8
 	{
 		/** Use project physics settings (DefaultShapeComplexity) */
 		Chaos_CTF_UseDefault,

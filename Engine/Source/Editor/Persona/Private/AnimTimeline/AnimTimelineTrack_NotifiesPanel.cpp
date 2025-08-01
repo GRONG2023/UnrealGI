@@ -1,23 +1,24 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "AnimTimelineTrack_NotifiesPanel.h"
+#include "AnimTimeline/AnimTimelineTrack_NotifiesPanel.h"
 #include "SAnimNotifyPanel.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Widgets/Layout/SBox.h"
 #include "PersonaUtils.h"
 #include "AnimSequenceTimelineCommands.h"
 #include "Widgets/Text/SInlineEditableTextBlock.h"
-#include "AnimTimelineTrack_Notifies.h"
+#include "AnimTimeline/AnimTimelineTrack_Notifies.h"
 #include "ScopedTransaction.h"
 #include "Widgets/Views/SExpanderArrow.h"
 #include "Widgets/Layout/SBorder.h"
-#include "SAnimOutlinerItem.h"
+#include "AnimTimeline/SAnimOutlinerItem.h"
 #include "Animation/AnimMontage.h"
-#include "AnimModel_AnimSequenceBase.h"
+#include "AnimTimeline/AnimModel_AnimSequenceBase.h"
 
 #define LOCTEXT_NAMESPACE "FAnimTimelineTrack_NotifiesPanel"
 
 const float FAnimTimelineTrack_NotifiesPanel::NotificationTrackHeight = 24.0f;
+const FName FAnimTimelineTrack_NotifiesPanel::AnimationEditorStatusBarName = FName(TEXT("AssetEditor.AnimationEditor.MainMenu"));
 
 ANIMTIMELINE_IMPLEMENT_TRACK(FAnimTimelineTrack_NotifiesPanel);
 
@@ -74,8 +75,8 @@ void FAnimTimelineTrack_NotifiesPanel::RefreshOutlinerWidget()
 
 		SlotBox->SetContent(
 			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("Sequencer.Section.BackgroundTint"))
-			.BorderBackgroundColor(FEditorStyle::GetColor("AnimTimeline.Outliner.ItemColor"))
+			.BorderImage(FAppStyle::GetBrush("Sequencer.Section.BackgroundTint"))
+			.BorderBackgroundColor(FAppStyle::GetColor("AnimTimeline.Outliner.ItemColor"))
 			[
 				SAssignNew(HorizontalBox, SHorizontalBox)
 				+SHorizontalBox::Slot()
@@ -207,34 +208,31 @@ void FAnimTimelineTrack_NotifiesPanel::RemoveTrack(int32 InTrackIndexToRemove)
 
 	if (AnimSequence->AnimNotifyTracks.IsValidIndex(InTrackIndexToRemove))
 	{
-		if (AnimSequence->AnimNotifyTracks[InTrackIndexToRemove].Notifies.Num() == 0)
+		FScopedTransaction Transaction(LOCTEXT("RemoveNotifyTrack", "Remove Notify Track"));
+		AnimSequence->Modify();
+
+		// before insert, make sure everything behind is fixed
+		for (int32 TrackIndex = InTrackIndexToRemove; TrackIndex < AnimSequence->AnimNotifyTracks.Num(); ++TrackIndex)
 		{
-			FScopedTransaction Transaction(LOCTEXT("RemoveNotifyTrack", "Remove Notify Track"));
-			AnimSequence->Modify();
+			FAnimNotifyTrack& Track = AnimSequence->AnimNotifyTracks[TrackIndex];
+			const int32 NewTrackIndex = FMath::Max(0, TrackIndex - 1);
 
-			// before insert, make sure everything behind is fixed
-			for (int32 TrackIndex = InTrackIndexToRemove + 1; TrackIndex < AnimSequence->AnimNotifyTracks.Num(); ++TrackIndex)
+			for (FAnimNotifyEvent* Notify : Track.Notifies)
 			{
-				FAnimNotifyTrack& Track = AnimSequence->AnimNotifyTracks[TrackIndex];
-				const int32 NewTrackIndex = TrackIndex - 1;
-
-				for (FAnimNotifyEvent* Notify : Track.Notifies)
-				{
-					// fix notifies indices
-					Notify->TrackIndex = NewTrackIndex;
-				}
-
-				for (FAnimSyncMarker* SyncMarker : Track.SyncMarkers)
-				{
-					// fix notifies indices
-					SyncMarker->TrackIndex = NewTrackIndex;
-				}
+				// fix notifies indices
+				Notify->TrackIndex = NewTrackIndex;
 			}
 
-			AnimSequence->AnimNotifyTracks.RemoveAt(InTrackIndexToRemove);
-
-			Update();
+			for (FAnimSyncMarker* SyncMarker : Track.SyncMarkers)
+			{
+				// fix notifies indices
+				SyncMarker->TrackIndex = NewTrackIndex;
+			}
 		}
+
+		AnimSequence->AnimNotifyTracks.RemoveAt(InTrackIndexToRemove);
+
+		Update();
 	}
 }
 
@@ -295,7 +293,50 @@ TSharedRef<SAnimNotifyPanel> FAnimTimelineTrack_NotifiesPanel::GetAnimNotifyPane
 			.OnNotifiesChanged_Lambda([this]()
 			{ 
 				Update();
-				GetModel()->OnTracksChanged().Broadcast(); 
+				GetModel()->OnTracksChanged().Broadcast();
+				 
+				if (StatusBarMessageHandle.IsValid())
+				{
+					if(UStatusBarSubsystem* StatusBarSubsystem = GEditor->GetEditorSubsystem<UStatusBarSubsystem>())
+					{
+						StatusBarSubsystem->PopStatusBarMessage(AnimationEditorStatusBarName, StatusBarMessageHandle);
+						StatusBarMessageHandle.Reset();
+					}
+				}
+			})
+			.OnNotifyStateHandleBeingDragged_Lambda([this](TSharedPtr<SAnimNotifyNode> NotifyNode, const FPointerEvent& Event, ENotifyStateHandleHit::Type Handle, float Time)
+			{
+				if (Event.IsShiftDown())
+				{
+					const FFrameTime FrameTime = FFrameTime::FromDecimal(Time * (double)GetModel()->GetTickResolution());
+					GetModel()->SetScrubPosition(FrameTime);
+				}
+
+				if (!StatusBarMessageHandle.IsValid())
+				{
+					if (UStatusBarSubsystem* StatusBarSubsystem = GEditor->GetEditorSubsystem<UStatusBarSubsystem>())
+					{
+						StatusBarMessageHandle = StatusBarSubsystem->PushStatusBarMessage(AnimationEditorStatusBarName,
+							LOCTEXT("AutoscrubNotifyStateHandle", "Hold SHIFT while dragging a notify state Begin or End handle to auto scrub the timeline."));
+					}
+				}
+			})
+			.OnNotifyNodesBeingDragged_Lambda([this](const TArray<TSharedPtr<SAnimNotifyNode>>& NotifyNodes, const class FDragDropEvent& Event, float DragXPosition, float DragTime)
+			{
+				if (Event.IsShiftDown())
+				{
+					const FFrameTime FrameTime = FFrameTime::FromDecimal(DragTime * (double)GetModel()->GetTickResolution());
+					GetModel()->SetScrubPosition(FrameTime);
+				}
+
+				if (!StatusBarMessageHandle.IsValid())
+				{
+					if (UStatusBarSubsystem* StatusBarSubsystem = GEditor->GetEditorSubsystem<UStatusBarSubsystem>())
+					{
+						StatusBarMessageHandle = StatusBarSubsystem->PushStatusBarMessage(AnimationEditorStatusBarName,
+							LOCTEXT("AutoscrubNotify", "Hold SHIFT while dragging a notify to auto scrub the timeline."));
+					}
+				}
 			});
 
 		GetModel()->GetAnimSequenceBase()->RegisterOnNotifyChanged(UAnimSequenceBase::FOnNotifyChanged::CreateSP(this, &FAnimTimelineTrack_NotifiesPanel::HandleNotifyChanged));

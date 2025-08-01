@@ -10,7 +10,7 @@
 #include "MaterialExpressionTransformPosition.generated.h"
 
 UENUM()
-enum EMaterialPositionTransformSource
+enum EMaterialPositionTransformSource : int
 {
 	/** Local space */
 	TRANSFORMPOSSOURCE_Local UMETA(DisplayName="Local Space"),
@@ -27,8 +27,11 @@ enum EMaterialPositionTransformSource
 	/** Camera space */
 	TRANSFORMPOSSOURCE_Camera  UMETA(DisplayName="Camera Space"),
 
-	/** Particle space */
-	TRANSFORMPOSSOURCE_Particle UMETA(DisplayName = "Mesh Particle Space"),
+	/** Particle space, deprecated value will be removed in a future release use instance space. */
+	TRANSFORMPOSSOURCE_Particle UMETA(Hidden, DisplayName = "Mesh Particle Space"),
+
+	/** Instance space (used to provide per instance transform, i.e. for Instanced Static Mesh / Particles). */
+	TRANSFORMPOSSOURCE_Instance UMETA(DisplayName = "Instance & Particle Space"),
 
 	TRANSFORMPOSSOURCE_MAX,
 };
@@ -43,16 +46,17 @@ class UMaterialExpressionTransformPosition : public UMaterialExpression
 	FExpressionInput Input;
 
 	/** source format of the position that will be transformed */
-	UPROPERTY(EditAnywhere, Category=MaterialExpressionTransformPosition, meta=(DisplayName = "Source"))
+	UPROPERTY(EditAnywhere, Category=MaterialExpressionTransformPosition, meta=(DisplayName = "Source", ShowAsInputPin = "Advanced"))
 	TEnumAsByte<enum EMaterialPositionTransformSource> TransformSourceType;
 
 	/** type of transform to apply to the input expression */
-	UPROPERTY(EditAnywhere, Category=MaterialExpressionTransformPosition, meta=(DisplayName = "Destination"))
+	UPROPERTY(EditAnywhere, Category=MaterialExpressionTransformPosition, meta=(DisplayName = "Destination", ShowAsInputPin = "Advanced"))
 	TEnumAsByte<enum EMaterialPositionTransformSource> TransformType;
 
 
 	//~ Begin UMaterialExpression Interface
 #if WITH_EDITOR
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
 	virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
 	virtual void GetCaption(TArray<FString>& OutCaptions) const override;
 #endif

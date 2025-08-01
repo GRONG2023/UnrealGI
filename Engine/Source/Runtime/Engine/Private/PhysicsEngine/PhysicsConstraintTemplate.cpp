@@ -3,6 +3,8 @@
 #include "PhysicsEngine/PhysicsConstraintTemplate.h"
 #include "PhysicsEngine/PhysicsAsset.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PhysicsConstraintTemplate)
+
 UPhysicsConstraintTemplate::UPhysicsConstraintTemplate(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
@@ -40,7 +42,7 @@ void UPhysicsConstraintTemplate::Serialize(FArchive& Ar)
 	Super::Serialize(Ar);
 
 	// If old content, copy properties out of setup into instance
-	if(Ar.UE4Ver() < VER_UE4_ALL_PROPS_TO_CONSTRAINTINSTANCE)
+	if(Ar.UEVer() < VER_UE4_ALL_PROPS_TO_CONSTRAINTINSTANCE)
 	{
 		CopySetupPropsToInstance(&DefaultInstance);
 	}
@@ -184,3 +186,4 @@ void UPhysicsConstraintTemplate::CopySetupPropsToInstance(FConstraintInstance* I
 	Instance->ProfileInstance.AngularBreakThreshold			= AngularBreakThreshold_DEPRECATED;
 #endif
 }
+

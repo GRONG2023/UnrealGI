@@ -6,16 +6,16 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
 #include "CoreTypes.h"
 #include "HAL/MemoryBase.h"
-#include "HAL/UnrealMemory.h"
-#include "Containers/Array.h"
-#include "Misc/Crc.h"
-#include "Containers/UnrealString.h"
-#include "Containers/Set.h"
-#include "Containers/Map.h"
-#include "Misc/ScopeLock.h"
 #include "HAL/ThreadSafeBool.h"
+#include "HAL/UnrealMemory.h"
+#include "Misc/Crc.h"
+#include "Misc/ScopeLock.h"
 
 #ifndef MALLOC_LEAKDETECTION
 	#define MALLOC_LEAKDETECTION 0
@@ -62,7 +62,7 @@ struct FMallocLeakReportOptions
 /**
  * Maintains a list of all pointers to currently allocated memory.
  */
-class CORE_API FMallocLeakDetection
+class FMallocLeakDetection
 {
 	struct FCallstackTrack
 	{
@@ -70,7 +70,7 @@ class CORE_API FMallocLeakDetection
 		{
 			FMemory::Memzero(this, sizeof(FCallstackTrack));
 		}
-		static const int32 Depth = 32;
+		static constexpr int32 Depth = 32;
 		uint64 CallStack[Depth];
 		uint32 FirstFrame;
 		uint32 LastFrame;
@@ -119,14 +119,14 @@ class CORE_API FMallocLeakDetection
 
 private:
 
-	FMallocLeakDetection();
-	~FMallocLeakDetection();
+	CORE_API FMallocLeakDetection();
+	CORE_API ~FMallocLeakDetection();
 
 	/** Track a callstack */
 
 	/** Stop tracking a callstack */
-	void AddCallstack(FCallstackTrack& Callstack);
-	void RemoveCallstack(FCallstackTrack& Callstack);
+	CORE_API void AddCallstack(FCallstackTrack& Callstack);
+	CORE_API void RemoveCallstack(FCallstackTrack& Callstack);
 
 	/** List of all currently allocated pointers */
 	TMap<void*, FCallstackTrack> OpenPointers;
@@ -167,38 +167,38 @@ private:
 
 public:	
 
-	static FMallocLeakDetection& Get();
-	static void HandleMallocLeakCommand(const TArray< FString >& Args);
+	static CORE_API FMallocLeakDetection& Get();
+	static CORE_API void HandleMallocLeakCommand(const TArray< FString >& Args);
 
 	/** Enable/disable collection of allocation with an optional filter on allocation size */
-	void SetAllocationCollection(bool bEnabled, int32 Size = 0);
+	CORE_API void SetAllocationCollection(bool bEnabled, int32 Size = 0);
 
 	/** Returns state of allocation collection */
 	bool IsAllocationCollectionEnabled(void) const { return bCaptureAllocs; }
 
 	/** Clear currently accumulated data */
-	void ClearData();
+	CORE_API void ClearData();
 
 	/** Dumps currently open callstacks */
-	int32 DumpOpenCallstacks(const TCHAR* FileName, const FMallocLeakReportOptions& Options = FMallocLeakReportOptions());
+	CORE_API int32 DumpOpenCallstacks(const TCHAR* FileName, const FMallocLeakReportOptions& Options = FMallocLeakReportOptions());
 
 	/** Perform a linear fit checkpoint of all open callstacks */
-	void CheckpointLinearFit();
+	CORE_API void CheckpointLinearFit();
 
 	/** Handles new allocated pointer */
-	void Malloc(void* Ptr, SIZE_T Size);
+	CORE_API void Malloc(void* Ptr, SIZE_T Size);
 
 	/** Handles reallocation */
-	void Realloc(void* OldPtr, SIZE_T OldSize, void* NewPtr, SIZE_T NewSize);
+	CORE_API void Realloc(void* OldPtr, SIZE_T OldSize, void* NewPtr, SIZE_T NewSize);
 
 	/** Removes allocated pointer from list */
-	void Free(void* Ptr);	
+	CORE_API void Free(void* Ptr);	
 
-	/** Disabled allocation tracking for this thread. Used by MALLOCLEAK_WHITELIST_SCOPE macros */
-	void SetDisabledForThisThread(const bool Disabled);
+	/** Disabled allocation tracking for this thread, @see MALLOCLEAK_IGNORE_SCOPE and FMallocLeakDetectionIgnoreScope. */
+	CORE_API void SetDisabledForThisThread(const bool Disabled);
 
 	/** Returns true of allocation tracking for this thread is  */
-	bool IsDisabledForThisThread() const;
+	CORE_API bool IsDisabledForThisThread() const;
 
 	/** Pushes context that will be associated with allocations. All open contexts will be displayed alongside
 	callstacks in a report.  */
@@ -206,37 +206,37 @@ public:
 	{
 		this->PushContext(*Context);
 	}
-	void PushContext(const TCHAR* Context);
+	CORE_API void PushContext(const TCHAR* Context);
 
 	/** Pops a context from the above */
-	void PopContext();
+	CORE_API void PopContext();
 
 	/** Returns */
-	void GetOpenCallstacks(TArray<uint32>& OutCallstacks, SIZE_T& OutTotalSize, const FMallocLeakReportOptions& Options = FMallocLeakReportOptions());
+	CORE_API void GetOpenCallstacks(TArray<uint32>& OutCallstacks, SIZE_T& OutTotalSize, const FMallocLeakReportOptions& Options = FMallocLeakReportOptions());
 };
 
 /**
- *	Helper class that can be used to whitelist allocations from a specific scope. Use this
- *	carefully and only if you know that a portion of code is throwing up either false
- *	positives or can be ignored. (e.g. one example is the FName table which never shrinks
+ *	Helper class that can be used to ignore allocations from a specific scope for leak detection.
+ *	Use this carefully and only if you know that a portion of code is throwing up either false
+ *	positives or can be ignored. (e.g., one example is the FName table which never shrinks
  *	and eventually reaches a max that is relatively inconsequential).
  */
-class FMallocLeakScopeWhitelist
+class FMallocLeakDetectionIgnoreScope
 {
 public:
-	FMallocLeakScopeWhitelist()
+	FMallocLeakDetectionIgnoreScope()
 	{
 		FMallocLeakDetection::Get().SetDisabledForThisThread(true);
 	}
 
-	~FMallocLeakScopeWhitelist()
+	~FMallocLeakDetectionIgnoreScope()
 	{
 		FMallocLeakDetection::Get().SetDisabledForThisThread(false);
 	}
 
 	// Non-copyable
-	FMallocLeakScopeWhitelist(const FMallocLeakScopeWhitelist&) = delete;
-	FMallocLeakScopeWhitelist& operator=(const FMallocLeakScopeWhitelist&) = delete;
+	FMallocLeakDetectionIgnoreScope(const FMallocLeakDetectionIgnoreScope&) = delete;
+	FMallocLeakDetectionIgnoreScope& operator=(const FMallocLeakDetectionIgnoreScope&) = delete;
 };
 
 class FMallocLeakScopedContext
@@ -258,15 +258,15 @@ public:
 	FMallocLeakScopedContext& operator=(const FMallocLeakScopedContext&) = delete;
 };
 
-#define MALLOCLEAK_WHITELIST_SCOPE() \
-	FMallocLeakScopeWhitelist ANONYMOUS_VARIABLE(ScopeWhitelist)
+#define MALLOCLEAK_IGNORE_SCOPE() \
+	FMallocLeakDetectionIgnoreScope ANONYMOUS_VARIABLE(DetectionShouldIgnoreScope)
 
 #define MALLOCLEAK_SCOPED_CONTEXT(Context) \
 	FMallocLeakScopedContext ANONYMOUS_VARIABLE(ScopedContext)(Context)
 
 #else // MALLOC_LEAKDETECTION 0
 
-#define MALLOCLEAK_WHITELIST_SCOPE()
+#define MALLOCLEAK_IGNORE_SCOPE()
 #define MALLOCLEAK_SCOPED_CONTEXT(Context)
 
 #endif // MALLOC_LEAKDETECTION

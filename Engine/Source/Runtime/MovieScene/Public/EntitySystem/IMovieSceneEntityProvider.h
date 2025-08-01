@@ -2,24 +2,35 @@
 
 #pragma once
 
-#include "UObject/Interface.h"
 #include "Containers/Array.h"
-#include "Misc/InlineValue.h"
+#include "Containers/ContainerAllocationPolicies.h"
+#include "Evaluation/MovieSceneSectionParameters.h"
+#include "EntitySystem/MovieSceneEntityBuilder.h"
 #include "EntitySystem/MovieSceneEntityIDs.h"
+#include "EntitySystem/MovieSceneEntitySystemTypes.h"
 #include "EntitySystem/MovieSceneSequenceInstanceHandle.h"
-#include "Math/Range.h"
 #include "Evaluation/MovieSceneCompletionMode.h"
+#include "HAL/Platform.h"
+#include "Math/Range.h"
+#include "Misc/Guid.h"
+#include "Misc/InlineValue.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Interface.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
 
 #include "IMovieSceneEntityProvider.generated.h"
 
 class UClass;
-class UMovieSceneSection;
 class UMovieSceneEntitySystemLinker;
-
-struct FMovieSceneTimeTransform;
+class UMovieSceneSection;
+class UObject;
+struct FFrameNumber;
 struct FMovieSceneEntityComponentFieldBuilder;
 struct FMovieSceneEvaluationFieldEntityMetaData;
 struct FMovieSceneEvaluationFieldSharedEntityMetaData;
+struct FMovieSceneTimeTransform;
+template <typename ElementType> class TRange;
 
 
 namespace UE
@@ -27,10 +38,9 @@ namespace UE
 namespace MovieScene
 {
 
-struct IEntityBuilder;
-struct FEntityImportParams;
-
 class FEntityManager;
+struct FEntityImportParams;
+struct IEntityBuilder;
 
 
 struct FImportedEntity
@@ -57,32 +67,37 @@ struct FEntityImportSequenceParams
 {
 	FEntityImportSequenceParams()
 		: HierarchicalBias(0)
+		, SequenceID(MovieSceneSequenceID::Root)
 		, DefaultCompletionMode(EMovieSceneCompletionMode::KeepState)
-		, bHasHierarchicalEasing(false)
+		, SubSectionFlags(EMovieSceneSubSectionFlags::None)
 		, bPreRoll(false)
 		, bPostRoll(false)
+		, bDynamicWeighting(false)
 	{}
 
 	int32 HierarchicalBias;
 
+	FMovieSceneSequenceID SequenceID;
 	FInstanceHandle InstanceHandle;
-	FInstanceHandle RootInstanceHandle;
+	FRootInstanceHandle RootInstanceHandle;
 
 	EMovieSceneCompletionMode DefaultCompletionMode;
+	EMovieSceneSubSectionFlags SubSectionFlags;
 
-	bool bHasHierarchicalEasing : 1;
 	bool bPreRoll : 1;
 	bool bPostRoll : 1;
+	bool bDynamicWeighting : 1;
 };
 
 struct FEntityImportParams
 {
-	const FMovieSceneEvaluationFieldEntityMetaData* EntityMetaData;
-	const FMovieSceneEvaluationFieldSharedEntityMetaData* SharedMetaData;
+	const FMovieSceneEvaluationFieldEntityMetaData* EntityMetaData = nullptr;
+	const FMovieSceneEvaluationFieldSharedEntityMetaData* SharedMetaData = nullptr;
 
 	uint32 EntityID = 0;
 
 	FInterrogationKey InterrogationKey;
+	FInterrogationInstance InterrogationInstance;
 
 	FEntityImportSequenceParams Sequence;
 
@@ -93,8 +108,8 @@ struct FEntityImportParams
 } // namespace UE
 
 
-UINTERFACE()
-class MOVIESCENE_API UMovieSceneEntityProvider : public UInterface
+UINTERFACE(MinimalAPI)
+class UMovieSceneEntityProvider : public UInterface
 {
 public:
 	GENERATED_BODY()
@@ -103,12 +118,12 @@ public:
 /**
  * Interface to be added to UMovieSceneSection types when they contain entity data
  */
-class MOVIESCENE_API IMovieSceneEntityProvider
+class IMovieSceneEntityProvider
 {
 public:
 
-	using FEntityImportParams   = UE::MovieScene::FEntityImportParams;
-	using FImportedEntity       = UE::MovieScene::FImportedEntity;
+	using FEntityImportParams        = UE::MovieScene::FEntityImportParams;
+	using FImportedEntity            = UE::MovieScene::FImportedEntity;
 
 
 	GENERATED_BODY()
@@ -123,8 +138,8 @@ public:
 	}
 
 
-	void ImportEntity(UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity);
-	void InterrogateEntity(UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity);
+	MOVIESCENE_API void ImportEntity(UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity);
+	MOVIESCENE_API void InterrogateEntity(UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity);
 
 private:
 

@@ -16,6 +16,10 @@
 #include "config.hh"
 #include "common.hh"
 #include "cell.hh"
+#include "HAL/PlatformMisc.h"
+
+
+PRAGMA_DISABLE_UNSAFE_TYPECAST_WARNINGS
 
 namespace voro {
 
@@ -2067,7 +2071,7 @@ void voronoicell_neighbor::neighborsTArray(TArray<int> &nbrs, bool excludeBounds
 	reset_edges();
 }
 /** Computes Unreal TArrays of all cell info. */
-void voronoicell_neighbor::extractCellInfo(FVector CellPosition, TArray<FVector> &Vertices, TArray<int32> &FaceVertexIndices, TArray<int32> &Nbrs, TArray<FVector> &Normals)
+void voronoicell_neighbor::extractCellInfo(const FVector& CellPosition, TArray<FVector> &Vertices, TArray<int32> &FaceVertexIndices, TArray<int32> &Nbrs, TArray<FVector> &Normals)
 {
 	Vertices.SetNumUninitialized(p);
 	double *ptsp = pts;
@@ -2079,7 +2083,7 @@ void voronoicell_neighbor::extractCellInfo(FVector CellPosition, TArray<FVector>
 	}
 	
 	
-	FaceVertexIndices.Empty(); Nbrs.Empty(); Normals.Empty();
+	FaceVertexIndices.Reset(); Nbrs.Reset(); Normals.Reset();
 
 	// Vertex indices code (face_vertices)
 	int i, j, k, l, m, vp(0), vn;
@@ -2146,6 +2150,46 @@ void voronoicell_neighbor::extractCellInfo(FVector CellPosition, TArray<FVector>
 	}
 	reset_edges();
 }
+/** Computes Unreal TArrays of all cell info. */
+void voronoicell::extractCellInfo(const FVector& CellPosition, TArray<FVector>& Vertices, TArray<int32>& FaceVertexIndices)
+{
+	Vertices.SetNumUninitialized(p);
+	double* ptsp = pts;
+	for (int i = 0; i < p; i++)
+	{
+		Vertices[i].X = CellPosition.X + *(ptsp++) * 0.5;
+		Vertices[i].Y = CellPosition.Y + *(ptsp++) * 0.5;
+		Vertices[i].Z = CellPosition.Z + *(ptsp++) * 0.5;
+	}
+
+	FaceVertexIndices.Reset();
+
+	// Vertex indices code (face_vertices)
+	int i, j, k, l, m, vp(0), vn;
+	for (i = 1; i < p; i++) for (j = 0; j < nu[i]; j++) {
+		k = ed[i][j];
+		if (k >= 0) { // on a new face
+			FaceVertexIndices.Add(0); // placeholder for face vertex count
+			FaceVertexIndices.Add(i);
+
+			ed[i][j] = -1 - k;
+			l = cycle_up(ed[i][nu[i] + j], k);
+			do {
+				FaceVertexIndices.Add(k);
+				m = ed[k][l];
+				ed[k][l] = -1 - m;
+
+				l = cycle_up(ed[k][nu[k] + l], m);
+				k = m;
+			} while (k != i);
+
+			vn = FaceVertexIndices.Num();
+			FaceVertexIndices[vp] = vn - vp - 1;
+			vp = vn;
+		}
+	}
+	reset_edges();
+}
 
 /** Prints the vertices, their edges, the relation table, and also notifies if
  * any memory errors are visible. */
@@ -2182,3 +2226,4 @@ template void voronoicell_base::check_memory_for_copy(voronoicell&,voronoicell_b
 template void voronoicell_base::check_memory_for_copy(voronoicell_neighbor&,voronoicell_base*);
 
 }
+PRAGMA_RESTORE_UNSAFE_TYPECAST_WARNINGS

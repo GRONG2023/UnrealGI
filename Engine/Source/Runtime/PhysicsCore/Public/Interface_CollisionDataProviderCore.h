@@ -19,12 +19,15 @@ struct FTriIndices
 	}
 };
 
+#if WITH_EDITORONLY_DATA
+PHYSICSCORE_API void operator<<(class FArchive& Ar, FTriIndices& TriIndices);
+#endif
 
 // Description of triangle mesh collision data necessary for cooking physics data
 struct FTriMeshCollisionData
 {
 	/** Array of vertices included in the triangle mesh */
-	TArray<FVector> Vertices;
+	TArray<FVector3f> Vertices;
 
 	/** Array of indices defining the ordering of triangles in the mesh */
 	TArray<FTriIndices> Indices;
@@ -54,4 +57,14 @@ struct FTriMeshCollisionData
 		, bDisableActiveEdgePrecompute(false)
 	{
 	}
+};
+
+#if WITH_EDITORONLY_DATA
+PHYSICSCORE_API void operator<<(class FArchive& Ar, FTriMeshCollisionData& TriMeshCollisionData);
+#endif
+
+// Estimates of triangle mesh collision data necessary for cooking physics data
+struct FTriMeshCollisionDataEstimates
+{
+	int64 VerticeCount = 0;
 };

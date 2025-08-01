@@ -14,13 +14,13 @@ namespace DatasmithSketchUpUtils
 			return FVector(float(V.x), float(-V.y), float(V.z));
 		}
 
-		static FORCEINLINE FVector ConvertPosition(double X, double Y, double Z)
+		static FORCEINLINE FVector3f ConvertPosition(double X, double Y, double Z)
 		{
 			const float UnitScaleSketchupToUnreal = 2.54; // centimeters per inch
-			return FVector(float(X * UnitScaleSketchupToUnreal), float(-Y * UnitScaleSketchupToUnreal), float(Z * UnitScaleSketchupToUnreal));
+			return FVector3f(float(X * UnitScaleSketchupToUnreal), float(-Y * UnitScaleSketchupToUnreal), float(Z * UnitScaleSketchupToUnreal));
 		}
 
-		static FORCEINLINE FVector ConvertPosition(const SUPoint3D& V)
+		static FORCEINLINE FVector3f ConvertPosition(const SUPoint3D& V)
 		{
 			return ConvertPosition(V.x, V.y, V.z);
 		}
@@ -78,6 +78,7 @@ namespace DatasmithSketchUpUtils
 		SUComponentInstanceRef InSComponentInstanceRef, // valid SketckUp component instance
 		SULayerRef             InSInheritedLayerRef     // SketchUp inherited layer
 	);
+	SULayerRef GetEffectiveLayer(SUDrawingElementRef DrawingElementRef, SULayerRef InInheritedLayerRef);
 
 	// Return whether or not a SketckUp component instance is visible in the current SketchUp scene.
 	bool IsVisible(
@@ -85,9 +86,9 @@ namespace DatasmithSketchUpUtils
 		SULayerRef             InSEffectiveLayerRef     // SketchUp component instance effective layer
 	);
 
-	// Return whether or not a SketckUp face is visible in the current SketchUp scene.
-	bool IsVisible(
-		SUFaceRef  InSFaceRef          // valid SketchUp face
+	// Return whether or not a SketckUp layer is visible in the current SketchUp scene taking into account folder visibility
+	bool IsLayerVisible(
+		SULayerRef LayerRef
 	);
 
 	// Get the material of a SketckUp component instance.

@@ -9,8 +9,9 @@
 #include "CoreMinimal.h"
 #include "TextureResource.h"
 #include "Streaming/StreamableRenderResourceState.h"
+#include "Engine/Texture.h"
 
-bool CanCreateWithPartiallyResidentMips(uint32 TexCreateFlags);
+bool CanCreateWithPartiallyResidentMips(ETextureCreateFlags TexCreateFlags);
 
 /** 
  * The rendering resource streamable texture.
@@ -22,14 +23,15 @@ public:
 	FStreamableTextureResource(UTexture* InOwner, const FTexturePlatformData* InPlatformData, const FStreamableRenderResourceState& InPostInitState, bool bAllowPartiallyResidentMips);
 
 	// Dynamic cast methods.
-	ENGINE_API virtual FStreamableTextureResource* GetStreamableTextureResource() { return this; }
+	virtual FStreamableTextureResource* GetStreamableTextureResource() { return this; }
 	// Dynamic cast methods (const).
-	ENGINE_API virtual const FStreamableTextureResource* GetStreamableTextureResource() const { return this; }
+	virtual const FStreamableTextureResource* GetStreamableTextureResource() const { return this; }
 
 	virtual uint32 GetSizeX() const final override { return SizeX; }
 	virtual uint32 GetSizeY() const final override { return SizeY; }
+	// Depth for 3D texture or ArraySize for texture 2d arrays
 	virtual uint32 GetSizeZ() const final override { return SizeZ; }
-	virtual void InitRHI() final override;
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 	virtual void ReleaseRHI() final override;
 
 	// This is only coherent sync on the rendering thread. To get the gamethread coherent value, use UStreamableRenderResource.CacheStreamableResourceState
@@ -70,6 +72,11 @@ public:
 		return State.IsValid() ? State.ResidentFirstLODIdx() : 0;
 	}
 
+	FORCEINLINE uint32 GetExtData() const { return PlatformData->GetExtData(); }
+
+	/** Returns the platform mip size for the given mip count. */
+	virtual uint64 GetPlatformMipsSize(uint32 NumMips) const = 0;
+
 protected:
 
 	virtual void CreateTexture() = 0;
@@ -92,7 +99,7 @@ protected:
 	uint32 SizeX = 0;
 	/** The height when all mips are streamed in. */
 	uint32 SizeY = 0;
-	/** The depth when all mips are streamed in. */
+	/** The 3d depth for volume texture or num  slices for 2d array when all mips are streamed in. */
 	uint32 SizeZ = 0;
 
 	/** The FName of the texture asset */
@@ -108,8 +115,12 @@ protected:
 	/** Whether this texture should be updated using the virtual address mapping for each mip. */
 	bool bUsePartiallyResidentMips = false;
 
+	/** Max anisotropy. if 0, will use r.MaxAnisotropy */
+	int8 MaxAniso = 0;
+
 #if STATS
-	virtual void CalcRequestedMipsSize() = 0;
+private:
+	void CalcRequestedMipsSize();
 	void IncrementTextureStats() const;
 	void DecrementTextureStats() const;
 

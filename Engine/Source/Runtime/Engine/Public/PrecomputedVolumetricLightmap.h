@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include "UObject/WeakObjectPtr.h"
 #include "CoreMinimal.h"
 #include "Misc/Guid.h"
 #include "Math/SHMath.h"
@@ -59,13 +60,16 @@ public:
 
 	ENGINE_API void CreateTexture(FIntVector Dimensions);
 	ENGINE_API void CreateTargetTexture(FIntVector Dimensions);
+	ENGINE_API void CreateUAV(FRHICommandListBase& RHICmdList);
+	
+	UE_DEPRECATED(5.3, "CreateUAV now requires a command list.")
 	ENGINE_API void CreateUAV();
 
 	TArray<uint8> Data;
 	// Stored redundantly for stats after Data has been discarded
 	int32 DataSize;
 	EPixelFormat Format;
-	FTexture3DRHIRef Texture;
+	FTextureRHIRef Texture;
 	FUnorderedAccessViewRHIRef UAV;
 
 	bool bNeedsCPUAccess;
@@ -82,13 +86,10 @@ struct FVolumetricLightmapBasicBrickDataLayers
 class FVolumetricLightmapBrickData : public FVolumetricLightmapBasicBrickDataLayers
 {
 public:
-	// Mobile LQ layers:
-	FVolumetricLightmapDataLayer LQLightColor;
-	FVolumetricLightmapDataLayer LQLightDirection;
 
 	ENGINE_API int32 GetMinimumVoxelSize() const;
 
-	ENGINE_API void ReleaseRHI()
+	void ReleaseRHI()
 	{
 		AmbientVector.Texture.SafeRelease();
 
@@ -114,7 +115,6 @@ public:
 	SIZE_T GetAllocatedBytes() const
 	{
 		SIZE_T NumBytes = AmbientVector.DataSize + SkyBentNormal.DataSize + DirectionalLightShadowing.DataSize;
-		NumBytes += LQLightColor.Data.Num() + LQLightDirection.Data.Num();
 
 		for (int32 i = 0; i < UE_ARRAY_COUNT(SHCoefficients); i++)
 		{
@@ -136,13 +136,6 @@ public:
 		SkyBentNormal.bNeedsCPUAccess = InAccess;
 		DirectionalLightShadowing.bNeedsCPUAccess = InAccess;
 	}
-
-	// discard the layers used for low quality lightmap (LQ includes direct lighting from stationary lights).
-	void DiscardLowQualityLayers()
-	{
-		LQLightColor.Discard();
-		LQLightDirection.Discard();
-	}
 };
 
 /** 
@@ -162,7 +155,7 @@ public:
 	ENGINE_API void InitializeOnImport(const FBox& NewBounds, int32 InBrickSize);
 	ENGINE_API void FinalizeImport();
 
-	ENGINE_API virtual void InitRHI() override;
+	ENGINE_API virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 	ENGINE_API virtual void ReleaseRHI() override;
 
 	ENGINE_API void InitRHIForSubLevelResources();
@@ -200,10 +193,10 @@ public:
 	/**
 	 * Runtime data for sub level streaming
 	 */
-	FVertexBufferRHIRef SubLevelBrickPositionsBuffer;
+	FBufferRHIRef SubLevelBrickPositionsBuffer;
 	FShaderResourceViewRHIRef SubLevelBrickPositionsSRV;
 
-	FVertexBufferRHIRef IndirectionTextureOriginalValuesBuffer;
+	FBufferRHIRef IndirectionTextureOriginalValuesBuffer;
 	FShaderResourceViewRHIRef IndirectionTextureOriginalValuesSRV;
 
 	int32 BrickDataBaseOffsetInAtlas;
@@ -233,7 +226,7 @@ public:
 
 	ENGINE_API void RemoveFromScene(FSceneInterface* Scene);
 	
-	ENGINE_API void SetData(FPrecomputedVolumetricLightmapData* NewData, FSceneInterface* Scene);
+	ENGINE_API void SetData(FRHICommandListBase& RHICmdList, FPrecomputedVolumetricLightmapData* NewData, FSceneInterface* Scene);
 
 	bool IsAddedToScene() const
 	{
@@ -317,7 +310,7 @@ inline FLinearColor ConvertToLinearColor<uint8>(uint8 InColor)
 	return FLinearColor(InColor * Scale, 0, 0, 0);
 };
 
-static const float GPointFilteringThreshold = .001f;
+inline static const float GPointFilteringThreshold = .001f;
 
 template<typename VoxelDataType>
 FLinearColor FilteredVolumeLookup(FVector Coordinate, FIntVector DataDimensions, const VoxelDataType* Data)
@@ -420,12 +413,7 @@ class FRemoveSubLevelBricksCS : public FGlobalShader
 	DECLARE_GLOBAL_SHADER(FRemoveSubLevelBricksCS);
 	SHADER_USE_PARAMETER_STRUCT(FRemoveSubLevelBricksCS, FGlobalShader);
 
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		static const auto AllowStaticLightingVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.AllowStaticLighting"));
-
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5) && AllowStaticLightingVar->GetValueOnAnyThread() != 0;
-	}
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(uint32, NumBricks)
@@ -444,12 +432,7 @@ class FCopyResidentBricksCS : public FGlobalShader
 	class FHasSkyBentNormal : SHADER_PERMUTATION_BOOL("HAS_SKY_BENT_NORMAL");
 	using FPermutationDomain = TShaderPermutationDomain<FHasSkyBentNormal>;
 
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		static const auto AllowStaticLightingVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.AllowStaticLighting"));
-
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5) && AllowStaticLightingVar->GetValueOnAnyThread() != 0;
-	}
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(uint32, StartPosInOldVolume)
@@ -469,12 +452,7 @@ class FCopyResidentBrickSHCoefficientsCS : public FGlobalShader
 	DECLARE_GLOBAL_SHADER(FCopyResidentBrickSHCoefficientsCS);
 	SHADER_USE_PARAMETER_STRUCT(FCopyResidentBrickSHCoefficientsCS, FGlobalShader);
 
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		static const auto AllowStaticLightingVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.AllowStaticLighting"));
-
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5) && AllowStaticLightingVar->GetValueOnAnyThread() != 0;
-	}
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(uint32, StartPosInOldVolume)
@@ -489,12 +467,7 @@ class FPatchIndirectionTextureCS : public FGlobalShader
 	DECLARE_GLOBAL_SHADER(FPatchIndirectionTextureCS);
 	SHADER_USE_PARAMETER_STRUCT(FPatchIndirectionTextureCS, FGlobalShader);
 
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		static const auto AllowStaticLightingVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.AllowStaticLighting"));
-
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5) && AllowStaticLightingVar->GetValueOnAnyThread() != 0;
-	}
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(uint32, NumBricks)
@@ -509,12 +482,7 @@ class FMoveWholeIndirectionTextureCS : public FGlobalShader
 	DECLARE_GLOBAL_SHADER(FMoveWholeIndirectionTextureCS);
 	SHADER_USE_PARAMETER_STRUCT(FMoveWholeIndirectionTextureCS, FGlobalShader);
 
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		static const auto AllowStaticLightingVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.AllowStaticLighting"));
-
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5) && AllowStaticLightingVar->GetValueOnAnyThread() != 0;
-	}
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(uint32, NumBricks)
@@ -532,6 +500,8 @@ struct FVolumetricLightmapBrickTextureSet : public FVolumetricLightmapBasicBrick
 	template<class VolumetricLightmapBrickDataType> // Can be either FVolumetricLightmapBrickData or FVolumetricLightmapBrickTextureSet
 	void Initialize(FIntVector InBrickDataDimensions, VolumetricLightmapBrickDataType& BrickData)
 	{
+		FRHICommandListBase& RHICmdList = FRHICommandListImmediate::Get();
+
 		BrickDataDimensions = InBrickDataDimensions;
 
 		AmbientVector.Format = BrickData.AmbientVector.Format;
@@ -544,22 +514,22 @@ struct FVolumetricLightmapBrickTextureSet : public FVolumetricLightmapBasicBrick
 		}
 
 		AmbientVector.CreateTargetTexture(BrickDataDimensions);
-		AmbientVector.CreateUAV();
+		AmbientVector.CreateUAV(RHICmdList);
 
 		for (int32 i = 0; i < UE_ARRAY_COUNT(SHCoefficients); i++)
 		{
 			SHCoefficients[i].CreateTargetTexture(BrickDataDimensions);
-			SHCoefficients[i].CreateUAV();
+			SHCoefficients[i].CreateUAV(RHICmdList);
 		}
 
 		if (BrickData.SkyBentNormal.Texture.IsValid())
 		{
 			SkyBentNormal.CreateTargetTexture(BrickDataDimensions);
-			SkyBentNormal.CreateUAV();
+			SkyBentNormal.CreateUAV(RHICmdList);
 		}
 
 		DirectionalLightShadowing.CreateTargetTexture(BrickDataDimensions);
-		DirectionalLightShadowing.CreateUAV();
+		DirectionalLightShadowing.CreateUAV(RHICmdList);
 	}
 
 	void Release()
@@ -582,14 +552,14 @@ struct FVolumetricLightmapBrickTextureSet : public FVolumetricLightmapBasicBrick
 	}
 };
 
-class ENGINE_API FVolumetricLightmapBrickAtlas : public FRenderResource
+class FVolumetricLightmapBrickAtlas : public FRenderResource
 {
 public:
-	FVolumetricLightmapBrickAtlas();
+	ENGINE_API FVolumetricLightmapBrickAtlas();
 
 	FVolumetricLightmapBrickTextureSet TextureSet;
 
-	virtual void ReleaseRHI() override;
+	ENGINE_API virtual void ReleaseRHI() override;
 
 	struct Allocation
 	{
@@ -602,8 +572,8 @@ public:
 
 	TArray<Allocation> Allocations;
 
-	void Insert(int32 Index, FPrecomputedVolumetricLightmapData* Data);
-	void Remove(FPrecomputedVolumetricLightmapData* Data);
+	ENGINE_API void Insert(int32 Index, FPrecomputedVolumetricLightmapData* Data);
+	ENGINE_API void Remove(FPrecomputedVolumetricLightmapData* Data);
 
 private:
 	bool bInitialized;

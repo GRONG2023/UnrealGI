@@ -2,14 +2,18 @@
 
 #pragma once
 
+#include "Math/Vector.h"
 #include "RenderResource.h"
+#include "RHIFwd.h"
 
+class FPositionVertexData;
 struct FStaticMeshBuildVertex;
+struct FConstMeshBuildVertexView;
 
 /** A vertex that stores just position. */
 struct FPositionVertex
 {
-	FVector	Position;
+	FVector3f	Position;
 
 	friend FArchive& operator<<(FArchive& Ar, FPositionVertex& V)
 	{
@@ -39,22 +43,24 @@ public:
 	* @param InVertices - The vertices to initialize the buffer with.
 	*/
 	ENGINE_API void Init(const TArray<FStaticMeshBuildVertex>& InVertices, bool bInNeedsCPUAccess = true);
-
+	ENGINE_API void Init(const FConstMeshBuildVertexView& InVertices, bool bInNeedsCPUAccess = true);
+	
 	/**
 	* Initializes this vertex buffer with the contents of the given vertex buffer.
 	* @param InVertexBuffer - The vertex buffer to initialize from.
 	*/
-	void Init(const FPositionVertexBuffer& InVertexBuffer, bool bInNeedsCPUAccess = true);
+	ENGINE_API void Init(const FPositionVertexBuffer& InVertexBuffer, bool bInNeedsCPUAccess = true);
 
-	ENGINE_API void Init(const TArray<FVector>& InPositions, bool bInNeedsCPUAccess = true);
+	ENGINE_API void Init(const TArray<FVector3f>& InPositions, bool bInNeedsCPUAccess = true);
 
 	/**
 	 * Appends the specified vertices to the end of the buffer
 	 *
 	 * @param	Vertices	The vertex data to be appended.  Must not be nullptr.
 	 * @param	NumVerticesToAppend		How many vertices should be added
+	 * @return	true if append operation is successful
 	 */
-	ENGINE_API void AppendVertices( const FStaticMeshBuildVertex* Vertices, const uint32 NumVerticesToAppend );
+	ENGINE_API bool AppendVertices( const FStaticMeshBuildVertex* Vertices, const uint32 NumVerticesToAppend );
 
 	/**
 	* Serializer
@@ -62,7 +68,7 @@ public:
 	* @param	Ar					Archive to serialize with
 	* @param	bInNeedsCPUAccess	Whether the elements need to be accessed by the CPU
 	*/
-	void Serialize(FArchive& Ar, bool bInNeedsCPUAccess);
+	ENGINE_API void Serialize(FArchive& Ar, bool bInNeedsCPUAccess);
 
 	void SerializeMetaData(FArchive& Ar);
 
@@ -74,12 +80,12 @@ public:
 	ENGINE_API void operator=(const FPositionVertexBuffer &Other);
 
 	// Vertex data accessors.
-	FORCEINLINE FVector& VertexPosition(uint32 VertexIndex)
+	FORCEINLINE FVector3f& VertexPosition(uint32 VertexIndex)
 	{
 		checkSlow(VertexIndex < GetNumVertices());
 		return ((FPositionVertex*)(Data + VertexIndex * Stride))->Position;
 	}
-	FORCEINLINE const FVector& VertexPosition(uint32 VertexIndex) const
+	FORCEINLINE const FVector3f& VertexPosition(uint32 VertexIndex) const
 	{
 		checkSlow(VertexIndex < GetNumVertices());
 		return ((FPositionVertex*)(Data + VertexIndex * Stride))->Position;
@@ -93,42 +99,25 @@ public:
 	{
 		return NumVertices;
 	}
+	ENGINE_API bool GetAllowCPUAccess() const;
+	
+	FORCEINLINE SIZE_T GetAllocatedSize() const { return (Data != nullptr) ? Stride * NumVertices : 0; }
 
 	/** Create an RHI vertex buffer with CPU data. CPU data may be discarded after creation (see TResourceArray::Discard) */
-	FVertexBufferRHIRef CreateRHIBuffer_RenderThread();
-	FVertexBufferRHIRef CreateRHIBuffer_Async();
+	FBufferRHIRef CreateRHIBuffer(FRHICommandListBase& RHICmdList);
 
-	/** Copy everything, keeping reference to the same RHI resources. */
-	void CopyRHIForStreaming(const FPositionVertexBuffer& Other, bool InAllowCPUAccess);
+	UE_DEPRECATED(5.4, "Use CreateRHIBuffer instead.")
+	FBufferRHIRef CreateRHIBuffer_RenderThread();
+
+	UE_DEPRECATED(5.4, "Use CreateRHIBuffer instead.")
+	FBufferRHIRef CreateRHIBuffer_Async();
 
 	/** Similar to Init/ReleaseRHI but only update existing SRV so references to the SRV stays valid */
-	template <uint32 MaxNumUpdates>
-	void InitRHIForStreaming(FRHIVertexBuffer* IntermediateBuffer, TRHIResourceUpdateBatcher<MaxNumUpdates>& Batcher)
-	{
-		check(VertexBufferRHI);
-		if (IntermediateBuffer)
-		{
-			Batcher.QueueUpdateRequest(VertexBufferRHI, IntermediateBuffer);
-			if (PositionComponentSRV)
-			{
-				Batcher.QueueUpdateRequest(PositionComponentSRV, VertexBufferRHI, 4, PF_R32_FLOAT);
-			}
-		}
-	}
-
-	template <uint32 MaxNumUpdates>
-	void ReleaseRHIForStreaming(TRHIResourceUpdateBatcher<MaxNumUpdates>& Batcher)
-	{
-		check(VertexBufferRHI);
-		Batcher.QueueUpdateRequest(VertexBufferRHI, nullptr);
-		if (PositionComponentSRV)
-		{
-			Batcher.QueueUpdateRequest(PositionComponentSRV, nullptr, 0, 0);
-		}
-	}
+	void InitRHIForStreaming(FRHIBuffer* IntermediateBuffer, FRHIResourceUpdateBatcher& Batcher);
+	void ReleaseRHIForStreaming(FRHIResourceUpdateBatcher& Batcher);
 
 	// FRenderResource interface.
-	ENGINE_API virtual void InitRHI() override;
+	ENGINE_API virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 	ENGINE_API virtual void ReleaseRHI() override;
 	virtual FString GetFriendlyName() const override { return TEXT("PositionOnly Static-mesh vertices"); }
 
@@ -144,7 +133,7 @@ private:
 	FShaderResourceViewRHIRef PositionComponentSRV;
 
 	/** The vertex data storage type */
-	TMemoryImagePtr<class FPositionVertexData> VertexData;
+	FPositionVertexData* VertexData;
 
 	/** The cached vertex data pointer. */
 	uint8* Data;
@@ -159,8 +148,9 @@ private:
 
 	/** Allocates the vertex data storage type. */
 	void AllocateData(bool bInNeedsCPUAccess = true);
-
-	template <bool bRenderThread>
-	FVertexBufferRHIRef CreateRHIBuffer_Internal();
 };
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_3
+#include "RHI.h"
+#endif
 

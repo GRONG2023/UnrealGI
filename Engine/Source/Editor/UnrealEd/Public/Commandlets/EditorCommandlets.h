@@ -188,7 +188,8 @@ struct FResourceDiskSize
 /**
  * Contains an object and the object's path name.
  */
-struct FObjectReference
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+struct UE_DEPRECATED(5.3, "DiffPackagesCommandlet has been deleted") FObjectReference
 {
 	UObject* Object;
 	FString ObjectPathName;
@@ -202,12 +203,14 @@ struct FObjectReference
 		}
 	}
 };
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 
 /**
  * Represents a single top-level object along with all its subobjects.
  */
-struct FObjectGraph
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+struct UE_DEPRECATED(5.3, "DiffPackagesCommandlet has been deleted.") FObjectGraph
 {
 	/**
 	 * The list of objects in this object graph.  The first element is always the root object.
@@ -226,45 +229,7 @@ struct FObjectGraph
 	/**
 	 * Returns the root of this object graph.
 	 */
-	inline UObject* GetRootObject() const { return Objects[0].Object; }
+	UObject* GetRootObject() const;
 };
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
-/**
- * Contains the natively serialized property data for a single UObject.
- */
-struct FNativePropertyData 
-{
-	/** the object that this property data is for */
-	UObject*				Object;
-
-	/** the raw bytes corresponding to this object's natively serialized property data */
-	TArray<uint8>			PropertyData;
-
-	/** the property names and textual representations of this object's natively serialized data */
-	TMap<FString,FString>	PropertyText;
-
-	/** Constructor */
-	FNativePropertyData( UObject* InObject );
-
-	/**
-	 * Changes the UObject associated with this native property data container and re-initializes the
-	 * PropertyData and PropertyText members
-	 */
-	void SetObject( UObject* NewObject );
-
-	/** Comparison operators */
-	inline bool operator==( const FNativePropertyData& Other ) const
-	{
-		return ((Object == NULL) == (Other.Object == NULL)) && PropertyData == Other.PropertyData && LegacyCompareEqual(PropertyText,Other.PropertyText);
-	}
-	inline bool operator!=( const FNativePropertyData& Other ) const
-	{
-		return ((Object == NULL) != (Other.Object == NULL)) || PropertyData != Other.PropertyData || LegacyCompareNotEqual(PropertyText,Other.PropertyText);
-	}
-
-	/** bool operator */
-	inline explicit operator bool() const
-	{
-		return PropertyData.Num() || PropertyText.Num();
-	}
-};

@@ -2,7 +2,7 @@
 
 #include "GraphEditorSettings.h"
 #include "UObject/UnrealType.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 
 
 /* UGraphEditorSettings structors
@@ -18,6 +18,7 @@ UGraphEditorSettings::UGraphEditorSettings( const FObjectInitializer& ObjectInit
 	, PaddingTowardsNodeEdge(10.0f)
 	, bTreatSplinesLikePins(true)
 	, SplineHoverTolerance(2.0f)
+	, SplineCloseTolerance(6.0f)
 	, ForwardSplineHorizontalDeltaRange(1000.0f)
 	, ForwardSplineVerticalDeltaRange(1000.0f)
 	, ForwardSplineTangentFromHorizontalDelta(1.0f, 0.0f)
@@ -40,6 +41,8 @@ UGraphEditorSettings::UGraphEditorSettings( const FObjectInitializer& ObjectInit
 	IntPinTypeColor = FLinearColor(0.013575f, 0.770000f, 0.429609f, 1.0f);		// green-blue
 	Int64PinTypeColor = FLinearColor(0.413575f, 0.770000f, 0.429609f, 1.0f);	
 	FloatPinTypeColor = FLinearColor(0.357667f, 1.0f, 0.060000f, 1.0f);			// bright green
+	DoublePinTypeColor = FLinearColor(0.039216f, 0.666667f, 0.0f, 1.0f);		// darker green
+	RealPinTypeColor = FLinearColor(0.039216f, 0.666667f, 0.0f, 1.0f);			// darker green
 	NamePinTypeColor = FLinearColor(0.607717f, 0.224984f, 1.0f, 1.0f);			// lilac
 	DelegatePinTypeColor = FLinearColor(1.0f, 0.04f, 0.04f, 1.0f);				// bright red
 	ObjectPinTypeColor = FLinearColor(0.0f, 0.4f, 0.910000f, 1.0f);				// sharp blue
@@ -128,7 +131,7 @@ FMargin UGraphEditorSettings::GetNonPinNodeBodyPadding() const
 
 FVector2D UGraphEditorSettings::GetShadowDeltaSize() const
 {
-	FVector2D ShadowSize = FEditorStyle::GetVector(TEXT("Graph.Node.ShadowSize"));
+	FVector2D ShadowSize = FAppStyle::GetVector(TEXT("Graph.Node.ShadowSize"));
 	ShadowSize.X += FMath::Min<float>(PaddingTowardsNodeEdge, 0.0f);
 	return ShadowSize;
 }

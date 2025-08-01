@@ -9,10 +9,18 @@
 #include "Framework/MultiBox/MultiBoxExtender.h"
 
 class FExtender;
+class FWorkspaceItem;
 
+namespace UE
+{
 namespace Trace
 {
 	class FStoreClient;
+}
+}
+
+namespace TraceServices
+{
 	class IAnalysisSession;
 }
 
@@ -21,14 +29,17 @@ namespace Trace
 /** Major tab IDs for Insights tools */
 struct TRACEINSIGHTS_API FInsightsManagerTabs
 {
-	static const FName StartPageTabId;
+	static const FName StartPageTabId; // DEPRECATED
+	static const FName TraceStoreTabId;
+	static const FName ConnectionTabId;
+	static const FName LauncherTabId;
 	static const FName SessionInfoTabId;
 	static const FName TimingProfilerTabId;
 	static const FName LoadingProfilerTabId;
 	static const FName NetworkingProfilerTabId;
 	static const FName MemoryProfilerTabId;
-	static const FName InsightsMessageLogTabId;
 	static const FName AutomationWindowTabId;
+	static const FName MessageLogTabId;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -37,7 +48,7 @@ struct TRACEINSIGHTS_API FInsightsManagerTabs
 struct TRACEINSIGHTS_API FTimingProfilerTabs
 {
 	// Tab identifiers
-	static const FName ToolbarID;
+	static const FName ToolbarID; // DEPRECATED
 	static const FName FramesTrackID;
 	static const FName TimingViewID;
 	static const FName TimersID;
@@ -45,26 +56,6 @@ struct TRACEINSIGHTS_API FTimingProfilerTabs
 	static const FName CalleesID;
 	static const FName StatsCountersID;
 	static const FName LogViewID;
-};
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-/** Configuration for an Insights minor tab. This is used to augment the standard supplied tabs from plugins. */
-struct TRACEINSIGHTS_API FInsightsMinorTabConfig
-{
-	FName TabId;
-
-	FText TabLabel;
-
-	FText TabTooltip;
-
-	FSlateIcon TabIcon;
-
-	FOnSpawnTab OnSpawnTab;
-
-	FOnFindTabToReuse OnFindTabToReuse;
-
-	TSharedPtr<FWorkspaceItem> WorkspaceGroup;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -116,26 +107,43 @@ struct TRACEINSIGHTS_API FInsightsMajorTabConfig
 /** Combination of extenders applied to the individual major tabs within Insights */
 struct TRACEINSIGHTS_API FInsightsMajorTabExtender
 {
-	FInsightsMajorTabExtender(TSharedPtr<FTabManager>& InTabManager) : MenuExtender(MakeShared<FExtender>()), TabManager(InTabManager) {}
+	FInsightsMajorTabExtender(TSharedPtr<FTabManager>& InTabManager, TSharedRef<FWorkspaceItem> InWorkspaceGroup)
+		: MenuExtender(MakeShared<FExtender>())
+		, TabManager(InTabManager)
+		, WorkspaceGroup(InWorkspaceGroup)
+	{}
 
 	TSharedPtr<FExtender>& GetMenuExtender() { return MenuExtender; }
 	FLayoutExtender& GetLayoutExtender() { return LayoutExtender; }
-	FInsightsMinorTabConfig& AddMinorTabConfig() { return MinorTabs.AddDefaulted_GetRef(); }
+	FMinorTabConfig& AddMinorTabConfig() { return MinorTabs.AddDefaulted_GetRef(); }
 	TSharedPtr<FTabManager> GetTabManager() const { return TabManager; }
-	const TArray<FInsightsMinorTabConfig>& GetMinorTabs() const { return MinorTabs; }
+	TSharedRef<FWorkspaceItem> GetWorkspaceGroup() { return WorkspaceGroup; }
+	const TArray<FMinorTabConfig>& GetMinorTabs() const { return MinorTabs; }
 
 protected:
 	/** Extender used to add to the menu for this tab */
 	TSharedPtr<FExtender> MenuExtender;
 
 	/** Any additional minor tabs to add */
-	TArray<FInsightsMinorTabConfig> MinorTabs;
+	TArray<FMinorTabConfig> MinorTabs;
 
 	/** Extender used when creating the layout for this tab */
 	FLayoutExtender LayoutExtender;
 
 	/** Tab manager for this major tab*/
 	TSharedPtr<FTabManager> TabManager;
+
+	TSharedRef<FWorkspaceItem> WorkspaceGroup;
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+/** Contains parameters that are passed to the CreateSessionBrowser function to control specific behaviors. */
+struct TRACEINSIGHTS_API FCreateSessionBrowserParams
+{
+	bool bAllowDebugTools = false;
+	bool bInitializeTesting = false;
+	bool bStartProcessWithStompMalloc = false;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -172,9 +180,14 @@ public:
 	virtual void CreateDefaultStore() = 0;
 
 	/**
+	 * Gets the default trace store (for "Browser" mode).
+	*/
+	virtual FString GetDefaultStoreDir() = 0;
+
+	/**
 	 * Gets the store client.
 	 */
-	virtual Trace::FStoreClient* GetStoreClient() = 0;
+	virtual UE::Trace::FStoreClient* GetStoreClient() = 0;
 
 	/**
 	 * Connects to a specified store.
@@ -183,14 +196,14 @@ public:
 	 * @param InStorePort The port of the store to connect to.
 	 * @return If connected succesfully or not.
 	 */
-	virtual bool ConnectToStore(const TCHAR* InStoreHost, uint32 InStorePort) = 0;
+	virtual bool ConnectToStore(const TCHAR* InStoreHost, uint32 InStorePort=0) = 0;
 
 	//////////////////////////////////////////////////
 
 	/**
 	 * Gets the current analysis session.
 	 */
-	virtual TSharedPtr<const Trace::IAnalysisSession> GetAnalysisSession() const = 0;
+	virtual TSharedPtr<const TraceServices::IAnalysisSession> GetAnalysisSession() const = 0;
 
 	/**
 	 * Starts analysis of the specified trace. Called when the application starts in "Viewer" mode.
@@ -202,8 +215,11 @@ public:
 
 	/**
 	 * Starts analysis of the last live session. Called when the application starts in "Viewer" mode.
+	 * On failure, if InRetryTime is > 0, retry connecting every frame for RetryTime seconds 
+	 * 
+	 * @param InRetryTime How many seconds to retry connecting asyncronously
 	 */
-	virtual void StartAnalysisForLastLiveSession() = 0;
+	virtual void StartAnalysisForLastLiveSession(float InRetryTime = 1.0f) = 0;
 
 	/**
 	 * Starts analysis of the specified *.utrace file. Called when the application starts in "Viewer" mode.
@@ -241,18 +257,20 @@ public:
 	/** Finds a major tab config for the specified id. */
 	virtual const FInsightsMajorTabConfig& FindMajorTabConfig(const FName& InMajorTabId) const = 0;
 
+	virtual FOnRegisterMajorTabExtensions* FindMajorTabLayoutExtension(const FName& InMajorTabId) = 0;
+
 	/** Sets the ini path for saving persistent layout data. */
 	virtual void SetUnrealInsightsLayoutIni(const FString& InIniPath) = 0;
 
 	/**
 	 * Called when the application starts in "Browser" mode.
 	 */
-	virtual void CreateSessionBrowser(bool bAllowDebugTools, bool bSingleProcess) = 0;
+	virtual void CreateSessionBrowser(const FCreateSessionBrowserParams& Params) = 0;
 
 	/**
 	 * Called when the application starts in "Viewer" mode.
 	 */
-	virtual void CreateSessionViewer(bool bAllowDebugTools) = 0;
+	virtual void CreateSessionViewer(bool bAllowDebugTools = false) = 0;
 
 	/**
 	 * Called when the application shutsdown.
@@ -265,11 +283,19 @@ public:
 	virtual void ScheduleCommand(const FString& InCmd) = 0;
 
 	/**
+	* Called to run automation test in Insights.
+	*/
+	virtual void RunAutomationTest(const FString& InCmd) = 0;
+
+	/**
 	* Called to initialize testing in stand alone Insights.
 	 * @param InInitAutomationModules If true Insights will initialize the modules required for running automation tests.
 	 * @param InAutoQuit If true Insights will close after completing session analysis and running any tests started using the ScheduleCommand function.
 	*/
 	virtual void InitializeTesting(bool InInitAutomationModules, bool InAutoQuit) = 0;
+
+	/** Execute command. */
+	virtual bool Exec(const TCHAR* Cmd, FOutputDevice& Ar) = 0;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -288,6 +314,12 @@ public:
 
 	/* Requests this component to unregister its major tabs. */
 	virtual void UnregisterMajorTabs() = 0;
+
+	/* Called by the TraceInsights module when it receives the OnWindowClosedEvent. Can be used to close any panels that should not persist in the layout. */
+	virtual void OnWindowClosedEvent() {}
+
+	/** Execute command. */
+	virtual bool Exec(const TCHAR* Cmd, FOutputDevice& Ar) { return false; }
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

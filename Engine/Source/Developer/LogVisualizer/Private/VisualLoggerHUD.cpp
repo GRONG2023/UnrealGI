@@ -9,6 +9,8 @@
 #include "DrawDebugHelpers.h"
 #include "VisualLoggerCameraController.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(VisualLoggerHUD)
+
 #define LOCTEXT_NAMESPACE "AVisualLoggerHUD"
 
 //----------------------------------------------------------------------//
@@ -51,7 +53,7 @@ void AVisualLoggerHUD::PostRender()
 			bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, CamLoc, CamRot.Vector() * 100000.f + CamLoc, ECC_Pawn, TraceParams);
 			if( bHit )
 			{
-				TextItem.Text = FText::FromString(FString::Printf(TEXT("Under cursor: '%s'"), *Hit.GetActor()->GetName()));
+				TextItem.Text = FText::FromString(FString::Printf(TEXT("Under cursor: '%s'"), *Hit.HitObjectHandle.GetName()));
 				Canvas->DrawItem( TextItem, X, Y );
 				
 				DrawDebugLine( GetWorld(), Hit.Location, Hit.Location+Hit.Normal*30.f, FColor::White );
@@ -61,9 +63,9 @@ void AVisualLoggerHUD::PostRender()
 				TextItem.Text = LOCTEXT("NotActorUnderCursor", "Not actor under cursor" );
 			}
 			Canvas->DrawItem( TextItem, X, Y );
-			Y += TextItem.DrawnSize.Y;
+			Y += static_cast<float>(TextItem.DrawnSize.Y);
 
-			if (DebugCamController->PickedActor != NULL)
+			if (DebugCamController->PickedActor.IsValid())
 			{
 				TextItem.Text = FText::FromString(FString::Printf(TEXT("Selected: '%s'"), *DebugCamController->PickedActor->GetName()));
 				Canvas->DrawItem( TextItem, X, Y );				
@@ -72,3 +74,4 @@ void AVisualLoggerHUD::PostRender()
 	}
 }
 #undef LOCTEXT_NAMESPACE
+

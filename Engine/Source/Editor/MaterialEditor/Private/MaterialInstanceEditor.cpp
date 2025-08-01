@@ -1,20 +1,25 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "MaterialInstanceEditor.h"
+
 #include "Widgets/Text/STextBlock.h"
 #include "EngineGlobals.h"
+#include "Engine/Texture.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Modules/ModuleManager.h"
 #include "Widgets/Views/SListView.h"
+#include "UObject/ObjectSaveContext.h"
 #include "UObject/Package.h"
 #include "Editor.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Styling/CoreStyle.h"
 #include "MaterialEditor/DEditorTextureParameterValue.h"
 #include "MaterialEditor/DEditorRuntimeVirtualTextureParameterValue.h"
+#include "MaterialEditor/DEditorSparseVolumeTextureParameterValue.h"
 #include "Materials/Material.h"
 #include "MaterialEditor/MaterialEditorInstanceConstant.h"
 #include "ThumbnailRendering/SceneThumbnailInfoWithPrimitive.h"
+#include "Materials/MaterialFunction.h"
 #include "Materials/MaterialInstance.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialFunctionInstance.h"
@@ -27,6 +32,7 @@
 #include "Materials/MaterialExpressionTextureBase.h"
 #include "Materials/MaterialExpressionTextureSampleParameter.h"
 #include "Materials/MaterialExpressionRuntimeVirtualTextureSampleParameter.h"
+#include "Materials/MaterialExpressionSparseVolumeTextureSample.h"
 
 #include "MaterialEditor.h"
 #include "MaterialEditorActions.h"
@@ -44,12 +50,13 @@
 #include "AdvancedPreviewSceneModule.h"
 #include "Misc/MessageDialog.h"
 #include "Framework/Commands/UICommandInfo.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "MaterialStats.h"
 #include "MaterialEditingLibrary.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "DebugViewModeHelpers.h"
 #include "VT/RuntimeVirtualTexture.h"
+#include "SparseVolumeTexture/SparseVolumeTexture.h"
 #include "Widgets/Input/SButton.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 
@@ -61,6 +68,8 @@ const FName FMaterialInstanceEditor::PreviewTabId( TEXT( "MaterialInstanceEditor
 const FName FMaterialInstanceEditor::PropertiesTabId( TEXT( "MaterialInstanceEditor_MaterialProperties" ) );
 const FName FMaterialInstanceEditor::LayerPropertiesTabId(TEXT("MaterialInstanceEditor_MaterialLayerProperties"));
 const FName FMaterialInstanceEditor::PreviewSettingsTabId(TEXT("MaterialInstanceEditor_PreviewSettings"));
+
+extern TAutoConsoleVariable<bool> CVarMaterialEdAllowIgnoringCompilationErrors;
 
 //////////////////////////////////////////////////////////////////////////
 // SMaterialTreeWidgetItem
@@ -231,25 +240,25 @@ void FMaterialInstanceEditor::RegisterTabSpawners(const TSharedRef<class FTabMan
 	InTabManager->RegisterTabSpawner( PreviewTabId, FOnSpawnTab::CreateSP( this, &FMaterialInstanceEditor::SpawnTab_Preview ) )
 		.SetDisplayName( LOCTEXT( "ViewportTab", "Viewport" ) )
 		.SetGroup( WorkspaceMenuCategoryRef )
-		.SetIcon( FSlateIcon( FEditorStyle::GetStyleSetName(), "LevelEditor.Tabs.Viewports" ) );
+		.SetIcon( FSlateIcon( FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Viewports" ) );
 	
 	InTabManager->RegisterTabSpawner( PropertiesTabId, FOnSpawnTab::CreateSP( this, &FMaterialInstanceEditor::SpawnTab_Properties ) )
 		.SetDisplayName( LOCTEXT( "PropertiesTab", "Details" ) )
 		.SetGroup( WorkspaceMenuCategoryRef )
-		.SetIcon( FSlateIcon( FEditorStyle::GetStyleSetName(), "LevelEditor.Tabs.Details" ) );
+		.SetIcon( FSlateIcon( FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Details" ) );
 
 	if (!bIsFunctionPreviewMaterial)
 	{
 		InTabManager->RegisterTabSpawner(LayerPropertiesTabId, FOnSpawnTab::CreateSP(this, &FMaterialInstanceEditor::SpawnTab_LayerProperties))
 			.SetDisplayName(LOCTEXT("LayerPropertiesTab", "Layer Parameters"))
 			.SetGroup(WorkspaceMenuCategoryRef)
-			.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.Tabs.Layers"));
+			.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Layers"));
 	}
 	
 	InTabManager->RegisterTabSpawner(PreviewSettingsTabId, FOnSpawnTab::CreateSP(this, &FMaterialInstanceEditor::SpawnTab_PreviewSettings))
 		.SetDisplayName(LOCTEXT("PreviewSceneSettingsTab", "Preview Scene Settings"))
 		.SetGroup(WorkspaceMenuCategoryRef)
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.Tabs.Details"));
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Details"));
 
 	MaterialStatsManager->RegisterTabs();
 
@@ -302,26 +311,23 @@ void FMaterialInstanceEditor::InitEditorForMaterialFunction(UMaterialFunctionIns
 	FunctionMaterialProxy->SetFlags(RF_Transactional);
 	FunctionMaterialProxy->bIsFunctionPreviewMaterial = true;
 
-	UMaterialFunctionInterface* BaseFunction = MaterialFunctionInstance;
-	while (UMaterialFunctionInstance* Instance = Cast<UMaterialFunctionInstance>(BaseFunction))
+	UMaterialFunctionInterface* BaseFunctionInterface = MaterialFunctionInstance;
+	while (UMaterialFunctionInstance* Instance = Cast<UMaterialFunctionInstance>(BaseFunctionInterface))
 	{
-		BaseFunction = Instance->GetBaseFunction();
+		BaseFunctionInterface = Instance->GetBaseFunction();
 	}
-	const TArray<UMaterialExpression*>* FunctionExpressions = BaseFunction->GetFunctionExpressions();
-	FunctionMaterialProxy->Expressions = FunctionExpressions ? *FunctionExpressions : TArray<UMaterialExpression*>();
+	if (UMaterialFunction* BaseFunction = Cast<UMaterialFunction>(BaseFunctionInterface))
+	{
+		FunctionMaterialProxy->AssignExpressionCollection(BaseFunction->GetExpressionCollection());
+	}
 
 	// Set expressions to be used with preview material
 	bool bSetPreviewExpression = false;
 	UMaterialExpressionFunctionOutput* FirstOutput = NULL;
-	for (int32 ExpressionIndex = FunctionMaterialProxy->Expressions.Num() - 1; ExpressionIndex >= 0; --ExpressionIndex)
+	for (int32 ExpressionIndex = FunctionMaterialProxy->GetExpressions().Num() - 1; ExpressionIndex >= 0; --ExpressionIndex)
 	{
-		UMaterialExpression* Expression = FunctionMaterialProxy->Expressions[ExpressionIndex];
-
-		if (!Expression)
-		{
-			FunctionMaterialProxy->Expressions.RemoveAt(ExpressionIndex);
-			continue;
-		}
+		UMaterialExpression* Expression = FunctionMaterialProxy->GetExpressions()[ExpressionIndex];
+		check(Expression);
 
 		Expression->Function = NULL;
 		Expression->Material = FunctionMaterialProxy;
@@ -342,14 +348,49 @@ void FMaterialInstanceEditor::InitEditorForMaterialFunction(UMaterialFunctionIns
 		FirstOutput->ConnectToPreviewMaterial(FunctionMaterialProxy, 0);
 	}
 
-	FMaterialUpdateContext UpdateContext(FMaterialUpdateContext::EOptions::SyncWithRenderingThread);
-	UpdateContext.AddMaterial(FunctionMaterialProxy);
-	FunctionMaterialProxy->PreEditChange(NULL);
-	FunctionMaterialProxy->PostEditChange();
+	{
+		FMaterialUpdateContext UpdateContext(FMaterialUpdateContext::EOptions::SyncWithRenderingThread);
+		UpdateContext.AddMaterial(FunctionMaterialProxy);
+		FunctionMaterialProxy->PreEditChange(NULL);
+		FunctionMaterialProxy->PostEditChange();
+	}
+
+	UMaterialFunctionInstance* ParentFunctionInstance = Cast<UMaterialFunctionInstance>(InMaterialFunction->Parent);
+	UMaterialInterface* FunctionInstanceParent = FunctionMaterialProxy;
+	if (ParentFunctionInstance)
+	{
+		// If our FunctionInstance inherits from *another* FunctionInstance, the parent may have overriden certain parameters
+		// These overriden values should be the default value as far as our FunctionInstance is concerned
+		// To model this, we create a MI that will hold these overriden values.  So our editor material hierarchy will look like this
+		// * UMaterial - includes the UMaterialExpressions, copied from our base UMaterialFunction
+		// * UMaterialInstance - we're creating this here, holds all parameter values overriden by our parent UMaterialFunctionInstance(s)
+		// * UMaterialInstance - will be created below, this is the object/proxy we'll be editing and potentially setting parameters on
+		UMaterialInstanceConstant* FunctionMaterialInstanceProxy = NewObject<UMaterialInstanceConstant>(GetTransientPackage(), NAME_None, RF_Transactional);
+		FunctionMaterialInstanceProxy->SetParentEditorOnly(FunctionMaterialProxy);
+		{
+			FMaterialInstanceParameterUpdateContext UpdateContext(FunctionMaterialInstanceProxy);
+			TArray<FMaterialParameterInfo> ParameterInfos;
+			TArray<FGuid> ParameterIds;
+			for (int32 ParameterTypeIndex = 0; ParameterTypeIndex < NumMaterialParameterTypes; ++ParameterTypeIndex)
+			{
+				const EMaterialParameterType ParameterType = (EMaterialParameterType)ParameterTypeIndex;
+				FunctionMaterialProxy->GetAllParameterInfoOfType(ParameterType, ParameterInfos, ParameterIds);
+				for (const FMaterialParameterInfo& ParameterInfo : ParameterInfos)
+				{
+					FMaterialParameterMetadata ParameterMeta;
+					if (ParentFunctionInstance->GetParameterOverrideValue(ParameterType, ParameterInfo.Name, ParameterMeta))
+					{
+						UpdateContext.SetParameterValueEditorOnly(ParameterInfo, ParameterMeta, EMaterialSetParameterValueFlags::SetCurveAtlas);
+					}
+				}
+			}
+		}
+		FunctionInstanceParent = FunctionMaterialInstanceProxy;
+	}
 
 	// Preview instance for function expressions
 	FunctionInstanceProxy = NewObject<UMaterialInstanceConstant>(GetTransientPackage(), NAME_None, RF_Transactional);
-	FunctionInstanceProxy->SetParentEditorOnly(FunctionMaterialProxy);
+	FunctionInstanceProxy->SetParentEditorOnly(FunctionInstanceParent);
 
 	MaterialFunctionInstance->OverrideMaterialInstanceParameterValues(FunctionInstanceProxy);
 	FunctionInstanceProxy->PreEditChange(NULL);
@@ -375,8 +416,8 @@ void FMaterialInstanceEditor::InitMaterialInstanceEditor( const EToolkitMode::Ty
 	MaterialEditorInstance->SetSourceInstance(InstanceConstant);
 	MaterialEditorInstance->SetSourceFunction(MaterialFunctionOriginal);
 
-	MaterialStatsManager = FMaterialStatsUtils::CreateMaterialStats(this);
-	MaterialStatsManager->SetMaterialDisplayName(MaterialEditorInstance->SourceInstance->GetName());
+	MaterialStatsManager = FMaterialStatsUtils::CreateMaterialStats(this, false, CVarMaterialEdAllowIgnoringCompilationErrors.GetValueOnGameThread());
+	MaterialStatsManager->SetMaterialsDisplayNames({MaterialEditorInstance->SourceInstance->GetName()});
 
 	// Register our commands. This will only register them if not previously registered
 	FMaterialEditorCommands::Register();
@@ -389,15 +430,10 @@ void FMaterialInstanceEditor::InitMaterialInstanceEditor( const EToolkitMode::Ty
 	UpdatePreviewViewportsVisibility();
 	IMaterialEditorModule* MaterialEditorModule = &FModuleManager::LoadModuleChecked<IMaterialEditorModule>("MaterialEditor");
 
-	TSharedRef<FTabManager::FLayout> StandaloneDefaultLayout = FTabManager::NewLayout("Standalone_MaterialInstanceEditor_Layout_v5")
+	TSharedRef<FTabManager::FLayout> StandaloneDefaultLayout = FTabManager::NewLayout("Standalone_MaterialInstanceEditor_Layout_v8")
 		->AddArea
 		(
 			FTabManager::NewPrimaryArea()->SetOrientation(Orient_Vertical)
-			->Split
-			(
-				FTabManager::NewStack()->SetSizeCoefficient(0.1f)->SetHideTabWell(true)
-				->AddTab(GetToolbarTabId(), ETabState::OpenedTab)
-			)
 			->Split
 			(
 				FTabManager::NewSplitter()->SetOrientation(Orient_Horizontal)->SetSizeCoefficient(0.9f)
@@ -417,15 +453,10 @@ void FMaterialInstanceEditor::InitMaterialInstanceEditor( const EToolkitMode::Ty
 
 	if (!bIsFunctionPreviewMaterial)
 	{
-		StandaloneDefaultLayout = FTabManager::NewLayout("Standalone_MaterialInstanceEditor_Layout_v7")
+		StandaloneDefaultLayout = FTabManager::NewLayout("Standalone_MaterialInstanceEditor_Layout_v8")
 			->AddArea
 			(
 				FTabManager::NewPrimaryArea()->SetOrientation(Orient_Vertical)
-				->Split
-				(
-					FTabManager::NewStack()->SetSizeCoefficient(0.1f)->SetHideTabWell(true)
-					->AddTab(GetToolbarTabId(), ETabState::OpenedTab)
-				)
 				->Split
 				(
 					FTabManager::NewSplitter()->SetOrientation(Orient_Horizontal)->SetSizeCoefficient(0.9f)
@@ -497,13 +528,15 @@ void FMaterialInstanceEditor::ReInitMaterialFunctionProxies()
 		// Temporarily store unsaved parameters
 		TArray<FScalarParameterValue> ScalarParameterValues = FunctionInstanceProxy->ScalarParameterValues;
 		TArray<FVectorParameterValue> VectorParameterValues = FunctionInstanceProxy->VectorParameterValues;
+		TArray<FDoubleVectorParameterValue> DoubleVectorParameterValues = FunctionInstanceProxy->DoubleVectorParameterValues;
 		TArray<FTextureParameterValue> TextureParameterValues = FunctionInstanceProxy->TextureParameterValues;
 		TArray<FRuntimeVirtualTextureParameterValue> RuntimeVirtualTextureParameterValues = FunctionInstanceProxy->RuntimeVirtualTextureParameterValues;
+		TArray<FSparseVolumeTextureParameterValue> SparseVolumeTextureParameterValues = FunctionInstanceProxy->SparseVolumeTextureParameterValues;
 		TArray<FFontParameterValue> FontParameterValues = FunctionInstanceProxy->FontParameterValues;
 
 		const FStaticParameterSet& OldStaticParameters = FunctionInstanceProxy->GetStaticParameters();
 		TArray<FStaticSwitchParameter> StaticSwitchParameters = OldStaticParameters.StaticSwitchParameters;
-		TArray<FStaticComponentMaskParameter> StaticComponentMaskParameters = OldStaticParameters.StaticComponentMaskParameters;
+		TArray<FStaticComponentMaskParameter> StaticComponentMaskParameters = OldStaticParameters.EditorOnly.StaticComponentMaskParameters;
 
 		// Regenerate proxies
 		InitEditorForMaterialFunction(MaterialFunctionOriginal);
@@ -538,6 +571,18 @@ void FMaterialInstanceEditor::ReInitMaterialFunctionProxies()
 			}
 		}
 
+		FunctionInstanceProxy->GetAllDoubleVectorParameterInfo(OutParameterInfo, Guids);
+		FunctionInstanceProxy->DoubleVectorParameterValues.Empty();
+		for (FDoubleVectorParameterValue& DoubleVectorParameter : DoubleVectorParameterValues)
+		{
+			int32 Index = Guids.Find(DoubleVectorParameter.ExpressionGUID);
+			if (Index != INDEX_NONE)
+			{
+				FunctionInstanceProxy->DoubleVectorParameterValues.Add(DoubleVectorParameter);
+				FunctionInstanceProxy->DoubleVectorParameterValues.Last().ParameterInfo = OutParameterInfo[Index];
+			}
+		}
+
 		FunctionInstanceProxy->GetAllTextureParameterInfo(OutParameterInfo, Guids);
 		FunctionInstanceProxy->TextureParameterValues.Empty();
 		for (FTextureParameterValue& TextureParameter : TextureParameterValues)
@@ -559,6 +604,18 @@ void FMaterialInstanceEditor::ReInitMaterialFunctionProxies()
 			{
 				FunctionInstanceProxy->RuntimeVirtualTextureParameterValues.Add(RuntimeVirtualTextureParameter);
 				FunctionInstanceProxy->RuntimeVirtualTextureParameterValues.Last().ParameterInfo = OutParameterInfo[Index];
+			}
+		}
+
+		FunctionInstanceProxy->GetAllSparseVolumeTextureParameterInfo(OutParameterInfo, Guids);
+		FunctionInstanceProxy->SparseVolumeTextureParameterValues.Empty();
+		for (FSparseVolumeTextureParameterValue& SparseVolumeTextureParameter : SparseVolumeTextureParameterValues)
+		{
+			int32 Index = Guids.Find(SparseVolumeTextureParameter.ExpressionGUID);
+			if (Index != INDEX_NONE)
+			{
+				FunctionInstanceProxy->SparseVolumeTextureParameterValues.Add(SparseVolumeTextureParameter);
+				FunctionInstanceProxy->SparseVolumeTextureParameterValues.Last().ParameterInfo = OutParameterInfo[Index];
 			}
 		}
 
@@ -590,14 +647,14 @@ void FMaterialInstanceEditor::ReInitMaterialFunctionProxies()
 		}
 
 		FunctionInstanceProxy->GetAllStaticComponentMaskParameterInfo(OutParameterInfo, Guids);
-		StaticParametersOverride.StaticComponentMaskParameters.Empty();
+		StaticParametersOverride.EditorOnly.StaticComponentMaskParameters.Empty();
 		for (FStaticComponentMaskParameter& StaticComponentMaskParameter : StaticComponentMaskParameters)
 		{
 			int32 Index = Guids.Find(StaticComponentMaskParameter.ExpressionGUID);
 			if (Index != INDEX_NONE)
 			{
-				StaticParametersOverride.StaticComponentMaskParameters.Add(StaticComponentMaskParameter);
-				StaticParametersOverride.StaticComponentMaskParameters.Last().ParameterInfo = OutParameterInfo[Index];
+				StaticParametersOverride.EditorOnly.StaticComponentMaskParameters.Add(StaticComponentMaskParameter);
+				StaticParametersOverride.EditorOnly.StaticComponentMaskParameters.Last().ParameterInfo = OutParameterInfo[Index];
 			}
 		}
 
@@ -620,7 +677,7 @@ FMaterialInstanceEditor::FMaterialInstanceEditor()
 , FunctionMaterialProxy(nullptr)
 , FunctionInstanceProxy(nullptr)
 {
-	UPackage::PreSavePackageEvent.AddRaw(this, &FMaterialInstanceEditor::PreSavePackage);
+	UPackage::PreSavePackageWithContextEvent.AddRaw(this, &FMaterialInstanceEditor::PreSavePackage);
 }
 
 FMaterialInstanceEditor::~FMaterialInstanceEditor()
@@ -630,7 +687,7 @@ FMaterialInstanceEditor::~FMaterialInstanceEditor()
 
 	GEditor->UnregisterForUndo( this );
 
-	UPackage::PreSavePackageEvent.RemoveAll(this);
+	UPackage::PreSavePackageWithContextEvent.RemoveAll(this);
 
 	// The streaming data will be null if there were any edits
 	if (MaterialEditorInstance && MaterialEditorInstance->SourceInstance && !MaterialEditorInstance->SourceInstance->HasTextureStreamingData())
@@ -646,7 +703,7 @@ FMaterialInstanceEditor::~FMaterialInstanceEditor()
 	{
 		MaterialEditorInstance->SourceInstance = nullptr;
 		MaterialEditorInstance->SourceFunction = nullptr;
-		MaterialEditorInstance->MarkPendingKill();
+		MaterialEditorInstance->MarkAsGarbage();
 		MaterialEditorInstance = nullptr;
 	}
 
@@ -708,9 +765,9 @@ bool FMaterialInstanceEditor::OnApplyVisible() const
 	return MaterialEditorInstance && MaterialEditorInstance->bIsFunctionPreviewMaterial == true;
 }
 
-bool FMaterialInstanceEditor::OnRequestClose()
+bool FMaterialInstanceEditor::OnRequestClose(EAssetEditorCloseReason InCloseReason)
 {
-	if (MaterialEditorInstance->bIsFunctionInstanceDirty)
+	if (MaterialEditorInstance->bIsFunctionInstanceDirty && InCloseReason != EAssetEditorCloseReason::AssetForceDeleted)
 	{
 		// Find out the user wants to do with this dirty function instance
 		EAppReturnType::Type YesNoCancelReply = FMessageDialog::Open(EAppMsgType::YesNoCancel,
@@ -757,12 +814,22 @@ void FMaterialInstanceEditor::CreateInternalWidgets()
 	PreviewUIViewport = SNew(SMaterialEditorUIPreviewViewport, GetMaterialInterface());
 
 	FPropertyEditorModule& PropertyEditorModule = FModuleManager::GetModuleChecked<FPropertyEditorModule>( "PropertyEditor" );
-	FDetailsViewArgs DetailsViewArgs( false, false, true, FDetailsViewArgs::HideNameArea, true, this );
+	FDetailsViewArgs DetailsViewArgs;
+	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+	DetailsViewArgs.bHideSelectionTip = true;
+	DetailsViewArgs.NotifyHook = this;
 	DetailsViewArgs.bShowModifiedPropertiesOption = false;
 	DetailsViewArgs.bShowCustomFilterOption = true;
 	MaterialInstanceDetails = PropertyEditorModule.CreateDetailView( DetailsViewArgs );
+	// the sizes of the parameter lists are only based on the parent material and not changed out from under the details panel 
+	// When a parameter is added open MI editors are refreshed
+	// the tree should also refresh if one of the layer or blend assets is swapped
+
+	auto ValidationLambda = ([](const FRootPropertyNodeList& PropertyNodeList) { return true; });
+	MaterialInstanceDetails->SetCustomValidatePropertyNodesFunction(FOnValidateDetailsViewPropertyNodes::CreateLambda(MoveTemp(ValidationLambda)));
+
 	FOnGetDetailCustomizationInstance LayoutMICDetails = FOnGetDetailCustomizationInstance::CreateStatic( 
-		&FMaterialInstanceParameterDetails::MakeInstance, MaterialEditorInstance, FGetShowHiddenParameters::CreateSP(this, &FMaterialInstanceEditor::GetShowHiddenParameters) );
+		&FMaterialInstanceParameterDetails::MakeInstance, MaterialEditorInstance.Get(), FGetShowHiddenParameters::CreateSP(this, &FMaterialInstanceEditor::GetShowHiddenParameters) );
 	MaterialInstanceDetails->RegisterInstancedCustomPropertyLayout( UMaterialEditorInstanceConstant::StaticClass(), LayoutMICDetails );
 	MaterialInstanceDetails->SetCustomFilterLabel(LOCTEXT("ShowOverriddenOnly", "Show Only Overridden Parameters"));
 	MaterialInstanceDetails->SetCustomFilterDelegate(FSimpleDelegate::CreateSP(this, &FMaterialInstanceEditor::FilterOverriddenProperties));
@@ -799,43 +866,37 @@ void FMaterialInstanceEditor::UpdatePreviewViewportsVisibility()
 
 void FMaterialInstanceEditor::RegisterToolBar()
 {
-	const FName MenuName = GetToolMenuToolbarName();
+	FName MenuName = FAssetEditorToolkit::GetToolMenuToolbarName();
 	if (!UToolMenus::Get()->IsMenuRegistered(MenuName))
 	{
 		UToolMenu* ToolBar = UToolMenus::Get()->RegisterMenu(MenuName, "AssetEditor.DefaultToolBar", EMultiBoxType::ToolBar);
 
 		FToolMenuInsert InsertAfterAssetSection("Asset", EToolMenuInsertType::After);
 		{
-			FToolMenuSection& Section = ToolBar->AddSection("Apply", TAttribute<FText>(), InsertAfterAssetSection);
-			Section.AddEntry(FToolMenuEntry::InitToolBarButton(FMaterialEditorCommands::Get().Apply));
-		}
+			FToolMenuSection& MaterialInstanceSection = ToolBar->AddSection("MaterialInstanceTools", TAttribute<FText>(), InsertAfterAssetSection);
 
-		{
-			FToolMenuSection& Section = ToolBar->AddSection("Command", TAttribute<FText>(), InsertAfterAssetSection);
-			Section.AddEntry(FToolMenuEntry::InitToolBarButton(FMaterialEditorCommands::Get().ShowAllMaterialParameters));
-			// TODO: support in material instance editor.
-			Section.AddEntry(FToolMenuEntry::InitToolBarButton(FMaterialEditorCommands::Get().TogglePlatformStats));
-		}
-
-		{
-			FToolMenuSection& Section = ToolBar->AddSection("Parent", TAttribute<FText>(), InsertAfterAssetSection);
-			Section.AddEntry(FToolMenuEntry::InitComboButton(
+			MaterialInstanceSection.AddEntry(FToolMenuEntry::InitToolBarButton(FMaterialEditorCommands::Get().Apply));
+			MaterialInstanceSection.AddEntry(FToolMenuEntry::InitToolBarButton(FMaterialEditorCommands::Get().ShowAllMaterialParameters));
+			MaterialInstanceSection.AddEntry(FToolMenuEntry::InitComboButton(
 				"Hierarchy",
 				FToolUIActionChoice(),
 				FNewToolMenuDelegate::CreateLambda([](UToolMenu* InSubMenu)
-				{
-					UMaterialEditorMenuContext* SubMenuContext = InSubMenu->FindContext<UMaterialEditorMenuContext>();
-					if (SubMenuContext && SubMenuContext->MaterialEditor.IsValid())
 					{
-						SubMenuContext->MaterialEditor.Pin()->GenerateInheritanceMenu(InSubMenu);
-					}
-				}),
+						UMaterialEditorMenuContext* SubMenuContext = InSubMenu->FindContext<UMaterialEditorMenuContext>();
+						if (SubMenuContext && SubMenuContext->MaterialEditor.IsValid())
+						{
+							SubMenuContext->MaterialEditor.Pin()->GenerateInheritanceMenu(InSubMenu);
+						}
+					}),
 				LOCTEXT("Hierarchy", "Hierarchy"),
-				FText::GetEmpty(),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "BTEditor.SwitchToBehaviorTreeMode"),
-				false
-			));
+						FText::GetEmpty(),
+						FSlateIcon(FAppStyle::Get().GetStyleSetName(), "MaterialEditor.Hierarchy"),
+						false
+						));
 		}
+
+		FToolMenuSection& UISection = ToolBar->AddSection("Stats", TAttribute<FText>(), InsertAfterAssetSection);
+		UISection.AddEntry(FToolMenuEntry::InitToolBarButton(FMaterialEditorCommands::Get().TogglePlatformStats));
 	}
 }
 
@@ -860,7 +921,6 @@ void FMaterialInstanceEditor::GenerateInheritanceMenu(UToolMenu* Menu)
 {
 	RebuildInheritanceList();
 	Menu->bShouldCloseWindowAfterMenuSelection = true;
-	Menu->bSearchable = true;
 	Menu->SetMaxHeight(500);
 
 	{
@@ -936,7 +996,6 @@ TSharedRef<SDockTab> FMaterialInstanceEditor::SpawnTab_Properties( const FSpawnT
 	check( Args.GetTabId().TabType == PropertiesTabId );
 
 	TSharedRef<SDockTab> SpawnedTab = SNew(SDockTab)
-		.Icon( FEditorStyle::GetBrush("MaterialInstanceEditor.Tabs.Properties") )
 		.Label(LOCTEXT("MaterialPropertiesTitle", "Details"))
 		[
 			SNew(SBorder)
@@ -957,7 +1016,6 @@ TSharedRef<SDockTab> FMaterialInstanceEditor::SpawnTab_LayerProperties(const FSp
 	check(Args.GetTabId().TabType == LayerPropertiesTabId);
 
 	TSharedRef<SDockTab> SpawnedTab = SNew(SDockTab)
-		.Icon(FEditorStyle::GetBrush("MaterialInstanceEditor.Tabs.Properties"))
 		.Label(LOCTEXT("MaterialLayerPropertiesTitle", "Layer Parameters"))
 		[
 			SNew(SBorder)
@@ -983,7 +1041,6 @@ TSharedRef<SDockTab> FMaterialInstanceEditor::SpawnTab_PreviewSettings(const FSp
 	}
 
 	TSharedRef<SDockTab> SpawnedTab = SNew(SDockTab)
-		.Icon(FEditorStyle::GetBrush("LevelEditor.Tabs.Details"))
 		.Label(LOCTEXT("PreviewSceneSettingsTab", "Preview Scene Settings"))
 		[
 			SNew(SBox)
@@ -1102,6 +1159,8 @@ void FMaterialInstanceEditor::NotifyPostChange( const FPropertyChangedEvent& Pro
 		UpdatePropertyWindow();
 	}
 
+	RefreshOnScreenMessages();
+
 	// something was changed in the material so we need to reflect this in the stats
 	MaterialStatsManager->SignalMaterialChanged();
 
@@ -1119,7 +1178,7 @@ void FMaterialInstanceEditor::RefreshPreviewAsset()
 		UMaterialInterface* ParentMaterial = MaterialEditorInstance->SourceInstance->Parent;
 
 		UObject* ParentPreview = ParentMaterial != nullptr ? ParentMaterial->PreviewMesh.TryLoad() : nullptr;
-		PreviewAsset = ParentPreview != nullptr ? ParentPreview : GUnrealEd->GetThumbnailManager()->EditorSphere;
+		PreviewAsset = ParentPreview != nullptr ? ParentPreview : ToRawPtr(GUnrealEd->GetThumbnailManager()->EditorSphere);
 
 		USceneThumbnailInfoWithPrimitive* ThumbnailInfo = Cast<USceneThumbnailInfoWithPrimitive>(MaterialEditorInstance->SourceInstance->ThumbnailInfo);
 		if (ThumbnailInfo)
@@ -1131,7 +1190,7 @@ void FMaterialInstanceEditor::RefreshPreviewAsset()
 	PreviewVC->SetPreviewAsset(PreviewAsset);
 }
 
-void FMaterialInstanceEditor::PreSavePackage(UPackage* Package)
+void FMaterialInstanceEditor::PreSavePackage(UPackage* Package, FObjectPreSaveContext ObjectSaveContext)
 {
 	// The streaming data will be null if there were any edits
 	if (MaterialEditorInstance && 
@@ -1157,7 +1216,7 @@ void FMaterialInstanceEditor::RebuildInheritanceList()
 			FunctionParentList.Insert(Parent, 0);
 
 			Current = Cast<UMaterialFunctionInstance>(Parent);
-			Parent = Current ? Current->Parent : nullptr;
+			Parent = Current ? ToRawPtr(Current->Parent) : nullptr;
 		}
 	}
 	else
@@ -1226,87 +1285,65 @@ void FMaterialInstanceEditor::DrawMessages( FViewport* Viewport, FCanvas* Canvas
 	Canvas->PopTransform();
 }
 
-/**
- * Draws sampler/texture mismatch warning strings.
- * @param Canvas - The canvas on which to draw.
- * @param DrawPositionY - The Y position at which to draw. Upon return contains the Y value following the last line of text drawn.
- */
-void FMaterialInstanceEditor::DrawSamplerWarningStrings(FCanvas* Canvas, int32& DrawPositionY)
+void FMaterialInstanceEditor::RefreshOnScreenMessages()
 {
-	if ( MaterialEditorInstance->SourceInstance )
+	OnScreenMessages.Reset();
+
+	if (MaterialEditorInstance->SourceInstance)
 	{
 		UMaterial* BaseMaterial = MaterialEditorInstance->SourceInstance->GetMaterial();
-		if ( BaseMaterial )
+		if (BaseMaterial)
 		{
-			UFont* FontToUse = GEngine->GetTinyFont();
-			const int32 SpacingBetweenLines = 13;
 			UEnum* SamplerTypeEnum = StaticEnum<EMaterialSamplerType>();
-			check( SamplerTypeEnum );
+			check(SamplerTypeEnum);
 			UEnum* MaterialTypeEnum = StaticEnum<ERuntimeVirtualTextureMaterialType>();
 			check(MaterialTypeEnum);
 
 			const int32 GroupCount = MaterialEditorInstance->ParameterGroups.Num();
-			for ( int32 GroupIndex = 0; GroupIndex < GroupCount; ++GroupIndex )
+			for (int32 GroupIndex = 0; GroupIndex < GroupCount; ++GroupIndex)
 			{
-				const FEditorParameterGroup& Group = MaterialEditorInstance->ParameterGroups[ GroupIndex ];
+				const FEditorParameterGroup& Group = MaterialEditorInstance->ParameterGroups[GroupIndex];
 				const int32 ParameterCount = Group.Parameters.Num();
-				for ( int32 ParameterIndex = 0; ParameterIndex < ParameterCount; ++ParameterIndex )
+				for (int32 ParameterIndex = 0; ParameterIndex < ParameterCount; ++ParameterIndex)
 				{
-					UDEditorTextureParameterValue* TextureParameterValue = Cast<UDEditorTextureParameterValue>( Group.Parameters[ ParameterIndex ] );
-					if ( TextureParameterValue && TextureParameterValue->ExpressionId.IsValid() )
+					UDEditorTextureParameterValue* TextureParameterValue = Cast<UDEditorTextureParameterValue>(Group.Parameters[ParameterIndex]);
+					if (TextureParameterValue && TextureParameterValue->ExpressionId.IsValid())
 					{
 						UTexture* Texture = NULL;
-						MaterialEditorInstance->SourceInstance->GetTextureParameterValue( TextureParameterValue->ParameterInfo, Texture );
-						if ( Texture )
+						MaterialEditorInstance->SourceInstance->GetTextureParameterValue(TextureParameterValue->ParameterInfo, Texture);
+						if (Texture)
 						{
-							EMaterialSamplerType SamplerType = UMaterialExpressionTextureBase::GetSamplerTypeForTexture( Texture );
-							UMaterialExpressionTextureSampleParameter* Expression = BaseMaterial->FindExpressionByGUID<UMaterialExpressionTextureSampleParameter>( TextureParameterValue->ExpressionId );
+							EMaterialSamplerType SamplerType = UMaterialExpressionTextureBase::GetSamplerTypeForTexture(Texture);
+							UMaterialExpressionTextureSampleParameter* Expression = BaseMaterial->FindExpressionByGUID<UMaterialExpressionTextureSampleParameter>(TextureParameterValue->ExpressionId);
 
 							FString ErrorMessage;
 							if (Expression && !Expression->TextureIsValid(Texture, ErrorMessage))
 							{
-								Canvas->DrawShadowedString(
-									5,
-									DrawPositionY,
-									*FString::Printf(TEXT("Error: %s has invalid texture %s: %s."),
-										*TextureParameterValue->ParameterInfo.Name.ToString(),
-										*Texture->GetPathName(),
-										*ErrorMessage),
-									FontToUse,
-									FLinearColor(1, 0, 0));
-								DrawPositionY += SpacingBetweenLines;
+								OnScreenMessages.Emplace(FLinearColor(1, 0, 0),
+									FString::Printf(TEXT("Error: %s has invalid texture %s: %s."),
+									*TextureParameterValue->ParameterInfo.Name.ToString(),
+									*Texture->GetPathName(),
+									*ErrorMessage));
 							}
 							else
 							{
 								if (Expression && Expression->SamplerType != SamplerType)
 								{
 									FString SamplerTypeDisplayName = SamplerTypeEnum->GetDisplayNameTextByValue(Expression->SamplerType).ToString();
-
-									Canvas->DrawShadowedString(
-										5,
-										DrawPositionY,
-										*FString::Printf(TEXT("Warning: %s samples %s as %s."),
-											*TextureParameterValue->ParameterInfo.Name.ToString(),
-											*Texture->GetPathName(),
-											*SamplerTypeDisplayName),
-										FontToUse,
-										FLinearColor(1, 1, 0));
-									DrawPositionY += SpacingBetweenLines;
+									OnScreenMessages.Emplace(FLinearColor(1, 1, 0),
+										FString::Printf(TEXT("Warning: %s samples %s as %s."),
+										*TextureParameterValue->ParameterInfo.Name.ToString(),
+										*Texture->GetPathName(),
+										*SamplerTypeDisplayName));
 								}
 								if (Expression && ((Expression->SamplerType == (EMaterialSamplerType)TC_Normalmap || Expression->SamplerType == (EMaterialSamplerType)TC_Masks) && Texture->SRGB))
 								{
 									FString SamplerTypeDisplayName = SamplerTypeEnum->GetDisplayNameTextByValue(Expression->SamplerType).ToString();
-
-									Canvas->DrawShadowedString(
-										5,
-										DrawPositionY,
-										*FString::Printf(TEXT("Warning: %s samples texture as '%s'. SRGB should be disabled for '%s'."),
+									OnScreenMessages.Emplace(FLinearColor(1, 1, 0),
+										FString::Printf(TEXT("Warning: %s samples texture as '%s'. SRGB should be disabled for '%s'."),
 											*TextureParameterValue->ParameterInfo.Name.ToString(),
 											*SamplerTypeDisplayName,
-											*Texture->GetPathName()),
-										FontToUse,
-										FLinearColor(1, 1, 0));
-									DrawPositionY += SpacingBetweenLines;
+											*Texture->GetPathName()));
 								}
 							}
 						}
@@ -1323,64 +1360,80 @@ void FMaterialInstanceEditor::DrawSamplerWarningStrings(FCanvas* Canvas, int32& 
 							if (!Expression)
 							{
 								const FText ExpressionNameText = FText::Format(LOCTEXT("MissingRVTExpression", "Warning: Runtime Virtual Texture Expression {0} not found."), FText::FromName(RuntimeVirtualTextureParameterValue->ParameterInfo.Name));
-								Canvas->DrawShadowedText(
-									5, DrawPositionY,
-									ExpressionNameText,
-									FontToUse,
-									FLinearColor(1, 1, 0));
-
-								DrawPositionY += SpacingBetweenLines;
+								OnScreenMessages.Emplace(FLinearColor(1, 1, 0), ExpressionNameText.ToString());
 							}
 							if (Expression && Expression->MaterialType != RuntimeVirtualTexture->GetMaterialType())
 							{
 								FString BaseMaterialTypeDisplayName = MaterialTypeEnum->GetDisplayNameTextByValue((int64)(Expression->MaterialType)).ToString();
 								FString OverrideMaterialTypeDisplayName = MaterialTypeEnum->GetDisplayNameTextByValue((int64)(RuntimeVirtualTexture->GetMaterialType())).ToString();
 
-								Canvas->DrawShadowedText(
-									5, DrawPositionY,
-									FText::Format(LOCTEXT("MismatchedRVTType","Warning: '{0}' interprets the virtual texture as '{1}' not '{2}', {3}"),
-										FText::FromName(RuntimeVirtualTextureParameterValue->ParameterInfo.Name),
-										FText::FromString(BaseMaterialTypeDisplayName),
-										FText::FromString(OverrideMaterialTypeDisplayName),
-										FText::FromString(RuntimeVirtualTexture->GetPathName())),
-									FontToUse,
-									FLinearColor(1, 1, 0));
-
-								DrawPositionY += SpacingBetweenLines;
+								OnScreenMessages.Emplace(FLinearColor(1, 1, 0),
+									FText::Format(LOCTEXT("MismatchedRVTType", "Warning: '{0}' interprets the virtual texture as '{1}' not '{2}', {3}"),
+									FText::FromName(RuntimeVirtualTextureParameterValue->ParameterInfo.Name),
+									FText::FromString(BaseMaterialTypeDisplayName),
+									FText::FromString(OverrideMaterialTypeDisplayName),
+									FText::FromString(RuntimeVirtualTexture->GetPathName())).ToString());
 							}
 							if (Expression && Expression->bSinglePhysicalSpace != RuntimeVirtualTexture->GetSinglePhysicalSpace())
 							{
-								Canvas->DrawShadowedText(
-									5, DrawPositionY,
+								OnScreenMessages.Emplace(FLinearColor(1, 1, 0),
 									FText::Format(LOCTEXT("VirtualTexturePagePackingWarning", "Warning: '{0}' interprets the virtual texture page table packing as {1} not {2}, {3}"),
-										FText::FromName(RuntimeVirtualTextureParameterValue->ParameterInfo.Name),
-										FText::FromString(RuntimeVirtualTexture->GetSinglePhysicalSpace() ?  TEXT("true") : TEXT("false")),
-										FText::FromString(Expression->bSinglePhysicalSpace ? TEXT("true") : TEXT("false")),
-										FText::FromString(RuntimeVirtualTexture->GetPathName())),
-									FontToUse,
-									FLinearColor(1, 1, 0));
-
-								DrawPositionY += SpacingBetweenLines;
+									FText::FromName(RuntimeVirtualTextureParameterValue->ParameterInfo.Name),
+									FText::FromString(RuntimeVirtualTexture->GetSinglePhysicalSpace() ? TEXT("true") : TEXT("false")),
+									FText::FromString(Expression->bSinglePhysicalSpace ? TEXT("true") : TEXT("false")),
+									FText::FromString(RuntimeVirtualTexture->GetPathName())).ToString());
 							}
 							if (Expression && Expression->bAdaptive != RuntimeVirtualTexture->GetAdaptivePageTable())
 							{
-								Canvas->DrawShadowedText(
-									5, DrawPositionY,
+								OnScreenMessages.Emplace(FLinearColor(1, 1, 0),
 									FText::Format(LOCTEXT("VirtualTextureAdaptiveWarning", "Warning: '{0}' interprets the adaptive page table setting as {1} not {2}, {3}"),
-										FText::FromName(RuntimeVirtualTextureParameterValue->ParameterInfo.Name),
-										FText::FromString(RuntimeVirtualTexture->GetAdaptivePageTable() ? TEXT("true") : TEXT("false")),
-										FText::FromString(Expression->bAdaptive ? TEXT("true") : TEXT("false")),
-										FText::FromString(RuntimeVirtualTexture->GetPathName())),
-									FontToUse,
-									FLinearColor(1, 1, 0));
+									FText::FromName(RuntimeVirtualTextureParameterValue->ParameterInfo.Name),
+									FText::FromString(RuntimeVirtualTexture->GetAdaptivePageTable() ? TEXT("true") : TEXT("false")),
+									FText::FromString(Expression->bAdaptive ? TEXT("true") : TEXT("false")),
+									FText::FromString(RuntimeVirtualTexture->GetPathName())).ToString());
+							}
+						}
+					}
 
-								DrawPositionY += SpacingBetweenLines;
+					UDEditorSparseVolumeTextureParameterValue * SparseVolumeTextureParameterValue = Cast<UDEditorSparseVolumeTextureParameterValue>(Group.Parameters[ParameterIndex]);
+					if (SparseVolumeTextureParameterValue && SparseVolumeTextureParameterValue->ExpressionId.IsValid())
+					{
+						USparseVolumeTexture* SparseVolumeTexture = NULL;
+						MaterialEditorInstance->SourceInstance->GetSparseVolumeTextureParameterValue(SparseVolumeTextureParameterValue->ParameterInfo, SparseVolumeTexture);
+						if (SparseVolumeTexture)
+						{
+							UMaterialExpressionSparseVolumeTextureSampleParameter* Expression = BaseMaterial->FindExpressionByGUID<UMaterialExpressionSparseVolumeTextureSampleParameter>(SparseVolumeTextureParameterValue->ExpressionId);
+							if (!Expression)
+							{
+								const FText ExpressionNameText = FText::Format(LOCTEXT("MissingSVTExpression", "Warning: Sparse Volume Texture Expression {0} not found."), FText::FromName(SparseVolumeTextureParameterValue->ParameterInfo.Name));
+								OnScreenMessages.Emplace(FLinearColor(1, 1, 0), ExpressionNameText.ToString());
 							}
 						}
 					}
 				}
 			}
 		}
+	}
+}
+
+/**
+ * Draws sampler/texture mismatch warning strings.
+ * @param Canvas - The canvas on which to draw.
+ * @param DrawPositionY - The Y position at which to draw. Upon return contains the Y value following the last line of text drawn.
+ */
+void FMaterialInstanceEditor::DrawSamplerWarningStrings(FCanvas* Canvas, int32& DrawPositionY)
+{
+	const int32 SpacingBetweenLines = 13;
+	UFont* FontToUse = GEngine->GetTinyFont();
+	for (const FOnScreenMessage& Message : OnScreenMessages)
+	{
+		Canvas->DrawShadowedString(
+			5,
+			DrawPositionY,
+			*Message.Message,
+			FontToUse,
+			Message.Color);
+		DrawPositionY += SpacingBetweenLines;
 	}
 }
 
@@ -1551,7 +1604,7 @@ bool FMaterialInstanceEditor::ApproveSetPreviewAsset(UObject* InAsset)
 void FMaterialInstanceEditor::Refresh()
 {
 	int32 TempIndex;
-	const bool bParentChanged = !MaterialParentList.Find( MaterialEditorInstance->Parent, TempIndex );
+	const bool bParentChanged = !MaterialParentList.Find( ToRawPtr(MaterialEditorInstance->Parent), TempIndex );
 
 	PreviewVC->RefreshViewport();
 
@@ -1561,6 +1614,8 @@ void FMaterialInstanceEditor::Refresh()
 	}
 	
 	UpdatePropertyWindow();
+
+	RefreshOnScreenMessages();
 }
 
 void FMaterialInstanceEditor::PostUndo( bool bSuccess )

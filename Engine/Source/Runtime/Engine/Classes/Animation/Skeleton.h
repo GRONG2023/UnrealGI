@@ -16,17 +16,33 @@
 #include "Animation/PreviewAssetAttachComponent.h"
 #include "Animation/SmartName.h"
 #include "Engine/AssetUserData.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "Engine/SkeletalMesh.h"
+#endif
+#include "HAL/CriticalSection.h"
 #include "Interfaces/Interface_AssetUserData.h"
 #include "Interfaces/Interface_PreviewMeshProvider.h"
+#include "Delegates/DelegateCombinations.h"
+#include "UObject/ObjectKey.h"
 #include "Skeleton.generated.h"
 
+class UAnimCurveMetaData;
 class UAnimSequence;
 class UBlendProfile;
 class URig;
-class USkeletalMesh;
 class USkeletalMeshSocket;
+class USkinnedAsset;
 class FPackageReloadedEvent;
+struct FAssetData;
 enum class EPackageReloadPhase : uint8;
+class USkeleton;
+typedef SmartName::UID_Type SkeletonAnimCurveUID;
+class USkeleton;
+struct FSkeletonRemapping;
+class FEditableSkeleton;
+
+// Delegate used to control global skeleton compatibility
+DECLARE_DELEGATE_RetVal(bool, FAreAllSkeletonsCompatible);
 
 /** This is a mapping table between bone in a particular skeletal mesh and bone of this skeleton set. */
 USTRUCT()
@@ -56,7 +72,7 @@ struct FSkeletonToMeshLinkup
 UENUM()
 namespace EBoneTranslationRetargetingMode
 {
-	enum Type
+	enum Type : int
 	{
 		/** Use translation from animation data. */
 		Animation,
@@ -80,6 +96,7 @@ struct FBoneNode
 {
 	GENERATED_USTRUCT_BODY()
 
+#if WITH_EDITORONLY_DATA
 	/** Name of bone, this is the search criteria to match with mesh bone. This will be NAME_None if deleted. */
 	UPROPERTY()
 	FName Name_DEPRECATED;
@@ -87,21 +104,28 @@ struct FBoneNode
 	/** Parent Index. -1 if not used. The root has 0 as its parent. Do not delete the element but set this to -1. If it is revived by other reason, fix up this link. */
 	UPROPERTY()
 	int32 ParentIndex_DEPRECATED;
+#endif
 
 	/** Retargeting Mode for Translation Component. */
 	UPROPERTY(EditAnywhere, Category=BoneNode)
 	TEnumAsByte<EBoneTranslationRetargetingMode::Type> TranslationRetargetingMode;
 
 	FBoneNode()
-		: ParentIndex_DEPRECATED(INDEX_NONE)
-		, TranslationRetargetingMode(EBoneTranslationRetargetingMode::Animation)
+		:
+#if WITH_EDITORONLY_DATA
+		ParentIndex_DEPRECATED(INDEX_NONE),
+#endif
+		TranslationRetargetingMode(EBoneTranslationRetargetingMode::Animation)
 	{
 	}
 
 	FBoneNode(FName InBoneName, int32 InParentIndex)
-		: Name_DEPRECATED(InBoneName)
-		, ParentIndex_DEPRECATED(InParentIndex)
-		, TranslationRetargetingMode(EBoneTranslationRetargetingMode::Animation)
+		:
+#if WITH_EDITORONLY_DATA
+		Name_DEPRECATED(InBoneName),
+		ParentIndex_DEPRECATED(InParentIndex),
+#endif
+		TranslationRetargetingMode(EBoneTranslationRetargetingMode::Animation)
 	{
 	}
 };
@@ -194,19 +218,6 @@ struct FNameMapping
 };
 
 USTRUCT()
-struct FRigConfiguration
-{
-	GENERATED_USTRUCT_BODY()
-
-	UPROPERTY()
-	class URig * Rig = nullptr;
-
-	// @todo in the future we can make this to be run-time data
-	UPROPERTY()
-	TArray<FNameMapping> BoneMappingTable;
-};
-
-USTRUCT()
 struct FAnimSlotGroup
 {
 	GENERATED_USTRUCT_BODY()
@@ -266,14 +277,14 @@ public:
 	}
 };
 
+
 /**
  *	USkeleton : that links between mesh and animation
  *		- Bone hierarchy for animations
  *		- Bone/track linkup between mesh and animation
  *		- Retargetting related
- *		- Mirror table
  */
-UCLASS(hidecategories=Object, MinimalAPI)
+UCLASS(hidecategories=Object, MinimalAPI, BlueprintType)
 class USkeleton : public UObject, public IInterface_AssetUserData, public IInterface_PreviewMeshProvider
 {
 	friend class UAnimationBlueprintLibrary;
@@ -286,9 +297,11 @@ protected:
 	UPROPERTY(VisibleAnywhere, Category=Skeleton)
 	TArray<struct FBoneNode> BoneTree;
 
+#if WITH_EDITORONLY_DATA
 	/** Reference skeleton poses in local space */
 	UPROPERTY()
 	TArray<FTransform> RefLocalPoses_DEPRECATED;
+#endif
 
 	/** Reference Skeleton */
 	FReferenceSkeleton ReferenceSkeleton;
@@ -310,6 +323,16 @@ protected:
 	*/
 	UPROPERTY()
 	TArray<FVirtualBone> VirtualBones;
+
+	/**
+	 * The list of compatible skeletons. This skeleton will be able to use animation data originating from skeletons within this array, such as animation sequences.
+	 * This property is not bi-directional.
+	 * 
+	 * This is an array of TSoftObjectPtr in order to prevent all skeletons to be loaded, as we only want to load things on demand.
+	 * As this is EditAnywhere and an array of TSoftObjectPtr, checking validity of pointers is needed.
+	 **/
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = CompatibleSkeletons)
+	TArray<TSoftObjectPtr<USkeleton>> CompatibleSkeletons;
 
 public:
 	//~ Begin UObject Interface.
@@ -333,28 +356,80 @@ public:
 	 *	everything explicitly to AttachComponent in the SkeletalMeshComponent.
 	 */
 	UPROPERTY()
-	TArray<class USkeletalMeshSocket*> Sockets;
+	TArray<TObjectPtr<class USkeletalMeshSocket>> Sockets;
 
 	/** Serializable retarget sources for this skeleton **/
 	TMap< FName, FReferencePose > AnimRetargetSources;
 
-	// Typedefs for greater smartname UID readability, add one for each smartname category 
+	// DEPRECATED - no longer used
 	typedef SmartName::UID_Type AnimCurveUID;
 
-	// Names for smartname mappings, if you're adding a new category of smartnames add a new name here
+	UE_DEPRECATED(5.3, "AnimCurveMappingName is no longer used.")
 	static ENGINE_API const FName AnimCurveMappingName;
 
-	// Names for smartname mappings, if you're adding a new category of smartnames add a new name here
+	UE_DEPRECATED(5.3, "AnimTrackCurveMappingName is no longer used.")
 	static ENGINE_API const FName AnimTrackCurveMappingName;
 
-	// these return container of curve meta data, if you modify this container, 
-	// you'll have to call REfreshCAchedAnimationCurveData to apply
-	ENGINE_API FCurveMetaData* GetCurveMetaData(const FName& CurveName);
-	ENGINE_API const FCurveMetaData* GetCurveMetaData(const FName& CurveName) const;
+	ENGINE_API FCurveMetaData* GetCurveMetaData(FName CurveName);
+	ENGINE_API const FCurveMetaData* GetCurveMetaData(FName CurveName) const;
+
+	UE_DEPRECATED(5.3, "Please use GetCurveMetaData with an FName.")
 	ENGINE_API const FCurveMetaData* GetCurveMetaData(const SmartName::UID_Type CurveUID) const;
+
+	UE_DEPRECATED(5.3, "Please use GetCurveMetaData with an FName.")
 	ENGINE_API FCurveMetaData* GetCurveMetaData(const FSmartName& CurveName);
+	
+	UE_DEPRECATED(5.3, "Please use GetCurveMetaData with an FName.")
 	ENGINE_API const FCurveMetaData* GetCurveMetaData(const FSmartName& CurveName) const;
-	// this is called when you know both flags - called by post serialize
+
+	/**
+	 * Iterate over all curve metadata entries, calling InFunction on each
+	 * @param	InFunction	The function to call
+	 **/
+	ENGINE_API void ForEachCurveMetaData(TFunctionRef<void(FName, const FCurveMetaData&)> InFunction) const;
+	
+	/** @return the number of curve metadata entries **/
+	ENGINE_API int32 GetNumCurveMetaData() const;
+
+	/**
+	 * Adds a curve metadata entry with the specified name
+	 * @param	InCurveName			The name of the curve to find
+	 * @return true if an entry was added, false if an entry already existed
+	 */
+	ENGINE_API bool AddCurveMetaData(FName CurveName);
+
+	/**
+	 * Get an array of all curve metadata names
+	 * @param	OutNames		The array to receive the metadata names 
+	 */
+	ENGINE_API void GetCurveMetaDataNames(TArray<FName>& OutNames) const;
+
+#if WITH_EDITOR
+	/**
+	 * Renames a curve metadata entry. Metadata is preserved, but assigned to a different curve name.
+	 * @param OldName	The name of an existing curve entry
+	 * @param NewName	The name to change the entry to
+	 * @return			true if the rename was successful (the old name was found and the new name didnt collide with an
+	 *					existing entry)
+	 */	
+	ENGINE_API bool RenameCurveMetaData(FName OldName, FName NewName);
+
+	/**
+	 * Removes a curve metadata entry for the specified name.
+	 * @param CurveName	The name of the curve to remove the metadata for
+	 * @return true if the entry was successfully removed (i.e. it existed)
+	 */
+	ENGINE_API bool RemoveCurveMetaData(FName CurveName);
+
+	/**
+	 * Removes a group of curve metadata entries for the specified names.
+	 * @param CurveNames	The names of the curves to remove the metadata for
+	 * @return true if any of the entries were successfully removed (i.e. something changed)
+	 */
+	ENGINE_API bool RemoveCurveMetaData(TArrayView<FName> CurveNames);
+#endif
+
+	// this is called when you know both flags - called by post serialize and import
 	ENGINE_API void AccumulateCurveMetaData(FName CurveName, bool bMaterialSet, bool bMorphtargetSet);
 
 	ENGINE_API bool AddNewVirtualBone(const FName SourceBoneName, const FName TargetBoneName);
@@ -368,8 +443,15 @@ public:
 	void HandleVirtualBoneChanges();
 
 	// return version of AnimCurveUidVersion
-	uint16 GetAnimCurveUidVersion() const { return AnimCurveUidVersion;  }
-	const TArray<uint16>& GetDefaultCurveUIDList() const { return DefaultCurveUIDList; }
+	uint16 GetAnimCurveUidVersion() const;
+
+	UE_DEPRECATED(5.3, "This function is no longer used")
+	const TArray<uint16>& GetDefaultCurveUIDList() const;
+
+	const TArray<TSoftObjectPtr<USkeleton>>& GetCompatibleSkeletons() const { return CompatibleSkeletons; }
+
+	UE_DEPRECATED(5.2, "Please use UE::Anim::FSkeletonRemappingRegistry::GetRemapping.")
+	ENGINE_API const FSkeletonRemapping* GetSkeletonRemapping(const USkeleton* SourceSkeleton) const;
 
 #if WITH_EDITOR
 	// Get existing (seen) sync marker names for this Skeleton
@@ -379,30 +461,33 @@ public:
 	void RegisterMarkerName(FName MarkerName) { ExistingMarkerNames.AddUnique(MarkerName); ExistingMarkerNames.Sort(FNameLexicalLess()); }
 
 	// Remove a sync marker name
-	void RemoveMarkerName(FName MarkerName) { ExistingMarkerNames.Remove(MarkerName); }
+	ENGINE_API bool RemoveMarkerName(FName MarkerName);
+
+	// Rename a sync marker name
+	ENGINE_API bool RenameMarkerName(FName InOldName, FName InNewName);
 #endif
 
 protected:
-	// Container for smart name mappings
+	// DEPRECATED - moved to CurveMetaData
 	UPROPERTY()
-	FSmartNameContainer SmartNames;
+	FSmartNameContainer SmartNames_DEPRECATED;
 
 	// Cached ptr to the persistent AnimCurveMapping
-	FSmartNameMapping* AnimCurveMapping;
+	UE_DEPRECATED(5.3, "AnimCurveMapping is no longer used")
+	static FSmartNameMapping* AnimCurveMapping;
 
-	// this is default curve uid list used like ref pose, as default value
-	// don't use this unless you want all curves from the skeleton
-	// FBoneContainer contains only list that is used by current LOD
-	TArray<uint16> DefaultCurveUIDList;
+	UE_DEPRECATED(5.3, "DefaultCurveUIDList is no longer used")
+	static TArray<uint16> DefaultCurveUIDList;
 
 	//Cached marker sync marker names (stripped for non editor)
 	TArray<FName> ExistingMarkerNames;
 
 private:
-	/** Increase the AnimCurveUidVersion so that instances can get the latest information */
-	void IncreaseAnimCurveUidVersion();
-	/** Current  Anim Curve Uid Version. Increase whenever it has to be recalculated */
-	uint16 AnimCurveUidVersion;
+	// Refresh skeleton metadata (updates bone indices for linked bone references)
+	void RefreshSkeletonMetaData();
+
+	// Returns the UAnimCurveMetaData from this skeleton's AssetUserData, creating one if it doesn't exist
+	UAnimCurveMetaData* GetOrCreateCurveMetaDataObject();
 
 public:
 	//////////////////////////////////////////////////////////////////////////
@@ -410,13 +495,17 @@ public:
 
 	/** List of blend profiles available in this skeleton */
 	UPROPERTY(Instanced)
-	TArray<UBlendProfile*> BlendProfiles;
+	TArray<TObjectPtr<UBlendProfile>> BlendProfiles;
 
 	/** Get the specified blend profile by name */
+	UFUNCTION(BlueprintPure, Category = Skeleton)
 	ENGINE_API UBlendProfile* GetBlendProfile(const FName& InProfileName);
 
 	/** Create a new blend profile with the specified name */
 	ENGINE_API UBlendProfile* CreateNewBlendProfile(const FName& InProfileName);
+
+	/** Rename an existing blend profile with the specified name. Returns the pointer if success, nullptr on failure */
+	ENGINE_API UBlendProfile* RenameBlendProfile(const FName& InProfileName, const FName& InNewProfileName);
 
 	//////////////////////////////////////////////////////////////////////////
 
@@ -454,41 +543,38 @@ public:
 	ENGINE_API void RemoveSlotGroup(const FName& InSlotName);
 	ENGINE_API void RenameSlotName(const FName& OldName, const FName& NewName);
 
-	////////////////////////////////////////////////////////////////////////////
-	// Smart Name Interfaces
-	////////////////////////////////////////////////////////////////////////////
-	// Adds a new name to the smart name container and modifies the skeleton so it can be saved
-	// return bool - Whether a name was added (false if already present)
 #if WITH_EDITOR
-	ENGINE_API bool AddSmartNameAndModify(FName ContainerName, FName NewDisplayName, FSmartName& NewName);
+	UE_DEPRECATED(5.3, "Please use AddCurveMetaData.")
+	bool AddSmartNameAndModify(FName ContainerName, FName NewDisplayName, FSmartName& NewName) { return false; }
 
-	// Renames a smartname in the specified container and modifies the skeleton
-	// return bool - Whether the rename was sucessful
-	ENGINE_API bool RenameSmartnameAndModify(FName ContainerName, SmartName::UID_Type Uid, FName NewName);
+	UE_DEPRECATED(5.3, "Please use RenameCurveMetaData.")
+	bool RenameSmartnameAndModify(FName ContainerName, SmartName::UID_Type Uid, FName NewName) { return false; }
+	
+	UE_DEPRECATED(5.3, "Please use RemoveCurveMetaData.")
+	void RemoveSmartnameAndModify(FName ContainerName, SmartName::UID_Type Uid) {}
 
-	// Removes a smartname from the specified container and modifies the skeleton
-	ENGINE_API void RemoveSmartnameAndModify(FName ContainerName, SmartName::UID_Type Uid);
-
-	// Removes smartnames from the specified container and modifies the skeleton
-	ENGINE_API void RemoveSmartnamesAndModify(FName ContainerName, const TArray<FName>& Names);
+	UE_DEPRECATED(5.3, "Please use RemoveCurveMetaData.")
+	void RemoveSmartnamesAndModify(FName ContainerName, const TArray<FName>& Names) {}
 #endif// WITH_EDITOR
 
-	// quick wrapper function for Find UID by name, if not found, it will return SmartName::MaxUID
-	ENGINE_API SmartName::UID_Type GetUIDByName(const FName& ContainerName, const FName& Name) const;
-	ENGINE_API bool GetSmartNameByUID(const FName& ContainerName, SmartName::UID_Type UID, FSmartName& OutSmartName);
-	ENGINE_API bool GetSmartNameByName(const FName& ContainerName, const FName& InName, FSmartName& OutSmartName);
+	UE_DEPRECATED(5.3, "This function is no longer used")
+	SmartName::UID_Type GetUIDByName(const FName& ContainerName, const FName& Name) const { return 0; }
 
-	// Get or add a smartname container with the given name
-	ENGINE_API const FSmartNameMapping* GetSmartNameContainer(const FName& ContainerName) const;
+	UE_DEPRECATED(5.3, "This function is no longer used")
+	bool GetSmartNameByUID(const FName& ContainerName, SmartName::UID_Type UID, FSmartName& OutSmartName) const { return false; }
+	
+	UE_DEPRECATED(5.3, "This function is no longer used")
+	bool GetSmartNameByName(const FName& ContainerName, const FName& InName, FSmartName& OutSmartName) const { return false; }
 
-	// make sure the smart name has valid UID and so on
-	ENGINE_API void VerifySmartName(const FName&  ContainerName, FSmartName& InOutSmartName);
-	ENGINE_API void VerifySmartNames(const FName&  ContainerName, TArray<FSmartName>& InOutSmartNames);
-private:
-	// Get or add a smartname container with the given name
-	FSmartNameMapping* GetOrAddSmartNameContainer(const FName& ContainerName);
-	bool VerifySmartNameInternal(const FName&  ContainerName, FSmartName& InOutSmartName);
-	bool FillSmartNameByDisplayName(FSmartNameMapping* Mapping, const FName& DisplayName, FSmartName& OutSmartName);
+	UE_DEPRECATED(5.3, "This function is no longer used")
+	const FSmartNameMapping* GetSmartNameContainer(const FName& ContainerName) const { return nullptr; }
+
+	UE_DEPRECATED(5.3, "This function is no longer used")
+	void VerifySmartName(const FName&  ContainerName, FSmartName& InOutSmartName) {}
+	
+	UE_DEPRECATED(5.3, "This function is no longer used")
+	void VerifySmartNames(const FName&  ContainerName, TArray<FSmartName>& InOutSmartNames) {}
+
 #if WITH_EDITORONLY_DATA
 private:
 	/** The default skeletal mesh to use when previewing this skeleton */
@@ -499,10 +585,9 @@ private:
 	UPROPERTY(duplicatetransient, AssetRegistrySearchable)
 	TSoftObjectPtr<class UDataAsset> AdditionalPreviewSkeletalMeshes;
 
-	UPROPERTY()
-	FRigConfiguration RigConfig;
-
 	/** rig property will be saved separately */
+	ENGINE_API virtual void GetAssetRegistryTags(FAssetRegistryTagsContext Context) const override;
+	UE_DEPRECATED(5.4, "Implement the version that takes FAssetRegistryTagsContext instead.")
 	ENGINE_API virtual void GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const override;
 
 public:
@@ -552,14 +637,30 @@ public:
 
 	typedef TArray<FBoneNode> FBoneTreeType;
 
-	//Use this Lock everytime you change or access LinkupCache and SkelMesh2LinkupCache member.
+	
+	UE_DEPRECATED(5.4, "Public access to this member variable is deprecated.")
 	FCriticalSection LinkupCacheLock;
 
 	/** Non-serialised cache of linkups between different skeletal meshes and this Skeleton. */
+	UE_DEPRECATED(5.4, "Public access to this member variable is deprecated.")
 	TArray<struct FSkeletonToMeshLinkup> LinkupCache;
 
-	/** Runtime built mapping table between SkeletalMeshes, and LinkupCache array indices. */
+private:
+	UE_DEPRECATED(5.4, "Please, use SkinnedAssetLinkupCache.")
+	TMap<TWeakObjectPtr<USkinnedAsset>, int32> SkinnedAsset2LinkupCache;
+	
+	//Use this Lock everytime you change or access SkinnedAssetLinkupCache member.
+	FRWLock SkinnedAssetLinkupCacheLock;
+
+	/** Runtime built mapping table between SkinnedAssets and Mesh Linkup Data*/
+	TMap<TObjectKey<USkinnedAsset>, TUniquePtr<FSkeletonToMeshLinkup>> SkinnedAssetLinkupCache;
+
+public:
+	UE_DEPRECATED(5.1, "Public access to this member variable is deprecated.")
 	TMap<TWeakObjectPtr<USkeletalMesh>, int32> SkelMesh2LinkupCache;
+
+	/** A cached soft object pointer of this skeleton. This is done for performance reasons when searching for compatible skeletons when using IsCompatible(Skeleton). */
+	TSoftObjectPtr<USkeleton> CachedSoftObjectPtr;
 
 	/** IInterface_PreviewMeshProvider interface */
 	virtual USkeletalMesh* GetPreviewMesh(bool bFindIfNotSet = false) override;
@@ -568,10 +669,7 @@ public:
 
 #if WITH_EDITORONLY_DATA
 
-	/*
-	 * Collect animation notifies that are referenced in all animations that use this skeleton (uses the asset registry).
-	 * Updates the cached AnimationNotifies array.
-	 */
+	UE_DEPRECATED(5.4, "Please do not use this function - notifies are stored collectively in the asset registry now rather than centrally on the skeleton")
 	ENGINE_API void CollectAnimationNotifies();
 
 	/*
@@ -582,6 +680,12 @@ public:
 
 	// Adds a new anim notify to the cached AnimationNotifies array.
 	ENGINE_API void AddNewAnimationNotify(FName NewAnimNotifyName);
+
+	// Removes an anim notify from the cached AnimationNotifies array.
+	ENGINE_API void RemoveAnimationNotify(FName AnimNotifyName);
+
+	// Renames an anim notify
+	ENGINE_API void RenameAnimationNotify(FName OldAnimNotifyName, FName NewAnimNotifyName);
 
 	ENGINE_API USkeletalMesh* GetAssetPreviewMesh(UObject* InAsset);
 
@@ -611,13 +715,65 @@ public:
 	 * @param	(out) List of Direct Children
 	 */
 	ENGINE_API int32 GetChildBones(int32 ParentBoneIndex, TArray<int32> & Children) const;
-
-#endif
+	
+	/**
+	 * Check if animation content authored on the supplied skeleton may be played on this skeleton.
+	 * Note that animations may not always be correct if they were not authored on this skeleton, and may require
+	 * retargeting or other fixup.
+	 */	
+	ENGINE_API bool IsCompatibleForEditor(const USkeleton* InSkeleton) const;
 
 	/**
-	 *	Check if this skeleton may be used with other skeleton
+	 * Check if this skeleton is compatible with a given other asset, if that is a skeleton.
+	 */	
+	ENGINE_API bool IsCompatibleForEditor(const FAssetData& AssetData, const TCHAR* InTag = TEXT("Skeleton")) const;
+
+	/**
+	 * Check if this skeleton is compatible with another skeleton asset that is identified by the string returned by AssetData(SkeletonPtr).GetExportTextName().
 	 */
-	ENGINE_API bool IsCompatible(USkeleton const * InSkeleton) const { return (InSkeleton && this == InSkeleton); }
+	ENGINE_API bool IsCompatibleForEditor(const FString& SkeletonAssetString) const;
+
+	/** Wrapper for !IsCompatibleForEditor, used as a convenience function for binding to FOnShouldFilterAsset in asset pickers. */
+	ENGINE_API bool ShouldFilterAsset(const FAssetData& InAssetData, const TCHAR* InTag = TEXT("Skeleton")) const;
+	
+	/** Get all skeleton assets that are compatible with this skeleton (not just the internal list, but also reciprocally and implicitly compatible skeletons) */
+	ENGINE_API void GetCompatibleSkeletonAssets(TArray<FAssetData>& OutAssets) const;
+
+	/** Get compatible assets given the asset's class and skeleton tag.*/
+	ENGINE_API void GetCompatibleAssets(UClass* AssetClass, const TCHAR* InTag, TArray<FAssetData>& OutAssets) const;
+#endif
+
+	UE_DEPRECATED(5.2, "Compatibility is now an editor-only concern. Please use IsCompatibleForEditor.")
+	ENGINE_API bool IsCompatible(const USkeleton* InSkeleton) const;
+
+	UE_DEPRECATED(5.2, "Compatibility is now an editor-only concern. Please use IsCompatibleForEditor.")
+	ENGINE_API bool IsCompatibleSkeletonByAssetData(const FAssetData& AssetData, const TCHAR* InTag = TEXT("Skeleton")) const;
+
+	UE_DEPRECATED(5.2, "Compatibility is now an editor-only concern. Please use IsCompatibleForEditor.")
+	ENGINE_API bool IsCompatibleSkeletonByAssetString(const FString& SkeletonAssetString) const;
+
+	DECLARE_EVENT(USkeleton, FSmartNamesChangedEvent);
+
+	UE_DEPRECATED(5.3, "This member is no longer used. Delegate registration for skeleton metadata can be handled via UAnimCurveMetaData.")
+	FSmartNamesChangedEvent OnSmartNamesChangedEvent;
+
+#if WITH_EDITORONLY_DATA
+	/**
+	 * Global compatibility delegate, used to override skeleton compatibility. If this returns true, no additional
+	 * compatibility checks are made.
+	 */
+	ENGINE_API static FAreAllSkeletonsCompatible AreAllSkeletonsCompatibleDelegate;
+#endif
+
+public:
+	UFUNCTION(BlueprintCallable, Category=Skeleton)
+	ENGINE_API void AddCompatibleSkeleton(const USkeleton* SourceSkeleton);
+
+	UFUNCTION(BlueprintCallable, Category = Skeleton, DisplayName = "AddCompatibleSkeleton")
+	ENGINE_API void AddCompatibleSkeletonSoft(const TSoftObjectPtr<USkeleton>& SourceSkeleton);
+
+	ENGINE_API void RemoveCompatibleSkeleton(const USkeleton* SourceSkeleton);
+	ENGINE_API void RemoveCompatibleSkeleton(const TSoftObjectPtr<USkeleton>& SourceSkeleton);
 
 	/** 
 	 * Indexing naming convention
@@ -629,41 +785,53 @@ public:
 	 */
 
 	/**
-	 * Verify to see if we can match this skeleton with the provided SkeletalMesh.
+	 * Verify to see if we can match this skeleton with the provided SkinnedAsset.
 	 * 
 	 * Returns true 
 	 *		- if bone hierarchy matches (at least needs to have matching parent) 
 	 *		- and if parent chain matches - meaning if bone tree has A->B->C and if ref pose has A->C, it will fail
 	 *		- and if more than 50 % of bones matches
 	 *  
-	 * @param	InSkelMesh	SkeletalMesh to compare the Skeleton against.
+	 * @param	InSkinnedAsset	SkinnedAsset to compare the Skeleton against.
+	 * @param   bDoParentChainCheck When true (the default) this method also compares if chains match with the parent. 
 	 * 
-	 * @return				true if animation set can play on supplied SkeletalMesh, false if not.
+	 * @return				true if animation set can play on supplied SkinnedAsset, false if not.
 	 */
-	ENGINE_API bool IsCompatibleMesh(const USkeletalMesh* InSkelMesh) const;
+	ENGINE_API bool IsCompatibleMesh(const USkinnedAsset* InSkinnedAsset, bool bDoParentChainCheck=true) const;
 
 	/** Clears all cache data **/
 	ENGINE_API void ClearCacheData();
 
-	/** 
-	 * Find a mesh linkup table (mapping of skeleton bone tree indices to refpose indices) for a particular SkeletalMesh
+	UE_DEPRECATED(5.4, "Please use FindOrAddMeshLinkupData.")
+	ENGINE_API int32 GetMeshLinkupIndex(const USkinnedAsset* InSkinnedAsset);
+
+	/**
+	 * Find a mesh linkup table (mapping of skeleton bone tree indices to refpose indices) for a particular SkinnedAsset
 	 * If one does not already exist, create it now.
 	 */
-	ENGINE_API int32 GetMeshLinkupIndex(const USkeletalMesh* InSkelMesh);
+	ENGINE_API const FSkeletonToMeshLinkup& FindOrAddMeshLinkupData(const USkinnedAsset* InSkinnedAsset);
+
+	/**
+	 * Adds a new Mesh Linkup Table to the map  for a particular SkinnedAsset
+	 *
+	 * @param	InSkinnedAsset	: SkinnedAsset to build look up for
+	 * @return	Const ref to the added FSkeletonToMeshLinkup unique ptr
+	 */
+	ENGINE_API const FSkeletonToMeshLinkup& AddMeshLinkupData(const USkinnedAsset* InSkinnedAsset);
 
 	/** 
-	 * Merge Bones (RequiredBones from InSkelMesh) to BoneTrees if not exists
+	 * Merge Bones (RequiredBones from InSkinnedAsset) to BoneTrees if not exists
 	 * 
 	 * Note that this bonetree can't ever clear up because doing so will corrupt all animation data that was imported based on this
 	 * If nothing exists, it will build new bone tree 
 	 * 
-	 * @param InSkelMesh			: Mesh to build from. 
-	 * @param RequiredRefBones		: RequiredBones are subset of list of bones (index to InSkelMesh->RefSkeleton)
+	 * @param InSkinnedAsset		: Mesh to build from. 
+	 * @param RequiredRefBones		: RequiredBones are subset of list of bones (index to InSkinnedAsset->RefSkeleton)
 									Most of cases, you don't like to add all bones to skeleton, so you'll have choice of cull out some
 	 * 
 	 * @return true if success
 	 */
-	ENGINE_API bool MergeBonesToBoneTree(const USkeletalMesh* InSkeletalMesh, const TArray<int32> &RequiredRefBones);
+	ENGINE_API bool MergeBonesToBoneTree(const USkinnedAsset* InSkinnedAsset, const TArray<int32> &RequiredRefBones, bool bShowProgress = true);
 
 	/** 
 	 * Merge all Bones to BoneTrees if not exists
@@ -671,56 +839,44 @@ public:
 	 * Note that this bonetree can't ever clear up because doing so will corrupt all animation data that was imported based on this
 	 * If nothing exists, it will build new bone tree 
 	 * 
-	 * @param InSkelMesh			: Mesh to build from. 
+	 * @param InSkinnedAsset		: Mesh to build from. 
 	 * 
 	 * @return true if success
 	 */
-	ENGINE_API bool MergeAllBonesToBoneTree(const USkeletalMesh* InSkelMesh);
+	ENGINE_API bool MergeAllBonesToBoneTree(const USkinnedAsset* InSkinnedAsset, bool bShowProgress = true);
 
 	/** 
 	 * Merge has failed, then Recreate BoneTree
 	 * 
 	 * This will invalidate all animations that were linked before, but this is needed 
 	 * 
-	 * @param InSkelMesh			: Mesh to build from. 
+	 * @param InSkinnedAsset		: Mesh to build from. 
 	 * 
 	 * @return true if success
 	 */
-	ENGINE_API bool RecreateBoneTree(USkeletalMesh* InSkelMesh);
+	ENGINE_API bool RecreateBoneTree(USkinnedAsset* InSkinnedAsset);
 
-	/** This is const accessor for BoneTree
-	 *  Understand there will be a lot of need to access BoneTree, but 
-	 *	Anybody modifying BoneTree will corrupt animation data, so will need to make sure it's not modifiable outside of Skeleton
-	 *	You can add new BoneNode but you can't modify current list. The index will be referenced by Animation data.
+	
+	/**
+	 * Get the local-space ref pose for the specified retarget source.
+	 * @param	RetargetSource	The name of the retarget source to find
+	 * @return the transforms for the retarget source reference pose. If the retarget source is not found, this returns the skeleton's reference pose.
 	 */
-	UE_DEPRECATED(4.14, "GetBoneTree should not be called. Please use GetBoneTranslationRetargetingMode()/SetBoneTranslationRetargetingMode() functions instead")
-	const TArray<FBoneNode>& GetBoneTree()	const
-	{ 
-		return BoneTree;	
-	}
-
-	// @todo document
-	const TArray<FTransform>& GetRefLocalPoses( FName RetargetSource = NAME_None ) const 
-	{
-		if ( RetargetSource != NAME_None ) 
-		{
-			const FReferencePose* FoundRetargetSource = AnimRetargetSources.Find(RetargetSource);
-			if (FoundRetargetSource)
-			{
-				return FoundRetargetSource->ReferencePose;
-			}
-		}
-
-		return ReferenceSkeleton.GetRefBonePose();	
-	}
+	ENGINE_API const TArray<FTransform>& GetRefLocalPoses( FName RetargetSource = NAME_None ) const;
 
 #if WITH_EDITORONLY_DATA
 	/**
-	 * Find a retarget source for a particular skel mesh.
-	 * @param	InMesh	The skeletal mesh to find a source for
+	 * Find a retarget source for a particular mesh.
+	 * @param	InSkinnedAsset	The skinned asset mesh to find a source for
 	 * @return NAME_None if a retarget source was not found, or a valid name if it was
 	 */
-	ENGINE_API FName GetRetargetSourceForMesh(USkeletalMesh* InMesh) const;
+	ENGINE_API FName GetRetargetSourceForMesh(USkinnedAsset* InSkinnedAsset) const;
+
+	/**
+	 * Get all the retarget source names for this skeleton.
+	 * @param	OutRetargetSources	The retarget source names array to be filled
+	 */
+	ENGINE_API void GetRetargetSources(TArray<FName>& OutRetargetSources) const;
 #endif
 
 	/** 
@@ -731,27 +887,28 @@ public:
 	 *
 	 * @return	Index of Track of Animation Sequence
 	 */
+	UE_DEPRECATED(5.2, "GetRawAnimationTrackIndex has been deprecated, use tracks are referenced by name instead")
 	ENGINE_API int32 GetRawAnimationTrackIndex(const int32 InSkeletonBoneIndex, const UAnimSequence* InAnimSeq);
 
 	/** 
 	 * Get Bone Tree Index from Reference Bone Index
-	 * @param	InSkelMesh	SkeletalMesh for the ref bone idx
-	 * @param	InRefBoneIdx	Reference Bone Index to look for - index of USkeletalMesh.RefSkeleton
+	 * @param	InSkinnedAsset	SkinnedAsset for the ref bone idx
+	 * @param	InRefBoneIdx	Reference Bone Index to look for - index of USkinnedAsset.RefSkeleton
 	 * @return	Index of BoneTree Index
 	 */
-	ENGINE_API int32 GetSkeletonBoneIndexFromMeshBoneIndex(const USkeletalMesh* InSkelMesh, const int32 MeshBoneIndex);
+	ENGINE_API int32 GetSkeletonBoneIndexFromMeshBoneIndex(const USkinnedAsset* InSkinnedAsset, const int32 MeshBoneIndex);
 
 	/** 
 	 * Get Reference Bone Index from Bone Tree Index
-	 * @param	InSkelMesh	SkeletalMesh for the ref bone idx
+	 * @param	InSkinnedAsset	SkinnedAsset for the ref bone idx
 	 * @param	InBoneTreeIdx	Bone Tree Index to look for - index of USkeleton.BoneTree
 	 * @return	Index of BoneTree Index
 	 */
-	ENGINE_API int32 GetMeshBoneIndexFromSkeletonBoneIndex(const USkeletalMesh* InSkelMesh, const int32 SkeletonBoneIndex);
+	ENGINE_API int32 GetMeshBoneIndexFromSkeletonBoneIndex(const USkinnedAsset* InSkinnedAsset, const int32 SkeletonBoneIndex);
 
-	EBoneTranslationRetargetingMode::Type GetBoneTranslationRetargetingMode(const int32 BoneTreeIdx) const
+	EBoneTranslationRetargetingMode::Type GetBoneTranslationRetargetingMode(const int32 BoneTreeIdx, bool bDisableRetargeting = false) const
 	{
-		if (BoneTree.IsValidIndex(BoneTreeIdx))
+		if (!bDisableRetargeting && BoneTree.IsValidIndex(BoneTreeIdx))
 		{
 			return BoneTree[BoneTreeIdx].TranslationRetargetingMode;
 		}
@@ -761,16 +918,16 @@ public:
 	/** 
 	 * Rebuild Look up between SkelMesh to BoneTree - this should only get called when SkelMesh is re-imported or so, where the mapping may be no longer valid
 	 *
-	 * @param	InSkelMesh	: SkeletalMesh to build look up for
+	 * @param	InSkinnedAsset	: SkinnedAsset to build look up for
 	 */
-	void RebuildLinkup(const USkeletalMesh* InSkelMesh);
+	ENGINE_API void RebuildLinkup(const USkinnedAsset* InSkinnedAsset);
 
 	/**
 	 * Remove Link up cache for the SkelMesh
 	 *
-	 * @param	InSkelMesh	: SkeletalMesh to remove linkup cache for 
+	 * @param	InSkinnedAsset	: SkinnedAsset to remove linkup cache for 
 	 */
-	void RemoveLinkup(const USkeletalMesh* InSkelMesh);
+	void RemoveLinkup(const USkinnedAsset* InSkinnedAsset);
 
 	ENGINE_API void SetBoneTranslationRetargetingMode(const int32 BoneIndex, EBoneTranslationRetargetingMode::Type NewRetargetingMode, bool bChildrenToo=false);
 
@@ -781,15 +938,15 @@ public:
 	ENGINE_API virtual void Serialize(FArchive& Ar) override;
 
 	/** 
-	 * Create RefLocalPoses from InSkelMesh. Note InSkelMesh cannot be null and this function will assert if it is.
+	 * Create RefLocalPoses from InSkinnedAsset. Note InSkinnedAsset cannot be null and this function will assert if it is.
 	 * 
 	 * If bClearAll is false, it will overwrite ref pose of bones that are found in InSkelMesh
 	 * If bClearAll is true, it will reset all Reference Poses 
-	 * Note that this means it will remove transforms of extra bones that might not be found in this skeletalmesh
+	 * Note that this means it will remove transforms of extra bones that might not be found in this InSkinnedAsset
 	 *
-	 * @return true if successful. false if skeletalmesh wasn't compatible with the bone hierarchy
+	 * @return true if successful. false if InSkinnedAsset wasn't compatible with the bone hierarchy
 	 */
-	ENGINE_API void UpdateReferencePoseFromMesh(const USkeletalMesh* InSkelMesh);
+	ENGINE_API void UpdateReferencePoseFromMesh(const USkinnedAsset* InSkinnedAsset);
 
 #if WITH_EDITORONLY_DATA
 	/**
@@ -801,25 +958,34 @@ public:
 #endif
 protected:
 	/** 
-	 * Check if Parent Chain Matches between BoneTree, and SkelMesh 
-	 * Meaning if BoneTree has A->B->C (top to bottom) and if SkelMesh has A->C
+	 * Check if Parent Chain Matches between BoneTree, and SkinnedAsset 
+	 * Meaning if BoneTree has A->B->C (top to bottom) and if SkinnedAsset has A->C
 	 * It will fail since it's missing B
 	 * We ensure this chain matches to play animation properly
 	 *
 	 * @param StartBoneIndex	: BoneTreeIndex to start from in BoneTree 
-	 * @param InSkelMesh		: SkeletalMesh to compare
+	 * @param InSkinnedAsset	: InSkinnedAsset to compare
 	 *
 	 * @return true if matches till root. false if not. 
 	 */
-	bool DoesParentChainMatch(int32 StartBoneTreeIndex, const USkeletalMesh* InSkelMesh) const;
+	bool DoesParentChainMatch(int32 StartBoneTreeIndex, const USkinnedAsset* InSkinnedAsset) const;
 
-	/** 
-	 * Build Look up between SkelMesh to BoneTree
+	/**
+	 * Build Look up between SkinnedAsset to BoneTree
 	 *
-	 * @param	InSkelMesh	: SkeletalMesh to build look up for
-	 * @return	Index of LinkupCache that this SkelMesh is linked to 
+	 * @param	InSkinnedAsset	: SkinnedAsset to build look up for
+	 * @return	Index of LinkupCache that this SkelMesh is linked to
 	 */
-	int32 BuildLinkup(const USkeletalMesh* InSkelMesh);
+	UE_DEPRECATED(5.4, "Please use BuildLinkup with USkinnedAsset and FSkeletonToMeshLinkup parameters.")
+	int32 BuildLinkup(const USkinnedAsset* InSkinnedAsset);
+
+	/**
+	 * Build Look up between SkinnedAsset to BoneTree
+	 *
+	 * @param	InSkinnedAsset			: SkinnedAsset to build look up for
+	 * @param	FSkeletonToMeshLinkup	: Out mesh linkup data
+	 */
+	void BuildLinkupData(const USkinnedAsset* InSkinnedAsset, FSkeletonToMeshLinkup& NewMeshLinkup);
 
 #if WITH_EDITORONLY_DATA
 	/**
@@ -830,19 +996,19 @@ protected:
 	/**
 	 * Create Reference Skeleton From the given Mesh 
 	 * 
-	 * @param InSkeletonMesh	SkeletalMesh that this Skeleton is based on
+	 * @param InSkinnedAsset	SkinnedAsset that this Skeleton is based on
 	 * @param RequiredRefBones	List of required bones to create skeleton from
 	 *
 	 * @return true if successful
 	 */
-	bool CreateReferenceSkeletonFromMesh(const USkeletalMesh* InSkeletalMesh, const TArray<int32> & RequiredRefBones);
+	bool CreateReferenceSkeletonFromMesh(const USkinnedAsset* InSkinnedAsset, const TArray<int32> & RequiredRefBones);
 
 #if WITH_EDITOR
 	DECLARE_MULTICAST_DELEGATE( FOnSkeletonHierarchyChangedMulticaster );
 	FOnSkeletonHierarchyChangedMulticaster OnSkeletonHierarchyChanged;
 
 	/** Call this when the skeleton has changed to fix dependent assets */
-	ENGINE_API void HandleSkeletonHierarchyChange();
+	ENGINE_API void HandleSkeletonHierarchyChange(bool bShowProgress = true);
 
 public:
 	typedef FOnSkeletonHierarchyChangedMulticaster::FDelegate FOnSkeletonHierarchyChanged;
@@ -858,22 +1024,17 @@ public:
 	ENGINE_API static const FName AnimNotifyTag;
 	ENGINE_API static const FString AnimNotifyTagDelimiter;
 
+	// Asset registry information for animation sync markers
+	ENGINE_API static const FName AnimSyncMarkerTag;
+	ENGINE_API static const FString AnimSyncMarkerTagDelimiter;
+	
 	// Asset registry information for animation curves
 	ENGINE_API static const FName CurveNameTag;
 	ENGINE_API static const FString CurveTagDelimiter;
 
-	// rig Configs
-	ENGINE_API static const FName RigTag;
-	ENGINE_API void SetRigConfig(URig * Rig);
-	ENGINE_API FName GetRigBoneMapping(const FName& NodeName) const;
-	ENGINE_API bool SetRigBoneMapping(const FName& NodeName, FName BoneName);
-	ENGINE_API FName GetRigNodeNameFromBoneName(const FName& BoneName) const;
-	// this make sure it stays within the valid range
-	ENGINE_API int32 GetMappedValidNodes(TArray<FName> &OutValidNodeNames);
-	// verify if it has all latest data
-	ENGINE_API void RefreshRigConfig();
-	int32 FindRigBoneMapping(const FName& NodeName) const;
-	ENGINE_API URig * GetRig() const;
+	// Asset registry information for compatible skeletons
+	ENGINE_API static const FName CompatibleSkeletonsNameTag;
+	ENGINE_API static const FString CompatibleSkeletonsTagDelimiter;
 
 #endif
 
@@ -889,9 +1050,6 @@ private:
 	// Handle skeletons being reloaded via the content browser
 	static void HandlePackageReloaded(const EPackageReloadPhase InPackageReloadPhase, FPackageReloadedEvent* InPackageReloadedEvent);
 
-
-
-
 public:
 	//~ Begin IInterface_AssetUserData Interface
 	ENGINE_API virtual void AddAssetUserData(UAssetUserData* InUserData) override;
@@ -902,6 +1060,16 @@ public:
 protected:
 	/** Array of user data stored with the asset */
 	UPROPERTY(EditAnywhere, AdvancedDisplay, Instanced, Category = Skeleton)
-	TArray<UAssetUserData*> AssetUserData;
+	TArray<TObjectPtr<UAssetUserData>> AssetUserData;
+
+#if WITH_EDITORONLY_DATA
+	/** Array of user data stored with the asset */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, Instanced, Category = Skeleton)
+	TArray<TObjectPtr<UAssetUserData>> AssetUserDataEditorOnly;
+#endif
+
+
+	friend struct FReferenceSkeletonModifier;
+	friend class FEditableSkeleton;
 };
 

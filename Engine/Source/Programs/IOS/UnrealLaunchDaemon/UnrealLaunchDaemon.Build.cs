@@ -6,11 +6,7 @@ public class UnrealLaunchDaemon : ModuleRules
 {
 	public UnrealLaunchDaemon( ReadOnlyTargetRules Target ) : base(Target)
 	{
-		PublicIncludePaths.AddRange(
-			new string[] {
-				"Runtime/Launch/Public"
-			}
-		);
+		PublicIncludePathModuleNames.Add("Launch");
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
@@ -21,7 +17,6 @@ public class UnrealLaunchDaemon : ModuleRules
 				"StreamingFile",
 				"Slate",
 				"SlateCore",
-				"EditorStyle",
 				"StandaloneRenderer",
 				"LaunchDaemonMessages",
 				"Projects",
@@ -35,7 +30,5 @@ public class UnrealLaunchDaemon : ModuleRules
 				"Messaging",
 			}
 		);
-
-		PrivateIncludePaths.Add("Runtime/Launch/Private");
 	}
 }

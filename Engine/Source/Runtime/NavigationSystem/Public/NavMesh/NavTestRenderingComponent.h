@@ -2,13 +2,20 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "Debug/DebugDrawComponent.h"
+#include "AI/Navigation/NavigationTypes.h" // NavNodeRef
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "PrimitiveViewRelevance.h"
-#include "Components/PrimitiveComponent.h"
 #include "DynamicMeshBuilder.h"
 #include "DebugRenderSceneProxy.h"
+#endif // UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 
+#include "NavTestRenderingComponent.generated.h"
+
+#if UE_ENABLE_DEBUG_DRAWING
+
+class FPrimitiveSceneProxy;
 class ANavigationTestingActor;
 class APlayerController;
 class FMeshElementCollector;
@@ -21,7 +28,7 @@ class FNavTestSceneProxy final : public FDebugRenderSceneProxy
 	friend class FNavTestDebugDrawDelegateHelper;
 
 public:
-	SIZE_T GetTypeHash() const override;
+	virtual SIZE_T GetTypeHash() const override;
 
 	struct FNodeDebugData
 	{
@@ -40,13 +47,11 @@ public:
 		}
 		FORCEINLINE friend uint32 GetTypeHash(const FNodeDebugData& Other)
 		{
-			return Other.PolyRef;
+			return ::GetTypeHash(Other.PolyRef);
 		}
 	};
 
-	FNavTestSceneProxy(const UNavTestRenderingComponent* InComponent);
-
-	~FNavTestSceneProxy() {}
+	explicit FNavTestSceneProxy(const UNavTestRenderingComponent* InComponent);
 
 	virtual void GetDynamicMeshElements(const TArray<const FSceneView*>& Views, const FSceneViewFamily& ViewFamily, uint32 VisibilityMap, FMeshElementCollector& Collector) const override;
 
@@ -61,20 +66,18 @@ public:
 
 	virtual FPrimitiveViewRelevance GetViewRelevance(const FSceneView* View) const override;
 
-	virtual uint32 GetMemoryFootprint(void) const override { return sizeof(*this) + GetAllocatedSize(); }
-
-	uint32 GetAllocatedSize(void) const;
+	virtual uint32 GetMemoryFootprint() const override { return sizeof(*this) + GetAllocatedSizeInternal(); }
 
 private:
-	FVector NavMeshDrawOffset;
+	uint32 GetAllocatedSizeInternal() const;
+
+	FVector3f NavMeshDrawOffset;
 
 	uint32 bShowBestPath : 1;
 	uint32 bShowNodePool : 1;
 	uint32 bShowDiff : 1;
 
 	ANavigationTestingActor* NavTestActor;
-	FDebugDrawDelegate DebugTextDrawingDelegate;
-	FDelegateHandle DebugTextDrawingDelegateHandle;
 	TArray<FVector> PathPoints;
 	TArray<FString> PathPointFlags;
 
@@ -88,53 +91,46 @@ private:
 	FVector ClosestWallLocation;
 };
 
-#if WITH_RECAST && WITH_EDITOR
 class FNavTestDebugDrawDelegateHelper : public FDebugDrawDelegateHelper
 {
 	typedef FDebugDrawDelegateHelper Super;
 
 public:
-	virtual void InitDelegateHelper(const FDebugRenderSceneProxy* InSceneProxy) override
+	FNavTestDebugDrawDelegateHelper(): bShowBestPath(false), bShowDiff(false)
 	{
-		check(0);
 	}
 
-	void InitDelegateHelper(const FNavTestSceneProxy* InSceneProxy);
-
-	virtual void RegisterDebugDrawDelgate() override;
-	virtual void UnregisterDebugDrawDelgate() override;
+	void SetupFromProxy(const FNavTestSceneProxy* InSceneProxy);
 
 protected:
-	void DrawDebugLabels(UCanvas* Canvas, APlayerController*) override;
+	virtual void DrawDebugLabels(UCanvas* Canvas, APlayerController*) override;
 
 private:
 	TSet<FNavTestSceneProxy::FNodeDebugData> NodeDebug;
-	ANavigationTestingActor* NavTestActor;
+	ANavigationTestingActor* NavTestActor = nullptr;
 	TArray<FVector> PathPoints;
 	TArray<FString> PathPointFlags;
 	FSetElementId BestNodeId;
 	uint32 bShowBestPath : 1;
 	uint32 bShowDiff : 1;
 };
-#endif //WITH_RECAST && WITH_EDITOR
 
-#include "NavTestRenderingComponent.generated.h"
+#endif // UE_ENABLE_DEBUG_DRAWING
 
-class FPrimitiveSceneProxy;
-struct FTransform;
-
-UCLASS(hidecategories=Object)
-class UNavTestRenderingComponent: public UPrimitiveComponent
+UCLASS(ClassGroup = Debug)
+class UNavTestRenderingComponent: public UDebugDrawComponent
 {
-	GENERATED_UCLASS_BODY()
+	GENERATED_BODY()
 
-	virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
+protected:
+
 	virtual FBoxSphereBounds CalcBounds(const FTransform &LocalToWorld) const override;
-	virtual void CreateRenderState_Concurrent(FRegisterComponentContext* Context) override;
-	virtual void DestroyRenderState_Concurrent() override;
 
+#if UE_ENABLE_DEBUG_DRAWING
+	virtual FDebugRenderSceneProxy* CreateDebugSceneProxy() override;
+	virtual FDebugDrawDelegateHelper& GetDebugDrawDelegateHelper() override { return NavTestDebugDrawDelegateHelper; }
 private:
-#if WITH_RECAST && WITH_EDITOR
 	FNavTestDebugDrawDelegateHelper NavTestDebugDrawDelegateHelper;
-#endif
+#endif // UE_ENABLE_DEBUG_DRAWING
 };
+

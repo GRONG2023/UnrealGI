@@ -4,14 +4,14 @@
 	FMallocDoubleFreeFinder.cpp: Memoory tracking allocator
 =============================================================================*/
 #include "HAL/MallocDoubleFreeFinder.h"
-#include "Logging/LogMacros.h"
-#include "Misc/OutputDeviceRedirector.h"
+
+#include "HAL/MemoryBase.h"
+#include "HAL/UnrealMemory.h"
 #include "Misc/Parse.h"
 #include "Misc/ScopeLock.h"
-#include "GenericPlatform/GenericPlatformProcess.h"
-#include "HAL/IConsoleManager.h"
-#include "HAL/PlatformMisc.h"
-#include "HAL/PlatformStackWalk.h"
+
+class FOutputDevice;
+class UWorld;
 
 CORE_API FMallocDoubleFreeFinder* GMallocDoubleFreeFinder;
 CORE_API bool GMallocDoubleFreeFinderEnabled = false;
@@ -134,6 +134,7 @@ void FMallocDoubleFreeFinder::TrackSpecial(void* Ptr)
 	}
 }
 
+#if UE_ALLOW_EXEC_COMMANDS
 bool FMallocDoubleFreeFinder::Exec(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar)
 {
 	if (FParse::Command(&Cmd, TEXT("DoubleFreeFinderCrash")))
@@ -141,13 +142,13 @@ bool FMallocDoubleFreeFinder::Exec(UWorld* InWorld, const TCHAR* Cmd, FOutputDev
 		void * test;
 		test = FMemory::Malloc(128);
 		FMemory::Free(test);
-		FMemory::Free(test);
+		FMemory::Free(test); //-V586
 		return true;
 	}
 
 	return UsedMalloc->Exec(InWorld, Cmd, Ar);
 }
-
+#endif // UE_ALLOW_EXEC_COMMANDS
 
 FMalloc* FMallocDoubleFreeFinder::OverrideIfEnabled(FMalloc*InUsedAlloc)
 {

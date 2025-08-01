@@ -10,7 +10,10 @@
 #include "Containers/ContainerAllocationPolicies.h"
 #include "Containers/Map.h"
 #include "Containers/Set.h"
+#include "Math/NumericLimits.h"
+#include "Misc/ScopeLock.h"
 #include "Templates/Tuple.h"
+#include <type_traits>
 
 #define LLM_PAGE_SIZE (16*1024)
 
@@ -22,7 +25,7 @@ typedef uint64 LLMNumAllocsType;
 typedef uint32 LLMNumAllocsType;
 #endif
 
-// POD types only
+// Trivially movable types without destructors only; memcpy is used and destructors are not called
 template<typename T, typename SizeType=int32>
 class FLLMArray
 {
@@ -195,19 +198,13 @@ public:
 
 	struct Values
 	{
+		TKey Key;
 		TValue1 Value1;
 		TValue2 Value2;
 	};
 
 	LLMMap()
-		: Allocator(NULL)
-		, Map(NULL)
-		, Count(0)
-		, Capacity(0)
-#ifdef PROFILE_LLMMAP
-		, IterAcc(0)
-		, IterCount(0)
-#endif
+		: bAllStripesLocked(false)
 	{
 	}
 
@@ -218,41 +215,52 @@ public:
 
 	void SetAllocator(UE::LLMPrivate::FLLMAllocator* InAllocator, SizeType InDefaultCapacity = DefaultCapacity)
 	{
-		Allocator = InAllocator;
+		for (StripeData& Stripe : MapStripes)
+		{
+			Stripe.Allocator = InAllocator;
 
-		Keys.SetAllocator(Allocator);
-		KeyHashes.SetAllocator(Allocator);
-		Values1.SetAllocator(Allocator);
-		Values2.SetAllocator(Allocator);
-		FreeKeyIndices.SetAllocator(Allocator);
+			Stripe.Keys.SetAllocator(InAllocator);
+			Stripe.KeyHashes.SetAllocator(InAllocator);
+			Stripe.Values1.SetAllocator(InAllocator);
+			Stripe.Values2.SetAllocator(InAllocator);
+			Stripe.FreeKeyIndices.SetAllocator(InAllocator);
 
-		Reserve(InDefaultCapacity);
+			Stripe.Reserve(InDefaultCapacity / StripeCount);
+		}
 	}
 
 	void Clear()
 	{
-		Keys.Clear(true);
-		KeyHashes.Clear(true);
-		Values1.Clear(true);
-		Values2.Clear(true);
-		FreeKeyIndices.Clear(true);
+		for (StripeData& Stripe : MapStripes)
+		{
+			FScopeLock AllocationScopeLock(&Stripe.CriticalSection);
 
-		Allocator->Free(Map, Capacity * sizeof(SizeType));
-		Map = NULL;
-		Count = 0;
-		Capacity = 0;
+			Stripe.Keys.Clear(true);
+			Stripe.KeyHashes.Clear(true);
+			Stripe.Values1.Clear(true);
+			Stripe.Values2.Clear(true);
+			Stripe.FreeKeyIndices.Clear(true);
+
+			Stripe.Allocator->Free(Stripe.Map, Stripe.Capacity * sizeof(SizeType));
+			Stripe.Map = NULL;
+			Stripe.Count = 0;
+			Stripe.Capacity = 0;
+		}
 	}
 
 	// Add a value to this set.
 	// If this set already contains the value does nothing.
 	void Add(const TKey& Key, const TValue1& Value1, const TValue2& Value2)
 	{
-		LLMCheck(Map);
-
 		SizeType KeyHash = Key.GetHashCode();
+		StripeData& Stripe = MapStripes[GetStripeIndex(KeyHash)];
 
-		SizeType MapIndex = GetMapIndex(Key, KeyHash);
-		SizeType KeyIndex = Map[MapIndex];
+		FScopeLock AllocationScopeLock(&Stripe.CriticalSection);
+
+		LLMCheck(Stripe.Map);
+
+		SizeType MapIndex = Stripe.GetMapIndex(Key, KeyHash);
+		SizeType KeyIndex = Stripe.Map[MapIndex];
 
 		if (KeyIndex != InvalidIndex)
 		{
@@ -263,105 +271,116 @@ public:
 				ShownWarning = true;
 			}
 
-			Values1[KeyIndex] = Value1;
-			Values2[KeyIndex] = Value2;
+			Stripe.Values1[KeyIndex] = Value1;
+			Stripe.Values2[KeyIndex] = Value2;
 		}
 		else
 		{
-			SizeType MaxCount = (Margin * Capacity) / 256U;
-			if (Count >= MaxCount)
+			// Be careful with the multiplication to avoid overflow, while still using only integer arithmetic for speed
+			// Margin/256U is the actual float we want to multiply by. The exact number doesn't matter, so use one order of operations
+			// when Capacity is low, and another when it is high
+			SizeType MaxCount = (Stripe.Capacity >= 256U * 256U ? (Stripe.Capacity / 256U) * Margin : (Margin * Stripe.Capacity) / 256U);
+			if (Stripe.Count >= MaxCount)
 			{
-				if (Count > MaxCount)
+				if (Stripe.Capacity * 2 < Stripe.Capacity)
 				{
-					// This shouldn't happen, because Count is only incremented here, and Capacity is only changed here, and Margin does not change, so Count should equal MaxCount before it goes over it
-					FPlatformMisc::LowLevelOutputDebugString(TEXT("LLM Error: Integer overflow in LLMap::Add, Count > MaxCount.\n"));
 					// Trying to issue a check statement here will cause reentry into this function, use PLATFORM_BREAK directly instead
+					FPlatformMisc::LowLevelOutputDebugString(TEXT("LLM Error: Integer overflow in LLMap::Add, Capacity has reached its maximum size.\n"));
 					PLATFORM_BREAK();
 				}
-				Grow();
-				MapIndex = GetMapIndex(Key, KeyHash);
+				if (Stripe.Count > MaxCount)
+				{
+					// Trying to issue a check statement here will cause reentry into this function, use PLATFORM_BREAK directly instead
+					// This shouldn't happen, because Count is only incremented here, and Capacity is only changed here, and Margin does not change, so Count should equal MaxCount before it goes over it
+					FPlatformMisc::LowLevelOutputDebugString(TEXT("LLM Assertion failure: Count > MaxCount.\n"));
+					PLATFORM_BREAK();
+				}
+				Stripe.Grow();
+				MapIndex = Stripe.GetMapIndex(Key, KeyHash);
 			}
 
-			if (FreeKeyIndices.Num())
+			if (Stripe.FreeKeyIndices.Num())
 			{
-				SizeType FreeIndex = FreeKeyIndices.RemoveLast();
-				Map[MapIndex] = FreeIndex;
-				Keys[FreeIndex] = Key;
-				KeyHashes[FreeIndex] = KeyHash;
-				Values1[FreeIndex] = Value1;
-				Values2[FreeIndex] = Value2;
+				SizeType FreeIndex = Stripe.FreeKeyIndices.RemoveLast();
+				Stripe.Map[MapIndex] = FreeIndex;
+				Stripe.Keys[FreeIndex] = Key;
+				Stripe.KeyHashes[FreeIndex] = KeyHash;
+				Stripe.Values1[FreeIndex] = Value1;
+				Stripe.Values2[FreeIndex] = Value2;
 			}
 			else
 			{
-				Map[MapIndex] = Keys.Num();
-				Keys.Add(Key);
-				KeyHashes.Add(KeyHash);
-				Values1.Add(Value1);
-				Values2.Add(Value2);
+				Stripe.Map[MapIndex] = Stripe.Keys.Num();
+				Stripe.Keys.Add(Key);
+				Stripe.KeyHashes.Add(KeyHash);
+				Stripe.Values1.Add(Value1);
+				Stripe.Values2.Add(Value2);
 			}
 
-			++Count;
+			++Stripe.Count;
 		}
 	}
 
 	Values GetValue(const TKey& Key)
 	{
-		TValue1* Value1;
-		TValue2* Value2;
-		LLMEnsure(Find(Key, Value1, Value2));
 		Values RetValues;
-		RetValues.Value1 = *Value1;
-		RetValues.Value2 = *Value2;
+		RetValues.Key = Find(Key, RetValues.Value1, RetValues.Value2);
+		LLMEnsure(RetValues.Key);
 		return RetValues;
 	}
 
-	bool Find(const TKey& Key, TValue1*& OutValue1, TValue2*& OutValue2)
+	TKey Find(const TKey& Key, TValue1& OutValue1, TValue2& OutValue2) const
 	{
 		SizeType KeyHash = Key.GetHashCode();
+		const StripeData& Stripe = MapStripes[GetStripeIndex(KeyHash)];
 
-		SizeType MapIndex = GetMapIndex(Key, KeyHash);
+		FScopeLock AllocationScopeLock(&Stripe.CriticalSection);
 
-		SizeType KeyIndex = Map[MapIndex];
+		SizeType MapIndex = Stripe.GetMapIndex(Key, KeyHash);
+
+		SizeType KeyIndex = Stripe.Map[MapIndex];
 		if (KeyIndex == InvalidIndex)
 		{
-			OutValue1 = nullptr;
-			OutValue2 = nullptr;
-			return false;
+			return TKey();
 		}
 
-		OutValue1 = &Values1[KeyIndex];
-		OutValue2 = &Values2[KeyIndex];
+		OutValue1 = Stripe.Values1[KeyIndex];
+		OutValue2 = Stripe.Values2[KeyIndex];
 
-		return true;
+		return Stripe.Keys[KeyIndex];
 	}
 
 	bool Remove(const TKey& Key, Values& OutValues)
 	{
 		SizeType KeyHash = Key.GetHashCode();
+		StripeData& Stripe = MapStripes[GetStripeIndex(KeyHash)];
 
-		LLMCheck(Map);
+		FScopeLock AllocationScopeLock(&Stripe.CriticalSection);
 
-		SizeType MapIndex = GetMapIndex(Key, KeyHash);
-		if (!IsItemInUse(MapIndex))
+		LLMCheck(Stripe.Map);
+
+		SizeType MapIndex = Stripe.GetMapIndex(Key, KeyHash);
+		if (!Stripe.IsItemInUse(MapIndex))
 		{
 			return false;
 		}
 
-		SizeType KeyIndex = Map[MapIndex];
+		SizeType KeyIndex = Stripe.Map[MapIndex];
 
-		OutValues.Value1 = Values1[KeyIndex];
-		OutValues.Value2 = Values2[KeyIndex];
+		OutValues.Key = Stripe.Keys[KeyIndex];
+		OutValues.Value1 = Stripe.Values1[KeyIndex];
+		OutValues.Value2 = Stripe.Values2[KeyIndex];
 
-		if (KeyIndex == Keys.Num() - 1)
+		if (KeyIndex == Stripe.Keys.Num() - 1)
 		{
-			Keys.RemoveLast();
-			KeyHashes.RemoveLast();
-			Values1.RemoveLast();
-			Values2.RemoveLast();
+			Stripe.Keys.RemoveLast();
+			Stripe.KeyHashes.RemoveLast();
+			Stripe.Values1.RemoveLast();
+			Stripe.Values2.RemoveLast();
 		}
 		else
 		{
-			FreeKeyIndices.Add(KeyIndex);
+			Stripe.FreeKeyIndices.Add(KeyIndex);
 		}
 
 		// find first index in this array
@@ -369,15 +388,15 @@ public:
 		SizeType FirstIndex = MapIndex;
 		if (!IndexIter)
 		{
-			IndexIter = Capacity;
+			IndexIter = Stripe.Capacity;
 		}
 		--IndexIter;
-		while (IsItemInUse(IndexIter))
+		while (Stripe.IsItemInUse(IndexIter))
 		{
 			FirstIndex = IndexIter;
 			if (!IndexIter)
 			{
-				IndexIter = Capacity;
+				IndexIter = Stripe.Capacity;
 			}
 			--IndexIter;
 		}
@@ -386,28 +405,28 @@ public:
 		for (;;)
 		{
 			// find the last item in the array that can replace the item being removed
-			SizeType IndexIter2 = (MapIndex + 1) & (Capacity - 1);
+			SizeType IndexIter2 = (MapIndex + 1) & (Stripe.Capacity - 1);
 
 			SizeType SwapIndex = InvalidIndex;
-			while (IsItemInUse(IndexIter2))
+			while (Stripe.IsItemInUse(IndexIter2))
 			{
-				SizeType SearchKeyIndex = Map[IndexIter2];
-				const SizeType SearchHashCode = KeyHashes[SearchKeyIndex];
-				const SizeType SearchInsertIndex = SearchHashCode & (Capacity - 1);
+				SizeType SearchKeyIndex = Stripe.Map[IndexIter2];
+				const SizeType SearchHashCode = Stripe.KeyHashes[SearchKeyIndex];
+				const SizeType SearchInsertIndex = SearchHashCode & (Stripe.Capacity - 1);
 
-				if (InRange(SearchInsertIndex, FirstIndex, MapIndex))
+				if (Stripe.InRange(SearchInsertIndex, FirstIndex, MapIndex))
 				{
 					SwapIndex = IndexIter2;
 					Found = true;
 				}
 
-				IndexIter2 = (IndexIter2 + 1) & (Capacity - 1);
+				IndexIter2 = (IndexIter2 + 1) & (Stripe.Capacity - 1);
 			}
 
 			// swap the item
 			if (Found)
 			{
-				Map[MapIndex] = Map[SwapIndex];
+				Stripe.Map[MapIndex] = Stripe.Map[SwapIndex];
 				MapIndex = SwapIndex;
 				Found = false;
 			}
@@ -418,33 +437,47 @@ public:
 		}
 
 		// remove the last item
-		Map[MapIndex] = InvalidIndex;
+		Stripe.Map[MapIndex] = InvalidIndex;
 
-		--Count;
+		--Stripe.Count;
 
 		return true;
 	}
 
 	SizeType Num() const
 	{
-		return Count;
+		SizeType TotalCount = 0;
+		for (StripeData& Stripe : MapStripes)
+		{
+			FScopeLock AllocationScopeLock(&Stripe.CriticalSection);
+			TotalCount += Stripe.Count;
+		}
+		return TotalCount;
 	}
 
 	bool HasKey(const TKey& Key)
 	{
 		SizeType KeyHash = Key.GetHashCode();
+		StripeData& Stripe = MapStripes[GetStripeIndex(KeyHash)];
 
-		SizeType MapIndex = GetMapIndex(Key, KeyHash);
-		return IsItemInUse(MapIndex);
+		FScopeLock AllocationScopeLock(&Stripe.CriticalSection);
+
+		SizeType MapIndex = Stripe.GetMapIndex(Key, KeyHash);
+		return Stripe.IsItemInUse(MapIndex);
 	}
 
 	void Trim()
 	{
-		Keys.Trim();
-		KeyHashes.Trim();
-		Values1.Trim();
-		Values2.Trim();
-		FreeKeyIndices.Trim();
+		for (StripeData& Stripe : MapStripes)
+		{
+			FScopeLock AllocationScopeLock(&Stripe.CriticalSection);
+
+			Stripe.Keys.Trim();
+			Stripe.KeyHashes.Trim();
+			Stripe.Values1.Trim();
+			Stripe.Values2.Trim();
+			Stripe.FreeKeyIndices.Trim();
+		}
 	}
 
 	struct FBaseIterator
@@ -453,10 +486,22 @@ public:
 		FBaseIterator& operator++()
 		{
 			++MapIndex;
-			while (MapIndex < MapRef.Capacity && !MapRef.IsItemInUse(MapIndex))
+			while (StripeIndex < StripeCount)
 			{
-				++MapIndex;
+				StripeData& Stripe = MapRef.MapStripes[StripeIndex];
+				while (MapIndex < Stripe.Capacity)
+				{
+					if (Stripe.IsItemInUse(MapIndex))
+					{
+						return *this;
+					}
+					MapIndex++;
+				}
+
+				++StripeIndex;
+				MapIndex = 0;
 			}
+
 			return *this;
 		}
 
@@ -467,16 +512,19 @@ public:
 		{
 			if (bEnd)
 			{
-				MapIndex = MapRef.Capacity;
+				StripeIndex = StripeCount;
+				MapIndex = 0;
 			}
 			else
 			{
-				MapIndex = static_cast<SizeType>(-1);
+				StripeIndex = 0;
+				MapIndex = -1;
 				++(*this);
 			}
 		}
 
 		ThisType& MapRef;
+		int32 StripeIndex;
 		SizeType MapIndex;
 	};
 
@@ -505,14 +553,16 @@ public:
 
 		bool operator!=(const FIterator& Other) const
 		{
-			return FBaseIterator::MapIndex != Other.FBaseIterator::MapIndex;
+			return FBaseIterator::StripeIndex != Other.FBaseIterator::StripeIndex || 
+				FBaseIterator::MapIndex != Other.FBaseIterator::MapIndex;
 		}
 
 		FTuple operator*() const
 		{
 			ThisType& LocalMap = FBaseIterator::MapRef;
-			SizeType KeyIndex = LocalMap.Map[FBaseIterator::MapIndex];
-			return FTuple(LocalMap.Keys[KeyIndex], LocalMap.Values1[KeyIndex], LocalMap.Values2[KeyIndex]);
+			StripeData& Stripe = LocalMap.MapStripes[FBaseIterator::StripeIndex];
+			SizeType KeyIndex = Stripe.Map[FBaseIterator::MapIndex];
+			return FTuple(Stripe.Keys[KeyIndex], Stripe.Values1[KeyIndex], Stripe.Values2[KeyIndex]);
 		}
 	};
 
@@ -541,19 +591,22 @@ public:
 
 		bool operator!=(const FConstIterator& Other) const
 		{
-			return FBaseIterator::MapIndex != Other.FBaseIterator::MapIndex;
+			return FBaseIterator::StripeIndex != Other.FBaseIterator::StripeIndex || 
+				FBaseIterator::MapIndex != Other.FBaseIterator::MapIndex;
 		}
 
 		FConstTuple operator*() const
 		{
 			ThisType& LocalMap = FBaseIterator::MapRef;
-			SizeType KeyIndex = LocalMap.Map[FBaseIterator::MapIndex];
-			return FConstTuple(LocalMap.Keys[KeyIndex], LocalMap.Values1[KeyIndex], LocalMap.Values2[KeyIndex]);
+			StripeData& Stripe = LocalMap.MapStripes[FBaseIterator::StripeIndex];
+			SizeType KeyIndex = Stripe.Map[FBaseIterator::MapIndex];
+			return FConstTuple(Stripe.Keys[KeyIndex], Stripe.Values1[KeyIndex], Stripe.Values2[KeyIndex]);
 		}
 	};
 
 	FIterator begin()
 	{
+		LLMCheck(bAllStripesLocked);
 		return FIterator(*this, false);
 	}
 
@@ -564,6 +617,7 @@ public:
 
 	FConstIterator begin() const
 	{
+		LLMCheck(bAllStripesLocked);
 		return FConstIterator(*this, false);
 	}
 
@@ -572,153 +626,217 @@ public:
 		return FConstIterator(*this, true);
 	}
 
-private:
-	void Reserve(SizeType NewCapacity)
+	void LockAll()
 	{
-		NewCapacity = GetNextPow2(NewCapacity);
+		// Locking all stripes is required to create an iterator
+		AllStripesLock.Lock();
+		LLMCheck(bAllStripesLocked == false);
+		bAllStripesLocked = true;
 
-		// keep a copy of the old map
-		SizeType* OldMap = Map;
-		SizeType OldCapacity = Capacity;
-
-		// allocate the new table
-		Capacity = NewCapacity;
-		Map = (SizeType*)Allocator->Alloc(NewCapacity * sizeof(SizeType));
-
-		for (SizeType Index = 0; Index < NewCapacity; ++Index)
-			Map[Index] = InvalidIndex;
-
-		// copy the values from the old to the new table
-		SizeType* OldItem = OldMap;
-		for (SizeType Index = 0; Index < OldCapacity; ++Index, ++OldItem)
+		for (StripeData& Stripe : MapStripes)
 		{
-			SizeType KeyIndex = *OldItem;
+			Stripe.CriticalSection.Lock();
+		}
+	}
 
-			if (KeyIndex != InvalidIndex)
-			{
-				SizeType MapIndex = GetMapIndex(Keys[KeyIndex], KeyHashes[KeyIndex]);
-				Map[MapIndex] = KeyIndex;
-			}
+	void UnlockAll()
+	{
+		for (StripeData& Stripe : MapStripes)
+		{
+			Stripe.CriticalSection.Unlock();
 		}
 
-		Allocator->Free(OldMap, OldCapacity * sizeof(SizeType));
-	}
-
-	static SizeType GetNextPow2(SizeType value)
-	{
-		SizeType p = 2;
-		while (p < value)
-			p *= 2;
-		return p;
-	}
-
-	bool IsItemInUse(SizeType MapIndex) const
-	{
-		return Map[MapIndex] != InvalidIndex;
-	}
-
-	SizeType GetMapIndex(const TKey& Key, SizeType Hash) const
-	{
-		SizeType Mask = Capacity - 1;
-		SizeType MapIndex = Hash & Mask;
-		SizeType KeyIndex = Map[MapIndex];
-
-		while (KeyIndex != InvalidIndex && !(Keys[KeyIndex] == Key))
-		{
-			MapIndex = (MapIndex + 1) & Mask;
-			KeyIndex = Map[MapIndex];
-#ifdef PROFILE_LLMMAP
-			++IterAcc;
-#endif
-		}
-
-#ifdef PROFILE_LLMMAP
-		++IterCount;
-		double Average = IterAcc / (double)IterCount;
-		if (Average > 2.0)
-		{
-			static double LastWriteTime = 0.0;
-			double Now = FPlatformTime::Seconds();
-			if (Now - LastWriteTime > 5)
-			{
-				LastWriteTime = Now;
-				UE_LOG(LogStats, Log, TEXT("WARNING: LLMMap average: %f\n"), (float)Average);
-			}
-		}
-#endif
-		return MapIndex;
-	}
-
-	// Increase the capacity of the map
-	void Grow()
-	{
-		SizeType NewCapacity = Capacity ? 2 * Capacity : DefaultCapacity;
-		Reserve(NewCapacity);
-	}
-
-	static bool InRange(
-		const SizeType Index,
-		const SizeType StartIndex,
-		const SizeType EndIndex)
-	{
-		return (StartIndex <= EndIndex) ?
-			Index >= StartIndex && Index <= EndIndex :
-			Index >= StartIndex || Index <= EndIndex;
+		LLMCheck(bAllStripesLocked == true);
+		bAllStripesLocked = false;
+		AllStripesLock.Unlock();
 	}
 
 	// data
 private:
+	static const int32 StripeCountLog2 = 4;		// 16 stripes
+	enum { StripeCount = 1 << StripeCountLog2 };
 	enum { DefaultCapacity = 1024 * 1024 };
 	enum { InvalidIndex = -1 };
 	static const SizeType Margin = (30 * 256) / 100;
 
-	mutable FCriticalSection CriticalSection;
+	static inline uint32 GetStripeIndex(uint32 KeyHash)
+	{
+		// FMath::Max prevents "shift too large" compile error in otherwise unreachable code when StripeCount == 1
+		return (StripeCount == 1) ? 0 : KeyHash >> (32 - FMath::Max(StripeCountLog2, 1));
+	}
 
-	UE::LLMPrivate::FLLMAllocator* Allocator;
+	static inline uint32 GetStripeIndex(uint64 KeyHash)
+	{
+		// FMath::Max prevents "shift too large" compile error in otherwise unreachable code when StripeCount == 1
+		return static_cast<uint32>((StripeCount == 1) ? 0 : KeyHash >> (64 - FMath::Max(StripeCountLog2, 1)));
+	}
 
-	SizeType* Map;
-	SizeType Count;
-	SizeType Capacity;
+	struct StripeData
+	{
+		StripeData()
+			: Allocator(nullptr)
+			, Map(nullptr)
+			, Count(0)
+			, Capacity(0)
+#ifdef PROFILE_LLMMAP
+			, IterAcc(0)
+			, IterCount(0)
+#endif
+		{}
 
-	// all these arrays must be kept in sync and are accessed by MapIndex
-	FLLMArray<TKey, SizeType> Keys;
-	FLLMArray<SizeType, SizeType> KeyHashes;
-	FLLMArray<TValue1, SizeType> Values1;
-	FLLMArray<TValue2, SizeType> Values2;
+		void Reserve(SizeType NewCapacity)
+		{
+			NewCapacity = FMath::Max(NewCapacity, (SizeType)1);
+			NewCapacity = static_cast<SizeType>(FPlatformMath::RoundUpToPowerOfTwo64(static_cast<uint64>(NewCapacity)));
 
-	FLLMArray<SizeType, SizeType> FreeKeyIndices;
+			// keep a copy of the old map
+			SizeType* OldMap = Map;
+			SizeType OldCapacity = Capacity;
+
+			LLMCheck(NewCapacity > OldCapacity);
+
+			// allocate the new table
+			Capacity = NewCapacity;
+			Map = (SizeType*)Allocator->Alloc(NewCapacity * sizeof(SizeType));
+
+			for (SizeType Index = 0; Index < NewCapacity; ++Index)
+				Map[Index] = InvalidIndex;
+
+			// copy the values from the old to the new table
+			SizeType* OldItem = OldMap;
+			for (SizeType Index = 0; Index < OldCapacity; ++Index, ++OldItem)
+			{
+				SizeType KeyIndex = *OldItem;
+
+				if (KeyIndex != InvalidIndex)
+				{
+					SizeType MapIndex = GetMapIndex(Keys[KeyIndex], KeyHashes[KeyIndex]);
+					Map[MapIndex] = KeyIndex;
+				}
+			}
+
+			Allocator->Free(OldMap, OldCapacity * sizeof(SizeType));
+		}
+
+		bool IsItemInUse(SizeType MapIndex) const
+		{
+			return Map[MapIndex] != InvalidIndex;
+		}
+
+		SizeType GetMapIndex(const TKey& Key, SizeType Hash) const
+		{
+			SizeType Mask = Capacity - 1;
+			SizeType MapIndex = Hash & Mask;
+			SizeType KeyIndex = Map[MapIndex];
+
+			while (KeyIndex != InvalidIndex && !(Keys[KeyIndex] == Key))
+			{
+				MapIndex = (MapIndex + 1) & Mask;
+				KeyIndex = Map[MapIndex];
+#ifdef PROFILE_LLMMAP
+				++IterAcc;
+#endif
+			}
 
 #ifdef PROFILE_LLMMAP
-	mutable int64 IterAcc;
-	mutable int64 IterCount;
+			++IterCount;
+			double Average = IterAcc / (double)IterCount;
+			if (Average > 2.0)
+			{
+				static double LastWriteTime = 0.0;
+				double Now = FPlatformTime::Seconds();
+				if (Now - LastWriteTime > 5)
+				{
+					LastWriteTime = Now;
+					UE_LOG(LogStats, Log, TEXT("WARNING: LLMMap average: %f\n"), (float)Average);
+				}
+			}
 #endif
+			return MapIndex;
+		}
+
+		// Increase the capacity of the map
+		void Grow()
+		{
+			SizeType NewCapacity = Capacity ? 2 * Capacity : DefaultCapacity / StripeCount;
+			Reserve(NewCapacity);
+		}
+
+		static bool InRange(
+			const SizeType Index,
+			const SizeType StartIndex,
+			const SizeType EndIndex)
+		{
+			return (StartIndex <= EndIndex) ?
+				Index >= StartIndex && Index <= EndIndex :
+				Index >= StartIndex || Index <= EndIndex;
+		}
+
+		mutable FCriticalSection CriticalSection;
+
+		UE::LLMPrivate::FLLMAllocator* Allocator;
+
+		SizeType* Map;
+		SizeType Count;
+		SizeType Capacity;
+
+		// all these arrays must be kept in sync and are accessed by MapIndex
+		FLLMArray<TKey, SizeType> Keys;
+		FLLMArray<SizeType, SizeType> KeyHashes;
+		FLLMArray<TValue1, SizeType> Values1;
+		FLLMArray<TValue2, SizeType> Values2;
+
+		FLLMArray<SizeType, SizeType> FreeKeyIndices;
+
+#ifdef PROFILE_LLMMAP
+		mutable int64 IterAcc;
+		mutable int64 IterCount;
+#endif
+	};
+
+	// We divide map items into multiple stripes by the high bits of the hash key, to reduce lock contention.
+	// Each stripe has its own critical section lock, and given even distribution of hash codes (due to the
+	// mix function applied to the key), multiple threads will usually end up with their own lock, and not
+	// need to wait on each other.
+	StripeData MapStripes[StripeCount];
+	FCriticalSection AllStripesLock;
+	std::atomic_bool bAllStripesLocked;
 };
 
 // Pointer key for hash map
 struct PointerKey
 {
-	PointerKey() : Pointer(NULL) {}
-	PointerKey(const void* InPointer) : Pointer(InPointer) {}
+	explicit PointerKey() = default;
+	explicit PointerKey(const void* InPointer, uint16 ExtraData=0)
+	: Pointer((UPTRINT(InPointer) << 16) | UPTRINT(ExtraData))
+	{
+		static_assert(sizeof(InPointer) == 8, "LLM only supports 64 bit platforms");
+		LLMEnsure(UPTRINT(InPointer) && UPTRINT(InPointer) <= 0x0000'ffff'ffff'ffff);
+	}
 	LLMNumAllocsType GetHashCode() const
 	{
 		return GetHashCodeImpl<sizeof(LLMNumAllocsType), sizeof(void*)>();
 	}
-	bool operator==(const PointerKey& other) const { return Pointer == other.Pointer; }
-	const void* Pointer;
+	bool operator==(const PointerKey& other) const { return GetPointer() == other.GetPointer(); }
+	explicit operator bool () const { return !!Pointer; }
+	void* GetPointer() const { return (void*)(Pointer >> 16); };
+	uint64 GetExtraData() const { return uint64(Pointer & 0xffff); }
 
 private:
+	UPTRINT Pointer = 0;
+
 	template <int HashSize, int PointerSize>
 	LLMNumAllocsType GetHashCodeImpl() const
 	{
 		static_assert(HashSize == 0 && PointerSize == 0, "Converting void* to a LLMNumAllocsType - sized hashkey is not implemented for the current sizes.");
-		return (LLMNumAllocsType)(intptr_t)Pointer;
+		return (LLMNumAllocsType)(UPTRINT)GetPointer();
 	}
 
 	template <>
 	LLMNumAllocsType GetHashCodeImpl<8,8>() const
 	{
 		// 64 bit pointer to 64 bit hash
-		uint64 Key = (uint64)Pointer;
+		uint64 Key = (uint64)GetPointer();
 		Key = (~Key) + (Key << 21);
 		Key = Key ^ (Key >> 24);
 		Key = Key * 265;
@@ -733,7 +851,7 @@ private:
 	LLMNumAllocsType GetHashCodeImpl<4, 8>() const
 	{
 		// 64 bit pointer to 32 bit hash
-		uint64 Key = (uint64)Pointer;
+		uint64 Key = (uint64)GetPointer();
 		Key = (~Key) + (Key << 21);
 		Key = Key ^ (Key >> 24);
 		Key = Key * 265;
@@ -748,7 +866,7 @@ private:
 	LLMNumAllocsType GetHashCodeImpl<4, 4>() const
 	{
 		// 32 bit pointer to 32 bit Hash
-		uint64 Key = (uint64)Pointer;
+		uint64 Key = (uint64)GetPointer();
 		Key = (~Key) + (Key << 18);
 		Key = Key ^ (Key >> 31);
 		Key = Key * 21;
@@ -758,6 +876,11 @@ private:
 		return (LLMNumAllocsType)Key;
 	}
 };
+
+namespace UE::Core::Private
+{
+	[[noreturn]] CORE_API void OnInvalidLLMAllocatorNum(int32 IndexSize, int64 NewNum, SIZE_T NumBytesPerElement);
+}
 
 /**
  * An allocator usable in Core containers. It is based on TSizedHeapAllocator, but instead of allocating from FMemory it allocates from FLLMAllocator.
@@ -769,6 +892,10 @@ class TSizedLLMAllocator
 public:
 	using SizeType = typename TBitsToSizeType<IndexSize>::Type;
 
+private:
+	using USizeType = std::make_unsigned_t<SizeType>;
+
+public:
 	enum { NeedsElementType = false };
 	enum { RequireRangeCheck = true };
 
@@ -837,6 +964,19 @@ public:
 			// Avoid calling FMemory::Realloc( nullptr, 0 ) as ANSI C mandates returning a valid pointer which is not what we want.
 			if (Data || NumElements)
 			{
+				static_assert(sizeof(SizeType) <= sizeof(SIZE_T), "SIZE_T is expected to handle all possible sizes");
+
+				// Check for under/overflow
+				bool bInvalidResize = NumElements < 0 || NumBytesPerElement < 1 || NumBytesPerElement > (SIZE_T)MAX_int32;
+				if constexpr (sizeof(SizeType) == sizeof(SIZE_T))
+				{
+					bInvalidResize = bInvalidResize || (SIZE_T)(USizeType)NumElements > (SIZE_T)TNumericLimits<SizeType>::Max() / NumBytesPerElement;
+				}
+				if (UNLIKELY(bInvalidResize))
+				{
+					UE::Core::Private::OnInvalidLLMAllocatorNum(IndexSize, NumElements, NumBytesPerElement);
+				}
+
 				//checkSlow(((uint64)NumElements*(uint64)ElementTypeInfo.GetSize() < (uint64)INT_MAX));
 				size_t NewSize = NumElements * NumBytesPerElement;
 				Data = UE::LLMPrivate::FLLMAllocator::Get()->Realloc(Data, Size, NewSize);
@@ -896,6 +1036,10 @@ public:
 		}
 	};
 };
+
+// Define the ResizeAllocation functions with the regular allocators as exported to avoid bloat
+extern template CORE_API FORCENOINLINE void TSizedLLMAllocator<32>::ForAnyElementType::ResizeAllocation(SizeType PreviousNumElements, SizeType NumElements, SIZE_T NumBytesPerElement);
+extern template CORE_API FORCENOINLINE void TSizedLLMAllocator<64>::ForAnyElementType::ResizeAllocation(SizeType PreviousNumElements, SizeType NumElements, SIZE_T NumBytesPerElement);
 
 // The standard container-specific allocators based on TSizedLLMAllocator; these are copied from ContainerAllocationPolicies.h
 using FDefaultLLMAllocator = TSizedLLMAllocator<32>;
@@ -1107,8 +1251,8 @@ namespace LLMAlgoImpl
 					if (!bPushed)
 					{
 						LeafToRootOrder.Add(VisitData.Vertex);
-						EdgesOnStack.SetNum(VisitData.EdgeStart, false /* bAllowShrinking */);
-						Stack.Pop(false /* bAllowShrinking */);
+						EdgesOnStack.SetNum(VisitData.EdgeStart, EAllowShrinking::No);
+						Stack.Pop(EAllowShrinking::No);
 					}
 				}
 			}

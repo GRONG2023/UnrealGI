@@ -6,8 +6,6 @@ public class PhysicsCore: ModuleRules
 {
 	public PhysicsCore(ReadOnlyTargetRules Target) : base(Target)
 	{
-        PublicIncludePaths.Add("Runtime/PhysicsCore/Public");
-
         PrivateDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
@@ -28,22 +26,8 @@ public class PhysicsCore: ModuleRules
 		PublicIncludePathModuleNames.Remove("PhysicsCore");
 		PublicDependencyModuleNames.Remove("PhysicsCore");
 
-		if (Target.bCompileChaos == false && Target.bUseChaos == false)
-        {
-            if (Target.bCompilePhysX)
-            {
-                // Not ideal but as this module publicly exposes PhysX types
-                // to other modules when PhysX is enabled it requires that its
-                // public files have access to PhysX includes
-                PublicDependencyModuleNames.Add("PhysX");
-            }
-
-            if (Target.bCompileAPEX)
-            {
-                PublicDependencyModuleNames.Add("APEX");
-            }
-        }
-
 		PrivateDefinitions.Add("CHAOS_INCLUDE_LEVEL_1=1");
+
+		bAllowAutoRTFMInstrumentation = true;
 	}
 }

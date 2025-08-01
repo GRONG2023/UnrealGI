@@ -15,7 +15,7 @@ struct FBox
 inline static FBox BoxDefaultInit()
 {
 	FBox Box;
-	Box.Min = Box.Max = SetVector(0.0f, 0.0f, 0.0f);
+	Box.Min = Box.Max = ZeroVector;
 	Box.IsValid = 0;
 	return Box;
 }
@@ -69,9 +69,8 @@ inline static FBox BoxTransformByMatrix(const FBox &Box, const FMatrix &M)
 	const FVector4 m2 = SetVector4(M.M[8], M.M[9], M.M[10], M.M[11]);
 	const FVector4 m3 = SetVector4(M.M[12], M.M[13], M.M[14], M.M[15]);
 
-	const uniform FVector Half = SetVector(0.5f, 0.5f, 0.5f);
-	const FVector Origin = (Box.Max + Box.Min) * Half;
-	const FVector Extent = (Box.Max - Box.Min) * Half;
+	const FVector Origin = (Box.Max + Box.Min) * HalfVector;
+	const FVector Extent = (Box.Max - Box.Min) * HalfVector;
 
 	FVector4 NewOrigin = SetVector4(Origin.V[0], Origin.V[0], Origin.V[0], Origin.V[0]) * m0;
 	NewOrigin = VectorMultiplyAdd(SetVector4(Origin.V[1], Origin.V[1], Origin.V[1], Origin.V[1]), m1, NewOrigin);
@@ -92,13 +91,14 @@ inline static FBox BoxTransformByMatrix(const FBox &Box, const FMatrix &M)
 	return NewBox;
 }
 
-export void BoxCalcBounds(  const uniform int TransformToGeometryIndex[],
-							const uniform int TransformIndices[],
-							const uniform FMatrix GlobalMatrices[],
-							const uniform FBox BoundingBoxes[],
-							const uniform FMatrix &LocalToWorldWithScale,
-							uniform FBox &BoundingBox,
-							const uniform int NumBoxes)
+export void BoxCalcBoundsFromGeometryGroup(
+				const uniform int TransformToGeometryIndex[],
+				const uniform int TransformIndices[],
+				const uniform FMatrix GlobalMatrices[],
+				const uniform FBox BoundingBoxes[],
+				const uniform FMatrix &LocalToWorldWithScale,
+				uniform FBox &BoundingBox,
+				const uniform int NumBoxes)
 {
 	FBox BoundingBoxSum = BoxDefaultInit();
 
@@ -109,7 +109,8 @@ export void BoxCalcBounds(  const uniform int TransformToGeometryIndex[],
 		#pragma ignore warning(perf)
 		const FBox B = BoundingBoxes[BoxIdx];
 
-		if (TransformToGeometryIndex[BoxIdx] != INDEX_NONE && B.IsValid)
+		#pragma ignore warning(perf)
+		if (TransformToGeometryIndex[TransformIndex] != INDEX_NONE && B.IsValid)
 		{
 			#pragma ignore warning(perf)
 			const FMatrix M = GlobalMatrices[TransformIndex];
@@ -122,11 +123,55 @@ export void BoxCalcBounds(  const uniform int TransformToGeometryIndex[],
 	#pragma ignore warning(perf)
 	ReducedBox[programIndex] = BoundingBoxSum;
 
-	foreach_active(j)
+	if (programIndex < NumBoxes)
 	{
-		unmasked
+		foreach_active(j)
 		{
-			BoundingBox = BoundingBox + ReducedBox[j];
+			unmasked
+			{
+				BoundingBox = BoundingBox + ReducedBox[j];
+			}
+		}
+	}
+}
+
+export void BoxCalcBoundsFromTransformGroup(
+				const uniform int TransformToGeometryIndex[],
+				const uniform FMatrix GlobalMatrices[],
+				const uniform FBox BoundingBoxes[],
+				const uniform FMatrix &LocalToWorldWithScale,
+				uniform FBox &BoundingBox,
+				const uniform int NumBoxes)
+{
+	FBox BoundingBoxSum = BoxDefaultInit();
+
+	foreach(TransformIndex = 0 ... NumBoxes)
+	{
+		#pragma ignore warning(perf)
+		const FBox B = BoundingBoxes[TransformIndex];
+
+		#pragma ignore warning(perf)
+		if (TransformToGeometryIndex[TransformIndex] != INDEX_NONE && B.IsValid)
+		{
+			#pragma ignore warning(perf)
+			const FMatrix M = GlobalMatrices[TransformIndex];
+			BoundingBoxSum = BoundingBoxSum + BoxTransformByMatrix(B, M * LocalToWorldWithScale);
+		}
+	}
+
+	// Custom reduce for large arrays
+	uniform FBox ReducedBox[programCount];
+	#pragma ignore warning(perf)
+	ReducedBox[programIndex] = BoundingBoxSum;
+
+	if (programIndex < NumBoxes)
+	{
+		foreach_active(j)
+		{
+			unmasked
+			{
+				BoundingBox = BoundingBox + ReducedBox[j];
+			}
 		}
 	}
 }

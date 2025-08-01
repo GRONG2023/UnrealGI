@@ -1,8 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "GameplayDebuggerCategory_NavLocalGrid.h"
+#include "GameplayDebugger/GameplayDebuggerCategory_NavLocalGrid.h"
 
-#if WITH_GAMEPLAY_DEBUGGER
+#if WITH_GAMEPLAY_DEBUGGER_MENU
 
 #include "GameFramework/PlayerController.h"
 #include "AIController.h"
@@ -11,6 +11,8 @@
 #include "Navigation/GridPathFollowingComponent.h"
 #include "DebugRenderSceneProxy.h"
 #include "Materials/Material.h"
+#include "Materials/MaterialRenderProxy.h"
+#include "SceneManagement.h"
 
 //////////////////////////////////////////////////////////////////////////
 // Scene proxy
@@ -86,38 +88,38 @@ public:
 
 				if (FreeCellMeshVerts.Num() > 0)
 				{
-					const FColoredMaterialRenderProxy* MeshColorInstance = new(FMemStack::Get()) FColoredMaterialRenderProxy(GEngine->DebugMeshMaterial->GetRenderProxy(), FLinearColor(FreeCellColor));
+					const FColoredMaterialRenderProxy* MeshColorInstance = &Collector.AllocateOneFrameResource<FColoredMaterialRenderProxy>(GEngine->DebugMeshMaterial->GetRenderProxy(), FLinearColor(FreeCellColor));
 					FDynamicMeshBuilder	MeshBuilder(View->GetFeatureLevel());
 					MeshBuilder.AddVertices(FreeCellMeshVerts);
 					MeshBuilder.AddTriangles(FreeCellMeshIndices);
-					MeshBuilder.GetMesh(FMatrix::Identity, MeshColorInstance, GetDepthPriorityGroup(View), false, false, ViewIndex, Collector);
+					MeshBuilder.GetMesh(FMatrix::Identity, MeshColorInstance, IntCastChecked<uint8>((int32)GetDepthPriorityGroup(View)), false, false, ViewIndex, Collector);
 				}
 
 				if (MarkedCellMeshVerts.Num() > 0)
 				{
-					const FColoredMaterialRenderProxy* MeshColorInstance = new(FMemStack::Get()) FColoredMaterialRenderProxy(GEngine->DebugMeshMaterial->GetRenderProxy(), FLinearColor(MarkedCellColor));
+					const FColoredMaterialRenderProxy* MeshColorInstance = &Collector.AllocateOneFrameResource<FColoredMaterialRenderProxy>(GEngine->DebugMeshMaterial->GetRenderProxy(), FLinearColor(MarkedCellColor));
 					FDynamicMeshBuilder	MeshBuilder(View->GetFeatureLevel());
 					MeshBuilder.AddVertices(MarkedCellMeshVerts);
 					MeshBuilder.AddTriangles(MarkedCellMeshIndices);
-					MeshBuilder.GetMesh(FMatrix::Identity, MeshColorInstance, GetDepthPriorityGroup(View), false, false, ViewIndex, Collector);
+					MeshBuilder.GetMesh(FMatrix::Identity, MeshColorInstance, IntCastChecked<uint8>((int32)GetDepthPriorityGroup(View)), false, false, ViewIndex, Collector);
 				}
 
 				if (BoundsMeshVerts.Num() > 0)
 				{
-					const FColoredMaterialRenderProxy* MeshColorInstance = new(FMemStack::Get()) FColoredMaterialRenderProxy(GEngine->DebugMeshMaterial->GetRenderProxy(), FLinearColor(BoundsColor));
+					const FColoredMaterialRenderProxy* MeshColorInstance = &Collector.AllocateOneFrameResource<FColoredMaterialRenderProxy>(GEngine->DebugMeshMaterial->GetRenderProxy(), FLinearColor(BoundsColor));
 					FDynamicMeshBuilder	MeshBuilder(View->GetFeatureLevel());
 					MeshBuilder.AddVertices(BoundsMeshVerts);
 					MeshBuilder.AddTriangles(BoundsMeshIndices);
-					MeshBuilder.GetMesh(FMatrix::Identity, MeshColorInstance, GetDepthPriorityGroup(View), false, false, ViewIndex, Collector);
+					MeshBuilder.GetMesh(FMatrix::Identity, MeshColorInstance, IntCastChecked<uint8>((int32)GetDepthPriorityGroup(View)), false, false, ViewIndex, Collector);
 				}
 
 				if (PathMeshVerts.Num() > 0)
 				{
-					const FColoredMaterialRenderProxy* MeshColorInstance = new(FMemStack::Get()) FColoredMaterialRenderProxy(GEngine->DebugMeshMaterial->GetRenderProxy(), FLinearColor(PathColor));
+					const FColoredMaterialRenderProxy* MeshColorInstance = &Collector.AllocateOneFrameResource<FColoredMaterialRenderProxy>(GEngine->DebugMeshMaterial->GetRenderProxy(), FLinearColor(PathColor));
 					FDynamicMeshBuilder	MeshBuilder(View->GetFeatureLevel());
 					MeshBuilder.AddVertices(PathMeshVerts);
 					MeshBuilder.AddTriangles(PathMeshIndices);
-					MeshBuilder.GetMesh(FMatrix::Identity, MeshColorInstance, GetDepthPriorityGroup(View), false, false, ViewIndex, Collector);
+					MeshBuilder.GetMesh(FMatrix::Identity, MeshColorInstance, IntCastChecked<uint8>((int32)GetDepthPriorityGroup(View)), false, false, ViewIndex, Collector);
 				}
 			}
 		}
@@ -149,10 +151,10 @@ protected:
 
 		const int32 FirstVertIdx = Verts.Num();
 
-		Verts.Add(FDynamicMeshVertex(Location0 - (DirRight * Width)));
-		Verts.Add(FDynamicMeshVertex(Location0 + (DirRight * Width)));
-		Verts.Add(FDynamicMeshVertex(Location1 - (DirRight * Width)));
-		Verts.Add(FDynamicMeshVertex(Location1 + (DirRight * Width)));
+		Verts.Add(FDynamicMeshVertex((FVector3f)(Location0 - (DirRight * Width))));
+		Verts.Add(FDynamicMeshVertex((FVector3f)(Location0 + (DirRight * Width))));
+		Verts.Add(FDynamicMeshVertex((FVector3f)(Location1 - (DirRight * Width))));
+		Verts.Add(FDynamicMeshVertex((FVector3f)(Location1 + (DirRight * Width))));
 
 		StoreQuadIndices(0, 1, 3, 2, FirstVertIdx, Indices);
 	}
@@ -164,14 +166,14 @@ protected:
 		const FVector CellMin = FVector(GridBounds.Min.X, GridBounds.Min.Y, GridBounds.Max.Z) + FVector(CellSize * CellIdx.X, CellSize * CellIdx.Y, 0);
 		const FBox CellBox(CellMin, CellMin + FVector(CellSize, CellSize, 0.0f));
 		const FVector Center = CellBox.GetCenter();
-		const FVector Extent = CellBox.GetExtent() - FVector(CellGapSize, CellGapSize, 0.f);
+		const FVector Extent = CellBox.GetExtent() - FVector(CellGapSize, CellGapSize, 0.);
 
 		const int32 FirstVertIdx = Verts.Num();
 
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X, Center.Y - Extent.Y, Center.Z - Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X, Center.Y - Extent.Y, Center.Z - Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X, Center.Y + Extent.Y, Center.Z - Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X, Center.Y + Extent.Y, Center.Z - Extent.Z)));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X, Center.Y - Extent.Y, Center.Z - Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X, Center.Y - Extent.Y, Center.Z - Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X, Center.Y + Extent.Y, Center.Z - Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X, Center.Y + Extent.Y, Center.Z - Extent.Z))));
 
 		StoreQuadIndices(0, 1, 3, 2, FirstVertIdx, Indices);
 	}
@@ -187,14 +189,14 @@ protected:
 
 		const int32 FirstVertIdx = Verts.Num();
 
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X, Center.Y - Extent.Y, Center.Z - Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X, Center.Y - Extent.Y, Center.Z - Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X, Center.Y + Extent.Y, Center.Z - Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X, Center.Y + Extent.Y, Center.Z - Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X, Center.Y - Extent.Y, Center.Z + Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X, Center.Y - Extent.Y, Center.Z + Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X, Center.Y + Extent.Y, Center.Z + Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X, Center.Y + Extent.Y, Center.Z + Extent.Z)));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X, Center.Y - Extent.Y, Center.Z - Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X, Center.Y - Extent.Y, Center.Z - Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X, Center.Y + Extent.Y, Center.Z - Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X, Center.Y + Extent.Y, Center.Z - Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X, Center.Y - Extent.Y, Center.Z + Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X, Center.Y - Extent.Y, Center.Z + Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X, Center.Y + Extent.Y, Center.Z + Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X, Center.Y + Extent.Y, Center.Z + Extent.Z))));
 
 		StoreQuadIndices(4, 5, 7, 6, FirstVertIdx, Indices);
 		StoreQuadIndices(1, 3, 7, 5, FirstVertIdx, Indices);
@@ -213,44 +215,44 @@ protected:
 		const FVector Center = GridBounds.GetCenter();
 		const FVector Extent = GridBounds.GetExtent();
 
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X, Center.Y - Extent.Y, Center.Z - Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X, Center.Y - Extent.Y, Center.Z - Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X, Center.Y + Extent.Y, Center.Z - Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X, Center.Y + Extent.Y, Center.Z - Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X, Center.Y - Extent.Y, Center.Z + Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X, Center.Y - Extent.Y, Center.Z + Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X, Center.Y + Extent.Y, Center.Z + Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X, Center.Y + Extent.Y, Center.Z + Extent.Z)));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X, Center.Y - Extent.Y, Center.Z - Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X, Center.Y - Extent.Y, Center.Z - Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X, Center.Y + Extent.Y, Center.Z - Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X, Center.Y + Extent.Y, Center.Z - Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X, Center.Y - Extent.Y, Center.Z + Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X, Center.Y - Extent.Y, Center.Z + Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X, Center.Y + Extent.Y, Center.Z + Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X, Center.Y + Extent.Y, Center.Z + Extent.Z))));
 
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X + FaceWidth, Center.Y - Extent.Y, Center.Z - Extent.Z + FaceWidth)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X - FaceWidth, Center.Y - Extent.Y, Center.Z - Extent.Z + FaceWidth)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X + FaceWidth, Center.Y - Extent.Y, Center.Z + Extent.Z - FaceWidth)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X - FaceWidth, Center.Y - Extent.Y, Center.Z + Extent.Z - FaceWidth)));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X + FaceWidth, Center.Y - Extent.Y, Center.Z - Extent.Z + FaceWidth))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X - FaceWidth, Center.Y - Extent.Y, Center.Z - Extent.Z + FaceWidth))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X + FaceWidth, Center.Y - Extent.Y, Center.Z + Extent.Z - FaceWidth))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X - FaceWidth, Center.Y - Extent.Y, Center.Z + Extent.Z - FaceWidth))));
 
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X, Center.Y - Extent.Y + FaceWidth, Center.Z - Extent.Z + FaceWidth)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X, Center.Y + Extent.Y - FaceWidth, Center.Z - Extent.Z + FaceWidth)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X, Center.Y - Extent.Y + FaceWidth, Center.Z + Extent.Z - FaceWidth)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X, Center.Y + Extent.Y - FaceWidth, Center.Z + Extent.Z - FaceWidth)));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X, Center.Y - Extent.Y + FaceWidth, Center.Z - Extent.Z + FaceWidth))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X, Center.Y + Extent.Y - FaceWidth, Center.Z - Extent.Z + FaceWidth))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X, Center.Y - Extent.Y + FaceWidth, Center.Z + Extent.Z - FaceWidth))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X, Center.Y + Extent.Y - FaceWidth, Center.Z + Extent.Z - FaceWidth))));
 
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X + FaceWidth, Center.Y - Extent.Y + FaceWidth, Center.Z + Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X - FaceWidth, Center.Y - Extent.Y + FaceWidth, Center.Z + Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X + FaceWidth, Center.Y + Extent.Y - FaceWidth, Center.Z + Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X - FaceWidth, Center.Y + Extent.Y - FaceWidth, Center.Z + Extent.Z)));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X + FaceWidth, Center.Y - Extent.Y + FaceWidth, Center.Z + Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X - FaceWidth, Center.Y - Extent.Y + FaceWidth, Center.Z + Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X + FaceWidth, Center.Y + Extent.Y - FaceWidth, Center.Z + Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X - FaceWidth, Center.Y + Extent.Y - FaceWidth, Center.Z + Extent.Z))));
 
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X + FaceWidth, Center.Y + Extent.Y, Center.Z - Extent.Z + FaceWidth)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X - FaceWidth, Center.Y + Extent.Y, Center.Z - Extent.Z + FaceWidth)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X + FaceWidth, Center.Y + Extent.Y, Center.Z + Extent.Z - FaceWidth)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X - FaceWidth, Center.Y + Extent.Y, Center.Z + Extent.Z - FaceWidth)));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X + FaceWidth, Center.Y + Extent.Y, Center.Z - Extent.Z + FaceWidth))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X - FaceWidth, Center.Y + Extent.Y, Center.Z - Extent.Z + FaceWidth))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X + FaceWidth, Center.Y + Extent.Y, Center.Z + Extent.Z - FaceWidth))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X - FaceWidth, Center.Y + Extent.Y, Center.Z + Extent.Z - FaceWidth))));
 
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X, Center.Y - Extent.Y + FaceWidth, Center.Z - Extent.Z + FaceWidth)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X, Center.Y + Extent.Y - FaceWidth, Center.Z - Extent.Z + FaceWidth)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X, Center.Y - Extent.Y + FaceWidth, Center.Z + Extent.Z - FaceWidth)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X, Center.Y + Extent.Y - FaceWidth, Center.Z + Extent.Z - FaceWidth)));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X, Center.Y - Extent.Y + FaceWidth, Center.Z - Extent.Z + FaceWidth))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X, Center.Y + Extent.Y - FaceWidth, Center.Z - Extent.Z + FaceWidth))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X, Center.Y - Extent.Y + FaceWidth, Center.Z + Extent.Z - FaceWidth))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X, Center.Y + Extent.Y - FaceWidth, Center.Z + Extent.Z - FaceWidth))));
 
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X + FaceWidth, Center.Y - Extent.Y + FaceWidth, Center.Z - Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X - FaceWidth, Center.Y - Extent.Y + FaceWidth, Center.Z - Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X - Extent.X + FaceWidth, Center.Y + Extent.Y - FaceWidth, Center.Z - Extent.Z)));
-		Verts.Add(FDynamicMeshVertex(FVector(Center.X + Extent.X - FaceWidth, Center.Y + Extent.Y - FaceWidth, Center.Z - Extent.Z)));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X + FaceWidth, Center.Y - Extent.Y + FaceWidth, Center.Z - Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X - FaceWidth, Center.Y - Extent.Y + FaceWidth, Center.Z - Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X - Extent.X + FaceWidth, Center.Y + Extent.Y - FaceWidth, Center.Z - Extent.Z))));
+		Verts.Add(FDynamicMeshVertex(UE::LWC::NarrowWorldPositionChecked(FVector(Center.X + Extent.X - FaceWidth, Center.Y + Extent.Y - FaceWidth, Center.Z - Extent.Z))));
 
 		StoreQuadIndices(0, 1, 9, 8, FirstVertIdx, Indices);
 		StoreQuadIndices(1, 5, 11, 9, FirstVertIdx, Indices);
@@ -299,13 +301,13 @@ protected:
 
 	uint32 GetAllocatedSize(void) const
 	{
-		uint32 AllocatedSize = FDebugRenderSceneProxy::GetAllocatedSize() +
+		const SIZE_T AllocatedSize = FDebugRenderSceneProxy::GetAllocatedSize() +
 			FreeCellMeshVerts.GetAllocatedSize() + FreeCellMeshIndices.GetAllocatedSize() +
 			MarkedCellMeshVerts.GetAllocatedSize() + MarkedCellMeshIndices.GetAllocatedSize() +
 			BoundsMeshVerts.GetAllocatedSize() + BoundsMeshIndices.GetAllocatedSize() +
 			PathMeshVerts.GetAllocatedSize() + PathMeshIndices.GetAllocatedSize();
 
-		return AllocatedSize;
+		return IntCastChecked<uint32>(AllocatedSize);
 	}
 
 private:
@@ -433,4 +435,4 @@ void FGameplayDebuggerCategory_NavLocalGrid::OnDataPackReplicated(int32 DataPack
 	MarkRenderStateDirty();
 }
 
-#endif // WITH_GAMEPLAY_DEBUGGER
+#endif // WITH_GAMEPLAY_DEBUGGER_MENU

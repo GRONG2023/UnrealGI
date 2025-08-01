@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AutoReimport/AutoReimportManager.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
 #include "Misc/WildcardString.h"
@@ -18,7 +18,7 @@
 #include "Settings/EditorLoadingSavingSettings.h"
 #include "Factories/Factory.h"
 #include "EditorFramework/AssetImportData.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Editor.h"
 #include "FileHelpers.h"
 
@@ -28,7 +28,7 @@
 
 #include "PackageTools.h"
 #include "ObjectTools.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Framework/Notifications/NotificationManager.h"
 #include "Widgets/Notifications/SNotificationList.h"
 #include "AutoReimport/ReimportFeedbackContext.h"
@@ -140,6 +140,10 @@ private:
 
 	/** FGCObject interface*/
 	virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FAutoReimportManager");
+	}
 
 private:
 
@@ -220,7 +224,7 @@ private:
 	TArray<TUniquePtr<FContentDirectoryMonitor>> DirectoryMonitors;
 
 	/** A list of packages to save when we've added a bunch of assets */
-	TArray<UPackage*> PackagesToSave;
+	TArray<TObjectPtr<UPackage>> PackagesToSave;
 
 	/** Reentracy guard for when we are making changes to assets */
 	bool bGuardAssetChanges;
@@ -369,7 +373,11 @@ void FAutoReimportManager::Destroy()
 	if (AssetRegistryModule)
 	{
 		FAssetSourceFilenameCache::Get().OnAssetRenamed().RemoveAll(this);
-		AssetRegistryModule->Get().OnInMemoryAssetDeleted().RemoveAll(this);
+		IAssetRegistry* AssetRegistry = AssetRegistryModule->TryGet();
+		if (AssetRegistry)
+		{
+			AssetRegistry->OnInMemoryAssetDeleted().RemoveAll(this);
+		}
 	}
 	
 	if (UEditorLoadingSavingSettings* Settings = GetMutableDefault<UEditorLoadingSavingSettings>())
@@ -750,7 +758,7 @@ TOptional<ECurrentState> FAutoReimportManager::ProcessDeletions()
 		Monitor->ExtractAssetsToDelete(AssetsToDelete);
 	}
 
-	FeedbackContextOverride->MainTask->EnterProgressFrame(TotalWork);
+	FeedbackContextOverride->MainTask->EnterProgressFrame(static_cast<float>(TotalWork));
 
 	if (AssetsToDelete.Num() > 0)
 	{
@@ -777,7 +785,7 @@ TOptional<ECurrentState> FAutoReimportManager::SavePackages()
 		const bool bAlreadyCheckedOut = false;
 		const bool bCheckDirty = false;
 		const bool bPromptToSave = false;
-		FEditorFileUtils::PromptForCheckoutAndSave(PackagesToSave, bCheckDirty, bPromptToSave, nullptr, bAlreadyCheckedOut);
+		FEditorFileUtils::PromptForCheckoutAndSave(ObjectPtrDecay(PackagesToSave), bCheckDirty, bPromptToSave, nullptr, bAlreadyCheckedOut);
 
 		PackagesToSave.Empty();
 	}

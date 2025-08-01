@@ -8,7 +8,8 @@
 #include "LandscapeProxy.h"
 #include "Editor/LandscapeEditor/Private/LandscapeEdMode.h"
 #include "LandscapeFileFormatInterface.h"
-#include "LandscapeBlueprintBrush.h"
+#include "LandscapeBlueprintBrushBase.h"
+#include "LandscapeImportHelper.h"
 
 #include "LandscapeEditorObject.generated.h"
 
@@ -127,16 +128,13 @@ enum class ELandscapeConvertMode : int8
 };
 
 UENUM()
-namespace EColorChannel
+enum class ELandscapeTextureColorChannel : int32
 {
-	enum Type
-	{
-		Red,
-		Green,
-		Blue,
-		Alpha,
-	};
-}
+	Red,
+	Green,
+	Blue,
+	Alpha,
+};
 
 UENUM()
 enum class ELandscapeMirrorOperation : uint8
@@ -201,19 +199,28 @@ struct FLandscapeImportLayer : public FLandscapeImportLayerInfo
 	GENERATED_USTRUCT_BODY()
 
 	UPROPERTY(Category="Import", VisibleAnywhere)
-	ULandscapeMaterialInstanceConstant* ThumbnailMIC;
+	TObjectPtr<ULandscapeMaterialInstanceConstant> ThumbnailMIC;
 
-	UPROPERTY(Category="Import", VisibleAnywhere)
+	UPROPERTY(Category = "Import", VisibleAnywhere)
 	ELandscapeImportResult ImportResult;
 
-	UPROPERTY(Category="Import", VisibleAnywhere)
+	UPROPERTY(Category = "Import", VisibleAnywhere)
 	FText ErrorMessage;
+
+	UPROPERTY(Category="Export", EditAnywhere, meta = (DisplayName = "Layer File"))
+	FString ExportFilePath;
+
+	UPROPERTY(Category="Import", EditAnywhere)
+	bool bSelected;
+
+	FLandscapeImportDescriptor ImportDescriptor;
 
 	FLandscapeImportLayer()
 		: FLandscapeImportLayerInfo()
 		, ThumbnailMIC(nullptr)
 		, ImportResult(ELandscapeImportResult::Success)
 		, ErrorMessage(FText())
+		, bSelected(false)
 	{
 	}
 };
@@ -252,6 +259,18 @@ struct FLandscapePatternBrushWorldSpaceSettings
 	{}
 };
 
+UENUM()
+enum class ELandscapeImportExportMode
+{
+	// Import and export only loaded landscape proxies
+	LoadedOnly, 
+	// Import and export the whole world loading & unloading regions as required.
+	All,		
+	// Import and export regions selected in the WP editor loading & unloading as required.
+	// Selected, // TODO: don.boogert   
+};
+
+
 UCLASS(MinimalAPI)
 class ULandscapeEditorObject : public UObject
 {
@@ -262,22 +281,27 @@ class ULandscapeEditorObject : public UObject
 
 	// Common Tool Settings:
 
-	// Strength of the tool. If you're using a pen/tablet with pressure-sensing, the pressure used affects the strength of the tool.
-	UPROPERTY(Category="Tool Settings", EditAnywhere, NonTransactional, meta=(ShowForTools="Paint,Sculpt,Erase,Smooth,Flatten,Erosion,HydraErosion,Noise,Mask,CopyPaste", ClampMin="0", ClampMax="10", UIMin="0", UIMax="1"))
+	// Strength of the Sculpt tool. If you're using a pen/tablet with pressure-sensing, the pressure used affects the strength of the tool.
+	UPROPERTY(Category="Tool Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Tool Strength", ShowForTools="Paint,Sculpt,Erase,Smooth,Flatten,Erosion,HydraErosion,Noise,Mask,CopyPaste", ShowForTargetTypes = "Heightmap,Visibility",  ClampMin="0", ClampMax="10", UIMin="0", UIMax="1"))
 	float ToolStrength;
+
+	// Strength of the Paint tool. If you're using a pen/tablet with pressure-sensing, the pressure used affects the strength of the tool.
+	UPROPERTY(Category="Tool Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Tool Strength", ShowForTools="Paint,Sculpt,Erase,Smooth,Flatten,Erosion,HydraErosion,Noise,Mask,CopyPaste", ShowForTargetTypes = "Weightmap", ClampMin="0", ClampMax="10", UIMin="0", UIMax="1"))
+	float PaintToolStrength;
 
 	// Enable to make tools blend towards a target value
 	UPROPERTY(Category = "Tool Settings", NonTransactional, EditAnywhere, meta = (InlineEditConditionToggle))
 	bool bUseWeightTargetValue;
 
 	// Enable to make tools blend towards a target value
-	UPROPERTY(Category="Tool Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Use Target Value", EditCondition="bUseWeightTargetValue", ShowForTools="Paint,Sculpt,Noise", ClampMin="0", ClampMax="10", UIMin="0", UIMax="1"))
+	UPROPERTY(Category="Tool Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Use Target Value", EditCondition="bUseWeightTargetValue", ShowForTools="Paint,Sculpt,Noise", ShowForTargetTypes = "Weightmap", ClampMin="0", ClampMax="10", UIMin="0", UIMax="1"))
 	float WeightTargetValue;
 
 	// I have no idea what this is for but it's used by the noise and erosion tools, and isn't exposed to the UI
 	UPROPERTY(NonTransactional)
 	float MaximumValueRadius;
 
+	// Use the combined result of the underlying layers as input to the operation.  When not checked, it will use only the data in the currently selected layer as input.
 	UPROPERTY(Category="Tool Settings", EditAnywhere, NonTransactional, meta=(ShowForTools="Flatten,Smooth,Erosion,HydraErosion,Ramp", ShowForTargetTypes="Heightmap", ShowForLandscapeLayerSystem))
 	bool bCombinedLayersOperation;
 
@@ -369,6 +393,10 @@ class ULandscapeEditorObject : public UObject
 	UPROPERTY(Category="Tool Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Noise Scale", ShowForTools="Erosion", ClampMin="1", ClampMax="512", UIMin="1.1", UIMax="256"))
 	float ErosionNoiseScale;
 
+	// Whether the erosion tool should take into account the paint layer's hardness parameter (a hardness of 0 means the layer is fully affected by erosion, while 1 means fully unaffected)
+	UPROPERTY(Category = "Tool Settings", EditAnywhere, NonTransactional, meta = (DisplayName = "Use Layer Hardness", ShowForTools = "Erosion"))
+	bool bErosionUseLayerHardness;
+
 	// Hydraulic Erosion Tool:
 
 	// The amount of rain to apply to the surface. Larger values will result in more erosion
@@ -376,14 +404,14 @@ class ULandscapeEditorObject : public UObject
 	int32 RainAmount;
 
 	// The amount of sediment that the water can carry. Larger values will result in more erosion
-	UPROPERTY(Category="Tool Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Sediment Cap.", ShowForTools="HydraErosion", ClampMin="0.1", ClampMax="1.0"))
+	UPROPERTY(Category="Tool Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Sediment Capacity", ShowForTools="HydraErosion", ClampMin="0.1", ClampMax="1.0"))
 	float SedimentCapacity;
 
 	// Number of erosion iterations, more means more erosion but is slower
 	UPROPERTY(Category="Tool Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Iterations", ShowForTools="HydraErosion", ClampMin="1", ClampMax="300", UIMin="1", UIMax="150"))
 	int32 HErodeIterationNum;
 
-	// Initial Rain Distribution
+	// Selects how rain is distributed over the brush area for hydro erosion
 	UPROPERTY(Category="Tool Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Initial Rain Distribution", ShowForTools="HydraErosion"))
 	ELandscapeToolHydroErosionMode RainDistMode;
 
@@ -430,9 +458,8 @@ class ULandscapeEditorObject : public UObject
 	UPROPERTY(Category="Tool Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Gizmo copy/paste all layers", ShowForTools="CopyPaste"))
 	bool bApplyToAllTargets;
 
-	// Makes sure the gizmo is snapped perfectly to the landscape so that the sample points line up, which makes copy/paste less blurry. Irrelevant if gizmo is scaled
-	UPROPERTY(Category="Tool Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Snap Gizmo to Landscape grid", ShowForTools="CopyPaste"))
-	bool bSnapGizmo;
+	UPROPERTY(Category="Tool Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Snap Gizmo to Landscape grid", ShowForTools="CopyPaste,ImportExport"))
+	ELandscapeGizmoSnapType SnapMode;
 
 	// Smooths the edges of the gizmo data into the landscape. Without this, the edges of the pasted data will be sharp
 	UPROPERTY(Category="Tool Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Use Smooth Gizmo Brush", ShowForTools="CopyPaste"))
@@ -463,10 +490,9 @@ class ULandscapeEditorObject : public UObject
 	UPROPERTY(Category="Tool Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Smoothing Width", ShowForTools="Mirror", ClampMin="0", UIMin="0", UIMax="20"))
 	int32 MirrorSmoothingWidth;
 
-	// Blueprint Brush Tool
-
+	// Selects the blueprint brush to apply to the current edit layer. Click on the landscape to apply it.
 	UPROPERTY(Category = "Tool Settings", EditAnywhere, Transient, meta = (DisplayName = "Blueprint Brush", ShowForTools = "BlueprintBrush"))
-	TSubclassOf<ALandscapeBlueprintBrush> BlueprintBrush;
+	TSubclassOf<ALandscapeBlueprintBrushBase> BlueprintBrush;
 
 	// Resize Landscape Tool
 
@@ -508,56 +534,105 @@ class ULandscapeEditorObject : public UObject
 	UPROPERTY(Category="New Landscape", EditAnywhere, meta=(DisplayName="Number of Components", ShowForTools="NewLandscape"))
 	FIntPoint NewLandscape_ComponentCount;
 
+	static const FVector NewLandscape_DefaultLocation;
+
 	// The location of the new landscape
 	UPROPERTY(Category="New Landscape", EditAnywhere, meta=(DisplayName="Location", ShowForTools="NewLandscape"))
 	FVector NewLandscape_Location;
+
+	static const FRotator NewLandscape_DefaultRotation;
 
 	// The rotation of the new landscape
 	UPROPERTY(Category="New Landscape", EditAnywhere, meta=(DisplayName="Rotation", ShowForTools="NewLandscape"))
 	FRotator NewLandscape_Rotation;
 
+	static const FVector NewLandscape_DefaultScale;
+
 	// The scale of the new landscape. This is the distance between each vertex on the landscape, defaulting to 100 units.
 	UPROPERTY(Category="New Landscape", EditAnywhere, meta=(DisplayName="Scale", ShowForTools="NewLandscape"))
 	FVector NewLandscape_Scale;
 
-	UPROPERTY(Category="New Landscape", VisibleAnywhere, NonTransactional, meta=(ShowForTools="NewLandscape"))
+	UPROPERTY(Category="New Landscape", VisibleAnywhere, NonTransactional, meta=(ShowForTools="NewLandscape,ImportExport"))
 	ELandscapeImportResult ImportLandscape_HeightmapImportResult;
 
-	UPROPERTY(Category="New Landscape", VisibleAnywhere, NonTransactional, meta=(ShowForTools="NewLandscape"))
+	UPROPERTY(Category="New Landscape", VisibleAnywhere, NonTransactional, meta=(ShowForTools="NewLandscape,ImportExport"))
 	FText ImportLandscape_HeightmapErrorMessage;
 
 	// Specify a height map file in 16-bit RAW or PNG format
-	UPROPERTY(Category="New Landscape", EditAnywhere, NonTransactional, meta=(DisplayName="Heightmap File", ShowForTools="NewLandscape"))
+	UPROPERTY(Category="New Landscape", EditAnywhere, NonTransactional, meta=(DisplayName="Heightmap File", ShowForTools="NewLandscape,ImportExport"))
 	FString ImportLandscape_HeightmapFilename;
 	UPROPERTY(NonTransactional)
 	uint32 ImportLandscape_Width;
 	UPROPERTY(NonTransactional)
 	uint32 ImportLandscape_Height;
 
+	UPROPERTY(Category="Import / Export", EditAnywhere, NonTransactional, meta=(DisplayName="Heightmap File", ShowForTools="ImportExport"))
+	FString HeightmapExportFilename;
+		
+	UPROPERTY(NonTransactional)
+	FIntPoint ImportLandscape_GizmoLocalPosition;
+
+	UPROPERTY(Category = "Import / Export", EditAnywhere, NonTransactional, meta =(ShowForTools = "ImportExport"))
+	ELandscapeImportTransformType ImportType;
+		
+	UPROPERTY(NonTransactional)
+	bool bHeightmapSelected = false;
+	
+	UPROPERTY(Category = "Import / Export", EditAnywhere, NonTransactional, meta = (DisplayName="Export Selected Edit Layer", ShowForTools = "ImportExport", ToolTip="When true exports the selected edit layer, if false exports the blended result"))
+	bool bExportEditLayer = true;
+
+	UPROPERTY(Category = "Import / Export", EditAnywhere, NonTransactional, meta = (ShowForTools = "ImportExport", ToolTip = "(World Partition only) When true, exports the landscape as a single file, if false exports each grid tile individually."))
+	bool bExportSingleFile = false;
+
+	UPROPERTY(Category = "Import / Export", EditAnywhere, NonTransactional, meta = (ShowForTools = "ImportExport"))
+	ELandscapeImportExportMode ImportExportMode = ELandscapeImportExportMode::LoadedOnly;
+
+	UPROPERTY(NonTransactional)
+	FLandscapeImportDescriptor HeightmapImportDescriptor;
+	
+	UPROPERTY(NonTransactional)
+	int32 HeightmapImportDescriptorIndex;
 private:
 	UPROPERTY(NonTransactional)
 	TArray<uint16> ImportLandscape_Data;
 public:
 	UPROPERTY(Category = "New Landscape", EditAnywhere, NonTransactional, meta = (DisplayName= "Enable Edit Layers", ToolTip="Enable support for landscape edit layers.", ShowForTools= "NewLandscape"))
-	bool bCanHaveLayersContent = false;
+	bool bCanHaveLayersContent = true;
 
-	// Whether the imported alpha maps are to be interpreted as "layered" or "additive" (UE4 uses additive internally)
-	UPROPERTY(Category="New Landscape", EditAnywhere, NonTransactional, meta=(DisplayName="Layer Alphamap Type", ShowForTools="NewLandscape"))
+	UPROPERTY(Category = "New Landscape", EditAnywhere, NonTransactional, meta = (DisplayName = "Flip Y Axis", ToolTip = "Whether to flip Y coordinate of imported files.", ShowForTools = "NewLandscape,ImportExport"))
+	bool bFlipYAxis = false;
+
+	UPROPERTY(Category = "New Landscape", EditAnywhere, NonTransactional, meta = (DisplayName= "World Partition Grid Size", ToolTip="Number of components per landscape streaming proxies per axis", ShowForTools="NewLandscape", ClampMin=1, ClampMax=16, UIMin=1, UIMax=16))
+	uint32 WorldPartitionGridSize = 2;
+
+	UPROPERTY(Category = "New Landscape", EditAnywhere, NonTransactional, meta = (DisplayName= "World Partition Region Size", ToolTip="Number of components per Landscape World Partition Region per axis.", ShowForTools="NewLandscape", ClampMin=4, ClampMax=64, UIMin=4, UIMax=64))
+	uint32 WorldPartitionRegionSize = 16;
+
+	// Whether the imported alpha maps are to be interpreted as "layered" or "additive" (UE uses additive internally)
+	UPROPERTY(Category="New Landscape", EditAnywhere, NonTransactional, meta=(DisplayName="Layer Alphamap Type", ShowForTools="NewLandscape,ImportExport"))
 	ELandscapeImportAlphamapType ImportLandscape_AlphamapType;
 
 	// The landscape layers that will be created. Only layer names referenced in the material assigned above are shown here. Modify the material to add more layers.
-	UPROPERTY(Category="New Landscape", EditAnywhere, NonTransactional, EditFixedSize, meta=(DisplayName="Layers", ShowForTools="NewLandscape"))
+	UPROPERTY(Category="New Landscape", EditAnywhere, NonTransactional, EditFixedSize, meta=(DisplayName="Layers", ShowForTools="NewLandscape,ImportExport"))
 	TArray<FLandscapeImportLayer> ImportLandscape_Layers;
 
 	// Common Brush Settings:
 
-	// The radius of the brush, in unreal units
-	UPROPERTY(Category="Brush Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Brush Size", ShowForBrushes="BrushSet_Circle,BrushSet_Alpha,BrushSet_Pattern", ClampMin="1", ClampMax="65536", UIMin="1", UIMax="8192", SliderExponent="3"))
+	// The radius of the sculpt brush, in unreal units
+	UPROPERTY(Category="Brush Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Brush Size", ShowForBrushes="BrushSet_Circle,BrushSet_Alpha,BrushSet_Pattern", ShowForTargetTypes = "Heightmap,Visibility", ClampMin="1", ClampMax="65536", UIMin="1", UIMax="8192", SliderExponent="3", MaxFractionalDigits="2", ToolTip = "Radius of the sculpt editing brush. The maximum slider/clamp value can be set with the BrushSizeUIMax/BrushSizeClampMax values in the Landscape project settings."))
 	float BrushRadius;
 
-	// The falloff at the edge of the brush, as a fraction of the brush's size. 0 = no falloff, 1 = all falloff
-	UPROPERTY(Category="Brush Settings", EditAnywhere, NonTransactional, meta=(ShowForBrushes="BrushSet_Circle,BrushSet_Gizmo,BrushSet_Pattern", ClampMin="0", ClampMax="1", UIMin = "0", UIMax = "1"))
+	// The radius of the paint brush, in unreal units
+	UPROPERTY(Category="Brush Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Brush Size", ShowForBrushes="BrushSet_Circle,BrushSet_Alpha,BrushSet_Pattern", ShowForTargetTypes = "Weightmap", ClampMin="1", ClampMax="65536", UIMin="1", UIMax="8192", SliderExponent="3", ToolTip = "Radius of the paint editing brush. The maximum slider/clamp value can be set with the BrushSizeUIMax/BrushSizeClampMax values in the Landscape project settings."))
+	float PaintBrushRadius;
+
+	// The falloff at the edge of the sculpt brush, as a fraction of the brush's size. 0 = no falloff, 1 = all falloff
+	UPROPERTY(Category="Brush Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Brush Falloff", ShowForBrushes="BrushSet_Circle,BrushSet_Gizmo,BrushSet_Pattern", ShowForTargetTypes = "Heightmap,Visibility", ClampMin="0", ClampMax="1", UIMin = "0", UIMax = "1"))
 	float BrushFalloff;
+	
+	// The falloff at the edge of the paint brush, as a fraction of the brush's size. 0 = no falloff, 1 = all falloff
+	UPROPERTY(Category="Brush Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Brush Falloff", ShowForBrushes="BrushSet_Circle,BrushSet_Gizmo,BrushSet_Pattern", ShowForTargetTypes = "Weightmap", ClampMin="0", ClampMax="1", UIMin = "0", UIMax = "1"))
+	float PaintBrushFalloff;
 
 	// Selects the Clay Brush painting mode
 	UPROPERTY(Category="Brush Settings", EditAnywhere, NonTransactional, meta=(ShowForTools="Sculpt", ShowForBrushes="BrushSet_Circle,BrushSet_Alpha,BrushSet_Pattern"))
@@ -585,6 +660,7 @@ public:
 	UPROPERTY(Category="Brush Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Texture Pan V", ShowForBrushes="BrushSet_Pattern", ClampMin="0", ClampMax="1"))
 	float AlphaBrushPanV;
 
+	// Tile the pattern in world space (this only takes scale and position into account, not rotation)
 	UPROPERTY(Category = "Brush Settings", EditAnywhere, NonTransactional, meta = (DisplayName = "Use World-Space", ShowForBrushes = "BrushSet_Pattern"))
 	bool bUseWorldSpacePatternBrush;
 
@@ -592,12 +668,12 @@ public:
 	FLandscapePatternBrushWorldSpaceSettings WorldSpacePatternBrushSettings;
 
 	// Mask texture to use
-	UPROPERTY(Category="Brush Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Texture", ShowForBrushes="BrushSet_Alpha,BrushSet_Pattern"))
-	UTexture2D* AlphaTexture;
+	UPROPERTY(Category  ="Brush Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Texture", ShowForBrushes="BrushSet_Alpha,BrushSet_Pattern"))
+	TObjectPtr<UTexture2D> AlphaTexture;
 
 	// Channel of Mask Texture to use
-	UPROPERTY(Category="Brush Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Texture Channel", ShowForBrushes="BrushSet_Alpha,BrushSet_Pattern"))
-	TEnumAsByte<EColorChannel::Type> AlphaTextureChannel;
+	UPROPERTY(Category = "Brush Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Texture Channel", ShowForBrushes="BrushSet_Alpha,BrushSet_Pattern"))
+	ELandscapeTextureColorChannel AlphaTextureChannel;
 
 	UPROPERTY(NonTransactional)
 	int32 AlphaTextureSizeX;
@@ -609,8 +685,11 @@ public:
 	// Component Brush:
 
 	// Number of components X/Y to affect at once. 1 means 1x1, 2 means 2x2, etc
-	UPROPERTY(Category="Brush Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Brush Size", ShowForBrushes="BrushSet_Component", ClampMin="1", ClampMax="128", UIMin="1", UIMax="64", SliderExponent="3"))
+	UPROPERTY(Category = "Brush Settings", EditAnywhere, NonTransactional, meta=(DisplayName="Brush Size", ShowForBrushes="BrushSet_Component", ClampMin="1", ClampMax="128", UIMin="1", UIMax="64", SliderExponent="3"))
 	int32 BrushComponentSize;
+
+	UPROPERTY(Category = "Brush Settings", EditAnywhere, NonTransactional, meta = (DisplayName = "Include Border", ShowForBrushes = "BrushSet_Component", ShowForTools = "Paint,Sculpt", ToolTip = "When true, the brush will affect all pixels within the component, including those on the border, which means neightboring components (which share a line/row with their neighbor) will be affected as well"))
+	bool bBrushComponentIncludeBorder = true;
 
 
 	// Target Layer Settings:
@@ -646,23 +725,34 @@ public:
 	void SetPasteMode(ELandscapeToolPasteMode InPasteMode);
 
 	// Alpha/Pattern Brush
-	bool SetAlphaTexture(UTexture2D* InTexture, EColorChannel::Type InTextureChannel);
+	void SetAlphaTexture(UTexture2D* InTexture, ELandscapeTextureColorChannel InTextureChannel);
+	bool HasValidAlphaTextureData() const;
 
 	// New Landscape
 	FString LastImportPath;
 
 	const TArray<uint16>& GetImportLandscapeData() const { return ImportLandscape_Data; }
 	void ClearImportLandscapeData() { ImportLandscape_Data.Empty(); }
-
+	void ChooseBestComponentSizeForImport();
 	void ImportLandscapeData();
-	void RefreshImportLayersList();
-	
-	void UpdateComponentLayerWhitelist();
+	void RefreshImportLayersList(bool bRefreshFromTarget = false);
+	ELandscapeImportResult CreateImportLayersInfo(TArray<FLandscapeImportLayerInfo>& OutImportLayerInfos);
+	ELandscapeImportResult CreateNewLayersInfo(TArray<FLandscapeImportLayerInfo>& OutNewLayerInfos);
+	void InitializeDefaultHeightData(TArray<uint16>& OutData);
+	void ExpandImportData(TArray<uint16>& OutHeightData, TArray<FLandscapeImportLayerInfo>& OutImportLayerInfos);
+	void UpdateComponentLayerAllowList();
+	bool UseSingleFileImport() const;
+	void OnChangeImportLandscapeResolution(int32 DescriptorIndex);
+	void OnImportHeightmapFilenameChanged() { RefreshImports(); }
+	void RefreshImports();
+	void OnImportWeightmapFilenameChanged() { RefreshLayerImports(); }
+	void RefreshLayerImports();
+	void RefreshLayerImport(FLandscapeImportLayer& ImportLayer);
 
 	int32 ClampLandscapeSize(int32 InComponentsCount) const
 	{
-		// Max size is either whole components below 8192 verts, or 32 components
-		return FMath::Clamp(InComponentsCount, 1, FMath::Min(32, FMath::FloorToInt(8191 / (NewLandscape_SectionsPerComponent * NewLandscape_QuadsPerSection))));
+		// Max size is either whole components below 8192 verts, or 256 components
+		return FMath::Clamp(InComponentsCount, 1, FMath::Min(256, FMath::FloorToInt(8191.0f / (float)(NewLandscape_SectionsPerComponent * NewLandscape_QuadsPerSection))));
 	}
 	
 	int32 CalcComponentsCount(int32 InResolution) const
@@ -671,7 +761,7 @@ public:
 	}
 
 	void NewLandscape_ClampSize()
-	{
+	{	
 		NewLandscape_ComponentCount.X = ClampLandscapeSize(NewLandscape_ComponentCount.X);
 		NewLandscape_ComponentCount.Y = ClampLandscapeSize(NewLandscape_ComponentCount.Y);
 	}
@@ -704,7 +794,7 @@ public:
 		}
 	}
 
-	void SetbSnapGizmo(bool InbSnapGizmo);
+	void SetGizmoSnapMode(ELandscapeGizmoSnapType SnapMode);
 
 	void SetParent(FEdModeLandscape* LandscapeParent)
 	{
@@ -713,4 +803,23 @@ public:
 
 	void UpdateTargetLayerDisplayOrder();
 	void UpdateShowUnusedLayers();
+
+	float GetCurrentToolStrength() const;
+	void SetCurrentToolStrength(float NewToolStrength);
+
+	float GetCurrentToolBrushRadius() const;
+	void SetCurrentToolBrushRadius(float NewBrushStrength);
+
+	float GetCurrentToolBrushFalloff() const;
+	void SetCurrentToolBrushFalloff(float NewBrushFalloff);
+
+private:
+
+	bool IsWeightmapTarget() const
+	{
+		check(ParentMode);
+		return !(ParentMode->CurrentToolTarget.TargetType == ELandscapeToolTargetType::Heightmap || ParentMode->CurrentToolTarget.TargetType == ELandscapeToolTargetType::Visibility);
+	}
+
+	static bool LoadAlphaTextureSourceData(UTexture2D* InTexture, TArray<uint8>& OutSourceData, int32& OutSourceDataSizeX, int32& OutSourceDataSizeY, ELandscapeTextureColorChannel& InOutTextureChannel);
 };

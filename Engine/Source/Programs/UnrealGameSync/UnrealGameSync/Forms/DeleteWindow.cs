@@ -2,57 +2,51 @@
 
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
-using System.Drawing;
-using System.IO;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace UnrealGameSync
 {
 	public partial class DeleteWindow : Form
 	{
-		Dictionary<string, bool> FilesToDelete;
+		readonly Dictionary<string, bool> _filesToDelete;
 
-		public DeleteWindow(Dictionary<string, bool> InFilesToDelete)
+		public DeleteWindow(Dictionary<string, bool> inFilesToDelete)
 		{
 			InitializeComponent();
+			Font = new System.Drawing.Font("Segoe UI", 8.25F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
 
-			FilesToDelete = InFilesToDelete;
+			_filesToDelete = inFilesToDelete;
 
-			foreach(KeyValuePair<string, bool> FileToDelete in FilesToDelete)
+			foreach (KeyValuePair<string, bool> fileToDelete in _filesToDelete)
 			{
-				ListViewItem Item = new ListViewItem(FileToDelete.Key);
-				Item.Tag = FileToDelete.Key;
-				Item.Checked = FileToDelete.Value;
-				FileList.Items.Add(Item);
+				ListViewItem item = new ListViewItem(fileToDelete.Key);
+				item.Tag = fileToDelete.Key;
+				item.Checked = fileToDelete.Value;
+				FileList.Items.Add(item);
 			}
 		}
 
 		private void UncheckAll_Click(object sender, EventArgs e)
 		{
-			foreach(ListViewItem Item in FileList.Items)
+			foreach (ListViewItem? item in FileList.Items)
 			{
-				Item.Checked = false;
+				item!.Checked = false;
 			}
 		}
 
 		private void CheckAll_Click(object sender, EventArgs e)
 		{
-			foreach(ListViewItem Item in FileList.Items)
+			foreach (ListViewItem? item in FileList.Items)
 			{
-				Item.Checked = true;
+				item!.Checked = true;
 			}
 		}
 
 		private void ContinueButton_Click(object sender, EventArgs e)
 		{
-			foreach(ListViewItem Item in FileList.Items)
+			foreach (ListViewItem? item in FileList.Items)
 			{
-				FilesToDelete[(string)Item.Tag] = Item.Checked;
+				_filesToDelete[(string)item!.Tag] = item.Checked;
 			}
 		}
 	}

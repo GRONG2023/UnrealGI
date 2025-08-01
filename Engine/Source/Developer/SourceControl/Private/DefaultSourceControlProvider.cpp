@@ -11,7 +11,7 @@
 
 void FDefaultSourceControlProvider::Init(bool bForceConnection)
 {
-	FMessageLog("SourceControl").Info(LOCTEXT("SourceControlDisabled", "Source control is disabled"));
+	FMessageLog("SourceControl").Info(LOCTEXT("SourceControlDisabled", "Revision control is disabled"));
 }
 
 void FDefaultSourceControlProvider::Close()
@@ -21,7 +21,16 @@ void FDefaultSourceControlProvider::Close()
 
 FText FDefaultSourceControlProvider::GetStatusText() const
 {
-	return LOCTEXT("SourceControlDisabled", "Source control is disabled");
+	return LOCTEXT("SourceControlDisabled", "Revision control is disabled");
+}
+
+
+TMap<ISourceControlProvider::EStatus, FString> FDefaultSourceControlProvider::GetStatus() const
+{
+	TMap<EStatus, FString> Result;
+	Result.Add(EStatus::Enabled, IsEnabled() ? TEXT("Yes") : TEXT("No") );
+	Result.Add(EStatus::Connected, (IsEnabled() && IsAvailable()) ? TEXT("Yes") : TEXT("No") );
+	return Result;
 }
 
 bool FDefaultSourceControlProvider::IsAvailable() const
@@ -45,6 +54,11 @@ ECommandResult::Type FDefaultSourceControlProvider::GetState( const TArray<FStri
 	return ECommandResult::Failed;
 }
 
+ECommandResult::Type FDefaultSourceControlProvider::GetState(const TArray<FSourceControlChangelistRef>& InChangelists, TArray<FSourceControlChangelistStateRef>& OutState, EStateCacheUsage::Type InStateCacheUsage)
+{
+	return ECommandResult::Failed;
+}
+
 TArray<FSourceControlStateRef> FDefaultSourceControlProvider::GetCachedStateByPredicate(TFunctionRef<bool(const FSourceControlStateRef&)> Predicate) const
 {
 	return TArray<FSourceControlStateRef>();
@@ -60,23 +74,28 @@ void FDefaultSourceControlProvider::UnregisterSourceControlStateChanged_Handle( 
 
 }
 
-ECommandResult::Type FDefaultSourceControlProvider::Execute( const TSharedRef<ISourceControlOperation, ESPMode::ThreadSafe>& InOperation, const TArray<FString>& InFiles, EConcurrency::Type InConcurrency, const FSourceControlOperationComplete& InOperationCompleteDelegate )
+ECommandResult::Type FDefaultSourceControlProvider::Execute( const FSourceControlOperationRef& InOperation, FSourceControlChangelistPtr InChangelist, const TArray<FString>& InFiles, EConcurrency::Type InConcurrency, const FSourceControlOperationComplete& InOperationCompleteDelegate )
 {
 	return ECommandResult::Failed;
 }
 
-bool FDefaultSourceControlProvider::CanCancelOperation( const TSharedRef<ISourceControlOperation, ESPMode::ThreadSafe>& InOperation ) const
+bool FDefaultSourceControlProvider::CanExecuteOperation( const FSourceControlOperationRef& InOperation ) const
 {
 	return false;
 }
 
-void FDefaultSourceControlProvider::CancelOperation( const TSharedRef<ISourceControlOperation, ESPMode::ThreadSafe>& InOperation )
+bool FDefaultSourceControlProvider::CanCancelOperation( const FSourceControlOperationRef& InOperation ) const
+{
+	return false;
+}
+
+void FDefaultSourceControlProvider::CancelOperation( const FSourceControlOperationRef& InOperation )
 {
 }
 
 bool FDefaultSourceControlProvider::UsesLocalReadOnlyState() const
 {
-	return false;
+	return true;
 }
 
 bool FDefaultSourceControlProvider::UsesChangelists() const
@@ -84,9 +103,39 @@ bool FDefaultSourceControlProvider::UsesChangelists() const
 	return false;
 }
 
+bool FDefaultSourceControlProvider::UsesUncontrolledChangelists() const
+{
+	return true;
+}
+
 bool FDefaultSourceControlProvider::UsesCheckout() const
 {
 	return false;
+}
+
+bool FDefaultSourceControlProvider::UsesFileRevisions() const
+{
+	return true;
+}
+
+bool FDefaultSourceControlProvider::UsesSnapshots() const
+{
+	return false;
+}
+
+bool FDefaultSourceControlProvider::AllowsDiffAgainstDepot() const
+{
+	return true;
+}
+
+TOptional<bool> FDefaultSourceControlProvider::IsAtLatestRevision() const
+{
+	return TOptional<bool>();
+}
+
+TOptional<int> FDefaultSourceControlProvider::GetNumLocalChanges() const
+{
+	return TOptional<int>();
 }
 
 void FDefaultSourceControlProvider::Tick()
@@ -97,6 +146,11 @@ void FDefaultSourceControlProvider::Tick()
 TArray< TSharedRef<ISourceControlLabel> > FDefaultSourceControlProvider::GetLabels( const FString& InMatchingSpec ) const
 {
 	return TArray< TSharedRef<ISourceControlLabel> >();
+}
+
+TArray<FSourceControlChangelistRef> FDefaultSourceControlProvider::GetChangelists( EStateCacheUsage::Type InStateCacheUsage )
+{
+	return TArray<FSourceControlChangelistRef>();
 }
 
 #if SOURCE_CONTROL_WITH_SLATE

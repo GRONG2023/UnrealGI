@@ -6,13 +6,11 @@ public class SlateRHIRenderer : ModuleRules
 {
     public SlateRHIRenderer(ReadOnlyTargetRules Target) : base(Target)
 	{
-        PrivateIncludePaths.Add("Runtime/SlateRHIRenderer/Private");
-
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
 				"CoreUObject",
-                "InputCore",
+				"DeveloperSettings",
 				"Slate",
 				"SlateCore",
                 "Engine",

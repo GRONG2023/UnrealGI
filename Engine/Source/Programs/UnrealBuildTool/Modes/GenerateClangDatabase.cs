@@ -1,11 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using UnrealBuildBase;
 
 namespace UnrealBuildTool
 {
@@ -22,11 +24,19 @@ namespace UnrealBuildTool
 		List<string> FilterRules = new List<string>();
 
 		/// <summary>
+		/// Execute any actions which result in code generation (eg. ISPC compilation)
+		/// </summary>
+		[CommandLine("-ExecCodeGenActions")]
+		[CommandLine("-NoExecCodeGenActions", Value = "false")]
+		public bool bExecCodeGenActions = true;
+
+		/// <summary>
 		/// Execute the command
 		/// </summary>
 		/// <param name="Arguments">Command line arguments</param>
 		/// <returns>Exit code</returns>
-		public override int Execute(CommandLineArguments Arguments)
+		/// <param name="Logger"></param>
+		public override async Task<int> ExecuteAsync(CommandLineArguments Arguments, ILogger Logger)
 		{
 			Arguments.ApplyTo(this);
 
@@ -36,121 +46,133 @@ namespace UnrealBuildTool
 			Arguments.ApplyTo(BuildConfiguration);
 
 			// Parse the filter argument
-			FileFilter FileFilter = null;
-			if(FilterRules.Count > 0)
+			FileFilter? FileFilter = null;
+			if (FilterRules.Count > 0)
 			{
 				FileFilter = new FileFilter(FileFilterType.Exclude);
-				foreach(string FilterRule in FilterRules)
+				foreach (string FilterRule in FilterRules)
 				{
 					FileFilter.AddRules(FilterRule.Split(';'));
 				}
 			}
 
+			// Force C++ modules to always include their generated code directories
+			UEBuildModuleCPP.bForceAddGeneratedCodeIncludePath = true;
+
 			// Parse all the target descriptors
-			List<TargetDescriptor> TargetDescriptors = TargetDescriptor.ParseCommandLine(Arguments, BuildConfiguration.bUsePrecompiled, BuildConfiguration.bSkipRulesCompile);
+			List<TargetDescriptor> TargetDescriptors = TargetDescriptor.ParseCommandLine(Arguments, BuildConfiguration, Logger);
 
 			// Generate the compile DB for each target
 			using (ISourceFileWorkingSet WorkingSet = new EmptySourceFileWorkingSet())
 			{
 				// Find the compile commands for each file in the target
-				Dictionary<FileReference, string> FileToCommand = new Dictionary<FileReference, string>();
+				Dictionary<Tuple<string, string>, string> FileToCommand = new();
 				foreach (TargetDescriptor TargetDescriptor in TargetDescriptors)
 				{
 					// Disable PCHs and unity builds for the target
-					TargetDescriptor.AdditionalArguments = TargetDescriptor.AdditionalArguments.Append(new string[] { "-NoPCH", "-DisableUnity" });
+					TargetDescriptor.bUseUnityBuild = false;
+					TargetDescriptor.IntermediateEnvironment = UnrealIntermediateEnvironment.GenerateClangDatabase;
+					TargetDescriptor.AdditionalArguments = TargetDescriptor.AdditionalArguments.Append(new string[] { "-NoPCH" });
+					// Default the compiler to clang
+					if (!TargetDescriptor.AdditionalArguments.Any(x => x.StartsWith("-Compiler=", StringComparison.OrdinalIgnoreCase)))
+					{
+						TargetDescriptor.AdditionalArguments = TargetDescriptor.AdditionalArguments.Append(new string[] { "-Compiler=Clang" });
+					}
 
 					// Create a makefile for the target
-					UEBuildTarget Target = UEBuildTarget.Create(TargetDescriptor, BuildConfiguration.bSkipRulesCompile, BuildConfiguration.bUsePrecompiled);
+					Logger.LogInformation("Creating target...");
+					UEBuildTarget Target = UEBuildTarget.Create(TargetDescriptor, BuildConfiguration, Logger);
+					UEToolChain TargetToolChain = Target.CreateToolchain(Target.Platform, Logger);
 
-					// Find the location of the compiler
-					VCEnvironment Environment = VCEnvironment.Create(WindowsCompiler.Clang, Target.Platform, Target.Rules.WindowsPlatform.Architecture, null, Target.Rules.WindowsPlatform.WindowsSdkVersion, null);
-					FileReference ClangPath = FileReference.Combine(Environment.CompilerDir, "bin", "clang++.exe");
+					// Create the makefile
+					TargetMakefile Makefile = await Target.BuildAsync(BuildConfiguration, WorkingSet, TargetDescriptor, Logger);
+					List<LinkedAction> Actions = Makefile.Actions.ConvertAll(x => new LinkedAction(x, TargetDescriptor));
+					ActionGraph.Link(Actions, Logger);
 
-					// Convince each module to output its generated code include path
-					foreach (UEBuildBinary Binary in Target.Binaries)
+					if (bExecCodeGenActions)
 					{
-						foreach (UEBuildModuleCPP Module in Binary.Modules.OfType<UEBuildModuleCPP>())
+						// Filter all the actions to execute
+						HashSet<FileItem> PrerequisiteItems = new HashSet<FileItem>(Makefile.Actions.SelectMany(x => x.ProducedItems).Where(x => x.HasExtension(".h") || x.HasExtension(".cpp") || x.HasExtension(".cc") || x.HasExtension(".c")));
+						List<LinkedAction> PrerequisiteActions = ActionGraph.GatherPrerequisiteActions(Actions, PrerequisiteItems);
+
+						Utils.ExecuteCustomBuildSteps(Makefile.PreBuildScripts, Logger);
+
+						// Execute code generation actions
+						if (PrerequisiteActions.Any())
 						{
-							Module.bAddGeneratedCodeIncludePath = true;
+							Logger.LogInformation("Executing actions that produce source files...");
+							await ActionGraph.ExecuteActionsAsync(BuildConfiguration, PrerequisiteActions, new List<TargetDescriptor> { TargetDescriptor }, Logger);
 						}
 					}
 
-					// Create all the binaries and modules
-					CppCompileEnvironment GlobalCompileEnvironment = Target.CreateCompileEnvironmentForProjectFiles();
-					foreach (UEBuildBinary Binary in Target.Binaries)
+					Logger.LogInformation("Filtering compile actions...");
+
+					IEnumerable<IExternalAction> CompileActions = Actions
+						.Where(x => x.ActionType == ActionType.Compile)
+						.Where(x => x.PrerequisiteItems.Any());
+
+					if (CompileActions.Any())
 					{
-						CppCompileEnvironment BinaryCompileEnvironment = Binary.CreateBinaryCompileEnvironment(GlobalCompileEnvironment);
-						foreach (UEBuildModuleCPP Module in Binary.Modules.OfType<UEBuildModuleCPP>())
+						foreach (IExternalAction Action in CompileActions)
 						{
-							if(!Module.Rules.bUsePrecompiled)
+							FileItem? SourceFile = Action.PrerequisiteItems.FirstOrDefault(x => x.HasExtension(".cpp") || x.HasExtension(".cc") || x.HasExtension(".c")) ?? Action.PrerequisiteItems.FirstOrDefault(x => x.HasExtension(".h"));
+							FileItem? OutputFile = Action.ProducedItems.FirstOrDefault(x => x.HasExtension(".obj") | x.HasExtension(".o"));
+							if (SourceFile == null || OutputFile == null)
 							{
-								UEBuildModuleCPP.InputFileCollection InputFileCollection = Module.FindInputFiles(Target.Platform, new Dictionary<DirectoryItem, FileItem[]>());
-
-								List<FileItem> InputFiles = new List<FileItem>();
-								InputFiles.AddRange(InputFileCollection.CPPFiles);
-								InputFiles.AddRange(InputFileCollection.CCFiles);
-
-								CppCompileEnvironment ModuleCompileEnvironment = Module.CreateModuleCompileEnvironment(Target.Rules, BinaryCompileEnvironment);
-
-								StringBuilder CommandBuilder = new StringBuilder();
-								CommandBuilder.AppendFormat("\"{0}\"", ClangPath.FullName);
-
-								if (ModuleCompileEnvironment.CppStandard >= CppStandardVersion.Cpp17)
-								{
-									CommandBuilder.AppendFormat(" -std=c++17");
-								}
-								else if (ModuleCompileEnvironment.CppStandard >= CppStandardVersion.Cpp14)
-								{
-									CommandBuilder.AppendFormat(" -std=c++14");
-								}
-
-								foreach (FileItem ForceIncludeFile in ModuleCompileEnvironment.ForceIncludeFiles)
-								{
-									CommandBuilder.AppendFormat(" -include \"{0}\"", ForceIncludeFile.FullName);
-								}
-								foreach (string Definition in ModuleCompileEnvironment.Definitions)
-								{
-									CommandBuilder.AppendFormat(" -D\"{0}\"", Definition);
-								}
-								foreach (DirectoryReference IncludePath in ModuleCompileEnvironment.UserIncludePaths)
-								{
-									CommandBuilder.AppendFormat(" -I\"{0}\"", IncludePath);
-								}
-								foreach (DirectoryReference IncludePath in ModuleCompileEnvironment.SystemIncludePaths)
-								{
-									CommandBuilder.AppendFormat(" -I\"{0}\"", IncludePath);
-								}
-
-								foreach (FileItem InputFile in InputFiles)
-								{
-									if(FileFilter == null || FileFilter.Matches(InputFile.Location.MakeRelativeTo(UnrealBuildTool.RootDirectory)))
-									{
-										FileToCommand[InputFile.Location] = String.Format("{0} \"{1}\"", CommandBuilder, InputFile.FullName);
-									}
-								}
+								continue;
 							}
+							// Create the command
+							StringBuilder CommandBuilder = new StringBuilder();
+							string CommandPath = Action.CommandPath.FullName.Contains(' ') ? Utils.MakePathSafeToUseWithCommandLine(Action.CommandPath) : Action.CommandPath.FullName;
+							CommandBuilder.AppendFormat("{0} {1}", CommandPath, Action.CommandArguments);
+
+							foreach (string ExtraArgument in GetExtraPlatformArguments(TargetToolChain))
+							{
+								CommandBuilder.AppendFormat(" {0}", ExtraArgument);
+							}
+
+							FileToCommand[Tuple.Create(SourceFile.FullName, OutputFile.FullName)] = CommandBuilder.ToString();
 						}
 					}
 				}
 
+				Logger.LogInformation("Writing database...");
+
 				// Write the compile database
-				FileReference DatabaseFile = FileReference.Combine(UnrealBuildTool.RootDirectory, "compile_commands.json");
+				DirectoryReference DatabaseDirectory = Arguments.GetDirectoryReferenceOrDefault("-OutputDir=", Unreal.RootDirectory);
+				FileReference DatabaseFile = FileReference.Combine(DatabaseDirectory, "compile_commands.json");
 				using (JsonWriter Writer = new JsonWriter(DatabaseFile))
 				{
 					Writer.WriteArrayStart();
-					foreach(KeyValuePair<FileReference, string> FileCommandPair in FileToCommand.OrderBy(x => x.Key.FullName))
+					foreach (KeyValuePair<Tuple<string, string>, string> FileCommandPair in FileToCommand.OrderBy(x => x.Key.Item1))
 					{
 						Writer.WriteObjectStart();
-						Writer.WriteValue("file", FileCommandPair.Key.FullName);
-						Writer.WriteValue("command", FileCommandPair.Value);
-						Writer.WriteValue("directory", UnrealBuildTool.EngineSourceDirectory.ToString());
+						Writer.WriteValue("file", FileCommandPair.Key.Item1.Replace('\\', '/'));
+						Writer.WriteValue("command", FileCommandPair.Value.Replace('\\', '/'));
+						Writer.WriteValue("directory", Unreal.EngineSourceDirectory.FullName.Replace('\\', '/'));
+						Writer.WriteValue("output", FileCommandPair.Key.Item2.Replace('\\', '/'));
 						Writer.WriteObjectEnd();
 					}
 					Writer.WriteArrayEnd();
 				}
+				Logger.LogInformation($"ClangDatabase written to {DatabaseFile.FullName}");
+
 			}
 
 			return 0;
+		}
+
+		private IEnumerable<string> GetExtraPlatformArguments(UEToolChain TargetToolChain)
+		{
+			IList<string> ExtraPlatformArguments = new List<string>();
+
+			ClangToolChain? ClangToolChain = TargetToolChain as ClangToolChain;
+			if (ClangToolChain != null)
+			{
+				ClangToolChain.AddExtraToolArguments(ExtraPlatformArguments);
+			}
+
+			return ExtraPlatformArguments;
 		}
 	}
 }

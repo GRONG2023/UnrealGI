@@ -7,20 +7,29 @@
 #include "WidgetProxy.h"
 #include "FastUpdate/SlateInvalidationRootHandle.h"
 #include "FastUpdate/SlateInvalidationWidgetIndex.h"
+#include "FastUpdate/SlateInvalidationWidgetSortOrder.h"
 #include "Rendering/DrawElements.h"
 
 struct FSlateCachedElementData;
-class FSlateInvalidationWidgetHeap;
 class FSlateInvalidationWidgetList;
+class FSlateInvalidationWidgetPreHeap;
+class FSlateInvalidationWidgetPrepassHeap;
+class FSlateInvalidationWidgetPostHeap;
 class FSlateWindowElementList;
 class FWidgetStyle;
+
+namespace UE::Slate::Private
+{
+	struct FSlateInvalidationPaintFastPathContext;
+}
 
 #define UE_SLATE_DEBUGGING_CLEAR_ALL_FAST_PATH_DATA 0
 
 struct FSlateInvalidationContext
 {
 	FSlateInvalidationContext(FSlateWindowElementList& InWindowElementList, const FWidgetStyle& InWidgetStyle)
-		: PaintArgs(nullptr)
+		: ViewOffset(0.0f, 0.0f)
+		, PaintArgs(nullptr)
 		, WidgetStyle(InWidgetStyle)
 		, WindowElementList(&InWindowElementList)
 		, LayoutScaleMultiplier(1.0f)
@@ -31,6 +40,7 @@ struct FSlateInvalidationContext
 	} 
 
 	FSlateRect CullingRect;
+	UE::Slate::FDeprecateVector2DResult ViewOffset;
 	const FPaintArgs* PaintArgs;
 	const FWidgetStyle& WidgetStyle;
 	FSlateWindowElementList* WindowElementList;
@@ -50,10 +60,13 @@ enum class ESlateInvalidationPaintType
 struct FSlateInvalidationResult
 {
 	FSlateInvalidationResult()
-		: MaxLayerIdPainted(0)
+		: ViewOffset(0.0f, 0.0f)
+		, MaxLayerIdPainted(0)
 		, bRepaintedWidgets(false)
 	{}
 
+	/** The view offset to use with the draw buffer */
+	UE::Slate::FDeprecateVector2DResult ViewOffset;
 	/** The max layer id painted or cached */
 	int32 MaxLayerIdPainted;
 	/** If we had to repaint any widget */
@@ -99,8 +112,6 @@ public:
 	const FSlateCachedElementData& GetCachedElements() const { return *CachedElementData; }
 	/** @return the invalidation root as a widget. */
 	const SWidget* GetInvalidationRootWidget() const { return InvalidationRootWidget; }
-	/** @return the the generation number the widget proxy handle should have to be valid. */
-	int32 GetFastPathGenerationNumber() const { return FastPathGenerationNumber; }
 	/** @return the Handle of the InvalidationRoot. */
 	FSlateInvalidationRootHandle GetInvalidationRootHandle() const { return InvalidationRootHandle; }
 	/** @return the list of widgets that are controlled by the InvalidationRoot. */
@@ -115,12 +126,21 @@ public:
 
 	SLATECORE_API void Advanced_ResetInvalidation(bool bClearResourcesImmediately);
 
-	SLATECORE_API static void ClearAllWidgetUpdatesPending();
-
 #if WITH_SLATE_DEBUGGING
 	/** @return the last paint type the invalidation root handle used. */
 	ESlateInvalidationPaintType GetLastPaintType() const { return LastPaintType; }
 	void SetLastPaintType(ESlateInvalidationPaintType Value) { LastPaintType = Value; }
+
+	struct FPerformanceStat
+	{
+		double WidgetsPreUpdate = 0.0;
+		double WidgetsAttribute = 0.0;
+		double WidgetsPrepass = 0.0;
+		double WidgetsUpdate = 0.0;
+		/** Include the other stats + maintenance */
+		double InvalidationProcessing = 0.0;
+	};
+	FPerformanceStat GetPerformanceStat() const { return PerformanceStat; }
 #endif
 
 protected:
@@ -138,28 +158,56 @@ protected:
 
 	virtual void OnRootInvalidated() { }
 
+	SLATECORE_API void SetNeedsSlowPath(bool InNeedsSlowPath);
+
 private:
 	FSlateInvalidationWidgetList& GetFastPathWidgetList() { return *FastWidgetPathList; }
 	void HandleInvalidateAllWidgets(bool bClearResourcesImmediately);
 
 	bool PaintFastPath(const FSlateInvalidationContext& Context);
+	bool PaintFastPath_UpdateNextWidget(const FSlateInvalidationContext& Context, UE::Slate::Private::FSlateInvalidationPaintFastPathContext& FastPathContext);
+	void PaintFastPath_FixupLayerId(UE::Slate::Private::FSlateInvalidationPaintFastPathContext& FastPathContext, const FWidgetProxy& InvalidationWidget, const int32 NewOutgoingLayerId);
+	void PaintFastPath_FixupParentLayerId(UE::Slate::Private::FSlateInvalidationPaintFastPathContext& FastPathContext, const FWidgetProxy& InvalidationWidget, const int32 NewOutgoingLayerId);
+	void PaintFastPath_AddUniqueSortedToFinalUpdateList(const FSlateInvalidationWidgetIndex InvalidationWidgetIndex);
 
-	/** Call to notify that the ordering of children below this Widget has changed and the fast path is no longer valid. */
-	void InvalidateWidgetChildOrder(TSharedRef<SWidget> Widget);
-	void ProcessChildOrderUpdate();
-	void BuildFastPathWidgetList(TSharedRef<SWidget> RootWidget);
+	/** Call when an invalidation occurred. */
+	void InvalidateWidget(FWidgetProxy& Proxy, EInvalidateWidgetReason InvalidateReason);
 
-	void AdjustWidgetsDesktopGeometry(FVector2D WindowToDesktopTransform);
+	void BuildFastPathWidgetList(const TSharedRef<SWidget>& RootWidget);
+	void AdjustWidgetsDesktopGeometry(UE::Slate::FDeprecateVector2DParameter WindowToDesktopTransform);
+
+	/** Update child order and slate attribute registration */
+	void ProcessPreUpdate();
+	/** Slate attribute update */
+	void ProcessAttributeUpdate();
+	/** Call Slate Prepass. */
+	void ProcessPrepassUpdate();
+	/** Update paint, tick, timers */
+	bool ProcessPostUpdate();
 
 private:
 	/** List of all the Widget included by this SlateInvalidationRoot. */
-	FSlateInvalidationWidgetList* FastWidgetPathList;
-	/** Index to widgets which are dirty, volatile, or need some sort of per frame update (such as a tick or timer) */
-	FSlateInvalidationWidgetHeap* WidgetsNeedingUpdate;
-	/** Index to widgets that will be updated. */
-	TArray<FSlateInvalidationWidgetIndex> FinalUpdateList;
-	/** Widget that has ChildOrder invalidation. */
-	TArray<TWeakPtr<SWidget>> WidgetsNeedingChildOrderUpdate;
+	TUniquePtr<FSlateInvalidationWidgetList> FastWidgetPathList;
+
+	/** Index of widgets that have the child order invalidated. They affect the widgets index/order. */
+	TUniquePtr<FSlateInvalidationWidgetPreHeap> WidgetsNeedingPreUpdate;
+
+	/**
+	 * Index of widgets that have the Prepass invalidated.
+	 * They will be updated before the the other layout invalidations to reduce the number of SlatePrepass call.
+	 */
+	TUniquePtr<FSlateInvalidationWidgetPrepassHeap> WidgetsNeedingPrepassUpdate;
+
+	/**
+	 * Index of widgets that have invalidation (volatile, or need some sort of per frame update such as a tick or timer).
+	 * They will be added to the FinalUpdateList to be updated.
+	 */
+	TUniquePtr<FSlateInvalidationWidgetPostHeap> WidgetsNeedingPostUpdate;
+
+	/** Widgets that will be updated. */
+	TArray<FSlateInvalidationWidgetHeapElement> FinalUpdateList;
+
+	FVector2f CachedViewOffset;
 
 	FSlateCachedElementData* CachedElementData;
 
@@ -167,30 +215,24 @@ private:
 
 	FHittestGrid* RootHittestGrid;
 
-	/**
-	 * The purpose of this number is as a unique Id for all widget proxy handles to validate themselves.
-	 * As widgets are added and removed, all their children are indirectly added or remove so it is necessary to invalidate all their handles.
-	 * Bumping the generation number is an efficient way to do this compared to iterating all the handles
-	 * The generation number is always incrementing
-	 */
-	int32 FastPathGenerationNumber;
-
 	int32 CachedMaxLayerId;
 
 	FSlateInvalidationRootHandle InvalidationRootHandle;
 
-	bool bChildOrderInvalidated;
 	bool bNeedsSlowPath;
 	bool bNeedScreenPositionShift;
-	bool bProcessingChildOrderUpdate;
+	bool bProcessingPreUpdate;
+	bool bProcessingAttributeUpdate;
+	bool bProcessingPrepassUpdate;
+	bool bProcessingPostUpdate;
+	bool bBuildingWidgetList;
+	bool bProcessingChildOrderInvalidation;
 
 #if WITH_SLATE_DEBUGGING
 	ESlateInvalidationPaintType LastPaintType;
-	uint32 ProcessInvalidationFrameNumber;
+	FPerformanceStat PerformanceStat;
 #endif
 #if UE_SLATE_DEBUGGING_CLEAR_ALL_FAST_PATH_DATA
 	TArray<const SWidget*> FastWidgetPathToClearedBecauseOfDelay;
 #endif
-
-	static TArray<FSlateInvalidationRoot*> ClearUpdateList;
 };

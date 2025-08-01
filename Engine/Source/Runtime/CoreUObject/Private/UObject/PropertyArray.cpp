@@ -1,21 +1,26 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "Templates/Casts.h"
-#include "UObject/PropertyTag.h"
 #include "UObject/UnrealType.h"
-#include "UObject/UnrealTypePrivate.h"
-#include "UObject/LinkerLoad.h"
-#include "UObject/PropertyHelper.h"
 
-// WARNING: This should always be the last include in any file that needs it (except .generated.h)
-#include "UObject/UndefineUPropertyMacros.h"
+#include "Misc/ScopeExit.h"
+#include "UObject/LinkerLoad.h"
+#include "UObject/OverriddenPropertySet.h"
+#include "UObject/PropertyHelper.h"
+#include "UObject/UnrealTypePrivate.h"
+#include "UObject/UObjectThreadContext.h"
 
 /*-----------------------------------------------------------------------------
 	FArrayProperty.
 -----------------------------------------------------------------------------*/
 IMPLEMENT_FIELD(FArrayProperty)
+
+FArrayProperty::FArrayProperty(FFieldVariant InOwner, const UECodeGen_Private::FArrayPropertyParams& Prop)
+	: Super(InOwner, (const UECodeGen_Private::FPropertyParamsBaseWithOffset&)Prop)
+	, Inner(nullptr)
+{
+	ArrayFlags = Prop.ArrayFlags;
+	SetElementSize();
+}
 
 #if WITH_EDITORONLY_DATA
 FArrayProperty::FArrayProperty(UField* InField)
@@ -57,7 +62,7 @@ void FArrayProperty::PostDuplicate(const FField& InField)
 void FArrayProperty::LinkInternal(FArchive& Ar)
 {
 	//FLinkerLoad* MyLinker = GetLinker();
-	//if( MyLinker )
+	//if (MyLinker)
 	//{
 	//	MyLinker->Preload(this);
 	//}
@@ -66,27 +71,27 @@ void FArrayProperty::LinkInternal(FArchive& Ar)
 
 	SetElementSize();
 }
-bool FArrayProperty::Identical( const void* A, const void* B, uint32 PortFlags ) const
+bool FArrayProperty::Identical(const void* A, const void* B, uint32 PortFlags) const
 {
 	checkSlow(Inner);
 
 	FScriptArrayHelper ArrayHelperA(this, A);
 
 	const int32 ArrayNum = ArrayHelperA.Num();
-	if ( B == NULL )
+	if (B == nullptr)
 	{
 		return ArrayNum == 0;
 	}
 
 	FScriptArrayHelper ArrayHelperB(this, B);
-	if ( ArrayNum != ArrayHelperB.Num() )
+	if (ArrayNum != ArrayHelperB.Num())
 	{
 		return false;
 	}
 
-	for ( int32 ArrayIndex = 0; ArrayIndex < ArrayNum; ArrayIndex++ )
+	for (int32 ArrayIndex = 0; ArrayIndex < ArrayNum; ArrayIndex++)
 	{
-		if ( !Inner->Identical( ArrayHelperA.GetRawPtr(ArrayIndex), ArrayHelperB.GetRawPtr(ArrayIndex), PortFlags) )
+		if (!Inner->Identical(ArrayHelperA.GetRawPtr(ArrayIndex), ArrayHelperB.GetRawPtr(ArrayIndex), PortFlags))
 		{
 			return false;
 		}
@@ -115,14 +120,15 @@ void FArrayProperty::SerializeItem(FStructuredArchive::FSlot Slot, void* Value, 
 	check(Inner);
 	FArchive& UnderlyingArchive = Slot.GetUnderlyingArchive();
 	const bool bIsTextFormat = UnderlyingArchive.IsTextFormat();
-	const bool bUPS = Slot.GetArchiveState().UseUnversionedPropertySerialization();
+	const bool bUPS = UnderlyingArchive.UseUnversionedPropertySerialization();
+	bool bExperimentalOverridableLogic = HasAnyPropertyFlags(CPF_ExperimentalOverridableLogic);
 	TOptional<FPropertyTag> MaybeInnerTag;
 
 	// Ensure that the Inner itself has been loaded before calling SerializeItem() on it
 	//UnderlyingArchive.Preload(Inner);
 
 	FScriptArrayHelper ArrayHelper(this, Value);
-	int32		n		= ArrayHelper.Num();
+	int32 ElementCount = ArrayHelper.Num();
 
 	// Custom branch for UPS to try and take advantage of bulk serialization
 	if (bUPS)
@@ -136,26 +142,26 @@ void FArrayProperty::SerializeItem(FStructuredArchive::FSlot Slot, void* Value, 
 			// but which maps down to straight writes to the underlying archive.
 			FStructuredArchiveStream Stream = Slot.EnterStream();
 
-			Stream.EnterElement() << n;
+			Stream.EnterElement() << ElementCount;
 
 			if (UnderlyingArchive.IsLoading())
 			{
-				ArrayHelper.EmptyAndAddUninitializedValues(n);
+				ArrayHelper.EmptyAndAddUninitializedValues(ElementCount);
 			}
 
-			Stream.EnterElement().Serialize(ArrayHelper.GetRawPtr(), n * Inner->ElementSize);
+			Stream.EnterElement().Serialize(ArrayHelper.GetRawPtr(), ElementCount * Inner->ElementSize);
 		}
 		else
 		{
-			FStructuredArchiveArray Array = Slot.EnterArray(n);
+			FStructuredArchiveArray Array = Slot.EnterArray(ElementCount);
 
 			if (UnderlyingArchive.IsLoading())
 			{
-				ArrayHelper.EmptyAndAddValues(n);
+				ArrayHelper.EmptyAndAddValues(ElementCount);
 			}
 
 			FSerializedPropertyScope SerializedProperty(UnderlyingArchive, Inner, this);
-			for (int32 i = 0; i < n; ++i)
+			for (int32 i = 0; i < ElementCount; ++i)
 			{
 #if WITH_EDITOR
 				static const FName NAME_UArraySerialize = FName(TEXT("FArrayProperty::Serialize"));
@@ -170,43 +176,395 @@ void FArrayProperty::SerializeItem(FStructuredArchive::FSlot Slot, void* Value, 
 		return;
 	}
 
-	if (bIsTextFormat && Inner->IsA<FStructProperty>())
+	if (bIsTextFormat && Inner->IsA<FStructProperty>() && UnderlyingArchive.UEVer() < EUnrealEngineObjectUE5Version::PROPERTY_TAG_COMPLETE_TYPE_NAME)
 	{
-		MaybeInnerTag.Emplace(UnderlyingArchive, Inner, 0, (uint8*)Value, (uint8*)Defaults);	
-		Slot << SA_ATTRIBUTE(TEXT("InnerStructName"), MaybeInnerTag.GetValue().StructName);
-		Slot << SA_OPTIONAL_ATTRIBUTE(TEXT("InnerStructGuid"), MaybeInnerTag.GetValue().StructGuid, FGuid());
+		MaybeInnerTag.Emplace(Inner, /*Index*/ 0, (uint8*)Value);
+
+		FName StructName;
+		FGuid StructGuid;
+		Slot << SA_ATTRIBUTE(TEXT("InnerStructName"), StructName);
+		Slot << SA_OPTIONAL_ATTRIBUTE(TEXT("InnerStructGuid"), StructGuid, FGuid());
+
+		UE::FPropertyTypeNameBuilder Builder;
+		Builder.AddName(NAME_StructProperty);
+		Builder.BeginParameters();
+		Builder.AddName(StructName);
+		if (StructGuid.IsValid())
+		{
+			Builder.AddGuid(StructGuid);
+		}
+		Builder.EndParameters();
+		MaybeInnerTag->SetType(Builder.Build());
 	}
 
-	FStructuredArchiveArray Array = Slot.EnterArray(n);
+	TOptional<FPropertyTag> SerializeFromMismatchedTag;
 
-	if( UnderlyingArchive.IsLoading() )
+	auto SerializeContainerItem = [this, &SerializeFromMismatchedTag](FStructuredArchiveSlot Slot, uint8* Item)
+	{
+		if (const FPropertyTag* Tag = SerializeFromMismatchedTag.GetPtrOrNull())
+		{
+			const int64 StartOfProperty = Slot.GetUnderlyingArchive().Tell();
+			FStructProperty* StructProperty = CastFieldChecked<FStructProperty>(Inner);
+			switch (StructProperty->ConvertFromType(*Tag, Slot, Item, nullptr, nullptr))
+			{
+				case EConvertFromTypeResult::Converted:
+				case EConvertFromTypeResult::Serialized:
+					return;
+				case EConvertFromTypeResult::CannotConvert:
+					// FStructProperty::ConvertFromType doesn't handle setting the default, so do it here.
+					StructProperty->Struct->InitializeDefaultValue(Item);
+					Slot.GetUnderlyingArchive().Seek(StartOfProperty + Tag->Size);	// Skip this item
+					return;
+				case EConvertFromTypeResult::UseSerializeItem:
+					// Fall through to default SerializeItem
+					break;
+			}
+		}
+
+		Inner->SerializeItem(Slot, Item);
+	};
+
+	// Make sure the container is reloading accordingly to the value set in the property tag if any
+	if (UnderlyingArchive.IsLoading() && FPropertyTagScope::GetCurrentPropertyTag())
+	{
+		bExperimentalOverridableLogic = FPropertyTagScope::GetCurrentPropertyTag()->bExperimentalOverridableLogic;
+	}
+
+	// *** Experimental *** Special serialization path for array with overridable serialization
+	if (bExperimentalOverridableLogic)
+	{
+		checkf(!UnderlyingArchive.ArUseCustomPropertyList, TEXT("Using custom property list is not supported by overridable serialization"));
+
+		FStructuredArchive::FRecord Record = Slot.EnterRecord();
+		if (UnderlyingArchive.IsLoading())
+		{
+			int32 NumReplaced = 0;
+			FStructuredArchive::FArray ReplacedArray = Record.EnterArray(TEXT("Replaced"), NumReplaced);
+			if (NumReplaced != INDEX_NONE)
+			{
+				ArrayHelper.EmptyAndAddValues(NumReplaced);
+				for (int32 i = 0; i < NumReplaced; i++)
+				{
+					SerializeContainerItem(ReplacedArray.EnterElement(), ArrayHelper.GetRawPtr(i));
+				}
+			}
+			else
+			{
+				// Only Array of Instanced subobject are handled here as sort of a set where the matching key is done using the archetype
+				const FObjectProperty* InnerObjectProperty = CastFieldChecked<FObjectProperty>(Inner);
+				checkf(InnerObjectProperty->HasAnyPropertyFlags(CPF_PersistentInstance), TEXT("Only supported code path here is the instanced subobjects"));
+
+				FOverriddenPropertySet* OverriddenProperties = FOverridableSerializationLogic::GetOverriddenProperties();
+
+				checkf(Defaults, TEXT("Expecting overridable serialization to have defaults to compare to"));
+
+				FScriptArrayHelper DefaultsArrayHelper(this, Defaults);
+
+				auto FindObject = [InnerObjectProperty](UObject* Object, UObject* Object2, FScriptArrayHelper& ArrayHelper) -> int32
+				{
+					if (Object)
+					{
+						const int32 ArrayNum = ArrayHelper.Num();
+						for (int i = 0; i < ArrayNum; ++i)
+						{
+							UObject* CurrentObject = InnerObjectProperty->GetObjectPropertyValue(ArrayHelper.GetElementPtr(i));
+							if (CurrentObject == Object || (Object2 && CurrentObject == Object2))
+							{
+								return i;
+							}
+						}
+					}
+					return INDEX_NONE;
+				};
+
+				uint8* TempValueStorage = nullptr;
+				ON_SCOPE_EXIT
+				{
+					if (TempValueStorage)
+					{
+						InnerObjectProperty->DestroyValue(TempValueStorage);
+						FMemory::Free(TempValueStorage);
+					}
+				};
+
+				int32 NumRemoved = 0;
+				FStructuredArchive::FArray RemovedArray = Record.EnterArray(TEXT("Removed"), NumRemoved);
+				if (NumRemoved != 0)
+				{
+					TArray<int32> IndicesToRemove;
+					TempValueStorage = (uint8*)FMemory::Malloc(InnerObjectProperty->ElementSize);
+					InnerObjectProperty->InitializeValue(TempValueStorage);
+
+					for (int32 i = 0; i < NumRemoved; ++i)
+					{
+						{
+							FSerializedPropertyScope SerializedProperty(UnderlyingArchive, Inner, this);
+							SerializeContainerItem(RemovedArray.EnterElement(), TempValueStorage);
+						}
+
+						if (UObject* RemovedSubObject = InnerObjectProperty->GetObjectPropertyValue(TempValueStorage))
+						{
+							int32 Index = FindObject(RemovedSubObject, nullptr, DefaultsArrayHelper);
+							if (Index != INDEX_NONE)
+							{
+								IndicesToRemove.Add(Index);
+							}
+
+							// Need to fetch the ArrayOverriddenPropertyNode every loop as the previous iteration might have reallocated the node.
+							if (FOverriddenPropertyNode* ArrayOverriddenPropertyNode = OverriddenProperties ? OverriddenProperties->SetOverriddenPropertyOperation(EOverriddenPropertyOperation::Modified, UnderlyingArchive.GetSerializedPropertyChain(), /*Property*/nullptr) : nullptr)
+							{
+								// Rebuild the overridden info
+								const FOverriddenPropertyNodeID RemovedSubObjectID(*RemovedSubObject);
+								OverriddenProperties->SetSubPropertyOperation(EOverriddenPropertyOperation::Remove, *ArrayOverriddenPropertyNode, RemovedSubObjectID);
+							}
+						}
+					}
+
+					IndicesToRemove.Sort(TGreater<>());
+					for (int32 IndexToRemove : IndicesToRemove)
+					{
+						ArrayHelper.RemoveValues(IndexToRemove);
+					}
+				}
+
+				int32 NumModified = 0;
+				FStructuredArchive::FArray ModifiedArray = Record.EnterArray(TEXT("Modified"), NumModified);
+				if (NumModified != 0)
+				{
+					if (!TempValueStorage)
+					{
+						TempValueStorage = (uint8*)FMemory::Malloc(InnerObjectProperty->ElementSize);
+						InnerObjectProperty->InitializeValue(TempValueStorage);
+					}
+
+					for (int32 i = 0; i < NumModified; ++i)
+					{
+						{
+							FSerializedPropertyScope SerializedProperty(UnderlyingArchive, Inner, this);
+							SerializeContainerItem(ModifiedArray.EnterElement(), TempValueStorage);
+						}
+
+						if (UObject* ModifiedObject = InnerObjectProperty->GetObjectPropertyValue(TempValueStorage))
+						{
+							int32 Index = FindObject(ModifiedObject->GetArchetype(), ModifiedObject, ArrayHelper);
+							if (Index != INDEX_NONE)
+							{
+								InnerObjectProperty->SetObjectPropertyValue(ArrayHelper.GetRawPtr(Index), ModifiedObject);
+							}
+						}
+					}
+				}
+
+				int32 NumAdded = 0;
+				FStructuredArchive::FArray AddedArray = Record.EnterArray(TEXT("Added"), NumAdded);
+				if (NumAdded != 0)
+				{
+					if (!TempValueStorage)
+					{
+						TempValueStorage = (uint8*)FMemory::Malloc(InnerObjectProperty->ElementSize);
+						InnerObjectProperty->InitializeValue(TempValueStorage);
+					}
+
+					int32 AddIndex = ArrayHelper.Num();
+					for (int32 i = 0; i < NumAdded; ++i)
+					{
+						{
+							FSerializedPropertyScope SerializedProperty(UnderlyingArchive, Inner, this);
+							SerializeContainerItem(AddedArray.EnterElement(), TempValueStorage);
+						}
+
+						if (UObject* AddedSubObject = InnerObjectProperty->GetObjectPropertyValue(TempValueStorage))
+						{
+							int32 Index = FindObject(AddedSubObject->GetArchetype(), AddedSubObject, ArrayHelper);
+							if (Index == INDEX_NONE)
+							{
+								ArrayHelper.AddValue();
+								Index = AddIndex++;
+							}
+							InnerObjectProperty->SetObjectPropertyValue(ArrayHelper.GetRawPtr(Index), AddedSubObject);
+
+							// Need to fetch the ArrayOverriddenPropertyNode every loop as the previous iteration might have reallocated the node.
+							if (FOverriddenPropertyNode* ArrayOverriddenPropertyNode = OverriddenProperties ? OverriddenProperties->SetOverriddenPropertyOperation(EOverriddenPropertyOperation::Modified, UnderlyingArchive.GetSerializedPropertyChain(), /*Property*/nullptr) : nullptr)
+							{
+								// Rebuild the overridden info
+								const FOverriddenPropertyNodeID AddedSubObjectID(*AddedSubObject);
+								OverriddenProperties->SetSubPropertyOperation(EOverriddenPropertyOperation::Add, *ArrayOverriddenPropertyNode, AddedSubObjectID);
+							}
+						}
+					}
+				}
+			}
+		}
+		else
+		{
+			// Container for temporarily tracking some indices
+			TArray<int32> RemovedIndices;
+			TArray<int32> ModifiedIndices;
+			TArray<int32> AddedIndices;
+
+			bool bReplaceArray = false;
+			if (!Defaults || !UnderlyingArchive.DoDelta() || UnderlyingArchive.IsTransacting())
+			{
+				bReplaceArray = true;
+			}
+			else
+			{
+				const FObjectProperty* InnerObjectProperty = CastField<FObjectProperty>(Inner);
+				EOverriddenPropertyOperation ArrayOverrideOp = EOverriddenPropertyOperation::None;
+				FOverriddenPropertySet* OverriddenProperties = FOverridableSerializationLogic::GetOverriddenProperties();
+				if (OverriddenProperties)
+				{
+					ArrayOverrideOp = OverriddenProperties->GetOverriddenPropertyOperation(UnderlyingArchive.GetSerializedPropertyChain(), /*Property*/nullptr);
+					bReplaceArray = ArrayOverrideOp == EOverriddenPropertyOperation::Replace;
+				}
+				else
+				{
+					bReplaceArray = !InnerObjectProperty || !InnerObjectProperty->HasAnyPropertyFlags(CPF_PersistentInstance);
+				}
+
+				if (!bReplaceArray)
+				{
+					// Only array of instanced subobjects are handled here as sort of a set where the matching key is done using the archetype
+					checkf(InnerObjectProperty&& InnerObjectProperty->HasAnyPropertyFlags(CPF_PersistentInstance), TEXT("Expecting only arrays of instanced subobjects"));
+
+					// We need to always serialize instanced subobjects to know if they have overridden values.
+					const int32 ArrayNum = ArrayHelper.Num();
+					for (int i = 0; i < ArrayNum; i++)
+					{
+						ModifiedIndices.Add(i);
+					}
+
+					if (OverriddenProperties && ArrayOverrideOp != EOverriddenPropertyOperation::None)
+					{
+
+						auto FindObject = [InnerObjectProperty](const FOverriddenPropertyNodeID ObjectToFind, FScriptArrayHelper& ArrayHelper) -> int32
+						{
+							const int32 ArrayNum = ArrayHelper.Num();
+							for (int i = 0; i < ArrayNum; ++i)
+							{
+								if (UObject* CurrentObject = InnerObjectProperty->GetObjectPropertyValue(ArrayHelper.GetElementPtr(i)))
+								{
+									if (ObjectToFind == FOverriddenPropertyNodeID(*CurrentObject))
+									{
+										return i;
+									}
+								}
+							}
+							return INDEX_NONE;
+						};
+
+						FScriptArrayHelper DefaultsArrayHelper(this, Defaults);
+
+						if (const FOverriddenPropertyNode* ArrayOverriddenPropertyNode = OverriddenProperties->GetOverriddenPropertyNode(UnderlyingArchive.GetSerializedPropertyChain()))
+						{
+							for (const auto& Pair : ArrayOverriddenPropertyNode->SubPropertyNodeKeys)
+							{
+								const EOverriddenPropertyOperation OverrideOp = OverriddenProperties->GetSubPropertyOperation(Pair.Value);
+								switch (OverrideOp)
+								{
+								case EOverriddenPropertyOperation::Remove:
+									{
+										const int32 DefaultIndex = FindObject(Pair.Key, DefaultsArrayHelper);
+										if (DefaultIndex != INDEX_NONE)
+										{
+											RemovedIndices.Add(DefaultIndex);
+										}
+										break;
+									}
+								case EOverriddenPropertyOperation::Add:
+									{
+										const int32 Index = FindObject(Pair.Key, ArrayHelper);
+										if (Index != INDEX_NONE)
+										{
+											AddedIndices.Add(Index);
+											ModifiedIndices.Remove(Index);
+										}
+										break;
+									}
+								default:
+									checkf(false, TEXT("Unsupported operation type"));
+									break;
+								}
+							}
+						}
+					}
+				}
+			}
+
+			int32 NumReplaced = bReplaceArray ? ArrayHelper.Num() : INDEX_NONE;
+			FStructuredArchive::FArray ReplacedArray = Record.EnterArray(TEXT("Replaced"), NumReplaced);
+			if (bReplaceArray)
+			{
+				const int32 ArrayNum = ArrayHelper.Num();
+				for (int32 i = 0; i < ArrayNum; ++i)
+				{
+					SerializeContainerItem(ReplacedArray.EnterElement(), ArrayHelper.GetRawPtr(i));
+				}
+			}
+			else
+			{
+				checkf(Defaults, TEXT("Expecting overridable serialization to have defaults to compare to"));
+				FScriptArrayHelper DefaultsArrayHelper(this, Defaults);
+
+				int32 NumRemoved = RemovedIndices.Num();
+				FStructuredArchive::FArray RemovedArray = Record.EnterArray(TEXT("Removed"), NumRemoved);
+				for (int32 i : RemovedIndices)
+				{
+					SerializeContainerItem(RemovedArray.EnterElement(), DefaultsArrayHelper.GetRawPtr(i));
+				}
+
+				int32 NumModified = ModifiedIndices.Num();
+				FStructuredArchive::FArray ModifiedArray = Record.EnterArray(TEXT("Modified"), NumModified);
+				for (int32 i : ModifiedIndices)
+				{
+					SerializeContainerItem(ModifiedArray.EnterElement(), ArrayHelper.GetRawPtr(i));
+				}
+
+				int32 NumAdded = AddedIndices.Num();
+				FStructuredArchive::FArray AddedArray = Record.EnterArray(TEXT("Added"), NumAdded);
+				for (int32 i : AddedIndices)
+				{
+					SerializeContainerItem(AddedArray.EnterElement(), ArrayHelper.GetRawPtr(i));
+				}
+			}
+		}
+		return;
+	}
+
+	FStructuredArchiveArray Array = Slot.EnterArray(ElementCount);
+
+	if (UnderlyingArchive.IsLoading())
 	{
 		// If using a custom property list, don't empty the array on load. Not all indices may have been serialized, so we need to preserve existing values at those slots.
 		if (UnderlyingArchive.ArUseCustomPropertyList)
 		{
 			const int32 OldNum = ArrayHelper.Num();
-			if (n > OldNum)
+			if (ElementCount > OldNum)
 			{
-				ArrayHelper.AddValues(n - OldNum);
+				ArrayHelper.AddValues(ElementCount - OldNum);
 			}
-			else if (n < OldNum)
+			else if (ElementCount < OldNum)
 			{
-				ArrayHelper.RemoveValues(n, OldNum - n);
+				ArrayHelper.RemoveValues(ElementCount, OldNum - ElementCount);
 			}
 		}
 		else
 		{
-			ArrayHelper.EmptyAndAddValues(n);
+			ArrayHelper.EmptyAndAddValues(ElementCount);
 		}
 	}
-	ArrayHelper.CountBytes( UnderlyingArchive );
+	ArrayHelper.CountBytes(UnderlyingArchive);
+
+	FUObjectSerializeContext* Context = FUObjectThreadContext::Get().GetSerializeContext();
 
 	// Serialize a PropertyTag for the inner property of this array, allows us to validate the inner struct to see if it has changed
-	if (UnderlyingArchive.UE4Ver() >= VER_UE4_INNER_ARRAY_TAG_INFO && Inner->IsA<FStructProperty>())
+	if (UnderlyingArchive.UEVer() < EUnrealEngineObjectUE5Version::PROPERTY_TAG_COMPLETE_TYPE_NAME &&
+		UnderlyingArchive.UEVer() >= VER_UE4_INNER_ARRAY_TAG_INFO &&
+		Inner->IsA<FStructProperty>())
 	{
 		if (!MaybeInnerTag)
 		{
-			MaybeInnerTag.Emplace(UnderlyingArchive, Inner, 0, (uint8*)Value, (uint8*)Defaults);
+			MaybeInnerTag.Emplace(Inner, 0, (uint8*)Value);
 			UnderlyingArchive << MaybeInnerTag.GetValue();
 		}
 
@@ -214,50 +572,73 @@ void FArrayProperty::SerializeItem(FStructuredArchive::FSlot Slot, void* Value, 
 
 		if (UnderlyingArchive.IsLoading())
 		{
-			auto CanSerializeFromStructWithDifferentName = [](const FPropertyTag& PropertyTag, const FStructProperty* StructProperty)
+			if (UE::FPropertyTypeName NewTypeName = ApplyRedirectsToPropertyType(InnerTag.GetType(), Inner); !NewTypeName.IsEmpty())
 			{
-				return PropertyTag.StructGuid.IsValid()
-					&& StructProperty 
-					&& StructProperty->Struct 
-					&& (PropertyTag.StructGuid == StructProperty->Struct->GetCustomGuid());
-			};
-
-			// Check if the Inner property can successfully serialize, the type may have changed
-			FStructProperty* StructProperty = CastFieldChecked<FStructProperty>(Inner);
-			// if check redirector to make sure if the name has changed
-			FName NewName = FLinkerLoad::FindNewNameForStruct(InnerTag.StructName);
-			FName StructName = StructProperty->Struct->GetFName();
-			if (NewName != NAME_None && NewName == StructName)
-			{
-				InnerTag.StructName = NewName;
+				InnerTag.SetType(NewTypeName);
 			}
 
-			if (InnerTag.StructName != StructProperty->Struct->GetFName()
-				&& !CanSerializeFromStructWithDifferentName(InnerTag, StructProperty))
+			// Check if the Inner property can successfully serialize, the type may have changed
+			if (!Inner->CanSerializeFromTypeName(InnerTag.GetType()))
 			{
-				UE_LOG(LogClass, Warning, TEXT("Property %s of %s has a struct type mismatch (tag %s != prop %s) in package:  %s. If that struct got renamed, add an entry to ActiveStructRedirects."),
-					*InnerTag.Name.ToString(), *GetName(), *InnerTag.StructName.ToString(), *CastFieldChecked<FStructProperty>(Inner)->Struct->GetName(), *UnderlyingArchive.GetArchiveName());
+				FStructProperty* StructProperty = CastFieldChecked<FStructProperty>(Inner);
+
+				// Attempt mismatched tag serialization if available
+				const FName StructName = InnerTag.GetType().GetParameterName(0);
+				if ((StructProperty->Struct->StructFlags & STRUCT_SerializeFromMismatchedTag) && (InnerTag.Type != NAME_StructProperty || StructName != StructProperty->Struct->GetFName()))
+				{
+					SerializeFromMismatchedTag = InnerTag;
+				}
+				else
+				{
+					UE::FPropertyTypeNameBuilder Builder;
+					StructProperty->SaveTypeName(Builder);
+					UE_LOG(LogClass, Warning, TEXT("Array Property %s has a struct type mismatch (tag %s != prop %s) in package: %s. If that struct got renamed, add an entry to ActiveStructRedirects."),
+						*WriteToString<32>(InnerTag.Name), *WriteToString<64>(InnerTag.GetType().GetParameter(0)), *WriteToString<64>(Builder.Build().GetParameter(0)), *UnderlyingArchive.GetArchiveName());
 
 #if WITH_EDITOR
-				// Ensure the structure is initialized
-				for (int32 i = 0; i < n; i++)
-				{
-					StructProperty->Struct->InitializeDefaultValue(ArrayHelper.GetRawPtr(i));
-				}
+					// Ensure the structure is initialized
+					for (int32 i = 0; i < ElementCount; i++)
+					{
+						StructProperty->Struct->InitializeDefaultValue(ArrayHelper.GetRawPtr(i));
+					}
 #endif // WITH_EDITOR
 
-				if (!bIsTextFormat)
-				{
-					// Skip the property
-					const int64 StartOfProperty = UnderlyingArchive.Tell();
-					const int64 RemainingSize = InnerTag.Size - (UnderlyingArchive.Tell() - StartOfProperty);
-					uint8 B;
-					for (int64 i = 0; i < RemainingSize; i++)
+					if (!bIsTextFormat)
 					{
-						UnderlyingArchive << B;
+						// Skip the property
+						const int64 StartOfProperty = UnderlyingArchive.Tell();
+						const int64 RemainingSize = InnerTag.Size - (UnderlyingArchive.Tell() - StartOfProperty);
+						uint8 B;
+						for (int64 i = 0; i < RemainingSize; i++)
+						{
+							UnderlyingArchive << B;
+						}
+					}
+					return;
+				}
+			}
+		}
+
+		if (Context && Context->bTrackSerializedPropertyPath)
+		{
+			// Update the path with types from the inner tag if the outer tag is incomplete.
+			if (const int32 SegmentIndex = Context->SerializedPropertyPath.GetSegmentCount() - 1; SegmentIndex >= 0)
+			{
+				UE::FPropertyPathNameSegment Segment = Context->SerializedPropertyPath.GetSegment(SegmentIndex);
+				if (Segment.Type.GetName() == NAME_ArrayProperty)
+				{
+					const UE::FPropertyTypeName InnerTypeName = Segment.Type.GetParameter(0);
+					if (InnerTypeName.GetName() == NAME_StructProperty && InnerTypeName.GetParameterCount() == 0)
+					{
+						UE::FPropertyTypeNameBuilder NewTypeBuilder;
+						NewTypeBuilder.AddName(NAME_ArrayProperty);
+						NewTypeBuilder.BeginParameters();
+						NewTypeBuilder.AddType(InnerTag.GetType());
+						NewTypeBuilder.EndParameters();
+						Segment.Type = NewTypeBuilder.Build();
+						Context->SerializedPropertyPath.SetSegment(SegmentIndex, Segment);
 					}
 				}
-				return;
 			}
 		}
 	}
@@ -277,7 +658,7 @@ void FArrayProperty::SerializeItem(FStructuredArchive::FSlot Slot, void* Value, 
 		const FCustomPropertyListNode* CustomPropertyList = UnderlyingArchive.ArCustomPropertyList;
 		const FCustomPropertyListNode* PropertyNode = CustomPropertyList;
 		FSerializedPropertyScope SerializedProperty(UnderlyingArchive, Inner, this);
-		while (PropertyNode && i < n && !bSerializeRemainingItems)
+		while (PropertyNode && i < ElementCount && !bSerializeRemainingItems)
 		{
 			if (PropertyNode->Property != Inner)
 			{
@@ -299,7 +680,8 @@ void FArrayProperty::SerializeItem(FStructuredArchive::FSlot Slot, void* Value, 
 
 				// Serialize the item at this array index
 				i = PropertyNode->ArrayIndex;
-				Inner->SerializeItem(Array.EnterElement(), ArrayHelper.GetRawPtr(i));
+				UE::FSerializedPropertyPathIndexScope SerializedPropertyPathIndex(Context, i, UE::ESerializedPropertyPathNotify::Yes);
+				SerializeContainerItem(Array.EnterElement(), ArrayHelper.GetRawPtr(i));
 				PropertyNode = PropertyNode->PropertyListNext;
 
 				// Restore the current property list
@@ -315,7 +697,7 @@ void FArrayProperty::SerializeItem(FStructuredArchive::FSlot Slot, void* Value, 
 
 		// Serialize each item until we get to the end of the array
 		FSerializedPropertyScope SerializedProperty(UnderlyingArchive, Inner, this);
-		while (i < n)
+		while (i < ElementCount)
 		{
 #if WITH_EDITOR
 			static const FName NAME_UArraySerialize = FName(TEXT("FArrayProperty::Serialize"));
@@ -323,7 +705,8 @@ void FArrayProperty::SerializeItem(FStructuredArchive::FSlot Slot, void* Value, 
 			NAME_UArraySerializeCount.SetNumber(i);
 			FArchive::FScopeAddDebugData P(UnderlyingArchive, NAME_UArraySerializeCount);
 #endif
-			Inner->SerializeItem(Array.EnterElement(), ArrayHelper.GetRawPtr(i++));
+			UE::FSerializedPropertyPathIndexScope SerializedPropertyPathIndex(Context, i, UE::ESerializedPropertyPathNotify::Yes);
+			SerializeContainerItem(Array.EnterElement(), ArrayHelper.GetRawPtr(i++));
 		}
 
 		// Restore use of the custom property list (if it was previously enabled)
@@ -335,7 +718,7 @@ void FArrayProperty::SerializeItem(FStructuredArchive::FSlot Slot, void* Value, 
 		FPropertyTag& InnerTag = MaybeInnerTag.GetValue();
 
 		// set the tag's size
-		InnerTag.Size = UnderlyingArchive.Tell() - DataOffset;
+		InnerTag.Size = IntCastChecked<int32>(UnderlyingArchive.Tell() - DataOffset);
 
 		if (InnerTag.Size > 0)
 		{
@@ -352,16 +735,16 @@ void FArrayProperty::SerializeItem(FStructuredArchive::FSlot Slot, void* Value, 
 	}
 }
 
-bool FArrayProperty::NetSerializeItem( FArchive& Ar, UPackageMap* Map, void* Data, TArray<uint8> * MetaData ) const
+bool FArrayProperty::NetSerializeItem(FArchive& Ar, UPackageMap* Map, void* Data, TArray<uint8> * MetaData) const
 {
-	UE_LOG( LogProperty, Fatal, TEXT( "Deprecated code path" ) );
+	UE_LOG(LogProperty, Fatal, TEXT("Deprecated code path"));
 	return 1;
 }
 
-void FArrayProperty::Serialize( FArchive& Ar )
+void FArrayProperty::Serialize(FArchive& Ar)
 {
 	Super::Serialize(Ar);
-	
+
 	SerializeSingleField(Ar, Inner, this);
 	checkSlow(Inner);
 }
@@ -376,7 +759,7 @@ void FArrayProperty::AddReferencedObjects(FReferenceCollector& Collector)
 
 FString FArrayProperty::GetCPPTypeCustom(FString* ExtendedTypeText, uint32 CPPExportFlags, const FString& InnerTypeText, const FString& InInnerExtendedTypeText) const
 {
-	if (ExtendedTypeText != NULL)
+	if (ExtendedTypeText != nullptr)
 	{
 		FString InnerExtendedTypeText = InInnerExtendedTypeText;
 		if (InnerExtendedTypeText.Len() && InnerExtendedTypeText.Right(1) == TEXT(">"))
@@ -394,42 +777,56 @@ FString FArrayProperty::GetCPPTypeCustom(FString* ExtendedTypeText, uint32 CPPEx
 	return TEXT("TArray");
 }
 
-FString FArrayProperty::GetCPPType( FString* ExtendedTypeText/*=NULL*/, uint32 CPPExportFlags/*=0*/ ) const
+FString FArrayProperty::GetCPPType(FString* ExtendedTypeText/*=nullptr*/, uint32 CPPExportFlags/*=0*/) const
 {
 	checkSlow(Inner);
 	FString InnerExtendedTypeText;
 	FString InnerTypeText;
-	if ( ExtendedTypeText != NULL )
+	if (ExtendedTypeText != nullptr)
 	{
 		InnerTypeText = Inner->GetCPPType(&InnerExtendedTypeText, CPPExportFlags & ~CPPF_ArgumentOrReturnValue); // we won't consider array inners to be "arguments or return values"
 	}
 	return GetCPPTypeCustom(ExtendedTypeText, CPPExportFlags, InnerTypeText, InnerExtendedTypeText);
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 FString FArrayProperty::GetCPPTypeForwardDeclaration() const
 {
 	checkSlow(Inner);
 	return Inner->GetCPPTypeForwardDeclaration();
 }
-FString FArrayProperty::GetCPPMacroType( FString& ExtendedTypeText ) const
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+FString FArrayProperty::GetCPPMacroType(FString& ExtendedTypeText) const
 {
 	checkSlow(Inner);
 	ExtendedTypeText = Inner->GetCPPType();
 	return TEXT("TARRAY");
 }
-void FArrayProperty::ExportTextItem( FString& ValueStr, const void* PropertyValue, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
+void FArrayProperty::ExportText_Internal(FString& ValueStr, const void* ContainerOrPropertyPtr, EPropertyPointerType PropertyPointerType, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope) const
 {
 	checkSlow(Inner);
 
-	if (0 != (PortFlags & PPF_ExportCpp))
+	uint8* TempArrayStorage = nullptr;
+	void* PropertyValuePtr = nullptr;
+	if (PropertyPointerType == EPropertyPointerType::Container && HasGetter())
 	{
-		FString ExtendedTypeText;
-		FString TypeText = GetCPPType(&ExtendedTypeText, EPropertyExportCPPFlags::CPPF_BlueprintCppBackend);
-		ValueStr += FString::Printf(TEXT("%s%s()"), *TypeText, *ExtendedTypeText);
-		return;
+		// Allocate temporary map as we first need to initialize it with the value provided by the getter function and then export it
+		TempArrayStorage = (uint8*)AllocateAndInitializeValue();
+		PropertyValuePtr = TempArrayStorage;
+		FProperty::GetValue_InContainer(ContainerOrPropertyPtr, PropertyValuePtr);
+	}
+	else
+	{
+		PropertyValuePtr = PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType);
 	}
 
-	FScriptArrayHelper ArrayHelper(this, PropertyValue);
+	ON_SCOPE_EXIT
+	{
+		DestroyAndFreeValue(TempArrayStorage);
+	};
+
+	FScriptArrayHelper ArrayHelper(this, PropertyValuePtr);
 
 	int32 DefaultSize = 0;
 	if (DefaultValue)
@@ -446,7 +843,7 @@ void FArrayProperty::ExportTextInnerItem(FString& ValueStr, const FProperty* Inn
 {
 	checkSlow(Inner);
 
-	uint8* StructDefaults = NULL;
+	uint8* StructDefaults = nullptr;
 	const FStructProperty* StructProperty = CastField<FStructProperty>(Inner);
 
 	const bool bReadableForm = (0 != (PPF_BlueprintDebugView & PortFlags));
@@ -456,7 +853,7 @@ void FArrayProperty::ExportTextInnerItem(FString& ValueStr, const FProperty* Inn
 	// so we export the entire struct to ensure all data is copied over correctly. Behavior is currently inconsistent when copy/pasting between the two types.
 	// In the future, static arrays could export diffs if the property being imported to is reset to default before the import.
 	// When exporting to an external editor, we want to save defaults so all information is available for editing
-	if ( StructProperty != NULL && Inner->ArrayDim == 1 && !bExternalEditor )
+	if (StructProperty != nullptr && Inner->ArrayDim == 1 && !bExternalEditor)
 	{
 		checkSlow(StructProperty->Struct);
 		StructDefaults = (uint8*)FMemory::Malloc(StructProperty->Struct->GetStructureSize() * Inner->ArrayDim);
@@ -464,12 +861,12 @@ void FArrayProperty::ExportTextInnerItem(FString& ValueStr, const FProperty* Inn
 	}
 
 	int32 Count = 0;
-	for( int32 i=0; i<PropertySize; i++ )
+	for (int32 i = 0; i < PropertySize; i++)
 	{
 		++Count;
-		if(!bReadableForm)
+		if (!bReadableForm)
 		{
-			if ( Count == 1 )
+			if (Count == 1)
 			{
 				ValueStr += TCHAR('(');
 			}
@@ -480,7 +877,7 @@ void FArrayProperty::ExportTextInnerItem(FString& ValueStr, const FProperty* Inn
 		}
 		else
 		{
-			if(Count > 1)
+			if (Count > 1)
 			{
 				ValueStr += TCHAR('\n');
 			}
@@ -507,7 +904,7 @@ void FArrayProperty::ExportTextInnerItem(FString& ValueStr, const FProperty* Inn
 			}
 		}
 
-		Inner->ExportTextItem( ValueStr, PropData, PropDefault, Parent, PortFlags|PPF_Delimited, ExportRootScope );
+		Inner->ExportTextItem_Direct(ValueStr, PropData, PropDefault, Parent, PortFlags|PPF_Delimited, ExportRootScope);
 	}
 
 	if ((Count > 0) && !bReadableForm)
@@ -521,14 +918,38 @@ void FArrayProperty::ExportTextInnerItem(FString& ValueStr, const FProperty* Inn
 	}
 }
 
-const TCHAR* FArrayProperty::ImportText_Internal(const TCHAR* Buffer, void* Data, int32 PortFlags, UObject* OwnerObject, FOutputDevice* ErrorText) const
+const TCHAR* FArrayProperty::ImportText_Internal(const TCHAR* Buffer, void* ContainerOrPropertyPtr, EPropertyPointerType PropertyPointerType, UObject* OwnerObject, int32 PortFlags, FOutputDevice* ErrorText) const
 {
-	FScriptArrayHelper ArrayHelper(this, Data);
+	uint8* TempArrayStorage = nullptr;
+	ON_SCOPE_EXIT
+	{
+		if (TempArrayStorage)
+		{
+			// TempArrayStorage is used by property setter so if it was allocated call the setter now
+			FProperty::SetValue_InContainer(ContainerOrPropertyPtr, TempArrayStorage);
 
-	return ImportTextInnerItem(Buffer, Inner, Data, PortFlags, OwnerObject, &ArrayHelper, ErrorText);
+			// Destroy and free the temp array used by property setter
+			DestroyAndFreeValue(TempArrayStorage);
+		}
+	};
+
+	void* ArrayPtr = nullptr;
+	if (PropertyPointerType == EPropertyPointerType::Container && HasSetter())
+	{
+		// Allocate temporary map as we first need to initialize it with the parsed items and then use the setter to update the property
+		TempArrayStorage = (uint8*)AllocateAndInitializeValue();
+		ArrayPtr = TempArrayStorage;
+	}
+	else
+	{
+		ArrayPtr = PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType);
+	}
+
+	FScriptArrayHelper ArrayHelper(this, ArrayPtr);
+	return ImportTextInnerItem(Buffer, Inner, ArrayPtr, PortFlags, OwnerObject, &ArrayHelper, ErrorText);
 }
 
-const TCHAR* FArrayProperty::ImportTextInnerItem( const TCHAR* Buffer, const FProperty* Inner, void* Data, int32 PortFlags, UObject* Parent, FScriptArrayHelper* ArrayHelper, FOutputDevice* ErrorText )
+const TCHAR* FArrayProperty::ImportTextInnerItem(const TCHAR* Buffer, const FProperty* Inner, void* Data, int32 PortFlags, UObject* Parent, FScriptArrayHelper* ArrayHelper, FOutputDevice* ErrorText)
 {
 	checkSlow(Inner);
 
@@ -543,9 +964,9 @@ const TCHAR* FArrayProperty::ImportTextInnerItem( const TCHAR* Buffer, const FPr
 		return Buffer;
 	}
 
-	if ( *Buffer++ != TCHAR('(') )
+	if (*Buffer++ != TCHAR('('))
 	{
-		return NULL;
+		return nullptr;
 	}
 
 	if (ArrayHelper)
@@ -556,6 +977,16 @@ const TCHAR* FArrayProperty::ImportTextInnerItem( const TCHAR* Buffer, const FPr
 
 	SkipWhitespace(Buffer);
 
+	if (*Buffer == TCHAR(')'))
+	{
+		// We didn't find any items. Clear the array again
+		if (ArrayHelper)
+		{
+			ArrayHelper->EmptyValues();
+		}
+		return Buffer;
+	}
+
 	int32 Index = 0;
 	while (*Buffer != TCHAR(')'))
 	{
@@ -565,11 +996,12 @@ const TCHAR* FArrayProperty::ImportTextInnerItem( const TCHAR* Buffer, const FPr
 		{
 			uint8* Address = ArrayHelper ? ArrayHelper->GetRawPtr(Index) : ((uint8*)Data + Inner->ElementSize * Index);
 			// Parse the item
-			Buffer = Inner->ImportText(Buffer, Address, PortFlags | PPF_Delimited, Parent, ErrorText);
+			checkf(ArrayHelper == nullptr || Inner->GetOffset_ForInternal() == 0, TEXT("Expected the Inner property of the FArrayProperty."));
+			Buffer = Inner->ImportText_Direct(Buffer, Address, Parent, PortFlags | PPF_Delimited, ErrorText);
 
-			if(!Buffer)
+			if (!Buffer)
 			{
-				return NULL;
+				return nullptr;
 			}
 
 			SkipWhitespace(Buffer);
@@ -586,7 +1018,7 @@ const TCHAR* FArrayProperty::ImportTextInnerItem( const TCHAR* Buffer, const FPr
 			}
 			else if (Index >= Inner->ArrayDim)
 			{
-				UE_LOG(LogProperty, Warning, TEXT("%s is a fixed-sized array of %i values. Additional data after %i has been ignored during import."), *Inner->GetName(), Inner->ArrayDim, Inner->ArrayDim);
+				ErrorText->Logf(ELogVerbosity::Warning, TEXT("%s is a fixed-sized array of %i values. Additional data after %i has been ignored during import."), *Inner->GetName(), Inner->ArrayDim, Inner->ArrayDim);
 				break;
 			}
 		}
@@ -599,11 +1031,22 @@ const TCHAR* FArrayProperty::ImportTextInnerItem( const TCHAR* Buffer, const FPr
 	// Make sure we ended on a )
 	if (*Buffer++ != TCHAR(')'))
 	{
-		return NULL;
+		return nullptr;
 	}
 
 	return Buffer;
 }
+
+#if WITH_EDITORONLY_DATA
+void FArrayProperty::AppendSchemaHash(FBlake3& Builder, bool bSkipEditorOnly) const
+{
+	Super::AppendSchemaHash(Builder, bSkipEditorOnly);
+	if (Inner)
+	{
+		Inner->AppendSchemaHash(Builder, bSkipEditorOnly);
+	}
+}
+#endif
 
 void FArrayProperty::AddCppProperty(FProperty* Property)
 {
@@ -613,14 +1056,14 @@ void FArrayProperty::AddCppProperty(FProperty* Property)
 	Inner = Property;
 }
 
-void FArrayProperty::CopyValuesInternal( void* Dest, void const* Src, int32 Count  ) const
+void FArrayProperty::CopyValuesInternal(void* Dest, void const* Src, int32 Count) const
 {
-	check(Count==1); // this was never supported, apparently
+	check(Count == 1); // this was never supported, apparently
 	FScriptArrayHelper SrcArrayHelper(this, Src);
 	FScriptArrayHelper DestArrayHelper(this, Dest);
 
 	int32 Num = SrcArrayHelper.Num();
-	if ( !(Inner->PropertyFlags & CPF_IsPlainOldData) )
+	if (!(Inner->PropertyFlags & CPF_IsPlainOldData))
 	{
 		DestArrayHelper.EmptyAndAddValues(Num);
 	}
@@ -630,33 +1073,33 @@ void FArrayProperty::CopyValuesInternal( void* Dest, void const* Src, int32 Coun
 	}
 	if (Num)
 	{
-		int32 Size = Inner->ElementSize;
+		size_t Size = Inner->ElementSize;
 		uint8* SrcData = (uint8*)SrcArrayHelper.GetRawPtr();
 		uint8* DestData = (uint8*)DestArrayHelper.GetRawPtr();
-		if( !(Inner->PropertyFlags & CPF_IsPlainOldData) )
+		if (!(Inner->PropertyFlags & CPF_IsPlainOldData))
 		{
-			for( int32 i=0; i<Num; i++ )
+			for (int32 i = 0; i < Num; i++)
 			{
-				Inner->CopyCompleteValue( DestData + i * Size, SrcData + i * Size );
+				Inner->CopyCompleteValue(DestData + i * Size, SrcData + i * Size);
 			}
 		}
 		else
 		{
-			FMemory::Memcpy( DestData, SrcData, Num*Size );
+			FMemory::Memcpy(DestData, SrcData, Num * Size);
 		}
 	}
 }
-void FArrayProperty::ClearValueInternal( void* Data ) const
+void FArrayProperty::ClearValueInternal(void* Data) const
 {
 	FScriptArrayHelper ArrayHelper(this, Data);
 	ArrayHelper.EmptyValues();
 }
-void FArrayProperty::DestroyValueInternal( void* Dest ) const
+void FArrayProperty::DestroyValueInternal(void* Dest) const
 {
 	FScriptArrayHelper ArrayHelper(this, Dest);
 	ArrayHelper.EmptyValues();
 
-	//@todo UE4 potential double destroy later from this...would be ok for a script array, but still
+	//@todo UE potential double destroy later from this...would be ok for a script array, but still
 	ArrayHelper.DestroyContainer_Unsafe();
 }
 bool FArrayProperty::PassCPPArgsByRef() const
@@ -666,15 +1109,15 @@ bool FArrayProperty::PassCPPArgsByRef() const
 
 /**
  * Creates new copies of components
- * 
+ *
  * @param	Data				pointer to the address of the instanced object referenced by this UComponentProperty
  * @param	DefaultData			pointer to the address of the default value of the instanced object referenced by this UComponentProperty
  * @param	Owner				the object that contains this property's data
  * @param	InstanceGraph		contains the mappings of instanced objects and components to their templates
  */
-void FArrayProperty::InstanceSubobjects( void* Data, void const* DefaultData, UObject* InOwner, FObjectInstancingGraph* InstanceGraph )
+void FArrayProperty::InstanceSubobjects(void* Data, void const* DefaultData, UObject* InOwner, FObjectInstancingGraph* InstanceGraph)
 {
-	if( Data && Inner->ContainsInstancedObjectProperty())
+	if (Data && Inner->ContainsInstancedObjectProperty())
 	{
 		FScriptArrayHelper ArrayHelper(this, Data);
 		FScriptArrayHelper DefaultArrayHelper(this, DefaultData);
@@ -682,11 +1125,11 @@ void FArrayProperty::InstanceSubobjects( void* Data, void const* DefaultData, UO
 		int32 InnerElementSize = Inner->ElementSize;
 		void* TempElement = FMemory_Alloca(InnerElementSize);
 
-		for( int32 ElementIndex = 0; ElementIndex < ArrayHelper.Num(); ElementIndex++ )
+		for (int32 ElementIndex = 0; ElementIndex < ArrayHelper.Num(); ElementIndex++)
 		{
 			uint8* DefaultValue = (DefaultData && ElementIndex < DefaultArrayHelper.Num()) ? DefaultArrayHelper.GetRawPtr(ElementIndex) : nullptr;
 			FMemory::Memmove(TempElement, ArrayHelper.GetRawPtr(ElementIndex), InnerElementSize);
-			Inner->InstanceSubobjects( TempElement, DefaultValue, InOwner, InstanceGraph );
+			Inner->InstanceSubobjects(TempElement, DefaultValue, InOwner, InstanceGraph);
 			if (ElementIndex < ArrayHelper.Num())
 			{
 				FMemory::Memmove(ArrayHelper.GetRawPtr(ElementIndex), TempElement, InnerElementSize);
@@ -704,61 +1147,91 @@ bool FArrayProperty::SameType(const FProperty* Other) const
 	return Super::SameType(Other) && Inner && Inner->SameType(((FArrayProperty*)Other)->Inner);
 }
 
-EConvertFromTypeResult FArrayProperty::ConvertFromType(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct)
+EConvertFromTypeResult FArrayProperty::ConvertFromType(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct, const uint8* Defaults)
 {
-	// TODO: The ArrayProperty Tag really doesn't have adequate information for
-	// many types. This should probably all be moved in to ::SerializeItem
-
-	if (Tag.Type == NAME_ArrayProperty && Tag.InnerType != NAME_None && Tag.InnerType != Inner->GetID())
+	if (Tag.Type != NAME_ArrayProperty)
 	{
-		void* ArrayPropertyData = ContainerPtrToValuePtr<void>(Data);
+		return EConvertFromTypeResult::UseSerializeItem;
+	}
 
-		int32 ElementCount = 0;
+	FArchive& UnderlyingArchive = Slot.GetUnderlyingArchive();
 
-		if (Slot.GetUnderlyingArchive().IsTextFormat())
+	const FPackageFileVersion Version = UnderlyingArchive.UEVer();
+	if (Version >= EUnrealEngineObjectUE5Version::PROPERTY_TAG_COMPLETE_TYPE_NAME)
+	{
+		if (CanSerializeFromTypeName(Tag.GetType()))
 		{
-			Slot.EnterArray(ElementCount);
+			return EConvertFromTypeResult::UseSerializeItem;
 		}
-		else
+	}
+	else
+	{
+		const FName InnerTypeName = Tag.GetType().GetParameterName(0);
+		if (InnerTypeName.IsNone() || InnerTypeName == Inner->GetID())
 		{
-			Slot.GetUnderlyingArchive() << ElementCount;
-		}
-
-		FScriptArrayHelper ScriptArrayHelper(this, ArrayPropertyData);
-		ScriptArrayHelper.EmptyAndAddValues(ElementCount);
-
-		// Convert properties from old type to new type automatically if types are compatible (array case)
-		if (ElementCount > 0)
-		{
-			FPropertyTag InnerPropertyTag;
-			InnerPropertyTag.Type = Tag.InnerType;
-			InnerPropertyTag.ArrayIndex = 0;
-
-			FStructuredArchive::FStream ValueStream = Slot.EnterStream();
-
-			if (Inner->ConvertFromType(InnerPropertyTag, ValueStream.EnterElement(), ScriptArrayHelper.GetRawPtr(0), DefaultsStruct) == EConvertFromTypeResult::Converted)
-			{
-				for (int32 i = 1; i < ElementCount; ++i)
-				{
-					verify(Inner->ConvertFromType(InnerPropertyTag, ValueStream.EnterElement(), ScriptArrayHelper.GetRawPtr(i), DefaultsStruct) == EConvertFromTypeResult::Converted);
-				}
-
-				return EConvertFromTypeResult::Converted;
-			}
-			// TODO: Implement SerializeFromMismatchedTag handling for arrays of structs
-			else
-			{
-				UE_LOG(LogClass, Warning, TEXT("Array Inner Type mismatch in %s of %s - Previous (%s) Current(%s) for package:  %s"), *Tag.Name.ToString(), *GetName(), *Tag.InnerType.ToString(), *Inner->GetID().ToString(), *Slot.GetUnderlyingArchive().GetArchiveName() );
-				return EConvertFromTypeResult::CannotConvert;
-			}
-		}
-		else
-		{
-			return EConvertFromTypeResult::Converted;
+			return EConvertFromTypeResult::UseSerializeItem;
 		}
 	}
 
-	return EConvertFromTypeResult::UseSerializeItem;
+	if (Tag.bExperimentalOverridableLogic)
+	{
+		return EConvertFromTypeResult::CannotConvert;
+	}
+
+	int32 ElementCount = 0;
+	if (UnderlyingArchive.IsTextFormat())
+	{
+		Slot.EnterArray(ElementCount);
+	}
+	else
+	{
+		UnderlyingArchive << ElementCount;
+	}
+
+	FScriptArrayHelper ScriptArrayHelper(this, ContainerPtrToValuePtr<void>(Data));
+	ScriptArrayHelper.EmptyAndAddValues(ElementCount);
+
+	FPropertyTag InnerPropertyTag;
+	InnerPropertyTag.SetType(Tag.GetType().GetParameter(0));
+	InnerPropertyTag.Name = Tag.Name;
+	InnerPropertyTag.ArrayIndex = 0;
+
+	if (Version < EUnrealEngineObjectUE5Version::PROPERTY_TAG_COMPLETE_TYPE_NAME && Version >= VER_UE4_INNER_ARRAY_TAG_INFO && InnerPropertyTag.Type == NAME_StructProperty)
+	{
+		UnderlyingArchive << InnerPropertyTag;
+	}
+
+	if (ElementCount == 0)
+	{
+		return EConvertFromTypeResult::Converted;
+	}
+
+	FUObjectSerializeContext* Context = FUObjectThreadContext::Get().GetSerializeContext();
+	FStructuredArchive::FStream ValueStream = Slot.EnterStream();
+
+	EConvertFromTypeResult ConvertResult;
+	{
+		UE::FSerializedPropertyPathIndexScope SerializedPropertyPathIndex(Context, 0, UE::ESerializedPropertyPathNotify::Yes);
+		ConvertResult = Inner->ConvertFromType(InnerPropertyTag, ValueStream.EnterElement(), ScriptArrayHelper.GetRawPtr(0), DefaultsStruct, nullptr);
+	}
+	if (ConvertResult == EConvertFromTypeResult::Converted || ConvertResult == EConvertFromTypeResult::Serialized)
+	{
+		for (int32 ElementIndex = 1; ElementIndex < ElementCount; ++ElementIndex)
+		{
+			UE::FSerializedPropertyPathIndexScope SerializedPropertyPathIndex(Context, ElementIndex, UE::ESerializedPropertyPathNotify::Yes);
+			ConvertResult = Inner->ConvertFromType(InnerPropertyTag, ValueStream.EnterElement(), ScriptArrayHelper.GetRawPtr(ElementIndex), DefaultsStruct, nullptr);
+			check(ConvertResult == EConvertFromTypeResult::Converted || ConvertResult == EConvertFromTypeResult::Serialized);
+		}
+		return ConvertResult;
+	}
+	else
+	{
+		UE::FPropertyTypeNameBuilder Builder;
+		Inner->SaveTypeName(Builder);
+		UE_LOG(LogClass, Warning, TEXT("Array Inner Type mismatch in %s - Previous (%s) Current(%s) in package: %s"),
+			*WriteToString<32>(Tag.Name), *WriteToString<32>(InnerPropertyTag.GetType()), *WriteToString<32>(Builder.Build()), *UnderlyingArchive.GetArchiveName());
+		return EConvertFromTypeResult::CannotConvert;
+	}
 }
 
 FField* FArrayProperty::GetInnerFieldByName(const FName& InName)
@@ -779,4 +1252,69 @@ void FArrayProperty::GetInnerFields(TArray<FField*>& OutFields)
 	}
 }
 
-#include "UObject/DefineUPropertyMacros.h"
+void* FArrayProperty::GetValueAddressAtIndex_Direct(const FProperty* InInner, void* InValueAddress, int32 Index) const
+{
+	FScriptArrayHelper ArrayHelper(this, InValueAddress);
+	checkf(Inner == InInner, TEXT("Passed in inner must be identical to the array property inner property"));
+	if (Index < ArrayHelper.Num() && Index >= 0)
+	{
+		return ArrayHelper.GetRawPtr(Index);
+	}
+	else
+	{
+		return nullptr;
+	}
+}
+
+bool FArrayProperty::UseBinaryOrNativeSerialization(const FArchive& Ar) const
+{
+	if (Super::UseBinaryOrNativeSerialization(Ar))
+	{
+		return true;
+	}
+
+	const FProperty* LocalInner = Inner;
+	check(LocalInner);
+	return LocalInner->UseBinaryOrNativeSerialization(Ar);
+}
+
+bool FArrayProperty::LoadTypeName(UE::FPropertyTypeName Type, const FPropertyTag* Tag)
+{
+	if (!Super::LoadTypeName(Type, Tag))
+	{
+		return false;
+	}
+
+	const UE::FPropertyTypeName InnerType = Type.GetParameter(0);
+	FField* Field = FField::TryConstruct(InnerType.GetName(), this, GetFName(), RF_NoFlags);
+	if (FProperty* Property = CastField<FProperty>(Field); Property && Property->LoadTypeName(InnerType, Tag))
+	{
+		Inner = Property;
+		return true;
+	}
+	delete Field;
+	return false;
+}
+
+void FArrayProperty::SaveTypeName(UE::FPropertyTypeNameBuilder& Type) const
+{
+	Super::SaveTypeName(Type);
+
+	const FProperty* LocalInner = Inner;
+	check(LocalInner);
+	Type.BeginParameters();
+	LocalInner->SaveTypeName(Type);
+	Type.EndParameters();
+}
+
+bool FArrayProperty::CanSerializeFromTypeName(UE::FPropertyTypeName Type) const
+{
+	if (!Super::CanSerializeFromTypeName(Type))
+	{
+		return false;
+	}
+
+	const FProperty* LocalInner = Inner;
+	check(LocalInner);
+	return LocalInner->CanSerializeFromTypeName(Type.GetParameter(0));
+}

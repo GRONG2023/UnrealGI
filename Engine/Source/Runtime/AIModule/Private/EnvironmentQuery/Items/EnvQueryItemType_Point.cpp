@@ -2,6 +2,8 @@
 
 #include "EnvironmentQuery/Items/EnvQueryItemType_Point.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(EnvQueryItemType_Point)
+
 template<>
 void FEnvQueryInstance::AddItemData<UEnvQueryItemType_Point, FVector>(FVector ItemValue)
 {
@@ -54,6 +56,8 @@ void UEnvQueryItemType_Point::SetContextHelper(FEnvQueryContextData& ContextData
 	ContextData.NumValues = MultiplePoints.Num();
 	ContextData.RawData.SetNumUninitialized(sizeof(FNavLocation)* MultiplePoints.Num());
 
+	checkf(ContextData.RawData.Num() == sizeof(FNavLocation) * MultiplePoints.Num(), TEXT("Failed to allocate the appropriate amount of memory"));
+
 	uint8* RawData = (uint8*)ContextData.RawData.GetData();
 	for (int32 PointIndex = 0; PointIndex < MultiplePoints.Num(); PointIndex++)
 	{
@@ -61,3 +65,4 @@ void UEnvQueryItemType_Point::SetContextHelper(FEnvQueryContextData& ContextData
 		RawData += sizeof(FNavLocation);
 	}
 }
+

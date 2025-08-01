@@ -2,11 +2,13 @@
 
 #pragma once
 
-#include "CoreTypes.h"
-#include "Misc/AssertionMacros.h"
-#include "Templates/UnrealTemplate.h"
 #include "Containers/UnrealString.h"
+#include "CoreTypes.h"
 #include "HAL/PlatformTime.h"
+#include "HAL/PreprocessorHelpers.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Build.h"
+#include "Templates/UnrealTemplate.h"
 
 /**
 * Utility class to capture time passed in seconds, adding delta time to passed
@@ -183,12 +185,12 @@ protected:
  */
 struct FScopeLogTime : public FConditionalScopeLogTime
 {
-	CORE_API FScopeLogTime(const WIDECHAR* InName, FTotalTimeAndCount* InCumulative = nullptr, EScopeLogTimeUnits InUnits = ScopeLog_Milliseconds)
+	FScopeLogTime(const WIDECHAR* InName, FTotalTimeAndCount* InCumulative = nullptr, EScopeLogTimeUnits InUnits = ScopeLog_Milliseconds)
 		: FConditionalScopeLogTime(true, InName, InCumulative, InUnits)
 	{
 	}
 
-	CORE_API FScopeLogTime(const ANSICHAR* InName, FTotalTimeAndCount* InCumulative = nullptr, EScopeLogTimeUnits InUnits = ScopeLog_Milliseconds)
+	FScopeLogTime(const ANSICHAR* InName, FTotalTimeAndCount* InCumulative = nullptr, EScopeLogTimeUnits InUnits = ScopeLog_Milliseconds)
 		: FConditionalScopeLogTime(true, InName, InCumulative, InUnits)
 	{
 	}

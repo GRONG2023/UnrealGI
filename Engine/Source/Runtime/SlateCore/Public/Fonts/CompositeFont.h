@@ -55,7 +55,7 @@ typedef TSharedRef<const FFontFaceData, ESPMode::ThreadSafe> FFontFaceDataConstR
  * Raw font data for a Font Face asset.
  * @note Exists as a struct so it can be shared between its owner asset and the font cache without worrying about UObject lifetimes. 
  */
-struct SLATECORE_API FFontFaceData
+struct FFontFaceData
 {
 public:
 	/** Default constructor */
@@ -124,8 +124,8 @@ public:
 
 private:
 	/** Memory stat tracking */
-	void TrackMemoryUsage() const;
-	void UntrackMemoryUsage() const;
+	SLATECORE_API void TrackMemoryUsage() const;
+	SLATECORE_API void UntrackMemoryUsage() const;
 
 	/** Internal data */
 	TArray<uint8> Data;
@@ -133,62 +133,74 @@ private:
 
 /** Payload data describing an individual font in a typeface. Keep this lean as it's also used as a key! */
 USTRUCT()
-struct SLATECORE_API FFontData
+struct FFontData
 {
 	GENERATED_USTRUCT_BODY()
 
 	/** Default constructor */
-	FFontData();
+	SLATECORE_API FFontData();
 
 	/** Construct the raw data from a font face asset */
-	explicit FFontData(const UObject* const InFontFaceAsset, const int32 InSubFaceIndex = 0);
+	SLATECORE_API explicit FFontData(const UObject* const InFontFaceAsset, const int32 InSubFaceIndex = 0);
 
 	/** Construct the raw data from a filename and the font data attributes */
-	FFontData(FString InFontFilename, const EFontHinting InHinting, const EFontLoadingPolicy InLoadingPolicy, const int32 InSubFaceIndex = 0);
+	SLATECORE_API FFontData(FString InFontFilename, const EFontHinting InHinting, const EFontLoadingPolicy InLoadingPolicy, const int32 InSubFaceIndex = 0);
 
 	/** Is this font data set to a font? (either by filename or by inline data) */
-	bool HasFont() const;
+	SLATECORE_API bool HasFont() const;
 
 	/** Get the filename of the font to use. This may not actually exist on disk in editor builds and we should load the face buffer instead. */
-	const FString& GetFontFilename() const;
+	SLATECORE_API const FString& GetFontFilename() const;
 
 	/** Get the hinting algorithm to use with the font. */
-	EFontHinting GetHinting() const;
+	SLATECORE_API EFontHinting GetHinting() const;
 
 	/** Get the enum controlling how this font should be loaded at runtime. */
-	EFontLoadingPolicy GetLoadingPolicy() const;
+	SLATECORE_API EFontLoadingPolicy GetLoadingPolicy() const;
 
 	/** Get the index of the sub-face that should be used. */
-	int32 GetSubFaceIndex() const;
+	SLATECORE_API int32 GetSubFaceIndex() const;
 
 	/** Set the index of the sub-face that should be used. */
-	void SetSubFaceIndex(const int32 InSubFaceIndex);
+	SLATECORE_API void SetSubFaceIndex(const int32 InSubFaceIndex);
 
 	/** Get the method to use when laying out the font? */
-	EFontLayoutMethod GetLayoutMethod() const;
+	SLATECORE_API EFontLayoutMethod GetLayoutMethod() const;
+
+	/** Returns true if the ascend is overridden. */
+	SLATECORE_API bool IsAscendOverridden() const;
+
+	/** Returns the overridden value of the ascend. This value will be used only if IsAscendOverridden returns true. */
+	SLATECORE_API int32 GetAscendOverriddenValue() const;
+
+	/** Returns true if the descend is overridden. */
+	SLATECORE_API bool IsDescendOverridden() const;
+
+	/** Returns the overridden value of the descend. This value will be used only if IsDescendOverridden returns true. */
+	SLATECORE_API int32 GetDescendOverriddenValue() const;
 
 	/** Get the data buffer containing the data for the current font face. */
-	FFontFaceDataConstPtr GetFontFaceData() const;
+	SLATECORE_API FFontFaceDataConstPtr GetFontFaceData() const;
 
 	/** Get the font face asset used by this data (if any). */
-	const UObject* GetFontFaceAsset() const;
+	SLATECORE_API const UObject* GetFontFaceAsset() const;
 
 #if WITH_EDITORONLY_DATA
 	/** True if this object contains any legacy data that needs to be upgraded PostLoad by calling the functions below (in order). */
-	bool HasLegacyData() const;
+	SLATECORE_API bool HasLegacyData() const;
 
 	/** Upgrade v1 font data to v2 bulk data. */
-	void ConditionalUpgradeFontDataToBulkData(UObject* InOuter);
+	SLATECORE_API void ConditionalUpgradeFontDataToBulkData(UObject* InOuter);
 
 	/** Upgrade v2 bulk data to v3 font face. */
-	void ConditionalUpgradeBulkDataToFontFace(UObject* InOuter, UClass* InFontFaceClass, const FName InFontFaceName);
+	SLATECORE_API void ConditionalUpgradeBulkDataToFontFace(UObject* InOuter, UClass* InFontFaceClass, const FName InFontFaceName);
 #endif // WITH_EDITORONLY_DATA
 
 	/** Check to see whether this font data is equal to the other font data */
-	bool operator==(const FFontData& Other) const;
+	SLATECORE_API bool operator==(const FFontData& Other) const;
 
 	/** Check to see whether this font data is not equal to the other font data */
-	bool operator!=(const FFontData& Other) const;
+	SLATECORE_API bool operator!=(const FFontData& Other) const;
 
 	/** Get the type hash for this font data */
 	friend inline uint32 GetTypeHash(const FFontData& Key)
@@ -201,7 +213,7 @@ struct SLATECORE_API FFontData
 		}
 		else
 		{
-			KeyHash = HashCombine(KeyHash, GetTypeHash(Key.FontFilename));
+			KeyHash = HashCombine(KeyHash, Key.FontFilenameHash);
 			KeyHash = HashCombine(KeyHash, GetTypeHash(Key.Hinting));
 			KeyHash = HashCombine(KeyHash, GetTypeHash(Key.LoadingPolicy));
 		}
@@ -211,7 +223,7 @@ struct SLATECORE_API FFontData
 	}
 
 	/** Handle serialization for this struct. */
-	bool Serialize(FArchive& Ar);
+	SLATECORE_API bool Serialize(FArchive& Ar);
 	friend FArchive& operator<<(FArchive& Ar, FFontData& InFontData)
 	{
 		InFontData.Serialize(Ar);
@@ -219,7 +231,7 @@ struct SLATECORE_API FFontData
 	}
 
 	/** Called by FStandaloneCompositeFont to prevent our objects from being GCd */
-	void AddReferencedObjects(FReferenceCollector& Collector);
+	SLATECORE_API void AddReferencedObjects(FReferenceCollector& Collector);
 
 private:
 	/**
@@ -228,6 +240,12 @@ private:
 	 */
 	UPROPERTY()
 	FString FontFilename;
+
+	/**
+	 * Cached hash value of FontFilename.
+	 * Must be updated everytime FontFilename changes.
+	 */
+	uint32  FontFilenameHash;
 
 	/**
 	 * The hinting algorithm to use with the font.
@@ -254,7 +272,7 @@ private:
 	 * Font data v3. This points to a font face asset.
 	 */
 	UPROPERTY()
-	const UObject* FontFaceAsset;
+	TObjectPtr<const UObject> FontFaceAsset;
 
 #if WITH_EDITORONLY_DATA
 	/**
@@ -262,7 +280,7 @@ private:
 	 * This can be removed once we no longer support loading packages older than FEditorObjectVersion::AddedFontFaceAssets (as can UFontBulkData itself).
 	 */
 	UPROPERTY()
-	UFontBulkData* BulkDataPtr_DEPRECATED;
+	TObjectPtr<UFontBulkData> BulkDataPtr_DEPRECATED;
 
 	/**
 	 * Legacy font data v1. This used to be where font data was stored prior to font bulk data.
@@ -285,7 +303,7 @@ struct TStructOpsTypeTraits<FFontData> : public TStructOpsTypeTraitsBase2<FFontD
 
 /** A single entry in a typeface */
 USTRUCT()
-struct SLATECORE_API FTypefaceEntry
+struct FTypefaceEntry
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -318,7 +336,7 @@ struct SLATECORE_API FTypefaceEntry
 
 /** Definition for a typeface (a family of fonts) */
 USTRUCT()
-struct SLATECORE_API FTypeface
+struct FTypeface
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -346,7 +364,7 @@ struct SLATECORE_API FTypeface
 };
 
 USTRUCT()
-struct SLATECORE_API FCompositeFallbackFont
+struct FCompositeFallbackFont
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -367,7 +385,7 @@ struct SLATECORE_API FCompositeFallbackFont
 };
 
 USTRUCT()
-struct SLATECORE_API FCompositeSubFont : public FCompositeFallbackFont
+struct FCompositeSubFont : public FCompositeFallbackFont
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -392,7 +410,7 @@ struct SLATECORE_API FCompositeSubFont : public FCompositeFallbackFont
 };
 
 USTRUCT()
-struct SLATECORE_API FCompositeFont
+struct FCompositeFont
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -436,6 +454,10 @@ struct SLATECORE_API FCompositeFont
 	UPROPERTY()
 	TArray<FCompositeSubFont> SubTypefaces;
 
+	/** If set to false, the ascent and descent override specified in a Font face will be ignored, and the value from the font source file will be used instead. */
+	UPROPERTY(EditAnywhere, Category = RuntimeFont)
+	bool bEnableAscentDescentOverride = true;
+
 #if WITH_EDITORONLY_DATA
 	/** 
 	 * Transient value containing the current history ID of this composite font
@@ -443,13 +465,19 @@ struct SLATECORE_API FCompositeFont
 	 */
 	int32 HistoryRevision;
 #endif	// WITH_EDITORONLY_DATA
+
+	/** Returns the enabled state of ascent and descent override. */
+	SLATECORE_API bool IsAscentDescentOverrideEnabled() const
+	{
+		return bEnableAscentDescentOverride;
+	}
 };
 
 /**
  * A version of FCompositeFont that should be used when it's not being embedded within another UObject
  * This derives from FGCObject to ensure that the bulk data objects are referenced correctly 
  */
-struct SLATECORE_API FStandaloneCompositeFont : public FCompositeFont, public FGCObject
+struct FStandaloneCompositeFont : public FCompositeFont, public FGCObject
 {
 	/** Default constructor */
 	FStandaloneCompositeFont()
@@ -463,6 +491,6 @@ struct SLATECORE_API FStandaloneCompositeFont : public FCompositeFont, public FG
 	}
 
 	// FGCObject interface
-	virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
-	virtual FString GetReferencerName() const override;
+	SLATECORE_API virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
+	SLATECORE_API virtual FString GetReferencerName() const override;
 };

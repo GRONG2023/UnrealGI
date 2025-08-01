@@ -17,6 +17,18 @@
 
 #include "Evaluation/MovieSceneEvaluationCustomVersion.h"
 
+#include "Channels/MovieSceneChannelProxy.h"
+#include "Channels/MovieSceneChannel.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneTrack)
+
+int32 GMovieSceneRemoveMutedTracksOnCook = 0;
+static FAutoConsoleVariableRef CVarMovieSceneRemoveMutedTracksOnCook(
+	TEXT("MovieScene.RemoveMutedTracksOnCook"),
+	GMovieSceneRemoveMutedTracksOnCook,
+	TEXT("If 1 remove muted tracks on cook, otherwise leave as is."),
+	ECVF_Default);
+
 UMovieSceneTrack::UMovieSceneTrack(const FObjectInitializer& InInitializer)
 	: Super(InInitializer)
 {
@@ -225,6 +237,8 @@ int32 UMovieSceneTrack::GetMaxRowIndex() const
 
 bool UMovieSceneTrack::FixRowIndices()
 {
+	TMap<int32, int32> NewToOldRowIndices;
+
 	bool bFixesMade = false;
 	TArray<UMovieSceneSection*> Sections = GetAllSections();
 	if (SupportsMultipleRows())
@@ -247,13 +261,22 @@ bool UMovieSceneTrack::FixRowIndices()
 				{
 					if (SectionForIndex->GetRowIndex() != NewIndex)
 					{
+						int32 OldIndex = SectionForIndex->GetRowIndex();
 						SectionForIndex->Modify();
 						SectionForIndex->SetRowIndex(NewIndex);
+						NewToOldRowIndices.FindOrAdd(NewIndex, OldIndex);
 						bFixesMade = true;
 					}
 				}
 				++NewIndex;
 			}
+		}
+
+		// If there aren't multiple rows (ie. max row is 0), there shouldn't be any disabled rows either
+		if (GetMaxRowIndex() == 0 && !RowsDisabled.IsEmpty())
+		{
+			Modify();
+			RowsDisabled.Empty();
 		}
 	}
 	else
@@ -268,8 +291,45 @@ bool UMovieSceneTrack::FixRowIndices()
 			}
 		}
 	}
+
+	if (NewToOldRowIndices.Num())
+	{
+		OnRowIndicesChanged(NewToOldRowIndices);
+	}
 	return bFixesMade;
 }
+
+#if WITH_EDITOR
+
+ECookOptimizationFlags UMovieSceneTrack::GetCookOptimizationFlags() const
+{
+	if (RemoveMutedTracksOnCook() && IsEvalDisabled())
+	{
+		return ECookOptimizationFlags::RemoveTrack;
+	}
+	return ECookOptimizationFlags::None; 
+}
+
+void UMovieSceneTrack::RemoveForCook()
+{
+	Modify();
+
+	for (UMovieSceneSection* Section : GetAllSections())
+	{
+		if (Section)
+		{
+			Section->RemoveForCook();
+		}
+	}
+	RemoveAllAnimationData();
+}
+
+bool UMovieSceneTrack::RemoveMutedTracksOnCook()
+{
+	return CVarMovieSceneRemoveMutedTracksOnCook->GetInt() != 0;
+}
+
+#endif
 
 bool UMovieSceneTrack::IsRowEvalDisabled(int32 RowIndex) const
 {
@@ -380,6 +440,11 @@ const FMovieSceneTrackEvaluationField& UMovieSceneTrack::GetEvaluationField()
 	return EvaluationField;
 }
 
+void UMovieSceneTrack::ForceUpdateEvaluationTree()
+{
+	UpdateEvaluationTree();
+}
+
 void UMovieSceneTrack::UpdateEvaluationTree()
 {
 	TMovieSceneEvaluationTree<FMovieSceneTrackEvaluationData> EvaluationTree;
@@ -409,7 +474,7 @@ void UMovieSceneTrack::UpdateEvaluationTree()
 			for (const FMovieSceneTrackEvaluationData& TrackData : TrackDataIt)
 			{
 				UMovieSceneSection* Section = TrackData.Section.Get();
-				SectionToEntry.FindOrAdd(Section).Add(FMovieSceneTrackEvaluationFieldEntry{ Section, Range, TrackData.ForcedTime, TrackData.Flags, TrackData.SortOrder });
+				SectionToEntry.FindOrAdd(Section).Add(FMovieSceneTrackEvaluationFieldEntry{decltype(FMovieSceneTrackEvaluationFieldEntry::Section)(Section), Range, TrackData.ForcedTime, TrackData.Flags, TrackData.SortOrder });
 			}
 		}
 		else
@@ -444,7 +509,7 @@ void UMovieSceneTrack::UpdateEvaluationTree()
 			int32 NumToConsolidate = Index - StartIndex;
 			if (NumToConsolidate > 0)
 			{
-				Pair.Value.RemoveAt(StartIndex + 1, NumToConsolidate, false);
+				Pair.Value.RemoveAt(StartIndex + 1, NumToConsolidate, EAllowShrinking::No);
 				NumEntries -= NumToConsolidate;
 			}
 		}
@@ -461,3 +526,4 @@ void UMovieSceneTrack::UpdateEvaluationTree()
 	EvaluationFieldVersion = GetEvaluationFieldVersion();
 #endif
 }
+

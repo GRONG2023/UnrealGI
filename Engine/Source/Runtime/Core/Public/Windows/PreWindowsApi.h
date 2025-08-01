@@ -2,17 +2,22 @@
 
 // #TODO: redirect to platform-agnostic version for the time being. Eventually this will become an error
 #include "HAL/Platform.h"
-#if !PLATFORM_WINDOWS && !PLATFORM_HOLOLENS
+#if !PLATFORM_WINDOWS
 	#include "Microsoft/PreWindowsApi.h"
 #else
 
-// Disable the warning that the pack size is changed in this header.
-#ifdef __clang__
-	#pragma clang diagnostic push
-	#pragma clang diagnostic ignored "-Wpragma-pack"
-#else	// __clang__
+// this file should only be included from WindowsHWrapper.h
+#if !defined(WINDOWS_H_WRAPPER_GUARD) 
+#pragma message("WARNING: do not include Windows/PreWindowsApi.h directly. Use Windows/WindowsHWrapper.h or Windows/AllowWindowsPlatformTypes.h instead") 
+#endif
+
+// Disable the warning that the pack size is changed in this header. We do this globally for
+// clang, since the mechanism of using a sub-header to modify packing generates a -Wpragma-pack
+// warning about modifying packing alignemnt in a header.
+#if !defined(__clang__)
 	#pragma warning(disable:4103)
 #endif	// __clang__
+
 
 // The 10.0.18362.0 SDK introduces an error if the packing isn't the default for the platform.
 PRAGMA_PUSH_PLATFORM_DEFAULT_PACKING

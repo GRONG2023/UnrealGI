@@ -1,8 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AITypes.h"
+#include "GameFramework/Actor.h"
 #include "UObject/Package.h"
 #include "Navigation/PathFollowingComponent.h"
+#include "NavFilters/NavigationQueryFilter.h"
 
 //----------------------------------------------------------------------//
 // FAIResourceLock
@@ -160,31 +162,31 @@ const FAIRequestID FAIRequestID::CurrentRequest(FAIRequestID::AnyRequestID);
 FAIMoveRequest::FAIMoveRequest() : 
 	GoalActor(nullptr), GoalLocation(FAISystem::InvalidLocation), FilterClass(nullptr),
 	bInitialized(false), bMoveToActor(false),
-	bUsePathfinding(true), bAllowPartialPath(true), bProjectGoalOnNavigation(true),
+	bUsePathfinding(true), bAllowPartialPath(true), bRequireNavigableEndLocation(true), bApplyCostLimitFromHeuristic(false), bProjectGoalOnNavigation(true),
 	bReachTestIncludesAgentRadius(true), bReachTestIncludesGoalRadius(true), bCanStrafe(false),
+	AcceptanceRadius(UPathFollowingComponent::DefaultAcceptanceRadius), CostLimitFactor(FLT_MAX), MinimumCostLimit(0.f),
 	UserFlags(0)
 {
-	AcceptanceRadius = UPathFollowingComponent::DefaultAcceptanceRadius;
 }
 
 FAIMoveRequest::FAIMoveRequest(const AActor* InGoalActor) :
 	GoalActor(const_cast<AActor*>(InGoalActor)), GoalLocation(FAISystem::InvalidLocation), FilterClass(nullptr),
 	bInitialized(true), bMoveToActor(true),
-	bUsePathfinding(true), bAllowPartialPath(true), bProjectGoalOnNavigation(true),
+	bUsePathfinding(true), bAllowPartialPath(true), bRequireNavigableEndLocation(true), bApplyCostLimitFromHeuristic(false), bProjectGoalOnNavigation(true),
 	bReachTestIncludesAgentRadius(true), bReachTestIncludesGoalRadius(true), bCanStrafe(false),
+	AcceptanceRadius(UPathFollowingComponent::DefaultAcceptanceRadius), CostLimitFactor(FLT_MAX), MinimumCostLimit(0.f),
 	UserFlags(0)
 {
-	AcceptanceRadius = UPathFollowingComponent::DefaultAcceptanceRadius;
 }
 
 FAIMoveRequest::FAIMoveRequest(const FVector& InGoalLocation) :
 	GoalActor(nullptr), GoalLocation(InGoalLocation), FilterClass(nullptr),
 	bInitialized(true), bMoveToActor(false),
-	bUsePathfinding(true), bAllowPartialPath(true), bProjectGoalOnNavigation(true),
+	bUsePathfinding(true), bAllowPartialPath(true), bRequireNavigableEndLocation(true), bApplyCostLimitFromHeuristic(false), bProjectGoalOnNavigation(true),
 	bReachTestIncludesAgentRadius(true), bReachTestIncludesGoalRadius(true), bCanStrafe(false),
+	AcceptanceRadius(UPathFollowingComponent::DefaultAcceptanceRadius), CostLimitFactor(FLT_MAX), MinimumCostLimit(0.f),
 	UserFlags(0)
 {
-	AcceptanceRadius = UPathFollowingComponent::DefaultAcceptanceRadius;
 }
 
 void FAIMoveRequest::SetGoalActor(const AActor* InGoalActor)
@@ -206,6 +208,11 @@ void FAIMoveRequest::SetGoalLocation(const FVector& InGoalLocation)
 	}
 }
 
+FVector FAIMoveRequest::GetDestination() const
+{
+	return bMoveToActor ? (GoalActor.IsValid() ? GoalActor->GetActorLocation() : FAISystem::InvalidLocation) : GoalLocation;
+}
+
 bool FAIMoveRequest::UpdateGoalLocation(const FVector& NewLocation) const
 {
 	if (!bMoveToActor)
@@ -220,19 +227,10 @@ bool FAIMoveRequest::UpdateGoalLocation(const FVector& NewLocation) const
 FString FAIMoveRequest::ToString() const
 {
 	return FString::Printf(TEXT("%s(%s) Mode(%s) Filter(%s) AcceptanceRadius(%.1f%s)"),
-		bMoveToActor ? TEXT("Actor") : TEXT("Location"), bMoveToActor ? *GetNameSafe(GoalActor) : *GoalLocation.ToString(),
+		bMoveToActor ? TEXT("Actor") : TEXT("Location"), bMoveToActor ? *GetNameSafe(GoalActor.Get()) : *GoalLocation.ToString(),
 		bUsePathfinding ? (bAllowPartialPath ? TEXT("partial path") : TEXT("complete path")) : TEXT("direct"),
 		*GetNameSafe(FilterClass),
 		AcceptanceRadius, bReachTestIncludesAgentRadius || (bMoveToActor && bReachTestIncludesGoalRadius) ? TEXT(" + overlap") : TEXT("")
 		);
 }
 
-FAIMoveRequest& FAIMoveRequest::SetStopOnOverlap(bool bStop)
-{
-	return SetReachTestIncludesAgentRadius(bStop);
-}
-
-bool FAIMoveRequest::CanStopOnOverlap() const
-{
-	return IsReachTestIncludingAgentRadius();
-}

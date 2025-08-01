@@ -2,8 +2,10 @@
 
 #pragma once
 
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "CoreMinimal.h"
 #include "Stats/Stats.h"
+#endif
 #include "UObject/ObjectMacros.h"
 #include "Templates/SubclassOf.h"
 #include "GameFramework/Actor.h"
@@ -32,7 +34,7 @@ struct FNavTestTickHelper : FTickableGameObject
 UENUM()
 namespace ENavCostDisplay
 {
-	enum Type
+	enum Type : int
 	{
 		TotalCost,
 		HeuristicOnly,
@@ -40,23 +42,23 @@ namespace ENavCostDisplay
 	};
 }
 
-UCLASS(hidecategories=(Object, Actor, Input, Rendering, Replication, LOD, Cooking), showcategories=("Input|MouseInput", "Input|TouchInput"), Blueprintable)
-class NAVIGATIONSYSTEM_API ANavigationTestingActor : public AActor, public INavAgentInterface, public INavPathObserverInterface
+UCLASS(hidecategories=(Object, Actor, Input, Rendering, Replication, HLOD, Cooking), showcategories=("Input|MouseInput", "Input|TouchInput"), Blueprintable, MinimalAPI)
+class ANavigationTestingActor : public AActor, public INavAgentInterface, public INavPathObserverInterface
 {
 	GENERATED_UCLASS_BODY()
 
 private:
 	UPROPERTY()
-	class UCapsuleComponent* CapsuleComponent;
+	TObjectPtr<class UCapsuleComponent> CapsuleComponent;
 
 #if WITH_EDITORONLY_DATA
 	/** Editor Preview */
 	UPROPERTY()
-	class UNavTestRenderingComponent* EdRenderComp;
+	TObjectPtr<class UNavTestRenderingComponent> EdRenderComp;
 #endif // WITH_EDITORONLY_DATA
 
 	UPROPERTY(EditAnywhere, Category = Navigation, meta=(EditCondition="bActAsNavigationInvoker"))
-	UNavigationInvokerComponent* InvokerComponent;
+	TObjectPtr<UNavigationInvokerComponent> InvokerComponent;
 
 	UPROPERTY(EditAnywhere, Category = Navigation, meta=(InlineEditConditionToggle))
 	uint32 bActAsNavigationInvoker : 1;
@@ -71,7 +73,7 @@ public:
 	FVector QueryingExtent;
 
 	UPROPERTY(transient)
-	ANavigationData* MyNavData;
+	TObjectPtr<ANavigationData> MyNavData;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category=AgentStatus)
 	FVector ProjectedLocation;
@@ -84,7 +86,7 @@ public:
 	uint32 bSearchStart : 1;
 
 	/** this multiplier is used to compute a max node cost allowed to the open list
-	 *	(cost limit = CostLimitFacotr*InitialHeuristicEstimate) */
+	 *	(cost limit = CostLimitFactor*InitialHeuristicEstimate) */
 	UPROPERTY(EditAnywhere, Category=Pathfinding, meta = (ClampMin = "0", UIMin = "0"))
 	float CostLimitFactor;
 
@@ -107,9 +109,17 @@ public:
 	UPROPERTY(EditAnywhere, Category=Pathfinding)
 	uint32 bGatherDetailedInfo : 1;
 
+	/** if set, require the end location to be close to the navigation data. The tolerance is controlled by QueryingExtent */
+	UPROPERTY(EditAnywhere, Category=Pathfinding)
+	uint32 bRequireNavigableEndLocation : 1;
+
 	UPROPERTY(EditAnywhere, Category=Query)
 	uint32 bDrawDistanceToWall : 1;
 
+	/** If set, a cylinder is drawn to indicate if the navigation data is ready (has been generated) for the given radius (green when ready, red otherwise). */
+	UPROPERTY(EditAnywhere, Category=Query)
+	uint32 bDrawIfNavDataIsReadyInRadius : 1;
+	
 	/** show polys from open (orange) and closed (yellow) sets */
 	UPROPERTY(EditAnywhere, Category=Debug)
 	uint32 bShowNodePool : 1;
@@ -125,6 +135,10 @@ public:
 	UPROPERTY(EditAnywhere, Category=Debug)
 	uint32 bShouldBeVisibleInGame : 1;
 
+	/** NavData must be ready for all tiles within radius. When using 0, NavData must be ready at the actor location. */
+	UPROPERTY(EditAnywhere, Category=Query)
+	float RadiusUsedToValidateNavData = 0;
+	
 	/** determines which cost will be shown*/
 	UPROPERTY(EditAnywhere, Category=Debug)
 	TEnumAsByte<ENavCostDisplay::Type> CostDisplayMode;
@@ -147,25 +161,28 @@ public:
 	float PathfindingTime;
 
 	UPROPERTY(transient, VisibleAnywhere, BlueprintReadOnly, Category=PathfindingStatus)
-	float PathCost;
+	double PathCost;
 
 	UPROPERTY(transient, VisibleAnywhere, BlueprintReadOnly, Category=PathfindingStatus)
 	int32 PathfindingSteps;
 
 	UPROPERTY(EditAnywhere, Category=Pathfinding)
-	ANavigationTestingActor* OtherActor;
+	TObjectPtr<ANavigationTestingActor> OtherActor;
 
 	/** "None" will result in default filter being used */
 	UPROPERTY(EditAnywhere, Category=Pathfinding)
 	TSubclassOf<class UNavigationQueryFilter> FilterClass;
 
-	UPROPERTY(transient, EditInstanceOnly, Category=Debug, meta=(ClampMin="-1", UIMin="-1"))
+	/** Show debug steps up to this index. Use -1 to disable. */
+	UPROPERTY(EditInstanceOnly, Category=Debug, meta=(ClampMin="-1", UIMin="-1"))
 	int32 ShowStepIndex;
 
 	UPROPERTY(EditAnywhere, Category=Pathfinding)
 	float OffsetFromCornersDistance;
 
 	FVector ClosestWallLocation;
+	
+	bool bNavDataIsReadyInRadius;
 
 #if WITH_RECAST && WITH_EDITORONLY_DATA
 	/** detail data gathered from each step of regular A* algorithm */
@@ -178,22 +195,22 @@ public:
 	FNavigationPath::FPathObserverDelegate::FDelegate PathObserver;
 
 	/** Dtor */
-	virtual ~ANavigationTestingActor();
+	NAVIGATIONSYSTEM_API virtual ~ANavigationTestingActor();
 
-	virtual void BeginDestroy() override;
+	NAVIGATIONSYSTEM_API virtual void BeginDestroy() override;
 
 #if WITH_EDITOR
-	virtual void PreEditChange(FProperty* PropertyThatWillChange) override;
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
-	virtual void PostEditMove(bool bFinished) override;
+	NAVIGATIONSYSTEM_API virtual void PreEditChange(FProperty* PropertyThatWillChange) override;
+	NAVIGATIONSYSTEM_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	NAVIGATIONSYSTEM_API virtual void PostEditMove(bool bFinished) override;
 	
-	virtual void PostLoad() override;
-	void TickMe();
+	NAVIGATIONSYSTEM_API virtual void PostLoad() override;
+	NAVIGATIONSYSTEM_API void TickMe();
 #endif // WITH_EDITOR
 
 	//~ Begin INavAgentInterface Interface
 	virtual const FNavAgentProperties& GetNavAgentPropertiesRef() const override { return NavAgentProps; }
-	virtual FVector GetNavAgentLocation() const override;
+	NAVIGATIONSYSTEM_API virtual FVector GetNavAgentLocation() const override;
 	virtual void GetMoveGoalReachTest(const AActor* MovingActor, const FVector& MoveOffset, FVector& GoalOffset, float& GoalRadius, float& GoalHalfHeight) const override {}
 	//~ End INavAgentInterface Interface
 
@@ -203,20 +220,19 @@ public:
 	virtual void OnPathFailed(class INavigationPathGenerator* PathGenerator) override {};
 	//~ End INavPathObserverInterface Interface	
 
-	void UpdateNavData();
-	void UpdatePathfinding();
-	void GatherDetailedData(ANavigationTestingActor* Goal);
-	void SearchPathTo(ANavigationTestingActor* Goal);
+	NAVIGATIONSYSTEM_API void UpdateNavData();
+	NAVIGATIONSYSTEM_API void UpdatePathfinding();
+	NAVIGATIONSYSTEM_API virtual void SearchPathTo(ANavigationTestingActor* Goal);
 
 	/*	Called when given path becomes invalid (via @see PathObserverDelegate)
 	 *	NOTE: InvalidatedPath doesn't have to be instance's current Path
 	 */
-	void OnPathEvent(FNavigationPath* InvalidatedPath, ENavPathEvent::Type Event);
+	NAVIGATIONSYSTEM_API void OnPathEvent(FNavigationPath* InvalidatedPath, ENavPathEvent::Type Event);
 
 	// Virtual method to override if you want to customize the query being 
 	// constructed for the path find (e.g. change the filter or add 
 	// constraints/goal evaluators).
-	virtual FPathFindingQuery BuildPathFindingQuery(const ANavigationTestingActor* Goal) const;
+	NAVIGATIONSYSTEM_API virtual FPathFindingQuery BuildPathFindingQuery(const ANavigationTestingActor* Goal) const;
 
 	/** Returns CapsuleComponent subobject **/
 	class UCapsuleComponent* GetCapsuleComponent() const { return CapsuleComponent; }
@@ -226,5 +242,6 @@ public:
 #endif
 
 protected:
-	FVector FindClosestWallLocation() const;
+	NAVIGATIONSYSTEM_API FVector FindClosestWallLocation() const;
+	bool CheckIfNavDataIsReadyInRadius();
 };

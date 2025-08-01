@@ -1,12 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/ViewportStatsSubsystem.h"
+#include "CanvasItem.h"
 #include "Engine/World.h"
-#include "Logging/LogMacros.h"
-#include "UnrealClient.h"		// FViewport
+#include "CanvasTypes.h"
 #include "Engine/Engine.h"      // GEngine
-#include "Engine/Canvas.h"		// FCanvas, UCanvas
 #include "TimerManager.h"		// FTimerDelegate, FTimerHandle
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ViewportStatsSubsystem)
 
 DECLARE_LOG_CATEGORY_EXTERN(LogViewportStatsSubsystem, Log, All);
 DEFINE_LOG_CATEGORY(LogViewportStatsSubsystem);
@@ -63,7 +64,7 @@ void UViewportStatsSubsystem::Draw(FViewport* Viewport, FCanvas* Canvas, UCanvas
 	{
 		SmallTextItem.Text = Message->DisplayText;
 		SmallTextItem.SetColor(Message->DisplayColor);
-		Canvas->DrawItem(SmallTextItem, MessagePos);
+		Canvas->DrawItem(SmallTextItem, MessagePos + Message->DisplayOffset);
 
 		MessagePos.Y += FontSizeY;
 	}
@@ -105,7 +106,7 @@ void UViewportStatsSubsystem::RemoveDisplayDelegate(const int32 IndexToRemove)
 	}
 }
 
-void UViewportStatsSubsystem::AddTimedDisplay(FText Text, FLinearColor Color, float Duration)
+void UViewportStatsSubsystem::AddTimedDisplay(FText Text, FLinearColor Color, float Duration, const FVector2D& DisplayOffset /* = FVector2D::ZeroVector */)
 {
 	UWorld* MyWorld = GetWorld();
 	
@@ -114,7 +115,7 @@ void UViewportStatsSubsystem::AddTimedDisplay(FText Text, FLinearColor Color, fl
 		return;
 	}
 
-	TSharedPtr<FUniqueDisplayData> Message = MakeShared<FUniqueDisplayData>(Text, Color);
+	TSharedPtr<FUniqueDisplayData> Message = MakeShared<FUniqueDisplayData>(Text, Color, DisplayOffset);
 	UniqueDisplayMessages.Add(Message);
 
 	// If the user has specified a duration, then remove the message after it
@@ -123,17 +124,18 @@ void UViewportStatsSubsystem::AddTimedDisplay(FText Text, FLinearColor Color, fl
 		FTimerDelegate TimerDel;
 		FTimerHandle TimerHandle;
 
-		auto RemoveAfterSecondsLambda = [](TSharedPtr<FUniqueDisplayData> DisplayItem, TArray<TSharedPtr<FUniqueDisplayData>>* ConditionArray)
+		auto RemoveAfterSecondsLambda = [](TWeakPtr<FUniqueDisplayData> DisplayItem, TArray<TSharedPtr<FUniqueDisplayData>>* ConditionArray)
 		{
-			if(DisplayItem.IsValid() && ConditionArray)
+			if (DisplayItem.IsValid() && ConditionArray)
 			{
-				ConditionArray->Remove(DisplayItem);
+				ConditionArray->Remove(DisplayItem.Pin());
 			}
 		};
 
-		TimerDel.BindLambda(RemoveAfterSecondsLambda, Message, &UniqueDisplayMessages);
+		TimerDel.BindLambda(RemoveAfterSecondsLambda, TWeakPtr<FUniqueDisplayData>(Message), &UniqueDisplayMessages);
 		MyWorld->GetTimerManager().SetTimer(TimerHandle, TimerDel, Duration, /* bInLoop= */ false);
 	}
 }
 
 #undef LOCTEXT_NAMESPACE
+

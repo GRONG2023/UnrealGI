@@ -10,6 +10,7 @@ LandscapeLight.cpp: Static lighting for LandscapeComponents
 #include "LandscapeProxy.h"
 #include "LandscapeInfo.h"
 #include "LightMap.h"
+#include "Engine/Level.h"
 #include "Engine/MapBuildDataRegistry.h"
 #include "Components/LightComponent.h"
 #include "ShadowMap.h"
@@ -46,7 +47,7 @@ FStaticLightingTextureMapping(
 void FLandscapeStaticLightingTextureMapping::Apply(FQuantizedLightmapData* QuantizedData, const TMap<ULightComponent*,FShadowMapData2D*>& ShadowMapData, ULevel* LightingScenario)
 {
 	static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.VirtualTexturedLightmaps"));
-	const bool bUseVirtualTextures = (CVar->GetValueOnAnyThread() != 0) && UseVirtualTexturing(GMaxRHIFeatureLevel);
+	const bool bUseVirtualTextures = (CVar->GetValueOnAnyThread() != 0) && UseVirtualTexturing(GMaxRHIShaderPlatform);
 
 	//ELightMapPaddingType PaddingType = GAllowLightmapPadding ? LMPT_NormalPadding : LMPT_NoPadding;
 	ELightMapPaddingType PaddingType = LMPT_NoPadding;
@@ -173,6 +174,28 @@ FLandscapeStaticLightingMesh::~FLandscapeStaticLightingMesh()
 
 namespace
 {
+	template <typename T, typename U>
+	T MultiLerp(T A, T B, U F1, T C, T D, U F2, U F3)
+	{
+		return static_cast<T>(FMath::RoundToInt32(
+			FMath::Lerp<float>(
+				FMath::Lerp<float>(A, B, F1),
+				FMath::Lerp<float>(C, D, F2),
+				F3
+			)
+		));
+	}
+
+	template <typename U>
+	float MultiLerp(int32 A, int32 B, U F1, int32 C, int32 D, U F2, U F3)
+	{
+		return FMath::Lerp(
+			FMath::Lerp(static_cast<float>(A), static_cast<float>(B), static_cast<float>(F1)),
+			FMath::Lerp(static_cast<float>(C), static_cast<float>(D), static_cast<float>(F2)),
+			static_cast<float>(F3)
+		);
+	}
+
 	void GetLODData(ULandscapeComponent* LandscapeComponent, int32 X, int32 Y, int32 HeightmapOffsetX, int32 HeightmapOffsetY, int32 LODValue, int32 HeightmapStride, FColor& OutHeight, FColor& OutXYOffset)
 	{
 		int32 ComponentSize = ((LandscapeComponent->SubsectionSizeQuads + 1) * LandscapeComponent->NumSubsections) >> LODValue;
@@ -180,8 +203,8 @@ namespace
 		int32 LODHeightmapSizeY = LandscapeComponent->GetHeightmap()->Source.GetSizeY() >> LODValue;
 		float Ratio = (float)(LODHeightmapSizeX) / (HeightmapStride);
 
-		int32 CurrentHeightmapOffsetX = FMath::RoundToInt((float)(LODHeightmapSizeX) * LandscapeComponent->HeightmapScaleBias.Z);
-		int32 CurrentHeightmapOffsetY = FMath::RoundToInt((float)(LODHeightmapSizeY) * LandscapeComponent->HeightmapScaleBias.W);
+		int32 CurrentHeightmapOffsetX = FMath::RoundToInt32(LODHeightmapSizeX * LandscapeComponent->HeightmapScaleBias.Z);
+		int32 CurrentHeightmapOffsetY = FMath::RoundToInt32(LODHeightmapSizeY * LandscapeComponent->HeightmapScaleBias.W);
 
 		float XX = FMath::Clamp<float>((X - HeightmapOffsetX) * Ratio, 0.f, ComponentSize - 1.f) + CurrentHeightmapOffsetX;
 		int32 XI = (int32)XX;
@@ -200,12 +223,9 @@ namespace
 		FColor H3 = HeightMipData[XI + FMath::Min(YI + 1, LODHeightmapSizeY - 1) * LODHeightmapSizeX];
 		FColor H4 = HeightMipData[FMath::Min(XI + 1, LODHeightmapSizeX - 1) + FMath::Min(YI + 1, LODHeightmapSizeY - 1) * LODHeightmapSizeX];
 
-		uint16 Height = FMath::RoundToInt(FMath::Lerp(FMath::Lerp<float>(((H1.R << 8) + H1.G), ((H2.R << 8) + H2.G), XF),
-			FMath::Lerp<float>(((H3.R << 8) + H3.G), ((H4.R << 8) + H4.G), XF), YF));
-		uint8 B = FMath::RoundToInt(FMath::Lerp(FMath::Lerp<float>((H1.B), (H2.B), XF),
-			FMath::Lerp<float>((H3.B), (H4.B), XF), YF));
-		uint8 A = FMath::RoundToInt(FMath::Lerp<float>(FMath::Lerp((H1.A), (H2.A), XF),
-			FMath::Lerp<float>((H3.A), (H4.A), XF), YF));
+		uint16 Height = MultiLerp<uint16, float>((H1.R << 8) + H1.G, (H2.R << 8) + H2.G, XF, (H3.R << 8) + H3.G, (H4.R << 8) + H4.G, XF, YF);
+		uint8 B = MultiLerp<uint8, float>(H1.B, H2.B, XF, H3.B, H4.B, XF, YF);
+		uint8 A = MultiLerp<uint8, float>(H1.A, H2.A, XF, H3.A, H4.A, XF, YF);
 
 		OutHeight = FColor((Height >> 8), Height & 255, B, A);
 
@@ -216,10 +236,8 @@ namespace
 			FColor X3 = XYOffsetMipData[XI + FMath::Min(YI + 1, LODHeightmapSizeY - 1) * LODHeightmapSizeX];
 			FColor X4 = XYOffsetMipData[FMath::Min(XI + 1, LODHeightmapSizeX - 1) + FMath::Min(YI + 1, LODHeightmapSizeY - 1) * LODHeightmapSizeX];
 
-			uint16 XComp = FMath::RoundToInt(FMath::Lerp(FMath::Lerp<float>(((X1.R << 8) + X1.G), ((X2.R << 8) + X2.G), XF),
-				FMath::Lerp<float>(((X3.R << 8) + X3.G), ((X4.R << 8) + X4.G), XF), YF));
-			uint16 YComp = FMath::RoundToInt(FMath::Lerp(FMath::Lerp<float>(((X1.B << 8) + X1.A), ((X2.B << 8) + X2.A), XF),
-				FMath::Lerp<float>(((X3.B << 8) + X3.A), ((X4.B << 8) + X4.A), XF), YF));
+			uint16 XComp = MultiLerp<uint16, float>((X1.R << 8) + X1.G, (X2.R << 8) + X2.G, XF, (X3.R << 8) + X3.G, (X4.R << 8) + X4.G, XF, YF);
+			uint16 YComp = MultiLerp<uint16, float>((X1.B << 8) + X1.A, (X2.B << 8) + X2.A, XF, (X3.B << 8) + X3.A, (X4.B << 8) + X4.A, XF, YF);
 
 			OutXYOffset = FColor((XComp >> 8), XComp & 255, YComp >> 8, YComp & 255);
 		}
@@ -248,7 +266,7 @@ namespace
 				}
 
 				ULandscapeComponent* Neighbor = Info->XYtoComponentMap.FindRef(ComponentBase + FIntPoint(x, y));
-				int32 NeighborLOD = -1;
+				int32 NeighborLOD;
 
 				if (Neighbor)
 				{
@@ -320,40 +338,28 @@ namespace
 						FVector2D XY(float(X - DataInterface.HeightmapComponentOffsetX) / (ComponentSize - 1), float(Y - DataInterface.HeightmapComponentOffsetY) / (ComponentSize - 1));
 						XY = XY - 0.5f;
 
-						float RealLOD = GeometryLOD;
+						float RealLOD;
 
 						if (XY.X < 0.f)
 						{
 							if (XY.Y < 0.f)
 							{
-								RealLOD = FMath::Lerp(
-									FMath::Lerp<float>(NeighborLODs[0], NeighborLODs[1], XY.X + 1.f),
-									FMath::Lerp<float>(NeighborLODs[3], GeometryLOD, XY.X + 1.f),
-									XY.Y + 1.f); // 0
+								RealLOD = MultiLerp(NeighborLODs[0], NeighborLODs[1], XY.X + 1.f, NeighborLODs[3], GeometryLOD, XY.X + 1.f, XY.Y + 1.f); // 0
 							}
 							else
 							{
-								RealLOD = FMath::Lerp(
-									FMath::Lerp<float>(NeighborLODs[3], GeometryLOD, XY.X + 1.f),
-									FMath::Lerp<float>(NeighborLODs[5], NeighborLODs[6], XY.X + 1.f),
-									XY.Y); // 2
+								RealLOD = MultiLerp(NeighborLODs[3], GeometryLOD, XY.X + 1.f, NeighborLODs[5], NeighborLODs[6], XY.X + 1.f, XY.Y); // 2
 							}
 						}
 						else
 						{
 							if (XY.Y < 0.f)
 							{
-								RealLOD = FMath::Lerp(
-									FMath::Lerp<float>(NeighborLODs[1], NeighborLODs[2], XY.X),
-									FMath::Lerp<float>(GeometryLOD, NeighborLODs[4], XY.X),
-									XY.Y + 1.f); // 1
+								RealLOD = MultiLerp(NeighborLODs[1], NeighborLODs[2], XY.X, GeometryLOD, NeighborLODs[4], XY.X, XY.Y + 1.f); // 1
 							}
 							else
 							{
-								RealLOD = FMath::Lerp(
-									FMath::Lerp<float>(GeometryLOD, NeighborLODs[4], XY.X),
-									FMath::Lerp<float>(NeighborLODs[6], NeighborLODs[7], XY.X),
-									XY.Y); // 3
+								RealLOD = MultiLerp(GeometryLOD, NeighborLODs[4], XY.X, NeighborLODs[6], NeighborLODs[7], XY.X, XY.Y); // 3
 							}
 						}
 
@@ -374,23 +380,23 @@ namespace
 								FMath::Min(MaxLOD, LODValue + 1), HeightmapStride, Height[1], XYOffset[1]);
 
 							// Need interpolation
-							uint16 Height0 = (Height[0].R << 8) + Height[0].G;
-							uint16 Height1 = (Height[1].R << 8) + Height[1].G;
-							uint16 LerpHeight = FMath::RoundToInt(FMath::Lerp<float>(Height0, Height1, MorphAlpha));
+							const uint16 Height0 = (Height[0].R << 8) + Height[0].G;
+							const uint16 Height1 = (Height[1].R << 8) + Height[1].G;
+							const uint16 LerpHeight = static_cast<uint16>(FMath::RoundToInt32(FMath::Lerp<float>(Height0, Height1, MorphAlpha)));
 
 							CompHeightData[X + Y * HeightmapStride] =
 								FColor((LerpHeight >> 8), LerpHeight & 255,
-								FMath::RoundToInt(FMath::Lerp<float>(Height[0].B, Height[1].B, MorphAlpha)),
-								FMath::RoundToInt(FMath::Lerp<float>(Height[0].A, Height[1].A, MorphAlpha)));
+								static_cast<uint8>(FMath::RoundToInt32(FMath::Lerp<float>(Height[0].B, Height[1].B, MorphAlpha))),
+								static_cast<uint8>(FMath::RoundToInt32(FMath::Lerp<float>(Height[0].A, Height[1].A, MorphAlpha))));
 							if (LandscapeComponent->XYOffsetmapTexture)
 							{
 								uint16 XComp0 = (XYOffset[0].R << 8) + XYOffset[0].G;
 								uint16 XComp1 = (XYOffset[1].R << 8) + XYOffset[1].G;
-								uint16 LerpXComp = FMath::RoundToInt(FMath::Lerp<float>(XComp0, XComp1, MorphAlpha));
+								uint16 LerpXComp = static_cast<uint16>(FMath::RoundToInt32(FMath::Lerp<float>(XComp0, XComp1, MorphAlpha)));
 
 								uint16 YComp0 = (XYOffset[0].B << 8) + XYOffset[0].A;
 								uint16 YComp1 = (XYOffset[1].B << 8) + XYOffset[1].A;
-								uint16 LerpYComp = FMath::RoundToInt(FMath::Lerp<float>(YComp0, YComp1, MorphAlpha));
+								uint16 LerpYComp = static_cast<uint16>(FMath::RoundToInt32(FMath::Lerp<float>(YComp0, YComp1, MorphAlpha)));
 
 								CompXYOffsetData[X + Y * HeightmapStride] =
 									FColor(LerpXComp >> 8, LerpXComp & 255, LerpYComp >> 8, LerpYComp & 255);
@@ -427,7 +433,7 @@ void FLandscapeStaticLightingMesh::GetHeightmapData(int32 InLOD, int32 GeometryL
 	check(Info);
 
 	bool bUseRenderedWPO = LandscapeComponent->GetLandscapeProxy()->bUseMaterialPositionOffsetInStaticLighting &&
-	                       LandscapeComponent->GetLandscapeMaterial()->GetMaterial()->WorldPositionOffset.IsConnected();
+		LandscapeComponent->GetLandscapeMaterial()->GetMaterial()->IsPropertyConnected(MP_WorldPositionOffset);
 
 	HeightData.Empty(FMath::Square(NumVertices));
 	HeightData.AddUninitialized(FMath::Square(NumVertices));
@@ -440,8 +446,6 @@ void FLandscapeStaticLightingMesh::GetHeightmapData(int32 InLOD, int32 GeometryL
 	// assume that ExpandQuad size <= SubsectionSizeQuads...
 	check(ExpandQuadsX <= SubsectionSizeQuads);
 	check(ExpandQuadsY <= SubsectionSizeQuads);
-
-	int32 MaxLOD = FMath::CeilLogTwo(LandscapeComponent->SubsectionSizeQuads + 1) - 1;
 
 	// copy heightmap data for this component...
 	{
@@ -458,7 +462,8 @@ void FLandscapeStaticLightingMesh::GetHeightmapData(int32 InLOD, int32 GeometryL
 			RenderedWPOData = LandscapeComponent->RenderWPOHeightmap(InLOD);
 		}
 
-		for (int32 Y = 0; Y < ComponentSizeQuads + 1; Y++)
+		const int32 ComponentSizeVerts = ComponentSizeQuads + 1;
+		for (int32 Y = 0; Y < ComponentSizeVerts; Y++)
 		{
 			const FColor* const Data = DataInterface.GetHeightData(0, Y);
 
@@ -475,8 +480,8 @@ void FLandscapeStaticLightingMesh::GetHeightmapData(int32 InLOD, int32 GeometryL
 			if (bUseRenderedWPO && RenderedWPOData.Num())
 			{
 				const int32 HeightDataOffset = ExpandQuadsX + (Y + ExpandQuadsY) * NumVertices;
-				const int32 WPODataOffset    = Y * (ComponentSizeQuads + 1);
-				for (int32 X = 0; X < ComponentSizeQuads; ++X)
+				const int32 WPODataOffset    = Y * ComponentSizeVerts;
+				for (int32 X = 0; X < ComponentSizeVerts; ++X)
 				{
 					const uint16 WPOHeight = RenderedWPOData[X + WPODataOffset];
 					FColor& Height = HeightData[X + HeightDataOffset];
@@ -588,10 +593,7 @@ void FLandscapeStaticLightingMesh::GetStaticLightingVertex(int32 VertexIndex, FS
 	const int32 LocalY = Y - ExpandQuadsY;
 
 	const FColor* Data = &HeightData[X + Y * NumVertices];
-
-	OutVertex.WorldTangentZ.X = 2.0f / 255.f * (float)Data->B - 1.0f;
-	OutVertex.WorldTangentZ.Y = 2.0f / 255.f * (float)Data->A - 1.0f;
-	OutVertex.WorldTangentZ.Z = FMath::Sqrt(1.0f - (FMath::Square(OutVertex.WorldTangentZ.X) + FMath::Square(OutVertex.WorldTangentZ.Y)));
+	OutVertex.WorldTangentZ = LandscapeDataAccess::UnpackNormal(*Data);
 	OutVertex.WorldTangentX = FVector4(OutVertex.WorldTangentZ.Z, 0.0f, -OutVertex.WorldTangentZ.X);
 	OutVertex.WorldTangentY = OutVertex.WorldTangentZ ^ OutVertex.WorldTangentX;
 
@@ -600,8 +602,8 @@ void FLandscapeStaticLightingMesh::GetStaticLightingVertex(int32 VertexIndex, FS
 	OutVertex.WorldTangentY = LocalToWorld.TransformVectorNoScale(OutVertex.WorldTangentY);
 	OutVertex.WorldTangentZ = LocalToWorld.TransformVectorNoScale(OutVertex.WorldTangentZ);
 
-	const uint16 Height = (Data->R << 8) + Data->G;
-	OutVertex.WorldPosition = LocalToWorld.TransformPosition(FVector(LocalX, LocalY, LandscapeDataAccess::GetLocalHeight(Height)));
+	const float Height = LandscapeDataAccess::UnpackHeight(*Data);
+	OutVertex.WorldPosition = LocalToWorld.TransformPosition(FVector(LocalX, LocalY, Height));
 
 	OutVertex.TextureCoordinates[0] = FVector2D((float)X / NumVertices, (float)Y / NumVertices); 
 	OutVertex.TextureCoordinates[LANDSCAPE_LIGHTMAP_UV_INDEX].X = X * UVFactor;
@@ -625,18 +627,17 @@ void FLandscapeStaticLightingMesh::GetTriangleIndices(int32 TriangleIndex,int32&
 	int32 QuadX = QuadIndex % (NumVertices - 1);
 	int32 QuadY = QuadIndex / (NumVertices - 1);
 
-	switch(QuadTriIndex)
+	if (QuadTriIndex == 0)
 	{
-	case 0:
 		OutI0 = (QuadX + 0) + (QuadY + 0) * NumVertices;
 		OutI1 = (QuadX + 1) + (QuadY + 1) * NumVertices;
 		OutI2 = (QuadX + 1) + (QuadY + 0) * NumVertices;
-		break;
-	case 1:
+	}
+	else // QuadTriIndex == 1
+	{
 		OutI0 = (QuadX + 0) + (QuadY + 0) * NumVertices;
 		OutI1 = (QuadX + 0) + (QuadY + 1) * NumVertices;
 		OutI2 = (QuadX + 1) + (QuadY + 1) * NumVertices;
-		break;
 	}
 
 	if (bReverseWinding)
@@ -652,7 +653,6 @@ FLightRayIntersection FLandscapeStaticLightingMesh::IntersectLightRay(const FVec
 	// Intersect the light ray with the terrain component.
 	FHitResult Result(1.0f);
 
-	FHitResult NewHitInfo;
 	FCollisionQueryParams NewTraceParams(SCENE_QUERY_STAT(FLandscapeStaticLightingMesh_IntersectLightRay), true );
 	
 	const bool bIntersects = LandscapeComponent->LineTraceComponent( Result, Start, End, NewTraceParams );
@@ -713,7 +713,7 @@ bool ULandscapeComponent::GetLightMapResolution( int32& Width, int32& Height ) c
 	int32 DesiredSize = 1;
 	uint32 LightingLOD = GetLandscapeProxy()->StaticLightingLOD;
 
-	float LightMapRatio = ::GetTerrainExpandPatchCount(LightMapRes, PatchExpandCountX, PatchExpandCountY, ComponentSizeQuads, (NumSubsections * (SubsectionSizeQuads+1)), DesiredSize, LightingLOD);
+	GetTerrainExpandPatchCount(LightMapRes, PatchExpandCountX, PatchExpandCountY, ComponentSizeQuads, (NumSubsections * (SubsectionSizeQuads+1)), DesiredSize, LightingLOD);
 
 	Width = DesiredSize;
 	Height = DesiredSize;
@@ -734,7 +734,7 @@ void ULandscapeComponent::GetLightAndShadowMapMemoryUsage( int32& LightMapMemory
 	GetLightMapResolution(Width, Height);
 
 	UWorld* World = GetWorld();
-	const ERHIFeatureLevel::Type FeatureLevel = World ? World->FeatureLevel.GetValue() : GMaxRHIFeatureLevel;
+	const ERHIFeatureLevel::Type FeatureLevel = World ? World->GetFeatureLevel() : GMaxRHIFeatureLevel;
 
 	if(AllowHighQualityLightmaps(FeatureLevel))
 	{
@@ -751,7 +751,10 @@ void ULandscapeComponent::GetLightAndShadowMapMemoryUsage( int32& LightMapMemory
 
 void ULandscapeComponent::InvalidateLightingCacheDetailed(bool bInvalidateBuildEnqueuedLighting, bool bTranslationOnly)
 {
-	Modify();
+	if (ULandscapeInfo* Info = GetLandscapeInfo())
+	{
+		Info->ModifyObject(this);
+	}
 
 	FComponentReregisterContext ReregisterContext(this);
 

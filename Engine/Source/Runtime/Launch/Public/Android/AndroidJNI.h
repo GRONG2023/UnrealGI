@@ -45,6 +45,7 @@ public:
 	static jmethodID AndroidThunkJava_ShowProgressDialog;
 	static jmethodID AndroidThunkJava_UpdateProgressDialog;
 	static jmethodID AndroidThunkJava_GetInputDeviceInfo;
+	static jmethodID AndroidThunkJava_SetInputDeviceVibrators;
 	static jmethodID AndroidThunkJava_IsGamepadAttached;
 	static jmethodID AndroidThunkJava_HasMetaDataKey;
 	static jmethodID AndroidThunkJava_GetMetaDataBoolean;
@@ -72,13 +73,16 @@ public:
 	static jmethodID AndroidThunkJava_SetSustainedPerformanceMode;
 	static jmethodID AndroidThunkJava_PushSensorEvents;
 	static jmethodID AndroidThunkJava_SetOrientation;
+	static jmethodID AndroidThunkJava_SetCellularPreference;
+	static jmethodID AndroidThunkJava_GetCellularPreference;
+
 
 	// Screen capture/recording permission
 	static jmethodID AndroidThunkJava_IsScreenCaptureDisabled;
 	static jmethodID AndroidThunkJava_DisableScreenCapture;
 
 	static jmethodID AndroidThunkCpp_VirtualInputIgnoreClick;
-	static jmethodID AndroidThunkCpp_IsVirtuaKeyboardShown;
+	static jmethodID AndroidThunkCpp_IsVirtualKeyboardShown;
 	static jmethodID AndroidThunkCpp_IsWebViewShown;
 
 	// InputDeviceInfo member field ids
@@ -88,11 +92,11 @@ public:
 	static jfieldID InputDeviceInfo_ControllerId;
 	static jfieldID InputDeviceInfo_Name;
 	static jfieldID InputDeviceInfo_Descriptor;
+	static jfieldID InputDeviceInfo_FeedbackMotorCount;
 
 	// IDs related to google play services
 	static jclass GoogleServicesClassID;
 	static jobject GoogleServicesThis;
-	static jmethodID AndroidThunkJava_ResetAchievements;
 	static jmethodID AndroidThunkJava_ShowAdBanner;
 	static jmethodID AndroidThunkJava_HideAdBanner;
 	static jmethodID AndroidThunkJava_CloseAdBanner;
@@ -101,9 +105,7 @@ public:
 	static jmethodID AndroidThunkJava_IsInterstitialAdRequested;
 	static jmethodID AndroidThunkJava_ShowInterstitialAd;
 	static jmethodID AndroidThunkJava_GetAdvertisingId;
-	static jmethodID AndroidThunkJava_GoogleClientConnect;
-	static jmethodID AndroidThunkJava_GoogleClientDisconnect;
-
+	
 	// Optionally added if GCM plugin (or other remote notification system) enabled
 	static jmethodID AndroidThunkJava_RegisterForRemoteNotifications;
 	static jmethodID AndroidThunkJava_UnregisterForRemoteNotifications;
@@ -115,8 +117,8 @@ public:
 	static jmethodID AndroidThunkJava_IapQueryInAppPurchases;
 	static jmethodID AndroidThunkJava_IapBeginPurchase;
 	static jmethodID AndroidThunkJava_IapIsAllowedToMakePurchases;
-	static jmethodID AndroidThunkJava_IapRestorePurchases;
 	static jmethodID AndroidThunkJava_IapQueryExistingPurchases;
+	static jmethodID AndroidThunkJava_IapAcknowledgePurchase;
 	static jmethodID AndroidThunkJava_IapConsumePurchase;
 
 	// SurfaceView functionality for view scaling on some devices
@@ -133,6 +135,10 @@ public:
 	// Motion controls
 	static jmethodID AndroidThunkJava_EnableMotion;
 
+	// Network Connection Listener
+	static jmethodID AndroidThunkJava_AddNetworkListener;
+	static jmethodID AndroidThunkJava_RemoveNetworkListener;
+
 	// member fields for getting the launch notification
 	static jclass LaunchNotificationClass;
 	static jfieldID LaunchNotificationUsed;
@@ -143,6 +149,10 @@ public:
 	static jclass ThreadClass;
 	static jmethodID CurrentThreadMethod;
 	static jmethodID SetNameMethod;
+
+	// WifiManager's Multicastlock handling
+	static jmethodID AndroidThunkJava_AcquireWifiManagerMulticastLock;
+	static jmethodID AndroidThunkJava_ReleaseWifiManagerMulticastLock;
 
 	/**
 	 * Find all known classes and methods
@@ -163,9 +173,16 @@ public:
 	static int32 CallIntMethod(JNIEnv* Env, jobject Object, jmethodID Method, ...);
 	static int64 CallLongMethod(JNIEnv* Env, jobject Object, jmethodID Method, ...);
 	static float CallFloatMethod(JNIEnv* Env, jobject Object, jmethodID Method, ...);
-	static double CallDoubleMethod(JNIEnv* Env, jobject Object, jmethodID Method, ...);
-	
+	static double CallDoubleMethod(JNIEnv* Env, jobject Object, jmethodID Method, ...);	
 	static bool CallBooleanMethod(JNIEnv* Env, jobject Object, jmethodID Method, ...);
+
+	static void CallStaticVoidMethod(JNIEnv* Env, jclass Clazz, jmethodID Method, ...);
+	static jobject CallStaticObjectMethod(JNIEnv* Env, jclass Clazz, jmethodID Method, ...);
+	static int32 CallStaticIntMethod(JNIEnv* Env, jclass Clazz, jmethodID Method, ...);
+	static int64 CallStaticLongMethod(JNIEnv* Env, jclass Clazz, jmethodID Method, ...);
+	static float CallStaticFloatMethod(JNIEnv* Env, jclass Clazz, jmethodID Method, ...);
+	static double CallStaticDoubleMethod(JNIEnv* Env, jclass Clazz, jmethodID Method, ...);
+	static bool CallStaticBooleanMethod(JNIEnv* Env, jclass Clazz, jmethodID Method, ...);
 
 	// Delegate that can be registered to that is called when an activity is finished
 	static FOnActivityResult OnActivityResultDelegate;

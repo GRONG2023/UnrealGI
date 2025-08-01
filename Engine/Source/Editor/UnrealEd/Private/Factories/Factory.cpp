@@ -5,6 +5,7 @@
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Misc/PathViews.h"
 #include "Misc/FeedbackContext.h"
 #include "Modules/ModuleManager.h"
 #include "UObject/UObjectHash.h"
@@ -42,10 +43,8 @@ UFactory::UFactory(const FObjectInitializer& ObjectInitializer)
 void UFactory::AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector)
 {	
 	UFactory* This = CastChecked<UFactory>(InThis);
-	UClass* SupportedClass = *This->SupportedClass;
-	UClass* ContextClass = *This->ContextClass;
-	Collector.AddReferencedObject(SupportedClass, This);
-	Collector.AddReferencedObject(ContextClass, This);
+	Collector.AddReferencedObject(This->SupportedClass.GetGCPtr(), This);
+	Collector.AddReferencedObject(This->ContextClass.GetGCPtr(), This);
 
 	Super::AddReferencedObjects(This, Collector);
 }
@@ -63,18 +62,19 @@ UObject* UFactory::FactoryCreateFile(UClass* InClass, UObject* InParent, FName I
 
 	if (ScriptFactoryCreateFile(Task))
 	{
-		if (Task->Result.Num() == 0)
+		TArray<UObject*> TaskResults = Task->GetObjects();
+		if (TaskResults.Num() == 0)
 		{
 			return nullptr;
 		}
 		else
 		{
-			for (int32 ResultIndex = 1; ResultIndex < Task->Result.Num(); ++ResultIndex)
+			for (int32 ResultIndex = 1; ResultIndex < TaskResults.Num(); ++ResultIndex)
 			{
-				AdditionalImportedObjects.Add(Task->Result[ResultIndex]);
+				AdditionalImportedObjects.Add(TaskResults[ResultIndex]);
 			}
 
-			return Task->Result[0];
+			return TaskResults[0];
 		}
 	}
 
@@ -98,13 +98,15 @@ UObject* UFactory::FactoryCreateFile(UClass* InClass, UObject* InParent, FName I
 
 	// load as binary
 	{
-		TArray<uint8> Data;
+		TArray64<uint8> Data;
 		if (!FFileHelper::LoadFileToArray(Data, *Filename))
 		{
 			UE_LOG(LogFactory, Error, TEXT("Failed to load file '%s' to array"), *Filename);
 			return nullptr;
 		}
 
+		// adds an extra null byte
+		// data loaders must be able to ignore an unexpected extra zero byte at the end of the file
 		Data.Add(0);
 		ParseParms(Parms);
 		const uint8* Ptr = &Data[0];
@@ -121,38 +123,41 @@ bool UFactory::FactoryCanImport( const FString& Filename )
 		return true;
 	}
 
-	// only T3D is supported
-	if (FPaths::GetExtension(Filename) != TEXT("t3d"))
+	if (IsSupportedFileExtension(FPathViews::GetExtension(Filename)))
 	{
-		return false;
+		return true;
 	}
 
-	// open file
-	FString Data;
-
-	if (FFileHelper::LoadFileToString(Data, *Filename))
+	// T3D support
+	if (FPaths::GetExtension(Filename) == TEXT("t3d"))
 	{
-		const TCHAR* Str= *Data;
-		if (FParse::Command(&Str, TEXT("BEGIN")) && FParse::Command(&Str, TEXT("OBJECT")))
+		// open file
+		FString Data;
+
+		if (FFileHelper::LoadFileToString(Data, *Filename))
 		{
-			FString strClass;
-			if (FParse::Value(Str, TEXT("CLASS="), strClass))
+			const TCHAR* Str= *Data;
+			if (FParse::Command(&Str, TEXT("BEGIN")) && FParse::Command(&Str, TEXT("OBJECT")))
 			{
-				//we found the right syntax, so no error if we don't match
-				if (strClass == SupportedClass->GetName())
+				FString strClass;
+				if (FParse::Value(Str, TEXT("CLASS="), strClass))
 				{
-					return true;
+					//we found the right syntax, so no error if we don't match
+					if (strClass == SupportedClass->GetName())
+					{
+						return true;
+					}
+
+					return false;
 				}
-
-				return false;
 			}
-		}
 
-		UE_LOG(LogFactory, Warning, TEXT("Factory import failed due to invalid format: %s"), *Filename);
-	}
-	else
-	{
-		UE_LOG(LogFactory, Warning, TEXT("Factory import failed due to inability to load file %s"), *Filename);
+			UE_LOG(LogFactory, Warning, TEXT("Factory import failed due to invalid format: %s"), *Filename);
+		}
+		else
+		{
+			UE_LOG(LogFactory, Warning, TEXT("Factory import failed due to inability to load file %s"), *Filename);
+		}
 	}
 
 	return false;
@@ -351,7 +356,7 @@ void UFactory::DisplayOverwriteOptionsDialog(const FText& Message)
 	else if (OverwriteYesOrNoToAllState != EAppReturnType::YesAll && OverwriteYesOrNoToAllState != EAppReturnType::NoAll)
 	{
 		OverwriteYesOrNoToAllState = FMessageDialog::Open(EAppMsgType::YesNoYesAllNoAllCancel, FText::Format(
-			NSLOCTEXT("UnrealEd", "ImportedAssetAlreadyExists", "{0} Would you like to overwrite the existing settings?\n\nYes or Yes to All: Overwrite the existing settings.\nNo or No to All: Preserve the existing settings.\nCancel: Abort the operation."),
+			NSLOCTEXT("UnrealEd", "ImportedAssetAlreadyExists", "{0}\n\nWould you also like to overwrite its existing settings?"),
 			Message));
 	}
 }
@@ -497,7 +502,32 @@ void UFactory::GetSupportedFileExtensions(TArray<FString>& OutExtensions) const
 }
 
 
-bool UFactory::ImportUntypedBulkDataFromText(const TCHAR*& Buffer, FUntypedBulkData& BulkData)
+bool UFactory::IsSupportedFileExtension(FStringView InExtension) const
+{
+	if (InExtension.StartsWith(TEXT('.')))
+	{
+		InExtension.RightChopInline(1);
+	}
+
+	for (const FString& Format : Formats)
+	{
+		const int32 DelimiterIdx = Format.Find(TEXT(";"));
+
+		if (DelimiterIdx != INDEX_NONE)
+		{
+			const FStringView FormatExtension(*Format, DelimiterIdx);
+			if (FormatExtension == InExtension)
+			{
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+
+bool UFactory::ImportUntypedBulkDataFromText(const TCHAR*& Buffer, FBulkData& BulkData)
 {
 	FString StrLine;
 	int32 ElementCount = 0;
@@ -535,14 +565,16 @@ bool UFactory::ImportUntypedBulkDataFromText(const TCHAR*& Buffer, FUntypedBulkD
 					check(Size == (ElementSize *ElementCount));
 
 					BulkData.Lock(LOCK_READ_WRITE);
-					void* RawBulkData = BulkData.Realloc(ElementCount);
+					void* RawBulkData = BulkData.Realloc(ElementCount, ElementSize);
 					RawData = (uint8*)RawBulkData;
 					bBulkDataIsLocked = true;
 				}
 				else if (FParse::Value(Str, TEXT("BEGIN "), ParsedText) && (ParsedText.ToUpper() == TEXT("BINARY")))
 				{
 					check(RawData);
+#ifndef PVS_STUDIO // Build machine refuses to disable to warning below
 					uint8* BulkDataPointer = RawData;
+#endif
 					while(FParse::Line(&Buffer,StrLine))
 					{
 						Str = *StrLine;
@@ -568,8 +600,10 @@ bool UFactory::ImportUntypedBulkDataFromText(const TCHAR*& Buffer, FUntypedBulkD
 								ParseStr +=2;
 							}
 							Value = FParse::HexDigit(ParseStr[0]) * 16 + FParse::HexDigit(ParseStr[1]);
+#ifndef PVS_STUDIO // Build machine refuses to disable to warning below
 							*BulkDataPointer = (uint8)Value; //-V522
 							BulkDataPointer++;
+#endif
 							ParseStr += 2;
 							ParseStr++;
 						}

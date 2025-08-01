@@ -10,8 +10,8 @@
 #include "DefaultLevelSequenceInstanceData.generated.h"
 
 /** Default instance data class that level sequences understand. Implements IMovieSceneTransformOrigin. */
-UCLASS(BlueprintType)
-class LEVELSEQUENCE_API UDefaultLevelSequenceInstanceData
+UCLASS(BlueprintType, MinimalAPI)
+class UDefaultLevelSequenceInstanceData
 	: public UObject
 	, public IMovieSceneTransformOrigin
 {
@@ -30,9 +30,9 @@ public:
 
 	/** When set, this actor's world position will be used as the transform origin for all absolute transform sections */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="General")
-	AActor* TransformOriginActor;
+	TObjectPtr<AActor> TransformOriginActor;
 
-	/** Specifies a transform that offsets all absolute transform sections in this sequence. Will compound with attach tracks. Scale is ignored. Not applied to Relative or Additive sections. */
+	/** Specifies a transform that offsets all absolute transform sections in this sequence. Scale is ignored. Not applied to Relative or Additive sections. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="General")
 	FTransform TransformOrigin;
 };

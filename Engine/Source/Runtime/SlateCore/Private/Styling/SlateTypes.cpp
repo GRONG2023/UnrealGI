@@ -1,18 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Styling/SlateTypes.h"
+#include "Brushes/SlateColorBrush.h"
 #include "Brushes/SlateNoResource.h"
 #include "Styling/StyleDefaults.h"
+#include "Styling/StyleColors.h"
 #include "Widgets/InvalidateWidgetReason.h"
 #include "Widgets/SWidget.h"
 
-namespace SlateTypeDefs
-{
-	// Colors
-	const static FLinearColor DefaultForeground = FLinearColor(0.72f, 0.72f, 0.72f, 1.f);
-	const static FLinearColor InvertedForeground = FLinearColor(0,0,0);
-}
-
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SlateTypes)
 
 FCheckBoxStyle::FCheckBoxStyle()
 : CheckBoxType(ESlateCheckBoxType::CheckBox)
@@ -26,7 +22,16 @@ FCheckBoxStyle::FCheckBoxStyle()
 , UndeterminedHoveredImage()
 , UndeterminedPressedImage()
 , Padding(FMargin(2,0,0,0))
+, BackgroundImage(FSlateNoResource())
+, BackgroundHoveredImage(FSlateNoResource())
+, BackgroundPressedImage(FSlateNoResource())
 , ForegroundColor(FSlateColor::UseForeground())
+, HoveredForeground(FSlateColor::UseForeground())
+, PressedForeground(FSlateColor::UseForeground())
+, CheckedForeground(FSlateColor::UseForeground())
+, CheckedHoveredForeground(FSlateColor::UseForeground())
+, CheckedPressedForeground(FSlateColor::UseForeground())
+, UndeterminedForeground(FSlateColor::UseForeground())
 , BorderBackgroundColor(FLinearColor::White)
 {
 }
@@ -50,12 +55,15 @@ void FCheckBoxStyle::GetResources( TArray< const FSlateBrush* > & OutBrushes ) c
 	OutBrushes.Add( &UndeterminedImage );
 	OutBrushes.Add( &UndeterminedHoveredImage );
 	OutBrushes.Add( &UndeterminedPressedImage );
+	OutBrushes.Add( &BackgroundImage );
+	OutBrushes.Add( &BackgroundHoveredImage );
+	OutBrushes.Add( &BackgroundPressedImage );
 }
 
 #if WITH_EDITORONLY_DATA
 void FCheckBoxStyle::PostSerialize(const FArchive& Ar)
 {
-	if(Ar.IsLoading() && Ar.UE4Ver() < VER_UE4_FSLATESOUND_CONVERSION)
+	if(Ar.IsLoading() && Ar.UEVer() < VER_UE4_FSLATESOUND_CONVERSION)
 	{
 		// eg, SoundCue'/Game/QA_Assets/Sound/TEST_Music_Ambient.TEST_Music_Ambient'
 		CheckedSlateSound = FSlateSound::FromName_DEPRECATED(CheckedSound_DEPRECATED);
@@ -66,12 +74,14 @@ void FCheckBoxStyle::PostSerialize(const FArchive& Ar)
 #endif
 
 FTextBlockStyle::FTextBlockStyle()
-: Font()
-, ColorAndOpacity()
-, ShadowOffset(FVector2D::ZeroVector)
-, ShadowColorAndOpacity(FLinearColor::Black)
-, SelectedBackgroundColor(FSlateColor::UseForeground())
-, HighlightColor(ForceInitToZero)
+	: Font()
+	, ColorAndOpacity()
+	, ShadowOffset(FVector2f::ZeroVector)
+	, ShadowColorAndOpacity(FLinearColor::Black)
+	, SelectedBackgroundColor(FSlateColor::UseForeground())
+	, HighlightColor(FLinearColor::Black)
+	, TransformPolicy(ETextTransformPolicy::None)
+	, OverflowPolicy(ETextOverflowPolicy::Clip)
 {
 }
 
@@ -99,6 +109,10 @@ FButtonStyle::FButtonStyle()
 : Normal()
 , Hovered()
 , Pressed()
+, NormalForeground(FSlateColor::UseForeground()) 
+, HoveredForeground(FSlateColor::UseForeground())
+, PressedForeground(FSlateColor::UseForeground())
+, DisabledForeground(FSlateColor::UseForeground())
 , NormalPadding()
 , PressedPadding()
 {
@@ -124,7 +138,7 @@ const FButtonStyle& FButtonStyle::GetDefault()
 #if WITH_EDITORONLY_DATA
 void FButtonStyle::PostSerialize(const FArchive& Ar)
 {
-	if(Ar.IsLoading() && Ar.UE4Ver() < VER_UE4_FSLATESOUND_CONVERSION)
+	if(Ar.IsLoading() && Ar.UEVer() < VER_UE4_FSLATESOUND_CONVERSION)
 	{
 		// eg, SoundCue'/Game/QA_Assets/Sound/TEST_Music_Ambient.TEST_Music_Ambient'
 		PressedSlateSound = FSlateSound::FromName_DEPRECATED(PressedSound_DEPRECATED);
@@ -134,9 +148,12 @@ void FButtonStyle::PostSerialize(const FArchive& Ar)
 #endif
 
 FComboButtonStyle::FComboButtonStyle()
-	: ShadowOffset(FVector2D::ZeroVector)
+	: ShadowOffset(FVector2f::ZeroVector)
 	, ShadowColorAndOpacity(FLinearColor::Black)
-	, MenuBorderPadding(FMargin(0.0f))
+	, MenuBorderPadding(0.0f)
+	, ContentPadding(5.0f)
+	, DownArrowPadding(2.0f)
+	, DownArrowAlign(EVerticalAlignment::VAlign_Center)
 {
 }
 
@@ -156,6 +173,8 @@ const FComboButtonStyle& FComboButtonStyle::GetDefault()
 }
 
 FComboBoxStyle::FComboBoxStyle()
+	: ContentPadding(FMargin(4.f, 2.f))
+	, MenuRowPadding(FMargin(0.f))
 {
 	ComboButtonStyle.SetMenuBorderPadding(FMargin(1.0));
 }
@@ -176,7 +195,7 @@ const FComboBoxStyle& FComboBoxStyle::GetDefault()
 #if WITH_EDITORONLY_DATA
 void FComboBoxStyle::PostSerialize(const FArchive& Ar)
 {
-	if(Ar.IsLoading() && Ar.UE4Ver() < VER_UE4_FSLATESOUND_CONVERSION)
+	if(Ar.IsLoading() && Ar.UEVer() < VER_UE4_FSLATESOUND_CONVERSION)
 	{
 		// eg, SoundCue'/Game/QA_Assets/Sound/TEST_Music_Ambient.TEST_Music_Ambient'
 		PressedSlateSound = FSlateSound::FromName_DEPRECATED(PressedSound_DEPRECATED);
@@ -234,14 +253,18 @@ FEditableTextBoxStyle::FEditableTextBoxStyle()
 	, BackgroundImageFocused()
 	, BackgroundImageReadOnly()
 	, Padding(FMargin(4.0f, 2.0f))
-	, Font(FStyleDefaults::GetFontInfo(9))
-	, ForegroundColor(SlateTypeDefs::InvertedForeground)
+#if WITH_EDITORONLY_DATA
+	, Font_DEPRECATED(FStyleDefaults::GetFontInfo(9))
+#endif
+	, TextStyle(FTextBlockStyle().SetFont(FStyleDefaults::GetFontInfo(9))
+				.SetColorAndOpacity(FSlateColor::UseForeground())
+				.SetSelectedBackgroundColor(FStyleColors::Highlight)
+				.SetHighlightColor(FStyleColors::Black)
+				.SetHighlightShape(FSlateColorBrush(FStyleColors::AccentGreen)))
+	, ForegroundColor(FSlateColor::UseForeground())
 	, BackgroundColor(FLinearColor::White)
-	, ReadOnlyForegroundColor(SlateTypeDefs::DefaultForeground)
-{
-}
-
-FEditableTextBoxStyle::~FEditableTextBoxStyle()
+	, ReadOnlyForegroundColor(FSlateColor::UseForeground())
+	, FocusedForegroundColor(FSlateColor::UseForeground())
 {
 }
 
@@ -284,6 +307,7 @@ const FInlineEditableTextBlockStyle& FInlineEditableTextBlockStyle::GetDefault()
 
 
 FProgressBarStyle::FProgressBarStyle()
+	: EnableFillAnimation(false)
 {
 }
 
@@ -313,6 +337,7 @@ FScrollBarStyle::FScrollBarStyle()
 	, NormalThumbImage(FSlateNoResource())
 	, HoveredThumbImage(FSlateNoResource())
 	, DraggedThumbImage(FSlateNoResource())
+	, Thickness(16.0f)
 {
 }
 
@@ -359,7 +384,9 @@ const FExpandableAreaStyle& FExpandableAreaStyle::GetDefault()
 
 
 FSearchBoxStyle::FSearchBoxStyle()
-	: bLeftAlignButtons(false)
+	: bLeftAlignButtons_DEPRECATED(false)
+	, bLeftAlignSearchResultButtons(false)
+	, bLeftAlignGlassImageAndClearButton(false)
 {
 }
 
@@ -368,7 +395,7 @@ FSearchBoxStyle& FSearchBoxStyle::SetTextBoxStyle( const FEditableTextBoxStyle& 
 	TextBoxStyle = InTextBoxStyle;
 	if (!ActiveFontInfo.HasValidFont())
 	{
-		ActiveFontInfo = TextBoxStyle.Font;
+		ActiveFontInfo = TextBoxStyle.TextStyle.Font;
 	}
 	return *this;
 }
@@ -388,6 +415,16 @@ const FSearchBoxStyle& FSearchBoxStyle::GetDefault()
 {
 	static FSearchBoxStyle Default;
 	return Default;
+}
+
+FSearchBoxStyle& FSearchBoxStyle::SetLeftAlignButtons(bool bInLeftAlignButtons)
+{
+	bLeftAlignButtons_DEPRECATED = bInLeftAlignButtons;
+	
+	bLeftAlignSearchResultButtons = bInLeftAlignButtons;
+	bLeftAlignGlassImageAndClearButton= bInLeftAlignButtons;
+
+	return *this;
 }
 
 FSliderStyle::FSliderStyle()
@@ -456,18 +493,23 @@ const FInlineTextImageStyle& FInlineTextImageStyle::GetDefault()
 }
 
 FSpinBoxStyle::FSpinBoxStyle()
-	: ForegroundColor(FSlateColor::UseForeground())
+	: ActiveBackgroundBrush(FSlateOptionalBrush())
+	, HoveredFillBrush(FSlateOptionalBrush())
+	, ForegroundColor(FSlateColor::UseForeground())
 	, TextPadding(FMargin(1.0f,2.0f))
+	, InsetPadding(FMargin(0))
 {
 }
 
 void FSpinBoxStyle::GetResources( TArray< const FSlateBrush* >& OutBrushes ) const
 {
-	OutBrushes.Add( &BackgroundBrush );
-	OutBrushes.Add( &HoveredBackgroundBrush );
-	OutBrushes.Add( &ActiveFillBrush );
-	OutBrushes.Add( &InactiveFillBrush );
-	OutBrushes.Add( &ArrowsImage );
+	OutBrushes.Add(&BackgroundBrush);
+	OutBrushes.Add(&HoveredBackgroundBrush);
+	OutBrushes.Add(&ActiveBackgroundBrush);
+	OutBrushes.Add(&ActiveFillBrush);
+	OutBrushes.Add(&HoveredFillBrush);
+	OutBrushes.Add(&InactiveFillBrush);
+	OutBrushes.Add(&ArrowsImage);
 }
 
 const FName FSpinBoxStyle::TypeName( TEXT("FSpinBoxStyle") );
@@ -497,9 +539,27 @@ const FSplitterStyle& FSplitterStyle::GetDefault()
 	return Default;
 }
 
+FTableViewStyle::FTableViewStyle()
+	: BackgroundBrush(FSlateNoResource())
+{
+}
+
+void FTableViewStyle::GetResources( TArray< const FSlateBrush* >& OutBrushes ) const
+{
+	OutBrushes.Add( &BackgroundBrush );	
+}
+
+const FName FTableViewStyle::TypeName( TEXT("FTableViewStyle") );
+
+const FTableViewStyle& FTableViewStyle::GetDefault()
+{
+	static FTableViewStyle Default;
+	return Default;
+}
 
 FTableRowStyle::FTableRowStyle()
-	: TextColor(FSlateColor::UseForeground())
+	: bUseParentRowBrush(false)
+	, TextColor(FSlateColor::UseForeground())
 	, SelectedTextColor(FLinearColor::White)
 {
 }
@@ -511,6 +571,8 @@ void FTableRowStyle::GetResources( TArray< const FSlateBrush* >& OutBrushes ) co
 	OutBrushes.Add( &ActiveBrush );
 	OutBrushes.Add( &InactiveHoveredBrush );
 	OutBrushes.Add( &InactiveBrush );
+	OutBrushes.Add( &ParentRowBackgroundHoveredBrush );
+	OutBrushes.Add( &ParentRowBackgroundBrush );
 	OutBrushes.Add( &EvenRowBackgroundHoveredBrush );
 	OutBrushes.Add( &EvenRowBackgroundBrush );
 	OutBrushes.Add( &OddRowBackgroundHoveredBrush );
@@ -556,6 +618,9 @@ const FTableColumnHeaderStyle& FTableColumnHeaderStyle::GetDefault()
 
 
 FHeaderRowStyle::FHeaderRowStyle()
+	: SplitterHandleSize(0.0)
+	, HorizontalSeparatorBrush(FSlateNoResource())
+	, HorizontalSeparatorThickness(0)
 {
 }
 
@@ -564,7 +629,8 @@ void FHeaderRowStyle::GetResources( TArray< const FSlateBrush* >& OutBrushes ) c
 	ColumnStyle.GetResources(OutBrushes);
 	LastColumnStyle.GetResources(OutBrushes);
 	ColumnSplitterStyle.GetResources(OutBrushes);
-	OutBrushes.Add( &BackgroundBrush );
+	OutBrushes.Add(&BackgroundBrush);
+	OutBrushes.Add(&HorizontalSeparatorBrush);
 }
 
 const FName FHeaderRowStyle::TypeName( TEXT("FHeaderRowStyle") );
@@ -577,7 +643,14 @@ const FHeaderRowStyle& FHeaderRowStyle::GetDefault()
 
 
 FDockTabStyle::FDockTabStyle()
-	: OverlapWidth(0.0f)
+	: TabTextStyle( FTextBlockStyle::GetDefault() )
+	, IconSize(16,16)
+	, OverlapWidth(0.0f)
+	, NormalForegroundColor(FSlateColor::UseForeground())
+	, HoveredForegroundColor(FSlateColor::UseForeground())
+	, ActiveForegroundColor(FSlateColor::UseForeground())
+	, ForegroundForegroundColor(FSlateColor::UseForeground())
+	, IconBorderPadding(1.f)
 {
 }
 
@@ -585,7 +658,6 @@ void FDockTabStyle::GetResources( TArray< const FSlateBrush* >& OutBrushes ) con
 {
 	CloseButtonStyle.GetResources(OutBrushes);
 	OutBrushes.Add( &NormalBrush );
-	OutBrushes.Add( &ActiveBrush );
 	OutBrushes.Add( &ColorOverlayTabBrush );
 	OutBrushes.Add( &ColorOverlayIconBrush );
 	OutBrushes.Add( &ForegroundBrush );
@@ -604,6 +676,7 @@ const FDockTabStyle& FDockTabStyle::GetDefault()
 
 
 FScrollBoxStyle::FScrollBoxStyle()
+	: BarThickness(9.0f)
 {
 }
 
@@ -644,12 +717,15 @@ const FScrollBorderStyle& FScrollBorderStyle::GetDefault()
 
 
 FWindowStyle::FWindowStyle()
-	: BackgroundColor( FLinearColor::White )
-	, OutlineColor( FLinearColor(0.1f, 0.1f, 0.1f, 1.0f) )
+	: BackgroundColor(FLinearColor::White)
+	, OutlineColor(FLinearColor::White)
+	, BorderColor(FLinearColor::White)
+	, WindowCornerRadius(0)
+	, BorderPadding(FMargin(5, 5, 5, 5))
 {
 }
 
-void FWindowStyle::GetResources( TArray< const FSlateBrush* >& OutBrushes ) const
+void FWindowStyle::GetResources(TArray< const FSlateBrush* >& OutBrushes) const
 {
 	MinimizeButtonStyle.GetResources(OutBrushes);
 	MaximizeButtonStyle.GetResources(OutBrushes);

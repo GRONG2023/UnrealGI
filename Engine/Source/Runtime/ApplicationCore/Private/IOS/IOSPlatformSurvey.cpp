@@ -21,15 +21,17 @@ bool FIOSPlatformSurvey::GetSurveyResults(FHardwareSurveyResults& OutResults, bo
 	FCString::Strcpy(OutResults.RenderingAPI, TEXT("Metal"));
 	OutResults.CPUCount = FPlatformMisc::NumberOfCores();
 
+#if !PLATFORM_VISIONOS
 	// display 0 is max size
 	CGRect MainFrame = [[UIScreen mainScreen] bounds];
-	float Scale = [[UIScreen mainScreen] scale];
-	OutResults.Displays[0].CurrentModeWidth = MainFrame.size.width * Scale;
-	OutResults.Displays[0].CurrentModeHeight = MainFrame.size.height * Scale;
+	double Scale = [[UIScreen mainScreen] scale];
+	OutResults.Displays[0].CurrentModeWidth = FMath::TruncToInt(MainFrame.size.width * Scale);
+	OutResults.Displays[0].CurrentModeHeight = FMath::TruncToInt(MainFrame.size.height * Scale);
 
 	// display 1 is current size
 	FPlatformRect ScreenSize = FIOSWindow::GetScreenRect();
 	OutResults.Displays[1].CurrentModeWidth = ScreenSize.Right - ScreenSize.Left;
 	OutResults.Displays[1].CurrentModeHeight = ScreenSize.Bottom - ScreenSize.Top;
+#endif
 	return true;
 }

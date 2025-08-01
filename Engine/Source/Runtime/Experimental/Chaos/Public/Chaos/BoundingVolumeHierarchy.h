@@ -63,10 +63,11 @@ class TBoundingVolumeHierarchy final : public ISpatialAcceleration<int32, T,d>
 	static constexpr bool DefaultAllowMultipleSplitting = false;
 	static constexpr bool DefaultUseVelocity = false;
 	static constexpr T DefaultDt = 0;
-	using TPayloadType = typename TBVHLeafTraits<LEAF_TYPE, TModels<CComplexBVHLeaf, LEAF_TYPE>::Value>::TPayloadType;
+	using TPayloadType = typename TBVHLeafTraits<LEAF_TYPE, TModels_V<CComplexBVHLeaf, LEAF_TYPE>>::TPayloadType;
 
-	CHAOS_API TBoundingVolumeHierarchy()
+	TBoundingVolumeHierarchy()
 		: MObjects(nullptr)
+		, MMaxLevels(DefaultMaxLevels)
 	{
 	}
 
@@ -74,12 +75,31 @@ class TBoundingVolumeHierarchy final : public ISpatialAcceleration<int32, T,d>
 	CHAOS_API TBoundingVolumeHierarchy(const OBJECT_ARRAY& Objects, const TArray<uint32>& ActiveIndices, const int32 MaxLevels = DefaultMaxLevels, const bool bUseVelocity = DefaultUseVelocity, const T Dt = DefaultDt);
 	
 	TBoundingVolumeHierarchy(const TBoundingVolumeHierarchy<OBJECT_ARRAY, LEAF_TYPE, T, d>& Other) = delete;
-	CHAOS_API TBoundingVolumeHierarchy(TBoundingVolumeHierarchy<OBJECT_ARRAY, LEAF_TYPE, T, d>&& Other)
+	TBoundingVolumeHierarchy(TBoundingVolumeHierarchy<OBJECT_ARRAY, LEAF_TYPE, T, d>&& Other)
 	    : MObjects(Other.MObjects), MGlobalObjects(MoveTemp(Other.MGlobalObjects)), MWorldSpaceBoxes(MoveTemp(Other.MWorldSpaceBoxes)), MMaxLevels(Other.MMaxLevels), Elements(MoveTemp(Other.Elements)), Leafs(MoveTemp(Other.Leafs))
 	{
 	}
 
-	CHAOS_API TBoundingVolumeHierarchy& operator=(TBoundingVolumeHierarchy<OBJECT_ARRAY, LEAF_TYPE, T, d>&& Other)
+	virtual void DeepAssign(const ISpatialAcceleration<int32, T, d>& Other) override
+	{
+
+		check(Other.GetType() == ESpatialAcceleration::AABBTreeBV);
+		*this = static_cast<const TBoundingVolumeHierarchy<OBJECT_ARRAY, LEAF_TYPE, T, d>&>(Other);
+	}
+
+	TBoundingVolumeHierarchy& operator=(const TBoundingVolumeHierarchy<OBJECT_ARRAY, LEAF_TYPE, T, d>& Other)
+	{
+		ISpatialAcceleration<int32, T, d>::DeepAssign(Other);
+		MObjects = Other.MObjects;
+		MGlobalObjects = Other.MGlobalObjects;
+		MWorldSpaceBoxes = Other.MWorldSpaceBoxes;
+		MMaxLevels = Other.MMaxLevels;
+		Elements = Other.Elements;
+		Leafs = Other.Leafs;
+		return *this;
+	}
+
+	TBoundingVolumeHierarchy& operator=(TBoundingVolumeHierarchy<OBJECT_ARRAY, LEAF_TYPE, T, d>&& Other)
 	{
 		MObjects = Other.MObjects;
 		MGlobalObjects = MoveTemp(Other.MGlobalObjects);
@@ -93,12 +113,12 @@ class TBoundingVolumeHierarchy final : public ISpatialAcceleration<int32, T,d>
 	CHAOS_API void UpdateHierarchy(const bool AllowMultipleSplitting = DefaultAllowMultipleSplitting, const bool bUseVelocity = DefaultUseVelocity, const T Dt = DefaultDt);
 	CHAOS_API void UpdateHierarchy(const TArray<uint32>& ActiveIndices, const bool AllowMultipleSplitting = DefaultAllowMultipleSplitting, const bool bUseVelocity = DefaultUseVelocity, const T Dt = DefaultDt);
 
-	CHAOS_API void Reinitialize(bool bUseVelocity, T Dt)
+	void Reinitialize(bool bUseVelocity, T Dt)
 	{
 		UpdateHierarchy(DefaultAllowMultipleSplitting, bUseVelocity, Dt);
 	}
 
-	CHAOS_API void Reinitialize(const TArray<uint32>& ActiveIndices, bool bUseVelocity, T Dt)
+	void Reinitialize(const TArray<uint32>& ActiveIndices, bool bUseVelocity, T Dt)
 	{
 		UpdateHierarchy(ActiveIndices, DefaultAllowMultipleSplitting, bUseVelocity, Dt);
 	}
@@ -118,14 +138,25 @@ class TBoundingVolumeHierarchy final : public ISpatialAcceleration<int32, T,d>
 		}
 	}
 
+	// Calls the visitor for every overlapping leaf.
+	// @tparam TVisitor void(const LEAF_TYPE& Leaf)
+	template<typename TVisitor>
+	void VisitAllIntersections(const FAABB3& LocalBounds, const TVisitor& Visitor) const
+	{
+		if (Elements.Num())
+		{
+			VisitAllIntersectionsRecursive(Elements[0], LocalBounds, Visitor);
+		}
+	}
+
 	// Begin ISpatialAcceleration interface
-	CHAOS_API TArray<int32> FindAllIntersections(const TAABB<T, d>& Box) const { return FindAllIntersectionsImp(Box); }
-	CHAOS_API TArray<int32> FindAllIntersections(const TSpatialRay<T,d>& Ray) const { return FindAllIntersectionsImp(Ray); }
-	CHAOS_API TArray<int32> FindAllIntersections(const TVector<T, d>& Point) const { return FindAllIntersectionsImp(Point); }
+	TArray<int32> FindAllIntersections(const FAABB3& Box) const { return FindAllIntersectionsImp(Box); }
+	TArray<int32> FindAllIntersections(const TSpatialRay<T,d>& Ray) const { return FindAllIntersectionsImp(Ray); }
+	TArray<int32> FindAllIntersections(const TVector<T, d>& Point) const { return FindAllIntersectionsImp(Point); }
 	CHAOS_API TArray<int32> FindAllIntersections(const TGeometryParticles<T, d>& InParticles, const int32 i) const;
 	// End ISpatialAcceleration interface
 
-	CHAOS_API const TArray<int32>& GlobalObjects() const
+	const TArray<int32>& GlobalObjects() const
 	{
 		return MGlobalObjects;
 	}
@@ -139,13 +170,13 @@ class TBoundingVolumeHierarchy final : public ISpatialAcceleration<int32, T,d>
 
 	CHAOS_API void Serialize(FArchive& Ar);
 
-	CHAOS_API virtual void Serialize(FChaosArchive& Ar) override
+	virtual void Serialize(FChaosArchive& Ar) override
 	{
 		check(false);
 	}
 
   private:
-	CHAOS_API void PrintTree(FString Prefix, const TBVHNode<T,d>* MyNode) const
+	void PrintTree(FString Prefix, const TBVHNode<T,d>* MyNode) const
 	{
 		UE_LOG(LogChaos, Verbose, TEXT("%sNode has Box: (%f, %f, %f) to (%f, %f, %f) with %d Children"), *Prefix, MyNode->MMin[0], MyNode->MMin[1], MyNode->MMin[2], MyNode->MMax[0], MyNode->MMax[1], MyNode->MMax[2], MyNode->MChildren.Num());
 		for (auto& Child : MyNode->MChildren)
@@ -154,16 +185,39 @@ class TBoundingVolumeHierarchy final : public ISpatialAcceleration<int32, T,d>
 		}
 	}
 
+	template<typename TVisitor>
+	void VisitAllIntersectionsRecursive(const TBVHNode<T, d>& MyNode, const FAABB3& ObjectBox, const TVisitor& Visitor) const
+	{
+		TAABB<T, d> Box(MyNode.MMin, MyNode.MMax);
+		if (!Box.Intersects(ObjectBox))
+		{
+			return;
+		}
+
+		if (MyNode.MChildren.Num() == 0)
+		{
+			Visitor(Leafs[MyNode.LeafIndex]);
+			return;
+		}
+
+		int32 NumChildren = MyNode.MChildren.Num();
+		for (int32 Child = 0; Child < NumChildren; ++Child)
+		{
+			VisitAllIntersectionsRecursive(Elements[MyNode.MChildren[Child]], ObjectBox, Visitor);
+		}
+	}
+
+
 	CHAOS_API TArray<int32> FindAllIntersectionsHelper(const TBVHNode<T,d>& MyNode, const TVector<T, d>& Point) const;
 	CHAOS_API TArray<int32> FindAllIntersectionsHelper(const TBVHNode<T,d>& MyNode, const TAABB<T, d>& ObjectBox) const;
 	CHAOS_API TArray<int32> FindAllIntersectionsHelper(const TBVHNode<T, d>& MyNode, const TSpatialRay<T, d>& Ray) const;
 
 	template <typename QUERY_OBJECT>
-	CHAOS_API void FindAllIntersectionsHelperRecursive(const TBVHNode<T,d>& MyNode, const QUERY_OBJECT& ObjectBox, TArray<int32>& AccumulateElements) const;
-	CHAOS_API void UpdateHierarchyImp(const TArray<int32>& AllObjects, const bool bAllowMultipleSplitting, const bool bUseVelocity, const T Dt);
+	void FindAllIntersectionsHelperRecursive(const TBVHNode<T,d>& MyNode, const QUERY_OBJECT& ObjectBox, TArray<int32>& AccumulateElements) const;
+	void UpdateHierarchyImp(const TArray<int32>& AllObjects, const bool bAllowMultipleSplitting, const bool bUseVelocity, const T Dt);
 
-	CHAOS_API int32 GenerateNextLevel(const TVector<T, d>& GlobalMin, const TVector<T, d>& GlobalMax, const TArray<int32>& Objects, const int32 Axis, const int32 Level, const bool AllowMultipleSplitting);
-	CHAOS_API int32 GenerateNextLevel(const TVector<T, d>& GlobalMin, const TVector<T, d>& GlobalMax, const TArray<int32>& Objects, const int32 Level);
+	int32 GenerateNextLevel(const TVector<T, d>& GlobalMin, const TVector<T, d>& GlobalMax, const TArray<int32>& Objects, const int32 Axis, const int32 Level, const bool AllowMultipleSplitting);
+	int32 GenerateNextLevel(const TVector<T, d>& GlobalMin, const TVector<T, d>& GlobalMax, const TArray<int32>& Objects, const int32 Level);
 
 	OBJECT_ARRAY const* MObjects;
 	TArray<int32> MGlobalObjects;
@@ -174,24 +228,6 @@ class TBoundingVolumeHierarchy final : public ISpatialAcceleration<int32, T,d>
 	TArray<LEAF_TYPE> Leafs;
 	FCriticalSection CriticalSection;
 };
-
-#if PLATFORM_MAC || PLATFORM_LINUX
-    extern template class CHAOS_API TBoundingVolumeHierarchy<TArray<Chaos::TSphere<FReal, 3>*>, TArray<int32>, FReal, 3>;
-    extern template class CHAOS_API TBoundingVolumeHierarchy<Chaos::TPBDRigidParticles<FReal, 3>, TArray<int32>, FReal, 3>;
-    extern template class CHAOS_API TBoundingVolumeHierarchy<Chaos::FParticles, TArray<int32>, FReal, 3>;
-    extern template class CHAOS_API TBoundingVolumeHierarchy<Chaos::TGeometryParticles<FReal, 3>, TArray<int32>, FReal, 3>;
-    extern template class CHAOS_API TBoundingVolumeHierarchy<Chaos::TPBDRigidParticles<FReal, 3>, TBoundingVolume<TPBDRigidParticleHandle<FReal,3>*, FReal, 3>, FReal, 3>;
-    extern template class CHAOS_API TBoundingVolumeHierarchy<Chaos::TGeometryParticles<FReal, 3>, TBoundingVolume<TGeometryParticleHandle<FReal,3>*, FReal, 3>, FReal, 3>;
-	extern template class CHAOS_API TBoundingVolumeHierarchy<TArray<TUniquePtr<Chaos::FImplicitObject>>, TArray<int32>, FReal, 3>;
-#else
-    extern template class TBoundingVolumeHierarchy<TArray<Chaos::TSphere<FReal, 3>*>, TArray<int32>, FReal, 3>;
-    extern template class TBoundingVolumeHierarchy<Chaos::TPBDRigidParticles<FReal, 3>, TArray<int32>, FReal, 3>;
-    extern template class TBoundingVolumeHierarchy<Chaos::FParticles, TArray<int32>, FReal, 3>;
-    extern template class TBoundingVolumeHierarchy<Chaos::TGeometryParticles<FReal, 3>, TArray<int32>, FReal, 3>;
-    extern template class TBoundingVolumeHierarchy<Chaos::TPBDRigidParticles<FReal, 3>, TBoundingVolume<TPBDRigidParticleHandle<FReal,3>*, FReal, 3>, FReal, 3>;
-    extern template class TBoundingVolumeHierarchy<Chaos::TGeometryParticles<FReal, 3>, TBoundingVolume<TGeometryParticleHandle<FReal,3>*, FReal, 3>, FReal, 3>;
-	extern template class TBoundingVolumeHierarchy<TArray<TUniquePtr<Chaos::FImplicitObject>>, TArray<int32>, FReal, 3>;
-#endif
 
 template<class OBJECT_ARRAY, class LEAF_TYPE, class T, int d>
 FArchive& operator<<(FArchive& Ar, TBoundingVolumeHierarchy<OBJECT_ARRAY, LEAF_TYPE, T, d>& BVH)

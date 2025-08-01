@@ -5,6 +5,7 @@
 #include "CoreTypes.h"
 #include "Misc/AssertionMacros.h"
 #include "HAL/UnrealMemory.h"
+#include "Containers/AllowShrinking.h"
 #include "Containers/ContainerAllocationPolicies.h"
 #include "Containers/Array.h"
 #include <initializer_list>
@@ -32,18 +33,22 @@ public:
 	{
 		return i>=0 && i<ArrayNum;
 	}
+	bool IsEmpty() const
+	{
+		return ArrayNum == 0;
+	}
 	FORCEINLINE int32 Num() const
 	{
 		checkSlow(ArrayNum>=0);
 		checkSlow(ArrayMax>=ArrayNum);
 		return ArrayNum;
 	}
-	void InsertZeroed( int32 Index, int32 Count, int32 NumBytesPerElement )
+	void InsertZeroed( int32 Index, int32 Count, int32 NumBytesPerElement, uint32 AlignmentOfElement )
 	{
-		Insert( Index, Count, NumBytesPerElement );
+		Insert( Index, Count, NumBytesPerElement, AlignmentOfElement );
 		FMemory::Memzero( (uint8*)this->GetAllocation()+Index*NumBytesPerElement, Count*NumBytesPerElement );
 	}
-	void Insert( int32 Index, int32 Count, int32 NumBytesPerElement )
+	void Insert( int32 Index, int32 Count, int32 NumBytesPerElement, uint32 AlignmentOfElement )
 	{
 		check(Count>=0);
 		check(ArrayNum>=0);
@@ -54,7 +59,7 @@ public:
 		const int32 OldNum = ArrayNum;
 		if( (ArrayNum+=Count)>ArrayMax )
 		{
-			ResizeGrow(OldNum, NumBytesPerElement);
+			ResizeGrow(OldNum, NumBytesPerElement, AlignmentOfElement);
 		}
 		FMemory::Memmove
 		(
@@ -62,8 +67,10 @@ public:
 			(uint8*)this->GetAllocation() + (Index       )*NumBytesPerElement,
 			                                               (OldNum-Index)*NumBytesPerElement
 		);
+
+		SlackTrackerNumChanged();
 	}
-	int32 Add( int32 Count, int32 NumBytesPerElement )
+	int32 Add( int32 Count, int32 NumBytesPerElement, uint32 AlignmentOfElement )
 	{
 		check(Count>=0);
 		checkSlow(ArrayNum>=0);
@@ -72,41 +79,80 @@ public:
 		const int32 OldNum = ArrayNum;
 		if( (ArrayNum+=Count)>ArrayMax )
 		{
-			ResizeGrow(OldNum, NumBytesPerElement);
+			ResizeGrow(OldNum, NumBytesPerElement, AlignmentOfElement);
 		}
+
+		SlackTrackerNumChanged();
 
 		return OldNum;
 	}
-	int32 AddZeroed( int32 Count, int32 NumBytesPerElement )
+	int32 AddZeroed( int32 Count, int32 NumBytesPerElement, uint32 AlignmentOfElement )
 	{
-		const int32 Index = Add( Count, NumBytesPerElement );
+		const int32 Index = Add( Count, NumBytesPerElement, AlignmentOfElement );
 		FMemory::Memzero( (uint8*)this->GetAllocation()+Index*NumBytesPerElement, Count*NumBytesPerElement );
 		return Index;
 	}
-	void Shrink( int32 NumBytesPerElement )
+	void Shrink( int32 NumBytesPerElement, uint32 AlignmentOfElement )
 	{
 		checkSlow(ArrayNum>=0);
 		checkSlow(ArrayMax>=ArrayNum);
 		if (ArrayNum != ArrayMax)
 		{
-			ResizeTo(ArrayNum, NumBytesPerElement);
+			ResizeTo(ArrayNum, NumBytesPerElement, AlignmentOfElement);
 		}
 	}
-	void MoveAssign(TScriptArray& Other, int32 NumBytesPerElement)
+	void SetNumUninitialized(int32 NewNum, int32 NumBytesPerElement, uint32 AlignmentOfElement, EAllowShrinking AllowShrinking = EAllowShrinking::Yes)
+	{
+		checkSlow(NewNum >= 0);
+		int32 OldNum = Num();
+		if (NewNum > OldNum)
+		{
+			Add(NewNum - OldNum, NumBytesPerElement, AlignmentOfElement);
+		}
+		else if (NewNum < OldNum)
+		{
+			Remove(NewNum, OldNum - NewNum, NumBytesPerElement, AlignmentOfElement, AllowShrinking);
+		}
+	}
+	UE_ALLOWSHRINKING_BOOL_DEPRECATED("SetNumUninitialized")
+	FORCEINLINE void SetNumUninitialized(int32 NewNum, int32 NumBytesPerElement, uint32 AlignmentOfElement, bool bAllowShrinking)
+	{
+		SetNumUninitialized(NewNum, NumBytesPerElement, AlignmentOfElement, bAllowShrinking ? EAllowShrinking::Yes : EAllowShrinking::No);
+	}
+	void MoveAssign(TScriptArray& Other, int32 NumBytesPerElement, uint32 AlignmentOfElement)
 	{
 		checkSlow(this != &Other);
-		Empty(0, NumBytesPerElement);
+		Empty(0, NumBytesPerElement, AlignmentOfElement);
 		this->MoveToEmpty(Other);
 		ArrayNum = Other.ArrayNum; Other.ArrayNum = 0;
 		ArrayMax = Other.ArrayMax; Other.ArrayMax = 0;
+
+		this->SlackTrackerNumChanged();
+		Other.SlackTrackerNumChanged();
 	}
-	void Empty( int32 Slack, int32 NumBytesPerElement )
+	void Empty( int32 Slack, int32 NumBytesPerElement, uint32 AlignmentOfElement )
 	{
 		checkSlow(Slack>=0);
 		ArrayNum = 0;
+
+		SlackTrackerNumChanged();
+
 		if (Slack != ArrayMax)
 		{
-			ResizeTo(Slack, NumBytesPerElement);
+			ResizeTo(Slack, NumBytesPerElement, AlignmentOfElement);
+		}
+	}
+	void Reset(int32 NewSize, int32 NumBytesPerElement, uint32 AlignmentOfElement)
+	{
+		if (NewSize <= ArrayMax)
+		{
+			ArrayNum = 0;
+
+			SlackTrackerNumChanged();
+		}
+		else
+		{
+			Empty(NewSize, NumBytesPerElement, AlignmentOfElement);
 		}
 	}
 	void SwapMemory(int32 A, int32 B, int32 NumBytesPerElement )
@@ -122,9 +168,13 @@ public:
 	,	ArrayMax( 0 )
 	{
 	}
-	void CountBytes( FArchive& Ar, int32 NumBytesPerElement  )
+	void CountBytes( FArchive& Ar, int32 NumBytesPerElement  ) const
 	{
 		Ar.CountBytes( ArrayNum*NumBytesPerElement, ArrayMax*NumBytesPerElement );
+	}
+	FORCEINLINE void CheckAddress(const void* Addr, int32 NumBytesPerElement) const
+	{
+		checkf((const char*)Addr < (const char*)GetData() || (const char*)Addr >= ((const char*)GetData() + ArrayMax * NumBytesPerElement), TEXT("Attempting to use a container element (%p) which already comes from the container being modified (%p, ArrayMax: %lld, ArrayNum: %lld, SizeofElement: %d)!"), Addr, GetData(), (long long)ArrayMax, (long long)ArrayNum, NumBytesPerElement);
 	}
 	/**
 	 * Returns the amount of slack in this array in elements.
@@ -133,8 +183,8 @@ public:
 	{
 		return ArrayMax - ArrayNum;
 	}
-		
-	void Remove( int32 Index, int32 Count, int32 NumBytesPerElement  )
+
+	void Remove( int32 Index, int32 Count, int32 NumBytesPerElement, uint32 AlignmentOfElement, EAllowShrinking AllowShrinking = EAllowShrinking::Yes )
 	{
 		if (Count)
 		{
@@ -156,48 +206,64 @@ public:
 			}
 			ArrayNum -= Count;
 
-			ResizeShrink(NumBytesPerElement);
+			SlackTrackerNumChanged();
+
+			if (AllowShrinking == EAllowShrinking::Yes)
+			{
+				ResizeShrink(NumBytesPerElement, AlignmentOfElement);
+			}
 			checkSlow(ArrayNum >= 0);
 			checkSlow(ArrayMax >= ArrayNum);
 		}
 	}
+	UE_ALLOWSHRINKING_BOOL_DEPRECATED("Remove")
+	FORCEINLINE void Remove(int32 Index, int32 Count, int32 NumBytesPerElement, uint32 AlignmentOfElement, bool bAllowShrinking)
+	{
+		Remove(Index, Count, NumBytesPerElement, AlignmentOfElement, bAllowShrinking ? EAllowShrinking::Yes : EAllowShrinking::No);
+	}
+	SIZE_T GetAllocatedSize(int32 NumBytesPerElement) const
+	{
+		return ((const typename AllocatorType::ForAnyElementType*)this)->GetAllocatedSize(ArrayMax, NumBytesPerElement);
+	}
 
 protected:
 
-	TScriptArray( int32 InNum, int32 NumBytesPerElement  )
+	TScriptArray( int32 InNum, int32 NumBytesPerElement, uint32 AlignmentOfElement )
 	:   ArrayNum( 0 )
 	,	ArrayMax( InNum )
 
 	{
 		if (ArrayMax)
 		{
-			ResizeInit(NumBytesPerElement);
+			ResizeInit(NumBytesPerElement, AlignmentOfElement);
 		}
 		ArrayNum = InNum;
+
+		SlackTrackerNumChanged();
 	}
 	int32	  ArrayNum;
 	int32	  ArrayMax;
 
-	FORCENOINLINE void ResizeInit(int32 NumBytesPerElement)
+	FORCENOINLINE void ResizeInit(int32 NumBytesPerElement, uint32 AlignmentOfElement)
 	{
-		ArrayMax = this->CalculateSlackReserve(ArrayMax, NumBytesPerElement);
-		this->ResizeAllocation(ArrayNum, ArrayMax, NumBytesPerElement);
+		ArrayMax = this->CalculateSlackReserve(ArrayMax, NumBytesPerElement, AlignmentOfElement);
+		this->ResizeAllocation(ArrayNum, ArrayMax, NumBytesPerElement, AlignmentOfElement);
 	}
-	FORCENOINLINE void ResizeGrow(int32 OldNum, int32 NumBytesPerElement)
+	FORCENOINLINE void ResizeGrow(int32 OldNum, int32 NumBytesPerElement, uint32 AlignmentOfElement)
 	{
-		ArrayMax = this->CalculateSlackGrow(ArrayNum, ArrayMax, NumBytesPerElement);
-		this->ResizeAllocation(OldNum, ArrayMax, NumBytesPerElement);
+		ArrayMax = this->CalculateSlackGrow(ArrayNum, ArrayMax, NumBytesPerElement, AlignmentOfElement);
+		this->ResizeAllocation(OldNum, ArrayMax, NumBytesPerElement, AlignmentOfElement);
 	}
-	FORCENOINLINE void ResizeShrink(int32 NumBytesPerElement)
+	FORCENOINLINE void ResizeShrink(int32 NumBytesPerElement, uint32 AlignmentOfElement)
 	{
-		const int32 NewArrayMax = this->CalculateSlackShrink(ArrayNum, ArrayMax, NumBytesPerElement);
+		const int32 NewArrayMax = this->CalculateSlackShrink(ArrayNum, ArrayMax, NumBytesPerElement, AlignmentOfElement);
 		if (NewArrayMax != ArrayMax)
 		{
 			ArrayMax = NewArrayMax;
-			this->ResizeAllocation(ArrayNum, ArrayMax, NumBytesPerElement);
+			this->ResizeAllocation(ArrayNum, ArrayMax, NumBytesPerElement, AlignmentOfElement);
 		}
 	}
-	FORCENOINLINE void ResizeTo(int32 NewMax, int32 NumBytesPerElement)
+	FORCENOINLINE void ResizeTo(int32 NewMax, int32 NumBytesPerElement, uint32 AlignmentOfElement)
 	{
 		if (NewMax)
 		{
@@ -206,9 +272,21 @@ protected:
 		if (NewMax != ArrayMax)
 		{
 			ArrayMax = NewMax;
-			this->ResizeAllocation(ArrayNum, ArrayMax, NumBytesPerElement);
+			this->ResizeAllocation(ArrayNum, ArrayMax, NumBytesPerElement, AlignmentOfElement);
 		}
 	}
+
+private:
+	FORCEINLINE void SlackTrackerNumChanged()
+	{
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+		if constexpr (TAllocatorTraits<AllocatorType>::SupportsSlackTracking)
+		{
+			((typename AllocatorType::ForAnyElementType*)this)->SlackTrackerLogNum(ArrayNum);
+		}
+#endif
+	}
+
 public:
 	// These should really be private, because they shouldn't be called, but there's a bunch of code
 	// that needs to be fixed first.
@@ -225,14 +303,14 @@ class FScriptArray : public TScriptArray<FHeapAllocator>
 public:
 	FScriptArray() = default;
 
-	void MoveAssign(FScriptArray& Other, int32 NumBytesPerElement)
+	void MoveAssign(FScriptArray& Other, int32 NumBytesPerElement, uint32 AlignmentOfElement)
 	{
-		Super::MoveAssign(Other, NumBytesPerElement);
+		Super::MoveAssign(Other, NumBytesPerElement, AlignmentOfElement);
 	}
 
 protected:
-	FScriptArray(int32 InNum, int32 NumBytesPerElement)
-		: TScriptArray<FHeapAllocator>(InNum, NumBytesPerElement)
+	FScriptArray(int32 InNum, int32 NumBytesPerElement, uint32 AlignmentOfElement)
+		: TScriptArray<FHeapAllocator>(InNum, NumBytesPerElement, AlignmentOfElement)
 	{
 	}
 

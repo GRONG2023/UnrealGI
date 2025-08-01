@@ -7,6 +7,7 @@
 #include "Animation/AnimSequence.h"
 #include "Animation/AnimBlueprint.h"
 #include "Animation/AnimBlueprintGeneratedClass.h"
+#include "Engine/SkeletalMesh.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "IAssetTools.h"
@@ -21,6 +22,7 @@
 #include "Editor.h"
 #include "EditorReimportHandler.h"
 #include "EditorFramework/AssetImportData.h"
+#include "AnimationBlueprintLibrary.h"
 
 #define LOCTEXT_NAMESPACE "EditorAnimUtils"
 
@@ -96,16 +98,19 @@ namespace EditorAnimUtils
 			}
 			else if( UAnimBlueprint* AnimBlueprint = Cast<UAnimBlueprint>(Asset) )
 			{
-
-				// Add parents blueprint. 
+				// Add parent non-template blueprints
 				UAnimBlueprint* ParentBP = Cast<UAnimBlueprint>(AnimBlueprint->ParentClass->ClassGeneratedBy);
 				while (ParentBP)
 				{
-					AnimBlueprintsToRetarget.AddUnique(ParentBP);
+					// Cant transitively retarget templates
+					if(!(ParentBP->bIsTemplate && ParentBP->TargetSkeleton == nullptr))
+					{
+						AnimBlueprintsToRetarget.AddUnique(ParentBP);
+					}
 					ParentBP = Cast<UAnimBlueprint>(ParentBP->ParentClass->ClassGeneratedBy);
 				}
 				
-				AnimBlueprintsToRetarget.AddUnique(AnimBlueprint);				
+				AnimBlueprintsToRetarget.AddUnique(AnimBlueprint);
 			}
 		}
 		
@@ -289,12 +294,13 @@ namespace EditorAnimUtils
 				// Copy curve data from source asset, preserving data in the target if present.
 				if (OldSkeleton)
 				{
-					EditorAnimUtils::CopyAnimCurves(OldSkeleton, NewSkeleton, AnimSequenceToRetarget, USkeleton::AnimCurveMappingName, ERawCurveTrackTypes::RCT_Float);
+					UAnimationBlueprintLibrary::CopyAnimationCurveNamesToSkeleton(OldSkeleton, NewSkeleton, AnimSequenceToRetarget, ERawCurveTrackTypes::RCT_Float);
 
 					// clear transform curves since those curves won't work in new skeleton
 					// since we're deleting curves, mark this rebake flag off
-					AnimSequenceToRetarget->RawCurveData.TransformCurves.Empty();
-					AnimSequenceToRetarget->bNeedsRebake = false;
+					IAnimationDataController& Controller = AnimSequenceToRetarget->GetController();
+					Controller.RemoveAllCurvesOfType(ERawCurveTrackTypes::RCT_Transform);
+
 					// I can't copy transform curves yet because transform curves need retargeting. 
 					//EditorAnimUtils::CopyAnimCurves(OldSkeleton, NewSkeleton, AssetToRetarget, USkeleton::AnimTrackCurveMappingName, FRawCurveTracks::TransformType);
 				}
@@ -315,6 +321,9 @@ namespace EditorAnimUtils
 			UAnimBlueprint * AnimBlueprint = (*AnimBPIter);
 
 			AnimBlueprint->TargetSkeleton = NewSkeleton;
+
+			// We can directly retarget templates (although not transitively via parents) so we need to make sure we clear the flag here
+			AnimBlueprint->bIsTemplate = false;
 
 			if (HasDuplicates())
 			{
@@ -460,24 +469,24 @@ namespace EditorAnimUtils
 		FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
 
 		TMap<UObject*, UObject*> DuplicateMap;
-
-		for(auto Iter = AssetsToDuplicate.CreateConstIterator(); Iter; ++Iter)
+		for(UObject* AssetToDuplicate : AssetsToDuplicate)
 		{
-			UObject* Asset = (*Iter);
-			if(!DuplicateMap.Contains(Asset))
+			if(DuplicateMap.Contains(AssetToDuplicate))
 			{
-				FString PathName = (NameRule)? NameRule->FolderPath : FPackageName::GetLongPackagePath(DestinationPackage->GetName());
+				continue; // ignore duplicates (shouldn't happen though)
+			}
+			
+			// create unique name in case of existing asset with same name
+			FString PathName = (NameRule)? NameRule->FolderPath : FPackageName::GetLongPackagePath(DestinationPackage->GetName());
+			FString ObjectName = CreateDesiredName(AssetToDuplicate, NameRule);
+			FString PackageName;
+			FString BasePackageName = PathName+"/"+ObjectName;
+			AssetToolsModule.Get().CreateUniqueAssetName(BasePackageName, TEXT(""), PackageName, ObjectName);
 
-				FString ObjectName;
-				FString NewPackageName;
-				AssetToolsModule.Get().CreateUniqueAssetName(PathName+"/"+ CreateDesiredName(Asset, NameRule), TEXT(""), NewPackageName, ObjectName);
-
-				// create one on skeleton folder
-				UObject* NewAsset = AssetToolsModule.Get().DuplicateAsset(ObjectName, PathName, Asset);
-				if ( NewAsset )
-				{
-					DuplicateMap.Add(Asset, NewAsset);
-				}
+			// create a new asset
+			if (UObject* NewAsset = AssetToolsModule.Get().DuplicateAsset(ObjectName, PathName, AssetToDuplicate))
+			{
+				DuplicateMap.Add(AssetToDuplicate, NewAsset);
 			}
 		}
 
@@ -507,21 +516,29 @@ namespace EditorAnimUtils
 				FFindAnimAssetRefs AnimRefFinderBlueprint(Node, AnimationAssets);
 			}
 		}
+		
+		// removes blendspaces that are embedded in the graph so that we don't duplicate them to make new assets
+		AnimationAssets.RemoveAll([](UAnimationAsset*& AnimationAsset)
+		{
+			const bool bIsBlendspace = IsValid(Cast<UBlendSpace>(AnimationAsset));
+			const bool bIsEmbedded = !AnimationAsset->GetSkeleton();
+			return bIsBlendspace && bIsEmbedded;
+		});
 	}
 
 	void ReplaceReferredAnimationsInBlueprint(UAnimBlueprint* AnimBlueprint, const TMap<UAnimationAsset*, UAnimationAsset*>& AnimAssetReplacementMap)
 	{
 		UObject* DefaultObject = AnimBlueprint->GetAnimBlueprintGeneratedClass()->GetDefaultObject();
 
-		FArchiveReplaceObjectRef<UAnimationAsset> ReplaceAr(DefaultObject, AnimAssetReplacementMap, false, false, false);//bNullPrivateRefs, bIgnoreOuterRef, bIgnoreArchetypeRef);
-		FArchiveReplaceObjectRef<UAnimationAsset> ReplaceAr2(AnimBlueprint, AnimAssetReplacementMap, false, false, false);//bNullPrivateRefs, bIgnoreOuterRef, bIgnoreArchetypeRef);
+		FArchiveReplaceObjectRef<UAnimationAsset> ReplaceAr(DefaultObject, AnimAssetReplacementMap);
+		FArchiveReplaceObjectRef<UAnimationAsset> ReplaceAr2(AnimBlueprint, AnimAssetReplacementMap);
 
 		// Replace event graph references
 		for(UEdGraph* GraphPage : AnimBlueprint->UbergraphPages)
 		{
 			for(UEdGraphNode* Node : GraphPage->Nodes)
 			{
-				FArchiveReplaceObjectRef<UAnimationAsset> ReplaceGraphAr(Node, AnimAssetReplacementMap, false, false, false);
+				FArchiveReplaceObjectRef<UAnimationAsset> ReplaceGraphAr(Node, AnimAssetReplacementMap);
 			}
 		}
 
@@ -530,47 +547,17 @@ namespace EditorAnimUtils
 		{
 			for(UEdGraphNode* Node : GraphPage->Nodes)
 			{
-				FArchiveReplaceObjectRef<UAnimationAsset> ReplaceGraphAr(Node, AnimAssetReplacementMap, false, false, false);
+				FArchiveReplaceObjectRef<UAnimationAsset> ReplaceGraphAr(Node, AnimAssetReplacementMap);
 			}
 		}
 	}
 
-	void CopyAnimCurves(USkeleton* OldSkeleton, USkeleton* NewSkeleton, UAnimSequenceBase *SequenceBase, const FName ContainerName, ERawCurveTrackTypes CurveType )
+	void CopyAnimCurves(USkeleton* OldSkeleton, USkeleton* NewSkeleton, UAnimSequenceBase* SequenceBase, const FName ContainerName, ERawCurveTrackTypes CurveType)
 	{
-		// Copy curve data from source asset, preserving data in the target if present.
-		const FSmartNameMapping* OldNameMapping = OldSkeleton->GetSmartNameContainer(ContainerName);
-		SequenceBase->RawCurveData.RefreshName(OldNameMapping, CurveType);
-
 		// In some circumstances the asset may have already been updated during the retarget process (eg. retargeting of child assets for blendspaces, etc)
 		if (NewSkeleton != SequenceBase->GetSkeleton())
 		{
-			switch (CurveType)
-			{
-			case ERawCurveTrackTypes::RCT_Float:
-			{
-				for (FFloatCurve& Curve : SequenceBase->RawCurveData.FloatCurves)
-				{
-					NewSkeleton->AddSmartNameAndModify(ContainerName, Curve.Name.DisplayName, Curve.Name);
-				}
-				break;
-			}
-			case ERawCurveTrackTypes::RCT_Vector:
-			{
-				for (FVectorCurve& Curve : SequenceBase->RawCurveData.VectorCurves)
-				{
-					NewSkeleton->AddSmartNameAndModify(ContainerName, Curve.Name.DisplayName, Curve.Name);
-				}
-				break;
-			}
-			case ERawCurveTrackTypes::RCT_Transform:
-			{
-				for (FTransformCurve& Curve : SequenceBase->RawCurveData.TransformCurves)
-				{
-					NewSkeleton->AddSmartNameAndModify(ContainerName, Curve.Name.DisplayName, Curve.Name);
-				}
-				break;
-			}
-			}
+			UAnimationBlueprintLibrary::CopyAnimationCurveNamesToSkeleton(OldSkeleton, NewSkeleton, SequenceBase, CurveType);
 		}
 	}
 

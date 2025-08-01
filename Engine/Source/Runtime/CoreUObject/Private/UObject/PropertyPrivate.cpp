@@ -19,11 +19,9 @@
 #include "Math/Box2D.h"
 #include "UObject/ReleaseObjectVersion.h"
 #include "UObject/UnrealTypePrivate.h"
+#include "UObject/GarbageCollectionSchema.h"
 #include "UObject/LinkerPlaceholderFunction.h"
 #include "UObject/LinkerPlaceholderClass.h"
-
-// WARNING: This should always be the last include in any file that needs it (except .generated.h)
-#include "UObject/UndefineUPropertyMacros.h"
 
 /*-----------------------------------------------------------------------------
 	UProperty implementation.
@@ -164,7 +162,7 @@ void UEnumProperty::AddReferencedObjects(UObject* InThis, FReferenceCollector& C
 	Super::AddReferencedObjects(InThis, Collector);
 }
 
-namespace UE4UEnumProperty_Private
+namespace UEEnumProperty_Private
 {
 	struct FEnumPropertyFriend
 	{
@@ -175,8 +173,7 @@ namespace UE4UEnumProperty_Private
 
 IMPLEMENT_CORE_INTRINSIC_CLASS(UEnumProperty, UProperty,
 	{
-		Class->EmitObjectReference(UE4UEnumProperty_Private::FEnumPropertyFriend::EnumOffset, TEXT("Enum"));
-		Class->EmitObjectReference(UE4UEnumProperty_Private::FEnumPropertyFriend::UnderlyingPropOffset, TEXT("UnderlyingProp"));
+		UE::GC::DeclareIntrinsicMembers(Class, { UE_GC_MEMBER(UEnumProperty, Enum), UE_GC_MEMBER(UEnumProperty, UnderlyingProp) });
 	}
 );
 
@@ -184,7 +181,7 @@ void UArrayProperty::Serialize(FArchive& Ar)
 {
 	Super::Serialize(Ar);
 	Ar << Inner;
-	checkSlow(Inner || HasAnyFlags(RF_ClassDefaultObject) || IsPendingKill());
+	checkSlow(Inner || HasAnyFlags(RF_ClassDefaultObject) || !IsValidChecked(this));
 }
 void UArrayProperty::AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector)
 {
@@ -195,7 +192,7 @@ void UArrayProperty::AddReferencedObjects(UObject* InThis, FReferenceCollector& 
 
 IMPLEMENT_CORE_INTRINSIC_CLASS(UArrayProperty, UProperty,
 	{
-		Class->EmitObjectReference(STRUCT_OFFSET(UArrayProperty, Inner), TEXT("Inner"));
+		UE::GC::DeclareIntrinsicMembers(Class, { UE_GC_MEMBER(UArrayProperty, Inner) });
 
 		// Ensure that TArray and FScriptArray are interchangeable, as FScriptArray will be used to access a native array property
 		// from script that is declared as a TArray in C++.
@@ -257,7 +254,7 @@ void UObjectPropertyBase::AddReferencedObjects(UObject* InThis, FReferenceCollec
 
 IMPLEMENT_CORE_INTRINSIC_CLASS(UObjectPropertyBase, UProperty,
 	{
-		Class->EmitObjectReference(STRUCT_OFFSET(UObjectProperty, PropertyClass), TEXT("PropertyClass"));
+		UE::GC::DeclareIntrinsicMembers(Class, { UE_GC_MEMBER(UObjectProperty, PropertyClass) });
 	}
 );
 
@@ -324,6 +321,7 @@ void UBoolProperty::SetBoolSize(const uint32 InSize, const bool bIsNativeBool, c
 	check(ByteMask != 0);
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void UBoolProperty::Serialize(FArchive& Ar)
 {
 	Super::Serialize(Ar);
@@ -335,17 +333,18 @@ void UBoolProperty::Serialize(FArchive& Ar)
 	if (Ar.IsLoading())
 	{
 		Ar << NativeBool;
-		if (!IsPendingKill())
+		if (IsValidChecked(this))
 		{
 			SetBoolSize(BoolSize, !!NativeBool);
 		}
 	}
 	else
 	{
-		NativeBool = (!HasAnyFlags(RF_ClassDefaultObject) && !IsPendingKill() && Ar.IsSaving()) ? (IsNativeBool() ? 1 : 0) : 0;
+		NativeBool = (!HasAnyFlags(RF_ClassDefaultObject) && IsValidChecked(this) && Ar.IsSaving()) ? (IsNativeBool() ? 1 : 0) : 0;
 		Ar << NativeBool;
 	}
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 IMPLEMENT_CORE_INTRINSIC_CLASS(UBoolProperty, UProperty,
 	{
@@ -370,7 +369,7 @@ void UByteProperty::AddReferencedObjects(UObject* InThis, FReferenceCollector& C
 
 IMPLEMENT_CORE_INTRINSIC_CLASS(UByteProperty, UNumericProperty,
 	{
-		Class->EmitObjectReference(STRUCT_OFFSET(UByteProperty, Enum), TEXT("Enum"));
+		UE::GC::DeclareIntrinsicMembers(Class, { UE_GC_MEMBER(UByteProperty, Enum) });
 	}
 );
 
@@ -439,7 +438,7 @@ void UClassProperty::AddReferencedObjects(UObject* InThis, FReferenceCollector& 
 
 IMPLEMENT_CORE_INTRINSIC_CLASS(UClassProperty, UObjectProperty,
 	{
-		Class->EmitObjectReference(STRUCT_OFFSET(UClassProperty, MetaClass), TEXT("MetaClass"));
+		UE::GC::DeclareIntrinsicMembers(Class, { UE_GC_MEMBER(UClassProperty, MetaClass) });
 	}
 );
 
@@ -474,7 +473,7 @@ void UDelegateProperty::BeginDestroy()
 
 IMPLEMENT_CORE_INTRINSIC_CLASS(UDelegateProperty, UProperty,
 	{
-		Class->EmitObjectReference(STRUCT_OFFSET(UDelegateProperty, SignatureFunction), TEXT("SignatureFunction"));
+		UE::GC::DeclareIntrinsicMembers(Class, { UE_GC_MEMBER(UDelegateProperty, SignatureFunction) });
 	}
 );
 
@@ -575,7 +574,7 @@ void UInterfaceProperty::AddReferencedObjects(UObject* InThis, FReferenceCollect
 
 IMPLEMENT_CORE_INTRINSIC_CLASS(UInterfaceProperty, UProperty,
 	{
-		Class->EmitObjectReference(STRUCT_OFFSET(UInterfaceProperty, InterfaceClass), TEXT("InterfaceClass"));
+		UE::GC::DeclareIntrinsicMembers(Class, { UE_GC_MEMBER(UInterfaceProperty, InterfaceClass) });
 	}
 );
 
@@ -612,8 +611,7 @@ void UMapProperty::AddReferencedObjects(UObject* InThis, FReferenceCollector& Co
 
 IMPLEMENT_CORE_INTRINSIC_CLASS(UMapProperty, UProperty,
 	{
-		Class->EmitObjectReference(STRUCT_OFFSET(UMapProperty, KeyProp),   TEXT("KeyProp"));
-		Class->EmitObjectReference(STRUCT_OFFSET(UMapProperty, ValueProp), TEXT("ValueProp"));
+		UE::GC::DeclareIntrinsicMembers(Class, { UE_GC_MEMBER(UMapProperty, KeyProp), UE_GC_MEMBER(UMapProperty, ValueProp) });
 
 		// Ensure that TArray and FScriptMap are interchangeable, as FScriptMap will be used to access a native array property
 		// from script that is declared as a TArray in C++.
@@ -651,7 +649,7 @@ void UMulticastDelegateProperty::BeginDestroy()
 
 IMPLEMENT_CORE_INTRINSIC_CLASS(UMulticastDelegateProperty, UProperty,
 	{
-		Class->EmitObjectReference(STRUCT_OFFSET(UMulticastDelegateProperty, SignatureFunction), TEXT("SignatureFunction"));
+		UE::GC::DeclareIntrinsicMembers(Class, { UE_GC_MEMBER(UMulticastDelegateProperty, SignatureFunction) });
 	}
 );
 
@@ -705,7 +703,7 @@ void USetProperty::AddReferencedObjects(UObject* InThis, FReferenceCollector& Co
 
 IMPLEMENT_CORE_INTRINSIC_CLASS(USetProperty, UProperty,
 	{
-		Class->EmitObjectReference(STRUCT_OFFSET(USetProperty, ElementProp), TEXT("ElementProp"));
+		UE::GC::DeclareIntrinsicMembers(Class, { UE_GC_MEMBER(USetProperty, ElementProp) });
 
 		// Ensure that TArray and FScriptMap are interchangeable, as FScriptMap will be used to access a native array property
 		// from script that is declared as a TArray in C++.
@@ -779,7 +777,7 @@ void USoftClassProperty::AddReferencedObjects(UObject* InThis, FReferenceCollect
 
 IMPLEMENT_CORE_INTRINSIC_CLASS(USoftClassProperty, USoftObjectProperty,
 	{
-		Class->EmitObjectReference(STRUCT_OFFSET(USoftClassProperty, MetaClass), TEXT("MetaClass"));
+		UE::GC::DeclareIntrinsicMembers(Class, { UE_GC_MEMBER(USoftClassProperty, MetaClass) });
 	}
 );
 
@@ -880,7 +878,7 @@ void UStructProperty::AddReferencedObjects(UObject* InThis, FReferenceCollector&
 
 IMPLEMENT_CORE_INTRINSIC_CLASS(UStructProperty, UProperty,
 	{
-		Class->EmitObjectReference(STRUCT_OFFSET(UStructProperty, Struct), TEXT("Struct"));
+		UE::GC::DeclareIntrinsicMembers(Class, { UE_GC_MEMBER(UStructProperty, Struct) });
 	}
 );
 
@@ -923,5 +921,3 @@ IMPLEMENT_CORE_INTRINSIC_CLASS(UMulticastInlineDelegatePropertyWrapper, UMultica
 	{
 	}
 );
-
-#include "UObject/DefineUPropertyMacros.h"

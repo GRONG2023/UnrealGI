@@ -2,11 +2,8 @@
 
 #include "Animation/AnimationPoseData.h"
 #include "Animation/AnimNodeBase.h"
-#include "Animation/AnimInstance.h"
-#include "Animation/AnimCurveTypes.h"
-#include "Animation/CustomAttributesRuntime.h"
+#include "Animation/AnimSlotEvaluationPose.h"
 
-#include "BonePose.h"
 
 FAnimationPoseData::FAnimationPoseData(FPoseContext& InPoseContext)
 	: Pose(InPoseContext.Pose), Curve(InPoseContext.Curve), Attributes(InPoseContext.CustomAttributes)
@@ -18,7 +15,7 @@ FAnimationPoseData::FAnimationPoseData(FSlotEvaluationPose& InSlotPoseContext)
 {
 }
 
-FAnimationPoseData::FAnimationPoseData(FCompactPose& InPose, FBlendedCurve& InCurve, FStackCustomAttributes& InAttributes) : Pose(InPose), Curve(InCurve), Attributes(InAttributes)
+FAnimationPoseData::FAnimationPoseData(FCompactPose& InPose, FBlendedCurve& InCurve, UE::Anim::FStackAttributeContainer& InAttributes) : Pose(InPose), Curve(InCurve), Attributes(InAttributes)
 {
 }
 
@@ -42,12 +39,12 @@ const FBlendedCurve& FAnimationPoseData::GetCurve() const
 	return Curve;
 }
 
-FStackCustomAttributes& FAnimationPoseData::GetAttributes()
+UE::Anim::FStackAttributeContainer& FAnimationPoseData::GetAttributes()
 {
 	return Attributes;
 }
 
-const FStackCustomAttributes& FAnimationPoseData::GetAttributes() const
+const UE::Anim::FStackAttributeContainer& FAnimationPoseData::GetAttributes() const
 {
 	return Attributes;
 }

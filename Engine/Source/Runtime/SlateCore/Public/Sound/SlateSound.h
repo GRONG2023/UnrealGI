@@ -12,7 +12,7 @@
  * An intermediary to make UBaseSound available for Slate to play sounds
  */
 USTRUCT(BlueprintType)
-struct SLATECORE_API FSlateSound
+struct FSlateSound
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -30,7 +30,7 @@ public:
 	 * @note Ensure that you only access the resource as a USoundBase 
 	 * @return The resource object, or null if this sound resource is empty
 	 */
-	UObject* GetResourceObject( ) const;
+	SLATECORE_API UObject* GetResourceObject( ) const;
 
 	/**
 	* Sets the sound that is supposed to be played.
@@ -43,12 +43,12 @@ public:
 	/**
 	 * Used when updating the ResourceObject within an FSlateSound from the editor to clear out any legacy data that may be set.
 	 */
-	void StripLegacyData_DEPRECATED( );
+	SLATECORE_API void StripLegacyData_DEPRECATED( );
 
 	/**
 	 * Used to upgrade a FName property to a FSlateSound property
 	 */
-	bool SerializeFromMismatchedTag(struct FPropertyTag const& Tag, FStructuredArchive::FSlot Slot);
+	SLATECORE_API bool SerializeFromMismatchedTag(struct FPropertyTag const& Tag, FStructuredArchive::FSlot Slot);
 
 public:
 
@@ -59,7 +59,7 @@ public:
 	 * @param SoundName The name of the sound to load, eg) SoundCue'/Game/QA_Assets/Sound/TEST_Music_Ambient.TEST_Music_Ambient'
 	 * @return An FSlateSound object with a ResourceObject pointer that's either set the given sound, or points to null if the sound could not be found
 	 */
-	static FSlateSound FromName_DEPRECATED( const FName& SoundName );
+	static SLATECORE_API FSlateSound FromName_DEPRECATED( const FName& SoundName );
 
 protected:
 
@@ -67,8 +67,8 @@ protected:
 	 * Pointer to the USoundBase. Holding onto it as a UObject because USoundBase is not available in Slate core.
 	 * Edited via FSlateSoundStructCustomization to ensure you can only set USoundBase assets on it.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Sound, meta=(DisplayName="Sound", AllowedClasses="SoundBase"))
-	UObject* ResourceObject;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Sound, meta=(DisplayName="Sound", AllowedClasses="/Script/Engine.SoundBase"))
+	TObjectPtr<UObject> ResourceObject;
 
 	/** The legacy resource name; only used by sounds that have been set-up in code, or otherwise upgraded from old FName properties, set to NAME_None in non-legacy instances */
 	FName LegacyResourceName_DEPRECATED;

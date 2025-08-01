@@ -1,8 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BehaviorTree/Tasks/BTTask_RunBehavior.h"
+#include "BehaviorTree/BlackboardData.h"
 #include "VisualLogger/VisualLogger.h"
 #include "AIController.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BTTask_RunBehavior)
 
 UBTTask_RunBehavior::UBTTask_RunBehavior(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
@@ -39,7 +42,16 @@ void UBTTask_RunBehavior::OnSubtreeDeactivated(UBehaviorTreeComponent& OwnerComp
 
 FString UBTTask_RunBehavior::GetStaticDescription() const
 {
-	return FString::Printf(TEXT("%s: %s"), *Super::GetStaticDescription(), *GetNameSafe(BehaviorAsset));
+	bool bIsBBCompatible = false;
+	if (const UBlackboardData* BlackboardData = GetBlackboardAsset())
+	{
+		if (const UBlackboardData* OtherBlackboardData = BehaviorAsset ? BehaviorAsset->GetBlackboardAsset() : nullptr )
+		{
+			bIsBBCompatible = BlackboardData == OtherBlackboardData || BlackboardData->IsChildOf(*OtherBlackboardData);
+		}
+	}
+		
+	return FString::Printf(TEXT("%s: %s%s"), *Super::GetStaticDescription(), *GetNameSafe(BehaviorAsset), bIsBBCompatible ? TEXT("") : TEXT(" (Blackboard not compatible)"));
 }
 
 #if WITH_EDITOR
@@ -50,3 +62,4 @@ FName UBTTask_RunBehavior::GetNodeIconName() const
 }
 
 #endif	// WITH_EDITOR
+

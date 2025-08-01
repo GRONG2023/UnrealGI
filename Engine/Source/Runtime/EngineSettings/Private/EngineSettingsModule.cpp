@@ -1,7 +1,5 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "CoreMinimal.h"
-#include "Modules/ModuleInterface.h"
 #include "Modules/ModuleManager.h"
 #include "UObject/UnrealType.h"
 #include "ConsoleSettings.h"
@@ -75,6 +73,8 @@ UGeneralProjectSettings::UGeneralProjectSettings( const FObjectInitializer& Obje
 	, bAllowClose(true)
 	, bAllowMaximize(true)
 	, bAllowMinimize(true)
+	, EyeOffsetForFakeStereoRenderingDevice(0.0320000005f)
+	, FOVForFakeStereoRenderingDevice(90)
 { }
 
 
@@ -118,7 +118,7 @@ FString UGameMapsSettings::GetGameModeForName(const FString& GameModeName)
 	}
 
 	// Check deprecated config
-	FConfigSection* GameModeSection = GConfig->GetSectionPrivate(TEXT("/Script/Engine.GameMode"), false, true, GGameIni);
+	const FConfigSection* GameModeSection = GConfig->GetSection(TEXT("/Script/Engine.GameMode"), false, GGameIni);
 	
 	if (GameModeSection)
 	{
@@ -161,7 +161,7 @@ FString UGameMapsSettings::GetGameModeForMapName(const FString& MapName)
 	}
 
 	// Check deprecated config
-	FConfigSection* GameModeSection = GConfig->GetSectionPrivate(TEXT("/Script/Engine.WorldSettings"), false, true, GGameIni);
+	const FConfigSection* GameModeSection = GConfig->GetSection(TEXT("/Script/Engine.WorldSettings"), false, GGameIni);
 
 	if (GameModeSection)
 	{

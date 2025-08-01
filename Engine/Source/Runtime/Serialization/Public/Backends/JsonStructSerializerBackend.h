@@ -2,9 +2,17 @@
 
 #pragma once
 
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "CoreTypes.h"
 #include "IStructSerializerBackend.h"
+#include "Misc/EnumClassFlags.h"
 #include "Serialization/JsonWriter.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/PropertyPortFlags.h"
+#include "UObject/UnrealType.h"
+
+class FArchive;
 
 /**
  * Implements a writer for UStruct serialization using Json.
@@ -14,7 +22,7 @@
  * all based on templates. At some point we will refactor the low-level Json API to provide more
  * flexibility for serialization.
  */
-class SERIALIZATION_API FJsonStructSerializerBackend
+class FJsonStructSerializerBackend
 	: public IStructSerializerBackend
 {
 public:
@@ -46,12 +54,12 @@ public:
 
 	// IStructSerializerBackend interface
 
-	virtual void BeginArray(const FStructSerializerState& State) override;
-	virtual void BeginStructure(const FStructSerializerState& State) override;
-	virtual void EndArray(const FStructSerializerState& State) override;
-	virtual void EndStructure(const FStructSerializerState& State) override;
-	virtual void WriteComment(const FString& Comment) override;
-	virtual void WriteProperty(const FStructSerializerState& State, int32 ArrayIndex = 0) override;
+	SERIALIZATION_API virtual void BeginArray(const FStructSerializerState& State) override;
+	SERIALIZATION_API virtual void BeginStructure(const FStructSerializerState& State) override;
+	SERIALIZATION_API virtual void EndArray(const FStructSerializerState& State) override;
+	SERIALIZATION_API virtual void EndStructure(const FStructSerializerState& State) override;
+	SERIALIZATION_API virtual void WriteComment(const FString& Comment) override;
+	SERIALIZATION_API virtual void WriteProperty(const FStructSerializerState& State, int32 ArrayIndex = 0) override;
 
 protected:
 
@@ -78,7 +86,7 @@ protected:
 		else if (State.KeyProperty != nullptr)
 		{
 			FString KeyString;
-			State.KeyProperty->ExportTextItem(KeyString, State.KeyData, nullptr, nullptr, PPF_None);
+			State.KeyProperty->ExportTextItem_Direct(KeyString, State.KeyData, nullptr, nullptr, PPF_None);
 			JsonWriter->WriteValue(KeyString, Value);
 		}
 		//Write PropertyName:Value for any other cases (single array element, single property, etc...)
@@ -102,7 +110,7 @@ protected:
 		else if (State.KeyProperty != nullptr)
 		{
 			FString KeyString;
-			State.KeyProperty->ExportTextItem(KeyString, State.KeyData, nullptr, nullptr, PPF_None);
+			State.KeyProperty->ExportTextItem_Direct(KeyString, State.KeyData, nullptr, nullptr, PPF_None);
 			JsonWriter->WriteNull(KeyString);
 		}
 		else

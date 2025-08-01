@@ -5,6 +5,13 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(JsonObjectWrapper)
+
+FJsonObjectWrapper::FJsonObjectWrapper()
+{
+	JsonObject = MakeShared<FJsonObject>();
+}
+
 bool FJsonObjectWrapper::ImportTextItem(const TCHAR*& Buffer, int32 PortFlags, UObject* Parent, FOutputDevice* ErrorText)
 {
 	// read JSON string from Buffer
@@ -14,7 +21,11 @@ bool FJsonObjectWrapper::ImportTextItem(const TCHAR*& Buffer, int32 PortFlags, U
 		int32 NumCharsRead = 0;
 		if (!FParse::QuotedString(Buffer, Json, &NumCharsRead))
 		{
-			ErrorText->Logf(ELogVerbosity::Warning, TEXT("FJsonObjectWrapper::ImportTextItem: Bad quoted string: %s\n"), Buffer);
+			if (ErrorText)
+			{
+				ErrorText->Logf(ELogVerbosity::Warning, TEXT("FJsonObjectWrapper::ImportTextItem: Bad quoted string: %s\n"), Buffer);
+			}
+			
 			return false;
 		}
 		Buffer += NumCharsRead;
@@ -26,11 +37,11 @@ bool FJsonObjectWrapper::ImportTextItem(const TCHAR*& Buffer, int32 PortFlags, U
 		Buffer += Json.Len();
 	}
 
-	// empty string yields empty shared pointer
+	// empty string resets/re-initializes shared pointer
 	if (Json.IsEmpty())
 	{
 		JsonString.Empty();
-		JsonObject.Reset();
+		JsonObject = MakeShared<FJsonObject>();
 		return true;
 	}
 
@@ -73,6 +84,11 @@ void FJsonObjectWrapper::PostSerialize(const FArchive& Ar)
 	}
 }
 
+FJsonObjectWrapper::operator bool() const
+{
+	return JsonObject.IsValid() && !JsonObject->Values.IsEmpty();
+}
+
 bool FJsonObjectWrapper::JsonObjectToString(FString& Str) const
 {
 	TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> JsonWriter = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Str, 0);
@@ -84,4 +100,5 @@ bool FJsonObjectWrapper::JsonObjectFromString(const FString& Str)
 	TSharedRef<TJsonReader<>> JsonReader = TJsonReaderFactory<>::Create(Str);
 	return FJsonSerializer::Deserialize(JsonReader, JsonObject);
 }
+
 

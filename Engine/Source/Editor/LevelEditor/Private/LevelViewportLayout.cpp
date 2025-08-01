@@ -13,11 +13,14 @@
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SSpacer.h"
 #include "Widgets/SCanvas.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Editor/UnrealEdEngine.h"
 #include "UnrealEdGlobals.h"
 #include "LevelEditor.h"
 #include "Widgets/Docking/SDockTab.h"
+#include "EditorViewportTabContent.h"
+#include "LevelViewportLayoutEntity.h"
+#include "SAssetEditorViewport.h"
 
 static const FName LevelEditorModName("LevelEditor");
 
@@ -34,102 +37,6 @@ namespace ViewportLayoutDefs
 
 	/** Default immersive state for new layouts - will only be applied when no config data is restoring state */
 	static const bool bDefaultShouldBeImmersive = false;
-}
-
-// SViewportsOverlay ////////////////////////////////////////////////
-
-/**
- * Overlay wrapper class so that we can cache the size of the widget
- * It will also store the LevelViewportLayout data because that data can't be stored
- * per app; it must be stored per viewport overlay in case the app that made it closes.
- */
-class SViewportsOverlay : public SCompoundWidget
-{
-
-public:
-
-	SLATE_BEGIN_ARGS( SViewportsOverlay ){}
-		SLATE_DEFAULT_SLOT( FArguments, Content )
-		SLATE_ARGUMENT( TSharedPtr<FLevelViewportTabContent>, LevelViewportTab )
-	SLATE_END_ARGS()
-
-	void Construct( const FArguments& InArgs );
-
-	/** Default constructor */
-	SViewportsOverlay()
-		: CachedSize( FVector2D::ZeroVector )
-	{}
-
-	/** Overridden from SWidget */
-	virtual void Tick( const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime ) override;
-
-	/** Wraps SOverlay::AddSlot() */
-	SOverlay::FOverlaySlot& AddSlot();
-
-	/** Wraps SOverlay::RemoveSlot() */
-	void RemoveSlot();
-
-	/**
-	 * Returns the cached size of this viewport overlay
-	 *
-	 * @return	The size that was cached
-	 */
-	const FVector2D& GetCachedSize() const;
-
-	/** Gets the Level Viewport Tab that created this overlay */
-	TSharedPtr<FLevelViewportTabContent> GetLevelViewportTab() const;
-
-private:
-	
-	/** Reference to the owning level viewport tab */
-	TSharedPtr<FLevelViewportTabContent> LevelViewportTab;
-
-	/** The overlay widget we're containing */
-	TSharedPtr< SOverlay > OverlayWidget;
-
-	/** Cache our size, so that we can use this when animating a viewport maximize/restore */
-	FVector2D CachedSize;
-};
-
-
-void SViewportsOverlay::Construct( const FArguments& InArgs )
-{
-	const TSharedRef<SWidget>& ContentWidget = InArgs._Content.Widget;
-	LevelViewportTab = InArgs._LevelViewportTab;
-
-	ChildSlot
-		[
-			SAssignNew( OverlayWidget, SOverlay )
-			+ SOverlay::Slot()
-			[
-				ContentWidget
-			]
-		];
-}
-
-void SViewportsOverlay::Tick( const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime )
-{
-	CachedSize = AllottedGeometry.Size;
-}
-
-SOverlay::FOverlaySlot& SViewportsOverlay::AddSlot()
-{
-	return OverlayWidget->AddSlot();
-}
-
-void SViewportsOverlay::RemoveSlot()
-{
-	return OverlayWidget->RemoveSlot();
-}
-
-const FVector2D& SViewportsOverlay::GetCachedSize() const
-{
-	return CachedSize;
-}
-
-TSharedPtr<FLevelViewportTabContent> SViewportsOverlay::GetLevelViewportTab() const
-{
-	return LevelViewportTab;
 }
 
 // FLevelViewportLayout /////////////////////////////
@@ -152,10 +59,8 @@ FLevelViewportLayout::FLevelViewportLayout()
 
 FLevelViewportLayout::~FLevelViewportLayout()
 {
-	for (auto& Pair : Viewports)
-	{
-		Pair.Value->OnLayoutDestroyed();
-	}
+	FLevelEditorModule& LevelEditor = FModuleManager::GetModuleChecked<FLevelEditorModule>(LevelEditorModName);
+	LevelEditor.OnTakeHighResScreenShots().RemoveAll(this);
 
 	// Make sure that we're not locking the immersive window after we go away
 	if( bIsImmersive || ( bWasImmersive && bIsTransitioning ) )
@@ -166,45 +71,51 @@ FLevelViewportLayout::~FLevelViewportLayout()
 			OwnerWindow->SetFullWindowOverlayContent( NULL );
 		}
 	}
-
-	FLevelEditorModule& LevelEditor = FModuleManager::GetModuleChecked<FLevelEditorModule>(LevelEditorModName);
-	LevelEditor.OnTakeHighResScreenShots().RemoveAll(this);
 }
 
 
-TSharedRef<SWidget> FLevelViewportLayout::BuildViewportLayout( TSharedPtr<SDockTab> InParentDockTab, TSharedPtr<FLevelViewportTabContent> InParentTab, const FString& LayoutString, TWeakPtr<ILevelEditor> InParentLevelEditor )
+TSharedRef<SWidget> FLevelViewportLayout::BuildViewportLayout(TSharedPtr<SDockTab> InParentDockTab, TSharedPtr<FEditorViewportTabContent> InParentTab, const FString& LayoutString)
 {
-	// We don't support reconfiguring an existing layout object, as this makes handling of transitions
-	// particularly difficult.  Instead just destroy the old layout and create a new layout object.
-	check( !ParentTab.IsValid() );
-	ParentTab = InParentDockTab;
-	ParentTabContent = InParentTab;
-	ParentLevelEditor = InParentLevelEditor;
-	MaximizedViewport = NAME_None;
+	TSharedRef<SWidget> ViewportLayoutWidget = FAssetEditorViewportLayout::BuildViewportLayout(InParentDockTab, InParentTab, LayoutString);
 
 	// Important: We use raw bindings here because we are releasing our binding in our destructor (where a weak pointer would be invalid)
 	// It's imperative that our delegate is removed in the destructor for the level editor module to play nicely with reloading.
 	FLevelEditorModule& LevelEditor = FModuleManager::GetModuleChecked<FLevelEditorModule>(LevelEditorModName);
 	LevelEditor.OnTakeHighResScreenShots().AddRaw(this, &FLevelViewportLayout::TakeHighResScreenShot);
 
-	// We use an overlay so that we can draw a maximized viewport on top of the other viewports
-	TSharedPtr<SBorder> ViewportsBorder;
-	TSharedRef<SViewportsOverlay> ViewportsOverlay =
-		SNew( SViewportsOverlay )
-		.LevelViewportTab(InParentTab)
-		[
-			SAssignNew( ViewportsBorder, SBorder )
-			.Padding( 0.0f )
-			.BorderImage( FEditorStyle::GetBrush("NoBorder") )
-			.Visibility( this, &FLevelViewportLayout::OnGetNonMaximizedVisibility )
-		];
+	// Prevent maximize if we only have a single viewport
+	bIsMaximizeSupported = (Viewports.Num() > 1);
 
-	ViewportsOverlayPtr = ViewportsOverlay;
+	return ViewportLayoutWidget;
+}
 
-	// Don't set the content until the OverlayPtr has been set, because it access this when we want to start with the viewports maximized.
-	ViewportsBorder->SetContent( MakeViewportLayout(LayoutString) );
-
-	return ViewportsOverlay;
+TSharedRef<SWidget> FLevelViewportLayout::FactoryViewport(FName InTypeName, const FAssetEditorViewportConstructionArgs& ConstructionArgs)
+{
+	TSharedPtr<IEditorViewportLayoutEntity> ViewportLayoutEntity;
+	TSharedPtr<FEditorViewportTabContent> PinnedTabContent = ParentTabContent.Pin();
+	if (PinnedTabContent.IsValid())
+	{
+		// Manually use the factory function here based on type, because legacy viewport types don't register with our factory functions
+		// The level editor module will return an appropriate default if the legacy lookup fails too.
+		if (const AssetEditorViewportFactoryFunction* FactoryFunc = PinnedTabContent->FindViewportCreationFactory(InTypeName))
+		{
+			TSharedPtr<SAssetEditorViewport> EditorViewport = (*FactoryFunc)(ConstructionArgs);
+			ViewportLayoutEntity = MakeShareable(new FLevelViewportLayoutEntity(EditorViewport));
+		}
+	}
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	if (!ViewportLayoutEntity.IsValid())
+	{
+		FLevelEditorModule& LevelEditor = FModuleManager::GetModuleChecked<FLevelEditorModule>(LevelEditorModName);
+		ViewportLayoutEntity = LevelEditor.FactoryViewport(InTypeName, ConstructionArgs);
+	}
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	
+	// Both the legacy level editor factory viewport, and the viewport creation functions should fall back to a valid default
+	check(ViewportLayoutEntity.IsValid());
+	
+	Viewports.Add(ConstructionArgs.ConfigKey, ViewportLayoutEntity);
+	return ViewportLayoutEntity->AsWidget();
 }
 
 void FLevelViewportLayout::BeginThrottleForAnimatedResize()
@@ -220,7 +131,7 @@ void FLevelViewportLayout::BeginThrottleForAnimatedResize()
 }
 
 
-void  FLevelViewportLayout::EndThrottleForAnimatedResize()
+void FLevelViewportLayout::EndThrottleForAnimatedResize()
 {
 	// Only leave this mode if there is a request
 	if( ViewportResizeThrottleRequest.IsValid() )
@@ -229,11 +140,14 @@ void  FLevelViewportLayout::EndThrottleForAnimatedResize()
 	}
 }
 
-void FLevelViewportLayout::InitCommonLayoutFromString( const FString& SpecificLayoutString, FName DefaultMaximizedViewport )
+void FLevelViewportLayout::InitCommonLayoutFromString( const FString& SpecificLayoutString, const FName PerspectiveViewportKey )
 {
+	FName DefaultMaximizedViewport = PerspectiveViewportKey;
+	MaximizedViewport = NAME_None;
+
 	bool bShouldBeMaximized = bIsMaximizeSupported && ViewportLayoutDefs::bDefaultShouldBeMaximized;
 	bool bShouldBeImmersive = ViewportLayoutDefs::bDefaultShouldBeImmersive;
-	
+
 	if (!SpecificLayoutString.IsEmpty())
 	{
 		const FString& IniSection = FLayoutSaveRestore::GetAdditionalLayoutConfigIni();
@@ -315,6 +229,7 @@ void FLevelViewportLayout::MaximizeViewport( FName ViewportToMaximize, const boo
 	// I.E Maximized viewport is NULL which means this is a new maximize or MaximizeViewport is equal to the passed in one which means this is a restore of the current maximized viewport
 	check( Entity.IsValid() );
 	check( MaximizedViewport.IsNone() || MaximizedViewport == ViewportToMaximize );
+	check(LayoutConfiguration.IsValid());
 
 	// If we're already in immersive mode, toggling maximize just needs to update some state (no visual change)
 	if( bIsImmersive )
@@ -435,17 +350,50 @@ void FLevelViewportLayout::MaximizeViewport( FName ViewportToMaximize, const boo
 				{
 					// Replace our viewport with a dummy widget in it's place during the maximize transition.  We can't
 					// have a single viewport widget in two places at once!
-					ReplaceWidget( MaximizedEntity->AsWidget(), ViewportReplacementWidget.ToSharedRef() );
+					LayoutConfiguration->ReplaceWidget( MaximizedEntity->AsWidget(), ViewportReplacementWidget.ToSharedRef() );
 
-					TSharedRef< SCanvas > Canvas = SNew( SCanvas );
-					Canvas->AddSlot()
-						.Position( TAttribute< FVector2D >( this, &FLevelViewportLayout::GetMaximizedViewportPositionOnCanvas ) )
-						.Size( TAttribute< FVector2D >( this, &FLevelViewportLayout::GetMaximizedViewportSizeOnCanvas ) )
-						[
-							MaximizedEntity->AsWidget()
-						];
+					// The attributes need the AllocatedSize of the parent.
+					// The size is updated in the Paint function and the attributes in the Prepass (too soon).
+					// Update the value manually Tick function (after the parent's Paint).
+					class SCanvasInternal : public SCanvas
+					{
+					public:
+						SCanvasInternal()
+						{
+							SetCanTick(true);
+						}
 
-					ViewportsOverlayWidget = Canvas;
+						void Construct(const FArguments& Args, TSharedRef<FLevelViewportLayout> ViewportLayout, TSharedRef<SWidget> MaximizedEntity)
+						{
+							SCanvas::Construct(Args);
+							OwnerViewportLayout = ViewportLayout;
+							AddSlot()
+								.Expose(ViewportsOverlayWidgetSlot)
+								[
+									MaximizedEntity
+								];
+						}
+
+						virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override
+						{
+							SCanvas::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
+							if (TSharedPtr<FLevelViewportLayout> Owner = OwnerViewportLayout.Pin())
+							{
+								ViewportsOverlayWidgetSlot->SetPosition(Owner->GetMaximizedViewportPositionOnCanvas());
+								ViewportsOverlayWidgetSlot->SetSize(Owner->GetMaximizedViewportSizeOnCanvas());
+							}
+						}
+
+					private:
+						using SCanvas::AddSlot;
+						using SCanvas::RemoveSlot;
+
+					private:
+						SCanvas::FSlot* ViewportsOverlayWidgetSlot = nullptr;
+						TWeakPtr<FLevelViewportLayout> OwnerViewportLayout;
+					};
+
+					ViewportsOverlayWidget = SNew(SCanvasInternal, SharedThis(this), MaximizedEntity->AsWidget());
 				}
 			}
 
@@ -487,20 +435,20 @@ void FLevelViewportLayout::MaximizeViewport( FName ViewportToMaximize, const boo
 				{
 					FWidgetPath ViewportsOverlayWidgetPath = ViewportWidgetPath.GetPathDownTo( ViewportsOverlayPtr.Pin().ToSharedRef() );
 					const FArrangedWidget& ViewportsOverlayGeometry = ViewportsOverlayWidgetPath.Widgets.Last();
-					MaximizedViewportStartPosition = ViewportsOverlayGeometry.Geometry.AbsolutePosition - WindowScreenPos;
+					MaximizedViewportStartPosition = FVector2D(ViewportsOverlayGeometry.Geometry.AbsolutePosition) - WindowScreenPos;
 					MaximizedViewportStartSize = ViewportsOverlayPtr.Pin()->GetCachedSize();
 				}
 				else
 				{
 					const FArrangedWidget& ViewportGeometry = ViewportWidgetPath.Widgets.Last();	
-					MaximizedViewportStartPosition = ViewportGeometry.Geometry.AbsolutePosition - WindowScreenPos;
+					MaximizedViewportStartPosition = FVector2D(ViewportGeometry.Geometry.AbsolutePosition) - WindowScreenPos;
 					MaximizedViewportStartSize = ViewportGeometry.Geometry.Size;
 				}
 			}
 			else
 			{
 				const FArrangedWidget& ViewportGeometry = ViewportWidgetPath.Widgets.Last();
-				MaximizedViewportStartPosition = ViewportGeometry.Geometry.Position;
+				MaximizedViewportStartPosition = FVector2D(ViewportGeometry.Geometry.Position);
 				MaximizedViewportStartSize = ViewportGeometry.Geometry.Size;
 			}
 		}
@@ -643,6 +591,7 @@ void FLevelViewportLayout::FinishMaximizeTransition()
 	{
 		TSharedPtr<ILevelViewportLayoutEntity> MaximizedViewportEntity = StaticCastSharedPtr<ILevelViewportLayoutEntity>(Viewports.FindRef(MaximizedViewport));
 		check(MaximizedViewportEntity.IsValid());
+		check(LayoutConfiguration.IsValid());
 
 		// The transition animation is complete, allow the engine to tick normally
 		EndThrottleForAnimatedResize();
@@ -712,7 +661,7 @@ void FLevelViewportLayout::FinishMaximizeTransition()
 			ViewportsOverlayWidget.Reset();
 
 			// Restore the viewport widget into the viewport layout splitter
-			ReplaceWidget( ViewportReplacementWidget.ToSharedRef(), MaximizedViewportEntity->AsWidget() );
+			LayoutConfiguration->ReplaceWidget( ViewportReplacementWidget.ToSharedRef(), MaximizedViewportEntity->AsWidget() );
 
 			MaximizedViewport = NAME_None;
 		}
@@ -767,4 +716,34 @@ void FLevelViewportLayout::Tick( float DeltaTime )
 bool FLevelViewportLayout::IsTickable() const
 {
 	return DeferredMaximizeCommands.Num() > 0 || ( bIsTransitioning && !MaximizeAnimation.IsPlaying() );
+}
+
+void FLevelViewportLayout::LoadConfig(const FString& LayoutString)
+{
+	FAssetEditorViewportLayout::LoadConfig(LayoutString);
+
+	if (!LayoutConfiguration.IsValid())
+	{
+		return;
+	}
+
+	LayoutConfiguration->LoadConfig(LayoutString, [this](const FString& SpecificLayoutString, const FName PerspectiveViewportName)
+	{
+		this->InitCommonLayoutFromString(SpecificLayoutString, PerspectiveViewportName);
+	});
+}
+
+void FLevelViewportLayout::SaveConfig(const FString& LayoutString) const
+{
+	FAssetEditorViewportLayout::SaveConfig(LayoutString);
+
+	if (IsTransitioning() || !LayoutConfiguration.IsValid())
+	{
+		return;
+	}
+
+	LayoutConfiguration->SaveConfig(LayoutString, [this](const FString& SpecificLayoutString)
+	{
+		this->SaveCommonLayoutString(SpecificLayoutString);
+	});
 }

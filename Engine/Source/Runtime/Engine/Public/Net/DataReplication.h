@@ -12,6 +12,9 @@
 #include "Engine/EngineTypes.h"
 #include "UObject/UnrealType.h"
 #include "UObject/GCObject.h"
+#include "HAL/LowLevelMemTracker.h"
+
+LLM_DECLARE_TAG_API(NetObjReplicator, ENGINE_API);
 
 class FNetFieldExportGroup;
 class FOutBunch;
@@ -67,21 +70,17 @@ struct FReplicatedActorProperty
  *		|----------------|
  *	
  */
-class ENGINE_API FObjectReplicator
+class FObjectReplicator
 {
 public:
 
-	FObjectReplicator();
-	~FObjectReplicator();
+	ENGINE_API FObjectReplicator();
+	ENGINE_API ~FObjectReplicator();
 
 	struct FRPCCallInfo 
 	{
 		FName FuncName;
 		int32 Calls;
-
-		UE_DEPRECATED(4.25, "Please use LastCallTimestamp instead")
-		float LastCallTime;
-
 		double LastCallTimestamp;
 	};
 
@@ -99,6 +98,9 @@ public:
 		/** Number of bits in buffer */
 		int64 NumBits;
 
+		/** The replication frame number when the RPC was queued. Used to track the latency caused by the delay. */
+		uint32 FrameQueuedAt;
+
 		/** Guids being waited on */
 		TSet<FNetworkGUID> UnmappedGuids;
 
@@ -106,45 +108,38 @@ public:
 			const FFieldNetCache* InRPCField,
 			const FReplicationFlags& InRepFlags,
 			FNetBitReader& InReader,
+			uint32 InReplicationFrame,
 			const TSet<FNetworkGUID>& InUnmappedGuids)
 			: RPCFieldIndex(InRPCField->FieldNetIndex)
 			, RepFlags(InRepFlags)
 			, Buffer(InReader.GetBuffer())
 			, NumBits(InReader.GetNumBits())
+			, FrameQueuedAt(InReplicationFrame)
 			, UnmappedGuids(InUnmappedGuids)
 		{}
 
 		void CountBytes(FArchive& Ar) const;
 	};
 
-	void InitWithObject(
+	ENGINE_API void InitWithObject(
 		UObject* InObject,
 		UNetConnection* InConnection,
 		bool bUseDefaultState = true);
 
-	void CleanUp();
+	ENGINE_API void CleanUp();
 
-	void StartReplicating(class UActorChannel* InActorChannel);
-	void StopReplicating(class UActorChannel* InActorChannel);
+	ENGINE_API void StartReplicating(class UActorChannel* InActorChannel);
+	ENGINE_API void StopReplicating(class UActorChannel* InActorChannel);
 
 	/** Recent/dirty related functions */
-	void InitRecentProperties(uint8* Source);
+	ENGINE_API void InitRecentProperties(uint8* Source);
 
 	/** Takes Data, and compares against shadow state to log differences */
-	bool ValidateAgainstState(const UObject* ObjectState);
+	ENGINE_API bool ValidateAgainstState(const UObject* ObjectState);
 
 	//~ Both of these should be private, IMO, but we'll leave them public for now for back compat
 	//~ in case anyone was using SerializeCustomDeltaProperty already.
-
-	bool SendCustomDeltaProperty(
-		UObject* InObject,
-		FProperty* Property,
-		uint32 ArrayIndex,
-		FNetBitWriter& OutBunch,
-		TSharedPtr<INetDeltaBaseState>& NewFullState,
-		TSharedPtr<INetDeltaBaseState> & OldState);
-
-	bool SendCustomDeltaProperty(
+	ENGINE_API bool SendCustomDeltaProperty(
 		UObject* InObject,
 		uint16 CustomDeltaProperty,
 		FNetBitWriter& OutBunch,
@@ -152,26 +147,32 @@ public:
 		TSharedPtr<INetDeltaBaseState>& OldState);
 
 	/** Packet was dropped */
-	void ReceivedNak(int32 NakPacketId);
+	ENGINE_API void ReceivedNak(int32 NakPacketId);
 
-	void CountBytes(FArchive& Ar) const;
+	ENGINE_API void CountBytes(FArchive& Ar) const;
 
 	/** Writes dirty properties to bunch */
-	void ReplicateCustomDeltaProperties(FNetBitWriter& Bunch, FReplicationFlags RepFlags);
-	bool ReplicateProperties(FOutBunch& Bunch, FReplicationFlags RepFlags);
-	void PostSendBunch(FPacketIdRange& PacketRange, uint8 bReliable);
+	UE_DEPRECATED(5.1, "Now takes an additional out param")
+	void ReplicateCustomDeltaProperties(FNetBitWriter& Bunch, FReplicationFlags RepFlags)
+	{
+		bool bSkippedPropertyCondition = false;
+		ReplicateCustomDeltaProperties(Bunch, RepFlags, bSkippedPropertyCondition);
+	}
 
-	/** Updates the custom delta state for a replay delta checkpoint */
-	UE_DEPRECATED(4.27, "No longer used")
-	void UpdateCheckpoint() {}
-	
-	bool ReceivedBunch(
+	ENGINE_API void ReplicateCustomDeltaProperties(FNetBitWriter& Bunch, FReplicationFlags RepFlags, bool& bSkippedPropertyCondition);
+	ENGINE_API bool ReplicateProperties(FOutBunch& Bunch, FReplicationFlags RepFlags);
+	ENGINE_API bool ReplicateProperties(FOutBunch& Bunch, FReplicationFlags RepFlags, FNetBitWriter& Writer);
+	ENGINE_API bool ReplicateProperties_r(FOutBunch& Bunch, FReplicationFlags RepFlags, FNetBitWriter& Writer);
+
+	ENGINE_API void PostSendBunch(FPacketIdRange& PacketRange, uint8 bReliable);
+
+	ENGINE_API bool ReceivedBunch(
 		FNetBitReader& Bunch,
 		const FReplicationFlags& RepFlags,
 		const bool bHasRepLayout,
 		bool& bOutHasUnmapped);
 
-	bool ReceivedRPC(
+	ENGINE_API bool ReceivedRPC(
 		FNetBitReader& Reader,
 		const FReplicationFlags& RepFlags,
 		const FFieldNetCache* FieldCache,
@@ -179,21 +180,21 @@ public:
 		bool& bOutDelayRPC,
 		TSet<FNetworkGUID>& OutUnmappedGuids);
 
-	void UpdateGuidToReplicatorMap();
-	bool MoveMappedObjectToUnmapped(const FNetworkGUID& GUID);
-	void PostReceivedBunch();
+	ENGINE_API void UpdateGuidToReplicatorMap();
+	ENGINE_API bool MoveMappedObjectToUnmapped(const FNetworkGUID& GUID);
+	ENGINE_API void PostReceivedBunch();
 
-	void ForceRefreshUnreliableProperties();
+	ENGINE_API void ForceRefreshUnreliableProperties();
 
-	void QueueRemoteFunctionBunch(UFunction* Func, FOutBunch &Bunch);
+	ENGINE_API void QueueRemoteFunctionBunch(UFunction* Func, FOutBunch &Bunch);
 
-	bool ReadyForDormancy(bool bDebug=false);
+	ENGINE_API bool ReadyForDormancy(bool bDebug=false);
 
-	void StartBecomingDormant();
+	ENGINE_API void StartBecomingDormant();
 
-	void CallRepNotifies(bool bSkipIfChannelHasQueuedBunches);
+	ENGINE_API void CallRepNotifies(bool bSkipIfChannelHasQueuedBunches);
 
-	void UpdateUnmappedObjects(bool& bOutHasMoreUnmapped);
+	ENGINE_API void UpdateUnmappedObjects(bool& bOutHasMoreUnmapped);
 
 	FORCEINLINE TWeakObjectPtr<UObject>	GetWeakObjectPtr() const
 	{
@@ -202,13 +203,19 @@ public:
 
 	FORCEINLINE UObject* GetObject() const
 	{
-		return ObjectPtr;
+		// If this replicator is dormant we have released our strong ref but the object may still be alive.
+		return ObjectPtr ? ObjectPtr : WeakObjectPtr.Get();
 	}
 
 	FORCEINLINE void SetObject(UObject* NewObj)
 	{
 		ObjectPtr = NewObj;
 		WeakObjectPtr = NewObj;
+	}
+
+	void ReleaseStrongReference()
+	{
+		ObjectPtr = nullptr;
 	}
 
 	FORCEINLINE void PreNetReceive()
@@ -229,18 +236,27 @@ public:
 		}
 	}
 
-	void QueuePropertyRepNotify(
+	ENGINE_API void QueuePropertyRepNotify(
 		UObject* Object,
 		FProperty* Property,
 		const int32 ElementIndex,
 		TArray<uint8>& MetaData);
 		
-	void WritePropertyHeaderAndPayload(
+	ENGINE_API void WritePropertyHeaderAndPayload(
 		UObject* Object,
 		FProperty*				Property,
 		FNetFieldExportGroup* NetFieldExportGroup,
 		FNetBitWriter& Bunch,
 		FNetBitWriter& Payload) const;	
+
+	/**
+	 * @return True if we've determined nothing needs to be updated / resent by the replicator, meaning
+	 *			we can safely skip updating it this frame.
+	 */
+	ENGINE_API bool CanSkipUpdate(FReplicationFlags Flags);
+
+	bool IsDirtyForReplay() const { return bDirtyForReplay; }
+	void ResetReplayDirtyTracking() { bDirtyForReplay = true; }
 
 public:
 
@@ -261,11 +277,23 @@ public:
 
 	/** Whether or not we've already replicated properties this frame. */
 	uint32 bHasReplicatedProperties : 1;
+	
+	/** Is this a subobject replicator and have we sent the creation data yet. */
+    uint32 bSentSubObjectCreation : 1;
 
 private:
 
 	/** Whether or not we are going to use Fast Array Delta Struct Delta Serialization. See FFastArraySerializer::FastArrayDeltaSerialize_DeltaSerializeStructs. */
 	uint32 bSupportsFastArrayDelta : 1;
+
+	/**
+	 * Whether or not this object replicator is eligible to skip replication calls based on
+	 * simple flag checks.
+	 */
+	uint32 bCanUseNonDirtyOptimization : 1;
+
+	/** Used to track if we've replicated this object into a checkpoint */
+	uint32 bDirtyForReplay : 1;
 
 public:
 	
@@ -274,7 +302,7 @@ public:
 	TUniquePtr<FRepState>  RepState;
 	TUniquePtr<FRepState> CheckpointRepState;
 
-	UClass* ObjectClass;
+	TObjectPtr<UClass> ObjectClass;
 
 	UObject* ObjectPtr;
 
@@ -302,11 +330,11 @@ private:
 	TWeakObjectPtr<UObject> WeakObjectPtr;
 };
 
-class ENGINE_API FScopedActorRoleSwap
+class FScopedActorRoleSwap
 {
 public:
-	FScopedActorRoleSwap(AActor* InActor);
-	~FScopedActorRoleSwap();
+	ENGINE_API FScopedActorRoleSwap(AActor* InActor);
+	ENGINE_API ~FScopedActorRoleSwap();
 
 	FScopedActorRoleSwap(const FScopedActorRoleSwap&) = delete;
 	FScopedActorRoleSwap& operator=(const FScopedActorRoleSwap&) = delete;

@@ -6,10 +6,11 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Runtime.Serialization.Formatters.Binary;
 using System.Security.Cryptography;
 using System.Text;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
+using UnrealBuildBase;
 
 namespace UnrealBuildTool
 {
@@ -51,39 +52,40 @@ namespace UnrealBuildTool
 		/// Constructor
 		/// </summary>
 		/// <param name="Location">File to store this history in</param>
-		public ActionHistoryLayer(FileReference Location)
+		/// <param name="Logger">Logger for output</param>
+		public ActionHistoryLayer(FileReference Location, ILogger Logger)
 		{
 			this.Location = Location;
 
-			if(FileReference.Exists(Location))
+			if (FileReference.Exists(Location))
 			{
-				Load();
+				Load(Logger);
 			}
 		}
 
 		/// <summary>
 		/// Attempts to load this action history from disk
 		/// </summary>
-		void Load()
+		void Load(ILogger Logger)
 		{
 			try
 			{
-				using(BinaryArchiveReader Reader = new BinaryArchiveReader(Location))
+				using (BinaryArchiveReader Reader = new BinaryArchiveReader(Location))
 				{
 					int Version = Reader.ReadInt();
-					if(Version != CurrentVersion)
+					if (Version != CurrentVersion)
 					{
-						Log.TraceLog("Unable to read action history from {0}; version {1} vs current {2}", Location, Version, CurrentVersion);
+						Logger.LogDebug("Unable to read action history from {Location}; version {Version} vs current {CurrentVersion}", Location, Version, CurrentVersion);
 						return;
 					}
 
-					OutputItemToAttributeHash = new ConcurrentDictionary<FileItem, byte[]>(Reader.ReadDictionary(() => Reader.ReadFileItem(), () => Reader.ReadFixedSizeByteArray(HashLength)));
+					OutputItemToAttributeHash = new ConcurrentDictionary<FileItem, byte[]>(Reader.ReadDictionary(() => Reader.ReadFileItem()!, () => Reader.ReadFixedSizeByteArray(HashLength))!);
 				}
 			}
-			catch(Exception Ex)
+			catch (Exception Ex)
 			{
-				Log.TraceWarning("Unable to read {0}. See log for additional information.", Location);
-				Log.TraceLog("{0}", ExceptionUtils.FormatExceptionDetails(Ex));
+				Logger.LogWarning("Unable to read {Location}. See log for additional information.", Location);
+				Logger.LogDebug("{Ex}", ExceptionUtils.FormatExceptionDetails(Ex));
 			}
 		}
 
@@ -113,7 +115,7 @@ namespace UnrealBuildTool
 		{
 			string InvariantText = Text.ToUpperInvariant();
 			byte[] InvariantBytes = Encoding.Unicode.GetBytes(InvariantText);
-			return new MD5CryptoServiceProvider().ComputeHash(InvariantBytes);
+			return MD5.Create().ComputeHash(InvariantBytes);
 		}
 
 		/// <summary>
@@ -124,9 +126,9 @@ namespace UnrealBuildTool
 		/// <returns>True if the hashes are equal</returns>
 		static bool CompareHashes(byte[] A, byte[] B)
 		{
-			for(int Idx = 0; Idx < HashLength; Idx++)
+			for (int Idx = 0; Idx < HashLength; Idx++)
 			{
-				if(A[Idx] != B[Idx])
+				if (A[Idx] != B[Idx])
 				{
 					return false;
 				}
@@ -144,7 +146,7 @@ namespace UnrealBuildTool
 		{
 			byte[] NewHash = ComputeHash(Attributes);
 
-			for (;;)
+			for (; ; )
 			{
 				if (OutputItemToAttributeHash.TryAdd(File, NewHash))
 				{
@@ -154,7 +156,7 @@ namespace UnrealBuildTool
 				}
 				else
 				{
-					byte[] OldHash;
+					byte[]? OldHash;
 					if (OutputItemToAttributeHash.TryGetValue(File, out OldHash))
 					{
 						if (CompareHashes(NewHash, OldHash))
@@ -172,8 +174,8 @@ namespace UnrealBuildTool
 							}
 						}
 					}
-				}				
-			}		
+				}
+			}
 		}
 
 		/// <summary>
@@ -182,12 +184,12 @@ namespace UnrealBuildTool
 		/// <param name="TargetName">Target name being built</param>
 		/// <param name="Platform">The platform being built</param>
 		/// <param name="TargetType">Type of the target being built</param>
-		/// <param name="Architecture">The target architecture</param>
+		/// <param name="Architectures">The target architecture(s)</param>
 		/// <returns>Path to the engine action history for this target</returns>
-		public static FileReference GetEngineLocation(string TargetName, UnrealTargetPlatform Platform, TargetType TargetType, string Architecture)
+		public static FileReference GetEngineLocation(string TargetName, UnrealTargetPlatform Platform, TargetType TargetType, UnrealArchitectures Architectures)
 		{
 			string AppName;
-			if(TargetType == TargetType.Program)
+			if (TargetType == TargetType.Program)
 			{
 				AppName = TargetName;
 			}
@@ -196,7 +198,7 @@ namespace UnrealBuildTool
 				AppName = UEBuildTarget.GetAppNameForTargetType(TargetType);
 			}
 
-			return FileReference.Combine(UnrealBuildTool.EngineDirectory, UEBuildTarget.GetPlatformIntermediateFolder(Platform, Architecture), AppName, "ActionHistory.bin");
+			return FileReference.Combine(Unreal.EngineDirectory, UEBuildTarget.GetPlatformIntermediateFolder(Platform, Architectures, false), AppName, "ActionHistory.bin");
 		}
 
 		/// <summary>
@@ -205,11 +207,11 @@ namespace UnrealBuildTool
 		/// <param name="ProjectFile">Path to the project file</param>
 		/// <param name="Platform">Platform being built</param>
 		/// <param name="TargetName">Name of the target being built</param>
-		/// <param name="Architecture">The target architecture</param>
+		/// <param name="Architectures">The target architecture(s)</param>
 		/// <returns>Path to the project action history</returns>
-		public static FileReference GetProjectLocation(FileReference ProjectFile, string TargetName, UnrealTargetPlatform Platform, string Architecture)
+		public static FileReference GetProjectLocation(FileReference ProjectFile, string TargetName, UnrealTargetPlatform Platform, UnrealArchitectures Architectures)
 		{
-			return FileReference.Combine(ProjectFile.Directory, UEBuildTarget.GetPlatformIntermediateFolder(Platform, Architecture), TargetName, "ActionHistory.dat");
+			return FileReference.Combine(ProjectFile.Directory, UEBuildTarget.GetPlatformIntermediateFolder(Platform, Architectures, false), TargetName, "ActionHistory.dat");
 		}
 
 		/// <summary>
@@ -219,17 +221,17 @@ namespace UnrealBuildTool
 		/// <param name="TargetName">Name of the target</param>
 		/// <param name="Platform">Platform being built</param>
 		/// <param name="TargetType">The target type</param>
-		/// <param name="Architecture">The target architecture</param>
+		/// <param name="Architectures">The target architecture(s)</param>
 		/// <returns>Dependency cache hierarchy for the given project</returns>
-		public static IEnumerable<FileReference> GetFilesToClean(FileReference ProjectFile, string TargetName, UnrealTargetPlatform Platform, TargetType TargetType, string Architecture)
+		public static IEnumerable<FileReference> GetFilesToClean(FileReference ProjectFile, string TargetName, UnrealTargetPlatform Platform, TargetType TargetType, UnrealArchitectures Architectures)
 		{
-			if(ProjectFile == null || !UnrealBuildTool.IsEngineInstalled())
+			if (ProjectFile == null || !Unreal.IsEngineInstalled())
 			{
-				yield return GetEngineLocation(TargetName, Platform, TargetType, Architecture);
+				yield return GetEngineLocation(TargetName, Platform, TargetType, Architectures);
 			}
-			if(ProjectFile != null)
+			if (ProjectFile != null)
 			{
-				yield return GetProjectLocation(ProjectFile, TargetName, Platform, Architecture);
+				yield return GetProjectLocation(ProjectFile, TargetName, Platform, Architectures);
 			}
 		}
 	}
@@ -269,20 +271,21 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="File">The file to update</param>
 		/// <param name="Attributes">The new attributes</param>
+		/// <param name="Logger">Logger for output</param>
 		/// <returns>True if the attributes were updated, false otherwise</returns>
-		public bool UpdateProducingAttributes(FileItem File, string Attributes)
+		public bool UpdateProducingAttributes(FileItem File, string Attributes, ILogger Logger)
 		{
 			FileReference LayerLocation = GetLayerLocationForFile(File.Location);
 
-			ActionHistoryLayer Layer = Layers.FirstOrDefault(x => x.Location == LayerLocation);
+			ActionHistoryLayer? Layer = Layers.FirstOrDefault(x => x.Location == LayerLocation);
 			if (Layer == null)
 			{
 				lock (LockObject)
 				{
 					Layer = Layers.FirstOrDefault(x => x.Location == LayerLocation);
-					if(Layer == null)
+					if (Layer == null)
 					{
-						Layer = new ActionHistoryLayer(LayerLocation);
+						Layer = new ActionHistoryLayer(LayerLocation, Logger);
 
 						List<ActionHistoryLayer> NewLayers = new List<ActionHistoryLayer>(Layers);
 						NewLayers.Add(Layer);
@@ -372,7 +375,7 @@ namespace UnrealBuildTool
 		/// </summary>
 		public void Save()
 		{
-			foreach(ActionHistoryLayer Layer in Layers)
+			foreach (ActionHistoryLayer Layer in Layers)
 			{
 				Layer.Save();
 			}
@@ -399,7 +402,7 @@ namespace UnrealBuildTool
 		/// </summary>
 		public ActionHistory()
 		{
-			Partitions.Add(new ActionHistoryPartition(UnrealBuildTool.EngineDirectory));
+			Partitions.Add(new ActionHistoryPartition(Unreal.EngineDirectory));
 		}
 
 		/// <summary>
@@ -411,8 +414,8 @@ namespace UnrealBuildTool
 		{
 			lock (LockObject)
 			{
-				ActionHistoryPartition Partition = Partitions.FirstOrDefault(x => x.BaseDir == BaseDir);
-				if(Partition == null)
+				ActionHistoryPartition? Partition = Partitions.FirstOrDefault(x => x.BaseDir == BaseDir);
+				if (Partition == null)
 				{
 					Partition = new ActionHistoryPartition(BaseDir);
 					Partitions.Add(Partition);
@@ -425,18 +428,19 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="File">The output file to look for</param>
 		/// <param name="Attributes">Receives the Attributes used to produce this file</param>
+		/// <param name="Logger">Logger for output</param>
 		/// <returns>True if the output item exists</returns>
-		public bool UpdateProducingAttributes(FileItem File, string Attributes)
+		public bool UpdateProducingAttributes(FileItem File, string Attributes, ILogger Logger)
 		{
 			foreach (ActionHistoryPartition Partition in Partitions)
 			{
 				if (File.Location.IsUnderDirectory(Partition.BaseDir))
 				{
-					return Partition.UpdateProducingAttributes(File, Attributes);
+					return Partition.UpdateProducingAttributes(File, Attributes, Logger);
 				}
 			}
 
-			Log.TraceWarning("File {0} is not under any action history root directory", File.Location);
+			Logger.LogWarning("File {FileLocation} is not under any action history root directory", File.Location);
 			return false;
 		}
 

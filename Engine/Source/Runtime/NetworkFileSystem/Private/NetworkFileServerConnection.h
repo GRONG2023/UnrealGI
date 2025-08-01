@@ -23,7 +23,7 @@ public:
 	 * @param InSocket - The client socket to use.
 	 * @param NetworkFileDelegates- delegates the client calls when events from the client happen
 	 */
-	FNetworkFileServerClientConnection( const FNetworkFileDelegateContainer* NetworkFileDelegates , const TArray<ITargetPlatform*>& InActiveTargetPlatforms );
+	FNetworkFileServerClientConnection(const FNetworkFileServerOptions& InFileServerOptions);
 
 	/**
 	 * Destructor.
@@ -146,14 +146,6 @@ protected:
 	bool PackageFile( FString& Filename, FString& TargetFilename, FArchive& Out);
 
 	/**
-	 * Processes a RecompileShaders message.
-	 *
-	 * @param In -
-	 * @param Out -
-	 */
-	void ProcessRecompileShaders( FArchive& In, FArchive& Out );
-
-	/**
 	 * Processes a heartbeat message.
 	 *
 	 * @param In -
@@ -173,7 +165,7 @@ protected:
 	void FileModifiedCallback( const FString& Filename );
 	
 	
-	virtual bool Exec(class UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar) override;
+	virtual bool Exec_Runtime(class UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar) override;
 
 
 	/**
@@ -285,6 +277,8 @@ private:
 	// custom key-value pair data for the curently connected target platform
 	TMap<FString,FString> ConnectedTargetCustomData;
 
+	// whether to restrict sending package assets from outside the sandbox
+	bool bRestrictPackageAssetsToSandbox;
 
 	//////////////////////////////////////////////////////////////////////////
 	//stats

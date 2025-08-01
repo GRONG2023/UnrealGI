@@ -7,10 +7,9 @@
 #include "Common/PagedArray.h"
 #include "Model/AsyncEnumerateTask.h"
 #include "Model/MonotonicTimelineData.h"
-#include "TraceServices/AnalysisService.h"
 #include "TraceServices/Containers/Timelines.h"
 
-namespace Trace
+namespace TraceServices
 {
 
 struct FMonotonicTimelineDefaultSettings
@@ -30,9 +29,35 @@ struct FMonotonicTimelineDefaultSettings
 	}
 };
 
+/*
+* An interface that can consume timed serial events (a timeline).
+*/
+template<typename InEventType>
+class IEditableTimeline
+{
+public:
+	virtual ~IEditableTimeline() = default;
+
+	/*
+	* Begin a new timed event.
+	* 
+	* @param StartTime	The starting timestamp of the event in seconds.
+	* @param Event		The event information.
+	*/
+	virtual void AppendBeginEvent(double StartTime, const InEventType& Event) = 0;
+
+	/*
+	* End a new timed event. This ends the event started by the prior call to AppendBeginEvent.
+	* 
+	* @param EndTime	The ending timestamp of the event in seconds.
+	*/
+	virtual void AppendEndEvent(double EndTime) = 0;
+};
+
 template<typename InEventType, typename SettingsType = FMonotonicTimelineDefaultSettings>
 class TMonotonicTimeline
 	: public ITimeline<InEventType>
+	, public IEditableTimeline<InEventType>
 {
 	friend class FEnumerateAsyncTask<InEventType, SettingsType>;
 
@@ -47,7 +72,6 @@ public:
 	TMonotonicTimeline(ILinearAllocator& InAllocator)
 		: Allocator(InAllocator)
 	{
-		
 		for (int32 DetailLevelIndex = 0; DetailLevelIndex < SettingsType::DetailLevelsCount; ++DetailLevelIndex)
 		{
 			double Resolution = SettingsType::DetailLevelResolution(DetailLevelIndex);
@@ -56,13 +80,21 @@ public:
 	}
 
 	virtual ~TMonotonicTimeline() = default;
-	
-	void AppendBeginEvent(double StartTime, const EventType& Event)
+
+	virtual void AppendBeginEvent(double StartTime, const EventType& Event) override
 	{
 		int32 CurrentDepth = DetailLevels[0].InsertionState.CurrentDepth;
+		if (CurrentDepth >= SettingsType::MaxDepth)
+		{
+			++ExtraDepthEvents;
+			return;
+		}
 
 		AddScopeEntry(DetailLevels[0], StartTime, true);
 		AddEvent(DetailLevels[0], Event);
+
+		check(CurrentDepth < SettingsType::MaxDepth);
+
 		FDetailLevelDepthState& Lod0DepthState = DetailLevels[0].InsertionState.DepthStates[CurrentDepth];
 		Lod0DepthState.EnterTime = StartTime;
 		Lod0DepthState.DominatingEvent = Event;
@@ -77,6 +109,7 @@ public:
 			{
 				if (CurrentDepthState.PendingEventIndex >= 0)
 				{
+					check(DetailLevel.InsertionState.PendingDepth < SettingsType::MaxDepth);
 					for (int32 Depth = DetailLevel.InsertionState.PendingDepth; Depth >= CurrentDepth; --Depth)
 					{
 						FDetailLevelDepthState& DepthState = DetailLevel.InsertionState.DepthStates[Depth];
@@ -110,14 +143,25 @@ public:
 			}
 			DetailLevel.SetEvent(CurrentDepthState.PendingEventIndex, Event);
 		}
+
 		++ModCount;
 	}
 
-	void AppendEndEvent(double EndTime)
+	virtual void AppendEndEvent(double EndTime) override
 	{
+		if (ExtraDepthEvents > 0)
+		{
+			--ExtraDepthEvents;
+			return;
+		}
+
+		check(DetailLevels[0].InsertionState.CurrentDepth <= SettingsType::MaxDepth);
+
 		AddScopeEntry(DetailLevels[0], EndTime, false);
 
 		int32 CurrentDepth = DetailLevels[0].InsertionState.CurrentDepth;
+		check(CurrentDepth < SettingsType::MaxDepth);
+
 		for (int32 DetailLevelIndex = 1; DetailLevelIndex < SettingsType::DetailLevelsCount; ++DetailLevelIndex)
 		{
 			FDetailLevel& DetailLevel = DetailLevels[DetailLevelIndex];
@@ -130,6 +174,7 @@ public:
 			check(CurrentDepthState.PendingScopeEnterIndex >= 0);
 			if (EndTime >= CurrentDepthState.EnterTime + DetailLevel.Resolution)
 			{
+				check(DetailLevel.InsertionState.PendingDepth < SettingsType::MaxDepth);
 				for (int32 Depth = DetailLevel.InsertionState.PendingDepth; Depth >= CurrentDepth; --Depth)
 				{
 					FDetailLevelDepthState& DepthState = DetailLevel.InsertionState.DepthStates[Depth];
@@ -142,6 +187,7 @@ public:
 				DetailLevel.InsertionState.PendingDepth = CurrentDepth - 1;
 			}
 		}
+
 		++ModCount;
 	}
 
@@ -155,9 +201,9 @@ public:
 		return DetailLevels[0].Events.Num();
 	}
 
-	virtual const EventType& GetEvent(uint64 InIndex) const override 
-	{ 
-		return DetailLevels[0].Events[InIndex]; 
+	virtual const EventType& GetEvent(uint64 InIndex) const override
+	{
+		return DetailLevels[0].Events[InIndex];
 	}
 
 	virtual double GetStartTime() const override
@@ -196,8 +242,7 @@ public:
 		{
 			--FirstScopePageIndex;
 		}
-		auto ScopeEntryIterator = DetailLevel.ScopeEntries.GetIteratorFromPage(FirstScopePageIndex);
-		const FEventScopeEntryPage* ScopePage = ScopeEntryIterator.GetCurrentPage();
+		const FEventScopeEntryPage* ScopePage = DetailLevel.ScopeEntries.GetPage(FirstScopePageIndex);
 		if (ScopePage->BeginTime > IntervalEnd)
 		{
 			return;
@@ -206,7 +251,7 @@ public:
 		{
 			return;
 		}
-		auto EventsIterator = DetailLevel.Events.GetIteratorFromItem(ScopePage->BeginEventIndex);
+
 		struct FEnumerationStackEntry
 		{
 			double StartTime;
@@ -222,8 +267,12 @@ public:
 			EnumerationStackEntry.Event = DetailLevel.GetEvent(EventStackEntry.EventIndex);
 		}
 
+		auto ScopeEntryIterator = DetailLevel.ScopeEntries.GetIteratorFromPage(FirstScopePageIndex);
 		const FEventScopeEntry* ScopeEntry = ScopeEntryIterator.GetCurrentItem();
+
+		auto EventsIterator = DetailLevel.Events.GetIteratorFromItem(ScopePage->BeginEventIndex);
 		const EventType* Event = EventsIterator.GetCurrentItem();
+
 		while (ScopeEntry && FMath::Abs(ScopeEntry->Time) < IntervalStart)
 		{
 			if (ScopeEntry->Time < 0.0)
@@ -314,11 +363,10 @@ public:
 
 		if (bSearchEndTimeUsingPages)
 		{
+			const FEventScopeEntryPage* CurrentScopePage = ScopeEntryIterator.GetCurrentPage();
 			do
 			{
-				const FEventScopeEntryPage* CurrentScopePage = ScopeEntryIterator.GetCurrentPage();
 				check(CurrentStackDepth <= CurrentScopePage->InitialStackCount);
-
 				while (CurrentStackDepth > 0 && CurrentScopePage->InitialStack[CurrentStackDepth - 1].EndTime > 0)
 				{
 					--CurrentStackDepth;
@@ -328,7 +376,9 @@ public:
 						return;
 					}
 				}
-			} while (ScopeEntryIterator.NextPage());
+				CurrentScopePage = ScopeEntryIterator.NextPage();
+			}
+			while (CurrentScopePage != nullptr);
 		}
 
 		while (CurrentStackDepth > 0)
@@ -339,6 +389,236 @@ public:
 				return;
 			}
 		}
+	}
+
+	virtual void EnumerateEventsBackwardsDownSampled(double IntervalEnd, double IntervalStart, double Resolution, typename ITimeline<EventType>::EventCallback Callback) const override
+	{
+		int32 DetailLevelIndex = SettingsType::DetailLevelsCount - 1;
+		for (; DetailLevelIndex > 0; --DetailLevelIndex)
+		{
+			if (DetailLevels[DetailLevelIndex].Resolution <= Resolution)
+			{
+				break;
+			}
+		}
+
+		const FDetailLevel& DetailLevel = DetailLevels[DetailLevelIndex];
+		if (DetailLevel.ScopeEntries.Num() == 0)
+		{
+			return;
+		}
+
+		uint64 LastScopePageIndex = Algo::UpperBoundBy(DetailLevel.ScopeEntries, IntervalEnd, [](const FEventScopeEntryPage& Page)
+			{
+				return Page.BeginTime;
+			});
+
+		struct FEnumerationStackEntry
+		{
+			double EndTime;
+			EventType Event;
+		};
+
+		// By default, we start from the very end of the session.
+		auto ScopeEntryIterator = DetailLevel.ScopeEntries.GetIteratorFromItem(DetailLevel.ScopeEntries.Num() - 1);
+		auto EventsIterator = DetailLevel.Events.GetIteratorFromItem(DetailLevel.Events.Num() - 1);
+		FEnumerationStackEntry EventStack[SettingsType::MaxDepth];
+		int32 CurrentStackDepth = 0;
+		const FEventScopeEntry* ScopeEntry = nullptr;
+
+		if (LastScopePageIndex > 0 && LastScopePageIndex < DetailLevel.ScopeEntries.NumPages())
+		{
+			// If we have a page we can start from, start enumerating backwards from the begining of that page.
+			ScopeEntryIterator = DetailLevel.ScopeEntries.GetIteratorFromPage(LastScopePageIndex);
+			const FEventScopeEntryPage* ScopePage = DetailLevel.ScopeEntries.GetPage(LastScopePageIndex);
+
+			EventsIterator = DetailLevel.Events.GetIteratorFromItem(ScopePage->BeginEventIndex);
+			CurrentStackDepth = ScopePage->InitialStackCount;
+			for (int32 InitialStackIndex = 0; InitialStackIndex < CurrentStackDepth; ++InitialStackIndex)
+			{
+				FEnumerationStackEntry& EnumerationStackEntry = EventStack[InitialStackIndex];
+				const FEventStackEntry& EventStackEntry = ScopePage->InitialStack[InitialStackIndex];
+				EnumerationStackEntry.EndTime = EventStackEntry.EndTime;
+				if (EnumerationStackEntry.EndTime < 0)
+				{
+					// We need to search for the EndTime of the event using pages.
+					auto PageIterator = ScopeEntryIterator;
+					while (const FEventScopeEntryPage* Page = PageIterator.NextPage())
+					{
+						if (Page->InitialStack[InitialStackIndex].EndTime > 0)
+						{
+							EnumerationStackEntry.EndTime = Page->InitialStack[InitialStackIndex].EndTime;
+							break;
+						}
+					}
+					if (EnumerationStackEntry.EndTime < 0)
+					{
+						EnumerationStackEntry.EndTime = DetailLevel.InsertionState.LastTime;
+					}
+				}
+				EnumerationStackEntry.Event = DetailLevel.GetEvent(EventStackEntry.EventIndex);
+			}
+			// We start enumerating from the previous page.
+			ScopeEntry = ScopeEntryIterator.PrevItem();
+			EventsIterator.PrevItem();
+		}
+		else
+		{
+			// If we start from the end of the session, we use InsertionState as the initial stack.
+			CurrentStackDepth = DetailLevel.InsertionState.CurrentDepth;
+			for (int32 InitialStackIndex = 0; InitialStackIndex < CurrentStackDepth; ++InitialStackIndex)
+			{
+				FEnumerationStackEntry& EnumerationStackEntry = EventStack[InitialStackIndex];
+				const FEventStackEntry& EventStackEntry = DetailLevel.InsertionState.EventStack[InitialStackIndex];
+				EnumerationStackEntry.EndTime = DetailLevel.InsertionState.LastTime;
+				EnumerationStackEntry.Event = DetailLevel.GetEvent(EventStackEntry.EventIndex);
+			}
+			ScopeEntry = ScopeEntryIterator.GetCurrentItem();
+		}
+
+		// Enumerate backwards until we reach IntervalEnd, without calling the Callback because thess events are not in the provided interval.
+		const EventType* Event = EventsIterator.GetCurrentItem();
+		while (ScopeEntry && FMath::Abs(ScopeEntry->Time) > IntervalEnd)
+		{
+			if (ScopeEntry->Time < 0.0)
+			{
+				check(CurrentStackDepth > 0);
+				--CurrentStackDepth;
+				Event = EventsIterator.PrevItem();
+			}
+			else
+			{
+				check(CurrentStackDepth < SettingsType::MaxDepth);
+				FEnumerationStackEntry& StackEntry = EventStack[CurrentStackDepth++];
+				StackEntry.EndTime = ScopeEntry->Time;
+			}
+			ScopeEntry = ScopeEntryIterator.PrevItem();
+		}
+
+		// Call the callback for the events that are open at IntervalEnd.
+		for (int32 StackIndex = 0; StackIndex < CurrentStackDepth; ++StackIndex)
+		{
+			FEnumerationStackEntry& StackEntry = EventStack[StackIndex];
+			if (Callback(true, StackEntry.EndTime, StackEntry.Event) == EEventEnumerate::Stop)
+			{
+				return;
+			}
+		}
+
+		// Enumerate backwards between IntervalEnd and IntervalStart.
+		while (ScopeEntry && FMath::Abs(ScopeEntry->Time) >= IntervalStart)
+		{
+			if (ScopeEntry->Time < 0.0)
+			{
+				check(CurrentStackDepth > 0);
+				FEnumerationStackEntry& StackEntry = EventStack[--CurrentStackDepth];
+				StackEntry.Event = *Event;
+				if (Callback(false, -ScopeEntry->Time, StackEntry.Event) == EEventEnumerate::Stop)
+				{
+					return;
+				}
+				Event = EventsIterator.PrevItem();
+			}
+			else
+			{
+				check(CurrentStackDepth < SettingsType::MaxDepth);
+				FEnumerationStackEntry& StackEntry = EventStack[CurrentStackDepth++];
+				StackEntry.EndTime = ScopeEntry->Time;
+
+				if (Callback(true, ScopeEntry->Time, StackEntry.Event) == EEventEnumerate::Stop)
+				{
+					return;
+				}
+			}
+			ScopeEntry = ScopeEntryIterator.PrevItem();
+		}
+
+		// Find the StartTime of the events that are open at IntervalStart.
+		bool bSearchStartTimeUsingPages = false;
+		uint64 LastPageIndex = ScopeEntryIterator.GetCurrentPageIndex();
+		uint32 ExitDepth = 0;
+		while (CurrentStackDepth > 0 && ScopeEntry)
+		{
+			if (ScopeEntryIterator.GetCurrentPageIndex() != LastPageIndex)
+			{
+				bSearchStartTimeUsingPages = true;
+				break;
+			}
+			if (ScopeEntry->Time < 0.0)
+			{
+				if (ExitDepth == 0)
+				{
+					FEnumerationStackEntry& StackEntry = EventStack[--CurrentStackDepth];
+					if (Callback(false, -ScopeEntry->Time, *EventsIterator.GetCurrentItem()) == EEventEnumerate::Stop)
+					{
+						return;
+					}
+				}
+				else
+				{
+					--ExitDepth;
+				}
+				EventsIterator.PrevItem();
+			}
+			else
+			{
+				++ExitDepth;
+			}
+
+			LastPageIndex = ScopeEntryIterator.GetCurrentPageIndex();
+			ScopeEntry = ScopeEntryIterator.PrevItem();
+		}
+
+		if (bSearchStartTimeUsingPages)
+		{
+			ScopeEntryIterator.NextPage();
+			const FEventScopeEntryPage* CurrentScopePage = ScopeEntryIterator.GetCurrentPage();
+			check(CurrentStackDepth <= CurrentScopePage->InitialStackCount);
+
+			while (CurrentStackDepth > 0)
+			{
+				--CurrentStackDepth;
+				EventType CurrentEvent = DetailLevel.GetEvent(CurrentScopePage->InitialStack[CurrentStackDepth].EventIndex);
+				double StartTime = DetailLevel.ScopeEntries[CurrentScopePage->InitialStack[CurrentStackDepth].EnterScopeIndex].Time;
+				if (Callback(false, StartTime, CurrentEvent) == EEventEnumerate::Stop)
+				{
+					return;
+				}
+			}
+		}
+	}
+
+	virtual void EnumerateEventsBackwardsDownSampled(double IntervalEnd, double IntervalStart, double Resolution, typename ITimeline<EventType>::EventRangeCallback Callback) const override
+	{
+		struct FStackEntry
+		{
+			double EndTime;
+			EventType Event;
+		};
+		FStackEntry EventStack[SettingsType::MaxDepth];
+		uint32 CurrentDepth = 0;
+
+		EnumerateEventsBackwardsDownSampled(IntervalEnd, IntervalStart, Resolution, [&EventStack, &CurrentDepth, Callback](bool IsEnter, double Time, const EventType& Event)
+		{
+			if (IsEnter)
+			{
+				FStackEntry& StackEntry = EventStack[CurrentDepth];
+				StackEntry.Event = Event;
+				StackEntry.EndTime = Time;
+				++CurrentDepth;
+			}
+			else
+			{
+				FStackEntry& StackEntry = EventStack[--CurrentDepth];
+				EEventEnumerate Ret = Callback(Time, StackEntry.EndTime, CurrentDepth, Event);
+				if (Ret != EEventEnumerate::Continue)
+				{
+					return Ret;
+				}
+			}
+
+			return EEventEnumerate::Continue;
+		});
 	}
 
 	virtual void EnumerateEventsDownSampledAsync(const typename ITimeline<EventType>::EnumerateAsyncParams& EnumerateAsyncParams) const override
@@ -379,10 +659,18 @@ public:
 			});
 
 		TArray<TSharedRef<FAsyncTask<FEnumarateAsyncTask>>> WorkerTasks;
-		uint64 NumPages = FMath::Max(LastScopePageIndex - FirstScopePageIndex, 1ULL);
 
+		check(LastScopePageIndex >= FirstScopePageIndex);
+		uint32 NumPages = FMath::Max(static_cast<uint32>(LastScopePageIndex - FirstScopePageIndex), 1u);
 		uint32 NumThreads = GThreadPool->GetNumThreads();
-		uint32 NumTasks = FMath::Min((uint64)NumThreads, NumPages);
+
+		if (EnumerateAsyncParams.MaxOccupancy > 0.0f)
+		{
+			NumThreads = FMath::Max(static_cast<uint32>(NumThreads * EnumerateAsyncParams.MaxOccupancy), 1u);
+		}
+
+		uint32 NumTasks = FMath::Min(NumThreads, NumPages);
+
 		uint32 PagesPerTask = NumPages / NumTasks;
 		uint32 RemainingPages = NumPages % NumTasks; // The remaining pages will be split between the first tasks
 
@@ -482,6 +770,16 @@ public:
 		EnumerateEventsDownSampled(IntervalStart, IntervalEnd, 0.0, Callback);
 	}
 
+	virtual void EnumerateEventsBackwards(double IntervalEnd, double IntervalStart, typename ITimeline<EventType>::EventCallback Callback) const override
+	{
+		EnumerateEventsBackwardsDownSampled(IntervalEnd, IntervalStart, 0.0, Callback);
+	}
+
+	virtual void EnumerateEventsBackwards(double IntervalEnd, double IntervalStart, typename ITimeline<EventType>::EventRangeCallback Callback) const override
+	{
+		EnumerateEventsBackwardsDownSampled(IntervalEnd, IntervalStart, 0.0, Callback);
+	}
+
 	virtual bool GetEventInfo(double InTime, double DeltaTime, int32 Depth, typename ITimeline<InEventType>::FTimelineEventInfo& EventInfo) const override
 	{
 		if (Depth >= SettingsType::MaxDepth || Depth < 0)
@@ -513,7 +811,7 @@ public:
 
 		auto ScopeEntryIterator = DetailLevel.ScopeEntries.GetIteratorFromPage(FirstScopePageIndex);
 
-		FEventStackEntry OutScopeEntry; 
+		FEventStackEntry OutScopeEntry;
 		bool bIsFound = FindEventUsingPageInitialStack(ScopeEntryIterator, InTime, DeltaTime, Depth, DetailLevel, OutScopeEntry);
 		if (bIsFound)
 		{
@@ -538,7 +836,7 @@ public:
 		{
 			--FirstScopePageIndex;
 			ScopeEntryIterator = DetailLevel.ScopeEntries.GetIteratorFromPage(FirstScopePageIndex);
-			ScopePage = ScopeEntryIterator.GetCurrentPage();
+			ScopePage = DetailLevel.ScopeEntries.GetPage(FirstScopePageIndex);
 		}
 
 		auto EventsIterator = DetailLevel.Events.GetIteratorFromItem(ScopePage->BeginEventIndex);
@@ -653,17 +951,15 @@ public:
 		//We find the page where the target event ends
 		ScopeEntryIterator = DetailLevel.ScopeEntries.GetIteratorFromPage(FirstScopePageIndex);
 		auto EventLastPageIterator = ScopeEntryIterator;
-		
-		while (ScopeEntryIterator.NextPage() != nullptr)
-		{
-			const FEventScopeEntryPage* CurrentScopePage = ScopeEntryIterator.GetCurrentPage();
 
+		while (const FEventScopeEntryPage* CurrentScopePage = ScopeEntryIterator.NextPage())
+		{
 			if (CurrentScopePage->InitialStackCount <= Depth)
 			{
 				break;
 			}
-			double StartTime = DetailLevel.GetScopeEntryTime(CurrentScopePage->InitialStack[Depth].EnterScopeIndex);
 
+			double StartTime = DetailLevel.GetScopeEntryTime(CurrentScopePage->InitialStack[Depth].EnterScopeIndex);
 			if (StartTime != TargetEntry.StartTime)
 			{
 				break;
@@ -690,7 +986,7 @@ public:
 				//The end of the event has not been reached by analysis
 				EventInfo.EndTime = DetailLevel.InsertionState.LastTime;
 			}
-			
+
 			return true;
 		}
 		else
@@ -700,7 +996,7 @@ public:
 			ScopeEntry = ScopeEntryIterator.GetCurrentItem();
 		}
 
-		while (ScopeEntry && 
+		while (ScopeEntry &&
 			   Depth < CurrentStackDepth)
 		{
 			if (ScopeEntry->Time < 0.0)
@@ -740,6 +1036,49 @@ public:
 		EventInfo.Event = TargetEntry.Event;
 
 		return true;
+	}
+
+	virtual int32 GetDepthAt(double Time) const override
+	{
+		const FDetailLevel& DetailLevel = DetailLevels[0];
+		if (DetailLevel.ScopeEntries.Num() == 0)
+		{
+			return 0;
+		}
+
+		uint64 FirstScopePageIndex = Algo::UpperBoundBy(DetailLevel.ScopeEntries, Time, [](const FEventScopeEntryPage& Page)
+			{
+				return Page.BeginTime;
+			});
+		if (FirstScopePageIndex > 0)
+		{
+			--FirstScopePageIndex;
+		}
+		const FEventScopeEntryPage* ScopePage = DetailLevel.ScopeEntries.GetPage(FirstScopePageIndex);
+		if (ScopePage->BeginTime > Time)
+		{
+			return 0;
+		}
+
+		int32 CurrentStackDepth = ScopePage->InitialStackCount;
+
+		auto ScopeEntryIterator = DetailLevel.ScopeEntries.GetIteratorFromPage(FirstScopePageIndex);
+		const FEventScopeEntry* ScopeEntry = ScopeEntryIterator.GetCurrentItem();
+		while (ScopeEntry && FMath::Abs(ScopeEntry->Time) < Time)
+		{
+			if (ScopeEntry->Time < 0.0)
+			{
+				CurrentStackDepth++;
+			}
+			else
+			{
+				check(CurrentStackDepth > 0);
+				--CurrentStackDepth;
+			}
+			ScopeEntry = ScopeEntryIterator.NextItem();
+		}
+
+		return CurrentStackDepth;
 	}
 
 private:
@@ -794,7 +1133,7 @@ private:
 
 	void AddScopeEntry(FDetailLevel& DetailLevel, double Time, bool IsEnter)
 	{
-		check(Time >= DetailLevel.InsertionState.LastTime);
+		checkf(Time >= DetailLevel.InsertionState.LastTime, TEXT("Time=%.9f LastTime=%.9f"), Time, DetailLevel.InsertionState.LastTime);
 
 		uint64 EventIndex = DetailLevel.Events.Num();
 		uint64 ScopeIndex = DetailLevel.ScopeEntries.Num();
@@ -810,8 +1149,9 @@ private:
 			{
 				FEventScopeEntryPage* CurrentScopeEntryPage = DetailLevel.ScopeEntries.GetPage(DetailLevel.InsertionState.CurrentScopeEntryPageIndex);
 				int32 PreviousPageInitialStackCount = CurrentScopeEntryPage->InitialStackCount;
+				check(DetailLevel.InsertionState.CurrentDepth <= SettingsType::MaxDepth);
 				int32 CurrentDepth = DetailLevel.InsertionState.CurrentDepth;
-				// Update the open scopes that were also open at the beginning of the last page so the values 
+				// Update the open scopes that were also open at the beginning of the last page so the values
 				// represent stats up to and including the current page
 				int ii = 0;
 				for (; ii < PreviousPageInitialStackCount && ii < CurrentDepth; ++ii)
@@ -846,23 +1186,24 @@ private:
 
 		if (IsEnter)
 		{
-			if (DetailLevel.InsertionState.CurrentDepth < SettingsType::MaxDepth)
-			{
-				FEventStackEntry& StackEntry = DetailLevel.InsertionState.EventStack[DetailLevel.InsertionState.CurrentDepth++];
-				StackEntry.EventIndex = EventIndex;
-				StackEntry.EnterScopeIndex = ScopeIndex;
-				StackEntry.ExclTime = 0.0;
-				StackEntry.EndTime = -1.0;
+			++DetailLevel.InsertionState.CurrentDepth;
+			check(DetailLevel.InsertionState.CurrentDepth <= SettingsType::MaxDepth);
 
-				if (DetailLevel.InsertionState.CurrentDepth > 1)
-				{
-					FEventStackEntry& ParentStackEntry = DetailLevel.InsertionState.EventStack[DetailLevel.InsertionState.CurrentDepth - 2];
-					ParentStackEntry.ExclTime += Time - DetailLevel.InsertionState.LastTime;
-				}
+			FEventStackEntry& StackEntry = DetailLevel.InsertionState.EventStack[DetailLevel.InsertionState.CurrentDepth - 1];
+			StackEntry.EventIndex = EventIndex;
+			StackEntry.EnterScopeIndex = ScopeIndex;
+			StackEntry.ExclTime = 0.0;
+			StackEntry.EndTime = -1.0;
+
+			if (DetailLevel.InsertionState.CurrentDepth > 1)
+			{
+				FEventStackEntry& ParentStackEntry = DetailLevel.InsertionState.EventStack[DetailLevel.InsertionState.CurrentDepth - 2];
+				ParentStackEntry.ExclTime += Time - DetailLevel.InsertionState.LastTime;
 			}
 		}
 		else
 		{
+			check(DetailLevel.InsertionState.CurrentDepth <= SettingsType::MaxDepth);
 			check(DetailLevel.InsertionState.CurrentDepth > 0);
 			--DetailLevel.InsertionState.CurrentDepth;
 
@@ -897,10 +1238,10 @@ private:
 		//Event.DebugType = Owner.EventTypes[TypeIndex];
 	}
 
-	bool FindEventUsingPageInitialStack(typename TPagedArray<FEventScopeEntry, FEventScopeEntryPage>::TIterator ScopeEntryIterator, 
-										double Time, 
-										double DeltaTime, 
-										int32 Depth, 
+	bool FindEventUsingPageInitialStack(typename TPagedArray<FEventScopeEntry, FEventScopeEntryPage>::TIterator ScopeEntryIterator,
+										double Time,
+										double DeltaTime,
+										int32 Depth,
 										const FDetailLevel& DetailLevel,
 										FEventStackEntry& OutPageStackEntry) const
 	{
@@ -916,11 +1257,11 @@ private:
 			}
 		}
 
-		const FEventScopeEntryPage* NextScopePage = nullptr;
-		if (!bIsInCurrentPageInitStack && ScopeEntryIterator.NextPage() != nullptr)
+		if (!bIsInCurrentPageInitStack)
 		{
-			NextScopePage = ScopeEntryIterator.GetCurrentPage();
-			if (NextScopePage->InitialStackCount > Depth)
+			const FEventScopeEntryPage* NextScopePage = ScopeEntryIterator.NextPage();
+			if (NextScopePage != nullptr &&
+				NextScopePage->InitialStackCount > Depth)
 			{
 				FEventStackEntry& NextPageStackEntry = NextScopePage->InitialStack[Depth];
 				double StartTime = DetailLevel.GetScopeEntryTime(NextPageStackEntry.EnterScopeIndex);
@@ -937,9 +1278,14 @@ private:
 			return false;
 		}
 
-		while (ScopeEntryIterator.NextPage() != nullptr && CurrentScopePage->InitialStack[Depth].EndTime < 0)
+		while (CurrentScopePage->InitialStack[Depth].EndTime < 0)
 		{
-			CurrentScopePage = ScopeEntryIterator.GetCurrentPage();
+			const FEventScopeEntryPage* NextScopePage = ScopeEntryIterator.NextPage();
+			if (NextScopePage == nullptr)
+			{
+				break;
+			}
+			CurrentScopePage = NextScopePage;
 		}
 
 		OutPageStackEntry = CurrentScopePage->InitialStack[Depth];
@@ -1083,7 +1429,8 @@ private:
 
 	ILinearAllocator& Allocator;
 	TArray<FDetailLevel> DetailLevels;
-	uint64 ModCount = 0;
+	int32 ExtraDepthEvents = 0; // the number of events virtually pushed on the stack when depth exceeds SettingsType::MaxDepth
+	uint64 ModCount = 0; // a serial number increased each time the timeline is modified
 };
 
-}
+} // namespace TraceServices

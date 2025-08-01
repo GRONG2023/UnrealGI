@@ -2,10 +2,14 @@
 
 #pragma once
 
-#include "Features/IModularFeature.h"
 #include "CoreMinimal.h"
+#include "Features/IModularFeature.h"
+#include "HAL/Platform.h"
+#include "UObject/NameTypes.h"
 
-class UNREALED_API IPIEAuthorizer : public IModularFeature
+class FString;
+
+class IPIEAuthorizer : public IModularFeature
 {
 public:
 	virtual ~IPIEAuthorizer() {}

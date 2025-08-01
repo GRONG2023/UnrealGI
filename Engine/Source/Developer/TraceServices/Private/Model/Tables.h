@@ -2,13 +2,13 @@
 
 #pragma once
 
-#include "CoreTypes.h"
-#include "TraceServices/AnalysisService.h"
+#include "Containers/UnrealString.h"
+#include "TraceServices/Containers/Tables.h"
 #include "Templates/Function.h"
 #include "Common/PagedArray.h"
 #include "Common/SlabAllocator.h"
 
-namespace Trace
+namespace TraceServices
 {
 
 template<typename Type>
@@ -154,11 +154,12 @@ class TTableLayout
 {
 public:
 	template<typename ColumnNativeType>
-	TTableLayout<RowType>& AddColumn(ColumnNativeType RowType::* MemberVariableColumn, const TCHAR* ColumnName)
+	TTableLayout<RowType>& AddColumn(ColumnNativeType RowType::* MemberVariableColumn, const TCHAR* ColumnName, uint32 DisplayHintFlags = 0)
 	{
 		Columns.Add({
 			ColumnName,
 			GetColumnTypeFromNativeType<ColumnNativeType>(),
+			DisplayHintFlags,
 			[MemberVariableColumn](const RowType& Row) -> FColumnValueContainer
 			{
 				return FColumnValueContainer(Row.*MemberVariableColumn);
@@ -168,11 +169,12 @@ public:
 	}
 
 	template<typename ColumnNativeType>
-	TTableLayout<RowType>& AddColumn(ColumnNativeType(RowType::* MemberFunctionColumn)() const, const TCHAR* ColumnName)
+	TTableLayout<RowType>& AddColumn(ColumnNativeType(RowType::* MemberFunctionColumn)() const, const TCHAR* ColumnName, uint32 DisplayHintFlags = 0)
 	{
 		Columns.Add({
 			ColumnName,
 			GetColumnTypeFromNativeType<ColumnNativeType>(),
+			DisplayHintFlags,
 			[MemberFunctionColumn](const RowType& Row) -> FColumnValueContainer
 			{
 				return FColumnValueContainer((Row.*MemberFunctionColumn)());
@@ -182,11 +184,12 @@ public:
 	}
 
 	template<typename ColumnNativeType>
-	TTableLayout<RowType>& AddColumn(ColumnNativeType(*FunctionColumn)(const RowType&), const TCHAR* ColumnName)
+	TTableLayout<RowType>& AddColumn(ColumnNativeType(*FunctionColumn)(const RowType&), const TCHAR* ColumnName, uint32 DisplayHintFlags = 0)
 	{
 		Columns.Add({
 			ColumnName,
 			GetColumnTypeFromNativeType<ColumnNativeType>(),
+			DisplayHintFlags,
 			[FunctionColumn](const RowType& Row) -> FColumnValueContainer
 			{
 				return FColumnValueContainer(FunctionColumn(Row));
@@ -195,24 +198,45 @@ public:
 		return *this;
 	}
 
+	template<typename ColumnNativeType>
+	TTableLayout<RowType>& AddColumn(const TCHAR* ColumnName, TFunction<FColumnValueContainer(const RowType&)> Projector, uint32 DisplayHintFlags = 0)
+	{
+		Columns.Add({
+			ColumnName,
+			GetColumnTypeFromNativeType<ColumnNativeType>(),
+			DisplayHintFlags,
+			Projector });
+		return *this;
+	}
+
 	uint64 GetColumnCount() const override
 	{
-		return Columns.Num();
+		return static_cast<uint64>(Columns.Num());
 	}
 
 	const TCHAR* GetColumnName(uint64 ColumnIndex) const override
 	{
-		return *Columns[ColumnIndex].Name;
+		return *Columns[static_cast<int32>(ColumnIndex)].Name;
 	}
 
 	ETableColumnType GetColumnType(uint64 ColumnIndex) const override
 	{
-		return Columns[ColumnIndex].Type;
+		return Columns[static_cast<int32>(ColumnIndex)].Type;
+	}
+
+	void SetColumnType(uint64 ColumnIndex, ETableColumnType ColumnType)
+	{
+		Columns[static_cast<int32>(ColumnIndex)].Type = ColumnType;
+	}
+
+	uint32 GetColumnDisplayHintFlags(uint64 ColumnIndex) const override
+	{
+		return Columns[static_cast<int32>(ColumnIndex)].DisplayHintFlags;
 	}
 
 	FColumnValueContainer GetColumnValue(const RowType& Row, uint64 ColumnIndex) const
 	{
-		return Columns[ColumnIndex].Projector(Row);
+		return Columns[static_cast<int32>(ColumnIndex)].Projector(Row);
 	}
 
 private:
@@ -220,6 +244,7 @@ private:
 	{
 		FString Name;
 		ETableColumnType Type;
+		uint32 DisplayHintFlags;
 		TFunction<FColumnValueContainer(const RowType&)> Projector;
 	};
 
@@ -316,7 +341,7 @@ public:
 		case TableColumnType_Float:
 			return Layout.GetColumnValue(*CurrentRow, ColumnIndex).FloatValue;
 		case TableColumnType_Double:
-			return static_cast<double>(Layout.GetColumnValue(*CurrentRow, ColumnIndex).DoubleValue);
+			return static_cast<float>(Layout.GetColumnValue(*CurrentRow, ColumnIndex).DoubleValue);
 		}
 		return 0.0;
 	}
@@ -423,13 +448,13 @@ private:
 	const TPagedArray<RowType>& Rows;
 };
 
-template<typename RowType>
+template<typename RowType, int AllocatorSlabSize = 2 << 20>
 class TTable
 	: public TTableBase<RowType>
 {
 public:
 	TTable()
-		: Allocator(2 << 20)
+		: Allocator(AllocatorSlabSize)
 		, Rows(Allocator, 1024)
 	{
 
@@ -437,7 +462,7 @@ public:
 
 	TTable(TTableLayout<RowType> Layout)
 		: TTableBase<RowType>(Layout)
-		, Allocator(2 << 20)
+		, Allocator(AllocatorSlabSize)
 		, Rows(Allocator, 1024)
 	{
 
@@ -448,14 +473,16 @@ public:
 		return Rows.PushBack();
 	}
 
+protected:
+	FSlabAllocator Allocator;
+
 private:
 	virtual const TPagedArray<RowType>& GetRows() const override
 	{
 		return Rows;
 	}
 
-	FSlabAllocator Allocator;
 	TPagedArray<RowType> Rows;
 };
 
-}
+} // namespace TraceServices

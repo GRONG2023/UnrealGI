@@ -22,7 +22,9 @@ namespace Audio
 	TUniquePtr<IConvolutionAlgorithm> FConvolutionFactory::NewConvolutionAlgorithm(const FConvolutionSettings& InSettings, const FName& InAlgorithmFactoryName)
 	{
 		// Get all IConvolutionAlgorithm factories. 
+		IModularFeatures::Get().LockModularFeatureList();
 		TArray<IConvolutionAlgorithmFactory*> Factories = IModularFeatures::Get().GetModularFeatureImplementations<IConvolutionAlgorithmFactory>(IConvolutionAlgorithmFactory::GetModularFeatureName());
+		IModularFeatures::Get().UnlockModularFeatureList();
 
 		// Remove null factories
 		Factories = Factories.FilterByPredicate([InAlgorithmFactoryName](const IConvolutionAlgorithmFactory* Factory) 
@@ -83,7 +85,7 @@ namespace Audio
 
 				if (!ConvolutionAlgorithm.IsValid())
 				{
-					UE_LOG(LogSignalProcessing, Warning, TEXT("IConvolutionAlgorithmFactory \"%s\" failed to create IConvolutionAlgorithm despite supporting ConvolutionReverb Settings."));
+					UE_LOG(LogSignalProcessing, Warning, TEXT("IConvolutionAlgorithmFactory failed to create IConvolutionAlgorithm despite supporting ConvolutionReverb Settings."));
 				}
 				else
 				{

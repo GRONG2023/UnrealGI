@@ -25,9 +25,9 @@ bool FMeshPaintGeometryAdapterForSplineMeshes::InitializeVertexData()
 		// Apply spline vertex deformation to each vertex
 		for (int32 Index = 0; Index < NumVertices; Index++)
 		{
-			FVector Position = LODModel->VertexBuffers.PositionVertexBuffer.VertexPosition(Index);
-			const FTransform SliceTransform = SplineMeshComponent->CalcSliceTransform(USplineMeshComponent::GetAxisValue(Position, SplineMeshComponent->ForwardAxis));
-			USplineMeshComponent::GetAxisValue(Position, SplineMeshComponent->ForwardAxis) = 0;
+			FVector Position = (FVector)LODModel->VertexBuffers.PositionVertexBuffer.VertexPosition(Index);
+			const FTransform SliceTransform = SplineMeshComponent->CalcSliceTransform(USplineMeshComponent::GetAxisValueRef(Position, SplineMeshComponent->ForwardAxis));
+			USplineMeshComponent::GetAxisValueRef(Position, SplineMeshComponent->ForwardAxis) = 0;
 			MeshVertices[Index] = SliceTransform.TransformPosition(Position);
 		}
 

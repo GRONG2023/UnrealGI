@@ -6,11 +6,36 @@
 #include "SceneView.h"
 #include "Animation/AnimSequenceBase.h"
 #include "ThumbnailHelpers.h"
+#include "Animation/Skeleton.h"
+#include "Engine/SkeletalMesh.h"
 
 UAnimSequenceThumbnailRenderer::UAnimSequenceThumbnailRenderer(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
 	ThumbnailScene = nullptr;
+}
+
+bool UAnimSequenceThumbnailRenderer::CanVisualizeAsset(UObject* Object)
+{
+	UAnimSequenceBase* AnimSequence = Cast<UAnimSequenceBase>(Object);
+	if (AnimSequence != nullptr)
+	{
+		if (USkeleton* Skeleton = AnimSequence->GetSkeleton())
+		{
+			USkeletalMesh* PreviewSkeletalMesh = Skeleton->GetAssetPreviewMesh(AnimSequence);
+			if (PreviewSkeletalMesh == nullptr)
+			{
+				PreviewSkeletalMesh = Skeleton->FindCompatibleMesh();
+			}
+
+			if (PreviewSkeletalMesh && (PreviewSkeletalMesh->IsCompiling() || PreviewSkeletalMesh->GetResourceForRendering() == nullptr))
+			{
+				return false;
+			}
+		}
+	}
+
+	return true;
 }
 
 void UAnimSequenceThumbnailRenderer::Draw(UObject* Object, int32 X, int32 Y, uint32 Width, uint32 Height, FRenderTarget* RenderTarget, FCanvas* Canvas, bool bAdditionalViewFamily)
@@ -26,15 +51,14 @@ void UAnimSequenceThumbnailRenderer::Draw(UObject* Object, int32 X, int32 Y, uin
 		if(ThumbnailScene->SetAnimation(Anim))
 		{
 			FSceneViewFamilyContext ViewFamily(FSceneViewFamily::ConstructionValues(RenderTarget, ThumbnailScene->GetScene(), FEngineShowFlags(ESFIM_Game))
-				.SetWorldTimes(FApp::GetCurrentTime() - GStartTime, FApp::GetDeltaTime(), FApp::GetCurrentTime() - GStartTime)
+				.SetTime(UThumbnailRenderer::GetTime())
 				.SetAdditionalViewFamily(bAdditionalViewFamily));
 
 			ViewFamily.EngineShowFlags.DisableAdvancedFeatures();
 			ViewFamily.EngineShowFlags.MotionBlur = 0;
 			ViewFamily.EngineShowFlags.LOD = 0;
 
-			ThumbnailScene->GetView(&ViewFamily, X, Y, Width, Height);
-			RenderViewFamily(Canvas, &ViewFamily);
+			RenderViewFamily(Canvas, &ViewFamily, ThumbnailScene->CreateView(&ViewFamily, X, Y, Width, Height));
 			ThumbnailScene->SetAnimation(nullptr);
 		}
 	}

@@ -14,8 +14,8 @@
 #include "EdGraphSchema_K2.h"
 #include "UserDefinedStructure/UserDefinedStructEditorData.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "Editor/UnrealEd/Public/Kismet2/CompilerResultsLog.h"
-#include "Editor/KismetCompiler/Public/KismetCompilerModule.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "KismetCompilerModule.h"
 
 #define LOCTEXT_NAMESPACE "Structure"
 
@@ -83,7 +83,7 @@ FStructureEditorUtils::EStructureError FStructureEditorUtils::IsStructureValid(c
 	{
 		if (OutMsg)
 		{
-			*OutMsg = FText::Format(LOCTEXT("StructureRecursionFmt", "Recursion: Struct cannot have itself as a member variable. Struct '{0}', recursive parent '{1}'"), 
+			*OutMsg = FText::Format(LOCTEXT("StructureRecursionFmt", "Recursion: Recursion: Struct cannot have itself or a nested struct member referencing itself as a member variable. Struct '{0}', recursive parent '{1}'"), 
 				 FText::FromString(Struct->GetFullName()), FText::FromString(RecursionParent->GetFullName())).ToString();
 		}
 		return EStructureError::Recursion;
@@ -188,21 +188,24 @@ bool FStructureEditorUtils::CanHaveAMemberVariableOfType(const UUserDefinedStruc
 {
 	if ((VarType.PinCategory == UEdGraphSchema_K2::PC_Struct) && Struct)
 	{
-		if (const UScriptStruct* SubCategoryStruct = Cast<const UScriptStruct>(VarType.PinSubCategoryObject.Get()))
+		if (const UObject* TypeObject = VarType.PinSubCategoryObject.Get())
 		{
-			const EStructureError Result = IsStructureValid(SubCategoryStruct, Struct, OutMsg);
-			if (EStructureError::Ok != Result)
+			if (const UScriptStruct* SubCategoryStruct = Cast<const UScriptStruct>(TypeObject))
 			{
+				const EStructureError Result = IsStructureValid(SubCategoryStruct, Struct, OutMsg);
+				if (EStructureError::Ok != Result)
+				{
+					return false;
+				}
+			}
+			else
+			{
+				if (OutMsg)
+				{
+					*OutMsg = LOCTEXT("StructureIncorrectStructType", "Incorrect struct type in a structure member variable.").ToString();
+				}
 				return false;
 			}
-		}
-		else
-		{
-			if (OutMsg)
-			{
-				*OutMsg = LOCTEXT("StructureIncorrectStructType", "Incorrect struct type in a structure member variable.").ToString();
-			}
-			return false;
 		}
 	}
 	else if ((VarType.PinCategory == UEdGraphSchema_K2::PC_Exec) 
@@ -215,18 +218,6 @@ bool FStructureEditorUtils::CanHaveAMemberVariableOfType(const UUserDefinedStruc
 			*OutMsg = LOCTEXT("StructureIncorrectTypeCategory", "Incorrect type for a structure member variable.").ToString();
 		}
 		return false;
-	}
-	else
-	{
-		const UClass* PinSubCategoryClass = Cast<const UClass>(VarType.PinSubCategoryObject.Get());
-		if (PinSubCategoryClass && PinSubCategoryClass->IsChildOf(UBlueprint::StaticClass()))
-		{
-			if (OutMsg)
-			{
-				*OutMsg = LOCTEXT("StructureUseBlueprintReferences", "Struct cannot use any blueprint references").ToString();
-			}
-			return false;
-		}
 	}
 	return true;
 }
@@ -374,6 +365,29 @@ bool FStructureEditorUtils::RenameVariable(UUserDefinedStruct* Struct, FGuid Var
 	return false;
 }
 
+
+bool FStructureEditorUtils::RenameVariable(UUserDefinedStruct* Struct, const FString& OldDisplayNameStr, const FString& NewDisplayNameStr)
+{
+	if (Struct)
+	{
+		if (TArray<FStructVariableDescription>* VarDescArray = GetVarDescPtr(Struct))
+		{
+			FStructVariableDescription* VarDesc = VarDescArray->FindByPredicate(
+				[&OldDisplayNameStr](const FStructVariableDescription& Var)
+				{
+					return Var.FriendlyName == OldDisplayNameStr;
+				}
+			);
+
+			if (VarDesc)
+			{
+				return RenameVariable(Struct, VarDesc->VarGuid, NewDisplayNameStr);
+			}
+		}
+	}
+
+	return false;
+}
 
 bool FStructureEditorUtils::ChangeVariableType(UUserDefinedStruct* Struct, FGuid VarGuid, const FEdGraphPinType& NewType)
 {
@@ -554,6 +568,7 @@ void FStructureEditorUtils::OnStructureChanged(UUserDefinedStruct* Struct, EStru
 		Struct->Status = EUserDefinedStructureStatus::UDSS_Dirty;
 		CompileStructure(Struct);
 		Struct->MarkPackageDirty();
+		Struct->OnChanged();
 	}
 }
 
@@ -564,7 +579,7 @@ void FStructureEditorUtils::RemoveInvalidStructureMemberVariableFromBlueprint(UB
 	{
 		const UScriptStruct* FallbackStruct = GetFallbackStruct();
 
-		FString DislpayList;
+		FString DisplayList;
 		TArray<FName> ZombieMemberNames;
 		for (int32 VarIndex = 0; VarIndex < Blueprint->NewVariables.Num(); ++VarIndex)
 		{
@@ -588,40 +603,22 @@ void FStructureEditorUtils::RemoveInvalidStructureMemberVariableFromBlueprint(UB
 			// If this variable is invalid then display a warning
 			if (bIsInvalid)
 			{
-				DislpayList += Var.FriendlyName.IsEmpty() ? Var.VarName.ToString() : Var.FriendlyName;
-				DislpayList += TEXT("\n");
+				DisplayList += Var.FriendlyName.IsEmpty() ? Var.VarName.ToString() : Var.FriendlyName;
+				DisplayList += TEXT("\n");
 				ZombieMemberNames.Add(Var.VarName);
 			}
 		}
 
 		if (ZombieMemberNames.Num())
 		{
-			EAppReturnType::Type Response = EAppReturnType::Ok;
-			if (GIsEditor && !IsRunningCommandlet())
-			{
-				Response = FMessageDialog::Open(
-					EAppMsgType::OkCancel,
-					FText::Format(
-						LOCTEXT("RemoveInvalidStructureMemberVariable_Msg", "The following member variables in blueprint '{0}' have invalid type. Would you like to remove them? \n\n{1}"),
-						FText::FromString(Blueprint->GetFullName()),
-						FText::FromString(DislpayList)
-					));
-			}
-			else
-			{
-				UE_LOG(LogBlueprint, Warning, TEXT("The following member variables in blueprint '%s' have invalid type. Removing them.\n\n%s"), *Blueprint->GetFullName(), *DislpayList);
-			}
-			check((EAppReturnType::Ok == Response) || (EAppReturnType::Cancel == Response));
+			UE_LOG(LogBlueprint, Warning, TEXT("The following member variables in blueprint '%s' have invalid type. Removing them.\n\n%s"), *Blueprint->GetFullName(), *DisplayList);
 
-			if (EAppReturnType::Ok == Response)
-			{				
-				Blueprint->Modify();
+			Blueprint->Modify();
 
-				for (const FName& Name : ZombieMemberNames)
-				{
-					Blueprint->NewVariables.RemoveAll(FFindByNameHelper<FBPVariableDescription>(Name)); //TODO: Add RemoveFirst to TArray
-					FBlueprintEditorUtils::RemoveVariableNodes(Blueprint, Name);
-				}
+			for (const FName& Name : ZombieMemberNames)
+			{
+				Blueprint->NewVariables.RemoveAll(FFindByNameHelper<FBPVariableDescription>(Name)); //TODO: Add RemoveFirst to TArray
+				FBlueprintEditorUtils::RemoveVariableNodes(Blueprint, Name);
 			}
 		}
 	}
@@ -753,26 +750,91 @@ bool FStructureEditorUtils::ChangeSaveGameEnabled(UUserDefinedStruct* Struct, FG
 	return false;
 }
 
-bool FStructureEditorUtils::MoveVariable(UUserDefinedStruct* Struct, FGuid VarGuid, EMoveDirection MoveDirection)
+/** Compute the initial and new indices to move the specified variable above/below another variable. */
+static bool ComputeIndicesForMove(
+	const TArray<FStructVariableDescription>& DescArray,
+	const FGuid& MoveVarGuid,
+	const FGuid& RelativeToGuid,
+	FStructureEditorUtils::EMovePosition Position,
+	int32& OutInitialIndex,
+	int32& OutNewIndex)
+{
+	int32 InitialIndex = DescArray.IndexOfByPredicate(
+		[MoveVarGuid](const FStructVariableDescription& Desc)
+		{
+			return Desc.VarGuid == MoveVarGuid;
+		});
+	int32 NewIndex = DescArray.IndexOfByPredicate(
+		[RelativeToGuid](const FStructVariableDescription& Desc)
+		{
+			return Desc.VarGuid == RelativeToGuid;
+		});
+	if (InitialIndex == INDEX_NONE || NewIndex == INDEX_NONE)
+	{
+		return false;
+	}
+
+	if (Position == FStructureEditorUtils::PositionBelow)
+	{
+		// If moving below a variable, then we actually move it to the next variable's index
+		NewIndex++;
+	}
+
+	if (InitialIndex < NewIndex)
+	{
+		// When the element is removed from the array, all the other elements below it are shifted by one,
+		// so moving an element down the array causes its new index to shift by one
+		NewIndex--;
+	}
+
+	if (InitialIndex == NewIndex)
+	{
+		// No move is happening because the index didn't change.
+		return false;
+	}
+
+	if (!ensure(NewIndex >= 0 && NewIndex < DescArray.Num()))
+	{
+		// New index is out of bounds - this shouldn't happen!
+		return false;
+	}
+
+	OutInitialIndex = InitialIndex;
+	OutNewIndex = NewIndex;
+	return true;
+}
+
+bool FStructureEditorUtils::MoveVariable(UUserDefinedStruct* Struct, FGuid MoveVarGuid, FGuid RelativeToGuid, EMovePosition Position)
 {
 	if (Struct)
 	{
-		const bool bMoveUp = (EMoveDirection::MD_Up == MoveDirection);
 		TArray<FStructVariableDescription>& DescArray = GetVarDesc(Struct);
-		const int32 InitialIndex = bMoveUp ? 1 : 0;
-		const int32 IndexLimit = DescArray.Num() - (bMoveUp ? 0 : 1);
-		for (int32 Index = InitialIndex; Index < IndexLimit; ++Index)
+		int32 InitialIndex, NewIndex;
+		if (!ComputeIndicesForMove(DescArray, MoveVarGuid, RelativeToGuid, Position, InitialIndex, NewIndex))
 		{
-			if (DescArray[Index].VarGuid == VarGuid)
-			{
-				const FScopedTransaction Transaction(LOCTEXT("ReorderVariables", "Variables reordered"));
-				ModifyStructData(Struct);
-
-				DescArray.Swap(Index, Index + (bMoveUp ? -1 : 1));
-				OnStructureChanged(Struct, EStructureEditorChangeInfo::MovedVariable);
-				return true;
-			}
+			return false;
 		}
+
+		const FScopedTransaction Transaction(LOCTEXT("ReorderVariables", "Variables reordered"));
+		ModifyStructData(Struct);
+
+		FStructVariableDescription MoveDesc = DescArray[InitialIndex];
+		DescArray.RemoveAt(InitialIndex);
+		DescArray.Insert(MoveDesc, NewIndex);
+
+		OnStructureChanged(Struct, EStructureEditorChangeInfo::MovedVariable);
+		return true;
+	}
+	return false;
+}
+
+bool FStructureEditorUtils::CanMoveVariable(UUserDefinedStruct* Struct, FGuid MoveVarGuid, FGuid RelativeToGuid, EMovePosition Position)
+{
+	if (Struct)
+	{
+		TArray<FStructVariableDescription>& DescArray = GetVarDesc(Struct);
+		int32 OldIndex, NewIndex; // populated but unused
+		return ComputeIndicesForMove(DescArray, MoveVarGuid, RelativeToGuid, Position, OldIndex, NewIndex);
 	}
 	return false;
 }

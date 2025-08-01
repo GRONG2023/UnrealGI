@@ -3,10 +3,12 @@
 #include "Engine/TimelineTemplate.h"
 #include "UObject/FortniteMainBranchObjectVersion.h"
 #include "UObject/Package.h"
-#include "Engine/Blueprint.h"
+#include "EngineLogs.h"
 #include "Curves/CurveFloat.h"
 #include "Curves/CurveLinearColor.h"
 #include "Curves/CurveVector.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(TimelineTemplate)
 
 namespace
 {
@@ -149,13 +151,6 @@ bool UTimelineTemplate::IsNewTrackNameValid(const FName NewTrackName) const
 			FindVectorTrackIndex(NewTrackName) == INDEX_NONE &&
 			FindEventTrackIndex(NewTrackName) == INDEX_NONE &&
 			FindLinearColorTrackIndex(NewTrackName) == INDEX_NONE;
-}
-
-FName UTimelineTemplate::GetEventTrackFunctionName(int32 EventTrackIndex) const
-{
-	check(EventTrackIndex < EventTracks.Num());
-
-	return EventTracks[EventTrackIndex].GetFunctionName();
 }
 
 int32 UTimelineTemplate::FindMetaDataEntryIndexForKey(const FName Key) const
@@ -521,4 +516,5 @@ bool FTTLinearColorTrack::operator==( const FTTLinearColorTrack& T2 ) const
 	}
 	return bColorCurvesEqual && FTTTrackBase::operator==(T2);
 }
+
 

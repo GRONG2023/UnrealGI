@@ -6,29 +6,9 @@
 
 #if WITH_CEF3
 
-#if PLATFORM_WINDOWS
-	#include "Windows/WindowsHWrapper.h"
-	#include "Windows/AllowWindowsPlatformTypes.h"
-	#include "Windows/AllowWindowsPlatformAtomics.h"
-#endif
 
-#pragma push_macro("OVERRIDE")
-#undef OVERRIDE // cef headers provide their own OVERRIDE macro
-THIRD_PARTY_INCLUDES_START
-#if PLATFORM_APPLE
-	PRAGMA_DISABLE_DEPRECATION_WARNINGS
-#endif
-#include "include/cef_client.h"
-#if PLATFORM_APPLE
-	PRAGMA_ENABLE_DEPRECATION_WARNINGS
-#endif
-THIRD_PARTY_INCLUDES_END
-#pragma pop_macro("OVERRIDE")
+#include "CEFLibCefIncludes.h"
 
-#if PLATFORM_WINDOWS
-	#include "Windows/HideWindowsPlatformAtomics.h"
-	#include "Windows/HideWindowsPlatformTypes.h"
-#endif
 
 #include "IWebBrowserWindow.h"
 
@@ -55,11 +35,15 @@ class FCEFBrowserHandler
 	, public CefJSDialogHandler
 	, public CefContextMenuHandler
 	, public CefDragHandler
+	, public CefResourceRequestHandler
+	, public CefRequestContextHandler
+	, public CefCookieAccessFilter
+	, public CefDialogHandler
 {
 public:
 
 	/** Default constructor. */
-	FCEFBrowserHandler(bool InUseTransparency, const TArray<FString>& AltRetryDomains = TArray<FString>());
+	FCEFBrowserHandler(bool InUseTransparency, bool InInterceptLoadRequests, const TArray<FString>& AltRetryDomains = TArray<FString>(), const TArray<FString>& AuthorizationHeaderAllowListURLS = TArray<FString>());
 
 public:
 
@@ -129,11 +113,20 @@ public:
 		return this;
 	}
 
+	virtual CefRefPtr<CefDialogHandler> GetDialogHandler() override
+	{
+		return this;
+	}
+
+	virtual CefRefPtr<CefCookieAccessFilter> GetCookieAccessFilter(
+		CefRefPtr<CefBrowser> Browser,
+		CefRefPtr<CefFrame> Frame,
+		CefRefPtr<CefRequest> Request) override;
 
 	virtual bool OnProcessMessageReceived(CefRefPtr<CefBrowser> Browser,
+		CefRefPtr<CefFrame> frame,
 		CefProcessId SourceProcess,
 		CefRefPtr<CefProcessMessage> Message) override;
-
 
 public:
 
@@ -144,7 +137,8 @@ public:
 	virtual bool OnTooltip(CefRefPtr<CefBrowser> Browser, CefString& Text) override;
 	virtual bool OnConsoleMessage(
 		CefRefPtr<CefBrowser> Browser, 
-		const CefString& Message, 
+		cef_log_severity_t level,
+		const CefString& Message,
 		const CefString& Source, 
 		int Line) override;
 
@@ -166,7 +160,8 @@ public:
 		CefWindowInfo& WindowInfo,
 		CefRefPtr<CefClient>& Client,
 		CefBrowserSettings& Settings,
-		bool* no_javascript_access) override 
+		CefRefPtr<CefDictionaryValue>& extra_info,
+		bool* no_javascript_access) override
 	{
 		return OnBeforePopup(Browser, Frame, Target_Url, Target_Frame_Name, PopupFeatures, WindowInfo, Client, Settings, no_javascript_access);
 	}
@@ -197,34 +192,33 @@ public:
 		bool canGoBack,
 		bool canGoForward) override;
 
-#if PLATFORM_LINUX
-	virtual void OnLoadStart(
-		CefRefPtr<CefBrowser> Browser,
-		CefRefPtr<CefFrame> Frame) override;
-#else
 	virtual void OnLoadStart(
 		CefRefPtr<CefBrowser> Browser,
 		CefRefPtr<CefFrame> Frame,
 		TransitionType CefTransitionType) override;
-#endif
 
 public:
 
 	// CefRenderHandler Interface
 	virtual bool GetRootScreenRect(CefRefPtr<CefBrowser> Browser, CefRect& Rect) override;
-	virtual bool GetViewRect(CefRefPtr<CefBrowser> Browser, CefRect& Rect) override;
+	virtual void GetViewRect(CefRefPtr<CefBrowser> Browser, CefRect& Rect) override;
 	virtual void OnPaint(CefRefPtr<CefBrowser> Browser,
 		PaintElementType Type,
 		const RectList& DirtyRects,
 		const void* Buffer,
 		int Width, int Height) override;
-	virtual void OnCursorChange(CefRefPtr<CefBrowser> Browser,
-		CefCursorHandle Cursor,
-		CefRenderHandler::CursorType Type,
-		const CefCursorInfo& CustomCursorInfo) override;
+	virtual void OnAcceleratedPaint(CefRefPtr<CefBrowser> Browser,
+		PaintElementType Type,
+		const RectList& DirtyRects,
+		void* SharedHandle) override;
 	virtual void OnPopupShow(CefRefPtr<CefBrowser> Browser, bool bShow) override;
 	virtual void OnPopupSize(CefRefPtr<CefBrowser> Browser, const CefRect& Rect) override;
 	virtual bool GetScreenInfo(CefRefPtr<CefBrowser> Browser, CefScreenInfo& ScreenInfo) override;
+	// CefDisplayHandler interface
+	virtual bool OnCursorChange(CefRefPtr<CefBrowser> browser,
+		CefCursorHandle cursor,
+		cef_cursor_type_t type,
+		const CefCursorInfo& custom_cursor_info) override;
 #if !PLATFORM_LINUX
 	virtual void OnImeCompositionRangeChanged(
 		CefRefPtr<CefBrowser> Browser,
@@ -236,7 +230,7 @@ public:
 
 	// CefRequestHandler Interface
 
-	virtual ReturnValue OnBeforeResourceLoad(
+	virtual CefResourceRequestHandler::ReturnValue OnBeforeResourceLoad(
 		CefRefPtr<CefBrowser> Browser,
 		CefRefPtr<CefFrame> Frame,
 		CefRefPtr<CefRequest> Request,
@@ -247,10 +241,16 @@ public:
 		CefRefPtr<CefResponse> Response,
 		URLRequestStatus Status,
 		int64 Received_content_length) override;
+	virtual void OnResourceRedirect(CefRefPtr<CefBrowser> browser,
+		CefRefPtr<CefFrame> frame,
+		CefRefPtr<CefRequest> request,
+		CefRefPtr<CefResponse> response,
+		CefString& new_url) override;
 	virtual void OnRenderProcessTerminated(CefRefPtr<CefBrowser> Browser, TerminationStatus Status) override;
 	virtual bool OnBeforeBrowse(CefRefPtr<CefBrowser> Browser,
 		CefRefPtr<CefFrame> Frame,
 		CefRefPtr<CefRequest> Request,
+		bool user_gesture, 
 		bool IsRedirect) override;
 	virtual CefRefPtr<CefResourceHandler> GetResourceHandler(
 		CefRefPtr<CefBrowser> Browser,
@@ -263,6 +263,15 @@ public:
 		CefRefPtr<CefSSLInfo> SslInfo,
 		CefRefPtr<CefRequestCallback> Callback ) override;
 
+	virtual CefRefPtr<CefResourceRequestHandler> GetResourceRequestHandler(
+		CefRefPtr<CefBrowser> browser,
+		CefRefPtr<CefFrame> frame,
+		CefRefPtr<CefRequest> request,
+		bool is_navigation,
+		bool is_download,
+		const CefString& request_initiator,
+		bool& disable_default_handling) override;
+
 public:
 	// CefKeyboardHandler interface
 	virtual bool OnKeyEvent(CefRefPtr<CefBrowser> Browser,
@@ -270,19 +279,21 @@ public:
 		CefEventHandle OsEvent) override;
 
 public:
+	// CefCookieAccessFilter interface
+	virtual bool CanSaveCookie(CefRefPtr<CefBrowser> Browser,
+		CefRefPtr<CefFrame> Frame,
+		CefRefPtr<CefRequest> Request,
+		CefRefPtr<CefResponse> Response,
+		const CefCookie& Cookie) override;
+
+	virtual bool CanSendCookie(CefRefPtr<CefBrowser> Browser,
+		CefRefPtr<CefFrame> Frame,
+		CefRefPtr<CefRequest> Request,
+		const CefCookie& Cookie) override;
+
+public:
 	// CefJSDialogHandler interface
 
-#if PLATFORM_LINUX
-	virtual bool OnJSDialog(
-		CefRefPtr<CefBrowser> Browser,
-		const CefString& OriginUrl,
-		const CefString& AcceptLang,
-		JSDialogType DialogType,
-		const CefString& MessageText,
-		const CefString& DefaultPromptText,
-		CefRefPtr<CefJSDialogCallback> Callback,
-		bool& OutSuppressMessage) override;
-#else
 	virtual bool OnJSDialog(
 		CefRefPtr<CefBrowser> Browser,
 		const CefString& OriginUrl,
@@ -291,7 +302,6 @@ public:
 		const CefString& DefaultPromptText,
 		CefRefPtr<CefJSDialogCallback> Callback,
 		bool& OutSuppressMessage) override;
-#endif
 
 	virtual bool OnBeforeUnloadDialog(CefRefPtr<CefBrowser> Browser, const CefString& MessageText, bool IsReload, CefRefPtr<CefJSDialogCallback> Callback) override;
 
@@ -310,7 +320,19 @@ public:
 
 	virtual void OnDraggableRegionsChanged(
 		CefRefPtr<CefBrowser> Browser,
+		CefRefPtr<CefFrame> frame, 
 		const std::vector<CefDraggableRegion>& Regions) override;
+
+public:
+	// CefDialogHandler interface
+
+	virtual bool OnFileDialog(CefRefPtr<CefBrowser> Browser,
+		FileDialogMode Mode,
+		const CefString& Title,
+		const CefString& DefaultFilePath,
+		const std::vector<CefString>& AcceptFilters,
+		int SelectedAcceptFilter,
+		CefRefPtr<CefFileDialogCallback> Callback) override;
 
 public:
 
@@ -325,32 +347,42 @@ public:
 	}
 
 	typedef TMap<FString, FString> FRequestHeaders;
-	DECLARE_DELEGATE_ThreeParams(FOnBeforeResourceLoadDelegate, const CefString& /*URL*/, CefRequest::ResourceType /*Type*/, FRequestHeaders& /*AdditionalHeaders*/);
+	DECLARE_DELEGATE_FourParams(FOnBeforeResourceLoadDelegate, const CefString& /*URL*/, CefRequest::ResourceType /*Type*/, FRequestHeaders& /*AdditionalHeaders*/, const bool /*AllowUserCredentials*/);
 	FOnBeforeResourceLoadDelegate& OnBeforeResourceLoad()
 	{
 		return BeforeResourceLoadDelegate;
 	}
 
-	DECLARE_DELEGATE_FourParams(FOnResourceLoadCompleteDelegate, const CefString& /*URL*/, CefRequest::ResourceType /*Type*/, CefRequestHandler::URLRequestStatus /*Status*/, int64 /*ContentLength*/);
+	DECLARE_DELEGATE_FourParams(FOnResourceLoadCompleteDelegate, const CefString& /*URL*/, CefRequest::ResourceType /*Type*/, CefResourceRequestHandler::URLRequestStatus /*Status*/, int64 /*ContentLength*/);
 	FOnResourceLoadCompleteDelegate& OnResourceLoadComplete()
 	{
 		return ResourceLoadCompleteDelegate;
 	}
 
-	DECLARE_DELEGATE_FourParams(FOnConsoleMessageDelegate, CefRefPtr<CefBrowser> /*Browser*/, const CefString& /*Message*/, const CefString& /*Source*/, int /*Line*/);
+	DECLARE_DELEGATE_FiveParams(FOnConsoleMessageDelegate, CefRefPtr<CefBrowser> /*Browser*/, cef_log_severity_t /*level*/, const CefString& /*Message*/, const CefString& /*Source*/, int32 /*Line*/);
 	FOnConsoleMessageDelegate& OnConsoleMessage()
 	{
 		return ConsoleMessageDelegate;
 	}
+
+	bool URLRequestAllowsCredentials(const FString& URL) const;
 
 private:
 
 	bool ShowDevTools(const CefRefPtr<CefBrowser>& Browser);
 
 	bool bUseTransparency;
+	bool bAllowAllCookies;
+	bool bInterceptLoadRequests;
 
 	TArray<FString> AltRetryDomains;
 	uint32 AltRetryDomainIdx = 0;
+
+	/** Domains we allow sending an authorization header too even if the request doesn't otherwise indicate support */
+	TArray<FString> AuthorizationHeaderAllowListURLS;
+
+	/** Keep track of URLs we see being loaded and the type of load it is*/
+	TMap<FString, CefRequest::ResourceType> MainFrameLoadTypes;
 
 	/** Delegate for notifying that a popup window is attempting to open. */
 	IWebBrowserWindow::FOnBeforePopupDelegate BeforePopupDelegate;

@@ -9,6 +9,7 @@ public class DesktopWidgets : ModuleRules
 		PublicDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
+				"CoreUObject",
 				"Slate",
 				"SlateCore",
 			}
@@ -18,14 +19,6 @@ public class DesktopWidgets : ModuleRules
 			new string[] {
                 "DesktopPlatform",
                 "InputCore",
-			}
-		);
-
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				"Developer/DesktopWidgets/Private",
-				"Developer/DesktopWidgets/Private/Widgets",
-                "Developer/DesktopWidgets/Private/Widgets/Input",
 			}
 		);
 	}

@@ -4,6 +4,9 @@
 #include "Rendering/DrawElements.h"
 #include "Styling/CoreStyle.h"
 
+SColorWheel::SColorWheel()
+	: SelectedColor(*this, FLinearColor(ForceInit))
+{}
 
 /* SColorWheel methods
  *****************************************************************************/
@@ -12,7 +15,7 @@ void SColorWheel::Construct(const FArguments& InArgs)
 {
 	Image = FCoreStyle::Get().GetBrush("ColorWheel.HueValueCircle");
 	SelectorImage = FCoreStyle::Get().GetBrush("ColorWheel.Selector");
-	SelectedColor = InArgs._SelectedColor;
+	SelectedColor.Assign(*this, InArgs._SelectedColor);
 
 	OnMouseCaptureBegin = InArgs._OnMouseCaptureBegin;
 	OnMouseCaptureEnd = InArgs._OnMouseCaptureEnd;
@@ -25,7 +28,7 @@ void SColorWheel::Construct(const FArguments& InArgs)
 
 FVector2D SColorWheel::ComputeDesiredSize(float) const
 {
-	return Image->ImageSize + SelectorImage->ImageSize;
+	return FVector2D(Image->ImageSize + SelectorImage->ImageSize);
 }
 
 
@@ -84,13 +87,13 @@ int32 SColorWheel::OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeom
 {
 	const bool bIsEnabled = ShouldBeEnabled(bParentEnabled);
 	const ESlateDrawEffect DrawEffects = bIsEnabled ? ESlateDrawEffect::None : ESlateDrawEffect::DisabledEffect;
-	const FVector2D& SelectorSize = SelectorImage->ImageSize;
-	const FVector2D CircleSize = AllottedGeometry.GetLocalSize() - SelectorSize;
+	const FVector2f SelectorSize = SelectorImage->ImageSize;
+	const FVector2f CircleSize = AllottedGeometry.GetLocalSize() - SelectorSize;
 	
 	FSlateDrawElement::MakeBox(
 		OutDrawElements,
 		LayerId,
-		AllottedGeometry.ToPaintGeometry(0.5 * SelectorSize, CircleSize),
+		AllottedGeometry.ToPaintGeometry(CircleSize, FSlateLayoutTransform(0.5f * SelectorSize)),
 		Image,
 		DrawEffects,
 		InWidgetStyle.GetColorAndOpacityTint() * Image->GetTint(InWidgetStyle)
@@ -99,7 +102,7 @@ int32 SColorWheel::OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeom
 	FSlateDrawElement::MakeBox(
 		OutDrawElements,
 		LayerId + 1,
-		AllottedGeometry.ToPaintGeometry(0.5f * (AllottedGeometry.GetLocalSize() + CalcRelativePositionFromCenter() * CircleSize - SelectorSize), SelectorSize),
+		AllottedGeometry.ToPaintGeometry(SelectorSize, FSlateLayoutTransform(0.5f * (AllottedGeometry.GetLocalSize() + CalcRelativePositionFromCenter() * CircleSize - SelectorSize))),
 		SelectorImage,
 		DrawEffects,
 		InWidgetStyle.GetColorAndOpacityTint() * SelectorImage->GetTint(InWidgetStyle)
@@ -112,21 +115,21 @@ int32 SColorWheel::OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeom
 /* SColorWheel implementation
  *****************************************************************************/
 
-FVector2D SColorWheel::CalcRelativePositionFromCenter() const
+UE::Slate::FDeprecateVector2DResult SColorWheel::CalcRelativePositionFromCenter() const
 {
 	float Hue = SelectedColor.Get().R;
 	float Saturation = SelectedColor.Get().G;
 	float Angle = Hue / 180.0f * PI;
 	float Radius = Saturation;
 
-	return FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * Radius;
+	return FVector2f(FMath::Cos(Angle), FMath::Sin(Angle)) * Radius;
 }
 
 
 bool SColorWheel::ProcessMouseAction(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent, bool bProcessWhenOutsideColorWheel)
 {
-	const FVector2D LocalMouseCoordinate = MyGeometry.AbsoluteToLocal(MouseEvent.GetScreenSpacePosition());
-	const FVector2D RelativePositionFromCenter = (2.0f * LocalMouseCoordinate - MyGeometry.GetLocalSize()) / (MyGeometry.GetLocalSize() - SelectorImage->ImageSize);
+	const FVector2f LocalMouseCoordinate = MyGeometry.AbsoluteToLocal(MouseEvent.GetScreenSpacePosition());
+	const FVector2f RelativePositionFromCenter = (2.0f * LocalMouseCoordinate - MyGeometry.GetLocalSize()) / (MyGeometry.GetLocalSize() - SelectorImage->ImageSize);
 	const float RelativeRadius = RelativePositionFromCenter.Size();
 
 	if (RelativeRadius <= 1.0f || bProcessWhenOutsideColorWheel)
@@ -138,6 +141,7 @@ bool SColorWheel::ProcessMouseAction(const FGeometry& MyGeometry, const FPointer
 			Angle += 2.0f * PI;
 		}
 
+		SelectedColor.UpdateNow(*this);
 		FLinearColor NewColor = SelectedColor.Get();
 		{
 			NewColor.R = Angle * 180.0f * INV_PI;

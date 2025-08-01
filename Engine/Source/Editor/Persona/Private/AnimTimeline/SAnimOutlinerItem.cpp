@@ -1,11 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "SAnimOutlinerItem.h"
-#include "AnimTimelineTrack.h"
+#include "AnimTimeline/SAnimOutlinerItem.h"
+#include "AnimTimeline/AnimTimelineTrack.h"
 #include "Widgets/Text/STextBlock.h"
-#include "SAnimOutliner.h"
+#include "AnimTimeline/SAnimOutliner.h"
 #include "Widgets/SOverlay.h"
-#include "SAnimTrackResizeArea.h"
+#include "AnimTimeline/SAnimTrackResizeArea.h"
 
 SAnimOutlinerItem::~SAnimOutlinerItem()
 {
@@ -22,6 +22,9 @@ void SAnimOutlinerItem::Construct(const FArguments& InArgs, const TSharedRef<STa
 	Track = InTrack;
 	OnGenerateWidgetForColumn = InArgs._OnGenerateWidgetForColumn;
 	HighlightText = InArgs._HighlightText;
+
+	bHovered = false;
+	SetHover(TAttribute<bool>::CreateSP(this, &SAnimOutlinerItem::ShouldAppearHovered));
 
 	SMultiColumnTableRow::Construct(
 		SMultiColumnTableRow::FArguments()
@@ -73,6 +76,7 @@ void SAnimOutlinerItem::AddTrackAreaReference(const TSharedPtr<SAnimTrack>& InTr
 
 void SAnimOutlinerItem::OnMouseEnter(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
 {
+	bHovered = true;
 	SMultiColumnTableRow<TSharedRef<FAnimTimelineTrack>>::OnMouseEnter(MyGeometry, MouseEvent);
 
 	TSharedPtr<FAnimTimelineTrack> PinnedTrack = Track.Pin();
@@ -84,6 +88,7 @@ void SAnimOutlinerItem::OnMouseEnter(const FGeometry& MyGeometry, const FPointer
 
 void SAnimOutlinerItem::OnMouseLeave(const FPointerEvent& MouseEvent)
 {
+	bHovered = false;
 	SMultiColumnTableRow<TSharedRef<FAnimTimelineTrack>>::OnMouseLeave(MouseEvent);
 
 	TSharedPtr<FAnimTimelineTrack> PinnedTrack = Track.Pin();
@@ -93,13 +98,12 @@ void SAnimOutlinerItem::OnMouseLeave(const FPointerEvent& MouseEvent)
 	}
 }
 
-bool SAnimOutlinerItem::IsHovered() const
+bool SAnimOutlinerItem::ShouldAppearHovered() const
 {
-	TSharedPtr<FAnimTimelineTrack> PinnedTrack = Track.Pin();
-	if(PinnedTrack.IsValid())
+	if(TSharedPtr<FAnimTimelineTrack> PinnedTrack = Track.Pin())
 	{
-		return SMultiColumnTableRow<TSharedRef<FAnimTimelineTrack>>::IsHovered() || PinnedTrack->IsHovered();
+		return bHovered || PinnedTrack->IsHovered();
 	}
 
-	return SMultiColumnTableRow<TSharedRef<FAnimTimelineTrack>>::IsHovered();
+	return bHovered;
 }

@@ -12,6 +12,7 @@
 #include "ComponentReregisterContext.h"
 #include "Linux/LinuxPlatformApplicationMisc.h"
 #include "GenericPlatform/GenericPlatformFramePacer.h"
+#include "RHIUtilities.h"
 
 /*------------------------------------------------------------------------------
 	OpenGL function pointers.
@@ -128,13 +129,13 @@ void Linux_PlatformCreateDummyGLWindow( FPlatformOpenGLContext *OutContext )
 		FPlatformMisc::MessageBoxExt(EAppMsgType::Ok,
 			*ErrorMessage.ToString(),
 			*(NSLOCTEXT("Renderer", "LinuxCannotCreatePlatformWindowTitle", "Cannot create SDL window.").ToString()));
-		FPlatformMisc::RequestExit(true);
+		FPlatformMisc::RequestExit(true, TEXT("Linux_PlatformCreateDummyGLWindow"));
 		// unreachable
 		return;
 	}
 	else
 	{
-		SDL_SetWindowTitle(DummyWindow, "UE4 Dummy GL window");
+		SDL_SetWindowTitle(DummyWindow, "UnrealEditor Dummy GL window");
 	}
 
 	OutContext->hWnd					= DummyWindow;
@@ -146,11 +147,7 @@ void Linux_PlatformCreateDummyGLWindow( FPlatformOpenGLContext *OutContext )
  */
 bool Linux_PlatformOpenGLDebugCtx()
 {
-#if UE_BUILD_DEBUG
-	return ! FParse::Param(FCommandLine::Get(),TEXT("openglNoDebug"));
-#else
-	return FParse::Param(FCommandLine::Get(),TEXT("openglDebug"));
-#endif
+	return IsOGLDebugOutputEnabled();
 }
 
 /**
@@ -218,7 +215,7 @@ struct FPlatformOpenGLDevice
 			FPlatformMisc::MessageBoxExt(EAppMsgType::Ok,
 				*(NSLOCTEXT("Renderer", "LinuxInsufficientDriversText", "Cannot create OpenGL context. Check that the drivers and hardware support at least OpenGL 4.3 (or re-run with -opengl3)").ToString()),
 				*(NSLOCTEXT("Renderer", "LinuxInsufficientDriversTitle", "Insufficient drivers or hardware").ToString()));
-			FPlatformMisc::RequestExit(true);
+			FPlatformMisc::RequestExit(true, TEXT("FPlatformOpenGLDevice()"));
 			// unreachable
 			return;
 		}
@@ -764,7 +761,7 @@ bool PlatformInitOpenGL()
 			FPlatformMisc::MessageBoxExt(EAppMsgType::Ok,
 				*FString::Printf(TEXT("%s. SDL error: \"%s\""), *(NSLOCTEXT("Renderer", "LinuxCannotLoadLibGLText", "Unable to dynamically load libGL").ToString()), UTF8_TO_TCHAR(SDL_GetError())),
 				*(NSLOCTEXT("Renderer", "LinuxInsufficientDriversTitle", "Insufficient drivers or hardware").ToString()));
-			FPlatformMisc::RequestExit(true);
+			FPlatformMisc::RequestExit(true, TEXT("PlatformInitOpenGL"));
 			// unreachable
 			return false;
 		}
@@ -985,7 +982,7 @@ bool PlatformContextIsCurrent( uint64 QueryContext )
 	return (uint64)Linux_GetCurrentContext() == QueryContext;
 }
 
-FRHITexture* PlatformCreateBuiltinBackBuffer( FOpenGLDynamicRHI* OpenGLRHI, uint32 SizeX, uint32 SizeY )
+FOpenGLTexture* PlatformCreateBuiltinBackBuffer( FOpenGLDynamicRHI* OpenGLRHI, uint32 SizeX, uint32 SizeY )
 {
 	return nullptr;
 }
@@ -1022,7 +1019,5 @@ void FLinuxOpenGL::ProcessExtensions( const FString& ExtensionsString )
 		glTexStorage1D = nullptr;
 		glTexStorage2D = nullptr;
 		glTexStorage3D = nullptr;
-
-		FOpenGLBase::bSupportsCopyImage  = false;
 	}
 }

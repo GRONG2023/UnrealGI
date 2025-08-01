@@ -2,8 +2,9 @@
 
 #include "Trace/Config.h"
 
-#if UE_TRACE_ENABLED
+#if UE_TRACE_ENABLED && PLATFORM_UNIX
 
+#include <cstring>
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -17,6 +18,7 @@
 	#include <sys/syscall.h>
 #endif // _GNU_SOURCE
 
+namespace UE {
 namespace Trace {
 namespace Private {
 
@@ -60,7 +62,7 @@ void ThreadDestroy(UPTRINT Handle)
 ////////////////////////////////////////////////////////////////////////////////
 uint64 TimeGetFrequency()
 {
-	return 1000000ull;
+	return 10000000ull;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -69,7 +71,7 @@ TRACELOG_API uint64 TimeGetTimestamp()
 	// should stay in sync with FPlatformTime::Cycles64() or the timeline will be broken!
 	struct timespec TimeSpec;
 	clock_gettime(CLOCK_MONOTONIC, &TimeSpec);
-	return static_cast<uint64>(static_cast<uint64>(TimeSpec.tv_sec) * 1000000ULL + static_cast<uint64>(TimeSpec.tv_nsec) / 1000ULL);
+	return static_cast<uint64>(static_cast<uint64>(TimeSpec.tv_sec) * 10000000ULL + static_cast<uint64>(TimeSpec.tv_nsec) / 100ULL);
 }
 
 
@@ -92,7 +94,13 @@ UPTRINT TcpSocketConnect(const ANSICHAR* Host, uint16 Port)
 {
 	struct FAddrInfoPtr
 	{
-					~FAddrInfoPtr()	{ freeaddrinfo(Value); }
+		~FAddrInfoPtr()	
+		{
+			if (Value != nullptr)
+			{
+				freeaddrinfo(Value);
+			}
+		}
 		addrinfo*	operator -> ()	{ return Value; }
 		addrinfo**	operator & ()	{ return &Value; }
 		addrinfo*	Value;
@@ -105,6 +113,7 @@ UPTRINT TcpSocketConnect(const ANSICHAR* Host, uint16 Port)
 	Hints.ai_protocol = IPPROTO_TCP;
 	if (getaddrinfo(Host, nullptr, &Hints, &Info))
 	{
+		Info.Value = nullptr;
 		return 0;
 	}
 
@@ -246,7 +255,23 @@ UPTRINT FileOpen(const ANSICHAR* Path)
 	return UPTRINT(Out + 1);
 }
 
+////////////////////////////////////////////////////////////////////////////////
+int32 GetLastErrorCode()
+{
+	return errno;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+bool GetErrorMessage(char* OutBuffer, uint32 BufferSize, int32 ErrorCode)
+{
+	const char* ErrorMessage = std::strerror(ErrorCode);
+	const bool bResult = strncpy(OutBuffer, ErrorMessage, BufferSize) != 0;
+	OutBuffer[BufferSize-1] = 0;
+	return bResult;
+}
+
 } // namespace Private
 } // namespace Trace
+} // namespace UE
 
 #endif // UE_TRACE_ENABLED

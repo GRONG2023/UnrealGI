@@ -23,22 +23,22 @@ public:
 
 	virtual TSharedRef<IAutomationDriver, ESPMode::ThreadSafe> CreateDriver() const override
 	{
-		return FAutomationDriverFactory::Create(AutomatedApplication.Get());
+		return FAutomationDriverFactory::Create(AutomatedApplication.ToSharedRef());
 	}
 
 	virtual TSharedRef<IAutomationDriver, ESPMode::ThreadSafe> CreateDriver(const TSharedRef<FDriverConfiguration, ESPMode::ThreadSafe>& Configuration) const override
 	{
-		return FAutomationDriverFactory::Create(AutomatedApplication.Get(), Configuration);
+		return FAutomationDriverFactory::Create(AutomatedApplication.ToSharedRef(), Configuration);
 	}
 
 	virtual TSharedRef<IAsyncAutomationDriver, ESPMode::ThreadSafe> CreateAsyncDriver() const override
 	{
-		return FAsyncAutomationDriverFactory::Create(AutomatedApplication.Get());
+		return FAsyncAutomationDriverFactory::Create(AutomatedApplication.ToSharedRef());
 	}
 
 	virtual TSharedRef<IAsyncAutomationDriver, ESPMode::ThreadSafe> CreateAsyncDriver(const TSharedRef<FDriverConfiguration, ESPMode::ThreadSafe>& Configuration) const override
 	{
-		return FAsyncAutomationDriverFactory::Create(AutomatedApplication.Get(), Configuration);
+		return FAsyncAutomationDriverFactory::Create(AutomatedApplication.ToSharedRef(), Configuration);
 	}
 
 	virtual bool IsEnabled() const override
@@ -48,7 +48,7 @@ public:
 
 	virtual void Enable() override
 	{
-		if (AutomatedApplication.IsValid())
+		if (IsEnabled())
 		{
 			return;
 		}
@@ -62,25 +62,35 @@ public:
 
 		if (AutomatedApplication.IsValid())
 		{
+			FSlateApplication::Get().SetPlatformApplication(AutomatedApplication.ToSharedRef());
 			AutomatedApplication->AllowPlatformMessageHandling();
 		}
-		
-		FSlateApplication::Get().SetPlatformApplication(AutomatedApplication.ToSharedRef());
 	}
 
 	virtual void Disable() override
 	{
-		if (!AutomatedApplication.IsValid())
+		if (!IsEnabled())
 		{
 			return;
 		}
 
 		AutomatedApplication->DisablePlatformMessageHandling();
 
+#if WITH_ACCESSIBILITY
+		// Unregister primary user on the accessible handler before swapping back the original application
+		FGenericAccessibleUserRegistry& UserRegistry = AutomatedApplication->GetAccessibleMessageHandler()->GetAccessibleUserRegistry();
+		UserRegistry.UnregisterUser(FGenericAccessibleUserRegistry::GetPrimaryUserIndex());
+#endif
+
 		FSlateApplication::Get().SetPlatformApplication(RealApplication.ToSharedRef());
 		RealApplication->SetMessageHandler(RealMessageHandler.ToSharedRef());
 
 		AutomatedApplication.Reset();
+		// Note that here we have to return the platform cursor that was overriden by FAutomatedCursor while enabling the module.
+		// Sometimes it is not being replaced with the real platform cursor, so we force it.
+		// It is needed to prevent possible issues that we are sending mouse events to the cursor that is outdated while executing the next tests from the list of AutomationDriver tests.
+		FSlateApplication::Get().UsePlatformCursorForCursorUser(true);
+
 		RealApplication.Reset();
 		RealMessageHandler.Reset();
 	}

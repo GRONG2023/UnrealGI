@@ -1,10 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/TargetPoint.h"
+#include "Async/TaskGraphInterfaces.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Components/ArrowComponent.h"
 #include "Components/BillboardComponent.h"
 #include "Engine/Texture2D.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(TargetPoint)
 
 ATargetPoint::ATargetPoint(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -28,7 +31,7 @@ ATargetPoint::ATargetPoint(const FObjectInitializer& ObjectInitializer)
 			FText NAME_TargetPoint;
 			FConstructorStatics()
 				: TargetIconSpawnObject(TEXT("/Engine/EditorMaterials/TargetIconSpawn"))
-				, TargetIconObject(TEXT("/Engine/EditorMaterials/TargetIcon"))
+				, TargetIconObject(TEXT("/Engine/EditorResources/S_TargetPoint"))
 				, ID_TargetPoint(TEXT("TargetPoint"))
 				, NAME_TargetPoint(NSLOCTEXT("SpriteCategory", "TargetPoint", "Target Points"))
 			{
@@ -39,7 +42,7 @@ ATargetPoint::ATargetPoint(const FObjectInitializer& ObjectInitializer)
 		if (SpriteComponent)
 		{
 			SpriteComponent->Sprite = ConstructorStatics.TargetIconObject.Get();
-			SpriteComponent->SetRelativeScale3D_Direct(FVector(0.35f, 0.35f, 0.35f));
+			SpriteComponent->SetRelativeScale3D_Direct(FVector(0.5f, 0.5f, 0.5f));
 			SpriteComponent->SpriteInfo.Category = ConstructorStatics.ID_TargetPoint;
 			SpriteComponent->SpriteInfo.DisplayName = ConstructorStatics.NAME_TargetPoint;
 			SpriteComponent->bIsScreenSizeScaled = true;
@@ -77,3 +80,4 @@ UBillboardComponent* ATargetPoint::GetSpriteComponent() const { return SpriteCom
 /** Returns ArrowComponent subobject **/
 UArrowComponent* ATargetPoint::GetArrowComponent() const { return ArrowComponent; }
 #endif
+

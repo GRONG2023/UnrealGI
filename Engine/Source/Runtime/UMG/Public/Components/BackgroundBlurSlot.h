@@ -15,53 +15,62 @@ class UBackgroundBlur;
 /**
  * The Slot for the UBackgroundBlurSlot, contains the widget displayed in a BackgroundBlur's single slot
  */
-UCLASS()
-class UMG_API UBackgroundBlurSlot : public UPanelSlot
+UCLASS(MinimalAPI)
+class UBackgroundBlurSlot : public UPanelSlot
 {
 	GENERATED_UCLASS_BODY()
 
 public:
 
-	UFUNCTION(BlueprintCallable, Category="Layout|Background Blur Slot")
-	void SetPadding(FMargin InPadding);
+	UMG_API FMargin GetPadding() const;
 
 	UFUNCTION(BlueprintCallable, Category="Layout|Background Blur Slot")
-	void SetHorizontalAlignment(EHorizontalAlignment InHorizontalAlignment);
+	UMG_API void SetPadding(FMargin InPadding);
+
+	UMG_API EHorizontalAlignment GetHorizontalAlignment() const;
 
 	UFUNCTION(BlueprintCallable, Category="Layout|Background Blur Slot")
-	void SetVerticalAlignment(EVerticalAlignment InVerticalAlignment);
+	UMG_API void SetHorizontalAlignment(EHorizontalAlignment InHorizontalAlignment);
+
+	UMG_API EVerticalAlignment GetVerticalAlignment() const;
+
+	UFUNCTION(BlueprintCallable, Category="Layout|Background Blur Slot")
+	UMG_API void SetVerticalAlignment(EVerticalAlignment InVerticalAlignment);
 
 protected:
+	UE_DEPRECATED(5.1, "Direct access to Padding is deprecated. Please use the getter or setter.")
 	/** The padding area between the slot and the content it contains. */
-	UPROPERTY(EditAnywhere, Category="Layout|Background Blur Slot")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Setter, BlueprintSetter="SetPadding", Category="Layout|Background Blur Slot")
 	FMargin Padding;
 
+	UE_DEPRECATED(5.1, "Direct access to HorizontalAlignment is deprecated. Please use the getter or setter.")
 	/** The alignment of the object horizontally. */
-	UPROPERTY(EditAnywhere, Category="Layout|Background Blur Slot")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Setter, BlueprintSetter="SetHorizontalAlignment", Category="Layout|Background Blur Slot")
 	TEnumAsByte<EHorizontalAlignment> HorizontalAlignment;
 
+	UE_DEPRECATED(5.1, "Direct access to VerticalAlignment is deprecated. Please use the getter or setter.")
 	/** The alignment of the object vertically. */
-	UPROPERTY(EditAnywhere, Category="Layout|Background Blur Slot")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Setter, BlueprintSetter="SetVerticalAlignment", Category="Layout|Background Blur Slot")
 	TEnumAsByte<EVerticalAlignment> VerticalAlignment;
 
 public:
 
-	// UPanelSlot interface
-	virtual void SynchronizeProperties() override;
-	// End of UPanelSlot interface
+	//~ Begin UPanelSlot interface
+	UMG_API virtual void SynchronizeProperties() override;
+	//~ End of UPanelSlot interface
 
 	/** Builds the underlying slot for the slate BackgroundBlur. */
-	void BuildSlot(TSharedRef<SBackgroundBlur> InBackgroundBlur);
+	UMG_API void BuildSlot(TSharedRef<SBackgroundBlur> InBackgroundBlur);
 
-	virtual void ReleaseSlateResources(bool bReleaseChildren) override;
+	UMG_API virtual void ReleaseSlateResources(bool bReleaseChildren) override;
 
 public:
 
 #if WITH_EDITOR
 
-	// UObject interface
-	virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
-	// End of UObject interface
+	//~ Begin UObject interface
+	UMG_API virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
+	//~ End of UObject interface
 
 #endif
 

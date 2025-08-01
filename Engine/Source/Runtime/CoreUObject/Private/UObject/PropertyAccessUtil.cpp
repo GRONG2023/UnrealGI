@@ -2,8 +2,102 @@
 
 #include "UObject/PropertyAccessUtil.h"
 #include "UObject/EnumProperty.h"
+#include "UObject/TextProperty.h"
 #include "UObject/Object.h"
 #include "UObject/Class.h"
+#include "Misc/DefaultValueHelper.h"
+
+namespace UE::PropertyAccessUtil::Private
+{
+
+bool IsRealNumberConversion(const FProperty* InSrcProp, const FProperty* InDestProp)
+{
+	check(InSrcProp);
+	check(InDestProp);
+
+	const bool bIsRealNumberConversion =
+		(InSrcProp->IsA<FDoubleProperty>() && InDestProp->IsA<FFloatProperty>()) ||
+		(InSrcProp->IsA<FFloatProperty>() && InDestProp->IsA<FDoubleProperty>());
+
+	return bIsRealNumberConversion;
+}
+
+void ConvertRealNumber(const FProperty* InSrcProp, const void* InSrcValue, const FProperty* InDestProp, void* InDestValue, int InCount)
+{
+	check(InSrcProp);
+	check(InSrcValue);
+	check(InDestProp);
+	check(InDestValue);
+	check(InCount > 0);
+	check(InCount <= InSrcProp->ArrayDim);
+
+	if (const FDoubleProperty* SrcDoubleProp = CastField<FDoubleProperty>(InSrcProp))
+	{
+		const FFloatProperty* DestFloatProp = CastFieldChecked<FFloatProperty>(InDestProp);
+		for (int32 Idx = 0; Idx < InCount; ++Idx)
+		{
+			const void* SrcElemValue = static_cast<const uint8*>(InSrcValue) + (InSrcProp->ElementSize * Idx);
+			void* DestElemValue = static_cast<uint8*>(InDestValue) + (InDestProp->ElementSize * Idx);
+
+			const double Value = SrcDoubleProp->GetFloatingPointPropertyValue(SrcElemValue);
+			DestFloatProp->SetFloatingPointPropertyValue(DestElemValue, Value);
+		}
+	}
+	else if (const FFloatProperty* SrcFloatProp = CastField<FFloatProperty>(InSrcProp))
+	{
+		const FDoubleProperty* DestDoubleProp = CastFieldChecked<FDoubleProperty>(InDestProp);
+		for (int32 Idx = 0; Idx < InCount; ++Idx)
+		{
+			const void* SrcElemValue = static_cast<const uint8*>(InSrcValue) + (InSrcProp->ElementSize * Idx);
+			void* DestElemValue = static_cast<uint8*>(InDestValue) + (InDestProp->ElementSize * Idx);
+
+			const double Value = SrcFloatProp->GetFloatingPointPropertyValue(SrcElemValue);
+			DestDoubleProp->SetFloatingPointPropertyValue(DestElemValue, Value);
+		}
+	}
+	else
+	{
+		checkf(false, TEXT("Invalid property type used with ConvertRealNumber!"));
+	}
+}
+
+bool AreRealNumbersIdentical(const FProperty* InSrcProp, const void* InSrcValue, const FProperty* InDestProp, const void* InDestValue)
+{
+	check(InSrcProp);
+	check(InSrcValue);
+	check(InDestProp);
+	check(InDestValue);
+
+	bool bIdentical = false;
+
+	if (const FDoubleProperty* SrcDoubleProp = CastField<FDoubleProperty>(InSrcProp))
+	{
+		const FFloatProperty* DestFloatProp = CastFieldChecked<FFloatProperty>(InDestProp);
+
+		const double SrcValue = SrcDoubleProp->GetFloatingPointPropertyValue(InSrcValue);
+		const double DestValue = DestFloatProp->GetFloatingPointPropertyValue(InDestValue);
+
+		bIdentical = (SrcValue == DestValue);
+		
+	}
+	else if (const FFloatProperty* SrcFloatProp = CastField<FFloatProperty>(InSrcProp))
+	{
+		const FDoubleProperty* DestDoubleProp = CastFieldChecked<FDoubleProperty>(InDestProp);
+		
+		const double SrcValue = SrcFloatProp->GetFloatingPointPropertyValue(InSrcValue);
+		const double DestValue = DestDoubleProp->GetFloatingPointPropertyValue(InDestValue);
+
+		bIdentical = (SrcValue == DestValue);
+	}
+	else
+	{
+		checkf(false, TEXT("Invalid property type used with AreRealNumbersIdentical!"));
+	}
+
+	return bIdentical;
+}
+
+}
 
 namespace PropertyAccessUtil
 {
@@ -29,7 +123,7 @@ int64 GetPropertyEnumValue(const FProperty* InProp, const void* InPropValue)
 	}
 	if (const FEnumProperty* EnumProp = CastField<FEnumProperty>(InProp))
 	{
-		EnumProp->GetUnderlyingProperty()->GetSignedIntPropertyValue(InPropValue);
+		return EnumProp->GetUnderlyingProperty()->GetSignedIntPropertyValue(InPropValue);
 	}
 	return INDEX_NONE;
 }
@@ -51,6 +145,8 @@ bool SetPropertyEnumValue(const FProperty* InProp, void* InPropValue, const int6
 
 bool ArePropertiesCompatible(const FProperty* InSrcProp, const FProperty* InDestProp)
 {
+	using namespace UE::PropertyAccessUtil::Private;
+
 	// Enum properties can either be a ByteProperty with an enum set, or an EnumProperty
 	// We allow coercion between these two types if they're using the same enum type
 	if (const UEnum* DestEnumType = GetPropertyEnumType(InDestProp))
@@ -70,27 +166,27 @@ bool ArePropertiesCompatible(const FProperty* InSrcProp, const FProperty* InDest
 		}
 	}
 
-	// Compare the classes as these must be an *exact* match as the access is low-level and without property coercion
-	if (InSrcProp->GetClass() != InDestProp->GetClass())
+	if (IsRealNumberConversion(InSrcProp, InDestProp))
 	{
-		return false;
+		return true;
 	}
 
 	// Containers also need to check their inner types
 	if (const FArrayProperty* SrcArrayProp = CastField<FArrayProperty>(InSrcProp))
 	{
-		const FArrayProperty* DestArrayProp = CastFieldChecked<FArrayProperty>(InDestProp);
-		return ArePropertiesCompatible(SrcArrayProp->Inner, DestArrayProp->Inner);
+		const FArrayProperty* DestArrayProp = CastField<FArrayProperty>(InDestProp);
+		return DestArrayProp && ArePropertiesCompatible(SrcArrayProp->Inner, DestArrayProp->Inner);
 	}
 	if (const FSetProperty* SrcSetProp = CastField<FSetProperty>(InSrcProp))
 	{
-		const FSetProperty* DestSetProp = CastFieldChecked<FSetProperty>(InDestProp);
-		return ArePropertiesCompatible(SrcSetProp->ElementProp, DestSetProp->ElementProp);
+		const FSetProperty* DestSetProp = CastField<FSetProperty>(InDestProp);
+		return DestSetProp && ArePropertiesCompatible(SrcSetProp->ElementProp, DestSetProp->ElementProp);
 	}
 	if (const FMapProperty* SrcMapProp = CastField<FMapProperty>(InSrcProp))
 	{
-		const FMapProperty* DestMapProp = CastFieldChecked<FMapProperty>(InDestProp);
-		return ArePropertiesCompatible(SrcMapProp->KeyProp, DestMapProp->KeyProp)
+		const FMapProperty* DestMapProp = CastField<FMapProperty>(InDestProp);
+		return DestMapProp
+			&& ArePropertiesCompatible(SrcMapProp->KeyProp, DestMapProp->KeyProp)
 			&& ArePropertiesCompatible(SrcMapProp->ValueProp, DestMapProp->ValueProp);
 	}
 
@@ -99,6 +195,8 @@ bool ArePropertiesCompatible(const FProperty* InSrcProp, const FProperty* InDest
 
 bool IsSinglePropertyIdentical(const FProperty* InSrcProp, const void* InSrcValue, const FProperty* InDestProp, const void* InDestValue)
 {
+	using namespace UE::PropertyAccessUtil::Private;
+
 	if (!ArePropertiesCompatible(InSrcProp, InDestProp))
 	{
 		return false;
@@ -113,7 +211,12 @@ bool IsSinglePropertyIdentical(const FProperty* InSrcProp, const void* InSrcValu
 		const bool bDestBoolValue = DestBoolProp->GetPropertyValue(InDestValue);
 		return bSrcBoolValue == bDestBoolValue;
 	}
-	
+
+	if (IsRealNumberConversion(InSrcProp, InDestProp))
+	{
+		return AreRealNumbersIdentical(InSrcProp, InSrcValue, InDestProp, InDestValue);
+	}
+
 	return InSrcProp->Identical(InSrcValue, InDestValue);
 }
 
@@ -131,6 +234,8 @@ bool IsCompletePropertyIdentical(const FProperty* InSrcProp, const void* InSrcVa
 
 bool CopySinglePropertyValue(const FProperty* InSrcProp, const void* InSrcValue, const FProperty* InDestProp, void* InDestValue)
 {
+	using namespace UE::PropertyAccessUtil::Private;
+
 	if (!ArePropertiesCompatible(InSrcProp, InDestProp))
 	{
 		return false;
@@ -153,15 +258,61 @@ bool CopySinglePropertyValue(const FProperty* InSrcProp, const void* InSrcValue,
 		DestBoolProp->SetPropertyValue(InDestValue, bBoolValue);
 		return true;
 	}
-	
+
+	if (IsRealNumberConversion(InSrcProp, InDestProp))
+	{
+		ConvertRealNumber(InSrcProp, InSrcValue, InDestProp, InDestValue, 1);
+		return true;
+	}
+
 	InSrcProp->CopySingleValue(InDestValue, InSrcValue);
 	return true;
 }
 
 bool CopyCompletePropertyValue(const FProperty* InSrcProp, const void* InSrcValue, const FProperty* InDestProp, void* InDestValue)
 {
+	using namespace UE::PropertyAccessUtil::Private;
+
 	if (!ArePropertiesCompatible(InSrcProp, InDestProp) || InSrcProp->ArrayDim != InDestProp->ArrayDim)
 	{
+		if (InDestProp->ArrayDim > 1)
+		{
+			// handle assignment of a dynamic array to a fixed array:
+			if (const FArrayProperty* SrcArray = CastField<FArrayProperty>(InSrcProp))
+			{
+				if (ArePropertiesCompatible(SrcArray->Inner, InDestProp))
+				{
+					FScriptArrayHelper SrcArrayHelper(SrcArray, InSrcValue);
+					if (SrcArrayHelper.Num() == InDestProp->ArrayDim)
+					{
+						for (int32 I = 0; I < InDestProp->ArrayDim; ++I)
+						{
+							void* DestValue = static_cast<uint8*>(InDestValue) + InDestProp->ElementSize * I;
+							CopySinglePropertyValue(SrcArray->Inner, SrcArrayHelper.GetElementPtr(I), InDestProp, DestValue);
+						}
+						return true;
+					}
+				}
+			}
+		}
+		else if (InSrcProp->ArrayDim > 1)
+		{
+			// handle assignment of a fixed array to a dynamic array:
+			if (const FArrayProperty* DstArray = CastField<FArrayProperty>(InDestProp))
+			{
+				if (ArePropertiesCompatible(DstArray->Inner, InSrcProp))
+				{
+					FScriptArrayHelper DstArrayHelper(DstArray, InDestValue);
+					DstArrayHelper.Resize(InSrcProp->ArrayDim);
+					for (int32 I = 0; I < InSrcProp->ArrayDim; ++I)
+					{
+						const void* SrcValue = static_cast<const uint8*>(InSrcValue) + InSrcProp->ElementSize * I;
+						CopySinglePropertyValue(InSrcProp, SrcValue, DstArray->Inner, DstArrayHelper.GetElementPtr(I));
+					}
+					return true;
+				}
+			}
+		}
 		return false;
 	}
 
@@ -196,6 +347,12 @@ bool CopyCompletePropertyValue(const FProperty* InSrcProp, const void* InSrcValu
 		return true;
 	}
 	
+	if (IsRealNumberConversion(InSrcProp, InDestProp))
+	{
+		ConvertRealNumber(InSrcProp, InSrcValue, InDestProp, InDestValue, InSrcProp->ArrayDim);
+		return true;
+	}
+
 	InSrcProp->CopyCompleteValue(InDestValue, InSrcValue);
 	return true;
 }
@@ -413,7 +570,10 @@ void EmitPostChangeNotify(const FPropertyAccessChangeNotify* InChangeNotify, con
 
 TUniquePtr<FPropertyAccessChangeNotify> BuildBasicChangeNotify(const FProperty* InProp, const UObject* InObject, const EPropertyAccessChangeNotifyMode InNotifyMode)
 {
-	check(InObject->IsA(InProp->GetOwnerClass()));
+	const UScriptStruct* SparseStruct = InObject->GetClass()->GetSparseClassDataStruct();
+	const bool bIsValidSparseProp = SparseStruct &&
+		SparseStruct->IsChildOf(InProp->GetOwnerStruct());
+	check(InObject->IsA(InProp->GetOwnerClass()) || bIsValidSparseProp);
 #if WITH_EDITOR
 	if (InNotifyMode != EPropertyAccessChangeNotifyMode::Never)
 	{
@@ -477,6 +637,53 @@ FProperty* FindPropertyByName(const FName InPropName, const UStruct* InStruct)
 	}
 
 	return Prop;
+}
+
+bool ImportDefaultPropertyValue(const FProperty* InProp, void* InPropValue, const FString& InDefaultValue, FOutputDevice* ErrorText)
+{
+	if (InDefaultValue.IsEmpty() && !(InProp->IsA<FStrProperty>() || InProp->IsA<FTextProperty>()))
+	{
+		return false;
+	}
+
+	bool bImportedText = false;
+
+	// Certain struct types export using a non-standard default value, so we have to import them manually rather than use ImportText
+	if (const FStructProperty* StructProp = CastField<FStructProperty>(InProp))
+	{
+		if (StructProp->Struct == TBaseStructure<FVector>::Get())
+		{
+			FVector* Vector = (FVector*)InPropValue;
+			bImportedText = FDefaultValueHelper::ParseVector(InDefaultValue, *Vector);
+		}
+		else if (StructProp->Struct == TBaseStructure<FVector2D>::Get())
+		{
+			FVector2D* Vector2D = (FVector2D*)InPropValue;
+			bImportedText = FDefaultValueHelper::ParseVector2D(InDefaultValue, *Vector2D);
+		}
+		else if (StructProp->Struct == TBaseStructure<FRotator>::Get())
+		{
+			FRotator* Rotator = (FRotator*)InPropValue;
+			bImportedText = FDefaultValueHelper::ParseRotator(InDefaultValue, *Rotator);
+		}
+		else if (StructProp->Struct == TBaseStructure<FColor>::Get())
+		{
+			FColor* Color = (FColor*)InPropValue;
+			bImportedText = FDefaultValueHelper::ParseColor(InDefaultValue, *Color);
+		}
+		else if (StructProp->Struct == TBaseStructure<FLinearColor>::Get())
+		{
+			FLinearColor* LinearColor = (FLinearColor*)InPropValue;
+			bImportedText = FDefaultValueHelper::ParseLinearColor(InDefaultValue, *LinearColor);
+		}
+	}
+
+	if (!bImportedText)
+	{
+		bImportedText = InProp->ImportText_Direct(*InDefaultValue, InPropValue, nullptr, PPF_None, ErrorText) != nullptr;
+	}
+
+	return bImportedText;
 }
 
 }

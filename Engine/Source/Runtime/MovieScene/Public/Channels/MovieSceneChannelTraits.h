@@ -72,6 +72,21 @@ namespace MovieScene
 	}
 
 	/**
+	 * Called to evaluate a channel. Overload with specific channel types for custom behaviour.
+	 *
+	 * @param InSection	  The section that contains the channel
+	 * @param InChannel   The channel to evaluate
+	 * @param InTime      The time to evaluate at
+	 * @param OutValue    Value to receive the result
+	 * @return true if the channel was evaluated successfully, false otherwise
+	 */
+	template<typename ChannelType, typename ValueType>
+	bool EvaluateChannel(const UMovieSceneSection* InSection, const ChannelType* InChannel, FFrameTime InTime, ValueType& OutValue)
+	{
+		return EvaluateChannel(InChannel, InTime, OutValue);
+	}
+
+	/**
 	 * Called to assign a specific value in a channel.
 	 *
 	 * @param InChannel     The channel the value is contained within
@@ -109,6 +124,12 @@ namespace MovieScene
 
 		// The key handle doesn't belong to this channel if it can't be found in the channel data, so report failure.
 		return false;
+	}
+
+	template<typename ChannelType>
+	EMovieSceneKeyInterpolation GetInterpolationMode(ChannelType* InChannel, const FFrameNumber& InTime, EMovieSceneKeyInterpolation DefaultInterpolationMode)
+	{
+		return DefaultInterpolationMode;
 	}
 
 	/**

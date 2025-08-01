@@ -7,10 +7,13 @@
 #include "Widgets/SWidget.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "SLevelViewport.h"
-#include "Editor/UnrealEd/Public/SViewportToolBar.h"
+#include "SViewportToolBar.h"
 
 class ACameraActor;
 class FExtender;
+class SExtensionPanel;
+class SActionableMessageViewportWidget;
+class STransformViewportToolBar;
 class FMenuBuilder;
 class UToolMenu;
 struct FToolMenuSection;
@@ -31,7 +34,7 @@ public:
 	virtual bool IsViewModeSupported(EViewModeIndex ViewModeIndex) const;
 
 	/** @return Level editor viewport client. */ 
-	FLevelEditorViewportClient* GetLevelViewportClient();
+	FLevelEditorViewportClient* GetLevelViewportClient() const;
 
 	/** Fills view menu */
 	void FillViewMenu(UToolMenu* InMenu);
@@ -44,10 +47,10 @@ private:
 	 */
 	FText GetCameraMenuLabel() const;
 
-	/**
-	 * Returns the label icon for the "Camera" tool bar menu, which changes depending on the viewport type
+	/* Returns the label icon for the Camera tool bar menu, which changes depending on viewport type 
 	 *
 	 * @return	Label icon to use for this menu label
+	 *
 	 */
 	const FSlateBrush* GetCameraMenuLabelIcon() const;
 
@@ -213,20 +216,6 @@ private:
 	void OnFOVValueChanged( float NewValue );
 
 	/**
-	* @return The widget containing the screen percentage.
-	*/
-	TSharedRef<SWidget> GenerateScreenPercentageMenu() const;
-
-	/** Called by the ScreenPercentage slider */
-	int32 OnGetScreenPercentageValue() const;
-
-	/** Called by the ScreenPercentage slider */
-	bool OnScreenPercentageIsEnabled() const;
-
-	/** Called when the ScreenPercentage slider is adjusted in the viewport */
-	void OnScreenPercentageValueChanged(int32 NewValue);
-
-	/**
 	 * @return The widget containing the far view plane slider.
 	 */
 	TSharedRef<SWidget> GenerateFarViewPlaneMenu() const;
@@ -247,6 +236,11 @@ private:
 	EVisibility GetScalabilityWarningVisibility() const;
 	TSharedRef<SWidget> GetScalabilityWarningMenuContent() const;
 
+	double OnGetHLODInEditorMinDrawDistanceValue() const;
+	void OnHLODInEditorMinDrawDistanceValueChanged(double NewValue) const;
+	double OnGetHLODInEditorMaxDrawDistanceValue() const;
+	void OnHLODInEditorMaxDrawDistanceValueChanged(double NewValue) const;
+
 private:
 	/**
 	 * Generates the toolbar show layers menu content 
@@ -263,6 +257,14 @@ private:
 	 */
 	static void FillShowFoliageTypesMenu(UToolMenu* Menu, TWeakPtr<class SLevelViewport> Viewport);
 
+	/**
+	 * Generates 'Show HLODs' menu content for a viewport
+	 *
+	 * @param Menu		The tool menu
+	 * @param Viewport	Target vieport
+	 */
+	void FillShowHLODsMenu(UToolMenu* Menu) const;
+
 	/** Generates the layout sub-menu content */
 	void GenerateViewportConfigsMenu(UToolMenu* Menu) const;
 
@@ -276,8 +278,20 @@ private:
 	void OnDisableRealtimeOverride();
 	bool IsRealtimeOverrideToggleVisible() const;
 	FText GetRealtimeOverrideTooltip() const;
+
+	float GetTransformToolbarWidth() const;
+
 private:
 	/** The viewport that we are in */
 	TWeakPtr<class SLevelViewport> Viewport;
+
+	/** STransformViewportToolBar menu */
+	TSharedPtr<STransformViewportToolBar> TransformToolbar;
+
+	/** Viewport widget for warning messages */
+	TSharedPtr<SActionableMessageViewportWidget> ActionableMessageViewportWidget;
+
+	/** The previous max STransformViewportToolBar width to allow deterministic size calculations */
+	mutable float TransformToolbar_CachedMaxWidth = 0.0f;
 };
 

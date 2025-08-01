@@ -8,17 +8,18 @@
 #include "PlayerStart.generated.h"
 
 /** 
- *	This class indicates a location where a player can spawn when the game begins
+ *	This class indicates a location where a player can spawn when the game begins.
  *	
+ * 
  *	@see https://docs.unrealengine.com/latest/INT/Engine/Actors/PlayerStart/
  */
-UCLASS(Blueprintable, ClassGroup=Common, hidecategories=Collision)
-class ENGINE_API APlayerStart : public ANavigationObjectBase
+UCLASS(Blueprintable, ClassGroup=Common, hidecategories=Collision, MinimalAPI)
+class APlayerStart : public ANavigationObjectBase
 {
 	GENERATED_BODY()
 public:
 
-	APlayerStart(const FObjectInitializer& ObjectInitializer);
+	ENGINE_API APlayerStart(const FObjectInitializer& ObjectInitializer);
 
 	/*~ To take more control over PlayerStart selection, you can override the virtual AGameModeBase::FindPlayerStart and AGameModeBase::ChoosePlayerStart functions. */
 
@@ -30,12 +31,12 @@ public:
 #if WITH_EDITORONLY_DATA
 private:
 	UPROPERTY()
-	class UArrowComponent* ArrowComponent;
+	TObjectPtr<class UArrowComponent> ArrowComponent;
 public:
 #endif
 
 #if WITH_EDITORONLY_DATA
 	/** Returns ArrowComponent subobject **/
-	class UArrowComponent* GetArrowComponent() const;
+	ENGINE_API class UArrowComponent* GetArrowComponent() const;
 #endif
 };

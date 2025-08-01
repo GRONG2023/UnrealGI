@@ -4,6 +4,8 @@
 #include "UObject/PropertyPortFlags.h"
 #include "MovieSceneFwd.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneFrameMigration)
+
 bool FMovieSceneFrameRange::Serialize(FArchive& Ar)
 {
 	Ar << Value;
@@ -34,7 +36,7 @@ TRange<FFrameNumber> FMovieSceneFrameRange::FromFloatRange(const TRange<float>& 
 bool FMovieSceneFrameRange::SerializeFromMismatchedTag(FPropertyTag const& Tag, FStructuredArchive::FSlot Slot)
 {
 	static const FName NAME_FloatRange("FloatRange");
-	if (Tag.Type == NAME_StructProperty && Tag.StructName == NAME_FloatRange)
+	if (Tag.GetType().IsStruct(NAME_FloatRange))
 	{
 		UScriptStruct* FloatStruct = TBaseStructure<FFloatRange>::Get();
 
@@ -55,11 +57,6 @@ bool FMovieSceneFrameRange::SerializeFromMismatchedTag(FPropertyTag const& Tag, 
 
 bool FMovieSceneFrameRange::ExportTextItem(FString& ValueStr, FMovieSceneFrameRange const& DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope) const
 {
-	if (0 != (PortFlags & EPropertyPortFlags::PPF_ExportCpp))
-	{
-		return false;
-	}
-
 	FString String;
 	if (Value.GetLowerBound().IsOpen())
 	{

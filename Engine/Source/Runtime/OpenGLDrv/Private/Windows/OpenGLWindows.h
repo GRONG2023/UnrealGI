@@ -10,7 +10,6 @@
 	#error "OpenGLWindows.h included for a platform other than Windows."
 #endif
 
-#include "Windows/WindowsHWrapper.h"
 #include "Windows/AllowWindowsPlatformTypes.h"
 	#include <GL/glcorearb.h>
 	#include <GL/glext.h>
@@ -294,7 +293,8 @@
 	EnumMacro(PFNGLFENCESYNCPROC, glFenceSync)\
 	EnumMacro(PFNGLGETSYNCIVPROC, glGetSynciv)\
 	EnumMacro(PFNGLCLIENTWAITSYNCPROC, glClientWaitSync)\
-	EnumMacro(PFNGLBINDBUFFERRANGEPROC, glBindBufferRange)
+	EnumMacro(PFNGLBINDBUFFERRANGEPROC, glBindBufferRange) \
+	EnumMacro(PFNGLGETPROGRAMRESOURCEINDEXPROC, glGetProgramResourceIndex) \
 
 #define ENUM_GL_ENTRYPOINTS_OPTIONAL(EnumMacro) \
 	EnumMacro(PFNGLCLIPCONTROLPROC,glClipControl) \
@@ -366,7 +366,6 @@
 	EnumMacro(PFNGLDISABLEIPROC,glDisableiEXT) \
 	EnumMacro(PFNGLENABLEIPROC,glEnableiEXT) \
 	EnumMacro(PFNGLFRAMEBUFFERTEXTUREPROC,glFramebufferTextureEXT) \
-	EnumMacro(PFNGLCOPYIMAGESUBDATAPROC, glCopyImageSubDataEXT) \
 	EnumMacro(PFNGLTEXBUFFERPROC,glTexBufferEXT) \
 	EnumMacro(PFNGLTEXBUFFERRANGEPROC,glTexBufferRangeEXT) \
 	EnumMacro(PFNGLDEPTHRANGEFPROC,glDepthRangef) \
@@ -445,7 +444,7 @@ struct FWindowsOpenGL : public FOpenGL4
 		}
 	}
 
-	static FORCEINLINE bool TexStorage2D(GLenum Target, GLint Levels, GLint InternalFormat, GLsizei Width, GLsizei Height, GLenum Format, GLenum Type, uint32 Flags)
+	static FORCEINLINE bool TexStorage2D(GLenum Target, GLint Levels, GLint InternalFormat, GLsizei Width, GLsizei Height, GLenum Format, GLenum Type, ETextureCreateFlags Flags)
 	{
 		if( glTexStorage2D != NULL )
 		{
@@ -633,7 +632,7 @@ struct FWindowsOpenGL : public FOpenGLESDeferred
 		}
 	}
 
-	static FORCEINLINE bool TexStorage2D(GLenum Target, GLint Levels, GLint InternalFormat, GLsizei Width, GLsizei Height, GLenum Format, GLenum Type, uint32 Flags)
+	static FORCEINLINE bool TexStorage2D(GLenum Target, GLint Levels, GLint InternalFormat, GLsizei Width, GLsizei Height, GLenum Format, GLenum Type, ETextureCreateFlags Flags)
 	{
 		if( glTexStorage2D != NULL )
 		{
@@ -676,7 +675,7 @@ struct FWindowsOpenGL : public FOpenGLESDeferred
 
 	static FORCEINLINE void CopyImageSubData(GLuint SrcName, GLenum SrcTarget, GLint SrcLevel, GLint SrcX, GLint SrcY, GLint SrcZ, GLuint DstName, GLenum DstTarget, GLint DstLevel, GLint DstX, GLint DstY, GLint DstZ, GLsizei Width, GLsizei Height, GLsizei Depth)
 	{
-		glCopyImageSubDataEXT( SrcName, SrcTarget, SrcLevel, SrcX, SrcY, SrcZ, DstName, DstTarget, DstLevel, DstX, DstY, DstZ, Width, Height, Depth);
+		glCopyImageSubData( SrcName, SrcTarget, SrcLevel, SrcX, SrcY, SrcZ, DstName, DstTarget, DstLevel, DstX, DstY, DstZ, Width, Height, Depth);
 	}
 };
 

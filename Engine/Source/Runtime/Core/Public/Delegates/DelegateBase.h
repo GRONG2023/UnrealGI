@@ -6,10 +6,10 @@
 #include "Containers/ContainerAllocationPolicies.h"
 #include "Math/UnrealMathUtility.h"
 #include "UObject/NameTypes.h"
+#include "Delegates/DelegateAccessHandler.h"
+#include "Delegates/DelegateInstancesImplFwd.h"
 #include "Delegates/DelegateSettings.h"
 #include "Delegates/IDelegateInstance.h"
-
-struct FWeakObjectPtr;
 
 #if !defined(_WIN32) || defined(_WIN64) || (defined(ALLOW_DELEGATE_INLINE_ALLOCATORS_ON_WIN32) && ALLOW_DELEGATE_INLINE_ALLOCATORS_ON_WIN32)
 	typedef TAlignedBytes<16, 16> FAlignedInlineDelegateType;
@@ -27,116 +27,15 @@ struct FWeakObjectPtr;
 	typedef FHeapAllocator FDelegateAllocatorType;
 #endif
 
-struct FWeakObjectPtr;
-
 template <typename UserPolicy>
 class TMulticastDelegateBase;
 
+template <typename UserPolicy>
+class TDelegateBase;
+
 ALIAS_TEMPLATE_TYPE_LAYOUT(template<typename ElementType>, FDelegateAllocatorType::ForElementType<ElementType>, void*);
 
-/**
- * Base class for unicast delegates.
- */
-class FDelegateBase
-{
-	template <typename>
-	friend class TMulticastDelegateBase;
-
-	template <typename>
-	friend class TDelegateBase;
-
-protected:
-	/**
-	 * Creates and initializes a new instance.
-	 *
-	 * @param InDelegateInstance The delegate instance to assign.
-	 */
-	explicit FDelegateBase()
-		: DelegateSize(0)
-	{
-	}
-
-	~FDelegateBase()
-	{
-		Unbind();
-	}
-
-	/**
-	 * Move constructor.
-	 */
-	FDelegateBase(FDelegateBase&& Other)
-	{
-		DelegateAllocator.MoveToEmpty(Other.DelegateAllocator);
-		DelegateSize = Other.DelegateSize;
-		Other.DelegateSize = 0;
-	}
-
-	/**
-	 * Move assignment.
-	 */
-	FDelegateBase& operator=(FDelegateBase&& Other)
-	{
-		Unbind();
-		DelegateAllocator.MoveToEmpty(Other.DelegateAllocator);
-		DelegateSize = Other.DelegateSize;
-		Other.DelegateSize = 0;
-		return *this;
-	}
-
-	/**
-	 * Unbinds this delegate
-	 */
-	FORCEINLINE void Unbind()
-	{
-		if (IDelegateInstance* Ptr = GetDelegateInstanceProtected())
-		{
-			Ptr->~IDelegateInstance();
-			DelegateAllocator.ResizeAllocation(0, 0, sizeof(FAlignedInlineDelegateType));
-			DelegateSize = 0;
-		}
-	}
-
-	/**
-	 * Gets the delegate instance.  Not intended for use by user code.
-	 *
-	 * @return The delegate instance.
-	 * @see SetDelegateInstance
-	 */
-	FORCEINLINE IDelegateInstance* GetDelegateInstanceProtected() const
-	{
-		return DelegateSize ? (IDelegateInstance*)DelegateAllocator.GetAllocation() : nullptr;
-	}
-
-private:
-	friend void* operator new(size_t Size, FDelegateBase& Base);
-
-	void* Allocate(int32 Size)
-	{
-		if (IDelegateInstance* CurrentInstance = GetDelegateInstanceProtected())
-		{
-			CurrentInstance->~IDelegateInstance();
-		}
-
-		int32 NewDelegateSize = FMath::DivideAndRoundUp(Size, (int32)sizeof(FAlignedInlineDelegateType));
-		if (DelegateSize != NewDelegateSize)
-		{
-			DelegateAllocator.ResizeAllocation(0, NewDelegateSize, sizeof(FAlignedInlineDelegateType));
-			DelegateSize = NewDelegateSize;
-		}
-
-		return DelegateAllocator.GetAllocation();
-	}
-
-private:
-	FDelegateAllocatorType::ForElementType<FAlignedInlineDelegateType> DelegateAllocator;
-	int32 DelegateSize;
-};
-
-inline void* operator new(size_t Size, FDelegateBase& Base)
-{
-	return Base.Allocate((int32)Size);
-}
-
+// not thread-safe version, with automatic race detection in dev builds
 struct FDefaultDelegateUserPolicy
 {
 	// To extend delegates, you should implement a policy struct like this and pass it as the second template
@@ -149,7 +48,7 @@ struct FDefaultDelegateUserPolicy
 	//   - This binding is not available through the public API of the delegate, but is accessible to FDelegateExtras.
 	//
 	// FDelegateExtras:
-	//   - Must publicly inherit FDelegateBase.
+	//   - Must publicly inherit TDelegateBase<FThreadSafetyMode>.
 	//   - Should contain any extra data and functions injected into a delegate (the object which holds an
 	//     FDelegateInstance-derived object, above).
 	//   - Public data members and member functions are accessible directly through the TDelegate object.
@@ -162,20 +61,127 @@ struct FDefaultDelegateUserPolicy
 	//     holds an array of FDelegateExtras-derived objects which is the invocation list).
 	//   - Public data members and member functions are accessible directly through the TMulticastDelegate object.
 
-	using FDelegateInstanceExtras  = IDelegateInstance;
-	using FDelegateExtras          = FDelegateBase;
+	using FDelegateInstanceExtras = IDelegateInstance;
+	using FThreadSafetyMode =
+#if UE_DETECT_DELEGATES_RACE_CONDITIONS
+		FNotThreadSafeDelegateMode;
+#else
+		FNotThreadSafeNotCheckedDelegateMode;
+#endif
+	using FDelegateExtras = TDelegateBase<FThreadSafetyMode>;
 	using FMulticastDelegateExtras = TMulticastDelegateBase<FDefaultDelegateUserPolicy>;
 };
 
-template <typename UserPolicy>
-class TDelegateBase : public UserPolicy::FDelegateExtras
+// thread-safe version
+struct FDefaultTSDelegateUserPolicy
 {
+	// see `FDefaultDelegateUserPolicy` for documentation
+	using FDelegateInstanceExtras = IDelegateInstance;
+	using FThreadSafetyMode = FThreadSafeDelegateMode;
+	using FDelegateExtras = TDelegateBase<FThreadSafetyMode>;
+	using FMulticastDelegateExtras = TMulticastDelegateBase<FDefaultTSDelegateUserPolicy>;
+};
+
+// not thread-safe version, no race detection. used primarily for deprecated unsafe delegates that must be kept running for backward compatibility
+struct FNotThreadSafeNotCheckedDelegateUserPolicy
+{
+	using FDelegateInstanceExtras = IDelegateInstance;
+	using FThreadSafetyMode = FNotThreadSafeNotCheckedDelegateMode;
+	using FDelegateExtras = TDelegateBase<FThreadSafetyMode>;
+	using FMulticastDelegateExtras = TMulticastDelegateBase<FNotThreadSafeNotCheckedDelegateUserPolicy>;
+};
+
+/**
+ * Base class for unicast delegates.
+ */
+template<typename ThreadSafetyMode>
+class TDelegateBase : public TDelegateAccessHandlerBase<ThreadSafetyMode>
+{
+private:
+	using Super = TDelegateAccessHandlerBase<ThreadSafetyMode>;
+
 	template <typename>
 	friend class TMulticastDelegateBase;
 
-	using Super = typename UserPolicy::FDelegateExtras;
+	template <typename>
+	friend class TDelegateBase;
+
+	template <class, typename, typename, typename...>
+	friend class TBaseUFunctionDelegateInstance;
+
+	template <bool, class, ESPMode, typename, typename, typename...>
+	friend class TBaseSPMethodDelegateInstance;
+
+	template <typename, ESPMode, typename, typename, typename, typename...>
+	friend class TBaseSPLambdaDelegateInstance;
+
+	template <bool, class, typename, typename, typename...>
+	friend class TBaseRawMethodDelegateInstance;
+
+	template <bool, class, typename, typename, typename...>
+	friend class TBaseUObjectMethodDelegateInstance;
+
+	template <typename, typename, typename...>
+	friend class TBaseStaticDelegateInstance;
+
+	template <typename, typename, typename, typename...>
+	friend class TBaseFunctorDelegateInstance;
+
+	template <typename, typename, typename, typename, typename...>
+	friend class TWeakBaseFunctorDelegateInstance;
+
+protected:
+	using typename Super::FReadAccessScope;
+	using Super::GetReadAccessScope;
+	using typename Super::FWriteAccessScope;
+	using Super::GetWriteAccessScope;
+
+	explicit TDelegateBase() = default;
 
 public:
+	~TDelegateBase()
+	{
+		Unbind();
+	}
+
+	TDelegateBase(TDelegateBase&& Other)
+	{
+		MoveConstruct(MoveTemp(Other));
+	}
+
+	TDelegateBase& operator=(TDelegateBase&& Other)
+	{
+		MoveAssign(MoveTemp(Other));
+		return *this;
+	}
+
+	// support for moving from delegates with different thread-safety mode
+	template<typename OtherThreadSafetyMode>
+	explicit TDelegateBase(TDelegateBase<OtherThreadSafetyMode>&& Other)
+	{
+		MoveConstruct(MoveTemp(Other));
+	}
+
+	/**
+	 * Unbinds this delegate
+	 */
+	FORCEINLINE void Unbind()
+	{
+		FWriteAccessScope WriteScope = GetWriteAccessScope();
+
+		UnbindUnchecked();
+	}
+
+	/**
+	 * Returns the amount of memory allocated by this delegate, not including sizeof(*this).
+	 */
+	SIZE_T GetAllocatedSize() const
+	{
+		FReadAccessScope ReadScope = GetReadAccessScope();
+
+		return DelegateAllocator.GetAllocatedSize(DelegateSize, sizeof(FAlignedInlineDelegateType));
+	}
+
 #if USE_DELEGATE_TRYGETBOUNDFUNCTIONNAME
 
 	/**
@@ -188,12 +194,10 @@ public:
 	 */
 	FName TryGetBoundFunctionName() const
 	{
-		if (IDelegateInstance* Ptr = Super::GetDelegateInstanceProtected())
-		{
-			return Ptr->TryGetBoundFunctionName();
-		}
+		FReadAccessScope ReadScope = GetReadAccessScope();
 
-		return NAME_None;
+		const IDelegateInstance* DelegateInstance = GetDelegateInstanceProtected();
+		return DelegateInstance ? DelegateInstance->TryGetBoundFunctionName() : NAME_None;
 	}
 
 #endif
@@ -205,12 +209,10 @@ public:
 	 */
 	FORCEINLINE class UObject* GetUObject( ) const
 	{
-		if (IDelegateInstance* Ptr = Super::GetDelegateInstanceProtected())
-		{
-			return Ptr->GetUObject();
-		}
+		FReadAccessScope ReadScope = GetReadAccessScope();
 
-		return nullptr;
+		const IDelegateInstance* DelegateInstance = GetDelegateInstanceProtected();
+		return DelegateInstance ? DelegateInstance->GetUObject() : nullptr;
 	}
 
 	/**
@@ -220,9 +222,10 @@ public:
 	 */
 	FORCEINLINE bool IsBound( ) const
 	{
-		IDelegateInstance* Ptr = Super::GetDelegateInstanceProtected();
+		FReadAccessScope ReadScope = GetReadAccessScope();
 
-		return Ptr && Ptr->IsSafeToExecute();
+		const IDelegateInstance* DelegateInstance = GetDelegateInstanceProtected();
+		return DelegateInstance && DelegateInstance->IsSafeToExecute();
 	}
 
 	/** 
@@ -232,10 +235,10 @@ public:
 	 */
 	FORCEINLINE const void* GetObjectForTimerManager() const
 	{
-		IDelegateInstance* Ptr = Super::GetDelegateInstanceProtected();
+		FReadAccessScope ReadScope = GetReadAccessScope();
 
-		const void* Result = Ptr ? Ptr->GetObjectForTimerManager() : nullptr;
-		return Result;
+		const IDelegateInstance* DelegateInstance = GetDelegateInstanceProtected();
+		return DelegateInstance ? DelegateInstance->GetObjectForTimerManager() : nullptr;
 	}
 
 	/**
@@ -248,12 +251,10 @@ public:
 	 */
 	uint64 GetBoundProgramCounterForTimerManager() const
 	{
-		if (IDelegateInstance* Ptr = Super::GetDelegateInstanceProtected())
-		{
-			return Ptr->GetBoundProgramCounterForTimerManager();
-		}
+		FReadAccessScope ReadScope = GetReadAccessScope();
 
-		return 0;
+		const IDelegateInstance* DelegateInstance = GetDelegateInstanceProtected();
+		return DelegateInstance ? DelegateInstance->GetBoundProgramCounterForTimerManager() : 0;
 	}
 
 	/** 
@@ -268,9 +269,24 @@ public:
 			return false;
 		}
 
-		IDelegateInstance* Ptr = Super::GetDelegateInstanceProtected();
+		FReadAccessScope ReadScope = GetReadAccessScope();
 
-		return Ptr && Ptr->HasSameObject(InUserObject);
+		const IDelegateInstance* DelegateInstance = GetDelegateInstanceProtected();
+		return DelegateInstance && DelegateInstance->HasSameObject(InUserObject);
+	}
+
+	/** 
+	 * Checks to see if this delegate can ever become valid again - if not, it can
+	 * be removed from broadcast lists or otherwise repurposed.
+	 *
+	 * @return True if the delegate is compatable, false otherwise.
+	 */
+	FORCEINLINE bool IsCompactable() const
+	{
+		FReadAccessScope ReadScope = GetReadAccessScope();
+
+		const IDelegateInstance* DelegateInstance = GetDelegateInstanceProtected();
+		return !DelegateInstance || DelegateInstance->IsCompactable();
 	}
 
 	/**
@@ -280,12 +296,101 @@ public:
 	 */
 	FORCEINLINE FDelegateHandle GetHandle() const
 	{
-		FDelegateHandle Result;
-		if (IDelegateInstance* Ptr = Super::GetDelegateInstanceProtected())
+		FReadAccessScope ReadScope = GetReadAccessScope();
+
+		const IDelegateInstance* DelegateInstance = GetDelegateInstanceProtected();
+		return DelegateInstance ? DelegateInstance->GetHandle() : FDelegateHandle{};
+	}
+
+protected:
+	/**
+	 * "emplacement" of delegate instance of the given type
+	 */
+	template<typename DelegateInstanceType, typename... DelegateInstanceParams>
+	void CreateDelegateInstance(DelegateInstanceParams&&... Params)
+	{
+		FWriteAccessScope WriteScope = GetWriteAccessScope();
+
+		IDelegateInstance* DelegateInstance = GetDelegateInstanceProtected();
+		if (DelegateInstance)
 		{
-			Result = Ptr->GetHandle();
+			DelegateInstance->~IDelegateInstance();
 		}
 
-		return Result;
+		new(Allocate(sizeof(DelegateInstanceType))) DelegateInstanceType(Forward<DelegateInstanceParams>(Params)...);
 	}
+
+	/**
+	 * Gets the delegate instance.  Not intended for use by user code.
+	 *
+	 * @return The delegate instance.
+	 * @see SetDelegateInstance
+	 */
+	FORCEINLINE IDelegateInstance* GetDelegateInstanceProtected()
+	{
+		return DelegateSize ? (IDelegateInstance*)DelegateAllocator.GetAllocation() : nullptr;
+	}
+
+	FORCEINLINE const IDelegateInstance* GetDelegateInstanceProtected() const
+	{
+		return DelegateSize ? (const IDelegateInstance*)DelegateAllocator.GetAllocation() : nullptr;
+	}
+
+private:
+	void* Allocate(int32 Size)
+	{
+		int32 NewDelegateSize = FMath::DivideAndRoundUp(Size, (int32)sizeof(FAlignedInlineDelegateType));
+		if (DelegateSize != NewDelegateSize)
+		{
+			DelegateAllocator.ResizeAllocation(0, NewDelegateSize, sizeof(FAlignedInlineDelegateType));
+			DelegateSize = NewDelegateSize;
+		}
+
+		return DelegateAllocator.GetAllocation();
+	}
+
+	template<typename OtherThreadSafetyMode>
+	void MoveConstruct(TDelegateBase<OtherThreadSafetyMode>&& Other)
+	{
+		typename TDelegateBase<OtherThreadSafetyMode>::FWriteAccessScope OtherWriteScope = Other.GetWriteAccessScope();
+
+		DelegateAllocator.MoveToEmpty(Other.DelegateAllocator);
+		DelegateSize = Other.DelegateSize;
+		Other.DelegateSize = 0;
+	}
+
+	template<typename OtherThreadSafetyMode>
+	void MoveAssign(TDelegateBase<OtherThreadSafetyMode>&& Other)
+	{
+		FDelegateAllocatorType::ForElementType<FAlignedInlineDelegateType> OtherDelegateAllocator;
+		int32 OtherDelegateSize;
+		{
+			typename TDelegateBase<OtherThreadSafetyMode>::FWriteAccessScope OtherWriteScope = Other.GetWriteAccessScope();
+			OtherDelegateAllocator.MoveToEmpty(Other.DelegateAllocator);
+			OtherDelegateSize = Other.DelegateSize;
+			Other.DelegateSize = 0;
+		}
+
+		{
+			FWriteAccessScope WriteScope = GetWriteAccessScope();
+
+			UnbindUnchecked();
+			DelegateAllocator.MoveToEmpty(OtherDelegateAllocator);
+			DelegateSize = OtherDelegateSize;
+		}
+	}
+
+private:
+	FORCEINLINE void UnbindUnchecked()
+	{
+		if (IDelegateInstance* Ptr = GetDelegateInstanceProtected())
+		{
+			Ptr->~IDelegateInstance();
+			DelegateAllocator.ResizeAllocation(0, 0, sizeof(FAlignedInlineDelegateType));
+			DelegateSize = 0;
+		}
+	}
+
+	FDelegateAllocatorType::ForElementType<FAlignedInlineDelegateType> DelegateAllocator;
+	int32 DelegateSize = 0;
 };

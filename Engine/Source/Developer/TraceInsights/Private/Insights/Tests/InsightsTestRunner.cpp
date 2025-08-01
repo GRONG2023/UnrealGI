@@ -11,14 +11,13 @@
 #include "IAutomationWorkerModule.h"
 #include "ISessionManager.h"
 #include "ISessionServicesModule.h"
+#include "Misc/CoreMisc.h"
+#include "Widgets/Docking/SDockTab.h"
 
 // Insights
 #include "Insights/Common/InsightsMenuBuilder.h"
 #include "Insights/InsightsManager.h"
-#include "Insights/Tests/UITests.h"
 #include "Insights/InsightsStyle.h"
-
-#include "Widgets/Docking/SDockTab.h"
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -40,7 +39,6 @@ void FInsightsTestRunner::ScheduleCommand(const FString& InCmd)
 	if (!ActualCmd.StartsWith(TEXT("Automation RunTests")))
 	{
 		UE_LOG(InsightsTestRunner, Warning, TEXT("[InsightsTestRunner] Command %s does not start with Automation RunTests. Command will be ignored."), *InCmd);
-
 		return;
 	}
 
@@ -58,12 +56,14 @@ void FInsightsTestRunner::Initialize(IUnrealInsightsModule& InsightsModule)
 		auto SessionService = SessionServicesModule.GetSessionService();
 		SessionService->Start();
 
-		//Create Session Manager
+		// Create Session Manager.
 		SessionServicesModule.GetSessionManager();
 
 		IAutomationControllerModule& AutomationControllerModule = FModuleManager::LoadModuleChecked<IAutomationControllerModule>(TEXT("AutomationController"));
 		AutomationControllerModule.Init();
 
+		// Initialize the target platform manager as it is needed by Automation Window.
+		GetTargetPlatformManager();
 		FModuleManager::Get().LoadModule("AutomationWindow");
 		FModuleManager::Get().LoadModule("AutomationWorker");
 	}
@@ -72,14 +72,14 @@ void FInsightsTestRunner::Initialize(IUnrealInsightsModule& InsightsModule)
 
 	// Register tick functions.
 	OnTick = FTickerDelegate::CreateSP(this, &FInsightsTestRunner::Tick);
-	OnTickHandle = FTicker::GetCoreTicker().AddTicker(OnTick, 1.0f);
+	OnTickHandle = FTSTicker::GetCoreTicker().AddTicker(OnTick, 1.0f);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void FInsightsTestRunner::Shutdown()
 {
-	FTicker::GetCoreTicker().RemoveTicker(OnTickHandle);
+	FTSTicker::GetCoreTicker().RemoveTicker(OnTickHandle);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -88,17 +88,17 @@ void FInsightsTestRunner::RegisterMajorTabs(IUnrealInsightsModule& InsightsModul
 {
 	if (bInitAutomationModules)
 	{
-		const FInsightsMajorTabConfig& AutomationInfoConfig = InsightsModule.FindMajorTabConfig(FInsightsManagerTabs::AutomationWindowTabId);
-		if (AutomationInfoConfig.bIsAvailable)
+		const FInsightsMajorTabConfig& AutomationConfig = InsightsModule.FindMajorTabConfig(FInsightsManagerTabs::AutomationWindowTabId);
+		if (AutomationConfig.bIsAvailable)
 		{
-			// Register tab spawner for the Session Info.
+			// Register tab spawner for the Automation window.
 			FTabSpawnerEntry& TabSpawnerEntry = FGlobalTabmanager::Get()->RegisterNomadTabSpawner(FInsightsManagerTabs::AutomationWindowTabId,
 				FOnSpawnTab::CreateRaw(this, &FInsightsTestRunner::SpawnAutomationWindowTab))
-				.SetDisplayName(AutomationInfoConfig.TabLabel.IsSet() ? AutomationInfoConfig.TabLabel.GetValue() : LOCTEXT("AutomationTab", "Automation"))
-				.SetTooltipText(AutomationInfoConfig.TabTooltip.IsSet() ? AutomationInfoConfig.TabTooltip.GetValue() : LOCTEXT("AutomationTooltipText", "Open the automation tab."))
-				.SetIcon(AutomationInfoConfig.TabIcon.IsSet() ? AutomationInfoConfig.TabIcon.GetValue() : FSlateIcon(FInsightsStyle::GetStyleSetName(), "SessionInfo.Icon.Small"));
+				.SetDisplayName(AutomationConfig.TabLabel.IsSet() ? AutomationConfig.TabLabel.GetValue() : LOCTEXT("AutomationTab", "Automation"))
+				.SetTooltipText(AutomationConfig.TabTooltip.IsSet() ? AutomationConfig.TabTooltip.GetValue() : LOCTEXT("AutomationTooltipText", "Opens the automation tab."))
+				.SetIcon(AutomationConfig.TabIcon.IsSet() ? AutomationConfig.TabIcon.GetValue() : FSlateIcon(FInsightsStyle::GetStyleSetName(), "Icons.TestAutomation"));
 
-			TSharedRef<FWorkspaceItem> Group = AutomationInfoConfig.WorkspaceGroup.IsValid() ? AutomationInfoConfig.WorkspaceGroup.ToSharedRef() : FInsightsManager::Get()->GetInsightsMenuBuilder()->GetWindowsGroup();
+			TSharedRef<FWorkspaceItem> Group = AutomationConfig.WorkspaceGroup.IsValid() ? AutomationConfig.WorkspaceGroup.ToSharedRef() : FInsightsManager::Get()->GetInsightsMenuBuilder()->GetWindowsGroup();
 			TabSpawnerEntry.SetGroup(Group);
 		}
 	}

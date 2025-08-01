@@ -2,6 +2,7 @@
 
 #include "DatasmithFacadeVariant.h"
 #include "DatasmithFacadeMaterial.h"
+#include "Math/Transform.h"
 
 FDatasmithFacadePropertyCapture::FDatasmithFacadePropertyCapture()
 : FDatasmithFacadeElement(FDatasmithSceneFactory::CreatePropertyCapture())
@@ -56,9 +57,9 @@ TSharedRef<IDatasmithActorBindingElement> FDatasmithFacadeActorBinding::GetDatas
 }
 
 void FDatasmithFacadeActorBinding::AddRelativeLocationCapture(
-	float X,
-	float Y,
-	float Z
+	double X,
+	double Y,
+	double Z
 )
 {
 	FVector Location(X, Y, Z);
@@ -69,9 +70,9 @@ void FDatasmithFacadeActorBinding::AddRelativeLocationCapture(
 }
 
 void FDatasmithFacadeActorBinding::AddRelativeRotationCapture(
-	float Pitch,
-	float Yaw,
-	float Roll
+	double Pitch,
+	double Yaw,
+	double Roll
 )
 {
 	FRotator Rotation(Pitch, Yaw, Roll);
@@ -82,10 +83,10 @@ void FDatasmithFacadeActorBinding::AddRelativeRotationCapture(
 }
 
 void FDatasmithFacadeActorBinding::AddRelativeRotationCapture(
-	float X,
-	float Y,
-	float Z,
-	float W
+	double X,
+	double Y,
+	double Z,
+	double W
 )
 {
 	FRotator Rotation(FQuat(X, Y, Z, W));
@@ -96,9 +97,9 @@ void FDatasmithFacadeActorBinding::AddRelativeRotationCapture(
 }
 
 void FDatasmithFacadeActorBinding::AddRelativeScaleCapture(
-	float X,
-	float Y,
-	float Z
+	double X,
+	double Y,
+	double Z
 )
 {
 	FVector Scale(X, Y, Z);
@@ -109,7 +110,7 @@ void FDatasmithFacadeActorBinding::AddRelativeScaleCapture(
 }
 
 void FDatasmithFacadeActorBinding::AddRelativeTransformCapture(
-	const float InMatrix[16],
+	const double InMatrix[16],
 	bool bRowMajor
 )
 {

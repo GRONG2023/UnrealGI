@@ -24,8 +24,8 @@ class UHierarchicalLODSetup;
 class ULevel;
 class UWorld;
 
-UCLASS(config = Engine, meta = (DisplayName = "Hierarchical LOD"), defaultconfig)
-class UNREALED_API UHierarchicalLODSettings : public UDeveloperSettings
+UCLASS(config = Engine, meta = (DisplayName = "Hierarchical LOD"), defaultconfig, MinimalAPI)
+class UHierarchicalLODSettings : public UDeveloperSettings
 {
 	GENERATED_UCLASS_BODY()
 
@@ -48,18 +48,14 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = HLODSystem, AdvancedDisplay, meta = (DisplayName = "Map UAssets used for building HLOD data through the ", RelativeToGameContentDir, LongPackageName))
 	TArray<FFilePath> MapsToBuild;
 
-	UPROPERTY(EditAnywhere, config, Category = HLODSystem, meta = (DisplayName = "Invalidate HLOD Clusters on changes to the Sub Actors"))
-	bool bInvalidateHLODClusters;
-
-	UPROPERTY(EditAnywhere, config, Category = HLODSystem, meta = (DisplayName = "Delete (out-dated) HLOD Assets on Save", editcondition = "bInvalidateHLODClusters"))
-	bool bDeleteHLODAssets;
-	
 	/** Base material used for creating a Constant Material Instance as the Proxy Material */
 	UPROPERTY(EditAnywhere, config, Category = HLODSystem)
 	TSoftObjectPtr<class UMaterialInterface> BaseMaterial;
 
 #if WITH_EDITOR
-	virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
+	static UNREALED_API bool IsValidFlattenMaterial(const UMaterialInterface* InBaseMaterial, bool bShowToaster);
+
+	UNREALED_API virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif // WITH_EDITOR
 };
 
@@ -69,50 +65,50 @@ public:
  *
  * This builds list of clusters and make sure it's sorted in the order of lower cost to high and merge clusters
  **/
-struct UNREALED_API FHierarchicalLODBuilder
+struct FHierarchicalLODBuilder
 {
-	FHierarchicalLODBuilder(UWorld* InWorld, bool bInPersistentLevelOnly = false);
+	UNREALED_API FHierarchicalLODBuilder(UWorld* InWorld, bool bInPersistentLevelOnly = false);
 
 	/** DO NOT USE. This constructor is for internal usage only for hot-reload purposes. */
-	FHierarchicalLODBuilder();
+	UNREALED_API FHierarchicalLODBuilder();
 
 	/**
 	* Build, Builds the clusters and spawn LODActors with their merged Static Meshes
 	*/
-	void Build();
+	UNREALED_API void Build();
 	
 	/**
 	* PreviewBuild, Builds the clusters and spawns LODActors but without actually creating/merging new StaticMeshes
 	*/
-	void PreviewBuild();
+	UNREALED_API void PreviewBuild();
 
 	/**
 	* Clear all the HLODs and the ALODActors that were created for them
 	*/
-	void ClearHLODs();
+	UNREALED_API void ClearHLODs();
 
 	/**
 	* Clear only the ALODActorsPreview 
 	*/
-	void ClearPreviewBuild();
+	UNREALED_API void ClearPreviewBuild();
 
 	/** Builds the LOD meshes for all LODActors inside of the World's Levels */
-	void BuildMeshesForLODActors(bool bForceAll);
+	UNREALED_API void BuildMeshesForLODActors(bool bForceAll);
 
 	/** Saves HLOD meshes for actors in all the World's levels */
-	void SaveMeshesForActors();
+	UNREALED_API void SaveMeshesForActors();
 
 	/** Get the list of mesh packages to save for a given level */
-	void GetMeshesPackagesToSave(ULevel* InLevel, TSet<UPackage*>& InHLODPackagesToSave, const FString& PreviousLevelName = "");
+	UNREALED_API void GetMeshesPackagesToSave(ULevel* InLevel, TSet<UPackage*>& InHLODPackagesToSave, const FString& PreviousLevelName = "");
 
 	/** Delete HLOD packages that are empty. */
-	void DeleteEmptyHLODPackages(ULevel* InLevel);
+	UNREALED_API void DeleteEmptyHLODPackages(ULevel* InLevel);
 
 	/** 
 	 * @param	bInForce	Whether to force the recalculation of this actor's build flag. If this is false then the cached flag is used an only recalculated every so often.
 	 * @return whether a build is needed (i.e. any LOD actors are dirty) 
 	 */
-	bool NeedsBuild(bool bInForce = false) const;
+	UNREALED_API bool NeedsBuild(bool bInForce = false) const;
 
 	/**
 	* Build a single LOD Actor's mesh
@@ -120,7 +116,7 @@ struct UNREALED_API FHierarchicalLODBuilder
 	* @param LODActor - LODActor to build mesh for
 	* @param LODLevel - LODLevel to build the mesh for
 	*/
-	void BuildMeshForLODActor(ALODActor* LODActor, const uint32 LODLevel);
+	UNREALED_API void BuildMeshForLODActor(ALODActor* LODActor, const uint32 LODLevel);
 
 private:
 	/**
@@ -159,9 +155,10 @@ private:
 
 	/* Retrieves HierarchicalLODVolumes and creates a cluster for each individual one
 	*
-	* @param InLevel - Level for which the HLODs are currently being build
+	* @param InLevel	Level for which the HLODs are currently being build
+	* @param LODIdx		LOD index to process
 	*/
-	void HandleHLODVolumes(ULevel* InLevel);
+	void HandleHLODVolumes(ULevel* InLevel, int32 LODIdx);
 
 	/**
 	* Determine whether or not this level should have HLODs built for it in the specified world

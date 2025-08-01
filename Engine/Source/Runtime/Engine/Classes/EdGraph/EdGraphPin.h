@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
 #include "Misc/Guid.h"
 #include "UObject/Class.h"
 #include "UObject/WeakObjectPtr.h"
@@ -31,7 +32,7 @@ struct FSimpleMemberReference
 	 * if it is a native delegate signature function (declared globally).
 	 */
 	UPROPERTY()
-	UObject* MemberParent;
+	TObjectPtr<UObject> MemberParent;
 
 	/** Name of the member */
 	UPROPERTY()
@@ -70,22 +71,8 @@ FORCEINLINE FArchive& operator<<(FArchive& Ar, FSimpleMemberReference& Data)
 	return Ar;
 }
 
-inline bool operator!= (const FEdGraphTerminalType& A, const FEdGraphTerminalType& B)
-{
-	return A.TerminalCategory != B.TerminalCategory
-		|| A.TerminalSubCategory != B.TerminalSubCategory
-		|| A.TerminalSubCategoryObject != B.TerminalSubCategoryObject
-		|| A.bTerminalIsConst != B.bTerminalIsConst
-		|| A.bTerminalIsWeakPointer != B.bTerminalIsWeakPointer;
-}
-
-inline bool operator==(const FEdGraphTerminalType& A, const FEdGraphTerminalType& B)
-{
-	return !(A != B);
-}
-
 /** Struct used to define the type of information carried on this pin */
-USTRUCT()
+USTRUCT(BlueprintType)
 struct FEdGraphPinType
 {
 	GENERATED_USTRUCT_BODY()
@@ -135,6 +122,10 @@ public:
 	UPROPERTY()
 	uint8 bIsUObjectWrapper:1;
 
+	/** Set to true if the type was serialized prior to BlueprintPinsUseRealNumbers */
+	UPROPERTY()
+	uint8 bSerializeAsSinglePrecisionFloat:1;
+
 	FORCEINLINE bool IsContainer() const { return (ContainerType != EPinContainerType::None); }
 	FORCEINLINE bool IsArray() const { return (ContainerType == EPinContainerType::Array); }
 	FORCEINLINE bool IsSet() const { return (ContainerType == EPinContainerType::Set); }
@@ -149,6 +140,7 @@ public:
 		, bIsConst(false)
 		, bIsWeakPointer(false)
 		, bIsUObjectWrapper(false)
+		, bSerializeAsSinglePrecisionFloat(false)
 	{
 	}
 
@@ -163,6 +155,7 @@ public:
 		, bIsConst(false)
 		, bIsWeakPointer(false)
 		, bIsUObjectWrapper(false)
+		, bSerializeAsSinglePrecisionFloat(false)
 	{
 	}
 
@@ -175,7 +168,6 @@ public:
 			&& (ContainerType == Other.ContainerType)
 			&& (bIsReference == Other.bIsReference)
 			&& (bIsWeakPointer == Other.bIsWeakPointer)
-			//&& (bIsUObjectWrapper == Other.bIsUObjectWrapper)
 			&& (PinSubCategoryMemberReference == Other.PinSubCategoryMemberReference)
 			&& (bIsConst == Other.bIsConst);
 	}
@@ -195,11 +187,15 @@ public:
 		bIsReference = false;
 		bIsWeakPointer = false;
 		bIsUObjectWrapper = false;
+		bSerializeAsSinglePrecisionFloat = false;
 		bIsConst = false;
 	}
 
 	ENGINE_API bool Serialize(FArchive& Ar);
 	ENGINE_API void PostSerialize(const FArchive& Ar);
+#if WITH_EDITORONLY_DATA
+	ENGINE_API static void DeclareCustomVersions(FArchive& Ar);
+#endif
 
 	static ENGINE_API FEdGraphPinType GetPinTypeForTerminalType( const FEdGraphTerminalType& TerminalType );
 	static ENGINE_API FEdGraphPinType GetTerminalTypeForContainer( const FEdGraphPinType& ContainerType );
@@ -236,17 +232,18 @@ struct TStructOpsTypeTraits< FEdGraphPinType > : public TStructOpsTypeTraitsBase
 		WithSerializer = true,
 		WithPostSerialize = true
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::Strong;
 };
 
 UENUM()
-enum EBlueprintPinStyleType
+enum EBlueprintPinStyleType : int
 {
 	BPST_Original UMETA(DisplayName="Circles, Grid, Diamond"),
 	BPST_VariantA UMETA(DisplayName="Directional Circles")
 };
 
 USTRUCT()
-struct ENGINE_API FEdGraphPinReference
+struct FEdGraphPinReference
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -256,17 +253,14 @@ struct ENGINE_API FEdGraphPinReference
 	FEdGraphPinReference(const UEdGraphPin* InPin) : OwningNode(nullptr) { SetPin(InPin); }
 
 	/** Sets the pin referred to by this struct */
-	void SetPin(const UEdGraphPin* NewPin);
+	ENGINE_API void SetPin(const UEdGraphPin* NewPin);
 
 	/** Gets the pin referred to by this struct */
-	UEdGraphPin* Get() const;
+	ENGINE_API UEdGraphPin* Get() const;
 
 	friend uint32 GetTypeHash(const FEdGraphPinReference& EdGraphPinReference)
 	{
-		UEdGraphNode* ResolvedOwningNode = EdGraphPinReference.OwningNode.Get();
-		ensureMsgf(ResolvedOwningNode || !EdGraphPinReference.PinId.IsValid(), TEXT("Trying to reference an unowned pin: %s"), *EdGraphPinReference.PinId.ToString());
-		uint32 NodeHash = ResolvedOwningNode ? FCrc::StrCrc32(*ResolvedOwningNode->GetName()) : 0;
-		return FCrc::StrCrc32(*EdGraphPinReference.PinId.ToString(), 0 );
+		return GetTypeHash(EdGraphPinReference.PinId);
 	}
 
 	bool operator==(const FEdGraphPinReference& Other) const
@@ -301,6 +295,9 @@ public:
 	/** Name of this pin. */
 	FName PinName;
 
+	/** Index of the pin in the source data structure represented by the graph, INDEX_NONE if not used */
+	int32 SourceIndex;
+
 	/** Direction of flow of this pin (input or output) */
 	TEnumAsByte<enum EEdGraphPinDirection> Direction;
 
@@ -321,9 +318,9 @@ public:
 	/** If true, the default value on this pin is ignored and should not be set. */
 	uint8 bDefaultValueIsIgnored:1;
 
-	/** If true, this pin is the focus of a diff. This is transient. */
-	uint8 bIsDiffing:1;
-
+	UE_DEPRECATED(5.0, "bIsDiffing is deprecated. Please use SGraphPanel::DiffResults and SGraphPanel::FocusedDiffResult instead")
+	uint32 bIsDiffing:1;
+	
 	/** If true, the pin may be hidden by user. */
 	uint8 bAdvancedView:1;
 
@@ -372,7 +369,7 @@ public:
 	FString AutogeneratedDefaultValue;
 
 	/** If the default value for this pin should be an object, we store a pointer to it */
-	class UObject* DefaultObject;
+	TObjectPtr<class UObject> DefaultObject;
 
 	/** If the default value for this pin should be an FText, it is stored here. */
 	FText DefaultTextValue;
@@ -459,6 +456,11 @@ public:
 	 */
 	ENGINE_API FString GetDefaultAsString() const;
 
+	/**
+	 * Returns true if GetDefaultAsString will return an empty string.
+	 */
+	ENGINE_API bool IsDefaultAsStringEmpty() const;
+
 	/** Returns a human readable FText representation of the string/object/text default value */
 	ENGINE_API FText GetDefaultAsText() const;
 
@@ -495,6 +497,7 @@ public:
 		PinType.ResetToDefaults();
 
 		PinName = NAME_None;
+		SourceIndex = INDEX_NONE;
 #if WITH_EDITORONLY_DATA
 		PinFriendlyName = FText::GetEmpty();
 #endif // WITH_EDITORONLY_DATA
@@ -517,6 +520,9 @@ public:
 
 	/** Serializes an array of pins as the owner. Only the OwningNode should call this function. */
 	static void SerializeAsOwningNode(FArchive& Ar, TArray<UEdGraphPin*>& ArrayRef);
+#if WITH_EDITORONLY_DATA
+	static void DeclarePinCustomVersions(FArchive& Ar);
+#endif
 
 	/** Marks the owning node as modified. */
 	ENGINE_API bool Modify(bool bAlwaysMarkDirty = true);
@@ -525,7 +531,7 @@ public:
 	ENGINE_API void SetOwningNode(UEdGraphNode* NewOwningNode);
 
 	/** Marks the pin as 'trashed'. *Does not* remove the pin from the Owning Node's Pins list */
-	ENGINE_API void MarkPendingKill();
+	ENGINE_API void MarkAsGarbage();
 
 	/** Returns true if InvalidateAndTrash was ever called on this pin. */
 	FORCEINLINE bool WasTrashed() const { return bWasTrashed; }
@@ -538,10 +544,10 @@ public:
 	ENGINE_API bool ExportTextItem(FString& ValueStr, int32 PortFlags) const;
 	ENGINE_API bool ImportTextItem(const TCHAR*& Buffer, int32 PortFlags, class UObject* Parent, FOutputDevice* ErrorText);
 
-	ENGINE_API const FString GetName() const { return PinName.ToString(); }
-	ENGINE_API const FName GetFName() const { return PinName; }
-	ENGINE_API UEdGraphNode* GetOuter() const { return GetOwningNodeUnchecked(); }
-	ENGINE_API bool IsPendingKill() const {	return bWasTrashed; }
+	const FString GetName() const { return PinName.ToString(); }
+	const FName GetFName() const { return PinName; }
+	UEdGraphNode* GetOuter() const { return GetOwningNodeUnchecked(); }
+	bool IsPendingKill() const {	return bWasTrashed; }
 	ENGINE_API FEdGraphTerminalType GetPrimaryTerminalType() const;
 
 	/** Verification that all pins have been destroyed after shutting down */
@@ -617,7 +623,7 @@ class UEdGraphPin_Deprecated : public UObject
 
 	/** If the default value for this pin should be an object, we store a pointer to it */
 	UPROPERTY()
-	class UObject* DefaultObject;
+	TObjectPtr<class UObject> DefaultObject;
 
 	/** If the default value for this pin should be an FText, it is stored here. */
 	UPROPERTY()
@@ -625,19 +631,19 @@ class UEdGraphPin_Deprecated : public UObject
 
 	/** Set of pins that we are linked to */
 	UPROPERTY()
-	TArray<class UEdGraphPin_Deprecated*> LinkedTo;
+	TArray<TObjectPtr<class UEdGraphPin_Deprecated>> LinkedTo;
 
 	/** The pins created when a pin is split and hidden */ 
 	UPROPERTY()
-	TArray<class UEdGraphPin_Deprecated*> SubPins;
+	TArray<TObjectPtr<class UEdGraphPin_Deprecated>> SubPins;
 
 	/** The pin that was split and generated this pin */
 	UPROPERTY()
-	UEdGraphPin_Deprecated* ParentPin;
+	TObjectPtr<UEdGraphPin_Deprecated> ParentPin;
 
 	/** Pin that this pin uses for passing through reference connection */
 	UPROPERTY()
-	UEdGraphPin_Deprecated* ReferencePassThroughConnection;
+	TObjectPtr<UEdGraphPin_Deprecated> ReferencePassThroughConnection;
 
 #if WITH_EDITORONLY_DATA
 	/** If true, this connector is currently hidden. */
@@ -655,10 +661,6 @@ class UEdGraphPin_Deprecated : public UObject
 	/** If true, the default value on this pin is ignored and should not be set */
 	UPROPERTY()
 	uint32 bDefaultValueIsIgnored:1;
-
-	/** If true, this pin is the focus of a diff */
-	UPROPERTY(transient)
-	uint32 bIsDiffing:1;
 
 	/** If true, the pin may be hidden by user */
 	UPROPERTY()

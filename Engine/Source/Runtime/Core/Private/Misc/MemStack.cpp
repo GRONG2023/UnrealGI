@@ -5,26 +5,42 @@
 #include "Misc/CommandLine.h"
 #include "Stats/Stats.h"
 #include "HAL/IConsoleManager.h"
+#include "HAL/LowLevelMemTracker.h"
 #include "Misc/CoreDelegates.h"
 #include <atomic>
+
+LLM_DEFINE_BOOTSTRAP_TAG(MemStack);
 
 DECLARE_MEMORY_STAT(TEXT("MemStack Large Block"), STAT_MemStackLargeBLock,STATGROUP_Memory);
 DECLARE_MEMORY_STAT(TEXT("PageAllocator Free"), STAT_PageAllocatorFree, STATGROUP_Memory);
 DECLARE_MEMORY_STAT(TEXT("PageAllocator Used"), STAT_PageAllocatorUsed, STATGROUP_Memory);
 
+FPageAllocator* FPageAllocator::Instance = nullptr;
+
+FPageAllocator::FPageAllocator()
+{
+	Instance = this;
+}
+
+FPageAllocator::~FPageAllocator()
+{
+	Instance = nullptr;
+}
+
 FPageAllocator& FPageAllocator::Get()
 {
-	static std::atomic<FPageAllocator*> ThePageAllocator;
-
-	FPageAllocator* LocalPageAllocator = ThePageAllocator.load(std::memory_order_acquire);
-	if (!LocalPageAllocator)
+	if (LIKELY(Instance != nullptr))
 	{
-		static FPageAllocator Instance;
-		LocalPageAllocator = &Instance;
-		ThePageAllocator.store(LocalPageAllocator, std::memory_order_release);
+		return *Instance;
 	}
 
-	return *LocalPageAllocator;
+	return Construct();
+}
+
+FORCENOINLINE FPageAllocator& FPageAllocator::Construct()
+{
+	static FPageAllocator PageAllocator;
+	return *Instance;
 }
 
 #define USE_MEMSTACK_PUGATORY (0)
@@ -219,15 +235,24 @@ uint64 FPageAllocator::BytesFree()
 
 void *FPageAllocator::Alloc()
 {
+#if USING_ADDRESS_SANITISER
+	return FMemory::Malloc(FPageAllocator::PageSize);
+#else
+	LLM_SCOPE_BY_BOOTSTRAP_TAG(MemStack);
 	void *Result = TheAllocator.Allocate();
 	STAT(UpdateStats());
 	return Result;
+#endif
 }
 
 void FPageAllocator::Free(void *Mem)
 {
+#if USING_ADDRESS_SANITISER
+	FMemory::Free(Mem);
+#else
 	TheAllocator.Free(Mem);
 	STAT(UpdateStats());
+#endif
 }
 
 void *FPageAllocator::AllocSmall()
@@ -283,6 +308,20 @@ void FPageAllocator::UpdateStats()
 /*-----------------------------------------------------------------------------
 	FMemStack implementation.
 -----------------------------------------------------------------------------*/
+ 
+FMemStackBase::FMemStackBase(EPageSize InPageSize)
+: Top(nullptr)
+, End(nullptr)
+, TopChunk(nullptr)
+, TopMark(nullptr)
+, NumMarks(0)
+, PageSize(InPageSize)
+, bShouldEnforceAllocMarks(false)
+{
+	// By fetching the FPageAllocator singleton's address here we can guarantee
+	// that its lifetime spans that of all FMemStackBase objects.
+	FPageAllocator::Get();
+}
 
 int32 FMemStackBase::GetByteCount() const
 {
@@ -307,7 +346,7 @@ void FMemStackBase::AllocateNewChunk(int32 MinSize)
 	// Create new chunk.
 	int32 TotalSize = MinSize + (int32)sizeof(FTaggedMemory);
 	uint32 AllocSize;
-	if (TopChunk || TotalSize > FPageAllocator::SmallPageSize)
+	if (TopChunk || TotalSize > FPageAllocator::SmallPageSize || PageSize == EPageSize::Large)
 	{
 		AllocSize = AlignArbitrary<int32>(TotalSize, FPageAllocator::PageSize);
 		if (AllocSize == FPageAllocator::PageSize)
@@ -375,4 +414,10 @@ bool FMemStackBase::ContainsPointer(const void* Pointer) const
 	}
 
 	return false;
+}
+
+FORCENOINLINE void UE::Core::Private::OnInvalidMemStackAllocatorNum(int32 NewNum, SIZE_T NumBytesPerElement)
+{
+	UE_LOG(LogCore, Fatal, TEXT("Trying to resize TMemStackAllocator to an invalid size of %d with element size %" SIZE_T_FMT), NewNum, NumBytesPerElement);
+	for (;;);
 }

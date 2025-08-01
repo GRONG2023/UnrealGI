@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
+#include <type_traits>
+
 #include "UObject/ObjectMacros.h"
 #include "PointWeightMap.generated.h"
 
@@ -13,7 +15,7 @@ enum class EWeightMapTargetCommon : uint8
 	BackstopDistance,    // Distance along the plane of the surface that the particles can travel (separation constraint)
 	BackstopRadius,      // Radius of movement to allow for backstop movement
 	AnimDriveStiffness,  // Strength of anim drive per-particle (spring driving particle back to skinned location
-	AnimDriveDamping     // Damping of anim drive springs
+	AnimDriveDamping_DEPRECATED UMETA(Hidden)  // Chaos onlyweightmap, deprecated from the common declaration
 };
 
 /** 
@@ -22,7 +24,7 @@ enum class EWeightMapTargetCommon : uint8
  * is then later applied to a phys mesh
  */
 USTRUCT()
-struct CLOTHINGSYSTEMRUNTIMECOMMON_API FPointWeightMap
+struct FPointWeightMap
 {
 	GENERATED_BODY();
 
@@ -33,6 +35,40 @@ struct CLOTHINGSYSTEMRUNTIMECOMMON_API FPointWeightMap
 		, bEnabled(false)
 #endif
 	{}
+
+	explicit FPointWeightMap(int32 NumPoints, float Value = 0.f)
+#if WITH_EDITORONLY_DATA
+		: Name(NAME_None)
+		, CurrentTarget((uint8)EWeightMapTargetCommon::None)
+		, bEnabled(false)
+#endif
+	{
+		Values.Init(Value, NumPoints);
+	}
+
+	explicit FPointWeightMap(const TConstArrayView<float>& InValues)
+		: Values(InValues)
+#if WITH_EDITORONLY_DATA
+		, Name(NAME_None)
+		, CurrentTarget((uint8)EWeightMapTargetCommon::None)
+		, bEnabled(false)
+#endif
+	{}
+
+	FPointWeightMap(const TConstArrayView<float>& InValues, float Offset, float Scale)
+#if WITH_EDITORONLY_DATA
+		: Name(NAME_None)
+		, CurrentTarget((uint8)EWeightMapTargetCommon::None)
+		, bEnabled(false)
+#endif
+	{
+		const int32 NumPoints = InValues.Num();
+		Values.SetNumUninitialized(NumPoints);
+		for (int32 Index = 0; Index < NumPoints; ++Index)
+		{
+			Values[Index] = Offset + Scale * InValues[Index];
+		}
+	}
 
 	~FPointWeightMap()
 	{}
@@ -54,7 +90,10 @@ struct CLOTHINGSYSTEMRUNTIMECOMMON_API FPointWeightMap
 	 * Initialize a weight map from another weight map while enabling and setting a new target.
 	 * @param Source the source weight map to copy the values from.
 	 * @param Target the new weight map target. */
-	template <typename T, typename = typename TEnableIf<TOr<TIsEnum<T>, TIsArithmetic<T>>::Value>::Type>
+	template <
+		typename T
+		UE_REQUIRES(std::is_enum_v<T> || std::is_arithmetic_v<T>)
+	>
 	void Initialize(const FPointWeightMap& Source, T Target)
 	{
 		Values = Source.Values;

@@ -11,14 +11,19 @@
 class FVulkanDescriptorSetCache;
 class FVulkanDescriptorPool;
 class FVulkanDescriptorPoolsManager;
+class FVulkanBindlessDescriptorManager;
 class FVulkanCommandListContextImmediate;
-#if VULKAN_USE_NEW_QUERIES
+class FVulkanTransientHeapCache;
+class FVulkanDeviceExtension;
 class FVulkanOcclusionQueryPool;
-#else
-class FOLDVulkanQueryPool;
+class FVulkanRenderPassManager;
+
+#if VULKAN_RHI_RAYTRACING
+class FVulkanRayTracingCompactionRequestHandler;
 #endif
 
-#define VULKAN_USE_DEBUG_NAMES 1
+// HOTFIX for UE-218250: Disable vulkan debug names to get around crash/performance issues
+#define VULKAN_USE_DEBUG_NAMES 0
 
 #if VULKAN_USE_DEBUG_NAMES
 #define VULKAN_SET_DEBUG_NAME(Device, Type, Handle, Format, ...) Device.VulkanSetObjectName(Type, (uint64)Handle, *FString::Printf(Format, __VA_ARGS__))
@@ -32,31 +37,57 @@ struct FOptionalVulkanDeviceExtensions
 	{
 		struct
 		{
-			uint32 HasKHRMaintenance1 : 1;
-			uint32 HasKHRMaintenance2 : 1;
-			//uint32 HasMirrorClampToEdge : 1;
-			uint32 HasKHRDedicatedAllocation : 1;
-			uint32 HasEXTValidationCache : 1;
-			uint32 HasAMDBufferMarker : 1;
-			uint32 HasNVDiagnosticCheckpoints : 1;
-			uint32 HasNVDeviceDiagnosticConfig : 1;
-			uint32 HasYcbcrSampler : 1;
-			uint32 HasMemoryPriority : 1;
-			uint32 HasMemoryBudget : 1;
-			uint32 HasDriverProperties : 1;
-			uint32 HasEXTFragmentDensityMap : 1;
-			uint32 HasEXTFragmentDensityMap2 : 1;
-			uint32 HasKHRFragmentShadingRate : 1;
-			uint32 HasEXTFullscreenExclusive : 1;
-			uint32 HasKHRImageFormatList : 1;
-			uint32 HasEXTASTCDecodeMode : 1;
-			uint32 HasQcomRenderPassTransform : 1;
-			uint32 HasAtomicInt64 : 1;
-			uint32 HasBufferAtomicInt64 : 1;
-			uint32 HasScalarBlockLayoutFeatures : 1;
-			uint32 HasKHRMultiview : 1;
+			// Optional Extensions
+			uint64 HasEXTValidationCache : 1;
+			uint64 HasMemoryPriority : 1;
+			uint64 HasMemoryBudget : 1;
+			uint64 HasEXTASTCDecodeMode : 1;
+			uint64 HasEXTFragmentDensityMap : 1;
+			uint64 HasEXTFragmentDensityMap2 : 1;
+			uint64 HasKHRFragmentShadingRate : 1;
+			uint64 HasEXTFullscreenExclusive : 1;
+			uint64 HasImageAtomicInt64 : 1;
+			uint64 HasAccelerationStructure : 1;
+			uint64 HasRayTracingPipeline : 1;
+			uint64 HasRayQuery : 1;
+			uint64 HasDeferredHostOperations : 1;
+			uint64 HasEXTCalibratedTimestamps : 1;
+			uint64 HasEXTDescriptorBuffer : 1;
+			uint64 HasEXTDeviceFault : 1;
+
+			// Vendor specific
+			uint64 HasAMDBufferMarker : 1;
+			uint64 HasNVDiagnosticCheckpoints : 1;
+			uint64 HasNVDeviceDiagnosticConfig : 1;
+			uint64 HasQcomRenderPassTransform : 1;
+
+			// Promoted to 1.1
+			uint64 HasKHRMultiview : 1;
+			uint64 HasKHR16bitStorage : 1;
+
+			// Promoted to 1.2
+			uint64 HasKHRRenderPass2 : 1;
+			uint64 HasKHRImageFormatList : 1;
+			uint64 HasKHRShaderAtomicInt64 : 1;
+			uint64 HasEXTScalarBlockLayout : 1;
+			uint64 HasBufferDeviceAddress : 1;
+			uint64 HasSPIRV_14 : 1;
+			uint64 HasShaderFloatControls : 1;
+			uint64 HasKHRShaderFloat16 : 1;
+			uint64 HasEXTDescriptorIndexing : 1;
+			uint64 HasEXTShaderViewportIndexLayer : 1;
+			uint64 HasSeparateDepthStencilLayouts : 1;
+			uint64 HasEXTHostQueryReset : 1;
+			uint64 HasQcomRenderPassShaderResolve : 1;
+
+			// Promoted to 1.3
+			uint64 HasEXTTextureCompressionASTCHDR : 1;
+			uint64 HasKHRMaintenance4 : 1;
+			uint64 HasKHRSynchronization2 : 1;
+			uint64 HasEXTSubgroupSizeControl : 1;
+			uint64 HasEXTPipelineCreationCacheControl : 1;
 		};
-		uint32 Packed;
+		uint64 Packed;
 	};
 
 	FOptionalVulkanDeviceExtensions()
@@ -65,13 +96,68 @@ struct FOptionalVulkanDeviceExtensions
 		Packed = 0;
 	}
 
-	void Setup(const TArray<const ANSICHAR*>& InDeviceExtensions);
-
 	inline bool HasGPUCrashDumpExtensions() const
 	{
 		return HasAMDBufferMarker || HasNVDiagnosticCheckpoints;
 	}
+
+#if VULKAN_RHI_RAYTRACING
+	inline bool HasRaytracingExtensions() const
+	{
+		return 
+			HasAccelerationStructure && 
+			(HasRayTracingPipeline || HasRayQuery) &&
+			HasEXTDescriptorIndexing &&
+			HasBufferDeviceAddress && 
+			HasDeferredHostOperations && 
+			HasSPIRV_14 && 
+			HasShaderFloatControls;
+	}
+#endif
 };
+
+// All the features and properties we need to keep around from extension initialization
+struct FOptionalVulkanDeviceExtensionProperties
+{
+	FOptionalVulkanDeviceExtensionProperties()
+	{
+		FMemory::Memzero(*this);
+	}
+
+	VkPhysicalDeviceDescriptorBufferPropertiesEXT DescriptorBufferProps;
+	VkPhysicalDeviceSubgroupSizeControlPropertiesEXT SubgroupSizeControlProperties;
+
+#if VULKAN_RHI_RAYTRACING
+	VkPhysicalDeviceAccelerationStructurePropertiesKHR AccelerationStructureProps;
+	VkPhysicalDeviceRayTracingPipelinePropertiesKHR RayTracingPipelineProps;
+#endif // VULKAN_RHI_RAYTRACING
+
+	VkPhysicalDeviceFragmentShadingRateFeaturesKHR FragmentShadingRateFeatures;
+	VkPhysicalDeviceFragmentDensityMapFeaturesEXT FragmentDensityMapFeatures;
+	VkPhysicalDeviceFragmentDensityMap2FeaturesEXT FragmentDensityMap2Features;
+};
+
+class FVulkanPhysicalDeviceFeatures
+{
+public:
+	FVulkanPhysicalDeviceFeatures()
+	{
+		FMemory::Memzero(*this);
+	}
+
+	void Query(VkPhysicalDevice PhysicalDevice, uint32 APIVersion);
+
+	VkPhysicalDeviceFeatures	     Core_1_0;
+	VkPhysicalDeviceVulkan11Features Core_1_1;
+private:
+	// Anything above Core 1.1 cannot be assumed, they should only be used by the device at init time
+	VkPhysicalDeviceVulkan12Features Core_1_2;
+	VkPhysicalDeviceVulkan13Features Core_1_3;
+
+	friend class FVulkanDevice;
+};
+
+
 namespace VulkanRHI
 {
 	class FDeferredDeletionQueue2 : public FDeviceChild
@@ -99,6 +185,8 @@ namespace VulkanRHI
 			ResourceAllocation,
 			DeviceMemoryAllocation,
 			BufferSuballocation,
+			AccelerationStructure,
+			BindlessHandle,
 		};
 
 		template <typename T>
@@ -108,6 +196,16 @@ namespace VulkanRHI
 			EnqueueGenericResource(Type, (uint64)Handle);
 		}
 
+		inline void EnqueueBindlessHandle(FRHIDescriptorHandle DescriptorHandle)
+		{
+			if (DescriptorHandle.IsValid())
+			{
+				const uint64 Type = (uint64)DescriptorHandle.GetRawType();
+				const uint64 Index = (uint64)DescriptorHandle.GetIndex();
+				const uint64 AsUInt64 = (Type << 32) | Index;
+				EnqueueResource(EType::BindlessHandle, AsUInt64);
+			}
+		}
 
 		void EnqueueResourceAllocation(FVulkanAllocation& Allocation);
 		void EnqueueDeviceAllocation(FDeviceMemoryAllocation* DeviceMemoryAllocation);
@@ -147,12 +245,10 @@ public:
 
 	~FVulkanDevice();
 
-	// Returns true if this is a viable candidate for main GPU
-	bool QueryGPU(int32 DeviceIndex);
+	void InitGPU();
 
-	void InitGPU(int32 DeviceIndex);
-
-	void CreateDevice();
+	void CreateDevice(TArray<const ANSICHAR*>& DeviceLayers, FVulkanDeviceExtensionArray& UEExtensions);
+	void ChooseVariableRateShadingMethod();
 
 	void PrepareForDestroy();
 	void Destroy();
@@ -215,51 +311,32 @@ public:
 		return GpuProps;
 	}
 
-#if VULKAN_SUPPORTS_FRAGMENT_DENSITY_MAP
-	inline const VkPhysicalDeviceFragmentDensityMapFeaturesEXT& GetFragmentDensityMapFeatures() const
+	inline VkExtent2D GetBestMatchedFragmentSize(EVRSShadingRate Rate) const
 	{
-		return FragmentDensityMapFeatures;
+		return FragmentSizeMap[Rate];
 	}
-#endif
-
-#if VULKAN_SUPPORTS_FRAGMENT_DENSITY_MAP2
-	inline const VkPhysicalDeviceFragmentDensityMap2FeaturesEXT& GetFragmentDensityMap2Features() const
-	{
-		return FragmentDensityMap2Features;
-	}
-#endif
-
-#if VULKAN_SUPPORTS_FRAGMENT_SHADING_RATE
-	inline const VkPhysicalDeviceFragmentShadingRateFeaturesKHR& GetFragmentShadingRateFeatures() const
-	{
-		return FragmentShadingRateFeatures;
-	}
-
-	inline const VkPhysicalDeviceFragmentShadingRatePropertiesKHR& GetFragmentShadingRateProperties() const
-	{
-		return FragmentShadingRateProperties;
-	}
-#endif
-
-#if VULKAN_SUPPORTS_MULTIVIEW
-	inline const VkPhysicalDeviceMultiviewFeatures& GetMultiviewFeatures() const
-	{
-		return MultiviewFeatures;
-	}
-#endif
 
 	inline const VkPhysicalDeviceLimits& GetLimits() const
 	{
 		return GpuProps.limits;
 	}
 
-#if VULKAN_SUPPORTS_PHYSICAL_DEVICE_PROPERTIES2
 	inline const VkPhysicalDeviceIDPropertiesKHR& GetDeviceIdProperties() const
 	{
-		check(RHI->GetOptionalExtensions().HasKHRGetPhysicalDeviceProperties2);
 		return GpuIdProps;
 	}
-#endif
+
+	inline const VkPhysicalDeviceSubgroupProperties& GetDeviceSubgroupProperties() const
+	{
+		return GpuSubgroupProps;
+	}
+
+#if VULKAN_RHI_RAYTRACING
+	FVulkanRayTracingCompactionRequestHandler* GetRayTracingCompactionRequestHandler() { return RayTracingCompactionRequestHandler; }
+
+	void InitializeRayTracing();
+	void CleanUpRayTracing();
+#endif // VULKAN_RHI_RAYTRACING
 
 #if VULKAN_SUPPORTS_VALIDATION_CACHE
 	inline VkValidationCacheEXT GetValidationCache() const
@@ -268,14 +345,9 @@ public:
 	}
 #endif
 
-	inline const VkPhysicalDeviceFeatures& GetPhysicalFeatures() const
+	inline const FVulkanPhysicalDeviceFeatures& GetPhysicalDeviceFeatures() const
 	{
-		return PhysicalFeatures;
-	}
-
-	inline bool HasSeparateDepthStencilLayouts() const
-	{
-		return bHasSeparateDepthStencilLayouts;
+		return PhysicalDeviceFeatures;
 	}
 
 	inline bool HasUnifiedMemory() const
@@ -283,13 +355,12 @@ public:
 		return DeviceMemoryManager.HasUnifiedMemory();
 	}
 
+	bool SupportsBindless() const;
+
 	inline uint64 GetTimestampValidBitsMask() const
 	{
 		return TimestampValidBitsMask;
 	}
-
-	bool IsTextureFormatSupported(VkFormat Format, uint32 RequiredFeatures) const;
-	bool IsBufferFormatSupported(VkFormat Format) const;
 
 	const VkComponentMapping& GetFormatComponentMapping(EPixelFormat UEFormat) const;
 
@@ -303,15 +374,12 @@ public:
 		return *DefaultSampler;
 	}
 
-	inline const FVulkanTextureView& GetDefaultImageView() const
+	inline const FVulkanView::FTextureView& GetDefaultImageView() const
 	{
-		return DefaultTextureView;
+		return DefaultTexture->DefaultView->GetTextureView();
 	}
 
-	inline const VkFormatProperties* GetFormatProperties() const
-	{
-		return FormatProperties;
-	}
+	const VkFormatProperties& GetFormatProperties(VkFormat InFormat) const;
 
 	inline VulkanRHI::FDeviceMemoryManager& GetDeviceMemoryManager()
 	{
@@ -326,11 +394,6 @@ public:
 	inline VulkanRHI::FMemoryManager& GetMemoryManager()
 	{
 		return MemoryManager;
-	}
-
-	inline bool SupportsMemoryless()
-	{
-		return bSupportsMemoryless;
 	}
 
 	inline VulkanRHI::FDeferredDeletionQueue2& GetDeferredDeletionQueue()
@@ -348,6 +411,11 @@ public:
 		return FenceManager;
 	}
 
+	inline FVulkanRenderPassManager& GetRenderPassManager()
+	{
+		return *RenderPassManager;
+	}
+
 	inline FVulkanDescriptorSetCache& GetDescriptorSetCache()
 	{
 		return *DescriptorSetCache;
@@ -356,6 +424,11 @@ public:
 	inline FVulkanDescriptorPoolsManager& GetDescriptorPoolsManager()
 	{
 		return *DescriptorPoolsManager;
+	}
+
+	inline FVulkanBindlessDescriptorManager* GetBindlessDescriptorManager()
+	{
+		return BindlessDescriptorManager;
 	}
 
 	inline TMap<uint32, FSamplerStateRHIRef>& GetSamplerMap()
@@ -378,22 +451,6 @@ public:
 	void NotifyDeletedImage(VkImage Image, bool bRenderTarget);
 
 #if VULKAN_ENABLE_DRAW_MARKERS
-	inline PFN_vkCmdDebugMarkerBeginEXT GetCmdDbgMarkerBegin() const
-	{
-		return DebugMarkers.CmdBegin;
-	}
-
-	inline PFN_vkCmdDebugMarkerEndEXT GetCmdDbgMarkerEnd() const
-	{
-		return DebugMarkers.CmdEnd;
-	}
-
-	inline PFN_vkDebugMarkerSetObjectNameEXT GetDebugMarkerSetObjectName() const
-	{
-		return DebugMarkers.CmdSetObjectName;
-	}
-
-#if 0//VULKAN_SUPPORTS_DEBUG_UTILS
 	inline PFN_vkCmdBeginDebugUtilsLabelEXT GetCmdBeginDebugLabel() const
 	{
 		return DebugMarkers.CmdBeginDebugLabel;
@@ -408,8 +465,6 @@ public:
 	{
 		return DebugMarkers.SetDebugName;
 	}
-#endif
-
 #endif
 
 	void PrepareForCPURead();
@@ -435,6 +490,16 @@ public:
 		return OptionalDeviceExtensions;
 	}
 
+	inline const FOptionalVulkanDeviceExtensionProperties& GetOptionalExtensionProperties() const
+	{
+		return OptionalDeviceExtensionProperties;
+	}
+
+	inline bool SupportsParallelRendering() const
+	{
+		return OptionalDeviceExtensions.HasSeparateDepthStencilLayouts && OptionalDeviceExtensions.HasKHRSynchronization2 && OptionalDeviceExtensions.HasKHRRenderPass2;
+	}
+
 #if VULKAN_SUPPORTS_GPU_CRASH_DUMPS
 	VkBuffer GetCrashMarkerBuffer() const
 	{
@@ -449,27 +514,26 @@ public:
 
 	void SetupPresentQueue(VkSurfaceKHR Surface);
 
-#if VULKAN_SUPPORTS_COLOR_CONVERSIONS
-	VkSamplerYcbcrConversion CreateSamplerColorConversion(const VkSamplerYcbcrConversionCreateInfo& CreateInfo);
-#endif
+	inline const TArray<VkQueueFamilyProperties>& GetQueueFamilyProps()
+	{
+		return QueueFamilyProps;
+	}
 
-	void*	Hotfix = nullptr;
+	FVulkanTransientHeapCache& GetOrCreateTransientHeapCache();
+
+	const TArray<const ANSICHAR*>& GetDeviceExtensions() { return DeviceExtensions; }
+
+	// Performs a GPU and CPU timestamp at nearly the same time.
+	// This allows aligning GPU and CPU events on the same timeline in profile visualization.
+	FGPUTimingCalibrationTimestamp GetCalibrationTimestamp();
 
 private:
-	void MapFormatSupport(EPixelFormat UEFormat, VkFormat VulkanFormat);
-	void MapFormatSupportWithFallback(EPixelFormat UEFormat, uint32 TextureRequiredFeatures, VkFormat VulkanFormat, TArrayView<const VkFormat> FallbackTextureFormats);
-	void MapFormatSupport(EPixelFormat UEFormat, VkFormat VulkanFormat, int32 BlockBytes);
-	void SetComponentMapping(EPixelFormat UEFormat, VkComponentSwizzle r, VkComponentSwizzle g, VkComponentSwizzle b, VkComponentSwizzle a);
-
-	FORCEINLINE void MapFormatSupportWithFallback(EPixelFormat UEFormat, VkFormat VulkanFormat, std::initializer_list<VkFormat> FallbackTextureFormats)
-	{
-		MapFormatSupportWithFallback(UEFormat, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT, VulkanFormat, MakeArrayView(FallbackTextureFormats));
-	}
-	
-	FORCEINLINE void MapFormatSupportWithFallback(EPixelFormat UEFormat, uint32 TextureRequiredFeatures, VkFormat VulkanFormat, std::initializer_list<VkFormat> FallbackTextureFormats)
-	{
-		MapFormatSupportWithFallback(UEFormat, TextureRequiredFeatures, VulkanFormat, MakeArrayView(FallbackTextureFormats));
-	}
+	void MapBufferFormatSupport(FPixelFormatInfo& PixelFormatInfo, EPixelFormat UEFormat, VkFormat VulkanFormat);
+	void MapImageFormatSupport(FPixelFormatInfo& PixelFormatInfo, const TArrayView<const VkFormat>& PrioritizedFormats, EPixelFormatCapabilities RequiredCapabilities);
+	void MapFormatSupport(EPixelFormat UEFormat, std::initializer_list<VkFormat> PrioritizedFormats, const VkComponentMapping& ComponentMapping, EPixelFormatCapabilities RequiredCapabilities, int32 BlockBytes);
+	void MapFormatSupport(EPixelFormat UEFormat, std::initializer_list<VkFormat> PrioritizedFormats, const VkComponentMapping& ComponentMapping);
+	void MapFormatSupport(EPixelFormat UEFormat, std::initializer_list<VkFormat> PrioritizedFormats, const VkComponentMapping& ComponentMapping, int32 BlockBytes);
+	void MapFormatSupport(EPixelFormat UEFormat, std::initializer_list<VkFormat> PrioritizedFormats, const VkComponentMapping& ComponentMapping, EPixelFormatCapabilities RequiredCapabilities);
 
 	void SubmitCommands(FVulkanCommandListContext* Context);
 
@@ -486,45 +550,37 @@ private:
 
 	VulkanRHI::FFenceManager FenceManager;
 
+	FVulkanRenderPassManager* RenderPassManager;
+
+	FVulkanTransientHeapCache* TransientHeapCache = nullptr;
+
 	// Active on ES3.1
 	FVulkanDescriptorSetCache* DescriptorSetCache = nullptr;
 	// Active on >= SM4
 	FVulkanDescriptorPoolsManager* DescriptorPoolsManager = nullptr;
 
+	FVulkanBindlessDescriptorManager* BindlessDescriptorManager = nullptr;
+
 	FVulkanShaderFactory ShaderFactory;
 
 	FVulkanSamplerState* DefaultSampler;
-	FVulkanSurface* DefaultImage;
-	FVulkanTextureView DefaultTextureView;
+	FVulkanTexture* DefaultTexture;
 
 	VkPhysicalDevice Gpu;
 	VkPhysicalDeviceProperties GpuProps;
-#if VULKAN_SUPPORTS_FRAGMENT_DENSITY_MAP
-	VkPhysicalDeviceFragmentDensityMapFeaturesEXT FragmentDensityMapFeatures;
-#endif
 
-#if VULKAN_SUPPORTS_FRAGMENT_DENSITY_MAP2
-	VkPhysicalDeviceFragmentDensityMap2FeaturesEXT FragmentDensityMap2Features;
-#endif
-
-#if VULKAN_SUPPORTS_FRAGMENT_SHADING_RATE
-	VkPhysicalDeviceFragmentShadingRatePropertiesKHR FragmentShadingRateProperties;
-	VkPhysicalDeviceFragmentShadingRateFeaturesKHR FragmentShadingRateFeatures;
 	TArray<VkPhysicalDeviceFragmentShadingRateKHR> FragmentShadingRates;
-#endif
+	TStaticArray<VkExtent2D, (EVRSShadingRate::VRSSR_Last+1)> FragmentSizeMap;
 
-#if VULKAN_SUPPORTS_MULTIVIEW
-	VkPhysicalDeviceMultiviewFeatures MultiviewFeatures;
-#endif
-
-#if VULKAN_SUPPORTS_PHYSICAL_DEVICE_PROPERTIES2
+	// Extension specific properties
 	VkPhysicalDeviceIDPropertiesKHR GpuIdProps;
-#endif
+	VkPhysicalDeviceSubgroupProperties GpuSubgroupProps;
 
-	VkPhysicalDeviceFeatures PhysicalFeatures;
-	bool bHasSeparateDepthStencilLayouts = false;
+#if VULKAN_RHI_RAYTRACING
+	FVulkanRayTracingCompactionRequestHandler* RayTracingCompactionRequestHandler = nullptr;
+#endif // VULKAN_RHI_RAYTRACING
 
-	bool bSupportsMemoryless = true;
+	FVulkanPhysicalDeviceFeatures PhysicalDeviceFeatures;
 
 	TArray<VkQueueFamilyProperties> QueueFamilyProps;
 	VkFormatProperties FormatProperties[VK_FORMAT_RANGE_SIZE];
@@ -560,18 +616,15 @@ private:
 	FVulkanCommandListContextImmediate* ImmediateContext;
 	FVulkanCommandListContext* ComputeContext;
 	TArray<FVulkanCommandListContext*> CommandContexts;
-#if VULKAN_SUPPORTS_COLOR_CONVERSIONS
-	TMap<uint32, VkSamplerYcbcrConversion> SamplerColorConversionMap;
-#endif
 
 	FVulkanDynamicRHI* RHI = nullptr;
 	bool bDebugMarkersFound = false;
-	TArray<const ANSICHAR*> DeviceExtensions;
-	TArray<const ANSICHAR*> ValidationLayers;
+	
+	static TArray<const ANSICHAR*> SetupDeviceLayers(VkPhysicalDevice Gpu, FVulkanDeviceExtensionArray& UEExtensions);
 
-	static void GetDeviceExtensionsAndLayers(VkPhysicalDevice Gpu, EGpuVendorId VendorId, TArray<const ANSICHAR*>& OutDeviceExtensions, TArray<const ANSICHAR*>& OutDeviceLayers, TArray<FString>& OutAllDeviceExtensions, TArray<FString>& OutAllDeviceLayers, bool& bOutDebugMarkers);
-
-	FOptionalVulkanDeviceExtensions OptionalDeviceExtensions;
+	FOptionalVulkanDeviceExtensions	OptionalDeviceExtensions;
+	FOptionalVulkanDeviceExtensionProperties OptionalDeviceExtensionProperties;
+	TArray<const ANSICHAR*>			DeviceExtensions;
 
 	void SetupFormats();
 
@@ -582,15 +635,9 @@ private:
 #if VULKAN_ENABLE_DRAW_MARKERS
 	struct
 	{
-		PFN_vkCmdDebugMarkerBeginEXT		CmdBegin = nullptr;
-		PFN_vkCmdDebugMarkerEndEXT			CmdEnd = nullptr;
-		PFN_vkDebugMarkerSetObjectNameEXT	CmdSetObjectName = nullptr;
 		PFN_vkSetDebugUtilsObjectNameEXT	SetDebugName = nullptr;
-
-#if 0//VULKAN_SUPPORTS_DEBUG_UTILS
 		PFN_vkCmdBeginDebugUtilsLabelEXT	CmdBeginDebugLabel = nullptr;
 		PFN_vkCmdEndDebugUtilsLabelEXT		CmdEndDebugLabel = nullptr;
-#endif
 	} DebugMarkers;
 	friend class FVulkanCommandListContext;
 #endif

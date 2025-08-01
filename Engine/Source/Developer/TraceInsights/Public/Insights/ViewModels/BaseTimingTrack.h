@@ -12,16 +12,19 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 class FMenuBuilder;
-namespace Trace { class IAnalysisSession; };
+namespace TraceServices { class IAnalysisSession; };
+namespace Insights { class FFilterConfigurator; }
 
 class FTimingEventSearchParameters;
 class FTimingTrackViewport;
 class ITimingViewDrawHelper;
 class FTooltipDrawState;
 class ITimingEvent;
+class ITimingEventRelation;
 class ITimingEventFilter;
 
 struct FDrawContext;
+struct FGeometry;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -44,10 +47,11 @@ struct TRACEINSIGHTS_API FTimingTrackOrder
 	static constexpr int32 TimeRuler  = -2 * GroupRange;
 	static constexpr int32 Markers    = -1 * GroupRange;
 	static constexpr int32 First      = 0;
-	static constexpr int32 Memory     = 1 * GroupRange;
-	static constexpr int32 Gpu        = 2 * GroupRange;
-	static constexpr int32 Cpu        = 3 * GroupRange;
-	static constexpr int32 Last       = 4 * GroupRange;
+	static constexpr int32 Task       = 1 * GroupRange;
+	static constexpr int32 Memory     = 2 * GroupRange;
+	static constexpr int32 Gpu        = 3 * GroupRange;
+	static constexpr int32 Cpu        = 4 * GroupRange;
+	static constexpr int32 Last       = 5 * GroupRange;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -88,11 +92,13 @@ ENUM_CLASS_FLAGS(EDrawEventMode);
 class TRACEINSIGHTS_API ITimingTrackUpdateContext
 {
 public:
+	virtual const FGeometry& GetGeometry() const = 0;
 	virtual const FTimingTrackViewport& GetViewport() const = 0;
 	virtual const FVector2D& GetMousePosition() const = 0;
 	virtual const TSharedPtr<const ITimingEvent> GetHoveredEvent() const = 0;
 	virtual const TSharedPtr<const ITimingEvent> GetSelectedEvent() const = 0;
 	virtual const TSharedPtr<ITimingEventFilter> GetEventFilter() const = 0;
+	virtual const TArray<TUniquePtr<ITimingEventRelation>>& GetCurrentRelations() const = 0;
 	virtual double GetCurrentTime() const = 0;
 	virtual float GetDeltaTime() const = 0;
 };
@@ -252,6 +258,15 @@ public:
 	// Called back from the timing view when an event is copied to the clipboard with Ctrl+C.
 	virtual void OnClipboardCopyEvent(const ITimingEvent& InSelectedEvent) const {}
 
+	TSharedPtr<FBaseTimingTrack> GetChildTrack() const { return ChildTrack; }
+	void SetChildTrack(TSharedPtr<FBaseTimingTrack> InTrack) { ChildTrack = InTrack; };
+
+	void SetParentTrack(TWeakPtr<FBaseTimingTrack> InTrack) { ParentTrack = InTrack; }
+	TWeakPtr<FBaseTimingTrack> GetParentTrack() const { return ParentTrack; }
+	bool IsChildTrack() const { return ParentTrack.IsValid(); }
+
+	virtual void SetFilterConfigurator(TSharedPtr<Insights::FFilterConfigurator> InFilterConfigurator) {}
+
 	// Returns number of text lines needed to display the debug string.
 	//TODO: virtual int GetDebugStringLineCount() const { return 0; }
 
@@ -261,6 +276,10 @@ public:
 protected:
 	void SetValidLocations(ETimingTrackLocation InValidLocations) { ValidLocations = InValidLocations; }
 	static uint64 GenerateId() { return IdGenerator++; }
+
+protected:
+	TSharedPtr<FBaseTimingTrack> ChildTrack;
+	TWeakPtr<FBaseTimingTrack> ParentTrack;
 
 private:
 	const uint64 Id;

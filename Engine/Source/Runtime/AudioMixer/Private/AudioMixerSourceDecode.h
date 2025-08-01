@@ -109,20 +109,31 @@ namespace Audio
 	struct FProceduralAudioTaskResults
 	{
 		int32 NumSamplesWritten;
+		bool bIsFinished;
+
+#if ENABLE_AUDIO_DEBUG
+		double CPUDuration = 0.0;
+#endif // if ENABLE_AUDIO_DEBUG
 
 		FProceduralAudioTaskResults()
 			: NumSamplesWritten(0)
+			, bIsFinished(false)
 		{}
 	};
 
 	// Results from decode audio task
 	struct FDecodeAudioTaskResults
 	{
+
 		// Whether or not the audio buffer looped
-		bool bLooped;
+		bool bIsFinishedOrLooped;
+
+#if ENABLE_AUDIO_DEBUG
+		double CPUDuration = 0;
+#endif // if ENABLE_AUDIO_DEBUG
 
 		FDecodeAudioTaskResults()
-			: bLooped(false)
+			: bIsFinishedOrLooped(false)
 		{}
 	};
 
@@ -168,12 +179,26 @@ namespace Audio
 	};
 
 	// Creates a task to decode a decoded file header
-	IAudioTask* CreateAudioTask(const FHeaderParseAudioTaskData& InJobData);
+	IAudioTask* CreateAudioTask(Audio::FDeviceId InDeviceId, const FHeaderParseAudioTaskData& InJobData);
 
 	// Creates a task for a procedural sound wave generation
-	IAudioTask* CreateAudioTask(const FProceduralAudioTaskData& InJobData);
+	IAudioTask* CreateAudioTask(Audio::FDeviceId InDeviceId, const FProceduralAudioTaskData& InJobData);
 
 	// Creates a task to decode a chunk of audio
-	IAudioTask* CreateAudioTask(const FDecodeAudioTaskData& InJobData);
+	IAudioTask* CreateAudioTask(Audio::FDeviceId InDeviceId, const FDecodeAudioTaskData& InJobData);
+
+	// Creates a queue for audio decode requests with a specific Id. Tasks
+	// created with this Id will not be started immediately upon creation,
+	// but will instead be queued up to await a start "kick" later. NOTE:
+	// "kicking" the queue is the responsibility of the system that creates 
+	// the queue, typically someplace like in a FOnAudioDevicePostRender delegate! 
+	void CreateSynchronizedAudioTaskQueue(AudioTaskQueueId QueueId);
+
+	// Destroys an audio decode task queue. Tasks currently queued up are 
+	// optionally started.
+	void DestroySynchronizedAudioTaskQueue(AudioTaskQueueId QueueId, bool RunCurrentQueue = false);
+
+	// "Kicks" all of the audio decode tasks currentlyt in the specified queue.
+	int KickQueuedTasks(AudioTaskQueueId QueueId);
 
 }

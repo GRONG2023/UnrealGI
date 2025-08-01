@@ -18,9 +18,16 @@ struct FCrashReportUtil
 	/** Formats processed diagnostic text by adding additional information about machine and user. */
 	static FText FormatDiagnosticText( const FText& DiagnosticText )
 	{
-		const FString LoginId = FPrimaryCrashProperties::Get()->LoginId.AsString();
-		const FString EpicAccountId = FPrimaryCrashProperties::Get()->EpicAccountId.AsString();
-		return FText::Format( LOCTEXT( "CrashReportClientCallstackPattern", "LoginId:{0}\nEpicAccountId:{1}\n\n{2}" ), FText::FromString( LoginId ), FText::FromString( EpicAccountId ), DiagnosticText );
+		TStringBuilder<512> Accounts;
+		if (const FString LoginId = FPrimaryCrashProperties::Get()->LoginId.AsString(); !LoginId.IsEmpty())
+		{
+			Accounts.Appendf(TEXT("LoginId:%s\n"), *LoginId);
+		}
+		if (const FString EpicAccountId= FPrimaryCrashProperties::Get()->EpicAccountId.AsString(); !EpicAccountId.IsEmpty())
+		{
+			Accounts.Appendf(TEXT("EpicAccountId:%s\n"), *EpicAccountId);
+		}
+		return FText::Format(LOCTEXT("CrashReportClientCallstackPattern", "{0}\n{1}"), FText::FromString(Accounts.ToString()), DiagnosticText);
 	}
 };
 
@@ -29,14 +36,14 @@ struct FCrashReportUtil
 #include "PlatformHttp.h"
 #include "Framework/Application/SlateApplication.h"
 
-FCrashReportClient::FCrashReportClient(const FPlatformErrorReport& InErrorReport)
+FCrashReportClient::FCrashReportClient(const FPlatformErrorReport& InErrorReport, bool bImplicitSend)
 	: DiagnosticText( LOCTEXT("ProcessingReport", "Processing crash report ...") )
 	, DiagnoseReportTask(nullptr)
 	, ErrorReport( InErrorReport )
 	, ReceiverUploader(FCrashReportCoreConfig::Get().GetReceiverAddress())
 	, DataRouterUploader(FCrashReportCoreConfig::Get().GetDataRouterURL())
 	, bShouldWindowBeHidden(false)
-	, bSendData(false)
+	, bSendData(bImplicitSend)
 	, bIsSuccesfullRestart(false)
 	, bIsUploadComplete(false)
 {
@@ -70,13 +77,18 @@ FCrashReportClient::FCrashReportClient(const FPlatformErrorReport& InErrorReport
 			FormattedDiagnosticText = FCrashReportUtil::FormatDiagnosticText( FText::FromString( ReportString ) );
 		}
 	}
+
+	if (bSendData)
+	{
+		StartTicker();
+	}
 }
 
 FCrashReportClient::~FCrashReportClient()
 {
 	if (TickHandle.IsValid())
 	{
-		FTicker::GetCoreTicker().RemoveTicker(TickHandle);
+		FTSTicker::GetCoreTicker().RemoveTicker(TickHandle);
 		TickHandle.Reset();
 	}
 	StopBackgroundThread();
@@ -100,6 +112,25 @@ FReply FCrashReportClient::CloseWithoutSending()
 	return FReply::Handled();
 }
 
+FReply FCrashReportClient::Close()
+{
+	bShouldWindowBeHidden = true;
+	return FReply::Handled();
+}
+
+#if PLATFORM_WINDOWS
+extern void CopyDiagnosticFilesToClipboard(TConstArrayView<FString> Files);
+#endif
+
+#if PLATFORM_WINDOWS
+FReply FCrashReportClient::CopyFilesToClipboard()
+{
+	TArray<FString> Files = FPlatformErrorReport(ErrorReport.GetReportDirectory()).GetFilesToUpload();
+	CopyDiagnosticFilesToClipboard(Files);
+	return FReply::Handled();
+}
+#endif
+
 FReply FCrashReportClient::Submit()
 {
 	bSendData = true;
@@ -120,7 +151,7 @@ FReply FCrashReportClient::SubmitAndRestart()
 	if (bRunFromLauncher)
 	{
 		// Hacky check to see if this is the editor. Not attempting to relaunch the editor using the Launcher because there is no way to pass the project via OpenLauncher()
-		if (!FPaths::GetCleanFilename(CrashedAppPath).StartsWith(TEXT("UE4Editor")))
+		if (!FPaths::GetCleanFilename(CrashedAppPath).StartsWith(TEXT("UnrealEditor")))
 		{
 			// We'll restart Launcher-run processes by having the installed Launcher handle it
 			ILauncherPlatform* LauncherPlatform = FLauncherPlatformModule::Get();
@@ -188,9 +219,6 @@ void FCrashReportClient::UserCommentChanged(const FText& Comment, ETextCommit::T
 
 void FCrashReportClient::RequestCloseWindow(const TSharedRef<SWindow>& Window)
 {
-	// Don't send the data.
-	bSendData = false;
-
 	// We may still processing minidump etc. so start the main ticker.
 	StartTicker();
 	bShouldWindowBeHidden = true;
@@ -229,7 +257,7 @@ void FCrashReportClient::StartTicker()
 {
 	if (!TickHandle.IsValid())
 	{
-		TickHandle = FTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FCrashReportClient::Tick), 1.f);
+		TickHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FCrashReportClient::Tick), 1.f);
 	}
 }
 
@@ -258,12 +286,7 @@ bool FCrashReportClient::Tick(float UnusedDeltaTime)
 		check(DiagnoseReportTask == nullptr); // Expected after StopBackgroundThread() call.
 	}
 
-	// Before going further, wait for the an action, either Submit(), CloseWithoutSending() or RequestCloseWindow().
-	if (!bShouldWindowBeHidden)
-	{
-		return true;
-	}
-
+	// Implicit send will begin uploading immediately and continue after the window is hidden
 	if( bSendData )
 	{
 		if (!FCrashUploadBase::IsInitialized())
@@ -304,6 +327,11 @@ bool FCrashReportClient::Tick(float UnusedDeltaTime)
 				return true;
 			}
 		}
+	}
+
+	if (!bShouldWindowBeHidden)
+	{
+		return true;
 	}
 
 	if (FCrashUploadBase::IsInitialized())

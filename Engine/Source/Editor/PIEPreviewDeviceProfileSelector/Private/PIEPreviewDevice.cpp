@@ -5,6 +5,7 @@
 #include "HAL/IConsoleManager.h"
 #include "CoreGlobals.h"
 #include "RHI.h"
+#include "DataDrivenShaderPlatformInfo.h"
 #include "Misc/ConfigCacheIni.h"
 #include "IDeviceProfileSelectorModule.h"
 #include "Modules/ModuleManager.h"
@@ -58,22 +59,22 @@ void FPIEPreviewDevice::ComputeViewportSize(const bool bClampWindowSize)
 
  	// compute widow size
 	WindowWidth = ScreenWidth;
-	WindowHeight = ScreenHeight + WindowTitleBarSize * DPIScaleFactor;
+	WindowHeight = ScreenHeight + FMath::TruncToInt32((float)WindowTitleBarSize * DPIScaleFactor);
 
 	// compute viewport margin
 	if (bShowBezel && BezelTexture != nullptr)
 	{
 		// compute widow size
-		WindowWidth += 2.0f * ViewportRect.X * ScaleX;
-		WindowHeight += 2.0f * ViewportRect.Y * ScaleY;
+		WindowWidth += FMath::TruncToInt32(2.0f * ViewportRect.X * ScaleX);
+		WindowHeight += FMath::TruncToInt32(2.0f * ViewportRect.Y * ScaleY);
 
 		ViewportRect.X = FMath::RoundToInt(ViewportRect.X * BezelScaleFactor);
 		ViewportRect.Y = FMath::RoundToInt(ViewportRect.Y * BezelScaleFactor);
 		ViewportRect.Width = FMath::RoundToInt(ViewportRect.Width * BezelScaleFactor);
 		ViewportRect.Height = FMath::RoundToInt(ViewportRect.Height * BezelScaleFactor);
 
-		ViewportMargin.Left = ViewportRect.X;
-		ViewportMargin.Top = ViewportRect.Y;
+		ViewportMargin.Left = (float)ViewportRect.X;
+		ViewportMargin.Top = (float)ViewportRect.Y;
 
 		int32 BezelWidth = IsDeviceFlipped() ? BezelTexture->GetSizeY() : BezelTexture->GetSizeX();
 		int32 BezelHeight = IsDeviceFlipped() ? BezelTexture->GetSizeX() : BezelTexture->GetSizeY();
@@ -107,7 +108,7 @@ void FPIEPreviewDevice::ComputeViewportSize(const bool bClampWindowSize)
 			ScaleY *= ScaleFactor;
 
 			WindowWidth = DesktopWidth;
-			WindowHeight *= ScaleFactor;
+			WindowHeight = FMath::TruncToInt32((float)WindowHeight * ScaleFactor);
 
 			ViewportMargin = ViewportMargin * ScaleFactor;
 		}
@@ -117,7 +118,7 @@ void FPIEPreviewDevice::ComputeViewportSize(const bool bClampWindowSize)
 			ScaleX *= ScaleFactor;
 			ScaleY *= ScaleFactor;
 
-			WindowWidth *= ScaleFactor;
+			WindowWidth = FMath::TruncToInt32((float)WindowWidth * ScaleFactor);
 			WindowHeight = DesktopHeight;
 
 			ViewportMargin = ViewportMargin * ScaleFactor;
@@ -162,8 +163,8 @@ void FPIEPreviewDevice::ComputeContentScaledResolution(int32& Width, int32& Heig
 					RequestedContentScaleFactor = DeviceSpecs->IOSProperties.NativeScaleFactor;
 				}
 
-				Width *= RequestedContentScaleFactor;
-				Height *= RequestedContentScaleFactor;
+				Width = FMath::TruncToInt32((float)Width * RequestedContentScaleFactor);
+				Height = FMath::TruncToInt32((float)Height * RequestedContentScaleFactor);
 			}
 			break;
 
@@ -177,8 +178,8 @@ void FPIEPreviewDevice::ComputeDeviceResolution(int32& Width, int32& Height)
 {
 	ComputeContentScaledResolution(Width, Height);
 
-	Width *= ResolutionScaleFactor;
-	Height *= ResolutionScaleFactor;
+	Width = FMath::TruncToInt32((float)Width * ResolutionScaleFactor);
+	Height = FMath::TruncToInt32((float)Height * ResolutionScaleFactor);
 }
 
 void FPIEPreviewDevice::DetermineScreenOrientationRequirements(bool& bNeedPortrait, bool& bNeedLandscape)
@@ -272,16 +273,16 @@ ERHIFeatureLevel::Type FPIEPreviewDevice::GetPreviewDeviceFeatureLevel() const
 			// use a local ini file, so that Windows can read settings that are in SwitchEngine.ini files...
 			FConfigFile SwitchSettings;
 			FConfigCacheIni::LoadLocalIniFile(SwitchSettings, TEXT("Engine"), true, TEXT("Switch"));
-			bool bUseMobileRenderer = false;
-			SwitchSettings.GetBool(TEXT("/Script/SwitchRuntimeSettings.SwitchRuntimeSettings"), TEXT("bUseMobileForwardRenderer"), bUseMobileRenderer);
+			bool bSupportDesktopRenderer = false;
+			SwitchSettings.GetBool(TEXT("/Script/SwitchRuntimeSettings.SwitchRuntimeSettings"), TEXT("bSupportDesktopRenderer"), bSupportDesktopRenderer);
 
-			if (bUseMobileRenderer)
+			if (bSupportDesktopRenderer)
 			{
-				return ERHIFeatureLevel::ES3_1;
+				return ERHIFeatureLevel::SM5;
 			}
 			else
 			{
-				return ERHIFeatureLevel::SM5;
+				return ERHIFeatureLevel::ES3_1;
 			}
 		}
 	}
@@ -411,6 +412,24 @@ void FPIEPreviewDevice::ApplyRHIOverrides() const
 	}
 }
 
+bool FPIEPreviewDevice::GetSelectorPropertyValue(const FName& PropertyType, FString& PropertyValueOUT) const
+{
+	switch (DeviceSpecs->DevicePlatform)
+	{
+		case EPIEPreviewDeviceType::Android:
+		{
+			IDeviceProfileSelectorModule* AndroidDeviceProfileSelector = FModuleManager::LoadModulePtr<IDeviceProfileSelectorModule>("AndroidDeviceProfileSelector");
+			if (AndroidDeviceProfileSelector)
+			{
+				return AndroidDeviceProfileSelector->GetSelectorPropertyValue(PropertyType, PropertyValueOUT);
+			}
+		}
+		break;
+	}
+	return false;
+}
+
+
 FString FPIEPreviewDevice::GetProfile() const
 {
 	FString Profile;
@@ -424,20 +443,24 @@ FString FPIEPreviewDevice::GetProfile() const
 			{
 				FPIEAndroidDeviceProperties& AndroidProperties = DeviceSpecs->AndroidProperties;
 
-				TMap<FString, FString> DeviceParameters;
-				DeviceParameters.Add("GPUFamily", AndroidProperties.GPUFamily);
-				DeviceParameters.Add("GLVersion", AndroidProperties.GLVersion);
-				DeviceParameters.Add("VulkanAvailable", AndroidProperties.VulkanAvailable ? "true" : "false");
-				DeviceParameters.Add("VulkanVersion", AndroidProperties.VulkanVersion);
-				DeviceParameters.Add("AndroidVersion", AndroidProperties.AndroidVersion);
-				DeviceParameters.Add("DeviceMake", AndroidProperties.DeviceMake);
-				DeviceParameters.Add("DeviceModel", AndroidProperties.DeviceModel);
-				DeviceParameters.Add("DeviceBuildNumber", AndroidProperties.DeviceBuildNumber);
-				DeviceParameters.Add("UsingHoudini", AndroidProperties.UsingHoudini ? "true" : "false");
-				DeviceParameters.Add("Hardware", AndroidProperties.Hardware);
-				DeviceParameters.Add("Chipset", AndroidProperties.Chipset);
+				TMap<FName, FString> DeviceParameters;
+				DeviceParameters.Add(FName(TEXT("SRC_GPUFamily")), AndroidProperties.GPUFamily);
+				DeviceParameters.Add(FName(TEXT("SRC_GLVersion")), AndroidProperties.GLVersion);
+				DeviceParameters.Add(FName(TEXT("SRC_VulkanAvailable")), AndroidProperties.VulkanAvailable ? "true" : "false");
+				DeviceParameters.Add(FName(TEXT("SRC_VulkanVersion")), AndroidProperties.VulkanVersion);
+				DeviceParameters.Add(FName(TEXT("SRC_AndroidVersion")), AndroidProperties.AndroidVersion);
+				DeviceParameters.Add(FName(TEXT("SRC_DeviceMake")), AndroidProperties.DeviceMake);
+				DeviceParameters.Add(FName(TEXT("SRC_DeviceModel")), AndroidProperties.DeviceModel);
+				DeviceParameters.Add(FName(TEXT("SRC_DeviceBuildNumber")), AndroidProperties.DeviceBuildNumber);
+				DeviceParameters.Add(FName(TEXT("SRC_UsingHoudini")), AndroidProperties.UsingHoudini ? "true" : "false");
+				DeviceParameters.Add(FName(TEXT("SRC_Hardware")), AndroidProperties.Hardware);
+				DeviceParameters.Add(FName(TEXT("SRC_Chipset")), AndroidProperties.Chipset);
+				DeviceParameters.Add(FName(TEXT("SRC_HMDSystemName")), AndroidProperties.HMDSystemName);
+				DeviceParameters.Add(FName(TEXT("SRC_TotalPhysicalGB")), AndroidProperties.TotalPhysicalGB);
+				DeviceParameters.Add(FName(TEXT("SRC_SM5Available")), AndroidProperties.SM5Available ? "true" : "false");
 
-				FString PIEProfileName = AndroidDeviceProfileSelector->GetDeviceProfileName(DeviceParameters);
+				AndroidDeviceProfileSelector->SetSelectorProperties(DeviceParameters);
+				FString PIEProfileName = AndroidDeviceProfileSelector->GetDeviceProfileName();
 				if (!PIEProfileName.IsEmpty())
 				{
 					Profile = PIEProfileName;
@@ -456,15 +479,15 @@ FString FPIEPreviewDevice::GetProfile() const
 			// load switch renderer configuration
 			FConfigFile SwitchSettings;
 			FConfigCacheIni::LoadLocalIniFile(SwitchSettings, TEXT("Engine"), true, TEXT("Switch"));
-			bool bUseMobileRenderer = false;
-			SwitchSettings.GetBool(TEXT("/Script/SwitchRuntimeSettings.SwitchRuntimeSettings"), TEXT("bUseMobileForwardRenderer"), bUseMobileRenderer);
+			bool bSupportDesktopRenderer = false;
+			SwitchSettings.GetBool(TEXT("/Script/SwitchRuntimeSettings.SwitchRuntimeSettings"), TEXT("bSupportDesktopRenderer"), bSupportDesktopRenderer);
 			bool bForwardShading = false;
 			SwitchSettings.GetBool(TEXT("/Script/SwitchRuntimeSettings.SwitchRuntimeSettings"), TEXT("bUseForwardShading"), bForwardShading);
 	
 			// taken from FSwitchApplication::UpdateActiveDeviceProfile()
 			Profile = DeviceSpecs->SwitchProperties.Docked ?
-				((bUseMobileRenderer || bForwardShading) ? TEXT("Switch_Console_Forward") : TEXT("Switch_Console_Deferred")) :
-				((bUseMobileRenderer || bForwardShading) ? TEXT("Switch_Handheld_Forward") : TEXT("Switch_Handheld_Deferred"));
+				((!bSupportDesktopRenderer || bForwardShading) ? TEXT("Switch_Console_Forward") : TEXT("Switch_Console_Deferred")) :
+				((!bSupportDesktopRenderer || bForwardShading) ? TEXT("Switch_Handheld_Forward") : TEXT("Switch_Handheld_Deferred"));
 		
 			break;
 		}
@@ -475,5 +498,5 @@ FString FPIEPreviewDevice::GetProfile() const
 
 int32 FPIEPreviewDevice::GetWindowClientHeight() const
 {
-	return WindowHeight - WindowTitleBarSize * DPIScaleFactor;
+	return WindowHeight - FMath::TruncToInt32((float)WindowTitleBarSize * DPIScaleFactor);
 }

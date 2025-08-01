@@ -17,7 +17,7 @@
 
 FTexAlignTools GTexAlignTools;
 
-static int32 GetMajorAxis( FVector InNormal, int32 InForceAxis )
+static int32 GetMajorAxis( FVector3f InNormal, int32 InForceAxis )
 {
 	// Figure out the major axis information.
 	int32 Axis = TAXIS_X;
@@ -34,7 +34,7 @@ static int32 GetMajorAxis( FVector InNormal, int32 InForceAxis )
 }
 
 // Checks the normal of the major axis ... if it's negative, returns 1.
-static bool ShouldFlipVectors( FVector InNormal, int32 InAxis )
+static bool ShouldFlipVectors( FVector3f InNormal, int32 InAxis )
 {
 	if( InAxis == TAXIS_X )
 		if( InNormal.X < 0 ) return 1;
@@ -105,7 +105,7 @@ void UTexAligner::Align( UWorld* InWorld, ETexAlign InTexAlignType, UModel* InMo
 	{
 		FBspSurfIdx* Surf = &InitialSurfList[i];
 //		Normal = InModel->Vectors[ Surf->Surf->vNormal ];
-//		GEditor->polyFindMaster( InModel, Surf->Idx, EdPoly );
+//		GEditor->polyFindBrush( InModel, Surf->Idx, EdPoly );
 
 		bool bOK = 1;
 		/*
@@ -125,14 +125,14 @@ void UTexAligner::Align( UWorld* InWorld, ETexAlign InTexAlignType, UModel* InMo
 	for( int32 i = 0 ; i < FinalSurfList.Num() ; i++ )
 	{
 		FBspSurfIdx* Surf = &FinalSurfList[i];
-		GEditor->polyFindMaster( InModel, Surf->Idx, EdPoly );
-		Normal = InModel->Vectors[ Surf->Surf->vNormal ];
+		GEditor->polyFindBrush( InModel, Surf->Idx, EdPoly );
+		Normal = (FVector)InModel->Vectors[ Surf->Surf->vNormal ];
 
 		AlignSurf( InTexAlignType == TEXALIGN_None ? (ETexAlign)DefTexAlign : InTexAlignType, InModel, Surf, &EdPoly, &Normal );
 
 		const bool bUpdateTexCoords = true;
 		const bool bOnlyRefreshSurfaceMaterials = true;
-		GEditor->polyUpdateMaster(InModel, Surf->Idx, bUpdateTexCoords, bOnlyRefreshSurfaceMaterials);
+		GEditor->polyUpdateBrush(InModel, Surf->Idx, bUpdateTexCoords, bOnlyRefreshSurfaceMaterials);
 	}
 
 	GEditor->RedrawLevelEditingViewports();
@@ -166,12 +166,12 @@ void UTexAlignerPlanar::AlignSurf( ETexAlign InTexAlignType, UModel* InModel, FB
 	else if( InTexAlignType == TEXALIGN_PlanarFloor )
 		TAxis = TAXIS_Z;
 
-	int32 Axis = GetMajorAxis( *InNormal, TAxis );
+	int32 Axis = GetMajorAxis( (FVector3f)*InNormal, TAxis );
 
 	if( TAxis != TAXIS_AUTO && TAxis != TAXIS_WALLS )
 		Axis = TAxis;
 
-	bool bFlip = ShouldFlipVectors( *InNormal, Axis );
+	bool bFlip = ShouldFlipVectors( (FVector3f)*InNormal, Axis );
 
 	// Determine the texturing vectors.
 	FVector U, V;
@@ -217,8 +217,8 @@ void UTexAlignerDefault::PostInitProperties()
 void UTexAlignerDefault::AlignSurf( ETexAlign InTexAlignType, UModel* InModel, FBspSurfIdx* InSurfIdx, FPoly* InPoly, FVector* InNormal )
 {
 	InPoly->Base = InPoly->Vertices[0];
-	InPoly->TextureU = FVector::ZeroVector;
-	InPoly->TextureV = FVector::ZeroVector;
+	InPoly->TextureU = FVector3f::ZeroVector;
+	InPoly->TextureV = FVector3f::ZeroVector;
 	InPoly->Finalize( NULL, 0 );
 
 	InPoly->TextureU *= UTile;
@@ -231,9 +231,9 @@ void UTexAlignerDefault::AlignSurf( ETexAlign InTexAlignType, UModel* InModel, F
 	const FVector Scale = Actor->GetActorScale();
 	const FRotationMatrix RotMatrix(Rotation);
 
-	FVector Base = RotMatrix.TransformVector((InPoly->Base - PrePivot) * Scale) + Location;
-	FVector TextureU = RotMatrix.TransformVector(InPoly->TextureU / Scale);
-	FVector TextureV = RotMatrix.TransformVector(InPoly->TextureV / Scale);
+	FVector Base = RotMatrix.TransformVector(((FVector)InPoly->Base - PrePivot) * Scale) + Location;
+	FVector TextureU = RotMatrix.TransformVector((FVector)InPoly->TextureU / Scale);
+	FVector TextureV = RotMatrix.TransformVector((FVector)InPoly->TextureV / Scale);
 
 	InSurfIdx->Surf->pBase = FBSPOps::bspAddPoint(InModel, &Base, 0);
 	InSurfIdx->Surf->vTextureU = FBSPOps::bspAddVector( InModel, &TextureU, 0);
@@ -256,7 +256,8 @@ void UTexAlignerBox::AlignSurf( ETexAlign InTexAlignType, UModel* InModel, FBspS
 {
 	FVector U, V;
 
-	InNormal->FindBestAxisVectors( V, U );
+	FVector Normal = *InNormal;
+	Normal.FindBestAxisVectors( V, U );
 	U *= -1.0;
 	V *= -1.0;
 
@@ -295,7 +296,7 @@ void UTexAlignerFit::AlignSurf( ETexAlign InTexAlignType, UModel* InModel, FBspS
 	TArray< FVector > WorldSpacePolyVertices;
 	for( int32 VertexIndex = 0; VertexIndex < InPoly->Vertices.Num(); ++VertexIndex )
 	{
-		WorldSpacePolyVertices.Add( InSurfIdx->Surf->Actor->ActorToWorld().TransformPosition( InPoly->Vertices[ VertexIndex ] ) );
+		WorldSpacePolyVertices.Add( InSurfIdx->Surf->Actor->ActorToWorld().TransformPosition( (FVector)InPoly->Vertices[ VertexIndex ] ) );
 	}
 
 			
@@ -306,18 +307,19 @@ void UTexAlignerFit::AlignSurf( ETexAlign InTexAlignType, UModel* InModel, FBspS
 		const FVector& VertexA = FirstPolyVertex;
 		const FVector& VertexB = WorldSpacePolyVertices[ 1 ];
 		FVector UpVec = ( VertexB - VertexA ).GetSafeNormal();
-		FVector RightVec = InPoly->Normal ^ UpVec;
+		FVector RightVec = (FVector)InPoly->Normal ^ UpVec;
 		WorldToPolyRotationMatrix.SetIdentity();
-		WorldToPolyRotationMatrix.SetAxes( &RightVec, &UpVec, &InPoly->Normal );
+		FVector Normal = (FVector)InPoly->Normal;
+		WorldToPolyRotationMatrix.SetAxes( &RightVec, &UpVec, &Normal );
 	}
 
 
 	// Find a corner of the polygon that's closest to a 90 degree angle.  When there are multiple corners with
 	// similar angles, we'll use the one closest to the local space bottom-left along the polygon's plane
-	const float DesiredAbsDotProduct = 0.0f;
+	const double DesiredAbsDotProduct = 0.0f;
 	int32 BestVertexIndex = INDEX_NONE;
-	float BestDotProductDiff = 10000.0f;
-	float BestPositivity = 10000.0f;
+	double BestDotProductDiff = 10000.0f;
+	double BestPositivity = 10000.0f;
 	for( int32 VertexIndex = 0; VertexIndex < WorldSpacePolyVertices.Num(); ++VertexIndex )
 	{
 		// Compute the previous and next vertex in the winding
@@ -329,14 +331,14 @@ void UTexAlignerFit::AlignSurf( ETexAlign InTexAlignType, UModel* InModel, FBspS
 		const FVector& NextVertex = WorldSpacePolyVertices[ NextWindingVertexIndex ];
 
 		// Compute the corner angle
-		float AbsDotProduct = FMath::Abs( ( PrevVertex - CurVertex ).GetSafeNormal() | ( NextVertex - CurVertex ).GetSafeNormal() );
+		double AbsDotProduct = FMath::Abs( ( PrevVertex - CurVertex ).GetSafeNormal() | ( NextVertex - CurVertex ).GetSafeNormal() );
 
 		// Compute how 'positive' this vertex is relative to the bottom left position in the polygon's plane
 		FVector PolySpaceVertex = WorldToPolyRotationMatrix.InverseTransformVector( CurVertex - FirstPolyVertex );
-		const float Positivity = PolySpaceVertex.X + PolySpaceVertex.Y;
+		const double Positivity = PolySpaceVertex.X + PolySpaceVertex.Y;
 
 		// Is the corner angle closer to 90 degrees than our current best?
-		const float DotProductDiff = FMath::Abs( AbsDotProduct - DesiredAbsDotProduct );
+		const double DotProductDiff = FMath::Abs( AbsDotProduct - DesiredAbsDotProduct );
 		if( FMath::IsNearlyEqual( DotProductDiff, BestDotProductDiff, 0.1f ) )
 		{
 			// This angle is just as good as the current best, so check to see which is closer to the local space
@@ -370,18 +372,20 @@ void UTexAlignerFit::AlignSurf( ETexAlign InTexAlignType, UModel* InModel, FBspS
 	const FVector& NextVertex = WorldSpacePolyVertices[ NextWindingVertexIndex ];
 
 	FVector TextureUpVec = ( NextVertex - BestVertex ).GetSafeNormal();
-	FVector TextureRightVec = InPoly->Normal ^ TextureUpVec;
+	FVector TextureRightVec = (FVector)InPoly->Normal ^ TextureUpVec;
 
 	FMatrix WorldToTextureRotationMatrix;
 	WorldToTextureRotationMatrix.SetIdentity();
-	WorldToTextureRotationMatrix.SetAxes( &TextureRightVec, &TextureUpVec, &InPoly->Normal );
+	FVector PolyNormal = (FVector)InPoly->Normal;
+	WorldToTextureRotationMatrix.SetAxes( &TextureRightVec, &TextureUpVec, &PolyNormal );
 
+	
 
 	// Compute bounds of polygon along plane
-	float MinX = FLT_MAX;
-	float MaxX = -FLT_MAX;
-	float MinY = FLT_MAX;
-	float MaxY = -FLT_MAX;
+	double MinX = std::numeric_limits<double>::max();
+	double MaxX = std::numeric_limits<double>::min();
+	double MinY = std::numeric_limits<double>::max();
+	double MaxY = std::numeric_limits<double>::min();
 	for( int32 VertexIndex = 0; VertexIndex < WorldSpacePolyVertices.Num(); ++VertexIndex )
 	{
 		const FVector& CurVertex = WorldSpacePolyVertices[ VertexIndex ];
@@ -417,8 +421,8 @@ void UTexAlignerFit::AlignSurf( ETexAlign InTexAlignType, UModel* InModel, FBspS
 
 	// Apply scale to UV vectors.  We incorporate the parameterized tiling rations and scale by our texture size
 	const float WorldTexelScale = UModel::GetGlobalBSPTexelScale();
-	const float TextureSizeU = FMath::Abs( MaxX - MinX );
-	const float TextureSizeV = FMath::Abs( MaxY - MinY );
+	const double TextureSizeU = FMath::Abs( MaxX - MinX );
+	const double TextureSizeV = FMath::Abs( MaxY - MinY );
 	FVector TextureUVector = UTile * TextureRightVec * WorldTexelScale / TextureSizeU;
 	FVector TextureVVector = VTile * TextureUpVec * WorldTexelScale / TextureSizeV;
 

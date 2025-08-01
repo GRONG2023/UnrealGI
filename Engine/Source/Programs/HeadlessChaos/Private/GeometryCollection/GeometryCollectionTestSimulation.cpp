@@ -33,16 +33,16 @@ namespace GeometryCollectionTest
 	{
 		FGeometryCollectionWrapper* Collection = TNewSimulationObject<GeometryType::GeometryCollectionWithSingleRigid>::Init()->template As<FGeometryCollectionWrapper>();
 
-		FFramework UnitTest;
+		FFramework UnitTest; 
 		UnitTest.AddSimulationObject(Collection);
 		UnitTest.Initialize();
 		UnitTest.Advance();
 
 		{ // test results
 			EXPECT_LT(FMath::Abs(Collection->RestCollection->Transform[0].GetTranslation().Z), SMALL_THRESHOLD); // rest never touched
-			EXPECT_EQ(Collection->DynamicCollection->Transform.Num(), 1); // simulated is falling
-			EXPECT_LT(Collection->DynamicCollection->Transform[0].GetTranslation().Z, 0.f);
-			EXPECT_NEAR(Collection->DynamicCollection->Transform[0].GetTranslation().Z, -980.f * UnitTest.Dt * UnitTest.Dt, 1e-2);// we seem to be twice gravity
+			EXPECT_EQ(Collection->DynamicCollection->GetNumTransforms(), 1); // simulated is falling
+			EXPECT_LT(Collection->DynamicCollection->GetTransform(0).GetTranslation().Z, 0.f);
+			EXPECT_NEAR(Collection->DynamicCollection->GetTransform(0).GetTranslation().Z, -980.f * UnitTest.Dt * UnitTest.Dt, 1e-2);// we seem to be twice gravity
 		}
 	}
 
@@ -55,7 +55,7 @@ namespace GeometryCollectionTest
 		Params.SimplicialType = ESimplicialType::Chaos_Simplicial_Box;
 		FVector BoxScale(Scale); 
 		Params.GeomTransform.SetScale3D(BoxScale); // Box dimensions
-		Params.GeomTransform.SetLocation(0.9f * Scale * FVector::UpVector);	// Don't start too deep in penetration or the pushout is too aggressive
+		Params.GeomTransform.SetLocation(0.99f * Scale * FVector::UpVector);	// Don't start too deep in penetration or the pushout is too aggressive
 		FGeometryCollectionWrapper* Collection = TNewSimulationObject<GeometryType::GeometryCollectionWithSingleRigid>::Init(Params)->template As<FGeometryCollectionWrapper>();
 		RigidBodyWrapper* Floor = TNewSimulationObject<GeometryType::RigidFloor>::Init()->template As<RigidBodyWrapper>();
 
@@ -70,8 +70,8 @@ namespace GeometryCollectionTest
 
 		{
 			EXPECT_LT(FMath::Abs(Collection->RestCollection->Transform[0].GetTranslation().Z), SMALL_THRESHOLD);
-			EXPECT_EQ(Collection->DynamicCollection->Transform.Num(), 1);
-			EXPECT_LT(FMath::Abs(Collection->DynamicCollection->Transform[0].GetTranslation().Z - 0.1f * Scale), MEDIUM_THRESHOLD * Scale);
+			EXPECT_EQ(Collection->DynamicCollection->GetNumTransforms(), 1);
+			EXPECT_LT(FMath::Abs(Collection->DynamicCollection->GetTransform(0).GetTranslation().Z - 0.1f * Scale), MEDIUM_THRESHOLD * Scale);
 		}
 	}
 
@@ -91,12 +91,15 @@ namespace GeometryCollectionTest
 		UnitTest.AddSimulationObject(Collection);
 		UnitTest.AddSimulationObject(Floor);
 		UnitTest.Initialize();
-		for (int i = 0; i < 10; i++) UnitTest.Advance();
+		for (int i = 0; i < 10; i++)
+		{
+			UnitTest.Advance();
+		}
 
 		{ // test results
 			EXPECT_LT(FMath::Abs(Collection->RestCollection->Transform[0].GetTranslation().Z), SMALL_THRESHOLD);
-			EXPECT_EQ(Collection->DynamicCollection->Transform.Num(), 1);
-			EXPECT_LT(FMath::Abs(Collection->DynamicCollection->Transform[0].GetTranslation().Z) - Scale[0], SMALL_THRESHOLD);
+			EXPECT_EQ(Collection->DynamicCollection->GetNumTransforms(), 1);
+			EXPECT_LT(FMath::Abs(Collection->DynamicCollection->GetTransform(0).GetTranslation().Z) - Scale[0], SMALL_THRESHOLD);
 		}
 	}
 
@@ -107,7 +110,7 @@ namespace GeometryCollectionTest
 		FVector Scale(100.0f);
 		CreationParameters Params; Params.ImplicitType = EImplicitTypeEnum::Chaos_Implicit_Box;  Params.SimplicialType = ESimplicialType::Chaos_Simplicial_Box;
 		Params.GeomTransform.SetScale3D(Scale); // Box size
-		Params.GeomTransform.SetLocation(0.9f * Scale * FVector::UpVector);	// Don't start too deep in penetration or the pushout is too aggressive
+		Params.GeomTransform.SetLocation(0.99f * Scale * FVector::UpVector);	// Don't start too deep in penetration or the pushout is too aggressive
 
 		FGeometryCollectionWrapper* Collection = TNewSimulationObject<GeometryType::GeometryCollectionWithSingleRigid>::Init(Params)->template As<FGeometryCollectionWrapper>();
 		RigidBodyWrapper* Floor = TNewSimulationObject<GeometryType::RigidFloor>::Init()->template As<RigidBodyWrapper>();
@@ -123,8 +126,8 @@ namespace GeometryCollectionTest
 
 		{
 			EXPECT_LT(FMath::Abs(Collection->RestCollection->Transform[0].GetTranslation().Z), SMALL_THRESHOLD);
-			EXPECT_EQ(Collection->DynamicCollection->Transform.Num(), 1);
-			EXPECT_LT(FMath::Abs(Collection->DynamicCollection->Transform[0].GetTranslation().Z - 0.1f * Scale[0]), MEDIUM_THRESHOLD * Scale[0]);
+			EXPECT_EQ(Collection->DynamicCollection->GetNumTransforms(), 1);
+			EXPECT_LT(FMath::Abs(Collection->DynamicCollection->GetTransform(0).GetTranslation().Z - 0.1f * Scale[0]), MEDIUM_THRESHOLD * Scale[0]);
 		}
 	}
 
@@ -142,10 +145,9 @@ namespace GeometryCollectionTest
 			UnitTest.Advance();
 
 		{
-			TManagedArray<FTransform>& Transform = Collection->DynamicCollection->Transform;
-			EXPECT_EQ(Transform.Num(), 1);
+			EXPECT_EQ(Collection->DynamicCollection->GetNumTransforms(), 1);
 			//UE_LOG(LogTest, Verbose, TEXT("Position : (%3.5f,%3.5f,%3.5f)"), Transform[0].GetTranslation().X, Transform[0].GetTranslation().Y, Transform[0].GetTranslation().Z);
-			EXPECT_EQ(Transform[0].GetTranslation().Z, 0.f);
+			EXPECT_EQ(Collection->DynamicCollection->GetTransform(0).GetTranslation().Z, 0.f);
 			EXPECT_EQ(Collection->DynamicCollection->DynamicState[0], (int32)EObjectStateTypeEnum::Chaos_Object_Kinematic);
 		}
 	}
@@ -165,7 +167,7 @@ namespace GeometryCollectionTest
 		UnitTest.AddSimulationObject(SleepingCollection);
 		UnitTest.Initialize();
 
-		const auto& Transform0 = SleepingCollection->DynamicCollection->Transform[0];
+		const auto& Transform0 = SleepingCollection->DynamicCollection->GetTransform(0);
 		for (int i = 0; i < 3; i++)
 		{
 			UnitTest.Advance();
@@ -175,7 +177,7 @@ namespace GeometryCollectionTest
 		{
 			// particle doesn't fall due to sleeping state
 			EXPECT_EQ(SleepingCollection->DynamicCollection->DynamicState[0], (int32)EObjectStateTypeEnum::Chaos_Object_Sleeping);
-			EXPECT_LT(FMath::Abs(SleepingCollection->DynamicCollection->Transform[0].GetTranslation().Z - InitialStartHeight), SMALL_THRESHOLD);
+			EXPECT_LT(FMath::Abs(SleepingCollection->DynamicCollection->GetTransform(0).GetTranslation().Z - InitialStartHeight), SMALL_THRESHOLD);
 		}
 
 	}
@@ -202,12 +204,12 @@ namespace GeometryCollectionTest
 		UnitTest.AddSimulationObject(MovingCollection);
 		UnitTest.Initialize();
 
-		const auto& Transform0 = MovingCollection->DynamicCollection->Transform[0];
-		const auto& Transform1 = SleepingCollection->DynamicCollection->Transform[0];
 		for (int i = 0; i < 15; i++)
 		{
 			UnitTest.Advance();
 
+			//const auto& Transform0 = MovingCollection->DynamicCollection->GetTransform(0);
+			//const auto& Transform1 = SleepingCollection->DynamicCollection->GetTransform(0);
 			//UE_LOG(LogTest, Verbose, TEXT("Position[0] : (%3.5f,%3.5f,%3.5f)"), Transform0.GetTranslation().X, Transform0.GetTranslation().Y, Transform0.GetTranslation().Z);
 			//UE_LOG(LogTest, Verbose, TEXT("Position[1] : (%3.5f,%3.5f,%3.5f)"), Transform1.GetTranslation().X, Transform1.GetTranslation().Y, Transform1.GetTranslation().Z);
 		}
@@ -215,102 +217,122 @@ namespace GeometryCollectionTest
 		{
 			// Is now dynamic and has moved from initial position
 			EXPECT_EQ(SleepingCollection->DynamicCollection->DynamicState[0], (int32)EObjectStateTypeEnum::Chaos_Object_Dynamic);
-			EXPECT_LT(Transform0.GetTranslation().Z, InitialStartHeight - 2.0f);
+			EXPECT_LT(MovingCollection->DynamicCollection->GetTransform(0).GetTranslation().Z, InitialStartHeight - 2.0f);
 		}
 
 	}
 
-	
-	GTEST_TEST(AllTraits, GeometryCollection_RigidBodies_CollisionGroup)
+	GTEST_TEST(AllTraits, GeometryCollection_RigidBodies_Enabling)
 	{
-		/*
-		TUniquePtr<Chaos::FChaosPhysicsMaterial> PhysicalMaterial = nullptr;
-		TSharedPtr<FGeometryCollection> RestCollection = nullptr;
-		TSharedPtr<FGeometryDynamicCollection> DynamicCollection = nullptr;
+		CreationParameters Params;
+		Params.SimplicialType = ESimplicialType::Chaos_Simplicial_Box;
+		Params.ImplicitType = EImplicitTypeEnum::Chaos_Implicit_Box;
 
-		//
-		//  Rigid Body Setup
-		//
-		auto RestInitFunc = [](TSharedPtr<FGeometryCollection>& RestCollection)
+		Params.DynamicState = EObjectStateTypeEnum::Chaos_Object_Dynamic;
+		Params.RootTransform.SetLocation(FVector(0.f, 0.f, 15.f));
+		FGeometryCollectionWrapper* MovingCollection = TNewSimulationObject<GeometryType::GeometryCollectionWithSingleRigid>::Init(Params)->template As<FGeometryCollectionWrapper>();
+
+		FFramework UnitTest;
+		UnitTest.AddSimulationObject(MovingCollection);
+		UnitTest.Initialize();
+
+		for (int i = 0; i < 5; i++)
 		{
-			RestCollection->AppendGeometry(*GeometryCollection::MakeCubeElement(FTransform(FVector(0, 0, 210.0)), FVector(100.0)));
-			RestCollection->AppendGeometry(*GeometryCollection::MakeCubeElement(FTransform(FVector(0, 0, 320.0)), FVector(100.0)));
-			RestCollection->AppendGeometry(*GeometryCollection::MakeCubeElement(FTransform(FVector(0, 0, 430.0)), FVector(100.0)));
-		};
-
-		////InitCollectionsParameters InitParams = { FTransform(FVector(0, 0, 100.0)), FVector(100.0), RestInitFunc, (int32)EObjectStateTypeEnum::Chaos_Object_Kinematic };
-		//InitCollections(PhysicalMaterial, RestCollection, DynamicCollection, InitParams);
-
-		//
-		// Solver setup
-		//
-		auto CustomFunc = [&RestCollection, &DynamicCollection, &PhysicalMaterial](FSimulationParameters& InParams)
+			UnitTest.Advance();
+			EXPECT_EQ(MovingCollection->DynamicCollection->DynamicState[0], (int32)EObjectStateTypeEnum::Chaos_Object_Dynamic);
+			EXPECT_LT(MovingCollection->DynamicCollection->GetTransform(0).GetTranslation().Z, 15.0f);
+		}
+		// Disabled particle
+		MovingCollection->PhysObject->DisableParticles_External({ 0 });
+		FReal CurrentPosition = MovingCollection->DynamicCollection->GetTransform(0).GetTranslation().Z;
+		for (int i = 0; i < 5; i++)
 		{
-			InParams.Shared.SizeSpecificData[0].ImplicitType = EImplicitTypeEnum::Chaos_Implicit_Box;
-		};
+			UnitTest.Advance();
+			EXPECT_EQ(MovingCollection->DynamicCollection->DynamicState[0], (int32)EObjectStateTypeEnum::Chaos_Object_Dynamic);
+			EXPECT_EQ(MovingCollection->DynamicCollection->GetTransform(0).GetTranslation().Z, CurrentPosition);
+		}
+	}
 
-		FGeometryCollectionPhysicsProxy* PhysObject = RigidBodySetup(PhysicalMaterial, RestCollection, DynamicCollection, CustomFunc);
-		PhysObject->SetCollisionParticlesPerObjectFraction( 1.0 );
 
-		Chaos::FPBDRigidsSolver* Solver = FChaosSolversModule::GetModule()->CreateSolver(nullptr, ESolverFlags::Standalone);
-#if CHAOS_PARTICLEHANDLE_TODO
-		Solver->RegisterObject(PhysObject);
-#endif
-		//Solver->SetHasFloor(true);
-		Solver->SetEnabled(true);
-		//PhysObject->ActivateBodies();
+	// CollisionGroup == 0 : Collide With Everything Except CollisionGroup=-1
+	// CollisionGroup == -1 : Collide With Nothing Including CollisionGroup=0
+	// CollisionGroup_A == CollisionGroup_B : Collide With Each Other
+	// CollisionGroup_A != CollisionGroup_B : Don't Collide With Each Other
+	// @todo(chaos): this test does not work with levelsets because the do not support manifolds
+	// and therefore do not stack.
+	GTEST_TEST(AllTraits, DISABLED_GeometryCollection_RigidBodies_CollisionGroup)
+	{
 
-		Solver->AdvanceSolverBy(1 / 24.);
-#if TODO_REIMPLEMENT_GET_RIGID_PARTICLES
-		Chaos::TPBDRigidParticles<FReal, 3>& Particles = Solver->GetRigidParticles();
+		FFramework UnitTest;
 
+		TSharedPtr<FGeometryCollection> RestCollection;
+		RestCollection = GeometryCollection::MakeCubeElement(FTransform(FVector(0.f, 0.f, 210.f)), FVector(100.0));
+		RestCollection->AppendGeometry(*GeometryCollection::MakeCubeElement(FTransform(FVector(0.f, 0.f, 320.f)), FVector(100.0)));
+		RestCollection->AppendGeometry(*GeometryCollection::MakeCubeElement(FTransform(FVector(0.f, 0.f, 430.f)), FVector(100.0)));
+		RestCollection->AppendGeometry(*GeometryCollection::MakeCubeElement(FTransform(FVector(0.f, 0.f, 540.f)), FVector(100.0)));
+		RestCollection->AppendGeometry(*GeometryCollection::MakeCubeElement(FTransform(FVector(0.f, 0.f, 650.f)), FVector(100.0)));
+
+		CreationParameters Params;
+		Params.RestCollection = RestCollection;
+		Params.ImplicitType = EImplicitTypeEnum::Chaos_Implicit_Box;
+		// I think there is suppose to be one more input param, but not sure what it is for...
+
+		FGeometryCollectionWrapper* Collection = TNewSimulationObject<GeometryType::GeometryCollectionWithSuppliedRestCollection>::Init(Params)->template As<FGeometryCollectionWrapper>();
+		RigidBodyWrapper* Floor = TNewSimulationObject<GeometryType::RigidFloor>::Init()->template As<RigidBodyWrapper>();
+		UnitTest.AddSimulationObject(Collection);
+		UnitTest.AddSimulationObject(Floor);
+		UnitTest.Initialize();
+		UnitTest.Advance();
+
+		// testing...
 		for (int Frame = 1; Frame < 200; Frame++)
 		{
-			Solver->AdvanceSolverBy(1 / 24.);
-			//FinalizeSolver(*Solver);
-			
 			if (Frame == 1)
 			{
-				Particles.CollisionGroup(0)=  0;
-				Particles.CollisionGroup(1)=  1;
-				Particles.CollisionGroup(2)=  1;
-				Particles.CollisionGroup(3)=  3;
-				Particles.CollisionGroup(4)= -1;
+				// Object 0 collides with everything except Object 4
+				// Objects 1,2 collide with each other and Object 0 plus the ground
+				// Object 3 collides with Object 0 plus the ground
+				// Object 4 collides with nothing
+				// We should end up with 2 stacks on the ground (0,1,2), (0,3) and one free-falling object (4)
+				Collection->PhysObject->GetSolverClusterHandle_Internal(0)->SetCollisionGroup(0);
+				Collection->PhysObject->GetSolverClusterHandle_Internal(1)->SetCollisionGroup(1);
+				Collection->PhysObject->GetSolverClusterHandle_Internal(2)->SetCollisionGroup(1);
+				Collection->PhysObject->GetSolverClusterHandle_Internal(3)->SetCollisionGroup(3);
+				Collection->PhysObject->GetSolverClusterHandle_Internal(4)->SetCollisionGroup(-1);
+
+				EXPECT_TRUE(Collection->DynamicCollection->GetTransform(0).GetRotation() == FQuat4f::Identity); // Can use defaulted zero rotation to indicate that the
+				EXPECT_TRUE(Collection->DynamicCollection->GetTransform(1).GetRotation() == FQuat4f::Identity); // rigid has not been affected. Should we though??
+				EXPECT_TRUE(Collection->DynamicCollection->GetTransform(2).GetRotation() == FQuat4f::Identity);
+				EXPECT_TRUE(Collection->DynamicCollection->GetTransform(3).GetRotation() == FQuat4f::Identity);
+				EXPECT_TRUE(Collection->DynamicCollection->GetTransform(4).GetRotation() == FQuat4f::Identity);
 			}
-			if (Frame == 13)
+
+			if (Frame == 100)
 			{
-				EXPECT_LT(FMath::Abs(Particles.X(0).Z), SMALL_NUMBER);
-				EXPECT_LT(FMath::Abs(Particles.X(1).Z - 50.f), 10.f);
-				EXPECT_LT(FMath::Abs(Particles.X(2).Z - 150.f), 10.f);
+				EXPECT_NEAR(Collection->DynamicCollection->GetTransform(0).GetTranslation().Z, 50.0f, 1.0f);
+				EXPECT_NEAR(Collection->DynamicCollection->GetTransform(1).GetTranslation().Z, 150.0f, 1.0f);
+				EXPECT_NEAR(Collection->DynamicCollection->GetTransform(2).GetTranslation().Z, 250.0f, 1.0f);
+				EXPECT_FALSE(Collection->DynamicCollection->GetTransform(0).GetRotation() == FQuat4f::Identity);
+				EXPECT_FALSE(Collection->DynamicCollection->GetTransform(1).GetRotation() == FQuat4f::Identity);
+				EXPECT_FALSE(Collection->DynamicCollection->GetTransform(2).GetRotation() == FQuat4f::Identity);
+				EXPECT_FALSE(Collection->DynamicCollection->GetTransform(3).GetRotation() == FQuat4f::Identity);
+				EXPECT_TRUE(Collection->DynamicCollection->GetTransform(4).GetRotation() == FQuat4f::Identity);
 			}
-			if( Frame == 30 )
-			{
-				EXPECT_LT(FMath::Abs(Particles.X(0).Z), SMALL_NUMBER);
-				EXPECT_LT(FMath::Abs(Particles.X(1).Z - 50.f), 10.f);
-				EXPECT_LT(FMath::Abs(Particles.X(2).Z - 150.f), 10.f);
-				EXPECT_GT(Particles.X(3).Z, 50.f);
-				EXPECT_LT(Particles.X(4).Z, -100);
-			}
-			if (Frame == 31)
-			{
-				Particles.CollisionGroup(0) = 0;
-				Particles.CollisionGroup(1) = -1;
-				Particles.CollisionGroup(2) = 1;
-				Particles.CollisionGroup(3) = -1;
-				Particles.CollisionGroup(4) = -1;
-			}
+			UnitTest.Advance();
 		}
 
-		EXPECT_LT(FMath::Abs(Particles.X(0).Z), SMALL_NUMBER);
-		EXPECT_LT(Particles.X(1).Z, -10000);
-		EXPECT_GT(Particles.X(2).Z, 50.0);
-		EXPECT_LT(Particles.X(3).Z, -10000);
-		EXPECT_LT(Particles.X(4).Z, -10000);
-#endif
+		EXPECT_NEAR(Collection->DynamicCollection->GetTransform(0).GetTranslation().Z, 50.0f, 1.0f);
+		EXPECT_NEAR(Collection->DynamicCollection->GetTransform(1).GetTranslation().Z, 150.0f, 1.0f);
+		EXPECT_NEAR(Collection->DynamicCollection->GetTransform(2).GetTranslation().Z, 250.0f, 1.0f);
+		EXPECT_NEAR(Collection->DynamicCollection->GetTransform(3).GetTranslation().Z, 150.0f, 1.0f);
+		EXPECT_FALSE(Collection->DynamicCollection->GetTransform(3).GetRotation() == FQuat4f::Identity);
+		EXPECT_TRUE(Collection->DynamicCollection->GetTransform(4).GetRotation() == FQuat4f::Identity); // Phased through everything, good.
+		EXPECT_LT(Collection->DynamicCollection->GetTransform(4).GetTranslation().Z, -100.0f);
 
-		FChaosSolversModule::GetModule()->DestroySolver(Solver);
-		delete PhysObject;
-		*/
+		Collection->PhysObject->GetSolverClusterHandle_Internal(0)->SetCollisionGroup(-1);
+		for (int i = 0; i < 50; i++) { UnitTest.Advance(); }
+		EXPECT_LT(Collection->DynamicCollection->GetTransform(0).GetTranslation().Z, -100.0f);
+
 	}
 
 
@@ -335,8 +357,8 @@ namespace GeometryCollectionTest
 		EXPECT_EQ(Simplicials.Num(), 1);
 		const Chaos::FBVHParticles& Simplicial = *Simplicials[0];
 
-		const TManagedArray<FGeometryDynamicCollection::FSharedImplicit>& Implicits = 
-			Collection->RestCollection->template GetAttribute<FGeometryDynamicCollection::FSharedImplicit>(
+		const TManagedArray<Chaos::FImplicitObjectPtr>& Implicits = 
+			Collection->RestCollection->template GetAttribute<Chaos::FImplicitObjectPtr>(
 				FGeometryDynamicCollection::ImplicitsAttribute, FTransformCollection::TransformGroup);
 		EXPECT_EQ(Implicits.Num(), 1);
 		check(Implicits[0]);
@@ -356,11 +378,11 @@ namespace GeometryCollectionTest
 		FReal MaxZ = -TNumericLimits<FReal>::Max();
 		for (uint32 Idx = 0; Idx < Simplicial.Size(); ++Idx)
 		{
-			const FReal phi = Implicit.SignedDistance(Simplicial.X(Idx));
+			const FReal phi = Implicit.SignedDistance(Simplicial.GetX(Idx));
 			EXPECT_LT(FMath::Abs(phi), DxSize);
 			//EXPECT_LT(FMath::Abs(phi), 0.01f);
 
-			const auto& Pos = Simplicial.X(Idx);
+			const auto& Pos = Simplicial.GetX(Idx);
 			MinX = MinX < Pos[0] ? MinX : Pos[0];
 			MinY = MinY < Pos[1] ? MinY : Pos[1];
 			MinZ = MinZ < Pos[2] ? MinZ : Pos[2];

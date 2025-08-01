@@ -10,10 +10,10 @@
 #include "Framework/Application/SlateApplication.h"
 #include "Types/ReflectionMetadata.h"
 #include "Rendering/SlateObjectReferenceCollector.h"
+#include "Widgets/SNullWidget.h"
 
 DECLARE_CYCLE_STAT(TEXT("SInvalidationPanel::Paint"), STAT_SlateInvalidationPaint, STATGROUP_Slate);
 
-#if WITH_SLATE_DEBUGGING
 
 void ConsoleVariableEnableInvalidationPanelsChanged(IConsoleVariable*);
 
@@ -24,6 +24,8 @@ FAutoConsoleVariableRef CVarEnableInvalidationPanels(
 	bInvalidationPanelsEnabled,
 	TEXT("Whether to attempt to cache any widgets through invalidation panels."),
 	FConsoleVariableDelegate::CreateStatic(ConsoleVariableEnableInvalidationPanelsChanged));
+
+#if WITH_SLATE_DEBUGGING
 
 static bool bAlwaysInvalidate = false;
 FAutoConsoleVariableRef CVarAlwaysInvalidate(
@@ -36,8 +38,7 @@ FAutoConsoleVariableRef CVarAlwaysInvalidate(
 
 
 SInvalidationPanel::SInvalidationPanel()
-	: EmptyChildSlot(this)
-	, HittestGrid(MakeShared<FHittestGrid>())
+	: HittestGrid(MakeShared<FHittestGrid>())
 	, bCanCache(true)
 	, bPaintedSinceLastPrepass(true)
 	, bWasCachable(false)
@@ -46,6 +47,7 @@ SInvalidationPanel::SInvalidationPanel()
 	SetInvalidationRootWidget(*this);
 	SetInvalidationRootHittestGrid(HittestGrid.Get());
 	SetCanTick(false);
+	SetVolatilePrepass(GetCanCache());
 
 	LastIncomingColorAndOpacity = FLinearColor::White;
 
@@ -76,7 +78,6 @@ SInvalidationPanel::~SInvalidationPanel()
 	}
 }
 
-#if WITH_SLATE_DEBUGGING
 void ConsoleVariableEnableInvalidationPanelsChanged(IConsoleVariable*)
 {
 	// If the cache changed, the parent's InvalidationRoot need to rebuild its list
@@ -87,6 +88,7 @@ void ConsoleVariableEnableInvalidationPanelsChanged(IConsoleVariable*)
 	}
 }
 
+#if WITH_SLATE_DEBUGGING
 bool SInvalidationPanel::AreInvalidationPanelsEnabled()
 {
 	return bInvalidationPanelsEnabled;
@@ -110,21 +112,15 @@ void SInvalidationPanel::EnableInvalidationPanels(bool bEnable)
 
 bool SInvalidationPanel::GetCanCache() const
 {
-	bool bDebugFlags = true;
-
-#if WITH_SLATE_DEBUGGING
-	// Disable invalidation panels if global invalidation is turned on
-	bDebugFlags = bInvalidationPanelsEnabled;
-#endif
-
-	return bCanCache && !GSlateEnableGlobalInvalidation && !GetProxyHandle().HasValidInvalidationRootOwnership(this) && bDebugFlags;
+	return bCanCache && !GSlateEnableGlobalInvalidation && bInvalidationPanelsEnabled;
 }
 
 void SInvalidationPanel::OnGlobalInvalidationToggled(bool bGlobalInvalidationEnabled)
 {
 	InvalidateRootChildOrder();
-
 	ClearAllFastPathData(true);
+	SetVolatilePrepass(GetCanCache());
+	Invalidate(EInvalidateWidgetReason::LayoutAndVolatility);
 }
 
 bool SInvalidationPanel::UpdateCachePrequisites(FSlateWindowElementList& OutDrawElements, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, int32 LayerId, const FWidgetStyle& InWidgetStyle) const
@@ -179,12 +175,8 @@ void SInvalidationPanel::SetCanCache(bool InCanCache)
 	if (bCanCache != InCanCache)
 	{
 		bCanCache = InCanCache;
-		// If the cache changed, invalidate the parent need to rebuild its list
-		//since InvalidationPanel cannot be nested in regular mode.
-		if (GetProxyHandle().IsValid(this) && !GSlateEnableGlobalInvalidation)
-		{
-			GetProxyHandle().GetInvalidationRootHandle().Advanced_GetInvalidationRootNoCheck()->InvalidateRootChildOrder(this);
-		}
+		SetVolatilePrepass(GetCanCache());
+		InvalidateRootChildOrder();
 	}
 }
 
@@ -192,7 +184,7 @@ FChildren* SInvalidationPanel::GetChildren()
 {
 	if (GetCanCache())
 	{
-		return &EmptyChildSlot;
+		return &FNoChildren::NoChildrenInstance;
 	}
 	else
 	{
@@ -200,10 +192,12 @@ FChildren* SInvalidationPanel::GetChildren()
 	}
 }
 
-FChildren* SInvalidationPanel::GetAllChildren()
+#if WITH_SLATE_DEBUGGING
+FChildren* SInvalidationPanel::Debug_GetChildrenForReflector()
 {
 	return SCompoundWidget::GetChildren();
 }
+#endif
 
 int32 SInvalidationPanel::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const
 {
@@ -239,7 +233,7 @@ int32 SInvalidationPanel::OnPaint( const FPaintArgs& Args, const FGeometry& Allo
 		if (bHittestCleared || bRequiresRecache)
 		{
 			// @todo: Overly aggressive?
-			MutableThis->InvalidateRootChildOrder();
+			MutableThis->InvalidateRootLayout(this);
 		}
 
 		// The root widget is our child.  We are not the root because we could be in a parent invalidation panel.  If we are nested in another invalidation panel, our OnPaint was called by that panel
@@ -253,9 +247,14 @@ int32 SInvalidationPanel::OnPaint( const FPaintArgs& Args, const FGeometry& Allo
 
 		const FSlateInvalidationResult Result = MutableThis->PaintInvalidationRoot(Context);
 
-		// add our widgets to the root hit test grid
-		Args.GetHittestGrid().AddGrid(HittestGrid);
+		const bool bInheritedHittestability = Args.GetInheritedHittestability();
+		const bool bOutgoingHittestability = bInheritedHittestability && GetVisibility().AreChildrenHitTestVisible();
 
+		// add our widgets to the root hit test grid
+		if (bOutgoingHittestability)
+		{
+			Args.GetHittestGrid().AddGrid(HittestGrid);
+		}
 		return Result.MaxLayerIdPainted;
 	}
 	else
@@ -283,14 +282,12 @@ bool SInvalidationPanel::CustomPrepass(float LayoutScaleMultiplier)
 
 	if (GetCanCache())
 	{
-		// The InvalidationRoot that own this retainer will call the ProcessInvalidation.
-		//ProcessInvalidation will only be called when the GlobalInvalidation is off and the Retainer is not inside another InvalidationRoot.
-		if (!GetProxyHandle().HasValidInvalidationRootOwnership(this))
-		{
-			ProcessInvalidation();
-		}
-
 		if (NeedsPrepass())
+		{
+			SetNeedsSlowPath(true);
+		}
+		ProcessInvalidation();
+		if (NeedsSlowPath())
 		{
 			FChildren* Children = SCompoundWidget::GetChildren();
 			Prepass_ChildLoop(LayoutScaleMultiplier, Children);
@@ -315,7 +312,7 @@ const FSlateInvalidationRoot* SInvalidationPanel::Advanced_AsInvalidationRoot() 
 
 TSharedRef<SWidget> SInvalidationPanel::GetRootWidget()
 {
-	return GetCanCache() ? SCompoundWidget::GetChildren()->GetChildAt(0) : EmptyChildSlot.GetChildAt(0);
+	return GetCanCache() ? SCompoundWidget::GetChildren()->GetChildAt(0) : SNullWidget::NullWidget;
 }
 
 int32 SInvalidationPanel::PaintSlowPath(const FSlateInvalidationContext& Context)

@@ -6,27 +6,32 @@ public class AssetTools : ModuleRules
 {
 	public AssetTools(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateIncludePaths.Add("Developer/AssetTools/Private");
-
 		PublicDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
 				"CoreUObject",
 				"SlateCore",
+				"EditorFramework",
+				"UnrealEd",
+			}
+		);
+
+		PublicIncludePathModuleNames.AddRange(
+			new string[] {
+				"AssetDefinition",
+				"Merge",
 				"UnrealEd",
 			}
 		);
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
-                "CurveAssetEditor",
+				"AssetDefinition",
 				"Engine",
                 "InputCore",
 				"ApplicationCore",
 				"Slate",
-                "EditorStyle",
 				"SourceControl",
-				"TextureEditor",
 				"PropertyEditor",
 				"Kismet",
 				"Landscape",
@@ -36,43 +41,35 @@ public class AssetTools : ModuleRules
 				"MaterialEditor",
 				"ToolMenus",
 				"PhysicsCore",
-				"DeveloperSettings"
+				"DeveloperSettings",
+				"ClassViewer",
+				"EngineSettings",
+				"InterchangeCore",
+				"InterchangeEngine",
+				"PhysicsUtilities",
+				"AssetRegistry"
 			}
 		);
 
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
 				"Analytics",
-				"AssetRegistry",
 				"ContentBrowser",
 				"CollectionManager",
-                "CurveAssetEditor",
 				"DesktopPlatform",
 				"EditorWidgets",
-				"GameProjectGeneration",
-                "PropertyEditor",
-                "ActorPickerMode",
-				"Kismet",
 				"MainFrame",
-				"MaterialEditor",
 				"MessageLog",
 				"PackagesDialog",
 				"Persona",
-				"FontEditor",
-                "AudioEditor",
-				"SourceControl",
-				"Landscape",
-                "SkeletonEditor",
-                "SkeletalMeshEditor",
                 "AnimationEditor",
-                "AnimationBlueprintEditor",
-                "AnimationModifiers"
+				"Cascade",
+				"VirtualTexturingEditor"
 			}
 		);
 
 		DynamicallyLoadedModuleNames.AddRange(
 			new string[] {
-				"AssetRegistry",
 				"ContentBrowser",
 				"CollectionManager",
 				"CurveTableEditor",
@@ -91,8 +88,17 @@ public class AssetTools : ModuleRules
                 "SkeletalMeshEditor",
                 "AnimationEditor",
                 "AnimationBlueprintEditor",
-                "AnimationModifiers"
+                "AnimationModifiers",
+                "VirtualTexturingEditor"
             }
 		);
+
+		CircularlyReferencedDependentModules.AddRange(
+			new string[] {
+				"UnrealEd",
+			}
+		);
+
+		UnsafeTypeCastWarningLevel = WarningLevel.Error;
 	}
 }

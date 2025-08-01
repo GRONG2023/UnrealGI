@@ -4,9 +4,7 @@
 	ParticleBeamModules.cpp: Particle module implementations for beams.
 =============================================================================*/
 
-#include "CoreMinimal.h"
 #include "Particles/ParticleSystem.h"
-#include "ParticleHelper.h"
 #include "Particles/ParticleModule.h"
 #include "ParticleEmitterInstances.h"
 #include "Particles/ParticleSystemComponent.h"
@@ -17,11 +15,15 @@
 #include "Particles/Beam/ParticleModuleBeamNoise.h"
 #include "Particles/Beam/ParticleModuleBeamSource.h"
 #include "Particles/Beam/ParticleModuleBeamTarget.h"
+#include "Particles/TypeData/ParticleModuleTypeDataBase.h"
 #include "Particles/TypeData/ParticleModuleTypeDataBeam2.h"
 #include "Particles/ParticleEmitter.h"
 #include "Particles/ParticleLODLevel.h"
 #include "Distributions/DistributionFloatConstantCurve.h"
 #include "Engine/InterpCurveEdSetup.h"
+#include "Engine/World.h"
+#include "ParticleBeamTrailVertexFactory.h"
+#include "UObject/UnrealType.h"
 
 /*-----------------------------------------------------------------------------
 	Abstract base modules used for categorization.
@@ -134,7 +136,7 @@ void UParticleModuleTypeDataBeam2::Spawn(FParticleEmitterInstance* Owner, int32 
 	if ((BeamInst->BeamModule_Target == NULL) && (BeamInst->BeamMethod == PEB2M_Distance))
 	{
 		// Set the particle target based on the distance
-		float	TotalDistance	= Distance.GetValue(Particle.RelativeTime, Component);
+		double	TotalDistance	= Distance.GetValue(Particle.RelativeTime, Component);
 		// Always use the X-axis of the component as the direction
 		FVector	Direction		= Component->GetComponentTransform().GetScaledAxis( EAxis::X );
 		Direction.Normalize();
@@ -252,7 +254,7 @@ void UParticleModuleTypeDataBeam2::Update(FParticleEmitterInstance* Owner, int32
 		if ((BeamInst->BeamModule_Target == NULL) && (BeamInst->BeamMethod == PEB2M_Distance))
 		{
 			// Set the particle target based on the distance
-			float	TotalDistance	= Distance.GetValue(Particle.RelativeTime, Component);
+			double	TotalDistance	= Distance.GetValue(Particle.RelativeTime, Component);
 			FVector	Direction		= Component->GetComponentTransform().GetScaledAxis( EAxis::X );
 			Direction.Normalize();
 			BeamData->TargetPoint	= BeamData->SourcePoint + Direction * TotalDistance;
@@ -324,7 +326,7 @@ void UParticleModuleTypeDataBeam2::Update(FParticleEmitterInstance* Owner, int32
 
 		// Determine the step size, count, and travelled ratio
 		BeamData->Direction		= BeamData->TargetPoint - BeamData->SourcePoint;
-		float	FullMagnitude	= FMath::Max(BeamData->Direction.Size(), 0.001f);
+		double	FullMagnitude	= FMath::Max(BeamData->Direction.Size(), 0.001);
 		BeamData->Direction.Normalize();
 
 		int32 InterpSteps = 0;
@@ -335,7 +337,7 @@ void UParticleModuleTypeDataBeam2::Update(FParticleEmitterInstance* Owner, int32
 			if (BEAM2_TYPEDATA_LOCKED(BeamData->Lock_Max_NumNoisePoints))
 			{
 				// If the beam is locked to the target, the steps are the interpolation count
-				BeamData->StepSize		= FullMagnitude / InterpolationCount;
+				BeamData->StepSize		= FullMagnitude / double(InterpolationCount);
 				BeamData->Steps			= InterpolationCount;
 				BeamData->TravelRatio	= 0.0f;
 			}
@@ -343,7 +345,7 @@ void UParticleModuleTypeDataBeam2::Update(FParticleEmitterInstance* Owner, int32
 			{
 				// Determine the number of steps we have traveled
 				FVector	TrueDistance	= Particle.Location - BeamData->SourcePoint;
-				float	TrueMagnitude	= TrueDistance.Size();
+				double	TrueMagnitude	= TrueDistance.Size();
 				if (TrueMagnitude > FullMagnitude)
 				{
 					// Lock to the target if we are over-shooting and determine the steps and step size
@@ -351,18 +353,18 @@ void UParticleModuleTypeDataBeam2::Update(FParticleEmitterInstance* Owner, int32
 					TrueDistance		= Particle.Location - BeamData->SourcePoint;
 					TrueMagnitude		= TrueDistance.Size();
 					BEAM2_TYPEDATA_SETLOCKED(BeamData->Lock_Max_NumNoisePoints, true);
-					BeamData->StepSize		= FullMagnitude / InterpolationCount;
+					BeamData->StepSize		= FullMagnitude / double(InterpolationCount);
 					BeamData->Steps			= InterpolationCount;
 					BeamData->TravelRatio	= 0.0f;
 				}
 				else
 				{
 					// Determine the steps and step size
-					BeamData->StepSize		= FullMagnitude / InterpolationCount;
+					BeamData->StepSize		= FullMagnitude / double(InterpolationCount);
 					BeamData->TravelRatio	= TrueMagnitude / FullMagnitude;
 					BeamData->Steps			= FMath::FloorToInt(BeamData->TravelRatio * InterpolationCount);
 					// Readjust the travel ratio
-					BeamData->TravelRatio	= (TrueMagnitude - (BeamData->StepSize * BeamData->Steps)) / BeamData->StepSize;
+					BeamData->TravelRatio	= (TrueMagnitude - (BeamData->StepSize * double(BeamData->Steps))) / BeamData->StepSize;
 				}
 			}
 			InterpSteps = BeamData->Steps;
@@ -384,7 +386,7 @@ void UParticleModuleTypeDataBeam2::Update(FParticleEmitterInstance* Owner, int32
 					// Determine the number of points to drop.
 					int32 Count = FMath::TruncToInt(FullMagnitude / BeamNoise->FrequencyDistance);
 					Count = FMath::Min<int32>(Count, Freq);
-					BeamData->StepSize		= FullMagnitude / (Count + 1);
+					BeamData->StepSize		= FullMagnitude / double(Count + 1);
 					BeamData->Steps			= Count;
 					BeamData->TravelRatio	= 0.0f;
 					if (NoiseDistanceScale != NULL)
@@ -396,7 +398,7 @@ void UParticleModuleTypeDataBeam2::Update(FParticleEmitterInstance* Owner, int32
 				else
 				{
 					// If locked, just use the noise frequency to determine steps
-					BeamData->StepSize		= FullMagnitude / (Freq + 1);
+					BeamData->StepSize		= FullMagnitude / double(Freq + 1);
 					BeamData->Steps			= Freq;
 					BeamData->TravelRatio	= 0.0f;
 					if (NoiseDistanceScale != NULL)
@@ -409,13 +411,13 @@ void UParticleModuleTypeDataBeam2::Update(FParticleEmitterInstance* Owner, int32
 			{
 				// Determine that actual distance traveled, and its magnitude
 				FVector	TrueDistance	= Particle.Location - BeamData->SourcePoint;
-				float	TrueMagnitude	= TrueDistance.Size();
+				double	TrueMagnitude	= TrueDistance.Size();
 
 				if (BeamNoise->FrequencyDistance > 0.0f)
 				{
 					int32 Count = FMath::TruncToInt(FullMagnitude / BeamNoise->FrequencyDistance);
 					Count = FMath::Min<int32>(Count, Freq);
-					BeamData->StepSize		= FullMagnitude / (Count + 1);
+					BeamData->StepSize		= FullMagnitude / double(Count + 1);
 					// Determine the partial trail amount and the steps taken
 					BeamData->TravelRatio	= TrueMagnitude / FullMagnitude;
 					BeamData->Steps			= FMath::FloorToInt(BeamData->TravelRatio * (Count + 1));
@@ -428,12 +430,12 @@ void UParticleModuleTypeDataBeam2::Update(FParticleEmitterInstance* Owner, int32
 					if (BeamData->Steps == Count)
 					{
 						BeamData->TravelRatio	= 
-							(TrueMagnitude - (BeamData->StepSize * BeamData->Steps)) / 
-							(FullMagnitude - (BeamData->StepSize * BeamData->Steps));
+							(TrueMagnitude - (BeamData->StepSize * double(BeamData->Steps))) /
+							(FullMagnitude - (BeamData->StepSize * double(BeamData->Steps)));
 					}
 					else
 					{
-						BeamData->TravelRatio	= (TrueMagnitude - (BeamData->StepSize * BeamData->Steps)) / BeamData->StepSize;
+						BeamData->TravelRatio	= (TrueMagnitude - (BeamData->StepSize * double(BeamData->Steps))) / BeamData->StepSize;
 					}
 
 					if (NoiseDistanceScale != NULL)
@@ -446,7 +448,7 @@ void UParticleModuleTypeDataBeam2::Update(FParticleEmitterInstance* Owner, int32
 				{
 					// If we are not doing noisy interpolation
 					// Determine the step size for the full beam
-					BeamData->StepSize		= FullMagnitude / (Freq + 1);
+					BeamData->StepSize		= FullMagnitude / double(Freq + 1);
 					// Determine the partial trail amount and the steps taken
 					BeamData->TravelRatio	= TrueMagnitude / FullMagnitude;
 					BeamData->Steps			= FMath::FloorToInt(BeamData->TravelRatio * (Freq + 1));
@@ -459,12 +461,12 @@ void UParticleModuleTypeDataBeam2::Update(FParticleEmitterInstance* Owner, int32
 					if (BeamData->Steps == Freq)
 					{
 						BeamData->TravelRatio	= 
-							(TrueMagnitude - (BeamData->StepSize * BeamData->Steps)) / 
-							(FullMagnitude - (BeamData->StepSize * BeamData->Steps));
+							(TrueMagnitude - (BeamData->StepSize * double(BeamData->Steps))) /
+							(FullMagnitude - (BeamData->StepSize * double(BeamData->Steps)));
 					}
 					else
 					{
-						BeamData->TravelRatio	= (TrueMagnitude - (BeamData->StepSize * BeamData->Steps)) / BeamData->StepSize;
+						BeamData->TravelRatio	= (TrueMagnitude - (BeamData->StepSize * double(BeamData->Steps))) / BeamData->StepSize;
 					}
 				}
 
@@ -487,7 +489,7 @@ void UParticleModuleTypeDataBeam2::Update(FParticleEmitterInstance* Owner, int32
 			FVector	TargetPosition;
 			FVector	TargetTangent;
 
-			float	InvTess	= 1.0f / InterpolationPoints;
+			double	InvTess	= 1.0 / double(InterpolationPoints);
 
 			SourcePosition	 = BeamData->SourcePoint;
 			SourceTangent	 = BeamData->SourceTangent;
@@ -519,12 +521,12 @@ void UParticleModuleTypeDataBeam2::Update(FParticleEmitterInstance* Owner, int32
 				InterpolatedPoints[ii] = FMath::CubicInterp(
 					SourcePosition, SourceTangent,
 					TargetPosition, TargetTangent,
-					InvTess * (ii + 1));
+					InvTess * double(ii + 1));
 				LastPosition		= InterpolatedPoints[ii];
 			}
 
 			BeamData->TriangleCount	= BeamData->Steps * 2;
-			if (BeamData->TravelRatio > KINDA_SMALL_NUMBER)
+			if (BeamData->TravelRatio > UE_KINDA_SMALL_NUMBER)
 			{
 //070305.SAS.		BeamData->TriangleCount	+= 2;
 			}
@@ -535,7 +537,7 @@ void UParticleModuleTypeDataBeam2::Update(FParticleEmitterInstance* Owner, int32
 				InterpolatedPoints[ii] = FMath::CubicInterp(
 					SourcePosition, SourceTangent,
 					TargetPosition, TargetTangent,
-					InvTess * (ii + 1));
+					InvTess * double(ii + 1));
 			}
 
 			if (bLowFreqNoise == true)
@@ -552,7 +554,7 @@ void UParticleModuleTypeDataBeam2::Update(FParticleEmitterInstance* Owner, int32
 					BeamData->TriangleCount	+= NoiseTess * 2;
 				}
 				else
-				if (BeamData->TravelRatio > KINDA_SMALL_NUMBER)
+				if (BeamData->TravelRatio > UE_KINDA_SMALL_NUMBER)
 				{
 					//@todo.SAS. Fix this!
 					// When the data fills in (vertices), it is incorrect.
@@ -581,7 +583,7 @@ void UParticleModuleTypeDataBeam2::Update(FParticleEmitterInstance* Owner, int32
 					BeamData->TriangleCount	+= NoiseTess * 2;
 				}
 				else
-				if (BeamData->TravelRatio > KINDA_SMALL_NUMBER)
+				if (BeamData->TravelRatio > UE_KINDA_SMALL_NUMBER)
 				{
 					//@todo.SAS. Fix this!
 					// When the data fills in (vertices), it is incorrect.
@@ -693,6 +695,22 @@ FParticleEmitterInstance* UParticleModuleTypeDataBeam2::CreateInstance(UParticle
 	Instance->InitParameters(InEmitterParent, InComponent);
 
 	return Instance;
+}
+
+const FVertexFactoryType* UParticleModuleTypeDataBeam2::GetVertexFactoryType() const
+{
+	return &FParticleBeamTrailVertexFactory::StaticType;
+}
+
+void UParticleModuleTypeDataBeam2::CollectPSOPrecacheData(const UParticleEmitter* Emitter, FPSOPrecacheParams& OutParams)
+{
+	bool bUsesDynamicParameter = (Emitter->DynamicParameterDataOffset > 0);
+	
+	FPSOPrecacheVertexFactoryData VFData;
+	VFData.VertexFactoryType = &FParticleBeamTrailVertexFactory::StaticType;
+	VFData.CustomDefaultVertexDeclaration = FParticleBeamTrailVertexFactory::GetPSOPrecacheVertexDeclaration(bUsesDynamicParameter);
+	OutParams.VertexFactoryDataList.Add(VFData);
+	OutParams.PrimitiveType = GetPrimitiveType();
 }
 
 void UParticleModuleTypeDataBeam2::CacheModuleInfo(UParticleEmitter* Emitter)
@@ -1504,7 +1522,7 @@ void UParticleModuleBeamNoise::Update(FParticleEmitterInstance* Owner, int32 Off
 				float	StepSize	= 1.0f / (Freq + 1);
 
 				// Fill in the points...
-				if (NoiseLockTime > KINDA_SMALL_NUMBER)
+				if (NoiseLockTime > UE_KINDA_SMALL_NUMBER)
 				{
 					//@todo. Add support for moving noise points!
 					// Check the times...
@@ -1978,7 +1996,7 @@ bool UParticleModuleBeamSource::ResolveSourceData(FParticleBeam2EmitterInstance*
 						}
 
 						//@todo. fill this in correctly...
-						BeamData->SourcePoint = CalcSourcePosition; 
+						BeamData->SourcePoint = CalcSourcePosition;
 						bSetSource = true;
 					}
 				}
@@ -2007,7 +2025,7 @@ bool UParticleModuleBeamSource::ResolveSourceData(FParticleBeam2EmitterInstance*
 				// Use the value as a world space position
 				BeamData->SourcePoint	= Source.GetValue(BeamInst->EmitterTime, BeamInst->Component);
 				// Take into account current world origin offset
-				BeamData->SourcePoint  -= FVector(BeamInst->Component->GetWorld()->OriginLocation);
+				BeamData->SourcePoint  -= (FVector)BeamInst->Component->GetWorld()->OriginLocation;
 			}
 			else
 			{
@@ -2316,7 +2334,7 @@ bool UParticleModuleBeamTarget::ResolveTargetData(FParticleBeam2EmitterInstance*
 		{
 			// Set the particle target based on the distance
 			float	Distance		= BeamInst->BeamTypeData->Distance.GetValue(Particle.RelativeTime, BeamInst->Component);
-			if (FMath::Abs(Distance) < KINDA_SMALL_NUMBER)
+			if (FMath::Abs(Distance) < UE_KINDA_SMALL_NUMBER)
 			{
 				Distance	= 0.001f;
 			}
@@ -2469,7 +2487,7 @@ bool UParticleModuleBeamTarget::ResolveTargetData(FParticleBeam2EmitterInstance*
 			{
 				BeamData->TargetPoint	= Target.GetValue(BeamInst->EmitterTime, BeamInst->Component);
 				// Take into account current world origin offset
-				BeamData->TargetPoint  -= FVector(BeamInst->Component->GetWorld()->OriginLocation);
+				BeamData->TargetPoint  -= (FVector)BeamInst->Component->GetWorld()->OriginLocation;
 			}
 			else
 			{

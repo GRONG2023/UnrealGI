@@ -3,6 +3,8 @@
 
 #include "ToolMenusBlueprintLibrary.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ToolMenusBlueprintLibrary)
+
 FScriptSlateIcon UToolMenuEntryExtensions::MakeScriptSlateIcon(const FName StyleSetName, const FName StyleName, const FName SmallStyleName)
 {
 	if (SmallStyleName == NAME_None)
@@ -44,9 +46,9 @@ void UToolMenuEntryExtensions::BreakToolMenuOwner(const FToolMenuOwner& InValue,
 	Name = InValue.TryGetName();
 }
 
-UObject* UToolMenuContextExtensions::FindByClass(const FToolMenuContext& Context, UClass* InClass)
+UObject* UToolMenuContextExtensions::FindByClass(const FToolMenuContext& Context, TSubclassOf<UObject> InClass)
 {
-	return Context.FindByClass(InClass);
+	return Context.FindByClass(*InClass);
 }
 
 void UToolMenuEntryExtensions::SetLabel(UPARAM(ref) FToolMenuEntry& Target, const FText& Label)
@@ -120,3 +122,4 @@ void UToolMenuSectionExtensions::AddEntryObject(UPARAM(ref) FToolMenuSection& Se
 {
 	Section.AddEntryObject(InObject);
 }
+

@@ -5,6 +5,7 @@
 #include "SSkinWeightProfileImportOptions.h"
 #include "HAL/UnrealMemory.h"
 #include "Engine/SkeletalMesh.h"
+#include "Engine/SkinnedAssetCommon.h"
 #include "Widgets/SWindow.h"
 #include "Modules/ModuleManager.h"
 #include "Framework/Application/SlateApplication.h"
@@ -31,7 +32,7 @@ void FSkinWeightProfileHelpers::ImportSkinWeightProfile(USkeletalMesh* InSkeleta
 	if (InSkeletalMesh)
 	{
 		const int32 LOD0Index = 0;
-		FString PickedFileName = FSkinWeightsUtilities::PickSkinWeightFBXPath(LOD0Index, InSkeletalMesh);
+		FString PickedFileName = FSkinWeightsUtilities::PickSkinWeightPath(LOD0Index, InSkeletalMesh);
 
 		bool bShouldImport = false;
 		USkinWeightImportOptions* ImportSettings = GetMutableDefault<USkinWeightImportOptions>();		
@@ -74,7 +75,7 @@ void FSkinWeightProfileHelpers::ImportSkinWeightProfile(USkeletalMesh* InSkeleta
 			FScopedSkeletalMeshPostEditChange ScopedPostEditChange(InSkeletalMesh);
 			const FName ProfileName(*ImportSettings->ProfileName);			
 			// Try and import the skin weight profile from the provided FBX file path
-			const bool bResult = FSkinWeightsUtilities::ImportAlternateSkinWeight(InSkeletalMesh, PickedFileName, ImportSettings->LODIndex, ProfileName);
+			const bool bResult = FSkinWeightsUtilities::ImportAlternateSkinWeight(InSkeletalMesh, PickedFileName, ImportSettings->LODIndex, ProfileName, false);
 			if (bResult)
 			{
 				FNotificationInfo NotificationInfo(FText::GetEmpty());
@@ -90,7 +91,7 @@ void FSkinWeightProfileHelpers::ImportSkinWeightProfile(USkeletalMesh* InSkeleta
 				FSlateNotificationManager::Get().AddNotification(NotificationInfo);
 			}
 
-			if(!InSkeletalMesh->IsLODImportedDataBuildAvailable(ImportSettings->LODIndex))
+			if(!InSkeletalMesh->HasMeshDescription(ImportSettings->LODIndex))
 			{
 				FLODUtilities::RegenerateDependentLODs(InSkeletalMesh, ImportSettings->LODIndex, GetTargetPlatformManagerRef().GetRunningTargetPlatform());
 			}
@@ -103,14 +104,14 @@ void FSkinWeightProfileHelpers::ImportSkinWeightProfileLOD(USkeletalMesh* InSkel
 	if (InSkeletalMesh)
 	{
 		// Pick a FBX file to import the weights from 
-		const FString PickedFileName = FSkinWeightsUtilities::PickSkinWeightFBXPath(LODIndex, InSkeletalMesh);
+		const FString PickedFileName = FSkinWeightsUtilities::PickSkinWeightPath(LODIndex, InSkeletalMesh);
 		FScopedSuspendAlternateSkinWeightPreview ScopedSuspendAlternateSkinnWeightPreview(InSkeletalMesh);
 		FScopedSkeletalMeshPostEditChange ScopedPostEditChange(InSkeletalMesh);
 		// Try and import skin weights for a specific mesh LOD
-		const bool bResult = FSkinWeightsUtilities::ImportAlternateSkinWeight(InSkeletalMesh, PickedFileName, LODIndex, ProfileName);
+		const bool bResult = FSkinWeightsUtilities::ImportAlternateSkinWeight(InSkeletalMesh, PickedFileName, LODIndex, ProfileName, false);
 		if (bResult)
 		{
-			if(!InSkeletalMesh->IsLODImportedDataBuildAvailable(LODIndex))
+			if(!InSkeletalMesh->HasMeshDescription(LODIndex))
 			{
 				FLODUtilities::RegenerateDependentLODs(InSkeletalMesh, LODIndex, GetTargetPlatformManagerRef().GetRunningTargetPlatform());
 			}
@@ -146,7 +147,7 @@ void FSkinWeightProfileHelpers::ReimportSkinWeightProfileLOD(USkeletalMesh* InSk
 			// Check to see if the source file is still valid
 			if (FPaths::FileExists(PathName))
 			{
-				bResult = FSkinWeightsUtilities::ImportAlternateSkinWeight(InSkeletalMesh, PathName, LODIndex, InProfileName);
+				bResult = FSkinWeightsUtilities::ImportAlternateSkinWeight(InSkeletalMesh, PathName, LODIndex, InProfileName, true);
 			}
 			else
 			{
@@ -154,14 +155,14 @@ void FSkinWeightProfileHelpers::ReimportSkinWeightProfileLOD(USkeletalMesh* InSk
 				if (EAppReturnType::Yes == FMessageDialog::Open(EAppMsgType::YesNo, WarningMessage))
 				{
 					// Otherwise let the user pick a new path
-					const FString PickedFileName = FSkinWeightsUtilities::PickSkinWeightFBXPath(LODIndex, InSkeletalMesh);
-					bResult = FSkinWeightsUtilities::ImportAlternateSkinWeight(InSkeletalMesh, PickedFileName, LODIndex, InProfileName);
+					const FString PickedFileName = FSkinWeightsUtilities::PickSkinWeightPath(LODIndex, InSkeletalMesh);
+					bResult = FSkinWeightsUtilities::ImportAlternateSkinWeight(InSkeletalMesh, PickedFileName, LODIndex, InProfileName, true);
 				}
 			}
 
 			if (bResult)
 			{
-				if (!InSkeletalMesh->IsLODImportedDataBuildAvailable(LODIndex))
+				if (!InSkeletalMesh->HasMeshDescription(LODIndex))
 				{
 					// Make sure we regenerate any LOD data that is based off the now re imported LOD
 					FLODUtilities::RegenerateDependentLODs(InSkeletalMesh, LODIndex, GetTargetPlatformManagerRef().GetRunningTargetPlatform());
@@ -207,7 +208,7 @@ void FSkinWeightProfileHelpers::RemoveSkinWeightProfile(USkeletalMesh* InSkeleta
 			{
 				// Delete the alternate influences data
 				LODModel.SkinWeightProfiles.Remove(InProfileName);
-				if (!InSkeletalMesh->IsLODImportedDataBuildAvailable(LODIndex))
+				if (!InSkeletalMesh->HasMeshDescription(LODIndex))
 				{
 					// Regenerate this generated LOD
 					FLODUtilities::SimplifySkeletalMeshLOD(UpdateContext, LODIndex, GetTargetPlatformManagerRef().GetRunningTargetPlatform());
@@ -242,7 +243,7 @@ void FSkinWeightProfileHelpers::RemoveSkinWeightProfileLOD(USkeletalMesh* InSkel
 		if (LODInfo && LODInfo->bHasBeenSimplified)
 		{
 			//We cannot remove alternate skin weights profile for a generated LOD
-			//It will be remove when the base LOD use to reduce will get his skin weights profile remove
+			//It will be removed when the base LOD used to reduce will get their skin weights profile removed
 			return;
 		}
 		FScopedSuspendAlternateSkinWeightPreview ScopedSuspendAlternateSkinnWeightPreview(InSkeletalMesh);
@@ -252,7 +253,7 @@ void FSkinWeightProfileHelpers::RemoveSkinWeightProfileLOD(USkeletalMesh* InSkel
 		{
 			FSkinWeightProfileHelpers::ClearSkinWeightProfileInstanceOverrides(InSkeletalMesh, InProfileName);
 
-			if (!InSkeletalMesh->IsLODImportedDataBuildAvailable(LODIndex))
+			if (!InSkeletalMesh->HasMeshDescription(LODIndex))
 			{
 				//Regenerate dependent LODs if we remove the LOD successfully
 				FLODUtilities::RegenerateDependentLODs(InSkeletalMesh, LODIndex, GetTargetPlatformManagerRef().GetRunningTargetPlatform());
@@ -280,7 +281,7 @@ void FSkinWeightProfileHelpers::ClearSkinWeightProfileInstanceOverrides(USkeleta
 	FScopedSkeletalMeshPostEditChange ScopedPostEditChange(InSkeletalMesh, false, true);
 	for (TObjectIterator<USkinnedMeshComponent> It; It; ++It)
 	{
-		if (It->SkeletalMesh == InSkeletalMesh)
+		if (Cast<USkeletalMesh>(It->GetSkinnedAsset()) == InSkeletalMesh)
 		{
 			checkf(!It->IsUnreachable(), TEXT("%s"), *It->GetFullName());
 

@@ -9,9 +9,13 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "Engine/EngineTypes.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "RHIDefinitions.h"
+#endif
 #include "Factories/Factory.h"
 #include "WorldFactory.generated.h"
+
+namespace ERHIFeatureLevel { enum Type : int; }
 
 UCLASS(MinimalAPI)
 class UWorldFactory : public UFactory
@@ -20,6 +24,8 @@ class UWorldFactory : public UFactory
 
 	TEnumAsByte<EWorldType::Type> WorldType;
 	bool bInformEngineOfWorld;
+	bool bCreateWorldPartition;
+	bool bEnableWorldPartitionStreaming;
 	ERHIFeatureLevel::Type FeatureLevel;
 
 	//~ Begin UFactory Interface

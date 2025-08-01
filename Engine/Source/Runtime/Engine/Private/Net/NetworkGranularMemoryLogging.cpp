@@ -2,16 +2,16 @@
 
 #include "Net/NetworkGranularMemoryLogging.h"
 
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#if UE_WITH_NETWORK_GRANULAR_MEM_TRACKING
 
 #include "Serialization/ArchiveCountMem.h"
 #include "EngineLogs.h"
 #include "HAL/IConsoleManager.h"
 #include "Containers/Ticker.h"
-#include "Templates/Sorting.h"
 #include "Stats/Stats.h"
+#include "Containers/Ticker.h"
 
-namespace GranularNetworkMemoryTrackingPrivate
+namespace UE::Net::Private::GranularMemoryTracking
 {
 	static TAutoConsoleVariable<int32> CVarUseGranularNetworkTracking(
 		TEXT("Net.UseGranularNetworkTracking"),
@@ -48,8 +48,11 @@ namespace GranularNetworkMemoryTrackingPrivate
 			};
 
 			TArray<FField> FieldValues;
-			FieldValues.Reserve(Fields.Num() + 1);
+			FieldValues.Reserve(Fields.Num() + 2);
 			FieldValues.Add({ &NewPrefix, TotalBytes });
+
+			static const FString CountName = TEXT("Count");
+			FieldValues.Add({ &CountName, Count });
 
 			for (auto ConstIt = Fields.CreateConstIterator(); ConstIt; ++ConstIt)
 			{
@@ -57,7 +60,7 @@ namespace GranularNetworkMemoryTrackingPrivate
 			}
 
 			// Keep our total scope data in place, but sort the rest of the fields.
-			Sort(FieldValues.GetData() + 1, FieldValues.Num() - 1, FieldLessThan);
+			Algo::Sort(MakeArrayView(FieldValues.GetData() + 2, FieldValues.Num() - 2), FieldLessThan);
 
 			FString ReportRow = FString::Printf(TEXT("%s\r\n%s"),
 				*FString::JoinBy(FieldValues, TEXT(","), [](const FField& Field) { return *Field.Name; }),
@@ -88,12 +91,18 @@ namespace GranularNetworkMemoryTrackingPrivate
 			return TotalBytes;
 		}
 
+		void IncrementCount()
+		{
+			++Count;
+		}
+
 		const FString ScopeName;
 
 	private:
 
 		TMap<FString, TUniquePtr<FNetworkMemoryTrackingScope>> SubScopes;
 		TMap<FString, uint64> Fields;
+		uint32 Count = 0;
 		uint64 TotalBytes = 0u;
 	};
 
@@ -123,8 +132,10 @@ namespace GranularNetworkMemoryTrackingPrivate
 			}
 			else
 			{
-				 CurrentScope = TopLevelScopes.Add(ScopeName, MakeUnique<FNetworkMemoryTrackingScope>(ScopeName)).Get();
+				CurrentScope = TopLevelScopes.Add(ScopeName, MakeUnique<FNetworkMemoryTrackingScope>(ScopeName)).Get();
 			}
+
+			CurrentScope->IncrementCount();
 
 			ScopeStack.Push(CurrentScope);
 		}
@@ -160,7 +171,7 @@ namespace GranularNetworkMemoryTrackingPrivate
 	private:
 
 		FNetworkMemoryTrackingScopeStack() :
-			TickHandle(FTicker::GetCoreTicker().AddTicker(TEXT("NetworkGranularMemoryLogging::FNetworkMemoryTrackingScopeStack"), 0, &FNetworkMemoryTrackingScopeStack::OnTick))
+			TickHandle(FTSTicker::GetCoreTicker().AddTicker(TEXT("NetworkGranularMemoryLogging::FNetworkMemoryTrackingScopeStack"), 0, &FNetworkMemoryTrackingScopeStack::OnTick))
 		{
 		}
 
@@ -179,7 +190,7 @@ namespace GranularNetworkMemoryTrackingPrivate
 			for (auto It = ScopeStack->TopLevelScopes.CreateIterator(); It; ++It)
 			{
 				It.Value()->GenerateRows(EmptyPrefix, Rows);
-				TopLevelKBRows.Add(FString::Printf(TEXT("%s KB\r\n%d"), *It.Key(), static_cast<double>(It.Value()->GetTotalBytes()) / double(1024.f)));
+				TopLevelKBRows.Add(FString::Printf(TEXT("%s KB\r\n%llu"), *It.Key(), FMath::DivideAndRoundUp(It.Value()->GetTotalBytes(), (uint64)1024)));
 			}
 
 			Rows.Append(TopLevelKBRows);
@@ -187,12 +198,12 @@ namespace GranularNetworkMemoryTrackingPrivate
 			// TODO: Replace \r\n with some platform specific newline macro.
 			UE_LOG(LogNet, Warning, TEXT("\r\n%s"), *FString::Join(Rows, TEXT("\r\n\r\n")));
 
-			FTicker::GetCoreTicker().RemoveTicker(ScopeStack->TickHandle);
+			FTSTicker::GetCoreTicker().RemoveTicker(ScopeStack->TickHandle);
 			ScopeStack.Reset();
 			return true;
 		}
 
-		FDelegateHandle TickHandle;
+		FTSTicker::FDelegateHandle TickHandle;
 		TMap<FString, TUniquePtr<FNetworkMemoryTrackingScope>> TopLevelScopes;
 		FNetworkMemoryTrackingScope* CurrentScope = nullptr;
 		TArray<FNetworkMemoryTrackingScope*> ScopeStack;
@@ -248,4 +259,4 @@ namespace GranularNetworkMemoryTrackingPrivate
 	}
 };
 
-#endif
+#endif // UE_WITH_NETWORK_GRANULAR_MEM_TRACKING

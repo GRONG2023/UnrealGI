@@ -3,12 +3,19 @@
 
 #include "Chaos/Box.h"
 #include "Chaos/ImplicitObject.h"
+#include "Chaos/ShapeInstanceFwd.h"
 #include "Chaos/Transform.h"
 #include "ChaosArchive.h"
 #include "Templates/EnableIf.h"
+#include "AABB.h"
 
 namespace Chaos
 {
+
+inline void TImplicitObjectTransformSerializeHelper(FChaosArchive& Ar, FImplicitObjectPtr& Obj)
+{
+	Ar << Obj;
+}
 
 inline void TImplicitObjectTransformSerializeHelper(FChaosArchive& Ar, TSerializablePtr<FImplicitObject>& Obj)
 {
@@ -16,16 +23,6 @@ inline void TImplicitObjectTransformSerializeHelper(FChaosArchive& Ar, TSerializ
 }
 
 inline void TImplicitObjectTransformSerializeHelper(FChaosArchive& Ar, const FImplicitObject* Obj)
-{
-	check(false);
-}
-
-inline void TImplicitObjectTransformAccumulateSerializableHelper(TArray<Pair<TSerializablePtr<FImplicitObject>, FRigidTransform3>>& Out, TSerializablePtr<FImplicitObject> Obj, const FRigidTransform3& NewTM)
-{
-	Obj->AccumulateAllSerializableImplicitObjects(Out, NewTM, Obj);
-}
-
-inline void TImplicitObjectTransformAccumulateSerializableHelper(TArray<Pair<TSerializablePtr<FImplicitObject>, FRigidTransform3>>& Out, const FImplicitObject* Obj, const FRigidTransform3& NewTM)
 {
 	check(false);
 }
@@ -43,30 +40,35 @@ class TImplicitObjectTransformed final : public FImplicitObject
 
 public:
 	using FImplicitObject::GetTypeName;
+	
+	UE_DEPRECATED(5.4, "Constructor no longer in use")
+	TImplicitObjectTransformed(TUniquePtr<Chaos::FImplicitObject> &&ObjectOwner, const TRigidTransform<T, d>& InTransform)
+		: FImplicitObject(EImplicitObject::HasBoundingBox, ImplicitObjectType::Transformed)
+	{
+		check(false);
+	}
 
 	/**
-	 * Create a transform around an ImplicitObject. Lifetime of the wrapped object is managed externally.
+	 * Create a transform around an ImplicitObject and take control of its lifetime.
 	 */
-	TImplicitObjectTransformed(ObjectType Object, const TRigidTransform<T, d>& InTransform)
-	    : FImplicitObject(EImplicitObject::HasBoundingBox, ImplicitObjectType::Transformed)
-	    , MObject(Object)
-	    , MTransform(InTransform)
-	    , MLocalBoundingBox(Object->BoundingBox().TransformedAABB(InTransform))
+	TImplicitObjectTransformed(Chaos::FImplicitObjectPtr&& Object, const TRigidTransform<T, d>& InTransform)
+		: FImplicitObject(EImplicitObject::HasBoundingBox, ImplicitObjectType::Transformed)
+		, MObject(MoveTemp(Object))
+		, MTransform(InTransform)
 	{
-		this->bIsConvex = Object->IsConvex();
+		this->MLocalBoundingBox = MObject->BoundingBox().TransformedAABB(InTransform);
+		this->bIsConvex = MObject->IsConvex();
 		this->bDoCollide = MObject->GetDoCollide();
 	}
 
 	/**
 	 * Create a transform around an ImplicitObject and take control of its lifetime.
 	 */
-	TImplicitObjectTransformed(TUniquePtr<Chaos::FImplicitObject> &&ObjectOwner, const TRigidTransform<T, d>& InTransform)
+	TImplicitObjectTransformed(const Chaos::FImplicitObjectPtr& Object, const TRigidTransform<T, d>& InTransform)
 	    : FImplicitObject(EImplicitObject::HasBoundingBox, ImplicitObjectType::Transformed)
-		, MObjectOwner(MoveTemp(ObjectOwner))
+		, MObject(Object)
 	    , MTransform(InTransform)
 	{
-		static_assert(bSerializable, "Non-serializable TImplicitObjectTransformed created with a UniquePtr");
-		this->MObject = FStorage::Convert(MObjectOwner);
 		this->MLocalBoundingBox = MObject->BoundingBox().TransformedAABB(InTransform);
 		this->bIsConvex = MObject->IsConvex();
 		this->bDoCollide = MObject->GetDoCollide();
@@ -76,13 +78,82 @@ public:
 	TImplicitObjectTransformed(TImplicitObjectTransformed<T, d, bSerializable>&& Other)
 	    : FImplicitObject(EImplicitObject::HasBoundingBox, ImplicitObjectType::Transformed)
 	    , MObject(Other.MObject)
-		, MObjectOwner(MoveTemp(Other.MObjectOwner))
 	    , MTransform(Other.MTransform)
 	    , MLocalBoundingBox(MoveTemp(Other.MLocalBoundingBox))
 	{
 		this->bIsConvex = Other.MObject->IsConvex();
 		this->bDoCollide = Other.MObject->GetDoCollide();
 	}
+	
+
+	virtual EImplicitObjectType GetNestedType() const override
+	{
+		return MObject->GetNestedType();
+	}
+	
+	virtual Chaos::FImplicitObjectPtr CopyGeometry() const
+	{
+		// shallow copying this just requires a copy of the pointer, which is just "this" which will convert into TRefCountPtr<FImplicitObject>
+		// const_cast required here as the invasive ref count needs to be mutated
+		return const_cast<TImplicitObjectTransformed*>(this);
+	}
+	
+	virtual Chaos::FImplicitObjectPtr CopyGeometryWithScale(const FVec3& Scale) const override
+	{
+		// This is a deep copy - we can't take a shallow copy of this and apply the scale without modifying all other instances
+		if(MObject)
+		{
+			//return MakeCopyWithScaleTransformed(MObjectOwner, MTransform, Scale);
+			// since we cannot have a { Scaled -- Transformed -- Shape } ( scaled can only directly reference concrete shapes )
+			// we need to scale the transform translation and set the Scaled on the shape itself like { (Adjusted)Transformed -- Scaled -- Shape }  
+			FRigidTransform3 AdjustedTransform{ MTransform };
+			AdjustedTransform.ScaleTranslation(Scale);
+
+			Chaos::FImplicitObjectPtr ScaledObject(MObject->CopyGeometryWithScale(Scale));
+			return MakeImplicitObjectPtr<TImplicitObjectTransformed<FReal,3>>(MoveTemp(ScaledObject), AdjustedTransform);
+		}
+		else
+		{
+			check(false);
+			return nullptr;
+		}
+	}
+
+	virtual Chaos::FImplicitObjectPtr DeepCopyGeometry() const
+	{
+		// Deep copy both the transformed wrapper, and the inner object
+		if(MObject)
+		{
+			Chaos::FImplicitObjectPtr ObjectCopy(MObject->DeepCopyGeometry());
+			return MakeImplicitObjectPtr<TImplicitObjectTransformed<T,d>>(MoveTemp(ObjectCopy), MTransform);
+		}
+		else
+		{
+			check(false);
+			return nullptr;
+		}
+	}
+
+	virtual Chaos::FImplicitObjectPtr DeepCopyGeometryWithScale(const FVec3& Scale) const override
+	{
+		if(MObject)
+		{
+			//return MakeCopyWithScaleTransformed(MObjectOwner, MTransform, Scale);
+			// since we cannot have a { Scaled -- Transformed -- Shape } ( scaled can only directly reference concrete shapes )
+			// we need to scale the transform translation and set the Scaled on the shape itself like { (Adjusted)Transformed -- Scaled -- Shape }  
+			FRigidTransform3 AdjustedTransform{ MTransform };
+			AdjustedTransform.ScaleTranslation(Scale);
+
+			Chaos::FImplicitObjectPtr ScaledObject(MObject->DeepCopyGeometryWithScale(Scale));
+			return MakeImplicitObjectPtr<TImplicitObjectTransformed<FReal,3>>(MoveTemp(ScaledObject), AdjustedTransform);
+		}
+		else
+		{
+			check(false);
+			return nullptr;
+		}
+	}
+	
 	~TImplicitObjectTransformed() {}
 
 	static constexpr EImplicitObjectType StaticType()
@@ -92,16 +163,16 @@ public:
 
 	const FImplicitObject* GetTransformedObject() const
 	{
-		return MObject.Get();
+		return MObject.GetReference();
 	}
 
-	FReal GetMargin() const
+	virtual FReal GetMargin() const override
 	{
 		// If the inner shape is quadratic, we have no margin
 		return (MObject->GetRadius() > 0.0f) ? 0.0f : Margin;
 	}
 
-	FReal GetRadius() const
+	virtual FReal GetRadius() const override
 	{
 		// If the inner shape is quadratic, so are we
 		return (MObject->GetRadius() > 0.0f) ? Margin : 0.0f;
@@ -173,7 +244,7 @@ public:
 		return ClosestIntersection;
 	}
 
-	virtual int32 FindClosestFaceAndVertices(const FVec3& Position, TArray<FVec3>& FaceVertices, FReal SearchDist = 0.01) const override
+	virtual int32 FindClosestFaceAndVertices(const FVec3& Position, TArray<FVec3>& FaceVertices, FReal SearchDist = 0.01f) const override
 	{
 		const FVec3 LocalPoint = MTransform.InverseTransformPosition(Position);
 		int32 FaceIndex = MObject->FindClosestFaceAndVertices(LocalPoint, FaceVertices, SearchDist);
@@ -190,24 +261,17 @@ public:
 	const TRigidTransform<T, d>& GetTransform() const { return MTransform; }
 	void SetTransform(const TRigidTransform<T, d>& InTransform)
 	{
-		MLocalBoundingBox = MObject->BoundingBox().TransformedBox(InTransform);
+		MLocalBoundingBox = MObject->BoundingBox().TransformedAABB(InTransform);
 		MTransform = InTransform;
 	}
 
-	virtual void AccumulateAllImplicitObjects(TArray<Pair<const FImplicitObject*, TRigidTransform<T, d>>>& Out, const TRigidTransform<T, d>& ParentTM) const
+	virtual void AccumulateAllImplicitObjects(TArray<Pair<const FImplicitObject*, TRigidTransform<T, d>>>& Out, const TRigidTransform<T, d>& ParentTM) const override
 	{
 		const TRigidTransform<T, d> NewTM = MTransform * ParentTM;
 		MObject->AccumulateAllImplicitObjects(Out, NewTM);
 	}
-
-	virtual void AccumulateAllSerializableImplicitObjects(TArray<Pair<TSerializablePtr<FImplicitObject>, TRigidTransform<T, d>>>& Out, const TRigidTransform<T, d>& ParentTM, TSerializablePtr<FImplicitObject> This) const
-	{
-		check(bSerializable);
-		const TRigidTransform<T, d> NewTM = MTransform * ParentTM;
-		TImplicitObjectTransformAccumulateSerializableHelper(Out, MObject, NewTM);
-	}
-
-	virtual void FindAllIntersectingObjects(TArray < Pair<const FImplicitObject*, TRigidTransform<T, d>>>& Out, const TAABB<T, d>& LocalBounds) const
+	
+	virtual void FindAllIntersectingObjects(TArray < Pair<const FImplicitObject*, TRigidTransform<T, d>>>& Out, const TAABB<T, d>& LocalBounds) const override
 	{
 		const TAABB<T, d> SubobjectBounds = LocalBounds.TransformedAABB(MTransform.Inverse());
 		int32 NumOut = Out.Num();
@@ -219,6 +283,12 @@ public:
 	}
 
 	virtual const TAABB<T, d> BoundingBox() const override { return MLocalBoundingBox; }
+
+	// Calculate the tight-fitting world-space bounding box
+	virtual FAABB3 CalculateTransformedBounds(const FRigidTransform3& InTransform) const
+	{
+		return MObject->CalculateTransformedBounds(FRigidTransform3::MultiplyNoScale(MTransform ,InTransform));
+	}
 
 	const FReal GetVolume() const
 	{
@@ -237,8 +307,8 @@ public:
 		// TODO: Actually compute this!
 		return BoundingBox().GetCenterOfMass();
 	}
-
-
+	
+	UE_DEPRECATED(5.4, "Please use GetGeometry instead")
 	const ObjectType Object() const { return MObject; }
 	
 	virtual void Serialize(FChaosArchive& Ar) override
@@ -249,24 +319,106 @@ public:
 		TImplicitObjectTransformSerializeHelper(Ar, MObject);
 		Ar << MTransform;
 		TBox<T, d>::SerializeAsAABB(Ar, MLocalBoundingBox);
+
+		// NOTE: Not serializing SharedObject which is a temp fix and only used in the runtime
 	}
 
 	virtual uint32 GetTypeHash() const override
 	{
 		// Combine the hash from the inner, non transformed object with our transform
-		return HashCombine(MObject->GetTypeHash(), ::GetTypeHash(MTransform));
+		return HashCombine(MObject->GetTypeHash(), GetTypeHashHelper(MTransform));
 	}
 
 	virtual uint16 GetMaterialIndex(uint32 HintIndex) const override
 	{
 		return MObject->GetMaterialIndex(HintIndex);
 	}
+	
+	const Chaos::FImplicitObjectRef GetGeometry() const
+	{
+		return MObject.GetReference();
+	}
+	
+	void SetGeometry(const Chaos::FImplicitObjectPtr& ImplicitObject)
+	{
+		MObject = ImplicitObject;
+	}
+
+protected:
+	virtual int32 CountObjectsInHierarchyImpl() const override final
+	{
+		// Include self
+		return 1 + MObject->CountObjectsInHierarchy();
+	}
+
+	virtual int32 CountLeafObjectsInHierarchyImpl() const override final
+	{
+		// Do not include self
+		return MObject->CountLeafObjectsInHierarchyImpl();
+	}
+
+	virtual void VisitOverlappingLeafObjectsImpl(
+		const FAABB3& InLocalBounds,
+		const FRigidTransform3& ObjectTransform,
+		const int32 RootObjectIndex,
+		int32& ObjectIndex,
+		int32& LeafObjectIndex,
+		const FImplicitHierarchyVisitor& VisitorFunc) const override final
+	{
+		// Skip self
+		++ObjectIndex;
+
+		// Visit child
+		const FAABB3 LocalBounds = InLocalBounds.InverseTransformedAABB(MTransform);
+		MObject->VisitOverlappingLeafObjectsImpl(LocalBounds, MTransform * ObjectTransform, RootObjectIndex, ObjectIndex, LeafObjectIndex, VisitorFunc);
+	}
+
+	virtual void VisitLeafObjectsImpl(
+		const FRigidTransform3& ObjectTransform,
+		const int32 RootObjectIndex,
+		int32& ObjectIndex,
+		int32& LeafObjectIndex,
+		const FImplicitHierarchyVisitor& VisitorFunc) const override final
+	{
+		// Skip self
+		++ObjectIndex;
+
+		// Visit child
+		MObject->VisitLeafObjectsImpl(MTransform * ObjectTransform, RootObjectIndex, ObjectIndex, LeafObjectIndex, VisitorFunc);
+	}
+
+	virtual bool VisitObjectsImpl(
+		const FRigidTransform3& ObjectTransform,
+		const int32 RootObjectIndex,
+		int32& ObjectIndex,
+		int32& LeafObjectIndex,
+		const FImplicitHierarchyVisitorBool& VisitorFunc) const override final
+	{
+		// Visit self
+		bool bContinue = VisitorFunc(this, ObjectTransform, RootObjectIndex, ObjectIndex, INDEX_NONE);
+		++ObjectIndex;
+
+		// Visit child
+		if (bContinue)
+		{
+			bContinue = MObject->VisitObjectsImpl(MTransform * ObjectTransform, RootObjectIndex, ObjectIndex, LeafObjectIndex, VisitorFunc);
+		}
+
+		return bContinue;
+	}
+
+	virtual bool IsOverlappingBoundsImpl(const FAABB3& InLocalBounds) const override final
+	{
+		const FAABB3 LocalBounds = InLocalBounds.InverseTransformedAABB(MTransform);
+		return MObject->IsOverlappingBoundsImpl(LocalBounds);
+	}
 
 private:
-	ObjectType MObject;
-	TUniquePtr<Chaos::FImplicitObject> MObjectOwner;
+	Chaos::FImplicitObjectPtr MObject;
 	TRigidTransform<T, d> MTransform;
 	TAABB<T, d> MLocalBoundingBox;
+
+	friend class FClusterUnionManager;
 
 	//needed for serialization
 	TImplicitObjectTransformed() : FImplicitObject(EImplicitObject::HasBoundingBox, ImplicitObjectType::Transformed) {}
@@ -274,7 +426,46 @@ private:
 	friend FImplicitObject;	//needed for serialization
 };
 
+namespace Utilities
+{
+	UE_DEPRECATED(5.4, "Please use DuplicateGeometryWithTransform instead")
+	inline TUniquePtr<FImplicitObject> DuplicateImplicitWithTransform(const FImplicitObject* const InObject, FTransform NewTransform)
+	{
+		check(false);
+		return nullptr;
+	}
+	inline Chaos::FImplicitObjectPtr DuplicateGeometryWithTransform(const FImplicitObject* const InObject, FTransform NewTransform)
+	{
+		if(!InObject)
+		{
+			return nullptr;
+		}
+
+		const EImplicitObjectType OuterType = InObject->GetType();
+
+		if(GetInnerType(OuterType) == ImplicitObjectType::Transformed)
+		{
+			// Take a deep copy here as we're modifying the transformed itself.
+			// #TODO - Deep copy the transformed wrapper but shallow copy the internal shape as that isn't modified.
+			// Likely need to expand the copy functions to handle deep copy wrappers but not concrete geoms
+			Chaos::FImplicitObjectPtr NewTransformed = InObject->DeepCopyGeometry();
+			TImplicitObjectTransformed<FReal, 3>* InnerTransformed = static_cast<TImplicitObjectTransformed<FReal, 3>*>(NewTransformed.GetReference());
+			InnerTransformed->SetTransform(NewTransform);
+
+			return MoveTemp(NewTransformed);
+		}
+		else
+		{
+			// Shallow copy the inner object and wrap it in a new transformed
+			Chaos::FImplicitObjectPtr NewInnerObject = InObject->CopyGeometry();
+			return MakeImplicitObjectPtr<TImplicitObjectTransformed<FReal, 3>>(MoveTemp(NewInnerObject), NewTransform);
+		}
+	}
+}
+
 template <typename T, int d>
 using TImplicitObjectTransformedNonSerializable = TImplicitObjectTransformed<T, d, false>;
+
+using FImplicitObjectTransformed = TImplicitObjectTransformed<FReal, 3>;
 
 }

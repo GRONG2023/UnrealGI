@@ -6,13 +6,6 @@ namespace UnrealBuildTool.Rules
 	{
 		public AudioCaptureCore(ReadOnlyTargetRules Target) : base(Target)
 		{
-			PrivateDependencyModuleNames.AddRange(
-				new string[]
-				{
-					"AudioMixerCore"
-				}
-			);
-
             PublicDependencyModuleNames.AddRange(
                 new string[]
                 {
@@ -20,6 +13,13 @@ namespace UnrealBuildTool.Rules
                     "SignalProcessing"
                 }
             );
-        }
+
+			PrivateDependencyModuleNames.AddRange(
+				new string[]
+				{
+					"Engine"
+				}
+			);
+		}
 	}
 }

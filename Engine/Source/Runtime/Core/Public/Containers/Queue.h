@@ -7,6 +7,8 @@
 #include "HAL/PlatformAtomics.h"
 #include "HAL/PlatformMisc.h"
 
+// WARNING: This queue is planned for deprecation in favor of TSpscQueue or TMpscQueue
+
 /**
  * Enumerates concurrent queue modes.
  */
@@ -31,14 +33,15 @@ enum class EQueueMode
  * writing it in a way that does not depend on possible instruction reordering on the CPU.
  * The Enqueue() method uses an atomic compare-and-swap in multiple-producers scenarios.
  *
- * @param ItemType The type of items stored in the queue.
+ * @param T The type of items stored in the queue.
  * @param Mode The queue mode (single-producer, single-consumer by default).
  * @todo gmp: Implement node pooling.
  */
-template<typename ItemType, EQueueMode Mode = EQueueMode::Spsc>
+template<typename T, EQueueMode Mode = EQueueMode::Spsc>
 class TQueue
 {
 public:
+	using FElementType = T;
 
 	/** Default constructor. */
 	TQueue()
@@ -66,7 +69,7 @@ public:
 	 * @note To be called only from consumer thread.
 	 * @see Empty, Enqueue, IsEmpty, Peek, Pop
 	 */
-	bool Dequeue(ItemType& OutItem)
+	bool Dequeue(FElementType& OutItem)
 	{
 		TNode* Popped = Tail->NextNode;
 
@@ -80,7 +83,7 @@ public:
 
 		TNode* OldTail = Tail;
 		Tail = Popped;
-		Tail->Item = ItemType();
+		Tail->Item = FElementType();
 		delete OldTail;
 
 		return true;
@@ -105,7 +108,7 @@ public:
 	 * @note To be called only from producer thread(s).
 	 * @see Dequeue, Pop
 	 */
-	bool Enqueue(const ItemType& Item)
+	bool Enqueue(const FElementType& Item)
 	{
 		TNode* NewNode = new TNode(Item);
 
@@ -116,7 +119,7 @@ public:
 
 		TNode* OldHead;
 
-		if (Mode == EQueueMode::Mpsc)
+		if constexpr (Mode == EQueueMode::Mpsc)
 		{
             OldHead = (TNode*)FPlatformAtomics::InterlockedExchangePtr((void**)&Head, NewNode);
 			TSAN_BEFORE(&OldHead->NextNode);
@@ -142,7 +145,7 @@ public:
 	 * @note To be called only from producer thread(s).
 	 * @see Dequeue, Pop
 	 */
-	bool Enqueue(ItemType&& Item)
+	bool Enqueue(FElementType&& Item)
 	{
 		TNode* NewNode = new TNode(MoveTemp(Item));
 
@@ -153,7 +156,7 @@ public:
 
 		TNode* OldHead;
 
-		if (Mode == EQueueMode::Mpsc)
+		if constexpr (Mode == EQueueMode::Mpsc)
 		{
             OldHead = (TNode*)FPlatformAtomics::InterlockedExchangePtr((void**)&Head, NewNode);
 			TSAN_BEFORE(&OldHead->NextNode);
@@ -191,7 +194,7 @@ public:
 	 * @note To be called only from consumer thread.
 	 * @see Dequeue, Empty, IsEmpty, Pop
 	 */
-	bool Peek(ItemType& OutItem) const
+	bool Peek(FElementType& OutItem) const
 	{
 		if (Tail->NextNode == nullptr)
 		{
@@ -211,7 +214,7 @@ public:
 	 *
 	 * @return Pointer to the item, or nullptr if queue is empty
 	 */
-	ItemType* Peek()
+	FElementType* Peek()
 	{
 		if (Tail->NextNode == nullptr)
 		{
@@ -221,7 +224,7 @@ public:
 		return &Tail->NextNode->Item;
 	}
 
-	FORCEINLINE const ItemType* Peek() const
+	FORCEINLINE const FElementType* Peek() const
 	{
 		return const_cast<TQueue*>(this)->Peek();
 	}
@@ -246,7 +249,7 @@ public:
 
 		TNode* OldTail = Tail;
 		Tail = Popped;
-		Tail->Item = ItemType();
+		Tail->Item = FElementType();
 		delete OldTail;
 
 		return true;
@@ -261,7 +264,7 @@ private:
 		TNode* volatile NextNode;
 
 		/** Holds the node's item. */
-		ItemType Item;
+		FElementType Item;
 
 		/** Default constructor. */
 		TNode()
@@ -269,13 +272,13 @@ private:
 		{ }
 
 		/** Creates and initializes a new node. */
-		explicit TNode(const ItemType& InItem)
+		explicit TNode(const FElementType& InItem)
 			: NextNode(nullptr)
 			, Item(InItem)
 		{ }
 
 		/** Creates and initializes a new node. */
-		explicit TNode(ItemType&& InItem)
+		explicit TNode(FElementType&& InItem)
 			: NextNode(nullptr)
 			, Item(MoveTemp(InItem))
 		{ }

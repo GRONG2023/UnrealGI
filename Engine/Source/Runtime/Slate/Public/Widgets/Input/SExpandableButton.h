@@ -12,9 +12,11 @@
 /**
  * A button that can either be collapsed or expanded, containing different content in each state.
  */
-class SLATE_API SExpandableButton
+class SExpandableButton
 	: public SBorder
 {
+	SLATE_DECLARE_WIDGET_API(SExpandableButton, SBorder, SLATE_API)
+
 public:
 
 	SLATE_BEGIN_ARGS( SExpandableButton )
@@ -47,21 +49,29 @@ public:
 
 	SLATE_END_ARGS()
 
+	SLATE_API SExpandableButton();
 	/**
 	 * Construct this widget
 	 *
 	 * @param	InArgs	The declaration data for this widget
 	 */
-	void Construct(const FArguments& InArgs);
+	SLATE_API void Construct(const FArguments& InArgs);
 
 protected:
 
 	/** Callbacks to determine visibility of parts that should be shown when the button state is collapsed or expanded */
-	EVisibility GetCollapsedVisibility() const;
-	EVisibility GetExpandedVisibility() const;
+	SLATE_API EVisibility GetCollapsedVisibility() const;
+	SLATE_API EVisibility GetExpandedVisibility() const;
 
-protected:
+	SLATE_API void UpdateVisibility();
+
+private:
 
 	/** The attribute of the current expansion state */
-	TAttribute<bool> IsExpanded;
+	TSlateAttribute<bool> IsExpanded;
+
+	TSharedPtr<SWidget> ExpandedChildContent;
+	TSharedPtr<SWidget> ToggleButtonClosed;
+	TSharedPtr<SWidget> ToggleButtonExpanded;
+	TSharedPtr<SWidget> CloseExpansionButton;
 };

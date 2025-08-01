@@ -1,18 +1,28 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "NavigationDataHandler.h"
+#include "Engine/Level.h"
 #include "NavMesh/RecastNavMeshGenerator.h"
-
+#include "NavAreas/NavArea.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogNavOctree, Warning, All);
 
-namespace
+namespace UE::NavigationHelper::Private
 {
-	int32 GetDirtyFlagHelper(int32 UpdateFlags, int32 DefaultValue)
+	int32 GetDirtyFlag(int32 UpdateFlags, int32 DefaultValue)
 	{
 		return ((UpdateFlags & FNavigationOctreeController::OctreeUpdate_Geometry) != 0) ? ENavigationDirtyFlag::All :
 			((UpdateFlags & FNavigationOctreeController::OctreeUpdate_Modifiers) != 0) ? ENavigationDirtyFlag::DynamicModifier :
 			DefaultValue;
+	}
+
+	FString GetElementName(const UObject& ElementOwner)
+	{
+		if (const UActorComponent* ActorComp = Cast<UActorComponent>(&ElementOwner))
+		{
+			return FString::Format(TEXT("Comp {0} of Actor {1}"), {*GetNameSafe(&ElementOwner), *GetNameSafe(ActorComp->GetOwner())});
+		}
+		return *GetNameSafe(&ElementOwner);
 	}
 }
 	
@@ -20,14 +30,30 @@ FNavigationDataHandler::FNavigationDataHandler(FNavigationOctreeController& InOc
 		: OctreeController(InOctreeController), DirtyAreasController(InDirtyAreasController)
 {}
 
+void FNavigationDataHandler::ConstructNavOctree(const FVector& Origin, const float Radius, const ENavDataGatheringModeConfig DataGatheringMode, const float GatheringNavModifiersWarningLimitTime)
+{
+	UE_LOG(LogNavOctree, Log, TEXT("CREATE (Origin:%s Radius:%.2f)"), *Origin.ToString(), Radius);
+
+	OctreeController.Reset();
+	OctreeController.NavOctree = MakeShareable(new FNavigationOctree(Origin, Radius));
+	OctreeController.NavOctree->SetDataGatheringMode(DataGatheringMode);
+#if !UE_BUILD_SHIPPING
+	OctreeController.NavOctree->SetGatheringNavModifiersTimeLimitWarning(GatheringNavModifiersWarningLimitTime);
+#endif // !UE_BUILD_SHIPPING
+}
+
 void FNavigationDataHandler::RemoveNavOctreeElementId(const FOctreeElementId2& ElementId, int32 UpdateFlags)
 {
 	if (ensure(OctreeController.IsValidElement(ElementId)))
 	{
 		const FNavigationOctreeElement& ElementData = OctreeController.NavOctree->GetElementById(ElementId);
-		const int32 DirtyFlag = GetDirtyFlagHelper(UpdateFlags, ElementData.Data->GetDirtyFlag());
-		// mark area occupied by given actor as dirty
-		DirtyAreasController.AddArea(ElementData.Bounds.GetBox(), DirtyFlag, [&ElementData] { return ElementData.Data->SourceObject.Get(); });
+		// mark area occupied by given element as dirty except if explicitly set to skip this default behavior
+		if (!ElementData.Data->bShouldSkipDirtyAreaOnAddOrRemove)
+		{
+			const int32 DirtyFlag = UE::NavigationHelper::Private::GetDirtyFlag(UpdateFlags, ElementData.Data->GetDirtyFlag());
+			DirtyAreasController.AddArea(ElementData.Bounds.GetBox(), DirtyFlag, [&ElementData] { return ElementData.Data->SourceObject.Get(); }, nullptr, "Remove from navoctree");
+		}
+
 		OctreeController.NavOctree->RemoveNode(ElementId);
 	}
 }
@@ -50,7 +76,7 @@ FSetElementId FNavigationDataHandler::RegisterNavOctreeElement(UObject& ElementO
 	}
 
 	const bool bIsRelevant = ElementInterface.IsNavigationRelevant();
-	UE_LOG(LogNavOctree, Log, TEXT("REG %s %s"), *ElementOwner.GetName(), bIsRelevant ? TEXT("[relevant]") : TEXT("[skip]"));
+	UE_LOG(LogNavOctree, Log, TEXT("REG %s %s"), *UE::NavigationHelper::Private::GetElementName(ElementOwner), bIsRelevant ? TEXT("[relevant]") : TEXT("[skip]"));
 
 	if (bIsRelevant)
 	{
@@ -69,12 +95,13 @@ FSetElementId FNavigationDataHandler::RegisterNavOctreeElement(UObject& ElementO
 
 		if (bCanAdd)
 		{
-			FNavigationDirtyElement UpdateInfo(&ElementOwner, &ElementInterface, GetDirtyFlagHelper(UpdateFlags, 0));
+			FNavigationDirtyElement UpdateInfo(&ElementOwner, &ElementInterface, UE::NavigationHelper::Private::GetDirtyFlag(UpdateFlags, 0), DirtyAreasController.bUseWorldPartitionedDynamicMode);
 
 			SetId = OctreeController.PendingOctreeUpdates.FindId(UpdateInfo);
 			if (SetId.IsValidId())
 			{
-				// make sure this request stays, in case it has been invalidated already
+				// make sure this request stays, in case it has been invalidated already and keep any dirty areas
+				UpdateInfo.ExplicitAreasToDirty = OctreeController.PendingOctreeUpdates[SetId].ExplicitAreasToDirty;
 				OctreeController.PendingOctreeUpdates[SetId] = UpdateInfo;
 			}
 			else
@@ -90,25 +117,33 @@ FSetElementId FNavigationDataHandler::RegisterNavOctreeElement(UObject& ElementO
 void FNavigationDataHandler::AddElementToNavOctree(const FNavigationDirtyElement& DirtyElement)
 {
 	check(OctreeController.NavOctree.IsValid());
+	LLM_SCOPE_BYTAG(NavigationOctree);
 
 	// handle invalidated requests first
 	if (DirtyElement.bInvalidRequest)
 	{
 		if (DirtyElement.bHasPrevData)
 		{
-			DirtyAreasController.AddArea(DirtyElement.PrevBounds, DirtyElement.PrevFlags, [&DirtyElement] { return DirtyElement.Owner.Get(); });
+			DirtyAreasController.AddArea(DirtyElement.PrevBounds, DirtyElement.PrevFlags, [&DirtyElement] { return DirtyElement.Owner.Get(); }, &DirtyElement, "Addition to navoctree (invalid request)");
 		}
 
 		return;
 	}
 
 	UObject* ElementOwner = DirtyElement.Owner.Get();
-	if (ElementOwner == nullptr || ElementOwner->IsPendingKill() || DirtyElement.NavInterface == nullptr)
+	if (!IsValid(ElementOwner) || DirtyElement.NavInterface == nullptr)
 	{
 		return;
 	}
 
 	FNavigationOctreeElement GeneratedData(*ElementOwner);
+
+	// In WP dynamic mode, store if this is loaded data.
+	if (DirtyAreasController.bUseWorldPartitionedDynamicMode)
+	{
+		GeneratedData.Data->bLoadedData = DirtyElement.bIsFromVisibilityChange || FNavigationSystem::IsLevelVisibilityChanging(ElementOwner);
+	}
+	
 	const FBox ElementBounds = DirtyElement.NavInterface->GetNavigationBounds();
 
 	UObject* NavigationParent = DirtyElement.NavInterface->GetNavigationParent();
@@ -129,24 +164,32 @@ void FNavigationDataHandler::AddElementToNavOctree(const FNavigationDirtyElement
 		const FOctreeElementId2* ElementId = ParentId ? ParentId : OctreeController.GetObjectsNavOctreeId(*NavigationParent);
 		if (ElementId && ensure(OctreeController.IsValidElement(*ElementId)))
 		{
-			UE_LOG(LogNavOctree, Log, TEXT("ADD %s to %s"), *GetNameSafe(ElementOwner), *GetNameSafe(NavigationParent));
+			UE_LOG(LogNavOctree, Log, TEXT("ADD %s to %s"), *UE::NavigationHelper::Private::GetElementName(*ElementOwner), *GetNameSafe(NavigationParent));
 			OctreeController.NavOctree->AppendToNode(*ElementId, DirtyElement.NavInterface, ElementBounds, GeneratedData);
 		}
 		else
 		{
-			UE_LOG(LogNavOctree, Warning, TEXT("Can't add node [%s] - parent [%s] not found in octree!"), *GetNameSafe(ElementOwner), *GetNameSafe(NavigationParent));
+			UE_LOG(LogNavOctree, Warning, TEXT("Can't add node [%s] - parent [%s] not found in octree!"), *UE::NavigationHelper::Private::GetElementName(*ElementOwner), *UE::NavigationHelper::Private::GetElementName(*NavigationParent));
 		}
 	}
 	else
 	{
-		UE_LOG(LogNavOctree, Log, TEXT("ADD %s"), *GetNameSafe(ElementOwner));
+		UE_LOG(LogNavOctree, Log, TEXT("ADD %s"), *UE::NavigationHelper::Private::GetElementName(*ElementOwner));
 		OctreeController.NavOctree->AddNode(ElementOwner, DirtyElement.NavInterface, ElementBounds, GeneratedData);
 	}
 
-	if (!GeneratedData.IsEmpty())
+	// mark area occupied by given element as dirty except if explicitly set to skip this default behavior
+	const int32 DirtyFlag = DirtyElement.FlagsOverride ? DirtyElement.FlagsOverride : GeneratedData.Data->GetDirtyFlag();
+	if (GeneratedData.Data->bShouldSkipDirtyAreaOnAddOrRemove)
 	{
-		const int32 DirtyFlag = DirtyElement.FlagsOverride ? DirtyElement.FlagsOverride : GeneratedData.Data->GetDirtyFlag();
-		DirtyAreasController.AddArea(GeneratedData.Bounds.GetBox(), DirtyFlag, [&ElementOwner] { return ElementOwner; });
+		if (DirtyElement.ExplicitAreasToDirty.Num() > 0)
+		{
+			DirtyAreasController.AddAreas(DirtyElement.ExplicitAreasToDirty, DirtyFlag, [&ElementOwner] { return ElementOwner; }, &DirtyElement, "Addition to navoctree");
+		}
+	}
+	else if (!GeneratedData.IsEmpty())
+	{
+		DirtyAreasController.AddArea(GeneratedData.Bounds.GetBox(), DirtyFlag, [&ElementOwner] { return ElementOwner; }, &DirtyElement, "Addition to navoctree");
 	}
 }
 
@@ -169,7 +212,7 @@ bool FNavigationDataHandler::UnregisterNavOctreeElement(UObject& ElementOwner, I
 
 	bool bUnregistered = false;
 	const FOctreeElementId2* ElementId = OctreeController.GetObjectsNavOctreeId(ElementOwner);
-	UE_LOG(LogNavOctree, Log, TEXT("UNREG %s %s"), *ElementOwner.GetName(), ElementId ? TEXT("[exists]") : TEXT("[does\'t exist]"));
+	UE_LOG(LogNavOctree, Log, TEXT("UNREG %s %s"), *UE::NavigationHelper::Private::GetElementName(ElementOwner), ElementId ? TEXT("[exists]") : TEXT("[doesn\'t exist]"));
 
 	if (ElementId != nullptr)
 	{
@@ -327,29 +370,50 @@ void FNavigationDataHandler::UpdateNavOctreeParentChain(UObject& ElementOwner, b
 	}
 }
 
-bool FNavigationDataHandler::UpdateNavOctreeElementBounds(UActorComponent& Comp, const FBox& NewBounds, const FBox& DirtyArea)
+bool FNavigationDataHandler::UpdateNavOctreeElementBounds(UObject& Object, const FBox& NewBounds, const TConstArrayView<FBox> DirtyAreas)
 {
-	const FOctreeElementId2* ElementId = OctreeController.GetObjectsNavOctreeId(Comp);
+	const FOctreeElementId2* ElementId = OctreeController.GetObjectsNavOctreeId(Object);
 	if (ElementId != nullptr && ensure(OctreeController.IsValidElement(*ElementId)))
 	{
 		OctreeController.NavOctree->UpdateNode(*ElementId, NewBounds);
 
-		// Add dirty area
-		if (DirtyArea.IsValid)
+		// Dirty areas
+		if (DirtyAreas.Num() > 0)
 		{
-			// Refresh ElementId since components may be stored in a different node after updating bounds
-			ElementId = OctreeController.GetObjectsNavOctreeId(Comp);
+			// Refresh ElementId since object may be stored in a different node after updating bounds
+			ElementId = OctreeController.GetObjectsNavOctreeId(Object);
 			if (ElementId != nullptr && ensure(OctreeController.IsValidElement(*ElementId)))
 			{
 				const FNavigationOctreeElement& ElementData = OctreeController.NavOctree->GetElementById(*ElementId);
-				DirtyAreasController.AddArea(DirtyArea, ElementData.Data->GetDirtyFlag(), [&Comp] { return &Comp; });
+				DirtyAreasController.AddAreas(DirtyAreas, ElementData.Data->GetDirtyFlag(), [&Object] { return &Object; }, nullptr, "Bounds change");
 			}
 		}
 
 		return true;
 	}
 
+	// If dirty areas are provided we need to append them to a pending update since the object is not added yet.
+	// Not necessary for the bounds since they are not stored in the update but fetched when the update is processed.
+	if (DirtyAreas.Num() > 0)
+	{
+		const FSetElementId PendingElementId = OctreeController.PendingOctreeUpdates.FindId(FNavigationDirtyElement(&Object));
+		if (PendingElementId.IsValidId())
+		{
+			FNavigationDirtyElement& DirtyElement = OctreeController.PendingOctreeUpdates[PendingElementId];
+			if (!DirtyElement.bInvalidRequest)
+			{
+				DirtyElement.ExplicitAreasToDirty.Append(DirtyAreas);
+				return true;
+			}
+		}
+	}
+
 	return false;
+}
+
+bool FNavigationDataHandler::UpdateNavOctreeElementBounds(UObject& Object, const FBox& NewBounds, const FBox& DirtyArea)
+{
+	return UpdateNavOctreeElementBounds(Object, NewBounds,  TConstArrayView<FBox>{DirtyArea});
 }
 	
 void FNavigationDataHandler::FindElementsInNavOctree(const FBox& QueryBox, const FNavigationOctreeFilter& Filter, TArray<FNavigationOctreeElement>& Elements)
@@ -425,15 +489,22 @@ void FNavigationDataHandler::AddLevelCollisionToOctree(ULevel& Level)
 		if (!ElementId && LevelGeom && LevelGeom->Num() > 0)
 		{
 			FNavigationOctreeElement BSPElem(Level);
+			
+			// In WP dynamic mode, store if this is loaded data.
+			if (DirtyAreasController.bUseWorldPartitionedDynamicMode)
+			{
+				BSPElem.Data->bLoadedData = Level.HasVisibilityChangeRequestPending();
+			}
+			
 			FRecastNavMeshGenerator::ExportVertexSoupGeometry(*LevelGeom, *BSPElem.Data);
 
 			const FBox& Bounds = BSPElem.Data->Bounds;
 			if (!Bounds.GetExtent().IsNearlyZero())
 			{
 				OctreeController.NavOctree->AddNode(&Level, nullptr, Bounds, BSPElem);
-				DirtyAreasController.AddArea(Bounds, ENavigationDirtyFlag::All, [&Level] { return &Level; });
+				DirtyAreasController.AddArea(Bounds, ENavigationDirtyFlag::All, [&Level] { return &Level; }, nullptr, "Add level");
 
-				UE_LOG(LogNavOctree, Log, TEXT("ADD %s"), *Level.GetName());
+				UE_LOG(LogNavOctree, Log, TEXT("ADD %s"), *UE::NavigationHelper::Private::GetElementName(Level));
 			}
 		}
 	}
@@ -445,7 +516,7 @@ void FNavigationDataHandler::RemoveLevelCollisionFromOctree(ULevel& Level)
 	if (OctreeController.NavOctree.IsValid())
 	{
 		const FOctreeElementId2* ElementId = OctreeController.GetObjectsNavOctreeId(Level);
-		UE_LOG(LogNavOctree, Log, TEXT("UNREG %s %s"), *Level.GetName(), ElementId ? TEXT("[exists]") : TEXT(""));
+		UE_LOG(LogNavOctree, Log, TEXT("UNREG %s %s"), *UE::NavigationHelper::Private::GetElementName(Level), ElementId ? TEXT("[exists]") : TEXT(""));
 
 		if (ElementId != nullptr)
 		{
@@ -453,7 +524,7 @@ void FNavigationDataHandler::RemoveLevelCollisionFromOctree(ULevel& Level)
 			{
 				// mark area occupied by given actor as dirty
 				const FNavigationOctreeElement& ElementData = OctreeController.NavOctree->GetElementById(*ElementId);
-				DirtyAreasController.AddArea(ElementData.Bounds.GetBox(), ENavigationDirtyFlag::All, [&Level] { return &Level; });
+				DirtyAreasController.AddArea(ElementData.Bounds.GetBox(), ENavigationDirtyFlag::All, [&Level] { return &Level; }, nullptr, "Remove level");
 			}
 
 			OctreeController.NavOctree->RemoveNode(*ElementId);
@@ -490,11 +561,19 @@ void FNavigationDataHandler::UpdateActorAndComponentsInNavOctree(AActor& Actor)
 
 void FNavigationDataHandler::ProcessPendingOctreeUpdates()
 {
-	if (OctreeController.PendingOctreeUpdates.Num() && OctreeController.NavOctree)
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_Navigation_ProcessPendingOctreeUpdates);
+
+	if (OctreeController.NavOctree)
 	{
-		for (TSet<FNavigationDirtyElement>::TIterator It(OctreeController.PendingOctreeUpdates); It; ++It)
+		// AddElementToNavOctree (through some of its resulting function calls) modifies PendingOctreeUpdates so invalidates the iterators,
+		// (via WaitUntilAsyncPropertyReleased() / UpdateComponentInNavOctree() / RegisterNavOctreeElement()). This means we can't iterate
+		// through this set in the normal way. Previously the code iterated through this which also left us open to other potential bugs
+		// in that we may have tried to modify elements we had already processed.
+		while (TSet<FNavigationDirtyElement>::TIterator It = OctreeController.PendingOctreeUpdates.CreateIterator())
 		{
-			AddElementToNavOctree(*It);
+			FNavigationDirtyElement Element = *It;
+			It.RemoveCurrent();
+			AddElementToNavOctree(Element);
 		}
 	}
 	OctreeController.PendingOctreeUpdates.Empty(32);

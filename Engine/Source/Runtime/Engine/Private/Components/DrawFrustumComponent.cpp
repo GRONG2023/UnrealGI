@@ -10,6 +10,8 @@
 #include "Engine/CollisionProfile.h"
 #include "SceneManagement.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(DrawFrustumComponent)
+
 
 /** Represents a draw frustum to the scene manager. */
 class FDrawFrustumSceneProxy final : public FPrimitiveSceneProxy
@@ -27,6 +29,7 @@ public:
 	*/
 	FDrawFrustumSceneProxy(const UDrawFrustumComponent* InComponent)
 	:	FPrimitiveSceneProxy(InComponent)
+	,	bFrustumEnabled(InComponent->bFrustumEnabled)
 	,	FrustumColor(InComponent->FrustumColor)
 	,	FrustumAngle(InComponent->FrustumAngle)
 	,	FrustumAspectRatio(InComponent->FrustumAspectRatio)
@@ -118,7 +121,7 @@ public:
 	virtual FPrimitiveViewRelevance GetViewRelevance(const FSceneView* View) const override
 	{
 		FPrimitiveViewRelevance Result;
-		Result.bDrawRelevance = IsShown(View) && View->Family->EngineShowFlags.CameraFrustums;
+		Result.bDrawRelevance = IsShown(View) && View->Family->EngineShowFlags.CameraFrustums && bFrustumEnabled;
 		Result.bDynamicRelevance = true;
 		Result.bShadowRelevance = IsShadowCast(View);
 		Result.bEditorPrimitiveRelevance = UseEditorCompositing(View);
@@ -129,6 +132,7 @@ public:
 	uint32 GetAllocatedSize( void ) const { return( FPrimitiveSceneProxy::GetAllocatedSize() ); }
 
 private:
+	bool bFrustumEnabled;
 	FColor FrustumColor;
 	float FrustumAngle;
 	float FrustumAspectRatio;
@@ -161,3 +165,4 @@ FBoxSphereBounds UDrawFrustumComponent::CalcBounds(const FTransform& LocalToWorl
 {
 	return FBoxSphereBounds( LocalToWorld.TransformPosition(FVector::ZeroVector), FVector(FrustumEndDist), FrustumEndDist );
 }
+

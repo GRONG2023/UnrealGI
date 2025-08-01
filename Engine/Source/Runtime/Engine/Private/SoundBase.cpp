@@ -2,12 +2,12 @@
 #include "Sound/SoundBase.h"
 
 #include "AudioDevice.h"
-#include "EngineDefines.h"
-#include "IAudioExtensionPlugin.h"
-#include "Sound/AudioSettings.h"
-#include "Sound/SoundClass.h"
-#include "Sound/SoundSubmix.h"
+#include "AudioPropertiesSheetAssetBase.h"
 #include "Engine/AssetUserData.h"
+#include "IAudioParameterTransmitter.h"
+#include "Sound/SoundSubmix.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SoundBase)
 
 
 USoundBase::USoundBase(const FObjectInitializer& ObjectInitializer)
@@ -61,10 +61,10 @@ float USoundBase::GetMaxDistance() const
 		}
 	}
 
-	return WORLD_MAX;
+	return FAudioDevice::GetMaxWorldDistance();
 }
 
-float USoundBase::GetDuration()
+float USoundBase::GetDuration() const
 {
 	return Duration;
 }
@@ -94,7 +94,12 @@ float USoundBase::GetPitchMultiplier()
 	return 1.f;
 }
 
-bool USoundBase::IsLooping()
+bool USoundBase::IsOneShot() const
+{
+	return !IsLooping();
+}
+
+bool USoundBase::IsLooping() const
 {
 	return (GetDuration() >= INDEFINITELY_LOOPING_DURATION);
 }
@@ -155,7 +160,7 @@ void USoundBase::GetConcurrencyHandles(TArray<FConcurrencyHandle>& OutConcurrenc
 	{
 		OutConcurrencyHandles.Add(ConcurrencyOverrides);
 	}
-	else if (ConcurrencySet.Num() > 0)
+	else if (!ConcurrencySet.IsEmpty())
 	{
 		for (const USoundConcurrency* Concurrency : ConcurrencySet)
 		{
@@ -170,7 +175,7 @@ void USoundBase::GetConcurrencyHandles(TArray<FConcurrencyHandle>& OutConcurrenc
 		if (const USoundConcurrency* DefaultConcurrency = AudioSettings->GetDefaultSoundConcurrency())
 		{
 			OutConcurrencyHandles.Emplace(*DefaultConcurrency);
-		}
+		}	
 	}
 }
 
@@ -184,7 +189,28 @@ bool USoundBase::GetSoundWavesWithCookedAnalysisData(TArray<USoundWave*>& OutSou
 	return false;
 }
 
+#if WITH_EDITOR
+void USoundBase::PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+
+	const FName AudioPropertiesSheetFName = GET_MEMBER_NAME_CHECKED(USoundBase, AudioPropertiesSheet);
+	const FName AudioPropertiesBindingsFName = GET_MEMBER_NAME_CHECKED(USoundBase, AudioPropertiesBindings);
+
+	if (FProperty* PropertyThatChanged = PropertyChangedEvent.Property)
+	{
+		const FName& Name = PropertyThatChanged->GetFName();
+		if (Name == AudioPropertiesSheetFName || Name == AudioPropertiesBindingsFName)
+		{
+			InjectPropertySheet();
+		}
+	}
+}
+#endif
+
 #if WITH_EDITORONLY_DATA
+
+
 void USoundBase::PostLoad()
 {
 	Super::PostLoad();
@@ -197,9 +223,9 @@ void USoundBase::PostLoad()
 		bOutputToBusOnly_DEPRECATED = false;
 	}
 
-	const int32 LinkerUE4Version = GetLinkerUE4Version();
+	const FPackageFileVersion LinkerUEVersion = GetLinkerUEVersion();
 
-	if (LinkerUE4Version < VER_UE4_SOUND_CONCURRENCY_PACKAGE)
+	if (LinkerUEVersion < VER_UE4_SOUND_CONCURRENCY_PACKAGE)
 	{
 		bOverrideConcurrency = true;
 		ConcurrencyOverrides.bLimitToOwner = false;
@@ -216,7 +242,7 @@ bool USoundBase::CanBeClusterRoot() const
 
 bool USoundBase::CanBeInCluster() const
 {
-	return false;
+	return true;
 }
 
 void USoundBase::Serialize(FArchive& Ar)
@@ -232,6 +258,8 @@ void USoundBase::Serialize(FArchive& Ar)
 			SoundConcurrencySettings_DEPRECATED = nullptr;
 		}
 	}
+
+	InjectPropertySheet();
 #endif // WITH_EDITORONLY_DATA
 }
 
@@ -276,5 +304,58 @@ void USoundBase::RemoveUserDataOfClass(TSubclassOf<UAssetUserData> InUserDataCla
 
 const TArray<UAssetUserData*>* USoundBase::GetAssetUserDataArray() const
 {
-	return &AssetUserData;
+	return &ToRawPtrTArrayUnsafe(AssetUserData);
 }
+
+TSharedPtr<Audio::IParameterTransmitter> USoundBase::CreateParameterTransmitter(Audio::FParameterTransmitterInitParams&& InParams) const
+{
+	return nullptr;
+}
+
+void USoundBase::InitParameters(TArray<FAudioParameter>& ParametersToInit, FName InFeatureName)
+{
+	for (int32 i = ParametersToInit.Num() - 1; i >= 0; --i)
+	{
+		if (!IsParameterValid(ParametersToInit[i]))
+		{
+			ParametersToInit.RemoveAtSwap(i, 1, EAllowShrinking::No);
+		}
+	}
+}
+
+bool USoundBase::IsParameterValid(const FAudioParameter& InParameter) const
+{
+	if (InParameter.ParamName.IsNone())
+	{
+		return false;
+	}
+
+	return !(InParameter.ParamType == EAudioParameterType::None || InParameter.ParamType == EAudioParameterType::NoneArray);
+}
+
+#if WITH_EDITORONLY_DATA
+
+void USoundBase::SetTimecodeOffset(const FSoundTimecodeOffset& InTimecodeOffset)
+{
+	TimecodeOffset = InTimecodeOffset;
+}
+
+TOptional<FSoundTimecodeOffset> USoundBase::GetTimecodeOffset() const
+{
+	static const FSoundTimecodeOffset Defaults;
+	if(TimecodeOffset == Defaults)
+	{
+		return {};
+	}
+	return TimecodeOffset;
+}
+
+void USoundBase::InjectPropertySheet()
+{
+	if (AudioPropertiesSheet && AudioPropertiesBindings)
+	{
+		AudioPropertiesSheet->CopyToObjectProperties(this, AudioPropertiesBindings);
+	}
+}
+
+#endif //WITH_EDITORONLY_DATA

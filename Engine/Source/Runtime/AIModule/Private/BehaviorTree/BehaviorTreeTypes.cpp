@@ -21,6 +21,8 @@
 #include "BehaviorTree/BTTaskNode.h"
 #include "BehaviorTree/BTCompositeNode.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BehaviorTreeTypes)
+
 //----------------------------------------------------------------------//
 // FBehaviorTreeInstance
 //----------------------------------------------------------------------//
@@ -83,6 +85,11 @@ void FBehaviorTreeInstance::Initialize(UBehaviorTreeComponent& OwnerComp, UBTCom
 
 void FBehaviorTreeInstance::Cleanup(UBehaviorTreeComponent& OwnerComp, EBTMemoryClear::Type CleanupType)
 {
+	if (!ensureMsgf(OwnerComp.KnownInstances.IsValidIndex(InstanceIdIndex), TEXT("Expected InstanceIdIndex to be in known instances (Root:%s, Num:%i, Index:%i)"), *GetNameSafe(RootNode->GetTreeAsset()), OwnerComp.KnownInstances.Num(), InstanceIdIndex))
+	{
+		return;
+	}
+
 	FBehaviorTreeInstanceId& Info = OwnerComp.KnownInstances[InstanceIdIndex];
 	if (Info.FirstNodeInstance >= 0)
 	{
@@ -179,8 +186,21 @@ FBehaviorTreeInstance::FBehaviorTreeInstance()
 }
 
 FBehaviorTreeInstance::FBehaviorTreeInstance(const FBehaviorTreeInstance& Other)
-{ 
-	*this = Other; 
+	: RootNode(Other.RootNode)
+	, ActiveNode(Other.ActiveNode)
+	, InstanceIdIndex(Other.InstanceIdIndex)
+	, ActiveNodeType(Other.ActiveNodeType)
+	, DeactivationNotify(Other.DeactivationNotify)
+{
+	ActiveAuxNodes = Other.ActiveAuxNodes;
+	ParallelTasks = Other.ParallelTasks;
+	InstanceMemory = Other.InstanceMemory;
+
+#if DO_ENSURE
+	bIteratingNodes = Other.bIteratingNodes;
+	ParallelTaskIndex = Other.ParallelTaskIndex;
+#endif // DO_ENSURE
+
 	IncMemoryStats();
 	INC_DWORD_STAT(STAT_AI_BehaviorTree_NumInstances);
 }
@@ -192,6 +212,49 @@ FBehaviorTreeInstance::FBehaviorTreeInstance(int32 MemorySize)
 	INC_DWORD_STAT(STAT_AI_BehaviorTree_NumInstances);
 }
 
+FBehaviorTreeInstance::FBehaviorTreeInstance(FBehaviorTreeInstance&& Other)
+	: RootNode(Other.RootNode)
+	, ActiveNode(Other.ActiveNode)
+	, InstanceIdIndex(Other.InstanceIdIndex)
+	, ActiveNodeType(Other.ActiveNodeType)
+	, DeactivationNotify(Other.DeactivationNotify)
+{
+	ActiveAuxNodes = MoveTemp(Other.ActiveAuxNodes);
+	ParallelTasks = MoveTemp(Other.ParallelTasks);
+	InstanceMemory = MoveTemp(Other.InstanceMemory);
+
+#if DO_ENSURE
+	bIteratingNodes = Other.bIteratingNodes;
+	ParallelTaskIndex = Other.ParallelTaskIndex;
+#endif // DO_ENSURE
+
+	IncMemoryStats();
+	INC_DWORD_STAT(STAT_AI_BehaviorTree_NumInstances);
+}
+
+FBehaviorTreeInstance& FBehaviorTreeInstance::operator=(FBehaviorTreeInstance&& Other)
+{
+	RootNode = Other.RootNode;
+	ActiveNode = Other.ActiveNode;
+	InstanceIdIndex = Other.InstanceIdIndex;
+	ActiveNodeType = Other.ActiveNodeType;
+	DeactivationNotify = Other.DeactivationNotify;
+
+	ActiveAuxNodes = MoveTemp(Other.ActiveAuxNodes);
+	ParallelTasks = MoveTemp(Other.ParallelTasks);
+	InstanceMemory = MoveTemp(Other.InstanceMemory);
+
+#if DO_ENSURE
+	bIteratingNodes = Other.bIteratingNodes;
+	ParallelTaskIndex = Other.ParallelTaskIndex;
+#endif // DO_ENSURE
+
+	IncMemoryStats();
+	INC_DWORD_STAT(STAT_AI_BehaviorTree_NumInstances);
+
+	return *this;
+}
+
 FBehaviorTreeInstance::~FBehaviorTreeInstance()
 {
 	DecMemoryStats();
@@ -200,18 +263,48 @@ FBehaviorTreeInstance::~FBehaviorTreeInstance()
 
 void FBehaviorTreeInstance::AddToActiveAuxNodes(UBTAuxiliaryNode* AuxNode)
 {
+	AddToActiveAuxNodesImpl(AuxNode);
+}
+
+void FBehaviorTreeInstance::AddToActiveAuxNodesImpl(UBTAuxiliaryNode* AuxNode)
+{
 #if DO_ENSURE
 	ensureAlwaysMsgf(bIteratingNodes == false, TEXT("Adding aux node while iterating through them is not allowed."));
 #endif // DO_ENSURE
+
 	MEM_STAT_UPDATE_WRAPPER(ActiveAuxNodes.Add(AuxNode));
+}
+
+void FBehaviorTreeInstance::AddToActiveAuxNodes(UBehaviorTreeComponent& OwnerComp, UBTAuxiliaryNode* AuxNode)
+{
+	UE_VLOG(OwnerComp.GetOwner(), LogBehaviorTree, Verbose, TEXT("%hs %s")
+		, __FUNCTION__
+		, *UBehaviorTreeTypes::DescribeNodeHelper(AuxNode));
+
+	AddToActiveAuxNodesImpl(AuxNode);
 }
 
 void FBehaviorTreeInstance::RemoveFromActiveAuxNodes(UBTAuxiliaryNode* AuxNode)
 {
+	RemoveFromActiveAuxNodesImpl(AuxNode);
+}
+
+void FBehaviorTreeInstance::RemoveFromActiveAuxNodesImpl(UBTAuxiliaryNode* AuxNode)
+{
 #if DO_ENSURE
 	ensureAlwaysMsgf(bIteratingNodes == false, TEXT("Removing aux node while iterating through them is not allowed."));
 #endif // DO_ENSURE
+
 	MEM_STAT_UPDATE_WRAPPER(ActiveAuxNodes.RemoveSingleSwap(AuxNode));
+}
+
+void FBehaviorTreeInstance::RemoveFromActiveAuxNodes(UBehaviorTreeComponent& OwnerComp, UBTAuxiliaryNode* AuxNode)
+{
+	UE_VLOG(OwnerComp.GetOwner(), LogBehaviorTree, Verbose, TEXT("%hs %s")
+		, __FUNCTION__
+		, *UBehaviorTreeTypes::DescribeNodeHelper(AuxNode));
+
+	RemoveFromActiveAuxNodesImpl(AuxNode);
 }
 
 void FBehaviorTreeInstance::ResetActiveAuxNodes()
@@ -238,7 +331,7 @@ void FBehaviorTreeInstance::RemoveParallelTaskAt(int32 TaskIndex)
 		TEXT("Removing from the list of parallel tasks from ExecuteOnEachParallelTask is only supported for the current task. Otherwise the iteration is broken."));
 #endif // DO_ENSURE
 
-	MEM_STAT_UPDATE_WRAPPER(ParallelTasks.RemoveAt(TaskIndex, /*Count=*/1, /*bAllowShrinking=*/false));
+	MEM_STAT_UPDATE_WRAPPER(ParallelTasks.RemoveAt(TaskIndex, /*Count=*/1, EAllowShrinking::No));
 }
 
 void FBehaviorTreeInstance::MarkParallelTaskAsAbortingAt(int32 TaskIndex)
@@ -330,7 +423,7 @@ void FBehaviorTreeInstance::DeactivateNodes(FBehaviorTreeSearchData& SearchData,
 				*UBehaviorTreeTypes::DescribeNodeUpdateMode(EBTNodeUpdateMode::Remove),
 				*UBehaviorTreeTypes::DescribeNodeHelper(UpdateInfo.AuxNode ? (UBTNode*)UpdateInfo.AuxNode : (UBTNode*)UpdateInfo.TaskNode));
 
-			SearchData.PendingUpdates.RemoveAt(Idx, 1, false);
+			SearchData.PendingUpdates.RemoveAt(Idx, 1, EAllowShrinking::No);
 		}
 	}
 
@@ -390,14 +483,16 @@ void FBehaviorTreeSearchData::AddUniqueUpdate(const FBehaviorTreeSearchUpdate& U
 			// duplicate, skip
 			if (Info.Mode == UpdateInfo.Mode)
 			{
+				UE_VLOG(OwnerComp.GetOwner(), LogBehaviorTree, Verbose, TEXT(">> skipped: duplicated operation"));
 				bSkipAdding = true;
 				break;
 			}
 
 			// don't add pairs add-remove
 			bSkipAdding = (Info.Mode == EBTNodeUpdateMode::Remove) || (UpdateInfo.Mode == EBTNodeUpdateMode::Remove);
+			UE_CVLOG(bSkipAdding, OwnerComp.GetOwner(), LogBehaviorTree, Verbose, TEXT(">> skipped: paired add/remove"));
 
-			PendingUpdates.RemoveAt(UpdateIndex, 1, false);
+			PendingUpdates.RemoveAt(UpdateIndex, 1, EAllowShrinking::No);
 		}
 	}
 	
@@ -407,16 +502,13 @@ void FBehaviorTreeSearchData::AddUniqueUpdate(const FBehaviorTreeSearchUpdate& U
 	{
 		const bool bIsActive = OwnerComp.IsAuxNodeActive(UpdateInfo.AuxNode, UpdateInfo.InstanceIndex);
 		bSkipAdding = !bIsActive;
+		UE_CVLOG(bSkipAdding, OwnerComp.GetOwner(), LogBehaviorTree, Verbose, TEXT(">> skipped: did not push a remove to PendingUpdates due to inactive aux node"));
 	}
 
 	if (!bSkipAdding)
 	{
 		const int32 Idx = PendingUpdates.Add(UpdateInfo);
 		PendingUpdates[Idx].bPostUpdate = (UpdateInfo.Mode == EBTNodeUpdateMode::Add) && (Cast<UBTService>(UpdateInfo.AuxNode) != NULL);
-	}
-	else
-	{
-		UE_VLOG(OwnerComp.GetOwner(), LogBehaviorTree, Verbose, TEXT(">> or not, update skipped"));
 	}
 }
 
@@ -455,7 +547,7 @@ void FBlackboardKeySelector::ResolveSelectedKey(const UBlackboardData& Blackboar
 		}
 
 		SelectedKeyID = BlackboardAsset.GetKeyID(SelectedKeyName);
-		SelectedKeyType = BlackboardAsset.GetKeyType(SelectedKeyID);
+		SelectedKeyType = BlackboardAsset.GetKeyType(FBlackboard::FKey(IntCastChecked<uint16>(SelectedKeyID)));
 		UE_CLOG(IsSet() == false, LogBehaviorTree, Warning
 			, TEXT("%s> Failed to find key \'%s\' in BB asset %s. BB Key Selector will be set to \'Invalid\'")
 			, *UBehaviorTreeTypes::GetBTLoggingContext()
@@ -572,13 +664,6 @@ void FBlackboardKeySelector::AddNameFilter(UObject* Owner, FName PropertyName)
 	AllowedTypes.Add(NewObject<UBlackboardKeyType_Name>(Owner, *FilterName));
 }
 
-// deprecated
-void FBlackboardKeySelector::AddClassFilter(UObject* Owner, FName PropertyName, TSubclassOf<UClass> AllowedClass)
-{
-	TSubclassOf<UObject> AllowedObjectClass = AllowedClass;
-	AddClassFilter(Owner, PropertyName, AllowedObjectClass);
-}
-
 //----------------------------------------------------------------------//
 // UBehaviorTreeTypes
 //----------------------------------------------------------------------//
@@ -621,6 +706,11 @@ FString UBehaviorTreeTypes::DescribeNodeHelper(const UBTNode* Node)
 
 FString UBehaviorTreeTypes::GetShortTypeName(const UObject* Ob)
 {
+	if ((Ob == nullptr) || (Ob->GetClass() == nullptr))
+	{
+		return TEXT("None");
+	}
+
 	if (Ob->GetClass()->HasAnyClassFlags(CLASS_CompiledFromBlueprint))
 	{
 		return Ob->GetClass()->GetName().LeftChop(2);
@@ -630,7 +720,7 @@ FString UBehaviorTreeTypes::GetShortTypeName(const UObject* Ob)
 	const int32 ShortNameIdx = TypeDesc.Find(TEXT("_"), ESearchCase::CaseSensitive);
 	if (ShortNameIdx != INDEX_NONE)
 	{
-		TypeDesc.MidInline(ShortNameIdx + 1, MAX_int32, false);
+		TypeDesc.MidInline(ShortNameIdx + 1, MAX_int32, EAllowShrinking::No);
 	}
 
 	return TypeDesc;
@@ -638,9 +728,7 @@ FString UBehaviorTreeTypes::GetShortTypeName(const UObject* Ob)
 
 void UBehaviorTreeTypes::SetBTLoggingContext(const UBTNode* NewBTLoggingContext)
 {
-	BTLoggingContext = NewBTLoggingContext 
-		? FString::Printf(TEXT("%s[%d]"), *NewBTLoggingContext->GetNodeName(), NewBTLoggingContext->GetExecutionIndex())
-		: TEXT("");
+	BTLoggingContext = DescribeNodeHelper(NewBTLoggingContext);
 }
 
 //----------------------------------------------------------------------//

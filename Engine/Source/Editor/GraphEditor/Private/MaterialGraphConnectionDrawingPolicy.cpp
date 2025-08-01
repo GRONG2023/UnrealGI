@@ -1,10 +1,28 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "MaterialGraphConnectionDrawingPolicy.h"
+
+#include "Containers/Array.h"
+#include "Containers/Set.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
+#include "GraphEditorSettings.h"
+#include "Layout/ArrangedWidget.h"
 #include "MaterialGraph/MaterialGraph.h"
 #include "MaterialGraph/MaterialGraphSchema.h"
-#include "MaterialGraphConnectionDrawingPolicy.h"
 #include "MaterialGraphNode_Knot.h"
+#include "Math/Color.h"
+#include "SGraphPin.h"
+#include "Shader/ShaderTypes.h"
+#include "Templates/Casts.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
+#include "SGraphSubstrateMaterial.h"
+#include "Widgets/SToolTip.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
+
+class FSlateRect;
 
 /////////////////////////////////////////////////////
 // FMaterialGraphConnectionDrawingPolicy
@@ -21,8 +39,6 @@ FMaterialGraphConnectionDrawingPolicy::FMaterialGraphConnectionDrawingPolicy(int
 	// Still need to be able to perceive the graph while dragging connectors, esp over comment boxes
 	HoverDeemphasisDarkFraction = 0.4f;
 }
-
-
 
 bool FMaterialGraphConnectionDrawingPolicy::FindPinCenter(UEdGraphPin* Pin, FVector2D& OutCenter) const
 {
@@ -103,18 +119,44 @@ bool FMaterialGraphConnectionDrawingPolicy::ShouldChangeTangentForKnot(UMaterial
 		return bPinReversed;
 	}
 }
+
 void FMaterialGraphConnectionDrawingPolicy::DetermineWiringStyle(UEdGraphPin* OutputPin, UEdGraphPin* InputPin, /*inout*/ FConnectionParams& Params)
 {
 	Params.AssociatedPin1 = OutputPin;
 	Params.AssociatedPin2 = InputPin;
 	Params.WireColor = MaterialGraphSchema->ActivePinColor;
 
+	if (Substrate::IsSubstrateEnabled() && (FSubstrateWidget::HasOutputSubstrateType(OutputPin) || FSubstrateWidget::HasInputSubstrateType(InputPin) || FSubstrateWidget::HasInputSubstrateType(OutputPin)))
+	{
+		Params.WireColor = FSubstrateWidget::GetConnectionColor();
+	}
+
+	UE::Shader::EValueType InputType = UE::Shader::EValueType::Void;
+	UE::Shader::EValueType OutputType = UE::Shader::EValueType::Void;
+	bool bInactivePin = false;
+	bool bExecPin = false;
+	bool bValueTypePin = false;
+
 	// Have to consider both pins as the input will be an 'output' when previewing a connection
 	if (OutputPin)
 	{
 		if (!MaterialGraph->IsInputActive(OutputPin))
 		{
-			Params.WireColor = MaterialGraphSchema->InactivePinColor;
+			bInactivePin = true;
+		}
+
+		if (OutputPin->PinType.PinCategory == UMaterialGraphSchema::PC_Exec)
+		{
+			bExecPin = true;
+		}
+		else if (OutputPin->PinType.PinCategory == UMaterialGraphSchema::PC_Void)
+		{
+			bValueTypePin = true;
+		}
+		else if (OutputPin->PinType.PinCategory == UMaterialGraphSchema::PC_ValueType)
+		{
+			OutputType = UE::Shader::FindValueType(OutputPin->PinType.PinSubCategory);
+			bValueTypePin = true;
 		}
 
 		UEdGraphNode* OutputNode = OutputPin->GetOwningNode();
@@ -127,14 +169,28 @@ void FMaterialGraphConnectionDrawingPolicy::DetermineWiringStyle(UEdGraphPin* Ou
 		}
 		else if (!OutputNode->IsNodeEnabled() || OutputNode->IsDisplayAsDisabledForced() || OutputNode->IsNodeUnrelated())
 		{
-			Params.WireColor = MaterialGraphSchema->InactivePinColor;
+			bInactivePin = true;
 		}
 	}
 	if (InputPin)
 	{
 		if (!MaterialGraph->IsInputActive(InputPin))
 		{
-			Params.WireColor = MaterialGraphSchema->InactivePinColor;
+			bInactivePin = true;
+		}
+
+		if (InputPin->PinType.PinCategory == UMaterialGraphSchema::PC_Exec)
+		{
+			bExecPin = true;
+		}
+		else if (InputPin->PinType.PinCategory == UMaterialGraphSchema::PC_Void)
+		{
+			bValueTypePin = true;
+		}
+		else if (InputPin->PinType.PinCategory == UMaterialGraphSchema::PC_ValueType)
+		{
+			InputType = UE::Shader::FindValueType(InputPin->PinType.PinSubCategory);
+			bValueTypePin = true;
 		}
 
 		UEdGraphNode* InputNode = InputPin->GetOwningNode();
@@ -147,7 +203,25 @@ void FMaterialGraphConnectionDrawingPolicy::DetermineWiringStyle(UEdGraphPin* Ou
 		}
 		else if (!InputNode->IsNodeEnabled() || InputNode->IsDisplayAsDisabledForced() || InputNode->IsNodeUnrelated())
 		{
-			Params.WireColor = MaterialGraphSchema->InactivePinColor;
+			bInactivePin = true;
+		}
+	}
+
+	if (bInactivePin)
+	{
+		Params.WireColor = MaterialGraphSchema->InactivePinColor;
+	}
+	else if (bExecPin)
+	{
+		Params.WireColor = Settings->ExecutionPinTypeColor;
+		Params.WireThickness = Settings->DefaultExecutionWireThickness;
+	}
+	else if (bValueTypePin)
+	{
+		// TODO - how to handle InputPin being nullptr, when does this occur?
+		if (InputPin)
+		{
+			Params.WireColor = MaterialGraphSchema->GetPinTypeColor(InputPin->PinType);
 		}
 	}
 
@@ -156,4 +230,62 @@ void FMaterialGraphConnectionDrawingPolicy::DetermineWiringStyle(UEdGraphPin* Ou
 	{
 		ApplyHoverDeemphasis(OutputPin, InputPin, /*inout*/ Params.WireThickness, /*inout*/ Params.WireColor);
 	}
+}
+
+TSharedPtr<IToolTip> FMaterialGraphConnectionDrawingPolicy::GetConnectionToolTip(const SGraphPanel& GraphPanel,	const FGraphSplineOverlapResult& OverlapData) const
+{
+	TSharedPtr<SGraphPin> Pin1Widget;
+	TSharedPtr<SGraphPin> Pin2Widget;
+	OverlapData.GetPinWidgets(GraphPanel, Pin1Widget, Pin2Widget);
+
+	if (!Pin1Widget || !Pin2Widget)
+	{
+		return FConnectionDrawingPolicy::GetConnectionToolTip(GraphPanel, OverlapData);
+	}
+
+	const FText LeftText = FText::Format(NSLOCTEXT("Unreal", "PinConnectionTooltipLeft", "<< {0}"), GetNodePinInfo(Pin1Widget));
+	const FText RightText = FText::Format(NSLOCTEXT("Unreal", "PinConnectionTooltipRight", "{0} >>"), GetNodePinInfo(Pin2Widget));
+
+	return SNew(SToolTip)
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot()
+			.HAlign(HAlign_Left)
+			.AutoHeight()
+			.Padding(0.0f, 0.0f, 0.0f, 5.0f)
+			[
+				SNew(STextBlock)
+					.Margin(FMargin(0.0f, 0.0f, 4.0f, 0.0f))
+					.Justification(ETextJustify::Left)
+					.Text(LeftText)
+			]
+			+ SVerticalBox::Slot()
+			.HAlign(HAlign_Right)
+			.AutoHeight()
+			.Padding(0.0f, 5.0f, 0.0f, 0.0f)
+			[
+				SNew(STextBlock)
+					.Margin(FMargin(4.0f, 0.0f, 0.0f, 0.0f))
+					.Justification(ETextJustify::Right)
+					.Text(RightText)
+			]
+		];
+}
+
+FText FMaterialGraphConnectionDrawingPolicy::GetNodePinInfo(const TSharedPtr<SGraphPin>& PinWidget) const
+{
+	const UEdGraphPin* PinObj = PinWidget->GetPinObj();
+	const UEdGraphNode* EdNode = PinObj->GetOwningNode();
+	 
+	FString NodeTitle = EdNode->GetNodeTitle(ENodeTitleType::ListView).ToString();
+	NodeTitle.RemoveFromStart(TEXT("Material Expression "));
+	
+	if (EdNode->GetCanRenameNode())
+	{
+		FText NodeEditableName = EdNode->GetNodeTitle(ENodeTitleType::EditableTitle);
+		NodeTitle = NodeTitle + TEXT(" (") + NodeEditableName.ToString() + TEXT(")");
+	}
+	const FText PinName = PinObj->GetDisplayName().IsEmptyOrWhitespace() ? FText::FromName(PinObj->PinName) : PinObj->GetDisplayName();
+	
+	return FText::Format(NSLOCTEXT("Unreal", "PinConnectionTooltipPartial", "{0}\r\n{1}"), FText::FromString(NodeTitle), /*NodeType,*/ PinName);
 }

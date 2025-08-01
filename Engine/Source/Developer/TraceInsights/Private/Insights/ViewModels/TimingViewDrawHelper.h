@@ -7,8 +7,9 @@
 #include "Math/Color.h"
 
 // Insights
-#include "Insights/ViewModels/TimingEventsTrack.h" // for ITimingEventsTrackDrawStateBuilder
+#include "Insights/ViewModels/ITimingEvent.h"
 #include "Insights/ViewModels/ITimingViewDrawHelper.h"
+#include "Insights/ViewModels/TimingEventsTrack.h" // for ITimingEventsTrackDrawStateBuilder
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -41,6 +42,7 @@ struct FTimingEventsTrackDrawState
 		float X;
 		FString Text;
 		bool bWhite;
+		FLinearColor Color;
 	};
 
 	FTimingEventsTrackDrawState()
@@ -100,7 +102,7 @@ private:
 	};
 
 public:
-	explicit FTimingEventsTrackDrawStateBuilder(FTimingEventsTrackDrawState& InState, const FTimingTrackViewport& InViewport);
+	explicit FTimingEventsTrackDrawStateBuilder(FTimingEventsTrackDrawState& InState, const FTimingTrackViewport& InViewport, float InFontScale);
 	virtual ~FTimingEventsTrackDrawStateBuilder() {}
 
 	/**
@@ -132,6 +134,7 @@ private:
 	TArray<FBoxData> LastBox;
 
 	const FSlateFontInfo EventFont;
+	float FontScale;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -141,10 +144,13 @@ class FTimingViewDrawHelper final : public ITimingViewDrawHelper
 private:
 	enum class EDrawLayer : int32
 	{
+		TrackBackground,
 		EventBorder,
 		EventFill,
 		EventText,
 		EventHighlight,
+		RelationBackground,
+		Relation,
 		HeaderBackground,
 		HeaderText,
 
@@ -164,11 +170,19 @@ public:
 
 	// ITimingViewDrawHelper interface
 	virtual const FSlateBrush* GetWhiteBrush() const override { return WhiteBrush; }
+	virtual const FSlateBrush* GetEventBorderBrush() const override { return EventBorderBrush; }
+	virtual const FSlateBrush* GetHoveredEventBorderBrush() const override { return HoveredEventBorderBrush; }
+	virtual const FSlateBrush* GetSelectedEventBorderBrush() const override { return SelectedEventBorderBrush; }
 	virtual const FSlateFontInfo& GetEventFont() const override { return EventFont; }
 	virtual FLinearColor GetEdgeColor() const override { return EdgeColor; }
+	virtual FLinearColor GetValidAreaColor() const override { return ValidAreaColor; }
+	virtual FLinearColor GetInvalidAreaColor() const override { return InvalidAreaColor; }
 	virtual FLinearColor GetTrackNameTextColor(const FBaseTimingTrack& Track) const override;
 	virtual int32 GetHeaderBackgroundLayerId() const override { return ReservedLayerId + ToInt32(EDrawLayer::HeaderBackground); }
 	virtual int32 GetHeaderTextLayerId() const override { return ReservedLayerId + ToInt32(EDrawLayer::HeaderText); }
+	virtual int32 GetRelationLayerId() const override {return ReservedLayerId + ToInt32(EDrawLayer::Relation); };
+	virtual int32 GetFirstLayerId() const override { return ReservedLayerId; }
+	virtual int32 GetNumLayerIds() const override { return ToInt32(EDrawLayer::Count); }
 
 	const FDrawContext& GetDrawContext() const { return DrawContext; }
 	const FTimingTrackViewport& GetViewport() const { return Viewport; }
@@ -181,8 +195,11 @@ public:
 
 	// OffsetY = 1.0f is for the top horizontal line (which separates the timelines) added by DrawTrackHeader.
 	void DrawEvents(const FTimingEventsTrackDrawState& DrawState, const FTimingEventsTrack& Track, const float OffsetY = 1.0f) const;
-
 	void DrawFadedEvents(const FTimingEventsTrackDrawState& DrawState, const FTimingEventsTrack& Track, const float OffsetY = 1.0f, const float Opacity = 0.1f) const;
+
+	void DrawLineEvents(const FTimingEventsTrackDrawState& DrawState, const FTimingEventsTrack& Track, const float OffsetY = 1.0f) const;
+	void DrawFadedLineEvents(const FTimingEventsTrackDrawState& DrawState, const FTimingEventsTrack& Track, const float OffsetY = 1.0f, const float Opacity = 0.1f) const;
+	void DrawContextSwitchMarkers(const FTimingEventsTrackDrawState& DrawState, float LineY, float LineH, float Opacity, bool bDrawOverlays, bool bDrawVerticalLines) const;
 
 	void DrawMarkers(const FTimingEventsTrackDrawState& DrawState, float LineY, float LineH, float Opacity) const;
 
@@ -190,6 +207,8 @@ public:
 	void DrawTrackHeader(const FBaseTimingTrack& Track, const int32 HeaderLayerId, const int32 HeaderTextLayerId) const;
 
 	void EndDrawTracks() const;
+
+	void DrawRelations(const TArray<TUniquePtr<ITimingEventRelation>>& Relations, ITimingEventRelation::EDrawFilter Filter) const;
 
 	//////////////////////////////////////////////////
 

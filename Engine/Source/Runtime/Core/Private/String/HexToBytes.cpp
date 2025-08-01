@@ -5,37 +5,36 @@
 #include "Containers/StringView.h"
 #include "Containers/UnrealString.h"
 
-namespace UE
+namespace UE::String
 {
-namespace String
+
+template <typename CharType>
+static inline int32 HexToBytesImpl(TStringView<CharType> Hex, uint8* const OutBytes)
 {
-	template <typename CharType>
-	int32 HexToBytesImpl(const TStringView<CharType>& Hex, uint8* const OutBytes)
+	const int32 HexCount = Hex.Len();
+	const CharType* HexPos = Hex.GetData();
+	const CharType* HexEnd = HexPos + HexCount;
+	uint8* OutPos = OutBytes;
+	if (const bool bPadNibble = (HexCount % 2) == 1)
 	{
-		const int32 HexCount = Hex.Len();
-		const CharType* HexPos = Hex.GetData();
-		const CharType* HexEnd = HexPos + HexCount;
-		uint8* OutPos = OutBytes;
-		if (const bool bPadNibble = (HexCount % 2) == 1)
-		{
-			*OutPos++ = TCharToNibble(*HexPos++);
-		}
-		while (HexPos != HexEnd)
-		{
-			const uint8 HiNibble = uint8(TCharToNibble(*HexPos++) << 4);
-			*OutPos++ = HiNibble | TCharToNibble(*HexPos++);
-		}
-		return static_cast<int32>(OutPos - OutBytes);
+		*OutPos++ = TCharToNibble(*HexPos++);
 	}
-
-	int32 HexToBytes(const FStringView& Hex, uint8* OutBytes)
+	while (HexPos != HexEnd)
 	{
-		return HexToBytesImpl<TCHAR>(Hex, OutBytes);
+		const uint8 HiNibble = uint8(TCharToNibble(*HexPos++) << 4);
+		*OutPos++ = HiNibble | TCharToNibble(*HexPos++);
 	}
-
-	int32 HexToBytes(const FAnsiStringView& Hex, uint8* OutBytes)
-	{
-		return HexToBytesImpl<ANSICHAR>(Hex, OutBytes);
-	}
+	return static_cast<int32>(OutPos - OutBytes);
 }
+
+int32 HexToBytes(FWideStringView Hex, uint8* OutBytes)
+{
+	return HexToBytesImpl<WIDECHAR>(Hex, OutBytes);
 }
+
+int32 HexToBytes(FUtf8StringView Hex, uint8* OutBytes)
+{
+	return HexToBytesImpl<UTF8CHAR>(Hex, OutBytes);
+}
+
+} // UE::String

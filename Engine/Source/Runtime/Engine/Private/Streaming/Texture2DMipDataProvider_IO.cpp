@@ -5,17 +5,20 @@ Texture2DMipDataProvider_IO.cpp : Implementation of FTextureMipDataProvider usin
 =============================================================================*/
 
 #include "Texture2DMipDataProvider_IO.h"
-#include "Engine/Texture2D.h"
+#include "Engine/Texture.h"
+#include "HAL/PlatformFile.h"
 #include "TextureResource.h"
-#include "HAL/PlatformFilemanager.h"
-#include "HAL/FileManager.h"
-#include "Misc/Paths.h"
 #include "Streaming/TextureStreamingHelpers.h"
+#include "ContentStreaming.h"
 
 FTexture2DMipDataProvider_IO::FTexture2DMipDataProvider_IO(const UTexture* InTexture, bool InPrioritizedIORequest)
 	: FTextureMipDataProvider(InTexture, ETickState::Init, ETickThread::Async)
 	, bPrioritizedIORequest(InPrioritizedIORequest)
 {
+	if (InTexture)
+	{
+		TextureName = InTexture->GetFName();
+	}
 }
 
 FTexture2DMipDataProvider_IO::~FTexture2DMipDataProvider_IO()
@@ -25,11 +28,24 @@ FTexture2DMipDataProvider_IO::~FTexture2DMipDataProvider_IO()
 
 void FTexture2DMipDataProvider_IO::Init(const FTextureUpdateContext& Context, const FTextureUpdateSyncOptions& SyncOptions)
 {
-	int32 CurrentFileIndex = INDEX_NONE;
+	IORequests.AddDefaulted(CurrentFirstLODIdx);
 
-	for (int32 MipIndex = PendingFirstLODIdx; MipIndex < CurrentFirstLODIdx; ++MipIndex)
+	// If this resource has optional LODs and we are streaming one of them.
+	if (ResourceState.NumNonOptionalLODs < ResourceState.MaxNumLODs && PendingFirstLODIdx < ResourceState.LODCountToFirstLODIdx(ResourceState.NumNonOptionalLODs))
 	{
-		const FTexture2DMipMap& OwnerMip = *Context.MipsView[MipIndex];
+		// Generate the FilenameHash of each optional LOD before the first one requested, so that we can handle properly PAK unmount events.
+		// Note that streamer only stores the hash for the first optional mip.
+		for (int32 MipIdx = 0; MipIdx < PendingFirstLODIdx; ++MipIdx)
+		{
+			const FTexture2DMipMap& OwnerMip = *Context.MipsView[MipIdx];
+			IORequests[MipIdx].FilenameHash = OwnerMip.BulkData.GetIoFilenameHash();
+		}
+	}
+	
+	// Otherwise validate each streamed in mip.
+	for (int32 MipIdx = PendingFirstLODIdx; MipIdx < CurrentFirstLODIdx; ++MipIdx)
+	{
+		const FTexture2DMipMap& OwnerMip = *Context.MipsView[MipIdx];
 		if (OwnerMip.BulkData.IsStoredCompressedOnDisk())
 		{
 			// Compression at the package level is no longer supported
@@ -40,42 +56,9 @@ void FTexture2DMipDataProvider_IO::Init(const FTextureUpdateContext& Context, co
 			// Invalid bulk data size.
 			continue;
 		}
-
-		FString IOFilename;
-		IOFilename = OwnerMip.BulkData.GetFilename();
-		if (FileInfos.IsValidIndex(CurrentFileIndex))
+		else
 		{
-			FFileInfo& FileInfo = FileInfos[CurrentFileIndex];
-			if (FileInfo.IOFilename == IOFilename && FileInfo.LastMipIndex + 1 == MipIndex)
-			{
-				FileInfo.LastMipIndex = MipIndex;
-			}
-			else // Otherwise create a new entry
-			{
-				CurrentFileIndex = INDEX_NONE;
-			}
-		}
-
-		if (CurrentFileIndex == INDEX_NONE)
-		{
-			int64 IOFileOffset = 0;
-			if (GEventDrivenLoaderEnabled)
-			{
-				if (IOFilename.EndsWith(TEXT(".uasset")) || IOFilename.EndsWith(TEXT(".umap")))
-				{
-					IOFileOffset = -IFileManager::Get().FileSize(*IOFilename);
-					check(IOFileOffset < 0);
-					IOFilename = FPaths::GetBaseFilename(IOFilename, false) + TEXT(".uexp");
-					UE_LOG(LogTexture, Error, TEXT("Streaming from the .uexp file '%s' this MUST be in a ubulk instead for best performance."), *IOFilename);
-				}
-			}
-
-			CurrentFileIndex = FileInfos.AddDefaulted();
-			FFileInfo& FileInfo = FileInfos[CurrentFileIndex];
-			FileInfo.IOFilename = MoveTemp(IOFilename);
-			FileInfo.IOFileOffset = IOFileOffset;
-			FileInfo.FirstMipIndex = MipIndex;
-			FileInfo.LastMipIndex = MipIndex;
+			IORequests[MipIdx].FilenameHash = OwnerMip.BulkData.GetIoFilenameHash();
 		}
 	}
 
@@ -89,49 +72,64 @@ int32 FTexture2DMipDataProvider_IO::GetMips(
 	const FTextureUpdateSyncOptions& SyncOptions)
 {
 	SetAsyncFileCallback(SyncOptions);
-	check(SyncOptions.Counter && !IORequests.Num());
+	check(SyncOptions.Counter);
 	
-	IORequests.AddDefaulted(CurrentFirstLODIdx);
-
-	for (FFileInfo& FileInfo : FileInfos)
+	while (StartingMipIndex < CurrentFirstLODIdx && MipInfos.IsValidIndex(StartingMipIndex))
 	{
-		while (StartingMipIndex >= FileInfo.FirstMipIndex && StartingMipIndex <= FileInfo.LastMipIndex && StartingMipIndex < CurrentFirstLODIdx)
+		const FTexture2DMipMap& OwnerMip = *Context.MipsView[StartingMipIndex];
+		const FTextureMipInfo& MipInfo = MipInfos[StartingMipIndex];
+
+		// Check the validity of the filename.
+		if (IORequests[StartingMipIndex].FilenameHash == INVALID_IO_FILENAME_HASH)
 		{
-			if (!MipInfos.IsValidIndex(StartingMipIndex))
-			{
-				break;
-			}
-			const FTextureMipInfo& MipInfo = MipInfos[StartingMipIndex];
-
-			if (!FileInfo.IOFileHandle)
-			{
-				FileInfo.IOFileHandle.Reset(FPlatformFileManager::Get().GetPlatformFile().OpenAsyncRead(*FileInfo.IOFilename));
-				if (!FileInfo.IOFileHandle)
-				{
-					break;
-				}
-			}
-
-			const FTexture2DMipMap& OwnerMip = *Context.MipsView[StartingMipIndex];
-			// If Data size is specified check compatibility for safety
-			if (MipInfo.DataSize && OwnerMip.BulkData.GetBulkDataSize() > MipInfo.DataSize)
-			{
-				break;
-			}
-
-			// Increment as we push the requests. If a requests complete immediately, then it will call the callback
-			// but that won't do anything because the tick would not try to acquire the lock since it is already locked.
-			SyncOptions.Counter->Increment();
-
-			IORequests[StartingMipIndex].Reset(FileInfo.IOFileHandle->ReadRequest(
-				OwnerMip.BulkData.GetBulkDataOffsetInFile() + FileInfo.IOFileOffset, 
-				OwnerMip.BulkData.GetBulkDataSize(), 
-				bPrioritizedIORequest ? AIOP_BelowNormal : AIOP_Low, 
-				&AsyncFileCallBack, 
-				(uint8*)MipInfo.DestData));
-
-			++StartingMipIndex;
+			break;
 		}
+
+		// If Data size is specified, check compatibility for safety
+		if (MipInfo.DataSize && (uint64)OwnerMip.BulkData.GetBulkDataSize() > MipInfo.DataSize)
+		{
+			break;
+		}
+		
+		// Ensure there is some valid place to read into.
+		if (!MipInfo.DestData)
+		{
+			break;
+		}
+
+		// Increment as we push the requests. If a request completes immediately, then it will call the callback
+		// but that won't do anything because the tick would not try to acquire the lock since it is already locked.
+		SyncOptions.Counter->Increment();
+
+		EAsyncIOPriorityAndFlags Priority = AIOP_Low;
+		if (bPrioritizedIORequest)
+		{
+			static IConsoleVariable* CVarAsyncLoadingPrecachePriority = IConsoleManager::Get().FindConsoleVariable(TEXT("s.AsyncLoadingPrecachePriority"));
+			const bool bLoadBeforeAsyncPrecache = CVarStreamingLowResHandlingMode.GetValueOnAnyThread() == (int32)FRenderAssetStreamingSettings::LRHM_LoadBeforeAsyncPrecache;
+
+			if (CVarAsyncLoadingPrecachePriority && bLoadBeforeAsyncPrecache)
+			{
+				const int32 AsyncIOPriority = CVarAsyncLoadingPrecachePriority->GetInt();
+				// Higher priority than regular requests but don't go over max
+				Priority = (EAsyncIOPriorityAndFlags)FMath::Clamp<int32>(AsyncIOPriority + 1, AIOP_BelowNormal, AIOP_MAX);
+			}
+			else
+			{
+				Priority = AIOP_BelowNormal;
+			}
+		}
+
+		IORequests[StartingMipIndex].BulkDataIORequest.Reset(
+			OwnerMip.BulkData.CreateStreamingRequest(
+				0,
+				OwnerMip.BulkData.GetBulkDataSize(),
+				Priority | AIOP_FLAG_DONTCACHE,
+				&AsyncFileCallBack,
+				(uint8*)MipInfo.DestData
+			)
+		);
+
+		++StartingMipIndex;
 	}
 
 	AdvanceTo(ETickState::PollMips, ETickThread::Async);
@@ -140,19 +138,33 @@ int32 FTexture2DMipDataProvider_IO::GetMips(
 
 bool FTexture2DMipDataProvider_IO::PollMips(const FTextureUpdateSyncOptions& SyncOptions)
 {
+	// Notify that some files have possibly been unmounted / missing.
+	if (bIORequestCancelled && !bIORequestAborted)
+	{
+		IRenderAssetStreamingManager& StreamingManager = IStreamingManager::Get().GetRenderAssetStreamingManager();
+		for (FIORequest& IORequest : IORequests)
+		{
+			StreamingManager.MarkMountedStateDirty(IORequest.FilenameHash);
+		}
+
+		UE_LOG(LogContentStreaming, Warning, TEXT("[%s] Texture stream in request failed due to IO error (Mip %d-%d)."), *TextureName.ToString(), ResourceState.AssetLODBias + PendingFirstLODIdx, ResourceState.AssetLODBias + CurrentFirstLODIdx - 1);
+	}
+
 	ClearIORequests();
 	AdvanceTo(ETickState::Done, ETickThread::None);
+
 	return !bIORequestCancelled;
 }
 
 void FTexture2DMipDataProvider_IO::AbortPollMips() 
 {
-	for (TUniquePtr<IAsyncReadRequest>& IORequest : IORequests)
+	for (FIORequest& IORequest : IORequests)
 	{
-		if (IORequest)
+		if (IORequest.BulkDataIORequest)
 		{
-			// Calling IAsyncReadRequest::cancel() here will trigger the AsyncFileCallBack and precipitate the execution of Cancel().
-			IORequest->Cancel();
+			// Calling cancel() here will trigger the AsyncFileCallBack and precipitate the execution of Cancel().
+			IORequest.BulkDataIORequest->Cancel();
+			bIORequestAborted = true;
 		}
 	}
 }
@@ -179,7 +191,7 @@ void FTexture2DMipDataProvider_IO::SetAsyncFileCallback(const FTextureUpdateSync
 	FTextureUpdateSyncOptions::FCallback RescheduleCallback = SyncOptions.RescheduleCallback;
 	check(Counter && RescheduleCallback);
 
-	AsyncFileCallBack = [this, Counter, RescheduleCallback](bool bWasCancelled, IAsyncReadRequest* Req)
+	AsyncFileCallBack = [this, Counter, RescheduleCallback](bool bWasCancelled, IBulkDataIORequest* Req)
 	{
 		// At this point task synchronization would hold the number of pending requests.
 		Counter->Decrement();
@@ -205,16 +217,13 @@ void FTexture2DMipDataProvider_IO::SetAsyncFileCallback(const FTextureUpdateSync
 
 void FTexture2DMipDataProvider_IO::ClearIORequests()
 {
-	for (TUniquePtr<IAsyncReadRequest>& IORequest : IORequests)
+	for (FIORequest& IORequest : IORequests)
 	{
-		if (IORequest)
+		// If requests are not yet completed, cancel and wait.
+		if (IORequest.BulkDataIORequest && !IORequest.BulkDataIORequest->PollCompletion())
 		{
-			// If clearing requests not yet completed, cancel and wait.
-			if (!IORequest->PollCompletion())
-			{
-				IORequest->Cancel();
-				IORequest->WaitCompletion();
-			}
+			IORequest.BulkDataIORequest->Cancel();
+			IORequest.BulkDataIORequest->WaitCompletion();
 		}
 	}
 	IORequests.Empty();

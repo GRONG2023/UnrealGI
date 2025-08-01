@@ -3,10 +3,11 @@
 set -e
 
 ConfigPath=`dirname "$0"`
-projectPath=$ConfigPath/..
-
-RelativeEnginePath=$projectPath/../../../../../../../Engine
-EnginePath=`python -c "import os; print(os.path.realpath('$RelativeEnginePath'))"`
+pushd $ConfigPath/..
+projectPath=`pwd`
+cd ../../../../../..
+EnginePath=`pwd`
+popd
 
 echo "UE_SDKS_ROOT = ${UE_SDKS_ROOT}"
 
@@ -23,14 +24,20 @@ fi
 
 # Remove ArchiCAD resource tool from quarantine
 pushd "$UE_SDKS_ROOT/HostMac/Mac/Archicad"
-	chmod 777 23/Support/Tools/OSX/ResConv
-	xattr -r -d com.apple.quarantine 23/Support/Tools/OSX/ResConv
+	chmod 777 23.1/Support/Tools/OSX/ResConv
+	xattr -r -d com.apple.quarantine 23.1/Support/Tools/OSX/ResConv
 
 	chmod 777 24/Support/Tools/OSX/ResConv
 	xattr -r -d com.apple.quarantine 24/Support/Tools/OSX/ResConv
 
 	chmod 777 25/Support/Tools/OSX/ResConv
 	xattr -r -d com.apple.quarantine 25/Support/Tools/OSX/ResConv
+
+	chmod 777 26/Support/Tools/OSX/ResConv
+	xattr -r -d com.apple.quarantine 26/Support/Tools/OSX/ResConv
+
+	chmod 777 27/Support/Tools/OSX/ResConv
+	xattr -r -d com.apple.quarantine 27/Support/Tools/OSX/ResConv
 popd
 
 OurDylibFolder=$projectPath/Dylibs
@@ -38,18 +45,24 @@ OurDylibFolder=$projectPath/Dylibs
 mkdir -p "$OurDylibFolder"
 
 dylibLibFreeImage=libfreeimage-3.18.0.dylib
+dylibtbb=libtbb.dylib
+dylibtbbmalloc=libtbbmalloc.dylib
 
-if [[ "$EnginePath/Binaries/ThirdParty/FreeImage/Mac/$dylibLibFreeImage" -nt "$OurDylibFolder/$dylibLibFreeImage" ]]; then
-	if [ -f "$OurDylibFolder/$dylibLibFreeImage" ]; then
-		unlink "$OurDylibFolder/$dylibLibFreeImage"
+SetUpThirdPartyDll() {
+	DylibName=$1
+	DylibPath=$2
+	if [[ "$DylibPath" -nt "$OurDylibFolder/$DylibName" ]]; then
+		if [ -f "$OurDylibFolder/$DylibName" ]; then
+			unlink "$OurDylibFolder/$DylibName"
+		fi
 	fi
-fi
-if [ ! -f "$OurDylibFolder/$dylibLibFreeImage" ]; then
-    echo "Copy $dylibLibFreeImage"
-    cp "$EnginePath/Binaries/ThirdParty/FreeImage/Mac/$dylibLibFreeImage" "$OurDylibFolder"
-	chmod +w "$OurDylibFolder/$dylibLibFreeImage"
-    install_name_tool -id @loader_path/$dylibLibFreeImage "$OurDylibFolder/$dylibLibFreeImage"
-fi
+	if [ ! -f "$OurDylibFolder/$DylibName" ]; then
+		echo "Copy $DylibName"
+		cp "$DylibPath" "$OurDylibFolder"
+		chmod +w "$OurDylibFolder/$DylibName"
+		install_name_tool -id @loader_path/$DylibName "$OurDylibFolder/$DylibName" > /dev/null 2>&1
+	fi
+}
 
 SetUpDll() {
 	DylibName=$1
@@ -64,13 +77,17 @@ SetUpDll() {
 		if [ -f "$OriginalDylibPath" ]; then
 			echo "Copy $DylibName"
 			cp "$OriginalDylibPath" "$OurDylibFolder"
-			install_name_tool -id @loader_path/$DylibName "$OurDylibFolder/$DylibName"
-			install_name_tool -change @rpath/$dylibLibFreeImage @loader_path/$dylibLibFreeImage "$OurDylibFolder/$DylibName"
+			install_name_tool -id @loader_path/$DylibName "$OurDylibFolder/$DylibName" > /dev/null 2>&1
+			install_name_tool -change @rpath/$dylibLibFreeImage @loader_path/$dylibLibFreeImage "$OurDylibFolder/$DylibName" > /dev/null 2>&1
 		else
 			echo "Missing $DylibName"
 		fi
 	fi
 }
+
+SetUpThirdPartyDll $dylibLibFreeImage "$EnginePath/Binaries/ThirdParty/FreeImage/Mac/$dylibLibFreeImage"
+SetUpThirdPartyDll $dylibtbb "$EnginePath/Binaries/ThirdParty/Intel/TBB/Mac/$dylibtbb"
+SetUpThirdPartyDll $dylibtbbmalloc "$EnginePath/Binaries/ThirdParty/Intel/TBB/Mac/$dylibtbbmalloc"
 
 SetUpDll DatasmithUE4ArchiCAD.dylib
 SetUpDll DatasmithUE4ArchiCAD-Mac-Debug.dylib

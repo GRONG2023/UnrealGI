@@ -2,34 +2,41 @@
 
 #include "Components/ProgressBar.h"
 #include "Slate/SlateBrushAsset.h"
+#include "Styling/DefaultStyleCache.h"
+#include "Styling/UMGCoreStyle.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ProgressBar)
 
 #define LOCTEXT_NAMESPACE "UMG"
 
 /////////////////////////////////////////////////////
 // UProgressBar
 
-static FProgressBarStyle* DefaultProgressBarStyle = nullptr;
-
 UProgressBar::UProgressBar(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
-	if (DefaultProgressBarStyle == nullptr)
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	WidgetStyle = UE::Slate::Private::FDefaultStyleCache::GetRuntime().GetProgressBarStyle();
+	
+#if WITH_EDITOR 
+	if (IsEditorWidget())
 	{
-		// HACK: THIS SHOULD NOT COME FROM CORESTYLE AND SHOULD INSTEAD BE DEFINED BY ENGINE TEXTURES/PROJECT SETTINGS
-		DefaultProgressBarStyle = new FProgressBarStyle(FCoreStyle::Get().GetWidgetStyle<FProgressBarStyle>("ProgressBar"));
+		WidgetStyle = UE::Slate::Private::FDefaultStyleCache::GetEditor().GetProgressBarStyle();
 
-		// Unlink UMG default colors from the editor settings colors.
-		DefaultProgressBarStyle->UnlinkColors();
+		// The CDO isn't an editor widget and thus won't use the editor style, call post edit change to mark difference from CDO
+		PostEditChange();
 	}
+#endif // WITH_EDITOR
 
-	WidgetStyle = *DefaultProgressBarStyle;
 	WidgetStyle.FillImage.TintColor = FLinearColor::White;
 
 	BarFillType = EProgressBarFillType::LeftToRight;
+	BarFillStyle = EProgressBarFillStyle::Mask;
 	bIsMarquee = false;
 	Percent = 0;
 	FillColorAndOpacity = FLinearColor::White;
 	BorderPadding = FVector2D(0, 0);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 void UProgressBar::ReleaseSlateResources(bool bReleaseChildren)
@@ -46,9 +53,15 @@ TSharedRef<SWidget> UProgressBar::RebuildWidget()
 	return MyProgressBar.ToSharedRef();
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void UProgressBar::SynchronizeProperties()
 {
 	Super::SynchronizeProperties();
+
+	if (!MyProgressBar.IsValid())
+	{
+		return;
+	}
 
 	TAttribute< TOptional<float> > PercentBinding = OPTIONAL_BINDING_CONVERT(float, Percent, TOptional<float>, ConvertFloatToOptionalFloat);
 	TAttribute<FSlateColor> FillColorAndOpacityBinding = PROPERTY_BINDING(FSlateColor, FillColorAndOpacity);
@@ -56,27 +69,29 @@ void UProgressBar::SynchronizeProperties()
 	MyProgressBar->SetStyle(&WidgetStyle);
 
 	MyProgressBar->SetBarFillType(BarFillType);
+	MyProgressBar->SetBarFillStyle(BarFillStyle);
 	MyProgressBar->SetPercent(bIsMarquee ? TOptional<float>() : PercentBinding);
 	MyProgressBar->SetFillColorAndOpacity(FillColorAndOpacityBinding);
 	MyProgressBar->SetBorderPadding(BorderPadding);
 }
 
-void UProgressBar::SetIsMarquee(bool InbIsMarquee)
+const FProgressBarStyle& UProgressBar::GetWidgetStyle() const
 {
-	bIsMarquee = InbIsMarquee;
+	return WidgetStyle;
+}
+
+void UProgressBar::SetWidgetStyle(const FProgressBarStyle& InStyle)
+{
+	WidgetStyle = InStyle;
 	if (MyProgressBar.IsValid())
 	{
-		MyProgressBar->SetPercent(bIsMarquee ? TOptional<float>() : Percent);
+		MyProgressBar->SetStyle(&WidgetStyle);
 	}
 }
 
-void UProgressBar::SetFillColorAndOpacity(FLinearColor Color)
+float UProgressBar::GetPercent() const
 {
-	FillColorAndOpacity = Color;
-	if (MyProgressBar.IsValid())
-	{
-		MyProgressBar->SetFillColorAndOpacity(FillColorAndOpacity);
-	}
+	return Percent;
 }
 
 void UProgressBar::SetPercent(float InPercent)
@@ -88,42 +103,76 @@ void UProgressBar::SetPercent(float InPercent)
 	}
 }
 
-void UProgressBar::PostLoad()
+EProgressBarFillType::Type UProgressBar::GetBarFillType() const
 {
-	Super::PostLoad();
+	return BarFillType;
+}
 
-	if (GetLinkerUE4Version() < VER_UE4_DEPRECATE_UMG_STYLE_ASSETS)
+void UProgressBar::SetBarFillType(EProgressBarFillType::Type InBarFillType)
+{
+	BarFillType = InBarFillType;
+	if (MyProgressBar.IsValid())
 	{
-		if (Style_DEPRECATED != nullptr)
-		{
-			const FProgressBarStyle* StylePtr = Style_DEPRECATED->GetStyle<FProgressBarStyle>();
-			if (StylePtr != nullptr)
-			{
-				WidgetStyle = *StylePtr;
-			}
-
-			Style_DEPRECATED = nullptr;
-		}
-
-		if (BackgroundImage_DEPRECATED != nullptr)
-		{
-			WidgetStyle.BackgroundImage = BackgroundImage_DEPRECATED->Brush;
-			BackgroundImage_DEPRECATED = nullptr;
-		}
-
-		if (FillImage_DEPRECATED != nullptr)
-		{
-			WidgetStyle.FillImage = FillImage_DEPRECATED->Brush;
-			FillImage_DEPRECATED = nullptr;
-		}
-
-		if (MarqueeImage_DEPRECATED != nullptr)
-		{
-			WidgetStyle.MarqueeImage = MarqueeImage_DEPRECATED->Brush;
-			MarqueeImage_DEPRECATED = nullptr;
-		}
+		MyProgressBar->SetBarFillType(BarFillType);
 	}
 }
+
+EProgressBarFillStyle::Type UProgressBar::GetBarFillStyle() const
+{
+	return BarFillStyle;
+}
+
+void UProgressBar::SetBarFillStyle(EProgressBarFillStyle::Type InBarFillStyle)
+{
+	BarFillStyle = InBarFillStyle;
+	if (MyProgressBar.IsValid())
+	{
+		MyProgressBar->SetBarFillStyle(BarFillStyle);
+	}
+}
+
+bool UProgressBar::UseMarquee() const
+{
+	return bIsMarquee;
+}
+
+void UProgressBar::SetIsMarquee(bool InbIsMarquee)
+{
+	bIsMarquee = InbIsMarquee;
+	if (MyProgressBar.IsValid())
+	{
+		MyProgressBar->SetPercent(bIsMarquee ? TOptional<float>() : Percent);
+	}
+}
+
+FVector2D UProgressBar::GetBorderPadding() const
+{
+	return BorderPadding;
+}
+
+void UProgressBar::SetBorderPadding(FVector2D InBorderPadding)
+{
+	BorderPadding = InBorderPadding;
+	if (MyProgressBar.IsValid())
+	{
+		MyProgressBar->SetBorderPadding(BorderPadding);
+	}
+}
+
+FLinearColor UProgressBar::GetFillColorAndOpacity() const
+{
+	return FillColorAndOpacity;
+}
+
+void UProgressBar::SetFillColorAndOpacity(FLinearColor Color)
+{
+	FillColorAndOpacity = Color;
+	if (MyProgressBar.IsValid())
+	{
+		MyProgressBar->SetFillColorAndOpacity(FillColorAndOpacity);
+	}
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 #if WITH_EDITOR
 
@@ -134,7 +183,9 @@ const FText UProgressBar::GetPaletteCategory()
 
 void UProgressBar::OnCreationFromPalette()
 {
-	FillColorAndOpacity = FLinearColor(0, 0.5f, 1.0f);
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	FillColorAndOpacity = FLinearColor(0.f, 0.5f, 1.0f);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 #endif
@@ -142,3 +193,4 @@ void UProgressBar::OnCreationFromPalette()
 /////////////////////////////////////////////////////
 
 #undef LOCTEXT_NAMESPACE
+

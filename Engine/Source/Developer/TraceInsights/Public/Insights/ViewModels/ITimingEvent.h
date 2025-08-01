@@ -6,7 +6,10 @@
 
 #include "Insights/Common/SimpleRtti.h"
 
+class ITimingViewDrawHelper;
 class FBaseTimingTrack;
+struct FDrawContext;
+class FTimingTrackViewport;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -60,6 +63,24 @@ public:
 	 * Returns a number that changes each time an attribute of this filter changes.
 	 */
 	virtual uint32 GetChangeNumber() const = 0;
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+class ITimingEventRelation
+{
+	INSIGHTS_DECLARE_RTTI_BASE(ITimingEventRelation)
+
+public:
+	enum class EDrawFilter
+	{
+		BetweenScrollableTracks, //  Only draw relations between 2 scrollable tracks.
+		BetweenDockedTracks, // Only draw relation if the source or target track are docked.
+	};
+
+	ITimingEventRelation() {}
+	virtual ~ITimingEventRelation() {}
+	virtual void Draw(const FDrawContext& DrawContext, const FTimingTrackViewport& Viewport, const ITimingViewDrawHelper& Helper, const EDrawFilter Filter) = 0;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

@@ -5,15 +5,17 @@
 ==============================================================================*/
 
 #include "VectorFieldVisualization.h"
+#include "MeshDrawShaderBindings.h"
 #include "RHIStaticStates.h"
+#include "Misc/DelayedAutoRegister.h"
 #include "SceneManagement.h"
 #include "VectorField.h"
-#include "EngineGlobals.h"
 #include "Engine/Engine.h"
 #include "Materials/Material.h"
-#include "ShaderParameterUtils.h"
+#include "Materials/MaterialRenderProxy.h"
 #include "FXSystem.h"
 #include "MeshMaterialShader.h"
+#include "DataDrivenShaderPlatformInfo.h"
 
 IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FVectorFieldVisualizationParameters,"VectorFieldVis");
 
@@ -26,9 +28,9 @@ IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FVectorFieldVisualizationParameters,"Ve
  */
 class FVectorFieldVisualizationVertexFactoryShaderParameters : public FVertexFactoryShaderParameters
 {
-	DECLARE_INLINE_TYPE_LAYOUT(FVectorFieldVisualizationVertexFactoryShaderParameters, NonVirtual);
+	DECLARE_TYPE_LAYOUT(FVectorFieldVisualizationVertexFactoryShaderParameters, NonVirtual);
 public:
-	void Bind( const FShaderParameterMap& ParameterMap )
+	void Bind(const FShaderParameterMap& ParameterMap)
 	{
 		VectorFieldTexture.Bind(ParameterMap, TEXT("VectorFieldTexture"));
 		VectorFieldTextureSampler.Bind(ParameterMap, TEXT("VectorFieldTextureSampler"));
@@ -46,12 +48,13 @@ public:
 		FVertexInputStreamArray& VertexStreams) const;
 
 private:
-	
-		/** The vector field texture parameter. */
-		LAYOUT_FIELD(FShaderResourceParameter, VectorFieldTexture)
-		LAYOUT_FIELD(FShaderResourceParameter, VectorFieldTextureSampler)
-	
+
+	/** The vector field texture parameter. */
+	LAYOUT_FIELD(FShaderResourceParameter, VectorFieldTexture);
+	LAYOUT_FIELD(FShaderResourceParameter, VectorFieldTextureSampler);
 };
+
+IMPLEMENT_TYPE_LAYOUT(FVectorFieldVisualizationVertexFactoryShaderParameters);
 
 /**
  * Vertex declaration for visualizing vector fields.
@@ -62,10 +65,10 @@ public:
 
 	FVertexDeclarationRHIRef VertexDeclarationRHI;
 
-	virtual void InitRHI() override
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override
 	{
 		FVertexDeclarationElementList Elements;
-		Elements.Add(FVertexElement(0, 0, VET_Float4, 0, sizeof(FVector4)));
+		Elements.Add(FVertexElement(0, 0, VET_Float4, 0, sizeof(FVector4f)));
 		VertexDeclarationRHI = PipelineStateCache::GetOrCreateVertexDeclaration(Elements);
 	}
 
@@ -85,15 +88,14 @@ class FDummyVertexBuffer : public FVertexBuffer
 {
 public:
 
-	virtual void InitRHI() override
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override
 	{
-		FRHIResourceCreateInfo CreateInfo;
-		void* BufferData = nullptr;
-		VertexBufferRHI = RHICreateAndLockVertexBuffer(sizeof(FVector4) * 2, BUF_Static, CreateInfo, BufferData);
-		FVector4* DummyContents = (FVector4*)BufferData;
-		DummyContents[0] = FVector4(0.0f, 0.0f, 0.0f, 0.0f);
-		DummyContents[1] = FVector4(1.0f, 1.0f, 1.0f, 1.0f);
-		RHIUnlockVertexBuffer(VertexBufferRHI);
+		FRHIResourceCreateInfo CreateInfo(TEXT("FDummyVertexBuffer"));
+		VertexBufferRHI = RHICmdList.CreateBuffer(sizeof(FVector4f) * 2, BUF_Static | BUF_VertexBuffer, 0, ERHIAccess::VertexOrIndexBuffer, CreateInfo);
+		FVector4f* DummyContents = (FVector4f*)RHICmdList.LockBuffer(VertexBufferRHI, 0, sizeof(FVector4f) * 2, RLM_WriteOnly);
+		DummyContents[0] = FVector4f(0.0f, 0.0f, 0.0f, 0.0f);
+		DummyContents[1] = FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
+		RHICmdList.UnlockBuffer(VertexBufferRHI);
 	}
 };
 TGlobalResource<FDummyVertexBuffer> GDummyVertexBuffer;
@@ -101,7 +103,7 @@ TGlobalResource<FDummyVertexBuffer> GDummyVertexBuffer;
 /**
  * Constructs render resources for this vertex factory.
  */
-void FVectorFieldVisualizationVertexFactory::InitRHI()
+void FVectorFieldVisualizationVertexFactory::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	FVertexStream Stream;
 
@@ -110,7 +112,7 @@ void FVectorFieldVisualizationVertexFactory::InitRHI()
 
 	// Stream 0: Global particle texture coordinate buffer.
 	Stream.VertexBuffer = &GDummyVertexBuffer;
-	Stream.Stride = sizeof(FVector4);
+	Stream.Stride = sizeof(FVector4f);
 	Stream.Offset = 0;
 	Streams.Add(Stream);
 
@@ -170,7 +172,10 @@ void FVectorFieldVisualizationVertexFactoryShaderParameters::GetElementShaderBin
 
 IMPLEMENT_VERTEX_FACTORY_PARAMETER_TYPE(FVectorFieldVisualizationVertexFactory, SF_Vertex, FVectorFieldVisualizationVertexFactoryShaderParameters);
 
-IMPLEMENT_VERTEX_FACTORY_TYPE(FVectorFieldVisualizationVertexFactory,"/Engine/Private/VectorFieldVisualizationVertexFactory.ush",true,false,true,false,false);
+IMPLEMENT_VERTEX_FACTORY_TYPE(FVectorFieldVisualizationVertexFactory,"/Engine/Private/VectorFieldVisualizationVertexFactory.ush",
+	  EVertexFactoryFlags::UsedWithMaterials
+	| EVertexFactoryFlags::SupportsDynamicLighting
+);
 
 /*------------------------------------------------------------------------------
 	Drawing interface.
@@ -238,10 +243,13 @@ void GetVectorFieldMesh(
 		Collector.RegisterOneFrameMaterialProxy(VisualizationMaterial);
 
 		// Set up parameters.
+		const FLargeWorldRenderPosition VolumeToWorldOrigin(VectorFieldInstance->VolumeToWorld.GetOrigin()); //DF_TODO
+
 		FVectorFieldVisualizationParameters UniformParameters;
-		UniformParameters.VolumeToWorld = VectorFieldInstance->VolumeToWorld;
-		UniformParameters.VolumeToWorldNoScale = VectorFieldInstance->VolumeToWorldNoScale;
-		UniformParameters.VoxelSize = FVector( 1.0f / Resource->SizeX, 1.0f / Resource->SizeY, 1.0f / Resource->SizeZ );
+		UniformParameters.VolumeToWorldTile = VolumeToWorldOrigin.GetTile();
+		UniformParameters.VolumeToWorld = FLargeWorldRenderScalar::MakeToRelativeWorldMatrix(VolumeToWorldOrigin.GetTileOffset(), VectorFieldInstance->VolumeToWorld);
+		UniformParameters.VolumeToWorldNoScale = FMatrix44f(VectorFieldInstance->VolumeToWorldNoScale);
+		UniformParameters.VoxelSize = FVector3f( 1.0f / Resource->SizeX, 1.0f / Resource->SizeY, 1.0f / Resource->SizeZ );
 		UniformParameters.Scale = VectorFieldInstance->Intensity * Resource->Intensity;
 
 		FVectorFieldVisualizationUserData* UserData = &Collector.AllocateOneFrameResource<FVectorFieldVisualizationUserData>();

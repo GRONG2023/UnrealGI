@@ -1,15 +1,22 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Misc/MessageDialog.h"
-#include "Misc/CString.h"
-#include "Logging/LogMacros.h"
+
+#include "Containers/UnrealString.h"
 #include "CoreGlobals.h"
-#include "Internationalization/Text.h"
+#include "CoreTypes.h"
 #include "Internationalization/Internationalization.h"
-#include "Misc/OutputDeviceRedirector.h"
-#include "Misc/FeedbackContext.h"
-#include "Misc/CoreDelegates.h"
+#include "Internationalization/Text.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Logging/LogVerbosity.h"
 #include "Misc/App.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/CString.h"
+#include "Misc/CoreDelegates.h"
+#include "Misc/FeedbackContext.h"
+#include "Misc/OutputDeviceRedirector.h"
+#include "Trace/Detail/Channel.h"
 
 namespace
 {
@@ -26,16 +33,25 @@ namespace
 
 void FMessageDialog::Debugf( const FText& Message, const FText* OptTitle )
 {
+	Debugf(Message, OptTitle ? *OptTitle : GetDefaultMessageTitle());
+}
+
+void FMessageDialog::Debugf( const FText& Message )
+{
+	Debugf(Message, GetDefaultMessageTitle());
+}
+
+void FMessageDialog::Debugf( const FText& Message, const FText& Title )
+{
 	if( FApp::IsUnattended() == true )
 	{
 		GLog->Logf( TEXT("%s"), *Message.ToString() );
 	}
 	else
 	{
-		FText Title = OptTitle ? *OptTitle : GetDefaultMessageTitle();
-		if ( GIsEditor && FCoreDelegates::ModalErrorMessage.IsBound() )
+		if ( GIsEditor && FCoreDelegates::ModalMessageDialog.IsBound() )
 		{
-			FCoreDelegates::ModalErrorMessage.Execute(EAppMsgType::Ok, Message, Title);
+			FCoreDelegates::ModalMessageDialog.Execute(EAppMsgCategory::Warning, EAppMsgType::Ok, Message, Title);
 		}
 		else
 		{
@@ -47,21 +63,40 @@ void FMessageDialog::Debugf( const FText& Message, const FText* OptTitle )
 void FMessageDialog::ShowLastError()
 {
 	uint32 LastError = FPlatformMisc::GetLastError();
-
-	TCHAR TempStr[MAX_SPRINTF]=TEXT("");
 	TCHAR ErrorBuffer[1024];
-	FCString::Sprintf( TempStr, TEXT("GetLastError : %d\n\n%s"), LastError, FPlatformMisc::GetSystemErrorMessage(ErrorBuffer, 1024, 0) );
-	if( FApp::IsUnattended() == true )
+	if (FApp::IsUnattended())
 	{
-		UE_LOG(LogOutputDevice, Fatal, TempStr);
+		UE_LOG(LogOutputDevice, Fatal, TEXT("GetLastError : %d\n\n%s"), LastError, FPlatformMisc::GetSystemErrorMessage(ErrorBuffer, 1024, 0));
 	}
 	else
 	{
-		FPlatformMisc::MessageBoxExt( EAppMsgType::Ok, TempStr, *NSLOCTEXT("MessageDialog", "DefaultSystemErrorTitle", "System Error").ToString() );
+		TCHAR TempStr[MAX_SPRINTF] = {};
+		FCString::Sprintf(TempStr, TEXT("GetLastError : %d\n\n%s"), LastError, FPlatformMisc::GetSystemErrorMessage(ErrorBuffer, 1024, 0));
+		FPlatformMisc::MessageBoxExt(EAppMsgType::Ok, TempStr, *NSLOCTEXT("MessageDialog", "DefaultSystemErrorTitle", "System Error").ToString());
 	}
 }
 
 EAppReturnType::Type FMessageDialog::Open( EAppMsgType::Type MessageType, const FText& Message, const FText* OptTitle )
+{
+	return Open(EAppMsgCategory::Warning, MessageType, Message, OptTitle ? *OptTitle : GetDefaultMessageTitle());
+}
+
+EAppReturnType::Type FMessageDialog::Open( EAppMsgType::Type MessageType, const FText& Message )
+{
+	return Open(EAppMsgCategory::Warning, MessageType, Message, GetDefaultMessageTitle());
+}
+
+EAppReturnType::Type FMessageDialog::Open(EAppMsgType::Type MessageType, const FText& Message, const FText& Title)
+{
+	return Open(EAppMsgCategory::Warning, MessageType, Message, Title);
+}
+
+EAppReturnType::Type FMessageDialog::Open( EAppMsgCategory MessageCategory, EAppMsgType::Type MessageType, const FText& Message)
+{
+	return Open(MessageCategory, MessageType, Message, GetDefaultMessageTitle());
+}
+
+EAppReturnType::Type FMessageDialog::Open( EAppMsgCategory MessageCategory, EAppMsgType::Type MessageType, const FText& Message, const FText& Title)
 {
 	EAppReturnType::Type DefaultValue = EAppReturnType::Yes;
 	switch(MessageType)
@@ -107,19 +142,38 @@ EAppReturnType::Type FMessageDialog::Open( EAppMsgType::Type MessageType, const 
 		}
 	}
 
-	return Open(MessageType, DefaultValue, Message, OptTitle);
+	return Open(MessageCategory, MessageType, DefaultValue, Message, Title);
 }
 
 EAppReturnType::Type FMessageDialog::Open(EAppMsgType::Type MessageType, EAppReturnType::Type DefaultValue, const FText& Message, const FText* OptTitle)
 {
+	return Open(EAppMsgCategory::Warning, MessageType, DefaultValue, Message, OptTitle ? *OptTitle : GetDefaultMessageTitle());
+}
+
+EAppReturnType::Type FMessageDialog::Open(EAppMsgType::Type MessageType, EAppReturnType::Type DefaultValue, const FText& Message)
+{
+	return Open(EAppMsgCategory::Warning, MessageType, DefaultValue, Message, GetDefaultMessageTitle());
+}
+
+EAppReturnType::Type FMessageDialog::Open(EAppMsgType::Type MessageType, EAppReturnType::Type DefaultValue, const FText& Message, const FText& Title)
+{
+	return Open(EAppMsgCategory::Warning, MessageType, DefaultValue, Message, Title);
+}
+
+EAppReturnType::Type FMessageDialog::Open(EAppMsgCategory MessageCategory, EAppMsgType::Type MessageType, EAppReturnType::Type DefaultValue, const FText& Message)
+{
+	return Open(MessageCategory, MessageType, DefaultValue, Message, GetDefaultMessageTitle());
+}
+
+EAppReturnType::Type FMessageDialog::Open(EAppMsgCategory MessageCategory, EAppMsgType::Type MessageType, EAppReturnType::Type DefaultValue, const FText& Message, const FText& Title)
+{
 	EAppReturnType::Type Result = DefaultValue;
-	const FText Title = OptTitle ? *OptTitle : GetDefaultMessageTitle();
 
 	if (!FApp::IsUnattended() && !GIsRunningUnattendedScript)
 	{
-		if ( GIsEditor && !IsRunningCommandlet() && FCoreDelegates::ModalErrorMessage.IsBound() )
+		if ( GIsEditor && !IsRunningCommandlet() && FCoreDelegates::ModalMessageDialog.IsBound() )
 		{
-			Result = FCoreDelegates::ModalErrorMessage.Execute( MessageType, Message, Title );
+			Result = FCoreDelegates::ModalMessageDialog.Execute( MessageCategory, MessageType, Message, Title );
 		}
 		else
 		{

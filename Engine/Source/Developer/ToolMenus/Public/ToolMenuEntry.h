@@ -12,10 +12,10 @@
 #include "Framework/MultiBox/MultiBoxDefs.h"
 #include "Framework/Commands/UICommandInfo.h"
 #include "UObject/TextProperty.h"
-
 #include "ToolMenuEntry.generated.h"
 
 class UToolMenuEntryScript;
+struct FKeyEvent;
 
 struct FToolMenuEntrySubMenuData
 {
@@ -34,6 +34,13 @@ public:
 	FNewToolMenuChoice ConstructMenu;
 };
 
+struct FToolMenuEntryOptionsDropdownData
+{
+	FNewToolMenuChoice MenuContentGenerator;
+	TAttribute<FText> ToolTip;
+	FUIAction Action;
+};
+
 struct FToolMenuEntryToolBarData
 {
 public:
@@ -44,9 +51,14 @@ public:
 	{
 	}
 
-	TOptional< EVisibility > LabelVisibility;
+	/** Delegate that generates a widget for this combo button's menu content.  Called when the menu is summoned. */
+	FNewToolMenuChoice ComboButtonContextMenuGenerator;
 
-	/** If true, the icon and label won't be displayed */
+	/** Legacy delegate that generates a widget for this combo button's menu content.  Called when the menu is summoned. */
+	FNewToolBarDelegateLegacy ConstructLegacy;
+
+	TSharedPtr<FToolMenuEntryOptionsDropdownData> OptionsDropdownData;
+
 	bool bSimpleComboBox;
 
 	/** Whether ToolBar will have Focusable buttons */
@@ -55,11 +67,6 @@ public:
 	/** Whether this toolbar should always use small icons, regardless of the current settings */
 	bool bForceSmallIcons;
 
-	/** Delegate that generates a widget for this combo button's menu content.  Called when the menu is summoned. */
-	FNewToolMenuChoice ComboButtonContextMenuGenerator;
-
-	/** Legacy delegate that generates a widget for this combo button's menu content.  Called when the menu is summoned. */
-	FNewToolBarDelegateLegacy ConstructLegacy;
 };
 
 
@@ -68,7 +75,8 @@ struct FToolMenuEntryWidgetData
 public:
 	FToolMenuEntryWidgetData() :
 		bNoIndent(false),
-		bSearchable(false)
+		bSearchable(false),
+		bNoPadding(false)
 	{
 	}
 
@@ -77,8 +85,25 @@ public:
 
 	/** If true, widget will be searchable */
 	bool bSearchable;
+
+	/** If true, no padding will be added */
+	bool bNoPadding;
 };
 
+struct FToolMenuCustomWidgetContext
+{
+	// The style used by the menu creating the widget
+	const class ISlateStyle* StyleSet = nullptr;
+
+	// The name of the style used by the menu creating the widget
+	FName StyleName;
+};
+
+/**
+ * Represents entries in menus such as buttons, checkboxes, and sub-menus.
+ *
+ * Many entries are created for you via the methods of FToolMenuSection, such as FToolMenuSection::AddMenuEntry.
+ */
 USTRUCT(BlueprintType)
 struct TOOLMENUS_API FToolMenuEntry
 {
@@ -87,6 +112,12 @@ struct TOOLMENUS_API FToolMenuEntry
 	FToolMenuEntry();
 	FToolMenuEntry(const FToolMenuOwner InOwner, const FName InName, EMultiBlockType InType);
 
+	FToolMenuEntry(const FToolMenuEntry&);
+	FToolMenuEntry(FToolMenuEntry&&);
+
+	FToolMenuEntry& operator=(const FToolMenuEntry&);
+	FToolMenuEntry& operator=(FToolMenuEntry&&);
+
 	static FToolMenuEntry InitMenuEntry(const FName InName, const TAttribute<FText>& InLabel, const TAttribute<FText>& InToolTip, const TAttribute<FSlateIcon>& InIcon, const FToolUIActionChoice& InAction, const EUserInterfaceActionType UserInterfaceActionType = EUserInterfaceActionType::Button, const FName InTutorialHighlightName = NAME_None);
 	static FToolMenuEntry InitMenuEntry(const TSharedPtr< const FUICommandInfo >& InCommand, const TAttribute<FText>& InLabelOverride = TAttribute<FText>(), const TAttribute<FText>& InToolTipOverride = TAttribute<FText>(), const TAttribute<FSlateIcon>& InIconOverride = TAttribute<FSlateIcon>(), const FName InTutorialHighlightName = NAME_None, const TOptional<FName> InNameOverride = TOptional<FName>());
 	static FToolMenuEntry InitMenuEntry(const FName InNameOverride, const TSharedPtr< const FUICommandInfo >& InCommand, const TAttribute<FText>& InLabelOverride = TAttribute<FText>(), const TAttribute<FText>& InToolTipOverride = TAttribute<FText>(), const TAttribute<FSlateIcon>& InIconOverride = TAttribute<FSlateIcon>(), const FName InTutorialHighlightName = NAME_None);
@@ -94,7 +125,7 @@ struct TOOLMENUS_API FToolMenuEntry
 	static FToolMenuEntry InitMenuEntry(const FName InName, const FToolUIActionChoice& InAction, const TSharedRef<SWidget>& Widget);
 
 	static FToolMenuEntry InitSubMenu(const FName InName, const TAttribute<FText>& InLabel, const TAttribute<FText>& InToolTip, const FNewToolMenuChoice& InMakeMenu, const FToolUIActionChoice& InAction, const EUserInterfaceActionType InUserInterfaceActionType, bool bInOpenSubMenuOnClick = false, const TAttribute<FSlateIcon>& InIcon = TAttribute<FSlateIcon>(), const bool bShouldCloseWindowAfterMenuSelection = true);
-	static FToolMenuEntry InitSubMenu(const FName InName, const TAttribute<FText>& InLabel, const TAttribute<FText>& InToolTip, const FNewToolMenuChoice& InMakeMenu, bool bInOpenSubMenuOnClick = false, const TAttribute<FSlateIcon>& InIcon = TAttribute<FSlateIcon>(), const bool bShouldCloseWindowAfterMenuSelection = true);
+	static FToolMenuEntry InitSubMenu(const FName InName, const TAttribute<FText>& InLabel, const TAttribute<FText>& InToolTip, const FNewToolMenuChoice& InMakeMenu, bool bInOpenSubMenuOnClick = false, const TAttribute<FSlateIcon>& InIcon = TAttribute<FSlateIcon>(), const bool bShouldCloseWindowAfterMenuSelection = true, const FName InTutorialHighlightName = NAME_None);
 	static FToolMenuEntry InitSubMenu(const FName InName, const FToolUIActionChoice& InAction, const TSharedRef<SWidget>& InWidget, const FNewToolMenuChoice& InMakeMenu, bool bShouldCloseWindowAfterMenuSelection = true);
 
 	static FToolMenuEntry InitToolBarButton(const FName InName, const FToolUIActionChoice& InAction, const TAttribute<FText>& InLabel = TAttribute<FText>(), const TAttribute<FText>& InToolTip = TAttribute<FText>(), const TAttribute<FSlateIcon>& InIcon = TAttribute<FSlateIcon>(), const EUserInterfaceActionType UserInterfaceActionType = EUserInterfaceActionType::Button, FName InTutorialHighlightName = NAME_None);
@@ -103,7 +134,7 @@ struct TOOLMENUS_API FToolMenuEntry
 
 	static FToolMenuEntry InitSeparator(const FName InName);
 
-	static FToolMenuEntry InitWidget(const FName InName, const TSharedRef<SWidget>& InWidget, const FText& Label, bool bNoIndent = false, bool bSearchable = true);
+	static FToolMenuEntry InitWidget(const FName InName, const TSharedRef<SWidget>& InWidget, const FText& Label, bool bNoIndent = false, bool bSearchable = true, bool bNoPadding = false, const FText& InToolTipText = FText());
 
 	bool IsSubMenu() const { return SubMenuData.bIsSubMenu; }
 
@@ -113,6 +144,14 @@ struct TOOLMENUS_API FToolMenuEntry
 
 	void SetCommandList(const TSharedPtr<const FUICommandList>& InCommandList);
 
+	UE_DEPRECATED(5.1, "AddOptionsDropdown is deprecated. Use InitComboButton with bSimpleComboBox=true")
+	void AddOptionsDropdown(FUIAction InAction, const FOnGetContent InMenuContentGenerator, const TAttribute<FText>& InToolTip = TAttribute<FText>());
+
+	void AddKeybindFromCommand(const TSharedPtr< const FUICommandInfo >& InCommand);
+
+	bool IsCommandKeybindOnly() const;
+	bool CommandAcceptsInput(const FKeyEvent& InKeyEvent) const;
+	bool TryExecuteToolUIAction(const FToolMenuContext& InContext);
 	friend struct FToolMenuSection;
 	friend class UToolMenuEntryScript;
 
@@ -150,7 +189,10 @@ public:
 	bool bShouldCloseWindowAfterMenuSelection;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tool Menus")
-	UToolMenuEntryScript* ScriptObject;
+	TObjectPtr<UToolMenuEntryScript> ScriptObject;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tool Menus")
+	FName StyleNameOverride;
 
 	FToolMenuEntrySubMenuData SubMenuData;
 
@@ -158,12 +200,16 @@ public:
 
 	FToolMenuEntryWidgetData WidgetData;
 
-	/** Optional delegate that returns a widget to use as this menu entry */
+	UE_DEPRECATED(5.0, "Use MakeCustomWidget instead")
 	FNewToolMenuWidget MakeWidget;
+
+	/** Optional delegate that returns a widget to use as this menu entry */
+	FNewToolMenuCustomWidget MakeCustomWidget;
 
 	TAttribute<FText> Label;
 	TAttribute<FText> ToolTip;
 	TAttribute<FSlateIcon> Icon;
+	TAttribute<FText> InputBindingLabel;
 
 private:
 
@@ -182,5 +228,7 @@ private:
 	FNewToolMenuDelegateLegacy ConstructLegacy;
 
 	bool bAddedDuringRegister;
-};
 
+	UPROPERTY()
+	bool bCommandIsKeybindOnly;
+};

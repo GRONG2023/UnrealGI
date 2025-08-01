@@ -67,6 +67,7 @@ struct FTargetInfo
 	FString Name;
 	FString Path;
 	EBuildTargetType Type;
+	TOptional<bool> DefaultTarget;
 };
 
 /**
@@ -170,7 +171,7 @@ public:
 	* Enumerates all the registered engine installations.
 	*
 	* @param	OutInstallations	Map of identifier/root-directory pairs for all known installations. Identifiers are typically
-	*								version strings for canonical UE4 releases or GUID strings for GitHub releases.
+	*								version strings for canonical UE releases or GUID strings for GitHub releases.
 	*/
 	virtual void EnumerateEngineInstallations(TMap<FString, FString>& OutInstallations) = 0;
 
@@ -428,15 +429,6 @@ public:
 	virtual const TArray<FTargetInfo>& GetTargetsForCurrentProject() const = 0;
 
 	/**
-	* Gets the path to the solution for the current project
-	*
-	* @param OutSolutionPath	Receives the string 
-	* @return True if a solution file exists and OutSolutionPath has been updated
-	*/
-	UE_DEPRECATED(4.24, "The IDesktopPlatform::GetSolutionPath() method has been deprecated. Use the ISourceCodeAccessor interface for cross-IDE support instead.")
-	virtual bool GetSolutionPath(FString& OutSolutionPath) = 0;
-
-	/**
 	 * Gets the path to the user's temporary directory
 	 *
 	 * @return The path to the user's temporary directory
@@ -465,4 +457,31 @@ public:
 	* @return Path to the folder
 	*/
 	virtual FString GetDefaultProjectCreationPath() = 0;
+
+	/**
+	* Get a Access token for use by OIDC compliant Identity Providers
+
+	* @param RootDir			Engine root directory for the project to use.
+	* @param ProjectFileName	Filename of the current project
+	* @param ProviderIdentifier	The identifier for the provider as configured in oidc-token.json
+	* @param bUnattended		True to indicate that no user interaction should be assumed
+	* @param Warn				Feedback context to use for progress updates
+	* @param OutToken			The allocated access token
+	* @param OutTokenExpiresAt	When the token expires
+	* @param bOutWasInteractiveLogin	True if the interactive login flow was used
+	* @return true if the task completed successfully.
+	*/
+	virtual bool GetOidcAccessToken(const FString& RootDir, const FString& ProjectFileName, const FString& ProviderIdentifier, bool bUnattended, FFeedbackContext* Warn, FString& OutToken, FDateTime& OutTokenExpiresAt, bool& bOutWasInteractiveLogin) = 0;
+
+	/**
+	* Get the status of a access token for use by OIDC compliant Identity Providers
+
+	* @param RootDir			Engine root directory for the project to use.
+	* @param ProjectFileName	Filename of the current project
+	* @param ProviderIdentifier	The identifier for the provider as configured in oidc-token.json
+	* @param Warn				Feedback context to use for progress updates
+	* @param OutStatus			The allocated access token
+	* @return true if the task completed successfully.
+	*/
+	virtual bool GetOidcTokenStatus(const FString& RootDir, const FString& ProjectFileName, const FString& ProviderIdentifier, FFeedbackContext* Warn, int& OutStatus) = 0;
 };

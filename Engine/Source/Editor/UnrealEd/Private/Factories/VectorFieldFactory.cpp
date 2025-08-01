@@ -119,12 +119,15 @@ static bool ParseFGA(
 	Stream = ParseIntCsv( Stream, &GridZ );
 
 	// Parse the bounding box.
-	Stream = ParseFloatCsv( Stream, &Bounds.Min.X );
-	Stream = ParseFloatCsv( Stream, &Bounds.Min.Y );
-	Stream = ParseFloatCsv( Stream, &Bounds.Min.Z );
-	Stream = ParseFloatCsv( Stream, &Bounds.Max.X );
-	Stream = ParseFloatCsv( Stream, &Bounds.Max.Y );
-	Stream = ParseFloatCsv( Stream, &Bounds.Max.Z );
+	FVector3f BMin, BMax;
+	Stream = ParseFloatCsv( Stream, &BMin.X );
+	Stream = ParseFloatCsv( Stream, &BMin.Y );
+	Stream = ParseFloatCsv( Stream, &BMin.Z );
+	Stream = ParseFloatCsv( Stream, &BMax.X );
+	Stream = ParseFloatCsv( Stream, &BMax.Y );
+	Stream = ParseFloatCsv( Stream, &BMax.Z );
+	Bounds.Min = (FVector)BMin;
+	Bounds.Max = (FVector)BMax;
 
 	// Make sure there is more to read.
 	if ( *Stream == 0 )
@@ -221,7 +224,7 @@ UObject* UVectorFieldStaticFactory::FactoryCreateBinary(
 	if ( IsFluidGridAscii( Type ) )
 	{
 		FString String;
-		const int32 BufferSize = BufferEnd - Buffer;
+		const int32 BufferSize = UE_PTRDIFF_TO_INT32(BufferEnd - Buffer);
 		FFileHelper::BufferToString( String, Buffer, BufferSize );
 		TCHAR* Stream = (TCHAR*)*String;
 		
@@ -245,7 +248,7 @@ UObject* UVectorFieldStaticFactory::FactoryCreateBinary(
 				const int32 DestBufferSize = VectorCount * sizeof(FFloat16Color);
 				VectorField->SourceData.Lock( LOCK_READ_WRITE );
 				FFloat16Color* RESTRICT DestValues = (FFloat16Color*)VectorField->SourceData.Realloc( DestBufferSize );
-				const FVector* RESTRICT SrcValues = (FVector*)FileContents.Values.GetData();
+				const FVector3f* RESTRICT SrcValues = (FVector3f*)FileContents.Values.GetData();
 				for ( int32 VectorIndex = 0; VectorIndex < VectorCount; ++VectorIndex )
 				{
 					DestValues->R = SrcValues->X;

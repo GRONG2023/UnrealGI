@@ -1,29 +1,45 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ClearQuad.h"
+#include "RenderUtils.h"
 #include "Shader.h"
 #include "RHIStaticStates.h"
 #include "OneColorShader.h"
 #include "PipelineStateCache.h"
-#include "ClearReplacementShaders.h"
 #include "RendererInterface.h"
 #include "Logging/LogMacros.h"
+
+void FClearVertexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
+{
+	// create a static vertex buffer
+	FRHIResourceCreateInfo CreateInfo(TEXT("FClearVertexBuffer"));
+	VertexBufferRHI = RHICmdList.CreateVertexBuffer(sizeof(FVector4f) * 4, BUF_Static, CreateInfo);
+	void* VoidPtr = RHICmdList.LockBuffer(VertexBufferRHI, 0, sizeof(FVector4f) * 4, RLM_WriteOnly);
+	// Generate the vertices used
+	FVector4f* Vertices = reinterpret_cast<FVector4f*>(VoidPtr);
+	Vertices[0] = FVector4f(-1.0f, 1.0f, 0.0f, 1.0f);
+	Vertices[1] = FVector4f(1.0f, 1.0f, 0.0f, 1.0f);
+	Vertices[2] = FVector4f(-1.0f, -1.0f, 0.0f, 1.0f);
+	Vertices[3] = FVector4f(1.0f, -1.0f, 0.0f, 1.0f);
+	RHICmdList.UnlockBuffer(VertexBufferRHI);
+}
 
 TGlobalResource<FClearVertexBuffer> GClearVertexBuffer;
 
 DEFINE_LOG_CATEGORY_STATIC(LogClearQuad, Log, Log)
 
-static void ClearQuadSetup( FRHICommandList& RHICmdList, bool bClearColor, int32 NumClearColors, const FLinearColor* ClearColorArray, bool bClearDepth, float Depth, bool bClearStencil, uint32 Stencil, TFunction<void(FGraphicsPipelineStateInitializer&)> PSOModifier = nullptr)
+template<EColorWriteMask ColorWriteMask>
+static void ClearQuadSetup(FRHICommandList& RHICmdList, int32 NumClearColors, const FLinearColor* ClearColorArray, bool bClearDepth, float Depth, bool bClearStencil, uint32 Stencil, TFunction<void(FGraphicsPipelineStateInitializer&)> PSOModifier = nullptr)
 {
 	if (UNLIKELY(!FApp::CanEverRender()))
 	{
 		return;
 	}
 
+	check(ColorWriteMask == CW_NONE || NumClearColors > 0);
+
 	// Set new states
-	FRHIBlendState* BlendStateRHI = bClearColor
-		? TStaticBlendState<>::GetRHI()
-		: TStaticBlendStateWriteMask<CW_NONE,CW_NONE,CW_NONE,CW_NONE,CW_NONE,CW_NONE,CW_NONE,CW_NONE>::GetRHI();
+	FRHIBlendState* BlendStateRHI = TStaticBlendStateWriteMask<ColorWriteMask, ColorWriteMask, ColorWriteMask, ColorWriteMask, ColorWriteMask, ColorWriteMask, ColorWriteMask, ColorWriteMask>::GetRHI();
 	
 	FRHIDepthStencilState* DepthStencilStateRHI =
 		(bClearDepth && bClearStencil)
@@ -73,16 +89,34 @@ static void ClearQuadSetup( FRHICommandList& RHICmdList, bool bClearColor, int32
 		PSOModifier(GraphicsPSOInit);
 	}
 
-	SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit);
-	RHICmdList.SetStencilRef(Stencil);
+	SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, Stencil);
 
-	VertexShader->SetDepthParameter(RHICmdList, Depth);
-	PixelShader->SetColors(RHICmdList, ClearColorArray, NumClearColors);
+	SetShaderParametersLegacyVS(RHICmdList, VertexShader, Depth);
+	
+	TOneColorPixelShaderMRT::FParameters PixelParameters;
+	PixelShader->FillParameters(PixelParameters, ClearColorArray, NumClearColors);
+	SetShaderParameters(RHICmdList, PixelShader, PixelShader.GetPixelShader(), PixelParameters);
+}
+
+void DrawClearQuadAlpha(FRHICommandList& RHICmdList, float Alpha)
+{
+	FLinearColor Color(0, 0, 0, Alpha);
+	ClearQuadSetup<CW_ALPHA>(RHICmdList, 1, &Color, false, 0, false, 0);
+
+	RHICmdList.SetStreamSource(0, GClearVertexBuffer.VertexBufferRHI, 0);
+	RHICmdList.DrawPrimitive(0, 2, 1);
 }
 
 void DrawClearQuadMRT(FRHICommandList& RHICmdList, bool bClearColor, int32 NumClearColors, const FLinearColor* ClearColorArray, bool bClearDepth, float Depth, bool bClearStencil, uint32 Stencil)
 {
-	ClearQuadSetup(RHICmdList, bClearColor, NumClearColors, ClearColorArray, bClearDepth, Depth, bClearStencil, Stencil);
+	if (bClearColor)
+	{
+		ClearQuadSetup<CW_RGBA>(RHICmdList, NumClearColors, ClearColorArray, bClearDepth, Depth, bClearStencil, Stencil);
+	}
+	else
+	{
+		ClearQuadSetup<CW_NONE>(RHICmdList, NumClearColors, ClearColorArray, bClearDepth, Depth, bClearStencil, Stencil);
+	}
 
 	RHICmdList.SetStreamSource(0, GClearVertexBuffer.VertexBufferRHI, 0);
 	RHICmdList.DrawPrimitive(0, 2, 1);
@@ -90,7 +124,14 @@ void DrawClearQuadMRT(FRHICommandList& RHICmdList, bool bClearColor, int32 NumCl
 
 void DrawClearQuadMRT(FRHICommandList& RHICmdList, bool bClearColor, int32 NumClearColors, const FLinearColor* ClearColorArray, bool bClearDepth, float Depth, bool bClearStencil, uint32 Stencil, FClearQuadCallbacks ClearQuadCallbacks)
 {
-	ClearQuadSetup(RHICmdList, bClearColor, NumClearColors, ClearColorArray, bClearDepth, Depth, bClearStencil, Stencil, ClearQuadCallbacks.PSOModifier);
+	if (bClearColor)
+	{
+		ClearQuadSetup<CW_RGBA>(RHICmdList, NumClearColors, ClearColorArray, bClearDepth, Depth, bClearStencil, Stencil, ClearQuadCallbacks.PSOModifier);
+	}
+	else
+	{
+		ClearQuadSetup<CW_NONE>(RHICmdList, NumClearColors, ClearColorArray, bClearDepth, Depth, bClearStencil, Stencil, ClearQuadCallbacks.PSOModifier);
+	}
 
 	if (ClearQuadCallbacks.PreClear)
 	{
@@ -115,13 +156,20 @@ void DrawClearQuadMRT(FRHICommandList& RHICmdList, bool bClearColor, int32 NumCl
 		return;
 	}
 
-	ClearQuadSetup(RHICmdList, bClearColor, NumClearColors, ClearColorArray, bClearDepth, Depth, bClearStencil, Stencil);
+	if (bClearColor)
+	{
+		ClearQuadSetup<CW_RGBA>(RHICmdList, NumClearColors, ClearColorArray, bClearDepth, Depth, bClearStencil, Stencil);
+	}
+	else
+	{
+		ClearQuadSetup<CW_NONE>(RHICmdList, NumClearColors, ClearColorArray, bClearDepth, Depth, bClearStencil, Stencil);
+	}
 
 	// Draw a fullscreen quad
 	if (ExcludeRect.Width() > 0 && ExcludeRect.Height() > 0)
 	{
 		// with a hole in it
-		FVector4 OuterVertices[4];
+		FVector4f OuterVertices[4];
 		OuterVertices[0].Set(-1.0f, 1.0f, Depth, 1.0f);
 		OuterVertices[1].Set(1.0f, 1.0f, Depth, 1.0f);
 		OuterVertices[2].Set(1.0f, -1.0f, Depth, 1.0f);
@@ -129,19 +177,19 @@ void DrawClearQuadMRT(FRHICommandList& RHICmdList, bool bClearColor, int32 NumCl
 
 		float InvViewWidth = 1.0f / ViewSize.X;
 		float InvViewHeight = 1.0f / ViewSize.Y;
-		FVector4 FractionRect = FVector4(ExcludeRect.Min.X * InvViewWidth, ExcludeRect.Min.Y * InvViewHeight, (ExcludeRect.Max.X - 1) * InvViewWidth, (ExcludeRect.Max.Y - 1) * InvViewHeight);
+		FVector4f FractionRect = FVector4f(ExcludeRect.Min.X * InvViewWidth, ExcludeRect.Min.Y * InvViewHeight, (ExcludeRect.Max.X - 1) * InvViewWidth, (ExcludeRect.Max.Y - 1) * InvViewHeight);
 
-		FVector4 InnerVertices[4];
+		FVector4f InnerVertices[4];
 		InnerVertices[0].Set(FMath::Lerp(-1.0f, 1.0f, FractionRect.X), FMath::Lerp(1.0f, -1.0f, FractionRect.Y), Depth, 1.0f);
 		InnerVertices[1].Set(FMath::Lerp(-1.0f, 1.0f, FractionRect.Z), FMath::Lerp(1.0f, -1.0f, FractionRect.Y), Depth, 1.0f);
 		InnerVertices[2].Set(FMath::Lerp(-1.0f, 1.0f, FractionRect.Z), FMath::Lerp(1.0f, -1.0f, FractionRect.W), Depth, 1.0f);
 		InnerVertices[3].Set(FMath::Lerp(-1.0f, 1.0f, FractionRect.X), FMath::Lerp(1.0f, -1.0f, FractionRect.W), Depth, 1.0f);
 
-		FRHIResourceCreateInfo CreateInfo;
-		FVertexBufferRHIRef VertexBufferRHI = RHICreateVertexBuffer(sizeof(FVector4) * 10, BUF_Volatile, CreateInfo);
-		void* VoidPtr = RHILockVertexBuffer(VertexBufferRHI, 0, sizeof(FVector4) * 10, RLM_WriteOnly);
+		FRHIResourceCreateInfo CreateInfo(TEXT("DrawClearQuadMRT"));
+		FBufferRHIRef VertexBufferRHI = RHICmdList.CreateVertexBuffer(sizeof(FVector4f) * 10, BUF_Volatile, CreateInfo);
+		void* VoidPtr = RHICmdList.LockBuffer(VertexBufferRHI, 0, sizeof(FVector4f) * 10, RLM_WriteOnly);
 		
-		FVector4* Vertices = reinterpret_cast<FVector4*>(VoidPtr);
+		FVector4f* Vertices = reinterpret_cast<FVector4f*>(VoidPtr);
 		Vertices[0] = OuterVertices[0];
 		Vertices[1] = InnerVertices[0];
 		Vertices[2] = OuterVertices[1];
@@ -153,7 +201,7 @@ void DrawClearQuadMRT(FRHICommandList& RHICmdList, bool bClearColor, int32 NumCl
 		Vertices[8] = OuterVertices[0];
 		Vertices[9] = InnerVertices[0];
 
-		RHIUnlockVertexBuffer(VertexBufferRHI);
+		RHICmdList.UnlockBuffer(VertexBufferRHI);
 		RHICmdList.SetStreamSource(0, VertexBufferRHI, 0);
 
 		RHICmdList.DrawPrimitive(0, 8, 1);

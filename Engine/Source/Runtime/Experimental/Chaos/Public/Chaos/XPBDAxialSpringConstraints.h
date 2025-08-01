@@ -1,108 +1,295 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
-#include "Chaos/Array.h"
 #include "Chaos/PBDAxialSpringConstraintsBase.h"
-#include "Chaos/PBDParticles.h"
-#include "Chaos/PerParticleRule.h"
+#include "Chaos/CollectionPropertyFacade.h"
 #include "ChaosStats.h"
 
-#include <algorithm>
-
 DECLARE_CYCLE_STAT(TEXT("Chaos XPBD Axial Spring Constraint"), STAT_XPBD_AxialSpring, STATGROUP_Chaos);
-namespace Chaos
-{
-// Stiffness is in N/CM^2, so it needs to be adjusted from the PBD stiffness ranging between [0,1]
-static const double XPBDAxialSpringMaxCompliance = 1e-7;  // Max stiffness: 1e+11 N/M^2 = 1e+7 N/CM^2 -> Max compliance: 1e-7 CM^2/N
 
-class FXPBDAxialSpringConstraints : public FParticleRule, public FPBDAxialSpringConstraintsBase
+namespace Chaos::Softs
+{
+
+// Stiffness is in kg/s^2
+UE_DEPRECATED(5.2, "Use FXPBDAxialSpringConstraints::MinStiffness instead.")
+static const FSolverReal XPBDAxialSpringMinStiffness = (FSolverReal)1e-4; // Stiffness below this will be considered 0 since all of our calculations are actually based on 1 / stiffness.
+UE_DEPRECATED(5.2, "Use FXPBDAxialSpringConstraints::MaxStiffness instead.")
+static const FSolverReal XPBDAxialSpringMaxStiffness = (FSolverReal)1e7;
+
+class FXPBDAxialSpringConstraints : public FPBDAxialSpringConstraintsBase
 {
 	typedef FPBDAxialSpringConstraintsBase Base;
-	using Base::MBarys;
-	using Base::MConstraints;
-	using Base::MDists;
-	using Base::MStiffness;
 
 public:
-	FXPBDAxialSpringConstraints(const FDynamicParticles& InParticles, TArray<TVector<int32, 3>>&& Constraints, const FReal Stiffness = (FReal)1.)
-	    : FPBDAxialSpringConstraintsBase(InParticles, MoveTemp(Constraints), Stiffness)
-	{ MLambdas.Init(0.f, MConstraints.Num()); }
+	// Stiffness is in kg/s^2
+	static constexpr FSolverReal MinStiffness = (FSolverReal)1e-4; // Stiffness below this will be considered 0 since all of our calculations are actually based on 1 / stiffness.
+	static constexpr FSolverReal MaxStiffness = (FSolverReal)1e7;
 
-	virtual ~FXPBDAxialSpringConstraints() {}
+	FXPBDAxialSpringConstraints(
+		const FSolverParticlesRange& Particles,
+		const TArray<TVec3<int32>>& InConstraints,
+		const TConstArrayView<FRealSingle>& StiffnessMultipliers,
+		const FSolverVec2& InStiffness,
+		bool bTrimKinematicConstraints)
+		: Base(
+			Particles,
+			InConstraints,
+			StiffnessMultipliers,
+			InStiffness,
+			bTrimKinematicConstraints,
+			MaxStiffness)
+	{
+		Lambdas.Init(0.f, Constraints.Num());
+	}
 
-	void Init() const { for (FReal& Lambda : MLambdas) { Lambda = (FReal)0.; } }
+	FXPBDAxialSpringConstraints(
+		const FSolverParticles& Particles,
+		int32 ParticleOffset,
+		int32 ParticleCount,
+		const TArray<TVec3<int32>>& InConstraints,
+		const TConstArrayView<FRealSingle>& StiffnessMultipliers,
+		const FSolverVec2& InStiffness,
+		bool bTrimKinematicConstraints)
+		: Base(
+			Particles,
+			ParticleOffset,
+			ParticleCount,
+			InConstraints,
+			StiffnessMultipliers,
+			InStiffness,
+			bTrimKinematicConstraints,
+			MaxStiffness)
+	{
+		Lambdas.Init(0.f, Constraints.Num());
+	}
 
-	virtual void Apply(FPBDParticles& InParticles, const FReal Dt) const override //-V762
+	virtual ~FXPBDAxialSpringConstraints() override {}
+
+	void SetProperties(const FSolverVec2& InStiffness) { Stiffness.SetWeightedValue(InStiffness, MaxStiffness); }
+
+	void ApplyProperties(const FSolverReal /*Dt*/, const int32 /*NumIterations*/) { Stiffness.ApplyXPBDValues(MaxStiffness); }
+
+	void Init() const { for (FSolverReal& Lambda : Lambdas) { Lambda = (FSolverReal)0.; } }
+
+	template<typename SolverParticlesOrRange>
+	void Apply(SolverParticlesOrRange& Particles, const FSolverReal Dt) const
 	{
 		SCOPE_CYCLE_COUNTER(STAT_XPBD_AxialSpring);
-		for (int32 i = 0; i < MConstraints.Num(); ++i)
+		if (!Stiffness.HasWeightMap())
 		{
-			const TVector<int32, 3>& constraint = MConstraints[i];
-			const int32 i1 = constraint[0];
-			const int32 i2 = constraint[1];
-			const int32 i3 = constraint[2];
-			const FVec3 Delta = GetDelta(InParticles, Dt, i);
-			const FReal Multiplier = (FReal)2. / (FMath::Max(MBarys[i], (FReal)1. - MBarys[i]) + (FReal)1.);
-			if (InParticles.InvM(i1) > 0)
+			const FSolverReal ExpStiffnessValue = (FSolverReal)Stiffness;
+			if (ExpStiffnessValue < MinStiffness)
 			{
-				InParticles.P(i1) -= Multiplier * InParticles.InvM(i1) * Delta;
+				return;
 			}
-			if (InParticles.InvM(i2))
+			for (int32 ConstraintIndex = 0; ConstraintIndex < Constraints.Num(); ++ConstraintIndex)
 			{
-				InParticles.P(i2) += Multiplier * InParticles.InvM(i2) * MBarys[i] * Delta;
+				const TVector<int32, 3>& constraint = Constraints[ConstraintIndex];
+				const int32 i1 = constraint[0];
+				const int32 i2 = constraint[1];
+				const int32 i3 = constraint[2];
+				const FSolverVec3 Delta = GetDelta(Particles, Dt, ConstraintIndex, ExpStiffnessValue);
+				const FSolverReal Multiplier = (FSolverReal)2. / (FMath::Max(Barys[ConstraintIndex], (FSolverReal)1. - Barys[ConstraintIndex]) + (FSolverReal)1.);
+				if (Particles.InvM(i1) > 0)
+				{
+					Particles.P(i1) -= Multiplier * Particles.InvM(i1) * Delta;
+				}
+				if (Particles.InvM(i2) != 0)
+				{
+					Particles.P(i2) += Multiplier * Particles.InvM(i2) * Barys[ConstraintIndex] * Delta;
+				}
+				if (Particles.InvM(i3) != 0)
+				{
+					Particles.P(i3) += Multiplier * Particles.InvM(i3) * ((FSolverReal)1. - Barys[ConstraintIndex]) * Delta;
+				}
 			}
-			if (InParticles.InvM(i3))
+		}
+		else
+		{
+			for (int32 ConstraintIndex = 0; ConstraintIndex < Constraints.Num(); ++ConstraintIndex)
 			{
-				InParticles.P(i3) += Multiplier * InParticles.InvM(i3) * (1 - MBarys[i]) * Delta;
+				const FSolverReal ExpStiffnessValue = Stiffness[ConstraintIndex];
+				const TVector<int32, 3>& constraint = Constraints[ConstraintIndex];
+				const int32 i1 = constraint[0];
+				const int32 i2 = constraint[1];
+				const int32 i3 = constraint[2];
+				const FSolverVec3 Delta = GetDelta(Particles, Dt, ConstraintIndex, ExpStiffnessValue);
+				const FSolverReal Multiplier = (FSolverReal)2. / (FMath::Max(Barys[ConstraintIndex], (FSolverReal)1. - Barys[ConstraintIndex]) + (FSolverReal)1.);
+				if (Particles.InvM(i1) > 0)
+				{
+					Particles.P(i1) -= Multiplier * Particles.InvM(i1) * Delta;
+				}
+				if (Particles.InvM(i2) != 0)
+				{
+					Particles.P(i2) += Multiplier * Particles.InvM(i2) * Barys[ConstraintIndex] * Delta;
+				}
+				if (Particles.InvM(i3) != 0)
+				{
+					Particles.P(i3) += Multiplier * Particles.InvM(i3) * ((FSolverReal)1. - Barys[ConstraintIndex]) * Delta;
+				}
 			}
 		}
 	}
 
 private:
-	inline FVec3 GetDelta(const FPBDParticles& InParticles, const FReal Dt, const int32 InConstraintIndex) const
+	template<typename SolverParticlesOrRange>
+	FSolverVec3 GetDelta(const SolverParticlesOrRange& Particles, const FSolverReal Dt, const int32 InConstraintIndex, const FSolverReal StiffnessValue) const
 	{
-		const TVector<int32, 3>& Constraint = MConstraints[InConstraintIndex];
+		const TVector<int32, 3>& Constraint = Constraints[InConstraintIndex];
 		const int32 i1 = Constraint[0];
 		const int32 i2 = Constraint[1];
 		const int32 i3 = Constraint[2];
 
-		const FReal Bary = MBarys[InConstraintIndex];
-		const FReal PInvMass = InParticles.InvM(i3) * ((FReal)1. - Bary) + InParticles.InvM(i2) * Bary;
-		if (InParticles.InvM(i1) == (FReal)0. && PInvMass == (FReal)0.)
+		const FSolverReal Bary = Barys[InConstraintIndex];
+		const FSolverReal PInvMass = Particles.InvM(i3) * ((FSolverReal)1. - Bary) + Particles.InvM(i2) * Bary;
+		if (StiffnessValue < MinStiffness || ( Particles.InvM(i1) == (FSolverReal)0. && PInvMass == (FSolverReal)0.))
 		{
-			return FVec3((FReal)0.);
+			return FSolverVec3((FSolverReal)0.);
 		}
-		const FReal CombinedInvMass = PInvMass + InParticles.InvM(i1);
-		ensure(CombinedInvMass > (FReal)SMALL_NUMBER);
+		const FSolverReal CombinedInvMass = PInvMass + Particles.InvM(i1);
+		ensure(CombinedInvMass > (FSolverReal)SMALL_NUMBER);
 
-		const FVec3& P1 = InParticles.P(i1);
-		const FVec3& P2 = InParticles.P(i2);
-		const FVec3& P3 = InParticles.P(i3);
-		const FVec3 P = (P2 - P3) * Bary + P3;
+		const FSolverVec3& P1 = Particles.P(i1);
+		const FSolverVec3& P2 = Particles.P(i2);
+		const FSolverVec3& P3 = Particles.P(i3);
+		const FSolverVec3 P = (P2 - P3) * Bary + P3;
 
-		const FVec3 Difference = P1 - P;
-		const FReal Distance = Difference.Size();
+		const FSolverVec3 Difference = P1 - P;
+		const FSolverReal Distance = Difference.Size();
 		if (UNLIKELY(Distance <= SMALL_NUMBER))
 		{
-			return FVec3((FReal)0.);
+			return FSolverVec3((FSolverReal)0.);
 		}
-		const FVec3 Direction = Difference / Distance;
-		const FReal Offset = (Distance - MDists[InConstraintIndex]);
+		const FSolverVec3 Direction = Difference / Distance;
+		const FSolverReal Offset = (Distance - Dists[InConstraintIndex]);
 
-		FReal& Lambda = MLambdas[InConstraintIndex];
-		const FReal Alpha = (FReal)XPBDAxialSpringMaxCompliance / (MStiffness * Dt * Dt);
+		FSolverReal& Lambda = Lambdas[InConstraintIndex];
+		const FSolverReal Alpha = (FSolverReal)1 / (StiffnessValue * Dt * Dt);
 
-		const FReal DLambda = (Offset - Alpha * Lambda) / (CombinedInvMass + Alpha);
-		const FVec3 Delta = DLambda * Direction;
+		const FSolverReal DLambda = (Offset - Alpha * Lambda) / (CombinedInvMass + Alpha);
+		const FSolverVec3 Delta = DLambda * Direction;
 		Lambda += DLambda;
 
 		return Delta;
 	}
 
+protected:
+	using Base::Constraints;
+	using Base::ParticleOffset;
+	using Base::ParticleCount;
+	using Base::Stiffness;
+
 private:
-	mutable TArray<FReal> MLambdas;
+	using Base::Barys;
+	using Base::Dists;
+
+	mutable TArray<FSolverReal> Lambdas;
 };
 
-template<class T, int d>
-using TXPBDAxialSpringConstraints UE_DEPRECATED(4.27, "Deprecated. this class is to be deleted, use FXPBDAxialSpringConstraints instead") = FXPBDAxialSpringConstraints;
-}
+class FXPBDAreaSpringConstraints final : public FXPBDAxialSpringConstraints
+{
+public:
+	static bool IsEnabled(const FCollectionPropertyConstFacade& PropertyCollection)
+	{
+		return IsXPBDAreaSpringStiffnessEnabled(PropertyCollection, false);
+	}
+
+	FXPBDAreaSpringConstraints(
+		const FSolverParticlesRange& Particles,
+		const TArray<TVec3<int32>>& InConstraints,
+		const TMap<FString, TConstArrayView<FRealSingle>>& WeightMaps,
+		const FCollectionPropertyConstFacade& PropertyCollection,
+		bool bTrimKinematicConstraints)
+		: FXPBDAxialSpringConstraints(
+			Particles,
+			InConstraints,
+			WeightMaps.FindRef(GetXPBDAreaSpringStiffnessString(PropertyCollection, XPBDAreaSpringStiffnessName.ToString())),
+			FSolverVec2(GetWeightedFloatXPBDAreaSpringStiffness(PropertyCollection, MaxStiffness)),
+			bTrimKinematicConstraints)
+		, XPBDAreaSpringStiffnessIndex(PropertyCollection)
+	{}
+
+	FXPBDAreaSpringConstraints(
+		const FSolverParticles& Particles,
+		int32 ParticleOffset,
+		int32 ParticleCount,
+		const TArray<TVec3<int32>>& InConstraints,
+		const TMap<FString, TConstArrayView<FRealSingle>>& WeightMaps,
+		const FCollectionPropertyConstFacade& PropertyCollection,
+		bool bTrimKinematicConstraints)
+		: FXPBDAxialSpringConstraints(
+			Particles,
+			ParticleOffset,
+			ParticleCount,
+			InConstraints,
+			WeightMaps.FindRef(GetXPBDAreaSpringStiffnessString(PropertyCollection, XPBDAreaSpringStiffnessName.ToString())),
+			FSolverVec2(GetWeightedFloatXPBDAreaSpringStiffness(PropertyCollection, MaxStiffness)),
+			bTrimKinematicConstraints)
+		, XPBDAreaSpringStiffnessIndex(PropertyCollection)
+	{}
+
+	UE_DEPRECATED(5.3, "Use weight map constructor instead.")
+	FXPBDAreaSpringConstraints(
+		const FSolverParticles& Particles,
+		int32 ParticleOffset,
+		int32 ParticleCount,
+		const TArray<TVec3<int32>>& InConstraints,
+		const TConstArrayView<FRealSingle>& StiffnessMultipliers,
+		const FCollectionPropertyConstFacade& PropertyCollection,
+		bool bTrimKinematicConstraints)
+		: FXPBDAxialSpringConstraints(
+			Particles,
+			ParticleOffset,
+			ParticleCount,
+			InConstraints,
+			StiffnessMultipliers,
+			FSolverVec2(GetWeightedFloatXPBDAreaSpringStiffness(PropertyCollection, MaxStiffness)),
+			bTrimKinematicConstraints)
+		, XPBDAreaSpringStiffnessIndex(PropertyCollection)
+	{}
+
+	virtual ~FXPBDAreaSpringConstraints() override = default;
+
+	void SetProperties(
+		const FCollectionPropertyConstFacade& PropertyCollection,
+		const TMap<FString, TConstArrayView<FRealSingle>>& WeightMaps)
+	{
+		if (IsXPBDAreaSpringStiffnessMutable(PropertyCollection))
+		{
+			const FSolverVec2 WeightedValue(GetWeightedFloatXPBDAreaSpringStiffness(PropertyCollection));
+			if (IsXPBDAreaSpringStiffnessStringDirty(PropertyCollection))
+			{
+				const FString& WeightMapName = GetXPBDAreaSpringStiffnessString(PropertyCollection);
+				Stiffness = FPBDStiffness(
+					WeightedValue,
+					WeightMaps.FindRef(WeightMapName),
+					TConstArrayView<TVec3<int32>>(Constraints),
+					ParticleOffset,
+					ParticleCount,
+					FPBDStiffness::DefaultTableSize,
+					FPBDStiffness::DefaultParameterFitBase,
+					MaxStiffness);
+			}
+			else
+			{
+				Stiffness.SetWeightedValue(WeightedValue, MaxStiffness);
+			}
+		}
+	}
+
+	UE_DEPRECATED(5.3, "Use SetProperties(const FCollectionPropertyConstFacade&, const TMap<FString, TConstArrayView<FRealSingle>>&, FSolverReal) instead.")
+	void SetProperties(const FCollectionPropertyConstFacade& PropertyCollection)
+	{
+		SetProperties(PropertyCollection, TMap<FString, TConstArrayView<FRealSingle>>());
+	}
+
+private:
+	using FXPBDAxialSpringConstraints::Constraints;
+	using FXPBDAxialSpringConstraints::ParticleOffset;
+	using FXPBDAxialSpringConstraints::ParticleCount;
+	using FXPBDAxialSpringConstraints::Stiffness;
+
+	UE_CHAOS_DECLARE_PROPERTYCOLLECTION_NAME(XPBDAreaSpringStiffness, float);
+};
+
+}  // End namespace Chaos::Softs

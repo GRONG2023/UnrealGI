@@ -5,7 +5,6 @@ using System.Runtime.InteropServices;
 
 namespace DatasmithSolidworks
 {
-    [ComVisible(false)]
     public class FVec2
     {
         public float X = 0f;
@@ -27,6 +26,39 @@ namespace DatasmithSolidworks
         {
             X = InX;
             Y = InY;
+        }
+
+        public static bool operator ==(FVec2 A, FVec2 B)
+        {
+	        if (ReferenceEquals(A, B))
+	        {
+		        return true;
+	        }
+
+	        if (A is null || B is null)
+	        {
+		        return false;
+	        }
+
+	        return A.X == B.X && A.Y == B.Y;
+        }
+
+        public static bool operator !=(FVec2 A, FVec2 B)
+        {
+	        return !(A == B);
+        }
+
+        public override bool Equals(object Obj)
+        {
+	        return Obj is FVec2 Other && this == Other;
+        }
+
+        public override int GetHashCode()
+        {
+	        int Hash = 7;
+	        Hash = Hash * 17 + X.GetHashCode();
+	        Hash = Hash * 17 + Y.GetHashCode();
+	        return Hash;
         }
 
         public static FVec2 Rotate(FVec2 InV, float InAngleRadians)

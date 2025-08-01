@@ -6,8 +6,7 @@
 #include "Rendering/DrawElements.h"
 #include "SequencerSectionPainter.h"
 #include "ISectionLayoutBuilder.h"
-#include "EditorStyleSet.h"
-#include "CommonMovieSceneTools.h"
+#include "Styling/AppStyle.h"
 #include "Tracks/MovieSceneEventTrack.h"
 #include "Sections/MovieSceneEventSection.h"
 #include "Sections/MovieSceneEventTriggerSection.h"
@@ -16,12 +15,13 @@
 #include "SequencerTimeSliderController.h"
 #include "Fonts/FontMeasure.h"
 #include "Framework/Application/SlateApplication.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "K2Node_FunctionEntry.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "MovieSceneSequence.h"
 #include "EditorFontGlyphs.h"
 #include "ScopedTransaction.h"
+#include "TimeToPixel.h"
 
 #define LOCTEXT_NAMESPACE "EventSection"
 
@@ -43,9 +43,9 @@ void FEventSectionBase::PaintEventName(FSequencerSectionPainter& Painter, int32 
 	static const float   BoxOffsetPx   = 10.f;
 	static const TCHAR*  WarningString = TEXT("\xf071");
 
-	const FSlateFontInfo FontAwesomeFont = FEditorStyle::Get().GetFontStyle("FontAwesome.10");
+	const FSlateFontInfo FontAwesomeFont = FAppStyle::Get().GetFontStyle("FontAwesome.10");
 	const FSlateFontInfo SmallLayoutFont = FCoreStyle::GetDefaultFontStyle("Bold", 10);
-	const FLinearColor   DrawColor       = FEditorStyle::GetSlateColor("SelectionColor").GetColor(FWidgetStyle());
+	const FLinearColor   DrawColor       = FAppStyle::GetSlateColor("SelectionColor").GetColor(FWidgetStyle());
 
 	TSharedRef<FSlateFontMeasure> FontMeasureService = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
 
@@ -75,8 +75,8 @@ void FEventSectionBase::PaintEventName(FSequencerSectionPainter& Painter, int32 
 	FSlateDrawElement::MakeBox(
 		Painter.DrawElements,
 		LayerId + 1,
-		Painter.SectionGeometry.ToPaintGeometry(BoxOffset, BoxSize),
-		FEditorStyle::GetBrush("WhiteBrush"),
+		Painter.SectionGeometry.ToPaintGeometry(BoxSize, FSlateLayoutTransform(BoxOffset)),
+		FAppStyle::GetBrush("WhiteBrush"),
 		ESlateDrawEffect::None,
 		FLinearColor::Black.CopyWithNewOpacity(0.5f)
 	);
@@ -87,18 +87,18 @@ void FEventSectionBase::PaintEventName(FSequencerSectionPainter& Painter, int32 
 		FSlateDrawElement::MakeText(
 			Painter.DrawElements,
 			LayerId + 2,
-			Painter.SectionGeometry.ToPaintGeometry(BoxOffset + IconOffset, IconSize),
+			Painter.SectionGeometry.ToPaintGeometry(IconSize, FSlateLayoutTransform(BoxOffset + IconOffset)),
 			WarningString,
 			FontAwesomeFont,
 			Painter.bParentEnabled ? ESlateDrawEffect::None : ESlateDrawEffect::DisabledEffect,
-			FEditorStyle::GetWidgetStyle<FTextBlockStyle>("Log.Warning").ColorAndOpacity.GetSpecifiedColor()
+			FAppStyle::GetWidgetStyle<FTextBlockStyle>("Log.Warning").ColorAndOpacity.GetSpecifiedColor()
 		);
 	}
 
 	FSlateDrawElement::MakeText(
 		Painter.DrawElements,
 		LayerId + 2,
-		Painter.SectionGeometry.ToPaintGeometry(BoxOffset + TextOffset, TextSize),
+		Painter.SectionGeometry.ToPaintGeometry(TextSize, FSlateLayoutTransform(BoxOffset + TextOffset)),
 		InEventString,
 		SmallLayoutFont,
 		Painter.bParentEnabled ? ESlateDrawEffect::None : ESlateDrawEffect::DisabledEffect,

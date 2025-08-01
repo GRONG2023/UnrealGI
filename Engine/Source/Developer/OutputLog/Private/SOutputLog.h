@@ -6,6 +6,7 @@
 #include "SlateFwd.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Input/Reply.h"
+#include "OutputLogCreationParams.h"
 #include "Widgets/SWidget.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/Input/SMultiLineEditableTextBox.h"
@@ -13,11 +14,13 @@
 #include "Widgets/Views/STableRow.h"
 #include "Framework/Text/BaseTextLayoutMarshaller.h"
 #include "Misc/TextFilterExpressionEvaluator.h"
+#include "HAL/CriticalSection.h"
 #include "HAL/IConsoleManager.h"
 
 class FMenuBuilder;
 class FOutputLogTextLayoutMarshaller;
 class FTextLayout;
+struct FToolMenuSection;
 class SMenuAnchor;
 
 /**
@@ -28,20 +31,14 @@ struct FOutputLogMessage
 {
 	TSharedRef<FString> Message;
 	ELogVerbosity::Type Verbosity;
+	int8 CategoryStartIndex;
 	FName Category;
 	FName Style;
 
-	FOutputLogMessage(const TSharedRef<FString>& NewMessage, FName NewCategory, FName NewStyle = NAME_None)
-		: Message(NewMessage)
-		, Verbosity(ELogVerbosity::Log)
-		, Category(NewCategory)
-		, Style(NewStyle)
-	{
-	}
-
-	FOutputLogMessage(const TSharedRef<FString>& NewMessage, ELogVerbosity::Type NewVerbosity, FName NewCategory, FName NewStyle = NAME_None)
+	FOutputLogMessage(const TSharedRef<FString>& NewMessage, ELogVerbosity::Type NewVerbosity, FName NewCategory, FName NewStyle, int32 InCategoryStartIndex)
 		: Message(NewMessage)
 		, Verbosity(NewVerbosity)
+		, CategoryStartIndex((int8)InCategoryStartIndex)
 		, Category(NewCategory)
 		, Style(NewStyle)
 	{
@@ -129,6 +126,8 @@ protected:
 	void SyncActiveCommandExecutor();
 
 	void SetActiveCommandExecutor(const FName InExecName);
+
+	void MakeNextCommandExecutorActive();
 
 	FText GetActiveCommandExecutorDisplayName() const;
 
@@ -237,7 +236,7 @@ private:
 };
 
 /**
-* Holds information about filters
+* Holds information about filters_
 */
 struct FOutputLogFilter
 {
@@ -252,6 +251,9 @@ struct FOutputLogFilter
 
 	/** true to allow all Log Categories */
 	bool bShowAllCategories;
+
+	/** Set of Verbosity levels that will show all regardless of category filter */
+	TSet<ELogVerbosity::Type> IgnoreFilterVerbosities;
 
 	/** Enable all filters by default */
 	FOutputLogFilter() : TextFilterExpressionEvaluator(ETextFilterExpressionEvaluatorMode::BasicString)
@@ -276,8 +278,10 @@ struct FOutputLogFilter
 
 	const TArray<FName>& GetAvailableLogCategories() { return AvailableLogCategories; }
 
+	const TArray<FName>& GetSelectedLogCategories() { return SelectedLogCategories; }
+
 	/** Adds a Log Category to the list of available categories, if it isn't already present */
-	void AddAvailableLogCategory(FName& LogCategory);
+	void AddAvailableLogCategory(const FName& LogCategory);
 
 	/** Enables or disables a Log Category in the filter */
 	void ToggleLogCategory(const FName& LogCategory);
@@ -309,12 +313,20 @@ class SOutputLog
 
 public:
 
-	SLATE_BEGIN_ARGS( SOutputLog )
-		: _Messages()
-		{}
-		
+	SLATE_BEGIN_ARGS( SOutputLog ) {}
+
+		SLATE_EVENT(FSimpleDelegate, OnCloseConsole)
+
 		/** All messages captured before this log window has been created */
 		SLATE_ARGUMENT( TArray< TSharedPtr<FOutputLogMessage> >, Messages )
+
+		/**  */
+		SLATE_ARGUMENT_DEFAULT( EOutputLogSettingsMenuFlags, SettingsMenuFlags ) = EOutputLogSettingsMenuFlags::None;
+
+		SLATE_ARGUMENT( FDefaultCategorySelectionMap, DefaultCategorySelection )
+
+		/** Used to determine the set of initially discovered log categories that should be selected */
+		SLATE_EVENT( FAllowLogCategoryCallback, AllowInitialLogCategory )
 
 	SLATE_END_ARGS()
 
@@ -326,7 +338,7 @@ public:
 	 *
 	 * @param	InArgs	Declaration used by the SNew() macro to construct this widget
 	 */
-	void Construct( const FArguments& InArgs );
+	void Construct( const FArguments& InArgs, bool bCreateDrawerDockButton );
 
 	// SWidget interface
 	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
@@ -344,22 +356,38 @@ public:
 	 */
 	static bool CreateLogMessages(const TCHAR* V, ELogVerbosity::Type Verbosity, const class FName& Category, TArray< TSharedPtr<FOutputLogMessage> >& OutMessages);
 
+	/** Registers settings dropdown tool menu for extensibility. */
+	static void RegisterSettingsMenu();
+
 	/**
 	* Called when delete all is selected
 	*/
 	void OnClearLog();
+
+	/** Called when a category is selected to be highlighted */
+	void OnHighlightCategory(FName NewCategoryToHighlight);
+
+	/** Called when the editor style settings are modified */
+	void HandleSettingChanged(FName ChangedSettingName);
+
+	void RefreshAllPreservingLocation();
 
 	/**
 	 * Called to determine whether delete all is currently a valid command
 	 */
 	bool CanClearLog() const;
 
+	/** Focuses the edit box where you type in console commands */
+	void FocusConsoleCommandBox();
+
+	/** Change the output log's filter. If CategoriesToShow is empty, all categories will be shown. */
+	void UpdateOutputLogFilter(const TArray<FName>& CategoriesToShow, TOptional<bool> bShowErrors = TOptional<bool>(), TOptional<bool> bShowWarnings = TOptional<bool>(), TOptional<bool> bShowLogs = TOptional<bool>());
+	void UpdateOutputLogFilter(const FOutputLogFilter& InFilter);
+
+	const FOutputLogFilter& GetOutputLogFilter() { return Filter; }
 protected:
 
 	virtual void Serialize( const TCHAR* V, ELogVerbosity::Type Verbosity, const class FName& Category ) override;
-
-	/* Remove itself on crash to prevent adding log lines here */
-	void OnCrash();
 
 protected:
 	/**
@@ -376,7 +404,7 @@ protected:
 	void OnConsoleCommandExecuted();
 
 	/** Request we immediately force scroll to the bottom of the log */
-	void RequestForceScroll();
+	void RequestForceScroll(bool bIfUserHasNotScrolledUp = false);
 
 	/** Converts the array of messages into something the text box understands */
 	TSharedPtr< FOutputLogTextLayoutMarshaller > MessagesTextMarshaller;
@@ -391,6 +419,9 @@ protected:
 	bool bIsUserScrolled;
 
 private:
+
+	void BuildInitialLogCategoryFilter(const FArguments& InArgs);
+	
 	/** Called by Slate when the filter box changes text. */
 	void OnFilterTextChanged(const FText& InFilterText);
 
@@ -407,19 +438,19 @@ private:
 	void VerbosityLogs_Execute();
 
 	/** Returns the state of Verbosity "Logs". */
-	bool VerbosityLogs_IsChecked() const;
+	ECheckBoxState VerbosityLogs_IsChecked() const;
 
 	/** Toggles Verbosity "Warnings" true/false. */
 	void VerbosityWarnings_Execute();
 
 	/** Returns the state of Verbosity "Warnings". */
-	bool VerbosityWarnings_IsChecked() const;
+	ECheckBoxState VerbosityWarnings_IsChecked() const;
 
 	/** Toggles Verbosity "Errors" true/false. */
 	void VerbosityErrors_Execute();
 
 	/** Returns the state of Verbosity "Errors". */
-	bool VerbosityErrors_IsChecked() const;
+	ECheckBoxState VerbosityErrors_IsChecked() const;
 
 	/** Toggles All Categories true/false. */
 	void CategoriesShowAll_Execute();
@@ -440,23 +471,44 @@ private:
 
 	void SetWordWrapEnabled(ECheckBoxState InValue);
 
+	void SetTimestampMode(ELogTimes::Type InValue);
+
+	bool IsSelectedTimestampMode(ELogTimes::Type NewType);
+
+	void AddTimestampMenuSection(FMenuBuilder& Menu);
+
+	ELogTimes::Type GetSelectedTimestampMode();
+
+#if WITH_EDITOR
 	bool IsClearOnPIEEnabled() const;
 
 	void SetClearOnPIE(ECheckBoxState InValue);
+#endif
 
-	FSlateColor GetViewButtonForegroundColor() const;
+	static void RegisterSettingsMenu_WordWrap(FToolMenuSection& InSection);
+	static void RegisterSettingsMenu_TimestampMode(FToolMenuSection& InSection);
+	static void RegisterSettingsMenu_ClearOnPIE(FToolMenuSection& InSection);
+	static void RegisterSettingsMenu_BrowseLogs(FToolMenuSection& InSection);
+	static void RegisterSettingsMenu_OpenLogExternal(FToolMenuSection& InSection);
+	FName GetSettingsMenuProfileForFlags(EOutputLogSettingsMenuFlags InFlags);
+	TSharedRef<SWidget> GetSettingsMenuContent(FName InMenuProfileName);
 
-	TSharedRef<SWidget> GetViewButtonContent();
+	TSharedRef<SWidget> CreateDrawerDockButton();
 
 	void OpenLogFileInExplorer();
 
 	void OpenLogFileInExternalEditor();
 
-public:
+	FReply OnDockInLayoutClicked();
+protected:
+	TSharedPtr<SConsoleInputBox> ConsoleInputBox;
+
 	/** Visible messages filter */
 	FOutputLogFilter Filter;
 
-	TSharedPtr<class SComboButton> ViewOptionsComboButton;
+	FDelegateHandle SettingsWatchHandle;
+
+	bool bShouldCreateDrawerDockButton = false;
 };
 
 /** Output log text marshaller to convert an array of FOutputLogMessages into styled lines to be consumed by an FTextLayout */
@@ -483,14 +535,29 @@ public:
 
 	void MarkMessagesCacheAsDirty();
 
+	FName GetCategoryForLocation(const FTextLocation Location) const;
+
+	FTextLocation GetTextLocationAt(const FVector2D& Relative) const;
+
+	FName GetCategoryToHighlight() const { return CategoryToHighlight; }
+
+	void SetCategoryToHighlight(FName InCategory) { CategoryToHighlight = InCategory; }
+
 protected:
 
 	FOutputLogTextLayoutMarshaller(TArray< TSharedPtr<FOutputLogMessage> > InMessages, FOutputLogFilter* InFilter);
 
 	void AppendPendingMessagesToTextLayout();
 
+	TMap<FName, float> CategoryHueMap;
+
+	float GetCategoryHue(FName CategoryName);
+
 	/** All log messages to show in the text box */
 	TArray< TSharedPtr<FOutputLogMessage> > Messages;
+
+	/** Messages pending add, kept separate to avoid a race condition when reading Messages */
+	TArray< TSharedPtr<FOutputLogMessage> > PendingMessages;
 
 	/** Index of the next entry in the Messages array that is pending submission to the text layout */
 	int32 NextPendingMessageIndex;
@@ -504,5 +571,10 @@ protected:
 	/** Visible messages filter */
 	FOutputLogFilter* Filter;
 
+	FName CategoryToHighlight;
+
 	FTextLayout* TextLayout;
+
+	/** Output log runs own its own "OutputDeviceRedirector" thread, lock against messages to prevent race conditions */
+	FCriticalSection PendingMessagesCriticalSection;
 };

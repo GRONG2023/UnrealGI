@@ -6,6 +6,7 @@
 #include "AutomationBlueprintFunctionLibrary.h"
 #include "Camera/CameraComponent.h"
 #include "Camera/PlayerCameraManager.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Kismet/GameplayStatics.h"
 #include "Engine/Engine.h"
 #include "EngineGlobals.h"
@@ -13,12 +14,18 @@
 #include "Widgets/SViewport.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Slate/SceneViewport.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Slate/WidgetRenderer.h"
+#include "TextureResource.h"
+#include "RenderingThread.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(FunctionalUIScreenshotTest)
 
 AFunctionalUIScreenshotTest::AFunctionalUIScreenshotTest( const FObjectInitializer& ObjectInitializer )
 	: AScreenshotFunctionalTestBase(ObjectInitializer)
 {
 	WidgetLocation = EWidgetTestAppearLocation::Viewport;
+	bHideDebugCanvas = true;
 }
 
 /**
@@ -40,7 +47,7 @@ void GetBackbufferInfo(const FViewport* InViewport, EPixelFormat* OutPixelFormat
 	{
 		FViewportRHIRef ViewportRHI = InViewport->GetViewportRHI();
 		check(ViewportRHI.IsValid());
-		FTexture2DRHIRef BackbufferTexture = RHICmdList.GetViewportBackBuffer(ViewportRHI);
+		FTexture2DRHIRef BackbufferTexture = RHIGetViewportBackBuffer(ViewportRHI);
 		check(BackbufferTexture.IsValid());
 		*OutPixelFormat = BackbufferTexture->GetFormat();
 		*OutIsSRGB = (BackbufferTexture->GetFlags() & TexCreate_SRGB) == TexCreate_SRGB;
@@ -52,6 +59,16 @@ void AFunctionalUIScreenshotTest::PrepareTest()
 {
 	// Resize viewport to screenshot size
 	Super::PrepareTest();
+
+	// Hide all debug info
+	if (bHideDebugCanvas)
+	{
+		if (IConsoleVariable* CVarDebugCanvasVisible = IConsoleManager::Get().FindConsoleVariable(TEXT("Slate.GameLayer.DebugCanvasVisible")))
+		{
+			PreviousDebugCanvasVisible = CVarDebugCanvasVisible->GetBool();
+			CVarDebugCanvasVisible->Set(false);
+		}
+	}
 
 	TSharedPtr<SViewport> GameViewportWidget = GEngine->GameViewport->GetGameViewportWidget();
 	check(GameViewportWidget.IsValid());
@@ -94,6 +111,14 @@ void AFunctionalUIScreenshotTest::PrepareTest()
 
 		SpawnedWidget->SetVisibility(ESlateVisibility::HitTestInvisible);
 	}
+	NumTickPassed = 0;
+	if (IConsoleVariable* CVarFixedDeltaTime = IConsoleManager::Get().FindConsoleVariable(TEXT("Slate.UseFixedDeltaTime")))
+	{
+		bWasPreviouslyUsingFixedDeltaTime = CVarFixedDeltaTime->GetBool();
+		PreviousFixedDeltaTime = FSlateApplication::GetFixedDeltaTime();
+		FSlateApplication::SetFixedDeltaTime(TestFixedDeltaTime);
+		CVarFixedDeltaTime->SetWithCurrentPriority(true);
+	}
 
 	UAutomationBlueprintFunctionLibrary::FinishLoadingBeforeScreenshot();
 }
@@ -107,6 +132,38 @@ void AFunctionalUIScreenshotTest::OnScreenshotTakenAndCompared()
 
 	// Restore viewport size and finish the test
 	Super::OnScreenshotTakenAndCompared();
+
+	// Restore the debug text
+	if (PreviousDebugCanvasVisible.IsSet())
+	{
+		if (IConsoleVariable* CVarDebugCanvasVisible = IConsoleManager::Get().FindConsoleVariable(TEXT("Slate.GameLayer.DebugCanvasVisible")))
+		{
+			CVarDebugCanvasVisible->Set(PreviousDebugCanvasVisible.GetValue());
+			PreviousDebugCanvasVisible.Reset();
+		}
+	}
+}
+
+void AFunctionalUIScreenshotTest::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	Super::EndPlay(EndPlayReason);
+
+	// Restore the debug text
+	if (PreviousDebugCanvasVisible.IsSet())
+	{
+		if (IConsoleVariable* CVarDebugCanvasVisible = IConsoleManager::Get().FindConsoleVariable(TEXT("Slate.GameLayer.DebugCanvasVisible")))
+		{
+			CVarDebugCanvasVisible->Set(PreviousDebugCanvasVisible.GetValue());
+			PreviousDebugCanvasVisible.Reset();
+		}
+	}
+
+	if (IConsoleVariable* CVarFixedDeltaTime = IConsoleManager::Get().FindConsoleVariable(TEXT("Slate.UseFixedDeltaTime")))
+	{
+		CVarFixedDeltaTime->SetWithCurrentPriority(bWasPreviouslyUsingFixedDeltaTime);
+		FSlateApplication::SetFixedDeltaTime(PreviousFixedDeltaTime);
+	}
+	NumTickPassed = 0;
 }
 
 /**
@@ -123,7 +180,7 @@ void ReadBackbuffer(const FViewport* InViewport, TArray<FColor>* OutPixels)
 		[InViewport, OutPixels](FRHICommandListImmediate& RHICmdList)
 	{
 		FViewportRHIRef ViewportRHI = InViewport->GetViewportRHI();
-		FTexture2DRHIRef BackbufferTexture = RHICmdList.GetViewportBackBuffer(ViewportRHI);
+		FTexture2DRHIRef BackbufferTexture = RHIGetViewportBackBuffer(ViewportRHI);
 		RHICmdList.ReadSurfaceData(
 			BackbufferTexture,
 			FIntRect(0, 0, BackbufferTexture->GetSizeX(), BackbufferTexture->GetSizeY()),
@@ -147,6 +204,21 @@ void ReadPixelsFromRT(UTextureRenderTarget2D* InRT, TArray<FColor>* OutPixels)
 			FReadSurfaceDataFlags());
 	});
 	FlushRenderingCommands();
+}
+
+bool  AFunctionalUIScreenshotTest::IsReady_Implementation()
+{
+	if (NumTickPassed * FSlateApplication::GetFixedDeltaTime() >= ScreenshotOptions.Delay)
+	{
+		return NumTickPassed > ScreenshotOptions.FrameDelay;
+	}
+	return false;
+}
+
+void  AFunctionalUIScreenshotTest::Tick(float DeltaSeconds)
+{
+	NumTickPassed += 1;
+	Super::Tick(DeltaSeconds);
 }
 
 void AFunctionalUIScreenshotTest::RequestScreenshot()
@@ -190,3 +262,4 @@ void AFunctionalUIScreenshotTest::RequestScreenshot()
 	check(OutColorData.Num() == ScreenshotSize.X * ScreenshotSize.Y);
 	GameViewportClient->OnScreenshotCaptured().Broadcast(ScreenshotSize.X, ScreenshotSize.Y, OutColorData);
 }
+

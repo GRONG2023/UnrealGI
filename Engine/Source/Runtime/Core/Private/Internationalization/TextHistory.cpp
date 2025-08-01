@@ -2,7 +2,6 @@
 
 #include "Internationalization/TextHistory.h"
 #include "UObject/ObjectVersion.h"
-#include "Internationalization/ITextData.h"
 #include "Internationalization/Culture.h"
 #include "Internationalization/Internationalization.h"
 #include "Internationalization/StringTableCore.h"
@@ -13,6 +12,7 @@
 #include "UObject/PropertyPortFlags.h"
 
 #include "Internationalization/FastDecimalFormat.h"
+#include "Internationalization/ITextGenerator.h"
 #include "Internationalization/TextFormatter.h"
 #include "Internationalization/TextChronoFormatter.h"
 #include "Internationalization/TextTransformer.h"
@@ -95,8 +95,8 @@ const TCHAR* SkipWhitespaceAndCharacter(const TCHAR* Buffer, const TCHAR InChar)
 
 const TCHAR* ReadNumberFromBuffer(const TCHAR* Buffer, FFormatArgumentValue& OutValue)
 {
-	static const TCHAR ValidNumericChars[] = TEXT("+-0123456789.ful");
-	static const TCHAR SuffixNumericChars[] = TEXT("ful");
+	static const TCHAR* ValidNumericChars = TEXT("+-0123456789.ful");
+	static const TCHAR* SuffixNumericChars = TEXT("ful");
 
 	FString NumericString;
 	while (*Buffer && FCString::Strchr(ValidNumericChars, *Buffer))
@@ -108,7 +108,7 @@ const TCHAR* ReadNumberFromBuffer(const TCHAR* Buffer, FFormatArgumentValue& Out
 	while (NumericString.Len() > 0 && FCString::Strchr(SuffixNumericChars, NumericString[NumericString.Len() - 1]))
 	{
 		SuffixString += NumericString[NumericString.Len() - 1];
-		NumericString.RemoveAt(NumericString.Len() - 1, 1, /*bAllowShrinking*/false);
+		NumericString.RemoveAt(NumericString.Len() - 1, 1, EAllowShrinking::No);
 	}
 
 	if (!NumericString.IsNumeric())
@@ -455,41 +455,58 @@ const TCHAR* ReadNumberOrPercentFromBuffer(const TCHAR* Buffer, const FString& T
 	return nullptr;
 }
 
-void WriteDateTimeToBuffer(FString& Buffer, const TCHAR* TokenMarker, const FDateTime& DateTime, const EDateTimeStyle::Type* DateStylePtr, const EDateTimeStyle::Type* TimeStylePtr, const FString& TimeZone, FCulturePtr TargetCulture, const bool bStripPackageNamespace)
+void WriteDateTimeToBuffer(FString& Buffer, const TCHAR* TokenMarker, const FDateTime& DateTime, const EDateTimeStyle::Type* DateStylePtr, const EDateTimeStyle::Type* TimeStylePtr, const FString* CustomPattern, const FString& TimeZone, FCulturePtr TargetCulture, const bool bStripPackageNamespace)
 {
 	auto WriteDateTimeStyle = [](FString& OutValueBuffer, const EDateTimeStyle::Type& InValue)
 	{
 		WriteScopedEnumToBuffer(OutValueBuffer, TEXT("EDateTimeStyle::"), InValue);
 	};
 
+	const bool bIsCustom = DateStylePtr && *DateStylePtr == EDateTimeStyle::Custom;
+	const bool bIsInvariantTz = TimeZone == FText::GetInvariantTimeZone();
+
 	FString Suffix;
-	if (TimeZone == FText::GetInvariantTimeZone())
+	if (bIsCustom)
 	{
-		Suffix = LocalSuffix;
+		Suffix += CustomSuffix;
+	}
+	if (bIsInvariantTz)
+	{
+		Suffix += LocalSuffix;
 	}
 	else
 	{
-		Suffix = UtcSuffix;
+		Suffix += UtcSuffix;
 	}
 
 	// Produces LOCGEN_DATE_UTC(..., ..., "...", "...") or LOCGEN_DATE_LOCAL(..., ..., "...")
 	// Produces LOCGEN_TIME_UTC(..., ..., "...", "...") or LOCGEN_TIME_LOCAL(..., ..., "...")
 	// Produces LOCGEN_DATETIME_UTC(..., ..., ..., "...", "...") or LOCGEN_DATETIME_LOCAL(..., ..., ..., "...")
+	// Produces LOCGEN_DATETIME_CUSTOM_UTC(..., "...", "...", "...") or LOCGEN_DATETIME_CUSTOM_LOCAL(..., "...", "...")
 	Buffer += TokenMarker;
 	Buffer += Suffix;
 	Buffer += TEXT("(");
 	FFormatArgumentValue(DateTime.ToUnixTimestamp()).ToExportedString(Buffer, bStripPackageNamespace);
-	if (DateStylePtr)
+	if (bIsCustom)
 	{
-		Buffer += TEXT(", ");
-		WriteDateTimeStyle(Buffer, *DateStylePtr);
+		Buffer += TEXT(", \"");
+		Buffer += CustomPattern ? CustomPattern->ReplaceCharWithEscapedChar() : FString();
+		Buffer += TEXT("\"");
 	}
-	if (TimeStylePtr)
+	else
 	{
-		Buffer += TEXT(", ");
-		WriteDateTimeStyle(Buffer, *TimeStylePtr);
+		if (DateStylePtr)
+		{
+			Buffer += TEXT(", ");
+			WriteDateTimeStyle(Buffer, *DateStylePtr);
+		}
+		if (TimeStylePtr)
+		{
+			Buffer += TEXT(", ");
+			WriteDateTimeStyle(Buffer, *TimeStylePtr);
+		}
 	}
-	if (Suffix == UtcSuffix)
+	if (!bIsInvariantTz)
 	{
 		Buffer += TEXT(", \"");
 		Buffer += TimeZone.ReplaceCharWithEscapedChar();
@@ -503,7 +520,7 @@ void WriteDateTimeToBuffer(FString& Buffer, const TCHAR* TokenMarker, const FDat
 	Buffer += TEXT("\")");
 }
 
-const TCHAR* ReadDateTimeFromBuffer(const TCHAR* Buffer, const FString& TokenMarker, FDateTime& OutDateTime, EDateTimeStyle::Type* OutDateStylePtr, EDateTimeStyle::Type* OutTimeStylePtr, FString& OutTimeZone, FCulturePtr& OutTargetCulture)
+const TCHAR* ReadDateTimeFromBuffer(const TCHAR* Buffer, const FString& TokenMarker, FDateTime& OutDateTime, EDateTimeStyle::Type* OutDateStylePtr, EDateTimeStyle::Type* OutTimeStylePtr, FString* OutCustomPattern, FString& OutTimeZone, FCulturePtr& OutTargetCulture)
 {
 	auto ReadDateTimeStyle = [](const TCHAR* InValueBuffer, EDateTimeStyle::Type& OutValue) -> const TCHAR*
 	{
@@ -516,7 +533,14 @@ const TCHAR* ReadDateTimeFromBuffer(const TCHAR* Buffer, const FString& TokenMar
 		// Parsing something of the form: LOCGEN_DATE_UTC(..., ..., "...", "...") or LOCGEN_DATE_LOCAL(..., ..., "...")
 		// Parsing something of the form: LOCGEN_TIME_UTC(..., ..., "...", "...") or LOCGEN_TIME_LOCAL(..., ..., "...")
 		// Parsing something of the form: LOCGEN_DATETIME_UTC(..., ..., ..., "...", "...") or LOCGEN_DATETIME_LOCAL(..., ..., ..., "...")
+		// Parsing something of the form: LOCGEN_DATETIME_CUSTOM_UTC(..., "...", "...", "...") or LOCGEN_DATETIME_CUSTOM_LOCAL(..., "...", "...")
 		Buffer += TokenMarker.Len();
+
+		const bool bIsCustom = TEXT_STRINGIFICATION_PEEK_MARKER(CustomSuffix);
+		if (bIsCustom)
+		{
+			TEXT_STRINGIFICATION_SKIP_MARKER_LEN(CustomSuffix);
+		}
 
 		if (TEXT_STRINGIFICATION_PEEK_MARKER(LocalSuffix))
 		{
@@ -559,24 +583,47 @@ const TCHAR* ReadDateTimeFromBuffer(const TCHAR* Buffer, const FString& TokenMar
 			return nullptr;
 		}
 
-		if (OutDateStylePtr)
+		if (bIsCustom)
 		{
-			// Skip whitespace before the comma, then step over it
+			if (OutDateStylePtr)
+			{
+				*OutDateStylePtr = EDateTimeStyle::Custom;
+			}
+			if (OutTimeStylePtr)
+			{
+				*OutTimeStylePtr = EDateTimeStyle::Custom;
+			}
+
+			// Skip whitespace before the comma, and then step over it
 			TEXT_STRINGIFICATION_SKIP_WHITESPACE_AND_CHAR(',');
 
-			// Skip any whitespace before the value, and then read the date style
+			// Skip whitespace before the value, and then read out the quoted custom pattern
+			FString CustomPatternTempString;
+			FString& CustomPatternStringRef = OutCustomPattern ? *OutCustomPattern : CustomPatternTempString;
 			TEXT_STRINGIFICATION_SKIP_WHITESPACE();
-			TEXT_STRINGIFICATION_FUNC_MODIFY_BUFFER_AND_VALIDATE(ReadDateTimeStyle, *OutDateStylePtr);
+			TEXT_STRINGIFICATION_READ_QUOTED_STRING(CustomPatternStringRef);
 		}
-
-		if (OutTimeStylePtr)
+		else
 		{
-			// Skip whitespace before the comma, then step over it
-			TEXT_STRINGIFICATION_SKIP_WHITESPACE_AND_CHAR(',');
+			if (OutDateStylePtr)
+			{
+				// Skip whitespace before the comma, then step over it
+				TEXT_STRINGIFICATION_SKIP_WHITESPACE_AND_CHAR(',');
 
-			// Skip any whitespace before the value, and then read the time style
-			TEXT_STRINGIFICATION_SKIP_WHITESPACE();
-			TEXT_STRINGIFICATION_FUNC_MODIFY_BUFFER_AND_VALIDATE(ReadDateTimeStyle, *OutTimeStylePtr);
+				// Skip any whitespace before the value, and then read the date style
+				TEXT_STRINGIFICATION_SKIP_WHITESPACE();
+				TEXT_STRINGIFICATION_FUNC_MODIFY_BUFFER_AND_VALIDATE(ReadDateTimeStyle, *OutDateStylePtr);
+			}
+
+			if (OutTimeStylePtr)
+			{
+				// Skip whitespace before the comma, then step over it
+				TEXT_STRINGIFICATION_SKIP_WHITESPACE_AND_CHAR(',');
+
+				// Skip any whitespace before the value, and then read the time style
+				TEXT_STRINGIFICATION_SKIP_WHITESPACE();
+				TEXT_STRINGIFICATION_FUNC_MODIFY_BUFFER_AND_VALIDATE(ReadDateTimeStyle, *OutTimeStylePtr);
+			}
 		}
 
 		if (OutTimeZone.IsEmpty())
@@ -634,119 +681,85 @@ void WriteTextFormatToBuffer(FString& Buffer, const FString& TokenMarker, const 
 ///////////////////////////////////////
 // FTextHistory
 
-/** Base class for all FText history types */
-
-FTextHistory::FTextHistory()
-	: Revision(FTextLocalizationManager::Get().GetTextRevision())
+void FTextHistory::UpdateDisplayStringIfOutOfDate()
 {
-}
-
-FTextHistory::FTextHistory(FTextHistory&& Other)
-	: Revision(MoveTemp(Other.Revision))
-{
-}
-
-FTextHistory& FTextHistory::operator=(FTextHistory&& Other)
-{
-	if (this != &Other)
+	if (CanUpdateDisplayString())
 	{
-		Revision = Other.Revision;
-	}
-	return *this;
-}
+		uint16 CurrentGlobalRevision = 0;
+		uint16 CurrentLocalRevision = 0;
+		UE_AUTORTFM_OPEN({
+			FTextLocalizationManager::Get().GetTextRevisions(GetTextId(), CurrentGlobalRevision, CurrentLocalRevision);
+		});
 
-bool FTextHistory::IsOutOfDate() const
-{
-	return Revision != FTextLocalizationManager::Get().GetTextRevision();
-}
-
-const FString* FTextHistory::GetSourceString() const
-{
-	return NULL;
-}
-
-void FTextHistory::GetHistoricFormatData(const FText& InText, TArray<FHistoricTextFormatData>& OutHistoricFormatData) const
-{
-}
-
-bool FTextHistory::GetHistoricNumericData(const FText& InText, FHistoricTextNumericData& OutHistoricNumericData) const
-{
-	return false;
-}
-
-void FTextHistory::SerializeForDisplayString(FStructuredArchive::FRecord Record, FTextDisplayStringPtr& InOutDisplayString)
-{
-	if(Record.GetArchiveState().IsLoading())
-	{
-		PrepareDisplayStringForRebuild(InOutDisplayString);
-	}
-}
-
-void FTextHistory::PrepareDisplayStringForRebuild(FTextDisplayStringPtr& OutDisplayString)
-{
-	// We will definitely need to do a rebuild later
-	Revision = 0;
-
-	//When duplicating, the CDO is used as the template, then values for the instance are assigned.
-	//If we don't duplicate the string, the CDO and the instance are both pointing at the same thing.
-	//This would result in all subsequently duplicated objects stamping over formerly duplicated ones.
-	OutDisplayString = MakeShared<FString, ESPMode::ThreadSafe>();
-}
-
-bool FTextHistory::StaticShouldReadFromBuffer(const TCHAR* Buffer)
-{
-	return false;
-}
-
-const TCHAR* FTextHistory::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace, FTextDisplayStringPtr& OutDisplayString)
-{
-	return nullptr;
-}
-
-bool FTextHistory::WriteToBuffer(FString& Buffer, FTextDisplayStringPtr DisplayString, const bool bStripPackageNamespace) const
-{
-	return false;
-}
-
-void FTextHistory::Rebuild(TSharedRef< FString, ESPMode::ThreadSafe > InDisplayString)
-{
-	const bool bIsOutOfDate = IsOutOfDate();
-	if(bIsOutOfDate)
-	{
-		// FTextHistory_Base will never report being able to rebuild its text, but we need to keep the history 
-		// revision in sync with the head culture so that FTextSnapshot::IdenticalTo still works correctly
-		Revision = FTextLocalizationManager::Get().GetTextRevision();
-
-		const bool bCanRebuildLocalizedDisplayString = CanRebuildLocalizedDisplayString();
-		if(bCanRebuildLocalizedDisplayString)
+		if (GlobalRevision != CurrentGlobalRevision || LocalRevision != CurrentLocalRevision)
 		{
-			InDisplayString.Get() = BuildLocalizedDisplayString();
+			GlobalRevision = CurrentGlobalRevision;
+			LocalRevision = CurrentLocalRevision;
+
+			UpdateDisplayString();
 		}
+	}
+}
+
+void FTextHistory::MarkDisplayStringOutOfDate()
+{
+	GlobalRevision = 0;
+	LocalRevision = 0;
+}
+
+void FTextHistory::MarkDisplayStringUpToDate()
+{
+	if (CanUpdateDisplayString())
+	{
+		FTextLocalizationManager::Get().GetTextRevisions(GetTextId(), GlobalRevision, LocalRevision);
+	}
+	else
+	{
+		GlobalRevision = 0;
+		LocalRevision = 0;
 	}
 }
 
 ///////////////////////////////////////
 // FTextHistory_Base
 
-FTextHistory_Base::FTextHistory_Base(FString&& InSourceString)
-	: SourceString(MoveTemp(InSourceString))
+FTextHistory_Base::FTextHistory_Base(const FTextId& InTextId, FString&& InSourceString)
+	: TextId(InTextId)
+	, SourceString(MoveTemp(InSourceString))
 {
 }
 
-FTextHistory_Base::FTextHistory_Base(FTextHistory_Base&& Other)
-	: FTextHistory(MoveTemp(Other))
-	, SourceString(MoveTemp(Other.SourceString))
+FTextHistory_Base::FTextHistory_Base(const FTextId& InTextId, FString&& InSourceString, FTextConstDisplayStringPtr&& InLocalizedString)
+	: TextId(InTextId)
+	, SourceString(MoveTemp(InSourceString))
+	, LocalizedString(MoveTemp(InLocalizedString))
 {
+	MarkDisplayStringUpToDate();
 }
 
-FTextHistory_Base& FTextHistory_Base::operator=(FTextHistory_Base&& Other)
+FTextId FTextHistory_Base::GetTextId() const
 {
-	FTextHistory::operator=(MoveTemp(Other));
-	if (this != &Other)
-	{
-		SourceString = MoveTemp(Other.SourceString);
-	}
-	return *this;
+	return TextId;
+}
+
+FTextConstDisplayStringPtr FTextHistory_Base::GetLocalizedString() const
+{
+	return LocalizedString;
+}
+
+const FString& FTextHistory_Base::GetSourceString() const
+{
+	return SourceString;
+}
+
+const FString& FTextHistory_Base::GetDisplayString() const
+{
+	return LocalizedString ? *LocalizedString : SourceString;
+}
+
+FString FTextHistory_Base::BuildInvariantDisplayString() const
+{
+	return SourceString;
 }
 
 bool FTextHistory_Base::IdenticalTo(const FTextHistory& Other, const ETextIdenticalModeFlags CompareModeFlags) const
@@ -755,47 +768,17 @@ bool FTextHistory_Base::IdenticalTo(const FTextHistory& Other, const ETextIdenti
 	return false; // No further comparison needed as FText::IdenticalTo already handles this case
 }
 
-FString FTextHistory_Base::BuildLocalizedDisplayString() const
-{
-	// This should never be called for base text (CanRebuildLocalizedDisplayString is false)
-	check(0);
-	return FString();
-}
-
-FString FTextHistory_Base::BuildInvariantDisplayString() const
-{
-	return SourceString;
-}
-
-const FString* FTextHistory_Base::GetSourceString() const
-{
-	return &SourceString;
-}
-
 void FTextHistory_Base::Serialize(FStructuredArchive::FRecord Record)
-{
-	// If I serialize out the Namespace and Key HERE, then we can load it up.
-	if(Record.GetUnderlyingArchive().IsSaving())
-	{
-		int8 HistoryType = (int8)ETextHistoryType::Base;
-		Record << SA_VALUE(TEXT("HistoryType"), HistoryType);
-	}
-}
-
-void FTextHistory_Base::SerializeForDisplayString(FStructuredArchive::FRecord Record, FTextDisplayStringPtr& InOutDisplayString)
 {
 	FArchive& BaseArchive = Record.GetUnderlyingArchive();
 
 	if(BaseArchive.IsLoading())
 	{
-		// We will definitely need to do a rebuild later
-		Revision = 0;
-
 		FTextKey Namespace;
-		Namespace.SerializeAsString(Record.EnterField(SA_FIELD_NAME(TEXT("Namespace"))));
+		Namespace.SerializeAsString(Record.EnterField(TEXT("Namespace")));
 
 		FTextKey Key;
-		Key.SerializeAsString(Record.EnterField(SA_FIELD_NAME(TEXT("Key"))));
+		Key.SerializeAsString(Record.EnterField(TEXT("Key")));
 
 		Record << SA_VALUE(TEXT("SourceString"), SourceString);
 
@@ -827,16 +810,14 @@ void FTextHistory_Base::SerializeForDisplayString(FStructuredArchive::FRecord Re
 		}
 #endif // WITH_EDITOR
 
-		// Using the deserialized namespace and key, find the DisplayString.
-		InOutDisplayString = FTextLocalizationManager::Get().GetDisplayString(Namespace, Key, &SourceString);
+		TextId = FTextId(Namespace, Key);
+		LocalizedString.Reset();
+		MarkDisplayStringOutOfDate();
 	}
 	else if(BaseArchive.IsSaving())
 	{
-		check(InOutDisplayString.IsValid());
-
-		FTextKey Namespace;
-		FTextKey Key;
-		const bool bFoundNamespaceAndKey = FTextLocalizationManager::Get().FindNamespaceAndKeyFromDisplayString(InOutDisplayString.ToSharedRef(), Namespace, Key);
+		FTextKey Namespace = TextId.GetNamespace();
+		FTextKey Key = TextId.GetKey();
 
 		if (BaseArchive.IsCooking())
 		{
@@ -865,28 +846,42 @@ void FTextHistory_Base::SerializeForDisplayString(FStructuredArchive::FRecord Re
 			}
 #endif // USE_STABLE_LOCALIZATION_KEYS
 
+#if WITH_EDITOR
 			// If this has no key, give it a GUID for a key
-			if (GIsEditor && !bFoundNamespaceAndKey && (BaseArchive.IsPersistent() && !BaseArchive.HasAnyPortFlags(PPF_Duplicate)))
+			if (GIsEditor && Key.IsEmpty() && (BaseArchive.IsPersistent() && !BaseArchive.HasAnyPortFlags(PPF_Duplicate)))
 			{
 				Key = FGuid::NewGuid().ToString();
-				if (!FTextLocalizationManager::Get().AddDisplayString(InOutDisplayString.ToSharedRef(), Namespace, Key))
-				{
-					// Could not add display string, reset namespace and key.
-					Namespace.Reset();
-					Key.Reset();
-				}
 			}
+#endif // WITH_EDITOR
 		}
 
 		// Serialize the Namespace
-		Namespace.SerializeAsString(Record.EnterField(SA_FIELD_NAME(TEXT("Namespace"))));
+		Namespace.SerializeAsString(Record.EnterField(TEXT("Namespace")));
 
 		// Serialize the Key
-		Key.SerializeAsString(Record.EnterField(SA_FIELD_NAME(TEXT("Key"))));
+		Key.SerializeAsString(Record.EnterField(TEXT("Key")));
 
 		// Serialize the SourceString
 		Record << SA_VALUE(TEXT("SourceString"), SourceString);
 	}
+}
+
+bool FTextHistory_Base::CanUpdateDisplayString()
+{
+	return FTextLocalizationManager::IsDisplayStringSupportEnabled() && !TextId.IsEmpty();
+}
+
+void FTextHistory_Base::UpdateDisplayString()
+{
+	check(!TextId.IsEmpty()); // CanUpdateDisplayString should prevent UpdateDisplayString being called
+
+	// Create a temp to hold the old value in case we abort, in which case we assign out of the OPEN so the old value will be preserved
+	FTextConstDisplayStringPtr NewLocalizedString;
+	UE_AUTORTFM_OPEN({
+		NewLocalizedString = FTextLocalizationManager::Get().GetDisplayString(TextId.GetNamespace(), TextId.GetKey(), SourceString.IsEmpty() ? nullptr : &SourceString);
+	});
+
+	LocalizedString = NewLocalizedString;
 }
 
 bool FTextHistory_Base::StaticShouldReadFromBuffer(const TCHAR* Buffer)
@@ -895,7 +890,7 @@ bool FTextHistory_Base::StaticShouldReadFromBuffer(const TCHAR* Buffer)
 		|| TEXT_STRINGIFICATION_PEEK_MARKER(TextStringificationUtil::LocTextMarker);
 }
 
-const TCHAR* FTextHistory_Base::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace, FTextDisplayStringPtr& OutDisplayString)
+const TCHAR* FTextHistory_Base::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace)
 {
 #define LOC_DEFINE_REGION
 	if (TEXT_STRINGIFICATION_PEEK_MARKER(TextStringificationUtil::NsLocTextMarker))
@@ -952,10 +947,9 @@ const TCHAR* FTextHistory_Base::ReadFromBuffer(const TCHAR* Buffer, const TCHAR*
 			// Strip the package localization ID to match how text works at runtime (properties do this when saving during cook)
 			TextNamespaceUtil::StripPackageNamespaceInline(NamespaceString);
 		}
-		OutDisplayString = FTextLocalizationManager::Get().GetDisplayString(NamespaceString, KeyString, &SourceString);
-
-		// We will definitely need to do a rebuild later
-		Revision = 0;
+		TextId = FTextId(NamespaceString, KeyString);
+		LocalizedString.Reset();
+		MarkDisplayStringOutOfDate();
 
 		return Buffer;
 	}
@@ -1008,10 +1002,9 @@ const TCHAR* FTextHistory_Base::ReadFromBuffer(const TCHAR* Buffer, const TCHAR*
 			// Strip the package localization ID to match how text works at runtime (properties do this when saving during cook)
 			TextNamespaceUtil::StripPackageNamespaceInline(NamespaceString);
 		}
-		OutDisplayString = FTextLocalizationManager::Get().GetDisplayString(NamespaceString, KeyString, &SourceString);
-
-		// We will definitely need to do a rebuild later
-		Revision = 0;
+		TextId = FTextId(NamespaceString, KeyString);
+		LocalizedString.Reset();
+		MarkDisplayStringOutOfDate();
 
 		return Buffer;
 	}
@@ -1020,14 +1013,12 @@ const TCHAR* FTextHistory_Base::ReadFromBuffer(const TCHAR* Buffer, const TCHAR*
 	return nullptr;
 }
 
-bool FTextHistory_Base::WriteToBuffer(FString& Buffer, FTextDisplayStringPtr DisplayString, const bool bStripPackageNamespace) const
+bool FTextHistory_Base::WriteToBuffer(FString& Buffer, const bool bStripPackageNamespace) const
 {
-	FString Namespace;
-	FString Key;
-	const bool bFoundNamespaceAndKey = DisplayString.IsValid() && FTextLocalizationManager::Get().FindNamespaceAndKeyFromDisplayString(DisplayString.ToSharedRef(), Namespace, Key);
-
-	if (bFoundNamespaceAndKey)
+	if (!TextId.IsEmpty())
 	{
+		FString Namespace = TextId.GetNamespace().GetChars();
+		FString Key = TextId.GetKey().GetChars();
 		if (bStripPackageNamespace)
 		{
 			TextNamespaceUtil::StripPackageNamespaceInline(Namespace);
@@ -1051,30 +1042,42 @@ bool FTextHistory_Base::WriteToBuffer(FString& Buffer, FTextDisplayStringPtr Dis
 }
 
 ///////////////////////////////////////
+// FTextHistory_Generated
+
+FTextHistory_Generated::FTextHistory_Generated(FString&& InDisplayString)
+	: DisplayString(MoveTemp(InDisplayString))
+{
+	MarkDisplayStringUpToDate();
+}
+
+const FString& FTextHistory_Generated::GetDisplayString() const
+{
+	return DisplayString;
+}
+
+void FTextHistory_Generated::Serialize(FStructuredArchive::FRecord Record)
+{
+	FArchive& BaseArchive = Record.GetUnderlyingArchive();
+
+	if (BaseArchive.IsLoading())
+	{
+		MarkDisplayStringOutOfDate();
+	}
+}
+
+void FTextHistory_Generated::UpdateDisplayString()
+{
+	DisplayString = BuildLocalizedDisplayString();
+}
+
+///////////////////////////////////////
 // FTextHistory_NamedFormat
 
-FTextHistory_NamedFormat::FTextHistory_NamedFormat(FTextFormat&& InSourceFmt, FFormatNamedArguments&& InArguments)
-	: SourceFmt(MoveTemp(InSourceFmt))
+FTextHistory_NamedFormat::FTextHistory_NamedFormat(FString&& InDisplayString, FTextFormat&& InSourceFmt, FFormatNamedArguments&& InArguments)
+	: FTextHistory_Generated(MoveTemp(InDisplayString))
+	, SourceFmt(MoveTemp(InSourceFmt))
 	, Arguments(MoveTemp(InArguments))
 {
-}
-
-FTextHistory_NamedFormat::FTextHistory_NamedFormat(FTextHistory_NamedFormat&& Other)
-	: FTextHistory(MoveTemp(Other))
-	, SourceFmt(MoveTemp(Other.SourceFmt))
-	, Arguments(MoveTemp(Other.Arguments))
-{
-}
-
-FTextHistory_NamedFormat& FTextHistory_NamedFormat::operator=(FTextHistory_NamedFormat&& Other)
-{
-	FTextHistory::operator=(MoveTemp(Other));
-	if (this != &Other)
-	{
-		SourceFmt = MoveTemp(Other.SourceFmt);
-		Arguments = MoveTemp(Other.Arguments);
-	}
-	return *this;
 }
 
 bool FTextHistory_NamedFormat::IdenticalTo(const FTextHistory& Other, const ETextIdenticalModeFlags CompareModeFlags) const
@@ -1116,23 +1119,19 @@ FString FTextHistory_NamedFormat::BuildInvariantDisplayString() const
 
 void FTextHistory_NamedFormat::Serialize(FStructuredArchive::FRecord Record)
 {
-	FArchive& BaseArchive = Record.GetUnderlyingArchive();
+	FTextHistory_Generated::Serialize(Record);
 
-	if(BaseArchive.IsSaving())
-	{
-		int8 HistoryType = (int8)ETextHistoryType::NamedFormat;
-		Record << SA_VALUE(TEXT("HistoryType"), HistoryType);
-	}
+	FArchive& BaseArchive = Record.GetUnderlyingArchive();
 
 	if (BaseArchive.IsSaving())
 	{
 		FText FormatText = SourceFmt.GetSourceText();
-		Record.EnterField(SA_FIELD_NAME(TEXT("FormatText"))) << FormatText;
+		Record.EnterField(TEXT("FormatText")) << FormatText;
 	}
 	else if (BaseArchive.IsLoading())
 	{
 		FText FormatText;
-		Record.EnterField(SA_FIELD_NAME(TEXT("FormatText"))) << FormatText;
+		Record.EnterField(TEXT("FormatText")) << FormatText;
 		SourceFmt = FTextFormat(FormatText);
 	}
 
@@ -1144,7 +1143,7 @@ bool FTextHistory_NamedFormat::StaticShouldReadFromBuffer(const TCHAR* Buffer)
 	return TEXT_STRINGIFICATION_PEEK_MARKER(TextStringificationUtil::LocGenFormatNamedMarker);
 }
 
-const TCHAR* FTextHistory_NamedFormat::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace, FTextDisplayStringPtr& OutDisplayString)
+const TCHAR* FTextHistory_NamedFormat::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace)
 {
 	if (TEXT_STRINGIFICATION_PEEK_MARKER(TextStringificationUtil::LocGenFormatNamedMarker))
 	{
@@ -1192,14 +1191,14 @@ const TCHAR* FTextHistory_NamedFormat::ReadFromBuffer(const TCHAR* Buffer, const
 		// Skip whitespace before the closing bracket, and then step over it
 		TEXT_STRINGIFICATION_SKIP_WHITESPACE_AND_CHAR(')');
 
-		PrepareDisplayStringForRebuild(OutDisplayString);
+		MarkDisplayStringOutOfDate();
 		return Buffer;
 	}
 
 	return nullptr;
 }
 
-bool FTextHistory_NamedFormat::WriteToBuffer(FString& Buffer, FTextDisplayStringPtr DisplayString, const bool bStripPackageNamespace) const
+bool FTextHistory_NamedFormat::WriteToBuffer(FString& Buffer, const bool bStripPackageNamespace) const
 {
 	TextStringificationUtil::WriteTextFormatToBuffer(Buffer, TextStringificationUtil::LocGenFormatNamedMarker, SourceFmt, bStripPackageNamespace, [this](TextStringificationUtil::FTextFormatArgumentEnumeratorCallback Callback)
 	{
@@ -1233,28 +1232,11 @@ void FTextHistory_NamedFormat::GetHistoricFormatData(const FText& InText, TArray
 ///////////////////////////////////////
 // FTextHistory_OrderedFormat
 
-FTextHistory_OrderedFormat::FTextHistory_OrderedFormat(FTextFormat&& InSourceFmt, FFormatOrderedArguments&& InArguments)
-	: SourceFmt(MoveTemp(InSourceFmt))
+FTextHistory_OrderedFormat::FTextHistory_OrderedFormat(FString&& InDisplayString, FTextFormat&& InSourceFmt, FFormatOrderedArguments&& InArguments)
+	: FTextHistory_Generated(MoveTemp(InDisplayString))
+	, SourceFmt(MoveTemp(InSourceFmt))
 	, Arguments(MoveTemp(InArguments))
 {
-}
-
-FTextHistory_OrderedFormat::FTextHistory_OrderedFormat(FTextHistory_OrderedFormat&& Other)
-	: FTextHistory(MoveTemp(Other))
-	, SourceFmt(MoveTemp(Other.SourceFmt))
-	, Arguments(MoveTemp(Other.Arguments))
-{
-}
-
-FTextHistory_OrderedFormat& FTextHistory_OrderedFormat::operator=(FTextHistory_OrderedFormat&& Other)
-{
-	FTextHistory::operator=(MoveTemp(Other));
-	if (this != &Other)
-	{
-		SourceFmt = MoveTemp(Other.SourceFmt);
-		Arguments = MoveTemp(Other.Arguments);
-	}
-	return *this;
 }
 
 bool FTextHistory_OrderedFormat::IdenticalTo(const FTextHistory& Other, const ETextIdenticalModeFlags CompareModeFlags) const
@@ -1291,23 +1273,19 @@ FString FTextHistory_OrderedFormat::BuildInvariantDisplayString() const
 
 void FTextHistory_OrderedFormat::Serialize(FStructuredArchive::FRecord Record)
 {
-	FArchive& BaseArchive = Record.GetUnderlyingArchive();
+	FTextHistory_Generated::Serialize(Record);
 
-	if(BaseArchive.IsSaving())
-	{
-		int8 HistoryType = (int8)ETextHistoryType::OrderedFormat;
-		Record << SA_VALUE(TEXT("HistoryType"), HistoryType);
-	}
+	FArchive& BaseArchive = Record.GetUnderlyingArchive();
 
 	if (BaseArchive.IsSaving())
 	{
 		FText FormatText = SourceFmt.GetSourceText();
-		Record.EnterField(SA_FIELD_NAME(TEXT("FormatText"))) << FormatText;
+		Record.EnterField(TEXT("FormatText")) << FormatText;
 	}
 	else if (BaseArchive.IsLoading())
 	{
 		FText FormatText;
-		Record.EnterField(SA_FIELD_NAME(TEXT("FormatText"))) << FormatText;
+		Record.EnterField(TEXT("FormatText")) << FormatText;
 		SourceFmt = FTextFormat(FormatText);
 	}
 
@@ -1319,7 +1297,7 @@ bool FTextHistory_OrderedFormat::StaticShouldReadFromBuffer(const TCHAR* Buffer)
 	return TEXT_STRINGIFICATION_PEEK_MARKER(TextStringificationUtil::LocGenFormatOrderedMarker);
 }
 
-const TCHAR* FTextHistory_OrderedFormat::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace, FTextDisplayStringPtr& OutDisplayString)
+const TCHAR* FTextHistory_OrderedFormat::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace)
 {
 	if (TEXT_STRINGIFICATION_PEEK_MARKER(TextStringificationUtil::LocGenFormatOrderedMarker))
 	{
@@ -1359,14 +1337,14 @@ const TCHAR* FTextHistory_OrderedFormat::ReadFromBuffer(const TCHAR* Buffer, con
 		// Skip whitespace before the closing bracket, and then step over it
 		TEXT_STRINGIFICATION_SKIP_WHITESPACE_AND_CHAR(')');
 
-		PrepareDisplayStringForRebuild(OutDisplayString);
+		MarkDisplayStringOutOfDate();
 		return Buffer;
 	}
 
 	return nullptr;
 }
 
-bool FTextHistory_OrderedFormat::WriteToBuffer(FString& Buffer, FTextDisplayStringPtr DisplayString, const bool bStripPackageNamespace) const
+bool FTextHistory_OrderedFormat::WriteToBuffer(FString& Buffer, const bool bStripPackageNamespace) const
 {
 	TextStringificationUtil::WriteTextFormatToBuffer(Buffer, TextStringificationUtil::LocGenFormatOrderedMarker, SourceFmt, bStripPackageNamespace, [this](TextStringificationUtil::FTextFormatArgumentEnumeratorCallback Callback)
 	{
@@ -1407,28 +1385,11 @@ void FTextHistory_OrderedFormat::GetHistoricFormatData(const FText& InText, TArr
 ///////////////////////////////////////
 // FTextHistory_ArgumentDataFormat
 
-FTextHistory_ArgumentDataFormat::FTextHistory_ArgumentDataFormat(FTextFormat&& InSourceFmt, TArray<FFormatArgumentData>&& InArguments)
-	: SourceFmt(MoveTemp(InSourceFmt))
+FTextHistory_ArgumentDataFormat::FTextHistory_ArgumentDataFormat(FString&& InDisplayString, FTextFormat&& InSourceFmt, TArray<FFormatArgumentData>&& InArguments)
+	: FTextHistory_Generated(MoveTemp(InDisplayString))
+	, SourceFmt(MoveTemp(InSourceFmt))
 	, Arguments(MoveTemp(InArguments))
 {
-}
-
-FTextHistory_ArgumentDataFormat::FTextHistory_ArgumentDataFormat(FTextHistory_ArgumentDataFormat&& Other)
-	: FTextHistory(MoveTemp(Other))
-	, SourceFmt(MoveTemp(Other.SourceFmt))
-	, Arguments(MoveTemp(Other.Arguments))
-{
-}
-
-FTextHistory_ArgumentDataFormat& FTextHistory_ArgumentDataFormat::operator=(FTextHistory_ArgumentDataFormat&& Other)
-{
-	FTextHistory::operator=(MoveTemp(Other));
-	if (this != &Other)
-	{
-		SourceFmt = MoveTemp(Other.SourceFmt);
-		Arguments = MoveTemp(Other.Arguments);
-	}
-	return *this;
 }
 
 bool FTextHistory_ArgumentDataFormat::IdenticalTo(const FTextHistory& Other, const ETextIdenticalModeFlags CompareModeFlags) const
@@ -1465,23 +1426,19 @@ FString FTextHistory_ArgumentDataFormat::BuildInvariantDisplayString() const
 
 void FTextHistory_ArgumentDataFormat::Serialize(FStructuredArchive::FRecord Record)
 {
-	FArchive& BaseArchive = Record.GetUnderlyingArchive();
+	FTextHistory_Generated::Serialize(Record);
 
-	if(BaseArchive.IsSaving())
-	{
-		int8 HistoryType = (int8)ETextHistoryType::ArgumentFormat;
-		Record << SA_VALUE(TEXT("HistoryType"), HistoryType);
-	}
+	FArchive& BaseArchive = Record.GetUnderlyingArchive();
 
 	if (BaseArchive.IsSaving())
 	{
 		FText FormatText = SourceFmt.GetSourceText();
-		Record.EnterField(SA_FIELD_NAME(TEXT("FormatText"))) << FormatText;
+		Record.EnterField(TEXT("FormatText")) << FormatText;
 	}
 	else if (BaseArchive.IsLoading())
 	{
 		FText FormatText;
-		Record.EnterField(SA_FIELD_NAME(TEXT("FormatText"))) << FormatText;
+		Record.EnterField(TEXT("FormatText")) << FormatText;
 		SourceFmt = FTextFormat(FormatText);
 	}
 
@@ -1493,12 +1450,12 @@ bool FTextHistory_ArgumentDataFormat::StaticShouldReadFromBuffer(const TCHAR* Bu
 	return false;
 }
 
-const TCHAR* FTextHistory_ArgumentDataFormat::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace, FTextDisplayStringPtr& OutDisplayString)
+const TCHAR* FTextHistory_ArgumentDataFormat::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace)
 {
 	return nullptr;
 }
 
-bool FTextHistory_ArgumentDataFormat::WriteToBuffer(FString& Buffer, FTextDisplayStringPtr DisplayString, const bool bStripPackageNamespace) const
+bool FTextHistory_ArgumentDataFormat::WriteToBuffer(FString& Buffer, const bool bStripPackageNamespace) const
 {
 	TextStringificationUtil::WriteTextFormatToBuffer(Buffer, TextStringificationUtil::LocGenFormatNamedMarker, SourceFmt, bStripPackageNamespace, [this](TextStringificationUtil::FTextFormatArgumentEnumeratorCallback Callback)
 	{
@@ -1538,6 +1495,9 @@ void FTextHistory_ArgumentDataFormat::GetHistoricFormatData(const FText& InText,
 		case EFormatArgumentType::Float:
 			ArgumentValue = FFormatArgumentValue(ArgumentData.ArgumentValueFloat);
 			break;
+		case EFormatArgumentType::Double:
+			ArgumentValue = FFormatArgumentValue(ArgumentData.ArgumentValueDouble);
+			break;
 		case EFormatArgumentType::Gender:
 			ArgumentValue = FFormatArgumentValue(ArgumentData.ArgumentValueGender);
 			break;
@@ -1554,8 +1514,9 @@ void FTextHistory_ArgumentDataFormat::GetHistoricFormatData(const FText& InText,
 ///////////////////////////////////////
 // FTextHistory_FormatNumber
 
-FTextHistory_FormatNumber::FTextHistory_FormatNumber(FFormatArgumentValue InSourceValue, const FNumberFormattingOptions* const InFormatOptions, FCulturePtr InTargetCulture)
-	: SourceValue(MoveTemp(InSourceValue))
+FTextHistory_FormatNumber::FTextHistory_FormatNumber(FString&& InDisplayString, FFormatArgumentValue InSourceValue, const FNumberFormattingOptions* const InFormatOptions, FCulturePtr InTargetCulture)
+	: FTextHistory_Generated(MoveTemp(InDisplayString))
+	, SourceValue(MoveTemp(InSourceValue))
 	, FormatOptions()
 	, TargetCulture(MoveTemp(InTargetCulture))
 {
@@ -1563,26 +1524,6 @@ FTextHistory_FormatNumber::FTextHistory_FormatNumber(FFormatArgumentValue InSour
 	{
 		FormatOptions = *InFormatOptions;
 	}
-}
-
-FTextHistory_FormatNumber::FTextHistory_FormatNumber(FTextHistory_FormatNumber&& Other)
-	: FTextHistory(MoveTemp(Other))
-	, SourceValue(MoveTemp(Other.SourceValue))
-	, FormatOptions(MoveTemp(Other.FormatOptions))
-	, TargetCulture(MoveTemp(Other.TargetCulture))
-{
-}
-
-FTextHistory_FormatNumber& FTextHistory_FormatNumber::operator=(FTextHistory_FormatNumber&& Other)
-{
-	FTextHistory::operator=(MoveTemp(Other));
-	if (this != &Other)
-	{
-		SourceValue = MoveTemp(Other.SourceValue);
-		FormatOptions = MoveTemp(Other.FormatOptions);
-		TargetCulture = MoveTemp(Other.TargetCulture);
-	}
-	return *this;
 }
 
 bool FTextHistory_FormatNumber::IdenticalTo(const FTextHistory& Other, const ETextIdenticalModeFlags CompareModeFlags) const
@@ -1596,6 +1537,8 @@ bool FTextHistory_FormatNumber::IdenticalTo(const FTextHistory& Other, const ETe
 
 void FTextHistory_FormatNumber::Serialize(FStructuredArchive::FRecord Record)
 {
+	FTextHistory_Generated::Serialize(Record);
+
 	FArchive& BaseArchive = Record.GetUnderlyingArchive();
 
 	Record << SA_VALUE(TEXT("SourceValue"), SourceValue);
@@ -1662,20 +1605,9 @@ FString FTextHistory_FormatNumber::BuildNumericDisplayString(const FDecimalNumbe
 ///////////////////////////////////////
 // FTextHistory_AsNumber
 
-FTextHistory_AsNumber::FTextHistory_AsNumber(FFormatArgumentValue InSourceValue, const FNumberFormattingOptions* const InFormatOptions, FCulturePtr InTargetCulture)
-	: FTextHistory_FormatNumber(MoveTemp(InSourceValue), InFormatOptions, MoveTemp(InTargetCulture))
+FTextHistory_AsNumber::FTextHistory_AsNumber(FString&& InDisplayString, FFormatArgumentValue InSourceValue, const FNumberFormattingOptions* const InFormatOptions, FCulturePtr InTargetCulture)
+	: FTextHistory_FormatNumber(MoveTemp(InDisplayString), MoveTemp(InSourceValue), InFormatOptions, MoveTemp(InTargetCulture))
 {
-}
-
-FTextHistory_AsNumber::FTextHistory_AsNumber(FTextHistory_AsNumber&& Other)
-	: FTextHistory_FormatNumber(MoveTemp(Other))
-{
-}
-
-FTextHistory_AsNumber& FTextHistory_AsNumber::operator=(FTextHistory_AsNumber&& Other)
-{
-	FTextHistory_FormatNumber::operator=(MoveTemp(Other));
-	return *this;
 }
 
 FString FTextHistory_AsNumber::BuildLocalizedDisplayString() const
@@ -1700,14 +1632,6 @@ FString FTextHistory_AsNumber::BuildInvariantDisplayString() const
 
 void FTextHistory_AsNumber::Serialize(FStructuredArchive::FRecord Record)
 {
-	FArchive& BaseArchive = Record.GetUnderlyingArchive();
-
-	if(BaseArchive.IsSaving())
-	{
-		int8 HistoryType = (int8)ETextHistoryType::AsNumber;
-		Record << SA_VALUE(TEXT("HistoryType"), HistoryType);
-	}
-
 	FTextHistory_FormatNumber::Serialize(Record);
 }
 
@@ -1716,15 +1640,15 @@ bool FTextHistory_AsNumber::StaticShouldReadFromBuffer(const TCHAR* Buffer)
 	return TEXT_STRINGIFICATION_PEEK_MARKER(TextStringificationUtil::LocGenNumberMarker);
 }
 
-const TCHAR* FTextHistory_AsNumber::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace, FTextDisplayStringPtr& OutDisplayString)
+const TCHAR* FTextHistory_AsNumber::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace)
 {
 	static const FString TokenMarker = TextStringificationUtil::LocGenNumberMarker;
 	TEXT_STRINGIFICATION_FUNC_MODIFY_BUFFER_AND_VALIDATE(TextStringificationUtil::ReadNumberOrPercentFromBuffer, TokenMarker, SourceValue, FormatOptions, TargetCulture);
-	PrepareDisplayStringForRebuild(OutDisplayString);
+	MarkDisplayStringOutOfDate();
 	return Buffer;
 }
 
-bool FTextHistory_AsNumber::WriteToBuffer(FString& Buffer, FTextDisplayStringPtr DisplayString, const bool bStripPackageNamespace) const
+bool FTextHistory_AsNumber::WriteToBuffer(FString& Buffer, const bool bStripPackageNamespace) const
 {
 	TextStringificationUtil::WriteNumberOrPercentToBuffer(Buffer, TextStringificationUtil::LocGenNumberMarker, SourceValue, FormatOptions, TargetCulture, bStripPackageNamespace);
 	return true;
@@ -1739,20 +1663,9 @@ bool FTextHistory_AsNumber::GetHistoricNumericData(const FText& InText, FHistori
 ///////////////////////////////////////
 // FTextHistory_AsPercent
 
-FTextHistory_AsPercent::FTextHistory_AsPercent(FFormatArgumentValue InSourceValue, const FNumberFormattingOptions* const InFormatOptions, FCulturePtr InTargetCulture)
-	: FTextHistory_FormatNumber(MoveTemp(InSourceValue), InFormatOptions, MoveTemp(InTargetCulture))
+FTextHistory_AsPercent::FTextHistory_AsPercent(FString&& InDisplayString, FFormatArgumentValue InSourceValue, const FNumberFormattingOptions* const InFormatOptions, FCulturePtr InTargetCulture)
+	: FTextHistory_FormatNumber(MoveTemp(InDisplayString), MoveTemp(InSourceValue), InFormatOptions, MoveTemp(InTargetCulture))
 {
-}
-
-FTextHistory_AsPercent::FTextHistory_AsPercent(FTextHistory_AsPercent&& Other)
-	: FTextHistory_FormatNumber(MoveTemp(Other))
-{
-}
-
-FTextHistory_AsPercent& FTextHistory_AsPercent::operator=(FTextHistory_AsPercent&& Other)
-{
-	FTextHistory_FormatNumber::operator=(MoveTemp(Other));
-	return *this;
 }
 
 FString FTextHistory_AsPercent::BuildLocalizedDisplayString() const
@@ -1777,14 +1690,6 @@ FString FTextHistory_AsPercent::BuildInvariantDisplayString() const
 
 void FTextHistory_AsPercent::Serialize(FStructuredArchive::FRecord Record)
 {
-	FArchive& BaseArchive = Record.GetUnderlyingArchive();
-
-	if(BaseArchive.IsSaving())
-	{
-		int8 HistoryType = (int8)ETextHistoryType::AsPercent;
-		Record << SA_VALUE(TEXT("HistoryType"), HistoryType);
-	}
-
 	FTextHistory_FormatNumber::Serialize(Record);
 }
 
@@ -1793,15 +1698,15 @@ bool FTextHistory_AsPercent::StaticShouldReadFromBuffer(const TCHAR* Buffer)
 	return TEXT_STRINGIFICATION_PEEK_MARKER(TextStringificationUtil::LocGenPercentMarker);
 }
 
-const TCHAR* FTextHistory_AsPercent::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace, FTextDisplayStringPtr& OutDisplayString)
+const TCHAR* FTextHistory_AsPercent::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace)
 {
 	static const FString TokenMarker = TextStringificationUtil::LocGenPercentMarker;
 	TEXT_STRINGIFICATION_FUNC_MODIFY_BUFFER_AND_VALIDATE(TextStringificationUtil::ReadNumberOrPercentFromBuffer, TokenMarker, SourceValue, FormatOptions, TargetCulture);
-	PrepareDisplayStringForRebuild(OutDisplayString);
+	MarkDisplayStringOutOfDate();
 	return Buffer;
 }
 
-bool FTextHistory_AsPercent::WriteToBuffer(FString& Buffer, FTextDisplayStringPtr DisplayString, const bool bStripPackageNamespace) const
+bool FTextHistory_AsPercent::WriteToBuffer(FString& Buffer, const bool bStripPackageNamespace) const
 {
 	TextStringificationUtil::WriteNumberOrPercentToBuffer(Buffer, TextStringificationUtil::LocGenPercentMarker, SourceValue, FormatOptions, TargetCulture, bStripPackageNamespace);
 	return true;
@@ -1816,26 +1721,10 @@ bool FTextHistory_AsPercent::GetHistoricNumericData(const FText& InText, FHistor
 ///////////////////////////////////////
 // FTextHistory_AsCurrency
 
-FTextHistory_AsCurrency::FTextHistory_AsCurrency(FFormatArgumentValue InSourceValue, FString InCurrencyCode, const FNumberFormattingOptions* const InFormatOptions, FCulturePtr InTargetCulture)
-	: FTextHistory_FormatNumber(MoveTemp(InSourceValue), InFormatOptions, MoveTemp(InTargetCulture))
+FTextHistory_AsCurrency::FTextHistory_AsCurrency(FString&& InDisplayString, FFormatArgumentValue InSourceValue, FString InCurrencyCode, const FNumberFormattingOptions* const InFormatOptions, FCulturePtr InTargetCulture)
+	: FTextHistory_FormatNumber(MoveTemp(InDisplayString), MoveTemp(InSourceValue), InFormatOptions, MoveTemp(InTargetCulture))
 	, CurrencyCode(MoveTemp(InCurrencyCode))
 {
-}
-
-FTextHistory_AsCurrency::FTextHistory_AsCurrency(FTextHistory_AsCurrency&& Other)
-	: FTextHistory_FormatNumber(MoveTemp(Other))
-	, CurrencyCode(MoveTemp(Other.CurrencyCode))
-{
-}
-
-FTextHistory_AsCurrency& FTextHistory_AsCurrency::operator=(FTextHistory_AsCurrency&& Other)
-{
-	FTextHistory_FormatNumber::operator=(MoveTemp(Other));
-	if (this != &Other)
-	{
-		CurrencyCode = MoveTemp(Other.CurrencyCode);
-	}
-	return *this;
 }
 
 FString FTextHistory_AsCurrency::BuildLocalizedDisplayString() const
@@ -1864,13 +1753,7 @@ void FTextHistory_AsCurrency::Serialize(FStructuredArchive::FRecord Record)
 {
 	FArchive& BaseArchive = Record.GetUnderlyingArchive();
 
-	if(BaseArchive.IsSaving())
-	{
-		int8 HistoryType = (int8)ETextHistoryType::AsCurrency;
-		Record << SA_VALUE(TEXT("HistoryType"), HistoryType);
-	}
-
-	if (BaseArchive.UE4Ver() >= VER_UE4_ADDED_CURRENCY_CODE_TO_FTEXT)
+	if (BaseArchive.UEVer() >= VER_UE4_ADDED_CURRENCY_CODE_TO_FTEXT)
 	{
 		Record << SA_VALUE(TEXT("CurrencyCode"), CurrencyCode);
 	}
@@ -1883,7 +1766,7 @@ bool FTextHistory_AsCurrency::StaticShouldReadFromBuffer(const TCHAR* Buffer)
 	return TEXT_STRINGIFICATION_PEEK_MARKER(TextStringificationUtil::LocGenCurrencyMarker);
 }
 
-const TCHAR* FTextHistory_AsCurrency::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace, FTextDisplayStringPtr& OutDisplayString)
+const TCHAR* FTextHistory_AsCurrency::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace)
 {
 	FInternationalization& I18N = FInternationalization::Get();
 	checkf(I18N.IsInitialized() == true, TEXT("FInternationalization is not initialized. An FText formatting method was likely used in static object initialization - this is not supported."));
@@ -1945,14 +1828,14 @@ const TCHAR* FTextHistory_AsCurrency::ReadFromBuffer(const TCHAR* Buffer, const 
 		const FNumberFormattingOptions& FormattingOptions = FormattingRules.CultureDefaultFormattingOptions;
 		SourceValue = BaseValue / static_cast<double>(FastDecimalFormat::Pow10(FormattingOptions.MaximumFractionalDigits));
 
-		PrepareDisplayStringForRebuild(OutDisplayString);
+		MarkDisplayStringOutOfDate();
 		return Buffer;
 	}
 
 	return nullptr;
 }
 
-bool FTextHistory_AsCurrency::WriteToBuffer(FString& Buffer, FTextDisplayStringPtr DisplayString, const bool bStripPackageNamespace) const
+bool FTextHistory_AsCurrency::WriteToBuffer(FString& Buffer, const bool bStripPackageNamespace) const
 {
 	FInternationalization& I18N = FInternationalization::Get();
 	checkf(I18N.IsInitialized() == true, TEXT("FInternationalization is not initialized. An FText formatting method was likely used in static object initialization - this is not supported."));
@@ -2001,45 +1884,24 @@ bool FTextHistory_AsCurrency::WriteToBuffer(FString& Buffer, FTextDisplayStringP
 ///////////////////////////////////////
 // FTextHistory_AsDate
 
-FTextHistory_AsDate::FTextHistory_AsDate(FDateTime InSourceDateTime, const EDateTimeStyle::Type InDateStyle, FString InTimeZone, FCulturePtr InTargetCulture)
-	: SourceDateTime(MoveTemp(InSourceDateTime))
+FTextHistory_AsDate::FTextHistory_AsDate(FString&& InDisplayString, FDateTime InSourceDateTime, const EDateTimeStyle::Type InDateStyle, FString InTimeZone, FCulturePtr InTargetCulture)
+	: FTextHistory_Generated(MoveTemp(InDisplayString))
+	, SourceDateTime(MoveTemp(InSourceDateTime))
 	, DateStyle(InDateStyle)
 	, TimeZone(MoveTemp(InTimeZone))
 	, TargetCulture(MoveTemp(InTargetCulture))
 {
-}
-
-FTextHistory_AsDate::FTextHistory_AsDate(FTextHistory_AsDate&& Other)
-	: FTextHistory(MoveTemp(Other))
-	, SourceDateTime(MoveTemp(Other.SourceDateTime))
-	, DateStyle(Other.DateStyle)
-	, TimeZone(MoveTemp(Other.TimeZone))
-	, TargetCulture(MoveTemp(Other.TargetCulture))
-{
-}
-
-FTextHistory_AsDate& FTextHistory_AsDate::operator=(FTextHistory_AsDate&& Other)
-{
-	FTextHistory::operator=(MoveTemp(Other));
-	if (this != &Other)
+	if (DateStyle == EDateTimeStyle::Custom)
 	{
-		SourceDateTime = MoveTemp(Other.SourceDateTime);
-		DateStyle = Other.DateStyle;
-		TimeZone = MoveTemp(Other.TimeZone);
-		TargetCulture = MoveTemp(Other.TargetCulture);
+		DateStyle = EDateTimeStyle::Default;
 	}
-	return *this;
 }
 
 void FTextHistory_AsDate::Serialize(FStructuredArchive::FRecord Record)
 {
-	FArchive& BaseArchive = Record.GetUnderlyingArchive();
+	FTextHistory_Generated::Serialize(Record);
 
-	if(BaseArchive.IsSaving())
-	{
-		int8 HistoryType = (int8)ETextHistoryType::AsDate;
-		Record << SA_VALUE(TEXT("HistoryType"), HistoryType);
-	}
+	FArchive& BaseArchive = Record.GetUnderlyingArchive();
 
 	Record << SA_VALUE(TEXT("SourceDateTime"), SourceDateTime);
 
@@ -2047,7 +1909,7 @@ void FTextHistory_AsDate::Serialize(FStructuredArchive::FRecord Record)
 	Record << SA_VALUE(TEXT("DateStyleInt8"), DateStyleInt8);
 	DateStyle = (EDateTimeStyle::Type)DateStyleInt8;
 
-	if( BaseArchive.UE4Ver() >= VER_UE4_FTEXT_HISTORY_DATE_TIMEZONE )
+	if( BaseArchive.UEVer() >= VER_UE4_FTEXT_HISTORY_DATE_TIMEZONE )
 	{
 		Record << SA_VALUE(TEXT("TimeZone"), TimeZone);
 	}
@@ -2074,17 +1936,17 @@ bool FTextHistory_AsDate::StaticShouldReadFromBuffer(const TCHAR* Buffer)
 	return TEXT_STRINGIFICATION_PEEK_MARKER(TextStringificationUtil::LocGenDateMarker);
 }
 
-const TCHAR* FTextHistory_AsDate::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace, FTextDisplayStringPtr& OutDisplayString)
+const TCHAR* FTextHistory_AsDate::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace)
 {
 	static const FString TokenMarker = TextStringificationUtil::LocGenDateMarker;
-	TEXT_STRINGIFICATION_FUNC_MODIFY_BUFFER_AND_VALIDATE(TextStringificationUtil::ReadDateTimeFromBuffer, TokenMarker, SourceDateTime, &DateStyle, nullptr, TimeZone, TargetCulture);
-	PrepareDisplayStringForRebuild(OutDisplayString);
+	TEXT_STRINGIFICATION_FUNC_MODIFY_BUFFER_AND_VALIDATE(TextStringificationUtil::ReadDateTimeFromBuffer, TokenMarker, SourceDateTime, &DateStyle, nullptr, nullptr, TimeZone, TargetCulture);
+	MarkDisplayStringOutOfDate();
 	return Buffer;
 }
 
-bool FTextHistory_AsDate::WriteToBuffer(FString& Buffer, FTextDisplayStringPtr DisplayString, const bool bStripPackageNamespace) const
+bool FTextHistory_AsDate::WriteToBuffer(FString& Buffer, const bool bStripPackageNamespace) const
 {
-	TextStringificationUtil::WriteDateTimeToBuffer(Buffer, TextStringificationUtil::LocGenDateMarker, SourceDateTime, &DateStyle, nullptr, TimeZone, TargetCulture, bStripPackageNamespace);
+	TextStringificationUtil::WriteDateTimeToBuffer(Buffer, TextStringificationUtil::LocGenDateMarker, SourceDateTime, &DateStyle, nullptr, nullptr, TimeZone, TargetCulture, bStripPackageNamespace);
 	return true;
 }
 
@@ -2119,45 +1981,24 @@ FString FTextHistory_AsDate::BuildInvariantDisplayString() const
 ///////////////////////////////////////
 // FTextHistory_AsTime
 
-FTextHistory_AsTime::FTextHistory_AsTime(FDateTime InSourceDateTime, const EDateTimeStyle::Type InTimeStyle, FString InTimeZone, FCulturePtr InTargetCulture)
-	: SourceDateTime(MoveTemp(InSourceDateTime))
+FTextHistory_AsTime::FTextHistory_AsTime(FString&& InDisplayString, FDateTime InSourceDateTime, const EDateTimeStyle::Type InTimeStyle, FString InTimeZone, FCulturePtr InTargetCulture)
+	: FTextHistory_Generated(MoveTemp(InDisplayString))
+	, SourceDateTime(MoveTemp(InSourceDateTime))
 	, TimeStyle(InTimeStyle)
 	, TimeZone(MoveTemp(InTimeZone))
 	, TargetCulture(MoveTemp(InTargetCulture))
 {
-}
-
-FTextHistory_AsTime::FTextHistory_AsTime(FTextHistory_AsTime&& Other)
-	: FTextHistory(MoveTemp(Other))
-	, SourceDateTime(MoveTemp(Other.SourceDateTime))
-	, TimeStyle(Other.TimeStyle)
-	, TimeZone(MoveTemp(Other.TimeZone))
-	, TargetCulture(MoveTemp(Other.TargetCulture))
-{
-}
-
-FTextHistory_AsTime& FTextHistory_AsTime::operator=(FTextHistory_AsTime&& Other)
-{
-	FTextHistory::operator=(MoveTemp(Other));
-	if (this != &Other)
+	if (TimeStyle == EDateTimeStyle::Custom)
 	{
-		SourceDateTime = MoveTemp(Other.SourceDateTime);
-		TimeStyle = Other.TimeStyle;
-		TimeZone = MoveTemp(Other.TimeZone);
-		TargetCulture = MoveTemp(Other.TargetCulture);
+		TimeStyle = EDateTimeStyle::Default;
 	}
-	return *this;
 }
 
 void FTextHistory_AsTime::Serialize(FStructuredArchive::FRecord Record)
 {
-	FArchive& BaseArchive = Record.GetUnderlyingArchive();
+	FTextHistory_Generated::Serialize(Record);
 
-	if(BaseArchive.IsSaving())
-	{
-		int8 HistoryType = (int8)ETextHistoryType::AsTime;
-		Record << SA_VALUE(TEXT("HistoryType"), HistoryType);
-	}
+	FArchive& BaseArchive = Record.GetUnderlyingArchive();
 
 	Record << SA_VALUE(TEXT("SourceDateTime"), SourceDateTime);
 
@@ -2189,17 +2030,17 @@ bool FTextHistory_AsTime::StaticShouldReadFromBuffer(const TCHAR* Buffer)
 	return TEXT_STRINGIFICATION_PEEK_MARKER(TextStringificationUtil::LocGenTimeMarker);
 }
 
-const TCHAR* FTextHistory_AsTime::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace, FTextDisplayStringPtr& OutDisplayString)
+const TCHAR* FTextHistory_AsTime::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace)
 {
 	static const FString TokenMarker = TextStringificationUtil::LocGenTimeMarker;
-	TEXT_STRINGIFICATION_FUNC_MODIFY_BUFFER_AND_VALIDATE(TextStringificationUtil::ReadDateTimeFromBuffer, TokenMarker, SourceDateTime, nullptr, &TimeStyle, TimeZone, TargetCulture);
-	PrepareDisplayStringForRebuild(OutDisplayString);
+	TEXT_STRINGIFICATION_FUNC_MODIFY_BUFFER_AND_VALIDATE(TextStringificationUtil::ReadDateTimeFromBuffer, TokenMarker, SourceDateTime, nullptr, &TimeStyle, nullptr, TimeZone, TargetCulture);
+	MarkDisplayStringOutOfDate();
 	return Buffer;
 }
 
-bool FTextHistory_AsTime::WriteToBuffer(FString& Buffer, FTextDisplayStringPtr DisplayString, const bool bStripPackageNamespace) const
+bool FTextHistory_AsTime::WriteToBuffer(FString& Buffer, const bool bStripPackageNamespace) const
 {
-	TextStringificationUtil::WriteDateTimeToBuffer(Buffer, TextStringificationUtil::LocGenTimeMarker, SourceDateTime, nullptr, &TimeStyle, TimeZone, TargetCulture, bStripPackageNamespace);
+	TextStringificationUtil::WriteDateTimeToBuffer(Buffer, TextStringificationUtil::LocGenTimeMarker, SourceDateTime, nullptr, &TimeStyle, nullptr, TimeZone, TargetCulture, bStripPackageNamespace);
 	return true;
 }
 
@@ -2234,48 +2075,41 @@ FString FTextHistory_AsTime::BuildInvariantDisplayString() const
 ///////////////////////////////////////
 // FTextHistory_AsDateTime
 
-FTextHistory_AsDateTime::FTextHistory_AsDateTime(FDateTime InSourceDateTime, const EDateTimeStyle::Type InDateStyle, const EDateTimeStyle::Type InTimeStyle, FString InTimeZone, FCulturePtr InTargetCulture)
-	: SourceDateTime(MoveTemp(InSourceDateTime))
+FTextHistory_AsDateTime::FTextHistory_AsDateTime(FString&& InDisplayString, FDateTime InSourceDateTime, const EDateTimeStyle::Type InDateStyle, const EDateTimeStyle::Type InTimeStyle, FString InTimeZone, FCulturePtr InTargetCulture)
+	: FTextHistory_Generated(MoveTemp(InDisplayString))
+	, SourceDateTime(MoveTemp(InSourceDateTime))
 	, DateStyle(InDateStyle)
 	, TimeStyle(InTimeStyle)
+	, CustomPattern()
+	, TimeZone(MoveTemp(InTimeZone))
+	, TargetCulture(MoveTemp(InTargetCulture))
+{
+	if (DateStyle == EDateTimeStyle::Custom)
+	{
+		DateStyle = EDateTimeStyle::Default;
+	}
+	if (TimeStyle == EDateTimeStyle::Custom)
+	{
+		TimeStyle = EDateTimeStyle::Default;
+	}
+}
+
+FTextHistory_AsDateTime::FTextHistory_AsDateTime(FString&& InDisplayString, FDateTime InSourceDateTime, FString InCustomPattern, FString InTimeZone, FCulturePtr InTargetCulture)
+	: FTextHistory_Generated(MoveTemp(InDisplayString))
+	, SourceDateTime(MoveTemp(InSourceDateTime))
+	, DateStyle(EDateTimeStyle::Custom)
+	, TimeStyle(EDateTimeStyle::Custom)
+	, CustomPattern(MoveTemp(InCustomPattern))
 	, TimeZone(MoveTemp(InTimeZone))
 	, TargetCulture(MoveTemp(InTargetCulture))
 {
 }
 
-FTextHistory_AsDateTime::FTextHistory_AsDateTime(FTextHistory_AsDateTime&& Other)
-	: FTextHistory(MoveTemp(Other))
-	, SourceDateTime(MoveTemp(Other.SourceDateTime))
-	, DateStyle(Other.DateStyle)
-	, TimeStyle(Other.TimeStyle)
-	, TimeZone(MoveTemp(Other.TimeZone))
-	, TargetCulture(MoveTemp(Other.TargetCulture))
-{
-}
-
-FTextHistory_AsDateTime& FTextHistory_AsDateTime::operator=(FTextHistory_AsDateTime&& Other)
-{
-	FTextHistory::operator=(MoveTemp(Other));
-	if (this != &Other)
-	{
-		SourceDateTime = MoveTemp(Other.SourceDateTime);
-		DateStyle = Other.DateStyle;
-		TimeStyle = Other.TimeStyle;
-		TimeZone = MoveTemp(Other.TimeZone);
-		TargetCulture = MoveTemp(Other.TargetCulture);
-	}
-	return *this;
-}
-
 void FTextHistory_AsDateTime::Serialize(FStructuredArchive::FRecord Record)
 {
-	FArchive& BaseArchive = Record.GetUnderlyingArchive();
+	FTextHistory_Generated::Serialize(Record);
 
-	if(BaseArchive.IsSaving())
-	{
-		int8 HistoryType = (int8)ETextHistoryType::AsDateTime;
-		Record << SA_VALUE(TEXT("HistoryType"), HistoryType);
-	}
+	FArchive& BaseArchive = Record.GetUnderlyingArchive();
 
 	Record << SA_VALUE(TEXT("SourceDateTime"), SourceDateTime);
 
@@ -2286,6 +2120,11 @@ void FTextHistory_AsDateTime::Serialize(FStructuredArchive::FRecord Record)
 	int8 TimeStyleInt8 = (int8)TimeStyle;
 	Record << SA_VALUE(TEXT("TimeStyle"), TimeStyleInt8);
 	TimeStyle = (EDateTimeStyle::Type)TimeStyleInt8;
+
+	if (DateStyle == EDateTimeStyle::Custom)
+	{
+		Record << SA_VALUE(TEXT("CustomPattern"), CustomPattern);
+	}
 
 	Record << SA_VALUE(TEXT("TimeZone"), TimeZone);
 
@@ -2311,17 +2150,17 @@ bool FTextHistory_AsDateTime::StaticShouldReadFromBuffer(const TCHAR* Buffer)
 	return TEXT_STRINGIFICATION_PEEK_MARKER(TextStringificationUtil::LocGenDateTimeMarker);
 }
 
-const TCHAR* FTextHistory_AsDateTime::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace, FTextDisplayStringPtr& OutDisplayString)
+const TCHAR* FTextHistory_AsDateTime::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace)
 {
 	static const FString TokenMarker = TextStringificationUtil::LocGenDateTimeMarker;
-	TEXT_STRINGIFICATION_FUNC_MODIFY_BUFFER_AND_VALIDATE(TextStringificationUtil::ReadDateTimeFromBuffer, TokenMarker, SourceDateTime, &DateStyle, &TimeStyle, TimeZone, TargetCulture);
-	PrepareDisplayStringForRebuild(OutDisplayString);
+	TEXT_STRINGIFICATION_FUNC_MODIFY_BUFFER_AND_VALIDATE(TextStringificationUtil::ReadDateTimeFromBuffer, TokenMarker, SourceDateTime, &DateStyle, &TimeStyle, &CustomPattern, TimeZone, TargetCulture);
+	MarkDisplayStringOutOfDate();
 	return Buffer;
 }
 
-bool FTextHistory_AsDateTime::WriteToBuffer(FString& Buffer, FTextDisplayStringPtr DisplayString, const bool bStripPackageNamespace) const
+bool FTextHistory_AsDateTime::WriteToBuffer(FString& Buffer, const bool bStripPackageNamespace) const
 {
-	TextStringificationUtil::WriteDateTimeToBuffer(Buffer, TextStringificationUtil::LocGenDateTimeMarker, SourceDateTime, &DateStyle, &TimeStyle, TimeZone, TargetCulture, bStripPackageNamespace);
+	TextStringificationUtil::WriteDateTimeToBuffer(Buffer, TextStringificationUtil::LocGenDateTimeMarker, SourceDateTime, &DateStyle, &TimeStyle, &CustomPattern, TimeZone, TargetCulture, bStripPackageNamespace);
 	return true;
 }
 
@@ -2332,6 +2171,7 @@ bool FTextHistory_AsDateTime::IdenticalTo(const FTextHistory& Other, const EText
 	return SourceDateTime == CastOther.SourceDateTime
 		&& DateStyle == CastOther.DateStyle
 		&& TimeStyle == CastOther.TimeStyle
+		&& CustomPattern == CastOther.CustomPattern
 		&& TimeZone == CastOther.TimeZone
 		&& TargetCulture == CastOther.TargetCulture;
 }
@@ -2342,7 +2182,9 @@ FString FTextHistory_AsDateTime::BuildLocalizedDisplayString() const
 	checkf(I18N.IsInitialized() == true, TEXT("FInternationalization is not initialized. An FText formatting method was likely used in static object initialization - this is not supported."));
 	const FCulture& Culture = TargetCulture.IsValid() ? *TargetCulture : *I18N.GetCurrentLocale();
 
-	return FTextChronoFormatter::AsDateTime(SourceDateTime, DateStyle, TimeStyle, TimeZone, Culture);
+	return DateStyle == EDateTimeStyle::Custom
+		? FTextChronoFormatter::AsDateTime(SourceDateTime, CustomPattern, TimeZone, Culture)
+		: FTextChronoFormatter::AsDateTime(SourceDateTime, DateStyle, TimeStyle, TimeZone, Culture);
 }
 
 FString FTextHistory_AsDateTime::BuildInvariantDisplayString() const
@@ -2351,45 +2193,26 @@ FString FTextHistory_AsDateTime::BuildInvariantDisplayString() const
 	checkf(I18N.IsInitialized() == true, TEXT("FInternationalization is not initialized. An FText formatting method was likely used in static object initialization - this is not supported."));
 	const FCulture& Culture = *I18N.GetInvariantCulture();
 
-	return FTextChronoFormatter::AsDateTime(SourceDateTime, DateStyle, TimeStyle, TimeZone, Culture);
+	return DateStyle == EDateTimeStyle::Custom
+		? FTextChronoFormatter::AsDateTime(SourceDateTime, CustomPattern, TimeZone, Culture)
+		: FTextChronoFormatter::AsDateTime(SourceDateTime, DateStyle, TimeStyle, TimeZone, Culture);
 }
 
 ///////////////////////////////////////
 // FTextHistory_Transform
 
-FTextHistory_Transform::FTextHistory_Transform(FText InSourceText, const ETransformType InTransformType)
-	: SourceText(MoveTemp(InSourceText))
+FTextHistory_Transform::FTextHistory_Transform(FString&& InDisplayString, FText InSourceText, const ETransformType InTransformType)
+	: FTextHistory_Generated(MoveTemp(InDisplayString))
+	, SourceText(MoveTemp(InSourceText))
 	, TransformType(InTransformType)
 {
 }
 
-FTextHistory_Transform::FTextHistory_Transform(FTextHistory_Transform&& Other)
-	: FTextHistory(MoveTemp(Other))
-	, SourceText(MoveTemp(Other.SourceText))
-	, TransformType(Other.TransformType)
-{
-}
-
-FTextHistory_Transform& FTextHistory_Transform::operator=(FTextHistory_Transform&& Other)
-{
-	FTextHistory::operator=(MoveTemp(Other));
-	if (this != &Other)
-	{
-		SourceText = MoveTemp(Other.SourceText);
-		TransformType = Other.TransformType;
-	}
-	return *this;
-}
-
 void FTextHistory_Transform::Serialize(FStructuredArchive::FRecord Record)
 {
-	FArchive& BaseArchive = Record.GetUnderlyingArchive();
+	FTextHistory_Generated::Serialize(Record);
 
-	if (BaseArchive.IsSaving())
-	{
-		int8 HistoryType = (int8)ETextHistoryType::Transform;
-		Record << SA_VALUE(TEXT("HistoryType"), HistoryType);
-	}
+	FArchive& BaseArchive = Record.GetUnderlyingArchive();
 
 	Record << SA_VALUE(TEXT("SourceText"), SourceText);
 
@@ -2403,7 +2226,7 @@ bool FTextHistory_Transform::StaticShouldReadFromBuffer(const TCHAR* Buffer)
 		|| TEXT_STRINGIFICATION_PEEK_MARKER(TextStringificationUtil::LocGenToUpperMarker);
 }
 
-const TCHAR* FTextHistory_Transform::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace, FTextDisplayStringPtr& OutDisplayString)
+const TCHAR* FTextHistory_Transform::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace)
 {
 	// Parsing something of the form: LOCGEN_TOLOWER(...) or LOCGEN_TOUPPER
 	if (TEXT_STRINGIFICATION_PEEK_MARKER(TextStringificationUtil::LocGenToLowerMarker))
@@ -2431,11 +2254,11 @@ const TCHAR* FTextHistory_Transform::ReadFromBuffer(const TCHAR* Buffer, const T
 	// Skip whitespace before the closing bracket, and then step over it
 	TEXT_STRINGIFICATION_SKIP_WHITESPACE_AND_CHAR(')');
 
-	PrepareDisplayStringForRebuild(OutDisplayString);
+	MarkDisplayStringOutOfDate();
 	return Buffer;
 }
 
-bool FTextHistory_Transform::WriteToBuffer(FString& Buffer, FTextDisplayStringPtr DisplayString, const bool bStripPackageNamespace) const
+bool FTextHistory_Transform::WriteToBuffer(FString& Buffer, const bool bStripPackageNamespace) const
 {
 	// Produces LOCGEN_TOLOWER(...) or LOCGEN_TOUPPER
 	switch (TransformType)
@@ -2511,33 +2334,49 @@ bool FTextHistory_Transform::GetHistoricNumericData(const FText& InText, FHistor
 FTextHistory_StringTableEntry::FTextHistory_StringTableEntry(FName InTableId, FString&& InKey, const EStringTableLoadingPolicy InLoadingPolicy)
 	: StringTableReferenceData(MakeShared<FStringTableReferenceData, ESPMode::ThreadSafe>())
 {
-	StringTableReferenceData->Initialize(&Revision, InTableId, MoveTemp(InKey), InLoadingPolicy);
+	StringTableReferenceData->Initialize(InTableId, MoveTemp(InKey), InLoadingPolicy);
+	MarkDisplayStringUpToDate();
 }
 
-FTextHistory_StringTableEntry::FTextHistory_StringTableEntry(FTextHistory_StringTableEntry&& Other)
-	: FTextHistory(MoveTemp(Other))
-	, StringTableReferenceData(MoveTemp(Other.StringTableReferenceData))
+FTextId FTextHistory_StringTableEntry::GetTextId() const
 {
 	if (StringTableReferenceData)
 	{
-		StringTableReferenceData->SetRevisionPtr(&Revision);
+		return StringTableReferenceData->GetTextId();
 	}
-	Other.StringTableReferenceData.Reset();
+	return FTextId();
 }
 
-FTextHistory_StringTableEntry& FTextHistory_StringTableEntry::operator=(FTextHistory_StringTableEntry&& Other)
+FTextConstDisplayStringPtr FTextHistory_StringTableEntry::GetLocalizedString() const
 {
-	FTextHistory::operator=(MoveTemp(Other));
-	if (this != &Other)
+	return StringTableReferenceData ? StringTableReferenceData->ResolveDisplayString() : nullptr;
+}
+
+const FString& FTextHistory_StringTableEntry::GetSourceString() const
+{
+	FStringTableEntryConstPtr StringTableEntryPin = StringTableReferenceData ? StringTableReferenceData->ResolveStringTableEntry() : nullptr;
+	if (StringTableEntryPin.IsValid())
 	{
-		StringTableReferenceData = MoveTemp(Other.StringTableReferenceData);
-		if (StringTableReferenceData)
-		{
-			StringTableReferenceData->SetRevisionPtr(&Revision);
-		}
-		Other.StringTableReferenceData.Reset();
+		return StringTableEntryPin->GetSourceString();
 	}
-	return *this;
+	return FStringTableEntry::GetPlaceholderSourceString();
+}
+
+const FString& FTextHistory_StringTableEntry::GetDisplayString() const
+{
+	if (FTextLocalizationManager::IsDisplayStringSupportEnabled())
+	{
+		if (FTextConstDisplayStringPtr DisplayString = GetLocalizedString())
+		{
+			return *DisplayString;
+		}
+	}
+	return GetSourceString();
+}
+
+FString FTextHistory_StringTableEntry::BuildInvariantDisplayString() const
+{
+	return GetSourceString();
 }
 
 bool FTextHistory_StringTableEntry::IdenticalTo(const FTextHistory& Other, const ETextIdenticalModeFlags CompareModeFlags) const
@@ -2547,43 +2386,7 @@ bool FTextHistory_StringTableEntry::IdenticalTo(const FTextHistory& Other, const
 	return StringTableReferenceData->IsIdentical(*CastOther.StringTableReferenceData);
 }
 
-FString FTextHistory_StringTableEntry::BuildLocalizedDisplayString() const
-{
-	// This should never be called for string table entries (CanRebuildLocalizedDisplayString is false)
-	check(0);
-	return FString();
-}
-
-FString FTextHistory_StringTableEntry::BuildInvariantDisplayString() const
-{
-	return *GetSourceString();
-}
-
-const FString* FTextHistory_StringTableEntry::GetSourceString() const
-{
-	FStringTableEntryConstPtr StringTableEntryPin = StringTableReferenceData ? StringTableReferenceData->ResolveStringTableEntry() : nullptr;
-	if (StringTableEntryPin.IsValid())
-	{
-		return &StringTableEntryPin->GetSourceString();
-	}
-	return &FStringTableEntry::GetPlaceholderSourceString();
-}
-
-FTextDisplayStringRef FTextHistory_StringTableEntry::GetDisplayString() const
-{
-	FStringTableEntryConstPtr StringTableEntryPin = StringTableReferenceData ? StringTableReferenceData->ResolveStringTableEntry() : nullptr;
-	if (StringTableEntryPin.IsValid())
-	{
-		FTextDisplayStringPtr DisplayString = StringTableEntryPin->GetDisplayString();
-		if (DisplayString.IsValid())
-		{
-			return DisplayString.ToSharedRef();
-		}
-	}
-	return FStringTableEntry::GetPlaceholderDisplayString();
-}
-
-void FTextHistory_StringTableEntry::GetTableIdAndKey(FName& OutTableId, FString& OutKey) const
+void FTextHistory_StringTableEntry::GetTableIdAndKey(FName& OutTableId, FTextKey& OutKey) const
 {
 	if (StringTableReferenceData)
 	{
@@ -2595,38 +2398,30 @@ void FTextHistory_StringTableEntry::Serialize(FStructuredArchive::FRecord Record
 {
 	FArchive& BaseArchive = Record.GetUnderlyingArchive();
 
-	if (BaseArchive.IsSaving())
-	{
-		int8 HistoryType = (int8)ETextHistoryType::StringTableEntry;
-		Record << SA_VALUE(TEXT("HistoryType"), HistoryType);
-	}
-
 	if (BaseArchive.IsLoading())
 	{
-		// We will definitely need to do a rebuild later
-		Revision = 0;
-
 		FName TableId;
-		FString Key;
+		FTextKey Key;
 		Record << SA_VALUE(TEXT("TableId"), TableId);
-		Record << SA_VALUE(TEXT("Key"), Key);
+		Key.SerializeAsString(Record.EnterField(TEXT("Key")));
 
 		// String Table assets should already have been created via dependency loading when using the EDL (although they may not be fully loaded yet)
 		const bool bIsLoadingViaEDL = GEventDrivenLoaderEnabled && EVENT_DRIVEN_ASYNC_LOAD_ACTIVE_AT_RUNTIME && BaseArchive.GetLinker();
 		StringTableReferenceData = MakeShared<FStringTableReferenceData, ESPMode::ThreadSafe>();
-		StringTableReferenceData->Initialize(&Revision, TableId, MoveTemp(Key), bIsLoadingViaEDL ? EStringTableLoadingPolicy::Find : EStringTableLoadingPolicy::FindOrLoad);
+		StringTableReferenceData->Initialize(TableId, Key, bIsLoadingViaEDL ? EStringTableLoadingPolicy::Find : EStringTableLoadingPolicy::FindOrLoad);
+		MarkDisplayStringUpToDate();
 	}
 	else if (BaseArchive.IsSaving())
 	{
 		FName TableId;
-		FString Key;
+		FTextKey Key;
 		if (StringTableReferenceData)
 		{
 			StringTableReferenceData->GetTableIdAndKey(TableId, Key);
 		}
 
 		Record << SA_VALUE(TEXT("TableId"), TableId);
-		Record << SA_VALUE(TEXT("Key"), Key);
+		Key.SerializeAsString(Record.EnterField(TEXT("Key")));
 	}
 
 	// Collect string table asset references
@@ -2636,12 +2431,11 @@ void FTextHistory_StringTableEntry::Serialize(FStructuredArchive::FRecord Record
 	}
 }
 
-void FTextHistory_StringTableEntry::SerializeForDisplayString(FStructuredArchive::FRecord Record, FTextDisplayStringPtr& InOutDisplayString)
+void FTextHistory_StringTableEntry::UpdateDisplayString()
 {
-	if (Record.GetArchiveState().IsLoading())
+	if (StringTableReferenceData)
 	{
-		// We will definitely need to do a rebuild later
-		Revision = 0;
+		StringTableReferenceData->ResolveDisplayString(/*bForceRefresh*/true);
 	}
 }
 
@@ -2650,7 +2444,7 @@ bool FTextHistory_StringTableEntry::StaticShouldReadFromBuffer(const TCHAR* Buff
 	return TEXT_STRINGIFICATION_PEEK_MARKER(TextStringificationUtil::LocTableMarker);
 }
 
-const TCHAR* FTextHistory_StringTableEntry::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace, FTextDisplayStringPtr& OutDisplayString)
+const TCHAR* FTextHistory_StringTableEntry::ReadFromBuffer(const TCHAR* Buffer, const TCHAR* TextNamespace, const TCHAR* PackageNamespace)
 {
 #define LOC_DEFINE_REGION
 	if (TEXT_STRINGIFICATION_PEEK_MARKER(TextStringificationUtil::LocTableMarker))
@@ -2680,10 +2474,8 @@ const TCHAR* FTextHistory_StringTableEntry::ReadFromBuffer(const TCHAR* Buffer, 
 
 		// Prepare the string table reference
 		StringTableReferenceData = MakeShared<FStringTableReferenceData, ESPMode::ThreadSafe>();
-		StringTableReferenceData->Initialize(&Revision, TableId, MoveTemp(Key), EStringTableLoadingPolicy::FindOrLoad);
-
-		// We will definitely need to do a rebuild later
-		Revision = 0;
+		StringTableReferenceData->Initialize(TableId, MoveTemp(Key), EStringTableLoadingPolicy::FindOrLoad);
+		MarkDisplayStringUpToDate();
 
 		return Buffer;
 	}
@@ -2692,20 +2484,22 @@ const TCHAR* FTextHistory_StringTableEntry::ReadFromBuffer(const TCHAR* Buffer, 
 	return nullptr;
 }
 
-bool FTextHistory_StringTableEntry::WriteToBuffer(FString& Buffer, FTextDisplayStringPtr DisplayString, const bool bStripPackageNamespace) const
+bool FTextHistory_StringTableEntry::WriteToBuffer(FString& Buffer, const bool bStripPackageNamespace) const
 {
 	if (StringTableReferenceData)
 	{
 		FName TableId;
-		FString Key;
+		FTextKey Key;
 		StringTableReferenceData->GetTableIdAndKey(TableId, Key);
+
+		FString KeyStr = Key.GetChars();
 
 #define LOC_DEFINE_REGION
 		// Produces LOCTABLE("...", "...")
 		Buffer += TEXT("LOCTABLE(\"");
 		Buffer += TableId.ToString().ReplaceCharWithEscapedChar();
 		Buffer += TEXT("\", \"");
-		Buffer += Key.ReplaceCharWithEscapedChar();
+		Buffer += KeyStr.ReplaceCharWithEscapedChar();
 		Buffer += TEXT("\")");
 #undef LOC_DEFINE_REGION
 
@@ -2715,9 +2509,8 @@ bool FTextHistory_StringTableEntry::WriteToBuffer(FString& Buffer, FTextDisplayS
 	return false;
 }
 
-void FTextHistory_StringTableEntry::FStringTableReferenceData::Initialize(uint16* InRevisionPtr, FName InTableId, FString&& InKey, const EStringTableLoadingPolicy InLoadingPolicy)
+void FTextHistory_StringTableEntry::FStringTableReferenceData::Initialize(FName InTableId, FTextKey InKey, const EStringTableLoadingPolicy InLoadingPolicy)
 {
-	RevisionPtr = InRevisionPtr;
 	TableId = InTableId;
 	Key = MoveTemp(InKey);
 	FStringTableRedirects::RedirectTableIdAndKey(TableId, Key);
@@ -2726,14 +2519,14 @@ void FTextHistory_StringTableEntry::FStringTableReferenceData::Initialize(uint16
 	{
 		// No loading attempt
 		LoadingPhase = EStringTableLoadingPhase::Loaded;
-		ResolveStringTableEntry();
+		ResolveDisplayString();
 	}
 	else if (InLoadingPolicy == EStringTableLoadingPolicy::FindOrFullyLoad && IStringTableEngineBridge::CanFindOrLoadStringTableAsset())
 	{
 		// Forced synchronous load
 		LoadingPhase = EStringTableLoadingPhase::Loaded;
 		IStringTableEngineBridge::FullyLoadStringTableAsset(TableId);
-		ResolveStringTableEntry();
+		ResolveDisplayString();
 	}
 	else
 	{
@@ -2743,19 +2536,13 @@ void FTextHistory_StringTableEntry::FStringTableReferenceData::Initialize(uint16
 	}
 }
 
-void FTextHistory_StringTableEntry::FStringTableReferenceData::SetRevisionPtr(uint16* InRevisionPtr)
-{
-	FScopeLock ScopeLock(&DataCS);
-	RevisionPtr = InRevisionPtr;
-}
-
 bool FTextHistory_StringTableEntry::FStringTableReferenceData::IsIdentical(const FStringTableReferenceData& Other) const
 {
 	FScopeLock ScopeLock(&DataCS);
 	FScopeLock OtherScopeLock(&Other.DataCS);
 
 	return TableId == Other.TableId
-		&& Key.Equals(Other.Key, ESearchCase::CaseSensitive);
+		&& Key == Other.Key;
 }
 
 FName FTextHistory_StringTableEntry::FStringTableReferenceData::GetTableId() const
@@ -2764,17 +2551,26 @@ FName FTextHistory_StringTableEntry::FStringTableReferenceData::GetTableId() con
 	return TableId;
 }
 
-FString FTextHistory_StringTableEntry::FStringTableReferenceData::GetKey() const
+FTextKey FTextHistory_StringTableEntry::FStringTableReferenceData::GetKey() const
 {
 	FScopeLock ScopeLock(&DataCS);
 	return Key;
 }
 
-void FTextHistory_StringTableEntry::FStringTableReferenceData::GetTableIdAndKey(FName& OutTableId, FString& OutKey) const
+void FTextHistory_StringTableEntry::FStringTableReferenceData::GetTableIdAndKey(FName& OutTableId, FTextKey& OutKey) const
 {
 	FScopeLock ScopeLock(&DataCS);
 	OutTableId = TableId;
 	OutKey = Key;
+}
+
+FTextId FTextHistory_StringTableEntry::FStringTableReferenceData::GetTextId()
+{
+	if (FStringTableEntryConstPtr StringTableEntryPin = ResolveStringTableEntry())
+	{
+		return StringTableEntryPin->GetDisplayStringId();
+	}
+	return FTextId();
 }
 
 void FTextHistory_StringTableEntry::FStringTableReferenceData::CollectStringTableAssetReferences(FStructuredArchive::FRecord Record)
@@ -2784,12 +2580,13 @@ void FTextHistory_StringTableEntry::FStringTableReferenceData::CollectStringTabl
 		FScopeLock ScopeLock(&DataCS);
 
 		const FName OldTableId = TableId;
-		IStringTableEngineBridge::CollectStringTableAssetReferences(TableId, Record.EnterField(SA_FIELD_NAME(TEXT("AssetReferences"))));
+		IStringTableEngineBridge::CollectStringTableAssetReferences(TableId, Record.EnterField(TEXT("AssetReferences")));
 
 		if (TableId != OldTableId)
 		{
 			// This String Table asset was redirected, so we'll need to re-resolve the String Table entry later
 			StringTableEntry.Reset();
+			DisplayString.Reset();
 		}
 	}
 }
@@ -2810,6 +2607,7 @@ FStringTableEntryConstPtr FTextHistory_StringTableEntry::FStringTableReferenceDa
 		// Reset for the case it was disowned rather than became null
 		StringTableEntry.Reset();
 		StringTableEntryPin.Reset();
+		DisplayString.Reset();
 
 		if (LoadingPhase != EStringTableLoadingPhase::Loaded)
 		{
@@ -2837,6 +2635,18 @@ FStringTableEntryConstPtr FTextHistory_StringTableEntry::FStringTableReferenceDa
 	}
 
 	return StringTableEntryPin;
+}
+
+FTextConstDisplayStringPtr FTextHistory_StringTableEntry::FStringTableReferenceData::ResolveDisplayString(const bool bForceRefresh)
+{
+	FStringTableEntryConstPtr StringTableEntryPin = ResolveStringTableEntry();
+
+	if (StringTableEntryPin && (!DisplayString || bForceRefresh))
+	{
+		DisplayString = StringTableEntryPin->GetDisplayString();
+	}
+
+	return DisplayString;
 }
 
 void FTextHistory_StringTableEntry::FStringTableReferenceData::ConditionalBeginAssetLoad()
@@ -2878,13 +2688,7 @@ void FTextHistory_StringTableEntry::FStringTableReferenceData::ConditionalBeginA
 		}
 		This->LoadingPhase = EStringTableLoadingPhase::Loaded;
 
-		// We will definitely need to do a rebuild later
-		if (This->RevisionPtr)
-		{
-			*This->RevisionPtr = 0;
-		}
-
-		This->ResolveStringTableEntry();
+		This->ResolveDisplayString();
 	});
 }
 
@@ -2892,8 +2696,9 @@ void FTextHistory_StringTableEntry::FStringTableReferenceData::ConditionalBeginA
 ///////////////////////////////////////
 // FTextHistory_TextGenerator
 
-FTextHistory_TextGenerator::FTextHistory_TextGenerator(const TSharedRef<ITextGenerator>& InTextGenerator)
-	: TextGenerator(InTextGenerator)
+FTextHistory_TextGenerator::FTextHistory_TextGenerator(FString&& InDisplayString, const TSharedRef<ITextGenerator>& InTextGenerator)
+	: FTextHistory_Generated(MoveTemp(InDisplayString))
+	, TextGenerator(InTextGenerator)
 {
 }
 
@@ -2920,13 +2725,10 @@ FString FTextHistory_TextGenerator::BuildInvariantDisplayString() const
 
 void FTextHistory_TextGenerator::Serialize(FStructuredArchive::FRecord Record)
 {
-	FArchive& BaseArchive = Record.GetUnderlyingArchive();
-	if (BaseArchive.IsSaving())
-	{
-		int8 HistoryType = (int8)ETextHistoryType::TextGenerator;
-		Record << SA_VALUE(TEXT("HistoryType"), HistoryType);
-	}
+	FTextHistory_Generated::Serialize(Record);
 
+	FArchive& BaseArchive = Record.GetUnderlyingArchive();
+	
 	FName GeneratorTypeID = (BaseArchive.IsSaving() && TextGenerator)
 		? TextGenerator->GetTypeID()
 		: FName();
@@ -2962,6 +2764,8 @@ void FTextHistory_TextGenerator::Serialize(FStructuredArchive::FRecord Record)
 				}
 			}
 		}
+
+		MarkDisplayStringOutOfDate();
 	}
 	else if (BaseArchive.IsSaving())
 	{

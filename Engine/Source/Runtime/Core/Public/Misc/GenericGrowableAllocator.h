@@ -9,6 +9,7 @@
 #include "CoreMinimal.h"
 #include "HAL/LowLevelMemTracker.h"
 #include "Misc/ScopeLock.h"
+#include "ProfilingDebugging/MemoryTrace.h"
 #include "Stats/Stats.h"
 
 //////////////
@@ -20,7 +21,8 @@
 // - Can maybe just make virtuals in FGrowableAllocationBase ??
 /////////////
 
-#define ALLOCATION_HISTOGRAM
+#define ALLOCATION_HISTOGRAM			(!UE_BUILD_SHIPPING && !UE_BUILD_TEST) && 1
+#define ALLOCATION_HISTOGRAM_DETAILED	(!UE_BUILD_SHIPPING && !UE_BUILD_TEST) && 0
 
 struct FGrowableAllocationBase
 {
@@ -51,7 +53,7 @@ public:
 	 */
 	virtual uint64 GetWasteApproximation()
 	{
-		double Waste = ((double)TotalWaste / (double)TotalAllocs) * CurrentAllocs;
+		double Waste = (static_cast<double>(TotalWaste) / static_cast<double>(TotalAllocs)) * static_cast<double>(CurrentAllocs);
 		return (uint64)Waste;
 	}
 
@@ -119,6 +121,10 @@ public:
 	 */
 	virtual bool DoesChunkContainAllocation(const FGrowableAllocationBase* Allocation) = 0;
 
+	/**
+	 * Queries the implementation if the given address came from this chunk
+	 */
+	virtual bool DoesChunkContainAddress(const void* Address) = 0;
 
 
 	/**
@@ -128,6 +134,7 @@ public:
 		: MemoryType(Type)
 		, HeapSize(InSize)
 		, UsedMemorySize(0)
+		, MaxFreeEntrySize(MaxFreeEntrySizeDirty)
 		, CriticalSection(InCriticalSection)
 	{
 	}
@@ -138,6 +145,7 @@ public:
 		HeapSize = CreateInternalMemory(HeapSize);
 		// entire chunk is free
 		FreeList = new FFreeEntry(NULL, 0, HeapSize);
+		MaxFreeEntrySize = FreeList->BlockSize;
 	}
 
 	/**
@@ -161,8 +169,30 @@ public:
 	*/
 	bool CanFitEntry(uint32 Size, uint32 Alignment)
 	{
+		// Compute MaxFreeEntrySize if necessary (should only happen if this chunk was just allocated from)
+		if (MaxFreeEntrySize == MaxFreeEntrySizeDirty)
+		{
+			MaxFreeEntrySize = 0;
+			for (FFreeEntry* Entry = FreeList; Entry; Entry = Entry->Next)
+			{
+				MaxFreeEntrySize = FMath::Max(Entry->BlockSize, MaxFreeEntrySize);
+			}
+		}
+
+		// Return false if we trivially don't fit
+		if (Size > MaxFreeEntrySize)
+		{
+			return false;
+		}
+
+		// Return true if we trivially do fit
+		if (Size + Alignment - 1 <= MaxFreeEntrySize)
+		{
+			return true;
+		}
+
+		// Slow method - search the free entries for a free chunk
 		bool bResult = false;
-		// look for a good free chunk
 		for (FFreeEntry *Entry = FreeList; Entry; Entry = Entry->Next)
 		{
 			if (Entry->CanFit(Size, Alignment))
@@ -199,36 +229,50 @@ public:
 
 		// look for a good free chunk
 		FFreeEntry* Prev = NULL;
-		for (FFreeEntry *Entry = FreeList; Entry; Entry = Entry->Next)
+		FFreeEntry* FindEntry = NULL;
+
+		for (FFreeEntry* Entry = FreeList; Entry; Entry = Entry->Next)
 		{
 			if (Entry->CanFit(AlignedSize, Alignment))
 			{
-				// Use it, leaving over any unused space
-				UsedMemorySize += AlignedSize;
-				bool bDelete;
-				uint32 Padding;
-				uint32 Offset = Entry->Split(AlignedSize, Alignment, bDelete, Padding, MinAllocationSize);
-				if (bDelete)
-				{
-					FFreeEntry*& PrevRef = Prev ? Prev->Next : FreeList;
-					PrevRef = Entry->Next;
-					delete Entry;
-				}
-
-				FGrowableAllocationBase* Allocation = CreateAllocationStruct();
-				Allocation->Size = AlignedSize;
-				Allocation->Padding = Padding;
-				Allocation->Offset = Offset;
-#if !UE_BUILD_SHIPPING
-				Allocation->OwnerType = OwnerType;
-#endif
-				LLM(FLowLevelMemTracker::Get().OnLowLevelAlloc(ELLMTracker::Default, GetAddressForTracking(Offset), Size));
-
-				// let the implementation fill in any more
-				InitializeAllocationStruct(Allocation);
-				return Allocation;
+				FindEntry = Entry;
+				break;
 			}
 			Prev = Entry;
+		}
+
+		if (FindEntry != NULL)
+		{
+			if (FindEntry->BlockSize == MaxFreeEntrySize)
+			{
+				// We're probably about to just split our largest entry, so mark the max size as dirty to indicate it needs recomputing
+				MaxFreeEntrySize = MaxFreeEntrySizeDirty;
+			}
+			// Use it, leaving over any unused space
+			UsedMemorySize += AlignedSize;
+			bool bDelete;
+			uint32 Padding;
+			uint32 Offset = FindEntry->Split(AlignedSize, Alignment, bDelete, Padding, MinAllocationSize);
+			if (bDelete)
+			{
+				FFreeEntry*& PrevRef = Prev ? Prev->Next : FreeList;
+				PrevRef = FindEntry->Next;
+				delete FindEntry;
+			}
+
+			FGrowableAllocationBase* Allocation = CreateAllocationStruct();
+			Allocation->Size = AlignedSize;
+			Allocation->Padding = Padding;
+			Allocation->Offset = Offset;
+#if !UE_BUILD_SHIPPING
+			Allocation->OwnerType = OwnerType;
+#endif
+			LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelAlloc(ELLMTracker::Default, GetAddressForTracking(Offset), Size));
+			MemoryTrace_Alloc(uint64(GetAddressForTracking(Offset)), Size, Alignment, EMemoryTraceRootHeap::SystemMemory);
+
+			// let the implementation fill in any more
+			InitializeAllocationStruct(Allocation);
+			return Allocation;
 		}
 
 		// if no suitable blocks were found, we must fail
@@ -246,7 +290,8 @@ public:
 		uint64 AllocationSize = Padding + Size;
 		uint32 Offset = Memory->Offset;
 
-		LLM(FLowLevelMemTracker::Get().OnLowLevelFree(ELLMTracker::Default, GetAddressForTracking(Offset)));
+		LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelFree(ELLMTracker::Default, GetAddressForTracking(Offset)));
+		MemoryTrace_Free(uint64(GetAddressForTracking(Offset)), EMemoryTraceRootHeap::SystemMemory);
 
 		// we are now done with the Allocation object
 		DestroyAllocationStruct(Memory);
@@ -254,7 +299,7 @@ public:
 		UsedMemorySize -= Size;
 		CurrentAllocs--;
 
-		// Search for where a place to insert a new free entry.
+		// Search for a place to insert a new free entry
 		FFreeEntry* Prev = NULL;
 		FFreeEntry* Entry = FreeList;
 		while (Entry && Offset > Entry->Location)
@@ -267,15 +312,20 @@ public:
 		if (Entry && (Offset + Size) == Entry->Location)
 		{
 			// Join with chunk
-			Entry->Location -= AllocationSize;
-			Entry->BlockSize += AllocationSize;
+			Entry->Location -= uint32(AllocationSize);
+			Entry->BlockSize += uint32(AllocationSize);
 
 			// Can we join the two entries?
 			if (Prev && (Prev->Location + Prev->BlockSize) == Entry->Location)
 			{
 				Prev->BlockSize += Entry->BlockSize;
 				Prev->Next = Entry->Next;
+				MaxFreeEntrySize = FMath::Max(MaxFreeEntrySize, Prev->BlockSize);
 				delete Entry;
+			}
+			else
+			{
+				MaxFreeEntrySize = FMath::Max(MaxFreeEntrySize, Entry->BlockSize);
 			}
 			return true;
 		}
@@ -284,7 +334,7 @@ public:
 		if (Prev && (Prev->Location + Prev->BlockSize + Padding) == Offset)
 		{
 			// Join with chunk
-			Prev->BlockSize += AllocationSize;
+			Prev->BlockSize += uint32(AllocationSize);
 
 			// Can we join the two entries?
 			if (Entry && (Prev->Location + Prev->BlockSize) == Entry->Location)
@@ -293,13 +343,15 @@ public:
 				Prev->Next = Entry->Next;
 				delete Entry;
 			}
+			MaxFreeEntrySize = FMath::Max(MaxFreeEntrySize, Prev->BlockSize);
 			return true;
 		}
 
 		// Insert a new entry.
-		FFreeEntry* NewFree = new FFreeEntry(Entry, Offset - Padding, AllocationSize);
+		FFreeEntry* NewFree = new FFreeEntry(Entry, uint32(Offset - Padding), AllocationSize);
 		FFreeEntry*& PrevRef = Prev ? Prev->Next : FreeList;
 		PrevRef = NewFree;
+		MaxFreeEntrySize = FMath::Max(MaxFreeEntrySize, NewFree->BlockSize);
 		return true;
 	}
 
@@ -359,7 +411,7 @@ private:
 		/** Constructor */
 		FFreeEntry(FFreeEntry *NextEntry, uint32 InLocation, uint64 InSize)
 			: Location(InLocation)
-			, BlockSize(InSize)
+			, BlockSize(uint32(InSize))
 			, Next(NextEntry)
 		{
 		}
@@ -403,8 +455,8 @@ private:
 			if (BlockSize - AllocationSize >= MinSize)
 			{
 				// update this free entry to just point to what's left after using the UsedSize
-				Location += AllocationSize;
-				BlockSize -= AllocationSize;
+				Location += uint32(AllocationSize);
+				BlockSize -= uint32(AllocationSize);
 				bDelete = false;
 			}
 			// if no more room, then just remove this entry from the list of free items
@@ -440,11 +492,16 @@ public:
 	/** Size of used memory */
 	uint64 UsedMemorySize;
 
+	/** Size of the largest free entry (will be MaxFreeEntrySizeDirty if unknown) */
+	uint32 MaxFreeEntrySize;
+
 	/** List of free blocks */
 	FFreeEntry* FreeList;
 
 	/** Shared critical section */
 	FCriticalSection* CriticalSection;
+
+	static const uint32 MaxFreeEntrySizeDirty = 0xffffffff;
 };
 
 
@@ -553,7 +610,7 @@ public:
 			return nullptr;
 		}
 
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#if ALLOCATION_HISTOGRAM
 		TotalAllocationsHistogram.FindOrAdd(AlignedSize)++;
 		PeakAllocationsHistogram.FindOrAdd(AlignedSize)++;
 
@@ -562,12 +619,12 @@ public:
 
 		TypeAllocInfo.Counts.Allocations++;
 		TypeAllocInfo.TotalAllocated += Result->Size;
-#ifdef ALLOCATION_HISTOGRAM
+#if ALLOCATION_HISTOGRAM_DETAILED
 		TypeAllocInfo.AllocationHistogram.FindOrAdd(Result->Size).Allocations++;
 #endif
-#endif // #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#endif // ALLOCATION_HISTOGRAM 
 
-#if !UE_BUILD_SHIPPING
+#if STATS
 		if (OwnerTypeToStatIdMap)
 		{
 			INC_MEMORY_STAT_BY_FName(OwnerTypeToStatIdMap[Result->OwnerType], Result->Size);
@@ -593,7 +650,7 @@ public:
 			ChunkAllocatorType* Chunk = AllocChunks[ChunkIndex];
 			if (Chunk && Chunk->DoesChunkContainAllocation(Memory))
 			{
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#if ALLOCATION_HISTOGRAM
 				PeakAllocationsHistogram[Memory->Size]--;
 
 				// untrack per type allocation info
@@ -601,12 +658,12 @@ public:
 
 				TypeAllocInfo.TotalAllocated -= Memory->Size;
 				TypeAllocInfo.Counts.Frees++;
-#ifdef ALLOCATION_HISTOGRAM
+#if ALLOCATION_HISTOGRAM_DETAILED
 				TypeAllocInfo.AllocationHistogram[Memory->Size].Frees++;
-#endif
-#endif // !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#endif 
+#endif // ALLOCATION_HISTOGRAM
 
-#if !UE_BUILD_SHIPPING
+#if STATS
 				if (OwnerTypeToStatIdMap)
 				{
 					DEC_MEMORY_STAT_BY_FName(OwnerTypeToStatIdMap[Memory->OwnerType], Memory->Size);
@@ -656,6 +713,23 @@ public:
 		}
 	}
 
+	bool DoesAllocatorContainAddress(const void* Address)
+	{
+		// multi-thread protection
+		FScopeLock ScopeLock(&CriticalSection);
+
+		// loop through the chunks, query each one to see if they contain the address
+		for (int32 ChunkIndex = 0; ChunkIndex < AllocChunks.Num(); ChunkIndex++)
+		{
+			ChunkAllocatorType* Chunk = AllocChunks[ChunkIndex];
+			if (Chunk && Chunk->DoesChunkContainAddress(Address))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
 	void ShowAllocationInfo()
 	{
  		FPlatformMisc::LowLevelOutputDebugStringf(TEXT("   Allocator has %d chunks\n"), AllocChunks.Num());
@@ -668,18 +742,19 @@ public:
 		// multi-thread protection
 		FScopeLock ScopeLock(&CriticalSection);
 
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#if ALLOCATION_HISTOGRAM
 		FPlatformMisc::LowLevelOutputDebugStringf(TEXT("Total Allocations Histogram:\n"));
 		for (auto It = TotalAllocationsHistogram.CreateIterator(); It; ++It)
 		{
 			FPlatformMisc::LowLevelOutputDebugStringf(TEXT(" %d, %d\n"), It.Key(), It.Value());
 		}
-#endif // !(UE_BUILD_SHIPPING || UE_BUILD_TEST
+#endif // ALLOCATION_HISTOGRAM
 
 		int32 NumChunks = 0;
 		// pass off to individual alloc chunks
 		for (int32 ChunkIndex = 0; ChunkIndex < AllocChunks.Num(); ChunkIndex++)
 		{
+			FPlatformMisc::LowLevelOutputDebugStringf(TEXT("\n-----------------\nChunk %d\n"),ChunkIndex);
 			ChunkAllocatorType* Chunk = AllocChunks[ChunkIndex];
 			if (Chunk)
 			{
@@ -690,7 +765,7 @@ public:
 
 	void DumpMemoryInfo()
 	{
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#if ALLOCATION_HISTOGRAM
 		// we use LowLevel here because we are usually dumping this out while 
 		for (auto InfoIt = PerTypeAllocationInfo.CreateConstIterator(); InfoIt; ++InfoIt)
 		{
@@ -704,14 +779,14 @@ public:
 			{
 				FPlatformMisc::LowLevelOutputDebugStringf(TEXT("      'OwnerType %d': %lld Allocs: %d Frees: %d\n"), InfoIt.Key(), Info.TotalAllocated, Info.Counts.Allocations, Info.Counts.Frees);
 			}
-#ifdef ALLOCATION_HISTOGRAM
+#if ALLOCATION_HISTOGRAM_DETAILED
 			for (auto HistoIt = Info.AllocationHistogram.CreateConstIterator(); HistoIt; ++HistoIt)
 			{
 				FPlatformMisc::LowLevelOutputDebugStringf(TEXT("           %d, %lld, %lld\n"), HistoIt.Key(), HistoIt.Value().Allocations, HistoIt.Value().Frees);
 			}
 #endif
 		}
-#endif // !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#endif // ALLOCATION_HISTOGRAM
 	}
 
 private:
@@ -780,8 +855,8 @@ private:
 	 void OutOfMemory(uint32 Size)
 	 {
 #if !UE_BUILD_SHIPPING
-		 FPlatformMisc::LowLevelOutputDebugStringf(TEXT("FGrowableAllocator: OOM allocating %dbytes %fMB"), Size, Size / 1024.0f / 1024.0f);
-		 UE_LOG(LogCore, Fatal, TEXT("FGrowableAllocator: OOM allocating %dbytes %fMB"), Size, Size / 1024.0f / 1024.0f);
+		 FPlatformMisc::LowLevelOutputDebugStringf(TEXT("FGrowableAllocator: OOM allocating %dbytes %fMB"), Size, static_cast<float>(Size) / 1024.0f / 1024.0f);
+		 UE_LOG(LogCore, Fatal, TEXT("FGrowableAllocator: OOM allocating %dbytes %fMB"), Size, static_cast<float>(Size) / 1024.0f / 1024.0f);
 #endif
 	 }
 
@@ -813,7 +888,7 @@ private:
 	 // a critical section used to coordinate all access in this instance of the allocator and it's chunks
 	 FCriticalSection CriticalSection;
 
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#if ALLOCATION_HISTOGRAM
 	 struct AllocFreeCounts
 	 {
 		 uint32 Allocations;
@@ -822,7 +897,7 @@ private:
 	 struct AllocationInfo
 	 {
 		 uint64 TotalAllocated;
-#ifdef ALLOCATION_HISTOGRAM
+#if ALLOCATION_HISTOGRAM_DETAILED
 		 TMap<uint32, AllocFreeCounts> AllocationHistogram;
 #endif
 		 AllocFreeCounts Counts;
@@ -833,7 +908,6 @@ private:
 	 TMap<uint64, uint32> TotalAllocationsHistogram;
 	 TMap<uint64, uint32> OutstandingAllocationsHistogram;
 	 TMap<uint64, uint32> PeakAllocationsHistogram;
-#endif // !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
-
+#endif // ALLOCATION_HISTOGRAM
 };
 

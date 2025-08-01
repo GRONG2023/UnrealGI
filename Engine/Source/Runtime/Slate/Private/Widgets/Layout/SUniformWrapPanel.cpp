@@ -3,39 +3,57 @@
 #include "Widgets/Layout/SUniformWrapPanel.h"
 #include "Layout/LayoutUtils.h"
 
+SLATE_IMPLEMENT_WIDGET(SUniformWrapPanel)
+void SUniformWrapPanel::PrivateRegisterAttributes(FSlateAttributeInitializer& AttributeInitializer)
+{
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION(AttributeInitializer, SlotPadding, EInvalidateWidgetReason::Layout);
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION(AttributeInitializer, MinDesiredSlotWidth, EInvalidateWidgetReason::Layout);
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION(AttributeInitializer, MinDesiredSlotHeight, EInvalidateWidgetReason::Layout);
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION(AttributeInitializer, MaxDesiredSlotWidth, EInvalidateWidgetReason::Layout);
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION(AttributeInitializer, NumColumnsOverride, EInvalidateWidgetReason::Layout);
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION(AttributeInitializer, MaxDesiredSlotHeight, EInvalidateWidgetReason::Layout);
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION(AttributeInitializer, HAlign, EInvalidateWidgetReason::Paint);
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION(AttributeInitializer, EvenRowDistribution, EInvalidateWidgetReason::Paint);
+}
+
 SUniformWrapPanel::SUniformWrapPanel()
-: Children(this)
-, HAlign(EHorizontalAlignment::HAlign_Left)
-, EvenRowDistribution(false)
+	: Children(this)
+	, SlotPadding(*this, FMargin(0.0f))
+	, NumColumnsOverride(*this, 0)
+	, MinDesiredSlotWidth(*this, 0.f)
+	, MinDesiredSlotHeight(*this, 0.f)
+	, MaxDesiredSlotWidth(*this, FLT_MAX)
+	, MaxDesiredSlotHeight(*this, FLT_MAX)
+	, HAlign(*this, EHorizontalAlignment::HAlign_Left)
+	, EvenRowDistribution(*this, false)
 {
 }
 
 void SUniformWrapPanel::Construct( const FArguments& InArgs )
 {
-	SlotPadding = InArgs._SlotPadding;
+	SlotPadding.Assign(*this, InArgs._SlotPadding);
 	NumColumns = 0;
 	NumRows = 0;
-	MinDesiredSlotWidth = InArgs._MinDesiredSlotWidth.Get();
-	MinDesiredSlotHeight = InArgs._MinDesiredSlotHeight.Get();
-	EvenRowDistribution =  InArgs._EvenRowDistribution.Get();
-	HAlign = InArgs._HAlign.Get();
+	NumVisibleChildren = 0;
+	MinDesiredSlotWidth.Assign(*this, InArgs._MinDesiredSlotWidth);
+	MinDesiredSlotHeight.Assign(*this, InArgs._MinDesiredSlotHeight);
+	MaxDesiredSlotWidth.Assign(*this, InArgs._MaxDesiredSlotWidth);
+	NumColumnsOverride.Assign(*this, InArgs._NumColumnsOverride);
+	MaxDesiredSlotHeight.Assign(*this, InArgs._MaxDesiredSlotHeight);
+	HAlign.Assign(*this, InArgs._HAlign);
+	EvenRowDistribution.Assign(*this, InArgs._EvenRowDistribution);
 
-	Children.Reserve( InArgs.Slots.Num() );
-	for (int32 ChildIndex=0; ChildIndex < InArgs.Slots.Num(); ChildIndex++)
-	{
-		FSlot* ChildSlot = InArgs.Slots[ChildIndex];
-		Children.Add( ChildSlot );
-	}
+	Children.AddSlots(MoveTemp(const_cast<TArray<FSlot::FSlotArguments>&>(InArgs._Slots)));
 }
 
 void SUniformWrapPanel::OnArrangeChildren( const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren ) const
 {
-
 	if ( Children.Num() > 0)
 	{
-
 		FVector2D CellSize = ComputeUniformCellSize();
-		NumColumns = FMath::Max(1, FMath::Min(NumVisibleChildren, FMath::FloorToInt( AllottedGeometry.GetLocalSize().X / CellSize.X )));
+		NumColumns = NumColumnsOverride.Get() != 0 ?
+				NumColumnsOverride.Get() :
+		FMath::Max(1, FMath::Min(NumVisibleChildren, FMath::FloorToInt( AllottedGeometry.GetLocalSize().X / CellSize.X )));
 		NumRows = FMath::CeilToInt ( (float) NumVisibleChildren / (float) NumColumns );
 
 		// If we have to have N rows, try to distribute the items across the rows evenly
@@ -84,7 +102,7 @@ void SUniformWrapPanel::OnArrangeChildren( const FGeometry& AllottedGeometry, FA
 
 				if (row == (NumRows - 1))
 				{
-					float NumLastRowColumns = NumVisibleChildren % AdjNumColumns != 0 ? NumVisibleChildren % AdjNumColumns : AdjNumColumns;
+					int32 NumLastRowColumns = (NumVisibleChildren % AdjNumColumns != 0) ? NumVisibleChildren % AdjNumColumns : AdjNumColumns;
 					if (HAlign.Get() == HAlign_Right)
 					{
 						LeftSlop = FMath::FloorToFloat(AllottedGeometry.GetLocalSize().X - (CellSize.X * NumLastRowColumns));
@@ -114,6 +132,9 @@ FVector2D SUniformWrapPanel::ComputeUniformCellSize() const
 	
 	const float CachedMinDesiredSlotWidth = MinDesiredSlotWidth.Get();
 	const float CachedMinDesiredSlotHeight = MinDesiredSlotHeight.Get();
+
+	const float CachedMaxDesiredSlotWidth = MaxDesiredSlotWidth.Get();
+	const float CachedMaxDesiredSlotHeight = MaxDesiredSlotHeight.Get();
 	
 	NumColumns = 0;
 	NumRows = 0;
@@ -135,8 +156,10 @@ FVector2D SUniformWrapPanel::ComputeUniformCellSize() const
 
 				MaxChildDesiredSize.X = FMath::Max( MaxChildDesiredSize.X, ChildDesiredSize.X );
 				MaxChildDesiredSize.Y = FMath::Max( MaxChildDesiredSize.Y, ChildDesiredSize.Y );
-			}
 
+				MaxChildDesiredSize.X = FMath::Min( MaxChildDesiredSize.X, CachedMaxDesiredSlotWidth);
+				MaxChildDesiredSize.Y = FMath::Min( MaxChildDesiredSize.Y, CachedMaxDesiredSlotHeight);
+			}
 		}
 	}
 
@@ -149,21 +172,25 @@ FVector2D SUniformWrapPanel::ComputeDesiredSize( float ) const
 
 	if (NumVisibleChildren > 0)
 	{
-		// Try to use the currente geometry .  If the preferred width or geometry isn't avaialble
+		// Try to use the current geometry. If the preferred width or geometry isn't available
 		// then try to make a square.
 		const FVector2D& LocalSize = GetTickSpaceGeometry().GetLocalSize();
 		if (!LocalSize.IsZero()) 
 		{
-			NumColumns = FMath::FloorToInt( LocalSize.X / MaxChildDesiredSize.X );
+			NumColumns = NumColumnsOverride.Get() != 0 ? NumColumnsOverride.Get() : 
+				FMath::FloorToInt(LocalSize.X / MaxChildDesiredSize.X);
 		}
 		else 
 		{
-			NumColumns = FMath::CeilToInt(FMath::Sqrt((float)NumVisibleChildren));
+			NumColumns = NumColumnsOverride.Get() != 0 ? NumColumnsOverride.Get() :
+			    FMath::CeilToInt(FMath::Sqrt((float)NumVisibleChildren));
 		}
 
-		NumRows = FMath::CeilToInt ( (float) NumVisibleChildren / (float) NumColumns );
-
-		return FVector2D( NumColumns*MaxChildDesiredSize.X, NumRows*MaxChildDesiredSize.Y );
+		if (NumColumns > 0)
+		{
+			NumRows = FMath::CeilToInt((float)NumVisibleChildren / (float)NumColumns);
+			return FVector2D(NumColumns * MaxChildDesiredSize.X, NumRows * MaxChildDesiredSize.Y);
+		}
 	}
 
 	return FVector2D::ZeroVector;
@@ -176,50 +203,52 @@ FChildren* SUniformWrapPanel::GetChildren()
 
 void SUniformWrapPanel::SetSlotPadding(TAttribute<FMargin> InSlotPadding)
 {
-	SlotPadding = InSlotPadding;
+	SlotPadding.Assign(*this, MoveTemp(InSlotPadding));
 }
 
 void SUniformWrapPanel::SetMinDesiredSlotWidth(TAttribute<float> InMinDesiredSlotWidth)
 {
-	MinDesiredSlotWidth = InMinDesiredSlotWidth;
+	MinDesiredSlotWidth.Assign(*this, MoveTemp(InMinDesiredSlotWidth));
 }
 
 void SUniformWrapPanel::SetMinDesiredSlotHeight(TAttribute<float> InMinDesiredSlotHeight)
 {
-	MinDesiredSlotHeight = InMinDesiredSlotHeight;
+	MinDesiredSlotHeight.Assign(*this, MoveTemp(InMinDesiredSlotHeight));
+}
+
+void SUniformWrapPanel::SetMaxDesiredSlotWidth(TAttribute<float> InMaxDesiredSlotWidth)
+{
+	MaxDesiredSlotWidth.Assign(*this, MoveTemp(InMaxDesiredSlotWidth));
+}
+
+void SUniformWrapPanel::SetNumColumnsOverride(TAttribute<int32> InNumColumnsOverride)
+{
+	NumColumnsOverride.Assign(*this, MoveTemp(InNumColumnsOverride));
+}
+
+void SUniformWrapPanel::SetMaxDesiredSlotHeight(TAttribute<float> InMaxDesiredSlotHeight)
+{
+	MaxDesiredSlotHeight.Assign(*this, MoveTemp(InMaxDesiredSlotHeight));
 }
 
 void SUniformWrapPanel::SetHorizontalAlignment(TAttribute<EHorizontalAlignment> InHAlignment)
 {
-	HAlign = InHAlignment;	
+	HAlign.Assign(*this, MoveTemp(InHAlignment));
 }
 
 void SUniformWrapPanel::SetEvenRowDistribution(TAttribute<bool> InEvenRowDistribution)
 {
-	EvenRowDistribution = InEvenRowDistribution;
+	EvenRowDistribution.Assign(*this, MoveTemp(InEvenRowDistribution));
 }
 
-SUniformWrapPanel::FSlot& SUniformWrapPanel::AddSlot()
+SUniformWrapPanel::FScopedWidgetSlotArguments SUniformWrapPanel::AddSlot()
 {
-	FSlot& NewSlot = *(new FSlot());
-
-	Children.Add( &NewSlot );
-
-	return NewSlot;
+	return FScopedWidgetSlotArguments{ MakeUnique<FSlot>(), this->Children, INDEX_NONE };
 }
 
 bool SUniformWrapPanel::RemoveSlot( const TSharedRef<SWidget>& SlotWidget )
 {
-	for (int32 SlotIdx = 0; SlotIdx < Children.Num(); ++SlotIdx)
-	{
-		if ( SlotWidget == Children[SlotIdx].GetWidget() )
-		{
-			Children.RemoveAt(SlotIdx);
-			return true;
-		}
-	}
-	
-	return false;
+	return Children.Remove(SlotWidget) != INDEX_NONE;
 }
 
 void SUniformWrapPanel::ClearChildren()

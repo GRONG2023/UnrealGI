@@ -12,46 +12,52 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogTransform, Log, All);
 
-// FTransform identity
-// @Note: Do not reference FVector::ZeroVector or FVector::OneVector
-// because they're not initialized yet, it will come as 0 vector
-const FTransform FTransform::Identity(FQuat(0.f,0.f,0.f,1.f), FVector(0.f), FVector(1.f));
+namespace UE
+{
+namespace Math
+{
 
+template<> const FTransform3f FTransform3f::Identity(FQuat4f(0.f, 0.f, 0.f, 1.f), FVector3f(0.f), FVector3f(1.f));
+template<> const FTransform3d FTransform3d::Identity(FQuat4d(0.0, 0.0, 0.0, 1.0), FVector3d(0.0), FVector3d(1.0));
 
-// Replacement of Inverse of FMatrix
+// Replacement of Inverse of TMatrix<T>
 
 /**
 * Does a debugf of the contents of this BoneAtom.
 */
-void FTransform::DebugPrint() const
+template<typename T>
+void TTransform<T>::DebugPrint() const
 {
 	UE_LOG(LogTransform, Log, TEXT("%s"), *ToHumanReadableString());
 }
 
-FString FTransform::ToHumanReadableString() const
+template<typename T>
+FString TTransform<T>::ToHumanReadableString() const
 {
-	FRotator R(GetRotation());
-	FVector T(GetTranslation());
-	FVector S(GetScale3D());
+	TRotator<T> R(GetRotation());
+	TVector<T> TT(GetTranslation());
+	TVector<T> S(GetScale3D());
 
 	FString Output = FString::Printf(TEXT("Rotation: Pitch %f Yaw %f Roll %f\r\n"), R.Pitch, R.Yaw, R.Roll);
-	Output += FString::Printf(TEXT("Translation: %f %f %f\r\n"), T.X, T.Y, T.Z);
+	Output += FString::Printf(TEXT("Translation: %f %f %f\r\n"), TT.X, TT.Y, TT.Z);
 	Output += FString::Printf(TEXT("Scale3D: %f %f %f\r\n"), S.X, S.Y, S.Z);
 
 	return Output;
 }
 
 
-FString FTransform::ToString() const
+template<typename T>
+FString TTransform<T>::ToString() const
 {
-	const FRotator R(Rotator());
-	const FVector T(GetTranslation());
-	const FVector S(GetScale3D());
+	const TRotator<T> R(Rotator());
+	const TVector<T> TT(GetTranslation());
+	const TVector<T> S(GetScale3D());
 
-	return FString::Printf(TEXT("%f,%f,%f|%f,%f,%f|%f,%f,%f"), T.X, T.Y, T.Z, R.Pitch, R.Yaw, R.Roll, S.X, S.Y, S.Z);
+	return FString::Printf(TEXT("%f,%f,%f|%f,%f,%f|%f,%f,%f"), TT.X, TT.Y, TT.Z, R.Pitch, R.Yaw, R.Roll, S.X, S.Y, S.Z);
 }
 
-bool FTransform::InitFromString( const FString& Source )
+template<typename T>
+bool TTransform<T>::InitFromString( const FString& Source )
 {
 	TArray<FString> ComponentStrings;
 	Source.ParseIntoArray(ComponentStrings, TEXT("|"), true);
@@ -62,33 +68,34 @@ bool FTransform::InitFromString( const FString& Source )
 	}
 
 	// Translation
-	FVector ParsedTranslation = FVector::ZeroVector;
+	TVector<T> ParsedTranslation = TVector<T>::ZeroVector;
 	if( !FDefaultValueHelper::ParseVector(ComponentStrings[0], ParsedTranslation) )
 	{
 		return false;
 	}
 
 	// Rotation
-	FRotator ParsedRotation = FRotator::ZeroRotator;
+	TRotator<T> ParsedRotation = TRotator<T>::ZeroRotator;
 	if( !FDefaultValueHelper::ParseRotator(ComponentStrings[1], ParsedRotation) )
 	{
 		return false;
 	}
 
 	// Scale
-	FVector ParsedScale = FVector::OneVector;
+	TVector<T> ParsedScale = TVector<T>::OneVector;
 	if( !FDefaultValueHelper::ParseVector(ComponentStrings[2], ParsedScale) )
 	{
 		return false;
 	}
 
-	SetComponents(FQuat(ParsedRotation), ParsedTranslation, ParsedScale);
+	SetComponents(TQuat<T>(ParsedRotation), ParsedTranslation, ParsedScale);
 
 	return true;
 }
 
 #define DEBUG_INVERSE_TRANSFORM 0
-FTransform FTransform::GetRelativeTransformReverse(const FTransform& Other) const
+template<typename T>
+TTransform<T> TTransform<T>::GetRelativeTransformReverse(const TTransform<T>& Other) const
 {
 	// A (-1) * B = VQS(B)(VQS (A)(-1))
 	// 
@@ -96,9 +103,9 @@ FTransform FTransform::GetRelativeTransformReverse(const FTransform& Other) cons
 	// Rotation = Q(B) * Q(A)(-1)
 	// Translation = T(B)-S(B)/S(A) *[Q(B)*Q(A)(-1)*T(A)*Q(A)*Q(B)(-1)]
 	// where A = this, and B = Other
-	FTransform Result;
+	TTransform<T> Result;
 
-	FVector SafeRecipScale3D = GetSafeScaleReciprocal(Scale3D);
+	TVector<T> SafeRecipScale3D = GetSafeScaleReciprocal(Scale3D);
 	Result.Scale3D = Other.Scale3D*SafeRecipScale3D;	
 
 	Result.Rotation = Other.Rotation*Rotation.Inverse();
@@ -106,8 +113,8 @@ FTransform FTransform::GetRelativeTransformReverse(const FTransform& Other) cons
 	Result.Translation = Other.Translation - Result.Scale3D * ( Result.Rotation * Translation );
 
 #if DEBUG_INVERSE_TRANSFORM
-	FMatrix AM = ToMatrixWithScale();
-	FMatrix BM = Other.ToMatrixWithScale();
+	TMatrix<T> AM = ToMatrixWithScale();
+	TMatrix<T> BM = Other.ToMatrixWithScale();
 
 	Result.DebugEqualMatrix(AM.InverseFast() *  BM);
 #endif
@@ -117,9 +124,10 @@ FTransform FTransform::GetRelativeTransformReverse(const FTransform& Other) cons
 
 /**
  * Set current transform and the relative to ParentTransform.
- * Equates to This = This->GetRelativeTransform(Parent), but saves the intermediate FTransform storage and copy.
+ * Equates to This = This->GetRelativeTransform(Parent), but saves the intermediate TTransform<T> storage and copy.
  */
-void FTransform::SetToRelativeTransform(const FTransform& ParentTransform)
+template<typename T>
+void TTransform<T>::SetToRelativeTransform(const TTransform<T>& ParentTransform)
 {
 	// A * B(-1) = VQS(B)(-1) (VQS (A))
 	// 
@@ -128,12 +136,12 @@ void FTransform::SetToRelativeTransform(const FTransform& ParentTransform)
 	// Translation = 1/S(B) *[Q(B)(-1)*(T(A)-T(B))*Q(B)]
 	// where A = this, B = Other
 #if DEBUG_INVERSE_TRANSFORM
- 	FMatrix AM = ToMatrixWithScale();
- 	FMatrix BM = ParentTransform.ToMatrixWithScale();
+ 	TMatrix<T> AM = ToMatrixWithScale();
+ 	TMatrix<T> BM = ParentTransform.ToMatrixWithScale();
 #endif
 
-	const FVector SafeRecipScale3D = GetSafeScaleReciprocal(ParentTransform.Scale3D, SMALL_NUMBER);
-	const FQuat InverseRot = ParentTransform.Rotation.Inverse();
+	const TVector<T> SafeRecipScale3D = GetSafeScaleReciprocal(ParentTransform.Scale3D, UE_SMALL_NUMBER);
+	const TQuat<T> InverseRot = ParentTransform.Rotation.Inverse();
 
 	Scale3D *= SafeRecipScale3D;	
 	Translation = (InverseRot * (Translation - ParentTransform.Translation)) * SafeRecipScale3D;
@@ -144,19 +152,21 @@ void FTransform::SetToRelativeTransform(const FTransform& ParentTransform)
 #endif
 }
 
-void FTransform::GetRelativeTransformUsingMatrixWithScale(FTransform* OutTransform, const FTransform* Base, const FTransform* Relative)
+template<typename T>
+void TTransform<T>::GetRelativeTransformUsingMatrixWithScale(TTransform<T>* OutTransform, const TTransform<T>* Base, const TTransform<T>* Relative)
 {
 	// the goal of using M is to get the correct orientation
 	// but for translation, we still need scale
-	FMatrix AM = Base->ToMatrixWithScale();
-	FMatrix BM = Relative->ToMatrixWithScale();
+	TMatrix<T> AM = Base->ToMatrixWithScale();
+	TMatrix<T> BM = Relative->ToMatrixWithScale();
 	// get combined scale
-	FVector SafeRecipScale3D = GetSafeScaleReciprocal(Relative->Scale3D, SMALL_NUMBER);
-	FVector DesiredScale3D = Base->Scale3D*SafeRecipScale3D;
+	TVector<T> SafeRecipScale3D = GetSafeScaleReciprocal(Relative->Scale3D, UE_SMALL_NUMBER);
+	TVector<T> DesiredScale3D = Base->Scale3D*SafeRecipScale3D;
 	ConstructTransformFromMatrixWithDesiredScale(AM, BM.Inverse(), DesiredScale3D, *OutTransform);
 }
 
-FTransform FTransform::GetRelativeTransform(const FTransform& Other) const
+template<typename T>
+TTransform<T> TTransform<T>::GetRelativeTransform(const TTransform<T>& Other) const
 {
 	// A * B(-1) = VQS(B)(-1) (VQS (A))
 	// 
@@ -164,7 +174,7 @@ FTransform FTransform::GetRelativeTransform(const FTransform& Other) const
 	// Rotation = Q(B)(-1) * Q(A)
 	// Translation = 1/S(B) *[Q(B)(-1)*(T(A)-T(B))*Q(B)]
 	// where A = this, B = Other
-	FTransform Result;
+	TTransform<T> Result;
 
 	if (AnyHasNegativeScale(Scale3D, Other.GetScale3D()))
 	{
@@ -173,22 +183,22 @@ FTransform FTransform::GetRelativeTransform(const FTransform& Other) const
 	}
 	else
 	{
-		FVector SafeRecipScale3D = GetSafeScaleReciprocal(Other.Scale3D, SMALL_NUMBER);
+		TVector<T> SafeRecipScale3D = GetSafeScaleReciprocal(Other.Scale3D, UE_SMALL_NUMBER);
 		Result.Scale3D = Scale3D*SafeRecipScale3D;
 
 		if (Other.Rotation.IsNormalized() == false)
 		{
-			return FTransform::Identity;
+			return TTransform<T>::Identity;
 		}
 
-		FQuat Inverse = Other.Rotation.Inverse();
+		TQuat<T> Inverse = Other.Rotation.Inverse();
 		Result.Rotation = Inverse*Rotation;
 
 		Result.Translation = (Inverse*(Translation - Other.Translation))*(SafeRecipScale3D);
 
 #if DEBUG_INVERSE_TRANSFORM
-		FMatrix AM = ToMatrixWithScale();
-		FMatrix BM = Other.ToMatrixWithScale();
+		TMatrix<T> AM = ToMatrixWithScale();
+		TMatrix<T> BM = Other.ToMatrixWithScale();
 
 		Result.DebugEqualMatrix(AM *  BM.InverseFast());
 
@@ -198,9 +208,10 @@ FTransform FTransform::GetRelativeTransform(const FTransform& Other) const
 	return Result;
 }
 
-bool FTransform::DebugEqualMatrix(const FMatrix& Matrix) const
+template<typename T>
+bool TTransform<T>::DebugEqualMatrix(const TMatrix<T>& Matrix) const
 {
-	FTransform TestResult(Matrix);
+	TTransform<T> TestResult(Matrix);
 	if (!Equals(TestResult))
 	{
 		// see now which one isn't equal
@@ -228,5 +239,13 @@ bool FTransform::DebugEqualMatrix(const FMatrix& Matrix) const
 
 	return true;
 }
+
+
+} // namespace UE::Math
+} // namespace UE
+
+// Instantiate for linker.
+template struct UE::Math::TTransform<float>;
+template struct UE::Math::TTransform<double>;
 
 #endif // #if !ENABLE_VECTORIZED_TRANSFORM

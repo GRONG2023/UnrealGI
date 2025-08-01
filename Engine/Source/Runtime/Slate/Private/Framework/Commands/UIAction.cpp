@@ -15,11 +15,16 @@ FUIAction::FUIAction()
 
 FUIAction::FUIAction(FExecuteAction InitExecuteAction, EUIActionRepeatMode InitRepeatMode)
 	: ExecuteAction(InitExecuteAction)
-	, CanExecuteAction(FCanExecuteAction::CreateRaw(&FSlateApplication::Get(), &FSlateApplication::IsNormalExecution))
+	, CanExecuteAction()
 	, GetActionCheckState()
 	, IsActionVisibleDelegate()
 	, RepeatMode(InitRepeatMode)
-{ 
+{
+	CanExecuteAction = FCanExecuteAction::CreateStatic([]()
+	{
+		return FSlateApplication::IsInitialized()
+			&& FSlateApplication::Get().IsNormalExecution();
+	});
 }
 
 FUIAction::FUIAction(FExecuteAction InitExecuteAction, FCanExecuteAction InitCanExecuteAction, EUIActionRepeatMode InitRepeatMode)
@@ -65,4 +70,25 @@ FUIAction::FUIAction(FExecuteAction InitExecuteAction, FCanExecuteAction InitCan
 	, IsActionVisibleDelegate(InitIsActionVisibleDelegate)
 	, RepeatMode(InitRepeatMode)
 { 
+}
+
+/////////////////////////////////////////////////////
+// FUIActionContext
+
+TSharedPtr<IUIActionContextBase> FUIActionContext::FindContext(const FName InName) const
+{
+	for (const TSharedPtr<IUIActionContextBase>& Context : Contexts)
+	{
+		if (Context && Context->GetContextName().IsEqual(InName))
+		{
+			return Context;
+		}
+	}
+
+	return nullptr;
+}
+
+void FUIActionContext::AddContext(const TSharedPtr<IUIActionContextBase>& InContext)
+{
+	Contexts.Add(InContext);
 }

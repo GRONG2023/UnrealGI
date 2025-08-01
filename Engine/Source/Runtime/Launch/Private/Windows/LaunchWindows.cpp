@@ -2,8 +2,6 @@
 	
 #include "CoreMinimal.h"
 
-#if WINDOWS_USE_FEATURE_LAUNCH
-
 #include "Misc/App.h"
 #include "Misc/OutputDeviceError.h"
 #include "LaunchEngineLoop.h"
@@ -14,6 +12,19 @@
 
 #if UE_BUILD_DEBUG
 #include <crtdbg.h>
+#endif
+
+#if USING_ADDRESS_SANITISER
+
+#include <sanitizer/asan_interface.h>
+
+DEFINE_LOG_CATEGORY_STATIC(LogASan, Log, All);
+
+static void ASanErrorCallback(const char* ErrorStr)
+{
+	UE_LOG(LogASan, Fatal, TEXT("ASan Error: %s"), ANSI_TO_TCHAR(ErrorStr));
+}
+
 #endif
 
 DEFINE_LOG_CATEGORY_STATIC(LogLaunchWindows, Log, All);
@@ -30,48 +41,18 @@ extern "C" { _declspec(dllexport) uint32 NvOptimusEnablement = 0x00000001; }
 // Also has to be .exe module to be correctly detected.
 extern "C" { _declspec(dllexport) uint32 AmdPowerXpressRequestHighPerformance = 0x00000001; }
 
-/**
- * Maintain a named mutex to detect whether we are the first instance of this game
- */
-HANDLE GNamedMutex = NULL;
+// Opt in to new D3D12 redist and tell the loader where to search for D3D12Core.dll.
+// The D3D loader looks for these symbol exports in the .exe module.
+// We only support this on x64 Windows Desktop platforms. Other platforms or non-redist-aware 
+// versions of Windows will transparently load default OS-provided D3D12 library.
+#define USE_D3D12_REDIST (PLATFORM_DESKTOP && PLATFORM_CPU_X86_FAMILY && PLATFORM_64BITS && 1)
+#if USE_D3D12_REDIST
+extern "C" { _declspec(dllexport) extern const UINT D3D12SDKVersion = 611; } // D3D12_SDK_VERSION
+extern "C" { _declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\"; }
+#endif // USE_D3D12_REDIST
 
 /** Whether we should pause before exiting. used by UCC */
 bool		GShouldPauseBeforeExit;
-
-void ReleaseNamedMutex( void )
-{
-	if( GNamedMutex )
-	{
-		ReleaseMutex( GNamedMutex );
-		GNamedMutex = NULL;
-	}
-}
-
-bool MakeNamedMutex( const TCHAR* CmdLine )
-{
-	bool bIsFirstInstance = false;
-
-	TCHAR MutexName[MAX_SPRINTF] = TEXT( "" );
-
-	FCString::Strcpy( MutexName, MAX_SPRINTF, TEXT( "UnrealEngine4" ) );
-
-	GNamedMutex = CreateMutex( NULL, true, MutexName );
-
-	if( GNamedMutex	&& GetLastError() != ERROR_ALREADY_EXISTS && !FParse::Param( CmdLine, TEXT( "NEVERFIRST" ) ) )
-	{
-		// We're the first instance!
-		bIsFirstInstance = true;
-	}
-	else
-	{
-		// Still need to release it in this case, because it gave us a valid copy
-		ReleaseNamedMutex();
-		// There is already another instance of the game running.
-		bIsFirstInstance = false;
-	}
-
-	return( bIsFirstInstance );
-}
 
 /**
  * Handler for CRT parameter validation. Triggers error
@@ -137,7 +118,7 @@ LAUNCH_API int32 GuardedMainWrapper( const TCHAR* CmdLine )
 			ErrorLevel = GuardedMain( CmdLine );
 		}
 #if !PLATFORM_SEH_EXCEPTIONS_DISABLED
-		__except( ReportCrash( GetExceptionInformation() ), EXCEPTION_CONTINUE_SEARCH )
+		__except( FPlatformMisc::GetCrashHandlingType() == ECrashHandlingType::Default ? (ReportCrash( GetExceptionInformation()), EXCEPTION_CONTINUE_SEARCH) : EXCEPTION_CONTINUE_SEARCH )
 		{
 			// Deliberately do nothing but avoid warning C6322: Empty _except block.
 			(void)0;
@@ -199,6 +180,9 @@ bool ProcessCommandLine()
 LAUNCH_API int32 LaunchWindowsStartup( HINSTANCE hInInstance, HINSTANCE hPrevInstance, char*, int32 nCmdShow, const TCHAR* CmdLine )
 {
 	TRACE_BOOKMARK(TEXT("WinMain.Enter"));
+#if USING_ADDRESS_SANITISER
+	__asan_set_error_report_callback(ASanErrorCallback);
+#endif
 
 	// Setup common Windows settings
 	SetupWindowsEnvironment();
@@ -224,19 +208,20 @@ LAUNCH_API int32 LaunchWindowsStartup( HINSTANCE hInInstance, HINSTANCE hPrevIns
 		SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
 	}
 
-#if !(UE_BUILD_SHIPPING && WITH_EDITOR)
-	// Named mutex we use to figure out whether we are the first instance of the game running. This is needed to e.g.
-	// make sure there is no contention when trying to save the shader cache.
-	GIsFirstInstance = MakeNamedMutex( CmdLine );
-
 	if ( FParse::Param( CmdLine,TEXT("crashreports") ) )
 	{
 		GAlwaysReportCrash = true;
 	}
-#endif
 
 	bool bNoExceptionHandler = FParse::Param(CmdLine,TEXT("noexceptionhandler"));
 	(void)bNoExceptionHandler;
+
+	bool bIgnoreDebugger = FParse::Param(CmdLine, TEXT("IgnoreDebugger"));
+	(void)bIgnoreDebugger;
+
+	bool bIsDebuggerPresent = FPlatformMisc::IsDebuggerPresent() && !bIgnoreDebugger;
+	(void)bIsDebuggerPresent;
+
 	// Using the -noinnerexception parameter will disable the exception handler within native C++, which is call from managed code,
 	// which is called from this function.
 	// The default case is to have three wrapped exception handlers 
@@ -254,7 +239,7 @@ LAUNCH_API int32 LaunchWindowsStartup( HINSTANCE hInInstance, HINSTANCE hPrevIns
 #if UE_BUILD_DEBUG
 	if (GUELibraryOverrideSettings.bIsEmbedded || !GAlwaysReportCrash)
 #else
-	if (GUELibraryOverrideSettings.bIsEmbedded || bNoExceptionHandler || (FPlatformMisc::IsDebuggerPresent() && !GAlwaysReportCrash))
+	if (GUELibraryOverrideSettings.bIsEmbedded || bNoExceptionHandler || (bIsDebuggerPresent && !GAlwaysReportCrash))
 #endif
 	{
 		// Don't use exception handling when a debugger is attached to exactly trap the crash. This does NOT check
@@ -274,12 +259,10 @@ LAUNCH_API int32 LaunchWindowsStartup( HINSTANCE hInInstance, HINSTANCE hPrevIns
 			GIsGuarded = 0;
 		}
 #if !PLATFORM_SEH_EXCEPTIONS_DISABLED
-		__except( GEnableInnerException ? EXCEPTION_EXECUTE_HANDLER : ReportCrash( GetExceptionInformation( ) ) )
+		__except( FPlatformMisc::GetCrashHandlingType() == ECrashHandlingType::Default
+				? ( GEnableInnerException ? EXCEPTION_EXECUTE_HANDLER : ReportCrash(GetExceptionInformation()) )
+				: EXCEPTION_CONTINUE_SEARCH )	
 		{
-#if !(UE_BUILD_SHIPPING && WITH_EDITOR)
-			// Release the mutex in the error case to ensure subsequent runs don't find it.
-			ReleaseNamedMutex();
-#endif
 			// Crashed.
 			ErrorLevel = 1;
 			if(GError)
@@ -288,7 +271,7 @@ LAUNCH_API int32 LaunchWindowsStartup( HINSTANCE hInInstance, HINSTANCE hPrevIns
 			}
 			LaunchStaticShutdownAfterError();
 			FPlatformMallocCrash::Get().PrintPoolsUsage();
-			FPlatformMisc::RequestExit( true );
+			FPlatformMisc::RequestExit( true, TEXT("LaunchWindowsStartup.ExceptionHandler"));
 		}
 #endif
 	}
@@ -303,11 +286,6 @@ LAUNCH_API void LaunchWindowsShutdown()
 	// Final shut down.
 	FEngineLoop::AppExit();
 
-#if !(UE_BUILD_SHIPPING && WITH_EDITOR)
-	// Release the named mutex again now that we are done.
-	ReleaseNamedMutex();
-#endif
-
 	// pause if we should
 	if (GShouldPauseBeforeExit)
 	{
@@ -321,6 +299,4 @@ int32 WINAPI WinMain(_In_ HINSTANCE hInInstance, _In_opt_ HINSTANCE hPrevInstanc
 	LaunchWindowsShutdown();
 	return Result;
 }
-
-#endif //WINDOWS_USE_FEATURE_LAUNCH
 

@@ -4,27 +4,30 @@
 
 #include "CoreMinimal.h"
 
-#if WITH_LIBCURL
+#if WITH_CURL
 
 #include "HttpThread.h"
 
-#if PLATFORM_WINDOWS
-#include "Windows/WindowsHWrapper.h"
-#include "Windows/AllowWindowsPlatformTypes.h"
+#if PLATFORM_MICROSOFT
+#include "Microsoft/AllowMicrosoftPlatformTypes.h"
 #endif
-	#include "curl/curl.h"
-#if PLATFORM_WINDOWS
-#include "Windows/HideWindowsPlatformTypes.h"
+#ifdef PLATFORM_CURL_INCLUDE
+#include PLATFORM_CURL_INCLUDE
+#else
+#include "curl/curl.h"
+#endif
+#if PLATFORM_MICROSOFT
+#include "Microsoft/HideMicrosoftPlatformTypes.h"
 #endif
 
-#endif //WITH_LIBCURL
+#endif //WITH_CURL
 
 class IHttpThreadedRequest;
 
-#if WITH_LIBCURL
+#if WITH_CURL
 
 class FCurlHttpThread
-	: public FHttpThread
+	: public FLegacyHttpThread
 {
 public:
 	
@@ -43,4 +46,4 @@ protected:
 };
 
 
-#endif //WITH_LIBCURL
+#endif //WITH_CURL

@@ -14,6 +14,10 @@
 #include "Templates/ScopedCallback.h"
 #include "Misc/WorldCompositionUtility.h"
 #include "Engine/MaterialMerging.h"
+#include "Engine/TextureStreamingTypes.h"
+#include "Misc/EditorPathObjectInterface.h"
+#include <atomic>
+
 #include "Level.generated.h"
 
 class AActor;
@@ -22,6 +26,7 @@ class AInstancedFoliageActor;
 class ALevelBounds;
 class APlayerController;
 class AWorldSettings;
+class AWorldDataLayers;
 class FSceneInterface;
 class ITargetPlatform;
 class UAssetUserData;
@@ -30,58 +35,68 @@ class UNavigationDataChunk;
 class UTexture2D;
 struct FLevelCollection;
 class ULevelActorContainer;
-class FLevelPartitionOperationScope;
 class FRegisterComponentContext;
+class SNotificationItem;
+class UActorFolder;
+class IWorldPartitionCell;
+class UWorldPartitionRuntimeCell;
+struct FFolder;
 
-UINTERFACE()
-class ULevelPartitionInterface : public UInterface
+#if WITH_EDITOR
+struct FLevelActorFoldersHelper
+{
+private:
+	static ENGINE_API void SetUseActorFolders(ULevel* InLevel, bool bInEnabled);
+	static ENGINE_API void AddActorFolder(ULevel* InLevel, UActorFolder* InActorFolder, bool bInShouldDirtyLevel, bool bInShouldBroadcast = true);
+	static ENGINE_API void RenameFolder(ULevel* InLevel, const FFolder& InOldFolder, const FFolder& InNewFolder);
+	static ENGINE_API void DeleteFolder(ULevel* InLevel, const FFolder& InFolder);
+
+	friend class UWorld;
+	friend class ULevel;
+	friend class UActorFolder;
+	friend class FWorldPartitionConverter;
+	friend class UWorldPartitionConvertCommandlet;
+	friend class FWorldPartitionLevelHelper;
+	friend class UWorldPartitionLevelStreamingDynamic;
+};
+
+#endif
+
+// Actor container class used to duplicate actors during cells streaming in PIE
+UCLASS()
+class UActorContainer : public UObject
 {
 	GENERATED_BODY()
+
+public:
+	UPROPERTY()
+	TMap<FName, TObjectPtr<AActor>> Actors;
 };
 
-class ILevelPartitionInterface
+USTRUCT()
+struct FActorFolderSet
 {
 	GENERATED_BODY()
 
-#if WITH_EDITOR
-	friend class FLevelPartitionOperationScope;
-#endif
-
 public:
-	virtual ULevel* GetSubLevel(const FVector& Coords) const = 0;
+
+	ENGINE_API void Add(UActorFolder* InActorFolder);
+	int32 Remove(UActorFolder* InActorFolder) { return ActorFolders.Remove(InActorFolder); }
+	bool IsEmpty() const { return ActorFolders.IsEmpty(); }
+	const TSet<TObjectPtr<UActorFolder>>& GetActorFolders() const { return ActorFolders; }
 
 private:
-#if WITH_EDITOR
-	virtual void BeginOperation(class FLevelPartitionOperationScope* Scope) = 0;
-	virtual void EndOperation() = 0;
-#endif
+
+	UPROPERTY(Transient)
+	TSet<TObjectPtr<UActorFolder>> ActorFolders;
 };
-
-#if WITH_EDITOR
-class ENGINE_API FLevelPartitionOperationScope
-{
-public:
-	FLevelPartitionOperationScope(ULevel* Level);
-	~FLevelPartitionOperationScope();
-		
-	TArray<AActor*> GetActors() const;
-	ULevel* GetLevel() const;
-
-private:
-	static ULevel* CreateTransientLevel(UWorld* InWorld);
-	static void DestroyTransientLevel(ULevel* InLevel);
-
-	ILevelPartitionInterface* InterfacePtr = nullptr;
-	ULevel* Level = nullptr;
-};
-#endif
 
 /**
  * Structure containing all information needed for determining the screen space
  * size of an object/ texture instance.
  */
 USTRUCT()
-struct ENGINE_API FStreamableTextureInstance
+struct FStreamableTextureInstance
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -110,13 +125,13 @@ struct ENGINE_API FStreamableTextureInstance
  * Serialized ULevel information about dynamic texture instances
  */
 USTRUCT()
-struct ENGINE_API FDynamicTextureInstance : public FStreamableTextureInstance
+struct FDynamicTextureInstance : public FStreamableTextureInstance
 {
 	GENERATED_USTRUCT_BODY()
 
 	/** Texture that is used by a dynamic UPrimitiveComponent. */
 	UPROPERTY()
-	UTexture2D*					Texture = nullptr;
+	TObjectPtr<UTexture2D>					Texture = nullptr;
 
 	/** Whether the primitive that uses this texture is attached to the scene or not. */
 	UPROPERTY()
@@ -136,23 +151,14 @@ struct ENGINE_API FDynamicTextureInstance : public FStreamableTextureInstance
 	friend FArchive& operator<<( FArchive& Ar, FDynamicTextureInstance& TextureInstance );
 };
 
-/** Manually implement TPointerIsConvertibleFromTo for AActor so that TWeakObjectPtr can use it below when AActor is forward declared. */
-template<> struct TPointerIsConvertibleFromTo<AActor, const volatile UObject>
-{
-	enum { Value = 1 };
-};
-
 /** Struct that holds on to information about Actors that wish to be auto enabled for input before the player controller has been created */
 struct FPendingAutoReceiveInputActor
 {
 	TWeakObjectPtr<AActor> Actor;
 	int32 PlayerIndex;
 
-	FPendingAutoReceiveInputActor(AActor* InActor, const int32 InPlayerIndex)
-		: Actor(InActor)
-		, PlayerIndex(InPlayerIndex)
-	{
-	}
+	FPendingAutoReceiveInputActor(AActor* InActor, const int32 InPlayerIndex);
+	~FPendingAutoReceiveInputActor();
 };
 
 /** A precomputed visibility cell, whose data is stored in FCompressedVisibilityChunk. */
@@ -310,7 +316,7 @@ private:
 };
 
 USTRUCT()
-struct ENGINE_API FLevelSimplificationDetails
+struct FLevelSimplificationDetails
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -345,35 +351,8 @@ struct ENGINE_API FLevelSimplificationDetails
 	UPROPERTY(Category=Landscape, EditAnywhere)
 	bool bBakeGrassToLandscape;
 
-	UPROPERTY()
-	bool bGenerateMeshNormalMap_DEPRECATED;
-	
-	UPROPERTY()
-	bool bGenerateMeshMetallicMap_DEPRECATED;
-
-	UPROPERTY()
-	bool bGenerateMeshRoughnessMap_DEPRECATED;
-	
-	UPROPERTY()
-	bool bGenerateMeshSpecularMap_DEPRECATED;
-	
-	UPROPERTY()
-	bool bGenerateLandscapeNormalMap_DEPRECATED;
-
-	UPROPERTY()
-	bool bGenerateLandscapeMetallicMap_DEPRECATED;
-
-	UPROPERTY()
-	bool bGenerateLandscapeRoughnessMap_DEPRECATED;
-	
-	UPROPERTY()
-	bool bGenerateLandscapeSpecularMap_DEPRECATED;
-
-	/** Handles deprecated properties */
-	void PostLoadDeprecated();
-	
-	FLevelSimplificationDetails();
-	bool operator == (const FLevelSimplificationDetails& Other) const;
+	ENGINE_API FLevelSimplificationDetails();
+	ENGINE_API bool operator == (const FLevelSimplificationDetails& Other) const;
 };
 
 /**
@@ -391,8 +370,18 @@ struct FReplicatedStaticActorDestructionInfo
 	FVector	DestroyedPosition;
 	TWeakObjectPtr<UObject> ObjOuter;
 	UPROPERTY()
-	UClass* ObjClass = nullptr;
+	TObjectPtr<UClass> ObjClass = nullptr;
 };
+
+#if WITH_EDITORONLY_DATA
+/** Enum defining how external actors are saved on disk */
+UENUM()
+enum class EActorPackagingScheme : uint8
+{
+	Original,	// Original scheme: ZZ/ZZ/... (maximum 1679616 folders,  ~0.6 files per folder with 1000000 files)
+	Reduced		//  Reduced scheme:  Z/ZZ/... (maximum   46656 folders, ~21.4 files per folder with 1000000 files)
+};
+#endif
 
 //
 // The level object.  Contains the level's actor list, BSP information, and brush list.
@@ -409,7 +398,7 @@ struct FReplicatedStaticActorDestructionInfo
  * @see UActor
  */
 UCLASS(MinimalAPI)
-class ULevel : public UObject, public IInterface_AssetUserData
+class ULevel : public UObject, public IInterface_AssetUserData, public ITextureStreamingContainer, public IEditorPathObjectInterface
 {
 	GENERATED_BODY()
 
@@ -419,10 +408,18 @@ public:
 	FURL					URL;
 
 	/** Array of all actors in this level, used by FActorIteratorBase and derived classes */
-	TArray<AActor*> Actors;
+	TArray<TObjectPtr<AActor>> Actors;
 
 	/** Array of actors to be exposed to GC in this level. All other actors will be referenced through ULevelActorContainer */
-	TArray<AActor*> ActorsForGC;
+	TArray<TObjectPtr<AActor>> ActorsForGC;
+
+#if WITH_EDITORONLY_DATA
+	AActor* PlayFromHereActor;
+
+	/** Use external actors, new actor spawned in this level will be external and existing external actors will be loaded on load. */
+	UPROPERTY(EditInstanceOnly, Category=World)
+	bool bUseExternalActors;
+#endif
 
 	/** Set before calling LoadPackage for a streaming level to ensure that OwningWorld is correct on the Level */
 	ENGINE_API static TMap<FName, TWeakObjectPtr<UWorld> > StreamedLevelsOwningWorld;
@@ -433,23 +430,23 @@ public:
 	 * It should not be accessed during BeginDestroy(), just like any other UObject references, since GC may occur in any order.
 	 */
 	UPROPERTY(Transient)
-	UWorld* OwningWorld;
+	TObjectPtr<UWorld> OwningWorld;
 
 	/** BSP UModel. */
 	UPROPERTY()
-	class UModel* Model;
+	TObjectPtr<class UModel> Model;
 
 	/** BSP Model components used for rendering. */
 	UPROPERTY()
-	TArray<class UModelComponent*> ModelComponents;
+	TArray<TObjectPtr<class UModelComponent>> ModelComponents;
 
 	UPROPERTY(Transient, DuplicateTransient, NonTransactional)
-	ULevelActorContainer* ActorCluster;
+	TObjectPtr<ULevelActorContainer> ActorCluster;
 
 #if WITH_EDITORONLY_DATA
 	/** Reference to the blueprint for level scripting */
 	UPROPERTY(NonTransactional)
-	class ULevelScriptBlueprint* LevelScriptBlueprint;
+	TObjectPtr<class ULevelScriptBlueprint> LevelScriptBlueprint;
 
 	/** The Guid list of all materials and meshes Guid used in the last texture streaming build. Used to know if the streaming data needs rebuild. Only used for the persistent level. */
 	UPROPERTY(NonTransactional)
@@ -466,20 +463,20 @@ public:
 
 	/** The level scripting actor, created by instantiating the class from LevelScriptBlueprint.  This handles all level scripting */
 	UPROPERTY(NonTransactional)
-	class ALevelScriptActor* LevelScriptActor;
+	TObjectPtr<class ALevelScriptActor> LevelScriptActor;
 
 	/**
 	 * Start and end of the navigation list for this level, used for quickly fixing up
 	 * when streaming this level in/out. @TODO DEPRECATED - DELETE
 	 */
 	UPROPERTY()
-	class ANavigationObjectBase *NavListStart;
+	TObjectPtr<class ANavigationObjectBase> NavListStart;
 	UPROPERTY()
-	class ANavigationObjectBase	*NavListEnd;
+	TObjectPtr<class ANavigationObjectBase>	NavListEnd;
 	
 	/** Navigation related data that can be stored per level */
 	UPROPERTY()
-	TArray<UNavigationDataChunk*> NavDataChunks;
+	TArray<TObjectPtr<UNavigationDataChunk>> NavDataChunks;
 	
 	/** Total number of KB used for lightmap textures in the level. */
 	UPROPERTY(VisibleAnywhere, Category=Level)
@@ -493,9 +490,17 @@ public:
 	UPROPERTY()
 	TArray<FVector> StaticNavigableGeometry;
 
-	/** The Guid of each texture refered by FStreamingTextureBuildInfo::TextureLevelIndex	*/
+	/** The Guid of each streamable texture refered by FStreamingTextureBuildInfo::TextureLevelIndex	*/
 	UPROPERTY()
 	TArray<FGuid> StreamingTextureGuids;
+
+	/** The name of each streamable texture referred by FStreamingTextureBuildInfo::TextureLevelIndex */
+	UPROPERTY()
+	TArray<FName> StreamingTextures;
+
+	/** Packed quality level and feature level used when building texture streaming data. This is used by runtime to determine if built data can be used or not. */
+	UPROPERTY()
+	uint32 PackedTextureStreamingQualityLevelFeatureLevel;
 
 	/** Data structures for holding the tick functions **/
 	class FTickTaskLevel*						TickTaskLevel;
@@ -527,7 +532,7 @@ public:
 	 * ReleaseRenderingResources must be called before changing what is referenced, to update the rendering thread state.
 	 */
 	UPROPERTY(NonPIEDuplicateTransient)
-	UMapBuildDataRegistry* MapBuildData;
+	TObjectPtr<UMapBuildDataRegistry> MapBuildData;
 
 	/** Level offset at time when lighting was built */
 	UPROPERTY()
@@ -560,7 +565,10 @@ public:
 	UPROPERTY(Transient, DuplicateTransient, NonTransactional)
 	uint8										bStaticComponentsRegisteredInStreamingManager: 1;
 
-	/** Whether the level is currently visible/ associated with the world */
+	/** 
+	 * Whether the level is currently visible/ associated with the world. 
+	 * If false, may not yet be fully removed from the world.
+	 */
 	UPROPERTY(transient)
 	uint8										bIsVisible:1;
 
@@ -573,8 +581,16 @@ public:
 
 	/** Whether the level has been saved after introducing actor GUIDs */
 	uint8										bContainsStableActorGUIDs:1;
+
+	/** Whether the level should call FixupActorFolders on its actors when loading the level/actors (only used when level is using actor folder objects) */
+	uint8										bFixupActorFoldersAtLoad:1;
+
+private:
+	/** Whether the level is set not to be reusable after unload (editor-only) */
+	uint8										bForceCantReuseUnloadedButStillAround:1;
 #endif
 	
+public:
 	/** The below variables are used temporarily while making a level visible.				*/
 
 	/** Whether we already moved actors.													*/
@@ -589,15 +605,13 @@ public:
 	uint8										bAlreadyInitializedNetworkActors:1;
 	/** Whether we already cleared AActor::bActorSeamlessTraveled.							*/
 	uint8										bAlreadyClearedActorsSeamlessTravelFlag:1;
-	/** Whether we already routed initialize on actors.										*/
-	uint8										bAlreadyRoutedActorInitialize:1;
 	/** Whether we already sorted the actor list.											*/
 	uint8										bAlreadySortedActorList:1;
 	/** Whether this level is in the process of being associated with its world	(i.e. we are within AddToWorld for this level */
 	uint8										bIsAssociatingLevel:1;
 	/** Whether this level is in the process of being disassociated with its world (i.e. we are within RemoveFromWorld for this level */
 	uint8										bIsDisassociatingLevel : 1;
-	/** Whether this level should be fully added to the world before rendering his components	*/
+	/** Whether this level should be fully added to the world before rendering its components	*/
 	uint8										bRequireFullVisibilityToRender:1;
 	/** Whether this level is specific to client, visibility state will not be replicated to server	*/
 	uint8										bClientOnlyVisible:1;
@@ -611,17 +625,32 @@ public:
 	uint8										bHasRerunConstructionScripts:1;
 	/** Whether the level had its actor cluster created. This doesn't mean that the creation was successful. */
 	uint8										bActorClusterCreated : 1;
+	/** If true, allows garbage collection clustering for the level */
+	uint8										bGarbageCollectionClusteringEnabled : 1;
+
+	/** Whether the level is partitioned or not. */
+    UPROPERTY()
+	uint8										bIsPartitioned : 1;
+
+	enum class EIncrementalComponentState : uint8
+	{
+		Init,
+		RegisterInitialComponents,
+#if WITH_EDITOR
+		RunConstructionScripts,
+#endif
+		Finalize
+	};
+
 	/** Whether the actor referenced by CurrentActorIndexForUpdateComponents has called PreRegisterAllComponents */
-	uint8										bHasCurrentActorCalledPreRegister;
+	uint8										bHasCurrentActorCalledPreRegister:1;
+	/** The current stage for incrementally updating actor components in the level*/
+	EIncrementalComponentState					IncrementalComponentState;
 	/** Current index into actors array for updating components.							*/
-	int32										CurrentActorIndexForUpdateComponents;
+	int32										CurrentActorIndexForIncrementalUpdate;
 	/** Current index into actors array for updating components.							*/
 	int32										CurrentActorIndexForUnregisterComponents;
 
-
-	/** Whether the level is currently pending being made visible.							*/
-	UE_DEPRECATED(4.15, "Use HasVisibilityChangeRequestPending")
-	bool HasVisibilityRequestPending() const;
 
 	/** Whether the level is currently pending being made invisible or visible.				*/
 	ENGINE_API bool HasVisibilityChangeRequestPending() const;
@@ -645,27 +674,17 @@ public:
 	UPROPERTY()
 	FLinearColor LevelColor;
 
-	float FixupOverrideVertexColorsTime;
-	int32 FixupOverrideVertexColorsCount;
+	std::atomic<uint64> FixupOverrideVertexColorsTimeMS;
+	std::atomic<uint32> FixupOverrideVertexColorsCount;
 
 	UPROPERTY(transient)
-	bool bLevelOkayForPlacementWhileCheckedIn;
+	bool bPromptWhenAddingToLevelBeforeCheckout;
 
-	/** Returns true if the current level is a partitioned level */
-	ENGINE_API bool IsPartitionedLevel() const;
+	UPROPERTY(transient)
+	bool bPromptWhenAddingToLevelOutsideBounds;
 
-	/** Returns true if the current level is a sublevel (managed by a parent partitioned level) */
-	ENGINE_API bool IsPartitionSubLevel() const;
-
-	/** Assign a level partition to this level */
-	ENGINE_API void SetLevelPartition(ILevelPartitionInterface* LevelPartition);
-
-	/** Get the level partition assigned to this level, if any */
-	ENGINE_API ILevelPartitionInterface* GetLevelPartition();
-	ENGINE_API const ILevelPartitionInterface* GetLevelPartition() const;
-	
-	/** Setup the provided sublevel so that it is handled by this level's partition */
-	ENGINE_API void SetPartitionSubLevel(ULevel* SubLevel);
+	UPROPERTY()
+	EActorPackagingScheme ActorPackagingScheme;
 
 #endif //WITH_EDITORONLY_DATA
 
@@ -684,18 +703,62 @@ public:
 	/** Marks level bounds as dirty so they will be recalculated  */
 	ENGINE_API void MarkLevelBoundsDirty();
 
-private:
+#if WITH_EDITOR
+	ENGINE_API static bool GetLevelBoundsFromAsset(const FAssetData& Asset, FBox& OutLevelBounds);
+	ENGINE_API static bool GetLevelBoundsFromPackage(FName LevelPackage, FBox& OutLevelBounds);
 
-#if WITH_EDITORONLY_DATA
-	/** Use external actors, new actor spawned in this level will be external and existing external actors will be loaded on load. */
-	UPROPERTY(EditInstanceOnly, Category = World)
-	bool bUseExternalActors;
+	ENGINE_API static bool GetWorldExternalActorsReferencesFromAsset(const FAssetData& Asset, TArray<FGuid>& OutWorldExternalActorsReferences);
+	ENGINE_API static bool GetWorldExternalActorsReferencesFromPackage(FName LevelPackage, TArray<FGuid>& OutWorldExternalActorsReferences);
+
+	ENGINE_API static bool GetIsLevelPartitionedFromAsset(const FAssetData& Asset);
+	ENGINE_API static bool GetIsLevelPartitionedFromPackage(FName LevelPackage);
+
+	ENGINE_API static bool GetIsLevelUsingExternalActorsFromAsset(const FAssetData& Asset);
+	ENGINE_API static bool GetIsLevelUsingExternalActorsFromPackage(FName LevelPackage);
+
+	ENGINE_API static bool GetIsUsingActorFoldersFromAsset(const FAssetData& Asset);
+	ENGINE_API static bool GetIsUsingActorFoldersFromPackage(FName LevelPackage);
+
+	ENGINE_API static bool GetIsStreamingDisabledFromAsset(const FAssetData& Asset);	
+	ENGINE_API static bool GetIsStreamingDisabledFromPackage(FName LevelPackage);
+
+	UE_DEPRECATED(5.3, "GetPartitionedLevelCanBeUsedByLevelInstanceFromAsset is deprecated.")
+	static bool GetPartitionedLevelCanBeUsedByLevelInstanceFromAsset(const FAssetData& Asset) { return true; }
+	UE_DEPRECATED(5.3, "GetPartitionedLevelCanBeUsedByLevelInstanceFromPackage is deprecated.")
+	static bool GetPartitionedLevelCanBeUsedByLevelInstanceFromPackage(FName LevelPackage) { return true; }
+	UE_DEPRECATED(5.4, "GetLevelScriptExternalActorsReferencesFromAsset is deprecated.")
+	ENGINE_API static bool GetLevelScriptExternalActorsReferencesFromAsset(const FAssetData& Asset, TArray<FGuid>& OutLevelScriptExternalActorsReferences) { return false;}
+	UE_DEPRECATED(5.4, "GetLevelScriptExternalActorsReferencesFromPackageis deprecated.")
+	ENGINE_API static bool GetLevelScriptExternalActorsReferencesFromPackage(FName LevelPackage, TArray<FGuid>& OutLevelScriptExternalActorsReferences) { return false; }
+
+	ENGINE_API static FVector GetLevelInstancePivotOffsetFromAsset(const FAssetData& Asset);
+	ENGINE_API static FVector GetLevelInstancePivotOffsetFromPackage(FName LevelPackage);
+
+	ENGINE_API static const FName LoadAllExternalObjectsTag;
+	ENGINE_API static const FName DontLoadExternalObjectsTag;
+	ENGINE_API static const FName DontLoadExternalFoldersTag;
+
+	ENGINE_API bool GetPromptWhenAddingToLevelOutsideBounds() const;
+	ENGINE_API bool GetPromptWhenAddingToLevelBeforeCheckout() const;
+
+	ENGINE_API void SetEditorPathOwner(UObject* InEditorPathOwner) { EditorPathOwner = InEditorPathOwner; }
+	ENGINE_API virtual UObject* GetEditorPathOwner() const override { return EditorPathOwner.Get(); }
+
+	ENGINE_API bool GetForceCantReuseUnloadedButStillAround() const { return bForceCantReuseUnloadedButStillAround; }
+	ENGINE_API void SetForceCantReuseUnloadedButStillAround(bool bNewValue) { bForceCantReuseUnloadedButStillAround = bNewValue; }
 #endif
 
+private:
 	FLevelBoundsActorUpdatedEvent LevelBoundsActorUpdatedEvent; 
 
 	UPROPERTY()
-	AWorldSettings* WorldSettings;
+	TObjectPtr<AWorldSettings> WorldSettings;
+
+	UPROPERTY()
+	TObjectPtr<AWorldDataLayers> WorldDataLayers;
+
+	UPROPERTY()
+	TSoftObjectPtr<UWorldPartitionRuntimeCell> WorldPartitionRuntimeCell;
 
 	/** Cached level collection that this level is contained in, for faster access than looping through the collections in the world. */
 	FLevelCollection* CachedLevelCollection;
@@ -704,7 +767,7 @@ protected:
 
 	/** Array of user data stored with the asset */
 	UPROPERTY()
-	TArray<UAssetUserData*> AssetUserData;
+	TArray<TObjectPtr<UAssetUserData>> AssetUserData;
 
 private:
 	// Actors awaiting input to be enabled once the appropriate PlayerController has been created
@@ -715,14 +778,39 @@ private:
 	TArray<FReplicatedStaticActorDestructionInfo> DestroyedReplicatedStaticActors;
 
 #if WITH_EDITORONLY_DATA
-	/** Level partition, if any */
+	/** Use actor folder objects, actor folders of this level will be persistent in their own object. */
 	UPROPERTY(EditInstanceOnly, Category = World)
-	TScriptInterface<ILevelPartitionInterface> LevelPartition;
+	bool bUseActorFolders;
 
-	/** When the level is partitioned, this will point to the owner partition (will be the same as this->LevelPartition in case that is the top partition level */
-	UPROPERTY()
-	TSoftObjectPtr<UObject> OwnerLevelPartition;
+	/** Actor folder objects. They can either be saved inside level or in their own package. */
+	UPROPERTY(Transient)
+	TMap<FGuid, TObjectPtr<UActorFolder>> ActorFolders;
+
+	/** Acceleration table used to find an ActorFolder object for a given folder path. */
+	UPROPERTY(Transient)
+	TMap<FString, FActorFolderSet> FolderLabelToActorFolders;
+
+	/** Temporary array containing actor folder objects manually loaded from their external packages (only used while loading the level). */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UActorFolder>> LoadedExternalActorFolders;
+
+	UPROPERTY(Transient)
+	TWeakObjectPtr<UObject> EditorPathOwner;
+
+	/** Temporary map of objects to their associated external packages. Used when detaching/attaching external actors packages during cook. */
+	UPROPERTY(Transient)
+	TMap<TObjectPtr<UObject>, TObjectPtr<UPackage>> ObjectsToExternalPackages;
 #endif // #if WITH_EDITORONLY_DATA
+
+	enum class ERouteActorInitializationState : uint8
+	{
+		Preinitialize,
+		Initialize,
+		BeginPlay,
+		Finished
+	};
+	ERouteActorInitializationState RouteActorInitializationState;
+	int32 RouteActorInitializationIndex;
 
 public:
 	// Used internally to determine which actors should go on the world's NetworkActor list
@@ -761,22 +849,41 @@ public:
 	virtual void PostEditUndo() override;	
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 	virtual void BeginCacheForCookedPlatformData(const ITargetPlatform *TargetPlatform) override;
-	virtual bool CanEditChange(const FProperty* PropertyThatWillChange) const override;
 #endif // WITH_EDITOR
+	virtual bool ResolveSubobject(const TCHAR* SubObjectPath, UObject*& OutObject, bool bLoadIfExists) override;
 	virtual void PostLoad() override;
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS // Suppress compiler warning on override of deprecated function
+	UE_DEPRECATED(5.0, "Use version that takes FObjectPreSaveContext instead.")
 	virtual void PreSave(const class ITargetPlatform* TargetPlatform) override;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	virtual void PreSave(FObjectPreSaveContext ObjectSaveContext) override;
 	virtual void PreDuplicate(FObjectDuplicationParameters& DupParams) override;
-	virtual void PostDuplicate(bool bDuplicateForPIE) override;
 	virtual bool CanBeClusterRoot() const override;
 	virtual void CreateCluster() override;
 	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
 	//~ End UObject Interface.
 
+#if	WITH_EDITOR
+	//~Begin ITextureStreamingContainer Interface.
+	virtual void InitializeTextureStreamingContainer(uint32 InPackedTextureStreamingQualityLevelFeatureLevel) override;
+	virtual uint16 RegisterStreamableTexture(UTexture* InTexture) override;
+	//~End ITextureStreamingContainer Interface.
+	ENGINE_API uint16 RegisterStreamableTexture(const FString& InTextureName, const FGuid& InTextureGuid);
+#endif
+
 	/**
 	 * Flag this level instance for destruction.
 	 * This is called by UWorld::CleanupWorld to flag the level and its owned packages for destruction.
+	 *
+	 * @param bCleanupResources Whether to uninit anything that was initialized through OnLevelLoaded()
+	 * @param bUnloadFromEditor Whether to also remove RF_Standalone flags in the editor on level-specific subassets so that they can be garbage collected
 	 */
-	ENGINE_API void CleanupLevel();
+	ENGINE_API void CleanupLevel(bool bCleanupResources = true, bool bUnloadFromEditor = true);
+
+	/**
+	 * Cleans all references from and to this level that may be preventing it from being Garbage Collected
+	 */
+	ENGINE_API void CleanupReferences();
 
 	/**
 	 * Clears all components of actors associated with this level (aka in Actors array) and 
@@ -813,10 +920,10 @@ public:
 	 */
 	void InvalidateModelGeometry();
 	
-#if WITH_EDITOR
 	/** Marks all level components render state as dirty */
 	ENGINE_API void MarkLevelComponentsRenderStateDirty();
 
+#if WITH_EDITOR
 	/** Called to create ModelComponents for BSP rendering */
 	void CreateModelComponents();
 #endif // WITH_EDITOR
@@ -844,6 +951,53 @@ public:
 	 */
 	ENGINE_API void SortActorList();
 
+#if WITH_EDITOR
+	/**
+	 * Add a dynamically loaded actor to this level, as if it was part of the original map load process.
+	 *
+	 * @param Actor				The actor to add to the level
+	 * @param TransformToApply	The transform to apply to this actor if it's not already in the level
+	 */
+	ENGINE_API void AddLoadedActor(AActor* Actor, const FTransform* TransformToApply = nullptr);
+	ENGINE_API void AddLoadedActors(const TArray<AActor*>& ActorList, const FTransform* TransformToApply = nullptr);
+
+	/**
+	 * Remove a dynamically loaded actor from this level.
+	 *
+	 * @param Actor				The actor to remove from the level
+	 * @param TransformToRemove	The transform that was applied to this actor when it was added to the level
+	 */
+	ENGINE_API void RemoveLoadedActor(AActor* Actor, const FTransform* TransformToRemove = nullptr);
+	ENGINE_API void RemoveLoadedActors(const TArray<AActor*>& ActorList, const FTransform* TransformToRemove = nullptr);
+
+	/** Called when dynamically loaded actors are being added to this level */
+	DECLARE_EVENT_OneParam(ULevel, FLoadedActorAddedToLevelPreEvent, const TArray<AActor*>&);
+	FLoadedActorAddedToLevelPreEvent OnLoadedActorAddedToLevelPreEvent;
+
+	/** Called when dynamically loaded actor is added to this level */
+	DECLARE_EVENT_OneParam(ULevel, FLoadedActorAddedToLevelEvent, AActor&);
+	FLoadedActorAddedToLevelEvent OnLoadedActorAddedToLevelEvent;
+
+	/** Called when dynamically loaded actors were added to this level */
+	DECLARE_EVENT_OneParam(ULevel, FLoadedActorAddedToLevelPostEvent, const TArray<AActor*>&);
+	FLoadedActorAddedToLevelPostEvent OnLoadedActorAddedToLevelPostEvent;
+
+	/** Called when dynamically loaded actors are being removed from this level */
+	DECLARE_EVENT_OneParam(ULevel, FLoadedActorRemovedFromLevelPreEvent, const TArray<AActor*>&);
+	FLoadedActorRemovedFromLevelPreEvent OnLoadedActorRemovedFromLevelPreEvent;
+
+	/** Called when dynamically loaded actor is removed from this level */
+	DECLARE_EVENT_OneParam(ULevel, FLoadedActorRemovedFromLevelEvent, AActor&);
+	FLoadedActorRemovedFromLevelEvent OnLoadedActorRemovedFromLevelEvent;
+
+	/** Called when dynamically loaded actors were removed from this level */
+	DECLARE_EVENT_OneParam(ULevel, FLoadedActorRemovedFromLevelPostEvent, const TArray<AActor*>&);
+	FLoadedActorRemovedFromLevelPostEvent OnLoadedActorRemovedFromLevelPostEvent;
+#endif
+
+	/* Called when level is loaded. */
+	ENGINE_API void OnLevelLoaded();
+
 	virtual bool IsNameStableForNetworking() const override { return true; }		// For now, assume all levels have stable net names
 
 	/** Handles network initialization for actors in this level */
@@ -858,11 +1012,22 @@ public:
 	ENGINE_API void ReleaseRenderingResources();
 
 	/**
+	 * Returns whether the level has completed routing actor initialization.
+	 */
+	bool IsFinishedRouteActorInitialization() const { return RouteActorInitializationState == ERouteActorInitializationState::Finished; }
+
+	/**
+	 * Method for resetting routing actor initialization for the next time this level is streamed.
+	 */
+	void ResetRouteActorInitializationState();
+
+	/**
 	 * Routes pre and post initialize to actors and also sets volumes.
 	 *
+	 * @param NumActorsToProcess	The maximum number of actors to update in this pass, 0 to process all actors.
 	 * @todo seamless worlds: this doesn't correctly handle volumes in the multi- level case
 	 */
-	void RouteActorInitialize();
+	void RouteActorInitialize(int32 NumActorsToProcess);
 
 	/**
 	 * Rebuilds static streaming data for all levels in the specified UWorld.
@@ -888,6 +1053,36 @@ public:
 	ENGINE_API AWorldSettings* GetWorldSettings(bool bChecked = true) const;
 
 	ENGINE_API void SetWorldSettings(AWorldSettings* NewWorldSettings);
+
+	/**
+	 * Returns the world data layers info for this level.
+	 *
+	 * @return		The AWorldDataLayers for this level.
+	 */
+	ENGINE_API AWorldDataLayers* GetWorldDataLayers() const;
+
+	ENGINE_API void SetWorldDataLayers(AWorldDataLayers* NewWorldDataLayers);
+
+	/**
+	 * Returns the RuntimeCell associated with this Level if it is a level representing a cell of a WorldPartition World.
+	 *
+	 * @return		The cell associated with the level.
+	 */
+	ENGINE_API const IWorldPartitionCell* GetWorldPartitionRuntimeCell() const;
+
+	/**
+	 * Returns if the level is a cell from a WorldPartition World.
+	 *
+	 * @return		The cell associated with the level.
+	 */
+	bool IsWorldPartitionRuntimeCell() const { return !WorldPartitionRuntimeCell.GetUniqueID().IsNull(); }
+
+	/**
+	 * Returns the UWorldPartition for this level.
+	 *
+	 * @return		The UWorldPartition for this level (nullptr if not found).
+	 */
+	ENGINE_API class UWorldPartition* GetWorldPartition() const;
 
 	/**
 	 * Returns the level scripting actor associated with this level
@@ -922,32 +1117,31 @@ public:
 	ENGINE_API void HandleLegacyMapBuildData();
 
 #if WITH_EDITOR
-	/** Returns true if the level uses external actors mode. */
-	ENGINE_API bool IsUsingExternalActors() const;
-
-	/** Sets if the level uses external actors mode or not. */
-	ENGINE_API void SetUseExternalActors(bool bEnable);
-
-	ENGINE_API static bool CanConvertActorToExternalPackaging(AActor* Actor);
-
-	/** 
-	 * Convert this level actors to the specified loading strategy
-	 * @param bExternal if true will convert internal actors to external, will convert external actors to internal otherwise
-	 * @note does not affect the level bUseExternalActors flag
+	/**
+	 * Get the package name for this actor
+	 * @param InLevelPackage the package to get the external actors package name of
+	 * @param InActorPackagingScheme the packaging scheme to use
+	 * @param InActorPath the fully qualified actor path, in the format: 'Outermost.Outer.Name'
+	 * @param InLevelMountPointContext an optional context object used to determine the mount point of the package
+	 * @return the package name
 	 */
-	ENGINE_API void ConvertAllActorsToPackaging(bool bExternal);
+	static ENGINE_API FString GetActorPackageName(UPackage* InLevelPackage, EActorPackagingScheme InActorPackagingScheme, const FString& InActorPath, const UObject* InLevelMountPointContext = nullptr);
 
 	/**
-	 * Get the list of (on disk) external actor packages associated with this level
-	 * @return Array of packages associated with this level
+	 * Returns a resolved level path using the level mount point context
+	 * @param InLevelPackage the level package name
+	 * @param InLevelMountPointContext an optional context object used to determine the mount point of the package
 	 */
-	ENGINE_API TArray<FString> GetOnDiskExternalActorPackages() const;
+	static ENGINE_API FString ResolveRootPath(const FString& LevelPackageName, const UObject* InLevelMountPointContext = nullptr);
 
 	/**
-	 * Get the list of (loaded) external actor packages associated with this level
-	 * @return Array of packages associated with this level
+	 * Get the package name for this actor
+	 * @param InBaseDir the base directory used when building the actor package name
+	 * @param InActorPackagingScheme the packaging scheme to use
+	 * @param InActorPath the fully qualified actor path, in the format: 'Outermost.Outer.Name'
+	 * @return the package name
 	 */
-	ENGINE_API TArray<UPackage*> GetLoadedExternalActorPackages() const;
+	static ENGINE_API FString GetActorPackageName(const FString& InBaseDir, EActorPackagingScheme InActorPackagingScheme, const FString& InActorPath);
 
 	/**
 	 * Get the folder containing the external actors for this level path
@@ -958,6 +1152,14 @@ public:
 	static ENGINE_API FString GetExternalActorsPath(const FString& InLevelPackageName, const FString& InPackageShortName = FString());
 
 	/**
+	 * Get the folders containing the external actors for this level path, including actor folders of registered plugins for this level 
+	 * @param InLevelPackageName The package name to get the external actors path of
+	 * @param InPackageShortName Optional short name to use instead of the package short name
+	 * @return the folder
+	 */
+	static ENGINE_API TArray<FString> GetExternalActorsPaths(const FString& InLevelPackageName, const FString& InPackageShortName = FString());
+
+	/**
 	 * Get the folder containing the external actors for this level
 	 * @param InLevelPackage The package to get the external actors path of
 	 * @param InPackageShortName Optional short name to use instead of the package short name
@@ -966,11 +1168,106 @@ public:
 	static ENGINE_API FString GetExternalActorsPath(UPackage* InLevelPackage, const FString& InPackageShortName = FString());
 
 	/**
+	 * Extract the packaging Scheme used by an external actor package based on the name of the package
+	 */
+	static ENGINE_API EActorPackagingScheme GetActorPackagingSchemeFromActorPackageName(const FStringView InActorPackageName);
+
+	/**
+	 * Scans/Updates all Level Assets (level package and external packages)
+	 */
+	static ENGINE_API void ScanLevelAssets(const FString& InLevelPackageName);
+
+	/**
+	 * Get the folder name from which all external actors paths are created
+	 * @return folder name
+	 */
+	static ENGINE_API const TCHAR* GetExternalActorsFolderName();
+
+	/** Returns true if the level uses external actors mode. */
+	ENGINE_API bool IsUsingExternalActors() const;
+
+	/** Sets if the level uses external actors mode or not. */
+	ENGINE_API void SetUseExternalActors(bool bEnable);
+
+	/**
+	 * Get the folders containing the external objects for this level path
+	 * @param InLevelPackageName The package name to get the external objects path of
+	 * @param InPackageShortName Optional short name to use instead of the package short name
+	 * @return the folders
+	 */
+	static ENGINE_API TArray<FString> GetExternalObjectsPaths(const FString& InLevelPackageName, const FString& InPackageShortName = FString());
+
+	/** Returns true if the level uses external objects. */
+	ENGINE_API bool IsUsingExternalObjects() const;
+
+	/** Returns true if the level uses actor folders mode. */
+	ENGINE_API bool IsUsingActorFolders() const;
+
+	/** Updates all actors/folders that refer to folders marked as deleted, reparent to valid folder, deletes folders marked as deleted. */
+	ENGINE_API void CreateOrUpdateActorFolders();
+
+	/** Deletes all actor folders marked as deleted and unreferenced by neither an actor nor another actor folder */
+	ENGINE_API void CleanupDeletedAndUnreferencedActorFolders();
+
+	/** Sets if the level uses actor folders mode or not. Returns true if succeeded. */
+	ENGINE_API bool SetUseActorFolders(bool bEnabled, bool bInteractive = false);
+
+	/** Finds the level actor folder by its guid. Returns null if not found. */
+	ENGINE_API UActorFolder* GetActorFolder(const FGuid& InGuid, bool bSkipDeleted = true) const;
+
+	/** Finds the level actor folder by its path. Returns null if not found. */
+	ENGINE_API UActorFolder* GetActorFolder(const FName& InPath) const;
+
+	/** Iterates on all valid level actor folders. */
+	ENGINE_API void ForEachActorFolder(TFunctionRef<bool(UActorFolder*)> Operation, bool bSkipDeleted = false);
+
+	/** Returns true if the level wants newly spawned actors to be external */
+	ENGINE_API bool ShouldCreateNewExternalActors() const;
+
+	/** Returns the level's actor packaging scheme */
+	EActorPackagingScheme GetActorPackagingScheme() const { return ActorPackagingScheme; }
+
+	/** 
+	 * Convert this level actors to the specified loading strategy
+	 * @param bExternal if true will convert internal actors to external, will convert external actors to internal otherwise
+	 * @note does not affect the level bUseExternalActors flag
+	 */
+	ENGINE_API void ConvertAllActorsToPackaging(bool bExternal);
+
+	/**
+	* Get a properly formated external actor package instance name for this level package to be used in FLinkerInstancingContext
+	* @return external actor package instance name
+	*/
+	static ENGINE_API FString GetExternalActorPackageInstanceName(const FString& LevelPackageName, const FString& ActorPackageName);
+
+	/**
+	 * Get the list of (on disk) external actor packages associated with this external actors path
+	 * @param ExternalActorsPath the path to scan for external actor packages
+	 * @return Array of packages associated with this level
+	 */
+	static ENGINE_API TArray<FString> GetOnDiskExternalActorPackages(const FString& ExternalActorsPath);
+
+	/**
+	 * Get the list of (on disk) external actor packages associated with this level
+	 * @return Array of packages associated with this level
+	 */
+	ENGINE_API TArray<FString> GetOnDiskExternalActorPackages(bool bTryUsingPackageLoadedPath = false) const;
+
+	/**
+	 * Get the list of (loaded) external object packages (actors/folders) associated with this level
+	 * @return Array of packages associated with this level
+	 */
+	ENGINE_API TArray<UPackage*> GetLoadedExternalObjectPackages() const;
+
+	/**
 	 * Create an package for this actor
-	 * @param InGuid the guid to generate the name from.
+	 * @param InLevelPackage the level package used when building the actor package name
+	 * @param InActorPackagingScheme the packaging scheme to use
+	 * @param InActorPath the fully qualified actor path, in the format: 'Outermost.Outer.Name'
+	 * @param InMountPointContext an optional context object used to determine the mount point of the package
 	 * @return the created package
 	 */
-	static ENGINE_API UPackage* CreateActorPackage(UPackage* InLevelPackage, const FGuid& InGuid);
+	static ENGINE_API UPackage* CreateActorPackage(UPackage* InLevelPackage, EActorPackagingScheme InActorPackagingScheme, const FString& InActorPath, const UObject* InMountPointContext = nullptr);
 
 	/**
 	 * Detach or reattach all level actors to from/to their external package
@@ -999,6 +1296,7 @@ public:
 	/**
 	 *  Returns a list of all blueprints contained within the level
 	 */
+	UE_DEPRECATED(5.0, "This function is deprecated, we only support having a single level script blueprint. Use GetLevelScriptBlueprint instead.")
 	ENGINE_API TArray<class UBlueprint*> GetLevelBlueprints() const;
 
 	/**
@@ -1010,10 +1308,16 @@ public:
 	 * Call on a level that was loaded from disk instead of PIE-duplicating, to fixup actor references
 	 */
 	ENGINE_API void FixupForPIE(int32 PIEInstanceID);
+	ENGINE_API void FixupForPIE(int32 PIEInstanceID, TFunctionRef<void(int32, FSoftObjectPath&)> CustomFixupFunction);
+
+	/**
+	 * Returns true if the level contains static meshes that have not finished compiling yet.
+	 */
+	ENGINE_API bool HasStaticMeshCompilationPending();
 #endif
 
 	/** @todo document */
-	ENGINE_API TArray<FVector> const* GetStaticNavigableGeometry() const { return &StaticNavigableGeometry;}
+	TArray<FVector> const* GetStaticNavigableGeometry() const { return &StaticNavigableGeometry;}
 
 	/** 
 	* Is this the persistent level 
@@ -1025,6 +1329,11 @@ public:
 	*/
 	ENGINE_API bool IsCurrentLevel() const;
 	
+	/**
+	 * Is this a level instance
+	 */
+	ENGINE_API bool IsInstancedLevel() const;
+
 	/** 
 	 * Shift level actors by specified offset
 	 * The offset vector will get subtracted from all actors positions and corresponding data structures
@@ -1046,22 +1355,98 @@ public:
 	virtual UAssetUserData* GetAssetUserDataOfClass(TSubclassOf<UAssetUserData> InUserDataClass) override;
 	//~ End IInterface_AssetUserData Interface
 
+	/** Estimate the amount of AddToWorld work for this level. Used by the adaptive level streaming timeslice (see s.AdaptiveAddToWorld.Enabled) */
+	int32 GetEstimatedAddToWorldWorkUnitsRemaining() const;
+	/** Estimate the total amount of AddToWorld work for this level. Used by the adaptive level streaming timeslice (see s.AdaptiveAddToWorld.Enabled) */
+	int32 GetEstimatedAddToWorldWorkUnitsTotal() const;
+
 #if WITH_EDITOR
 	/** meant to be called only from editor, calculating and storing static geometry to be used with off-line and/or on-line navigation building */
 	ENGINE_API void RebuildStaticNavigableGeometry();
 
+	DECLARE_DELEGATE_ThreeParams(FLevelExternalActorsPathsProviderDelegate, const FString&, const FString&, TArray<FString>&);
+	/** Registers a level external actor paths provider */
+	static ENGINE_API FDelegateHandle RegisterLevelExternalActorsPathsProvider(const FLevelExternalActorsPathsProviderDelegate& Provider);
+	/** Unregisters a level external actor paths provider */
+	static ENGINE_API void UnregisterLevelExternalActorsPathsProvider(const FDelegateHandle& ProviderDelegateHandle);
+
+	DECLARE_DELEGATE_RetVal_ThreeParams(bool, FLevelMountPointResolverDelegate, const FString&, const UObject*, FString&);
+	/** Registers a level mount point resolver */
+	static ENGINE_API FDelegateHandle RegisterLevelMountPointResolver(const FLevelMountPointResolverDelegate& Resolver);
+	/** Unregisters a level mount point resolver */
+	static ENGINE_API void UnregisterLevelMountPointResolver(const FDelegateHandle& ResolverDelegateHandle);
 #endif
 
-
+private:
+	bool IncrementalRegisterComponents(bool bPreRegisterComponents, int32 NumComponentsToUpdate, FRegisterComponentContext* Context);
 #if WITH_EDITOR
+	bool IncrementalRunConstructionScripts(bool bProcessAllActors);
+	TOptional<bool> bCachedHasStaticMeshCompilationPending;
+
+	/** Array of registered delegates used by GetExternalActorsPaths. */
+	static TArray<FLevelExternalActorsPathsProviderDelegate> LevelExternalActorsPathsProviders;
+
+	/** Array of registered delegates used by GetExternalActorsPaths. */
+	static TArray<FLevelMountPointResolverDelegate> LevelMountPointResolvers;
+private:
+	/**
+	 * Potentially defer the running of an actor's construction script on load
+	 * The running will be deferred if the actor's user construction script is non trivial 
+	 * and if there are outstanding asset compilation currently running (currently checks against static meshes)
+	 * @param InActor The actor to check
+	 * @return true if the running of the construction script was deferred
+	 */
+	bool DeferRunningConstructionScripts(AActor* InActor);
+
 	/** Attempts to detect and fix any issues with the level script blueprint and associated objects */
 	void RepairLevelScript();
 
+	/** Prepares/fixes actor folder objects once level is fully loaded. */
+	void FixupActorFolders();
+
+	void AddActorFolder(UActorFolder* InActorFolder);
+	void RemoveActorFolder(UActorFolder* InActorFolder);
+	void OnFolderMarkAsDeleted(UActorFolder* InActorFolder);
+	void OnFolderLabelChanged(UActorFolder* InActorFolder, const FString& InOldFolderLabel);
+
+	/** Sets the level to use or not the actor folder objects feature. */
+	void SetUseActorFoldersInternal(bool bInEnabled);
+
+	/** Returns unreferenced actor folders that are marked as deleted. */
+	TSet<FGuid> GetDeletedAndUnreferencedActorFolders() const;
+
+	friend struct FLevelActorFoldersHelper;
+	friend struct FSetWorldPartitionRuntimeCell;
+	friend class FWorldPartitionLevelHelper;
+	friend class UActorFolder;
+	friend class AWorldDataLayers;
+
 	/** Replace the existing LSA (if set) by spawning a new one based on this level's script blueprint */
 	void RegenerateLevelScriptActor();
+
+	/** Find and destroy any extra LSAs, as they will cause duplicated level script operations */
+	void RemoveExtraLevelScriptActors();
+
+	/** Notification popup used to guide the user to repair multiple LSAs detected upon loading in the editor */
+	TWeakPtr<SNotificationItem> MultipleLSAsNotification;
+	void OnMultipleLSAsPopupClicked();
+	void OnMultipleLSAsPopupDismissed();
+
 #endif // WITH_EDITOR
 };
 
+#if WITH_EDITOR
+struct FSetWorldPartitionRuntimeCell
+{
+private:
+	FSetWorldPartitionRuntimeCell(ULevel* InLevel, const FSoftObjectPath& InWorldPartitionRuntimeCell)
+	{
+		InLevel->WorldPartitionRuntimeCell = InWorldPartitionRuntimeCell;
+	}
+	friend class FWorldPartitionLevelHelper;
+	friend class UWorldPartition;
+};
+#endif 
 
 /**
  * Macro for wrapping Delegates in TScopedCallback

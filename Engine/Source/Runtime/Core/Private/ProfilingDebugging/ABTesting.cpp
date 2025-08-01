@@ -57,7 +57,6 @@ FABTest::FABTest()
 		, CurrentTest(0)
 		, RemainingTrial(0)
 		, RemainingPrint(0)
-		, SampleIndex(0)
 		, HistoryNum(0)
 		, ReportNum(0)
 		, CoolDown(0)
@@ -124,7 +123,7 @@ const TCHAR* FABTest::TickAndGetCommand()
 		if (ABTestNumSamples < HistoryNum)
 		{
 			check(ABTestNumSamples == Samples.Num());
-			Sample = new (Samples)FSample();
+			Sample = &Samples.AddDefaulted_GetRef();
 		}
 		else
 		{

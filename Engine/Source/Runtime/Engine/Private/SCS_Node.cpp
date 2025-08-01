@@ -1,11 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/SCS_Node.h"
+#include "EngineLogs.h"
 #include "UObject/LinkerLoad.h"
-#include "Engine/Blueprint.h"
-#include "Misc/SecureHash.h"
-#include "UObject/PropertyPortFlags.h"
+#include "Engine/World.h"
 #include "Engine/InheritableComponentHandler.h"
+#include "StaticMeshResources.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SCS_Node)
 
 //////////////////////////////////////////////////////////////////////////
 // USCS_Node
@@ -48,7 +50,7 @@ UActorComponent* USCS_Node::GetActualComponentTemplate(UBlueprintGeneratedClass*
 			} while (!OverridenComponentTemplate && ActualBPGC && SCS != ActualBPGC->SimpleConstructionScript);
 		}
 	}
-	return OverridenComponentTemplate ? OverridenComponentTemplate : ComponentTemplate;
+	return OverridenComponentTemplate ? OverridenComponentTemplate : ToRawPtr(ComponentTemplate);
 }
 
 const FBlueprintCookedComponentInstancingData* USCS_Node::GetActualComponentTemplateData(UBlueprintGeneratedClass* ActualBPGC) const
@@ -79,10 +81,10 @@ const FBlueprintCookedComponentInstancingData* USCS_Node::GetActualComponentTemp
 	return OverridenComponentTemplateData ? OverridenComponentTemplateData : &CookedComponentInstancingData;
 }
 
-UActorComponent* USCS_Node::ExecuteNodeOnActor(AActor* Actor, USceneComponent* ParentComponent, const FTransform* RootTransform, const FRotationConversionCache* RootRelativeRotationCache, bool bIsDefaultTransform)
+UActorComponent* USCS_Node::ExecuteNodeOnActor(AActor* Actor, USceneComponent* ParentComponent, const FTransform* RootTransform, const FRotationConversionCache* RootRelativeRotationCache, bool bIsDefaultTransform, ESpawnActorScaleMethod TransformScaleMethod)
 {
 	check(Actor != nullptr);
-	check((ParentComponent != nullptr && !ParentComponent->IsPendingKill()) || (RootTransform != nullptr)); // must specify either a parent component or a world transform
+	check(IsValid(ParentComponent) || (RootTransform != nullptr)); // must specify either a parent component or a world transform
 
 	// Create a new component instance based on the template
 	UActorComponent* NewActorComp = nullptr;
@@ -116,18 +118,32 @@ UActorComponent* USCS_Node::ExecuteNodeOnActor(AActor* Actor, USceneComponent* P
 		USceneComponent* NewSceneComp = Cast<USceneComponent>(NewActorComp);
 		if (NewSceneComp != nullptr)
 		{
+			// Only register scene components if the world is initialized
+			UWorld* World = Actor->GetWorld();
+			bool bRegisterComponent = World && World->bIsWorldInitialized;
+
 			// If NULL is passed in, we are the root, so set transform and assign as RootComponent on Actor, similarly if the 
 			// NewSceneComp is the ParentComponent then we are the root component. This happens when the root component is recycled
 			// by StaticAllocateObject.
-			if (ParentComponent == nullptr || (ParentComponent && ParentComponent->IsPendingKill()) || ParentComponent == NewSceneComp)
+			if (!IsValid(ParentComponent) || ParentComponent == NewSceneComp)
 			{
 				FTransform WorldTransform = *RootTransform;
+				switch(TransformScaleMethod)
+				{
+				case ESpawnActorScaleMethod::OverrideRootScale:
+				case ESpawnActorScaleMethod::SelectDefaultAtRuntime:
+					// Use the provided transform and ignore the root component
+					break;
+				case ESpawnActorScaleMethod::MultiplyWithRoot:
+					WorldTransform = NewSceneComp->GetRelativeTransform() * WorldTransform;
+					break;
+				}
+				
 				if(bIsDefaultTransform)
 				{
 					// Note: We use the scale vector from the component template when spawning (to match what happens with a native root). This
 					// does NOT occur when this component is instanced as part of dynamically spawning a Blueprint class in a cooked build (i.e.
-					// 'bIsDefaultTransform' will be 'false' in that situation). In order to maintain the same behavior between a nativized and
-					// non-nativized cooked build, if this ever changes, we would also need to update the code in AActor::PostSpawnInitialize().
+					// 'bIsDefaultTransform' will be 'false' in that situation).
 					WorldTransform.SetScale3D(NewSceneComp->GetRelativeScale3D());
 				}
 
@@ -140,7 +156,7 @@ UActorComponent* USCS_Node::ExecuteNodeOnActor(AActor* Actor, USceneComponent* P
 				Actor->SetRootComponent(NewSceneComp);
 
 				// This will be true if we deferred the RegisterAllComponents() call at spawn time. In that case, we can call it now since we have set a scene root.
-				if (Actor->HasDeferredComponentRegistration())
+				if (Actor->HasDeferredComponentRegistration() && bRegisterComponent)
 				{
 					// Register the root component along with any components whose registration may have been deferred pending SCS execution in order to establish a root.
 					Actor->RegisterAllComponents();
@@ -153,7 +169,15 @@ UActorComponent* USCS_Node::ExecuteNodeOnActor(AActor* Actor, USceneComponent* P
 			}
 
 			// Register SCS scene components now (if necessary). Non-scene SCS component registration is deferred until after SCS execution, as there can be dependencies on the scene hierarchy.
-			USimpleConstructionScript::RegisterInstancedComponent(NewSceneComp);
+			if (bRegisterComponent)
+			{
+				FStaticMeshComponentBulkReregisterContext* ReregisterContext = Cast<USimpleConstructionScript>(GetOuter())->GetReregisterContext();
+				if (ReregisterContext)
+				{
+					ReregisterContext->AddConstructedComponent(NewSceneComp);
+				}
+				USimpleConstructionScript::RegisterInstancedComponent(NewSceneComp);
+			}
 		}
 
 		// If we want to save this to a property, do it here
@@ -324,10 +348,28 @@ void USCS_Node::PreloadChain()
 
 	if (ComponentTemplate && ComponentTemplate->HasAnyFlags(RF_NeedLoad))
 	{
-		ComponentTemplate->GetLinker()->Preload(ComponentTemplate);
+		if (ensureMsgf(ComponentTemplate->GetLinker(), TEXT("Failed to find linker for %s, likely a circular dependency"), *ComponentTemplate->GetPathName()))
+		{
+			ComponentTemplate->GetLinker()->Preload(ComponentTemplate);
+
+			TArray<UObject*> Children;
+			GetObjectsWithOuter(ComponentTemplate, Children, true, RF_LoadCompleted);
+			for (UObject* Obj : Children)
+			{
+				if (!Obj->HasAnyFlags(RF_WasLoaded))
+				{
+					continue;
+				}
+
+				if (FLinkerLoad* Linker = Obj->GetLinker())
+				{
+					Linker->Preload(Obj);
+				}
+			}
+		}
 	}
 
-	for( TArray<USCS_Node*>::TIterator ChildIt(ChildNodes); ChildIt; ++ChildIt )
+	for( decltype(ChildNodes)::TIterator ChildIt(ChildNodes); ChildIt; ++ChildIt )
 	{
 		USCS_Node* CurrentChild = *ChildIt;
 		if( CurrentChild )
@@ -623,15 +665,15 @@ void USCS_Node::ValidateGuid()
 	}
 }
 
-EDataValidationResult USCS_Node::IsDataValid(TArray<FText>& ValidationErrors)
+EDataValidationResult USCS_Node::IsDataValid(FDataValidationContext& Context) const
 {
-	EDataValidationResult Result = Super::IsDataValid(ValidationErrors);
+	EDataValidationResult Result = Super::IsDataValid(Context);
 	Result = (Result == EDataValidationResult::NotValidated) ? EDataValidationResult::Valid : Result;
 
 	// check the component that this node represents
 	if (ComponentTemplate)
 	{
-		EDataValidationResult ComponentResult = ComponentTemplate->IsDataValid(ValidationErrors);
+		EDataValidationResult ComponentResult = AsConst(*ComponentTemplate).IsDataValid(Context);
 		Result = CombineDataValidationResults(Result, ComponentResult);
 	}
 
@@ -640,7 +682,7 @@ EDataValidationResult USCS_Node::IsDataValid(TArray<FText>& ValidationErrors)
 	{
 		if (Child)
 		{
-			EDataValidationResult ChildResult = Child->IsDataValid(ValidationErrors);
+			EDataValidationResult ChildResult = Child->IsDataValid(Context);
 			Result = CombineDataValidationResults(Result, ChildResult);
 		}
 	}
@@ -649,3 +691,4 @@ EDataValidationResult USCS_Node::IsDataValid(TArray<FText>& ValidationErrors)
 }
 
 #endif // WITH_EDITOR
+

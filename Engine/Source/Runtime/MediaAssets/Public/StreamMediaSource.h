@@ -5,12 +5,15 @@
 #include "BaseMediaSource.h"
 #include "Containers/UnrealString.h"
 #include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
 
 #include "StreamMediaSource.generated.h"
 
+class UObject;
 
-UCLASS(BlueprintType)
-class MEDIAASSETS_API UStreamMediaSource
+
+UCLASS(BlueprintType, MinimalAPI)
+class UStreamMediaSource
 	: public UBaseMediaSource
 {
 	GENERATED_BODY()
@@ -25,6 +28,11 @@ public:
 
 	//~ UMediaSource interface
 
-	virtual FString GetUrl() const override;
-	virtual bool Validate() const override;
+	MEDIAASSETS_API virtual FString GetUrl() const override;
+	MEDIAASSETS_API virtual bool Validate() const override;
+
+#if WITH_EDITOR
+	MEDIAASSETS_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
+
 };

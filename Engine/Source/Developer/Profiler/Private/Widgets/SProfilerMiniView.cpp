@@ -1,6 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Widgets/SProfilerMiniView.h"
+
+#if STATS
+
 #include "Fonts/SlateFontInfo.h"
 #include "Misc/Paths.h"
 #include "Rendering/DrawElements.h"
@@ -8,8 +11,8 @@
 #include "Fonts/FontMeasure.h"
 #include "Styling/CoreStyle.h"
 #include "Framework/Application/SlateApplication.h"
-#include "EditorStyleSet.h"
 #include "ProfilerSession.h"
+#include "ProfilerStyle.h"
 
 
 SProfilerMiniView::SProfilerMiniView()
@@ -99,24 +102,24 @@ int32 SProfilerMiniView::OnPaint( const FPaintArgs& Args, const FGeometry& Allot
 	// Rendering info.
 	const bool bEnabled = ShouldBeEnabled( bParentEnabled );
 	const ESlateDrawEffect DrawEffects = bEnabled ? ESlateDrawEffect::None : ESlateDrawEffect::DisabledEffect;
-	const FSlateBrush* MiniViewArea = FEditorStyle::GetBrush( "Profiler.LineGraphArea" );
-	const FSlateBrush* WhiteBrush = FEditorStyle::GetBrush( "WhiteTexture" );
+	const FSlateBrush* MiniViewArea = FProfilerStyle::Get().GetBrush( "Brushes.White25" );
+	const FSlateBrush* WhiteBrush = FProfilerStyle::Get().GetBrush( "Brushes.White" );
 
 	PaintState = new((void*)PaintStateMemory) FSlateOnPaintState( AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, DrawEffects );
 
-	const float MiniViewSizeX = AllottedGeometry.Size.X;
-	const float MiniViewSizeY = AllottedGeometry.Size.Y;
+	const float MiniViewSizeX = static_cast<float>(AllottedGeometry.Size.X);
+	const float MiniViewSizeY = static_cast<float>(AllottedGeometry.Size.Y);
 
 	const TSharedRef< FSlateFontMeasure > FontMeasureService = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
 	FSlateFontInfo SummaryFont = FCoreStyle::GetDefaultFontStyle("Regular", 8);
-	const float MaxFontCharHeight = FontMeasureService->Measure( TEXT( "!" ), SummaryFont ).Y;
+	const float MaxFontCharHeight = static_cast<float>(FontMeasureService->Measure( TEXT( "!" ), SummaryFont ).Y);
 
 	// Draw background.
 	FSlateDrawElement::MakeBox
 	(
 		OutDrawElements,
 		LayerId,
-		AllottedGeometry.ToPaintGeometry( FVector2D( 0, 0 ), FVector2D( MiniViewSizeX, AllottedGeometry.Size.Y ) ),
+		AllottedGeometry.ToPaintGeometry( FVector2D( MiniViewSizeX, AllottedGeometry.Size.Y ), FSlateLayoutTransform() ),
 		MiniViewArea,
 		DrawEffects,
 		MiniViewArea->GetTint( InWidgetStyle ) * InWidgetStyle.GetColorAndOpacityTint()
@@ -152,7 +155,7 @@ int32 SProfilerMiniView::OnPaint( const FPaintArgs& Args, const FGeometry& Allot
 			(
 				OutDrawElements,
 				LayerId,
-				AllottedGeometry.ToPaintGeometry( FVector2D( DestSamplePosX0, MiniViewSizeY - GTSizeY ), FVector2D( DestSampleSizeX, GTSizeY ) ),
+				AllottedGeometry.ToPaintGeometry( FVector2D( DestSampleSizeX, GTSizeY ), FSlateLayoutTransform(FVector2D( DestSamplePosX0, MiniViewSizeY - GTSizeY )) ),
 				&SolidWhiteBrush,
 				DrawEffects,
 				GameThreadColor
@@ -163,7 +166,7 @@ int32 SProfilerMiniView::OnPaint( const FPaintArgs& Args, const FGeometry& Allot
 			(
 				OutDrawElements,
 				LayerId,
-				AllottedGeometry.ToPaintGeometry( FVector2D( DestSamplePosX0, MiniViewSizeY - GTSizeY - RTSizeY ), FVector2D( DestSampleSizeX, RTSizeY ) ),
+				AllottedGeometry.ToPaintGeometry( FVector2D( DestSampleSizeX, RTSizeY ), FSlateLayoutTransform(FVector2D( DestSamplePosX0, MiniViewSizeY - GTSizeY - RTSizeY )) ),
 				&SolidWhiteBrush,
 				DrawEffects,
 				RenderThreadColor
@@ -192,8 +195,8 @@ int32 SProfilerMiniView::OnPaint( const FPaintArgs& Args, const FGeometry& Allot
 		
 		const int32 MaxFrameIndex = AllFrames.Num() - 1;
 		
-		const int32 SelectionBoxX0 = FMath::TruncToInt( FrameIndexToPosition( SelectionBoxFrameStart ) );
-		const int32 SelectionBoxX1 = FMath::TruncToInt(FrameIndexToPosition(SelectionBoxFrameEnd + 1));
+		const double SelectionBoxX0 = FMath::TruncToInt( FrameIndexToPosition( SelectionBoxFrameStart ) );
+		const double SelectionBoxX1 = FMath::TruncToInt( FrameIndexToPosition( SelectionBoxFrameEnd + 1 ));
 
 		if( SelectionBoxFrameStart > 0 )
 		{
@@ -201,7 +204,7 @@ int32 SProfilerMiniView::OnPaint( const FPaintArgs& Args, const FGeometry& Allot
 			(
 				OutDrawElements,
 				LayerId,
-				AllottedGeometry.ToPaintGeometry( FVector2D( 0.0f, 0.0f ), FVector2D( (float)SelectionBoxX0, AllottedGeometry.Size.Y ) ),
+				AllottedGeometry.ToPaintGeometry( FVector2D( SelectionBoxX0, AllottedGeometry.Size.Y ), FSlateLayoutTransform(FVector2D( 0.0, 0.0 )) ),
 				&SolidWhiteBrush,
 				DrawEffects,
 				FColorList::Grey.WithAlpha( 192 )
@@ -214,7 +217,7 @@ int32 SProfilerMiniView::OnPaint( const FPaintArgs& Args, const FGeometry& Allot
 			(
 				OutDrawElements,
 				LayerId,
-				AllottedGeometry.ToPaintGeometry( FVector2D( SelectionBoxX1, 0.0f ), FVector2D( MiniViewSizeX - SelectionBoxX1, AllottedGeometry.Size.Y ) ),
+				AllottedGeometry.ToPaintGeometry( FVector2D( MiniViewSizeX - SelectionBoxX1, AllottedGeometry.Size.Y ), FSlateLayoutTransform(FVector2D( SelectionBoxX1, 0.0 )) ),
 				&SolidWhiteBrush,
 				DrawEffects,
 				FColorList::Grey.WithAlpha( 192 )
@@ -222,15 +225,15 @@ int32 SProfilerMiniView::OnPaint( const FPaintArgs& Args, const FGeometry& Allot
 		}
 
 		// Draw the filler, to hide the difference between window's width and mini-view samples' width.
-		const float FillerSizeX = MiniViewSizeX - CurrentSamplePosX;
-		if( FillerSizeX > 0.0f )
+		const double FillerSizeX = MiniViewSizeX - CurrentSamplePosX;
+		if( FillerSizeX > 0.0 )
 		{
-			const float FillerPosX0 = MiniViewSizeX - FillerSizeX;
+			const double FillerPosX0 = MiniViewSizeX - FillerSizeX;
 			FSlateDrawElement::MakeBox
 			(
 				OutDrawElements,
 				LayerId,
-				AllottedGeometry.ToPaintGeometry( FVector2D( FillerPosX0, 0.0f ), FVector2D( FillerSizeX + 1.0f, AllottedGeometry.Size.Y ) ),
+				AllottedGeometry.ToPaintGeometry( FVector2D( FillerSizeX + 1.0, AllottedGeometry.Size.Y ), FSlateLayoutTransform(FVector2D( FillerPosX0, 0.0 )) ),
 				&SolidWhiteBrush,
 				DrawEffects,
 				// #Profiler: 2014-04-09 How to get this color from Slate?
@@ -244,8 +247,8 @@ int32 SProfilerMiniView::OnPaint( const FPaintArgs& Args, const FGeometry& Allot
 		(
 			OutDrawElements,
 			LayerId,
-			AllottedGeometry.ToPaintGeometry( FVector2D( SelectionBoxX0, 0.0f ), FVector2D( SelectionBoxX1 - SelectionBoxX0, AllottedGeometry.Size.Y ) ),
-			FEditorStyle::GetBrush( "PlainBorder" ),
+			AllottedGeometry.ToPaintGeometry( FVector2D( SelectionBoxX1 - SelectionBoxX0, AllottedGeometry.Size.Y ), FSlateLayoutTransform(FVector2D( SelectionBoxX0, 0.0 )) ),
+			FProfilerStyle::Get().GetBrush( "PlainBorder" ),
 			DrawEffects,
 			FColorList::Green
 		);
@@ -258,19 +261,19 @@ int32 SProfilerMiniView::OnPaint( const FPaintArgs& Args, const FGeometry& Allot
 		const float MarkerPosY = 4.0f;
 
 		// Upper left
-		DrawText( TEXT( "Rendering thread" ), SummaryFont, FVector2D( MarkerPosX, MarkerPosY ), RenderThreadColor, FColor::Black, FVector2D( 1.0f, 1.0f ) );
+		DrawText( TEXT( "Rendering thread" ), SummaryFont, FVector2D( MarkerPosX, MarkerPosY ), RenderThreadColor, FColor::Black, FVector2D( 1.0, 1.0 ) );
 		// Down left
-		DrawText( TEXT( "Game thread" ), SummaryFont, FVector2D( MarkerPosX, MiniViewSizeY - MarkerPosY - MaxFontCharHeight ), GameThreadColor, FColor::Black, FVector2D( 1.0f, 1.0f ) );
+		DrawText( TEXT( "Game thread" ), SummaryFont, FVector2D( MarkerPosX, MiniViewSizeY - MarkerPosY - MaxFontCharHeight ), GameThreadColor, FColor::Black, FVector2D( 1.0, 1.0 ) );
 
 		// Upper right
 		const FString ThreadTimeMax = FString::Printf( TEXT( "%5.2f MS" ), MaxFrameTime );
-		const float ThreadTimeMaxSizeX = FontMeasureService->Measure( ThreadTimeMax, SummaryFont ).X;
-		DrawText( ThreadTimeMax, SummaryFont, FVector2D( MiniViewSizeX - ThreadTimeMaxSizeX - MarkerPosX, MarkerPosY ), FColor::White, FColor::Black, FVector2D( 1.0f, 1.0f ) );
+		const double ThreadTimeMaxSizeX = FontMeasureService->Measure( ThreadTimeMax, SummaryFont ).X;
+		DrawText( ThreadTimeMax, SummaryFont, FVector2D( MiniViewSizeX - ThreadTimeMaxSizeX - MarkerPosX, MarkerPosY ), FColor::White, FColor::Black, FVector2D( 1.0, 1.0 ) );
 
 		// Down right
 		const FString ThreadTimeMin = TEXT( "0.0 MS" );
-		const float ThreadTimeMinSizeX = FontMeasureService->Measure( ThreadTimeMin, SummaryFont ).X;
-		DrawText( ThreadTimeMin, SummaryFont, FVector2D( MiniViewSizeX - ThreadTimeMinSizeX - MarkerPosX, MiniViewSizeY - MarkerPosY - MaxFontCharHeight ), FColor::White, FColor::Black, FVector2D( 1.0f, 1.0f ) );
+		const double ThreadTimeMinSizeX = FontMeasureService->Measure( ThreadTimeMin, SummaryFont ).X;
+		DrawText( ThreadTimeMin, SummaryFont, FVector2D( MiniViewSizeX - ThreadTimeMinSizeX - MarkerPosX, MiniViewSizeY - MarkerPosY - MaxFontCharHeight ), FColor::White, FColor::Black, FVector2D( 1.0, 1.0 ) );
 	
 	}
 
@@ -378,7 +381,7 @@ FReply SProfilerMiniView::OnMouseButtonDown( const FGeometry& MyGeometry, const 
 			else
 			{
 				// Clicked outside the selection box, so move the selection box to that position.
-				DistanceDragged = MousePositionOnButtonDown.X;
+				DistanceDragged = static_cast<float>(MousePositionOnButtonDown.X);
 			}
 
 			if( bCanBeStartDragged || bCanBeEndDragged )
@@ -448,9 +451,9 @@ FReply SProfilerMiniView::OnMouseMove( const FGeometry& MyGeometry, const FPoint
 	if( IsReady() )
 	{
 		const FVector2D MousePosition = MyGeometry.AbsoluteToLocal( MouseEvent.GetScreenSpacePosition() );
-		HoveredFrameIndex = PositionToFrameIndex( MousePosition.X );
+		HoveredFrameIndex = PositionToFrameIndex( static_cast<float>(MousePosition.X) );
 
-		const float CursorPosXDelta = MouseEvent.GetCursorDelta().X;
+		const float CursorPosXDelta = static_cast<float>(MouseEvent.GetCursorDelta().X);
 
 		if( MouseEvent.IsMouseButtonDown( EKeys::LeftMouseButton ) )
 		{
@@ -489,11 +492,11 @@ FReply SProfilerMiniView::OnMouseMove( const FGeometry& MyGeometry, const FPoint
 		}
 		else
 		{
-			const float StartEdgeDistance = FrameIndexToPosition(SelectionBoxFrameStart) - MousePosition.X;
-			const float EndEdgeDistance = MousePosition.X - FrameIndexToPosition(SelectionBoxFrameEnd);
+			const float StartEdgeDistance = FrameIndexToPosition(SelectionBoxFrameStart) - static_cast<float>(MousePosition.X);
+			const float EndEdgeDistance = static_cast<float>(MousePosition.X) - FrameIndexToPosition(SelectionBoxFrameEnd);
 
-			bCanBeStartDragged = StartEdgeDistance < MOUSE_SNAP_DISTANCE && StartEdgeDistance > 0.0f;
-			bCanBeEndDragged = EndEdgeDistance < MOUSE_SNAP_DISTANCE && EndEdgeDistance > 0.0f;
+			bCanBeStartDragged = StartEdgeDistance < (float)MOUSE_SNAP_DISTANCE && StartEdgeDistance > 0.0f;
+			bCanBeEndDragged = EndEdgeDistance < (float)MOUSE_SNAP_DISTANCE && EndEdgeDistance > 0.0f;
 
 			if( StartEdgeDistance <= 0.0f && EndEdgeDistance <= 0.0f )
 			{
@@ -654,7 +657,7 @@ void SProfilerMiniView::ProcessData()
 
 	UpdateNumPixelsPerSample();
 
-	const int32 NumMiniViewSamples = FMath::TruncToInt(ThisGeometry.Size.X / GetNumPixelsPerSample());
+	const int32 NumMiniViewSamples = FMath::TruncToInt(static_cast<float>(ThisGeometry.Size.X) / GetNumPixelsPerSample());
 	MiniViewSamples.Reset( NumMiniViewSamples );
 
 	MiniViewSamples.AddZeroed( NumMiniViewSamples );
@@ -671,7 +674,7 @@ void SProfilerMiniView::ProcessData()
 		for( int32 FrameIndex = 0; FrameIndex < NumAllFrames; ++FrameIndex )
 		{
 			const FFrameThreadTimes& FrameThreadTimes = AllFrames[FrameIndex];
-			const int32 SampleIndex = FMath::TruncToInt( ScaleRatio*FrameIndex );
+			const int32 SampleIndex = FMath::TruncToInt( ScaleRatio * (float)FrameIndex );
 
 			FMiniViewSample& Dest = MiniViewSamples[SampleIndex];
 			Dest.AddFrameAndFindMax( FrameThreadTimes );
@@ -711,3 +714,5 @@ void SProfilerMiniView::ProcessData()
 
 	MaxFrameTime = FMath::Clamp( MaxFrameTime, 0.0f, (float)MAX_VISIBLE_THREADTIME );
 }
+
+#endif // STATS

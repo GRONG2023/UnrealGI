@@ -18,7 +18,7 @@ b) As for FbxNode::GetAnimationInternval, this one will iterate through all prop
 
 /** Animation length type when importing */
 UENUM(BlueprintType)
-enum EFBXAnimationLengthImportType
+enum EFBXAnimationLengthImportType : int
 {
 	/** This option imports animation frames based on what is defined at the time of export */
 	FBXALIT_ExportedTime			UMETA(DisplayName = "Exported Time"),
@@ -33,8 +33,8 @@ enum EFBXAnimationLengthImportType
 /**
 * Import data and options used when importing any mesh from FBX
 */
-UCLASS(BlueprintType, config = EditorPerProjectUserSettings, configdonotcheckdefaults)
-class UNREALED_API UFbxAnimSequenceImportData : public UFbxAssetImportData
+UCLASS(BlueprintType, config = EditorPerProjectUserSettings, configdonotcheckdefaults, MinimalAPI)
+class UFbxAnimSequenceImportData : public UFbxAssetImportData
 {
 	GENERATED_UCLASS_BODY()
 	
@@ -66,20 +66,23 @@ class UNREALED_API UFbxAnimSequenceImportData : public UFbxAssetImportData
 	UPROPERTY(EditAnywhere, AdvancedDisplay, config, Category = ImportSettings, meta = (EditCondition = "!bUseDefaultSampleRate", ToolTip = "Sample fbx animation data at the specified sample rate, 0 find automaticaly the best sample rate", ClampMin = 0, UIMin = 0, ClampMax = 48000, UIMax = 60))
 	int32 CustomSampleRate;
 
+	UPROPERTY(EditAnywhere, AdvancedDisplay, config, Category = ImportSettings, meta = (ToolTip = "If enabled, snaps the animation to the closest frame boundary using the import sampling rate"))
+	bool bSnapToClosestFrameBoundary;
+
 	/** Name of source animation that was imported, used to reimport correct animation from the FBX file */
 	UPROPERTY()
 	FString SourceAnimationName;
 
-	/** Import if custom attribute as a curve within the animation */
-	UPROPERTY(EditAnywhere, AdvancedDisplay, config, Category = ImportSettings)
+	/** If true, import node attributes as either Animation Curves or Animation Attributes */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, config, Category = ImportSettings, meta = (DisplayName = "Import Attributes as Curves or Animation Attributes"))
 	bool bImportCustomAttribute;
 
-	/** If true, all previous custom attribute curves will be deleted when doing a re-import. */
-	UPROPERTY(EditAnywhere, AdvancedDisplay, config, Category = ImportSettings)
+	/** If true, all previous node attributes imported as Animation Curves will be deleted when doing a re-import. */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, config, Category = ImportSettings, meta = (DisplayName = "Delete existing Animation Curves"))
 	bool bDeleteExistingCustomAttributeCurves;
 
-	/** If true, all previous non-curve custom attributes will be deleted when doing a re-import. */
-	UPROPERTY(EditAnywhere, AdvancedDisplay, config, Category = ImportSettings)
+	/** If true, all previous node attributes imported as Animation Attributes will be deleted when doing a re-import. */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, config, Category = ImportSettings, meta = (DisplayName = "Delete existing Animation Attributes"))
 	bool bDeleteExistingNonCurveCustomAttributes;
 	
 	/** Import bone transform tracks. If false, this will discard any bone transform tracks. (useful for curves only animations)*/
@@ -89,6 +92,10 @@ class UNREALED_API UFbxAnimSequenceImportData : public UFbxAssetImportData
 	/** Set Material Curve Type for all custom attributes that exists */
 	UPROPERTY(EditAnywhere, AdvancedDisplay, config, Category = ImportSettings, meta = (EditCondition = "bImportCustomAttribute", DisplayName="Set Material Curve Type"))
 	bool bSetMaterialDriveParameterOnCustomAttribute;
+
+	/** Whether to automatically add curve metadata to an animation's skeleton. If this is disabled, curve metadata will be added to skeletal meshes for morph targets, but no metadata entry will be created for general curves. */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, config, Category = ImportSettings)
+	bool bAddCurveMetadataToSkeleton;
 
 	/** Set Material Curve Type for the custom attribute with the following suffixes. This doesn't matter if Set Material Curve Type is true  */
 	UPROPERTY(EditAnywhere, AdvancedDisplay, config, Category = ImportSettings, meta = (EditCondition = "bImportCustomAttribute", DisplayName = "Material Curve Suffixes"))
@@ -102,7 +109,7 @@ class UNREALED_API UFbxAnimSequenceImportData : public UFbxAssetImportData
 	UPROPERTY(EditAnywhere, AdvancedDisplay, config, Category = ImportSettings)
 	bool bDeleteExistingMorphTargetCurves;
 
-	/** When importing custom attribute or morphtarget as curve, do not import if it doens't have any value other than zero. This is to avoid adding extra curves to evaluate */
+	/** When importing custom attribute or morphtarget as curve, do not import if it doesn't have any value other than zero. This is to avoid adding extra curves to evaluate */
 	UPROPERTY(EditAnywhere, AdvancedDisplay, config, Category = ImportSettings, meta = (DisplayName = "Do not import curves with only 0 values"))
 	bool bDoNotImportCurveWithZero;
 
@@ -111,13 +118,13 @@ class UNREALED_API UFbxAnimSequenceImportData : public UFbxAssetImportData
 	bool bPreserveLocalTransform;
 
 	/** Gets or creates fbx import data for the specified anim sequence */
-	static UFbxAnimSequenceImportData* GetImportDataForAnimSequence(UAnimSequence* AnimSequence, UFbxAnimSequenceImportData* TemplateForCreation);
+	static UNREALED_API UFbxAnimSequenceImportData* GetImportDataForAnimSequence(UAnimSequence* AnimSequence, UFbxAnimSequenceImportData* TemplateForCreation);
 
-	virtual bool CanEditChange(const FProperty* InProperty) const override;
+	UNREALED_API virtual bool CanEditChange(const FProperty* InProperty) const override;
 
-	virtual void Serialize(FArchive& Ar) override;
+	UNREALED_API virtual void Serialize(FArchive& Ar) override;
 
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	UNREALED_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 
-	void CopyAnimationValues(const UFbxAnimSequenceImportData* Other);
+	UNREALED_API void CopyAnimationValues(const UFbxAnimSequenceImportData* Other);
 };

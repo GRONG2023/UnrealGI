@@ -19,18 +19,18 @@ struct FBehaviorTreeTemplateInfo
 
 	/** behavior tree asset */
 	UPROPERTY()
-	UBehaviorTree* Asset = nullptr;
+	TObjectPtr<UBehaviorTree> Asset = nullptr;
 
 	/** initialized template */
 	UPROPERTY(transient)
-	UBTCompositeNode* Template = nullptr;
+	TObjectPtr<UBTCompositeNode> Template = nullptr;
 
 	/** size required for instance memory */
 	uint16 InstanceMemorySize;
 };
 
-UCLASS(config=Engine, Transient)
-class AIMODULE_API UBehaviorTreeManager : public UObject
+UCLASS(config=Engine, Transient, MinimalAPI)
+class UBehaviorTreeManager : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
@@ -39,27 +39,27 @@ class AIMODULE_API UBehaviorTreeManager : public UObject
 	int32 MaxDebuggerSteps;
 
 	/** get behavior tree template for given blueprint */
-	bool LoadTree(UBehaviorTree& Asset, UBTCompositeNode*& Root, uint16& InstanceMemorySize);
+	AIMODULE_API bool LoadTree(UBehaviorTree& Asset, UBTCompositeNode*& Root, uint16& InstanceMemorySize);
 
 	/** get aligned memory size */
-	static int32 GetAlignedDataSize(int32 Size);
+	static AIMODULE_API uint16 GetAlignedDataSize(uint16 Size);
 
 	/** helper function for sorting and aligning node memory */
-	static void InitializeMemoryHelper(const TArray<UBTDecorator*>& Nodes, TArray<uint16>& MemoryOffsets, int32& MemorySize, bool bForceInstancing = false);
+	static AIMODULE_API void InitializeMemoryHelper(const TArray<UBTDecorator*>& Nodes, TArray<uint16>& MemoryOffsets, int32& MemorySize, bool bForceInstancing = false);
 
 	/** cleanup hooks for map loading */
-	virtual void FinishDestroy() override;
+	AIMODULE_API virtual void FinishDestroy() override;
 
-	void DumpUsageStats() const;
+	AIMODULE_API void DumpUsageStats() const;
 
 	/** register new behavior tree component for tracking */
-	void AddActiveComponent(UBehaviorTreeComponent& Component);
+	AIMODULE_API void AddActiveComponent(UBehaviorTreeComponent& Component);
 
 	/** unregister behavior tree component from tracking */
-	void RemoveActiveComponent(UBehaviorTreeComponent& Component);
+	AIMODULE_API void RemoveActiveComponent(UBehaviorTreeComponent& Component);
 
-	static UBehaviorTreeManager* GetCurrent(UWorld* World);
-	static UBehaviorTreeManager* GetCurrent(UObject* WorldContextObject);
+	static AIMODULE_API UBehaviorTreeManager* GetCurrent(UWorld* World);
+	static AIMODULE_API UBehaviorTreeManager* GetCurrent(UObject* WorldContextObject);
 
 protected:
 
@@ -68,5 +68,5 @@ protected:
 	TArray<FBehaviorTreeTemplateInfo> LoadedTemplates;
 
 	UPROPERTY()
-	TArray<UBehaviorTreeComponent*> ActiveComponents;
+	TArray<TObjectPtr<UBehaviorTreeComponent>> ActiveComponents;
 };

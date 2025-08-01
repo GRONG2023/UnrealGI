@@ -2,12 +2,18 @@
 
 #pragma once
 
+#include "Containers/EnumAsByte.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Object.h"
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphNode_Comment.h"
+#include "HAL/Platform.h"
 #include "Layout/Margin.h"
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "GraphEditorSettings.generated.h"
 
 UENUM()
@@ -44,7 +50,7 @@ public:
 
 	/** Switch between using the right and middle mouse button for panning (defaults to right) */
 	UPROPERTY(config, EditAnywhere, Category = GeneralStyle)
-		EGraphPanningMouseButton PanningMouseButton;
+	EGraphPanningMouseButton PanningMouseButton;
 
 	/** The amount of padding above a pin (defaults to 4) */
 	UPROPERTY(config, EditAnywhere, Category=GeneralStyle, AdvancedDisplay)
@@ -87,6 +93,10 @@ public:
 	/** The distance threshold controlling how close the mouse has to be to the spline in order to trigger a hover response */ 
 	UPROPERTY(EditAnywhere, config, Category=Splines, meta=(EditCondition=bTreatSplinesLikePins))
 	float SplineHoverTolerance;
+
+	/** The additional distance around the spline to count as close, preventing other actions if the user just misses the spline when clicking*/
+	UPROPERTY(EditAnywhere, config, Category = Splines, meta = (EditCondition = bTreatSplinesLikePins))
+	float SplineCloseTolerance;
 
 	/** The maximum value to clamp the absolute value of the horizontal distance between endpoints when calculating tangents (when the wire is moving forward) */
 	UPROPERTY(config, EditAnywhere, Category=Splines, AdvancedDisplay)
@@ -150,23 +160,31 @@ public:
 	FLinearColor IntPinTypeColor;
 
 	/** Integer64 pin type color */
-	UPROPERTY(EditAnywhere, config, Category = PinColors)
+	UPROPERTY(EditAnywhere, config, Category=PinColors)
 	FLinearColor Int64PinTypeColor;
 
 	/** Floating-point pin type color */
 	UPROPERTY(EditAnywhere, config, Category=PinColors)
 	FLinearColor FloatPinTypeColor;
 
+	/** Double pin type color */
+	UPROPERTY(EditAnywhere, config, Category=PinColors)
+	FLinearColor DoublePinTypeColor;
+
+	/** Real pin type color */
+	UPROPERTY(EditAnywhere, config, Category=PinColors)
+	FLinearColor RealPinTypeColor;
+
 	/** Name pin type color */
 	UPROPERTY(EditAnywhere, config, Category=PinColors)
 	FLinearColor NamePinTypeColor;
 
 	/** Asset pin type color */
-	UPROPERTY(EditAnywhere, config, Category = PinColors)
+	UPROPERTY(EditAnywhere, config, Category=PinColors)
 	FLinearColor SoftObjectPinTypeColor;
 
 	/** Asset Class pin type color */
-	UPROPERTY(EditAnywhere, config, Category = PinColors)
+	UPROPERTY(EditAnywhere, config, Category=PinColors)
 	FLinearColor SoftClassPinTypeColor;
 
 	/** Delegate pin type color */

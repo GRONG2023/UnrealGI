@@ -17,8 +17,8 @@ class USlateWidgetStyleAsset;
 /**
  * Allows a user to enter multiple lines of text
  */
-UCLASS(meta=(DisplayName="Text Box (Multi-Line)"))
-class UMG_API UMultiLineEditableTextBox : public UTextLayoutWidget
+UCLASS(meta=(DisplayName="Text Box (Multi-Line)"), MinimalAPI)
+class UMultiLineEditableTextBox : public UTextLayoutWidget
 {
 	GENERATED_UCLASS_BODY()
 
@@ -29,12 +29,14 @@ public:
 
 public:
 	
+	UE_DEPRECATED(5.1, "Direct access to Text is deprecated. Please use the getter or setter.")
 	/** The text content for this editable text box widget */
-	UPROPERTY(EditAnywhere, Category=Content, meta=(MultiLine="true"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, BlueprintGetter = "GetText", BlueprintSetter = "SetText", FieldNotify, Category = Content, meta=(MultiLine="true"))
 	FText Text;
 
+	UE_DEPRECATED(5.1, "Direct access to HintText is deprecated. Please use the getter or setter.")
 	/** Hint text that appears when there is no text in the text box */
-	UPROPERTY(EditAnywhere, Category=Content, meta=(MultiLine="true"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, BlueprintGetter = "GetHintText", BlueprintSetter = "SetHintText", Category = Content, meta = (MultiLine = "true"))
 	FText HintText;
 
 	/** A bindable delegate to allow logic to drive the hint text of the widget */
@@ -46,12 +48,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Style", meta=(DisplayName="Style"))
 	FEditableTextBoxStyle WidgetStyle;
 
+#if WITH_EDITORONLY_DATA
+	UE_DEPRECATED(5.1, "TextStyle has been deprecated as it was mainly duplicated information already available inside WidgetStyle. Please use the WidgetStyle.TextStyle instead.")
 	/** The text style */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, BlueprintSetter = SetTextStyle, Category="Style", meta=(DisplayName="Text Style"))
-	FTextBlockStyle TextStyle;
+	UPROPERTY(meta=(DisplayName="Text Style"))
+	FTextBlockStyle TextStyle_DEPRECATED;
+#endif
 
-	/** Sets whether this text block can be modified interactively by the user */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Appearance")
+	UE_DEPRECATED(5.1, "Direct access to IsReadOnly is deprecated. Please use the getter or setter.")
+	/** Sets the Text as Readonly to prevent it from being modified interactively by the user */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter = GetIsReadOnly, Setter = SetIsReadOnly, Category = Appearance)
 	bool bIsReadOnly;
 
 	/** Whether the context menu can be opened */
@@ -66,25 +72,6 @@ public:
 	UPROPERTY(EditAnywhere, Category=Behavior, AdvancedDisplay)
 	EVirtualKeyboardDismissAction VirtualKeyboardDismissAction;
 
-	UPROPERTY()
-	USlateWidgetStyleAsset* Style_DEPRECATED;
-
-	/** Font color and opacity (overrides Style) */
-	UPROPERTY()
-	FSlateFontInfo Font_DEPRECATED;
-
-	/** Text color and opacity (overrides Style) */
-	UPROPERTY()
-	FLinearColor ForegroundColor_DEPRECATED;
-
-	/** The color of the background/border around the editable text (overrides Style) */
-	UPROPERTY()
-	FLinearColor BackgroundColor_DEPRECATED;
-
-	/** Text color and opacity when read-only (overrides Style) */
-	UPROPERTY()
-	FLinearColor ReadOnlyForegroundColor_DEPRECATED;
-
 	/** Called whenever the text is changed programmatically or interactively by the user */
 	UPROPERTY(BlueprintAssignable, Category="Widget Event", meta=(DisplayName="OnTextChanged (Multi-Line Text Box)"))
 	FOnMultiLineEditableTextBoxChangedEvent OnTextChanged;
@@ -98,67 +85,96 @@ public:
 
 public:
 
-	/**  */
+	/**
+	 * Gets the widget text
+	 * @return The widget text
+	 */
 	UFUNCTION(BlueprintCallable, Category="Widget", meta=(DisplayName="GetText (Multi-Line Text Box)"))
-	FText GetText() const;
+	UMG_API FText GetText() const;
 
-	/**  */
+	/**
+	 * Directly sets the widget text.
+	 * Warning: This will wipe any binding created for the Text property!
+	 * @param InText The text to assign to the widget
+	 */
 	UFUNCTION(BlueprintCallable, Category="Widget", meta=(DisplayName="SetText (Multi-Line Text Box)"))
-	void SetText(FText InText);
+	UMG_API void SetText(FText InText);
 
-	/**  */
-	UFUNCTION(BlueprintCallable, Category="Widget", meta=(DisplayName="GetHintText (Multi-Line Text Box)"))
-	FText GetHintText() const;
+	/** Returns the Hint text that appears when there is no text in the text box */
+	UFUNCTION(BlueprintCallable, Category = "Widget", meta = (DisplayName = "GetHintText (Multi-Line Text Box)"))
+	UMG_API FText GetHintText() const;
 
-	/**  */
+	/**
+	* Sets the Hint text that appears when there is no text in the text box
+	* @param InHintText The text that appears when there is no text in the text box
+	*/
 	UFUNCTION(BlueprintCallable, Category="Widget", meta=(DisplayName="SetHintText (Multi-Line Text Box)"))
-	void SetHintText(FText InHintText);
+	UMG_API void SetHintText(FText InHintText);
 
 	UFUNCTION(BlueprintCallable, Category="Widget", meta=(DisplayName="SetError (Multi-Line Text Box)"))
-	void SetError(FText InError);
+	UMG_API void SetError(FText InError);
 
-	UFUNCTION(BlueprintCallable, Category="Widget", meta=(DisplayName="SetIsReadOnly (Multi-Line Text Box)"))
-	void SetIsReadOnly(bool bReadOnly);
+	/** Return true when this text cannot be modified interactively by the user */
+	UMG_API bool GetIsReadOnly() const;
 
-	UFUNCTION(BlueprintSetter)
-	void SetTextStyle(const FTextBlockStyle& InTextStyle);
+	/** Sets the Text as Readonly to prevent it from being modified interactively by the user */
+	UFUNCTION(BlueprintCallable, Category = "Widget", meta = (DisplayName = "SetIsReadOnly (Multi-Line Text Box)"))
+	UMG_API void SetIsReadOnly(UPARAM(DisplayName = "ReadyOnly") bool bReadOnly);
+
+	UFUNCTION(BlueprintCallable, Category="Widget", meta=(DisplayName="SetTextStyle (Multi-Line Text Box)"))
+	UMG_API void SetTextStyle(const FTextBlockStyle& InTextStyle);
+
+	UFUNCTION(BlueprintCallable, Category="Widget", meta=(DisplayName="SetForegroundColor (Multi-Line Text Box)"))
+	UMG_API void SetForegroundColor(FLinearColor color);
 
 	//TODO UMG Add Set ReadOnlyForegroundColor
 	//TODO UMG Add Set BackgroundColor
-	//TODO UMG Add Set ForegroundColor
 	//TODO UMG Add Set Font
 
 public:
-	//~ Begin UTextLayoutWidget Interface
-	virtual void SetJustification(ETextJustify::Type InJustification) override;
-	//~ End UTextLayoutWidget Interface
-
 	//~ Begin UWidget Interface
-	virtual void SynchronizeProperties() override;
+	UMG_API virtual void SynchronizeProperties() override;
 	//~ End UWidget Interface
 
 	//~ Begin UVisual Interface
-	virtual void ReleaseSlateResources(bool bReleaseChildren) override;
+	UMG_API virtual void ReleaseSlateResources(bool bReleaseChildren) override;
 	//~ End UVisual Interface
 
-	//~ Begin UObject Interface
-	virtual void PostLoad() override;
-	//~ End UObject Interface
-
 #if WITH_EDITOR
-	virtual const FText GetPaletteCategory() override;
+	UMG_API virtual const FText GetPaletteCategory() override;
 #endif
+	UMG_API virtual void Serialize(FArchive& Ar) override;
 
 protected:
+	//~ Begin UTextLayoutWidget Interface
+	UMG_API virtual void OnShapedTextOptionsChanged(FShapedTextOptions InShapedTextOptions) override;
+	UMG_API virtual void OnJustificationChanged(ETextJustify::Type InJustification) override;
+	UMG_API virtual void OnWrappingPolicyChanged(ETextWrappingPolicy InWrappingPolicy) override;
+	UMG_API virtual void OnAutoWrapTextChanged(bool InAutoWrapText) override;
+	UMG_API virtual void OnWrapTextAtChanged(float InWrapTextAt) override;
+	UMG_API virtual void OnLineHeightPercentageChanged(float InLineHeightPercentage) override;
+	UMG_API virtual void OnApplyLineHeightToBottomLineChanged(bool InApplyLineHeightToBottomLine) override;
+	UMG_API virtual void OnMarginChanged(const FMargin& InMargin) override;
+	//~ End UTextLayoutWidget Interface
+
 	//~ Begin UWidget Interface
-	virtual TSharedRef<SWidget> RebuildWidget() override;
+	UMG_API virtual TSharedRef<SWidget> RebuildWidget() override;
 	// End of UWidget
 
-	void HandleOnTextChanged(const FText& Text);
-	void HandleOnTextCommitted(const FText& Text, ETextCommit::Type CommitMethod);
+	UMG_API void HandleOnTextChanged(const FText& Text);
+	UMG_API void HandleOnTextCommitted(const FText& Text, ETextCommit::Type CommitMethod);
 
 protected:
 	TSharedPtr<SMultiLineEditableTextBox> MyEditableTextBlock;
 
 	PROPERTY_BINDING_IMPLEMENTATION(FText, HintText);
+
+private:
+	/** @return true if the text was changed, or false if identical. */
+	bool SetTextInternal(const FText& InText);
+
+#if WITH_EDITORONLY_DATA
+	UPROPERTY()
+	bool bIsFontDeprecationDone;
+#endif
 };

@@ -2,10 +2,15 @@
 
 #pragma once
 
+#include "CurveEditorSnapMetrics.h"
 #include "ICurveEditorDragOperation.h"
+#include "Input/Reply.h"
+#include "Math/Vector2D.h"
+#include "Templates/SharedPointer.h"
 
 class FCurveEditor;
 class SCurveEditorView;
+struct FPointerEvent;
 
 class FCurveEditorDragOperation_PanView : public ICurveEditorDragOperation
 {
@@ -26,6 +31,8 @@ private:
 	double InitialInputMin, InitialInputMax;
 	double InitialOutputMin, InitialOutputMax;
 	FCurveEditorAxisSnap::FSnapState SnappingState;
+	FVector2D LastMousePosition;
+
 };
 
 class FCurveEditorDragOperation_PanInput : public ICurveEditorDragOperation
@@ -41,4 +48,5 @@ private:
 	FCurveEditor* CurveEditor;
 	double InitialInputMin, InitialInputMax;
 	FCurveEditorAxisSnap::FSnapState SnappingState;
+	FVector2D LastMousePosition;
 };

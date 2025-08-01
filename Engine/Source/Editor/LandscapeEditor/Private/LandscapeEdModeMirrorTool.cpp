@@ -5,7 +5,7 @@
 #include "Materials/MaterialInterface.h"
 #include "AI/NavigationSystemBase.h"
 #include "Materials/MaterialInstanceDynamic.h"
-#include "UnrealWidget.h"
+#include "UnrealWidgetFwd.h"
 #include "EditorModeManager.h"
 #include "EditorViewportClient.h"
 #include "LandscapeToolInterface.h"
@@ -27,7 +27,7 @@ class FLandscapeToolMirror : public FLandscapeTool
 {
 protected:
 	FEdModeLandscape* EdMode;
-	UMaterialInstanceDynamic* MirrorPlaneMaterial;
+	TObjectPtr<UMaterialInstanceDynamic> MirrorPlaneMaterial;
 
 	ECoordSystem SavedCoordSystem;
 
@@ -45,9 +45,9 @@ public:
 		Collector.AddReferencedObject(MirrorPlaneMaterial);
 	}
 
-	virtual const TCHAR* GetToolName() override { return TEXT("Mirror"); }
-	virtual FText GetDisplayName() override { return NSLOCTEXT("UnrealEd", "LandscapeTool_Mirror", "Mirror Landscape"); };
-	virtual FText GetDisplayMessage() override { return NSLOCTEXT("UnrealEd", "LandscapeTool_Mirror_Message", "Copy one side of a landscape to the other side so that you can easily mirror or rotate the landscape geometry along the X or Y axis."); };
+	virtual const TCHAR* GetToolName() const override { return TEXT("Mirror"); }
+	virtual FText GetDisplayName() const override { return NSLOCTEXT("UnrealEd", "LandscapeTool_Mirror", "Mirror Landscape"); };
+	virtual FText GetDisplayMessage() const override { return NSLOCTEXT("UnrealEd", "LandscapeTool_Mirror_Message", "Copy one side of a landscape to the other side so that you can easily mirror or rotate the landscape geometry along the X or Y axis."); };
 
 	virtual void SetEditRenderType() override { GLandscapeEditRenderMode = ELandscapeEditRenderMode::None | (GLandscapeEditRenderMode & ELandscapeEditRenderMode::BitMaskForMask); }
 	virtual bool SupportsMask() override { return false; }
@@ -63,7 +63,7 @@ public:
 		{
 			CenterMirrorPoint();
 		}
-		GLevelEditorModeTools().SetWidgetMode(FWidget::WM_Translate);
+		GLevelEditorModeTools().SetWidgetMode(UE::Widget::WM_Translate);
 		SavedCoordSystem = GLevelEditorModeTools().GetCoordSystem();
 		GLevelEditorModeTools().SetCoordSystem(COORD_Local);
 	}
@@ -141,7 +141,7 @@ public:
 					MirrorPlaneScale.Y = (MaxX - MinX) / 2.0f;
 				}
 
-				MirrorPoint3D.Z = GetLocalZAtPoint(LandscapeInfo, FMath::RoundToInt(MirrorPoint3D.X), FMath::RoundToInt(MirrorPoint3D.Y));
+				MirrorPoint3D.Z = GetLocalZAtPoint(LandscapeInfo, FMath::RoundToInt32(MirrorPoint3D.X), FMath::RoundToInt32(MirrorPoint3D.Y));
 				MirrorPoint3D = LandscapeToWorld.TransformPosition(MirrorPoint3D);
 
 				FMatrix Matrix;
@@ -166,7 +166,7 @@ public:
 				const FBox Box = FBox(FVector(-1, -1, 0), FVector(+1, +1, 0));
 				DrawWireBox(PDI, Matrix, Box, FLinearColor::Green, SDPG_World);
 
-				const float LandscapeScaleRatio = LandscapeToWorld.GetScale3D().Z / LandscapeToWorld.GetScale3D().X;
+				const float LandscapeScaleRatio = static_cast<float>(LandscapeToWorld.GetScale3D().Z / LandscapeToWorld.GetScale3D().X);
 				FVector2D UVScale = FVector2D(FMath::RoundToFloat(MirrorPlaneScale.Y / 10), FMath::RoundToFloat(MirrorPlaneScale.Z * LandscapeScaleRatio / 10 / 2) * 2);
 				MirrorPlaneMaterial->SetVectorParameterValue(FName("GridSize"), FVector(UVScale, 0));
 				DrawPlane10x10(PDI, Matrix, 1, FVector2D(0, 0), FVector2D(1, 1), MirrorPlaneMaterial->GetRenderProxy(), SDPG_World);
@@ -203,9 +203,9 @@ public:
 		return false;
 	}
 
-	virtual EAxisList::Type GetWidgetAxisToDraw(FWidget::EWidgetMode CheckMode) const override
+	virtual EAxisList::Type GetWidgetAxisToDraw(UE::Widget::EWidgetMode CheckMode) const override
 	{
-		if (CheckMode == FWidget::WM_Translate)
+		if (CheckMode == UE::Widget::WM_Translate)
 		{
 			switch (EdMode->UISettings->MirrorOp)
 			{
@@ -223,10 +223,6 @@ public:
 				check(0);
 				return EAxisList::None;
 			}
-		}
-		else
-		{
-			return EAxisList::None;
 		}
 
 		return EAxisList::None;
@@ -259,7 +255,7 @@ public:
 			{
 				MirrorPoint3D.Y = EdMode->UISettings->MirrorPoint.Y;
 			}
-			MirrorPoint3D.Z = GetLocalZAtPoint(LandscapeInfo, FMath::RoundToInt(MirrorPoint3D.X), FMath::RoundToInt(MirrorPoint3D.Y));
+			MirrorPoint3D.Z = GetLocalZAtPoint(LandscapeInfo, FMath::RoundToInt32(MirrorPoint3D.X), FMath::RoundToInt32(MirrorPoint3D.Y));
 			MirrorPoint3D = LandscapeToWorld.TransformPosition(MirrorPoint3D);
 			MirrorPoint3D.Z += 1000.f; // place the widget a little off the ground for better visibility
 			return MirrorPoint3D;
@@ -541,7 +537,7 @@ public:
 		case ELandscapeMirrorOperation::PlusXToMinusX:
 		case ELandscapeMirrorOperation::RotatePlusXToMinusX:
 			{
-				MirrorPos = FMath::RoundToInt(MirrorPoint.X);
+				MirrorPos = FMath::RoundToInt32(MirrorPoint.X);
 				if (MirrorPos <= MinX || MirrorPos >= MaxX)
 				{
 					return;
@@ -575,7 +571,7 @@ public:
 		case ELandscapeMirrorOperation::PlusYToMinusY:
 		case ELandscapeMirrorOperation::RotatePlusYToMinusY:
 			{
-				MirrorPos = FMath::RoundToInt(MirrorPoint.Y);
+				MirrorPos = FMath::RoundToInt32(MirrorPoint.Y);
 				if (MirrorPos <= MinY || MirrorPos >= MaxY)
 				{
 					return;
@@ -654,7 +650,7 @@ public:
 				for (ULandscapeComponent* Component : Components)
 				{
 					// Recreate collision for modified components and update the navmesh
-					ULandscapeHeightfieldCollisionComponent* CollisionComponent = Component->CollisionComponent.Get();
+					ULandscapeHeightfieldCollisionComponent* CollisionComponent = Component->GetCollisionComponent();
 					if (CollisionComponent)
 					{
 						CollisionComponent->RecreateCollision();

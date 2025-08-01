@@ -29,6 +29,20 @@ public:
 	{
 	}
 
+	FGPUProfilerEventNodeStats(const FGPUProfilerEventNodeStats& rhs)
+	{
+		NumDraws = rhs.NumDraws;
+		NumPrimitives = rhs.NumPrimitives;
+		NumVertices = rhs.NumVertices;
+		NumDispatches = rhs.NumDispatches;
+		NumTotalDispatches = rhs.NumTotalDispatches;
+		NumTotalDraws = rhs.NumDraws;
+		NumTotalPrimitives = rhs.NumPrimitives;
+		NumTotalVertices = rhs.NumVertices;
+		TimingResult = rhs.TimingResult;
+		NumEvents = rhs.NumEvents;
+	}
+
 	/** Exclusive number of draw calls rendered in this event. */
 	uint32 NumDraws;
 
@@ -102,7 +116,7 @@ public:
 };
 
 /** An entire frame of perf event nodes, including ancillary timers. */
-struct RHI_API FGPUProfilerEventNodeFrame
+struct FGPUProfilerEventNodeFrame
 {
 	virtual ~FGPUProfilerEventNodeFrame() {}
 
@@ -116,7 +130,7 @@ struct RHI_API FGPUProfilerEventNodeFrame
 	virtual void EndFrame() {}
 
 	/** Dumps perf event information, blocking on GPU. */
-	void DumpEventTree();
+	RHI_API void DumpEventTree();
 
 	/** Calculates root timing base frequency (if needed by this RHI) */
 	virtual float GetRootTimingResults() { return 0.0f; }
@@ -133,14 +147,14 @@ struct RHI_API FGPUProfilerEventNodeFrame
 */
 struct FGPUTimingCalibrationTimestamp
 {
-	uint64 GPUMicroseconds;
-	uint64 CPUMicroseconds;
+	uint64 GPUMicroseconds = 0;
+	uint64 CPUMicroseconds = 0;
 };
 
 /**
  * Holds information if this platform's GPU allows timing
  */
-struct RHI_API FGPUTiming
+struct FGPUTiming
 {
 public:
 	/**
@@ -195,10 +209,10 @@ public:
 
 protected:
 	/** Whether the static variables have been initialized. */
-	static bool		GAreGlobalsInitialized;
+	RHI_API static bool		GAreGlobalsInitialized;
 
 	/** Whether GPU timing measurements are supported by the driver. */
-	static bool		GIsSupported;
+	RHI_API static bool		GIsSupported;
 
 	static void SetTimingFrequency(uint64 TimingFrequency, uint32 GPUIndex = 0)
 	{
@@ -212,21 +226,21 @@ protected:
 
 private:
 	/** Frequency for the timing values, in number of ticks per seconds, or 0 if the feature isn't supported. */
-	static TStaticArray<uint64, MAX_NUM_GPUS>	GTimingFrequency;
+	RHI_API static TStaticArray<uint64, MAX_NUM_GPUS>	GTimingFrequency;
 
 	/**
 	* Two timestamps performed on GPU and CPU at nearly the same time.
 	* This can be used to visualize GPU and CPU timing events on the same timeline.
 	* Both values may be 0 if timer calibration is not available on current platform.
 	*/
-	static TStaticArray<FGPUTimingCalibrationTimestamp, MAX_NUM_GPUS> GCalibrationTimestamp;
+	RHI_API static TStaticArray<FGPUTimingCalibrationTimestamp, MAX_NUM_GPUS> GCalibrationTimestamp;
 };
 
 /** 
  * Encapsulates GPU profiling logic and data. 
  * There's only one global instance of this struct so it should only contain global data, nothing specific to a frame.
  */
-struct RHI_API FGPUProfiler
+struct FGPUProfiler
 {
 	/** Whether we are currently tracking perf events or not. */
 	bool bTrackingEvents;
@@ -279,15 +293,20 @@ struct RHI_API FGPUProfiler
 	{
 	}
 
-	void RegisterGPUWork(uint32 NumPrimitives = 0, uint32 NumVertices = 0)
+	void RegisterGPUWork(uint32 NumDraws, uint32 NumPrimitives, uint32 NumVertices)
 	{
 		if (bTrackingEvents && CurrentEventNode)
 		{
 			check(IsInRenderingThread() || IsInRHIThread());
-			CurrentEventNode->NumDraws++;
+			CurrentEventNode->NumDraws += NumDraws;
 			CurrentEventNode->NumPrimitives += NumPrimitives;
 			CurrentEventNode->NumVertices += NumVertices;
 		}
+	}
+
+	void RegisterGPUWork(uint32 NumPrimitives = 0, uint32 NumVertices = 0)
+	{
+		RegisterGPUWork(1, NumPrimitives, NumVertices);
 	}
 
 	void RegisterGPUDispatch(FIntVector GroupCount)
@@ -305,6 +324,6 @@ struct RHI_API FGPUProfiler
 		return new FGPUProfilerEventNode(InName, InParent);
 	}
 
-	virtual void PushEvent(const TCHAR* Name, FColor Color);
-	virtual void PopEvent();
+	RHI_API virtual void PushEvent(const TCHAR* Name, FColor Color);
+	RHI_API virtual void PopEvent();
 };

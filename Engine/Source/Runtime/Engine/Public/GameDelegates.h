@@ -20,10 +20,12 @@ enum class EGameDelegates_SaveGame : short
 	Detail,	
 };
 
-/** Delegate to modify cooking behavior - return extra packages to cook, load up the asset registry, etc */
+// UE_DEPRECATED(5.0, "Use AssetManager or FModifyCookDelegate instead.")
 DECLARE_DELEGATE_OneParam(FCookModificationDelegate, TArray<FString>& /*ExtraPackagesToCook*/);
-DECLARE_DELEGATE_FiveParams(FAssignStreamingChunkDelegate, const FString& /*PackageToAdd*/, const FString& /*LastLoadedMapName*/, const TArray<int32>& /*AssetRegistryChunkIDs*/, const TArray<int32>& /*ExistingChunkIds*/, TArray<int32>& /*OutChunkIndexList*/);
-DECLARE_DELEGATE_RetVal_ThreeParams(bool, FGetPackageDependenciesForManifestGeneratorDelegate, FName /*PackageName*/, TArray<FName>& /*DependentPackageNames*/, uint8 /*DependencyType*/);
+/** Delegate to modify cooking behavior - return extra packages to cook, load up the asset registry, etc */
+DECLARE_MULTICAST_DELEGATE_ThreeParams(FModifyCookDelegate,
+	TConstArrayView<const ITargetPlatform*> /* InTargetPlatforms */, TArray<FName>& /* InOutPackagesToCook */,
+	TArray<FName>& /* InOutPackagesToNeverCook */);
 
 /** Delegate to assign a disc layer to a chunk */
 typedef const TMap<FName, FString> FAssignLayerChunkMap;
@@ -45,6 +47,12 @@ DECLARE_MULTICAST_DELEGATE_OneParam(FPendingConnectionLostDelegate, const FUniqu
 /** Delegate to handle when a connection is disconnecting */
 DECLARE_MULTICAST_DELEGATE_TwoParams(FHandleDisconnectDelegate, class UWorld* /*InWorld*/, class UNetDriver* /*NetDriver*/);
 
+/** Delegate to allow game to use a custom ICookedEditorPackageManager class */
+DECLARE_DELEGATE_RetVal(TUniquePtr<class ICookedEditorPackageManager>, FCookedEditorPackageManagerFactoryDelegate);
+
+/** Delegate to inform those interested that a view target has changed. */
+DECLARE_MULTICAST_DELEGATE_ThreeParams(FViewTargetChangedDelegate, class APlayerController* /*PC*/, class AActor* /*OldViewTarget*/, class AActor* /*NewViewTarget*/);
+
 // Helper defines to make defining the delegate members easy
 #define DEFINE_GAME_DELEGATE(DelegateType) \
 	public: F##DelegateType& Get##DelegateType() { return DelegateType; } \
@@ -55,21 +63,18 @@ DECLARE_MULTICAST_DELEGATE_TwoParams(FHandleDisconnectDelegate, class UWorld* /*
 	private: DelegateType DelegateVariable;
 
 /** Class to set and get game callbacks */
-class ENGINE_API FGameDelegates
+class FGameDelegates
 {
 public:
 
 	/** Return a single FGameDelegates object */
-	static FGameDelegates& Get();
+	static ENGINE_API FGameDelegates& Get();
 
 	// Called when an exit command is received
 	DEFINE_GAME_DELEGATE_TYPED(ExitCommandDelegate, FSimpleMulticastDelegate);
 
 	// Called when ending playing a map
 	DEFINE_GAME_DELEGATE_TYPED(EndPlayMapDelegate, FSimpleMulticastDelegate);
-
-	// Called when a matinee is canceled 
-	DEFINE_GAME_DELEGATE_TYPED(MatineeCancelledDelegate, FSimpleMulticastDelegate);
 
 	// Called when a pending connection has been lost 
 	DEFINE_GAME_DELEGATE_TYPED(PendingConnectionLostDelegate, FPendingConnectionLostDelegate);
@@ -81,20 +86,22 @@ public:
 	// Called when a player is disconnecting due to network failure
 	DEFINE_GAME_DELEGATE(HandleDisconnectDelegate);
 
+	//Called when a PlayerController view target changes.
+	DEFINE_GAME_DELEGATE_TYPED(ViewTargetChangedDelegate, FViewTargetChangedDelegate);
+
 	// Implement all delegates declared above
 	DEFINE_GAME_DELEGATE(AssignLayerChunkDelegate);
 	DEFINE_GAME_DELEGATE(ExtendedSaveGameInfoDelegate);
 	DEFINE_GAME_DELEGATE(WebServerActionDelegate);	
 
-	// DEPRECATED, switch to subclassing AssetManager instead
-	DEFINE_GAME_DELEGATE(CookModificationDelegate);
 public:
-	UE_DEPRECATED(4.26, "Switch to subclassing AssetManager instead")
-	FAssignStreamingChunkDelegate& GetAssignStreamingChunkDelegate() { return AssignStreamingChunkDelegate; }
-	UE_DEPRECATED(4.26, "Switch to subclassing AssetManager instead")
-	FGetPackageDependenciesForManifestGeneratorDelegate& GetGetPackageDependenciesForManifestGeneratorDelegate() { return GetPackageDependenciesForManifestGeneratorDelegate; }
-
+	UE_DEPRECATED(5.0, "Use AssetManager or ModifyCookDelegate instead.")
+	FCookModificationDelegate& GetCookModificationDelegate() { return CookModificationDelegate; }
 private:
-	FAssignStreamingChunkDelegate AssignStreamingChunkDelegate;
-	FGetPackageDependenciesForManifestGeneratorDelegate GetPackageDependenciesForManifestGeneratorDelegate;
+	FCookModificationDelegate CookModificationDelegate;
+
+	// Called at start of CookByTheBook
+	DEFINE_GAME_DELEGATE(ModifyCookDelegate);
+
+	DEFINE_GAME_DELEGATE(CookedEditorPackageManagerFactoryDelegate);
 };

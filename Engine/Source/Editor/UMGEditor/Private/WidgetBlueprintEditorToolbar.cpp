@@ -8,7 +8,7 @@
 #include "Widgets/Layout/SSpacer.h"
 
 #if WITH_EDITOR
-	#include "EditorStyleSet.h"
+	#include "Styling/AppStyle.h"
 #endif // WITH_EDITOR
 #include "Widgets/SToolTip.h"
 #include "IDocumentation.h"
@@ -37,7 +37,7 @@ public:
 	{
 		SBorder::Construct(
 			SBorder::FArguments()
-			.BorderImage(FEditorStyle::GetBrush("BlueprintEditor.PipelineSeparator"))
+			.BorderImage(FAppStyle::GetBrush("BlueprintEditor.PipelineSeparator"))
 			.Padding(0.0f)
 			);
 	}
@@ -94,15 +94,14 @@ void FWidgetBlueprintEditorToolbar::FillWidgetBlueprintEditorModesToolbar(FToolB
 			.OnSetActiveMode(SetActiveMode)
 			.ToolTip(IDocumentation::Get()->CreateToolTip(
 				LOCTEXT("DesignerModeButtonTooltip", "Switch to Blueprint Designer Mode"),
-				NULL,
+				nullptr,
 				TEXT("Shared/Editors/BlueprintEditor"),
 				TEXT("DesignerMode")))
-			.IconImage(FEditorStyle::GetBrush("UMGEditor.SwitchToDesigner"))
-			.SmallIconImage(FEditorStyle::GetBrush("UMGEditor.SwitchToDesigner.Small"))
+			.IconImage(FAppStyle::GetBrush("UMGEditor.SwitchToDesigner"))
 			.AddMetaData<FTagMetaData>(FTagMetaData(TEXT("DesignerMode")))
 		);
 
-		BlueprintEditorPtr->AddToolbarWidget(SNew(SBlueprintModeSeparator));
+		BlueprintEditorPtr->AddToolbarWidget(SNew(SSpacer).Size(FVector2D(10.0f, 1.0f)));
 
 		BlueprintEditorPtr->AddToolbarWidget(
 			SNew(SModeWidget, FWidgetBlueprintApplicationModes::GetLocalizedMode(FWidgetBlueprintApplicationModes::GraphMode), FWidgetBlueprintApplicationModes::GraphMode)
@@ -111,17 +110,35 @@ void FWidgetBlueprintEditorToolbar::FillWidgetBlueprintEditorModesToolbar(FToolB
 			.CanBeSelected(BlueprintEditorPtr.Get(), &FBlueprintEditor::IsEditingSingleBlueprint)
 			.ToolTip(IDocumentation::Get()->CreateToolTip(
 				LOCTEXT("GraphModeButtonTooltip", "Switch to Graph Editing Mode"),
-				NULL,
+				nullptr,
 				TEXT("Shared/Editors/BlueprintEditor"),
 				TEXT("GraphMode")))
-			.ToolTipText(LOCTEXT("GraphModeButtonTooltip", "Switch to Graph Editing Mode"))
-			.IconImage(FEditorStyle::GetBrush("FullBlueprintEditor.SwitchToScriptingMode"))
-			.SmallIconImage(FEditorStyle::GetBrush("FullBlueprintEditor.SwitchToScriptingMode.Small"))
+			.IconImage(FAppStyle::GetBrush("FullBlueprintEditor.SwitchToScriptingMode"))
 			.AddMetaData<FTagMetaData>(FTagMetaData(TEXT("GraphMode")))
 		);
 		
 		// Right side padding
-		BlueprintEditorPtr->AddToolbarWidget(SNew(SSpacer).Size(FVector2D(4.0f, 1.0f)));
+		BlueprintEditorPtr->AddToolbarWidget(SNew(SSpacer).Size(FVector2D(10.0f, 1.0f)));
+
+		if (FWidgetBlueprintApplicationModes::IsPreviewModeEnabled())
+		{
+			BlueprintEditorPtr->AddToolbarWidget(
+				SNew(SModeWidget, FWidgetBlueprintApplicationModes::GetLocalizedMode(FWidgetBlueprintApplicationModes::PreviewMode), FWidgetBlueprintApplicationModes::PreviewMode)
+				.OnGetActiveMode(GetActiveMode)
+				.OnSetActiveMode(SetActiveMode)
+				.CanBeSelected(BlueprintEditorPtr.Get(), &FBlueprintEditor::IsEditingSingleBlueprint)
+				.ToolTip(IDocumentation::Get()->CreateToolTip(
+					LOCTEXT("PreviewModeButtonTooltip", "Switch to Preview Mode"),
+					nullptr,
+					TEXT("Shared/Editors/BlueprintEditor"),
+					TEXT("DebugMode")))
+				.IconImage(FAppStyle::GetBrush("BlueprintDebugger.TabIcon"))
+				.AddMetaData<FTagMetaData>(FTagMetaData(TEXT("PreviewMode")))
+			);
+		
+			// Right side padding
+			BlueprintEditorPtr->AddToolbarWidget(SNew(SSpacer).Size(FVector2D(10.0f, 1.0f)));
+		}
 	}
 }
 
@@ -129,7 +146,7 @@ void FWidgetBlueprintEditorToolbar::FillWidgetBlueprintEditorModesToolbar(FToolB
 void FWidgetBlueprintEditorToolbar::AddWidgetReflector(UToolMenu* InMenu)
 {
 	FToolMenuSection& Section = InMenu->AddSection("WidgetTools");
-	Section.InsertPosition = FToolMenuInsert("Asset", EToolMenuInsertType::After);
+	Section.InsertPosition = FToolMenuInsert("SourceControl", EToolMenuInsertType::After);
 
 	Section.AddEntry(FToolMenuEntry::InitToolBarButton(
 		"OpenWidgetReflector",
@@ -141,6 +158,19 @@ void FWidgetBlueprintEditorToolbar::AddWidgetReflector(UToolMenu* InMenu)
 		, LOCTEXT("OpenWidgetReflectorToolTip", "Opens the Widget Reflector, a handy tool for diagnosing problems with live widgets.")
 		, FSlateIcon(FCoreStyle::Get().GetStyleSetName(), "WidgetReflector.Icon")
 	));
+}
+
+void FWidgetBlueprintEditorToolbar::AddToolPalettes(UToolMenu* InMenu)
+{
+	// @TODO: DarenC - For now we only support one tool palette, switch this to a dropdown when we support multiple tool palettes.
+	for (TSharedPtr<FUICommandInfo>& Command : WidgetEditor.Pin()->ToolPaletteCommands)
+	{
+		FToolMenuSection& Section = InMenu->FindOrAddSection("UMGToolPalette");
+		Section.AddDynamicEntry(Command->GetCommandName(), FNewToolMenuSectionDelegate::CreateLambda([this, Command](FToolMenuSection& InSection)
+			{
+				InSection.AddEntry(FToolMenuEntry::InitToolBarButton(Command));
+			}));
+	}
 }
 
 #undef LOCTEXT_NAMESPACE

@@ -5,6 +5,8 @@
 #include "Engine/Texture2D.h"
 #include "LandscapePrivate.h"
 #include "RenderingThread.h"
+#include "Hash/CityHashHelpers.h"
+
 
 /** Data for a read back task. */
 struct FLandscapeEditReadbackTaskImpl
@@ -35,32 +37,34 @@ struct FLandscapeEditReadbackTaskImpl
 };
 
 /** Initialize the read back task data that is written by game thread. */
-bool InitTask_GameThread(FLandscapeEditReadbackTaskImpl& Task, UTexture2D const* InTexture, FLandscapeEditLayerReadback::FReadbackContext&& InReadbackContext, uint32 InFrameId)
+void InitTask_GameThread(FLandscapeEditReadbackTaskImpl& Task, UTexture2D const* InTexture, FLandscapeEditLayerReadback::FReadbackContext&& InReadbackContext, uint32 InFrameId)
 {
-	Task.TextureResource = InTexture->Resource;
+	Task.TextureResource = InTexture->GetResource();
 	Task.ReadbackContext = MoveTemp(InReadbackContext);
 	Task.InitFrameId = InFrameId;
 	Task.Size = FIntPoint(InTexture->GetSizeX(), InTexture->GetSizeY());
 	Task.NumMips = InTexture->GetNumMips();
 	Task.Format = InTexture->GetPixelFormat();
 	Task.CompletionState = FLandscapeEditReadbackTaskImpl::ECompletionState::None;
-	
-	return Task.TextureResource != nullptr;
 }
 
 /** Initialize the read back task resources. */
 bool InitTask_RenderThread(FLandscapeEditReadbackTaskImpl& Task)
 {
-	if (Task.StagingTextures.Num() == 0 || !Task.StagingTextures[0].IsValid() || Task.StagingTextures[0]->GetSizeXYZ() != FIntVector(Task.Size.X, Task.Size.Y, 1))
+	if (Task.StagingTextures.Num() == 0 || !Task.StagingTextures[0].IsValid() || Task.StagingTextures[0]->GetSizeXYZ() != FIntVector(Task.Size.X, Task.Size.Y, 1) || (Task.StagingTextures[0]->GetFormat() != Task.Format))
 	{
 		Task.StagingTextures.SetNum(Task.NumMips);
 
-		FRHIResourceCreateInfo CreateInfo(TEXT("LandscapeEditReadbackTask"));
 		for (uint32 MipIndex = 0; MipIndex < Task.NumMips; ++MipIndex)
 		{
 			const int32 MipWidth = FMath::Max(Task.Size.X >> MipIndex, 1);
 			const int32 MipHeight = FMath::Max(Task.Size.Y >> MipIndex, 1);
-			Task.StagingTextures[MipIndex] = RHICreateTexture2D(MipWidth, MipHeight, Task.Format, 1, 1, TexCreate_CPUReadback, CreateInfo);
+
+			const FRHITextureCreateDesc Desc =
+				FRHITextureCreateDesc::Create2D(TEXT("LandscapeEditReadbackTask"), MipWidth, MipHeight, Task.Format)
+				.SetFlags(ETextureCreateFlags::CPUReadback);
+
+			Task.StagingTextures[MipIndex] = RHICreateTexture(Desc);
 		}
 
 	}
@@ -69,6 +73,7 @@ bool InitTask_RenderThread(FLandscapeEditReadbackTaskImpl& Task)
 	{
 		Task.ReadbackFence = RHICreateGPUFence(TEXT("LandscapeEditReadbackTask"));
 	}
+	Task.ReadbackFence->Clear();
 
 	return true;
 }
@@ -78,7 +83,7 @@ void KickTask_RenderThread(FRHICommandListImmediate& RHICmdList, FLandscapeEditR
 {
 	// Transition staging textures for write.
 	TArray <FRHITransitionInfo> Transitions;
-	Transitions.Add(FRHITransitionInfo(Task.TextureResource->GetTexture2DRHI(), ERHIAccess::Unknown, ERHIAccess::CopySrc));
+	Transitions.Add(FRHITransitionInfo(Task.TextureResource->GetTexture2DRHI(), ERHIAccess::SRVMask, ERHIAccess::CopySrc));
 	for (uint32 MipIndex = 0; MipIndex < Task.NumMips; ++MipIndex)
 	{
 		Transitions.Add(FRHITransitionInfo(Task.StagingTextures[MipIndex], ERHIAccess::Unknown, ERHIAccess::CopyDest));
@@ -100,10 +105,10 @@ void KickTask_RenderThread(FRHICommandListImmediate& RHICmdList, FLandscapeEditR
 
 	// Transition staging textures for read.
 	Transitions.Reset();
-	Transitions.Add(FRHITransitionInfo(Task.TextureResource->GetTexture2DRHI(), ERHIAccess::CopySrc, ERHIAccess::SRVGraphics));
+	Transitions.Add(FRHITransitionInfo(Task.TextureResource->GetTexture2DRHI(), ERHIAccess::CopySrc, ERHIAccess::SRVMask));
 	for (uint32 MipIndex = 0; MipIndex < Task.NumMips; ++MipIndex)
 	{
-		Transitions.Add(FRHITransitionInfo(Task.StagingTextures[MipIndex], ERHIAccess::CopyDest, ERHIAccess::CPURead));
+		Transitions.Add(FRHITransitionInfo(Task.StagingTextures[MipIndex], ERHIAccess::Unknown, ERHIAccess::CPURead));
 	}
 	RHICmdList.Transition(Transitions);
 
@@ -113,8 +118,11 @@ void KickTask_RenderThread(FRHICommandListImmediate& RHICmdList, FLandscapeEditR
 	Task.CompletionState = FLandscapeEditReadbackTaskImpl::ECompletionState::Pending;
 }
 
-/** Update the read back task on the render thread. Check if the GPU work is complete and if it is copy the data. */
-void UpdateTask_RenderThread(FRHICommandListImmediate& RHICmdList, FLandscapeEditReadbackTaskImpl& Task, bool bFlush)
+/**
+ * Update the read back task on the render thread. Check if the GPU work is complete and if it is copy the data.
+ * @return true if the task's state is Complete, false if it is still Pending : 
+ */
+bool UpdateTask_RenderThread(FRHICommandListImmediate& RHICmdList, FLandscapeEditReadbackTaskImpl& Task, bool bFlush)
 {
 	if (Task.CompletionState == FLandscapeEditReadbackTaskImpl::ECompletionState::Pending && (bFlush || Task.ReadbackFence->Poll()))
 	{
@@ -126,11 +134,14 @@ void UpdateTask_RenderThread(FRHICommandListImmediate& RHICmdList, FLandscapeEdi
 			const int32 MipWidth = FMath::Max(Task.Size.X >> MipIndex, 1);
 			const int32 MipHeight = FMath::Max(Task.Size.Y >> MipIndex, 1);
 
+			// Editor always runs on GPU zero
+			const uint32 GPUIndex = 0;
+
 			Task.Result[MipIndex].SetNum(MipWidth * MipHeight);
 
 			void* Data = nullptr;
 			int32 TargetWidth, TargetHeight;
-			RHICmdList.MapStagingSurface(Task.StagingTextures[MipIndex], Task.ReadbackFence.GetReference(), Data, TargetWidth, TargetHeight);
+			RHICmdList.MapStagingSurface(Task.StagingTextures[MipIndex], Task.ReadbackFence.GetReference(), Data, TargetWidth, TargetHeight, GPUIndex);
 			check(Data != nullptr);
 			check(MipWidth <= TargetWidth && MipHeight <= TargetHeight);
 
@@ -143,13 +154,15 @@ void UpdateTask_RenderThread(FRHICommandListImmediate& RHICmdList, FLandscapeEdi
 				WritePtr += MipWidth;
 			}
 
-			RHICmdList.UnmapStagingSurface(Task.StagingTextures[MipIndex]);
+			RHICmdList.UnmapStagingSurface(Task.StagingTextures[MipIndex], GPUIndex);
 		}
 
 		// Write completion flag for game thread.
 		FPlatformMisc::MemoryBarrier();
 		Task.CompletionState = FLandscapeEditReadbackTaskImpl::ECompletionState::Complete;
 	}
+
+	return (Task.CompletionState == FLandscapeEditReadbackTaskImpl::ECompletionState::Complete);
 }
 
 
@@ -175,24 +188,34 @@ public:
 	/** Allocate task data from the pool. */
 	int32 Allocate(UTexture2D const* InTexture, FLandscapeEditLayerReadback::FReadbackContext&& InReadbackContext)
 	{
-		int32 Index = 0;
+		int32 CurrentIndex = 0;
+		int32 BestEntryIndex = INDEX_NONE;
+		FIntVector TextureSize(InTexture->GetSizeX(), InTexture->GetSizeY(), 1);
 		auto ItEnd = Pool.end();
-		for (auto It = Pool.begin(); It != ItEnd; ++It, ++Index)
+		for (auto It = Pool.begin(); It != ItEnd; ++It, ++CurrentIndex)
 		{
-			if ((*It).TextureResource == nullptr)
+			FLandscapeEditReadbackTaskImpl& Task = *It;
+			// If the entry is unused, it's a candidate 
+			if (Task.TextureResource == nullptr)
 			{
-				break;
+				BestEntryIndex = CurrentIndex;
+				// Check the entry's texture size to ensure it's the best possible candidate. If so, no need to look further :
+				if (!Task.StagingTextures.IsEmpty() && Task.StagingTextures[0].IsValid() && (Task.StagingTextures[0]->GetSizeXYZ() == TextureSize) && (Task.Format == InTexture->GetPixelFormat()))
+				{
+					break;
+				}
 			}
 		}
 
-		if (Index == Pool.Num())
+		if (BestEntryIndex == INDEX_NONE)
 		{
 			Pool.Add();
+			BestEntryIndex = Pool.Num() - 1;
 		}
 
-		const bool bSuccess = InitTask_GameThread(Pool[Index], InTexture, MoveTemp(InReadbackContext), FrameCount);
-		AllocCount += bSuccess ? 1: 0;
-		return bSuccess ? Index : -1;
+		InitTask_GameThread(Pool[BestEntryIndex], InTexture, MoveTemp(InReadbackContext), FrameCount);
+		++AllocCount;
+		return BestEntryIndex;
 	}
 
 	/** Return task data to the pool. */
@@ -230,12 +253,15 @@ public:
 					Task->ReadbackContext.Empty();
 					Task->Result.Empty();
 
-					// Release the render resources (which may already be released)
-					ENQUEUE_RENDER_COMMAND(FLandscapeEditLayerReadback_Release)([Task](FRHICommandListImmediate& RHICmdList)
+					if (!Task->StagingTextures.IsEmpty() || Task->ReadbackFence.IsValid())
 					{
-						Task->StagingTextures.Reset();
-						Task->ReadbackFence.SafeRelease();
-					});
+						// Release the render resources (which may already be released)
+						ENQUEUE_RENDER_COMMAND(FLandscapeEditLayerReadback_Release)([Task](FRHICommandListImmediate& RHICmdList)
+						{
+							Task->StagingTextures.Reset();
+							Task->ReadbackFence.SafeRelease();
+						});
+					}
 				}
 			}
 		}
@@ -249,7 +275,7 @@ static TGlobalResource< FLandscapeEditReadbackTaskPool > GReadbackTaskPool;
 
 
 FLandscapeEditLayerReadback::FLandscapeEditLayerReadback()
-	: Hash(0)
+	: Hash(0ull)
 {}
 
 FLandscapeEditLayerReadback::~FLandscapeEditLayerReadback()
@@ -260,12 +286,14 @@ FLandscapeEditLayerReadback::~FLandscapeEditLayerReadback()
 	}
 }
 
-uint32 FLandscapeEditLayerReadback::CalculateHash(const uint8* InMipData, int32 InSizeInBytes)
+uint64 FLandscapeEditLayerReadback::CalculateHash(const uint8* InMipData, int32 InSizeInBytes)
 {
-	return FCrc::MemCrc32(InMipData, InSizeInBytes);
+	TRACE_CPUPROFILER_EVENT_SCOPE(FLandscapeEditLayerReadback::CalculateHash);
+
+	return CityHash64(reinterpret_cast<const char*>(InMipData), InSizeInBytes);
 }
 
-bool FLandscapeEditLayerReadback::SetHash(uint32 InHash)
+bool FLandscapeEditLayerReadback::SetHash(uint64 InHash)
 {
 	const bool bChanged = InHash != Hash;
 	Hash = InHash;
@@ -295,7 +323,13 @@ void FLandscapeEditLayerReadback::Tick()
 	{
 		for (int32 TaskHandle : TasksToUpdate)
 		{
-			UpdateTask_RenderThread(RHICmdList, GReadbackTaskPool.Pool[TaskHandle], false);
+			// Tick the task : 
+			bool bTaskComplete = UpdateTask_RenderThread(RHICmdList, GReadbackTaskPool.Pool[TaskHandle], false);
+			// Stop processing at the first incomplete task in order not to get a task's state to Complete before a one of its previous task (in case their GPU fences are written in between the calls to UpdateTask_RenderThread) : 
+			if (!bTaskComplete)
+			{
+				break;
+			}
 		}
 	});
 }
@@ -308,7 +342,8 @@ void FLandscapeEditLayerReadback::Flush()
 	{
 		for (int32 TaskHandle : TasksToUpdate)
 		{
-			UpdateTask_RenderThread(RHICmdList, GReadbackTaskPool.Pool[TaskHandle], true);
+			bool bTaskComplete = UpdateTask_RenderThread(RHICmdList, GReadbackTaskPool.Pool[TaskHandle], true);
+			check(bTaskComplete); // Flush should never fail to complete
 		}
 	});
 
@@ -359,7 +394,7 @@ void FLandscapeEditLayerReadback::ReleaseCompletedResults(int32 InResultNum)
 		GReadbackTaskPool.Free(TaskHandles[TaskIndex]);
 	}
 
-	TaskHandles.RemoveAt(0, InResultNum, false);
+	TaskHandles.RemoveAt(0, InResultNum, EAllowShrinking::No);
 }
 
 bool FLandscapeEditLayerReadback::HasWork()

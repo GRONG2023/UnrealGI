@@ -23,7 +23,12 @@ void FGenericPlatformOutputDevices::SetupOutputDevices()
 	check(GLog);
 
 	ResetCachedAbsoluteFilename();
-	GLog->AddOutputDevice(FPlatformOutputDevices::GetLog());
+	
+	// Add the default log device (typically file) unless the commandline says otherwise.
+	if (!FParse::Param(FCommandLine::Get(), TEXT("NODEFAULTLOG")))
+	{
+		GLog->AddOutputDevice(FPlatformOutputDevices::GetLog());
+	}
 
 	TArray<FOutputDevice*> ChannelFileOverrides;
 	FPlatformOutputDevices::GetPerChannelFileOverrides(ChannelFileOverrides);
@@ -40,21 +45,25 @@ void FGenericPlatformOutputDevices::SetupOutputDevices()
 		GLog->AddOutputDevice(GLogConsole);
 	}
 	
+#if USE_DEBUG_LOGGING
 	// If the platform has a separate debug output channel (e.g. OutputDebugString) then add an output device
 	// unless logging is turned off
-	if (FPlatformMisc::HasSeparateChannelForDebugOutput())
+	if (FPlatformMisc::HasSeparateChannelForDebugOutput() && !FParse::Param(FCommandLine::Get(), TEXT("NODEBUGOUTPUT")))
 	{
 		GLog->AddOutputDevice(new FOutputDeviceDebug());
 	}
+#endif // USE_DEBUG_LOGGING
 #endif
 
+#if USE_EVENT_LOGGING
 	GLog->AddOutputDevice(FPlatformOutputDevices::GetEventLog());
+#endif // USE_EVENT_LOGGING
 };
 
 void FGenericPlatformOutputDevices::ResetCachedAbsoluteFilename()
 {
 	FScopeLock ScopeLock(&LogFilenameLock);
-	CachedAbsoluteFilename[0] = 0;
+	CachedAbsoluteFilename[0] = TEXT('\0');
 }
 
 void FGenericPlatformOutputDevices::OnLogFileOpened(const TCHAR* Pathname)
@@ -76,16 +85,27 @@ FString FGenericPlatformOutputDevices::GetAbsoluteLogFilename()
 		{
 			if (FParse::Value(FCommandLine::Get(), TEXT("ABSLOG="), LogFilename, bShouldStopOnSeparator))
 			{
-				CachedAbsoluteFilename[0] = 0;
+				CachedAbsoluteFilename[0] = TEXT('\0');
 			}
 		}
 
 		FString Extension(FPaths::GetExtension(LogFilename));
 		if (Extension != TEXT("log") && Extension != TEXT("txt"))
 		{
-			// Ignoring the specified log filename because it doesn't have a .log extension			
+			// Ignoring the specified log filename because it doesn't have a .log extension.
 			LogFilename.Empty();
 		}
+
+#if defined(UE_CUSTOM_LOG_FILENAME)
+		if (LogFilename.Len() == 0)
+		{
+			LogFilename = UE_CUSTOM_LOG_FILENAME;
+			if (LogFilename.Len() != 0)
+			{
+				LogFilename += TEXT(".log");
+			}
+		}
+#endif
 
 		if (LogFilename.Len() == 0)
 		{
@@ -95,7 +115,7 @@ FString FGenericPlatformOutputDevices::GetAbsoluteLogFilename()
 			}
 			else
 			{
-				LogFilename = TEXT("UE4");
+				LogFilename = TEXT("Unreal");
 			}
 
 			LogFilename += TEXT(".log");

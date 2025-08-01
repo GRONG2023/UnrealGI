@@ -3,7 +3,7 @@
 #include "EngineSystem.h"
 
 #if VEHICLE_DEBUGGING_ENABLED
-PRAGMA_DISABLE_OPTIMIZATION
+UE_DISABLE_OPTIMIZATION
 #endif
 
 namespace Chaos
@@ -11,6 +11,7 @@ namespace Chaos
 
 
 	FSimpleEngineSim::FSimpleEngineSim(const FSimpleEngineConfig* StaticDataIn) : TVehicleSystem<FSimpleEngineConfig>(StaticDataIn)
+		, MaxTorque(Setup().MaxTorque)
 		, ThrottlePosition(0.f)
 		, TargetSpeed(0.f)
 		, CurrentRPM(0.f)
@@ -27,7 +28,7 @@ namespace Chaos
 
 	float FSimpleEngineSim::GetTorqueFromRPM(float RPM, bool LimitToIdle /*= true*/)
 	{
-		if (!EngineStarted || RPM >= Setup().MaxRPM || Setup().MaxRPM == 0)
+		if (!EngineStarted || (FMath::Abs(RPM - Setup().MaxRPM) < 1.0f) || Setup().MaxRPM == 0)
 		{
 			return 0.f;
 		}
@@ -37,7 +38,7 @@ namespace Chaos
 			RPM = FMath::Clamp(RPM, (float)Setup().EngineIdleRPM, (float)Setup().MaxRPM);
 		}
 
-		return Setup().TorqueCurve.GetValue(RPM, Setup().MaxRPM, Setup().MaxTorque);
+		return Setup().TorqueCurve.GetValue(RPM, Setup().MaxRPM, MaxTorque);
 	}
 
 	void FSimpleEngineSim::Simulate(float DeltaTime)
@@ -79,5 +80,5 @@ namespace Chaos
 
 
 #if VEHICLE_DEBUGGING_ENABLED
-PRAGMA_ENABLE_OPTIMIZATION
+UE_ENABLE_OPTIMIZATION
 #endif

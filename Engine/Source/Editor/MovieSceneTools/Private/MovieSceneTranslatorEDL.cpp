@@ -5,12 +5,12 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "LevelSequence.h"
 #include "Tracks/MovieSceneAudioTrack.h"
 #include "Sections/MovieSceneCinematicShotSection.h"
 #include "Tracks/MovieSceneCinematicShotTrack.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Misc/FrameRate.h"
 #include "MovieSceneTimeHelpers.h"
 #include "MovieSceneCaptureModule.h"
@@ -119,7 +119,7 @@ void ParseFromEDL(const FString& InputString, FFrameRate TickResolution, FFrameR
 		// 001 AX V C 00:00:00:00 00:00:12:02 00:00:07:20 00:00:12:03
 		if (!bFoundEventLine)
 		{
-			if (InputChars.Num() == 8)
+			if (InputChars.Num() >= 8)
 			{
 				EventName = InputChars[0];
 				AuxName = InputChars[1]; // Typically AX but unused in this case
@@ -166,10 +166,11 @@ void ParseFromEDL(const FString& InputString, FFrameRate TickResolution, FFrameR
 				if (TrackType != FShotData::ETrackType::TT_None &&
 					EditType != FShotData::EEditType::ET_None)
 				{
-					SourceInFrame  = SMPTEToFrame(InputChars[4], TickResolution, FrameRate);
-					SourceOutFrame = SMPTEToFrame(InputChars[5], TickResolution, FrameRate);
-					EditInFrame    = SMPTEToFrame(InputChars[6], TickResolution, FrameRate);
-					EditOutFrame   = SMPTEToFrame(InputChars[7], TickResolution, FrameRate);
+					// Look for timecodes at the end
+					SourceInFrame  = SMPTEToFrame(InputChars[InputChars.Num() - 4], TickResolution, FrameRate);
+					SourceOutFrame = SMPTEToFrame(InputChars[InputChars.Num() - 3], TickResolution, FrameRate);
+					EditInFrame    = SMPTEToFrame(InputChars[InputChars.Num() - 2], TickResolution, FrameRate);
+					EditOutFrame   = SMPTEToFrame(InputChars[InputChars.Num() - 1], TickResolution, FrameRate);
 
 					bFoundEventLine = true;
 					continue; // Go to the next line
@@ -179,18 +180,21 @@ void ParseFromEDL(const FString& InputString, FFrameRate TickResolution, FFrameR
 		
 		// Then look for:
 		// * FROM CLIP NAME: shot0010_001.avi
+		// * KEY CLIP NAME: shot0010_001.avi
 		else
 		{
 			if (InputChars.Num() == 5 &&
 				InputChars[0] == TEXT("*") &&
-				InputChars[1].ToUpper() == TEXT("FROM") &&
-				InputChars[2].ToUpper() == TEXT("CLIP") &&
+				( (InputChars[1].ToUpper() == TEXT("FROM") && InputChars[2].ToUpper() == TEXT("CLIP")) ||
+				  (InputChars[1].ToUpper() == TEXT("KEY") && InputChars[2].ToUpper() == TEXT("CLIP")) ) &&
 				InputChars[3].ToUpper() == TEXT("NAME:"))
 			{
 				ReelName = InputChars[4];
 
-				//@todo can't assume avi's written out
-				ReelName.LeftChopInline(4, false); // strip .avi
+				if (ReelName.EndsWith(TEXT(".avi")))
+				{
+					ReelName.LeftChopInline(4, EAllowShrinking::No); // strip .avi
+				}
 
 				FString ElementName = MoveTemp(ReelName);
 				FString ElementPath = ElementName;
@@ -367,11 +371,13 @@ bool MovieSceneTranslatorEDL::ImportEDL(UMovieScene* InMovieScene, FFrameRate In
 	TArray<FShotData> ShotDataArray;
 	ParseFromEDL(InputString, TickResolution, InFrameRate, ShotDataArray);
 
-	UMovieSceneCinematicShotTrack* CinematicShotTrack = InMovieScene->FindMasterTrack<UMovieSceneCinematicShotTrack>();
+	UMovieSceneCinematicShotTrack* CinematicShotTrack = InMovieScene->FindTrack<UMovieSceneCinematicShotTrack>();
 	if (!CinematicShotTrack)
 	{
-		CinematicShotTrack = InMovieScene->AddMasterTrack<UMovieSceneCinematicShotTrack>();
+		CinematicShotTrack = InMovieScene->AddTrack<UMovieSceneCinematicShotTrack>();
 	}
+
+	TSet<UMovieSceneSection*> RelevantSections;
 
 	for (FShotData ShotData : ShotDataArray)
 	{
@@ -383,7 +389,7 @@ bool MovieSceneTranslatorEDL::ImportEDL(UMovieScene* InMovieScene, FFrameRate In
 			for (UMovieSceneSection* Section : CinematicShotTrack->GetAllSections())
 			{
 				UMovieSceneCinematicShotSection* CinematicShotSection = Cast<UMovieSceneCinematicShotSection>(Section);
-				if (CinematicShotSection != nullptr)
+				if (CinematicShotSection != nullptr && !RelevantSections.Contains(Section))
 				{
 					UMovieSceneSequence* ShotSequence = CinematicShotSection->GetSequence();
 				
@@ -404,7 +410,7 @@ bool MovieSceneTranslatorEDL::ImportEDL(UMovieScene* InMovieScene, FFrameRate In
 
 				// Collect a full list of assets with the specified class
 				TArray<FAssetData> AssetDataArray;
-				AssetRegistryModule.Get().GetAssetsByClass(ULevelSequence::StaticClass()->GetFName(), AssetDataArray);
+				AssetRegistryModule.Get().GetAssetsByClass(ULevelSequence::StaticClass()->GetClassPathName(), AssetDataArray);
 
 				for (FAssetData AssetData : AssetDataArray)
 				{
@@ -422,10 +428,22 @@ bool MovieSceneTranslatorEDL::ImportEDL(UMovieScene* InMovieScene, FFrameRate In
 			// Conform this shot section
 			if (ShotSection)
 			{
+				RelevantSections.Add(ShotSection);
+
 				ShotSection->Modify();
 				ShotSection->Parameters.StartFrameOffset = ShotData.SourceInFrame;
 				ShotSection->SetRange(TRange<FFrameNumber>(ShotData.EditInFrame, ShotData.EditOutFrame));
 			}
+		}
+	}
+
+	// Remove irrelevant sections backwards to ensure prior indices remain valid
+	const TArray<UMovieSceneSection*>& Sections = CinematicShotTrack->GetAllSections();
+	for (int32 Index = Sections.Num()-1; Index >= 0; --Index) 
+	{
+		if (!RelevantSections.Contains(Sections[Index]))
+		{
+			CinematicShotTrack->RemoveSectionAt(Index);
 		}
 	}
 
@@ -447,13 +465,13 @@ bool MovieSceneTranslatorEDL::ExportEDL(const UMovieScene* InMovieScene, FFrameR
 
 	TArray<FShotData> ShotDataArray;
 
-	for (UMovieSceneTrack* MasterTrack : InMovieScene->GetMasterTracks())
+	for (UMovieSceneTrack* Track : InMovieScene->GetTracks())
 	{
 		// @todo: sequencer-timecode: deal with framerate differences??
 		TRange<FFrameNumber> PlaybackRange = InMovieScene->GetPlaybackRange();
-		if (MasterTrack->IsA(UMovieSceneCinematicShotTrack::StaticClass()))
+		if (Track->IsA(UMovieSceneCinematicShotTrack::StaticClass()))
 		{
-			UMovieSceneCinematicShotTrack* CinematicShotTrack = Cast<UMovieSceneCinematicShotTrack>(MasterTrack);
+			UMovieSceneCinematicShotTrack* CinematicShotTrack = Cast<UMovieSceneCinematicShotTrack>(Track);
 
 			for (UMovieSceneSection* ShotSection : CinematicShotTrack->GetAllSections())
 			{
@@ -490,9 +508,9 @@ bool MovieSceneTranslatorEDL::ExportEDL(const UMovieScene* InMovieScene, FFrameR
 				ShotDataArray.Add(FShotData(ShotName, ShotPath, FShotData::ETrackType::TT_Video, FShotData::EEditType::ET_Cut, SourceInFrame, SourceOutFrame, EditInFrame, EditOutFrame, bWithinPlaybackRange));
 			}
 		}
-		else if (MasterTrack->IsA(UMovieSceneAudioTrack::StaticClass()))
+		else if (Track->IsA(UMovieSceneAudioTrack::StaticClass()))
 		{
-			UMovieSceneAudioTrack* AudioTrack = Cast<UMovieSceneAudioTrack>(MasterTrack);
+			UMovieSceneAudioTrack* AudioTrack = Cast<UMovieSceneAudioTrack>(Track);
 
 			//@todo support audio clips
 		}

@@ -33,7 +33,7 @@ struct FReferenceBoneFrame
  * This isn't the twist control node for bone twist
  */
 USTRUCT()
-struct ANIMGRAPHRUNTIME_API FAnimNode_TwistCorrectiveNode : public FAnimNode_SkeletalControlBase
+struct FAnimNode_TwistCorrectiveNode : public FAnimNode_SkeletalControlBase
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -56,7 +56,7 @@ struct ANIMGRAPHRUNTIME_API FAnimNode_TwistCorrectiveNode : public FAnimNode_Ske
 
  	// Maximum limit of the input value (mapped to RemappedMax, only used when limiting the source range)
  	// We can't go more than 180 right now because this is dot product driver
-	UPROPERTY(EditAnywhere, Category = "Mapping", meta = (UIMin = 0.f, ClampMin = 0.f, UIMax = 90.f, ClampMax = 90.f, EditCondition = bUseRange, DisplayName = "Max Angle In Degree"))
+	UPROPERTY(EditAnywhere, Category = "Mapping", meta = (UIMin = 0.f, ClampMin = 0.f, UIMax = 90.f, ClampMax = 90.f, DisplayName = "Max Angle In Degree"))
  	float RangeMax;
 
  	// Minimum value to apply to the destination (remapped from the input range)
@@ -67,27 +67,36 @@ struct ANIMGRAPHRUNTIME_API FAnimNode_TwistCorrectiveNode : public FAnimNode_Ske
 	UPROPERTY(EditAnywhere, Category = "Mapping", meta = (EditCondition = bUseRange, DisplayName = "Mapped Range Max"))
  	float RemappedMax;
 
+#if WITH_EDITORONLY_DATA
+	UPROPERTY()
+	FAnimCurveParam Curve_DEPRECATED;
+#endif
+
 	UPROPERTY(EditAnywhere, Category = "Output Curve")
-	FAnimCurveParam Curve;
+	FName CurveName;
 
 public:
-	FAnimNode_TwistCorrectiveNode();
+	ANIMGRAPHRUNTIME_API FAnimNode_TwistCorrectiveNode();
 
 	// FAnimNode_Base interface
-	virtual void GatherDebugData(FNodeDebugData& DebugData) override;
-	virtual void CacheBones_AnyThread(const FAnimationCacheBonesContext& Context)  override;
-	virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
+	ANIMGRAPHRUNTIME_API virtual void GatherDebugData(FNodeDebugData& DebugData) override;
+	ANIMGRAPHRUNTIME_API virtual void CacheBones_AnyThread(const FAnimationCacheBonesContext& Context)  override;
+	ANIMGRAPHRUNTIME_API virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
 	// End of FAnimNode_Base interface
 
 	// FAnimNode_SkeletalControlBase interface
-	virtual void EvaluateComponentSpaceInternal(FComponentSpacePoseContext& Context) override;
-	virtual bool IsValidToEvaluate(const USkeleton* Skeleton, const FBoneContainer& RequiredBones) override;
+	ANIMGRAPHRUNTIME_API virtual void EvaluateComponentSpaceInternal(FComponentSpacePoseContext& Context) override;
+	ANIMGRAPHRUNTIME_API virtual bool IsValidToEvaluate(const USkeleton* Skeleton, const FBoneContainer& RequiredBones) override;
 	// End of FAnimNode_SkeletalControlBase interface
+
+	// Type traits support
+	ANIMGRAPHRUNTIME_API bool Serialize(FArchive& Ar);
+	ANIMGRAPHRUNTIME_API void PostSerialize(const FArchive& Ar);
 
 protected:
 	
 	// FAnimNode_SkeletalControlBase protected interface
-	virtual void InitializeBoneReferences(const FBoneContainer& RequiredBones) override;
+	ANIMGRAPHRUNTIME_API virtual void InitializeBoneReferences(const FBoneContainer& RequiredBones) override;
 
 private:
 	// Reference Pose Angle
@@ -99,4 +108,14 @@ private:
 	FVector GetReferenceAxis(FCSPose<FCompactPose>& MeshBases, const FReferenceBoneFrame& Reference) const;
 	// Get Angle of Base, and Twist from Reference Bone Transform
 	float	GetAngle(const FVector& Base, const FVector& Twist, const FTransform& ReferencetBoneTransform) const;
+};
+
+template<>
+struct TStructOpsTypeTraits<FAnimNode_TwistCorrectiveNode> : public TStructOpsTypeTraitsBase2<FAnimNode_TwistCorrectiveNode>
+{
+	enum
+	{
+		WithSerializer = true,
+		WithPostSerialize = true
+	};
 };

@@ -19,6 +19,7 @@
 #include "SKismetInspector.h"
 #include "AnimationGraph.h"
 #include "AnimationGraphSchema.h"
+#include "AnimGraphNode_LinkedAnimLayer.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Widgets/Input/SComboButton.h"
 #include "Widgets/Input/SEditableTextBox.h"
@@ -106,7 +107,7 @@ void FAnimGraphDetails::CustomizeDetails(IDetailLayoutBuilder& DetailLayout)
 				.ButtonContent()
 				[
 					SNew(SBorder)
-					.BorderImage(FEditorStyle::GetBrush("NoBorder"))
+					.BorderImage(FAppStyle::GetBrush("NoBorder"))
 					.Padding(FMargin(0, 0, 5, 0))
 					[
 						SNew(SEditableTextBox)
@@ -155,8 +156,8 @@ void FAnimGraphDetails::CustomizeDetails(IDetailLayoutBuilder& DetailLayout)
 	.VAlign(VAlign_Center)
 	[
 		SNew(SButton)
-		.ButtonStyle(FEditorStyle::Get(), "RoundButton")
-		.ForegroundColor(FEditorStyle::GetSlateColor("DefaultForeground"))
+		.ButtonStyle(FAppStyle::Get(), "RoundButton")
+		.ForegroundColor(FAppStyle::GetSlateColor("DefaultForeground"))
 		.ContentPadding(FMargin(2, 0))
 		.OnClicked(this, &FAnimGraphDetails::OnAddNewInputPoseClicked)
 		.HAlign(HAlign_Right)
@@ -169,7 +170,7 @@ void FAnimGraphDetails::CustomizeDetails(IDetailLayoutBuilder& DetailLayout)
 			.Padding(FMargin(0, 1))
 			[
 				SNew(SImage)
-				.Image(FEditorStyle::GetBrush("Plus"))
+				.Image(FAppStyle::GetBrush("Plus"))
 			]
 			+ SHorizontalBox::Slot()
 			.VAlign(VAlign_Center)
@@ -240,14 +241,14 @@ void FAnimGraphDetails::CustomizeDetails(IDetailLayoutBuilder& DetailLayout)
 						.AutoWidth()
 						[
 							SNew(SButton)
-							.ButtonStyle(FEditorStyle::Get(), "HoverHintOnly")
-							.ForegroundColor(FEditorStyle::GetSlateColor("DefaultForeground"))
+							.ButtonStyle(FAppStyle::Get(), "HoverHintOnly")
+							.ForegroundColor(FAppStyle::GetSlateColor("DefaultForeground"))
 							.ContentPadding(FMargin(2, 2))
 							.OnClicked(this, &FAnimGraphDetails::OnRemoveInputPoseClicked, LinkedInputPoseNode)
 							.ToolTipText(LOCTEXT("RemoveInputPoseTooltip", "Remove this input pose"))
 							[
 								SNew(SImage)
-								.Image(FEditorStyle::GetBrush("Cross"))
+								.Image(FAppStyle::GetBrush("Cross"))
 							]
 						]
 					]
@@ -293,6 +294,10 @@ FReply FAnimGraphDetails::OnAddNewInputPoseClicked()
 
 	FEdGraphSchemaAction_K2NewNode::SpawnNode<UAnimGraphNode_LinkedInputPose>(Graph, NewNodePosition, EK2NewNodeFlags::None);
 
+	TSharedPtr<IAnimationBlueprintEditor> AnimBlueprintEditor = AnimBlueprintEditorPtr.Pin();
+	UBlueprint* Blueprint = AnimBlueprintEditor->GetBlueprintObj();
+	UAnimGraphNode_LinkedInputPose::ReconstructLayerNodes(Blueprint);
+
 	DetailLayoutBuilder->ForceRefreshDetails();
 	
 	return FReply::Handled();
@@ -311,8 +316,11 @@ FReply FAnimGraphDetails::OnRemoveInputPoseClicked(UAnimGraphNode_LinkedInputPos
 	}
 
 	TSharedPtr<IAnimationBlueprintEditor> AnimBlueprintEditor = AnimBlueprintEditorPtr.Pin();
-	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(AnimBlueprintEditor->GetBlueprintObj());
+	UBlueprint* Blueprint = AnimBlueprintEditor->GetBlueprintObj();
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 
+	UAnimGraphNode_LinkedInputPose::ReconstructLayerNodes(Blueprint);
+	
 	DetailLayoutBuilder->ForceRefreshDetails();
 
 	return FReply::Handled();
@@ -321,12 +329,16 @@ FReply FAnimGraphDetails::OnRemoveInputPoseClicked(UAnimGraphNode_LinkedInputPos
 FText FAnimGraphDetails::OnGetGroupText() const
 {
 	UAnimGraphNode_Root* Root = FBlueprintEditorUtils::GetAnimGraphRoot(Graph);
-	if(Root->Node.Group == NAME_None)
+	if (Root->Node.GetGroup() == FAnimNode_Root::DefaultSharedGroup)
 	{
-		return LOCTEXT("DefaultGroup", "Default");
+		return LOCTEXT("DefaultGroupSharedGroup", "Default Shared Group");
+	}
+	else if(Root->Node.GetGroup() == NAME_None)
+	{
+		return LOCTEXT("DefaultGroupUngrouped", "Ungrouped");
 	}
 		
-	return FText::FromName(Root->Node.Group);
+	return FText::FromName(Root->Node.GetGroup());
 }
 
 void FAnimGraphDetails::OnGroupTextCommitted(const FText& NewText, ETextCommit::Type InTextCommit)
@@ -335,7 +347,7 @@ void FAnimGraphDetails::OnGroupTextCommitted(const FText& NewText, ETextCommit::
 	{
 		// Remove excess whitespace and prevent categories with just spaces
 		FText GroupName = FText::TrimPrecedingAndTrailing(NewText);
-		if(GroupName.ToString().Equals(TEXT("Default")))
+		if(GroupName.ToString().Equals(TEXT("Ungrouped")))
 		{
 			GroupName = FText::GetEmpty();
 		}
@@ -353,7 +365,7 @@ void FAnimGraphDetails::OnGroupSelectionChanged(TSharedPtr<FText> ProposedSelect
 	if(ProposedSelection.IsValid())
 	{
 		FText GroupName = *ProposedSelection.Get();
-		if(GroupName.ToString().Equals(TEXT("Default")))
+		if(GroupName.ToString().Equals(TEXT("Ungrouped")))
 		{
 			GroupName = FText::GetEmpty();
 		}
@@ -392,9 +404,9 @@ void FAnimGraphDetails::RefreshGroupSource()
 	GroupSource.Empty();
 
 	UAnimGraphNode_Root* Root = FBlueprintEditorUtils::GetAnimGraphRoot(Graph);
-	if(Root->Node.Group != NAME_None)
+	if(Root->Node.GetGroup() != NAME_None)
 	{
-		GroupSource.Add(MakeShared<FText>(LOCTEXT("DefaultGroup", "Default")));
+		GroupSource.Add(MakeShared<FText>(LOCTEXT("DefaultGroupUngrouped", "Ungrouped")));
 	}
 
 	// Pull groups from implemented functions

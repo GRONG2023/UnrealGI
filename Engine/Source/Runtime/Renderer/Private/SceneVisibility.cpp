@@ -1,16 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-/*=============================================================================
-	SceneVisibility.cpp: Scene visibility determination.
-=============================================================================*/
-
+#include "SceneVisibility.h"
+#include "SceneVisibilityPrivate.h"
 #include "CoreMinimal.h"
 #include "HAL/ThreadSafeCounter.h"
 #include "Stats/Stats.h"
 #include "Misc/MemStack.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/App.h"
-#include "Async/TaskGraphInterfaces.h"
 #include "EngineDefines.h"
 #include "EngineGlobals.h"
 #include "EngineStats.h"
@@ -19,32 +16,43 @@
 #include "SceneInterface.h"
 #include "RendererInterface.h"
 #include "PrimitiveViewRelevance.h"
+#include "Materials/Material.h"
 #include "MaterialShared.h"
 #include "SceneManagement.h"
 #include "ScenePrivateBase.h"
 #include "PostProcess/SceneRenderTargets.h"
 #include "SceneCore.h"
+#include "SceneOcclusion.h"
 #include "LightSceneInfo.h"
 #include "SceneRendering.h"
 #include "DeferredShadingRenderer.h"
 #include "DynamicPrimitiveDrawing.h"
-#include "ScenePrivate.h"
 #include "FXSystem.h"
 #include "PostProcess/PostProcessing.h"
 #include "SceneView.h"
-#include "SceneSoftwareOcclusion.h"
+#include "SkyAtmosphereRendering.h"
 #include "Engine/LODActor.h"
 #include "GPUScene.h"
 #include "TranslucentRendering.h"
 #include "Async/ParallelFor.h"
 #include "HairStrands/HairStrandsRendering.h"
+#include "HairStrands/HairStrandsData.h"
 #include "RectLightSceneProxy.h"
 #include "Math/Halton.h"
-#include "ProfilingDebugging/DiagnosticTable.h"
-
-/*------------------------------------------------------------------------------
-	Globals
-------------------------------------------------------------------------------*/
+#include "ProfilingDebugging/CountersTrace.h"
+#include "Algo/Unique.h"
+#include "InstanceCulling/InstanceCullingManager.h"
+#include "InstanceCulling/InstanceCullingOcclusionQuery.h"
+#include "PostProcess/TemporalAA.h"
+#include "RayTracing/RayTracingInstanceCulling.h"
+#include "HeterogeneousVolumes/HeterogeneousVolumes.h"
+#include "RendererModule.h"
+#include "SceneViewExtension.h"
+#include "RenderCore.h"
+#include "UnrealEngine.h"
+#include "VT/VirtualTextureSystem.h"
+#include "NaniteSceneProxy.h"
+#include "ViewDebug.h"
 
 static float GWireframeCullThreshold = 5.0f;
 static FAutoConsoleVariableRef CVarWireframeCullThreshold(
@@ -95,6 +103,14 @@ static FAutoConsoleVariableRef CVarHZBOcclusion(
 	ECVF_RenderThreadSafe
 	);
 
+int32 GOcclusionFeedback_Enable = 0;
+static FAutoConsoleVariableRef CVarOcclusionFeedback_Enable(
+	TEXT("r.OcclusionFeedback.Enable"),
+	GOcclusionFeedback_Enable,
+	TEXT("Whether to enable occlusion system based on a rendering feedback. Currently works only with a mobile rendering\n"),
+	ECVF_RenderThreadSafe
+);
+
 static int32 GVisualizeOccludedPrimitives = 0;
 static FAutoConsoleVariableRef CVarVisualizeOccludedPrimitives(
 	TEXT("r.VisualizeOccludedPrimitives"),
@@ -130,15 +146,6 @@ static TAutoConsoleVariable<float> CVarMinAutomaticViewMipBiasOffset(
 	TEXT("Automatic view mip bias's constant offset (default to -0.3)."),
 	ECVF_RenderThreadSafe);
 
-
-static int32 GOcclusionCullParallelPrimFetch = 0;
-static FAutoConsoleVariableRef CVarOcclusionCullParallelPrimFetch(
-	TEXT("r.OcclusionCullParallelPrimFetch"),
-	GOcclusionCullParallelPrimFetch,
-	TEXT("Enables Parallel Occlusion Cull primitive fetch."),
-	ECVF_RenderThreadSafe
-	);
-
 static int32 GILCUpdatePrimTaskEnabled = 1;
 
 static FAutoConsoleVariableRef CVarILCUpdatePrimitivesTask(
@@ -148,13 +155,13 @@ static FAutoConsoleVariableRef CVarILCUpdatePrimitivesTask(
 	ECVF_RenderThreadSafe
 	);
 
-static int32 GDoInitViewsLightingAfterPrepass = 0;
-static FAutoConsoleVariableRef CVarDoInitViewsLightingAfterPrepass(
-	TEXT("r.DoInitViewsLightingAfterPrepass"),
-	GDoInitViewsLightingAfterPrepass,
-	TEXT("Delays the lighting part of InitViews until after the prepass. This improves the threading throughput and gets the prepass to the GPU ASAP. Experimental options; has an unknown race."),
+int32 GEarlyInitDynamicShadows = 1;
+static FAutoConsoleVariableRef CVarEarlyInitDynamicShadows(
+	TEXT("r.EarlyInitDynamicShadows"),
+	GEarlyInitDynamicShadows,
+	TEXT("Starts shadow culling tasks earlier in the frame."),
 	ECVF_RenderThreadSafe
-	);
+);
 
 static int32 GFramesNotOcclusionTestedToExpandBBoxes = 5;
 static FAutoConsoleVariableRef CVarFramesNotOcclusionTestedToExpandBBoxes(
@@ -222,13 +229,111 @@ static FAutoConsoleVariableRef CVarLODFadeTime( TEXT("r.LODFadeTime"), GFadeTime
 static float GDistanceFadeMaxTravel = 1000.0f;
 static FAutoConsoleVariableRef CVarDistanceFadeMaxTravel( TEXT("r.DistanceFadeMaxTravel"), GDistanceFadeMaxTravel, TEXT("Max distance that the player can travel during the fade time."), ECVF_RenderThreadSafe );
 
+extern int32 GVisibilitySkipAlwaysVisible;
 
-static TAutoConsoleVariable<int32> CVarParallelInitViews(
-	TEXT("r.ParallelInitViews"),
-	1,
-	TEXT("Toggles parallel init views. 0 = off; 1 = on"),
+static int32 GVisibilityTaskSchedule = 1;
+static FAutoConsoleVariableRef CVarVisibilityTaskSchedule(
+	TEXT("r.Visibility.TaskSchedule"),
+	GVisibilityTaskSchedule,
+	TEXT("Controls how the visibility task graph is scheduled.")
+	TEXT("0: Work is primarily done on the render thread with the potential for parallel help;")
+	TEXT("1: Work is done on an async task graph (if supported by platform);"),
 	ECVF_RenderThreadSafe
-	);          
+);
+
+static int32 GFrustumCullNumPrimitivesPerTask = 0;
+static FAutoConsoleVariableRef CVarFrustumCullNumPrimitivesPerTask(
+	TEXT("r.Visibility.FrustumCull.NumPrimitivesPerTask"),
+	GFrustumCullNumPrimitivesPerTask,
+	TEXT("Assigns a fixed number of primitives for each frustum cull task.")
+	TEXT(" 0: Automatic;")
+	TEXT(">0: Fixed number of primitives per task (clamped to fixed limits);"),
+	ECVF_RenderThreadSafe
+);
+
+static bool GFrustumCullEnabled = true;
+static FAutoConsoleVariableRef CVarFrustumCullEnable(
+	TEXT("r.Visibility.FrustumCull.Enabled"),
+	GFrustumCullEnabled,
+	TEXT("Enables frustum culling."),
+	ECVF_RenderThreadSafe
+);
+
+static bool GFrustumCullUseOctree = false;
+static FAutoConsoleVariableRef CVarFrustumCullUseOctree(
+	TEXT("r.Visibility.FrustumCull.UseOctree"),
+	GFrustumCullUseOctree,
+	TEXT("Use the octree for visibility calculations."),
+	ECVF_RenderThreadSafe
+);
+
+static bool GFrustumCullUseSphereTestFirst = false;
+static FAutoConsoleVariableRef CVarFrustumCullUseSphereTestFirst(
+	TEXT("r.Visibility.FrustumCull.UseSphereTestFirst"),
+	GFrustumCullUseSphereTestFirst,
+	TEXT("Performance tweak. Uses a sphere cull before and in addition to a box for frustum culling."),
+	ECVF_RenderThreadSafe
+);
+
+static bool GFrustumCullUseFastIntersect = false;
+static TAutoConsoleVariable<int32> CVarFrustumCullUseFastIntersect(
+	TEXT("r.Visibility.FrustumCull.UseFastIntersect"),
+	1,
+	TEXT("Use optimized 8 plane fast intersection code if we have 8 permuted planes."),
+	ECVF_RenderThreadSafe
+);
+
+static int32 GOcclusionCullMaxQueriesPerTask = 0;
+static FAutoConsoleVariableRef CVarOcclusionCullMaxQueriesPerTask(
+	TEXT("r.Visibility.OcclusionCull.MaxQueriesPerTask"),
+	GOcclusionCullMaxQueriesPerTask,
+	TEXT("Assigns a fixed number of occlusion queries for each occlusion cull task.")
+	TEXT(" 0: Automatic;")
+	TEXT(">0: Fixed number of occlusion queries per task;"),
+	ECVF_RenderThreadSafe
+);
+
+static int32 GNumDynamicMeshElementTasks = 4;
+static FAutoConsoleVariableRef CVarNumDynamicMeshElementTasks(
+	TEXT("r.Visibility.DynamicMeshElements.NumMainViewTasks"),
+	GNumDynamicMeshElementTasks,
+	TEXT("Controls the number of gather dynamic mesh elements tasks to run asynchronously during view visibility."),
+	ECVF_RenderThreadSafe
+);
+
+inline uint32 GetNumDynamicMeshElementTasks()
+{
+	if (!IsParallelGatherDynamicMeshElementsEnabled())
+	{
+		return 0;
+	}
+
+	return FMath::Clamp<int32>(GNumDynamicMeshElementTasks, 0, LowLevelTasks::FScheduler::Get().GetNumWorkers());
+}
+
+static bool GOcclusionCullEnabled = true;
+static FAutoConsoleVariableRef CVarOcclusionCullEnable(
+	// TODO: Move to r.Visibility.OcclusionCull.Enable. Still several explicit references.
+	TEXT("r.AllowOcclusionQueries"),
+	GOcclusionCullEnabled,
+	TEXT("Enables hardware occlusion culling."),
+	ECVF_RenderThreadSafe
+);
+
+bool FSceneRenderer::DoOcclusionQueries() const
+{
+	return GOcclusionCullEnabled && !ViewFamily.EngineShowFlags.DisableOcclusionQueries;
+}
+
+static int32 GRelevanceNumPrimitivesPerPacket = 0;
+static FAutoConsoleVariableRef CVarRelevanceNumPrimitivesPerPacket(
+	TEXT("r.Visibility.Relevance.NumPrimitivesPerPacket"),
+	GRelevanceNumPrimitivesPerPacket,
+	TEXT("Assigns a fixed number of primitives for each relevance packet.")
+	TEXT(" 0: Automatic;")
+	TEXT(">0: Fixed number of primitives per packet (clamped to fixed limits);"),
+	ECVF_RenderThreadSafe
+);
 
 float GLightMaxDrawDistanceScale = 1.0f;
 static FAutoConsoleVariableRef CVarLightMaxDrawDistanceScale(
@@ -240,6 +345,11 @@ static FAutoConsoleVariableRef CVarLightMaxDrawDistanceScale(
 
 #if !UE_BUILD_SHIPPING
 
+static TAutoConsoleVariable<int32> CVarTAADebugOverrideTemporalIndex(
+	TEXT("r.TemporalAA.Debug.OverrideTemporalIndex"), -1,
+	TEXT("Override the temporal index for debugging purposes."),
+	ECVF_RenderThreadSafe);
+
 static TAutoConsoleVariable<float> CVarFreezeTemporalSequences(
 	TEXT("r.Test.FreezeTemporalSequences"), 0,
 	TEXT("Freezes all temporal sequences."),
@@ -250,93 +360,34 @@ static TAutoConsoleVariable<float> CVarFreezeTemporalHistories(
 	TEXT("Freezes all temporal histories as well as the temporal sequence."),
 	ECVF_RenderThreadSafe);
 
-static bool bDumpPrimitivesNextFrame = false;
-
-static FAutoConsoleCommand CVarDumpPrimitives(
-	TEXT("DumpPrimitives"),
-	TEXT("Writes out all scene primitive names to a CSV file in the Logs directory"),
-	FConsoleCommandDelegate::CreateStatic([] { bDumpPrimitivesNextFrame = true; }),
-	ECVF_Default);
+static TAutoConsoleVariable<float> CVarFreezeTemporalHistoriesProgress(
+	TEXT("r.Test.FreezeTemporalHistories.Progress"), 0,
+	TEXT("Progress the temporal histories by one frame when modified."),
+	ECVF_RenderThreadSafe);
 
 #endif
 
 DECLARE_CYCLE_STAT(TEXT("Occlusion Readback"), STAT_CLMM_OcclusionReadback, STATGROUP_CommandListMarkers);
 DECLARE_CYCLE_STAT(TEXT("After Occlusion Readback"), STAT_CLMM_AfterOcclusionReadback, STATGROUP_CommandListMarkers);
 
-/*------------------------------------------------------------------------------
-	Visibility determination.
-------------------------------------------------------------------------------*/
+TRACE_DECLARE_INT_COUNTER(Scene_Visibility_NumProcessedPrimitives, TEXT("Scene/Visibility/NumProcessedPrimitives"));
+TRACE_DECLARE_INT_COUNTER(Scene_Visibility_FrustumCull_NumCulledPrimitives, TEXT("Scene/Visibility/FrustumCull/NumCulledPrimitives"));
+TRACE_DECLARE_INT_COUNTER(Scene_Visibility_FrustumCull_NumPrimitivesPerTask, TEXT("Scene/Visibility/FrustumCull/NumPrimitivesPerTask"));
+TRACE_DECLARE_INT_COUNTER(Scene_Visibility_OcclusionCull_NumTestedQueries, TEXT("Scene/Visibility/OcclusionCull/NumTestedQueries"));
+TRACE_DECLARE_INT_COUNTER(Scene_Visibility_OcclusionCull_NumCulledPrimitives, TEXT("Scene/Visibility/OcclusionCull/NumCulledPrimitives"));
+TRACE_DECLARE_INT_COUNTER(Scene_Visibility_Relevance_NumPrimitivesPerPacket, TEXT("Scene/Visibility/Relevance/NumPrimitivesPerPacket"));
+TRACE_DECLARE_INT_COUNTER(Scene_Visibility_Relevance_NumPrimitivesProcessed, TEXT("Scene/Visibility/Relevance/NumPrimitivesProcessed"));
 
-/**
- * Update a primitive's fading state.
- * @param FadingState - State to update.
- * @param View - The view for which to update.
- * @param bVisible - Whether the primitive should be visible in the view.
- */
-static void UpdatePrimitiveFadingStateHelper(FPrimitiveFadingState& FadingState, FViewInfo& View, bool bVisible)
+///////////////////////////////////////////////////////////////////////////////
+
+IVisibilityTaskData* LaunchVisibilityTasks(FRHICommandListImmediate& RHICmdList, FSceneRenderer& SceneRenderer, const UE::Tasks::FTask& BeginInitVisibilityPrerequisites)
 {
-	if (FadingState.bValid)
-	{
-		if (FadingState.bIsVisible != bVisible)
-		{
-			float CurrentRealTime = View.Family->CurrentRealTime;
-
-			// Need to kick off a fade, so make sure that we have fading state for that
-			if( !IsValidRef(FadingState.UniformBuffer) )
-			{
-				// Primitive is not currently fading.  Start a new fade!
-				FadingState.EndTime = CurrentRealTime + GFadeTime;
-
-				if( bVisible )
-				{
-					// Fading in
-					// (Time - StartTime) / FadeTime
-					FadingState.FadeTimeScaleBias.X = 1.0f / GFadeTime;
-					FadingState.FadeTimeScaleBias.Y = -CurrentRealTime / GFadeTime;
-				}
-				else
-				{
-					// Fading out
-					// 1 - (Time - StartTime) / FadeTime
-					FadingState.FadeTimeScaleBias.X = -1.0f / GFadeTime;
-					FadingState.FadeTimeScaleBias.Y = 1.0f + CurrentRealTime / GFadeTime;
-				}
-
-				FDistanceCullFadeUniformShaderParameters Uniforms;
-				Uniforms.FadeTimeScaleBias = FadingState.FadeTimeScaleBias;
-				FadingState.UniformBuffer = FDistanceCullFadeUniformBufferRef::CreateUniformBufferImmediate( Uniforms, UniformBuffer_MultiFrame );
-			}
-			else
-			{
-				// Reverse fading direction but maintain current opacity
-				// Solve for d: a*x+b = -a*x+d
-				FadingState.FadeTimeScaleBias.Y = 2.0f * CurrentRealTime * FadingState.FadeTimeScaleBias.X + FadingState.FadeTimeScaleBias.Y;
-				FadingState.FadeTimeScaleBias.X = -FadingState.FadeTimeScaleBias.X;
-				
-				if( bVisible )
-				{
-					// Fading in
-					// Solve for x: a*x+b = 1
-					FadingState.EndTime = ( 1.0f - FadingState.FadeTimeScaleBias.Y ) / FadingState.FadeTimeScaleBias.X;
-				}
-				else
-				{
-					// Fading out
-					// Solve for x: a*x+b = 0
-					FadingState.EndTime = -FadingState.FadeTimeScaleBias.Y / FadingState.FadeTimeScaleBias.X;
-				}
-
-				FDistanceCullFadeUniformShaderParameters Uniforms;
-				Uniforms.FadeTimeScaleBias = FadingState.FadeTimeScaleBias;
-				FadingState.UniformBuffer = FDistanceCullFadeUniformBufferRef::CreateUniformBufferImmediate( Uniforms, UniformBuffer_MultiFrame );
-			}
-		}
-	}
-
-	FadingState.FrameNumber = View.Family->FrameNumber;
-	FadingState.bIsVisible = bVisible;
-	FadingState.bValid = true;
+	FVisibilityTaskData* TaskData = SceneRenderer.Allocator.Create<FVisibilityTaskData>(RHICmdList, SceneRenderer);
+	TaskData->LaunchVisibilityTasks(BeginInitVisibilityPrerequisites);
+	return TaskData;
 }
+
+///////////////////////////////////////////////////////////////////////////////
 
 bool FViewInfo::IsDistanceCulled( float DistanceSquared, float MinDrawDistance, float InMaxDrawDistance, const FPrimitiveSceneInfo* PrimitiveSceneInfo)
 {
@@ -357,7 +408,16 @@ bool FViewInfo::IsDistanceCulled_AnyThread(float DistanceSquared, float MinDrawD
 	const float MaxDrawDistanceScale = GetCachedScalabilityCVars().ViewDistanceScale;
 	const float FadeRadius = GDisableLODFade ? 0.0f : GDistanceFadeMaxTravel;
 	const float MaxDrawDistance = InMaxDrawDistance * MaxDrawDistanceScale;
+
+	bool bHasMaxDrawDistance = InMaxDrawDistance != FLT_MAX;
+	bool bHasMinDrawDistance = MinDrawDistance > 0;
 	bOutMayBeFading = false;
+
+
+	if (!bHasMaxDrawDistance && !bHasMinDrawDistance)
+	{
+		return false;
+	}
 
 	// If cull distance is disabled, always show (except foliage)
 	if (Family->EngineShowFlags.DistanceCulledPrimitives && !PrimitiveSceneInfo->Proxy->IsDetailMesh())
@@ -366,14 +426,14 @@ bool FViewInfo::IsDistanceCulled_AnyThread(float DistanceSquared, float MinDrawD
 	}
 
 	// The primitive is always culled if it exceeds the max fade distance.
-	if (DistanceSquared > FMath::Square(MaxDrawDistance + FadeRadius) || DistanceSquared < FMath::Square(MinDrawDistance))
+	if ((bHasMaxDrawDistance && DistanceSquared > FMath::Square(MaxDrawDistance + FadeRadius)) || (bHasMinDrawDistance && DistanceSquared < FMath::Square(MinDrawDistance)))
 	{
 		return true;
 	}
 
-	const bool bDistanceCulled = (DistanceSquared > FMath::Square(MaxDrawDistance));
-	const bool bMayBeFading = (DistanceSquared > FMath::Square(MaxDrawDistance - FadeRadius));
-	
+	const bool bDistanceCulled = bHasMaxDrawDistance && (DistanceSquared > FMath::Square(MaxDrawDistance));
+	const bool bMayBeFading = bHasMaxDrawDistance && (DistanceSquared > FMath::Square(MaxDrawDistance - FadeRadius));
+
 	if (!GDisableLODFade && bMayBeFading && State != NULL && !bDisableDistanceBasedFadeTransitions && PrimitiveSceneInfo->Proxy->IsUsingDistanceCullFade())
 	{
 		// Don't update primitive fading state yet because current thread may be not render thread
@@ -384,29 +444,7 @@ bool FViewInfo::IsDistanceCulled_AnyThread(float DistanceSquared, float MinDrawD
 	return bDistanceCulled && !bOutMayBeFading;
 }
 
-bool FViewInfo::UpdatePrimitiveFadingState(const FPrimitiveSceneInfo* PrimitiveSceneInfo, bool bFadingIn)
-{
-	// Update distance-based visibility and fading state if it has not already been updated.
-	const int32 PrimitiveIndex = PrimitiveSceneInfo->GetIndex();
-	const FRelativeBitReference PrimitiveBit(PrimitiveIndex);
-	bool bStillFading = false;
-
-	if (!PotentiallyFadingPrimitiveMap.AccessCorrespondingBit(PrimitiveBit))
-	{
-		FPrimitiveFadingState& FadingState = ((FSceneViewState*)State)->PrimitiveFadingStates.FindOrAdd(PrimitiveSceneInfo->PrimitiveComponentId);
-		UpdatePrimitiveFadingStateHelper(FadingState, *this, bFadingIn);
-		FRHIUniformBuffer* UniformBuffer = FadingState.UniformBuffer;
-		bStillFading = UniformBuffer != nullptr;
-		PrimitiveFadeUniformBuffers[PrimitiveIndex] = UniformBuffer;
-		PrimitiveFadeUniformBufferMap[PrimitiveIndex] = UniformBuffer != nullptr;
-		PotentiallyFadingPrimitiveMap.AccessCorrespondingBit(PrimitiveBit) = true;
-	}
-
-	// If we're still fading then make sure the object is still drawn, even if it's beyond the max draw distance
-	return !bFadingIn && !bStillFading;
-}
-
-FORCEINLINE bool IntersectBox8Plane(const FVector& InOrigin, const FVector& InExtent, const FPlane*PermutedPlanePtr)
+inline bool IntersectBox8Plane(const FVector& InOrigin, const FVector& InExtent, const FPlane*PermutedPlanePtr)
 {
 	// this removes a lot of the branches as we know there's 8 planes
 	// copied directly out of ConvexVolume.cpp
@@ -466,1736 +504,946 @@ FORCEINLINE bool IntersectBox8Plane(const FVector& InOrigin, const FVector& InEx
 	return true;
 }
 
-
-static int32 FrustumCullNumWordsPerTask = 128;
-static FAutoConsoleVariableRef CVarFrustumCullNumWordsPerTask(
-	TEXT("r.FrustumCullNumWordsPerTask"),
-	FrustumCullNumWordsPerTask,
-	TEXT("Performance tweak. Controls the granularity for the ParallelFor for frustum culling."),
-	ECVF_Default
-	);
-
-
-template<bool UseCustomCulling, bool bAlsoUseSphereTest, bool bUseFastIntersect>
-static int32 FrustumCull(const FScene* Scene, FViewInfo& View)
+struct FFrustumCullingFlags
 {
-	SCOPE_CYCLE_COUNTER(STAT_FrustumCull);
+	bool bShouldVisibilityCull;
+	bool bUseCustomCulling;
+	bool bUseSphereTestFirst;
+	bool bUseFastIntersect;
+	bool bUseVisibilityOctree;
+	bool bHasHiddenPrimitives;
+	bool bHasShowOnlyPrimitives;
+};
 
-	FThreadSafeCounter NumCulledPrimitives;
-	float MaxDrawDistanceScale = GetCachedScalabilityCVars().ViewDistanceScale;
-	MaxDrawDistanceScale *= GetCachedScalabilityCVars().CalculateFieldOfViewDistanceScale(View.DesiredFOV);
+// Returns true if the frustum and bounds intersect
+inline bool IsPrimitiveVisible(FViewInfo& View, const FPlane* PermutedPlanePtr, const FPrimitiveBounds& Bounds, int32 VisibilityId, FFrustumCullingFlags Flags)
+{
+	// The custom culling and sphere culling are additional tests, meaning that if they pass, the
+	// remaining culling tests will still be performed.  If any of the tests fail, then the primitive
+	// is culled, and the remaining tests do not need be performed
 
-	FSceneViewState* ViewState = (FSceneViewState*)View.State;
-	const bool bHLODActive = Scene->SceneLODHierarchy.IsActive();
-	const FHLODVisibilityState* const HLODState = bHLODActive && ViewState ? &ViewState->HLODVisibilityState : nullptr;
+	if (Flags.bUseCustomCulling && !View.CustomVisibilityQuery->IsVisible(VisibilityId, FBoxSphereBounds(Bounds.BoxSphereBounds.Origin, Bounds.BoxSphereBounds.BoxExtent, Bounds.BoxSphereBounds.SphereRadius)))
+	{
+		return false;
+	}
 
-	//Primitives per ParallelFor task
-	//Using async FrustumCull. Thanks Yager! See https://udn.unrealengine.com/questions/252385/performance-of-frustumcull.html
-	//Performance varies on total primitive count and tasks scheduled. Check the mentioned link above for some measurements.
-	//There have been some changes as compared to the code measured in the link
+	if (Flags.bUseSphereTestFirst && !View.ViewFrustum.IntersectSphere(Bounds.BoxSphereBounds.Origin, Bounds.BoxSphereBounds.SphereRadius))
+	{
+		return false;
+	}
 
-	const int32 BitArrayNum = View.PrimitiveVisibilityMap.Num();
-	const int32 BitArrayWords = FMath::DivideAndRoundUp(View.PrimitiveVisibilityMap.Num(), (int32)NumBitsPerDWORD);
-	const int32 NumTasks = FMath::DivideAndRoundUp(BitArrayWords, FrustumCullNumWordsPerTask);
+	if (Flags.bUseFastIntersect)
+	{
+		return IntersectBox8Plane(Bounds.BoxSphereBounds.Origin, Bounds.BoxSphereBounds.BoxExtent, PermutedPlanePtr);
+	}
+	else
+	{
+		return View.ViewFrustum.IntersectBox(Bounds.BoxSphereBounds.Origin, Bounds.BoxSphereBounds.BoxExtent);
+	}
+}
 
-	ParallelFor(NumTasks, 
-		[&NumCulledPrimitives, Scene, &View, MaxDrawDistanceScale, HLODState](int32 TaskIndex)
+inline bool IsPrimitiveHidden(const FScene& Scene, FViewInfo& View, int32 PrimitiveIndex, FFrustumCullingFlags Flags)
+{
+	// If any primitives are explicitly hidden, remove them now.
+	if (Flags.bHasHiddenPrimitives && View.HiddenPrimitives.Contains(Scene.PrimitiveComponentIds[PrimitiveIndex]))
+	{
+		return true;
+	}
+
+	// If the view has any show only primitives, hide everything else
+	if (Flags.bHasShowOnlyPrimitives && !View.ShowOnlyPrimitives->Contains(Scene.PrimitiveComponentIds[PrimitiveIndex]))
+	{
+		return true;
+	}
+
+	return false;
+}
+
+#if RHI_RAYTRACING
+
+inline bool ShouldCullForRayTracing(const FScene& Scene, FViewInfo& View, int32 PrimitiveIndex)
+{
+	const FRayTracingCullingParameters& RayTracingCullingParameters = View.RayTracingCullingParameters;
+
+	if (RayTracing::CullPrimitiveByFlags(RayTracingCullingParameters, &Scene, PrimitiveIndex))
+	{
+		return true;
+	}
+
+	const bool bIsFarFieldPrimitive = EnumHasAnyFlags(Scene.PrimitiveRayTracingFlags[PrimitiveIndex], ERayTracingPrimitiveFlags::FarField);
+	const Experimental::FHashElementId GroupId = Scene.PrimitiveRayTracingGroupIds[PrimitiveIndex];
+
+	if (RayTracingCullingParameters.bCullUsingGroupIds && GroupId.IsValid())
+	{
+		const FBoxSphereBounds& GroupBounds = Scene.PrimitiveRayTracingGroups.GetByElementId(GroupId).Value.Bounds;
+		const float GroupMinDrawDistance = Scene.PrimitiveRayTracingGroups.GetByElementId(GroupId).Value.MinDrawDistance;
+		return RayTracing::ShouldCullBounds(RayTracingCullingParameters, GroupBounds, GroupMinDrawDistance, bIsFarFieldPrimitive);
+	}
+	else
+	{
+		const FPrimitiveBounds& RESTRICT Bounds = Scene.PrimitiveBounds[PrimitiveIndex];
+		return RayTracing::ShouldCullBounds(RayTracingCullingParameters, Bounds.BoxSphereBounds, Bounds.MinDrawDistance, bIsFarFieldPrimitive);
+	}
+};
+#endif //RHI_RAYTRACING
+
+static void CullOctree(const FScene& Scene, FViewInfo& View, const FFrustumCullingFlags& Flags, FSceneBitArray& OutVisibleNodes)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(SceneVisibility_CullOctree);
+
+	// Two bits per octree node, 1st bit is Inside Frustum, 2nd bit is Outside Frustum
+	OutVisibleNodes.Init(false, Scene.PrimitiveOctree.GetNumNodes() * 2);
+
+	Scene.PrimitiveOctree.FindNodesWithPredicate(
+		[&View, &OutVisibleNodes, &Flags](FScenePrimitiveOctree::FNodeIndex ParentNodeIndex, FScenePrimitiveOctree::FNodeIndex NodeIndex, const FBoxCenterAndExtent& NodeBounds)
 		{
-			QUICK_SCOPE_CYCLE_COUNTER(STAT_FrustumCull_Loop);
-			const FPlane* PermutedPlanePtr = View.ViewFrustum.PermutedPlanes.GetData();
-			const int32 BitArrayNumInner = View.PrimitiveVisibilityMap.Num();
-			FVector ViewOriginForDistanceCulling = View.ViewMatrices.GetViewOrigin();
-			float FadeRadius = GDisableLODFade ? 0.0f : GDistanceFadeMaxTravel;
-			uint8 CustomVisibilityFlags = EOcclusionFlags::CanBeOccluded | EOcclusionFlags::HasPrecomputedVisibility;
-
-			// Primitives may be explicitly removed from stereo views when using mono
-			const int32 TaskWordOffset = TaskIndex * FrustumCullNumWordsPerTask;
-
-			for (int32 WordIndex = TaskWordOffset; WordIndex < TaskWordOffset + FrustumCullNumWordsPerTask && WordIndex * NumBitsPerDWORD < BitArrayNumInner; WordIndex++)
+			// If the parent node is completely contained there is no need to test containment
+			if (ParentNodeIndex != INDEX_NONE && !OutVisibleNodes[(ParentNodeIndex * 2) + 1])
 			{
-				uint32 Mask = 0x1;
-				uint32 VisBits = 0;
-				uint32 FadingBits = 0;
-				uint32 DistanceCulledBits = 0;
-				for (int32 BitSubIndex = 0; BitSubIndex < NumBitsPerDWORD && WordIndex * NumBitsPerDWORD + BitSubIndex < BitArrayNumInner; BitSubIndex++, Mask <<= 1)
-				{
-					int32 Index = WordIndex * NumBitsPerDWORD + BitSubIndex;
-					const FPrimitiveBounds& Bounds = Scene->PrimitiveBounds[Index];
-					float DistanceSquared = (Bounds.BoxSphereBounds.Origin - ViewOriginForDistanceCulling).SizeSquared();
-					int32 VisibilityId = INDEX_NONE;
+				OutVisibleNodes[NodeIndex * 2] = true;
+				OutVisibleNodes[NodeIndex * 2 + 1] = false;
+				return true;
+			}
 
-					if (UseCustomCulling &&
-						((Scene->PrimitiveOcclusionFlags[Index] & CustomVisibilityFlags) == CustomVisibilityFlags))
+			const FPlane* PermutedPlanePtr = View.ViewFrustum.PermutedPlanes.GetData();
+			bool bIntersects = false;
+
+			if (Flags.bUseFastIntersect)
+			{
+				bIntersects = IntersectBox8Plane(NodeBounds.Center, NodeBounds.Extent, PermutedPlanePtr);
+			}
+			else
+			{
+				bIntersects = View.ViewFrustum.IntersectBox(NodeBounds.Center, NodeBounds.Extent);
+			}
+
+			if (bIntersects)
+			{
+				OutVisibleNodes[NodeIndex * 2] = true;
+				OutVisibleNodes[NodeIndex * 2 + 1] = View.ViewFrustum.GetBoxIntersectionOutcode(NodeBounds.Center, NodeBounds.Extent).GetOutside();
+			}
+
+			return bIntersects;
+		},
+		[](FScenePrimitiveOctree::FNodeIndex /*ParentNodeIndex*/, FScenePrimitiveOctree::FNodeIndex /*NodeIndex*/, const FBoxCenterAndExtent& /*NodeBounds*/)
+		{
+
+		});
+}
+
+static void UpdateAlwaysVisible(const FScene& Scene, FViewInfo& View, FFrustumCullingFlags Flags, const FVisibilityTaskConfig& TaskConfig, int32 TaskIndex, float CurrentWorldTime)
+{
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_AlwaysVisible_Loop);
+
+	check(Scene.PrimitivesAlwaysVisibleOffset != ~0u);
+	const int32 BitArrayNumInner = TaskConfig.NumVisiblePrimitives;
+	const int32 StartWord = int32(Scene.PrimitivesAlwaysVisibleOffset) / NumBitsPerDWORD;
+	const int32 TaskWordOffset = TaskIndex * TaskConfig.AlwaysVisible.NumWordsPerTask;
+
+	uint32* RESTRICT VisWords = View.PrimitiveVisibilityMap.GetData();
+#if RHI_RAYTRACING
+	uint32* RESTRICT  RTWords = View.PrimitiveRayTracingVisibilityMap.GetData();
+#endif
+
+	for (int32 WordIndex = TaskWordOffset; WordIndex < TaskWordOffset + int32(TaskConfig.AlwaysVisible.NumWordsPerTask) && WordIndex * NumBitsPerDWORD < BitArrayNumInner; ++WordIndex)
+	{
+		uint32 Mask = 0x1;
+
+		uint32 VisBits = 0;
+	#if RHI_RAYTRACING
+		uint32 RayTracingBits = 0;
+	#endif
+
+		for (int32 BitSubIndex = 0; BitSubIndex < NumBitsPerDWORD && WordIndex * NumBitsPerDWORD + BitSubIndex < BitArrayNumInner; ++BitSubIndex, Mask <<= 1)
+		{
+			const int32 Index = (StartWord + WordIndex) * NumBitsPerDWORD + BitSubIndex;
+			VisBits |= Mask;
+
+		#if RHI_RAYTRACING
+			if (!IsPrimitiveHidden(Scene, View, Index, Flags) && !ShouldCullForRayTracing(Scene, View, Index))
+			{
+				RayTracingBits |= Mask;
+			}
+		#endif
+
+			FPrimitiveSceneInfo* PrimitiveSceneInfo = Scene.Primitives[Index];
+			PrimitiveSceneInfo->LastRenderTime = CurrentWorldTime;
+
+			const bool bUpdateLastRenderTimeOnScreen = true;
+			PrimitiveSceneInfo->UpdateComponentLastRenderTime(CurrentWorldTime, bUpdateLastRenderTimeOnScreen);
+		}
+
+		VisWords[StartWord + WordIndex] = VisBits;
+
+	#if RHI_RAYTRACING
+		if (RayTracingBits)
+		{
+			RTWords[StartWord + WordIndex] = RayTracingBits;
+		}
+	#endif
+	}
+}
+
+static int32 FrustumCull(const FScene& Scene, FViewInfo& View, FFrustumCullingFlags Flags, float MaxDrawDistanceScale, const FHLODVisibilityState* const HLODState, const FSceneBitArray* VisibleNodes, const FVisibilityTaskConfig& TaskConfig, int32 TaskIndex)
+{
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_FrustumCull_Loop);
+
+	bool bDisableLODFade = GDisableLODFade || View.bDisableDistanceBasedFadeTransitions;
+	const FPlane* PermutedPlanePtr = View.ViewFrustum.PermutedPlanes.GetData();
+	FVector ViewOriginForDistanceCulling = View.ViewMatrices.GetViewOrigin();
+	float FadeRadius = bDisableLODFade ? 0.0f : GDistanceFadeMaxTravel;
+	uint8 CustomVisibilityFlags = EOcclusionFlags::CanBeOccluded | EOcclusionFlags::HasPrecomputedVisibility;
+
+	int32 BitArrayNumInner = TaskConfig.NumTestedPrimitives;
+
+	uint32 NumPrimitivesCulledForTask = 0;
+
+	// Primitives may be explicitly removed from stereo views when using mono
+	const int32 TaskWordOffset = TaskIndex * TaskConfig.FrustumCull.NumWordsPerTask;
+
+	FVector ViewOrigin = View.ViewMatrices.GetViewOrigin();
+
+	uint32* RESTRICT VisWords = View.PrimitiveVisibilityMap.GetData();
+	uint32* RESTRICT FadeWords = View.PotentiallyFadingPrimitiveMap.GetData();
+#if RHI_RAYTRACING
+	uint32* RESTRICT  RTWords = View.PrimitiveRayTracingVisibilityMap.GetData();
+#endif
+
+	for (int32 WordIndex = TaskWordOffset; WordIndex < TaskWordOffset + int32(TaskConfig.FrustumCull.NumWordsPerTask) && WordIndex * NumBitsPerDWORD < BitArrayNumInner; WordIndex++)
+	{
+		uint32 Mask = 0x1; 
+		uint32 VisBits = 0;
+		uint32 FadingBits = 0;
+	#if RHI_RAYTRACING
+		uint32 RayTracingBits = 0;
+	#endif
+
+		// If visibility culling is disabled, make sure to use the existing visibility state
+		if (!Flags.bShouldVisibilityCull)
+		{
+			VisBits = VisWords[WordIndex];
+		}
+
+		for (int32 BitSubIndex = 0; BitSubIndex < NumBitsPerDWORD && WordIndex * NumBitsPerDWORD + BitSubIndex < BitArrayNumInner; BitSubIndex++, Mask <<= 1)
+		{
+			int32 Index = WordIndex * NumBitsPerDWORD + BitSubIndex;
+			bool bPrimitiveIsHidden = IsPrimitiveHidden(Scene, View, Index, Flags);
+			bool bIsVisible = Flags.bShouldVisibilityCull ? true : (VisBits & Mask) == Mask;
+
+			bIsVisible = bIsVisible && !bPrimitiveIsHidden;
+
+		#if RHI_RAYTRACING
+			bool bIsVisibleInRayTracing = true;
+
+			if (bPrimitiveIsHidden || ShouldCullForRayTracing(Scene, View, Index))
+			{
+				bIsVisibleInRayTracing = false;
+			}
+		#endif
+
+			const FPrimitiveBounds& RESTRICT Bounds = Scene.PrimitiveBounds[Index];
+
+			// Zero sized bounds indicates that we are not visible.
+			bIsVisible &= Bounds.BoxSphereBounds.SphereRadius > 0;
+
+			if (Flags.bShouldVisibilityCull && bIsVisible)
+			{
+				bool bShouldDistanceCull = true;
+				bool bPartiallyOutside = true;
+				bool bShouldFrustumCull = true;
+
+				// Fading HLODs and their children must be visible, objects hidden by HLODs can be culled
+				if (HLODState)
+				{
+					if (HLODState->IsNodeForcedVisible(Index))
 					{
-						VisibilityId = Scene->PrimitiveVisibilityIds[Index].ByteIndex;
+						bShouldDistanceCull = false;
+					}
+					else if (HLODState->IsNodeForcedHidden(Index))
+					{
+						bIsVisible = false;
+					}
+				}
+
+				// Frustum first
+				bShouldFrustumCull = bShouldFrustumCull && bIsVisible;
+				if (bShouldFrustumCull)
+				{
+					if (Flags.bUseVisibilityOctree)
+					{
+						// If the parent octree node was completely contained by the frustum, there is no need do an additional frustum test on the primitive bounds
+						// If the parent octree node is partially in the frustum, perform an additional test on the primitive bounds
+						uint32 OctreeNodeIndex = Scene.PrimitiveOctreeIndex[Index];
+
+						bIsVisible = (*VisibleNodes)[OctreeNodeIndex * 2];
+						bPartiallyOutside = (*VisibleNodes)[OctreeNodeIndex * 2 + 1];
 					}
 
-					// Preserve infinite draw distance
-					float MaxDrawDistance = Bounds.MaxCullDistance < FLT_MAX ? Bounds.MaxCullDistance * MaxDrawDistanceScale : FLT_MAX; 
-					float MinDrawDistanceSq = Bounds.MinDrawDistanceSq;
+					if (bIsVisible)
+					{
+						int32 VisibilityId = INDEX_NONE;
 
+						if (Flags.bUseCustomCulling &&
+							((Scene.PrimitiveOcclusionFlags[Index] & CustomVisibilityFlags) == CustomVisibilityFlags))
+						{
+							VisibilityId = Scene.PrimitiveSceneProxies[Index]->GetVisibilityId();
+						}
+
+						bIsVisible = !bPartiallyOutside || IsPrimitiveVisible(View, PermutedPlanePtr, Bounds, VisibilityId, Flags);
+					}
+				}
+
+				// Distance cull if frustum cull passed
+				bShouldDistanceCull = bShouldDistanceCull && bIsVisible;
+				if (bShouldDistanceCull)
+				{
 					// If cull distance is disabled, always show the primitive (except foliage)
 					if (View.Family->EngineShowFlags.DistanceCulledPrimitives
-						&& !Scene->Primitives[Index]->Proxy->IsDetailMesh())
+						&& !Scene.PrimitiveSceneProxies[Index]->IsDetailMesh()) // Proxy call is intentionally behind the DistancedCulledPrimitives check to prevent an expensive memory read
 					{
-						MaxDrawDistance = FLT_MAX;
+						bShouldDistanceCull = false;
 					}
+				}
 
-					// Fading HLODs and their children must be visible, objects hidden by HLODs can be culled
-					if (HLODState)
+				if (bShouldDistanceCull)
+				{
+					// Preserve infinite draw distance
+					bool bHasMaxDrawDistance = Bounds.MaxCullDistance < FLT_MAX;
+					bool bHasMinDrawDistance = Bounds.MinDrawDistance > 0;
+
+					if (bHasMaxDrawDistance || bHasMinDrawDistance)
 					{
-						if (HLODState->IsNodeForcedVisible(Index))
+						float MaxDrawDistance = Bounds.MaxCullDistance * MaxDrawDistanceScale;
+						float MinDrawDistanceSq = FMath::Square(Bounds.MinDrawDistance);
+						float DistanceSquared = FVector::DistSquared(Bounds.BoxSphereBounds.Origin, ViewOriginForDistanceCulling);
+
+						// Always test the fade in distance.  If a primitive was set to always draw, it may need to be faded in.
+						if (bHasMaxDrawDistance)
 						{
-							MaxDrawDistance = FLT_MAX;
-							MinDrawDistanceSq = 0.f;
-						}
-						else if (HLODState->IsNodeForcedHidden(Index))
-						{
-							MaxDrawDistance = 0.f;
-						}
-					}
-
-					bool bDistanceCulled = DistanceSquared > FMath::Square(MaxDrawDistance + FadeRadius) || (DistanceSquared < MinDrawDistanceSq);
-
-					// Store distane culled primitives so it can correctly culled when collecting RT primitives
-					if (bDistanceCulled)
-					{
-						DistanceCulledBits |= Mask;
-					}
-
-					if (bDistanceCulled ||
-						(UseCustomCulling && !View.CustomVisibilityQuery->IsVisible(VisibilityId, FBoxSphereBounds(Bounds.BoxSphereBounds.Origin, Bounds.BoxSphereBounds.BoxExtent, Bounds.BoxSphereBounds.SphereRadius))) ||
-						(bAlsoUseSphereTest && View.ViewFrustum.IntersectSphere(Bounds.BoxSphereBounds.Origin, Bounds.BoxSphereBounds.SphereRadius) == false) ||
-						(bUseFastIntersect ? IntersectBox8Plane(Bounds.BoxSphereBounds.Origin, Bounds.BoxSphereBounds.BoxExtent, PermutedPlanePtr) : View.ViewFrustum.IntersectBox(Bounds.BoxSphereBounds.Origin, Bounds.BoxSphereBounds.BoxExtent)) == false)
-					{
-						STAT(NumCulledPrimitives.Increment());
-					}
-					else
-					{
-						if (DistanceSquared > FMath::Square(MaxDrawDistance))
-						{
-							if (Scene->Primitives[Index]->Proxy->IsUsingDistanceCullFade())
+							float MaxFadeDistanceSquared = FMath::Square(MaxDrawDistance + FadeRadius);
+							float MinFadeDistanceSquared = FMath::Square(MaxDrawDistance - FadeRadius);
+							if ((DistanceSquared < MaxFadeDistanceSquared && DistanceSquared > MinFadeDistanceSquared)
+								&& Scene.PrimitiveSceneProxies[Index]->IsUsingDistanceCullFade())  // Proxy call is intentionally behind the fade check to prevent an expensive memory read
 							{
 								FadingBits |= Mask;
 							}
 						}
-						else
+
+						// Check for distance culling first
+						const bool bFarDistanceCulled = bHasMaxDrawDistance && (DistanceSquared > FMath::Square(MaxDrawDistance));
+						const bool bNearDistanceCulled = bHasMinDrawDistance && (DistanceSquared < MinDrawDistanceSq);
+						bool bIsDistanceCulled = bNearDistanceCulled || bFarDistanceCulled;
+
+						if (bIsDistanceCulled)
 						{
-							// The primitive is visible!
-							VisBits |= Mask;
-							if (DistanceSquared > FMath::Square(MaxDrawDistance - FadeRadius))
-							{
-								if (Scene->Primitives[Index]->Proxy->IsUsingDistanceCullFade())
-								{
-									FadingBits |= Mask;
-								}
-							}
+							bIsVisible = false;
 						}
+
+					#if RHI_RAYTRACING
+						if (bFarDistanceCulled)
+						{
+							bIsVisibleInRayTracing = false;
+						}
+					#endif
 					}
 				}
-				if (FadingBits)
-				{
-					check(!View.PotentiallyFadingPrimitiveMap.GetData()[WordIndex]); // this should start at zero
-					View.PotentiallyFadingPrimitiveMap.GetData()[WordIndex] = FadingBits;
-				}
-				if (VisBits)
-				{
-					check(!View.PrimitiveVisibilityMap.GetData()[WordIndex]); // this should start at zero
-					View.PrimitiveVisibilityMap.GetData()[WordIndex] = VisBits;
-				}
-				if (DistanceCulledBits)
-				{
-					check(!View.DistanceCullingPrimitiveMap.GetData()[WordIndex]); // this should start at zero
-					View.DistanceCullingPrimitiveMap.GetData()[WordIndex] = DistanceCulledBits;
-				}
 			}
-		},
-		!FApp::ShouldUseThreadingForPerformance() || (UseCustomCulling && !View.CustomVisibilityQuery->IsThreadsafe()) || CVarParallelInitViews.GetValueOnRenderThread() == 0 || !IsInActualRenderingThread()
-	);
 
-	return NumCulledPrimitives.GetValue();
-}
-
-/**
- * Updated primitive fading states for the view.
- */
-static void UpdatePrimitiveFading(const FScene* Scene, FViewInfo& View)
-{
-	SCOPE_CYCLE_COUNTER(STAT_UpdatePrimitiveFading);
-
-	FSceneViewState* ViewState = (FSceneViewState*)View.State;
-
-	if (ViewState)
-	{
-		uint32 PrevFrameNumber = ViewState->PrevFrameNumber;
-		float CurrentRealTime = View.Family->CurrentRealTime;
-
-		// First clear any stale fading states.
-		for (FPrimitiveFadingStateMap::TIterator It(ViewState->PrimitiveFadingStates); It; ++It)
-		{
-			FPrimitiveFadingState& FadingState = It.Value();
-			if (FadingState.FrameNumber != PrevFrameNumber ||
-				(IsValidRef(FadingState.UniformBuffer) && CurrentRealTime >= FadingState.EndTime))
+			if (bIsVisible)
 			{
-				It.RemoveCurrent();
-			}
-		}
-
-		// Should we allow fading transitions at all this frame?  For frames where the camera moved
-		// a large distance or where we haven't rendered a view in awhile, it's best to disable
-		// fading so users don't see unexpected object transitions.
-		if (!GDisableLODFade && !View.bDisableDistanceBasedFadeTransitions)
-		{
-			// Do a pass over potentially fading primitives and update their states.
-			for (FSceneSetBitIterator BitIt(View.PotentiallyFadingPrimitiveMap); BitIt; ++BitIt)
-			{
-				bool bVisible = View.PrimitiveVisibilityMap.AccessCorrespondingBit(BitIt);
-				FPrimitiveFadingState& FadingState = ViewState->PrimitiveFadingStates.FindOrAdd(Scene->PrimitiveComponentIds[BitIt.GetIndex()]);
-				UpdatePrimitiveFadingStateHelper(FadingState, View, bVisible);
-				FRHIUniformBuffer* UniformBuffer = FadingState.UniformBuffer;
-				if (UniformBuffer && !bVisible)
-				{
-					// If the primitive is fading out make sure it remains visible.
-					View.PrimitiveVisibilityMap.AccessCorrespondingBit(BitIt) = true;
-				}
-				View.PrimitiveFadeUniformBuffers[BitIt.GetIndex()] = UniformBuffer;
-				View.PrimitiveFadeUniformBufferMap[BitIt.GetIndex()] = UniformBuffer != nullptr;
-			}
-		}
-	}
-}
-
-struct FOcclusionBounds
-{
-	FOcclusionBounds(FPrimitiveOcclusionHistory* InPrimitiveOcclusionHistory, const FVector& InBoundsOrigin, const FVector& InBoundsExtent, bool bInGroupedQuery)
-		: PrimitiveOcclusionHistory(InPrimitiveOcclusionHistory)
-		, BoundsOrigin(InBoundsOrigin)
-		, BoundsExtent(InBoundsExtent)
-		, bGroupedQuery(bInGroupedQuery)
-	{
-	}
-	FOcclusionBounds(FPrimitiveOcclusionHistoryKey InPrimitiveOcclusionHistoryKey, const FVector& InBoundsOrigin, const FVector& InBoundsExtent, uint32 InLastQuerySubmitFrame)
-		: PrimitiveOcclusionHistoryKey(InPrimitiveOcclusionHistoryKey)
-		, BoundsOrigin(InBoundsOrigin)
-		, BoundsExtent(InBoundsExtent)
-		, LastQuerySubmitFrame(InLastQuerySubmitFrame)
-	{
-	}
-	union 
-	{
-		FPrimitiveOcclusionHistory* PrimitiveOcclusionHistory;
-		FPrimitiveOcclusionHistoryKey PrimitiveOcclusionHistoryKey;
-	};
-
-	FVector BoundsOrigin;
-	FVector BoundsExtent;	
-	union 
-	{
-		bool bGroupedQuery;
-		uint32 LastQuerySubmitFrame;
-	};
-};
-
-struct FHZBBound
-{
-	FHZBBound(FPrimitiveOcclusionHistory* InTargetHistory, const FVector& InBoundsOrigin, const FVector& InBoundsExtent)
-	: TargetHistory(InTargetHistory)
-	, BoundsOrigin(InBoundsOrigin)
-	, BoundsExtent(InBoundsExtent)
-	{}
-
-	FPrimitiveOcclusionHistory* TargetHistory;
-	FVector BoundsOrigin;
-	FVector BoundsExtent;
-};
-
-#define BALANCE_LOAD 1
-#define QUERY_SANITY_CHECK 0
-
-struct FVisForPrimParams
-{
-	FVisForPrimParams(){}
-
-	FVisForPrimParams(const FScene* InScene, 
-						FViewInfo* InView, 
-						FViewElementPDI* InOcclusionPDI, 						
-						const int32 InStartIndex, 
-						const int32 InNumToProcess, 
-						const bool bInSubmitQueries, 
-						const bool bInHZBOcclusion,						
-						TArray<FPrimitiveOcclusionHistory>* OutOcclusionHistory,
-						TArray<FPrimitiveOcclusionHistory*>* OutQueriesToRelease,
-						TArray<FHZBBound>* OutHZBBounds,
-						TArray<FOcclusionBounds>* OutQueriesToRun,
-						TArray<bool>* OutSubIsOccluded)
-		: Scene(InScene)
-		, View(InView)
-		, OcclusionPDI(InOcclusionPDI)		
-		, StartIndex(InStartIndex)
-		, NumToProcess(InNumToProcess)
-		, bSubmitQueries(bInSubmitQueries)
-		, bHZBOcclusion(bInHZBOcclusion)		
-		, bNeedsScanOnRead(false)
-		, InsertPrimitiveOcclusionHistory(OutOcclusionHistory)
-		, QueriesToRelease(OutQueriesToRelease)
-		, HZBBoundsToAdd(OutHZBBounds)
-		, QueriesToAdd(OutQueriesToRun)	
-		, SubIsOccluded(OutSubIsOccluded)
-	{
-
-	}
-
-	void Init(	const FScene* InScene,
-				FViewInfo* InView,
-				FViewElementPDI* InOcclusionPDI,
-				const int32 InStartIndex,
-				const int32 InNumToProcess,
-				const bool bInSubmitQueries,
-				const bool bInHZBOcclusion,				
-				TArray<FPrimitiveOcclusionHistory>* OutOcclusionHistory,
-				TArray<FPrimitiveOcclusionHistory*>* OutQueriesToRelease,
-				TArray<FHZBBound>* OutHZBBounds,
-				TArray<FOcclusionBounds>* OutQueriesToRun,
-				TArray<bool>* OutSubIsOccluded)
-			
-	{
-		Scene = InScene;
-		View = InView;
-		OcclusionPDI = InOcclusionPDI;
-		StartIndex = InStartIndex;
-		NumToProcess = InNumToProcess;
-		bSubmitQueries = bInSubmitQueries;
-		bHZBOcclusion = bInHZBOcclusion;
-		InsertPrimitiveOcclusionHistory = OutOcclusionHistory;
-		QueriesToRelease = OutQueriesToRelease;
-		HZBBoundsToAdd = OutHZBBounds;
-		QueriesToAdd = OutQueriesToRun;
-		SubIsOccluded = OutSubIsOccluded;
-	}
-
-	const FScene* Scene;
-	FViewInfo* View;
-	FViewElementPDI* OcclusionPDI;
-	int32 StartIndex;
-	int32 NumToProcess;
-	bool bSubmitQueries;
-	bool bHZBOcclusion;	
-
-	// Whether the entries written into the history need to be read using a scan search (see FPrimitiveOcclusionHistory::bNeedsScanOnRead)
-	bool bNeedsScanOnRead;
-
-	//occlusion history to insert into.  In parallel these will be all merged back into the view's history on the main thread.
-	//use TChunkedArray so pointers to the new FPrimitiveOcclusionHistory's won't change if the array grows.	
-	TArray<FPrimitiveOcclusionHistory>*		InsertPrimitiveOcclusionHistory;
-	TArray<FPrimitiveOcclusionHistory*>*	QueriesToRelease;
-	TArray<FHZBBound>*						HZBBoundsToAdd;
-	TArray<FOcclusionBounds>*				QueriesToAdd;
-	int32									NumOccludedPrims;
-	TArray<bool>*							SubIsOccluded;
-};
-
-//This function is shared between the single and multi-threaded versions.  Modifications to any primitives indexed by BitIt should be ok
-//since only one of the task threads will ever reference it.  However, any modifications to shared state like the ViewState must be buffered
-//to be recombined later.
-template<bool bSingleThreaded>
-static void FetchVisibilityForPrimitives_Range(FVisForPrimParams& Params, FGlobalDynamicVertexBuffer* DynamicVertexBufferIfSingleThreaded)
-{	
-	int32 NumOccludedPrimitives = 0;
-	
-	const FScene* Scene				= Params.Scene;
-	FViewInfo& View					= *Params.View;
-	FViewElementPDI* OcclusionPDI	= Params.OcclusionPDI;
-	const int32 StartIndex			= Params.StartIndex;
-	const int32 NumToProcess		= Params.NumToProcess;
-	const bool bSubmitQueries		= Params.bSubmitQueries;
-	const bool bHZBOcclusion		= Params.bHZBOcclusion;
-
-	const float PrimitiveProbablyVisibleTime = GEngine->PrimitiveProbablyVisibleTime;
-
-	FSceneViewState* ViewState = (FSceneViewState*)View.State;
-	const int32 NumBufferedFrames = FOcclusionQueryHelpers::GetNumBufferedFrames(Scene->GetFeatureLevel());
-	bool bClearQueries = !View.Family->EngineShowFlags.HitProxies;
-	const float CurrentRealTime = View.Family->CurrentRealTime;
-	uint32 OcclusionFrameCounter = ViewState->OcclusionFrameCounter;
-	FRHIRenderQueryPool* OcclusionQueryPool = ViewState->OcclusionQueryPool;
-	FHZBOcclusionTester& HZBOcclusionTests = ViewState->HZBOcclusionTests;
-
-	int32 ReadBackLagTolerance = NumBufferedFrames;
-
-	const bool bIsStereoView = IStereoRendering::IsStereoEyeView(View);
-	const bool bUseRoundRobinOcclusion = bIsStereoView && !View.bIsSceneCapture && View.ViewState->IsRoundRobinEnabled();
-	if (bUseRoundRobinOcclusion)
-	{
-		// We don't allow clearing of a history entry if we do not also submit an occlusion query to replace the deleted one
-		// as we want to keep the history as full as possible
-		bClearQueries &= bSubmitQueries;
-
-		// However, if this frame happens to be the first frame, then we clear anyway since in the first frame we should not be
-		// reading past queries
-		bClearQueries |= View.bIgnoreExistingQueries;
-
-		// Round-robin occlusion culling involves reading frames that could be twice as stale as without round-robin
-		ReadBackLagTolerance = NumBufferedFrames * 2;
-	}
-	// Round robin occlusion culling can make holes in the occlusion history which would require scanning the history when reading
-	Params.bNeedsScanOnRead = bUseRoundRobinOcclusion;
-
-	TSet<FPrimitiveOcclusionHistory, FPrimitiveOcclusionHistoryKeyFuncs>& ViewPrimitiveOcclusionHistory = ViewState->PrimitiveOcclusionHistorySet;
-	TArray<FPrimitiveOcclusionHistory>* InsertPrimitiveOcclusionHistory = Params.InsertPrimitiveOcclusionHistory;
-	TArray<FPrimitiveOcclusionHistory*>* QueriesToRelease = Params.QueriesToRelease;
-	TArray<FHZBBound>* HZBBoundsToAdd = Params.HZBBoundsToAdd;
-	TArray<FOcclusionBounds>* QueriesToAdd = Params.QueriesToAdd;	
-
-	const bool bNewlyConsideredBBoxExpandActive = GExpandNewlyOcclusionTestedBBoxesAmount > 0.0f && GFramesToExpandNewlyOcclusionTestedBBoxes > 0 && GFramesNotOcclusionTestedToExpandBBoxes > 0;
-	const float NeverOcclusionTestDistanceSquared = GNeverOcclusionTestDistance * GNeverOcclusionTestDistance;
-	const FVector ViewOrigin = View.ViewMatrices.GetViewOrigin();
-
-	const int32 ReserveAmount = NumToProcess;
-	if (!bSingleThreaded)
-	{		
-		check(InsertPrimitiveOcclusionHistory);
-		check(QueriesToRelease);
-		check(HZBBoundsToAdd);
-		check(QueriesToAdd);
-
-		//avoid doing reallocs as much as possible.  Unlikely to make an entry per processed element.		
-		InsertPrimitiveOcclusionHistory->Reserve(ReserveAmount);
-		QueriesToRelease->Reserve(ReserveAmount);
-		HZBBoundsToAdd->Reserve(ReserveAmount);
-		QueriesToAdd->Reserve(ReserveAmount);
-	}
-	
-	int32 NumProcessed = 0;
-	int32 NumTotalPrims = View.PrimitiveVisibilityMap.Num();
-	int32 NumTotalDefUnoccluded = View.PrimitiveDefinitelyUnoccludedMap.Num();
-
-	//if we are load balanced then we iterate only the set bits, and the ranges have been pre-selected to evenly distribute set bits among the tasks with no overlaps.
-	//if not, then the entire array is evenly divided by range.
-#if BALANCE_LOAD
-	for (FSceneSetBitIterator BitIt(View.PrimitiveVisibilityMap, StartIndex); BitIt && (NumProcessed < NumToProcess); ++BitIt, ++NumProcessed)
-#else
-	for (TBitArray<SceneRenderingBitArrayAllocator>::FIterator BitIt(View.PrimitiveVisibilityMap, StartIndex); BitIt && (NumProcessed < NumToProcess); ++BitIt, ++NumProcessed)
-#endif
-	{		
-		uint8 OcclusionFlags = Scene->PrimitiveOcclusionFlags[BitIt.GetIndex()];
-		bool bCanBeOccluded = (OcclusionFlags & EOcclusionFlags::CanBeOccluded) != 0;
-
-#if !BALANCE_LOAD		
-		if (!View.PrimitiveVisibilityMap.AccessCorrespondingBit(BitIt))
-		{
-			continue;
-		}
-#endif
-
-		//we can't allow the prim history insertion array to realloc or it will invalidate pointers in the other output arrays.
-		const bool bCanAllocPrimHistory = bSingleThreaded || InsertPrimitiveOcclusionHistory->Num() < InsertPrimitiveOcclusionHistory->Max();		
-
-		if (GIsEditor)
-		{
-			FPrimitiveSceneInfo* PrimitiveSceneInfo = Scene->Primitives[BitIt.GetIndex()];
-
-			if (PrimitiveSceneInfo->Proxy->IsSelected())
-			{
-				// to render occluded outline for selected objects
-				bCanBeOccluded = false;
-			}
-		}
-		int32 NumSubQueries = 1;
-		bool bSubQueries = false;
-		const TArray<FBoxSphereBounds>* SubBounds = nullptr;
-
-		check(Params.SubIsOccluded);
-		TArray<bool>& SubIsOccluded = *Params.SubIsOccluded;
-		int32 SubIsOccludedStart = SubIsOccluded.Num();
-		if ((OcclusionFlags & EOcclusionFlags::HasSubprimitiveQueries) && GAllowSubPrimitiveQueries && !View.bDisableQuerySubmissions)
-		{
-			FPrimitiveSceneProxy* Proxy = Scene->Primitives[BitIt.GetIndex()]->Proxy;
-			SubBounds = Proxy->GetOcclusionQueries(&View);
-			NumSubQueries = SubBounds->Num();
-			bSubQueries = true;
-			if (!NumSubQueries)
-			{
-				View.PrimitiveVisibilityMap.AccessCorrespondingBit(BitIt) = false;
-				continue;
-			}
-			SubIsOccluded.Reserve(NumSubQueries);
-		}
-
-		bool bAllSubOcclusionStateIsDefinite = true;
-		bool bAllSubOccluded = true;
-		FPrimitiveComponentId PrimitiveId = Scene->PrimitiveComponentIds[BitIt.GetIndex()];
-
-		for (int32 SubQuery = 0; SubQuery < NumSubQueries; SubQuery++)
-		{
-			FPrimitiveOcclusionHistory* PrimitiveOcclusionHistory = ViewPrimitiveOcclusionHistory.Find(FPrimitiveOcclusionHistoryKey(PrimitiveId, SubQuery));
-			
-			bool bIsOccluded = false;
-			bool bOcclusionStateIsDefinite = false;			
-
-			if (!PrimitiveOcclusionHistory)
-			{
-				// If the primitive doesn't have an occlusion history yet, create it.
-				if (bSingleThreaded)
-				{					
-					// In singlethreaded mode we can safely modify the view's history directly.
-					PrimitiveOcclusionHistory = &ViewPrimitiveOcclusionHistory[
-						ViewPrimitiveOcclusionHistory.Add(FPrimitiveOcclusionHistory(PrimitiveId, SubQuery))
-					];
-				}
-				else if (bCanAllocPrimHistory)
-				{
-					// In multithreaded mode we have to buffer the new histories and add them to the view during a post-combine
-					PrimitiveOcclusionHistory = &(*InsertPrimitiveOcclusionHistory)[
-						InsertPrimitiveOcclusionHistory->Add(FPrimitiveOcclusionHistory(PrimitiveId, SubQuery))
-					];
-				}				
-				
-				// If the primitive hasn't been visible recently enough to have a history, treat it as unoccluded this frame so it will be rendered as an occluder and its true occlusion state can be determined.
-				// already set bIsOccluded = false;
-
-				// Flag the primitive's occlusion state as indefinite, which will force it to be queried this frame.
-				// The exception is if the primitive isn't occludable, in which case we know that it's definitely unoccluded.
-				bOcclusionStateIsDefinite = bCanBeOccluded ? false : true;
+				// The primitive is visible!
+				VisBits |= Mask;
 			}
 			else
 			{
-				if (View.bIgnoreExistingQueries)
+				++NumPrimitivesCulledForTask;
+			}
+
+		#if RHI_RAYTRACING
+			if (bIsVisibleInRayTracing)
+			{
+				RayTracingBits |= Mask;
+			}
+		#endif
+		}
+
+		if (Flags.bShouldVisibilityCull && FadingBits)
+		{
+			FadeWords[WordIndex] = FadingBits;
+		}
+
+		if (Flags.bShouldVisibilityCull && VisBits)
+		{
+			VisWords[WordIndex] = VisBits;
+		}
+
+	#if RHI_RAYTRACING
+		if (RayTracingBits)
+		{
+			RTWords[WordIndex] = RayTracingBits;
+		}
+	#endif
+	}
+
+	return NumPrimitivesCulledForTask;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+static void ClearStalePrimitiveFadingStates(FViewInfo& View, FSceneViewState* ViewState)
+{
+	if (!ViewState)
+	{
+		return;
+	}
+
+	const uint32 PrevFrameNumber = ViewState->PrevFrameNumber;
+	const float CurrentRealTime = View.Family->Time.GetRealTimeSeconds();
+
+	// First clear any stale fading states.
+	for (FPrimitiveFadingStateMap::TIterator It(ViewState->PrimitiveFadingStates); It; ++It)
+	{
+		FPrimitiveFadingState& FadingState = It.Value();
+		if (FadingState.FrameNumber != PrevFrameNumber ||
+			(IsValidRef(FadingState.UniformBuffer) && CurrentRealTime >= FadingState.EndTime))
+		{
+			It.RemoveCurrent();
+		}
+	}
+}
+
+static void UpdatePrimitiveFadingStateHelper(FPrimitiveFadingState& FadingState, const FViewInfo& View, bool bVisible)
+{
+	if (FadingState.bValid)
+	{
+		if (FadingState.bIsVisible != bVisible)
+		{
+			float CurrentRealTime = View.Family->Time.GetRealTimeSeconds();
+
+			// Need to kick off a fade, so make sure that we have fading state for that
+			if (!IsValidRef(FadingState.UniformBuffer))
+			{
+				// Primitive is not currently fading.  Start a new fade!
+				FadingState.EndTime = CurrentRealTime + GFadeTime;
+
+				if (bVisible)
 				{
-					// If the view is ignoring occlusion queries, the primitive is definitely unoccluded.
-					// already set bIsOccluded = false;
-					bOcclusionStateIsDefinite = View.bDisableQuerySubmissions;
-				}
-				else if (bCanBeOccluded)
-				{
-					if (bHZBOcclusion)
-					{
-						if (HZBOcclusionTests.IsValidFrame(PrimitiveOcclusionHistory->LastTestFrameNumber))
-						{
-							bIsOccluded = !HZBOcclusionTests.IsVisible(PrimitiveOcclusionHistory->HZBTestIndex);
-							bOcclusionStateIsDefinite = true;
-						}
-					}
-					else
-					{
-						// Read the occlusion query results.
-						uint64 NumSamples = 0;
-						bool bGrouped = false;
-						FRHIRenderQuery* PastQuery = PrimitiveOcclusionHistory->GetQueryForReading(OcclusionFrameCounter, NumBufferedFrames, ReadBackLagTolerance, bGrouped);
-						if (PastQuery)
-						{
-							//int32 RefCount = PastQuery.GetReference()->GetRefCount();
-							// NOTE: RHIGetOcclusionQueryResult should never fail when using a blocking call, rendering artifacts may show up.
-							//if (RHICmdList.GetRenderQueryResult(PastQuery, NumSamples, true))
-							if (GDynamicRHI->RHIGetRenderQueryResult(PastQuery, NumSamples, true))
-							{
-								// we render occlusion without MSAA
-								uint32 NumPixels = (uint32)NumSamples;
-
-								// The primitive is occluded if none of its bounding box's pixels were visible in the previous frame's occlusion query.
-								bIsOccluded = (NumPixels == 0);
-
-								
-								if (!bIsOccluded)
-								{
-									checkSlow(View.OneOverNumPossiblePixels > 0.0f);
-									PrimitiveOcclusionHistory->LastPixelsPercentage = NumPixels * View.OneOverNumPossiblePixels;
-								}
-								else
-								{
-									PrimitiveOcclusionHistory->LastPixelsPercentage = 0.0f;
-								}								
-
-
-								// Flag the primitive's occlusion state as definite if it wasn't grouped.
-								bOcclusionStateIsDefinite = !bGrouped;
-							}
-							else
-							{
-								// If the occlusion query failed, treat the primitive as visible.  
-								// already set bIsOccluded = false;
-							}
-						}
-						else
-						{
-							if (NumBufferedFrames > 1 || GRHIMaximumReccommendedOustandingOcclusionQueries < MAX_int32)
-							{
-								// If there's no occlusion query for the primitive, assume it is whatever it was last frame
-								bIsOccluded = PrimitiveOcclusionHistory->WasOccludedLastFrame;
-								bOcclusionStateIsDefinite = PrimitiveOcclusionHistory->OcclusionStateWasDefiniteLastFrame;
-							}
-							else
-							{
-								// If there's no occlusion query for the primitive, set it's visibility state to whether it has been unoccluded recently.
-								bIsOccluded = (PrimitiveOcclusionHistory->LastProvenVisibleTime + GEngine->PrimitiveProbablyVisibleTime < CurrentRealTime);
-								// the state was definite last frame, otherwise we would have ran a query
-								bOcclusionStateIsDefinite = true;
-							}
-							if (bIsOccluded)
-							{
-								PrimitiveOcclusionHistory->LastPixelsPercentage = 0.0f;
-							}
-							else
-							{
-								PrimitiveOcclusionHistory->LastPixelsPercentage = GEngine->MaxOcclusionPixelsFraction;
-							}
-						}
-					}
-
-					if (GVisualizeOccludedPrimitives && OcclusionPDI && bIsOccluded)
-					{
-						const FBoxSphereBounds& Bounds = bSubQueries ? (*SubBounds)[SubQuery] : Scene->PrimitiveOcclusionBounds[BitIt.GetIndex()];
-						DrawWireBox(OcclusionPDI, Bounds.GetBox(), FColor(50, 255, 50), SDPG_Foreground);
-					}
+					// Fading in
+					// (Time - StartTime) / FadeTime
+					FadingState.FadeTimeScaleBias.X = 1.0f / GFadeTime;
+					FadingState.FadeTimeScaleBias.Y = -CurrentRealTime / GFadeTime;
 				}
 				else
-				{					
-					// Primitives that aren't occludable are considered definitely unoccluded.
-					// already set bIsOccluded = false;
-					bOcclusionStateIsDefinite = true;
-				}
-
-				if (bClearQueries)
-				{					
-					if (bSingleThreaded)
-					{						
-						PrimitiveOcclusionHistory->ReleaseQuery(OcclusionFrameCounter, NumBufferedFrames);
-					}
-					else
-					{
-						if (PrimitiveOcclusionHistory->GetQueryForEviction(OcclusionFrameCounter, NumBufferedFrames))
-						{
-							QueriesToRelease->Add(PrimitiveOcclusionHistory);							
-						}
-					}
-				}
-			}
-
-			if (PrimitiveOcclusionHistory)
-			{
-				if (bSubmitQueries && bCanBeOccluded)
 				{
-					bool bSkipNewlyConsidered = false;
-
-					if (bNewlyConsideredBBoxExpandActive)
-					{
-						if (!PrimitiveOcclusionHistory->BecameEligibleForQueryCooldown && OcclusionFrameCounter - PrimitiveOcclusionHistory->LastConsideredFrameNumber > uint32(GFramesNotOcclusionTestedToExpandBBoxes))
-						{
-							PrimitiveOcclusionHistory->BecameEligibleForQueryCooldown = GFramesToExpandNewlyOcclusionTestedBBoxes;
-						}
-
-						bSkipNewlyConsidered = !!PrimitiveOcclusionHistory->BecameEligibleForQueryCooldown;
-
-						if (bSkipNewlyConsidered)
-						{
-							PrimitiveOcclusionHistory->BecameEligibleForQueryCooldown--;
-						}
-					}
-
-
-					bool bAllowBoundsTest;
-					const FBoxSphereBounds OcclusionBounds = (bSubQueries ? (*SubBounds)[SubQuery] : Scene->PrimitiveOcclusionBounds[BitIt.GetIndex()]).ExpandBy(GExpandAllTestedBBoxesAmount + (bSkipNewlyConsidered ? GExpandNewlyOcclusionTestedBBoxesAmount : 0.0));
-					if (FVector::DistSquared(ViewOrigin, OcclusionBounds.Origin) < NeverOcclusionTestDistanceSquared)
-					{
-						bAllowBoundsTest = false;
-					}
-					else if (View.bHasNearClippingPlane)
-					{
-						bAllowBoundsTest = View.NearClippingPlane.PlaneDot(OcclusionBounds.Origin) <
-							-(FVector::BoxPushOut(View.NearClippingPlane, OcclusionBounds.BoxExtent));
-
-					}
-					else if (!View.IsPerspectiveProjection())
-					{
-						// Transform parallel near plane
-						static_assert((int32)ERHIZBuffer::IsInverted != 0, "Check equation for culling!");
-						bAllowBoundsTest = View.WorldToScreen(OcclusionBounds.Origin).Z - View.ViewMatrices.GetProjectionMatrix().M[2][2] * OcclusionBounds.SphereRadius < 1;
-					}
-					else
-					{
-						bAllowBoundsTest = OcclusionBounds.SphereRadius < HALF_WORLD_MAX;
-					}
-
-					if (bAllowBoundsTest)
-					{
-						PrimitiveOcclusionHistory->LastTestFrameNumber = OcclusionFrameCounter;
-						if (bHZBOcclusion)
-						{
-							// Always run
-							if (bSingleThreaded)
-							{								
-								PrimitiveOcclusionHistory->HZBTestIndex = HZBOcclusionTests.AddBounds(OcclusionBounds.Origin, OcclusionBounds.BoxExtent);
-							}
-							else
-							{
-								HZBBoundsToAdd->Emplace(PrimitiveOcclusionHistory, OcclusionBounds.Origin, OcclusionBounds.BoxExtent);
-							}
-						}
-						else
-						{
-							// decide if a query should be run this frame
-							bool bRunQuery, bGroupedQuery;
-
-							if (!bSubQueries && // sub queries are never grouped, we assume the custom code knows what it is doing and will group internally if it wants
-								(OcclusionFlags & EOcclusionFlags::AllowApproximateOcclusion))
-							{
-								if (bIsOccluded)
-								{
-									// Primitives that were occluded the previous frame use grouped queries.
-									bGroupedQuery = true;
-									bRunQuery = true;
-								}
-								else if (bOcclusionStateIsDefinite)
-								{
-									bGroupedQuery = false;
-									float Rnd = GOcclusionRandomStream.GetFraction();
-									if (GRHISupportsExactOcclusionQueries)
-									{
-										float FractionMultiplier = FMath::Max(PrimitiveOcclusionHistory->LastPixelsPercentage / GEngine->MaxOcclusionPixelsFraction, 1.0f);
-										bRunQuery = (FractionMultiplier * Rnd) < GEngine->MaxOcclusionPixelsFraction;
-									}
-									else
-									{
-										bRunQuery = CurrentRealTime - PrimitiveOcclusionHistory->LastProvenVisibleTime > PrimitiveProbablyVisibleTime * (0.5f * 0.25f * Rnd);
-									}									
-								}
-								else
-								{
-									bGroupedQuery = false;
-									bRunQuery = true;
-								}
-							}
-							else
-							{
-								// Primitives that need precise occlusion results use individual queries.
-								bGroupedQuery = false;
-								bRunQuery = true;
-							}
-
-							if (bRunQuery)
-							{
-								const FVector BoundOrigin = OcclusionBounds.Origin + View.ViewMatrices.GetPreViewTranslation();
-								const FVector BoundExtent = OcclusionBounds.BoxExtent;
-
-								if (bSingleThreaded)
-								{
-									checkSlow(DynamicVertexBufferIfSingleThreaded);
-
-									if (GRHIMaximumReccommendedOustandingOcclusionQueries < MAX_int32 && !bGroupedQuery)
-									{
-										QueriesToAdd->Emplace(FPrimitiveOcclusionHistoryKey(PrimitiveId, SubQuery), BoundOrigin, BoundExtent, PrimitiveOcclusionHistory->LastQuerySubmitFrame());
-									}
-									else
-									{
-										PrimitiveOcclusionHistory->SetCurrentQuery(OcclusionFrameCounter,
-											bGroupedQuery ?
-											View.GroupedOcclusionQueries.BatchPrimitive(BoundOrigin, BoundExtent, *DynamicVertexBufferIfSingleThreaded) :
-											View.IndividualOcclusionQueries.BatchPrimitive(BoundOrigin, BoundExtent, *DynamicVertexBufferIfSingleThreaded),
-											NumBufferedFrames,
-											bGroupedQuery,
-											Params.bNeedsScanOnRead
-										);
-									}
-								}
-								else
-								{
-									check(GRHIMaximumReccommendedOustandingOcclusionQueries < MAX_int32); // it would be fairly easy to set up this path to optimize when there are a limited number, but it hasn't been done yet
-									QueriesToAdd->Emplace(PrimitiveOcclusionHistory, BoundOrigin, BoundExtent, bGroupedQuery);
-								}
-							}
-						}
-					}
-					else
-					{
-						// If the primitive's bounding box intersects the near clipping plane, treat it as definitely unoccluded.
-						bIsOccluded = false;
-						bOcclusionStateIsDefinite = true;
-					}
+					// Fading out
+					// 1 - (Time - StartTime) / FadeTime
+					FadingState.FadeTimeScaleBias.X = -1.0f / GFadeTime;
+					FadingState.FadeTimeScaleBias.Y = 1.0f + CurrentRealTime / GFadeTime;
 				}
-				// Set the primitive's considered time to keep its occlusion history from being trimmed.
-				PrimitiveOcclusionHistory->LastConsideredTime = CurrentRealTime;
-				if (!bIsOccluded && bOcclusionStateIsDefinite)
-				{
-					PrimitiveOcclusionHistory->LastProvenVisibleTime = CurrentRealTime;
-				}
-				PrimitiveOcclusionHistory->LastConsideredFrameNumber = OcclusionFrameCounter;
-				PrimitiveOcclusionHistory->WasOccludedLastFrame = bIsOccluded;
-				PrimitiveOcclusionHistory->OcclusionStateWasDefiniteLastFrame = bOcclusionStateIsDefinite;
-			}
 
-			if (bSubQueries)
-			{
-				SubIsOccluded.Add(bIsOccluded);
-				if (!bIsOccluded)
-				{
-					bAllSubOccluded = false;
-				}
-				if (bIsOccluded || !bOcclusionStateIsDefinite)
-				{
-					bAllSubOcclusionStateIsDefinite = false;
-				}
+				FDistanceCullFadeUniformShaderParameters Uniforms;
+				Uniforms.FadeTimeScaleBias = FVector2f(FadingState.FadeTimeScaleBias);	// LWC_TODO: Precision loss
+				FadingState.UniformBuffer = FDistanceCullFadeUniformBufferRef::CreateUniformBufferImmediate(Uniforms, UniformBuffer_MultiFrame);
 			}
 			else
 			{
-					
-				if (bIsOccluded)
+				// Reverse fading direction but maintain current opacity
+				// Solve for d: a*x+b = -a*x+d
+				FadingState.FadeTimeScaleBias.Y = 2.0f * CurrentRealTime * FadingState.FadeTimeScaleBias.X + FadingState.FadeTimeScaleBias.Y;
+				FadingState.FadeTimeScaleBias.X = -FadingState.FadeTimeScaleBias.X;
+
+				if (bVisible)
 				{
-					View.PrimitiveVisibilityMap.AccessCorrespondingBit(BitIt) = false;
-					STAT(NumOccludedPrimitives++);
+					// Fading in
+					// Solve for x: a*x+b = 1
+					FadingState.EndTime = (1.0f - FadingState.FadeTimeScaleBias.Y) / FadingState.FadeTimeScaleBias.X;
 				}
-				else if (bOcclusionStateIsDefinite)
+				else
 				{
-					View.PrimitiveDefinitelyUnoccludedMap.AccessCorrespondingBit(BitIt) = true;
-				}					
-			}			
-		}
+					// Fading out
+					// Solve for x: a*x+b = 0
+					FadingState.EndTime = -FadingState.FadeTimeScaleBias.Y / FadingState.FadeTimeScaleBias.X;
+				}
 
-		if (bSubQueries)
-		{
-			if (SubIsOccluded.Num() > 0)
-			{
-				FPrimitiveSceneProxy* Proxy = Scene->Primitives[BitIt.GetIndex()]->Proxy;
-				Proxy->AcceptOcclusionResults(&View, &SubIsOccluded, SubIsOccludedStart, SubIsOccluded.Num() - SubIsOccludedStart);
-			}
-
-			if (bAllSubOccluded)
-			{
-				View.PrimitiveVisibilityMap.AccessCorrespondingBit(BitIt) = false;
-				STAT(NumOccludedPrimitives++);
-			}
-			else if (bAllSubOcclusionStateIsDefinite)
-			{
-				View.PrimitiveDefinitelyUnoccludedMap.AccessCorrespondingBit(BitIt) = true;
+				FDistanceCullFadeUniformShaderParameters Uniforms;
+				Uniforms.FadeTimeScaleBias = FVector2f(FadingState.FadeTimeScaleBias);	// LWC_TODO: Precision loss
+				FadingState.UniformBuffer = FDistanceCullFadeUniformBufferRef::CreateUniformBufferImmediate(Uniforms, UniformBuffer_MultiFrame);
 			}
 		}
 	}
 
-	check(NumTotalDefUnoccluded == View.PrimitiveDefinitelyUnoccludedMap.Num());
-	check(NumTotalPrims == View.PrimitiveVisibilityMap.Num());
-	check(!InsertPrimitiveOcclusionHistory || InsertPrimitiveOcclusionHistory->Num() <= ReserveAmount);
-	Params.NumOccludedPrims = NumOccludedPrimitives;	
+	FadingState.FrameNumber = View.Family->FrameNumber;
+	FadingState.bIsVisible = bVisible;
+	FadingState.bValid = true;
 }
 
-FAutoConsoleTaskPriority CPrio_FetchVisibilityForPrimitivesTask(
-	TEXT("TaskGraph.TaskPriorities.FetchVisibilityForPrimitivesTask"),
-	TEXT("Task and thread priority for FetchVisibilityForPrimitivesTask."),
-	ENamedThreads::HighThreadPriority, // if we have high priority task threads, then use them...
-	ENamedThreads::NormalTaskPriority, // .. at normal task priority
-	ENamedThreads::HighTaskPriority // if we don't have hi pri threads, then use normal priority threads at high task priority instead
-	);
-
-class FetchVisibilityForPrimitivesTask
+static void UpdatePrimitiveFading(const FScene& Scene, FViewInfo& View, FSceneViewState* ViewState, FPrimitiveRange PrimitiveRange)
 {
-	FVisForPrimParams& Params;
-
-public:
-
-	FetchVisibilityForPrimitivesTask(FVisForPrimParams& InParams)
-		: Params(InParams)
+	if (!ViewState)
 	{
+		return;
 	}
 
-	FORCEINLINE TStatId GetStatId() const
+	SCOPE_CYCLE_COUNTER(STAT_UpdatePrimitiveFading);
+
+	// Should we allow fading transitions at all this frame?  For frames where the camera moved
+	// a large distance or where we haven't rendered a view in awhile, it's best to disable
+	// fading so users don't see unexpected object transitions.
+	if (!GDisableLODFade && !View.bDisableDistanceBasedFadeTransitions)
 	{
-		RETURN_QUICK_DECLARE_CYCLE_STAT(FetchVisibilityForPrimitivesTask, STATGROUP_TaskGraphTasks);
+		// Do a pass over potentially fading primitives and update their states.
+		for (FSceneSetBitIterator BitIt(View.PotentiallyFadingPrimitiveMap, PrimitiveRange.StartIndex); BitIt.GetIndex() < PrimitiveRange.EndIndex; ++BitIt)
+		{
+			bool bVisible = View.PrimitiveVisibilityMap.AccessCorrespondingBit(BitIt);
+			FPrimitiveFadingState& FadingState = ViewState->PrimitiveFadingStates.FindOrAdd(Scene.PrimitiveComponentIds[BitIt.GetIndex()]);
+			UpdatePrimitiveFadingStateHelper(FadingState, View, bVisible);
+			FRHIUniformBuffer* UniformBuffer = FadingState.UniformBuffer;
+			if (UniformBuffer && !bVisible)
+			{
+				// If the primitive is fading out make sure it remains visible.
+				View.PrimitiveVisibilityMap.AccessCorrespondingBit(BitIt) = true;
+
+			#if RHI_RAYTRACING
+				// Cannot just assume the ray tracing visibility will be true, so a complete recalculation for its culling needs to happen
+				// This should be a very rare occurrence, so the hit is not worrisome.
+				// TODO:  Could this be moved into the actual culling phase?
+
+				if (!ShouldCullForRayTracing(Scene, View, BitIt.GetIndex()))
+				{
+					View.PrimitiveRayTracingVisibilityMap.AccessCorrespondingBit(BitIt) = true;
+				}
+			#endif
+			}
+			View.PrimitiveFadeUniformBuffers[BitIt.GetIndex()] = UniformBuffer;
+			View.PrimitiveFadeUniformBufferMap[BitIt.GetIndex()] = UniformBuffer != nullptr;
+		}
 	}
+}
 
-	ENamedThreads::Type GetDesiredThread()
-	{
-		return CPrio_FetchVisibilityForPrimitivesTask.Get();
-	}
-
-	static ESubsequentsMode::Type GetSubsequentsMode() { return ESubsequentsMode::TrackSubsequents; }
-
-	void DoTask(ENamedThreads::Type CurrentThread, const FGraphEventRef& MyCompletionGraphEvent)
-	{
-		FetchVisibilityForPrimitives_Range<false>(Params, nullptr);
-	}
-};
-
-static int32 FetchVisibilityForPrimitives(const FScene* Scene, FViewInfo& View, const bool bSubmitQueries, const bool bHZBOcclusion, FGlobalDynamicVertexBuffer& DynamicVertexBuffer)
+bool FViewInfo::UpdatePrimitiveFadingState(const FPrimitiveSceneInfo* PrimitiveSceneInfo, bool bFadingIn)
 {
-	CSV_SCOPED_TIMING_STAT_EXCLUSIVE(FetchVisibilityForPrimitives);
-	QUICK_SCOPE_CYCLE_COUNTER(STAT_FetchVisibilityForPrimitives);
-	FSceneViewState* ViewState = (FSceneViewState*)View.State;
-	
-	static int32 SubIsOccludedArrayIndex = 0;
-	SubIsOccludedArrayIndex = 1 - SubIsOccludedArrayIndex;
+	// Update distance-based visibility and fading state if it has not already been updated.
+	const int32 PrimitiveIndex = PrimitiveSceneInfo->GetIndex();
+	const FRelativeBitReference PrimitiveBit(PrimitiveIndex);
+	bool bStillFading = false;
 
-	const int32 NumBufferedFrames = FOcclusionQueryHelpers::GetNumBufferedFrames(Scene->GetFeatureLevel());
-	uint32 OcclusionFrameCounter = ViewState->OcclusionFrameCounter;
-	TSet<FPrimitiveOcclusionHistory, FPrimitiveOcclusionHistoryKeyFuncs>& ViewPrimitiveOcclusionHistory = ViewState->PrimitiveOcclusionHistorySet;
+	if (!PotentiallyFadingPrimitiveMap.AccessCorrespondingBit(PrimitiveBit))
+	{
+		FPrimitiveFadingState& FadingState = ((FSceneViewState*)State)->PrimitiveFadingStates.FindOrAdd(PrimitiveSceneInfo->PrimitiveComponentId);
+		UpdatePrimitiveFadingStateHelper(FadingState, *this, bFadingIn);
+		FRHIUniformBuffer* UniformBuffer = FadingState.UniformBuffer;
+		bStillFading = UniformBuffer != nullptr;
+		PrimitiveFadeUniformBuffers[PrimitiveIndex] = UniformBuffer;
+		PrimitiveFadeUniformBufferMap[PrimitiveIndex] = UniformBuffer != nullptr;
+		PotentiallyFadingPrimitiveMap.AccessCorrespondingBit(PrimitiveBit) = true;
+	}
 
-	if (GOcclusionCullParallelPrimFetch && GSupportsParallelOcclusionQueries)
-	{		
-		static const int32 MaxNumCullTasks = 4;
-		static const int32 ActualNumCullTasks = 4;
-		static const int32 NumOutputArrays = MaxNumCullTasks;
-		
-		FGraphEventRef TaskRefArray[NumOutputArrays];
+	// If we're still fading then make sure the object is still drawn, even if it's beyond the max draw distance
+	return !bFadingIn && !bStillFading;
+}
 
-		//params for each task
-		FVisForPrimParams Params[NumOutputArrays];
+///////////////////////////////////////////////////////////////////////////////
 
-		//output arrays for each task
-		TArray<FPrimitiveOcclusionHistory> OutputOcclusionHistory[NumOutputArrays];
-		TArray<FPrimitiveOcclusionHistory*> OutQueriesToRelease[NumOutputArrays];
-		TArray<FHZBBound> OutHZBBounds[NumOutputArrays];
-		TArray<FOcclusionBounds> OutQueriesToRun[NumOutputArrays];	
+FFilterStaticMeshesForViewData::FFilterStaticMeshesForViewData(FViewInfo& View)
+{
+	ViewOrigin = View.ViewMatrices.GetViewOrigin();
 
-		static TArray<bool> FrameSubIsOccluded[NumOutputArrays][FSceneView::NumBufferedSubIsOccludedArrays];
+	// outside of the loop to be more efficient
+	ForcedLODLevel = (View.Family->EngineShowFlags.LOD) ? GetCVarForceLOD() : 0;
 
-		//optionally balance the tasks by how the visible primitives are distributed in the array rather than just breaking up the array by range.
-		//should make the tasks more equal length.
-#if BALANCE_LOAD
-		int32 StartIndices[NumOutputArrays] = { 0 };
-		int32 ProcessRange[NumOutputArrays] = { 0 };
+	LODScale = CVarStaticMeshLODDistanceScale.GetValueOnRenderThread() * View.LODDistanceFactor;
+
+	MinScreenRadiusForCSMDepthSquared = GMinScreenRadiusForCSMDepth * GMinScreenRadiusForCSMDepth;
+	MinScreenRadiusForDepthPrepassSquared = GMinScreenRadiusForDepthPrepass * GMinScreenRadiusForDepthPrepass;
+
+	bFullEarlyZPass = ShouldForceFullDepthPass(View.GetShaderPlatform());
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+FDrawCommandRelevancePacket::FDrawCommandRelevancePacket()
+{
+	bUseCachedMeshDrawCommands = UseCachedMeshDrawCommands();
+
+	for (int32 PassIndex = 0; PassIndex < EMeshPass::Num; ++PassIndex)
+	{
+		NumDynamicBuildRequestElements[PassIndex] = 0;
+	}
+}
+
+void FDrawCommandRelevancePacket::AddCommandsForMesh(
+	int32 PrimitiveIndex, 
+	const FPrimitiveSceneInfo* InPrimitiveSceneInfo,
+	const FStaticMeshBatchRelevance& RESTRICT StaticMeshRelevance, 
+	const FStaticMeshBatch& RESTRICT StaticMesh, 
+	EMeshDrawCommandCullingPayloadFlags CullingPayloadFlags,
+	const FScene& Scene,
+	bool bCanCache, 
+	EMeshPass::Type PassType)
+{
+	const bool bIsNaniteMesh = Scene.PrimitiveFlagsCompact[PrimitiveIndex].bIsNaniteMesh;
+	if (bIsNaniteMesh && Scene.PrimitivesAlwaysVisibleOffset != ~0u)
+	{
+		return;
+	}
+
+	const EShadingPath ShadingPath = GetFeatureLevelShadingPath(Scene.GetFeatureLevel());
+	const bool bUseCachedMeshCommand = bUseCachedMeshDrawCommands
+		&& !!(FPassProcessorManager::GetPassFlags(ShadingPath, PassType) & EMeshPassFlags::CachedMeshCommands)
+		&& StaticMeshRelevance.bSupportsCachingMeshDrawCommands
+		&& bCanCache;
+
+	if (bUseCachedMeshCommand)
+	{
+		const int32 StaticMeshCommandInfoIndex = StaticMeshRelevance.GetStaticMeshCommandInfoIndex(PassType);
+		if (StaticMeshCommandInfoIndex >= 0)
 		{
-			QUICK_SCOPE_CYCLE_COUNTER(STAT_FetchVisibilityForPrimitivesPreProcess);
-			int32 NumBitsSet = 0;
-			for (FSceneSetBitIterator BitIt(View.PrimitiveVisibilityMap); BitIt; ++BitIt, ++NumBitsSet)
-			{
-			}
-			
-			int32 BitsPerTask = NumBitsSet / ActualNumCullTasks;
-			int32 NumBitsForRange = 0;
-			int32 CurrentStartIndex = 0;
-			int32 RangeToSet = 0;
+			const FCachedMeshDrawCommandInfo& CachedMeshDrawCommand = InPrimitiveSceneInfo->StaticMeshCommandInfos[StaticMeshCommandInfoIndex];
+			const FCachedPassMeshDrawList& SceneDrawList = Scene.CachedDrawLists[PassType];
 
-			//accumulate set bits for each task until we reach the target, then set the start/end and move on.
-			for (FSceneSetBitIterator BitIt(View.PrimitiveVisibilityMap); BitIt && RangeToSet < (ActualNumCullTasks - 1); ++BitIt)
-			{
-				++NumBitsForRange;
-				if (NumBitsForRange == BitsPerTask)
-				{
-					StartIndices[RangeToSet] = CurrentStartIndex;
-					ProcessRange[RangeToSet] = NumBitsForRange;
+			// AddUninitialized_GetRef()
+			VisibleCachedDrawCommands[(uint32)PassType].AddUninitialized();
+			FVisibleMeshDrawCommand& NewVisibleMeshDrawCommand = VisibleCachedDrawCommands[(uint32)PassType].Last();
 
-					++RangeToSet;
-					NumBitsForRange = 0;
-					CurrentStartIndex = BitIt.GetIndex() + 1;
-				}
-			}
+			const FMeshDrawCommand* MeshDrawCommand = CachedMeshDrawCommand.StateBucketId >= 0
+				? &Scene.CachedMeshDrawCommandStateBuckets[PassType].GetByElementId(CachedMeshDrawCommand.StateBucketId).Key
+				: &SceneDrawList.MeshDrawCommands[CachedMeshDrawCommand.CommandIndex];
 
-			//final range is the rest of the set bits, no matter how many there are.
-			StartIndices[ActualNumCullTasks - 1] = CurrentStartIndex;
-			ProcessRange[ActualNumCullTasks - 1] = NumBitsSet - (BitsPerTask * 3);
+			NewVisibleMeshDrawCommand.Setup(
+				MeshDrawCommand,
+				InPrimitiveSceneInfo->GetMDCIdInfo(),
+				CachedMeshDrawCommand.StateBucketId,
+				CachedMeshDrawCommand.MeshFillMode,
+				CachedMeshDrawCommand.MeshCullMode,
+				CachedMeshDrawCommand.Flags,
+				CachedMeshDrawCommand.SortKey,
+				CachedMeshDrawCommand.CullingPayload,
+				CullingPayloadFlags);
 		}
-#endif
-
-		const int32 NumPrims = View.PrimitiveVisibilityMap.Num();
-		const int32 NumPerTask = NumPrims / ActualNumCullTasks;
-		int32 StartIndex = 0;
-		int32 NumToProcess = NumPerTask;
-
-		FGraphEventArray TaskWaitArray;
-		int32 NumTasks = 0;
-		for (int32 i = 0; i < ActualNumCullTasks && (StartIndex < NumPrims); ++i, ++NumTasks)
-		{
-			NumToProcess = (i == (ActualNumCullTasks - 1)) ? (NumPrims - StartIndex) : NumPerTask;
-			TArray<bool>& SubIsOccluded = FrameSubIsOccluded[i][SubIsOccludedArrayIndex];
-			SubIsOccluded.Reset();
-
-			Params[i].Init(
-				Scene,
-				&View,
-				nullptr,
-#if BALANCE_LOAD
-				StartIndices[i],
-				ProcessRange[i],
-#else
-				StartIndex,
-				NumToProcess,
-#endif
-				bSubmitQueries,
-				bHZBOcclusion,				
-				&OutputOcclusionHistory[i],
-				&OutQueriesToRelease[i],
-				&OutHZBBounds[i],
-				&OutQueriesToRun[i],
-				&SubIsOccluded
-				);
-
-			TaskRefArray[i] = TGraphTask<FetchVisibilityForPrimitivesTask>::CreateTask().ConstructAndDispatchWhenReady(Params[i]);			
-			TaskWaitArray.Add(TaskRefArray[i]);
-
-			StartIndex += NumToProcess;
-		}
-
-		FRHIRenderQueryPool* OcclusionQueryPool = ViewState->OcclusionQueryPool;
-		FHZBOcclusionTester& HZBOcclusionTests = ViewState->HZBOcclusionTests;		
-
-		int32 NumOccludedPrims = 0;
-		{
-			QUICK_SCOPE_CYCLE_COUNTER(STAT_FetchVisibilityForPrimitivesCombine);
-
-			//wait for them all so we don't start modifying the prim histories while the gather is running
-			FTaskGraphInterface::Get().WaitUntilTasksComplete(TaskWaitArray, ENamedThreads::GetRenderThread_Local());
-
-#if QUERY_SANITY_CHECK
-			{
-				QUICK_SCOPE_CYCLE_COUNTER(STAT_FetchVisibilityForPrimitivesSanity);
-				TSet<int32> ReleaseQuerySet;
-				TSet<int32> RunQuerySet;
-				TSet<int32> MasterPrimsProcessed;
-				for (int32 i = 0; i < NumTasks; ++i)
-				{
-					bool bAlreadyIn = false;
-					for (auto ReleaseQueryIter = OutQueriesToRelease[i].CreateIterator(); ReleaseQueryIter; ++ReleaseQueryIter)
-					{
-						FPrimitiveOcclusionHistory* History = *ReleaseQueryIter;
-						ReleaseQuerySet.Add(History->PrimitiveId.PrimIDValue, &bAlreadyIn);
-						checkf(!bAlreadyIn, TEXT("Prim: %i double released query."), History->PrimitiveId.PrimIDValue);
-					}
-
-					for (auto RunQueriesIter = OutQueriesToRun[i].CreateIterator(); RunQueriesIter; ++RunQueriesIter)
-					{
-						FPrimitiveOcclusionHistory* History = RunQueriesIter->PrimitiveOcclusionHistory;
-						RunQuerySet.Add(History->PrimitiveId.PrimIDValue, &bAlreadyIn);
-						checkf(!bAlreadyIn, TEXT("Prim: %i double run query."), History->PrimitiveId.PrimIDValue);
-					}					
-				}
-			}
-#endif
-
-			//Add/Release query ops use stored PrimitiveHistory pointers. We must do ALL of these from all tasks before adding any new PrimitiveHistories to the view.
-			//Adding new histories to the view could cause the array to resize which would invalidate all the stored output pointers for the other operations.
-			for (int32 i = 0; i < NumTasks; ++i)
-			{
-				//HZB output
-				for (auto HZBBoundIter = OutHZBBounds[i].CreateIterator(); HZBBoundIter; ++HZBBoundIter)
-				{
-					HZBBoundIter->TargetHistory->HZBTestIndex = HZBOcclusionTests.AddBounds(HZBBoundIter->BoundsOrigin, HZBBoundIter->BoundsExtent);
-				}
-
-				//Manual query release handling
-				for (auto ReleaseQueryIter = OutQueriesToRelease[i].CreateIterator(); ReleaseQueryIter; ++ReleaseQueryIter)
-				{
-					FPrimitiveOcclusionHistory* History = *ReleaseQueryIter;
-					History->ReleaseQuery(OcclusionFrameCounter, NumBufferedFrames);
-				}
-				
-				//New query batching
-				for (auto RunQueriesIter = OutQueriesToRun[i].CreateIterator(); RunQueriesIter; ++RunQueriesIter)
-				{
-					RunQueriesIter->PrimitiveOcclusionHistory->SetCurrentQuery(OcclusionFrameCounter,
-						RunQueriesIter->bGroupedQuery ?
-						View.GroupedOcclusionQueries.BatchPrimitive(RunQueriesIter->BoundsOrigin, RunQueriesIter->BoundsExtent, DynamicVertexBuffer) :
-						View.IndividualOcclusionQueries.BatchPrimitive(RunQueriesIter->BoundsOrigin, RunQueriesIter->BoundsExtent, DynamicVertexBuffer),
-						NumBufferedFrames,
-						RunQueriesIter->bGroupedQuery,
-						Params[i].bNeedsScanOnRead
-						);
-				}
-			}
-
-			//now add new primitive histories to the view. may resize the view's array.
-			for (int32 i = 0; i < NumTasks; ++i)
-			{											
-				for (int32 HistoryIndex = 0; HistoryIndex < OutputOcclusionHistory[i].Num(); ++HistoryIndex)
-				{
-					ViewPrimitiveOcclusionHistory.Add(MoveTemp(OutputOcclusionHistory[i][HistoryIndex]));
-				}
-
-				//accumulate occluded prims across tasks
-				NumOccludedPrims += Params[i].NumOccludedPrims;
-			}
-		}
-		
-		return NumOccludedPrims;
 	}
 	else
 	{
-		//SubIsOccluded stuff needs a frame's lifetime
-		TArray<bool>& SubIsOccluded = View.FrameSubIsOccluded[SubIsOccludedArrayIndex];
-		SubIsOccluded.Reset();
-
-		static TArray<FOcclusionBounds> PendingIndividualQueriesWhenOptimizing;
-		PendingIndividualQueriesWhenOptimizing.Reset();
-
-		static TArray<FOcclusionBounds*> PendingIndividualQueriesWhenOptimizingSorter;
-		PendingIndividualQueriesWhenOptimizingSorter.Reset();
-
-		FViewElementPDI OcclusionPDI(&View, nullptr, nullptr);
-		int32 StartIndex = 0;
-		int32 NumToProcess = View.PrimitiveVisibilityMap.Num();				
-		FVisForPrimParams Params(
-			Scene,
-			&View,
-			&OcclusionPDI,
-			StartIndex,
-			NumToProcess,
-			bSubmitQueries,
-			bHZBOcclusion,			
-			nullptr,
-			nullptr,
-			nullptr,
-			&PendingIndividualQueriesWhenOptimizing,
-			&SubIsOccluded
-			);
-
-		FetchVisibilityForPrimitives_Range<true>(Params, &DynamicVertexBuffer);
-
-		int32 IndQueries = PendingIndividualQueriesWhenOptimizing.Num();
-		if (IndQueries)
-		{
-			int32 SoftMaxQueries = GRHIMaximumReccommendedOustandingOcclusionQueries / FMath::Min(NumBufferedFrames, 2); // extra RHIT frame does not count
-			int32 UsedQueries = View.GroupedOcclusionQueries.GetNumBatchOcclusionQueries();
-
-			int32 FirstQueryToDo = 0;
-			int32 QueriesToDo = IndQueries;
-
-
-			if (SoftMaxQueries < UsedQueries + IndQueries)
-			{
-				QueriesToDo = (IndQueries + 9) / 10;  // we need to make progress, even if it means stalling and waiting for the GPU. At a minimum, we will do 10%
-
-				if (SoftMaxQueries > UsedQueries + QueriesToDo)
-				{
-					// we can do more than the minimum
-					QueriesToDo = SoftMaxQueries - UsedQueries;
-				}
-			}
-			if (QueriesToDo == IndQueries)
-			{
-				for (int32 Index = 0; Index < IndQueries; Index++)
-				{
-					FOcclusionBounds* RunQueriesIter = &PendingIndividualQueriesWhenOptimizing[Index];
-					FPrimitiveOcclusionHistory* PrimitiveOcclusionHistory = ViewPrimitiveOcclusionHistory.Find(RunQueriesIter->PrimitiveOcclusionHistoryKey);
-
-					PrimitiveOcclusionHistory->SetCurrentQuery(OcclusionFrameCounter,
-						View.IndividualOcclusionQueries.BatchPrimitive(RunQueriesIter->BoundsOrigin, RunQueriesIter->BoundsExtent, DynamicVertexBuffer),
-						NumBufferedFrames,
-						false,
-						Params.bNeedsScanOnRead
-					);
-				}
-			}
-			else
-			{
-				check(QueriesToDo < IndQueries);
-				PendingIndividualQueriesWhenOptimizingSorter.Reserve(PendingIndividualQueriesWhenOptimizing.Num());
-				for (int32 Index = 0; Index < IndQueries; Index++)
-				{
-					FOcclusionBounds* RunQueriesIter = &PendingIndividualQueriesWhenOptimizing[Index];
-					PendingIndividualQueriesWhenOptimizingSorter.Add(RunQueriesIter);
-				}
-
-				PendingIndividualQueriesWhenOptimizingSorter.Sort(
-					[](const FOcclusionBounds& A, const FOcclusionBounds& B) 
-					{
-						return A.LastQuerySubmitFrame < B.LastQuerySubmitFrame;
-					}
-				);
-				for (int32 Index = 0; Index < QueriesToDo; Index++)
-				{
-					FOcclusionBounds* RunQueriesIter = PendingIndividualQueriesWhenOptimizingSorter[Index];
-					FPrimitiveOcclusionHistory* PrimitiveOcclusionHistory = ViewPrimitiveOcclusionHistory.Find(RunQueriesIter->PrimitiveOcclusionHistoryKey);
-					PrimitiveOcclusionHistory->SetCurrentQuery(OcclusionFrameCounter,
-						View.IndividualOcclusionQueries.BatchPrimitive(RunQueriesIter->BoundsOrigin, RunQueriesIter->BoundsExtent, DynamicVertexBuffer),
-						NumBufferedFrames,
-						false,
-						Params.bNeedsScanOnRead
-					);
-				}
-			}
-
-
-			// lets prevent this from staying too large for too long
-			if (PendingIndividualQueriesWhenOptimizing.GetSlack() > IndQueries * 4)
-			{
-				PendingIndividualQueriesWhenOptimizing.Empty();
-				PendingIndividualQueriesWhenOptimizingSorter.Empty();
-			}
-			else
-			{
-				PendingIndividualQueriesWhenOptimizing.Reset();
-				PendingIndividualQueriesWhenOptimizingSorter.Reset();
-			}
-		}
-		return Params.NumOccludedPrims;
+		NumDynamicBuildRequestElements[PassType] += StaticMeshRelevance.NumElements;
+		DynamicBuildRequests[PassType].Add(&StaticMesh);
+		DynamicBuildFlags[PassType].Add(CullingPayloadFlags);
 	}
 }
 
-/**
- * Cull occluded primitives in the view.
- */
-static int32 OcclusionCull(FRHICommandListImmediate& RHICmdList, const FScene* Scene, FViewInfo& View, FGlobalDynamicVertexBuffer& DynamicVertexBuffer)
+///////////////////////////////////////////////////////////////////////////////
+
+FRelevancePacket::FRelevancePacket(
+	FVisibilityTaskData& InTaskData,
+	const FViewInfo& InView,
+	int32 InViewIndex,
+	const FFilterStaticMeshesForViewData& InViewData,
+	uint8* InMarkMasks)
+	: CurrentWorldTime(InView.Family->Time.GetWorldTimeSeconds())
+	, DeltaWorldTime(InView.Family->Time.GetDeltaWorldTimeSeconds())
+	, TaskData(InTaskData)
+	, TaskConfig(InTaskData.TaskConfig)
+	, Scene(TaskData.Scene)
+	, View(InView)
+	, ViewCommands(TaskData.DynamicMeshElements.ViewCommandsPerView[InViewIndex])
+	, ViewBit(1 << InViewIndex)
+	, ViewData(InViewData)
+	, DynamicPrimitiveViewMasks(TaskData.DynamicMeshElements.PrimitiveViewMasks)
+	, MarkMasks(InMarkMasks)
+	, Input(TaskConfig.Relevance.NumPrimitivesPerPacket)
+	, NotDrawRelevant(TaskConfig.Relevance.NumPrimitivesPerPacket)
+	, TranslucentSelfShadowPrimitives(TaskConfig.Relevance.NumPrimitivesPerPacket)
+	, VisibleDynamicPrimitivesWithSimpleLights(TaskConfig.Relevance.NumPrimitivesPerPacket)
+	, DirtyIndirectLightingCacheBufferPrimitives(TaskConfig.Relevance.NumPrimitivesPerPacket)
+	, NaniteCustomDepthInstances(TaskConfig.Relevance.NumPrimitivesPerPacket)
+	, PrimitivesLODMask(TaskConfig.Relevance.NumPrimitivesPerPacket)
+	, bAddLightmapDensityCommands(TaskData.bAddLightmapDensityCommands)
+{}
+
+void FRelevancePacket::LaunchComputeRelevanceTask()
 {
-	SCOPE_CYCLE_COUNTER(STAT_OcclusionCull);	
-	RHICmdList.SetCurrentStat(GET_STATID(STAT_CLMM_OcclusionReadback));
+	check(!bComputeRelevanceTaskLaunched);
 
-	// INITVIEWS_TODO: This could be more efficient if broken up in to separate concerns:
-	// - What is occluded?
-	// - For which primitives should we render occlusion queries?
-	// - Generate occlusion query geometry.
-
-	int32 NumOccludedPrimitives = 0;
-	FSceneViewState* ViewState = (FSceneViewState*)View.State;
-	
-	// Disable HZB on OpenGL platforms to avoid rendering artifacts
-	// It can be forced on by setting HZBOcclusion to 2
-	bool bHZBOcclusion = !IsOpenGLPlatform(GShaderPlatformForFeatureLevel[Scene->GetFeatureLevel()]);
-	bHZBOcclusion = bHZBOcclusion && GHZBOcclusion;
-	bHZBOcclusion = bHZBOcclusion && FDataDrivenShaderPlatformInfo::GetSupportsHZBOcclusion(GShaderPlatformForFeatureLevel[Scene->GetFeatureLevel()]);
-	bHZBOcclusion = bHZBOcclusion || (GHZBOcclusion == 2);
-
-	// Use precomputed visibility data if it is available.
-	if (View.PrecomputedVisibilityData)
+	if (!Input.IsEmpty())
 	{
-		QUICK_SCOPE_CYCLE_COUNTER(STAT_LookupPrecomputedVisibility);
+		bComputeRelevanceTaskLaunched = true;
 
-		FViewElementPDI OcclusionPDI(&View, nullptr, nullptr);
-		uint8 PrecomputedVisibilityFlags = EOcclusionFlags::CanBeOccluded | EOcclusionFlags::HasPrecomputedVisibility;
-		for (FSceneSetBitIterator BitIt(View.PrimitiveVisibilityMap); BitIt; ++BitIt)
+		if (TaskData.DynamicMeshElements.CommandPipe)
 		{
-			if ((Scene->PrimitiveOcclusionFlags[BitIt.GetIndex()] & PrecomputedVisibilityFlags) == PrecomputedVisibilityFlags)
-			{
-				FPrimitiveVisibilityId VisibilityId = Scene->PrimitiveVisibilityIds[BitIt.GetIndex()];
-				if ((View.PrecomputedVisibilityData[VisibilityId.ByteIndex] & VisibilityId.BitMask) == 0)
-				{
-					View.PrimitiveVisibilityMap.AccessCorrespondingBit(BitIt) = false;
-					INC_DWORD_STAT_BY(STAT_StaticallyOccludedPrimitives,1);
-					STAT(NumOccludedPrimitives++);
+			TaskData.DynamicMeshElements.CommandPipe->AddNumCommands(1);
+		}
 
-					if (GVisualizeOccludedPrimitives)
-					{
-						const FBoxSphereBounds& Bounds = Scene->PrimitiveOcclusionBounds[BitIt.GetIndex()];
-						DrawWireBox(&OcclusionPDI, Bounds.GetBox(), FColor(100, 50, 50), SDPG_Foreground);
-					}
+		ComputeRelevanceTask = UE::Tasks::Launch(UE_SOURCE_LOCATION, [this]
+		{
+			FOptionalTaskTagScope Scope(ETaskTag::EParallelRenderingThread);
+			FDynamicPrimitiveIndexList DynamicPrimitiveIndexList;
+			ComputeRelevance(DynamicPrimitiveIndexList);
+
+			if (TaskData.DynamicMeshElements.CommandPipe)
+			{
+				if (DynamicPrimitiveIndexList.IsEmpty())
+				{
+					TaskData.DynamicMeshElements.CommandPipe->ReleaseNumCommands(1);
+				}
+				else
+				{
+					TaskData.DynamicMeshElements.CommandPipe->EnqueueCommand(MoveTemp(DynamicPrimitiveIndexList));
 				}
 			}
-		}
+
+		}, Scene.GetCacheMeshDrawCommandsTask(), TaskConfig.Relevance.ComputeRelevanceTaskPriority);
+	}
+}
+
+void FRelevancePacket::Finalize()
+{
+	FViewInfo& WriteView = const_cast<FViewInfo&>(View);
+	FViewCommands& WriteViewCommands = const_cast<FViewCommands&>(ViewCommands);
+	const EShadingPath ShadingPath = GetFeatureLevelShadingPath(Scene.GetFeatureLevel());
+
+	for (int32 BitIndex : NotDrawRelevant.Prims)
+	{
+		WriteView.PrimitiveVisibilityMap[BitIndex] = false;
 	}
 
-	float CurrentRealTime = View.Family->CurrentRealTime;
-	if (ViewState)
-	{
-		if (ViewState->SceneSoftwareOcclusion)
-		{
-			SCOPE_CYCLE_COUNTER(STAT_SoftwareOcclusionCull)
-			NumOccludedPrimitives += ViewState->SceneSoftwareOcclusion->Process(RHICmdList, Scene, View);
-		}
-		else if (Scene->GetFeatureLevel() >= ERHIFeatureLevel::ES3_1)
-		{
-			bool bSubmitQueries = !View.bDisableQuerySubmissions;
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
-			bSubmitQueries = bSubmitQueries && !ViewState->HasViewParent() && !ViewState->bIsFrozen;
+	TaskConfig.Relevance.NumPrimitivesProcessed += Input.Prims.Num();
+
+#if WITH_EDITOR
+	WriteView.EditorVisualizeLevelInstancesNanite.Append(EditorVisualizeLevelInstancesNanite);
+	WriteView.EditorSelectedInstancesNanite.Append(EditorSelectedInstancesNanite);
+	WriteView.EditorSelectedNaniteHitProxyIds.Append(EditorSelectedNaniteHitProxyIds);
 #endif
 
-			if( bHZBOcclusion )
+	WriteView.ShadingModelMaskInView |= CombinedShadingModelMask;
+	WriteView.bUsesGlobalDistanceField |= bUsesGlobalDistanceField;
+	WriteView.bUsesLightingChannels |= bUsesLightingChannels;
+	WriteView.bTranslucentSurfaceLighting |= bTranslucentSurfaceLighting;
+	WriteView.bSceneHasSkyMaterial |= bSceneHasSkyMaterial;
+	WriteView.bHasSingleLayerWaterMaterial |= bHasSingleLayerWaterMaterial;
+	WriteView.bUsesSecondStageDepthPass |= bUsesSecondStageDepthPass && ShadingPath != EShadingPath::Mobile;
+	VisibleDynamicPrimitivesWithSimpleLights.AppendTo(WriteView.VisibleDynamicPrimitivesWithSimpleLights);
+	WriteView.NumVisibleDynamicPrimitives += NumVisibleDynamicPrimitives;
+	WriteView.NumVisibleDynamicEditorPrimitives += NumVisibleDynamicEditorPrimitives;
+	WriteView.TranslucentPrimCount.Append(TranslucentPrimCount);
+	WriteView.bHasDistortionPrimitives |= bHasDistortionPrimitives;
+	WriteView.bHasCustomDepthPrimitives |= bHasCustomDepthPrimitives;
+	WriteView.CustomDepthStencilValues.Append(CustomDepthStencilValues);
+	NaniteCustomDepthInstances.AppendTo(WriteView.NaniteCustomDepthInstances);
+	WriteView.bUsesCustomDepth |= bUsesCustomDepth;
+	WriteView.bUsesCustomStencil |= bUsesCustomStencil;
+	WriteView.SubstrateViewData.MaxClosurePerPixel = FMath::Max(WriteView.SubstrateViewData.MaxClosurePerPixel, 8u - FMath::CountLeadingZeros8(SubstrateClosureCountMask));
+	WriteView.SubstrateViewData.MaxBytesPerPixel = FMath::Max(WriteView.SubstrateViewData.MaxBytesPerPixel, SubstrateUintPerPixel * 4u);
+	WriteView.SubstrateViewData.bUsesComplexSpecialRenderPath |= bUsesComplexSpecialRenderPath;
+	DirtyIndirectLightingCacheBufferPrimitives.AppendTo(WriteView.DirtyIndirectLightingCacheBufferPrimitives);
+
+	WriteView.MeshDecalBatches.Append(MeshDecalBatches);
+	WriteView.VolumetricMeshBatches.Append(VolumetricMeshBatches);
+	WriteView.HeterogeneousVolumesMeshBatches.Append(HeterogeneousVolumesMeshBatches);
+	WriteView.SkyMeshBatches.Append(SkyMeshBatches);
+	WriteView.SortedTrianglesMeshBatches.Append(SortedTrianglesMeshBatches);
+
+	for (FPrimitiveLODMask PrimitiveLODMask : PrimitivesLODMask.Prims)
+	{
+		WriteView.PrimitivesLODMask[PrimitiveLODMask.PrimitiveIndex] = PrimitiveLODMask.LODMask;
+	}
+
+	for (int32 PassIndex = 0; PassIndex < EMeshPass::Num; PassIndex++)
+	{
+		if (PassIndex == EMeshPass::NaniteMeshPass && Scene.PrimitivesAlwaysVisibleOffset != ~0u)
+		{
+			continue;
+		}
+
+		FPassDrawCommandArray& SrcCommands = DrawCommandPacket.VisibleCachedDrawCommands[PassIndex];
+		FMeshCommandOneFrameArray& DstCommands = WriteViewCommands.MeshCommands[PassIndex];
+		if (SrcCommands.Num() > 0)
+		{
+			static_assert(sizeof(SrcCommands[0]) == sizeof(DstCommands[0]), "Memcpy sizes must match.");
+			const int32 PrevNum = DstCommands.AddUninitialized(SrcCommands.Num());
+			FMemory::Memcpy(&DstCommands[PrevNum], &SrcCommands[0], SrcCommands.Num() * sizeof(SrcCommands[0]));
+		}
+
+		FPassDrawCommandBuildRequestArray& SrcRequests = DrawCommandPacket.DynamicBuildRequests[PassIndex];
+		TArray<const FStaticMeshBatch*, SceneRenderingAllocator>& DstRequests = WriteViewCommands.DynamicMeshCommandBuildRequests[PassIndex];
+		if (SrcRequests.Num() > 0)
+		{
+			static_assert(sizeof(SrcRequests[0]) == sizeof(DstRequests[0]), "Memcpy sizes must match.");
+			const int32 PrevNum = DstRequests.AddUninitialized(SrcRequests.Num());
+			FMemory::Memcpy(&DstRequests[PrevNum], &SrcRequests[0], SrcRequests.Num() * sizeof(SrcRequests[0]));
+		}
+
+		FPassDrawCommandBuildFlagsArray& SrcFlags = DrawCommandPacket.DynamicBuildFlags[PassIndex];
+		TArray<EMeshDrawCommandCullingPayloadFlags, SceneRenderingAllocator>& DstFlags = WriteViewCommands.DynamicMeshCommandBuildFlags[PassIndex];
+		if (SrcFlags.Num() > 0)
+		{
+			static_assert(sizeof(SrcFlags[0]) == sizeof(DstFlags[0]), "Memcpy sizes must match.");
+			const int32 PrevNum = DstFlags.AddUninitialized(SrcFlags.Num());
+			FMemory::Memcpy(&DstFlags[PrevNum], &SrcFlags[0], SrcFlags.Num() * sizeof(SrcFlags[0]));
+		}
+
+		WriteViewCommands.NumDynamicMeshCommandBuildRequestElements[PassIndex] += DrawCommandPacket.NumDynamicBuildRequestElements[PassIndex];
+	}
+
+	// Prepare translucent self shadow uniform buffers.
+	for (int32 PrimitiveIndex : TranslucentSelfShadowPrimitives.Prims)
+	{
+		FUniformBufferRHIRef& UniformBuffer = WriteView.TranslucentSelfShadowUniformBufferMap.FindOrAdd(PrimitiveIndex);
+
+		if (!UniformBuffer)
+		{
+			FTranslucentSelfShadowUniformParameters Parameters;
+			SetupTranslucentSelfShadowUniformParameters(nullptr, Parameters);
+			UniformBuffer = FTranslucentSelfShadowUniformParameters::CreateUniformBuffer(Parameters, EUniformBufferUsage::UniformBuffer_SingleFrame);
+		}
+	}
+}
+
+void FRelevancePacket::ComputeRelevance(FDynamicPrimitiveIndexList& DynamicPrimitiveIndexList)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(ComputeViewRelevance);
+	SCOPE_CYCLE_COUNTER(STAT_ComputeViewRelevance);
+
+	CombinedShadingModelMask = 0;
+	SubstrateUintPerPixel = 0;
+	bUsesComplexSpecialRenderPath = false;
+	SubstrateClosureCountMask = 0;
+	bSceneHasSkyMaterial = 0;
+	bHasSingleLayerWaterMaterial = 0;
+	bUsesSecondStageDepthPass = 0;
+	bUsesGlobalDistanceField = false;
+	bUsesLightingChannels = false;
+	bTranslucentSurfaceLighting = false;
+	const EShadingPath ShadingPath = GetFeatureLevelShadingPath(Scene.GetFeatureLevel());
+	const bool bHairStrandsEnabled = IsHairStrandsEnabled(EHairStrandsShaderType::All, Scene.GetShaderPlatform());
+
+	int32 NumVisibleStaticMeshElements = 0;
+	FViewInfo& WriteView = const_cast<FViewInfo&>(View);
+	const FSceneViewState* ViewState = (FSceneViewState*)View.State;
+	const bool bMobileMaskedInEarlyPass = (ShadingPath == EShadingPath::Mobile) && Scene.EarlyZPassMode == DDM_MaskedOnly;
+	const bool bMobileBasePassAlwaysUsesCSM = (ShadingPath == EShadingPath::Mobile) && MobileBasePassAlwaysUsesCSM(Scene.GetShaderPlatform());
+	const bool bVelocityPassWritesDepth = Scene.EarlyZPassMode == DDM_AllOpaqueNoVelocity;
+	const bool bHLODActive = Scene.SceneLODHierarchy.IsActive();
+	const FHLODVisibilityState* const HLODState = bHLODActive && ViewState ? &ViewState->HLODVisibilityState : nullptr;
+	float MaxDrawDistanceScale = GetCachedScalabilityCVars().ViewDistanceScale;
+	MaxDrawDistanceScale *= GetCachedScalabilityCVars().CalculateFieldOfViewDistanceScale(View.DesiredFOV);
+
+	const auto AddEditorDynamicPrimitive = [this, &DynamicPrimitiveIndexList](int32 PrimitiveIndex)
+	{
+#if WITH_EDITOR
+		if (GIsEditor)
+		{
+			++NumVisibleDynamicEditorPrimitives;
+
+			if (DynamicPrimitiveViewMasks)
 			{
-				QUICK_SCOPE_CYCLE_COUNTER(STAT_MapHZBResults);
-				check(!ViewState->HZBOcclusionTests.IsValidFrame(ViewState->OcclusionFrameCounter));
-				ViewState->HZBOcclusionTests.MapResults(RHICmdList);
+				FPlatformAtomics::InterlockedOr((volatile int8*)&DynamicPrimitiveViewMasks->EditorPrimitives[PrimitiveIndex], ViewBit);
 			}
- 
-			// Perform round-robin occlusion queries
-			if (View.ViewState->IsRoundRobinEnabled() &&
-				!View.bIsSceneCapture && // We only round-robin on the main renderer (not scene captures)
-				!View.bIgnoreExistingQueries && // We do not alternate occlusion queries when we want to refresh the occlusion history
-				(IStereoRendering::IsStereoEyeView(View))) // Only relevant to stereo views
+			else
 			{
-				// For even frames, prevent left eye from occlusion querying
-				// For odd frames, prevent right eye from occlusion querying
-				const bool FrameParity = ((View.ViewState->PrevFrameNumber & 0x01) == 1);
-				bSubmitQueries &= (FrameParity  && IStereoRendering::IsAPrimaryView(View)) ||
-								  (!FrameParity && IStereoRendering::IsASecondaryView(View));
+				DynamicPrimitiveIndexList.EditorPrimitives.Emplace(PrimitiveIndex, ViewBit);
 			}
+		}
+#endif
+	};
 
-			View.ViewState->PrimitiveOcclusionQueryPool.AdvanceFrame(
-				ViewState->OcclusionFrameCounter,
-				FOcclusionQueryHelpers::GetNumBufferedFrames(Scene->GetFeatureLevel()),
-				View.ViewState->IsRoundRobinEnabled() && !View.bIsSceneCapture && IStereoRendering::IsStereoEyeView(View));
+	const auto AddDynamicPrimitive = [this, &DynamicPrimitiveIndexList](int32 PrimitiveIndex)
+	{
+		++NumVisibleDynamicPrimitives;
 
-			NumOccludedPrimitives += FetchVisibilityForPrimitives(Scene, View, bSubmitQueries, bHZBOcclusion, DynamicVertexBuffer);
-
-			if( bHZBOcclusion )
-			{
-				QUICK_SCOPE_CYCLE_COUNTER(STAT_HZBUnmapResults);
-
-				ViewState->HZBOcclusionTests.UnmapResults(RHICmdList);
-
-				if( bSubmitQueries )
-				{
-					ViewState->HZBOcclusionTests.SetValidFrameNumber(ViewState->OcclusionFrameCounter);
-				}
-			}
+		if (DynamicPrimitiveViewMasks)
+		{
+			FPlatformAtomics::InterlockedOr((volatile int8*)&DynamicPrimitiveViewMasks->Primitives[PrimitiveIndex], ViewBit);
 		}
 		else
 		{
-			// No occlusion queries, so mark primitives as not occluded
-			for (FSceneSetBitIterator BitIt(View.PrimitiveVisibilityMap); BitIt; ++BitIt)
-			{
-				View.PrimitiveDefinitelyUnoccludedMap.AccessCorrespondingBit(BitIt) = true;
-			}
+			DynamicPrimitiveIndexList.Primitives.Emplace(PrimitiveIndex, ViewBit);
 		}
-	}
-	RHICmdList.SetCurrentStat(GET_STATID(STAT_CLMM_AfterOcclusionReadback));
-	return NumOccludedPrimitives;
-}
-
-const int32 InputsPrimNumPerRelevancePacket = 128;
-const int32 AverageMeshBatchNumPerRelevancePacket = InputsPrimNumPerRelevancePacket * 2;
-
-template<class T, int TAmplifyFactor = 1>
-struct FRelevancePrimSet
-{
-	enum
-	{
-		MaxInputPrims = InputsPrimNumPerRelevancePacket - 1, // leave space for NumPrims.
-		MaxOutputPrims = MaxInputPrims * TAmplifyFactor
-	};
-	int32 NumPrims;
-
-	T Prims[MaxOutputPrims];
-
-	FORCEINLINE FRelevancePrimSet()
-		: NumPrims(0)
-	{
-		//FMemory::Memzero(Prims, sizeof(T) * GetMaxOutputPrim());
-	}
-	FORCEINLINE void AddPrim(T Prim)
-	{
-		checkSlow(NumPrims < MaxOutputPrims);
-		Prims[NumPrims++] = Prim;
-	}
-	FORCEINLINE bool IsFull() const
-	{
-		return NumPrims >= MaxOutputPrims;
-	}
-	template<class TARRAY>
-	FORCEINLINE void AppendTo(TARRAY& DestArray)
-	{
-		DestArray.Append(Prims, NumPrims);
-	}
-};
-
-struct FMarkRelevantStaticMeshesForViewData
-{
-	FVector ViewOrigin;
-	int32 ForcedLODLevel;
-	float LODScale;
-	float MinScreenRadiusForCSMDepthSquared;
-	float MinScreenRadiusForDepthPrepassSquared;
-	bool bFullEarlyZPass;
-
-	FMarkRelevantStaticMeshesForViewData(FViewInfo& View)
-	{
-		ViewOrigin = View.ViewMatrices.GetViewOrigin();
-
-		// outside of the loop to be more efficient
-		ForcedLODLevel = (View.Family->EngineShowFlags.LOD) ? GetCVarForceLOD() : 0;
-
-		LODScale = CVarStaticMeshLODDistanceScale.GetValueOnRenderThread() * View.LODDistanceFactor;
-
-		MinScreenRadiusForCSMDepthSquared = GMinScreenRadiusForCSMDepth * GMinScreenRadiusForCSMDepth;
-		MinScreenRadiusForDepthPrepassSquared = GMinScreenRadiusForDepthPrepass * GMinScreenRadiusForDepthPrepass;
-
-		extern bool ShouldForceFullDepthPass(EShaderPlatform ShaderPlatform);
-		bFullEarlyZPass = ShouldForceFullDepthPass(View.GetShaderPlatform());
-	}
-};
-
-namespace EMarkMaskBits
-{
-	enum Type
-	{
-		StaticMeshVisibilityMapMask = 0x2,
-		StaticMeshFadeOutDitheredLODMapMask = 0x10,
-		StaticMeshFadeInDitheredLODMapMask = 0x20,
-	};
-}
-
-typedef TArray<FVisibleMeshDrawCommand, TInlineAllocator<AverageMeshBatchNumPerRelevancePacket>> FPassDrawCommandArray;
-typedef TArray<const FStaticMeshBatch*, TInlineAllocator<AverageMeshBatchNumPerRelevancePacket>> FPassDrawCommandBuildRequestArray;
-
-struct FDrawCommandRelevancePacket
-{
-	FDrawCommandRelevancePacket()
-	{
-		bUseCachedMeshDrawCommands = UseCachedMeshDrawCommands();
-
-		for (int32 PassIndex = 0; PassIndex < EMeshPass::Num; ++PassIndex)
-		{
-			NumDynamicBuildRequestElements[PassIndex] = 0;
-		}
-	}
-
-	FPassDrawCommandArray VisibleCachedDrawCommands[EMeshPass::Num];
-	FPassDrawCommandBuildRequestArray DynamicBuildRequests[EMeshPass::Num];
-	int32 NumDynamicBuildRequestElements[EMeshPass::Num];
-	bool bUseCachedMeshDrawCommands;
-
-	void AddCommandsForMesh(
-		int32 PrimitiveIndex, 
-		const FPrimitiveSceneInfo* InPrimitiveSceneInfo,
-		const FStaticMeshBatchRelevance& RESTRICT StaticMeshRelevance, 
-		const FStaticMeshBatch& RESTRICT StaticMesh, 
-		const FScene* RESTRICT Scene, 
-		bool bCanCache, 
-		EMeshPass::Type PassType)
-	{
-		const EShadingPath ShadingPath = Scene->GetShadingPath();
-		const bool bUseCachedMeshCommand = bUseCachedMeshDrawCommands
-			&& !!(FPassProcessorManager::GetPassFlags(ShadingPath, PassType) & EMeshPassFlags::CachedMeshCommands)
-			&& StaticMeshRelevance.bSupportsCachingMeshDrawCommands
-			&& bCanCache;
-
-		if (bUseCachedMeshCommand)
-		{
-			const int32 StaticMeshCommandInfoIndex = StaticMeshRelevance.GetStaticMeshCommandInfoIndex(PassType);
-			if (StaticMeshCommandInfoIndex >= 0)
-			{
-				const FCachedMeshDrawCommandInfo& CachedMeshDrawCommand = InPrimitiveSceneInfo->StaticMeshCommandInfos[StaticMeshCommandInfoIndex];
-				const FCachedPassMeshDrawList& SceneDrawList = Scene->CachedDrawLists[PassType];
-
-				// AddUninitialized_GetRef()
-				VisibleCachedDrawCommands[(uint32)PassType].AddUninitialized();
-				FVisibleMeshDrawCommand& NewVisibleMeshDrawCommand = VisibleCachedDrawCommands[(uint32)PassType].Last();
-
-				const FMeshDrawCommand* MeshDrawCommand = CachedMeshDrawCommand.StateBucketId >= 0
-					? &Scene->CachedMeshDrawCommandStateBuckets[PassType].GetByElementId(CachedMeshDrawCommand.StateBucketId).Key
-					: &SceneDrawList.MeshDrawCommands[CachedMeshDrawCommand.CommandIndex];
-
-				NewVisibleMeshDrawCommand.Setup(
-					MeshDrawCommand,
-					PrimitiveIndex,
-					PrimitiveIndex,
-					CachedMeshDrawCommand.StateBucketId,
-					CachedMeshDrawCommand.MeshFillMode,
-					CachedMeshDrawCommand.MeshCullMode,
-					CachedMeshDrawCommand.SortKey);
-			}
-		}
-		else
-		{
-			NumDynamicBuildRequestElements[PassType] += StaticMeshRelevance.NumElements;
-			DynamicBuildRequests[PassType].Add(&StaticMesh);
-		}
-	}
-};
-
-struct FRelevancePacket
-{
-	const float CurrentWorldTime;
-	const float DeltaWorldTime;
-
-	FRHICommandListImmediate& RHICmdList;
-	const FScene* Scene;
-	const FViewInfo& View;
-	const FViewCommands& ViewCommands;
-	const uint8 ViewBit;
-	const FMarkRelevantStaticMeshesForViewData& ViewData;
-	FPrimitiveViewMasks& OutHasDynamicMeshElementsMasks;
-	FPrimitiveViewMasks& OutHasDynamicEditorMeshElementsMasks;
-	uint8* RESTRICT MarkMasks;
-
-	FRelevancePrimSet<int32> Input;
-	FRelevancePrimSet<int32> RelevantStaticPrimitives;
-	FRelevancePrimSet<int32> NotDrawRelevant;
-	FRelevancePrimSet<int32> TranslucentSelfShadowPrimitives;
-	FRelevancePrimSet<FPrimitiveSceneInfo*> VisibleDynamicPrimitivesWithSimpleLights;
-	int32 NumVisibleDynamicPrimitives;
-	int32 NumVisibleDynamicEditorPrimitives;
-	FMeshPassMask VisibleDynamicMeshesPassMask;
-	FTranslucenyPrimCount TranslucentPrimCount;
-	bool bHasDistortionPrimitives;
-	bool bHasCustomDepthPrimitives;
-	FRelevancePrimSet<FPrimitiveSceneInfo*> LazyUpdatePrimitives;
-	FRelevancePrimSet<FPrimitiveSceneInfo*> DirtyIndirectLightingCacheBufferPrimitives;
-	FRelevancePrimSet<FPrimitiveSceneInfo*> RecachedReflectionCapturePrimitives;
-
-	TArray<FMeshDecalBatch> MeshDecalBatches;
-	TArray<FVolumetricMeshBatch> VolumetricMeshBatches;
-	TArray<FSkyMeshBatch> SkyMeshBatches;
-	FDrawCommandRelevancePacket DrawCommandPacket;
-
-	struct FPrimitiveLODMask
-	{
-		FPrimitiveLODMask()
-			: PrimitiveIndex(INDEX_NONE)
-		{}
-
-		FPrimitiveLODMask(const int32 InPrimitiveIndex, const FLODMask& InLODMask)
-			: PrimitiveIndex(InPrimitiveIndex)
-			, LODMask(InLODMask)
-		{}
-
-		int32 PrimitiveIndex;
-		FLODMask LODMask;
 	};
 
-	FRelevancePrimSet<FPrimitiveLODMask> PrimitivesLODMask; // group both lod mask with primitive index to be able to properly merge them in the view
-
-	uint16 CombinedShadingModelMask;
-	bool bUsesGlobalDistanceField;
-	bool bUsesLightingChannels;
-	bool bTranslucentSurfaceLighting;
-	bool bUsesSceneDepth;
-	bool bUsesCustomDepthStencil;
-	bool bShouldRenderDepthToTranslucency;
-	bool bSceneHasSkyMaterial;
-	bool bHasSingleLayerWaterMaterial;
-	bool bHasTranslucencySeparateModulation;
-
-	FRelevancePacket(
-		FRHICommandListImmediate& InRHICmdList,
-		const FScene* InScene, 
-		const FViewInfo& InView, 
-		const FViewCommands& InViewCommands,
-		uint8 InViewBit,
-		const FMarkRelevantStaticMeshesForViewData& InViewData,
-		FPrimitiveViewMasks& InOutHasDynamicMeshElementsMasks,
-		FPrimitiveViewMasks& InOutHasDynamicEditorMeshElementsMasks,
-		uint8* InMarkMasks)
-
-		: CurrentWorldTime(InView.Family->CurrentWorldTime)
-		, DeltaWorldTime(InView.Family->DeltaWorldTime)
-		, RHICmdList(InRHICmdList)
-		, Scene(InScene)
-		, View(InView)
-		, ViewCommands(InViewCommands)
-		, ViewBit(InViewBit)
-		, ViewData(InViewData)
-		, OutHasDynamicMeshElementsMasks(InOutHasDynamicMeshElementsMasks)
-		, OutHasDynamicEditorMeshElementsMasks(InOutHasDynamicEditorMeshElementsMasks)
-		, MarkMasks(InMarkMasks)
-		, NumVisibleDynamicPrimitives(0)
-		, NumVisibleDynamicEditorPrimitives(0)
-		, bHasDistortionPrimitives(false)
-		, bHasCustomDepthPrimitives(false)
-		, CombinedShadingModelMask(0)
-		, bUsesGlobalDistanceField(false)
-		, bUsesLightingChannels(false)
-		, bTranslucentSurfaceLighting(false)
-		, bUsesSceneDepth(false)
-		, bUsesCustomDepthStencil(false)
-		, bShouldRenderDepthToTranslucency(false)
-		, bSceneHasSkyMaterial(false)
-		, bHasSingleLayerWaterMaterial(false)
-		, bHasTranslucencySeparateModulation(false)
+	for (int32 InputPrimsIndex = 0; InputPrimsIndex < Input.Prims.Num(); ++InputPrimsIndex)
 	{
-	}
+		int32 BitIndex = Input.Prims[InputPrimsIndex];
 
-	void AnyThreadTask()
-	{
-		ComputeRelevance();
-		MarkRelevant();
-	}
-
-	void ComputeRelevance()
-	{
-		CombinedShadingModelMask = 0;
-		bSceneHasSkyMaterial = 0;
-		bHasSingleLayerWaterMaterial = 0;
-		bHasTranslucencySeparateModulation = 0;
-		bUsesGlobalDistanceField = false;
-		bUsesLightingChannels = false;
-		bTranslucentSurfaceLighting = false;
-		const EShadingPath ShadingPath = Scene->GetShadingPath();
-		const bool bAddLightmapDensityCommands = View.Family->EngineShowFlags.LightMapDensity && AllowDebugViewmodes();
-
-		SCOPE_CYCLE_COUNTER(STAT_ComputeViewRelevance);
-		for (int32 Index = 0; Index < Input.NumPrims; Index++)
+		if (InputPrimsIndex + 1 < Input.Prims.Num())
 		{
-			int32 BitIndex = Input.Prims[Index];
-			FPrimitiveSceneInfo* PrimitiveSceneInfo = Scene->Primitives[BitIndex];
-			FPrimitiveViewRelevance& ViewRelevance = const_cast<FPrimitiveViewRelevance&>(View.PrimitiveViewRelevanceMap[BitIndex]);
-			ViewRelevance = PrimitiveSceneInfo->Proxy->GetViewRelevance(&View);
-			ViewRelevance.bInitializedThisFrame = true;
+			int32 NextBitIndex = Input.Prims[InputPrimsIndex + 1];
 
-			const bool bStaticRelevance = ViewRelevance.bStaticRelevance;
-			const bool bDrawRelevance = ViewRelevance.bDrawRelevance;
-			const bool bDynamicRelevance = ViewRelevance.bDynamicRelevance;
-			const bool bShadowRelevance = ViewRelevance.bShadowRelevance;
-			const bool bEditorRelevance = ViewRelevance.bEditorPrimitiveRelevance;
-			const bool bEditorSelectionRelevance = ViewRelevance.bEditorStaticSelectionRelevance;
-			const bool bTranslucentRelevance = ViewRelevance.HasTranslucency();
-
-			const bool bHairStrandsEnabled = ViewRelevance.bHairStrands && IsHairStrandsEnabled(EHairStrandsShaderType::All, Scene->GetShaderPlatform());
-			if (!bEditorRelevance && bHairStrandsEnabled)
-			{
-				++NumVisibleDynamicPrimitives;
-				OutHasDynamicMeshElementsMasks[BitIndex] |= ViewBit;
-			}
-
-			if (View.bIsReflectionCapture && !PrimitiveSceneInfo->Proxy->IsVisibleInReflectionCaptures())
-			{
-				NotDrawRelevant.AddPrim(BitIndex);
-				continue;
-			}
-
-			if (bStaticRelevance && (bDrawRelevance || bShadowRelevance))
-			{
-				RelevantStaticPrimitives.AddPrim(BitIndex);
-			}
-
-			if (!bDrawRelevance)
-			{
-				NotDrawRelevant.AddPrim(BitIndex);
-				continue;
-			}
-
-			if (bEditorRelevance)
-			{
-				++NumVisibleDynamicEditorPrimitives;
-
-				if (GIsEditor)
-				{
-					OutHasDynamicEditorMeshElementsMasks[BitIndex] |= ViewBit;
-				}
-			}
-			else if(bDynamicRelevance)
-			{
-				// Keep track of visible dynamic primitives.
-				++NumVisibleDynamicPrimitives;
-				OutHasDynamicMeshElementsMasks[BitIndex] |= ViewBit;
-
-				if (ViewRelevance.bHasSimpleLights)
-				{
-					VisibleDynamicPrimitivesWithSimpleLights.AddPrim(PrimitiveSceneInfo);
-				}
-			}
-
-			if (bTranslucentRelevance && !bEditorRelevance && ViewRelevance.bRenderInMainPass)
-			{
-				if (View.Family->AllowTranslucencyAfterDOF())
-				{
-					if (ViewRelevance.bNormalTranslucency)
-					{
-						TranslucentPrimCount.Add(ETranslucencyPass::TPT_StandardTranslucency, ViewRelevance.bUsesSceneColorCopy);
-					}
-
-					if (ViewRelevance.bSeparateTranslucency)
-					{
-						TranslucentPrimCount.Add(ETranslucencyPass::TPT_TranslucencyAfterDOF, ViewRelevance.bUsesSceneColorCopy);
-					}
-
-					if (ViewRelevance.bSeparateTranslucencyModulate)
-					{
-						TranslucentPrimCount.Add(ETranslucencyPass::TPT_TranslucencyAfterDOFModulate, ViewRelevance.bUsesSceneColorCopy);
-					}
-				}
-				else // Otherwise, everything is rendered in a single bucket. This is not related to whether DOF is currently enabled or not.
-				{
-					// When using all translucency, Standard and AfterDOF are sorted together instead of being rendered like 2 buckets.
-					TranslucentPrimCount.Add(ETranslucencyPass::TPT_AllTranslucency, ViewRelevance.bUsesSceneColorCopy);
-				}
-
-				if (ViewRelevance.bDistortion)
-				{
-					bHasDistortionPrimitives = true;
-				}
-			}
-			
-			CombinedShadingModelMask |= ViewRelevance.ShadingModelMask;
-			bUsesGlobalDistanceField |= ViewRelevance.bUsesGlobalDistanceField;
-			bUsesLightingChannels |= ViewRelevance.bUsesLightingChannels;
-			bTranslucentSurfaceLighting |= ViewRelevance.bTranslucentSurfaceLighting;
-			bUsesSceneDepth |= ViewRelevance.bUsesSceneDepth;
-			bUsesCustomDepthStencil |= ViewRelevance.bUsesCustomDepthStencil;
-			bSceneHasSkyMaterial |= ViewRelevance.bUsesSkyMaterial;
-			bHasSingleLayerWaterMaterial |= ViewRelevance.bUsesSingleLayerWaterMaterial;
-			bHasTranslucencySeparateModulation |= ViewRelevance.bSeparateTranslucencyModulate;
-			bShouldRenderDepthToTranslucency |= ViewRelevance.bShouldRenderDepthToTranslucency;
-
-			if (ViewRelevance.bRenderCustomDepth)
-			{
-				bHasCustomDepthPrimitives = true;
-			}
-
-			extern bool GUseTranslucencyShadowDepths;
-			if (GUseTranslucencyShadowDepths && ViewRelevance.bTranslucentSelfShadow)
-			{
-				TranslucentSelfShadowPrimitives.AddPrim(BitIndex);
-			}
-
-			// INITVIEWS_TODO: Do this in a separate pass? There are no dependencies
-			// here except maybe ParentPrimitives. This could be done in a 
-			// low-priority background task and forgotten about.
-
-			PrimitiveSceneInfo->LastRenderTime = CurrentWorldTime;
-
-			// If the primitive is definitely unoccluded or if in Wireframe mode and the primitive is estimated
-			// to be unoccluded, then update the primitive components's LastRenderTime 
-			// on the game thread. This signals that the primitive is visible.
-			if (View.PrimitiveDefinitelyUnoccludedMap[BitIndex] || (View.Family->EngineShowFlags.Wireframe && View.PrimitiveVisibilityMap[BitIndex]))
-			{
-				PrimitiveSceneInfo->UpdateComponentLastRenderTime(CurrentWorldTime, /*bUpdateLastRenderTimeOnScreen=*/true);
-			}
-
-			// Cache the nearest reflection proxy if needed
-			if (PrimitiveSceneInfo->NeedsReflectionCaptureUpdate())
-			{
-				// mobile should not have any outstanding reflection capture update requests at this point, except for when lighting isn't rebuilt		
-				PrimitiveSceneInfo->CacheReflectionCaptures();
-
-				// With forward shading we need to track reflection capture cache updates
-				// in order to update primitive's uniform buffer's closest reflection capture id.
-				if (IsForwardShadingEnabled(Scene->GetShaderPlatform()))
-				{
-					RecachedReflectionCapturePrimitives.AddPrim(PrimitiveSceneInfo);
-				}
-			}
-
-			if (PrimitiveSceneInfo->NeedsUniformBufferUpdate())
-			{
-				LazyUpdatePrimitives.AddPrim(PrimitiveSceneInfo);
-			}
-			if (PrimitiveSceneInfo->NeedsIndirectLightingCacheBufferUpdate())
-			{
-				DirtyIndirectLightingCacheBufferPrimitives.AddPrim(PrimitiveSceneInfo);
-			}
+			// Prefetch the next primitive / proxy pair for the next loop.
+			FPlatformMisc::Prefetch(Scene.Primitives[NextBitIndex]);
+			FPlatformMisc::Prefetch(Scene.PrimitiveSceneProxies[NextBitIndex]);
 		}
-	}
 
-	void MarkRelevant()
-	{
-		SCOPE_CYCLE_COUNTER(STAT_StaticRelevance);
+		FPrimitiveSceneInfo* PrimitiveSceneInfo = Scene.Primitives[BitIndex];
+		FPrimitiveViewRelevance& ViewRelevance = const_cast<FPrimitiveViewRelevance&>(View.PrimitiveViewRelevanceMap[BitIndex]);
 
-		// using a local counter to reduce memory traffic
-		int32 NumVisibleStaticMeshElements = 0;
-		FViewInfo& WriteView = const_cast<FViewInfo&>(View);
-		const FSceneViewState* ViewState = (FSceneViewState*)View.State;
-		const EShadingPath ShadingPath = Scene->GetShadingPath();
+		const FPrimitiveSceneProxy* PrimitiveSceneProxy = PrimitiveSceneInfo->Proxy;
 
-		const bool bHLODActive = Scene->SceneLODHierarchy.IsActive();
-		const FHLODVisibilityState* const HLODState = bHLODActive && ViewState ? &ViewState->HLODVisibilityState : nullptr;
+		// Prefetch the scene data and static mesh relevance array now while we call GetViewRelevance to reduce memory waits.
+		FPlatformMisc::Prefetch(PrimitiveSceneInfo->StaticMeshRelevances.GetData());
+		FPlatformMisc::Prefetch(PrimitiveSceneInfo->GetSceneData());
 
-		for (int32 StaticPrimIndex = 0, Num = RelevantStaticPrimitives.NumPrims; StaticPrimIndex < Num; ++StaticPrimIndex)
+		ViewRelevance = PrimitiveSceneProxy->GetViewRelevance(&View);
+		ViewRelevance.bInitializedThisFrame = true;
+
+		const bool bStaticRelevance = ViewRelevance.bStaticRelevance;
+		const bool bDrawRelevance = ViewRelevance.bDrawRelevance;
+		const bool bDynamicRelevance = ViewRelevance.bDynamicRelevance;
+		const bool bShadowRelevance = ViewRelevance.bShadowRelevance;
+		const bool bEditorRelevance = ViewRelevance.bEditorPrimitiveRelevance;
+		const bool bEditorVisualizeLevelInstanceRelevance = ViewRelevance.bEditorVisualizeLevelInstanceRelevance;
+		const bool bEditorSelectionRelevance = ViewRelevance.bEditorStaticSelectionRelevance;
+		const bool bTranslucentRelevance = ViewRelevance.HasTranslucency();
+		const bool bHairStrandsRelevance = bHairStrandsEnabled && ViewRelevance.bHairStrands;
+
+		if (View.bIsReflectionCapture && !PrimitiveSceneProxy->IsVisibleInReflectionCaptures())
 		{
-			int32 PrimitiveIndex = RelevantStaticPrimitives.Prims[StaticPrimIndex];
-			const FPrimitiveSceneInfo* RESTRICT PrimitiveSceneInfo = Scene->Primitives[PrimitiveIndex];
-			const FPrimitiveBounds& Bounds = Scene->PrimitiveBounds[PrimitiveIndex];
-			const FPrimitiveViewRelevance& ViewRelevance = View.PrimitiveViewRelevanceMap[PrimitiveIndex];
+			NotDrawRelevant.AddPrim(BitIndex);
+			continue;
+		}
+
+		if (bStaticRelevance && (bDrawRelevance || bShadowRelevance))
+		{
+			int32 PrimitiveIndex = BitIndex;
+			const FPrimitiveBounds& Bounds = Scene.PrimitiveBounds[PrimitiveIndex];
 			const bool bIsPrimitiveDistanceCullFading = View.PrimitiveFadeUniformBufferMap[PrimitiveIndex];
 
-			const int8 CurFirstLODIdx = PrimitiveSceneInfo->Proxy->GetCurrentFirstLODIdx_RenderThread();
+			const int8 CurFirstLODIdx = PrimitiveSceneProxy->GetCurrentFirstLODIdx_RenderThread();
 			check(CurFirstLODIdx >= 0);
 			float MeshScreenSizeSquared = 0;
-			FLODMask LODToRender = ComputeLODForMeshes(PrimitiveSceneInfo->StaticMeshRelevances, View, Bounds.BoxSphereBounds.Origin, Bounds.BoxSphereBounds.SphereRadius, ViewData.ForcedLODLevel, MeshScreenSizeSquared, CurFirstLODIdx, ViewData.LODScale);
+			FLODMask LODToRender = ComputeLODForMeshes(PrimitiveSceneInfo->StaticMeshRelevances, View, Bounds.BoxSphereBounds.Origin, Bounds.BoxSphereBounds.SphereRadius, PrimitiveSceneInfo->GpuLodInstanceRadius, ViewData.ForcedLODLevel, MeshScreenSizeSquared, CurFirstLODIdx, ViewData.LODScale);
 
 			PrimitivesLODMask.AddPrim(FRelevancePacket::FPrimitiveLODMask(PrimitiveIndex, LODToRender));
 
 			const bool bIsHLODFading = HLODState ? HLODState->IsNodeFading(PrimitiveIndex) : false;
 			const bool bIsHLODFadingOut = HLODState ? HLODState->IsNodeFadingOut(PrimitiveIndex) : false;
 			const bool bIsLODDithered = LODToRender.IsDithered();
+			const bool bIsLODRange = LODToRender.IsLODRange();
 
 			float DistanceSquared = (Bounds.BoxSphereBounds.Origin - ViewData.ViewOrigin).SizeSquared();
 			const float LODFactorDistanceSquared = DistanceSquared * FMath::Square(ViewData.LODScale);
 			const bool bDrawShadowDepth = FMath::Square(Bounds.BoxSphereBounds.SphereRadius) > ViewData.MinScreenRadiusForCSMDepthSquared * LODFactorDistanceSquared;
-			const bool bDrawDepthOnly = ViewData.bFullEarlyZPass || FMath::Square(Bounds.BoxSphereBounds.SphereRadius) > GMinScreenRadiusForDepthPrepass * GMinScreenRadiusForDepthPrepass * LODFactorDistanceSquared;
-
-			const bool bAddLightmapDensityCommands = View.Family->EngineShowFlags.LightMapDensity && AllowDebugViewmodes();
-			const bool bMobileMaskedInEarlyPass = MaskedInEarlyPass(Scene->GetShaderPlatform()) && Scene->EarlyZPassMode == DDM_MaskedOnly;
+			const bool bDrawDepthOnly = ViewData.bFullEarlyZPass || ((ShadingPath != EShadingPath::Mobile) && (FMath::Square(Bounds.BoxSphereBounds.SphereRadius) > GMinScreenRadiusForDepthPrepass * GMinScreenRadiusForDepthPrepass * LODFactorDistanceSquared));
 
 			const int32 NumStaticMeshes = PrimitiveSceneInfo->StaticMeshRelevances.Num();
-			for(int32 MeshIndex = 0;MeshIndex < NumStaticMeshes;MeshIndex++)
+			for (int32 MeshIndex = 0; MeshIndex < NumStaticMeshes; MeshIndex++)
 			{
 				const FStaticMeshBatchRelevance& StaticMeshRelevance = PrimitiveSceneInfo->StaticMeshRelevances[MeshIndex];
 				const FStaticMeshBatch& StaticMesh = PrimitiveSceneInfo->StaticMeshes[MeshIndex];
 
-				if (LODToRender.ContainsLOD(StaticMeshRelevance.LODIndex))
+				if (StaticMeshRelevance.bOverlayMaterial && !View.Family->EngineShowFlags.DistanceCulledPrimitives)
+				{
+					// Overlay mesh can have its own cull distance that is shorter than primitive cull distance
+					float OverlayMaterialMaxDrawDistance = StaticMeshRelevance.ScreenSize;
+					if (OverlayMaterialMaxDrawDistance > 0.f && OverlayMaterialMaxDrawDistance != FLT_MAX)
+					{
+						if (DistanceSquared > FMath::Square(OverlayMaterialMaxDrawDistance * MaxDrawDistanceScale))
+						{
+							// distance culled
+							continue;
+						}
+					}
+				}
+
+				int8 StaticMeshLODIndex = StaticMeshRelevance.GetLODIndex();
+				if (LODToRender.ContainsLOD(StaticMeshLODIndex))
 				{
 					uint8 MarkMask = 0;
 					bool bHiddenByHLODFade = false; // Hide mesh LOD levels that HLOD is substituting
@@ -2204,18 +1452,18 @@ struct FRelevancePacket
 					{
 						if (bIsHLODFadingOut)
 						{
-							if (bIsLODDithered && LODToRender.DitheredLODIndices[1] == StaticMeshRelevance.LODIndex)
+							if (bIsLODDithered && LODToRender.LODIndex1 == StaticMeshLODIndex)
 							{
 								bHiddenByHLODFade = true;
 							}
 							else
 							{
-								MarkMask |= EMarkMaskBits::StaticMeshFadeOutDitheredLODMapMask;	
+								MarkMask |= EMarkMaskBits::StaticMeshFadeOutDitheredLODMapMask;
 							}
 						}
 						else
 						{
-							if (bIsLODDithered && LODToRender.DitheredLODIndices[0] == StaticMeshRelevance.LODIndex)
+							if (bIsLODDithered && LODToRender.LODIndex0 == StaticMeshLODIndex)
 							{
 								bHiddenByHLODFade = true;
 							}
@@ -2227,7 +1475,7 @@ struct FRelevancePacket
 					}
 					else if (bIsLODDithered)
 					{
-						if (LODToRender.DitheredLODIndices[0] == StaticMeshRelevance.LODIndex)
+						if (LODToRender.LODIndex0 == StaticMeshLODIndex)
 						{
 							MarkMask |= EMarkMaskBits::StaticMeshFadeOutDitheredLODMapMask;
 						}
@@ -2240,25 +1488,65 @@ struct FRelevancePacket
 					// Don't cache if it requires per view per mesh state for LOD dithering or distance cull fade.
 					const bool bIsMeshDitheringLOD = StaticMeshRelevance.bDitheredLODTransition && (MarkMask & (EMarkMaskBits::StaticMeshFadeOutDitheredLODMapMask | EMarkMaskBits::StaticMeshFadeInDitheredLODMapMask));
 					const bool bCanCache = !bIsPrimitiveDistanceCullFading && !bIsMeshDitheringLOD;
-					
+
+					// When we apply LOD selection on GPU we submit a range of LODs and then cull each one according to screen size.
+					// At both ends of a LOD range we only want to cull by screen size in one direction. This ensures that all possible screen sizes map to one LOD in the range.
+					EMeshDrawCommandCullingPayloadFlags CullingPayloadFlags = EMeshDrawCommandCullingPayloadFlags::Default;
+					CullingPayloadFlags |= bIsLODRange && !LODToRender.IsMaxLODInRange(StaticMeshRelevance.GetLODIndex()) ? EMeshDrawCommandCullingPayloadFlags::MinScreenSizeCull : (EMeshDrawCommandCullingPayloadFlags)0;
+					CullingPayloadFlags |= bIsLODRange && !LODToRender.IsMinLODInRange(StaticMeshRelevance.GetLODIndex()) ? EMeshDrawCommandCullingPayloadFlags::MaxScreenSizeCull : (EMeshDrawCommandCullingPayloadFlags)0;
+
 					if (ViewRelevance.bDrawRelevance)
 					{
 						if ((StaticMeshRelevance.bUseForMaterial || StaticMeshRelevance.bUseAsOccluder)
 							&& (ViewRelevance.bRenderInMainPass || ViewRelevance.bRenderCustomDepth || ViewRelevance.bRenderInDepthPass)
 							&& !bHiddenByHLODFade)
 						{
-							bool bMobileIsInDepthPassMaskedMesh = (bMobileMaskedInEarlyPass && ViewRelevance.bMasked) && ShadingPath == EShadingPath::Mobile;
-							bool bMobileIsInFullDepthPass = (StaticMeshRelevance.bUseForDepthPass && Scene->EarlyZPassMode == DDM_AllOpaque) && ShadingPath == EShadingPath::Mobile;
-							if ((StaticMeshRelevance.bUseForDepthPass && bDrawDepthOnly && ShadingPath != EShadingPath::Mobile) || bMobileIsInDepthPassMaskedMesh || bMobileIsInFullDepthPass)
+							// Add velocity commands first to track for case where velocity pass writes depth.
+							bool bIsMeshInVelocityPass = false;
+							if (StaticMeshRelevance.bUseForMaterial && ViewRelevance.bRenderInMainPass)
 							{
-								DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::DepthPass);
+								if (ViewRelevance.HasVelocity())
+								{
+									if (FVelocityMeshProcessor::PrimitiveHasVelocityForView(View, PrimitiveSceneProxy))
+									{
+										if (ViewRelevance.bVelocityRelevance &&
+											FOpaqueVelocityMeshProcessor::PrimitiveCanHaveVelocity(View.GetShaderPlatform(), PrimitiveSceneProxy) &&
+											FOpaqueVelocityMeshProcessor::PrimitiveHasVelocityForFrame(PrimitiveSceneProxy))
+										{
+											DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::Velocity);
+											bIsMeshInVelocityPass = true;
+										}
 
+										if (ViewRelevance.bOutputsTranslucentVelocity &&
+											FTranslucentVelocityMeshProcessor::PrimitiveCanHaveVelocity(View.GetShaderPlatform(), PrimitiveSceneProxy) &&
+											FTranslucentVelocityMeshProcessor::PrimitiveHasVelocityForFrame(PrimitiveSceneProxy))
+										{
+											DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::TranslucentVelocity);
+										}
+									}
+								}
+							}
+
+							// Add depth commands.
+							if (StaticMeshRelevance.bUseForDepthPass && (bDrawDepthOnly || (bMobileMaskedInEarlyPass && ViewRelevance.bMasked)))
+							{
+								if (!(bIsMeshInVelocityPass && bVelocityPassWritesDepth))
+								{
+									if (ViewRelevance.bRenderInSecondStageDepthPass && ShadingPath != EShadingPath::Mobile)
+									{
+										DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::SecondStageDepthPass);
+									}
+									else
+									{
+										DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::DepthPass);
+									}
+								}
 #if RHI_RAYTRACING
 								if (IsRayTracingEnabled())
 								{
 									if (MarkMask & EMarkMaskBits::StaticMeshFadeOutDitheredLODMapMask)
 									{
-										DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::DitheredLODFadingOutMaskPass);
+										DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::DitheredLODFadingOutMaskPass);
 									}
 								}
 #endif
@@ -2273,12 +1561,15 @@ struct FRelevancePacket
 									// Skydome must not be added to base pass bucket
 									if (!StaticMeshRelevance.bUseSkyMaterial)
 									{
-										DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::BasePass);
-										DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::MobileBasePassCSM);
+										DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::BasePass);
+										if (!bMobileBasePassAlwaysUsesCSM)
+										{
+											DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::MobileBasePassCSM);
+										}
 									}
 									else
 									{
-										DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::SkyPass);
+										DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::SkyPass);
 									}
 									// bUseSingleLayerWaterMaterial is added to BasePass on Mobile. No need to add it to SingleLayerWaterPass
 
@@ -2286,37 +1577,38 @@ struct FRelevancePacket
 								}
 								else // Regular shading path
 								{
-									DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::BasePass);
+									DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::BasePass);
 									MarkMask |= EMarkMaskBits::StaticMeshVisibilityMapMask;
 
 									if (StaticMeshRelevance.bUseSkyMaterial)
 									{
-										DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::SkyPass);
+										DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::SkyPass);
 									}
 									if (StaticMeshRelevance.bUseSingleLayerWaterMaterial)
 									{
-										DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::SingleLayerWaterPass);
+										DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::SingleLayerWaterPass);
+										DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::SingleLayerWaterDepthPrepass);
 									}
 								}
 
 								if (StaticMeshRelevance.bUseAnisotropy)
 								{
-									DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::AnisotropyPass);
+									DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::AnisotropyPass);
 								}
 
 								if (ViewRelevance.bRenderCustomDepth)
 								{
-									DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::CustomDepth);
+									DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::CustomDepth);
 								}
 
 								if (bAddLightmapDensityCommands)
 								{
-									DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::LightmapDensity);
+									DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::LightmapDensity);
 								}
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 								else if (View.Family->UseDebugViewPS())
 								{
-									DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::DebugViewMode);
+									DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::DebugViewMode);
 								}
 #endif
 
@@ -2325,37 +1617,14 @@ struct FRelevancePacket
 								{
 									if (View.bAllowTranslucentPrimitivesInHitProxy)
 									{
-										DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::HitProxy);
+										DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::HitProxy);
 									}
 									else
 									{
-										DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::HitProxyOpaqueOnly);
+										DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::HitProxyOpaqueOnly);
 									}
 								}
 #endif
-
-								if (ViewRelevance.HasVelocity())
-								{
-									const FPrimitiveSceneProxy* PrimitiveSceneProxy = PrimitiveSceneInfo->Proxy;
-
-									if (FVelocityMeshProcessor::PrimitiveHasVelocityForView(View, PrimitiveSceneProxy))
-									{
-										if (ViewRelevance.bVelocityRelevance &&
-											FOpaqueVelocityMeshProcessor::PrimitiveCanHaveVelocity(View.GetShaderPlatform(), PrimitiveSceneProxy) &&
-											FOpaqueVelocityMeshProcessor::PrimitiveHasVelocityForFrame(PrimitiveSceneProxy))
-										{
-											DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::Velocity);
-										}
-
-										if (ViewRelevance.bOutputsTranslucentVelocity &&
-											FTranslucentVelocityMeshProcessor::PrimitiveCanHaveVelocity(View.GetShaderPlatform(), PrimitiveSceneProxy) &&
-											FTranslucentVelocityMeshProcessor::PrimitiveHasVelocityForFrame(PrimitiveSceneProxy))
-										{
-											DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::TranslucentVelocity);
-										}
-									}
-								}
-
 								++NumVisibleStaticMeshElements;
 
 								INC_DWORD_STAT_BY(STAT_StaticMeshTriangles, StaticMesh.GetNumPrimitives());
@@ -2369,52 +1638,78 @@ struct FRelevancePacket
 						{
 							if (View.Family->AllowTranslucencyAfterDOF())
 							{
-								if (ViewRelevance.bNormalTranslucency)
+								if ((ViewRelevance.bNormalTranslucency || (View.AutoBeforeDOFTranslucencyBoundary > 0.0f && ViewRelevance.bSeparateTranslucency)))
 								{
-									DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::TranslucencyStandard);
+									DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::TranslucencyStandard);
+								}
+
+								if ((ViewRelevance.bNormalTranslucency || (View.AutoBeforeDOFTranslucencyBoundary > 0.0f && ViewRelevance.bSeparateTranslucency)) && ViewRelevance.bTranslucencyModulate && View.Family->AllowStandardTranslucencySeparated())
+								{
+									DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::TranslucencyStandardModulate);
 								}
 
 								if (ViewRelevance.bSeparateTranslucency)
 								{
-									DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::TranslucencyAfterDOF);
+									DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::TranslucencyAfterDOF);
 								}
 
-								if (ViewRelevance.bSeparateTranslucencyModulate)
+								if (ViewRelevance.bSeparateTranslucency && ViewRelevance.bTranslucencyModulate)
 								{
-									DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::TranslucencyAfterDOFModulate);
+									DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::TranslucencyAfterDOFModulate);
+								}
+
+								if (ViewRelevance.bPostMotionBlurTranslucency)
+								{
+									DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::TranslucencyAfterMotionBlur);
 								}
 							}
 							else
 							{
 								// Otherwise, everything is rendered in a single bucket. This is not related to whether DOF is currently enabled or not.
 								// When using all translucency, Standard and AfterDOF are sorted together instead of being rendered like 2 buckets.
-								DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::TranslucencyAll);
+								DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::TranslucencyAll);
+							}
+
+							if (ViewRelevance.bTranslucentSurfaceLighting)
+							{
+								DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::LumenTranslucencyRadianceCacheMark);
+								DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::LumenFrontLayerTranslucencyGBuffer);
 							}
 
 							if (ViewRelevance.bDistortion)
 							{
-								DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::Distortion);
-							}
-
-							if (ShadingPath == EShadingPath::Mobile && View.bIsSceneCapture)
-							{
-								DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::MobileInverseOpacity);
+								DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::Distortion);
 							}
 						}
 
 #if WITH_EDITOR
+						if (ViewRelevance.bEditorVisualizeLevelInstanceRelevance)
+						{
+							DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::EditorLevelInstance);
+						}
+
 						if (ViewRelevance.bEditorStaticSelectionRelevance)
 						{
-							DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, Scene, bCanCache, EMeshPass::EditorSelection);
+							DrawCommandPacket.AddCommandsForMesh(PrimitiveIndex, PrimitiveSceneInfo, StaticMeshRelevance, StaticMesh, CullingPayloadFlags, Scene, bCanCache, EMeshPass::EditorSelection);
 						}
 #endif
 
 						if (ViewRelevance.bHasVolumeMaterialDomain)
 						{
-							VolumetricMeshBatches.AddUninitialized(1);
-							FVolumetricMeshBatch& BatchAndProxy = VolumetricMeshBatches.Last();
-							BatchAndProxy.Mesh = &StaticMesh;
-							BatchAndProxy.Proxy = PrimitiveSceneInfo->Proxy;
+							if (ShouldRenderMeshBatchWithHeterogeneousVolumes(&StaticMesh, PrimitiveSceneProxy, View.FeatureLevel))
+							{
+								HeterogeneousVolumesMeshBatches.AddUninitialized(1);
+								FVolumetricMeshBatch& BatchAndProxy = HeterogeneousVolumesMeshBatches.Last();
+								BatchAndProxy.Mesh = &StaticMesh;
+								BatchAndProxy.Proxy = PrimitiveSceneProxy;
+							}
+							else
+							{
+								VolumetricMeshBatches.AddUninitialized(1);
+								FVolumetricMeshBatch& BatchAndProxy = VolumetricMeshBatches.Last();
+								BatchAndProxy.Mesh = &StaticMesh;
+								BatchAndProxy.Proxy = PrimitiveSceneProxy;
+							}
 						}
 
 						if (ViewRelevance.bUsesSkyMaterial)
@@ -2422,18 +1717,28 @@ struct FRelevancePacket
 							SkyMeshBatches.AddUninitialized(1);
 							FSkyMeshBatch& BatchAndProxy = SkyMeshBatches.Last();
 							BatchAndProxy.Mesh = &StaticMesh;
-							BatchAndProxy.Proxy = PrimitiveSceneInfo->Proxy;
+							BatchAndProxy.Proxy = PrimitiveSceneProxy;
 							BatchAndProxy.bVisibleInMainPass = ViewRelevance.bRenderInMainPass;
 							BatchAndProxy.bVisibleInRealTimeSkyCapture = PrimitiveSceneInfo->bVisibleInRealTimeSkyCapture;
 						}
 
-						if (ViewRelevance.bRenderInMainPass && ViewRelevance.bDecal)
+						if (ViewRelevance.HasTranslucency() && PrimitiveSceneProxy->SupportsSortedTriangles()) // Need to check material as well
+						{
+							SortedTrianglesMeshBatches.AddUninitialized(1);
+							FSortedTrianglesMeshBatch& BatchAndProxy = SortedTrianglesMeshBatches.Last();
+							BatchAndProxy.Mesh = &StaticMesh;
+							BatchAndProxy.Proxy = PrimitiveSceneProxy;
+						}
+
+						// FIXME: Now if a primitive has one batch with a decal material all primitive mesh batches will be added as decals
+						// Because ViewRelevance is a sum of all material relevances in the primitive
+						if (ViewRelevance.bRenderInMainPass && ViewRelevance.bDecal && StaticMeshRelevance.bUseForMaterial)
 						{
 							MeshDecalBatches.AddUninitialized(1);
 							FMeshDecalBatch& BatchAndProxy = MeshDecalBatches.Last();
 							BatchAndProxy.Mesh = &StaticMesh;
-							BatchAndProxy.Proxy = PrimitiveSceneInfo->Proxy;
-							BatchAndProxy.SortKey = PrimitiveSceneInfo->Proxy->GetTranslucencySortPriority();
+							BatchAndProxy.Proxy = PrimitiveSceneProxy;
+							BatchAndProxy.SortKey = PrimitiveSceneProxy->GetTranslucencySortPriority();
 						}
 					}
 
@@ -2444,224 +1749,400 @@ struct FRelevancePacket
 				}
 			}
 		}
-		static_assert(sizeof(WriteView.NumVisibleStaticMeshElements) == sizeof(int32), "Atomic is the wrong size");
-		FPlatformAtomics::InterlockedAdd((volatile int32*)&WriteView.NumVisibleStaticMeshElements, NumVisibleStaticMeshElements);
-	}
 
-	void RenderThreadFinalize()
-	{
-		FViewInfo& WriteView = const_cast<FViewInfo&>(View);
-		FViewCommands& WriteViewCommands = const_cast<FViewCommands&>(ViewCommands);
-		
-		for (int32 Index = 0; Index < NotDrawRelevant.NumPrims; Index++)
+		if (!bDrawRelevance)
 		{
-			WriteView.PrimitiveVisibilityMap[NotDrawRelevant.Prims[Index]] = false;
+			NotDrawRelevant.AddPrim(BitIndex);
+			continue;
 		}
 
-		WriteView.ShadingModelMaskInView |= CombinedShadingModelMask;
-		WriteView.bUsesGlobalDistanceField |= bUsesGlobalDistanceField;
-		WriteView.bUsesLightingChannels |= bUsesLightingChannels;
-		WriteView.bTranslucentSurfaceLighting |= bTranslucentSurfaceLighting;
-		WriteView.bUsesSceneDepth |= bUsesSceneDepth;
-		WriteView.bSceneHasSkyMaterial |= bSceneHasSkyMaterial;
-		WriteView.bHasSingleLayerWaterMaterial |= bHasSingleLayerWaterMaterial;
-		WriteView.bHasTranslucencySeparateModulation |= bHasTranslucencySeparateModulation;
-		VisibleDynamicPrimitivesWithSimpleLights.AppendTo(WriteView.VisibleDynamicPrimitivesWithSimpleLights);
-		WriteView.NumVisibleDynamicPrimitives += NumVisibleDynamicPrimitives;
-		WriteView.NumVisibleDynamicEditorPrimitives += NumVisibleDynamicEditorPrimitives;
-		WriteView.TranslucentPrimCount.Append(TranslucentPrimCount);
-		WriteView.bHasDistortionPrimitives |= bHasDistortionPrimitives;
-		WriteView.bHasCustomDepthPrimitives |= bHasCustomDepthPrimitives;
-		WriteView.bUsesCustomDepthStencilInTranslucentMaterials |= bUsesCustomDepthStencil;
-		WriteView.bShouldRenderDepthToTranslucency |= bShouldRenderDepthToTranslucency;
-		DirtyIndirectLightingCacheBufferPrimitives.AppendTo(WriteView.DirtyIndirectLightingCacheBufferPrimitives);
-
-		WriteView.MeshDecalBatches.Append(MeshDecalBatches);
-		WriteView.VolumetricMeshBatches.Append(VolumetricMeshBatches);
-		WriteView.SkyMeshBatches.Append(SkyMeshBatches);
-
-		for (int32 Index = 0; Index < RecachedReflectionCapturePrimitives.NumPrims; ++Index)
+#if WITH_EDITOR
+		auto CollectSelectedNaniteInstanceDraws = [](
+			const FPrimitiveSceneInfo& PrimitiveSceneInfo,
+			const FPrimitiveSceneProxy* PrimitiveSceneProxy,
+			TArray<Nanite::FInstanceDraw>& OutInstanceDraws,
+			TArray<uint32>* OutSelectedInstanceHitProxyIDs,
+			bool bSelectedInstancesOnly
+		)
 		{
-			FPrimitiveSceneInfo* PrimitiveSceneInfo = RecachedReflectionCapturePrimitives.Prims[Index];
-
-			PrimitiveSceneInfo->SetNeedsUniformBufferUpdate(true);
-			PrimitiveSceneInfo->ConditionalUpdateUniformBuffer(RHICmdList);
-
-			FScene& WriteScene = *const_cast<FScene*>(Scene);
-			AddPrimitiveToUpdateGPU(WriteScene, PrimitiveSceneInfo->GetIndex());
-		}
-
-		for (int32 Index = 0; Index < LazyUpdatePrimitives.NumPrims; Index++)
-		{
-			LazyUpdatePrimitives.Prims[Index]->ConditionalUpdateUniformBuffer(RHICmdList);
-		}
-
-		for (int32 i = 0; i < PrimitivesLODMask.NumPrims; ++i)
-		{
-			WriteView.PrimitivesLODMask[PrimitivesLODMask.Prims[i].PrimitiveIndex] = PrimitivesLODMask.Prims[i].LODMask;
-		}
-
-		for (int32 PassIndex = 0; PassIndex < EMeshPass::Num; PassIndex++)
-		{
-			FPassDrawCommandArray& SrcCommands = DrawCommandPacket.VisibleCachedDrawCommands[PassIndex];
-			FMeshCommandOneFrameArray& DstCommands = WriteViewCommands.MeshCommands[PassIndex];
-			if (SrcCommands.Num() > 0)
+			if (!PrimitiveSceneProxy->IsNaniteMesh())
 			{
-				static_assert(sizeof(SrcCommands[0]) == sizeof(DstCommands[0]), "Memcpy sizes must match.");
-				const int32 PrevNum = DstCommands.AddUninitialized(SrcCommands.Num());
-				FMemory::Memcpy(&DstCommands[PrevNum], &SrcCommands[0], SrcCommands.Num() * sizeof(SrcCommands[0]));
+				return;
 			}
 
-			FPassDrawCommandBuildRequestArray& SrcRequests = DrawCommandPacket.DynamicBuildRequests[PassIndex];
-			TArray<const FStaticMeshBatch*, SceneRenderingAllocator>& DstRequests = WriteViewCommands.DynamicMeshCommandBuildRequests[PassIndex];
-			if (SrcRequests.Num() > 0)
+			auto* NaniteProxy = static_cast<const Nanite::FSceneProxyBase*>(PrimitiveSceneProxy);
+
+			if (bSelectedInstancesOnly)
 			{
-				static_assert(sizeof(SrcRequests[0]) == sizeof(DstRequests[0]), "Memcpy sizes must match.");
-				const int32 PrevNum = DstRequests.AddUninitialized(SrcRequests.Num());
-				FMemory::Memcpy(&DstRequests[PrevNum], &SrcRequests[0], SrcRequests.Num() * sizeof(SrcRequests[0]));
-			}
-
-			WriteViewCommands.NumDynamicMeshCommandBuildRequestElements[PassIndex] += DrawCommandPacket.NumDynamicBuildRequestElements[PassIndex];
-		}
-
-		// Prepare translucent self shadow uniform buffers.
-		for (int32 Index = 0; Index < TranslucentSelfShadowPrimitives.NumPrims; ++Index)
-		{
-			const int32 PrimitiveIndex = TranslucentSelfShadowPrimitives.Prims[Index];
-
-			FUniformBufferRHIRef& UniformBuffer = WriteView.TranslucentSelfShadowUniformBufferMap.FindOrAdd(PrimitiveIndex);
-
-			if (!UniformBuffer)
-			{
-				FTranslucentSelfShadowUniformParameters Parameters;
-				SetupTranslucentSelfShadowUniformParameters(nullptr, Parameters);
-				UniformBuffer = FTranslucentSelfShadowUniformParameters::CreateUniformBuffer(Parameters, EUniformBufferUsage::UniformBuffer_SingleFrame);
-			}
-		}
-	}
-};
-
-static void ComputeAndMarkRelevanceForViewParallel(
-	FRHICommandListImmediate& RHICmdList,
-	const FScene* Scene,
-	FViewInfo& View,
-	FViewCommands& ViewCommands,
-	uint8 ViewBit,
-	FPrimitiveViewMasks& OutHasDynamicMeshElementsMasks,
-	FPrimitiveViewMasks& OutHasDynamicEditorMeshElementsMasks
-	)
-{
-	SCOPED_NAMED_EVENT(FSceneRenderer_ComputeAndMarkRelevanceForViewParallel, FColor::Blue);
-
-	check(OutHasDynamicMeshElementsMasks.Num() == Scene->Primitives.Num());
-
-	FFrozenSceneViewMatricesGuard FrozenMatricesGuard(View);
-	const FMarkRelevantStaticMeshesForViewData ViewData(View);
-
-	int32 NumMesh = View.StaticMeshVisibilityMap.Num();
-	uint8* RESTRICT MarkMasks = (uint8*)FMemStack::Get().Alloc(NumMesh + 31 , 8); // some padding to simplify the high speed transpose
-	FMemory::Memzero(MarkMasks, NumMesh + 31);
-
-	int32 EstimateOfNumPackets = NumMesh / (FRelevancePrimSet<int32>::MaxInputPrims * 4);
-
-	TArray<FRelevancePacket*,SceneRenderingAllocator> Packets;
-	Packets.Reserve(EstimateOfNumPackets);
-
-	bool WillExecuteInParallel = FApp::ShouldUseThreadingForPerformance() && CVarParallelInitViews.GetValueOnRenderThread() > 0 && IsInActualRenderingThread();
-
-	{
-		FSceneSetBitIterator BitIt(View.PrimitiveVisibilityMap);
-		if (BitIt)
-		{
-
-			FRelevancePacket* Packet = new(FMemStack::Get()) FRelevancePacket(
-				RHICmdList,
-				Scene, 
-				View, 
-				ViewCommands,
-				ViewBit,
-				ViewData,
-				OutHasDynamicMeshElementsMasks,
-				OutHasDynamicEditorMeshElementsMasks,
-				MarkMasks);
-			Packets.Add(Packet);
-
-			while (1)
-			{
-				Packet->Input.AddPrim(BitIt.GetIndex());
-				++BitIt;
-				if (Packet->Input.IsFull() || !BitIt)
+				if (!NaniteProxy->IsSelected())
 				{
-					if (!BitIt)
+					// We're only concerned with selected instances
+					return;
+				}
+				else if (!NaniteProxy->HasSelectedInstances() && OutSelectedInstanceHitProxyIDs != nullptr)
+				{
+					// Primitive is selected but not individual instances, so just add the primitive's hit proxy IDs
+					for (auto& HitProxyId : NaniteProxy->GetHitProxyIds())
 					{
-						break;
-					}
-					else
-					{
-						Packet = new(FMemStack::Get()) FRelevancePacket(
-							RHICmdList,
-							Scene, 
-							View, 
-							ViewCommands,
-							ViewBit,
-							ViewData,
-							OutHasDynamicMeshElementsMasks,
-							OutHasDynamicEditorMeshElementsMasks,
-							MarkMasks);
-						Packets.Add(Packet);
+						const uint32 HitProxyID = HitProxyId.GetColor().ToPackedABGR();
+						OutSelectedInstanceHitProxyIDs->Add(HitProxyID);
 					}
 				}
 			}
+
+			const int32 MaxInstances = PrimitiveSceneInfo.GetNumInstanceSceneDataEntries();
+			OutInstanceDraws.Reserve(OutInstanceDraws.Num() + MaxInstances);
+			const FInstanceSceneDataBuffers* InstanceSceneDataBuffers = PrimitiveSceneInfo.GetInstanceSceneDataBuffers();
+			const bool bCollectInstanceHitProxyIds = bSelectedInstancesOnly &&
+				NaniteProxy->HasSelectedInstances() &&
+				OutSelectedInstanceHitProxyIDs != nullptr &&
+				InstanceSceneDataBuffers != nullptr;
+			for (int32 Idx = 0; Idx < MaxInstances; ++Idx)
+			{
+				if (bCollectInstanceHitProxyIds)
+				{
+					FInstanceSceneDataBuffers::FReadView ProxyData = InstanceSceneDataBuffers->GetReadView();
+					// If we have per-instance editor data, exclude instance draws of unselected instances
+					// draws of unselected instances
+					if (ProxyData.InstanceEditorData.IsValidIndex(Idx))
+					{
+						FColor HitProxyColor;
+						bool bSelected;
+						FInstanceEditorData::Unpack(ProxyData.InstanceEditorData[Idx], HitProxyColor, bSelected);
+						if (!bSelected)
+						{
+							continue;
+						}
+							
+						const uint32 HitProxyID = HitProxyColor.ToPackedABGR();
+						OutSelectedInstanceHitProxyIDs->Add(HitProxyID);
+					}
+				}
+
+				OutInstanceDraws.Add(
+					Nanite::FInstanceDraw {
+						uint32(PrimitiveSceneInfo.GetInstanceSceneDataOffset() + Idx),
+						0u
+					}
+				);
+			}
+		};
+
+		if (bEditorVisualizeLevelInstanceRelevance)
+		{
+			CollectSelectedNaniteInstanceDraws(*PrimitiveSceneInfo, PrimitiveSceneProxy, EditorVisualizeLevelInstancesNanite, nullptr, false);
+		}
+
+		if (bEditorSelectionRelevance)
+		{
+			CollectSelectedNaniteInstanceDraws(*PrimitiveSceneInfo, PrimitiveSceneProxy, EditorSelectedInstancesNanite, &EditorSelectedNaniteHitProxyIds, true);
+		}
+#endif
+
+		if (bEditorRelevance)
+		{
+			AddEditorDynamicPrimitive(BitIndex);
+		}
+		else if(bDynamicRelevance)
+		{
+			AddDynamicPrimitive(BitIndex);
+
+			if (ViewRelevance.bHasSimpleLights)
+			{
+				VisibleDynamicPrimitivesWithSimpleLights.AddPrim(PrimitiveSceneInfo);
+			}
+		}
+		else if (bHairStrandsRelevance)
+		{
+			AddDynamicPrimitive(BitIndex);
+		}
+
+		if (bTranslucentRelevance && !bEditorRelevance && ViewRelevance.bRenderInMainPass)
+		{
+			if (View.Family->AllowTranslucencyAfterDOF())
+			{
+				if ((ViewRelevance.bNormalTranslucency || (View.AutoBeforeDOFTranslucencyBoundary > 0.0f && ViewRelevance.bSeparateTranslucency)))
+				{
+					TranslucentPrimCount.Add(ETranslucencyPass::TPT_TranslucencyStandard, ViewRelevance.bUsesSceneColorCopy);
+				}
+
+				if ((ViewRelevance.bNormalTranslucency || (View.AutoBeforeDOFTranslucencyBoundary > 0.0f && ViewRelevance.bSeparateTranslucency)) && ViewRelevance.bTranslucencyModulate && View.Family->AllowStandardTranslucencySeparated())
+				{
+					TranslucentPrimCount.Add(ETranslucencyPass::TPT_TranslucencyStandardModulate, ViewRelevance.bUsesSceneColorCopy);
+				}
+
+				if (ViewRelevance.bSeparateTranslucency)
+				{
+					TranslucentPrimCount.Add(ETranslucencyPass::TPT_TranslucencyAfterDOF, ViewRelevance.bUsesSceneColorCopy);
+				}
+
+				if (ViewRelevance.bSeparateTranslucency && ViewRelevance.bTranslucencyModulate)
+				{
+					TranslucentPrimCount.Add(ETranslucencyPass::TPT_TranslucencyAfterDOFModulate, ViewRelevance.bUsesSceneColorCopy);
+				}
+
+				if (ViewRelevance.bPostMotionBlurTranslucency)
+				{
+					TranslucentPrimCount.Add(ETranslucencyPass::TPT_TranslucencyAfterMotionBlur, ViewRelevance.bUsesSceneColorCopy);
+				}
+			}
+			else // Otherwise, everything is rendered in a single bucket. This is not related to whether DOF is currently enabled or not.
+			{
+				// When using all translucency, Standard and AfterDOF are sorted together instead of being rendered like 2 buckets.
+				TranslucentPrimCount.Add(ETranslucencyPass::TPT_AllTranslucency, ViewRelevance.bUsesSceneColorCopy);
+			}
+
+			if (ViewRelevance.bDistortion)
+			{
+				bHasDistortionPrimitives = true;
+			}
+		}
+
+		CombinedShadingModelMask |= ViewRelevance.ShadingModelMask;
+		SubstrateUintPerPixel = FMath::Max(SubstrateUintPerPixel, ViewRelevance.SubstrateUintPerPixel);
+		bUsesComplexSpecialRenderPath |= ViewRelevance.bUsesComplexSpecialRenderPath;
+		SubstrateClosureCountMask |= ViewRelevance.SubstrateClosureCountMask;
+		bUsesGlobalDistanceField |= ViewRelevance.bUsesGlobalDistanceField;
+		bUsesLightingChannels |= ViewRelevance.bUsesLightingChannels;
+		bTranslucentSurfaceLighting |= ViewRelevance.bTranslucentSurfaceLighting;
+		bUsesCustomDepth |= (ViewRelevance.CustomDepthStencilUsageMask & 1) > 0;
+		bUsesCustomStencil |= (ViewRelevance.CustomDepthStencilUsageMask & (1 << 1)) > 0;
+		bSceneHasSkyMaterial |= ViewRelevance.bUsesSkyMaterial;
+		bHasSingleLayerWaterMaterial |= ViewRelevance.bUsesSingleLayerWaterMaterial;
+		bUsesSecondStageDepthPass |= ViewRelevance.bRenderInSecondStageDepthPass && ShadingPath!=EShadingPath::Mobile;
+
+		if (ViewRelevance.bRenderCustomDepth)
+		{
+			bHasCustomDepthPrimitives = true;
+			CustomDepthStencilValues.Add(PrimitiveSceneInfo->Proxy->GetCustomDepthStencilValue());
+
+			if (PrimitiveSceneInfo->Proxy->IsNaniteMesh())
+			{
+				check(PrimitiveSceneInfo->IsIndexValid());
+				NaniteCustomDepthInstances.AddPrim(
+					FPrimitiveInstanceRange {
+						PrimitiveSceneInfo->GetIndex(),
+						PrimitiveSceneInfo->GetInstanceSceneDataOffset(),
+						PrimitiveSceneInfo->GetNumInstanceSceneDataEntries()
+					}
+				);
+			}
+		}
+
+		extern bool GUseTranslucencyShadowDepths;
+		if (GUseTranslucencyShadowDepths && ViewRelevance.bTranslucentSelfShadow)
+		{
+			TranslucentSelfShadowPrimitives.AddPrim(BitIndex);
+		}
+
+		PrimitiveSceneInfo->LastRenderTime = CurrentWorldTime;
+
+		const bool bUpdateLastRenderTimeOnScreen = true;
+		PrimitiveSceneInfo->UpdateComponentLastRenderTime(CurrentWorldTime, bUpdateLastRenderTimeOnScreen);
+
+		// Cache the nearest reflection proxy if needed
+		if (PrimitiveSceneInfo->NeedsReflectionCaptureUpdate())
+		{
+			// mobile should not have any outstanding reflection capture update requests at this point, except for when lighting isn't rebuilt		
+			PrimitiveSceneInfo->CacheReflectionCaptures();
+		}
+
+		if (PrimitiveSceneInfo->NeedsIndirectLightingCacheBufferUpdate())
+		{
+			DirtyIndirectLightingCacheBufferPrimitives.AddPrim(PrimitiveSceneInfo);
 		}
 	}
+
+	static_assert(sizeof(WriteView.NumVisibleStaticMeshElements) == sizeof(int32), "Atomic is the wrong size");
+	FPlatformAtomics::InterlockedAdd((volatile int32*)&WriteView.NumVisibleStaticMeshElements, NumVisibleStaticMeshElements);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+FComputeAndMarkRelevance::FComputeAndMarkRelevance(FVisibilityTaskData& InTaskData, FScene& InScene, FViewInfo& InView, uint8 InViewIndex)
+	: TaskData(InTaskData)
+	, Scene(InScene)
+	, View(InView)
+	, ViewCommands(TaskData.DynamicMeshElements.ViewCommandsPerView[InViewIndex])
+	, ViewIndex(InViewIndex)
+	, ViewData(View)
+	, NumMeshes(Scene.StaticMeshes.GetMaxIndex())
+	, NumPrimitivesPerPacket(InTaskData.TaskConfig.Relevance.NumPrimitivesPerPacket)
+	, bLaunchOnAddPrimitive(TaskData.TaskConfig.Schedule == EVisibilityTaskSchedule::Parallel)
+	, bFinished(!bLaunchOnAddPrimitive)
+{
+	MarkMasks = (uint8*)TaskData.Allocator.Malloc(NumMeshes + 31, 8); // some padding to simplify the high speed transpose
+	FMemory::Memzero(MarkMasks, NumMeshes + 31);
+	Packets.Reserve(InTaskData.TaskConfig.Relevance.NumEstimatedPackets);
+	CreateRelevancePacket();
+	InstancedPrimitiveAddedMap.Init(false, InScene.Primitives.Num());
+}
+
+void FComputeAndMarkRelevance::AddPrimitives(FPrimitiveIndexList&& PrimitiveIndexList)
+{
+	// In ISR only, the primary view will also receive all primitives visible in secondary views, since all rendering is handled from the primary
+	if (View.bIsMultiViewportEnabled && View.StereoPass == EStereoscopicPass::eSSP_PRIMARY)
 	{
-		QUICK_SCOPE_CYCLE_COUNTER(STAT_ComputeAndMarkRelevanceForViewParallel_ParallelFor);
-		ParallelFor(Packets.Num(), 
-			[&Packets](int32 Index)
+		for (int32 Index : PrimitiveIndexList)
+		{
+			// Because we've queued primitives from both the primary and secondary views, we need to filter duplicates
+			if (!InstancedPrimitiveAddedMap[Index])
 			{
-				Packets[Index]->AnyThreadTask();
-			},
-			!WillExecuteInParallel
-		);
+				AddPrimitive(Index);
+				InstancedPrimitiveAddedMap[Index] = true;
+			}
+		}
 	}
+
+	else if (PrimitiveIndexList.Num() == NumPrimitivesPerPacket)
 	{
-		QUICK_SCOPE_CYCLE_COUNTER(STAT_ComputeAndMarkRelevanceForViewParallel_RenderThreadFinalize);
+		// Create a one-off packet that will take all the primitives.
+		FRelevancePacket* Packet = CreateRelevancePacket();
+		Packet->Input.Prims = MoveTemp(PrimitiveIndexList);
+
+		if (bLaunchOnAddPrimitive)
+		{
+			Packet->LaunchComputeRelevanceTask();
+		}
+
+		// Put the previous last packet that was in progress back in the last slot.
+		Swap(Packets[Packets.Num() - 1], Packets[Packets.Num() - 2]);
+	}
+
+	else
+	{
+		for (int32 Index : PrimitiveIndexList)
+		{
+			AddPrimitive(Index);
+		}
+	}
+}
+
+void FComputeAndMarkRelevance::AddPrimitive(int32 Index)
+{
+	FRelevancePacket* Packet = Packets.Last();
+
+	if (Packet->Input.AddPrim(Index); Packet->Input.IsFull())
+	{
+		if (bLaunchOnAddPrimitive)
+		{
+			Packet->LaunchComputeRelevanceTask();
+		}
+		CreateRelevancePacket();
+	}
+}
+
+void FComputeAndMarkRelevance::Finish(UE::Tasks::FTaskEvent& ComputeRelevanceTaskEvent)
+{
+	check(!bFinished);
+	bFinished = true;
+
+	SCOPED_NAMED_EVENT(FinishRelevance, FColor::Magenta);
+
+	Packets.Last()->LaunchComputeRelevanceTask();
+
+	for (FRelevancePacket* Packet : Packets)
+	{
+		if (Packet->bComputeRelevanceTaskLaunched)
+		{
+			ComputeRelevanceTaskEvent.AddPrerequisites(Packet->ComputeRelevanceTask);
+		}
+	}
+
+	ComputeRelevanceTaskEvent.Trigger();
+}
+
+void FComputeAndMarkRelevance::Finalize()
+{
+	check(bFinished && !bFinalized);
+	bFinalized = true;
+
+	if (!bLaunchOnAddPrimitive)
+	{
+		ParallelFor(Packets.Num(), [this](int32 Index)
+		{
+			FOptionalTaskTagScope Scope(ETaskTag::EParallelRenderingThread);
+			FDynamicPrimitiveIndexList DynamicPrimitiveIndexList;
+
+			FRelevancePacket* Packet = Packets[Index];
+			Packet->ComputeRelevance(DynamicPrimitiveIndexList);
+		});
+	}
+
+	SCOPED_NAMED_EVENT(FinalizeRelevance, FColor::Magenta);
+
+	{
+		QUICK_SCOPE_CYCLE_COUNTER(STAT_ComputeAndMarkRelevanceForViewParallel_Finalize);
 
 		for (int32 PassIndex = 0; PassIndex < EMeshPass::Num; PassIndex++)
 		{
 			int32 NumVisibleCachedMeshDrawCommands = 0;
 			int32 NumDynamicBuildRequests = 0;
+			int32 NumDynamicBuildFlags = 0;
 
 			for (auto Packet : Packets)
 			{
 				NumVisibleCachedMeshDrawCommands += Packet->DrawCommandPacket.VisibleCachedDrawCommands[PassIndex].Num();
 				NumDynamicBuildRequests += Packet->DrawCommandPacket.DynamicBuildRequests[PassIndex].Num();
+				NumDynamicBuildFlags += Packet->DrawCommandPacket.DynamicBuildFlags[PassIndex].Num();
 			}
 
 			ViewCommands.MeshCommands[PassIndex].Reserve(NumVisibleCachedMeshDrawCommands);
 			ViewCommands.DynamicMeshCommandBuildRequests[PassIndex].Reserve(NumDynamicBuildRequests);
+			ViewCommands.DynamicMeshCommandBuildFlags[PassIndex].Reserve(NumDynamicBuildFlags);
+			check(NumDynamicBuildRequests == NumDynamicBuildFlags);
 		}
+
+		View.DirtyIndirectLightingCacheBufferPrimitivesMutex.Lock();
 
 		for (auto Packet : Packets)
 		{
-			Packet->RenderThreadFinalize();
-			Packet->~FRelevancePacket();
+			Packet->Finalize();
+			delete Packet;
 		}
 
+		View.DirtyIndirectLightingCacheBufferPrimitivesMutex.Unlock();
+
 		Packets.Empty();
+
+		// Finalize Nanite materials
+		if (TaskData.bAddNaniteRelevance)
+		{
+			// This needs to complete before InitViews runs so that combined primitive/material relevance has been computed for Nanite
+			Scene.WaitForCacheNaniteMaterialBinsTask();
+
+			FViewInfo& WriteView = View;
+			{
+				const FNaniteShadingPipelines& ShadingPipelines = Scene.NaniteShadingPipelines[ENaniteMeshPass::BasePass];
+				const FPrimitiveViewRelevance& CombinedRelevance = ShadingPipelines.CombinedRelevance;
+
+				WriteView.ShadingModelMaskInView |= CombinedRelevance.ShadingModelMask;
+				WriteView.bUsesLightingChannels |= CombinedRelevance.bUsesLightingChannels;
+				WriteView.bSceneHasSkyMaterial |= CombinedRelevance.bUsesSkyMaterial;
+				WriteView.bHasDistortionPrimitives |= CombinedRelevance.bDistortion;
+				WriteView.bHasCustomDepthPrimitives |= CombinedRelevance.bRenderCustomDepth;
+				WriteView.bUsesCustomDepth |= (CombinedRelevance.CustomDepthStencilUsageMask & 1) > 0;
+				WriteView.bUsesCustomStencil |= (CombinedRelevance.CustomDepthStencilUsageMask & (1 << 1)) > 0;
+				WriteView.SubstrateViewData.MaxClosurePerPixel = FMath::Max(WriteView.SubstrateViewData.MaxClosurePerPixel, 8u - FMath::CountLeadingZeros8(CombinedRelevance.SubstrateClosureCountMask));
+				WriteView.SubstrateViewData.MaxBytesPerPixel = FMath::Max(WriteView.SubstrateViewData.MaxBytesPerPixel, CombinedRelevance.SubstrateUintPerPixel * 4u);
+				WriteView.SubstrateViewData.bUsesComplexSpecialRenderPath |= CombinedRelevance.bUsesComplexSpecialRenderPath;
+			}
+		}
 	}
 
+	TRACE_COUNTER_SET(Scene_Visibility_Relevance_NumPrimitivesProcessed, TaskData.TaskConfig.Relevance.NumPrimitivesProcessed);
+
 	QUICK_SCOPE_CYCLE_COUNTER(STAT_ComputeAndMarkRelevanceForViewParallel_TransposeMeshBits);
-	check(View.StaticMeshVisibilityMap.Num() == NumMesh && 
-		View.StaticMeshFadeOutDitheredLODMap.Num() == NumMesh && 
-		View.StaticMeshFadeInDitheredLODMap.Num() == NumMesh
-		);
+	check(View.StaticMeshVisibilityMap.Num() == NumMeshes &&
+		View.StaticMeshFadeOutDitheredLODMap.Num() == NumMeshes &&
+		View.StaticMeshFadeInDitheredLODMap.Num() == NumMeshes
+	);
 	uint32* RESTRICT StaticMeshVisibilityMap_Words = View.StaticMeshVisibilityMap.GetData();
 	uint32* RESTRICT StaticMeshFadeOutDitheredLODMap_Words = View.StaticMeshFadeOutDitheredLODMap.GetData();
 	uint32* RESTRICT StaticMeshFadeInDitheredLODMap_Words = View.StaticMeshFadeInDitheredLODMap.GetData();
-	const uint64* RESTRICT MarkMasks64 = (const uint64* RESTRICT)MarkMasks;
+	const uint64* RESTRICT MarkMasks64 = (const uint64 * RESTRICT)MarkMasks;
 	const uint8* RESTRICT MarkMasks8 = MarkMasks;
-	for (int32 BaseIndex = 0; BaseIndex < NumMesh; BaseIndex += 32)
+	for (uint32 BaseIndex = 0; BaseIndex < NumMeshes; BaseIndex += 32)
 	{
 		uint32 StaticMeshVisibilityMap_Word = 0;
 		uint32 StaticMeshFadeOutDitheredLODMap_Word = 0;
@@ -2700,19 +2181,43 @@ static void ComputeAndMarkRelevanceForViewParallel(
 	}
 }
 
-void ComputeDynamicMeshRelevance(EShadingPath ShadingPath, bool bAddLightmapDensityCommands, const FPrimitiveViewRelevance& ViewRelevance, const FMeshBatchAndRelevance& MeshBatch, FViewInfo& View, FMeshPassMask& PassMask, FPrimitiveSceneInfo* PrimitiveSceneInfo, const FPrimitiveBounds& Bounds)
+///////////////////////////////////////////////////////////////////////////////
+
+static void ComputeDynamicMeshRelevance(
+	EShadingPath ShadingPath,
+	bool bAddLightmapDensityCommands,
+	const FPrimitiveViewRelevance& ViewRelevance,
+	const FMeshBatchAndRelevance& MeshBatch,
+	FViewInfo& View,
+	FMeshPassMask& PassMask,
+	FPrimitiveSceneInfo* PrimitiveSceneInfo,
+	const FPrimitiveBounds& Bounds)
 {
 	const int32 NumElements = MeshBatch.Mesh->Elements.Num();
 
 	if (ViewRelevance.bDrawRelevance && (ViewRelevance.bRenderInMainPass || ViewRelevance.bRenderCustomDepth || ViewRelevance.bRenderInDepthPass))
 	{
-		PassMask.Set(EMeshPass::DepthPass);
-		View.NumVisibleDynamicMeshElements[EMeshPass::DepthPass] += NumElements;
+		if (ViewRelevance.bRenderInSecondStageDepthPass && ShadingPath != EShadingPath::Mobile)
+		{
+			PassMask.Set(EMeshPass::SecondStageDepthPass);
+			View.NumVisibleDynamicMeshElements[EMeshPass::SecondStageDepthPass] += NumElements;
+		}
+		else
+		{
+			PassMask.Set(EMeshPass::DepthPass);
+			View.NumVisibleDynamicMeshElements[EMeshPass::DepthPass] += NumElements;
+		}
 
 		if (ViewRelevance.bRenderInMainPass || ViewRelevance.bRenderCustomDepth)
 		{
 			PassMask.Set(EMeshPass::BasePass);
 			View.NumVisibleDynamicMeshElements[EMeshPass::BasePass] += NumElements;
+
+			if (ViewRelevance.bUsesSkyMaterial)
+			{
+				PassMask.Set(EMeshPass::SkyPass);
+				View.NumVisibleDynamicMeshElements[EMeshPass::SkyPass] += NumElements;
+			}
 
 			if (ViewRelevance.bUsesAnisotropy)
 			{
@@ -2774,6 +2279,8 @@ void ComputeDynamicMeshRelevance(EShadingPath ShadingPath, bool bAddLightmapDens
 			{
 				PassMask.Set(EMeshPass::SingleLayerWaterPass);
 				View.NumVisibleDynamicMeshElements[EMeshPass::SingleLayerWaterPass] += NumElements;
+				PassMask.Set(EMeshPass::SingleLayerWaterDepthPrepass);
+				View.NumVisibleDynamicMeshElements[EMeshPass::SingleLayerWaterDepthPrepass] += NumElements;
 			}
 		}
 	}
@@ -2784,10 +2291,16 @@ void ComputeDynamicMeshRelevance(EShadingPath ShadingPath, bool bAddLightmapDens
 	{
 		if (View.Family->AllowTranslucencyAfterDOF())
 		{
-			if (ViewRelevance.bNormalTranslucency)
+			if ((ViewRelevance.bNormalTranslucency || (View.AutoBeforeDOFTranslucencyBoundary > 0.0f && ViewRelevance.bSeparateTranslucency)))
 			{
 				PassMask.Set(EMeshPass::TranslucencyStandard);
 				View.NumVisibleDynamicMeshElements[EMeshPass::TranslucencyStandard] += NumElements;
+			}
+
+			if ((ViewRelevance.bNormalTranslucency || (View.AutoBeforeDOFTranslucencyBoundary > 0.0f && ViewRelevance.bSeparateTranslucency)) && ViewRelevance.bTranslucencyModulate && View.Family->AllowStandardTranslucencySeparated())
+			{
+				PassMask.Set(EMeshPass::TranslucencyStandardModulate);
+				View.NumVisibleDynamicMeshElements[EMeshPass::TranslucencyStandardModulate] += NumElements;
 			}
 
 			if (ViewRelevance.bSeparateTranslucency)
@@ -2796,10 +2309,16 @@ void ComputeDynamicMeshRelevance(EShadingPath ShadingPath, bool bAddLightmapDens
 				View.NumVisibleDynamicMeshElements[EMeshPass::TranslucencyAfterDOF] += NumElements;
 			}
 
-			if (ViewRelevance.bSeparateTranslucencyModulate)
+			if (ViewRelevance.bSeparateTranslucency && ViewRelevance.bTranslucencyModulate)
 			{
 				PassMask.Set(EMeshPass::TranslucencyAfterDOFModulate);
 				View.NumVisibleDynamicMeshElements[EMeshPass::TranslucencyAfterDOFModulate] += NumElements;
+			}
+
+			if (ViewRelevance.bPostMotionBlurTranslucency)
+			{
+				PassMask.Set(EMeshPass::TranslucencyAfterMotionBlur);
+				View.NumVisibleDynamicMeshElements[EMeshPass::TranslucencyAfterMotionBlur] += NumElements;
 			}
 		}
 		else
@@ -2808,16 +2327,19 @@ void ComputeDynamicMeshRelevance(EShadingPath ShadingPath, bool bAddLightmapDens
 			View.NumVisibleDynamicMeshElements[EMeshPass::TranslucencyAll] += NumElements;
 		}
 
+		if (ViewRelevance.bTranslucentSurfaceLighting)
+		{
+			PassMask.Set(EMeshPass::LumenTranslucencyRadianceCacheMark);
+			View.NumVisibleDynamicMeshElements[EMeshPass::LumenTranslucencyRadianceCacheMark] += NumElements;
+
+			PassMask.Set(EMeshPass::LumenFrontLayerTranslucencyGBuffer);
+			View.NumVisibleDynamicMeshElements[EMeshPass::LumenFrontLayerTranslucencyGBuffer] += NumElements;
+		}
+
 		if (ViewRelevance.bDistortion)
 		{
 			PassMask.Set(EMeshPass::Distortion);
 			View.NumVisibleDynamicMeshElements[EMeshPass::Distortion] += NumElements;
-		}
-
-		if (ShadingPath == EShadingPath::Mobile && View.bIsSceneCapture)
-		{
-			PassMask.Set(EMeshPass::MobileInverseOpacity);
-			View.NumVisibleDynamicMeshElements[EMeshPass::MobileInverseOpacity] += NumElements;
 		}
 	}
 
@@ -2826,6 +2348,9 @@ void ComputeDynamicMeshRelevance(EShadingPath ShadingPath, bool bAddLightmapDens
 	{
 		PassMask.Set(EMeshPass::EditorSelection);
 		View.NumVisibleDynamicMeshElements[EMeshPass::EditorSelection] += NumElements;
+
+		PassMask.Set(EMeshPass::EditorLevelInstance);
+		View.NumVisibleDynamicMeshElements[EMeshPass::EditorLevelInstance] += NumElements;
 	}
 
 	// Hair strands are not rendered into the base pass (bRenderInMainPass=0) and so this 
@@ -2840,10 +2365,20 @@ void ComputeDynamicMeshRelevance(EShadingPath ShadingPath, bool bAddLightmapDens
 
 	if (ViewRelevance.bHasVolumeMaterialDomain)
 	{
-		View.VolumetricMeshBatches.AddUninitialized(1);
-		FVolumetricMeshBatch& BatchAndProxy = View.VolumetricMeshBatches.Last();
-		BatchAndProxy.Mesh = MeshBatch.Mesh;
-		BatchAndProxy.Proxy = MeshBatch.PrimitiveSceneProxy;
+		if (ShouldRenderMeshBatchWithHeterogeneousVolumes(MeshBatch.Mesh, MeshBatch.PrimitiveSceneProxy, View.FeatureLevel))
+		{
+			View.HeterogeneousVolumesMeshBatches.AddUninitialized(1);
+			FVolumetricMeshBatch& BatchAndProxy = View.HeterogeneousVolumesMeshBatches.Last();
+			BatchAndProxy.Mesh = MeshBatch.Mesh;
+			BatchAndProxy.Proxy = MeshBatch.PrimitiveSceneProxy;
+		}
+		else
+		{
+			View.VolumetricMeshBatches.AddUninitialized(1);
+			FVolumetricMeshBatch& BatchAndProxy = View.VolumetricMeshBatches.Last();
+			BatchAndProxy.Mesh = MeshBatch.Mesh;
+			BatchAndProxy.Proxy = MeshBatch.PrimitiveSceneProxy;
+		}
 	}
 
 	if (ViewRelevance.bUsesSkyMaterial)
@@ -2856,6 +2391,14 @@ void ComputeDynamicMeshRelevance(EShadingPath ShadingPath, bool bAddLightmapDens
 		BatchAndProxy.bVisibleInRealTimeSkyCapture = PrimitiveSceneInfo->bVisibleInRealTimeSkyCapture;
 	}
 
+	if (ViewRelevance.HasTranslucency() && PrimitiveSceneInfo->Proxy->SupportsSortedTriangles())
+	{
+		View.SortedTrianglesMeshBatches.AddUninitialized(1);
+		FSortedTrianglesMeshBatch& BatchAndProxy = View.SortedTrianglesMeshBatches.Last();
+		BatchAndProxy.Mesh = MeshBatch.Mesh;
+		BatchAndProxy.Proxy = MeshBatch.PrimitiveSceneProxy;
+	}
+
 	if (ViewRelevance.bRenderInMainPass && ViewRelevance.bDecal)
 	{
 		View.MeshDecalBatches.AddUninitialized(1);
@@ -2864,130 +2407,2212 @@ void ComputeDynamicMeshRelevance(EShadingPath ShadingPath, bool bAddLightmapDens
 		BatchAndProxy.Proxy = MeshBatch.PrimitiveSceneProxy;
 		BatchAndProxy.SortKey = MeshBatch.PrimitiveSceneProxy->GetTranslucencySortPriority();
 	}
-	
+
 	const bool bIsHairStrandsCompatible = ViewRelevance.bHairStrands && IsHairStrandsEnabled(EHairStrandsShaderType::All, View.GetShaderPlatform());
 	if (bIsHairStrandsCompatible)
 	{
-		View.HairStrandsMeshElements.AddUninitialized(1);
-		FMeshBatchAndRelevance& BatchAndProxy = View.HairStrandsMeshElements.Last();
-		BatchAndProxy = MeshBatch;
+		// Disable bCheckLengthScaleInitialize when running hit proxy as LengthScale is not initialized
+		const bool bCheckLengthScale = !View.Family->EngineShowFlags.HitProxies;
+		if (HairStrands::IsHairStrandsVF(MeshBatch.Mesh) && HairStrands::IsHairVisible(MeshBatch, bCheckLengthScale))
+		{
+			View.HairStrandsMeshElements.AddUninitialized(1);
+			FMeshBatchAndRelevance& BatchAndProxy = View.HairStrandsMeshElements.Last();
+			BatchAndProxy = MeshBatch;
+		}
+
+		if (HairStrands::IsHairCardsVF(MeshBatch.Mesh) && ViewRelevance.bRenderInMainPass)
+		{
+			View.HairCardsMeshElements.AddUninitialized(1);
+			FMeshBatchAndRelevance& BatchAndProxy = View.HairCardsMeshElements.Last();
+			BatchAndProxy = MeshBatch;
+		}
 	}
 }
 
-void FSceneRenderer::GatherDynamicMeshElements(
-	TArray<FViewInfo>& InViews, 
-	const FScene* InScene, 
-	const FSceneViewFamily& InViewFamily, 
-	FGlobalDynamicIndexBuffer& DynamicIndexBuffer,
-	FGlobalDynamicVertexBuffer& DynamicVertexBuffer,
-	FGlobalDynamicReadBuffer& DynamicReadBuffer,
-	const FPrimitiveViewMasks& HasDynamicMeshElementsMasks, 
-	const FPrimitiveViewMasks& HasDynamicEditorMeshElementsMasks,
-	FMeshElementCollector& Collector)
+///////////////////////////////////////////////////////////////////////////////
+
+FGPUOcclusionPacket::FGPUOcclusionPacket(FVisibilityViewPacket& InViewPacket, const FGPUOcclusionState& InOcclusionState)
+	: ViewPacket(InViewPacket)
+	, View(ViewPacket.View)
+	, ViewState(*ViewPacket.ViewState)
+	, ViewElementPDI(ViewPacket.ViewElementPDI)
+	, HZBOcclusionTests(ViewState.HZBOcclusionTests)
+	, OcclusionFeedback(ViewState.OcclusionFeedback)
+	, PrimitiveOcclusionHistorySet(ViewState.Occlusion.PrimitiveOcclusionHistorySet)
+	, Scene(ViewPacket.Scene)
+	, OcclusionState(InOcclusionState)
+	, ViewOrigin(View.ViewMatrices.GetViewOrigin())
+	, OcclusionFrameCounter(ViewState.OcclusionFrameCounter)
+	, PrimitiveProbablyVisibleTime(GEngine->PrimitiveProbablyVisibleTime)
+	, CurrentRealTime(View.Family->Time.GetRealTimeSeconds())
+	, NeverOcclusionTestDistanceSquared(GNeverOcclusionTestDistance* GNeverOcclusionTestDistance)
+	, bUseOcclusionFeedback(OcclusionFeedback.IsInitialized())
+	, bNewlyConsideredBBoxExpandActive(GExpandNewlyOcclusionTestedBBoxesAmount > 0.0f && GFramesToExpandNewlyOcclusionTestedBBoxes > 0 && GFramesNotOcclusionTestedToExpandBBoxes > 0)
+{}
+
+template <bool bIsParallel, typename VisitorType>
+bool FGPUOcclusionPacket::OcclusionCullPrimitive(VisitorType& Visitor, FOcclusionCullResult& Result, int32 Index)
 {
-	SCOPE_CYCLE_COUNTER(STAT_GetDynamicMeshElements);
+	const uint8 OcclusionFlags = Scene.PrimitiveOcclusionFlags[Index];
 
-	int32 NumPrimitives = InScene->Primitives.Num();
-	check(HasDynamicMeshElementsMasks.Num() == NumPrimitives);
+	int32 NumSubQueries = 1;
+	bool bSubQueries = false;
+	const TArray<FBoxSphereBounds>* SubBounds = nullptr;
+	int32 SubIsOccludedStart = 0;
 
-	int32 ViewCount = InViews.Num();
+	if ((OcclusionFlags & EOcclusionFlags::HasSubprimitiveQueries) && OcclusionState.bAllowSubQueries)
 	{
-		Collector.ClearViewMeshArrays();
-
-		for (int32 ViewIndex = 0; ViewIndex < ViewCount; ViewIndex++)
+		FPrimitiveSceneProxy* Proxy = Scene.PrimitiveSceneProxies[Index];
+		SubBounds = Proxy->GetOcclusionQueries(&View);
+		NumSubQueries = SubBounds->Num();
+		bSubQueries = true;
+		if (!NumSubQueries)
 		{
-			Collector.AddViewMeshArrays(
-				&InViews[ViewIndex], 
-				&InViews[ViewIndex].DynamicMeshElements,
-				&InViews[ViewIndex].SimpleElementCollector,
-				&InViews[ViewIndex].DynamicPrimitiveShaderData, 
-				InViewFamily.GetFeatureLevel(),
-				&DynamicIndexBuffer,
-				&DynamicVertexBuffer,
-				&DynamicReadBuffer);
+			if constexpr (bIsParallel)
+			{
+				View.PrimitiveVisibilityMap[Index].AtomicSet(false);
+			}
+			else
+			{
+				View.PrimitiveVisibilityMap[Index] = false;
+			}
+			return false;
 		}
 
-		const bool bIsInstancedStereo = (ViewCount > 0) ? (InViews[0].IsInstancedStereoPass() || InViews[0].bIsMobileMultiViewEnabled) : false;
-		const EShadingPath ShadingPath = Scene->GetShadingPath();
-
-		for (int32 PrimitiveIndex = 0; PrimitiveIndex < NumPrimitives; ++PrimitiveIndex)
+		if (!SubIsOccluded || SubIsOccluded->Num() + NumSubQueries > SubIsOccluded->Max())
 		{
-			const uint8 ViewMask = HasDynamicMeshElementsMasks[PrimitiveIndex];
+			SubIsOccluded = View.Allocator.Create<TArray<bool>>();
+			SubIsOccluded->Reserve(FMath::Max<uint32>(NumSubQueries, SubIsOccludedPageSize));
+		}
 
-			if (ViewMask != 0)
+		SubIsOccludedStart = SubIsOccluded->Num();
+	}
+
+	bool bIsVisible = true;
+	bool bAllSubOcclusionStateIsDefinite = true;
+	bool bAllSubOccluded = true;
+	FPrimitiveComponentId PrimitiveId = Scene.PrimitiveComponentIds[Index];
+
+	for (int32 SubQuery = 0; SubQuery < NumSubQueries; SubQuery++)
+	{
+		FPrimitiveOcclusionHistory* PrimitiveOcclusionHistory = PrimitiveOcclusionHistorySet.Find(FPrimitiveOcclusionHistoryKey(PrimitiveId, SubQuery));
+
+		bool bIsOccluded = false;
+		bool bOcclusionStateIsDefinite = false;
+
+		if (!PrimitiveOcclusionHistory)
+		{
+			PrimitiveOcclusionHistory = Visitor.AddOcclusionHistory(FPrimitiveOcclusionHistory(PrimitiveId, SubQuery));
+		}
+		else
+		{
+			if (View.bIgnoreExistingQueries)
 			{
-				// Don't cull a single eye when drawing a stereo pair
-				const uint8 ViewMaskFinal = (bIsInstancedStereo) ? ViewMask | 0x3 : ViewMask;
-
-				FPrimitiveSceneInfo* PrimitiveSceneInfo = InScene->Primitives[PrimitiveIndex];
-				const FPrimitiveBounds& Bounds = InScene->PrimitiveBounds[PrimitiveIndex];
-				Collector.SetPrimitive(PrimitiveSceneInfo->Proxy, PrimitiveSceneInfo->DefaultDynamicHitProxyId);
-
-				PrimitiveSceneInfo->Proxy->GetDynamicMeshElements(InViewFamily.Views, InViewFamily, ViewMaskFinal, Collector);
-
-				// Compute DynamicMeshElementsMeshPassRelevance for this primitive.
-				for (int32 ViewIndex = 0; ViewIndex < ViewCount; ViewIndex++)
+				// If the view is ignoring occlusion queries, the primitive is definitely unoccluded.
+				bOcclusionStateIsDefinite = View.bDisableQuerySubmissions;
+			}
+			else
+			{
+				if (bUseOcclusionFeedback)
 				{
-					if (ViewMaskFinal & (1 << ViewIndex))
+					bIsOccluded = OcclusionFeedback.IsOccluded(FPrimitiveOcclusionHistoryKey(PrimitiveId, SubQuery));
+					bOcclusionStateIsDefinite = true;
+				}
+				else if (OcclusionState.bHZBOcclusion)
+				{
+					if (HZBOcclusionTests.IsValidFrame(PrimitiveOcclusionHistory->LastTestFrameNumber))
 					{
-						FViewInfo& View = InViews[ViewIndex];
-						const bool bAddLightmapDensityCommands = View.Family->EngineShowFlags.LightMapDensity && AllowDebugViewmodes();
-						const FPrimitiveViewRelevance& ViewRelevance = View.PrimitiveViewRelevanceMap[PrimitiveIndex];
-
-						const int32 LastNumDynamicMeshElements = View.DynamicMeshElementsPassRelevance.Num();
-						View.DynamicMeshElementsPassRelevance.SetNum(View.DynamicMeshElements.Num());
-
-						for (int32 ElementIndex = LastNumDynamicMeshElements; ElementIndex < View.DynamicMeshElements.Num(); ++ElementIndex)
+						bIsOccluded = !HZBOcclusionTests.IsVisible(PrimitiveOcclusionHistory->HZBTestIndex);
+						bOcclusionStateIsDefinite = true;
+					}
+				}
+				else
+				{
+					// Read the occlusion query results.
+					uint64 NumSamples = 0;
+					bool bGrouped = false;
+					FRHIRenderQuery* PastQuery = PrimitiveOcclusionHistory->GetQueryForReading(OcclusionFrameCounter, OcclusionState.NumBufferedFrames, OcclusionState.ReadBackLagTolerance, bGrouped);
+					if (PastQuery)
+					{
+						if (RHIGetRenderQueryResult(PastQuery, NumSamples, true))
 						{
-							const FMeshBatchAndRelevance& MeshBatch = View.DynamicMeshElements[ElementIndex];
-							FMeshPassMask& PassRelevance = View.DynamicMeshElementsPassRelevance[ElementIndex];
+							// we render occlusion without MSAA
+							uint32 NumPixels = (uint32)NumSamples;
 
-							ComputeDynamicMeshRelevance(ShadingPath, bAddLightmapDensityCommands, ViewRelevance, MeshBatch, View, PassRelevance, PrimitiveSceneInfo, Bounds);
+							// The primitive is occluded if none of its bounding box's pixels were visible in the previous frame's occlusion query.
+							bIsOccluded = (NumPixels == 0);
+
+							if (!bIsOccluded)
+							{
+								checkSlow(View.OneOverNumPossiblePixels > 0.0f);
+								PrimitiveOcclusionHistory->LastPixelsPercentage = NumPixels * View.OneOverNumPossiblePixels;
+							}
+							else
+							{
+								PrimitiveOcclusionHistory->LastPixelsPercentage = 0.0f;
+							}
+
+							// Flag the primitive's occlusion state as definite if it wasn't grouped.
+							bOcclusionStateIsDefinite = !bGrouped;
+						}
+						else
+						{
+							// If the occlusion query failed, treat the primitive as visible.  
+							// already set bIsOccluded = false;
+						}
+
+						Result.NumTestedQueries++;
+					}
+					else
+					{
+						if (OcclusionState.NumBufferedFrames > 1 || GRHIMaximumReccommendedOustandingOcclusionQueries < MAX_int32)
+						{
+							// If there's no occlusion query for the primitive, assume it is whatever it was last frame
+							bIsOccluded = PrimitiveOcclusionHistory->WasOccludedLastFrame;
+							bOcclusionStateIsDefinite = PrimitiveOcclusionHistory->OcclusionStateWasDefiniteLastFrame;
+						}
+						else
+						{
+							// If there's no occlusion query for the primitive, set it's visibility state to whether it has been unoccluded recently.
+							bIsOccluded = (PrimitiveOcclusionHistory->LastProvenVisibleTime + GEngine->PrimitiveProbablyVisibleTime < CurrentRealTime);
+							// the state was definite last frame, otherwise we would have ran a query
+							bOcclusionStateIsDefinite = true;
+						}
+						if (bIsOccluded)
+						{
+							PrimitiveOcclusionHistory->LastPixelsPercentage = 0.0f;
+						}
+						else
+						{
+							PrimitiveOcclusionHistory->LastPixelsPercentage = GEngine->MaxOcclusionPixelsFraction;
+						}
+					}
+				}
+
+				if (GVisualizeOccludedPrimitives && bIsOccluded)
+				{
+					const FBoxSphereBounds& Bounds = bSubQueries ? (*SubBounds)[SubQuery] : Scene.PrimitiveOcclusionBounds[Index];
+					Visitor.AddVisualizeQuery(Bounds.GetBox());
+				}
+			}
+		}
+
+		if (OcclusionState.bSubmitQueries)
+		{
+			bool bSkipNewlyConsidered = false;
+
+			if (bNewlyConsideredBBoxExpandActive)
+			{
+				if (!PrimitiveOcclusionHistory->BecameEligibleForQueryCooldown && OcclusionFrameCounter - PrimitiveOcclusionHistory->LastConsideredFrameNumber > uint32(GFramesNotOcclusionTestedToExpandBBoxes))
+				{
+					PrimitiveOcclusionHistory->BecameEligibleForQueryCooldown = GFramesToExpandNewlyOcclusionTestedBBoxes;
+				}
+
+				bSkipNewlyConsidered = !!PrimitiveOcclusionHistory->BecameEligibleForQueryCooldown;
+
+				if (bSkipNewlyConsidered)
+				{
+					PrimitiveOcclusionHistory->BecameEligibleForQueryCooldown--;
+				}
+			}
+
+			bool bAllowBoundsTest;
+			const FBoxSphereBounds OcclusionBounds = (bSubQueries ? (*SubBounds)[SubQuery] : Scene.PrimitiveOcclusionBounds[Index]).ExpandBy(GExpandAllTestedBBoxesAmount + (bSkipNewlyConsidered ? GExpandNewlyOcclusionTestedBBoxesAmount : 0.0));
+			if (FVector::DistSquared(ViewOrigin, OcclusionBounds.Origin) < NeverOcclusionTestDistanceSquared)
+			{
+				bAllowBoundsTest = false;
+			}
+			else if (View.bHasNearClippingPlane)
+			{
+				bAllowBoundsTest = View.NearClippingPlane.PlaneDot(OcclusionBounds.Origin) <
+					-(FVector::BoxPushOut(View.NearClippingPlane, OcclusionBounds.BoxExtent));
+
+			}
+			else if (!View.IsPerspectiveProjection())
+			{
+				// Transform parallel near plane
+				static_assert((int32)ERHIZBuffer::IsInverted != 0, "Check equation for culling!");
+				bAllowBoundsTest = View.WorldToScreen(OcclusionBounds.Origin).Z - View.ViewMatrices.GetProjectionMatrix().M[2][2] * OcclusionBounds.SphereRadius < 1;
+			}
+			else
+			{
+				bAllowBoundsTest = OcclusionBounds.SphereRadius < HALF_WORLD_MAX;
+			}
+
+			if (bAllowBoundsTest)
+			{
+				PrimitiveOcclusionHistory->LastTestFrameNumber = OcclusionFrameCounter;
+
+				if (bUseOcclusionFeedback)
+				{
+					const FVector BoundOrigin = OcclusionBounds.Origin + View.ViewMatrices.GetPreViewTranslation();
+					const FVector BoundExtent = OcclusionBounds.BoxExtent;
+
+					Visitor.AddOcclusionFeedback(FOcclusionFeedbackEntry(FPrimitiveOcclusionHistoryKey(PrimitiveId, SubQuery), BoundOrigin, BoundExtent));
+				}
+				else if (OcclusionState.bHZBOcclusion)
+				{
+					Visitor.AddHZBBounds(FHZBBound(PrimitiveOcclusionHistory, OcclusionBounds.Origin, OcclusionBounds.BoxExtent));
+				}
+				else
+				{
+					// decide if a query should be run this frame
+					bool bRunQuery, bGroupedQuery;
+
+					if (!bSubQueries && // sub queries are never grouped, we assume the custom code knows what it is doing and will group internally if it wants
+						(OcclusionFlags & EOcclusionFlags::AllowApproximateOcclusion))
+					{
+						if (bIsOccluded)
+						{
+							// Primitives that were occluded the previous frame use grouped queries.
+							bGroupedQuery = true;
+							bRunQuery = true;
+						}
+						else if (bOcclusionStateIsDefinite)
+						{
+							bGroupedQuery = false;
+							float Rnd = GOcclusionRandomStream.GetFraction();
+							if (GRHISupportsExactOcclusionQueries)
+							{
+								float FractionMultiplier = FMath::Max(PrimitiveOcclusionHistory->LastPixelsPercentage / GEngine->MaxOcclusionPixelsFraction, 1.0f);
+								bRunQuery = (FractionMultiplier * Rnd) < GEngine->MaxOcclusionPixelsFraction;
+							}
+							else
+							{
+								bRunQuery = CurrentRealTime - PrimitiveOcclusionHistory->LastProvenVisibleTime > PrimitiveProbablyVisibleTime * (0.5f * 0.25f * Rnd);
+							}
+						}
+						else
+						{
+							bGroupedQuery = false;
+							bRunQuery = true;
+						}
+					}
+					else
+					{
+						// Primitives that need precise occlusion results use individual queries.
+						bGroupedQuery = false;
+						bRunQuery = true;
+					}
+
+					if (bRunQuery)
+					{
+						const FVector BoundOrigin = OcclusionBounds.Origin + View.ViewMatrices.GetPreViewTranslation();
+						const FVector BoundExtent = OcclusionBounds.BoxExtent;
+
+						if (GRHIMaximumReccommendedOustandingOcclusionQueries < MAX_int32 && !bGroupedQuery)
+						{
+							Visitor.AddThrottledOcclusionQuery(FThrottledOcclusionQuery(FPrimitiveOcclusionHistoryKey(PrimitiveId, SubQuery), BoundOrigin, BoundExtent, PrimitiveOcclusionHistory->LastQuerySubmitFrame()));
+						}
+						else
+						{
+							Visitor.AddOcclusionQuery(FOcclusionQuery(PrimitiveOcclusionHistory, BoundOrigin, BoundExtent, bGroupedQuery));
 						}
 					}
 				}
 			}
-
-			// Mark DynamicMeshEndIndices end.
-			for (int32 ViewIndex = 0; ViewIndex < ViewCount; ViewIndex++)
+			else
 			{
-				InViews[ViewIndex].DynamicMeshEndIndices[PrimitiveIndex] = Collector.GetMeshBatchCount(ViewIndex);
+				// If the primitive's bounding box intersects the near clipping plane, treat it as definitely unoccluded.
+				bIsOccluded = false;
+				bOcclusionStateIsDefinite = true;
+			}
+		}
+
+		// Set the primitive's considered time to keep its occlusion history from being trimmed.
+		PrimitiveOcclusionHistory->LastConsideredTime = CurrentRealTime;
+		if (!bIsOccluded && bOcclusionStateIsDefinite)
+		{
+			PrimitiveOcclusionHistory->LastProvenVisibleTime = CurrentRealTime;
+		}
+
+		PrimitiveOcclusionHistory->LastConsideredFrameNumber = OcclusionFrameCounter;
+		PrimitiveOcclusionHistory->WasOccludedLastFrame = bIsOccluded;
+		PrimitiveOcclusionHistory->OcclusionStateWasDefiniteLastFrame = bOcclusionStateIsDefinite;
+
+		if (bSubQueries)
+		{
+			SubIsOccluded->Add(bIsOccluded);
+			if (!bIsOccluded)
+			{
+				bAllSubOccluded = false;
+			}
+			if (bIsOccluded || !bOcclusionStateIsDefinite)
+			{
+				bAllSubOcclusionStateIsDefinite = false;
+			}
+		}
+		else
+		{
+			if (bIsOccluded)
+			{
+				if constexpr (bIsParallel)
+				{
+					View.PrimitiveVisibilityMap[Index].AtomicSet(false);
+				}
+				else
+				{
+					View.PrimitiveVisibilityMap[Index] = false;
+				}
+				bIsVisible = false;
+				Result.NumCulledPrimitives++;
 			}
 		}
 	}
 
+	if (bSubQueries)
+	{
+		FPrimitiveSceneProxy* Proxy = Scene.PrimitiveSceneProxies[Index];
+		Proxy->AcceptOcclusionResults(&View, SubIsOccluded, SubIsOccludedStart, SubIsOccluded->Num() - SubIsOccludedStart);
+
+		if (bAllSubOccluded)
+		{
+			if constexpr (bIsParallel)
+			{
+				View.PrimitiveVisibilityMap[Index].AtomicSet(false);
+			}
+			else
+			{
+				View.PrimitiveVisibilityMap[Index] = false;
+			}
+			bIsVisible = false;
+			Result.NumCulledPrimitives++;
+		}
+	}
+
+	return bIsVisible;
+}
+
+void FGPUOcclusionPacket::FProcessVisitor::AddOcclusionQuery(const FOcclusionQuery& Query)
+{
+	FRHIRenderQuery* RenderQuery = nullptr;
+
+	if (Query.bGroupedQuery)
+	{
+		RenderQuery = Packet.View.GroupedOcclusionQueries.BatchPrimitive(Query.Bounds.Origin, Query.Bounds.Extent, DynamicVertexBuffer);
+	}
+	else
+	{
+		RenderQuery = Packet.View.IndividualOcclusionQueries.BatchPrimitive(Query.Bounds.Origin, Query.Bounds.Extent, DynamicVertexBuffer);
+	}
+
+	Packet.ViewState.Occlusion.LastOcclusionQuery = RenderQuery;
+	Packet.ViewState.Occlusion.NumRequestedQueries++;
+
+	Query.PrimitiveOcclusionHistory->SetCurrentQuery(
+		Packet.ViewState.OcclusionFrameCounter,
+		RenderQuery,
+		Packet.OcclusionState.NumBufferedFrames,
+		Query.bGroupedQuery,
+		Packet.OcclusionState.bUseRoundRobinOcclusion
+	);
+}
+
+void FGPUOcclusionPacket::FProcessVisitor::SubmitThrottledOcclusionQueries()
+{
+	if (ThrottledOcclusionQueries.IsEmpty())
+	{
+		return;
+	}
+
+	TArray<FThrottledOcclusionQuery*, SceneRenderingAllocator> SortedQueries;
+	SortedQueries.Reserve(ThrottledOcclusionQueries.Num());
+
+	for (FThrottledOcclusionQuery& ThrottledOcclusionQuery : ThrottledOcclusionQueries)
+	{
+		SortedQueries.Emplace(&ThrottledOcclusionQuery);
+	}
+
+	const int32 NumRequestedThrottledQueries = SortedQueries.Num();
+	const int32 NumUsedQueries = Packet.View.GroupedOcclusionQueries.GetNumBatchOcclusionQueries();
+	const int32 ThrottleThreshold = GRHIMaximumReccommendedOustandingOcclusionQueries / FMath::Min(Packet.OcclusionState.NumBufferedFrames, 2); // extra RHIT frame does not count
+
+	int32 NumThrottledQueries = NumRequestedThrottledQueries;
+
+	if (NumUsedQueries + NumRequestedThrottledQueries > ThrottleThreshold)
+	{
+		// We need to make progress, even if it means stalling and waiting for the GPU. At a minimum, we will do 10%.
+		NumThrottledQueries = (NumRequestedThrottledQueries + 9) / 10;
+
+		if (NumUsedQueries + NumThrottledQueries < ThrottleThreshold)
+		{
+			// We can do more than the minimum.
+			NumThrottledQueries = ThrottleThreshold - NumUsedQueries;
+		}
+	}
+
+	if (NumThrottledQueries < NumRequestedThrottledQueries)
+	{
+		SortedQueries.Sort([](const FThrottledOcclusionQuery& A, const FThrottledOcclusionQuery& B)
+		{
+			return A.LastQuerySubmitFrame < B.LastQuerySubmitFrame;
+		});
+	}
+
+	for (int32 Index = 0; Index < NumThrottledQueries; ++Index)
+	{
+		FThrottledOcclusionQuery* Query = SortedQueries[Index];
+		FPrimitiveOcclusionHistory* PrimitiveOcclusionHistory = PrimitiveOcclusionHistorySet.Find(Query->PrimitiveOcclusionHistoryKey);
+
+		FRHIRenderQuery* RenderQuery = Packet.View.IndividualOcclusionQueries.BatchPrimitive(Query->Bounds.Origin, Query->Bounds.Extent, DynamicVertexBuffer);
+
+		Packet.ViewState.Occlusion.LastOcclusionQuery = RenderQuery;
+		Packet.ViewState.Occlusion.NumRequestedQueries++;
+
+		PrimitiveOcclusionHistory->SetCurrentQuery(
+			Packet.ViewState.OcclusionFrameCounter,
+			RenderQuery,
+			Packet.OcclusionState.NumBufferedFrames,
+			false,
+			Packet.OcclusionState.bUseRoundRobinOcclusion
+		);
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+FGPUOcclusion::FGPUOcclusion(FVisibilityViewPacket& InViewPacket)
+	: ViewPacket(InViewPacket)
+	, Scene(ViewPacket.Scene)
+	, View(ViewPacket.View)
+	, ViewState(*ViewPacket.ViewState)
+{
+	State.bSubmitQueries = !View.bDisableQuerySubmissions;
+
+#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+	State.bSubmitQueries &= !ViewState.bIsFrozen;
+#endif
+
+	// Perform round-robin occlusion queries
+	if (ViewState.IsRoundRobinEnabled() &&
+		!View.bIsSceneCapture && // We only round-robin on the main renderer (not scene captures)
+		!View.bIgnoreExistingQueries && // We do not alternate occlusion queries when we want to refresh the occlusion history
+		IStereoRendering::IsStereoEyeView(View)) // Only relevant to stereo views
+	{
+		// For even frames, prevent left eye from occlusion querying
+		// For odd frames, prevent right eye from occlusion querying
+		const bool FrameParity = ((ViewState.PrevFrameNumber & 0x01) == 1);
+		State.bSubmitQueries &= (FrameParity && IStereoRendering::IsAPrimaryView(View)) || (!FrameParity && IStereoRendering::IsASecondaryView(View));
+	}
+
+	// Disable HZB on OpenGL platforms to avoid rendering artifacts
+	// It can be forced on by setting HZBOcclusion to 2
+	State.bHZBOcclusion = !IsOpenGLPlatform(View.GetShaderPlatform());
+	State.bHZBOcclusion &= FDataDrivenShaderPlatformInfo::GetSupportsHZBOcclusion(View.GetShaderPlatform());
+	State.bHZBOcclusion &= GHZBOcclusion != 0;
+	State.bHZBOcclusion |= GHZBOcclusion == 2;
+
+	State.bUseRoundRobinOcclusion = IStereoRendering::IsStereoEyeView(View) && !View.bIsSceneCapture && ViewState.IsRoundRobinEnabled();
+
+	State.NumBufferedFrames = FOcclusionQueryHelpers::GetNumBufferedFrames(Scene.GetFeatureLevel());
+	State.ReadBackLagTolerance = State.NumBufferedFrames;
+
+	State.bAllowSubQueries = GAllowSubPrimitiveQueries && !View.bDisableQuerySubmissions;
+
+	if (State.bUseRoundRobinOcclusion)
+	{
+		// Round-robin occlusion culling involves reading frames that could be twice as stale as without round-robin
+		State.ReadBackLagTolerance = State.NumBufferedFrames * 2;
+	}
+}
+
+void FGPUOcclusion::Map(FRHICommandListImmediate& RHICmdListImmediate)
+{
+	SCOPED_NAMED_EVENT(MapOcclusionResults, FColor::Magenta);
+	RHICmdListImmediate.SetCurrentStat(GET_STATID(STAT_CLMM_OcclusionReadback));
+
+	if (ViewState.OcclusionFeedback.IsInitialized())
+	{
+		QUICK_SCOPE_CYCLE_COUNTER(STAT_OcclusionFeedback_ReadbackResults);
+		ViewState.OcclusionFeedback.ReadbackResults(RHICmdListImmediate);
+		ViewState.OcclusionFeedback.AdvanceFrame(ViewState.OcclusionFrameCounter);
+	}
+	else if (State.bHZBOcclusion)
+	{
+		QUICK_SCOPE_CYCLE_COUNTER(STAT_MapHZBResults);
+		check(!ViewState.HZBOcclusionTests.IsValidFrame(ViewState.OcclusionFrameCounter));
+		ViewState.HZBOcclusionTests.MapResults(RHICmdListImmediate);
+	}
+
+	ViewState.PrimitiveOcclusionQueryPool.AdvanceFrame(
+		ViewState.OcclusionFrameCounter,
+		FOcclusionQueryHelpers::GetNumBufferedFrames(Scene.GetFeatureLevel()),
+		ViewState.IsRoundRobinEnabled() && !View.bIsSceneCapture && IStereoRendering::IsStereoEyeView(View));
+
+	ViewState.Occlusion.NumRequestedQueries = 0;
+
+	RHICmdListImmediate.SetCurrentStat(GET_STATID(STAT_CLMM_AfterOcclusionReadback));
+}
+
+void FGPUOcclusion::Unmap(FRHICommandListImmediate& RHICmdListImmediate)
+{
+	if (State.bHZBOcclusion)
+	{
+		ViewState.HZBOcclusionTests.UnmapResults(RHICmdListImmediate);
+	}
+
+	if (View.FeatureLevel == ERHIFeatureLevel::ES3_1)
+	{
+		// Initialize/release OcclusionFeedback system on demand
+		if (GOcclusionFeedback_Enable == 0 && ViewState.OcclusionFeedback.IsInitialized())
+		{
+			ViewState.OcclusionFeedback.ReleaseResource();
+		}
+		else if (GOcclusionFeedback_Enable != 0 && !ViewState.OcclusionFeedback.IsInitialized())
+		{
+			ViewState.OcclusionFeedback.InitResource(RHICmdListImmediate);
+		}
+	}
+
+	if (State.bHZBOcclusion && State.bSubmitQueries)
+	{
+		ViewState.HZBOcclusionTests.SetValidFrameNumber(ViewState.OcclusionFrameCounter);
+	}
+}
+
+void FGPUOcclusion::WaitForLastOcclusionQuery()
+{
+	if (ViewState.Occlusion.LastOcclusionQuery)
+	{
+		uint64 Result;
+		const bool bWait = true;
+		RHIGetRenderQueryResult(ViewState.Occlusion.LastOcclusionQuery, Result, bWait);
+		ViewState.Occlusion.LastOcclusionQuery = nullptr;
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+bool FGPUOcclusionParallelPacket::AddPrimitive(int32 PrimitiveIndex)
+{
+	EOcclusionFlags::Type OcclusionFlags;
+
+	if (CanBeOccluded(PrimitiveIndex, OcclusionFlags))
+	{
+		Input.AddElement(PrimitiveIndex);
+		int32 NumSubQueries = 1;
+
+		if (EnumHasAnyFlags(OcclusionFlags, EOcclusionFlags::HasSubprimitiveQueries) && OcclusionState.bAllowSubQueries)
+		{
+			NumSubQueries = Scene.PrimitiveSceneProxies[PrimitiveIndex]->GetOcclusionQueries(&View)->Num();
+		}
+
+		NumInputSubQueries += NumSubQueries;
+		return true;
+	}
+
+	return false;
+}
+
+void FGPUOcclusionParallelPacket::LaunchOcclusionCullTask()
+{
+	check(!bTaskLaunched);
+
+	if (Input.IsEmpty())
+	{
+		return;
+	}
+
+	bTaskLaunched = true;
+
+	ViewPacket.Relevance.CommandPipe.AddNumCommands(1);
+
+	FVisibilityTaskConfig& TaskConfig = ViewPacket.TaskConfig;
+
+	Task = UE::Tasks::Launch(UE_SOURCE_LOCATION, [this, &TaskConfig]
+	{
+		FOptionalTaskTagScope Scope(ETaskTag::EParallelRenderingThread);
+
+		FPrimitiveIndexList PrimitiveIndexList;
+		const FOcclusionCullResult Result = OcclusionCullTask(PrimitiveIndexList);
+
+		if (PrimitiveIndexList.IsEmpty())
+		{
+			ViewPacket.Relevance.CommandPipe.ReleaseNumCommands(1);
+		}
+		else
+		{
+			ViewPacket.Relevance.CommandPipe.EnqueueCommand(MoveTemp(PrimitiveIndexList));
+		}
+
+		RecordOcclusionCullResult(Result);
+
+	}, TaskConfig.OcclusionCull.TaskPriority);
+}
+
+FOcclusionCullResult FGPUOcclusionParallelPacket::OcclusionCullTask(FPrimitiveIndexList& PrimitiveIndexList)
+{
+	SCOPED_NAMED_EVENT(OcclusionCull, FColor::Magenta);
+
+	FOcclusionCullResult Result;
+
+	PrimitiveIndexList.Reserve(Input.Num());
+
+	for (int32 Index : Input)
+	{
+		if (OcclusionCullPrimitive<true>(RecordVisitor, Result, Index))
+		{
+			PrimitiveIndexList.Emplace(Index);
+		}
+	}
+
+	return Result;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void FGPUOcclusionParallel::AddPrimitives(FPrimitiveRange PrimitiveRange)
+{
+	WaitForLastOcclusionQuery();
+
+	for (FSceneSetBitIterator BitIt(View.PrimitiveVisibilityMap, PrimitiveRange.StartIndex); BitIt.GetIndex() < PrimitiveRange.EndIndex; ++BitIt)
+	{
+		FGPUOcclusionParallelPacket* Packet = Packets.Last();
+
+		if (Packet->AddPrimitive(BitIt.GetIndex()))
+		{
+			if (Packet->IsFull())
+			{
+				Packet->LaunchOcclusionCullTask();
+				CreateOcclusionPacket();
+			}
+		}
+		else
+		{
+			// The primitive will not be occluded, so accumulate a packet of primitives to send directly to the relevance pipe to reduce latency.
+			NonOccludedPrimitives.Emplace(BitIt.GetIndex());
+
+			if (NonOccludedPrimitives.Num() == MaxNonOccludedPrimitives)
+			{
+				ViewPacket.Relevance.CommandPipe.AddNumCommands(1);
+				ViewPacket.Relevance.CommandPipe.EnqueueCommand(MoveTemp(NonOccludedPrimitives));
+				NonOccludedPrimitives.Reset();
+				NonOccludedPrimitives.Reserve(MaxNonOccludedPrimitives);
+			}
+		}
+	}
+}
+
+void FGPUOcclusionParallel::Finish(UE::Tasks::FTaskEvent& OcclusionCullTasks)
+{
+	check(!bFinished);
+	bFinished = true;
+
+	Packets.Last()->LaunchOcclusionCullTask();
+
+	if (!NonOccludedPrimitives.IsEmpty())
+	{
+		ViewPacket.Relevance.CommandPipe.AddNumCommands(1);
+		ViewPacket.Relevance.CommandPipe.EnqueueCommand(MoveTemp(NonOccludedPrimitives));
+		NonOccludedPrimitives.Reset();
+	}
+
+	for (FGPUOcclusionParallelPacket* Packet : Packets)
+	{
+		if (Packet->bTaskLaunched)
+		{
+			OcclusionCullTasks.AddPrerequisites(Packet->Task);
+		}
+	}
+
+	OcclusionCullTasks.Trigger();
+}
+
+void FGPUOcclusionParallel::Finalize()
+{
+	check(bFinished);
+	bFinalized = true;
+
+	SCOPED_NAMED_EVENT(FinalizeOcclusionCull, FColor::Magenta);
+
+	for (FGPUOcclusionParallelPacket* Packet : Packets)
+	{
+		FGPUOcclusionPacket::FProcessVisitor ProcessVisitor(*Packet, *RHICmdList, DynamicVertexBuffer);
+		ProcessVisitor.Replay(Packet->RecordVisitor);
+	}
+
+	for (FGPUOcclusionParallelPacket* Packet : Packets)
+	{
+		// Wait to add occlusion histories until after replaying commands since it will invalidate pointers.
+		for (FPrimitiveOcclusionHistory& OcclusionHistory : Packet->RecordVisitor.OcclusionHistories)
+		{
+			ViewState.Occlusion.PrimitiveOcclusionHistorySet.Add(OcclusionHistory);
+		}
+
+		delete Packet;
+	}
+
+	Packets.Empty();
+	DynamicVertexBuffer.Commit();
+	RHICmdList->FinishRecording();
+	FinalizeTask.Trigger();
+}
+
+void FGPUOcclusionParallel::Map(FRHICommandListImmediate& RHICmdListImmediate)
+{
+	FGPUOcclusion::Map(RHICmdListImmediate);
+	RHICmdList = new FRHICommandList(RHICmdListImmediate.GetGPUMask());
+	RHICmdList->SwitchPipeline(ERHIPipeline::Graphics);
+	DynamicVertexBuffer.Init(*RHICmdList);
+}
+
+void FGPUOcclusionParallel::Unmap(FRHICommandListImmediate& RHICmdListImmediate)
+{
+	FinalizeTask.Wait();
+	check(bFinalized);
+	RHICmdListImmediate.QueueAsyncCommandListSubmit(RHICmdList);
+	FGPUOcclusion::Unmap(RHICmdListImmediate);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void FGPUOcclusionSerial::AddPrimitives(FPrimitiveRange PrimitiveRange)
+{
+	CSV_SCOPED_TIMING_STAT_EXCLUSIVE(FetchVisibilityForPrimitives);
+
+	for (FSceneSetBitIterator BitIt(View.PrimitiveVisibilityMap, PrimitiveRange.StartIndex); BitIt.GetIndex() < PrimitiveRange.EndIndex; ++BitIt)
+	{
+		EOcclusionFlags::Type OcclusionFlags;
+		if (Packet.CanBeOccluded(BitIt.GetIndex(), OcclusionFlags))
+		{
+			Packet.OcclusionCullPrimitive<false>(ProcessVisitor, OcclusionCullResult, BitIt.GetIndex());
+		}
+	}
+}
+
+void FGPUOcclusionSerial::Map(FRHICommandListImmediate& RHICmdListImmediate)
+{
+	FGPUOcclusion::Map(RHICmdListImmediate);
+	DynamicVertexBuffer.Init(RHICmdListImmediate);
+}
+
+void FGPUOcclusionSerial::Unmap(FRHICommandListImmediate& RHICmdListImmediate)
+{
+	DynamicVertexBuffer.Commit();
+	ProcessVisitor.SubmitThrottledOcclusionQueries();
+	Packet.RecordOcclusionCullResult(OcclusionCullResult);
+	FGPUOcclusion::Unmap(RHICmdListImmediate);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+static int32 PrecomputedOcclusionCull(FVisibilityViewPacket& ViewPacket, FPrimitiveRange PrimitiveRange)
+{
+	int32 NumOccludedPrimitives = 0;
+
+	const FScene& Scene = ViewPacket.Scene;
+	FViewInfo& View = ViewPacket.View;
+
+	if (View.PrecomputedVisibilityData)
+	{
+		SCOPED_NAMED_EVENT(PrecomputedOcclusionCull, FColor::Magenta);
+		QUICK_SCOPE_CYCLE_COUNTER(STAT_PrecomputedOcclusionCull);
+
+		uint8 PrecomputedVisibilityFlags = EOcclusionFlags::CanBeOccluded | EOcclusionFlags::HasPrecomputedVisibility;
+		for (FSceneSetBitIterator BitIt(View.PrimitiveVisibilityMap, PrimitiveRange.StartIndex); BitIt.GetIndex() < PrimitiveRange.EndIndex; ++BitIt)
+		{
+			if ((Scene.PrimitiveOcclusionFlags[BitIt.GetIndex()] & PrecomputedVisibilityFlags) == PrecomputedVisibilityFlags)
+			{
+				FPrimitiveVisibilityId VisibilityId = Scene.PrimitiveVisibilityIds[BitIt.GetIndex()];
+				if ((View.PrecomputedVisibilityData[VisibilityId.ByteIndex] & VisibilityId.BitMask) == 0)
+				{
+					if (GVisualizeOccludedPrimitives)
+					{
+						const FBoxSphereBounds& Bounds = Scene.PrimitiveOcclusionBounds[BitIt.GetIndex()];
+						DrawWireBox(&ViewPacket.ViewElementPDI, Bounds.GetBox(), FColor(100, 50, 50), SDPG_Foreground);
+					}
+
+					View.PrimitiveVisibilityMap.AccessCorrespondingBit(BitIt) = false;
+					INC_DWORD_STAT_BY(STAT_StaticallyOccludedPrimitives, 1);
+					NumOccludedPrimitives++;
+				}
+			}
+		}
+	}
+
+	return NumOccludedPrimitives;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+FVisibilityTaskConfig::FVisibilityTaskConfig(const FScene& Scene, TConstArrayView<FViewInfo*> Views)
+{
+	Schedule = GVisibilityTaskSchedule != 0 ? EVisibilityTaskSchedule::Parallel : EVisibilityTaskSchedule::RenderThread;
+
+	if (Schedule == EVisibilityTaskSchedule::Parallel)
+	{
+		if (!FApp::ShouldUseThreadingForPerformance() || !GIsThreadedRendering || !GSupportsParallelOcclusionQueries || GVisualizeOccludedPrimitives > 0 || IsMobilePlatform(Scene.GetShaderPlatform()))
+		{
+			Schedule = EVisibilityTaskSchedule::RenderThread;
+		}
+	}
+
+	NumTestedPrimitives = uint32(Scene.Primitives.Num());
+	NumVisiblePrimitives = 0u;
+
+	if (Scene.PrimitivesAlwaysVisibleOffset != ~0u)
+	{
+		NumTestedPrimitives  = Scene.PrimitivesAlwaysVisibleOffset;
+		NumVisiblePrimitives = uint32(Scene.Primitives.Num()) - NumTestedPrimitives;
+
+		// Ensure that the dword alignment code is correct and we never have partial dword offsets
+		check(uint32(NumTestedPrimitives % NumBitsPerDWORD) == 0u);
+	}
+
+	const uint32 NumWorkerThreads = FMath::Min(LowLevelTasks::FScheduler::Get().GetNumWorkers(), 16u);
+
+	// These values tune the task granularity based on number of primitives in the scene and the number of worker tasks available.
+	const uint32 NumAlwaysVisibleTasksPerThread = 2;
+	const uint32 NumFrustumCullTasksPerThread   = 2;
+	const uint32 NumOcclusionCullTasksPerThread = 2;
+	const uint32 NumRelevanceTasksPerThread     = 32;
+
+	const uint32 NumWordsPerTaskIfRenderThread = 128;
+
+	// Always Visible
+	if (NumVisiblePrimitives > 0u)
+	{
+		const uint32 NumPrimitiveWords = FMath::DivideAndRoundUp<uint32>(NumVisiblePrimitives, NumBitsPerDWORD);
+
+		if (Schedule == EVisibilityTaskSchedule::RenderThread)
+		{
+			AlwaysVisible.NumWordsPerTask = NumWordsPerTaskIfRenderThread;
+		}
+		else
+		{
+			AlwaysVisible.NumWordsPerTask = FMath::DivideAndRoundUp(NumPrimitiveWords, NumWorkerThreads * NumAlwaysVisibleTasksPerThread);
+		}
+
+		AlwaysVisible.NumWordsPerTask = FMath::Clamp(AlwaysVisible.NumWordsPerTask, AlwaysVisible.MinWordsPerTask, NumPrimitiveWords);
+		AlwaysVisible.NumPrimitivesPerTask = AlwaysVisible.NumWordsPerTask * NumBitsPerDWORD;
+		AlwaysVisible.NumTasks = FMath::DivideAndRoundUp(NumVisiblePrimitives, AlwaysVisible.NumPrimitivesPerTask);
+	}
+	else
+	{
+		AlwaysVisible.NumWordsPerTask = 0;
+		AlwaysVisible.NumPrimitivesPerTask = 0;
+		AlwaysVisible.NumTasks = 0;
+	}
+
+	// Frustum Cull
+	{
+		const uint32 NumPrimitiveWords = FMath::DivideAndRoundUp<uint32>(NumTestedPrimitives, NumBitsPerDWORD);
+
+		if (GFrustumCullNumPrimitivesPerTask > 0)
+		{
+			FrustumCull.NumWordsPerTask = FMath::DivideAndRoundUp<uint32>(GFrustumCullNumPrimitivesPerTask, NumBitsPerDWORD);
+		}
+		else if (Schedule == EVisibilityTaskSchedule::RenderThread)
+		{
+			FrustumCull.NumWordsPerTask = NumWordsPerTaskIfRenderThread;
+		}
+		else
+		{
+			FrustumCull.NumWordsPerTask = FMath::DivideAndRoundUp(NumPrimitiveWords, NumWorkerThreads * NumFrustumCullTasksPerThread);
+		}
+
+		FrustumCull.NumWordsPerTask = FMath::Clamp(FrustumCull.NumWordsPerTask, FrustumCull.MinWordsPerTask, NumPrimitiveWords);
+		FrustumCull.NumPrimitivesPerTask = FrustumCull.NumWordsPerTask * NumBitsPerDWORD;
+		FrustumCull.NumTasks = FMath::DivideAndRoundUp(NumTestedPrimitives, FrustumCull.NumPrimitivesPerTask);
+	}
+
+	// Occlusion Cull
+	{
+		OcclusionCull.Views.SetNum(Views.Num());
+
+		for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
+		{
+			uint32& MaxQueriesPerTask = OcclusionCull.Views[ViewIndex].MaxQueriesPerTask;
+
+			if (GOcclusionCullMaxQueriesPerTask > 0)
+			{
+				MaxQueriesPerTask = GOcclusionCullMaxQueriesPerTask;
+			}
+			else if (FSceneViewState* ViewState = static_cast<FSceneViewState*>(Views[ViewIndex]->State))
+			{
+				MaxQueriesPerTask = FMath::DivideAndRoundUp(ViewState->Occlusion.NumRequestedQueries, FMath::Max(1u, NumWorkerThreads) * NumOcclusionCullTasksPerThread);
+			}
+
+			MaxQueriesPerTask = FMath::Max(MaxQueriesPerTask, OcclusionCull.MinQueriesPerTask);
+		}
+	}
+
+	// Relevance
+	{
+		const uint32 NumPrimitivesPerPacketIfRenderThread = 128;
+
+		if (GRelevanceNumPrimitivesPerPacket > 0)
+		{
+			Relevance.NumPrimitivesPerPacket = GRelevanceNumPrimitivesPerPacket;
+		}
+		else if (Schedule == EVisibilityTaskSchedule::RenderThread)
+		{
+			Relevance.NumPrimitivesPerPacket = NumPrimitivesPerPacketIfRenderThread;
+		}
+		else
+		{
+			Relevance.NumPrimitivesPerPacket = FMath::DivideAndRoundUp(NumTestedPrimitives, NumWorkerThreads * NumRelevanceTasksPerThread);
+		}
+
+		Relevance.NumPrimitivesPerPacket = FMath::Clamp(Relevance.NumPrimitivesPerPacket, Relevance.MinPrimitivesPerTask, Relevance.MaxPrimitivesPerTask);
+		Relevance.NumEstimatedPackets = FMath::DivideAndRoundUp(NumTestedPrimitives, Relevance.NumPrimitivesPerPacket);
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+FVisibilityViewPacket::FVisibilityViewPacket(FVisibilityTaskData& InTaskData, FScene& InScene, FViewInfo& InView, int32 InViewIndex)
+	: TaskData(InTaskData)
+	, TaskConfig(TaskData.TaskConfig)
+	, Scene(InScene)
+	, View(InView)
+	, ViewState(static_cast<FSceneViewState*>(View.ViewState))
+	, ViewIndex(InViewIndex)
+	, ViewElementPDI(&View, nullptr, nullptr)
+{
+	if (ViewState && !View.Family->EngineShowFlags.Wireframe && GOcclusionCullEnabled)
+	{
+		if (TaskConfig.Schedule == EVisibilityTaskSchedule::Parallel)
+		{
+			OcclusionCull.ContextIfParallel = TaskData.Allocator.Create<FGPUOcclusionParallel>(*this);
+		}
+		else
+		{
+			OcclusionCull.ContextIfSerial = TaskData.Allocator.Create<FGPUOcclusionSerial>(*this);
+		}
+	}
+
+	if (TaskConfig.Schedule == EVisibilityTaskSchedule::Parallel)
+	{
+		// Chain the frustum cull task to the relevance task since we only wait on relevance.
+		Tasks.ComputeRelevance.AddPrerequisites(Tasks.FrustumCull);
+
+		// Callback for when an occlusion command is queued from frustum culling.
+		OcclusionCull.CommandPipe.SetCommandFunction([this](FPrimitiveRange PrimitiveRange)
+		{
+			UpdatePrimitiveFading(Scene, View, ViewState, PrimitiveRange);
+
+			const int32 NumCulledPrimitives = PrecomputedOcclusionCull(*this, PrimitiveRange);
+
+			if (OcclusionCull.ContextIfParallel)
+			{
+				OcclusionCull.ContextIfParallel->AddPrimitives(PrimitiveRange);
+			}
+
+			else if (View.bIsMultiViewportEnabled)
+			{
+				// In ISR, we still need to use the relevance pipe even when occlusion is disabled to ensure all commands are forwarded to the primary view.
+				FPrimitiveIndexList PrimitiveIndexList;
+				for (FSceneSetBitIterator BitIt(View.PrimitiveVisibilityMap, PrimitiveRange.StartIndex); BitIt.GetIndex() < PrimitiveRange.EndIndex; ++BitIt)
+				{
+					PrimitiveIndexList.Emplace(BitIt.GetIndex());
+				}
+
+				if (!PrimitiveIndexList.IsEmpty())
+				{
+					Relevance.CommandPipe.AddNumCommands(1);
+					Relevance.CommandPipe.EnqueueCommand(PrimitiveIndexList);
+				}
+			}
+
+			else
+			{
+				// When occlusion is disabled primitives are queued directly to the relevance context rather than as a command on the relevance pipe.
+				for (FSceneSetBitIterator BitIt(View.PrimitiveVisibilityMap, PrimitiveRange.StartIndex); BitIt.GetIndex() < PrimitiveRange.EndIndex; ++BitIt)
+				{
+					Relevance.Context->AddPrimitive(BitIt.GetIndex());
+				}
+			}
+
+			TaskConfig.OcclusionCull.NumCulledPrimitives.fetch_add(NumCulledPrimitives, std::memory_order_relaxed);
+		});
+
+		// Callback for when the occlusion pipe is done accepting commands.
+		OcclusionCull.CommandPipe.SetEmptyFunction([this]
+		{
+			if (OcclusionCull.ContextIfParallel)
+			{
+				OcclusionCull.ContextIfParallel->Finish(Tasks.OcclusionCull);
+
+				// Launch a follow-up task to finalize occlusion results after all occlusion packets have completed.
+				UE::Tasks::Launch(UE_SOURCE_LOCATION, [this]
+				{
+					FOptionalTaskTagScope Scope(ETaskTag::EParallelRenderingThread);
+					Relevance.CommandPipe.ReleaseNumCommands(1);
+					OcclusionCull.ContextIfParallel->Finalize();
+
+				}, Tasks.OcclusionCull, TaskConfig.OcclusionCull.FinalizeTaskPriority);
+			}
+			else
+			{
+				Relevance.CommandPipe.ReleaseNumCommands(1);
+				Tasks.OcclusionCull.Trigger();
+			}
+		});
+
+		// Take a reference on the occlusion command pipe that is released when all frustum cull commands are enqueued.
+		OcclusionCull.CommandPipe.AddNumCommands(1);
+
+		// Callback for when a relevance command is queued from occlusion.
+		if (View.bIsMultiViewportEnabled && View.StereoPass == EStereoscopicPass::eSSP_SECONDARY)
+		{
+			Relevance.CommandPipe.SetCommandFunction([this](FPrimitiveIndexList&& PrimitiveIndexList)
+			{
+				// For instanced stereo secondary views, also send this command to the primary view
+				Relevance.PrimaryViewCommandPipe->AddNumCommands(1);
+				Relevance.PrimaryViewCommandPipe->EnqueueCommand(PrimitiveIndexList);
+
+				Relevance.Context->AddPrimitives(CopyTemp(PrimitiveIndexList));
+			});
+		}
+		else
+		{
+			Relevance.CommandPipe.SetCommandFunction([this](FPrimitiveIndexList&& PrimitiveIndexList)
+			{
+				Relevance.Context->AddPrimitives(MoveTemp(PrimitiveIndexList));
+			});
+		}
+
+		// Callback for when the relevance pipe is done accepting commands.
+		if (View.bIsMultiViewportEnabled && View.StereoPass == EStereoscopicPass::eSSP_SECONDARY)
+		{
+			Relevance.CommandPipe.SetEmptyFunction([this]
+			{
+				Relevance.Context->Finish(Tasks.ComputeRelevance);
+
+				// Release reference on the instanced primary pipe
+				Relevance.PrimaryViewCommandPipe->ReleaseNumCommands(1);
+			});
+		}
+		else
+		{
+			Relevance.CommandPipe.SetEmptyFunction([this]
+			{
+				Relevance.Context->Finish(Tasks.ComputeRelevance);
+
+				// Only used in the Views.Num() == 1 case
+				if (TaskData.DynamicMeshElements.CommandPipe)
+				{
+					TaskData.DynamicMeshElements.CommandPipe->ReleaseNumCommands(1);
+				}
+			});
+		}
+
+		// Take a reference on the relevance command pipe that is released by the occlusion pipe when all occlusion commands are complete.
+		Relevance.CommandPipe.AddNumCommands(1);
+	}
+}
+
+void FVisibilityViewPacket::BeginInitVisibility()
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE_TEXT(*FString::Printf(TEXT("BeginInitVisibility %d"), ViewIndex));
+
+	// Mark all primitives as visible when not visibility culling
+	bool bShouldVisibilityCull = GFrustumCullEnabled;
+
+	// Allocate the view's visibility maps.
+	View.PrimitiveVisibilityMap.Init(!bShouldVisibilityCull, Scene.Primitives.Num());
+	View.PrimitiveRayTracingVisibilityMap.Init(false, Scene.Primitives.Num());
+	View.DynamicMeshElementRanges.SetNumZeroed(Scene.Primitives.Num());
+	View.PotentiallyFadingPrimitiveMap.Init(false, Scene.Primitives.Num());
+	View.PrimitiveFadeUniformBuffers.AddZeroed(Scene.Primitives.Num());
+	View.PrimitiveFadeUniformBufferMap.Init(false, Scene.Primitives.Num());
+	View.StaticMeshVisibilityMap.Init(false, Scene.StaticMeshes.GetMaxIndex());
+	View.StaticMeshFadeOutDitheredLODMap.Init(false, Scene.StaticMeshes.GetMaxIndex());
+	View.StaticMeshFadeInDitheredLODMap.Init(false, Scene.StaticMeshes.GetMaxIndex());
+	View.PrimitivesLODMask.Init(FLODMask(), Scene.Primitives.Num());
+
+	View.PrimitiveViewRelevanceMap.Reset(Scene.Primitives.Num());
+	View.PrimitiveViewRelevanceMap.AddZeroed(Scene.Primitives.Num());
+
+	if (View.ShowOnlyPrimitives.IsSet())
+	{
+		View.bHasNoVisiblePrimitive = View.ShowOnlyPrimitives->Num() == 0;
+	}
+
+	Relevance.Context = TaskData.Allocator.Create<FComputeAndMarkRelevance>(TaskData, Scene, View, ViewIndex);
+
+	ClearStalePrimitiveFadingStates(View, ViewState);
+
+	// Development builds sometimes override frustum culling, e.g. dependent views in the editor.
+#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+	if (ViewState)
+	{
+		// For views with frozen visibility, check if the primitive is in the frozen visibility set.
+		if (ViewState->bIsFrozen)
+		{
+			bShouldVisibilityCull = false;
+			for (int32 Index = 0; Index < int32(TaskConfig.NumTestedPrimitives); ++Index)
+			{
+				if (ViewState->FrozenPrimitives.Contains(Scene.PrimitiveComponentIds[Index]))
+				{
+					View.PrimitiveVisibilityMap[Index] = true;
+				}
+			}
+		}
+	}
+#endif
+
+	const float MaxDrawDistanceScale = GetCachedScalabilityCVars().ViewDistanceScale * GetCachedScalabilityCVars().CalculateFieldOfViewDistanceScale(View.DesiredFOV);
+	const FHLODVisibilityState* HLODState = nullptr;
+
+	// Most views use standard frustum culling.
+	if (bShouldVisibilityCull)
+	{
+		// Update HLOD transition/visibility states to allow use during distance culling
+		FLODSceneTree& HLODTree = Scene.SceneLODHierarchy;
+
+		if (HLODTree.IsActive())
+		{
+			HLODTree.UpdateVisibilityStates(View, Tasks.LightVisibility);
+
+			if (ViewState)
+			{
+				HLODState = &ViewState->HLODVisibilityState;
+			}
+		}
+		else
+		{
+			HLODTree.ClearVisibilityState(View);
+		}
+	}
+
+	Tasks.LightVisibility.Trigger();
+
+	FFrustumCullingFlags Flags;
+	Flags.bShouldVisibilityCull  = bShouldVisibilityCull;
+	Flags.bUseCustomCulling      = View.CustomVisibilityQuery && View.CustomVisibilityQuery->Prepare();
+	Flags.bUseSphereTestFirst    = GFrustumCullUseSphereTestFirst;
+	Flags.bUseFastIntersect      = (View.ViewFrustum.PermutedPlanes.Num() == 8) && GFrustumCullUseFastIntersect;
+	Flags.bUseVisibilityOctree   = GFrustumCullUseOctree;
+	Flags.bHasHiddenPrimitives   = View.HiddenPrimitives.Num() > 0;
+	Flags.bHasShowOnlyPrimitives = View.ShowOnlyPrimitives.IsSet();
+
+	UE::Tasks::FTask PrerequisiteTask;
+
+#if RHI_RAYTRACING
+	View.RayTracingCullingParameters.Init(View);
+
+	// Sync cached raytracing tasks ShouldCullForRayTracing.
+	PrerequisiteTask = Scene.GetCacheRayTracingPrimitivesTask();
+#endif
+
+	FSceneBitArray* VisibleNodes = nullptr;
+
+	if (bShouldVisibilityCull && Flags.bUseVisibilityOctree)
+	{
+		VisibleNodes = TaskData.Allocator.Create<FSceneBitArray>();
+		CullOctree(Scene, View, Flags, *VisibleNodes);
+	}
+
+	const bool bCullingIsThreadsafe = (!Flags.bUseCustomCulling || View.CustomVisibilityQuery->IsThreadsafe());
+
+	if (TaskConfig.Schedule == EVisibilityTaskSchedule::Parallel)
+	{
+		// Always Visible
+		const bool bHasAlwaysVisible = TaskConfig.NumVisiblePrimitives > 0;
+		if (bHasAlwaysVisible)
+		{
+			const float CurrentWorldTime = View.Family->Time.GetWorldTimeSeconds();
+			for (uint32 TaskIndex = 0; TaskIndex < TaskConfig.AlwaysVisible.NumTasks; ++TaskIndex)
+			{
+				Tasks.AlwaysVisible.AddPrerequisites(
+					UE::Tasks::Launch(UE_SOURCE_LOCATION, [this, Flags, TaskIndex, CurrentWorldTime]() mutable
+				{
+					TRACE_CPUPROFILER_EVENT_SCOPE(SceneVisibility_AlwaysVisible);
+					SCOPE_CYCLE_COUNTER(STAT_UpdateAlwaysVisible);
+
+					FOptionalTaskTagScope TaskTagScope(ETaskTag::EParallelRenderingThread);
+					UpdateAlwaysVisible(Scene, View, Flags, TaskConfig, TaskIndex, CurrentWorldTime);
+
+				}, PrerequisiteTask, TaskConfig.TaskPriority, UE::Tasks::EExtendedTaskPriority::None));
+			}
+		}
+
+		// Frustum Cull
+		{
+			// Frustum culling tasks have to run serially if custom culling is not thread-safe.
+			const UE::Tasks::EExtendedTaskPriority ExtendedTaskPriority = GetExtendedTaskPriority(bCullingIsThreadsafe);
+
+			// Assign the number of expected commands first so the pipe can determine when the last task has completed.
+			OcclusionCull.CommandPipe.AddNumCommands(TaskConfig.FrustumCull.NumTasks);
+
+			for (uint32 TaskIndex = 0; TaskIndex < TaskConfig.FrustumCull.NumTasks; ++TaskIndex)
+			{
+				Tasks.FrustumCull.AddPrerequisites(
+					UE::Tasks::Launch(UE_SOURCE_LOCATION, [this, Flags, MaxDrawDistanceScale, HLODState, VisibleNodes, TaskIndex]() mutable
+				{
+					TRACE_CPUPROFILER_EVENT_SCOPE(SceneVisibility_FrustumCull);
+					FOptionalTaskTagScope TaskTagScope(ETaskTag::EParallelRenderingThread);
+					int32 NumCulledPrimitives = FrustumCull(Scene, View, Flags, MaxDrawDistanceScale, HLODState, VisibleNodes, TaskConfig, TaskIndex);
+
+					FPrimitiveRange PrimitiveRange;
+					PrimitiveRange.StartIndex = TaskConfig.FrustumCull.NumPrimitivesPerTask * (TaskIndex);
+					PrimitiveRange.EndIndex   = TaskConfig.FrustumCull.NumPrimitivesPerTask + PrimitiveRange.StartIndex;
+					PrimitiveRange.EndIndex   = FMath::Min(PrimitiveRange.EndIndex, int32(TaskConfig.NumTestedPrimitives));
+
+					// Skip rendering of dynamic objects without static lighting for static reflection captures.
+					if (View.bStaticSceneOnly)
+					{
+						for (FSceneSetBitIterator BitIt(View.PrimitiveVisibilityMap, PrimitiveRange.StartIndex); BitIt.GetIndex() < PrimitiveRange.EndIndex; ++BitIt)
+						{
+							if (!Scene.PrimitiveSceneProxies[BitIt.GetIndex()]->HasStaticLighting())
+							{
+								View.PrimitiveVisibilityMap.AccessCorrespondingBit(BitIt) = false;
+								NumCulledPrimitives++;
+							}
+						}
+					}
+
+					// Skip rendering of small objects when in wireframe mode for performance since wireframe doesn't enable occlusion culling.
+					if (View.Family->EngineShowFlags.Wireframe)
+					{
+						const float ScreenSizeScale = FMath::Max(View.ViewMatrices.GetProjectionMatrix().M[0][0] * View.ViewRect.Width(), View.ViewMatrices.GetProjectionMatrix().M[1][1] * View.ViewRect.Height());
+
+						for (FSceneSetBitIterator BitIt(View.PrimitiveVisibilityMap, PrimitiveRange.StartIndex); BitIt.GetIndex() < PrimitiveRange.EndIndex; ++BitIt)
+						{
+							if (ScreenSizeScale * Scene.PrimitiveBounds[BitIt.GetIndex()].BoxSphereBounds.SphereRadius <= GWireframeCullThreshold)
+							{
+								View.PrimitiveVisibilityMap.AccessCorrespondingBit(BitIt) = false;
+								NumCulledPrimitives++;
+							}
+						}
+					}
+
+					const uint32 NumVisiblePrimitives = PrimitiveRange.EndIndex - PrimitiveRange.StartIndex - NumCulledPrimitives;
+
+					// Primary views can have additional visible primitives derived from secondary views. In that case forward
+					// the command down the pipe even though there weren't any visible primitives from frustum culling.
+					if (NumVisiblePrimitives == 0 && View.StereoPass != EStereoscopicPass::eSSP_PRIMARY)
+					{
+						OcclusionCull.CommandPipe.ReleaseNumCommands(1);
+					}
+					else
+					{
+						OcclusionCull.CommandPipe.EnqueueCommand(PrimitiveRange);
+					}
+
+					TaskConfig.FrustumCull.NumCulledPrimitives.fetch_add(NumCulledPrimitives, std::memory_order_relaxed);
+
+				}, bHasAlwaysVisible ? Tasks.AlwaysVisible : PrerequisiteTask, TaskConfig.TaskPriority, ExtendedTaskPriority));
+			}
+
+			OcclusionCull.CommandPipe.ReleaseNumCommands(1);
+		}
+	}
+	else
+	{
+		const bool bSingleThreaded = !FApp::ShouldUseThreadingForPerformance() || !bCullingIsThreadsafe;
+
+		PrerequisiteTask.Wait();
+
+		const float CurrentWorldTime = View.Family->Time.GetWorldTimeSeconds();
+		ParallelFor(TaskConfig.AlwaysVisible.NumTasks, [this, Flags, CurrentWorldTime](int32 TaskIndex)
+		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(SceneVisibility_AlwaysVisible);
+			FOptionalTaskTagScope TaskTagScope(ETaskTag::EParallelRenderingThread);
+			UpdateAlwaysVisible(Scene, View, Flags, TaskConfig, TaskIndex, CurrentWorldTime);
+
+		}, bSingleThreaded);
+
+		ParallelFor(TaskConfig.FrustumCull.NumTasks, [this, Flags, MaxDrawDistanceScale, HLODState, VisibleNodes](int32 TaskIndex)
+		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(SceneVisibility_FrustumCull);
+			FOptionalTaskTagScope TaskTagScope(ETaskTag::EParallelRenderingThread);
+			int32 NumCulledPrimitives = FrustumCull(Scene, View, Flags, MaxDrawDistanceScale, HLODState, VisibleNodes, TaskConfig, TaskIndex);
+			TaskConfig.FrustumCull.NumCulledPrimitives.fetch_add(NumCulledPrimitives, std::memory_order_relaxed);
+
+		}, bSingleThreaded);
+	}
+
+	Tasks.AlwaysVisible.Trigger();
+	Tasks.FrustumCull.Trigger();
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+FDynamicMeshElementContext::FDynamicMeshElementContext(FSceneRenderer& SceneRenderer)
+	: ViewFamily(SceneRenderer.ViewFamily)
+	, Views(SceneRenderer.AllViews)
+	, Primitives(SceneRenderer.Scene->Primitives)
+	// Defer committing GPU scene and Material updates until the mesh collectors are finished. Deferring materials allows VT updates to
+	// overlap with GDME (uniform expression updates can't happen at the same time as the async VT system update), and since we are going
+	// wide across a single view we would otherwise have to lock for GPU scene updates.
+	, MeshCollector(SceneRenderer.FeatureLevel, SceneRenderer.Allocator, FMeshElementCollector::ECommitFlags::DeferAll)
+#if WITH_EDITOR
+	, EditorMeshCollector(SceneRenderer.FeatureLevel, SceneRenderer.Allocator, FMeshElementCollector::ECommitFlags::DeferAll)
+#endif
+	, RHICmdList(new FRHICommandList(FRHIGPUMask::All()))
+	, DynamicVertexBuffer(*RHICmdList)
+	, DynamicIndexBuffer(*RHICmdList)
+{
+	RHICmdList->SwitchPipeline(ERHIPipeline::Graphics);
+
+	ViewMeshArraysPerView.SetNum(Views.Num());
+
+	MeshCollector.Start(
+		*RHICmdList,
+		DynamicVertexBuffer,
+		DynamicIndexBuffer,
+		SceneRenderer.DynamicReadBufferForInitViews
+	);
+
+	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
+	{
+		FViewInfo& View = *Views[ViewIndex];
+		FViewMeshArrays& ViewMeshArrays = ViewMeshArraysPerView[ViewIndex];
+
+		MeshCollector.AddViewMeshArrays(
+			&View,
+			&ViewMeshArrays.DynamicMeshElements,
+			&ViewMeshArrays.SimpleElementCollector,
+			&View.DynamicPrimitiveCollector
+#if UE_ENABLE_DEBUG_DRAWING
+			, &ViewMeshArrays.DebugSimpleElementCollector
+#endif
+		);
+	}
+
+#if WITH_EDITOR
 	if (GIsEditor)
 	{
-		Collector.ClearViewMeshArrays();
+		EditorMeshCollector.Start(
+			*RHICmdList,
+			DynamicVertexBuffer,
+			DynamicIndexBuffer,
+			SceneRenderer.DynamicReadBufferForInitViews
+		);
 
-		for (int32 ViewIndex = 0; ViewIndex < ViewCount; ViewIndex++)
+		for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
 		{
-			Collector.AddViewMeshArrays(
-				&InViews[ViewIndex], 
-				&InViews[ViewIndex].DynamicEditorMeshElements, 
-				&InViews[ViewIndex].EditorSimpleElementCollector, 
-				&InViews[ViewIndex].DynamicPrimitiveShaderData, 
-				InViewFamily.GetFeatureLevel(),
-				&DynamicIndexBuffer,
-				&DynamicVertexBuffer,
-				&DynamicReadBuffer);
+			FViewInfo& View = *Views[ViewIndex];
+			FViewMeshArrays& ViewMeshArrays = ViewMeshArraysPerView[ViewIndex];
+
+			EditorMeshCollector.AddViewMeshArrays(
+				&View,
+				&ViewMeshArrays.DynamicEditorMeshElements,
+				&ViewMeshArrays.EditorSimpleElementCollector,
+				&View.DynamicPrimitiveCollector
+#if UE_ENABLE_DEBUG_DRAWING
+				, &ViewMeshArrays.DebugSimpleElementCollector
+#endif
+			);
 		}
+	}
+#endif
+}
+
+FGraphEventRef FDynamicMeshElementContext::LaunchRenderThreadTask(FDynamicPrimitiveIndexList&& PrimitiveIndexList)
+{
+	return FFunctionGraphTask::CreateAndDispatchWhenReady([this, PrimitiveIndexList = MoveTemp(PrimitiveIndexList)]
+	{
+		for (FDynamicPrimitiveIndex PrimitiveIndex : PrimitiveIndexList.Primitives)
+		{
+			GatherDynamicMeshElementsForPrimitive(Primitives[PrimitiveIndex.Index], PrimitiveIndex.ViewMask);
+		}
+
+#if WITH_EDITOR
+		for (FDynamicPrimitiveIndex PrimitiveIndex : PrimitiveIndexList.EditorPrimitives)
+		{
+			GatherDynamicMeshElementsForEditorPrimitive(Primitives[PrimitiveIndex.Index], PrimitiveIndex.ViewMask);
+		}
+#endif
+	}, TStatId{}, nullptr, ENamedThreads::GetRenderThread_Local());
+}
+
+UE::Tasks::FTask FDynamicMeshElementContext::LaunchAsyncTask(FDynamicPrimitiveIndexQueue* PrimitiveIndexQueue, UE::Tasks::ETaskPriority TaskPriority)
+{
+	return Pipe.Launch(UE_SOURCE_LOCATION, [this, PrimitiveIndexQueue]
+	{
+		FOptionalTaskTagScope Scope(ETaskTag::EParallelRenderingThread);
+		FDynamicPrimitiveIndex PrimitiveIndex;
+
+		while (PrimitiveIndexQueue->Pop(PrimitiveIndex))
+		{
+			GatherDynamicMeshElementsForPrimitive(Primitives[PrimitiveIndex.Index], PrimitiveIndex.ViewMask);
+		}
+
+#if WITH_EDITOR
+		while (PrimitiveIndexQueue->PopEditor(PrimitiveIndex))
+		{
+			GatherDynamicMeshElementsForEditorPrimitive(Primitives[PrimitiveIndex.Index], PrimitiveIndex.ViewMask);
+		}
+#endif
+	}, TaskPriority);
+}
+
+void FDynamicMeshElementContext::GatherDynamicMeshElementsForPrimitive(FPrimitiveSceneInfo* Primitive, uint8 ViewMask)
+{
+	SCOPED_NAMED_EVENT(DynamicPrimitive, FColor::Magenta);
+
+	TArray<int32, TInlineAllocator<4>> MeshBatchCountBefore;
+	MeshBatchCountBefore.SetNumUninitialized(Views.Num());
+	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
+	{
+		MeshBatchCountBefore[ViewIndex] = MeshCollector.GetMeshBatchCount(ViewIndex);
+	}
+
+	MeshCollector.SetPrimitive(Primitive->Proxy, Primitive->DefaultDynamicHitProxyId);
+	Primitive->Proxy->GetDynamicMeshElements(ViewFamily.AllViews, ViewFamily, ViewMask, MeshCollector);
+
+	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
+	{
+		FViewInfo& View = *Views[ViewIndex];
+
+		if (ViewMask & (1 << ViewIndex))
+		{
+			FDynamicPrimitive& DynamicPrimitive = DynamicPrimitives.Emplace_GetRef();
+			DynamicPrimitive.PrimitiveIndex = Primitive->GetIndex();
+			DynamicPrimitive.ViewIndex = ViewIndex;
+			DynamicPrimitive.StartElementIndex = MeshBatchCountBefore[ViewIndex];
+			DynamicPrimitive.EndElementIndex = MeshCollector.GetMeshBatchCount(ViewIndex);
+		}
+	}
+}
+
+void FDynamicMeshElementContext::GatherDynamicMeshElementsForEditorPrimitive(FPrimitiveSceneInfo* Primitive, uint8 ViewMask)
+{
+#if WITH_EDITOR
+	EditorMeshCollector.SetPrimitive(Primitive->Proxy, Primitive->DefaultDynamicHitProxyId);
+	Primitive->Proxy->GetDynamicMeshElements(ViewFamily.AllViews, ViewFamily, ViewMask, EditorMeshCollector);
+#endif
+}
+
+void FDynamicMeshElementContext::Finish()
+{
+	MeshCollector.Finish();
+
+#if WITH_EDITOR
+	if (GIsEditor)
+	{
+		EditorMeshCollector.Finish();
+	}
+#endif
+
+	DynamicVertexBuffer.Commit();
+	DynamicIndexBuffer.Commit();
+	RHICmdList->FinishRecording();
+}
+
+FDynamicMeshElementContextContainer::~FDynamicMeshElementContextContainer()
+{
+	check(CommandLists.IsEmpty());
+}
+
+UE::Tasks::FTask FDynamicMeshElementContextContainer::LaunchAsyncTask(FDynamicPrimitiveIndexQueue* PrimitiveIndexQueue, int32 Index, UE::Tasks::ETaskPriority TaskPriority)
+{
+	return Contexts[Index]->LaunchAsyncTask(PrimitiveIndexQueue, TaskPriority);
+}
+
+FGraphEventRef FDynamicMeshElementContextContainer::LaunchRenderThreadTask(FDynamicPrimitiveIndexList&& PrimitiveIndexList)
+{
+	return Contexts.Last()->LaunchRenderThreadTask(MoveTemp(PrimitiveIndexList));
+}
+
+void FDynamicMeshElementContextContainer::Init(FSceneRenderer& SceneRenderer, int32 NumAsyncContexts)
+{
+	const int32 NumRenderThreadContexts = 1;
+	const int32 NumContexts = NumAsyncContexts + NumRenderThreadContexts;
+	Views = SceneRenderer.AllViews;
+	Contexts.Reserve(NumContexts);
+	CommandLists.Reserve(Contexts.Num());
+
+	for (int32 Index = 0; Index < NumContexts; ++Index)
+	{
+		FDynamicMeshElementContext* Context = SceneRenderer.Allocator.Create<FDynamicMeshElementContext>(SceneRenderer);
+		Contexts.Emplace(Context);
+		CommandLists.Emplace(Context->RHICmdList);
+	}
+}
+
+void FDynamicMeshElementContextContainer::MergeContexts(TArray<FDynamicPrimitive, SceneRenderingAllocator>& OutDynamicPrimitives)
+{
+	SCOPED_NAMED_EVENT(MergeGatherDynamicMeshElementContexts, FColor::Magenta);
+
+	check(!Views.IsEmpty());
+
+	// Fast path for one context; just move the memory instead of copying.
+	if (Contexts.Num() == 1)
+	{
+		FDynamicMeshElementContext* Context = Contexts[0];
+		OutDynamicPrimitives = MoveTemp(Context->DynamicPrimitives);
+
+		for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
+		{
+			FViewInfo& View = *Views[ViewIndex];
+			FDynamicMeshElementContext::FViewMeshArrays& ViewMeshArrays = Context->ViewMeshArraysPerView[ViewIndex];
+
+			View.SimpleElementCollector = MoveTemp(ViewMeshArrays.SimpleElementCollector);
+			View.DynamicMeshElements    = MoveTemp(ViewMeshArrays.DynamicMeshElements);
+
+#if WITH_EDITOR
+			View.EditorSimpleElementCollector = MoveTemp(ViewMeshArrays.EditorSimpleElementCollector);
+			View.DynamicEditorMeshElements    = MoveTemp(ViewMeshArrays.DynamicEditorMeshElements);
+#endif
+
+#if UE_ENABLE_DEBUG_DRAWING
+			View.DebugSimpleElementCollector = MoveTemp(ViewMeshArrays.DebugSimpleElementCollector);
+#endif
+		}
+	}
+	// >1 context means we have to merge the containers.
+	else
+	{
+		struct FViewAllocationInfo
+		{
+			FSimpleElementCollector::FAllocationInfo SimpleElementCollector;
+			uint32 NumDynamicMeshElements = 0;
+#if WITH_EDITOR
+			FSimpleElementCollector::FAllocationInfo EditorSimpleElementCollector;
+			uint32 NumDynamicEditorMeshElements = 0;
+#endif
+#if UE_ENABLE_DEBUG_DRAWING
+			FSimpleElementCollector::FAllocationInfo DebugSimpleElementCollector;
+#endif
+		};
+
+		TArray<FViewAllocationInfo, TInlineAllocator<2>> AllocationInfosPerView;
+		AllocationInfosPerView.AddDefaulted(Views.Num());
+		uint32 NumDynamicPrimitives = 0;
+
+		for (FDynamicMeshElementContext* Context : Contexts)
+		{
+			NumDynamicPrimitives += Context->DynamicPrimitives.Num();
+			check(AllocationInfosPerView.Num() == Context->ViewMeshArraysPerView.Num());
+
+			// Accumulate allocation info for each context in order to reserve container memory once.
+			for (int32 ViewIndex = 0; ViewIndex < AllocationInfosPerView.Num(); ++ViewIndex)
+			{
+				const FDynamicMeshElementContext::FViewMeshArrays& ViewMeshArrays = Context->ViewMeshArraysPerView[ViewIndex];
+				FViewAllocationInfo& AllocationInfo = AllocationInfosPerView[ViewIndex];
+
+				ViewMeshArrays.SimpleElementCollector.AddAllocationInfo(AllocationInfo.SimpleElementCollector);
+				AllocationInfo.NumDynamicMeshElements += ViewMeshArrays.DynamicMeshElements.Num();
+#if WITH_EDITOR
+				ViewMeshArrays.EditorSimpleElementCollector.AddAllocationInfo(AllocationInfo.EditorSimpleElementCollector);
+				AllocationInfo.NumDynamicEditorMeshElements += ViewMeshArrays.DynamicEditorMeshElements.Num();
+#endif
+#if UE_ENABLE_DEBUG_DRAWING
+				ViewMeshArrays.DebugSimpleElementCollector.AddAllocationInfo(AllocationInfo.DebugSimpleElementCollector);
+#endif
+			}
+		}
+
+		OutDynamicPrimitives.Reserve(NumDynamicPrimitives);
+
+		// Reserve memory for merged containers.
+		for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
+		{
+			FViewAllocationInfo& AllocationInfo = AllocationInfosPerView[ViewIndex];
+			FViewInfo& View = *Views[ViewIndex];
+
+			View.SimpleElementCollector.Reserve(AllocationInfo.SimpleElementCollector);
+			View.DynamicMeshElements.Reserve(AllocationInfo.NumDynamicMeshElements);
+#if WITH_EDITOR
+			View.EditorSimpleElementCollector.Reserve(AllocationInfo.EditorSimpleElementCollector);
+			View.DynamicEditorMeshElements.Reserve(AllocationInfo.NumDynamicEditorMeshElements);
+#endif
+#if UE_ENABLE_DEBUG_DRAWING
+			View.DebugSimpleElementCollector.Reserve(AllocationInfo.DebugSimpleElementCollector);
+#endif
+
+			// Reset dynamic element count to use as offset for copying ranges in the next loop.
+			AllocationInfo.NumDynamicMeshElements = 0;
+		}
+
+		for (FDynamicMeshElementContext* Context : Contexts)
+		{
+			for (FDynamicPrimitive DynamicPrimitive : Context->DynamicPrimitives)
+			{
+				const uint32 NumDynamicMeshElements = AllocationInfosPerView[DynamicPrimitive.ViewIndex].NumDynamicMeshElements;
+
+				// Offset the dynamic element range by the current number of meshes in the final container.
+				DynamicPrimitive.StartElementIndex += NumDynamicMeshElements;
+				DynamicPrimitive.EndElementIndex   += NumDynamicMeshElements;
+
+				OutDynamicPrimitives.Emplace(DynamicPrimitive);
+
+				Views[DynamicPrimitive.ViewIndex]->DynamicMeshElementRanges[DynamicPrimitive.PrimitiveIndex] = FInt32Vector2(DynamicPrimitive.StartElementIndex, DynamicPrimitive.EndElementIndex);
+			}
+
+			for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
+			{
+				FViewInfo& View = *Views[ViewIndex];
+				FDynamicMeshElementContext::FViewMeshArrays& ViewMeshArrays = Context->ViewMeshArraysPerView[ViewIndex];
+
+				AllocationInfosPerView[ViewIndex].NumDynamicMeshElements += ViewMeshArrays.DynamicMeshElements.Num();
+
+				View.SimpleElementCollector.Append(ViewMeshArrays.SimpleElementCollector);
+				View.DynamicMeshElements.Append(ViewMeshArrays.DynamicMeshElements);
+#if WITH_EDITOR
+				View.EditorSimpleElementCollector.Append(ViewMeshArrays.EditorSimpleElementCollector);
+				View.DynamicEditorMeshElements.Append(ViewMeshArrays.DynamicEditorMeshElements);
+#endif
+#if UE_ENABLE_DEBUG_DRAWING
+				View.DebugSimpleElementCollector.Append(ViewMeshArrays.DebugSimpleElementCollector);
+#endif
+			}
+
+			Context->DynamicPrimitives.Empty();
+			Context->ViewMeshArraysPerView.Empty();
+		}
+	}
+}
+
+void FDynamicMeshElementContextContainer::Submit(FRHICommandListImmediate& RHICmdList)
+{
+	for (FDynamicMeshElementContext* Context : Contexts)
+	{
+		Context->Finish();
+	}
+
+	RHICmdList.QueueAsyncCommandListSubmit(CommandLists);
+	CommandLists.Empty();
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+FVisibilityTaskData::FVisibilityTaskData(FRHICommandListImmediate& InRHICmdList, FSceneRenderer& InSceneRenderer)
+	: RHICmdList(InRHICmdList)
+	, SceneRenderer(InSceneRenderer)
+	, Scene(*SceneRenderer.Scene)
+	, Views(SceneRenderer.AllViews)
+	, ViewFamily(SceneRenderer.ViewFamily)
+	, ShadingPath(GetFeatureLevelShadingPath(Scene.GetFeatureLevel()))
+	, TaskConfig(Scene, Views)
+	, bAddNaniteRelevance(InSceneRenderer.ShouldRenderNanite())
+	, bAddLightmapDensityCommands(ViewFamily.EngineShowFlags.LightMapDensity&& AllowDebugViewmodes())
+{
+	Tasks.bWaitingAllowed = TaskConfig.Schedule == EVisibilityTaskSchedule::Parallel;
+}
+
+void FVisibilityTaskData::LaunchVisibilityTasks(const UE::Tasks::FTask& BeginInitVisibilityPrerequisites)
+{
+	SCOPED_NAMED_EVENT(LaunchVisibilityTasks, FColor::Magenta);
+	ViewPackets.Reserve(Views.Num());
+
+	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
+	{
+		// Each view gets its own visibility task packet which contains all the state to manage the task graph for a view.
+		FVisibilityViewPacket& ViewPacket = ViewPackets.Emplace_GetRef(*this, Scene, *Views[ViewIndex], ViewIndex);
+
+		// Each respective stage of visibility for each view is connected to its corresponding task event in order to track when all views complete each stage.
+		Tasks.LightVisibility.AddPrerequisites(ViewPacket.Tasks.LightVisibility);
+		Tasks.FrustumCull.AddPrerequisites(ViewPacket.Tasks.FrustumCull);
+		Tasks.OcclusionCull.AddPrerequisites(ViewPacket.Tasks.OcclusionCull);
+		Tasks.ComputeRelevance.AddPrerequisites(ViewPacket.Tasks.ComputeRelevance);
+
+		if (ViewPacket.ViewState)
+		{
+			SCOPE_CYCLE_COUNTER(STAT_DecompressPrecomputedOcclusion);
+			ViewPacket.View.PrecomputedVisibilityData = ViewPacket.ViewState->GetPrecomputedVisibilityData(ViewPacket.View, &Scene);
+		}
+	}
+
+	// Each relevance task should have this as a prerequisite, but in case there aren't any tasks we make it explicit.
+	Tasks.ComputeRelevance.AddPrerequisites(Scene.GetCacheMeshDrawCommandsTask());
+
+	// Wait on the GPU skin cache task prior to GDME.
+	Tasks.DynamicMeshElementsPrerequisites.AddPrerequisites(Scene.GetGPUSkinCacheTask());
+
+	bool bAllocatePrimitiveViewMasks = true;
+
+	if (TaskConfig.Schedule == EVisibilityTaskSchedule::Parallel)
+	{
+		if (Views.Num() > 1 && Views[0]->bIsMultiViewportEnabled)
+		{
+			// Instanced multi-view scenarios have secondary views which feed visibility data into primary views. In this
+			// case we make all views finish culling first before launching a task that merges secondary visibility
+			// maps into the primary view, which then becomes a prerequisite task for processing relevance pipe commands.
+			// All views will share a single relevance pipe and therefore a single relevance context.
+
+			TArray<UE::Tasks::FTask, SceneRenderingAllocator> PreSyncCullingTasks;
+
+			for (FVisibilityViewPacket& ViewPacket : ViewPackets)
+			{
+				// Ensure we merge after all culling is complete.
+				PreSyncCullingTasks.Emplace(ViewPacket.Tasks.FrustumCull);
+				PreSyncCullingTasks.Emplace(ViewPacket.Tasks.OcclusionCull);
+			}
+
+			UE::Tasks::FTask MergeSecondaryViewsTask = UE::Tasks::Launch(UE_SOURCE_LOCATION, [this]
+			{
+				MergeSecondaryViewVisibility();
+
+			}, PreSyncCullingTasks, TaskConfig.OcclusionCull.TaskPriority);
+
+			for (FVisibilityViewPacket& ViewPacket : ViewPackets)
+			{
+				// Force the shared primary view relevance pipe to wait until the merge task completes.
+				if (ViewPacket.View.StereoPass == EStereoscopicPass::eSSP_PRIMARY)
+				{
+					ViewPacket.Relevance.CommandPipe.SetPrerequisiteTask(MergeSecondaryViewsTask);
+				}
+			}
+		}
+
+		else if (Views.Num() == 1)
+		{
+			// When using a single view, dynamic mesh elements are pushed into a pipe that is executed on the render thread which allows for some overlap with compute relevance work.
+			DynamicMeshElements.CommandPipe = Allocator.Create<TCommandPipe<FDynamicPrimitiveIndexList>>(TEXT("GatherDynamicMeshElements"));
+
+			DynamicMeshElements.CommandPipe->SetCommandFunction([this](FDynamicPrimitiveIndexList&& DynamicPrimitiveIndexList)
+			{
+				GatherDynamicMeshElements(MoveTemp(DynamicPrimitiveIndexList));
+			});
+
+			DynamicMeshElements.CommandPipe->SetPrerequisiteTask(Tasks.DynamicMeshElementsPrerequisites);
+
+			Tasks.DynamicMeshElementsPipe = FGraphEvent::CreateGraphEvent();
+
+			DynamicMeshElements.CommandPipe->SetEmptyFunction([this]
+			{
+				Tasks.DynamicMeshElementsPipe->DispatchSubsequents();
+				Tasks.DynamicMeshElements.Trigger();
+			});
+
+			// Take a reference that is released when the relevance pipe has completed. We only need to take one since there can only be one view.
+			DynamicMeshElements.CommandPipe->AddNumCommands(1);
+
+			// We don't need the primitive view masks when in parallel mode with a single view.
+			bAllocatePrimitiveViewMasks = false;
+		}
+	}
+
+	if (bAllocatePrimitiveViewMasks)
+	{
+		DynamicMeshElements.PrimitiveViewMasks = Allocator.Create<FDynamicPrimitiveViewMasks>();
+		DynamicMeshElements.PrimitiveViewMasks->Primitives.AddZeroed(Scene.Primitives.Num());
+
+	#if WITH_EDITOR
+		if (GIsEditor)
+		{
+			DynamicMeshElements.PrimitiveViewMasks->EditorPrimitives.AddZeroed(Scene.Primitives.Num());
+		}
+	#endif
+	}
+
+	DynamicMeshElements.ContextContainer.Init(SceneRenderer, GetNumDynamicMeshElementTasks());
+	DynamicMeshElements.ViewCommandsPerView.SetNum(Views.Num());
+
+	Tasks.LightVisibility.AddPrerequisites(UE::Tasks::Launch(UE_SOURCE_LOCATION, [this]
+	{
+		FOptionalTaskTagScope Scope(ETaskTag::EParallelRenderingThread);
+		SceneRenderer.ComputeLightVisibility();
+
+	}, TaskConfig.TaskPriority));
+
+	if (TaskConfig.Schedule == EVisibilityTaskSchedule::Parallel)
+	{
+		SceneRenderer.WaitOcclusionTests(RHICmdList);
+
+		// Parallel occlusion culling is not supported on mobile
+		check(!Views.IsEmpty())
+		checkf(!Views[0]->bIsMobileMultiViewEnabled, TEXT("This culling path was not tested with MMV"));
+
+		// In instanced stereo, we'll also redirect all primitives to the primary view's relevance command pipe, so secondary viewports need a reference
+		if (Views[0]->bIsMultiViewportEnabled)
+		{
+			int32 PrimaryViewIndex = Views[0]->PrimaryViewIndex;
+			for (FVisibilityViewPacket& ViewPacket : ViewPackets)
+			{
+				if (ViewPacket.View.StereoPass == EStereoscopicPass::eSSP_SECONDARY)
+				{
+					ViewPacket.Relevance.PrimaryViewCommandPipe = &ViewPackets[PrimaryViewIndex].Relevance.CommandPipe;
+					ViewPacket.Relevance.PrimaryViewCommandPipe->AddNumCommands(1); // Ensure the primary pipe doesn't close until the secondary pipe has forwarded all commands
+				}
+			}
+		}
+
+		for (FVisibilityViewPacket& ViewPacket : ViewPackets)
+		{
+			if (ViewPacket.OcclusionCull.ContextIfParallel)
+			{
+				ViewPacket.OcclusionCull.ContextIfParallel->Map(RHICmdList);
+			}
+
+			Tasks.BeginInitVisibility.AddPrerequisites(UE::Tasks::Launch(UE_SOURCE_LOCATION, [&ViewPacket]
+			{
+				FOptionalTaskTagScope Scope(ETaskTag::EParallelRenderingThread);
+				ViewPacket.BeginInitVisibility();
+
+			}, BeginInitVisibilityPrerequisites, TaskConfig.TaskPriority));
+		}
+
+		// Static relevance is finalized for ALL views after each view completes static mesh filtering tasks.
+		Tasks.FinalizeRelevance = UE::Tasks::Launch(UE_SOURCE_LOCATION, [this]
+		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(FSceneRenderer_FinalizeStaticRelevance);
+
+			for (FVisibilityViewPacket& ViewPacket : ViewPackets)
+			{
+				ViewPacket.Relevance.Context->Finalize();
+			}
+
+		}, Tasks.ComputeRelevance, TaskConfig.TaskPriority);
+	}
+
+	// All task events are connected to prerequisites now and can be safely triggered.
+	Tasks.BeginInitVisibility.Trigger();
+	Tasks.LightVisibility.Trigger();
+	Tasks.FrustumCull.Trigger();
+	Tasks.OcclusionCull.Trigger();
+	Tasks.ComputeRelevance.Trigger();
+}
+
+void FVisibilityTaskData::MergeSecondaryViewVisibility()
+{
+	SCOPED_NAMED_EVENT(MergeSecondaryViewVisibility, FColor::Magenta);
+
+	// When using instanced multi-view, any primitive that is marked visible in ANY view must be marked visible in its primary view.
+	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
+	{
+		FViewInfo& View = *Views[ViewIndex];
+
+		if (View.StereoPass == EStereoscopicPass::eSSP_SECONDARY)
+		{
+			const FSceneBitArray& SecondaryVisibilityMap = View.PrimitiveVisibilityMap;
+			FSceneBitArray& PrimaryVisibilityMap = Views[View.PrimaryViewIndex]->PrimitiveVisibilityMap;
+			check(PrimaryVisibilityMap.Num() == SecondaryVisibilityMap.Num());
+
+			const uint32 NumWords = FMath::DivideAndRoundUp(PrimaryVisibilityMap.Num(), NumBitsPerDWORD);
+
+			for (uint32 Index = 0; Index < NumWords; ++Index)
+			{
+				PrimaryVisibilityMap.GetData()[Index] |= SecondaryVisibilityMap.GetData()[Index];
+			}
+		}
+	}
+}
+
+void FVisibilityTaskData::GatherDynamicMeshElements(FDynamicPrimitiveIndexList&& DynamicPrimitiveIndexList)
+{
+	FDynamicPrimitiveIndexList RenderThreadDynamicPrimitiveIndexList;
+
+	const int32 NumAsyncContexts = DynamicMeshElements.ContextContainer.GetNumAsyncContexts();
+
+	if (NumAsyncContexts > 0)
+	{
+		const auto FilterDynamicPrimitives = [] (TArrayView<FPrimitiveSceneProxy*> PrimitiveSceneProxies, FDynamicPrimitiveIndexList::FList& Primitives, FDynamicPrimitiveIndexList::FList& RenderThreadPrimitives)
+		{
+			for (int32 Index = 0; Index < Primitives.Num(); )
+			{
+				const FDynamicPrimitiveIndex PrimitiveIndex = Primitives[Index];
+
+				if (!PrimitiveSceneProxies[PrimitiveIndex.Index]->SupportsParallelGDME())
+				{
+					RenderThreadPrimitives.Emplace(PrimitiveIndex);
+					Primitives.RemoveAtSwap(Index, 1, EAllowShrinking::No);
+				}
+				else
+				{
+					Index++;
+				}
+			}
+		};
+
+		FilterDynamicPrimitives(Scene.PrimitiveSceneProxies, DynamicPrimitiveIndexList.Primitives, RenderThreadDynamicPrimitiveIndexList.Primitives);
+#if WITH_EDITOR
+		FilterDynamicPrimitives(Scene.PrimitiveSceneProxies, DynamicPrimitiveIndexList.EditorPrimitives, RenderThreadDynamicPrimitiveIndexList.EditorPrimitives);
+#endif
+	}
+	else
+	{
+		RenderThreadDynamicPrimitiveIndexList = MoveTemp(DynamicPrimitiveIndexList);
+		DynamicPrimitiveIndexList = {};
+	}
+
+	if (!RenderThreadDynamicPrimitiveIndexList.IsEmpty())
+	{
+		Tasks.DynamicMeshElementsRenderThread = DynamicMeshElements.ContextContainer.LaunchRenderThreadTask(MoveTemp(RenderThreadDynamicPrimitiveIndexList));
+	}
+
+	if (!DynamicPrimitiveIndexList.IsEmpty())
+	{
+		FDynamicPrimitiveIndexQueue* Queue = Allocator.Create<FDynamicPrimitiveIndexQueue>(MoveTemp(DynamicPrimitiveIndexList));
+
+		for (int32 Index = 0; Index < DynamicMeshElements.ContextContainer.GetNumAsyncContexts(); ++Index)
+		{
+			Tasks.DynamicMeshElements.AddPrerequisites(DynamicMeshElements.ContextContainer.LaunchAsyncTask(Queue, Index, TaskConfig.TaskPriority));
+		}
+	}
+}
+
+void FVisibilityTaskData::GatherDynamicMeshElements(const FDynamicPrimitiveViewMasks& DynamicPrimitiveViewMasks)
+{
+	SCOPED_NAMED_EVENT(GatherDynamicMeshElements, FColor::Magenta);
+
+	Tasks.DynamicMeshElementsPrerequisites.Wait();
+
+	const auto GetPrimaryViewMask = [this] (uint8 ViewMask) -> uint8
+	{
+		// If a mesh is visible in a secondary view, mark it as visible in the primary view
+		uint8 ViewMaskFinal = ViewMask;
+
+		for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
+		{
+			const FViewInfo& View = *Views[ViewIndex];
+
+			if (ViewMask & (1 << ViewIndex) && IStereoRendering::IsASecondaryView(View))
+			{
+				ViewMaskFinal |= 1 << Views[ViewIndex]->PrimaryViewIndex;
+			}
+		}
+
+		return ViewMaskFinal;
+	};
+
+	FDynamicPrimitiveIndexList DynamicPrimitiveIndexList;
+	DynamicPrimitiveIndexList.Primitives.Reserve(128);
+
+	const int32 NumPrimitives = DynamicPrimitiveViewMasks.Primitives.Num();
+
+	for (int32 PrimitiveIndex = 0; PrimitiveIndex < NumPrimitives; ++PrimitiveIndex)
+	{
+		const uint8 ViewMask = DynamicPrimitiveViewMasks.Primitives[PrimitiveIndex];
+
+		if (ViewMask != 0)
+		{
+			DynamicPrimitiveIndexList.Primitives.Emplace(PrimitiveIndex, GetPrimaryViewMask(ViewMask));
+		}
+	}
+
+#if WITH_EDITOR
+	if (GIsEditor)
+	{
+		DynamicPrimitiveIndexList.EditorPrimitives.Reserve(128);
 
 		for (int32 PrimitiveIndex = 0; PrimitiveIndex < NumPrimitives; ++PrimitiveIndex)
 		{
-			const uint8 ViewMask = HasDynamicEditorMeshElementsMasks[PrimitiveIndex];
+			const uint8 ViewMask = DynamicPrimitiveViewMasks.EditorPrimitives[PrimitiveIndex];
 
 			if (ViewMask != 0)
 			{
-				FPrimitiveSceneInfo* PrimitiveSceneInfo = InScene->Primitives[PrimitiveIndex];
-				Collector.SetPrimitive(PrimitiveSceneInfo->Proxy, PrimitiveSceneInfo->DefaultDynamicHitProxyId);
-
-				PrimitiveSceneInfo->Proxy->GetDynamicMeshElements(InViewFamily.Views, InViewFamily, ViewMask, Collector);
+				DynamicPrimitiveIndexList.EditorPrimitives.Emplace(PrimitiveIndex, GetPrimaryViewMask(ViewMask));
 			}
 		}
 	}
-	MeshCollector.ProcessTasks();
+#endif
+
+	GatherDynamicMeshElements(MoveTemp(DynamicPrimitiveIndexList));
+	Tasks.DynamicMeshElements.Trigger();
 }
+
+void FVisibilityTaskData::SetupMeshPasses(FExclusiveDepthStencil::Type BasePassDepthStencilAccess, FInstanceCullingManager& InstanceCullingManager)
+{
+	DynamicMeshElements.ContextContainer.MergeContexts(DynamicMeshElements.DynamicPrimitives);
+
+	{
+		SCOPED_NAMED_EVENT(DynamicRelevance, FColor::Magenta);
+
+		for (FViewInfo* View : Views)
+		{
+			View->DynamicMeshElementsPassRelevance.SetNum(View->DynamicMeshElements.Num());
+		}
+
+		for (FDynamicPrimitive DynamicPrimitive : DynamicMeshElements.DynamicPrimitives)
+		{
+			FPrimitiveSceneInfo* PrimitiveSceneInfo = Scene.Primitives[DynamicPrimitive.PrimitiveIndex];
+			const FPrimitiveBounds& Bounds = Scene.PrimitiveBounds[DynamicPrimitive.PrimitiveIndex];
+			FViewInfo& View = *Views[DynamicPrimitive.ViewIndex];
+			const FPrimitiveViewRelevance& ViewRelevance = View.PrimitiveViewRelevanceMap[DynamicPrimitive.PrimitiveIndex];
+
+			for (int32 ElementIndex = DynamicPrimitive.StartElementIndex; ElementIndex < DynamicPrimitive.EndElementIndex; ++ElementIndex)
+			{
+				const FMeshBatchAndRelevance& MeshBatch = View.DynamicMeshElements[ElementIndex];
+				FMeshPassMask& PassRelevance = View.DynamicMeshElementsPassRelevance[ElementIndex];
+
+				ComputeDynamicMeshRelevance(ShadingPath, bAddLightmapDensityCommands, ViewRelevance, MeshBatch, View, PassRelevance, PrimitiveSceneInfo, Bounds);
+			}
+		}
+	}
+
+	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
+	{
+		FViewInfo& View = *Views[ViewIndex];
+		View.MeshDecalBatches.Sort();
+
+	#if WITH_EDITOR
+		{
+			// Sort, uniquify and truncate the selected Nanite hit proxy IDs
+			Algo::Sort(View.EditorSelectedNaniteHitProxyIds);
+			int32 EndIndex = Algo::Unique(View.EditorSelectedNaniteHitProxyIds);
+			View.EditorSelectedNaniteHitProxyIds.RemoveAt(EndIndex, View.EditorSelectedNaniteHitProxyIds.Num() - EndIndex);
+		}
+	#endif
+
+	#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+		FSceneViewState* ViewState = static_cast<FSceneViewState*>(View.State);
+
+		// if we are freezing the scene, then remember the primitives that are rendered.
+		if (ViewState && ViewState->bIsFreezing)
+		{
+			for (FSceneSetBitIterator BitIt(View.PrimitiveVisibilityMap); BitIt; ++BitIt)
+			{
+				ViewState->FrozenPrimitives.Add(Scene.PrimitiveComponentIds[BitIt.GetIndex()]);
+			}
+		}
+	#endif
+
+		if (!View.ShouldRenderView())
+		{
+			continue;
+		}
+
+		FViewCommands& ViewCommands = DynamicMeshElements.ViewCommandsPerView[ViewIndex];
+
+	#if !UE_BUILD_SHIPPING
+		FViewDebugInfo::Get().ProcessPrimitives(&Scene, View, ViewCommands);
+	#endif
+
+		SceneRenderer.SetupMeshPass(View, BasePassDepthStencilAccess, ViewCommands, InstanceCullingManager);
+	}
+}
+
+void FVisibilityTaskData::ProcessRenderThreadTasks()
+{
+	SCOPE_CYCLE_COUNTER(STAT_ViewVisibilityTime);
+	SCOPED_NAMED_EVENT(ProcessVisibilityTasks, FColor::Magenta);
+
+	UE::Tasks::FTask VirtualTextureTask;
+
+	StartGatherDynamicMeshElements();
+
+	FPrimitiveRange PrimitiveRange;
+	PrimitiveRange.StartIndex = 0u;
+	PrimitiveRange.EndIndex = TaskConfig.NumTestedPrimitives;
+
+	if (TaskConfig.Schedule == EVisibilityTaskSchedule::RenderThread)
+	{
+		for (FVisibilityViewPacket& ViewPacket : ViewPackets)
+		{
+			ViewPacket.BeginInitVisibility();
+			UpdatePrimitiveFading(Scene, ViewPacket.View, ViewPacket.ViewState, PrimitiveRange);
+		}
+
+		SceneRenderer.WaitOcclusionTests(RHICmdList);
+
+		for (FVisibilityViewPacket& ViewPacket : ViewPackets)
+		{
+			if (ViewPacket.OcclusionCull.ContextIfSerial)
+			{
+				SCOPED_NAMED_EVENT(OcclusionCull, FColor::Magenta);
+				const int32 NumCulledPrimitives = PrecomputedOcclusionCull(ViewPacket, PrimitiveRange);
+
+				ViewPacket.OcclusionCull.ContextIfSerial->Map(RHICmdList);
+				ViewPacket.OcclusionCull.ContextIfSerial->AddPrimitives(PrimitiveRange);
+				ViewPacket.OcclusionCull.ContextIfSerial->Unmap(RHICmdList);
+
+				if (NumCulledPrimitives > 0)
+				{
+					TaskConfig.OcclusionCull.NumCulledPrimitives.fetch_add(NumCulledPrimitives, std::memory_order_relaxed);
+				}
+			}
+
+			ViewPacket.Tasks.OcclusionCull.Trigger();
+		}
+
+		MergeSecondaryViewVisibility();
+
+		// Relevance requires that cached mesh commands be available first.
+		Scene.WaitForCacheMeshDrawCommandsTask();
+
+		for (FVisibilityViewPacket& ViewPacket : ViewPackets)
+		{
+			for (FSceneSetBitIterator BitIt(ViewPacket.View.PrimitiveVisibilityMap, PrimitiveRange.StartIndex); BitIt.GetIndex() < PrimitiveRange.EndIndex; ++BitIt)
+			{
+				ViewPacket.Relevance.Context->AddPrimitive(BitIt.GetIndex());
+			}
+			ViewPacket.Relevance.Context->Finalize();
+			ViewPacket.Tasks.ComputeRelevance.Trigger();
+		}
+
+		Tasks.bWaitingAllowed = true;
+
+		check(DynamicMeshElements.PrimitiveViewMasks);
+		GatherDynamicMeshElements(*DynamicMeshElements.PrimitiveViewMasks);
+	}
+	else
+	{
+		if (DynamicMeshElements.CommandPipe)
+		{
+			SCOPED_NAMED_EVENT(WaitForGatherDynamicMeshElements, FColor::Magenta);
+
+			// Wait on the command pipe first as it will be continually updating the render thread event (and process tasks while we wait).
+			Tasks.DynamicMeshElementsPipe->Wait(ENamedThreads::GetRenderThread_Local());
+		}
+		else
+		{
+			Tasks.ComputeRelevance.Wait();
+			check(DynamicMeshElements.PrimitiveViewMasks);
+			GatherDynamicMeshElements(*DynamicMeshElements.PrimitiveViewMasks);
+		}
+
+		for (FVisibilityViewPacket& ViewPacket : ViewPackets)
+		{
+			if (ViewPacket.OcclusionCull.ContextIfParallel)
+			{
+				ViewPacket.OcclusionCull.ContextIfParallel->Unmap(RHICmdList);
+			}
+		}
+	}
+
+	// Now process all gather dynamic mesh element tasks that were queued up to run on the render thread.
+	if (Tasks.DynamicMeshElementsRenderThread)
+	{
+		Tasks.DynamicMeshElementsRenderThread->Wait(ENamedThreads::GetRenderThread_Local());
+	}
+
+	Tasks.LightVisibility.Wait();
+	Tasks.FinalizeRelevance.Wait();
+
+	INC_DWORD_STAT_BY(STAT_ProcessedPrimitives, PrimitiveRange.EndIndex * Views.Num());
+	INC_DWORD_STAT_BY(STAT_CulledPrimitives, TaskConfig.FrustumCull.NumCulledPrimitives);
+	INC_DWORD_STAT_BY(STAT_OccludedPrimitives, TaskConfig.OcclusionCull.NumCulledPrimitives);
+
+	TRACE_COUNTER_SET(Scene_Visibility_NumProcessedPrimitives, PrimitiveRange.EndIndex * Views.Num());
+	TRACE_COUNTER_SET(Scene_Visibility_FrustumCull_NumPrimitivesPerTask, TaskConfig.FrustumCull.NumPrimitivesPerTask);
+	TRACE_COUNTER_SET(Scene_Visibility_FrustumCull_NumCulledPrimitives, TaskConfig.FrustumCull.NumCulledPrimitives);
+	TRACE_COUNTER_SET(Scene_Visibility_OcclusionCull_NumCulledPrimitives, TaskConfig.OcclusionCull.NumCulledPrimitives);
+	TRACE_COUNTER_SET(Scene_Visibility_OcclusionCull_NumTestedQueries, TaskConfig.OcclusionCull.NumTestedQueries);
+	TRACE_COUNTER_SET(Scene_Visibility_Relevance_NumPrimitivesPerPacket, TaskConfig.Relevance.NumPrimitivesPerPacket);
+}
+
+void FVisibilityTaskData::FinishGatherDynamicMeshElements(FExclusiveDepthStencil::Type BasePassDepthStencilAccess, FInstanceCullingManager& InstanceCullingManager, FVirtualTextureUpdater* VirtualTextureUpdater)
+{
+	check(IsInRenderingThread());
+	SCOPED_NAMED_EVENT(FinishDynamicMeshElements, FColor::Magenta);
+
+	FVirtualTextureSystem::Get().WaitForTasks(VirtualTextureUpdater);
+	Tasks.DynamicMeshElements.Wait();
+	DynamicMeshElements.ContextContainer.Submit(RHICmdList);
+
+	Tasks.MeshPassSetup = UE::Tasks::Launch(UE_SOURCE_LOCATION, [this, BasePassDepthStencilAccess, &InstanceCullingManager]
+	{
+		FOptionalTaskTagScope Scope(ETaskTag::EParallelRenderingThread);
+		SetupMeshPasses(BasePassDepthStencilAccess, InstanceCullingManager);
+
+	}, TaskConfig.TaskPriority);
+
+	FSceneRenderer::DynamicReadBufferForInitViews.Commit(RHICmdList);
+}
+
+void FVisibilityTaskData::Finish()
+{
+	SCOPED_NAMED_EVENT(FinishVisibility, FColor::Magenta);
+
+	Tasks.ComputeRelevance.Wait();
+	Tasks.FinalizeRelevance.Wait();
+	Tasks.DynamicMeshElements.Wait();
+	Tasks.MeshPassSetup.Wait();
+
+	ViewPackets.Empty();
+	DynamicMeshElements.DynamicPrimitives.Empty();
+	Allocator.BulkDelete();
+	bFinished = true;
+}
+
+///////////////////////////////////////////////////////////////////////////////
 
 /**
  * Helper for InitViews to detect large camera movement, in both angle and position.
@@ -3007,83 +4632,52 @@ static bool IsLargeCameraMovement(FSceneView& View, const FMatrix& PrevViewMatri
 		Distance.SizeSquared() > CameraTranslationThreshold * CameraTranslationThreshold;
 }
 
-void FSceneRenderer::PreVisibilityFrameSetup(FRHICommandListImmediate& RHICmdList)
+void FSceneRenderer::PreVisibilityFrameSetup(FRDGBuilder& GraphBuilder)
 {
-	// Notify the RHI we are beginning to render a scene.
-	RHICmdList.BeginScene();
+	FRHICommandListImmediate& RHICmdList = GraphBuilder.RHICmdList;
 
+	if (GetRendererOutput() == ERendererOutput::FinalSceneColor)
 	{
-		static auto CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.DoLazyStaticMeshUpdate"));
-		const bool DoLazyStaticMeshUpdate = (CVar->GetInt() && !GIsEditor);
-
-		if (DoLazyStaticMeshUpdate)
+		if (Views.Num() > 0 && !ViewFamily.EngineShowFlags.HitProxies)
 		{
-			QUICK_SCOPE_CYCLE_COUNTER(STAT_PreVisibilityFrameSetup_EvictionForLazyStaticMeshUpdate);
-			static int32 RollingRemoveIndex = 0;
-			static int32 RollingPassShrinkIndex = 0;
-			if (RollingRemoveIndex >= Scene->Primitives.Num())
+			FHairStrandsBookmarkParameters Parameters; 
+			CreateHairStrandsBookmarkParameters(Scene, Views, AllFamilyViews, Parameters, false /*bComputeVisibleInstances*/);
+			Parameters.TransientResources = AllocateHairTransientResources(GraphBuilder, Scene);
+			if (Parameters.HasInstances())
 			{
-				RollingRemoveIndex = 0;
-				RollingPassShrinkIndex++;
-				if (RollingPassShrinkIndex >= UE_ARRAY_COUNT(Scene->CachedDrawLists))
+				if (Scene && IsHairStrandsEnabled(EHairStrandsShaderType::All, Scene->GetShaderPlatform()))
 				{
-					RollingPassShrinkIndex = 0;
+					// 1.Update binding surfaces
+					// Prepare surface data (MeshLODData)
+					Scene->WaitForGPUSkinCacheTask();
+					RunHairStrandsBookmark(GraphBuilder, EHairStrandsBookmark::ProcessBindingSurfaceUpdate, Parameters);
+
+					// 2. Prepare surface data for guides
+					if (Views[0].AllowGPUParticleUpdate())
+					{
+						RunHairStrandsBookmark(GraphBuilder, EHairStrandsBookmark::ProcessGuideInterpolation, Parameters);
+					}
 				}
-				// Periodically shrink the SparseArray containing cached mesh draw commands which we are causing to be regenerated with UpdateStaticMeshes
-				Scene->CachedDrawLists[RollingPassShrinkIndex].MeshDrawCommands.Shrink();
 			}
-			const int32 NumRemovedPerFrame = 10;
-			TArray<FPrimitiveSceneInfo*, TInlineAllocator<10>> SceneInfos;
-			for (int32 NumRemoved = 0; NumRemoved < NumRemovedPerFrame && RollingRemoveIndex < Scene->Primitives.Num(); NumRemoved++, RollingRemoveIndex++)
+		}
+
+		// Notify the FX system that the scene is about to perform visibility checks.
+
+		if (FXSystem && Views.IsValidIndex(0))
+		{
+			FXSystem->PreInitViews(GraphBuilder, Views[0].AllowGPUParticleUpdate() && !ViewFamily.EngineShowFlags.HitProxies, AllFamilies, &ViewFamily);
+		}
+
+#if WITH_EDITOR
+		// Draw lines to lights affecting this mesh if its selected.
+		if (ViewFamily.EngineShowFlags.LightInfluences && Scene)
+		{
+			Scene->WaitForCreateLightPrimitiveInteractionsTask();
+
+			for (TConstSetBitIterator<> It(Scene->PrimitivesSelected); It; ++It)
 			{
-				SceneInfos.Add(Scene->Primitives[RollingRemoveIndex]);
-			}
-			FPrimitiveSceneInfo::UpdateStaticMeshes(RHICmdList, Scene, SceneInfos, false);
-		}
-	}
-
-	RunGPUSkinCacheTransition(RHICmdList, Scene, EGPUSkinCacheTransition::FrameSetup);
-
-	if (Views.Num() > 0 && !ViewFamily.EngineShowFlags.HitProxies)
-	{
-		FHairStrandsBookmarkParameters Parameters = CreateHairStrandsBookmarkParameters(Views);
-		if (Parameters.bHasElements)
-		{
-			FRDGBuilder GraphBuilder(RHICmdList);
-			RunHairStrandsBookmark(GraphBuilder, EHairStrandsBookmark::ProcessLODSelection, Parameters);
-			GraphBuilder.Execute();
-		}
-	}
-
-	if (IsHairStrandsEnabled(EHairStrandsShaderType::All, Scene->GetShaderPlatform()) && Views.Num() > 0 && !ViewFamily.EngineShowFlags.HitProxies)
-	{
-		// If we are rendering from scene capture we don't need to run another time the hair bookmarks.
-		if (Views[0].AllowGPUParticleUpdate())
-		{
-			FRDGBuilder GraphBuilder(RHICmdList);
-
-			FHairStrandsBookmarkParameters Parameters = CreateHairStrandsBookmarkParameters(Views);
-			RunHairStrandsBookmark(GraphBuilder, EHairStrandsBookmark::ProcessGuideInterpolation, Parameters);
-			GraphBuilder.Execute();
-		}
-	}
-
-	// Notify the FX system that the scene is about to perform visibility checks.
-
-	if (FXSystem && Views.IsValidIndex(0))
-	{
-		FXSystem->PreInitViews(RHICmdList, Views[0].AllowGPUParticleUpdate() && !ViewFamily.EngineShowFlags.HitProxies);
-	}
-
-	// Draw lines to lights affecting this mesh if its selected.
-	if (ViewFamily.EngineShowFlags.LightInfluences)
-	{
-		for (TArray<FPrimitiveSceneInfo*>::TConstIterator It(Scene->Primitives); It; ++It)
-		{
-			const FPrimitiveSceneInfo* PrimitiveSceneInfo = *It;
-			if (PrimitiveSceneInfo->Proxy->IsSelected())
-			{
-				FLightPrimitiveInteraction *LightList = PrimitiveSceneInfo->LightList;
+				const FPrimitiveSceneInfo* PrimitiveSceneInfo = Scene->Primitives[It.GetIndex()];
+				FLightPrimitiveInteraction* LightList = PrimitiveSceneInfo->LightList;
 				while (LightList)
 				{
 					const FLightSceneInfo* LightSceneInfo = LightList->GetLight();
@@ -3097,11 +4691,11 @@ void FSceneRenderer::PreVisibilityFrameSetup(FRHICommandListImmediate& RHICmdLis
 					if (bRelevant)
 					{
 						// Draw blue for light-mapped lights and orange for dynamic lights
-						const FColor LineColor = bLightMapped ? FColor(0,140,255) : FColor(255,140,0);
-						for (int32 ViewIndex = 0;ViewIndex < Views.Num();ViewIndex++)
+						const FColor LineColor = bLightMapped ? FColor(0, 140, 255) : FColor(255, 140, 0);
+						for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
 						{
 							FViewInfo& View = Views[ViewIndex];
-							FViewElementPDI LightInfluencesPDI(&View,nullptr,&View.DynamicPrimitiveShaderData);
+							FViewElementPDI LightInfluencesPDI(&View, nullptr, &View.DynamicPrimitiveCollector);
 							LightInfluencesPDI.DrawLine(PrimitiveSceneInfo->Proxy->GetBounds().Origin, LightSceneInfo->Proxy->GetLightToWorld().GetOrigin(), LineColor, SDPG_World);
 						}
 					}
@@ -3109,23 +4703,69 @@ void FSceneRenderer::PreVisibilityFrameSetup(FRHICommandListImmediate& RHICmdLis
 				}
 			}
 		}
+#endif
+
+#if RHI_RAYTRACING
+		if (Scene && Views.Num())
+		{
+			const int32 ReferenceViewIndex = 0;
+			const FViewInfo& ReferenceView = Views[ReferenceViewIndex];
+
+			Scene->RayTracingScene.InitPreViewTranslation(ReferenceView.ViewMatrices);
+			Scene->RayTracingScene.bNeedsDebugInstanceGPUSceneIndexBuffer = IsRayTracingInstanceOverlapEnabled(ReferenceView);
+		}
+#endif
 	}
-	
+
+	for (const auto& ViewExtension : ViewFamily.ViewExtensions)
+	{
+		ViewExtension->PreInitViews_RenderThread(GraphBuilder);
+	}
+}
+
+void FSceneRenderer::PrepareViewStateForVisibility(const FSceneTexturesConfig& SceneTexturesConfig)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(PrepareViewStateForVisibility);
+
 #if UE_BUILD_SHIPPING
 	const bool bFreezeTemporalHistories = false;
 	const bool bFreezeTemporalSequences = false;
 #else
 	bool bFreezeTemporalHistories = CVarFreezeTemporalHistories.GetValueOnRenderThread() != 0;
+
+	static int32 CurrentFreezeTemporalHistoriesProgress = 0;
+	if (CurrentFreezeTemporalHistoriesProgress != CVarFreezeTemporalHistoriesProgress.GetValueOnRenderThread())
+	{
+		bFreezeTemporalHistories = false;
+		CurrentFreezeTemporalHistoriesProgress = CVarFreezeTemporalHistoriesProgress.GetValueOnRenderThread();
+	}
+
 	bool bFreezeTemporalSequences = bFreezeTemporalHistories || CVarFreezeTemporalSequences.GetValueOnRenderThread() != 0;
 #endif
 
+	// Load this field once so it has a consistent value for all views (and to avoid the atomic load in the loop).
+	// While the value may not be perfectly in sync when we render other view families, this is ok as this
+	// invalidation mechanism is only used for interactive rendering where we expect to be constantly drawing the scene.
+	// Therefore it is acceptable for some view families to be a frame or so behind others.
+	uint32 CurrentPathTracingInvalidationCounter = Scene->PathTracingInvalidationCounter.Load();
+
 	// Setup motion blur parameters (also check for camera movement thresholds)
-	for(int32 ViewIndex = 0;ViewIndex < Views.Num();ViewIndex++)
+	for(int32 ViewIndex = 0;ViewIndex < AllViews.Num();ViewIndex++)
 	{
-		FViewInfo& View = Views[ViewIndex];
+		FViewInfo& View = *AllViews[ViewIndex];
 		FSceneViewState* ViewState = View.ViewState;
 
 		check(View.VerifyMembersChecks());
+
+		// Setup global dither fade in and fade out uniform buffers.
+		{
+			FDitherUniformShaderParameters DitherUniformShaderParameters;
+			DitherUniformShaderParameters.LODFactor = View.GetTemporalLODTransition();
+			View.DitherFadeOutUniformBuffer = FDitherUniformBufferRef::CreateUniformBufferImmediate(DitherUniformShaderParameters, UniformBuffer_SingleFrame);
+
+			DitherUniformShaderParameters.LODFactor = View.GetTemporalLODTransition() - 1.0f;
+			View.DitherFadeInUniformBuffer = FDitherUniformBufferRef::CreateUniformBufferImmediate(DitherUniformShaderParameters, UniformBuffer_SingleFrame);
+		}
 
 		// Once per render increment the occlusion frame counter.
 		if (ViewState)
@@ -3138,18 +4778,22 @@ void FSceneRenderer::PreVisibilityFrameSetup(FRHICommandListImmediate& RHICmdLis
 		const bool bIsHitTesting = ViewFamily.EngineShowFlags.HitProxies;
 		// Don't test occlusion queries in collision viewmode as they can be bigger then the rendering bounds.
 		const bool bCollisionView = ViewFamily.EngineShowFlags.CollisionVisibility || ViewFamily.EngineShowFlags.CollisionPawn;
-		if (GIsHighResScreenshot || !DoOcclusionQueries(FeatureLevel) || bIsHitTesting || bCollisionView)
+		if (GIsHighResScreenshot || !DoOcclusionQueries() || bIsHitTesting || bCollisionView || ViewFamily.EngineShowFlags.DisableOcclusionQueries)
 		{
 			View.bDisableQuerySubmissions = true;
 			View.bIgnoreExistingQueries = true;
 		}
-		FSceneRenderTargets& SceneContext = FSceneRenderTargets::Get(RHICmdList);
 
 		// set up the screen area for occlusion
-		float NumPossiblePixels = SceneContext.UseDownsizedOcclusionQueries() && IsValidRef(SceneContext.SmallDepthZ) ?
-			(float)View.ViewRect.Width() / SceneContext.GetSmallColorDepthDownsampleFactor() * (float)View.ViewRect.Height() / SceneContext.GetSmallColorDepthDownsampleFactor() :
-			View.ViewRect.Width() * View.ViewRect.Height();
-		View.OneOverNumPossiblePixels = NumPossiblePixels > 0.0 ? 1.0f / NumPossiblePixels : 0.0f;
+		{
+			float OcclusionPixelMultiplier = 1.0f;
+			if (UseDownsampledOcclusionQueries())
+			{
+				OcclusionPixelMultiplier = 1.0f / static_cast<float>(FMath::Square(SceneTexturesConfig.SmallDepthDownsampleFactor));
+			}
+			float NumPossiblePixels = static_cast<float>(View.ViewRect.Width() * View.ViewRect.Height()) * OcclusionPixelMultiplier;
+			View.OneOverNumPossiblePixels = NumPossiblePixels > 0.0 ? 1.0f / NumPossiblePixels : 0.0f;
+		}
 
 		// Still need no jitter to be set for temporal feedback on SSR (it is enabled even when temporal AA is off).
 		check(View.TemporalJitterPixels.X == 0.0f);
@@ -3180,62 +4824,84 @@ void FSceneRenderer::PreVisibilityFrameSetup(FRHICommandListImmediate& RHICmdLis
 		// Subpixel jitter for temporal AA
 		int32 CVarTemporalAASamplesValue = CVarTemporalAASamples.GetValueOnRenderThread();
 
+		EMainTAAPassConfig TAAConfig = GetMainTAAPassConfig(View);
+
 		bool bTemporalUpsampling = View.PrimaryScreenPercentageMethod == EPrimaryScreenPercentageMethod::TemporalUpscale;
 		
 		// Apply a sub pixel offset to the view.
-		if (View.AntiAliasingMethod == AAM_TemporalAA && ViewState && (CVarTemporalAASamplesValue > 0 || bTemporalUpsampling) && View.bAllowTemporalJitter)
+		if (IsTemporalAccumulationBasedMethod(View.AntiAliasingMethod) && ViewState && (CVarTemporalAASamplesValue > 0 || bTemporalUpsampling) && View.bAllowTemporalJitter)
 		{
 			float EffectivePrimaryResolutionFraction = float(View.ViewRect.Width()) / float(View.GetSecondaryViewRectSize().X);
 
-			bool bIsMobileTAA = IsMobilePlatform(View.GetShaderPlatform()) && !SupportsGen4TAA(View.GetShaderPlatform());
-
 			// Compute number of TAA samples.
-			int32 TemporalAASamples = CVarTemporalAASamplesValue;
+			int32 TemporalAASamples;
 			{
-				if (bIsMobileTAA)
+				if (TAAConfig == EMainTAAPassConfig::TSR)
 				{
-					// Only support 2 samples for mobile temporal AA.
-					TemporalAASamples = 2;
+					// Force the number of AA sample to make sure the quality doesn't get
+					// compromised by previously set settings for Gen4 TAA
+					TemporalAASamples = 8;
 				}
-				else if(bTemporalUpsampling)
+				else
+				{
+					TemporalAASamples = FMath::Clamp(CVarTemporalAASamplesValue, 1, 255);
+				}
+
+				if (bTemporalUpsampling)
 				{
 					// When doing TAA upsample with screen percentage < 100%, we need extra temporal samples to have a
 					// constant temporal sample density for final output pixels to avoid output pixel aligned converging issues.
-					TemporalAASamples = float(TemporalAASamples) * FMath::Max(1.f, 1.f / (EffectivePrimaryResolutionFraction * EffectivePrimaryResolutionFraction));
+					TemporalAASamples = FMath::RoundToInt(float(TemporalAASamples) * FMath::Max(1.f, 1.f / (EffectivePrimaryResolutionFraction * EffectivePrimaryResolutionFraction)));
 				}
 				else if (CVarTemporalAASamplesValue == 5)
 				{
 					TemporalAASamples = 4;
 				}
 
-				TemporalAASamples = FMath::Clamp(TemporalAASamples, 1, 255);
+				// Use immediately higher prime number to break up coherence between the TAA jitter sequence and any
+				// other random signal that are power of two of View.StateFrameIndex
+				if (TAAConfig == EMainTAAPassConfig::TSR)
+				{
+					static const uint8 kFirstPrimeNumbers[] = {
+						2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
+						101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193, 197, 199,
+						211, 223, 227, 229, 233, 239, 241, 251,
+					};
+
+					for (int32 PrimeNumberId = FMath::Max(4, (TemporalAASamples - 1) / 5); PrimeNumberId < UE_ARRAY_COUNT(kFirstPrimeNumbers); PrimeNumberId++)
+					{
+						if (int32(kFirstPrimeNumbers[PrimeNumberId]) >= TemporalAASamples)
+						{
+							TemporalAASamples = int32(kFirstPrimeNumbers[PrimeNumberId]);
+							break;
+						}
+					}
+				}
 			}
 
 			// Compute the new sample index in the temporal sequence.
-			int32 TemporalSampleIndex			= ViewState->TemporalAASampleIndex + 1;
-			if(TemporalSampleIndex >= TemporalAASamples || View.bCameraCut)
+			int32 TemporalSampleIndex = ViewState->TemporalAASampleIndex + 1;
+			if (TemporalSampleIndex >= TemporalAASamples || View.bCameraCut)
 			{
 				TemporalSampleIndex = 0;
 			}
 
+			#if !UE_BUILD_SHIPPING
+			if (CVarTAADebugOverrideTemporalIndex.GetValueOnRenderThread() >= 0)
+			{
+				TemporalSampleIndex = CVarTAADebugOverrideTemporalIndex.GetValueOnRenderThread();
+			}
+			#endif
+
 			// Updates view state.
 			if (!View.bStatePrevViewInfoIsReadOnly && !bFreezeTemporalSequences)
 			{
-				ViewState->TemporalAASampleIndex		  = TemporalSampleIndex;
-				ViewState->TemporalAASampleIndexUnclamped = ViewState->TemporalAASampleIndexUnclamped+1;
+				ViewState->TemporalAASampleIndex = TemporalSampleIndex;
 			}
 
 			// Choose sub pixel sample coordinate in the temporal sequence.
 			float SampleX, SampleY;
-			if (bIsMobileTAA)
-			{
-				float SamplesX[] = { -8.0f / 16.0f, 0.0 / 16.0f };
-				float SamplesY[] = { /* - */ 0.0f / 16.0f, 8.0 / 16.0f };
-				check(TemporalAASamples == UE_ARRAY_COUNT(SamplesX));
-				SampleX = SamplesX[TemporalSampleIndex];
-				SampleY = SamplesY[TemporalSampleIndex];
-			}
-			else if (View.PrimaryScreenPercentageMethod == EPrimaryScreenPercentageMethod::TemporalUpscale)
+			if (View.PrimaryScreenPercentageMethod == EPrimaryScreenPercentageMethod::TemporalUpscale)
 			{
 				// Uniformly distribute temporal jittering in [-.5; .5], because there is no longer any alignement of input and output pixels.
 				SampleX = Halton(TemporalSampleIndex + 1, 2) - 0.5f;
@@ -3339,6 +5005,7 @@ void FSceneRenderer::PreVisibilityFrameSetup(FRHICommandListImmediate& RHICmdLis
 		{
 			NewPrevViewInfo.ViewRect = View.ViewRect;
 			NewPrevViewInfo.ViewMatrices = View.ViewMatrices;
+			NewPrevViewInfo.ViewRect = View.ViewRect;
 		}
 
 		if ( ViewState )
@@ -3350,47 +5017,57 @@ void FSceneRenderer::PreVisibilityFrameSetup(FRHICommandListImmediate& RHICmdLis
 			}
 
 			// determine if we are initializing or we should reset the persistent state
-			const float DeltaTime = View.Family->CurrentRealTime - ViewState->LastRenderTime;
+			const float DeltaTime = View.Family->Time.GetRealTimeSeconds() - ViewState->LastRenderTime;
 			const bool bFirstFrameOrTimeWasReset = DeltaTime < -0.0001f || ViewState->LastRenderTime < 0.0001f;
 			const bool bIsLargeCameraMovement = IsLargeCameraMovement(
 				View,
 				ViewState->PrevFrameViewInfo.ViewMatrices.GetViewMatrix(),
 				ViewState->PrevFrameViewInfo.ViewMatrices.GetViewOrigin(),
-				45.0f, GCameraCutTranslationThreshold);
+				75.0f, GCameraCutTranslationThreshold);
 			const bool bResetCamera = (bFirstFrameOrTimeWasReset || View.bCameraCut || bIsLargeCameraMovement || View.bForceCameraVisibilityReset);
 			
 #if RHI_RAYTRACING
-			// Note: 0.18 deg is the minimum angle for avoiding numerical precision issue (which would cause constant invalidation)
-			const bool bIsCameraMove = IsLargeCameraMovement(
-				View,
-				ViewState->PrevFrameViewInfo.ViewMatrices.GetViewMatrix(),
-				ViewState->PrevFrameViewInfo.ViewMatrices.GetViewOrigin(),
-				0.18f /*degree*/, 0.1f /*cm*/);
-			const bool bIsProjMatrixDifferent = View.ViewMatrices.GetProjectionNoAAMatrix() != View.ViewState->PrevFrameViewInfo.ViewMatrices.GetProjectionNoAAMatrix();
-			bool bInvalidatePathTracer = false;
-			
+			static const auto CVarTemporalDenoiser = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.PathTracing.TemporalDenoiser.mode"));
+			const int TemporalDenoiserMode = CVarTemporalDenoiser ? CVarTemporalDenoiser->GetValueOnAnyThread() : 0;
+
 			if (View.bIsOfflineRender)
 			{
 				// In the offline context, we want precise control over when to restart the path tracer's accumulation to allow for motion blur
 				// So we use the camera cut signal only. In particular - we should not use bForceCameraVisibilityReset since this has
 				// interactions with the motion blur post process effect in tiled rendering (see comment below).
-				bInvalidatePathTracer = View.bCameraCut || View.bForcePathTracerReset;
+				if (View.bCameraCut || View.bForcePathTracerReset)
+				{
+					const bool bClearTemporalDenoisingHistory = (TemporalDenoiserMode == 1) ? View.bCameraCut : true;
+					ViewState->PathTracingInvalidate(bClearTemporalDenoisingHistory);
+				}
 			}
 			else
 			{
 				// for interactive usage - any movement or scene change should restart the path tracer
-				bInvalidatePathTracer = bResetCamera ||
-					Scene->bPathTracingNeedsInvalidation ||
+
+				// Note: 0.18 deg is the minimum angle for avoiding numerical precision issue (which would cause constant invalidation)
+				const bool bIsCameraMove = IsLargeCameraMovement(
+					View,
+					ViewState->PrevFrameViewInfo.ViewMatrices.GetViewMatrix(),
+					ViewState->PrevFrameViewInfo.ViewMatrices.GetViewOrigin(),
+					0.18f /*degree*/, 0.1f /*cm*/);
+				const bool bIsProjMatrixDifferent = View.ViewMatrices.GetProjectionNoAAMatrix() != View.ViewState->PrevFrameViewInfo.ViewMatrices.GetProjectionNoAAMatrix();
+
+				// For each view, we remember what the invalidation counter was set to last time we were here so we can catch all changes
+				const bool bNeedsInvalidation = ViewState->PathTracingInvalidationCounter != CurrentPathTracingInvalidationCounter;
+				ViewState->PathTracingInvalidationCounter = CurrentPathTracingInvalidationCounter;
+				if (bNeedsInvalidation ||
 					bIsProjMatrixDifferent ||
 					bIsCameraMove ||
-					View.bForcePathTracerReset;
+					View.bCameraCut ||
+					View.bForceCameraVisibilityReset ||
+					View.bForcePathTracerReset)
+				{
+					const bool bClearTemporalDenoisingHistory = (TemporalDenoiserMode == 2) ? View.bCameraCut : true;
+					ViewState->PathTracingInvalidate(bClearTemporalDenoisingHistory);
+				}
 			}
 
-			if (bInvalidatePathTracer)
-			{
-				ViewState->PathTracingInvalidate();
-				Scene->bPathTracingNeedsInvalidation = false;
-			}
 #endif // RHI_RAYTRACING
 
 			if (bResetCamera)
@@ -3424,12 +5101,12 @@ void FSceneRenderer::PreVisibilityFrameSetup(FRHICommandListImmediate& RHICmdLis
 
 			// detect conditions where we should reset occlusion queries
 			if (bFirstFrameOrTimeWasReset || 
-				ViewState->LastRenderTime + GEngine->PrimitiveProbablyVisibleTime < View.Family->CurrentRealTime ||
+				ViewState->LastRenderTime + GEngine->PrimitiveProbablyVisibleTime < View.Family->Time.GetRealTimeSeconds() ||
 				View.bCameraCut ||
 				View.bForceCameraVisibilityReset ||
 				IsLargeCameraMovement(
 					View, 
-				    ViewState->PrevViewMatrixForOcclusionQuery, 
+				    FMatrix(ViewState->PrevViewMatrixForOcclusionQuery), 
 				    ViewState->PrevViewOriginForOcclusionQuery, 
 				    GEngine->CameraRotationThreshold, GEngine->CameraTranslationThreshold))
 			{
@@ -3446,22 +5123,8 @@ void FSceneRenderer::PreVisibilityFrameSetup(FRHICommandListImmediate& RHICmdLis
 				View.bIgnoreExistingQueries = true;
 			}
 
-			ViewState->PrevViewMatrixForOcclusionQuery = View.ViewMatrices.GetViewMatrix();
+			ViewState->PrevViewMatrixForOcclusionQuery = FMatrix44f(View.ViewMatrices.GetViewMatrix());	// LWC_TODO: Precision loss
 			ViewState->PrevViewOriginForOcclusionQuery = View.ViewMatrices.GetViewOrigin();
-				
-			// store old view matrix and detect conditions where we should reset motion blur 
-#if RHI_RAYTRACING
-			{
-				if (bResetCamera || IsLargeCameraMovement(View, ViewState->PrevFrameViewInfo.ViewMatrices.GetViewMatrix(), ViewState->PrevFrameViewInfo.ViewMatrices.GetViewOrigin(), 0.1f, 0.1f))
-				{
-					ViewState->RayTracingNumIterations = 1;
-				}
-				else
-				{
-					ViewState->RayTracingNumIterations++;
-				}
-			}
-#endif // RHI_RAYTRACING
 
 			// we don't use DeltaTime as it can be 0 (in editor) and is computed by subtracting floats (loses precision over time)
 			// Clamp DeltaWorldTime to reasonable values for the purposes of motion blur, things like TimeDilation can make it very small
@@ -3486,19 +5149,6 @@ void FSceneRenderer::PreVisibilityFrameSetup(FRHICommandListImmediate& RHICmdLis
 			View.PrevViewInfo = NewPrevViewInfo;
 		}
 	}
-
-	// Setup global dither fade in and fade out uniform buffers.
-	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
-	{
-		FViewInfo& View = Views[ViewIndex];
-
-		FDitherUniformShaderParameters DitherUniformShaderParameters;
-		DitherUniformShaderParameters.LODFactor = View.GetTemporalLODTransition();
-		View.DitherFadeOutUniformBuffer = FDitherUniformBufferRef::CreateUniformBufferImmediate(DitherUniformShaderParameters, UniformBuffer_SingleFrame);
-
-		DitherUniformShaderParameters.LODFactor = View.GetTemporalLODTransition() - 1.0f;
-		View.DitherFadeInUniformBuffer = FDitherUniformBufferRef::CreateUniformBufferImmediate(DitherUniformShaderParameters, UniformBuffer_SingleFrame);
-	}
 }
 
 void FSceneViewState::UpdateMotionBlurTimeScale(const FViewInfo& View)
@@ -3506,7 +5156,7 @@ void FSceneViewState::UpdateMotionBlurTimeScale(const FViewInfo& View)
 	const int32 MotionBlurTargetFPS = View.FinalPostProcessSettings.MotionBlurTargetFPS;
 
 	// Ensure we can divide by the Delta Time later without a divide by zero.
-	float DeltaWorldTime = FMath::Max(View.Family->DeltaWorldTime, SMALL_NUMBER);
+	float DeltaRealTime = FMath::Max(View.Family->Time.GetDeltaRealTimeSeconds(), SMALL_NUMBER);
 
 	// Track the current FPS by using an exponential moving average of the current delta time.
 	if (MotionBlurTargetFPS <= 0)
@@ -3515,12 +5165,12 @@ void FSceneViewState::UpdateMotionBlurTimeScale(const FViewInfo& View)
 		if (GetSequencerState() == ESS_Paused)
 		{
 			// Reset the moving average to the current delta time.
-			MotionBlurTargetDeltaTime = DeltaWorldTime;
+			MotionBlurTargetDeltaTime = DeltaRealTime;
 		}
 		else
 		{
 			// Smooth the target delta time using a moving average.
-			MotionBlurTargetDeltaTime = FMath::Lerp(MotionBlurTargetDeltaTime, DeltaWorldTime, 0.1f);
+			MotionBlurTargetDeltaTime = FMath::Lerp(MotionBlurTargetDeltaTime, DeltaRealTime, 0.1f);
 		}
 	}
 	else // Track a fixed target FPS.
@@ -3529,641 +5179,46 @@ void FSceneViewState::UpdateMotionBlurTimeScale(const FViewInfo& View)
 		// Tuned for content compatibility with existing content when target is the default 30 FPS.
 		if (GetSequencerState() == ESS_Paused)
 		{
-			DeltaWorldTime = 1.0f / 60.0f;
+			DeltaRealTime = 1.0f / 60.0f;
 		}
+
 
 		MotionBlurTargetDeltaTime = 1.0f / static_cast<float>(MotionBlurTargetFPS);
 	}
 
-	MotionBlurTimeScale = MotionBlurTargetDeltaTime / DeltaWorldTime;
+	MotionBlurTimeScale = MotionBlurTargetDeltaTime / DeltaRealTime;
 }
 
-static TAutoConsoleVariable<int32> CVarAlsoUseSphereForFrustumCull(
-	TEXT("r.AlsoUseSphereForFrustumCull"),
-	0,  
-	TEXT("Performance tweak. If > 0, then use a sphere cull before and in addition to a box for frustum culling."),
-	ECVF_RenderThreadSafe
-	);
-
-static TAutoConsoleVariable<int32> CVarUseFastIntersect(
-	TEXT("r.UseFastIntersect"),
-	1,
-	TEXT("Use optimized 8 plane fast intersection code if we have 8 permuted planes."),
-	ECVF_RenderThreadSafe
-);
-
-
-void UpdateReflectionSceneData(FScene* Scene)
+void FDeferredShadingSceneRenderer::ComputeLightVisibility()
 {
-	QUICK_SCOPE_CYCLE_COUNTER(STAT_UpdateReflectionSceneData)
-	SCOPED_NAMED_EVENT(UpdateReflectionScene, FColor::Red);
+	FSceneRenderer::ComputeLightVisibility();
 
+	CreateIndirectCapsuleShadows();
 
-	FReflectionEnvironmentSceneData& ReflectionSceneData = Scene->ReflectionSceneData;
-
-	ReflectionSceneData.SortedCaptures.Reset(ReflectionSceneData.RegisteredReflectionCaptures.Num());
-	ReflectionSceneData.NumBoxCaptures = 0;
-	ReflectionSceneData.NumSphereCaptures = 0;
-
-	const int32 MaxCubemaps = ReflectionSceneData.CubemapArray.GetMaxCubemaps();
-	int32_t PlatformMaxNumReflectionCaptures = FMath::Min(FMath::FloorToInt(GMaxTextureArrayLayers / 6.0f), GMaxNumReflectionCaptures);
-
-	// Pack visible reflection captures into the uniform buffer, each with an index to its cubemap array entry.
-	// GPUScene primitive data stores closest reflection capture as index into this buffer, so this index which must be invalidate every time OutSortData contents change.
-	for (int32 ReflectionProxyIndex = 0; ReflectionProxyIndex < ReflectionSceneData.RegisteredReflectionCaptures.Num() && ReflectionSceneData.SortedCaptures.Num() < PlatformMaxNumReflectionCaptures; ReflectionProxyIndex++)
-	{
-		FReflectionCaptureProxy* CurrentCapture = ReflectionSceneData.RegisteredReflectionCaptures[ReflectionProxyIndex];
-
-		FReflectionCaptureSortData NewSortEntry;
-
-		NewSortEntry.CubemapIndex = -1;
-		NewSortEntry.CaptureOffsetAndAverageBrightness = FVector4(CurrentCapture->CaptureOffset, 1.0f);
-		NewSortEntry.CaptureProxy = CurrentCapture;
-		if (SupportsTextureCubeArray(Scene->GetFeatureLevel()))
-		{
-			FCaptureComponentSceneState* ComponentStatePtr = ReflectionSceneData.AllocatedReflectionCaptureState.Find(CurrentCapture->Component);
-			if (!ComponentStatePtr)
-			{
-				// Skip reflection captures without built data to upload
-				continue;
-			}
-
-			NewSortEntry.CubemapIndex = ComponentStatePtr->CubemapIndex;
-			check(NewSortEntry.CubemapIndex < MaxCubemaps || NewSortEntry.CubemapIndex == 0);
-			NewSortEntry.CaptureOffsetAndAverageBrightness.W = ComponentStatePtr->AverageBrightness;
-		}
-
-		NewSortEntry.Guid = CurrentCapture->Guid;
-		NewSortEntry.PositionAndRadius = FVector4(CurrentCapture->Position, CurrentCapture->InfluenceRadius);
-		float ShapeTypeValue = (float)CurrentCapture->Shape;
-		NewSortEntry.CaptureProperties = FVector4(CurrentCapture->Brightness, NewSortEntry.CubemapIndex, ShapeTypeValue, 0);
-
-		if (CurrentCapture->Shape == EReflectionCaptureShape::Plane)
-		{
-			//planes count as boxes in the compute shader.
-			++ReflectionSceneData.NumBoxCaptures;
-			NewSortEntry.BoxTransform = FMatrix(
-				FPlane(CurrentCapture->ReflectionPlane),
-				FPlane(CurrentCapture->ReflectionXAxisAndYScale),
-				FPlane(0, 0, 0, 0),
-				FPlane(0, 0, 0, 0));
-
-			NewSortEntry.BoxScales = FVector4(0);
-		}
-		else if (CurrentCapture->Shape == EReflectionCaptureShape::Sphere)
-		{
-			++ReflectionSceneData.NumSphereCaptures;
-		}
-		else
-		{
-			++ReflectionSceneData.NumBoxCaptures;
-			NewSortEntry.BoxTransform = CurrentCapture->BoxTransform;
-			NewSortEntry.BoxScales = FVector4(CurrentCapture->BoxScales, CurrentCapture->BoxTransitionDistance);
-		}
-
-		ReflectionSceneData.SortedCaptures.Add(NewSortEntry);
-	}
-
-	ReflectionSceneData.SortedCaptures.Sort();
-
-	for (int32 CaptureIndex = 0; CaptureIndex < ReflectionSceneData.SortedCaptures.Num(); CaptureIndex++)
-	{
-		ReflectionSceneData.SortedCaptures[CaptureIndex].CaptureProxy->SortedCaptureIndex = CaptureIndex;
-	}
-
-
-	// If SortedCaptures change, then in case of forward renderer all scene primitives need to be updated, as they 
-	// store index into sorted reflection capture uniform buffer for the forward renderer.
-	if (IsForwardShadingEnabled(Scene->GetShaderPlatform()) && ReflectionSceneData.AllocatedReflectionCaptureStateHasChanged)
-	{
-		const int32 NumPrimitives = Scene->Primitives.Num();
-		for (int32 PrimitiveIndex = 0; PrimitiveIndex < NumPrimitives; ++PrimitiveIndex)
-		{
-			Scene->Primitives[PrimitiveIndex]->SetNeedsUniformBufferUpdate(true);
-		}
-
-		Scene->GPUScene.bUpdateAllPrimitives = true;
-
-		ReflectionSceneData.AllocatedReflectionCaptureStateHasChanged = false;
-	}
-
-
-	// Mark all primitives for reflection proxy update
-	{
-		QUICK_SCOPE_CYCLE_COUNTER(STAT_MarkAllPrimitivesForReflectionProxyUpdate);
-
-		if (Scene->ReflectionSceneData.bRegisteredReflectionCapturesHasChanged)
-		{
-			// Mobile needs to re-cache all mesh commands when scene capture data has changed
-			const bool bNeedsStaticMeshUpdate = Scene->GetShadingPath() == EShadingPath::Mobile;
-			
-			// Mark all primitives as needing an update
-			// Note: Only visible primitives will actually update their reflection proxy
-			for (int32 PrimitiveIndex = 0; PrimitiveIndex < Scene->Primitives.Num(); PrimitiveIndex++)
-			{
-				FPrimitiveSceneInfo* Primitive = Scene->Primitives[PrimitiveIndex];
-				Primitive->RemoveCachedReflectionCaptures();
-
-				if (bNeedsStaticMeshUpdate)
-				{
-					Primitive->CacheReflectionCaptures();
-					Primitive->BeginDeferredUpdateStaticMeshes();
-				}
-			}
-
-			Scene->ReflectionSceneData.bRegisteredReflectionCapturesHasChanged = false;
-		}
-	}
+	SetupVolumetricFog();
 }
 
-#if !UE_BUILD_SHIPPING
-static uint32 GetDrawCountFromPrimitiveSceneInfo(FScene* Scene, const FPrimitiveSceneInfo* PrimitiveSceneInfo)
+void FSceneRenderer::ComputeLightVisibility()
 {
-	uint32 DrawCount = 0;
-	for (const FCachedMeshDrawCommandInfo& CachedCommand : PrimitiveSceneInfo->StaticMeshCommandInfos)
-	{
-		if (CachedCommand.MeshPass != EMeshPass::BasePass)
-			continue;
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_PostVisibilityFrameSetup_Light_Visibility);
 
-		if (CachedCommand.StateBucketId != INDEX_NONE || CachedCommand.CommandIndex >= 0)
-		{
-			DrawCount++;
-		}
-	}
-
-	return DrawCount;
-}
-
-void FSceneRenderer::DumpPrimitives(const FViewCommands& ViewCommands)
-{
-	if (!bDumpPrimitivesNextFrame)
-	{
-		return;
-	}
-
-	bDumpPrimitivesNextFrame = false;
-
-	struct FPrimitiveInfo
-	{
-		FString		Name;
-		uint32		DrawCount;
-
-		bool operator<(const FPrimitiveInfo& other) const
-		{
-			return Name < other.Name;
-		}
-	};
-
-	TArray<FPrimitiveInfo> Primitives;
-	Primitives.Reserve(ViewCommands.MeshCommands[EMeshPass::BasePass].Num() + ViewCommands.DynamicMeshCommandBuildRequests[EMeshPass::BasePass].Num());
-
-	FScopeLock Lock(&Scene->CachedMeshDrawCommandLock[EMeshPass::BasePass]);
-
-	for (const FVisibleMeshDrawCommand& Mesh : ViewCommands.MeshCommands[EMeshPass::BasePass])
-	{
-		int32 PrimitiveId = Mesh.DrawPrimitiveId;
-		if (PrimitiveId < Scene->Primitives.Num())
-		{
-			const FPrimitiveSceneInfo* PrimitiveSceneInfo = Scene->Primitives[PrimitiveId];
-			FString FullName = PrimitiveSceneInfo->ComponentForDebuggingOnly->GetFullName();
-
-			uint32 DrawCount = GetDrawCountFromPrimitiveSceneInfo(Scene, PrimitiveSceneInfo);
-
-			Primitives.Add({ MoveTemp(FullName), DrawCount });
-		}
-	}
-
-	for (const FStaticMeshBatch* StaticMeshBatch : ViewCommands.DynamicMeshCommandBuildRequests[EMeshPass::BasePass])
-	{
-		const FPrimitiveSceneInfo* PrimitiveSceneInfo = StaticMeshBatch->PrimitiveSceneInfo;
-		FString FullName = PrimitiveSceneInfo->ComponentForDebuggingOnly->GetFullName();
-
-		uint32 DrawCount = GetDrawCountFromPrimitiveSceneInfo(Scene, PrimitiveSceneInfo);
-
-		Primitives.Add({ MoveTemp(FullName), DrawCount });
-	}
-
-	Primitives.Sort();
-
-	FDiagnosticTableViewer DrawViewer(*FDiagnosticTableViewer::GetUniqueTemporaryFilePath(TEXT("Primitives")), true);
-	DrawViewer.AddColumn(TEXT("Name"));
-	DrawViewer.AddColumn(TEXT("NumDraws"));
-	DrawViewer.CycleRow();
-
-	for (const FPrimitiveInfo& Primitive : Primitives)
-	{
-		DrawViewer.AddColumn(*Primitive.Name);
-		DrawViewer.AddColumn(*FString::Printf(TEXT("%d"), Primitive.DrawCount));
-		DrawViewer.CycleRow();
-	}
-}
-#endif
-
-void FSceneRenderer::ComputeViewVisibility(FRHICommandListImmediate& RHICmdList, FExclusiveDepthStencil::Type BasePassDepthStencilAccess, FViewVisibleCommandsPerView& ViewCommandsPerView, 
-	FGlobalDynamicIndexBuffer& DynamicIndexBuffer, FGlobalDynamicVertexBuffer& DynamicVertexBuffer, FGlobalDynamicReadBuffer& DynamicReadBuffer)
-{
-	SCOPE_CYCLE_COUNTER(STAT_ViewVisibilityTime);
-	SCOPED_NAMED_EVENT(FSceneRenderer_ComputeViewVisibility, FColor::Magenta);
-
-	STAT(int32 NumProcessedPrimitives = 0);
-	STAT(int32 NumCulledPrimitives = 0);
-	STAT(int32 NumOccludedPrimitives = 0);
-
-	// Allocate the visible light info.
-	if (Scene->Lights.GetMaxIndex() > 0)
-	{
-		VisibleLightInfos.AddZeroed(Scene->Lights.GetMaxIndex());
-	}
-
-	int32 NumPrimitives = Scene->Primitives.Num();
-	float CurrentRealTime = ViewFamily.CurrentRealTime;
-
-	FPrimitiveViewMasks HasDynamicMeshElementsMasks;
-	HasDynamicMeshElementsMasks.AddZeroed(NumPrimitives);
-
-	FPrimitiveViewMasks HasDynamicEditorMeshElementsMasks;
-
-	if (GIsEditor)
-	{
-		HasDynamicEditorMeshElementsMasks.AddZeroed(NumPrimitives);
-	}
-
-	const bool bIsInstancedStereo = (Views.Num() > 0) ? (Views[0].IsInstancedStereoPass() || Views[0].bIsMobileMultiViewEnabled) : false;
-	UpdateReflectionSceneData(Scene);
-
-	{
-		QUICK_SCOPE_CYCLE_COUNTER(STAT_ViewVisibilityTime_ConditionalUpdateStaticMeshesWithoutVisibilityCheck);
-		SCOPED_NAMED_EVENT(FSceneRenderer_ConditionalUpdateStaticMeshes, FColor::Red);
-
-		Scene->ConditionalMarkStaticMeshElementsForUpdate();
-
-		TArray<FPrimitiveSceneInfo*> UpdatedSceneInfos;
-		for (TSet<FPrimitiveSceneInfo*>::TIterator It(Scene->PrimitivesNeedingStaticMeshUpdateWithoutVisibilityCheck); It; ++It)
-		{
-			FPrimitiveSceneInfo* Primitive = *It;
-			if (Primitive->NeedsUpdateStaticMeshes())
-			{
-				UpdatedSceneInfos.Add(Primitive);
-			}
-		}
-		if (UpdatedSceneInfos.Num() > 0)
-		{
-			FPrimitiveSceneInfo::UpdateStaticMeshes(RHICmdList, Scene, UpdatedSceneInfos);
-		}
-		Scene->PrimitivesNeedingStaticMeshUpdateWithoutVisibilityCheck.Reset();
-	}
-
-	uint8 ViewBit = 0x1;
-	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex, ViewBit <<= 1)
-	{
-		STAT(NumProcessedPrimitives += NumPrimitives);
-
-		FViewInfo& View = Views[ViewIndex];
-		FViewCommands& ViewCommands = ViewCommandsPerView[ViewIndex];
-		FSceneViewState* ViewState = (FSceneViewState*)View.State;
-
-		// Allocate the view's visibility maps.
-		View.PrimitiveVisibilityMap.Init(false,Scene->Primitives.Num());
-		// we don't initialized as we overwrite the whole array (in GatherDynamicMeshElements)
-		View.DynamicMeshEndIndices.SetNumUninitialized(Scene->Primitives.Num());
-		View.PrimitiveDefinitelyUnoccludedMap.Init(false,Scene->Primitives.Num());
-		View.PotentiallyFadingPrimitiveMap.Init(false,Scene->Primitives.Num());
-		View.PrimitiveFadeUniformBuffers.AddZeroed(Scene->Primitives.Num());
-		View.PrimitiveFadeUniformBufferMap.Init(false, Scene->Primitives.Num());
-		View.StaticMeshVisibilityMap.Init(false,Scene->StaticMeshes.GetMaxIndex());
-		View.StaticMeshFadeOutDitheredLODMap.Init(false,Scene->StaticMeshes.GetMaxIndex());
-		View.StaticMeshFadeInDitheredLODMap.Init(false,Scene->StaticMeshes.GetMaxIndex());
-		View.PrimitivesLODMask.Init(FLODMask(), Scene->Primitives.Num());
-		View.DistanceCullingPrimitiveMap.Init(false, Scene->Primitives.Num());
-
-		View.VisibleLightInfos.Empty(Scene->Lights.GetMaxIndex());
-
-		// The dirty list allocation must take into account the max possible size because when GILCUpdatePrimTaskEnabled is true,
-		// the indirect lighting cache will be update on by threaded job, which can not do reallocs on the buffer (since it uses the SceneRenderingAllocator).
-		View.DirtyIndirectLightingCacheBufferPrimitives.Reserve(Scene->Primitives.Num());
-
-		for(int32 LightIndex = 0;LightIndex < Scene->Lights.GetMaxIndex();LightIndex++)
-		{
-			if( LightIndex+2 < Scene->Lights.GetMaxIndex() )
-			{
-				if (LightIndex > 2)
-				{
-					FLUSH_CACHE_LINE(&View.VisibleLightInfos(LightIndex-2));
-				}
-				// @todo optimization These prefetches cause asserts since LightIndex > View.VisibleLightInfos.Num() - 1
-				//FPlatformMisc::Prefetch(&View.VisibleLightInfos[LightIndex+2]);
-				//FPlatformMisc::Prefetch(&View.VisibleLightInfos[LightIndex+1]);
-			}
-			new(View.VisibleLightInfos) FVisibleLightViewInfo();
-		}
-
-		View.PrimitiveViewRelevanceMap.Empty(Scene->Primitives.Num());
-		View.PrimitiveViewRelevanceMap.AddZeroed(Scene->Primitives.Num());
-
-		// If this is the visibility-parent of other views, reset its ParentPrimitives list.
-		const bool bIsParent = ViewState && ViewState->IsViewParent();
-		if ( bIsParent )
-		{
-			// PVS-Studio does not understand the validation of ViewState above, so we're disabling
-			// its warning that ViewState may be null:
-			ViewState->ParentPrimitives.Empty(); //-V595
-		}
-
-		if (ViewState)
-		{	
-			SCOPE_CYCLE_COUNTER(STAT_DecompressPrecomputedOcclusion);
-			View.PrecomputedVisibilityData = ViewState->GetPrecomputedVisibilityData(View, Scene);
-		}
-		else
-		{
-			View.PrecomputedVisibilityData = NULL;
-		}
-
-		if (View.PrecomputedVisibilityData)
-		{
-			bUsedPrecomputedVisibility = true;
-		}
-
-		bool bNeedsFrustumCulling = true;
-
-		// Development builds sometimes override frustum culling, e.g. dependent views in the editor.
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
-		if( ViewState )
-		{
-#if WITH_EDITOR
-			// For visibility child views, check if the primitive was visible in the parent view.
-			const FSceneViewState* const ViewParent = (FSceneViewState*)ViewState->GetViewParent();
-			if(ViewParent)
-			{
-				bNeedsFrustumCulling = false;
-				for (FSceneBitArray::FIterator BitIt(View.PrimitiveVisibilityMap); BitIt; ++BitIt)
-				{
-					if (ViewParent->ParentPrimitives.Contains(Scene->PrimitiveComponentIds[BitIt.GetIndex()]))
-					{
-						BitIt.GetValue() = true;
-					}
-				}
-			}
-#endif
-			// For views with frozen visibility, check if the primitive is in the frozen visibility set.
-			if(ViewState->bIsFrozen)
-			{
-				bNeedsFrustumCulling = false;
-				for (FSceneBitArray::FIterator BitIt(View.PrimitiveVisibilityMap); BitIt; ++BitIt)
-				{
-					if (ViewState->FrozenPrimitives.Contains(Scene->PrimitiveComponentIds[BitIt.GetIndex()]))
-					{
-						BitIt.GetValue() = true;
-					}
-				}
-			}
-		}
-#endif
-
-		// Most views use standard frustum culling.
-		if (bNeedsFrustumCulling)
-		{
-			// Update HLOD transition/visibility states to allow use during distance culling
-			FLODSceneTree& HLODTree = Scene->SceneLODHierarchy;
-			if (HLODTree.IsActive())
-			{
-				QUICK_SCOPE_CYCLE_COUNTER(STAT_ViewVisibilityTime_HLODUpdate);
-				HLODTree.UpdateVisibilityStates(View);
-			}
-			else
-			{
-				HLODTree.ClearVisibilityState(View);
-			}
-
-			int32 NumCulledPrimitivesForView;
-			const bool bUseFastIntersect = (View.ViewFrustum.PermutedPlanes.Num() == 8) && CVarUseFastIntersect.GetValueOnRenderThread();
-			if (View.CustomVisibilityQuery && View.CustomVisibilityQuery->Prepare())
-			{
-				if (CVarAlsoUseSphereForFrustumCull.GetValueOnRenderThread())
-				{
-					NumCulledPrimitivesForView = bUseFastIntersect ? FrustumCull<true, true, true>(Scene, View) : FrustumCull<true, true, false>(Scene, View);
-				}
-				else
-				{
-					NumCulledPrimitivesForView = bUseFastIntersect ? FrustumCull<true, false, true>(Scene, View) : FrustumCull<true, false, false>(Scene, View);
-				}
-			}
-			else
-			{
-				if (CVarAlsoUseSphereForFrustumCull.GetValueOnRenderThread())
-				{
-					NumCulledPrimitivesForView = bUseFastIntersect ? FrustumCull<false, true, true>(Scene, View) : FrustumCull<false, true, false>(Scene, View);
-				}
-				else
-				{
-					NumCulledPrimitivesForView = bUseFastIntersect ? FrustumCull<false, false, true>(Scene, View) : FrustumCull<false, false, false>(Scene, View);
-				}
-			}
-			STAT(NumCulledPrimitives += NumCulledPrimitivesForView);
-			UpdatePrimitiveFading(Scene, View);			
-		}
-
-		// If any primitives are explicitly hidden, remove them now.
-		if (View.HiddenPrimitives.Num())
-		{
-			for (FSceneSetBitIterator BitIt(View.PrimitiveVisibilityMap); BitIt; ++BitIt)
-			{
-				if (View.HiddenPrimitives.Contains(Scene->PrimitiveComponentIds[BitIt.GetIndex()]))
-				{
-					View.PrimitiveVisibilityMap.AccessCorrespondingBit(BitIt) = false;
-				}
-			}
-		}
-
-		// If the view has any show only primitives, hide everything else
-		if (View.ShowOnlyPrimitives.IsSet())
-		{
-			View.bHasNoVisiblePrimitive = View.ShowOnlyPrimitives->Num() == 0;
-			for (FSceneSetBitIterator BitIt(View.PrimitiveVisibilityMap); BitIt; ++BitIt)
-			{
-				if (!View.ShowOnlyPrimitives->Contains(Scene->PrimitiveComponentIds[BitIt.GetIndex()]))
-				{
-					View.PrimitiveVisibilityMap.AccessCorrespondingBit(BitIt) = false;
-				}
-			}
-		}
-
-		if (View.bStaticSceneOnly)
-		{
-			for (FSceneSetBitIterator BitIt(View.PrimitiveVisibilityMap); BitIt; ++BitIt)
-			{
-				// Reflection captures should only capture objects that won't move, since reflection captures won't update at runtime
-				if (!Scene->Primitives[BitIt.GetIndex()]->Proxy->HasStaticLighting())
-				{
-					View.PrimitiveVisibilityMap.AccessCorrespondingBit(BitIt) = false;
-				}
-			}
-		}
-
-		// Cull small objects in wireframe in ortho views
-		// This is important for performance in the editor because wireframe disables any kind of occlusion culling
-		if (View.Family->EngineShowFlags.Wireframe)
-		{
-			float ScreenSizeScale = FMath::Max(View.ViewMatrices.GetProjectionMatrix().M[0][0] * View.ViewRect.Width(), View.ViewMatrices.GetProjectionMatrix().M[1][1] * View.ViewRect.Height());
-			for (FSceneSetBitIterator BitIt(View.PrimitiveVisibilityMap); BitIt; ++BitIt)
-			{
-				if (ScreenSizeScale * Scene->PrimitiveBounds[BitIt.GetIndex()].BoxSphereBounds.SphereRadius <= GWireframeCullThreshold)
-				{
-					View.PrimitiveVisibilityMap.AccessCorrespondingBit(BitIt) = false;
-				}
-			}
-		}
-
-		// Occlusion cull for all primitives in the view frustum, but not in wireframe.
-		if (!View.Family->EngineShowFlags.Wireframe)
-		{
-			int32 NumOccludedPrimitivesInView = OcclusionCull(RHICmdList, Scene, View, DynamicVertexBuffer);
-			STAT(NumOccludedPrimitives += NumOccludedPrimitivesInView);
-		}
-
-		{
-			QUICK_SCOPE_CYCLE_COUNTER(STAT_ViewVisibilityTime_ConditionalUpdateStaticMeshes);
-			SCOPED_NAMED_EVENT(FSceneRenderer_UpdateStaticMeshes, FColor::Red);
-
-			TArray<FPrimitiveSceneInfo*> AddedSceneInfos;
-			for (TConstDualSetBitIterator<SceneRenderingBitArrayAllocator, FDefaultBitArrayAllocator> BitIt(View.PrimitiveVisibilityMap, Scene->PrimitivesNeedingStaticMeshUpdate); BitIt; ++BitIt)
-			{
-				int32 PrimitiveIndex = BitIt.GetIndex();
-				AddedSceneInfos.Add(Scene->Primitives[PrimitiveIndex]);
-			}
-
-			if (AddedSceneInfos.Num() > 0)
-			{
-				FPrimitiveSceneInfo::UpdateStaticMeshes(RHICmdList, Scene, AddedSceneInfos);
-			}
-		}
-
-		// ISR views can't compute relevance until all views are frustum culled
-		if (!bIsInstancedStereo)
-		{
-			SCOPE_CYCLE_COUNTER(STAT_ViewRelevance);
-			ComputeAndMarkRelevanceForViewParallel(RHICmdList, Scene, View, ViewCommands, ViewBit, HasDynamicMeshElementsMasks, HasDynamicEditorMeshElementsMasks);
-		}
-
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
-		// Store the primitive for parent occlusion rendering.
-		if (FPlatformProperties::SupportsWindowedMode() && ViewState && ViewState->IsViewParent())
-		{
-			for (FSceneDualSetBitIterator BitIt(View.PrimitiveVisibilityMap, View.PrimitiveDefinitelyUnoccludedMap); BitIt; ++BitIt)
-			{
-				ViewState->ParentPrimitives.Add(Scene->PrimitiveComponentIds[BitIt.GetIndex()]);
-			}
-		}
-#endif
-
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
-		// if we are freezing the scene, then remember the primitives that are rendered.
-		if (ViewState && ViewState->bIsFreezing)
-		{
-			for (FSceneSetBitIterator BitIt(View.PrimitiveVisibilityMap); BitIt; ++BitIt)
-			{
-				ViewState->FrozenPrimitives.Add(Scene->PrimitiveComponentIds[BitIt.GetIndex()]);
-			}
-		}
-#endif
-
-		// TODO: right now decals visibility computed right before rendering them, ideally it should be done in InitViews and this flag should be replaced with list of visible decals  
-	    // Currently used to disable stencil operations in forward base pass when scene has no any decals
-		View.bSceneHasDecals = (Scene->Decals.Num() > 0) || (GForceSceneHasDecals != 0);
-	}
-
-	if ((Views.Num() > 1) && bIsInstancedStereo)
-	{
-		// Ensure primitives from the right-eye view are visible in the left-eye (instanced) view
-		FSceneBitArray& LeftView = Views[0].PrimitiveVisibilityMap;
-		const FSceneBitArray& RightView = Views[1].PrimitiveVisibilityMap;
-
-		check(LeftView.Num() == RightView.Num())
-
-		const uint32 NumWords = FMath::DivideAndRoundUp(LeftView.Num(), NumBitsPerDWORD);
-		uint32* const LeftData = LeftView.GetData();
-		const uint32* const RightData = RightView.GetData();
-
-		for (uint32 Index = 0; Index < NumWords; ++Index)
-		{
-			LeftData[Index] |= RightData[Index];
-		}
-	}
-	
-	ViewBit = 0x1;
-	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
-	{
-		FViewInfo& View = Views[ViewIndex];
-		FViewCommands& ViewCommands = ViewCommandsPerView[ViewIndex];
-		
-		if (bIsInstancedStereo)
-		{
-			SCOPE_CYCLE_COUNTER(STAT_ViewRelevance);
-			ComputeAndMarkRelevanceForViewParallel(RHICmdList, Scene, View, ViewCommands, ViewBit, HasDynamicMeshElementsMasks, HasDynamicEditorMeshElementsMasks);
-		}
-		ViewBit <<= 1;
-	}
-
-	{
-		SCOPED_NAMED_EVENT(FSceneRenderer_GatherDynamicMeshElements, FColor::Yellow);
-		// Gather FMeshBatches from scene proxies
-		GatherDynamicMeshElements(Views, Scene, ViewFamily, DynamicIndexBuffer, DynamicVertexBuffer, DynamicReadBuffer,
-			HasDynamicMeshElementsMasks, HasDynamicEditorMeshElementsMasks, MeshCollector);
-	}
+	VisibleLightInfos.AddDefaulted(Scene->Lights.GetMaxIndex());
 
 	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
 	{
 		FViewInfo& View = Views[ViewIndex];
-		if (!View.ShouldRenderView())
+		View.VisibleLightInfos.Empty(Scene->Lights.GetMaxIndex());
+
+		for (int32 LightIndex = 0; LightIndex < Scene->Lights.GetMaxIndex(); LightIndex++)
 		{
-			continue;
-		}
-
-		FViewCommands& ViewCommands = ViewCommandsPerView[ViewIndex];
-
-#if !UE_BUILD_SHIPPING
-		DumpPrimitives(ViewCommands);
-#endif
-
-		SetupMeshPass(View, BasePassDepthStencilAccess, ViewCommands);
-	}
-
-	INC_DWORD_STAT_BY(STAT_ProcessedPrimitives,NumProcessedPrimitives);
-	INC_DWORD_STAT_BY(STAT_CulledPrimitives,NumCulledPrimitives);
-	INC_DWORD_STAT_BY(STAT_OccludedPrimitives,NumOccludedPrimitives);
-}
-
-void FSceneRenderer::PostVisibilityFrameSetup(FILCUpdatePrimTaskData& OutILCTaskData)
-{
-	QUICK_SCOPE_CYCLE_COUNTER(STAT_PostVisibilityFrameSetup);
-
-	{
-		QUICK_SCOPE_CYCLE_COUNTER(STAT_PostVisibilityFrameSetup_Sort);
-		for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
-		{		
-			FViewInfo& View = Views[ViewIndex];
-
-			View.MeshDecalBatches.Sort();
-
-			if (View.State)
-			{
-				((FSceneViewState*)View.State)->TrimHistoryRenderTargets(Scene);
-			}
+			new (View.VisibleLightInfos) FVisibleLightViewInfo();
 		}
 	}
 
 	const bool bSetupMobileLightShafts = FeatureLevel <= ERHIFeatureLevel::ES3_1 && ShouldRenderLightShafts(ViewFamily);
 
-	if (ViewFamily.EngineShowFlags.HitProxies == 0 && Scene->PrecomputedLightVolumes.Num() > 0
-		&& GILCUpdatePrimTaskEnabled && FPlatformProcess::SupportsMultithreading())
-	{
-		Scene->IndirectLightingCache.StartUpdateCachePrimitivesTask(Scene, *this, true, OutILCTaskData);
-	}
-
-	{
-		QUICK_SCOPE_CYCLE_COUNTER(STAT_PostVisibilityFrameSetup_Light_Visibility);
 	// determine visibility of each light
-	for(TSparseArray<FLightSceneInfoCompact>::TConstIterator LightIt(Scene->Lights);LightIt;++LightIt)
+	for(auto LightIt = Scene->Lights.CreateConstIterator();LightIt;++LightIt)
 	{
 		const FLightSceneInfoCompact& LightSceneInfoCompact = *LightIt;
 		const FLightSceneInfo* LightSceneInfo = LightSceneInfoCompact.LightSceneInfo;
@@ -4179,29 +5234,30 @@ void FSceneRenderer::PostVisibilityFrameSetup(FILCUpdatePrimTaskData& OutILCTask
 				Proxy->GetLightType() == LightType_Spot ||
 				Proxy->GetLightType() == LightType_Rect )
 			{
-				FSphere const& BoundingSphere = Proxy->GetBoundingSphere();
-				if (View.ViewFrustum.IntersectSphere(BoundingSphere.Center, BoundingSphere.W))
+				const FSphere& BoundingSphere = Proxy->GetBoundingSphere();
+				const bool bInViewFrustum = View.ViewFrustum.IntersectSphere(BoundingSphere.Center, BoundingSphere.W);
+
+				if (View.IsPerspectiveProjection())
 				{
-					if (View.IsPerspectiveProjection())
-					{
-						FSphere Bounds = Proxy->GetBoundingSphere();
-						float DistanceSquared = (Bounds.Center - View.ViewMatrices.GetViewOrigin()).SizeSquared();
-						float MaxDistSquared = Proxy->GetMaxDrawDistance() * Proxy->GetMaxDrawDistance() * GLightMaxDrawDistanceScale * GLightMaxDrawDistanceScale;
-						const bool bDrawLight = (FMath::Square(FMath::Min(0.0002f, GMinScreenRadiusForLights / Bounds.W) * View.LODDistanceFactor) * DistanceSquared < 1.0f)
-													&& (MaxDistSquared == 0 || DistanceSquared < MaxDistSquared);
+					const float DistanceSquared = (BoundingSphere.Center - View.ViewMatrices.GetViewOrigin()).SizeSquared();
+					const float ProxyMaxDistance = Proxy->GetMaxDrawDistance();
+					const float ScaledMaxDistance = ProxyMaxDistance * GLightMaxDrawDistanceScale;
+					const bool bDrawLight = (FMath::Square(FMath::Min(0.0002f, GMinScreenRadiusForLights / BoundingSphere.W) * View.LODDistanceFactor) * DistanceSquared < 1.0f)
+												&& (ProxyMaxDistance <= 0.0 || DistanceSquared < FMath::Square(ScaledMaxDistance));
 							
-						VisibleLightViewInfo.bInViewFrustum = bDrawLight;
-					}
-					else
-					{
-						VisibleLightViewInfo.bInViewFrustum = true;
-					}
+					VisibleLightViewInfo.bInViewFrustum = bDrawLight && bInViewFrustum;
+					VisibleLightViewInfo.bInDrawRange = bDrawLight;
+				}
+				else
+				{
+					VisibleLightViewInfo.bInViewFrustum = bInViewFrustum;
+					VisibleLightViewInfo.bInDrawRange = true;
 				}
 			}
 			else
 			{
 				VisibleLightViewInfo.bInViewFrustum = true;
-
+				VisibleLightViewInfo.bInDrawRange = true;
 				// Setup single sun-shaft from direction lights for mobile.
 				if (bSetupMobileLightShafts && LightSceneInfo->bEnableLightShaftBloom && ShouldRenderLightShaftsForLight(View, *LightSceneInfo->Proxy))
 				{
@@ -4222,161 +5278,241 @@ void FSceneRenderer::PostVisibilityFrameSetup(FILCUpdatePrimTaskData& OutILCTask
 
 				if( DistanceSqr < Radius * Radius )
 				{
-					FLightShaderParameters LightParameters;
-
-					Proxy->GetLightShaderParameters(LightParameters);
-
-					// Force to be at least 0.75 pixels
-					float CubemapSize = (float)IConsoleManager::Get().FindTConsoleVariableDataInt( TEXT("r.ReflectionCaptureResolution") )->GetValueOnAnyThread();
-					float Distance = FMath::Sqrt( DistanceSqr );
-					float MinRadius = Distance * 0.75f / CubemapSize;
-					LightParameters.SourceRadius = FMath::Max( MinRadius, LightParameters.SourceRadius );
-
-					// Snap to cubemap pixel center to reduce aliasing
-					FVector Scale = ToLight.GetAbs();
-					int32 MaxComponent = Scale.X > Scale.Y ? ( Scale.X > Scale.Z ? 0 : 2 ) : ( Scale.Y > Scale.Z ? 1 : 2 );
-					for( int32 k = 1; k < 3; k++ )
-					{
-						float Projected = ToLight[ (MaxComponent + k) % 3 ] / Scale[ MaxComponent ];
-						float Quantized = ( FMath::RoundToFloat( Projected * (0.5f * CubemapSize) - 0.5f ) + 0.5f ) / (0.5f * CubemapSize);
-						ToLight[ (MaxComponent + k) % 3 ] = Quantized * Scale[ MaxComponent ];
-					}
-					Origin = ToLight + View.ViewMatrices.GetViewOrigin();
-				
-					FLinearColor Color( LightParameters.Color.X, LightParameters.Color.Y, LightParameters.Color.Z, LightParameters.FalloffExponent );
-					const bool bIsRectLight = Proxy->IsRectLight();
-					if( !bIsRectLight )
-					{
-						const float SphereArea = (4.0f * PI) * FMath::Square( LightParameters.SourceRadius );
-						const float CylinderArea = (2.0f * PI) * LightParameters.SourceRadius * LightParameters.SourceLength;
-						const float SurfaceArea = SphereArea + CylinderArea;
-						Color *= 4.0f / SurfaceArea;
-					}
-
-					if( Proxy->IsInverseSquared() )
-					{
-						float LightRadiusMask = FMath::Square( 1.0f - FMath::Square( DistanceSqr * FMath::Square( LightParameters.InvRadius ) ) );
-						Color.A = LightRadiusMask;
-					}
-					else
-					{
-						// Remove inverse square falloff
-						Color *= DistanceSqr + 1.0f;
-
-						// Apply falloff
-						Color.A = FMath::Pow( 1.0f - DistanceSqr * FMath::Square(LightParameters.InvRadius ), LightParameters.FalloffExponent );
-					}
-					
-					// Spot falloff
-					FVector L = ToLight.GetSafeNormal();
-					Color.A *= FMath::Square( FMath::Clamp( ( (L | LightParameters.Direction) - LightParameters.SpotAngles.X ) * LightParameters.SpotAngles.Y, 0.0f, 1.0f ) );
-
-					Color.A *= LightParameters.SpecularScale;
-
-					// Rect is one sided
-					if( bIsRectLight && (L | LightParameters.Direction) < 0.0f )
-						continue;
-
-					UTexture* SurfaceTexture = nullptr;
-					if (bIsRectLight)
-					{
-						const FRectLightSceneProxy* RectLightProxy = (const FRectLightSceneProxy*)Proxy;
-						SurfaceTexture = RectLightProxy->SourceTexture;
-					}
-					
-					FMaterialRenderProxy* ColoredMeshInstance = nullptr;
-					if (SurfaceTexture)
-						ColoredMeshInstance = new(FMemStack::Get()) FColoredTexturedMaterialRenderProxy(GEngine->EmissiveMeshMaterial->GetRenderProxy(), Color, NAME_Color, SurfaceTexture, NAME_LinearColor);
-					else
-						ColoredMeshInstance = new(FMemStack::Get()) FColoredMaterialRenderProxy(GEngine->EmissiveMeshMaterial->GetRenderProxy(), Color, NAME_Color);
-
-					FMatrix LightToWorld = Proxy->GetLightToWorld();
-					LightToWorld.RemoveScaling();
-
-					FViewElementPDI LightPDI( &View, NULL, &View.DynamicPrimitiveShaderData );
-
-					if( bIsRectLight )
-					{
-						DrawBox( &LightPDI, LightToWorld, FVector( 0.0f, LightParameters.SourceRadius, LightParameters.SourceLength ), ColoredMeshInstance, SDPG_World );
-					}
-					else if( LightParameters.SourceLength > 0.0f )
-					{
-						DrawSphere( &LightPDI, Origin + 0.5f * LightParameters.SourceLength * LightToWorld.GetUnitAxis( EAxis::Z ), FRotator::ZeroRotator, LightParameters.SourceRadius * FVector::OneVector, 36, 24, ColoredMeshInstance, SDPG_World );
-						DrawSphere( &LightPDI, Origin - 0.5f * LightParameters.SourceLength * LightToWorld.GetUnitAxis( EAxis::Z ), FRotator::ZeroRotator, LightParameters.SourceRadius * FVector::OneVector, 36, 24, ColoredMeshInstance, SDPG_World );
-						DrawCylinder( &LightPDI, Origin, LightToWorld.GetUnitAxis( EAxis::X ), LightToWorld.GetUnitAxis( EAxis::Y ), LightToWorld.GetUnitAxis( EAxis::Z ), LightParameters.SourceRadius, 0.5f * LightParameters.SourceLength, 36, ColoredMeshInstance, SDPG_World );
-					}
-					else
-					{
-						DrawSphere( &LightPDI, Origin, FRotator::ZeroRotator, LightParameters.SourceRadius * FVector::OneVector, 36, 24, ColoredMeshInstance, SDPG_World );
-					}
+					View.VisibleReflectionCaptureLights.Emplace(Proxy);
 				}
 			}
 		}
 	}
-	}
-	{
 
-		QUICK_SCOPE_CYCLE_COUNTER(STAT_PostVisibilityFrameSetup_InitFogConstants);
-		InitFogConstants();
+	InitFogConstants();
+}
+
+void FSceneRenderer::GatherReflectionCaptureLightMeshElements()
+{
+	// view frustum cull lights in each view
+	for (FViewInfo& View : Views)
+	{
+		for (const FLightSceneProxy* Proxy : View.VisibleReflectionCaptureLights)
+		{
+			FVector Origin = Proxy->GetOrigin();
+			FVector ToLight = Origin - View.ViewMatrices.GetViewOrigin();
+			float DistanceSqr = ToLight | ToLight;
+			float Radius = Proxy->GetRadius();
+
+			FLightRenderParameters LightParameters;
+			Proxy->GetLightShaderParameters(LightParameters);
+
+			// Force to be at least 0.75 pixels
+			float CubemapSize = (float)IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.ReflectionCaptureResolution"))->GetValueOnAnyThread();
+			float Distance = FMath::Sqrt(DistanceSqr);
+			float MinRadius = Distance * 0.75f / CubemapSize;
+			LightParameters.SourceRadius = FMath::Max(MinRadius, LightParameters.SourceRadius);
+
+			// Snap to cubemap pixel center to reduce aliasing
+			FVector Scale = ToLight.GetAbs();
+			int32 MaxComponent = Scale.X > Scale.Y ? (Scale.X > Scale.Z ? 0 : 2) : (Scale.Y > Scale.Z ? 1 : 2);
+			for (int32 k = 1; k < 3; k++)
+			{
+				float Projected = ToLight[(MaxComponent + k) % 3] / Scale[MaxComponent];
+				float Quantized = (FMath::RoundToFloat(Projected * (0.5f * CubemapSize) - 0.5f) + 0.5f) / (0.5f * CubemapSize);
+				ToLight[(MaxComponent + k) % 3] = Quantized * Scale[MaxComponent];
+			}
+			Origin = ToLight + View.ViewMatrices.GetViewOrigin();
+
+			FLinearColor Color(LightParameters.Color.R, LightParameters.Color.G, LightParameters.Color.B, LightParameters.FalloffExponent);
+			const bool bIsRectLight = Proxy->IsRectLight();
+			if (!bIsRectLight)
+			{
+				const float SphereArea = (4.0f * PI) * FMath::Square(LightParameters.SourceRadius);
+				const float CylinderArea = (2.0f * PI) * LightParameters.SourceRadius * LightParameters.SourceLength;
+				const float SurfaceArea = SphereArea + CylinderArea;
+				Color *= 4.0f / SurfaceArea;
+			}
+
+			if (Proxy->IsInverseSquared())
+			{
+				float LightRadiusMask = FMath::Square(1.0f - FMath::Square(DistanceSqr * FMath::Square(LightParameters.InvRadius)));
+				Color.A = LightRadiusMask;
+			}
+			else
+			{
+				// Remove inverse square falloff
+				Color *= DistanceSqr + 1.0f;
+
+				// Apply falloff
+				Color.A = FMath::Pow(1.0f - DistanceSqr * FMath::Square(LightParameters.InvRadius), LightParameters.FalloffExponent);
+			}
+
+			// Spot falloff
+			FVector L = ToLight.GetSafeNormal();
+			Color.A *= FMath::Square(FMath::Clamp(((L | (FVector)LightParameters.Direction) - LightParameters.SpotAngles.X) * LightParameters.SpotAngles.Y, 0.0f, 1.0f));
+
+			Color.A *= LightParameters.SpecularScale;
+
+			// Rect is one sided
+			if (bIsRectLight && (L | (FVector)LightParameters.Direction) < 0.0f)
+				continue;
+
+			UTexture* SurfaceTexture = nullptr;
+			if (bIsRectLight)
+			{
+				const FRectLightSceneProxy* RectLightProxy = (const FRectLightSceneProxy*)Proxy;
+				SurfaceTexture = RectLightProxy->SourceTexture;
+			}
+
+			FMaterialRenderProxy* ColoredMeshInstance = nullptr;
+			if (SurfaceTexture)
+			{
+				ColoredMeshInstance = Allocator.Create<FColoredTexturedMaterialRenderProxy>(GEngine->EmissiveMeshMaterial->GetRenderProxy(), Color, NAME_Color, SurfaceTexture, NAME_LinearColor);
+			}
+			else
+			{
+				ColoredMeshInstance = Allocator.Create<FColoredMaterialRenderProxy>(GEngine->EmissiveMeshMaterial->GetRenderProxy(), Color, NAME_Color);
+			}
+
+			FMatrix LightToWorld = Proxy->GetLightToWorld();
+			LightToWorld.RemoveScaling();
+
+			FViewElementPDI LightPDI(&View, NULL, &View.DynamicPrimitiveCollector);
+
+			if (bIsRectLight)
+			{
+				DrawBox(&LightPDI, LightToWorld, FVector(0.0f, LightParameters.SourceRadius, LightParameters.SourceLength), ColoredMeshInstance, SDPG_World);
+			}
+			else if (LightParameters.SourceLength > 0.0f)
+			{
+				DrawSphere(&LightPDI, Origin + 0.5f * LightParameters.SourceLength * LightToWorld.GetUnitAxis(EAxis::Z), FRotator::ZeroRotator, LightParameters.SourceRadius * FVector::OneVector, 36, 24, ColoredMeshInstance, SDPG_World);
+				DrawSphere(&LightPDI, Origin - 0.5f * LightParameters.SourceLength * LightToWorld.GetUnitAxis(EAxis::Z), FRotator::ZeroRotator, LightParameters.SourceRadius * FVector::OneVector, 36, 24, ColoredMeshInstance, SDPG_World);
+				DrawCylinder(&LightPDI, Origin, LightToWorld.GetUnitAxis(EAxis::X), LightToWorld.GetUnitAxis(EAxis::Y), LightToWorld.GetUnitAxis(EAxis::Z), LightParameters.SourceRadius, 0.5f * LightParameters.SourceLength, 36, ColoredMeshInstance, SDPG_World);
+			}
+			else
+			{
+				DrawSphere(&LightPDI, Origin, FRotator::ZeroRotator, LightParameters.SourceRadius * FVector::OneVector, 36, 24, ColoredMeshInstance, SDPG_World);
+			}
+		}
+
+		View.VisibleReflectionCaptureLights.Empty();
+	}
+}
+
+void FSceneRenderer::PostVisibilityFrameSetup(FILCUpdatePrimTaskData*& OutILCTaskData)
+{
+	if (GetRendererOutput() != ERendererOutput::FinalSceneColor)
+	{
+		return;
+	}
+
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_PostVisibilityFrameSetup);
+
+	{
+		QUICK_SCOPE_CYCLE_COUNTER(STAT_PostVisibilityFrameSetup_Sort);
+		for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
+		{		
+			FViewInfo& View = Views[ViewIndex];
+
+			if (View.State)
+			{
+				((FSceneViewState*)View.State)->TrimHistoryRenderTargets(Scene);
+			}
+		}
+	}
+
+	GatherReflectionCaptureLightMeshElements();
+
+	if (ViewFamily.EngineShowFlags.HitProxies == 0 && Scene->PrecomputedLightVolumes.Num() > 0
+		&& GILCUpdatePrimTaskEnabled && FPlatformProcess::SupportsMultithreading())
+	{
+		OutILCTaskData = Allocator.Create<FILCUpdatePrimTaskData>();
+		Scene->IndirectLightingCache.StartUpdateCachePrimitivesTask(Scene, *this, true, *OutILCTaskData);
+		check(OutILCTaskData->TaskRef.IsValid());
 	}
 }
 
 uint32 GetShadowQuality();
+void UpdateHairResources(FRDGBuilder& GraphBuilder, const FViewInfo& View);
 
 /** 
 * Performs once per frame setup prior to visibility determination.
 */
-void FDeferredShadingSceneRenderer::PreVisibilityFrameSetup(FRHICommandListImmediate& RHICmdList)
+void FDeferredShadingSceneRenderer::PreVisibilityFrameSetup(FRDGBuilder& GraphBuilder)
 {
 	// Possible stencil dither optimization approach
 	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
 	{
 		FViewInfo& View = Views[ViewIndex];
-		View.bAllowStencilDither = bDitheredLODTransitionsUseStencil;
+		View.bAllowStencilDither = DepthPass.bDitheredLODTransitionsUseStencil;
 	}
 
-	FSceneRenderer::PreVisibilityFrameSetup(RHICmdList);
+	FSceneRenderer::PreVisibilityFrameSetup(GraphBuilder);
 }
 
 /**
  * Initialize scene's views.
  * Check visibility, build visible mesh commands, etc.
  */
-bool FDeferredShadingSceneRenderer::InitViews(FRHICommandListImmediate& RHICmdList, FExclusiveDepthStencil::Type BasePassDepthStencilAccess, struct FILCUpdatePrimTaskData& ILCTaskData)
+void FDeferredShadingSceneRenderer::BeginInitViews(
+	FRDGBuilder& GraphBuilder,
+	const FSceneTexturesConfig& SceneTexturesConfig,
+	FInstanceCullingManager& InstanceCullingManager,
+	FRDGExternalAccessQueue& ExternalAccessQueue,
+	FInitViewTaskDatas& TaskDatas)
 {
 	SCOPED_NAMED_EVENT(FDeferredShadingSceneRenderer_InitViews, FColor::Emerald);
 	SCOPE_CYCLE_COUNTER(STAT_InitViewsTime);
-	CSV_SCOPED_TIMING_STAT_EXCLUSIVE(InitViews_Scene);
-	check(RHICmdList.IsOutsideRenderPass());
+	RDG_CSV_STAT_EXCLUSIVE_SCOPE(GraphBuilder, InitViews_Scene);
 
-	PreVisibilityFrameSetup(RHICmdList);
+	const bool bRendererOutputFinalSceneColor = (GetRendererOutput() == ERendererOutput::FinalSceneColor);
 
-	RHICmdList.ImmediateFlush(EImmediateFlushType::DispatchToRHIThread);
+	PreVisibilityFrameSetup(GraphBuilder);
+
+	// Start processing dynamic mesh elements tasks early enough to overlap with shadows and GPU scene update.
+	TaskDatas.VisibilityTaskData->StartGatherDynamicMeshElements();
+
+	// Attempt to launch dynamic shadow tasks early before finalizing visibility.
+	if (bRendererOutputFinalSceneColor)
+	{
+		BeginInitDynamicShadows(GraphBuilder, TaskDatas, InstanceCullingManager);
+	}
+
+	FRHICommandListImmediate& RHICmdList = GraphBuilder.RHICmdList;
+
+	if (InstanceCullingManager.IsEnabled()
+		&& Scene->InstanceCullingOcclusionQueryRenderer
+		&& Scene->InstanceCullingOcclusionQueryRenderer->InstanceOcclusionQueryBuffer)
+	{
+		InstanceCullingManager.InstanceOcclusionQueryBuffer = GraphBuilder.RegisterExternalBuffer(Scene->InstanceCullingOcclusionQueryRenderer->InstanceOcclusionQueryBuffer);
+		InstanceCullingManager.InstanceOcclusionQueryBufferFormat = Scene->InstanceCullingOcclusionQueryRenderer->InstanceOcclusionQueryBufferFormat;
+	}
+
+	// Create GPU-side representation of the view for instance culling.
+	InstanceCullingManager.AllocateViews(Views.Num());
+	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
+	{
+		Views[ViewIndex].GPUSceneViewId = InstanceCullingManager.RegisterView(Views[ViewIndex]);
+
+		uint32 InstanceFactor = Views[ViewIndex].GetStereoPassInstanceFactor();
+		Views[ViewIndex].InstanceFactor = InstanceFactor > 0 ? InstanceFactor : 1;
+	}
 
 	{
 		// This is to init the ViewUniformBuffer before rendering for the Niagara compute shader.
 		// This needs to run before ComputeViewVisibility() is called, but the views normally initialize the ViewUniformBuffer after that (at the end of this method).
-		if (FXSystem && FXSystem->RequiresEarlyViewUniformBuffer() && Views.IsValidIndex(0))
+		if (FXSystem && FXSystem->RequiresEarlyViewUniformBuffer() && Views.IsValidIndex(0) && bRendererOutputFinalSceneColor)
 		{
+			// during ISR, instanced view RHI resources need to be initialized first.
+			if (FViewInfo* InstancedView = const_cast<FViewInfo*>(Views[0].GetInstancedView()))
+			{
+				InstancedView->InitRHIResources();
+			}
 			Views[0].InitRHIResources();
-			FXSystem->PostInitViews(RHICmdList, Views[0].ViewUniformBuffer, Views[0].AllowGPUParticleUpdate() && !ViewFamily.EngineShowFlags.HitProxies);
+			FXSystem->PostInitViews(GraphBuilder, GetSceneViews(), !ViewFamily.EngineShowFlags.HitProxies);
 		}
 	}
-	
-	FViewVisibleCommandsPerView ViewCommandsPerView;
-	ViewCommandsPerView.SetNum(Views.Num());
 
-	ComputeViewVisibility(RHICmdList, BasePassDepthStencilAccess, ViewCommandsPerView, DynamicIndexBufferForInitViews, DynamicVertexBufferForInitViews, DynamicReadBufferForInitViews);
-
-	RHICmdList.ImmediateFlush(EImmediateFlushType::DispatchToRHIThread);
-
-	// This has to happen before Scene->IndirectLightingCache.UpdateCache, since primitives in View.IndirectShadowPrimitives need ILC updates
-	CreateIndirectCapsuleShadows();
+	LumenScenePDIVisualization();
 
 	// This must happen before we start initialising and using views.
-	UpdateSkyIrradianceGpuBuffer(RHICmdList);
-
-	RHICmdList.ImmediateFlush(EImmediateFlushType::DispatchToRHIThread);
+	UpdateSkyIrradianceGpuBuffer(GraphBuilder, ViewFamily.EngineShowFlags, Scene->SkyLight, Scene->SkyIrradianceEnvironmentMap);
 
 	// Initialise Sky/View resources before the view global uniform buffer is built.
 	if (ShouldRenderSkyAtmosphere(Scene, ViewFamily.EngineShowFlags))
@@ -4384,105 +5520,101 @@ bool FDeferredShadingSceneRenderer::InitViews(FRHICommandListImmediate& RHICmdLi
 		InitSkyAtmosphereForViews(RHICmdList);
 	}
 
-	PostVisibilityFrameSetup(ILCTaskData);
-	RHICmdList.ImmediateFlush(EImmediateFlushType::DispatchToRHIThread);
-
-	FVector AverageViewPosition(0);
-
-	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
-	{		
-		FViewInfo& View = Views[ViewIndex];
-		AverageViewPosition += View.ViewMatrices.GetViewOrigin() / Views.Num();
-	}
-
-	bool bDoInitViewAftersPrepass = !!GDoInitViewsLightingAfterPrepass;
-
-	if (!bDoInitViewAftersPrepass)
-	{
-		InitViewsPossiblyAfterPrepass(RHICmdList, ILCTaskData);
-	}
-
 	{
 		QUICK_SCOPE_CYCLE_COUNTER(STAT_InitViews_InitRHIResources);
-		// initialize per-view uniform buffer.
-		for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
+		// initialize per-view uniform buffer. Do it from back to front because secondary stereo view follows its primary one, but primary needs to know the instanced's params
+		for (int32 ViewIndex = Views.Num() - 1; ViewIndex >= 0; --ViewIndex)
 		{
 			FViewInfo& View = Views[ViewIndex];
-
-			if (View.ViewState)
-			{
-				if (!View.ViewState->ForwardLightingResources)
-				{
-					View.ViewState->ForwardLightingResources.Reset(new FForwardLightingViewResources());
-				}
-
-				View.ForwardLightingResources = View.ViewState->ForwardLightingResources.Get();
-			}
-			else
-			{
-				View.ForwardLightingResourcesStorage.Reset(new FForwardLightingViewResources());
-				View.ForwardLightingResources = View.ForwardLightingResourcesStorage.Get();
-			}
-
-#if RHI_RAYTRACING
-			View.IESLightProfileResource = View.ViewState ? &View.ViewState->IESLightProfileResources : nullptr;
-#endif
 			// Set the pre-exposure before initializing the constant buffers.
-			if (View.ViewState)
-			{
-				View.ViewState->UpdatePreExposure(View);
-			}
+			View.UpdatePreExposure();
 
 			// Initialize the view's RHI resources.
+			UpdateHairResources(GraphBuilder, View);
 			View.InitRHIResources();
+		}
+
+		for (FCustomRenderPassInfo& PassInfo : CustomRenderPassInfos)
+		{
+			for (FViewInfo& View : PassInfo.Views)
+			{
+				View.InitRHIResources();
+			}
 		}
 	}
 
-	SetupVolumetricFog();
+	TaskDatas.VisibilityTaskData->ProcessRenderThreadTasks();
 
+	// Make a second attempt to launch shadow tasks it wasn't able to the first time due to visibility being deferred.
+	if (bRendererOutputFinalSceneColor)
 	{
-		QUICK_SCOPE_CYCLE_COUNTER(STAT_InitViews_OnStartRender);
-		OnStartRender(RHICmdList);
+		BeginInitDynamicShadows(GraphBuilder, TaskDatas, InstanceCullingManager);
 	}
 
-	return bDoInitViewAftersPrepass;
+	PostVisibilityFrameSetup(TaskDatas.ILCUpdatePrim);
 }
 
-void FSceneRenderer::SetupSceneReflectionCaptureBuffer(FRHICommandListImmediate& RHICmdList)
+template<class T>
+void CreateReflectionCaptureUniformBuffer(const TArray<FReflectionCaptureSortData>& SortedCaptures, TUniformBufferRef<T>& OutReflectionCaptureUniformBuffer)
 {
-	FReflectionCaptureShaderData SamplePositionsBuffer;
-
-	const TArray<FReflectionCaptureSortData>& SortedCaptures = Scene->ReflectionSceneData.SortedCaptures;
-
+	T SamplePositionsBuffer;
 	for (int32 CaptureIndex = 0; CaptureIndex < SortedCaptures.Num(); CaptureIndex++)
 	{
-		SamplePositionsBuffer.PositionAndRadius[CaptureIndex] = SortedCaptures[CaptureIndex].PositionAndRadius;
+		SamplePositionsBuffer.PositionHighAndRadius[CaptureIndex] = FVector4f(SortedCaptures[CaptureIndex].Position.High, SortedCaptures[CaptureIndex].Radius);
+		SamplePositionsBuffer.PositionLow[CaptureIndex] = FVector4f(SortedCaptures[CaptureIndex].Position.Low, 0);
+
 		SamplePositionsBuffer.CaptureProperties[CaptureIndex] = SortedCaptures[CaptureIndex].CaptureProperties;
 		SamplePositionsBuffer.CaptureOffsetAndAverageBrightness[CaptureIndex] = SortedCaptures[CaptureIndex].CaptureOffsetAndAverageBrightness;
 		SamplePositionsBuffer.BoxTransform[CaptureIndex] = SortedCaptures[CaptureIndex].BoxTransform;
 		SamplePositionsBuffer.BoxScales[CaptureIndex] = SortedCaptures[CaptureIndex].BoxScales;
 	}
 
-	Scene->UniformBuffers.ReflectionCaptureUniformBuffer.UpdateUniformBufferImmediate(SamplePositionsBuffer);
+	OutReflectionCaptureUniformBuffer = TUniformBufferRef<T>::CreateUniformBufferImmediate(SamplePositionsBuffer, UniformBuffer_SingleFrame);
+}
 
+void FSceneRenderer::SetupSceneReflectionCaptureBuffer(FRHICommandListImmediate& RHICmdList)
+{
+	const TArray<FReflectionCaptureSortData>& SortedCaptures = Scene->ReflectionSceneData.SortedCaptures;
+
+	TUniformBufferRef<FMobileReflectionCaptureShaderData> MobileReflectionCaptureUniformBuffer;
+	TUniformBufferRef<FReflectionCaptureShaderData> ReflectionCaptureUniformBuffer;
+
+	if (IsMobilePlatform(ShaderPlatform))
+	{
+		CreateReflectionCaptureUniformBuffer(SortedCaptures, MobileReflectionCaptureUniformBuffer);
+	}
+	else
+	{
+		CreateReflectionCaptureUniformBuffer(SortedCaptures, ReflectionCaptureUniformBuffer);
+	}
 
 	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
 	{
 		FViewInfo& View = Views[ViewIndex];
 
-		View.ReflectionCaptureUniformBuffer = Scene->UniformBuffers.ReflectionCaptureUniformBuffer;
+		if (IsMobilePlatform(ShaderPlatform))
+		{
+			View.MobileReflectionCaptureUniformBuffer = MobileReflectionCaptureUniformBuffer;
+		}
+		else
+		{
+			View.ReflectionCaptureUniformBuffer = ReflectionCaptureUniformBuffer;
+		}
+		
 		View.NumBoxReflectionCaptures = 0;
 		View.NumSphereReflectionCaptures = 0;
 		View.FurthestReflectionCaptureDistance = 0.0f;
 
-		if (View.Family->EngineShowFlags.ReflectionEnvironment)
+		if (View.Family->EngineShowFlags.ReflectionEnvironment 
+			// Avoid feedback
+			&& !View.bIsReflectionCapture)
 		{
 			View.NumBoxReflectionCaptures = Scene->ReflectionSceneData.NumBoxCaptures;
 			View.NumSphereReflectionCaptures = Scene->ReflectionSceneData.NumSphereCaptures;
 
 			for (int32 CaptureIndex = 0; CaptureIndex < SortedCaptures.Num(); CaptureIndex++)
 			{
-				const FSphere BoundingSphere(SortedCaptures[CaptureIndex].PositionAndRadius, SortedCaptures[CaptureIndex].PositionAndRadius.W);
+				const FSphere BoundingSphere(SortedCaptures[CaptureIndex].Position.GetVector3d(), SortedCaptures[CaptureIndex].Radius);
 
 				const float Distance = View.ViewMatrices.GetViewMatrix().TransformPosition(BoundingSphere.Center).Z + BoundingSphere.W;
 
@@ -4492,20 +5624,21 @@ void FSceneRenderer::SetupSceneReflectionCaptureBuffer(FRHICommandListImmediate&
 	}
 }
 
-void FDeferredShadingSceneRenderer::InitViewsPossiblyAfterPrepass(FRHICommandListImmediate& RHICmdList, struct FILCUpdatePrimTaskData& ILCTaskData)
+void FDeferredShadingSceneRenderer::EndInitViews(
+	FRDGBuilder& GraphBuilder,
+	FLumenSceneFrameTemporaries& FrameTemporaries,
+	FInstanceCullingManager& InstanceCullingManager,
+	FInitViewTaskDatas& TaskDatas)
 {
-	SCOPED_NAMED_EVENT(FDeferredShadingSceneRenderer_InitViewsPossiblyAfterPrepass, FColor::Emerald);
+	SCOPED_NAMED_EVENT(FDeferredShadingSceneRenderer_InitViewsAfterPrepass, FColor::Emerald);
 	SCOPE_CYCLE_COUNTER(STAT_InitViewsPossiblyAfterPrepass);
 
-	if (ViewFamily.EngineShowFlags.DynamicShadows 
-		&& !IsSimpleForwardShadingEnabled(ShaderPlatform)
-		&& !ViewFamily.EngineShowFlags.HitProxies)
-	{
-		// Setup dynamic shadows.
-		InitDynamicShadows(RHICmdList, DynamicIndexBufferForInitShadows, DynamicVertexBufferForInitShadows, DynamicReadBufferForInitShadows);
+	TaskDatas.VisibilityTaskData->Finish();
 
-		RHICmdList.ImmediateFlush(EImmediateFlushType::DispatchToRHIThread);
-	}
+	// Trigger shadow GDME tasks after the main visibility tasks are synced. Projection stencil shadows reference the main view dynamic elements.
+	BeginShadowGatherDynamicMeshElements(TaskDatas.DynamicShadows);
+
+	FRHICommandListImmediate& RHICmdList = GraphBuilder.RHICmdList;
 
 	// If parallel ILC update is disabled, then process it in place.
 	if (ViewFamily.EngineShowFlags.HitProxies == 0
@@ -4513,25 +5646,31 @@ void FDeferredShadingSceneRenderer::InitViewsPossiblyAfterPrepass(FRHICommandLis
 		&& !(GILCUpdatePrimTaskEnabled && FPlatformProcess::SupportsMultithreading()))
 	{
 		QUICK_SCOPE_CYCLE_COUNTER(STAT_PostVisibilityFrameSetup_IndirectLightingCache_Update);
-		check(!ILCTaskData.TaskRef.IsValid());
+		check(!TaskDatas.ILCUpdatePrim);
 		Scene->IndirectLightingCache.UpdateCache(Scene, *this, true);
 	}
 
 	// If we kicked off ILC update via task, wait and finalize.
-	if (ILCTaskData.TaskRef.IsValid())
+	if (TaskDatas.ILCUpdatePrim)
 	{
-		Scene->IndirectLightingCache.FinalizeCacheUpdates(Scene, *this, ILCTaskData);
+		Scene->IndirectLightingCache.FinalizeCacheUpdates(Scene, *this, *TaskDatas.ILCUpdatePrim);
 	}
 
 	{
 		QUICK_SCOPE_CYCLE_COUNTER(STAT_InitViews_UpdatePrimitiveIndirectLightingCacheBuffers);
 		// Now that the indirect lighting cache is updated, we can update the primitive precomputed lighting buffers.
-		UpdatePrimitiveIndirectLightingCacheBuffers();
+		UpdatePrimitiveIndirectLightingCacheBuffers(GraphBuilder.RHICmdList);
 	}
 
-	SeparateTranslucencyDimensions = UpdateTranslucencyTimers(RHICmdList, Views);
+	SeparateTranslucencyDimensions = UpdateSeparateTranslucencyDimensions(*this);
 
 	SetupSceneReflectionCaptureBuffer(RHICmdList);
+
+	if (IsForwardShadingEnabled(ShaderPlatform))
+	{
+		// Dynamic shadows are synced earlier when forward shading is enabled.
+		FinishInitDynamicShadows(GraphBuilder, TaskDatas.DynamicShadows, InstanceCullingManager);
+	}
 }
 
 /*------------------------------------------------------------------------------
@@ -4616,7 +5755,7 @@ void FLODSceneTree::ClearVisibilityState(FViewInfo& View)
 	}
 }
 
-void FLODSceneTree::UpdateVisibilityStates(FViewInfo& View)
+void FLODSceneTree::UpdateVisibilityStates(FViewInfo& View, UE::Tasks::FTaskEvent& FlushCachedShadowsTaskEvent)
 {
 	if (FSceneViewState* ViewState = (FSceneViewState*)View.State)
 	{
@@ -4627,6 +5766,7 @@ void FLODSceneTree::UpdateVisibilityStates(FViewInfo& View)
 			return;
 		}
 #endif
+		QUICK_SCOPE_CYCLE_COUNTER(STAT_ViewVisibilityTime_HLODUpdate);
 
 		// Per-frame initialization
 		FHLODVisibilityState& HLODState = ViewState->HLODVisibilityState;
@@ -4642,7 +5782,9 @@ void FLODSceneTree::UpdateVisibilityStates(FViewInfo& View)
 		{
 			checkf(0, TEXT("HLOD update incorrectly allocated primitive maps"));
 			return;
-		}		
+		}
+
+		TArray<FPrimitiveSceneInfo*, SceneRenderingAllocator> FlushCachedShadowPrimitives;
 
 		int32 UpdateCount = ++HLODState.UpdateCount;
 
@@ -4687,7 +5829,7 @@ void FLODSceneTree::UpdateVisibilityStates(FViewInfo& View)
 				continue;
 			}
 
-			const int32 NodeIndex = SceneInfo->GetIndex();	
+			const int32 NodeIndex = SceneInfo->GetIndex();
 
 			if (!Scene->PrimitiveBounds.IsValidIndex(NodeIndex))
 			{
@@ -4696,11 +5838,11 @@ void FLODSceneTree::UpdateVisibilityStates(FViewInfo& View)
 			}
 
 			FPrimitiveBounds& Bounds = Scene->PrimitiveBounds[NodeIndex];
-			const bool bForcedIntoView = FMath::IsNearlyZero(Bounds.MinDrawDistanceSq);
+			const bool bForcedIntoView = FMath::IsNearlyZero(Bounds.MinDrawDistance);
 
 			// Update visibility states of this node and owned children
 			const float DistanceSquared = Bounds.BoxSphereBounds.ComputeSquaredDistanceFromBoxToPoint(View.ViewMatrices.GetViewOrigin());
-			const bool bNearCulled = DistanceSquared < Bounds.MinDrawDistanceSq * HLODState.FOVDistanceScaleSq;
+			const bool bNearCulled = DistanceSquared < FMath::Square(Bounds.MinDrawDistance) * HLODState.FOVDistanceScaleSq;
 			const bool bFarCulled = DistanceSquared > Bounds.MaxDrawDistance * Bounds.MaxDrawDistance * HLODState.FOVDistanceScaleSq;
 			const bool bIsInDrawRange = !bNearCulled && !bFarCulled;
 
@@ -4739,12 +5881,7 @@ void FLODSceneTree::UpdateVisibilityStates(FViewInfo& View)
 			// Flush cached lighting data when changing visible contents
 			if (NodeVisibility.bIsVisible != NodeVisibility.bWasVisible || bWasFadingPreUpdate || NodeVisibility.bIsFading)
 			{
-				FLightPrimitiveInteraction* NodeLightList = SceneInfo->LightList;
-				while (NodeLightList)
-				{
-					NodeLightList->FlushCachedShadowMapData();
-					NodeLightList = NodeLightList->GetNextLight();
-				}
+				FlushCachedShadowPrimitives.Emplace(SceneInfo);
 			}
 
 			// Force fully disabled view relevance so shadows don't attempt to recompute
@@ -4790,7 +5927,24 @@ void FLODSceneTree::UpdateVisibilityStates(FViewInfo& View)
 				}
 			}
 		}
-	}	
+
+		if (!FlushCachedShadowPrimitives.IsEmpty())
+		{
+			// We don't want to block on the LPI creation task as it overlaps with this work. Spawn a new task that will be waited on further down the pipe.
+			FlushCachedShadowsTaskEvent.AddPrerequisites(UE::Tasks::Launch(UE_SOURCE_LOCATION, [this, Primitives = MoveTemp(FlushCachedShadowPrimitives)]
+			{
+				for (FPrimitiveSceneInfo* SceneInfo : Primitives)
+				{
+					FLightPrimitiveInteraction* NodeLightList = SceneInfo->LightList;
+					while (NodeLightList)
+					{
+						NodeLightList->FlushCachedShadowMapData();
+						NodeLightList = NodeLightList->GetNextLight();
+					}
+				}
+			}, Scene->GetCreateLightPrimitiveInteractionsTask()));
+		}
+	}
 }
 
 void FLODSceneTree::ApplyNodeFadingToChildren(FSceneViewState* ViewState, FLODSceneNode& Node, FHLODSceneNodeVisibilityState& NodeVisibility, const bool bIsFading, const bool bIsFadingOut)

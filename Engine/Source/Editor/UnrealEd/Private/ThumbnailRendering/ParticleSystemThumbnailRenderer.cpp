@@ -6,8 +6,10 @@
 #include "ShowFlags.h"
 #include "SceneView.h"
 #include "Editor/UnrealEdEngine.h"
+#include "Engine/Canvas.h"
 #include "Particles/ParticleSystem.h"
 #include "Engine/Texture2D.h"
+#include "TextureResource.h"
 #include "ThumbnailHelpers.h"
 #include "UnrealEdGlobals.h"
 
@@ -77,31 +79,30 @@ void UParticleSystemThumbnailRenderer::Draw(UObject* Object, int32 X, int32 Y, u
 
 				ThumbnailScene->SetParticleSystem(ParticleSystem);
 				FSceneViewFamilyContext ViewFamily( FSceneViewFamily::ConstructionValues( RenderTarget, ThumbnailScene->GetScene(), FEngineShowFlags(ESFIM_Game))
-					.SetWorldTimes(FApp::GetCurrentTime() - GStartTime, FApp::GetDeltaTime(), FApp::GetCurrentTime() - GStartTime)
+					.SetTime(UThumbnailRenderer::GetTime())
 					.SetAdditionalViewFamily(bAdditionalViewFamily));
 			
 				ViewFamily.EngineShowFlags.DisableAdvancedFeatures();
 				ViewFamily.EngineShowFlags.MotionBlur = 0;
 
-				ThumbnailScene->GetView(&ViewFamily, X, Y, Width, Height);
-				RenderViewFamily(Canvas, &ViewFamily);
+				RenderViewFamily(Canvas, &ViewFamily, ThumbnailScene->CreateView(&ViewFamily, X, Y, Width, Height));
 				ThumbnailScene->SetParticleSystem(nullptr);
 			}
 			else if (ParticleSystem->ThumbnailImage)
 			{
 				Canvas->DrawTile(X,Y,Width,Height,0.f,0.f,1.f,1.f,FLinearColor::White,
-					ParticleSystem->ThumbnailImage->Resource,false);
+					ParticleSystem->ThumbnailImage->GetResource(),false);
 				if (ParticleSystem->ThumbnailImageOutOfDate == true)
 				{
 					Canvas->DrawTile(X,Y,Width/2,Height/2,0.f,0.f,1.f,1.f,FLinearColor::White,
-						OutOfDate->Resource,true);
+						OutOfDate->GetResource(),true);
 				}
 			}
 			else if (NoImage)
 			{
 				// Use the texture interface to draw
 				Canvas->DrawTile(X,Y,Width,Height,0.f,0.f,1.f,1.f,FLinearColor::White,
-					NoImage->Resource,false);
+					NoImage->GetResource(),false);
 			}
 		}
 	}

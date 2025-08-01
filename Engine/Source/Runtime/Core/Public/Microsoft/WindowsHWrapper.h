@@ -4,9 +4,22 @@
 #include "HAL/Platform.h"
 
 #if PLATFORM_WINDOWS
-	#include "Windows/WindowsHWrapper.h"
-#elif PLATFORM_HOLOLENS
-	#include "HoloLens/WindowsHWrapper.h"
+	#include "Windows/WindowsHWrapper.h" // HEADER_UNIT_IGNORE
 #else
-    #include "Microsoft/WindowsHWrapperPrivate.h"
+	#include "CoreTypes.h"
+	#include "HAL/PlatformMemory.h"
+
+	#if defined(WINDOWS_H_WRAPPER_GUARD)
+	#error WINDOWS_H_WRAPPER_GUARD already defined
+	#endif
+	#define WINDOWS_H_WRAPPER_GUARD
+	
+	#include "Microsoft/PreWindowsApiPrivate.h"
+	#ifndef STRICT
+	#define STRICT
+	#endif
+	#include "Microsoft/MinWindowsPrivate.h"
+	#include "Microsoft/PostWindowsApiPrivate.h"
+	
+	#undef WINDOWS_H_WRAPPER_GUARD
 #endif

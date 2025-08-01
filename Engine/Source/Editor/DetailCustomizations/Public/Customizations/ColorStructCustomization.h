@@ -2,16 +2,31 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "Layout/Visibility.h"
-#include "Input/Reply.h"
-#include "Widgets/SWidget.h"
 #include "IPropertyTypeCustomization.h"
-#include "PropertyHandle.h"
+#include "Input/Reply.h"
+#include "Layout/Visibility.h"
+#include "Math/Color.h"
 #include "MathStructCustomizations.h"
+#include "Misc/Optional.h"
+#include "PropertyEditorModule.h"
+#include "PropertyHandle.h"
+#include "Styling/SlateColor.h"
+#include "Templates/SharedPointer.h"
+#include "Widgets/SWidget.h"
 
 class FDetailWidgetRow;
+class IPropertyHandle;
+class IPropertyTypeCustomization;
+class IPropertyTypeCustomizationUtils;
+class SBorder;
 class SColorPicker;
+class SWidget;
+class SWindow;
+struct FGeometry;
+struct FPointerEvent;
 
 /**
  * Base class for color struct customization (FColor,FLinearColor).
@@ -22,7 +37,8 @@ class DETAILCUSTOMIZATIONS_API FColorStructCustomization
 public:
 
 	static TSharedRef<IPropertyTypeCustomization> MakeInstance();
-	
+	~FColorStructCustomization();
+
 protected:
 
 	FColorStructCustomization()
@@ -30,19 +46,47 @@ protected:
 		, bIsInlineColorPickerVisible(false)
 		, bIsInteractive(false)
 		, bDontUpdateWhileEditing(false)
+
 	{}
+
+protected:
+
+	struct FLinearOrSrgbColor;
+
+	/**
+	 * Get the color used by this struct as a linear color value
+	 * @param InColor To be filled with the color value used by this struct, or white if this struct is being used to edit multiple values
+	 * @return The result of trying to get the color value
+	 */
+	virtual FPropertyAccess::Result GetColorAsLinear(FLinearColor& InColor) const;
+
+	/**
+	 * Does the type have Alpha Support
+	 * @return true if it does
+	*/
+	virtual bool TypeSupportsAlpha() const { return true; }
+
+	/**
+	 * Stores the colors from the property into SavedPreColorPickerColors
+	*/
+	virtual void GatherSavedPreColorPickerColors();
+
+	/**
+	 * Stores the color as a string in LastPickerColorString
+	*/
+	virtual void SetLastPickerColorString(const FLinearColor NewColor);
+
+	/**
+	 * Converts Colors into strings
+	 * @param Colors Array of colors to convert
+	 * @return Array of colors converted to string
+	*/
+	virtual TArray<FString> ConvertToPerObjectColors(const TArray<FLinearOrSrgbColor>& Colors) const;
 
 protected:
 
 	/** Creates the color widget that when clicked spawns the color picker window. */
 	TSharedRef<SWidget> CreateColorWidget(TWeakPtr<IPropertyHandle>);
-
-	/**
-	 * Get the color used by this struct as a linear color value
-	 * @param InColor To be filled with the color value used by this struct, or white if this struct is being used to edit multiple values  
-	 * @return The result of trying to get the color value
-	 */
-	FPropertyAccess::Result GetColorAsLinear(FLinearColor& InColor) const;
 
 	/**
 	 * Does this struct have multiple values?
@@ -102,6 +146,15 @@ protected:
 	FLinearColor OnGetColorForColorBlock() const;
 	
 	/**
+	 * @return The color that should be displayed in the color block in slate color format                                                           
+	 */
+	FSlateColor  OnGetSlateColorForBlock() const;
+
+	/**
+	 * @return The border color encompassing the entire color block                                                         
+	 */
+	FSlateColor GetColorWidgetBorderColor() const;
+	/**
 	 * Called when the user clicks in the color block (opens inline color picker)
 	 */
 	FReply OnMouseButtonDownColorBlock(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent);
@@ -142,6 +195,14 @@ protected:
 	/** Color struct handle */
 	TSharedPtr<IPropertyHandle> StructPropertyHandle;
 
+	/** Cached widget for the color picker to use as a parent */
+	TSharedPtr<SWidget> ColorPickerParentWidget;
+
+	TSharedPtr<SWidget > ColorWidgetBackgroundBorder;
+
+	/** Overrides the default state of the sRGB check box */
+	TOptional<bool> sRGBOverride;
+
 	/** True if the property is a linear color property */
 	bool bIsLinearColor;
 
@@ -157,12 +218,9 @@ protected:
 	/** Last color set from color picker as string*/
 	FString LastPickerColorString;
 
-	/** Cached widget for the color picker to use as a parent */
-	TSharedPtr<SWidget> ColorPickerParentWidget;
 
 	/** The value won;t be updated while editing */
 	bool bDontUpdateWhileEditing;
 
-	/** Overrides the default state of the sRGB check box */
-	TOptional<bool> sRGBOverride;
+	TOptional<int32> TransactionIndex;	
 };

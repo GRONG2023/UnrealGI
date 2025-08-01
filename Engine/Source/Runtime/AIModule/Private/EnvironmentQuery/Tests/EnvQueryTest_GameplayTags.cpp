@@ -1,10 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "EnvironmentQuery/Tests/EnvQueryTest_GameplayTags.h"
+
 #include "GameFramework/Actor.h"
 #include "EnvironmentQuery/Items/EnvQueryItemType_ActorBase.h"
 #include "BehaviorTree/BTNode.h"
 #include "GameplayTagAssetInterface.h"
+#include "UObject/ObjectSaveContext.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(EnvQueryTest_GameplayTags)
 
 UEnvQueryTest_GameplayTags::UEnvQueryTest_GameplayTags(const FObjectInitializer& ObjectInitializer) :
 	Super(ObjectInitializer)
@@ -16,16 +20,25 @@ UEnvQueryTest_GameplayTags::UEnvQueryTest_GameplayTags(const FObjectInitializer&
 	// To search for GameplayTags, currently we require the item type to be an actor.  Certainly it must at least be a
 	// class of some sort to be able to find the interface required.
 	ValidItemType = UEnvQueryItemType_ActorBase::StaticClass();
+	
+	bRejectIncompatibleItems = false;
 }
 
 void UEnvQueryTest_GameplayTags::PreSave(const class ITargetPlatform* TargetPlatform)
+{
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+	Super::PreSave(TargetPlatform);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void UEnvQueryTest_GameplayTags::PreSave(FObjectPreSaveContext ObjectSaveContext)
 {
 	// If this is a new object, it's already converted to new format.  If it was old, this should've already been set to
 	// true in PostLoad.  This prevents us from erroneously trying to import old data multiple times and so obliterating
 	// current data.
 	bUpdatedToUseQuery = true;
 
-	Super::PreSave(TargetPlatform);
+	Super::PreSave(ObjectSaveContext);
 }
 
 void UEnvQueryTest_GameplayTags::PostLoad()
@@ -65,7 +78,7 @@ void UEnvQueryTest_GameplayTags::PostLoad()
 	Super::PostLoad();
 }
 
-bool UEnvQueryTest_GameplayTags::SatisfiesTest(IGameplayTagAssetInterface* ItemGameplayTagAssetInterface) const
+bool UEnvQueryTest_GameplayTags::SatisfiesTest(const IGameplayTagAssetInterface* ItemGameplayTagAssetInterface) const
 {
 	// Currently we're requiring that the test only be run on items that implement the interface.  In theory, we could
 	// (instead of checking) support correctly passing or failing on items that don't implement the interface or
@@ -90,12 +103,14 @@ void UEnvQueryTest_GameplayTags::RunTest(FEnvQueryInstance& QueryInstance) const
 	BoolValue.BindData(QueryOwner, QueryInstance.QueryID);
 	bool bWantsValid = BoolValue.GetValue();
 
+	// If no GameplayTagAssetInterface is found then defer to the user preferred behavior
+	const EEnvItemStatus::Type IncompatibleStatus = bRejectIncompatibleItems ? EEnvItemStatus::Failed : EEnvItemStatus::Passed;
+
 	// loop through all items
 	for (FEnvQueryInstance::ItemIterator It(this, QueryInstance); It; ++It)
 	{
-		AActor* ItemActor = GetItemActor(QueryInstance, It.GetIndex());
-		IGameplayTagAssetInterface* GameplayTagAssetInterface = Cast<IGameplayTagAssetInterface>(ItemActor);
-		if (GameplayTagAssetInterface != NULL)
+		const AActor* ItemActor = GetItemActor(QueryInstance, It.GetIndex());
+		if (const IGameplayTagAssetInterface* GameplayTagAssetInterface = Cast<const IGameplayTagAssetInterface>(ItemActor))
 		{
 			bool bSatisfiesTest = SatisfiesTest(GameplayTagAssetInterface);
 
@@ -103,9 +118,9 @@ void UEnvQueryTest_GameplayTags::RunTest(FEnvQueryInstance& QueryInstance) const
 			// rename to make these more consistent.
 			It.SetScore(TestPurpose, FilterType, bSatisfiesTest, bWantsValid);
 		}
-		else // If no GameplayTagAssetInterface is found, this test doesn't apply at all, so just skip the item.
-		{	 // Currently 
-			It.ForceItemState(EEnvItemStatus::Passed);
+		else 
+		{
+			It.ForceItemState(IncompatibleStatus);
 		}
 	}
 }
@@ -119,3 +134,4 @@ void UEnvQueryTest_GameplayTags::SetTagQueryToMatch(FGameplayTagQuery& GameplayT
 {
 	TagQueryToMatch = GameplayTagQuery;
 }
+

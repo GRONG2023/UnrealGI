@@ -2,18 +2,25 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "EdGraph/EdGraphSchema.h"
 #include "BlueprintActionFilter.h"
+#include "CoreMinimal.h"
+#include "EdGraph/EdGraphSchema.h"
+#include "HAL/Platform.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/ObjectMacros.h"
 
+#include "BlueprintActionMenuUtils.generated.h"
+
+class UClass;
 class UK2Node;
+struct FBlueprintActionContext;
 struct FBlueprintActionMenuBuilder;
+struct FEdGraphSchemaAction;
 
 UENUM()
 namespace EContextTargetFlags
 {
-	enum Type
+	enum Type : int
 	{
 		TARGET_Blueprint			= 0x00000001 UMETA(DisplayName="This Blueprint", ToolTip="Include functions and variables that belong to this Blueprint."),
 		TARGET_SubComponents		= 0x00000002 UMETA(DisplayName="Components", ToolTip="Include functions that belong to components of this Blueprint and/or the other target classes."),
@@ -21,6 +28,7 @@ namespace EContextTargetFlags
 		TARGET_PinObject			= 0x00000008 UMETA(DisplayName="Pin Type Class", ToolTip="Include functions and variables that belong to this pin type."),
 		TARGET_SiblingPinObjects	= 0x00000010 UMETA(DisplayName="Other Object Outputs", ToolTip="Include functions and variables that belong to any of this node's output types."),
 		TARGET_BlueprintLibraries	= 0x00000020 UMETA(DisplayName="Libraries", ToolTip="Include static functions that are globally accessible (belonging to function/macro libraries, etc.)."),
+		TARGET_NonImportedTypes		= 0x00000040 UMETA(DisplayName="Non-Imported Types", ToolTip="Include functions from loaded types that are not imported by this Blueprint."),
 
 		// +1 to the last flag (so we can easily iterate these flags)
 		ContextTargetFlagsEnd UMETA(Hidden),

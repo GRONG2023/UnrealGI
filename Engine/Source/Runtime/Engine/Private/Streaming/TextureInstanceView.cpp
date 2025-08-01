@@ -6,7 +6,6 @@
 
 #include "Streaming/TextureInstanceView.h"
 #include "Streaming/TextureInstanceView.inl"
-#include "Engine/TextureStreamingTypes.h"
 #include "Streaming/TextureStreamingHelpers.h"
 #include "Components/PrimitiveComponent.h"
 #include "ContentStreaming.h"
@@ -24,7 +23,7 @@ void FRenderAssetInstanceView::FBounds4::Set(int32 Index, const FBoxSphereBounds
 	ExtentX.Component(Index) = Bounds.BoxExtent.X;
 	ExtentY.Component(Index) = Bounds.BoxExtent.Y;
 	ExtentZ.Component(Index) = Bounds.BoxExtent.Z;
-	Radius.Component(Index) = Bounds.SphereRadius;
+	RadiusOrComponentScale.Component(Index) = Bounds.SphereRadius;
 	PackedRelativeBox[Index] = InPackedRelativeBox;
 	MinDistanceSq.Component(Index) = InMinDistanceSq;
 	MinRangeSq.Component(Index) = InMinRangeSq;
@@ -55,7 +54,7 @@ void FRenderAssetInstanceView::FBounds4::UnpackBounds(int32 Index, const UPrimit
 		ExtentX.Component(Index) = SubBounds.BoxExtent.X;
 		ExtentY.Component(Index) = SubBounds.BoxExtent.Y;
 		ExtentZ.Component(Index) = SubBounds.BoxExtent.Z;
-		Radius.Component(Index) = SubBounds.SphereRadius;
+		RadiusOrComponentScale.Component(Index) = SubBounds.SphereRadius;
 		PackedRelativeBox[Index] = PackedRelativeBox_Identity;
 		MinDistanceSq.Component(Index) = MinDistance2;
 		MinRangeSq.Component(Index) = MinRange2;
@@ -77,7 +76,7 @@ void FRenderAssetInstanceView::FBounds4::FullUpdate(int32 Index, const FBoxSpher
 	ExtentX.Component(Index) = Bounds.BoxExtent.X;
 	ExtentY.Component(Index) = Bounds.BoxExtent.Y;
 	ExtentZ.Component(Index) = Bounds.BoxExtent.Z;
-	Radius.Component(Index) = Bounds.SphereRadius;
+	RadiusOrComponentScale.Component(Index) = Bounds.SphereRadius;
 	PackedRelativeBox[Index] = PackedRelativeBox_Identity;
 	MinDistanceSq.Component(Index) = 0;
 	MinRangeSq.Component(Index) = 0;
@@ -114,7 +113,7 @@ FBoxSphereBounds FRenderAssetInstanceView::FRenderAssetLinkConstIterator::GetBou
 		Bounds.BoxExtent.Y = TheBounds4.ExtentY[Index];
 		Bounds.BoxExtent.Z = TheBounds4.ExtentZ[Index];
 
-		Bounds.SphereRadius = TheBounds4.Radius[Index];
+		Bounds.SphereRadius = Bounds.BoxExtent.Length();
 	}
 	return Bounds;
 }
@@ -258,74 +257,10 @@ void FRenderAssetInstanceView::SwapData(FRenderAssetInstanceView* Lfs, FRenderAs
 	check(Lfs->CompiledRenderAssetMap.Num() == 0 && Rhs->CompiledRenderAssetMap.Num() == 0);
 	check(!Lfs->CompiledNumForcedLODCompMap.Num() && !Rhs->CompiledNumForcedLODCompMap.Num());
 
-	FMemory::Memswap(&Lfs->Bounds4 , &Rhs->Bounds4, sizeof(Lfs->Bounds4));
-	FMemory::Memswap(&Lfs->Elements , &Rhs->Elements, sizeof(Lfs->Elements));
-	FMemory::Memswap(&Lfs->RenderAssetMap, &Rhs->RenderAssetMap, sizeof(Lfs->RenderAssetMap));
-	FMemory::Memswap(&Lfs->MaxTexelFactor , &Rhs->MaxTexelFactor, sizeof(Lfs->MaxTexelFactor));
-}
-
-void FRenderAssetInstanceView::OnVerifyElementIdxFailed(int32 Idx, bool bInRange, int32 IterationCount, TMap<const UPrimitiveComponent*, int32>* ComponentMapPtr, TArray<int32>* FreeIndicesPtr) const
-{
-	const UStreamableRenderAsset* AssetPtr = bInRange ? Elements[Idx].RenderAsset : nullptr;
-	const UPrimitiveComponent* CompPtr = bInRange ? Elements[Idx].Component : nullptr;
-	const int32 BoundsIdx = bInRange ? Elements[Idx].BoundsIndex : INDEX_NONE;
-	const float TexelFactor = bInRange ? Elements[Idx].TexelFactor : 0.f;
-	const int32 bForceLoad = bInRange ? Elements[Idx].bForceLoad : 0;
-	const int32 PrevAssetLink = bInRange ? Elements[Idx].PrevRenderAssetLink : INDEX_NONE;
-	const int32 NextAssetLink = bInRange ? Elements[Idx].NextRenderAssetLink : INDEX_NONE;
-	const int32 NextCompLink = bInRange ? Elements[Idx].NextComponentLink : INDEX_NONE;
-	const int32* CompLink = ComponentMapPtr ? ComponentMapPtr->Find(CompPtr) : nullptr;
-	const FRenderAssetDesc* AssetDesc = RenderAssetMap.Find(AssetPtr);
-	const int32 bFoundInFreeIndices = FreeIndicesPtr ? FreeIndicesPtr->Contains(Idx) : 0;
-
-	FString CompLinkStr;
-	if (CompLink)
-	{
-		int32 NextLink = *CompLink;
-		bool bLinkValid;
-		while (NextLink != INDEX_NONE)
-		{
-			bLinkValid = NextLink >= 0 && NextLink < Elements.Num();
-			CompLinkStr += FString::FromInt(NextLink);
-			CompLinkStr += bLinkValid ? TEXT("") : TEXT("(invalid)");
-			NextLink = bLinkValid ? Elements[NextLink].NextComponentLink : INDEX_NONE;
-			if (NextLink != INDEX_NONE)
-			{
-				CompLinkStr += TEXT("->");
-			}
-		}
-	}
-
-	FString AssetLinkStr;
-	if (AssetDesc)
-	{
-		int32 NextLink = AssetDesc->HeadLink;
-		bool bLinkValid = NextLink >= 0 && NextLink < Elements.Num();
-		if (bLinkValid && Elements[NextLink].PrevRenderAssetLink != INDEX_NONE)
-		{
-			AssetLinkStr += FString::FromInt(Elements[NextLink].PrevRenderAssetLink);
-			AssetLinkStr += TEXT("(?)->");
-		}
-		while (NextLink != INDEX_NONE)
-		{
-			AssetLinkStr += FString::FromInt(NextLink);
-			AssetLinkStr += bLinkValid ? TEXT("") : TEXT("(invalid)");
-			NextLink = bLinkValid ? Elements[NextLink].NextRenderAssetLink : INDEX_NONE;
-			bLinkValid = NextLink >= 0 && NextLink < Elements.Num();
-			if (NextLink != INDEX_NONE)
-			{
-				AssetLinkStr += TEXT("->");
-			}
-		}
-	}
-
-	UE_LOG(LogContentStreaming, Fatal,
-		TEXT("VerifyElementIdx failed: Num=%d, Idx=%d, Asset=%p, Comp=%p, BoundsIdx=%d, TexelFactor=%.2f, ")
-		TEXT("bForceLoad=%d, PrevAssetLink=%d, NextAssetLink=%d, NextCompLink=%d, CompMapEntry=%p, AssetMapEntry=%p, ")
-		TEXT("CompLinks=%s, AssetLinks=%s, bFoundInFreeIndices=%d, Iteration=%d"),
-		Elements.Num(), Idx, AssetPtr, CompPtr, BoundsIdx, TexelFactor,
-		bForceLoad, PrevAssetLink, NextAssetLink, NextCompLink, CompLink, AssetDesc,
-		*CompLinkStr, *AssetLinkStr, bFoundInFreeIndices, IterationCount);
+	Swap(Lfs->Bounds4 , Rhs->Bounds4);
+	Swap(Lfs->Elements , Rhs->Elements);
+	Swap(Lfs->RenderAssetMap, Rhs->RenderAssetMap);
+	Swap(Lfs->MaxTexelFactor , Rhs->MaxTexelFactor);
 }
 
 void FRenderAssetInstanceAsyncView::UpdateBoundSizes_Async(
@@ -353,6 +288,11 @@ void FRenderAssetInstanceAsyncView::UpdateBoundSizes_Async(
 	{
 		const FRenderAssetInstanceView::FBounds4& CurrentBounds4 = View->GetBounds4(Bounds4Index);
 
+		// LWC_TODO - Origin values are loaded from doubles, the remaining values are loaded from floats
+		// Could potentially perform some of these operations with float VectorRegisters, which could potentially be more efficient
+		// (Otherwise we're paying cost to convert these values to double VectorRegisters on load)
+		// Tricky to manage precision though, as with large worlds, distance between object and view origin can potentially overflow float capacity
+
 		// Calculate distance of viewer to bounding sphere.
 		const VectorRegister OriginX = VectorLoadAligned( &CurrentBounds4.OriginX );
 		const VectorRegister OriginY = VectorLoadAligned( &CurrentBounds4.OriginY );
@@ -363,8 +303,8 @@ void FRenderAssetInstanceAsyncView::UpdateBoundSizes_Async(
 		const VectorRegister ExtentX = VectorLoadAligned( &CurrentBounds4.ExtentX );
 		const VectorRegister ExtentY = VectorLoadAligned( &CurrentBounds4.ExtentY );
 		const VectorRegister ExtentZ = VectorLoadAligned( &CurrentBounds4.ExtentZ );
-		const VectorRegister Radius = VectorLoadAligned( &CurrentBounds4.Radius );
-		const VectorRegister PackedRelativeBox = VectorLoadAligned( reinterpret_cast<const FVector4*>(&CurrentBounds4.PackedRelativeBox) );
+		const VectorRegister ComponentScale = VectorLoadAligned( &CurrentBounds4.RadiusOrComponentScale );
+		const VectorRegister PackedRelativeBox = VectorLoadAligned( reinterpret_cast<const FVector4f*>(&CurrentBounds4.PackedRelativeBox) );
 		const VectorRegister MinDistanceSq = VectorLoadAligned( &CurrentBounds4.MinDistanceSq );
 		const VectorRegister MinRangeSq = VectorLoadAligned( &CurrentBounds4.MinRangeSq );
 		const VectorRegister MaxRangeSq = VectorLoadAligned(&CurrentBounds4.MaxRangeSq);
@@ -415,8 +355,9 @@ void FRenderAssetInstanceAsyncView::UpdateBoundSizes_Async(
 				Temp = VectorSubtract( ViewOriginZ, OriginZ );
 				DistSq = VectorMultiplyAdd( Temp, Temp, DistSq );
 
-				DistSqMinusRadiusSq = VectorMultiply( Radius, Radius );
-				DistSqMinusRadiusSq = VectorSubtract( DistSq, DistSqMinusRadiusSq );
+				DistSqMinusRadiusSq = VectorNegateMultiplyAdd( ExtentX, ExtentX, DistSq );
+				DistSqMinusRadiusSq = VectorNegateMultiplyAdd( ExtentY, ExtentY, DistSq );
+				DistSqMinusRadiusSq = VectorNegateMultiplyAdd( ExtentZ, ExtentZ, DistSq );
 				// This can be negative here!!!
 			}
 
@@ -462,10 +403,13 @@ void FRenderAssetInstanceAsyncView::UpdateBoundSizes_Async(
 		VectorStoreAligned(MaxNormalizedSize, MaxNormalizedSizeScalar);
 		MS_ALIGN(16) float MaxNormalizedSize_VisibleOnlyScalar[4] GCC_ALIGN(16);
 		VectorStoreAligned(MaxNormalizedSize_VisibleOnly, MaxNormalizedSize_VisibleOnlyScalar);
+		MS_ALIGN(16) float ComponentScaleScalar[4] GCC_ALIGN(16);
+		VectorStoreAligned(ComponentScale, ComponentScaleScalar);
 		for (int32 SubIndex = 0; SubIndex < 4; ++SubIndex)
 		{
 			BoundsVieWInfo[SubIndex].MaxNormalizedSize = MaxNormalizedSizeScalar[SubIndex];
 			BoundsVieWInfo[SubIndex].MaxNormalizedSize_VisibleOnly = MaxNormalizedSize_VisibleOnlyScalar[SubIndex];
+			BoundsVieWInfo[SubIndex].ComponentScale = ComponentScaleScalar[SubIndex];
 		}
 	}
 
@@ -517,7 +461,7 @@ void FRenderAssetInstanceAsyncView::ProcessElement(
 		else
 		{
 			check(AssetType == EStreamableRenderAssetType::StaticMesh || AssetType == EStreamableRenderAssetType::SkeletalMesh);
-			check(-TexelFactor <= MAX_MESH_LOD_COUNT);
+			check(-TexelFactor <= (float)MAX_MESH_LOD_COUNT);
 			MaxNumForcedLODs = FMath::Max(MaxNumForcedLODs, static_cast<int32>(-TexelFactor));
 		}
 
@@ -568,7 +512,7 @@ void FRenderAssetInstanceAsyncView::GetRenderAssetScreenSize(
 							&& ensure(CompiledElement.BoundsIndex < View->NumBounds4() * 4))
 						{
 							FRenderAssetInstanceView::FCompiledElement* MutableCompiledElement = const_cast<FRenderAssetInstanceView::FCompiledElement*>(&CompiledElement);
-							MutableCompiledElement->TexelFactor = View->GetBounds4(CompiledElement.BoundsIndex / 4).Radius.Component(CompiledElement.BoundsIndex % 4) * 2.f;
+							MutableCompiledElement->TexelFactor = View->GetBounds4(CompiledElement.BoundsIndex / 4).RadiusOrComponentScale.Component(CompiledElement.BoundsIndex % 4) * 2.f;
 						}
 
 						ProcessElement(
@@ -593,15 +537,13 @@ void FRenderAssetInstanceAsyncView::GetRenderAssetScreenSize(
 		}
 		else
 		{
-			int32 IterationCount_DebuggingOnly = 0;
-			for (auto It = View->GetElementIterator(InAsset); It && (AssetType != EStreamableRenderAssetType::Texture || MaxSize_VisibleOnly < MAX_TEXTURE_SIZE || LogPrefix); ++It, ++IterationCount_DebuggingOnly)
+			for (auto It = View->GetElementIterator(InAsset); It && (AssetType != EStreamableRenderAssetType::Texture || MaxSize_VisibleOnly < MAX_TEXTURE_SIZE || LogPrefix); ++It)
 			{
-				View->VerifyElementIdx_DebuggingOnly(It.GetCurElementIdx_ForDebuggingOnly(), IterationCount_DebuggingOnly);
 				// Only handle elements that are in bounds.
 				if (ensure(BoundsViewInfo.IsValidIndex(It.GetBoundsIndex())))
 				{
 					const FBoundsViewInfo& BoundsVieWInfo = BoundsViewInfo[It.GetBoundsIndex()];
-					ProcessElement(AssetType, BoundsVieWInfo, It.GetTexelFactor(), It.GetForceLoad(), MaxSize, MaxSize_VisibleOnly, MaxNumForcedLODs);
+					ProcessElement(AssetType, BoundsVieWInfo, AssetType != EStreamableRenderAssetType::Texture ? It.GetTexelFactor() : It.GetTexelFactor() * BoundsVieWInfo.ComponentScale, It.GetForceLoad(), MaxSize, MaxSize_VisibleOnly, MaxNumForcedLODs);
 					if (LogPrefix)
 					{
 						It.OutputToLog(BoundsVieWInfo.MaxNormalizedSize, BoundsVieWInfo.MaxNormalizedSize_VisibleOnly, LogPrefix);
@@ -610,19 +552,4 @@ void FRenderAssetInstanceAsyncView::GetRenderAssetScreenSize(
 			}
 		}
 	}
-}
-
-bool FRenderAssetInstanceAsyncView::HasRenderAssetReferences(const UStreamableRenderAsset* InAsset) const
-{
-	return View.IsValid() && (bool)View->GetElementIterator(InAsset);
-}
-
-bool FRenderAssetInstanceAsyncView::HasComponentWithForcedLOD(const UStreamableRenderAsset* InAsset) const
-{
-	return View.IsValid() && View->HasComponentWithForcedLOD(InAsset);
-}
-
-bool FRenderAssetInstanceAsyncView::HasAnyComponentWithForcedLOD() const
-{
-	return View.IsValid() && View->HasAnyComponentWithForcedLOD();
 }

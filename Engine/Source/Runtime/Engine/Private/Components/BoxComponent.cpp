@@ -2,16 +2,21 @@
 
 
 #include "Components/BoxComponent.h"
-#include "WorldCollision.h"
+#include "CollisionShape.h"
+#include "PhysicsEngine/BodySetup.h"
 #include "PrimitiveViewRelevance.h"
 #include "PrimitiveSceneProxy.h"
 #include "SceneManagement.h"
 #include "PhysicsEngine/BoxElem.h"
-#include "PhysicsEngine/BodySetup.h"
 #include "PrimitiveSceneProxy.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BoxComponent)
 
 UBoxComponent::UBoxComponent(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
+#if WITH_EDITOR
+	, ShowFlags(ESFIM_All0)
+#endif // WITH_EDITOR
 {
 	BoxExtent = FVector(32.0f, 32.0f, 32.0f);
 
@@ -40,27 +45,26 @@ void UBoxComponent::SetBoxExtent(FVector NewBoxExtent, bool bUpdateOverlaps)
 	}
 }
 
-
-template <EShapeBodySetupHelper UpdateBodySetupAction>
-bool InvalidateOrUpdateBoxBodySetup(UBodySetup*& ShapeBodySetup, bool bUseArchetypeBodySetup, FVector BoxExtent)
+template <EShapeBodySetupHelper UpdateBodySetupAction, typename BodySetupType>
+bool InvalidateOrUpdateBoxBodySetup(BodySetupType& ShapeBodySetup, bool bUseArchetypeBodySetup, FVector BoxExtent)
 {
 	check((bUseArchetypeBodySetup && UpdateBodySetupAction == EShapeBodySetupHelper::InvalidateSharingIfStale) || (!bUseArchetypeBodySetup && UpdateBodySetupAction == EShapeBodySetupHelper::UpdateBodySetup));
 	check(ShapeBodySetup->AggGeom.BoxElems.Num() == 1);
 	FKBoxElem* se = ShapeBodySetup->AggGeom.BoxElems.GetData();
 
-	// @todo UE4 do we allow this now?
+	// @todo do we allow this now?
 	// check for malformed values
-	if (BoxExtent.X < KINDA_SMALL_NUMBER)
+	if (BoxExtent.X < UE_KINDA_SMALL_NUMBER)
 	{
 		BoxExtent.X = 1.0f;
 	}
 
-	if (BoxExtent.Y < KINDA_SMALL_NUMBER)
+	if (BoxExtent.Y < UE_KINDA_SMALL_NUMBER)
 	{
 		BoxExtent.Y = 1.0f;
 	}
 
-	if (BoxExtent.Z < KINDA_SMALL_NUMBER)
+	if (BoxExtent.Z < UE_KINDA_SMALL_NUMBER)
 	{
 		BoxExtent.Z = 1.0f;
 	}
@@ -101,6 +105,14 @@ void UBoxComponent::UpdateBodySetup()
 	}
 }
 
+#if WITH_EDITOR
+void UBoxComponent::SetShowFlags(const FEngineShowFlags& InShowFlags)
+{
+	ShowFlags = InShowFlags;
+	MarkRenderStateDirty();
+}
+#endif // WITH_EDITOR
+
 bool UBoxComponent::IsZeroExtent() const
 {
 	return BoxExtent.IsZero();
@@ -133,6 +145,46 @@ FPrimitiveSceneProxy* UBoxComponent::CreateSceneProxy()
 			,	LineThickness( InComponent->LineThickness )
 		{
 			bWillEverBeLit = false;
+
+#if WITH_EDITOR
+			struct FIterSink
+			{
+				FIterSink(const FEngineShowFlags InSelectedShowFlags)
+					: SelectedShowFlags(InSelectedShowFlags)
+				{
+					SelectedShowFlagIndices.SetNum(FEngineShowFlags::SF_FirstCustom, false);
+				}
+
+				bool HandleShowFlag(uint32 InIndex, const FString& InName)
+				{
+					if (SelectedShowFlags.GetSingleFlag(InIndex) == true)
+					{
+						SelectedShowFlagIndices.PadToNum(InIndex + 1, false);
+						SelectedShowFlagIndices[InIndex] = true;
+					}
+
+					return true;
+				}
+
+				bool OnEngineShowFlag(uint32 InIndex, const FString& InName)
+				{
+					return HandleShowFlag(InIndex, InName);
+				}
+
+				bool OnCustomShowFlag(uint32 InIndex, const FString& InName)
+				{
+					return HandleShowFlag(InIndex, InName);
+				}
+
+				const FEngineShowFlags SelectedShowFlags;
+
+				TBitArray<> SelectedShowFlagIndices;
+			};
+
+			FIterSink Sink(InComponent->ShowFlags);
+			FEngineShowFlags::IterateAllFlags(Sink);
+			SelectedShowFlagIndices = MoveTemp(Sink.SelectedShowFlagIndices);
+#endif // WITH_EDITOR
 		}
 
 		virtual void GetDynamicMeshElements(const TArray<const FSceneView*>& Views, const FSceneViewFamily& ViewFamily, uint32 VisibilityMap, FMeshElementCollector& Collector) const override
@@ -164,6 +216,15 @@ FPrimitiveSceneProxy* UBoxComponent::CreateSceneProxy()
 
 			FPrimitiveViewRelevance Result;
 			Result.bDrawRelevance = (IsShown(View) && bProxyVisible) || bShowForCollision;
+#if WITH_EDITOR
+			bool bAreAllSelectedFlagsEnabled = true;
+			for (TConstSetBitIterator<> It(SelectedShowFlagIndices); It; ++It)
+			{
+				bAreAllSelectedFlagsEnabled &= View->Family->EngineShowFlags.GetSingleFlag(It.GetIndex());
+			}
+
+			Result.bDrawRelevance &= bAreAllSelectedFlagsEnabled;
+#endif // WITH_EDITOR
 			Result.bDynamicRelevance = true;
 			Result.bShadowRelevance = IsShadowCast(View);
 			Result.bEditorPrimitiveRelevance = UseEditorCompositing(View);
@@ -176,7 +237,10 @@ FPrimitiveSceneProxy* UBoxComponent::CreateSceneProxy()
 		const uint32	bDrawOnlyIfSelected:1;
 		const FVector	BoxExtents;
 		const FColor	BoxColor;
-		const float LineThickness;
+		const float		LineThickness;
+#if WITH_EDITOR
+		TBitArray<>		SelectedShowFlagIndices;
+#endif // WITH_EDITOR
 	};
 
 	return new FBoxSceneProxy( this );
@@ -194,3 +258,4 @@ FCollisionShape UBoxComponent::GetCollisionShape(float Inflation) const
 
 	return FCollisionShape::MakeBox(Extent);
 }
+

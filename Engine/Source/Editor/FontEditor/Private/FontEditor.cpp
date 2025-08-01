@@ -1,39 +1,79 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "FontEditor.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "EngineGlobals.h"
-#include "Engine/Texture2D.h"
-#include "Framework/Commands/Commands.h"
-#include "Engine/Engine.h"
-#include "Misc/MessageDialog.h"
-#include "Misc/FileHelper.h"
-#include "Modules/ModuleManager.h"
-#include "Widgets/Input/SEditableTextBox.h"
-#include "Widgets/Input/SCheckBox.h"
-#include "EditorStyleSet.h"
+
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/List.h"
+#include "CoreGlobals.h"
+#include "Delegates/Delegate.h"
+#include "DesktopPlatformModule.h"
+#include "DetailsViewArgs.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
 #include "EditorReimportHandler.h"
-#include "Exporters/Exporter.h"
-#include "Engine/FontImportOptions.h"
+#include "Engine/Engine.h"
+#include "Engine/EngineTypes.h"
 #include "Engine/Font.h"
 #include "Engine/FontFace.h"
-#include "Editor.h"
+#include "Engine/FontImportOptions.h"
+#include "Engine/Texture.h"
+#include "Engine/Texture2D.h"
+#include "Engine/TextureDefines.h"
+#include "Exporters/Exporter.h"
+#include "Exporters/TextureExporterTGA.h"
+#include "Factories/Factory.h"
 #include "Factories/FontFactory.h"
 #include "Factories/TextureFactory.h"
 #include "Factories/TrueTypeFontFactory.h"
-#include "Exporters/TextureExporterTGA.h"
-#include "Dialogs/Dialogs.h"
 #include "FontEditorModule.h"
 #include "Framework/Application/SlateApplication.h"
-#include "Widgets/Colors/SColorPicker.h"
-#include "SFontEditorViewport.h"
-#include "SCompositeFontEditor.h"
-#include "DesktopPlatformModule.h"
-#include "PropertyEditorModule.h"
+#include "Framework/Commands/Commands.h"
+#include "Framework/Commands/InputChord.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandInfo.h"
+#include "Framework/Commands/UICommandList.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Framework/MultiBox/MultiBoxExtender.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMisc.h"
+#include "IDesktopPlatform.h"
 #include "IDetailsView.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Margin.h"
+#include "Logging/LogMacros.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/FileHelper.h"
+#include "Misc/MessageDialog.h"
+#include "Misc/Paths.h"
+#include "Modules/ModuleManager.h"
+#include "PropertyEditorDelegates.h"
+#include "PropertyEditorModule.h"
+#include "SCompositeFontEditor.h"
+#include "SFontEditorViewport.h"
+#include "Selection.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Subsystems/ImportSubsystem.h"
+#include "Templates/Casts.h"
+#include "Textures/SlateIcon.h"
+#include "Toolkits/AssetEditorToolkit.h"
+#include "Types/SlateEnums.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/Colors/SColorPicker.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Docking/SDockTab.h"
-#include "Engine/Selection.h"
+#include "Widgets/Input/SCheckBox.h"
+#include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Input/SNumericEntryBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
 
 #define LOCTEXT_NAMESPACE "FontEditor"
 
@@ -56,7 +96,7 @@ class FFontEditorCommands : public TCommands<FFontEditorCommands>
 public:
 	/** Constructor */
 	FFontEditorCommands() 
-		: TCommands<FFontEditorCommands>("FontEditor", NSLOCTEXT("Contexts", "FontEditor", "Font Editor"), NAME_None, FEditorStyle::GetStyleSetName())
+		: TCommands<FFontEditorCommands>("FontEditor", NSLOCTEXT("Contexts", "FontEditor", "Font Editor"), NAME_None, FAppStyle::GetAppStyleSetName())
 	{
 	}
 	
@@ -103,29 +143,29 @@ void FFontEditor::RegisterTabSpawners(const TSharedRef<class FTabManager>& InTab
 	InTabManager->RegisterTabSpawner( TexturePagesViewportTabId, FOnSpawnTab::CreateSP(this, &FFontEditor::SpawnTab_TexturePagesViewport) )
 		.SetDisplayName( LOCTEXT("TexturePagesViewportTab", "Texture Pages") )
 		.SetGroup(WorkspaceMenuCategoryRef)
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.Tabs.Viewports"))
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Viewports"))
 		.SetMenuType( TAttribute<ETabSpawnerMenuType::Type>::Create(TAttribute<ETabSpawnerMenuType::Type>::FGetter::CreateSP(this, &FFontEditor::GetTabSpawnerMenuType, TexturePagesViewportTabId)) );
 
 	InTabManager->RegisterTabSpawner( CompositeFontEditorTabId, FOnSpawnTab::CreateSP(this, &FFontEditor::SpawnTab_CompositeFontEditor) )
 		.SetDisplayName( LOCTEXT("CompositeFontEditorTab", "Composite Font") )
 		.SetGroup(WorkspaceMenuCategoryRef)
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "FontEditor.Tabs.PageProperties"))
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "FontEditor.Tabs.PageProperties"))
 		.SetMenuType( TAttribute<ETabSpawnerMenuType::Type>::Create(TAttribute<ETabSpawnerMenuType::Type>::FGetter::CreateSP(this, &FFontEditor::GetTabSpawnerMenuType, CompositeFontEditorTabId)) );
 
 	InTabManager->RegisterTabSpawner( PreviewTabId,		FOnSpawnTab::CreateSP(this, &FFontEditor::SpawnTab_Preview) )
 		.SetDisplayName( LOCTEXT("PreviewTab", "Preview") )
 		.SetGroup(WorkspaceMenuCategoryRef)
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "FontEditor.Tabs.Preview"));
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "FontEditor.Tabs.Preview"));
 
 	InTabManager->RegisterTabSpawner( PropertiesTabId,	FOnSpawnTab::CreateSP(this, &FFontEditor::SpawnTab_Properties) )
 		.SetDisplayName( LOCTEXT("PropertiesTabId", "Details") )
 		.SetGroup(WorkspaceMenuCategoryRef)
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.Tabs.Details"));
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Details"));
 
 	InTabManager->RegisterTabSpawner( PagePropertiesTabId,FOnSpawnTab::CreateSP(this, &FFontEditor::SpawnTab_PageProperties) )
 		.SetDisplayName( LOCTEXT("PagePropertiesTab", "Page Details") )
 		.SetGroup(WorkspaceMenuCategoryRef)
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "FontEditor.Tabs.PageProperties"))
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "FontEditor.Tabs.PageProperties"))
 		.SetMenuType( TAttribute<ETabSpawnerMenuType::Type>::Create(TAttribute<ETabSpawnerMenuType::Type>::FGetter::CreateSP(this, &FFontEditor::GetTabSpawnerMenuType, PagePropertiesTabId)) );
 }
 
@@ -195,15 +235,10 @@ void FFontEditor::InitFontEditor(const EToolkitMode::Type Mode, const TSharedPtr
 
 	CreateInternalWidgets();
 
-	const TSharedRef<FTabManager::FLayout> StandaloneDefaultLayout = FTabManager::NewLayout("Standalone_FontEditor_Layout_v3")
+	const TSharedRef<FTabManager::FLayout> StandaloneDefaultLayout = FTabManager::NewLayout("Standalone_FontEditor_Layout_v4")
 	->AddArea
 	(
 		FTabManager::NewPrimaryArea() ->SetOrientation( Orient_Vertical )
-		->Split
-		(
-			FTabManager::NewStack()
-			->AddTab( GetToolbarTabId(), ETabState::OpenedTab ) ->SetHideTabWell( true )
-		)
 		->Split
 		(
 			FTabManager::NewSplitter() ->SetOrientation(Orient_Horizontal) ->SetSizeCoefficient(0.9f)
@@ -333,7 +368,6 @@ TSharedRef<SDockTab> FFontEditor::SpawnTab_Preview( const FSpawnTabArgs& Args )
 	check( Args.GetTabId().TabType == PreviewTabId );
 
 	TSharedRef<SDockTab> SpawnedTab = SNew(SDockTab)
-		.Icon(FEditorStyle::GetBrush("FontEditor.Tabs.Preview"))
 		.Label(LOCTEXT("FontPreviewTitle", "Preview"))
 		[
 			FontPreview.ToSharedRef()
@@ -349,7 +383,6 @@ TSharedRef<SDockTab> FFontEditor::SpawnTab_Properties( const FSpawnTabArgs& Args
 	check( Args.GetTabId().TabType == PropertiesTabId );
 
 	TSharedRef<SDockTab> SpawnedTab = SNew(SDockTab)
-		.Icon(FEditorStyle::GetBrush("FontEditor.Tabs.Properties"))
 		.Label(LOCTEXT("FontPropertiesTitle", "Details"))
 		[
 			FontProperties.ToSharedRef()
@@ -365,7 +398,6 @@ TSharedRef<SDockTab> FFontEditor::SpawnTab_PageProperties( const FSpawnTabArgs& 
 	check( Args.GetTabId().TabType == PagePropertiesTabId );
 
 	TSharedRef<SDockTab> SpawnedTab = SNew(SDockTab)
-		.Icon(FEditorStyle::GetBrush("FontEditor.Tabs.PageProperties"))
 		.Label(LOCTEXT("FontPagePropertiesTitle", "Page Details"))
 		[
 			FontPageProperties.ToSharedRef()
@@ -402,6 +434,16 @@ void FFontEditor::OnPreviewTextChanged(const FText& Text)
 	FontPreviewWidget->SetPreviewText(Text);
 }
 
+TOptional<float> FFontEditor::GetDrawFontScale() const
+{
+	return FontPreviewWidget->GetPreviewFontScale();
+}
+
+void FFontEditor::OnDrawFontScaleChanged(float InNewValue, ETextCommit::Type CommitType)
+{
+	FontPreviewWidget->SetPreviewFontScale(InNewValue);
+}
+
 ECheckBoxState FFontEditor::GetDrawFontMetricsState() const
 {
 	return (FontPreviewWidget->GetPreviewFontMetrics()) ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
@@ -423,6 +465,7 @@ void FFontEditor::PostUndo(bool bSuccess)
 void FFontEditor::NotifyPostChange( const FPropertyChangedEvent& PropertyChangedEvent, class FEditPropertyChain* PropertyThatChanged)
 {
 	static const FName FontCacheTypePropertyName = GET_MEMBER_NAME_CHECKED(UFont, FontCacheType);
+	static const FName FontRasterizationModePropertyName = GET_MEMBER_NAME_CHECKED(UFont, FontRasterizationMode);
 	static const FName CompositeFontPropertyName = GET_MEMBER_NAME_CHECKED(UFont, CompositeFont);
 	static const FName TexturePageWidthName = GET_MEMBER_NAME_CHECKED(FFontImportOptionsData, TexturePageWidth);
 	static const FName TexturePageMaxHeightName = GET_MEMBER_NAME_CHECKED(FFontImportOptionsData, TexturePageMaxHeight);
@@ -431,11 +474,10 @@ void FFontEditor::NotifyPostChange( const FPropertyChangedEvent& PropertyChanged
 	if(PropertyChangedEvent.Property && PropertyChangedEvent.Property->GetFName() == FontCacheTypePropertyName)
 	{
 		// Show a warning message, as what we're about to do will destroy any existing data in this font object
-		const FText Title = LOCTEXT("ChangeCacheTypeWarningTitle", "Really change the font cache type?");
 		const EAppReturnType::Type DlgResult = FMessageDialog::Open(
 			EAppMsgType::YesNo, 
 			LOCTEXT("ChangeCacheTypeWarningMsg", "Changing the cache type will cause this font to be reinitialized (discarding any existing data).\n\nAre you sure you want to proceed?"), 
-			&Title
+			LOCTEXT("ChangeCacheTypeWarningTitle", "Really change the font cache type?")
 			);
 
 		bool bSuccessfullyChangedCacheType = false;
@@ -450,6 +492,7 @@ void FFontEditor::NotifyPostChange( const FPropertyChangedEvent& PropertyChanged
 
 			// If we changed the font cache type, then we need to update the UI to hide the invalid tabs and spawn the new ones
 			UpdateLayout();
+			FontProperties->ForceRefresh();
 		}
 		else
 		{
@@ -468,6 +511,13 @@ void FFontEditor::NotifyPostChange( const FPropertyChangedEvent& PropertyChanged
 				break;
 			}
 		}
+	}
+
+	if (PropertyChangedEvent.Property && PropertyChangedEvent.Property->GetFName() == FontRasterizationModePropertyName)
+	{
+		// Show / hide SdfFont category of properties
+		UpdateLayout();
+		FontProperties->ForceRefresh();
 	}
 
 	if (PropertyChangedEvent.Property && PropertyChangedEvent.Property->GetFName() == DistanceFieldScaleFactorName)
@@ -610,6 +660,17 @@ void FFontEditor::CreateInternalWidgets()
 			.SelectAllTextWhenFocused(true)
 			.OnTextChanged(this, &FFontEditor::OnPreviewTextChanged)
 		]
+
+		+ SHorizontalBox::Slot()
+		.AutoWidth()
+		[
+			SNew(SNumericEntryBox<float>)
+			.Value(this, &FFontEditor::GetDrawFontScale)
+			.MinValue(1.f)
+			.MaxValue(10.f)
+			.OnValueCommitted(this, &FFontEditor::OnDrawFontScaleChanged)
+		]
+
 
 		+SHorizontalBox::Slot()
 		.AutoWidth()
@@ -891,21 +952,24 @@ bool FFontEditor::OnExportAllEnabled() const
 
 void FFontEditor::OnBackgroundColor()
 {
-	FColor Color = FontPreviewWidget->GetPreviewBackgroundColor();
-	TArray<FColor*> FColorArray;
-	FColorArray.Add(&Color);
+	TWeakPtr<SFontEditorViewport> WeakFontPreviewWidget = FontPreviewWidget;
 
 	FColorPickerArgs PickerArgs;
 	PickerArgs.bIsModal = true;
 	PickerArgs.ParentWidget = FontPreview;
 	PickerArgs.bUseAlpha = true;
+	PickerArgs.bClampValue = true;
 	PickerArgs.DisplayGamma = TAttribute<float>::Create( TAttribute<float>::FGetter::CreateUObject(GEngine, &UEngine::GetDisplayGamma) );
-	PickerArgs.ColorArray = &FColorArray;
+	PickerArgs.InitialColor = FontPreviewWidget->GetPreviewBackgroundColor();
+	PickerArgs.OnColorCommitted = FOnLinearColorValueChanged::CreateLambda([WeakFontPreviewWidget](FLinearColor NewValue)
+		{
+			if (TSharedPtr<SFontEditorViewport> PinnedWidget = WeakFontPreviewWidget.Pin())
+			{
+				PinnedWidget->SetPreviewBackgroundColor(NewValue.ToFColorSRGB());
+			}
+		});
 
-	if (OpenColorPicker(PickerArgs))
-	{
-		FontPreviewWidget->SetPreviewBackgroundColor(Color);
-	}
+	OpenColorPicker(PickerArgs);
 }
 
 bool FFontEditor::OnBackgroundColorEnabled() const
@@ -916,21 +980,23 @@ bool FFontEditor::OnBackgroundColorEnabled() const
 
 void FFontEditor::OnForegroundColor()
 {
-	FColor Color = FontPreviewWidget->GetPreviewForegroundColor();
-	TArray<FColor*> FColorArray;
-	FColorArray.Add(&Color);
+	TWeakPtr<SFontEditorViewport> WeakFontPreviewWidget = FontPreviewWidget;
 
 	FColorPickerArgs PickerArgs;
 	PickerArgs.bIsModal = true;
 	PickerArgs.ParentWidget = FontPreview;
 	PickerArgs.bUseAlpha = true;
 	PickerArgs.DisplayGamma = TAttribute<float>::Create( TAttribute<float>::FGetter::CreateUObject(GEngine, &UEngine::GetDisplayGamma) );
-	PickerArgs.ColorArray = &FColorArray;
+	PickerArgs.InitialColor = FontPreviewWidget->GetPreviewForegroundColor();
+	PickerArgs.OnColorCommitted = FOnLinearColorValueChanged::CreateLambda([WeakFontPreviewWidget](FLinearColor NewValue)
+		{
+			if (TSharedPtr<SFontEditorViewport> PinnedWidget = WeakFontPreviewWidget.Pin())
+			{
+				PinnedWidget->SetPreviewForegroundColor(NewValue.ToFColorSRGB());
+			}
+		});
 
-	if (OpenColorPicker(PickerArgs))
-	{
-		FontPreviewWidget->SetPreviewForegroundColor(Color);
-	}
+	OpenColorPicker(PickerArgs);
 }
 
 bool FFontEditor::OnForegroundColorEnabled() const
@@ -956,6 +1022,13 @@ void FFontEditor::OnPostReimport(UObject* InObject, bool bSuccess)
 
 void FFontEditor::OnObjectPropertyChanged(UObject* InObject, struct FPropertyChangedEvent& InPropertyChangedEvent)
 {
+	if (Cast<UFont>(InObject))
+	{
+		//Force all texts using a font to be refreshed.
+		FSlateApplicationBase::Get().InvalidateAllWidgets(false);
+		GSlateLayoutGeneration++;
+	}
+
 	if (Cast<UFontFace>(InObject))
 	{
 		// Refresh the composite font editor when a font face is changed as it may affect our preview
@@ -1078,12 +1151,28 @@ bool FFontEditor::RecreateFontObject(const EFontCacheType NewCacheType)
 bool FFontEditor::GetIsPropertyVisible(const FPropertyAndParent& PropertyAndParent) const
 {
 	static const FName CategoryFName = "Category";
+	const FString& CategoryValue = PropertyAndParent.Property.GetMetaData(CategoryFName);
+
+	// If SDF feature is disabled, hide all SDF-related settings
+	if (!IsSlateSdfTextFeatureEnabled())
+	{
+		if (PropertyAndParent.Property.GetFName() == GET_MEMBER_NAME_CHECKED(UFont, FontRasterizationMode) ||
+			PropertyAndParent.Property.GetFName() == GET_MEMBER_NAME_CHECKED(UFont, SdfSettings))
+		{
+			return false;
+		}
+	}
+
+	// Hide SDF settings if font rasterization mode is not MSDF
+	if (!Font->IsSdfFont() && PropertyAndParent.Property.GetFName() == GET_MEMBER_NAME_CHECKED(UFont, SdfSettings))
+	{
+		return false;
+	}
 
 	// We need to hide the properties associated with the category that we're not currently using (either Offline or Runtime)
 	const FString CategoryToExclude = (Font->FontCacheType == EFontCacheType::Offline) ? TEXT("RuntimeFont") : TEXT("OfflineFont");
 
 	// We need to hide the properties associated with the category that we're not currently using (either Offline or Runtime)
-	const FString& CategoryValue = PropertyAndParent.Property.GetMetaData(CategoryFName);
 	return CategoryValue != CategoryToExclude;
 }
 

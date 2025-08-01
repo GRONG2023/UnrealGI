@@ -4,10 +4,11 @@
 #include "CoreMinimal.h"
 #include "Widgets/SWidget.h"
 #include "Engine/MeshMerging.h"
-#include "IMergeActorsTool.h"
-#include "SMeshProxyDialog.h"
+#include "MergeActorsTool.h"
 
 #include "MeshProxyTool.generated.h"
+
+class SMeshProxyDialog;
 
 /** Singleton wrapper to allow for using the setting structure in SSettingsView */
 UCLASS(config = Engine)
@@ -39,7 +40,7 @@ public:
 			if (UObjectInitialized() && DefaultSettings)
 			{
 				DefaultSettings->RemoveFromRoot();
-				DefaultSettings->MarkPendingKill();
+				DefaultSettings->MarkAsGarbage();
 			}
 
 			DefaultSettings = nullptr;
@@ -58,7 +59,7 @@ public:
 /**
 * Mesh Proxy Tool
 */
-class FMeshProxyTool : public IMergeActorsTool
+class FMeshProxyTool : public FMergeActorsTool
 {
 	friend class SMeshProxyDialog;
 
@@ -68,11 +69,14 @@ public:
 
 	// IMergeActorsTool interface
 	virtual TSharedRef<SWidget> GetWidget() override;
-	virtual FName GetIconName() const override { return "MergeActors.MeshProxyTool"; }
+	virtual FName GetIconName() const override;
+	virtual FText GetToolNameText() const override;
 	virtual FText GetTooltipText() const override;
 	virtual FString GetDefaultPackageName() const override;
-	virtual bool CanMerge() const override;
-	virtual bool RunMerge(const FString& PackageName) override;
+
+protected:
+	virtual bool RunMerge(const FString& PackageName, const TArray<TSharedPtr<FMergeComponentData>>& SelectedComponents) override;
+	virtual const TArray<TSharedPtr<FMergeComponentData>>& GetSelectedComponentsInWidget() const override;
 
 protected:
 
@@ -94,12 +98,21 @@ public:
 
 	// IMergeActorsTool interface
 	virtual TSharedRef<SWidget> GetWidget() override;
-	virtual FName GetIconName() const override { return "MergeActors.MeshProxyTool"; }
+	virtual FName GetIconName() const override;
+	virtual FText GetToolNameText() const override;
 	virtual FText GetTooltipText() const override;
 	virtual FString GetDefaultPackageName() const override;
-	virtual bool RunMerge(const FString& PackageName) override;
-	virtual bool CanMerge() const override;
-protected:
+	virtual bool GetReplaceSourceActors() const override { return bReplaceSourceActors; }
+	virtual void SetReplaceSourceActors(bool bInReplaceSourceActors) override { bReplaceSourceActors = bInReplaceSourceActors; }
+	virtual bool RunMergeFromSelection() override;
+	virtual bool RunMergeFromWidget() override;
+	virtual bool CanMergeFromSelection() const override;
+	virtual bool CanMergeFromWidget() const override;
 
+protected:
+	virtual bool RunMerge(const FString& PackageName);
+
+protected:
+	bool bReplaceSourceActors = false;
 	FMeshProxySettings ProxySettings;
 };

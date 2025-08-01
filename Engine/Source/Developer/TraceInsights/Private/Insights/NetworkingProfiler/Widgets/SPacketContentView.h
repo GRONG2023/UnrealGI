@@ -11,6 +11,7 @@
 #include "TraceServices/Model/NetProfiler.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
+#include "Widgets/Input/SComboBox.h"
 
 // Insights
 #include "Insights/Common/FixedCircularBuffer.h"
@@ -86,6 +87,20 @@ struct FNetworkPacketEventRef
  */
 class SPacketContentView : public SCompoundWidget
 {
+private:
+	struct FAggregationModeItem
+	{
+		/** Conversion constructor. */
+		FAggregationModeItem(const TraceServices::ENetProfilerAggregationMode& InMode)
+			: Mode(InMode)
+		{}
+
+		FText GetText() const;
+		FText GetTooltipText() const;
+
+		TraceServices::ENetProfilerAggregationMode Mode;
+	};
+
 public:
 	/** Number of pixels. */
 	static constexpr float MOUSE_SNAP_DISTANCE = 2.0f;
@@ -96,6 +111,8 @@ public:
 		Arrow,
 		Hand,
 	};
+
+	enum class EEventNavigationType { AnyLevel, SameLevel };
 
 public:
 	/** Default constructor. */
@@ -110,7 +127,7 @@ public:
 	SLATE_BEGIN_ARGS(SPacketContentView) {}
 	SLATE_END_ARGS()
 
-	void Construct(const FArguments& InArgs, TSharedPtr<SNetworkingProfilerWindow> InProfilerWindow);
+	void Construct(const FArguments& InArgs, TSharedRef<SNetworkingProfilerWindow> InProfilerWindow);
 
 	/**
 	 * Ticks this widget. Override in derived classes, but always call the parent implementation.
@@ -137,11 +154,11 @@ public:
 	//virtual FReply OnKeyUp(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
 
 	void ResetPacket();
-	void SetPacket(uint32 InGameInstanceIndex, uint32 InConnectionIndex, Trace::ENetProfilerConnectionMode InConnectionMode, uint32 InPacketIndex, int64 InPacketBitSize);
+	void SetPacket(uint32 InGameInstanceIndex, uint32 InConnectionIndex, TraceServices::ENetProfilerConnectionMode InConnectionMode, uint32 InPacketIndex, int64 InPacketBitSize);
 
 	bool IsFilterByNetIdEnabled() const { return bFilterByNetId; }
-	uint32 GetFilterNetId() const { return FilterNetId; }
-	void SetFilterNetId(const uint32 InNetId);
+	uint64 GetFilterNetId() const { return FilterNetId; }
+	void SetFilterNetId(const uint64 InNetId);
 
 	bool IsFilterByEventTypeEnabled() const { return bFilterByEventType; }
 	uint32 GetFilterEventTypeIndex() const { return FilterEventTypeIndex; }
@@ -150,14 +167,18 @@ public:
 	void EnableFilterEventType(const uint32 InEventTypeIndex);
 	void DisableFilterEventType();
 
-	FReply FindFirstEvent();
-	FReply FindPreviousEvent();
-	FReply FindNextEvent();
-	FReply FindLastEvent();
+	TraceServices::ENetProfilerAggregationMode GetSelectedFilterEventAggregationMode() const { return SelectedAggregationMode ? SelectedAggregationMode->Mode : TraceServices::ENetProfilerAggregationMode::Aggregate; }
+
+	void FindFirstEvent();
+	void FindPreviousEvent(EEventNavigationType NavigationType);
+	void FindNextEvent(EEventNavigationType NavigationType);
+	void FindLastEvent();
+	void FindPreviousLevel();
+	void FindNextLevel();
 
 private:
-	FReply FindPreviousPacket_OnClicked();
-	FReply FindNextPacket_OnClicked();
+	void FindPreviousPacket();
+	void FindNextPacket();
 
 	FText GetPacketText() const;
 	void Packet_OnTextCommitted(const FText& InNewText, ETextCommit::Type InTextCommit);
@@ -196,7 +217,7 @@ private:
 
 	uint32 GetPacketSequence(int32 PacketIndex) const;
 
-	void UpdateState();
+	void UpdateState(float FontScale);
 
 	void UpdateHoveredEvent();
 	FNetworkPacketEventRef GetEventAtMousePosition(float X, float Y);
@@ -204,18 +225,24 @@ private:
 	void OnSelectedEventChanged();
 	void SelectHoveredEvent();
 
+	void AdjustForSplitContent();
+
+	TSharedRef<SWidget> CreateAggregationModeComboBox();
+	TSharedRef<SWidget> AggregationMode_OnGenerateWidget(TSharedPtr<FAggregationModeItem> InAggregationMode) const;
+	void AggregationMode_OnSelectionChanged(TSharedPtr<FAggregationModeItem> NewAggregationMode, ESelectInfo::Type SelectInfo);
+	FText AggregationMode_GetSelectedText() const;
+	FText AggregationMode_GetSelectedTooltipText() const;
+
 private:
-	TSharedPtr<SNetworkingProfilerWindow> ProfilerWindow;
+	TWeakPtr<SNetworkingProfilerWindow> ProfilerWindowWeakPtr;
 
 	/** The track's viewport. Encapsulates info about position and scale. */
 	FPacketContentViewport Viewport;
 	bool bIsViewportDirty;
 
-	float NetEventsOffsetY;
-
 	uint32 GameInstanceIndex;
 	uint32 ConnectionIndex;
-	Trace::ENetProfilerConnectionMode ConnectionMode;
+	TraceServices::ENetProfilerConnectionMode ConnectionMode;
 	uint32 PacketIndex;
 	uint32 PacketSequence;
 	int64 PacketBitSize; // total number of bits; [bit]
@@ -225,7 +252,7 @@ private:
 	FText FilterEventName;
 
 	bool bFilterByNetId;
-	uint32 FilterNetId;
+	uint64 FilterNetId;
 
 	bool bHighlightFilteredEvents;
 
@@ -237,6 +264,10 @@ private:
 	//////////////////////////////////////////////////
 
 	TSharedPtr<SScrollBar> HorizontalScrollBar;
+
+	TSharedPtr<SComboBox<TSharedPtr<FAggregationModeItem>>> AggregationModeComboBox;
+	TArray<TSharedPtr<FAggregationModeItem>> AvailableAggregationModes;
+	TSharedPtr<FAggregationModeItem> SelectedAggregationMode;
 
 	//////////////////////////////////////////////////
 	// Panning and Zooming behaviors

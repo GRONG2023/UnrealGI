@@ -12,13 +12,14 @@
 
 #include "AutoReimport/AutoReimportUtilities.h"
 
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "PackageTools.h"
 #include "ObjectTools.h"
 #include "IAssetTools.h"
 #include "AssetToolsModule.h"
 #include "AutoReimport/ReimportFeedbackContext.h"
 #include "AutoReimport/AssetSourceFilenameCache.h"
+#include "Misc/NamePermissionList.h"
 
 #define LOCTEXT_NAMESPACE "ContentDirectoryMonitor"
 
@@ -125,7 +126,7 @@ void FContentDirectoryMonitor::Tick()
 	// Immediately resolve any changes that we should not consider
 	const FDateTime Threshold = FDateTime::UtcNow() - FTimespan::FromSeconds(GetDefault<UEditorLoadingSavingSettings>()->AutoReimportThreshold);
 
-	TArray<DirectoryWatcher::FUpdateCacheTransaction> InsignificantTransactions = Cache.FilterOutstandingChanges([=](const DirectoryWatcher::FUpdateCacheTransaction& Transaction, const FDateTime& TimeOfChange){
+	TArray<DirectoryWatcher::FUpdateCacheTransaction> InsignificantTransactions = Cache.FilterOutstandingChanges([this, Threshold](const DirectoryWatcher::FUpdateCacheTransaction& Transaction, const FDateTime& TimeOfChange){
 		return TimeOfChange <= Threshold && !ShouldConsiderChange(Transaction);
 	});
 
@@ -149,6 +150,14 @@ bool FContentDirectoryMonitor::ShouldConsiderChange(const DirectoryWatcher::FUpd
 	{
 		return false;
 	}
+
+	static const FName AssetToolsName("AssetTools");
+	IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>(AssetToolsName).Get();
+	if (!AssetTools.GetWritableFolderPermissionList()->PassesStartsWithFilter(Transaction.Filename.Get()))
+	{
+		return false;
+	}
+
 	return true;
 }
 
@@ -159,7 +168,7 @@ int32 FContentDirectoryMonitor::GetNumUnprocessedChanges() const
 	int32 Total = 0;
 
 	// Get all the changes that have happend beyond our import threshold
-	Cache.IterateOutstandingChanges([=, &Total](const DirectoryWatcher::FUpdateCacheTransaction& Transaction, const FDateTime& TimeOfChange){
+	Cache.IterateOutstandingChanges([this, &Total, Threshold](const DirectoryWatcher::FUpdateCacheTransaction& Transaction, const FDateTime& TimeOfChange){
 		if (TimeOfChange <= Threshold && ShouldConsiderChange(Transaction))
 		{
 			++Total;
@@ -182,7 +191,7 @@ int32 FContentDirectoryMonitor::StartProcessing()
 	const FDateTime Threshold = FDateTime::UtcNow() - FTimespan::FromSeconds(GetDefault<UEditorLoadingSavingSettings>()->AutoReimportThreshold);
 
 	// Get all the changes that have happend beyond our import threshold
-	auto OutstandingChanges = Cache.FilterOutstandingChanges([=](const DirectoryWatcher::FUpdateCacheTransaction& Transaction, const FDateTime& TimeOfChange){
+	auto OutstandingChanges = Cache.FilterOutstandingChanges([this, Threshold](const DirectoryWatcher::FUpdateCacheTransaction& Transaction, const FDateTime& TimeOfChange){
 		return TimeOfChange <= Threshold && ShouldConsiderChange(Transaction);
 	});
 
@@ -248,7 +257,7 @@ UObject* AttemptImport(UClass* InFactoryType, UPackage* Package, FName InName, b
 	return Asset;
 }
 
-void FContentDirectoryMonitor::ProcessAdditions(const DirectoryWatcher::FTimeLimit& TimeLimit, TArray<UPackage*>& OutPackagesToSave, const TMap<FString, TArray<UFactory*>>& InFactoriesByExtension, FReimportFeedbackContext& Context)
+void FContentDirectoryMonitor::ProcessAdditions(const DirectoryWatcher::FTimeLimit& TimeLimit, TArray<TObjectPtr<UPackage>>& OutPackagesToSave, const TMap<FString, TArray<UFactory*>>& InFactoriesByExtension, FReimportFeedbackContext& Context)
 {
 	bool bCancelled = false;
 	for (int32 Index = 0; Index < AddedFiles.Num(); ++Index)
@@ -409,7 +418,7 @@ void FContentDirectoryMonitor::ProcessAdditions(const DirectoryWatcher::FTimeLim
 	AddedFiles.Empty();
 }
 
-void FContentDirectoryMonitor::ProcessModifications(const DirectoryWatcher::FTimeLimit& TimeLimit, TArray<UPackage*>& OutPackagesToSave, FReimportFeedbackContext& Context)
+void FContentDirectoryMonitor::ProcessModifications(const DirectoryWatcher::FTimeLimit& TimeLimit, TArray<TObjectPtr<UPackage>>& OutPackagesToSave, FReimportFeedbackContext& Context)
 {
 	auto* ReimportManager = FReimportManager::Instance();
 
@@ -439,41 +448,48 @@ void FContentDirectoryMonitor::ProcessModifications(const DirectoryWatcher::FTim
 					const FString PackagePath = UPackageTools::SanitizePackageName(MountedContentPath / FPaths::GetPath(Change.Filename.Get()));
 					const FString FullDestPath = PackagePath / NewAssetName;
 
-					if (ExistingPackage && ExistingPackage->FileName.ToString() == FullDestPath)
+					const FText SrcPathText = FText::FromString(Assets[0].PackageName.ToString());
+					const FText DstPathText = FText::FromString(FullDestPath);
+					FPackagePath DestPackagePath;
+					if (!FPackagePath::TryFromMountedName(FullDestPath, DestPackagePath))
 					{
-						// No need to process this asset - it's already been moved to the right location
-						Cache.CompleteTransaction(MoveTemp(Change));
-						continue;
-					}
-
-					const FText SrcPathText = FText::FromString(Assets[0].PackageName.ToString()),
-						DstPathText = FText::FromString(FullDestPath);
-
-					if (FPackageName::DoesPackageExist(*FullDestPath))
-					{
-						Context.AddMessage(EMessageSeverity::Warning, FText::Format(LOCTEXT("MoveWarning_ExistingAsset", "Can't move {0} to {1} - one already exists."), SrcPathText, DstPathText));
+						Context.AddMessage(EMessageSeverity::Warning, FText::Format(LOCTEXT("MoveWarning_NotInMountedPath", "Can't move {0} to {1} - {1} is not in a mounted path."), SrcPathText, DstPathText));
 					}
 					else
 					{
-						TArray<FAssetRenameData> RenameData;
-						RenameData.Emplace(Asset, PackagePath, NewAssetName);
-
-						Context.AddMessage(EMessageSeverity::Info, FText::Format(LOCTEXT("Success_MovedAsset", "Moving asset {0} to {1}."),	SrcPathText, DstPathText));
-
-						FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get().RenameAssetsWithDialog(RenameData);
-
-						TArray<FString> Filenames;
-						Filenames.Add(FullFilename);
-
-						// Update the reimport file names
-						FReimportManager::Instance()->UpdateReimportPaths(Asset, Filenames);
-						Asset->MarkPackageDirty();
-
-						if (!bAssetWasDirty)
+						if (ExistingPackage && ExistingPackage->GetLoadedPath() == DestPackagePath)
 						{
-							if (UPackage* NewPackage = Asset->GetOutermost())
+							// No need to process this asset - it's already been moved to the right location
+							Cache.CompleteTransaction(MoveTemp(Change));
+							continue;
+						}
+
+						if (FPackageName::DoesPackageExist(DestPackagePath, &DestPackagePath))
+						{
+							Context.AddMessage(EMessageSeverity::Warning, FText::Format(LOCTEXT("MoveWarning_ExistingAsset", "Can't move {0} to {1} - one already exists."), SrcPathText, DstPathText));
+						}
+						else
+						{
+							TArray<FAssetRenameData> RenameData;
+							RenameData.Emplace(Asset, PackagePath, NewAssetName);
+
+							Context.AddMessage(EMessageSeverity::Info, FText::Format(LOCTEXT("Success_MovedAsset", "Moving asset {0} to {1}."), SrcPathText, DstPathText));
+
+							FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get().RenameAssetsWithDialog(RenameData);
+
+							TArray<FString> Filenames;
+							Filenames.Add(FullFilename);
+
+							// Update the reimport file names
+							FReimportManager::Instance()->UpdateReimportPaths(Asset, Filenames);
+							Asset->MarkPackageDirty();
+
+							if (!bAssetWasDirty)
 							{
-								OutPackagesToSave.Add(NewPackage);
+								if (UPackage* NewPackage = Asset->GetOutermost())
+								{
+									OutPackagesToSave.Add(NewPackage);
+								}
 							}
 						}
 					}
@@ -505,7 +521,7 @@ void FContentDirectoryMonitor::ProcessModifications(const DirectoryWatcher::FTim
 	ModifiedFiles.Empty();
 }
 
-void FContentDirectoryMonitor::ReimportAssetWithNewSource(UObject* InAsset, const FString& FullFilename, TArray<UPackage*>& OutPackagesToSave, FReimportFeedbackContext& Context)
+void FContentDirectoryMonitor::ReimportAssetWithNewSource(UObject* InAsset, const FString& FullFilename, TArray<TObjectPtr<UPackage>>& OutPackagesToSave, FReimportFeedbackContext& Context)
 {
 	TArray<FString> Filenames;
 	Filenames.Add(FullFilename);
@@ -514,7 +530,7 @@ void FContentDirectoryMonitor::ReimportAssetWithNewSource(UObject* InAsset, cons
 	ReimportAsset(InAsset, FullFilename, OutPackagesToSave, Context);
 }
 
-void FContentDirectoryMonitor::ReimportAsset(UObject* Asset, const FString& FullFilename, TArray<UPackage*>& OutPackagesToSave, FReimportFeedbackContext& Context)
+void FContentDirectoryMonitor::ReimportAsset(UObject* Asset, const FString& FullFilename, TArray<TObjectPtr<UPackage>>& OutPackagesToSave, FReimportFeedbackContext& Context)
 {
 	const bool bAssetWasDirty = IsAssetDirty(Asset);
 	if (!FReimportManager::Instance()->Reimport(Asset, false /* Ask for new file */, false /* Show notification */))

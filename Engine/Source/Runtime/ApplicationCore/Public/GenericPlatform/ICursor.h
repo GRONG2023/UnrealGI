@@ -14,7 +14,7 @@ typedef struct tagRECT RECT;
  */
 namespace EMouseCursor
 {
-	enum Type
+	enum Type : int
 	{
 		/** Causes no mouse cursor to be visible */
 		None,
@@ -69,6 +69,8 @@ namespace EMouseCursor
 class ICursor
 {
 public:
+	virtual ~ICursor() = default;
+
 	/** Creates a hardware cursor from file. Can return nullptr when not available. */
 	virtual void* CreateCursorFromFile(const FString& InPathToCursorWithoutExtension, FVector2D HotSpot) { return nullptr; }
 
@@ -111,7 +113,4 @@ public:
 	 * Allows overriding the shape of a particular cursor.
 	 */
 	virtual void SetTypeShape(EMouseCursor::Type InCursorType, void* CursorHandle) = 0;
-
-	UE_DEPRECATED(4.16, "Use SetTypeShape instead.")
-	void SetCustomShape(void* CursorHandle) { SetTypeShape(EMouseCursor::Custom, CursorHandle); }
 };

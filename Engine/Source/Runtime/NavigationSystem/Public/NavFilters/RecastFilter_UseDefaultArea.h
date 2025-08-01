@@ -2,12 +2,18 @@
 
 #pragma once
 
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#endif
 #include "NavFilters/NavigationQueryFilter.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "RecastFilter_UseDefaultArea.generated.h"
 
 class ANavigationData;
+class UObject;
+struct FNavigationQueryFilter;
 
 /** Regular navigation area, applied to entire navigation data by default */
 UCLASS(MinimalAPI)

@@ -10,15 +10,12 @@
 
 #if OPENGL_GL4
 
-GLint FOpenGL4::MaxComputeTextureImageUnits = -1;
 GLint FOpenGL4::MaxComputeUniformComponents = -1;
 GLint FOpenGL4::MaxCombinedUAVUnits = 0;
 GLint FOpenGL4::MaxComputeUAVUnits = -1;
 GLint FOpenGL4::MaxPixelUAVUnits = -1;
 
-bool FOpenGL4::bSupportsComputeShaders = true;
 bool FOpenGL4::bSupportsGPUMemoryInfo = false;
-bool FOpenGL4::bSupportsTextureView = true;
 
 void FOpenGL4::ProcessQueryGLInt()
 {
@@ -26,17 +23,19 @@ void FOpenGL4::ProcessQueryGLInt()
 	GET_GL_INT(GL_MAX_FRAGMENT_IMAGE_UNIFORMS, 0, MaxPixelUAVUnits);
 	GET_GL_INT(GL_TEXTURE_BUFFER_OFFSET_ALIGNMENT, 0, TextureBufferAlignment);
 
-	if (bSupportsComputeShaders)
-	{
-		GET_GL_INT(GL_MAX_COMPUTE_TEXTURE_IMAGE_UNITS, 0, MaxComputeTextureImageUnits);
-		GET_GL_INT(GL_MAX_COMPUTE_UNIFORM_COMPONENTS, 0, MaxComputeUniformComponents);
-		GET_GL_INT(GL_MAX_COMPUTE_IMAGE_UNIFORMS, 0, MaxComputeUAVUnits);
-	}
+	GET_GL_INT(GL_MAX_COMPUTE_UNIFORM_COMPONENTS, 0, MaxComputeUniformComponents);
+	GET_GL_INT(GL_MAX_COMPUTE_IMAGE_UNIFORMS, 0, MaxComputeUAVUnits);
+	
+	GLint MaxCombinedSSBOUnits = 0;
+	GET_GL_INT(GL_MAX_COMBINED_SHADER_STORAGE_BLOCKS, 0, MaxCombinedSSBOUnits);
+	// UAVs slots in UE are shared between Images and SSBO, so this should be max(GL_MAX_COMBINED_IMAGE_UNIFORMS, GL_MAX_COMBINED_SHADER_STORAGE_BLOCKS)
+	MaxCombinedUAVUnits = FMath::Max(MaxCombinedUAVUnits, MaxCombinedSSBOUnits);
 	
 	// clamp UAV units to a sensible limit
-	MaxCombinedUAVUnits = FMath::Min(MaxCombinedUAVUnits, 8);
-	MaxComputeUAVUnits = FMath::Min(MaxComputeUAVUnits, MaxCombinedUAVUnits);
-	MaxPixelUAVUnits = FMath::Min(MaxPixelUAVUnits, MaxCombinedUAVUnits);
+	MaxCombinedUAVUnits = FMath::Min(MaxCombinedUAVUnits, 16);
+	MaxComputeUAVUnits = FMath::Min(MaxComputeUAVUnits, 16);
+	// this is split between VS and PS, 4 to each stage
+	MaxPixelUAVUnits = FMath::Min(MaxPixelUAVUnits, 4);
 }
 
 void FOpenGL4::ProcessExtensions( const FString& ExtensionsString )
@@ -55,8 +54,6 @@ void FOpenGL4::ProcessExtensions( const FString& ExtensionsString )
 
 
 	bSupportsGPUMemoryInfo = ExtensionsString.Contains(TEXT("GL_NVX_gpu_memory_info"));
-	bSupportsComputeShaders = ExtensionsString.Contains(TEXT("GL_ARB_compute_shader")) || (MajorVersion ==4 && MinorVersion >= 3) || (MajorVersion > 4);
-	bSupportsTextureView = ExtensionsString.Contains(TEXT("GL_ARB_texture_view")) || (MajorVersion == 4 && MinorVersion >= 3) || (MajorVersion > 4);
 
 	//Process Queries after extensions to avoid queries that use functionality that might not be present
 	ProcessQueryGLInt();

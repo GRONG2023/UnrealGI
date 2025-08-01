@@ -11,6 +11,7 @@
 #include "DetailWidgetRow.h"
 #include "DetailCategoryBuilder.h"
 #include "DetailLayoutBuilder.h"
+#include "ILandscapeSplineInterface.h"
 
 #define LOCTEXT_NAMESPACE "LandscapeSplineDetails"
 
@@ -49,19 +50,23 @@ void FLandscapeSplineDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuild
 			.Text(LOCTEXT("SelectAll", "Select all connected:"))
 		]
 		+ SHorizontalBox::Slot()
+		.Padding(0, 2, 0, 2)
 		.FillWidth(1)
 		[
 			SNew(SButton)
 			.Text(LOCTEXT("ControlPoints", "Control Points"))
 			.HAlign(HAlign_Center)
+			.VAlign(VAlign_Center)
 			.OnClicked(this, &FLandscapeSplineDetails::OnSelectConnectedControlPointsButtonClicked)
 		]
 		+ SHorizontalBox::Slot()
+		.Padding(0, 2, 0, 2)
 		.FillWidth(1)
 		[
 			SNew(SButton)
 			.Text(LOCTEXT("Segments", "Segments"))
 			.HAlign(HAlign_Center)
+			.VAlign(VAlign_Center)
 			.OnClicked(this, &FLandscapeSplineDetails::OnSelectConnectedSegmentsButtonClicked)
 		]
 	];
@@ -70,7 +75,6 @@ void FLandscapeSplineDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuild
 	[
 		SNew(SHorizontalBox)
 		+ SHorizontalBox::Slot()
-		.Padding(0, 0, 2, 0)
 		.VAlign(VAlign_Center)
 		.FillWidth(1)
 		[
@@ -85,7 +89,6 @@ void FLandscapeSplineDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuild
 	[
 		SNew(SHorizontalBox)
 		+ SHorizontalBox::Slot()
-		.Padding(0, 0, 2, 0)
 		.VAlign(VAlign_Center)
 		.FillWidth(1)
 		[
@@ -138,7 +141,7 @@ bool FLandscapeSplineDetails::IsFlipSegmentButtonEnabled() const
 
 FText FLandscapeSplineDetails::OnGetSplineOwningLandscapeText() const
 {
-	TSet<ALandscapeProxy*> SplineOwners;
+	TSet<AActor*> SplineOwners;
 	FEdModeLandscape* LandscapeEdMode = GetEditorMode();
 	if (LandscapeEdMode && LandscapeEdMode->CurrentToolTarget.LandscapeInfo.IsValid())
 	{
@@ -146,7 +149,7 @@ FText FLandscapeSplineDetails::OnGetSplineOwningLandscapeText() const
 	}
 
 	FString SplineOwnersStr;
-	for (ALandscapeProxy* Owner : SplineOwners)
+	for (AActor* Owner : SplineOwners)
 	{
 		if (Owner)
 		{
@@ -154,7 +157,7 @@ FText FLandscapeSplineDetails::OnGetSplineOwningLandscapeText() const
 			{
 				SplineOwnersStr += ", ";
 			}
-			
+
 			SplineOwnersStr += Owner->GetActorLabel();
 		}
 	}
@@ -198,7 +201,12 @@ FReply FLandscapeSplineDetails::OnMoveToCurrentLevelButtonClicked()
 bool FLandscapeSplineDetails::IsMoveToCurrentLevelButtonEnabled() const
 {
 	FEdModeLandscape* LandscapeEdMode = GetEditorMode();
-	return (LandscapeEdMode && LandscapeEdMode->CurrentToolTarget.LandscapeInfo.IsValid() && LandscapeEdMode->CurrentToolTarget.LandscapeInfo->GetCurrentLevelLandscapeProxy(true));
+	if (LandscapeEdMode && LandscapeEdMode->CurrentToolTarget.LandscapeInfo.IsValid() && LandscapeEdMode->CurrentToolTarget.LandscapeInfo->GetCurrentLevelLandscapeProxy(true))
+	{
+		return LandscapeEdMode->CanMoveSplineToCurrentLevel();
+	}
+
+	return false;
 }
 
 FReply FLandscapeSplineDetails::OnUpdateSplineMeshLevelsButtonClicked()

@@ -2,13 +2,15 @@
 
 #include "DeviceProfiles/DeviceProfile.h"
 #include "Misc/Paths.h"
+#include "Scalability.h"
 #include "UObject/Package.h"
 #include "UObject/UnrealType.h"
-#include "UObject/UObjectHash.h"
 #include "UObject/UObjectIterator.h"
 #include "HAL/IConsoleManager.h"
 
 #include "DeviceProfiles/DeviceProfileFragment.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(DeviceProfile)
 
 DEFINE_LOG_CATEGORY_STATIC(LogDeviceProfile, Log, All);
 
@@ -23,28 +25,40 @@ UDeviceProfile::UDeviceProfile(const FObjectInitializer& ObjectInitializer)
 {
 	BaseProfileName = TEXT("");
 	DeviceType = TEXT("");
+	bIsVisibleForAssets = false;
 
 	bVisible = true;
 
 	FString DeviceProfileFileName = FPaths::EngineConfigDir() + TEXT("Deviceprofiles.ini");
-//	LoadConfig(GetClass(), *DeviceProfileFileName, UE4::LCPF_ReadParentSections);
+//	LoadConfig(GetClass(), *DeviceProfileFileName, UE::LCPF_ReadParentSections);
 }
 
+const FSelectedFragmentProperties* UDeviceProfile::GetFragmentByTag(FName& FragmentTag) const
+{
+	for (const FSelectedFragmentProperties& SelectedFragment : SelectedFragments)
+	{
+		if (SelectedFragment.Tag == FragmentTag)
+		{
+			return &SelectedFragment;
+		}
+	}
+	return nullptr;
+}
 
 void UDeviceProfile::GatherParentCVarInformationRecursively(OUT TMap<FString, FString>& CVarInformation) const
 {
 	// Recursively build the parent tree
-	if (BaseProfileName != TEXT(""))
+	if (!BaseProfileName.IsEmpty())
 	{
-		UDeviceProfile* ParentProfile = FindObject<UDeviceProfile>(GetTransientPackage(), *BaseProfileName);
-		check(ParentProfile != NULL);
+		UDeviceProfile* ParentProfile = GetParentProfile(false);
+		check(ParentProfile != nullptr);
 
 		for (auto& CurrentCVar : ParentProfile->CVars)
 		{
 			FString CVarKey, CVarValue;
 			if (CurrentCVar.Split(TEXT("="), &CVarKey, &CVarValue))
 			{
-				if (CVarInformation.Find(CVarKey) == NULL)
+				if (CVarInformation.Find(CVarKey) == nullptr)
 				{
 					CVarInformation.Add(CVarKey, *CurrentCVar);
 				}
@@ -60,11 +74,29 @@ UTextureLODSettings* UDeviceProfile::GetTextureLODSettings() const
 	return (UTextureLODSettings*)this;
 }
 
-
-void UDeviceProfile::PostInitProperties()
+UDeviceProfile* UDeviceProfile::GetParentProfile(bool bIncludeDefaultObject) const
 {
-	Super::PostInitProperties();
-	ValidateTextureLODGroups();
+	UDeviceProfile* ParentProfile = nullptr;
+
+	if (HasAnyFlags(RF_ClassDefaultObject) == false)
+	{
+		if (Parent != nullptr)
+		{
+			return Parent;
+		}
+		if (!BaseProfileName.IsEmpty())
+		{
+			ParentProfile = FindObject<UDeviceProfile>(GetTransientPackage(), *BaseProfileName);
+		}
+		// don't find a parent for GlobalDefaults as it's the implied parent for everything (it would
+		// return itself which is bad)
+		if (!ParentProfile && bIncludeDefaultObject && GetName() != TEXT("GlobalDefaults"))
+		{
+			ParentProfile = FindObject<UDeviceProfile>(GetTransientPackage(), TEXT("GlobalDefaults"));
+		}
+	}
+
+	return ParentProfile;
 }
 
 void UDeviceProfile::BeginDestroy()
@@ -90,18 +122,7 @@ void UDeviceProfile::ValidateTextureLODGroups()
 	);
 
 	// Make sure every Texture Group has an entry, any that aren't specified for this profile should use it's parents values, or the defaults.
-	UDeviceProfile* ParentProfile = nullptr;
-	if (HasAnyFlags(RF_ClassDefaultObject) == false)
-	{
-		if (BaseProfileName.IsEmpty() == false)
-		{
-			ParentProfile = FindObject<UDeviceProfile>(GetTransientPackage(), *BaseProfileName);
-		}
-		if (ParentProfile == nullptr)
-		{
-			ParentProfile = CastChecked<UDeviceProfile>(UDeviceProfile::StaticClass()->GetDefaultObject());
-		}
-	}
+	UDeviceProfile* ParentProfile = GetParentProfile(true);
 
 	for (int32 GroupId = 0; GroupId < (int32)TEXTUREGROUP_MAX; ++GroupId)
 	{
@@ -153,7 +174,7 @@ void UDeviceProfile::PostEditChangeProperty( FPropertyChangedEvent& PropertyChan
 			{
 				UDeviceProfile* ParentProfile = *DeviceProfileIt;
 
-				if( !ParentProfile->IsPendingKill() )
+				if( IsValid(ParentProfile) )
 				{
 					int32 ProfileGeneration = 1;
 					do
@@ -165,7 +186,7 @@ void UDeviceProfile::PostEditChangeProperty( FPropertyChangedEvent& PropertyChan
 							break;
 						}
 
-						ParentProfile = FindObject<UDeviceProfile>( GetTransientPackage(), *ParentProfile->BaseProfileName );
+						ParentProfile = ParentProfile->GetParentProfile(false);
 						++ProfileGeneration;
 					} while ( ParentProfile );
 				}
@@ -181,11 +202,7 @@ void UDeviceProfile::PostEditChangeProperty( FPropertyChangedEvent& PropertyChan
 					if( CurrentGeneration == DeviceProfileIt.Value() )
 					{
 						UDeviceProfile* CurrentGenerationProfile = DeviceProfileIt.Key();
-						UDeviceProfile* ParentProfile = FindObject<UDeviceProfile>( GetTransientPackage(), *CurrentGenerationProfile->BaseProfileName );
-						if( ParentProfile == NULL )
-						{
-							ParentProfile = ClassCDO;
-						}
+						UDeviceProfile* ParentProfile = CurrentGenerationProfile->GetParentProfile(true);
 
 						for (TFieldIterator<FProperty> CurrentObjPropertyIter( GetClass() ); CurrentObjPropertyIter; ++CurrentObjPropertyIter)
 						{
@@ -352,15 +369,85 @@ const TMap<FString, FString>& UDeviceProfile::GetConsolidatedCVars() const
 		BuildCVarMap(this, ConsolidatedCVars);
 
 		// Iteratively build the parent tree
-		const UDeviceProfile* ParentProfile = Cast<UDeviceProfile>(Parent);
+		const UDeviceProfile* ParentProfile = GetParentProfile(false);
 		while (ParentProfile)
 		{
 			BuildCVarMap(ParentProfile, ConsolidatedCVars);
-			ParentProfile = Cast<UDeviceProfile>(ParentProfile->Parent);
+			ParentProfile = ParentProfile->GetParentProfile(false);
 		}
 	}
 
 	return ConsolidatedCVars;
+}
+
+#endif
+
+
+#if ALLOW_OTHER_PLATFORM_CONFIG
+
+void UDeviceProfile::ExpandDeviceProfileCVars()
+{
+	// VisitPlatformCVarsForEmulation can't access Scalability.h, so make sure it doesn't change away from 3, or if it does, to fix up the hardcoded number
+	static_assert(Scalability::DefaultQualityLevel == 3, "If this trips, update this and IConsoleManager::VisitPlatformCVarsForEmulation with the new value!");
+
+	IConsoleManager::VisitPlatformCVarsForEmulation(*DeviceType, GetName(),
+		[this](const FString& CVarName, const FString& CVarValue, EConsoleVariableFlags SetByAndPreview)
+		{
+			// don't add scalabiliy groups to the expanded, but do add them to the preview set (this is to maintain same 
+			// functionality for GetAllExpandedCVars(), but allow to see what Preview will set the SGs to in the SetByPreview mode)
+			if (!CVarName.StartsWith(TEXT("sg.")))
+			{
+				AllExpandedCVars.Add(CVarName, CVarValue);
+			}
+
+			if (SetByAndPreview & EConsoleVariableFlags::ECVF_Preview)
+			{
+				AllPreviewCVars.Add(CVarName, CVarValue);
+			}
+		});
+}
+
+const TMap<FString, FString>& UDeviceProfile::GetAllExpandedCVars()
+{
+	// expand on first use
+	if (AllExpandedCVars.Num() == 0)
+	{
+		ExpandDeviceProfileCVars();
+	}
+
+	return AllExpandedCVars;
+}
+
+const TMap<FString, FString>& UDeviceProfile::GetAllPreviewCVars()
+{
+	// expand on first use
+	if (AllPreviewCVars.Num() == 0)
+	{
+		ExpandDeviceProfileCVars();
+	}
+
+	return AllPreviewCVars;
+}
+
+void UDeviceProfile::ClearAllExpandedCVars()
+{
+	AllExpandedCVars.Empty();
+	AllPreviewCVars.Empty();
+}
+
+void UDeviceProfile::SetPreviewMemorySizeBucket(EPlatformMemorySizeBucket PreviewMemorySizeBucketIn)
+{ 
+	if (PreviewMemorySizeBucket != PreviewMemorySizeBucketIn)
+	{
+		PreviewMemorySizeBucket = PreviewMemorySizeBucketIn;
+		// If this changes then any cached cvars are likely to be invalid too.
+		ClearAllExpandedCVars();
+	}
+}
+
+EPlatformMemorySizeBucket UDeviceProfile::GetPreviewMemorySizeBucket() const
+{ 
+	return PreviewMemorySizeBucket;
 }
 
 #endif

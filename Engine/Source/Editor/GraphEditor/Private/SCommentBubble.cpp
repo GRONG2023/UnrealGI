@@ -1,14 +1,35 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SCommentBubble.h"
-#include "Widgets/SOverlay.h"
-#include "Engine/GameViewportClient.h"
-#include "Widgets/SBoxPanel.h"
-#include "Widgets/Images/SImage.h"
-#include "Widgets/Input/SMultiLineEditableTextBox.h"
-#include "Widgets/Input/SCheckBox.h"
+
+#include "EdGraph/EdGraphNode.h"
+#include "GenericPlatform/GenericApplication.h"
+#include "GenericPlatform/ICursor.h"
+#include "Input/Events.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Children.h"
+#include "Layout/Geometry.h"
+#include "Layout/Margin.h"
+#include "Layout/SlateRect.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Optional.h"
+#include "SGraphNode.h"
 #include "SGraphPanel.h"
 #include "ScopedTransaction.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/SlateBrush.h"
+#include "Styling/StyleColors.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Input/SCheckBox.h"
+#include "Widgets/Input/SMultiLineEditableTextBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SNullWidget.h"
+#include "Widgets/SOverlay.h"
+
+class SWidget;
 
 namespace SCommentBubbleDefs
 {
@@ -29,12 +50,6 @@ namespace SCommentBubbleDefs
 
 	/** Luminance CoEficients */
 	static const FLinearColor LuminanceCoEff( 0.2126f, 0.7152f, 0.0722f, 0.f );
-
-	/** Light foreground color */
-	static const FLinearColor LightForegroundClr( 0.f, 0.f, 0.f, 0.65f );
-
-	/** Dark foreground color */
-	static const FLinearColor DarkForegroundClr( 1.f, 1.f, 1.f, 0.65f );
 
 	/** Clear text box background color */
 	static const FLinearColor TextClearBackground( 0.f, 0.f, 0.f, 0.f );
@@ -64,7 +79,8 @@ void SCommentBubble::Construct( const FArguments& InArgs )
 	ToggleButtonCheck		= InArgs._ToggleButtonCheck.IsBound() ?	InArgs._ToggleButtonCheck : 
 																	TAttribute<ECheckBoxState>( this, &SCommentBubble::GetToggleButtonCheck );
 	// Ensue this value is set to something sensible
-	ForegroundColor = SCommentBubbleDefs::LightForegroundClr;
+	CalculatedForegroundColor = FStyleColors::Foreground;
+	BubbleLuminance = 0.0f;
 
 	// Cache the comment
 	CachedComment = CommentAttribute.Get();
@@ -77,7 +93,7 @@ void SCommentBubble::Construct( const FArguments& InArgs )
 FCursorReply SCommentBubble::OnCursorQuery( const FGeometry& MyGeometry, const FPointerEvent& CursorEvent ) const
 {
 	const FVector2D Size( GetDesiredSize().X, GetDesiredSize().Y - SCommentBubbleDefs::BubbleArrowHeight );
-	const FSlateRect TestRect( MyGeometry.AbsolutePosition, MyGeometry.AbsolutePosition + Size );
+	const FSlateRect TestRect( FVector2D(MyGeometry.AbsolutePosition), FVector2D(MyGeometry.AbsolutePosition) + Size );
 
 	if( TestRect.ContainsPoint( CursorEvent.GetScreenSpacePosition() ))
 	{
@@ -98,8 +114,8 @@ void SCommentBubble::Tick( const FGeometry& AllottedGeometry, const double InCur
 	if( bTitleBarBubbleVisible || IsBubbleVisible() )
 	{
 		const FLinearColor BubbleColor = GetBubbleColor().GetSpecifiedColor() * SCommentBubbleDefs::LuminanceCoEff;
-		const float BubbleLuminance = BubbleColor.R + BubbleColor.G + BubbleColor.B;
-		ForegroundColor = BubbleLuminance < 0.5f ? SCommentBubbleDefs::DarkForegroundClr : SCommentBubbleDefs::LightForegroundClr;
+		BubbleLuminance = BubbleColor.R + BubbleColor.G + BubbleColor.B;
+		CalculatedForegroundColor = BubbleLuminance < 0.5f ? FStyleColors::Foreground : FStyleColors::Background;
 	}
 
 	TickVisibility(InCurrentTime, InDeltaTime);
@@ -161,10 +177,10 @@ void SCommentBubble::UpdateBubble()
 {
 	if( GraphNode->bCommentBubbleVisible )
 	{
-		const FSlateBrush* CommentCalloutArrowBrush = FEditorStyle::GetBrush(TEXT("Graph.Node.CommentArrow"));
-		const FMargin BubblePadding = FEditorStyle::GetMargin( TEXT("Graph.Node.Comment.BubbleWidgetMargin"));
-		const FMargin PinIconPadding = FEditorStyle::GetMargin( TEXT("Graph.Node.Comment.PinIconPadding"));
-		const FMargin BubbleOffset = FEditorStyle::GetMargin( TEXT("Graph.Node.Comment.BubbleOffset"));
+		const FSlateBrush* CommentCalloutArrowBrush = FAppStyle::GetBrush(TEXT("Graph.Node.CommentArrow"));
+		const FMargin BubblePadding = FAppStyle::GetMargin( TEXT("Graph.Node.Comment.BubbleWidgetMargin"));
+		const FMargin PinIconPadding = FAppStyle::GetMargin( TEXT("Graph.Node.Comment.PinIconPadding"));
+		const FMargin BubbleOffset = FAppStyle::GetMargin( TEXT("Graph.Node.Comment.BubbleOffset"));
 		// Conditionally create bubble controls
 		TSharedPtr<SWidget> BubbleControls = SNullWidget::NullWidget;
 
@@ -185,7 +201,7 @@ void SCommentBubble::UpdateBubble()
 					.Padding( PinIconPadding )
 					[
 						SNew( SCheckBox )
-						.Style( &FEditorStyle::Get().GetWidgetStyle<FCheckBoxStyle>( "CommentBubblePin" ))
+						.Style( &FAppStyle::Get().GetWidgetStyle<FCheckBoxStyle>( "CommentBubblePin" ))
 						.IsChecked( this, &SCommentBubble::GetPinnedButtonCheck )
 						.OnCheckStateChanged( this, &SCommentBubble::OnPinStateToggle )
 						.ToolTipText( this, &SCommentBubble::GetScaleButtonTooltip )
@@ -199,12 +215,12 @@ void SCommentBubble::UpdateBubble()
 				.VAlign( VAlign_Top )
 				[
 					SNew( SCheckBox )
-					.Style( &FEditorStyle::Get().GetWidgetStyle< FCheckBoxStyle >( "CommentBubbleButton" ))
+					.Style( &FAppStyle::Get().GetWidgetStyle< FCheckBoxStyle >( "CommentBubbleButton" ))
 					.IsChecked( ToggleButtonCheck )
 					.OnCheckStateChanged( this, &SCommentBubble::OnCommentBubbleToggle )
 					.ToolTipText( NSLOCTEXT( "CommentBubble", "ToggleCommentTooltip", "Toggle Comment Bubble" ))
 					.Cursor( EMouseCursor::Default )
-					.ForegroundColor( FLinearColor::White )
+					.ForegroundColor(FStyleColors::Foreground)
 				];
 			}
 			else
@@ -217,12 +233,12 @@ void SCommentBubble::UpdateBubble()
 				.VAlign( VAlign_Top )
 				[
 					SNew( SCheckBox )
-					.Style( &FEditorStyle::Get().GetWidgetStyle< FCheckBoxStyle >( "CommentBubbleButton" ))
+					.Style( &FAppStyle::Get().GetWidgetStyle< FCheckBoxStyle >( "CommentBubbleButton" ))
 					.IsChecked( ToggleButtonCheck )
 					.OnCheckStateChanged( this, &SCommentBubble::OnCommentBubbleToggle )
 					.ToolTipText( NSLOCTEXT( "CommentBubble", "ToggleCommentTooltip", "Toggle Comment Bubble" ))
 					.Cursor( EMouseCursor::Default )
-					.ForegroundColor( FLinearColor::White )
+					.ForegroundColor( FStyleColors::Foreground )
 				];
 			}
 		}
@@ -242,7 +258,7 @@ void SCommentBubble::UpdateBubble()
 					+SOverlay::Slot()
 					[
 						SNew(SImage)
-						.Image( FEditorStyle::GetBrush( TEXT("Graph.Node.CommentBubble")) )
+						.Image( FAppStyle::GetBrush( TEXT("Graph.Node.CommentBubble")) )
 						.ColorAndOpacity( this, &SCommentBubble::GetBubbleColor )
 					]
 					+SOverlay::Slot()
@@ -256,17 +272,17 @@ void SCommentBubble::UpdateBubble()
 						[
 							SAssignNew(TextBlock, SMultiLineEditableTextBox)
 							.Text(MakeAttributeLambda([this] { return CachedCommentText; }))
+							.Style(FAppStyle::Get(), "Graph.CommentBubble.EditableText")
 							.HintText( NSLOCTEXT( "CommentBubble", "EditCommentHint", "Click to edit" ))
-							.IsReadOnly( this, &SCommentBubble::IsReadOnly )
-							.Font( FEditorStyle::GetFontStyle( TEXT("Graph.Node.CommentFont")))
+							.IsReadOnly(this, &SCommentBubble::IsReadOnly)
 							.SelectAllTextWhenFocused( true )
 							.RevertTextOnEscape( true )
 							.ClearKeyboardFocusOnCommit( true )
-							.ModiferKeyForNewLine( EModifierKey::Shift )
-							.ForegroundColor( this, &SCommentBubble::GetTextForegroundColor )
-							.ReadOnlyForegroundColor( this, &SCommentBubble::GetTextForegroundColor )
-							.BackgroundColor( this, &SCommentBubble::GetTextBackgroundColor )
-							.OnTextCommitted( this, &SCommentBubble::OnCommentTextCommitted )
+							.ModiferKeyForNewLine(EModifierKey::Shift)
+							.OnTextCommitted(this, &SCommentBubble::OnCommentTextCommitted)
+							.ForegroundColor(this, &SCommentBubble::GetTextForegroundColor)
+							.ReadOnlyForegroundColor(this, &SCommentBubble::GetReadOnlyTextForegroundColor)
+							.BackgroundColor(this, &SCommentBubble::GetTextBackgroundColor)
 						]
 						+SHorizontalBox::Slot()
 						.AutoWidth()
@@ -299,7 +315,7 @@ void SCommentBubble::UpdateBubble()
 
 		if( bEnableTitleBarBubble )
 		{
-			const FMargin BubbleOffset = FEditorStyle::GetMargin( TEXT("Graph.Node.Comment.BubbleOffset"));
+			const FMargin BubbleOffset = FAppStyle::GetMargin( TEXT("Graph.Node.Comment.BubbleOffset"));
 			// Create Title bar bubble toggle widget
 			SAssignNew( TitleBarBubble, SHorizontalBox )
 			.Visibility( this, &SCommentBubble::GetToggleButtonVisibility )
@@ -310,7 +326,7 @@ void SCommentBubble::UpdateBubble()
 			.Padding( BubbleOffset )
 			[
 				SNew( SCheckBox )
-				.Style( &FEditorStyle::Get().GetWidgetStyle< FCheckBoxStyle >( "CommentTitleButton" ))
+				.Style( &FAppStyle::Get().GetWidgetStyle< FCheckBoxStyle >( "CommentTitleButton" ))
 				.IsChecked( ToggleButtonCheck )
 				.OnCheckStateChanged( this, &SCommentBubble::OnCommentBubbleToggle )
 				.ToolTipText( NSLOCTEXT( "CommentBubble", "ToggleCommentTooltip", "Toggle Comment Bubble" ))
@@ -402,17 +418,6 @@ FSlateColor SCommentBubble::GetBubbleColor() const
 	}
 	return ReturnColor;
 }
-
-FSlateColor SCommentBubble::GetTextBackgroundColor() const
-{
-	return TextBlock->HasKeyboardFocus() ? FLinearColor::White : SCommentBubbleDefs::TextClearBackground;
-}
-
-FSlateColor SCommentBubble::GetTextForegroundColor() const
-{
-	return TextBlock->HasKeyboardFocus() ? FLinearColor::Black : ForegroundColor;
-}
-
 void SCommentBubble::OnCommentTextCommitted( const FText& NewText, ETextCommit::Type CommitInfo )
 {
 	if (CommitInfo == ETextCommit::OnEnter || CommitInfo == ETextCommit::OnUserMovedFocus)
@@ -421,6 +426,28 @@ void SCommentBubble::OnCommentTextCommitted( const FText& NewText, ETextCommit::
 		CachedCommentText = NewText;
 		OnTextCommittedDelegate.ExecuteIfBound(CachedCommentText, CommitInfo);
 	}
+}
+
+FSlateColor SCommentBubble::GetTextBackgroundColor() const
+{
+	return TextBlock->HasKeyboardFocus() ? FSlateColor::UseStyle() : SCommentBubbleDefs::TextClearBackground;
+}
+
+FSlateColor SCommentBubble::GetTextForegroundColor() const
+{
+	if (TextBlock->HasKeyboardFocus())
+	{
+		return BubbleLuminance < 0.5f ? FStyleColors::Background : FStyleColors::Foreground;
+	}
+	else
+	{
+		return BubbleLuminance < 0.5f ? FStyleColors::Foreground : FStyleColors::Background;
+	}
+}
+
+FSlateColor SCommentBubble::GetReadOnlyTextForegroundColor() const
+{
+	return TextBlock->HasKeyboardFocus() ? FStyleColors::Foreground : FSlateColor::UseStyle();
 }
 
 EVisibility SCommentBubble::GetToggleButtonVisibility() const

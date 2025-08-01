@@ -1,6 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ProfilerManager.h"
+
+#if STATS
+
 #include "Modules/ModuleManager.h"
 #include "IProfilerClientModule.h"
 #include "Stats/StatsFile.h"
@@ -97,7 +100,7 @@ void FProfilerManager::PostConstructor()
 {
 	// Register tick functions.
 	OnTick = FTickerDelegate::CreateSP( this, &FProfilerManager::Tick );
-	OnTickHandle = FTicker::GetCoreTicker().AddTicker( OnTick, 1.0f );
+	OnTickHandle = FTSTicker::GetCoreTicker().AddTicker( OnTick, 1.0f );
 
 	// Create profiler client.
 	ProfilerClient = FModuleManager::GetModuleChecked<IProfilerClientModule>("ProfilerClient").CreateProfilerClient();
@@ -139,7 +142,7 @@ FProfilerManager::~FProfilerManager()
 	FProfilerCommands::Unregister();
 
 	// Unregister tick function.
-	FTicker::GetCoreTicker().RemoveTicker( OnTickHandle );
+	FTSTicker::GetCoreTicker().RemoveTicker( OnTickHandle );
 
 	// Remove ourselves from the session manager.
 	if (SessionManager.IsValid())
@@ -299,8 +302,8 @@ bool FProfilerManager::Tick( float DeltaTime )
 		const double MBInv = 1.0 / 1024.0 / 1024.0;
 		const SIZE_T DiffPhys = FPlatformMemory::GetStats().UsedPhysical - StartUsedPhysical;
 
-		const double SessionMemory = MBInv*ProfilerSession->GetMemoryUsage();
-		const double PhysMemory = MBInv*DiffPhys;
+		const double SessionMemory = MBInv * (double)ProfilerSession->GetMemoryUsage();
+		const double PhysMemory = MBInv * (double)DiffPhys;
 
 		UE_LOG( LogStats, VeryVerbose, TEXT( "ProfilerSession: %6.2f MB (%6.2f MB) # (%6.2f MB) / %7u -> %4u" ), 
 			SessionMemory,
@@ -438,7 +441,7 @@ void FProfilerManager::ProfilerClient_OnProfilerFileTransfer( const FString& Fil
 {
 	// Display and update the notification a file that is being sent.
 
-	const float Progress = (double)FileProgress/(double)FileSize;
+	const float Progress = static_cast<float>((double)FileProgress/(double)FileSize);
 
 	ELoadingProgressStates ProgressState = ELoadingProgressStates::InvalidOrMax;
 
@@ -690,3 +693,5 @@ void FProfilerManager::SetViewMode( EProfilerViewMode NewViewMode )
 }
 
 #undef LOCTEXT_NAMESPACE
+
+#endif // STATS

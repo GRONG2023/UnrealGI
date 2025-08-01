@@ -16,7 +16,7 @@ class FDatasmithFacadeMeshElement;
 class FDatasmithFacadeMetaData;
 class FDatasmithFacadeTexture;
 class FDatasmithFacadeLevelVariantSets;
-
+class FDatasmithFacadeLevelSequence;
 
 class DATASMITHFACADE_API FDatasmithFacadeScene
 {
@@ -55,6 +55,14 @@ public:
 		EActorRemovalRule RemovalRule = EActorRemovalRule::RemoveChildren
 	);
 
+	void RemoveActorAt(
+		int32 ActorIndex,
+		EActorRemovalRule RemovalRule = EActorRemovalRule::RemoveChildren
+	)
+	{
+		SceneRef->RemoveActorAt(ActorIndex, static_cast<EDatasmithActorRemovalRule>(RemovalRule));
+	}
+
 	void AddMaterial(
 		FDatasmithFacadeBaseMaterial* InMaterialPtr
 	);
@@ -82,6 +90,13 @@ public:
 	void RemoveMaterial(
 		FDatasmithFacadeBaseMaterial* InMaterialPtr
 	);
+
+	void RemoveMaterialAt(
+		int32 MaterialIndex
+	)
+	{
+		SceneRef->RemoveMaterialAt(MaterialIndex);
+	}
 
 	FDatasmithFacadeMeshElement* ExportDatasmithMesh(
 		FDatasmithFacadeMesh* Mesh,
@@ -111,6 +126,13 @@ public:
 		FDatasmithFacadeMeshElement* MeshElement
 	);
 
+	void RemoveMeshAt(
+		int32 MeshIndex
+	)
+	{
+		SceneRef->RemoveMeshAt(MeshIndex);
+	}
+
 	void AddTexture(
 		FDatasmithFacadeTexture* InTexturePtr
 	);
@@ -129,6 +151,13 @@ public:
 		FDatasmithFacadeTexture* InTexturePtr
 	);
 
+	void RemoveTextureAt(
+		int32 TextureIndex
+	)
+	{
+		SceneRef->RemoveTextureAt(TextureIndex);
+	}
+
 	void AddLevelVariantSets(
 		FDatasmithFacadeLevelVariantSets* InLevelVariantSetsPtr
 	);
@@ -142,6 +171,34 @@ public:
 	void RemoveLevelVariantSets(
 		FDatasmithFacadeLevelVariantSets* InLevelVariantSetsPtr
 	);
+
+	void RemoveLevelVariantSetsAt(
+		int32 LevelVariantSetsIndex
+	)
+	{
+		SceneRef->RemoveLevelVariantSetsAt(LevelVariantSetsIndex);
+	}
+
+	void AddLevelSequence(
+		FDatasmithFacadeLevelSequence* InLevelSequence
+	);
+
+	int32 GetLevelSequencesCount() const;
+
+	FDatasmithFacadeLevelSequence* GetNewLevelSequence(
+		int32 LevelSequenceIndex
+	);
+
+	void RemoveLevelSequence(
+		FDatasmithFacadeLevelSequence* InLevelSequence
+	);
+
+	void RemoveLevelSequenceAt(
+		int32 LevelSequenceIndex
+	)
+	{
+		SceneRef->RemoveLevelSequenceAt(LevelSequenceIndex);
+	}
 
 	void AddMetaData(
 		FDatasmithFacadeMetaData* InMetaDataPtr
@@ -168,11 +225,18 @@ public:
 	void RemoveMetaData(
 		FDatasmithFacadeMetaData* InMetaDataPtr
 	);
+
+	void RemoveMetaDataAt(
+		int32 MetaDataIndex
+	)
+	{
+		SceneRef->RemoveMetaDataAt(MetaDataIndex);
+	}
 	
 	/** Set the Datasmith scene name */
 	void SetName(const TCHAR* InName);
 
-	/** Set the Datasmith scene file name */
+	/** Get the Datasmith scene file name */
 	const TCHAR* GetName() const;
 
 	/** Set the path to the folder where the .datasmith file will be saved. */
@@ -183,6 +247,14 @@ public:
 
 	/** Get the path were additional assets will be saved to. */
 	const TCHAR* GetAssetsOutputPath() const;
+
+	/** Get the Datasmith scene Geolocation data*/
+	void GetGeolocation(double& OutLatitude, double& OutLongitude, double& OutElevation) const;
+
+	/** Set the Datasmith scene Geolocation data*/
+	void SetGeolocationLatitude(double Latitude);
+	void SetGeolocationLongitude(double Longitude);
+	void SetGeolocationElevation(double Elevation);
 
 	/** Instantiate an exporter and register export start time */
 	void PreExport();

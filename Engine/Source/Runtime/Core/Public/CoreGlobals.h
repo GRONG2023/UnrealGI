@@ -1,21 +1,30 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
-#include "CoreTypes.h"
 #include "Containers/UnrealString.h"
-#include "UObject/NameTypes.h"
-#include "Logging/LogMacros.h"
+#include "CoreTypes.h"
 #include "HAL/PlatformTLS.h"
-#include "Templates/Atomic.h"
+#include "Logging/LogMacros.h"
+#include "Misc/Build.h"
+#include "Misc/EnumClassFlags.h"
+#include "Misc/OutputDevice.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "Templates/Atomic.h"
+#include "UObject/NameTypes.h"
+
+#include <atomic>
 
 class Error;
-class FConfigCacheIni;
-class FFixedUObjectArray;
 class FChunkedFixedUObjectArray;
+class FConfigCacheIni;
+class FExec;
+class FFixedUObjectArray;
 class FOutputDeviceConsole;
 class FOutputDeviceRedirector;
+class FRunnableThread;
+class FText;
 class ITransaction;
+class UClass;
 
 CORE_API DECLARE_LOG_CATEGORY_EXTERN(LogHAL, Log, All);
 CORE_API DECLARE_LOG_CATEGORY_EXTERN(LogSerialization, Log, All);
@@ -36,10 +45,11 @@ CORE_API DECLARE_LOG_CATEGORY_EXTERN(LogInit, Log, All);
 CORE_API DECLARE_LOG_CATEGORY_EXTERN(LogExit, Log, All);
 CORE_API DECLARE_LOG_CATEGORY_EXTERN(LogExec, Warning, All);
 CORE_API DECLARE_LOG_CATEGORY_EXTERN(LogScript, Warning, All);
-CORE_API DECLARE_LOG_CATEGORY_EXTERN(LogLocalization, Error, All);
+CORE_API DECLARE_LOG_CATEGORY_EXTERN(LogLocalization, Log, All);
 CORE_API DECLARE_LOG_CATEGORY_EXTERN(LogLongPackageNames, Log, All);
 CORE_API DECLARE_LOG_CATEGORY_EXTERN(LogProcess, Log, All);
 CORE_API DECLARE_LOG_CATEGORY_EXTERN(LogLoad, Log, All);
+CORE_API DECLARE_LOG_CATEGORY_EXTERN(LogVirtualization, Log, All);
 
 // Temporary log category, generally you should not check things in that use this
 CORE_API DECLARE_LOG_CATEGORY_EXTERN(LogTemp, Log, All);
@@ -61,17 +71,26 @@ CORE_API void BootTimingPoint(const ANSICHAR *Message);
 
 CORE_API void DumpBootTiming();
 
-struct CORE_API FScopedBootTiming
+struct FScopedBootTiming
 {
 	FString Message;
 	double StartTime;
-	FScopedBootTiming(const ANSICHAR *InMessage);
-	FScopedBootTiming(const ANSICHAR *InMessage, FName Suffix);
-	~FScopedBootTiming();
+	CORE_API FScopedBootTiming(const ANSICHAR *InMessage);
+	CORE_API FScopedBootTiming(const ANSICHAR *InMessage, FName Suffix);
+	CORE_API ~FScopedBootTiming();
+};
+
+struct FEngineTrackedActivityScope
+{
+	CORE_API FEngineTrackedActivityScope(const TCHAR* Fmt, ...);
+	CORE_API FEngineTrackedActivityScope(const FString& Str);
+	CORE_API ~FEngineTrackedActivityScope();
 };
 
 
 #define SCOPED_BOOT_TIMING(x) TRACE_CPUPROFILER_EVENT_SCOPE_STR(x); FScopedBootTiming ANONYMOUS_VARIABLE(BootTiming_)(x);
+#define UE_SCOPED_ENGINE_ACTIVITY(Fmt, ...) FEngineTrackedActivityScope ANONYMOUS_VARIABLE(EngineActivity_)(Fmt, ## __VA_ARGS__);
+
 
 #define GLog GetGlobalLogSingleton()
 extern CORE_API FConfigCacheIni* GConfig;
@@ -86,7 +105,7 @@ extern CORE_API TCHAR GErrorHist[16384];
 // #crashReport: 2014-08-19 Combine into one, refactor.
 extern CORE_API TCHAR GErrorExceptionDescription[4096];
 
-struct CORE_API FCoreTexts
+struct FCoreTexts
 {
 	const FText& True;
 	const FText& False;
@@ -94,14 +113,19 @@ struct CORE_API FCoreTexts
 	const FText& No;
 	const FText& None;
 
-	static const FCoreTexts& Get();
+	static CORE_API const FCoreTexts& Get();
 
 	/** Invalidates existing references. Do not use FCoreTexts after calling. */
-	static void TearDown();
+	static CORE_API void TearDown();
 
 	// Non-copyable
 	FCoreTexts(const FCoreTexts&) = delete;
 	FCoreTexts& operator=(const FCoreTexts&) = delete;
+
+	FCoreTexts(const FText& InTrue, const FText& InFalse, const FText& InYes, const FText& InNo, const FText& InNone)
+		: True(InTrue), False(InFalse), Yes(InYes), No(InNo), None(InNone)
+	{
+	}
 };
 
 #if !defined(DISABLE_LEGACY_CORE_TEXTS) || DISABLE_LEGACY_CORE_TEXTS == 0
@@ -171,6 +195,7 @@ extern CORE_API bool GIsRunningUnattendedScript;
 
 #if WITH_ENGINE
 extern CORE_API bool PRIVATE_GIsRunningCommandlet;
+extern CORE_API UClass* PRIVATE_GRunningCommandletClass;
 
 /** If true, initialize RHI and set up scene for rendering even when running a commandlet. */
 extern CORE_API bool PRIVATE_GAllowCommandletRendering;
@@ -187,7 +212,6 @@ extern CORE_API bool PRIVATE_GAllowCommandletAudio;
 */
 extern CORE_API bool GIsEditor;
 extern CORE_API bool GIsImportingT3D;
-extern CORE_API bool GIsUCCMakeStandaloneHeaderGenerator;
 extern CORE_API bool GIsTransacting;
 
 /** Indicates that the game thread is currently paused deep in a call stack,
@@ -201,19 +225,21 @@ extern CORE_API bool			GFirstFrameIntraFrameDebugging;
 
 // Defined as variables during code analysis to prevent lots of '<constant> && <expr>' warnings
 extern CORE_API bool GIsEditor;
-extern CORE_API bool GIsUCCMakeStandaloneHeaderGenerator;
 extern CORE_API bool GIntraFrameDebuggingGameThread;
 extern CORE_API bool GFirstFrameIntraFrameDebugging;
 
 #else
 
 #define GIsEditor								false
-#define GIsUCCMakeStandaloneHeaderGenerator		false
 #define GIntraFrameDebuggingGameThread			false
 #define GFirstFrameIntraFrameDebugging			false
 
 #endif // WITH_EDITORONLY_DATA
 
+#if WITH_EDITOR
+extern CORE_API bool PRIVATE_GIsRunningCookCommandlet;
+extern CORE_API bool PRIVATE_GIsRunningDLCCookCommandlet;
+#endif
 
 /**
 * Check to see if this executable is running a commandlet (custom command-line processing code in an editor-like environment)
@@ -224,6 +250,42 @@ FORCEINLINE bool IsRunningCommandlet()
 	return PRIVATE_GIsRunningCommandlet;
 #else
 	return false;
+#endif
+}
+
+/**
+* Check to see if this executable is running the cookcommandlet
+*/
+FORCEINLINE bool IsRunningCookCommandlet()
+{
+#if WITH_EDITOR
+	return PRIVATE_GIsRunningCookCommandlet;
+#else
+	return false;
+#endif
+}
+
+/**
+* Check to see if this executable is running the cookcommandlet
+*/
+FORCEINLINE bool IsRunningDLCCookCommandlet()
+{
+#if WITH_EDITOR
+	return PRIVATE_GIsRunningDLCCookCommandlet;
+#else
+	return false;
+#endif
+}
+
+/** Returns running commandlet name 
+ * 
+ */
+FORCEINLINE UClass* GetRunningCommandletClass()
+{
+#if WITH_ENGINE
+	return PRIVATE_GRunningCommandletClass;
+#else
+	return nullptr;
 #endif
 }
 
@@ -248,12 +310,36 @@ FORCEINLINE bool IsAllowCommandletAudio()
 #endif
 }
 
+namespace UE
+{
+/**
+ * If multiple copies of the process are running and communicating together, the director process has MultiprocessId 0
+ * and the worker processes have MultiprocessId > 0.
+ * When only a single process is running, GetMultiprocessId returns 0.
+ * Based on commandline. Primary example is cookworkers in multiprocess cook.
+ * Systems that need to write a separate file per running process should use this id as part of their file descriptor.
+ */
+CORE_API int32 GetMultiprocessId();
+}
+
+namespace UE::Private
+{
+CORE_API void SetMultiprocessId(int32 MultiprocessId);
+}
+
+class FIsDuplicatingClassForReinstancing
+{
+public:
+	CORE_API FIsDuplicatingClassForReinstancing& operator= (bool bOther);
+	CORE_API operator bool() const;
+};
+
 extern CORE_API bool GEdSelectionLock;
 extern CORE_API bool GIsClient;
 extern CORE_API bool GIsServer;
 extern CORE_API bool GIsCriticalError;
 extern CORE_API TSAN_ATOMIC(bool) GIsRunning;
-extern CORE_API bool GIsDuplicatingClassForReinstancing;
+extern CORE_API FIsDuplicatingClassForReinstancing GIsDuplicatingClassForReinstancing;
 
 /**
 * These are set when the engine first starts up.
@@ -282,6 +368,13 @@ extern CORE_API bool GIsGuarded;
 #ifndef UE_SET_REQUEST_EXIT_ON_TICK_ONLY
 	#define UE_SET_REQUEST_EXIT_ON_TICK_ONLY 0
 #endif
+
+/**
+ * Returns true after all initial modules have finished all of their loading phases during Engine startup:
+ * Corresponds to the event FCoreDelegates::OnAllModuleLoadingPhasesComplete
+ */
+extern CORE_API bool IsEngineStartupModuleLoadingComplete();
+extern CORE_API void SetEngineStartupModuleLoadingComplete();
 
 UE_DEPRECATED(4.24, "Please use IsEngineExitRequested()/RequestEngineExit(const FString&)")
 extern CORE_API bool GIsRequestingExit;
@@ -343,6 +436,7 @@ extern CORE_API FString GDeviceProfilesIni;
 extern CORE_API FString GGameplayTagsIni;
 
 extern CORE_API float GNearClippingPlane;
+extern CORE_API float GNearClippingPlane_RenderThread;
 
 extern CORE_API bool GExitPurge;
 extern CORE_API TCHAR GInternalProjectName[64];
@@ -366,6 +460,19 @@ extern CORE_API bool (*IsAsyncLoadingSuspended)();
 /** Returns true if async loading is using the async loading thread */
 extern CORE_API bool(*IsAsyncLoadingMultithreaded)();
 
+enum class ELoaderType : uint8
+{
+	NotInitialized,
+	LegacyLoader,
+	EditorPackageLoader,
+	ZenLoader
+};
+
+CORE_API const TCHAR* LexToString(ELoaderType Type);
+
+/** Returns the type of the currently active loader, if any. */
+extern CORE_API ELoaderType(*GetLoaderType)();
+
 /** Suspends texture updates caused by completed async IOs. */
 extern CORE_API void (*SuspendTextureStreamingRenderTasks)();
 
@@ -381,7 +488,14 @@ extern CORE_API bool GIsCookerLoadingPackage;
 /** Whether GWorld points to the play in editor world */
 extern CORE_API bool GIsPlayInEditorWorld;
 
-extern CORE_API int32 GPlayInEditorID;
+class FPlayInEditorID
+{
+public:
+	CORE_API FPlayInEditorID& operator= (int32 InOther);
+	CORE_API operator int32() const;
+};
+/** In the editor, this is set to the specific world context PIEInstance that is being currently processed */
+extern CORE_API FPlayInEditorID GPlayInEditorID;
 
 /** Whether or not PIE was attempting to play from PlayerStart */
 UE_DEPRECATED(4.25, "This variable is no longer set. Use !GEditor->GetPlayInEditorSessionInfo()->OriginalRequestParams.HasPlayWorldPlacement() instead.")
@@ -406,7 +520,7 @@ extern CORE_API bool GEventDrivenLoaderEnabled;
 extern CORE_API bool GIsRetrievingVTablePtr;
 
 /** Steadily increasing frame counter. */
-extern CORE_API TSAN_ATOMIC(uint64) GFrameCounter;
+extern CORE_API uint64 GFrameCounter;
 
 extern CORE_API uint64 GFrameCounterRenderThread;
 
@@ -422,16 +536,9 @@ extern CORE_API uint32 GFrameNumber;
 /** NEED TO RENAME, for RT version of GFrameTime use View.ViewFamily->FrameNumber or pass down from RT from GFrameTime). */
 extern CORE_API uint32 GFrameNumberRenderThread;
 
-#if !(UE_BUILD_SHIPPING && WITH_EDITOR)
-// We cannot count on this variable to be accurate in a shipped game, so make sure no code tries to use it
 /** Whether we are the first instance of the game running. */
-#if PLATFORM_UNIX
-#define GIsFirstInstance FPlatformProcess::IsFirstInstance()
-#else
+UE_DEPRECATED(5.1, "Please use `FPlatformProcess::IsFirstInstance()`")
 extern CORE_API bool GIsFirstInstance;
-#endif
-
-#endif
 
 /** Threshold for a frame to be considered a hitch (in milliseconds). */
 extern CORE_API float GHitchThresholdMS;
@@ -449,13 +556,6 @@ extern CORE_API uint32 GRenderThreadId;
 /** Thread ID of the slate thread, if any */
 extern CORE_API uint32 GSlateLoadingThreadId;
 
-/** Thread ID of the audio thread, if any */
-UE_DEPRECATED(4.26, "Please use `IsAudioThreadRunning()` or `IsInAudioThread()`")
-extern CORE_API uint32 GAudioThreadId;
-
-/** Whether the audio thread is suspended */
-extern CORE_API TAtomic<bool> GIsAudioThreadSuspended;
-
 /** Has GGameThreadId been set yet? */
 extern CORE_API bool GIsGameThreadIdInitialized;
 
@@ -469,18 +569,24 @@ extern CORE_API FLazyName GCurrentTraceName;
 extern CORE_API ELogTimes::Type GPrintLogTimes;
 
 /** How to print the category in log output. */
-extern CORE_API bool GPrintLogCategory;
+extern CORE_API TSAN_ATOMIC(bool) GPrintLogCategory;
 
 /** How to print the verbosity in log output. */
-extern CORE_API bool GPrintLogVerbosity;
+extern CORE_API TSAN_ATOMIC(bool) GPrintLogVerbosity;
 
 #if USE_HITCH_DETECTION
 /** Used by the lightweight stats and FGameThreadHitchHeartBeat to print a stat stack for hitches in shipping builds. */
-extern CORE_API bool GHitchDetected;
+extern CORE_API TSAN_ATOMIC(bool) GHitchDetected;
 #endif
 
 /** Whether stats should emit named events for e.g. PIX. */
 extern CORE_API int32 GCycleStatsShouldEmitNamedEvents;
+
+/** Whether verbose stats should be also generate external profiler named events.
+* Thread sleep/wait stats or extremely high frequency cycle counting stats are disabled by default.
+* Has no effect if GCycleStatsShouldEmitNamedEvents is 0.
+*/
+extern CORE_API bool GShouldEmitVerboseNamedEvents;
 
 /** Disables some warnings and minor features that would interrupt a demo presentation*/
 extern CORE_API bool GIsDemoMode;
@@ -503,6 +609,101 @@ extern CORE_API bool GPumpingMessages;
 /** Enables various editor and HMD hacks that allow the experimental VR editor feature to work, perhaps at the expense of other systems */
 extern CORE_API bool GEnableVREditorHacks;
 
+#if !UE_BUILD_SHIPPING
+
+/** Whether we should ignore the attached debugger. */
+extern CORE_API bool GIgnoreDebugger;
+
+#endif // #if !UE_BUILD_SHIPPING
+
+enum class ETaskTag : int32
+{
+	ENone						= 0 << 0,
+	EStaticInit					= 1 << 0,
+	EGameThread					= 1 << 1,
+	ESlateThread				= 1 << 2,
+	EAudioThread UE_DEPRECATED(5.0, "AudioThread was removed and ETaskTag::EAudioThread is not used anymore. Please remove it.") = 1 << 3,
+	ERenderingThread			= 1 << 4,
+	ERhiThread					= 1 << 5,
+	EAsyncLoadingThread			= 1 << 6,
+
+	ENamedThreadBits			= (EAsyncLoadingThread << 1) - 1,
+	EParallelThread				= 1 << 8, //This can be used when multipe threads or jobs are involved (usually a parallel for) It will avoid the check for uniqieness of the named thread tag.
+	EWorkerThread				= 1 << 7 | EParallelThread,
+	EParallelRenderingThread	= ERenderingThread | EParallelThread,
+	EParallelGameThread			= EGameThread | EParallelThread,
+	EParallelRhiThread			= ERhiThread | EParallelThread,
+};
+
+ENUM_CLASS_FLAGS(ETaskTag);
+
+
+/**
+ * This class can be used to Tag an execution context aka Thead or Job and allows us to later querry the state when we are in the callstack
+ * It is usually used for the IsInRendering/GamethreadFunctions.
+ *
+ * @param CtorSignature InTag the Tag to use
+ */
+class FTaskTagScope
+{
+	friend class FRunnableThread;
+	friend class FRenderingThread;
+	static thread_local ETaskTag ActiveTaskTag;
+	static int32 GetStaticThreadId();
+	ETaskTag ParentTag;
+	ETaskTag Tag;
+	bool TagOnlyIfNone;
+
+public:
+	/**
+	 * Clear the ETaskTag::StaticInit tag so that the Main OS Thread has no active tag.
+	 * This will allow functions such as IsInGameThread() to function properly when called from the Main Thread.
+	 */
+	static void CORE_API SetTagNone();
+
+	/**
+	 * Restore the ETaskTag::StaticInit tag so that the destructors of global
+	 * (or local static) C++ objects function properly when checking thread
+	 * state (from functions like IsInGameThread()).
+	 */
+	static void CORE_API SetTagStaticInit();
+
+	/**
+	* Swap the Tag this is only used when Thread contexts move between different threads.
+	*/
+	static ETaskTag CORE_API SwapTag(ETaskTag Tag);
+
+protected:
+	CORE_API FTaskTagScope(bool InTagOnlyIfNone, ETaskTag InTag);
+
+public:
+	FTaskTagScope(ETaskTag InTag = ETaskTag::ENone) : FTaskTagScope(false, InTag)
+	{
+
+	}
+
+	CORE_API ~FTaskTagScope();
+
+	static CORE_API ETaskTag GetCurrentTag();
+	static CORE_API bool IsCurrentTag(ETaskTag InTag);
+	static CORE_API bool IsRunningDuringStaticInit();
+};
+
+/**
+ * This class can be used to Tag an execution context but only in case it has not already been tagged
+ * It is usually used for the IsInRendering/GamethreadFunctions.
+ *
+ * @param CtorSignature InTag the Tag to use
+ */
+class FOptionalTaskTagScope : public FTaskTagScope
+{
+public:
+	FOptionalTaskTagScope(ETaskTag InTag = ETaskTag::ENone) : FTaskTagScope(true, InTag)
+	{
+
+	}
+};
+
 /**
  * Ensures that current thread is during retrieval of vtable ptr of some
  * UClass.
@@ -513,25 +714,15 @@ extern CORE_API bool GEnableVREditorHacks;
 CORE_API void EnsureRetrievingVTablePtrDuringCtor(const TCHAR* CtorSignature);
 
 /** @return True if called from the game thread. */
-FORCEINLINE bool IsInGameThread()
-{
-	if(GIsGameThreadIdInitialized)
-	{
-		const uint32 CurrentThreadId = FPlatformTLS::GetCurrentThreadId();
-		return CurrentThreadId == GGameThreadId;
-	}
+extern CORE_API bool IsInGameThread();
 
-	return true;
-}
+/** @return True if called from the game thread in a parallel for. */
+extern CORE_API bool IsInParallelGameThread();
 
 extern CORE_API bool IsAudioThreadRunning();
 
 /** @return True if called from the audio thread, and not merely a thread calling audio functions. */
 extern CORE_API bool IsInAudioThread();
-
-/** Thread used for audio */
-UE_DEPRECATED(4.26, "Please use `IsAudioThreadRunning()` or `IsInAudioThread()`")
-extern CORE_API FRunnableThread* GAudioThread;
 
 /** @return True if called from the slate thread, and not merely a thread calling slate functions. */
 extern CORE_API bool IsInSlateThread();
@@ -561,6 +752,9 @@ extern CORE_API bool IsRHIThreadRunning();
 
 /** @return True if called from the RHI thread, or if called from ANY thread during single threaded rendering */
 extern CORE_API bool IsInRHIThread();
+
+/** @return True if called from any parallel RHI thread, or if called from ANY thread during single threaded rendering */
+extern CORE_API bool IsInParallelRHIThread();
 
 /** Thread used for RHI */
 UE_DEPRECATED(4.26, "Please use `IsRHIThreadRunning()`")
@@ -598,15 +792,24 @@ struct FScopedLoadingState
 };
 #endif
 
-
 bool CORE_API GetEmitDrawEvents();
-
-bool CORE_API GetEmitDrawEventsOnlyOnCommandlist();
-
 void CORE_API SetEmitDrawEvents(bool EmitDrawEvents);
-
-void CORE_API EnableEmitDrawEventsOnlyOnCommandlist();
 
 /** Array to help visualize weak pointers in the debugger */
 class FChunkedFixedUObjectArray;
+
 extern CORE_API FChunkedFixedUObjectArray* GCoreObjectArrayForDebugVisualizers;
+
+namespace UE::CoreUObject::Private
+{
+	/** Array to help visualize object paths in the debugger */
+	struct FStoredObjectPathDebug;
+	
+	/** Array to help visualize object handles in the debugger */
+	struct FObjectHandlePackageDebugData;
+}
+extern CORE_API UE::CoreUObject::Private::FStoredObjectPathDebug* GCoreComplexObjectPathDebug;
+extern CORE_API UE::CoreUObject::Private::FObjectHandlePackageDebugData* GCoreObjectHandlePackageDebug;
+
+/** @return True if running cook-on-the-fly. */
+bool CORE_API IsRunningCookOnTheFly();

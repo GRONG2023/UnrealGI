@@ -1,15 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "HAL/Platform.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UnrealTemplate.h"
 
-/**
- * Tokenize the text based upon the given rule set
- */
-class SLATE_API FSyntaxTokenizer
+class ISyntaxTokenizer
 {
 public:
-
 	/** Denotes the type of token */
 	enum class ETokenType : uint8
 	{
@@ -39,6 +40,17 @@ public:
 		TArray<FToken> Tokens;
 	};
 
+	virtual ~ISyntaxTokenizer() {};
+	
+	virtual void Process(TArray<FTokenizedLine>& OutTokenizedLines, const FString& Input) = 0;
+};
+
+/**
+ * Tokenize the text based upon the given rule set
+ */
+class FSyntaxTokenizer : public ISyntaxTokenizer
+{
+public:
 	/** Rule used to match syntax token types */
 	struct FRule
 	{
@@ -54,11 +66,11 @@ public:
 	 * Create a new tokenizer which will use the given rules to match syntax tokens
 	 * @param InRules Rules to control the tokenizer, processed in-order so the most greedy matches must come first
 	 */
-	static TSharedRef< FSyntaxTokenizer > Create(TArray<FRule> InRules);
+	static SLATE_API TSharedRef< FSyntaxTokenizer > Create(TArray<FRule> InRules);
 
-	virtual ~FSyntaxTokenizer();
+	SLATE_API virtual ~FSyntaxTokenizer();
 
-	void Process(TArray<FTokenizedLine>& OutTokenizedLines, const FString& Input);
+	SLATE_API virtual void Process(TArray<FTokenizedLine>& OutTokenizedLines, const FString& Input) override;
 
 private:
 

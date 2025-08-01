@@ -1,9 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "UserInterface/PropertyEditor/SPropertyEditorEditInline.h"
+#include "Algo/AnyOf.h"
 #include "Modules/ModuleManager.h"
 #include "Widgets/Images/SImage.h"
 #include "PropertyEditorHelpers.h"
+#include "PropertyRestriction.h"
 #include "ObjectPropertyNode.h"
 #include "PropertyHandleImpl.h"
 #include "ClassViewerModule.h"
@@ -11,6 +13,7 @@
 #include "Styling/SlateIconFinder.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Editor.h"
+#include "PropertyEditorUtils.h"
 
 class FPropertyEditorInlineClassFilter : public IClassViewerFilter
 {
@@ -26,45 +29,120 @@ public:
 
 	/** Hierarchy of objects that own this property. Used to check against ClassWithin. */
 	TSet< const UObject* > OwningObjects;
+	
+	/** The interface that must be implemented. */
+	const UClass* InterfaceThatMustBeImplemented;
 
-	bool IsClassAllowed(const FClassViewerInitializationOptions& InInitOptions, const UClass* InClass, TSharedRef< FClassViewerFilterFuncs > InFilterFuncs ) override
+	/** Classes that can be picked */
+	TArray<const UClass*> AllowedClassFilters;
+
+	/** Classes that can't be picked */
+	TArray<const UClass*> DisallowedClassFilters;
+
+	virtual bool IsClassAllowed(const FClassViewerInitializationOptions& InInitOptions, const UClass* InClass, TSharedRef< FClassViewerFilterFuncs > InFilterFuncs ) override
 	{
-		const bool bChildOfObjectClass = ObjProperty && InClass->IsChildOf(ObjProperty->PropertyClass);
-		const bool bDerivedInterfaceClass = IntProperty && InClass->ImplementsInterface(IntProperty->InterfaceClass);
+		auto IsClassChildOf = [InClass](const UClass* FilterClass)
+		{
+			return InClass->IsChildOf(FilterClass);
+		};
+		
+		return IsClassAllowedHelper(InClass, IsClassChildOf, InFilterFuncs);
+	}
+	
+	virtual bool IsUnloadedClassAllowed(const FClassViewerInitializationOptions& InInitOptions, const TSharedRef< const IUnloadedBlueprintData > InBlueprint, TSharedRef< FClassViewerFilterFuncs > InFilterFuncs) override
+	{
+		auto IsClassChildOf = [InBlueprint](const UClass* FilterClass)
+		{
+			if (FilterClass && InBlueprint->GetClassPathName() == FilterClass->GetClassPathName())
+			{
+				return true;
+			}
+			
+			return InBlueprint->IsChildOf(FilterClass);
+		};
+		
+		return IsClassAllowedHelper(InBlueprint, IsClassChildOf, InFilterFuncs);
+	}
 
-		const bool bMatchesFlags = InClass->HasAnyClassFlags(CLASS_EditInlineNew) && 
+private:
+
+	template <typename TClass, typename TIsChildOfFunction>
+	bool IsClassAllowedHelper(TClass InClass, TIsChildOfFunction IsClassChildOf, TSharedRef< FClassViewerFilterFuncs > InFilterFuncs)
+	{
+		const bool bMatchesFlags = InClass->HasAnyClassFlags(CLASS_EditInlineNew) &&
 			!InClass->HasAnyClassFlags(CLASS_Hidden | CLASS_HideDropDown | CLASS_Deprecated) &&
 			(bAllowAbstract || !InClass->HasAnyClassFlags(CLASS_Abstract));
 
-		if( (bChildOfObjectClass || bDerivedInterfaceClass) && bMatchesFlags )
+		if (!bMatchesFlags)
 		{
-			// Verify that the Owners of the property satisfy the ClassWithin constraint of the given class.
-			// When ClassWithin is null, assume it can be owned by anything.
-			return InClass->ClassWithin == nullptr || InFilterFuncs->IfMatchesAll_ObjectsSetIsAClass(OwningObjects, InClass->ClassWithin) != EFilterReturn::Failed;
+			return false;
 		}
 
-		return false;
+		// If it's neither an object property that is a child of the object class or an interface property that doesn't implement the interface, skip
+		const bool bChildOfObjectClass = ObjProperty && InClass->IsChildOf(ObjProperty->PropertyClass);
+		const bool bDerivedInterfaceClass = IntProperty && InClass->ImplementsInterface(IntProperty->InterfaceClass);
+		if (!bChildOfObjectClass && !bDerivedInterfaceClass)
+		{
+			return false;
+		}
+
+		// If the class doesn't satisfy an interface requirement, skip
+		if ((InterfaceThatMustBeImplemented != nullptr) && !InClass->ImplementsInterface(InterfaceThatMustBeImplemented))
+		{
+			return false;
+		}
+
+		// If the the class is explicitly present in the disallowed class filter set, we can't allow it
+		if (Algo::AnyOf(DisallowedClassFilters, IsClassChildOf))
+		{
+			return false;
+		}
+
+		// If the class is explicitly not present in the allowed class filter set, we can't allow it
+		if (!AllowedClassFilters.IsEmpty() && Algo::NoneOf(AllowedClassFilters, IsClassChildOf))
+		{
+			return false;
+		}
+
+		// Verify that the Owners of the property satisfy the ClassWithin constraint of the given class.
+		// When ClassWithin is null, assume it can be owned by anything.
+		const UClass* ClassWithin = GetClassWithin(InClass);
+		if (ClassWithin != nullptr && InFilterFuncs->IfMatchesAll_ObjectsSetIsAClass(OwningObjects, ClassWithin) ==
+			EFilterReturn::Failed)
+		{
+			return false;
+		}
+
+		return true;
 	}
 
-	virtual bool IsUnloadedClassAllowed(const FClassViewerInitializationOptions& InInitOptions, const TSharedRef< const IUnloadedBlueprintData > InUnloadedClassData, TSharedRef< FClassViewerFilterFuncs > InFilterFuncs) override
+	static const UClass* GetClassWithin(const UClass* InClass)
 	{
-		const bool bChildOfObjectClass = InUnloadedClassData->IsChildOf(ObjProperty->PropertyClass);
+		return InClass->ClassWithin;
+	}
 
-		const bool bMatchesFlags = InUnloadedClassData->HasAnyClassFlags(CLASS_EditInlineNew) && 
-			!InUnloadedClassData->HasAnyClassFlags(CLASS_Hidden | CLASS_HideDropDown | CLASS_Deprecated) &&
-			(bAllowAbstract || !InUnloadedClassData->HasAnyClassFlags((CLASS_Abstract)));
-
-		if (bChildOfObjectClass && bMatchesFlags)
-		{
-			const UClass* ClassWithin = InUnloadedClassData->GetClassWithin();
-
-			// Verify that the Owners of the property satisfy the ClassWithin constraint of the given class.
-			// When ClassWithin is null, assume it can be owned by anything.
-			return ClassWithin == nullptr || InFilterFuncs->IfMatchesAll_ObjectsSetIsAClass(OwningObjects, ClassWithin) != EFilterReturn::Failed;
-		}
-		return false;
+	static const UClass* GetClassWithin(const TSharedRef< const IUnloadedBlueprintData > InBlueprint)
+	{
+		return InBlueprint->GetClassWithin();
 	}
 };
+
+namespace UE::PropertyEditor::EditInline::Private
+{
+
+static UClass* FindOrLoadClass(const FString& ClassName)
+{
+	UClass* Class = UClass::TryFindTypeSlow<UClass>(ClassName, EFindFirstObjectOptions::EnsureIfAmbiguous);
+
+	if (!Class)
+	{
+		Class = LoadObject<UClass>(nullptr, *ClassName);
+	}
+
+	return Class;
+}
+
+} // namespace UE::PropertyEditor::EditInline::Private
 
 void SPropertyEditorEditInline::Construct( const FArguments& InArgs, const TSharedRef< class FPropertyEditor >& InPropertyEditor )
 {
@@ -77,7 +155,7 @@ void SPropertyEditorEditInline::Construct( const FArguments& InArgs, const TShar
 		SAssignNew(ComboButton, SComboButton)
 		.IsEnabled(this, &SPropertyEditorEditInline::IsValueEnabled, WeakHandlePtr)
 		.OnGetMenuContent(this, &SPropertyEditorEditInline::GenerateClassPicker)
-		.ContentPadding(0)
+		.ContentPadding(0.0f)
 		.ToolTipText(InPropertyEditor, &FPropertyEditor::GetValueAsText )
 		.ButtonContent()
 		[
@@ -171,14 +249,83 @@ TSharedRef<SWidget> SPropertyEditorEditInline::GenerateClassPicker()
 	Options.NameTypeToDisplay = EClassViewerNameTypeToDisplay::DisplayName;
 
 	TSharedPtr<FPropertyEditorInlineClassFilter> ClassFilter = MakeShareable( new FPropertyEditorInlineClassFilter );
-	Options.ClassFilter = ClassFilter;
+	Options.ClassFilters.Add(ClassFilter.ToSharedRef());
 	ClassFilter->bAllowAbstract = false;
 
 	const TSharedRef< FPropertyNode > PropertyNode = PropertyEditor->GetPropertyNode();
 	FProperty* Property = PropertyNode->GetProperty();
 	ClassFilter->ObjProperty = CastField<FObjectPropertyBase>( Property );
 	ClassFilter->IntProperty = CastField<FInterfaceProperty>( Property );
-	Options.bShowNoneOption = !(Property->PropertyFlags & CPF_NoClear);
+
+	// Filter based on UPROPERTY meta data
+	const FProperty* MetadataProperty = Property->GetOwnerProperty();
+
+	static const FName NAME_MustImplement(ANSITEXTVIEW("MustImplement"));
+	ClassFilter->InterfaceThatMustBeImplemented = MetadataProperty->GetClassMetaData(NAME_MustImplement);
+
+	if (ClassFilter->InterfaceThatMustBeImplemented != nullptr)
+	{
+		if (!ClassFilter->InterfaceThatMustBeImplemented->HasAnyClassFlags(CLASS_Interface))
+		{
+			UE_LOG(LogPropertyNode, Warning, TEXT("Property (%s) specifies a MustImplement class which isn't an interface (%s), clearing filter."), *Property->GetFullName(), *ClassFilter->InterfaceThatMustBeImplemented->GetPathName());
+			ClassFilter->InterfaceThatMustBeImplemented = nullptr;
+		}
+		else if (ClassFilter->InterfaceThatMustBeImplemented == UInterface::StaticClass())
+		{
+			UE_LOG(LogPropertyNode, Warning, TEXT("Property (%s) specifies a MustImplement class which isn't valid (UInterface), clearing filter."), *Property->GetFullName());
+			ClassFilter->InterfaceThatMustBeImplemented = nullptr;
+		}
+	}
+
+	TArray<UObject*> ObjectList;
+	if (PropertyEditor && PropertyEditor->GetPropertyHandle()->IsValidHandle())
+	{
+		PropertyEditor->GetPropertyHandle()->GetOuterObjects(ObjectList);
+	}
+
+	TArray<const UClass*> AllowedClassFilters;
+	TArray<const UClass*> DisallowedClassFilters;
+	PropertyEditorUtils::GetAllowedAndDisallowedClasses(ObjectList, *Property, AllowedClassFilters, DisallowedClassFilters, false);
+	
+	using namespace UE::PropertyEditor::EditInline::Private;
+
+	// Filter based on restrictions
+	for (const TSharedRef<const FPropertyRestriction>& ClassRestriction : PropertyNode->GetRestrictions())
+	{
+		for (TArray<FString>::TConstIterator Iter = ClassRestriction.Get().GetHiddenValuesIterator(); Iter; ++Iter)
+		{
+			if (const UClass* HiddenClass = FindOrLoadClass(*Iter))
+			{
+				DisallowedClassFilters.Add(HiddenClass);
+			}
+		}
+
+		for (TArray<FString>::TConstIterator Iter = ClassRestriction.Get().GetDisabledValuesIterator(); Iter; ++Iter)
+		{
+			if (const UClass* DisabledClass = FindOrLoadClass(*Iter))
+			{
+				DisallowedClassFilters.Add(DisabledClass);
+			}
+		}
+
+		for (TArray<TSharedRef<IClassViewerFilter>>::TConstIterator  Iter = ClassRestriction.Get().GeClassViewFilterIterator(); Iter; ++Iter)
+		{
+			Options.ClassFilters.Add(*Iter);
+		}
+	}
+
+	ClassFilter->AllowedClassFilters = MoveTemp(AllowedClassFilters);
+	ClassFilter->DisallowedClassFilters = MoveTemp(DisallowedClassFilters);
+	
+	bool bContainerHasNoClear = false;
+	if(PropertyNode->GetArrayIndex() != INDEX_NONE)
+	{
+		if(const TSharedPtr<FPropertyNode>& ParentNode = PropertyNode->GetParentNodeSharedPtr())
+		{
+			bContainerHasNoClear = ParentNode->GetProperty()->HasAllPropertyFlags(CPF_NoClear);
+		}
+	}
+	Options.bShowNoneOption = !Property->HasAllPropertyFlags(CPF_NoClear) && !bContainerHasNoClear;
 
 	FObjectPropertyNode* ObjectPropertyNode = PropertyNode->FindObjectItemParent();
 	if( ObjectPropertyNode )
@@ -195,20 +342,6 @@ TSharedRef<SWidget> SPropertyEditorEditInline::GenerateClassPicker()
 	FOnClassPicked OnPicked( FOnClassPicked::CreateRaw( this, &SPropertyEditorEditInline::OnClassPicked ) );
 
 	return FModuleManager::LoadModuleChecked<FClassViewerModule>("ClassViewer").CreateClassViewer(Options, OnPicked);
-}
-
-UObject* GetTransientOuterForRename(UClass* ForClass)
-{
-	// if someone has tautologically placed themself within their own hierarchy then we'll
-	// just assume they're ok with eventually being outered to a upackage, similar UPackage
-	// is a UObject, so if someone demands that they be outered to 'a uobject' we'll 
-	// just leave them directly parented to the transient package:
-	if (ForClass->ClassWithin && ForClass->ClassWithin != ForClass && ForClass->ClassWithin != UObject::StaticClass())
-	{
-		FScopedAllowAbstractClassAllocation AllowAbstract;
-		return NewObject<UObject>(GetTransientOuterForRename(ForClass->ClassWithin), ForClass->ClassWithin, NAME_None, RF_Transient);
-	}
-	return GetTransientPackage();
 }
 
 void SPropertyEditorEditInline::OnClassPicked(UClass* InClass)
@@ -259,7 +392,7 @@ void SPropertyEditorEditInline::OnClassPicked(UClass* InClass)
 					NewObjectName = ObjectName;
 
 					ConstructorHelpers::StripObjectClass(DefaultValue);
-					NewObjectTemplate = StaticFindObject(InClass, ANY_PACKAGE, *DefaultValue);
+					NewObjectTemplate = StaticFindObject(InClass, nullptr, *DefaultValue);
 				}
 			}
 		}
@@ -280,7 +413,7 @@ void SPropertyEditorEditInline::OnClassPicked(UClass* InClass)
 			if (InClass)
 			{
 				FStringView CurClassName, CurObjectName;
-				if (PrevPerObjectValues[NewValues.Num()] != FName(NAME_None).ToString())
+				if (PrevPerObjectValues.IsValidIndex(NewValues.Num()) && PrevPerObjectValues[NewValues.Num()] != FName(NAME_None).ToString())
 				{
 					ExtractClassAndObjectNames(PrevPerObjectValues[NewValues.Num()], CurClassName, CurObjectName);
 				}
@@ -307,13 +440,21 @@ void SPropertyEditorEditInline::OnClassPicked(UClass* InClass)
 							SubObject->Rename(*MakeUniqueObjectName(GetTransientPackage(), SubObject->GetClass()).ToString(), GetTransientPackage(), REN_DontCreateRedirectors);
 
 							// If we've renamed the object out of the way here, we don't need to do it again below
-							PrevPerObjectValues[NewValues.Num()].Reset();
+							if (PrevPerObjectValues.IsValidIndex(NewValues.Num()))
+							{
+								PrevPerObjectValues[NewValues.Num()].Reset();
+							}
 						}
 					}
 
 					UObject* NewUObject = NewObject<UObject>(UseOuter, InClass, *NewObjectName, MaskedOuterFlags, NewObjectTemplate);
 
-					NewValue = NewUObject->GetPathName();
+					// Wrap the value in quotes before setting - in some cases for editinline-instanced values, the outer object path
+					// can potentially contain a space token (e.g. if the outer object was instanced as a Blueprint template object
+					// based on a user-facing variable name). While technically such characters should not be allowed, historically there
+					// has been no issue with most tokens in the INVALID_OBJECTNAME_CHARACTERS set being present in in-memory object names,
+					// other than some systems failing to resolve the object's path if the string representation of the value is not quoted.
+					NewValue = FString::Printf(TEXT("\"%s\""), *NewUObject->GetPathName().ReplaceQuotesWithEscapedQuotes());
 				}
 			}
 			else
@@ -333,7 +474,7 @@ void SPropertyEditorEditInline::OnClassPicked(UClass* InClass)
 				// Move the old subobject to the transient package so GetObjectsWithOuter will not return it
 				// This is particularly important for UActorComponent objects so resetting owned components on the parent doesn't find it
 				ConstructorHelpers::StripObjectClass(PrevPerObjectValues[Index]);
-				if (UObject* SubObject = StaticFindObject(UObject::StaticClass(), ANY_PACKAGE, *PrevPerObjectValues[Index]))
+				if (UObject* SubObject = StaticFindObject(UObject::StaticClass(), nullptr, *PrevPerObjectValues[Index]))
 				{
 					SubObject->Rename(nullptr, GetTransientOuterForRename(SubObject->GetClass()), REN_DontCreateRedirectors);
 				}

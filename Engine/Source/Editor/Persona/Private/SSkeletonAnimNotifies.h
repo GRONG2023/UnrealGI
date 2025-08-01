@@ -16,6 +16,7 @@
 #include "Widgets/Views/SListView.h"
 #include "EditorObjectsTracker.h"
 #include "EditorUndoClient.h"
+#include "Filters/FilterBase.h"
 
 #define LOCTEXT_NAMESPACE "SkeletonAnimnotifies"
 
@@ -46,6 +47,25 @@ private:
 	FOnObjectsSelected OnObjectsSelected;
 };
 
+// This is a flag that is used to filter UI part
+enum class EAnimNotifyFilterFlags : uint8 
+{
+	// Show none
+	None			= 0, 
+	// Show notifies
+	Notifies		= 0x01, 
+	// Show sync markers
+	SyncMarkers		= 0x02, 
+	// Show the current skeleton's items
+	CurrentSkeleton	= 0x04, 
+	// Show other compatible asset's items
+	CompatibleAssets = 0x08, 
+	// Show other asset's items
+	OtherAssets		= 0x10, 
+};
+
+ENUM_CLASS_FLAGS(EAnimNotifyFilterFlags);
+
 //////////////////////////////////////////////////////////////////////////
 // FDisplayedAnimNotifyInfo
 
@@ -60,17 +80,25 @@ public:
 	/** Flag to say whether this is a new item we are creating */
 	bool bIsNew;
 
+	/** Identifies sync markers vs notifies */
+	bool bIsSyncMarker;
+
+	/** Flags for this item */
+	EAnimNotifyFilterFlags ItemFlags;
+
 	/** Static function for creating a new item, but ensures that you can only have a TSharedRef to one */
-	static TSharedRef<FDisplayedAnimNotifyInfo> Make(const FName& NotifyName)
+	static TSharedRef<FDisplayedAnimNotifyInfo> Make(const FName& NotifyName, bool bInIsSyncMarker, EAnimNotifyFilterFlags InItemFlags)
 	{
-		return MakeShareable(new FDisplayedAnimNotifyInfo(NotifyName));
+		return MakeShareable(new FDisplayedAnimNotifyInfo(NotifyName, bInIsSyncMarker, InItemFlags));
 	}
 
 protected:
 	/** Hidden constructor, always use Make above */
-	FDisplayedAnimNotifyInfo(const FName& InNotifyName)
+	FDisplayedAnimNotifyInfo(const FName& InNotifyName, bool bInIsSyncMarker, EAnimNotifyFilterFlags InItemFlags)
 		: Name( InNotifyName )
 		, bIsNew(false)
+		, bIsSyncMarker(bInIsSyncMarker)
+		, ItemFlags(InItemFlags)
 	{}
 
 	/** Hidden constructor, always use Make above */
@@ -85,7 +113,10 @@ class SSkeletonAnimNotifies : public SCompoundWidget, public FGCObject, public F
 public:
 	SLATE_BEGIN_ARGS( SSkeletonAnimNotifies )
 		: _IsPicker(false)
-		, _IsSyncMarker(false)
+		, _ShowSyncMarkers(true)
+		, _ShowNotifies(true)
+		, _ShowCompatibleSkeletonAssets(false)
+		, _ShowOtherAssets(false)
 	{}
 
 	/** Delegate called to select an object in the details panel */
@@ -97,12 +128,27 @@ public:
 	/** Whether we should use this dialog as a picker or an editor. In picker mode we cant add, remove or rename notifies. */
 	SLATE_ARGUMENT(bool, IsPicker)
 
-	/** Whether we should use this dialog for sync markers instead of notifies */
-	SLATE_ARGUMENT(bool, IsSyncMarker)
+	/** Whether we should show sync markers */
+	SLATE_ARGUMENT_DEPRECATED(bool, IsSyncMarker, 5.3, "Please use ShowSyncMarkers or ShowNotifies instead")
+
+	/** Whether we should show sync markers */
+	SLATE_ARGUMENT(bool, ShowSyncMarkers)
+
+	/** Whether we should show notifies */
+	SLATE_ARGUMENT(bool, ShowNotifies)
+
+	/** Whether we notifies and sync markers from assets compatible with the current skeleton */
+	SLATE_ARGUMENT(bool, ShowCompatibleSkeletonAssets)
+
+	/** Whether we notifies and sync markers from assets other than those compatible with the current skeleton */
+	SLATE_ARGUMENT(bool, ShowOtherAssets)
+
+	/** Editable skeleton - if this is set, notifies and sync markers will be added to the skeleton on creation */
+	SLATE_ARGUMENT(TSharedPtr<IEditableSkeleton>, EditableSkeleton)
 
 	SLATE_END_ARGS()
 public:
-	void Construct(const FArguments& InArgs, const TSharedRef<IEditableSkeleton>& InEditableSkeleton, const TSharedPtr<class FAssetEditorToolkit>& InHostingApp = nullptr);
+	void Construct(const FArguments& InArgs, const TSharedPtr<class FAssetEditorToolkit>& InHostingApp = nullptr);
 
 	~SSkeletonAnimNotifies();
 
@@ -124,6 +170,10 @@ public:
 
 	// FGCObject interface start
 	virtual void AddReferencedObjects( FReferenceCollector& Collector ) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("SSkeletonAnimNotifies");
+	}
 	// FGCObject interface end
 
 	/** When user attempts to commit the name of a track*/
@@ -153,27 +203,30 @@ private:
 
 	/** Delegate handler for determining whether we can show the delete menu options */
 	bool CanPerformDelete() const;
-
-	/** Delegate handler for deleting anim notifies */
-	void OnDeleteAnimNotify();
-
-	/** Delegate handler for deleting a sync marker */
-	void OnDeleteSyncMarker();
+	
+	/** Delegate handler for determining whether we can show the find references menu option */
+	bool CanPerformFindReferences() const;
+	
+	/** Delegate handler for deleting items */
+	void OnDeleteItems();
 
 	/** Delegate handler for determining whether we can show the rename menu options */
 	bool CanPerformRename() const;
 
-	/** Delegate handler for adding anim notifies */
-	void OnAddAnimNotify();
+	/** Delegate handler for adding anim notifies & sync markers */
+	void OnAddItem(bool bIsSyncMarker);
 
-	/** Delegate handler for renaming anim notifies */
-	void OnRenameAnimNotify();
+	/** Delegate handler for renaming items */
+	void OnRenameItem();
 
-	/** Wrapper that populates NotifiesListView using current filter test */
+	/** Wrapper that populates NotifiesListView using current filter text */
 	void RefreshNotifiesListWithFilter();
 
-	/** Populates NotifiesListView based on the skeletons notifies and the supplied filter text */
-	void CreateNotifiesList( const FString& SearchText = FString("") );
+	/** Populates NotifyList based on the project's notifies */
+	void CreateNotifiesList();
+
+	/** Populates FilteredNotifyList based on the project's notifies and the supplied filter text */
+	void FilterNotifiesList(const FString& InSearchText);
 
 	/** handler for user selecting a Notify in NotifiesListView - populates the details panel */
 	void ShowNotifyInDetailsView( FName NotifyName );
@@ -199,8 +252,11 @@ private:
 	/** Widget used to display the list of notifies */
 	TSharedPtr<SAnimNotifyListType> NotifiesListView;
 
-	/** A list of notifies. Used by the NotifiesListView. */
+	/** A list of all notifies and sync markers. */
 	TArray< TSharedPtr<FDisplayedAnimNotifyInfo> > NotifyList;
+
+	/** Filtered list of notifies. Used by the NotifiesListView. */
+	TArray< TSharedPtr<FDisplayedAnimNotifyInfo> > FilteredNotifyList;
 
 	/** Current text typed into NameFilterBox */
 	FText FilterText;
@@ -218,10 +274,31 @@ private:
 	TWeakPtr<class FAssetEditorToolkit> WeakHostingApp;
 
 	/** Whether we should use this dialog as a picker or an editor. In picker mode we cant add, remove or rename notifies. */
-	bool bIsPicker;
+	bool bIsPicker = false;
 
-	/** Whether we are using this dialog for sync markers instead of notifies */
-	bool bIsSyncMarker;
+	/** Whether we should display markers */
+	bool bShowSyncMarkers = false;
+
+	/** Whether we should display notifies */
+	bool bShowNotifies = false;
+
+	/** Whether we should display notifies or sync markers from other skeletons */
+	bool bShowOtherSkeletonItems = false;
+
+	/** Whether we notifies and sync markers from assets other than the current skeleton */
+	bool bShowOtherAssets = false;
+	
+	/** Whether we notifies and sync markers from assets compatible with the current skeleton */
+	bool bShowCompatibleSkeletonAssets = false;
+
+	/** Whether to suspend refreshing the UI when filtering */
+	bool bAllowRefreshFilter = true;
+
+	/** All filters that can be applied to the widget's display */
+	TArray<TSharedRef<FFilterBase<EAnimNotifyFilterFlags>>> Filters;
+
+	/** Current filter flags */
+	EAnimNotifyFilterFlags CurrentFilterFlags = EAnimNotifyFilterFlags::None;
 };
 
 #undef LOCTEXT_NAMESPACE

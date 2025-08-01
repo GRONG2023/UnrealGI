@@ -5,9 +5,10 @@
  */
 
 #include "DrawDebugHelpers.h"
-#include "EngineGlobals.h"
+#include "Engine/GameInstance.h"
+#include "Engine/GameViewportClient.h"
 #include "Engine/Engine.h"
-#include "CanvasItem.h"
+#include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/WorldSettings.h"
 #include "Components/LineBatchComponent.h"
@@ -64,10 +65,28 @@ bool CanDrawServerDebugInContext(const FWorldContext& WorldContext)
 
 void FlushPersistentDebugLines( const UWorld* InWorld )
 {
-	if(InWorld && InWorld->PersistentLineBatcher)
+	if (GEngine->GetNetMode(InWorld) != NM_DedicatedServer)
 	{
-		InWorld->PersistentLineBatcher->Flush();
+		if (InWorld && InWorld->PersistentLineBatcher)
+		{
+			InWorld->PersistentLineBatcher->Flush();
+		}
 	}
+#if WITH_EDITOR
+	else
+	{
+		if (GIsEditor)
+		{
+			for (const FWorldContext& WorldContext : GEngine->GetWorldContexts())
+			{ 
+				if (CanDrawServerDebugInContext(WorldContext))
+				{
+					FlushPersistentDebugLines(WorldContext.World());
+				}
+			} 
+		}
+	}
+#endif
 }
 
 ULineBatchComponent* GetDebugLineBatcher( const UWorld* InWorld, bool bPersistentLines, float LifeTime, bool bDepthIsForeground )
@@ -119,31 +138,16 @@ void DrawDebugDirectionalArrow(const UWorld* InWorld, FVector const& LineStart, 
 	// no debug line drawing on dedicated server
 	if (GEngine->GetNetMode(InWorld) != NM_DedicatedServer)
 	{
-		if (ArrowSize <= 0)
+		if (ULineBatchComponent* const LineBatcher = GetDebugLineBatcher(InWorld, bPersistentLines, LifeTime, (DepthPriority == SDPG_Foreground)))
 		{
-			ArrowSize = 10.f;
+			float const LineLifeTime = GetDebugLineLifeTime(LineBatcher, LifeTime, bPersistentLines);
+			if (ArrowSize <= 0)
+			{
+				ArrowSize = 10.f;
+			}
+			
+			LineBatcher->DrawDirectionalArrow(LineStart, LineEnd, ArrowSize, Color, LineLifeTime, DepthPriority, Thickness);
 		}
-
-		DrawDebugLine(InWorld, LineStart, LineEnd, Color, bPersistentLines, LifeTime, DepthPriority, Thickness);
-
-		FVector Dir = (LineEnd-LineStart);
-		Dir.Normalize();
-		FVector Up(0, 0, 1);
-		FVector Right = Dir ^ Up;
-		if (!Right.IsNormalized())
-		{
-			Dir.FindBestAxisVectors(Up, Right);
-		}
-		FVector Origin = FVector::ZeroVector;
-		FMatrix TM;
-		// get matrix with dir/right/up
-		TM.SetAxes(&Dir, &Right, &Up, &Origin);
-
-		// since dir is x direction, my arrow will be pointing +y, -x and -y, -x
-		float ArrowSqrt = FMath::Sqrt(ArrowSize);
-		FVector ArrowPos;
-		DrawDebugLine(InWorld, LineEnd, LineEnd + TM.TransformPosition(FVector(-ArrowSqrt, ArrowSqrt, 0)), Color, bPersistentLines, LifeTime, DepthPriority, Thickness);
-		DrawDebugLine(InWorld, LineEnd, LineEnd + TM.TransformPosition(FVector(-ArrowSqrt, -ArrowSqrt, 0)), Color, bPersistentLines, LifeTime, DepthPriority, Thickness);
 	}
 	else
 	{
@@ -159,22 +163,8 @@ void DrawDebugBox(const UWorld* InWorld, FVector const& Center, FVector const& B
 		// this means foreground lines can't be persistent 
 		if (ULineBatchComponent* const LineBatcher = GetDebugLineBatcher(InWorld, bPersistentLines, LifeTime, (DepthPriority == SDPG_Foreground)))
 		{
-			float LineLifeTime = GetDebugLineLifeTime(LineBatcher, LifeTime, bPersistentLines);
-
-			LineBatcher->DrawLine(Center + FVector( Box.X,  Box.Y,  Box.Z), Center + FVector( Box.X, -Box.Y, Box.Z), Color, DepthPriority, Thickness, LineLifeTime);
-			LineBatcher->DrawLine(Center + FVector( Box.X, -Box.Y,  Box.Z), Center + FVector(-Box.X, -Box.Y, Box.Z), Color, DepthPriority, Thickness, LineLifeTime);
-			LineBatcher->DrawLine(Center + FVector(-Box.X, -Box.Y,  Box.Z), Center + FVector(-Box.X,  Box.Y, Box.Z), Color, DepthPriority, Thickness, LineLifeTime);
-			LineBatcher->DrawLine(Center + FVector(-Box.X,  Box.Y,  Box.Z), Center + FVector( Box.X,  Box.Y, Box.Z), Color, DepthPriority, Thickness, LineLifeTime);
-
-			LineBatcher->DrawLine(Center + FVector( Box.X,  Box.Y, -Box.Z), Center + FVector( Box.X, -Box.Y, -Box.Z), Color, DepthPriority, Thickness, LineLifeTime);
-			LineBatcher->DrawLine(Center + FVector( Box.X, -Box.Y, -Box.Z), Center + FVector(-Box.X, -Box.Y, -Box.Z), Color, DepthPriority, Thickness, LineLifeTime);
-			LineBatcher->DrawLine(Center + FVector(-Box.X, -Box.Y, -Box.Z), Center + FVector(-Box.X,  Box.Y, -Box.Z), Color, DepthPriority, Thickness, LineLifeTime);
-			LineBatcher->DrawLine(Center + FVector(-Box.X,  Box.Y, -Box.Z), Center + FVector( Box.X,  Box.Y, -Box.Z), Color, DepthPriority, Thickness, LineLifeTime);
-
-			LineBatcher->DrawLine(Center + FVector( Box.X,  Box.Y,  Box.Z), Center + FVector( Box.X,  Box.Y, -Box.Z), Color, DepthPriority, Thickness, LineLifeTime);
-			LineBatcher->DrawLine(Center + FVector( Box.X, -Box.Y,  Box.Z), Center + FVector( Box.X, -Box.Y, -Box.Z), Color, DepthPriority, Thickness, LineLifeTime);
-			LineBatcher->DrawLine(Center + FVector(-Box.X, -Box.Y,  Box.Z), Center + FVector(-Box.X, -Box.Y, -Box.Z), Color, DepthPriority, Thickness, LineLifeTime);
-			LineBatcher->DrawLine(Center + FVector(-Box.X,  Box.Y,  Box.Z), Center + FVector(-Box.X,  Box.Y, -Box.Z), Color, DepthPriority, Thickness, LineLifeTime);
+			const float BoxLifeTime = GetDebugLineLifeTime(LineBatcher, LifeTime, bPersistentLines);
+			LineBatcher->DrawBox(Center, Box, Color, BoxLifeTime, DepthPriority, Thickness);
 		}
 	}
 	else
@@ -191,59 +181,8 @@ void DrawDebugBox(const UWorld* InWorld, FVector const& Center, FVector const& B
 		// this means foreground lines can't be persistent 
 		if (ULineBatchComponent* const LineBatcher = GetDebugLineBatcher(InWorld, bPersistentLines, LifeTime, (DepthPriority == SDPG_Foreground)))
 		{
-			float const LineLifeTime = GetDebugLineLifeTime(LineBatcher, LifeTime, bPersistentLines);
-			TArray<struct FBatchedLine> Lines;
-
-			FTransform const Transform(Rotation);
-			FVector Start = Transform.TransformPosition(FVector( Box.X,  Box.Y,  Box.Z));
-			FVector End = Transform.TransformPosition(FVector( Box.X, -Box.Y, Box.Z));
-			new(Lines) FBatchedLine(Center + Start, Center + End, Color, LineLifeTime, Thickness, DepthPriority);
-
-			Start = Transform.TransformPosition(FVector( Box.X, -Box.Y,  Box.Z));
-			End = Transform.TransformPosition(FVector(-Box.X, -Box.Y, Box.Z));
-			new(Lines) FBatchedLine(Center + Start, Center + End, Color, LineLifeTime, Thickness, DepthPriority);
-
-			Start = Transform.TransformPosition(FVector(-Box.X, -Box.Y,  Box.Z));
-			End = Transform.TransformPosition(FVector(-Box.X,  Box.Y, Box.Z));
-			new(Lines) FBatchedLine(Center + Start, Center + End, Color, LineLifeTime, Thickness, DepthPriority);
-
-			Start = Transform.TransformPosition(FVector(-Box.X,  Box.Y,  Box.Z));
-			End = Transform.TransformPosition(FVector( Box.X,  Box.Y, Box.Z));
-			new(Lines) FBatchedLine(Center + Start, Center + End, Color, LineLifeTime, Thickness, DepthPriority);
-
-			Start = Transform.TransformPosition(FVector( Box.X,  Box.Y, -Box.Z));
-			End = Transform.TransformPosition(FVector( Box.X, -Box.Y, -Box.Z));
-			new(Lines) FBatchedLine(Center + Start, Center + End, Color, LineLifeTime, Thickness, DepthPriority);
-
-			Start = Transform.TransformPosition(FVector( Box.X, -Box.Y, -Box.Z));
-			End = Transform.TransformPosition(FVector(-Box.X, -Box.Y, -Box.Z));
-			new(Lines) FBatchedLine(Center + Start, Center + End, Color, LineLifeTime, Thickness, DepthPriority);
-
-			Start = Transform.TransformPosition(FVector(-Box.X, -Box.Y, -Box.Z));
-			End = Transform.TransformPosition(FVector(-Box.X,  Box.Y, -Box.Z));
-			new(Lines) FBatchedLine(Center + Start, Center + End, Color, LineLifeTime, Thickness, DepthPriority);
-
-			Start = Transform.TransformPosition(FVector(-Box.X,  Box.Y, -Box.Z));
-			End = Transform.TransformPosition(FVector( Box.X,  Box.Y, -Box.Z));
-			new(Lines )FBatchedLine(Center + Start, Center + End, Color, LineLifeTime, Thickness, DepthPriority);
-
-			Start = Transform.TransformPosition(FVector( Box.X,  Box.Y,  Box.Z));
-			End = Transform.TransformPosition(FVector( Box.X,  Box.Y, -Box.Z));
-			new(Lines) FBatchedLine(Center + Start, Center + End, Color, LineLifeTime, Thickness, DepthPriority);
-
-			Start = Transform.TransformPosition(FVector( Box.X, -Box.Y,  Box.Z));
-			End = Transform.TransformPosition(FVector( Box.X, -Box.Y, -Box.Z));
-			new(Lines) FBatchedLine(Center + Start, Center + End, Color, LineLifeTime, Thickness, DepthPriority);
-
-			Start = Transform.TransformPosition(FVector(-Box.X, -Box.Y,  Box.Z));
-			End = Transform.TransformPosition(FVector(-Box.X, -Box.Y, -Box.Z));
-			new(Lines) FBatchedLine(Center + Start, Center + End, Color, LineLifeTime, Thickness, DepthPriority);
-
-			Start = Transform.TransformPosition(FVector(-Box.X,  Box.Y,  Box.Z));
-			End = Transform.TransformPosition(FVector(-Box.X,  Box.Y, -Box.Z));
-			new(Lines) FBatchedLine(Center + Start, Center + End, Color, LineLifeTime, Thickness, DepthPriority);
-
-			LineBatcher->DrawLines(Lines);
+			float const BoxLifeTime = GetDebugLineLifeTime(LineBatcher, LifeTime, bPersistentLines);
+			LineBatcher->DrawBox(Center, Box, Rotation, Color, BoxLifeTime, DepthPriority, Thickness);
 		}
 	}
 	else
@@ -403,7 +342,7 @@ static void InternalDrawDebugCircle(const UWorld* InWorld, const FMatrix& Transf
 
 		// Need at least 4 segments
 		Segments = FMath::Max(Segments, 4);
-		const float AngleStep = 2.f * PI / float(Segments);
+		const float AngleStep = 2.f * UE_PI / float(Segments);
 
 		const FVector Center = TransformMatrix.GetOrigin();
 		const FVector AxisY = TransformMatrix.GetScaledAxis(EAxis::Y);
@@ -433,8 +372,6 @@ void DrawDebugCircle(const UWorld* InWorld, const FMatrix& TransformMatrix, floa
 		{
 			const float LineLifeTime = GetDebugLineLifeTime(LineBatcher, LifeTime, bPersistentLines);
 
-			// Need at least 4 segments
-			Segments = FMath::Max((Segments - 2) / 2, 4);
 			InternalDrawDebugCircle(InWorld, TransformMatrix, Radius, Segments, Color, bPersistentLines, LifeTime, DepthPriority, Thickness);
 
 			if (bDrawAxis)
@@ -479,6 +416,44 @@ void DrawDebugCircle(const UWorld* InWorld, FVector Center, float Radius, int32 
 	);
 }
 
+void DrawDebugCircleArc(const UWorld* InWorld, const FVector& Center, float Radius, const FVector& Direction, float AngleWidth, int32 Segments, const FColor& Color, bool PersistentLines, float LifeTime, uint8 DepthPriority, float Thickness)
+{
+	if (GEngine->GetNetMode(InWorld) != NM_DedicatedServer)
+	{
+		if (ULineBatchComponent* const LineBatcher = GetDebugLineBatcher(InWorld, PersistentLines, LifeTime, (DepthPriority == SDPG_Foreground)))
+		{
+			const float LineLifeTime = GetDebugLineLifeTime(LineBatcher, LifeTime, PersistentLines);
+
+			// Need at least 4 segments
+			Segments = FMath::Max(Segments, 4);
+			const float AngleStep = AngleWidth / float(Segments) * 2.f;
+
+			FVector AxisY, AxisZ;
+			FVector DirectionNorm = Direction.GetSafeNormal();
+			DirectionNorm.FindBestAxisVectors(AxisZ, AxisY);
+
+			TArray<FBatchedLine> Lines;
+			Lines.Empty(Segments);
+			float Angle = -AngleWidth;
+			FVector PrevVertex = Center + Radius * (AxisY * -FMath::Sin(Angle) + DirectionNorm * FMath::Cos(Angle));
+			while (Segments--)
+			{
+				Angle += AngleStep;
+				FVector NextVertex = Center + Radius * (AxisY * -FMath::Sin(Angle) + DirectionNorm * FMath::Cos(Angle));
+				Lines.Emplace(FBatchedLine(PrevVertex, NextVertex, Color, LineLifeTime, Thickness, DepthPriority));
+				PrevVertex = NextVertex;
+			}
+
+			LineBatcher->DrawLines(Lines);
+		}
+	}
+	else
+	{
+		UE_DRAW_SERVER_DEBUG_ON_EACH_CLIENT(DrawDebugCircleArc, Center, Radius, Direction, AngleWidth, Segments, AdjustColorForServer(Color), PersistentLines, LifeTime, DepthPriority, Thickness);
+	}
+
+}
+
 void DrawDebug2DDonut(const UWorld* InWorld, const FMatrix& TransformMatrix, float InnerRadius, float OuterRadius, int32 Segments, const FColor& Color, bool bPersistentLines, float LifeTime, uint8 DepthPriority, float Thickness)
 {
 	// no debug line drawing on dedicated server
@@ -520,52 +495,8 @@ void DrawDebugSphere(const UWorld* InWorld, FVector const& Center, float Radius,
 		// this means foreground lines can't be persistent 
 		if (ULineBatchComponent* const LineBatcher = GetDebugLineBatcher(InWorld, bPersistentLines, LifeTime, (DepthPriority == SDPG_Foreground)))
 		{
-			float LineLifeTime = GetDebugLineLifeTime(LineBatcher, LifeTime, bPersistentLines);
-
-			// Need at least 4 segments
-			Segments = FMath::Max(Segments, 4);
-
-			FVector Vertex1, Vertex2, Vertex3, Vertex4;
-			const float AngleInc = 2.f * PI / float(Segments);
-			int32 NumSegmentsY = Segments;
-			float Latitude = AngleInc;
-			int32 NumSegmentsX;
-			float Longitude;
-			float SinY1 = 0.0f, CosY1 = 1.0f, SinY2, CosY2;
-			float SinX, CosX;
-
-			TArray<FBatchedLine> Lines;
-			Lines.Empty(NumSegmentsY * Segments * 2);
-			while (NumSegmentsY--)
-			{
-				SinY2 = FMath::Sin(Latitude);
-				CosY2 = FMath::Cos(Latitude);
-
-				Vertex1 = FVector(SinY1, 0.0f, CosY1) * Radius + Center;
-				Vertex3 = FVector(SinY2, 0.0f, CosY2) * Radius + Center;
-				Longitude = AngleInc;
-
-				NumSegmentsX = Segments;
-				while (NumSegmentsX--)
-				{
-					SinX = FMath::Sin(Longitude);
-					CosX = FMath::Cos(Longitude);
-
-					Vertex2 = FVector((CosX * SinY1), (SinX * SinY1), CosY1) * Radius + Center;
-					Vertex4 = FVector((CosX * SinY2), (SinX * SinY2), CosY2) * Radius + Center;
-
-					Lines.Add(FBatchedLine(Vertex1, Vertex2, Color, LineLifeTime, Thickness, DepthPriority));
-					Lines.Add(FBatchedLine(Vertex1, Vertex3, Color, LineLifeTime, Thickness, DepthPriority));
-
-					Vertex1 = Vertex2;
-					Vertex3 = Vertex4;
-					Longitude += AngleInc;
-				}
-				SinY1 = SinY2;
-				CosY1 = CosY2;
-				Latitude += AngleInc;
-			}
-			LineBatcher->DrawLines(Lines);
+			const float SphereLifeTime = GetDebugLineLifeTime(LineBatcher, LifeTime, bPersistentLines);
+			LineBatcher->DrawSphere(Center, Radius, Segments, Color, SphereLifeTime, DepthPriority, Thickness);
 		}
 	}
 	else
@@ -582,46 +513,8 @@ void DrawDebugCylinder(const UWorld* InWorld, FVector const& Start, FVector cons
 		// this means foreground lines can't be persistent 
 		if (ULineBatchComponent* const LineBatcher = GetDebugLineBatcher(InWorld, bPersistentLines, LifeTime, (DepthPriority == SDPG_Foreground)))
 		{
-			// Need at least 4 segments
-			Segments = FMath::Max(Segments, 4);
-
-			// Rotate a point around axis to form cylinder segments
-			FVector Segment;
-			FVector P1, P2, P3, P4;
-			const float AngleInc = 360.f / Segments;
-			float Angle = AngleInc;
-
-			// Default for Axis is up
-			FVector Axis = (End - Start).GetSafeNormal();
-			if( Axis.IsZero() )
-			{
-				Axis = FVector(0.f, 0.f, 1.f);
-			}
-
-			FVector Perpendicular;
-			FVector Dummy;
-
-			Axis.FindBestAxisVectors(Perpendicular, Dummy);
-		
-			Segment = Perpendicular.RotateAngleAxis(0, Axis) * Radius;
-			P1 = Segment + Start;
-			P3 = Segment + End;
-
-			const float LineLifeTime = GetDebugLineLifeTime(LineBatcher, LifeTime, bPersistentLines);
-			while( Segments-- )
-			{
-				Segment = Perpendicular.RotateAngleAxis(Angle, Axis) * Radius;
-				P2 = Segment + Start;
-				P4 = Segment + End;
-
-				LineBatcher->DrawLine(P2, P4, Color, DepthPriority, Thickness, LineLifeTime);
-				LineBatcher->DrawLine(P1, P2, Color, DepthPriority, Thickness, LineLifeTime);
-				LineBatcher->DrawLine(P3, P4, Color, DepthPriority, Thickness, LineLifeTime);
-
-				P1 = P2;
-				P3 = P4;
-				Angle += AngleInc;
-			}
+			const float CylinderLifeTime = GetDebugLineLifeTime(LineBatcher, LifeTime, bPersistentLines);
+			LineBatcher->DrawCylinder(Start, End, Radius, Segments, Color, CylinderLifeTime, DepthPriority, Thickness);
 		}
 	}
 	else
@@ -704,81 +597,11 @@ void DrawDebugCone(const UWorld* InWorld, FVector const& Origin, FVector const& 
 	// no debug line drawing on dedicated server
 	if (GEngine->GetNetMode(InWorld) != NM_DedicatedServer)
 	{
-		// Need at least 4 sides
-		NumSides = FMath::Max(NumSides, 4);
-
-		const float Angle1 = FMath::Clamp<float>(AngleHeight, (float)KINDA_SMALL_NUMBER, (float)(PI - KINDA_SMALL_NUMBER));
-		const float Angle2 = FMath::Clamp<float>(AngleWidth, (float)KINDA_SMALL_NUMBER, (float)(PI - KINDA_SMALL_NUMBER));
-
-		const float SinX_2 = FMath::Sin(0.5f * Angle1);
-		const float SinY_2 = FMath::Sin(0.5f * Angle2);
-
-		const float SinSqX_2 = SinX_2 * SinX_2;
-		const float SinSqY_2 = SinY_2 * SinY_2;
-
-		const float TanX_2 = FMath::Tan(0.5f * Angle1);
-		const float TanY_2 = FMath::Tan(0.5f * Angle2);
-
-		TArray<FVector> ConeVerts;
-		ConeVerts.AddUninitialized(NumSides);
-
-		for(int32 i = 0; i < NumSides; i++)
-		{
-			const float Fraction	= (float)i/(float)(NumSides);
-			const float Thi			= 2.f * PI * Fraction;
-			const float Phi			= FMath::Atan2(FMath::Sin(Thi)*SinY_2, FMath::Cos(Thi)*SinX_2);
-			const float SinPhi		= FMath::Sin(Phi);
-			const float CosPhi		= FMath::Cos(Phi);
-			const float SinSqPhi	= SinPhi*SinPhi;
-			const float CosSqPhi	= CosPhi*CosPhi;
-
-			const float RSq			= SinSqX_2*SinSqY_2 / (SinSqX_2*SinSqPhi + SinSqY_2*CosSqPhi);
-			const float R			= FMath::Sqrt(RSq);
-			const float Sqr			= FMath::Sqrt(1-RSq);
-			const float Alpha		= R*CosPhi;
-			const float Beta		= R*SinPhi;
-
-			ConeVerts[i].X = (1 - 2*RSq);
-			ConeVerts[i].Y = 2 * Sqr * Alpha;
-			ConeVerts[i].Z = 2 * Sqr * Beta;
-		}
-
-		// Calculate transform for cone.
-		FVector YAxis, ZAxis;
-		FVector DirectionNorm = Direction.GetSafeNormal();
-		DirectionNorm.FindBestAxisVectors(YAxis, ZAxis);
-		const FMatrix ConeToWorld = FScaleMatrix(FVector(Length)) * FMatrix(DirectionNorm, YAxis, ZAxis, Origin);
-
 		// this means foreground lines can't be persistent 
 		if (ULineBatchComponent* const LineBatcher = GetDebugLineBatcher(InWorld, bPersistentLines, LifeTime, (DepthPriority == SDPG_Foreground)))
 		{
-			float const LineLifeTime = GetDebugLineLifeTime(LineBatcher, LifeTime, bPersistentLines);
-
-			TArray<FBatchedLine> Lines;
-			Lines.Empty(NumSides);
-
-			FVector CurrentPoint, PrevPoint, FirstPoint;
-			for(int32 i = 0; i < NumSides; i++)
-			{
-				CurrentPoint = ConeToWorld.TransformPosition(ConeVerts[i]);
-				Lines.Add(FBatchedLine(ConeToWorld.GetOrigin(), CurrentPoint, DrawColor, LineLifeTime, Thickness, DepthPriority));
-
-				// PrevPoint must be defined to draw junctions
-				if( i > 0 )
-				{
-					Lines.Add(FBatchedLine(PrevPoint, CurrentPoint, DrawColor, LineLifeTime, Thickness, DepthPriority));
-				}
-				else
-				{
-					FirstPoint = CurrentPoint;
-				}
-
-				PrevPoint = CurrentPoint;
-			}
-			// Connect last junction to first
-			Lines.Add(FBatchedLine(CurrentPoint, FirstPoint, DrawColor, LineLifeTime, Thickness, DepthPriority));
-
-			LineBatcher->DrawLines(Lines);
+			float const ConeLifeTime = GetDebugLineLifeTime(LineBatcher, LifeTime, bPersistentLines);
+			LineBatcher->DrawCone(Origin, Direction, Length, AngleWidth, AngleHeight, NumSides, DrawColor, ConeLifeTime, DepthPriority, Thickness);
 		}
 	}
 	else
@@ -873,24 +696,9 @@ void DrawDebugFrustum(const UWorld* InWorld, const FMatrix& FrustumToWorld, FCol
 	}
 }
 
-
-
-static void DrawHalfCircle(const UWorld* InWorld, const FVector& Base, const FVector& X, const FVector& Y, const FColor& Color, float Radius, int32 NumSides, bool bPersistentLines, float LifeTime, uint8 DepthPriority, float Thickness)
-{
-	float	AngleDelta = 2.0f * (float)PI / ((float)NumSides);
-	FVector	LastVertex = Base + X * Radius;
-
-	for(int32 SideIndex = 0; SideIndex < (NumSides/2); SideIndex++)
-	{
-		FVector	Vertex = Base + (X * FMath::Cos(AngleDelta * (SideIndex + 1)) + Y * FMath::Sin(AngleDelta * (SideIndex + 1))) * Radius;
-		DrawDebugLine(InWorld, LastVertex, Vertex, Color, bPersistentLines, LifeTime, DepthPriority, Thickness);
-		LastVertex = Vertex;
-	}	
-}
-
 void DrawCircle(const UWorld* InWorld, const FVector& Base, const FVector& X, const FVector& Y, const FColor& Color, float Radius, int32 NumSides, bool bPersistentLines, float LifeTime, uint8 DepthPriority, float Thickness)
 {
-	const float	AngleDelta = 2.0f * PI / NumSides;
+	const float	AngleDelta = 2.0f * UE_PI / NumSides;
 	FVector	LastVertex = Base + X * Radius;
 
 	for(int32 SideIndex = 0;SideIndex < NumSides;SideIndex++)
@@ -906,36 +714,11 @@ void DrawDebugCapsule(const UWorld* InWorld, FVector const& Center, float HalfHe
 	// no debug line drawing on dedicated server
 	if (GEngine->GetNetMode(InWorld) != NM_DedicatedServer)
 	{
-		const int32 DrawCollisionSides = 16;
-
-		FVector Origin = Center;
-		FMatrix Axes = FQuatRotationTranslationMatrix(Rotation, FVector::ZeroVector);
-		FVector XAxis = Axes.GetScaledAxis( EAxis::X );
-		FVector YAxis = Axes.GetScaledAxis( EAxis::Y );
-		FVector ZAxis = Axes.GetScaledAxis( EAxis::Z ); 
-
-		// Draw top and bottom circles
-		float HalfAxis = FMath::Max<float>(HalfHeight - Radius, 1.f);
-		FVector TopEnd = Origin + HalfAxis*ZAxis;
-		FVector BottomEnd = Origin - HalfAxis*ZAxis;
-
-		DrawCircle(InWorld, TopEnd, XAxis, YAxis, Color, Radius, DrawCollisionSides, bPersistentLines, LifeTime, DepthPriority, Thickness);
-		DrawCircle(InWorld, BottomEnd, XAxis, YAxis, Color, Radius, DrawCollisionSides, bPersistentLines, LifeTime, DepthPriority, Thickness);
-
-		// Draw domed caps
-		DrawHalfCircle(InWorld, TopEnd, YAxis, ZAxis, Color, Radius, DrawCollisionSides, bPersistentLines, LifeTime, DepthPriority, Thickness);
-		DrawHalfCircle(InWorld, TopEnd, XAxis, ZAxis, Color, Radius, DrawCollisionSides, bPersistentLines, LifeTime, DepthPriority, Thickness);
-
-		FVector NegZAxis = -ZAxis;
-
-		DrawHalfCircle(InWorld, BottomEnd, YAxis, NegZAxis, Color, Radius, DrawCollisionSides, bPersistentLines, LifeTime, DepthPriority, Thickness);
-		DrawHalfCircle(InWorld, BottomEnd, XAxis, NegZAxis, Color, Radius, DrawCollisionSides, bPersistentLines, LifeTime, DepthPriority, Thickness);
-
-		// Draw connected lines
-		DrawDebugLine(InWorld, TopEnd + Radius*XAxis, BottomEnd + Radius*XAxis, Color, bPersistentLines, LifeTime, DepthPriority, Thickness);
-		DrawDebugLine(InWorld, TopEnd - Radius*XAxis, BottomEnd - Radius*XAxis, Color, bPersistentLines, LifeTime, DepthPriority, Thickness);
-		DrawDebugLine(InWorld, TopEnd + Radius*YAxis, BottomEnd + Radius*YAxis, Color, bPersistentLines, LifeTime, DepthPriority, Thickness);
-		DrawDebugLine(InWorld, TopEnd - Radius*YAxis, BottomEnd - Radius*YAxis, Color, bPersistentLines, LifeTime, DepthPriority, Thickness);
+		if (ULineBatchComponent* const LineBatcher = GetDebugLineBatcher(InWorld, bPersistentLines, LifeTime, (DepthPriority == SDPG_Foreground)))
+		{
+			float const CapsuleLifeTime = GetDebugLineLifeTime(LineBatcher, LifeTime, bPersistentLines);
+			LineBatcher->DrawCapsule(Center, HalfHeight, Radius, Rotation, Color, CapsuleLifeTime, DepthPriority, Thickness);
+		}
 	}
 	else
 	{
@@ -989,6 +772,84 @@ void DrawDebugCamera(const UWorld* InWorld, FVector const& Location, FRotator co
 	}
 }
 
+// https://en.wikipedia.org/wiki/Centripetal_Catmull%E2%80%93Rom_spline
+void DrawCentripetalCatmullRomSpline(const UWorld* InWorld, TConstArrayView<FVector> Points, FColor const& Color, float Alpha, int32 NumSamplesPerSegment, bool bPersistentLines, float LifeTime, uint8 DepthPriority, float Thickness)
+{
+	TConstArrayView<FColor> Colors(&Color, 1);
+	DrawCentripetalCatmullRomSpline(InWorld, Points, Colors, Alpha, NumSamplesPerSegment, bPersistentLines, LifeTime, DepthPriority, Thickness);
+}
+
+void DrawCentripetalCatmullRomSpline(const UWorld* InWorld, TConstArrayView<FVector> Points, TConstArrayView<FColor> Colors, float Alpha, int32 NumSamplesPerSegment, bool bPersistentLines, float LifeTime, uint8 DepthPriority, float Thickness)
+{
+	const int32 NumPoints = Points.Num();
+	const int32 NumColors = Colors.Num();
+	if (NumPoints > 1)
+	{
+		auto GetT = [](float T, float Alpha, const FVector& P0, const FVector& P1)
+		{
+			const FVector P1P0 = P1 - P0;
+			const float Dot = P1P0 | P1P0;
+			const float Pow = FMath::Pow(Dot, Alpha * .5f);
+			return Pow + T;
+		};
+
+		auto LerpColor = [](FColor A, FColor B, float T) -> FColor
+		{
+			return FColor(
+				FMath::RoundToInt(float(A.R) * (1.f - T) + float(B.R) * T),
+				FMath::RoundToInt(float(A.G) * (1.f - T) + float(B.G) * T),
+				FMath::RoundToInt(float(A.B) * (1.f - T) + float(B.B) * T),
+				FMath::RoundToInt(float(A.A) * (1.f - T) + float(B.A) * T));
+		};
+
+		FVector PrevPoint = Points[0];
+		for (int i = 0; i < NumPoints - 1; ++i)
+		{
+			const FVector& P0 = Points[FMath::Max(i - 1, 0)];
+			const FVector& P1 = Points[i];
+			const FVector& P2 = Points[i + 1];
+			const FVector& P3 = Points[FMath::Min(i + 2, NumPoints - 1)];
+
+			const float T0 = 0.0f;
+			const float T1 = GetT(T0, Alpha, P0, P1);
+			const float T2 = GetT(T1, Alpha, P1, P2);
+			const float T3 = GetT(T2, Alpha, P2, P3);
+
+			const float T1T0 = T1 - T0;
+			const float T2T1 = T2 - T1;
+			const float T3T2 = T3 - T2;
+			const float T2T0 = T2 - T0;
+			const float T3T1 = T3 - T1;
+
+			const bool bIsNearlyZeroT1T0 = FMath::IsNearlyZero(T1T0, UE_KINDA_SMALL_NUMBER);
+			const bool bIsNearlyZeroT2T1 = FMath::IsNearlyZero(T2T1, UE_KINDA_SMALL_NUMBER);
+			const bool bIsNearlyZeroT3T2 = FMath::IsNearlyZero(T3T2, UE_KINDA_SMALL_NUMBER);
+			const bool bIsNearlyZeroT2T0 = FMath::IsNearlyZero(T2T0, UE_KINDA_SMALL_NUMBER);
+			const bool bIsNearlyZeroT3T1 = FMath::IsNearlyZero(T3T1, UE_KINDA_SMALL_NUMBER);
+
+			const FColor Color1 = Colors[FMath::Min(i, NumColors - 1)];
+			const FColor Color2 = Colors[FMath::Min(i + 1, NumColors - 1)];
+
+			for (int SampleIndex = 1; SampleIndex < NumSamplesPerSegment; ++SampleIndex)
+			{
+				const float ParametricDistance = float(SampleIndex) / float(NumSamplesPerSegment - 1);
+
+				const float T = FMath::Lerp(T1, T2, ParametricDistance);
+
+				const FVector A1 = bIsNearlyZeroT1T0 ? P0 : (T1 - T) / T1T0 * P0 + (T - T0) / T1T0 * P1;
+				const FVector A2 = bIsNearlyZeroT2T1 ? P1 : (T2 - T) / T2T1 * P1 + (T - T1) / T2T1 * P2;
+				const FVector A3 = bIsNearlyZeroT3T2 ? P2 : (T3 - T) / T3T2 * P2 + (T - T2) / T3T2 * P3;
+				const FVector B1 = bIsNearlyZeroT2T0 ? A1 : (T2 - T) / T2T0 * A1 + (T - T0) / T2T0 * A2;
+				const FVector B2 = bIsNearlyZeroT3T1 ? A2 : (T3 - T) / T3T1 * A2 + (T - T1) / T3T1 * A3;
+				const FVector Point = bIsNearlyZeroT2T1 ? B1 : (T2 - T) / T2T1 * B1 + (T - T1) / T2T1 * B2;
+
+				DrawDebugLine(InWorld, PrevPoint, Point, LerpColor(Color1, Color2, ParametricDistance), bPersistentLines, LifeTime, DepthPriority, Thickness);
+
+				PrevPoint = Point;
+			}
+		}
+	}
+}
 
 void DrawDebugFloatHistory(UWorld const & WorldRef, FDebugFloatHistory const & FloatHistory, FTransform const & DrawTransform, FVector2D const & DrawSize, FColor const & DrawColor, bool const & bPersistent, float const & LifeTime, uint8 const & DepthPriority)
 {
@@ -999,7 +860,7 @@ void DrawDebugFloatHistory(UWorld const & WorldRef, FDebugFloatHistory const & F
 		FVector const AxisX = DrawTransform.GetUnitAxis(EAxis::Y);
 		FVector const AxisY = DrawTransform.GetUnitAxis(EAxis::Z);
 		FVector const AxisXStep = AxisX *  DrawSize.X / float(NumSamples);
-		FVector const AxisYStep = AxisY *  DrawSize.Y / FMath::Max(FloatHistory.GetMinMaxRange(), KINDA_SMALL_NUMBER);
+		FVector const AxisYStep = AxisY *  DrawSize.Y / FMath::Max(FloatHistory.GetMinMaxRange(), UE_KINDA_SMALL_NUMBER);
 
 		// Frame
 		DrawDebugLine(&WorldRef, DrawLocation, DrawLocation + AxisX * DrawSize.X, DrawColor, bPersistent, LifeTime, DepthPriority);
@@ -1064,10 +925,23 @@ void DrawDebugCanvasLine(UCanvas* Canvas, const FVector& Start, const FVector& E
 
 void DrawDebugCanvasCircle(UCanvas* Canvas, const FVector& Base, const FVector& X, const FVector& Y, FColor Color, float Radius, int32 NumSides)
 {
-	const float	AngleDelta = 2.0f * PI / NumSides;
+	const float	AngleDelta = 2.0f * UE_PI / NumSides;
 	FVector	LastVertex = Base + X * Radius;
 
 	for(int32 SideIndex = 0;SideIndex < NumSides;SideIndex++)
+	{
+		const FVector Vertex = Base + (X * FMath::Cos(AngleDelta * (SideIndex + 1)) + Y * FMath::Sin(AngleDelta * (SideIndex + 1))) * Radius;
+		DrawDebugCanvasLine(Canvas, LastVertex, Vertex, Color);
+		LastVertex = Vertex;
+	}
+}
+
+void DrawDebugCanvasHalfCircle(UCanvas* Canvas, const FVector& Base, const FVector& X, const FVector& Y, FColor Color, float Radius, int32 NumSides)
+{
+	const float	AngleDelta = 2.0f * UE_PI / NumSides;
+	FVector	LastVertex = Base + X * Radius;
+
+	for (int32 SideIndex = 0;SideIndex < NumSides / 2;SideIndex++)
 	{
 		const FVector Vertex = Base + (X * FMath::Cos(AngleDelta * (SideIndex + 1)) + Y * FMath::Sin(AngleDelta * (SideIndex + 1))) * Radius;
 		DrawDebugCanvasLine(Canvas, LastVertex, Vertex, Color);
@@ -1084,8 +958,8 @@ void DrawDebugCanvasWireSphere(UCanvas* Canvas, const FVector& Base, FColor Colo
 
 void DrawDebugCanvasWireCone(UCanvas* Canvas, const FTransform& Transform, float ConeRadius, float ConeAngle, int32 ConeSides, FColor Color)
 {
-	static const float TwoPI = 2.0f * PI;
-	static const float ToRads = PI / 180.0f;
+	static const float TwoPI = 2.0f * UE_PI;
+	static const float ToRads = UE_PI / 180.0f;
 	static const float MaxAngle = 89.0f * ToRads + 0.001f;
 	const float ClampedConeAngle = FMath::Clamp(ConeAngle * ToRads, 0.001f, MaxAngle);
 	const float SinClampedConeAngle = FMath::Sin( ClampedConeAngle );
@@ -1125,6 +999,66 @@ void DrawDebugCanvasWireCone(UCanvas* Canvas, const FTransform& Transform, float
 	DrawDebugCanvasLine( Canvas, Verts[Verts.Num()-1], Verts[0], Color );
 }
 
+void DrawDebugCanvasWireBox(UCanvas* Canvas, const FMatrix& Transform, const FBox& Box, FColor Color)
+{
+	const FVector Vertices[] =
+	{
+		Transform.TransformPosition(FVector(Box.Min.X, Box.Min.Y, Box.Min.Z)),
+		Transform.TransformPosition(FVector(Box.Min.X, Box.Min.Y, Box.Max.Z)),
+		Transform.TransformPosition(FVector(Box.Min.X, Box.Max.Y, Box.Min.Z)),
+		Transform.TransformPosition(FVector(Box.Min.X, Box.Max.Y, Box.Max.Z)),
+		Transform.TransformPosition(FVector(Box.Max.X, Box.Min.Y, Box.Min.Z)),
+		Transform.TransformPosition(FVector(Box.Max.X, Box.Min.Y, Box.Max.Z)),
+		Transform.TransformPosition(FVector(Box.Max.X, Box.Max.Y, Box.Min.Z)),
+		Transform.TransformPosition(FVector(Box.Max.X, Box.Max.Y, Box.Max.Z))
+	};
+
+	const FIntVector2 Edges[] =
+	{
+		{ 0, 1 }, { 2, 3 },	{ 4, 5 }, { 6, 7 },
+		{ 0, 4 }, { 4, 6 },	{ 6, 2 }, { 2, 0 },
+		{ 1, 5 }, { 5, 7 },	{ 7, 3 }, { 3, 1 }
+	};
+
+	for (const FIntVector2& Edge : Edges)
+	{
+		DrawDebugCanvasLine(Canvas, Vertices[Edge.X], Vertices[Edge.Y], Color);
+	}
+}
+
+void DrawDebugCanvasCapsule(UCanvas* Canvas, const FMatrix& Transform, float HalfLength, float Radius, const FColor& LineColor)
+{
+	constexpr int32 DrawCollisionSides = 16;
+
+	FVector Origin = Transform.GetOrigin();
+	FVector XAxis = Transform.GetScaledAxis(EAxis::X);
+	FVector YAxis = Transform.GetScaledAxis(EAxis::Y);
+	FVector ZAxis = Transform.GetScaledAxis(EAxis::Z);
+
+	// Draw top and bottom circles
+	float HalfAxis = FMath::Max<float>(HalfLength - Radius, 1.f);
+	FVector TopEnd = Origin + HalfAxis * ZAxis;
+	FVector BottomEnd = Origin - HalfAxis * ZAxis;
+
+	DrawDebugCanvasCircle(Canvas, TopEnd, XAxis, YAxis, LineColor, Radius, DrawCollisionSides);
+	DrawDebugCanvasCircle(Canvas, BottomEnd, XAxis, YAxis, LineColor, Radius, DrawCollisionSides);
+
+	// Draw domed caps
+	DrawDebugCanvasHalfCircle(Canvas, TopEnd, YAxis, ZAxis, LineColor, Radius, DrawCollisionSides);
+	DrawDebugCanvasHalfCircle(Canvas, TopEnd, XAxis, ZAxis, LineColor, Radius, DrawCollisionSides);
+
+	FVector NegZAxis = -ZAxis;
+
+	DrawDebugCanvasHalfCircle(Canvas, BottomEnd, YAxis, NegZAxis, LineColor, Radius, DrawCollisionSides);
+	DrawDebugCanvasHalfCircle(Canvas, BottomEnd, XAxis, NegZAxis, LineColor, Radius, DrawCollisionSides);
+
+	// Draw connected lines
+	DrawDebugCanvasLine(Canvas, TopEnd + Radius * XAxis, BottomEnd + Radius * XAxis, LineColor);
+	DrawDebugCanvasLine(Canvas, TopEnd - Radius * XAxis, BottomEnd - Radius * XAxis, LineColor);
+	DrawDebugCanvasLine(Canvas, TopEnd + Radius * YAxis, BottomEnd + Radius * YAxis, LineColor);
+	DrawDebugCanvasLine(Canvas, TopEnd - Radius * YAxis, BottomEnd - Radius * YAxis, LineColor);
+}
+
 //
 // Canvas 2D
 //
@@ -1142,7 +1076,7 @@ void DrawDebugCanvas2DLine(UCanvas* Canvas, const FVector2D& StartPosition, cons
 
 void DrawDebugCanvas2DCircle(UCanvas* Canvas, const FVector2D& Center, float Radius, int32 NumSides, const FLinearColor& LineColor, const float& LineThickness)
 {
-	const float	AngleDelta = 2.0f * PI / NumSides;
+	const float	AngleDelta = 2.0f * UE_PI / NumSides;
 	FVector2D AxisX(1.f, 0.f);
 	FVector2D AxisY(0.f, -1.f);
 	FVector2D LastVertex = Center + AxisX * Radius;

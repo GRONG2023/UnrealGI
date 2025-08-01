@@ -6,6 +6,10 @@
 #include "Animation/AnimInstanceProxy.h"
 #include "Animation/AnimSequence.h"
 #include "Animation/AnimTrace.h"
+#include "Animation/AnimStats.h"
+#include "Animation/AnimSyncScope.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNode_RandomPlayer)
 
 FAnimNode_RandomPlayer::FAnimNode_RandomPlayer()
     : CurrentPlayDataIndex(0)
@@ -48,7 +52,7 @@ void FAnimNode_RandomPlayer::Initialize_AnyThread(const FAnimationInitializeCont
 	}
 
 	NormalizedPlayChances.Empty(NormalizedPlayChances.Num());
-	NormalizedPlayChances.AddUninitialized(NumValidEntries + 1);
+	NormalizedPlayChances.AddUninitialized(NumValidEntries);
 
 	// Sanitize the data and sum up the range of the random chances so that
 	// we can normalize the individual chances below.
@@ -64,7 +68,7 @@ void FAnimNode_RandomPlayer::Initialize_AnyThread(const FAnimationInitializeCont
 
 		if (Entry->MaxPlayRate < Entry->MinPlayRate)
 		{
-			Swap(Entry->MaxLoopCount, Entry->MinLoopCount);
+			Swap(Entry->MaxPlayRate, Entry->MinPlayRate);
 		}
 
 		Entry->BlendIn.Reset();
@@ -89,7 +93,8 @@ void FAnimNode_RandomPlayer::Initialize_AnyThread(const FAnimationInitializeCont
 			CurrentChance += ValidEntries[Idx]->ChanceToPlay / SumChances;
 			NormalizedPlayChances[Idx] = CurrentChance;
 		}
-		NormalizedPlayChances[NumValidEntries] = 1.0f;
+		// Remove rounding errors (possibly slightly padding out the chance of the last item)
+		NormalizedPlayChances[NumValidEntries - 1] = 1.0f;
 	}
 
 	// Initialize random stream and pick first entry
@@ -112,6 +117,8 @@ void FAnimNode_RandomPlayer::Initialize_AnyThread(const FAnimationInitializeCont
 
 void FAnimNode_RandomPlayer::Update_AnyThread(const FAnimationUpdateContext& Context)
 {
+	BlendWeight = Context.GetFinalBlendWeight();
+
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_ANIMNODE(Update_AnyThread)
 	GetEvaluateGraphExposedInputs().Execute(Context);
 
@@ -124,14 +131,14 @@ void FAnimNode_RandomPlayer::Update_AnyThread(const FAnimationUpdateContext& Con
 	FRandomAnimPlayData* CurrentData = &GetPlayData(ERandomDataIndexType::Current);
 	FRandomAnimPlayData* NextData = &GetPlayData(ERandomDataIndexType::Next);
 
-	const UAnimSequence* CurrentSequence = CurrentData->Entry->Sequence;
+	const UAnimSequenceBase* CurrentSequence = CurrentData->Entry->Sequence;
 
 	// If we looped around, adjust the previous play time to always be before the current playtime,
 	// since we can assume modulo. This makes the crossing check for the start time a lot simpler.
-	float AdjustedPreviousPlayTime = CurrentData->PreviousPlayTime;
+	float AdjustedPreviousPlayTime = CurrentData->DeltaTimeRecord.GetPrevious();
 	if (CurrentData->CurrentPlayTime < AdjustedPreviousPlayTime)
 	{
-		AdjustedPreviousPlayTime -= CurrentSequence->SequenceLength;
+		AdjustedPreviousPlayTime -= CurrentSequence->GetPlayLength();
 	}
 
 	// Did we cross the play start time? Decrement the loop counter. Once we're on the last loop, we can
@@ -171,10 +178,10 @@ void FAnimNode_RandomPlayer::Update_AnyThread(const FAnimationUpdateContext& Con
 				float AmountPlayedSoFar = CurrentData->CurrentPlayTime - CurrentData->PlayStartTime;
 				if (AmountPlayedSoFar < 0.0f)
 				{
-					AmountPlayedSoFar += CurrentSequence->SequenceLength;
+					AmountPlayedSoFar += CurrentSequence->GetPlayLength();
 				}
 
-				float TimeRemaining = CurrentSequence->SequenceLength - AmountPlayedSoFar;
+				float TimeRemaining = CurrentSequence->GetPlayLength() - AmountPlayedSoFar;
 
 				if (TimeRemaining <= NextSequenceEntry.BlendIn.GetBlendTime() || bHasLooped)
 				{
@@ -218,8 +225,8 @@ void FAnimNode_RandomPlayer::Update_AnyThread(const FAnimationUpdateContext& Con
 	}
 
 	// Cache time to detect loops
-	CurrentData->PreviousPlayTime = CurrentData->CurrentPlayTime;
-	NextData->PreviousPlayTime = NextData->CurrentPlayTime;
+	CurrentData->DeltaTimeRecord.SetPrevious(CurrentData->CurrentPlayTime);
+	NextData->DeltaTimeRecord.SetPrevious(NextData->CurrentPlayTime);
 
 	if (bAdvanceToNextEntry)
 	{
@@ -230,22 +237,23 @@ void FAnimNode_RandomPlayer::Update_AnyThread(const FAnimationUpdateContext& Con
 		NextData = &GetPlayData(ERandomDataIndexType::Next);
 	}
 
-	FAnimInstanceProxy* AnimProxy = Context.AnimInstanceProxy;
-	FAnimGroupInstance* SyncGroup;
-	FAnimTickRecord& TickRecord = AnimProxy->CreateUninitializedTickRecord(SyncGroup, NAME_None);
-	AnimProxy->MakeSequenceTickRecord(
-	    TickRecord, CurrentData->Entry->Sequence, true, CurrentData->PlayRate,
-	    CurrentData->BlendWeight, CurrentData->CurrentPlayTime, CurrentData->MarkerTickRecord);
-	
+	FAnimTickRecord TickRecord(CurrentData->Entry->Sequence, true, CurrentData->PlayRate, false, CurrentData->BlendWeight, CurrentData->CurrentPlayTime, CurrentData->MarkerTickRecord);
+	TickRecord.DeltaTimeRecord = &CurrentData->DeltaTimeRecord;
+	TickRecord.GatherContextData(Context);
+
+	UE::Anim::FAnimSyncGroupScope& SyncScope = Context.GetMessageChecked<UE::Anim::FAnimSyncGroupScope>();
+	SyncScope.AddTickRecord(TickRecord, UE::Anim::FAnimSyncParams(), UE::Anim::FAnimSyncDebugInfo(Context));
+
 	TRACE_ANIM_TICK_RECORD(Context, TickRecord);
 
 	if (FAnimationRuntime::HasWeight(NextData->BlendWeight))
 	{
-		FAnimTickRecord& NextTickRecord = AnimProxy->CreateUninitializedTickRecord(SyncGroup, NAME_None);
-		AnimProxy->MakeSequenceTickRecord(
-		    NextTickRecord, NextData->Entry->Sequence, true, NextData->PlayRate,
-		    NextData->BlendWeight, NextData->CurrentPlayTime, NextData->MarkerTickRecord);
-			
+		FAnimTickRecord NextTickRecord(NextData->Entry->Sequence, true, NextData->PlayRate, false, NextData->BlendWeight, NextData->CurrentPlayTime, NextData->MarkerTickRecord);
+		NextTickRecord.DeltaTimeRecord = &NextData->DeltaTimeRecord;
+		NextTickRecord.GatherContextData(Context);
+
+		SyncScope.AddTickRecord(NextTickRecord, UE::Anim::FAnimSyncParams(), UE::Anim::FAnimSyncDebugInfo(Context));
+
 		TRACE_ANIM_TICK_RECORD(Context, NextTickRecord);
 	}
 
@@ -258,6 +266,8 @@ void FAnimNode_RandomPlayer::Update_AnyThread(const FAnimationUpdateContext& Con
 void FAnimNode_RandomPlayer::Evaluate_AnyThread(FPoseContext& Output)
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_ANIMNODE(Evaluate_AnyThread)
+	ANIM_MT_SCOPE_CYCLE_COUNTER_VERBOSE(RandomPlayer, !IsInGameThread());
+
 	if (ValidEntries.Num() == 0)
 	{
 		Output.ResetToRefPose();
@@ -267,7 +277,7 @@ void FAnimNode_RandomPlayer::Evaluate_AnyThread(FPoseContext& Output)
 	FRandomAnimPlayData& CurrentData = GetPlayData(ERandomDataIndexType::Current);
 	FRandomAnimPlayData& NextData = GetPlayData(ERandomDataIndexType::Next);
 
-	UAnimSequence* CurrentSequence = CurrentData.Entry->Sequence;
+	UAnimSequenceBase* CurrentSequence = CurrentData.Entry->Sequence;
 
 	if (!FMath::IsNearlyEqualByULP(CurrentData.BlendWeight, 1.0f))
 	{
@@ -276,7 +286,7 @@ void FAnimNode_RandomPlayer::Evaluate_AnyThread(FPoseContext& Output)
 		// Start Blending
 		FCompactPose Poses[2];
 		FBlendedCurve Curves[2];
-		FStackCustomAttributes Attributes[2];
+		UE::Anim::FStackAttributeContainer Attributes[2];
 		float Weights[2];
 
 		const FBoneContainer& RequiredBone = AnimProxy->GetRequiredBones();
@@ -289,14 +299,13 @@ void FAnimNode_RandomPlayer::Evaluate_AnyThread(FPoseContext& Output)
 		Weights[0] = CurrentData.BlendWeight;
 		Weights[1] = NextData.BlendWeight;
 
-		UAnimSequence* NextSequence = NextData.Entry->Sequence;
-
+		UAnimSequenceBase* NextSequence = NextData.Entry->Sequence;
 
 		FAnimationPoseData CurrentPoseData(Poses[0], Curves[0], Attributes[0]);
 		FAnimationPoseData NextPoseData(Poses[1], Curves[1], Attributes[1]);
 
-		CurrentSequence->GetAnimationPose(CurrentPoseData, FAnimExtractContext(CurrentData.CurrentPlayTime, AnimProxy->ShouldExtractRootMotion()));
-		NextSequence->GetAnimationPose(NextPoseData, FAnimExtractContext(NextData.CurrentPlayTime, AnimProxy->ShouldExtractRootMotion()));
+		CurrentSequence->GetAnimationPose(CurrentPoseData, FAnimExtractContext(static_cast<double>(CurrentData.CurrentPlayTime), AnimProxy->ShouldExtractRootMotion(), CurrentData.DeltaTimeRecord, CurrentData.RemainingLoops > 0));
+		NextSequence->GetAnimationPose(NextPoseData, FAnimExtractContext(static_cast<double>(NextData.CurrentPlayTime), AnimProxy->ShouldExtractRootMotion(), NextData.DeltaTimeRecord, NextData.RemainingLoops > 0));
 
 		FAnimationPoseData AnimationPoseData(Output);
 		FAnimationRuntime::BlendPosesTogether(Poses, Curves, Attributes, Weights, AnimationPoseData);
@@ -305,7 +314,7 @@ void FAnimNode_RandomPlayer::Evaluate_AnyThread(FPoseContext& Output)
 	{
 		// Single animation, no blending needed.
 		FAnimationPoseData AnimationPoseData(Output);
-		CurrentSequence->GetAnimationPose(AnimationPoseData, FAnimExtractContext(CurrentData.CurrentPlayTime, Output.AnimInstanceProxy->ShouldExtractRootMotion()));
+		CurrentSequence->GetAnimationPose(AnimationPoseData, FAnimExtractContext(static_cast<double>(CurrentData.CurrentPlayTime), Output.AnimInstanceProxy->ShouldExtractRootMotion(), CurrentData.DeltaTimeRecord, CurrentData.RemainingLoops > 0));
 	}
 }
 
@@ -317,6 +326,73 @@ void FAnimNode_RandomPlayer::GatherDebugData(FNodeDebugData& DebugData)
 	DebugData.AddDebugItem(DebugLine, true);
 }
 
+UAnimationAsset* FAnimNode_RandomPlayer::GetAnimAsset() const
+{
+	UAnimationAsset* AnimationAsset = nullptr;
+
+	if (ValidEntries.Num() > 0)
+	{
+		const FRandomAnimPlayData& CurrentPlayData = GetPlayData(ERandomDataIndexType::Current);
+		AnimationAsset = (CurrentPlayData.Entry != nullptr) ? CurrentPlayData.Entry->Sequence : nullptr;
+	}
+
+	return AnimationAsset;
+}
+
+float FAnimNode_RandomPlayer::GetAccumulatedTime() const
+{
+	float AccumulatedTime = 0.f;
+
+	if (ValidEntries.Num() > 0)
+	{
+		const FRandomAnimPlayData& CurrentPlayData = GetPlayData(ERandomDataIndexType::Current);
+
+		return CurrentPlayData.CurrentPlayTime;
+	}
+
+	return AccumulatedTime;
+}
+
+bool FAnimNode_RandomPlayer::GetIgnoreForRelevancyTest() const
+{
+	return GET_ANIM_NODE_DATA(bool, bIgnoreForRelevancyTest);
+}
+
+bool FAnimNode_RandomPlayer::SetIgnoreForRelevancyTest(bool bInIgnoreForRelevancyTest)
+{
+#if WITH_EDITORONLY_DATA
+	bIgnoreForRelevancyTest = bInIgnoreForRelevancyTest;
+#endif
+
+	if (bool* bIgnoreForRelevancyTestPtr = GET_INSTANCE_ANIM_NODE_DATA_PTR(bool, bIgnoreForRelevancyTest))
+	{
+		*bIgnoreForRelevancyTestPtr = bInIgnoreForRelevancyTest;
+		return true;
+	}
+
+	return false;
+}
+
+float FAnimNode_RandomPlayer::GetCachedBlendWeight() const
+{
+	return BlendWeight;
+}
+
+void FAnimNode_RandomPlayer::ClearCachedBlendWeight()
+{
+	BlendWeight = 0.f;
+}
+
+const FDeltaTimeRecord* FAnimNode_RandomPlayer::GetDeltaTimeRecord() const
+{
+	if (ValidEntries.Num() > 0)
+	{
+		const FRandomAnimPlayData& CurrentPlayData = GetPlayData(ERandomDataIndexType::Current);
+		return &CurrentPlayData.DeltaTimeRecord;
+	}
+	return nullptr;
+}
+
 int32 FAnimNode_RandomPlayer::GetNextValidEntryIndex()
 {
 	check(ValidEntries.Num() > 0);
@@ -324,7 +400,7 @@ int32 FAnimNode_RandomPlayer::GetNextValidEntryIndex()
 	if (bShuffleMode)
 	{
 		// Get the top value, don't allow realloc
-		int32 Index = ShuffleList.Pop(false);
+		int32 Index = ShuffleList.Pop(EAllowShrinking::No);
 
 		// If we cleared the shuffles, rebuild for the next round, indicating
 		// the current value so that we don't pop that one off again next time.
@@ -359,18 +435,23 @@ FRandomAnimPlayData& FAnimNode_RandomPlayer::GetPlayData(ERandomDataIndexType Ty
 	}
 }
 
-void FAnimNode_RandomPlayer::InitPlayData(FRandomAnimPlayData& Data, int32 ValidEntryIndex, float BlendWeight)
+const FRandomAnimPlayData& FAnimNode_RandomPlayer::GetPlayData(ERandomDataIndexType Type) const
 {
-	FRandomPlayerSequenceEntry* Entry = ValidEntries[ValidEntryIndex];
+	return const_cast<FAnimNode_RandomPlayer*>(this)->GetPlayData(Type);
+}
+
+void FAnimNode_RandomPlayer::InitPlayData(FRandomAnimPlayData& Data, int32 InValidEntryIndex, float InBlendWeight)
+{
+	FRandomPlayerSequenceEntry* Entry = ValidEntries[InValidEntryIndex];
 
 	Data.Entry = Entry;
-	Data.BlendWeight = BlendWeight;
-	Data.PlayRate = RandomStream.FRandRange(Entry->MinPlayRate, Entry->MaxPlayRate);
+	Data.BlendWeight = InBlendWeight;
+	Data.PlayRate = static_cast<float>(RandomStream.FRandRange(Entry->MinPlayRate, Entry->MaxPlayRate));
 	Data.RemainingLoops = FMath::Clamp(RandomStream.RandRange(Entry->MinLoopCount, Entry->MaxLoopCount), 0, MAX_int32);
 
 	Data.PlayStartTime = 0.0f;
 	Data.CurrentPlayTime = 0.0f;
-	Data.PreviousPlayTime = 0.0f;
+	Data.DeltaTimeRecord = FDeltaTimeRecord();
 	Data.MarkerTickRecord.Reset();
 }
 
@@ -420,3 +501,4 @@ void FAnimNode_RandomPlayer::BuildShuffleList(int32 LastEntry)
 		ShuffleList.Swap(RandomStream.RandRange(0, ShuffleList.Num() - 2), ShuffleList.Num() - 1);
 	}
 }
+

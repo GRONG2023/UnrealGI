@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Materials/MaterialExpressionCustomOutput.h"
-
+#include "MaterialValueType.h"
 #include "MaterialExpressionLandscapePhysicalMaterialOutput.generated.h"
 
 /** Structure linking a material expression input with a physical material. For use by UMaterialExpressionLandscapePhysicalMaterialOutput. */
@@ -14,7 +14,7 @@ struct FPhysicalMaterialInput
 	GENERATED_USTRUCT_BODY()
 
 	UPROPERTY(EditAnywhere, Category = PhysicalMaterial)
-	class UPhysicalMaterial* PhysicalMaterial;
+	TObjectPtr<class UPhysicalMaterial> PhysicalMaterial;
 
 	UPROPERTY(meta = (RequiredInput = "true"))
 	FExpressionInput Input;
@@ -29,8 +29,8 @@ struct FPhysicalMaterialInput
  * This can be used to generate the dominant physical material for each point on a landscape.
  * Note that the use of a material output node to generate this information is optional and when a node of this type is not present we fall back on a CPU path which analyzes landscape layer data.
  */
-UCLASS(collapsecategories, hidecategories=Object)
-class LANDSCAPE_API UMaterialExpressionLandscapePhysicalMaterialOutput : public UMaterialExpressionCustomOutput
+UCLASS(collapsecategories, hidecategories=Object, MinimalAPI)
+class UMaterialExpressionLandscapePhysicalMaterialOutput : public UMaterialExpressionCustomOutput
 {
 	GENERATED_UCLASS_BODY()
 
@@ -40,21 +40,27 @@ class LANDSCAPE_API UMaterialExpressionLandscapePhysicalMaterialOutput : public 
 
 #if WITH_EDITOR
 	//~ Begin UObject Interface
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	LANDSCAPE_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 	//~ End UObject Interface
 
 	//~ Begin UMaterialExpression Interface
-	virtual void GetCaption(TArray<FString>& OutCaptions) const override;
-	virtual const TArray<FExpressionInput*> GetInputs() override;
-	virtual FExpressionInput* GetInput(int32 InputIndex) override;
-	virtual FName GetInputName(int32 InputIndex) const override;
+	LANDSCAPE_API virtual void GetCaption(TArray<FString>& OutCaptions) const override;
+	LANDSCAPE_API virtual TArrayView<FExpressionInput*> GetInputsView() override;
+	LANDSCAPE_API virtual FExpressionInput* GetInput(int32 InputIndex) override;
+	LANDSCAPE_API virtual FName GetInputName(int32 InputIndex) const override;
 	virtual uint32 GetInputType(int32 InputIndex) override { return MCT_Float; }
-	virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
+	LANDSCAPE_API virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
+
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
 	//~ End UMaterialExpression Interface
 #endif
 
 	//~ Begin UMaterialExpressionCustomOutput Interface
 	virtual int32 GetNumOutputs() const override { return Inputs.Num(); }
 	virtual FString GetFunctionName() const override { return TEXT("GetPhysicalMaterial"); }
+
+#if WITH_EDITOR
+	virtual UE::Shader::EValueType GetCustomOutputType(int32 OutputIndex) const override;
+#endif
 	//~ End UMaterialExpressionCustomOutput Interface
 };

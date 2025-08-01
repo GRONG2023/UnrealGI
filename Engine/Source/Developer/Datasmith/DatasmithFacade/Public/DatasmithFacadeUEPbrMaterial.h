@@ -328,9 +328,11 @@ public:
 	FDatasmithFacadeExpressionInput GetEmissiveColor() const;
 	FDatasmithFacadeExpressionInput GetOpacity() const;
 	FDatasmithFacadeExpressionInput GetNormal() const;
-	FDatasmithFacadeExpressionInput GetWorldDisplacement() const;
 	FDatasmithFacadeExpressionInput GetRefraction() const;
 	FDatasmithFacadeExpressionInput GetAmbientOcclusion() const;
+	FDatasmithFacadeExpressionInput GetClearCoat() const;
+	FDatasmithFacadeExpressionInput GetClearCoatRoughness() const;
+	FDatasmithFacadeExpressionInput GetWorldPositionOffset() const;
 	FDatasmithFacadeExpressionInput GetMaterialAttributes() const;
 
 	int GetBlendMode() const;
@@ -363,7 +365,7 @@ public:
 
 	/** Reset all expression to their default values and remove all connections */
 	void ResetExpressionGraph()
-	{ 
+	{
 		constexpr bool bRemoveAllExpressions = false;
 		GetDatasmithUEPbrMaterialElement()->ResetExpressionGraph( bRemoveAllExpressions );
 	}

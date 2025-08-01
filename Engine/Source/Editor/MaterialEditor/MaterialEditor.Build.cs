@@ -8,18 +8,17 @@ public class MaterialEditor : ModuleRules
 	{
 		PrivateIncludePaths.AddRange(
 			new string[] {
-				"Editor/MaterialEditor/Private"
 			}
 		);
 
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] 
 			{
-				"AssetRegistry", 
 				"AssetTools",
 				"Kismet",
 				"EditorWidgets",
-            }
+				"MessageLog",
+			}
 		);
 
 		PrivateDependencyModuleNames.AddRange(
@@ -37,6 +36,7 @@ public class MaterialEditor : ModuleRules
 				"RHI",
                 "MaterialUtilities",
                 "PropertyEditor",
+				"EditorFramework",
 				"UnrealEd",
 				"GraphEditor",
                 "AdvancedPreviewScene",
@@ -44,6 +44,7 @@ public class MaterialEditor : ModuleRules
                 "AssetRegistry",
 				"ToolMenus",
 				"MainFrame",
+				"Landscape"
 			}
 		);
 

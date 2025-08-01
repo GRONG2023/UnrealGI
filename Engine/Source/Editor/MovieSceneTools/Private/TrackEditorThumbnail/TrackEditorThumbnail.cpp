@@ -20,6 +20,7 @@
 #include "LegacyScreenPercentageDriver.h"
 #include "CanvasTypes.h"
 #include "EngineModule.h"
+#include "SceneViewExtension.h"
 
 namespace TrackEditorThumbnailConstants
 {
@@ -36,13 +37,12 @@ public:
 
 	float CurrentWorldTime, DeltaWorldTime;
 
-	virtual FSceneView* CalcSceneView(FSceneViewFamily* ViewFamily, const EStereoscopicPass StereoPass = eSSP_FULL) override
+	virtual FSceneView* CalcSceneView(FSceneViewFamily* ViewFamily, const int32 StereoViewIndex = INDEX_NONE) override
 	{
-		FSceneView* View = FLevelEditorViewportClient::CalcSceneView(ViewFamily, StereoPass);
+		FSceneView* View = FLevelEditorViewportClient::CalcSceneView(ViewFamily, StereoViewIndex);
 
 		// Artificially set the world times so that graphics settings apply correctly (we don't tick the world when rendering thumbnails)
-		ViewFamily->CurrentWorldTime = CurrentWorldTime;
-		ViewFamily->DeltaWorldTime = DeltaWorldTime;
+		ViewFamily->Time = FGameTime::CreateDilated(ViewFamily->Time.GetRealTimeSeconds(), ViewFamily->Time.GetDeltaRealTimeSeconds(), CurrentWorldTime, DeltaWorldTime);
 
 		View->FinalPostProcessSettings.bOverride_AutoExposureSpeedDown = View->FinalPostProcessSettings.bOverride_AutoExposureSpeedUp = true;
 		View->FinalPostProcessSettings.AutoExposureSpeedDown = View->FinalPostProcessSettings.AutoExposureSpeedUp = 0.02f;
@@ -89,11 +89,11 @@ void FTrackEditorThumbnail::AssignFrom(TSharedRef<FSlateTextureData, ESPMode::Th
 			InThumbnailTexture->SetTextureData(InTextureData);
 			if (InThumbnailTexture->IsInitialized())
 			{
-				InThumbnailTexture->UpdateRHI();
+				InThumbnailTexture->UpdateRHI(RHICmdList);
 			}
 			else
 			{
-				InThumbnailTexture->InitResource();
+				InThumbnailTexture->InitResource(RHICmdList);
 			}
 		}
 	);
@@ -177,8 +177,8 @@ void FTrackEditorThumbnail::ResizeRenderTarget(const FIntPoint& InSize)
 		{
 			if (InThumbnailTexture && InThumbnailRenderTarget)
 			{
-				InThumbnailTexture->InitResource();
-				InThumbnailRenderTarget->InitResource();
+				InThumbnailTexture->InitResource(RHICmdList);
+				InThumbnailRenderTarget->InitResource(RHICmdList);
 				InThumbnailTexture->SetRHIRef(InThumbnailRenderTarget->GetTextureRHI(), InThumbnailRenderTarget->GetSizeX(), InThumbnailRenderTarget->GetSizeY());
 			}
 		}
@@ -404,8 +404,10 @@ void FTrackEditorThumbnailCache::DrawViewportThumbnail(FTrackEditorThumbnail& Tr
 	UWorld* World = PreviewCameraComponent->GetWorld();
 
 	FSceneViewFamilyContext ViewFamily( FSceneViewFamily::ConstructionValues( TrackEditorThumbnail.GetRenderTarget(), World->Scene, FEngineShowFlags(ESFIM_Game) )
-		.SetWorldTimes(FApp::GetCurrentTime() - GStartTime, FApp::GetDeltaTime(), FApp::GetCurrentTime() - GStartTime)
+		.SetTime(FGameTime::GetTimeSinceAppStart())
 		.SetResolveScene(true));
+
+	FSceneViewStateInterface* ViewStateInterface = nullptr;
 
 	// Screen percentage is not supported in thumbnail.
 	ViewFamily.EngineShowFlags.ScreenPercentage = false;
@@ -420,10 +422,24 @@ void FTrackEditorThumbnailCache::DrawViewportThumbnail(FTrackEditorThumbnail& Tr
 	case EThumbnailQuality::Normal:
 	case EThumbnailQuality::Best:
 		ViewFamily.EngineShowFlags.SetMotionBlur(false);
+
+		// Default eye adaptation requires a viewstate.
+		ViewFamily.EngineShowFlags.EyeAdaptation = true;
+		UMovieSceneUserThumbnailSettings* ThumbnailSettings = GetMutableDefault<UMovieSceneUserThumbnailSettings>();
+		FSceneViewStateInterface* Ref = ThumbnailSettings->ViewState.GetReference();
+		if (!Ref)
+		{
+			ThumbnailSettings->ViewState.Allocate(ViewFamily.GetFeatureLevel());
+		}
+		ViewStateInterface = ThumbnailSettings->ViewState.GetReference();
 		break;
 	}
 
 	FSceneViewInitOptions ViewInitOptions;
+
+	// Use target exposure without blend. 
+	ViewInitOptions.bInCameraCut = true;
+	ViewInitOptions.SceneViewStateInterface = ViewStateInterface;
 
 	ViewInitOptions.BackgroundColor = FLinearColor::Black;
 	ViewInitOptions.SetViewRectangle(FIntRect(FIntPoint::ZeroValue, RTSize));
@@ -442,11 +458,17 @@ void FTrackEditorThumbnailCache::DrawViewportThumbnail(FTrackEditorThumbnail& Tr
 	ViewFamily.Views.Add(NewView);
 
 	const float GlobalResolutionFraction = 1.f;
-	const bool  AllowPostProcessSettingsScreenPercentage = false;
-	ViewFamily.SetScreenPercentageInterface(new FLegacyScreenPercentageDriver(ViewFamily, GlobalResolutionFraction, AllowPostProcessSettingsScreenPercentage));
+	ViewFamily.SetScreenPercentageInterface(new FLegacyScreenPercentageDriver(ViewFamily, GlobalResolutionFraction));
 
-	FCanvas Canvas(TrackEditorThumbnail.GetRenderTarget(), nullptr, FApp::GetCurrentTime() - GStartTime, FApp::GetDeltaTime(), FApp::GetCurrentTime() - GStartTime, World->Scene->GetFeatureLevel());
+	FCanvas Canvas(TrackEditorThumbnail.GetRenderTarget(), nullptr, FGameTime::GetTimeSinceAppStart(), World->Scene->GetFeatureLevel());
 	Canvas.Clear(FLinearColor::Transparent);
+
+	ViewFamily.ViewExtensions = GEngine->ViewExtensions->GatherActiveExtensions(FSceneViewExtensionContext(World->Scene));
+	for (const FSceneViewExtensionRef& Extension : ViewFamily.ViewExtensions)
+	{
+		Extension->SetupViewFamily(ViewFamily);
+		Extension->SetupView(ViewFamily, *NewView);
+	}
 
 	GetRendererModule().BeginRenderingViewFamily(&Canvas, &ViewFamily);
 }
@@ -552,7 +574,7 @@ void FTrackEditorThumbnailCache::UpdateFilledThumbnails()
 			Remove.Append(&Thumbnails[0], Index);
 			ThumbnailPool.Pin()->RemoveThumbnailsNeedingRedraw(Remove);
 
-			Thumbnails.RemoveAt(0, Index, false);
+			Thumbnails.RemoveAt(0, Index, EAllowShrinking::No);
 		}
 	}
 
@@ -577,7 +599,7 @@ void FTrackEditorThumbnailCache::UpdateFilledThumbnails()
 			Remove.Append(&Thumbnails[Thumbnails.Num() - NumToRemove], NumToRemove);
 			ThumbnailPool.Pin()->RemoveThumbnailsNeedingRedraw(Remove);
 
-			Thumbnails.RemoveAt(Thumbnails.Num() - NumToRemove, NumToRemove, false);
+			Thumbnails.RemoveAt(Thumbnails.Num() - NumToRemove, NumToRemove, EAllowShrinking::No);
 		}
 	}
 

@@ -4,17 +4,13 @@
 	URL.cpp: Various file-management functions.
 =============================================================================*/
 
-#include "CoreMinimal.h"
-#include "Misc/CoreMisc.h"
-#include "Misc/Paths.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Modules/ModuleManager.h"
 #include "Misc/PackageName.h"
 #include "GameMapsSettings.h"
-#include "Engine/EngineBaseTypes.h"
 #include "Engine/World.h"
-#include "AssetData.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 
 /*-----------------------------------------------------------------------------
 	FURL Statics.
@@ -174,7 +170,7 @@ FURL::FURL( FURL* Base, const TCHAR* TextURL, ETravelType Type )
 		check(Base);
 		for( int32 i=0; i<Base->Op.Num(); i++ )
 		{
-			new(Op)FString(Base->Op[i]);
+			Op.Add(Base->Op[i]);
 		}
 	}
 
@@ -463,7 +459,7 @@ FURL::FURL( FURL* Base, const TCHAR* TextURL, ETravelType Type )
 			FText MapNameError;
 			bool bFoundMap = false;
 
-			if (FPaths::FileExists(*URLStr) && FPackageName::TryConvertFilenameToLongPackageName(URLStr, MapFullName))
+			if (FPaths::FileExists(URLStr) && FPackageName::TryConvertFilenameToLongPackageName(URLStr, MapFullName))
 			{
 				Map = MapFullName;
 				bFoundMap = true;
@@ -478,7 +474,12 @@ FURL::FURL( FURL* Base, const TCHAR* TextURL, ETravelType Type )
 					if (!AssetRegistry.IsLoadingAssets())
 					{
 						TArray<FAssetData> MapList;
-						if (AssetRegistry.GetAssetsByClass(UWorld::StaticClass()->GetFName(), /*out*/ MapList))
+
+						FARFilter Filter;
+						Filter.ClassPaths.Add(UWorld::StaticClass()->GetClassPathName());
+						Filter.WithoutPackageFlags = PKG_CookGenerated | PKG_PlayInEditor;
+
+						if (AssetRegistry.GetAssets(Filter, /*out*/ MapList))
 						{
 							FName TargetTestName(*URLStr);
 							for (const FAssetData& MapAsset : MapList)
@@ -496,10 +497,12 @@ FURL::FURL( FURL* Base, const TCHAR* TextURL, ETravelType Type )
 
 				if (!bFoundMap)
 				{
-					// Fall back to incredibly slow disk scan for the package
-					if (FPackageName::SearchForPackageOnDisk(URLStr + FPackageName::GetMapPackageExtension(), &MapFullName))
+					// Fall back to a slow AssetRegistry scan for the package
+					IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+					FName ExistingPackageName = AssetRegistry.GetFirstPackageByName(URLStr);
+					if (!ExistingPackageName.IsNone())
 					{
-						Map = MapFullName;
+						ExistingPackageName.ToString(Map);
 						bFoundMap = true;
 					}
 				}
@@ -508,7 +511,7 @@ FURL::FURL( FURL* Base, const TCHAR* TextURL, ETravelType Type )
 			if (!bFoundMap)
 			{
 				// can't find file, invalidate and bail
-				UE_CLOG(MapNameError.ToString().Len() > 0, LogLongPackageNames, Warning, TEXT("URL: %s: %s"), *URLStr, *MapNameError.ToString());
+				UE_LOG(LogLongPackageNames, Warning, TEXT("Can't Find URL: %s: %s. Invalidating and reverting to Default URL."), *URLStr, *MapNameError.ToString());
 				*this = FURL();
 				Valid = 0;
 			}
@@ -654,7 +657,7 @@ void FURL::AddOption( const TCHAR* Str )
 
 	if (i == Op.Num())
 	{
-		new(Op) FString(Str);
+		Op.Emplace(Str);
 	}
 	else
 	{
@@ -672,11 +675,9 @@ void FURL::RemoveOption( const TCHAR* Key, const TCHAR* Section, const FString& 
 	{
 		if ( Op[i].Left(FCString::Strlen(Key)) == Key )
 		{
-			FConfigSection* Sec = GConfig->GetSectionPrivate( Section ? Section : TEXT("DefaultPlayer"), 0, 0, Filename );
-			if ( Sec )
+			if (GConfig->RemoveKeyFromSection(Section ? Section : TEXT("DefaultPlayer"), Key, Filename))
 			{
-				if (Sec->Remove( Key ) > 0)
-					GConfig->Flush( 0, Filename );
+				GConfig->Flush( 0, Filename );
 			}
 
 			Op.RemoveAt(i);

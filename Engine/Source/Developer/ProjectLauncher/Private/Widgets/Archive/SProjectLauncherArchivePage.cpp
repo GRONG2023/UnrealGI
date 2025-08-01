@@ -1,8 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "SProjectLauncherArchivePage.h"
+#include "Widgets/Archive/SProjectLauncherArchivePage.h"
 
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "DesktopPlatformModule.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Styling/SlateTypes.h"
@@ -64,8 +64,8 @@ void SProjectLauncherArchivePage::Construct(const FArguments& InArgs, const TSha
 			.Padding(0.0, 8.0, 0.0, 0.0)
 			[
 				SNew(SBorder)
-					.Padding(8.0)
-					.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+					.Padding(8.0f)
+					.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 					.Visibility(this, &SProjectLauncherArchivePage::HandleArchiveVisibility)
 					[
 						SNew(SVerticalBox)

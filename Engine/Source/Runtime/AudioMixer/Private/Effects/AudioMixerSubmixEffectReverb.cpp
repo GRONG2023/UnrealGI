@@ -2,13 +2,17 @@
 
 #include "SubmixEffects/AudioMixerSubmixEffectReverb.h"
 #include "AudioMixerEffectsManager.h"
+#include "HAL/IConsoleManager.h"
 #include "Sound/ReverbEffect.h"
 #include "Audio.h"
 #include "AudioMixer.h"
 #include "DSP/BufferVectorOperations.h"
+#include "DSP/FloatArrayMath.h"
 #include "DSP/ReverbFast.h"
 #include "DSP/Amp.h"
 #include "ProfilingDebugging/CsvProfiler.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AudioMixerSubmixEffectReverb)
 
 // Link to "Audio" profiling category
 CSV_DECLARE_CATEGORY_MODULE_EXTERN(AUDIOMIXERCORE_API, Audio);
@@ -64,6 +68,8 @@ void FSubmixEffectReverb::Init(const FSoundEffectSubmixInitData& InitData)
 	 */
 	Audio::FPlateReverbFastSettings NewSettings;
 
+	SampleRate = InitData.SampleRate;
+
 	NewSettings.EarlyReflections.Decay = 0.9f;
 	NewSettings.EarlyReflections.Absorption = 0.7f;
 	NewSettings.EarlyReflections.Gain = 1.0f;
@@ -78,7 +84,6 @@ void FSubmixEffectReverb::Init(const FSoundEffectSubmixInitData& InitData)
 	NewSettings.LateReflections.Decay = 0.15f;
 	NewSettings.LateReflections.Density = 0.85f;
 
-
 	ReverbParams.SetParams(NewSettings);
 
 	DecayCurve.AddKey(0.0f, 0.99f);
@@ -89,7 +94,10 @@ void FSubmixEffectReverb::Init(const FSoundEffectSubmixInitData& InitData)
 	DecayCurve.AddKey(19.0f, 0.002f);
 	DecayCurve.AddKey(20.0f, 0.0001f);
 
-	PlateReverb = MakeUnique<Audio::FPlateReverbFast>(InitData.SampleRate, 512, NewSettings);
+	if (DisableSubmixReverbCVarFast == 0)
+	{
+		PlateReverb = MakeUnique<Audio::FPlateReverbFast>(SampleRate, 512, NewSettings);
+	}
 }
 
 void FSubmixEffectReverb::OnPresetChanged()
@@ -137,6 +145,13 @@ void FSubmixEffectReverb::OnProcessAudio(const FSoundEffectSubmixInputData& InDa
 		return;
 	}
 
+	if (!PlateReverb.IsValid())
+	{
+		Audio::FPlateReverbFastSettings NewSettings;
+		ReverbParams.CopyParams(NewSettings);
+		PlateReverb = MakeUnique<Audio::FPlateReverbFast>(SampleRate, 512, NewSettings);
+	}
+
 	CSV_SCOPED_TIMING_STAT(Audio, SubmixReverb);
 	SCOPE_CYCLE_COUNTER(STAT_AudioMixerSubmixReverb);
 
@@ -158,11 +173,10 @@ void FSubmixEffectReverb::OnProcessAudio(const FSoundEffectSubmixInputData& InDa
 	{
 		// Wet level is applied to input audio to preserve reverb tail when changing wet level
 		WetInputBuffer.AddZeroed(InData.AudioBuffer->Num());
-		Audio::MixInBufferFast(*InData.AudioBuffer, WetInputBuffer, LastWet, CurrentWetDry.WetLevel);
+		Audio::ArrayMixIn(*InData.AudioBuffer, WetInputBuffer, LastWet, CurrentWetDry.WetLevel);
 	}
 
 	PlateReverb->ProcessAudio(WetInputBuffer, InData.NumChannels, *OutData.AudioBuffer, OutData.NumChannels);
-
 }
 
 bool FSubmixEffectReverb::SetParameters(const FAudioEffectParameters& InParams)
@@ -186,17 +200,17 @@ bool FSubmixEffectReverb::SetParameters(const FAudioEffectParameters& InParams)
 	NewSettings.bEnableLateReflections = !ReverbEffectParams.bBypassLateReflections;
 
 	// Early Reflections
-	NewSettings.EarlyReflections.Gain = FMath::GetMappedRangeValueClamped({ 0.0f, 3.16f }, { 0.0f, 1.0f }, ReverbEffectParams.ReflectionsGain);
-	NewSettings.EarlyReflections.PreDelayMsec = FMath::GetMappedRangeValueClamped({ 0.0f, 0.3f }, { 0.0f, 300.0f }, ReverbEffectParams.ReflectionsDelay);
-	NewSettings.EarlyReflections.Bandwidth = FMath::GetMappedRangeValueClamped({ 0.0f, 1.0f }, { 0.0f, 1.0f }, 1.0f - ReverbEffectParams.GainHF);
+	NewSettings.EarlyReflections.Gain = FMath::GetMappedRangeValueClamped(FVector2f{ 0.0f, 3.16f }, FVector2f{ 0.0f, 1.0f }, ReverbEffectParams.ReflectionsGain);
+	NewSettings.EarlyReflections.PreDelayMsec = FMath::GetMappedRangeValueClamped(FVector2f{ 0.0f, 0.3f }, FVector2f{ 0.0f, 300.0f }, ReverbEffectParams.ReflectionsDelay);
+	NewSettings.EarlyReflections.Bandwidth = FMath::GetMappedRangeValueClamped(FVector2f{ 0.0f, 1.0f }, FVector2f{ 0.0f, 1.0f }, 1.0f - ReverbEffectParams.GainHF);
 
 	// LateReflections
-	NewSettings.LateReflections.LateDelayMsec = FMath::GetMappedRangeValueClamped({ 0.0f, 0.1f }, { 0.0f, 100.0f }, ReverbEffectParams.LateDelay);
-	NewSettings.LateReflections.LateGainDB = FMath::GetMappedRangeValueClamped({ 0.0f, 1.0f }, { 0.0f, 1.0f }, ReverbEffectParams.Gain);
-	NewSettings.LateReflections.Bandwidth = FMath::GetMappedRangeValueClamped({ 0.0f, 1.0f }, { 0.1f, 0.6f }, ReverbEffectParams.AirAbsorptionGainHF);
-	NewSettings.LateReflections.Diffusion = FMath::GetMappedRangeValueClamped({ 0.05f, 1.0f }, { 0.0f, 0.95f }, ReverbEffectParams.Diffusion);
-	NewSettings.LateReflections.Dampening = FMath::GetMappedRangeValueClamped({ 0.05f, 1.95f }, { 0.0f, 0.999f }, ReverbEffectParams.DecayHFRatio);
-	NewSettings.LateReflections.Density = FMath::GetMappedRangeValueClamped({ 0.0f, 0.95f }, { 0.06f, 1.0f }, ReverbEffectParams.Density);
+	NewSettings.LateReflections.LateDelayMsec = FMath::GetMappedRangeValueClamped(FVector2f{ 0.0f, 0.1f }, FVector2f{ 0.0f, 100.0f }, ReverbEffectParams.LateDelay);
+	NewSettings.LateReflections.LateGainDB = FMath::GetMappedRangeValueClamped(FVector2f{ 0.0f, 1.0f }, FVector2f{ 0.0f, 1.0f }, ReverbEffectParams.Gain);
+	NewSettings.LateReflections.Bandwidth = FMath::GetMappedRangeValueClamped(FVector2f{ 0.0f, 1.0f }, FVector2f{ 0.1f, 0.6f }, ReverbEffectParams.AirAbsorptionGainHF);
+	NewSettings.LateReflections.Diffusion = FMath::GetMappedRangeValueClamped(FVector2f{ 0.05f, 1.0f }, FVector2f{ 0.0f, 0.95f }, ReverbEffectParams.Diffusion);
+	NewSettings.LateReflections.Dampening = FMath::GetMappedRangeValueClamped(FVector2f{ 0.05f, 1.95f }, FVector2f{ 0.0f, 0.999f }, ReverbEffectParams.DecayHFRatio);
+	NewSettings.LateReflections.Density = FMath::GetMappedRangeValueClamped(FVector2f{ 0.0f, 0.95f }, FVector2f{ 0.06f, 1.0f }, ReverbEffectParams.Density);
 
 	// Use mapping function to get decay time in seconds to internal linear decay scale value
 	const float DecayValue = DecayCurve.Eval(ReverbEffectParams.DecayTime);
@@ -219,7 +233,7 @@ bool FSubmixEffectReverb::SetParameters(const FAudioEffectParameters& InParams)
 void FSubmixEffectReverb::UpdateParameters()
 {
 	Audio::FPlateReverbFastSettings NewSettings;
-	if (ReverbParams.GetParams(&NewSettings))
+	if (PlateReverb.IsValid() && ReverbParams.GetParams(&NewSettings))
 	{
 		PlateReverb->SetSettings(NewSettings);
 	}
@@ -240,6 +254,11 @@ void FSubmixEffectReverb::UpdateParameters()
 	{
 		// Enable quad mapping
 		TargetQuadBehavior = Audio::FPlateReverbFastSettings::EQuadBehavior::QuadMatched;
+	}
+
+	if (!PlateReverb.IsValid())
+	{
+		return;
 	}
 
 	// Check if settings need to be updated
@@ -281,3 +300,4 @@ void USubmixEffectReverbPreset::SetSettings(const FSubmixEffectReverbSettings& I
 {
 	UpdateSettings(InSettings);
 }
+

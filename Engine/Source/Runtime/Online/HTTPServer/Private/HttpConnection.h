@@ -6,6 +6,7 @@
 #include "HttpConnectionRequestReadContext.h"
 #include "HttpConnectionResponseWriteContext.h"
 #include "HttpResultCallback.h"
+#include "HttpServerConfig.h"
 #include "HttpServerConstants.h"
 #include "HttpServerHttpVersion.h"
 #include "Misc/Timespan.h"
@@ -166,7 +167,7 @@ private:
 	 * @param ErrorCode The HTTP error code
 	 * @param ErrorCodeStr The machine-readable error description
 	 */
-	void HandleReadError(EHttpServerResponseCodes ErrorCode,  const TCHAR* ErrorCodeStr);
+	void HandleReadError(EHttpServerResponseCodes ErrorCode, const TCHAR* ErrorCodeStr);
 
 	/**
 	 * Logs the caller-supplied error code and closes the connection
@@ -252,5 +253,8 @@ private:
 
 	/** The duration (seconds) at which idle keep-alive connections are forcefully timed out */
 	static constexpr float ConnectionKeepAliveTimeout = 15.0f;
+
+	/** Connection configuration data */
+	FHttpServerConnectionConfig Config;
 };
 

@@ -15,6 +15,7 @@ void SExpandableArea::Construct( const FArguments& InArgs )
 {
 	check(InArgs._Style);
 
+	WidgetStyle = InArgs._Style;
 	bAreaCollapsed = InArgs._InitiallyCollapsed;
 	MinWidth = InArgs._MinWidth;
 	MaxHeight = InArgs._MaxHeight;
@@ -36,8 +37,7 @@ void SExpandableArea::Construct( const FArguments& InArgs )
 		HeaderContent = 
 			SNew(STextBlock)
 			.Text(InArgs._AreaTitle)
-			.Font(InArgs._AreaTitleFont)
-			.ShadowOffset(FVector2D(1.0f, 1.0f));
+			.Font(InArgs._AreaTitleFont);
 	}
 
 	// If the user wants the body of the expanded section to be different from the title area,
@@ -50,9 +50,10 @@ void SExpandableArea::Construct( const FArguments& InArgs )
 	const TAttribute<const FSlateBrush*> TitleBorderImage = !bBodyDiffers ? FStyleDefaults::GetNoBrush() : InArgs._BorderImage;
 	const TAttribute<FSlateColor> TitleBorderBackgroundColor = !bBodyDiffers ? FLinearColor::Transparent : InArgs._BorderBackgroundColor;
 
+	bAllowAnimatedTransition = InArgs._AllowAnimatedTransition;
 	ChildSlot
 	[
-		SNew( SBorder )
+		SAssignNew(WidgetBorder, SBorder )
 		.BorderImage( FullBorderImage )
 		.BorderBackgroundColor( FullBorderBackgroundColor )
 		.Padding(0.0f)
@@ -66,7 +67,7 @@ void SExpandableArea::Construct( const FArguments& InArgs )
 				.BorderBackgroundColor(TitleBorderBackgroundColor)
 				.Padding(0.0f)
 				[
-					SNew( SButton )
+					SAssignNew(ExpandingButton, SButton )
 					.Cursor(InArgs._HeaderCursor.IsSet() ? InArgs._HeaderCursor : GetCursor())
 					.ButtonStyle(FCoreStyle::Get(), "NoBorder")
 					.ContentPadding(InArgs._HeaderPadding)
@@ -80,7 +81,7 @@ void SExpandableArea::Construct( const FArguments& InArgs )
 			+ SVerticalBox::Slot()
 			.FillHeight(1.0f)
 			[
-				SNew(SBorder)
+				SAssignNew(BodyBorder, SBorder)
 				.Visibility(this, &SExpandableArea::OnGetContentVisibility)
 				.BorderImage(InArgs._BodyBorderImage)
 				.BorderBackgroundColor(InArgs._BodyBorderBackgroundColor)
@@ -92,6 +93,11 @@ void SExpandableArea::Construct( const FArguments& InArgs )
 			]
 		]
 	];
+
+	if (bBodyDiffers)
+	{
+		WidgetBorder = TitleBorder;
+	}
 }
 
 void SExpandableArea::SetExpanded( bool bExpanded )
@@ -165,18 +171,6 @@ EVisibility SExpandableArea::OnGetContentVisibility() const
 	return Scale > 0 ? EVisibility::Visible : EVisibility::Collapsed;
 }
 
-/*
-FReply SExpandableArea::OnMouseDown( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent )
-{
-	if ( MouseEvent.GetEffectingButton() == EKeys::LeftMouseButton )
-	{
-		//we need to capture the mouse for MouseUp events
-		return FReply::Handled().CaptureMouse( HeaderBorder.ToSharedRef() ).SetUserFocus( AsShared(), EFocusCause::Mouse );
-	}
-
-	return FReply::Unhandled();
-}*/
-
 
 FReply SExpandableArea::OnHeaderClicked()
 {
@@ -188,7 +182,7 @@ FReply SExpandableArea::OnHeaderClicked()
 
 void SExpandableArea::OnToggleContentVisibility()
 {
-	SetExpanded_Animated( !!bAreaCollapsed );
+	bAllowAnimatedTransition ? SetExpanded_Animated(!!bAreaCollapsed) : SetExpanded(!!bAreaCollapsed);
 }
 
 const FSlateBrush* SExpandableArea::OnGetCollapseImage() const
@@ -207,7 +201,7 @@ FVector2D SExpandableArea::ComputeDesiredSize( float ) const
 	EVisibility ChildVisibility = ChildSlot.GetWidget()->GetVisibility();
 	if ( ChildVisibility != EVisibility::Collapsed )
 	{
-		FVector2D SlotWidgetDesiredSize = ChildSlot.GetWidget()->GetDesiredSize() + ChildSlot.SlotPadding.Get().GetDesiredSize();
+		FVector2D SlotWidgetDesiredSize = ChildSlot.GetWidget()->GetDesiredSize() + ChildSlot.GetPadding().GetDesiredSize();
 		
 		// Only clamp if the user specified a min width
 		if( MinWidth > 0.0f )
@@ -230,6 +224,55 @@ FVector2D SExpandableArea::ComputeDesiredSize( float ) const
 bool SExpandableArea::IsTitleHovered() const
 {
 	return TitleBorder.IsValid() && TitleBorder->IsHovered();
+}
+
+
+void SExpandableArea::SetMaxHeight(float InMaxHeight)
+{
+	if (MaxHeight != InMaxHeight)
+	{
+		MaxHeight = InMaxHeight;
+		Invalidate(EInvalidateWidgetReason::Layout);
+	}
+}
+
+void SExpandableArea::SetStyle(const FExpandableAreaStyle* InStyle)
+{
+	WidgetStyle = InStyle;
+}
+
+void SExpandableArea::SetBorderBrush(const FSlateBrush* InBorderBrush)
+{
+	check(WidgetBorder)
+	WidgetBorder->SetBorderImage(InBorderBrush);
+}
+
+void SExpandableArea::InvalidateStyle()
+{
+	Invalidate(EInvalidateWidgetReason::Layout);
+}
+
+void SExpandableArea::InvalidateBorderBrush()
+{
+	Invalidate(EInvalidateWidgetReason::Layout);
+}
+
+void SExpandableArea::SetBorderBackgroundColor(const FSlateColor& InBorderColor)
+{
+	check(WidgetBorder)
+	WidgetBorder->SetBorderBackgroundColor(InBorderColor);
+}
+
+void SExpandableArea::SetHeaderPadding(FMargin InHeaderPadding)
+{
+	check(ExpandingButton)
+	ExpandingButton->SetContentPadding(InHeaderPadding);
+}
+
+void SExpandableArea::SetAreaPadding(FMargin InAreaPadding)
+{
+	check(BodyBorder)
+	BodyBorder->SetPadding(InAreaPadding);
 }
 
 #undef LOCTEXT_NAMESPACE

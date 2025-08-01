@@ -2,6 +2,8 @@
 
 
 #include "Dialogs/Dialogs.h"
+
+#include "Dialog/DialogUtils.h"
 #include "Dialogs/DialogsPrivate.h"
 #include "Misc/App.h"
 #include "Misc/AssertionMacros.h"
@@ -17,13 +19,13 @@
 #include "Widgets/Layout/SUniformGridPanel.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SCheckBox.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Editor.h"
 #include "ObjectTools.h"
 #include "DesktopPlatformModule.h"
-#include "Widgets/Input/SHyperlink.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "HAL/PlatformMisc.h"
+#include "SPrimaryButton.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogDialogs, Log, All);
 
@@ -39,132 +41,184 @@ class SChoiceDialog : public SCompoundWidget
 {
 public:
 	SLATE_BEGIN_ARGS( SChoiceDialog )	{}
-		SLATE_ATTRIBUTE(TSharedPtr<SWindow>, ParentWindow)
+		SLATE_ARGUMENT(TSharedPtr<SWindow>, ParentWindow)
 		SLATE_ATTRIBUTE(FText, Message)	
 		SLATE_ATTRIBUTE(float, WrapMessageAt)
-		SLATE_ATTRIBUTE(EAppMsgType::Type, MessageType)
+		SLATE_ARGUMENT(EAppMsgCategory, MessageCategory)
+		SLATE_ARGUMENT(EAppMsgType::Type, MessageType)
 	SLATE_END_ARGS()
 
 	BEGIN_SLATE_FUNCTION_BUILD_OPTIMIZATION
 	void Construct( const FArguments& InArgs )
 	{
-		ParentWindow = InArgs._ParentWindow.Get();
+		ParentWindow = InArgs._ParentWindow;
 		ParentWindow->SetWidgetToFocusOnActivate(SharedThis(this));
 		Response = EAppReturnType::Cancel;
+		MessageType = InArgs._MessageType;
 
-		FSlateFontInfo MessageFont( FEditorStyle::GetFontStyle("StandardDialog.LargeFont"));
+		FSlateFontInfo MessageFont( FAppStyle::GetFontStyle("StandardDialog.LargeFont"));
 		MyMessage = InArgs._Message;
 
 		TSharedPtr<SUniformGridPanel> ButtonBox;
 
+		const FSlateBrush* IconBrush = FDialogUtils::GetMessageCategoryIcon(InArgs._MessageCategory);
+
 		this->ChildSlot
-			[	
-				SNew(SBorder)
-					.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+		[	
+			SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+			.Padding(16.f)
+			[
+				SNew(SVerticalBox)
+
+				+ SVerticalBox::Slot()
+				.HAlign(HAlign_Fill)
+				.VAlign(VAlign_Fill)
+				.FillHeight(1.0f)
+				.MaxHeight(550)
+				[
+					SNew(SHorizontalBox)
+					+SHorizontalBox::Slot()
+					.AutoWidth()
+					.VAlign(VAlign_Top)
+					.HAlign(HAlign_Left)
 					[
-						SNew(SVerticalBox)
-
-						+ SVerticalBox::Slot()
-							.HAlign(HAlign_Fill)
-							.VAlign(VAlign_Fill)
-							.FillHeight(1.0f)
-							.MaxHeight(550)
-							.Padding(12.0f)
-							[
-								SNew(SScrollBox)
-
-								+ SScrollBox::Slot()
-									[
-										SNew(STextBlock)
-											.Text(MyMessage)
-											.Font(MessageFont)
-											.WrapTextAt(InArgs._WrapMessageAt)
-									]
-							]
-
-						+SVerticalBox::Slot()
-							.AutoHeight()
-							.Padding(0.0f)
-							[
-								SNew(SHorizontalBox)
-
-								+ SHorizontalBox::Slot()
-									.FillWidth(1.0f)
-									.HAlign(HAlign_Left)
-									.VAlign(VAlign_Bottom)
-									.Padding(12.0f)
-									[
-										SNew(SHyperlink)
-											.OnNavigate(this, &SChoiceDialog::HandleCopyMessageHyperlinkNavigate)
-											.Text( NSLOCTEXT("SChoiceDialog", "CopyMessageHyperlink", "Copy Message") )
-											.ToolTipText( NSLOCTEXT("SChoiceDialog", "CopyMessageTooltip", "Copy the text in this message to the clipboard (CTRL+C)") )
-									]
-
-								+ SHorizontalBox::Slot()
-									.AutoWidth()
-									.HAlign(HAlign_Right)
-									.VAlign(VAlign_Bottom)
-									.Padding(2.f)
-									[
-										SAssignNew( ButtonBox, SUniformGridPanel )
-											.SlotPadding(FEditorStyle::GetMargin("StandardDialog.SlotPadding"))
-											.MinDesiredSlotWidth(FEditorStyle::GetFloat("StandardDialog.MinDesiredSlotWidth"))
-											.MinDesiredSlotHeight(FEditorStyle::GetFloat("StandardDialog.MinDesiredSlotHeight"))
-									]
-							]
+						SNew(SImage)
+						.DesiredSizeOverride(FVector2D(24.f, 24.f))
+						.Image(IconBrush)
 					]
-			];
+
+					+SHorizontalBox::Slot()
+					.Padding(16.f, 0.f, 0.f, 0.f)
+					[
+						SNew(SScrollBox)
+						+ SScrollBox::Slot()
+						.HAlign(HAlign_Left)
+						.VAlign(VAlign_Center)
+						[
+							SNew(STextBlock)
+							.Text(MyMessage)
+							.Font(MessageFont)
+							.WrapTextAt(InArgs._WrapMessageAt)
+						]
+					]
+				]
+
+				+SVerticalBox::Slot()
+				.Padding(0.f, 32.f, 0.f, 0.f)
+				.AutoHeight()
+				[
+					SNew(SHorizontalBox)
+
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.HAlign(HAlign_Left)
+					.VAlign(VAlign_Center)
+					[
+						SNew(SButton)
+						.ButtonStyle(FAppStyle::Get(), "SimpleButton")
+						.OnClicked(this, &SChoiceDialog::HandleCopyMessageButtonClicked)
+						.ToolTipText(NSLOCTEXT("SChoiceDialog", "CopyMessageTooltip", "Copy the text in this message to the clipboard (CTRL+C)"))
+						.ContentPadding(2.f)
+						.Content()
+						[
+							SNew(SImage)
+							.Image(FAppStyle::Get().GetBrush("Icons.Clipboard"))
+							.ColorAndOpacity(FSlateColor::UseForeground())
+						]
+					]
+
+					+ SHorizontalBox::Slot()
+						.FillWidth(1.0f)
+						.HAlign(HAlign_Left)
+						.VAlign(VAlign_Center)
+						.Padding(FMargin(16.f, 0.f, 0.f, 0.f))
+						[
+							SNew(SCheckBox)
+							.IsChecked(ECheckBoxState::Unchecked)
+							.OnCheckStateChanged(this, &SChoiceDialog::OnCheckboxClicked)
+							.Visibility(this, &SChoiceDialog::GetCheckboxVisibility)
+							.ToolTipText(NSLOCTEXT("SChoiceDialog", "ApplyToAllTooltip", "Make your choice of Yes or No apply to all remaining items in the current operation"))
+							[
+								SNew(STextBlock)
+								.WrapTextAt(615.0f)
+								.Text(NSLOCTEXT("SChoiceDialog", "ApplyToAllLabel", "Apply to All"))
+							]
+						]
+
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.HAlign(HAlign_Right)
+					.VAlign(VAlign_Center)
+					[
+						SAssignNew( ButtonBox, SUniformGridPanel )
+						.SlotPadding(FMargin(8.f, 0.f, 0.f, 0.f))
+						.MinDesiredSlotWidth(FAppStyle::Get().GetFloat("StandardDialog.MinDesiredSlotWidth"))
+						.MinDesiredSlotHeight(FAppStyle::Get().GetFloat("StandardDialog.MinDesiredSlotHeight"))
+					]
+				]
+			]
+		];
 
 		int32 SlotIndex = 0;
 
 #define ADD_SLOT(Button)\
 		ButtonBox->AddSlot(SlotIndex++,0)\
 		[\
-		SNew( SButton )\
-		.Text( EAppReturnTypeToText(EAppReturnType::Button) )\
-		.OnClicked( this, &SChoiceDialog::HandleButtonClicked, EAppReturnType::Button )\
-		.ContentPadding(FEditorStyle::GetMargin("StandardDialog.ContentPadding"))\
-		.HAlign(HAlign_Center)\
+			SNew( SButton )\
+			.VAlign(VAlign_Center)\
+			.HAlign(HAlign_Center)\
+			.Text( EAppReturnTypeToText(EAppReturnType::Button) )\
+			.OnClicked( this, &SChoiceDialog::HandleButtonClicked, EAppReturnType::Button )\
 		];
 
-		switch ( InArgs._MessageType.Get() )
+#define ADD_SLOT_PRIMARY(Button)\
+		ButtonBox->AddSlot(SlotIndex++,0)\
+		[\
+			SNew( SButton )\
+			.VAlign(VAlign_Center)\
+			.HAlign(HAlign_Center)\
+			.ButtonStyle(&FAppStyle::Get().GetWidgetStyle<FButtonStyle>("PrimaryButton"))\
+			.Text( EAppReturnTypeToText(EAppReturnType::Button) )\
+			.OnClicked( this, &SChoiceDialog::HandleButtonClicked, EAppReturnType::Button )\
+		];
+
+
+
+		switch ( MessageType )
 		{	
 		case EAppMsgType::Ok:
-			ADD_SLOT(Ok)
+			ADD_SLOT_PRIMARY(Ok)
 			break;
 		case EAppMsgType::YesNo:
-			ADD_SLOT(Yes)
+			ADD_SLOT_PRIMARY(Yes)
 			ADD_SLOT(No)
 			break;
 		case EAppMsgType::OkCancel:
-			ADD_SLOT(Ok)
+			ADD_SLOT_PRIMARY(Ok)
 			ADD_SLOT(Cancel)
 			break;
 		case EAppMsgType::YesNoCancel:
-			ADD_SLOT(Yes)
+			ADD_SLOT_PRIMARY(Yes)
 			ADD_SLOT(No)
 			ADD_SLOT(Cancel)
 			break;
 		case EAppMsgType::CancelRetryContinue:
-			ADD_SLOT(Cancel)
+			ADD_SLOT_PRIMARY(Continue)
 			ADD_SLOT(Retry)
-			ADD_SLOT(Continue)
+			ADD_SLOT(Cancel)
 			break;
 		case EAppMsgType::YesNoYesAllNoAll:
-			ADD_SLOT(Yes)
+			ADD_SLOT_PRIMARY(Yes)
 			ADD_SLOT(No)
-			ADD_SLOT(YesAll)
-			ADD_SLOT(NoAll)
 			break;
 		case EAppMsgType::YesNoYesAllNoAllCancel:
-			ADD_SLOT(Yes)
+			ADD_SLOT_PRIMARY(Yes)
 			ADD_SLOT(No)
-			ADD_SLOT(YesAll)
-			ADD_SLOT(NoAll)
 			ADD_SLOT(Cancel)
 			break;
 		case EAppMsgType::YesNoYesAll:
-			ADD_SLOT(Yes)
+			ADD_SLOT_PRIMARY(Yes)
 			ADD_SLOT(No)
 			ADD_SLOT(YesAll)
 			break;
@@ -213,21 +267,21 @@ public:
 		switch(ReturnType)
 		{
 		case EAppReturnType::No:
-			return LOCTEXT("EAppReturnTypeNo", "No");
+			return FDialogButtonTexts::Get().No;
 		case EAppReturnType::Yes:
-			return LOCTEXT("EAppReturnTypeYes", "Yes");
+			return FDialogButtonTexts::Get().Yes;
 		case EAppReturnType::YesAll:
-			return LOCTEXT("EAppReturnTypeYesAll", "Yes All");
+			return FDialogButtonTexts::Get().YesAll;
 		case EAppReturnType::NoAll:
-			return LOCTEXT("EAppReturnTypeNoAll", "No All");
+			return FDialogButtonTexts::Get().NoAll;
 		case EAppReturnType::Cancel:
-			return LOCTEXT("EAppReturnTypeCancel", "Cancel");
+			return FDialogButtonTexts::Get().Cancel;
 		case EAppReturnType::Ok:
-			return LOCTEXT("EAppReturnTypeOk", "OK");
+			return FDialogButtonTexts::Get().Ok;
 		case EAppReturnType::Retry:
-			return LOCTEXT("EAppReturnTypeRetry", "Retry");
+			return FDialogButtonTexts::Get().Retry;
 		case EAppReturnType::Continue:
-			return LOCTEXT("EAppReturnTypeContinue", "Continue");
+			return FDialogButtonTexts::Get().Continue;
 		default:
 			return LOCTEXT("MissingType", "MISSING RETURN TYPE");
 		}
@@ -250,6 +304,18 @@ private:
 	FReply HandleButtonClicked( EAppReturnType::Type InResponse )
 	{
 		Response = InResponse;
+		if ((MessageType == EAppMsgType::YesNoYesAllNoAll || MessageType == EAppMsgType::YesNoYesAllNoAllCancel)
+			&& bApplyToAllChecked)
+		{
+			if (Response == EAppReturnType::Yes)
+			{
+				Response = EAppReturnType::YesAll;
+			}
+			else if (Response == EAppReturnType::No)
+			{
+				Response = EAppReturnType::NoAll;
+			}
+		}
 
 		ResultCallback.ExecuteIfBound(ParentWindow.ToSharedRef(), Response);
 
@@ -259,12 +325,29 @@ private:
 		return FReply::Handled();
 	}
 
-	// Handles clicking the 'Copy Message' hyper link.
-	void HandleCopyMessageHyperlinkNavigate( )
+	// Handles clicking the 'Copy Message' button.
+	FReply HandleCopyMessageButtonClicked()
 	{
 		CopyMessageToClipboard();
+		return FReply::Handled();
 	}
 		
+	// Used as a delegate for the OnClicked property of the Apply to All checkbox
+	void OnCheckboxClicked(ECheckBoxState InNewState)
+	{
+		bApplyToAllChecked = InNewState == ECheckBoxState::Checked;
+	}
+
+	// Used as a delegate for the Visibility property of the Apply to All checkbox
+	EVisibility GetCheckboxVisibility() const
+	{
+		if (MessageType == EAppMsgType::YesNoYesAllNoAll || MessageType == EAppMsgType::YesNoYesAllNoAllCancel)
+		{
+			return EVisibility::Visible;
+		}
+		return EVisibility::Hidden;
+	}
+
 public:
 	/** Callback delegate that is triggered, when the dialog is run in non-modal mode */
 	FOnMsgDlgResult ResultCallback;
@@ -274,10 +357,12 @@ private:
 	EAppReturnType::Type Response;
 	TSharedPtr<SWindow> ParentWindow;
 	TAttribute<FText> MyMessage;
+	bool bApplyToAllChecked;
+	EAppMsgType::Type MessageType;
 };
 
 
-void CreateMsgDlgWindow(TSharedPtr<SWindow>& OutWindow, TSharedPtr<SChoiceDialog>& OutDialog, EAppMsgType::Type InMessageType,
+void CreateMsgDlgWindow(TSharedPtr<SWindow>& OutWindow, TSharedPtr<SChoiceDialog>& OutDialog, EAppMsgCategory InMessageCategory, EAppMsgType::Type InMessageType,
 						const FText& InMessage, const FText& InTitle, FOnMsgDlgResult ResultCallback=NULL)
 {
 	OutWindow = SNew(SWindow)
@@ -290,6 +375,7 @@ void CreateMsgDlgWindow(TSharedPtr<SWindow>& OutWindow, TSharedPtr<SChoiceDialog
 		.ParentWindow(OutWindow)
 		.Message(InMessage)
 		.WrapMessageAt(512.0f)
+		.MessageCategory(InMessageCategory)
 		.MessageType(InMessageType);
 
 	OutDialog->ResultCallback = ResultCallback;
@@ -297,7 +383,7 @@ void CreateMsgDlgWindow(TSharedPtr<SWindow>& OutWindow, TSharedPtr<SChoiceDialog
 	OutWindow->SetContent(OutDialog.ToSharedRef());
 }
 
-EAppReturnType::Type OpenMessageDialog_Internal(EAppMsgType::Type InMessageType, EAppReturnType::Type InDefaultValue, const FText& InMessage, const FText& InTitle)
+EAppReturnType::Type OpenMessageDialog_Internal(EAppMsgCategory InMessageCategory, EAppMsgType::Type InMessageType, EAppReturnType::Type InDefaultValue, const FText& InMessage, const FText& InTitle)
 {
 	EAppReturnType::Type Response = InDefaultValue;
 	if (FApp::IsUnattended() == true || GIsRunningUnattendedScript)
@@ -309,7 +395,7 @@ EAppReturnType::Type OpenMessageDialog_Internal(EAppMsgType::Type InMessageType,
 		TSharedPtr<SWindow> MsgWindow = NULL;
 		TSharedPtr<SChoiceDialog> MsgDialog = NULL;
 
-		CreateMsgDlgWindow(MsgWindow, MsgDialog, InMessageType, InMessage, InTitle);
+		CreateMsgDlgWindow(MsgWindow, MsgDialog, InMessageCategory, InMessageType, InMessage, InTitle);
 
 		GEditor->EditorAddModalWindow(MsgWindow.ToSharedRef());
 
@@ -319,7 +405,7 @@ EAppReturnType::Type OpenMessageDialog_Internal(EAppMsgType::Type InMessageType,
 	return Response;
 }
 
-EAppReturnType::Type OpenMessageDialog_Internal(EAppMsgType::Type InMessageType, const FText& InMessage, const FText& InTitle)
+EAppReturnType::Type OpenMessageDialog_Internal(EAppMsgCategory InMessageCategory, EAppMsgType::Type InMessageType, const FText& InMessage, const FText& InTitle)
 {
 	EAppReturnType::Type DefaultValue = EAppReturnType::Yes;
 	switch (InMessageType)
@@ -361,17 +447,17 @@ EAppReturnType::Type OpenMessageDialog_Internal(EAppMsgType::Type InMessageType,
 		}
 	}
 
-	return OpenMessageDialog_Internal(InMessageType, DefaultValue, InMessage, InTitle);
+	return OpenMessageDialog_Internal(InMessageCategory, InMessageType, DefaultValue, InMessage, InTitle);
 }
 
 EAppReturnType::Type OpenMsgDlgInt(EAppMsgType::Type InMessageType, const FText& InMessage, const FText& InTitle)
 {
-	return OpenMessageDialog_Internal(InMessageType, InMessage, InTitle);
+	return OpenMessageDialog_Internal(EAppMsgCategory::Warning, InMessageType, InMessage, InTitle);
 }
 
 EAppReturnType::Type OpenMsgDlgInt(EAppMsgType::Type InMessageType, EAppReturnType::Type InDefaultValue, const FText& InMessage, const FText& InTitle)
 {
-	return OpenMessageDialog_Internal(InMessageType, InDefaultValue, InMessage, InTitle);
+	return OpenMessageDialog_Internal(EAppMsgCategory::Warning, InMessageType, InDefaultValue, InMessage, InTitle);
 }
 
 TSharedRef<SWindow> OpenMsgDlgInt_NonModal(EAppMsgType::Type InMessageType, const FText& InMessage, const FText& InTitle,
@@ -380,7 +466,7 @@ TSharedRef<SWindow> OpenMsgDlgInt_NonModal(EAppMsgType::Type InMessageType, cons
 	TSharedPtr<SWindow> MsgWindow = NULL;
 	TSharedPtr<SChoiceDialog> MsgDialog = NULL;
 
-	CreateMsgDlgWindow(MsgWindow, MsgDialog, InMessageType, InMessage, InTitle, ResultCallback);
+	CreateMsgDlgWindow(MsgWindow, MsgDialog, EAppMsgCategory::Warning, InMessageType, InMessage, InTitle, ResultCallback);
 
 	FSlateApplication::Get().AddWindow(MsgWindow.ToSharedRef());
 
@@ -404,7 +490,7 @@ public:
 			.HAlign(HAlign_Fill)
 			.VAlign(VAlign_Fill)
 			.FillHeight(1.0f)
-			.Padding(5)
+			.Padding(5.0f)
 			[
 				SNew( STextBlock )
 				.WrapTextAt(615.0f)	// 400.0f
@@ -421,7 +507,7 @@ public:
 					SNew( SButton )
 					.Text( NSLOCTEXT("UnrealEd", "Yes", "Yes") )
 					.OnClicked( this, &SModalDialog::OnYesClicked )
-					.ContentPadding(7)
+					.ContentPadding(7.0f)
 				]
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
@@ -429,7 +515,7 @@ public:
 					SNew( SButton )
 					.Text( NSLOCTEXT("UnrealEd", "No", "No") )
 					.OnClicked( this, &SModalDialog::OnNoClicked )
-					.ContentPadding(7)
+					.ContentPadding(7.0f)
 				]
 			]
 		];
@@ -490,7 +576,8 @@ class SModalDialogWithCheckbox : public SCompoundWidget
 {
 public:
 	SLATE_BEGIN_ARGS( SModalDialogWithCheckbox )
-	:_bHasCancelButton(false) 
+	: _bHasCancelButton(false)
+	, _WrapMessageAt(512.0f)
 	{}
 		/** Warning message displayed on the dialog */
 		SLATE_ATTRIBUTE(FText, Message)
@@ -510,6 +597,9 @@ public:
 		/** Default value of the checkbox */
 		SLATE_ARGUMENT(bool, bDefaultCheckValue)
 
+		/** Wrap message at specified length, zero or negative number will disable the wrapping */
+		SLATE_ARGUMENT(float, WrapMessageAt)
+
 		/** Typically an icon to help the user more easily identify the nature of the issue */
 		SLATE_ATTRIBUTE( const FSlateBrush*, Image )
 
@@ -528,19 +618,20 @@ public:
 		MyMessage = InArgs._Message;
 		MyCheckboxMessage = InArgs._CheckboxMessage;
 
-		FSlateFontInfo MessageFont( FEditorStyle::GetFontStyle("StandardDialog.LargeFont"));
+		FSlateFontInfo MessageFont( FAppStyle::GetFontStyle("StandardDialog.LargeFont"));
 
 		ChildSlot
 		[
 			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+			.Padding(16.f)
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 			[
 				SNew( SVerticalBox )
 				+SVerticalBox::Slot()
 				.HAlign(HAlign_Fill)
 				.VAlign(VAlign_Fill)
 				.FillHeight(1.0f)
-				.Padding(0,5,0,5)
+				.Padding(0)
 				.MaxHeight(550)
 				[
 					SNew( SScrollBox )
@@ -561,11 +652,11 @@ public:
 						+SHorizontalBox::Slot()
 						.AutoWidth()
 						.VAlign(VAlign_Center)
-						.Padding(5,0,5,0)
+						.Padding(FMargin(16.f, 0.f, 0.f, 0.f))
 						[
 							SNew( STextBlock )
-							.WrapTextAt(512.0f)
-							.Text( MyMessage )
+							.WrapTextAt(InArgs._WrapMessageAt)
+							.Text(MyMessage)
 							.Font(MessageFont)
 						]
 					]
@@ -574,6 +665,7 @@ public:
 				+SVerticalBox::Slot()
 				.AutoHeight()
 				.HAlign(HAlign_Fill)
+				.Padding(FMargin(0.f, 32.f, 0.f, 0.f))
 				[
 					ConstructConditionalInternals(InArgs)
 				]
@@ -591,13 +683,11 @@ public:
 	TSharedRef<SHorizontalBox> ConstructConditionalInternals( const FArguments& InArgs ) 
 	{
 		TSharedRef<SHorizontalBox> HorizontalBox = SNew(SHorizontalBox);
-		TSharedPtr<SUniformGridPanel> UniformGridPanel;
 		
 		// checkbox with user specified text
 		HorizontalBox->AddSlot()
 		.HAlign(HAlign_Left)
-		.Padding(5,0,15,0)
-		.AutoWidth()
+		.FillWidth(1.0)
 		[
 			SNew(SCheckBox)
 			.IsChecked(InArgs._bDefaultCheckValue ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
@@ -611,35 +701,28 @@ public:
 		];
 		HorizontalBox->AddSlot()
 		.HAlign(HAlign_Right)
-		.Padding(2.f)
+		.Padding(FMargin(16.f, 0.f, 0.f, 0.f)) // currently hardcoded until we adjust StandardDialog.SlotPadding
+		.AutoWidth()
 		[
-			SAssignNew(UniformGridPanel, SUniformGridPanel)
-			.SlotPadding(FEditorStyle::GetMargin("StandardDialog.SlotPadding"))
+			SNew(SPrimaryButton)
+			.Text(InArgs._ConfirmText)
+			.OnClicked(this, &SModalDialogWithCheckbox::OnConfirmClicked)
+			
 		];
 
-		// yes/ok/confirm button
-		UniformGridPanel->AddSlot(0,0)
-		.HAlign(HAlign_Fill)
-		[
-			SNew( SButton )
-			.Text( InArgs._ConfirmText )
-			.OnClicked( this, &SModalDialogWithCheckbox::OnConfirmClicked )
-			.ContentPadding(FEditorStyle::GetMargin("StandardDialog.ContentPadding"))
-			.HAlign(HAlign_Center)
-		];
 
 		// Only add a cancel button if required
 		if (InArgs._bHasCancelButton)
 		{
 			// cancel/stop/abort button
-			UniformGridPanel->AddSlot(1,0)
-			.HAlign(HAlign_Fill)
+			HorizontalBox->AddSlot()
+			.HAlign(HAlign_Right)
+			.Padding(FMargin(8.f, 0.f, 0.f, 0.f)) // currently hardcoded until we adjust StandardDialog.SlotPadding
+			.AutoWidth()
 			[
 				SNew( SButton )
 				.Text( InArgs._CancelText )
 				.OnClicked( this, &SModalDialogWithCheckbox::OnCancelClicked )
-				.ContentPadding(FEditorStyle::GetMargin("StandardDialog.ContentPadding"))
-				.HAlign(HAlign_Center)
 			];
 		}
 	
@@ -725,6 +808,13 @@ private:
 	TAttribute<FText> MyCheckboxMessage;
 };
 
+TSet<FString> FSuppressableWarningDialog::SuppressedInTheSession = {};
+
+FString SuppressableWarningDialogGetSessionKey(const FString& IniSettingName, const FString& IniSettingFileName)
+{
+	return IniSettingFileName + TEXT("_") + IniSettingName;
+}
+
 FSuppressableWarningDialog::FSuppressableWarningDialog(const FSetupInfo& Info)
 {
 	// Ensure proper usage of the suppression warning.
@@ -738,8 +828,28 @@ FSuppressableWarningDialog::FSuppressableWarningDialog(const FSetupInfo& Info)
 	IniSettingName = Info.IniSettingName;
 	IniSettingFileName = Info.IniSettingFileName;
 	Prompt = Info.Message;
+	ResponseIniSettingName = Info.IniSettingName + TEXT("_ConfirmResponse");
 
-	GConfig->GetBool( *ConfigSection, *IniSettingName, bShouldSuppressDialog, IniSettingFileName );
+	// bDontPersistSuppressionAcrossSessions takes precedence until removed
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	if (Info.bDontPersistSuppressionAcrossSessions)
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	{
+		DialogMode = EMode::DontPersistSuppressionAcrossSessions;
+	}
+	else
+	{
+		DialogMode = Info.DialogMode;
+	}
+
+	if (DialogMode == EMode::DontPersistSuppressionAcrossSessions)
+	{
+		bShouldSuppressDialog = SuppressedInTheSession.Contains(SuppressableWarningDialogGetSessionKey(IniSettingName, IniSettingFileName));
+	}
+	else
+	{
+		GConfig->GetBool( *ConfigSection, *IniSettingName, bShouldSuppressDialog, IniSettingFileName );
+	}
 	
 	if (!bShouldSuppressDialog && FSlateApplication::IsInitialized())
 	{
@@ -749,7 +859,7 @@ FSuppressableWarningDialog::FSuppressableWarningDialog(const FSetupInfo& Info)
 		.SupportsMaximize(false) .SupportsMinimize(false);
 
 		// Cache a default image to be used as most cases will not provide their own.
-		static const FSlateBrush* DefaultImage = FEditorStyle::GetBrush("NotificationList.DefaultMessage");
+		static const FSlateBrush* DefaultImage = FAppStyle::GetBrush("Icons.WarningWithColor.Large");
 
 		MessageBox = SNew(SModalDialogWithCheckbox)
 			.Message(Prompt)
@@ -759,7 +869,8 @@ FSuppressableWarningDialog::FSuppressableWarningDialog(const FSetupInfo& Info)
 			.bDefaultCheckValue(Info.bDefaultToSuppressInTheFuture)
 			.CheckboxMessage(Info.CheckBoxText)
 			.ParentWindow(ModalWindow)
-			.Image((Info.Image != NULL) ? Info.Image : DefaultImage);
+			.Image((Info.Image != NULL) ? Info.Image : DefaultImage)
+			.WrapMessageAt(Info.WrapMessageAt);
 
 		ModalWindow->SetContent( MessageBox.ToSharedRef() );
 	}
@@ -772,25 +883,65 @@ FSuppressableWarningDialog::EResult FSuppressableWarningDialog::ShowModal() cons
 	bool bShouldSuppressDialog = false;
 
 	// Get the setting from the config file.
-	GConfig->GetBool( *ConfigSection, *IniSettingName, bShouldSuppressDialog, IniSettingFileName );
+	if (DialogMode == EMode::DontPersistSuppressionAcrossSessions)
+	{
+		bShouldSuppressDialog = SuppressedInTheSession.Contains(SuppressableWarningDialogGetSessionKey(IniSettingName, IniSettingFileName));
+	}
+	else
+	{
+		GConfig->GetBool( *ConfigSection, *IniSettingName, bShouldSuppressDialog, IniSettingFileName );
+	}
 
 	EResult RetCode = Suppressed;
 	if( !bShouldSuppressDialog )
 	{
 		GEditor->EditorAddModalWindow(ModalWindow.ToSharedRef());
 		RetCode = (MessageBox->GetResponse()) ? Confirm : Cancel;
+		
+		// Set the ini variable to the state of the disable check box
+		bShouldSuppressDialog = MessageBox->GetCheckBoxState();
 
 		if( RetCode == Confirm )
 		{
-			// Set the ini variable to the state of the disable check box
-			bShouldSuppressDialog = MessageBox->GetCheckBoxState();
-			GConfig->SetBool( *ConfigSection, *IniSettingName, bShouldSuppressDialog, IniSettingFileName );
+			if (DialogMode == EMode::DontPersistSuppressionAcrossSessions)
+			{
+				if (bShouldSuppressDialog)
+				{
+					SuppressedInTheSession.Add(SuppressableWarningDialogGetSessionKey(IniSettingName, IniSettingFileName));
+				}
+			}
+			else
+			{
+				GConfig->SetBool(*ConfigSection, *IniSettingName, bShouldSuppressDialog, IniSettingFileName);
+
+				if (DialogMode == EMode::PersistUserResponse)
+				{
+					GConfig->SetBool(*ConfigSection, *ResponseIniSettingName, true, IniSettingFileName);
+				}
+			}
+		}
+		else
+		{
+			if (DialogMode == EMode::PersistUserResponse)
+			{
+				GConfig->SetBool(*ConfigSection, *IniSettingName, bShouldSuppressDialog, IniSettingFileName);
+				GConfig->SetBool(*ConfigSection, *ResponseIniSettingName, false, IniSettingFileName);
+			}
 		}
 	}
 	else
 	{
 		// If the dialog is suppressed, log the warning
 		UE_LOG(LogDialogs, Warning, TEXT("Suppressed: %s"), *Prompt.ToString());
+
+		if (DialogMode == EMode::PersistUserResponse)
+		{
+			// Get the saved response
+			bool bWasConfirmed = false;
+			GConfig->GetBool(*ConfigSection, *ResponseIniSettingName, bWasConfirmed, IniSettingFileName);
+
+			RetCode = bWasConfirmed ? Confirm : Cancel;
+		}
 	}
 
 	return RetCode;
@@ -829,8 +980,8 @@ bool PromptUserIfExistingObject(const FString& Name, const FString& Package, UPa
 	QualifiedName += Name;
 
 	// Check for an existing object
-	UObject* ExistingObject = StaticFindObject( UObject::StaticClass(), ANY_PACKAGE, *QualifiedName );
-	if( ExistingObject != NULL )
+	UObject* ExistingObject = StaticFindObject( UObject::StaticClass(), nullptr, *QualifiedName );
+	if( ExistingObject != nullptr )
 	{
 		// Object already exists in either the specified package or another package.  Check to see if the user wants
 		// to replace the object.
@@ -878,7 +1029,7 @@ void SGenericDialogWidget::Construct( const FArguments& InArgs )
 	{
 		ContentWidget = 
 			SNew(SBox)
-			.MaxDesiredHeight(InArgs._ScrollBoxMaxHeight)
+			.MaxDesiredHeight(static_cast<float>(InArgs._ScrollBoxMaxHeight))
 			[
 				SNew(SScrollBox)
 				+SScrollBox::Slot()
@@ -903,13 +1054,15 @@ void SGenericDialogWidget::Construct( const FArguments& InArgs )
 		+SVerticalBox::Slot()
 		.HAlign(HAlign_Right)
 		.AutoHeight()
-		.Padding(0.0f, 2.0f, 0.0f, 0.0f)
+		.Padding(0.f, 2.f, 0.f, 0.f)
 		[
 			SNew(SButton)
 			.Text( NSLOCTEXT("UnrealEd", "OK", "OK") )
 			.OnClicked(this, &SGenericDialogWidget::OnOK_Clicked)
 		]
 	];
+
+	OkPressedDelegate = InArgs._OnOkPressed;
 }
 
 void SGenericDialogWidget::OpenDialog(const FText& InDialogTitle, const TSharedRef< SWidget >& DisplayContent, const FArguments& InArgs, bool bAsModalDialog)
@@ -925,11 +1078,12 @@ void SGenericDialogWidget::OpenDialog(const FText& InDialogTitle, const TSharedR
 		[
 			SNew( SBorder )
 			.Padding( 4.f )
-			.BorderImage( FEditorStyle::GetBrush( "ToolPanel.GroupBorder" ) )
+			.BorderImage( FAppStyle::GetBrush( "ToolPanel.GroupBorder" ) )
 			[
 				SAssignNew(GenericDialogWidget, SGenericDialogWidget)
 				.UseScrollBox(InArgs._UseScrollBox)
 				.ScrollBoxMaxHeight(InArgs._ScrollBoxMaxHeight)
+				.OnOkPressed(InArgs._OnOkPressed)
 				[
 					DisplayContent
 				]
@@ -950,9 +1104,43 @@ void SGenericDialogWidget::OpenDialog(const FText& InDialogTitle, const TSharedR
 
 FReply SGenericDialogWidget::OnOK_Clicked(void)
 {
+	OkPressedDelegate.ExecuteIfBound();
+	
 	MyWindow.Pin()->RequestDestroyWindow();
 
 	return FReply::Handled();
+}
+
+TSharedRef<SWindow> UE::Private::CreateModalDialogWindow(
+	const FText& InTitle,
+	TSharedRef<SWidget> Contents,
+	ESizingRule Sizing,
+	FVector2D MinDimensions)
+{
+	// clang-format off
+	return SNew(SWindow)
+		.Title(InTitle)
+		.SizingRule(Sizing)
+		.MinWidth(MinDimensions.X)
+		.MinHeight(MinDimensions.Y)
+		.ClientSize(MinDimensions)
+		.SupportsMaximize(false)
+		.SupportsMinimize(false)
+		.HasCloseButton(false)
+		[
+			SNew(SBorder)
+			.Padding(4.f)
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+			[
+				MoveTemp(Contents)
+			]
+		];
+	// clang-format on
+}
+
+void UE::Private::ShowModalDialogWindow(TSharedRef<SWindow> Window)
+{
+	GEditor->EditorAddModalWindow(Window);
 }
 
 #undef LOCTEXT_NAMESPACE 

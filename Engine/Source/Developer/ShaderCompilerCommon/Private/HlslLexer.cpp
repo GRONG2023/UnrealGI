@@ -8,10 +8,7 @@
 
 namespace CrossCompiler
 {
-	template <typename T, size_t N>
-	char (&ArraySizeHelper(T (&array)[N]))[N];
-#define ArraySize(array) (sizeof(ArraySizeHelper(array)))
-#define MATCH_TARGET(S) S, (int32)ArraySize(S) - 1
+#define MATCH_TARGET(S) S, (UE_ARRAY_COUNT(S) - 1)
 
 	typedef FPlatformTypes::TCHAR TCHAR;
 
@@ -292,6 +289,33 @@ namespace CrossCompiler
 				InsertToken(TEXT("uint3x4"), EHlslToken::Uint3x4);
 				InsertToken(TEXT("uint4x4"), EHlslToken::Uint4x4);
 
+				InsertToken(TEXT("uint64_t"), EHlslToken::Uint64_t);
+				InsertToken(TEXT("uint64_t1"), EHlslToken::Uint64_t1);
+				InsertToken(TEXT("uint64_t2"), EHlslToken::Uint64_t2);
+				InsertToken(TEXT("uint64_t3"), EHlslToken::Uint64_t3);
+				InsertToken(TEXT("uint64_t4"), EHlslToken::Uint64_t4);
+				InsertToken(TEXT("uint64_t1x1"), EHlslToken::Uint64_t1x1);
+				InsertToken(TEXT("uint64_t2x1"), EHlslToken::Uint64_t2x1);
+				InsertToken(TEXT("uint64_t3x1"), EHlslToken::Uint64_t3x1);
+				InsertToken(TEXT("uint64_t4x1"), EHlslToken::Uint64_t4x1);
+				InsertToken(TEXT("uint64_t1x2"), EHlslToken::Uint64_t1x2);
+				InsertToken(TEXT("uint64_t2x2"), EHlslToken::Uint64_t2x2);
+				InsertToken(TEXT("uint64_t3x2"), EHlslToken::Uint64_t3x2);
+				InsertToken(TEXT("uint64_t4x2"), EHlslToken::Uint64_t4x2);
+				InsertToken(TEXT("uint64_t1x3"), EHlslToken::Uint64_t1x3);
+				InsertToken(TEXT("uint64_t2x3"), EHlslToken::Uint64_t2x3);
+				InsertToken(TEXT("uint64_t3x3"), EHlslToken::Uint64_t3x3);
+				InsertToken(TEXT("uint64_t4x3"), EHlslToken::Uint64_t4x3);
+				InsertToken(TEXT("uint64_t1x4"), EHlslToken::Uint64_t1x4);
+				InsertToken(TEXT("uint64_t2x4"), EHlslToken::Uint64_t2x4);
+				InsertToken(TEXT("uint64_t3x4"), EHlslToken::Uint64_t3x4);
+				InsertToken(TEXT("uint64_t4x4"), EHlslToken::Uint64_t4x4);
+
+				InsertToken(TEXT("ulong"), EHlslToken::Uint64_t);	
+				InsertToken(TEXT("ulong2"), EHlslToken::Uint64_t2);	
+				InsertToken(TEXT("ulong3"), EHlslToken::Uint64_t3);	
+				InsertToken(TEXT("ulong4"), EHlslToken::Uint64_t4);	
+
 				InsertToken(TEXT("half"), EHlslToken::Half);
 				InsertToken(TEXT("half1"), EHlslToken::Half1);
 				InsertToken(TEXT("half2"), EHlslToken::Half2);
@@ -382,6 +406,7 @@ namespace CrossCompiler
 				InsertToken(TEXT("RW_Texture2D"), EHlslToken::RWTexture2D);	// PSSL
 				InsertToken(TEXT("RWTexture2DArray"), EHlslToken::RWTexture2DArray);
 				InsertToken(TEXT("RW_Texture2D_Array"), EHlslToken::RWTexture2DArray);	// PSSL
+				InsertToken(TEXT("RasterizerOrderedTexture2D"), EHlslToken::RasterizerOrderedTexture2D);
 				InsertToken(TEXT("RWTexture3D"), EHlslToken::RWTexture3D);
 				InsertToken(TEXT("RW_Texture3D"), EHlslToken::RWTexture3D);	// PSSL
 				InsertToken(TEXT("StructuredBuffer"), EHlslToken::StructuredBuffer);
@@ -414,6 +439,7 @@ namespace CrossCompiler
 				InsertToken(TEXT("inline"), EHlslToken::Inline);
 				InsertToken(TEXT("typedef"), EHlslToken::Typedef);
 				InsertToken(TEXT("packoffset"), EHlslToken::PackOffset);
+				InsertToken(TEXT("operator"), EHlslToken::Operator);
 			}
 		} GStaticInitializer;
 	}
@@ -662,7 +688,7 @@ namespace CrossCompiler
 					// Check for infinity constant
 					if (Match('#'))
 					{
-						if (MatchString(TEXT("INF"), 3))
+						if (MatchString(MATCH_TARGET(TEXT("INF"))))
 						{
 							goto Done;
 						}
@@ -1290,13 +1316,13 @@ namespace CrossCompiler
 			else
 			{
 				FString Directive = TEXT("#if 0") + Tokenizer.ReadToEndOfLine();
-				CompilerMessages.SourceWarning(*FString::Printf(TEXT("Unhandled preprocessor directive (%s); HlslParser requires preprocessed input!"), Tokenizer.Current));
+				CompilerMessages.SourceWarning(*FString::Printf(TEXT("Unhandled preprocessor directive (%.500s); HlslParser requires preprocessed input!"), *Directive));
 			}
 		}
 		else
 		{
-			FString Directive = TEXT("#") + Tokenizer.ReadToEndOfLine();
-			CompilerMessages.SourceWarning(*FString::Printf(TEXT("Unhandled token (%s); HlslParser requires preprocessed input!"), Tokenizer.Current));
+			FString Directive = Tokenizer.ReadToEndOfLine();
+			CompilerMessages.SourceWarning(*FString::Printf(TEXT("Unhandled token (%.500s); HlslParser requires preprocessed input!"), *Directive));
 		}
 
 		Tokenizer.SkipToNextLine();

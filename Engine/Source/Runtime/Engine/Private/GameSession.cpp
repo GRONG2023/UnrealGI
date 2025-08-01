@@ -5,8 +5,8 @@
 =============================================================================*/
 
 #include "GameFramework/GameSession.h"
+#include "Engine/World.h"
 #include "Misc/CommandLine.h"
-#include "EngineGlobals.h"
 #include "Engine/Engine.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/GameModeBase.h"
@@ -14,16 +14,18 @@
 #include "Net/OnlineEngineInterface.h"
 #include "GameFramework/PlayerState.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(GameSession)
+
 DEFINE_LOG_CATEGORY(LogGameSession);
 
 static TAutoConsoleVariable<int32> CVarMaxPlayersOverride( TEXT( "net.MaxPlayersOverride" ), 0, TEXT( "If greater than 0, will override the standard max players count. Useful for testing full servers." ) );
 
-/** 
- * Returns the player controller associated with this net id
- * @param PlayerNetId the id to search for
- * @return the player controller if found, otherwise NULL
- */
 APlayerController* GetPlayerControllerFromNetId(UWorld* World, const FUniqueNetId& PlayerNetId)
+{
+	return GetPlayerControllerFromNetId(World, FUniqueNetIdRepl(PlayerNetId.AsShared()));
+}
+
+APlayerController* GetPlayerControllerFromNetId(UWorld* World, const FUniqueNetIdRepl& PlayerNetId)
 {
 	if (PlayerNetId.IsValid())
 	{
@@ -32,10 +34,10 @@ APlayerController* GetPlayerControllerFromNetId(UWorld* World, const FUniqueNetI
 		{
 			APlayerController* PlayerController = Iterator->Get();
 			// Determine if this is a player with replication
-			if (PlayerController && PlayerController->PlayerState != NULL && PlayerController->PlayerState->GetUniqueId().IsValid())
+			if (PlayerController && PlayerController->PlayerState && PlayerController->PlayerState->GetUniqueId().IsValid())
 			{
 				// If the ids match, then this is the right player.
-				if (*PlayerController->PlayerState->GetUniqueId() == PlayerNetId)
+				if (PlayerController->PlayerState->GetUniqueId() == PlayerNetId)
 				{
 					return PlayerController;
 				}
@@ -122,6 +124,24 @@ void AGameSession::OnEndSessionComplete(FName InSessionName, bool bWasSuccessful
 	UE_LOG(LogGameSession, Verbose, TEXT("OnEndSessionComplete %s bSuccess: %d"), *InSessionName.ToString(), bWasSuccessful);
 }
 
+void AGameSession::PostReloadConfig(FProperty* PropertyThatWasLoaded)
+{
+	Super::PostReloadConfig(PropertyThatWasLoaded);
+
+	if (!IsTemplate())
+	{
+		if (MaxPlayersOptionOverride.IsSet())
+		{
+			MaxPlayers = *MaxPlayersOptionOverride;
+		}
+
+		if (MaxSpectatorsOptionOverride.IsSet())
+		{
+			MaxSpectators = *MaxSpectatorsOptionOverride;
+		}
+	}
+}
+
 bool AGameSession::HandleStartMatchRequest()
 {
 	return false;
@@ -133,8 +153,17 @@ void AGameSession::InitOptions( const FString& Options )
 	check(World);
 	AGameModeBase* const GameMode = World ? World->GetAuthGameMode() : nullptr;
 
-	MaxPlayers = UGameplayStatics::GetIntOption( Options, TEXT("MaxPlayers"), MaxPlayers );
-	MaxSpectators = UGameplayStatics::GetIntOption( Options, TEXT("MaxSpectators"), MaxSpectators );
+	if (UGameplayStatics::HasOption(Options, TEXT("MaxPlayers")))
+	{
+		MaxPlayers = UGameplayStatics::GetIntOption(Options, TEXT("MaxPlayers"), MaxPlayers);
+		MaxPlayersOptionOverride = MaxPlayers;
+	}
+
+	if (UGameplayStatics::HasOption(Options, TEXT("MaxSpectators")))
+	{
+		MaxSpectators = UGameplayStatics::GetIntOption(Options, TEXT("MaxSpectators"), MaxSpectators);
+		MaxSpectatorsOptionOverride = MaxSpectators;
+	}
 	
 	if (GameMode)
 	{
@@ -223,11 +252,27 @@ void AGameSession::PostLogin(APlayerController* NewPlayer)
 int32 AGameSession::GetNextPlayerID()
 {
 	// Start at 256, because 255 is special (means all team for some UT Emote stuff)
-	static int32 NextPlayerID = 256;
+	static constexpr int32 MinPlayerId = 256;
+	static constexpr int32 MaxPlayerId = TNumericLimits<int32>::Max() - 1;
+	
+	static int32 NextPlayerID = MinPlayerId;
+	
+	// Prevent possible integer overflow by wrapping the value to the max player ID
+	if (NextPlayerID >= MaxPlayerId)
+	{
+		UE_LOG(LogGameSession, Warning, TEXT("AGameSession::GetNextPlayerID had to wrap the Player ID, this probably shouldn't have happened. PlayerID collisions may occur! Is this function being called incorrectly in a loop?"));
+		NextPlayerID = MinPlayerId;
+	}
+	
 	return NextPlayerID++;
 }
 
 void AGameSession::RegisterPlayer(APlayerController* NewPlayer, const FUniqueNetIdPtr& UniqueId, bool bWasFromInvite)
+{
+	RegisterPlayer(NewPlayer, FUniqueNetIdRepl(UniqueId), bWasFromInvite);
+}
+
+void AGameSession::RegisterPlayer(APlayerController* NewPlayer, const FUniqueNetIdRepl& UniqueId, bool bWasFromInvite)
 {
 	if (NewPlayer != NULL)
 	{
@@ -244,21 +289,44 @@ void AGameSession::UnregisterPlayer(FName InSessionName, const FUniqueNetIdRepl&
 	UWorld* World = GetWorld();
 	if (GetNetMode() != NM_Standalone &&
 		UniqueId.IsValid() &&
-		UniqueId->IsValid())
+		UOnlineEngineInterface::Get()->DoesSessionExist(World, InSessionName))
 	{
 		// Remove the player from the session
-		UOnlineEngineInterface::Get()->UnregisterPlayer(World, InSessionName, *UniqueId);
+		UOnlineEngineInterface::Get()->UnregisterPlayer(World, InSessionName, UniqueId);
 	}
 }
 
-void AGameSession::UnregisterPlayers(FName InSessionName, const TArray< FUniqueNetIdRef >& Players)
+void AGameSession::UnregisterPlayers(FName InSessionName, const TArray<FUniqueNetIdRef>& Players)
 {
 	UWorld* World = GetWorld();
 	if (GetNetMode() != NM_Standalone &&
-		Players.Num() > 0)
+		Players.Num() > 0 &&
+		UOnlineEngineInterface::Get()->DoesSessionExist(World, InSessionName))
 	{
 		// Remove the player from the session
-		UOnlineEngineInterface::Get()->UnregisterPlayers(World, InSessionName, Players);
+		TArray<FUniqueNetIdWrapper> PlayerIdsAsWrappers;
+		for (const FUniqueNetIdRef& PlayerId : Players)
+		{
+			PlayerIdsAsWrappers.Emplace(PlayerId);
+		}
+		UOnlineEngineInterface::Get()->UnregisterPlayers(World, InSessionName, PlayerIdsAsWrappers);
+	}
+}
+
+void AGameSession::UnregisterPlayers(FName InSessionName, const TArray<FUniqueNetIdRepl>& Players)
+{
+	UWorld * World = GetWorld();
+	if (GetNetMode() != NM_Standalone &&
+		Players.Num() > 0 &&
+		UOnlineEngineInterface::Get()->DoesSessionExist(World, InSessionName))
+	{
+		// Remove the player from the session
+		TArray<FUniqueNetIdWrapper> PlayerIdsAsWrappers;
+		for (const FUniqueNetIdRepl& PlayerId : Players)
+		{
+			PlayerIdsAsWrappers.Emplace(PlayerId);
+		}
+		UOnlineEngineInterface::Get()->UnregisterPlayers(World, InSessionName, PlayerIdsAsWrappers);
 	}
 }
 
@@ -405,3 +473,4 @@ void AGameSession::UpdateSessionJoinability(FName InSessionName, bool bPublicSea
 		UOnlineEngineInterface::Get()->UpdateSessionJoinability(GetWorld(), InSessionName, bPublicSearchable, bAllowInvites, bJoinViaPresence, bJoinViaPresenceFriendsOnly);
 	}
 }
+

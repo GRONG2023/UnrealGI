@@ -1,25 +1,23 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Class.h"
-#include "UObject/PropertyPortFlags.h"
 #include "UObject/UnrealType.h"
+
+#include "Algo/Find.h"
+#include "Hash/Blake3.h"
 #include "UObject/UnrealTypePrivate.h"
 #include "UObject/UObjectThreadContext.h"
-#include "Serialization/ArchiveUObjectFromStructuredArchive.h"
-#include "Algo/Find.h"
-#include "UObject/LinkerLoad.h"
-#include "Misc/NetworkVersion.h"
-
-// WARNING: This should always be the last include in any file that needs it (except .generated.h)
-#include "UObject/UndefineUPropertyMacros.h"
 
 /*-----------------------------------------------------------------------------
 	FByteProperty.
 -----------------------------------------------------------------------------*/
 
 IMPLEMENT_FIELD(FByteProperty)
+
+FByteProperty::FByteProperty(FFieldVariant InOwner, const UECodeGen_Private::FBytePropertyParams& Prop)
+	: TProperty_Numeric(InOwner, (const UECodeGen_Private::FPropertyParamsBaseWithOffset&)Prop)
+{
+	this->Enum = Prop.EnumFunc ? Prop.EnumFunc() : nullptr;
+}
 
 #if WITH_EDITORONLY_DATA
 FByteProperty::FByteProperty(UField* InField)
@@ -70,11 +68,11 @@ void FByteProperty::SerializeItem( FStructuredArchive::FSlot Slot, void* Value, 
 		int32 EnumIndex = Enum->GetIndexByName(EnumValueName, EGetByNameFlags::ErrorIfNotFound);
 		if (EnumIndex == INDEX_NONE)
 		{
-			*(uint8*)Value = Enum->GetMaxEnumValue();
+			*(uint8*)Value = IntCastChecked<uint8>(Enum->GetMaxEnumValue());
 		}
 		else
 		{
-			*(uint8*)Value = Enum->GetValueByIndex(EnumIndex);
+			*(uint8*)Value = IntCastChecked<uint8>(Enum->GetValueByIndex(EnumIndex));
 		}
 	}
 	// Saving
@@ -98,9 +96,11 @@ void FByteProperty::SerializeItem( FStructuredArchive::FSlot Slot, void* Value, 
 }
 bool FByteProperty::NetSerializeItem( FArchive& Ar, UPackageMap* Map, void* Data, TArray<uint8> * MetaData ) const
 {
-	if (Ar.EngineNetVer() < HISTORY_ENUM_SERIALIZATION_COMPAT)
+	Ar.UsingCustomVersion(FEngineNetworkCustomVersion::Guid);
+
+	if (Ar.EngineNetVer() < FEngineNetworkCustomVersion::EnumSerializationCompat)
 	{
-		Ar.SerializeBits(Data, Enum ? FMath::CeilLogTwo(Enum->GetMaxEnumValue()) : 8);
+		Ar.SerializeBits(Data, Enum ? FMath::CeilLogTwo64(Enum->GetMaxEnumValue()) : 8);
 	}
 	else
 	{
@@ -182,7 +182,12 @@ struct TConvertIntToEnumProperty
 		OldIntType OldValue;
 		Slot << OldValue;
 
-		uint8 NewValue = OldValue;
+		ConvertValue(OldValue, Property, Enum, Obj, Tag);
+	}
+
+	static void ConvertValue(OldIntType OldValue, FByteProperty* Property, UEnum* Enum, void* Obj, const FPropertyTag& Tag)
+	{
+		uint8 NewValue = (uint8)OldValue;
 		if (OldValue > (OldIntType)TNumericLimits<uint8>::Max() || !Enum->IsValidEnumValue(NewValue))
 		{
 			UE_LOG(
@@ -195,52 +200,62 @@ struct TConvertIntToEnumProperty
 				*Enum->GetNameByValue(Enum->GetMaxEnumValue()).ToString()
 				);
 
-			NewValue = Enum->GetMaxEnumValue();
+			NewValue = IntCastChecked<uint8>(Enum->GetMaxEnumValue());
 		}
 
 		Property->SetPropertyValue_InContainer(Obj, NewValue, Tag.ArrayIndex);
 	}
 };
 
-EConvertFromTypeResult FByteProperty::ConvertFromType(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct)
+EConvertFromTypeResult FByteProperty::ConvertFromType(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct, const uint8* Defaults)
 {
-	if (Tag.Type == NAME_ByteProperty  && ((Tag.EnumName == NAME_None) != (Enum == nullptr)))
+	const EName* TagType= Tag.Type.ToEName();
+	if (UNLIKELY(Tag.Type.GetNumber() || !TagType))
 	{
-		// a byte property gained or lost an enum
-		// attempt to convert it
-		uint8 PreviousValue = 0;
-		if (Tag.EnumName == NAME_None)
+		return EConvertFromTypeResult::UseSerializeItem;
+	}
+
+	switch (*TagType)
+	{
+	default:
+		return EConvertFromTypeResult::UseSerializeItem;
+	case NAME_ByteProperty:
+	{
+		if ((Tag.GetType().GetParameterCount() == 0) != (Enum == nullptr))
 		{
-			// If we're a nested property the EnumName tag got lost. Fail to read in this case
-			FProperty* const PropertyOwner = GetOwner<FProperty>();
-			if (PropertyOwner)
+			// A byte property gained or lost an enum.
+			uint8 PreviousValue = 0;
+			if (Enum)
 			{
-				return EConvertFromTypeResult::UseSerializeItem;
+				// A nested property would lose its enum name on previous versions. Handle this case for backward compatibility reasons.
+				if (GetOwner<FProperty>() && Slot.GetArchiveState().UEVer() < EUnrealEngineObjectUE5Version::PROPERTY_TAG_COMPLETE_TYPE_NAME)
+				{
+					return EConvertFromTypeResult::UseSerializeItem;
+				}
+
+				// Read the byte and assume its value corresponds to a valid enumerator.
+				Slot << PreviousValue;
+			}
+			else
+			{
+				// Attempt to find the enum from the tag and find the byte value from the enum.
+				PreviousValue = (uint8)ReadEnumAsInt64(Slot, DefaultsStruct, Tag);
 			}
 
-			// simply pretend the property still doesn't have an enum and serialize the single byte
-			Slot << PreviousValue;
+			SetPropertyValue_InContainer(Data, PreviousValue, Tag.ArrayIndex);
+			return EConvertFromTypeResult::Converted;
 		}
-		else
-		{
-			// attempt to find the old enum and get the byte value from the serialized enum name
-			PreviousValue = (uint8)ReadEnumAsInt64(Slot, DefaultsStruct, Tag);
-		}
-
-		// now copy the value into the object's address space
-		SetPropertyValue_InContainer(Data, PreviousValue, Tag.ArrayIndex);
+		return EConvertFromTypeResult::UseSerializeItem;
 	}
-	else if (Tag.Type == NAME_EnumProperty && (Enum == nullptr || Tag.EnumName == Enum->GetFName()))
+	case NAME_EnumProperty:
 	{
-		// an enum property became a byte
-		// attempt to find the old enum and get the byte value from the serialized enum name
+		// Attempt to find the enum from the tag and find the byte value from the enum.
 		uint8 PreviousValue = (uint8)ReadEnumAsInt64(Slot, DefaultsStruct, Tag);
 
-		// now copy the value into the object's address space
 		SetPropertyValue_InContainer(Data, PreviousValue, Tag.ArrayIndex);
+		return EConvertFromTypeResult::Converted;
 	}
-	else if (Tag.Type == NAME_Int8Property)
-	{
+	case NAME_Int8Property:
 		if (Enum)
 		{
 			TConvertIntToEnumProperty<int8>::Convert(Slot, this, Enum, Data, Tag);
@@ -249,9 +264,8 @@ EConvertFromTypeResult FByteProperty::ConvertFromType(const FPropertyTag& Tag, F
 		{
 			ConvertFromArithmeticValue<int8>(Slot, Data, Tag);
 		}
-	}
-	else if (Tag.Type == NAME_Int16Property)
-	{
+		return EConvertFromTypeResult::Converted;
+	case NAME_Int16Property:
 		if (Enum)
 		{
 			TConvertIntToEnumProperty<int16>::Convert(Slot, this, Enum, Data, Tag);
@@ -260,9 +274,8 @@ EConvertFromTypeResult FByteProperty::ConvertFromType(const FPropertyTag& Tag, F
 		{
 			ConvertFromArithmeticValue<int16>(Slot, Data, Tag);
 		}
-	}
-	else if (Tag.Type == NAME_IntProperty)
-	{
+		return EConvertFromTypeResult::Converted;
+	case NAME_IntProperty:
 		if (Enum)
 		{
 			TConvertIntToEnumProperty<int32>::Convert(Slot, this, Enum, Data, Tag);
@@ -271,9 +284,8 @@ EConvertFromTypeResult FByteProperty::ConvertFromType(const FPropertyTag& Tag, F
 		{
 			ConvertFromArithmeticValue<int32>(Slot, Data, Tag);
 		}
-	}
-	else if (Tag.Type == NAME_Int64Property)
-	{
+		return EConvertFromTypeResult::Converted;
+	case NAME_Int64Property:
 		if (Enum)
 		{
 			TConvertIntToEnumProperty<int64>::Convert(Slot, this, Enum, Data, Tag);
@@ -282,9 +294,8 @@ EConvertFromTypeResult FByteProperty::ConvertFromType(const FPropertyTag& Tag, F
 		{
 			ConvertFromArithmeticValue<int64>(Slot, Data, Tag);
 		}
-	}
-	else if (Tag.Type == NAME_UInt16Property)
-	{
+		return EConvertFromTypeResult::Converted;
+	case NAME_UInt16Property:
 		if (Enum)
 		{
 			TConvertIntToEnumProperty<uint16>::Convert(Slot, this, Enum, Data, Tag);
@@ -293,9 +304,8 @@ EConvertFromTypeResult FByteProperty::ConvertFromType(const FPropertyTag& Tag, F
 		{
 			ConvertFromArithmeticValue<uint16>(Slot, Data, Tag);
 		}
-	}
-	else if (Tag.Type == NAME_UInt32Property)
-	{
+		return EConvertFromTypeResult::Converted;
+	case NAME_UInt32Property:
 		if (Enum)
 		{
 			TConvertIntToEnumProperty<uint32>::Convert(Slot, this, Enum, Data, Tag);
@@ -304,9 +314,8 @@ EConvertFromTypeResult FByteProperty::ConvertFromType(const FPropertyTag& Tag, F
 		{
 			ConvertFromArithmeticValue<uint32>(Slot, Data, Tag);
 		}
-	}
-	else if (Tag.Type == NAME_UInt64Property)
-	{
+		return EConvertFromTypeResult::Converted;
+	case NAME_UInt64Property:
 		if (Enum)
 		{
 			TConvertIntToEnumProperty<uint64>::Convert(Slot, this, Enum, Data, Tag);
@@ -315,66 +324,71 @@ EConvertFromTypeResult FByteProperty::ConvertFromType(const FPropertyTag& Tag, F
 		{
 			ConvertFromArithmeticValue<uint64>(Slot, Data, Tag);
 		}
-	}
-	else
-	{
-		return EConvertFromTypeResult::UseSerializeItem;
-	}
-
-	return EConvertFromTypeResult::Converted;
-}
-
-void FByteProperty::ExportTextItem( FString& ValueStr, const void* PropertyValue, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
-{
-	if (0 != (PortFlags & PPF_ExportCpp))
-	{
+		return EConvertFromTypeResult::Converted;
+	case NAME_BoolProperty:
 		if (Enum)
 		{
-			const int32 ActualValue = *(const uint8*)PropertyValue;
-			const int32 MaxValue = Enum->GetMaxEnumValue();
-			const int32 GoodValue = Enum->IsValidEnumValue(ActualValue) ? ActualValue : MaxValue;
-			const bool bNonNativeEnum = Enum->GetClass() != UEnum::StaticClass();
-			ensure(!bNonNativeEnum || Enum->CppType.IsEmpty());
-			const FString FullyQualifiedEnumName = bNonNativeEnum ? ::UnicodeToCPPIdentifier(Enum->GetName(), false, TEXT("E__"))
-				: (Enum->CppType.IsEmpty() ? Enum->GetName() : Enum->CppType);
-			if (GoodValue == MaxValue)
-			{
-				// not all native enums have Max value declared
-				ValueStr += FString::Printf(TEXT("(%s)(%d)"), *FullyQualifiedEnumName, ActualValue);
-			}
-			else
-			{
-				ValueStr += FString::Printf(TEXT("%s::%s"), *FullyQualifiedEnumName,
-					*Enum->GetNameStringByValue(GoodValue));
-			}
+			TConvertIntToEnumProperty<uint64>::ConvertValue(Tag.BoolVal, this, Enum, Data, Tag);
 		}
 		else
 		{
-			Super::ExportTextItem(ValueStr, PropertyValue, DefaultValue, Parent, PortFlags, ExportRootScope);
+			SetPropertyValue_InContainer(Data, Tag.BoolVal, Tag.ArrayIndex);
 		}
-		return;
+		return EConvertFromTypeResult::Converted;
 	}
+}
 
+#if WITH_EDITORONLY_DATA
+void FByteProperty::AppendSchemaHash(FBlake3& Builder, bool bSkipEditorOnly) const
+{
+	Super::AppendSchemaHash(Builder, bSkipEditorOnly);
+	if (Enum)
+	{
+		FNameBuilder NameBuilder;
+		Enum->GetPathName(nullptr, NameBuilder);
+		Builder.Update(NameBuilder.GetData(), NameBuilder.Len() * sizeof(NameBuilder.GetData()[0]));
+		int32 Num = Enum->NumEnums();
+		for (int32 Index = 0; Index < Num; ++Index)
+		{
+			AppendHash(Builder, Enum->GetNameByIndex(Index));
+		}
+	}
+}
+#endif
+
+void FByteProperty::ExportText_Internal( FString& ValueStr, const void* PropertyValueOrContainer, EPropertyPointerType PropertyPointerType, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
+{
 	if( Enum && (PortFlags & PPF_ConsoleVariable) == 0 )
 	{
+		int64 ActualValue = 0;
+		if (PropertyPointerType == EPropertyPointerType::Container && HasGetter())
+		{
+			uint8 Value = 0;
+			GetValue_InContainer(PropertyValueOrContainer, &Value);
+			ActualValue = Value;
+		}
+		else
+		{
+			ActualValue = *(const uint8*)PointerToValuePtr(PropertyValueOrContainer, PropertyPointerType);
+		}
 		// if the value is the max value (the autogenerated *_MAX value), export as "INVALID", unless we're exporting text for copy/paste (for copy/paste,
 		// the property text value must actually match an entry in the enum's names array)
-		bool bIsValid = Enum->IsValidEnumValue(*(const uint8*)PropertyValue);
-		bool bIsMax = *(const uint8*)PropertyValue == Enum->GetMaxEnumValue();
+		bool bIsValid = Enum->IsValidEnumValue(ActualValue);
+		bool bIsMax = ActualValue == Enum->GetMaxEnumValue();
 		if (bIsValid && (!bIsMax || (PortFlags & PPF_Copy)))
 		{
 			// We do not want to export the enum text for non-display uses, localization text is very dynamic and would cause issues on import
 			if (PortFlags & PPF_PropertyWindow)
 			{
-				ValueStr += Enum->GetDisplayNameTextByValue(*(const uint8*)PropertyValue).ToString();
+				ValueStr += Enum->GetDisplayNameTextByValue(ActualValue).ToString();
 			}
 			else if (PortFlags & PPF_ExternalEditor)
 			{
-				ValueStr += Enum->GetAuthoredNameStringByValue(*(const uint8*)PropertyValue);
+				ValueStr += Enum->GetAuthoredNameStringByValue(ActualValue);
 			}
 			else
 			{
-				ValueStr += Enum->GetNameStringByValue(*(const uint8*)PropertyValue);
+				ValueStr += Enum->GetNameStringByValue(ActualValue);
 			}
 		}
 		else
@@ -384,10 +398,10 @@ void FByteProperty::ExportTextItem( FString& ValueStr, const void* PropertyValue
 	}
 	else
 	{
-		Super::ExportTextItem(ValueStr, PropertyValue, DefaultValue, Parent, PortFlags, ExportRootScope);
+		Super::ExportText_Internal(ValueStr, PropertyValueOrContainer, PropertyPointerType, DefaultValue, Parent, PortFlags, ExportRootScope);
 	}
 }
-const TCHAR* FByteProperty::ImportText_Internal( const TCHAR* InBuffer, void* Data, int32 PortFlags, UObject* Parent, FOutputDevice* ErrorText ) const
+const TCHAR* FByteProperty::ImportText_Internal( const TCHAR* InBuffer, void* ContainerOrPropertyPtr, EPropertyPointerType PropertyPointerType, UObject* Parent, int32 PortFlags, FOutputDevice* ErrorText ) const
 {
 	if( Enum && (PortFlags & PPF_ConsoleVariable) == 0 )
 	{
@@ -403,7 +417,15 @@ const TCHAR* FByteProperty::ImportText_Internal( const TCHAR* InBuffer, void* Da
 			}
 			if (EnumIndex != INDEX_NONE)
 			{
-				*(uint8*)Data = Enum->GetValueByIndex(EnumIndex);
+				uint8 EnumValue = IntCastChecked<uint8>(Enum->GetValueByIndex(EnumIndex));
+				if (PropertyPointerType == EPropertyPointerType::Container && HasSetter())
+				{
+					SetValue_InContainer(ContainerOrPropertyPtr, EnumValue);
+				}
+				else
+				{
+					*(uint8*)PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType) = EnumValue;
+				}
 				return Buffer;
 			}
 
@@ -411,20 +433,25 @@ const TCHAR* FByteProperty::ImportText_Internal( const TCHAR* InBuffer, void* Da
 			// return null so that the caller of ImportText can generate a more meaningful
 			// warning/error
 			UObject* SerializedObject = nullptr;
-			if (FLinkerLoad* Linker = GetLinker())
+			if (FUObjectSerializeContext* LoadContext = FUObjectThreadContext::Get().GetSerializeContext())
 			{
-				if (FUObjectSerializeContext* LoadContext = Linker->GetSerializeContext())
-				{
-					SerializedObject = LoadContext->SerializedObject;
-				}
+				SerializedObject = LoadContext->SerializedObject;
 			}
-			UE_LOG(LogClass, Warning, TEXT("In asset '%s', there is an enum property of type '%s' with an invalid value of '%s'"), *GetPathNameSafe(SerializedObject ? SerializedObject : FUObjectThreadContext::Get().ConstructedObject), *Enum->GetName(), *Temp);
+			const bool bIsNativeOrLoaded = (!Enum->HasAnyFlags(RF_WasLoaded) || Enum->HasAnyFlags(RF_LoadCompleted));
+			ErrorText->Logf(ELogVerbosity::Warning, TEXT("FBP: In asset '%s', there is an enum property of type '%s' with an invalid value of '%s' - %s"), 
+				*GetPathNameSafe(SerializedObject ? SerializedObject : FUObjectThreadContext::Get().ConstructedObject), 
+				*Enum->GetName(), 
+				*Temp,
+				bIsNativeOrLoaded ? TEXT("loaded") : TEXT("not loaded"));
 			return nullptr;
 		}
 	}
 	
 	// Interpret "True" and "False" as 1 and 0. This is mostly for importing a property that was exported as a bool and is imported as a non-enum byte.
-	if (!Enum)
+	// Also allow for ConsoleVariable-backed enums to attempt to convert True/False to 1/0 in case a bool cvar has been converted to an enum. 
+	// Enum properties backed by an integer CVar are stored as number values, so this code will only do anything when reading an old .ini file with True/False values
+	// We log a warning so users can fix up their .ini files to use integer values that map to the enum
+	if (!Enum || (PortFlags & PPF_ConsoleVariable))
 	{
 		FString Temp;
 		if (const TCHAR* Buffer = FPropertyHelpers::ReadToken(InBuffer, Temp))
@@ -433,18 +460,46 @@ const TCHAR* FByteProperty::ImportText_Internal( const TCHAR* InBuffer, void* Da
 
 			if (Temp == TEXT("True") || Temp == *(CoreTexts.True.ToString()))
 			{
-				SetIntPropertyValue(Data, 1ull);
+				uint64 TrueValue = 1ull;
+				if (PropertyPointerType == EPropertyPointerType::Container && HasSetter())
+				{
+					SetValue_InContainer(ContainerOrPropertyPtr, static_cast<uint8>(TrueValue));
+				}
+				else
+				{
+					SetIntPropertyValue(PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType), TrueValue);
+				}
+
+				if (Enum)
+				{
+					UE_LOG(LogClass, Warning, TEXT("ConsoleVariable-Backed Enum Property of type '%s' was set from a string. Please update the cvar in your ini files."), *Enum->GetPathName(), *Enum->GetName());
+				}
+
 				return Buffer;
 			}
 			else if (Temp == TEXT("False") || Temp == *(CoreTexts.False.ToString()))
 			{
-				SetIntPropertyValue(Data, 0ull);
+				uint64 FalseValue = 0ull;
+				if (PropertyPointerType == EPropertyPointerType::Container && HasSetter())
+				{
+					SetValue_InContainer(ContainerOrPropertyPtr, static_cast<uint8>(FalseValue));
+				}
+				else
+				{
+					SetIntPropertyValue(PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType), FalseValue);
+				}
+
+				if (Enum)
+				{
+					UE_LOG(LogClass, Warning, TEXT("ConsoleVariable-Backed Enum Property of type '%s' was set from a string. Please update the cvar in your ini files."), *Enum->GetPathName(), *Enum->GetName());
+				}
+
 				return Buffer;
 			}
 		}
 	}
 
-	return Super::ImportText_Internal( InBuffer, Data, PortFlags, Parent, ErrorText );
+	return Super::ImportText_Internal( InBuffer, ContainerOrPropertyPtr, PropertyPointerType, Parent, PortFlags, ErrorText );
 }
 
 UEnum* FByteProperty::GetIntPropertyEnum() const
@@ -460,4 +515,51 @@ uint64 FByteProperty::GetMaxNetSerializeBits() const
 	return FMath::Min(DesiredBits, MaxBits);
 }
 
-#include "UObject/DefineUPropertyMacros.h"
+bool FByteProperty::LoadTypeName(UE::FPropertyTypeName Type, const FPropertyTag* Tag)
+{
+	if (!Super::LoadTypeName(Type, Tag))
+	{
+		return false;
+	}
+
+	const FName EnumName = Type.GetParameterName(0);
+	if (EnumName.IsNone())
+	{
+		return true;
+	}
+
+	if (UEnum* LocalEnum = FindFirstObject<UEnum>(*WriteToString<256>(EnumName), EFindFirstObjectOptions::NativeFirst))
+	{
+		Enum = LocalEnum;
+		return true;
+	}
+
+	return false;
+}
+
+void FByteProperty::SaveTypeName(UE::FPropertyTypeNameBuilder& Type) const
+{
+	Super::SaveTypeName(Type);
+
+	if (const UEnum* LocalEnum = Enum)
+	{
+		Type.BeginParameters();
+		Type.AddPath(LocalEnum);
+		Type.EndParameters();
+	}
+}
+
+bool FByteProperty::CanSerializeFromTypeName(UE::FPropertyTypeName Type) const
+{
+	if (!Super::CanSerializeFromTypeName(Type))
+	{
+		return false;
+	}
+
+	const FName EnumName = Type.GetParameterName(0);
+	if (const UEnum* LocalEnum = Enum)
+	{
+		return EnumName == LocalEnum->GetFName();
+	}
+	return EnumName.IsNone();
+}

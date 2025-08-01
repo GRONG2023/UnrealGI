@@ -2,6 +2,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Styling/SlateBrush.h"
 
 class IPropertyTableCellPresenter
 {
@@ -9,6 +10,8 @@ public:
 	virtual ~IPropertyTableCellPresenter() { }
 
 	virtual TSharedRef< class SWidget > ConstructDisplayWidget() = 0;
+
+	virtual const FSlateBrush* GetEditModeCellBrush() { return nullptr; }
 
 	virtual bool RequiresDropDown() = 0;
 

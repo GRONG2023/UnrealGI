@@ -7,6 +7,7 @@
 #include "EngineGlobals.h"
 #include "Engine/Engine.h"
 #include "AISystem.h"
+#include "BehaviorTreeNodeInitializationData.h"
 #include "BehaviorTree/BehaviorTreeTypes.h"
 #include "BehaviorTree/BTNode.h"
 #include "BehaviorTree/BTTaskNode.h"
@@ -15,6 +16,9 @@
 #include "BehaviorTree/BTCompositeNode.h"
 #include "BehaviorTree/BehaviorTree.h"
 #include "BehaviorTree/Tasks/BTTask_RunBehavior.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BehaviorTreeManager)
+
 #if WITH_EDITOR
 #include "Kismet2/KismetEditorUtilities.h"
 #endif // WITH_EDITOR
@@ -51,40 +55,11 @@ void UBehaviorTreeManager::FinishDestroy()
 	Super::FinishDestroy();
 }
 
-int32 UBehaviorTreeManager::GetAlignedDataSize(int32 Size)
+uint16 UBehaviorTreeManager::GetAlignedDataSize(uint16 Size)
 {
 	// round to 4 bytes
 	return ((Size + 3) & ~3);
 }
-
-struct FNodeInitializationData
-{
-	UBTNode* Node;
-	UBTCompositeNode* ParentNode;
-	uint16 ExecutionIndex;
-	uint16 DataSize;
-	uint16 SpecialDataSize;
-	uint8 TreeDepth;
-
-	FNodeInitializationData() {}
-	FNodeInitializationData(UBTNode* InNode, UBTCompositeNode* InParentNode,
-		uint16 InExecutionIndex, uint8 InTreeDepth, uint16 NodeMemory, uint16 SpecialNodeMemory = 0)
-		: Node(InNode), ParentNode(InParentNode), ExecutionIndex(InExecutionIndex), TreeDepth(InTreeDepth)
-	{
-		SpecialDataSize = UBehaviorTreeManager::GetAlignedDataSize(SpecialNodeMemory);
-
-		const uint16 NodeMemorySize = NodeMemory + SpecialDataSize;
-		DataSize = (NodeMemorySize <= 2) ? NodeMemorySize : UBehaviorTreeManager::GetAlignedDataSize(NodeMemorySize);
-	}
-
-	struct FMemorySort
-	{
-		FORCEINLINE bool operator()(const FNodeInitializationData& A, const FNodeInitializationData& B) const
-		{
-			return A.DataSize > B.DataSize;
-		}
-	};
-};
 
 static void MergeDecoratorOpsHelper(TArray<FBTDecoratorLogic>& LinkOps, const TArray<FBTDecoratorLogic>& InjectedOps, const int32 NumOriginalDecorators, const int32 NumInjectedDecorators)
 {
@@ -97,15 +72,15 @@ static void MergeDecoratorOpsHelper(TArray<FBTDecoratorLogic>& LinkOps, const TA
 	if (NumOriginalDecorators > 0)
 	{
 		// and operator for two groups of composites: original and new one
-		FBTDecoratorLogic MasterAndOp(EBTDecoratorLogic::And, LinkOps.Num() ? 2 : (NumOriginalDecorators + 1));
-		LinkOps.Insert(MasterAndOp, 0);
+		FBTDecoratorLogic MainAndOp(EBTDecoratorLogic::And, LinkOps.Num() ? 2 : IntCastChecked<uint16>(NumOriginalDecorators + 1));
+		LinkOps.Insert(MainAndOp, 0);
 
 		if (NumOriginalOps == 0)
 		{
 			// add Test operations, original link didn't have composite operators
 			for (int32 Idx = 0; Idx < NumOriginalDecorators; Idx++)
 			{
-				FBTDecoratorLogic TestOp(EBTDecoratorLogic::Test, Idx);
+				FBTDecoratorLogic TestOp(EBTDecoratorLogic::Test, IntCastChecked<uint16>(Idx));
 				LinkOps.Add(TestOp);
 			}
 		}
@@ -114,12 +89,12 @@ static void MergeDecoratorOpsHelper(TArray<FBTDecoratorLogic>& LinkOps, const TA
 	// add injected operators
 	if (InjectedOps.Num() == 0)
 	{
-		FBTDecoratorLogic InjectedAndOp(EBTDecoratorLogic::And, NumInjectedDecorators);
+		FBTDecoratorLogic InjectedAndOp(EBTDecoratorLogic::And, IntCastChecked<uint16>(NumInjectedDecorators));
 		LinkOps.Add(InjectedAndOp);
 
 		for (int32 Idx = 0; Idx < NumInjectedDecorators; Idx++)
 		{
-			FBTDecoratorLogic TestOp(EBTDecoratorLogic::Test, NumOriginalDecorators + Idx);
+			FBTDecoratorLogic TestOp(EBTDecoratorLogic::Test, IntCastChecked<uint16>(NumOriginalDecorators + Idx));
 			LinkOps.Add(TestOp);
 		}
 	}
@@ -130,7 +105,7 @@ static void MergeDecoratorOpsHelper(TArray<FBTDecoratorLogic>& LinkOps, const TA
 			FBTDecoratorLogic InjectedOpCopy = InjectedOps[Idx];
 			if (InjectedOpCopy.Operation == EBTDecoratorLogic::Test)
 			{
-				InjectedOpCopy.Number += NumOriginalDecorators;
+				InjectedOpCopy.Number = IntCastChecked<uint16>((int32)InjectedOpCopy.Number + NumOriginalDecorators);
 			}
 
 			LinkOps.Add(InjectedOpCopy);
@@ -139,11 +114,14 @@ static void MergeDecoratorOpsHelper(TArray<FBTDecoratorLogic>& LinkOps, const TA
 }
 
 static void InitializeNodeHelper(UBTCompositeNode* ParentNode, UBTNode* NodeOb,
-	uint8 TreeDepth, uint16& ExecutionIndex, TArray<FNodeInitializationData>& InitList,
+	uint8 TreeDepth, uint16& ExecutionIndex, TArray<FBehaviorTreeNodeInitializationData>& InitList,
 	UBehaviorTree& TreeAsset, UObject* NodeOuter)
 {
-	InitList.Add(FNodeInitializationData(NodeOb, ParentNode, ExecutionIndex, TreeDepth, NodeOb->GetInstanceMemorySize(), NodeOb->GetSpecialMemorySize()));
-	NodeOb->InitializeFromAsset(TreeAsset);
+	InitList.Add(FBehaviorTreeNodeInitializationData(NodeOb, ParentNode, ExecutionIndex, TreeDepth, NodeOb->GetInstanceMemorySize(), NodeOb->GetSpecialMemorySize()));
+	{
+		FScopedBTLoggingContext LogContext(NodeOb);
+		NodeOb->InitializeFromAsset(TreeAsset);
+	}
 	ExecutionIndex++;
 
 	UBTCompositeNode* CompositeOb = Cast<UBTCompositeNode>(NodeOb);
@@ -156,7 +134,7 @@ static void InitializeNodeHelper(UBTCompositeNode* ParentNode, UBTNode* NodeOb,
 				UE_LOG(LogBehaviorTree, Warning, TEXT("%s has missing service node! (parent: %s)"),
 					*TreeAsset.GetName(), *UBehaviorTreeTypes::DescribeNodeHelper(CompositeOb));
 
-				CompositeOb->Services.RemoveAt(ServiceIndex, 1, false);
+				CompositeOb->Services.RemoveAt(ServiceIndex, 1, EAllowShrinking::No);
 				ServiceIndex--;
 				continue;
 			}
@@ -164,9 +142,10 @@ static void InitializeNodeHelper(UBTCompositeNode* ParentNode, UBTNode* NodeOb,
 			UBTService* Service = Cast<UBTService>(StaticDuplicateObject(CompositeOb->Services[ServiceIndex], NodeOuter));;
 			CompositeOb->Services[ServiceIndex] = Service;
 
-			InitList.Add(FNodeInitializationData(Service, CompositeOb, ExecutionIndex, TreeDepth,
+			InitList.Add(FBehaviorTreeNodeInitializationData(Service, CompositeOb, ExecutionIndex, TreeDepth,
 				Service->GetInstanceMemorySize(), Service->GetSpecialMemorySize()));
 
+			FScopedBTLoggingContext LogContext(Service);
 			Service->InitializeFromAsset(TreeAsset);
 			// don't initialize parent link for services on composite node
 			ExecutionIndex++;
@@ -182,7 +161,7 @@ static void InitializeNodeHelper(UBTCompositeNode* ParentNode, UBTNode* NodeOb,
 					UE_LOG(LogBehaviorTree, Warning, TEXT("%s has missing decorator node! (parent: %s, branch: %d)"),
 						*TreeAsset.GetName(), *UBehaviorTreeTypes::DescribeNodeHelper(CompositeOb), ChildIndex);
 
-					ChildInfo.Decorators.RemoveAt(DecoratorIndex, 1, false);
+					ChildInfo.Decorators.RemoveAt(DecoratorIndex, 1, EAllowShrinking::No);
 					DecoratorIndex--;
 					continue;
 				}
@@ -190,11 +169,12 @@ static void InitializeNodeHelper(UBTCompositeNode* ParentNode, UBTNode* NodeOb,
 				UBTDecorator* Decorator = Cast<UBTDecorator>(StaticDuplicateObject(ChildInfo.Decorators[DecoratorIndex], NodeOuter));
 				ChildInfo.Decorators[DecoratorIndex] = Decorator;
 
-				InitList.Add(FNodeInitializationData(Decorator, CompositeOb, ExecutionIndex, TreeDepth,
+				InitList.Add(FBehaviorTreeNodeInitializationData(Decorator, CompositeOb, ExecutionIndex, TreeDepth,
 					Decorator->GetInstanceMemorySize(), Decorator->GetSpecialMemorySize()));
 
+				FScopedBTLoggingContext LogContext(Decorator);
 				Decorator->InitializeFromAsset(TreeAsset);
-				Decorator->InitializeParentLink(ChildIndex);
+				Decorator->InitializeParentLink(IntCastChecked<uint8>(ChildIndex));
 				ExecutionIndex++;
 			}
 
@@ -218,13 +198,14 @@ static void InitializeNodeHelper(UBTCompositeNode* ParentNode, UBTNode* NodeOb,
 					UBTDecorator* Decorator = Cast<UBTDecorator>(StaticDuplicateObject(SubtreeAsset.RootDecorators[DecoratorIndex], NodeOuter));
 					ChildInfo.Decorators.Add(Decorator);
 
-					InitList.Add(FNodeInitializationData(Decorator, CompositeOb, ExecutionIndex, TreeDepth,
+					InitList.Add(FBehaviorTreeNodeInitializationData(Decorator, CompositeOb, ExecutionIndex, TreeDepth,
 						Decorator->GetInstanceMemorySize(), Decorator->GetSpecialMemorySize()));
 
 					// initialize with parent tree
 					Decorator->MarkInjectedNode();
+					FScopedBTLoggingContext LogContext(Decorator);
 					Decorator->InitializeFromAsset(TreeAsset);
-					Decorator->InitializeParentLink(ChildIndex);
+					Decorator->InitializeParentLink(IntCastChecked<uint8>(ChildIndex));
 					ExecutionIndex++;
 				}
 
@@ -251,7 +232,7 @@ static void InitializeNodeHelper(UBTCompositeNode* ParentNode, UBTNode* NodeOb,
 						UE_LOG(LogBehaviorTree, Warning, TEXT("%s has missing service node! (parent: %s)"),
 							*TreeAsset.GetName(), *UBehaviorTreeTypes::DescribeNodeHelper(ChildInfo.ChildTask));
 
-						ChildInfo.ChildTask->Services.RemoveAt(ServiceIndex, 1, false);
+						ChildInfo.ChildTask->Services.RemoveAt(ServiceIndex, 1, EAllowShrinking::No);
 						ServiceIndex--;
 						continue;
 					}
@@ -259,11 +240,12 @@ static void InitializeNodeHelper(UBTCompositeNode* ParentNode, UBTNode* NodeOb,
 					UBTService* Service = Cast<UBTService>(StaticDuplicateObject(ChildInfo.ChildTask->Services[ServiceIndex], NodeOuter));
 					ChildInfo.ChildTask->Services[ServiceIndex] = Service;
 
-					InitList.Add(FNodeInitializationData(Service, CompositeOb, ExecutionIndex, TreeDepth,
+					InitList.Add(FBehaviorTreeNodeInitializationData(Service, CompositeOb, ExecutionIndex, TreeDepth,
 						Service->GetInstanceMemorySize(), Service->GetSpecialMemorySize()));
 
+					FScopedBTLoggingContext LogContext(Service);
 					Service->InitializeFromAsset(TreeAsset);
-					Service->InitializeParentLink(ChildIndex);
+					Service->InitializeParentLink(IntCastChecked<uint8>(ChildIndex));
 					ExecutionIndex++;
 				}
 			}
@@ -299,7 +281,7 @@ bool UBehaviorTreeManager::LoadTree(UBehaviorTree& Asset, UBTCompositeNode*& Roo
 		TemplateInfo.Asset = &Asset;
 		TemplateInfo.Template = Cast<UBTCompositeNode>(StaticDuplicateObject(Asset.RootNode, this));
 
-		TArray<FNodeInitializationData> InitList;
+		TArray<FBehaviorTreeNodeInitializationData> InitList;
 		uint16 ExecutionIndex = 0;
 		InitializeNodeHelper(NULL, TemplateInfo.Template, 0, ExecutionIndex, InitList, Asset, this);
 
@@ -314,7 +296,7 @@ bool UBehaviorTreeManager::LoadTree(UBehaviorTree& Asset, UBTCompositeNode*& Roo
 		// sort nodes by memory size, so they can be packed better
 		// it still won't protect against structures, that are internally misaligned (-> uint8, uint32)
 		// but since all Engine level nodes are good... 
-		InitList.Sort(FNodeInitializationData::FMemorySort());
+		InitList.Sort(FBehaviorTreeNodeInitializationData::FMemorySort());
 		uint16 MemoryOffset = 0;
 		for (int32 Index = 0; Index < InitList.Num(); Index++)
 		{
@@ -336,7 +318,7 @@ bool UBehaviorTreeManager::LoadTree(UBehaviorTree& Asset, UBTCompositeNode*& Roo
 
 void UBehaviorTreeManager::InitializeMemoryHelper(const TArray<UBTDecorator*>& Nodes, TArray<uint16>& MemoryOffsets, int32& MemorySize, bool bForceInstancing)
 {
-	TArray<FNodeInitializationData> InitList;
+	TArray<FBehaviorTreeNodeInitializationData> InitList;
 	for (int32 NodeIndex = 0; NodeIndex < Nodes.Num(); NodeIndex++)
 	{
 		UBTNode* Node = Nodes[NodeIndex];
@@ -347,7 +329,7 @@ void UBehaviorTreeManager::InitializeMemoryHelper(const TArray<UBTDecorator*>& N
 			Node->ForceInstancing(true);
 		}
 
-		InitList.Add(FNodeInitializationData(Nodes[NodeIndex], NULL, 0, 0, Nodes[NodeIndex]->GetInstanceMemorySize(), Nodes[NodeIndex]->GetSpecialMemorySize()));
+		InitList.Add(FBehaviorTreeNodeInitializationData(Nodes[NodeIndex], NULL, 0, 0, Nodes[NodeIndex]->GetInstanceMemorySize(), Nodes[NodeIndex]->GetSpecialMemorySize()));
 
 		if (bForceInstancing && !bUsesInstancing)
 		{
@@ -355,7 +337,7 @@ void UBehaviorTreeManager::InitializeMemoryHelper(const TArray<UBTDecorator*>& N
 		}
 	}
 
-	InitList.Sort(FNodeInitializationData::FMemorySort());
+	InitList.Sort(FBehaviorTreeNodeInitializationData::FMemorySort());
 
 	uint16 MemoryOffset = 0;
 	MemoryOffsets.AddZeroed(Nodes.Num());
@@ -519,3 +501,4 @@ UBehaviorTreeManager* UBehaviorTreeManager::GetCurrent(UObject* WorldContextObje
 	UAISystem* AISys = UAISystem::GetCurrentSafe(World);
 	return AISys ? AISys->GetBehaviorTreeManager() : nullptr;
 }
+

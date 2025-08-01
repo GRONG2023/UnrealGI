@@ -3,27 +3,25 @@
 #pragma once
 
 #include "CoreTypes.h"
-#include "Templates/IsSigned.h"
-#include "Templates/PointerIsConvertibleFromTo.h"
 #include "Misc/AssertionMacros.h"
+#include "Misc/ReverseIterate.h"
+#include "Templates/Invoke.h"
 #include "Templates/UnrealTypeTraits.h"
+#include "Traits/ElementType.h"
 #include "Containers/Array.h"
+#include "Math/UnrealMathUtility.h"
+#include <type_traits>
 
-namespace ArrayViewPrivate
+namespace UE::Core::ArrayView::Private
 {
 	/**
 	 * Trait testing whether a type is compatible with the view type
+	 *
+	 * The extra stars here are *IMPORTANT*
+	 * They prevent TMultiArrayView<Base>(TArray<Derived>&) from compiling!
 	 */
 	template <typename T, typename ElementType>
-	struct TIsCompatibleElementType
-	{
-	public:
-		/** NOTE:
-		 * The stars in the TPointerIsConvertibleFromTo test are *IMPORTANT*
-		 * They prevent TArrayView<Base>(TArray<Derived>&) from compiling!
-		 */
-		enum { Value = TPointerIsConvertibleFromTo<T*, ElementType* const>::Value };
-	};
+	constexpr bool TIsCompatibleElementType_V =std::is_convertible_v<T**, ElementType* const*>;
 
 	// Simply forwards to an unqualified GetData(), but can be called from within TArrayView
 	// where GetData() is already a member and so hides any others.
@@ -33,15 +31,75 @@ namespace ArrayViewPrivate
 		return GetData(Forward<T>(Arg));
 	}
 
+	// Gets the data from the passed argument and proceeds to reinterpret the resulting elements
+	template <typename T>
+	FORCEINLINE decltype(auto) GetReinterpretedDataHelper(T&& Arg)
+	{
+		auto NaturalPtr = GetData(Forward<T>(Arg));
+		using NaturalElementType = std::remove_pointer_t<decltype(NaturalPtr)>;
+
+		auto Size = GetNum(Arg);
+		auto EndPtr = NaturalPtr + Size;
+		TContainerElementTypeCompatibility<NaturalElementType>::ReinterpretRangeContiguous(NaturalPtr, EndPtr, Size);
+
+		return reinterpret_cast<typename TContainerElementTypeCompatibility<NaturalElementType>::ReinterpretType*>(NaturalPtr);
+	}
+
 	/**
 	 * Trait testing whether a type is compatible with the view type
 	 */
 	template <typename RangeType, typename ElementType>
 	struct TIsCompatibleRangeType
 	{
-		static constexpr bool Value = TIsCompatibleElementType<typename TRemovePointer<decltype(GetData(DeclVal<RangeType&>()))>::Type, ElementType>::Value;
+		static constexpr bool Value = TIsCompatibleElementType_V<std::remove_pointer_t<decltype(GetData(DeclVal<RangeType&>()))>, ElementType>;
+
+		template <typename T>
+		static decltype(auto) GetData(T&& Arg)
+		{
+			return UE::Core::ArrayView::Private::GetDataHelper(Forward<T>(Arg));
+		}
+	};
+
+	/**
+	 * Trait testing whether a type is reinterpretable in a way that permits use with the view type
+	 */
+	template <typename RangeType, typename ElementType>
+	struct TIsReinterpretableRangeType
+	{
+	private:
+		using NaturalElementType = std::remove_pointer_t<decltype(GetData(DeclVal<RangeType&>()))>;
+		using TypeCompat = TContainerElementTypeCompatibility<NaturalElementType>;
+
+	public:
+		static constexpr bool Value = 
+			!std::is_same_v<typename TypeCompat::ReinterpretType, NaturalElementType>
+			&&
+			TIsCompatibleElementType_V<typename TypeCompat::ReinterpretType, ElementType>
+			&&
+			(!UE_DEPRECATE_MUTABLE_TOBJECTPTR
+			 || std::is_same_v<ElementType, std::remove_pointer_t<typename TypeCompat::ReinterpretType>* const>
+			 || std::is_same_v<ElementType, const std::remove_pointer_t<typename TypeCompat::ReinterpretType>* const>);
+
+		template <typename T>
+		static decltype(auto) GetData(T&& Arg)
+		{
+			return UE::Core::ArrayView::Private::GetReinterpretedDataHelper(Forward<T>(Arg));
+		}
 	};
 }
+
+template <typename T>                                  constexpr bool TIsTArrayView_V                                                       = false;
+template <typename InElementType, typename InSizeType> constexpr bool TIsTArrayView_V<               TArrayView<InElementType, InSizeType>> = true;
+template <typename InElementType, typename InSizeType> constexpr bool TIsTArrayView_V<      volatile TArrayView<InElementType, InSizeType>> = true;
+template <typename InElementType, typename InSizeType> constexpr bool TIsTArrayView_V<const          TArrayView<InElementType, InSizeType>> = true;
+template <typename InElementType, typename InSizeType> constexpr bool TIsTArrayView_V<const volatile TArrayView<InElementType, InSizeType>> = true;
+
+template <typename T>
+struct TIsTArrayView
+{
+	static constexpr bool Value = TIsTArrayView_V<T>;
+	static constexpr bool value = TIsTArrayView_V<T>;
+};
 
 /**
  * Templated fixed-size view of another array
@@ -68,7 +126,7 @@ namespace ArrayViewPrivate
  *
  * Caution:
  *   Treat a view like a *reference* to the elements in the array. DO NOT free or reallocate the array while the view exists!
- *   For this reason, be mindful of lifetime when constructing TArrayViews from rvalue initializer lists:
+ *   For this reason, be mindful of lifetimes when constructing TArrayViews from rvalue initializer lists:
  *
  *   TArrayView<int> View = { 1, 2, 3 }; // construction of array view from rvalue initializer list
  *   int n = View[0]; // undefined behavior, as the initializer list was destroyed at the end of the previous line
@@ -80,7 +138,12 @@ public:
 	using ElementType = InElementType;
 	using SizeType = InSizeType;
 
-	static_assert(TIsSigned<SizeType>::Value, "TArrayView only supports signed index types");
+	static_assert(std::is_signed_v<SizeType>, "TArrayView only supports signed index types");
+
+	// Defaulted object behavior - we want compiler-generated functions rather than going through the generic range constructor.
+	TArrayView(const TArrayView&) = default;
+	TArrayView& operator=(const TArrayView&) = default;
+	~TArrayView() = default;
 
 	/**
 	 * Constructor.
@@ -93,10 +156,10 @@ public:
 
 private:
 	template <typename T>
-	using TIsCompatibleElementType = ArrayViewPrivate::TIsCompatibleElementType<T, ElementType>;
+	using TIsCompatibleRangeType = UE::Core::ArrayView::Private::TIsCompatibleRangeType<T, ElementType>;
 
 	template <typename T>
-	using TIsCompatibleRangeType = ArrayViewPrivate::TIsCompatibleRangeType<T, ElementType>;
+	using TIsReinterpretableRangeType = UE::Core::ArrayView::Private::TIsReinterpretableRangeType<T, ElementType>;
 
 public:
 	/**
@@ -106,19 +169,68 @@ public:
 	 */
 	template <
 		typename OtherRangeType,
-		typename CVUnqualifiedOtherRangeType = typename TRemoveCV<typename TRemoveReference<OtherRangeType>::Type>::Type,
-		typename = typename TEnableIf<
+		typename CVUnqualifiedOtherRangeType = std::remove_cv_t<std::remove_reference_t<OtherRangeType>>
+		UE_REQUIRES(
 			TAnd<
 				TIsContiguousContainer<CVUnqualifiedOtherRangeType>,
-				TIsCompatibleRangeType<OtherRangeType>
-			>::Value
-		>::Type
+				TOr<
+					TIsCompatibleRangeType<OtherRangeType>,
+					TIsReinterpretableRangeType<OtherRangeType>
+				>
+			>::Value &&
+			TIsTArrayView_V<CVUnqualifiedOtherRangeType> &&
+			!std::is_same_v<CVUnqualifiedOtherRangeType, TArrayView>
+		)
 	>
 	FORCEINLINE TArrayView(OtherRangeType&& Other)
-		: DataPtr(ArrayViewPrivate::GetDataHelper(Forward<OtherRangeType>(Other)))
+		: DataPtr(std::conditional_t<
+						TIsCompatibleRangeType<OtherRangeType>::Value,
+						TIsCompatibleRangeType<OtherRangeType>,
+						TIsReinterpretableRangeType<OtherRangeType>
+					>::GetData(Forward<OtherRangeType>(Other)))
 	{
 		const auto InCount = GetNum(Forward<OtherRangeType>(Other));
-		check((InCount >= 0) && ((sizeof(InCount) < sizeof(SizeType)) || (InCount <= static_cast<decltype(InCount)>(TNumericLimits<SizeType>::Max()))));
+		using InCountType = decltype(InCount);
+
+		// Unlike the other constructor, we don't need to check(InCount >= 0), because it's coming from a TArrayView which guarantees that
+		if constexpr (sizeof(InCountType) > sizeof(SizeType) || (sizeof(InCountType) == sizeof(SizeType) && std::is_unsigned_v<InCountType>))
+		{
+			check(InCount <= static_cast<InCountType>(TNumericLimits<SizeType>::Max()));
+		}
+
+		ArrayNum = (SizeType)InCount;
+	}
+	template <
+		typename OtherRangeType,
+		typename CVUnqualifiedOtherRangeType = std::remove_cv_t<std::remove_reference_t<OtherRangeType>>
+		UE_REQUIRES(
+			TAnd<
+				TIsContiguousContainer<CVUnqualifiedOtherRangeType>,
+				TOr<
+					TIsCompatibleRangeType<OtherRangeType>,
+					TIsReinterpretableRangeType<OtherRangeType>
+				>
+			>::Value &&
+			!TIsTArrayView_V<CVUnqualifiedOtherRangeType>
+		)
+	>
+	FORCEINLINE TArrayView(OtherRangeType&& Other UE_LIFETIMEBOUND)
+		: DataPtr(std::conditional_t<
+			TIsCompatibleRangeType<OtherRangeType>::Value,
+			TIsCompatibleRangeType<OtherRangeType>,
+			TIsReinterpretableRangeType<OtherRangeType>
+		>::GetData(Forward<OtherRangeType>(Other)))
+	{
+		const auto InCount = GetNum(Forward<OtherRangeType>(Other));
+		using InCountType = decltype(InCount);
+		if constexpr (sizeof(InCountType) > sizeof(SizeType) || (sizeof(InCountType) == sizeof(SizeType) && std::is_unsigned_v<InCountType>))
+		{
+			check(InCount >= 0 && InCount <= static_cast<InCountType>(TNumericLimits<SizeType>::Max()));
+		}
+		else
+		{
+			check(InCount >= 0);
+		}
 		ArrayNum = (SizeType)InCount;
 	}
 
@@ -128,9 +240,11 @@ public:
 	 * @param InData	The data to view
 	 * @param InCount	The number of elements
 	 */
-	template <typename OtherElementType,
-		typename = typename TEnableIf<TIsCompatibleElementType<OtherElementType>::Value>::Type>
-	FORCEINLINE TArrayView(OtherElementType* InData, SizeType InCount)
+	template <
+		typename OtherElementType
+		UE_REQUIRES(UE::Core::ArrayView::Private::TIsCompatibleElementType_V<OtherElementType, ElementType>)
+	>
+	FORCEINLINE TArrayView(OtherElementType* InData UE_LIFETIMEBOUND, SizeType InCount)
 		: DataPtr(InData)
 		, ArrayNum(InCount)
 	{
@@ -142,10 +256,11 @@ public:
 	 *
 	 * The caller is responsible for ensuring that the view does not outlive the initializer list.
 	 */
-	FORCEINLINE TArrayView(std::initializer_list<ElementType> List)
-		: DataPtr(ArrayViewPrivate::GetDataHelper(List))
+	FORCEINLINE TArrayView(std::initializer_list<ElementType> List UE_LIFETIMEBOUND)
+		: DataPtr(UE::Core::ArrayView::Private::GetDataHelper(List))
 		, ArrayNum(GetNum(List))
 	{
+		static_assert(std::is_const_v<ElementType>, "Only views of const elements can bind to initializer lists");
 	}
 
 public:
@@ -153,7 +268,7 @@ public:
 	/**
 	 * Helper function for returning a typed pointer to the first array entry.
 	 *
-	 * @returns Pointer to first array entry or nullptr if ArrayMax == 0.
+	 * @returns Pointer to first array entry.
 	 */
 	FORCEINLINE ElementType* GetData() const
 	{
@@ -179,8 +294,7 @@ public:
 	}
 
 	/**
-	 * Checks array invariants: if array size is greater than zero and less
-	 * than maximum.
+	 * Checks array invariants: if array size is greater than or equal to zero.
 	 */
 	FORCEINLINE void CheckInvariants() const
 	{
@@ -196,11 +310,25 @@ public:
 	{
 		CheckInvariants();
 
-		checkf((Index >= 0) & (Index < ArrayNum),TEXT("Array index out of bounds: %i from an array of size %i"),Index,ArrayNum); // & for one branch
+		checkf((Index >= 0) & (Index < ArrayNum),TEXT("Array index out of bounds: %lld from an array of size %lld"), (long long)Index, (long long)ArrayNum); // & for one branch
 	}
 
 	/**
-	 * Tests if index is valid, i.e. than or equal to zero, and less than the number of elements in the array.
+	 * Checks if a slice range [Index, Index+InNum) is in array range.
+	 * Length is 0 is allowed on empty arrays; Index must be 0 in that case.
+	 *
+	 * @param Index Starting index of the slice.
+	 * @param InNum Length of the slice.
+	 */
+	FORCEINLINE void SliceRangeCheck(SizeType Index, SizeType InNum) const
+	{
+		checkf(Index >= 0, TEXT("Invalid index (%lld)"), (long long)Index);
+		checkf(InNum >= 0, TEXT("Invalid count (%lld)"), (long long)InNum);
+		checkf(Index + InNum <= ArrayNum, TEXT("Range (index: %lld, count: %lld) lies outside the view of %lld elements"), (long long)Index, (long long)InNum, (long long)ArrayNum);
+	}
+
+	/**
+	 * Tests if index is valid, i.e. greater than or equal to zero, and less than the number of elements in the array.
 	 *
 	 * @param Index Index to test.
 	 *
@@ -209,6 +337,17 @@ public:
 	FORCEINLINE bool IsValidIndex(SizeType Index) const
 	{
 		return (Index >= 0) && (Index < ArrayNum);
+	}
+
+	/**
+	 * Returns true if the array view is empty and contains no elements. 
+	 *
+	 * @returns True if the array view is empty.
+	 * @see Num
+	 */
+	bool IsEmpty() const
+	{
+		return ArrayNum == 0;
 	}
 
 	/**
@@ -222,7 +361,7 @@ public:
 	}
 
 	/**
-	 * Array bracket operator. Returns reference to element at give index.
+	 * Array bracket operator. Returns reference to element at given index.
 	 *
 	 * @returns Reference to indexed element.
 	 */
@@ -248,17 +387,95 @@ public:
 
 	/**
 	 * Returns a sliced view
+	 * This is similar to Mid(), but with a narrow contract, i.e. slicing outside of the range of the view is illegal.
 	 *
 	 * @param Index starting index of the new view
 	 * @param InNum number of elements in the new view
 	 * @returns Sliced view
+	 *
+	 * @see Mid
 	 */
-	FORCEINLINE TArrayView Slice(SizeType Index, SizeType InNum) const
+	[[nodiscard]] FORCEINLINE TArrayView Slice(SizeType Index, SizeType InNum) const
 	{
-		check(InNum > 0);
-		check(IsValidIndex(Index));
-		check(IsValidIndex(Index + InNum - 1));
+		SliceRangeCheck(Index, InNum);
 		return TArrayView(DataPtr + Index, InNum);
+	}
+
+	/** Returns the left-most part of the view by taking the given number of elements from the left. */
+	[[nodiscard]] inline TArrayView Left(SizeType Count) const
+	{
+		return TArrayView(DataPtr, FMath::Clamp(Count, (SizeType)0, ArrayNum));
+	}
+
+	/** Returns the left-most part of the view by chopping the given number of elements from the right. */
+	[[nodiscard]] inline TArrayView LeftChop(SizeType Count) const
+	{
+		return TArrayView(DataPtr, FMath::Clamp(ArrayNum - Count, (SizeType)0, ArrayNum));
+	}
+
+	/** Returns the right-most part of the view by taking the given number of elements from the right. */
+	[[nodiscard]] inline TArrayView Right(SizeType Count) const
+	{
+		const SizeType OutLen = FMath::Clamp(Count, (SizeType)0, ArrayNum);
+		return TArrayView(DataPtr + ArrayNum - OutLen, OutLen);
+	}
+
+	/** Returns the right-most part of the view by chopping the given number of elements from the left. */
+	[[nodiscard]] inline TArrayView RightChop(SizeType Count) const
+	{
+		const SizeType OutLen = FMath::Clamp(ArrayNum - Count, (SizeType)0, ArrayNum);
+		return TArrayView(DataPtr + ArrayNum - OutLen, OutLen);
+	}
+
+	/** Returns the middle part of the view by taking up to the given number of elements from the given position. */
+	[[nodiscard]] inline TArrayView Mid(SizeType Index, SizeType Count = TNumericLimits<SizeType>::Max()) const
+	{
+		ElementType* const CurrentStart  = GetData();
+		const SizeType     CurrentLength = Num();
+
+		// Clamp minimum index at the start of the range, adjusting the length down if necessary
+		const SizeType NegativeIndexOffset = (Index < 0) ? Index : 0;
+		Count += NegativeIndexOffset;
+		Index -= NegativeIndexOffset;
+
+		// Clamp maximum index at the end of the range
+		Index = (Index > CurrentLength) ? CurrentLength : Index;
+
+		// Clamp count between 0 and the distance to the end of the range
+		Count = FMath::Clamp(Count, (SizeType)0, (CurrentLength - Index));
+
+		TArrayView Result = TArrayView(CurrentStart + Index, Count);
+		return Result;
+	}
+
+	/** Modifies the view to be the given number of elements from the left. */
+	inline void LeftInline(SizeType CharCount)
+	{
+		*this = Left(CharCount);
+	}
+
+	/** Modifies the view by chopping the given number of elements from the right. */
+	inline void LeftChopInline(SizeType CharCount)
+	{
+		*this = LeftChop(CharCount);
+	}
+
+	/** Modifies the view to be the given number of elements from the right. */
+	inline void RightInline(SizeType CharCount)
+	{
+		*this = Right(CharCount);
+	}
+
+	/** Modifies the view by chopping the given number of elements from the left. */
+	inline void RightChopInline(SizeType CharCount)
+	{
+		*this = RightChop(CharCount);
+	}
+
+	/** Modifies the view to be the middle part by taking up to the given number of elements from the given position. */
+	inline void MidInline(SizeType Position, SizeType CharCount = TNumericLimits<SizeType>::Max())
+	{
+		*this = Mid(Position, CharCount);
 	}
 
 	/**
@@ -324,7 +541,7 @@ public:
 		for (const ElementType* RESTRICT Start = GetData(), *RESTRICT Data = Start + StartIndex; Data != Start; )
 		{
 			--Data;
-			if (Pred(*Data))
+			if (::Invoke(Pred, *Data))
 			{
 				return static_cast<SizeType>(Data - Start);
 			}
@@ -382,7 +599,7 @@ public:
 		const ElementType* RESTRICT Start = GetData();
 		for (const ElementType* RESTRICT Data = Start, *RESTRICT DataEnd = Start + ArrayNum; Data != DataEnd; ++Data)
 		{
-			if (Pred(*Data))
+			if (::Invoke(Pred, *Data))
 			{
 				return static_cast<SizeType>(Data - Start);
 			}
@@ -425,7 +642,7 @@ public:
 	{
 		for (ElementType* RESTRICT Data = GetData(), *RESTRICT DataEnd = Data + ArrayNum; Data != DataEnd; ++Data)
 		{
-			if (Pred(*Data))
+			if (::Invoke(Pred, *Data))
 			{
 				return Data;
 			}
@@ -443,12 +660,12 @@ public:
 	 *          the subset of elements for which the functor returns true.
 	 */
 	template <typename Predicate>
-	TArray<typename TRemoveConst<ElementType>::Type> FilterByPredicate(Predicate Pred) const
+	TArray<std::remove_const_t<ElementType>> FilterByPredicate(Predicate Pred) const
 	{
-		TArray<typename TRemoveConst<ElementType>::Type> FilterResults;
+		TArray<std::remove_const_t<ElementType>> FilterResults;
 		for (const ElementType* RESTRICT Data = GetData(), *RESTRICT DataEnd = Data + ArrayNum; Data != DataEnd; ++Data)
 		{
-			if (Pred(*Data))
+			if (::Invoke(Pred, *Data))
 			{
 				FilterResults.Add(*Data);
 			}
@@ -475,7 +692,7 @@ public:
 	}
 
 	/**
-	 * Checks if this array contains element for which the predicate is true.
+	 * Checks if this array contains an element for which the predicate is true.
 	 *
 	 * @param Predicate to use
 	 *
@@ -492,37 +709,53 @@ public:
 	 * DO NOT USE DIRECTLY
 	 * STL-like iterators to enable range-based for loop support.
 	 */
-	FORCEINLINE ElementType* begin() const { return GetData(); }
-	FORCEINLINE ElementType* end  () const { return GetData() + Num(); }
+	FORCEINLINE ElementType*                         begin () const { return GetData(); }
+	FORCEINLINE ElementType*                         end   () const { return GetData() + Num(); }
+	FORCEINLINE TReversePointerIterator<ElementType> rbegin() const { return TReversePointerIterator<ElementType>(GetData() + Num()); }
+	FORCEINLINE TReversePointerIterator<ElementType> rend  () const { return TReversePointerIterator<ElementType>(GetData()); }
 
 public:
 	/**
 	 * Sorts the array assuming < operator is defined for the item type.
+	 *
+	 * @note: If your array contains raw pointers, they will be automatically dereferenced during sorting.
+	 *        Therefore, your array will be sorted by the values being pointed to, rather than the pointers' values.
+	 *        If this is not desirable, please use Algo::Sort(MyArray) directly instead.
+	 *        The auto-dereferencing behavior does not occur with smart pointers.
 	 */
 	void Sort()
 	{
-		::Sort(GetData(), Num());
+		Algo::Sort(*this, TDereferenceWrapper<ElementType, TLess<>>(TLess<>()));
 	}
 
 	/**
 	 * Sorts the array using user define predicate class.
 	 *
 	 * @param Predicate Predicate class instance.
+	 * @note: If your array contains raw pointers, they will be automatically dereferenced during sorting.
+	 *        Therefore, your predicate will be passed references rather than pointers.
+	 *        If this is not desirable, please use Algo::Sort(MyArray, Predicate) directly instead.
+	 *        The auto-dereferencing behavior does not occur with smart pointers.
 	 */
 	template <class PREDICATE_CLASS>
 	void Sort(const PREDICATE_CLASS& Predicate)
 	{
-		::Sort(GetData(), Num(), Predicate);
+		TDereferenceWrapper<ElementType, PREDICATE_CLASS> PredicateWrapper(Predicate);
+		Algo::Sort(*this, PredicateWrapper);
 	}
 
 	/**
 	 * Stable sorts the array assuming < operator is defined for the item type.
 	 *
 	 * Stable sort is slower than non-stable algorithm.
+	 * @note: If your array contains raw pointers, they will be automatically dereferenced during sorting.
+	 *        Therefore, your array will be sorted by the values being pointed to, rather than the pointers' values.
+	 *        If this is not desirable, please use Algo::StableSort(MyArray) directly instead.
+	 *        The auto-dereferencing behavior does not occur with smart pointers.
 	 */
 	void StableSort()
 	{
-		::StableSort(GetData(), Num());
+		Algo::StableSort(*this, TDereferenceWrapper<ElementType, TLess<>>(TLess<>()));
 	}
 
 	/**
@@ -531,11 +764,16 @@ public:
 	 * Stable sort is slower than non-stable algorithm.
 	 *
 	 * @param Predicate Predicate class instance
+	 * @note: If your array contains raw pointers, they will be automatically dereferenced during sorting.
+	 *        Therefore, your predicate will be passed references rather than pointers.
+	 *        If this is not desirable, please use Algo::StableSort(MyArray, Predicate) directly instead.
+	 *        The auto-dereferencing behavior does not occur with smart pointers.
 	 */
 	template <class PREDICATE_CLASS>
 	void StableSort(const PREDICATE_CLASS& Predicate)
 	{
-		::StableSort(GetData(), Num(), Predicate);
+		TDereferenceWrapper<ElementType, PREDICATE_CLASS> PredicateWrapper(Predicate);
+		Algo::StableSort(*this, PredicateWrapper);
 	}
 
 private:
@@ -549,8 +787,8 @@ struct TIsZeroConstructType<TArrayView<InElementType>>
 	enum { Value = true };
 };
 
-template <typename T>
-struct TIsContiguousContainer<TArrayView<T>>
+template <typename T, typename SizeType>
+struct TIsContiguousContainer<TArrayView<T, SizeType>>
 {
 	enum { Value = true };
 };
@@ -559,24 +797,33 @@ struct TIsContiguousContainer<TArrayView<T>>
 
 template <
 	typename OtherRangeType,
-	typename CVUnqualifiedOtherRangeType = typename TRemoveCV<typename TRemoveReference<OtherRangeType>::Type>::Type,
-	typename = typename TEnableIf<TIsContiguousContainer<CVUnqualifiedOtherRangeType>::Value>::Type
+	typename CVUnqualifiedOtherRangeType = std::remove_cv_t<std::remove_reference_t<OtherRangeType>>
+	UE_REQUIRES(TIsContiguousContainer<CVUnqualifiedOtherRangeType>::Value && TIsTArrayView_V<CVUnqualifiedOtherRangeType>)
 >
 auto MakeArrayView(OtherRangeType&& Other)
 {
-	return TArrayView<typename TRemovePointer<decltype(GetData(DeclVal<OtherRangeType&>()))>::Type>(Forward<OtherRangeType>(Other));
+	return TArrayView<std::remove_pointer_t<decltype(GetData(DeclVal<OtherRangeType&>()))>>(Forward<OtherRangeType>(Other));
+}
+template <
+	typename OtherRangeType,
+	typename CVUnqualifiedOtherRangeType = std::remove_cv_t<std::remove_reference_t<OtherRangeType>>
+	UE_REQUIRES(TIsContiguousContainer<CVUnqualifiedOtherRangeType>::Value && !TIsTArrayView_V<CVUnqualifiedOtherRangeType>)
+>
+auto MakeArrayView(OtherRangeType&& Other UE_LIFETIMEBOUND)
+{
+	return TArrayView<std::remove_pointer_t<decltype(GetData(DeclVal<OtherRangeType&>()))>>(Forward<OtherRangeType>(Other));
 }
 
 template<typename ElementType>
-auto MakeArrayView(ElementType* Pointer, int32 Size)
+auto MakeArrayView(ElementType* Pointer UE_LIFETIMEBOUND, int32 Size)
 {
 	return TArrayView<ElementType>(Pointer, Size);
 }
 
 template <typename T>
-TArrayView<const T> MakeArrayView(std::initializer_list<T> List)
+TArrayView<const T> MakeArrayView(std::initializer_list<T> List UE_LIFETIMEBOUND)
 {
-	return TArrayView<const T>(List);
+	return TArrayView<const T>(List.begin(), List.size());
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -616,6 +863,7 @@ bool operator==(TArrayView<ElementType> Lhs, RangeType&& Rhs)
 	return (Rhs == Lhs);
 }
 
+#if !PLATFORM_COMPILER_HAS_GENERATED_COMPARISON_OPERATORS
 /**
  * Inequality operator.
  *
@@ -641,12 +889,13 @@ bool operator!=(TArrayView<ElementType> Lhs, RangeType&& Rhs)
 {
 	return !(Rhs == Lhs);
 }
+#endif
 
 template<typename InElementType, typename InAllocatorType>
 template<typename OtherElementType, typename OtherSizeType>
 FORCEINLINE TArray<InElementType, InAllocatorType>::TArray(const TArrayView<OtherElementType, OtherSizeType>& Other)
 {
-	CopyToEmpty(Other.GetData(), Other.Num(), 0, 0);
+	CopyToEmpty(Other.GetData(), Other.Num(), 0);
 }
 
 template<typename InElementType, typename InAllocatorType>
@@ -654,6 +903,12 @@ template<typename OtherElementType, typename OtherSizeType>
 FORCEINLINE TArray<InElementType, InAllocatorType>& TArray<InElementType, InAllocatorType>::operator=(const TArrayView<OtherElementType, OtherSizeType>& Other)
 {
 	DestructItems(GetData(), ArrayNum);
-	CopyToEmpty(Other.GetData(), Other.Num(), ArrayMax, 0);
+	CopyToEmpty(Other.GetData(), Other.Num(), ArrayMax);
 	return *this;
 }
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
+#include "Templates/IsConst.h"
+#include "Templates/IsSigned.h"
+#include "Templates/PointerIsConvertibleFromTo.h"
+#endif

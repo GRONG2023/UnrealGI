@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Windows/WindowsPlatformStackWalk.h"
+#include "Async/RecursiveMutex.h"
+#include "Async/UniqueLock.h"
 #include "HAL/PlatformMemory.h"
 #include "HAL/PlatformMisc.h"
 #include "Logging/LogMacros.h"
@@ -13,16 +15,19 @@
 #include "Misc/Paths.h"
 #include "Misc/CommandLine.h"
 #include "HAL/PlatformProcess.h"
+#include "HAL/CriticalSection.h"
 #include "CoreGlobals.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/OutputDeviceRedirector.h"
+#include "Misc/ScopeLock.h"
 
-#include "Windows/WindowsHWrapper.h"
 #include "Windows/AllowWindowsPlatformTypes.h"
+THIRD_PARTY_INCLUDES_START
 	#include <DbgHelp.h>
 	#include <Shlwapi.h>
 	#include <TlHelp32.h>
 	#include <Psapi.h>
+THIRD_PARTY_INCLUDES_END
 #include "Windows/HideWindowsPlatformTypes.h"
 
 #include "Modules/ModuleManager.h"
@@ -32,6 +37,9 @@
 	Stack walking.
 	@TODO To be removed
 -----------------------------------------------------------------------------*/
+
+//@note Global lock as a tentative fix to narrow down UE-192420
+static UE::FRecursiveMutex GStackWalkingLock;
 
 /** Whether appInitStackWalking() has been called successfully or not. */
 static bool GStackWalkingInitialized = false;
@@ -63,13 +71,8 @@ static const TCHAR* CrashReporterSettings = TEXT("/Script/UnrealEd.CrashReporter
 
 typedef bool  (WINAPI *TFEnumProcesses)( uint32* lpidProcess, uint32 cb, uint32* cbNeeded);
 typedef bool  (WINAPI *TFEnumProcessModules)(HANDLE hProcess, HMODULE *lphModule, uint32 cb, LPDWORD lpcbNeeded);
-#if WINVER > 0x502
 typedef uint32 (WINAPI *TFGetModuleBaseName)(HANDLE hProcess, HMODULE hModule, LPWSTR lpBaseName, uint32 nSize);
 typedef uint32 (WINAPI *TFGetModuleFileNameEx)(HANDLE hProcess, HMODULE hModule, LPWSTR lpFilename, uint32 nSize);
-#else
-typedef uint32 (WINAPI *TFGetModuleBaseName)(HANDLE hProcess, HMODULE hModule, LPSTR lpBaseName, uint32 nSize);
-typedef uint32 (WINAPI *TFGetModuleFileNameEx)(HANDLE hProcess, HMODULE hModule, LPSTR lpFilename, uint32 nSize);
-#endif
 typedef bool  (WINAPI *TFGetModuleInformation)(HANDLE hProcess, HMODULE hModule, LPMODULEINFO lpmodinfo, uint32 cb);
 
 static TFEnumProcesses			FEnumProcesses;
@@ -106,29 +109,112 @@ struct FWindowsThreadContextWrapper
 		check(Magic == MAGIC_VAL);
 	}
 };
-/**
- * Helper function performing the actual stack walk. This code relies on the symbols being loaded for best results
- * walking the stack albeit at a significant performance penalty.
- *
- * This helper function is designed to be called within a structured exception handler.
- *
- * @param	BackTrace			Array to write backtrace to
- * @param	MaxDepth			Maximum depth to walk - needs to be less than or equal to array size
- * @param	Context				Thread context information
- * @return	EXCEPTION_EXECUTE_HANDLER
- */
 
-static int32 CaptureStackTraceHelper(uint64 *BackTrace, uint32 MaxDepth, FWindowsThreadContextWrapper* ContextWapper, uint32* Depth)
+#if USE_FAST_STACKTRACE
+NTSYSAPI uint16 NTAPI RtlCaptureStackBackTrace(
+	__in uint32 FramesToSkip,
+	__in uint32 FramesToCapture,
+	__out_ecount(FramesToCapture) PVOID *BackTrace,
+	__out_opt PDWORD BackTraceHash
+	);
+
+/** Maximum callstack depth that is supported by the current OS. */
+static ULONG GMaxCallstackDepth = 62;
+
+/** Whether DetermineMaxCallstackDepth() has been called or not. */
+static bool GMaxCallstackDepthInitialized = false;
+
+/** Maximum callstack depth we support, no matter what OS we're running on. */
+#define MAX_CALLSTACK_DEPTH 128
+
+/** Checks the current OS version and sets up the GMaxCallstackDepth variable. */
+void DetermineMaxCallstackDepth()
+{
+	GMaxCallstackDepth = MAX_CALLSTACK_DEPTH;
+	GMaxCallstackDepthInitialized = true;
+}
+
+#endif
+
+void FWindowsPlatformStackWalk::StackWalkAndDump( ANSICHAR* HumanReadableString, SIZE_T HumanReadableStringSize, int32 IgnoreCount, void* Context )
+{
+	UE::TUniqueLock GlobalLock(GStackWalkingLock);
+
+	InitStackWalking();
+
+	// If the callstack is for the executing thread, ignore this function
+	if (Context == nullptr)
+	{
+		IgnoreCount++;
+	}
+	FGenericPlatformStackWalk::StackWalkAndDump(HumanReadableString, HumanReadableStringSize, IgnoreCount, Context);
+	// If we incremented IgnoreCount, make sure we have instructions after StackWalkAndDump so the compiler
+	// can not remove this function from the callstack using Tail Call Elimination
+	if (Context == nullptr)
+	{
+		static volatile int32 ForceCompilerToReturnHere = 0;
+		ForceCompilerToReturnHere += static_cast<int32>(HumanReadableStringSize);
+	}
+}
+
+void FWindowsPlatformStackWalk::StackWalkAndDump( ANSICHAR* HumanReadableString, SIZE_T HumanReadableStringSize, void* ProgramCounter, void* Context )
+{
+	UE::TUniqueLock GlobalLock(GStackWalkingLock);
+
+	InitStackWalking();
+	FGenericPlatformStackWalk::StackWalkAndDump(HumanReadableString, HumanReadableStringSize, ProgramCounter, Context);
+}
+
+FORCENOINLINE TArray<FProgramCounterSymbolInfo> FWindowsPlatformStackWalk::GetStack(int32 IgnoreCount, int32 MaxDepth, void* Context)
+{
+	UE::TUniqueLock GlobalLock(GStackWalkingLock);
+
+	InitStackWalking();
+
+	// If the callstack is for the executing thread, ignore this function
+	if(Context == nullptr)
+	{
+		IgnoreCount++;
+	}
+	return FGenericPlatformStackWalk::GetStack(IgnoreCount, MaxDepth, Context);
+}
+
+void FWindowsPlatformStackWalk::ThreadStackWalkAndDump(ANSICHAR* HumanReadableString, SIZE_T HumanReadableStringSize, int32 IgnoreCount, uint32 ThreadId)
+{
+	UE::TUniqueLock GlobalLock(GStackWalkingLock);
+
+	InitStackWalking();
+	HANDLE ThreadHandle = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_TERMINATE | THREAD_SUSPEND_RESUME, false, ThreadId);
+	if (ThreadHandle)
+	{
+		// sync with other threads that may try to suspend us as we try to suspend them
+		static FCriticalSection Mutex;
+		FScopeLock Lock(&Mutex);
+
+		// Suspend the thread before grabbing its context (possible fix for incomplete callstacks)
+		SuspendThread(ThreadHandle);
+		// Give task scheduler some time to actually suspend the thread
+		FPlatformProcess::Sleep(0.01f);
+		FWindowsThreadContextWrapper ContextWapper;
+		ContextWapper.Context.ContextFlags = CONTEXT_CONTROL;
+		ContextWapper.ThreadHandle = ThreadHandle;
+		if (GetThreadContext(ThreadHandle, &ContextWapper.Context))
+		{
+			FGenericPlatformStackWalk::StackWalkAndDump(HumanReadableString, HumanReadableStringSize, IgnoreCount, &ContextWapper);
+		}
+		ResumeThread(ThreadHandle);
+	}
+}
+
+static int32 CaptureStackTraceExternalProcess(uint64* BackTrace, uint32 MaxDepth, CONTEXT* InContext, HANDLE ThreadHandle, uint32* Depth)
 {
 	STACKFRAME64		StackFrame64;
-	HANDLE				ProcessHandle;
+	HANDLE				ProcessHandle = GProcessHandle;
 	unsigned long		LastError;
 	bool				bStackWalkSucceeded	= true;
 	uint32				CurrentDepth		= 0;
 	uint32				MachineType			= IMAGE_FILE_MACHINE_I386;
-	ContextWapper->CheckOk();
-	HANDLE				ThreadHandle = ContextWapper->ThreadHandle;
-	CONTEXT				ContextCopy = ContextWapper->Context;
+	CONTEXT				ContextCopy = *InContext;
 
 	*Depth = 0;
 
@@ -136,9 +222,6 @@ static int32 CaptureStackTraceHelper(uint64 *BackTrace, uint32 MaxDepth, FWindow
 	__try
 #endif
 	{
-		// Get context, process and thread information.
-		ProcessHandle	= GProcessHandle;
-
 		// Zero out stack frame.
 		FMemory::Memzero( StackFrame64 );
 
@@ -147,14 +230,21 @@ static int32 CaptureStackTraceHelper(uint64 *BackTrace, uint32 MaxDepth, FWindow
 		StackFrame64.AddrStack.Mode      = AddrModeFlat;
 		StackFrame64.AddrFrame.Mode      = AddrModeFlat;
 #if PLATFORM_64BITS
-		StackFrame64.AddrPC.Offset = ContextWapper->Context.Rip;
-		StackFrame64.AddrStack.Offset = ContextWapper->Context.Rsp;
-		StackFrame64.AddrFrame.Offset = ContextWapper->Context.Rbp;
+#if defined(_M_ARM64)
+		StackFrame64.AddrPC.Offset       = ContextCopy.Pc;
+		StackFrame64.AddrStack.Offset    = ContextCopy.Sp;
+		StackFrame64.AddrFrame.Offset    = ContextCopy.Fp;
+		MachineType                      = IMAGE_FILE_MACHINE_ARM64;
+#else
+		StackFrame64.AddrPC.Offset       = ContextCopy.Rip;
+		StackFrame64.AddrStack.Offset    = ContextCopy.Rsp;
+		StackFrame64.AddrFrame.Offset    = ContextCopy.Rbp;
 		MachineType                      = IMAGE_FILE_MACHINE_AMD64;
+#endif
 #else	//PLATFORM_64BITS
-		StackFrame64.AddrPC.Offset       = ContextWapper->Context.Eip;
-		StackFrame64.AddrStack.Offset    = ContextWapper->Context.Esp;
-		StackFrame64.AddrFrame.Offset    = ContextWapper->Context.Ebp;
+		StackFrame64.AddrPC.Offset       = ContextCopy.Eip;
+		StackFrame64.AddrStack.Offset    = ContextCopy.Esp;
+		StackFrame64.AddrFrame.Offset    = ContextCopy.Ebp;
 #endif	//PLATFORM_64BITS
 
 		// Walk the stack one frame at a time.
@@ -206,120 +296,76 @@ static int32 CaptureStackTraceHelper(uint64 *BackTrace, uint32 MaxDepth, FWindow
 	return EXCEPTION_EXECUTE_HANDLER;
 }
 
-PRAGMA_DISABLE_OPTIMIZATION // Work around "flow in or out of inline asm code suppresses global optimization" warning C4740.
-
-
-int32 CaptureStackTraceHelper(uint64* BackTrace, uint32 MaxDepth, CONTEXT* Context)
+void FWindowsPlatformStackWalk::CaptureStackTraceByProcess(uint64* OutBacktrace, uint32 MaxDepth, void* InContext, void* InThreadHandle, uint32* OutDepth, bool bExternalProcess)
 {
-	FWindowsThreadContextWrapper HelperContext;
-	HelperContext.ThreadHandle = GetCurrentThread();
-	HelperContext.Context = *Context;
-	uint32 Depth = 0;
-
-	return CaptureStackTraceHelper(BackTrace, MaxDepth, &HelperContext, &Depth);
-}
-
-#if USE_FAST_STACKTRACE
-NTSYSAPI uint16 NTAPI RtlCaptureStackBackTrace(
-	__in uint32 FramesToSkip,
-	__in uint32 FramesToCapture,
-	__out_ecount(FramesToCapture) PVOID *BackTrace,
-	__out_opt PDWORD BackTraceHash
-	);
-
-/** Maximum callstack depth that is supported by the current OS. */
-static ULONG GMaxCallstackDepth = 62;
-
-/** Whether DetermineMaxCallstackDepth() has been called or not. */
-static bool GMaxCallstackDepthInitialized = false;
-
-/** Maximum callstack depth we support, no matter what OS we're running on. */
-#define MAX_CALLSTACK_DEPTH 128
-
-/** Checks the current OS version and sets up the GMaxCallstackDepth variable. */
-void DetermineMaxCallstackDepth()
-{
-	// Check that we're running on Vista or newer (version 6.0+).
-	if ( FPlatformMisc::VerifyWindowsVersion(6, 0) )
+	if (!bExternalProcess)
 	{
-		GMaxCallstackDepth = MAX_CALLSTACK_DEPTH;
-	}
-	else
-	{
-		GMaxCallstackDepth = FMath::Min<ULONG>(62,MAX_CALLSTACK_DEPTH);
-	}
-	GMaxCallstackDepthInitialized = true;
-}
-
-#endif
-
-void FWindowsPlatformStackWalk::StackWalkAndDump( ANSICHAR* HumanReadableString, SIZE_T HumanReadableStringSize, int32 IgnoreCount, void* Context )
-{
-	InitStackWalking();
-
-	// If the callstack is for the executing thread, ignore this function
-	if(Context == nullptr)
-	{
-		IgnoreCount++;
-	}
-	FGenericPlatformStackWalk::StackWalkAndDump(HumanReadableString, HumanReadableStringSize, IgnoreCount, Context);
-}
-
-FORCENOINLINE TArray<FProgramCounterSymbolInfo> FWindowsPlatformStackWalk::GetStack(int32 IgnoreCount, int32 MaxDepth, void* Context)
-{
-	InitStackWalking();
-
-	// If the callstack is for the executing thread, ignore this function
-	if(Context == nullptr)
-	{
-		IgnoreCount++;
-	}
-	return FGenericPlatformStackWalk::GetStack(IgnoreCount, MaxDepth, Context);
-}
-
-void FWindowsPlatformStackWalk::ThreadStackWalkAndDump(ANSICHAR* HumanReadableString, SIZE_T HumanReadableStringSize, int32 IgnoreCount, uint32 ThreadId)
-{
-	InitStackWalking();
-	HANDLE ThreadHandle = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_TERMINATE | THREAD_SUSPEND_RESUME, false, ThreadId);
-	if (ThreadHandle)
-	{
-		// Suspend the thread before grabbing its context (possible fix for incomplete callstacks)
-		SuspendThread(ThreadHandle);
-		// Give task scheduler some time to actually suspend the thread
-		FPlatformProcess::Sleep(0.01f);
-		FWindowsThreadContextWrapper ContextWapper;
-		ContextWapper.Context.ContextFlags = CONTEXT_CONTROL;
-		ContextWapper.ThreadHandle = ThreadHandle;
-		if (GetThreadContext(ThreadHandle, &ContextWapper.Context))
+		FMicrosoftPlatformStackWalk::CaptureStackTraceInternal(OutBacktrace, MaxDepth, InContext, InThreadHandle, OutDepth);
+		// If we fail to capture a stack trace with this method, fall back to using dbghelp
+		if (*OutDepth != 0)
 		{
-			FGenericPlatformStackWalk::StackWalkAndDump(HumanReadableString, HumanReadableStringSize, IgnoreCount, &ContextWapper);
+			return;
 		}
-		ResumeThread(ThreadHandle);
 	}
+
+	// Init if not already initialized for another process
+	InitStackWalking();
+	CaptureStackTraceExternalProcess(OutBacktrace, MaxDepth, reinterpret_cast<PCONTEXT>(InContext), reinterpret_cast<HANDLE>(InThreadHandle), OutDepth);	
 }
 
-uint32 FWindowsPlatformStackWalk::CaptureThreadStackBackTrace(uint64 ThreadId, uint64* BackTrace, uint32 MaxDepth)
+uint32 FWindowsPlatformStackWalk::CaptureThreadStackBackTrace(uint64 ThreadId, uint64* BackTrace, uint32 MaxDepth, void* Context)
 {
-	InitStackWalking();
+	UE::TUniqueLock GlobalLock(GStackWalkingLock);
 
 	if (BackTrace == nullptr || MaxDepth == 0)
+	{
 		return 0;
+	}
+
+	// Do not call InitStackWalking as we're just capturing addresses without using the dbghelp library etc if this is the same process.
+	// If we're walking another process, they will already have initialized stackwalking to set GProcessHandle.
+	// Don't suspend the calling thread, capture it's context directly and trace
+	if (ThreadId == FPlatformTLS::GetCurrentThreadId())
+	{
+		// If we fail to capture a stack trace with this method, fall back to opening the thread handle
+		uint32 Depth = CaptureStackBackTrace(BackTrace, MaxDepth);
+		if (Depth != 0)
+		{
+			return Depth;
+		}
+	}
 
 	HANDLE ThreadHandle = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_TERMINATE | THREAD_SUSPEND_RESUME, false, (DWORD)ThreadId);
 	if (!ThreadHandle)
+	{
 		return 0;
+	}
 
 	// Suspend the thread before grabbing its context
-	SuspendThread(ThreadHandle);
+	if (SuspendThread(ThreadHandle) == (DWORD)-1)
+	{
+		return 0;
+	}
 
-	FWindowsThreadContextWrapper ContextWrapper;
-	ContextWrapper.Context.ContextFlags = CONTEXT_CONTROL;
-	ContextWrapper.ThreadHandle = ThreadHandle;
+	bool bExternalProcess = GProcessHandle != INVALID_HANDLE_VALUE && GProcessHandle != GetCurrentProcess();
 
 	uint32 Depth = 0;
-	if (GetThreadContext(ThreadHandle, &ContextWrapper.Context))
+	if (Context)
 	{
-		CaptureStackTraceHelper(BackTrace, MaxDepth, &ContextWrapper, &Depth);
+		FWindowsThreadContextWrapper* ContextWrapper = reinterpret_cast<FWindowsThreadContextWrapper*>(Context);
+		ContextWrapper->ThreadHandle = ThreadHandle; // Use the thread handle open above to be sure it has the correct permissions.
+		CaptureStackTraceByProcess(BackTrace, MaxDepth, &ContextWrapper->Context, ThreadHandle, &Depth, bExternalProcess);
+	}
+	else
+	{
+		CONTEXT ThreadContext;
+		FMemory::Memzero(ThreadContext);
+		ThreadContext.ContextFlags = CONTEXT_CONTROL;
+
+		if (::GetThreadContext(ThreadHandle, &ThreadContext))
+		{
+			CaptureStackTraceByProcess(BackTrace, MaxDepth, &ThreadContext, ThreadHandle, &Depth, bExternalProcess);
+		}
 	}
 
 	ResumeThread(ThreadHandle);
@@ -335,10 +381,12 @@ uint32 FWindowsPlatformStackWalk::CaptureThreadStackBackTrace(uint64 ThreadId, u
  *
  * @param	BackTrace			[out] Pointer to array to take backtrace
  * @param	MaxDepth			Entries in BackTrace array
- * @param	Context				Optional thread context information
+ * @param	Context				Optional thread context information (FWindowsThreadContextWrapper instance)
  */
 uint32 FWindowsPlatformStackWalk::CaptureStackBackTrace( uint64* BackTrace, uint32 MaxDepth, void* Context )
 {
+	UE::TUniqueLock GlobalLock(GStackWalkingLock);
+
 	// Make sure we have place to store the information before we go through the process of raising
 	// an exception and handling it.
 	if (BackTrace == NULL || MaxDepth == 0)
@@ -349,8 +397,8 @@ uint32 FWindowsPlatformStackWalk::CaptureStackBackTrace( uint64* BackTrace, uint
 	uint32 Depth = 0;
 	if (Context)
 	{
-		InitStackWalking();
-		CaptureStackTraceHelper(BackTrace, MaxDepth, (FWindowsThreadContextWrapper*)Context, &Depth);
+		FWindowsThreadContextWrapper* Wrapper = reinterpret_cast<FWindowsThreadContextWrapper*>(Context);
+		FMicrosoftPlatformStackWalk::CaptureStackTraceInternal(BackTrace, MaxDepth, &Wrapper->Context, Wrapper->ThreadHandle, &Depth);
 	}
 	else
 	{
@@ -384,59 +432,34 @@ uint32 FWindowsPlatformStackWalk::CaptureStackBackTrace( uint64* BackTrace, uint
 		}		
 #elif USE_SLOW_STACKTRACE
 		// NOTE: Make sure to enable Stack Frame pointers: bOmitFramePointers = false, or /Oy-
-		// If GStackWalkingInitialized is true, traces will work anyway but will be much slower.
-		if (!GStackWalkingInitialized)
-		{
-			InitStackWalking();
-		}
-		
 		CONTEXT HelperContext;
 		RtlCaptureContext(&HelperContext);
 
-		// Capture the back trace.
-		CaptureStackTraceHelper(BackTrace, MaxDepth, &HelperContext, &Depth);		
-#elif PLATFORM_64BITS
+		FMicrosoftPlatformStackWalk::CaptureStackTraceInternal(BackTrace, MaxDepth, &HelperContext, GetCurrentThread(), &Depth);
+#else
+		static_assert(PLATFORM_64BITS, "Non-64 bit windows not supported");
+
 		// Raise an exception so CaptureStackBackTraceHelper has access to context record.
 		__try
 		{
-			RaiseException(0,			// Application-defined exception code.
-							0,			// Zero indicates continuable exception.
-							0,			// Number of arguments in args array (ignored if args is NULL)
-				NULL);		// Array of arguments
-			}
+			RaiseException(0, // Application-defined exception code.
+				0,            // Zero indicates continuable exception.
+				0,            // Number of arguments in args array (ignored if args is NULL)
+				NULL);        // Array of arguments
+		}
 		// Capture the back trace.
-		__except (CaptureStackTraceHelper(BackTrace, MaxDepth, (GetExceptionInformation())->ContextRecord, &Depth))
+		__except (FMicrosoftPlatformStackWalk::CaptureStackTraceInternal(BackTrace, MaxDepth, (GetExceptionInformation())->ContextRecord, GetCurrentThread(), &Depth))
 		{
 		}
-#else
-		// Use a bit of inline assembly to capture the information relevant to stack walking which is
-		// basically EIP and EBP.
-		CONTEXT HelperContext;
-		memset(&HelperContext, 0, sizeof(CONTEXT));
-		HelperContext.ContextFlags = CONTEXT_FULL;
-
-		// Use a fake function call to pop the return address and retrieve EIP.
-		__asm
-		{
-			call FakeFunctionCall
-			FakeFunctionCall :
-			pop eax
-			mov HelperContext.Eip, eax
-			mov HelperContext.Ebp, ebp
-			mov HelperContext.Esp, esp
-		}
-
-		// Capture the back trace.
-		CaptureStackTraceHelper(BackTrace, MaxDepth, &HelperContext, &Depth);
 #endif
 	}	
 	return Depth;
 }
 
-PRAGMA_ENABLE_OPTIMIZATION
-
 void FWindowsPlatformStackWalk::ProgramCounterToSymbolInfo( uint64 ProgramCounter, FProgramCounterSymbolInfo& out_SymbolInfo )
 {
+	UE::TUniqueLock GlobalLock(GStackWalkingLock);
+
 	// Initialize stack walking as it loads up symbol information which we require.
 	InitStackWalking();
 
@@ -507,6 +530,8 @@ void FWindowsPlatformStackWalk::ProgramCounterToSymbolInfo( uint64 ProgramCounte
 
 void FWindowsPlatformStackWalk::ProgramCounterToSymbolInfoEx(uint64 ProgramCounter, FProgramCounterSymbolInfoEx& out_SymbolInfo)
 {
+	UE::TUniqueLock GlobalLock(GStackWalkingLock);
+
 #if ON_DEMAND_SYMBOL_LOADING
 	// Load symbols for the module
 	bool bShouldReloadModuleMissingDebugSymbols = !FPlatformProperties::IsMonolithicBuild() && FPlatformStackWalk::WantsDetailedCallstacksInNonMonolithicBuilds();
@@ -621,7 +646,6 @@ bool FWindowsPlatformStackWalk::UploadLocalSymbols()
 {
 	InitStackWalking();
 
-#if WINVER > 0x502
 	// Upload locally compiled files to symbol storage.
 	FString SymbolStorage;
 	if (!GConfig->GetString( CrashReporterSettings, TEXT( "UploadSymbolsPath" ), SymbolStorage, GEditorPerProjectIni ) || SymbolStorage.IsEmpty())
@@ -704,9 +728,6 @@ bool FWindowsPlatformStackWalk::UploadLocalSymbols()
 			}
 		}
 	}
-#else
-	UE_LOG( LogWindows, Log, TEXT( "Symbol server not supported on Windows XP." ) );
-#endif
 	return true;
 }
 
@@ -717,13 +738,8 @@ void LoadSymbolsForModule(HMODULE ModuleHandle, const FString& RemoteStorage)
 	int32 ErrorCode = 0;
 
 	MODULEINFO ModuleInfo = { 0 };
-#if WINVER > 0x502
 	WCHAR ModuleName[FProgramCounterSymbolInfo::MAX_NAME_LENGTH] = { 0 };
 	WCHAR ImageName[FProgramCounterSymbolInfo::MAX_NAME_LENGTH] = { 0 };
-#else
-	ANSICHAR ModuleName[FProgramCounterSymbolInfo::MAX_NAME_LENGTH] = { 0 };
-	ANSICHAR ImageName[FProgramCounterSymbolInfo::MAX_NAME_LENGTH] = { 0 };
-#endif
 #if PLATFORM_64BITS
 	static_assert(sizeof(MODULEINFO) == 24, "Broken alignment for 64bit Windows include.");
 #else
@@ -734,40 +750,31 @@ void LoadSymbolsForModule(HMODULE ModuleHandle, const FString& RemoteStorage)
 	FGetModuleBaseName(ProcessHandle, ModuleHandle, ModuleName, FProgramCounterSymbolInfo::MAX_NAME_LENGTH);
 
 	// Set the search path to find PDBs in the same folder as the DLL.
-#if WINVER > 0x502
 	WCHAR SearchPath[MAX_PATH] = { 0 };
 	WCHAR* FileName = NULL;
 	const auto Result = GetFullPathNameW(ImageName, MAX_PATH, SearchPath, &FileName);
-#else
-	ANSICHAR SearchPath[MAX_PATH] = { 0 };
-	ANSICHAR* FileName = NULL;
-	const auto Result = GetFullPathNameA(ImageName, MAX_PATH, SearchPath, &FileName);
-#endif
 
 	FString SearchPathList;
 	if (Result != 0 && Result < MAX_PATH)
 	{
 		*FileName = 0;
-#if WINVER > 0x502
 		SearchPathList = SearchPath;
-#else
-		SearchPathList = ANSI_TO_TCHAR(SearchPath);
-#endif
 	}
 	if (!RemoteStorage.IsEmpty())
 	{
 		if (!SearchPathList.IsEmpty())
 		{
-			SearchPathList.AppendChar(';');
+			SearchPathList.AppendChar(TEXT(';'));
 		}
 		SearchPathList.Append(RemoteStorage);
 	}
 
-#if WINVER > 0x502
+	UE::TUniqueLock GlobalLock(GStackWalkingLock);
+
 	SymSetSearchPathW(ProcessHandle, *SearchPathList);
 
 	// Load module.
-	const DWORD64 BaseAddress = SymLoadModuleExW(ProcessHandle, ModuleHandle, ImageName, ModuleName, (DWORD64)ModuleInfo.lpBaseOfDll, (uint32)ModuleInfo.SizeOfImage, NULL, 0);
+	const DWORD64 BaseAddress = SymLoadModuleExW(ProcessHandle, ModuleHandle, ImageName, ModuleName, (DWORD64)ModuleInfo.lpBaseOfDll, ModuleInfo.SizeOfImage, NULL, 0);
 	if (!BaseAddress)
 	{
 		ErrorCode = GetLastError();
@@ -778,22 +785,6 @@ void LoadSymbolsForModule(HMODULE ModuleHandle, const FString& RemoteStorage)
 			UE_LOG(LogWindows, Warning, TEXT("SymLoadModuleExW. Error: %d"), ErrorCode);
 		}
 	}
-#else
-	SymSetSearchPath(ProcessHandle, TCHAR_TO_ANSI(*SearchPathList));
-
-	// Load module.
-	const DWORD64 BaseAddress = SymLoadModuleEx(ProcessHandle, ModuleHandle, ImageName, ModuleName, (DWORD64)ModuleInfo.lpBaseOfDll, (uint32)ModuleInfo.SizeOfImage, NULL, 0);
-	if (!BaseAddress)
-	{
-		ErrorCode = GetLastError();
-
-		// If the module is already loaded, the return value is zero and GetLastError returns ERROR_SUCCESS.
-		if (ErrorCode != ERROR_SUCCESS)
-		{
-			UE_LOG(LogWindows, Warning, TEXT("SymLoadModuleEx. Error: %d"), ErrorCode);
-		}
-	}
-#endif
 }
 
 
@@ -825,6 +816,8 @@ void LoadSymbolsForProcessModules(const FString &RemoteStorage)
 
 void LoadSymbolsForModuleByAddress(uint64 Address, const FString& RemoteStorage, bool bShouldReloadModuleMissingDebugSymbols)
 {
+	UE::TUniqueLock GlobalLock(GStackWalkingLock);
+
 	HMODULE ModuleHandle = NULL;
 
 	if (GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCTSTR)Address, &ModuleHandle))
@@ -871,6 +864,8 @@ int32 FWindowsPlatformStackWalk::GetProcessModuleCount()
 
 int32 FWindowsPlatformStackWalk::GetProcessModuleSignatures(FStackWalkModuleInfo *ModuleSignatures, const int32 ModuleSignaturesSize)
 {
+	UE::TUniqueLock GlobalLock(GStackWalkingLock);
+
 	FPlatformStackWalk::InitStackWalking();
 
 	HANDLE		ProcessHandle = GProcessHandle; 
@@ -892,13 +887,8 @@ int32 FWindowsPlatformStackWalk::GetProcessModuleSignatures(FStackWalkModuleInfo
 	for( int32 ModuleIndex = 0; ModuleHandlePointer[ModuleIndex] && SignatureIndex < ModuleSignaturesSize; ModuleIndex++ )
 	{
 		MODULEINFO ModuleInfo = {0};
-#if WINVER > 0x502
 		WCHAR ModuleName[MAX_PATH] = {0};
 		WCHAR ImageName[MAX_PATH] = {0};
-#else
-		ANSICHAR ModuleName[MAX_PATH] = { 0 };
-		ANSICHAR ImageName[MAX_PATH] = { 0 };
-#endif
 #if PLATFORM_64BITS
 		static_assert(sizeof( MODULEINFO ) == 24, "Broken alignment for 64bit Windows include.");
 #else
@@ -954,6 +944,18 @@ int32 FWindowsPlatformStackWalk::GetProcessModuleSignatures(FStackWalkModuleInfo
  */ 
 static void OnModulesChanged( FName ModuleThatChanged, EModuleChangeReason ReasonForChange )
 {
+	// PluginDirectoryChanged didn't change which modules are loaded or unloaded.
+	if (ReasonForChange == EModuleChangeReason::PluginDirectoryChanged)
+	{
+		return;
+	}
+#if ON_DEMAND_SYMBOL_LOADING
+	if (ReasonForChange == EModuleChangeReason::ModuleLoaded)
+	{
+		return; // If the module is needed to resolve a callstack, the module and its symbols will be loaded on demand.
+	}
+#endif
+
 	GNeedToRefreshSymbols = true;
 }
 
@@ -1002,11 +1004,11 @@ FString GetRemoteStorage(const FString& DownstreamStorage)
 		{
 			if (StorageIndex > 0) 
 			{
-				SymbolStorage.AppendChar(';');
+				SymbolStorage.AppendChar(TEXT(';'));
 			}
 			SymbolStorage.Append(TEXT("SRV*"));
 			SymbolStorage.Append(DownstreamStorage);
-			SymbolStorage.AppendChar('*');
+			SymbolStorage.AppendChar(TEXT('*'));
 			SymbolStorage.Append(RemoteStorage[StorageIndex]);
 		}
 		return SymbolStorage;
@@ -1054,22 +1056,42 @@ FString GetSymbolSearchPath()
 /**
  * Initializes the symbol engine if needed.
  */
-bool FWindowsPlatformStackWalk::InitStackWalkingInternal(void* Process)
+bool FWindowsPlatformStackWalk::InitStackWalkingInternal(void* Process, bool bForceReinitOnProcessMismatch)
 {
-	if (GProcessHandle != INVALID_HANDLE_VALUE && !GNeedToRefreshSymbols)
+	UE::TUniqueLock GlobalLock(GStackWalkingLock);
+
+	if (GStackWalkingInitialized)
 	{
-		return true;
+		if (Process == GProcessHandle && !GNeedToRefreshSymbols)
+		{
+			return true;
+		}
+		else if (Process != GProcessHandle) // Case: CrashReportClient walked its own process to log one of its ensure, then need to remote walk the Editor process to report an ensure/crash.
+		{
+			if (bForceReinitOnProcessMismatch)
+			{
+				SymCleanup(GProcessHandle);
+				GStackWalkingInitialized = false;
+				GNeedToRefreshSymbols = false;
+				GProcessHandle = Process;
+			}
+			else
+			{
+				return false; // Stack walking is already initialized for another process.
+			}
+		}
+		// Fallthrough.
 	}
-	GProcessHandle = Process;
-
-	// DbgHelp functions are not thread safe, but this function can potentially be called from different
-	// threads in our engine, so we take a critical section
-	static FCriticalSection CriticalSection;
-	FScopeLock Lock( &CriticalSection );
-
-	// Only initialize once.
-	if( !GStackWalkingInitialized )
+	else // Not initialized yet.
 	{
+		GProcessHandle = Process;
+	}
+
+	// Only do this code once, it never changes.
+	static bool bHasRunOnce = false;
+	if (!bHasRunOnce)
+	{
+		bHasRunOnce = true;
 		void* DllHandle = FPlatformProcess::GetDllHandle( TEXT("PSAPI.DLL") );
 		if( DllHandle == NULL )
 		{
@@ -1079,21 +1101,19 @@ bool FWindowsPlatformStackWalk::InitStackWalkingInternal(void* Process)
 		// Load dynamically linked PSAPI routines.
 		FEnumProcesses			= (TFEnumProcesses)			FPlatformProcess::GetDllExport( DllHandle,TEXT("EnumProcesses"));
 		FEnumProcessModules		= (TFEnumProcessModules)	FPlatformProcess::GetDllExport( DllHandle,TEXT("EnumProcessModules"));
-#if WINVER > 0x502
 		FGetModuleFileNameEx	= (TFGetModuleFileNameEx)	FPlatformProcess::GetDllExport( DllHandle,TEXT("GetModuleFileNameExW"));
 		FGetModuleBaseName		= (TFGetModuleBaseName)		FPlatformProcess::GetDllExport( DllHandle,TEXT("GetModuleBaseNameW"));
-#else
-		FGetModuleFileNameEx	= (TFGetModuleFileNameEx)	FPlatformProcess::GetDllExport( DllHandle,TEXT("GetModuleFileNameExA"));
-		FGetModuleBaseName		= (TFGetModuleBaseName)		FPlatformProcess::GetDllExport( DllHandle,TEXT("GetModuleBaseNameA"));
-#endif
 		FGetModuleInformation	= (TFGetModuleInformation)	FPlatformProcess::GetDllExport( DllHandle,TEXT("GetModuleInformation"));
+	}
 
-		// Abort if we can't look up the functions.
-		if( !FEnumProcesses || !FEnumProcessModules || !FGetModuleFileNameEx || !FGetModuleBaseName || !FGetModuleInformation )
-		{
-			return false;
-		}
+	// Abort if the required function pointers were not be loaded successfully.
+	if( !FEnumProcesses || !FEnumProcessModules || !FGetModuleFileNameEx || !FGetModuleBaseName || !FGetModuleInformation )
+	{
+		return false;
+	}
 
+	auto InitDbgHelp = []()
+	{
 		// Set up the symbol engine.
 		uint32 SymOpts = SymGetOptions();
 
@@ -1114,15 +1134,10 @@ bool FWindowsPlatformStackWalk::InitStackWalkingInternal(void* Process)
 
 		SymSetOptions( SymOpts );
 
-		FString SymbolSearchPath = GetSymbolSearchPath();
-	
 		// Initialize the symbol engine.
-#if WINVER > 0x502
+		FString SymbolSearchPath = GetSymbolSearchPath();
 		SymInitializeW( GProcessHandle, SymbolSearchPath.IsEmpty() ? nullptr : *SymbolSearchPath, true );
-#else
-		SymInitialize( GProcessHandle, nullptr, true );
-#endif
-	
+
 		GNeedToRefreshSymbols = false;
 		GStackWalkingInitialized = true;
 
@@ -1133,12 +1148,36 @@ bool FWindowsPlatformStackWalk::InitStackWalkingInternal(void* Process)
 			LoadSymbolsForProcessModules(RemoteStorage);
 		}
 #endif
+	};
+
+	if (!GStackWalkingInitialized)
+	{
+		InitDbgHelp();
 	}
-#if WINVER > 0x502
 	else if (GNeedToRefreshSymbols)
 	{
+#if ON_DEMAND_SYMBOL_LOADING
+		// Cleaning up and reinitializing is faster than calling SymRefreshModuleList() in a basic test conditions. The MS documentation claims that SymInitialize() with bInvadeProcess true (as done above)
+		// do the same thing as SymRefreshModuleList(), but that's likely not true. It was measured as following:
+		//
+		// FPlatformStackWalk::InitStackWalking(); // Must be the very first call (no prior ensure and anything that dumped the stack)
+		// FPlatformStackWalk::StackWalkAndDump(...);
+		// FModuleManager::Get().OnModulesChanged().Broadcast(NAME_None, EModuleChangeReason::ModuleUnloaded); // This set to GNeedToRefreshSymbols = true.
+		// FPlatformStackWalk::InitStackWalking(); // This will trigger the code that needs to be measured.
+		// FPlatformStackWalk::StackWalkAndDump(...);
+		//
+		// If we use: SymRefreshModuleList(), it takes 7 seconds and the memory usage of the Editor is doubled.
+		// If we use: SymCleanup() + SymInitializeW(..., bInvadeProcess=true), it takes 0.03s and doesn't use more memory to perform the dump.
+		//
+		// Why? Hard to tell. Maybe a bug. That's in the internal working of DBGHelp and this might change in the future. Cleaning up DBGHelp
+		// invalidates the cached states. This may affect negatively other use cases, but that's speculation. Also, module change events mostly
+		// happen at startup, usually before PlatformStackWalk::InitStackWalking() is called the first time unless an ensure() fires early or
+		// some code calls StackWalkAndDump() during the initialization phase, forcing initialization of DBGHelp.
+		SymCleanup(GProcessHandle);
+		InitDbgHelp();
+#else
 		// Refresh and reload symbols
-		SymRefreshModuleList( GProcessHandle );
+		SymRefreshModuleList(GProcessHandle);
 
 		GNeedToRefreshSymbols = false;
 
@@ -1149,8 +1188,8 @@ bool FWindowsPlatformStackWalk::InitStackWalkingInternal(void* Process)
 			// so load symbols for all modules the process has loaded.
 			LoadSymbolsForProcessModules( RemoteStorage );
 		}
-	}
 #endif
+	}
 
 	return GStackWalkingInitialized;
 }
@@ -1158,17 +1197,90 @@ bool FWindowsPlatformStackWalk::InitStackWalkingInternal(void* Process)
 
 bool FWindowsPlatformStackWalk::InitStackWalking()
 {
-	return FWindowsPlatformStackWalk::InitStackWalkingInternal(GetCurrentProcess());
+	// When stack walking is already initialized, the code often implicitly assumes that the same process is going to
+	// be walked, but that's not always true since CrashReportClient can walk its own process to log an ensure and walk
+	// the Editor process to report an ensure/crash. If stack walking is already initialized, keep walking the same process.
+	return FWindowsPlatformStackWalk::InitStackWalkingInternal(GetCurrentProcess(), /*bForceReinitOnProcessMismatch*/false);
 }
 
 bool FWindowsPlatformStackWalk::InitStackWalkingForProcess(const FProcHandle& Process)
 {
-	return FWindowsPlatformStackWalk::InitStackWalkingInternal(Process.Get());
+	// When the caller specifies a process, that process become the 'official' one and this will reinitialize the stack walking
+	// if the current process and the new process don't match. Using an invalid process handle means 'force to reinitialize to the current process'.
+	return FWindowsPlatformStackWalk::InitStackWalkingInternal(Process.IsValid() ? Process.Get() : GetCurrentProcess(), /*bForceReinitOnProcessMismatch*/true);
 }
-
 
 void FWindowsPlatformStackWalk::RegisterOnModulesChanged()
 {
 	// Register for callback so we can reload symbols when new modules are loaded
 	FModuleManager::Get().OnModulesChanged().AddStatic( &OnModulesChanged );
+}
+
+bool FWindowsPlatformStackWalk::GetFunctionDefinitionLocation(const FString& FunctionSymbolName, const FString& FunctionModuleName, FString& OutPathname, uint32& OutLineNumber, uint32& OutColumnNumber)
+{
+	UE::TUniqueLock GlobalLock(GStackWalkingLock);
+
+#if ON_DEMAND_SYMBOL_LOADING
+	bool bShouldReloadModuleMissingDebugSymbols = !FPlatformProperties::IsMonolithicBuild() && !FunctionModuleName.IsEmpty();
+	if (bShouldReloadModuleMissingDebugSymbols)
+	{
+		HMODULE ModuleHandle = GetModuleHandle(*FunctionModuleName);
+		if (!ModuleHandle)
+		{
+			return false;
+		}
+
+		MODULEINFO ModuleInfo = { 0 };
+		FGetModuleInformation(GProcessHandle, ModuleHandle, &ModuleInfo, sizeof(ModuleInfo));
+
+		// Get the module info containing the debug symbols state.
+		IMAGEHLP_MODULE64 ImageHelpModule = {0};
+		ImageHelpModule.SizeOfStruct = sizeof( ImageHelpModule );
+		if (!SymGetModuleInfo64(GProcessHandle, (DWORD64)ModuleInfo.EntryPoint, &ImageHelpModule))
+		{
+			return false;
+		}
+
+		if (ImageHelpModule.SymType == SymNone)
+		{
+			// The module is already loaded but 'SymNone' means that we are missing debug symbols. The module was likely loaded implicitly while the symbol search path wasn't properly set, so the debug engine did not find the .pdb and
+			// now that 'bad' state is cached. Unloading the module will clear the entry in the debug engine cache and loading it again with the proper symbol search path should pick up the .pdb this time.
+			SymUnloadModule(GProcessHandle, (DWORD64)ModuleInfo.lpBaseOfDll);
+		}
+
+		if (ImageHelpModule.SymType == SymDeferred || ImageHelpModule.SymType == SymNone)
+		{
+			// Load (or reload the module with) the debug symbols.
+			LoadSymbolsForModule(ModuleHandle, GetRemoteStorage(GetDownstreamStorage()));
+		}
+	}
+#endif
+
+	ANSICHAR SymbolInfoBuffer[sizeof(IMAGEHLP_SYMBOL64) + MAX_SYM_NAME];
+	PIMAGEHLP_SYMBOL64 SymbolInfoPtr = reinterpret_cast<IMAGEHLP_SYMBOL64*>(SymbolInfoBuffer);
+	SymbolInfoPtr->SizeOfStruct = sizeof(SymbolInfoBuffer);
+	SymbolInfoPtr->MaxNameLength = MAX_SYM_NAME;
+
+	FString FullyQualifiedSymbolName = FunctionSymbolName;
+	if(!FunctionModuleName.IsEmpty())
+	{
+		FullyQualifiedSymbolName = FString::Printf(TEXT( "%s!%s" ), *FunctionModuleName, *FunctionSymbolName);
+	}
+
+	// Query information about this symbol by name
+	if(::SymGetSymFromName64(GProcessHandle, TCHAR_TO_ANSI(*FullyQualifiedSymbolName ), SymbolInfoPtr))
+	{
+		IMAGEHLP_LINE64 FileAndLineInfo;
+		FileAndLineInfo.SizeOfStruct = sizeof(FileAndLineInfo);
+
+		// Query file and line number information for this symbol.
+		if(::SymGetLineFromAddr64(GProcessHandle, SymbolInfoPtr->Address, (::DWORD*)&OutColumnNumber, &FileAndLineInfo))
+		{
+			OutPathname = (const ANSICHAR*)(FileAndLineInfo.FileName);
+			OutLineNumber = FileAndLineInfo.LineNumber;
+			return true;
+		}
+	}
+
+	return false;
 }

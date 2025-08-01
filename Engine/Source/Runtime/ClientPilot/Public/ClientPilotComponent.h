@@ -2,15 +2,21 @@
 #pragma once
 
 #include "ClientPilotBlackboardManager.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "ClientPilotComponent.generated.h"
 
-UCLASS()
-class CLIENTPILOT_API UClientPilotComponent : public UObject
+class UClientPilotBlackboard;
+
+UCLASS(MinimalAPI)
+class UClientPilotComponent : public UObject
 {
 	GENERATED_BODY()
 public:
-	UClientPilotComponent();
-	UClientPilotBlackboard* GetBlackboardInstance();
-	virtual void ThinkAndAct();
+	CLIENTPILOT_API UClientPilotComponent();
+	CLIENTPILOT_API UClientPilotBlackboard* GetBlackboardInstance();
+	CLIENTPILOT_API virtual void ThinkAndAct();
 
 };

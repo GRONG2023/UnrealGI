@@ -12,7 +12,7 @@ class AActor;
 
 /** Enum defining the object sets for this stats object */
 UENUM()
-enum EPrimitiveObjectSets
+enum EPrimitiveObjectSets : int
 {
 	PrimitiveObjectSets_AllObjects			UMETA( DisplayName = "All Objects" , ToolTip = "View primitive statistics for all objects in all levels" ),
 	PrimitiveObjectSets_CurrentLevel		UMETA( DisplayName = "Current Level" , ToolTip = "View primitive statistics for objects in the current level" ),
@@ -99,15 +99,15 @@ class UPrimitiveStats : public UObject
 
 	/** Minimum radius of bounding sphere of instance in map */
 	UPROPERTY(VisibleAnywhere, AssetRegistrySearchable, Category="Stats", meta=( DisplayName = "Min R", ColumnWidth = "84", ShowTotal = "true" ) )
-	float RadiusMin;
+	double RadiusMin;
 
 	/** Maximum radius of bounding sphere of instance in map */
 	UPROPERTY(VisibleAnywhere, AssetRegistrySearchable, Category="Stats", meta=( DisplayName = "Max R", ColumnWidth = "88", ShowTotal = "true" ) )
-	float RadiusMax;
+	double RadiusMax;
 
 	/** Average radius of bounding sphere of instance in map */
 	UPROPERTY(VisibleAnywhere, AssetRegistrySearchable, Category="Stats", meta=( DisplayName = "Avg R", ColumnWidth = "86", ShowTotal = "true" ) )
-	float RadiusAvg;
+	double RadiusAvg;
 
 public:
 

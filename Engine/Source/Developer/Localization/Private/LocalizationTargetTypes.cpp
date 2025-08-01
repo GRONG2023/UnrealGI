@@ -3,6 +3,7 @@
 #include "LocalizationTargetTypes.h"
 #include "Templates/Casts.h"
 #include "HAL/FileManager.h"
+#include "Misc/AsciiSet.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/App.h"
@@ -13,6 +14,8 @@
 #include "Serialization/Csv/CsvParser.h"
 #include "LocalizationConfigurationScript.h"
 #include "LocalizationSettings.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(LocalizationTargetTypes)
 
 #define LOCTEXT_NAMESPACE "LocalizationTargetTypes"
 
@@ -74,11 +77,21 @@ bool FGatherTextSearchDirectory::Validate(const bool bIsEngineTarget, FText& Out
 		return false;
 	}
 
-	const FString ResolvedPath = FPaths::IsRelative(Path) ? FPaths::Combine(*FLocalizationGatherPathRootUtil::GetResolvedPathRoot(PathRoot, bIsEngineTarget), *Path) : Path;
+	FString ResolvedPath = FPaths::IsRelative(Path) ? FPaths::Combine(*FLocalizationGatherPathRootUtil::GetResolvedPathRoot(PathRoot, bIsEngineTarget), *Path) : Path;
 	if (ResolvedPath.IsEmpty())
 	{
 		OutError = LOCTEXT("SearchDirectoryEmptyError", "Search directory not specified. Use \".\" to specify the root directory.");
 		return false;
+	}
+
+	{
+		constexpr FAsciiSet Wildcards("*?");
+		if (const TCHAR* FirstWildcard = FAsciiSet::FindFirstOrEnd(*ResolvedPath, Wildcards); *FirstWildcard != 0)
+		{
+			// Trim the wildcard from this search path, as it would fail the rest of the validation with it
+			ResolvedPath = ResolvedPath.Left(UE_PTRDIFF_TO_INT32(FirstWildcard - *ResolvedPath));
+			ResolvedPath = FPaths::GetPath(MoveTemp(ResolvedPath));
+		}
 	}
 
 	FText InvalidPathReason;
@@ -347,7 +360,6 @@ namespace
 
 	private:
 		FWordCountCSVParser(FLocalizationTargetSettings& InTarget)
-			: Target(InTarget)
 		{
 			MandatoryColumnNames.Add( TEXT("Date/Time") );
 			MandatoryColumnNames.Add( TEXT("Word Count") );
@@ -425,7 +437,6 @@ namespace
 		}
 
 	private:
-		FLocalizationTargetSettings& Target;
 		TArray<FString> MandatoryColumnNames;
 		TArray<FString> CultureNames;
 	};
@@ -732,3 +743,4 @@ void ULocalizationTargetSet::PostEditChangeProperty(FPropertyChangedEvent& Prope
 #endif
 
 #undef LOCTEXT_NAMESPACE
+

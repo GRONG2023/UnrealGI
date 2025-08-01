@@ -7,6 +7,7 @@
 #define FVector FVectorWorkaround
 #ifdef __OBJC__
 #import <Cocoa/Cocoa.h>
+#undef PF_MAX
 #endif
 #include <Carbon/Carbon.h>
 #include <CoreServices/CoreServices.h>
@@ -58,9 +59,6 @@ struct tagRECT
 	int32 bottom;
 };
 typedef struct tagRECT RECT;
-
-#define OUT
-#define IN
 
 /*----------------------------------------------------------------------------
 Memory. On Mac OS X malloc allocates memory aligned to 16 bytes.

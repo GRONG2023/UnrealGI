@@ -5,6 +5,10 @@
 #include "CoreTypes.h"
 #include "HAL/ThreadSafeCounter.h"
 
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// DEPRECATED. Please use `std::atomic<int64>`
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 /** Thread safe counter for 64bit ints */
 class FThreadSafeCounter64
 {
@@ -30,7 +34,7 @@ public:
 	*
 	* @param Other The other thread safe counter to copy
 	*/
-	FThreadSafeCounter64(const FThreadSafeCounter& Other)
+	FThreadSafeCounter64(const FThreadSafeCounter64& Other)
 	{
 		Counter = Other.GetValue();
 	}

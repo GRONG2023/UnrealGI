@@ -18,11 +18,11 @@ class ARadialForceActor : public ARigidBodyBase
 private:
 	/** Force component */
 	UPROPERTY(Category = RadialForceActor, VisibleAnywhere, BlueprintReadOnly, meta = (ExposeFunctionCategories = "Activation,Components|Activation,Physics,Physics|Components|RadialForce", AllowPrivateAccess = "true"))
-	class URadialForceComponent* ForceComponent;
+	TObjectPtr<class URadialForceComponent> ForceComponent;
 
 #if WITH_EDITORONLY_DATA
 	UPROPERTY()
-	UBillboardComponent* SpriteComponent;
+	TObjectPtr<UBillboardComponent> SpriteComponent;
 #endif
 public:
 
@@ -46,10 +46,10 @@ public:
 
 public:
 	/** Returns ForceComponent subobject **/
-	ENGINE_API class URadialForceComponent* GetForceComponent() const { return ForceComponent; }
+	class URadialForceComponent* GetForceComponent() const { return ForceComponent; }
 #if WITH_EDITORONLY_DATA
 	/** Returns SpriteComponent subobject **/
-	ENGINE_API UBillboardComponent* GetSpriteComponent() const { return SpriteComponent; }
+	UBillboardComponent* GetSpriteComponent() const { return SpriteComponent; }
 #endif
 };
 

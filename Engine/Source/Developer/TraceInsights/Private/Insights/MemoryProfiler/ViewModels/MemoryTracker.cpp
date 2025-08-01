@@ -17,18 +17,12 @@ FMemoryTracker::FMemoryTracker(FMemoryTrackerId InTrackerId, const FString InTra
 	: Id(InTrackerId)
 	, Name(InTrackerName)
 {
-	//TODO: static_assert(FMemoryTracker::InvalidTrackerId == static_cast<FMemoryTracker>(Trace::FMemoryTrackerDesc::InvalidTrackerId), "Memory TrackerId type mismatch!");
+	//TODO: static_assert(FMemoryTracker::InvalidTrackerId == static_cast<FMemoryTracker>(FMemoryTrackerDesc::InvalidTrackerId), "Memory TrackerId type mismatch!");
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 FMemoryTracker::~FMemoryTracker()
-{
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-void FMemoryTracker::Update()
 {
 }
 

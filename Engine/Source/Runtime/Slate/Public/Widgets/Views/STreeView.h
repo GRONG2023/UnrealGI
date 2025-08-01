@@ -14,6 +14,8 @@
 #include "Widgets/Text/STextBlock.h"
 #include "Framework/Layout/Overscroll.h"
 #include "Widgets/Views/SListView.h"
+#include "Algo/Reverse.h"
+#include "Math/NumericLimits.h"
 
 /** Info needed by a (relatively) small fraction of the tree items; some of them may not be visible. */
 struct FSparseItemInfo
@@ -93,7 +95,7 @@ public:
 	using MapKeyFuncsSparse = typename TListTypeTraits< ItemType >::MapKeyFuncsSparse;
 
 	using TSparseItemMap    = TMap< ItemType, FSparseItemInfo, FDefaultSetAllocator, MapKeyFuncsSparse >;
-	using TItemSet          = TSet< ItemType, typename TListTypeTraits< ItemType >::SetKeyFuncs >;
+	using TItemSet          = TSet< TObjectPtrWrapTypeOf<ItemType>, typename TListTypeTraits< TObjectPtrWrapTypeOf<ItemType> >::SetKeyFuncs >;
 
 	using FOnGetChildren            = typename TSlateDelegates< ItemType >::FOnGetChildren;
 	using FOnGenerateRow            = typename TSlateDelegates< ItemType >::FOnGenerateRow;
@@ -112,11 +114,13 @@ public:
 public:
 	
 	SLATE_BEGIN_ARGS( STreeView<ItemType> )
-		: _OnGenerateRow()
+		: _TreeViewStyle(&FAppStyle::Get().GetWidgetStyle<FTableViewStyle>("TreeView"))
+		, _OnGenerateRow()
+		, _OnGeneratePinnedRow()
 		, _OnGetChildren()
 		, _OnSetExpansionRecursive()
-		, _TreeItemsSource( static_cast< const TArray<ItemType>* >(nullptr) ) //@todo Slate Syntax: Initializing from nullptr without a cast
 		, _ItemHeight(16)
+		, _MaxPinnedItems(6) // Having more than the max amount of items leads to the extra items in the middle being collapsed into ellipses, and the last item is fully shown
 		, _OnContextMenuOpening()
 		, _OnMouseButtonClick()
 		, _OnMouseButtonDoubleClick()
@@ -130,6 +134,8 @@ public:
 		, _ScrollbarDragFocusCause(EFocusCause::Mouse)
 		, _ConsumeMouseWheel( EConsumeMouseWheel::WhenScrollingPossible )
 		, _AllowOverscroll(EAllowOverscroll::Yes)
+		, _ScrollBarStyle(&FAppStyle::Get().GetWidgetStyle<FScrollBarStyle>("ScrollBar"))
+		, _PreventThrottling(false)
 		, _WheelScrollMultiplier(GetGlobalScrollAmount())
 		, _OnItemToString_Debug()
 		, _OnEnteredBadState()
@@ -138,11 +144,16 @@ public:
 		, _AllowInvisibleItemSelection(false)
 		, _HighlightParentNodesForSelection(false)
 		, _ReturnFocusToSelection()
+		, _ShouldStackHierarchyHeaders(false)
 		{
 			this->_Clipping = EWidgetClipping::ClipToBounds;
 		}
 
+		SLATE_STYLE_ARGUMENT( FTableViewStyle, TreeViewStyle )
+
 		SLATE_EVENT( FOnGenerateRow, OnGenerateRow )
+
+		SLATE_EVENT( FOnGenerateRow, OnGeneratePinnedRow )
 
 		SLATE_EVENT( FOnWidgetToBeRemoved, OnRowReleased )
 
@@ -154,13 +165,15 @@ public:
 
 		SLATE_EVENT( FOnSetExpansionRecursive, OnSetExpansionRecursive )
 
-		SLATE_ARGUMENT( const TArray<ItemType>* , TreeItemsSource )
+		SLATE_ITEMS_SOURCE_ARGUMENT( ItemType, TreeItemsSource )
 
 		SLATE_ATTRIBUTE( float, ItemHeight )
 
+		SLATE_ATTRIBUTE( int32, MaxPinnedItems );
+
 		SLATE_EVENT( FOnContextMenuOpening, OnContextMenuOpening )
 
-		SLATE_EVENT(FOnMouseButtonClick, OnMouseButtonClick)
+		SLATE_EVENT( FOnMouseButtonClick, OnMouseButtonClick)
 
 		SLATE_EVENT( FOnMouseButtonDoubleClick, OnMouseButtonDoubleClick )
 
@@ -168,7 +181,7 @@ public:
 
 		SLATE_EVENT( FOnExpansionChanged, OnExpansionChanged )
 
-		SLATE_EVENT(FIsSelectableOrNavigable, OnIsSelectableOrNavigable)
+		SLATE_EVENT( FIsSelectableOrNavigable, OnIsSelectableOrNavigable)
 
 		SLATE_ATTRIBUTE( ESelectionMode::Type, SelectionMode )
 
@@ -187,6 +200,10 @@ public:
 		SLATE_ARGUMENT( EConsumeMouseWheel, ConsumeMouseWheel );
 		
 		SLATE_ARGUMENT( EAllowOverscroll, AllowOverscroll );
+		
+		SLATE_STYLE_ARGUMENT( FScrollBarStyle, ScrollBarStyle );
+
+		SLATE_ARGUMENT( bool, PreventThrottling )
 
 		SLATE_ARGUMENT( float, WheelScrollMultiplier );
 
@@ -205,6 +222,12 @@ public:
 
 		SLATE_ARGUMENT(bool, ReturnFocusToSelection)
 
+		/** If true, Show the current hierarchy of items pinned at the top of the Tree View */
+		SLATE_ATTRIBUTE(bool, ShouldStackHierarchyHeaders)
+	
+		/** Callback delegate to have first chance handling of the OnKeyDown event */
+		SLATE_EVENT(FOnKeyDown, OnKeyDownHandler)
+
 	SLATE_END_ARGS()
 
 		
@@ -218,12 +241,15 @@ public:
 		this->Clipping = InArgs._Clipping;
 
 		this->OnGenerateRow = InArgs._OnGenerateRow;
+		this->OnGeneratePinnedRow = InArgs._OnGeneratePinnedRow;
 		this->OnRowReleased = InArgs._OnRowReleased;
 		this->OnItemScrolledIntoView = InArgs._OnItemScrolledIntoView;
 		this->OnGetChildren = InArgs._OnGetChildren;
 		this->OnSetExpansionRecursive = InArgs._OnSetExpansionRecursive;
-		this->TreeItemsSource = InArgs._TreeItemsSource;
 
+		this->SetRootItemsSource(InArgs.MakeTreeItemsSource(this->SharedThis(this)));
+
+		this->OnKeyDownHandler = InArgs._OnKeyDownHandler;
 		this->OnContextMenuOpening = InArgs._OnContextMenuOpening;
 		this->OnClick = InArgs._OnMouseButtonClick;
 		this->OnDoubleClick = InArgs._OnMouseButtonDoubleClick;
@@ -253,6 +279,13 @@ public:
 
 		this->bReturnFocusToSelection = InArgs._ReturnFocusToSelection;
 
+		this->bShouldStackHierarchyHeaders = InArgs._ShouldStackHierarchyHeaders;
+
+		this->SetStyle(InArgs._TreeViewStyle);
+
+		this->MaxPinnedItems = InArgs._MaxPinnedItems;
+		this->DefaultMaxPinnedItems = InArgs._MaxPinnedItems;
+
 		// Check for any parameters that the coder forgot to specify.
 		FString ErrorString;
 		{
@@ -261,7 +294,7 @@ public:
 				ErrorString += TEXT("Please specify an OnGenerateRow. \n");
 			}
 
-			if ( this->TreeItemsSource == nullptr )
+			if (!this->HasValidRootItemsSource())
 			{
 				ErrorString += TEXT("Please specify a TreeItemsSource. \n");
 			}
@@ -286,7 +319,7 @@ public:
 		else
 		{
 			// Make the TableView
-			this->ConstructChildren( 0, InArgs._ItemHeight, EListItemAlignment::LeftAligned, InArgs._HeaderRow, InArgs._ExternalScrollbar, Orient_Vertical, InArgs._OnTreeViewScrolled );
+			this->ConstructChildren( 0, InArgs._ItemHeight, EListItemAlignment::LeftAligned, InArgs._HeaderRow, InArgs._ExternalScrollbar, Orient_Vertical, InArgs._OnTreeViewScrolled, InArgs._ScrollBarStyle, InArgs._PreventThrottling );
 			if (this->ScrollBar.IsValid())
 			{
 				this->ScrollBar->SetDragFocusCause(InArgs._ScrollbarDragFocusCause);
@@ -298,18 +331,26 @@ public:
 	/** Default constructor. */
 	STreeView()
 		: SListView< ItemType >( ETableViewMode::Tree )
-		, TreeItemsSource( nullptr )
 		, bTreeItemsAreDirty( true )
 	{
-		this->ItemsSource = &LinearizedItems;
+		SListView<ItemType>::SetItemsSource(&LinearizedItems);
 	}
 
 public:
 
-	// SWidget overrides
+	//~ SWidget overrides
 
 	virtual FReply OnKeyDown( const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent ) override
 	{
+		if (this->OnKeyDownHandler.IsBound())
+		{
+			FReply Reply = this->OnKeyDownHandler.Execute(MyGeometry, InKeyEvent);
+			if (Reply.IsEventHandled())
+			{
+				return Reply;
+			}
+		}
+		
 		// Check for selection/expansion toggling keys (Left, Right)
 		// SelectorItem represents the keyboard selection. If it isn't valid then we don't know what to expand.
 		// Don't respond to key-presses containing "Alt" as a modifier
@@ -376,13 +417,13 @@ public:
 			}
 		}
 
-		return SListView<ItemType>::OnKeyDown(MyGeometry, InKeyEvent);
+		return SListView<ItemType>::OnKeyDown_Internal(MyGeometry, InKeyEvent);
 	}
 	
 private:
 
-	// Tree View adds the ability to expand/collapse items.
-	// All the selection functionality is inherited from ListView.
+	//~ Tree View adds the ability to expand/collapse items.
+	//~ All the selection functionality is inherited from ListView.
 
 	virtual bool Private_IsItemExpanded( const ItemType& TheItem ) const override
 	{
@@ -429,7 +470,7 @@ private:
 
 	virtual bool Private_DoesItemHaveChildren( int32 ItemIndexInList ) const override
 	{
-		bool bHasChildren = false;
+		bool bHasChildren = false;
 		if (DenseItemInfos.IsValidIndex(ItemIndexInList))
 		{
 			bHasChildren = DenseItemInfos[ItemIndexInList].bHasChildren;
@@ -523,7 +564,7 @@ public:
 				// We are about to repopulate linearized items; the ListView that TreeView is built on top of will also need to refresh.
 				bTreeItemsAreDirty = false;
 
-				if ( OnGetChildren.IsBound() && TreeItemsSource != nullptr )								
+				if ( OnGetChildren.IsBound() && HasValidRootItemsSource() )
 				{
 					// We make copies of the old expansion and selection sets so that we can remove
 					// any items that are no longer seen by the tree.
@@ -533,7 +574,7 @@ public:
 					
 					// Rebuild the linearized view of the tree data.
 					LinearizedItems.Empty();
-					PopulateLinearizedItems( *TreeItemsSource, LinearizedItems, TempDenseItemInfos, TBitArray<>(), TempSelectedItemsMap, TempSparseItemInfo, true, INDEX_NONE );
+					PopulateLinearizedItems(GetRootItems(), LinearizedItems, TempDenseItemInfos, TBitArray<>(), TempSelectedItemsMap, TempSparseItemInfo, true, INDEX_NONE);
 
 					if( !bAllowInvisibleItemSelection &&
 						(this->SelectedItems.Num() != TempSelectedItemsMap.Num() ||
@@ -596,9 +637,9 @@ public:
 	 * @return true if we encountered expanded children; false otherwise.
 	 */
 	bool PopulateLinearizedItems(
-		const TArray<ItemType>& InItemsSource,
-		TArray< ItemType >& InLinearizedItems,
-		TArray< FItemInfo >& NewDenseItemInfos,
+		TArrayView<const ItemType> InItemsSource,
+		TArray<ItemType>& InLinearizedItems,
+		TArray<FItemInfo>& NewDenseItemInfos,
 		TBitArray<> NeedsParentWire,
 		TItemSet& OutNewSelectedItems,
 		TSparseItemMap& NewSparseItemInfo,
@@ -665,6 +706,111 @@ public:
 
 		return bSawExpandedItems;
 	}
+
+	int32 PopulatePinnedItems(const TArray<ItemType>& InItemsSource, TArray< ItemType >& InPinnedItems, const STableViewBase::FReGenerateResults& Results)
+	{
+		// The value we return, to signify if we want the hierarchy to be collapsed even if it doesn't reach the max amount
+		int32 MaxPinnedItemsOverride = -1;
+
+		if (InItemsSource.IsEmpty())
+		{
+			return MaxPinnedItemsOverride;
+		}
+
+		// Calculate the index of the first item in view
+		int32 StartIndex = FMath::Clamp((int32)(FMath::FloorToDouble(Results.NewScrollOffset)), 0, InItemsSource.Num() - 1);
+		int32 CurrentItemIndex = StartIndex;
+
+		auto GetNonVisibleParents = [this, &InItemsSource, StartIndex](TArray<ItemType>& OutParents, int32 ItemIndex) {
+			if (!DenseItemInfos.IsValidIndex(ItemIndex))
+			{
+				return;
+			}
+
+			int32 ParentIndex = ItemIndex;
+
+			// Walk through the list of parents of the current item until you reach the root
+			do
+			{
+				ParentIndex = DenseItemInfos[ItemIndex].ParentIndex;
+
+				// If the current item has a parent, and the parent is not visible, add the parent to the list of pinned items
+				if (InItemsSource.IsValidIndex(ParentIndex) && ParentIndex < StartIndex)
+				{
+					OutParents.Add(InItemsSource[ParentIndex]);
+				}
+
+				ItemIndex = ParentIndex;
+
+			} while (ParentIndex != INDEX_NONE);
+		};
+
+		/* Special Case for if we are at the end of the list. When there is no space to scroll down in a list, changing the pinned hierarchy could also change the first visible item
+		 * which is used to calculate the pinned hierarchy. This leads to an infinite loop, so we solve this by finding a first visible item that has a hierachy large enough to hide
+		 * itself, and then collapse the hierarchy until the item remains the first visible item (so there are no infinite loops since the first visible item doesn't change)
+		 *  
+		 */ 
+		if (Results.bGeneratedPastLastItem && Results.NewScrollOffset > 0)
+		{
+			int32 LastItem = InItemsSource.Num() - 1;
+			int32 CurrentMaxPinnedItems = this->MaxPinnedItems.Get();
+
+			// Could be different than reported by STableViewBase if some items are collapsed
+			int32 NumPinnedItems = (this->GetNumPinnedItems() < CurrentMaxPinnedItems) ? this->GetNumPinnedItems() : CurrentMaxPinnedItems;
+
+			// This is the first item that would be visible, if there were no pinned rows
+			int32 FirstItem = FMath::TruncToInt32(Results.NewScrollOffset - NumPinnedItems);
+
+			// We find items that have a hierarchy big enough to cover themselves, but select the smallest among them
+			int32 MinSpaceOccupied = TNumericLimits<int32>::Max();
+
+			// The index of the item we select
+			int32 MinIndex = -1;
+
+			for (int32 ItemIndex = FirstItem; ItemIndex <= LastItem; ItemIndex++)
+			{
+				// Get all parents of the current item that are not visible, to calculate the number of items in its hierarchy
+				TArray<ItemType> NonVisibleParents;
+				GetNonVisibleParents(NonVisibleParents, ItemIndex);
+
+				int32 NumParents = NonVisibleParents.Num();
+
+				// How many items would be required in the hierarchy to cover the item itself
+				int32 IndexOffset = ItemIndex - FirstItem;
+
+				// If the hierarchy is too small, ignore it
+				if (NumParents < IndexOffset)
+				{
+					continue;
+				}
+
+				// If hierarchy is the smallest we have found so far, AND the number of pinned items it will require is < the allowed max
+				if (NumParents - IndexOffset < MinSpaceOccupied && IndexOffset <= CurrentMaxPinnedItems)
+				{
+					MinSpaceOccupied = NumParents - IndexOffset;
+					MinIndex = ItemIndex;
+				}
+				
+			}
+
+			// If we found no such items, we are in the middle of generating the list so pinned rows are not required
+			if (MinIndex == -1)
+			{
+				return MaxPinnedItemsOverride;
+			}
+
+			CurrentItemIndex = MinIndex;
+			MaxPinnedItemsOverride = MinIndex - FirstItem;
+		}
+
+		// Get all the parents of the item that are not visible, which is the hierarchy to stack
+		GetNonVisibleParents(InPinnedItems, CurrentItemIndex);
+
+		// Reverse the list so the root is at the front
+		Algo::Reverse(InPinnedItems);
+
+		return MaxPinnedItemsOverride;
+	}
 		
 	/**
 	 * Given a TreeItem, create a Widget to represent it in the tree view.
@@ -712,6 +858,12 @@ public:
 		SListView<ItemType>::RebuildList();
 	}
 
+	void SetStyle(const FTableViewStyle* InStyle)
+	{
+		Style = InStyle;
+		STableViewBase::SetBackgroundBrush( Style != nullptr ? &Style->BackgroundBrush : FStyleDefaults::GetNoBrush() );
+	}
+
 	/**
 	 * Set whether some data item is expanded or not.
 	 * 
@@ -746,16 +898,105 @@ public:
 		return Private_IsItemExpanded( InItem );
 	}
 
-		
+public:
+	//~ Hide the base function from SListView 
+	UE_DEPRECATED(5.3, "SetItemsSource is deprecated. You probably want to use SetTreeItemsSource.")
+	void SetItemsSource(const TArray<ItemType>* InListItemsSource)
+	{
+		SListView<ItemType>::SetItemsSource(InListItemsSource);
+	}
+	UE_DEPRECATED(5.3, "SetItemsSource is deprecated. You probably want to use SetTreeItemsSource.")
+	void SetItemsSource(TSharedRef<::UE::Slate::Containers::TObservableArray<ItemType>> InListItemsSource)
+	{
+		SListView<ItemType>::SetItemsSource(InListItemsSource);
+	}
+	UE_DEPRECATED(5.3, "SetItemsSource is deprecated. You probably want to use SetTreeItemsSource.")
+	void SetItemsSource(TUniquePtr<UE::Slate::ItemsSource::IItemsSource<ItemType>> Provider)
+	{
+		SListView<ItemType>::SetItemsSource(MoveTemp(Provider));
+	}
+	UE_DEPRECATED(5.3, "ClearItemsSource is deprecated. You probably want to use ClearRootItemsSource.")
+	void ClearItemsSource()
+	{
+		SListView<ItemType>::ClearItemsSource();
+	}
+	UE_DEPRECATED(5.3, "HasValidItemsSource is deprecated. You probably want to use HasValidRootItemsSource.")
+	bool HasValidItemsSource() const
+	{
+		return SListView<ItemType>::HasValidItemsSource();
+	}
+	UE_DEPRECATED(5.3, "GetItems is deprecated. You probably want to use GetRootItems.")
+	TArrayView<const ItemType> GetItems() const
+	{
+		return SListView<ItemType>::GetItems();
+	}
+
+public:
+
 	/**
 	 * Set the TreeItemsSource. The Tree will generate widgets to represent these items.
-	 *
 	 * @param InItemsSource  A pointer to the array of items that should be observed by this TreeView.
 	 */
 	void SetTreeItemsSource( const TArray<ItemType>* InItemsSource)
 	{
-		TreeItemsSource = InItemsSource;
+		SetRootItemsSource(InItemsSource);
+	}
+
+	/**
+	 * Set the Root items. The tree will generate widgets to represent these items.
+	 * @param InItemsSource  A pointer to the array of items that should be observed by this TreeView.
+	 */
+	void SetRootItemsSource(const TArray<ItemType>* InItemsSource)
+	{
+		ensureMsgf(InItemsSource, TEXT("The TreeItemsSource is invalid."));
+		if (TreeViewSource == nullptr || !TreeViewSource->IsSame(reinterpret_cast<const void*>(InItemsSource)))
+		{
+			if (InItemsSource)
+			{
+				SetRootItemsSource(MakeUnique<UE::Slate::ItemsSource::FArrayPointer<ItemType>>(InItemsSource));
+			}
+			else
+			{
+				ClearRootItemsSource();
+			}
+		}
+	}
+
+	/**
+	 * Set the RootItemsSource. The tree will generate widgets to represent these items.
+	 * @param InItemsSource  A pointer to the array of items that should be observed by this TreeView.
+	 */
+	void SetRootItemsSource(TSharedRef<UE::Slate::Containers::TObservableArray<ItemType>> InItemsSource)
+	{
+		if (TreeViewSource == nullptr || !TreeViewSource->IsSame(reinterpret_cast<const void*>(&InItemsSource.Get())))
+		{
+			SetRootItemsSource(MakeUnique<UE::Slate::ItemsSource::FSharedObservableArray<ItemType>>(this->SharedThis(this), MoveTemp(InItemsSource)));
+		}
+	}
+
+	/**
+	 * Establishes a new list of root items being observed by the list.
+	 * Wipes all existing state and requests and will fully rebuild on the next tick.
+	 */
+	void SetRootItemsSource(TUniquePtr<UE::Slate::ItemsSource::IItemsSource<ItemType>> Provider)
+	{
+		TreeViewSource = MoveTemp(Provider);
 		RequestTreeRefresh();
+	}
+
+	void ClearRootItemsSource()
+	{
+		SetRootItemsSource(TUniquePtr<UE::Slate::ItemsSource::IItemsSource<ItemType>>());
+	}
+
+	bool HasValidRootItemsSource() const
+	{
+		return TreeViewSource != nullptr;
+	}
+
+	TArrayView<const ItemType> GetRootItems() const
+	{
+		return TreeViewSource ? TreeViewSource->GetItems() : TArrayView<const ItemType>();
 	}
 
 	/**
@@ -781,6 +1022,27 @@ public:
 		RequestTreeRefresh();
 	}
 
+	virtual STableViewBase::FReGenerateResults ReGenerateItems(const FGeometry& MyGeometry) override
+	{
+		// We need to call the parent function first to know if we reached the end of the list
+		STableViewBase::FReGenerateResults Results = SListView<ItemType>::ReGenerateItems(MyGeometry);
+
+		if (bShouldStackHierarchyHeaders.Get())
+		{
+			TArray<ItemType> PinnedItems;
+
+			// If we reached the end of the list and there is space, a special case requires the hierarchy to be collapsed forcefully
+			int32 MaxPinnedItemsOverride = PopulatePinnedItems(LinearizedItems, PinnedItems, Results);
+			this->ReGeneratePinnedItems(PinnedItems, MyGeometry, MaxPinnedItemsOverride);
+		}
+		else
+		{
+			this->ClearPinnedWidgets();
+		}
+
+		return Results;
+	}
+
 protected:
 	
 	/** The delegate that is invoked whenever we need to gather an item's children. */
@@ -789,6 +1051,7 @@ protected:
 	/** The delegate that is invoked to recursively expand/collapse a tree items children. */
 	FOnSetExpansionRecursive OnSetExpansionRecursive;
 
+	UE_DEPRECATED(5.3, "Protected access to TreeItemsSource is deprecated. Please use GetTreeItems, SetTreeItemsSource or HasValidTreeItemsSource.")
 	/** A pointer to the items being observed by the tree view. */
 	const TArray<ItemType>* TreeItemsSource;		
 		
@@ -807,7 +1070,12 @@ protected:
 	/** The delegate that is invoked whenever an item in the tree is expanded or collapsed. */
 	FOnExpansionChanged OnExpansionChanged;
 
+	/** Style resource for the tree */
+	const FTableViewStyle* Style;
+
 private:		
+	/** Pointer to the source data that we are observing */
+	TUniquePtr<UE::Slate::ItemsSource::IItemsSource<ItemType>> TreeViewSource;
 
 	/** true when the LinearizedItems need to be regenerated. */
 	bool bTreeItemsAreDirty = false;
@@ -817,4 +1085,7 @@ private:
 
 	/** true if we should highlight all parents for each of the currently selected items */
 	bool bHighlightParentNodesForSelection = false;
+
+	/** true if we want to show the hierarchy of items pinned at the top */
+	TAttribute<bool> bShouldStackHierarchyHeaders = false;
 };

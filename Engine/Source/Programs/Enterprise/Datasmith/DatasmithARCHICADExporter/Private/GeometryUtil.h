@@ -8,9 +8,6 @@
 #include "ModelVector.hpp"
 #include "Vertex.hpp"
 
-struct FQuat;
-struct FVector;
-
 BEGIN_NAMESPACE_UE_AC
 
 // Tool geometry class

@@ -15,12 +15,17 @@
 #include "GameFramework/Actor.h"
 #include "Engine/Blueprint.h"
 #include "RawIndexBuffer.h"
+#include "CinematicExporter.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/LightComponent.h"
 #include "Model.h"
+
+#include "Channels/MovieSceneDoubleChannel.h"
 #include "Channels/MovieSceneFloatChannel.h"
 #include "Channels/MovieSceneIntegerChannel.h"
 #include "Channels/MovieSceneStringChannel.h"
+#include "Channels/MovieSceneByteChannel.h"
+
 #include "Animation/AnimTypes.h"
 #include "Animation/AnimSequenceBase.h"
 #include "Animation/AnimSequence.h"
@@ -38,6 +43,7 @@
 #include "Components/DirectionalLightComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/Polys.h"
+#include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "Editor.h"
 #include "Channels/MovieSceneChannelProxy.h"
@@ -51,26 +57,19 @@
 #include "Materials/MaterialExpressionTextureSample.h"
 #include "Materials/MaterialInstance.h"
 
-#include "Matinee/InterpData.h"
-#include "Matinee/InterpTrackMove.h"
-#include "Matinee/InterpTrackMoveAxis.h"
-#include "Matinee/InterpTrackFloatProp.h"
-#include "Matinee/InterpTrackInstFloatProp.h"
-#include "Matinee/InterpTrackInstMove.h"
-#include "Matinee/InterpTrackAnimControl.h"
-#include "Matinee/InterpTrackInstAnimControl.h"
-
 #include "LandscapeProxy.h"
 #include "LandscapeInfo.h"
 #include "LandscapeComponent.h"
 #include "LandscapeDataAccess.h"
 #include "Components/SplineMeshComponent.h"
+#include "StaticMeshComponentLODInfo.h"
 #include "StaticMeshResources.h"
 
-#include "Matinee/InterpGroup.h"
-#include "Matinee/InterpGroupInst.h"
-#include "Matinee/MatineeActor.h"
 #include "FbxExporter.h"
+#include "Exporters/FbxExportOption.h"
+#include "FbxExportOptionsWindow.h"
+#include "FbxAnimUtils.h"
+#include "INodeAndChannelMappings.h"
 
 #include "StaticMeshAttributes.h"
 #include "StaticMeshOperations.h"
@@ -82,40 +81,35 @@
 #include "IMovieScenePlayer.h"
 #include "MovieScene.h"
 #include "Tracks/MovieScene3DTransformTrack.h"
+#include "Tracks/MovieSceneDoubleTrack.h"
 #include "Tracks/MovieSceneFloatTrack.h"
 #include "Tracks/MovieSceneSkeletalAnimationTrack.h"
 #include "Sections/MovieSceneSkeletalAnimationSection.h"
 #include "Sections/MovieScene3DTransformSection.h"
+#include "Sections/MovieSceneDoubleSection.h"
 #include "Sections/MovieSceneFloatSection.h"
 #include "Evaluation/MovieScenePlayback.h"
 #include "Evaluation/MovieSceneEvaluationTemplateInstance.h"
 #include "MovieSceneSequence.h"
 #include "MovieSceneTimeHelpers.h"
-
-#if WITH_PHYSX
 #include "DynamicMeshBuilder.h"
-#include "PhysXPublic.h"
-#include "geometry/PxConvexMesh.h"
-#include "PhysicsEngine/BodySetup.h"
-#endif // WITH_PHYSX
 
-#if WITH_CHAOS
+#include "PhysicsEngine/AggregateGeom.h"
+#include "PhysicsEngine/BodySetup.h"
+#include "PhysicsEngine/ConvexElem.h"
+#include "PhysicsEngine/SphereElem.h"
+
 #include "Chaos/Core.h"
 #include "Chaos/Particles.h"
 #include "Chaos/Plane.h"
-#endif
+#include "ChaosCheck.h"
+#include "Animation/AnimationSettings.h"
+#include "Chaos/Convex.h"
 
-#include "Exporters/FbxExportOption.h"
-#include "FbxExportOptionsWindow.h"
 #include "Widgets/SWindow.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Interfaces/IMainFrameModule.h"
 #include "UObject/MetaData.h"
-
-#if WITH_CHAOS
-#include "ChaosCheck.h"
-#include "Chaos/Convex.h"
-#endif
 
 namespace UnFbx
 {
@@ -223,6 +217,14 @@ void FFbxExporter::FillExportOptions(bool BatchMode, bool bShowOptionDialog, con
 	);
 
 	FSlateApplication::Get().AddModalWindow(Window, ParentWindow, false);
+
+	//Respect the edit condition
+	if(ExportOptionsUI->bExportSourceMesh)
+	{
+		ExportOptionsUI->Collision = false;
+		ExportOptionsUI->LevelOfDetail = false;
+	}
+
 	ExportOptionsUI->SaveOptions();
 
 	if (FbxOptionWindow->ShouldExport())
@@ -373,12 +375,12 @@ void FFbxExporter::WriteToFile(const TCHAR* Filename)
 	if( !Exporter->Initialize(TCHAR_TO_UTF8(Filename), FileFormat, SdkManager->GetIOSettings()) )
 	{
 		UE_LOG(LogFbx, Warning, TEXT("Call to KFbxExporter::Initialize() failed.\n"));
-		UE_LOG(LogFbx, Warning, TEXT("Error returned: %s\n\n"), Exporter->GetStatus().GetErrorString() );
+		UE_LOG(LogFbx, Warning, TEXT("Error returned: %hs\n\n"), Exporter->GetStatus().GetErrorString() );
 		return;
 	}
 
 	FbxManager::GetFileFormatVersion(Major, Minor, Revision);
-	UE_LOG(LogFbx, Warning, TEXT("FBX version number for this version of the FBX SDK is %d.%d.%d\n\n"), Major, Minor, Revision);
+	UE_LOG(LogFbx, Log, TEXT("FBX version number for this version of the FBX SDK is %d.%d.%d\n\n"), Major, Minor, Revision);
 
 	// Export the scene.
 	Status = Exporter->Export(Scene); 
@@ -773,12 +775,12 @@ void FFbxExporter::ExportModel(UModel* Model, FbxNode* Node, const char* Name)
 	for (uint32 VertexIdx = 0; VertexIdx < VertCount; ++VertexIdx)
 	{
 		FModelVertex& Vertex = Model->VertexBuffer.Vertices[VertexIdx];
-		FVector Normal = Vertex.TangentZ;
+		FVector Normal = (FVector4)Vertex.TangentZ;
 
 		// If the vertex is outside of the world extent, snap it to the origin.  The faces associated with
 		// these vertices will be removed before exporting.  We leave the snapped vertex in the buffer so
 		// we won't have to deal with reindexing everything.
-		FVector FinalVertexPos = Vertex.Position;
+		FVector FinalVertexPos = (FVector)Vertex.Position;
 		if( FMath::Abs( Vertex.Position.X ) > BiasedHalfWorldExtent ||
 			FMath::Abs( Vertex.Position.Y ) > BiasedHalfWorldExtent ||
 			FMath::Abs( Vertex.Position.Z ) > BiasedHalfWorldExtent )
@@ -852,7 +854,7 @@ void FFbxExporter::ExportModel(UModel* Model, FbxNode* Node, const char* Name)
 			{
 				// Skip triangles that belong to BSP geometry close to the world extent, since its probably
 				// the automatically-added-brush for new levels.  The vertices will be left in the buffer (unreferenced)
-				FVector VertexPos = Model->VertexBuffer.Vertices[ IndexBuffer.Indices[ TriangleIdx * 3 + IndexIdx ] ].Position;
+				FVector VertexPos = (FVector)Model->VertexBuffer.Vertices[ IndexBuffer.Indices[ TriangleIdx * 3 + IndexIdx ] ].Position;
 				if( FMath::Abs( VertexPos.X ) > BiasedHalfWorldExtent ||
 					FMath::Abs( VertexPos.Y ) > BiasedHalfWorldExtent ||
 					FMath::Abs( VertexPos.Z ) > BiasedHalfWorldExtent )
@@ -952,7 +954,7 @@ void FFbxExporter::ExportStaticMesh(AActor* Actor, UStaticMeshComponent* StaticM
 
 			const int32 LightmapUVChannel = -1;
 			const TArray<FStaticMaterial>* MaterialOrderOverride = nullptr;
-			ExportStaticMeshToFbx(StaticMesh, CurrentLodIndex, *FbxMeshName, FbxActorLOD, LightmapUVChannel, ColorBuffer, MaterialOrderOverride, &StaticMeshComponent->OverrideMaterials);
+			ExportStaticMeshToFbx(StaticMesh, CurrentLodIndex, *FbxMeshName, FbxActorLOD, LightmapUVChannel, ColorBuffer, MaterialOrderOverride, &ToRawPtrTArrayUnsafe(StaticMeshComponent->OverrideMaterials));
 		}
 	}
 	else
@@ -965,7 +967,7 @@ void FFbxExporter::ExportStaticMesh(AActor* Actor, UStaticMeshComponent* StaticM
 		FbxNode* FbxActor = ExportActor(Actor, false, NodeNameAdapter);
 		const int32 LightmapUVChannel = -1;
 		const TArray<FStaticMaterial>* MaterialOrderOverride = nullptr;
-		ExportStaticMeshToFbx(StaticMesh, LODIndex, *FbxMeshName, FbxActor, LightmapUVChannel, ColorBuffer, MaterialOrderOverride, &StaticMeshComponent->OverrideMaterials);
+		ExportStaticMeshToFbx(StaticMesh, LODIndex, *FbxMeshName, FbxActor, LightmapUVChannel, ColorBuffer, MaterialOrderOverride, &ToRawPtrTArrayUnsafe(StaticMeshComponent->OverrideMaterials));
 	}
 }
 
@@ -1010,7 +1012,7 @@ void FFbxExporter::ExportBSP( UModel* Model, bool bSelectedOnly )
 				FBSPExportData& Data = BrushToMeshMap.FindOrAdd( BrushActor );
 
 				FPoly Poly;
-				GEditor->polyFindMaster(Model, Node.iSurf, Poly);
+				GEditor->polyFindBrush(Model, Node.iSurf, Poly);
 
 				Data.NumVerts += Node.NumVertices;
 				Data.NumFaces += Node.NumVertices-2;
@@ -1032,7 +1034,7 @@ void FFbxExporter::ExportBSP( UModel* Model, bool bSelectedOnly )
 		if( (Surf.PolyFlags & PF_Selected) || !bSelectedOnly || (BrushActor && BrushActor->IsSelected() && Node.NumVertices >= 3) )
 		{
 			FPoly Poly;
-			GEditor->polyFindMaster( Model, Node.iSurf, Poly );
+			GEditor->polyFindBrush( Model, Node.iSurf, Poly );
 
 			FBSPExportData* ExportData = BrushToMeshMap.Find( BrushActor );
 			if( NULL == ExportData )
@@ -1071,12 +1073,11 @@ void FFbxExporter::ExportBSP( UModel* Model, bool bSelectedOnly )
 			
 			//Get the Attributes
 			FStaticMeshAttributes MeshAttributes(Mesh);
-			TVertexAttributesRef<FVector> VertexPositions = MeshAttributes.GetVertexPositions();
-			TVertexInstanceAttributesRef<FVector2D> UVs = MeshAttributes.GetVertexInstanceUVs();
-			TVertexInstanceAttributesRef<FVector4> Colors = MeshAttributes.GetVertexInstanceColors();
-			TVertexInstanceAttributesRef<FVector> Normals = MeshAttributes.GetVertexInstanceNormals();
+			TVertexAttributesRef<FVector3f> VertexPositions = MeshAttributes.GetVertexPositions();
+			TVertexInstanceAttributesRef<FVector2f> UVs = MeshAttributes.GetVertexInstanceUVs();
+			TVertexInstanceAttributesRef<FVector4f> Colors = MeshAttributes.GetVertexInstanceColors();
+			TVertexInstanceAttributesRef<FVector3f> Normals = MeshAttributes.GetVertexInstanceNormals();
 			TEdgeAttributesRef<bool> EdgeHardnesses = MeshAttributes.GetEdgeHardnesses();
-			TEdgeAttributesRef<float> EdgeCreaseSharpnesses = MeshAttributes.GetEdgeCreaseSharpnesses();
 
 			
 			UMaterialInterface*	Material = Poly.Material;
@@ -1091,19 +1092,19 @@ void FFbxExporter::ExportBSP( UModel* Model, bool bSelectedOnly )
 			//The material ID should follow the unique materials
 			check(Mesh.IsPolygonGroupValid(CurrentPolygonGroupID));
 
-			const FVector& TextureBase = Model->Points[Surf.pBase];
-			const FVector& TextureX = Model->Vectors[Surf.vTextureU];
-			const FVector& TextureY = Model->Vectors[Surf.vTextureV];
-			const FVector& Normal = Model->Vectors[Surf.vNormal];
+			const FVector& TextureBase = (FVector)Model->Points[Surf.pBase];
+			const FVector& TextureX = (FVector)Model->Vectors[Surf.vTextureU];
+			const FVector& TextureY = (FVector)Model->Vectors[Surf.vTextureV];
+			const FVector& Normal = (FVector)Model->Vectors[Surf.vNormal];
 
 			const int32 StartIndex = ExportData->CurrentVertAddIndex;
 
 			for(int32 VertexIndex = 0; VertexIndex < Node.NumVertices ; VertexIndex++ )
 			{
 				const FVert& Vert = Model->Verts[Node.iVertPool + VertexIndex];
-				const FVector& Vertex = Model->Points[Vert.pVertex];
+				const FVector& Vertex = (FVector)Model->Points[Vert.pVertex];
 				FVertexID VertexID = Mesh.CreateVertex();
-				VertexPositions[VertexID] = Vertex;
+				VertexPositions[VertexID] = (FVector3f)Vertex;
 			}
 			ExportData->CurrentVertAddIndex += Node.NumVertices;
 
@@ -1129,15 +1130,15 @@ void FFbxExporter::ExportBSP( UModel* Model, bool bSelectedOnly )
 					VertexIDs[Corner] = FVertexID(WedgeIndices[Corner]);
 					VertexInstanceIDs[Corner] = Mesh.CreateVertexInstance(VertexIDs[Corner]);
 					const FVert& Vert = Model->Verts[TriVertIndices[Corner]];
-					const FVector& Vertex = Model->Points[Vert.pVertex];
+					const FVector& Vertex = (FVector)Model->Points[Vert.pVertex];
 
 					float U = ((Vertex - TextureBase) | TextureX) / UModel::GetGlobalBSPTexelScale();
 					float V = ((Vertex - TextureBase) | TextureY) / UModel::GetGlobalBSPTexelScale();
-					UVs.Set(VertexInstanceIDs[Corner], 0, FVector2D(U, V));
+					UVs.Set(VertexInstanceIDs[Corner], 0, FVector2f(U, V));
 					//This is not exported when exporting the whole level via ExportModel so leaving out here for now. 
 					//UVs.Set(VertexInstanceIDs[Corner], 1, Vert.ShadowTexCoord);
-					Colors[VertexInstanceIDs[Corner]] = FLinearColor::White;
-					Normals[VertexInstanceIDs[Corner]] = Normal;
+					Colors[VertexInstanceIDs[Corner]] = FVector4f(FLinearColor::White);
+					Normals[VertexInstanceIDs[Corner]] = (FVector3f)Normal;
 				}
 
 				// Insert a polygon into the mesh
@@ -1146,7 +1147,6 @@ void FFbxExporter::ExportBSP( UModel* Model, bool bSelectedOnly )
 				for (const FEdgeID& EdgeID : NewEdgeIDs)
 				{
 					EdgeHardnesses[EdgeID] = false;
-					EdgeCreaseSharpnesses[EdgeID] = 0.0f;
 				}
 
 				//Add to the smoothGroup array so we can compute hard edge later
@@ -1234,7 +1234,7 @@ void FFbxExporter::ExportSkeletalMesh( AActor* Actor, USkeletalMeshComponent* Sk
 	if (Scene == NULL || Actor == NULL || SkeletalMeshComponent == NULL) return;
 
 	// Retrieve the skeletal mesh rendering information.
-	USkeletalMesh* SkeletalMesh = SkeletalMeshComponent->SkeletalMesh;
+	USkeletalMesh* SkeletalMesh = SkeletalMeshComponent->GetSkeletalMeshAsset();
 
 	FString FbxNodeName = NodeNameAdapter.GetActorNodeName(Actor);
 
@@ -1392,6 +1392,8 @@ FbxSurfaceMaterial* FFbxExporter::ExportMaterial(UMaterialInterface* MaterialInt
 		//Nothing to export
 		return nullptr;
 	}
+
+	UMaterialEditorOnlyData* MaterialEditorOnly = Material->GetEditorOnlyData();
 	
 	// Set the shading model
 	if (Material->GetShadingModels().HasOnlyShadingModel(MSM_DefaultLit))
@@ -1409,15 +1411,15 @@ FbxSurfaceMaterial* FFbxExporter::ExportMaterial(UMaterialInterface* MaterialInt
 	//Get the base material connected expression parameter name for all the supported fbx material exported properties
 	//We only support material input where the connected expression is a parameter of type (constant, scalar, vector, texture, TODO virtual texture)
 
-	FName BaseColorParamName = (!Material->BaseColor.UseConstant && Material->BaseColor.Expression) ? Material->BaseColor.Expression->GetParameterName() : NAME_None;
+	FName BaseColorParamName = (!MaterialEditorOnly->BaseColor.UseConstant && MaterialEditorOnly->BaseColor.Expression) ? MaterialEditorOnly->BaseColor.Expression->GetParameterName() : NAME_None;
 	bool BaseColorParamSet = false;
-	FName EmissiveParamName = (!Material->EmissiveColor.UseConstant && Material->EmissiveColor.Expression) ? Material->EmissiveColor.Expression->GetParameterName() : NAME_None;
+	FName EmissiveParamName = (!MaterialEditorOnly->EmissiveColor.UseConstant && MaterialEditorOnly->EmissiveColor.Expression) ? MaterialEditorOnly->EmissiveColor.Expression->GetParameterName() : NAME_None;
 	bool EmissiveParamSet = false;
-	FName NormalParamName = Material->Normal.Expression ? Material->Normal.Expression->GetParameterName() : NAME_None;
+	FName NormalParamName = MaterialEditorOnly->Normal.Expression ? MaterialEditorOnly->Normal.Expression->GetParameterName() : NAME_None;
 	bool NormalParamSet = false;
-	FName OpacityParamName = (!Material->Opacity.UseConstant && Material->Opacity.Expression) ? Material->Opacity.Expression->GetParameterName() : NAME_None;
+	FName OpacityParamName = (!MaterialEditorOnly->Opacity.UseConstant && MaterialEditorOnly->Opacity.Expression) ? MaterialEditorOnly->Opacity.Expression->GetParameterName() : NAME_None;
 	bool OpacityParamSet = false;
-	FName OpacityMaskParamName = (!Material->OpacityMask.UseConstant && Material->OpacityMask.Expression) ? Material->OpacityMask.Expression->GetParameterName() : NAME_None;
+	FName OpacityMaskParamName = (!MaterialEditorOnly->OpacityMask.UseConstant && MaterialEditorOnly->OpacityMask.Expression) ? MaterialEditorOnly->OpacityMask.Expression->GetParameterName() : NAME_None;
 	bool OpacityMaskParamSet = false;
 
 	UMaterialInstance* MaterialInstance = Cast<UMaterialInstance>(MaterialInterface);
@@ -1575,24 +1577,24 @@ FbxSurfaceMaterial* FFbxExporter::ExportMaterial(UMaterialInterface* MaterialInt
 	//The OpacityMaskParam set the transparency factor, so set it only if it was not set
 	if(!OpacityMaskParamSet)
 	{
-		((FbxSurfaceLambert*)FbxMaterial)->TransparencyFactor.Set(Material->Opacity.Constant);
+		((FbxSurfaceLambert*)FbxMaterial)->TransparencyFactor.Set(MaterialEditorOnly->Opacity.Constant);
 	}
 
 	// Fill in the profile_COMMON effect with the material information.
 	//Fill the texture or constant
 	if(!BaseColorParamSet)
 	{
-		if (!FillFbxTextureProperty(FbxSurfaceMaterial::sDiffuse, Material->BaseColor, FbxMaterial))
+		if (!FillFbxTextureProperty(FbxSurfaceMaterial::sDiffuse, MaterialEditorOnly->BaseColor, FbxMaterial))
 		{
-			((FbxSurfaceLambert*)FbxMaterial)->Diffuse.Set(SetMaterialComponent(Material->BaseColor, true));
+			((FbxSurfaceLambert*)FbxMaterial)->Diffuse.Set(SetMaterialComponent(MaterialEditorOnly->BaseColor, true));
 		}
 	}
 
 	if (!EmissiveParamSet)
 	{
-		if (!FillFbxTextureProperty(FbxSurfaceMaterial::sEmissive, Material->EmissiveColor, FbxMaterial))
+		if (!FillFbxTextureProperty(FbxSurfaceMaterial::sEmissive, MaterialEditorOnly->EmissiveColor, FbxMaterial))
 		{
-			((FbxSurfaceLambert*)FbxMaterial)->Emissive.Set(SetMaterialComponent(Material->EmissiveColor, true));
+			((FbxSurfaceLambert*)FbxMaterial)->Emissive.Set(SetMaterialComponent(MaterialEditorOnly->EmissiveColor, true));
 		}
 	}
 
@@ -1603,18 +1605,18 @@ FbxSurfaceMaterial* FFbxExporter::ExportMaterial(UMaterialInterface* MaterialInt
 	{
 		if (!OpacityParamSet)
 		{
-			if (!FillFbxTextureProperty(FbxSurfaceMaterial::sTransparentColor, Material->Opacity, FbxMaterial))
+			if (!FillFbxTextureProperty(FbxSurfaceMaterial::sTransparentColor, MaterialEditorOnly->Opacity, FbxMaterial))
 			{
-				FbxDouble3 OpacityValue((FbxDouble)(Material->Opacity.Constant), (FbxDouble)(Material->Opacity.Constant), (FbxDouble)(Material->Opacity.Constant));
+				FbxDouble3 OpacityValue((FbxDouble)(MaterialEditorOnly->Opacity.Constant), (FbxDouble)(MaterialEditorOnly->Opacity.Constant), (FbxDouble)(MaterialEditorOnly->Opacity.Constant));
 				((FbxSurfaceLambert*)FbxMaterial)->TransparentColor.Set(OpacityValue);
 			}
 		}
 
 		if (!OpacityMaskParamSet)
 		{
-			if (!FillFbxTextureProperty(FbxSurfaceMaterial::sTransparencyFactor, Material->OpacityMask, FbxMaterial))
+			if (!FillFbxTextureProperty(FbxSurfaceMaterial::sTransparencyFactor, MaterialEditorOnly->OpacityMask, FbxMaterial))
 			{
-				((FbxSurfaceLambert*)FbxMaterial)->TransparencyFactor.Set(Material->OpacityMask.Constant);
+				((FbxSurfaceLambert*)FbxMaterial)->TransparencyFactor.Set(MaterialEditorOnly->OpacityMask.Constant);
 			}
 		}
 	}
@@ -1624,128 +1626,13 @@ FbxSurfaceMaterial* FFbxExporter::ExportMaterial(UMaterialInterface* MaterialInt
 		if (!NormalParamSet)
 		{
 			//Set the Normal map only if there is a texture sampler
-			FillFbxTextureProperty(FbxSurfaceMaterial::sNormalMap, Material->Normal, FbxMaterial);
+			FillFbxTextureProperty(FbxSurfaceMaterial::sNormalMap, MaterialEditorOnly->Normal, FbxMaterial);
 		}
 	}
 
 	FbxMaterials.Add(MaterialInterface, FbxMaterial);
 	
 	return FbxMaterial;
-}
-
-
-FFbxExporter::FMatineeNodeNameAdapter::FMatineeNodeNameAdapter( AMatineeActor* InMatineeActor )
-{
-	MatineeActor = InMatineeActor;
-}
-
-FString FFbxExporter::FMatineeNodeNameAdapter::GetActorNodeName(const AActor* Actor)
-{
-	FString NodeName = Actor->GetName();
-	const UInterpGroupInst* FoundGroupInst = MatineeActor->FindGroupInst( Actor );
-	if( FoundGroupInst != NULL )
-	{
-		NodeName = FoundGroupInst->Group->GroupName.ToString();
-	}
-
-	// Maya does not support dashes.  Change all dashes to underscores
-	NodeName = NodeName.Replace(TEXT("-"), TEXT("_") );
-
-	return NodeName;
-}
-
-FMatineeAnimTrackAdapter::FMatineeAnimTrackAdapter( AMatineeActor* InMatineeActor )
-{
-	MatineeActor = InMatineeActor;
-}
-
-int32 FMatineeAnimTrackAdapter::GetLocalStartFrame() const
-{
-	return 0;
-}
-
-
-int32 FMatineeAnimTrackAdapter::GetLength() const
-{
-	return MatineeActor->MatineeData->InterpLength * (1.f / GetFrameRate());
-}
-
-
-void FMatineeAnimTrackAdapter::UpdateAnimation( int32 LocalFrame )
-{
-	float Time = LocalFrame * GetFrameRate();
-	MatineeActor->UpdateInterp( Time, true );
-}
-
-
-/**
- * Exports the given Matinee sequence information into a FBX document.
- */
-bool FFbxExporter::ExportMatinee(AMatineeActor* InMatineeActor)
-{
-	if (InMatineeActor == NULL || Scene == NULL) return false;
-
-	// If the Matinee editor is not open, we need to initialize the sequence.
-	//bool InitializeMatinee = InMatineeActor->MatineeData == NULL;
-	//if (InitializeMatinee)
-	//{
-	//	InMatineeActor->InitInterp();
-	//}
-
-	// Iterate over the Matinee data groups and export the known tracks
-	int32 GroupCount = InMatineeActor->GroupInst.Num();
-	for (int32 GroupIndex = 0; GroupIndex < GroupCount; ++GroupIndex)
-	{
-		UInterpGroupInst* Group = InMatineeActor->GroupInst[GroupIndex];
-		AActor* Actor = Group->GetGroupActor();
-		if (Group->Group == NULL || Actor == NULL) continue;
-
-		FbxNode* FbxActor = FindActor(Actor); 
-		// now it should export everybody
-		check (FbxActor);
-
-		// Look for the tracks that we currently support
-		int32 TrackCount = FMath::Min(Group->TrackInst.Num(), Group->Group->InterpTracks.Num());
-		for (int32 TrackIndex = 0; TrackIndex < TrackCount; ++TrackIndex)
-		{
-			UInterpTrackInst* TrackInst = Group->TrackInst[TrackIndex];
-			UInterpTrack* Track = Group->Group->InterpTracks[TrackIndex];
-			if ( Track->IsDisabled() == false )
-			{
-				if(TrackInst->IsA(UInterpTrackInstMove::StaticClass()) && Track->IsA(UInterpTrackMove::StaticClass()))
-				{
-					UInterpTrackInstMove* MoveTrackInst = (UInterpTrackInstMove*)TrackInst;
-					UInterpTrackMove* MoveTrack = (UInterpTrackMove*)Track;
-					ExportMatineeTrackMove(FbxActor, MoveTrackInst, MoveTrack, InMatineeActor->MatineeData->InterpLength);
-				}
-				else if(TrackInst->IsA(UInterpTrackInstFloatProp::StaticClass()) && Track->IsA(UInterpTrackFloatProp::StaticClass()))
-				{
-					UInterpTrackInstFloatProp* PropertyTrackInst = (UInterpTrackInstFloatProp*)TrackInst;
-					UInterpTrackFloatProp* PropertyTrack = (UInterpTrackFloatProp*)Track;
-					ExportMatineeTrackFloatProp(FbxActor, PropertyTrack);
-				}
-				else if(TrackInst->IsA(UInterpTrackInstAnimControl::StaticClass()) && Track->IsA(UInterpTrackAnimControl::StaticClass()))
-				{
-					USkeletalMeshComponent* SkeletalMeshComp = Cast<USkeletalMeshComponent>(Actor->GetComponentByClass(USkeletalMeshComponent::StaticClass()));
-					if(SkeletalMeshComp)
-					{
-						static const float SamplingRate = 1.f / DEFAULT_SAMPLERATE;
-
-						FMatineeAnimTrackAdapter AnimTrackAdapter(InMatineeActor);
-						ExportAnimTrack(AnimTrackAdapter, Actor, SkeletalMeshComp, SamplingRate);
-					}
-				}
-			}
-		}
-	}
-
-	//if (InitializeMatinee)
-	//{
-	//	InMatineeActor->TermInterp();
-	//}
-
-	DefaultCamera = NULL;
-	return true;
 }
 
 
@@ -1825,7 +1712,7 @@ int32 FLevelSequenceAnimTrackAdapter::GetStartFrame() const
 {
 	FFrameRate TickResolution = MovieScene->GetTickResolution();
 	FFrameRate DisplayRate = MovieScene->GetDisplayRate();
-	return FFrameRate::TransformTime(FFrameTime(UE::MovieScene::DiscreteInclusiveLower(MovieScene->GetPlaybackRange()) * RootToLocalTransform.InverseLinearOnly()), TickResolution, DisplayRate).RoundToFrame().Value;
+	return FFrameRate::TransformTime(FFrameTime(UE::MovieScene::DiscreteInclusiveLower(MovieScene->GetPlaybackRange()) * RootToLocalTransform.InverseNoLooping()), TickResolution, DisplayRate).RoundToFrame().Value;
 }
 
 int32 FLevelSequenceAnimTrackAdapter::GetLength() const
@@ -1842,14 +1729,14 @@ void FLevelSequenceAnimTrackAdapter::UpdateAnimation( int32 LocalFrame )
 	FFrameRate DisplayRate = MovieScene->GetDisplayRate();
 
 	FFrameTime LocalTime = FFrameRate::TransformTime(FFrameTime(LocalFrame), DisplayRate, TickResolution);
-	FFrameTime GlobalTime = LocalTime * RootToLocalTransform.InverseLinearOnly();
+	FFrameTime GlobalTime = LocalTime * RootToLocalTransform.InverseNoLooping();
 
 	FMovieSceneContext Context = FMovieSceneContext(FMovieSceneEvaluationRange(GlobalTime, TickResolution), MovieScenePlayer->GetPlaybackStatus()).SetHasJumped(true);
 
-	MovieScenePlayer->GetEvaluationTemplate().Evaluate( Context, *MovieScenePlayer );
+	MovieScenePlayer->GetEvaluationTemplate().EvaluateSynchronousBlocking( Context );
 }
 
-float FLevelSequenceAnimTrackAdapter::GetFrameRate() const
+double FLevelSequenceAnimTrackAdapter::GetFrameRate() const
 {
 	return MovieScene->GetDisplayRate().AsDecimal();
 }
@@ -1893,7 +1780,10 @@ float FLevelSequenceAnimTrackAdapter::GetAnimTime(int32 LocalFrame) const
 	{
 		if (UMovieSceneSkeletalAnimationSection* AnimSection = Cast<UMovieSceneSkeletalAnimationSection>(Section))
 		{
-			return AnimSection->MapTimeToAnimation(LocalTime, TickResolution);
+			if (AnimSection->Params.Animation)
+			{
+				return static_cast<float>(AnimSection->MapTimeToAnimation(LocalTime, TickResolution));
+			}
 		}
 	}
 
@@ -1987,6 +1877,17 @@ bool FFbxExporter::ExportLevelSequenceTracks(UMovieScene* MovieScene, IMovieScen
 	USceneComponent* BoundComponent = Cast<USceneComponent>(BoundObject);
 
 	const bool bIsCameraActor = BoundActor ? BoundActor->IsA(ACameraActor::StaticClass()) : BoundComponent ? BoundComponent->IsA(UCameraComponent::StaticClass()) : false;
+	const bool bIsLightActor = BoundActor ? BoundActor->IsA(ALight::StaticClass()) : BoundComponent ? BoundComponent->IsA(ULightComponent::StaticClass()) : false;
+
+	bool bBakeAllTransformChannels = false;
+	if (bIsCameraActor || bIsLightActor)
+	{
+		bBakeAllTransformChannels = (static_cast<uint8>(GetExportOptions()->BakeCameraAndLightAnimation) & static_cast<uint8>(EMovieSceneBakeType::BakeTransforms));
+	}
+	else
+	{
+		bBakeAllTransformChannels = (static_cast<uint8>(GetExportOptions()->BakeActorAnimation) & static_cast<uint8>(EMovieSceneBakeType::BakeTransforms));
+	}
 
 	// If this actor has attached actors, and the bound component isn't the root component, skip the 3d transform track because we don't want the 
 	// component transform to be assigned to the actor, which would subsequently apply to the attached children 
@@ -2002,7 +1903,7 @@ bool FFbxExporter::ExportLevelSequenceTracks(UMovieScene* MovieScene, IMovieScen
 	}
 
 	// If there's more than one transform track for this actor (ie. on the actor and on the root component) or if there's more than one section, evaluate baked
-	if (bIsCameraActor || TransformTracks.Num() > 1 || (TransformTracks.Num() != 0 && TransformTracks[0].Get()->GetAllSections().Num() > 1))
+	if (bBakeAllTransformChannels || TransformTracks.Num() > 1 || (TransformTracks.Num() != 0 && TransformTracks[0].Get()->GetAllSections().Num() > 1))
 	{
 		if (!bSkip3DTransformTrack)
 		{
@@ -2031,7 +1932,16 @@ bool FFbxExporter::ExportLevelSequenceTracks(UMovieScene* MovieScene, IMovieScen
 		}
 		else
 		{
-			ExportLevelSequenceTrackChannels(FbxActor, *Track, MovieScene->GetPlaybackRange(), RootToLocalTransform);
+			bool bBakeChannels = false;
+			if (bIsCameraActor || bIsLightActor)
+			{
+				bBakeChannels = (static_cast<uint8>(GetExportOptions()->BakeCameraAndLightAnimation) & static_cast<uint8>(EMovieSceneBakeType::BakeChannels));
+			}
+			else
+			{
+				bBakeChannels = (static_cast<uint8>(GetExportOptions()->BakeActorAnimation) & static_cast<uint8>(EMovieSceneBakeType::BakeChannels));
+			}
+			ExportLevelSequenceTrackChannels(FbxActor, *Track, MovieScene->GetPlaybackRange(), RootToLocalTransform, bBakeChannels);
 		}
 	}
 
@@ -2119,6 +2029,416 @@ bool FFbxExporter::ExportLevelSequence(UMovieScene* MovieScene, const TArray<FGu
 	return true;
 }
 
+void FFbxExporter::AddTimecodeAttributesAndSetKey(const UMovieSceneSection* InSection, FbxNode* InFbxNode, const FMovieSceneSequenceTransform& RootToLocalTransform)
+{
+	FbxAnimLayer* BaseLayer = AnimStack->GetMember<FbxAnimLayer>(0);
+	const FFrameRate TickResolution = InSection->GetTypedOuter<UMovieScene>()->GetTickResolution();
+	
+	FName TCHourAttrName(TEXT("TCHour"));
+	FName TCMinuteAttrName(TEXT("TCMinute"));
+	FName TCSecondAttrName(TEXT("TCSecond"));
+	FName TCFrameAttrName(TEXT("TCFrame"));
+
+	if (const UAnimationSettings* AnimationSettings = UAnimationSettings::Get())
+	{
+		TCHourAttrName = AnimationSettings->BoneTimecodeCustomAttributeNameSettings.HourAttributeName;
+		TCMinuteAttrName = AnimationSettings->BoneTimecodeCustomAttributeNameSettings.MinuteAttributeName;
+		TCSecondAttrName = AnimationSettings->BoneTimecodeCustomAttributeNameSettings.SecondAttributeName;
+		TCFrameAttrName = AnimationSettings->BoneTimecodeCustomAttributeNameSettings.FrameAttributeName;
+	}
+
+	const TArray<FString> TimecodePropertyNames = {
+		TCHourAttrName.ToString(),
+		TCMinuteAttrName.ToString(),
+		TCSecondAttrName.ToString(),
+		TCFrameAttrName.ToString()
+	};
+
+	const TArray<int32> TimecodeValues = {
+		InSection->TimecodeSource.Timecode.Hours,
+		InSection->TimecodeSource.Timecode.Minutes,
+		InSection->TimecodeSource.Timecode.Seconds,
+		InSection->TimecodeSource.Timecode.Frames
+	};
+
+	const FFrameNumber KeyTime = InSection->GetTypedOuter<UMovieScene>()->GetPlaybackRange().GetLowerBoundValue();
+		
+	for (int i = 0; i < TimecodePropertyNames.Num(); i++)
+	{
+		const FString PropertyName = TimecodePropertyNames[i];
+		CreateAnimatableUserProperty(InFbxNode, 0.0, StringCast<char>(*PropertyName).Get(), StringCast<char>(*PropertyName).Get(), FbxFloatDT);
+		FbxProperty Property = InFbxNode->FindProperty(StringCast<char>(*PropertyName).Get());
+
+		if (Property.IsValid())
+		{
+			if (FbxAnimCurve* AnimCurve = Property.GetCurve(BaseLayer, nullptr, true))
+			{
+				const float KeyValue = (float)TimecodeValues[i];
+					
+				AnimCurve->KeyModifyBegin();
+					
+				FbxTime FbxTime;
+				const double KeyTimeSeconds = GetExportOptions()->bExportLocalTime ? KeyTime / TickResolution : (KeyTime * RootToLocalTransform.InverseNoLooping()) / TickResolution;
+
+				FbxTime.SetSecondDouble(KeyTimeSeconds);
+
+				const int FbxKeyIndex = AnimCurve->KeyAdd(FbxTime);
+				AnimCurve->KeySet(FbxKeyIndex, FbxTime, KeyValue, FbxAnimCurveDef::eInterpolationConstant);
+				AnimCurve->KeySetConstantMode(FbxKeyIndex, FbxAnimCurveDef::EConstantMode::eConstantStandard);
+
+				AnimCurve->KeyModifyEnd();
+			}
+		}
+	}
+}
+
+bool FFbxExporter::ExportControlRigSection(const UMovieSceneSection* Section, const TArray<FControlRigFbxNodeMapping>& ChannelsMapping,
+	const TArray<FName>& FilterControls, const FMovieSceneSequenceTransform& RootToLocalTransform)
+{
+	if (!Section)
+	{
+		return false;
+	}
+	
+	UMovieSceneTrack* Track = Section->GetTypedOuter<UMovieSceneTrack>();
+
+	FbxAnimLayer* BaseLayer = AnimStack->GetMember<FbxAnimLayer>(0);
+
+	const FFrameRate TickResolution = Track->GetTypedOuter<UMovieScene>()->GetTickResolution();
+
+	// Helpers to convert channel/property names to indices and vice versa
+	const TArray<FString> TransformComponentsArray = {"X", "Y", "Z"};
+	const TArray<FString> TransformPropertyArray = {"Location", "Rotation", "Scale"};
+
+	// Cached transform channels for a single property to bake and export the 3 channels in one go
+	TPair<FMovieSceneFloatChannel*, bool> CachedTransformChannels[3] = {{nullptr, false}, {nullptr, false}, {nullptr, false}};
+	// Cached transform property index keep track of which property we are currently caching to bake & export Transforms & TransformNoScale
+	int CurrentTmPropertyIndex = 0;
+	
+	// The control rig parent group node
+	FbxNode* RootFbxNode = CreateNode(Track->GetDisplayName().ToString());
+
+	// Export timecode
+	AddTimecodeAttributesAndSetKey(Section, RootFbxNode, RootToLocalTransform);
+	
+	const FName BoolChannelTypeName = FMovieSceneBoolChannel::StaticStruct()->GetFName();
+	const FName ByteChannelTypeName = FMovieSceneByteChannel::StaticStruct()->GetFName();
+	const FName DoubleChannelTypeName = FMovieSceneDoubleChannel::StaticStruct()->GetFName();
+	const FName FloatChannelTypeName = FMovieSceneFloatChannel::StaticStruct()->GetFName();
+	const FName IntegerChannelTypeName = FMovieSceneIntegerChannel::StaticStruct()->GetFName();
+	
+	FMovieSceneChannelProxy& ChannelProxy = Section->GetChannelProxy();
+	for (const FMovieSceneChannelEntry& Entry : ChannelProxy.GetAllEntries())
+	{
+		TArrayView<FMovieSceneChannel* const> Channels = Entry.GetChannels();
+		TArrayView<const FMovieSceneChannelMetaData> AllMetaData = Entry.GetMetaData();
+
+		for (int32 Index = 0; Index < Channels.Num(); ++Index)
+		{
+			const FName ChannelTypeName = Entry.GetChannelTypeName();
+			FMovieSceneChannelHandle ChannelHandle = ChannelProxy.MakeHandle(ChannelTypeName, Index);
+
+			FMovieSceneBoolChannel* BoolChannel = ChannelTypeName == BoolChannelTypeName ? ChannelHandle.Cast<FMovieSceneBoolChannel>().Get() : nullptr;
+			FMovieSceneByteChannel* ByteChannel = ChannelTypeName == ByteChannelTypeName ? ChannelHandle.Cast<FMovieSceneByteChannel>().Get() : nullptr;
+			FMovieSceneDoubleChannel* DoubleChannel = ChannelTypeName == DoubleChannelTypeName ? ChannelHandle.Cast<FMovieSceneDoubleChannel>().Get() : nullptr;
+			FMovieSceneFloatChannel* FloatChannel = ChannelTypeName == FloatChannelTypeName ? ChannelHandle.Cast<FMovieSceneFloatChannel>().Get() : nullptr;
+			FMovieSceneIntegerChannel* IntegerChannel = ChannelTypeName == IntegerChannelTypeName ? ChannelHandle.Cast<FMovieSceneIntegerChannel>().Get() : nullptr;
+
+			if (!BoolChannel && !ByteChannel && !DoubleChannel && !FloatChannel && !IntegerChannel)
+			{
+				continue;
+			}
+
+			// Find the node and attribute names
+			const FMovieSceneChannelMetaData& MetaData = AllMetaData[Index];
+			const FString ChannelName = MetaData.Name.ToString();
+
+			FControlRigFbxCurveData FbxCurveData;
+			if (INodeAndChannelMappings* ChannelMapping = Cast<INodeAndChannelMappings>(Track))
+			{
+				if (!ChannelMapping->GetFbxCurveDataFromChannelMetadata(MetaData, FbxCurveData))
+				{
+					continue;
+				}
+			}
+
+			// Skip any control not in the filter if the filter isn't empty
+			if (!FilterControls.IsEmpty() && !FilterControls.Contains(FbxCurveData.ControlName))
+			{
+				continue;
+			}
+
+			// Find or create the node
+			FbxNode* ControlFbxNode = RootFbxNode->FindChild(StringCast<char>(*FbxCurveData.NodeName).Get());
+			if (ControlFbxNode == nullptr)
+			{
+				ControlFbxNode = FbxNode::Create(Scene, StringCast<char>(*FbxCurveData.NodeName).Get());
+				RootFbxNode->AddChild(ControlFbxNode);
+			}
+
+			// Remap channel, optionally baking & exporting it for transforms & rotations 
+			bool bNegate = false;
+			int TmComponentIndex = TransformComponentsArray.Find(FbxCurveData.AttributeName);
+
+			// Find the attribute to remap onto and whether to negate the channel if required
+			const FControlRigFbxNodeMapping* NodeMapping = ChannelsMapping.FindByPredicate(
+				[ChannelTypeName, FbxCurveData, TmComponentIndex](const FControlRigFbxNodeMapping& AMapping)
+			{
+				const bool bAttrMatch = AMapping.ChannelAttrIndex == TmComponentIndex;
+				const bool bControlTypeOk = AMapping.ControlType == FbxCurveData.ControlType;
+				// todo: am: need to allow mapping of position/rotation/scale for transforms & euler transforms to allow export of negated transform curves
+				const bool bChannelTypeOk = AMapping.ChannelType == ChannelTypeName;
+
+				// If the control is treated as an attribute of another control, we don't need to check the attribute to remap
+				const bool bAttrOk = !FbxCurveData.IsControlNode() || bAttrMatch;
+					
+				const bool bRemapControl = bControlTypeOk && bChannelTypeOk && bAttrOk;
+				return bRemapControl;
+			});
+			
+			if (TmComponentIndex != INDEX_NONE)
+			{
+				// Retrieve property name for Vector2D, Position, Scale
+				if (FbxCurveData.ControlType == FFBXControlRigTypeProxyEnum::Vector2D || FbxCurveData.ControlType == FFBXControlRigTypeProxyEnum::Position)
+				{
+					FbxCurveData.AttributePropertyName = "Location";
+				}
+				if (FbxCurveData.ControlType == FFBXControlRigTypeProxyEnum::Scale)
+				{
+					FbxCurveData.AttributePropertyName = "Scale";
+				}
+				
+				// Export converted & baked for Rotations & Transforms
+				if ((uint8)FbxCurveData.ControlType >= (uint8)FFBXControlRigTypeProxyEnum::Rotator)
+				{
+					const bool bExportCachedTransforms = TmComponentIndex == 2;
+					const bool bRotator = FbxCurveData.ControlType == FFBXControlRigTypeProxyEnum::Rotator;
+					
+					int TmPropertyIndex = bRotator ? 1 : CurrentTmPropertyIndex;
+
+					// todo: am: does not handle remapping to another property (i.e. rotation to location)
+					// Remap transform channel
+					if (NodeMapping)
+					{
+						TmPropertyIndex = NodeMapping->FbxAttrIndex / 3;
+						TmComponentIndex = NodeMapping->FbxAttrIndex % 3;
+						bNegate = NodeMapping->bNegate;
+					}
+
+					// Cache a single transform property channel
+					CachedTransformChannels[TmComponentIndex].Key = FloatChannel;
+					CachedTransformChannels[TmComponentIndex].Value = bNegate;
+
+					// Once all 3 channels in the current property have been cached, export baked
+					if (bExportCachedTransforms)
+					{
+						for (int i = 0; i < 3; i++)
+						{
+							if (CachedTransformChannels[i].Key && CachedTransformChannels[i].Key->GetNumKeys() > 0)
+							{
+								// Only export baked if at least one curve has keys
+								ExportTransformChannelsToFbxCurve(ControlFbxNode, CachedTransformChannels[0],
+									CachedTransformChannels[1], CachedTransformChannels[2],
+									TmPropertyIndex, Track, RootToLocalTransform);
+								
+								break;
+							}
+						}
+
+						// Increase or reset CurrentTmPropertyIndex to keep track of which property in a Transform we are currently caching
+						const bool bNoScale = FbxCurveData.ControlType == FFBXControlRigTypeProxyEnum::TransformNoScale;
+						const bool bTransformProcessed = bRotator || CurrentTmPropertyIndex == 2 || (bNoScale && CurrentTmPropertyIndex == 1);
+						CurrentTmPropertyIndex = bTransformProcessed ? 0 : CurrentTmPropertyIndex + 1;
+					}
+
+					continue;
+				}
+			}
+			// Remap non transform channels if required (rotations & transforms remapped separately)
+			if (NodeMapping)
+			{
+				FbxCurveData.AttributePropertyName = TransformPropertyArray[NodeMapping->FbxAttrIndex / 3];
+				FbxCurveData.AttributeName = TransformComponentsArray[NodeMapping->FbxAttrIndex % 3];
+				bNegate = NodeMapping->bNegate;
+			}
+			
+			FbxProperty Property;
+			
+			// Use AttributeName (i.e. Weight) as the property if no AttributePropertyName (i.e. Scale). Use NodeName if AttributeName was also empty...
+			const FString FbxPropertyName = FbxCurveData.AttributePropertyName.IsEmpty() ? (!FbxCurveData.AttributeName.IsEmpty() ? FbxCurveData.AttributeName : FbxCurveData.NodeName) : FbxCurveData.AttributePropertyName;
+
+			// Try and find the existing property
+			if (FbxCurveData.AttributePropertyName == "Location")
+			{
+				Property = ControlFbxNode->LclTranslation;
+			}
+			else if (FbxCurveData.AttributePropertyName == "Rotation")
+			{
+				Property = ControlFbxNode->LclRotation;
+			}
+			else if (FbxCurveData.AttributePropertyName == "Scale")
+			{
+				Property = ControlFbxNode->LclScaling;
+			}
+			else
+			{
+				Property = ControlFbxNode->FindProperty(StringCast<char>(*FbxPropertyName).Get());
+			}
+
+			// Or create it otherwise
+			if (!Property.IsValid())
+			{
+				if (DoubleChannel)
+				{
+					double Default = DoubleChannel->GetDefault().Get(0);
+					CreateAnimatableUserProperty(ControlFbxNode, Default, StringCast<char>(*FbxPropertyName).Get(), StringCast<char>(*FbxPropertyName).Get(), FbxDoubleDT);
+				}
+				else if (FloatChannel)
+				{
+					float Default = FloatChannel->GetDefault().Get(0);
+					CreateAnimatableUserProperty(ControlFbxNode, Default, StringCast<char>(*FbxPropertyName).Get(), StringCast<char>(*FbxPropertyName).Get(), FbxFloatDT);
+				}
+				else if (IntegerChannel)
+				{
+					int32 Default = IntegerChannel->GetDefault().Get(0);
+					CreateAnimatableUserProperty(ControlFbxNode, Default, StringCast<char>(*FbxPropertyName).Get(), StringCast<char>(*FbxPropertyName).Get(), FbxIntDT);
+				}
+				else if (BoolChannel)
+				{
+					bool Default = BoolChannel->GetDefault().Get(false);
+					CreateAnimatableUserProperty(ControlFbxNode, Default, StringCast<char>(*FbxPropertyName).Get(), StringCast<char>(*FbxPropertyName).Get(), FbxBoolDT);
+				}
+				else if (ByteChannel)
+				{
+					uint8 Default = ByteChannel->GetDefault().Get(0);
+					CreateAnimatableUserProperty(ControlFbxNode, Default, StringCast<char>(*FbxPropertyName).Get(), StringCast<char>(*FbxPropertyName).Get(), FbxEnumDT);
+				}
+
+				Property = ControlFbxNode->FindProperty(StringCast<char>(*FbxPropertyName).Get());
+			}
+
+			if (!Property.IsValid())
+			{
+				continue;
+			}
+			
+			// Create the anim curve, optionally of the given name if the attribute had a component
+			FbxAnimCurveNode* AnimCurveNode = Property.GetCurveNode(BaseLayer, true);
+			FbxAnimCurve* AnimCurve = Property.GetCurve(BaseLayer, FbxCurveData.AttributePropertyName.IsEmpty() ? nullptr : StringCast<char>(*FbxCurveData.AttributeName).Get(), true);
+			if (!AnimCurve)
+			{
+				continue;
+			}
+
+			// Export the curve
+			if (BoolChannel)
+			{
+				ExportChannelToFbxCurve(*AnimCurve, *BoolChannel, TickResolution, RootToLocalTransform);
+			}
+			else if (ByteChannel)
+			{
+				ExportChannelToFbxCurve(*AnimCurve, *ByteChannel, TickResolution, RootToLocalTransform);
+			}
+			else if (DoubleChannel)
+			{
+				ExportChannelToFbxCurve(*AnimCurve, *DoubleChannel, TickResolution, ERichCurveValueMode::Default, bNegate, RootToLocalTransform);
+			}
+			else if (FloatChannel)
+			{
+				ExportChannelToFbxCurve(*AnimCurve, *FloatChannel, TickResolution, ERichCurveValueMode::Default, bNegate, RootToLocalTransform);
+			}
+			else if (IntegerChannel)
+			{
+				ExportChannelToFbxCurve(*AnimCurve, *IntegerChannel, TickResolution, RootToLocalTransform);
+			}
+		}
+	}
+	return true;
+}
+
+void FFbxExporter::ExportTransformChannelsToFbxCurve(FbxNode* InFbxNode, TPair<FMovieSceneFloatChannel*, bool> ChannelX, TPair<FMovieSceneFloatChannel*, bool> ChannelY, TPair<FMovieSceneFloatChannel*, bool> ChannelZ, int TmPropertyIndex, const UMovieSceneTrack* Track, const FMovieSceneSequenceTransform& RootToLocalTransform)
+{
+	FbxAnimLayer* BaseLayer = AnimStack->GetMember<FbxAnimLayer>(0);
+
+	FbxProperty Property = TmPropertyIndex == 0 ? InFbxNode->LclTranslation : TmPropertyIndex == 1 ? InFbxNode->LclRotation : InFbxNode->LclScaling;
+	
+	FbxAnimCurve* FbxCurveX = Property.GetCurve(BaseLayer, FBXSDK_CURVENODE_COMPONENT_X, true);
+	FbxAnimCurve* FbxCurveY = Property.GetCurve(BaseLayer, FBXSDK_CURVENODE_COMPONENT_Y, true);
+	FbxAnimCurve* FbxCurveZ = Property.GetCurve(BaseLayer, FBXSDK_CURVENODE_COMPONENT_Z, true);
+
+	FTransform RotationDirectionConvert;
+
+	FbxCurveX->KeyModifyBegin();
+	FbxCurveY->KeyModifyBegin();
+	FbxCurveZ->KeyModifyBegin();
+
+	FFrameRate TickResolution = Track->GetTypedOuter<UMovieScene>()->GetTickResolution();
+	FFrameRate DisplayRate = Track->GetTypedOuter<UMovieScene>()->GetDisplayRate();
+	TRange<FFrameNumber> PlaybackRange = Track->GetTypedOuter<UMovieScene>()->GetPlaybackRange();
+	
+	int32 LocalStartFrame = FFrameRate::TransformTime(FFrameTime(UE::MovieScene::DiscreteInclusiveLower(PlaybackRange)), TickResolution, DisplayRate).RoundToFrame().Value;
+	int32 StartFrame = FFrameRate::TransformTime(FFrameTime(UE::MovieScene::DiscreteInclusiveLower(PlaybackRange) * RootToLocalTransform.InverseNoLooping()), TickResolution, DisplayRate).RoundToFrame().Value;
+	int32 AnimationLength = FFrameRate::TransformTime(FFrameTime(FFrameNumber(UE::MovieScene::DiscreteSize(PlaybackRange))), TickResolution, DisplayRate).RoundToFrame().Value;
+
+	for (int32 FrameCount = 0; FrameCount <= AnimationLength; ++FrameCount)
+	{
+		int32 LocalFrame = LocalStartFrame + FrameCount;
+
+		FFrameTime LocalTime = FFrameRate::TransformTime(FFrameTime(LocalFrame), DisplayRate, TickResolution);
+
+		FVector3f Vec = FVector3f::ZeroVector;
+		if (ChannelX.Key)
+		{
+			ChannelX.Key->Evaluate(LocalTime, Vec.X);
+			if (ChannelX.Value)
+			{
+				Vec.X = -Vec.X;
+			}
+		}
+		if (ChannelY.Key)
+		{
+			ChannelY.Key->Evaluate(LocalTime, Vec.Y);
+			if (ChannelY.Value)
+			{
+				Vec.Y = -Vec.Y;
+			}
+		}
+		if (ChannelZ.Key)
+		{
+			ChannelZ.Key->Evaluate(LocalTime, Vec.Z);
+			if (ChannelZ.Value)
+			{
+				Vec.Z = -Vec.Z;
+			}
+		}
+
+		FbxVector4 KeyVec;
+
+		if (TmPropertyIndex == 0)
+		{
+			KeyVec = Converter.ConvertToFbxPos((FVector)Vec);
+		}
+		else if (TmPropertyIndex == 1)
+		{
+			KeyVec = Converter.ConvertToFbxRot((FVector)Vec);
+		}
+		else
+		{
+			KeyVec = Converter.ConvertToFbxScale((FVector)Vec);
+		}
+
+		FbxTime FbxTime;
+		FbxTime.SetSecondDouble(GetExportOptions()->bExportLocalTime ? DisplayRate.AsSeconds(LocalFrame) : DisplayRate.AsSeconds(StartFrame + FrameCount));
+
+		FbxCurveX->KeySet(FbxCurveX->KeyAdd(FbxTime), FbxTime, KeyVec[0]);
+		FbxCurveY->KeySet(FbxCurveY->KeyAdd(FbxTime), FbxTime, KeyVec[1]);
+		FbxCurveZ->KeySet(FbxCurveZ->KeyAdd(FbxTime), FbxTime, KeyVec[2]);
+	}
+
+	FbxCurveX->KeyModifyEnd();
+	FbxCurveY->KeyModifyEnd();
+	FbxCurveZ->KeyModifyEnd();
+}
 
 /**
  * Exports a scene node with the placement indicated by a given actor.
@@ -2225,7 +2545,7 @@ FbxNode* FFbxExporter::ExportActor(AActor* Actor, bool bExportComponents, INodeN
 				{
 					ComponentsToExport.Add( StaticMeshComp );
 				}
-				else if( SkelMeshComp && SkelMeshComp->SkeletalMesh )
+				else if( SkelMeshComp && SkelMeshComp->GetSkeletalMeshAsset())
 				{
 					ComponentsToExport.Add( SkelMeshComp );
 				}
@@ -2317,10 +2637,10 @@ FbxNode* FFbxExporter::ExportActor(AActor* Actor, bool bExportComponents, INodeN
 						const int32 LightmapUVChannel = -1;
 						const TArray<FStaticMaterial>* MaterialOrderOverride = nullptr;
 						const FColorVertexBuffer* ColorBuffer = nullptr;
-						ExportStaticMeshToFbx(StaticMeshComp->GetStaticMesh(), LODIndex, *StaticMeshComp->GetName(), ExportNode, LightmapUVChannel, ColorBuffer, MaterialOrderOverride, &StaticMeshComp->OverrideMaterials);
+						ExportStaticMeshToFbx(StaticMeshComp->GetStaticMesh(), LODIndex, *StaticMeshComp->GetName(), ExportNode, LightmapUVChannel, ColorBuffer, MaterialOrderOverride, &ToRawPtrTArrayUnsafe(StaticMeshComp->OverrideMaterials));
 					}
 				}
-				else if (SkelMeshComp && SkelMeshComp->SkeletalMesh)
+				else if (SkelMeshComp && SkelMeshComp->GetSkeletalMeshAsset())
 				{
 					ExportSkeletalMeshComponent(SkelMeshComp, *SkelMeshComp->GetName(), ExportNode, NodeNameAdapter, bSaveAnimSeq);
 				}
@@ -2349,121 +2669,6 @@ FbxNode* FFbxExporter::ExportActor(AActor* Actor, bool bExportComponents, INodeN
 	}
 
 	return ActorNode;
-}
-
-/**
- * Exports the Matinee movement track into the FBX animation library.
- */
-void FFbxExporter::ExportMatineeTrackMove(FbxNode* FbxActor, UInterpTrackInstMove* MoveTrackInst, UInterpTrackMove* MoveTrack, float InterpLength)
-{
-	if (FbxActor == NULL || MoveTrack == NULL) return;
-	
-	// For the Y and Z angular rotations, we need to invert the relative animation frames,
-	// While keeping the standard angles constant.
-
-	if (MoveTrack != NULL)
-	{
-		FbxAnimLayer* BaseLayer = AnimStack->GetMember<FbxAnimLayer>(0);
-		FbxAnimCurve* Curve;
-
-		bool bPosCurve = true;
-		if( MoveTrack->SubTracks.Num() == 0 )
-		{
-			// Translation;
-			FbxActor->LclTranslation.GetCurveNode(BaseLayer, true);
-			Curve = FbxActor->LclTranslation.GetCurve(BaseLayer, FBXSDK_CURVENODE_COMPONENT_X, true);
-			ExportAnimatedVector(Curve, "X", MoveTrack, MoveTrackInst, bPosCurve, 0, false, InterpLength);
-			Curve = FbxActor->LclTranslation.GetCurve(BaseLayer, FBXSDK_CURVENODE_COMPONENT_Y, true);
-			ExportAnimatedVector(Curve, "Y", MoveTrack, MoveTrackInst, bPosCurve, 1, true, InterpLength);
-			Curve = FbxActor->LclTranslation.GetCurve(BaseLayer, FBXSDK_CURVENODE_COMPONENT_Z, true);
-			ExportAnimatedVector(Curve, "Z", MoveTrack, MoveTrackInst, bPosCurve, 2, false, InterpLength);
-
-			// Rotation
-			FbxActor->LclRotation.GetCurveNode(BaseLayer, true);
-			bPosCurve = false;
-
-			Curve = FbxActor->LclRotation.GetCurve(BaseLayer, FBXSDK_CURVENODE_COMPONENT_X, true);
-			ExportAnimatedVector(Curve, "X", MoveTrack, MoveTrackInst, bPosCurve, 0, false, InterpLength);
-			Curve = FbxActor->LclRotation.GetCurve(BaseLayer, FBXSDK_CURVENODE_COMPONENT_Y, true);
-			ExportAnimatedVector(Curve, "Y", MoveTrack, MoveTrackInst, bPosCurve, 1, true, InterpLength);
-			Curve = FbxActor->LclRotation.GetCurve(BaseLayer, FBXSDK_CURVENODE_COMPONENT_Z, true);
-			ExportAnimatedVector(Curve, "Z", MoveTrack, MoveTrackInst, bPosCurve, 2, true, InterpLength);
-		}
-		else
-		{
-			// Translation;
-			FbxActor->LclTranslation.GetCurveNode(BaseLayer, true);
-			Curve = FbxActor->LclTranslation.GetCurve(BaseLayer, FBXSDK_CURVENODE_COMPONENT_X, true);
-			ExportMoveSubTrack(Curve, "X", CastChecked<UInterpTrackMoveAxis>(MoveTrack->SubTracks[0]), MoveTrackInst, bPosCurve, 0, false, InterpLength);
-			Curve = FbxActor->LclTranslation.GetCurve(BaseLayer, FBXSDK_CURVENODE_COMPONENT_Y, true);
-			ExportMoveSubTrack(Curve, "Y", CastChecked<UInterpTrackMoveAxis>(MoveTrack->SubTracks[1]), MoveTrackInst, bPosCurve, 1, true, InterpLength);
-			Curve = FbxActor->LclTranslation.GetCurve(BaseLayer, FBXSDK_CURVENODE_COMPONENT_Z, true);
-			ExportMoveSubTrack(Curve, "Z", CastChecked<UInterpTrackMoveAxis>(MoveTrack->SubTracks[2]), MoveTrackInst, bPosCurve, 2, false, InterpLength);
-
-			// Rotation
-			FbxActor->LclRotation.GetCurveNode(BaseLayer, true);
-			bPosCurve = false;
-
-			Curve = FbxActor->LclRotation.GetCurve(BaseLayer, FBXSDK_CURVENODE_COMPONENT_X, true);
-			ExportMoveSubTrack(Curve, "X", CastChecked<UInterpTrackMoveAxis>(MoveTrack->SubTracks[3]), MoveTrackInst, bPosCurve, 0, false, InterpLength);
-			Curve = FbxActor->LclRotation.GetCurve(BaseLayer, FBXSDK_CURVENODE_COMPONENT_Y, true);
-			ExportMoveSubTrack(Curve, "Y", CastChecked<UInterpTrackMoveAxis>(MoveTrack->SubTracks[4]), MoveTrackInst, bPosCurve, 1, true, InterpLength);
-			Curve = FbxActor->LclRotation.GetCurve(BaseLayer, FBXSDK_CURVENODE_COMPONENT_Z, true);
-			ExportMoveSubTrack(Curve, "Z", CastChecked<UInterpTrackMoveAxis>(MoveTrack->SubTracks[5]), MoveTrackInst, bPosCurve, 2, true, InterpLength);
-		}
-	}
-}
-
-/**
- * Exports the Matinee float property track into the FBX animation library.
- */
-void FFbxExporter::ExportMatineeTrackFloatProp(FbxNode* FbxActor, UInterpTrackFloatProp* PropTrack)
-{
-	if (FbxActor == NULL || PropTrack == NULL) return;
-	
-	FbxNodeAttribute* FbxNodeAttr = NULL;
-	// camera and light is appended on the fbx pivot node
-	if( FbxActor->GetChild(0) )
-	{
-		FbxNodeAttr = ((FbxNode*)FbxActor->GetChild(0))->GetNodeAttribute();
-
-		if (FbxNodeAttr == NULL) return;
-	}
-	
-	FbxProperty Property;
-	FString PropertyName = PropTrack->PropertyName.ToString();
-	bool IsFoV = false;
-	// most properties are created as user property, only FOV of camera in FBX supports animation
-	if (PropertyName == "Intensity")
-	{
-		Property = FbxActor->FindProperty("UE_Intensity", false);
-	}
-	else if (PropertyName == "FalloffExponent")
-	{
-		Property = FbxActor->FindProperty("UE_FalloffExponent", false);
-	}
-	else if (PropertyName == "AttenuationRadius")
-	{
-		Property = FbxActor->FindProperty("UE_Radius", false);
-	}
-	else if (PropertyName == "FOVAngle" && FbxNodeAttr )
-	{
-		Property = ((FbxCamera*)FbxNodeAttr)->FocalLength;
-		IsFoV = true;
-	}
-	else if (PropertyName == "AspectRatio")
-	{
-		Property = FbxActor->FindProperty("UE_AspectRatio", false);
-	}
-	else if (PropertyName == "MotionBlur_Amount")
-	{
-		Property = FbxActor->FindProperty("UE_MotionBlur_Amount", false);
-	}
-
-	if (Property != 0)
-	{
-		ExportAnimatedFloat(&Property, &PropTrack->FloatTrack, IsFoV);
-	}
 }
 
 void ConvertInterpToFBX(uint8 UnrealInterpMode, FbxAnimCurveDef::EInterpolationType& Interpolation, FbxAnimCurveDef::ETangentMode& Tangent)
@@ -2507,349 +2712,6 @@ void ConvertInterpToFBX(uint8 UnrealInterpMode, FbxAnimCurveDef::EInterpolationT
 static bool IsEquivalent(float a, float b, float Tolerance = KINDA_SMALL_NUMBER)
 {
 	return (a - b) > -Tolerance && (a - b) < Tolerance;
-}
-
-// Set the default FPS to 30 because the SetupMatinee MEL script sets up Maya this way.
-const float FFbxExporter::BakeTransformsFPS = DEFAULT_SAMPLERATE;
-
-/**
- * Exports a given interpolation curve into the FBX animation curve.
- */
-void FFbxExporter::ExportAnimatedVector(FbxAnimCurve* FbxCurve, const char* ChannelName, UInterpTrackMove* MoveTrack, UInterpTrackInstMove* MoveTrackInst, bool bPosCurve, int32 CurveIndex, bool bNegative, float InterpLength)
-{
-	if (Scene == NULL) return;
-	
-	FInterpCurveVector* Curve = bPosCurve ? &MoveTrack->PosTrack : &MoveTrack->EulerTrack;
-
-	if (Curve == NULL || CurveIndex >= 3) return;
-
-#define FLT_TOLERANCE 0.000001
-
-	// Determine how many key frames we are exporting. If the user wants to export a key every 
-	// frame, calculate this number. Otherwise, use the number of keys the user created. 
-	int32 KeyCount = bBakeKeys ? (InterpLength * BakeTransformsFPS) : Curve->Points.Num();
-
-	// Write out the key times from the curve to the FBX curve.
-	TArray<float> KeyTimes;
-	for (int32 KeyIndex = 0; KeyIndex < KeyCount; ++KeyIndex)
-	{
-		// The Unreal engine allows you to place more than one key at one time value:
-		// displace the extra keys. This assumes that Unreal's keys are always ordered.
-		float KeyTime = bBakeKeys ? (KeyIndex * InterpLength) / KeyCount : Curve->Points[KeyIndex].InVal;
-		if (KeyTimes.Num() && KeyTime < KeyTimes[KeyIndex-1] + FLT_TOLERANCE)
-		{
-			KeyTime = KeyTimes[KeyIndex-1] + 0.01f; // Add 1 millisecond to the timing of this key.
-		}
-		KeyTimes.Add(KeyTime);
-	}
-
-	// Write out the key values from the curve to the FBX curve.
-	FbxCurve->KeyModifyBegin();
-	for (int32 KeyIndex = 0; KeyIndex < KeyCount; ++KeyIndex)
-	{
-		// First, convert the output value to the correct coordinate system, if we need that.  For movement
-		// track keys that are in a local coordinate system (IMF_RelativeToInitial), we need to transform
-		// the keys to world space first
-		FVector FinalOutVec;
-		{
-			FVector KeyPosition;
-			FRotator KeyRotation;
-
-			// If we are baking trnasforms, ask the movement track what are transforms are at the given time.
-			if( bBakeKeys )
-			{
-				MoveTrack->GetKeyTransformAtTime(MoveTrackInst, KeyTimes[KeyIndex], KeyPosition, KeyRotation);
-			}
-			// Else, this information is already present in the position and rotation tracks stored on the movement track.
-			else
-			{
-				KeyPosition = MoveTrack->PosTrack.Points[KeyIndex].OutVal;
-				KeyRotation = FRotator( FQuat::MakeFromEuler(MoveTrack->EulerTrack.Points[KeyIndex].OutVal) );
-			}
-
-			if (bKeepHierarchy)
-			{
-				if(bPosCurve)
-				{
-					FinalOutVec = KeyPosition;
-				}
-				else
-				{
-					FinalOutVec = KeyRotation.Euler();
-				}
-			}
-			else
-			{
-				FVector WorldSpacePos;
-				FRotator WorldSpaceRotator;
-				MoveTrack->ComputeWorldSpaceKeyTransform(
-					MoveTrackInst,
-					KeyPosition,
-					KeyRotation,
-					WorldSpacePos,			// Out
-					WorldSpaceRotator);	// Out
-
-				if(bPosCurve)
-				{
-					FinalOutVec = WorldSpacePos;
-				}
-				else
-				{
-					FinalOutVec = WorldSpaceRotator.Euler();
-				}
-			}
-		}
-
-		float KeyTime = KeyTimes[KeyIndex];
-		float OutValue = (CurveIndex == 0) ? FinalOutVec.X : (CurveIndex == 1) ? FinalOutVec.Y : FinalOutVec.Z;
-		float FbxKeyValue = bNegative ? -OutValue : OutValue;
-		
-		// Add a new key to the FBX curve
-		FbxTime Time;
-		FbxAnimCurveKey FbxKey;
-		Time.SetSecondDouble((float)KeyTime);
-		int FbxKeyIndex = FbxCurve->KeyAdd(Time);
-		
-
-		FbxAnimCurveDef::EInterpolationType Interpolation = FbxAnimCurveDef::eInterpolationConstant;
-		FbxAnimCurveDef::ETangentMode Tangent = FbxAnimCurveDef::eTangentAuto;
-		
-		if( !bBakeKeys )
-		{
-			ConvertInterpToFBX(Curve->Points[KeyIndex].InterpMode, Interpolation, Tangent);
-		}
-
-		if (bBakeKeys || Interpolation != FbxAnimCurveDef::eInterpolationCubic)
-		{
-			FbxCurve->KeySet(FbxKeyIndex, Time, (float)FbxKeyValue, Interpolation, Tangent);
-		}
-		else
-		{
-			FInterpCurvePoint<FVector>& Key = Curve->Points[KeyIndex];
-
-			// Setup tangents for bezier curves. Avoid this for keys created from baking 
-			// transforms since there is no tangent info created for these types of keys. 
-			if( Interpolation == FbxAnimCurveDef::eInterpolationCubic ) //-V547
-			{
-				float OutTangentValue = (CurveIndex == 0) ? Key.LeaveTangent.X : (CurveIndex == 1) ? Key.LeaveTangent.Y : Key.LeaveTangent.Z;
-				float OutTangentX = (KeyIndex < KeyCount - 1) ? (KeyTimes[KeyIndex + 1] - KeyTime) / 3.0f : 0.333f;
-				if (IsEquivalent(OutTangentX, KeyTime))
-				{
-					OutTangentX = 0.00333f; // 1/3rd of a millisecond.
-				}
-				float OutTangentY = OutTangentValue / 3.0f;
-				float RightTangent =  OutTangentY / OutTangentX ;
-				
-				float NextLeftTangent = 0;
-				
-				if (KeyIndex < KeyCount - 1)
-				{
-					FInterpCurvePoint<FVector>& NextKey = Curve->Points[KeyIndex + 1];
-					float NextInTangentValue = (CurveIndex == 0) ? NextKey.ArriveTangent.X : (CurveIndex == 1) ? NextKey.ArriveTangent.Y : NextKey.ArriveTangent.Z;
-					float NextInTangentX;
-					NextInTangentX = (KeyTimes[KeyIndex + 1] - KeyTimes[KeyIndex]) / 3.0f;
-					float NextInTangentY = NextInTangentValue / 3.0f;
-					NextLeftTangent =  NextInTangentY / NextInTangentX ;
-				}
-
-				FbxCurve->KeySet(FbxKeyIndex, Time, (float)FbxKeyValue, Interpolation, Tangent, RightTangent, NextLeftTangent );
-			}
-		}
-	}
-	FbxCurve->KeyModifyEnd();
-}
-
-void FFbxExporter::ExportMoveSubTrack(FbxAnimCurve* FbxCurve, const ANSICHAR* ChannelName, UInterpTrackMoveAxis* SubTrack, UInterpTrackInstMove* MoveTrackInst, bool bPosCurve, int32 CurveIndex, bool bNegative, float InterpLength)
-{
-	if (Scene == NULL || FbxCurve == NULL) return;
-
-	FInterpCurveFloat* Curve = &SubTrack->FloatTrack;
-	UInterpTrackMove* ParentTrack = CastChecked<UInterpTrackMove>( SubTrack->GetOuter() );
-
-#define FLT_TOLERANCE 0.000001
-
-	// Determine how many key frames we are exporting. If the user wants to export a key every 
-	// frame, calculate this number. Otherwise, use the number of keys the user created. 
-	int32 KeyCount = bBakeKeys ? (InterpLength * BakeTransformsFPS) : Curve->Points.Num();
-
-	// Write out the key times from the curve to the FBX curve.
-	TArray<float> KeyTimes;
-	for(int32 KeyIndex = 0; KeyIndex < KeyCount; ++KeyIndex)
-	{
-		// The Unreal engine allows you to place more than one key at one time value:
-		// displace the extra keys. This assumes that Unreal's keys are always ordered.
-		float KeyTime = bBakeKeys ? (KeyIndex * InterpLength) / KeyCount : Curve->Points[KeyIndex].InVal;
-		if(KeyTimes.Num() && KeyTime < KeyTimes[KeyIndex-1] + FLT_TOLERANCE)
-		{
-			KeyTime = KeyTimes[KeyIndex-1] + 0.01f; // Add 1 millisecond to the timing of this key.
-		}
-		KeyTimes.Add(KeyTime);
-	}
-	// Write out the key values from the curve to the FBX curve.
-	FbxCurve->KeyModifyBegin();
-	for (int32 KeyIndex = 0; KeyIndex < KeyCount; ++KeyIndex)
-	{
-		// First, convert the output value to the correct coordinate system, if we need that.  For movement
-		// track keys that are in a local coordinate system (IMF_RelativeToInitial), we need to transform
-		// the keys to world space first
-		FVector FinalOutVec;
-		{
-			FVector KeyPosition;
-			FRotator KeyRotation;
-
-			ParentTrack->GetKeyTransformAtTime(MoveTrackInst, KeyTimes[KeyIndex], KeyPosition, KeyRotation);
-		
-			FVector WorldSpacePos;
-			FRotator WorldSpaceRotator;
-			ParentTrack->ComputeWorldSpaceKeyTransform(
-				MoveTrackInst,
-				KeyPosition,
-				KeyRotation,
-				WorldSpacePos,			// Out
-				WorldSpaceRotator );	// Out
-
-			if( bPosCurve )
-			{
-				FinalOutVec = WorldSpacePos;
-			}
-			else
-			{
-				FinalOutVec = WorldSpaceRotator.Euler();
-			}
-		}
-
-		float KeyTime = KeyTimes[KeyIndex];
-		float OutValue = (CurveIndex == 0) ? FinalOutVec.X : (CurveIndex == 1) ? FinalOutVec.Y : FinalOutVec.Z;
-		float FbxKeyValue = bNegative ? -OutValue : OutValue;
-
-		// Add a new key to the FBX curve
-		FbxTime Time;
-		FbxAnimCurveKey FbxKey;
-		Time.SetSecondDouble((float)KeyTime);
-		int FbxKeyIndex = FbxCurve->KeyAdd(Time);
-
-		FbxAnimCurveDef::EInterpolationType Interpolation = FbxAnimCurveDef::eInterpolationConstant;
-		FbxAnimCurveDef::ETangentMode Tangent = FbxAnimCurveDef::eTangentAuto;
-		
-		if (bBakeKeys || Interpolation != FbxAnimCurveDef::eInterpolationCubic)
-		{
-			FbxCurve->KeySet(FbxKeyIndex, Time, (float)FbxKeyValue, Interpolation, Tangent);
-		}
-		else
-		{
-			FInterpCurvePoint<float>& Key = Curve->Points[KeyIndex];
-			ConvertInterpToFBX(Key.InterpMode, Interpolation, Tangent);
-
-			// Setup tangents for bezier curves. Avoid this for keys created from baking 
-			// transforms since there is no tangent info created for these types of keys. 
-			if( Interpolation == FbxAnimCurveDef::eInterpolationCubic )
-			{
-				float OutTangentValue = Key.LeaveTangent;
-				float OutTangentX = (KeyIndex < KeyCount - 1) ? (KeyTimes[KeyIndex + 1] - KeyTime) / 3.0f : 0.333f;
-				if (IsEquivalent(OutTangentX, KeyTime))
-				{
-					OutTangentX = 0.00333f; // 1/3rd of a millisecond.
-				}
-				float OutTangentY = OutTangentValue / 3.0f;
-				float RightTangent =  OutTangentY / OutTangentX ;
-
-				float NextLeftTangent = 0;
-
-				if (KeyIndex < KeyCount - 1)
-				{
-					FInterpCurvePoint<float>& NextKey = Curve->Points[KeyIndex + 1];
-					float NextInTangentValue =  Key.LeaveTangent;
-					float NextInTangentX;
-					NextInTangentX = (KeyTimes[KeyIndex + 1] - KeyTimes[KeyIndex]) / 3.0f;
-					float NextInTangentY = NextInTangentValue / 3.0f;
-					NextLeftTangent =  NextInTangentY / NextInTangentX ;
-				}
-
-				FbxCurve->KeySet(FbxKeyIndex, Time, (float)FbxKeyValue, Interpolation, Tangent, RightTangent, NextLeftTangent );
-			}
-		}
-	}
-	FbxCurve->KeyModifyEnd();
-}
-
-void FFbxExporter::ExportAnimatedFloat(FbxProperty* FbxProperty, FInterpCurveFloat* Curve, bool IsCameraFoV)
-{
-	if (FbxProperty == NULL || Curve == NULL) return;
-
-	// do not export an empty anim curve
-	if (Curve->Points.Num() == 0) return;
-
-	FbxAnimCurve* AnimCurve = FbxAnimCurve::Create(Scene, "");
-	FbxAnimCurveNode* CurveNode = FbxProperty->GetCurveNode(true);
-	if (!CurveNode)
-	{
-		return;
-	}
-	CurveNode->SetChannelValue<double>(0U, Curve->Points[0].OutVal);
-	CurveNode->ConnectToChannel(AnimCurve, 0U);
-
-	// Write out the key times from the curve to the FBX curve.
-	int32 KeyCount = Curve->Points.Num();
-	TArray<float> KeyTimes;
-	for (int32 KeyIndex = 0; KeyIndex < KeyCount; ++KeyIndex)
-	{
-		FInterpCurvePoint<float>& Key = Curve->Points[KeyIndex];
-
-		// The Unreal engine allows you to place more than one key at one time value:
-		// displace the extra keys. This assumes that Unreal's keys are always ordered.
-		float KeyTime = Key.InVal;
-		if (KeyTimes.Num() && KeyTime < KeyTimes[KeyIndex-1] + FLT_TOLERANCE)
-		{
-			KeyTime = KeyTimes[KeyIndex-1] + 0.01f; // Add 1 millisecond to the timing of this key.
-		}
-		KeyTimes.Add(KeyTime);
-	}
-
-	// Write out the key values from the curve to the FBX curve.
-	AnimCurve->KeyModifyBegin();
-	for (int32 KeyIndex = 0; KeyIndex < KeyCount; ++KeyIndex)
-	{
-		FInterpCurvePoint<float>& Key = Curve->Points[KeyIndex];
-		float KeyTime = KeyTimes[KeyIndex];
-		
-		// Add a new key to the FBX curve
-		FbxTime Time;
-		FbxAnimCurveKey FbxKey;
-		Time.SetSecondDouble((float)KeyTime);
-		int FbxKeyIndex = AnimCurve->KeyAdd(Time);
-		float OutVal = (IsCameraFoV && DefaultCamera)? DefaultCamera->ComputeFocalLength(Key.OutVal): (float)Key.OutVal;
-
-		FbxAnimCurveDef::EInterpolationType Interpolation = FbxAnimCurveDef::eInterpolationConstant;
-		FbxAnimCurveDef::ETangentMode Tangent = FbxAnimCurveDef::eTangentAuto;
-		ConvertInterpToFBX(Key.InterpMode, Interpolation, Tangent);
-		
-		if (Interpolation != FbxAnimCurveDef::eInterpolationCubic)
-		{
-			AnimCurve->KeySet(FbxKeyIndex, Time, OutVal, Interpolation, Tangent);
-		}
-		else
-		{
-			// Setup tangents for bezier curves.
-			float OutTangentX = (KeyIndex < KeyCount - 1) ? (KeyTimes[KeyIndex + 1] - KeyTime) / 3.0f : 0.333f;
-			float OutTangentY = Key.LeaveTangent / 3.0f;
-			float RightTangent =  OutTangentY / OutTangentX ;
-
-			float NextLeftTangent = 0;
-
-			if (KeyIndex < KeyCount - 1)
-			{
-				FInterpCurvePoint<float>& NextKey = Curve->Points[KeyIndex + 1];
-				float NextInTangentX;
-				NextInTangentX = (KeyTimes[KeyIndex + 1] - KeyTimes[KeyIndex]) / 3.0f;
-				float NextInTangentY = NextKey.ArriveTangent / 3.0f;
-				NextLeftTangent =  NextInTangentY / NextInTangentX ;
-			}
-
-			AnimCurve->KeySet(FbxKeyIndex, Time, OutVal, Interpolation, Tangent, RightTangent, NextLeftTangent );
-
-		}
-	}
-	AnimCurve->KeyModifyEnd();
 }
 
 
@@ -2905,25 +2767,64 @@ void RichCurveInterpolationToFbxInterpolation(ERichCurveInterpMode InInterpolati
 	}
 }
 
-void FFbxExporter::ExportChannelToFbxCurve(FbxAnimCurve& InFbxCurve, const FMovieSceneFloatChannel& InChannel, FFrameRate TickResolution, ERichCurveValueMode ValueMode, bool bNegative, const FMovieSceneSequenceTransform& RootToLocalTransform)
+template<typename ChannelType>
+void FFbxExporter::ExportBezierChannelToFbxCurveBaked(FbxAnimCurve& InFbxCurve, const ChannelType& InChannel, FFrameRate TickResolution, const UMovieSceneTrack* Track, ERichCurveValueMode ValueMode, bool bNegative, const FMovieSceneSequenceTransform& RootToLocalTransform)
 {
+	using ChannelValueType = typename ChannelType::ChannelValueType;
+	using CurveValueType = typename ChannelType::CurveValueType;
+
+	const float NegateFactor = bNegative ? -1.f : 1.f;
+	const float kOneThird = 1.f / 3.f;
+
+	InFbxCurve.KeyModifyBegin();
+
+	FFrameRate DisplayRate = Track->GetTypedOuter<UMovieScene>()->GetDisplayRate();
+	TRange<FFrameNumber> PlaybackRange = Track->GetTypedOuter<UMovieScene>()->GetPlaybackRange();
+
+	int32 LocalStartFrame = FFrameRate::TransformTime(FFrameTime(UE::MovieScene::DiscreteInclusiveLower(PlaybackRange)), TickResolution, DisplayRate).RoundToFrame().Value;
+	int32 StartFrame = FFrameRate::TransformTime(FFrameTime(UE::MovieScene::DiscreteInclusiveLower(PlaybackRange) * RootToLocalTransform.InverseNoLooping()), TickResolution, DisplayRate).RoundToFrame().Value;
+	int32 AnimationLength = FFrameRate::TransformTime(FFrameTime(FFrameNumber(UE::MovieScene::DiscreteSize(PlaybackRange))), TickResolution, DisplayRate).RoundToFrame().Value;
+
+	for (int32 FrameCount = 0; FrameCount <= AnimationLength; ++FrameCount)
+	{
+		int32 LocalFrame = LocalStartFrame + FrameCount;
+
+		FFrameTime LocalTime = FFrameRate::TransformTime(FFrameTime(LocalFrame), DisplayRate, TickResolution);
+
+		float Value;
+		InChannel.Evaluate(LocalTime, Value);
+
+		FbxTime FbxTime;
+		FbxTime.SetSecondDouble(GetExportOptions()->bExportLocalTime ? DisplayRate.AsSeconds(LocalFrame) : DisplayRate.AsSeconds(StartFrame + FrameCount));
+
+		InFbxCurve.KeySet(InFbxCurve.KeyAdd(FbxTime), FbxTime, Value, FbxAnimCurveDef::eInterpolationLinear);
+	}
+	InFbxCurve.KeyModifyEnd();
+}
+
+template<typename ChannelType>
+void FFbxExporter::ExportBezierChannelToFbxCurve(FbxAnimCurve& InFbxCurve, const ChannelType& InChannel, FFrameRate TickResolution, ERichCurveValueMode ValueMode, bool bNegative, const FMovieSceneSequenceTransform& RootToLocalTransform)
+{
+	using ChannelValueType = typename ChannelType::ChannelValueType;
+	using CurveValueType = typename ChannelType::CurveValueType;
+
 	const float NegateFactor = bNegative ? -1.f : 1.f;
 	const float kOneThird = 1.f / 3.f;
 	InFbxCurve.KeyModifyBegin();
 
 	TArrayView<const FFrameNumber>          Times  = InChannel.GetTimes();
-	TArrayView<const FMovieSceneFloatValue> Values = InChannel.GetValues();
+	TArrayView<const ChannelValueType> Values = InChannel.GetValues();
 
 	for (int32 Index = 0; Index < Times.Num(); ++Index)
 	{
-		const FFrameNumber          KeyTime  = Times[Index];
-		const FMovieSceneFloatValue KeyValue = Values[Index];
+		const FFrameNumber       KeyTime  = Times[Index];
+		const ChannelValueType   KeyValue = Values[Index];
 
-		const float Value = (ValueMode == ERichCurveValueMode::Fov ? DefaultCamera->ComputeFocalLength( KeyValue.Value ) : KeyValue.Value) * NegateFactor;
+		const CurveValueType Value = (ValueMode == ERichCurveValueMode::Fov ? DefaultCamera->ComputeFocalLength( KeyValue.Value ) : KeyValue.Value) * NegateFactor;
 
 		FbxTime FbxTime;
 		FbxAnimCurveKey FbxKey;
-		const double KeyTimeSeconds = GetExportOptions()->bExportLocalTime ? KeyTime / TickResolution : (KeyTime * RootToLocalTransform.InverseLinearOnly()) / TickResolution;
+		const double KeyTimeSeconds = GetExportOptions()->bExportLocalTime ? KeyTime / TickResolution : (KeyTime * RootToLocalTransform.InverseNoLooping()) / TickResolution;
 
 		FbxTime.SetSecondDouble(KeyTimeSeconds);
 
@@ -2946,17 +2847,17 @@ void FFbxExporter::ExportChannelToFbxCurve(FbxAnimCurve& InFbxCurve, const FMovi
 				float LeaveTangent = KeyValue.Tangent.LeaveTangent * TickResolution.AsDecimal();
 				float NextArriveTangent = Values[Index + 1].Tangent.ArriveTangent * TickResolution.AsDecimal();
 
-				//Need to convert Ue4 tangent weight which is the length of the hypotenuse to FBX normalized X(time) weight
+				//Need to convert UE tangent weight which is the length of the hypotenuse to FBX normalized X(time) weight
 				if (WeightedMode == FbxAnimCurveDef::eWeightedAll || WeightedMode == FbxAnimCurveDef::eWeightedRight)
 				{
-					const float XVal = FMath::Sqrt((KeyValue.Tangent.LeaveTangentWeight * KeyValue.Tangent.LeaveTangentWeight) / (1.0f + LeaveTangent * LeaveTangent));
+					const CurveValueType XVal = FMath::Sqrt((KeyValue.Tangent.LeaveTangentWeight * KeyValue.Tangent.LeaveTangentWeight) / (1.0f + LeaveTangent * LeaveTangent));
 					LeaveTangentWeight = XVal / TimeDiff;
 				}
 
 				//make sure next tangent is weighted else use default weight
 				if ((Values[Index + 1].Tangent.TangentWeightMode == ERichCurveTangentWeightMode::RCTWM_WeightedBoth || Values[Index + 1].Tangent.TangentWeightMode == ERichCurveTangentWeightMode::RCTWM_WeightedArrive) )
 				{
-					const float XVal = FMath::Sqrt((Values[Index + 1].Tangent.ArriveTangentWeight * Values[Index + 1].Tangent.ArriveTangentWeight) / (1.0f + NextArriveTangent * NextArriveTangent));
+					const CurveValueType XVal = FMath::Sqrt((Values[Index + 1].Tangent.ArriveTangentWeight * Values[Index + 1].Tangent.ArriveTangentWeight) / (1.0f + NextArriveTangent * NextArriveTangent));
 					NextArriveTangentWeight = XVal / TimeDiff;
 				}
 				if (bNegative)
@@ -2980,27 +2881,53 @@ void FFbxExporter::ExportChannelToFbxCurve(FbxAnimCurve& InFbxCurve, const FMovi
 	InFbxCurve.KeyModifyEnd();
 }
 
+void FFbxExporter::ExportChannelToFbxCurve(FbxAnimCurve& InFbxCurve, const FMovieSceneFloatChannel& InChannel, FFrameRate TickResolution, ERichCurveValueMode ValueMode, bool bNegative, const FMovieSceneSequenceTransform& RootToLocalTransform)
+{
+	ExportBezierChannelToFbxCurve(InFbxCurve, InChannel, TickResolution, ValueMode, bNegative, RootToLocalTransform);
+}
+
+void FFbxExporter::ExportChannelToFbxCurve(FbxAnimCurve& InFbxCurve, const FMovieSceneDoubleChannel& InChannel, FFrameRate TickResolution, ERichCurveValueMode ValueMode, bool bNegative, const FMovieSceneSequenceTransform& RootToLocalTransform)
+{
+	ExportBezierChannelToFbxCurve(InFbxCurve, InChannel, TickResolution, ValueMode, bNegative, RootToLocalTransform);
+}
+
 void FFbxExporter::ExportChannelToFbxCurve(FbxAnimCurve& InFbxCurve, const FMovieSceneIntegerChannel& InChannel, FFrameRate TickResolution, const FMovieSceneSequenceTransform& RootToLocalTransform)
+{
+	ExportConstantChannelToFbxCurve<FMovieSceneIntegerChannel, int32>(InFbxCurve, InChannel, TickResolution, RootToLocalTransform);
+}
+
+void FFbxExporter::ExportChannelToFbxCurve(FbxAnimCurve& InFbxCurve, const FMovieSceneBoolChannel& InChannel, FFrameRate TickResolution, const FMovieSceneSequenceTransform& RootToLocalTransform)
+{
+	ExportConstantChannelToFbxCurve<FMovieSceneBoolChannel, bool>(InFbxCurve, InChannel, TickResolution, RootToLocalTransform);
+}
+
+void FFbxExporter::ExportChannelToFbxCurve(FbxAnimCurve& InFbxCurve, const FMovieSceneByteChannel& InChannel, FFrameRate TickResolution, const FMovieSceneSequenceTransform& RootToLocalTransform)
+{
+	ExportConstantChannelToFbxCurve<FMovieSceneByteChannel, uint8>(InFbxCurve, InChannel, TickResolution, RootToLocalTransform);
+}
+
+template<typename ChannelType, typename T>
+void FFbxExporter::ExportConstantChannelToFbxCurve(FbxAnimCurve& InFbxCurve, const ChannelType& InChannel, FFrameRate TickResolution, const FMovieSceneSequenceTransform& RootToLocalTransform)
 {
 	InFbxCurve.KeyModifyBegin();
 
-	TArrayView<const FFrameNumber> Times  = InChannel.GetTimes();
-	TArrayView<const int32> Values = InChannel.GetValues();
+	const TArrayView<const FFrameNumber> Times  = InChannel.GetTimes();
+	const TArrayView<const T> Values = InChannel.GetValues();
 
 	for (int32 Index = 0; Index < Times.Num(); ++Index)
 	{
 		const FFrameNumber KeyTime = Times[Index];
-		int32 KeyValue = Values[Index];
+		const T KeyValue = Values[Index];
 
 		FbxTime FbxTime;
-		FbxAnimCurveKey FbxKey;
-		const double KeyTimeSeconds = GetExportOptions()->bExportLocalTime ? KeyTime / TickResolution : (KeyTime * RootToLocalTransform.InverseLinearOnly()) / TickResolution;
+		const double KeyTimeSeconds = GetExportOptions()->bExportLocalTime ? KeyTime / TickResolution : (KeyTime * RootToLocalTransform.InverseNoLooping()) / TickResolution;
 
 		FbxTime.SetSecondDouble(KeyTimeSeconds);
 
 		const int FbxKeyIndex = InFbxCurve.KeyAdd(FbxTime);
 
 		InFbxCurve.KeySet(FbxKeyIndex, FbxTime, KeyValue, FbxAnimCurveDef::eInterpolationConstant);
+		InFbxCurve.KeySetConstantMode(FbxKeyIndex, FbxAnimCurveDef::EConstantMode::eConstantStandard);
 	}
 	InFbxCurve.KeyModifyEnd();
 }
@@ -3024,7 +2951,9 @@ void FFbxExporter::ExportLevelSequence3DTransformTrack(FbxNode* FbxNode, IMovieS
 
 	const bool bIsCameraActor = BoundActor ? BoundActor->IsA(ACameraActor::StaticClass()) : BoundComponent ? BoundComponent->IsA(UCameraComponent::StaticClass()) : false;
 	const bool bIsLightActor = BoundActor ? BoundActor->IsA(ALight::StaticClass()) : BoundComponent ? BoundComponent->IsA(ULightComponent::StaticClass()) : false;
-	const bool bBakeRotations = bIsCameraActor || bIsLightActor;
+
+	// If bake rotations is set, and actor is a camera or light actor, only bake rotation channel
+	const bool bBakeRotations = (bIsCameraActor || bIsLightActor) && (static_cast<uint8>(GetExportOptions()->BakeCameraAndLightAnimation) & static_cast<uint8>(EMovieSceneBakeType::BakeTransforms));
 
 	if (!FbxNode)
 	{
@@ -3050,27 +2979,65 @@ void FFbxExporter::ExportLevelSequence3DTransformTrack(FbxNode* FbxNode, IMovieS
 	FbxAnimCurve* FbxCurveScaleY = FbxNode->LclScaling.GetCurve(BaseLayer, FBXSDK_CURVENODE_COMPONENT_Y, true);
 	FbxAnimCurve* FbxCurveScaleZ = FbxNode->LclScaling.GetCurve(BaseLayer, FBXSDK_CURVENODE_COMPONENT_Z, true);
 
-	TArrayView<FMovieSceneFloatChannel*> FloatChannels = TransformSection->GetChannelProxy().GetChannels<FMovieSceneFloatChannel>();
+	FMovieSceneChannelProxy& SectionChannelProxy = TransformSection->GetChannelProxy();
+	TMovieSceneChannelHandle<FMovieSceneDoubleChannel> DoubleChannels[] = {
+		SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Location.X"),
+		SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Location.Y"),
+		SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Location.Z"),
+		SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Rotation.X"),
+		SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Rotation.Y"),
+		SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Rotation.Z"),
+		SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Scale.X"),
+		SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Scale.Y"),
+		SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Scale.Z")
+	};
 
 	// Translation
-	ExportChannelToFbxCurve(*FbxCurveTransX, *FloatChannels[0], TickResolution, ERichCurveValueMode::Default, false, RootToLocalTransform);
-	ExportChannelToFbxCurve(*FbxCurveTransY, *FloatChannels[1], TickResolution, ERichCurveValueMode::Default, true, RootToLocalTransform);
-	ExportChannelToFbxCurve(*FbxCurveTransZ, *FloatChannels[2], TickResolution, ERichCurveValueMode::Default, false, RootToLocalTransform);
+	if (DoubleChannels[0].Get())
+	{
+		ExportChannelToFbxCurve(*FbxCurveTransX, *DoubleChannels[0].Get(), TickResolution, ERichCurveValueMode::Default, false, RootToLocalTransform);
+	}
+	if (DoubleChannels[1].Get())
+	{
+		ExportChannelToFbxCurve(*FbxCurveTransY, *DoubleChannels[1].Get(), TickResolution, ERichCurveValueMode::Default, true, RootToLocalTransform);
+	}
+	if (DoubleChannels[2].Get())
+	{
+		ExportChannelToFbxCurve(*FbxCurveTransZ, *DoubleChannels[2].Get(), TickResolution, ERichCurveValueMode::Default, false, RootToLocalTransform);
+	}
 
 	// Scale - don't generate scale keys for cameras
 	if (!bIsCameraActor)
 	{
-		ExportChannelToFbxCurve(*FbxCurveScaleX, *FloatChannels[6], TickResolution, ERichCurveValueMode::Default, false, RootToLocalTransform);
-		ExportChannelToFbxCurve(*FbxCurveScaleY, *FloatChannels[7], TickResolution, ERichCurveValueMode::Default, false, RootToLocalTransform);
-		ExportChannelToFbxCurve(*FbxCurveScaleZ, *FloatChannels[8], TickResolution, ERichCurveValueMode::Default, false, RootToLocalTransform);
+		if (DoubleChannels[6].Get())
+		{
+			ExportChannelToFbxCurve(*FbxCurveScaleX, *DoubleChannels[6].Get(), TickResolution, ERichCurveValueMode::Default, false, RootToLocalTransform);
+		}
+		if (DoubleChannels[7].Get())
+		{
+			ExportChannelToFbxCurve(*FbxCurveScaleY, *DoubleChannels[7].Get(), TickResolution, ERichCurveValueMode::Default, false, RootToLocalTransform);
+		}
+		if (DoubleChannels[8].Get())
+		{
+			ExportChannelToFbxCurve(*FbxCurveScaleZ, *DoubleChannels[8].Get(), TickResolution, ERichCurveValueMode::Default, false, RootToLocalTransform);
+		}
 	}
 
 	// Rotation - bake rotation for cameras and lights
 	if (!bBakeRotations)
 	{
-		ExportChannelToFbxCurve(*FbxCurveRotX, *FloatChannels[3], TickResolution, ERichCurveValueMode::Default, false, RootToLocalTransform);
-		ExportChannelToFbxCurve(*FbxCurveRotY, *FloatChannels[4], TickResolution, ERichCurveValueMode::Default, true, RootToLocalTransform);
-		ExportChannelToFbxCurve(*FbxCurveRotZ, *FloatChannels[5], TickResolution, ERichCurveValueMode::Default, true, RootToLocalTransform);
+		if (DoubleChannels[3].Get())
+		{
+			ExportChannelToFbxCurve(*FbxCurveRotX, *DoubleChannels[3].Get(), TickResolution, ERichCurveValueMode::Default, false, RootToLocalTransform);
+		}
+		if (DoubleChannels[4].Get())
+		{
+			ExportChannelToFbxCurve(*FbxCurveRotY, *DoubleChannels[4].Get(), TickResolution, ERichCurveValueMode::Default, true, RootToLocalTransform);
+		}
+		if (DoubleChannels[5].Get())
+		{
+			ExportChannelToFbxCurve(*FbxCurveRotZ, *DoubleChannels[5].Get(), TickResolution, ERichCurveValueMode::Default, true, RootToLocalTransform);
+		}
 	}
 	else
 	{
@@ -3091,7 +3058,7 @@ void FFbxExporter::ExportLevelSequence3DTransformTrack(FbxNode* FbxNode, IMovieS
 		FbxCurveRotZ->KeyModifyBegin();
 
 		int32 LocalStartFrame = FFrameRate::TransformTime(FFrameTime(UE::MovieScene::DiscreteInclusiveLower(InPlaybackRange)), TickResolution, DisplayRate).RoundToFrame().Value;
-		int32 StartFrame = FFrameRate::TransformTime(FFrameTime(UE::MovieScene::DiscreteInclusiveLower(InPlaybackRange) * RootToLocalTransform.InverseLinearOnly()), TickResolution, DisplayRate).RoundToFrame().Value;
+		int32 StartFrame = FFrameRate::TransformTime(FFrameTime(UE::MovieScene::DiscreteInclusiveLower(InPlaybackRange) * RootToLocalTransform.InverseNoLooping()), TickResolution, DisplayRate).RoundToFrame().Value;
 		int32 AnimationLength = FFrameRate::TransformTime(FFrameTime(FFrameNumber(UE::MovieScene::DiscreteSize(InPlaybackRange))), TickResolution, DisplayRate).RoundToFrame().Value;
 
 		for (int32 FrameCount = 0; FrameCount <= AnimationLength; ++FrameCount)
@@ -3100,25 +3067,52 @@ void FFbxExporter::ExportLevelSequence3DTransformTrack(FbxNode* FbxNode, IMovieS
 
 			FFrameTime LocalTime = FFrameRate::TransformTime(FFrameTime(LocalFrame), DisplayRate, TickResolution);
 
-			FVector Trans = FVector::ZeroVector;
-			FloatChannels[0]->Evaluate(LocalTime, Trans.X);
-			FloatChannels[1]->Evaluate(LocalTime, Trans.Y);
-			FloatChannels[2]->Evaluate(LocalTime, Trans.Z);
+			FVector3f Trans = FVector3f::ZeroVector;
+			if (DoubleChannels[0].Get())
+			{
+				DoubleChannels[0].Get()->Evaluate(LocalTime, Trans.X);
+			}
+			if (DoubleChannels[1].Get())
+			{
+				DoubleChannels[1].Get()->Evaluate(LocalTime, Trans.Y);
+			}
+			if (DoubleChannels[2].Get())
+			{
+				DoubleChannels[2].Get()->Evaluate(LocalTime, Trans.Z);
+			}
 
 			FRotator Rotator;
-			FloatChannels[3]->Evaluate(LocalTime, Rotator.Roll);
-			FloatChannels[4]->Evaluate(LocalTime, Rotator.Pitch);
-			FloatChannels[5]->Evaluate(LocalTime, Rotator.Yaw);
+			if (DoubleChannels[3].Get())
+			{
+				DoubleChannels[3].Get()->Evaluate(LocalTime, Rotator.Roll);
+			}
+			if (DoubleChannels[4].Get())
+			{
+				DoubleChannels[4].Get()->Evaluate(LocalTime, Rotator.Pitch);
+			}
+			if (DoubleChannels[5].Get())
+			{
+				DoubleChannels[5].Get()->Evaluate(LocalTime, Rotator.Yaw);
+			}
 
-			FVector Scale;
-			FloatChannels[6]->Evaluate(LocalTime, Scale.X);
-			FloatChannels[7]->Evaluate(LocalTime, Scale.Y);
-			FloatChannels[8]->Evaluate(LocalTime, Scale.Z);
+			FVector3f Scale;
+			if (DoubleChannels[6].Get())
+			{
+				DoubleChannels[6].Get()->Evaluate(LocalTime, Scale.X);
+			}
+			if (DoubleChannels[7].Get())
+			{
+				DoubleChannels[7].Get()->Evaluate(LocalTime, Scale.Y);
+			}
+			if (DoubleChannels[8].Get())
+			{
+				DoubleChannels[8].Get()->Evaluate(LocalTime, Scale.Z);
+			}
 
 			FTransform RelativeTransform;
-			RelativeTransform.SetTranslation(Trans);
+			RelativeTransform.SetTranslation((FVector)Trans);
 			RelativeTransform.SetRotation(Rotator.Quaternion());
-			RelativeTransform.SetScale3D(Scale);
+			RelativeTransform.SetScale3D((FVector)Scale);
 
 			RelativeTransform = RotationDirectionConvert * RelativeTransform;
 
@@ -3168,6 +3162,35 @@ void FFbxExporter::ExportLevelSequenceBaked3DTransformTrack(IAnimTrackAdapter& A
 	const bool bIsCameraActor = BoundActor ? BoundActor->IsA(ACameraActor::StaticClass()) : BoundComponent ? BoundComponent->IsA(UCameraComponent::StaticClass()) : false;
 	const bool bIsLightActor = BoundActor ? BoundActor->IsA(ALight::StaticClass()) : BoundComponent ? BoundComponent->IsA(ULightComponent::StaticClass()) : false;
 	const bool bBakeRotations = bIsCameraActor || bIsLightActor;
+
+	USceneComponent* InterrogatedComponent = nullptr;
+	if (BoundComponent)
+	{
+		InterrogatedComponent = BoundComponent;
+	}
+	else if (BoundActor)
+	{
+		InterrogatedComponent = BoundActor->GetRootComponent();
+	}
+
+	if (bIsCameraActor)
+	{
+		if (InterrogatedComponent && InterrogatedComponent->IsA<UCameraComponent>())
+		{
+			// all set
+		}
+		else if (BoundActor && BoundActor->IsA(ACameraActor::StaticClass()))
+		{
+			ACameraActor* CameraActor = Cast<ACameraActor>(BoundActor);
+			InterrogatedComponent = CameraActor->GetCameraComponent();
+		}
+	}
+
+	if (!InterrogatedComponent)
+	{
+		UE_LOG(LogFbx, Warning, TEXT("Export transform track for %s failed because could not find suitable scene component"), *BoundObject->GetName());
+		return;
+	}
 
 	if (!FbxNode)
 	{
@@ -3220,36 +3243,13 @@ void FFbxExporter::ExportLevelSequenceBaked3DTransformTrack(IAnimTrackAdapter& A
 		FbxCurveScaleZ->KeyModifyBegin();
 	}
 
-	FMovieSceneTimeTransform LocalToRootTransform = RootToLocalTransform.InverseLinearOnly();
-
-	USceneComponent* InterrogatedComponent = nullptr;
-	if (BoundComponent)
-	{
-		InterrogatedComponent = BoundComponent;
-	}
-	else if (BoundActor)
-	{
-		InterrogatedComponent = BoundActor->GetRootComponent();
-	}
-
-	if (bIsCameraActor)
-	{
-		if (InterrogatedComponent && InterrogatedComponent->IsA<UCameraComponent>())
-		{
-			// all set
-		}
-		else if (BoundActor && BoundActor->IsA(ACameraActor::StaticClass()))
-		{
-			ACameraActor* CameraActor = Cast<ACameraActor>(BoundActor);
-			InterrogatedComponent = CameraActor->GetCameraComponent();
-		}
-	}
+	FMovieSceneSequenceTransform LocalToRootTransform = RootToLocalTransform.InverseNoLooping();
 
 	TArray<FTransform> RelativeTransforms;
 	int32 LocalStartFrame = FFrameRate::TransformTime(FFrameTime(DiscreteInclusiveLower(InPlaybackRange)), TickResolution, DisplayRate).RoundToFrame().Value;
 	int32 AnimationLength = FFrameRate::TransformTime(FFrameTime(FFrameNumber(DiscreteSize(InPlaybackRange))), TickResolution, DisplayRate).RoundToFrame().Value + 1; // Add one so that we export a key for the end frame
 
-	const float SampleRate = 1.0f/DisplayRate.AsDecimal();
+	const double SampleRate = 1.0/DisplayRate.AsDecimal();
 
 	for (int32 FrameNumber = LocalStartFrame; FrameNumber < LocalStartFrame + AnimationLength; ++FrameNumber)
 	{
@@ -3266,7 +3266,7 @@ void FFbxExporter::ExportLevelSequenceBaked3DTransformTrack(IAnimTrackAdapter& A
 				ChildSkeletalMeshComponent->TickAnimation(SampleRate, false);
 
 				ChildSkeletalMeshComponent->RefreshBoneTransforms();
-				ChildSkeletalMeshComponent->RefreshSlaveComponents();
+				ChildSkeletalMeshComponent->RefreshFollowerComponents();
 				ChildSkeletalMeshComponent->UpdateComponentToWorld();
 				ChildSkeletalMeshComponent->FinalizeBoneTransform();
 				ChildSkeletalMeshComponent->MarkRenderTransformDirty();
@@ -3315,7 +3315,8 @@ void FFbxExporter::ExportLevelSequenceBaked3DTransformTrack(IAnimTrackAdapter& A
 		}
 		else
 		{
-			FbxTime.SetSecondDouble(DisplayRate.AsSeconds(CurrentFrame * LocalToRootTransform));
+			FFrameTime CurrentTime = FFrameRate::TransformTime(CurrentFrame, DisplayRate, TickResolution) * LocalToRootTransform;
+			FbxTime.SetSecondDouble(DisplayRate.AsSeconds(FFrameRate::TransformTime(CurrentTime, TickResolution, DisplayRate)));
 		}
 
 		FbxCurveTransX->KeySet(FbxCurveTransX->KeyAdd(FbxTime), FbxTime, KeyTrans[0]);
@@ -3351,7 +3352,7 @@ void FFbxExporter::ExportLevelSequenceBaked3DTransformTrack(IAnimTrackAdapter& A
 }
 
 
-void FFbxExporter::ExportLevelSequenceTrackChannels( FbxNode* FbxNode, UMovieSceneTrack& Track, const TRange<FFrameNumber>& InPlaybackRange, const FMovieSceneSequenceTransform& RootToLocalTransform)
+void FFbxExporter::ExportLevelSequenceTrackChannels( FbxNode* FbxNode, UMovieSceneTrack& Track, const TRange<FFrameNumber>& InPlaybackRange, const FMovieSceneSequenceTransform& RootToLocalTransform, bool bBakeBezierCurves)
 {
 	// TODO: Support more than one section?
 	UMovieSceneSection* Section = Track.GetAllSections().Num() > 0 ? Track.GetAllSections()[0] : nullptr;
@@ -3369,6 +3370,7 @@ void FFbxExporter::ExportLevelSequenceTrackChannels( FbxNode* FbxNode, UMovieSce
 	FbxCamera* FbxCamera = FbxNode->GetCamera();
 	FFrameRate TickResolution = Track.GetTypedOuter<UMovieScene>()->GetTickResolution();
 
+	const FName DoubleChannelTypeName = FMovieSceneDoubleChannel::StaticStruct()->GetFName();
 	const FName FloatChannelTypeName = FMovieSceneFloatChannel::StaticStruct()->GetFName();
 	const FName IntegerChannelTypeName = FMovieSceneIntegerChannel::StaticStruct()->GetFName();
 	const FName StringChannelTypeName = FMovieSceneStringChannel::StaticStruct()->GetFName();
@@ -3376,7 +3378,8 @@ void FFbxExporter::ExportLevelSequenceTrackChannels( FbxNode* FbxNode, UMovieSce
 	for (const FMovieSceneChannelEntry& Entry : Section->GetChannelProxy().GetAllEntries())
 	{
 		const FName ChannelTypeName = Entry.GetChannelTypeName();
-		if (ChannelTypeName != FloatChannelTypeName && 
+		if (ChannelTypeName != DoubleChannelTypeName && 
+			ChannelTypeName != FloatChannelTypeName && 
 			ChannelTypeName != IntegerChannelTypeName && 
 			ChannelTypeName != StringChannelTypeName)
 		{
@@ -3390,11 +3393,12 @@ void FFbxExporter::ExportLevelSequenceTrackChannels( FbxNode* FbxNode, UMovieSce
 		{
 			FMovieSceneChannelHandle Channel = ChannelProxy.MakeHandle(ChannelTypeName, Index);
 
+			FMovieSceneDoubleChannel* DoubleChannel = Entry.GetChannelTypeName() == DoubleChannelTypeName ? Channel.Cast<FMovieSceneDoubleChannel>().Get() : nullptr;
 			FMovieSceneFloatChannel* FloatChannel = Entry.GetChannelTypeName() == FloatChannelTypeName ? Channel.Cast<FMovieSceneFloatChannel>().Get() : nullptr;
 			FMovieSceneIntegerChannel* IntegerChannel = Entry.GetChannelTypeName() == IntegerChannelTypeName ? Channel.Cast<FMovieSceneIntegerChannel>().Get() : nullptr;
 			FMovieSceneStringChannel* StringChannel = Entry.GetChannelTypeName() == StringChannelTypeName ? Channel.Cast<FMovieSceneStringChannel>().Get() : nullptr;
 
-			if (!FloatChannel && !IntegerChannel && !StringChannel)
+			if (!DoubleChannel && !FloatChannel && !IntegerChannel && !StringChannel)
 			{
 				continue;
 			}
@@ -3447,7 +3451,11 @@ void FFbxExporter::ExportLevelSequenceTrackChannels( FbxNode* FbxNode, UMovieSce
 
 			if (Property == 0)
 			{
-				if (FloatChannel)
+				if (DoubleChannel)
+				{
+					CreateAnimatableUserProperty(FbxNode, DoubleChannel->GetDefault().Get(MAX_flt), TCHAR_TO_UTF8(*PropertyName), TCHAR_TO_UTF8(*PropertyName));
+				}
+				else if (FloatChannel)
 				{
 					CreateAnimatableUserProperty(FbxNode, FloatChannel->GetDefault().Get(MAX_flt), TCHAR_TO_UTF8(*PropertyName), TCHAR_TO_UTF8(*PropertyName));
 				}
@@ -3480,12 +3488,33 @@ void FFbxExporter::ExportLevelSequenceTrackChannels( FbxNode* FbxNode, UMovieSce
 				continue;
 			}
 
-			if (FloatChannel)
+			if (DoubleChannel)
+			{
+				CurveNode->SetChannelValue<double>(0U, DoubleChannel->GetDefault().Get(MAX_dbl));
+				CurveNode->ConnectToChannel(AnimCurve, 0U);
+
+				if (bBakeBezierCurves)
+				{
+					ExportBezierChannelToFbxCurveBaked(*AnimCurve, *DoubleChannel, TickResolution, &Track, IsFoV ? ERichCurveValueMode::Fov : ERichCurveValueMode::Default, false, RootToLocalTransform);
+				}
+ 				else
+ 				{
+					ExportChannelToFbxCurve(*AnimCurve, *DoubleChannel, TickResolution, IsFoV ? ERichCurveValueMode::Fov : ERichCurveValueMode::Default, false, RootToLocalTransform);
+				}
+			}
+			else if (FloatChannel)
 			{
 				CurveNode->SetChannelValue<double>(0U, FloatChannel->GetDefault().Get(MAX_flt));
 				CurveNode->ConnectToChannel(AnimCurve, 0U);
 
-				ExportChannelToFbxCurve(*AnimCurve, *FloatChannel, TickResolution, IsFoV ? ERichCurveValueMode::Fov : ERichCurveValueMode::Default, false, RootToLocalTransform);
+				if (bBakeBezierCurves)
+				{
+					ExportBezierChannelToFbxCurveBaked(*AnimCurve, *FloatChannel, TickResolution, &Track, IsFoV ? ERichCurveValueMode::Fov : ERichCurveValueMode::Default, false, RootToLocalTransform);
+				}
+				else
+				{
+					ExportChannelToFbxCurve(*AnimCurve, *FloatChannel, TickResolution, IsFoV ? ERichCurveValueMode::Fov : ERichCurveValueMode::Default, false, RootToLocalTransform);
+				}
 			}
 			else if (IntegerChannel)
 			{
@@ -3577,7 +3606,7 @@ void DetermineUVsToWeld(TArray<int32>& VertRemap, TArray<int32>& UniqueVerts, co
 	TMap<FVector2D,int32> HashedVerts;
 	for(int32 Vertex=0; Vertex < VertexCount; Vertex++)
 	{
-		const FVector2D& PositionA = VertexBuffer.GetVertexUV(Vertex,TexCoordSourceIndex);
+		const FVector2D& PositionA = FVector2D(VertexBuffer.GetVertexUV(Vertex,TexCoordSourceIndex));
 		const int32* FoundIndex = HashedVerts.Find(PositionA);
 		if ( !FoundIndex )
 		{
@@ -3607,7 +3636,7 @@ void DetermineVertsToWeld(TArray<int32>& VertRemap, TArray<int32>& UniqueVerts, 
 	TMap<FVector,int32> HashedVerts;
 	for(int32 a=0; a < VertexCount; a++)
 	{
-		const FVector& PositionA = RenderMesh.VertexBuffers.PositionVertexBuffer.VertexPosition(a);
+		const FVector& PositionA = (FVector)RenderMesh.VertexBuffers.PositionVertexBuffer.VertexPosition(a);
 		const int32* FoundIndex = HashedVerts.Find(PositionA);
 		if ( !FoundIndex )
 		{
@@ -3621,8 +3650,6 @@ void DetermineVertsToWeld(TArray<int32>& VertRemap, TArray<int32>& UniqueVerts, 
 		}
 	}
 }
-
-#if (WITH_PHYSX && PHYSICS_INTERFACE_PHYSX) || WITH_CHAOS
 
 class FCollisionFbxExporter
 {
@@ -3790,11 +3817,7 @@ public:
 private:
 	uint32 GetConvexVerticeNumber(const FKConvexElem &ConvexElem)
 	{
-#if WITH_PHYSX && PHYSICS_INTERFACE_PHYSX
-		return ConvexElem.GetConvexMesh() != nullptr ? ConvexElem.GetConvexMesh()->getNbVertices() : 0;
-#elif WITH_CHAOS
 		return ConvexElem.VertexData.Num();
-#endif
 	}
 
 	uint32 GetBoxVerticeNumber() { return 24; }
@@ -3805,20 +3828,6 @@ private:
 
 	void AddConvexVertex(const FKConvexElem &ConvexElem)
 	{
-#if WITH_PHYSX && PHYSICS_INTERFACE_PHYSX
-		const physx::PxConvexMesh* ConvexMesh = ConvexElem.GetConvexMesh();
-		if (ConvexMesh == nullptr)
-		{
-			return;
-		}
-		const PxVec3 *VertexArray = ConvexMesh->getVertices();
-		for (uint32 PosIndex = 0; PosIndex < ConvexMesh->getNbVertices(); ++PosIndex)
-		{
-			FVector Position = P2UVector(VertexArray[PosIndex]);
-			ControlPoints[CurrentVertexOffset + PosIndex] = FbxVector4(Position.X, -Position.Y, Position.Z);
-		}
-		CurrentVertexOffset += ConvexMesh->getNbVertices();
-#elif WITH_CHAOS
 		const TArray<FVector>& VertexArray = ConvexElem.VertexData;
 		for (int32 PosIndex = 0; PosIndex < VertexArray.Num(); ++PosIndex)
 		{
@@ -3826,45 +3835,19 @@ private:
 			ControlPoints[CurrentVertexOffset + PosIndex] = FbxVector4(Position.X, -Position.Y, Position.Z);
 		}
 		CurrentVertexOffset += VertexArray.Num();
-#endif
 	}
 
 	void AddConvexNormals(const FKConvexElem &ConvexElem)
 	{
-#if WITH_PHYSX && PHYSICS_INTERFACE_PHYSX
-		const physx::PxConvexMesh* ConvexMesh = ConvexElem.GetConvexMesh();
-		if (ConvexMesh == nullptr)
-		{
-			return;
-		}
-		const PxU8* PIndexBuffer = ConvexMesh->getIndexBuffer();
-		int32 PolygonNumber = ConvexMesh->getNbPolygons();
-		for (int32 PolyIndex = 0; PolyIndex < PolygonNumber; ++PolyIndex)
-		{
-			PxHullPolygon PolyData;
-			if (!ConvexMesh->getPolygonData(PolyIndex, PolyData))
-			{
-				continue;
-			}
-			const PxVec3 PPlaneNormal(PolyData.mPlane[0], PolyData.mPlane[1], PolyData.mPlane[2]);
-			FVector Normal = P2UVector(PPlaneNormal.getNormalized());
-			FbxVector4 FbxNormal = FbxVector4(Normal.X, -Normal.Y, Normal.Z);
-			// add vertices 
-			for (PxU32 j = 0; j < PolyData.mNbVerts; ++j)
-			{
-				LayerElementNormal->GetDirectArray().Add(FbxNormal);
-			}
-		}
-#elif WITH_CHAOS
 		const auto& ConvexMesh = ConvexElem.GetChaosConvexMesh();
 		if (!ConvexMesh.IsValid())
 		{
 			return;
 		}
-		const TArray<Chaos::TPlaneConcrete<Chaos::FReal, 3>>& Faces = ConvexMesh->GetFaces();
+		const TArray<Chaos::FConvex::FPlaneType>& Faces = ConvexMesh->GetFaces();
 		for (int32 PolyIndex = 0; PolyIndex < Faces.Num(); ++PolyIndex)
 		{
-			FVector Normal = Faces[PolyIndex].Normal().GetSafeNormal();
+			FVector Normal = (FVector)Faces[PolyIndex].Normal().GetSafeNormal();
 			FbxVector4 FbxNormal = FbxVector4(Normal.X, -Normal.Y, Normal.Z);
 			// add vertices 
 			for (int32 j = 0; j < 3; ++j)
@@ -3872,38 +3855,10 @@ private:
 				LayerElementNormal->GetDirectArray().Add(FbxNormal);
 			}
 		}
-#endif
 	}
 
 	void AddConvexPolygon(const FKConvexElem &ConvexElem)
 	{
-#if WITH_PHYSX && PHYSICS_INTERFACE_PHYSX
-		const physx::PxConvexMesh* ConvexMesh = ConvexElem.GetConvexMesh();
-		if (ConvexMesh == nullptr)
-		{
-			return;
-		}
-		const PxU8* PIndexBuffer = ConvexMesh->getIndexBuffer();
-		int32 PolygonNumber = ConvexMesh->getNbPolygons();
-		for (int32 PolyIndex = 0; PolyIndex < PolygonNumber; ++PolyIndex)
-		{
-			PxHullPolygon PolyData;
-			if (!ConvexMesh->getPolygonData(PolyIndex, PolyData))
-			{
-				continue;
-			}
-			Mesh->BeginPolygon(ActualMatIndex);
-			const PxU8* PolyIndices = PIndexBuffer + PolyData.mIndexBase;
-			// add vertices 
-			for (PxU32 j = 0; j < PolyData.mNbVerts; ++j)
-			{
-				const uint32 VertIndex = CurrentVertexOffset + PolyIndices[j];
-				Mesh->AddPolygon(VertIndex);
-			}
-			Mesh->EndPolygon();
-		}
-		CurrentVertexOffset += ConvexMesh->getNbVertices();
-#elif WITH_CHAOS
 		const auto& ConvexMesh = ConvexElem.GetChaosConvexMesh();
 		if (!ConvexMesh.IsValid())
 		{
@@ -3925,7 +3880,6 @@ private:
 		}
 
 		CurrentVertexOffset += ConvexElem.VertexData.Num();
-#endif
 	}
 
 	void AddBoxVertex(const FKBoxElem &BoxElem)
@@ -3997,8 +3951,8 @@ private:
 			ArcVert->Position.Z = FMath::Cos(angle);
 
 			ArcVert->SetTangents(
-				FVector(1, 0, 0),
-				FVector(0.0f, -ArcVert->Position.Z, ArcVert->Position.Y),
+				FVector3f(1, 0, 0),
+				FVector3f(0.0f, -ArcVert->Position.Z, ArcVert->Position.Y),
 				ArcVert->Position
 				);
 		}
@@ -4006,8 +3960,8 @@ private:
 		// Then rotate this arc SpherNumSides+1 times.
 		for (int32 s = 0; s < SpherNumSides + 1; s++)
 		{
-			FRotator ArcRotator(0, 360.f * (float)s / SpherNumSides, 0);
-			FRotationMatrix ArcRot(ArcRotator);
+			FRotator3f ArcRotator(0, 360.f * (float)s / SpherNumSides, 0);
+			FRotationMatrix44f ArcRot(ArcRotator);
 
 			for (int32 v = 0; v < SphereNumRings + 1; v++)
 			{
@@ -4016,9 +3970,9 @@ private:
 				Verts[VIx].Position = ArcRot.TransformPosition(ArcVerts[v].Position);
 
 				Verts[VIx].SetTangents(
-					ArcRot.TransformVector(ArcVerts[v].TangentX.ToFVector()),
+					ArcRot.TransformVector(ArcVerts[v].TangentX.ToFVector3f()),
 					ArcRot.TransformVector(ArcVerts[v].GetTangentY()),
-					ArcRot.TransformVector(ArcVerts[v].TangentZ.ToFVector())
+					ArcRot.TransformVector(ArcVerts[v].TangentZ.ToFVector3f())
 					);
 			}
 		}
@@ -4026,7 +3980,7 @@ private:
 		// Add all of the vertices we generated to the mesh builder.
 		for (int32 VertexIndex = 0; VertexIndex < SphereNumVerts; VertexIndex++)
 		{
-			FVector Position = SphereTransform.TransformPosition(Verts[VertexIndex].Position);
+			FVector Position = (FVector)SphereTransform.TransformPosition((FVector)Verts[VertexIndex].Position);
 			ControlPoints[CurrentVertexOffset + VertexIndex] = FbxVector4(Position.X, -Position.Y, Position.Z);
 		}
 		CurrentVertexOffset += SphereNumVerts;
@@ -4152,20 +4106,20 @@ private:
 			SpherePos.Y = Radius * FMath::Sin(Angle);
 			SpherePos.Z = Radius * FMath::Cos(Angle);
 
-			ArcVert->Position = SpherePos + FVector(0, 0, ZOffset);
+			ArcVert->Position = (FVector3f)SpherePos + FVector3f(0, 0, ZOffset);
 
 			ArcVert->SetTangents(
-				FVector(1, 0, 0),
-				FVector(0.0f, -SpherePos.Z, SpherePos.Y),
-				SpherePos
+				FVector3f(1, 0, 0),
+				FVector3f(0.0f, -SpherePos.Z, SpherePos.Y),
+				(FVector3f)SpherePos
 				);
 		}
 
 		// Then rotate this arc NumSides+1 times.
 		for (int32 SideIdx = 0; SideIdx < CapsuleNumSides + 1; SideIdx++)
 		{
-			const FRotator ArcRotator(0, 360.f * ((float)SideIdx / CapsuleNumSides), 0);
-			const FRotationMatrix ArcRot(ArcRotator);
+			const FRotator3f ArcRotator(0, 360.f * ((float)SideIdx / CapsuleNumSides), 0);
+			const FRotationMatrix44f ArcRot(ArcRotator);
 
 			for (int32 VertIdx = 0; VertIdx < CapsuleNumRings + 1; VertIdx++)
 			{
@@ -4174,9 +4128,9 @@ private:
 				Verts[VIx].Position = ArcRot.TransformPosition(ArcVerts[VertIdx].Position);
 
 				Verts[VIx].SetTangents(
-					ArcRot.TransformVector(ArcVerts[VertIdx].TangentX.ToFVector()),
+					ArcRot.TransformVector(ArcVerts[VertIdx].TangentX.ToFVector3f()),
 					ArcRot.TransformVector(ArcVerts[VertIdx].GetTangentY()),
-					ArcRot.TransformVector(ArcVerts[VertIdx].TangentZ.ToFVector())
+					ArcRot.TransformVector(ArcVerts[VertIdx].TangentZ.ToFVector3f())
 					);
 			}
 		}
@@ -4184,7 +4138,7 @@ private:
 		// Add all of the vertices we generated to the mesh builder.
 		for (int32 VertexIndex = 0; VertexIndex < CapsuleNumVerts; VertexIndex++)
 		{
-			FVector Position = CapsuleTransform.TransformPosition(Verts[VertexIndex].Position);
+			FVector Position = (FVector)CapsuleTransform.TransformPosition((FVector)Verts[VertexIndex].Position);
 			ControlPoints[CurrentVertexOffset + VertexIndex] = FbxVector4(Position.X, -Position.Y, Position.Z);
 		}
 		CurrentVertexOffset += CapsuleNumVerts;
@@ -4360,7 +4314,7 @@ FbxNode* FFbxExporter::ExportCollisionMesh(const UStaticMesh* StaticMesh, const 
 	FbxActor->SetNodeAttribute(CollisionMesh);
 	return FbxActor;
 }
-#endif //WITH_PHYSX
+
 
 void FFbxExporter::ExportObjectMetadata(const UObject* ObjectToExport, FbxNode* Node)
 {
@@ -4403,6 +4357,604 @@ void FFbxExporter::ExportObjectMetadata(const UObject* ObjectToExport, FbxNode* 
 	}
 }
 
+bool FFbxExporter::ExportStaticMeshFromMeshDescription(FbxMesh* Mesh
+	, const UStaticMesh* StaticMesh
+	, const FMeshDescription* MeshDescription
+	, FbxNode* FbxActor
+	, int32 LightmapUVChannel
+	, const TArray<FStaticMaterial>* MaterialOrderOverride
+	, const TArray<UMaterialInterface*>* OverrideMaterials)
+{
+
+	if (MeshDescription->IsEmpty() || MeshDescription->Vertices().Num() == 0)
+	{
+		return false;
+	}
+
+	FStaticMeshConstAttributes Attributes(*MeshDescription);
+	TVertexAttributesConstRef<FVector3f> VertexPositions = Attributes.GetVertexPositions();
+	TVertexInstanceAttributesConstRef<FVector3f> VertexInstanceNormals = Attributes.GetVertexInstanceNormals();
+	TVertexInstanceAttributesConstRef<FVector3f> VertexInstanceTangents = Attributes.GetVertexInstanceTangents();
+	TVertexInstanceAttributesConstRef<float> VertexInstanceBinormalSigns = Attributes.GetVertexInstanceBinormalSigns();
+	TVertexInstanceAttributesConstRef<FVector2f> VertexInstanceUVs = Attributes.GetVertexInstanceUVs();
+	TVertexInstanceAttributesConstRef<FVector4f> VertexInstanceColors = Attributes.GetVertexInstanceColors();
+	TPolygonGroupAttributesConstRef<FName> PolygonGroupMaterialSlotNames = Attributes.GetPolygonGroupMaterialSlotNames();
+	TEdgeAttributesConstRef<bool> EdgeHardnesses = Attributes.GetEdgeHardnesses();
+
+	const int32 VertexCount = MeshDescription->Vertices().Num();
+	const int32 VertexInstanceCount = MeshDescription->VertexInstances().Num();
+
+	Mesh->InitControlPoints(VertexCount);
+
+	FbxVector4* ControlPoints = Mesh->GetControlPoints();
+	for (int32 PosIndex = 0; PosIndex < VertexCount; ++PosIndex)
+	{
+		FVector Position = (FVector)VertexPositions[FVertexID(PosIndex)];
+		ControlPoints[PosIndex] = FbxVector4(Position.X, -Position.Y, Position.Z);
+	}
+
+	// Set the normals on Layer 0.
+	FbxLayer* Layer = Mesh->GetLayer(0);
+	if (Layer == nullptr)
+	{
+		Mesh->CreateLayer();
+		Layer = Mesh->GetLayer(0);
+	}
+
+	TArray<uint32> Indices;
+	Indices.Reserve(VertexInstanceCount);
+	for (const FPolygonGroupID& PolygonGroupID : MeshDescription->PolygonGroups().GetElementIDs())
+	{
+		for(const FTriangleID& TriangleID : MeshDescription->GetPolygonGroupTriangles(PolygonGroupID))
+		{
+			TArrayView<const FVertexInstanceID> TriangleVertexInstanceIDs = MeshDescription->GetTriangleVertexInstances(TriangleID);
+			for(const FVertexInstanceID& VertexInstanceID : TriangleVertexInstanceIDs)
+			{
+				Indices.Add(MeshDescription->GetVertexInstanceVertex(VertexInstanceID).GetValue());
+			}
+		}
+	}
+
+	// Create and fill in the per-face-vertex normal data source.
+	// We extract the Z-tangent and the X/Y-tangents which are also stored in the render mesh.
+	FbxLayerElementNormal* LayerElementNormal = FbxLayerElementNormal::Create(Mesh, "");
+	FbxLayerElementTangent* LayerElementTangent = FbxLayerElementTangent::Create(Mesh, "");
+	FbxLayerElementBinormal* LayerElementBinormal = FbxLayerElementBinormal::Create(Mesh, "");
+
+	// Set 3 NTBs per triangle instead of storing on positional control points
+	LayerElementNormal->SetMappingMode(FbxLayerElement::eByPolygonVertex);
+	LayerElementTangent->SetMappingMode(FbxLayerElement::eByPolygonVertex);
+	LayerElementBinormal->SetMappingMode(FbxLayerElement::eByPolygonVertex);
+
+	// Set the NTBs values for every polygon vertex.
+	LayerElementNormal->SetReferenceMode(FbxLayerElement::eDirect);
+	LayerElementTangent->SetReferenceMode(FbxLayerElement::eDirect);
+	LayerElementBinormal->SetReferenceMode(FbxLayerElement::eDirect);
+
+	//Extract the tangent space
+	{
+		for (const FPolygonGroupID& PolygonGroupID : MeshDescription->PolygonGroups().GetElementIDs())
+		{
+			for (const FTriangleID& TriangleID : MeshDescription->GetPolygonGroupTriangles(PolygonGroupID))
+			{
+				TArrayView<const FVertexInstanceID> TriangleVertexInstanceIDs = MeshDescription->GetTriangleVertexInstances(TriangleID);
+				for (const FVertexInstanceID& VertexInstanceID : TriangleVertexInstanceIDs)
+				{
+					//Query the tangent space
+					FVector3f Normal, Tangent, Binormal;
+					Tangent = VertexInstanceTangents[VertexInstanceID];
+					Normal = VertexInstanceNormals[VertexInstanceID];
+					float BinormalSign = VertexInstanceBinormalSigns[VertexInstanceID];
+					Binormal = (FVector3f::CrossProduct(Normal, Tangent).GetSafeNormal() * BinormalSign);
+
+					FbxVector4 FbxNormal = FbxVector4(Normal.X, -Normal.Y, Normal.Z);
+					FbxNormal.Normalize();
+					LayerElementNormal->GetDirectArray().Add(FbxNormal);
+
+					FbxVector4 FbxTangent = FbxVector4(Tangent.X, -Tangent.Y, Tangent.Z);
+					FbxTangent.Normalize();
+					LayerElementTangent->GetDirectArray().Add(FbxTangent);
+
+					FbxVector4 FbxBinormal = FbxVector4(-Binormal.X, Binormal.Y, -Binormal.Z);
+					FbxBinormal.Normalize();
+					LayerElementBinormal->GetDirectArray().Add(FbxBinormal);
+				}
+			}
+		}
+	}
+
+	Layer->SetNormals(LayerElementNormal);
+	Layer->SetTangents(LayerElementTangent);
+	Layer->SetBinormals(LayerElementBinormal);
+
+	// Create and fill in the per-face-vertex texture coordinate data source(s).
+	// Create UV for Diffuse channel.
+	int32 TexCoordSourceCount = (LightmapUVChannel == -1) ? MeshDescription->GetNumUVElementChannels() : LightmapUVChannel + 1;
+	int32 TexCoordSourceIndex = (LightmapUVChannel == -1) ? 0 : LightmapUVChannel;
+	for (; TexCoordSourceIndex < TexCoordSourceCount; ++TexCoordSourceIndex)
+	{
+		FbxLayer* UVsLayer = (LightmapUVChannel == -1) ? Mesh->GetLayer(TexCoordSourceIndex) : Mesh->GetLayer(0);
+		if (UVsLayer == NULL)
+		{
+			Mesh->CreateLayer();
+			UVsLayer = (LightmapUVChannel == -1) ? Mesh->GetLayer(TexCoordSourceIndex) : Mesh->GetLayer(0);
+		}
+		check(UVsLayer);
+
+		FString UVChannelNameBuilder = TEXT("UVmap_") + FString::FromInt(TexCoordSourceIndex);
+		const auto UVChannelNameUTF8 = TStringConversion<FTCHARToUTF8_Convert>(*UVChannelNameBuilder); // Do not inline it! The lifetime of this object needs to extend over the usage of the converted buffer.
+		const char* UVChannelName = UVChannelNameUTF8.Get(); // actually UTF8 as required by Fbx, but can't use UE's UTF8CHAR type because that's a uint8 aka *unsigned* char
+		if ((LightmapUVChannel >= 0) || ((LightmapUVChannel == -1) && (TexCoordSourceIndex == StaticMesh->GetLightMapCoordinateIndex())))
+		{
+			UVChannelName = "LightMapUV";
+		}
+		
+		FbxLayerElementUV* UVDiffuseLayer = FbxLayerElementUV::Create(Mesh, UVChannelName);
+
+		UVDiffuseLayer->SetMappingMode(FbxLayerElement::eByPolygonVertex);
+		UVDiffuseLayer->SetReferenceMode(FbxLayerElement::eDirect);
+
+		for (const FPolygonGroupID& PolygonGroupID : MeshDescription->PolygonGroups().GetElementIDs())
+		{
+			for (const FTriangleID& TriangleID : MeshDescription->GetPolygonGroupTriangles(PolygonGroupID))
+			{
+				TArrayView<const FVertexInstanceID> TriangleVertexInstanceIDs = MeshDescription->GetTriangleVertexInstances(TriangleID);
+				for (const FVertexInstanceID& VertexInstanceID : TriangleVertexInstanceIDs)
+				{
+					const FVector2f& VertexUV = VertexInstanceUVs.Get(VertexInstanceID, TexCoordSourceIndex);
+					UVDiffuseLayer->GetDirectArray().Add(FbxVector2(VertexUV.X, -VertexUV.Y + 1.0));
+				}
+			}
+		}
+		UVsLayer->SetUVs(UVDiffuseLayer, FbxLayerElement::eTextureDiffuse);
+	}
+
+	FbxLayerElementMaterial* MatLayer = FbxLayerElementMaterial::Create(Mesh, "");
+	MatLayer->SetMappingMode(FbxLayerElement::eByPolygon);
+	MatLayer->SetReferenceMode(FbxLayerElement::eIndexToDirect);
+	Layer->SetMaterials(MatLayer);
+
+	FbxLayerElementSmoothing* SmoothingInfoLayer = FbxLayerElementSmoothing::Create(Mesh, ""); 
+	SmoothingInfoLayer->SetMappingMode(FbxLayerElement::eByEdge);
+	SmoothingInfoLayer->SetReferenceMode(FbxLayerElement::eDirect);
+	Layer->SetSmoothing(SmoothingInfoLayer);
+
+	//Create the polygon with the correct material
+	{
+		int32 IndiceIndex = 0;
+		TSet<FEdgeID> ProcessEdges;
+		ProcessEdges.Reserve(Indices.Num());
+		for(const FPolygonGroupID& PolygonGroupID : MeshDescription->PolygonGroups().GetElementIDs())
+		{
+			UMaterialInterface* Material = nullptr;
+
+			if (OverrideMaterials && OverrideMaterials->IsValidIndex(PolygonGroupID.GetValue()))
+			{
+				Material = (*OverrideMaterials)[PolygonGroupID.GetValue()];
+			}
+			else
+			{
+				FName CurrentMaterialSlotName = PolygonGroupMaterialSlotNames[PolygonGroupID];
+				int32 MaterialIndex = StaticMesh->GetMaterialIndexFromImportedMaterialSlotName(CurrentMaterialSlotName);
+				if(MaterialIndex == INDEX_NONE)
+				{
+					MaterialIndex = PolygonGroupID.GetValue();
+				}
+				if(!StaticMesh->GetStaticMaterials().IsValidIndex(MaterialIndex))
+				{
+					MaterialIndex = 0;
+				}
+				Material = StaticMesh->GetMaterial(MaterialIndex);
+			}
+
+			FbxSurfaceMaterial* FbxMaterial = Material ? ExportMaterial(Material) : nullptr;
+			if (!FbxMaterial)
+			{
+				FbxMaterial = CreateDefaultMaterial();
+			}
+			int32 MatIndex = FbxActor->AddMaterial(FbxMaterial);
+
+			// Determine the actual material index
+			int32 ActualMatIndex = MatIndex;
+
+			if (MaterialOrderOverride)
+			{
+				ActualMatIndex = MaterialOrderOverride->Find(Material);
+			}
+
+			//Create the triangles
+			{
+				for (const FTriangleID& TriangleID : MeshDescription->GetPolygonGroupTriangles(PolygonGroupID))
+				{
+					FVertexID Corner[3];
+					int32 CornerIndex = 0;
+					Mesh->BeginPolygon(ActualMatIndex);
+					TArrayView<const FVertexInstanceID> TriangleVertexInstanceIDs = MeshDescription->GetTriangleVertexInstances(TriangleID);
+					for (const FVertexInstanceID& VertexInstanceID : TriangleVertexInstanceIDs)
+					{
+						Corner[CornerIndex] = MeshDescription->GetVertexInstanceVertex(VertexInstanceID);
+						Mesh->AddPolygon(Indices[IndiceIndex]);
+						IndiceIndex++;
+						CornerIndex++;
+					}
+					Mesh->EndPolygon();
+				}
+			}
+		}
+		//Build the edge so we can set the edge hardness
+		Mesh->BuildMeshEdgeArray();
+		for (const FPolygonGroupID& PolygonGroupID : MeshDescription->PolygonGroups().GetElementIDs())
+		{
+			for (const FTriangleID& TriangleID : MeshDescription->GetPolygonGroupTriangles(PolygonGroupID))
+			{
+				FVertexID Corner[3];
+				int32 CornerIndex = 0;
+				TArrayView<const FVertexInstanceID> TriangleVertexInstanceIDs = MeshDescription->GetTriangleVertexInstances(TriangleID);
+				for (const FVertexInstanceID& VertexInstanceID : TriangleVertexInstanceIDs)
+				{
+					Corner[CornerIndex] = MeshDescription->GetVertexInstanceVertex(VertexInstanceID);
+					CornerIndex++;
+				}
+
+				//Add the smoothing group for the triangle
+				for (CornerIndex = 0; CornerIndex < 3; ++CornerIndex)
+				{
+					FVertexID EdgeStart = Corner[CornerIndex];
+					FVertexID EdgeEnd = Corner[(CornerIndex + 1) % 3];
+					FEdgeID MatchEdgeId = MeshDescription->GetVertexPairEdge(EdgeStart, EdgeEnd);
+					if (ProcessEdges.Contains(MatchEdgeId))
+					{
+						continue;
+					}
+					ProcessEdges.Add(MatchEdgeId);
+
+					bool ReverseEdge = false;
+					int32 FbxEdgeIndex = Mesh->GetMeshEdgeIndex(EdgeStart.GetValue(), EdgeEnd.GetValue(), ReverseEdge);
+					if (FbxEdgeIndex == -1)
+					{
+						continue;
+					}
+					int32 EdgeHardnessValue = 1;
+					if (MatchEdgeId != INDEX_NONE)
+					{
+						EdgeHardnessValue = EdgeHardnesses[MatchEdgeId] ? 0 : 1;
+					}
+					int32 LayerAddIndex = SmoothingInfoLayer->GetDirectArray().Add(EdgeHardnessValue);
+					ensure(LayerAddIndex == FbxEdgeIndex);
+				}
+			}
+		}
+	}
+
+	// Create and fill in the vertex color data source.
+	uint32 ColorVertexCount = MeshDescription->VertexInstanceAttributes().HasAttribute(MeshAttribute::VertexInstance::Color) ? MeshDescription->VertexInstances().Num() : 0;
+
+	// Only export vertex colors if they exist
+	if (GetExportOptions()->VertexColor && ColorVertexCount > 0)
+	{
+		FbxLayerElementVertexColor* VertexColor = FbxLayerElementVertexColor::Create(Mesh, "");
+		VertexColor->SetMappingMode(FbxLayerElement::eByPolygonVertex);
+		VertexColor->SetReferenceMode(FbxLayerElement::eDirect);
+		FbxLayerElementArrayTemplate<FbxColor>& VertexColorArray = VertexColor->GetDirectArray();
+		Layer->SetVertexColors(VertexColor);
+
+		for (const FPolygonGroupID& PolygonGroupID : MeshDescription->PolygonGroups().GetElementIDs())
+		{
+			for (const FTriangleID& TriangleID : MeshDescription->GetPolygonGroupTriangles(PolygonGroupID))
+			{
+				TArrayView<const FVertexInstanceID> TriangleVertexInstanceIDs = MeshDescription->GetTriangleVertexInstances(TriangleID);
+				for (const FVertexInstanceID& VertexInstanceID : TriangleVertexInstanceIDs)
+				{
+					const FVector4f& SourceVertexColor = VertexInstanceColors[VertexInstanceID];
+					FLinearColor LinearColor(SourceVertexColor);
+					//Convert to sRGB
+					FColor Color = LinearColor.ToFColor(true);
+					VertexColorArray.Add(FbxColor(static_cast<float>(Color.R)/255.0f, static_cast<float>(Color.G) / 255.0f, static_cast<float>(Color.B) / 255.0f, static_cast<float>(Color.A) / 255.0f));
+				}
+			}
+		}
+	}
+	return true;
+}
+
+bool FFbxExporter::ExportStaticMeshFromRenderData(FbxMesh* Mesh
+	, const UStaticMesh* StaticMesh
+	, const FStaticMeshLODResources& RenderMesh
+	, FbxNode* FbxActor
+	, int32 LightmapUVChannel
+	, const FColorVertexBuffer* ColorBuffer
+	, const TArray<FStaticMaterial>* MaterialOrderOverride
+	, const TArray<UMaterialInterface*>* OverrideMaterials)
+{
+	// Verify the integrity of the static mesh.
+	if (RenderMesh.VertexBuffers.StaticMeshVertexBuffer.GetNumVertices() == 0)
+	{
+		return false;
+	}
+
+	if (RenderMesh.Sections.Num() == 0)
+	{
+		return false;
+	}
+
+	// Remaps an Unreal vert to final reduced vertex list
+	TArray<int32> VertRemap;
+	TArray<int32> UniqueVerts;
+
+	// Weld verts
+	DetermineVertsToWeld(VertRemap, UniqueVerts, RenderMesh);
+
+	// Create and fill in the vertex position data source.
+	// The position vertices are duplicated, for some reason, retrieve only the first half vertices.
+	const int32 VertexCount = VertRemap.Num();
+	const int32 PolygonsCount = RenderMesh.Sections.Num();
+
+	Mesh->InitControlPoints(UniqueVerts.Num());
+
+	FbxVector4* ControlPoints = Mesh->GetControlPoints();
+	for (int32 PosIndex = 0; PosIndex < UniqueVerts.Num(); ++PosIndex)
+	{
+		int32 UnrealPosIndex = UniqueVerts[PosIndex];
+		FVector Position = (FVector)RenderMesh.VertexBuffers.PositionVertexBuffer.VertexPosition(UnrealPosIndex);
+		ControlPoints[PosIndex] = FbxVector4(Position.X, -Position.Y, Position.Z);
+	}
+
+	// Set the normals on Layer 0.
+	FbxLayer* Layer = Mesh->GetLayer(0);
+	if (Layer == nullptr)
+	{
+		Mesh->CreateLayer();
+		Layer = Mesh->GetLayer(0);
+	}
+
+	// Build list of Indices re-used multiple times to lookup Normals, UVs, other per face vertex information
+	TArray<uint32> Indices;
+	for (int32 PolygonsIndex = 0; PolygonsIndex < PolygonsCount; ++PolygonsIndex)
+	{
+		FIndexArrayView RawIndices = RenderMesh.IndexBuffer.GetArrayView();
+		const FStaticMeshSection& Polygons = RenderMesh.Sections[PolygonsIndex];
+		const uint32 TriangleCount = Polygons.NumTriangles;
+		for (uint32 TriangleIndex = 0; TriangleIndex < TriangleCount; ++TriangleIndex)
+		{
+			for (uint32 PointIndex = 0; PointIndex < 3; PointIndex++)
+			{
+				uint32 UnrealVertIndex = RawIndices[Polygons.FirstIndex + ((TriangleIndex * 3) + PointIndex)];
+				Indices.Add(UnrealVertIndex);
+			}
+		}
+	}
+
+	// Create and fill in the per-face-vertex normal data source.
+	// We extract the Z-tangent and the X/Y-tangents which are also stored in the render mesh.
+	FbxLayerElementNormal* LayerElementNormal = FbxLayerElementNormal::Create(Mesh, "");
+	FbxLayerElementTangent* LayerElementTangent = FbxLayerElementTangent::Create(Mesh, "");
+	FbxLayerElementBinormal* LayerElementBinormal = FbxLayerElementBinormal::Create(Mesh, "");
+
+	// Set 3 NTBs per triangle instead of storing on positional control points
+	LayerElementNormal->SetMappingMode(FbxLayerElement::eByPolygonVertex);
+	LayerElementTangent->SetMappingMode(FbxLayerElement::eByPolygonVertex);
+	LayerElementBinormal->SetMappingMode(FbxLayerElement::eByPolygonVertex);
+
+	// Set the NTBs values for every polygon vertex.
+	LayerElementNormal->SetReferenceMode(FbxLayerElement::eDirect);
+	LayerElementTangent->SetReferenceMode(FbxLayerElement::eDirect);
+	LayerElementBinormal->SetReferenceMode(FbxLayerElement::eDirect);
+
+	TArray<FbxVector4> FbxNormals;
+	TArray<FbxVector4> FbxTangents;
+	TArray<FbxVector4> FbxBinormals;
+
+	FbxNormals.AddUninitialized(VertexCount);
+	FbxTangents.AddUninitialized(VertexCount);
+	FbxBinormals.AddUninitialized(VertexCount);
+
+	for (int32 NTBIndex = 0; NTBIndex < VertexCount; ++NTBIndex)
+	{
+		FVector3f Normal = (FVector3f)(RenderMesh.VertexBuffers.StaticMeshVertexBuffer.VertexTangentZ(NTBIndex));
+		FbxVector4& FbxNormal = FbxNormals[NTBIndex];
+		FbxNormal = FbxVector4(Normal.X, -Normal.Y, Normal.Z);
+		FbxNormal.Normalize();
+
+		FVector3f Tangent = (FVector3f)(RenderMesh.VertexBuffers.StaticMeshVertexBuffer.VertexTangentX(NTBIndex));
+		FbxVector4& FbxTangent = FbxTangents[NTBIndex];
+		FbxTangent = FbxVector4(Tangent.X, -Tangent.Y, Tangent.Z);
+		FbxTangent.Normalize();
+
+		FVector3f Binormal = -(FVector3f)(RenderMesh.VertexBuffers.StaticMeshVertexBuffer.VertexTangentY(NTBIndex));
+		FbxVector4& FbxBinormal = FbxBinormals[NTBIndex];
+		FbxBinormal = FbxVector4(Binormal.X, -Binormal.Y, Binormal.Z);
+		FbxBinormal.Normalize();
+	}
+
+	// Add one normal per each face index (3 per triangle)
+	for (int32 FbxVertIndex = 0; FbxVertIndex < Indices.Num(); FbxVertIndex++)
+	{
+		uint32 UnrealVertIndex = Indices[FbxVertIndex];
+		LayerElementNormal->GetDirectArray().Add(FbxNormals[UnrealVertIndex]);
+		LayerElementTangent->GetDirectArray().Add(FbxTangents[UnrealVertIndex]);
+		LayerElementBinormal->GetDirectArray().Add(FbxBinormals[UnrealVertIndex]);
+	}
+
+	Layer->SetNormals(LayerElementNormal);
+	Layer->SetTangents(LayerElementTangent);
+	Layer->SetBinormals(LayerElementBinormal);
+
+	FbxNormals.Empty();
+	FbxTangents.Empty();
+	FbxBinormals.Empty();
+
+	// Create and fill in the per-face-vertex texture coordinate data source(s).
+	// Create UV for Diffuse channel.
+	int32 TexCoordSourceCount = (LightmapUVChannel == -1) ? RenderMesh.VertexBuffers.StaticMeshVertexBuffer.GetNumTexCoords() : LightmapUVChannel + 1;
+	int32 TexCoordSourceIndex = (LightmapUVChannel == -1) ? 0 : LightmapUVChannel;
+	for (; TexCoordSourceIndex < TexCoordSourceCount; ++TexCoordSourceIndex)
+	{
+		FbxLayer* UVsLayer = (LightmapUVChannel == -1) ? Mesh->GetLayer(TexCoordSourceIndex) : Mesh->GetLayer(0);
+		if (UVsLayer == NULL)
+		{
+			Mesh->CreateLayer();
+			UVsLayer = (LightmapUVChannel == -1) ? Mesh->GetLayer(TexCoordSourceIndex) : Mesh->GetLayer(0);
+		}
+		check(UVsLayer);
+
+		FString UVChannelNameBuilder = TEXT("UVmap_") + FString::FromInt(TexCoordSourceIndex);
+		const auto UVChannelNameUTF8 = TStringConversion<FTCHARToUTF8_Convert>(*UVChannelNameBuilder); // Do not inline it! The lifetime of this object needs to extend over the usage of the converted buffer.
+		const char* UVChannelName = UVChannelNameUTF8.Get(); // actually UTF8 as required by Fbx, but can't use UE's UTF8CHAR type because that's a uint8 aka *unsigned* char
+		if ((LightmapUVChannel >= 0) || ((LightmapUVChannel == -1) && (TexCoordSourceIndex == StaticMesh->GetLightMapCoordinateIndex())))
+		{
+			UVChannelName = "LightMapUV";
+		}
+
+		FbxLayerElementUV* UVDiffuseLayer = FbxLayerElementUV::Create(Mesh, UVChannelName);
+
+		// Note: when eINDEX_TO_DIRECT is used, IndexArray must be 3xTriangle count, DirectArray can be smaller
+		UVDiffuseLayer->SetMappingMode(FbxLayerElement::eByPolygonVertex);
+		UVDiffuseLayer->SetReferenceMode(FbxLayerElement::eIndexToDirect);
+
+		TArray<int32> UvsRemap;
+		TArray<int32> UniqueUVs;
+		// Weld UVs
+		DetermineUVsToWeld(UvsRemap, UniqueUVs, RenderMesh.VertexBuffers.StaticMeshVertexBuffer, TexCoordSourceIndex);
+
+		// Create the texture coordinate data source.
+		for (int32 FbxVertIndex = 0; FbxVertIndex < UniqueUVs.Num(); FbxVertIndex++)
+		{
+			int32 UnrealVertIndex = UniqueUVs[FbxVertIndex];
+			const FVector2f& TexCoord = RenderMesh.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(UnrealVertIndex, TexCoordSourceIndex);
+			UVDiffuseLayer->GetDirectArray().Add(FbxVector2(TexCoord.X, -TexCoord.Y + 1.0));
+		}
+
+		// For each face index, point to a texture uv
+		UVDiffuseLayer->GetIndexArray().SetCount(Indices.Num());
+		for (int32 FbxVertIndex = 0; FbxVertIndex < Indices.Num(); FbxVertIndex++)
+		{
+			uint32 UnrealVertIndex = Indices[FbxVertIndex];
+			int32 NewVertIndex = UvsRemap[UnrealVertIndex];
+			UVDiffuseLayer->GetIndexArray().SetAt(FbxVertIndex, NewVertIndex);
+		}
+
+		UVsLayer->SetUVs(UVDiffuseLayer, FbxLayerElement::eTextureDiffuse);
+	}
+
+	FbxLayerElementMaterial* MatLayer = FbxLayerElementMaterial::Create(Mesh, "");
+	MatLayer->SetMappingMode(FbxLayerElement::eByPolygon);
+	MatLayer->SetReferenceMode(FbxLayerElement::eIndexToDirect);
+	Layer->SetMaterials(MatLayer);
+
+	// Keep track of the number of tri's we export
+	uint32 AccountedTriangles = 0;
+	for (int32 PolygonsIndex = 0; PolygonsIndex < PolygonsCount; ++PolygonsIndex)
+	{
+		const FStaticMeshSection& Polygons = RenderMesh.Sections[PolygonsIndex];
+		FIndexArrayView RawIndices = RenderMesh.IndexBuffer.GetArrayView();
+		UMaterialInterface* Material = nullptr;
+
+		if (OverrideMaterials && OverrideMaterials->IsValidIndex(Polygons.MaterialIndex))
+		{
+			Material = (*OverrideMaterials)[Polygons.MaterialIndex];
+		}
+		else
+		{
+			Material = StaticMesh->GetMaterial(Polygons.MaterialIndex);
+		}
+
+		FbxSurfaceMaterial* FbxMaterial = Material ? ExportMaterial(Material) : NULL;
+		if (!FbxMaterial)
+		{
+			FbxMaterial = CreateDefaultMaterial();
+		}
+		int32 MatIndex = FbxActor->AddMaterial(FbxMaterial);
+
+		// Determine the actual material index
+		int32 ActualMatIndex = MatIndex;
+
+		if (MaterialOrderOverride)
+		{
+			ActualMatIndex = MaterialOrderOverride->Find(Material);
+		}
+		// Static meshes contain one triangle list per element.
+		// [GLAFORTE] Could it occasionally contain triangle strips? How do I know?
+		uint32 TriangleCount = Polygons.NumTriangles;
+
+		// Copy over the index buffer into the FBX polygons set.
+		for (uint32 TriangleIndex = 0; TriangleIndex < TriangleCount; ++TriangleIndex)
+		{
+			Mesh->BeginPolygon(ActualMatIndex);
+			for (uint32 PointIndex = 0; PointIndex < 3; PointIndex++)
+			{
+				uint32 OriginalUnrealVertIndex = RawIndices[Polygons.FirstIndex + ((TriangleIndex * 3) + PointIndex)];
+				int32 RemappedVertIndex = VertRemap[OriginalUnrealVertIndex];
+				Mesh->AddPolygon(RemappedVertIndex);
+			}
+			Mesh->EndPolygon();
+		}
+
+		AccountedTriangles += TriangleCount;
+	}
+
+#ifdef TODO_FBX
+	// Throw a warning if this is a lightmap export and the exported poly count does not match the raw triangle data count
+	if (LightmapUVChannel != -1 && AccountedTriangles != RenderMesh.RawTriangles.GetElementCount())
+	{
+		FMessageDialog::Open(EAppMsgType::Ok, NSLOCTEXT("UnrealEd", "StaticMeshEditor_LightmapExportFewerTriangles", "Fewer polygons have been exported than the raw triangle count.  This Lightmapped UV mesh may contain fewer triangles than the destination mesh on import."));
+	}
+
+	// Create and fill in the smoothing data source.
+	FbxLayerElementSmoothing* SmoothingInfo = FbxLayerElementSmoothing::Create(Mesh, "");
+	SmoothingInfo->SetMappingMode(FbxLayerElement::eByPolygon);
+	SmoothingInfo->SetReferenceMode(FbxLayerElement::eDirect);
+	FbxLayerElementArrayTemplate<int>& SmoothingArray = SmoothingInfo->GetDirectArray();
+	Layer->SetSmoothing(SmoothingInfo);
+
+	// This is broken. We are exporting the render mesh but providing smoothing
+	// information from the source mesh. The render triangles are not in the
+	// same order. Therefore we should export the raw mesh or not export
+	// smoothing group information!
+	int32 TriangleCount = RenderMesh.RawTriangles.GetElementCount();
+	FStaticMeshTriangle* RawTriangleData = (FStaticMeshTriangle*)RenderMesh.RawTriangles.Lock(LOCK_READ_ONLY);
+	for (int32 TriangleIndex = 0; TriangleIndex < TriangleCount; TriangleIndex++)
+	{
+		FStaticMeshTriangle* Triangle = (RawTriangleData++);
+
+		SmoothingArray.Add(Triangle->SmoothingMask);
+	}
+	RenderMesh.RawTriangles.Unlock();
+#endif // #if TODO_FBX
+
+	// Create and fill in the vertex color data source.
+	const FColorVertexBuffer* ColorBufferToUse = ColorBuffer ? ColorBuffer : &RenderMesh.VertexBuffers.ColorVertexBuffer;
+	uint32 ColorVertexCount = ColorBufferToUse->GetNumVertices();
+
+	// Only export vertex colors if they exist
+	if (GetExportOptions()->VertexColor && ColorVertexCount > 0)
+	{
+		FbxLayerElementVertexColor* VertexColor = FbxLayerElementVertexColor::Create(Mesh, "");
+		VertexColor->SetMappingMode(FbxLayerElement::eByPolygonVertex);
+		VertexColor->SetReferenceMode(FbxLayerElement::eIndexToDirect);
+		FbxLayerElementArrayTemplate<FbxColor>& VertexColorArray = VertexColor->GetDirectArray();
+		Layer->SetVertexColors(VertexColor);
+
+		for (int32 FbxVertIndex = 0; FbxVertIndex < Indices.Num(); FbxVertIndex++)
+		{
+			FLinearColor VertColor(1.0f, 1.0f, 1.0f);
+			uint32 UnrealVertIndex = Indices[FbxVertIndex];
+			if (UnrealVertIndex < ColorVertexCount)
+			{
+				VertColor = ColorBufferToUse->VertexColor(UnrealVertIndex).ReinterpretAsLinear();
+			}
+
+			VertexColorArray.Add(FbxColor(VertColor.R, VertColor.G, VertColor.B, VertColor.A));
+		}
+
+		VertexColor->GetIndexArray().SetCount(Indices.Num());
+		for (int32 FbxVertIndex = 0; FbxVertIndex < Indices.Num(); FbxVertIndex++)
+		{
+			VertexColor->GetIndexArray().SetAt(FbxVertIndex, FbxVertIndex);
+		}
+	}
+	return true;
+}
+
 /**
  * Exports a static mesh
  * @param StaticMesh	The static mesh to export
@@ -4425,295 +4977,43 @@ FbxNode* FFbxExporter::ExportStaticMeshToFbx(const UStaticMesh* StaticMesh, int3
 	{
 		Mesh = FbxMesh::Create(Scene, TCHAR_TO_UTF8(MeshName));
 
-		const FStaticMeshLODResources& RenderMesh = StaticMesh->GetLODForExport(ExportLOD);
+		int32 LodIndex = ExportLOD == INDEX_NONE ? 0 : ExportLOD;
+		bool bExportSourceMesh = GetExportOptions()->bExportSourceMesh && !GetExportOptions()->LevelOfDetail && !GetExportOptions()->Collision;
+		const bool bUseNaniteData = LodIndex == 0 && StaticMesh->IsNaniteEnabled() && StaticMesh->IsHiResMeshDescriptionValid();
+		const bool bUseLodData = !bUseNaniteData && StaticMesh->IsMeshDescriptionValid(LodIndex);
+		bExportSourceMesh &= (bUseNaniteData || bUseLodData);
 
-		// Verify the integrity of the static mesh.
-		if (RenderMesh.VertexBuffers.StaticMeshVertexBuffer.GetNumVertices() == 0)
+		if (bExportSourceMesh)
 		{
-			return nullptr;
-		}
-
-		if (RenderMesh.Sections.Num() == 0)
-		{
-			return nullptr;
-		}
-
-		// Remaps an Unreal vert to final reduced vertex list
-		TArray<int32> VertRemap;
-		TArray<int32> UniqueVerts;
-
-		// Weld verts
-		DetermineVertsToWeld(VertRemap, UniqueVerts, RenderMesh);
-
-		// Create and fill in the vertex position data source.
-		// The position vertices are duplicated, for some reason, retrieve only the first half vertices.
-		const int32 VertexCount = VertRemap.Num();
-		const int32 PolygonsCount = RenderMesh.Sections.Num();
-
-		Mesh->InitControlPoints(UniqueVerts.Num());
-
-		FbxVector4* ControlPoints = Mesh->GetControlPoints();
-		for (int32 PosIndex = 0; PosIndex < UniqueVerts.Num(); ++PosIndex)
-		{
-			int32 UnrealPosIndex = UniqueVerts[PosIndex];
-			FVector Position = RenderMesh.VertexBuffers.PositionVertexBuffer.VertexPosition(UnrealPosIndex);
-			ControlPoints[PosIndex] = FbxVector4(Position.X, -Position.Y, Position.Z);
-		}
-
-		// Set the normals on Layer 0.
-		FbxLayer* Layer = Mesh->GetLayer(0);
-		if (Layer == nullptr)
-		{
-			Mesh->CreateLayer();
-			Layer = Mesh->GetLayer(0);
-		}
-
-		// Build list of Indices re-used multiple times to lookup Normals, UVs, other per face vertex information
-		TArray<uint32> Indices;
-		for (int32 PolygonsIndex = 0; PolygonsIndex < PolygonsCount; ++PolygonsIndex)
-		{
-			FIndexArrayView RawIndices = RenderMesh.IndexBuffer.GetArrayView();
-			const FStaticMeshSection& Polygons = RenderMesh.Sections[PolygonsIndex];
-			const uint32 TriangleCount = Polygons.NumTriangles;
-			for (uint32 TriangleIndex = 0; TriangleIndex < TriangleCount; ++TriangleIndex)
+			if (bUseNaniteData)
 			{
-				for (uint32 PointIndex = 0; PointIndex < 3; PointIndex++)
+				//Export the nanite mesh description
+				if (!ExportStaticMeshFromMeshDescription(Mesh, StaticMesh, StaticMesh->GetHiResMeshDescription(), FbxActor, LightmapUVChannel, MaterialOrderOverride, OverrideMaterials))
 				{
-					uint32 UnrealVertIndex = RawIndices[Polygons.FirstIndex + ((TriangleIndex * 3) + PointIndex)];
-					Indices.Add(UnrealVertIndex);
+					return nullptr;
 				}
-			}
-		}
-
-		// Create and fill in the per-face-vertex normal data source.
-		// We extract the Z-tangent and the X/Y-tangents which are also stored in the render mesh.
-		FbxLayerElementNormal* LayerElementNormal = FbxLayerElementNormal::Create(Mesh, "");
-		FbxLayerElementTangent* LayerElementTangent = FbxLayerElementTangent::Create(Mesh, "");
-		FbxLayerElementBinormal* LayerElementBinormal = FbxLayerElementBinormal::Create(Mesh, "");
-
-		// Set 3 NTBs per triangle instead of storing on positional control points
-		LayerElementNormal->SetMappingMode(FbxLayerElement::eByPolygonVertex);
-		LayerElementTangent->SetMappingMode(FbxLayerElement::eByPolygonVertex);
-		LayerElementBinormal->SetMappingMode(FbxLayerElement::eByPolygonVertex);
-
-		// Set the NTBs values for every polygon vertex.
-		LayerElementNormal->SetReferenceMode(FbxLayerElement::eDirect);
-		LayerElementTangent->SetReferenceMode(FbxLayerElement::eDirect);
-		LayerElementBinormal->SetReferenceMode(FbxLayerElement::eDirect);
-
-		TArray<FbxVector4> FbxNormals;
-		TArray<FbxVector4> FbxTangents;
-		TArray<FbxVector4> FbxBinormals;
-		
-		FbxNormals.AddUninitialized(VertexCount);
-		FbxTangents.AddUninitialized(VertexCount);
-		FbxBinormals.AddUninitialized(VertexCount);
-		
-		for (int32 NTBIndex = 0; NTBIndex < VertexCount; ++NTBIndex)
-		{
-			FVector Normal = (FVector)(RenderMesh.VertexBuffers.StaticMeshVertexBuffer.VertexTangentZ(NTBIndex));
-			FbxVector4& FbxNormal = FbxNormals[NTBIndex];
-			FbxNormal = FbxVector4(Normal.X, -Normal.Y, Normal.Z);
-			FbxNormal.Normalize();
-
-			FVector Tangent = (FVector)(RenderMesh.VertexBuffers.StaticMeshVertexBuffer.VertexTangentX(NTBIndex));
-			FbxVector4& FbxTangent = FbxTangents[NTBIndex];
-			FbxTangent = FbxVector4(Tangent.X, -Tangent.Y, Tangent.Z);
-			FbxTangent.Normalize();
-
-			FVector Binormal = -(FVector)(RenderMesh.VertexBuffers.StaticMeshVertexBuffer.VertexTangentY(NTBIndex));
-			FbxVector4& FbxBinormal = FbxBinormals[NTBIndex];
-			FbxBinormal = FbxVector4(Binormal.X, -Binormal.Y, Binormal.Z);
-			FbxBinormal.Normalize();
-		}
-
-		// Add one normal per each face index (3 per triangle)
-		for (int32 FbxVertIndex = 0; FbxVertIndex < Indices.Num(); FbxVertIndex++)
-		{
-			uint32 UnrealVertIndex = Indices[FbxVertIndex];
-			LayerElementNormal->GetDirectArray().Add(FbxNormals[UnrealVertIndex]);
-			LayerElementTangent->GetDirectArray().Add(FbxTangents[UnrealVertIndex]);
-			LayerElementBinormal->GetDirectArray().Add(FbxBinormals[UnrealVertIndex]);
-		}
-		
-		Layer->SetNormals(LayerElementNormal);
-		Layer->SetTangents(LayerElementTangent);
-		Layer->SetBinormals(LayerElementBinormal);
-		
-		FbxNormals.Empty();
-		FbxTangents.Empty();
-		FbxBinormals.Empty();
-
-		// Create and fill in the per-face-vertex texture coordinate data source(s).
-		// Create UV for Diffuse channel.
-		int32 TexCoordSourceCount = (LightmapUVChannel == -1) ? RenderMesh.VertexBuffers.StaticMeshVertexBuffer.GetNumTexCoords() : LightmapUVChannel + 1;
-		int32 TexCoordSourceIndex = (LightmapUVChannel == -1) ? 0 : LightmapUVChannel;
-		for (; TexCoordSourceIndex < TexCoordSourceCount; ++TexCoordSourceIndex)
-		{
-			FbxLayer* UVsLayer = (LightmapUVChannel == -1) ? Mesh->GetLayer(TexCoordSourceIndex) : Mesh->GetLayer(0);
-			if (UVsLayer == NULL)
-			{
-				Mesh->CreateLayer();
-				UVsLayer = (LightmapUVChannel == -1) ? Mesh->GetLayer(TexCoordSourceIndex) : Mesh->GetLayer(0);
-			}
-			check(UVsLayer);
-
-			FString UVChannelNameBuilder = TEXT("UVmap_") + FString::FromInt(TexCoordSourceIndex);
-			const char* UVChannelName = TCHAR_TO_UTF8(*UVChannelNameBuilder); // actually UTF8 as required by Fbx, but can't use UE4's UTF8CHAR type because that's a uint8 aka *unsigned* char
-			if ((LightmapUVChannel >= 0) || ((LightmapUVChannel == -1) && (TexCoordSourceIndex == StaticMesh->GetLightMapCoordinateIndex())))
-			{
-				UVChannelName = "LightMapUV";
-			}
-
-			FbxLayerElementUV* UVDiffuseLayer = FbxLayerElementUV::Create(Mesh, UVChannelName);
-
-			// Note: when eINDEX_TO_DIRECT is used, IndexArray must be 3xTriangle count, DirectArray can be smaller
-			UVDiffuseLayer->SetMappingMode(FbxLayerElement::eByPolygonVertex);
-			UVDiffuseLayer->SetReferenceMode(FbxLayerElement::eIndexToDirect);
-
-			TArray<int32> UvsRemap;
-			TArray<int32> UniqueUVs;
-			// Weld UVs
-			DetermineUVsToWeld(UvsRemap, UniqueUVs, RenderMesh.VertexBuffers.StaticMeshVertexBuffer, TexCoordSourceIndex);
-
-			// Create the texture coordinate data source.
-			for (int32 FbxVertIndex = 0; FbxVertIndex < UniqueUVs.Num(); FbxVertIndex++)
-			{
-				int32 UnrealVertIndex = UniqueUVs[FbxVertIndex];
-				const FVector2D& TexCoord = RenderMesh.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(UnrealVertIndex, TexCoordSourceIndex);
-				UVDiffuseLayer->GetDirectArray().Add(FbxVector2(TexCoord.X, -TexCoord.Y + 1.0));
-			}
-
-			// For each face index, point to a texture uv
-			UVDiffuseLayer->GetIndexArray().SetCount(Indices.Num());
-			for (int32 FbxVertIndex = 0; FbxVertIndex < Indices.Num(); FbxVertIndex++)
-			{
-				uint32 UnrealVertIndex = Indices[FbxVertIndex];
-				int32 NewVertIndex = UvsRemap[UnrealVertIndex];
-				UVDiffuseLayer->GetIndexArray().SetAt(FbxVertIndex, NewVertIndex);
-			}
-
-			UVsLayer->SetUVs(UVDiffuseLayer, FbxLayerElement::eTextureDiffuse);
-		}
-
-		FbxLayerElementMaterial* MatLayer = FbxLayerElementMaterial::Create(Mesh, "");
-		MatLayer->SetMappingMode(FbxLayerElement::eByPolygon);
-		MatLayer->SetReferenceMode(FbxLayerElement::eIndexToDirect);
-		Layer->SetMaterials(MatLayer);
-
-		// Keep track of the number of tri's we export
-		uint32 AccountedTriangles = 0;
-		for (int32 PolygonsIndex = 0; PolygonsIndex < PolygonsCount; ++PolygonsIndex)
-		{
-			const FStaticMeshSection& Polygons = RenderMesh.Sections[PolygonsIndex];
-			FIndexArrayView RawIndices = RenderMesh.IndexBuffer.GetArrayView();
-			UMaterialInterface* Material = nullptr;
-			
-			if (OverrideMaterials && OverrideMaterials->IsValidIndex(Polygons.MaterialIndex))
-			{
-				Material = (*OverrideMaterials)[Polygons.MaterialIndex];
 			}
 			else
 			{
-				Material = StaticMesh->GetMaterial(Polygons.MaterialIndex);
-			}
-
-			FbxSurfaceMaterial* FbxMaterial = Material ? ExportMaterial(Material) : NULL;
-			if (!FbxMaterial)
-			{
-				FbxMaterial = CreateDefaultMaterial();
-			}
-			int32 MatIndex = FbxActor->AddMaterial(FbxMaterial);
-
-			// Determine the actual material index
-			int32 ActualMatIndex = MatIndex;
-
-			if (MaterialOrderOverride)
-			{
-				ActualMatIndex = MaterialOrderOverride->Find(Material);
-			}
-			// Static meshes contain one triangle list per element.
-			// [GLAFORTE] Could it occasionally contain triangle strips? How do I know?
-			uint32 TriangleCount = Polygons.NumTriangles;
-
-			// Copy over the index buffer into the FBX polygons set.
-			for (uint32 TriangleIndex = 0; TriangleIndex < TriangleCount; ++TriangleIndex)
-			{
-				Mesh->BeginPolygon(ActualMatIndex);
-				for (uint32 PointIndex = 0; PointIndex < 3; PointIndex++)
+				ensure(bUseLodData);
+				//Export the lod mesh description
+				if(!ExportStaticMeshFromMeshDescription(Mesh, StaticMesh, StaticMesh->GetMeshDescription(LodIndex), FbxActor, LightmapUVChannel, MaterialOrderOverride, OverrideMaterials))
 				{
-					uint32 OriginalUnrealVertIndex = RawIndices[Polygons.FirstIndex + ((TriangleIndex * 3) + PointIndex)];
-					int32 RemappedVertIndex = VertRemap[OriginalUnrealVertIndex];
-					Mesh->AddPolygon(RemappedVertIndex);
+					return nullptr;
 				}
-				Mesh->EndPolygon();
 			}
-
-			AccountedTriangles += TriangleCount;
 		}
-
-#ifdef TODO_FBX
-		// Throw a warning if this is a lightmap export and the exported poly count does not match the raw triangle data count
-		if (LightmapUVChannel != -1 && AccountedTriangles != RenderMesh.RawTriangles.GetElementCount())
+		else
 		{
-			FMessageDialog::Open( EAppMsgType::Ok, NSLOCTEXT("UnrealEd", "StaticMeshEditor_LightmapExportFewerTriangles", "Fewer polygons have been exported than the raw triangle count.  This Lightmapped UV mesh may contain fewer triangles than the destination mesh on import.") );
-		}
-
-		// Create and fill in the smoothing data source.
-		FbxLayerElementSmoothing* SmoothingInfo = FbxLayerElementSmoothing::Create(Mesh, "");
-		SmoothingInfo->SetMappingMode(FbxLayerElement::eByPolygon);
-		SmoothingInfo->SetReferenceMode(FbxLayerElement::eDirect);
-		FbxLayerElementArrayTemplate<int>& SmoothingArray = SmoothingInfo->GetDirectArray();
-		Layer->SetSmoothing(SmoothingInfo);
-
-		// This is broken. We are exporting the render mesh but providing smoothing
-		// information from the source mesh. The render triangles are not in the
-		// same order. Therefore we should export the raw mesh or not export
-		// smoothing group information!
-		int32 TriangleCount = RenderMesh.RawTriangles.GetElementCount();
-		FStaticMeshTriangle* RawTriangleData = (FStaticMeshTriangle*)RenderMesh.RawTriangles.Lock(LOCK_READ_ONLY);
-		for (int32 TriangleIndex = 0; TriangleIndex < TriangleCount; TriangleIndex++)
-		{
-			FStaticMeshTriangle* Triangle = (RawTriangleData++);
-
-			SmoothingArray.Add(Triangle->SmoothingMask);
-		}
-		RenderMesh.RawTriangles.Unlock();
-#endif // #if TODO_FBX
-
-		// Create and fill in the vertex color data source.
-		const FColorVertexBuffer* ColorBufferToUse = ColorBuffer ? ColorBuffer : &RenderMesh.VertexBuffers.ColorVertexBuffer;
-		uint32 ColorVertexCount = ColorBufferToUse->GetNumVertices();
-
-		// Only export vertex colors if they exist
-		if (GetExportOptions()->VertexColor && ColorVertexCount > 0)
-		{
-			FbxLayerElementVertexColor* VertexColor = FbxLayerElementVertexColor::Create(Mesh, "");
-			VertexColor->SetMappingMode(FbxLayerElement::eByPolygonVertex);
-			VertexColor->SetReferenceMode(FbxLayerElement::eIndexToDirect);
-			FbxLayerElementArrayTemplate<FbxColor>& VertexColorArray = VertexColor->GetDirectArray();
-			Layer->SetVertexColors(VertexColor);
-
-			for (int32 FbxVertIndex = 0; FbxVertIndex < Indices.Num(); FbxVertIndex++)
+			//Export the render data
+			const FStaticMeshLODResources& RenderMesh = StaticMesh->GetLODForExport(LodIndex);
+			if (!ExportStaticMeshFromRenderData(Mesh, StaticMesh, RenderMesh, FbxActor, LightmapUVChannel, ColorBuffer, MaterialOrderOverride, OverrideMaterials))
 			{
-				FLinearColor VertColor(1.0f, 1.0f, 1.0f);
-				uint32 UnrealVertIndex = Indices[FbxVertIndex];
-				if (UnrealVertIndex < ColorVertexCount)
-				{
-					VertColor = ColorBufferToUse->VertexColor(UnrealVertIndex).ReinterpretAsLinear();
-				}
-
-				VertexColorArray.Add(FbxColor(VertColor.R, VertColor.G, VertColor.B, VertColor.A));
-			}
-
-			VertexColor->GetIndexArray().SetCount(Indices.Num());
-			for (int32 FbxVertIndex = 0; FbxVertIndex < Indices.Num(); FbxVertIndex++)
-			{
-				VertexColor->GetIndexArray().SetAt(FbxVertIndex, FbxVertIndex);
+				return nullptr;
 			}
 		}
-
-		if ((ExportLOD == 0 || ExportLOD == -1) && LightmapUVChannel == -1 && ColorBuffer == nullptr && MaterialOrderOverride == nullptr)
+		
+		if (LodIndex == 0 && LightmapUVChannel == -1 && ColorBuffer == nullptr && MaterialOrderOverride == nullptr)
 		{
 			FbxMeshes.Add(StaticMesh, Mesh);
 		}
@@ -4749,13 +5049,10 @@ FbxNode* FFbxExporter::ExportStaticMeshToFbx(const UStaticMesh* StaticMesh, int3
 		}
 	}
 
-#if (WITH_PHYSX && PHYSICS_INTERFACE_PHYSX) || WITH_CHAOS
 	if ((ExportLOD == 0 || ExportLOD == -1) && GetExportOptions()->Collision)
 	{
 		ExportCollisionMesh(StaticMesh, MeshName, FbxActor);
 	}
-#endif
-
 
 	//Set the original meshes in case it was already existing
 	FbxActor->SetNodeAttribute(Mesh);
@@ -4804,10 +5101,10 @@ void FFbxExporter::ExportSplineMeshToFbx(const USplineMeshComponent* SplineMeshC
 	for (int32 PosIndex = 0; PosIndex < UniqueVerts.Num(); ++PosIndex)
 	{
 		int32 UnrealPosIndex = UniqueVerts[PosIndex];
-		FVector Position = RenderMesh.VertexBuffers.PositionVertexBuffer.VertexPosition(UnrealPosIndex);
+		FVector Position = (FVector)RenderMesh.VertexBuffers.PositionVertexBuffer.VertexPosition(UnrealPosIndex);
 
-		const FTransform SliceTransform = SplineMeshComp->CalcSliceTransform(USplineMeshComponent::GetAxisValue(Position, SplineMeshComp->ForwardAxis));
-		USplineMeshComponent::GetAxisValue(Position, SplineMeshComp->ForwardAxis) = 0;
+		const FTransform SliceTransform = SplineMeshComp->CalcSliceTransform(USplineMeshComponent::GetAxisValueRef(Position, SplineMeshComp->ForwardAxis));
+		USplineMeshComponent::GetAxisValueRef(Position, SplineMeshComp->ForwardAxis) = 0;
 		Position = SliceTransform.TransformPosition(Position);
 
 		ControlPoints[PosIndex] = FbxVector4(Position.X, -Position.Y, Position.Z);
@@ -4852,8 +5149,8 @@ void FFbxExporter::ExportSplineMeshToFbx(const USplineMeshComponent* SplineMeshC
 	FbxNormals.AddUninitialized(VertexCount);
 	for (int32 VertIndex = 0; VertIndex < VertexCount; ++VertIndex)
 	{
-		FVector Position = RenderMesh.VertexBuffers.PositionVertexBuffer.VertexPosition(VertIndex);
-		const FTransform SliceTransform = SplineMeshComp->CalcSliceTransform(USplineMeshComponent::GetAxisValue(Position, SplineMeshComp->ForwardAxis));
+		FVector Position = (FVector)RenderMesh.VertexBuffers.PositionVertexBuffer.VertexPosition(VertIndex);
+		const FTransform SliceTransform = SplineMeshComp->CalcSliceTransform(USplineMeshComponent::GetAxisValueRef(Position, SplineMeshComp->ForwardAxis));
 		FVector Normal = FVector(RenderMesh.VertexBuffers.StaticMeshVertexBuffer.VertexTangentZ(VertIndex));
 		Normal = SliceTransform.TransformVector(Normal);
 		FbxVector4& FbxNormal = FbxNormals[VertIndex];
@@ -4881,7 +5178,8 @@ void FFbxExporter::ExportSplineMeshToFbx(const USplineMeshComponent* SplineMeshC
 			UVsLayer = Mesh->GetLayer(TexCoordSourceIndex);
 		}
 		FString UVChannelNameBuilder = TEXT("UVmap_") + FString::FromInt(TexCoordSourceIndex);
-		const char* UVChannelName = TCHAR_TO_UTF8(*UVChannelNameBuilder); // actually UTF8 as required by Fbx, but can't use UE4's UTF8CHAR type because that's a uint8 aka *unsigned* char
+		const auto UVChannelNameUTF8 = TStringConversion<FTCHARToUTF8_Convert>(*UVChannelNameBuilder); // Do not inline it! The lifetime of this object needs to extend over the usage of the converted buffer.
+		const char* UVChannelName = UVChannelNameUTF8.Get(); // actually UTF8 as required by Fbx, but can't use UE's UTF8CHAR type because that's a uint8 aka *unsigned* char
 		if (TexCoordSourceIndex == StaticMesh->GetLightMapCoordinateIndex())
 		{
 			UVChannelName = "LightMapUV";
@@ -4901,7 +5199,7 @@ void FFbxExporter::ExportSplineMeshToFbx(const USplineMeshComponent* SplineMeshC
 		// Create the texture coordinate data source.
 		for (int32 UnrealVertIndex : UniqueUVs)
 		{
-			const FVector2D& TexCoord = RenderMesh.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(UnrealVertIndex, TexCoordSourceIndex);
+			const FVector2f& TexCoord = RenderMesh.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(UnrealVertIndex, TexCoordSourceIndex);
 			UVDiffuseLayer->GetDirectArray().Add(FbxVector2(TexCoord.X, -TexCoord.Y + 1.0));
 		}
 
@@ -5025,7 +5323,7 @@ void FFbxExporter::ExportInstancedMeshToFbx(const UInstancedStaticMeshComponent*
 			const int32 LightmapUVChannel = -1;
 			const TArray<FStaticMaterial>* MaterialOrderOverride = nullptr;
 			const FColorVertexBuffer* ColorBuffer = nullptr;
-			ExportStaticMeshToFbx(StaticMesh, LODIndex, *FString::Printf(TEXT("%d"), InstanceIndex), InstNode, LightmapUVChannel, ColorBuffer, MaterialOrderOverride, &InstancedMeshComp->OverrideMaterials);
+			ExportStaticMeshToFbx(StaticMesh, LODIndex, *FString::Printf(TEXT("%d"), InstanceIndex), InstNode, LightmapUVChannel, ColorBuffer, MaterialOrderOverride, &ToRawPtrTArrayUnsafe(InstancedMeshComp->OverrideMaterials));
 			FbxActor->AddChild(InstNode);
 		}
 	}
@@ -5126,11 +5424,11 @@ void FFbxExporter::ExportLandscapeToFbx(ALandscapeProxy* Landscape, const TCHAR*
 		FLandscapeComponentDataInterface CDI(Component, Landscape->ExportLOD);
 		const int32 BaseVertIndex = SelectedComponentIndex++ * VertexCountPerComponent;
 
-		TArray<FWeightmapLayerAllocationInfo>& ComponentWeightmapLayerAllocations = Component->GetWeightmapLayerAllocations();
+		const TArray<FWeightmapLayerAllocationInfo>& ComponentWeightmapLayerAllocations = Component->GetWeightmapLayerAllocations();
 		TArray<uint8> CompVisData;
 		for (int32 AllocIdx = 0; AllocIdx < ComponentWeightmapLayerAllocations.Num(); AllocIdx++)
 		{
-			FWeightmapLayerAllocationInfo& AllocInfo = ComponentWeightmapLayerAllocations[AllocIdx];
+			const FWeightmapLayerAllocationInfo& AllocInfo = ComponentWeightmapLayerAllocations[AllocIdx];
 			if (AllocInfo.LayerInfo == ALandscapeProxy::VisibilityLayer)
 			{
 				CDI.GetWeightmapTextureData(AllocInfo.LayerInfo, CompVisData);

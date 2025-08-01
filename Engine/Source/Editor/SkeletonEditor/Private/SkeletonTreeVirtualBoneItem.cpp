@@ -1,15 +1,21 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SkeletonTreeVirtualBoneItem.h"
+#include "Widgets/Input/SSpinBox.h"
 #include "Widgets/Text/STextBlock.h"
 #include "SSkeletonTreeRow.h"
 #include "IPersonaPreviewScene.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Text/SInlineEditableTextBlock.h"
+#include "Widgets/Views/SListView.h"
 #include "Containers/UnrealString.h"
 #include "Animation/DebugSkelMeshComponent.h"
+#include "Animation/BlendProfile.h"
 #include "UObject/Package.h"
+#include "SocketDragDropOp.h"
+#include "Editor.h"
+#include "ScopedTransaction.h"
 
 #define LOCTEXT_NAMESPACE "FSkeletonTreeVirtualBoneItem"
 
@@ -22,10 +28,12 @@ FSkeletonTreeVirtualBoneItem::FSkeletonTreeVirtualBoneItem(const FName& InBoneNa
 	BoneProxy = NewObject<UBoneProxy>(GetTransientPackage(), *(BoneProxyPrefix + FString::Printf(TEXT("%p"), &InSkeletonTree.Get()) + InBoneName.ToString()));
 	BoneProxy->SetFlags(RF_Transactional);
 	BoneProxy->BoneName = InBoneName;
+	BoneProxy->bIsTransformEditable = false;
 	TSharedPtr<IPersonaPreviewScene> PreviewScene = InSkeletonTree->GetPreviewScene();
 	if (PreviewScene.IsValid())
 	{
 		BoneProxy->SkelMeshComponent = PreviewScene->GetPreviewMeshComponent();
+		BoneProxy->WeakPreviewScene = PreviewScene.ToWeakPtr();
 	}
 }
 
@@ -36,16 +44,16 @@ EVisibility FSkeletonTreeVirtualBoneItem::GetLODIconVisibility() const
 
 void FSkeletonTreeVirtualBoneItem::GenerateWidgetForNameColumn(TSharedPtr< SHorizontalBox > Box, const TAttribute<FText>& FilterText, FIsSelected InIsSelected)
 {
-	const FSlateBrush* LODIcon = FEditorStyle::GetBrush("SkeletonTree.LODBone");
+	const FSlateBrush* LODIcon = FAppStyle::Get().GetBrush("SkeletonTree.Bone");
 
 	Box->AddSlot()
 		.AutoWidth()
-		.Padding(FMargin(0.0f, 1.0f))
+		.Padding(FMargin(0.0f, 2.0f))
 		.VAlign(VAlign_Center)
 		.HAlign(HAlign_Center)
 		[
 			SNew(SImage)
-			.ColorAndOpacity(FSlateColor::UseForeground())
+			.ColorAndOpacity(this, &FSkeletonTreeVirtualBoneItem::GetBoneTextColor, InIsSelected)
 			.Image(LODIcon)
 			.Visibility(this, &FSkeletonTreeVirtualBoneItem::GetLODIconVisibility)
 		];
@@ -69,7 +77,7 @@ void FSkeletonTreeVirtualBoneItem::GenerateWidgetForNameColumn(TSharedPtr< SHori
 
 	Box->AddSlot()
 		.AutoWidth()
-		.Padding(2, 2, 1, 0)
+		.Padding(4, 0, 0, 0)
 		[
 			SNew(STextBlock)
 			.ColorAndOpacity(this, &FSkeletonTreeVirtualBoneItem::GetBoneTextColor, InIsSelected)
@@ -79,20 +87,134 @@ void FSkeletonTreeVirtualBoneItem::GenerateWidgetForNameColumn(TSharedPtr< SHori
 		];
 
 	Box->AddSlot()
+		.Padding(4, 0, 0, 0)
 		.AutoWidth()
 		[
 			InlineWidget.ToSharedRef()
 		];
 }
 
-TSharedRef< SWidget > FSkeletonTreeVirtualBoneItem::GenerateWidgetForDataColumn(const FName& DataColumnName)
+TSharedRef< SWidget > FSkeletonTreeVirtualBoneItem::GenerateWidgetForDataColumn(const FName& DataColumnName, FIsSelected InIsSelected)
 {
+	if (DataColumnName == ISkeletonTree::Columns::BlendProfile)
+	{
+		return SNew(SBox)
+			.Padding(0.0f)
+			.HAlign(HAlign_Fill)
+			.VAlign(VAlign_Center)
+			[
+				SNew(SSpinBox<float>)
+				.Visibility(this, &FSkeletonTreeVirtualBoneItem::GetBoneBlendProfileVisibility)
+			.Style(&FAppStyle::Get(), "SkeletonTree.HyperlinkSpinBox")
+			.Font(FAppStyle::Get().GetFontStyle("SmallFont"))
+			.ContentPadding(0.0f)
+			.Delta(0.01f)
+			.MinValue(0.0f)
+			.MinSliderValue(this, &FSkeletonTreeVirtualBoneItem::GetBlendProfileMinSliderValue)
+			.MaxSliderValue(this, &FSkeletonTreeVirtualBoneItem::GetBlendProfileMaxSliderValue)
+			.Value(this, &FSkeletonTreeVirtualBoneItem::GetBoneBlendProfileScale)
+			.OnValueCommitted(this, &FSkeletonTreeVirtualBoneItem::OnBlendSliderCommitted)
+			.OnValueChanged(this, &FSkeletonTreeVirtualBoneItem::OnBlendSliderChanged)
+			.OnBeginSliderMovement(this, &FSkeletonTreeVirtualBoneItem::OnBeginBlendSliderMovement)
+			.OnEndSliderMovement(this, &FSkeletonTreeVirtualBoneItem::OnEndBlendSliderMovement)
+			.ClearKeyboardFocusOnCommit(true)
+			];
+	}
+
 	return SNullWidget::NullWidget;
+}
+
+EVisibility FSkeletonTreeVirtualBoneItem::GetBoneBlendProfileVisibility() const
+{
+	return GetSkeletonTree()->GetSelectedBlendProfile() ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+float FSkeletonTreeVirtualBoneItem::GetBoneBlendProfileScale()	const
+{
+	if (UBlendProfile* CurrentProfile = GetSkeletonTree()->GetSelectedBlendProfile())
+	{
+		return CurrentProfile->GetBoneBlendScale(BoneName);
+	}
+
+	return 0.0;
+}
+
+TOptional<float> FSkeletonTreeVirtualBoneItem::GetBlendProfileMaxSliderValue() const
+{
+	if (UBlendProfile* CurrentProfile = GetSkeletonTree()->GetSelectedBlendProfile())
+	{
+		return (CurrentProfile->GetMode() == EBlendProfileMode::WeightFactor) ? 10.0f : 1.0f;
+	}
+
+	return 1.0f;
+}
+
+TOptional<float> FSkeletonTreeVirtualBoneItem::GetBlendProfileMinSliderValue() const
+{
+	if (UBlendProfile* CurrentProfile = GetSkeletonTree()->GetSelectedBlendProfile())
+	{
+		return (CurrentProfile->GetMode() == EBlendProfileMode::WeightFactor) ? 1.0f : 0.0f;
+	}
+
+	return 0.0f;
+}
+
+void FSkeletonTreeVirtualBoneItem::OnBeginBlendSliderMovement()
+{
+	if (bBlendSliderStartedTransaction == false)
+	{
+		bBlendSliderStartedTransaction = true;
+		GEditor->BeginTransaction(LOCTEXT("BlendSliderTransation", "Set Blend Profile Value"));
+
+		const FName& BlendProfileName = GetSkeletonTree()->GetSelectedBlendProfile()->GetFName();
+		UBlendProfile* BlendProfile = GetEditableSkeleton()->GetBlendProfile(BlendProfileName);
+
+		if (BlendProfile)
+		{
+			BlendProfile->SetFlags(RF_Transactional);
+			BlendProfile->Modify();
+		}
+	}
+}
+
+void FSkeletonTreeVirtualBoneItem::OnEndBlendSliderMovement(float NewValue)
+{
+	if (bBlendSliderStartedTransaction)
+	{
+		GEditor->EndTransaction();
+		bBlendSliderStartedTransaction = false;
+	}
+}
+
+void FSkeletonTreeVirtualBoneItem::OnBlendSliderCommitted(float NewValue, ETextCommit::Type CommitType)
+{
+	FName BlendProfileName = GetSkeletonTree()->GetSelectedBlendProfile()->GetFName();
+	UBlendProfile* BlendProfile = GetEditableSkeleton()->GetBlendProfile(BlendProfileName);
+
+	if (BlendProfile)
+	{
+		FScopedTransaction Transaction(LOCTEXT("SetBlendProfileValue", "Set Blend Profile Value"));
+		BlendProfile->SetFlags(RF_Transactional);
+		BlendProfile->Modify();
+
+		BlendProfile->SetBoneBlendScale(BoneName, NewValue, false, true);
+	}
+}
+
+void FSkeletonTreeVirtualBoneItem::OnBlendSliderChanged(float NewValue)
+{
+	const FName& BlendProfileName = GetSkeletonTree()->GetSelectedBlendProfile()->GetFName();
+	UBlendProfile* BlendProfile = GetEditableSkeleton()->GetBlendProfile(BlendProfileName);
+
+	if (BlendProfile)
+	{
+		BlendProfile->SetBoneBlendScale(BoneName, NewValue, false, true);
+	}
 }
 
 FSlateFontInfo FSkeletonTreeVirtualBoneItem::GetBoneTextFont() const
 {
-	return FEditorStyle::GetWidgetStyle<FTextBlockStyle>("SkeletonTree.BoldFont").Font;
+	return FAppStyle::GetWidgetStyle<FTextBlockStyle>("SkeletonTree.NormalFont").Font;
 }
 
 FSlateColor FSkeletonTreeVirtualBoneItem::GetBoneTextColor(FIsSelected InIsSelected) const
@@ -121,6 +243,62 @@ FText FSkeletonTreeVirtualBoneItem::GetBoneToolTip()
 void FSkeletonTreeVirtualBoneItem::OnItemDoubleClicked()
 {
 	OnRenameRequested.ExecuteIfBound();
+}
+
+void FSkeletonTreeVirtualBoneItem::HandleDragEnter(const FDragDropEvent& DragDropEvent)
+{
+	TSharedPtr<FSocketDragDropOp> DragConnectionOp = DragDropEvent.GetOperationAs<FSocketDragDropOp>();
+
+	// Is someone dragging a socket onto a bone?
+	if (DragConnectionOp.IsValid())
+	{
+		if (BoneName != DragConnectionOp->GetSocketInfo().Socket->BoneName)
+		{
+			// The socket can be dropped here if we're a bone and NOT the socket's existing parent
+			DragConnectionOp->SetIcon(FAppStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Ok")));
+		}
+		else if (DragConnectionOp->IsAltDrag())
+		{
+			// For Alt-Drag, dropping onto the existing parent is fine, as we're going to copy, not move the socket
+			DragConnectionOp->SetIcon(FAppStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Ok")));
+		}
+	}
+}
+
+void FSkeletonTreeVirtualBoneItem::HandleDragLeave(const FDragDropEvent& DragDropEvent)
+{
+	TSharedPtr<FSocketDragDropOp> DragConnectionOp = DragDropEvent.GetOperationAs<FSocketDragDropOp>();
+	if (DragConnectionOp.IsValid())
+	{
+		// Reset the drag/drop icon when leaving this row
+		DragConnectionOp->SetIcon(FAppStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Error")));
+	}
+}
+
+FReply FSkeletonTreeVirtualBoneItem::HandleDrop(const FDragDropEvent& DragDropEvent)
+{
+	TSharedPtr<FSocketDragDropOp> DragConnectionOp = DragDropEvent.GetOperationAs<FSocketDragDropOp>();
+	if (DragConnectionOp.IsValid())
+	{
+		FSelectedSocketInfo SocketInfo = DragConnectionOp->GetSocketInfo();
+
+		if (DragConnectionOp->IsAltDrag())
+		{
+			// In an alt-drag, the socket can be dropped on any bone
+			// (including its existing parent) to create a uniquely named copy
+			GetSkeletonTree()->DuplicateAndSelectSocket(SocketInfo, BoneName);
+		}
+		else if (BoneName != SocketInfo.Socket->BoneName)
+		{
+			// The socket can be dropped here if we're a bone and NOT the socket's existing parent
+			USkeletalMesh* SkeletalMesh = GetSkeletonTree()->GetPreviewScene().IsValid() ? GetSkeletonTree()->GetPreviewScene()->GetPreviewMeshComponent()->GetSkeletalMeshAsset() : nullptr;
+			GetEditableSkeleton()->SetSocketParent(SocketInfo.Socket->SocketName, BoneName, SkeletalMesh);
+
+			return FReply::Handled();
+		}
+	}
+
+	return FReply::Unhandled();
 }
 
 void FSkeletonTreeVirtualBoneItem::RequestRename()

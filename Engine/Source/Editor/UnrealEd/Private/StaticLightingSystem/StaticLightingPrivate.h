@@ -269,6 +269,8 @@ public:
 	 */
 	FStaticLightingSystem(const FLightingBuildOptions& InOptions, UWorld* InWorld, ULevel* InLightingScenario);
 	~FStaticLightingSystem();
+
+	bool CheckLightmassExecutableVersion();
 	
 	/** Kicks off the lightmass processing, and, if successful, starts the asynchronous task */
 	bool BeginLightmassProcess();
@@ -454,8 +456,8 @@ private:
 /** Stores debug information about a static lighting ray. */
 struct FDebugStaticLightingRay
 {
-	FVector4 Start;
-	FVector4 End;
+	FVector4f Start;
+	FVector4f End;
 	bool bHit;
 	bool bPositive;
 };
@@ -465,12 +467,12 @@ struct FDebugStaticLightingVertex
 	FDebugStaticLightingVertex() {}
 
 	FDebugStaticLightingVertex(const FStaticLightingVertex& InVertex) :
-		VertexNormal(InVertex.WorldTangentZ),
-		VertexPosition(InVertex.WorldPosition)
+		VertexNormal((FVector3f)InVertex.WorldTangentZ), // LWC_TODO: precision loss
+		VertexPosition((FVector3f)InVertex.WorldPosition) // LWC_TODO: precision loss
 	{}
 
-	FVector4 VertexNormal;
-	FVector4 VertexPosition;
+	FVector4f VertexNormal;
+	FVector4f VertexPosition;
 };
 
 struct FDebugLightingCacheRecord
@@ -485,20 +487,20 @@ struct FDebugLightingCacheRecord
 struct FDebugPhoton
 {
 	int32 Id;
-	FVector4 Position;
-	FVector4 Direction;
-	FVector4 Normal;
+	FVector4f Position;
+	FVector4f Direction;
+	FVector4f Normal;
 };
 
 struct FDebugOctreeNode
 {
-	FVector4 Center;
-	FVector4 Extent;
+	FVector4f Center;
+	FVector4f Extent;
 };
 
 struct FDebugVolumeLightingSample
 {
-	FVector4 Position;
+	FVector4f Position;
 	FLinearColor AverageIncidentRadiance;
 };
 
@@ -527,7 +529,7 @@ struct FDebugLightingOutput
 	TArray<FDebugStaticLightingRay> PrecomputedVisibilityRays;
 	bool bDirectPhotonValid;
 	FDebugPhoton GatheredDirectPhoton;
-	FVector4 TexelCorners[NumTexelCorners];
+	FVector4f TexelCorners[NumTexelCorners];
 	bool bCornerValid[NumTexelCorners];
 	float SampleRadius;
 

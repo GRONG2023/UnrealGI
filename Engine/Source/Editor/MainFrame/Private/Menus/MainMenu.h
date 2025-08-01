@@ -8,7 +8,6 @@
 #include "Modules/ModuleInterface.h"
 #include "Modules/ModuleManager.h"
 #include "Framework/Docking/TabManager.h"
-#include "ILocalizationDashboardModule.h"
 
 class FMenuBuilder;
 struct FToolMenuContext;
@@ -30,21 +29,11 @@ public:
 	static TSharedRef<SWidget> MakeMainMenu( const TSharedPtr<FTabManager>& TabManager, const FName MenuName, FToolMenuContext& ToolMenuContext );
 
 	/**
-	 * Static: Creates a widget for the main tab's menu bar.  This is just like the main menu bar, but also includes.
-	 * some "project level" menu items that we don't want propagated to most normal menus.
-	 *
-	 * @param TabManager Create the workspace menu based on this tab manager.
-	 * @param MenuName Identifier associated with the menu.
-	 * @return ToolMenuContext Context containing state.
-	 */
-	static TSharedRef<SWidget> MakeMainTabMenu( const TSharedPtr<FTabManager>& TabManager, const FName MenuName, FToolMenuContext& ToolMenuContext );
-
-	/**
 	 * Static: Registers main menu with menu system.
 	 */
 	static void RegisterMainMenu();
 
-protected:
+private:
 
 	/**
 	 * Called to fill the file menu's content.
@@ -63,6 +52,11 @@ protected:
 	static void RegisterWindowMenu();
 
 	/**
+	 * Called to fill the app menu's content.
+	 */
+	static void RegisterToolsMenu();
+
+	/**
 	 * Called to fill the help menu's content.
 	 */
 	static void RegisterHelpMenu();
@@ -75,9 +69,13 @@ protected:
 	/**
 	 * Called to fill the file menu's recent and exit content.
 	 */
-	static void RegisterRecentFileAndExitMenuItems();
+	static void RegisterExitMenuItems();
 
-private:
+	/**
+	 * Called to fill the main menu for nomad tabs (these tabs generally have a less menu options)
+	 */
+	static void RegisterNomadMainMenu();
+
 	/** 
 	* Opens the experimental project launcher tab.
 	* Remove this when it is is no longer experimental.
@@ -85,15 +83,6 @@ private:
 	static void OpenProjectLauncher()
 	{
 		FGlobalTabmanager::Get()->TryInvokeTab(FName(TEXT("ProjectLauncher")));
-	}
-
-	/**
-	* Opens the experimental localization dashboard.
-	* Remove this when it is no longer experimental.
-	*/
-	static void OpenLocalizationDashboard()
-	{
-		FModuleManager::LoadModuleChecked<ILocalizationDashboardModule>("LocalizationDashboard").Show();
 	}
 
 	/**

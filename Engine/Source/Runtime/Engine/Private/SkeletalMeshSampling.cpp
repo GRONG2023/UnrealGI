@@ -2,10 +2,11 @@
 
 #include "Engine/SkeletalMeshSampling.h"
 #include "Engine/SkeletalMesh.h"
-#include "RawIndexBuffer.h"
-#include "Rendering/SkeletalMeshLODRenderData.h"
+#include "Engine/SkinnedAssetCommon.h"
 #include "Rendering/SkeletalMeshRenderData.h"
 #include "UObject/NiagaraObjectVersion.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SkeletalMeshSampling)
 
 //////////////////////////////////////////////////////////////////////////
 //FSkeletalMeshAreaWeightedTriangleSampler
@@ -354,3 +355,4 @@ bool FSkeletalMeshSamplingInfo::IsSamplingEnabled(const USkeletalMesh* OwnerMesh
 
 	return false;
 }
+

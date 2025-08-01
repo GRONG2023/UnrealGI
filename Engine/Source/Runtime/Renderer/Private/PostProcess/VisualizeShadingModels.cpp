@@ -2,9 +2,10 @@
 
 #include "PostProcess/VisualizeShadingModels.h"
 #include "CanvasTypes.h"
-#include "RenderTargetTemp.h"
+#include "SceneRendering.h"
 #include "SceneTextureParameters.h"
 #include "UnrealEngine.h"
+#include "DataDrivenShaderPlatformInfo.h"
 
 class FVisualizeShadingModelPS : public FGlobalShader
 {
@@ -24,7 +25,7 @@ public:
 		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSceneTextureUniformParameters, SceneTextures)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneColorTexture)
 		SHADER_PARAMETER_SAMPLER(SamplerState, SceneColorSampler)
-		SHADER_PARAMETER_ARRAY(uint32, ShadingModelMaskInView, [ShadingModelCount])
+		SHADER_PARAMETER_SCALAR_ARRAY(uint32, ShadingModelMaskInView, [ShadingModelCount])
 		RENDER_TARGET_BINDING_SLOTS()
 	END_SHADER_PARAMETER_STRUCT()
 };
@@ -61,7 +62,7 @@ FScreenPassTexture AddVisualizeShadingModelPass(FRDGBuilder& GraphBuilder, const
 	{
 		const uint32 BitMask = (1 << BitIndex);
 
-		PassParameters->ShadingModelMaskInView[BitIndex] = (View.ShadingModelMaskInView & BitMask) != 0;
+		GET_SCALAR_ARRAY_ELEMENT(PassParameters->ShadingModelMaskInView, BitIndex) = (View.ShadingModelMaskInView & BitMask) != 0;
 	}
 
 	TShaderMapRef<FVisualizeShadingModelPS> PixelShader(View.ShaderMap);

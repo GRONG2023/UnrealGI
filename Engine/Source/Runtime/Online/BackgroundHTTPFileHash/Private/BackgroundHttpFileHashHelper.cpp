@@ -3,7 +3,7 @@
 #include "BackgroundHttpFileHashPrivate.h"
 
 #include "HAL/FileManager.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "HAL/PlatformFile.h"
 
 #include "Hash/CityHash.h"
@@ -269,7 +269,7 @@ FString FBackgroundHttpFileHashHelper::FindValidFilenameHashForURL(const FString
 
 FString FBackgroundHttpFileHashHelper::GenerateHashedFilenameForURL(const FString& URL, uint32 CollisionCount) const
 {
-	const TArray<TCHAR>& UnderlyingCharData = URL.GetCharArray();
+	const TArray<TCHAR, FString::AllocatorType>& UnderlyingCharData = URL.GetCharArray();
 	const uint32 HashedURL = CityHash32(reinterpret_cast<const char*>(UnderlyingCharData.GetData()), (UnderlyingCharData.Num() * sizeof(TCHAR)));
 	
 	return FPaths::MakeValidFileName(FString::Printf(TEXT("%d%d"), HashedURL, CollisionCount));

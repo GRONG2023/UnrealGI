@@ -48,12 +48,6 @@ class UMaterialExpressionMakeMaterialAttributes : public UMaterialExpression
 	FExpressionInput WorldPositionOffset;
 
 	UPROPERTY()
-	FExpressionInput WorldDisplacement;
-
-	UPROPERTY()
-	FExpressionInput TessellationMultiplier;
-
-	UPROPERTY()
 	FExpressionInput SubsurfaceColor;
 
 	UPROPERTY()
@@ -77,6 +71,12 @@ class UMaterialExpressionMakeMaterialAttributes : public UMaterialExpression
 	UPROPERTY()
 	FExpressionInput ShadingModel;
 
+	UPROPERTY()
+	FExpressionInput Displacement;
+
+	/** Get the input for a material property. Returns nullptr if the property isn't supported. */
+	FExpressionInput* GetExpressionInput(EMaterialProperty InProperty);
+
 	//~ Begin UObject Interface
 	virtual void Serialize(FStructuredArchive::FRecord Record) override;
 	//~ End UObject Interface
@@ -87,6 +87,9 @@ class UMaterialExpressionMakeMaterialAttributes : public UMaterialExpression
 	virtual void GetCaption(TArray<FString>& OutCaptions) const override;
 	virtual bool IsResultMaterialAttributes(int32 OutputIndex) override {return true;}
 	virtual uint32 GetInputType(int32 InputIndex) override;
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
+
+	uint64 GetConnectedInputs() const;
 #endif // WITH_EDITOR
 	//~ End UMaterialExpression Interface
 };

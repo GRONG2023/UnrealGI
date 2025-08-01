@@ -1,10 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AnimGraphNode_SkeletalControlBase.h"
-#include "UnrealWidget.h"
+#include "UnrealWidgetFwd.h"
 #include "AnimationGraphSchema.h"
 #include "Animation/AnimationSettings.h"
+#include "Animation/AnimInstance.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Engine/SkeletalMesh.h"
 #include "Kismet2/CompilerResultsLog.h"
 #include "DetailLayoutBuilder.h"
 #include "ScopedTransaction.h"
@@ -24,7 +26,7 @@ UAnimGraphNode_SkeletalControlBase::UAnimGraphNode_SkeletalControlBase(const FOb
 int32 UAnimGraphNode_SkeletalControlBase::GetWidgetCoordinateSystem(const USkeletalMeshComponent* SkelComp)
 {
 	PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	if (GetWidgetMode(SkelComp) == FWidget::WM_Scale)
+	if (GetWidgetMode(SkelComp) == UE::Widget::WM_Scale)
 	{
 		return COORD_Local;
 	}
@@ -38,7 +40,7 @@ int32 UAnimGraphNode_SkeletalControlBase::GetWidgetCoordinateSystem(const USkele
 // returns int32 instead of EWidgetMode because of compiling issue on Mac
 int32 UAnimGraphNode_SkeletalControlBase::GetWidgetMode(const USkeletalMeshComponent* SkelComp)
 {
-	return  (int32)FWidget::EWidgetMode::WM_None;
+	return  (int32)UE::Widget::EWidgetMode::WM_None;
 }
 
 int32 UAnimGraphNode_SkeletalControlBase::ChangeToNextWidgetMode(const USkeletalMeshComponent* SkelComp, int32 CurWidgetMode)
@@ -60,7 +62,7 @@ FLinearColor UAnimGraphNode_SkeletalControlBase::GetNodeTitleColor() const
 
 FString UAnimGraphNode_SkeletalControlBase::GetNodeCategory() const
 {
-	return TEXT("Skeletal Control Nodes");
+	return TEXT("Animation|Skeletal Controls");
 }
 
 FText UAnimGraphNode_SkeletalControlBase::GetControllerDescription() const
@@ -81,7 +83,7 @@ void UAnimGraphNode_SkeletalControlBase::CreateOutputPins()
 
 void UAnimGraphNode_SkeletalControlBase::ConvertToComponentSpaceTransform(const USkeletalMeshComponent* SkelComp, const FTransform & InTransform, FTransform & OutCSTransform, int32 BoneIndex, EBoneControlSpace Space) const
 {
-	USkeleton * Skeleton = SkelComp->SkeletalMesh->GetSkeleton();
+	USkeleton * Skeleton = SkelComp->GetSkeletalMeshAsset()->GetSkeleton();
 
 	switch (Space)
 	{
@@ -105,7 +107,7 @@ void UAnimGraphNode_SkeletalControlBase::ConvertToComponentSpaceTransform(const 
 			const int32 ParentIndex = Skeleton->GetReferenceSkeleton().GetParentIndex(BoneIndex);
 			if (ParentIndex != INDEX_NONE)																																																																																																																															
 			{
-				const int32 MeshParentIndex = Skeleton->GetMeshBoneIndexFromSkeletonBoneIndex(SkelComp->SkeletalMesh, ParentIndex);
+				const int32 MeshParentIndex = Skeleton->GetMeshBoneIndexFromSkeletonBoneIndex(SkelComp->GetSkeletalMeshAsset(), ParentIndex);
 				if (MeshParentIndex != INDEX_NONE)
 				{
 					const FTransform ParentTM = SkelComp->GetBoneTransform(MeshParentIndex);
@@ -122,7 +124,7 @@ void UAnimGraphNode_SkeletalControlBase::ConvertToComponentSpaceTransform(const 
 	case BCS_BoneSpace:
 		if (BoneIndex != INDEX_NONE)
 		{
-			const int32 MeshBoneIndex = Skeleton->GetMeshBoneIndexFromSkeletonBoneIndex(SkelComp->SkeletalMesh, BoneIndex);
+			const int32 MeshBoneIndex = Skeleton->GetMeshBoneIndexFromSkeletonBoneIndex(SkelComp->GetSkeletalMeshAsset(), BoneIndex);
 			if (MeshBoneIndex != INDEX_NONE)
 			{
 				const FTransform BoneTM = SkelComp->GetBoneTransform(MeshBoneIndex);
@@ -136,9 +138,9 @@ void UAnimGraphNode_SkeletalControlBase::ConvertToComponentSpaceTransform(const 
 		break;
 
 	default:
-		if (SkelComp->SkeletalMesh)
+		if (SkelComp->GetSkeletalMeshAsset())
 		{
-			UE_LOG(LogAnimation, Warning, TEXT("ConvertToComponentSpaceTransform: Unknown BoneSpace %d  for Mesh: %s"), (uint8)Space, *SkelComp->SkeletalMesh->GetFName().ToString());
+			UE_LOG(LogAnimation, Warning, TEXT("ConvertToComponentSpaceTransform: Unknown BoneSpace %d  for Mesh: %s"), (uint8)Space, *SkelComp->GetSkeletalMeshAsset()->GetFName().ToString());
 		}
 		else
 		{
@@ -250,7 +252,7 @@ FVector UAnimGraphNode_SkeletalControlBase::ConvertWidgetLocation(const USkeleta
 
 	if (MeshBases.GetPose().IsValid())
 	{
-		USkeleton * Skeleton = SkelComp->SkeletalMesh->GetSkeleton();
+		USkeleton * Skeleton = SkelComp->GetSkeletalMeshAsset()->GetSkeleton();
 		const FMeshPoseBoneIndex MeshBoneIndex(SkelComp->GetBoneIndex(BoneName));
 		const FCompactPoseBoneIndex CompactBoneIndex = MeshBases.GetPose().GetBoneContainer().MakeCompactPoseIndex(MeshBoneIndex);
 
@@ -425,6 +427,7 @@ void UAnimGraphNode_SkeletalControlBase::PostEditChangeProperty(struct FProperty
 				if (GetNode()->AlphaInputType != EAnimAlphaInputType::Float)
 				{
 					Pin->BreakAllPinLinks();
+					RemoveBindings(Pin->PinName);
 				}
 			}
 			else if (Pin->PinName == GET_MEMBER_NAME_STRING_CHECKED(FAnimNode_SkeletalControlBase, bAlphaBoolEnabled))
@@ -432,6 +435,7 @@ void UAnimGraphNode_SkeletalControlBase::PostEditChangeProperty(struct FProperty
 				if (GetNode()->AlphaInputType != EAnimAlphaInputType::Bool)
 				{
 					Pin->BreakAllPinLinks();
+					RemoveBindings(Pin->PinName);
 				}
 			}
 			else if (Pin->PinName == GET_MEMBER_NAME_STRING_CHECKED(FAnimNode_SkeletalControlBase, AlphaCurveName))
@@ -439,6 +443,7 @@ void UAnimGraphNode_SkeletalControlBase::PostEditChangeProperty(struct FProperty
 				if (GetNode()->AlphaInputType != EAnimAlphaInputType::Curve)
 				{
 					Pin->BreakAllPinLinks();
+					RemoveBindings(Pin->PinName);
 				}
 			}
 		}
@@ -449,6 +454,22 @@ void UAnimGraphNode_SkeletalControlBase::PostEditChangeProperty(struct FProperty
 	}
 
 	Super::PostEditChangeProperty(PropertyChangedEvent);
+}
+
+bool UAnimGraphNode_SkeletalControlBase::ShowVisualWarning() const
+{
+	const FAnimNode_SkeletalControlBase* DebuggedNode = GetDebuggedNode();
+
+	const bool bHasError = DebuggedNode ? DebuggedNode->HasValidationVisualWarnings() : false;
+
+	return bHasError;
+}
+
+FText UAnimGraphNode_SkeletalControlBase::GetVisualWarningTooltipText() const
+{
+	FAnimNode_SkeletalControlBase* DebuggedNode = GetDebuggedNode();
+
+	return DebuggedNode ? DebuggedNode->GetValidationVisualWarningMessage() : FText::GetEmpty();
 }
 
 void UAnimGraphNode_SkeletalControlBase::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
@@ -492,6 +513,23 @@ void UAnimGraphNode_SkeletalControlBase::ValidateAnimNodePostCompile(FCompilerRe
 			MessageLog.Warning(TEXT("@@ contains no LOD Threshold."), this);
 		}
 	}
+}
+
+FAnimNode_SkeletalControlBase* UAnimGraphNode_SkeletalControlBase::GetDebuggedNode() const
+{
+	if (const UObject* ObjectBeingDebugged = GetAnimBlueprint()->GetObjectBeingDebugged())
+	{
+		if (const UAnimInstance* InstanceBeingDebugged = Cast<const UAnimInstance>(ObjectBeingDebugged))
+		{
+			USkeletalMeshComponent* Component = InstanceBeingDebugged->GetSkelMeshComponent();
+			if (Component != nullptr && Component->GetAnimInstance() != nullptr)
+			{
+				return static_cast<FAnimNode_SkeletalControlBase*>(FindDebugAnimNode(Component));
+			}
+		}
+	}
+
+	return nullptr;
 }
 
 #undef LOCTEXT_NAMESPACE

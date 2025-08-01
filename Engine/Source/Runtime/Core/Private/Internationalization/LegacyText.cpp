@@ -9,8 +9,7 @@
 #include "Internationalization/Internationalization.h"
 
 #if !UE_ENABLE_ICU
-#include "Internationalization/Text.h"
-#include "TextData.h"
+#include "Internationalization/TextHistory.h"
 
 FString FTextChronoFormatter::AsDate( const FDateTime& DateTime, const EDateTimeStyle::Type DateStyle, const FString& TimeZone, const FCulture& TargetCulture )
 {
@@ -30,6 +29,12 @@ FString FTextChronoFormatter::AsDateTime( const FDateTime& DateTime, const EDate
 	return DateTime.ToString(TEXT("%Y.%m.%d-%H.%M.%S"));
 }
 
+FString FTextChronoFormatter::AsDateTime(const FDateTime& DateTime, const FString& CustomPattern, const FString& TimeZone, const FCulture& TargetCulture)
+{
+	checkf(FInternationalization::Get().IsInitialized() == true, TEXT("FInternationalization is not initialized. An FText formatting method was likely used in static object initialization - this is not supported."));
+	return DateTime.ToFormattedString(*CustomPattern);
+}
+
 FString FTextTransformer::ToLower(const FString& InStr)
 {
 	return InStr.ToLower();
@@ -45,24 +50,24 @@ bool FText::IsWhitespace(const TCHAR Char)
 	return FChar::IsWhitespace(Char);
 }
 
-int32 FText::CompareTo( const FText& Other, const ETextComparisonLevel::Type ComparisonLevel ) const
+int32 FTextComparison::CompareTo( const FString& A, const FString& B, const ETextComparisonLevel::Type ComparisonLevel )
 {
-	return ToString().Compare(Other.ToString(), ESearchCase::CaseSensitive);
+	return A.Compare(B, ESearchCase::CaseSensitive);
 }
 
-int32 FText::CompareToCaseIgnored( const FText& Other ) const
+int32 FTextComparison::CompareToCaseIgnored( const FString& A, const FString& B )
 {
-	return ToString().Compare(Other.ToString(), ESearchCase::IgnoreCase);
+	return A.Compare(B, ESearchCase::IgnoreCase);
 }
 
-bool FText::EqualTo( const FText& Other, const ETextComparisonLevel::Type ComparisonLevel ) const
+bool FTextComparison::EqualTo( const FString& A, const FString& B, const ETextComparisonLevel::Type ComparisonLevel )
 {
-	return ToString().Equals(Other.ToString(), ESearchCase::CaseSensitive);
+	return A.Equals(B, ESearchCase::CaseSensitive);
 }
 
-bool FText::EqualToCaseIgnored( const FText& Other ) const
+bool FTextComparison::EqualToCaseIgnored( const FString& A, const FString& B )
 {
-	return ToString().Equals(Other.ToString(), ESearchCase::IgnoreCase);
+	return A.Equals(B, ESearchCase::IgnoreCase);
 }
 
 FText::FSortPredicate::FSortPredicate(const ETextComparisonLevel::Type ComparisonLevel)

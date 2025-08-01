@@ -4,10 +4,16 @@
 #include "CoreMinimal.h"
 #include "LandscapeProxy.h"
 #include "Landscape.h"
+#include "LandscapeEditTypes.h"
+#include "LandscapeInfo.h"
+#include "LandscapeLayerInfoObject.h"
+#include "LandscapePrivate.h"
 #include "Misc/MapErrors.h"
 #include "Misc/UObjectToken.h"
 #include "Logging/MessageLog.h"
 #include "Logging/TokenizedMessage.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(LandscapeBlueprintBrushBase)
 
 #define LOCTEXT_NAMESPACE "Landscape"
 
@@ -23,8 +29,10 @@ static TAutoConsoleVariable<int32> CVarLandscapeBrushPadding(
 ALandscapeBlueprintBrushBase::ALandscapeBlueprintBrushBase(const FObjectInitializer& ObjectInitializer)
 #if WITH_EDITORONLY_DATA
 	: OwningLandscape(nullptr)
+	, UpdateOnPropertyChange(true)
 	, AffectHeightmap(false)
 	, AffectWeightmap(false)
+	, AffectVisibilityLayer(false)
 	, bIsVisible(true)
 	, LastRequestLayersContentUpdateFrameNumber(InvalidLastRequestLayersContentUpdateFrameNumber)
 #endif
@@ -39,35 +47,57 @@ ALandscapeBlueprintBrushBase::ALandscapeBlueprintBrushBase(const FObjectInitiali
 	PrimaryActorTick.SetTickFunctionEnable(true);
 	bIsEditorOnlyActor = true;
 #endif // WITH_EDITOR
+
+#if WITH_EDITORONLY_DATA
+	bIsSpatiallyLoaded = false;
+#endif
 }
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 
 UTextureRenderTarget2D* ALandscapeBlueprintBrushBase::Render_Implementation(bool InIsHeightmap, UTextureRenderTarget2D* InCombinedResult, const FName& InWeightmapLayerName)
 {
 	return Render_Native(InIsHeightmap, InCombinedResult, InWeightmapLayerName);
 }
 
+UTextureRenderTarget2D* ALandscapeBlueprintBrushBase::RenderLayer_Implementation(const FLandscapeBrushParameters& InParameters)
+{
+	return RenderLayer_Native(InParameters);
+}
+
+UTextureRenderTarget2D* ALandscapeBlueprintBrushBase::RenderLayer_Native(const FLandscapeBrushParameters& InParameters)
+{
+	const bool bIsHeightmap = InParameters.LayerType == ELandscapeToolTargetType::Heightmap;
+
+	// Without any implementation, we call the former Render method so content created before the deprecation will still work as expected.
+	return Render(bIsHeightmap, InParameters.CombinedResult, InParameters.WeightmapLayerName);
+}
+
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
 void ALandscapeBlueprintBrushBase::Initialize_Implementation(const FTransform& InLandscapeTransform, const FIntPoint& InLandscapeSize, const FIntPoint& InLandscapeRenderTargetSize)
 {
 	Initialize_Native(InLandscapeTransform, InLandscapeSize, InLandscapeRenderTargetSize);
 }
 
-void ALandscapeBlueprintBrushBase::RequestLandscapeUpdate()
+void ALandscapeBlueprintBrushBase::RequestLandscapeUpdate(bool bInUserTriggered)
 {
 #if WITH_EDITORONLY_DATA
+	UE_LOG(LogLandscape, Verbose, TEXT("ALandscapeBlueprintBrushBase::RequestLandscapeUpdate"));
 	if (OwningLandscape)
 	{
 		uint32 ModeMask = 0;
-		if (AffectHeightmap)
+		if (AffectsHeightmap())
 		{
 			ModeMask |= ELandscapeLayerUpdateMode::Update_Heightmap_Editing_NoCollision;
 		}
-		if (AffectWeightmap)
+		if (AffectsWeightmap() || AffectsVisibilityLayer())
 		{
 			ModeMask |= ELandscapeLayerUpdateMode::Update_Weightmap_Editing_NoCollision;
 		}
 		if (ModeMask)
 		{
-			OwningLandscape->RequestLayersContentUpdateForceAll((ELandscapeLayerUpdateMode)ModeMask);
+			OwningLandscape->RequestLayersContentUpdateForceAll((ELandscapeLayerUpdateMode)ModeMask, bInUserTriggered);
 			// Just in case differentiate between 0 (default value and frame number)
 			LastRequestLayersContentUpdateFrameNumber = GFrameNumber == InvalidLastRequestLayersContentUpdateFrameNumber ? GFrameNumber + 1 : GFrameNumber;
 		}
@@ -86,11 +116,11 @@ void ALandscapeBlueprintBrushBase::PushDeferredLayersContentUpdate()
 		LastRequestLayersContentUpdateFrameNumber + CVarLandscapeBrushPadding.GetValueOnAnyThread() <= GFrameNumber)
 	{
 		uint32 ModeMask = 0;
-		if (AffectHeightmap)
+		if (AffectsHeightmap())
 		{
 			ModeMask |= ELandscapeLayerUpdateMode::Update_Heightmap_All;
 		}
-		if (AffectWeightmap)
+		if (AffectsWeightmap() || AffectsVisibilityLayer())
 		{
 			ModeMask |= ELandscapeLayerUpdateMode::Update_Weightmap_All;
 		}
@@ -137,37 +167,86 @@ void ALandscapeBlueprintBrushBase::SetIsVisible(bool bInIsVisible)
 #endif
 }
 
-void ALandscapeBlueprintBrushBase::SetAffectsHeightmap(bool bInAffectsHeightmap)
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+void ALandscapeBlueprintBrushBase::SetAffectsHeightmap(bool bAffectsHeightmap)
 {
-#if WITH_EDITORONLY_DATA
-	Modify();
-	AffectHeightmap = bInAffectsHeightmap;
-	if (OwningLandscape)
-	{
-		OwningLandscape->OnBlueprintBrushChanged();
-	}
-#endif
+	SetCanAffectHeightmap(bAffectsHeightmap);
 }
 
-void ALandscapeBlueprintBrushBase::SetAffectsWeightmap(bool bInAffectsWeightmap)
+void ALandscapeBlueprintBrushBase::SetAffectsWeightmap(bool bAffectsWeightmap)
 {
-#if WITH_EDITORONLY_DATA
-	Modify();
-	AffectWeightmap = bInAffectsWeightmap;
-	if (OwningLandscape)
-	{
-		OwningLandscape->OnBlueprintBrushChanged();
-	}
-#endif
+	SetCanAffectWeightmap(bAffectsWeightmap);
+}
+
+void ALandscapeBlueprintBrushBase::SetAffectsVisibilityLayer(bool bInAffectsVisibilityLayer)
+{
+	SetCanAffectVisibilityLayer(bInAffectsVisibilityLayer);
 }
 
 bool ALandscapeBlueprintBrushBase::IsAffectingWeightmapLayer(const FName& InLayerName) const
 {
+	return AffectsWeightmapLayer(InLayerName);
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+void ALandscapeBlueprintBrushBase::SetCanAffectHeightmap(bool bInCanAffectHeightmap)
+{
 #if WITH_EDITORONLY_DATA
+	if (bInCanAffectHeightmap != AffectHeightmap)
+	{
+		Modify();
+		AffectHeightmap = bInCanAffectHeightmap;
+		if (OwningLandscape)
+		{
+			OwningLandscape->OnBlueprintBrushChanged();
+		}
+	}
+#endif // WITH_EDITORONLY_DATA
+}
+
+void ALandscapeBlueprintBrushBase::SetCanAffectWeightmap(bool bInCanAffectWeightmap)
+{
+#if WITH_EDITORONLY_DATA
+	if (bInCanAffectWeightmap != AffectWeightmap)
+	{
+		Modify();
+		AffectWeightmap = bInCanAffectWeightmap;
+		if (OwningLandscape)
+		{
+			OwningLandscape->OnBlueprintBrushChanged();
+		}
+	}
+#endif // WITH_EDITORONLY_DATA
+}
+
+void ALandscapeBlueprintBrushBase::SetCanAffectVisibilityLayer(bool bInCanAffectVisibilityLayer)
+{
+#if WITH_EDITORONLY_DATA
+	if (bInCanAffectVisibilityLayer != AffectVisibilityLayer)
+	{
+		Modify();
+		AffectVisibilityLayer = bInCanAffectVisibilityLayer;
+		if (OwningLandscape)
+		{
+			OwningLandscape->OnBlueprintBrushChanged();
+		}
+	}
+#endif // WITH_EDITORONLY_DATA
+}
+
+bool ALandscapeBlueprintBrushBase::AffectsWeightmapLayer(const FName& InLayerName) const
+{
+#if WITH_EDITORONLY_DATA
+	if (!CanAffectWeightmap())
+	{
+		return false;
+	}
+
 	return AffectedWeightmapLayers.Contains(InLayerName);
-#else
+#else // WITH_EDITORONLY_DATA
 	return false;
-#endif
+#endif // !WITH_EDITORONLY_DATA
 }
 
 void ALandscapeBlueprintBrushBase::PostEditMove(bool bFinished)
@@ -182,7 +261,7 @@ void ALandscapeBlueprintBrushBase::PostEditChangeProperty(FPropertyChangedEvent&
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 #if WITH_EDITORONLY_DATA
-	if (OwningLandscape)
+	if (OwningLandscape && UpdateOnPropertyChange)
 	{
 		OwningLandscape->OnBlueprintBrushChanged();
 	}

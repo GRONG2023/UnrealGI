@@ -11,17 +11,10 @@ class UActorComponent;
 class UFoliageType;
 struct FProceduralFoliageInstance;
 
-#if WITH_PHYSX
-namespace physx
-{
-	class PxRigidActor;
-}
-#endif
-
 UENUM(BlueprintType)
 namespace ESimulationOverlap
 {
-	enum Type
+	enum Type : int
 	{
 		/*Instances overlap with collision*/
 		CollisionOverlap,
@@ -35,7 +28,7 @@ namespace ESimulationOverlap
 UENUM(BlueprintType)
 namespace ESimulationQuery
 {
-	enum Type
+	enum Type : int
 	{
 		None = 0 UMETA(Hidden),
 		/*Instances overlap with collision*/
@@ -62,22 +55,21 @@ struct FProceduralFoliageOverlap
 };
 
 USTRUCT(BlueprintType)
-struct FOLIAGE_API FProceduralFoliageInstance
+struct FProceduralFoliageInstance
 {
 public:
 	GENERATED_USTRUCT_BODY()
-	FProceduralFoliageInstance();
-	FProceduralFoliageInstance(const FProceduralFoliageInstance& Other);
+	FOLIAGE_API FProceduralFoliageInstance();
 
-	static FProceduralFoliageInstance* Domination(FProceduralFoliageInstance* A, FProceduralFoliageInstance* B, ESimulationOverlap::Type OverlapType);
+	static FOLIAGE_API FProceduralFoliageInstance* Domination(FProceduralFoliageInstance* A, FProceduralFoliageInstance* B, ESimulationOverlap::Type OverlapType);
 
-	float GetMaxRadius() const;
-	float GetShadeRadius() const;
-	float GetCollisionRadius() const;
+	FOLIAGE_API float GetMaxRadius() const;
+	FOLIAGE_API float GetShadeRadius() const;
+	FOLIAGE_API float GetCollisionRadius() const;
 
 	bool IsAlive() const { return bAlive; }
 
-	void TerminateInstance();
+	FOLIAGE_API void TerminateInstance();
 
 public:
 	UPROPERTY()
@@ -96,7 +88,7 @@ public:
 	float Scale;
 
 	UPROPERTY()
-	const UFoliageType* Type;
+	TObjectPtr<const UFoliageType> Type;
 
 	UActorComponent* BaseComponent;
 

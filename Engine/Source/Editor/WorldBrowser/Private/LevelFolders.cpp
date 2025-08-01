@@ -79,7 +79,7 @@ void FLevelFolders::SaveLevel(TSharedRef<FLevelModel> LevelModel)
 	Housekeeping();
 
 	// Attempt to save the folder state for the levels
-	const UEditorLevelFolders* const* Folders = TemporaryLevelFolders.Find(GetLevelModelKey(LevelModel));
+	const auto* Folders = TemporaryLevelFolders.Find(GetLevelModelKey(LevelModel));
 
 	if (Folders)
 	{
@@ -166,7 +166,7 @@ FName FLevelFolders::GetDefaultFolderName(TSharedRef<FLevelModel> LevelModel, FN
 
 UEditorLevelFolders& FLevelFolders::GetOrCreateFoldersForLevel(TSharedRef<FLevelModel> LevelModel)
 {
-	if (UEditorLevelFolders** Folders = TemporaryLevelFolders.Find(GetLevelModelKey(LevelModel)))
+	if (auto* Folders = TemporaryLevelFolders.Find(GetLevelModelKey(LevelModel)))
 	{
 		return **Folders;
 	}
@@ -255,7 +255,7 @@ UEditorLevelFolders& FLevelFolders::Initialize(TSharedRef<FLevelModel> LevelMode
 			auto Reader = TJsonReaderFactory<TCHAR>::Create(Ar.Get());
 			if (FJsonSerializer::Deserialize(Reader, RootObject))
 			{
-				const TSharedPtr<FJsonObject>& JsonFolders = RootObject->GetObjectField("Folders");
+				const TSharedPtr<FJsonObject>& JsonFolders = RootObject->GetObjectField(TEXT("Folders"));
 				for (const auto& Pair : JsonFolders->Values)
 				{
 					// Only load properties for folders that still exist in the world

@@ -6,6 +6,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Algo/AnyOf.h"
 #include "HAL/ThreadSafeCounter.h"
 #include "UObject/ObjectMacros.h"
 #include "Serialization/AsyncLoading.h"
@@ -18,6 +19,8 @@
 #include "Misc/ConfigCacheIni.h"
 #include "HAL/LowLevelMemTracker.h"
 #include "Serialization/AsyncPackageLoader.h"
+
+#include <atomic>
 
 struct FPrecacheCallbackHandler;
 
@@ -96,7 +99,7 @@ struct FAsyncLoadEventQueue
 			//@todoio check(FAsyncLoadingThread::IsInAsyncLoadThread());
 			if (EventQueue.Num())
 			{
-				EventQueue.HeapPop(Event, false);
+				EventQueue.HeapPop(Event, EAllowShrinking::No);
 				bResult = true;
 			}
 		}
@@ -108,31 +111,111 @@ struct FAsyncLoadEventQueue
 	}
 };
 
-/** Package dependency tree used for flushing specific packages */
-struct FFlushTree
+// Shared data for FFlushRequest
+struct FFlushRequestData
 {
-	int32 RequestId;
-	TSet<FName> PackagesToFlush;
-
-	FFlushTree(int32 InRequestId)
-		: RequestId(InRequestId)
+	FFlushRequestData(TConstArrayView<int32> InRequestIDs)
+		: RequestIDs(MakeUnique<std::atomic<int32>[]>(InRequestIDs.Num()))
+		, NumRequests(InRequestIDs.Num())
 	{
-	}
-
-	bool AddPackage(const FName& Package)
-	{
-		if (!PackagesToFlush.Contains(Package))
+		for (int32 i=0; i < InRequestIDs.Num(); ++i)
 		{
-			PackagesToFlush.Add(Package);
-			return true;
+			RequestIDs.Get()[i] = InRequestIDs[i];
 		}
-		return false;
+	}
+	
+	TConstArrayView<std::atomic<int32>> GetRequestIDs() const
+	{
+		return MakeArrayView(RequestIDs.Get(), NumRequests);
 	}
 
-	bool Contains(const FName& Package)
+	TArrayView<std::atomic<int32>> GetRequestIDs() 
 	{
-		return PackagesToFlush.Contains(Package);
+		return MakeArrayView(RequestIDs.Get(), NumRequests);
 	}
+	
+	void OnRequestComplete(int32 InCompletedRequest)
+	{
+		for (std::atomic<int32>& RequestID : GetRequestIDs())
+		{
+			if (RequestID.load(std::memory_order_relaxed) == InCompletedRequest)
+			{
+				++NumCompletedRequests;
+			}
+		}
+	}
+	
+	bool IsComplete()
+	{
+		return NumRequests == NumCompletedRequests;
+	}
+
+private:
+	/** 
+	 * Shared request id state between main thread and async loading thread. 
+	 * @note because request id are assigned to package request after being generated
+	 * multiple request ids can identify a specific package request however only the original request id
+	 * will properly identify unloaded dependencies. The shared nature of the request allows the async loading thread to
+	 * fix up the main thread flush request id to identify the original request id instead of duplicate when trying to identify
+	 * which main thread packages should be processed when flushing.
+	 */
+	TUniquePtr<std::atomic<int32>[]> RequestIDs;	
+	int32 NumRequests;
+	int32 NumCompletedRequests = 0;
+};
+
+/** 
+ * Request to flush a specific package using the request id 
+ */
+struct FFlushRequest
+{
+	FFlushRequest() = default;
+
+	FFlushRequest(TConstArrayView<int32> InRequestIDs)
+		: Data(MakeShared<FFlushRequestData>(InRequestIDs))
+	{
+	}
+	
+	TConstArrayView<std::atomic<int32>> GetRequestIDs() const 
+	{
+		return Data->GetRequestIDs();
+	}
+
+	bool IsValid() const
+	{
+		return Data.IsValid();
+	}
+	
+	bool IsComplete() const
+	{
+		return Data->IsComplete();
+	}
+
+	operator bool() const
+	{
+		return IsValid();
+	}
+
+private:
+	void OnRequestComplete(int32 RequestID)
+	{
+		Data->OnRequestComplete(RequestID);	
+	}
+
+	void AdjustRequestIDs(TMap<int32, int32>& DuplicateRequestMap)
+	{
+		for (std::atomic<int32>& RequestID : Data->GetRequestIDs())
+		{	
+			if (int32* MainRequest = DuplicateRequestMap.Find(RequestID.load(std::memory_order_relaxed)))
+			{
+				RequestID.store(*MainRequest, std::memory_order_relaxed);
+			}
+		}
+	}
+
+	friend class FAsyncLoadingThread;
+
+	TSharedPtr<FFlushRequestData, ESPMode::ThreadSafe> Data;
 };
 
 /** Holds the maximum package summary size that can be set via ini files
@@ -149,7 +232,9 @@ struct FMaxPackageSummarySize
  */
 class FAsyncLoadingThread final : public FRunnable, public IAsyncPackageLoader
 {
-	IEDLBootNotificationManager& EDLBootNotificationManager;
+	friend struct FAsyncPackage;
+
+	struct FEDLBootNotificationManager& EDLBootNotificationManager;
 
 	/** Thread to run the worker FRunnable on */
 	FRunnableThread* Thread;
@@ -189,7 +274,7 @@ class FAsyncLoadingThread final : public FRunnable, public IAsyncPackageLoader
 	TArray<FAsyncPackage*> PackagesToDelete;
 	TMap<FName, FAsyncPackage*> LoadedPackagesToProcessNameLookup;
 #if WITH_EDITOR
-	TArray<FWeakObjectPtr> LoadedAssets;
+	TSet<FWeakObjectPtr> LoadedAssets;
 #endif
 #if THREADSAFE_UOBJECTS
 	/** [ASYNC/GAME THREAD] Critical section for LoadedPackagesToProcess list. 
@@ -197,6 +282,17 @@ class FAsyncLoadingThread final : public FRunnable, public IAsyncPackageLoader
 	 */
 	FCriticalSection LoadedPackagesToProcessCritical;
 #endif
+
+	/** [ASYNC/GAME THREAD] FIFO of current flush requests from the game thread, managed by the async thread.
+	 * producer can only be the game thread.
+	 */
+	TArray<FFlushRequest, TInlineAllocator<4>> FlushRequests;
+#if THREADSAFE_UOBJECTS
+	/** [ASYNC/GAME THREAD] Critical section for the FlushRequests stack. needed if running with the async loading thread. */
+	FCriticalSection FlushRequestCritical;
+#endif
+	/** [ASYNC THREAD] Map containing a mapping of duplicate request to their main request. Use to operate flush request accurately. */
+	TMap<int32, int32> DuplicateRequestMap;
 
 	/** [ASYNC THREAD] Array of packages that are being preloaded */
 	TArray<FAsyncPackage*> AsyncPackages;
@@ -244,10 +340,28 @@ private:
 	/** Thread safe counter used to accumulate cycles spent on blocking. Using stats may generate to many stats messages. */
 	static FThreadSafeCounter BlockingCycles;
 #endif
+
+	IAsyncPackageLoader* IoStorePackageLoader = nullptr;
+
 public:
 
-	FAsyncLoadingThread(int32 InThreadIndex, IEDLBootNotificationManager& InEDLBootNotificationManager);
+	FAsyncLoadingThread(int32 InThreadIndex);
 	virtual ~FAsyncLoadingThread();
+
+	virtual ELoaderType GetLoaderType() const override
+	{
+		return ELoaderType::LegacyLoader;
+	}
+
+	IAsyncPackageLoader* GetIoStorePackageLoader() const
+	{
+		return IoStorePackageLoader;
+	}
+
+	void SetIoStorePackageLoader(IAsyncPackageLoader* InIoStorePackageLoader)
+	{
+		IoStorePackageLoader = InIoStorePackageLoader;
+	}
 
 	//~ Begin FRunnable Interface.
 	virtual bool Init();
@@ -265,27 +379,35 @@ public:
 	/** Start the async loading thread */
 	void StartThread() override;
 
+	bool ShouldAlwaysLoadPackageAsync(const FPackagePath& InPackagePath) override;
+
+	int32 LoadPackage(const FPackagePath& PackagePath, FLoadPackageAsyncOptionalParams OptionalParams) override;
+
 	int32 LoadPackage(
-			const FString& InPackageName,
-			const FGuid* InGuid,
-			const TCHAR* InPackageToLoadFrom,
+			const FPackagePath& InPackagePath,
+			FName InCustomName,
 			FLoadPackageAsyncDelegate InCompletionDelegate,
 			EPackageFlags InPackageFlags,
 			int32 InPIEInstanceID,
 			int32 InPackagePriority,
-			const FLinkerInstancingContext* InstancingContext) override;
+			const FLinkerInstancingContext* InInstancingContext,
+			uint32 InLoadFlags) override;
 
-	EAsyncPackageState::Type ProcessLoading(bool bUseTimeLimit, bool bUseFullTimeLimit, float TimeLimit) override;
+	EAsyncPackageState::Type ProcessLoading(bool bUseTimeLimit, bool bUseFullTimeLimit, double TimeLimit) override;
 
-	EAsyncPackageState::Type ProcessLoadingUntilComplete(TFunctionRef<bool()> CompletionPredicate, float TimeLimit) override;
+	EAsyncPackageState::Type ProcessLoadingUntilComplete(TFunctionRef<bool()> CompletionPredicate, double TimeLimit) override;
 
-	void FlushLoading(int32 PackageId) override;
+	void FlushLoading(TConstArrayView<int32> RequestIDs) override;
 
 	void NotifyConstructedDuringAsyncLoading(UObject* Object, bool bSubObject) override;
 
 	void NotifyUnreachableObjects(const TArrayView<FUObjectItem*>& UnreachableObjects) override {};
 
-	void FireCompletedCompiledInImport(void* AsyncPacakge, FPackageIndex Import) override;
+	void FireCompletedCompiledInImport(void* AsyncPacakge, FPackageIndex Import);
+
+	void NotifyRegistrationEvent(const TCHAR* PackageName, const TCHAR* Name, ENotifyRegistrationType NotifyRegistrationType, ENotifyRegistrationPhase NotifyRegistrationPhase, UObject* (*InRegister)(), bool InbDynamic, UObject* FinishedObject) override;
+
+	void NotifyRegistrationComplete() override;
 
 	/** [EDL] Event queue */
 	FAsyncLoadEventQueue EventQueue;
@@ -484,10 +606,10 @@ public:
 	* @param bUseTimeLimit True if time limit should be used [time-slicing].
 	* @param bUseFullTimeLimit True if full time limit should be used [time-slicing].
 	* @param TimeLimit Maximum amount of time that can be spent in this call [time-slicing].
-	* @param FlushTree Package dependency tree to be flushed
+	* @param FlushRequest The request to flush a package and its depedencies. May be invalid.
 	* @return The current state of async loading
 	*/
-	EAsyncPackageState::Type ProcessAsyncLoading(int32& OutPackagesProcessed, bool bUseTimeLimit = false, bool bUseFullTimeLimit = false, float TimeLimit = 0.0f, FFlushTree* FlushTree = nullptr);
+	EAsyncPackageState::Type ProcessAsyncLoading(int32& OutPackagesProcessed, bool bUseTimeLimit, bool bUseFullTimeLimit, float TimeLimit, FFlushRequest& FlushRequest);
 
 	/**
 	* [EDL] [ASYNC* THREAD] Checks fopr cycles in the event driven loader and does fatal errors in that case
@@ -500,10 +622,10 @@ public:
 	* @param bUseTimeLimit True if time limit should be used [time-slicing].
 	* @param bUseFullTimeLimit True if full time limit should be used [time-slicing].
 	* @param TimeLimit Maximum amount of time that can be spent in this call [time-slicing].
-	* @param FlushTree Package dependency tree to be flushed
+	* @param FlushRequest The request to flush a package and its depedencies. May be invalid.
 	* @return The current state of async loading
 	*/
-	EAsyncPackageState::Type TickAsyncLoading(bool bUseTimeLimit, bool bUseFullTimeLimit, float TimeLimit, FFlushTree* FlushTree = nullptr);
+	EAsyncPackageState::Type TickAsyncLoading(bool bUseTimeLimit, bool bUseFullTimeLimit, double TimeLimit, FFlushRequest FlushRequest = FFlushRequest());
 
 	/**
 	* [ASYNC THREAD] Main thread loop
@@ -511,9 +633,9 @@ public:
 	* @param bUseTimeLimit True if time limit should be used [time-slicing].
 	* @param bUseFullTimeLimit True if full time limit should be used [time-slicing].
 	* @param TimeLimit Maximum amount of time that can be spent in this call [time-slicing].
-	* @param FlushTree Package dependency tree to be flushed
+	* @param FlushRequest The request to flush a package and its depedencies. May be invalid.
 	*/
-	EAsyncPackageState::Type TickAsyncThread(bool bUseTimeLimit, bool bUseFullTimeLimit, float TimeLimit, bool& bDidSomething, FFlushTree* FlushTree = nullptr);
+	EAsyncPackageState::Type TickAsyncThread(bool bUseTimeLimit, bool bUseFullTimeLimit, double TimeLimit, bool& bDidSomething, FFlushRequest& FlushRequest);
 
 	/** Initializes async loading thread */
 	void InitializeLoading() override;
@@ -525,17 +647,8 @@ public:
 	 */
 	float GetAsyncLoadPercentage(const FName& PackageName) override;
 
-	/** 
-	 * [ASYNC/GAME THREAD] Checks if a request ID already is added to the loading queue
-	 */
-	bool ContainsRequestID(int32 RequestID)
-	{
-#if THREADSAFE_UOBJECTS
-		FScopeLock Lock(&PendingRequestsCritical);
-#endif
-		return PendingRequests.Contains(RequestID);
-	}
 
+private:
 	/** 
 	 * [ASYNC/GAME THREAD] Adds a request ID to the list of pending requests
 	 */
@@ -565,6 +678,20 @@ public:
 		}		
 	}
 
+	/**
+	 * [ASYNC/GAME THREAD] Pop flush request from the flush request stacks.
+	 * @note: one of the request id passed should normally match the top of the request stack if any.
+	 */
+	void CompleteFlushRequests(TArray<int32>& RequestIDs);
+
+	/**
+	 * [ASYNC THREAD] Add a mapping being duplicate request and the main/first explicit request made for a package
+	 * @param DuplicateRequestId the duplicate request id
+	 * @param MainRequestId the main request id that will be used for processing flush request
+	 */
+	void MapDuplicateRequestID(int32 DuplicateRequestId, int32 MainRequestId);
+
+
 	/** [ASYNC/GAME THREAD] Number of package load requests in the async loading queue */
 	int32 GetQueuedPackagesCount() const
 	{
@@ -576,31 +703,88 @@ public:
 		return ExistingAsyncPackagesCounter.GetValue();
 	}
 
-private:
+	/**
+	 * [ASYNC/GAME THREAD] Checks if a request ID already is added to the loading queue
+	 */
+	bool ContainsRequestInternal(int32 RequestID)
+	{
+#if THREADSAFE_UOBJECTS
+		FScopeLock Lock(&PendingRequestsCritical);
+#endif
+		return PendingRequests.Contains(RequestID);
+	}
 
+	/**
+	 * [ASYNC/GAME THREAD] Checks if a request ID already is added to the loading queue
+	 */
+	bool ContainsAnyRequestInternal(TConstArrayView<int32> RequestIDs)
+	{
+#if THREADSAFE_UOBJECTS
+		FScopeLock Lock(&PendingRequestsCritical);
+#endif
+		return Algo::AnyOf(RequestIDs, [this](int32 RequestID){ return PendingRequests.Contains(RequestID); });
+	}
+
+	/**
+	 * [ASYNC/GAME THREAD] Checks if a request ID already is added to the loading queue
+	 */
+	bool ContainsAnyRequestInternal(TConstArrayView<std::atomic<int32>> RequestIDs)
+	{
+#if THREADSAFE_UOBJECTS
+		FScopeLock Lock(&PendingRequestsCritical);
+#endif
+		return Algo::AnyOf(RequestIDs, [this](const std::atomic<int32>& RequestID){ return PendingRequests.Contains(RequestID.load(std::memory_order_relaxed)); });
+	}
+
+	/** 
+	 * [GAME THREAD] Add a Flush request to the flush stack
+	 * @param RequestIDs the request id of the packages to flush
+	 * @returns the flushtree for the flush request to use on the game thread
+	 * @note the FlushRequest is a shared resource between the async loading thread and the main thread
+	 */
+	FFlushRequest AddFlushRequest(TConstArrayView<int32> RequestIDs);
+
+	/** 
+	 * [ASYNC THREAD] Peek the top of the flush request stack
+	 * @returns the current flush tree to consider 
+	 */
+	FFlushRequest PeekFlushRequest();
+
+	/** 
+	 * [ASYNC THREAD] Adjust the flush request if needed, in case of duplicate request
+	 * @param  InFlushRequest the flush request to adjust
+	 */
+	void AdjustFlushRequest(FFlushRequest& FlushRequest);
+
+	/**
+	 * [GAME THREAD/ASYNC THREAD] Use by both the game thread and async thread to determine if the current package should be processed in relation to the current flush tree
+	 * @param InAsyncPackage The package to potentially process
+	 * @param FlushRequest the current flush request
+	 * @returns true if we should process the package
+	 */
+	bool ShouldProcessPackage(FAsyncPackage* InAsyncPackage, const FFlushRequest& FlushRequest);
+	
 	/**
 	* [GAME THREAD] Performs game-thread specific operations on loaded packages (not-thread-safe PostLoad, callbacks)
 	*
 	* @param bUseTimeLimit True if time limit should be used [time-slicing].
 	* @param bUseFullTimeLimit True if full time limit should be used [time-slicing].
 	* @param TimeLimit Maximum amount of time that can be spent in this call [time-slicing].
-	* @param FlushTree Package dependency tree to be flushed
+	* @param FlushRequest Package dependency tree to be flushed
 	* @return The current state of async loading
 	*/
-	EAsyncPackageState::Type ProcessLoadedPackages(bool bUseTimeLimit, bool bUseFullTimeLimit, float TimeLimit, bool& bDidSomething, FFlushTree* FlushTree = nullptr);
+	EAsyncPackageState::Type ProcessLoadedPackages(bool bUseTimeLimit, bool bUseFullTimeLimit, double TimeLimit, bool& bDidSomething, const FFlushRequest& FlushRequest);
 
 	/**
 	* [ASYNC THREAD] Creates async packages from the queued requests
-	* @param FlushTree Package dependency tree to be flushed
 	*/
-	int32 CreateAsyncPackagesFromQueue(bool bUseTimeLimit, bool bUseFullTimeLimit, float TimeLimit, FFlushTree* FlushTree = nullptr);
+	int32 CreateAsyncPackagesFromQueue(bool bUseTimeLimit, bool bUseFullTimeLimit, double TimeLimit);
 
 	/**
 	* [ASYNC THREAD] Internal helper function for processing a package load request. If dependency preloading is enabled, 
 	* it will call itself recursively for all the package dependencies
-	* @param FlushTree Package dependency tree to be flushed
 	*/
-	void ProcessAsyncPackageRequest(FAsyncPackageDesc* InRequest, FAsyncPackage* InRootPackage, FFlushTree* FlushTree);
+	void ProcessAsyncPackageRequest(FAsyncPackageDesc* InRequest, FAsyncPackage* InRootPackage);
 
 	/**
 	* [ASYNC THREAD] Internal helper function for updating the priorities of an existing package and all its dependencies
@@ -609,9 +793,10 @@ private:
 
 	/**
 	* [ASYNC THREAD] Finds existing async package and adds the new request's completion callback to it.
-	* @param FlushTree Package dependency tree to be flushed
+	* @param PackageRequest The package description for the request
+	* @param PackageList The package list to look into
 	*/
-	FAsyncPackage* FindExistingPackageAndAddCompletionCallback(FAsyncPackageDesc* PackageRequest, TMap<FName, FAsyncPackage*>& PackageList, FFlushTree* FlushTree);
+	FAsyncPackage* FindExistingPackageAndAddCompletionCallback(FAsyncPackageDesc* PackageRequest, TMap<FName, FAsyncPackage*>& PackageList);
 
 	/**
 	* [ASYNC THREAD] Adds a package to a list of packages that have finished loading on the async thread

@@ -13,7 +13,7 @@ class FPaintArgs;
 class FSlateWindowElementList;
 
 /** A widget that displays a spinning image.*/
-class SLATE_API SSpinningImage : public SImage
+class SSpinningImage : public SImage
 {
 public:
 	SLATE_BEGIN_ARGS(SSpinningImage)
@@ -38,10 +38,13 @@ public:
 	SLATE_END_ARGS()
 
 	/* Construct this widget */
-	void Construct( const FArguments& InArgs );
+	SLATE_API void Construct( const FArguments& InArgs );
 
-	virtual int32 OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const override;
-
+	//~ Begin SWidget interface
+	SLATE_API virtual int32 OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const override;
+	SLATE_API virtual bool ComputeVolatility() const override;
+	//~ End SWidget interface
+	
 private:
 	/** The sequence to drive the spinning animation */
 	FCurveSequence SpinAnimationSequence;

@@ -3,12 +3,36 @@
 #pragma once
 
 #include "Containers/Array.h"
+#include "Containers/ArrayView.h"
+#include "EntitySystem/MovieSceneEntitySystemLinker.h"
 #include "EntitySystem/MovieSceneInstanceRegistry.h"
+#include "EntitySystem/MovieSceneSequenceInstanceHandle.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformMisc.h"
+#include "Serialization/Archive.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
 
 #include "MovieSceneTrackInstance.generated.h"
 
-class UMovieSceneSection;
 class UMovieSceneEntitySystemLinker;
+class UMovieSceneSection;
+class UWorld;
+struct FMovieSceneTrackInstanceComponent;
+
+namespace UE
+{
+namespace MovieScene
+{
+
+struct FPreAnimatedTrackInstanceInputCaptureSources;
+
+}
+}
 
 USTRUCT()
 struct FMovieSceneTrackInstanceInput
@@ -17,18 +41,28 @@ struct FMovieSceneTrackInstanceInput
 
 	/** The section that acts as an input for this animator */
 	UPROPERTY()
-	UMovieSceneSection* Section = nullptr;
+	TObjectPtr<UMovieSceneSection> Section = nullptr;
 
 	/** The instance that this input relates to */
 	UE::MovieScene::FInstanceHandle InstanceHandle;
 
+	/** Whether the input has been processed by being added to a track instance */
+	bool bInputHasBeenProcessed = false;
+
+	/** Check whether this input matches another, ignoring the bInputHasBeenProcessed flag */
+	bool IsSameInput(const FMovieSceneTrackInstanceInput& OtherInput) const
+	{
+		return Section == OtherInput.Section && InstanceHandle == OtherInput.InstanceHandle;
+	}
+
 	friend bool operator==(const FMovieSceneTrackInstanceInput& A, const FMovieSceneTrackInstanceInput& B)
 	{
-		return A.Section == B.Section && A.InstanceHandle == B.InstanceHandle;
+		return A.Section == B.Section && A.InstanceHandle == B.InstanceHandle && A.bInputHasBeenProcessed == B.bInputHasBeenProcessed;
 	}
 
 	friend bool operator<(const FMovieSceneTrackInstanceInput& A, const FMovieSceneTrackInstanceInput& B)
 	{
+		// bInputHasBeenProcessed is not considered for sorting
 		if (A.Section == B.Section)
 		{
 			return A.InstanceHandle < B.InstanceHandle;
@@ -48,7 +82,7 @@ struct FMovieSceneTrackInstanceInput
 	/** Serializer that ensures both the section and instance handle are copied over when an input is copied for a reinstanced animator */
 	bool Serialize(FArchive& Ar)
 	{
-		Ar << (UObject*&)Section << InstanceHandle.InstanceID << InstanceHandle.InstanceSerial;
+		Ar << (UObject*&)Section << InstanceHandle.InstanceID << InstanceHandle.InstanceSerial << bInputHasBeenProcessed;
 		return true;
 	}
 };
@@ -65,10 +99,10 @@ struct TStructOpsTypeTraits<FMovieSceneTrackInstanceInput> : public TStructOpsTy
 
 
 /**
- * Base class for all track instances. Can also be used for master tracks where AnimatedObject will be nullptr
+ * Base class for all track instances. Can also be used for root tracks where AnimatedObject will be nullptr
  */
-UCLASS(transient)
-class MOVIESCENE_API UMovieSceneTrackInstance : public UObject
+UCLASS(transient, MinimalAPI)
+class UMovieSceneTrackInstance : public UObject
 {
 public:
 	GENERATED_BODY()
@@ -79,36 +113,36 @@ public:
 	 * @param InAnimatedObject     (optional) The object that we should animate
 	 * @param InLinker             The entity system linker that owns this animator. Used for retrieving contexts and player information.
 	 */
-	void Initialize(UObject* InAnimatedObject, UMovieSceneEntitySystemLinker* InLinker);
+	MOVIESCENE_API void Initialize(UObject* InAnimatedObject, UMovieSceneEntitySystemLinker* InLinker);
 
 
 	/**
 	 * Run this animator for the current frame
 	 */
-	void Animate();
+	MOVIESCENE_API void Animate();
 
 
 	/**
 	 * Update the inputs that contribute to this animator
 	 */
-	void UpdateInputs(TArray<FMovieSceneTrackInstanceInput>&& InNewInputs);
+	MOVIESCENE_API void UpdateInputs(TArray<FMovieSceneTrackInstanceInput>&& InNewInputs);
 
 
 	/**
 	 * Destroy this animator. The animator may still have inputs when it is destroyed.
 	 */
-	void Destroy();
+	MOVIESCENE_API void Destroy();
 
 
 public:
 
 
 	/**
-	 * Retrieve the object that is being animated (may be nullptr for master tracks)
+	 * Retrieve the object that is being animated (may be nullptr for root tracks)
 	 */
 	UObject* GetAnimatedObject() const
 	{
-		return AnimatedObject;
+		return WeakAnimatedObject.Get();
 	}
 
 
@@ -117,7 +151,7 @@ public:
 	 */
 	UMovieSceneEntitySystemLinker* GetLinker() const
 	{
-		return Linker;
+		return PrivateLinker;
 	}
 
 
@@ -128,6 +162,11 @@ public:
 	{
 		return Inputs;
 	}
+
+	MOVIESCENE_API virtual UWorld* GetWorld() const override;
+#if WITH_EDITOR
+	virtual bool ImplementsGetWorld() const override { return true; }
+#endif
 
 private:
 
@@ -152,18 +191,16 @@ private:
 	/** Called when this animator is being destroyed in order that it can perform any final fixup */
 	virtual void OnDestroyed() {}
 
-	virtual UWorld* GetWorld() const override;
-
 private:
 
 	UPROPERTY()
-	UObject* AnimatedObject;
+	TWeakObjectPtr<UObject> WeakAnimatedObject;
 
 	UPROPERTY()
-	bool bIsMasterTrackInstance;
+	bool bIsRootTrackInstance;
 
 	UPROPERTY()
-	UMovieSceneEntitySystemLinker* Linker;
+	TObjectPtr<UMovieSceneEntitySystemLinker> PrivateLinker;
 
 	UPROPERTY()
 	TArray<FMovieSceneTrackInstanceInput> Inputs;

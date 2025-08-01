@@ -7,7 +7,7 @@
 
 #include "BuildPatchInstaller.h"
 #include "IBuildManifestSet.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "HAL/FileManager.h"
 #include "HAL/RunnableThread.h"
 #include "Misc/Paths.h"
@@ -39,6 +39,7 @@
 #include "Installer/Verifier.h"
 #include "Installer/FileAttribution.h"
 #include "Installer/InstallerAnalytics.h"
+#include "Installer/InstallerSharedContext.h"
 #include "Installer/Prerequisites.h"
 #include "Installer/MachineConfig.h"
 #include "Installer/MessagePump.h"
@@ -52,6 +53,10 @@
 #include "Installer/Statistics/FileConstructorStatistics.h"
 #include "Installer/Statistics/VerifierStatistics.h"
 #include "Installer/Statistics/FileOperationTracker.h"
+
+#if !defined(ENABLE_PATCH_DISK_OVERFLOW_STORE)
+#	define ENABLE_PATCH_DISK_OVERFLOW_STORE 1
+#endif
 
 DEFINE_LOG_CATEGORY_STATIC(LogBPSInstallerConfig, Log, All);
 
@@ -105,6 +110,13 @@ namespace ConfigHelpers
 		FOptimisedDeltaConfiguration OptimisedDeltaConfiguration(InstallerAction.GetSharedInstallOrCurrentManifest());
 		OptimisedDeltaConfiguration.SourceManifest = InstallerAction.TryGetSharedCurrentManifest();
 		OptimisedDeltaConfiguration.CloudDirectories = Config.CloudDirectories;
+		if (!InstallerAction.GetCloudSubdirectory().IsEmpty())
+		{
+			for (FString& CloudDirectory : OptimisedDeltaConfiguration.CloudDirectories)
+			{
+				CloudDirectory /= InstallerAction.GetCloudSubdirectory();
+			}
+		}
 		OptimisedDeltaConfiguration.DeltaPolicy = Config.DeltaPolicy;
 		OptimisedDeltaConfiguration.InstallMode = Config.InstallMode;
 		return OptimisedDeltaConfiguration;
@@ -247,6 +259,14 @@ namespace InstallerHelpers
 			{
 				UE_LOG(LogBPSInstallerConfig, Log, TEXT("Build Config: ValidTags: %s"), *Tag);
 			}
+			if (!InstallerAction.GetInstallSubdirectory().IsEmpty())
+			{
+				UE_LOG(LogBuildPatchServices, Log, TEXT("Build Config: InstallSubdirectory: %s"), *InstallerAction.GetInstallSubdirectory());
+			}
+			if (!InstallerAction.GetCloudSubdirectory().IsEmpty())
+			{
+				UE_LOG(LogBuildPatchServices, Log, TEXT("Build Config: CloudSubdirectory: %s"), *InstallerAction.GetCloudSubdirectory());
+			}
 		}
 
 		UE_LOG(LogBPSInstallerConfig, Log, TEXT("Build Config: InstallDirectory: %s"), *InstallerConfiguration.InstallDirectory);
@@ -263,9 +283,9 @@ namespace InstallerHelpers
 			UE_LOG(LogBPSInstallerConfig, Log, TEXT("Build Config: CloudDirectories: %s"), *CloudDirectory);
 		}
 
-		UE_LOG(LogBPSInstallerConfig, Log, TEXT("Build Config: InstallMode: %s"), *EnumToString(InstallerConfiguration.InstallMode));
-		UE_LOG(LogBPSInstallerConfig, Log, TEXT("Build Config: VerifyMode: %s"), *EnumToString(InstallerConfiguration.VerifyMode));
-		UE_LOG(LogBPSInstallerConfig, Log, TEXT("Build Config: DeltaPolicy: %s"), *EnumToString(InstallerConfiguration.DeltaPolicy));
+		UE_LOG(LogBPSInstallerConfig, Log, TEXT("Build Config: InstallMode: %s"), LexToString(InstallerConfiguration.InstallMode));
+		UE_LOG(LogBPSInstallerConfig, Log, TEXT("Build Config: VerifyMode: %s"), LexToString(InstallerConfiguration.VerifyMode));
+		UE_LOG(LogBPSInstallerConfig, Log, TEXT("Build Config: DeltaPolicy: %s"), LexToString(InstallerConfiguration.DeltaPolicy));
 		UE_LOG(LogBPSInstallerConfig, Log, TEXT("Build Config: bRunRequiredPrereqs: %s"), (InstallerConfiguration.bRunRequiredPrereqs) ? TEXT("true") : TEXT("false"));
 		UE_LOG(LogBPSInstallerConfig, Log, TEXT("Build Config: bAllowConcurrentExecution: %s"), (InstallerConfiguration.bAllowConcurrentExecution) ? TEXT("true") : TEXT("false"));
 	}
@@ -434,7 +454,7 @@ namespace BuildPatchServices
 		, InstallerError(FInstallerErrorFactory::Create())
 		, Analytics(MoveTemp(InAnalytics))
 		, InstallerAnalytics(FInstallerAnalyticsFactory::Create(Analytics.Get()))
-		, FileOperationTracker(FFileOperationTrackerFactory::Create(FTicker::GetCoreTicker()))
+		, FileOperationTracker(Configuration.bTrackFileOperations ? FFileOperationTrackerFactory::Create(FTSTicker::GetCoreTicker()) : FFileOperationTrackerFactory::CreateNull())
 		, MemoryChunkStoreStatistics(FMemoryChunkStoreStatisticsFactory::Create(FileOperationTracker.Get()))
 		, DiskChunkStoreStatistics(FDiskChunkStoreStatisticsFactory::Create(InstallerAnalytics.Get(), FileOperationTracker.Get()))
 		, DownloadSpeedRecorder(FSpeedRecorderFactory::Create())
@@ -448,7 +468,7 @@ namespace BuildPatchServices
 		, CloudChunkSourceStatistics(FCloudChunkSourceStatisticsFactory::Create(InstallerAnalytics.Get(), &BuildProgress, FileOperationTracker.Get()))
 		, FileConstructorStatistics(FFileConstructorStatisticsFactory::Create(DiskReadSpeedRecorder.Get(), DiskWriteSpeedRecorder.Get(), &BuildProgress, FileOperationTracker.Get()))
 		, VerifierStatistics(FVerifierStatisticsFactory::Create(DiskReadSpeedRecorder.Get(), &BuildProgress, FileOperationTracker.Get()))
-		, DownloadService(FDownloadServiceFactory::Create(FTicker::GetCoreTicker(), HttpManager.Get(), FileSystem.Get(), DownloadServiceStatistics.Get(), InstallerAnalytics.Get()))
+		, DownloadService(FDownloadServiceFactory::Create(HttpManager.Get(), FileSystem.Get(), DownloadServiceStatistics.Get(), InstallerAnalytics.Get()))
 		, MessagePump(FMessagePumpFactory::Create())
 		, Controllables()
 	{
@@ -459,17 +479,37 @@ namespace BuildPatchServices
 		FString InstallDirectory = Configuration.InstallDirectory;
 		FPaths::NormalizeDirectoryName(InstallDirectory);
 		FPaths::CollapseRelativeDirectories(InstallDirectory);
+
+		TArray<FBuildPatchAppManifestPtr> Manifests;
+		Manifests.Reserve(Configuration.InstallerActions.Num() * 2);
+
 		for (const FInstallerAction& InstallerAction : Configuration.InstallerActions)
 		{
 			FBuildPatchInstallerAction& BuildPatchInstallerAction = InstallerActions.Emplace_GetRef(InstallerAction);
 			// Make sure existing manifests are added to installation info.
 			if (BuildPatchInstallerAction.TryGetCurrentManifest())
 			{
-				InstallationInfo.Add(InstallDirectory, BuildPatchInstallerAction.GetSharedCurrentManifest());
+				InstallationInfo.Add(InstallDirectory / BuildPatchInstallerAction.GetInstallSubdirectory(), BuildPatchInstallerAction.GetSharedCurrentManifest());
 			}
 			// Cache chunk sizes too
-			ChunkDataSizeProvider->AddManifestData(BuildPatchInstallerAction.TryGetSharedCurrentManifest());
-			ChunkDataSizeProvider->AddManifestData(BuildPatchInstallerAction.TryGetSharedInstallManifest());
+			if (FBuildPatchAppManifestPtr SharedCurrentManifest = BuildPatchInstallerAction.TryGetSharedCurrentManifest())
+			{
+				Manifests.Emplace(MoveTemp(SharedCurrentManifest));
+			}
+			if (FBuildPatchAppManifestPtr SharedInstallManifest = BuildPatchInstallerAction.TryGetSharedInstallManifest())
+			{
+				Manifests.Emplace(MoveTemp(SharedInstallManifest));
+			}
+		}
+
+		ChunkDataSizeProvider->AddManifestData(Manifests);
+
+		if (!Configuration.SharedContext)
+		{
+			Configuration.SharedContext = FBuildInstallerSharedContextFactory::Create(TEXT("BuildPatchInstaller"));
+			const bool bUseChunkDBs = !Configuration.ChunkDatabaseFiles.IsEmpty();
+			const uint32 NumExpectedThreads = Configuration.SharedContext->NumThreadsPerInstaller(bUseChunkDBs);
+			Configuration.SharedContext->PreallocateThreads(NumExpectedThreads);
 		}
 	}
 
@@ -485,12 +525,9 @@ namespace BuildPatchServices
 		{
 			InstallerError->SetError(EBuildPatchInstallError::ApplicationClosing, ApplicationClosedErrorCodes::ApplicationClosed);
 		}
-		if (Thread != nullptr)
-		{
-			Thread->WaitForCompletion();
-			delete Thread;
-			Thread = nullptr;
-		}
+
+		CleanupThread();
+
 		if (InstallerAnalytics.IsValid())
 		{
 			InstallerAnalytics->Flush();
@@ -504,6 +541,7 @@ namespace BuildPatchServices
 		if (IsComplete())
 		{
 			ExecuteCompleteDelegate();
+			CleanupThread();
 			bStillTicking = false;
 		}
 		return bStillTicking;
@@ -579,8 +617,9 @@ namespace BuildPatchServices
 		if (Thread == nullptr)
 		{
 			// Start thread!
-			const TCHAR* ThreadName = TEXT("BuildPatchInstallerThread");
-			Thread = FRunnableThread::Create(this, ThreadName);
+			Thread = Configuration.SharedContext->CreateThread();
+			Thread->RunTask([this]{ Run(); });
+
 			StartDelegate.ExecuteIfBound(AsShared());
 		}
 		return Thread != nullptr;
@@ -658,22 +697,22 @@ namespace BuildPatchServices
 		}
 
 		// do the delta optimization
-		FOptimisedDeltaDependencies OptimisedDeltaDependencies = InstallerHelpers::BuildOptimisedDeltaDependencies(DownloadService);
-		typedef TTuple<FBuildPatchInstallerAction&, IOptimisedDelta*> FManifestInfoDeltaPair;
+		typedef TTuple<FBuildPatchInstallerAction&, TUniquePtr<IOptimisedDelta>> FManifestInfoDeltaPair;
 		TArray<FManifestInfoDeltaPair> RunningOptimisedDeltas;
 		for (FBuildPatchInstallerAction& InstallerAction : InstallerActions)
 		{
 			if (InstallerAction.IsUpdate())
 			{
-				IOptimisedDelta* OptimisedDelta = FOptimisedDeltaFactory::Create(ConfigHelpers::BuildOptimisedDeltaConfig(Configuration, InstallerAction), OptimisedDeltaDependencies);
-				OptimisedDeltas.Add(TUniquePtr<IOptimisedDelta>(OptimisedDelta));
-				RunningOptimisedDeltas.Add(FManifestInfoDeltaPair{ InstallerAction, OptimisedDelta });
+				TUniquePtr<IOptimisedDelta> OptimisedDelta(FOptimisedDeltaFactory::Create(
+					ConfigHelpers::BuildOptimisedDeltaConfig(Configuration, InstallerAction), 
+					InstallerHelpers::BuildOptimisedDeltaDependencies(DownloadService)));
+				RunningOptimisedDeltas.Add(FManifestInfoDeltaPair{ InstallerAction, MoveTemp(OptimisedDelta) });
 			}
 		}
 		for (FManifestInfoDeltaPair& RunningOptimisedDelta : RunningOptimisedDeltas)
 		{
 			FBuildPatchInstallerAction& InstallerAction = RunningOptimisedDelta.Get<0>();
-			IOptimisedDelta* const OptimisedDelta = RunningOptimisedDelta.Get<1>();
+			const TUniquePtr<IOptimisedDelta>& OptimisedDelta = RunningOptimisedDelta.Get<1>();
 			const IOptimisedDelta::FResultValueOrError& OptimisedDeltaResult = OptimisedDelta->GetResult();
 			PreviousTotalDownloadRequired.Add(OptimisedDelta->GetMetaDownloadSize());
 			// The OptimiseDelta class handles policy, so if we get a nullptr back, that is a hard error.
@@ -689,6 +728,7 @@ namespace BuildPatchServices
 				InstallerAction.SetDeltaManifest(OptimisedDeltaResult.GetValue().ToSharedRef());
 			}
 		}
+		RunningOptimisedDeltas.Empty();
 
 		// We can now build out any systems that need late construction but can survive between retries.
 		ManifestSet.Reset(FBuildManifestSetFactory::Create(InstallerActions));
@@ -700,14 +740,16 @@ namespace BuildPatchServices
 			Controllables.Add(Verifier.Get());
 		}
 
-		// Queue update to chunk data size cache on main thread
-		AsyncHelpers::ExecuteOnGameThread<void>([this]()
+		// Update to chunk data size cache since we may have delta manifests now
 		{
+			TArray<FBuildPatchAppManifestPtr> ActionManifests;
+			ActionManifests.Reserve(InstallerActions.Num());
 			for (const FBuildPatchInstallerAction& InstallerAction : InstallerActions)
 			{
-				ChunkDataSizeProvider->AddManifestData(InstallerAction.TryGetSharedInstallManifest());
+				ActionManifests.Emplace(InstallerAction.TryGetSharedInstallManifest());
 			}
-		}).Wait();
+			ChunkDataSizeProvider->AddManifestData(ActionManifests);
+		}
 
 		// Init build statistics that are known.
 		{
@@ -717,6 +759,24 @@ namespace BuildPatchServices
 			BuildStats.ErrorCode = InstallerError->GetErrorCode();
 			BuildStats.FailureReasonText = InstallerError->GetErrorText();
 			BuildStats.FailureType = InstallerError->GetErrorType();
+		}
+
+		// Check for any filepath violations.
+		FString InstallDirectoryWithSlash = Configuration.InstallDirectory;
+		FPaths::NormalizeDirectoryName(InstallDirectoryWithSlash);
+		FPaths::CollapseRelativeDirectories(InstallDirectoryWithSlash);
+		InstallDirectoryWithSlash /= TEXT("/");
+		TSet<FString> ExpectedFiles;
+		ManifestSet->GetExpectedFiles(ExpectedFiles);
+		for (const FString& ExpectedFile : ExpectedFiles)
+		{
+			const FString InstallConstructionFile = FPaths::ConvertRelativePathToFull(Configuration.InstallDirectory, ExpectedFile);
+			if (!InstallConstructionFile.StartsWith(InstallDirectoryWithSlash))
+			{
+				UE_LOG(LogBuildPatchServices, Error, TEXT("Installer setup: Filepath in manifest escaped install directory. %s -> %s"), *ExpectedFile, *InstallConstructionFile);
+				InstallerError->SetError(EBuildPatchInstallError::InitializationError, InitializationErrorCodes::InvalidDataInManifest);
+				bInstallerInitSuccess = false;
+			}
 		}
 
 		bIsInited = true;
@@ -930,6 +990,8 @@ namespace BuildPatchServices
 	{
 		FChunkDbSourceConfig ChunkDbSourceConfig(Configuration.ChunkDatabaseFiles);
 
+		ChunkDbSourceConfig.SharedContext = Configuration.SharedContext.Get();
+
 		// Load batch fetch config.
 		GConfig->GetInt(TEXT("Portal.BuildPatch"), TEXT("ChunkDbSourcePreFetchMinimum"), ChunkDbSourceConfig.PreFetchMinimum, GEngineIni);
 		GConfig->GetInt(TEXT("Portal.BuildPatch"), TEXT("ChunkDbSourcePreFetchMaximum"), ChunkDbSourceConfig.PreFetchMaximum, GEngineIni);
@@ -960,6 +1022,8 @@ namespace BuildPatchServices
 	FCloudSourceConfig FBuildPatchInstaller::BuildCloudSourceConfig()
 	{
 		FCloudSourceConfig CloudSourceConfig(Configuration.CloudDirectories);
+
+		CloudSourceConfig.SharedContext = Configuration.SharedContext.Get();
 
 		// Load max download retry count from engine config.
 		GConfig->GetInt(TEXT("Portal.BuildPatch"), TEXT("ChunkRetries"), CloudSourceConfig.MaxRetryCount, GEngineIni);
@@ -1224,11 +1288,16 @@ namespace BuildPatchServices
 			TSet<FGuid> ReferencedChunks = ChunkReferenceTracker->GetReferencedChunks();
 			TUniquePtr<IChunkEvictionPolicy> MemoryEvictionPolicy(FChunkEvictionPolicyFactory::Create(
 				ChunkReferenceTracker.Get()));
-			TUniquePtr<IDiskChunkStore> DiskOverflowStore(FDiskChunkStoreFactory::Create(
+			TUniquePtr<IDiskChunkStore> DiskOverflowStore;
+#if ENABLE_PATCH_DISK_OVERFLOW_STORE
+			FDiskChunkStoreConfig DiskChunkStoreConfig(DataStagingDir);
+			DiskChunkStoreConfig.SharedContext = Configuration.SharedContext.Get();
+			DiskOverflowStore.Reset(FDiskChunkStoreFactory::Create(
 				FileSystem.Get(),
 				ChunkDataSerialization.Get(),
 				DiskChunkStoreStatistics.Get(),
-				FDiskChunkStoreConfig(DataStagingDir)));
+				MoveTemp(DiskChunkStoreConfig)));
+#endif // ENABLE_PATCH_DISK_OVERFLOW_STORE
 			TUniquePtr<IMemoryChunkStore> CloudChunkStore(FMemoryChunkStoreFactory::Create(
 				ChunkStoreMemorySize,
 				MemoryEvictionPolicy.Get(),
@@ -1253,7 +1322,7 @@ namespace BuildPatchServices
 				InstallChunkSourceStatistics.Get(),
 				InstallationInfo,
 				ManifestSet.Get()));
-			const TSet<FGuid> InitialDownloadChunks = ReferencedChunks.Difference(InstallChunkSource->GetAvailableChunks()).Difference(ChunkDbChunkSource->GetAvailableChunks());
+			TSet<FGuid> InitialDownloadChunks = ReferencedChunks.Difference(InstallChunkSource->GetAvailableChunks()).Difference(ChunkDbChunkSource->GetAvailableChunks());
 			FileOperationTracker->OnDataStateUpdate(ReferencedChunks.Intersect(ChunkDbChunkSource->GetAvailableChunks()), EFileOperationState::PendingLocalChunkDbData);
 			FileOperationTracker->OnDataStateUpdate(ReferencedChunks.Intersect(InstallChunkSource->GetAvailableChunks()).Difference(ChunkDbChunkSource->GetAvailableChunks()), EFileOperationState::PendingLocalInstallData);
 			FileOperationTracker->OnDataStateUpdate(InitialDownloadChunks, EFileOperationState::PendingRemoteCloudData);
@@ -1270,7 +1339,7 @@ namespace BuildPatchServices
 				DownloadConnectionCount.Get(),
 				CloudChunkSourceStatistics.Get(),
 				ManifestSet.Get(),
-				InitialDownloadChunks));
+				MoveTemp(InitialDownloadChunks)));
 			TArray<IChunkSource*> ChunkSources;
 			ChunkSources.Add(ChunkDbChunkSource.Get());
 			ChunkSources.Add(InstallChunkSource.Get());
@@ -1303,7 +1372,9 @@ namespace BuildPatchServices
 			{
 				ChainedChunkSource->AddRepeatRequirement(LostChunk);
 			};
+#if ENABLE_PATCH_DISK_OVERFLOW_STORE
 			DiskOverflowStore->SetLostChunkCallback(LostChunkCallback);
+#endif // ENABLE_PATCH_DISK_OVERFLOW_STORE
 			CloudChunkStore->SetLostChunkCallback(LostChunkCallback);
 
 
@@ -1353,7 +1424,7 @@ namespace BuildPatchServices
 
 			// Wait for the file constructor to complete
 			ConstructTimer.Start();
-			FileConstructor->Wait();
+			FileConstructor->Run();
 			ConstructTimer.Stop();
 			FileConstructor->OnBeforeDeleteFile().Remove(OnBeforeDeleteFileHandle);
 			UE_LOG(LogBuildPatchServices, Log, TEXT("File construction complete"));
@@ -1778,6 +1849,12 @@ namespace BuildPatchServices
 		return bBackupSuccess;
 	}
 
+	void FBuildPatchInstaller::CleanupThread()
+	{
+		Configuration.SharedContext->ReleaseThread(Thread);
+		Thread = nullptr;
+	}
+
 	double FBuildPatchInstaller::GetDownloadSpeed() const
 	{
 		return DownloadSpeedRecorder->GetAverageSpeed(ConfigHelpers::DownloadSpeedAverageTime());
@@ -1994,13 +2071,13 @@ namespace BuildPatchServices
 	{
 		check(IsInGameThread());
 		check(MessageHandler != nullptr);
-		MessageHandlers.AddUnique(MessageHandler);
+		MessagePump->RegisterMessageHandler(MessageHandler);
 	}
 
 	void FBuildPatchInstaller::UnregisterMessageHandler(FMessageHandler* MessageHandler)
 	{
 		check(IsInGameThread());
-		MessageHandlers.Remove(MessageHandler);
+		MessagePump->UnregisterMessageHandler(MessageHandler);
 	}
 
 	void FBuildPatchInstaller::ExecuteCompleteDelegate()
@@ -2038,14 +2115,6 @@ namespace BuildPatchServices
 	void FBuildPatchInstaller::PumpMessages()
 	{
 		check(IsInGameThread());
-		MessagePump->PumpMessages(MessageHandlers);
-	}
-
-	void FBuildPatchInstaller::WaitForThread() const
-	{
-		if (Thread != nullptr)
-		{
-			Thread->WaitForCompletion();
-		}
+		MessagePump->PumpMessages();
 	}
 }

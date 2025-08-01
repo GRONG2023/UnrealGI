@@ -2,13 +2,20 @@
 
 #pragma once
 
-#include "Misc/CoreDefines.h"
-#include "Math/Color.h"
-#include "Math/Float16Color.h"
-#include "Math/IntPoint.h"
-#include "Templates/UniquePtr.h"
+#include "Containers/Array.h"
+#include "Containers/ContainersFwd.h"
+#include "Containers/UnrealString.h"
+#include "HAL/Platform.h"
 #include "IImageWrapper.h"
 #include "ImagePixelData.h"
+#include "Math/Color.h"
+#include "Math/Float16.h"
+#include "Math/Float16Color.h"
+#include "Math/IntPoint.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/CoreDefines.h"
+#include "Templates/Function.h"
+#include "Templates/UniquePtr.h"
 
 template<typename> struct TImageDataTraits;
 
@@ -74,6 +81,8 @@ public:
 	IMAGEWRITEQUEUE_API virtual bool RunTask() override final;
 	IMAGEWRITEQUEUE_API virtual void OnAbandoned() override final;
 
+	IMAGEWRITEQUEUE_API void AddPreProcessorToSetAlphaOpaque();
+
 private:
 
 	/**
@@ -99,13 +108,6 @@ private:
 	 */
 	bool InitializeWrapper(IImageWrapper* InWrapper, EImageFormat WrapperFormat);
 
-	/**
-	 * Special case implementation for writing bitmap data due to deficiencies in the IImageWriter API (it can't set raw pixel data without trying to compress it, which asserts)
-	 *
-	 * @return true a bitmap was written out at the specified filename, false otherwise
-	 */
-	bool WriteBitmap();
-
 
 	/**
 	 * Run over all the processors for the pixel data
@@ -115,82 +117,14 @@ private:
 
 
 /**
- * A pixel preprocessor for use with FImageWriteTask::PixelPreProcessor that does gamma correction as part of the threaded work
- */
-template<typename PixelType> struct TAsyncGammaCorrect;
-
-
-template<>
-struct TAsyncGammaCorrect<FColor>
-{
-	float Gamma;
-	TAsyncGammaCorrect(float InGamma) : Gamma(InGamma) {}
-
-	void operator()(FImagePixelData* PixelData)
-	{
-		check(PixelData->GetType() == EImagePixelType::Color);
-
-		TImagePixelData<FColor>* ColorData = static_cast<TImagePixelData<FColor>*>(PixelData);
-		for (FColor& Pixel : ColorData->Pixels)
-		{
-			Pixel.A = (uint8)FMath::RoundToFloat(FMath::Pow(Pixel.A / 255.f, Gamma) * 255.f);
-			Pixel.R = (uint8)FMath::RoundToFloat(FMath::Pow(Pixel.R / 255.f, Gamma) * 255.f);
-			Pixel.G = (uint8)FMath::RoundToFloat(FMath::Pow(Pixel.G / 255.f, Gamma) * 255.f);
-			Pixel.B = (uint8)FMath::RoundToFloat(FMath::Pow(Pixel.B / 255.f, Gamma) * 255.f);
-		}
-	}
-};
-
-template<>
-struct TAsyncGammaCorrect<FFloat16Color>
-{
-	float Gamma;
-	TAsyncGammaCorrect(float InGamma) : Gamma(InGamma) {}
-
-	void operator()(FImagePixelData* PixelData)
-	{
-		check(PixelData->GetType() == EImagePixelType::Float16);
-
-		TImagePixelData<FFloat16Color>* Float16ColorData = static_cast<TImagePixelData<FFloat16Color>*>(PixelData);
-		for (FFloat16Color& Pixel : Float16ColorData->Pixels)
-		{
-			Pixel.A = FMath::Pow(Pixel.A.GetFloat(), Gamma);
-			Pixel.R = FMath::Pow(Pixel.R.GetFloat(), Gamma);
-			Pixel.G = FMath::Pow(Pixel.G.GetFloat(), Gamma);
-			Pixel.B = FMath::Pow(Pixel.B.GetFloat(), Gamma);
-		}
-	}
-};
-
-template<>
-struct TAsyncGammaCorrect<FLinearColor>
-{
-	float Gamma;
-	TAsyncGammaCorrect(float InGamma) : Gamma(InGamma) {}
-
-	void operator()(FImagePixelData* PixelData)
-	{
-		check(PixelData->GetType() == EImagePixelType::Float32);
-
-		TImagePixelData<FLinearColor>* LinearColorData = static_cast<TImagePixelData<FLinearColor>*>(PixelData);
-		for (FLinearColor& Pixel : LinearColorData->Pixels)
-		{
-			Pixel.A = FMath::Pow(Pixel.A, Gamma);
-			Pixel.R = FMath::Pow(Pixel.R, Gamma);
-			Pixel.G = FMath::Pow(Pixel.G, Gamma);
-			Pixel.B = FMath::Pow(Pixel.B, Gamma);
-		}
-	}
-};
-
-
-/**
  * A pixel preprocessor for use with FImageWriteTask::PixelPreProcessor that overwrites the alpha channel with a fixed value as part of the threaded work
+ *
+ * DEPRECATED.  Prefer AddPreProcessorToSetAlphaOpaque.
  */
 template<typename PixelType> struct TAsyncAlphaWrite;
 
 template<>
-struct TAsyncAlphaWrite<FColor>
+struct TAsyncAlphaWrite<FColor> // prefer AddPreProcessorToSetAlphaOpaque
 {
 	uint8 Alpha;
 	TAsyncAlphaWrite(uint8 InAlpha) : Alpha(InAlpha) {}
@@ -208,7 +142,7 @@ struct TAsyncAlphaWrite<FColor>
 };
 
 template<>
-struct TAsyncAlphaWrite<FFloat16Color>
+struct TAsyncAlphaWrite<FFloat16Color> // prefer AddPreProcessorToSetAlphaOpaque
 {
 	FFloat16 Alpha;
 	TAsyncAlphaWrite(float InAlpha) : Alpha(InAlpha) {}
@@ -226,7 +160,7 @@ struct TAsyncAlphaWrite<FFloat16Color>
 };
 
 template<>
-struct TAsyncAlphaWrite<FLinearColor>
+struct TAsyncAlphaWrite<FLinearColor> // prefer AddPreProcessorToSetAlphaOpaque
 {
 	float Alpha;
 	TAsyncAlphaWrite(float InAlpha) : Alpha(InAlpha) {}
@@ -245,6 +179,9 @@ struct TAsyncAlphaWrite<FLinearColor>
 
 /**
  * A pixel preprocessor for use with FImageWriteTask::PixelPreProcessor that inverts the alpha channel as part of the threaded work
+ *
+ * DEPRECATED.  This is not used that I can see; if it is, make something like AddPreProcessorToSetAlphaOpaque where the implementation
+ *   is in a C file and handles all formats, not a template in a header.
  */
 template<typename PixelType> struct TAsyncAlphaInvert;
 
@@ -273,7 +210,7 @@ struct TAsyncAlphaInvert<FFloat16Color>
 		TImagePixelData<FFloat16Color>* Float16ColorData = static_cast<TImagePixelData<FFloat16Color>*>(PixelData);
 		for (FFloat16Color& Pixel : Float16ColorData->Pixels)
 		{
-			Pixel.A = FFloat16(1.f) - Pixel.A;
+			Pixel.A = FFloat16(1.f - Pixel.A.GetFloat());
 		}
 	}
 };

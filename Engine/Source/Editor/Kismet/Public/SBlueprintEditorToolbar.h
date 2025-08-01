@@ -3,17 +3,26 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Misc/Attribute.h"
-#include "Widgets/SWidget.h"
-#include "Textures/SlateIcon.h"
-#include "EditorStyleSet.h"
 #include "Framework/Commands/Commands.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
+#include "Misc/Attribute.h"
+#include "SourceControlOperations.h"
+#include "Styling/AppStyle.h"
+#include "Templates/SharedPointer.h"
+#include "Textures/SlateIcon.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
+#include "Widgets/SWidget.h"
 #include "WorkflowOrientedApp/SModeWidget.h"
 
 class FBlueprintEditor;
 class FExtender;
 class FMenuBuilder;
 class FToolBarBuilder;
+class FUICommandInfo;
+class SWidget;
+class UBlueprintEditorToolMenuContext;
 class UToolMenu;
 struct FToolMenuContext;
 
@@ -35,12 +44,6 @@ protected:
 	static void FillDebugMenu(UToolMenu* Menu);
 
 	static void FillDeveloperMenu(UToolMenu* Menu);
-
-private:
-	/** Diff current blueprint against the specified revision */
-	static void DiffAgainstRevision( class UBlueprint* Current, int32 OldRevision );
-
-	static TSharedRef<SWidget> MakeDiffMenu(const FToolMenuContext& ToolMenuContext);
 };
 
 
@@ -49,7 +52,7 @@ class FFullBlueprintEditorCommands : public TCommands<FFullBlueprintEditorComman
 public:
 	/** Constructor */
 	FFullBlueprintEditorCommands() 
-		: TCommands<FFullBlueprintEditorCommands>("FullBlueprintEditor", NSLOCTEXT("Contexts", "FullBlueprintEditor", "Full Blueprint Editor"), NAME_None, FEditorStyle::GetStyleSetName())
+		: TCommands<FFullBlueprintEditorCommands>("FullBlueprintEditor", NSLOCTEXT("Contexts", "FullBlueprintEditor", "Full Blueprint Editor"), NAME_None, FAppStyle::GetAppStyleSetName())
 	{
 	}
 
@@ -92,6 +95,11 @@ public:
 
 	/** Returns the current status as text for the blueprint being edited */
 	FText GetStatusTooltip() const;
+
+	/** Diff current blueprint against the specified revision */
+	static void DiffAgainstRevision(class UBlueprint* Current, int32 OldRevision);
+
+	static TSharedRef<SWidget> MakeDiffMenu(const UBlueprintEditorToolMenuContext* InContext);
 
 protected:
 	/** Pointer back to the blueprint editor tool that owns us */

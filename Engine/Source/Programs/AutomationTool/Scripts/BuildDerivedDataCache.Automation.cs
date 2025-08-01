@@ -8,7 +8,11 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.IO;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using UnrealBuildBase;
+using Microsoft.Extensions.Logging;
+
+using static AutomationTool.CommandUtils;
 
 public class BuildDerivedDataCache : BuildCommand
 {
@@ -23,7 +27,7 @@ public class BuildDerivedDataCache : BuildCommand
 		string BackendName = ParseParamValue("BackendName", "CreateInstalledEnginePak");
 		string RelativePakPath = ParseParamValue("RelativePakPath", "Engine/DerivedDataCache/Compressed.ddp");
 		bool bSkipEngine = ParseParam("SkipEngine");
-
+		string EngineContentExtraArgs = ParseParamValue("EngineContentExtraArgs", string.Empty);
 
 		// Get paths to everything within the temporary directory
 		string EditorExe = CommandUtils.GetEditorCommandletExe(TempDir, HostPlatform);
@@ -38,7 +42,7 @@ public class BuildDerivedDataCache : BuildCommand
 		{
 			if (!String.IsNullOrWhiteSpace(FeaturePack))
 			{
-				string FeaturePackPath = CommandUtils.CombinePaths(CommandUtils.RootDirectory.FullName, FeaturePack);
+				string FeaturePackPath = CommandUtils.CombinePaths(Unreal.RootDirectory.FullName, FeaturePack);
 				if (!CommandUtils.FileExists(FeaturePackPath))
 				{
 					throw new AutomationException("Could not find project: " + FeaturePack);
@@ -74,14 +78,14 @@ public class BuildDerivedDataCache : BuildCommand
 						FilteredPlatforms.Add(TargetPlatform);
 					}
 				}
-				if(FilteredPlatforms.Count == 0)
+				if (FilteredPlatforms.Count == 0)
 				{
-					LogInformation("Did not find any project specific platforms for FeaturePack {0} out of supplied TargetPlatforms {1}, skipping it!", GameName, ProjectSpecificPlatforms);
+					Logger.LogInformation("Did not find any project specific platforms for FeaturePack {GameName} out of supplied TargetPlatforms {ProjectSpecificPlatforms}, skipping it!", GameName, ProjectSpecificPlatforms);
 					continue;
 				}
 				ProjectSpecificPlatforms = CommandUtils.CombineCommandletParams(FilteredPlatforms.Distinct().ToArray());
 			}
-			CommandUtils.LogInformation("Generating DDC data for {0} on {1}", GameName, ProjectSpecificPlatforms);
+			Logger.LogInformation("Generating DDC data for {GameName} on {ProjectSpecificPlatforms}", GameName, ProjectSpecificPlatforms);
 			CommandUtils.DDCCommandlet(FileRef, EditorExe, null, ProjectSpecificPlatforms, String.Format("-fill -DDC={0} -ProjectOnly", BackendName));
 
 			string ProjectPakFile = CommandUtils.CombinePaths(Path.GetDirectoryName(OutputPakFile), String.Format("Compressed-{0}.ddp", GameName));
@@ -96,9 +100,30 @@ public class BuildDerivedDataCache : BuildCommand
 
 		}
 
-		// Generate DDC for the editor, and merge all the other PAK files in
-		CommandUtils.LogInformation("Generating DDC data for engine content on {0}", TargetPlatforms);
-		CommandUtils.DDCCommandlet(null, EditorExe, null, TargetPlatforms, String.Format("-fill -DDC={0} -MergePaks={1}{2}", BackendName, CommandUtils.MakePathSafeToUseWithCommandLine(String.Join("+", ProjectPakFiles)), bSkipEngine? " -projectonly" : ""));
+		// Before running the Engine, delete any stale saved Config files from previous runs of the Engine. The list of enabled plugins can change, and the config file needs to be
+		// recomputed after they do, but there is currently nothing that makes that happen automatically
+		CommandUtils.DeleteDirectory(CommandUtils.CombinePaths(TempDir, "Engine", "Saved", "Config"));
+
+		// Generate DDC for the editor, and merge all the other PAK files ini
+		List<string> EngineContentArgs = new() 
+		{ 
+			"-fill",
+			$"-DDC={BackendName}",
+			$"-MergePaks={CommandUtils.MakePathSafeToUseWithCommandLine(String.Join("+", ProjectPakFiles))}" 
+		};
+
+		if (!string.IsNullOrEmpty(EngineContentExtraArgs))
+		{
+			EngineContentArgs.Add(EngineContentExtraArgs);
+		}
+
+		if (bSkipEngine)
+		{
+			EngineContentArgs.Add("-projectonly");
+		}
+
+		Logger.LogInformation("Generating DDC data for engine content on {TargetPlatforms}", TargetPlatforms);
+		CommandUtils.DDCCommandlet(null, EditorExe, null, TargetPlatforms, String.Join(" ", EngineContentArgs));
 
 		string SavedPakFile = CommandUtils.CombinePaths(SavedDir, RelativePakPath);
 		CommandUtils.CopyFile(OutputPakFile, SavedPakFile);

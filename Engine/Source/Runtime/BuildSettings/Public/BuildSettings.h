@@ -17,6 +17,34 @@ namespace BuildSettings
 	BUILDSETTINGS_API bool IsLicenseeVersion();
 
 	/**
+	* The major engine version.
+	* 
+	* @return The major part of the engine version
+	*/
+	BUILDSETTINGS_API int GetEngineVersionMajor();
+
+	/**
+	* The minor engine version.
+	*
+	* @return The minor part of the engine version
+	*/
+	BUILDSETTINGS_API int GetEngineVersionMinor();
+
+	/**
+	* The hotfix engine version.
+	*
+	* @return The hotfix patch part of the engine version
+	*/
+	BUILDSETTINGS_API int GetEngineVersionHotfix();
+
+	/**
+	* The engine version.
+	* 
+	* @return The engine version as a string in the format MAJOR.MINOR.HOTFIX-BUILD_VERSION
+	*/
+	BUILDSETTINGS_API const TCHAR* GetEngineVersionString();
+
+	/**
 	 * The Perforce changelist being compiled. Use this value advisedly; it does not take into account out-of-order commits to engine release branches over 
 	 * development branches, licensee versions, or whether the engine version has been locked to maintain compatibility with a previous engine release. Prefer
 	 * BUILD_VERSION where a unique, product-specific identifier is required, or FEngineVersion::CompatibleWith() where relational comparisons between two 
@@ -43,11 +71,18 @@ namespace BuildSettings
 	BUILDSETTINGS_API const TCHAR* GetBranchName();
 
 	/**
-	 * The timestamp of this build. Derived from the compiler's __DATE__ macro, so only updated when the BuildSettings module is rebuilt (ie. whenever CL changes, etc...)
+	 * The date timestamp of this build. Derived from the compiler's __DATE__ macro, so only updated when the BuildSettings module is rebuilt (ie. whenever CL changes, etc...)
 	 *
 	 * @return String representing the build timestamp
 	 */
 	BUILDSETTINGS_API const TCHAR* GetBuildDate();
+
+	/**
+	 * The time timestamp of this build. Derived from the compiler's __TIME__ macro, so only updated when the BuildSettings module is rebuilt (ie. whenever CL changes, etc...)
+	 *
+	 * @return String representing the build timestamp
+	 */
+	BUILDSETTINGS_API const TCHAR* GetBuildTime();
 
 	/**
 	 * Retrieves the user-defined build version for this application.
@@ -62,4 +97,14 @@ namespace BuildSettings
 	 * @return True if this is a promoted build of the engine.
 	 */
 	BUILDSETTINGS_API bool IsPromotedBuild();
+
+	/**
+	 * Identifies whether this build was compiled with or without debug info. (e.g. pdb files on Microsoft platforms)
+	 */
+	BUILDSETTINGS_API bool IsWithDebugInfo();
+
+	/**
+	 * Returns a URL where the job which created these binaries on an automation system (e.g. Horde) can be found, or an empty string.
+	 */
+	BUILDSETTINGS_API const TCHAR* GetBuildURL();
 }

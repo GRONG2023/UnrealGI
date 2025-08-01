@@ -6,8 +6,8 @@
 #include "Containers/ContainerAllocationPolicies.h"
 #include "Containers/Array.h"
 #include "Math/UnrealMathUtility.h"
-#include "Delegates/IDelegateInstance.h"
-#include "Delegates/DelegateBase.h"
+#include "Delegates/IDelegateInstance.h" // IWYU pragma: export
+#include "Delegates/DelegateBase.h" // IWYU pragma: export
 
 #if !defined(NUM_MULTICAST_DELEGATE_INLINE_ENTRIES) || NUM_MULTICAST_DELEGATE_INLINE_ENTRIES == 0
 	typedef FHeapAllocator FMulticastInvocationListAllocatorType;
@@ -17,25 +17,67 @@
 	typedef TInlineAllocator<NUM_MULTICAST_DELEGATE_INLINE_ENTRIES> FMulticastInvocationListAllocatorType;
 #endif
 
+#define UE_MULTICAST_DELEGATE_DEFAULT_COMPACTION_THRESHOLD 2
+
 /**
  * Abstract base class for multicast delegates.
  */
 template<typename UserPolicy>
-class TMulticastDelegateBase
+class TMulticastDelegateBase : public TDelegateAccessHandlerBase<typename UserPolicy::FThreadSafetyMode>
 {
 protected:
-	using InvocationListType = TArray<TDelegateBase<UserPolicy>, FMulticastInvocationListAllocatorType>;
+	using Super = TDelegateAccessHandlerBase<typename UserPolicy::FThreadSafetyMode>;
+	using typename Super::FReadAccessScope;
+	using Super::GetReadAccessScope;
+	using typename Super::FWriteAccessScope;
+	using Super::GetWriteAccessScope;
+
+	// individual bindings are not checked for races as it's done for the parent delegate
+	using UnicastDelegateType = TDelegateBase<FNotThreadSafeNotCheckedDelegateMode>;
+
+	using InvocationListType = TArray<UnicastDelegateType, FMulticastInvocationListAllocatorType>;
 
 public:
+	TMulticastDelegateBase(TMulticastDelegateBase&& Other)
+	{
+		*this = MoveTemp(Other);
+	}
+
+	TMulticastDelegateBase& operator=(TMulticastDelegateBase&& Other)
+	{
+		if (&Other == this)
+		{
+			return *this;
+		}
+
+		InvocationListType LocalInvocationList;
+		int32 LocalCompactionThreshold;
+
+		{
+			FWriteAccessScope OtherWriteScope = Other.GetWriteAccessScope();
+
+			LocalInvocationList = MoveTemp(Other.InvocationList);
+			LocalCompactionThreshold = Other.CompactionThreshold;
+			Other.CompactionThreshold = UE_MULTICAST_DELEGATE_DEFAULT_COMPACTION_THRESHOLD;
+		}
+
+		{
+			FWriteAccessScope ThisWriteScope = GetWriteAccessScope();
+
+			ClearUnchecked();
+			InvocationList = MoveTemp(LocalInvocationList);
+			CompactionThreshold = LocalCompactionThreshold;
+		}
+
+		return *this;
+	}
+
 	/** Removes all functions from this delegate's invocation list. */
 	void Clear( )
 	{
-		for (TDelegateBase<UserPolicy>& DelegateBaseRef : InvocationList)
-		{
-			DelegateBaseRef.Unbind();
-		}
+		FWriteAccessScope WriteScope = GetWriteAccessScope();
 
-		CompactInvocationList(false);
+		ClearUnchecked();
 	}
 
 	/**
@@ -45,7 +87,9 @@ public:
 	 */
 	inline bool IsBound( ) const
 	{
-		for (const TDelegateBase<UserPolicy>& DelegateBaseRef : InvocationList)
+		FReadAccessScope ReadScope = GetReadAccessScope();
+	
+		for (const UnicastDelegateType& DelegateBaseRef : InvocationList)
 		{
 			if (DelegateBaseRef.GetDelegateInstanceProtected())
 			{
@@ -62,9 +106,11 @@ public:
 	 */
 	inline bool IsBoundToObject( void const* InUserObject ) const
 	{
-		for (const TDelegateBase<UserPolicy>& DelegateBaseRef : InvocationList)
+		FReadAccessScope ReadScope = GetReadAccessScope();
+
+		for (const UnicastDelegateType& DelegateBaseRef : InvocationList)
 		{
-			IDelegateInstance* DelegateInstance = DelegateBaseRef.GetDelegateInstanceProtected();
+			const IDelegateInstance* DelegateInstance = DelegateBaseRef.GetDelegateInstanceProtected();
 			if ((DelegateInstance != nullptr) && DelegateInstance->HasSameObject(InUserObject))
 			{
 				return true;
@@ -83,10 +129,12 @@ public:
 	 */
 	int32 RemoveAll( const void* InUserObject )
 	{
+		FWriteAccessScope WriteScope = GetWriteAccessScope();
+
 		int32 Result = 0;
 		if (InvocationListLockCount > 0)
 		{
-			for (TDelegateBase<UserPolicy>& DelegateBaseRef : InvocationList)
+			for (UnicastDelegateType& DelegateBaseRef : InvocationList)
 			{
 				IDelegateInstance* DelegateInstance = DelegateBaseRef.GetDelegateInstanceProtected();
 				if ((DelegateInstance != nullptr) && DelegateInstance->HasSameObject(InUserObject))
@@ -97,7 +145,7 @@ public:
 				}
 			}
 
-			// can't compact at the moment, but set out threshold to zero so the next add will do it
+			// can't compact at the moment as the invocation list is locked, but set out threshold to zero so the next add will do it
 			if (Result > 0)
 			{
 				CompactionThreshold = 0;
@@ -108,14 +156,14 @@ public:
 			// compact us while shuffling in later delegates to fill holes
 			for (int32 InvocationListIndex = 0; InvocationListIndex < InvocationList.Num();)
 			{
-				TDelegateBase<UserPolicy>& DelegateBaseRef = InvocationList[InvocationListIndex];
+				UnicastDelegateType& DelegateBaseRef = InvocationList[InvocationListIndex];
 
 				IDelegateInstance* DelegateInstance = DelegateBaseRef.GetDelegateInstanceProtected();
 				if (DelegateInstance == nullptr
 					|| DelegateInstance->HasSameObject(InUserObject)
 					|| DelegateInstance->IsCompactable())
 				{
-					InvocationList.RemoveAtSwap(InvocationListIndex, 1, false);
+					InvocationList.RemoveAtSwap(InvocationListIndex, 1, EAllowShrinking::No);
 					++Result;
 				}
 				else
@@ -124,7 +172,7 @@ public:
 				}
 			}
 
-			CompactionThreshold = FMath::Max(2, 2 * InvocationList.Num());
+			CompactionThreshold = FMath::Max(UE_MULTICAST_DELEGATE_DEFAULT_COMPACTION_THRESHOLD, 2 * InvocationList.Num());
 
 			InvocationList.Shrink();
 		}
@@ -132,27 +180,109 @@ public:
 		return Result;
 	}
 
+	/**
+	 * Returns the amount of memory allocated by this delegate's invocation list and the delegates stored within it, not including sizeof(*this).
+	 */
+	SIZE_T GetAllocatedSize() const
+	{
+		FReadAccessScope ReadScope = GetReadAccessScope();
+	
+		SIZE_T Size = 0;
+		Size += InvocationList.GetAllocatedSize();
+		for (const UnicastDelegateType& DelegateBaseRef : InvocationList)
+		{
+			Size += DelegateBaseRef.GetAllocatedSize();
+		}
+		return Size;
+	}
+
 protected:
 
 	/** Hidden default constructor. */
 	inline TMulticastDelegateBase( )
-		: CompactionThreshold(2)
+		: CompactionThreshold(UE_MULTICAST_DELEGATE_DEFAULT_COMPACTION_THRESHOLD)
 		, InvocationListLockCount(0)
 	{ }
 
 protected:
+	template<typename DelegateInstanceInterfaceType>
+	void CopyFrom(const TMulticastDelegateBase& Other)
+	{
+		InvocationListType TempInvocationList;
+
+		{
+			FReadAccessScope OtherReadScope = Other.GetReadAccessScope();
+
+		    for (const UnicastDelegateType& OtherDelegateRef : Other.GetInvocationList())
+		    {
+				if (const IDelegateInstance* OtherInstance = OtherDelegateRef.GetDelegateInstanceProtected())
+			    {
+				    UnicastDelegateType TempDelegate;
+				    static_cast<const DelegateInstanceInterfaceType*>(OtherInstance)->CreateCopy(TempDelegate);
+				    TempInvocationList.Add(MoveTemp(TempDelegate));
+			    }
+		    }
+		}
+
+		{
+			FWriteAccessScope ThisWriteScope = GetWriteAccessScope();
+
+			ClearUnchecked();
+			InvocationList = MoveTemp(TempInvocationList);
+		}
+	}
+
+	template<typename DelegateInstanceInterfaceType, typename... ParamTypes>
+	void Broadcast(ParamTypes... Params) const
+	{
+		// the `const` on the method is a lie
+		FWriteAccessScope WriteScope = const_cast<TMulticastDelegateBase*>(this)->GetWriteAccessScope();
+
+		bool NeedsCompaction = false;
+
+		LockInvocationList();
+		{
+			const InvocationListType& LocalInvocationList = GetInvocationList();
+
+			// call bound functions in reverse order, so we ignore any instances that may be added by callees
+			for (int32 InvocationListIndex = LocalInvocationList.Num() - 1; InvocationListIndex >= 0; --InvocationListIndex)
+			{
+				// this down-cast is OK! allows for managing invocation list in the base class without requiring virtual functions
+				const UnicastDelegateType& DelegateBase = LocalInvocationList[InvocationListIndex];
+
+				const IDelegateInstance* DelegateInstanceInterface = DelegateBase.GetDelegateInstanceProtected();
+				if (DelegateInstanceInterface == nullptr || !static_cast<const DelegateInstanceInterfaceType*>(DelegateInstanceInterface)->ExecuteIfSafe(Params...))
+				{
+					NeedsCompaction = true;
+				}
+			}
+		}
+		UnlockInvocationList();
+
+		if (NeedsCompaction)
+		{
+			const_cast<TMulticastDelegateBase*>(this)->CompactInvocationList();
+		}
+	}
 
 	/**
 	 * Adds the given delegate instance to the invocation list.
 	 *
 	 * @param NewDelegateBaseRef The delegate instance to add.
 	 */
-	inline FDelegateHandle AddDelegateInstance(TDelegateBase<UserPolicy>&& NewDelegateBaseRef)
+	template <typename NewDelegateType>
+	inline FDelegateHandle AddDelegateInstance(NewDelegateType&& NewDelegateBaseRef)
 	{
-		// compact but obey threshold of when this will trigger
-		CompactInvocationList(true);
-		FDelegateHandle Result = NewDelegateBaseRef.GetHandle();
-		InvocationList.Add(MoveTemp(NewDelegateBaseRef));
+		FWriteAccessScope WriteScope = GetWriteAccessScope();
+
+		FDelegateHandle Result;
+		if (NewDelegateBaseRef.IsBound())
+		{
+			// compact but obey threshold of when this will trigger
+			CompactInvocationList(true);
+			Result = NewDelegateBaseRef.GetHandle();
+			InvocationList.Emplace(Forward<NewDelegateType>(NewDelegateBaseRef));
+		}
 		return Result;
 	}
 
@@ -164,9 +294,11 @@ protected:
 	 */
 	bool RemoveDelegateInstance(FDelegateHandle Handle)
 	{
+		FWriteAccessScope WriteScope = GetWriteAccessScope();
+
 		for (int32 InvocationListIndex = 0; InvocationListIndex < InvocationList.Num(); ++InvocationListIndex)
 		{
-			TDelegateBase<UserPolicy>& DelegateBase = InvocationList[InvocationListIndex];
+			UnicastDelegateType& DelegateBase = InvocationList[InvocationListIndex];
 
 			IDelegateInstance* DelegateInstance = DelegateBase.GetDelegateInstanceProtected();
 			if (DelegateInstance && DelegateInstance->GetHandle() == Handle)
@@ -180,6 +312,7 @@ protected:
 		return false;
 	}
 
+private:
 	/**
 	 * Removes any expired or deleted functions from the invocation list.
 	 *
@@ -218,7 +351,7 @@ protected:
 			}
 		}
 
-		CompactionThreshold = FMath::Max(2, 2 * InvocationList.Num());
+		CompactionThreshold = FMath::Max(UE_MULTICAST_DELEGATE_DEFAULT_COMPACTION_THRESHOLD, 2 * InvocationList.Num());
 
 		if (OldNumItems > CompactionThreshold)
 		{
@@ -260,17 +393,16 @@ protected:
 		return InvocationListLockCount;
 	}
 
-protected:
-	/**
-	 * Helper function for derived classes of TMulticastDelegateBase to get at the delegate instance.
-	 */
-	template <typename DelegateType>
-	static FORCEINLINE auto* GetDelegateInstanceProtectedHelper(const DelegateType& Base)
-	{
-		return Base.GetDelegateInstanceProtected();
-	}
-
 private:
+	void ClearUnchecked()
+	{
+		for (UnicastDelegateType& DelegateBaseRef : InvocationList)
+		{
+			DelegateBaseRef.Unbind();
+		}
+
+		CompactInvocationList(false);
+	}
 
 	/** Holds the collection of delegate instances to invoke. */
 	InvocationListType InvocationList;

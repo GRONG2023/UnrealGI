@@ -1,7 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "EngineFontServices.h"
-#include "Misc/CoreMisc.h"
 #include "Fonts/FontCache.h"
 #include "Framework/Application/SlateApplication.h"
 
@@ -11,12 +10,13 @@ FEngineFontServices::FEngineFontServices()
 {
 	check(IsInGameThread());
 
-#if !UE_SERVER
-	if (!IsRunningDedicatedServer() && !IsRunningCommandlet())
+	if (FSlateApplication::IsInitialized())
 	{
-		SlateFontServices = FSlateApplication::Get().GetRenderer()->GetFontServices();
+		if (const FSlateRenderer* Renderer = FSlateApplication::Get().GetRenderer())
+		{
+			SlateFontServices = Renderer->GetFontServices();
+		}
 	}
-#endif
 }
 
 FEngineFontServices::~FEngineFontServices()

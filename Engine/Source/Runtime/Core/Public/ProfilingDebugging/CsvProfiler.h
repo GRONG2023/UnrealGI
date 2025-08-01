@@ -7,47 +7,45 @@
 
 #pragma once
 
-#include "CoreTypes.h"
-#include "Containers/Queue.h"
-#include "UObject/NameTypes.h"
-#include "Templates/UniquePtr.h"
 #include "Async/Future.h"
-#include "Async/TaskGraphInterfaces.h"
+#include "Async/TaskGraphFwd.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/Queue.h"
+#include "Containers/SparseArray.h"
+#include "Containers/UnrealString.h"
+#include "CoreTypes.h"
+#include "Delegates/Delegate.h"
+#include "HAL/CriticalSection.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PreprocessorHelpers.h"
+#include "HAL/ThreadSafeCounter.h"
 #include "Misc/EnumClassFlags.h"
-#include "ProfilingDebugging/MiscTrace.h"
+#include "ProfilingDebugging/CsvProfilerConfig.h"
 #include "ProfilingDebugging/CsvProfilerTrace.h"
+#include "ProfilingDebugging/MiscTrace.h"
+#include "Templates/IsArrayOrRefOfTypeByPredicate.h"
+#include "Templates/IsValidVariadicFunctionArg.h"
+#include "Templates/RefCounting.h"
+#include "Templates/UniquePtr.h"
+#include "Templates/UnrealTemplate.h"
+#include "Traits/IsCharEncodingCompatibleWith.h"
+#include "UObject/NameTypes.h"
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "Async/TaskGraphInterfaces.h"
+#endif
+
 
 #include <atomic>
 
-// Whether to allow the CSV profiler in shipping builds.
-// Enable in a .Target.cs file if required.
-#ifndef CSV_PROFILER_ENABLE_IN_SHIPPING
-#define CSV_PROFILER_ENABLE_IN_SHIPPING 0
-#endif
-
-// Enables command line switches and unit tests of the CSV profiler.
-// The default disables these features in a shipping build, but a .Target.cs file can override this.
-#ifndef CSV_PROFILER_ALLOW_DEBUG_FEATURES
-#define CSV_PROFILER_ALLOW_DEBUG_FEATURES (!UE_BUILD_SHIPPING)
-#endif
-
-#ifndef CSV_PROFILER_USE_CUSTOM_FRAME_TIMINGS
-#define CSV_PROFILER_USE_CUSTOM_FRAME_TIMINGS 0
-#endif
-
-// CSV_PROFILER default enabling rules, if not specified explicitly in <Program>.Target.cs GlobalDefinitions
-#ifndef CSV_PROFILER
-	#if WITH_SERVER_CODE
-	  #define CSV_PROFILER (WITH_ENGINE && 1)
-	#else
-	  #define CSV_PROFILER (WITH_ENGINE && (!UE_BUILD_SHIPPING || CSV_PROFILER_ENABLE_IN_SHIPPING))
-	#endif
-#endif
+class FCsvProfiler;
+class FEvent;
+class FScopedCsvStat;
+class FScopedCsvStatExclusive;
+struct FCsvDeclaredStat;
 
 #if CSV_PROFILER
-
-#define CSV_TIMING_STATS_EMIT_NAMED_EVENTS 0
-#define CSV_EXCLUSIVE_TIMING_STATS_EMIT_NAMED_EVENTS 0
 
 // Helpers
 #define CSV_CATEGORY_INDEX(CategoryName)						(_GCsvCategory_##CategoryName.Index)
@@ -57,16 +55,24 @@
 // Inline stats (no up front definition)
 #define CSV_SCOPED_TIMING_STAT(Category,StatName) \
 	TRACE_CSV_PROFILER_INLINE_STAT(#StatName, CSV_CATEGORY_INDEX(Category)); \
-	FScopedCsvStat _ScopedCsvStat_ ## StatName (#StatName, CSV_CATEGORY_INDEX(Category));
+	FScopedCsvStat _ScopedCsvStat_ ## StatName (#StatName, CSV_CATEGORY_INDEX(Category), "CSV_"#StatName);
 #define CSV_SCOPED_TIMING_STAT_GLOBAL(StatName) \
 	TRACE_CSV_PROFILER_INLINE_STAT(#StatName, CSV_CATEGORY_INDEX_GLOBAL); \
-	FScopedCsvStat _ScopedCsvStat_ ## StatName (#StatName, CSV_CATEGORY_INDEX_GLOBAL);
+	FScopedCsvStat _ScopedCsvStat_ ## StatName (#StatName, CSV_CATEGORY_INDEX_GLOBAL, "CSV_"#StatName);
 #define CSV_SCOPED_TIMING_STAT_EXCLUSIVE(StatName) \
 	TRACE_CSV_PROFILER_INLINE_STAT_EXCLUSIVE(#StatName); \
-	FScopedCsvStatExclusive _ScopedCsvStatExclusive_ ## StatName (#StatName);
+	FScopedCsvStatExclusive _ScopedCsvStatExclusive_ ## StatName (#StatName, "CSV_"#StatName);
 #define CSV_SCOPED_TIMING_STAT_EXCLUSIVE_CONDITIONAL(StatName,Condition) \
 	TRACE_CSV_PROFILER_INLINE_STAT_EXCLUSIVE(#StatName); \
-	FScopedCsvStatExclusiveConditional _ScopedCsvStatExclusive_ ## StatName (#StatName,Condition);
+	FScopedCsvStatExclusiveConditional _ScopedCsvStatExclusive_ ## StatName (#StatName,Condition, "CSV_"#StatName);
+#define CSV_SCOPED_TIMING_STAT_RECURSIVE(Category,StatName) \
+	TRACE_CSV_PROFILER_INLINE_STAT(#StatName, CSV_CATEGORY_INDEX(Category)); \
+	static thread_local int32 _ScopedCsvStatRecursive_EntryCount_ ## StatName = 0; \
+	FScopedCsvStatRecursive _ScopedCsvStatRecursive_ ## StatName (_ScopedCsvStatRecursive_EntryCount_ ## StatName, #StatName, CSV_CATEGORY_INDEX(Category), "CSV_"#StatName);
+#define CSV_SCOPED_TIMING_STAT_RECURSIVE_CONDITIONAL(Category,StatName,Condition) \
+	TRACE_CSV_PROFILER_INLINE_STAT(#StatName, CSV_CATEGORY_INDEX(Category)); \
+	static thread_local int32 _ScopedCsvStatRecursive_EntryCount_ ## StatName = 0; \
+	FScopedCsvStatRecursiveConditional _ScopedCsvStatRecursive_ ## StatName (_ScopedCsvStatRecursive_EntryCount_ ## StatName, #StatName, CSV_CATEGORY_INDEX(Category), Condition, "CSV_"#StatName);
 
 #define CSV_SCOPED_WAIT(WaitTime)							FScopedCsvWaitConditional _ScopedCsvWait(WaitTime>0 && FCsvProfiler::IsWaitTrackingEnabledOnCurrentThread());
 #define CSV_SCOPED_WAIT_CONDITIONAL(Condition)				FScopedCsvWaitConditional _ScopedCsvWait(Condition);
@@ -100,7 +106,7 @@
 // Events
 #define CSV_EVENT(Category, Format, ...) \
 	FCsvProfiler::RecordEventf( CSV_CATEGORY_INDEX(Category), Format, ##__VA_ARGS__ ); \
-	TRACE_BOOKMARK(Format, ##__VA_ARGS__)
+	TRACE_BOOKMARK(TEXT(PREPROCESSOR_TO_STRING(Category)) TEXT("/") Format, ##__VA_ARGS__)
 
 #define CSV_EVENT_GLOBAL(Format, ...) \
 	FCsvProfiler::RecordEventf( CSV_CATEGORY_INDEX_GLOBAL, Format, ##__VA_ARGS__ ); \
@@ -108,6 +114,7 @@
 
 // Metadata
 #define CSV_METADATA(Key,Value)									FCsvProfiler::SetMetadata( Key, Value )
+#define CSV_NON_PERSISTENT_METADATA(Key,Value)					FCsvProfiler::SetNonPersistentMetadata( Key, Value )
 
 #else
   #define CSV_CATEGORY_INDEX(CategoryName)						
@@ -117,6 +124,8 @@
   #define CSV_SCOPED_TIMING_STAT_GLOBAL(StatName)					
   #define CSV_SCOPED_TIMING_STAT_EXCLUSIVE(StatName)
   #define CSV_SCOPED_TIMING_STAT_EXCLUSIVE_CONDITIONAL(StatName,Condition)
+  #define CSV_SCOPED_TIMING_STAT_RECURSIVE(Category,StatName)
+  #define CSV_SCOPED_TIMING_STAT_RECURSIVE_CONDITIONAL(Category,StatName,Condition)
   #define CSV_SCOPED_WAIT(WaitTime)
   #define CSV_SCOPED_WAIT_CONDITIONAL(Condition)
   #define CSV_SCOPED_SET_WAIT_STAT(StatName)
@@ -134,14 +143,17 @@
   #define CSV_EVENT(Category, Format, ...) 						
   #define CSV_EVENT_GLOBAL(Format, ...)
   #define CSV_METADATA(Key,Value)
+  #define CSV_NON_PERSISTENT_METADATA(Key,Value)
 #endif
 
 
 #if CSV_PROFILER
+
 class FCsvProfilerFrame;
-class FCsvProfilerThreadData;
 class FCsvProfilerProcessingThread;
+class FCsvProfilerThreadData;
 class FName;
+struct FCsvPersistentCustomStats;
 
 enum class ECsvCustomStatOp : uint8
 {
@@ -162,7 +174,7 @@ struct FCsvCategory;
 
 struct FCsvDeclaredStat
 {
-	FCsvDeclaredStat(TCHAR* InNameString, uint32 InCategoryIndex) 
+	FCsvDeclaredStat(const TCHAR* InNameString, uint32 InCategoryIndex) 
 		: Name(InNameString)
 		, CategoryIndex(InCategoryIndex) 
 	{
@@ -215,6 +227,115 @@ struct FCsvCaptureCommand
 	TSharedFuture<FString> Future;
 };
 
+//
+// Persistent custom stats
+// 
+enum class ECsvPersistentCustomStatType : uint8
+{
+	Float,
+	Int,
+	Count
+};
+
+class FCsvPersistentCustomStatBase
+{
+public:
+	FCsvPersistentCustomStatBase(FName InName, uint32 InCategoryIndex, bool bInResetEachFrame, ECsvPersistentCustomStatType InStatType)
+		: Name(InName), CategoryIndex(InCategoryIndex), bResetEachFrame(bInResetEachFrame), StatType(InStatType)
+	{
+	}
+
+	ECsvPersistentCustomStatType GetStatType() const
+	{
+		return StatType;
+	}
+protected:
+	FName Name;
+	uint32 CategoryIndex;
+	bool bResetEachFrame;
+	ECsvPersistentCustomStatType StatType;
+};
+
+
+template <class T> 
+class TCsvPersistentCustomStat : public FCsvPersistentCustomStatBase
+{
+	friend struct FCsvPersistentCustomStats;
+private:
+	std::atomic<T> Value;
+};
+
+
+template <>
+class TCsvPersistentCustomStat<float> : public FCsvPersistentCustomStatBase
+{
+	friend struct FCsvPersistentCustomStats;
+public:
+	TCsvPersistentCustomStat<float>(FName InName, uint32 InCategoryIndex, bool bInResetEachFrame)
+		: FCsvPersistentCustomStatBase(InName, InCategoryIndex, bInResetEachFrame, ECsvPersistentCustomStatType::Float)
+		, Value(0.0f)
+	{}
+
+	float Add(float Rhs)
+	{
+		float Previous = Value.load(std::memory_order_consume);
+		float Desired = Previous + Rhs;
+		while (!Value.compare_exchange_weak(Previous, Desired, std::memory_order_release, std::memory_order_consume))
+		{
+			Desired = Previous + Rhs;
+		}
+		return Desired;
+	}
+	float Sub(float Rhs)
+	{
+		return Add(-Rhs);
+	}
+	void Set(float NewVal)
+	{
+		return Value.store(NewVal, std::memory_order_relaxed);
+	}
+	float GetValue()
+	{
+		return Value.load();
+	}
+	static ECsvPersistentCustomStatType GetClassStatType() { return ECsvPersistentCustomStatType::Float; }
+protected:
+	std::atomic<float> Value;
+};
+
+
+template <>
+class TCsvPersistentCustomStat<int32> : public FCsvPersistentCustomStatBase
+{
+	friend struct FCsvPersistentCustomStats;
+public:
+	TCsvPersistentCustomStat<int32>(FName InName, uint32 InCategoryIndex, bool bInResetEachFrame)
+		: FCsvPersistentCustomStatBase(InName, InCategoryIndex, bInResetEachFrame, ECsvPersistentCustomStatType::Int)
+		, Value(0)
+	{}
+
+	int32 Add(int32 Rhs)
+	{
+		return Value.fetch_add(Rhs, std::memory_order_relaxed);
+	}
+	int32 Sub(int32 Rhs)
+	{
+		return Value.fetch_sub(Rhs, std::memory_order_relaxed);
+	}
+	void Set(int32 NewVal)
+	{
+		Value.store(NewVal, std::memory_order_relaxed);
+	}
+	int32 GetValue()
+	{
+		return Value.load();
+	}
+	static ECsvPersistentCustomStatType GetClassStatType() { return ECsvPersistentCustomStatType::Int; }
+protected:
+	std::atomic<int> Value;
+};
+
+
 /**
 * FCsvProfiler class. This manages recording and reporting all for CSV stats
 */
@@ -232,33 +353,39 @@ public:
 
 	/** Begin static interface (used by macros)*/
 	/** Push/pop events */
-	CORE_API static void BeginStat(const char * StatName, uint32 CategoryIndex);
-	CORE_API static void EndStat(const char * StatName, uint32 CategoryIndex);
+	CORE_API static void BeginStat(const char* StatName, uint32 CategoryIndex, const char* NamedEventName = nullptr);
+	CORE_API static void BeginStat(const FName& StatName, uint32 CategoryIndex);
+	CORE_API static void EndStat(const char* StatName, uint32 CategoryIndex);
+	CORE_API static void EndStat(const FName& StatName, uint32 CategoryIndex);
 
-	CORE_API static void BeginExclusiveStat(const char * StatName);
+	CORE_API static void BeginExclusiveStat(const char * StatName, const char* NamedEventName = nullptr);
 	CORE_API static void EndExclusiveStat(const char * StatName);
 
 	CORE_API static void RecordCustomStat(const char * StatName, uint32 CategoryIndex, float Value, const ECsvCustomStatOp CustomStatOp);
 	CORE_API static void RecordCustomStat(const FName& StatName, uint32 CategoryIndex, float Value, const ECsvCustomStatOp CustomStatOp);
+	CORE_API static void RecordCustomStat(const char* StatName, uint32 CategoryIndex, double Value, const ECsvCustomStatOp CustomStatOp);
+	CORE_API static void RecordCustomStat(const FName& StatName, uint32 CategoryIndex, double Value, const ECsvCustomStatOp CustomStatOp);
 	CORE_API static void RecordCustomStat(const char * StatName, uint32 CategoryIndex, int32 Value, const ECsvCustomStatOp CustomStatOp);
 	CORE_API static void RecordCustomStat(const FName& StatName, uint32 CategoryIndex, int32 Value, const ECsvCustomStatOp CustomStatOp);
 
 	CORE_API static void RecordEvent(int32 CategoryIndex, const FString& EventText);
+	CORE_API static void RecordEventAtFrameStart(int32 CategoryIndex, const FString& EventText);
 	CORE_API static void RecordEventAtTimestamp(int32 CategoryIndex, const FString& EventText, uint64 Cycles64);
 
+	/** Metadata values set with this function will persist between captures. */
 	CORE_API static void SetMetadata(const TCHAR* Key, const TCHAR* Value);
+	/** Metadata values set with this function will be cleared after the capture ends. */
+	CORE_API static void SetNonPersistentMetadata(const TCHAR* Key, const TCHAR* Value);
 	
-	/** Set Thread name for a TLS. Needs to be called before the first event of that thread is sent. */
-	CORE_API static void SetThreadName(const FString& ThreadName);
-
 	static CORE_API int32 RegisterCategory(const FString& Name, bool bEnableByDefault, bool bIsGlobal);
+	static CORE_API int32 GetCategoryIndex(const FString& Name);
 
 	template <typename FmtType, typename... Types>
 	FORCEINLINE static void RecordEventf(int32 CategoryIndex, const FmtType& Fmt, Types... Args)
 	{
-		static_assert(TIsArrayOrRefOfType<FmtType, TCHAR>::Value, "Formatting string must be a TCHAR array.");
-		static_assert(TAnd<TIsValidVariadicFunctionArg<Types>...>::Value, "Invalid argument(s) passed to FCsvProfiler::RecordEventf");
-		RecordEventfInternal(CategoryIndex, Fmt, Args...);
+		static_assert(TIsArrayOrRefOfTypeByPredicate<FmtType, TIsCharEncodingCompatibleWithTCHAR>::Value, "Formatting string must be a TCHAR array.");
+		static_assert((TIsValidVariadicFunctionArg<Types>::Value && ...), "Invalid argument(s) passed to FCsvProfiler::RecordEventf");
+		RecordEventfInternal(CategoryIndex, (const TCHAR*)Fmt, Args...);
 	}
 
 	CORE_API static void BeginSetWaitStat(const char * StatName);
@@ -268,15 +395,18 @@ public:
 	CORE_API static void EndWait();
 
 	/** Singleton interface */
-	CORE_API bool IsCapturing();
-	CORE_API bool IsCapturing_Renderthread();
-	CORE_API bool IsWritingFile();
+	CORE_API bool IsCapturing() const;
+	CORE_API bool IsCapturing_Renderthread() const;
+	CORE_API bool IsWritingFile() const;
+	CORE_API bool IsEndCapturePending() const;
 
-	CORE_API int32 GetCaptureFrameNumber();
-	CORE_API int32 GetNumFrameToCaptureOnEvent();
+	CORE_API int32 GetCaptureFrameNumber() const;
+	CORE_API int32 GetCaptureFrameNumberRT() const;
+	CORE_API int32 GetNumFrameToCaptureOnEvent() const;
 
 	CORE_API bool EnableCategoryByString(const FString& CategoryName) const;
 	CORE_API void EnableCategoryByIndex(uint32 CategoryIndex, bool bEnable) const;
+	CORE_API bool IsCategoryEnabled(uint32 CategoryIndex) const;
 
 	/** Per-frame update */
 	CORE_API void BeginFrame();
@@ -304,34 +434,60 @@ public:
 
 	CORE_API void SetDeviceProfileName(FString InDeviceProfileName);
 
-	CORE_API FString GetOutputFilename() const { return OutputFilename; }
+	FString GetOutputFilename() const { return OutputFilename; }
+	CORE_API TMap<FString, FString> GetMetadataMapCopy();
 
 	CORE_API static bool IsWaitTrackingEnabledOnCurrentThread();
 
+	CORE_API void GetFrameExecCommands(TArray<FString>& OutFrameCommands) const;
 
+	/** Called right before we start capturing. */
 	DECLARE_MULTICAST_DELEGATE(FOnCSVProfileStart);
 	FOnCSVProfileStart& OnCSVProfileStart() { return OnCSVProfileStartDelegate; }
 
+	/** Called when csv frame 0 begins its capture. This is when CsvEvents and CustomStats will start being collected. */
+	DECLARE_MULTICAST_DELEGATE(FOnCSVProfileFirstFrame);
+	FOnCSVProfileFirstFrame& OnCSVProfileFirstFrame() { return OnCSVProfileFirstFrameDelegate; }
+
+	/** Called when the capture is requested to end, allowing any final information to be written (eg. metadata). */
+	DECLARE_MULTICAST_DELEGATE(FOnCSVProfileEndRequested);
+	FOnCSVProfileEndRequested& OnCSVProfileEndRequested() { return OnCSVProfileEndRequestedDelegate; }
+
 	DECLARE_MULTICAST_DELEGATE(FOnCSVProfileEnd);
 	FOnCSVProfileEnd& OnCSVProfileEnd() { return OnCSVProfileEndDelegate; }
-	
+
 	DECLARE_MULTICAST_DELEGATE_OneParam(FOnCSVProfileFinished, const FString& /*Filename */);
 	FOnCSVProfileFinished& OnCSVProfileFinished() { return OnCSVProfileFinishedDelegate; }
 
-	CORE_API void SetRenderThreadId(uint32 InRenderThreadId)
+	/** Called at the end of the frame when capturing, before end frame processing completes */
+	DECLARE_MULTICAST_DELEGATE(FOnCSVProfileEndFrame);
+	FOnCSVProfileEndFrame& OnCSVProfileEndFrame() { return OnCSVProfileEndFrameDelegate; }
+
+	void SetRenderThreadId(uint32 InRenderThreadId)
 	{
 		RenderThreadId = InRenderThreadId;
 	}
 
-	CORE_API void SetRHIThreadId(uint32 InRHIThreadId)
+	void SetRHIThreadId(uint32 InRHIThreadId)
 	{
 		RHIThreadId = InRHIThreadId;
 	}
 
+	// Persistent custom stat methods. These are pre-registered custom stats whose value can persist over multiple frames
+	// They are lower overhead than normal custom stats because accumulate ops don't require memory allocation
+	CORE_API TCsvPersistentCustomStat<int32>* GetOrCreatePersistentCustomStatInt(FName Name, int32 CategoryIndex = CSV_CATEGORY_INDEX_GLOBAL, bool bResetEachFrame = false);
+	CORE_API TCsvPersistentCustomStat<float>* GetOrCreatePersistentCustomStatFloat(FName Name, int32 CategoryIndex = CSV_CATEGORY_INDEX_GLOBAL, bool bResetEachFrame = false);
+
 private:
 	CORE_API static void VARARGS RecordEventfInternal(int32 CategoryIndex, const TCHAR* Fmt, ...);
 
-	static int32 GetCategoryIndex(const FString& Name);
+	enum class EMetadataPersistenceType : int8
+	{
+		Persistent,
+		NonPersistent
+	};
+
+	void SetMetadataInternal(const TCHAR* Key, const TCHAR* Value, bool bSanitize=true, EMetadataPersistenceType PersistenceType = EMetadataPersistenceType::Persistent);
 
 	void FinalizeCsvFile();
 
@@ -339,9 +495,11 @@ private:
 
 	int32 NumFramesToCapture;
 	int32 CaptureFrameNumber;
+	int32 CaptureFrameNumberRT;
 	int32 CaptureOnEventFrameCount;
 
 	bool bInsertEndFrameAtFrameStart;
+	bool bNamedEventsWasEnabled;
 
 	uint64 LastEndFrameTimestamp;
 	uint32 CaptureEndFrameCount;
@@ -354,6 +512,7 @@ private:
 	FThreadSafeCounter IsShuttingDown;
 
 	TMap<FString, FString> MetadataMap;
+	TMap<FString, FString> NonPersistentMetadataMap;
 	TQueue<TMap<FString, FString>> MetadataQueue;
 	FCriticalSection MetadataCS;
 
@@ -362,8 +521,10 @@ private:
 	ECsvProfilerFlags CurrentFlags;
 
 	FOnCSVProfileStart OnCSVProfileStartDelegate;
+	FOnCSVProfileFirstFrame OnCSVProfileFirstFrameDelegate;
+	FOnCSVProfileEndRequested OnCSVProfileEndRequestedDelegate;
 	FOnCSVProfileEnd OnCSVProfileEndDelegate;
-	
+	FOnCSVProfileEndFrame OnCSVProfileEndFrameDelegate;
 	FOnCSVProfileFinished OnCSVProfileFinishedDelegate;
 
 	std::atomic<uint32> RenderThreadId{ 0 };
@@ -373,21 +534,15 @@ private:
 class FScopedCsvStat
 {
 public:
-	FScopedCsvStat(const char * InStatName, uint32 InCategoryIndex)
+	FScopedCsvStat(const char * InStatName, uint32 InCategoryIndex, const char * InNamedEventName = nullptr)
 		: StatName(InStatName)
 		, CategoryIndex(InCategoryIndex)
 	{
-		FCsvProfiler::BeginStat(StatName, CategoryIndex);
-#if CSV_TIMING_STATS_EMIT_NAMED_EVENTS
-		FPlatformMisc::BeginNamedEvent(FColor(255, 128, 255), StatName);
-#endif
+		FCsvProfiler::BeginStat(StatName, CategoryIndex, InNamedEventName);
 	}
 
 	~FScopedCsvStat()
 	{
-#if CSV_TIMING_STATS_EMIT_NAMED_EVENTS
-		FPlatformMisc::EndNamedEvent();
-#endif
 		FCsvProfiler::EndStat(StatName, CategoryIndex);
 	}
 	const char * StatName;
@@ -397,20 +552,14 @@ public:
 class FScopedCsvStatExclusive 
 {
 public:
-	FScopedCsvStatExclusive(const char * InStatName)
+	FScopedCsvStatExclusive(const char * InStatName, const char* InNamedEventName = nullptr)
 		: StatName(InStatName)
 	{
-		FCsvProfiler::BeginExclusiveStat(StatName);
-#if CSV_EXCLUSIVE_TIMING_STATS_EMIT_NAMED_EVENTS
-		FPlatformMisc::BeginNamedEvent(FColor(255, 128, 128), StatName);
-#endif
+		FCsvProfiler::BeginExclusiveStat(StatName, InNamedEventName);
 	}
 
 	~FScopedCsvStatExclusive()
 	{
-#if CSV_EXCLUSIVE_TIMING_STATS_EMIT_NAMED_EVENTS
-		FPlatformMisc::EndNamedEvent();
-#endif
 		FCsvProfiler::EndExclusiveStat(StatName);
 	}
 	const char * StatName;
@@ -419,16 +568,13 @@ public:
 class FScopedCsvStatExclusiveConditional
 {
 public:
-	FScopedCsvStatExclusiveConditional(const char * InStatName, bool bInCondition)
+	FScopedCsvStatExclusiveConditional(const char * InStatName, bool bInCondition, const char* InNamedEventName = nullptr)
 		: StatName(InStatName)
 		, bCondition(bInCondition)
 	{
 		if (bCondition)
 		{
-			FCsvProfiler::BeginExclusiveStat(StatName);
-#if CSV_EXCLUSIVE_TIMING_STATS_EMIT_NAMED_EVENTS
-			FPlatformMisc::BeginNamedEvent(FColor(255,128,128),StatName);
-#endif
+			FCsvProfiler::BeginExclusiveStat(StatName, InNamedEventName);
 		}
 	}
 
@@ -436,14 +582,73 @@ public:
 	{
 		if (bCondition)
 		{
-#if CSV_EXCLUSIVE_TIMING_STATS_EMIT_NAMED_EVENTS
-			FPlatformMisc::EndNamedEvent();
-#endif
 			FCsvProfiler::EndExclusiveStat(StatName);
 		}
 	}
 	const char * StatName;
 	bool bCondition;
+};
+
+class FScopedCsvStatRecursive
+{
+	const char* StatName;
+	uint32 CategoryIndex;
+	int32& EntryCounter;
+public:
+	FScopedCsvStatRecursive(int32& InEntryCounter, const char* InStatName, uint32 InCategoryIndex, const char* InNamedEventName = nullptr)
+		: StatName(InStatName)
+		, CategoryIndex(InCategoryIndex)
+		, EntryCounter(InEntryCounter)
+	{
+		++EntryCounter; // this needs to happen before BeginStat in case BeginStat causes reentry
+		if (EntryCounter == 1)
+		{
+			FCsvProfiler::BeginStat(StatName, CategoryIndex, InNamedEventName);
+		}
+	}
+	~FScopedCsvStatRecursive()
+	{
+		if (EntryCounter == 1)
+		{
+			FCsvProfiler::EndStat(StatName, CategoryIndex);
+		}
+		--EntryCounter;
+	}
+};
+
+class FScopedCsvStatRecursiveConditional
+{
+	const char* StatName;
+	uint32 CategoryIndex;
+	int32& EntryCounter;
+	bool bCondition;
+public:
+	FScopedCsvStatRecursiveConditional(int32& InEntryCounter, const char* InStatName, uint32 InCategoryIndex, bool bInCondition, const char* InNamedEventName = nullptr)
+		: StatName(InStatName)
+		, CategoryIndex(InCategoryIndex)
+		, EntryCounter(InEntryCounter)
+		, bCondition(bInCondition)
+	{
+		if (bCondition)
+		{
+			++EntryCounter; // this needs to happen before BeginStat in case BeginStat causes reentry
+			if (EntryCounter == 1)
+			{
+				FCsvProfiler::BeginStat(StatName, CategoryIndex, InNamedEventName);
+			}
+		}
+	}
+	~FScopedCsvStatRecursiveConditional()
+	{
+		if (bCondition)
+		{
+			if (EntryCounter == 1)
+			{
+				FCsvProfiler::EndStat(StatName, CategoryIndex);
+			}
+			--EntryCounter;
+		}
+	}
 };
 
 class FScopedCsvWaitConditional
@@ -455,9 +660,6 @@ public:
 		if (bCondition)
 		{
 			FCsvProfiler::BeginWait();
-#if CSV_EXCLUSIVE_TIMING_STATS_EMIT_NAMED_EVENTS
-			FPlatformMisc::BeginNamedEvent(FColor(255, 128, 128), EventWait);
-#endif
 		}
 	}
 
@@ -465,9 +667,6 @@ public:
 	{
 		if (bCondition)
 		{
-#if CSV_EXCLUSIVE_TIMING_STATS_EMIT_NAMED_EVENTS
-			FPlatformMisc::EndNamedEvent();
-#endif
 			FCsvProfiler::EndWait();
 		}
 	}
@@ -491,7 +690,7 @@ public:
 	const char * StatName;
 };
 
-struct CORE_API FCsvCategory
+struct FCsvCategory
 {
 	FCsvCategory() : Index(-1) {}
 	FCsvCategory(const TCHAR* CategoryString, bool bDefaultValue, bool bIsGlobal = false)

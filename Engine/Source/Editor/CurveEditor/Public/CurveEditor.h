@@ -2,44 +2,75 @@
 
 #pragma once
 
-#include "CoreTypes.h"
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
 #include "Containers/Map.h"
-#include "Templates/UniquePtr.h"
-#include "Math/Vector2D.h"
-#include "Misc/Attribute.h"
-#include "Math/Range.h"
-#include "Misc/FrameRate.h"
-
-#include "CurveEditorTypes.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "CoreTypes.h"
 #include "CurveDataAbstraction.h"
-#include "CurveModel.h"
-#include "Tree/CurveEditorTree.h"
-#include "ICurveEditorBounds.h"
+#include "CurveEditorHelpers.h"
+#include "CurveEditorScreenSpace.h"
 #include "CurveEditorSelection.h"
+#include "CurveEditorSnapMetrics.h"
+#include "CurveEditorTypes.h"
+#include "CurveModel.h"
+#include "Delegates/Delegate.h"
+#include "EditorUndoClient.h"
+#include "HAL/PlatformCrt.h"
+#include "IBufferedCurveModel.h"
+#include "ICurveEditorBounds.h"
 #include "ICurveEditorDragOperation.h"
 #include "ICurveEditorModule.h"
 #include "ICurveEditorToolExtension.h"
-#include "EditorUndoClient.h"
-#include "CurveEditorScreenSpace.h"
 #include "ITimeSlider.h"
-#include "CurveEditorHelpers.h"
+#include "Internationalization/Text.h"
+#include "Math/Axis.h"
+#include "Math/Range.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/FrameRate.h"
+#include "Misc/Optional.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UniquePtr.h"
+#include "Tree/CurveEditorTree.h"
 
-class UCurveEditorSettings;
-class FUICommandList;
 class FCurveEditor;
-class SCurveEditorPanel;
-class UCurveEditorCopyBuffer;
-
-struct FGeometry;
-struct FCurveEditorSnapMetrics;
+class FCurveEditor;
+class FCurveModel;
+class FUICommandList;
+class IBufferedCurveModel;
 class ICurveEditorExtension;
 class ICurveEditorToolExtension;
-class IBufferedCurveModel;
+class ITimeSliderController;
+class SCurveEditorPanel;
+class SCurveEditorView;
+class UCurveEditorCopyBuffer;
+class UCurveEditorCopyableCurveKeys;
+class UCurveEditorSettings;
+struct FCurveDrawParams;
+struct FCurveEditorInitParams;
+struct FCurveEditorSnapMetrics;
+struct FGeometry;
 
 DECLARE_DELEGATE_OneParam(FOnSetBoolean, bool)
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnActiveToolChanged, FCurveEditorToolID)
-DECLARE_MULTICAST_DELEGATE_TwoParams(FOnCurveArrayChanged, FCurveModel*, bool /*displayed*/);
+DECLARE_MULTICAST_DELEGATE_ThreeParams(FOnCurveArrayChanged, FCurveModel*, bool /*displayed*/,const FCurveEditor*);
 
+/** Enums to describe supported tangent types, by default support all but smart auto*/
+enum class ECurveEditorTangentTypes : int32
+{
+	InterpolationConstant = 0x1,
+	InterpolationLinear = 0x2,
+	InterpolationCubicAuto = 0x4,
+
+	InterpolationCubicUser = 0x8,
+	InterpolationCubicBreak = 0x10,
+	InterpolationCubicWeighted = 0x20,
+	InterpolationCubicSmartAuto = 0x40,
+
+};
 
 class CURVEEDITOR_API FCurveEditor 
 	: public FEditorUndoClient
@@ -99,9 +130,11 @@ public:
 	FCurveEditor(const FCurveEditor&) = delete;
 	FCurveEditor& operator=(const FCurveEditor&) = delete;
 
-	virtual ~FCurveEditor() {}
+	virtual ~FCurveEditor();
 
 	void InitCurveEditor(const FCurveEditorInitParams& InInitParams);
+
+	virtual int32 GetSupportedTangentTypes();
 
 public:
 
@@ -115,13 +148,21 @@ public:
 
 	FCurveEditorScreenSpaceH GetPanelInputSpace() const;
 
+	void ResetMinMaxes();
+
 public:
+	/**
+	 * Zoom the curve editor to fit all the selected curves (or all curves if none selected)
+	 *
+	 * @param Axes         (Optional) Axes to lock the zoom to
+	 */
+	void ZoomToFit(EAxisList::Type Axes = EAxisList::All);
 	/**
 	 * Zoom the curve editor to fit all the currently visible curves
 	 *
 	 * @param Axes         (Optional) Axes to lock the zoom to
 	 */
-	void ZoomToFit(EAxisList::Type Axes = EAxisList::All);
+	void ZoomToFitAll(EAxisList::Type Axes = EAxisList::All);
 	/**
 	 * Zoom the curve editor to fit the requested curves.
 	 *
@@ -174,6 +215,14 @@ public:
 	ICurveEditorToolExtension* GetCurrentTool() const;
 
 	FCurveEditorToolID AddTool(TUniquePtr<ICurveEditorToolExtension>&& InTool);
+	
+	/** Nudge left or right*/
+	void TranslateSelectedKeys(double SecondsToAdd);
+	void TranslateSelectedKeysLeft();
+	void TranslateSelectedKeysRight();
+
+	/** Snap time to the first selected key */
+	void SnapToSelectedKey();
 
 	/** Step to next or previous key from the current time */
 	void StepToNextKey();
@@ -189,6 +238,12 @@ public:
 	void SetSelectionRangeStart();
 	void SetSelectionRangeEnd();
 	void ClearSelectionRange();
+
+	/** Selection */
+	void SelectAllKeys();
+	void SelectForward();
+	void SelectBackward();
+	void SelectNone();
 
 	/** Toggle the expansion state of the selected nodes or all nodes if none selected */
 	void ToggleExpandCollapseNodes(bool bRecursive);
@@ -258,21 +313,28 @@ public:
 	void SuppressBoundTransformUpdates(bool bSuppress) { bBoundTransformUpdatesSuppressed = bSuppress; }
 	bool AreBoundTransformUpdatesSuppressed() const { return bBoundTransformUpdatesSuppressed; }
 
+	/** Return the curve model IDs that are selected in the tree or have selected keys */
+	TSet<FCurveModelID> GetSelectionFromTreeAndKeys() const;
+
 	TSet<FCurveModelID> GetEditedCurves() const;
 	/** Attribute used for determining default attributes to apply to a newly create key */
 	TAttribute<FKeyAttributes> GetDefaultKeyAttribute() const { return DefaultKeyAttributes; }
 	/** Create a copy of the specified set of curves. */
-	void SetBufferedCurves(const TSet<FCurveModelID>& InCurves);
+	void AddBufferedCurves(const TSet<FCurveModelID>& InCurves);
 	/** Attempts to apply the buffered curve to the passed in curve set. Returns true on success. */
-	bool ApplyBufferedCurves(const TSet<FCurveModelID>& InCurvesToApplyTo);
+	bool ApplyBufferedCurves(const TSet<FCurveModelID>& InCurvesToApplyTo, const bool bSwapBufferCurves);
 	/** Return the number of stored Buffered Curves. */
 	int32 GetNumBufferedCurves() const { return BufferedCurves.Num(); }
 	/** Return the array of buffered curves */
 	const TArray<TUniquePtr<IBufferedCurveModel>>& GetBufferedCurves() const { return BufferedCurves; }
+	/** Returns whether the buffered curve is to be acted on, ie. selected, in the tree view or with selected keys */
+	bool IsActiveBufferedCurve(const TUniquePtr<IBufferedCurveModel>& BufferedCurve) const;
+
 	// ~FCurveEditor
 
 	// FEditorUndoClient
-	virtual void PostUndo(bool bSuccess);
+	virtual void PostUndo(bool bSuccess) override;
+	virtual void PostRedo(bool bSuccess) override;
 	// ~FEditorUndoClient
 
 	const TArray<TSharedRef<ICurveEditorExtension>> GetEditorExtensions() const
@@ -312,6 +374,12 @@ public:
 	 */
 	const TArray<FCurveEditorTreeItemID>& GetRootTreeItems() const;
 
+
+	/**
+	 * Find a tree ID id associated with a CurveModelID
+	 */
+	FCurveEditorTreeItemID GetTreeIDFromCurveID(FCurveModelID CurveID) const;
+
 	/**
 	 * Add a new tree item to this curve editor
 	 */
@@ -323,7 +391,7 @@ public:
 	void RemoveTreeItem(FCurveEditorTreeItemID ItemID);
 
 	/**
-	 * Remove all tree items fromt he curve editor
+	 * Remove all tree items from the curve editor
 	 */
 	void RemoveAllTreeItems();
 
@@ -362,6 +430,15 @@ public:
 	{
 		return &Tree;
 	}
+
+	/**
+	Whether or not we are are doign a direct selection, could be used to see why a curve model is being created or destroyed, by direct selection or by sequencer filtering?
+	*/
+	bool IsDoingDirectSelection() const
+	{
+		return Tree.IsDoingDirectSelection();
+	}
+
 
 	/**
 	 * Retrieve a serial number that is incremented any time a curve is added or removed
@@ -410,6 +487,8 @@ public:
 
 protected:
 	void ImportCopyBufferFromText(const FString& TextToImport, /*out*/ TArray<UCurveEditorCopyBuffer*>& ImportedCopyBuffers) const;
+	TSet<FCurveModelID> GetTargetCurvesForPaste() const;
+	bool CopyBufferCurveToCurveID(const UCurveEditorCopyableCurveKeys* InSourceCurve, const FCurveModelID InTargetCurve, TOptional<double> InTimeOffset, const bool bInAddToSelection, const bool bInOverwriteRange);
 
 	void GetChildCurveModelIDs(const FCurveEditorTreeItemID TreeItemID, TSet<FCurveModelID>& CurveModelIDs) const;
 
@@ -417,7 +496,7 @@ public:
 	/**
 	 * Paste keys
 	 */
-	void PasteKeys(TSet<FCurveModelID> CurveModelIDs);
+	void PasteKeys(TSet<FCurveModelID> CurveModelIDs, const bool bInOverwriteRange = false);
 
 	/**
 	 * Delete the currently selected keys
@@ -435,17 +514,21 @@ public:
 	void StraightenSelection();
 
 	/**
+	 * Set random curve colors
+	 */
+	void SetRandomCurveColorsForSelected();
+
+	/**
+	 * Pick a curve color and set on selected
+	 */	
+	void SetCurveColorsForSelected();
+
+	/**
 	* Do we currently have keys to flatten or straighten?
 	*/
 	bool CanFlattenOrStraightenSelection() const;
 
 public:
-	/**
-	 * Populate the specified array with curve painting parameters
-	 *
-	 * @param OutDrawParams    An array to populate with curve painting parameters, one per visible curve
-	 */
-	void GetCurveDrawParams(TArray<FCurveDrawParams>& OutDrawParams) const;
 
 	/**
 	 * Called by SCurveEditorPanel to update the allocated geometry for this curve editor.
@@ -511,6 +594,7 @@ protected:
 	*/
 	void ApplyBufferedCurveToTarget(const IBufferedCurveModel* BufferedCurve, FCurveModel* TargetCurve);
 
+	void OnCustomColorsChanged();
 
 protected:
 
@@ -578,5 +662,4 @@ public:
 	* Delegate that's broadcast when the curve display changes.
 	*/
 	FOnCurveArrayChanged OnCurveArrayChanged;
-
 };

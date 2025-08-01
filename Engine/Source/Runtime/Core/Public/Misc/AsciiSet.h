@@ -56,13 +56,25 @@ public:
 		return FAsciiSet(Bitset);
 	}
 
+	/** Create new set containing the combination of this set and another */
+	constexpr FORCEINLINE FAsciiSet operator|(FAsciiSet OtherSet) const
+	{
+		return FAsciiSet(LoMask | OtherSet.LoMask, HiMask | OtherSet.HiMask);
+	}
+
+	/** Create new set containing only the characters that exist in both this and another specified set */
+	constexpr FORCEINLINE FAsciiSet operator&(FAsciiSet OtherSet) const
+	{
+		return FAsciiSet(LoMask & OtherSet.LoMask, HiMask & OtherSet.HiMask);
+	}
+
 	/** Create new set containing inverse set of characters - likely including null-terminator */
 	constexpr FORCEINLINE FAsciiSet operator~() const
 	{
 		return FAsciiSet(~LoMask, ~HiMask);
 	}
 
-	// C string util functions
+	////////// Algorithms for C strings //////////
 
 	/** Find first character of string inside set or end pointer. Never returns null. */
 	template<class CharType>
@@ -120,7 +132,122 @@ public:
 		return *Skip(Str, Set) == '\0';
 	}
 
+	////////// Algorithms for string types like FStringView and FString //////////
+
+	/** Get initial substring with all characters in set */
+	template<class StringType>
+	static constexpr StringType FindPrefixWith(const StringType& Str, FAsciiSet Set)
+	{
+		return Scan<EDir::Forward, EInclude::Members, EKeep::Head>(Str, Set);
+	}
+
+	/** Get initial substring with no characters in set */
+	template<class StringType>
+	static constexpr StringType FindPrefixWithout(const StringType& Str, FAsciiSet Set)
+	{
+		return Scan<EDir::Forward, EInclude::NonMembers, EKeep::Head>(Str, Set);
+	}
+
+	/** Trim initial characters in set */
+	template<class StringType>
+	static constexpr StringType TrimPrefixWith(const StringType& Str, FAsciiSet Set)
+	{
+		return Scan<EDir::Forward, EInclude::Members, EKeep::Tail>(Str, Set);
+	}
+
+	/** Trim initial characters not in set */
+	template<class StringType>
+	static constexpr StringType TrimPrefixWithout(const StringType& Str, FAsciiSet Set)
+	{
+		return Scan<EDir::Forward, EInclude::NonMembers, EKeep::Tail>(Str, Set);
+	}
+
+	/** Get trailing substring with all characters in set */
+	template<class StringType>
+	static constexpr StringType FindSuffixWith(const StringType& Str, FAsciiSet Set)
+	{
+		return Scan<EDir::Reverse, EInclude::Members, EKeep::Tail>(Str, Set);
+	}
+
+	/** Get trailing substring with no characters in set */
+	template<class StringType>
+	static constexpr StringType FindSuffixWithout(const StringType& Str, FAsciiSet Set)
+	{
+		return Scan<EDir::Reverse, EInclude::NonMembers, EKeep::Tail>(Str, Set);
+	}
+
+	/** Trim trailing characters in set */
+	template<class StringType>
+	static constexpr StringType TrimSuffixWith(const StringType& Str, FAsciiSet Set)
+	{
+		return Scan<EDir::Reverse, EInclude::Members, EKeep::Head>(Str, Set);
+	}
+
+	/** Trim trailing characters not in set */
+	template<class StringType>
+	static constexpr StringType TrimSuffixWithout(const StringType& Str, FAsciiSet Set)
+	{
+		return Scan<EDir::Reverse, EInclude::NonMembers, EKeep::Head>(Str, Set);
+	}
+	
+	/** Test if string contains any character in set */
+	template<class StringType>
+	static constexpr bool HasAny(const StringType& Str, FAsciiSet Set)
+	{
+		return !HasNone(Str, Set);
+	}
+
+	/** Test if string contains no character in set */
+	template<class StringType>
+	static constexpr bool HasNone(const StringType& Str, FAsciiSet Set)
+	{
+		uint64 Match = 0;
+		for (auto Char : Str)
+		{
+			Match |= Set.Test(Char);
+		}
+		return Match == 0;
+	}
+
+	/** Test if string contains any character outside of set */
+	template<class StringType>
+	static constexpr bool HasOnly(const StringType& Str, FAsciiSet Set)
+	{
+		auto End = GetData(Str) + GetNum(Str);
+		return FindFirst<EInclude::Members>(Set, GetData(Str), End) == End;
+	}
+
 private:
+	enum class EDir {Forward, Reverse};
+	enum class EInclude {Members, NonMembers};
+	enum class EKeep {Head, Tail};
+
+	template<EInclude Include, typename CharType>
+	static constexpr const CharType* FindFirst(FAsciiSet Set, const CharType* It, const CharType* End)
+	{
+		for (; It != End && (Include == EInclude::Members) == !!Set.Test(*It); ++It);
+		return It;
+	}
+
+	template<EInclude Include, typename CharType>
+	static constexpr const CharType* FindLast(FAsciiSet Set, const CharType* It, const CharType* End)
+	{
+		for (; It != End && (Include == EInclude::Members) == !!Set.Test(*It); --It);
+		return It;
+	}
+
+	template<EDir Dir, EInclude Include, EKeep Keep, class StringType>
+	static constexpr StringType Scan(const StringType& Str, FAsciiSet Set)
+	{
+		auto Begin = GetData(Str);
+		auto End = Begin + GetNum(Str);
+		auto It = Dir == EDir::Forward	? FindFirst<Include>(Set, Begin, End)
+										: FindLast<Include>(Set, End - 1, Begin - 1) + 1;
+
+		return Keep == EKeep::Head	? StringType(Begin, static_cast<int32>(It - Begin))
+									: StringType(It, static_cast<int32>(End - It));
+	}
+
 	// Work-around for constexpr limitations
 	struct InitData { uint64 Lo, Hi; };
 	static constexpr uint64 NilMask = uint64(1) << '\0';

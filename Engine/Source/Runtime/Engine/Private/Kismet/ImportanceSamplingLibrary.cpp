@@ -2,10 +2,11 @@
 
 #include "Kismet/ImportanceSamplingLibrary.h"
 #include "Math/Sobol.h"
-#include "Math/UnrealMathUtility.h"
 #include "Engine/Texture2D.h"
+#include "TextureCompiler.h"
 #include "UObject/Stack.h"
-#include "UObject/NoExportTypes.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ImportanceSamplingLibrary)
 
 #define LOCTEXT_NAMESPACE "ImportanceSamplingLibrary"
 
@@ -60,7 +61,7 @@ float FImportanceTexture::ImportanceWeight(FColor Texel, TEnumAsByte<EImportance
 	FLinearColor LinearTexel = (Texture.IsValid() && Texture->SRGB) ? FLinearColor(Texel) : Texel.ReinterpretAsLinear();
 
 	switch (WeightingFunc) {
-	case EImportanceWeight::Luminance:	return LinearTexel.ComputeLuminance();
+	case EImportanceWeight::Luminance:	return LinearTexel.GetLuminance();
 	case EImportanceWeight::Red:		return LinearTexel.R;
 	case EImportanceWeight::Green:		return LinearTexel.G;
 	case EImportanceWeight::Blue:		return LinearTexel.B;
@@ -71,6 +72,15 @@ float FImportanceTexture::ImportanceWeight(FColor Texel, TEnumAsByte<EImportance
 
 void FImportanceTexture::Initialize(UTexture2D *SourceTexture, TEnumAsByte<EImportanceWeight::Type> WeightingFunc)
 {
+#if WITH_EDITOR
+	// For now, this doesn't support being refreshed once the source texture compilation is done.
+	// So force it to finish its compilation if it is not yet done to avoid getting the default's texture data.
+	if (SourceTexture && SourceTexture->IsCompiling())
+	{
+		FTextureCompilingManager::Get().FinishCompilation({ SourceTexture });
+	}
+#endif
+
 	if (!SourceTexture || SourceTexture->GetPixelFormat() != EPixelFormat::PF_B8G8R8A8)
 	{
 		Texture = 0;
@@ -89,10 +99,13 @@ void FImportanceTexture::Initialize(UTexture2D *SourceTexture, TEnumAsByte<EImpo
 	int32 FirstMip = FMath::Max(0, SourceMips - MAX_MIP_LEVELS);
 	NumMips = SourceMips - FirstMip;
 	MipData.AddZeroed(NumMips);
+	// this gets the PlatformData mip data, not the Source:
 	SourceTexture->GetMipData(FirstMip, (void**)MipData.GetData());
 
 	// Copy just the needed MIP data and adjust size
+	// todo: why is it being copied? just use MipData
 	FIntPoint SrcSize = FIntPoint(SourceTexture->GetSizeX(), SourceTexture->GetSizeY());
+	// todo: this mip size computation looks wrong
 	Size = FIntPoint(((SrcSize.X - 1) >> FirstMip) + 1, ((SrcSize.Y - 1) >> FirstMip) + 1);
 	FIntPoint LastMipSize(((Size.X - 1) >> (NumMips - 1)) + 1, ((Size.Y - 1) >> (NumMips - 1)) + 1);
 	size_t MipDataSize = (4 * Size.X * Size.Y - LastMipSize.X * LastMipSize.Y) / 3;
@@ -254,3 +267,4 @@ void UImportanceSamplingLibrary::ImportanceSample(const FImportanceTexture &Text
 #undef LOCTEXT_NAMESPACE
 #undef BINARY_SEARCH_LIMIT
 #undef MAX_MIP_LEVELS
+

@@ -6,18 +6,33 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
 #include "Engine/EngineTypes.h"
 #include "Templates/RefCounting.h"
-#include "RHI.h"
 #include "RenderResource.h"
+#include "Containers/DynamicRHIResourceArray.h"
+#include "Math/DoubleFloat.h"
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
+#include "Misc/LargeWorldRenderPosition.h"
+#include "RHI.h"
 #include "HitProxies.h"
 #include "SceneView.h"
 #include "StaticBoundShaderState.h"
 #include "PipelineStateCache.h"
+#endif
+
+class FGraphicsPipelineStateInitializer;
+class FHitProxyId;
+class FRHICommandList;
+class FSceneView;
 
 struct FBatchedPoint;
 struct FMeshPassProcessorRenderState;
+struct FDFRelativeViewMatrices;
+
+enum EBlendMode : int;
+enum ESimpleElementBlendMode : int;
 
 namespace EBlendModeFilter
 {
@@ -33,19 +48,27 @@ namespace EBlendModeFilter
 /** The type used to store batched line vertices. */
 struct FSimpleElementVertex
 {
-	FVector4 Position;
-	FVector2D TextureCoordinate;
+	// Store LWC-scale positions per-vertex
+	// Could potentially optimize this by storing a global batch offset, along with relative position per-vertex, but this would be more complicated
+	// Could also pack this structure to save some space, W component of position is currently unused for example
+	FDFVector4 Position;
+	FVector2f TextureCoordinate;
 	FLinearColor Color;
 	FColor HitProxyIdColor;
 
-	FSimpleElementVertex() {}
+	ENGINE_API FSimpleElementVertex();
 
-	FSimpleElementVertex(const FVector4& InPosition,const FVector2D& InTextureCoordinate,const FLinearColor& InColor,FHitProxyId InHitProxyId):
-		Position(InPosition),
-		TextureCoordinate(InTextureCoordinate),
-		Color(InColor),
-		HitProxyIdColor(InHitProxyId.GetColor())
-	{}
+	ENGINE_API FSimpleElementVertex(const FVector4f& InPosition, const FVector2f& InTextureCoordinate, const FLinearColor& InColor, const FColor& InHitProxyColor);
+	ENGINE_API FSimpleElementVertex(const FVector4f& InPosition, const FVector2D& InTextureCoordinate, const FLinearColor& InColor, const FColor& InHitProxyColor);
+	ENGINE_API FSimpleElementVertex(const FVector3f& InPosition, const FVector2D& InTextureCoordinate, const FLinearColor& InColor, const FColor& InHitProxyColor);
+	ENGINE_API FSimpleElementVertex(const FVector4d& InPosition, const FVector2D& InTextureCoordinate, const FLinearColor& InColor, const FColor& InHitProxyColor);
+	ENGINE_API FSimpleElementVertex(const FVector3d& InPosition, const FVector2D& InTextureCoordinate, const FLinearColor& InColor, const FColor& InHitProxyColor);
+
+	ENGINE_API FSimpleElementVertex(const FVector4f& InPosition, const FVector2f& InTextureCoordinate, const FLinearColor& InColor, FHitProxyId InHitProxyId);
+	ENGINE_API FSimpleElementVertex(const FVector4f& InPosition, const FVector2D& InTextureCoordinate, const FLinearColor& InColor, FHitProxyId InHitProxyId);
+	ENGINE_API FSimpleElementVertex(const FVector3f& InPosition, const FVector2D& InTextureCoordinate, const FLinearColor& InColor, FHitProxyId InHitProxyId);
+	ENGINE_API FSimpleElementVertex(const FVector4d& InPosition, const FVector2D& InTextureCoordinate, const FLinearColor& InColor, FHitProxyId InHitProxyId);
+	ENGINE_API FSimpleElementVertex(const FVector3d& InPosition, const FVector2D& InTextureCoordinate, const FLinearColor& InColor, FHitProxyId InHitProxyId);
 };
 
 /**
@@ -54,27 +77,14 @@ struct FSimpleElementVertex
 class FSimpleElementVertexDeclaration : public FRenderResource
 {
 public:
-
 	FVertexDeclarationRHIRef VertexDeclarationRHI;
 
-	// Destructor.
-	virtual ~FSimpleElementVertexDeclaration() {}
+	ENGINE_API FSimpleElementVertexDeclaration();
+	ENGINE_API FSimpleElementVertexDeclaration(FSimpleElementVertexDeclaration&&);
+	ENGINE_API virtual ~FSimpleElementVertexDeclaration();
 
-	virtual void InitRHI() override
-	{
-		FVertexDeclarationElementList Elements;
-		uint16 Stride = sizeof(FSimpleElementVertex);
-		Elements.Add(FVertexElement(0,STRUCT_OFFSET(FSimpleElementVertex,Position),VET_Float4,0,Stride));
-		Elements.Add(FVertexElement(0,STRUCT_OFFSET(FSimpleElementVertex,TextureCoordinate),VET_Float2,1,Stride));
-		Elements.Add(FVertexElement(0,STRUCT_OFFSET(FSimpleElementVertex,Color),VET_Float4,2,Stride));
-		Elements.Add(FVertexElement(0,STRUCT_OFFSET(FSimpleElementVertex,HitProxyIdColor),VET_Color,3,Stride));
-		VertexDeclarationRHI = PipelineStateCache::GetOrCreateVertexDeclaration(Elements);
-	}
-
-	virtual void ReleaseRHI() override
-	{
-		VertexDeclarationRHI.SafeRelease();
-	}
+	ENGINE_API virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
+	ENGINE_API virtual void ReleaseRHI() override;
 };
 
 /** The simple element vertex declaration. */
@@ -90,6 +100,7 @@ class FBatchedElementParameters
 public:
 
 	/** Binds vertex and pixel shaders for this element */
+	// LWC_TODO - InTransform should be a FMatrix44f, and/or should extend this with a method that takes FRelativeViewMatrices, to allow LWC-aware rendering with customized shaders
 	virtual void BindShaders(FRHICommandList& RHICmdList, FGraphicsPipelineStateInitializer& GraphicsPSOInit, ERHIFeatureLevel::Type InFeatureLevel, const FMatrix& InTransform, const float InGamma, const FMatrix& ColorWeights, const FTexture* Texture) = 0;
 
 };
@@ -97,41 +108,36 @@ public:
 
 
 /** Batched elements for later rendering. */
-class ENGINE_API FBatchedElements
+class FBatchedElements
 {
 public:
-
 	/**
-	* Constructor 
-	*/
-	FBatchedElements()
-		:	MaxMeshIndicesAllowed(GDrawUPIndexCheckCount / sizeof(int32))
-			// the index buffer is 2 bytes, so make sure we only address 0xFFFF vertices in the index buffer
-		,	MaxMeshVerticesAllowed(FMath::Min<uint32>(0xFFFF, GDrawUPVertexCheckCount / sizeof(FSimpleElementVertex)))
-		,	bEnableHDREncoding(true)
-	{
-	}
+	 * Constructor 
+	 */
+	ENGINE_API FBatchedElements();
 
 	/** Adds a line to the batch. Note only SE_BLEND_Opaque will be used for batched line rendering. */
-	void AddLine(const FVector& Start,const FVector& End,const FLinearColor& Color,FHitProxyId HitProxyId, float Thickness = 0.0f, float DepthBias = 0.0f, bool bScreenSpace = false);
+	ENGINE_API void AddLine(const FVector& Start,const FVector& End,const FLinearColor& Color,FHitProxyId HitProxyId, float Thickness = 0.0f, float DepthBias = 0.0f, bool bScreenSpace = false);
 
 	/** Adds a translucent line to the batch. */
-	void AddTranslucentLine(const FVector& Start, const FVector& End, const FLinearColor& Color, FHitProxyId HitProxyId, float Thickness = 0.0f, float DepthBias = 0.0f, bool bScreenSpace = false);
+	ENGINE_API void AddTranslucentLine(const FVector& Start, const FVector& End, const FLinearColor& Color, FHitProxyId HitProxyId, float Thickness = 0.0f, float DepthBias = 0.0f, bool bScreenSpace = false);
 
 	/** Adds a point to the batch. Note only SE_BLEND_Opaque will be used for batched point rendering. */
-	void AddPoint(const FVector& Position,float Size,const FLinearColor& Color,FHitProxyId HitProxyId);
+	ENGINE_API void AddPoint(const FVector& Position,float Size,const FLinearColor& Color,FHitProxyId HitProxyId);
 
+	/** This is for compatibility but should be avoided since it's slower due to conversions. */
+	ENGINE_API int32 AddVertex(const FVector4& InPosition, const FVector2D& InTextureCoordinate, const FLinearColor& InColor, FHitProxyId HitProxyId);
 	/** Adds a mesh vertex to the batch. */
-	int32 AddVertex(const FVector4& InPosition,const FVector2D& InTextureCoordinate,const FLinearColor& InColor,FHitProxyId HitProxyId);
+	ENGINE_API int32 AddVertexf(const FVector4f& InPosition, const FVector2f& InTextureCoordinate, const FLinearColor& InColor, FHitProxyId HitProxyId);
 
 	/** Adds a triangle to the batch. */
-	void AddTriangle(int32 V0,int32 V1,int32 V2,const FTexture* Texture,EBlendMode BlendMode);
+	ENGINE_API void AddTriangle(int32 V0,int32 V1,int32 V2,const FTexture* Texture,EBlendMode BlendMode);
 
 	/** Adds a triangle to the batch. */
-	void AddTriangle(int32 V0, int32 V1, int32 V2, const FTexture* Texture, ESimpleElementBlendMode BlendMode, const FDepthFieldGlowInfo& GlowInfo = FDepthFieldGlowInfo());
+	ENGINE_API void AddTriangle(int32 V0, int32 V1, int32 V2, const FTexture* Texture, ESimpleElementBlendMode BlendMode, const FDepthFieldGlowInfo& GlowInfo = FDepthFieldGlowInfo());
 
 	/** Adds a triangle to the batch. */
-	void AddTriangle(int32 V0,int32 V1,int32 V2,FBatchedElementParameters* BatchedElementParameters,ESimpleElementBlendMode BlendMode);
+	ENGINE_API void AddTriangle(int32 V0,int32 V1,int32 V2,FBatchedElementParameters* BatchedElementParameters,ESimpleElementBlendMode BlendMode);
 
 	/** 
 	* Reserves space in index array for a mesh element for current number plus expected number.
@@ -140,7 +146,7 @@ public:
 	* @param Texture - used to find the mesh element entry
 	* @param BlendMode - used to find the mesh element entry
 	*/
-	void AddReserveTriangles(int32 NumMeshTriangles,const FTexture* Texture,ESimpleElementBlendMode BlendMode);
+	ENGINE_API void AddReserveTriangles(int32 NumMeshTriangles,const FTexture* Texture,ESimpleElementBlendMode BlendMode);
 
 	/** 
 	* Reserves space in index array for a mesh element
@@ -149,7 +155,7 @@ public:
 	* @param Texture - used to find the mesh element entry
 	* @param BlendMode - used to find the mesh element entry
 	*/
-	void ReserveTriangles(int32 NumMeshTriangles,const FTexture* Texture,ESimpleElementBlendMode BlendMode);
+	ENGINE_API void ReserveTriangles(int32 NumMeshTriangles,const FTexture* Texture,ESimpleElementBlendMode BlendMode);
 	
 	/** 
 	* Reserves space in mesh vertex array for current number plus expected number.
@@ -158,7 +164,7 @@ public:
 	* @param Texture - used to find the mesh element entry
 	* @param BlendMode - used to find the mesh element entry
 	*/
-	void AddReserveVertices(int32 NumMeshVerts);
+	ENGINE_API void AddReserveVertices(int32 NumMeshVerts);
 
 	/** 
 	* Reserves space in mesh vertex array for at least this many total verts.
@@ -167,7 +173,7 @@ public:
 	* @param Texture - used to find the mesh element entry
 	* @param BlendMode - used to find the mesh element entry
 	*/
-	void ReserveVertices(int32 NumMeshVerts);
+	ENGINE_API void ReserveVertices(int32 NumMeshVerts);
 
 	/** 
 	 * Reserves space in line vertex array
@@ -176,10 +182,10 @@ public:
 	 * @param bDepthBiased - whether reserving depth-biased lines or non-biased lines
 	 * @param bThickLines - whether reserving regular lines or thick lines
 	 */
-	void AddReserveLines(int32 NumLines, bool bDepthBiased = false, bool bThickLines = false);
+	ENGINE_API void AddReserveLines(int32 NumLines, bool bDepthBiased = false, bool bThickLines = false);
 
 	/** Adds a sprite to the batch. */
-	void AddSprite(
+	ENGINE_API void AddSprite(
 		const FVector& Position,
 		float SizeX,
 		float SizeY,
@@ -190,23 +196,10 @@ public:
 		float UL,
 		float V,
 		float VL,
-		uint8 BlendMode = SE_BLEND_Masked
+		uint8 BlendMode,
+		float OpacityMaskRefVal
 		);
 
-	/** 
-	 *Draws the batch
-	 *
-	 * @param Transform	The transform matrix for each viewport (View->ViewProjectionMatrix)
-	 * @param ViewportSizeX	The width of the viewport
-	 * @param ViewportSizeY The height of the viewport
-	 * @param bHitTesting	Whether or not we are hit testing
-	 * @param Gamma			Optional gamma override
-	 * @param View			Optional FSceneView for shaders that need access to view constants
-	 * @param DepthTexture	DepthTexture for manual depth testing with editor compositing in the pixel shader
-	 */
-	UE_DEPRECATED(4.14, "Deprecated. Use the FBatchedElements::Draw method that takes a non-optional FSceneView parameter instead")
-	bool Draw(FRHICommandList& RHICmdList, const FMeshPassProcessorRenderState& DrawRenderState, ERHIFeatureLevel::Type FeatureLevel, bool bNeedToSwitchVerticalAxis, const FMatrix& Transform, uint32 ViewportSizeX, uint32 ViewportSizeY, bool bHitTesting, float Gamma = 1.0f, const FSceneView* View = nullptr, EBlendModeFilter::Type Filter = EBlendModeFilter::All) const;
-	
 	/**
 	 * Draws the batch
 	 *
@@ -215,12 +208,12 @@ public:
 	 * @param Gamma			Optional gamma override
 	 * @param DepthTexture	DepthTexture for manual depth testing with editor compositing in the pixel shader
 	 */
-	bool Draw(FRHICommandList& RHICmdList, const FMeshPassProcessorRenderState& DrawRenderState, ERHIFeatureLevel::Type FeatureLevel, bool bNeedToSwitchVerticalAxis, const FSceneView& View, bool bHitTesting, float Gamma = 1.0f, EBlendModeFilter::Type Filter = EBlendModeFilter::All) const;
+	ENGINE_API bool Draw(FRHICommandList& RHICmdList, const FMeshPassProcessorRenderState& DrawRenderState, ERHIFeatureLevel::Type FeatureLevel, const FSceneView& View, bool bHitTesting, float Gamma = 1.0f, EBlendModeFilter::Type Filter = EBlendModeFilter::All) const;
 
 	/**
 	 * Creates a proxy FSceneView for operations that are not tied directly to a scene but still require batched elements to be drawn.
 	 */
-	static FSceneView CreateProxySceneView(const FMatrix& ProjectionMatrix, const FIntRect& ViewRect);
+	static ENGINE_API FSceneView CreateProxySceneView(const FMatrix& ProjectionMatrix, const FIntRect& ViewRect);
 
 	FORCEINLINE bool HasPrimsToDraw() const
 	{
@@ -228,10 +221,10 @@ public:
 	}
 
 	/** Adds a triangle to the batch. Extensive version where all parameters can be passed in. */
-	void AddTriangleExtensive(int32 V0,int32 V1,int32 V2,FBatchedElementParameters* BatchedElementParameters,const FTexture* Texture,ESimpleElementBlendMode BlendMode, const FDepthFieldGlowInfo& GlowInfo = FDepthFieldGlowInfo());
+	ENGINE_API void AddTriangleExtensive(int32 V0,int32 V1,int32 V2,FBatchedElementParameters* BatchedElementParameters,const FTexture* Texture,ESimpleElementBlendMode BlendMode, const FDepthFieldGlowInfo& GlowInfo = FDepthFieldGlowInfo());
 
 	/** Clears any batched elements **/
-	void Clear();
+	ENGINE_API void Clear();
 
 	/** 
 	 * Helper function to return the amount of memory allocated by this class 
@@ -244,10 +237,35 @@ public:
 			+ Sprites.GetAllocatedSize() + MeshElements.GetAllocatedSize() + MeshVertices.GetAllocatedSize();
 	}
 
-	void EnableMobileHDREncoding(bool bInEnableHDREncoding)
+	UE_DEPRECATED(5.4, "EnableMobileHDREncoding is no longer supported")
+	void EnableMobileHDREncoding(bool bInEnableHDREncoding) {}
+
+	class FAllocationInfo
 	{
-		bEnableHDREncoding = bInEnableHDREncoding;
-	}
+	public:
+		FAllocationInfo() = default;
+
+	private:
+		int32 NumLineVertices = 0;
+		int32 NumPoints = 0;
+		int32 NumWireTris = 0;
+		int32 NumWireTriVerts = 0;
+		int32 NumThickLines = 0;
+		int32 NumSprites = 0;
+		int32 NumMeshElements = 0;
+		int32 NumMeshVertices = 0;
+
+		friend FBatchedElements;
+	};
+
+	/** Accumulates allocation info for use calling Reserve. */
+	ENGINE_API void AddAllocationInfo(FAllocationInfo& AllocationInfo) const;
+
+	/** Reserves memory for all containers. */
+	ENGINE_API void Reserve(const FAllocationInfo& AllocationInfo);
+
+	/** Appends contents of another batched elements into this one and clears the other one. */
+	ENGINE_API void Append(FBatchedElements& Other);
 
 private:
 
@@ -260,7 +278,7 @@ private:
 	 * @param	CameraX		Local space normalized view direction X vector
 	 * @param	CameraY		Local space normalized view direction Y vector
 	 */
-	void DrawPointElements(FRHICommandList& RHICmdList, const FMatrix& Transform, const uint32 ViewportSizeX, const uint32 ViewportSizeY, const FVector& CameraX, const FVector& CameraY) const;
+	ENGINE_API void DrawPointElements(FRHICommandList& RHICmdList, const FMatrix& Transform, const uint32 ViewportSizeX, const uint32 ViewportSizeY, const FVector& CameraX, const FVector& CameraY) const;
 
 	TArray<FSimpleElementVertex> LineVertices;
 
@@ -269,7 +287,7 @@ private:
 		FVector Position;
 		float Size;
 		FColor Color;
-		FHitProxyId HitProxyId;
+		FColor HitProxyColor;
 	};
 	TArray<FBatchedPoint> Points;
 
@@ -278,7 +296,8 @@ private:
 		float DepthBias;
 	};
 	TArray<FBatchedWireTris> WireTris;
-	TArray<FSimpleElementVertex> WireTriVerts;
+
+	mutable TResourceArray<FSimpleElementVertex> WireTriVerts;
 
 	struct FBatchedThickLines
 	{
@@ -286,7 +305,7 @@ private:
 		FVector End;
 		float Thickness;
 		FLinearColor Color;
-		FHitProxyId HitProxyId;
+		FColor HitProxyColor;
 		float DepthBias;
 		uint32 bScreenSpace;
 	};
@@ -299,15 +318,15 @@ private:
 		float SizeY;
 		const FTexture* Texture;
 		FLinearColor Color;
-		FHitProxyId HitProxyId;
+		FColor HitProxyColor;
 		float U;
 		float UL;
 		float V;
 		float VL;
+		float OpacityMaskRefVal;
 		uint8 BlendMode;
 	};
-	/** This array is sorted during draw-calls */
-	mutable TArray<FBatchedSprite> Sprites;
+	TArray<FBatchedSprite> Sprites;
 
 	struct FBatchedMeshElement
 	{
@@ -335,46 +354,23 @@ private:
 	TArray<FBatchedMeshElement,TInlineAllocator<2> > MeshElements;
 	TArray<FSimpleElementVertex,TInlineAllocator<4> > MeshVertices;
 
-	/** bound shader state for the fast path */
-	class FSimpleElementBSSContainer
-	{
-		static const uint32 NumBSS = (uint32)SE_BLEND_RGBA_MASK_START;
-		FGlobalBoundShaderState UnencodedBSS;
-		FGlobalBoundShaderState EncodedBSS[NumBSS];
-	public:
-		FGlobalBoundShaderState& GetBSS(bool bEncoded, ESimpleElementBlendMode BlendMode)
-		{
-			if (bEncoded)
-			{
-				check((uint32)BlendMode < NumBSS);
-				return EncodedBSS[BlendMode];
-			}
-			else
-			{
-				return UnencodedBSS;
-			}
-		}
-	};
-
 	/**
 	 * Sets the appropriate vertex and pixel shader.
 	 */
-	void PrepareShaders(
+	ENGINE_API void PrepareShaders(
 		FRHICommandList& RHICmdList,
 		FGraphicsPipelineStateInitializer& GraphicsPSOInit,
+		uint32 StencilRef,
 		ERHIFeatureLevel::Type FeatureLevel,
 		ESimpleElementBlendMode BlendMode,
-		const FMatrix& Transform,
-		bool bSwitchVerticalAxis,
+		const FDFRelativeViewMatrices& ViewMatrices,
 		FBatchedElementParameters* BatchedElementParameters,
 		const FTexture* Texture,
 		bool bHitTesting,
 		float Gamma,
-		const FDepthFieldGlowInfo* GlowInfo = NULL,
-		const FSceneView* View = NULL
+		const FDepthFieldGlowInfo* GlowInfo = nullptr,
+		const FSceneView* View = nullptr,
+		float OpacityMaskRefVal = .5f
 		) const;
-
-	/** if false then prevent the use of HDR encoded shaders. */
-	bool bEnableHDREncoding;
 };
 

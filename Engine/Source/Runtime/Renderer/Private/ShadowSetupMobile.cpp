@@ -7,6 +7,7 @@ ShadowSetupMobile.cpp: Shadow setup implementation for mobile specific features.
 #include "CoreMinimal.h"
 #include "Stats/Stats.h"
 #include "HAL/IConsoleManager.h"
+#include "Engine/World.h"
 #include "EngineDefines.h"
 #include "ConvexVolume.h"
 #include "RendererInterface.h"
@@ -15,6 +16,11 @@ ShadowSetupMobile.cpp: Shadow setup implementation for mobile specific features.
 #include "SceneRendering.h"
 #include "DynamicPrimitiveDrawing.h"
 #include "ScenePrivate.h"
+#include "MeshPassProcessor.h"
+#include "UObject/UObjectIterator.h"
+#include "RenderCore.h"
+#include "ShadowRendering.h"
+#include "StaticMeshBatch.h"
 
 static TAutoConsoleVariable<int32> CVarCsmShaderCullingDebugGfx(
 	TEXT("r.Mobile.Shadow.CSMShaderCullingDebugGfx"),
@@ -22,7 +28,7 @@ static TAutoConsoleVariable<int32> CVarCsmShaderCullingDebugGfx(
 	TEXT(""),
 	ECVF_RenderThreadSafe);
 
-const uint32 CSMShaderCullingMethodDefault = !PLATFORM_LUMIN;
+const uint32 CSMShaderCullingMethodDefault = 1;
 static TAutoConsoleVariable<int32> CVarsCsmShaderCullingMethod(
 	TEXT("r.Mobile.Shadow.CSMShaderCullingMethod"),
 	CSMShaderCullingMethodDefault,
@@ -31,8 +37,52 @@ static TAutoConsoleVariable<int32> CVarsCsmShaderCullingMethod(
 	TEXT("1 - Light frustum, all primitives whose bounding box is within CSM receiving distance. (default)\n")
 	TEXT("2 - Combined caster bounds, all primitives whose bounds are within CSM receiving distance and the capsule of the combined bounds of all casters.\n")
 	TEXT("3 - Light frustum + caster bounds, all primitives whose bounds are within CSM receiving distance and capsule of at least one caster. (slowest)\n")
+	TEXT("4 - Cull all. Prevent primitives from receiving CSM shadows.\n")
+	TEXT("5 - Disable culling if mobile distance field shadowing is used for all views.\n")
 	TEXT("Combine with 16 to change primitive bounding test to spheres instead of box. (i.e. 18 == combined casters + sphere test)")
 	,ECVF_RenderThreadSafe);
+
+static void OnCsmShaderCullingMethodChanged()
+{
+	// Cannot do this in editors because feature levels can change
+#if !WITH_EDITOR
+	static int32 PrevValue = CSMShaderCullingMethodDefault;
+	const int32 CurValue = (CVarsCsmShaderCullingMethod.GetValueOnGameThread() & 0xF);
+	
+	if (CurValue != PrevValue && (CurValue == 5 || PrevValue == 5))
+	{
+		PrevValue = CurValue;
+
+		if (CurValue == 5)
+		{
+			TArray<ERHIFeatureLevel::Type> UsedFeatureLevels;
+			for (TObjectIterator<UWorld> It; It; ++It)
+			{
+				const UWorld* World = *It;
+				if (World && World->Scene)
+				{
+					UsedFeatureLevels.AddUnique(World->Scene->GetFeatureLevel());
+				}
+			}
+
+			bool bBasePassAlwaysUseCSM = UsedFeatureLevels.Num() > 0;
+			for (ERHIFeatureLevel::Type FeatureLevel : UsedFeatureLevels)
+			{
+				bBasePassAlwaysUseCSM = bBasePassAlwaysUseCSM && MobileBasePassAlwaysUsesCSM(GetFeatureLevelShaderPlatform(FeatureLevel));
+			}
+
+			const EMeshPassFlags NewFlags = bBasePassAlwaysUseCSM ? EMeshPassFlags::MainView : (EMeshPassFlags::CachedMeshCommands | EMeshPassFlags::MainView);
+			FPassProcessorManager::SetPassFlags(EShadingPath::Mobile, EMeshPass::MobileBasePassCSM, NewFlags);
+		}
+		else
+		{
+			FPassProcessorManager::SetPassFlags(EShadingPath::Mobile, EMeshPass::MobileBasePassCSM, EMeshPassFlags::CachedMeshCommands | EMeshPassFlags::MainView);
+		}
+	}
+#endif
+}
+
+static FAutoConsoleVariableSink CVarsCsmShaderCullingMethodSink(FConsoleCommandDelegate::CreateStatic(&OnCsmShaderCullingMethodChanged));
 
 static bool CouldStaticMeshEverReceiveCSMFromStationaryLight(ERHIFeatureLevel::Type FeatureLevel, const FPrimitiveSceneInfo* PrimitiveSceneInfo, const FStaticMeshBatch& StaticMesh)
 {
@@ -99,28 +149,21 @@ static bool MobileDetermineStaticMeshesCSMVisibilityStateInner(
 	const FLightSceneInfo& LightSceneInfo = ProjectedShadowInfo->GetLightSceneInfo();
 	FLightSceneProxy* RESTRICT LightProxy = LightSceneInfo.Proxy;
 	FVector LightDir = LightProxy->GetDirection();
-	const float ShadowCastLength = WORLD_MAX;
 
 	FPrimitiveSceneInfo* RESTRICT	PrimitiveSceneInfo = PrimitiveSceneInfoCompact.PrimitiveSceneInfo;
 	FPrimitiveSceneProxy* RESTRICT	PrimitiveProxy = PrimitiveSceneInfoCompact.Proxy;
-	const FBoxSphereBounds&			PrimitiveBounds = PrimitiveSceneInfoCompact.Bounds;
+	const FBoxSphereBounds			PrimitiveBounds(PrimitiveSceneInfoCompact.Bounds);
 	bool bFoundCSMReceiver = false;
 	if (PrimitiveProxy->WillEverBeLit() && PrimitiveProxy->ShouldReceiveMobileCSMShadows()
 		&& (PrimitiveProxy->GetLightingChannelMask() & LightProxy->GetLightingChannelMask()) != 0)
 	{
-
-		if (ProjectedShadowInfo->bReflectiveShadowmap && !PrimitiveProxy->AffectsDynamicIndirectLighting())
-		{
-			return bFoundCSMReceiver;
-		}
-
 		const FVector LightDirection = LightProxy->GetDirection();
 		const FVector PrimitiveToShadowCenter = ProjectedShadowInfo->ShadowBounds.Center - PrimitiveBounds.Origin;
 		// Project the primitive's bounds origin onto the light vector
-		const float ProjectedDistanceFromShadowOriginAlongLightDir = PrimitiveToShadowCenter | LightDirection;
+		const FVector::FReal ProjectedDistanceFromShadowOriginAlongLightDir = PrimitiveToShadowCenter | LightDirection;
 		// Calculate the primitive's squared distance to the cylinder's axis
-		const float PrimitiveDistanceFromCylinderAxisSq = (-LightDirection * ProjectedDistanceFromShadowOriginAlongLightDir + PrimitiveToShadowCenter).SizeSquared();
-		const float CombinedRadiusSq = FMath::Square(ProjectedShadowInfo->ShadowBounds.W + PrimitiveBounds.SphereRadius);
+		const FVector::FReal PrimitiveDistanceFromCylinderAxisSq = (-LightDirection * ProjectedDistanceFromShadowOriginAlongLightDir + PrimitiveToShadowCenter).SizeSquared();
+		const FVector::FReal CombinedRadiusSq = FMath::Square(ProjectedShadowInfo->ShadowBounds.W + PrimitiveBounds.SphereRadius);
 
 		// Include all primitives for movable lights, but only statically shadowed primitives from a light with static shadowing,
 		// Since lights with static shadowing still create per-object shadows for primitives without static shadowing.
@@ -161,11 +204,11 @@ static bool MobileDetermineStaticMeshesCSMVisibilityState(FScene* Scene, FViewIn
 	{
 		QUICK_SCOPE_CYCLE_COUNTER(STAT_ShadowOctreeTraversal);
 		// Find primitives that are in a shadow frustum in the octree.
-		Scene->PrimitiveOctree.FindElementsWithPredicate([&IsReceiverFunc](const FBoxCenterAndExtent& NodeBounds)
+		Scene->PrimitiveOctree.FindElementsWithPredicate([&IsReceiverFunc](FScenePrimitiveOctree::FNodeIndex /*ParentNodeIndex*/, FScenePrimitiveOctree::FNodeIndex /*NodeIndex*/, const FBoxCenterAndExtent& NodeBounds)
 		{
 			return IsReceiverFunc(FVector(NodeBounds.Center), FVector(NodeBounds.Extent), NodeBounds.Extent.Size3());
 		},
-		[&bFoundReceiver, Scene, &View, WholeSceneShadow, &IsReceiverFunc](const FPrimitiveSceneInfoCompact& Primitive)
+		[&bFoundReceiver, Scene, &View, WholeSceneShadow, &IsReceiverFunc](FScenePrimitiveOctree::FNodeIndex /*ParentNodeIndex*/, const FPrimitiveSceneInfoCompact& Primitive)
 		{
 			// gather the shadows for this one primitive
 			bFoundReceiver = MobileDetermineStaticMeshesCSMVisibilityStateInner(Scene, View, Primitive, WholeSceneShadow, IsReceiverFunc) || bFoundReceiver;
@@ -191,7 +234,7 @@ static void VisualizeMobileDynamicCSMSubjectCapsules(FViewInfo& View, FLightScen
 	FVisibleLightViewInfo& VisibleLightViewInfo = View.VisibleLightInfos[LightSceneInfo->Id];
 	FMobileCSMSubjectPrimitives& MobileCSMSubjectPrimitives = VisibleLightViewInfo.MobileCSMSubjectPrimitives;
 	FVector LightDir = LightSceneInfo->Proxy->GetDirection();
-	const float ShadowCastLength = WORLD_MAX;
+	const FVector::FReal ShadowCastLength = WORLD_MAX;
 	const uint32 CullingMethod = CVarsCsmShaderCullingMethod.GetValueOnRenderThread() & 0xF;
 	const bool bSphereTest = (CVarsCsmShaderCullingMethod.GetValueOnRenderThread() & 0x10) != 0;
 
@@ -202,11 +245,12 @@ static void VisualizeMobileDynamicCSMSubjectCapsules(FViewInfo& View, FLightScen
 			// Combined bounds
 			FVector CombinedCasterStart;
 			FVector CombinedCasterEnd;
-			FBoxSphereBounds CombinedBounds(ForceInitToZero);
+			FBoxSphereBounds::Builder CombinedBoundsBuilder;
 			for (auto& Caster : MobileCSMSubjectPrimitives.GetShadowSubjectPrimitives())
 			{
-				CombinedBounds = (CombinedBounds.SphereRadius > 0.0f) ? CombinedBounds + Caster->Proxy->GetBounds() : Caster->Proxy->GetBounds();
+				CombinedBoundsBuilder += Caster->Proxy->GetBounds();
 			}
+			FBoxSphereBounds CombinedBounds(CombinedBoundsBuilder);
 			CombinedCasterStart = CombinedBounds.Origin;
 			CombinedCasterEnd = CombinedBounds.Origin + (LightDir * ShadowCastLength);
 
@@ -231,7 +275,7 @@ static void VisualizeMobileDynamicCSMSubjectCapsules(FViewInfo& View, FLightScen
 			{
 				// all culling modes draw the receiver frustum.
 				FViewElementPDI ShadowFrustumPDI(&View, nullptr, nullptr);
-				FMatrix Reciever = ProjectedShadowInfo->InvReceiverMatrix;
+				FMatrix Reciever(ProjectedShadowInfo->InvReceiverInnerMatrix);
 				DrawFrustumWireframe(&ShadowFrustumPDI, Reciever * FTranslationMatrix(-ProjectedShadowInfo->PreShadowTranslation), FColor::Cyan, 0);
 			}
 		}
@@ -240,54 +284,55 @@ static void VisualizeMobileDynamicCSMSubjectCapsules(FViewInfo& View, FLightScen
 }
 
 /** Finds the visible dynamic shadows for each view. */
-void FMobileSceneRenderer::InitDynamicShadows(FRHICommandListImmediate& RHICmdList)
+FDynamicShadowsTaskData* FMobileSceneRenderer::InitDynamicShadows(FRDGBuilder& GraphBuilder, FInstanceCullingManager& InstanceCullingManager)
 {
-	static auto* MyCVarMobileEnableStaticAndCSMShadowReceivers = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.Mobile.EnableStaticAndCSMShadowReceivers"));
-	const bool bCombinedStaticAndCSMEnabled = MyCVarMobileEnableStaticAndCSMShadowReceivers->GetValueOnRenderThread()!=0;
-
-	static auto* CVarMobileEnableMovableLightCSMShaderCulling = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.Mobile.EnableMovableLightCSMShaderCulling"));
-	const bool bMobileEnableMovableLightCSMShaderCulling = CVarMobileEnableMovableLightCSMShaderCulling->GetValueOnRenderThread() == 1;
+	const bool bCombinedStaticAndCSMEnabled = FReadOnlyCVARCache::MobileEnableStaticAndCSMShadowReceivers();
+	const bool bMobileEnableMovableLightCSMShaderCulling = FReadOnlyCVARCache::MobileEnableMovableLightCSMShaderCulling();
 
 	// initialize CSMVisibilityInfo for each eligible light.
 	for (FLightSceneInfo* MobileDirectionalLightSceneInfo : Scene->MobileDirectionalLights)
 	{
-		const FLightSceneProxy* LightSceneProxy = MobileDirectionalLightSceneInfo ? MobileDirectionalLightSceneInfo->Proxy : nullptr;
-		if (LightSceneProxy)
-		{
-			bool bLightHasCombinedStaticAndCSMEnabled = bCombinedStaticAndCSMEnabled && LightSceneProxy->UseCSMForDynamicObjects();
-			bool bMovableLightUsingCSM = bMobileEnableMovableLightCSMShaderCulling && LightSceneProxy->IsMovable() && MobileDirectionalLightSceneInfo->ShouldRenderViewIndependentWholeSceneShadows();
+		const bool bShouldRecordShadowSubjectsForMobile = MobileDirectionalLightSceneInfo ? MobileDirectionalLightSceneInfo->ShouldRecordShadowSubjectsForMobile() : false;
 
-			if (bLightHasCombinedStaticAndCSMEnabled || bMovableLightUsingCSM)
+		if (bShouldRecordShadowSubjectsForMobile)
+		{
+			int32 PrimitiveCount = Scene->Primitives.Num();
+			for (auto& View : Views)
 			{
-				int32 PrimitiveCount = Scene->Primitives.Num();
-				for (auto& View : Views)
-				{
-					FMobileCSMSubjectPrimitives& MobileCSMSubjectPrimitives = View.VisibleLightInfos[MobileDirectionalLightSceneInfo->Id].MobileCSMSubjectPrimitives;
-					MobileCSMSubjectPrimitives.InitShadowSubjectPrimitives(PrimitiveCount);
-				}
+				FMobileCSMSubjectPrimitives& MobileCSMSubjectPrimitives = View.VisibleLightInfos[MobileDirectionalLightSceneInfo->Id].MobileCSMSubjectPrimitives;
+				MobileCSMSubjectPrimitives.InitShadowSubjectPrimitives(PrimitiveCount);
 			}
 		}
 	}
 
-	FSceneRenderer::InitDynamicShadows(RHICmdList, DynamicIndexBuffer, DynamicVertexBuffer, DynamicReadBuffer);
-
-	PrepareViewVisibilityLists();
+	FDynamicShadowsTaskData* TaskData = FSceneRenderer::InitDynamicShadows(GraphBuilder, InstanceCullingManager);
 
 	bool bAlwaysUseCSM = false;
-	for (FLightSceneInfo* MobileDirectionalLightSceneInfo : Scene->MobileDirectionalLights)
+	const bool bSkipCSMShaderCulling = MobileBasePassAlwaysUsesCSM(Scene->GetShaderPlatform());
+
+	if (bSkipCSMShaderCulling)
 	{
-		const FLightSceneProxy* LightSceneProxy = MobileDirectionalLightSceneInfo ? MobileDirectionalLightSceneInfo->Proxy : nullptr;
-		if (LightSceneProxy)
+		bAlwaysUseCSM = true;
+	}
+	else
+	{
+		PrepareViewVisibilityLists();
+
+		for (FLightSceneInfo* MobileDirectionalLightSceneInfo : Scene->MobileDirectionalLights)
 		{
-			bool bLightHasCombinedStaticAndCSMEnabled = bCombinedStaticAndCSMEnabled && LightSceneProxy->UseCSMForDynamicObjects();
-			bool bMovableLightUsingCSM = bMobileEnableMovableLightCSMShaderCulling && LightSceneProxy->IsMovable() && MobileDirectionalLightSceneInfo->ShouldRenderViewIndependentWholeSceneShadows();
-			
-			// non-csm culling movable light will force all draws to use CSM shaders.
-			// TODO: Cases in which a light channel uses a shadow casting non-csm culled movable light we only really need to use CSM on primitives that match the light channel.
-			bAlwaysUseCSM = bAlwaysUseCSM || (!bMobileEnableMovableLightCSMShaderCulling && LightSceneProxy->IsMovable() && MobileDirectionalLightSceneInfo->ShouldRenderViewIndependentWholeSceneShadows());
-			if (bLightHasCombinedStaticAndCSMEnabled || bMovableLightUsingCSM)
+			const FLightSceneProxy* LightSceneProxy = MobileDirectionalLightSceneInfo ? MobileDirectionalLightSceneInfo->Proxy : nullptr;
+			if (LightSceneProxy)
 			{
-				BuildCSMVisibilityState(MobileDirectionalLightSceneInfo);
+				bool bLightHasCombinedStaticAndCSMEnabled = bCombinedStaticAndCSMEnabled && LightSceneProxy->UseCSMForDynamicObjects();
+				bool bMovableLightUsingCSM = bMobileEnableMovableLightCSMShaderCulling && LightSceneProxy->IsMovable() && MobileDirectionalLightSceneInfo->ShouldRenderViewIndependentWholeSceneShadows();
+
+				// non-csm culling movable light will force all draws to use CSM shaders.
+				// TODO: Cases in which a light channel uses a shadow casting non-csm culled movable light we only really need to use CSM on primitives that match the light channel.
+				bAlwaysUseCSM = bAlwaysUseCSM || (!bMobileEnableMovableLightCSMShaderCulling && LightSceneProxy->IsMovable() && MobileDirectionalLightSceneInfo->ShouldRenderViewIndependentWholeSceneShadows());
+				if (bLightHasCombinedStaticAndCSMEnabled || bMovableLightUsingCSM)
+				{
+					BuildCSMVisibilityState(MobileDirectionalLightSceneInfo);
+				}
 			}
 		}
 	}
@@ -296,12 +341,16 @@ void FMobileSceneRenderer::InitDynamicShadows(FRHICommandListImmediate& RHICmdLi
 	{
 		FMobileCSMVisibilityInfo& MobileCSMVisibilityInfo = View.MobileCSMVisibilityInfo;
 		MobileCSMVisibilityInfo.bAlwaysUseCSM = bAlwaysUseCSM;
+		if (bSkipCSMShaderCulling)
+		{
+			MobileCSMVisibilityInfo.bMobileDynamicCSMInUse = true;
+		}
 	}
 
 	{
 		// Check for modulated shadows. 
 		bModulatedShadowsInUse = false;
-		for (TSparseArray<FLightSceneInfoCompact>::TConstIterator LightIt(Scene->Lights); LightIt && bModulatedShadowsInUse == false; ++LightIt)
+		for (auto LightIt = Scene->Lights.CreateConstIterator(); LightIt && bModulatedShadowsInUse == false; ++LightIt)
 		{
 			const FLightSceneInfoCompact& LightSceneInfoCompact = *LightIt;
 			FLightSceneInfo* LightSceneInfo = LightSceneInfoCompact.LightSceneInfo;
@@ -310,6 +359,8 @@ void FMobileSceneRenderer::InitDynamicShadows(FRHICommandListImmediate& RHICmdLi
 			bModulatedShadowsInUse = VisibleLightInfo.ShadowsToProject.Num() > 0;
 		}
 	}
+
+	return TaskData;
 }
 
 // generate a single FProjectedShadowInfo to encompass LightSceneInfo.
@@ -337,10 +388,11 @@ bool BuildSingleCascadeShadowInfo(FViewInfo &View, TArray<FVisibleLightInfo, Sce
 				LightSceneInfo,
 				&View,
 				WholeSceneInitializer,
-				ShadowBufferResolution.X ,
+				ShadowBufferResolution.X,
 				ShadowBufferResolution.Y,
-				ShadowBorder,
-				false	// no RSM
+				ShadowBufferResolution.X,
+				ShadowBufferResolution.Y,
+				ShadowBorder
 			);
 			bSuccess = true;
 		}
@@ -392,7 +444,7 @@ void FMobileSceneRenderer::BuildCSMVisibilityState(FLightSceneInfo* LightSceneIn
 				float Far = ProjectedShadowInfo->CascadeSettings.SplitFar;
 
 				DrawFrustumWireframe(&ShadowFrustumPDI, (ViewMatrix * FPerspectiveMatrix(ActualFOV, AspectRatio, 1.0f, Near, Far)).Inverse(), FColor::Emerald, 0);
-				DrawFrustumWireframe(&ShadowFrustumPDI, ProjectedShadowInfo->SubjectAndReceiverMatrix.Inverse() * FTranslationMatrix(-ProjectedShadowInfo->PreShadowTranslation), FColor::Cyan, 0);
+				DrawFrustumWireframe(&ShadowFrustumPDI, FMatrix(ProjectedShadowInfo->TranslatedWorldToClipInnerMatrix.Inverse()) * FTranslationMatrix(-ProjectedShadowInfo->PreShadowTranslation), FColor::Cyan, 0);
 			}
 
 			FViewInfo* ShadowSubjectView = ProjectedShadowInfo->DependentView ? ProjectedShadowInfo->DependentView : &View;
@@ -410,7 +462,7 @@ void FMobileSceneRenderer::BuildCSMVisibilityState(FLightSceneInfo* LightSceneIn
 				GetViewFrustumBounds(ViewFrustum, View.ViewMatrices.GetViewProjectionMatrix(), true);
 				//FConvexVolume& ShadowReceiverFrustum = ProjectedShadowInfo->CascadeSettings.ShadowBoundsAccurate;
 				//FVector PreShadowTranslation = FVector(0, 0, 0);
-				FConvexVolume& ShadowReceiverFrustum = ProjectedShadowInfo->ReceiverFrustum;
+				FConvexVolume& ShadowReceiverFrustum = ProjectedShadowInfo->ReceiverInnerFrustum;
 				FVector& PreShadowTranslation = ProjectedShadowInfo->PreShadowTranslation;
 
 
@@ -460,17 +512,16 @@ void FMobileSceneRenderer::BuildCSMVisibilityState(FLightSceneInfo* LightSceneIn
 					}
 					case 2: // combined casters:
 					{
-						FVector CombinedCasterStart;
-						FVector CombinedCasterEnd;
-						FBoxSphereBounds CombinedBounds(ForceInitToZero);
-
 						// Calculate combined bounds
+						FBoxSphereBounds::Builder CombinedBoundsBuilder;
 						for (auto& Caster : ShadowSubjectPrimitives)
 						{
-							CombinedBounds = (CombinedBounds.SphereRadius > 0.0f) ? CombinedBounds + Caster->Proxy->GetBounds() : Caster->Proxy->GetBounds();
+							CombinedBoundsBuilder += Caster->Proxy->GetBounds();
 						}
-						CombinedCasterStart = CombinedBounds.Origin;
-						CombinedCasterEnd = CombinedBounds.Origin + (LightDir * ShadowCastLength);
+
+						FBoxSphereBounds CombinedBounds(CombinedBoundsBuilder);
+						FVector CombinedCasterStart = CombinedBounds.Origin;
+						FVector CombinedCasterEnd = CombinedBounds.Origin + (LightDir * ShadowCastLength);
 
 						if (bSphereTest)
 						{

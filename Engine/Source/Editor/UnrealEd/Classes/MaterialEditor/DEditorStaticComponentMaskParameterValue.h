@@ -9,7 +9,7 @@
 #include "DEditorStaticComponentMaskParameterValue.generated.h"
 
 USTRUCT()
-struct UNREALED_API FDComponentMaskParameter
+struct FDComponentMaskParameter
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -45,13 +45,34 @@ struct UNREALED_API FDComponentMaskParameter
 	
 };
 
-UCLASS(hidecategories=Object, collapsecategories)
-class UNREALED_API UDEditorStaticComponentMaskParameterValue : public UDEditorParameterValue
+UCLASS(hidecategories=Object, collapsecategories, MinimalAPI)
+class UDEditorStaticComponentMaskParameterValue : public UDEditorParameterValue
 {
 	GENERATED_UCLASS_BODY()
 
 	UPROPERTY(EditAnywhere, Category=DEditorStaticComponentMaskParameterValue)
 	struct FDComponentMaskParameter ParameterValue;
 
+	virtual FName GetDefaultGroupName() const override { return TEXT("Static Component Mask Parameter Values"); }
+
+	virtual bool GetValue(FMaterialParameterMetadata& OutResult) const override
+	{
+		UDEditorParameterValue::GetValue(OutResult);
+		OutResult.Value = FMaterialParameterValue(ParameterValue.R, ParameterValue.G, ParameterValue.B, ParameterValue.A);
+		return true;
+	}
+
+	virtual bool SetValue(const FMaterialParameterValue& Value) override
+	{
+		if (Value.Type == EMaterialParameterType::StaticComponentMask)
+		{
+			ParameterValue.R = Value.Bool[0];
+			ParameterValue.G = Value.Bool[1];
+			ParameterValue.B = Value.Bool[2];
+			ParameterValue.A = Value.Bool[3];
+			return true;
+		}
+		return false;
+	}
 };
 

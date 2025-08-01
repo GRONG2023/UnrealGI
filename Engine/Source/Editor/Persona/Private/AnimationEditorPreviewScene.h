@@ -21,6 +21,7 @@ public:
 	~FAnimationEditorPreviewScene();
 
 	/** IPersonaPreviewScene interface */
+	virtual void UnregisterForUndo() override;
 	virtual TSharedRef<class IPersonaToolkit> GetPersonaToolkit() const override { return PersonaToolkit.Pin().ToSharedRef(); }
 	virtual void SetPreviewAnimationAsset(UAnimationAsset* AnimAsset, bool bEnablePreview = true) override;
 	virtual UAnimationAsset* GetPreviewAnimationAsset() const override;
@@ -32,6 +33,8 @@ public:
 	virtual void InvalidateViews() override;
 	virtual void FocusViews() override;
 	virtual UDebugSkelMeshComponent* GetPreviewMeshComponent() const override { return SkeletalMeshComponent; }
+	virtual TArray<UDebugSkelMeshComponent*> GetAllPreviewMeshComponents() const override;
+	virtual void ForEachPreviewMesh(TFunction<void (UDebugSkelMeshComponent*)> PerMeshFunction) override;
 	virtual void SetPreviewMeshComponent(UDebugSkelMeshComponent* InSkeletalMeshComponent) override;
 	virtual void SetAdditionalMeshes(class UDataAsset* InAdditionalMeshes) override;
 	virtual void SetAdditionalMeshesSelectable(bool bSelectable) override;
@@ -232,7 +235,6 @@ public:
 		return CameraOverride;
 	}
 
-
 	virtual void HandleSkeletonTreeSelectionChanged(const TArrayView<TSharedPtr<ISkeletonTreeItem>>& InSelectedItems, ESelectInfo::Type InSelectInfo) override;
 	/** FPreviewScene interface */
 	virtual void Tick(float InDeltaTime) override;
@@ -317,12 +319,20 @@ public:
 		bAllowAdditionalMeshes = bAllow;
 	}
 
-	/** Get whether bones can be selected by their physics bodies */
-	virtual bool UsePhysicsBodiesForBoneSelection() const override;
+	virtual void SetEditableSkeleton(TSharedPtr<IEditableSkeleton> InEditableSkeleton) override
+	{
+		EditableSkeletonPtr = InEditableSkeleton;
+	}
 
-	/** Set whether bones can be selected by their physics bodies */
-	virtual void SetUsePhysicsBodiesForBoneSelection(bool bUsePhysicsBodies) override;
+	void SetIsBeingConstructed(bool bInIsBeingConstructed) 
+	{
+		bIsBeingConstructed = bInIsBeingConstructed;
+	}
 
+	bool IsBeingConstructed() const
+	{
+		return bIsBeingConstructed;
+	}
 
 private:
 	/** Set preview mesh internal use only. The mesh should be verified by now. */
@@ -362,13 +372,13 @@ private:
 	}
 private:
 	/** The one and only actor we have */
-	AActor* Actor;
+	TObjectPtr<AActor> Actor;
 
 	/** The main preview skeletal mesh component */
-	UDebugSkelMeshComponent*			SkeletalMeshComponent;
+	TObjectPtr<UDebugSkelMeshComponent>			SkeletalMeshComponent;
 
 	/** Array of loaded additional meshes */
-	TArray<USkeletalMeshComponent*>		AdditionalMeshes;
+	TArray<TObjectPtr<USkeletalMeshComponent>>		AdditionalMeshes;
 
 	/** The editable skeleton we are viewing/editing */
 	TWeakPtr<class IEditableSkeleton> EditableSkeletonPtr;
@@ -392,7 +402,7 @@ private:
 	FOnMeshClickMulticaster OnMeshClick;
 
 	/** Configuration object for editing in details panels */
-	class UPersonaPreviewSceneDescription* PreviewSceneDescription;
+	TObjectPtr<class UPersonaPreviewSceneDescription> PreviewSceneDescription;
 
 	/** Previous information of a wind actor */
 	FVector PrevWindLocation;
@@ -468,9 +478,9 @@ private:
 	/** Allow additional meshes to be selectable */
 	bool bAdditionalMeshesSelectable;
 
-	/** Allow bones to be selectable by clicking on their respective physics bodies */
-	bool bUsePhysicsBodiesForBoneSelection;
-
 	/** Delegate Remove attach component */
 	FOnRemoveAttachedComponentFilter OnRemoveAttachedComponentFilter;
+
+	/** True during initial creation, so some code can be skipped */
+	bool bIsBeingConstructed = false;
 };

@@ -7,6 +7,9 @@
 #include "UObject/WeakObjectPtr.h"
 #include "IPackageAutoSaver.h"
 
+class FObjectPostSaveContext;
+struct FTransactionContext;
+
 namespace ECloseNotification
 {
 	enum Type
@@ -61,7 +64,12 @@ private:
 	 * @param Filename The filename the package was saved to
 	 * @param Obj The package that was saved
 	 */
-	void OnPackageSaved(const FString& Filename, UObject* Obj);
+	void OnPackageSaved(const FString& Filename, UPackage* Pkg, FObjectPostSaveContext ObjectSaveContext);
+
+	/**
+	 * Called when an undo/redo operation happens.
+	 */
+	void OnUndoRedo();
 
 	/**
 	 * Update the dirty lists for the current package
@@ -128,18 +136,27 @@ private:
 	/** Indicate that we need to update the restore file. */
 	bool bNeedRestoreFileUpdate = false;
 
+	/** True if we need to invalidate and re-cache our list of dirty files. */
+	bool bSyncWithDirtyPackageList = false;
+
+	/** Set of packages that are pending an update in the auto-save lists */
+	TSet<TWeakObjectPtr<UPackage>, TWeakObjectPtrSetKeyFuncs<TWeakObjectPtr<UPackage>>> PackagesPendingUpdate;
+
+	/** Set of package names that have been deleted and should be ignored while in an empty state */
+	TSet<FName> PackagesToIgnoreIfEmpty;
+
 	/** Used to reference to the active auto-save warning notification */
 	TWeakPtr<SNotificationItem> AutoSaveNotificationPtr;
 
 	/** Packages that have been dirtied and not saved by the user, mapped to their latest auto-save file */
-	TMap<TWeakObjectPtr<UPackage>, FString> DirtyPackagesForUserSave;
+	TMap<TWeakObjectPtr<UPackage>, FString, FDefaultSetAllocator, TWeakObjectPtrMapKeyFuncs<TWeakObjectPtr<UPackage>, FString>> DirtyPackagesForUserSave;
 
 	/** Maps that have been dirtied and not saved by the auto-saver */
-	TSet<TWeakObjectPtr<UPackage>> DirtyMapsForAutoSave;
+	TSet<TWeakObjectPtr<UPackage>, TWeakObjectPtrSetKeyFuncs<TWeakObjectPtr<UPackage>>> DirtyMapsForAutoSave;
 
 	/** Content that has been dirtied and not saved by the auto-saver */
-	TSet<TWeakObjectPtr<UPackage>> DirtyContentForAutoSave;
+	TSet<TWeakObjectPtr<UPackage>, TWeakObjectPtrSetKeyFuncs<TWeakObjectPtr<UPackage>>> DirtyContentForAutoSave;
 
 	/** Restore information that was loaded following a crash */
-	TMap<FString, FString> PackagesThatCanBeRestored;
+	TMap<FString, TPair<FString, FString>> PackagesThatCanBeRestored;
 };

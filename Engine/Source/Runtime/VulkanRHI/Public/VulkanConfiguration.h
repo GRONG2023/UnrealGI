@@ -8,22 +8,35 @@
 
 #pragma once
 
+#include "HAL/LowLevelMemTracker.h"
 #include "VulkanCommon.h"
+
+struct VkAllocationCallbacks;
 
 // API version we want to target.
 #ifndef UE_VK_API_VERSION
-	#define UE_VK_API_VERSION									VK_API_VERSION_1_0
+	#define UE_VK_API_VERSION									VK_API_VERSION_1_1
 #endif
 
 // by default, we enable debugging in Development builds, unless the platform says not to
 #ifndef VULKAN_SHOULD_DEBUG_IN_DEVELOPMENT
-	#define VULKAN_SHOULD_DEBUG_IN_DEVELOPMENT 1
+	#define VULKAN_SHOULD_DEBUG_IN_DEVELOPMENT					1
 #endif
 
-#define VULKAN_HAS_DEBUGGING_ENABLED							(UE_BUILD_DEBUG || (UE_BUILD_DEVELOPMENT && VULKAN_SHOULD_DEBUG_IN_DEVELOPMENT))
+#ifndef VULKAN_HAS_DEBUGGING_ENABLED
+	#define VULKAN_HAS_DEBUGGING_ENABLED						(!IS_PROGRAM && (UE_BUILD_DEBUG || (UE_BUILD_DEVELOPMENT && VULKAN_SHOULD_DEBUG_IN_DEVELOPMENT)))
+#endif
 
-// Enables the VK_LAYER_LUNARG_api_dump layer and the report VK_DEBUG_REPORT_INFORMATION_BIT_EXT flag
-#define VULKAN_ENABLE_API_DUMP									0
+// default value of r.Vulkan.EnableValidation
+// 0 - disable validation layers
+// 1 - enable errors
+// 2 - enable errors & warnings
+// 3 - enable errors, warnings & performance warnings
+// 4 - enable errors, warnings, performance & information messages
+// 5 - enable all messages
+#ifndef VULKAN_VALIDATION_DEFAULT_VALUE
+	#define VULKAN_VALIDATION_DEFAULT_VALUE						(UE_BUILD_DEBUG ? 2 : 0)
+#endif
 
 #ifndef VULKAN_SHOULD_ENABLE_DRAW_MARKERS
 	#define VULKAN_SHOULD_ENABLE_DRAW_MARKERS					0
@@ -50,14 +63,6 @@
 #define VULKAN_HASH_POOLS_WITH_TYPES_USAGE_ID					1
 
 #define VULKAN_SINGLE_ALLOCATION_PER_RESOURCE					0
-
-#ifndef VULKAN_FREEPAGE_FOR_TYPE
-	#define VULKAN_FREEPAGE_FOR_TYPE							0
-#endif
-
-#ifndef VULKAN_USE_NEW_QUERIES
-	#define VULKAN_USE_NEW_QUERIES								1
-#endif
 
 #ifndef VULKAN_SHOULD_USE_LLM
 	#define VULKAN_SHOULD_USE_LLM								0
@@ -103,18 +108,6 @@
 	#define VULKAN_ENABLE_LRU_CACHE								0
 #endif
 
-#ifdef VK_KHR_maintenance1
-	#define VULKAN_SUPPORTS_MAINTENANCE_LAYER1					1
-#else
-	#define VULKAN_SUPPORTS_MAINTENANCE_LAYER1					0
-#endif
-
-#ifdef VK_KHR_maintenance2
-	#define VULKAN_SUPPORTS_MAINTENANCE_LAYER2					1
-#else
-	#define VULKAN_SUPPORTS_MAINTENANCE_LAYER2					0
-#endif
-
 #ifdef VK_EXT_validation_cache
 	#define VULKAN_SUPPORTS_VALIDATION_CACHE					1
 #else
@@ -128,11 +121,7 @@
 #endif
 
 #ifndef VULKAN_SUPPORTS_DEDICATED_ALLOCATION
-	#ifdef VK_KHR_dedicated_allocation
-		#define VULKAN_SUPPORTS_DEDICATED_ALLOCATION			1
-	#else
-		#define VULKAN_SUPPORTS_DEDICATED_ALLOCATION			0
-	#endif
+	#define VULKAN_SUPPORTS_DEDICATED_ALLOCATION				1
 #endif
 
 #ifndef VULKAN_SUPPORTS_GOOGLE_DISPLAY_TIMING
@@ -147,20 +136,12 @@
 	#define VULKAN_USE_CREATE_WIN32_SURFACE						0
 #endif
 
-#ifndef VULKAN_USE_REAL_RENDERPASS_COMPATIBILITY
-	#define VULKAN_USE_REAL_RENDERPASS_COMPATIBILITY			1
-#endif
-
 #ifndef VULKAN_USE_DIFFERENT_POOL_CMDBUFFERS
 	#define VULKAN_USE_DIFFERENT_POOL_CMDBUFFERS				1
 #endif
 
 #ifndef VULKAN_DELETE_STALE_CMDBUFFERS
 	#define VULKAN_DELETE_STALE_CMDBUFFERS						1
-#endif
-
-#ifndef VULKAN_SUPPORTS_COLOR_CONVERSIONS
-	#define VULKAN_SUPPORTS_COLOR_CONVERSIONS					0
 #endif
 
 #ifndef VULKAN_SUPPORTS_AMD_BUFFER_MARKER
@@ -189,65 +170,33 @@
 	#define VULKAN_SUPPORTS_GPU_CRASH_DUMPS						(VULKAN_SUPPORTS_AMD_BUFFER_MARKER || VULKAN_SUPPORTS_NV_DIAGNOSTIC_CONFIG)
 #endif
 
-#ifndef VULKAN_SUPPORTS_DEBUG_UTILS
-	#ifdef VK_EXT_debug_utils
-		#define VULKAN_SUPPORTS_DEBUG_UTILS						1
-	#else
-		#define VULKAN_SUPPORTS_DEBUG_UTILS						0
-	#endif
-#endif
-
 #ifndef VULKAN_SUPPORTS_SCALAR_BLOCK_LAYOUT
-	#ifdef VK_EXT_scalar_block_layout
-		#define VULKAN_SUPPORTS_SCALAR_BLOCK_LAYOUT				1
-	#else
-		#define VULKAN_SUPPORTS_SCALAR_BLOCK_LAYOUT				0
-	#endif
+	#define VULKAN_SUPPORTS_SCALAR_BLOCK_LAYOUT					1
 #endif
 
 
 #ifndef VULKAN_SUPPORTS_MEMORY_BUDGET
-	#ifdef VK_EXT_memory_budget
-		#define VULKAN_SUPPORTS_MEMORY_BUDGET					1
-	#else
-		#define VULKAN_SUPPORTS_MEMORY_BUDGET					0
-	#endif
+	#define VULKAN_SUPPORTS_MEMORY_BUDGET						1
 #endif
 
 #ifndef VULKAN_SUPPORTS_MEMORY_PRIORITY
-	#ifdef VK_EXT_memory_priority
-		#define VULKAN_SUPPORTS_MEMORY_PRIORITY					1
-	#else
-		#define VULKAN_SUPPORTS_MEMORY_PRIORITY					0
-	#endif
-#endif
-
-#ifndef VULKAN_SUPPORTS_PHYSICAL_DEVICE_PROPERTIES2
-	#ifdef VK_KHR_get_physical_device_properties2
-		#define VULKAN_SUPPORTS_PHYSICAL_DEVICE_PROPERTIES2		1
-	#else
-		#define VULKAN_SUPPORTS_PHYSICAL_DEVICE_PROPERTIES2		0
-	#endif
-#endif
-
-#ifndef VULKAN_SUPPORTS_EXTERNAL_MEMORY
-	#ifdef VK_KHR_external_memory_capabilities
-		#define VULKAN_SUPPORTS_EXTERNAL_MEMORY					(VULKAN_SUPPORTS_PHYSICAL_DEVICE_PROPERTIES2)	// Requirement
-	#else
-		#define VULKAN_SUPPORTS_EXTERNAL_MEMORY					0
-	#endif
+	#define VULKAN_SUPPORTS_MEMORY_PRIORITY						1
 #endif
 
 #ifndef VULKAN_SUPPORTS_DRIVER_PROPERTIES
-	#ifdef VK_KHR_driver_properties
-		#define VULKAN_SUPPORTS_DRIVER_PROPERTIES				1
-	#else
-		#define VULKAN_SUPPORTS_DRIVER_PROPERTIES				0
-	#endif
+	#define VULKAN_SUPPORTS_DRIVER_PROPERTIES					1
 #endif
 
 #ifndef VULKAN_SUPPORTS_QCOM_RENDERPASS_TRANSFORM
 	#define VULKAN_SUPPORTS_QCOM_RENDERPASS_TRANSFORM			0
+#endif
+
+#ifndef VULKAN_SUPPORTS_QCOM_RENDERPASS_SHADER_RESOLVE
+	#ifdef VK_QCOM_render_pass_shader_resolve
+		#define VULKAN_SUPPORTS_QCOM_RENDERPASS_SHADER_RESOLVE	1
+	#else
+		#define VULKAN_SUPPORTS_QCOM_RENDERPASS_SHADER_RESOLVE	0
+	#endif
 #endif
 
 #ifndef VULKAN_SUPPORTS_FULLSCREEN_EXCLUSIVE
@@ -258,58 +207,42 @@
 	#endif
 #endif
 
-#ifndef VULKAN_SUPPORTS_FRAGMENT_DENSITY_MAP
-	#ifdef VK_EXT_fragment_density_map
-		#define VULKAN_SUPPORTS_FRAGMENT_DENSITY_MAP			1
-	#else
-		#define VULKAN_SUPPORTS_FRAGMENT_DENSITY_MAP			0
-	#endif
+#ifndef VULKAN_SUPPORTS_TEXTURE_COMPRESSION_ASTC_HDR
+#ifdef VK_EXT_texture_compression_astc_hdr
+#define VULKAN_SUPPORTS_TEXTURE_COMPRESSION_ASTC_HDR			1
+#else
+#define VULKAN_SUPPORTS_TEXTURE_COMPRESSION_ASTC_HDR			0
+#endif
 #endif
 
-#ifndef VULKAN_SUPPORTS_FRAGMENT_DENSITY_MAP2
-	#ifdef VK_EXT_fragment_density_map2
-		#define VULKAN_SUPPORTS_FRAGMENT_DENSITY_MAP2			1
+#ifndef VULKAN_SUPPORTS_RENDERPASS2
+	#ifdef VK_KHR_create_renderpass2
+		#define VULKAN_SUPPORTS_RENDERPASS2 1
 	#else
-		#define VULKAN_SUPPORTS_FRAGMENT_DENSITY_MAP2			0
-	#endif
-#endif
-
-#ifndef VULKAN_SUPPORTS_FRAGMENT_SHADING_RATE
-	#ifdef VK_KHR_fragment_shading_rate
-		#define VULKAN_SUPPORTS_FRAGMENT_SHADING_RATE 1
-	#else
-		#define VULKAN_SUPPORTS_FRAGMENT_SHADING_RATE 0
-	#endif
-#endif
-
-#ifndef VULKAN_SUPPORTS_MULTIVIEW
-	#ifdef VK_KHR_multiview
-		#define VULKAN_SUPPORTS_MULTIVIEW						1
-	#else
-		#define VULKAN_SUPPORTS_MULTIVIEW						0
+		#define VULKAN_SUPPORTS_RENDERPASS2 0
 	#endif
 #endif
 
 #ifndef VULKAN_SUPPORTS_ASTC_DECODE_MODE
 	#ifdef VK_EXT_astc_decode_mode
-		#define VULKAN_SUPPORTS_ASTC_DECODE_MODE				(VULKAN_SUPPORTS_PHYSICAL_DEVICE_PROPERTIES2)	// Requirement
+		#define VULKAN_SUPPORTS_ASTC_DECODE_MODE				1
 	#else
 		#define VULKAN_SUPPORTS_ASTC_DECODE_MODE				0
 	#endif
 #endif
 
-#ifndef VULKAN_SUPPORTS_SEPARATE_DEPTH_STENCIL_LAYOUTS
-	#ifdef VK_KHR_separate_depth_stencil_layouts
-		#define VULKAN_SUPPORTS_SEPARATE_DEPTH_STENCIL_LAYOUTS	1
-	#else
-		#define VULKAN_SUPPORTS_SEPARATE_DEPTH_STENCIL_LAYOUTS	0
-	#endif
+#ifdef VK_EXT_shader_viewport_index_layer
+	#define VULKAN_SUPPORTS_SHADER_VIEWPORT_INDEX_LAYER	1
+#else
+	#define VULKAN_SUPPORTS_SHADER_VIEWPORT_INDEX_LAYER	0
 #endif
 
-#ifdef VK_KHR_shader_atomic_int64
-	#define VULKAN_SUPPORTS_BUFFER_64BIT_ATOMICS	1
-#else
-	#define VULKAN_SUPPORTS_BUFFER_64BIT_ATOMICS	0
+#ifndef VULKAN_SUPPORTS_DESCRIPTOR_INDEXING
+	#ifdef VK_EXT_descriptor_indexing
+		#define VULKAN_SUPPORTS_DESCRIPTOR_INDEXING	1
+	#else
+		#define VULKAN_SUPPORTS_DESCRIPTOR_INDEXING	0
+	#endif
 #endif
 
 #ifndef VULKAN_OBJECT_TRACKING 
@@ -328,8 +261,21 @@ VULKANRHI_API DECLARE_LOG_CATEGORY_EXTERN(LogVulkanRHI, Log, All);
 	#define VULKAN_PURGE_SHADER_MODULES							0
 #endif
 
+#ifndef VULKAN_SUPPORTS_TRANSIENT_RESOURCE_ALLOCATOR
+	#define VULKAN_SUPPORTS_TRANSIENT_RESOURCE_ALLOCATOR		1
+#endif
+
+
 #if !defined(NV_AFTERMATH)
 	#define NV_AFTERMATH 0
+#endif
+
+
+#ifndef VK_TYPE_TO_STRING
+#	define VK_TYPE_TO_STRING(Type, Value) *FString::Printf(TEXT("%u"), (uint32)Value)
+#endif
+#ifndef VK_FLAGS_TO_STRING
+#	define VK_FLAGS_TO_STRING(Type, Value) *FString::Printf(TEXT("%u"), (uint32)Value)
 #endif
 
 

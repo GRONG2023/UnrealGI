@@ -7,9 +7,10 @@
 #pragma once
 
 #include "RHIDefinitions.h"
+#include "Logging/LogMacros.h"
 
 #ifndef VULKAN_SUPPORTS_GEOMETRY_SHADERS
-	#define VULKAN_SUPPORTS_GEOMETRY_SHADERS					(!PLATFORM_ANDROID || PLATFORM_LUMIN) && PLATFORM_SUPPORTS_GEOMETRY_SHADERS
+	#define VULKAN_SUPPORTS_GEOMETRY_SHADERS					PLATFORM_SUPPORTS_GEOMETRY_SHADERS
 #endif
 
 // This defines controls shader generation (so will cause a format rebuild)
@@ -23,28 +24,44 @@ namespace ShaderStage
 	{
 		// Adjusting these requires a full shader rebuild (ie modify the guid on VulkanCommon.usf)
 		// Keep the values in sync with EShaderFrequency
-		Vertex			= 0,
-		Pixel			= 1,
+		Vertex = 0,
+		Pixel = 1,
 
 #if VULKAN_SUPPORTS_GEOMETRY_SHADERS
-		Geometry		= 2,
-#if PLATFORM_SUPPORTS_TESSELLATION_SHADERS
-		Hull			= 3,
-		Domain			= 4,
+		Geometry = 2,
 #endif
-		NumStages,
 
-		MaxNumSets		= 8,
+#if RHI_RAYTRACING
+		RayGen = 3,
+		RayMiss = 4,
+		RayHitGroup = 5,
+		RayCallable = 6,
+#endif
+
+#if VULKAN_SUPPORTS_GEOMETRY_SHADERS
+		NumGeometryStages = 1,
 #else
-		NumStages		= 2,
-
-		MaxNumSets		= 4,
+		NumGeometryStages = 0,
 #endif
+
+#if RHI_RAYTRACING
+		NumRayTracingStages = 4,
+#else
+		NumRayTracingStages = 0,
+#endif
+
+		NumStages = (2 + NumGeometryStages + NumRayTracingStages),
 
 		// Compute is its own pipeline, so it can all live as set 0
-		Compute			= 0,
+		Compute = 0,
 
-		Invalid			= -1,
+#if VULKAN_SUPPORTS_GEOMETRY_SHADERS || RHI_RAYTRACING
+		MaxNumSets = 8,
+#else
+		MaxNumSets = 4,
+#endif
+
+		Invalid = -1,
 	};
 
 	inline EStage GetStageForFrequency(EShaderFrequency Stage)
@@ -52,14 +69,16 @@ namespace ShaderStage
 		switch (Stage)
 		{
 		case SF_Vertex:		return Vertex;
-#if PLATFORM_SUPPORTS_TESSELLATION_SHADERS
-		case SF_Hull:		return Hull;
-		case SF_Domain:		return Domain;
-#endif
 		case SF_Pixel:		return Pixel;
 #if VULKAN_SUPPORTS_GEOMETRY_SHADERS
 		case SF_Geometry:	return Geometry;
 #endif
+#if RHI_RAYTRACING
+		case SF_RayGen:			return RayGen;
+		case SF_RayMiss:		return RayMiss;
+		case SF_RayHitGroup:	return RayHitGroup;
+		case SF_RayCallable:	return RayCallable;
+#endif // RHI_RAYTRACING
 		case SF_Compute:	return Compute;
 		default:
 			checkf(0, TEXT("Invalid shader Stage %d"), (int32)Stage);
@@ -74,14 +93,16 @@ namespace ShaderStage
 		switch (Stage)
 		{
 		case EStage::Vertex:	return SF_Vertex;
-#if PLATFORM_SUPPORTS_TESSELLATION_SHADERS
-		case EStage::Hull:		return SF_Hull;
-		case EStage::Domain:	return SF_Domain;
-#endif
 		case EStage::Pixel:		return SF_Pixel;
 #if VULKAN_SUPPORTS_GEOMETRY_SHADERS
 		case EStage::Geometry:	return SF_Geometry;
 #endif
+#if RHI_RAYTRACING
+		case EStage::RayGen:		return SF_RayGen;
+		case EStage::RayMiss:		return SF_RayMiss;
+		case EStage::RayHitGroup:	return SF_RayHitGroup;
+		case EStage::RayCallable:	return SF_RayCallable;
+#endif //	RHI_RAYTRACING
 		default:
 			checkf(0, TEXT("Invalid shader Stage %d"), (int32)Stage);
 			break;
@@ -91,6 +112,31 @@ namespace ShaderStage
 	}
 };
 
+namespace VulkanBindless
+{
+	static constexpr uint32 MaxUniformBuffersPerStage = 16;
+
+	enum EDescriptorSets
+	{
+		BindlessSamplerSet = 0,
+
+		BindlessStorageBufferSet,
+		BindlessUniformBufferSet,
+
+		BindlessStorageImageSet,
+		BindlessSampledImageSet,
+
+		BindlessStorageTexelBufferSet,
+		BindlessUniformTexelBufferSet,
+
+		BindlessAccelerationStructureSet,
+
+		BindlessSingleUseUniformBufferSet,  // Keep last
+		NumBindlessSets,
+		MaxNumSets = NumBindlessSets
+	};
+};
+
 namespace EVulkanBindingType
 {
 	enum EType : uint8
@@ -98,24 +144,24 @@ namespace EVulkanBindingType
 		PackedUniformBuffer,	//VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
 		UniformBuffer,			//VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
 
-		CombinedImageSampler,	//VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
-		Sampler,				//VK_DESCRIPTOR_TYPE_SAMPLER
-		Image,					//VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
+		CombinedImageSampler,	//VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER	*not used*
+		Sampler,				//VK_DESCRIPTOR_TYPE_SAMPLER				(HLSL: SamplerState/SamplerComparisonState)
+		Image,					//VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE			(HLSL: Texture2D/3D/Cube)
 
-		UniformTexelBuffer,		//VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER	Buffer<>
+		UniformTexelBuffer,		//VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER	(HLSL: Buffer)
 
-		//A storage image (VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) is a descriptor type that is used for load, store, and atomic operations on image memory from within shaders bound to pipelines.
-		StorageImage,			//VK_DESCRIPTOR_TYPE_STORAGE_IMAGE		RWTexture
+		// A storage image is a descriptor type that is used for load, store, and atomic operations on image memory from within shaders bound to pipelines.
+		StorageImage,			//VK_DESCRIPTOR_TYPE_STORAGE_IMAGE			(HLSL: RWTexture2D/3D/Cube)
 
-		//RWBuffer/RWTexture?
-		//A storage texel buffer (VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) represents a tightly packed array of homogeneous formatted data that is stored in a buffer and is made accessible to shaders. Storage texel buffers differ from uniform texel buffers in that they support stores and atomic operations in shaders, may support a different maximum length, and may have different performance characteristics.
-		StorageTexelBuffer,
+		//A storage texel buffer represents a tightly packed array of homogeneous formatted data that is stored in a buffer and is made accessible to shaders. Storage texel buffers differ from uniform texel buffers in that they support stores and atomic operations in shaders, may support a different maximum length, and may have different performance characteristics.
+		StorageTexelBuffer,		//VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER	(HLSL: RWBuffer)
 
-		// UAV/RWBuffer
-		//A storage buffer(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) is a region of structured storage that supports both read and write access for shaders.In addition to general read and write operations, some members of storage buffers can be used as the target of atomic operations.In general, atomic operations are only supported on members that have unsigned integer formats.
-		StorageBuffer,
+		// A storage buffer is a region of structured storage that supports both read and write access for shaders. In addition to general read and write operations, some members of storage buffers can be used as the target of atomic operations. In general, atomic operations are only supported on members that have unsigned integer formats.
+		StorageBuffer,			//VK_DESCRIPTOR_TYPE_STORAGE_BUFFER			(HLSL: StructuredBuffer/RWStructureBuffer/ByteAddressBuffer/RWByteAddressBuffer)
 
 		InputAttachment,
+
+		AccelerationStructure,	//VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR
 
 		Count,
 	};
@@ -134,6 +180,7 @@ namespace EVulkanBindingType
 		case StorageTexelBuffer:	return 'z';
 		case StorageBuffer:			return 'v';
 		case InputAttachment:		return 'a';
+		case AccelerationStructure:	return 'r';
 		default:
 			check(0);
 			break;

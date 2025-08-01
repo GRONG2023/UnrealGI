@@ -8,6 +8,7 @@
 
 #include "CoreMinimal.h"
 #include "VulkanConfiguration.h"
+#include "VulkanBarriers.h"
 
 extern int32 GVulkanProfileCmdBuffers;
 extern int32 GVulkanUseCmdBufferTimingForGPUTime;
@@ -40,6 +41,11 @@ public:
 	FVulkanCommandBufferPool* GetOwner()
 	{
 		return CommandBufferPool;
+	}
+
+	FVulkanDevice* GetDevice()
+	{
+		return Device;
 	}
 
 	bool IsUniformBufferBarrierAdded() const
@@ -138,12 +144,22 @@ public:
 		return SubmittedFenceCounter;
 	}
 
+	inline FVulkanLayoutManager& GetLayoutManager()
+	{
+		return LayoutManager;
+	}
+
 	inline bool HasValidTiming() const
 	{
 		return (Timing != nullptr) && (FMath::Abs((int64)FenceSignaledCounter - (int64)LastValidTiming) < 3);
 	}
 
-	void VULKANRHI_API AddWaitSemaphore(VkPipelineStageFlags InWaitFlags, VulkanRHI::FSemaphore* InWaitSemaphore);
+	void VULKANRHI_API AddWaitSemaphore(VkPipelineStageFlags InWaitFlags, VulkanRHI::FSemaphore* InWaitSemaphore)
+	{
+		AddWaitSemaphore(InWaitFlags, MakeArrayView<VulkanRHI::FSemaphore*>(&InWaitSemaphore, 1));
+	}
+
+	void VULKANRHI_API AddWaitSemaphore(VkPipelineStageFlags InWaitFlags, TArrayView<VulkanRHI::FSemaphore*> InWaitSemaphores);
 
 	void Begin();
 	void End();
@@ -159,8 +175,8 @@ public:
 		NeedReset,
 	};
 
-	VkViewport CurrentViewport;
-	VkRect2D CurrentScissor;
+	TArray<VkViewport, TInlineAllocator<2>> CurrentViewports;
+	TArray<VkRect2D, TInlineAllocator<2>> CurrentScissors;
 	uint32 CurrentStencilRef;
 	EState State;
 	uint8 bNeedsDynamicStateSet			: 1;
@@ -233,6 +249,8 @@ private:
 	void AllocMemory();
 	void FreeMemory();
 
+	FVulkanLayoutManager LayoutManager;
+
 public:
 	//#todo-rco: Hide this
 	TMap<uint32, class FVulkanTypedDescriptorPoolSet*> TypedDescriptorPoolSets;
@@ -259,7 +277,7 @@ public:
 		return &CS;
 	}
 
-	void FreeUnusedCmdBuffers(FVulkanQueue* Queue);
+	void FreeUnusedCmdBuffers(FVulkanQueue* Queue, bool bTrimMemory);
 
 	inline FVulkanCommandBufferManager& GetMgr()
 	{
@@ -289,6 +307,8 @@ class FVulkanCommandBufferManager
 public:
 	FVulkanCommandBufferManager(FVulkanDevice* InDevice, FVulkanCommandListContext* InContext);
 	~FVulkanCommandBufferManager();
+
+	void Init(FVulkanCommandListContext* InContext);
 
 	inline FVulkanCmdBuffer* GetActiveCmdBuffer()
 	{
@@ -356,11 +376,28 @@ public:
 
 	uint32 CalculateGPUTime();
 
-	void FreeUnusedCmdBuffers();
+	void FreeUnusedCmdBuffers(bool bTrimMemory);
 
-	FVulkanCommandListContext* GetCommandListContext()
+	inline FVulkanCommandListContext* GetCommandListContext()
 	{
 		return Context;
+	}
+
+	inline FVulkanQueue* GetQueue()
+	{
+		return Queue;
+	}
+
+	inline void NotifyDeletedImage(VkImage Image)
+	{
+		if (UploadCmdBuffer)
+		{
+			UploadCmdBuffer->GetLayoutManager().NotifyDeletedImage(Image);
+		}
+		if (ActiveCmdBuffer)
+		{
+			ActiveCmdBuffer->GetLayoutManager().NotifyDeletedImage(Image);
+		}
 	}
 
 private:

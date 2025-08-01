@@ -5,9 +5,10 @@
 =============================================================================*/
 
 #include "Curves/CurveLinearColorAtlas.h"
+#include "Async/TaskGraphInterfaces.h"
 #include "Curves/CurveLinearColor.h"
-#include "Components/MeshComponent.h"
-#include "Materials/MaterialInstanceDynamic.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(CurveLinearColorAtlas)
 
 
 UCurveLinearColorAtlas::UCurveLinearColorAtlas(const FObjectInitializer& ObjectInitializer)
@@ -323,6 +324,8 @@ void UCurveLinearColorAtlas::OnCurveUpdated(UCurveBase* Curve, EPropertyChangeTy
 // Render any textures
 void UCurveLinearColorAtlas::UpdateTextures()
 {
+	LLM_SCOPE(ELLMTag::Textures);
+
 	// Save off the data needed to render each gradient.
 	// Callback into the section owner to get the Gradients array
 	const int32 TextureDataSize = Source.CalcMipSize(0);
@@ -373,3 +376,4 @@ bool UCurveLinearColorAtlas::GetCurvePosition(UCurveLinearColor* InCurve, float&
 	}
 	return false;
 }
+

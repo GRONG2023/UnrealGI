@@ -6,8 +6,6 @@ public class LevelSequence : ModuleRules
 {
 	public LevelSequence(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateIncludePaths.Add("Runtime/LevelSequence/Private");
-
 		PublicDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
@@ -24,6 +22,7 @@ public class LevelSequence : ModuleRules
 			new string[] {
 				"DeveloperSettings",
 				"MediaAssets",
+				"UniversalObjectLocator",
 			}
 		);
 
@@ -32,6 +31,7 @@ public class LevelSequence : ModuleRules
 			PrivateDependencyModuleNames.AddRange(
 				new string[] {
 					"ActorPickerMode",
+					"EditorFramework",
 					"PropertyEditor",
 					"UnrealEd"
 				}

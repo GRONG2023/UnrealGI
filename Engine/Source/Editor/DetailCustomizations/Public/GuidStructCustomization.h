@@ -3,11 +3,15 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Styling/SlateColor.h"
 #include "IPropertyTypeCustomization.h"
+#include "Internationalization/Text.h"
+#include "Styling/SlateColor.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateEnums.h"
 
 class IPropertyHandle;
 class SEditableTextBox;
+struct FGuid;
 
 namespace EPropertyEditorGuidActions
 {
@@ -67,7 +71,7 @@ private:
 	void HandleGuidActionClicked( EPropertyEditorGuidActions::Type Action );
 
 	/** Handles getting the text color of the editable text box. */
-	FSlateColor HandleTextBoxForegroundColor( ) const;
+	FSlateColor HandleTextBoxForegroundColor() const;
 
 	/** Handles getting the text to be displayed in the editable text box. */
 	FText HandleTextBoxText( ) const;

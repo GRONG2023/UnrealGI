@@ -34,8 +34,14 @@ void FMacErrorOutputDevice::Serialize( const TCHAR* Msg, ELogVerbosity::Type Ver
 		{
 			UE_LOG(LogMac, Error, TEXT("appError called: %s"), Msg );
 		}
-		FCString::Strncpy( GErrorHist, Msg, UE_ARRAY_COUNT(GErrorHist) - 5 );
-		FCString::Strncat( GErrorHist, TEXT("\r\n\r\n"), UE_ARRAY_COUNT(GErrorHist) - 1  );
+
+		// CheckVerifyFailedImpl writes GErrorHist including a callstack and then calls GError->Logf with only the
+		// assertion expression and description. Keep GErrorHist intact if it begins with Msg.
+		if (FCString::Strncmp(GErrorHist, Msg, FMath::Min<int32>(UE_ARRAY_COUNT(GErrorHist), FCString::Strlen(Msg))))
+		{
+			FCString::Strncpy(GErrorHist, Msg, UE_ARRAY_COUNT(GErrorHist) - 5);
+			FCString::Strncat(GErrorHist, TEXT("\r\n\r\n"), UE_ARRAY_COUNT(GErrorHist) - 1);
+		}
 		ErrorPos = FCString::Strlen(GErrorHist);
 	}
 	else
@@ -49,22 +55,21 @@ void FMacErrorOutputDevice::Serialize( const TCHAR* Msg, ELogVerbosity::Type Ver
 #if PLATFORM_EXCEPTIONS_DISABLED
 		UE_DEBUG_BREAK();
 #endif
-		const int32 NumStackFramesToIgnore = 0;
-
+		void* ErrorProgramCounter = GetErrorProgramCounter();
 		if (GIsGPUCrashed)
 		{
-			ReportGPUCrash(Msg, NumStackFramesToIgnore);
+			ReportGPUCrash(Msg, ErrorProgramCounter);
 		}
 		else
 		{
-			ReportAssert(Msg, NumStackFramesToIgnore);
+			ReportAssert(Msg, ErrorProgramCounter);
 		}
 	}
 	else
 	{
 		// We crashed outside the guarded code (e.g. appExit).
 		HandleError();
-		FPlatformMisc::RequestExit( true );
+		FPlatformMisc::RequestExit( true, TEXT("FMacErrorOutputDevice::Serialize.!GIsGuarded"));
 	}
 }
 
@@ -92,17 +97,7 @@ void FMacErrorOutputDevice::HandleError()
 	UE_LOG(LogMac, Log, TEXT("=== Critical error: ===") LINE_TERMINATOR TEXT("%s") LINE_TERMINATOR, GErrorExceptionDescription);
 	UE_LOG(LogMac, Log, TEXT("%s"), GErrorHist);
     
-    GLog->Flush();
-    
-#if PLATFORM_MAC_ARM64
-    // stack dumping seems broken on arm, so for the time being spin so we can dump callstacks
-    // via activity monitor to find broken things.
-    while (true)
-    {
-        FPlatformMisc::LowLevelOutputDebugString(TEXT("Spinning after fatal error.."));
-        FPlatformProcess::Sleep( 1.0 );
-    }
-#endif
+    GLog->Panic();
 
 	HandleErrorRestoreUI();
 

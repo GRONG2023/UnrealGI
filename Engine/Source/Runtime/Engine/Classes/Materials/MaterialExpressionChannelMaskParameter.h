@@ -4,20 +4,10 @@
 
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
+#include "MaterialValueType.h"
+#include "Materials/MaterialExpressionChannelMaskParameterColor.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
 #include "MaterialExpressionChannelMaskParameter.generated.h"
-
-UENUM()
-namespace EChannelMaskParameterColor
-{
-	enum Type
-	{
-		Red,
-		Green,
-		Blue,
-		Alpha,
-	};
-}
 
 UCLASS(collapsecategories, hidecategories=(Object, MaterialExpressionVectorParameter), MinimalAPI)
 class UMaterialExpressionChannelMaskParameter : public UMaterialExpressionVectorParameter
@@ -27,13 +17,21 @@ class UMaterialExpressionChannelMaskParameter : public UMaterialExpressionVector
 	UPROPERTY(EditAnywhere, Category=MaterialExpressionChannelMaskParameter)
 	TEnumAsByte<EChannelMaskParameterColor::Type> MaskChannel;
 
-#if WITH_EDITORONLY_DATA
 	UPROPERTY()
 	FExpressionInput Input;
-#endif
 
 #if WITH_EDITOR
-	virtual bool SetParameterValue(FName InParameterName, FLinearColor InValue) override;
+	virtual bool GetParameterValue(FMaterialParameterMetadata& OutMeta) const override
+	{
+		if (Super::GetParameterValue(OutMeta))
+		{
+			OutMeta.bUsedAsChannelMask = true;
+			return true;
+		}
+		return false;
+	}
+
+	virtual bool SetParameterValue(FName InParameterName, FLinearColor InValue, EMaterialExpressionSetParameterValueFlags Flags) override;
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 
 	virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
@@ -41,6 +39,8 @@ class UMaterialExpressionChannelMaskParameter : public UMaterialExpressionVector
 	
 	virtual bool IsInputConnectionRequired(int32 InputIndex) const override {return true;}
 	virtual uint32 GetInputType(int32 InputIndex) override {return MCT_Float4;}
+
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
 #endif
 
 	virtual bool IsUsedAsChannelMask() const override {return true;}

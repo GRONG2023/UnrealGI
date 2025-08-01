@@ -1,15 +1,19 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SAddContentDialog.h"
-#include "Widgets/Layout/SBorder.h"
-#include "EditorStyleSet.h"
+
+#include "Internationalization/Internationalization.h"
+#include "Layout/Margin.h"
+#include "Math/Vector2D.h"
+#include "Misc/Attribute.h"
 #include "SAddContentWidget.h"
+#include "Styling/AppStyle.h"
+#include "Widgets/Layout/SBorder.h"
 
 #define LOCTEXT_NAMESPACE "AddContentDialog"
 
 void SAddContentDialog::Construct(const FArguments& InArgs)
 {
-	SAssignNew(AddContentWidget, SAddContentWidget);
 
 	SWindow::Construct(SWindow::FArguments()
 		.Title(LOCTEXT("AddContentDialogTitle", "Add Content to the Project"))
@@ -19,16 +23,10 @@ void SAddContentDialog::Construct(const FArguments& InArgs)
 		.SupportsMaximize(false)
 		[
 			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
-			.Padding(FMargin(15))
+			.BorderImage(FAppStyle::GetBrush("Brushes.Panel"))
+			.Padding(FMargin(10,0))
 			[
-				SNew(SVerticalBox)
-
-				// Add content widget.
-				+ SVerticalBox::Slot()
-				[
-					AddContentWidget.ToSharedRef()
-				]
+				SNew(SAddContentWidget)
 			]
 		]);
 }

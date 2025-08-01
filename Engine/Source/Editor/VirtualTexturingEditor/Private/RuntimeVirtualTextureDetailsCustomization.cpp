@@ -21,6 +21,7 @@
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Layout/SWrapBox.h"
+#include "Widgets/Text/STextBlock.h"
 
 #define LOCTEXT_NAMESPACE "VirtualTexturingEditorModule"
 
@@ -269,7 +270,7 @@ void FRuntimeVirtualTextureComponentDetailsCustomization::CustomizeDetails(IDeta
 		.VAlign(VAlign_Center)
 		[
 			SNew(SImage)
-			.Image(FEditorStyle::GetBrush("Icons.Warning"))
+			.Image(FAppStyle::GetBrush("Icons.Warning"))
 			.Visibility(this, &FRuntimeVirtualTextureComponentDetailsCustomization::IsBuildWarningIconVisible)
 			.ToolTipText(LOCTEXT("Warning_Build_Tooltip", "The settings have changed since the Streaming Texture was last rebuilt. Streaming mips are disabled."))
 		]
@@ -301,7 +302,7 @@ bool FRuntimeVirtualTextureComponentDetailsCustomization::IsBuildStreamedMipsEna
 
 EVisibility FRuntimeVirtualTextureComponentDetailsCustomization::IsBuildWarningIconVisible() const
 {
-	bool bVisible = RuntimeVirtualTextureComponent->GetVirtualTexture() != nullptr && !RuntimeVirtualTextureComponent->IsStreamingTextureValid();
+	const bool bVisible = RuntimeVirtualTextureComponent->IsStreamingTextureInvalid();
 	return bVisible ? EVisibility::Visible : EVisibility::Hidden;
 }
 
@@ -335,9 +336,8 @@ FReply FRuntimeVirtualTextureComponentDetailsCustomization::BuildStreamedMips()
 
 		RuntimeVirtualTextureComponent->GetStreamingTexture()->Modify();
 
-		const bool bDebug = RuntimeVirtualTextureComponent->IsBuildDebugStreamingMips();
-		const ERuntimeVirtualTextureDebugType DebugType = bDebug ? ERuntimeVirtualTextureDebugType::Debug : ERuntimeVirtualTextureDebugType::None;
-		if (RuntimeVirtualTexture::BuildStreamedMips(RuntimeVirtualTextureComponent, DebugType))
+		const FLinearColor FixedColor = RuntimeVirtualTextureComponent->GetStreamingMipsFixedColor();
+		if (RuntimeVirtualTexture::BuildStreamedMips(RuntimeVirtualTextureComponent, FixedColor))
 		{
 			bOK = true;
 		}

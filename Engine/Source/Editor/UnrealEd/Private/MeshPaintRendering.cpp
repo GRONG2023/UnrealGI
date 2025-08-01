@@ -6,7 +6,7 @@
 
 #include "MeshPaintRendering.h"
 #include "ShaderParameters.h"
-#include "RenderResource.h"
+#include "DataDrivenShaderPlatformInfo.h"
 #include "Shader.h"
 #include "StaticBoundShaderState.h"
 #include "RHIStaticStates.h"
@@ -42,9 +42,9 @@ namespace MeshPaintRendering
 			TransformParameter.Bind( Initializer.ParameterMap, TEXT( "c_Transform" ) );
 		}
 
-		void SetParameters(FRHICommandList& RHICmdList, const FMatrix& InTransform )
+		void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const FMatrix44f& InTransform )
 		{
-			SetShaderValue(RHICmdList, RHICmdList.GetBoundVertexShader(), TransformParameter, InTransform );
+			SetShaderValue(BatchedParameters, TransformParameter, InTransform );
 		}
 
 	private:
@@ -83,47 +83,75 @@ namespace MeshPaintRendering
 			ChannelFlagsParameter.Bind( Initializer.ParameterMap, TEXT( "c_ChannelFlags") );
 			GenerateMaskFlagParameter.Bind( Initializer.ParameterMap, TEXT( "c_GenerateMaskFlag") );
 			GammaParameter.Bind( Initializer.ParameterMap, TEXT( "c_Gamma" ) );
+			PaintBrushTextureParameter.Bind(Initializer.ParameterMap, TEXT("s_PaintBrushTexture"));
+			PaintBrushTextureParameterSampler.Bind(Initializer.ParameterMap, TEXT("s_PaintBrushTextureSampler"));
+			RotationDirectionParameter.Bind(Initializer.ParameterMap, TEXT("RotationDirection"));
+			RotationOffsetParameter.Bind(Initializer.ParameterMap, TEXT("RotationOffset"));
 		}
 
-		void SetParameters(FRHICommandList& RHICmdList, const float InGamma, const FMeshPaintShaderParameters& InShaderParams )
+		void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const float InGamma, const FMeshPaintShaderParameters& InShaderParams )
 		{
-			FRHIPixelShader* ShaderRHI = RHICmdList.GetBoundPixelShader();
-
 			SetTextureParameter(
-				RHICmdList, 
-				ShaderRHI,
+				BatchedParameters,
 				CloneTextureParameter,
 				CloneTextureParameterSampler,
 				TStaticSamplerState< SF_Point, AM_Clamp, AM_Clamp, AM_Clamp >::GetRHI(),
 				InShaderParams.CloneTexture->GetRenderTargetResource()->TextureRHI );
 
-			SetShaderValue(RHICmdList, ShaderRHI, WorldToBrushMatrixParameter, InShaderParams.WorldToBrushMatrix );
+			SetShaderValue(BatchedParameters, WorldToBrushMatrixParameter, (FMatrix44f)InShaderParams.WorldToBrushMatrix );
 
-			FVector4 BrushMetrics;
+			FVector4f BrushMetrics;
 			BrushMetrics.X = InShaderParams.BrushRadius;
 			BrushMetrics.Y = InShaderParams.BrushRadialFalloffRange;
 			BrushMetrics.Z = InShaderParams.BrushDepth;
 			BrushMetrics.W = InShaderParams.BrushDepthFalloffRange;
-			SetShaderValue(RHICmdList, ShaderRHI, BrushMetricsParameter, BrushMetrics );
+			SetShaderValue(BatchedParameters, BrushMetricsParameter, BrushMetrics );
 
-			FVector4 BrushStrength4( InShaderParams.BrushStrength, 0.0f, 0.0f, 0.0f );
-			SetShaderValue(RHICmdList, ShaderRHI, BrushStrengthParameter, BrushStrength4 );
+			FVector4f BrushStrength4( InShaderParams.BrushStrength, 0.0f, 0.0f, 0.0f );
+			SetShaderValue(BatchedParameters, BrushStrengthParameter, BrushStrength4 );
 
-			SetShaderValue(RHICmdList, ShaderRHI, BrushColorParameter, InShaderParams.BrushColor );
+			SetShaderValue(BatchedParameters, BrushColorParameter, InShaderParams.BrushColor );
 
-			FVector4 ChannelFlags;
+			FVector4f ChannelFlags;
 			ChannelFlags.X = InShaderParams.RedChannelFlag;
 			ChannelFlags.Y = InShaderParams.GreenChannelFlag;
 			ChannelFlags.Z = InShaderParams.BlueChannelFlag;
 			ChannelFlags.W = InShaderParams.AlphaChannelFlag;
-			SetShaderValue(RHICmdList, ShaderRHI, ChannelFlagsParameter, ChannelFlags );
+			SetShaderValue(BatchedParameters, ChannelFlagsParameter, ChannelFlags );
 			
 			float MaskVal = InShaderParams.GenerateMaskFlag ? 1.0f : 0.0f;
-			SetShaderValue(RHICmdList, ShaderRHI, GenerateMaskFlagParameter, MaskVal );
+			SetShaderValue(BatchedParameters, GenerateMaskFlagParameter, MaskVal );
 
 			// @todo MeshPaint
-			SetShaderValue(RHICmdList, ShaderRHI, GammaParameter, InGamma );
+			SetShaderValue(BatchedParameters, GammaParameter, InGamma );
+			if (InShaderParams.PaintBrushTexture)
+			{
+				SetTextureParameter(
+					BatchedParameters,
+					PaintBrushTextureParameter,
+					PaintBrushTextureParameterSampler,
+					TStaticSamplerState<SF_Point, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI(),
+					InShaderParams.PaintBrushTexture->GetRenderTargetResource()->TextureRHI);
+				SetShaderValue(BatchedParameters, RotationOffsetParameter, InShaderParams.PaintBrushRotationOffset);
+
+				if (InShaderParams.bRotateBrushTowardsDirection)
+				{
+					SetShaderValue(BatchedParameters, RotationDirectionParameter, InShaderParams.PaintBrushDirectionVector);
+				}
+			}
 		}
+
+		class FMeshPaintUsePaintBrush : SHADER_PERMUTATION_BOOL("MESH_PAINT_USE_PAINTBRUSH");
+		class FMeshPaintUseRotateTowardDirection : SHADER_PERMUTATION_BOOL("MESH_PAINT_ROTATE_TOWARD_DIRECTION");
+		class FMeshPaintUseFillBucket : SHADER_PERMUTATION_BOOL("MESH_PAINT_USE_FILL_BUCKET");
+
+		using FPermutationDomain = TShaderPermutationDomain<FMeshPaintUsePaintBrush, FMeshPaintUseRotateTowardDirection, FMeshPaintUseFillBucket>;
+
+		LAYOUT_FIELD(FShaderResourceParameter, PaintBrushTextureParameter);
+		LAYOUT_FIELD(FShaderResourceParameter, PaintBrushTextureParameterSampler);
+
+		LAYOUT_FIELD(FShaderParameter, RotationDirectionParameter);
+		LAYOUT_FIELD(FShaderParameter, RotationOffsetParameter);
 
 	private:
 		/** Texture that is a clone of the destination render target before we start drawing */
@@ -179,9 +207,9 @@ namespace MeshPaintRendering
 			TransformParameter.Bind( Initializer.ParameterMap, TEXT( "c_Transform" ) );
 		}
 
-		void SetParameters(FRHICommandList& RHICmdList, const FMatrix& InTransform )
+		void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const FMatrix44f& InTransform )
 		{
-			SetShaderValue(RHICmdList, RHICmdList.GetBoundVertexShader(), TransformParameter, InTransform );
+			SetShaderValue(BatchedParameters, TransformParameter, InTransform );
 		}
 
 	private:
@@ -224,37 +252,32 @@ namespace MeshPaintRendering
 			GammaParameter.Bind( Initializer.ParameterMap, TEXT( "Gamma" ) );
 		}
 
-		void SetParameters(FRHICommandList& RHICmdList, const float InGamma, const FMeshPaintDilateShaderParameters& InShaderParams )
+		void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const float InGamma, const FMeshPaintDilateShaderParameters& InShaderParams )
 		{
-			FRHIPixelShader* ShaderRHI = RHICmdList.GetBoundPixelShader();
-
 			SetTextureParameter(
-				RHICmdList, 
-				ShaderRHI,
+				BatchedParameters,
 				Texture0Parameter,
 				Texture0ParameterSampler,
 				TStaticSamplerState< SF_Point, AM_Clamp, AM_Clamp, AM_Clamp >::GetRHI(),
 				InShaderParams.Texture0->GetRenderTargetResource()->TextureRHI );
 
 			SetTextureParameter(
-				RHICmdList, 
-				ShaderRHI,
+				BatchedParameters,
 				Texture1Parameter,
 				Texture1ParameterSampler,
 				TStaticSamplerState< SF_Point, AM_Clamp, AM_Clamp, AM_Clamp >::GetRHI(),
 				InShaderParams.Texture1->GetRenderTargetResource()->TextureRHI );
 
 			SetTextureParameter(
-				RHICmdList, 
-				ShaderRHI,
+				BatchedParameters,
 				Texture2Parameter,
 				Texture2ParameterSampler,
 				TStaticSamplerState< SF_Point, AM_Clamp, AM_Clamp, AM_Clamp >::GetRHI(),
 				InShaderParams.Texture2->GetRenderTargetResource()->TextureRHI );
 
-			SetShaderValue(RHICmdList, ShaderRHI, WidthPixelOffsetParameter, InShaderParams.WidthPixelOffset );
-			SetShaderValue(RHICmdList, ShaderRHI, HeightPixelOffsetParameter, InShaderParams.HeightPixelOffset );
-			SetShaderValue(RHICmdList, ShaderRHI, GammaParameter, InGamma );
+			SetShaderValue(BatchedParameters, WidthPixelOffsetParameter, InShaderParams.WidthPixelOffset );
+			SetShaderValue(BatchedParameters, HeightPixelOffsetParameter, InShaderParams.HeightPixelOffset );
+			SetShaderValue(BatchedParameters, GammaParameter, InGamma );
 		}
 
 
@@ -311,20 +334,26 @@ namespace MeshPaintRendering
 										   const FMeshPaintShaderParameters& InShaderParams )
 	{
 		TShaderMapRef< TMeshPaintVertexShader > VertexShader(GetGlobalShaderMap(InFeatureLevel));
-		TShaderMapRef< TMeshPaintPixelShader > PixelShader(GetGlobalShaderMap(InFeatureLevel));
 
-		GraphicsPSOInit.BoundShaderState.VertexDeclarationRHI = GMeshPaintDilateVertexDeclaration.VertexDeclarationRHI;
+		TMeshPaintPixelShader::FPermutationDomain MeshPaintPermutationVector;
+		MeshPaintPermutationVector.Set<TMeshPaintPixelShader::FMeshPaintUsePaintBrush>(InShaderParams.PaintBrushTexture != nullptr);
+		MeshPaintPermutationVector.Set<TMeshPaintPixelShader::FMeshPaintUseRotateTowardDirection>(InShaderParams.bRotateBrushTowardsDirection);
+		MeshPaintPermutationVector.Set<TMeshPaintPixelShader::FMeshPaintUseFillBucket>(InShaderParams.bUseFillBucket);
+		TShaderMapRef<TMeshPaintPixelShader> PixelShader(GetGlobalShaderMap(InFeatureLevel), MeshPaintPermutationVector);
+
+		GraphicsPSOInit.BoundShaderState.VertexDeclarationRHI = GMeshPaintVertexDeclaration.VertexDeclarationRHI;
 		GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShader.GetVertexShader();
 		GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
 		GraphicsPSOInit.PrimitiveType = PT_TriangleList;
 
-		SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, EApplyRendertargetOption::ForceApply);
+		RHICmdList.ApplyCachedRenderTargets(GraphicsPSOInit);
+		SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
 
 		// Set vertex shader parameters
-		VertexShader->SetParameters(RHICmdList, InTransform );
+		SetShaderParametersLegacyVS(RHICmdList, VertexShader, FMatrix44f(InTransform) );	// LWC_TODO: Precision loss
 		
 		// Set pixel shader parameters
-		PixelShader->SetParameters(RHICmdList, InGamma, InShaderParams );
+		SetShaderParametersLegacyPS(RHICmdList, PixelShader, InGamma, InShaderParams );
 
 		// @todo MeshPaint: Make sure blending/color writes are setup so we can write to ALPHA if needed!
 	}
@@ -342,13 +371,14 @@ namespace MeshPaintRendering
 		GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
 		GraphicsPSOInit.PrimitiveType = PT_TriangleList;
 
-		SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, EApplyRendertargetOption::ForceApply);
+		RHICmdList.ApplyCachedRenderTargets(GraphicsPSOInit);
+		SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
 
 		// Set vertex shader parameters
-		VertexShader->SetParameters(RHICmdList, InTransform );
+		SetShaderParametersLegacyVS(RHICmdList, VertexShader, FMatrix44f(InTransform) );	// LWC_TODO: Precision loss
 
 		// Set pixel shader parameters
-		PixelShader->SetParameters(RHICmdList, InGamma, InShaderParams );
+		SetShaderParametersLegacyPS(RHICmdList, PixelShader, InGamma, InShaderParams );
 	}
 
 }

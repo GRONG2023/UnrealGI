@@ -8,29 +8,27 @@ namespace UnrealBuildTool.Rules
 		{
 			bUseUnity = true;
 
-            PrivateDependencyModuleNames.AddRange(
+			PrivateDependencyModuleNames.AddRange(
 				new string[]
 				{
-                    "InputCore",
-                    "CoreUObject",
-                    "Engine"
-                }
+					"CoreUObject",
+					"Engine",
+					"AudioMixer"
+				}
 			);
 
 			PublicDependencyModuleNames.AddRange(
 				new string[]
 				{
-                    "Core",
+					"Core",
 					"SignalProcessing"
-                }
+				}
 			);
 
-            if (Target.Type == TargetType.Editor &&
-				(Target.Platform == UnrealTargetPlatform.Win64 || Target.Platform == UnrealTargetPlatform.Win32)
-                )
-            {
-                AddEngineThirdPartyPrivateStaticDependencies(Target, "UELibSampleRate");
-            }
-        }
+			if (Target.Type == TargetType.Editor && Target.Platform == UnrealTargetPlatform.Win64)
+			{
+				AddEngineThirdPartyPrivateStaticDependencies(Target, "UELibSampleRate");
+			}
+		}
 	}
 }

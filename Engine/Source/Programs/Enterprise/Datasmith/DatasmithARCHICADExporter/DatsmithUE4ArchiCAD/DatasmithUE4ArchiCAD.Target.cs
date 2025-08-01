@@ -9,6 +9,7 @@ public class DatasmithUE4ArchiCADTarget : TargetRules
 		: base(Target)
 	{
 		Type = TargetType.Program;
+		IncludeOrderVersion = EngineIncludeOrderVersion.Latest;
 		SolutionDirectory = "Programs/Datasmith";
 		bBuildInSolutionByDefault = false;
 
@@ -20,8 +21,11 @@ public class DatasmithUE4ArchiCADTarget : TargetRules
 
 		ExtraModuleNames.AddRange( new string[] { "DatasmithCore", "DatasmithExporter"} );
 
+		if (Target.Platform == UnrealTargetPlatform.Mac)
+		{
+		}
+
 		bBuildDeveloperTools = false;
-		bUseMallocProfiler = false;
 		bBuildWithEditorOnlyData = true;
 		bCompileAgainstEngine = false;
 		bCompileAgainstCoreUObject = true;

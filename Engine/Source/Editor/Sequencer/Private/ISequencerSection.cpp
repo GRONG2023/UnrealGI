@@ -1,31 +1,42 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ISequencerSection.h"
-#include "MovieSceneSection.h"
-#include "ISectionLayoutBuilder.h"
-#include "SequencerSectionPainter.h"
-#include "IKeyArea.h"
+
+#include "Channels/MovieSceneChannelEditorData.h"
+#include "Channels/MovieSceneChannelHandle.h"
 #include "Channels/MovieSceneChannelProxy.h"
+#include "Containers/ArrayView.h"
+#include "Containers/ContainerAllocationPolicies.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "HAL/PlatformCrt.h"
+#include "IKeyArea.h"
+#include "ISectionLayoutBuilder.h"
+#include "Math/NumericLimits.h"
+#include "Math/Range.h"
+#include "Math/RangeBound.h"
+#include "Math/UnrealMathSSE.h"
+#include "MovieSceneSection.h"
+#include "SequencerSectionPainter.h"
+#include "Templates/Tuple.h"
+#include "Templates/UnrealTemplate.h"
+#include "ISequencerChannelInterface.h"
+#include "ISequencerModule.h"
+#include "Modules/ModuleManager.h"
+#include "MVVM/ViewModels/ViewDensity.h"
 
-/** Structure used during key area creation to group channels by their group name */
-struct FChannelData
-{
-	/** Handle to the channel */
-	FMovieSceneChannelHandle Channel;
-
-	/** The channel's editor meta data */
-	const FMovieSceneChannelMetaData& MetaData;
-};
+struct FMovieSceneChannel;
 
 /** Data pertaining to a group of channels */
 struct FGroupData
 {
-	FGroupData(FText InGroupText)
+	FGroupData(FText InGroupText, FGetMovieSceneTooltipText InGetGroupTooltipTextDelegate)
 		: GroupText(InGroupText)
+		, GetGroupTooltipTextDelegate(InGetGroupTooltipTextDelegate)
 		, SortOrder(-1)
 	{}
 
-	void AddChannel(FChannelData&& InChannel)
+	void AddChannel(ISequencerSection::FChannelData&& InChannel)
 	{
 		if (InChannel.MetaData.SortOrder < SortOrder)
 		{
@@ -37,16 +48,21 @@ struct FGroupData
 
 	/** Text to display for the group */
 	FText GroupText;
+	
+	/** Getter for text to display for the group tooltip */
+	FGetMovieSceneTooltipText GetGroupTooltipTextDelegate;
 
 	/** Sort order of the group */
 	uint32 SortOrder;
 
 	/** Array of channels within this group */
-	TArray<FChannelData, TInlineAllocator<4>> Channels;
+	TArray<ISequencerSection::FChannelData, TInlineAllocator<4>> Channels;
 };
 
 void ISequencerSection::GenerateSectionLayout( ISectionLayoutBuilder& LayoutBuilder )
 {
+	using namespace UE::Sequencer;
+
 	UMovieSceneSection* Section = GetSectionObject();
 	if (!Section)
 	{
@@ -77,7 +93,12 @@ void ISequencerSection::GenerateSectionLayout( ISectionLayoutBuilder& LayoutBuil
 				FGroupData* ExistingGroup = GroupToChannelsMap.Find(GroupName);
 				if (!ExistingGroup)
 				{
-					ExistingGroup = &GroupToChannelsMap.Add(GroupName, FGroupData(MetaData.Group));
+					FText GroupDisplayName = FText::FromString(MetaData.GetPropertyMetaData(FCommonChannelData::GroupDisplayName));
+					if (GroupDisplayName.IsEmpty())
+					{
+						GroupDisplayName = FText::FromName(GroupName);
+					}
+					ExistingGroup = &GroupToChannelsMap.Add(GroupName, FGroupData(GroupDisplayName, MetaData.GetGroupTooltipTextDelegate));
 				}
 
 				ExistingGroup->AddChannel(FChannelData{ Channel, MetaData });
@@ -90,20 +111,38 @@ void ISequencerSection::GenerateSectionLayout( ISectionLayoutBuilder& LayoutBuil
 		return;
 	}
 
+
+	ISequencerModule* SequencerModule = &FModuleManager::LoadModuleChecked<ISequencerModule>("Sequencer");
+
+	auto ChannelFactory = [this, SequencerModule](FName InChannelName, const FMovieSceneChannelHandle& InChannel)
+	{
+		TSharedPtr<FChannelModel> ChannelModel = this->ConstructChannelModel(InChannelName, InChannel);
+		if (!ChannelModel)
+		{
+			ISequencerChannelInterface* EditorInterface = SequencerModule->FindChannelEditorInterface(InChannel.GetChannelTypeName());
+			if (EditorInterface)
+			{
+				ChannelModel = EditorInterface->CreateChannelModel_Raw(InChannel, InChannelName);
+			}
+		}
+
+		return ChannelModel;
+	};
+
 	// Collapse single channels to the top level track node if allowed
 	if (GroupToChannelsMap.Num() == 1)
 	{
 		const TTuple<FName, FGroupData>& Pair = *GroupToChannelsMap.CreateIterator();
 		if (Pair.Value.Channels.Num() == 1 && Pair.Value.Channels[0].MetaData.bCanCollapseToTrack)
 		{
-			LayoutBuilder.SetTopLevelChannel(Pair.Value.Channels[0].Channel);
+			LayoutBuilder.SetTopLevelChannel(Pair.Value.Channels[0].Channel, ChannelFactory);
 			return;
 		}
 	}
 
 	// Sort the channels in each group by its sort order and name
 	TArray<FName, TInlineAllocator<6>> SortedGroupNames;
-	for (auto& Pair : GroupToChannelsMap)
+	for (TPair<FName, FGroupData>& Pair : GroupToChannelsMap)
 	{
 		SortedGroupNames.Add(Pair.Key);
 
@@ -138,16 +177,21 @@ void ISequencerSection::GenerateSectionLayout( ISectionLayoutBuilder& LayoutBuil
 	// Create key areas for each group name
 	for (FName GroupName : SortedGroupNames)
 	{
-		auto& ChannelData = GroupToChannelsMap.FindChecked(GroupName);
+		FGroupData& ChannelData = GroupToChannelsMap.FindChecked(GroupName);
 
 		if (!GroupName.IsNone())
 		{
-			LayoutBuilder.PushCategory(GroupName, ChannelData.GroupText);
+			auto Factory = [this, &ChannelData](FName InCategoryName, const FText& InDisplayText)
+			{
+				return this->ConstructCategoryModel(InCategoryName, InDisplayText, ChannelData.Channels);
+			};
+
+			LayoutBuilder.PushCategory(GroupName, ChannelData.GroupText, ChannelData.GetGroupTooltipTextDelegate, Factory);
 		}
 
 		for (const FChannelData& ChannelAndData : ChannelData.Channels)
 		{
-			LayoutBuilder.AddChannel(ChannelAndData.Channel);
+			LayoutBuilder.AddChannel(ChannelAndData.Channel, ChannelFactory);
 		}
 
 		if (!GroupName.IsNone())
@@ -156,6 +200,25 @@ void ISequencerSection::GenerateSectionLayout( ISectionLayoutBuilder& LayoutBuil
 		}
 	}
 }
+
+float ISequencerSection::GetSectionHeight() const
+{
+	return SequencerSectionConstants::DefaultSectionHeight;
+}
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+float ISequencerSection::GetSectionHeight(const UE::Sequencer::FViewDensityInfo& ViewDensity) const
+{
+	// Call the deprecated method
+	float Height = GetSectionHeight();
+	if (Height != SequencerSectionConstants::DefaultSectionHeight)
+	{
+		// Override the uniform height for some sections
+		return Height;
+	}
+	return ViewDensity.UniformHeight.Get(Height);
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 void ISequencerSection::ResizeSection(ESequencerSectionResizeMode ResizeMode, FFrameNumber ResizeFrameNumber)
 {

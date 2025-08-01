@@ -3,8 +3,10 @@
 #include "PostProcess/PostProcessBokehDOF.h"
 #include "PostProcess/PostProcessDOF.h"
 #include "CanvasTypes.h"
-#include "RenderTargetTemp.h"
-#include "DiaphragmDOF.h"
+#include "PostProcess/DiaphragmDOF.h"
+#include "SceneRendering.h"
+#include "DataDrivenShaderPlatformInfo.h"
+#include "UnrealEngine.h"
 
 class FVisualizeDOFPS : public FGlobalShader
 {
@@ -24,9 +26,11 @@ public:
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, DepthTexture)
 		SHADER_PARAMETER_SAMPLER(SamplerState, ColorSampler)
 		SHADER_PARAMETER_SAMPLER(SamplerState, DepthSampler)
-		SHADER_PARAMETER(FVector4, DepthOfFieldParams)
-		SHADER_PARAMETER(FVector4, NearColor)
-		SHADER_PARAMETER(FVector4, FarColor)
+		SHADER_PARAMETER(FScreenTransform, SvPositionToColorUV)
+		SHADER_PARAMETER(FScreenTransform, SvPositionToDepthUV)
+		SHADER_PARAMETER(FVector4f, DepthOfFieldParams)
+		SHADER_PARAMETER(FVector4f, NearColor)
+		SHADER_PARAMETER(FVector4f, FarColor)
 		RENDER_TARGET_BINDING_SLOTS()
 	END_SHADER_PARAMETER_STRUCT()
 };
@@ -37,7 +41,6 @@ FScreenPassTexture AddVisualizeDOFPass(FRDGBuilder& GraphBuilder, const FViewInf
 {
 	check(Inputs.SceneColor.IsValid());
 	check(Inputs.SceneDepth.IsValid());
-	checkf(Inputs.SceneColor.ViewRect == Inputs.SceneDepth.ViewRect, TEXT("VisualizeDOF requires that the scene and depth view rects match."));
 
 	FScreenPassRenderTarget Output = Inputs.OverrideOutput;
 
@@ -57,6 +60,17 @@ FScreenPassTexture AddVisualizeDOFPass(FRDGBuilder& GraphBuilder, const FViewInf
 	PassParameters->DepthTexture = Inputs.SceneDepth.Texture;
 	PassParameters->ColorSampler = PointClampSampler;
 	PassParameters->DepthSampler = PointClampSampler;
+	{
+		FScreenTransform SvPositionToViewportUV = FScreenTransform::SvPositionToViewportUV(Output.ViewRect);
+		PassParameters->SvPositionToColorUV = 
+			SvPositionToViewportUV *
+			FScreenTransform::ChangeTextureBasisFromTo(
+				InputViewport, FScreenTransform::ETextureBasis::ViewportUV, FScreenTransform::ETextureBasis::TextureUV);
+		PassParameters->SvPositionToDepthUV =
+			SvPositionToViewportUV *
+			FScreenTransform::ChangeTextureBasisFromTo(
+				FScreenPassTextureViewport(Inputs.SceneDepth), FScreenTransform::ETextureBasis::ViewportUV, FScreenTransform::ETextureBasis::TextureUV);
+	}
 	PassParameters->DepthOfFieldParams = GetDepthOfFieldParameters(View.FinalPostProcessSettings);
 	PassParameters->NearColor = FLinearColor(0, 0.8f, 0, 0);
 	PassParameters->FarColor = FLinearColor(0, 0, 0.8f, 0);
@@ -103,13 +117,18 @@ FScreenPassTexture AddVisualizeDOFPass(FRDGBuilder& GraphBuilder, const FViewInf
 
 		const FVector2D Fov = View.ViewMatrices.ComputeHalfFieldOfViewPerAxis();
 
-		const float FocalLength = DiaphragmDOF::ComputeFocalLengthFromFov(View);
+		DiaphragmDOF::FPhysicalCocModel CocModel;
+		CocModel.Compile(View);
 
-		Line = FString::Printf(TEXT("Field Of View in deg. (computed): %.1f x %.1f"), FMath::RadiansToDegrees(Fov.X) * 2.0f, FMath::RadiansToDegrees(Fov.Y) * 2.0f);
+		const float UUToMM = 10.0f;
+
+		Line = FString::Printf(TEXT("Field Of View in deg.: %.1f x %.1f"), FMath::RadiansToDegrees(Fov.X) * 2.0f, FMath::RadiansToDegrees(Fov.Y) * 2.0f);
 		Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), FLinearColor(0.5, 0.5, 1));
-		Line = FString::Printf(TEXT("Focal Length (computed): %.1f"), FocalLength);
-		Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), FLinearColor(0.5, 0.5, 10));
-		Line = FString::Printf(TEXT("Sensor: APS-C 24.576 mm sensor, crop-factor 1.61x"));
+		Line = FString::Printf(TEXT("Focal Length: %.1f mm"), UUToMM * CocModel.VerticalFocalLength);
+		Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), FLinearColor(0.5, 0.5, 1));
+		Line = FString::Printf(TEXT("Squeeze Factor: %.1f"), CocModel.Squeeze);
+		Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), FLinearColor(0.5, 0.5, 1));
+		Line = FString::Printf(TEXT("Sensor: %.1f x %.1f mm"), UUToMM * CocModel.SensorWidth, UUToMM * CocModel.SensorHeight);
 		Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), FLinearColor(0.5, 0.5, 1));
 	});
 

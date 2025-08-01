@@ -5,88 +5,88 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "Animation/AnimationAsset.h"
-#include "Animation/AnimNodeBase.h"
+#include "Animation/AnimNode_RelevantAssetPlayerBase.h"
+#include "Animation/AnimSync.h"
 #include "AnimNode_AssetPlayerBase.generated.h"
 
 /* Base class for any asset playing anim node */
 USTRUCT(BlueprintInternalUseOnly)
-struct ENGINE_API FAnimNode_AssetPlayerBase : public FAnimNode_Base
+struct FAnimNode_AssetPlayerBase : public FAnimNode_AssetPlayerRelevancyBase
 {
-	GENERATED_BODY();
+	GENERATED_BODY()
 
-	FAnimNode_AssetPlayerBase();
+	friend class UAnimGraphNode_AssetPlayerBase;
 
-	/** Get the last encountered blend weight for this node */
-	virtual float GetCachedBlendWeight() const;
-	
-	/** Set the cached blendweight to zero */
-	void ClearCachedBlendWeight();
-
-	/** Get the currently referenced time within the asset player node */
-	virtual float GetAccumulatedTime() const;
-
-	/** Override the currently accumulated time */
-	virtual void SetAccumulatedTime(const float& NewTime);
-
-	/** Get the animation asset associated with the node, derived classes should implement this */
-	virtual UAnimationAsset* GetAnimAsset();
+	FAnimNode_AssetPlayerBase() = default;
 
 	/** Initialize function for setup purposes */
-	virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
+	ENGINE_API virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
 
 	/** Update the node, marked final so we can always handle blendweight caching.
 	 *  Derived classes should implement UpdateAssetPlayer
 	 */
-
-	virtual void Update_AnyThread(const FAnimationUpdateContext& Context) final override;
+	ENGINE_API virtual void Update_AnyThread(const FAnimationUpdateContext& Context) final override;
 
 	/** Update method for the asset player, to be implemented by derived classes */
 	virtual void UpdateAssetPlayer(const FAnimationUpdateContext& Context) {};
 
-	// The group name (NAME_None if it is not part of any group)
-	UPROPERTY()
-	FName GroupName;
+	// Create a tick record for this node
+	ENGINE_API void CreateTickRecordForNode(const FAnimationUpdateContext& Context, UAnimSequenceBase* Sequence, bool bLooping, float PlayRate, bool bIsEvaluator);
 
+	// Get the sync group name we are using
+	virtual FName GetGroupName() const { return NAME_None; }
+
+	// Get the sync group role we are using
+	virtual EAnimGroupRole::Type GetGroupRole() const { return EAnimGroupRole::CanBeLeader; }
+
+	// Get the sync group method we are using
+	virtual EAnimSyncMethod GetGroupMethod() const { return EAnimSyncMethod::DoNotSync; }
+
+	// Set the sync group name we are using
+	virtual bool SetGroupName(FName InGroupName) { return false; }
+
+	// Set the sync group role we are using
+	virtual bool SetGroupRole(EAnimGroupRole::Type InRole) { return false; }
+
+	// Set the sync group method we are using
+	virtual bool SetGroupMethod(EAnimSyncMethod InMethod) { return false; }
+
+	// --- FAnimNode_RelevantAssetPlayerBase ---
+	ENGINE_API virtual float GetAccumulatedTime() const override;
+	ENGINE_API virtual void SetAccumulatedTime(float NewTime) override;
+	ENGINE_API virtual float GetCachedBlendWeight() const override;
+	ENGINE_API virtual void ClearCachedBlendWeight() override;
+	ENGINE_API virtual float GetCurrentAssetTimePlayRateAdjusted() const override;
+	ENGINE_API virtual const FDeltaTimeRecord* GetDeltaTimeRecord() const override;
+	// --- End of FAnimNode_RelevantAssetPlayerBase ---
+
+private:
 #if WITH_EDITORONLY_DATA
 	UPROPERTY()
-	int32 GroupIndex_DEPRECATED;
+	int32 GroupIndex_DEPRECATED = INDEX_NONE;
+
+	UPROPERTY()
+	EAnimSyncGroupScope GroupScope_DEPRECATED = EAnimSyncGroupScope::Local;
 #endif
-
-	// The role this player can assume within the group (ignored if GroupIndex is INDEX_NONE)
-	UPROPERTY()
-	TEnumAsByte<EAnimGroupRole::Type> GroupRole;
-
-	// The scope at which marker-based sync is applied
-	UPROPERTY()
-	EAnimSyncGroupScope GroupScope;
-
-	/** If true, "Relevant anim" nodes that look for the highest weighted animation in a state will ignore
-	 *  this node
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Relevancy, meta=(PinHiddenByDefault))
-	bool bIgnoreForRelevancyTest;
-
-	// Create a tick record for this node
-	void CreateTickRecordForNode(const FAnimationUpdateContext& Context, UAnimSequenceBase* Sequence, bool bLooping, float PlayRate);
-
-	// Functions to report data to getters, this is required for all asset players (but can't be pure abstract because of struct instantiation generated code).
-	virtual float GetCurrentAssetLength() { return 0.0f; }
-	virtual float GetCurrentAssetTime() { return 0.0f; }
-	virtual float GetCurrentAssetTimePlayRateAdjusted() { return GetCurrentAssetTime(); }
-
+	
 protected:
-
-	/** Track whether we have been full weight previously. Reset when we reach 0 weight*/
-	bool bHasBeenFullWeight;
+	/** Store data about current marker position when using marker based syncing*/
+	FMarkerTickRecord MarkerTickRecord;
 
 	/** Last encountered blendweight for this node */
 	UPROPERTY(BlueprintReadWrite, Transient, Category=DoNotEdit)
-	float BlendWeight;
+	float BlendWeight = 0.0f;
 
 	/** Accumulated time used to reference the asset in this node */
 	UPROPERTY(BlueprintReadWrite, Transient, Category=DoNotEdit)
-	float InternalTimeAccumulator;
+	float InternalTimeAccumulator = 0.0f;
+	
+	/** Previous frame InternalTimeAccumulator value and effective delta time leading into the current frame */
+	FDeltaTimeRecord DeltaTimeRecord;
 
-	/** Store data about current marker position when using marker based syncing*/
-	FMarkerTickRecord MarkerTickRecord;
+	/** Track whether we have been full weight previously. Reset when we reach 0 weight*/
+	bool bHasBeenFullWeight = false;
+
+	/** Get sync parameters for the tick record produced by this asset player */
+	ENGINE_API UE::Anim::FAnimSyncParams GetSyncParams(bool bRequestedInertialization) const;
 };

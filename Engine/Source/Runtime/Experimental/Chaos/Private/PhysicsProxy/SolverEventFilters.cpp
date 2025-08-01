@@ -4,6 +4,8 @@
 #include "Chaos/CollisionResolutionTypes.h"
 #include "Chaos/ExternalCollisionData.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SolverEventFilters)
+
 namespace Chaos
 {
 
@@ -68,4 +70,22 @@ namespace Chaos
 		return true;
 	}
 
+	bool FSolverRemovalEventFilter::Pass(const FRemovalData& InData) const
+	{
+		if (Settings.MinMass > 0.0f && InData.Mass < Settings.MinMass)
+			return false;
+
+		if (Settings.MinVolume > 0)
+		{
+			FVec3 Extents = InData.BoundingBox.Extents();
+			FReal Volume = Extents[0] * Extents[1] * Extents[2];
+
+			if (Volume < Settings.MinVolume)
+				return false;
+		}
+
+		return true;
+	}
+
 } // namespace Chaos
+

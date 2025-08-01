@@ -1,26 +1,53 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SWindow.h"
-#include "Widgets/SCompoundWidget.h"
-#include "Textures/SlateIcon.h"
-#include "Widgets/Views/STableViewBase.h"
-#include "Widgets/Views/STableRow.h"
-#include "Widgets/Views/SListView.h"
-#include "GraphEditor.h"
-#include "DiffUtils.h"
+#include "Delegates/Delegate.h"
 #include "DiffResults.h"
+#include "DiffUtils.h"
+#include "GraphEditor.h"
+#include "HAL/Platform.h"
+#include "IAssetTypeActions.h"
+#include "Misc/Attribute.h"
+#include "Misc/Optional.h"
 #include "SKismetInspector.h"
-#include "Developer/AssetTools/Public/IAssetTypeActions.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
+#include "Textures/SlateIcon.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/SWindow.h"
+#include "Widgets/Views/SListView.h"
+#include "Widgets/Views/STableRow.h"
+#include "Widgets/Views/STableViewBase.h"
+#include "Widgets/Views/STreeView.h"
 
+class FBlueprintDifferenceTreeEntry;
 class FSpawnTabArgs;
 class FTabManager;
+class FText;
+class FUICommandList;
 class IDiffControl;
+class SBox;
 class SMyBlueprint;
+class SOverlay;
+class SSplitter;
+class SWidget;
+class SWindow;
+class UBlueprint;
 class UEdGraph;
+class UEdGraphNode;
+class UEdGraphPin;
+class UObject;
 struct FGraphToDiff;
+template <typename ItemType> class SListView;
+
 enum class EAssetEditorCloseReason : uint8;
 
 /** Individual Diff item shown in the list of diffs */
@@ -51,8 +78,11 @@ struct KISMET_API FDiffPanel
 	/** Initializes the panel, can be moved into constructor if diff and merge clients are made more uniform: */
 	void InitializeDiffPanel();
 
-	/** Generate this panel based on the specified graph */
-	void GeneratePanel(UEdGraph* Graph, UEdGraph* GraphToDiff);
+	/** Generate a panel for NewGraph diffed against OldGraph */
+	void GeneratePanel(UEdGraph* NewGraph, UEdGraph* OldGraph);
+	
+	/** Generate a panel that displays the Graph and reflects the items in the DiffResults */
+	void GeneratePanel(UEdGraph* Graph, TSharedPtr<TArray<FDiffSingleResult>> DiffResults, TAttribute<int32> FocusedDiffResult);
 
 	/** Generate the 'MyBlueprint' widget, which is private to this module */
 	TSharedRef<class SWidget> GenerateMyBlueprintWidget();
@@ -69,6 +99,9 @@ struct KISMET_API FDiffPanel
 	/** Functions used to focus/find a particular change in a diff result */
 	void FocusDiff(UEdGraphPin& Pin);
 	void FocusDiff(UEdGraphNode& Node);
+
+	TSharedRef<SWidget> GetMyBlueprintWidget() const;
+	TSharedRef<SWidget> GetDetailsWidget() const;
 
 	/** The blueprint that owns the graph we are showing */
 	const UBlueprint*				Blueprint;
@@ -90,9 +123,6 @@ struct KISMET_API FDiffPanel
 
 	/** True if we should show a name identifying which asset this panel is displaying */
 	bool							bShowAssetName;
-
-	/** The panel stores the last pin that was focused on by the user, so that it can clear the visual style when selection changes */
-	UEdGraphPin*					LastFocusedPin;
 
 	/** The widget that contains the revision info in graph mode */
 	TSharedPtr<SWidget>				OverlayGraphRevisionInfo;
@@ -119,6 +149,8 @@ public:
 	void Construct(const FArguments& InArgs);
 	virtual ~SBlueprintDiff();
 
+	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
+
 	/** Called when a new Graph is clicked on by user */
 	void OnGraphChanged(FGraphToDiff* Diff);
 
@@ -135,7 +167,10 @@ public:
 	static TSharedRef<SWidget> DefaultEmptyPanel();
 
 	/** Helper function to create a window that holds a diff widget */
-	static TSharedPtr<SWindow> CreateDiffWindow(FText WindowTitle, UBlueprint* OldBlueprint, UBlueprint* NewBlueprint, const struct FRevisionInfo& OldRevision, const struct FRevisionInfo& NewRevision);
+	static TSharedPtr<SWindow> CreateDiffWindow(FText WindowTitle, const UBlueprint* OldBlueprint, const UBlueprint* NewBlueprint, const struct FRevisionInfo& OldRevision, const struct FRevisionInfo& NewRevision);
+
+	/** Helper function to create a window that holds a diff widget that defaults a window title*/
+	static TSharedPtr<SWindow> CreateDiffWindow(const UBlueprint* OldBlueprint, const UBlueprint* NewBlueprint, const FRevisionInfo& OldRevision, const FRevisionInfo& NewRevision, const UClass* BlueprintClass);
 
 protected:
 	/** Called when user clicks button to go to next difference */
@@ -182,7 +217,7 @@ protected:
 	FDiffPanel& GetDiffPanelForNode(UEdGraphNode& Node);
 
 	/** Event handler that updates the graph view when user selects a new graph */
-	void HandleGraphChanged( const FString& GraphPath );
+	void HandleGraphChanged(FGraphToDiff* Diff);
 	
 	/** Function used to generate the list of differences and the widgets needed to calculate that list */
 	void GenerateDifferencesList();
@@ -211,6 +246,7 @@ protected:
 	FDiffControl GenerateDefaultsPanel();
 	FDiffControl GenerateClassSettingsPanel();
 	FDiffControl GenerateComponentsPanel();
+	FDiffControl GenerateGeneralFileCommentEntries();
 
 	TSharedRef<SOverlay> GenerateGraphWidgetForPanel(FDiffPanel& OutDiffPanel) const;
 	TSharedRef<SBox> GenerateRevisionInfoWidgetForPanel(TSharedPtr<SWidget>& OutGeneratedWidget,const FText& InRevisionText) const;
@@ -248,7 +284,7 @@ protected:
 	TSharedPtr<FTabManager> TabManager;
 
 	/** Tree of differences collected across all panels: */
-	TArray< TSharedPtr<class FBlueprintDifferenceTreeEntry> > MasterDifferencesList;
+	TArray< TSharedPtr<class FBlueprintDifferenceTreeEntry> > PrimaryDifferencesList;
 
 	/** List of all differences, cached so that we can iterate only the differences and not labels, etc: */
 	TArray< TSharedPtr<class FBlueprintDifferenceTreeEntry> > RealDifferences;
@@ -263,6 +299,18 @@ protected:
 	TWeakPtr<SWindow> WeakParentWindow;
 
 	FDelegateHandle AssetEditorCloseDelegate;
+
+	/** To make diffing more accurate and friendly, UBlueprint::CategorySorting gets modified. this will revert to the
+	 *  old version when the window closes */
+	class FScopedCategorySortChange
+	{
+	public:
+		~FScopedCategorySortChange();
+		void SetBlueprint(UBlueprint* Blueprint);
+	private:
+		UBlueprint* Blueprint = nullptr;
+		TArray<FName> Backup = {};
+	} ScopedCategorySortChange;
 };
 
 

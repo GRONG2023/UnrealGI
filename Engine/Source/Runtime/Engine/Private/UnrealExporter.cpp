@@ -6,29 +6,24 @@
 
 // Engine includes.
 #include "UnrealExporter.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Object.h"
 #include "UObject/UnrealType.h"
-#include "Components/ActorComponent.h"
 #include "Exporters/Exporter.h"
-#include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/OutputDeviceFile.h"
 #include "Serialization/BufferArchive.h"
-#include "UObject/UObjectHash.h"
 #include "UObject/UObjectIterator.h"
-#include "UObject/Package.h"
-#include "UObject/PropertyPortFlags.h"
-#include "GameFramework/Actor.h"
 #include "Model.h"
 #include "Misc/FeedbackContext.h"
 #include "AssetExportTask.h"
+#include "Misc/AsciiSet.h"
 #include "UObject/GCObjectScopeGuard.h"
-#include "Engine/Selection.h"
 
 #if WITH_EDITOR
 #include "Editor.h"
+#include "Selection.h"
+#else
+#include "UObject/Package.h"
 #endif
 
 DEFINE_LOG_CATEGORY_STATIC(LogExporter, Log, All);
@@ -169,7 +164,7 @@ bool UExporter::ExportToArchive( UObject* Object, UExporter* InExporter, FArchiv
 }
 
 
-void UExporter::ExportToOutputDevice(const FExportObjectInnerContext* Context, UObject* Object, UExporter* InExporter, FOutputDevice& Out, const TCHAR* FileType, int32 Indent, uint32 PortFlags, bool bInSelectedOnly, UObject* ExportRootScope)
+bool UExporter::ExportToOutputDevice(const FExportObjectInnerContext* Context, UObject* Object, UExporter* InExporter, FOutputDevice& Out, const TCHAR* FileType, int32 Indent, uint32 PortFlags, bool bInSelectedOnly, UObject* ExportRootScope)
 {
 	check(Object);
 	UExporter* Exporter = InExporter;
@@ -180,7 +175,7 @@ void UExporter::ExportToOutputDevice(const FExportObjectInnerContext* Context, U
 	if( !Exporter )
 	{
 		UE_LOG(LogExporter, Warning, TEXT("No %s exporter found for %s"), FileType, *Object->GetFullName() );
-		return;
+		return false;
 	}
 	check(Object->IsA(Exporter->SupportedClass));
 	int32 SavedIndent = Exporter->TextIndent;
@@ -202,14 +197,15 @@ void UExporter::ExportToOutputDevice(const FExportObjectInnerContext* Context, U
 		PortFlags |= PPF_Copy;
 	}
 
-	Exporter->ExportText( Context, Object, FileType, Out, GWarn, PortFlags );
+	const bool bSuccess = Exporter->ExportText( Context, Object, FileType, Out, GWarn, PortFlags );
 	Exporter->TextIndent = SavedIndent;
+
+	return bSuccess;
 }
 
 
 int32 UExporter::ExportToFile( UObject* Object, UExporter* InExporter, const TCHAR* Filename, bool InSelectedOnly, bool NoReplaceIdentical, bool Prompt )
 {
-#if WITH_EDITOR
 	UAssetExportTask* ExportTask = NewObject<UAssetExportTask>();
 	FGCObjectScopeGuard ExportTaskGuard(ExportTask);
 	ExportTask->Object = Object;
@@ -222,15 +218,11 @@ int32 UExporter::ExportToFile( UObject* Object, UExporter* InExporter, const TCH
 	ExportTask->bWriteEmptyFiles = false;
 	ExportTask->bAutomated = false;
 	return RunAssetExportTask(ExportTask) ? 1 : 0;
-#else
-	return 0;
-#endif
 }
 
 
 bool UExporter::RunAssetExportTask(class UAssetExportTask* Task)
 {
-#if WITH_EDITOR
 	check(Task);
 
 	CurrentFilename = Task->Filename;
@@ -243,7 +235,20 @@ bool UExporter::RunAssetExportTask(class UAssetExportTask* Task)
 	UExporter*	Exporter	= Task->Exporter;
 	FString		Extension	= FPaths::GetExtension(Task->Filename);
 
-	if (!Exporter)
+	// We were provided with an exporter, check to see if its compatible with the asset we want to export
+	if (Exporter)
+	{
+		if (UObject* Object = Task->Object.Get())
+		{
+			if (!Object->IsA(Exporter->SupportedClass))
+			{
+				Task->Errors.Add(FString::Printf(TEXT("Chosen exporter '%s' does not support the exported object's class '%s'!"), *Exporter->GetName(), *Object->GetClass()->GetName()));
+				UE_LOG(LogExporter, Warning, TEXT( "%s" ), *Task->Errors.Last());
+				return false;
+			}
+		}
+	}
+	else
 	{
 		// look for an exporter with all possible extensions, so an exporter can have something like *.xxx.yyy as an extension
 		int32 SearchStart = 0;
@@ -361,10 +366,10 @@ bool UExporter::RunAssetExportTask(class UAssetExportTask* Task)
 		const int32 FileCount = Exporter->GetFileCount(Task->Object);
 		for( int32 i = 0; i < FileCount; i++ )
 		{
-			FBufferArchive Buffer;
+			FBufferArchive64 Buffer;
 			if(ExportToArchive(Task->Object, Exporter, Buffer, *Extension, i))
 			{
-				FString UniqueFilename = Exporter->GetUniqueFilename(*Task->Filename, i, FileCount);
+				FString UniqueFilename = Exporter->GetUniqueFilename(Task->Object, *Task->Filename, i, FileCount);
 
 				if(!Task->bReplaceIdentical)
 				{
@@ -402,14 +407,10 @@ bool UExporter::RunAssetExportTask(class UAssetExportTask* Task)
 		return true;
 	}
 	return false;
-#else
-	return false;
-#endif
 }
 
 bool UExporter::RunAssetExportTasks(const TArray<UAssetExportTask*>& ExportTasks)
 {
-#if WITH_EDITOR
 	bool bSuccess = true;
 	for (UAssetExportTask* Task : ExportTasks)
 	{
@@ -419,14 +420,10 @@ bool UExporter::RunAssetExportTasks(const TArray<UAssetExportTask*>& ExportTasks
 		}
 	}
 	return bSuccess;
-#else
-	return false;
-#endif
 }
 
 int32 UExporter::ExportToFileEx( FExportToFileParams& ExportParams )
 {
-#if WITH_EDITOR
 	check(ExportParams.Object);
 	UAssetExportTask* ExportTask = NewObject<UAssetExportTask>();
 	FGCObjectScopeGuard ExportTaskGuard(ExportTask);
@@ -441,9 +438,6 @@ int32 UExporter::ExportToFileEx( FExportToFileParams& ExportParams )
 	ExportTask->IgnoreObjectList = ExportParams.IgnoreObjectList;
 	ExportTask->bAutomated = false;
 	return RunAssetExportTask(ExportTask) ? 1 : 0;
-#else
-	return 0;
-#endif
 }
 
 const bool UExporter::bEnableDebugBrackets = false;
@@ -475,12 +469,19 @@ void UExporter::EmitBeginObject( FOutputDevice& Ar, UObject* Obj, uint32 PortFla
 			UObject* Archetype = Obj->GetArchetype();
 			// since we could have two object owners with the same name (like named Blueprints in different folders),
 			// we need the fully qualified path for the archetype (so we don't get confused when unpacking this)
-			Ar.Logf(TEXT(" Archetype=%s"), *FObjectPropertyBase::GetExportPath(Archetype, Archetype->GetOutermost(), /*ExportRootScope =*/nullptr, PortFlags & ~PPF_ExportsNotFullyQualified));
+			Ar.Logf(TEXT(" Archetype=%s"), *FObjectPropertyBase::GetExportPath(Archetype, nullptr, /*ExportRootScope =*/nullptr, (PortFlags | PPF_Delimited) & ~PPF_ExportsNotFullyQualified));
 		}
 	}
 
+	// When exporting for diffs, export paths can cause false positives. since diff files don't get imported, we can
+	// skip adding this info the file.
+	if (!(PortFlags & PPF_ForDiff))
+	{
+		// Emit the object path
+		Ar.Logf(TEXT(" ExportPath=%s"), *FObjectPropertyBase::GetExportPath(Obj, nullptr, nullptr, (PortFlags | PPF_Delimited) & ~PPF_ExportsNotFullyQualified));
+	}
 	// end in a return
-	Ar.Logf(TEXT("\r\n"));
+	Ar.Logf(LINE_TERMINATOR);
 
 	if ( bEnableDebugBrackets )
 	{
@@ -501,7 +502,7 @@ void UExporter::EmitEndObject( FOutputDevice& Ar )
 FExportObjectInnerContext::FExportObjectInnerContext()
 {
 	// For each object . . .
-	for (UObject* InnerObj : TObjectRange<UObject>(RF_ClassDefaultObject, true, EInternalObjectFlags::PendingKill))
+	for (UObject* InnerObj : TObjectRange<UObject>(RF_ClassDefaultObject, true, EInternalObjectFlags::Garbage))
 	{
 		UObject* OuterObj = InnerObj->GetOuter();
 		if ( OuterObj )
@@ -526,12 +527,12 @@ FExportObjectInnerContext::FExportObjectInnerContext()
 FExportObjectInnerContext::FExportObjectInnerContext(const TArray<UObject*>& ObjsToIgnore)
 {
 	// For each object . . .
-	for (UObject* InnerObj : TObjectRange<UObject>(RF_ClassDefaultObject, true, EInternalObjectFlags::PendingKill))
+	for (UObject* InnerObj : TObjectRange<UObject>(RF_ClassDefaultObject, true, EInternalObjectFlags::Garbage))
 	{
 		if (!ObjsToIgnore.Contains(InnerObj))
 		{
 			UObject* OuterObj = InnerObj->GetOuter();
-			if (OuterObj && !OuterObj->IsPendingKill())
+			if (IsValid(OuterObj))
 			{
 				InnerList* Inners = ObjectToInnerMap.Find(OuterObj);
 				if (Inners)
@@ -551,6 +552,20 @@ FExportObjectInnerContext::FExportObjectInnerContext(const TArray<UObject*>& Obj
 }
 
 
+bool FExportObjectInnerContext::IsObjectSelected(const UObject* InObj) const
+{
+	return InObj->IsSelected();
+}
+
+
+bool UExporter::IsObjectSelectedForExport(const FExportObjectInnerContext* Context, const UObject* Object)
+{
+	return Context
+		? Context->IsObjectSelected(Object)
+		: Object->IsSelected();
+}
+
+
 void UExporter::ExportObjectInner(const FExportObjectInnerContext* Context, UObject* Object, FOutputDevice& Ar, uint32 PortFlags)
 {
 	// indent all the text in here
@@ -565,7 +580,7 @@ void UExporter::ExportObjectInner(const FExportObjectInnerContext* Context, UObj
 	else
 	{
 		// NOTE: We ignore inner objects that have been tagged for death
-		GetObjectsWithOuter(Object, TempInners, false, RF_NoFlags, EInternalObjectFlags::PendingKill);
+		GetObjectsWithOuter(Object, TempInners, false, RF_NoFlags, EInternalObjectFlags::Garbage);
 	}
 	FExportObjectInnerContext::InnerList const& UnsortedObjectInners = ContextInners ? *ContextInners : TempInners;
 
@@ -624,10 +639,11 @@ void UExporter::ExportObjectInner(const FExportObjectInnerContext* Context, UObj
 
 		if (AActor* Actor = Cast<AActor>(Object))
 		{
+			// Todo PlacementMode consider removing that code when we it will replace the foliage
 			// Export anything extra for the components. Used for instanced foliage.
 			// This is done after the actor properties so these are set when regenerating the extra data objects.
 			TArray<UActorComponent*> Components;
-			Actor->GetComponents<UActorComponent, FDefaultAllocator>(Components);
+			Actor->GetComponents(Components);
 			ExportComponentExtra(Context, Components, Ar, PortFlags);
 		}
 	}
@@ -664,7 +680,6 @@ void ExportProperties
 	UObject*		ExportRootScope
 )
 {
-	FString ThisName = TEXT("(none)");
 	check(ObjectClass != NULL);
 
 	for( FProperty* Property = ObjectClass->PropertyLink; Property; Property = Property->PropertyLinkNext )
@@ -672,7 +687,15 @@ void ExportProperties
 		if (!Property->ShouldPort(PortFlags))
 			continue;
 
-		ThisName = Property->GetName();
+		FString SanitizedPropertyName = Property->GetName();
+		constexpr FAsciiSet Whitespace("\t ");
+		constexpr FAsciiSet SpecialCharacters("=()[].\"\'");
+		if (FAsciiSet::HasAny(SanitizedPropertyName, SpecialCharacters) || Whitespace.Contains(SanitizedPropertyName[0]))
+		{
+			// to increase frequency of forward compatibility, only sanitize property names that absolutely need it
+			SanitizedPropertyName = FString::Format(TEXT("\"{0}\""), {Property->GetName().ReplaceCharWithEscapedChar()});
+		}
+
 		FArrayProperty* ArrayProperty = CastField<FArrayProperty>(Property);
 		FObjectPropertyBase* ExportObjectProp = (Property->PropertyFlags & CPF_ExportObject) != 0 ? CastField<FObjectPropertyBase>(Property) : NULL;
 		const uint32 ExportFlags = PortFlags | PPF_Delimited;
@@ -709,7 +732,7 @@ void ExportProperties
 				// If the current size of the array is 0 and the default one is not, add in an empty item so on import it will be empty
 				if( ArrayHelper.Num() == 0 && DiffArrayHelper.Num() != 0 )
 				{
-					Out.Logf(TEXT("%s%s=\r\n"), FCString::Spc(Indent), *Property->GetName());
+					Out.Logf(TEXT("%s%s=\r\n"), FCString::Spc(Indent), *SanitizedPropertyName);
 				}
 				else
 				{
@@ -729,7 +752,7 @@ void ExportProperties
 						bool bExportItem = DiffData == NULL || (!bHasDiffData && (DynamicArrayIndex == ArrayHelper.Num()-1)) || (DiffData != SourceData && !InnerProp->Identical(SourceData, DiffData, ExportFlags));
 						if (bExportItem)
 						{
-							InnerProp->ExportTextItem(Value, SourceData, DiffData, Parent, ExportFlags, ExportRootScope);
+							InnerProp->ExportTextItem_Direct(Value, SourceData, DiffData, Parent, ExportFlags, ExportRootScope);
 							if (ExportObjectProp)
 							{
 								UObject* Obj = ExportObjectProp->GetObjectPropertyValue(ArrayHelper.GetRawPtr(DynamicArrayIndex));
@@ -764,12 +787,12 @@ void ExportProperties
 								}
 							}
 
-							Out.Logf(TEXT("%s%s(%i)=%s\r\n"), FCString::Spc(Indent), *Property->GetName(), DynamicArrayIndex, *Value);
+							Out.Logf(TEXT("%s%s(%i)=%s\r\n"), FCString::Spc(Indent), *SanitizedPropertyName, DynamicArrayIndex, *Value);
 						}
 					}
 					for (int32 DynamicArrayIndex = DiffArrayHelper.Num()-1; DynamicArrayIndex >= ArrayHelper.Num(); --DynamicArrayIndex)
 					{
-						Out.Logf(TEXT("%s%s.RemoveIndex(%d)\r\n"), FCString::Spc(Indent), *Property->GetName(), DynamicArrayIndex);
+						Out.Logf(TEXT("%s%s.RemoveIndex(%d)\r\n"), FCString::Spc(Indent), *SanitizedPropertyName, DynamicArrayIndex);
 					}
 				}
 			}
@@ -822,11 +845,11 @@ void ExportProperties
 
 					if( Property->ArrayDim == 1 )
 					{
-						Out.Logf( TEXT("%s%s=%s\r\n"), FCString::Spc(Indent), *Property->GetName(), *Value );
+						Out.Logf( TEXT("%s%s=%s\r\n"), FCString::Spc(Indent), *SanitizedPropertyName, *Value );
 					}
 					else
 					{
-						Out.Logf( TEXT("%s%s(%i)=%s\r\n"), FCString::Spc(Indent), *Property->GetName(), PropertyArrayIndex, *Value );
+						Out.Logf( TEXT("%s%s(%i)=%s\r\n"), FCString::Spc(Indent), *SanitizedPropertyName, PropertyArrayIndex, *Value );
 					}
 				}
 			}
@@ -901,31 +924,52 @@ FString DumpObjectToString(UObject* Object)
 
 #if WITH_EDITOR
 FSelectedActorExportObjectInnerContext::FSelectedActorExportObjectInnerContext()
-	//call the empty version of the base class
-	: FExportObjectInnerContext(false)
+	: FExportObjectInnerContext(false) //call the empty version of the base class
 {
 	// For each selected actor...
 	for (FSelectionIterator It(GEditor->GetSelectedActorIterator()); It; ++It)
 	{
 		AActor* Actor = (AActor*)*It;
 		checkSlow(Actor->IsA(AActor::StaticClass()));
-
-		ForEachObjectWithOuter(Actor, [this](UObject* InnerObj)
-		{
-			UObject* OuterObj = InnerObj->GetOuter();
-			InnerList* Inners = ObjectToInnerMap.Find(OuterObj);
-			if (Inners)
-			{
-				// Add object to existing inner list.
-				Inners->Add( InnerObj );
-			}
-			else
-			{
-				// Create a new inner list for the outer object.
-				InnerList& InnersForOuterObject = ObjectToInnerMap.Add(OuterObj, InnerList());
-				InnersForOuterObject.Add(InnerObj);
-			}
-		}, /** bIncludeNestedObjects */ true, RF_NoFlags, EInternalObjectFlags::PendingKill);
+		AddSelectedActor(Actor);
 	}
+}
+
+FSelectedActorExportObjectInnerContext::FSelectedActorExportObjectInnerContext(const TArray<AActor*> InSelectedActors)
+	: FExportObjectInnerContext(false) //call the empty version of the base class
+{
+	// For each selected actor...
+	for (const AActor* Actor : InSelectedActors)
+	{
+		AddSelectedActor(Actor);
+	}
+}
+
+bool FSelectedActorExportObjectInnerContext::IsObjectSelected(const UObject* InObj) const
+{
+	const AActor* Actor = Cast<AActor>(InObj);
+	return Actor && SelectedActors.Contains(Actor);
+}
+
+void FSelectedActorExportObjectInnerContext::AddSelectedActor(const AActor* InActor)
+{
+	SelectedActors.Add(InActor);
+
+	ForEachObjectWithOuter(InActor, [this](UObject* InnerObj)
+	{
+		UObject* OuterObj = InnerObj->GetOuter();
+		InnerList* Inners = ObjectToInnerMap.Find(OuterObj);
+		if (Inners)
+		{
+			// Add object to existing inner list.
+			Inners->Add(InnerObj);
+		}
+		else
+		{
+			// Create a new inner list for the outer object.
+			InnerList& InnersForOuterObject = ObjectToInnerMap.Add(OuterObj, InnerList());
+			InnersForOuterObject.Add(InnerObj);
+		}
+	}, /** bIncludeNestedObjects */ true, RF_NoFlags, EInternalObjectFlags::Garbage);
 }
 #endif

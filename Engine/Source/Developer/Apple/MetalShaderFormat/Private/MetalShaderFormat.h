@@ -8,6 +8,13 @@
 #include "HAL/PlatformProcess.h"
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
+#include "RHIFeatureLevel.h"
+#include "RHIShaderPlatform.h"
+
+//
+#ifndef UE_METAL_USE_METAL_SHADER_CONVERTER
+#define UE_METAL_USE_METAL_SHADER_CONVERTER PLATFORM_SUPPORTS_BINDLESS_RENDERING
+#endif // UE_METAL_USE_METAL_SHADER_CONVERTER
 
 // IOS and TVOS use the mobile toolchain.
 enum EAppleSDKType
@@ -17,15 +24,13 @@ enum EAppleSDKType
 	AppleSDKCount,
 };
 
-extern void CompileShader_Metal(const struct FShaderCompilerInput& Input, struct FShaderCompilerOutput& Output, const class FString& WorkingDirectory);
-extern uint32 GetMetalFormatVersion(FName Format);
-
 static FName NAME_SF_METAL(TEXT("SF_METAL"));
 static FName NAME_SF_METAL_MRT(TEXT("SF_METAL_MRT"));
 static FName NAME_SF_METAL_TVOS(TEXT("SF_METAL_TVOS"));
 static FName NAME_SF_METAL_MRT_TVOS(TEXT("SF_METAL_MRT_TVOS"));
-static FName NAME_SF_METAL_SM5_NOTESS(TEXT("SF_METAL_SM5_NOTESS"));
 static FName NAME_SF_METAL_SM5(TEXT("SF_METAL_SM5"));
+static FName NAME_SF_METAL_SM6(TEXT("SF_METAL_SM6"));
+static FName NAME_SF_METAL_SIM(TEXT("SF_METAL_SIM"));
 static FName NAME_SF_METAL_MACES3_1(TEXT("SF_METAL_MACES3_1"));
 static FName NAME_SF_METAL_MRT_MAC(TEXT("SF_METAL_MRT_MAC"));
 
@@ -75,6 +80,8 @@ public:
 	bool ExecMetalLib(EAppleSDKType SDK, const TCHAR* Parameters, int32* OutReturnCode, FString* OutStdOut, FString* OutStdErr) const;
 	// Executes metal-ar for 'SDK' on the local or remote machine, depending on configuration
 	bool ExecMetalAr(EAppleSDKType SDK, const TCHAR* ScriptFile, int32* OutReturnCode, FString* OutStdOut, FString* OutStdErr) const;
+	// Executes air-pack for 'SDK' on the local or remote machine, depending on configuration
+    bool ExecAirPack(EAppleSDKType SDK, const TCHAR* Parameters, int32* OutReturnCode, FString* OutStdOut, FString* OutStdErr) const;
 
 	// This toolchain is set up correctly and ready to use.
 	bool IsCompilerAvailable() const
@@ -130,7 +137,7 @@ public:
 	// True if Platform indicates a mobile (ios, tvos) platform
 	static bool IsMobile(const EShaderPlatform Platform)
 	{
-		return (Platform == SP_METAL || Platform == SP_METAL_MRT || Platform == SP_METAL_TVOS || Platform == SP_METAL_MRT_TVOS);
+		return (Platform == SP_METAL || Platform == SP_METAL_MRT || Platform == SP_METAL_SIM || Platform == SP_METAL_TVOS || Platform == SP_METAL_MRT_TVOS);
 	}
 
 	// True if Format is the FName of a mobile shader format (ios, tvos)
@@ -189,6 +196,8 @@ public:
 	static FString MetalArBinary;
 	// The name of the metal binary packager - metallib
 	static FString MetalLibraryBinary;
+	// The name of air-pack
+    static FString AirPackBinary;
 
 	// The extension of the mapping from shader to metallib for shared material libraries - .metalmap
 	static FString MetalMapExtension;
@@ -223,6 +232,9 @@ private:
 	FString MetalLibBinaryCommand[AppleSDKCount];
 	// The command string to invoke 'metal-ar'
 	FString MetalArBinaryCommand[AppleSDKCount];
+
+	// The command string to invoke 'air-pack'
+    FString AirPackBinaryCommand[AppleSDKCount];
 
 	// The compiler version string, parsed out of metal -v
 	FString	MetalCompilerVersionString[AppleSDKCount];

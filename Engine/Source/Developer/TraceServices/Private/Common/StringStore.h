@@ -7,8 +7,9 @@
 #include "Common/PagedArray.h"
 #include "Containers/Map.h"
 #include "Containers/StringView.h"
+#include "HAL/CriticalSection.h"
 
-namespace Trace
+namespace TraceServices
 {
 
 class FStringStore
@@ -23,6 +24,7 @@ private:
 	{
 		BlockSize = 4 << 20
 	};
+	FCriticalSection Cs;
 	FSlabAllocator& Allocator;
 	TMap<uint32, const TCHAR*> StoredStrings;
 	TCHAR* BufferPtr = nullptr;
@@ -31,4 +33,4 @@ private:
 
 };
 
-}
+} // namespace TraceServices

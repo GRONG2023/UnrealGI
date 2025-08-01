@@ -9,7 +9,6 @@
 #include "CoreMinimal.h"
 #include "Templates/RefCounting.h"
 #include "RHI.h"
-#include "RHIResources.h"
 #include "RenderResource.h"
 
 /**
@@ -46,7 +45,7 @@ public:
 	}
 
 	/** Initialize RHI resources. */
-	virtual void InitRHI() override;
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 
 	/** Release RHI resources. */
 	virtual void ReleaseRHI() override;
@@ -62,7 +61,7 @@ public:
 	FGPUSortBuffers GetSortBuffers();
 
 	/** Retrieve the sorted vertex buffer that results will always be located at. */
-	FRHIVertexBuffer* GetSortedVertexBufferRHI(int32 BufferIndex)
+	FRHIBuffer* GetSortedVertexBufferRHI(int32 BufferIndex)
 	{
 		check((BufferIndex & 0xFFFFFFFE) == 0);
 		return VertexBuffers[BufferIndex];
@@ -74,14 +73,14 @@ public:
 private:
 
 	/** Vertex buffer storage for particle sort keys. */
-	FVertexBufferRHIRef KeyBuffers[2];
+	FBufferRHIRef KeyBuffers[2];
 	/** Shader resource view for particle sort keys. */
 	FShaderResourceViewRHIRef KeyBufferSRVs[2];
 	/** Unordered access view for particle sort keys. */
 	FUnorderedAccessViewRHIRef KeyBufferUAVs[2];
 
 	/** Vertex buffer containing sorted particle vertices. */
-	FVertexBufferRHIRef VertexBuffers[2];
+	FBufferRHIRef VertexBuffers[2];
 	/** Shader resource view for sorting particle vertices. */
 	FShaderResourceViewRHIRef VertexBufferSortSRVs[2];
 	/** Unordered access view for sorting particle vertices. */
@@ -164,7 +163,7 @@ DECLARE_DELEGATE_SixParams(FGPUSortKeyGenDelegate, FRHICommandListImmediate&, in
  * The usecase involes registering a sort task through AddTask() and then initializing the sort data through the KeyGen callback.
  * The sort manager can be enabled or disabled through "fx.AllowGPUSorting"
  */
-class ENGINE_API FGPUSortManager : public FRefCountedObject
+class FGPUSortManager : public FRefCountedObject
 {
 public:
 
@@ -182,9 +181,9 @@ public:
 	};
 
 	/** A little helper to generate the batch element keys based on the number of elements in the batch and the sort precision. */
-	struct ENGINE_API FKeyGenInfo
+	struct FKeyGenInfo
 	{
-		FKeyGenInfo(uint32 NumElements, bool bHighPrecisionKeys);
+		ENGINE_API FKeyGenInfo(uint32 NumElements, bool bHighPrecisionKeys);
 
 		/**
 		 * ElementKey = (ElementIndex & EmitterKeyMask) << ElementKeyShift.
@@ -237,12 +236,12 @@ private:
 		 * @param InUsedCount - An initial used count, typically the used size of the previous buffer in FDynamicValueBuffer::ValueBuffers.
 		 * @param InSettings - The buffer allocation settings, in particular what data types are requires for SRV and UAV.
 		 */
-		FValueBuffer(int32 InAllocatedCount, int32 InUsedCount, const FSettings& InSettings);
+		FValueBuffer(FRHICommandListBase& RHICmdList, int32 InAllocatedCount, int32 InUsedCount, const FSettings& InSettings);
 
 		~FValueBuffer() { ReleaseRHI(); }
 
 		/** Release the render resources. */
-		void ReleaseRHI() override;
+		void ReleaseRHI() override final;
 
 		/** Used for sorting */
 		FShaderResourceViewRHIRef UInt32SRV;
@@ -300,7 +299,7 @@ private:
 		 * @param ValueCount - The number of elements to add to the buffer.
 		 * @param Flags - Flag about what data format needs to be bound, see EGPUSortFlags::AnyValueFormat.
 		 */
-		void Allocate(FAllocationInfo& OutInfo, const FSettings& InSettings, int32 ValueCount, EGPUSortFlags Flags);
+		void Allocate(FRHICommandListBase& RHICmdList, FAllocationInfo& OutInfo, const FSettings& InSettings, int32 ValueCount, EGPUSortFlags Flags);
 
 		/**
 		 * Shrinks the buffer after it has been used this frame if applicable.
@@ -310,7 +309,7 @@ private:
 		 * 
 		 * @param InSettings - Buffer allocation settings, in particular the number of frames required before actually shrinking.
 		 */
-		void SkrinkAndReset(const FSettings& InSettings);
+		void SkrinkAndReset(FRHICommandListBase& RHICmdList, const FSettings& InSettings);
 		
 		/** Release resources */
 		void ReleaseRHI();
@@ -398,9 +397,9 @@ private:
 public:
 
 	/** Creates the sort manager, this is when the settings are configured. */
-	FGPUSortManager(ERHIFeatureLevel::Type InFeatureLevel);
+	ENGINE_API FGPUSortManager(ERHIFeatureLevel::Type InFeatureLevel);
 
-	~FGPUSortManager();
+	ENGINE_API ~FGPUSortManager();
 
 	/**
 	 * Register a client system into the sort manager. Client systems are systems that will call AddTask().
@@ -412,7 +411,7 @@ public:
 	 * @param UsedFlags - The possibly used flags for each of the client system tasks, used to perform some optimizations.
 	 * @param InName - A name defining this client system, used for GPU markers.
 	 */
-	void Register(const FGPUSortKeyGenDelegate& CallbackDelegate, EGPUSortFlags UsedFlags, const FName& InName);	
+	ENGINE_API void Register(const FGPUSortKeyGenDelegate& CallbackDelegate, EGPUSortFlags UsedFlags, const FName& InName);	
 
 	/**
 	 * Add a GPU sort task to process this frame. Tasks are expected to be created before OnPreRender() gets called.
@@ -423,8 +422,10 @@ public:
 	 * 
 	 * Return true if the task was added to a batch, false otherwise, could be because GPU sorting is disabled.
 	 */
-	bool AddTask(FAllocationInfo& OutInfo, int32 ValueCount, EGPUSortFlags TaskFlags);
+	ENGINE_API bool AddTask(FRHICommandListBase& RHICmdList, FAllocationInfo& OutInfo, int32 ValueCount, EGPUSortFlags TaskFlags);
 
+	UE_DEPRECATED(5.4, "AddTask now requires a command list.")
+	ENGINE_API bool AddTask(FAllocationInfo& OutInfo, int32 ValueCount, EGPUSortFlags TaskFlags);
 
 	/**
 	 * Callback that needs to be called in the rendering loop, after calls to FFXSystemInterface::PreRender() are issued.
@@ -435,7 +436,7 @@ public:
 	 *
 	 * @param RHICmdList - The command list to be used.
 	 */
-	void OnPreRender(FRHICommandListImmediate& RHICmdList);
+	ENGINE_API void OnPreRender(class FRDGBuilder& GraphBuilder);
 
 	/**
 	 * Callback that needs to be called in the rendering loop, after calls to FFXSystemInterface::PostRenderOpaque() are issued.
@@ -444,13 +445,19 @@ public:
 	 *
 	 * @param RHICmdList - The command list to be used.
 	 */
-	void OnPostRenderOpaque(FRHICommandListImmediate& RHICmdList);
+	ENGINE_API void OnPostRenderOpaque(class FRDGBuilder& GraphBuilder);
 
 	/**
 	 * Event to register and receive post-prerender notification.
 	 */	
 	DECLARE_EVENT_OneParam(FGPUSortManager, FPostPreRenderEvent, FRHICommandListImmediate&);
 	FPostPreRenderEvent PostPreRenderEvent;
+
+	/**
+	 * Event to register and receive post-postrender notification.
+	 */
+	DECLARE_EVENT_OneParam(FGPUSortManager, FPostPostRenderEvent, FRHICommandListImmediate&);
+	FPostPreRenderEvent PostPostRenderEvent;
 
 private:
 
@@ -486,9 +493,9 @@ private:
 	/** Setup the final sort flags and the processing order of all batches. Called after no other tasks will be added this frame. */
 	void FinalizeSortBatches();
 	/** Make sure there is enough GPU sort buffers to satisfy all batches created this frame. Free one used ones. */
-	void UpdateSortBuffersPool();
+	void UpdateSortBuffersPool(FRHICommandListBase& RHICmdList);
 	/** Resize (shrink) the DynamicValueBuffers and free the unused ones. */
-	void ResetDynamicValuesBuffers();
+	void ResetDynamicValuesBuffers(FRHICommandListBase& RHICmdList);
 	/** Delete all GPU sort buffers. */
 	void ReleaseSortBuffers();
 

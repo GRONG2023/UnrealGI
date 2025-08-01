@@ -10,7 +10,7 @@ namespace Chaos
 {
 	class FBVHParticles;
 
-	struct CHAOS_API FClusterCreationParameters
+	struct FClusterCreationParameters
 	{
 		enum EConnectionMethod
 		{
@@ -18,18 +18,23 @@ namespace Chaos
 			DelaunayTriangulation,
 			MinimalSpanningSubsetDelaunayTriangulation,
 			PointImplicitAugmentedWithMinimalDelaunay,
+			BoundsOverlapFilteredDelaunayTriangulation,
 			None
 		};
-
 
 		FClusterCreationParameters(
 			FReal CoillisionThicknessPercentIn = (FReal)0.3
 			, int32 MaxNumConnectionsIn = 100
 			, bool bCleanCollisionParticlesIn = true
 			, bool bCopyCollisionParticlesIn = true
-			, bool bGenerateConnectionGraphIn = true, EConnectionMethod ConnectionMethodIn = EConnectionMethod::MinimalSpanningSubsetDelaunayTriangulation
+			, bool bGenerateConnectionGraphIn = true
+			, EConnectionMethod ConnectionMethodIn = EConnectionMethod::MinimalSpanningSubsetDelaunayTriangulation
+			, FReal ConnectionGraphBoundsFilteringMarginIn = 0
 			, FBVHParticles* CollisionParticlesIn = nullptr
 			, Chaos::TPBDRigidClusteredParticleHandle<Chaos::FReal,3>* ClusterParticleHandleIn = nullptr
+			, const FVec3& ScaleIn = FVec3::OneVector
+			, bool bIsAnchoredIn = false
+			, bool bInEnableStrainOnCollision = true
 		)
 			: CoillisionThicknessPercent(CoillisionThicknessPercentIn)
 			, MaxNumConnections(MaxNumConnectionsIn)
@@ -37,8 +42,12 @@ namespace Chaos
 			, bCopyCollisionParticles(bCopyCollisionParticlesIn)
 			, bGenerateConnectionGraph(bGenerateConnectionGraphIn)
 			, ConnectionMethod(ConnectionMethodIn)
+			, ConnectionGraphBoundsFilteringMargin(ConnectionGraphBoundsFilteringMarginIn)
 			, CollisionParticles(CollisionParticlesIn)
 			, ClusterParticleHandle(ClusterParticleHandleIn)
+			, Scale(ScaleIn)
+			, bIsAnchored(bIsAnchoredIn)
+			, bEnableStrainOnCollision(bInEnableStrainOnCollision)
 		{}
 
 		FReal CoillisionThicknessPercent;
@@ -47,7 +56,11 @@ namespace Chaos
 		bool bCopyCollisionParticles;
 		bool bGenerateConnectionGraph;
 		EConnectionMethod ConnectionMethod;
+		FReal ConnectionGraphBoundsFilteringMargin;
 		FBVHParticles* CollisionParticles;
 		Chaos::FPBDRigidClusteredParticleHandle* ClusterParticleHandle;
+		FVec3 Scale;
+		bool bIsAnchored;
+		bool bEnableStrainOnCollision;
 	};
 }

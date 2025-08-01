@@ -3,6 +3,8 @@
 #include "Chaos/ChaosNotifyHandlerInterface.h"
 #include "Components/PrimitiveComponent.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ChaosNotifyHandlerInterface)
+
 UChaosNotifyHandlerInterface::UChaosNotifyHandlerInterface(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
@@ -22,7 +24,7 @@ FHitResult UChaosSolverEngineBlueprintLibrary::ConvertPhysicsCollisionToHitResul
 	FHitResult Hit(0.f);
 	
 	Hit.Component = PhysicsCollision.OtherComponent;
-	Hit.Actor = Hit.Component.IsValid() ? Hit.Component->GetOwner() : nullptr;
+	Hit.HitObjectHandle = FActorInstanceHandle(Hit.Component.IsValid() ? Hit.Component->GetOwner() : nullptr);
 	Hit.bBlockingHit = true;
 	Hit.Normal = PhysicsCollision.Normal;
 	Hit.ImpactNormal = PhysicsCollision.Normal;
@@ -48,3 +50,4 @@ FChaosPhysicsCollisionInfo::FChaosPhysicsCollisionInfo()
 {
 
 }
+

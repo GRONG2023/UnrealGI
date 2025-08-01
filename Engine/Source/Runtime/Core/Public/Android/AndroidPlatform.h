@@ -57,31 +57,20 @@ typedef FAndroidTypes FPlatformTypes;
 #define PLATFORM_UI_HAS_MOBILE_SCROLLBARS			1
 #define PLATFORM_UI_NEEDS_TOOLTIPS					0
 #define PLATFORM_UI_NEEDS_FOCUS_OUTLINES			0
-#define PLATFORM_SUPPORTS_EARLY_MOVIE_PLAYBACK		1 // movies will start before engine is initalized
-#define PLATFORM_SUPPORTS_GEOMETRY_SHADERS			0
-#define PLATFORM_SUPPORTS_TESSELLATION_SHADERS		0
+#define PLATFORM_SUPPORTS_EARLY_MOVIE_PLAYBACK		1 // movies will start before engine is initialized
+#define PLATFORM_SUPPORTS_GEOMETRY_SHADERS			(RHI_RAYTRACING) // Currently required due to the way we offset ShaderStage::EStage
 #define PLATFORM_SUPPORTS_VIRTUAL_TEXTURE_STREAMING	1
-#define PLATFORM_SUPPORTS_LANDSCAPE_VISUAL_MESH_LOD_STREAMING 1
-
+#define PLATFORM_USE_ANSI_POSIX_MALLOC				1
+#define PLATFORM_USE_MINIMAL_HANG_DETECTION			1
 #define PLATFORM_CODE_SECTION(Name)					__attribute__((section(Name)))
+#define PLATFORM_ALLOW_ALLOCATIONS_IN_FASYNCWRITER_SERIALIZEBUFFERTOARCHIVE	0
+
+#define PLATFORM_RETURN_ADDRESS_FOR_CALLSTACKTRACING	PLATFORM_RETURN_ADDRESS
 
 #define PLATFORM_GLOBAL_LOG_CATEGORY				LogAndroid
-#define PLATFORM_RHITHREAD_DEFAULT_BYPASS			0
 
-#ifndef RUNNING_WITH_ASAN
-	#define RUNNING_WITH_ASAN						0
-#endif
-
-// Conditionally set in AndroidToolChain.cs
-// always set to 1 for ARM64 builds
-// set to 1 for ARMV7 builds if bUseNEONForArmV7=True in AndroidRuntimeSettings section
-//#define PLATFORM_ENABLE_VECTORINTRINSICS_NEON		1
-
-#if __has_feature(cxx_decltype_auto)
-	#define PLATFORM_COMPILER_HAS_DECLTYPE_AUTO 1
-#else
-	#define PLATFORM_COMPILER_HAS_DECLTYPE_AUTO 0
-#endif
+#define PLATFORM_ENABLE_VECTORINTRINSICS			1
+#define PLATFORM_ENABLE_VECTORINTRINSICS_NEON		PLATFORM_ANDROID_ARM64
 
 // some android platform overrides that sub-platforms can disable
 #ifndef USE_ANDROID_JNI
@@ -101,6 +90,35 @@ typedef FAndroidTypes FPlatformTypes;
 #endif
 #ifndef USE_ANDROID_EVENTS
 	#define USE_ANDROID_EVENTS						1
+#endif
+#ifndef USE_ANDROID_STANDALONE
+	#define USE_ANDROID_STANDALONE					0
+#endif
+
+
+#if (!USE_ANDROID_STANDALONE && UE_BUILD_DEBUG) || (USE_ANDROID_STANDALONE && !UE_BUILD_SHIPPING)
+	// M is the scope for the logging such as LogAndroid, STANDALONE_DEBUG_LOGf should be used when using formatted arguments.
+#	define STANDALONE_DEBUG_LOG(M, ...)  FPlatformMisc::LowLevelOutputDebugStringf(TEXT(#M " : "),##__VA_ARGS__);
+#	define STANDALONE_DEBUG_LOGf(M, ...)  FPlatformMisc::LowLevelOutputDebugStringf(TEXT(#M " : ") __VA_ARGS__);
+
+#else
+#	define STANDALONE_DEBUG_LOG(...)  
+#	define STANDALONE_DEBUG_LOGf(...)  
+#endif
+
+#define ANDROID_GAMEACTIVITY_BASE_CLASSPATH			"com/epicgames/unreal/GameActivity"
+
+#if USE_ANDROID_STANDALONE
+#	define ANDROID_GAMEACTIVITY_CLASSPATH	"com/epicgames/makeaar/GameActivityForMakeAAR"
+#else
+#	define ANDROID_GAMEACTIVITY_CLASSPATH	"com/epicgames/unreal/GameActivity"
+#endif
+
+
+
+// Enable to set thread nice values when setting runnable thread priorities
+#ifndef ANDROID_USE_NICE_VALUE_THREADPRIORITY
+	#define ANDROID_USE_NICE_VALUE_THREADPRIORITY 0
 #endif
 
 // Function type macros.

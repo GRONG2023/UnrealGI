@@ -78,7 +78,7 @@ struct FIOSPlatformProperties
 	}
 	static FORCEINLINE bool SupportsMemoryMappedAnimation()
 	{
-		return true;
+		return false;
 	}
 	static FORCEINLINE int64 GetMemoryMappingAlignment()
 	{
@@ -104,8 +104,30 @@ struct FIOSPlatformProperties
 	{
 		return true;
 	}
+
+	static FORCEINLINE bool SupportsVirtualTextureStreaming()
+	{
+		return true;
+	}
+};
+
+struct FTVOSPlatformProperties : public FIOSPlatformProperties
+{
+	// @todo breaking change here!
+	static FORCEINLINE const char* PlatformName()
+	{
+		return "TVOS";
+	}
+
+	static FORCEINLINE const char* IniPlatformName()
+	{
+		return "TVOS";
+	}
 };
 
 #ifdef PROPERTY_HEADER_SHOULD_DEFINE_TYPE
+
+
 typedef FIOSPlatformProperties FPlatformProperties;
+
 #endif

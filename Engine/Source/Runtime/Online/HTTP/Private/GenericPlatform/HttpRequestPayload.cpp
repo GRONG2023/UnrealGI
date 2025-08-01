@@ -3,7 +3,9 @@
 #include "GenericPlatform/HttpRequestPayload.h"
 #include "GenericPlatform/GenericPlatformFile.h"
 #include "GenericPlatform/GenericPlatformHttp.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
+#include "HAL/FileManager.h"
+#include "Http.h"
 
 bool FGenericPlatformHttp::IsURLEncoded(const TArray<uint8>& Payload)
 {
@@ -33,7 +35,14 @@ bool FGenericPlatformHttp::IsURLEncoded(const TArray<uint8>& Payload)
 	return true;
 }
 
-FRequestPayloadInFileStream::FRequestPayloadInFileStream(TSharedRef<FArchive, ESPMode::ThreadSafe> InFile) : File(InFile)
+FRequestPayloadInFileStream::FRequestPayloadInFileStream(const FString& InFilename)
+	: Filename(InFilename)
+{
+}
+
+FRequestPayloadInFileStream::FRequestPayloadInFileStream(TSharedRef<FArchive> InFile, bool bInCloseWhenComplete) 
+	: File(InFile)
+	, bCloseWhenComplete(bInCloseWhenComplete)
 {
 }
 
@@ -41,9 +50,9 @@ FRequestPayloadInFileStream::~FRequestPayloadInFileStream()
 {
 }
 
-int32 FRequestPayloadInFileStream::GetContentLength() const
+uint64 FRequestPayloadInFileStream::GetContentLength() const
 {
-	return static_cast<int32>(File->TotalSize());
+	return File ? File->TotalSize() : 0;
 }
 
 const TArray<uint8>& FRequestPayloadInFileStream::GetContent() const
@@ -67,7 +76,12 @@ size_t FRequestPayloadInFileStream::FillOutputBuffer(void* OutputBuffer, size_t 
 
 size_t FRequestPayloadInFileStream::FillOutputBuffer(TArrayView<uint8> OutputBuffer, size_t SizeAlreadySent)
 {
-	const size_t ContentLength = static_cast<size_t>(GetContentLength());
+	if (!File)
+	{
+		return 0;
+	}
+
+	const size_t ContentLength = GetContentLength();
 	check(SizeAlreadySent <= ContentLength);
 	const size_t SizeToSend = ContentLength - SizeAlreadySent;
 	const size_t SizeToSendThisTime = FMath::Min(SizeToSend, static_cast<size_t>(OutputBuffer.Num()));
@@ -82,6 +96,33 @@ size_t FRequestPayloadInFileStream::FillOutputBuffer(TArrayView<uint8> OutputBuf
 	return SizeToSendThisTime;
 }
 
+bool FRequestPayloadInFileStream::Open()
+{
+	if (!File && !Filename.IsEmpty())
+	{
+		FArchive* RawFile = IFileManager::Get().CreateFileReader(*Filename);
+		if (!RawFile)
+		{
+			UE_LOG(LogHttp, Warning, TEXT("FRequestPayloadInFileStream::Open Failed to open %s for reading"), *Filename);
+			return false;
+		}
+
+		File = MakeShareable(RawFile);
+		bCloseWhenComplete = true;
+	}
+
+	return File != nullptr;
+}
+
+void FRequestPayloadInFileStream::Close()
+{
+	if (bCloseWhenComplete && File)
+	{
+		File->Close();
+		File.Reset();
+	}
+}
+
 FRequestPayloadInMemory::FRequestPayloadInMemory(const TArray<uint8>& Array) : Buffer(Array)
 {
 }
@@ -94,7 +135,7 @@ FRequestPayloadInMemory::~FRequestPayloadInMemory()
 {
 }
 
-int32 FRequestPayloadInMemory::GetContentLength() const
+uint64 FRequestPayloadInMemory::GetContentLength() const
 {
 	return Buffer.Num();
 }
@@ -125,4 +166,13 @@ size_t FRequestPayloadInMemory::FillOutputBuffer(TArrayView<uint8> OutputBuffer,
 		FMemory::Memcpy(OutputBuffer.GetData(), Buffer.GetData() + SizeAlreadySent, SizeToSendThisTime);
 	}
 	return SizeToSendThisTime;
+}
+
+bool FRequestPayloadInMemory::Open()
+{
+	return true;
+}
+
+void FRequestPayloadInMemory::Close()
+{
 }

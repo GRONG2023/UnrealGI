@@ -23,13 +23,6 @@
 
 #include "exp.h"
 
-DISABLE_SDK_WARNINGS_START
-#include "Sight.hpp"
-DISABLE_SDK_WARNINGS_END
-
-#include "AttributeReader.hpp"
-#include "Model.hpp"
-
 BEGIN_NAMESPACE_UE_AC
 
 void FCommander::DoSnapshot()
@@ -196,14 +189,20 @@ void FCommander::DoSnapshotOrExport(const IO::Location* InExportedFile)
 		void* CurrentSight = nullptr;
 		if (ACAPI_3D_GetCurrentWindowSight(&CurrentSight) != NoError)
 		{
-			throw UE_AC_Error("Current view isn't 3D", UE_AC_Error::kNotIn3DView);
+			UE_AC_DebugF("FCommander::DoSnapshotOrExport - Error : Current view isn't 3D\n");
+			return;
 		}
 		Modeler::SightPtr		 SightPtr((Modeler::Sight*)CurrentSight);
 		Modeler::ConstModel3DPtr Model3D(SightPtr->GetMainModelPtr());
 
 		ModelerAPI::Model Model;
+#if AC_VERSION < 26
 		AttributeReader	  Reader; // deprecated constructor, temporary!
 		UE_AC_TestGSError(EXPGetModel(Model3D, &Model, &Reader));
+#else
+		GS::Owner<Modeler::IAttributeReader> Reader(ACAPI_Attribute_GetCurrentAttributeSetReader());
+		UE_AC_TestGSError(EXPGetModel(Model3D, &Model, Reader.Get()));
+#endif
 		if (InExportedFile)
 		{
 			FExporter().DoExport(Model, *InExportedFile);

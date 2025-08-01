@@ -2,6 +2,9 @@
 
 #include "VT/VirtualTextureFeedback.h"
 
+#include "RenderGraphBuilder.h"
+#include "RenderGraphUtils.h"
+
 #if PLATFORM_WINDOWS
 // Use Query objects until RHI has a good fence on D3D11
 #define USE_RHI_FENCES 0
@@ -22,7 +25,7 @@ public:
 		Fences.AddDefaulted(NumFences);
 	}
 
-	void InitRHI()
+	void InitRHI(FRHICommandListBase& RHICmdList)
 	{
 	}
 
@@ -38,7 +41,7 @@ public:
 	{
 		if (!Fences[Index])
 		{
-			Fences[Index] = RHICmdList.CreateGPUFence(FName(""));
+			Fences[Index] = RHICreateGPUFence(FName(""));
 		}
 		Fences[Index]->Clear();
 	}
@@ -79,7 +82,7 @@ public:
 		Fences.AddDefaulted(InSize);
 	}
 
-	void InitRHI()
+	void InitRHI(FRHICommandListBase&)
 	{
 		if (!DummyFence.IsValid())
 		{
@@ -127,7 +130,7 @@ public:
 	bool Poll(FRHICommandListImmediate& RHICmdList, int32 Index)
 	{
 		uint64 Dummy;
-		return RHICmdList.GetRenderQueryResult(Fences[Index], Dummy, false, RHICmdList.GetGPUMask().ToIndex());
+		return RHIGetRenderQueryResult(Fences[Index], Dummy, false, RHICmdList.GetGPUMask().ToIndex());
 	}
 
 	FGPUFenceRHIRef GetMapFence(int32 Index)
@@ -157,14 +160,14 @@ FVirtualTextureFeedback::~FVirtualTextureFeedback()
 	delete Fences;
 }
 
-void FVirtualTextureFeedback::InitRHI()
+void FVirtualTextureFeedback::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	for (int32 Index = 0; Index < MaxTransfers; ++Index)
 	{
 		FeedbackItems[Index].StagingBuffer = RHICreateStagingBuffer();
 	}
 
-	Fences->InitRHI();
+	Fences->InitRHI(RHICmdList);
 }
 
 void FVirtualTextureFeedback::ReleaseRHI()
@@ -177,10 +180,8 @@ void FVirtualTextureFeedback::ReleaseRHI()
 	Fences->ReleaseRHI();
 }
 
-void FVirtualTextureFeedback::TransferGPUToCPU(FRHICommandListImmediate& RHICmdList, FVertexBufferRHIRef const& Buffer, FVirtualTextureFeedbackBufferDesc const& Desc)
+void FVirtualTextureFeedback::TransferGPUToCPU(FRHICommandListImmediate& RHICmdList, FBufferRHIRef const& Buffer, FVirtualTextureFeedbackBufferDesc const& Desc)
 {
-	QUICK_SCOPE_CYCLE_COUNTER(STAT_VirtualTextureFeedback_TransferGPUToCPU);
-
 	if (NumPending >= MaxTransfers)
 	{
 		// If we have too many pending transfers, start throwing away the oldest in the ring buffer.
@@ -205,6 +206,25 @@ void FVirtualTextureFeedback::TransferGPUToCPU(FRHICommandListImmediate& RHICmdL
 	// Increment the ring buffer write position.
 	WriteIndex = (WriteIndex + 1) % MaxTransfers;
 	++NumPending;
+}
+
+BEGIN_SHADER_PARAMETER_STRUCT(FVirtualTextureFeedbackCopyParameters, )
+	RDG_BUFFER_ACCESS(Input, ERHIAccess::CopySrc)
+END_SHADER_PARAMETER_STRUCT()
+
+void FVirtualTextureFeedback::TransferGPUToCPU(FRDGBuilder& GraphBuilder, FRDGBuffer* Buffer, FVirtualTextureFeedbackBufferDesc const& Desc)
+{
+	FVirtualTextureFeedbackCopyParameters* Parameters = GraphBuilder.AllocParameters<FVirtualTextureFeedbackCopyParameters>();
+	Parameters->Input = Buffer;
+
+	GraphBuilder.AddPass(
+		RDG_EVENT_NAME("VirtualTextureFeedbackCopy"),
+		Parameters,
+		ERDGPassFlags::Readback,
+		[this, Buffer, Desc](FRHICommandListImmediate& InRHICmdList)
+	{
+		TransferGPUToCPU(InRHICmdList, Buffer->GetRHI(), Desc);
+	});
 }
 
 bool FVirtualTextureFeedback::CanMap(FRHICommandListImmediate& RHICmdList)
@@ -271,7 +291,7 @@ FVirtualTextureFeedback::FMapResult FVirtualTextureFeedback::Map(FRHICommandList
 		else
 		{
 			// Concatenate the results to a single buffer (stored in the MapResources) and return that.
-			MapResources[MapResult.MapHandle].ResultData.SetNumUninitialized(TotalReadSize, false);
+			MapResources[MapResult.MapHandle].ResultData.SetNumUninitialized(TotalReadSize, EAllowShrinking::No);
 			MapResult.Data = MapResources[MapResult.MapHandle].ResultData.GetData();
 			MapResult.Size = 0;
 

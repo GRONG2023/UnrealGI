@@ -2,7 +2,10 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/UnrealString.h"
+#include "CoreTypes.h"
+#include "Delegates/Delegate.h"
+#include "Templates/SharedPointer.h"
 
 class IXmppChat;
 class IXmppMessages;
@@ -92,7 +95,7 @@ public:
 /**
  * Jid for identifying user on the current connection as well as roster members
  */
-class XMPP_API FXmppUserJid
+class FXmppUserJid
 {
 public:
 
@@ -114,7 +117,7 @@ public:
 	 * @param JidString the formatted JID
 	 * @return FXmppUserJid populated from the formatted JID
 	 */
-	static FXmppUserJid FromFullJid(const FString& JidString);
+	static XMPP_API FXmppUserJid FromFullJid(const FString& JidString);
 
 	/** unique id for the user */
 	FString Id;
@@ -133,9 +136,9 @@ public:
 	 *
 	 * @return Whether the Resource was successfully parsed or not
 	 */
-	static bool ParseResource(const FString& InResource, FString& OutAppId, FString& OutPlatform, FString& OutPlatformUserId);
+	static XMPP_API bool ParseResource(const FString& InResource, FString& OutAppId, FString& OutPlatform, FString& OutPlatformUserId);
 
-	static FString CreateResource(const FString& AppId, const FString& Platform, const FString& PlatformUserId);
+	static XMPP_API FString CreateResource(const FString& AppId, const FString& Platform, const FString& PlatformUserId);
 
 	/** 
 	 * Get the components that comprise the resource
@@ -155,7 +158,7 @@ public:
 	 * Separate the MUC half of the resource (nickname:userid) from the UserJid resource portion (Vx:AppId:Platform:etc)
 	 * This is highly dependent on FChatRoomMemberMcp::BuildMemberJidResourceString
 	 */
-	static FString ParseMucUserResource(const FString& InResource);
+	static XMPP_API FString ParseMucUserResource(const FString& InResource);
 
 	bool operator==(const FXmppUserJid& Other) const
 	{
@@ -199,7 +202,7 @@ public:
 		return !Id.IsEmpty() && !Domain.IsEmpty();
 	}
 
-	FString ToDebugString() const;
+	XMPP_API FString ToDebugString() const;
 };
 
 typedef TSharedPtr<IXmppPresence, ESPMode::ThreadSafe> IXmppPresencePtr;
@@ -258,9 +261,9 @@ public:
 
 	/**
 	 * Get the jid of the last user login attempt
-	 * Note that he may be logged out
+	 * Note that they may be logged out
 	 *
-	 * @param jid to identity user
+	 * @param jid to identify user
 	 */
 	virtual const FXmppUserJid& GetUserJid() const = 0;
 

@@ -15,7 +15,7 @@
 class UStaticMesh;
 
 UENUM()
-enum FoliageVertexColorMask
+enum FoliageVertexColorMask : int
 {
 	FOLIAGEVERTEXCOLORMASK_Disabled UMETA(DisplayName="Disabled"),
 	FOLIAGEVERTEXCOLORMASK_Red		UMETA(DisplayName="Red"),
@@ -79,6 +79,27 @@ enum class EFoliageScaling : uint8
 	LockYZ
 };
 
+USTRUCT()
+struct FFoliageDensityFalloff
+{
+	GENERATED_USTRUCT_BODY()
+
+	FFoliageDensityFalloff();
+
+	UPROPERTY(Category = Procedural, EditAnywhere, meta = (Subcategory = "Density"))
+	bool bUseFalloffCurve = false;
+
+	/**
+	 * Density as a function of normalized distance (i.e. distance from Procedural Foliage Volume / Max Volume Extent).
+	 * X = 0 corresponds to Normalized distance = 0, X = 1 corresponds to Normalized distance = Max distance.
+	 * Y = 0 corresponds to 0% probability of keeping instance, Y = 1 corresponds to 100% probability of keeping instance.
+	 */
+	UPROPERTY(Category = Procedural, EditAnywhere, meta = (Subcategory = "Density", XAxisName = "Normalized Distance", YAxisName = "Density Factor"))
+	FRuntimeFloatCurve FalloffCurve;
+
+	FOLIAGE_API bool IsInstanceFiltered(const FVector2D& Position, const FVector2D& Origin, FVector::FReal MaxDistance) const;
+	FOLIAGE_API float GetDensityFalloffValue(const FVector2D& Position, const FVector2D& Origin, FVector::FReal MaxDistance) const;
+};
 
 UCLASS(abstract, hidecategories = Object, editinlinenew, MinimalAPI, BlueprintType, Blueprintable)
 class UFoliageType : public UObject
@@ -92,10 +113,14 @@ class UFoliageType : public UObject
 	virtual void PostLoad() override;
 
 	virtual bool IsNotAssetOrBlueprint() const;
-
-	FOLIAGE_API FVector GetRandomScale() const;
+	FOLIAGE_API FVector3f GetRandomScale() const;
 	
 #if WITH_EDITOR
+	virtual FString GetDefaultNewAssetName() const
+	{
+		return TEXT("NewFoliage");
+	}
+
 	virtual void SetSource(UObject* InSource) PURE_VIRTUAL(UFoliageType::SetSource, );
 	virtual void UpdateBounds() {}
 	/* Lets subclasses decide if the InstancedFoliageActor should reallocate its instances if the specified property change event occurs */
@@ -182,60 +207,72 @@ public:
 	// PLACEMENT
 
 	/** Specifies a range from minimum to maximum of the offset to apply to a foliage instance's Z location */
-	UPROPERTY(EditAnywhere, Category=Placement, meta=(DisplayName="Z Offset", ReapplyCondition="ReapplyZOffset"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Placement, meta=(DisplayName="Z Offset", ReapplyCondition="ReapplyZOffset"))
 	FFloatInterval ZOffset;
 
 	/** Whether foliage instances should have their angle adjusted away from vertical to match the normal of the surface they're painted on 
 	 *  If AlignToNormal is enabled and RandomYaw is disabled, the instance will be rotated so that the +X axis points down-slope */
-	UPROPERTY(EditAnywhere, Category=Placement, meta=(ReapplyCondition="ReapplyAlignToNormal"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Placement, meta=(ReapplyCondition="ReapplyAlignToNormal"))
 	uint32 AlignToNormal:1;
 
+	/**	Whether the normal should be averaged on a number of samples around the hit location */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Placement, meta=(ToolTip="Will average normal based on Foliage Type base radius (this as a cost as it will do extra line traces)"))
+	uint32 AverageNormal:1;
+
+	/** Average Normal should use all hit components or only the original hit component */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Placement, meta = (EditCondition = "AverageNormal", ToolTip = "Whether to discard normals originating from other hit components or not when averaging normals"))
+	uint32 AverageNormalSingleComponent:1;
+
 	/** The maximum angle in degrees that foliage instances will be adjusted away from the vertical */
-	UPROPERTY(EditAnywhere, Category=Placement, meta=(UIMin = 0, ClampMin = 0, UIMax = 359, ClampMax = 359, HideBehind="AlignToNormal"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Placement, meta=(UIMin = 0, ClampMin = 0, UIMax = 359, ClampMax = 359, HideBehind="AlignToNormal"))
 	float AlignMaxAngle;
 
 	/** If selected, foliage instances will have a random yaw rotation around their vertical axis applied */
-	UPROPERTY(EditAnywhere, Category=Placement, meta=(ReapplyCondition="ReapplyRandomYaw"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Placement, meta=(ReapplyCondition="ReapplyRandomYaw"))
 	uint32 RandomYaw:1;
 
 	/** A random pitch adjustment can be applied to each instance, up to the specified angle in degrees, from the original vertical */
-	UPROPERTY(EditAnywhere, Category=Placement, meta=(UIMin = 0, ClampMin = 0, UIMax = 359, ClampMax = 359, ReapplyCondition="ReapplyRandomPitchAngle"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Placement, meta=(UIMin = 0, ClampMin = 0, UIMax = 359, ClampMax = 359, ReapplyCondition="ReapplyRandomPitchAngle"))
 	float RandomPitchAngle;
 
 	/* Foliage instances will only be placed on surfaces sloping in the specified angle range from the horizontal */
-	UPROPERTY(EditAnywhere, Category=Placement, meta=(UIMin=0, ClampMin = 0, UIMax = 359, ClampMax = 359, ReapplyCondition="ReapplyGroundSlope"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Placement, meta=(UIMin=0, ClampMin = 0, UIMax = 359, ClampMax = 359, ReapplyCondition="ReapplyGroundSlope"))
 	FFloatInterval GroundSlopeAngle;
 
 	/* The valid altitude range where foliage instances will be placed, specified using minimum and maximum world coordinate Z values */
-	UPROPERTY(EditAnywhere, Category=Placement, meta=(ReapplyCondition="ReapplyHeight"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Placement, meta=(ReapplyCondition="ReapplyHeight"))
 	FFloatInterval Height;
 
 	/** If layer names are specified, painting on landscape will limit the foliage to areas of landscape with the specified layers painted */
-	UPROPERTY(EditAnywhere, AdvancedDisplay, Category=Placement, meta=(ReapplyCondition="ReapplyLandscapeLayers", DisplayName="Inclusion Landscape Layers"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category=Placement, meta=(ReapplyCondition="ReapplyLandscapeLayers", DisplayName="Inclusion Landscape Layers"))
 	TArray<FName> LandscapeLayers;
 
 	/** Specifies the minimum value above which the landscape layer weight value must be, in order for foliage instances to be placed in a specific area */
-	UPROPERTY(EditAnywhere, AdvancedDisplay, Category=Placement, meta=(UIMin=0, ClampMin = 0, UIMax = 1, ClampMax = 1, HideBehind="LandscapeLayers", DisplayName="Minimum Inclusion Landscape Weight"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category=Placement, meta=(UIMin=0, ClampMin = 0, UIMax = 1, ClampMax = 1, HideBehind="LandscapeLayers", DisplayName="Minimum Inclusion Landscape Weight"))
 	float MinimumLayerWeight;
 
 	/** If layer names are specified, painting on landscape will exclude the foliage to areas of landscape without the specified layers painted */
-	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = Placement, meta = (ReapplyCondition = "ReapplyLandscapeLayers"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = Placement, meta = (ReapplyCondition = "ReapplyLandscapeLayers"))
 	TArray<FName> ExclusionLandscapeLayers;
 
 	/** Specifies the minimum value above which the landscape exclusion layer weight value must be, in order for foliage instances to be excluded in a specific area */
-	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = Placement, meta = (UIMin=0, ClampMin = 0, UIMax = 1, ClampMax = 1, HideBehind = "ExclusionLandscapeLayers"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = Placement, meta = (UIMin=0, ClampMin = 0, UIMax = 1, ClampMax = 1, HideBehind = "ExclusionLandscapeLayers"))
 	float MinimumExclusionLayerWeight;
 
 	UPROPERTY()
 	FName LandscapeLayer_DEPRECATED;
 	
 	/* If checked, an overlap test with existing world geometry is performed before each instance is placed */
-	UPROPERTY(EditAnywhere, AdvancedDisplay, Category=Placement, meta=(ReapplyCondition="ReapplyCollisionWithWorld"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category=Placement, meta=(ReapplyCondition="ReapplyCollisionWithWorld"))
 	uint32 CollisionWithWorld:1;
 
 	/* The foliage instance's collision bounding box will be scaled by the specified amount before performing the overlap check */
-	UPROPERTY(EditAnywhere, AdvancedDisplay, Category=Placement, meta=(HideBehind="CollisionWithWorld"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category=Placement, meta=(HideBehind="CollisionWithWorld"))
 	FVector CollisionScale;
+		
+	/** Line trace count to use around hit location when averaging normal */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = Placement, meta=(EditCondition="AverageNormal"))
+	int32 AverageNormalSampleCount;
 
 	UPROPERTY()
 	FBoxSphereBounds MeshBounds;
@@ -282,6 +319,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=InstanceSettings, meta=(EditCondition="CastShadow"))
 	uint32 bCastStaticShadow:1;
 
+	/** Whether the object should cast contact shadows. This flag is only used if CastShadow is true. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=InstanceSettings, meta=(EditCondition = "CastShadow"))
+	uint8 bCastContactShadow : 1;
+
 	/** Whether this foliage should cast dynamic shadows as if it were a two sided material. */
 	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadOnly, Category=InstanceSettings, meta=(EditCondition="bCastDynamicShadow"))
 	uint32 bCastShadowAsTwoSided:1;
@@ -293,6 +334,10 @@ public:
 	/** Whether to override the lightmap resolution defined in the static mesh. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=InstanceSettings, meta=(InlineEditConditionToggle))
 	uint32 bOverrideLightMapRes:1;
+
+	/** Control shadow invalidation behavior, in particular with respect to Virtual Shadow Maps and material effects like World Position Offset. */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadOnly, Category=InstanceSettings, meta=(EditCondition="CastShadow"))
+	EShadowCacheInvalidationBehavior ShadowCacheInvalidationBehavior;
 
 	/** Overrides the lightmap resolution defined in the static mesh */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=InstanceSettings, meta=(DisplayName="Light Map Resolution", EditCondition="bOverrideLightMapRes"))
@@ -314,6 +359,9 @@ public:
 
 	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadOnly, Category = InstanceSettings)
 	uint8 bEvaluateWorldPositionOffset : 1;
+
+	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadOnly, Category = InstanceSettings, meta = (ClampMin=0))
+	int32 WorldPositionOffsetDisableDistance;
 
 	/** Custom collision for foliage */
 	UPROPERTY(EditAnywhere, Category=InstanceSettings, meta=(HideObjectType=true))
@@ -363,11 +411,11 @@ public:
 	uint32 IsSelected:1;
 #endif
 public:
-	FOLIAGE_API float GetRadius(bool bInSingleInstanceMode) const { return bInSingleInstanceMode && bSingleInstanceModeOverrideRadius ? SingleInstanceModeRadius : Radius; }
+	float GetRadius(bool bInSingleInstanceMode) const { return bInSingleInstanceMode && bSingleInstanceModeOverrideRadius ? SingleInstanceModeRadius : Radius; }
 
 	// PROCEDURAL
 
-	FOLIAGE_API float GetSeedDensitySquared() const { return InitialSeedDensity * InitialSeedDensity; }
+	float GetSeedDensitySquared() const { return InitialSeedDensity * InitialSeedDensity; }
 	FOLIAGE_API float GetMaxRadius() const;
 	FOLIAGE_API float GetScaleForAge(const float Age) const;
 	FOLIAGE_API float GetInitAge(FRandomStream& RandomStream) const;
@@ -455,6 +503,9 @@ public:
 	UPROPERTY(Category = Procedural, EditAnywhere, meta = (Subcategory = "Growth", XAxisName = "Normalized Age", YAxisName = "Scale Factor"))
 	FRuntimeFloatCurve ScaleCurve;
 
+	UPROPERTY(Category = Procedural, EditAnywhere)
+	FFoliageDensityFalloff DensityFalloff;
+
 	UPROPERTY(Transient)
 	int32 ChangeCount;
 
@@ -538,6 +589,12 @@ public:
 	UPROPERTY(EditAnywhere, Category=Scalability)
 	uint32 bEnableDiscardOnLoad:1;
 
+	/*
+	 * Whether this foliage type should be affected by the Engine's "foliage.CullDistanceScale" setting 
+	 */
+	UPROPERTY(EditAnywhere, Category = Scalability)
+	uint32 bEnableCullDistanceScaling : 1;
+
 public:
 	// VIRTUAL TEXTURE
 
@@ -546,7 +603,7 @@ public:
 	 * The mesh material also needs to be set up to output to a virtual texture. 
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=VirtualTexture, meta = (DisplayName = "Draw in Virtual Textures"))
-	TArray<URuntimeVirtualTexture*> RuntimeVirtualTextures;
+	TArray<TObjectPtr<URuntimeVirtualTexture>> RuntimeVirtualTextures;
 
 	/**
 	 * Number of lower mips in the runtime virtual texture to skip for rendering this primitive.
@@ -559,6 +616,14 @@ public:
 	/** Controls if this component draws in the main pass as well as in the virtual texture. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = VirtualTexture, meta = (DisplayName = "Draw in Main Pass"))
 	ERuntimeVirtualTextureMainPassType VirtualTextureRenderPassType = ERuntimeVirtualTextureMainPassType::Exclusive;
+
+public:
+	// HLOD
+
+#if WITH_EDITORONLY_DATA
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=HLOD)
+	uint32 bIncludeInHLOD:1;
+#endif // WITH_EDITORONLY_DATA
 
 private:
 

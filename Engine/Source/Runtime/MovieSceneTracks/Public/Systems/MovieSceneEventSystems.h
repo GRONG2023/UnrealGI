@@ -4,9 +4,15 @@
 
 #include "EntitySystem/MovieSceneEntitySystem.h"
 #include "Channels/MovieSceneEvent.h"
+#include "Evaluation/IMovieScenePlaybackCapability.h"
 #include "MovieSceneEventSystems.generated.h"
 
-class IMovieScenePlayer;
+namespace UE::MovieScene
+{
+
+struct FSharedPlaybackState;
+
+}  // namespace UE::MovieScene
 
 USTRUCT()
 struct FMovieSceneEventTriggerData
@@ -30,63 +36,66 @@ struct FMovieSceneEventTriggerData
  * Does not dispatch any async tasks
  */
 
-UCLASS()
-class MOVIESCENETRACKS_API UMovieSceneEventSystem : public UMovieSceneEntitySystem
+UCLASS(MinimalAPI)
+class UMovieSceneEventSystem : public UMovieSceneEntitySystem
 {
 public:
 	GENERATED_BODY()
 
-	UMovieSceneEventSystem(const FObjectInitializer& ObjInit);
+	MOVIESCENETRACKS_API UMovieSceneEventSystem(const FObjectInitializer& ObjInit);
 
-	void AddEvent(UE::MovieScene::FInstanceHandle RootInstance, const FMovieSceneEventTriggerData& TriggerData);
+	MOVIESCENETRACKS_API void AddEvent(UE::MovieScene::FInstanceHandle RootInstance, const FMovieSceneEventTriggerData& TriggerData);
 
 protected:
 
-	bool HasEvents() const;
-	void TriggerAllEvents();
+	MOVIESCENETRACKS_API bool HasEvents() const;
+	MOVIESCENETRACKS_API void TriggerAllEvents();
 
 private:
 
-	virtual void OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents) override;
-	virtual bool IsRelevantImpl(UMovieSceneEntitySystemLinker* InLinker) const override;
+	using FSharedPlaybackState = UE::MovieScene::FSharedPlaybackState;
 
-	static void TriggerEvents(TArrayView<const FMovieSceneEventTriggerData> Events, IMovieScenePlayer* Player);
-	static void TriggerEventWithParameters(UObject* DirectorInstance, const FMovieSceneEventTriggerData& Event, TArrayView<UObject* const> GlobalContexts, IMovieScenePlayer* Player);
-	static bool PatchBoundObject(uint8* Parameters, UObject* BoundObject, FProperty* BoundObjectProperty, IMovieScenePlayer* Player, FMovieSceneSequenceID SequenceID);
+	MOVIESCENETRACKS_API virtual void OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents) override;
+	MOVIESCENETRACKS_API virtual bool IsRelevantImpl(UMovieSceneEntitySystemLinker* InLinker) const override;
+	MOVIESCENETRACKS_API virtual void OnUnlink() override final;
+
+	static void TriggerEvents(TArrayView<const FMovieSceneEventTriggerData> Events, TSharedRef<const FSharedPlaybackState> SharedPlaybackState);
+	static void TriggerEventWithParameters(UObject* DirectorInstance, const FMovieSceneEventTriggerData& Event, TArrayView<UObject* const> GlobalContexts, TSharedRef<const FSharedPlaybackState> SharedPlaybackState);
+	static bool PatchBoundObject(uint8* Parameters, UObject* BoundObject, FProperty* BoundObjectProperty, TSharedRef<const FSharedPlaybackState> SharedPlaybackState, FMovieSceneSequenceID SequenceID);
 
 	/** Events grouped by root sequence instance handle */
 	TMap< UE::MovieScene::FInstanceHandle, TArray<FMovieSceneEventTriggerData> > EventsByRoot;
 };
 
 /** System that triggers events before any spawnables */
-UCLASS()
-class MOVIESCENETRACKS_API UMovieScenePreSpawnEventSystem : public UMovieSceneEventSystem
+UCLASS(MinimalAPI)
+class UMovieScenePreSpawnEventSystem : public UMovieSceneEventSystem
 {
 public:
 	GENERATED_BODY()
 
-	UMovieScenePreSpawnEventSystem(const FObjectInitializer& ObjInit);
+	MOVIESCENETRACKS_API UMovieScenePreSpawnEventSystem(const FObjectInitializer& ObjInit);
 };
 
 
 /** System that triggers events after any spawnables */
-UCLASS()
-class MOVIESCENETRACKS_API UMovieScenePostSpawnEventSystem : public UMovieSceneEventSystem
+UCLASS(MinimalAPI)
+class UMovieScenePostSpawnEventSystem : public UMovieSceneEventSystem
 {
 public:
 	GENERATED_BODY()
 
-	UMovieScenePostSpawnEventSystem(const FObjectInitializer& ObjInit);
+	MOVIESCENETRACKS_API UMovieScenePostSpawnEventSystem(const FObjectInitializer& ObjInit);
 };
 
 /** System that triggers events right at the end of evaluation */
-UCLASS()
-class MOVIESCENETRACKS_API UMovieScenePostEvalEventSystem : public UMovieSceneEventSystem
+UCLASS(MinimalAPI)
+class UMovieScenePostEvalEventSystem : public UMovieSceneEventSystem
 {
 public:
 	GENERATED_BODY()
 
-	UMovieScenePostEvalEventSystem(const FObjectInitializer& ObjInit);
+	MOVIESCENETRACKS_API UMovieScenePostEvalEventSystem(const FObjectInitializer& ObjInit);
 
-	virtual void OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents)override;
+	MOVIESCENETRACKS_API virtual void OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents)override;
 };

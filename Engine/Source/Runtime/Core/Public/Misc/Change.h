@@ -2,8 +2,17 @@
 
 #pragma once
 
-#include "Templates/UniquePtr.h"
 #include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Misc/AssertionMacros.h"
+#include "Templates/UniquePtr.h"
+#include "Templates/UnrealTemplate.h"
+
+class FFeedbackContext;
+class FReferenceCollector;
+class UObject;
 
 /**
  * FChange modifies a UObject and is meant to be used to implement undo/redo.
@@ -19,7 +28,7 @@
  * FChange may eventually be deprecated. You should subclass 
  * FSwapChange and FCommandChange to implement these different styles.
  */
-class CORE_API FChange
+class FChange
 {
 
 public:
@@ -44,11 +53,14 @@ public:
 	/** @return true if this Change has Expired, ie it will no longer have any effect and could be skipped by undo/redo */
 	virtual bool HasExpired( UObject* Object ) const { return false; }
 
+	/** Used by GC to collect referenced objects. */
+	virtual void AddReferencedObjects( FReferenceCollector& Collector ) { }
+
 	/** Describes this change (for debugging) */
 	virtual FString ToString() const = 0;
 
 	/** Prints this change to the log, including sub-changes if there are any.  For compound changes, there might be multiple lines.  You should not need to override this function. */
-	virtual void PrintToLog( class FFeedbackContext& FeedbackContext, const int32 IndentLevel = 0 );
+	CORE_API virtual void PrintToLog( FFeedbackContext& FeedbackContext, const int32 IndentLevel = 0 );
 
 	/** Virtual destructor */
 	virtual ~FChange()
@@ -77,23 +89,23 @@ private:
  *   1) apply the change to the given UObject
  *   2) return a new FSwapChange that does the "opposite" action
  */
-class CORE_API FSwapChange : public FChange
+class FSwapChange : public FChange
 {
 
 public:
-	virtual EChangeStyle GetChangeType() override
+	virtual EChangeStyle GetChangeType() final
 	{
 		return FChange::EChangeStyle::InPlaceSwap;
 	}
 
 	/** Makes the change to the object */
-	virtual void Apply(UObject* Object) override
+	virtual void Apply(UObject* Object) final
 	{
 		check(false);
 	}
 
 	/** Reverts change to the object */
-	virtual void Revert(UObject* Object) override
+	virtual void Revert(UObject* Object) final
 	{
 		check(false);
 	}
@@ -105,16 +117,16 @@ public:
  * To use FCommandChange you must implement Apply() and Revert()
  * Revert() is called to "Undo" and Apply() is called to "Redo"
  */
-class CORE_API FCommandChange : public FChange
+class FCommandChange : public FChange
 {
 
 public:
-	virtual EChangeStyle GetChangeType() override
+	virtual EChangeStyle GetChangeType() final
 	{
 		return FChange::EChangeStyle::CommandPattern;
 	}
 
-	virtual TUniquePtr<FChange> Execute(UObject* Object)
+	virtual TUniquePtr<FChange> Execute(UObject* Object) final
 	{
 		check(false);
 		return nullptr;
@@ -127,7 +139,7 @@ public:
 
 
 
-struct CORE_API FCompoundChangeInput
+struct FCompoundChangeInput
 {
 	FCompoundChangeInput()
 	{
@@ -153,7 +165,7 @@ private:
  * FCompoundChange applies a sequence of FSwapChanges.
  * The changes are executed in reverse order (this is like a mini undo stack)
  */
-class CORE_API FCompoundChange : public FSwapChange
+class FCompoundChange : public FSwapChange
 {
 
 public:
@@ -165,9 +177,9 @@ public:
 	}
 
 	// Parent class overrides
-	virtual TUniquePtr<FChange> Execute( UObject* Object ) override;
-	virtual FString ToString() const override;
-	virtual void PrintToLog( class FFeedbackContext& FeedbackContext, const int32 IndentLevel = 0 ) override;
+	CORE_API virtual TUniquePtr<FChange> Execute( UObject* Object ) override;
+	CORE_API virtual FString ToString() const override;
+	CORE_API virtual void PrintToLog( class FFeedbackContext& FeedbackContext, const int32 IndentLevel = 0 ) override;
 
 
 private:

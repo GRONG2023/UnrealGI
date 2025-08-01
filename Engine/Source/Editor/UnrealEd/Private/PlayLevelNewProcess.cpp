@@ -6,6 +6,8 @@
 #include "Editor.h"
 #include "GameFramework/GameModeBase.h"
 #include "HAL/PlatformApplicationMisc.h"
+#include "Settings/LevelEditorPlaySettings.h"
+#include "DataDrivenShaderPlatformInfo.h"
 
 void UEditorEngine::StartPlayInNewProcessSession(FRequestPlaySessionParams& InRequestParams)
 {
@@ -71,7 +73,7 @@ void UEditorEngine::LaunchNewProcess(const FRequestPlaySessionParams& InParams, 
 
 	if (InParams.GameModeOverride)
 	{
-		UnrealURLParams += FString::Printf(TEXT("?game=%s"), *InParams.GameModeOverride->GetName());
+		UnrealURLParams += FString::Printf(TEXT("?game=%s"), *InParams.GameModeOverride->GetPathName());
 	}
 
 	if (bIsDedicatedServer)
@@ -81,8 +83,11 @@ void UEditorEngine::LaunchNewProcess(const FRequestPlaySessionParams& InParams, 
 	else if (NetMode == EPlayNetMode::PIE_ListenServer)
 	{
 		UnrealURLParams += TEXT("?Listen");
+	}
 
-		// Add any additional url parameters the user might have specified.
+	if (NetMode == EPlayNetMode::PIE_ListenServer)
+	{
+		// Add any additional url parameters the user might have specified, for both listen and dedicated servers
 		FString AdditionalServerGameOptions;
 		InParams.EditorPlaySettings->GetAdditionalServerGameOptions(AdditionalServerGameOptions);
 
@@ -173,12 +178,27 @@ void UEditorEngine::LaunchNewProcess(const FRequestPlaySessionParams& InParams, 
 		CommandLine += TEXT(" -vulkan -faketouches -featureleveles31");
 	}
 
-	// If they're trying to launch a new process (from the editor) in VR, this will fail because the editor
-	// owns the HMD resource, so we warn, and then fall back. They will need to use single-process for VR preview.
+	// VRPreview handling
 	if (InParams.SessionPreviewTypeOverride.Get(EPlaySessionPreviewType::NoPreview) == EPlaySessionPreviewType::VRPreview)
 	{
-		CommandLine += TEXT(" -nohmd");
-		GLog->CategorizedLogf(FName("LogHMD"), ELogVerbosity::Warning, TEXT("Standalone Game VR not supported, please use VR Preview."));
+		if (!InParams.EditorPlaySettings->IsOneHeadsetEachProcess())
+		{
+			// If they're trying to launch a new process (from the editor) in VR, this will fail because the editor
+			// owns the HMD resource, so we warn, and then fall back. They will need to use single-process for VR preview.
+			CommandLine += TEXT(" -nohmd");
+			UE_LOG(LogPlayLevel, Warning, TEXT("Standalone Game VR not supported, please use VR Preview. Launching separate process PIE with -nohmd."));
+		}
+		else if (InInstanceNum != 0) // PIE instance 0 is normally run in the editor process, so we may not see it here. That instance get the real HMD, so no simulator argument is passed.
+		{
+			CommandLine += TEXT(" -HMDSimulator");
+			UE_LOG(LogPlayLevel, Log, TEXT("Launching separate process PIE with -HMDSimulator. See bOneHeadsetEachProcess editor preference tooltip for more information about this."));
+		}
+	}
+
+	// if we had -emulatestereo on the commandline, also pass it to the new process
+	if (InParams.EditorPlaySettings->bEmulateStereo || FParse::Param(FCommandLine::Get(), TEXT("emulatestereo")))
+	{
+		CommandLine += TEXT(" -emulatestereo");
 	}
 
 	// Allow disabling the sound in the new clients.
@@ -197,13 +217,6 @@ void UEditorEngine::LaunchNewProcess(const FRequestPlaySessionParams& InParams, 
 	if (InParams.AdditionalStandaloneCommandLineParameters.IsSet())
 	{
 		CommandLine += FString::Printf(TEXT(" %s"), *InParams.AdditionalStandaloneCommandLineParameters.GetValue());
-	}
-
-	// Mobile uses its own set of command line arguments that can be passed. Mobile can be previewed both in-process and
-	// standalone, so we need two separate sets of arguments right now.
-	if (InParams.EditorPlaySettings->AdditionalLaunchParametersForMobile.Len() > 0)
-	{
-		CommandLine += FString::Printf(TEXT(" %s"), *InParams.EditorPlaySettings->AdditionalLaunchParametersForMobile);
 	}
 
 	// Allow servers to override which port they are launched on.
@@ -258,7 +271,7 @@ void UEditorEngine::LaunchNewProcess(const FRequestPlaySessionParams& InParams, 
 			FIntPoint WindowPosition = InParams.EditorPlaySettings->NewWindowPosition;
 			
 			WindowPosition.X += FMath::Max(InInstanceNum - 1, 0) * WindowSize.X;
-			WindowPosition.Y += SWindowDefs::DefaultTitleBarSize * FPlatformApplicationMisc::GetDPIScaleFactorAtPoint(0, 0);
+			WindowPosition.Y += static_cast<int32>(SWindowDefs::DefaultTitleBarSize * FPlatformApplicationMisc::GetDPIScaleFactorAtPoint(0, 0));
 
 			// If they don't want to center the new window, we add a specific location. This will get saved to user settings
 			// via SAVEWINPOS and not end up reflected in our PlayInEditor settings.
@@ -306,14 +319,17 @@ void UEditorEngine::LaunchNewProcess(const FRequestPlaySessionParams& InParams, 
 	if (NetMode != EPlayNetMode::PIE_Client)
 	{
 		// If we're not a client, build a PlayWorld URL to load to.
-		FString ServerMapNameOverride;
-		InParams.EditorPlaySettings->GetServerMapNameOverride(ServerMapNameOverride);
-		
-		// Allow the user to override which map the server should load.
-		if (ServerMapNameOverride.Len() > 0)
+		if (NetMode != EPlayNetMode::PIE_Standalone)
 		{
-			UE_LOG(LogPlayLevel, Log, TEXT("Map Override specified in configuration, using %s instead of current map (%s)"), *ServerMapNameOverride, *MapName);
-			MapName = ServerMapNameOverride;
+			FString ServerMapNameOverride;
+			InParams.EditorPlaySettings->GetServerMapNameOverride(ServerMapNameOverride);
+		
+			// Allow the user to override which map the server should load.
+			if (ServerMapNameOverride.Len() > 0)
+			{
+				UE_LOG(LogPlayLevel, Log, TEXT("Map Override specified in configuration, using %s instead of current map (%s)"), *ServerMapNameOverride, *MapName);
+				MapName = ServerMapNameOverride;
+			}
 		}
 
 		NamedArguments.Add(TEXT("PlayWorldURL"), BuildPlayWorldURL(*MapName, false, UnrealURLParams));

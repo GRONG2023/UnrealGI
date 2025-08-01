@@ -6,6 +6,8 @@
 #include "Sections/MovieSceneCinematicShotSection.h"
 #include "Compilation/MovieSceneCompilerRules.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneCinematicShotTrack)
+
 
 #define LOCTEXT_NAMESPACE "MovieSceneCinematicShotTrack"
 
@@ -27,7 +29,7 @@ UMovieSceneSubSection* UMovieSceneCinematicShotTrack::AddSequenceOnRow(UMovieSce
 	UMovieSceneCinematicShotSection* NewShotSection = Cast<UMovieSceneCinematicShotSection>(NewSection);
 
 	// When a new sequence is added, sort all sequences to ensure they are in the correct order
-	MovieSceneHelpers::SortConsecutiveSections(Sections);
+	MovieSceneHelpers::SortConsecutiveSections(MutableView(Sections));
 
 	// Once sequences are sorted fixup the surrounding sequences to fix any gaps
 	//MovieSceneHelpers::FixupConsecutiveSections(Sections, *NewSection, false);
@@ -61,7 +63,7 @@ void UMovieSceneCinematicShotTrack::RemoveSection(UMovieSceneSection& Section)
 {
 	Sections.Remove(&Section);
 	//MovieSceneHelpers::FixupConsecutiveSections(Sections, Section, true);
-	MovieSceneHelpers::SortConsecutiveSections(Sections);
+	MovieSceneHelpers::SortConsecutiveSections(MutableView(Sections));
 
 	// @todo Sequencer: The movie scene owned by the section is now abandoned.  Should we offer to delete it?  
 }
@@ -69,7 +71,7 @@ void UMovieSceneCinematicShotTrack::RemoveSection(UMovieSceneSection& Section)
 void UMovieSceneCinematicShotTrack::RemoveSectionAt(int32 SectionIndex)
 {
 	Sections.RemoveAt(SectionIndex);
-	MovieSceneHelpers::SortConsecutiveSections(Sections);
+	MovieSceneHelpers::SortConsecutiveSections(MutableView(Sections));
 }
 
 bool UMovieSceneCinematicShotTrack::SupportsMultipleRows() const
@@ -154,7 +156,8 @@ FText UMovieSceneCinematicShotTrack::GetDefaultDisplayName() const
 
 void UMovieSceneCinematicShotTrack::SortSections()
 {
-	MovieSceneHelpers::SortConsecutiveSections(Sections);
+	MovieSceneHelpers::SortConsecutiveSections(MutableView(Sections));
 }
 
 #undef LOCTEXT_NAMESPACE
+

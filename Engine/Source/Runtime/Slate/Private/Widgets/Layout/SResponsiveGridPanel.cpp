@@ -4,32 +4,36 @@
 #include "Layout/ArrangedChildren.h"
 #include "Layout/LayoutUtils.h"
 
+SLATE_IMPLEMENT_WIDGET(SResponsiveGridPanel)
+void SResponsiveGridPanel::PrivateRegisterAttributes(FSlateAttributeInitializer& AttributeInitializer)
+{
+	FSlateWidgetSlotAttributeInitializer Initializer = SLATE_ADD_PANELCHILDREN_DEFINITION(AttributeInitializer, Slots);
+	FSlot::RegisterAttributes(Initializer);
+}
+
 /**
  *  !!!!!!!!!!!!!!!!!   EXPERIMENTAL  !!!!!!!!!!!!!!!!!   
  * The SResponsiveGridPanel is still in development and the API may change drastically in the future
  * or maybe removed entirely.
  */
 SResponsiveGridPanel::SResponsiveGridPanel()
-: Slots(this)
+: Slots(this, GET_MEMBER_NAME_CHECKED(SResponsiveGridPanel, Slots))
 {}
 
-SResponsiveGridPanel::FSlot& SResponsiveGridPanel::AddSlot(int32 Row)
+SResponsiveGridPanel::FScopedWidgetSlotArguments SResponsiveGridPanel::AddSlot(int32 Row)
 {
-	return InsertSlot(new FSlot(Row));
+	TWeakPtr<SResponsiveGridPanel> WeakPanel = SharedThis(this);
+
+	TUniquePtr<FSlot> NewSlot = MakeUnique<FSlot>(Row);
+	NewSlot->Panel = WeakPanel;
+
+	int32 InsertLocation = FindInsertSlotLocation(NewSlot.Get());
+	return FScopedWidgetSlotArguments{ MoveTemp(NewSlot), this->Slots, InsertLocation};
 }
 
 bool SResponsiveGridPanel::RemoveSlot(const TSharedRef<SWidget>& SlotWidget)
 {
-	for (int32 SlotIdx = 0; SlotIdx < Slots.Num(); ++SlotIdx)
-	{
-		if (SlotWidget == Slots[SlotIdx].GetWidget())
-		{
-			Slots.RemoveAt(SlotIdx);
-			return true;
-		}
-	}
-
-	return false;
+	return Slots.Remove(SlotWidget) != INDEX_NONE;
 }
 
 void SResponsiveGridPanel::ClearChildren()
@@ -47,9 +51,24 @@ void SResponsiveGridPanel::Construct(const FArguments& InArgs, int32 InTotalColu
 
 	RowFillCoefficients = InArgs.RowFillCoefficients;
 
-	for (int32 SlotIdx = 0; SlotIdx < InArgs.Slots.Num(); ++SlotIdx)
+	// Populate the slots such that they are sorted by Layer (order preserved within layers)
+
+	TWeakPtr<SResponsiveGridPanel> WeakPanel = SharedThis(this);
+	Slots.Reserve(InArgs._Slots.Num());
+	for (int32 SlotIndex = 0; SlotIndex < InArgs._Slots.Num(); ++SlotIndex)
 	{
-		InsertSlot(InArgs.Slots[SlotIdx]);
+		int32 SlotLocation = FindInsertSlotLocation(InArgs._Slots[SlotIndex].GetSlot());
+		if (SlotLocation == INDEX_NONE)
+		{
+			SlotLocation = Slots.AddSlot(MoveTemp(const_cast<FSlot::FSlotArguments&>(InArgs._Slots[SlotIndex])));
+		}
+		else
+		{
+			Slots.InsertSlot(MoveTemp(const_cast<FSlot::FSlotArguments&>(InArgs._Slots[SlotIndex])), SlotLocation);
+		}
+
+		FSlot& NewSlot = Slots[SlotLocation];
+		NewSlot.Panel = WeakPanel;
 	}
 }
 
@@ -253,7 +272,7 @@ void SResponsiveGridPanel::OnArrangeChildren( const FGeometry& AllottedGeometry,
 
 			// Do the standard arrangement of elements within a slot
 			// Takes care of alignment and padding.
-			FMargin SlotPadding(CurSlot.SlotPadding.Get());
+			FMargin SlotPadding(CurSlot.GetPadding());
 
 			AlignmentArrangeResult XAxisResult = AlignChild<Orient_Horizontal>(CellSize.X, CurSlot, SlotPadding);
 			AlignmentArrangeResult YAxisResult = AlignChild<Orient_Vertical>(CellSize.Y, CurSlot, SlotPadding);
@@ -348,7 +367,7 @@ void SResponsiveGridPanel::ComputeDesiredCellSizes(float AvailableWidth, TArray<
 			}
 
 			// The slots want to be as big as its content along with the required padding.
-			const FVector2D SlotDesiredSize = CurSlot.GetWidget()->GetDesiredSize() + CurSlot.SlotPadding.Get().GetDesiredSize();
+			const FVector2D SlotDesiredSize = CurSlot.GetWidget()->GetDesiredSize() + CurSlot.GetPadding().GetDesiredSize();
 
 			// If the slot has a (colspan,rowspan) of (1,1) it will only affect that cell.
 			// For larger spans, the slots size will be evenly distributed across all the affected cells.
@@ -419,39 +438,18 @@ void SResponsiveGridPanel::SetRowFill(int32 RowId, float Coefficient)
 	RowFillCoefficients[RowId] = Coefficient;
 }
 
-SResponsiveGridPanel::FSlot& SResponsiveGridPanel::InsertSlot(SResponsiveGridPanel::FSlot* InSlot)
+int32 SResponsiveGridPanel::FindInsertSlotLocation(SResponsiveGridPanel::FSlot* InSlot) const
 {
-	InSlot->Panel = SharedThis(this);
-
-	bool bInserted = false;
-
 	// Insert the slot in the list such that slots are sorted by LayerOffset.
-	for (int32 SlotIndex = 0; !bInserted && SlotIndex < Slots.Num(); ++SlotIndex)
+	for (int32 SlotIndex = 0; SlotIndex < Slots.Num(); ++SlotIndex)
 	{
 		if (InSlot->RowParam < this->Slots[SlotIndex].RowParam)
 		{
-			Slots.Insert(InSlot, SlotIndex);
-			bInserted = true;
+			return SlotIndex;
 		}
 	}
 
-	// We haven't inserted yet, so add to the end of the list.
-	if (!bInserted)
-	{
-		Slots.Add(InSlot);
-	}
-
-	NotifySlotChanged(InSlot);
-
-	return *InSlot;
-}
-
-void SResponsiveGridPanel::NotifySlotChanged(SResponsiveGridPanel::FSlot* InSlot)
-{
-	//// Keep the size of the grid up to date.
-	//// We need an extra cell at the end for easily figuring out the size across any number of cells
-
-	//Rows.AddZeroed();
+	return INDEX_NONE;
 }
 
 int32 SResponsiveGridPanel::LayoutDebugPaint(const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId ) const

@@ -6,8 +6,12 @@
 #include "DSP/BufferVectorOperations.h"
 #include "DSP/Dsp.h"
 
+class FEvent;
+
 namespace Audio
 {
+
+	
 	/**
 	 * This class can be thought of as an output for a single constructed instance of FPatchInput.
 	 * Each FPatchOutput can only be connected to one FPatchInput. To route multiple outputs, see FPatchSplitter.
@@ -25,36 +29,43 @@ namespace Audio
 	 * NewOutput->PopAudio(OutAudioBufferPtr, AudioBufferNumSamples);
 	 * 
 	 */
-	struct SIGNALPROCESSING_API FPatchOutput
+	struct FPatchOutput
 	{
 	public:
-		FPatchOutput(int32 MaxCapacity, float InGain = 1.0f);
+		SIGNALPROCESSING_API FPatchOutput(int32 InMaxCapacity, float InGain = 1.0f);
 
-		/** The default constructor will result in an uninitialized, disconnected patch point, which  */
-		FPatchOutput();
+		/** The default constructor will result in an uninitialized, disconnected patch point. */
+		SIGNALPROCESSING_API FPatchOutput();
 
+		SIGNALPROCESSING_API virtual ~FPatchOutput();
+		
 		/** Copies the minimum of NumSamples or however many samples are available into OutBuffer. Returns the number of samples copied, or -1 if this output's corresponding input has been destroyed. */
-		int32 PopAudio(float* OutBuffer, int32 NumSamples, bool bUseLatestAudio);
+		SIGNALPROCESSING_API int32 PopAudio(float* OutBuffer, int32 NumSamples, bool bUseLatestAudio);
 
 		/** Sums the minimum of NumSamples or however many samples are available into OutBuffer. Returns the number of samples summed into OutBuffer. */
-		int32 MixInAudio(float* OutBuffer, int32 NumSamples, bool bUseLatestAudio);
+		SIGNALPROCESSING_API int32 MixInAudio(float* OutBuffer, int32 NumSamples, bool bUseLatestAudio);
 
 		/** Returns the current number of samples buffered on this output. */
-		int32 GetNumSamplesAvailable();
+		SIGNALPROCESSING_API int32 GetNumSamplesAvailable() const;
+
+		/** Pauses the current thread until there are the given number of samples available to pop. Will return true if it succeeded, false if it timed out. */
+		SIGNALPROCESSING_API bool WaitUntilNumSamplesAvailable(int32 NumSamples, uint32 TimeOutMilliseconds = MAX_uint32);
 
 		/** Returns true if the input for this patch has been destroyed. */
-		bool IsInputStale() const;
+		SIGNALPROCESSING_API bool IsInputStale() const;
 
 		friend class FPatchInput;
 		friend class FPatchMixer;
 		friend class FPatchSplitter;
 	private:
-
+		
+		SIGNALPROCESSING_API int32 PushAudioToInternalBuffer(const float* InBuffer, int32 NumSamples);
+		
 		// Internal buffer.
 		TCircularAudioBuffer<float> InternalBuffer;
 
 		// For MixInAudio, audio is popped off of InternalBuffer onto here, and then mixed into OutBuffer in MixInAudio.
-		AlignedFloatBuffer MixingBuffer;
+		FAlignedFloatBuffer MixingBuffer;
 
 		// This is applied in PopAudio or MixInAudio.
 		TAtomic<float> TargetGain;
@@ -64,9 +75,12 @@ namespace Audio
 		int32 PatchID;
 
 		// Counter that is incremented/decremented to allow FPatchInput to be copied around safely.
-		int32 NumAliveInputs;
+		std::atomic<int32> NumAliveInputs;
 
-		static TAtomic<int32> PatchIDCounter;
+		// Event to pause the current thread until a given number of samples has been filled
+		std::atomic<FEvent*> SamplesPushedEvent;
+
+		static SIGNALPROCESSING_API TAtomic<int32> PatchIDCounter;
 	};
 
 	/** Patch outputs are owned by the FPatchMixer, and are pinned by the FPatchInput. */
@@ -76,39 +90,49 @@ namespace Audio
 	/**
 	 * Handle to a patch. Should only be used by a single thread.
 	 */
-	class SIGNALPROCESSING_API FPatchInput
+	class FPatchInput
 	{
 	public:
 		/** PatchInputs can only be created from explicit outputs. */
-		FPatchInput(const FPatchOutputStrongPtr& InOutput);
-		FPatchInput(const FPatchInput& Other);
-		FPatchInput& operator=(const FPatchInput& Other);
-		FPatchInput(FPatchInput&& Other);
+		SIGNALPROCESSING_API FPatchInput(const FPatchOutputStrongPtr& InOutput);
+		SIGNALPROCESSING_API FPatchInput(const FPatchInput& Other);
+		SIGNALPROCESSING_API FPatchInput& operator=(const FPatchInput& Other);
+		SIGNALPROCESSING_API FPatchInput& operator=(FPatchInput&& Other);
+		SIGNALPROCESSING_API FPatchInput(FPatchInput&& Other);
 
 		/** Default constructed FPatchInput instances will always return -1 for PushAudio and true for IsOutputStillActive. */
-		FPatchInput();
+		FPatchInput() = default;
 
-		~FPatchInput();
+		SIGNALPROCESSING_API ~FPatchInput();
 
-		/** pushes audio from InBuffer to the corresponding FPatchOutput.
+		/** Pushes audio from InBuffer to the corresponding FPatchOutput.
+		 *  Pushes zeros if InBuffer is nullptr.
 		 *  Returns how many samples were able to be pushed, or -1 if the output was disconnected.
 		 */
-		int32 PushAudio(const float* InBuffer, int32 NumSamples);
+		SIGNALPROCESSING_API int32 PushAudio(const float* InBuffer, int32 NumSamples);
 
-		void SetGain(float InGain);
+		/** Returns the current number of samples buffered in this input. */
+		SIGNALPROCESSING_API int32 GetNumSamplesAvailable() const;
+
+		SIGNALPROCESSING_API void SetGain(float InGain);
 
 		/** Returns false if this output was removed, either because someone called FPatchMixer::RemoveTap with this FPatchInput, or the FPatchMixer was destroyed. */
-		bool IsOutputStillActive();
+		SIGNALPROCESSING_API bool IsOutputStillActive() const;
 
+		/** Returns false if this output was not initialized properly. */
+		SIGNALPROCESSING_API bool IsValid() const;
+
+		SIGNALPROCESSING_API void Reset();
+		
 		friend class FPatchMixer;
 		friend class FPatchSplitter;
 
 	private:
-		/** Weak pointer to our destination buffer. */
+		/** Strong pointer to our destination buffer. */
 		FPatchOutputStrongPtr OutputHandle;
 
-		/** Counter of the number of push calls until we check OutputHandle.IsUnique() and possibly clean up the output. */
-		int32 PushCallsCounter;
+		/** Counter of the number of push calls. */
+		int32 PushCallsCounter = 0;
 	};
 
 	/**
@@ -116,36 +140,39 @@ namespace Audio
 	 * Important to note that this is MPSC: while multiple threads can enqueue audio on an instance of FPatchMixer using instances of FPatchInput,
 	 * only one thread can call PopAudio safely.
 	 */
-	class SIGNALPROCESSING_API FPatchMixer
+	class FPatchMixer
 	{
 	public:
-		/** Constructor. */
-		FPatchMixer();
-
 		/** Adds a new input to the tap collector. Calling this is thread safe, but individual instances of FPatchInput are only safe to be used from one thread. */
-		FPatchInput AddNewInput(int32 MaxLatencyInSamples, float InGain);
+		SIGNALPROCESSING_API FPatchInput AddNewInput(int32 MaxLatencyInSamples, float InGain);
+
+		/** Adds an existing patch input to the patch mixer. */
+		SIGNALPROCESSING_API void AddNewInput(const FPatchInput& InPatchInput);
 
 		/** Removes a tap from the tap collector. Calling this is thread safe, though FPatchOutput will likely not be deleted until the next call of PopAudio. */
-		void RemovePatch(const FPatchInput& TapInput);
+		SIGNALPROCESSING_API void RemovePatch(const FPatchInput& InPatchInput);
 
 		/** Mixes all inputs into a single buffer. This should only be called from a single thread. Returns the number of non-silent samples popped to OutBuffer. */
-		int32 PopAudio(float* OutBuffer, int32 OutNumSamples, bool bUseLatestAudio);
+		SIGNALPROCESSING_API int32 PopAudio(float* OutBuffer, int32 OutNumSamples, bool bUseLatestAudio);
 
 		/** This returns the number of inputs currently connected to this patch mixer. Thread safe, but blocks for PopAudio. */
-		int32 Num();
+		SIGNALPROCESSING_API int32 Num();
 
 		/** This function call gets the maximum number of samples that's safe to pop, based on the thread with the least amount of samples buffered. Thread safe, but blocks for PopAudio. */
-		int32 MaxNumberOfSamplesThatCanBePopped();
+		SIGNALPROCESSING_API int32 MaxNumberOfSamplesThatCanBePopped();
+
+		/** Pauses the current thread until there are the given number of samples available to pop. Will return true if it succeeded, false if it timed out. */
+		SIGNALPROCESSING_API bool WaitUntilNumSamplesAvailable(int32 NumSamples, uint32 TimeOutMilliseconds = MAX_uint32);
 
 		/** Disconnect everything currently connected to this mixer. */
-		void DisconnectAllInputs();
+		SIGNALPROCESSING_API void DisconnectAllInputs();
 
 	private:
 		/** Called within PopAudio. Flushes the PendingNewPatches array into CurrentPatches. During this function, AddNewPatch is blocked. */
 		void ConnectNewPatches();
 
 		/** Called within PopAudio and MaxNumberOfSamplesThatCanBePopped. Removes PendingTapsToDelete from CurrentPatches and ConnectNewPatches. 
-		 * During this function, RemoveTap and AddNewPatch are blocked. Callers of this function must have CurrentPatchesCritialSection locked. */
+		 * During this function, RemoveTap and AddNewPatch are blocked. Callers of this function must have CurrentPatchesCriticalSection locked. */
 		void CleanUpDisconnectedPatches();
 
 		/** New taps are added here in AddNewPatch, and then are moved to CurrentPatches in ConnectNewPatches. */
@@ -168,32 +195,29 @@ namespace Audio
 	 * This class is SPMC: multiple threads can call FPatchOutputStrongPtr->PopAudio safely,
 	 * but only one thread can call PushAudio.
 	 */
-	class SIGNALPROCESSING_API FPatchSplitter
+	class FPatchSplitter
 	{
 	public:
-		/** Constructor. */
-		FPatchSplitter();
-
-		/** The destructor will mark every still connected FPatchOutput as stale. */
-		~FPatchSplitter();
-
 		/**
 		 * Adds a new output. Calling this is thread safe, but individual instances of FPatchOutput are only safe to be used from one thread.
 		 * the returned FPatchOutputPtr can be safely destroyed at any point.
 		 */
-		FPatchOutputStrongPtr AddNewPatch(int32 MaxLatencyInSamples, float InGain);
+		SIGNALPROCESSING_API FPatchOutputStrongPtr AddNewPatch(int32 MaxLatencyInSamples, float InGain);
+
+		/** Adds a new a patch from an existing patch output. */
+		SIGNALPROCESSING_API void AddNewPatch(FPatchOutputStrongPtr&& InPatchOutputStrongPtr);
+		SIGNALPROCESSING_API void AddNewPatch(const FPatchOutputStrongPtr& InPatchOutputStrongPtr);
 
 		/** This call pushes audio to all outputs connected to this splitter. Only should be called from one thread. */
-		int32 PushAudio(const float* InBuffer, int32 InNumSamples);
+		SIGNALPROCESSING_API int32 PushAudio(const float* InBuffer, int32 InNumSamples);
 
 		/** This returns the number of outputs currently connected to this patch splitter. Thread safe, but blocks for PushAudio. */
-		int32 Num();
+		SIGNALPROCESSING_API int32 Num();
 
 		/** This function call gets the maximum number of samples that's safe to push. Thread safe, but blocks for PushAudio. */
-		int32 MaxNumberOfSamplesThatCanBePushed();
+		SIGNALPROCESSING_API int32 MaxNumberOfSamplesThatCanBePushed();
 
 	private:
-		// Called from PushAudio(). 
 		void AddPendingPatches();
 
 		TArray<FPatchInput> PendingOutputs;
@@ -205,41 +229,37 @@ namespace Audio
 
 	/**
 	 * This class is used to mix multiple inputs from disparate threads to a single mixdown and deliver that mixdown to multiple outputs.
-	 * This class is MPCMC, but only one thread can and should call ProcessAudio().
+	 * This class is MPMC, but only one thread can and should call ProcessAudio().
 	 */
-	class SIGNALPROCESSING_API FPatchMixerSplitter
+	class FPatchMixerSplitter
 	{
 	public:
-		/** Constructor. */
-		FPatchMixerSplitter();
-
-		/** The destructor will mark every still connected FPatchOutput as stale. */
-		virtual ~FPatchMixerSplitter();
-
 		/**
 		 * Adds a new output. Calling this is thread safe, but individual instances of FPatchOutput are only safe to be used from one thread.
 		 * the returned FPatchOutputPtr can be safely destroyed at any point.
 		 */
-		FPatchOutputStrongPtr AddNewOutput(int32 MaxLatencyInSamples, float InGain);
+		SIGNALPROCESSING_API FPatchOutputStrongPtr AddNewOutput(int32 MaxLatencyInSamples, float InGain);
+
+		/** Adds a new a patch from an existing patch output. */
+		SIGNALPROCESSING_API void AddNewOutput(const FPatchOutputStrongPtr& InPatchOutputStrongPtr);
 
 		/** Adds a new input to the tap collector. Calling this is thread safe, but individual instances of FPatchInput are only safe to be used from one thread. */
-		FPatchInput AddNewInput(int32 MaxLatencyInSamples, float InGain);
+		SIGNALPROCESSING_API FPatchInput AddNewInput(int32 MaxLatencyInSamples, float InGain);
+
+		/** Adds a new a patch input from an existing patch input object. */
+		SIGNALPROCESSING_API void AddNewInput(FPatchInput& InInput);
 
 		/** Removes a tap from the tap collector. Calling this is thread safe, though FPatchOutput will likely not be deleted until the next call of PopAudio. */
-		void RemovePatch(const FPatchInput& TapInput);
+		SIGNALPROCESSING_API void RemovePatch(const FPatchInput& InInput);
 
 		/** Mixes audio from all inputs and pushes it to all outputs. Should be called regularly. */
-		void ProcessAudio();
-
-	protected:
-		/** This class can be subclassed with OnProcessAudio overridden. */
-		virtual void OnProcessAudio(TArrayView<const float> InAudio) {}
+		SIGNALPROCESSING_API void ProcessAudio();
 
 	private:
 		FPatchMixer Mixer;
 		FPatchSplitter Splitter;
 
 		/** This buffer is used to pop audio from our Mixer and push to our splitter. */
-		AlignedFloatBuffer IntermediateBuffer;
+		FAlignedFloatBuffer IntermediateBuffer;
 	};
 }

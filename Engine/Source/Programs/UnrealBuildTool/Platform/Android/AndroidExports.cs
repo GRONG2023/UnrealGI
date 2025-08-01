@@ -2,10 +2,8 @@
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
 
 namespace UnrealBuildTool
 {
@@ -15,22 +13,16 @@ namespace UnrealBuildTool
 	public interface IAndroidToolChain
 	{
 		/// <summary>
-		/// Finds the list of supported architectures
+		/// Returns the Android NDK Level
 		/// </summary>
-		/// <returns>The targeted architectures</returns>
-		List<string> GetAllArchitectures();
-
-		/// <summary>
-		/// Finds the list of supported GPU architectures
-		/// </summary>
-		/// <returns>The targeted GPU architectures</returns>
-		List<string> GetAllGPUArchitectures();
-
-		/// <summary>
-		/// Finds the list of supported GPU architectures
-		/// </summary>
-		/// <returns>The targeted GPU architectures</returns>
+		/// <returns>The NDK Level</returns>
 		int GetNdkApiLevelInt(int MinNDK);
+
+		/// <summary>
+		/// Returns the Current NDK Version
+		/// </summary>
+		/// <returns>The NDK Version</returns>
+		UInt64 GetNdkVersionInt();
 	}
 
 	/// <summary>
@@ -49,7 +41,7 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="Architectures"></param>
 		/// <param name="inPluginExtraData"></param>
-		void SetAndroidPluginData(List<string> Architectures, List<string> inPluginExtraData);
+		void SetAndroidPluginData(UnrealArchitectures Architectures, List<string> inPluginExtraData);
 
 		/// <summary>
 		/// 
@@ -64,8 +56,9 @@ namespace UnrealBuildTool
 		/// <param name="Configuration"></param>
 		/// <param name="bIsDataDeploy"></param>
 		/// <param name="bSkipGradleBuild"></param>
+		/// <param name="bIsArchive"></param>
 		/// <returns></returns>
-		bool PrepForUATPackageOrDeploy(FileReference ProjectFile, string ProjectName, DirectoryReference ProjectDirectory, string ExecutablePath, string EngineDirectory, bool bForDistribution, string CookFlavor, UnrealTargetConfiguration Configuration, bool bIsDataDeploy, bool bSkipGradleBuild);
+		bool PrepForUATPackageOrDeploy(FileReference ProjectFile, string ProjectName, DirectoryReference ProjectDirectory, string ExecutablePath, string EngineDirectory, bool bForDistribution, string CookFlavor, UnrealTargetConfiguration Configuration, bool bIsDataDeploy, bool bSkipGradleBuild, bool bIsArchive);
 
 		/// <summary>
 		/// 
@@ -86,21 +79,11 @@ namespace UnrealBuildTool
 		/// 
 		/// </summary>
 		/// <param name="ProjectFile"></param>
-		/// <returns></returns>
-		public static IAndroidToolChain CreateToolChain(FileReference ProjectFile)
-		{
-			return new AndroidToolChain(ProjectFile, false, null, null);
-		}
-
-		/// <summary>
-		/// 
-		/// </summary>
-		/// <param name="ProjectFile"></param>
 		/// <param name="InForcePackageData"></param>
 		/// <returns></returns>
 		public static IAndroidDeploy CreateDeploymentHandler(FileReference ProjectFile, bool InForcePackageData)
 		{
-			return new UEDeployAndroid(ProjectFile, InForcePackageData);
+			return new UEDeployAndroid(ProjectFile, InForcePackageData, Log.Logger);
 		}
 
 		/// <summary>
@@ -117,9 +100,9 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="NDKArch"></param>
 		/// <returns></returns>
-		public static string GetUE4Arch(string NDKArch)
+		public static UnrealArch GetUnrealArch(string NDKArch)
 		{
-			return UEDeployAndroid.GetUE4Arch(NDKArch);
+			return UEDeployAndroid.GetUnrealArch(NDKArch);
 		}
 
 		/// <summary>
@@ -127,10 +110,36 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="SourceFile"></param>
 		/// <param name="TargetFile"></param>
-		public static void StripSymbols(FileReference SourceFile, FileReference TargetFile)
+		/// <param name="Logger">Logger for output</param>
+		public static void StripSymbols(FileReference SourceFile, FileReference TargetFile, ILogger Logger)
 		{
-			AndroidToolChain ToolChain = new AndroidToolChain(null, false, null, null);
-			ToolChain.StripSymbols(SourceFile, TargetFile);
+			AndroidToolChain ToolChain = new AndroidToolChain(null, Logger);
+			ToolChain.StripSymbols(SourceFile, TargetFile, Logger);
+		}
+
+		/// <summary>
+		/// 
+		/// </summary>
+		/// <param name="ProjectFile"></param>
+		/// <param name="bForceDontBundleLibrariesInAPK"></param>
+		/// <param name="Configuration"></param>
+		/// <param name="bIsArchive"></param>
+		/// <param name="bFromMSBuild"></param>
+		/// <param name="bIsFromUAT"></param>
+		/// <param name="Logger"></param>
+		public static bool GetDontBundleLibrariesInAPK(FileReference? ProjectFile, bool? bForceDontBundleLibrariesInAPK, UnrealTargetConfiguration Configuration, bool bIsArchive, bool bFromMSBuild, bool bIsFromUAT, ILogger? Logger)
+		{
+			return UEDeployAndroid.GetDontBundleLibrariesInAPK(ProjectFile, bForceDontBundleLibrariesInAPK, Configuration, bIsArchive, bFromMSBuild, bIsFromUAT, Logger);
+		}
+
+		/// <summary>
+		/// 
+		/// </summary>
+		/// <param name="Target"></param>
+		/// <param name="Logger"></param>
+		public static string GetAFSExecutable(UnrealTargetPlatform Target, ILogger Logger)
+		{
+			return UEDeployAndroid.GetAFSExecutable(Target, Logger);
 		}
 	}
 }

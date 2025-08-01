@@ -20,7 +20,7 @@ DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(TEXT("Num Async File Requests"), STAT_Asyn
 class IAsyncReadRequest;
 typedef TFunction<void(bool bWasCancelled, IAsyncReadRequest*)> FAsyncFileCallBack;
 
-class CORE_API IAsyncReadRequest
+class IAsyncReadRequest
 {
 protected:
 	union
@@ -29,10 +29,10 @@ protected:
 		uint8* Memory;
 	};
 	FAsyncFileCallBack Callback;
-	bool bDataIsReady;
-	bool bCompleteAndCallbackCalled;
-	bool bCompleteSync;
-	bool bCanceled;
+	TSAN_ATOMIC(bool) bDataIsReady;
+	TSAN_ATOMIC(bool) bCompleteAndCallbackCalled;
+	TSAN_ATOMIC(bool) bCompleteSync;
+	TSAN_ATOMIC(bool) bCanceled;
 	const bool bSizeRequest;
 	const bool bUserSuppliedMemory;
 public:
@@ -63,7 +63,7 @@ public:
 	}
 
 	/* Not legal to destroy the request until it is complete. */
-	virtual ~IAsyncReadRequest() TSAN_SAFE
+	virtual ~IAsyncReadRequest()
 	{
 		// check(bCompleteAndCallbackCalled && (bSizeRequest || !Memory)); // must be complete, and if it was a read request, the memory should be gone
 		UE_CLOG(!(bCompleteAndCallbackCalled && (bSizeRequest || !Memory)),
@@ -76,7 +76,7 @@ public:
 	* Nonblocking poll of the state of completion.
 	* @return true if the request is complete
 	**/
-	FORCEINLINE bool PollCompletion() TSAN_SAFE
+	FORCEINLINE bool PollCompletion()
 	{
 		return bCompleteAndCallbackCalled;
 	}
@@ -94,6 +94,19 @@ public:
 		}
 		WaitCompletionImpl(TimeLimitSeconds);
 		return PollCompletion();
+	}
+
+	/**
+	* Waits for the request to complete, with an additional guarantee that the second consecutive call won't ever block, which is not a case for
+	* WaitCompletion().
+	*/
+	virtual void EnsureCompletion()
+	{
+		// Default implementation is the same as WaitCompletion(0.0f) except that it skips the testing of
+		// PollCompletion. This is potentially slower because we do not early exit if PollCompletion is true, but it
+		// provides a stronger guarantee of completion because PollCompletion can sometimes return true while
+		// completion steps are still in progress.
+		WaitCompletionImpl(0.0f);
 	}
 
 	/** Cancel the request. This is a non-blocking async call and so does not ensure completion! **/
@@ -125,7 +138,7 @@ public:
 	* Return the bytes of a completed read request. Not legal to call unless the request is complete.
 	* @return Returned memory block which if non-null contains the bytes read. Caller owns the memory block and must call FMemory::Free on it when done. Can be null if the file was not found or could not be read or the request was cancelled, or the request had AIOP_FLAG_PRECACHE.
 	**/
-	FORCEINLINE uint8* GetReadResults() TSAN_SAFE
+	FORCEINLINE uint8* GetReadResults()
 	{
 		check(bDataIsReady && !bSizeRequest);
 		uint8* Result = Memory;
@@ -135,6 +148,11 @@ public:
 		}
 		else
 		{
+			if (Memory && !bUserSuppliedMemory)
+			{
+				ReleaseMemoryOwnershipImpl();
+			}
+
 			Memory = nullptr;
 		}
 		return Result;
@@ -151,7 +169,14 @@ protected:
 	/** Cancel the request. This is a non-blocking async call and so does not ensure completion! **/
 	virtual void CancelImpl() = 0;
 
-	void SetDataComplete() TSAN_SAFE
+	/** Transfer ownership of Memory from the async request to the outside caller (called in response to GetReadResults).
+	  * It's only relevant to Read requests, in which case the most common use is to update (decrease) the STAT_AsyncFileMemory
+	  * stat which is typically incremented when async requests allocate Memory.
+	  * It doesn't play any role in Size requests, so it may be left empty for them.
+	  */
+	virtual void ReleaseMemoryOwnershipImpl() = 0;
+
+	void SetDataComplete()
 	{
 		bDataIsReady = true;
 		FPlatformMisc::MemoryBarrier();
@@ -162,20 +187,20 @@ protected:
 		FPlatformMisc::MemoryBarrier();
 	}
 
-	void SetAllComplete() TSAN_SAFE
+	void SetAllComplete()
 	{
 		bCompleteAndCallbackCalled = true;
 		FPlatformMisc::MemoryBarrier();
 	}
 
-	void SetComplete() TSAN_SAFE
+	void SetComplete()
 	{
 		SetDataComplete();
 		SetAllComplete();
 	}
 };
 
-class CORE_API IAsyncReadFileHandle
+class IAsyncReadFileHandle
 {
 public:
 	IAsyncReadFileHandle()

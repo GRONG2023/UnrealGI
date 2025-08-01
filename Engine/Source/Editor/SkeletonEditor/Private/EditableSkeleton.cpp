@@ -5,9 +5,10 @@
 #include "Misc/MessageDialog.h"
 #include "Misc/FeedbackContext.h"
 #include "Modules/ModuleManager.h"
+#include "UObject/AssetRegistryTagsContext.h"
 #include "UObject/UObjectHash.h"
 #include "UObject/UObjectIterator.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "EdGraph/EdGraphSchema.h"
 #include "Animation/AnimSequenceBase.h"
 #include "Animation/AnimSequence.h"
@@ -24,8 +25,10 @@
 #include "SBlendProfilePicker.h"
 #include "AssetNotifications.h"
 #include "BlueprintActionDatabase.h"
-#include "ARFilter.h"
-#include "AssetRegistryModule.h"
+#include "IAssetFamily.h"
+#include "PersonaModule.h"
+#include "AssetRegistry/ARFilter.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "SSkeletonWidget.h"
 #include "Engine/DataAsset.h"
 #include "Animation/PreviewCollectionInterface.h"
@@ -132,12 +135,17 @@ private:
 FEditableSkeleton::FEditableSkeleton(USkeleton* InSkeleton)
 	: Skeleton(InSkeleton)
 {
-	Skeleton->CollectAnimationNotifies();
+	Skeleton->SetFlags(RF_Transactional);
 }
 
 const USkeleton& FEditableSkeleton::GetSkeleton() const
 {
 	return *Skeleton;
+}
+
+bool FEditableSkeleton::IsSkeletonValid() const
+{
+	return Skeleton != nullptr;
 }
 
 const TArray<class UBlendProfile*>& FEditableSkeleton::GetBlendProfiles() const
@@ -165,8 +173,22 @@ void FEditableSkeleton::RemoveBlendProfile(UBlendProfile* InBlendProfile)
 
 		Skeleton->Modify();
 		Skeleton->BlendProfiles.Remove(InBlendProfile);
-		InBlendProfile->MarkPendingKill();
+		InBlendProfile->MarkAsGarbage();
 	}
+}
+
+UBlendProfile* FEditableSkeleton::RenameBlendProfile(const FName& InBlendProfileName, const FName& InNewBlendProfileName)
+{
+	FScopedTransaction Transaction(LOCTEXT("RenameBlendProfile", "Rename Blend Profile"));
+
+	UBlendProfile* Profile = Skeleton->RenameBlendProfile(InBlendProfileName, InNewBlendProfileName);
+	
+	if (Profile == nullptr)
+	{
+		Transaction.Cancel();
+	}
+
+	return Profile;
 }
 
 void FEditableSkeleton::SetBlendProfileScale(const FName& InBlendProfileName, const FName& InBoneName, float InNewScale, bool bInRecurse)
@@ -180,6 +202,30 @@ void FEditableSkeleton::SetBlendProfileScale(const FName& InBlendProfileName, co
 		BlendProfile->Modify();
 		const int32 BoneIndex = Skeleton->GetReferenceSkeleton().FindBoneIndex(InBoneName);
 		BlendProfile->SetBoneBlendScale(BoneIndex, InNewScale, bInRecurse, true);
+	}
+}
+
+void FEditableSkeleton::SetBlendProfileMode(FName InBlendProfileName, EBlendProfileMode ProfileMode)
+{
+	UBlendProfile* BlendProfile = GetBlendProfile(InBlendProfileName);
+	if (BlendProfile)
+	{
+		FScopedTransaction Transaction(LOCTEXT("SetBlendProfileMode", "Set Blend Profile Mode"));
+
+		const bool bWasBlendMask = BlendProfile->IsBlendMask();
+		BlendProfile->SetFlags(RF_Transactional);
+		BlendProfile->Modify();
+		BlendProfile->Mode = ProfileMode;
+		const bool bIsBlendMask = BlendProfile->IsBlendMask();
+		// Re-set entry indices from the end to properly handle different default values when changing from/to blend mask
+		if (bWasBlendMask != bIsBlendMask)
+		{
+			for (int32 EntryIndex = BlendProfile->GetNumBlendEntries() - 1; EntryIndex >= 0; --EntryIndex)
+			{
+				const FBlendProfileBoneEntry& Entry = BlendProfile->ProfileEntries[EntryIndex];
+				BlendProfile->SetBoneBlendScale(Entry.BoneReference.BoneName, Entry.BlendScale);
+			}
+		}
 	}
 }
 
@@ -211,7 +257,7 @@ void FEditableSkeleton::RefreshBoneTree()
 
 bool FEditableSkeleton::DoesSocketAlreadyExist(const USkeletalMeshSocket* InSocket, const FText& InSocketName, ESocketParentType SocketParentType, USkeletalMesh* InSkeletalMesh) const
 {
-	TArray<USkeletalMeshSocket*>* SocketArrayPtr = nullptr;
+	TArray<TObjectPtr<USkeletalMeshSocket>>* SocketArrayPtr = nullptr;
 	if (SocketParentType == ESocketParentType::Mesh && InSkeletalMesh)
 	{
 		SocketArrayPtr = &InSkeletalMesh->GetMeshOnlySocketList();
@@ -237,112 +283,13 @@ bool FEditableSkeleton::DoesSocketAlreadyExist(const USkeletalMeshSocket* InSock
 	return false;
 }
 
-bool FEditableSkeleton::AddSmartname(const FName& InContainerName, const FName& InNewName, FSmartName& OutSmartName)
-{
-	if (const FSmartNameMapping* NameMapping = Skeleton->GetSmartNameContainer(InContainerName))
-	{
-		return Skeleton->AddSmartNameAndModify(InContainerName, InNewName, OutSmartName);
-	}
-
-	return false;
-}
-
-void FEditableSkeleton::RenameSmartname(const FName InContainerName, SmartName::UID_Type InNameUid, const FName InNewName)
-{
-	FSmartName CurveToRename;
-	if (!Skeleton->GetSmartNameByUID(USkeleton::AnimCurveMappingName, InNameUid, CurveToRename))
-	{
-		return; //Could not get existing smart name
-	}
-
-	const FSmartNameMapping* Mapping = Skeleton->GetSmartNameContainer(InContainerName);
-	if (!Mapping || Mapping->Exists(InNewName))
-	{
-		return; // Name already exists
-	}
-
-	FText Title = LOCTEXT("RenameCurveDialogTitle", "Confirm Rename");
-	FText ConfirmMessage = LOCTEXT("RenameCurveMessage", "Renaming a curve will necessitate loading and modifying animations and pose assets that use this curve. This could be a slow process.\n\nContinue?");
-
-	if (FMessageDialog::Open(EAppMsgType::YesNo, ConfirmMessage, &Title) == EAppReturnType::Yes)
-	{
-		TArray<FAssetData> AnimationAssets;
-
-		TArray<FName> Names = { CurveToRename.DisplayName };
-		GetAssetsContainingCurves(InContainerName, Names, AnimationAssets);
-
-		// AnimationAssets now only contains assets that are using the selected curve(s)
-		if (AnimationAssets.Num() > 0)
-		{
-			TArray<UAnimSequence*> SequencesToRecompress;
-			SequencesToRecompress.Reserve(AnimationAssets.Num());
-
-			// Proceed to delete the curves
-			GWarn->BeginSlowTask(FText::Format(LOCTEXT("RenameCurvesTaskDesc", "Renaming curve for skeleton {0}"), FText::FromString(Skeleton->GetName())), true);
-			FScopedTransaction Transaction(LOCTEXT("RenameCurvesTransactionName", "Rename skeleton curve"));
-
-			// Remove curves from animation assets
-			for (FAssetData& Data : AnimationAssets)
-			{
-				UObject* Asset = Data.GetAsset();
-
-				if(UAnimSequenceBase* SequenceBase = Cast<UAnimSequenceBase>(Asset))
-				{
-					SequenceBase->Modify();
-
-					if (FAnimCurveBase* CurrentCurveData = SequenceBase->RawCurveData.GetCurveData(CurveToRename.UID))
-					{
-						CurrentCurveData->Name.DisplayName = InNewName;
-						SequenceBase->MarkRawDataAsModified();
-						if (UAnimSequence* Seq = Cast<UAnimSequence>(SequenceBase))
-						{
-							SequencesToRecompress.Add(Seq);
-
-							Seq->ClearCompressedCurveData();
-						}
-					}
-				}
-				else if (UPoseAsset* PoseAsset = Cast<UPoseAsset>(Asset))
-				{
-					PoseAsset->Modify();
-
-					PoseAsset->RenameSmartName(CurveToRename.DisplayName, InNewName);
-				}
-			}
-			GWarn->EndSlowTask();
-
-			GWarn->BeginSlowTask(LOCTEXT("RebuildingAnimations", "Rebaking/compressing modified animations"), true);
-
-			//Make sure skeleton is correct before compression 
-
-			Skeleton->RenameSmartnameAndModify(InContainerName, InNameUid, InNewName);
-
-			// Rebake/compress the animations
-			for (UAnimSequence* Seq : SequencesToRecompress)
-			{
-				GWarn->StatusUpdate(1, 2, FText::Format(LOCTEXT("RebuildingAnimationsStatus", "Rebuilding {0}"), FText::FromString(Seq->GetName())));
-				Seq->RequestSyncAnimRecompression();
-			}
-
-			GWarn->EndSlowTask();
-		}
-		else
-		{
-			Skeleton->RenameSmartnameAndModify(InContainerName, InNameUid, InNewName);
-		}
-
-		OnSmartNameChanged.Broadcast(InContainerName);
-	}
-
-}
-
 void FEditableSkeleton::GetAssetsContainingCurves(const FName& InContainerName, const TArray<FName>& InNames, TArray<FAssetData>& OutAssets) const
 {
 	FAssetData SkeletonData(Skeleton);
 	const FString CurrentSkeletonName = SkeletonData.GetExportTextName();
 
 	FAssetRegistryModule& AssetModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-	AssetModule.Get().GetAssetsByClass(UAnimationAsset::StaticClass()->GetFName(), OutAssets, true);
+	AssetModule.Get().GetAssetsByClass(UAnimationAsset::StaticClass()->GetClassPathName(), OutAssets, true);
 
 	GWarn->BeginSlowTask(LOCTEXT("CollectAnimationsTaskDesc", "Collecting assets..."), true);
 
@@ -362,14 +309,10 @@ void FEditableSkeleton::GetAssetsContainingCurves(const FName& InContainerName, 
 				// using the selected name. We only load what we have to here.
 				UObject* Asset = Data.GetAsset();
 				check(Asset);
-				TArray<UObject::FAssetRegistryTag> Tags;
-				Asset->GetAssetRegistryTags(Tags);
+				FAssetRegistryTagsContextData TagsContext(Asset, EAssetRegistryTagsCaller::Uncategorized);
+				Asset->GetAssetRegistryTags(TagsContext);
 
-				UObject::FAssetRegistryTag* CurveTag = Tags.FindByPredicate([](const UObject::FAssetRegistryTag& InTag)
-				{
-					return InTag.Name == USkeleton::CurveNameTag;
-				});
-				
+				UObject::FAssetRegistryTag* CurveTag = TagsContext.Tags.Find(USkeleton::CurveNameTag);
 				if (CurveTag)
 				{
 					CurveData = CurveTag->Value;
@@ -395,134 +338,11 @@ void FEditableSkeleton::GetAssetsContainingCurves(const FName& InContainerName, 
 
 		if (!bAssetContainsRemovableCurves)
 		{
-			OutAssets.RemoveAtSwap(Idx,1,false);
+			OutAssets.RemoveAtSwap(Idx,1,EAllowShrinking::No);
 		}
 	}
 
 	GWarn->EndSlowTask();
-}
-
-void FEditableSkeleton::RemoveSmartnamesAndFixupAnimations(const FName& InContainerName, const TArray<FName>& InNames)
-{
-	FText Title = LOCTEXT("RemoveCurveInitialDialogTitle", "Confirm Remove");
-	FText ConfirmMessage = LOCTEXT("RemoveCurveInitialDialogMessage", "Removing curves will necessitate loading and modifying animations and pose assets that use these curves. This could be a slow process.\n\nContinue?");
-
-	if (FMessageDialog::Open(EAppMsgType::YesNo, ConfirmMessage, &Title) != EAppReturnType::Yes)
-	{
-		return;
-	}
-
-	TArray<FAssetData> AnimationAssets;
-	GetAssetsContainingCurves(InContainerName, InNames, AnimationAssets);
-
-	// AnimationAssets now only contains assets that are using the selected curve(s)
-	if (AnimationAssets.Num() > 0)
-	{
-		FString AssetMessage = LOCTEXT("DeleteCurveMessage", "Deleting curves will:\n\nRemove the curves from Animations and PoseAssets\nRemove poses using that curve name from PoseAssets.\n\nThe following assets will be modified. Continue?\n\n").ToString();
-
-		AnimationAssets.Sort([&](const FAssetData& A, const FAssetData& B)
-		{ 
-			if (A.AssetClass == B.AssetClass)
-			{
-				return A.AssetName.LexicalLess(B.AssetName);
-			}
-			return A.AssetClass.LexicalLess(B.AssetClass);
-		});
-
-		for (FAssetData& Data : AnimationAssets)
-		{
-			AssetMessage += Data.AssetName.ToString() + " (" + Data.AssetClass.ToString() + ")\n";
-		}
-
-		FText AssetTitleText = LOCTEXT("DeleteCurveDialogTitle", "Confirm Deletion");
-		FText AssetMessageText = FText::FromString(AssetMessage);
-
-		if (FMessageDialog::Open(EAppMsgType::YesNo, AssetMessageText, &AssetTitleText) == EAppReturnType::Yes)
-		{
-			// Proceed to delete the curves
-			GWarn->BeginSlowTask(FText::Format(LOCTEXT("DeleteCurvesTaskDesc", "Deleting curve from skeleton {0}"), FText::FromString(Skeleton->GetName())), true);
-			FScopedTransaction Transaction(LOCTEXT("DeleteCurvesTransactionName", "Delete skeleton curve"));
-
-			// Remove curves from animation assets
-			for (FAssetData& Data : AnimationAssets)
-			{
-				UObject* Asset = Data.GetAsset();
-
-				if(UAnimSequenceBase* Sequence = Cast<UAnimSequenceBase>(Asset))
-				{
-					USkeleton* MySkeleton = Sequence->GetSkeleton();
-					Sequence->Modify(true);
-					for (FName Name : InNames)
-					{
-						FSmartName CurveToDelete;
-						if (MySkeleton->GetSmartNameByName(USkeleton::AnimCurveMappingName, Name, CurveToDelete))
-						{
-							Sequence->RawCurveData.DeleteCurveData(CurveToDelete);
-						}
-					}
-					Sequence->MarkRawDataAsModified();
-				}
-				else if (UPoseAsset* PoseAsset = Cast<UPoseAsset>(Asset))
-				{
-					PoseAsset->Modify();
-					PoseAsset->RemoveSmartNames(InNames);
-				}
-			}
-			GWarn->EndSlowTask();
-
-			GWarn->BeginSlowTask(LOCTEXT("RebuildingAnimations", "Rebaking/compressing modified animations"), true);
-
-			// Rebake/compress the animations
-			for (TObjectIterator<UAnimSequence> It; It; ++It)
-			{
-				UAnimSequence* Seq = *It;
-
-				GWarn->StatusUpdate(1, 2, FText::Format(LOCTEXT("RebuildingAnimationsStatus", "Rebuilding {0}"), FText::FromString(Seq->GetName())));
-				Seq->RequestSyncAnimRecompression();
-			}
-			GWarn->EndSlowTask();
-
-			// Remove names from skeleton
-			Skeleton->RemoveSmartnamesAndModify(InContainerName, InNames);
-		}
-	}
-	else if(InNames.Num() > 0)
-	{
-		FScopedTransaction Transaction(LOCTEXT("DeleteCurvesTransactionName", "Delete skeleton curve"));
-
-		// Remove names from skeleton
-		Skeleton->RemoveSmartnamesAndModify(InContainerName, InNames);	
-	}
-
-	OnSmartNameChanged.Broadcast(InContainerName);
-}
-
-void FEditableSkeleton::SetCurveMetaDataMaterial(const FSmartName& CurveName, bool bOverrideMaterial)
-{
-	Skeleton->Modify();
-	FCurveMetaData* CurveMetaData = Skeleton->GetCurveMetaData(CurveName);
-	if (CurveMetaData)
-	{
-		// override curve data
-		CurveMetaData->Type.bMaterial = !!bOverrideMaterial;
-	}
-}
-
-void FEditableSkeleton::SetCurveMetaBoneLinks(const FSmartName& CurveName, TArray<FBoneReference>& BoneLinks, uint8 InMaxLOD)
-{
-	Skeleton->Modify();
-	FCurveMetaData* CurveMetaData = Skeleton->GetCurveMetaData(CurveName);
-	if (CurveMetaData)
-	{
-		// override curve data
-		CurveMetaData->LinkedBones = BoneLinks;
-		CurveMetaData->MaxLOD = InMaxLOD;
-		//  initialize to this skeleton
-		for (FBoneReference& BoneReference : CurveMetaData->LinkedBones)
-		{
-			BoneReference.Initialize(Skeleton);
-		}
-	}
 }
 
 FName FEditableSkeleton::GenerateUniqueSocketName( FName InName, USkeletalMesh* InSkeletalMesh )
@@ -644,6 +464,14 @@ void FEditableSkeleton::SetSocketParent(const FName& SocketName, const FName& Ne
 
 		Socket->BoneName = NewParentName;
 
+		for (TWeakPtr<SSkeletonTree> SkeletonTree : SkeletonTrees)
+		{
+			if (SkeletonTree.IsValid())
+			{
+				SkeletonTree.Pin()->PostSetSocketParent();
+			}
+		}
+
 		OnTreeRefresh.Broadcast();
 	}
 }
@@ -764,7 +592,7 @@ void FEditableSkeleton::HandleRemoveAllAssets(TSharedPtr<IPersonaPreviewScene> I
 
 	DeleteAttachedObjects(Skeleton->PreviewAttachedAssetContainer, InPreviewScene);
 
-	USkeletalMesh* SkeletalMesh = InPreviewScene->GetPreviewMeshComponent()->SkeletalMesh;
+	USkeletalMesh* SkeletalMesh = InPreviewScene->GetPreviewMeshComponent()->GetSkeletalMeshAsset();
 	if (SkeletalMesh)
 	{
 		SkeletalMesh->Modify();
@@ -878,7 +706,7 @@ void FEditableSkeleton::HandleAttachAssets(const TArray<UObject*>& InObjects, co
 
 		if (bAttachToMesh)
 		{
-			USkeletalMesh* SkeletalMesh = InPreviewScene->GetPreviewMeshComponent()->SkeletalMesh;
+			USkeletalMesh* SkeletalMesh = InPreviewScene->GetPreviewMeshComponent()->GetSkeletalMeshAsset();
 			if (SkeletalMesh != nullptr)
 			{
 				FScopedTransaction Transaction(LOCTEXT("DragDropAttachMeshUndo", "Attach Assets to Mesh"));
@@ -925,7 +753,7 @@ void FEditableSkeleton::HandleDeleteAttachedAssets(const TArray<FPreviewAttached
 	if (InAttachedObjects.Num() > 0)
 	{
 		Skeleton->Modify();
-		USkeletalMesh* SkeletalMesh = InPreviewScene->GetPreviewMeshComponent()->SkeletalMesh;
+		USkeletalMesh* SkeletalMesh = InPreviewScene->GetPreviewMeshComponent()->GetSkeletalMeshAsset();
 		if (SkeletalMesh != nullptr)
 		{
 			SkeletalMesh->Modify();
@@ -961,7 +789,7 @@ void FEditableSkeleton::HandleDeleteSockets(const TArray<FSelectedSocketInfo>& I
 		}
 		else
 		{
-			USkeletalMesh* SkeletalMesh = InPreviewScene->GetPreviewMeshComponent()->SkeletalMesh;
+			USkeletalMesh* SkeletalMesh = InPreviewScene->GetPreviewMeshComponent()->GetSkeletalMeshAsset();
 			if (SkeletalMesh != nullptr)
 			{
 				UObject* Object = SkeletalMesh->GetPreviewAttachedAssetContainer().GetAttachedObjectByAttachName(SocketName);
@@ -1062,14 +890,17 @@ TSharedRef<SWidget> FEditableSkeleton::CreateBlendProfilePicker(const FBlendProf
 		.OnBlendProfileSelected(InArgs.OnBlendProfileSelected)
 		.AllowNew(InArgs.bAllowNew)
 		.AllowClear(InArgs.bAllowClear)
-		.AllowRemove(InArgs.bAllowRemove);
+		.AllowModify(InArgs.bAllowModify)
+		.SupportedBlendProfileModes(InArgs.SupportedBlendProfileModes)
+		.PropertyHandle(InArgs.PropertyHandle);
 
 	BlendProfilePickers.Add(BlendProfilePicker);
 	return BlendProfilePicker;
 }
 
-int32 FEditableSkeleton::DeleteAnimNotifies(const TArray<FName>& InNotifyNames)
+int32 FEditableSkeleton::DeleteAnimNotifies(const TArray<FName>& InNotifyNames, bool bDeleteFromAnimations)
 {
+	int32 NumAnimationsModified = 0;
 	const FScopedTransaction Transaction(LOCTEXT("DeleteAnimNotify", "Delete Anim Notify"));
 	Skeleton->Modify();
 
@@ -1078,42 +909,69 @@ int32 FEditableSkeleton::DeleteAnimNotifies(const TArray<FName>& InNotifyNames)
 		Skeleton->AnimationNotifies.Remove(Notify);
 	}
 
-	TArray<FAssetData> CompatibleAnimSequences;
-	GetCompatibleAnimSequences(CompatibleAnimSequences);
-
-	int32 NumAnimationsModified = 0;
-
-	for (int32 AssetIndex = 0; AssetIndex < CompatibleAnimSequences.Num(); ++AssetIndex)
+	if(bDeleteFromAnimations)
 	{
-		const FAssetData& PossibleAnimSequence = CompatibleAnimSequences[AssetIndex];
-		if(UObject* LoadedAsset = PossibleAnimSequence.GetAsset())
-		{
-			UAnimSequenceBase* Sequence = CastChecked<UAnimSequenceBase>(LoadedAsset);
+		TArray<FAssetData> CompatibleAnimSequences;
+		GetCompatibleAnimSequences(CompatibleAnimSequences);
 
-			if (Sequence->RemoveNotifies(InNotifyNames))
+		for (int32 AssetIndex = 0; AssetIndex < CompatibleAnimSequences.Num(); ++AssetIndex)
+		{
+			const FAssetData& PossibleAnimSequence = CompatibleAnimSequences[AssetIndex];
+			if(UObject* LoadedAsset = PossibleAnimSequence.GetAsset())
 			{
-				++NumAnimationsModified;
+				UAnimSequenceBase* Sequence = CastChecked<UAnimSequenceBase>(LoadedAsset);
+
+				if (Sequence->RemoveNotifies(InNotifyNames))
+				{
+					++NumAnimationsModified;
+				}
 			}
 		}
 	}
 
-	FBlueprintActionDatabase::Get().RefreshAssetActions(Skeleton);
-	
+	FBlueprintActionDatabase& ActionDatabase = FBlueprintActionDatabase::Get();
+	ActionDatabase.ClearAssetActions(UAnimBlueprint::StaticClass());
+	ActionDatabase.RefreshClassActions(UAnimBlueprint::StaticClass());
 	OnNotifiesChanged.Broadcast();
 
 	return NumAnimationsModified;
 }
 
-void FEditableSkeleton::DeleteSyncMarkers(const TArray<FName>& InSyncMarkerNames)
+int32 FEditableSkeleton::DeleteSyncMarkers(const TArray<FName>& InSyncMarkerNames, bool bDeleteFromAnimations)
 {
+	int32 NumAnimationsModified = 0;
 	const FScopedTransaction Transaction(LOCTEXT("DeleteSyncMarkers", "Delete Sync Markers"));
-
 	Skeleton->Modify();
 
 	for (FName Marker : InSyncMarkerNames)
 	{
 		Skeleton->RemoveMarkerName(Marker);
 	}
+
+	if(bDeleteFromAnimations)
+	{
+		TArray<FAssetData> CompatibleAnimSequences;
+		GetCompatibleAnimSequences(CompatibleAnimSequences);
+
+		for (int32 AssetIndex = 0; AssetIndex < CompatibleAnimSequences.Num(); ++AssetIndex)
+		{
+			const FAssetData& PossibleAnimSequence = CompatibleAnimSequences[AssetIndex];
+			if(UObject* LoadedAsset = PossibleAnimSequence.GetAsset())
+			{
+				if(UAnimSequence* Sequence = Cast<UAnimSequence>(LoadedAsset))
+				{
+					if (Sequence->RemoveSyncMarkers(InSyncMarkerNames))
+					{
+						++NumAnimationsModified;
+					}
+				}
+			}
+		}
+	}
+	
+	OnNotifiesChanged.Broadcast();
+
+	return NumAnimationsModified;
 }
 
 void FEditableSkeleton::AddNotify(FName NewName)
@@ -1122,7 +980,9 @@ void FEditableSkeleton::AddNotify(FName NewName)
 	Skeleton->Modify();
 	Skeleton->AddNewAnimationNotify(NewName);
 
-	FBlueprintActionDatabase::Get().RefreshAssetActions(Skeleton);
+	FBlueprintActionDatabase& ActionDatabase = FBlueprintActionDatabase::Get();
+	ActionDatabase.ClearAssetActions(UAnimBlueprint::StaticClass());
+	ActionDatabase.RefreshClassActions(UAnimBlueprint::StaticClass());
 	OnNotifiesChanged.Broadcast();
 }
 
@@ -1131,53 +991,115 @@ void FEditableSkeleton::AddSyncMarker(FName NewName)
 	const FScopedTransaction Transaction(LOCTEXT("AddNewSyncMarkerToSkeleton", "Add New Sync Marker To Skeleton"));
 	Skeleton->Modify();
 	Skeleton->RegisterMarkerName(NewName);
+
+	OnNotifiesChanged.Broadcast();
 }
 
-int32 FEditableSkeleton::RenameNotify(const FName NewName, const FName OldName)
+int32 FEditableSkeleton::RenameNotify(const FName NewName, const FName OldName, bool bRenameInAnimations)
 {
-	const FScopedTransaction Transaction(LOCTEXT("RenameAnimNotify", "Rename Anim Notify"));
-	Skeleton->Modify();
-
-	int32 Index = Skeleton->AnimationNotifies.IndexOfByKey(OldName);
-	Skeleton->AnimationNotifies[Index] = NewName;
-
-	TArray<FAssetData> CompatibleAnimSequences;
-	GetCompatibleAnimSequences(CompatibleAnimSequences);
-
 	int32 NumAnimationsModified = 0;
-
-	for (int32 AssetIndex = 0; AssetIndex < CompatibleAnimSequences.Num(); ++AssetIndex)
+	int32 Index = Skeleton->AnimationNotifies.IndexOfByKey(OldName);
+	if(Index != INDEX_NONE)
 	{
-		const FAssetData& PossibleAnimSequence = CompatibleAnimSequences[AssetIndex];
-		if(UObject* Asset = PossibleAnimSequence.GetAsset())
-		{
-			UAnimSequenceBase* Sequence = Cast<UAnimSequenceBase>(Asset);
+		const FScopedTransaction Transaction(LOCTEXT("RenameAnimNotify", "Rename Anim Notify"));
+		Skeleton->Modify();
 
-			bool SequenceModified = false;
-			for (int32 NotifyIndex = Sequence->Notifies.Num() - 1; NotifyIndex >= 0; --NotifyIndex)
+		Skeleton->AnimationNotifies[Index] = NewName;
+
+		if(bRenameInAnimations)
+		{
+			TArray<FAssetData> CompatibleAnimSequences;
+			GetCompatibleAnimSequences(CompatibleAnimSequences);
+			
+			for (int32 AssetIndex = 0; AssetIndex < CompatibleAnimSequences.Num(); ++AssetIndex)
 			{
-				FAnimNotifyEvent& AnimNotify = Sequence->Notifies[NotifyIndex];
-				if (OldName == AnimNotify.NotifyName)
+				const FAssetData& PossibleAnimSequence = CompatibleAnimSequences[AssetIndex];
+				if(UObject* Asset = PossibleAnimSequence.GetAsset())
 				{
-					if (!SequenceModified)
+					UAnimSequenceBase* Sequence = Cast<UAnimSequenceBase>(Asset);
+
+					bool SequenceModified = false;
+					for (int32 NotifyIndex = Sequence->Notifies.Num() - 1; NotifyIndex >= 0; --NotifyIndex)
 					{
-						Sequence->Modify();
-						++NumAnimationsModified;
-						SequenceModified = true;
+						FAnimNotifyEvent& AnimNotify = Sequence->Notifies[NotifyIndex];
+						if (OldName == AnimNotify.NotifyName)
+						{
+							if (!SequenceModified)
+							{
+								Sequence->Modify();
+								++NumAnimationsModified;
+								SequenceModified = true;
+							}
+							AnimNotify.NotifyName = NewName;
+						}
 					}
-					AnimNotify.NotifyName = NewName;
+
+					if (SequenceModified)
+					{
+						Sequence->MarkPackageDirty();
+					}
 				}
 			}
-
-			if (SequenceModified)
-			{
-				Sequence->MarkPackageDirty();
-			}
 		}
+
+		FBlueprintActionDatabase& ActionDatabase = FBlueprintActionDatabase::Get();
+		ActionDatabase.ClearAssetActions(UAnimBlueprint::StaticClass());
+		ActionDatabase.RefreshClassActions(UAnimBlueprint::StaticClass());
+		OnNotifiesChanged.Broadcast();
 	}
 
-	FBlueprintActionDatabase::Get().RefreshAssetActions(Skeleton);
-	OnNotifiesChanged.Broadcast();
+	return NumAnimationsModified;
+}
+
+int32 FEditableSkeleton::RenameSyncMarker(const FName NewName, const FName OldName, bool bRenameInAnimations)
+{
+	int32 NumAnimationsModified = 0;
+	int32 Index = Skeleton->ExistingMarkerNames.IndexOfByKey(OldName);
+	if(Index != INDEX_NONE)
+	{
+		const FScopedTransaction Transaction(LOCTEXT("RenameSyncMarker", "Rename Sync Marker"));
+		Skeleton->Modify();
+		Skeleton->ExistingMarkerNames[Index] = NewName;
+
+		if(bRenameInAnimations)
+		{
+			TArray<FAssetData> CompatibleAnimSequences;
+			GetCompatibleAnimSequences(CompatibleAnimSequences);
+
+			for (int32 AssetIndex = 0; AssetIndex < CompatibleAnimSequences.Num(); ++AssetIndex)
+			{
+				const FAssetData& PossibleAnimSequence = CompatibleAnimSequences[AssetIndex];
+				if(UObject* Asset = PossibleAnimSequence.GetAsset())
+				{
+					if(UAnimSequence* Sequence = Cast<UAnimSequence>(Asset))
+					{
+						bool SequenceModified = false;
+						for (int32 MarkerIndex = Sequence->AuthoredSyncMarkers.Num() - 1; MarkerIndex >= 0; --MarkerIndex)
+						{
+							FAnimSyncMarker& AnimSyncMarker = Sequence->AuthoredSyncMarkers[MarkerIndex];
+							if (OldName == AnimSyncMarker.MarkerName)
+							{
+								if (!SequenceModified)
+								{
+									Sequence->Modify();
+									++NumAnimationsModified;
+									SequenceModified = true;
+								}
+								AnimSyncMarker.MarkerName = NewName;
+							}
+						}
+
+						if (SequenceModified)
+						{
+							Sequence->MarkPackageDirty();
+						}
+					}
+				}
+			}
+		}
+
+		OnNotifiesChanged.Broadcast();
+	}
 
 	return NumAnimationsModified;
 }
@@ -1196,7 +1118,7 @@ void FEditableSkeleton::GetCompatibleAnimSequences(TArray<struct FAssetData>& Ou
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 
 	TArray<FAssetData> AssetDataList;
-	AssetRegistryModule.Get().GetAssetsByClass(UAnimSequenceBase::StaticClass()->GetFName(), AssetDataList, true);
+	AssetRegistryModule.Get().GetAssetsByClass(UAnimSequenceBase::StaticClass()->GetClassPathName(), AssetDataList, true);
 
 	OutAssets.Empty(AssetDataList.Num());
 
@@ -1279,6 +1201,14 @@ void FEditableSkeleton::RenameRetargetSource(const FName InOldName, const FName 
 		TagsAndValues.Add(GET_MEMBER_NAME_CHECKED(UAnimSequence, RetargetSource), InOldName.ToString());
 		AssetRegistryModule.Get().GetAssetsByTagValues(TagsAndValues, AssetList);
 
+		// This could get assets of different skeletons here, so trim them
+		const FString SkeletonName = FAssetData(Skeleton).GetExportTextName();
+		AssetList.RemoveAll([&SkeletonName](const FAssetData& InAssetData)
+		{
+			FString AssetSkeletonName = InAssetData.GetTagValueRef<FString>(TEXT("Skeleton"));
+			return AssetSkeletonName != SkeletonName;
+		});
+		
 		// ask users if they'd like to continue and/or fix up
 		if (AssetList.Num() > 0)
 		{
@@ -1376,6 +1306,14 @@ void FEditableSkeleton::DeleteRetargetSources(const TArray<FName>& InRetargetSou
 			TagsAndValues.Add(GET_MEMBER_NAME_CHECKED(UAnimSequence, RetargetSource), PoseFound->PoseName.ToString());
 			AssetRegistryModule.Get().GetAssetsByTagValues(TagsAndValues, AssetList);
 
+			// This could get assets of different skeletons here, so trim them
+			const FString SkeletonName = FAssetData(Skeleton).GetExportTextName();
+			AssetList.RemoveAll([&SkeletonName](const FAssetData& InAssetData)
+			{
+				FString AssetSkeletonName = InAssetData.GetTagValueRef<FString>(TEXT("Skeleton"));
+				return AssetSkeletonName != SkeletonName;
+			});
+			
 			// ask users if they'd like to continue and/or fix up
 			if (AssetList.Num() > 0)
 			{
@@ -1459,34 +1397,28 @@ void FEditableSkeleton::RefreshRetargetSources(const TArray<FName>& InRetargetSo
 	}
 }
 
-void FEditableSkeleton::RefreshRigConfig()
+void FEditableSkeleton::AddCompatibleSkeleton(const USkeleton* InCompatibleSkeleton)
 {
-	Skeleton->RefreshRigConfig();
-}
-
-void FEditableSkeleton::SetRigConfig(URig* InRig)
-{
-	const FScopedTransaction Transaction(LOCTEXT("RigAssetChanged", "Select Rig"));
-	Skeleton->Modify();
-	Skeleton->SetRigConfig(InRig);
-}
-
-void FEditableSkeleton::SetRigBoneMapping(const FName& InNodeName, const FName& InBoneName)
-{
-	const FScopedTransaction Transaction(LOCTEXT("BoneMappingChanged", "Change Bone Mapping"));
-	Skeleton->Modify();
-	Skeleton->SetRigBoneMapping(InNodeName, InBoneName);
-}
-
-void FEditableSkeleton::SetRigBoneMappings(const TMap<FName, FName>& InMappings)
-{
-	const FScopedTransaction Transaction(LOCTEXT("BoneMappingsChanged", "Change Bone Mappings"));
+	const FScopedTransaction Transaction(LOCTEXT("AddedCompatibleSkeletons", "Add Compatible Skeleton"));
 	Skeleton->Modify();
 
-	for (const TPair<FName, FName>& Mapping : InMappings)
-	{
-		Skeleton->SetRigBoneMapping(Mapping.Key, Mapping.Value);
-	}
+	Skeleton->AddCompatibleSkeleton(InCompatibleSkeleton);
+
+	// Inform asset families
+	FPersonaModule& PersonaModule = FModuleManager::LoadModuleChecked<FPersonaModule>("Persona");
+	PersonaModule.BroadcastAssetFamilyChange();
+}
+
+void FEditableSkeleton::RemoveCompatibleSkeleton(const USkeleton* InCompatibleSkeleton)
+{
+	const FScopedTransaction Transaction(LOCTEXT("RemoveCompatibleSkeletons", "Remove Compatible Skeleton"));
+	Skeleton->Modify();
+
+	Skeleton->RemoveCompatibleSkeleton(InCompatibleSkeleton);
+
+	// Inform asset families
+	FPersonaModule& PersonaModule = FModuleManager::LoadModuleChecked<FPersonaModule>("Persona");
+	PersonaModule.BroadcastAssetFamilyChange();
 }
 
 void FEditableSkeleton::RemoveUnusedBones()
@@ -1500,7 +1432,7 @@ void FEditableSkeleton::RemoveUnusedBones()
 	}
 
 	FARFilter Filter;
-	Filter.ClassNames.Add(USkeletalMesh::StaticClass()->GetFName());
+	Filter.ClassPaths.Add(USkeletalMesh::StaticClass()->GetClassPathName());
 
 	FString SkeletonString = FAssetData(Skeleton).GetExportTextName();
 	Filter.TagsAndValues.Add(USkeletalMesh::GetSkeletonMemberName(), SkeletonString);
@@ -1654,15 +1586,6 @@ void FEditableSkeleton::RenameSlotName(const FName InOldSlotName, const FName In
 	OnSlotsChanged.Broadcast();
 }
 
-FDelegateHandle FEditableSkeleton::RegisterOnSmartNameChanged(const FOnSmartNameChanged::FDelegate& InOnSmartNameChanged)
-{
-	return OnSmartNameChanged.Add(InOnSmartNameChanged);
-}
-
-void FEditableSkeleton::UnregisterOnSmartNameChanged(FDelegateHandle InHandle)
-{
-	OnSmartNameChanged.Remove(InHandle);
-}
 
 FDelegateHandle FEditableSkeleton::RegisterOnSlotsChanged(const FSimpleMulticastDelegate::FDelegate& InOnSlotsChanged)
 {

@@ -1,7 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/TriggerVolume.h"
+#include "Async/TaskGraphInterfaces.h"
 #include "Components/BrushComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(TriggerVolume)
 
 ATriggerVolume::ATriggerVolume(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -23,7 +26,7 @@ void ATriggerVolume::LoadedFromAnotherClass(const FName& OldClassName)
 {
 	Super::LoadedFromAnotherClass(OldClassName);
 
-	if(GetLinkerUE4Version() < VER_UE4_REMOVE_DYNAMIC_VOLUME_CLASSES)
+	if(GetLinkerUEVersion() < VER_UE4_REMOVE_DYNAMIC_VOLUME_CLASSES)
 	{
 		static FName DynamicTriggerVolume_NAME(TEXT("DynamicTriggerVolume"));
 
@@ -35,3 +38,4 @@ void ATriggerVolume::LoadedFromAnotherClass(const FName& OldClassName)
 }
 
 #endif
+

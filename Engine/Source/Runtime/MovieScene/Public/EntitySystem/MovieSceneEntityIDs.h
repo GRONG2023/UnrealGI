@@ -2,19 +2,22 @@
 
 #pragma once
 
-#include "CoreTypes.h"
 #include "Containers/BitArray.h"
-#include "Templates/TypeHash.h"
+#include "Containers/ContainerAllocationPolicies.h"
+#include "CoreTypes.h"
+#include "Misc/AssertionMacros.h"
 #include "Misc/Guid.h"
+#include "Templates/TypeHash.h"
+
+#include <initializer_list>
 
 namespace UE
 {
 namespace MovieScene
 {
 
-struct FComponentTypeID;
 class FEntityManager;
-
+struct FComponentTypeID;
 template<typename T> struct TComponentTypeID;
 
 /**
@@ -181,7 +184,7 @@ struct FComponentTypeID
 	static FComponentTypeID FromBitIndex(int32 BitIndex)
 	{
 		check( (BitIndex & 0xFFFF0000) == 0 );
-		return FComponentTypeID(BitIndex);
+		return FComponentTypeID((uint16)BitIndex);
 	}
 
 	template<typename T>

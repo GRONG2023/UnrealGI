@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 using AutomationTool;
+using EpicGames.BuildGraph;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -9,10 +10,11 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Xml;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 using UnrealBuildTool;
+using UnrealBuildBase;
 
-namespace BuildGraph.Tasks
+namespace AutomationTool.Tasks
 {
 	/// <summary>
 	/// Parameters for a copy task
@@ -48,7 +50,7 @@ namespace BuildGraph.Tasks
 	/// Renames a file, or group of files.
 	/// </summary>
 	[TaskElement("Rename", typeof(RenameTaskParameters))]
-	public class RenameTask : CustomTask
+	public class RenameTask : BgTaskImpl
 	{
 		/// <summary>
 		/// Parameters for this task
@@ -70,7 +72,7 @@ namespace BuildGraph.Tasks
 		/// <param name="Job">Information about the current job</param>
 		/// <param name="BuildProducts">Set of build products produced by this node.</param>
 		/// <param name="TagNameToFileSet">Mapping from tag names to the set of files they include</param>
-		public override void Execute(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
+		public override Task ExecuteAsync(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
 		{
 			// Get the pattern to match against. If it's a simple pattern (eg. *.cpp, Engine/Build/...), automatically infer the source wildcard
 			string FromPattern = Parameters.From;
@@ -110,7 +112,7 @@ namespace BuildGraph.Tasks
 			}
 
 			// Find the input files
-			HashSet<FileReference> InputFiles = ResolveFilespec(CommandUtils.RootDirectory, Parameters.Files, TagNameToFileSet);
+			HashSet<FileReference> InputFiles = ResolveFilespec(Unreal.RootDirectory, Parameters.Files, TagNameToFileSet);
 
 			// Find all the corresponding output files
 			Dictionary<FileReference, FileReference> RenameFiles = new Dictionary<FileReference, FileReference>();
@@ -143,6 +145,8 @@ namespace BuildGraph.Tasks
 			{
 				FindOrAddTagSet(TagNameToFileSet, TagName).UnionWith(RenameFiles.Values);
 			}
+
+			return Task.CompletedTask;
 		}
 
 		/// <summary>

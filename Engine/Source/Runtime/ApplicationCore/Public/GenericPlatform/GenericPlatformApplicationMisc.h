@@ -2,9 +2,23 @@
 
 #pragma once
 
+#include "Containers/UnrealString.h"
 #include "CoreTypes.h"
 #include "GenericPlatform/GenericApplication.h"
+#include "GenericPlatform/GenericApplicationMessageHandler.h"
 #include "HAL/IConsoleManager.h"
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
+#include "Templates/IsFloatingPoint.h"
+#include "Templates/UnrealTypeTraits.h"
+#include "Templates/Function.h"
+#include "Misc/EnumClassFlags.h"
+
+class FAutoConsoleVariableRef;
+class FFeedbackContext;
+class FOutputDeviceConsole;
+class FOutputDeviceError;
+class IPlatformInputDeviceMapper;
 
 /**
  * The accuracy when dealing with physical characteristics of the monitor/screen of the device we're running on.
@@ -16,15 +30,51 @@ enum class EScreenPhysicalAccuracy
 	Truth
 };
 
-struct APPLICATIONCORE_API FGenericPlatformApplicationMisc
+/**
+ * Callback for when FindInputDeviceForUserWithUI has completed
+ */
+struct FShowInputDeviceSelectorParams
 {
-	static void PreInit();
+	FInputDeviceId InputDeviceId;
+	FPlatformUserId PlatformUserId;
+};
+typedef TFunction<void(const FShowInputDeviceSelectorParams&)> FShowInputDeviceSelectorComplete;
 
-	static void Init();
+/**
+ * Callback for when ShowPlatformUserSelector has completed.
+ */
+struct FPlatformUserSelectionCompleteParams
+{
+	FPlatformUserId SelectedUserId;
+	bool bSuccess;
+};
+typedef TFunction<void(const FPlatformUserSelectionCompleteParams& Params)> FPlatformUserSelectionComplete;
 
-	static void PostInit();
+/*
+ * Options for ShowPlatformUserSelector. Not all platforms will support all flags
+ */
+enum class EPlatformUserSelectorFlags : uint8
+{
+	None                         = 0,
+	RequiresOnlineEnabledProfile = (1 << 1), // whether to only show profiles that have an online account
+	ShowSkipButton               = (1 << 2), // display a 'skip' button UI to be closed & return the initiating user
+	AllowGuests                  = (1 << 3), // temporary guest accounts, throwaways etc.
+	ShowNewUsersOnly             = (1 << 4), // do not show profiles that are already in-use by the title
 
-	static void TearDown();
+	Default                      = ShowSkipButton, // most commonly used options
+};
+ENUM_CLASS_FLAGS(EPlatformUserSelectorFlags);
+
+
+struct FGenericPlatformApplicationMisc
+{
+	static APPLICATIONCORE_API void PreInit();
+
+	static APPLICATIONCORE_API void Init();
+
+	static APPLICATIONCORE_API void PostInit();
+
+	static APPLICATIONCORE_API void TearDown();
 
 	/**
 	 * Load the preinit modules required by this platform, typically they are the renderer modules
@@ -43,36 +93,38 @@ struct APPLICATIONCORE_API FGenericPlatformApplicationMisc
 	/**
 	 * Creates a console output device for this platform. Should only be called once.
 	 */
-	static FOutputDeviceConsole* CreateConsoleOutputDevice();
+	static APPLICATIONCORE_API FOutputDeviceConsole* CreateConsoleOutputDevice();
 
 	/**
 	 * Gets a pointer to the platform error output device singleton.
 	 */
-	static FOutputDeviceError* GetErrorOutputDevice();
+	static APPLICATIONCORE_API FOutputDeviceError* GetErrorOutputDevice();
 
 	/**
 	 * Gets a pointer to the default platform feedback context implementation.
 	 */
-	static FFeedbackContext* GetFeedbackContext();
+	static APPLICATIONCORE_API FFeedbackContext* GetFeedbackContext();
+
+	/**
+	 * Gets a pointer to the default platform input device manager.
+	 */
+	static APPLICATIONCORE_API IPlatformInputDeviceMapper* CreatePlatformInputDeviceManager();
 
 	/**
 	 * Creates an application instance.
 	 */
-	static class GenericApplication* CreateApplication();
+	static APPLICATIONCORE_API class GenericApplication* CreateApplication();
 
 	/** Request application to minimize (goto background). **/
-	static void RequestMinimize();
+	static APPLICATIONCORE_API void RequestMinimize();
 
 	/** Returns true if the specified application has a visible window, and that window is active/has focus/is selected */
-	static bool IsThisApplicationForeground();	
+	static APPLICATIONCORE_API bool IsThisApplicationForeground();	
 
 	/**
 	* Returns whether the platform wants to use a touch screen for a virtual keyboard.
 	*/
-	static bool RequiresVirtualKeyboard()
-	{
-		return PLATFORM_HAS_TOUCH_MAIN_SCREEN;
-	}
+	static APPLICATIONCORE_API bool RequiresVirtualKeyboard();
 
 	/**
 	 *	Pumps Windows messages.
@@ -83,8 +135,8 @@ struct APPLICATIONCORE_API FGenericPlatformApplicationMisc
 	}
 
 	/**
-	 * Prevents screen-saver from kicking in by moving the mouse by 0 pixels. This works even on
-	 * Vista in the presence of a group policy for password protected screen saver.
+	 * Prevents screen-saver from kicking in by moving the mouse by 0 pixels. This works even
+	 * in the presence of a group policy for password protected screen saver.
 	 */
 	static void PreventScreenSaver()
 	{
@@ -125,7 +177,7 @@ struct APPLICATIONCORE_API FGenericPlatformApplicationMisc
 	 * @param	InGamma			Optional gamma correction to apply to the screen color
 	 * @return					The color of the pixel displayed at the chosen location
 	 */
-	static struct FLinearColor GetScreenPixelColor(const struct FVector2D& InScreenPos, float InGamma = 1.0f);
+	static APPLICATIONCORE_API struct FLinearColor GetScreenPixelColor(const FVector2D& InScreenPos, float InGamma = 1.0f);
 
 	/**
 	 * Searches for a window that matches the window name or the title starts with a particular text. When
@@ -161,7 +213,7 @@ struct APPLICATIONCORE_API FGenericPlatformApplicationMisc
 
 	/** @return true if the application is high dpi aware */
 
-	static bool IsHighDPIAwarenessEnabled();
+	static APPLICATIONCORE_API bool IsHighDPIAwarenessEnabled();
 
 	/*
 	 * UE expects mouse coordinates in screen space. Some platforms provides in client space. 
@@ -240,37 +292,100 @@ struct APPLICATIONCORE_API FGenericPlatformApplicationMisc
 	}
 				
 	/** Copies text to the operating system clipboard. */
-	static void ClipboardCopy(const TCHAR* Str);
+	static APPLICATIONCORE_API void ClipboardCopy(const TCHAR* Str);
 
 	/** Pastes in text from the operating system clipboard. */
-	static void ClipboardPaste(class FString& Dest);
+	static APPLICATIONCORE_API void ClipboardPaste(class FString& Dest);
 
 	/**
 	 * Gets the physical size of the screen if possible.  Some platforms lie, some platforms don't know.
 	 */
-	static EScreenPhysicalAccuracy GetPhysicalScreenDensity(int32& OutScreenDensity);
+	static APPLICATIONCORE_API EScreenPhysicalAccuracy GetPhysicalScreenDensity(int32& OutScreenDensity);
 
 	/**
 	 * Gets the physical size of the screen if possible.  Some platforms lie, some platforms don't know.
 	 */
-	static EScreenPhysicalAccuracy ComputePhysicalScreenDensity(int32& OutScreenDensity);
+	static APPLICATIONCORE_API EScreenPhysicalAccuracy ComputePhysicalScreenDensity(int32& OutScreenDensity);
 
 	/**
 	 * If we know or can approximate the pixel density of the screen we will convert the incoming inches
 	 * to pixels on the device.  If the accuracy is unknown OutPixels will be set to 0.
 	 */
-	static EScreenPhysicalAccuracy ConvertInchesToPixels(float Inches, float& OutPixels);
+	template<typename T, typename T2, TEMPLATE_REQUIRES(TIsFloatingPoint<T>::Value && TIsFloatingPoint<T2>::Value)>
+	static EScreenPhysicalAccuracy ConvertInchesToPixels(T Inches, T2& OutPixels)
+	{
+		int32 ScreenDensity = 0;
+		const EScreenPhysicalAccuracy Accuracy = GetPhysicalScreenDensity(ScreenDensity);
+
+		if (ScreenDensity != 0)
+		{
+			OutPixels = static_cast<T2>(Inches * ScreenDensity);
+		}
+		else
+		{
+			OutPixels = 0;
+		}
+
+		return Accuracy;
+	}
 
 	/**
 	 * If we know or can approximate the pixel density of the screen we will convert the incoming pixels
 	 * to inches on the device.  If the accuracy is unknown OutInches will be set to 0.
 	 */
-	static EScreenPhysicalAccuracy ConvertPixelsToInches(float Pixels, float& OutInches);
+	template<typename T, typename T2, TEMPLATE_REQUIRES(TIsFloatingPoint<T>::Value && TIsFloatingPoint<T2>::Value)>
+	static EScreenPhysicalAccuracy ConvertPixelsToInches(T Pixels, T2& OutInches)
+	{
+		int32 ScreenDensity = 0;
+		const EScreenPhysicalAccuracy Accuracy = GetPhysicalScreenDensity(ScreenDensity);
+
+		if (ScreenDensity != 0)
+		{
+			OutInches = static_cast<T2>(Pixels / ScreenDensity);
+		}
+		else
+		{
+			OutInches = 0;
+		}
+
+		return Accuracy;		
+	}
+	
+	/**
+	 * Asyncronously display the platform-specific input device selection UI, if supported.
+	 * 
+	 * @param InitiatingUserId The platform user to find an input device for.
+	 * @param OnShowInputDeviceSelectorComplete Callback for when the input device selection operation has completed
+	 * @return true if the UI will be shown and the callback will be called
+	 * @return false if the platform does not support an input device selection API, or it is not currently available (the callback will not be called)
+	 */
+	static bool ShowInputDeviceSelector( FPlatformUserId InitiatingUserId, FShowInputDeviceSelectorComplete OnShowInputDeviceSelectorComplete )
+	{
+		// no default implementation
+		return false;
+	}
+
+	/**
+	 * Asyncronously display the platform-specific user selection UI, if supported.
+	 * 
+	 * @param InitiatingInputDeviceId The input device that prompted showing the UI, if applicable. The input device may be re-paired with the newly-selected user, depending on the platform
+	 * @param Flags customization options for the user selection UI.
+	 * @param OnUserSelectionComplete callback for when the user selection operation has completed
+	 * @return true if the UI will be shown and the callback will be called
+	 * @return false if the platform does not support a user-selection API, or it is not currently available (the callback will not be called)
+	 */
+	static bool ShowPlatformUserSelector(FInputDeviceId InitiatingInputDeviceId, EPlatformUserSelectorFlags Flags, FPlatformUserSelectionComplete OnUserSelectionComplete)
+	{
+		// no default implementation
+		return false;
+	}
+
 
 protected:
-	static bool CachedPhysicalScreenData;
-	static EScreenPhysicalAccuracy CachedPhysicalScreenAccuracy;
-	static int32 CachedPhysicalScreenDensity;
-	static FAutoConsoleVariableRef CVarEnableHighDPIAwareness;
+	static APPLICATIONCORE_API bool CachedPhysicalScreenData;
+	static APPLICATIONCORE_API EScreenPhysicalAccuracy CachedPhysicalScreenAccuracy;
+	static APPLICATIONCORE_API int32 CachedPhysicalScreenDensity;
+	static APPLICATIONCORE_API FAutoConsoleVariableRef CVarEnableHighDPIAwareness;
+	static APPLICATIONCORE_API FAutoConsoleVariableRef CVarAllowVirtualKeyboard;
 
 };

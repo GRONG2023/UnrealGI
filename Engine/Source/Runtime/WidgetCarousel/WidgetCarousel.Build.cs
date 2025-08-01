@@ -12,13 +12,7 @@ public class WidgetCarousel : ModuleRules
 				"ApplicationCore",
 				"Slate",
 				"SlateCore",
-				"InputCore",
 				"CoreUObject"
-			}
-		);
-
-		PrivateIncludePaths.AddRange(
-			new string[] {
 			}
 		);
 	}

@@ -24,12 +24,12 @@ struct FViewOcclusionQueries
 	using FPlanarReflectionArray = TArray<FPlanarReflectionSceneProxy const*, SceneRenderingAllocator>;
 	using FRenderQueryArray = TArray<FRHIRenderQuery*, SceneRenderingAllocator>;
 
-	FProjectedShadowArray PointLightQueryInfos;
+	FProjectedShadowArray LocalLightQueryInfos;
 	FProjectedShadowArray CSMQueryInfos;
-	FProjectedShadowArray ShadowQuerieInfos;
-	FPlanarReflectionArray ReflectionQuerieInfos;
+	FProjectedShadowArray ShadowQueryInfos;
+	FPlanarReflectionArray ReflectionQueryInfos;
 
-	FRenderQueryArray PointLightQueries;
+	FRenderQueryArray LocalLightQueries;
 	FRenderQueryArray CSMQueries;
 	FRenderQueryArray ShadowQueries;
 	FRenderQueryArray ReflectionQueries;
@@ -46,8 +46,6 @@ class FOcclusionQueryVS : public FGlobalShader
 {
 	DECLARE_SHADER_TYPE(FOcclusionQueryVS,Global);
 public:
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters) { return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1); }
-
 	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
 	{
 		static auto* MobileUseHWsRGBEncodingCVAR = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.Mobile.UseHWsRGBEncoding"));
@@ -67,30 +65,29 @@ public:
 
 	FOcclusionQueryVS() {}
 
-	void SetParametersWithBoundingSphere(FRHICommandList& RHICmdList, const FViewInfo& View, const FSphere& BoundingSphere)
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const FViewInfo& View, const FSphere& BoundingSphere)
 	{
-		FGlobalShader::SetParameters<FViewUniformShaderParameters>(RHICmdList, RHICmdList.GetBoundVertexShader(), View.ViewUniformBuffer);
-
-		FVector4 StencilingSpherePosAndScale;
+		FVector4f StencilingSpherePosAndScale;
 		StencilingGeometry::GStencilSphereVertexBuffer.CalcTransform(StencilingSpherePosAndScale, BoundingSphere, View.ViewMatrices.GetPreViewTranslation());
-		StencilingGeometryParameters.Set(RHICmdList, this, StencilingSpherePosAndScale);
-
-		if (GEngine && GEngine->StereoRenderingDevice)
-		{
-			SetShaderValue(RHICmdList, RHICmdList.GetBoundVertexShader(), ViewId, GEngine->StereoRenderingDevice->GetViewIndexForPass(View.StereoPass));
-		}
+		SetParametersInternal(BatchedParameters, View, StencilingSpherePosAndScale);
 	}
 
-	void SetParameters(FRHICommandList& RHICmdList, const FViewInfo& View)
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const FViewInfo& View)
 	{
-		FGlobalShader::SetParameters<FViewUniformShaderParameters>(RHICmdList, RHICmdList.GetBoundVertexShader(),View.ViewUniformBuffer);
+		SetParametersInternal(BatchedParameters, View, FVector4f(0, 0, 0, 1));
+	}
+
+private:
+	void SetParametersInternal(FRHIBatchedShaderParameters& BatchedParameters, const FViewInfo& View, const FVector4f& StencilingSpherePosAndScale)
+	{
+		FGlobalShader::SetParameters<FViewUniformShaderParameters>(BatchedParameters, View.ViewUniformBuffer);
 
 		// Don't transform if rendering frustum
-		StencilingGeometryParameters.Set(RHICmdList, this, FVector4(0,0,0,1));
+		StencilingGeometryParameters.Set(BatchedParameters, StencilingSpherePosAndScale);
 
-		if (GEngine && GEngine->StereoRenderingDevice)
+		if (ViewId.IsBound())
 		{
-			SetShaderValue(RHICmdList, RHICmdList.GetBoundVertexShader(), ViewId, GEngine->StereoRenderingDevice->GetViewIndexForPass(View.StereoPass));
+			SetShaderValue(BatchedParameters, ViewId, (View.StereoPass == EStereoscopicPass::eSSP_FULL) ? 0 : View.StereoViewIndex);
 		}
 	}
 
@@ -106,10 +103,10 @@ class FOcclusionQueryPS : public FGlobalShader
 {
 	DECLARE_SHADER_TYPE(FOcclusionQueryPS, Global);
 public:
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters) { return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1); }
-
 	FOcclusionQueryPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer) :
 		FGlobalShader(Initializer) {}
 	FOcclusionQueryPS() {}
 };
 
+// Returns whether occlusion queries should be downsampled.
+extern RENDERER_API bool UseDownsampledOcclusionQueries();

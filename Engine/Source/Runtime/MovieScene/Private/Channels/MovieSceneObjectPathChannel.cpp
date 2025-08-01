@@ -3,6 +3,8 @@
 #include "Channels/MovieSceneObjectPathChannel.h"
 #include "Engine/World.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneObjectPathChannel)
+
 bool FMovieSceneObjectPathChannelKeyValue::SerializeFromMismatchedTag(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot)
 {
 	if (Tag.Type == NAME_SoftObjectProperty)
@@ -153,6 +155,16 @@ void FMovieSceneObjectPathChannel::Offset(FFrameNumber DeltaPosition)
 	GetData().Offset(DeltaPosition);
 }
 
+FKeyHandle FMovieSceneObjectPathChannel::GetHandle(int32 Index)
+{
+	return GetData().GetHandle(Index);
+}
+
+int32 FMovieSceneObjectPathChannel::GetIndex(FKeyHandle Handle)
+{
+	return GetData().GetIndex(Handle);
+}
+
 void FMovieSceneObjectPathChannel::Optimize(const FKeyDataOptimizationParams& InParameters)
 {}
 
@@ -160,4 +172,5 @@ void FMovieSceneObjectPathChannel::ClearDefault()
 {
 	RemoveDefault();
 }
+
 

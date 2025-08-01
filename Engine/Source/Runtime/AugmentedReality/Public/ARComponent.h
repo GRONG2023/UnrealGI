@@ -34,10 +34,10 @@ struct FARSessionPayload
 	int32 ConfigFlags = 0;
 	
 	UPROPERTY(BlueprintReadOnly, Category = "AR")
-	UMaterialInterface* DefaultMeshMaterial = nullptr;
+	TObjectPtr<UMaterialInterface> DefaultMeshMaterial = nullptr;
 
 	UPROPERTY(BlueprintReadOnly, Category = "AR")
-	UMaterialInterface* DefaultWireframeMeshMaterial = nullptr;
+	TObjectPtr<UMaterialInterface> DefaultWireframeMeshMaterial = nullptr;
 
 	void SetFlag(EARSessionConfigFlags InFlag);
 	bool HasFlag(EARSessionConfigFlags InFlag) const;
@@ -107,7 +107,7 @@ struct FARImageUpdatePayload
 	FTransform WorldTransform = FTransform::Identity;
 	
 	UPROPERTY(BlueprintReadOnly, Category = "AR")
-	UARCandidateImage* DetectedImage = nullptr;
+	TObjectPtr<UARCandidateImage> DetectedImage = nullptr;
 	
 	UPROPERTY(BlueprintReadOnly, Category = "AR")
 	FVector2D EstimatedSize = FVector2D::ZeroVector;
@@ -210,7 +210,8 @@ struct AUGMENTEDREALITY_API FAccumulatedNormal
 	FVector Normal = FVector::ZeroVector;
 	uint32 NumFaces = 0;
 	
-	static void CalculateVertexNormals(TArray<FAccumulatedNormal>& AccumulatedNormals, const TArray<FVector>& Vertices, const TArray<MRMESH_INDEX_TYPE>& Indices, TArray<FPackedNormal>& OutTangentData, FVector MeshCenter = FVector::ZeroVector, float PositionScale = 1.f);
+	template<typename VertexType>
+	static void CalculateVertexNormals(TArray<FAccumulatedNormal>& AccumulatedNormals, const TArray<VertexType>& Vertices, const TArray<MRMESH_INDEX_TYPE>& Indices, TArray<FPackedNormal>& OutTangentData, FVector MeshCenter = FVector::ZeroVector, float PositionScale = 1.f);
 };
 
 /**
@@ -280,21 +281,21 @@ protected:
 	 * If not set, the DefaultMeshMaterial from ARSessionConfig will be used.
 	 */
 	UPROPERTY(EditAnywhere, Category = "AR Gameplay")
-	UMaterialInterface* DefaultMeshMaterial = nullptr;
+	TObjectPtr<UMaterialInterface> DefaultMeshMaterial = nullptr;
 
 	/**
 	 * The default wireframe material to be used for the generated mesh component.
 	 * If not set, the DefaultMeshMaterial from ARSessionConfig will be used.
 	 */
 	UPROPERTY(EditAnywhere, Category = "AR Gameplay")
-	UMaterialInterface* DefaultWireframeMeshMaterial = nullptr;
+	TObjectPtr<UMaterialInterface> DefaultWireframeMeshMaterial = nullptr;
 
 	UPROPERTY()
-	UMRMeshComponent* MRMeshComponent;
+	TObjectPtr<UMRMeshComponent> MRMeshComponent;
 	
 	/** The tracked geometry used for updating this component, only set on "local" client */
 	UPROPERTY()
-	UARTrackedGeometry* MyTrackedGeometry;
+	TObjectPtr<UARTrackedGeometry> MyTrackedGeometry;
 	
 	/** If this component has ever been updated */
 	bool bFirstUpdate = true;

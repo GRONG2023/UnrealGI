@@ -2,30 +2,50 @@
 
 #pragma once
 
-#include "CoreTypes.h"
-#include "Templates/UnrealTemplate.h"
-#include "HAL/ThreadSafeCounter.h"
-#include "Math/NumericLimits.h"
-#include "HAL/ThreadSingleton.h"
-#include "HAL/LowLevelMemTracker.h"
 #include "Containers/Array.h"
-#include "Containers/UnrealString.h"
-#include "HAL/PlatformTime.h"
-#include "UObject/NameTypes.h"
-#include "Containers/LockFreeList.h"
 #include "Containers/ChunkedArray.h"
+#include "Containers/ContainerAllocationPolicies.h"
+#include "Containers/LockFreeList.h"
+#include "Containers/UnrealString.h"
+#include "CoreGlobals.h"
+#include "CoreTypes.h"
 #include "Delegates/Delegate.h"
-#include "Templates/Atomic.h"
+#include "Delegates/DelegateBase.h"
+#include "HAL/CriticalSection.h"
+#include "HAL/LowLevelMemTracker.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMemory.h"
+#include "HAL/PlatformMisc.h"
+#include "HAL/PlatformTLS.h"
+#include "HAL/PlatformTime.h"
+#include "HAL/ThreadSafeCounter.h"
+#include "HAL/ThreadSingleton.h"
+#include "HAL/UnrealMemory.h"
 #include "Math/Color.h"
-#include "StatsCommon.h"
-#include "Templates/UniquePtr.h"
+#include "Math/NumericLimits.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Build.h"
+#include "Misc/CString.h"
+#include "Misc/EnumClassFlags.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "ProfilingDebugging/MiscTrace.h"
+#include "StatsCommon.h"
 #include "StatsTrace.h"
+#include "Templates/Atomic.h"
+#include "Templates/TypeCompatibleBytes.h"
+#include "Templates/UniquePtr.h"
+#include "Templates/UnrealTemplate.h"
+#include "Trace/Detail/Channel.h"
+#include "Trace/Detail/Channel.inl"
+#include "Trace/Trace.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
 
+class FOutputDevice;
 class FScopeCycleCounter;
 class FThreadStats;
 struct TStatId;
+template <typename T> struct TIsPODType;
 
 /**
 * This is thread-private information about the thread idle stats, which we always collect, even in final builds
@@ -36,6 +56,9 @@ class CORE_API FThreadIdleStats : public TThreadSingleton<FThreadIdleStats>
 
 	FThreadIdleStats()
 		: Waits(0)
+		, WaitsCriticalPath(0)
+		, IsCriticalPathCounter(1)
+		, bInIdleScope(false)
 	{}
 
 public:
@@ -43,32 +66,80 @@ public:
 	/** Total cycles we waited for sleep or event. **/
 	uint32 Waits;
 
+	/** Total cycles we waited for sleep or event on the critical path. **/
+	uint32 WaitsCriticalPath;
+
+	int IsCriticalPathCounter;
+	bool bInIdleScope;
+
+	static void BeginCriticalPath()
+	{
+		FThreadIdleStats::Get().IsCriticalPathCounter++;
+	}
+
+	static void EndCriticalPath()
+	{
+		FThreadIdleStats::Get().IsCriticalPathCounter--;
+	}
+
+	struct FScopeNonCriticalPath
+	{
+		FScopeNonCriticalPath()
+		{
+			FThreadIdleStats::Get().IsCriticalPathCounter--;
+		}
+		~FScopeNonCriticalPath()
+		{
+			FThreadIdleStats::Get().IsCriticalPathCounter++;
+		}
+	};
+
+	bool IsCriticalPath() const 
+	{
+		return IsCriticalPathCounter > 0;
+	}
+
+	void Reset()
+	{
+		Waits = 0;
+		WaitsCriticalPath = 0;
+		IsCriticalPathCounter = 1;
+	}
+
+
+
 	struct FScopeIdle
 	{
+#if defined(DISABLE_THREAD_IDLE_STATS) && DISABLE_THREAD_IDLE_STATS
+		FScopeIdle( bool bInIgnore = false )
+		{}
+#else
 		/** Starting cycle counter. */
 		const uint32 Start;
 
 		/** If true, we ignore this thread idle stats. */
 		const bool bIgnore;
 
-#if defined(DISABLE_THREAD_IDLE_STATS) && DISABLE_THREAD_IDLE_STATS
-		FScopeIdle( bool bInIgnore = false )
-			: Start(0)
-			, bIgnore( bInIgnore )
-		{
-		}
-#else
-		FScopeIdle( bool bInIgnore = false )
-			: Start(FPlatformTime::Cycles())
-			, bIgnore( bInIgnore )
-		{
-		}
+#if CPUPROFILERTRACE_ENABLED
+		FCpuProfilerTrace::FEventScope TraceEventScope;
+#endif
+
+		CORE_API FScopeIdle(bool bInIgnore = false);
 
 		~FScopeIdle()
 		{
 			if( !bIgnore )
 			{
-				FThreadIdleStats::Get().Waits += FPlatformTime::Cycles() - Start;
+				FThreadIdleStats& IdleStats = FThreadIdleStats::Get();
+				uint32 CyclesElapsed = FPlatformTime::Cycles() - Start;
+				IdleStats.Waits += CyclesElapsed;
+
+				if (IdleStats.IsCriticalPath())
+				{
+					IdleStats.WaitsCriticalPath += CyclesElapsed;
+				}
+
+				IdleStats.bInIdleScope = false;
 			}
 		}
 #endif
@@ -79,37 +150,46 @@ public:
 CORE_API bool DirectStatsCommand(const TCHAR* Cmd, bool bBlockForCompletion = false, FOutputDevice* Ar = nullptr);
 
 /** Helper struct that contains method available even when the stats are disabled. */
-struct CORE_API FStats
+struct FStats
 {
 	/** Delegate to fire every time we need to advance the stats for the rendering thread. */
-	DECLARE_DELEGATE_ThreeParams( FOnAdvanceRenderingThreadStats, bool /*bDiscardCallstack*/, int64 /*StatsFrame*/, int32 /*MasterDisableChangeTagStartFrame*/ );
+	DECLARE_DELEGATE_ThreeParams( FOnAdvanceRenderingThreadStats, bool /*bDiscardCallstack*/, int64 /*StatsFrame*/, int32 /*PrimaryDisableChangeTagStartFrame*/ );
 
 	/** Advances stats for the current frame. */
-	static void AdvanceFrame( bool bDiscardCallstack, const FOnAdvanceRenderingThreadStats& AdvanceRenderingThreadStatsDelegate = FOnAdvanceRenderingThreadStats() );
+	static CORE_API void AdvanceFrame( bool bDiscardCallstack, const FOnAdvanceRenderingThreadStats& AdvanceRenderingThreadStatsDelegate = FOnAdvanceRenderingThreadStats() );
 
 	/** Advances stats for commandlets, only valid if the command line has the proper token. @see HasStatsForCommandletsToken */
-	static void TickCommandletStats();
+	static CORE_API void TickCommandletStats();
 
 	/**
 	* @return true, if the command line has the LoadTimeStatsForCommandlet or LoadTimeFileForCommandlet token which enables stats in the commandlets.
 	* !!!CAUTION!!! You need to manually advance stats frame in order to maintain the data integrity and not to leak the memory.
 	*/
-	static bool EnabledForCommandlet();
+	static CORE_API bool EnabledForCommandlet();
 
 	/**
 	* @return true, if the command line has the LoadTimeStatsForCommandlet token which enables LoadTimeStats equivalent for commandlets.
 	* All collected stats will be dumped to the log file at the end of running the specified commandlet.
 	*/
-	static bool HasLoadTimeStatsForCommandletToken();
+	static CORE_API bool HasLoadTimeStatsForCommandletToken();
 
 	/**
 	* @return true, if the command line has the LoadTimeFileForCommandlet token which enables LoadTimeFile equivalent for commandlets.
 	*/
-	static bool HasLoadTimeFileForCommandletToken();
+	static CORE_API bool HasLoadTimeFileForCommandletToken();
 
 	/** Current game thread stats frame. */
-	static TAtomic<int32> GameThreadStatsFrame;
+	static CORE_API TAtomic<int32> GameThreadStatsFrame;
 };
+
+enum class EStatFlags : uint8
+{
+	None            = 0,
+	ClearEveryFrame = 1 << 0,
+	CycleStat       = 1 << 1,
+	Verbose         = 1 << 2, // Profiling scopes for this stat will no generate a trace event by default. See GShouldEmitVerboseNamedEvents.
+};
+ENUM_CLASS_FLAGS(EStatFlags);
 
 #if STATS
 
@@ -187,6 +267,16 @@ struct TStatId
 	FORCEINLINE const WIDECHAR* GetStatDescriptionWIDE() const
 	{
 		return StatIdPtr->StatDescriptionWide.Get();
+	}
+
+	FORCEINLINE bool operator==(TStatId Other) const
+	{
+		return StatIdPtr == Other.StatIdPtr;
+	}
+
+	FORCEINLINE bool operator!=(TStatId Other) const
+	{
+		return StatIdPtr != Other.StatIdPtr;
 	}
 
 private:
@@ -283,7 +373,7 @@ struct EStatOperation
 		MaxVal,
 
 		/** This is a memory operation. @see EMemoryOperation. */
-		Memory,
+		Memory UE_DEPRECATED(5.3, "Use Trace/MemoryInsights and/or LLM for memory profiling."),
 
 		Num,
 		Mask = 0xf,
@@ -341,7 +431,7 @@ struct EMemoryRegion
 };
 
 /** Memory operation for STAT_Memory_AllocPtr. */
-enum class EMemoryOperation : uint8
+enum class UE_DEPRECATED(5.3, "Use Trace/MemoryInsights and/or LLM for memory profiling.") EMemoryOperation : uint8
 {
 	/** Invalid. */
 	Invalid,	
@@ -393,9 +483,11 @@ FORCEINLINE uint32 FromPackedCallCountDuration_Duration(int64 Both)
 class FStatNameAndInfo
 {
 	/**
-	 * An FName, but the high bits of the Number are used for other fields.
+	 * Store name and number separately in case UE_FNAME_OUTLINE_NUMBER is set, so the high bits of the Number are used for other fields.
 	 */
-	FMinimalName NameAndInfo;
+	FNameEntryId Index;
+	int32 Number;
+
 public:
 	FORCEINLINE_STATS FStatNameAndInfo()
 	{
@@ -405,15 +497,14 @@ public:
 	 * Build from a raw FName
 	 */
 	FORCEINLINE_STATS FStatNameAndInfo(FName Other, bool bAlreadyHasMeta)
-		: NameAndInfo(NameToMinimalName(Other))
+		: Index(Other.GetComparisonIndex())
+		, Number(Other.GetNumber())
 	{
 		if (!bAlreadyHasMeta)
 		{
-			int32 Number = NameAndInfo.Number;
 			// ok, you can't have numbered stat FNames too large
 			checkStats(!(Number >> EStatAllFields::StartShift));
 			Number |= EStatMetaFlags::DummyAlwaysOne << (EStatMetaFlags::Shift + EStatAllFields::StartShift);
-			NameAndInfo.Number = Number;
 		}
 		CheckInvariants();
 	}
@@ -422,13 +513,14 @@ public:
 	 * Build with stat metadata
 	 */
 	FORCEINLINE_STATS FStatNameAndInfo(FName InStatName, char const* InGroup, char const* InCategory, TCHAR const* InDescription, EStatDataType::Type InStatType, bool bShouldClearEveryFrame, bool bCycleStat, bool bSortByName, FPlatformMemory::EMemoryCounterRegion MemoryRegion = FPlatformMemory::MCR_Invalid)
-		: NameAndInfo(NameToMinimalName(ToLongName(InStatName, InGroup, InCategory, InDescription, bSortByName)))
 	{
-		int32 Number = NameAndInfo.Number;
+		FName LongName = ToLongName(InStatName, InGroup, InCategory, InDescription, bSortByName);
+		Index = LongName.GetComparisonIndex();
+		Number = LongName.GetNumber();
+
 		// ok, you can't have numbered stat FNames too large
 		checkStats(!(Number >> EStatAllFields::StartShift));
 		Number |= (EStatMetaFlags::DummyAlwaysOne | EStatMetaFlags::HasLongNameAndMetaInfo) << (EStatMetaFlags::Shift + EStatAllFields::StartShift);
-		NameAndInfo.Number = Number;
 
 		SetField<EStatDataType>(InStatType);
 		SetFlag(EStatMetaFlags::ShouldClearEveryFrame, bShouldClearEveryFrame);
@@ -445,9 +537,9 @@ public:
 	/**
 	 * Internal use, used by the deserializer
 	 */
-	FORCEINLINE_STATS void SetNumberDirect(int32 Number)
+	FORCEINLINE_STATS void SetNumberDirect(int32 InNumber)
 	{
-		NameAndInfo.Number = Number;
+		Number = InNumber;
 	}
 
 	/**
@@ -456,7 +548,7 @@ public:
 	FORCEINLINE_STATS int32 GetRawNumber() const
 	{
 		CheckInvariants();
-		return NameAndInfo.Number;
+		return Number;
 	}
 
 	/**
@@ -467,10 +559,10 @@ public:
 		// ok, you can't have numbered stat FNames too large
 		checkStats(!(RawName.GetNumber() >> EStatAllFields::StartShift));
 		CheckInvariants();
-		int32 Number = NameAndInfo.Number;
-		Number &= ~((1 << EStatAllFields::StartShift) - 1);
-		NameAndInfo = NameToMinimalName(RawName);
-		NameAndInfo.Number = (Number | RawName.GetNumber());
+		int32 LocalNumber = Number;
+		LocalNumber &= ~((1 << EStatAllFields::StartShift) - 1);
+		Index = RawName.GetComparisonIndex();
+		Number = (LocalNumber | RawName.GetNumber());
 	}
 
 	/**
@@ -480,11 +572,7 @@ public:
 	FORCEINLINE_STATS FName GetRawName() const
 	{
 		CheckInvariants();
-		FMinimalName Result(NameAndInfo);
-		int32 Number = NameAndInfo.Number;
-		Number &= ((1 << EStatAllFields::StartShift) - 1);
-		Result.Number = Number;
-		return MinimalNameToName(Result);
+		return FName(Index, Index, Number & ((1 << EStatAllFields::StartShift) - 1));
 	}
 
 	/**
@@ -494,7 +582,7 @@ public:
 	FORCEINLINE_STATS FName GetEncodedName() const
 	{
 		CheckInvariants();
-		return MinimalNameToName(NameAndInfo);
+		return FName(Index, Index, Number);
 	}
 
 	/**
@@ -547,8 +635,8 @@ public:
 	 */
 	FORCEINLINE_STATS void CheckInvariants() const
 	{
-		checkStats((NameAndInfo.Number & (EStatMetaFlags::DummyAlwaysOne << (EStatAllFields::StartShift + EStatMetaFlags::Shift)))
-			&& NameAndInfo.Index);
+		checkStats((Number & (EStatMetaFlags::DummyAlwaysOne << (EStatAllFields::StartShift + EStatMetaFlags::Shift)))
+			&& Index);
 	}
 
 	/**
@@ -559,10 +647,10 @@ public:
 	typename TField::Type GetField() const
 	{
 		CheckInvariants();
-		int32 Number = NameAndInfo.Number;
-		Number = (Number >> (EStatAllFields::StartShift + TField::Shift)) & TField::Mask;
-		checkStats(Number != TField::Invalid && Number < TField::Num);
-		return typename TField::Type(Number);
+		int32 LocalNumber = Number;
+		LocalNumber = (LocalNumber >> (EStatAllFields::StartShift + TField::Shift)) & TField::Mask;
+		checkStats(LocalNumber != TField::Invalid && LocalNumber < TField::Num);
+		return typename TField::Type(LocalNumber);
 	}
 
 	/**
@@ -572,12 +660,12 @@ public:
 	template<typename TField>
 	void SetField(typename TField::Type Value)
 	{
-		int32 Number = NameAndInfo.Number;
+		int32 LocalNumber = Number;
 		CheckInvariants();
 		checkStats(Value < TField::Num && Value != TField::Invalid);
-		Number &= ~(TField::Mask << (EStatAllFields::StartShift + TField::Shift));
-		Number |= Value << (EStatAllFields::StartShift + TField::Shift);
-		NameAndInfo.Number = Number;
+		LocalNumber &= ~(TField::Mask << (EStatAllFields::StartShift + TField::Shift));
+		LocalNumber |= Value << (EStatAllFields::StartShift + TField::Shift);
+		Number = LocalNumber;
 		CheckInvariants();
 	}
 
@@ -587,10 +675,10 @@ public:
 	 */
 	bool GetFlag(EStatMetaFlags::Type Bit) const
 	{
-		int32 Number = NameAndInfo.Number;
+		int32 LocalNumber = Number;
 		CheckInvariants();
 		checkStats(Bit < EStatMetaFlags::Num && Bit != EStatMetaFlags::Invalid);
-		return !!((Number >> (EStatAllFields::StartShift + EStatMetaFlags::Shift)) & Bit);
+		return !!((LocalNumber >> (EStatAllFields::StartShift + EStatMetaFlags::Shift)) & Bit);
 	}
 
 	/**
@@ -600,18 +688,18 @@ public:
 	 */
 	void SetFlag(EStatMetaFlags::Type Bit, bool Value)
 	{
-		int32 Number = NameAndInfo.Number;
+		int32 LocalNumber = Number;
 		CheckInvariants();
 		checkStats(Bit < EStatMetaFlags::Num && Bit != EStatMetaFlags::Invalid);
 		if (Value)
 		{
-			Number |= (Bit << (EStatAllFields::StartShift + EStatMetaFlags::Shift));
+			LocalNumber |= (Bit << (EStatAllFields::StartShift + EStatMetaFlags::Shift));
 		}
 		else
 		{
-			Number &= ~(Bit << (EStatAllFields::StartShift + EStatMetaFlags::Shift));
+			LocalNumber &= ~(Bit << (EStatAllFields::StartShift + EStatMetaFlags::Shift));
 		}
-		NameAndInfo.Number = Number;
+		Number = LocalNumber;
 		CheckInvariants();
 	}
 
@@ -862,7 +950,7 @@ template< typename TEnum >
 struct TStatMessage
 {
 	typedef TEnum TStructEnum;
-	static const int32 EnumCount = TEnum::Num;
+	static constexpr int32 EnumCount = TEnum::Num;
 
 	/**
 	* Generic payload
@@ -1123,11 +1211,12 @@ struct FStatPacket
 	void SetThreadProperties()
 	{
 		ThreadId = FPlatformTLS::GetCurrentThreadId();
-		if (IsInGameThread())
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		if (ThreadId == GGameThreadId)
 		{
 			ThreadType = EThreadType::Game;
 		}
-		else if (IsInActualRenderingThread())
+		else if (ThreadId == GRenderThreadId)
 		{
 			ThreadType = EThreadType::Renderer;
 		}
@@ -1135,6 +1224,7 @@ struct FStatPacket
 		{
 			ThreadType = EThreadType::Other;
 		}
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
 
 
@@ -1184,11 +1274,7 @@ public:
 	CORE_API FThreadStatsPool();
 
 	/** Singleton accessor. */
-	CORE_API static FThreadStatsPool& Get()
-	{
-		static FThreadStatsPool Singleton;
-		return Singleton;
-	}
+	CORE_API static FThreadStatsPool& Get();
 
 	/** Gets an instance from the pool and call the default constructor on it. */
 	CORE_API FThreadStats* GetFromPool();
@@ -1214,17 +1300,17 @@ class FThreadStats : FNoncopyable
 	friend struct FThreadStatsPool;
 
 	/** Used to control when we are collecting stats. User of the stats system increment and decrement this counter as they need data. **/
-	CORE_API static FThreadSafeCounter MasterEnableCounter;
-	/** Every time bMasterEnable changes, we update this. This is used to determine frames that have complete data. **/
-	CORE_API static FThreadSafeCounter MasterEnableUpdateNumber;
-	/** while bMasterEnable (or other things affecting stat collection) is chaning, we lock this. This is used to determine frames that have complete data. **/
-	CORE_API static FThreadSafeCounter MasterDisableChangeTagLock;
+	CORE_API static FThreadSafeCounter PrimaryEnableCounter;
+	/** Every time bPrimaryEnable changes, we update this. This is used to determine frames that have complete data. **/
+	CORE_API static FThreadSafeCounter PrimaryEnableUpdateNumber;
+	/** while bPrimaryEnable (or other things affecting stat collection) is chaning, we lock this. This is used to determine frames that have complete data. **/
+	CORE_API static FThreadSafeCounter PrimaryDisableChangeTagLock;
 	/** TLS slot that holds a FThreadStats. **/
 	CORE_API static uint32 TlsSlot;
-	/** Computed by CheckEnable, the current "master control" for stats collection, based on MasterEnableCounter and a few other things. **/
-	CORE_API static bool bMasterEnable;
+	/** Computed by CheckEnable, the current "primary control" for stats collection, based on PrimaryEnableCounter and a few other things. **/
+	CORE_API static bool bPrimaryEnable;
 	/** Set to permanently disable the stats system. **/
-	CORE_API static bool bMasterDisableForever;
+	CORE_API static bool bPrimaryDisableForever;
 	/** True if we running in the raw stats mode, all stats processing is disabled, captured stats messages are written in timely manner, memory overhead is minimal. */
 	CORE_API static bool bIsRawStatsActive;
 
@@ -1253,14 +1339,13 @@ class FThreadStats : FNoncopyable
 	/** Tracks current stack depth for cycle counters. **/
 	bool bSawExplicitFlush;
 
-	/** True if this is the stats thread, which needs special handling. **/
-	bool bIsStatsThread;
-
 	/** Gathers information about the current thread and sets up the TLS value. **/
 	CORE_API FThreadStats();
 
 	/** Constructor used for the pool. */
 	CORE_API FThreadStats(EConstructor);
+
+	void SendMessage_Async(FStatPacket* ToSend);
 
 public:
 	/** Checks the TLS for a thread packet and if it isn't found, it makes a new one. **/
@@ -1400,9 +1485,12 @@ public:
 
 	/** Pseudo-Memory operation. */
 	template<typename TValue>
+	UE_DEPRECATED(5.3, "Use Trace/MemoryInsights and/or LLM for memory profiling.")
 	FORCEINLINE_STATS void AddMemoryMessage( FName InStatName, TValue Value )
 	{
+#if UE_STATS_MEMORY_PROFILER_ENABLED
 		AddStatMessage(FStatMessage(InStatName, EStatOperation::Memory, Value, false));
+#endif //UE_STATS_MEMORY_PROFILER_ENABLED
 	}
 
 	/** 
@@ -1414,7 +1502,7 @@ public:
 	/** Return true if we are currently collecting data **/
 	static FORCEINLINE_STATS bool IsCollectingData()
 	{
-		return bMasterEnable;
+		return bPrimaryEnable;
 	}
 	static FORCEINLINE_STATS bool IsCollectingData(TStatId StatId)
 	{
@@ -1425,69 +1513,104 @@ public:
 	/** Return true if we are currently collecting data **/
 	static FORCEINLINE_STATS bool WillEverCollectData()
 	{
-		return !bMasterDisableForever;
+		return !bPrimaryDisableForever;
 	}
 
 	/** Return true if the threading is ready **/
 	static FORCEINLINE_STATS bool IsThreadingReady()
 	{
-		return !!TlsSlot;
+		return FPlatformTLS::IsValidTlsSlot(TlsSlot);
 	}
 
 	/** Indicate that you would like the system to begin collecting data, if it isn't already collecting data. Think reference count. **/
-	static FORCEINLINE_STATS void MasterEnableAdd(int32 Value = 1)
+	static FORCEINLINE_STATS void PrimaryEnableAdd(int32 Value = 1)
 	{
-		MasterEnableCounter.Add(Value);
+		PrimaryEnableCounter.Add(Value);
 		CheckEnable();
 	}
 
 	/** Indicate that you no longer need stat data, if nobody else needs stat data, then no stat data will be collected. Think reference count. **/
-	static FORCEINLINE_STATS void MasterEnableSubtract(int32 Value = 1)
+	static FORCEINLINE_STATS void PrimaryEnableSubtract(int32 Value = 1)
 	{
-		MasterEnableCounter.Subtract(Value);
+		PrimaryEnableCounter.Subtract(Value);
 		CheckEnable();
 	}
 
 	/** Indicate that you no longer need stat data, forever. **/
-	static FORCEINLINE_STATS void MasterDisableForever()
+	static FORCEINLINE_STATS void PrimaryDisableForever()
 	{
-		bMasterDisableForever = true;
+		bPrimaryDisableForever = true;
 		CheckEnable();
 	}
 
 	/** This is called before we start to change something that will invalidate. **/
-	static FORCEINLINE_STATS void MasterDisableChangeTagLockAdd(int32 Value = 1)
+	static FORCEINLINE_STATS void PrimaryDisableChangeTagLockAdd(int32 Value = 1)
 	{
-		MasterDisableChangeTagLock.Add(Value);
+		PrimaryDisableChangeTagLock.Add(Value);
 		FPlatformMisc::MemoryBarrier();
-		MasterEnableUpdateNumber.Increment();
+		PrimaryEnableUpdateNumber.Increment();
 	}
 
 	/** Indicate that you no longer need stat data, if nobody else needs stat data, then no stat data will be collected. Think reference count. **/
-	static FORCEINLINE_STATS void MasterDisableChangeTagLockSubtract(int32 Value = 1)
+	static FORCEINLINE_STATS void PrimaryDisableChangeTagLockSubtract(int32 Value = 1)
 	{
 		FPlatformMisc::MemoryBarrier();
-		MasterEnableUpdateNumber.Increment();
+		PrimaryEnableUpdateNumber.Increment();
 		FPlatformMisc::MemoryBarrier();
-		MasterDisableChangeTagLock.Subtract(Value);
+		PrimaryDisableChangeTagLock.Subtract(Value);
 	}
 
-	/** Everytime master enable changes, this number increases. This is used to determine full frames. **/
-	static FORCEINLINE_STATS int32 MasterDisableChangeTag()
+	/** Everytime primary enable changes, this number increases. This is used to determine full frames. **/
+	static FORCEINLINE_STATS int32 PrimaryDisableChangeTag()
 	{
-		if (MasterDisableChangeTagLock.GetValue())
+		if (PrimaryDisableChangeTagLock.GetValue())
 		{
 			// while locked we are continually invalid, so we will just keep giving unique numbers
-			return MasterEnableUpdateNumber.Increment();
+			return PrimaryEnableUpdateNumber.Increment();
 		}
-		return MasterEnableUpdateNumber.GetValue();
+		return PrimaryEnableUpdateNumber.GetValue();
+	}
+
+	/** Indicate that you would like the system to begin collecting data, if it isn't already collecting data. Think reference count. **/
+	UE_DEPRECATED(5.1, "Use PrimaryEnableAdd instead")
+	static FORCEINLINE_STATS void MasterEnableAdd(int32 Value = 1)
+	{
+		PrimaryEnableAdd(Value);
+	}
+
+	/** Indicate that you no longer need stat data, if nobody else needs stat data, then no stat data will be collected. Think reference count. **/
+	UE_DEPRECATED(5.1, "Use PrimaryEnableSubtract instead")
+	static FORCEINLINE_STATS void MasterEnableSubtract(int32 Value = 1)
+	{
+		PrimaryEnableSubtract(Value);
+	}
+
+	/** Indicate that you no longer need stat data, forever. **/
+	UE_DEPRECATED(5.1, "Use PrimaryDisableForever instead")
+	static FORCEINLINE_STATS void MasterDisableForever()
+	{
+		PrimaryDisableForever();
+	}
+
+	/** This is called before we start to change something that will invalidate. **/
+	UE_DEPRECATED(5.1, "Use PrimaryDisableChangeTagLockAdd instead")
+	static FORCEINLINE_STATS void MasterDisableChangeTagLockAdd(int32 Value = 1)
+	{
+		PrimaryDisableChangeTagLockAdd(Value);
+	}
+
+	/** Indicate that you no longer need stat data, if nobody else needs stat data, then no stat data will be collected. Think reference count. **/
+	UE_DEPRECATED(5.1, "Use PrimaryDisableChangeTagLockSubtract instead")
+	static FORCEINLINE_STATS void MasterDisableChangeTagLockSubtract(int32 Value = 1)
+	{
+		PrimaryDisableChangeTagLockSubtract(Value);
 	}
 
 	/** Call this if something disrupts data gathering. For example when the render thread is killed, data is abandoned.**/
 	static FORCEINLINE_STATS void FrameDataIsIncomplete()
 	{
 		FPlatformMisc::MemoryBarrier();
-		MasterEnableUpdateNumber.Increment();
+		PrimaryEnableUpdateNumber.Increment();
 		FPlatformMisc::MemoryBarrier();
 	}
 
@@ -1538,7 +1661,7 @@ public:
 	 * Pushes the specified stat onto the hierarchy for this thread. Starts
 	 * the timing of the cycles used
 	 */
-	FORCEINLINE_STATS void Start( TStatId InStatId, bool bAlways = false )
+	FORCEINLINE_STATS void Start(TStatId InStatId, EStatFlags InStatFlags, bool bAlways = false)
 	{
 		FMinimalName StatMinimalName = InStatId.GetMinimalName(EMemoryOrder::Relaxed);
 		if (StatMinimalName.IsNone())
@@ -1547,31 +1670,60 @@ public:
 		}
 
 		// Emit named event for active cycle stat.
-		if ( GCycleStatsShouldEmitNamedEvents > 0 )
+		if (GCycleStatsShouldEmitNamedEvents
+			&& (GShouldEmitVerboseNamedEvents || !EnumHasAnyFlags(InStatFlags, EStatFlags::Verbose)))
 		{
-#if	PLATFORM_USES_ANSI_STRING_FOR_EXTERNAL_PROFILING
-			FPlatformMisc::BeginNamedEvent( FColor( 0 ), InStatId.GetStatDescriptionANSI() );
+#if PLATFORM_USES_ANSI_STRING_FOR_EXTERNAL_PROFILING
+			FPlatformMisc::BeginNamedEvent(FColor(0), InStatId.GetStatDescriptionANSI());
 #else
-			FPlatformMisc::BeginNamedEvent( FColor( 0 ), InStatId.GetStatDescriptionWIDE() );
-#endif // PLATFORM_USES_ANSI_STRING_FOR_EXTERNAL_PROFILING
+			FPlatformMisc::BeginNamedEvent(FColor(0), InStatId.GetStatDescriptionWIDE());
+#endif
 			EmittedEvent |= NamedEvent;
-		}
 
 #if CPUPROFILERTRACE_ENABLED
-		if (GCycleStatsShouldEmitNamedEvents > 0 && UE_TRACE_CHANNELEXPR_IS_ENABLED(CpuChannel))
-		{
-			FCpuProfilerTrace::OutputBeginDynamicEvent(InStatId.GetStatDescriptionANSI()); //todo: Could we use FName index as event id?
-			EmittedEvent |= TraceEvent;
-		}
+			if (UE_TRACE_CHANNELEXPR_IS_ENABLED(CpuChannel))
+			{
+				FName StatName = MinimalNameToName(StatMinimalName);
+				FCpuProfilerTrace::OutputBeginDynamicEventWithId(StatName, InStatId.GetStatDescriptionWIDE());
+				EmittedEvent |= TraceEvent;
+			}
 #endif
+		}
 
-		if( (bAlways && FThreadStats::WillEverCollectData()) || FThreadStats::IsCollectingData() )
+		if ((bAlways && FThreadStats::WillEverCollectData()) || FThreadStats::IsCollectingData())
 		{
 			FName StatName = MinimalNameToName(StatMinimalName);
 			StatId = StatName;
-			FThreadStats::AddMessage( StatName, EStatOperation::CycleScopeStart );
+			FThreadStats::AddMessage(StatName, EStatOperation::CycleScopeStart);
 			EmittedEvent |= ThreadStatsEvent;
 		}
+	}
+
+	FORCEINLINE_STATS void Start(TStatId InStatId, bool bAlways = false)
+	{
+		Start(InStatId, EStatFlags::None, bAlways);
+	}
+
+	FORCEINLINE_STATS void StartTrace(const FName Name)
+	{
+#if CPUPROFILERTRACE_ENABLED
+		if (UE_TRACE_CHANNELEXPR_IS_ENABLED(CpuChannel))
+		{
+			FCpuProfilerTrace::OutputBeginDynamicEvent(Name);
+			EmittedEvent |= TraceEvent;
+		}
+#endif
+	}
+
+	FORCEINLINE_STATS void StartTrace(const FName Name, const TCHAR* Desc)
+	{
+#if CPUPROFILERTRACE_ENABLED
+		if (UE_TRACE_CHANNELEXPR_IS_ENABLED(CpuChannel))
+		{
+			FCpuProfilerTrace::OutputBeginDynamicEventWithId(Name, Desc);
+			EmittedEvent |= TraceEvent;
+		}
+#endif
 	}
 
 	/**
@@ -1579,7 +1731,7 @@ public:
 	 */
 	FORCEINLINE_STATS void Stop()
 	{
-		if ( EmittedEvent & NamedEvent )
+		if (EmittedEvent & NamedEvent)
 		{
 			FPlatformMisc::EndNamedEvent();
 		}
@@ -1591,7 +1743,7 @@ public:
 		}
 #endif
 
-		if(EmittedEvent & ThreadStatsEvent)
+		if (EmittedEvent & ThreadStatsEvent)
 		{
 			FThreadStats::AddMessage(StatId, EStatOperation::CycleScopeEnd);
 		}
@@ -1639,7 +1791,7 @@ class FStartupMessages
 {
 	friend class FStatsThread;
 
-	TArray<FStatMessage> DelayedMessages;
+	TArray64<FStatMessage> DelayedMessages;
 	FCriticalSection CriticalSection;
 
 public:
@@ -1670,6 +1822,7 @@ public:
 	/**
 	 * Returns a pointer to a bool (valid forever) that determines if this group is active
 	 * This should be CACHED. We will get a few calls from different stats and different threads and stuff, but once things are "warmed up", this should NEVER be called.
+	 * This function will also register any stats with the StatsTrace system 
 	 * @param InGroup, group to look up
 	 * @param InCategory, the category the group belongs to
 	 * @param bDefaultEnable, If this is the first time this group has been set up, this sets the default enable value for this group.
@@ -1799,7 +1952,7 @@ struct FStatGroup_##StatName\
 	} \
 };
 
-#define DECLARE_STAT(Description, StatName, GroupName, StatType, bShouldClearEveryFrame, bCycleStat, MemoryRegion) \
+#define DECLARE_STAT(Description, StatName, GroupName, StatType, StatFlags, MemoryRegion) \
 struct FStat_##StatName\
 { \
 	typedef FStatGroup_##GroupName TGroup; \
@@ -1817,11 +1970,15 @@ struct FStat_##StatName\
 	} \
 	static FORCEINLINE bool IsClearEveryFrame() \
 	{ \
-		return bShouldClearEveryFrame; \
+		return EnumHasAnyFlags(GetFlags(), EStatFlags::ClearEveryFrame); \
 	} \
 	static FORCEINLINE bool IsCycleStat() \
 	{ \
-		return bCycleStat; \
+		return EnumHasAnyFlags(GetFlags(), EStatFlags::CycleStat); \
+	} \
+	static FORCEINLINE EStatFlags GetFlags() \
+	{ \
+		return StatFlags; \
 	} \
 	static FORCEINLINE FPlatformMemory::EMemoryCounterRegion GetMemoryRegion() \
 	{ \
@@ -1833,6 +1990,7 @@ struct FStat_##StatName\
 #define GET_STATFNAME(Stat) (StatPtr_##Stat.GetStatFName())
 #define GET_STATDESCRIPTION(Stat) (FStat_##Stat::GetDescription())
 #define GET_STATISEVERYFRAME(Stat) (FStat_##Stat::IsClearEveryFrame())
+#define GET_STATFLAGS(Stat) (FStat_##Stat::GetFlags())
 
 #define STAT_GROUP_TO_FStatGroup(Group) FStatGroup_##Group
 
@@ -1844,44 +2002,47 @@ struct FStat_##StatName\
 	struct FThreadSafeStaticStat<FStat_##Stat> StatPtr_##Stat;
 
 #define RETURN_QUICK_DECLARE_CYCLE_STAT(StatId,GroupId) \
-	DECLARE_STAT(TEXT(#StatId),StatId,GroupId,EStatDataType::ST_int64, true, true, FPlatformMemory::MCR_Invalid); \
+	DECLARE_STAT(TEXT(#StatId),StatId,GroupId,EStatDataType::ST_int64, EStatFlags::ClearEveryFrame | EStatFlags::CycleStat, FPlatformMemory::MCR_Invalid); \
 	static DEFINE_STAT(StatId) \
 	return GET_STATID(StatId);
 
 #define QUICK_USE_CYCLE_STAT(StatId,GroupId) [](){ RETURN_QUICK_DECLARE_CYCLE_STAT(StatId, GroupId); }()
 
 #define DECLARE_CYCLE_STAT(CounterName,StatId,GroupId) \
-	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, true, true, FPlatformMemory::MCR_Invalid); \
+	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, EStatFlags::ClearEveryFrame | EStatFlags::CycleStat, FPlatformMemory::MCR_Invalid); \
+	static DEFINE_STAT(StatId)
+#define DECLARE_CYCLE_STAT_WITH_FLAGS(CounterName,StatId,GroupId,StatFlags) \
+	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, (StatFlags) | EStatFlags::ClearEveryFrame | EStatFlags::CycleStat, FPlatformMemory::MCR_Invalid); \
 	static DEFINE_STAT(StatId)
 #define DECLARE_FLOAT_COUNTER_STAT(CounterName,StatId,GroupId) \
-	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_double, true, false, FPlatformMemory::MCR_Invalid); \
+	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_double,EStatFlags::ClearEveryFrame, FPlatformMemory::MCR_Invalid); \
 	static DEFINE_STAT(StatId)
 #define DECLARE_DWORD_COUNTER_STAT(CounterName,StatId,GroupId) \
-	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, true, false, FPlatformMemory::MCR_Invalid); \
+	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64,EStatFlags::ClearEveryFrame, FPlatformMemory::MCR_Invalid); \
 	static DEFINE_STAT(StatId)
 #define DECLARE_FLOAT_ACCUMULATOR_STAT(CounterName,StatId,GroupId) \
-	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_double, false, false, FPlatformMemory::MCR_Invalid); \
+	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_double, EStatFlags::None, FPlatformMemory::MCR_Invalid); \
 	static DEFINE_STAT(StatId)
 #define DECLARE_DWORD_ACCUMULATOR_STAT(CounterName,StatId,GroupId) \
-	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, false, false, FPlatformMemory::MCR_Invalid); \
+	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, EStatFlags::None, FPlatformMemory::MCR_Invalid); \
 	static DEFINE_STAT(StatId)
 
 /** FName stat that allows sending a string based data. */
 #define DECLARE_FNAME_STAT(CounterName,StatId,GroupId) \
-	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_FName, false, false, FPlatformMemory::MCR_Invalid); \
+	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_FName, EStatFlags::None, FPlatformMemory::MCR_Invalid); \
 	static DEFINE_STAT(StatId)
 
 /** This is a fake stat, mostly used to implement memory message or other custom stats that don't easily fit into the system. */
 #define DECLARE_PTR_STAT(CounterName,StatId,GroupId)\
-	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_Ptr, false, false, FPlatformMemory::MCR_Invalid); \
+	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_Ptr, EStatFlags::None, FPlatformMemory::MCR_Invalid); \
 	static DEFINE_STAT(StatId)
 
 #define DECLARE_MEMORY_STAT(CounterName,StatId,GroupId) \
-	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, false, false, FPlatformMemory::MCR_Physical); \
+	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, EStatFlags::None, FPlatformMemory::MCR_Physical); \
 	static DEFINE_STAT(StatId)
 
 #define DECLARE_MEMORY_STAT_POOL(CounterName,StatId,GroupId,Pool) \
-	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, false, false, Pool); \
+	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, EStatFlags::None, Pool); \
 	static DEFINE_STAT(StatId)
 
 /*-----------------------------------------------------------------------------
@@ -1889,37 +2050,40 @@ struct FStat_##StatName\
 -----------------------------------------------------------------------------*/
 
 #define DECLARE_CYCLE_STAT_EXTERN(CounterName,StatId,GroupId, APIX) \
-	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, true, true, FPlatformMemory::MCR_Invalid); \
+	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, EStatFlags::ClearEveryFrame | EStatFlags::CycleStat, FPlatformMemory::MCR_Invalid); \
+	extern APIX DEFINE_STAT(StatId);
+#define DECLARE_CYCLE_STAT_WITH_FLAGS_EXTERN(CounterName,StatId,GroupId,StatFlags, APIX) \
+	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, (StatFlags) | EStatFlags::ClearEveryFrame | EStatFlags::CycleStat, FPlatformMemory::MCR_Invalid); \
 	extern APIX DEFINE_STAT(StatId);
 #define DECLARE_FLOAT_COUNTER_STAT_EXTERN(CounterName,StatId,GroupId, API) \
-	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_double, true, false, FPlatformMemory::MCR_Invalid); \
+	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_double, EStatFlags::ClearEveryFrame, FPlatformMemory::MCR_Invalid); \
 	extern API DEFINE_STAT(StatId);
 #define DECLARE_DWORD_COUNTER_STAT_EXTERN(CounterName,StatId,GroupId, API) \
-	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, true, false, FPlatformMemory::MCR_Invalid); \
+	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, EStatFlags::ClearEveryFrame, FPlatformMemory::MCR_Invalid); \
 	extern API DEFINE_STAT(StatId);
 #define DECLARE_FLOAT_ACCUMULATOR_STAT_EXTERN(CounterName,StatId,GroupId, API) \
-	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_double, false, false, FPlatformMemory::MCR_Invalid); \
+	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_double, EStatFlags::None, FPlatformMemory::MCR_Invalid); \
 	extern API DEFINE_STAT(StatId);
 #define DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(CounterName,StatId,GroupId, API) \
-	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, false, false, FPlatformMemory::MCR_Invalid); \
+	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, EStatFlags::None, FPlatformMemory::MCR_Invalid); \
 	extern API DEFINE_STAT(StatId);
 
 /** FName stat that allows sending a string based data. */
 #define DECLARE_FNAME_STAT_EXTERN(CounterName,StatId,GroupId, API) \
-	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_FName, false, false, FPlatformMemory::MCR_Invalid); \
+	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_FName, EStatFlags::None, FPlatformMemory::MCR_Invalid); \
 	extern API DEFINE_STAT(StatId);
 
 /** This is a fake stat, mostly used to implement memory message or other custom stats that don't easily fit into the system. */
 #define DECLARE_PTR_STAT_EXTERN(CounterName,StatId,GroupId, API) \
-	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_Ptr, false, false, FPlatformMemory::MCR_Invalid); \
+	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_Ptr, EStatFlags::None, FPlatformMemory::MCR_Invalid); \
 	extern API DEFINE_STAT(StatId);
 
 #define DECLARE_MEMORY_STAT_EXTERN(CounterName,StatId,GroupId, API) \
-	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, false, false, FPlatformMemory::MCR_Physical); \
+	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, EStatFlags::None, FPlatformMemory::MCR_Physical); \
 	extern API DEFINE_STAT(StatId);
 
 #define DECLARE_MEMORY_STAT_POOL_EXTERN(CounterName,StatId,GroupId,Pool, API) \
-	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, false, false, Pool); \
+	DECLARE_STAT(CounterName,StatId,GroupId,EStatDataType::ST_int64, EStatFlags::None, Pool); \
 	extern API DEFINE_STAT(StatId);
 
 /** Macro for declaring group factory instances */
@@ -1936,18 +2100,18 @@ struct FStat_##StatName\
 	DECLARE_STAT_GROUP(GroupDesc, GroupId, GroupCat, false, CompileIn, false);
 
 #define DECLARE_SCOPE_CYCLE_COUNTER(CounterName,Stat,GroupId) \
-	DECLARE_STAT(CounterName,Stat,GroupId,EStatDataType::ST_int64, true, true, FPlatformMemory::MCR_Invalid); \
+	DECLARE_STAT(CounterName,Stat,GroupId,EStatDataType::ST_int64, EStatFlags::ClearEveryFrame | EStatFlags::CycleStat, FPlatformMemory::MCR_Invalid); \
 	static DEFINE_STAT(Stat) \
-	FScopeCycleCounter CycleCount_##Stat(GET_STATID(Stat));
+	FScopeCycleCounter CycleCount_##Stat(GET_STATID(Stat), GET_STATFLAGS(Stat));
 
 #define QUICK_SCOPE_CYCLE_COUNTER(Stat) \
 	DECLARE_SCOPE_CYCLE_COUNTER(TEXT(#Stat),Stat,STATGROUP_Quick)
 
 #define SCOPE_CYCLE_COUNTER(Stat) \
-	FScopeCycleCounter CycleCount_##Stat(GET_STATID(Stat));
+	FScopeCycleCounter CycleCount_##Stat(GET_STATID(Stat), GET_STATFLAGS(Stat));
 
 #define CONDITIONAL_SCOPE_CYCLE_COUNTER(Stat,bCondition) \
-	FScopeCycleCounter CycleCount_##Stat(bCondition ? GET_STATID(Stat) : TStatId());
+	FScopeCycleCounter CycleCount_##Stat(bCondition ? GET_STATID(Stat) : TStatId(), GET_STATFLAGS(Stat));
 
 #define SCOPE_SECONDS_ACCUMULATOR(Stat) \
 	FSimpleScopeSecondsStat SecondsAccum_##Stat(GET_STATID(Stat));
@@ -1965,48 +2129,47 @@ struct FStat_##StatName\
 {\
 	if (FThreadStats::IsCollectingData() || !GET_STATISEVERYFRAME(Stat)) \
 	{ \
-		FThreadStats::AddMessage(GET_STATFNAME(Stat), EStatOperation::Add, int64(1));\
-		TRACE_STAT_INCREMENT(GET_STATFNAME(Stat)); \
+		const FName StatName = GET_STATFNAME(Stat); \
+		FThreadStats::AddMessage(StatName, EStatOperation::Add, int64(1));\
+		TRACE_STAT_INCREMENT(StatName); \
 	} \
 }
 #define INC_FLOAT_STAT_BY(Stat, Amount) \
 {\
-	if (Amount != 0.0f) \
+	double AddAmount = double(Amount); \
+	if (AddAmount != 0.0) \
 	{ \
 		if (FThreadStats::IsCollectingData() || !GET_STATISEVERYFRAME(Stat)) \
 		{ \
-			FThreadStats::AddMessage(GET_STATFNAME(Stat), EStatOperation::Add, double(Amount));\
-			TRACE_STAT_ADD(GET_STATFNAME(Stat), double(Amount)); \
+			const FName StatName = GET_STATFNAME(Stat); \
+			FThreadStats::AddMessage(StatName, EStatOperation::Add, AddAmount); \
+			TRACE_STAT_ADD(StatName, AddAmount); \
 		} \
 	} \
 }
 #define INC_DWORD_STAT_BY(Stat, Amount) \
 {\
-	if (Amount != 0) \
+	int64 AddAmount = int64(Amount); \
+	if (AddAmount != 0) \
 	{ \
 		if (FThreadStats::IsCollectingData() || !GET_STATISEVERYFRAME(Stat)) \
 		{ \
-			FThreadStats::AddMessage(GET_STATFNAME(Stat), EStatOperation::Add, int64(Amount));\
-			TRACE_STAT_ADD(GET_STATFNAME(Stat), int64(Amount)); \
+			const FName StatName = GET_STATFNAME(Stat); \
+			FThreadStats::AddMessage(StatName, EStatOperation::Add, AddAmount); \
+			TRACE_STAT_ADD(StatName, AddAmount); \
 		} \
-	} \
-}
-#define INC_DWORD_STAT_FNAME_BY(StatFName, Amount) \
-{\
-	if (Amount != 0) \
-	{ \
-		FThreadStats::AddMessage(StatFName, EStatOperation::Add, int64(Amount));\
-		TRACE_STAT_ADD(StatFName, int64(Amount)); \
 	} \
 }
 #define INC_MEMORY_STAT_BY(Stat, Amount) \
 {\
-	if (Amount != 0) \
+	int64 AddAmount = int64(Amount); \
+	if (AddAmount != 0) \
 	{ \
 		if (FThreadStats::IsCollectingData() || !GET_STATISEVERYFRAME(Stat)) \
 		{ \
-			FThreadStats::AddMessage(GET_STATFNAME(Stat), EStatOperation::Add, int64(Amount));\
-			TRACE_STAT_ADD(GET_STATFNAME(Stat), int64(Amount)); \
+			const FName StatName = GET_STATFNAME(Stat); \
+			FThreadStats::AddMessage(StatName, EStatOperation::Add, AddAmount); \
+			TRACE_STAT_ADD(StatName, AddAmount); \
 		} \
 	} \
 }
@@ -2014,48 +2177,47 @@ struct FStat_##StatName\
 {\
 	if (FThreadStats::IsCollectingData() || !GET_STATISEVERYFRAME(Stat)) \
 	{ \
-		FThreadStats::AddMessage(GET_STATFNAME(Stat), EStatOperation::Subtract, int64(1));\
-		TRACE_STAT_DECREMENT(GET_STATFNAME(Stat)); \
+		const FName StatName = GET_STATFNAME(Stat); \
+		FThreadStats::AddMessage(StatName, EStatOperation::Subtract, int64(1));\
+		TRACE_STAT_DECREMENT(StatName); \
 	} \
 }
 #define DEC_FLOAT_STAT_BY(Stat,Amount) \
 {\
-	if (Amount != 0.0f) \
+	double SubtractAmount = double(Amount); \
+	if (SubtractAmount != 0.0) \
 	{ \
 		if (FThreadStats::IsCollectingData() || !GET_STATISEVERYFRAME(Stat)) \
 		{ \
-			FThreadStats::AddMessage(GET_STATFNAME(Stat), EStatOperation::Subtract, double(Amount));\
-			TRACE_STAT_ADD(GET_STATFNAME(Stat), -double(Amount)); \
+			const FName StatName = GET_STATFNAME(Stat); \
+			FThreadStats::AddMessage(StatName, EStatOperation::Subtract, SubtractAmount); \
+			TRACE_STAT_ADD(StatName, -SubtractAmount); \
 		} \
 	} \
 }
 #define DEC_DWORD_STAT_BY(Stat,Amount) \
 {\
-	if (Amount != 0) \
+	int64 SubtractAmount = int64(Amount); \
+	if (SubtractAmount != 0) \
 	{ \
 		if (FThreadStats::IsCollectingData() || !GET_STATISEVERYFRAME(Stat)) \
 		{ \
-			FThreadStats::AddMessage(GET_STATFNAME(Stat), EStatOperation::Subtract, int64(Amount));\
-			TRACE_STAT_ADD(GET_STATFNAME(Stat), -int64(Amount)); \
+			const FName StatName = GET_STATFNAME(Stat); \
+			FThreadStats::AddMessage(StatName, EStatOperation::Subtract, SubtractAmount); \
+			TRACE_STAT_ADD(StatName, -SubtractAmount); \
 		} \
-	} \
-}
-#define DEC_DWORD_STAT_FNAME_BY(StatFName,Amount) \
-{\
-	if (Amount != 0) \
-	{ \
-		FThreadStats::AddMessage(StatFName, EStatOperation::Subtract, int64(Amount));\
-		TRACE_STAT_ADD(StatFName, -int64(Amount)); \
 	} \
 }
 #define DEC_MEMORY_STAT_BY(Stat,Amount) \
 {\
-	if (Amount != 0) \
+	int64 SubtractAmount = int64(Amount); \
+	if (SubtractAmount != 0) \
 	{ \
 		if (FThreadStats::IsCollectingData() || !GET_STATISEVERYFRAME(Stat)) \
 		{ \
-			FThreadStats::AddMessage(GET_STATFNAME(Stat), EStatOperation::Subtract, int64(Amount));\
-			TRACE_STAT_ADD(GET_STATFNAME(Stat), -int64(Amount)); \
+			const FName StatName = GET_STATFNAME(Stat); \
+			FThreadStats::AddMessage(StatName, EStatOperation::Subtract, SubtractAmount); \
+			TRACE_STAT_ADD(StatName, -SubtractAmount); \
 		} \
 	} \
 }
@@ -2063,24 +2225,30 @@ struct FStat_##StatName\
 {\
 	if (FThreadStats::IsCollectingData() || !GET_STATISEVERYFRAME(Stat)) \
 	{ \
-		FThreadStats::AddMessage(GET_STATFNAME(Stat), EStatOperation::Set, int64(Value));\
-		TRACE_STAT_SET(GET_STATFNAME(Stat), int64(Value)); \
+		const FName StatName = GET_STATFNAME(Stat); \
+		int64 SetValue = int64(Value); \
+		FThreadStats::AddMessage(StatName, EStatOperation::Set, SetValue); \
+		TRACE_STAT_SET(StatName, SetValue); \
 	} \
 }
 #define SET_DWORD_STAT(Stat,Value) \
 {\
 	if (FThreadStats::IsCollectingData() || !GET_STATISEVERYFRAME(Stat)) \
 	{ \
-		FThreadStats::AddMessage(GET_STATFNAME(Stat), EStatOperation::Set, int64(Value));\
-		TRACE_STAT_SET(GET_STATFNAME(Stat), int64(Value)); \
+		const FName StatName = GET_STATFNAME(Stat); \
+		int64 SetValue = int64(Value); \
+		FThreadStats::AddMessage(StatName, EStatOperation::Set, SetValue); \
+		TRACE_STAT_SET(StatName, SetValue); \
 	} \
 }
 #define SET_FLOAT_STAT(Stat,Value) \
 {\
 	if (FThreadStats::IsCollectingData() || !GET_STATISEVERYFRAME(Stat)) \
 	{ \
-		FThreadStats::AddMessage(GET_STATFNAME(Stat), EStatOperation::Set, double(Value));\
-		TRACE_STAT_SET(GET_STATFNAME(Stat), double(Value)); \
+		const FName StatName = GET_STATFNAME(Stat); \
+		double SetValue = double(Value); \
+		FThreadStats::AddMessage(StatName, EStatOperation::Set, SetValue); \
+		TRACE_STAT_SET(StatName, SetValue); \
 	} \
 }
 
@@ -2105,26 +2273,30 @@ struct FStat_##StatName\
 }
 #define INC_FLOAT_STAT_BY_FName(Stat, Amount) \
 {\
-	if (Amount != 0.0f) \
+	double AddAmount = double(Amount); \
+	if (AddAmount != 0.0) \
 	{ \
-		FThreadStats::AddMessage(Stat, EStatOperation::Add, double(Amount));\
-		TRACE_STAT_ADD(Stat, double(Amount)); \
+		FThreadStats::AddMessage(Stat, EStatOperation::Add, AddAmount); \
+		TRACE_STAT_ADD(Stat, AddAmount); \
 	} \
 }
 #define INC_DWORD_STAT_BY_FName(Stat, Amount) \
 {\
-	if (Amount != 0) \
+	int64 AddAmount = int64(Amount); \
+	if (AddAmount != 0) \
 	{ \
-		FThreadStats::AddMessage(Stat, EStatOperation::Add, int64(Amount));\
-		TRACE_STAT_ADD(Stat, int64(Amount)); \
+		FThreadStats::AddMessage(Stat, EStatOperation::Add, AddAmount); \
+		TRACE_STAT_ADD(Stat, AddAmount); \
 	} \
 }
+#define INC_DWORD_STAT_FNAME_BY(Stat, Amount) INC_DWORD_STAT_BY_FName(Stat, Amount)
 #define INC_MEMORY_STAT_BY_FName(Stat, Amount) \
 {\
-	if (Amount != 0) \
+	int64 AddAmount = int64(Amount); \
+	if (AddAmount != 0) \
 	{ \
-		FThreadStats::AddMessage(Stat, EStatOperation::Add, int64(Amount));\
-		TRACE_STAT_ADD(Stat, int64(Amount)); \
+		FThreadStats::AddMessage(Stat, EStatOperation::Add, AddAmount); \
+		TRACE_STAT_ADD(Stat, AddAmount); \
 	} \
 }
 #define DEC_DWORD_STAT_FName(Stat) \
@@ -2134,42 +2306,49 @@ struct FStat_##StatName\
 }
 #define DEC_FLOAT_STAT_BY_FName(Stat,Amount) \
 {\
-	if (Amount != 0.0f) \
+	double SubtractAmount = double(Amount); \
+	if (SubtractAmount != 0.0) \
 	{ \
-		FThreadStats::AddMessage(Stat, EStatOperation::Subtract, double(Amount));\
-		TRACE_STAT_ADD(Stat, -double(Amount)); \
+		FThreadStats::AddMessage(Stat, EStatOperation::Subtract, SubtractAmount); \
+		TRACE_STAT_ADD(Stat, -SubtractAmount); \
 	} \
 }
 #define DEC_DWORD_STAT_BY_FName(Stat,Amount) \
 {\
-	if (Amount != 0) \
+	int64 SubtractAmount = int64(Amount); \
+	if (SubtractAmount != 0) \
 	{ \
-		FThreadStats::AddMessage(Stat, EStatOperation::Subtract, int64(Amount));\
-		TRACE_STAT_ADD(Stat, -int64(Amount)); \
+		FThreadStats::AddMessage(Stat, EStatOperation::Subtract, SubtractAmount); \
+		TRACE_STAT_ADD(Stat, -SubtractAmount); \
 	} \
 }
+#define DEC_DWORD_STAT_FNAME_BY(Stat,Amount) DEC_DWORD_STAT_BY_FName(Stat,Amount)
 #define DEC_MEMORY_STAT_BY_FName(Stat,Amount) \
 {\
-	if (Amount != 0) \
+	int64 SubtractAmount = int64(Amount); \
+	if (SubtractAmount != 0) \
 	{ \
-		FThreadStats::AddMessage(Stat, EStatOperation::Subtract, int64(Amount));\
-		TRACE_STAT_ADD(Stat, -int64(Amount)); \
+		FThreadStats::AddMessage(Stat, EStatOperation::Subtract, SubtractAmount); \
+		TRACE_STAT_ADD(Stat, -SubtractAmount); \
 	} \
 }
 #define SET_MEMORY_STAT_FName(Stat,Value) \
 {\
-	FThreadStats::AddMessage(Stat, EStatOperation::Set, int64(Value));\
-	TRACE_STAT_SET(Stat, int64(Value)); \
+	int64 SetValue = int64(Value); \
+	FThreadStats::AddMessage(Stat, EStatOperation::Set, SetValue); \
+	TRACE_STAT_SET(Stat, SetValue); \
 }
 #define SET_DWORD_STAT_FName(Stat,Value) \
 {\
-	FThreadStats::AddMessage(Stat, EStatOperation::Set, int64(Value));\
-	TRACE_STAT_SET(Stat, int64(Value)); \
+	int64 SetValue = int64(Value); \
+	FThreadStats::AddMessage(Stat, EStatOperation::Set, SetValue); \
+	TRACE_STAT_SET(Stat, SetValue); \
 }
 #define SET_FLOAT_STAT_FName(Stat,Value) \
 {\
-	FThreadStats::AddMessage(Stat, EStatOperation::Set, double(Value));\
-	TRACE_STAT_SET(Stat, double(Value)); \
+	double SetValue = double(Value); \
+	FThreadStats::AddMessage(Stat, EStatOperation::Set, SetValue); \
+	TRACE_STAT_SET(Stat, SetValue); \
 }
 
 
@@ -2213,6 +2392,7 @@ DECLARE_STATS_GROUP(TEXT("Memory StaticMesh"),STATGROUP_MemoryStaticMesh, STATCA
 DECLARE_STATS_GROUP(TEXT("Memory"),STATGROUP_Memory, STATCAT_Advanced);
 DECLARE_STATS_GROUP(TEXT("Mesh Particles"),STATGROUP_MeshParticles, STATCAT_Advanced);
 DECLARE_STATS_GROUP(TEXT("Metal"),STATGROUP_MetalRHI, STATCAT_Advanced);
+DECLARE_STATS_GROUP(TEXT("AGX"),STATGROUP_AGXRHI, STATCAT_Advanced);
 DECLARE_STATS_GROUP(TEXT("Morph"),STATGROUP_MorphTarget, STATCAT_Advanced);
 DECLARE_STATS_GROUP(TEXT("Navigation"),STATGROUP_Navigation, STATCAT_Advanced);
 DECLARE_STATS_GROUP(TEXT("Net"),STATGROUP_Net, STATCAT_Advanced);
@@ -2235,6 +2415,7 @@ DECLARE_STATS_GROUP(TEXT("RHI"), STATGROUP_RHI, STATCAT_Advanced);
 DECLARE_STATS_GROUP(TEXT("RDG"), STATGROUP_RDG, STATCAT_Advanced);
 DECLARE_STATS_GROUP(TEXT("Render Thread"),STATGROUP_RenderThreadProcessing, STATCAT_Advanced);
 DECLARE_STATS_GROUP(TEXT("Render Target Pool"), STATGROUP_RenderTargetPool, STATCAT_Advanced);
+DECLARE_STATS_GROUP(TEXT("Render Scaling"), STATGROUP_RenderScaling, STATCAT_Advanced);
 DECLARE_STATS_GROUP(TEXT("Scene Memory"),STATGROUP_SceneMemory, STATCAT_Advanced);
 DECLARE_STATS_GROUP(TEXT("Scene Rendering"),STATGROUP_SceneRendering, STATCAT_Advanced);
 DECLARE_STATS_GROUP(TEXT("Scene Update"),STATGROUP_SceneUpdate, STATCAT_Advanced);
@@ -2267,12 +2448,13 @@ DECLARE_FLOAT_COUNTER_STAT_EXTERN(TEXT("Seconds Per Cycle"),STAT_SecondsPerCycle
 #if STATS || ENABLE_STATNAMEDEVENTS
 namespace Stats
 {
+	UE_DEPRECATED(5.1, "No replacement. Engine usage was redundant")
 	FORCEINLINE bool IsThreadCollectingData()
 	{
-#if STATS
-		return FThreadStats::IsCollectingData();
+#if STATS && CPUPROFILERTRACE_ENABLED
+		return UE_TRACE_CHANNELEXPR_IS_ENABLED(CpuChannel) || FThreadStats::IsCollectingData();
 #else
-		return GCycleStatsShouldEmitNamedEvents > 0;
+		return GCycleStatsShouldEmitNamedEvents != 0;
 #endif
 	}
 }

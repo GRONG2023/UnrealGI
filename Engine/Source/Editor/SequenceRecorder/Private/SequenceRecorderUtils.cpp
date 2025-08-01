@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SequenceRecorderUtils.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Actor.h"
 #include "Animation/AnimSingleNodeInstance.h"
 #include "AnimationRecorder.h"
@@ -14,6 +15,7 @@
 #include "Tracks/MovieSceneCameraCutTrack.h"
 #include "Sections/MovieSceneCameraCutSection.h"
 #include "SequenceRecorderActorGroup.h"
+#include "UObject/SavePackage.h"
 
 namespace SequenceRecorderUtils
 {
@@ -35,7 +37,7 @@ AActor* GetAttachment(AActor* InActor, FName& SocketName, FName& ComponentName)
 	return AttachedActor;
 }
 
-bool RecordSingleNodeInstanceToAnimation(USkeletalMeshComponent* PreviewComponent, UAnimSequence* NewAsset)
+bool RecordSingleNodeInstanceToAnimation(USkeletalMeshComponent* PreviewComponent, UAnimSequence* NewAsset, bool bShowMessage)
 {
 	UAnimSingleNodeInstance* SingleNodeInstance = (PreviewComponent) ? Cast<UAnimSingleNodeInstance>(PreviewComponent->GetAnimInstance()) : nullptr;
 	if (SingleNodeInstance && NewAsset)
@@ -61,8 +63,8 @@ bool RecordSingleNodeInstanceToAnimation(USkeletalMeshComponent* PreviewComponen
 		FAnimationRecordingSettings Setting;
 		AnimRecorder.Init(PreviewComponent, NewAsset,nullptr, Setting);
 		float Length = SingleNodeInstance->GetLength();
-		const float DefaultSampleRate = (Setting.SampleRate > 0.f) ? Setting.SampleRate : DEFAULT_SAMPLERATE;
-		const float Interval = 1.f / DefaultSampleRate;
+		const FFrameRate DefaultSampleRate = Setting.SampleFrameRate.IsValid() ? Setting.SampleFrameRate : FAnimationRecordingSettings::DefaultSampleFrameRate;
+		const float Interval = DefaultSampleRate.AsInterval();
 		float Time = 0.f;
 		for (; Time < Length; Time += Interval)
 		{
@@ -76,7 +78,7 @@ bool RecordSingleNodeInstanceToAnimation(USkeletalMeshComponent* PreviewComponen
 			RecordMesh(PreviewComponent, SingleNodeInstance, AnimRecorder, Length, Remainder);
 		}
 
-		AnimRecorder.FinishRecording(true);
+		AnimRecorder.FinishRecording(bShowMessage);
 		return true;
 	}
 
@@ -106,7 +108,7 @@ FString MakeNewGroupName(const FString& BaseAssetPath, const FString& BaseAssetN
 		// If the existing base asset name doesn't conflict, use it
 		FString AssetPath = BaseAssetPath / BaseAssetName / BaseAssetName + Dot + BaseAssetName;
 
-		if (!ExistingGroupNames.Contains(FName(*BaseAssetName)) && !AssetRegistryModule.Get().GetAssetByObjectPath(*AssetPath).IsValid())
+		if (!ExistingGroupNames.Contains(FName(*BaseAssetName)) && !AssetRegistryModule.Get().GetAssetByObjectPath(FSoftObjectPath(AssetPath)).IsValid())
 		{
 			return BaseAssetName;
 		}
@@ -136,7 +138,7 @@ FString MakeNewGroupName(const FString& BaseAssetPath, const FString& BaseAssetN
 
 		FString AssetPath = BaseAssetPath / NewAssetName / NewAssetName + Dot + NewAssetName;
 
-		if (!ExistingGroupNames.Contains(FName(*NewAssetName)) && !AssetRegistryModule.Get().GetAssetByObjectPath(*AssetPath).IsValid())
+		if (!ExistingGroupNames.Contains(FName(*NewAssetName)) && !AssetRegistryModule.Get().GetAssetByObjectPath(FSoftObjectPath(AssetPath)).IsValid())
 		{
 			return NewAssetName;
 		}
@@ -174,7 +176,7 @@ bool ParseTakeName(const FString& InTakeName, FString& OutActorName, FString& Ou
 	if (Splits.Num() > 0)
 	{
 		OutTakeNumber = FCString::Atoi(*Splits[Splits.Num()-1]);
-		Splits.Pop(true);
+		Splits.Pop(EAllowShrinking::Yes);
 		bHasTakeNumber = true;
 	}
 
@@ -182,7 +184,7 @@ bool ParseTakeName(const FString& InTakeName, FString& OutActorName, FString& Ou
 	if (Splits.Num() > 0 && OutSessionName.IsEmpty())
 	{
 		OutSessionName = Splits[Splits.Num()-1];
-		Splits.Pop(true);
+		Splits.Pop(EAllowShrinking::Yes);
 	}
 
 	// The rest is the actor name
@@ -270,18 +272,21 @@ void SaveAsset(UObject* InObject)
 	// More like a quick fix to be able to save sequence recordings in -game mode
 	Package->GetMetaData();
 
-	UPackage::SavePackage(Package, NULL, RF_Standalone, *PackageFileName, GError, nullptr, false, true, SAVE_NoError);
+	FSavePackageArgs SaveArgs;
+	SaveArgs.TopLevelFlags = RF_Standalone;
+	SaveArgs.SaveFlags = SAVE_NoError;
+	UPackage::SavePackage(Package, NULL, *PackageFileName, SaveArgs);
 }
 
 void GatherTakeInfo(ULevelSequence* InLevelSequence, TArray<FTakeInfo>& TakeInfos)
 {
 	UMovieScene* MovieScene = InLevelSequence->GetMovieScene();
 
-	for (auto MasterTrack : MovieScene->GetMasterTracks())
+	for (auto Track : MovieScene->GetTracks())
 	{
-		if (MasterTrack->IsA<UMovieSceneSubTrack>())
+		if (Track->IsA<UMovieSceneSubTrack>())
 		{
-			UMovieSceneSubTrack* SubTrack = Cast<UMovieSceneSubTrack>(MasterTrack);
+			UMovieSceneSubTrack* SubTrack = Cast<UMovieSceneSubTrack>(Track);
 			for (auto Section : SubTrack->GetAllSections())
 			{
 				if (Section->IsA<UMovieSceneSubSection>())

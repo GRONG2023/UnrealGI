@@ -6,8 +6,11 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
 #include "Containers/List.h"
+#include "CoreMinimal.h"
+#include "Misc/Build.h"
+#include "RHI.h"
+#include "RHIDefinitions.h"
 #include "RenderResource.h"
 
 class FShader;
@@ -29,23 +32,6 @@ public:
 
 	/** Destructor. */
 	RENDERCORE_API virtual ~FGlobalBoundShaderStateResource();
-
-	/**
-	 * If this global bound shader state hasn't been initialized yet, initialize it.
-	 * @return The bound shader state RHI.
-	 */
-	FRHIBoundShaderState* GetInitializedRHI(
-		FRHIVertexDeclaration* VertexDeclaration,
-		FRHIVertexShader* VertexShader,
-		FRHIPixelShader* PixelShader,
-		FRHIGeometryShader* GeometryShader
-		);
-
-	/**
-	 * If this global bound shader state has been initialized return it, otherwise return null. Can be called from any thread.
-	 * @return The bound shader state RHI.
-	 */
-	FRHIBoundShaderState* GetPreinitializedRHI();
 
 private:
 

@@ -2,12 +2,10 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-
 #include "Algo/BinarySearch.h"
 #include "AssetRegistry/AssetData.h"
-#include "Containers/BitArray.h"
 #include "AssetRegistry/IAssetRegistry.h"
+#include "Containers/BitArray.h"
 #include "Misc/AssetRegistryInterface.h"
 #include "PropertyCombinationSet.h"
 
@@ -73,7 +71,7 @@ public:
 	/** Returns number of connections this node has, both references and dependencies */
 	int32 GetConnectionCount() const;
 	/** Returns amount of memory used by the arrays */
-	uint32 GetAllocatedSize(void) const
+	SIZE_T GetAllocatedSize(void) const
 	{
 		return PackageDependencies.GetAllocatedSize() + PackageFlags.GetAllocatedSize() + NameDependencies.GetAllocatedSize() + ManageDependencies.GetAllocatedSize() + ManageFlags.GetAllocatedSize() + Referencers.GetAllocatedSize();
 	}
@@ -137,6 +135,12 @@ public:
 
 	struct FSaveScratch
 	{
+		struct FSortInfo
+		{
+			int32 SerializeIndex;
+			int32 ListIndex;
+		};
+		TArray<FSortInfo> SortInfos;
 		TArray<int32> OutDependencies;
 		TBitArray<> OutFlagBits;
 	};
@@ -158,6 +162,8 @@ public:
 	void SetIsDependencyListSorted(UE::AssetRegistry::EDependencyCategory Category, bool bValue);
 	bool IsReferencersSorted() const;
 	void SetIsReferencersSorted(bool bValue);
+	bool IsDependenciesInitialized() const;
+	void SetIsDependenciesInitialized(bool bValue);
 
 private:
 
@@ -172,6 +178,7 @@ private:
 		SearchableNameIsSorted = 1;
 		ManageIsSorted = 1;
 		ReferencersIsSorted = 1;
+		DependenciesInitialized = 0;
 	}
 
 	/** The name of the package/object this node represents */
@@ -186,4 +193,5 @@ private:
 	uint32 SearchableNameIsSorted : 1;
 	uint32 ManageIsSorted : 1;
 	uint32 ReferencersIsSorted : 1;
+	uint32 DependenciesInitialized : 1;
 };

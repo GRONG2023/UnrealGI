@@ -68,8 +68,9 @@ public:
 
 	/**
 	 * Purges any objects marked pending kill from the object list
+	 * @return True if any objects were purged, or false otherwise
 	 */
-	void PurgeKilledObjects();
+	bool PurgeKilledObjects();
 
 	// Called when the object list is finalized, Finalize() finishes the property window setup.
 	void Finalize();
@@ -88,11 +89,11 @@ public:
 	virtual TArray<const UStruct*> GetAllStructures() const override;
 
 	virtual int32 GetInstancesNum() const override{ return GetNumObjects(); }
-	virtual uint8* GetMemoryOfInstance(int32 Index) override
+	virtual uint8* GetMemoryOfInstance(int32 Index) const override
 	{
 		return (uint8*)GetUObject(Index);
 	}
-	virtual uint8* GetValuePtrOfInstance(int32 Index, const FProperty* InProperty, FPropertyNode* InParentNode) override
+	virtual uint8* GetValuePtrOfInstance(int32 Index, const FProperty* InProperty, const FPropertyNode* InParentNode) const override
 	{
 		if (InParentNode == nullptr || InProperty == nullptr)
 		{
@@ -113,7 +114,7 @@ public:
 
 		return InProperty->ContainerPtrToValuePtr<uint8>(ParentPtr);
 	}
-	virtual TWeakObjectPtr<UObject> GetInstanceAsUObject(int32 Index) override
+	virtual TWeakObjectPtr<UObject> GetInstanceAsUObject(int32 Index) const override
 	{
 		check(Objects.IsValidIndex(Index));
 		return Objects[Index];
@@ -133,14 +134,14 @@ public:
 
 
 	/** Generates a single child from the provided property name.  Any existing children are destroyed */
-	TSharedPtr<FPropertyNode> GenerateSingleChild( FName ChildPropertyName );
+	virtual TSharedPtr<FPropertyNode> GenerateSingleChild( FName ChildPropertyName ) override;
 
 	/**
 	 * @return The hidden categories 
 	 */
 	const TSet<FName>& GetHiddenCategories() const { return HiddenCategories; }
 
-	bool IsRootNode() const { return ParentNode == nullptr; }
+	bool IsRootNode() const { return ParentNodeWeakPtr.Pin() == nullptr; }
 
 	/**
 	 * @return True if Struct is one of the sparse data structures used by this object
@@ -151,7 +152,7 @@ protected:
 	virtual void InitBeforeNodeFlags() override;
 	virtual void InitChildNodes() override;
 	virtual bool GetQualifiedName( FString& PathPlusIndex, const bool bWithArrayIndex, const FPropertyNode* StopParent = nullptr, bool bIgnoreCategories = false ) const override;
-	virtual uint8* GetValueBaseAddress(uint8* Base, bool bIsSparseData) const override;
+	virtual uint8* GetValueBaseAddress(uint8* Base, bool bIsSparseData, bool bIsStruct) const override;
 	/**
 	 * Looks at the Objects array and creates the best base class.  Called by
 	 * Finalize(); that is, when the list of selected objects is being finalized.

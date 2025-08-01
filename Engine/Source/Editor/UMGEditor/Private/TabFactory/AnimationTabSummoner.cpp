@@ -8,6 +8,8 @@
 #include "Animation/WidgetAnimation.h"
 #include "WidgetBlueprint.h"
 #include "WidgetBlueprintEditorUtils.h"
+#include "Widgets/Docking/SDockTab.h"
+#include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Layout/SScrollBorder.h"
 #include "Widgets/Views/STableViewBase.h"
@@ -15,26 +17,35 @@
 #include "Widgets/Views/SListView.h"
 
 #if WITH_EDITOR
-	#include "EditorStyleSet.h"
+	#include "Styling/AppStyle.h"
 #endif // WITH_EDITOR
 #include "Blueprint/WidgetTree.h"
 
+#include "UMGEditorActions.h"
 #include "UMGStyle.h"
 #include "Widgets/Input/SSearchBox.h"
+#include "Input/DragAndDrop.h"
+#include "DragAndDrop/DecoratedDragDropOp.h"
 #include "Widgets/Text/SInlineEditableTextBlock.h"
 #include "Framework/Commands/GenericCommands.h"
 #include "ScopedTransaction.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Misc/TextFilter.h"
 #include "Kismet2/Kismet2NameValidators.h"
+#include "SPositiveActionButton.h"
+#include "GraphEditorActions.h"
+#include "BlueprintModes/WidgetBlueprintApplicationModes.h"
+#include "Engine/MemberReference.h"
 
 #define LOCTEXT_NAMESPACE "UMG"
 
 const FName FAnimationTabSummoner::TabID(TEXT("Animations"));
+const FName FAnimationTabSummoner::WidgetAnimSequencerDrawerID(TEXT("WidgetAnimSequencer"));
 
-FAnimationTabSummoner::FAnimationTabSummoner(TSharedPtr<class FWidgetBlueprintEditor> InBlueprintEditor)
+FAnimationTabSummoner::FAnimationTabSummoner(TSharedPtr<class FWidgetBlueprintEditor> InBlueprintEditor, bool bInIsDrawerTab)
 		: FWorkflowTabFactory(TabID, InBlueprintEditor)
 		, BlueprintEditor(InBlueprintEditor)
+		, bIsDrawerTab(bInIsDrawerTab)
 {
 	TabLabel = LOCTEXT("AnimationsTabLabel", "Animations");
 	TabIcon = FSlateIcon(FUMGStyle::GetStyleSetName(), "Animations.TabIcon");
@@ -128,6 +139,29 @@ struct FWidgetAnimationListItem
 	bool bNewAnimation;
 };
 
+/**
+ * This drag drop operation allows us to move around animations in the widget tree
+ */
+class FWidgetAnimationDragDropOp : public FDecoratedDragDropOp
+{
+public:
+	DRAG_DROP_OPERATOR_TYPE(FWidgetAnimationDragDropOp, FDecoratedDragDropOp)
+
+	/** The template to create an instance */
+	TSharedPtr<FWidgetAnimationListItem> ListItem;
+
+	/** Constructs the drag drop operation */
+	static TSharedRef<FWidgetAnimationDragDropOp> New(const TSharedPtr<FWidgetAnimationListItem>& InListItem, FText InDragText)
+	{
+		TSharedRef<FWidgetAnimationDragDropOp> Operation = MakeShared<FWidgetAnimationDragDropOp>();
+		Operation->ListItem = InListItem;
+		Operation->DefaultHoverText = InDragText;
+		Operation->CurrentHoverText = InDragText;
+		Operation->Construct();
+
+		return Operation;
+	}
+};
 
 typedef SListView<TSharedPtr<FWidgetAnimationListItem> > SWidgetAnimationListView;
 
@@ -144,7 +178,10 @@ public:
 
 		STableRow<TSharedPtr<FWidgetAnimationListItem>>::Construct(
 			STableRow<TSharedPtr<FWidgetAnimationListItem>>::FArguments()
-			.Padding( FMargin( 3.0f, 2.0f) )
+			.Padding(FMargin(3.0f, 2.0f))
+			.OnDragDetected(this, &SWidgetAnimationListItem::OnDragDetected)
+			.OnCanAcceptDrop(this, &SWidgetAnimationListItem::OnCanAcceptDrop)
+			.OnAcceptDrop(this, &SWidgetAnimationListItem::OnAcceptDrop)
 			.Content()
 			[
 				SAssignNew(InlineTextBlock, SInlineEditableTextBlock)
@@ -225,6 +262,11 @@ private:
 					Blueprint->Modify();
 					Blueprint->Animations.Add(WidgetAnimation);
 					ListItem.Pin()->bNewAnimation = false;
+
+					if (TSharedPtr<FWidgetBlueprintEditor> WidgetBlueprintEditorPin = BlueprintEditor.Pin())
+					{
+						WidgetBlueprintEditorPin->NotifyWidgetAnimListChanged();
+					}
 				}
 			}
 
@@ -238,8 +280,75 @@ private:
 			Blueprint->Animations.Add(WidgetAnimation);
 			ListItem.Pin()->bNewAnimation = false;
 			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+			if (TSharedPtr<FWidgetBlueprintEditor> WidgetBlueprintEditorPin = BlueprintEditor.Pin())
+			{
+				WidgetBlueprintEditorPin->NotifyWidgetAnimListChanged();
+			}
 		}
 	}
+
+	/** Called whenever a drag is detected by the tree view. */
+	FReply OnDragDetected(const FGeometry& InGeometry, const FPointerEvent& InPointerEvent)
+	{
+		TSharedPtr<FWidgetAnimationListItem> ListItemPinned = ListItem.Pin();
+		if (ListItemPinned.IsValid())
+		{
+			FText DefaultText = LOCTEXT("DefaultDragDropFormat", "Move 1 item(s)");
+			return FReply::Handled().BeginDragDrop(FWidgetAnimationDragDropOp::New(ListItemPinned, DefaultText));
+		}
+		return FReply::Unhandled();
+	}
+
+	/** Called to determine whether a current drag operation is valid for this row. */
+	TOptional<EItemDropZone> OnCanAcceptDrop(const FDragDropEvent& DragDropEvent, EItemDropZone InItemDropZone, TSharedPtr<FWidgetAnimationListItem> InListItem)
+	{
+		TSharedPtr<FWidgetAnimationDragDropOp> DragDropOp = DragDropEvent.GetOperationAs<FWidgetAnimationDragDropOp>();
+		if (DragDropOp.IsValid())
+		{
+			if (InItemDropZone == EItemDropZone::OntoItem)
+			{
+				DragDropOp->CurrentIconBrush = FAppStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Error"));
+			}
+			else
+			{
+				DragDropOp->CurrentIconBrush = FAppStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Ok"));
+			}
+			return InItemDropZone;
+		}
+		return TOptional<EItemDropZone>();
+	}
+
+	/** Called to complete a drag and drop onto this drop. */
+	FReply OnAcceptDrop(const FDragDropEvent& DragDropEvent, EItemDropZone InItemDropZone, TSharedPtr<FWidgetAnimationListItem> InListItem)
+	{
+		TSharedPtr<FWidgetAnimationDragDropOp> DragDropOp = DragDropEvent.GetOperationAs<FWidgetAnimationDragDropOp>();
+		if (DragDropOp.IsValid() 
+			&& DragDropOp->ListItem.IsValid() && DragDropOp->ListItem->Animation
+			&& InListItem.IsValid() && InListItem->Animation
+			&& DragDropOp->ListItem->Animation != InListItem->Animation)
+		{
+			if (UWidgetBlueprint* Blueprint = BlueprintEditor.Pin()->GetWidgetBlueprintObj())
+			{
+				Blueprint->Modify();
+				Blueprint->Animations.Remove(DragDropOp->ListItem->Animation);
+
+				int32 RelativeNewIndex = Blueprint->Animations.IndexOfByKey(InListItem->Animation);
+				RelativeNewIndex += InItemDropZone == EItemDropZone::BelowItem ? 1 : 0;
+
+				Blueprint->Animations.Insert(DragDropOp->ListItem->Animation, RelativeNewIndex);
+				FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+				if (TSharedPtr<FWidgetBlueprintEditor> WidgetBlueprintEditorPin = BlueprintEditor.Pin())
+				{
+					WidgetBlueprintEditorPin->NotifyWidgetAnimListChanged();
+				}
+				return FReply::Handled();
+			}
+		}
+		return FReply::Unhandled();
+	}
+
 private:
 	TWeakPtr<FWidgetAnimationListItem> ListItem;
 	TWeakPtr<FWidgetBlueprintEditor> BlueprintEditor;
@@ -253,12 +362,24 @@ public:
 	SLATE_BEGIN_ARGS( SUMGAnimationList	) {}
 	SLATE_END_ARGS()
 
-	void Construct( const FArguments& InArgs, TSharedPtr<FWidgetBlueprintEditor> InBlueprintEditor )
+	~SUMGAnimationList()
+	{
+		if (TSharedPtr<FWidgetBlueprintEditor> WidgetBlueprintEditorPin = BlueprintEditor.Pin())
+		{
+			WidgetBlueprintEditorPin->OnWidgetAnimationsUpdated.RemoveAll(this);
+			WidgetBlueprintEditorPin->OnSelectedAnimationChanged.RemoveAll(this);
+		}
+	}
+
+	void Construct( const FArguments& InArgs, TSharedPtr<FWidgetBlueprintEditor> InBlueprintEditor, bool bInIsDrawerTab )
 	{
 		BlueprintEditor = InBlueprintEditor;
+		bIsDrawerTab = bInIsDrawerTab;
 
 		InBlueprintEditor->GetOnWidgetBlueprintTransaction().AddSP( this, &SUMGAnimationList::OnWidgetBlueprintTransaction );
 		InBlueprintEditor->OnEnterWidgetDesigner.AddSP(this, &SUMGAnimationList::OnEnteringDesignerMode);
+		InBlueprintEditor->OnWidgetAnimationsUpdated.AddSP(this, &SUMGAnimationList::OnUpdatedAnimationList);
+		InBlueprintEditor->OnSelectedAnimationChanged.AddSP(this, &SUMGAnimationList::AnimationListSelelctionSync);
 
 		SAssignNew(AnimationListView, SWidgetAnimationListView)
 			.ItemHeight(20.0f)
@@ -272,63 +393,63 @@ public:
 		ChildSlot
 		[
 			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+			.Padding( FMargin(bIsDrawerTab ? 8.0f : 2.0f, 2.0f) )
 			[
-				SNew(SVerticalBox)
-				+ SVerticalBox::Slot()
-				.Padding( 2 )
-				.AutoHeight()
+				SNew(SOverlay)
+				+SOverlay::Slot()
+				.HAlign(HAlign_Fill)
+				.VAlign(VAlign_Fill)
 				[
-					SNew( SHorizontalBox )
-					+ SHorizontalBox::Slot()
-					.Padding(0)
-					.VAlign( VAlign_Center )
-					.AutoWidth()
+					SNew(SSplitter)
+					+ SSplitter::Slot()
+					.Value(0.15f)
 					[
-						SNew(SButton)
-						.ButtonStyle(FEditorStyle::Get(), "FlatButton.Success")
-						.ForegroundColor(FEditorStyle::Get().GetSlateColor("Foreground"))
-						.ContentPadding(FMargin(2.0f, 1.0f))
-						.OnClicked( this, &SUMGAnimationList::OnNewAnimationClicked )
-						.HAlign(HAlign_Center)
-						.VAlign(VAlign_Center)
+						SNew(SVerticalBox)
+						+ SVerticalBox::Slot()
+						.Padding( 2 )
+						.AutoHeight()
 						[
 							SNew( SHorizontalBox )
 							+ SHorizontalBox::Slot()
-							.VAlign(VAlign_Center)
+							.Padding(0)
+							.VAlign( VAlign_Center )
 							.AutoWidth()
 							[
-								SNew(STextBlock)
-								.TextStyle(FEditorStyle::Get(), "NormalText.Important")
-								.Font(FEditorStyle::Get().GetFontStyle("FontAwesome.10"))
-								.Text(FText::FromString(FString(TEXT("\xf067"))) /*fa-plus*/)
-							]
-
-							+ SHorizontalBox::Slot()
-							.Padding( 2.0f, 0.0f )
-							[
-								SNew( STextBlock )
-								.TextStyle(FEditorStyle::Get(), "NormalText.Important")
+								SNew(SPositiveActionButton)
+								.OnClicked( this, &SUMGAnimationList::OnNewAnimationClicked )
 								.Text( LOCTEXT("NewAnimationButtonText", "Animation") )
+							]
+							+ SHorizontalBox::Slot()
+							.Padding(2.0f, 0.0f)
+							.VAlign( VAlign_Center )
+							[
+								SAssignNew(SearchBoxPtr, SSearchBox)
+								.HintText(LOCTEXT("Search Animations", "Search Animations"))
+								.OnTextChanged(this, &SUMGAnimationList::OnSearchChanged)
+							]
+						]
+						+ SVerticalBox::Slot()
+						.FillHeight(1.0f)
+						[
+							SNew(SScrollBorder, AnimationListView.ToSharedRef())
+							[
+								AnimationListView.ToSharedRef()
 							]
 						]
 					]
-					+ SHorizontalBox::Slot()
-					.Padding(2.0f, 0.0f)
-					.VAlign( VAlign_Center )
+					+ SSplitter::Slot()
+					.Value(0.85f)
 					[
-						SAssignNew(SearchBoxPtr, SSearchBox)
-						.HintText(LOCTEXT("Search Animations", "Search Animations"))
-						.OnTextChanged(this, &SUMGAnimationList::OnSearchChanged)
+						bIsDrawerTab ? BlueprintEditor.Pin()->CreateSequencerDrawerWidget() : BlueprintEditor.Pin()->CreateSequencerTabWidget()
 					]
 				]
-				+ SVerticalBox::Slot()
-				.FillHeight(1.0f)
+				+SOverlay::Slot()
+				.HAlign(HAlign_Right)
+				.VAlign(VAlign_Top)
+				.Padding(FMargin(24.0, 10.0))
 				[
-					SNew(SScrollBorder, AnimationListView.ToSharedRef())
-					[
-						AnimationListView.ToSharedRef()
-					]
+					CreateDrawerDockButton()
 				]
 			]
 		];
@@ -338,7 +459,7 @@ public:
 		CreateCommandList();
 	}
 
-	virtual FReply OnKeyDown( const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent )
+	virtual FReply OnKeyDown( const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent ) override
 	{
 		FReply Reply = FReply::Unhandled();
 		if( CommandList->ProcessCommandBindings( InKeyEvent ) )
@@ -351,18 +472,56 @@ public:
 
 private:
 
-	void UpdateAnimationList()
+	void OnUpdatedAnimationList()
 	{
 		Animations.Empty();
 
 		const TArray<UWidgetAnimation*>& WidgetAnimations = BlueprintEditor.Pin()->GetWidgetBlueprintObj()->Animations;
 
-		for( UWidgetAnimation* Animation : WidgetAnimations )
+		for (UWidgetAnimation* Animation : WidgetAnimations)
 		{
-			Animations.Add( MakeShareable( new FWidgetAnimationListItem( Animation ) ) );
+			Animations.Add(MakeShareable(new FWidgetAnimationListItem(Animation)));
 		}
-		
+
 		AnimationListView->RequestListRefresh();
+	}
+
+	void AnimationListSelelctionSync()
+	{
+		if (TSharedPtr<FWidgetBlueprintEditor> WidgetBlueprintEditorPin = BlueprintEditor.Pin())
+		{
+			UWidgetAnimation* CurrentSelectedAnimation = WidgetBlueprintEditorPin->GetCurrentAnimation();
+
+			// This is to avoid looping calls to this function due to broadcast.
+			for (const TSharedPtr<FWidgetAnimationListItem>& SelectedAnimItem : AnimationListView->GetSelectedItems())
+			{
+				if (SelectedAnimItem->Animation == CurrentSelectedAnimation)
+				{
+					return;
+				}
+			}
+
+			// Find the list item containing the selected animation.
+			for (const TSharedPtr<FWidgetAnimationListItem>& AnimItem : Animations)
+			{
+				if (AnimItem->Animation == CurrentSelectedAnimation)
+				{
+					AnimationListView->SetSelection(AnimItem);
+					return;
+				}
+			}
+			AnimationListView->ClearSelection();
+		}
+	}
+
+	void UpdateAnimationList()
+	{
+		// There may be multiple sequencers acting as a view for our widget
+		// Let the BP editor handle updates as it as aware of all possible sequencers
+		if (TSharedPtr<FWidgetBlueprintEditor> WidgetBlueprintEditorPin = BlueprintEditor.Pin())
+		{
+			WidgetBlueprintEditorPin->NotifyWidgetAnimListChanged();
+		}
 	}
 
 	void OnEnteringDesignerMode()
@@ -525,7 +684,7 @@ private:
 		}
 	}
 
-	TSharedPtr<SWidget> OnContextMenuOpening() const
+	TSharedPtr<SWidget> OnContextMenuOpening()
 	{
 		FMenuBuilder MenuBuilder( true, CommandList.ToSharedRef() );
 
@@ -534,12 +693,32 @@ private:
 			MenuBuilder.AddMenuEntry(FGenericCommands::Get().Rename);
 			MenuBuilder.AddMenuEntry(FGenericCommands::Get().Duplicate);
 			MenuBuilder.AddMenuSeparator();
-
+			MenuBuilder.AddMenuEntry(FGraphEditorCommands::Get().FindReferences);
 			MenuBuilder.AddMenuEntry(FGenericCommands::Get().Delete);
 		}
 		MenuBuilder.EndSection();
 
 		return MenuBuilder.MakeWidget();
+	}
+
+	void FindReferencesToSelectedAnimation()
+	{
+		if (TSharedPtr<FWidgetBlueprintEditor> WidgetEditor = BlueprintEditor.Pin())
+		{
+			TArray< TSharedPtr<FWidgetAnimationListItem> > SelectedAnimations = AnimationListView->GetSelectedItems();
+			if (SelectedAnimations.Num() == 1)
+			{
+				TSharedPtr<FWidgetAnimationListItem> SelectedAnimation = SelectedAnimations[0];
+				const FString VariableName = SelectedAnimation->Animation->GetName();
+				
+				FMemberReference MemberReference;
+				MemberReference.SetSelfMember(*VariableName);
+				const FString SearchTerm = MemberReference.GetReferenceSearchString(WidgetEditor->GetWidgetBlueprintObj()->SkeletonGeneratedClass);
+
+				WidgetEditor->SetCurrentMode(FWidgetBlueprintApplicationModes::GraphMode);
+				WidgetEditor->SummonSearchUI(true, SearchTerm);
+			}
+		}
 	}
 
 	TSharedRef<ITableRow> OnGenerateWidgetForMovieScene( TSharedPtr<FWidgetAnimationListItem> InListItem, const TSharedRef< STableViewBase >& InOwnerTableView )
@@ -568,11 +747,66 @@ private:
 			FExecuteAction::CreateSP(this, &SUMGAnimationList::OnRenameAnimation),
 			FCanExecuteAction::CreateSP(this, &SUMGAnimationList::CanExecuteContextMenuAction)
 			);
+		
+		CommandList->MapAction(
+			FGraphEditorCommands::Get().FindReferences,
+			FExecuteAction::CreateSP(this, &SUMGAnimationList::FindReferencesToSelectedAnimation),
+			FCanExecuteAction::CreateSP(this, &SUMGAnimationList::CanExecuteContextMenuAction)
+			);
+
+		CommandList->MapAction(FUMGEditorCommands::Get().OpenAnimDrawer,
+			FExecuteAction::CreateSP(this, &SUMGAnimationList::ToggleAnimDrawer)
+		);
+	}
+
+	FReply CreateDrawerDockButtonClicked()
+	{
+		if (TSharedPtr<FWidgetBlueprintEditor> WidgetEditor = BlueprintEditor.Pin())
+		{
+			WidgetEditor->DockInLayoutClicked();
+		}
+
+		return FReply::Handled();
+	}
+
+	TSharedRef<SWidget> CreateDrawerDockButton()
+	{
+		if(bIsDrawerTab)
+		{
+			return 
+				SNew(SButton)
+				.ButtonStyle(FAppStyle::Get(), "SimpleButton")
+				.ToolTipText(LOCTEXT("DockInLayout_Tooltip", "Docks animation drawer in tab."))
+				.ContentPadding(FMargin(1, 0))
+				.OnClicked(this, &SUMGAnimationList::CreateDrawerDockButtonClicked)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.VAlign(VAlign_Center)
+					.Padding(4.0, 0.0f)
+					[
+						SNew(SImage)
+						.ColorAndOpacity(FSlateColor::UseForeground())
+						.Image(FAppStyle::Get().GetBrush("Icons.Layout"))
+					]
+					+ SHorizontalBox::Slot()
+					.VAlign(VAlign_Center)
+					.Padding(4.0, 0.0f)
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT("DockInLayout", "Dock in Layout"))
+						.ColorAndOpacity(FSlateColor::UseForeground())
+					]
+				];
+		}
+
+		return SNullWidget::NullWidget;
 	}
 
 	bool CanExecuteContextMenuAction() const
 	{
-		return AnimationListView->GetNumItemsSelected() == 1 && !BlueprintEditor.Pin()->InDebuggingMode();
+		return AnimationListView->GetNumItemsSelected() == 1 && !BlueprintEditor.Pin()->IsPlayInEditorActive();
 	}
 
 	void OnDuplicateAnimation()
@@ -614,7 +848,7 @@ private:
 
 		UWidgetBlueprint* WidgetBlueprint = WidgetBlueprintEditorPin->GetWidgetBlueprintObj();
 
-		TArray<UWidgetAnimation*>& WidgetAnimations = WidgetBlueprint->Animations;
+		TArray<TObjectPtr<UWidgetAnimation>>& WidgetAnimations = WidgetBlueprint->Animations;
 
 		{
 			const FScopedTransaction Transaction(LOCTEXT("DeleteAnimationTransaction", "Delete Animation"));
@@ -642,12 +876,22 @@ private:
 		AnimationListView->RequestScrollIntoView( SelectedAnimation );
 	}
 
+	void ToggleAnimDrawer()
+	{
+		if (TSharedPtr<FWidgetBlueprintEditor> WidgetEditor = BlueprintEditor.Pin())
+		{
+			WidgetEditor->ToggleAnimDrawer();
+		}
+	}
+
+
 private:
 	TSharedPtr<FUICommandList> CommandList;
 	TWeakPtr<FWidgetBlueprintEditor> BlueprintEditor;
 	TSharedPtr<SWidgetAnimationListView> AnimationListView;
 	TArray< TSharedPtr<FWidgetAnimationListItem> > Animations;
 	TSharedPtr<SSearchBox> SearchBoxPtr;
+	bool bIsDrawerTab;
 };
 
 
@@ -655,8 +899,18 @@ TSharedRef<SWidget> FAnimationTabSummoner::CreateTabBody(const FWorkflowTabSpawn
 {
 	TSharedPtr<FWidgetBlueprintEditor> BlueprintEditorPinned = BlueprintEditor.Pin();
 
-	return SNew( SUMGAnimationList, BlueprintEditorPinned );
-	
+	return SNew( SUMGAnimationList, BlueprintEditorPinned, bIsDrawerTab);
+}
+
+TSharedRef<SDockTab> FAnimationTabSummoner::SpawnTab(const FWorkflowTabSpawnInfo& Info) const
+{
+	TSharedRef<SDockTab> NewTab = FWorkflowTabFactory::SpawnTab(Info);
+	if (TSharedPtr<FWidgetBlueprintEditor> BlueprintEditorPinned = BlueprintEditor.Pin())
+	{
+		NewTab->SetOnTabClosed(SDockTab::FOnTabClosedCallback::CreateSP(BlueprintEditorPinned.ToSharedRef(), &FWidgetBlueprintEditor::OnWidgetAnimTabSequencerClosed));
+		BlueprintEditorPinned->OnWidgetAnimTabSequencerOpened();
+	}
+	return NewTab;
 }
 
 #undef LOCTEXT_NAMESPACE 

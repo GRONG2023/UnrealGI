@@ -4,15 +4,18 @@
 	ParticleTrailModules.cpp: Particle module implementations for trails.
 =============================================================================*/
 
-#include "CoreMinimal.h"
-#include "ParticleHelper.h"
 #include "ParticleEmitterInstances.h"
+#include "Particles/ParticleModule.h"
 #include "Particles/ParticleSystemComponent.h"
 #include "Distributions/DistributionFloatConstant.h"
 #include "Particles/Trail/ParticleModuleTrailBase.h"
 #include "Particles/Trail/ParticleModuleTrailSource.h"
 #include "Particles/TypeData/ParticleModuleTypeDataAnimTrail.h"
+#include "Particles/TypeData/ParticleModuleTypeDataBase.h"
 #include "Particles/TypeData/ParticleModuleTypeDataRibbon.h"
+#include "ParticleBeamTrailVertexFactory.h"
+#include "UObject/UnrealType.h"
+#include "Particles/ParticleEmitter.h"
 
 UParticleModuleTrailBase::UParticleModuleTrailBase(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -237,6 +240,22 @@ FParticleEmitterInstance* UParticleModuleTypeDataRibbon::CreateInstance(UParticl
 	return Instance;
 }
 
+const FVertexFactoryType* UParticleModuleTypeDataRibbon::GetVertexFactoryType() const
+{
+	return &FParticleBeamTrailVertexFactory::StaticType;
+}
+
+void UParticleModuleTypeDataRibbon::CollectPSOPrecacheData(const UParticleEmitter* Emitter, FPSOPrecacheParams& OutParams)
+{
+	bool bUsesDynamicParameter = (Emitter->DynamicParameterDataOffset > 0);
+
+	FPSOPrecacheVertexFactoryData VFData;
+	VFData.VertexFactoryType = &FParticleBeamTrailVertexFactory::StaticType;
+	VFData.CustomDefaultVertexDeclaration = FParticleBeamTrailVertexFactory::GetPSOPrecacheVertexDeclaration(bUsesDynamicParameter);
+	OutParams.VertexFactoryDataList.Add(VFData);
+	OutParams.PrimitiveType = GetPrimitiveType();
+}
+
 /*-----------------------------------------------------------------------------
 	UParticleModuleTypeDataAnimTrail implementation.
 -----------------------------------------------------------------------------*/
@@ -261,4 +280,20 @@ FParticleEmitterInstance* UParticleModuleTypeDataAnimTrail::CreateInstance(UPart
 	check(Instance);
 	Instance->InitParameters(InEmitterParent, InComponent);
 	return Instance;
+}
+
+const FVertexFactoryType* UParticleModuleTypeDataAnimTrail::GetVertexFactoryType() const
+{
+	return &FParticleBeamTrailVertexFactory::StaticType;
+}
+
+void UParticleModuleTypeDataAnimTrail::CollectPSOPrecacheData(const UParticleEmitter* Emitter, FPSOPrecacheParams& OutParams)
+{
+	bool bUsesDynamicParameter = (Emitter->DynamicParameterDataOffset > 0);
+
+	FPSOPrecacheVertexFactoryData VFData;
+	VFData.VertexFactoryType = &FParticleBeamTrailVertexFactory::StaticType;
+	VFData.CustomDefaultVertexDeclaration = FParticleBeamTrailVertexFactory::GetPSOPrecacheVertexDeclaration(bUsesDynamicParameter);
+	OutParams.VertexFactoryDataList.Add(VFData);
+	OutParams.PrimitiveType = GetPrimitiveType();
 }

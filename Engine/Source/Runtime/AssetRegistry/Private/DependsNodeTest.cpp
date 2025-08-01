@@ -753,7 +753,7 @@ bool FDependsNodeTest::RunTest(const FString& Parameters)
 				TestTrue(TEXT("IterateOverDependencies two property corners expected values"), Dependency == &B && Category == EDependencyCategory::Package && (Properties == EDependencyProperty::Game || Properties == EDependencyProperty::Hard));
 				TestTrue(TEXT("IterateOverDependencies two property corners bDuplicate is set correctly"), IterationIndex == 0 || bDuplicate);
 				bHasGame = bHasGame || Properties == EDependencyProperty::Game;
-				bHasHard = bHasHard || Properties == EDependencyProperty::Game;
+				bHasHard = bHasHard || Properties == EDependencyProperty::Hard;
 				IterationIndex++;
 			});
 		TestTrue(TEXT("IterateOverDependencies two property corners hits both corners"), bHasGame && bHasHard);
@@ -767,7 +767,7 @@ bool FDependsNodeTest::RunTest(const FString& Parameters)
 				TestTrue(TEXT("IterateOverDependencies two property corners, node-specific, expected values"), Dependency == &B && Category == EDependencyCategory::Package && (Properties == EDependencyProperty::Game || Properties == EDependencyProperty::Hard));
 				TestTrue(TEXT("IterateOverDependencies two property corners, node-specific, bDuplicate is set correctly"), IterationIndex == 0 || bDuplicate);
 				bHasGame = bHasGame || Properties == EDependencyProperty::Game;
-				bHasHard = bHasHard || Properties == EDependencyProperty::Game;
+				bHasHard = bHasHard || Properties == EDependencyProperty::Hard;
 				IterationIndex++;
 			}, &B);
 		TestTrue(TEXT("IterateOverDependencies two property corners, node-specific, hits both corners"), bHasGame&& bHasHard);
@@ -816,7 +816,7 @@ bool FDependsNodeTest::RunTest(const FString& Parameters)
 				TestTrue(TEXT("AddPackageDependencySet only two elements"), IterationIndex < 2);
 				TestTrue(TEXT("AddPackageDependencySets expected values"), Dependency == &B && Category == EDependencyCategory::Package && (Properties == EDependencyProperty::Game || Properties == EDependencyProperty::Hard));
 				bHasGame = bHasGame || Properties == EDependencyProperty::Game;
-				bHasHard = bHasHard || Properties == EDependencyProperty::Game;
+				bHasHard = bHasHard || Properties == EDependencyProperty::Hard;
 				IterationIndex++;
 			});
 		TestTrue(TEXT("IterateOverDependencies two property corners hits both corners"), bHasGame && bHasHard);
@@ -970,7 +970,7 @@ bool FDependsNodeTest::RunTest(const FString& Parameters)
 							LinkHaver.AddDependency(LinkNode, EDependencyCategory::SearchableName, EDependencyProperty::None);
 							LinkHaver.AddDependency(LinkNode, EDependencyCategory::Manage, ManageProperties[NodeIndex]);
 						};
-						auto GetNodeIndex = [&LinkNodes](const FDependsNode* Existing) { return Existing - &LinkNodes[0]; };
+						auto GetNodeIndex = [&LinkNodes](const FDependsNode* Existing) { return UE_PTRDIFF_TO_INT32(Existing - &LinkNodes[0]); };
 
 						if (SortTestType != ESortTestType::AlwaysSorted)
 						{
@@ -1114,8 +1114,7 @@ bool FDependsNodeTest::RunTest(const FString& Parameters)
 					return nullptr;
 				};
 
-				FAssetRegistrySerializationOptions Options;
-				Options.ModifyForDevelopment();
+				FAssetRegistrySerializationOptions Options(UE::AssetRegistry::ESerializationTarget::ForDevelopment);
 				Options.bSerializeSearchableNameDependencies = bKeepNameDependencies;
 				Options.bSerializeManageDependencies = bKeepManageDependencies;
 

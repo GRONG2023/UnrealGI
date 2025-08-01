@@ -4,6 +4,8 @@
 
 #include "Containers/UnrealString.h"
 #include "GenericPlatform/GenericPlatformMath.h"
+#include "HAL/Platform.h"
+#include "Math/UnrealMathUtility.h"
 #include "Misc/FrameNumber.h"
 #include "Misc/FrameRate.h"
 #include "Misc/Timespan.h"
@@ -57,7 +59,8 @@ struct FTimecode
 			const int32 CurrentRolloverSeconds = (int32)IntegralPart % NumberOfSecondsPerDay;
 			InSeconds = (double)CurrentRolloverSeconds + Fractional;
 		}
-		int32 NumberOfFrames = InbDropFrame ? (int32)FMath::RoundToDouble(InSeconds * InFrameRate.AsDecimal()) : (int32)FMath::RoundToDouble(InSeconds * FMath::RoundToDouble(InFrameRate.AsDecimal()));
+		
+		const int32 NumberOfFrames = (int32)FMath::RoundToDouble(InSeconds * InFrameRate.AsDecimal());
 		*this = FromFrameNumber(FFrameNumber(NumberOfFrames), InFrameRate, InbDropFrame);
 	}
 
@@ -230,9 +233,7 @@ public:
 	FTimespan ToTimespan(const FFrameRate& InFrameRate) const
 	{
 		const FFrameNumber ConvertedFrameNumber = ToFrameNumber(InFrameRate);
-		const double NumberOfSeconds = bDropFrameFormat
-				? ConvertedFrameNumber.Value * InFrameRate.AsInterval()
-				: (double)ConvertedFrameNumber.Value / FMath::RoundToDouble(InFrameRate.AsDecimal());
+		const double NumberOfSeconds = ConvertedFrameNumber.Value * InFrameRate.AsInterval();
 		return FTimespan::FromSeconds(NumberOfSeconds);
 	}
 
@@ -240,7 +241,7 @@ public:
 	 * Create a FTimecode from a timespan at the given frame rate. Optionally supports creating a drop frame timecode,
 	 * which drops certain timecode display numbers to help account for NTSC frame rates which are fractional.
 	 *
-	 * @param InFrameNumber	- The timespan to convert into a timecode.
+	 * @param InTimespan	- The timespan to convert into a timecode.
 	 * @param InFrameRate	- The framerate that this timecode is based in. This should be the playback framerate as it is used to determine
 	 *						  when the Frame value wraps over.
 	 * @param InbDropFrame	- If true, the returned timecode will drop the first two frames on every minute (except when Minute % 10 == 0)
@@ -256,7 +257,7 @@ public:
 	/**
 	 * Create a FTimecode from a timespan at the given frame rate.
 	 *
-	 * @param InFrameNumber	- The timespan to convert into a timecode.
+	 * @param InTimespan	- The timespan to convert into a timecode.
 	 * @param InFrameRate	- The framerate that this timecode is based in. This should be the playback framerate as it is used to determine
 	 *						  when the Frame value wraps over.
 	 * @param InbRollover	- If true, the hours will be the modulo of 24.
@@ -283,6 +284,19 @@ public:
 
 	/** By default, should we generate a timecode in drop frame format when the frame rate does support it. */
 	static CORE_API bool UseDropFormatTimecodeByDefaultWhenSupported();
+
+	/**
+	 * Returns true if the given frame rate string represents a supported drop frame timecode frame rate, or false otherwise.
+	 * 
+	 * Drop frame timecode is only supported for NTSC_30 (29.97 FPS) or NTSC_60 (59.94 FPS) frame rates.
+	 */
+	static bool IsValidDropFormatTimecodeRate(const FString& InRateString)
+	{
+		const FString NTSC_30_DF = "29.97df";
+		const FString NTSC_60_DF = "59.94df";
+
+		return (InRateString == NTSC_30_DF || InRateString == NTSC_60_DF);
+	}
 
 	/**
 	 * Get the Qualified Timecode formatted in HH:MM:SS:FF or HH:MM:SS;FF depending on if this represents drop-frame timecode or not.
@@ -331,14 +345,16 @@ public:
 
 	/** If true, this Timecode represents a Drop Frame timecode used to account for fractional frame rates in NTSC play rates. */
 	bool bDropFrameFormat;
+
+
+	friend inline bool operator==(const FTimecode& A, const FTimecode& B)
+	{
+		return A.Hours == B.Hours && A.Minutes == B.Minutes && A.Seconds == B.Seconds && A.Frames == B.Frames;
+	}
+
+	friend inline bool operator!=(const FTimecode& A, const FTimecode& B)
+	{
+		return !(A == B);
+	}
+
 };
-
-inline bool operator==(const FTimecode& A, const FTimecode& B)
-{
-	return A.Hours == B.Hours && A.Minutes == B.Minutes && A.Seconds == B.Seconds && A.Frames == B.Frames;
-}
-
-inline bool operator!=(const FTimecode& A, const FTimecode& B)
-{
-	return !(A == B);
-}

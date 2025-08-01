@@ -10,9 +10,11 @@
 #include "Framework/Text/ISlateLineHighlighter.h"
 #include "Framework/Text/SlateTextRun.h"
 #include "Framework/Text/SlatePasswordRun.h"
+#include "Trace/SlateMemoryTags.h"
 
 TSharedRef< FSlateTextLayout > FSlateTextLayout::Create(SWidget* InOwner, FTextBlockStyle InDefaultTextStyle)
 {
+	LLM_SCOPE_BYTAG(UI_Text);
 	TSharedRef< FSlateTextLayout > Layout = MakeShareable( new FSlateTextLayout(InOwner, MoveTemp(InDefaultTextStyle)) );
 	Layout->AggregateChildren();
 
@@ -67,14 +69,71 @@ int32 FSlateTextLayout::OnPaint( const FPaintArgs& Args, const FGeometry& Allott
 
 	int32 HighestLayerId = LayerId;
 
-	for (const FTextLayout::FLineView& LineView : LineViews)
+	auto IsAtLeastPartiallyVisible = [&AllottedGeometry, &InverseScale, &MyCullingRect](FVector2D Offset, FVector2D Size)
 	{
 		// Is this line visible?  This checks if the culling rect, which represents the AABB around the last clipping rect, intersects the 
 		// line of text, this requires that we get the text line into render space.
 		// TODO perhaps save off this line view rect during text layout?
-		const FVector2D LocalLineOffset = LineView.Offset * InverseScale;
-		const FSlateRect LineViewRect(AllottedGeometry.GetRenderBoundingRect(FSlateRect(LocalLineOffset, LocalLineOffset + (LineView.Size * InverseScale))));
-		if ( !FSlateRect::DoRectanglesIntersect(LineViewRect, MyCullingRect))
+		const FVector2D LocalLineOffset = Offset * InverseScale;
+		FSlateRect Rect(AllottedGeometry.GetRenderBoundingRect(FSlateRect(LocalLineOffset, LocalLineOffset + (Size * InverseScale))));
+
+		return FSlateRect::DoRectanglesIntersect(Rect, MyCullingRect);
+	};
+
+	auto IsFullyVisibleOnVerticalAxis = [&AllottedGeometry, &InverseScale, &MyCullingRect](FVector2D Offset, FVector2D Size)
+	{
+		const FVector2D LocalLineOffset = Offset * InverseScale;
+		FSlateRect Rect(AllottedGeometry.GetRenderBoundingRect(FSlateRect(LocalLineOffset, LocalLineOffset + (Size * InverseScale))));
+
+		//Clamp on the horizontal axis because we care only about vertical one.
+		Rect.Left = MyCullingRect.Left;
+		Rect.Right = MyCullingRect.Right;
+		return FSlateRect::IsRectangleContained(MyCullingRect, Rect);
+	};
+
+
+	const ETextOverflowPolicy OverflowPolicy = TextOverflowPolicyOverride.Get(DefaultTextStyle.OverflowPolicy);
+	const bool bIsMultiline = LineViews.Num() > 1;
+
+	int32 LineToDisplayNum = LineViews.Num();
+	int32 LastLineIndexToDisplay = 0;
+	if (bIsMultiline)
+	{
+		if (OverflowPolicy == ETextOverflowPolicy::MultilineEllipsis)
+		{
+			for (int32 LineIndex = 0; LineIndex < LineViews.Num(); ++LineIndex)
+			{	//Depending on their length, some lines can be invisible, but following ones could be visible, so we have to parse all of them to get the real last one.
+				if (IsFullyVisibleOnVerticalAxis(LineViews[LineIndex].Offset, LineViews[LineIndex].Size))
+				{
+					LastLineIndexToDisplay = LineIndex;
+				}
+			}
+			LineToDisplayNum = LastLineIndexToDisplay + 1;
+		}
+		else if (OverflowPolicy == ETextOverflowPolicy::Ellipsis)
+		{
+			for (int32 LineIndex = 0; LineIndex < LineViews.Num(); ++LineIndex)
+			{	//Depending on their length, some lines can be invisible, but following ones could be visible, so we have to parse all of them to get the real last one.
+				if (IsAtLeastPartiallyVisible(LineViews[LineIndex].Offset, LineViews[LineIndex].Size))
+				{
+					LastLineIndexToDisplay = LineIndex;
+				}
+			}
+			LineToDisplayNum = LastLineIndexToDisplay + 1;
+		}
+		else
+		{
+			LastLineIndexToDisplay = LineToDisplayNum - 1;
+		}
+	}
+
+	for (int32 LineIndex = 0; LineIndex < LineToDisplayNum; ++LineIndex)
+	{
+		const FTextLayout::FLineView& LineView = LineViews[LineIndex];
+		ETextOverflowPolicy LineOverflowPolicy = OverflowPolicy;
+		ETextOverflowDirection LineOverflowDirection = ETextOverflowDirection::NoOverflow;
+
+		if (!IsAtLeastPartiallyVisible(LineView.Offset, LineView.Size))
 		{
 			continue;
 		}
@@ -86,11 +145,70 @@ int32 FSlateTextLayout::OnPaint( const FPaintArgs& Args, const FGeometry& Allott
 		const int32 TextLayer = BlockDebugLayer + 1;
 		int32 HighestBlockLayerId = TextLayer;
 
-		// Render every block for this line
-		for (const TSharedRef< ILayoutBlock >& Block : LineView.Blocks)
+		bool bIsLastVisibleLine = false;
+		bool bIsNextLineClipped = false;
+		if (LineOverflowPolicy == ETextOverflowPolicy::Ellipsis || LineOverflowPolicy == ETextOverflowPolicy::MultilineEllipsis)
 		{
+			if (bIsMultiline)
+			{
+				bIsLastVisibleLine = LineIndex == LastLineIndexToDisplay;
+				bIsNextLineClipped = LineViews.IsValidIndex(LineIndex + 1) ? bIsLastVisibleLine : false;
+
+				//When wrapping/multiline text, we have to use the reading direction of the text, not the justification.
+				LineOverflowDirection = LineView.TextBaseDirection == TextBiDi::ETextDirection::LeftToRight ? ETextOverflowDirection::LeftToRight : ETextOverflowDirection::RightToLeft;
+			}
+			else
+			{
+				bIsLastVisibleLine = true;
+				const ETextJustify::Type VisualJustification = CalculateLineViewVisualJustification(LineView);
+				LineOverflowDirection = VisualJustification == ETextJustify::Left ? ETextOverflowDirection::LeftToRight : (VisualJustification == ETextJustify::Right ? ETextOverflowDirection::RightToLeft : ETextOverflowDirection::NoOverflow);
+			}
+		}
+
+		int32 LastVisibleBlockIndex = -1;
+		int32 NextBlockOffset = 0;
+		if (bIsLastVisibleLine)
+		{
+			int32 StartValue = 0;
+			int32 EndValue = 0;
+			if (LineOverflowDirection == ETextOverflowDirection::LeftToRight)
+			{
+				EndValue = LineView.Blocks.Num();
+				NextBlockOffset = 1;
+			}
+			else if (LineOverflowDirection == ETextOverflowDirection::RightToLeft)
+			{
+				StartValue = LineView.Blocks.Num() - 1;
+				EndValue = -1;
+				NextBlockOffset = -1;
+			}
+
+			for (int32 BlockIndex = StartValue; BlockIndex != EndValue; BlockIndex += NextBlockOffset)
+			{	//Depending on their position, some blocks can be invisible, but a following one could be visible, so we have to parse all of them.
+				const TSharedRef< ILayoutBlock >& Block = LineView.Blocks[BlockIndex];
+				if (IsAtLeastPartiallyVisible(Block->GetLocationOffset(), Block->GetSize()))
+				{
+					LastVisibleBlockIndex = BlockIndex;
+				}
+			}
+		}
+		else
+		{
+			LineOverflowDirection = ETextOverflowDirection::NoOverflow;
+			LineOverflowPolicy = ETextOverflowPolicy::Clip;
+		}
+
+		// Render every block for this line
+		for (int32 BlockIndex = 0; BlockIndex < LineView.Blocks.Num(); ++BlockIndex)
+		{
+			const TSharedRef< ILayoutBlock >& Block = LineView.Blocks[BlockIndex];
+			if (!IsAtLeastPartiallyVisible(Block->GetLocationOffset(), Block->GetSize()))
+			{
+				continue;
+			}
+
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
-			if ( GShowTextDebugging )
+			if ( GShowTextDebugging)
 			{
 				BlockDebugHue.R += 50.0f;
 
@@ -105,6 +223,10 @@ int32 FSlateTextLayout::OnPaint( const FPaintArgs& Args, const FGeometry& Allott
 			}
 #endif
 
+			FTextArgs TextArgs(LineView, Block, DefaultTextStyle, LineOverflowPolicy, LineOverflowDirection);
+			TextArgs.bIsLastVisibleBlock = bIsLastVisibleLine && BlockIndex == LastVisibleBlockIndex;
+			TextArgs.bIsNextBlockClipped = bIsNextLineClipped && (LineView.Blocks.IsValidIndex(BlockIndex + NextBlockOffset) ? TextArgs.bIsLastVisibleBlock : true);
+
 			const TSharedRef< ISlateRun > Run = StaticCastSharedRef< ISlateRun >( Block->GetRun() );
 
 			int32 HighestRunLayerId = TextLayer;
@@ -115,7 +237,7 @@ int32 FSlateTextLayout::OnPaint( const FPaintArgs& Args, const FGeometry& Allott
 			}
 			else
 			{
-				HighestRunLayerId = Run->OnPaint( Args, LineView, Block, DefaultTextStyle, AllottedGeometry, MyCullingRect, OutDrawElements, TextLayer, InWidgetStyle, bParentEnabled );
+				HighestRunLayerId = Run->OnPaint( Args, TextArgs, AllottedGeometry, MyCullingRect, OutDrawElements, TextLayer, InWidgetStyle, bParentEnabled );
 			}
 
 			HighestBlockLayerId = FMath::Max( HighestBlockLayerId, HighestRunLayerId );

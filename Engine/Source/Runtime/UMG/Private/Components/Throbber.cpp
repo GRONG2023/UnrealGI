@@ -2,34 +2,40 @@
 
 #include "Components/Throbber.h"
 #include "SlateFwd.h"
+#include "SlateGlobals.h"
 #include "Slate/SlateBrushAsset.h"
+#include "Styling/DefaultStyleCache.h"
+#include "Styling/UMGCoreStyle.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(Throbber)
 
 #define LOCTEXT_NAMESPACE "UMG"
 
 /////////////////////////////////////////////////////
 // UThrobber
 
-static FSlateBrush* DefaultThrobberBrush = nullptr;
-
 UThrobber::UThrobber(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	NumberOfPieces = 3;
 
 	bAnimateVertically = true;
 	bAnimateHorizontally = true;
 	bAnimateOpacity = true;
-
-	if (DefaultThrobberBrush == nullptr)
+	
+	Image = UE::Slate::Private::FDefaultStyleCache::GetRuntime().GetThrobberBrush();
+	
+#if WITH_EDITOR 
+	if (IsEditorWidget())
 	{
-		// HACK: THIS SHOULD NOT COME FROM CORESTYLE AND SHOULD INSTEAD BE DEFINED BY ENGINE TEXTURES/PROJECT SETTINGS
-		DefaultThrobberBrush = new FSlateBrush(*FCoreStyle::Get().GetBrush("Throbber.Chunk"));
+		Image = UE::Slate::Private::FDefaultStyleCache::GetEditor().GetThrobberBrush();
 
-		// Unlink UMG default colors from the editor settings colors.
-		DefaultThrobberBrush->UnlinkColors();
+		// The CDO isn't an editor widget and thus won't use the editor style, call post edit change to mark difference from CDO
+		PostEditChange();
 	}
-
-	Image = *DefaultThrobberBrush;
+#endif // WITH_EDITOR
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 void UThrobber::ReleaseSlateResources(bool bReleaseChildren)
@@ -41,11 +47,12 @@ void UThrobber::ReleaseSlateResources(bool bReleaseChildren)
 
 TSharedRef<SWidget> UThrobber::RebuildWidget()
 {
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	MyThrobber = SNew(SThrobber)
 		.PieceImage(&Image)
 		.NumPieces(FMath::Clamp(NumberOfPieces, 1, 25))
 		.Animate(GetAnimation());
-
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	return MyThrobber.ToSharedRef();
 }
 
@@ -53,10 +60,20 @@ void UThrobber::SynchronizeProperties()
 {
 	Super::SynchronizeProperties();
 
+	if (!MyThrobber.IsValid())
+	{
+		return;
+	}
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	MyThrobber->SetPieceImage(&Image);
+	MyThrobber->InvalidatePieceImage();
 	MyThrobber->SetNumPieces(FMath::Clamp(NumberOfPieces, 1, 25));
 	MyThrobber->SetAnimate(GetAnimation());
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 SThrobber::EAnimation UThrobber::GetAnimation() const
 {
 	const int32 AnimationParams = (bAnimateVertically ? SThrobber::Vertical : 0) |
@@ -68,11 +85,22 @@ SThrobber::EAnimation UThrobber::GetAnimation() const
 
 void UThrobber::SetNumberOfPieces(int32 InNumberOfPieces)
 {
-	NumberOfPieces = InNumberOfPieces;
+	int32 NewNumberOfPieces = FMath::Clamp(InNumberOfPieces, 1, 25);
+	if (NewNumberOfPieces != InNumberOfPieces)
+	{
+		UE_LOG(LogSlate, Warning, TEXT("The number of Pieces was clamped between 1 and 25"));
+	}
+
+	NumberOfPieces = NewNumberOfPieces;
 	if (MyThrobber.IsValid())
 	{
-		MyThrobber->SetNumPieces(FMath::Clamp(NumberOfPieces, 1, 25));
+		MyThrobber->SetNumPieces(NumberOfPieces);
 	}
+}
+
+int32 UThrobber::GetNumberOfPieces() const
+{
+	return NumberOfPieces;
 }
 
 void UThrobber::SetAnimateHorizontally(bool bInAnimateHorizontally)
@@ -84,6 +112,11 @@ void UThrobber::SetAnimateHorizontally(bool bInAnimateHorizontally)
 	}
 }
 
+bool UThrobber::IsAnimateHorizontally() const
+{
+	return bAnimateHorizontally;
+}
+
 void UThrobber::SetAnimateVertically(bool bInAnimateVertically)
 {
 	bAnimateVertically = bInAnimateVertically;
@@ -93,7 +126,12 @@ void UThrobber::SetAnimateVertically(bool bInAnimateVertically)
 	}
 }
 
-void UThrobber:: SetAnimateOpacity(bool bInAnimateOpacity)
+bool UThrobber::IsAnimateVertically() const
+{
+	return bAnimateVertically;
+}
+
+void UThrobber::SetAnimateOpacity(bool bInAnimateOpacity)
 {
 	bAnimateOpacity = bInAnimateOpacity;
 	if (MyThrobber.IsValid())
@@ -102,19 +140,25 @@ void UThrobber:: SetAnimateOpacity(bool bInAnimateOpacity)
 	}
 }
 
-void UThrobber::PostLoad()
+bool UThrobber::IsAnimateOpacity() const
 {
-	Super::PostLoad();
+	return bAnimateOpacity;
+}
 
-	if ( GetLinkerUE4Version() < VER_UE4_DEPRECATE_UMG_STYLE_ASSETS )
+void UThrobber::SetImage(const FSlateBrush& Brush)
+{
+	Image = Brush;
+	if (MyThrobber.IsValid())
 	{
-		if ( PieceImage_DEPRECATED != nullptr )
-		{
-			Image = PieceImage_DEPRECATED->Brush;
-			PieceImage_DEPRECATED = nullptr;
-		}
+		MyThrobber->InvalidatePieceImage();
 	}
 }
+
+const FSlateBrush& UThrobber::GetImage() const
+{
+	return Image;
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 #if WITH_EDITOR
 
@@ -128,3 +172,4 @@ const FText UThrobber::GetPaletteCategory()
 /////////////////////////////////////////////////////
 
 #undef LOCTEXT_NAMESPACE
+

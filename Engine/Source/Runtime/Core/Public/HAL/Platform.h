@@ -1,16 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
-
+// IWYU pragma: begin_exports
 #pragma once
 
 #include "Misc/Build.h"
+#include "Misc/LargeWorldCoordinates.h"
 
 // define all other platforms to be zero
 //@port Define the platform here to be zero when compiling for other platforms
 #if !defined(PLATFORM_WINDOWS)
 	#define PLATFORM_WINDOWS 0
-#endif
-#if !defined(PLATFORM_XBOXONE)
-	#define PLATFORM_XBOXONE 0
 #endif
 #if !defined(PLATFORM_MAC)
 	#define PLATFORM_MAC 0
@@ -19,14 +17,14 @@
 	#define PLATFORM_MAC_X86 0
 	#define PLATFORM_MAC_ARM64 0
 #endif
-#if !defined(PLATFORM_PS4)
-	#define PLATFORM_PS4 0
-#endif
 #if !defined(PLATFORM_IOS)
 	#define PLATFORM_IOS 0
 #endif
 #if !defined(PLATFORM_TVOS)
 	#define PLATFORM_TVOS 0
+#endif
+#if !defined(PLATFORM_VISIONOS)
+	#define PLATFORM_VISIONOS 0
 #endif
 #if !defined(PLATFORM_ANDROID)
 	#define PLATFORM_ANDROID 0
@@ -43,26 +41,14 @@
 #if !defined(PLATFORM_ANDROID_X64)
 	#define PLATFORM_ANDROID_X64 0
 #endif
-#if !defined(PLATFORM_ANDROID_VULKAN)
-	#define PLATFORM_ANDROID_VULKAN 0
-#endif
-#if !defined(PLATFORM_ANDROIDGL4)
-	#define PLATFORM_ANDROIDGL4 0
-#endif
-#if !defined(PLATFORM_LUMINGL4)
-	#define PLATFORM_LUMINGL4 0
-#endif
-#if !defined(PLATFORM_LUMIN)
-	#define PLATFORM_LUMIN 0
-#endif
 #if !defined(PLATFORM_APPLE)
 	#define PLATFORM_APPLE 0
 #endif
 #if !defined(PLATFORM_LINUX)
 	#define PLATFORM_LINUX 0
 #endif
-#if !defined(PLATFORM_LINUXAARCH64)
-	#define PLATFORM_LINUXAARCH64 0
+#if !defined(PLATFORM_LINUXARM64)
+	#define PLATFORM_LINUXARM64 0
 #endif
 #if !defined(PLATFORM_SWITCH)
 	#define PLATFORM_SWITCH 0
@@ -89,7 +75,7 @@
 
 // Whether the CPU is x86/x64 (i.e. both 32 and 64-bit variants)
 #ifndef PLATFORM_CPU_X86_FAMILY
-	#if (defined(_M_IX86) || defined(__i386__) || defined(_M_X64) || defined(__amd64__) || defined(__x86_64__))
+	#if (defined(_M_IX86) || defined(__i386__) || defined(_M_X64) || defined(__amd64__) || defined(__x86_64__)) && !defined(_M_ARM64EC)
 		#define PLATFORM_CPU_X86_FAMILY	1
 	#else
 		#define PLATFORM_CPU_X86_FAMILY	0
@@ -98,7 +84,7 @@
 
 // Whether the CPU is AArch32/AArch64 (i.e. both 32 and 64-bit variants)
 #ifndef PLATFORM_CPU_ARM_FAMILY
-	#if (defined(__arm__) || defined(_M_ARM) || defined(__aarch64__) || defined(_M_ARM64))
+	#if (defined(__arm__) || defined(_M_ARM) || defined(__aarch64__) || defined(_M_ARM64) || defined(_M_ARM64EC))
 		#define PLATFORM_CPU_ARM_FAMILY	1
 	#else
 		#define PLATFORM_CPU_ARM_FAMILY	0
@@ -122,14 +108,22 @@
 #endif // defined(__clang__)
 #endif
 
-#if PLATFORM_WINDOWS
-	#include "Windows/WindowsPlatformCodeAnalysis.h"
-#elif PLATFORM_COMPILER_CLANG
+#if PLATFORM_COMPILER_CLANG
 	#include "Clang/ClangPlatformCodeAnalysis.h"
+#elif PLATFORM_WINDOWS
+	#include "Windows/WindowsPlatformCodeAnalysis.h"
 #endif
 
 #ifndef USING_ADDRESS_SANITISER
 	#define USING_ADDRESS_SANITISER 0
+#endif
+
+#ifndef USING_HW_ADDRESS_SANITISER
+	#define USING_HW_ADDRESS_SANITISER 0
+#endif
+
+#ifndef PLATFORM_HAS_ASAN_INCLUDE
+	#define PLATFORM_HAS_ASAN_INCLUDE __has_include(<sanitizer/asan_interface.h>)
 #endif
 
 //---------------------------------------------------------
@@ -175,20 +169,35 @@
 // If PLATFORM_MAYBE_HAS_### is 1, then ### intrinsics are compilable.
 // This does not guarantee that the intrinsics are runnable on all instances of the platform however; a runtime check such as cpuid may be required to confirm availability.
 // If PLATFORM_ALWAYS_HAS_### is 1, then ## intrinsics will compile and run on all instances of the platform.  PLATFORM_ALWAYS_HAS_### == 1 implies PLATFORM_MAYBE_HAS_### == 1.
+
+// UE5.2+ requires SSE4.2.
 #ifndef PLATFORM_MAYBE_HAS_SSE4_1
-	#define PLATFORM_MAYBE_HAS_SSE4_1			0
+	#define PLATFORM_MAYBE_HAS_SSE4_1			PLATFORM_CPU_X86_FAMILY
 #endif
 #ifndef PLATFORM_ALWAYS_HAS_SSE4_1
-	#define PLATFORM_ALWAYS_HAS_SSE4_1			0
+	#define PLATFORM_ALWAYS_HAS_SSE4_1			PLATFORM_CPU_X86_FAMILY
 #endif
+#ifndef PLATFORM_ALWAYS_HAS_SSE4_2
+	#define PLATFORM_ALWAYS_HAS_SSE4_2			PLATFORM_CPU_X86_FAMILY
+#endif
+
 #ifndef PLATFORM_MAYBE_HAS_AVX
 	#define PLATFORM_MAYBE_HAS_AVX				0
 #endif
 #ifndef PLATFORM_ALWAYS_HAS_AVX
 	#define PLATFORM_ALWAYS_HAS_AVX				0
 #endif
+#ifndef PLATFORM_ALWAYS_HAS_AVX_2
+	#define PLATFORM_ALWAYS_HAS_AVX_2			0
+#endif
 #ifndef PLATFORM_ALWAYS_HAS_FMA3
 	#define PLATFORM_ALWAYS_HAS_FMA3			0
+#endif
+#ifndef PLATFORM_ALWAYS_HAS_AESNI
+	#define PLATFORM_ALWAYS_HAS_AESNI			0
+#endif
+#ifndef PLATFORM_ALWAYS_HAS_SHA
+	#define PLATFORM_ALWAYS_HAS_SHA				0
 #endif
 
 
@@ -207,6 +216,9 @@
 #ifndef PLATFORM_ENABLE_VECTORINTRINSICS_NEON
 	#define PLATFORM_ENABLE_VECTORINTRINSICS_NEON	0
 #endif
+#ifndef UE_VALIDATE_FORMAT_STRINGS
+	#define UE_VALIDATE_FORMAT_STRINGS 0
+#endif
 #ifndef PLATFORM_USE_LS_SPEC_FOR_WIDECHAR
 	#define PLATFORM_USE_LS_SPEC_FOR_WIDECHAR	1
 #endif
@@ -216,24 +228,8 @@
 #ifndef PLATFORM_COMPILER_DISTINGUISHES_INT_AND_LONG
 	#define PLATFORM_COMPILER_DISTINGUISHES_INT_AND_LONG			0
 #endif
-#ifdef _MSC_VER
-	#define PLATFORM_COMPILER_HAS_AUTO_RETURN_TYPES 1
-	#ifndef __clang__
-		#pragma deprecated("PLATFORM_COMPILER_HAS_AUTO_RETURN_TYPES")
-	#endif
-#else
-	#define PLATFORM_COMPILER_HAS_AUTO_RETURN_TYPES 1 DEPRECATED_MACRO(4.19, "PLATFORM_COMPILER_HAS_AUTO_RETURN_TYPES has been deprecated and should be replaced with 1.")
-#endif
 #ifndef PLATFORM_COMPILER_HAS_GENERIC_KEYWORD
 	#define PLATFORM_COMPILER_HAS_GENERIC_KEYWORD	0
-#endif
-#ifdef _MSC_VER
-	#define PLATFORM_COMPILER_HAS_DEFAULTED_FUNCTIONS 1
-	#ifndef __clang__
-		#pragma deprecated("PLATFORM_COMPILER_HAS_DEFAULTED_FUNCTIONS")
-	#endif
-#else
-	#define PLATFORM_COMPILER_HAS_DEFAULTED_FUNCTIONS 1 DEPRECATED_MACRO(4.19, "PLATFORM_COMPILER_HAS_DEFAULTED_FUNCTIONS has been deprecated and should be replaced with 1.")
 #endif
 #ifndef PLATFORM_COMPILER_COMMON_LANGUAGE_RUNTIME_COMPILATION
 	#define PLATFORM_COMPILER_COMMON_LANGUAGE_RUNTIME_COMPILATION 0
@@ -241,17 +237,14 @@
 #ifndef PLATFORM_COMPILER_HAS_TCHAR_WMAIN
 	#define PLATFORM_COMPILER_HAS_TCHAR_WMAIN 0
 #endif
-#ifndef PLATFORM_COMPILER_HAS_DECLTYPE_AUTO
-	#define PLATFORM_COMPILER_HAS_DECLTYPE_AUTO 1
+#define PLATFORM_COMPILER_HAS_DECLTYPE_AUTO 1 UE_DEPRECATED_MACRO(5.4, "PLATFORM_COMPILER_HAS_DECLTYPE_AUTO has been deprecated and should be replaced with 1.")
+#define PLATFORM_COMPILER_HAS_FOLD_EXPRESSIONS 1 UE_DEPRECATED_MACRO(5.4, "PLATFORM_COMPILER_HAS_FOLD_EXPRESSIONS has been deprecated and should be replaced with 1.")
+#ifndef PLATFORM_COMPILER_HAS_GENERATED_COMPARISON_OPERATORS
+	#define PLATFORM_COMPILER_HAS_GENERATED_COMPARISON_OPERATORS (__cplusplus >= 202002L)
 #endif
-#ifndef PLATFORM_COMPILER_HAS_IF_CONSTEXPR
-	#define PLATFORM_COMPILER_HAS_IF_CONSTEXPR 1
-#endif
-#ifndef PLATFORM_COMPILER_HAS_FOLD_EXPRESSIONS
-	#define PLATFORM_COMPILER_HAS_FOLD_EXPRESSIONS 0
-#endif
-#ifndef PLATFORM_TCHAR_IS_1_BYTE
-	#define PLATFORM_TCHAR_IS_1_BYTE			0
+// Feature test macro for constexpr __builtin_FILE() and __builtin_LINE()
+#ifndef PLATFORM_COMPILER_SUPPORTS_CONSTEXPR_BUILTIN_FILE_AND_LINE
+	#define PLATFORM_COMPILER_SUPPORTS_CONSTEXPR_BUILTIN_FILE_AND_LINE 1
 #endif
 #ifndef PLATFORM_TCHAR_IS_4_BYTES
 	#define PLATFORM_TCHAR_IS_4_BYTES			0
@@ -259,11 +252,23 @@
 #ifndef PLATFORM_WCHAR_IS_4_BYTES
 	#define PLATFORM_WCHAR_IS_4_BYTES			0
 #endif
+// The PLATFORM_TCHAR_IS_CHAR16 macro really represents PLATFORM_WIDECHAR_IS_CHAR16 - it should be deprecated
 #ifndef PLATFORM_TCHAR_IS_CHAR16
 	#define PLATFORM_TCHAR_IS_CHAR16			0
 #endif
+#define PLATFORM_WIDECHAR_IS_CHAR16 PLATFORM_TCHAR_IS_CHAR16
+#ifndef PLATFORM_TCHAR_IS_UTF8CHAR
+	#define PLATFORM_TCHAR_IS_UTF8CHAR			USE_UTF8_TCHARS
+#endif
+#ifndef PLATFORM_UCS2CHAR_IS_UTF16CHAR
+	// Currently true, but we don't want it to be true
+	#define PLATFORM_UCS2CHAR_IS_UTF16CHAR		1
+#endif
 #ifndef PLATFORM_HAS_BSD_TIME
 	#define PLATFORM_HAS_BSD_TIME				1
+#endif
+#ifndef PLATFORM_HAS_BSD_THREAD_CPUTIME
+	#define PLATFORM_HAS_BSD_THREAD_CPUTIME		0
 #endif
 #ifndef PLATFORM_HAS_BSD_SOCKETS
 	#define PLATFORM_HAS_BSD_SOCKETS			1
@@ -276,6 +281,13 @@
 #endif
 #ifndef PLATFORM_USE_PTHREADS
 	#define PLATFORM_USE_PTHREADS				1
+#endif
+#ifndef PLATFORM_HAS_MULTITHREADED_PREMAIN
+	/**
+	 * If true, the platform uses multiple threads in c++ static initialization before main is called, and systems
+	 * accessible from multiple threads during premain static initialization must handle multithreaded synchronization.
+	 */
+	#define PLATFORM_HAS_MULTITHREADED_PREMAIN 0
 #endif
 #ifndef PLATFORM_MAX_FILEPATH_LENGTH_DEPRECATED
 	#define PLATFORM_MAX_FILEPATH_LENGTH_DEPRECATED		128			// Deprecated - prefer FPlatformMisc::GetMaxPathLength() instead.
@@ -300,6 +312,9 @@
 #endif
 #ifndef PLATFORM_HAS_BSD_SOCKET_FEATURE_IOCTL
 	#define PLATFORM_HAS_BSD_SOCKET_FEATURE_IOCTL	1
+#endif
+#ifndef PLATFORM_HAS_BSD_SOCKET_FEATURE_POLL
+	#define PLATFORM_HAS_BSD_SOCKET_FEATURE_POLL	0
 #endif
 #ifndef PLATFORM_HAS_BSD_SOCKET_FEATURE_SELECT
 	#define PLATFORM_HAS_BSD_SOCKET_FEATURE_SELECT	1
@@ -350,12 +365,12 @@
 	#define PLATFORM_SUPPORTS_GEOMETRY_SHADERS		1
 #endif
 
-#ifndef PLATFORM_SUPPORTS_TESSELLATION_SHADERS
-	#define PLATFORM_SUPPORTS_TESSELLATION_SHADERS	1
+#ifndef PLATFORM_SUPPORTS_MESH_SHADERS
+	#define PLATFORM_SUPPORTS_MESH_SHADERS 0
 #endif
 
-#if PLATFORM_SUPPORTS_TESSELLATION_SHADERS && !PLATFORM_SUPPORTS_GEOMETRY_SHADERS
-	#error Geometry shader support is required by tessellation
+#ifndef PLATFORM_SUPPORTS_BINDLESS_RENDERING
+	#define PLATFORM_SUPPORTS_BINDLESS_RENDERING 0
 #endif
 
 #ifndef PLATFORM_BUILTIN_VERTEX_HALF_FLOAT
@@ -380,6 +395,10 @@
 
 #ifndef PLATFORM_SUPPORTS_JEMALLOC
 	#define PLATFORM_SUPPORTS_JEMALLOC 0
+#endif
+
+#ifndef PLATFORM_SUPPORTS_MIMALLOC
+	#define PLATFORM_SUPPORTS_MIMALLOC 0
 #endif
 
 #ifndef PLATFORM_CAN_SUPPORT_EDITORONLY_DATA
@@ -414,10 +433,6 @@
 	#define PLATFORM_SUPPORTS_STACK_SYMBOLS 0
 #endif
 
-#ifndef PLATFORM_RUNTIME_MALLOCPROFILER_SYMBOLICATION
-	#define PLATFORM_RUNTIME_MALLOCPROFILER_SYMBOLICATION PLATFORM_SUPPORTS_STACK_SYMBOLS
-#endif
-
 #ifndef PLATFORM_HAS_128BIT_ATOMICS
 	#define PLATFORM_HAS_128BIT_ATOMICS 0
 #endif
@@ -428,10 +443,6 @@
 
 #ifndef PLATFORM_IMPLEMENTS_BeginNamedEventStatic
 	#define PLATFORM_IMPLEMENTS_BeginNamedEventStatic			0
-#endif
-
-#ifndef PLATFORM_RHITHREAD_DEFAULT_BYPASS
-	#define PLATFORM_RHITHREAD_DEFAULT_BYPASS					1
 #endif
 
 #ifndef PLATFORM_HAS_UMA
@@ -466,10 +477,6 @@
 	#define PLATFORM_WEAKLY_CONSISTENT_MEMORY PLATFORM_CPU_ARM_FAMILY
 #endif
 
-#ifndef PLATFORM_HAS_CRC_INTRINSICS
-	#define PLATFORM_HAS_CRC_INTRINSICS							0
-#endif
-
 #ifndef PLATFORM_NEEDS_RHIRESOURCELIST
 	#define PLATFORM_NEEDS_RHIRESOURCELIST 1
 #endif
@@ -478,16 +485,20 @@
 	#define PLATFORM_USE_FULL_TASK_GRAPH						1
 #endif
 
+#ifndef PLATFORM_USES_ANSI_MALLOC
+	#define PLATFORM_USES_ANSI_MALLOC							1
+#endif
+
 #ifndef PLATFORM_USE_ANSI_POSIX_MALLOC
 	#define PLATFORM_USE_ANSI_POSIX_MALLOC						0
+#endif
+
+#ifndef PLATFORM_USES__ALIGNED_MALLOC
+	#define PLATFORM_USES__ALIGNED_MALLOC						0
 #endif
 
 #ifndef PLATFORM_USE_ANSI_MEMALIGN
 	#define PLATFORM_USE_ANSI_MEMALIGN							0
-#endif
-
-#ifndef PLATFORM_USE_ANSI_POSIX_MALLOC
-	#define PLATFORM_USE_ANSI_POSIX_MALLOC						0
 #endif
 
 #ifndef PLATFORM_IS_ANSI_MALLOC_THREADSAFE
@@ -502,21 +513,12 @@
 	#define PLATFORM_SUPPORTS_VORBIS_CODEC						1
 #endif
 
-
 #ifndef PLATFORM_USE_MINIMAL_HANG_DETECTION
 	#define PLATFORM_USE_MINIMAL_HANG_DETECTION					0
 #endif
 
-#ifndef PLATFORM_PRESENT_HANG_DETECTION_ON_BY_DEFAULT
-	#define PLATFORM_PRESENT_HANG_DETECTION_ON_BY_DEFAULT		0
-#endif
-
 #ifndef PLATFORM_USE_GENERIC_STRING_IMPLEMENTATION
 	#define PLATFORM_USE_GENERIC_STRING_IMPLEMENTATION			1
-#endif
-
-#ifndef PLATFORM_SUPPORTS_LLM
-	#define PLATFORM_SUPPORTS_LLM								1
 #endif
 
 #ifndef PLATFORM_ALLOW_ALLOCATIONS_IN_FASYNCWRITER_SERIALIZEBUFFERTOARCHIVE
@@ -526,6 +528,7 @@
 #ifndef PLATFORM_HAS_FPlatformVirtualMemoryBlock
 	#define	PLATFORM_HAS_FPlatformVirtualMemoryBlock 1
 #endif
+
 #ifndef PLATFORM_BYPASS_PAK_PRECACHE
 	#define PLATFORM_BYPASS_PAK_PRECACHE 0
 #endif
@@ -534,60 +537,12 @@
 	#define PLATFORM_SUPPORTS_FLIP_TRACKING 0
 #endif
 
-#ifndef PLATFORM_USE_FULL_TASK_GRAPH
-	#define PLATFORM_USE_FULL_TASK_GRAPH						1
-#endif
-
-#ifndef PLATFORM_USE_ANSI_POSIX_MALLOC
-	#define PLATFORM_USE_ANSI_POSIX_MALLOC						0
-#endif
-
-#ifndef PLATFORM_USE_ANSI_MEMALIGN
-	#define PLATFORM_USE_ANSI_MEMALIGN							0
-#endif
-
-#ifndef PLATFORM_USE_ANSI_POSIX_MALLOC
-	#define PLATFORM_USE_ANSI_POSIX_MALLOC						0
-#endif
-
-#ifndef PLATFORM_IS_ANSI_MALLOC_THREADSAFE
-	#define PLATFORM_IS_ANSI_MALLOC_THREADSAFE					0
-#endif
-
-#ifndef PLATFORM_SUPPORTS_OPUS_CODEC
-	#define PLATFORM_SUPPORTS_OPUS_CODEC						1
-#endif
-
-#ifndef PLATFORM_SUPPORTS_VORBIS_CODEC
-	#define PLATFORM_SUPPORTS_VORBIS_CODEC						1
-#endif
-
-#ifndef PLATFORM_USE_MINIMAL_HANG_DETECTION
-	#define PLATFORM_USE_MINIMAL_HANG_DETECTION					0
-#endif
-
-#ifndef PLATFORM_USE_GENERIC_STRING_IMPLEMENTATION
-	#define PLATFORM_USE_GENERIC_STRING_IMPLEMENTATION			1
-#endif
-
 #ifndef PLATFORM_USE_SHOWFLAGS_ALWAYS_BITFIELD
 	#define	PLATFORM_USE_SHOWFLAGS_ALWAYS_BITFIELD				1
 #endif
 
-#ifndef PLATFORM_SUPPORTS_LLM
-	#define PLATFORM_SUPPORTS_LLM								1
-#endif
-
-#ifndef PLATFORM_ALLOW_ALLOCATIONS_IN_FASYNCWRITER_SERIALIZEBUFFERTOARCHIVE
-	#define	PLATFORM_ALLOW_ALLOCATIONS_IN_FASYNCWRITER_SERIALIZEBUFFERTOARCHIVE 1
-#endif
-
-#ifndef PLATFORM_HAS_FPlatformVirtualMemoryBlock
-	#define	PLATFORM_HAS_FPlatformVirtualMemoryBlock 1
-#endif
-
 #ifndef PLATFORM_SUPPORTS_LANDSCAPE_VISUAL_MESH_LOD_STREAMING
-	#define PLATFORM_SUPPORTS_LANDSCAPE_VISUAL_MESH_LOD_STREAMING 0
+	#define PLATFORM_SUPPORTS_LANDSCAPE_VISUAL_MESH_LOD_STREAMING 0 UE_DEPRECATED_MACRO(5.1, "PLATFORM_SUPPORTS_LANDSCAPE_VISUAL_MESH_LOD_STREAMING has been deprecated and should be replaced with 0.")
 #endif
 
 #ifndef PLATFORM_USE_GENERIC_LAUNCH_IMPLEMENTATION
@@ -606,17 +561,57 @@
 	#define PLATFORM_SUPPORTS_COLORIZED_OUTPUT_DEVICE PLATFORM_DESKTOP
 #endif
 
-#ifndef PLATFORM_USE_BACKBUFFER_WRITE_TRANSITION_TRACKING
-	#define PLATFORM_USE_BACKBUFFER_WRITE_TRANSITION_TRACKING 0
-#endif
-
 #ifndef PLATFORM_USE_PLATFORM_FILE_MANAGED_STORAGE_WRAPPER
 	#define PLATFORM_USE_PLATFORM_FILE_MANAGED_STORAGE_WRAPPER	0
 #endif
 
-#ifndef PLATFORM_REQUIRES_UAV_TO_RTV_TEXTURE_CACHE_FLUSH_WORKAROUND
-	#define PLATFORM_REQUIRES_UAV_TO_RTV_TEXTURE_CACHE_FLUSH_WORKAROUND 0
-#endif // #ifndef PLATFORM_REQUIRES_UAV_TO_RTV_TEXTURE_CACHE_FLUSH_WORKAROUND
+#ifndef PLATFORM_HAS_DIRECT_TEXTURE_MEMORY_ACCESS
+	#define PLATFORM_HAS_DIRECT_TEXTURE_MEMORY_ACCESS 0
+#endif
+
+#ifndef PLATFORM_DIRECT_TEXTURE_MEMORY_ACCESS_LOCK_MODE 
+	#define PLATFORM_DIRECT_TEXTURE_MEMORY_ACCESS_LOCK_MODE RLM_ReadOnly 
+#endif
+
+#ifndef PLATFORM_USE_REPORT_ENSURE
+	#define PLATFORM_USE_REPORT_ENSURE PLATFORM_DESKTOP
+#endif
+
+#ifndef PLATFORM_USE_FALLBACK_PSO
+	#define PLATFORM_USE_FALLBACK_PSO 0
+#endif
+
+#ifndef PLATFORM_SUPPORTS_PSO_PRECACHING
+	#define PLATFORM_SUPPORTS_PSO_PRECACHING (!UE_SERVER)
+#endif
+
+#ifndef PLATFORM_USES_UNFAIR_LOCKS
+	#define PLATFORM_USES_UNFAIR_LOCKS 0
+#endif
+
+#ifndef PLATFORM_HAS_FENV_H
+	#define PLATFORM_HAS_FENV_H 1
+#endif
+
+#ifndef PLATFORM_REQUIRES_TYPELESS_RESOURCE_DISCARD_WORKAROUND
+	#define PLATFORM_REQUIRES_TYPELESS_RESOURCE_DISCARD_WORKAROUND 0
+#endif
+
+#ifndef PLATFORM_CONSOLE_DYNAMIC_LINK
+	#define PLATFORM_CONSOLE_DYNAMIC_LINK 0
+#endif
+
+#ifndef PLATFORM_MAX_UNIFORM_BUFFER_RANGE
+	#define PLATFORM_MAX_UNIFORM_BUFFER_RANGE (16u*1024u)
+#endif
+
+#ifndef PLATFORM_IMPLEMENTS_BATCH_FILE_DELETE
+	#define PLATFORM_IMPLEMENTS_BATCH_FILE_DELETE 0
+#endif
+
+#ifndef PLATFORM_WRITES_ARE_SLOW
+	#define PLATFORM_WRITES_ARE_SLOW 0
+#endif
 
 // deprecated, do not use
 #define PLATFORM_HAS_THREADSAFE_RHIGetRenderQueryResult	#
@@ -655,44 +650,73 @@
 	#define RESTRICT __restrict						/* no alias hint */
 #endif
 
-/* Wrap a function signature in these to warn that callers should not ignore the return value */
-#ifndef FUNCTION_CHECK_RETURN_START
-	#define FUNCTION_CHECK_RETURN_START \
-		DEPRECATED_MACRO(4.26, "FUNCTION_CHECK_RETURN_START has been deprecated - please use UE_NODISCARD")
-#endif
-#ifndef FUNCTION_CHECK_RETURN_END
-	#define FUNCTION_CHECK_RETURN_END \
-		DEPRECATED_MACRO(4.26, "FUNCTION_CHECK_RETURN_END has been deprecated - please use UE_NODISCARD")
-#endif
-
-/* Wrap a function signature in these to indicate that the function never returns */
-#ifndef FUNCTION_NO_RETURN_START
-	#define FUNCTION_NO_RETURN_START \
-		DEPRECATED_MACRO(4.26, "FUNCTION_NO_RETURN_START has been deprecated - please use UE_NORETURN")
-#endif
-#ifndef FUNCTION_NO_RETURN_END
-	#define FUNCTION_NO_RETURN_END \
-		DEPRECATED_MACRO(4.26, "FUNCTION_NO_RETURN_END has been deprecated - please use UE_NORETURN")
-#endif
-
 /* Use before a function declaration to warn that callers should not ignore the return value */
-#if !defined(UE_NODISCARD) && defined(__has_cpp_attribute)
+#ifdef __has_cpp_attribute
 	#if __has_cpp_attribute(nodiscard)
-		#define UE_NODISCARD [[nodiscard]]
+		// Define this in when all UE_NODISCARD usage has been replaced and we are ready to deprecate
+		#ifdef _MSC_VER
+			#define UE_NODISCARD [[nodiscard]]
+			#ifndef __clang__
+				#pragma deprecated("UE_NODISCARD")
+			#endif
+		#else
+			#define UE_NODISCARD [[nodiscard]] UE_DEPRECATED_MACRO(5.4, "UE_NODISCARD has been deprecated and should be replaced with [[nodiscard]].")
+		#endif
+	#else
+		#error "Compiler is expected to support [[nodiscard]]"
+	#endif
+#else
+	#error "Compiler is expected to support [[nodiscard]]"
+#endif
+
+// Use before a constructor declaration to warn when an unnamed temporary object is ignored, e.g. FScopeLock(CS); instead of FScopeLock Lock(CS);
+// We can't just use UE_NODISCARD in this case because older compilers don't like [[nodiscard]] on constructors.
+#if !defined(UE_NODISCARD_CTOR) && defined(__has_cpp_attribute)
+	#if __has_cpp_attribute(nodiscard)
+		#if (defined(_MSC_VER) && _MSC_VER >= 1924) || (defined(__clang__) && __clang_major__ >= 10)
+			#define UE_NODISCARD_CTOR [[nodiscard]]
+		#endif
 	#endif
 #endif
-#ifndef UE_NODISCARD
-	#define UE_NODISCARD
+
+#ifndef UE_NODISCARD_CTOR
+	#define UE_NODISCARD_CTOR
 #endif
 
 /* Use before a function declaration to indicate that the function never returns */
-#if !defined(UE_NORETURN) && defined(__has_cpp_attribute)
+#ifdef __has_cpp_attribute
 	#if __has_cpp_attribute(noreturn)
-		#define UE_NORETURN [[noreturn]]
+		#ifdef _MSC_VER
+			#define UE_NORETURN [[noreturn]]
+			#ifndef __clang__
+				#pragma deprecated("UE_NORETURN")
+			#endif
+		#else
+			#define UE_NORETURN [[noreturn]] UE_DEPRECATED_MACRO(5.4, "UE_NORETURN has been deprecated and should be replaced with [[noreturn]].")
+		#endif
+	#else
+		#error "Compiler is expected to support [[noreturn]]"
+	#endif
+#else
+	#error "Compiler is expected to support [[noreturn]]"
+#endif
+
+/* Macro wrapper for the consteval keyword which isn't yet present on all compilers - constexpr
+   can be used as a workaround but is less strict and so may let some non-consteval code pass */
+#if defined(__cpp_consteval)
+	#define UE_CONSTEVAL consteval
+#else
+	#define UE_CONSTEVAL constexpr
+#endif
+
+/* Use before a class data member declaration allow it to be overlapped with other non-static data members or base class subobjects of its class. */
+#if !defined(UE_NO_UNIQUE_ADDRESS) && defined(__has_cpp_attribute)
+	#if __has_cpp_attribute(no_unique_address)
+		#define UE_NO_UNIQUE_ADDRESS [[no_unique_address]]
 	#endif
 #endif
-#ifndef UE_NORETURN
-	#define UE_NORETURN
+#ifndef UE_NO_UNIQUE_ADDRESS
+	#define UE_NO_UNIQUE_ADDRESS
 #endif
 
 /* Wrap a function signature in these to indicate that the function never returns nullptr */
@@ -703,8 +727,15 @@
 	#define FUNCTION_NON_NULL_RETURN_END
 #endif
 
-#ifndef FUNCTION_CHECK_RETURN
-	#define FUNCTION_CHECK_RETURN(...) DEPRECATED_MACRO(4.12, "FUNCTION_CHECK_RETURN has been deprecated and should be replaced with FUNCTION_CHECK_RETURN_START and FUNCTION_CHECK_RETURN_END.") FUNCTION_CHECK_RETURN_START __VA_ARGS__ FUNCTION_CHECK_RETURN_END
+/* Wrap lifetimebound annotations to indicate that a function argument must outlive a return value or constructed object */
+#ifndef UE_LIFETIMEBOUND
+	#define UE_LIFETIMEBOUND
+#endif
+
+/* Annotate functions that allocate new memory to ensure the compiler can optimize them accordingly.
+   The arguments to this macro specify the 1-based arguments of the annotated function that specify the size of the allocation. */
+#ifndef UE_ALLOCATION_FUNCTION
+	#define UE_ALLOCATION_FUNCTION(...)
 #endif
 
 /** Promise expression is true. Compiler can optimize accordingly with undefined behavior if wrong. Static analyzers understand this.  */
@@ -718,14 +749,18 @@
 	#endif
 #endif
 
-#define ASSUME(x) UE_ASSUME(x) DEPRECATED_MACRO(4.25, "Please use UE_ASSUME instead.")
+/** Improves the debugging of functions which act as pure reference casts, eliding the call and doing a direct cast from the argument to the return type */
+#ifndef UE_INTRINSIC_CAST
+	#define UE_INTRINSIC_CAST
+#endif
 
 /** Branch prediction hints */
 #ifndef LIKELY						/* Hints compiler that expression is likely to be true, much softer than UE_ASSUME - allows (penalized by worse performance) expression to be false */
 	#if ( defined(__clang__) || defined(__GNUC__) ) && (PLATFORM_UNIX)	// effect of these on non-Linux platform has not been analyzed as of 2016-03-21
 		#define LIKELY(x)			__builtin_expect(!!(x), 1)
 	#else
-		#define LIKELY(x)			(x)
+		// the additional "!!" is added to silence "warning: equality comparison with exteraneous parenthese" messages on android
+		#define LIKELY(x)			(!!(x))
 	#endif
 #endif
 
@@ -733,7 +768,8 @@
 	#if ( defined(__clang__) || defined(__GNUC__) ) && (PLATFORM_UNIX)	// effect of these on non-Linux platform has not been analyzed as of 2016-03-21
 		#define UNLIKELY(x)			__builtin_expect(!!(x), 0)
 	#else
-		#define UNLIKELY(x)			(x)
+		// the additional "!!" is added to silence "warning: equality comparison with exteraneous parenthese" messages on android
+		#define UNLIKELY(x)			(!!(x))
 	#endif
 #endif
 
@@ -749,8 +785,8 @@
 #endif
 
 // Enable/disable optimizations for a specific function to improve build times
-#define BEGIN_FUNCTION_BUILD_OPTIMIZATION PRAGMA_DISABLE_OPTIMIZATION
-#define END_FUNCTION_BUILD_OPTIMIZATION   PRAGMA_ENABLE_OPTIMIZATION
+#define BEGIN_FUNCTION_BUILD_OPTIMIZATION UE_DISABLE_OPTIMIZATION_SHIP
+#define END_FUNCTION_BUILD_OPTIMIZATION   UE_ENABLE_OPTIMIZATION_SHIP
 
 #ifndef FORCEINLINE_DEBUGGABLE_ACTUAL
 	#define FORCEINLINE_DEBUGGABLE_ACTUAL inline
@@ -769,8 +805,12 @@
 #ifndef ABSTRACT
 	#define ABSTRACT
 #endif
-#ifndef CONSTEXPR
-	#define CONSTEXPR constexpr
+#define CONSTEXPR constexpr UE_DEPRECATED_MACRO(5.4, "CONSTEXPR has been deprecated and should be replaced with constexpr.")
+#ifndef IN
+	#define IN
+#endif
+#ifndef OUT
+	#define OUT
 #endif
 
 // String constants
@@ -870,10 +910,6 @@
 	#define FAST_BOOT_HACKS  0
 #endif
 
-#ifndef DEPRECATED_FORGAME
-	#define DEPRECATED_FORGAME(...) DEPRECATED_MACRO(4.22, "The DEPRECATED_FORGAME macro has been deprecated in favor of UE_DEPRECATED_FORGAME().")
-#endif
-
 // Console ANSICHAR/TCHAR command line handling
 #if PLATFORM_COMPILER_HAS_TCHAR_WMAIN
 #define INT32_MAIN_INT32_ARGC_TCHAR_ARGV() int32 wmain(int32 ArgC, TCHAR* ArgV[])
@@ -899,8 +935,6 @@ int32 main(int32 ArgC, ANSICHAR* Utf8ArgV[]) \
 } \
 int32 tchar_main(int32 ArgC, TCHAR* ArgV[])
 #endif
-
-template<typename,typename> struct TAreTypesEqual;
 
 //--------------------------------------------------------------------------------------------
 // POD types refactor for porting old code:
@@ -972,7 +1006,7 @@ typedef FPlatformTypes::WIDECHAR	WIDECHAR;
 /// Either ANSICHAR or WIDECHAR, depending on whether the platform supports wide characters or the requirements of the licensee.
 typedef FPlatformTypes::TCHAR		TCHAR;
 /// An 8-bit character containing a UTF8 (Unicode, 8-bit, variable-width) code unit.
-typedef FPlatformTypes::CHAR8		UTF8CHAR;
+typedef FPlatformTypes::UTF8CHAR	UTF8CHAR;
 /// A 16-bit character containing a UCS2 (Unicode, 16-bit, fixed-width) code unit, used for compatibility with 'Windows TCHAR' across multiple platforms.
 typedef FPlatformTypes::CHAR16		UCS2CHAR;
 /// A 16-bit character containing a UTF16 (Unicode, 16-bit, variable-width) code unit.
@@ -1000,19 +1034,18 @@ typedef FPlatformTypes::TYPE_OF_NULLPTR	TYPE_OF_NULLPTR;
 namespace TypeTests
 {
 	template <typename A, typename B>
-	struct TAreTypesEqual
-	{
-		static const bool Value = false;
-	};
+	inline constexpr bool TAreTypesEqual_V = false;
 
 	template <typename T>
-	struct TAreTypesEqual<T, T>
-	{
-		static const bool Value = true;
-	};
+	inline constexpr bool TAreTypesEqual_V<T, T> = true;
 
-	static_assert(!PLATFORM_TCHAR_IS_4_BYTES || sizeof(TCHAR) == 4, "TCHAR size must be 4 bytes.");
-	static_assert(PLATFORM_TCHAR_IS_4_BYTES || sizeof(TCHAR) == 2, "TCHAR size must be 2 bytes.");
+#if PLATFORM_TCHAR_IS_4_BYTES
+	static_assert(sizeof(TCHAR) == 4, "TCHAR size must be 4 bytes.");
+#elif PLATFORM_TCHAR_IS_UTF8CHAR
+	static_assert(sizeof(TCHAR) == 1, "TCHAR size must be 1 byte.");
+#else
+	static_assert(sizeof(TCHAR) == 2, "TCHAR size must be 2 bytes.");
+#endif
 
 	static_assert(!PLATFORM_WCHAR_IS_4_BYTES || sizeof(wchar_t) == 4, "wchar_t size must be 4 bytes.");
 	static_assert(PLATFORM_WCHAR_IS_4_BYTES || sizeof(wchar_t) == 2, "wchar_t size must be 2 bytes.");
@@ -1024,10 +1057,25 @@ namespace TypeTests
 
 	static_assert(char(-1) < char(0), "Unsigned char type test failed.");
 
-	static_assert((!TAreTypesEqual<ANSICHAR, WIDECHAR>::Value), "ANSICHAR and WIDECHAR should be different types.");
-	static_assert((!TAreTypesEqual<ANSICHAR, UCS2CHAR>::Value), "ANSICHAR and CHAR16 should be different types.");
-	static_assert((!TAreTypesEqual<WIDECHAR, UCS2CHAR>::Value), "WIDECHAR and CHAR16 should be different types.");
-	static_assert((TAreTypesEqual<TCHAR, ANSICHAR>::Value == true || TAreTypesEqual<TCHAR, WIDECHAR>::Value == true), "TCHAR should either be ANSICHAR or WIDECHAR.");
+	static_assert((!TAreTypesEqual_V<ANSICHAR, WIDECHAR>),  "ANSICHAR and WIDECHAR should be different types.");
+	static_assert((!TAreTypesEqual_V<ANSICHAR, UTF8CHAR>),  "ANSICHAR and UTF8CHAR should be different types.");
+#if !PLATFORM_UCS2CHAR_IS_UTF16CHAR
+	// We want these types to be different, because we want to be able to determine whether an encoding
+	// is fixed-width (UCS2CHAR) or variable-width (UTF16CHAR) at compile time.
+	static_assert((!TAreTypesEqual_V<UCS2CHAR, UTF16CHAR>), "UCS2CHAR and UTF16CHAR should be different types.");
+#else
+	// We don't want these types to be equal, but while this macro exists, they ought to be equal
+	static_assert(TAreTypesEqual_V<UCS2CHAR, UTF16CHAR>, "UCS2CHAR and UTF16CHAR are expected to be the same type.");
+#endif
+	static_assert((!TAreTypesEqual_V<ANSICHAR, UCS2CHAR>),  "ANSICHAR and UCS2CHAR should be different types.");
+	static_assert((!TAreTypesEqual_V<WIDECHAR, UCS2CHAR>),  "WIDECHAR and UCS2CHAR should be different types.");
+	static_assert(TAreTypesEqual_V<TCHAR, ANSICHAR> || TAreTypesEqual_V<TCHAR, WIDECHAR> || TAreTypesEqual_V<TCHAR, UTF8CHAR>, "TCHAR should either be ANSICHAR, WIDECHAR or UTF8CHAR.");
+
+#if PLATFORM_WIDECHAR_IS_CHAR16
+	static_assert(TAreTypesEqual_V<WIDECHAR, char16_t>, "WIDECHAR should be char16_t");
+#else
+	static_assert(TAreTypesEqual_V<WIDECHAR, wchar_t>, "WIDECHAR should be wchar_t");
+#endif
 
 	static_assert(sizeof(uint8) == 1, "uint8 type size test failed.");
 	static_assert(int32(uint8(-1)) == 0xFF, "uint8 type sign test failed.");
@@ -1059,7 +1107,10 @@ namespace TypeTests
 
 	static_assert(sizeof(WIDECHAR) == 2 || sizeof(WIDECHAR) == 4, "WIDECHAR type size test failed.");
 
-	static_assert(sizeof(UCS2CHAR) == 2, "UCS2CHAR type size test failed.");
+	static_assert(sizeof(UTF8CHAR)  == 1, "UTF8CHAR type size test failed.");
+	static_assert(sizeof(UCS2CHAR)  == 2, "UCS2CHAR type size test failed.");
+	static_assert(sizeof(UTF16CHAR) == 2, "UTF16CHAR type size test failed.");
+	static_assert(sizeof(UTF32CHAR) == 4, "UTF32CHAR type size test failed.");
 
 	static_assert(sizeof(PTRINT) == sizeof(void *), "PTRINT type size test failed.");
 	static_assert(PTRINT(-1) < PTRINT(0), "PTRINT type sign test failed.");
@@ -1075,14 +1126,84 @@ namespace TypeTests
 #include COMPILED_PLATFORM_HEADER(PlatformCompilerSetup.h)
 
 
-// If we don't have a platform-specific define for the TEXT macro, define it now.
-#if !defined(TEXT) && !UE_BUILD_DOCS
-	#if PLATFORM_TCHAR_IS_CHAR16
-		#define TEXT_PASTE(x) u ## x
-	#else
-		#define TEXT_PASTE(x) L ## x
-	#endif
-		#define TEXT(x) TEXT_PASTE(x)
+#define UTF8TEXT_PASTE(x)  u8 ## x
+#define UTF16TEXT_PASTE(x) u ## x
+#if PLATFORM_WIDECHAR_IS_CHAR16
+	#define WIDETEXT_PASTE(x)  UTF16TEXT_PASTE(x)
+#else
+	#define WIDETEXT_PASTE(x)  L ## x
 #endif
 
+// If we don't have a platform-specific define for the TEXT macro, define it now.
+#if !defined(TEXT) && !UE_BUILD_DOCS
+	#if PLATFORM_TCHAR_IS_UTF8CHAR
+		#define TEXT_PASTE(x) UTF8TEXT(x)
+	#else
+		#define TEXT_PASTE(x) WIDETEXT(x)
+	#endif
+	#define TEXT(x) TEXT_PASTE(x)
+#endif
 
+namespace UE::Core::Private
+{
+	// Can't be constexpr because it involves casts
+	template <SIZE_T N>
+	FORCEINLINE auto ToUTF8Literal(const char(&Array)[N]) -> const UTF8CHAR(&)[N]
+	{
+		return (const UTF8CHAR(&)[N])Array;
+	}
+
+#if defined(__cpp_char8_t)
+	// Can't be constexpr because it involves casts
+	template <SIZE_T N>
+	FORCEINLINE auto ToUTF8Literal(const char8_t (&Array)[N]) -> const UTF8CHAR(&)[N]
+	{
+		return (const UTF8CHAR (&)[N])Array;
+	}
+#endif
+
+	FORCEINLINE constexpr UTF8CHAR ToUTF8Literal(unsigned long long Ch)
+	{
+		return (UTF8CHAR)Ch;
+	}
+
+	template <typename CharType>
+	void CharTextStaticAssert()
+	{
+		static_assert(sizeof(CharType) == 0, "Unsupported char type passed to CHARTEXT");
+	}
+}
+
+#define UTF8TEXT(x) (UE::Core::Private::ToUTF8Literal(UTF8TEXT_PASTE(x)))
+#define UTF16TEXT(x) UTF16TEXT_PASTE(x)
+#define WIDETEXT(str) WIDETEXT_PASTE(str)
+
+// Expands out to x, TEXT(x) or UTF8TEXT(x) depending on CharType
+#define CHARTEXT(CharType, x) \
+	( \
+		[]() -> decltype(auto) \
+		{ \
+			/* We expect <type_traits> to already have been included any time the CHARTEXT macro is used */ \
+			using UnqualifiedCharType = std::remove_cv_t<CharType>; \
+			if constexpr (std::is_same_v<UnqualifiedCharType, ANSICHAR>) \
+			{ \
+				return x; \
+			} \
+			else if constexpr (std::is_same_v<UnqualifiedCharType, TCHAR>) \
+			{ \
+				return TEXT(x); \
+			} \
+			else if constexpr (std::is_same_v<UnqualifiedCharType, UTF8CHAR>) \
+			{ \
+				return UTF8TEXT(x); \
+			} \
+			else \
+			{ \
+				/* We want a compile error, so forward to a templated function because of the static_assert(false) problem */ \
+				UE::Core::Private::CharTextStaticAssert<CharType>(); \
+				return x; \
+			} \
+		}() \
+	)
+
+// IWYU pragma: end_exports

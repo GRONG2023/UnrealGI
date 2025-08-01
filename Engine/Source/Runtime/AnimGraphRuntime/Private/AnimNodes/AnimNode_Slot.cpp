@@ -2,7 +2,12 @@
 
 #include "AnimNodes/AnimNode_Slot.h"
 #include "Animation/AnimInstanceProxy.h"
+#include "Animation/AnimMontage.h"
+#include "Animation/AnimStats.h"
 #include "Animation/AnimTrace.h"
+#include "Animation/AnimNode_Inertialization.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNode_Slot)
 
 /////////////////////////////////////////////////////
 // FAnimNode_Slot
@@ -38,6 +43,29 @@ void FAnimNode_Slot::Update_AnyThread(const FAnimationUpdateContext& Context)
 	// Update cache in AnimInstance.
 	Context.AnimInstanceProxy->UpdateSlotNodeWeight(SlotName, WeightData.SlotNodeWeight, Context.GetFinalBlendWeight());
 
+	UE::Anim::FSlotInertializationRequest InertializationRequest;
+	if (Context.AnimInstanceProxy->GetSlotInertializationRequest(SlotName, InertializationRequest))
+	{
+		UE::Anim::IInertializationRequester* InertializationRequester = Context.GetMessage<UE::Anim::IInertializationRequester>();
+		if (InertializationRequester)
+		{
+			FInertializationRequest Request;
+			Request.Duration = InertializationRequest.Get<0>();
+			Request.BlendProfile = InertializationRequest.Get<1>();
+#if ANIM_TRACE_ENABLED
+			Request.NodeId = Context.GetCurrentNodeId();
+			Request.AnimInstance = Context.AnimInstanceProxy->GetAnimInstanceObject();
+#endif
+
+			InertializationRequester->RequestInertialization(Request);
+		}
+		else
+		{
+			FAnimNode_Inertialization::LogRequestError(Context, Source);
+		}
+	}
+
+
 	const bool bUpdateSource = bAlwaysUpdateSourcePose || FAnimWeight::IsRelevant(WeightData.SourceWeight);
 	if (bUpdateSource)
 	{
@@ -57,10 +85,13 @@ void FAnimNode_Slot::Update_AnyThread(const FAnimationUpdateContext& Context)
 void FAnimNode_Slot::Evaluate_AnyThread(FPoseContext & Output)
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_ANIMNODE(Evaluate_AnyThread)
+	ANIM_MT_SCOPE_CYCLE_COUNTER_VERBOSE(Slot, !IsInGameThread());
+
 	// If not playing a montage, just pass through
 	if (WeightData.SlotNodeWeight <= ZERO_ANIMWEIGHT_THRESH)
 	{
 		Source.Evaluate(Output);
+		PostEvaluateSourcePose(Output);
 	}
 	else
 	{
@@ -70,6 +101,7 @@ void FAnimNode_Slot::Evaluate_AnyThread(FPoseContext & Output)
 			Source.Evaluate(SourceContext);
 		}
 
+		PostEvaluateSourcePose(SourceContext);
 		const FAnimationPoseData SourcePoseData(SourceContext);
 		FAnimationPoseData OutputPoseData(Output);
 		Output.AnimInstanceProxy->SlotEvaluatePose(SlotName, SourcePoseData, WeightData.SourceWeight, OutputPoseData, WeightData.SlotNodeWeight, WeightData.TotalNodeWeight);
@@ -115,3 +147,4 @@ FAnimNode_Slot::FAnimNode_Slot()
 	, bAlwaysUpdateSourcePose(false)
 {
 }
+

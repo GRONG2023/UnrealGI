@@ -20,13 +20,13 @@ void CrashReporterCrashHandler(const FGenericCrashContext& GenericContext)
 static FString GSavedCommandLine;
 static bool GIsUnattended = false;
 
-@interface UE4AppDelegate : NSObject <NSApplicationDelegate, NSFileManagerDelegate>
+@interface UEAppDelegate : NSObject <NSApplicationDelegate, NSFileManagerDelegate>
 {
 }
 
 @end
 
-@implementation UE4AppDelegate
+@implementation UEAppDelegate
 
 //handler for the quit apple event used by the Dock menu
 - (void)handleQuitEvent:(NSAppleEventDescriptor*)Event withReplyEvent:(NSAppleEventDescriptor*)ReplyEvent
@@ -49,8 +49,10 @@ static bool GIsUnattended = false;
 	}
 	
 	RunCrashReportClient(*GSavedCommandLine);
-	
-	[NSApp terminate: self];
+    
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSApp terminate: nil];
+    });
 }
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)Sender;
@@ -110,7 +112,7 @@ int main(int argc, char *argv[])
 	
 	SCOPED_AUTORELEASE_POOL;
 	[NSApplication sharedApplication];
-	[NSApp setDelegate:[UE4AppDelegate new]];
+	[NSApp setDelegate:[UEAppDelegate new]];
 	[NSApp run];
 	return 0;
 }

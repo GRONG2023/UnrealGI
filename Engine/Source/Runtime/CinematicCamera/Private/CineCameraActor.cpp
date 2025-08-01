@@ -4,6 +4,8 @@
 #include "DrawDebugHelpers.h"
 #include "CineCameraComponent.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(CineCameraActor)
+
 #define LOCTEXT_NAMESPACE "CineCameraActor"
 
 //////////////////////////////////////////////////////////////////////////
@@ -18,6 +20,10 @@ ACineCameraActor::ACineCameraActor(const FObjectInitializer& ObjectInitializer)
 
 	PrimaryActorTick.bCanEverTick = true;
 	SetActorTickEnabled(true);
+
+#if WITH_EDITORONLY_DATA
+	bIsSpatiallyLoaded = false;
+#endif
 }
 
 void ACineCameraActor::PostInitializeComponents()
@@ -117,3 +123,4 @@ bool ACineCameraActor::ShouldTickForTracking() const
 
 
 #undef LOCTEXT_NAMESPACE
+

@@ -8,7 +8,7 @@
 #include "UObject/UnrealType.h"
 #include "UObject/EnumProperty.h"
 #include "UObject/TextProperty.h"
-
+#include "Math/InterpCurvePoint.h"
 
 /** Generic (struct) implementation */
 template<typename T>
@@ -230,6 +230,42 @@ inline bool IsConcreteTypeCompatibleWithReflectedType_Impl<FGuid>(FProperty* Pro
 }
 
 template<>
+inline bool IsConcreteTypeCompatibleWithReflectedType_Impl<FInterpCurvePointFloat>(FProperty* Property)
+{
+	return IsConcreteTypeCompatibleWithReflectedType_BuiltInStruct<FInterpCurvePointFloat>(Property);
+}
+
+template<>
+inline bool IsConcreteTypeCompatibleWithReflectedType_Impl<FInterpCurvePointVector>(FProperty* Property)
+{
+	return IsConcreteTypeCompatibleWithReflectedType_BuiltInStruct<FInterpCurvePointVector>(Property);
+}
+
+template<>
+inline bool IsConcreteTypeCompatibleWithReflectedType_Impl<FInterpCurvePointVector2D>(FProperty* Property)
+{
+	return IsConcreteTypeCompatibleWithReflectedType_BuiltInStruct<FInterpCurvePointVector2D>(Property);
+}
+
+template<>
+inline bool IsConcreteTypeCompatibleWithReflectedType_Impl<FInterpCurvePointQuat>(FProperty* Property)
+{
+	return IsConcreteTypeCompatibleWithReflectedType_BuiltInStruct<FInterpCurvePointQuat>(Property);
+}
+
+template<>
+inline bool IsConcreteTypeCompatibleWithReflectedType_Impl<FInterpCurvePointTwoVectors>(FProperty* Property)
+{
+	return IsConcreteTypeCompatibleWithReflectedType_BuiltInStruct<FInterpCurvePointTwoVectors>(Property);
+}
+
+template<>
+inline bool IsConcreteTypeCompatibleWithReflectedType_Impl<FInterpCurvePointLinearColor>(FProperty* Property)
+{
+	return IsConcreteTypeCompatibleWithReflectedType_BuiltInStruct<FInterpCurvePointLinearColor>(Property);
+}
+
+template<>
 inline bool IsConcreteTypeCompatibleWithReflectedType_Impl<FFloatRangeBound>(FProperty* Property)
 {
 	return IsConcreteTypeCompatibleWithReflectedType_BuiltInStruct<FFloatRangeBound>(Property);
@@ -277,25 +313,26 @@ inline bool IsConcreteTypeCompatibleWithReflectedType_Impl<FSoftClassPath>(FProp
 	return IsConcreteTypeCompatibleWithReflectedType_BuiltInStruct<FSoftClassPath>(Property);
 }
 
-template<>
-inline bool IsConcreteTypeCompatibleWithReflectedType_Impl<UObject*>(FProperty* Property)
-{
-	if ( FObjectProperty* ObjectProperty = CastField<FObjectProperty>(Property) )
-	{
-		return true;
-		//return ObjectProperty->PropertyClass->IsChildOf(T::StaticClass());
-	}
-
-	return false;
-}
-
 /** Standard implementation */
 template<typename T> 
 struct FConcreteTypeCompatibleWithReflectedTypeHelper
 {
 	static bool IsConcreteTypeCompatibleWithReflectedType(FProperty* Property) 
 	{
-		return IsConcreteTypeCompatibleWithReflectedType_Impl<T>(Property);
+		if constexpr (TIsPointerOrObjectPtrToBaseOf<T, UObject>::Value)
+		{
+			if (FObjectProperty* ObjectProperty = CastField<FObjectProperty>(Property))
+			{
+				return true;
+				//return ObjectProperty->PropertyClass->IsChildOf(T::StaticClass());
+			}
+
+			return false;
+		}
+		else
+		{
+			return IsConcreteTypeCompatibleWithReflectedType_Impl<T>(Property);
+		}
 	}
 };
 
@@ -347,24 +384,28 @@ struct FConcreteTypeCompatibleWithReflectedTypeHelper<TLazyObjectPtr<T>>
 /** 
  * Check whether the concrete type T is compatible with the reflected type of a FProperty for 
  * the purposes of CopysingleValue()
- * Non-enum implementation.
  */
 template<typename T>
-static inline typename TEnableIf<!TIsEnum<T>::Value, bool>::Type IsConcreteTypeCompatibleWithReflectedType(FProperty* Property)
+static inline bool IsConcreteTypeCompatibleWithReflectedType(FProperty* Property)
 {
-	return FConcreteTypeCompatibleWithReflectedTypeHelper<T>::IsConcreteTypeCompatibleWithReflectedType(Property);
-}
-
-/** Enum implementation. @see IsConcreteTypeCompatibleWithReflectedType */
-template<typename T>
-static inline typename TEnableIf<TIsEnum<T>::Value, bool>::Type IsConcreteTypeCompatibleWithReflectedType(FProperty* Property)
-{
-	return FConcreteTypeCompatibleWithReflectedTypeHelper<uint8>::IsConcreteTypeCompatibleWithReflectedType(Property);
+	if constexpr (TIsEnum<T>::Value || TIsTEnumAsByte<T>::Value)
+	{
+		return FConcreteTypeCompatibleWithReflectedTypeHelper<uint8>::IsConcreteTypeCompatibleWithReflectedType(Property);
+	}
+	else
+	{
+		return FConcreteTypeCompatibleWithReflectedTypeHelper<T>::IsConcreteTypeCompatibleWithReflectedType(Property);
+	}
 }
 
 template<typename T>
 inline bool PropertySizesMatch_Impl(FProperty* InProperty)
 {
+	if (FByteProperty* ByteProperty = CastField<FByteProperty>(InProperty))
+	{
+		return InProperty->ElementSize == sizeof(uint8);
+	}
+
 	return InProperty->ElementSize == sizeof(T);
 }
 

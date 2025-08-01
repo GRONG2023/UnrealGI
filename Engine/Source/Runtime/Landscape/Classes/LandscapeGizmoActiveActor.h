@@ -16,12 +16,20 @@ class UMaterialInstance;
 class UTexture2D;
 
 UENUM()
-enum ELandscapeGizmoType
+enum ELandscapeGizmoType : int
 {
 	LGT_None,
 	LGT_Height,
 	LGT_Weight,
 	LGT_MAX,
+};
+
+UENUM()
+enum class ELandscapeGizmoSnapType
+{
+	None,
+	Component,
+	Texel
 };
 
 USTRUCT()
@@ -60,7 +68,7 @@ class ALandscapeGizmoActiveActor : public ALandscapeGizmoActor
 	TEnumAsByte<enum ELandscapeGizmoType> DataType;
 
 	UPROPERTY(Transient)
-	UTexture2D* GizmoTexture;
+	TObjectPtr<UTexture2D> GizmoTexture;
 
 	UPROPERTY()
 	FVector2D TextureScale;
@@ -90,19 +98,22 @@ class ALandscapeGizmoActiveActor : public ALandscapeGizmoActor
 	FVector FrustumVerts[8];
 
 	UPROPERTY()
-	UMaterial* GizmoMaterial;
+	TObjectPtr<UMaterial> GizmoMaterial;
 
 	UPROPERTY()
-	UMaterialInstance* GizmoDataMaterial;
+	TObjectPtr<UMaterialInstance> GizmoDataMaterial;
 
 	UPROPERTY()
-	UMaterial* GizmoMeshMaterial;
+	TObjectPtr<UMaterial> GizmoMeshMaterial;
 
 	UPROPERTY(Category=LandscapeGizmoActiveActor, VisibleAnywhere)
-	TArray<ULandscapeLayerInfoObject*> LayerInfos;
+	TArray<TObjectPtr<ULandscapeLayerInfoObject>> LayerInfos;
 
 	UPROPERTY(transient)
-	bool bSnapToLandscapeGrid;
+	ELandscapeGizmoSnapType SnapType = ELandscapeGizmoSnapType::None;
+
+	UPROPERTY(transient)
+	bool bFollowTerrainHeight = true;
 
 	UPROPERTY(transient)
 	FRotator UnsnappedRotation;
@@ -122,6 +133,7 @@ public:
 
 	virtual void EditorApplyTranslation(const FVector& DeltaTranslation, bool bAltDown, bool bShiftDown, bool bCtrlDown) override;
 	virtual void EditorApplyRotation(const FRotator& DeltaRotation, bool bAltDown, bool bShiftDown, bool bCtrlDown) override;
+	virtual void EditorApplyScale(const FVector& DeltaScale, const FVector* PivotLocation, bool bAltDown, bool bShiftDown, bool bCtrlDown) override;
 
 	/**
 	 * Whenever the decal actor has moved:
@@ -169,25 +181,25 @@ public:
 	// @todo document
 	float GetWidth() const
 	{
-		return Width * GetRootComponent()->GetRelativeScale3D().X;
+		return static_cast<float>(Width * GetRootComponent()->GetRelativeScale3D().X);
 	}
 
 	// @todo document
 	float GetHeight() const
 	{
-		return Height * GetRootComponent()->GetRelativeScale3D().Y;
+		return static_cast<float>(Height * GetRootComponent()->GetRelativeScale3D().Y);
 	}
 
 	// @todo document
 	float GetLength() const
 	{
-		return LengthZ * GetRootComponent()->GetRelativeScale3D().Z;
+		return static_cast<float>(LengthZ * GetRootComponent()->GetRelativeScale3D().Z);
 	}
 
 	// @todo document
 	void SetLength(float WorldLength)
 	{
-		LengthZ = WorldLength / GetRootComponent()->GetRelativeScale3D().Z;
+		LengthZ = static_cast<float>(WorldLength / GetRootComponent()->GetRelativeScale3D().Z);
 	}
 
 	static const int32 DataTexSize = 128;

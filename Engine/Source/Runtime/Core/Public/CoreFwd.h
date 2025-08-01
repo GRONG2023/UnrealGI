@@ -4,6 +4,7 @@
 
 #include "CoreTypes.h"
 #include "Containers/ContainersFwd.h"
+#include "Math/MathFwd.h"
 #include "UObject/UObjectHierarchyFwd.h"
 
 // Basic types
@@ -15,23 +16,7 @@ class FFeedbackContext;
 struct FDateTime;
 struct FGuid;
 
-// Math
-class FSphere;
-struct FBox;
-struct FBox2D;
-struct FColor;
-struct FLinearColor;
-struct FMatrix;
-struct FPlane;
-struct FQuat;
-struct FRotator;
-struct FTransform;
-struct FVector;
-struct FVector2D;
-struct FVector4;
-struct FBoxSphereBounds;
-struct FIntPoint;
-struct FIntRect;
+// Math - See Math/MathFwd.h
 
 // Misc
 struct FResourceSizeEx;

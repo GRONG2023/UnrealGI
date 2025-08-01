@@ -5,16 +5,15 @@
 =============================================================================*/
 
 #include "Components/RectLightComponent.h"
+#include "SceneInterface.h"
 #include "UObject/ConstructorHelpers.h"
-#include "RenderingThread.h"
 #include "Engine/Texture2D.h"
-#include "SceneManagement.h"
-#include "PointLightSceneProxy.h"
 #include "RectLightSceneProxy.h"
+#include "SceneView.h"
 
-#include "RHIUtilities.h"
-#include "GlobalShader.h"
-#include "ShaderParameterUtils.h"
+#include "DataDrivenShaderPlatformInfo.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(RectLightComponent)
 
 extern int32 GAllowPointLightCubemapShadows;
 
@@ -30,8 +29,8 @@ URectLightComponent::URectLightComponent(const FObjectInitializer& ObjectInitial
 #if WITH_EDITORONLY_DATA
 	if (!IsRunningCommandlet())
 	{
-		static ConstructorHelpers::FObjectFinder<UTexture2D> StaticTexture(TEXT("/Engine/EditorResources/LightIcons/S_LightPoint"));
-		static ConstructorHelpers::FObjectFinder<UTexture2D> DynamicTexture(TEXT("/Engine/EditorResources/LightIcons/S_LightPointMove"));
+		static ConstructorHelpers::FObjectFinder<UTexture2D> StaticTexture(TEXT("/Engine/EditorResources/LightIcons/S_LightRect"));
+		static ConstructorHelpers::FObjectFinder<UTexture2D> DynamicTexture(TEXT("/Engine/EditorResources/LightIcons/S_LightRect"));
 
 		StaticEditorTexture = StaticTexture.Object;
 		StaticEditorTextureScale = 0.5f;
@@ -116,7 +115,11 @@ float URectLightComponent::ComputeLightBrightness() const
 	}
 	else if (IntensityUnits == ELightUnits::Lumens)
 	{
-		LightBrightness *= (100.f * 100.f / PI); // Conversion from cm2 to m2 and PI from the cosine distribution
+		LightBrightness *= (100.f * 100.f / UE_PI); // Conversion from cm2 to m2 and PI from the cosine distribution
+	}
+	else if (IntensityUnits == ELightUnits::EV)
+	{
+		LightBrightness *= (100.f * 100.f) * EV100ToLuminance(LightBrightness);
 	}
 	else
 	{
@@ -135,7 +138,11 @@ void URectLightComponent::SetLightBrightness(float InBrightness)
 	}
 	else if (IntensityUnits == ELightUnits::Lumens)
 	{
-		Super::SetLightBrightness(InBrightness / (100.f * 100.f / PI)); // Conversion from cm2 to m2 and PI from the cosine distribution
+		Super::SetLightBrightness(InBrightness / (100.f * 100.f / UE_PI)); // Conversion from cm2 to m2 and PI from the cosine distribution
+	}
+	else if (IntensityUnits == ELightUnits::EV)
+	{
+		Super::SetLightBrightness(LuminanceToEV100(InBrightness / (100.f * 100.f)));
 	}
 	else
 	{
@@ -203,6 +210,7 @@ FRectLightSceneProxy::FRectLightSceneProxy(const URectLightComponent* Component)
 	, RayTracingData(Component->RayTracingData)
 	, SourceTexture(Component->SourceTexture)
 {
+	RectAtlasId = ~0u;
 }
 
 FRectLightSceneProxy::~FRectLightSceneProxy() {}
@@ -218,26 +226,59 @@ bool FRectLightSceneProxy::HasSourceTexture() const
 }
 
 /** Accesses parameters needed for rendering the light. */
-void FRectLightSceneProxy::GetLightShaderParameters(FLightShaderParameters& LightParameters) const
+void FRectLightSceneProxy::GetLightShaderParameters(FLightRenderParameters& LightParameters, uint32 Flags) const
 {
 	FLinearColor LightColor = GetColor();
 	LightColor /= 0.5f * SourceWidth * SourceHeight;
-
-	LightParameters.Position = GetOrigin();
+	LightParameters.WorldPosition = GetOrigin();
 	LightParameters.InvRadius = InvRadius;
-	LightParameters.Color = FVector(LightColor.R, LightColor.G, LightColor.B);
+	LightParameters.Color = LightColor;
 	LightParameters.FalloffExponent = 0.0f;
 
-	LightParameters.Direction = -GetDirection();
-	LightParameters.Tangent = FVector(WorldToLight.M[0][2], WorldToLight.M[1][2], WorldToLight.M[2][2]);
-	LightParameters.SpotAngles = FVector2D(-2.0f, 1.0f);
+	LightParameters.Direction = FVector3f(-GetDirection());
+	LightParameters.Tangent = FVector3f(WorldToLight.M[0][2], WorldToLight.M[1][2], WorldToLight.M[2][2]);
+	LightParameters.SpotAngles = FVector2f(-2.0f, 1.0f);
 	LightParameters.SpecularScale = SpecularScale;
 	LightParameters.SourceRadius = SourceWidth * 0.5f;
 	LightParameters.SoftSourceRadius = 0.0f;
 	LightParameters.SourceLength = SourceHeight * 0.5f;
-	LightParameters.SourceTexture = SourceTexture ? SourceTexture->Resource->TextureRHI : GWhiteTexture->TextureRHI;
 	LightParameters.RectLightBarnCosAngle = FMath::Cos(FMath::DegreesToRadians(BarnDoorAngle));
 	LightParameters.RectLightBarnLength = BarnDoorLength;
+	LightParameters.RectLightAtlasUVOffset = FVector2f::ZeroVector;
+	LightParameters.RectLightAtlasUVScale = FVector2f::ZeroVector;
+	LightParameters.RectLightAtlasMaxLevel = FLightRenderParameters::GetRectLightAtlasInvalidMIPLevel();
+	LightParameters.IESAtlasIndex = INDEX_NONE;
+	LightParameters.InverseExposureBlend = InverseExposureBlend;
+	LightParameters.LightFunctionAtlasLightIndex = GetLightFunctionAtlasLightIndex();
+
+	if (IESAtlasId != ~0)
+	{
+		GetSceneInterface()->GetLightIESAtlasSlot(this, &LightParameters);
+	}
+
+	if (RectAtlasId != ~0u)
+	{
+		GetSceneInterface()->GetRectLightAtlasSlot(this, &LightParameters);
+	}
+	
+	// Render RectLight approximately as SpotLight if the requester does not support rect light (e.g., translucent light grid or mobile)
+	const bool bRenderAsSpotLight = !!(Flags & ELightShaderParameterFlags::RectAsSpotLight) || (SceneInterface && IsMobilePlatform(SceneInterface->GetShaderPlatform()));
+	if (bRenderAsSpotLight)
+	{
+		float ClampedOuterConeAngle = FMath::DegreesToRadians(89.001f);
+		float ClampedInnerConeAngle = FMath::DegreesToRadians(70.0f);
+		float CosOuterCone = FMath::Cos(ClampedOuterConeAngle);
+		float CosInnerCone = FMath::Cos(ClampedInnerConeAngle);
+		float InvCosConeDifference = 1.0f / (CosInnerCone - CosOuterCone);
+
+		LightParameters.Color = GetColor();
+		LightParameters.FalloffExponent = 8.0f;
+		LightParameters.SpotAngles = FVector2f(CosOuterCone, InvCosConeDifference);
+		LightParameters.SourceRadius = (SourceWidth + SourceHeight) * 0.5 * 0.5f;
+		LightParameters.SourceLength = 0.0f;
+		LightParameters.RectLightBarnCosAngle = 0.0f;
+		LightParameters.RectLightBarnLength = -2.0f;
+	}
 }
 
 /**
@@ -252,15 +293,12 @@ bool FRectLightSceneProxy::GetWholeSceneProjectedShadowInitializer(const FSceneV
 		FWholeSceneProjectedShadowInitializer& OutInitializer = *new(OutInitializers) FWholeSceneProjectedShadowInitializer;
 		OutInitializer.PreShadowTranslation = -GetLightToWorld().GetOrigin();
 		OutInitializer.WorldToLight = GetWorldToLight().RemoveTranslation();
-		OutInitializer.Scales = FVector(1, 1, 1);
-		OutInitializer.FaceDirection = FVector(0, 0, 1);
+		OutInitializer.Scales = FVector2D(1, 1);
 		OutInitializer.SubjectBounds = FBoxSphereBounds(FVector(0, 0, 0), FVector(Radius, Radius, Radius), Radius);
 		OutInitializer.WAxis = FVector4(0, 0, 1, 0);
 		OutInitializer.MinLightW = 0.1f;
 		OutInitializer.MaxDistanceToCastInLightW = Radius;
-		
-		bool bSupportsGeometryShaders = RHISupportsGeometryShaders(GShaderPlatformForFeatureLevel[ViewFamily.GetFeatureLevel()]) || RHISupportsVertexShaderLayer(ViewFamily.GetShaderPlatform());
-		OutInitializer.bOnePassPointLightShadow = bSupportsGeometryShaders;
+		OutInitializer.bOnePassPointLightShadow = true;
 
 		OutInitializer.bRayTracedDistanceField = UseRayTracedDistanceFieldShadows() && DoesPlatformSupportDistanceFieldShadowing(ViewFamily.GetShaderPlatform());
 		return true;

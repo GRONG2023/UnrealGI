@@ -3,6 +3,54 @@
 #include "Engine/AssetManagerTypes.h"
 #include "Engine/AssetManager.h"
 #include "Engine/AssetManagerSettings.h"
+#include "Engine/DeveloperSettings.h"
+#include "UObject/UnrealType.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AssetManagerTypes)
+
+bool FPrimaryAssetTypeInfo::HasValidConfigData() const
+{
+	if (PrimaryAssetType == NAME_None)
+	{
+		return false;
+	}
+
+	if (AssetBaseClass.IsNull())
+	{
+		return false;
+	}
+
+	// No paths are required
+
+	return true;
+}
+
+bool FPrimaryAssetTypeInfo::CanModifyConfigData() const
+{
+	// Can't modify config data after adding paths
+	return AssetScanPaths.Num() == 0;
+}
+
+bool FPrimaryAssetTypeInfo::HasValidRuntimeData() const
+{
+	if (PrimaryAssetType == NAME_None)
+	{
+		return false;
+	}
+
+	if (AssetBaseClassLoaded == nullptr)
+	{
+		return false;
+	}
+
+	// Invalid if the paths haven't been copied over yet, this is valid if all paths are empty
+	if ((AssetScanPaths.Num() == 0) && (Directories.Num() + SpecificAssets.Num() > 0))
+	{
+		return false;
+	}
+
+	return true;
+}
 
 void FPrimaryAssetTypeInfo::FillRuntimeData(bool& bIsValid, bool& bBaseClassWasLoaded)
 {
@@ -52,14 +100,8 @@ void FPrimaryAssetTypeInfo::FillRuntimeData(bool& bIsValid, bool& bBaseClassWasL
 		}
 	}
 
-	if (AssetScanPaths.Num() == 0)
-	{
-		// No scan locations picked out
-		return;
-	}
-
-	// Valid data
-	bIsValid = true;
+	// Valid data, it's fine for a type to have no scan directories
+	bIsValid = ensureMsgf(HasValidRuntimeData(), TEXT("Failed to FillRuntimeData for Primary Asset Type %s"), *PrimaryAssetType.ToString());
 }
 
 bool FPrimaryAssetRules::IsDefault() const
@@ -237,7 +279,7 @@ void UAssetManagerSettings::PostEditChangeProperty(FPropertyChangedEvent& Proper
 		}
 		ApplyMetaDataTagsSettings();
 	}
-	else if (PropertyChangedEvent.Property && UAssetManager::IsValid())
+	else if (PropertyChangedEvent.Property && UAssetManager::IsInitialized())
 	{
 		UAssetManager::Get().ReinitializeFromConfig();
 	}

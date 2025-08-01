@@ -2,20 +2,20 @@
 
 #include "NetEventNode.h"
 
-#define LOCTEXT_NAMESPACE "NetEventNode"
+#define LOCTEXT_NAMESPACE "FNetEventNode"
 
-const FName FNetEventNode::TypeName(TEXT("FNetEventNode"));
+INSIGHTS_IMPLEMENT_RTTI(FNetEventNode)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void FNetEventNode::ResetAggregatedStats()
 {
-	AggregatedStats = Trace::FNetProfilerAggregatedStats();
+	AggregatedStats = TraceServices::FNetProfilerAggregatedStats();
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void FNetEventNode::SetAggregatedStats(const Trace::FNetProfilerAggregatedStats& InAggregatedStats)
+void FNetEventNode::SetAggregatedStats(const TraceServices::FNetProfilerAggregatedStats& InAggregatedStats)
 {
 	AggregatedStats = InAggregatedStats;
 }

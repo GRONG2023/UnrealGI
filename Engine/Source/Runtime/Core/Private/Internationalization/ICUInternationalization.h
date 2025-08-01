@@ -8,7 +8,9 @@
 #include "Containers/Map.h"
 #include "Internationalization/CulturePointer.h"
 #include "Templates/UniquePtr.h"
+#include "Templates/PimplPtr.h"
 
+class FCultureFilter;
 class FInternationalization;
 
 #if UE_ENABLE_ICU
@@ -98,8 +100,7 @@ private:
 	TMap<FString, FString> CultureMappings;
 
 	bool bHasInitializedAllowedCultures;
-	TSet<FString> EnabledCultures;
-	TSet<FString> DisabledCultures;
+	TPimplPtr<FCultureFilter> AllowedCulturesFilter;
 
 	TMap<FString, FCultureRef> CachedCultures;
 	FCriticalSection CachedCulturesCS;
@@ -116,7 +117,6 @@ private:
 	struct FICUCachedFileData
 	{
 		FICUCachedFileData(const int64 FileSize);
-		FICUCachedFileData(void* ExistingBuffer);
 		FICUCachedFileData(FICUCachedFileData&& Source);
 		~FICUCachedFileData();
 
@@ -129,6 +129,7 @@ private:
 
 	// Map for associating ICU data file paths with cached file data, to prevent multiple copies of immutable ICU data files from residing in memory.
 	TMap<FString, FICUCachedFileData> PathToCachedFileDataMap;
+	FCriticalSection PathToCachedFileDataMapCS;
 };
 
 #endif

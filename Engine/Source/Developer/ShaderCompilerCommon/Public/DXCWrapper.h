@@ -3,11 +3,12 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "HAL/Platform.h"
 #include "Templates/RefCounting.h"
 
 struct FDllHandle : public FRefCountedObject
 {
-protected:
+private:
 	void* Handle = nullptr;
 
 public:
@@ -17,19 +18,27 @@ public:
 
 class SHADERCOMPILERCOMMON_API FDxcModuleWrapper
 {
+private:
+	uint32 ModuleVersionHash = 0;
 protected:
-	TRefCountPtr<FDllHandle> Dxc;
-
+	FORCEINLINE uint32 GetModuleVersionHash() const
+	{
+		return ModuleVersionHash;
+	}
 public:
 	FDxcModuleWrapper();
 	virtual ~FDxcModuleWrapper();
 };
 
-class SHADERCOMPILERCOMMON_API FShaderConductorModuleWrapper : public FDxcModuleWrapper
+class SHADERCOMPILERCOMMON_API FShaderConductorModuleWrapper : private FDxcModuleWrapper
 {
+private:
+	uint32 ModuleVersionHash = 0;
 protected:
-	TRefCountPtr<FDllHandle> ShaderConductor;
-
+	FORCEINLINE uint32 GetModuleVersionHash() const
+	{
+		return ModuleVersionHash;
+	}
 public:
 	FShaderConductorModuleWrapper();
 	virtual ~FShaderConductorModuleWrapper();

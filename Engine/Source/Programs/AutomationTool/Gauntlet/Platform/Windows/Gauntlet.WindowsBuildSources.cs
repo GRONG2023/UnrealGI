@@ -14,12 +14,8 @@ namespace Gauntlet
 		public override string PlatformFolderPrefix { get { return "Windows"; } }
 	}
 
-	public class Win32BuildSource : StagedBuildSource<StagedBuild>
+	public interface IWindowsSelfInstallingBuild
 	{
-		public override string BuildName { get { return "Win32StagedBuild"; } }
-
-		public override UnrealTargetPlatform Platform { get { return UnrealTargetPlatform.Win32; } }
-
-		public override string PlatformFolderPrefix { get { return "Windows"; } }
+		WindowsAppInstall Install(TargetDeviceWindows TargetDevice, UnrealAppConfig AppConfig, out string BasePath);
 	}
 }

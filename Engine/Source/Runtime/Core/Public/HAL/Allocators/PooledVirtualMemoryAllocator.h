@@ -62,7 +62,7 @@ struct FPooledVirtualMemoryAllocator
 	FPooledVirtualMemoryAllocator();
 
 	void* Allocate(SIZE_T Size, uint32 AllocationHint = 0, FCriticalSection* Mutex = nullptr);
-	void Free(void* Ptr, SIZE_T Size, FCriticalSection* Mutex = nullptr);
+	void Free(void* Ptr, SIZE_T Size, FCriticalSection* Mutex = nullptr, bool ThreadIsTimeCritical = false);
 	void FreeAll(FCriticalSection* Mutex = nullptr);
 
 	/** A structure that describes a pool of a particular size */
@@ -77,6 +77,14 @@ struct FPooledVirtualMemoryAllocator
 
 	/** Returns free memory in the pools */
 	uint64 GetCachedFreeTotal();
+
+	/** Refresh allocator if needed. (does nothing in that implementation) */
+	void Refresh() {}
+
+	/** Update memory stats (does nothing in that implementation) */
+	void UpdateStats() {}
+
+	void DumpAllocatorStats(class FOutputDevice& Ar);
 
 private:
 

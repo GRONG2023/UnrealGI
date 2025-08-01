@@ -1,21 +1,20 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 using UnrealBuildTool;
+using System.IO;
 
 public class UnrealLightmass : ModuleRules
 {
 	public UnrealLightmass(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PublicIncludePaths.Add("Runtime/Launch/Public");
+		PublicIncludePathModuleNames.Add("Launch");
 
-        PrivateDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "zlib", "SwarmInterface", "Projects", "ApplicationCore" });
+		PrivateDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "zlib", "SwarmInterface", "Projects", "ApplicationCore" });
 
 		PublicDefinitions.Add("UE_LIGHTMASS=1");
 
-		if ((Target.Platform == UnrealTargetPlatform.Win64) || (Target.Platform == UnrealTargetPlatform.Win32))
+		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
-			AddEngineThirdPartyPrivateStaticDependencies(Target, "DX9");
-
 			// Unreallightmass requires GetProcessMemoryInfo exported by psapi.dll. http://msdn.microsoft.com/en-us/library/windows/desktop/ms683219(v=vs.85).aspx
 			PublicSystemLibraries.Add("psapi.lib");
 			PrivateDependencyModuleNames.AddRange(
@@ -43,12 +42,11 @@ public class UnrealLightmass : ModuleRules
 				}
 			);
 		}
-
+		
 		// Lightmass ray tracing is 8% faster with buffer security checks disabled due to fixed size arrays on the stack in the kDOP ray tracing functions
 		// Warning: This means buffer overwrites will not be detected
 		bEnableBufferSecurityChecks = false;
 
-		PrivateIncludePaths.Add("Runtime/Launch/Private");		// For LaunchEngineLoop.cpp include
 		PrivateIncludePaths.Add("Programs/UnrealLightmass/Private/Launch");
 		PrivateIncludePaths.Add("Programs/UnrealLightmass/Private/ImportExport");
 		PrivateIncludePaths.Add("Programs/UnrealLightmass/Private/CPUSolver");
@@ -60,6 +58,7 @@ public class UnrealLightmass : ModuleRules
 
         // Always use the official version of IntelTBB
         string IntelTBBLibs = Target.UEThirdPartyBinariesDirectory + "Intel/TBB/";
+        string IntelEmbreeLibs = Target.UEThirdPartyBinariesDirectory + "Intel/Embree/Embree270";
 
         // EMBREE
         if (Target.Platform == UnrealTargetPlatform.Win64)
@@ -82,6 +81,24 @@ public class UnrealLightmass : ModuleRules
 			RuntimeDependencies.Add("$(EngineDir)/Binaries/Mac/libembree.2.dylib");
 			RuntimeDependencies.Add("$(EngineDir)/Binaries/Mac/libtbb.dylib", IntelTBBLibs + "Mac/libtbb.dylib"); // Take latest version to avoid overwriting the editor's copy
 			RuntimeDependencies.Add("$(EngineDir)/Binaries/Mac/libtbbmalloc.dylib", IntelTBBLibs + "Mac/libtbbmalloc.dylib");
+			PublicDefinitions.Add("USE_EMBREE=1");
+		}
+		else if (Target.IsInPlatformGroup(UnrealPlatformGroup.Unix) && Target.Architecture == UnrealArch.X64) // no support for arm64 yet
+		{
+			string IncludeDir = Target.UEThirdPartySourceDirectory + "Intel/Embree/Embree270/Linux/x86_64-unknown-linux-gnu";
+			string SDKDir = Path.Combine(IntelEmbreeLibs, "Linux/x86_64-unknown-linux-gnu/lib");
+
+			PublicIncludePaths.Add(Path.Combine(IncludeDir, "include"));
+			PublicAdditionalLibraries.Add(Path.Combine(SDKDir, "libembree.so"));
+			PublicAdditionalLibraries.Add(Path.Combine(IntelTBBLibs, "Linux/libtbb.so"));
+			// disabled for Linux atm due to a bug in libtbbmalloc on exit
+			// PublicAdditionalLibraries.Add(Path.Combine(IntelTBBLibs, "Linux/libtbbmalloc.so"));
+			RuntimeDependencies.Add(Path.Combine(SDKDir, "libembree.so"));
+			RuntimeDependencies.Add(Path.Combine(SDKDir, "libembree.so.2"));
+			RuntimeDependencies.Add(Path.Combine(IntelTBBLibs, "Linux/libtbb.so"));
+			RuntimeDependencies.Add(Path.Combine(IntelTBBLibs, "Linux/libtbb.so.2"));
+			// disabled for Linux atm due to a bug in libtbbmalloc on exit
+			// RuntimeDependencies.Add(Path.Combine(IntelTBBLibs, "Linux/libtbbmalloc.so"));
 			PublicDefinitions.Add("USE_EMBREE=1");
 		}
         else

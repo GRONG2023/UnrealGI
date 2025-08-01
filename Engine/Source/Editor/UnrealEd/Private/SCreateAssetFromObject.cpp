@@ -6,9 +6,9 @@
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Input/SButton.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "GameFramework/Actor.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Engine/Selection.h"
 #include "Editor.h"
 #include "Misc/FileHelper.h"
@@ -16,8 +16,9 @@
 #include "IContentBrowserSingleton.h"
 #include "ContentBrowserModule.h"
 #include "AssetToolsModule.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "PackageTools.h"
+#include "SPrimaryButton.h"
 
 #define LOCTEXT_NAMESPACE "SCreateAssetFromActor"
 
@@ -90,52 +91,57 @@ void SCreateAssetFromObject::Construct(const FArguments& InArgs, TSharedPtr<SWin
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		[
-			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot()
-			.Padding(0.0f, 0.0f, 4.0f, 0.0f)
-			.AutoWidth()
+			SNew(SBorder)
+			.BorderImage(FAppStyle::Get().GetBrush("Brushes.Panel"))
+			.Padding(16.f)
 			[
-				SNew(STextBlock)
-				.Text(HeadingText)
-			]
-			+ SHorizontalBox::Slot()
-			.FillWidth(1.0f)
-			[
-				SAssignNew(FileNameWidget, SEditableTextBox)
-				.Text(FText::FromString(AssetName))
-				.OnTextChanged(this, &SCreateAssetFromObject::OnFilenameChanged)
-			]
-		]
-		+ SVerticalBox::Slot()
-		.HAlign(HAlign_Right)
-		.Padding(0, 20, 0, 0)
-		.AutoHeight()
-		[
-			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot()
-			.Padding(0, 2, 6, 0)
-			.AutoWidth()
-			[
-				SNew(SButton)
-				.VAlign(VAlign_Bottom)
-				.ContentPadding(FMargin(8, 2, 8, 2))
-				.OnClicked(this, &SCreateAssetFromObject::OnCreateAssetFromActorClicked)
-				.IsEnabled(this, &SCreateAssetFromObject::IsCreateAssetFromActorEnabled)
-				.ButtonStyle(FEditorStyle::Get(), "FlatButton.Success")
-				.TextStyle(FEditorStyle::Get(), "FlatButton.DefaultTextStyle")
-				.Text(CreateButtonText)
-			]
-			+ SHorizontalBox::Slot()
-			.Padding(0, 2, 0, 0)
-			.AutoWidth()
-			[
-				SNew(SButton)
-				.VAlign(VAlign_Bottom)
-				.ContentPadding(FMargin(8, 2, 8, 2))
-				.OnClicked(this, &SCreateAssetFromObject::OnCancelCreateAssetFromActor)
-				.ButtonStyle(FEditorStyle::Get(), "FlatButton.Default")
-				.TextStyle(FEditorStyle::Get(), "FlatButton.DefaultTextStyle")
-				.Text(LOCTEXT("CancelButtonText", "Cancel"))
+				SNew(SVerticalBox)
+
+				+SVerticalBox::Slot()
+				.AutoHeight()
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.Padding(0.0f, 0.0f, 8.0f, 0.0f)
+					.AutoWidth()
+					.VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Text(HeadingText)
+					]
+
+					+ SHorizontalBox::Slot()
+					.FillWidth(1.0f)
+					[
+						SAssignNew(FileNameWidget, SEditableTextBox)
+						.Text(FText::FromString(AssetName))
+						.OnTextChanged(this, &SCreateAssetFromObject::OnFilenameChanged)
+					]
+				]
+
+				+ SVerticalBox::Slot()
+				.HAlign(HAlign_Right)
+				.AutoHeight()
+				.Padding(0.f, 16.f, 0.f, 0.f)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					[
+						SNew(SPrimaryButton)
+						.OnClicked(this, &SCreateAssetFromObject::OnCreateAssetFromActorClicked)
+						.Text(CreateButtonText)
+					]
+
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(16.f, 0.f, 0.f, 0.f)
+					[
+						SNew(SButton)
+						.Text(LOCTEXT("CancelButtonText", "Cancel"))
+						.OnClicked(this, &SCreateAssetFromObject::OnCancelCreateAssetFromActor)
+					]
+				]
 			]
 		]
 	];

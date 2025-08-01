@@ -5,6 +5,7 @@
 #include "Engine/Engine.h"
 #include "Components/LightComponent.h"
 #include "Editor.h"
+#include "PropertyNode.h"
 #include "Widgets/Colors/SColorBlock.h"
 #include "Materials/MaterialExpressionConstant3Vector.h"
 #include "Widgets/Colors/SColorPicker.h"
@@ -46,9 +47,11 @@ TSharedRef< SColorBlock > SPropertyEditorColor::ConstructColorBlock()
 	return SNew( SColorBlock )
 		.Color( this, &SPropertyEditorColor::OnGetColor )
 		.ShowBackgroundForAlpha(true)
-		.IgnoreAlpha(bIgnoreAlpha)
+		.AlphaDisplayMode(bIgnoreAlpha ? EColorBlockAlphaDisplayMode::Ignore : EColorBlockAlphaDisplayMode::Combined)
 		.OnMouseButtonDown( this, &SPropertyEditorColor::ColorBlock_OnMouseButtonDown )
-		.Size( FVector2D( 10.0f, 10.0f ) );
+		.Size( FVector2D( 120.0f, 20.0f ) )
+		.CornerRadius(FVector4(4.0f,4.0f,4.0f,4.0f));
+
 }
 
 TSharedRef< SColorBlock > SPropertyEditorColor::ConstructAlphaColorBlock()
@@ -57,10 +60,11 @@ TSharedRef< SColorBlock > SPropertyEditorColor::ConstructAlphaColorBlock()
 	return SNew( SColorBlock )
 		.Color( this, &SPropertyEditorColor::OnGetColor )
 		.ShowBackgroundForAlpha(false)
-		.IgnoreAlpha(true)
+		.AlphaDisplayMode(EColorBlockAlphaDisplayMode::Ignore)
 		.Visibility( this, &SPropertyEditorColor::GetVisibilityForOpaqueDisplay )
 		.OnMouseButtonDown( this, &SPropertyEditorColor::ColorBlock_OnMouseButtonDown )
-		.Size( FVector2D( 10.0f, 10.0f ) );
+		.Size( FVector2D( 120.0f, 20.0f ) )
+		.CornerRadius(FVector4(4.0f,4.0f,4.0f,4.0f));
 }
 
 bool SPropertyEditorColor::ShouldDisplayIgnoreAlpha() const
@@ -164,6 +168,7 @@ void SPropertyEditorColor::CreateColorPickerWindow(const TSharedRef< class FProp
 		OriginalColors.Empty( ReadAddresses.Num() );
 		OriginalColors.AddUninitialized( ReadAddresses.Num() );
 
+		bool bClampValue = false;
 		// Store off the original colors in the case that the user cancels the color picker. We'll revert to the original colors in that case
 		for( int32 AddrIndex = 0; AddrIndex <  ReadAddresses.Num(); ++AddrIndex )
 		{
@@ -174,6 +179,7 @@ void SPropertyEditorColor::CreateColorPickerWindow(const TSharedRef< class FProp
 				if( CastField<FStructProperty>(Property)->Struct->GetFName() == NAME_Color )
 				{
 					OriginalColors[AddrIndex] = ((FColor*)Addr)->ReinterpretAsLinear();
+					bClampValue = true;
 				}
 				else
 				{
@@ -191,10 +197,11 @@ void SPropertyEditorColor::CreateColorPickerWindow(const TSharedRef< class FProp
 		PickerArgs.ParentWidget = AsShared();
 		PickerArgs.bUseAlpha = bUseAlpha;
 		PickerArgs.bOnlyRefreshOnOk = bOnlyRefreshOnOk;
+		PickerArgs.bClampValue = bClampValue;
 		PickerArgs.DisplayGamma = TAttribute<float>::Create( TAttribute<float>::FGetter::CreateUObject(GEngine, &UEngine::GetDisplayGamma) );
 		PickerArgs.OnColorCommitted = FOnLinearColorValueChanged::CreateSP( this, &SPropertyEditorColor::SetColor);
 		PickerArgs.OnColorPickerCancelled = FOnColorPickerCancelled::CreateSP( this, &SPropertyEditorColor::OnColorPickerCancelled );
-		PickerArgs.InitialColorOverride = InitialColor;
+		PickerArgs.InitialColor = InitialColor;
 
 		OpenColorPicker(PickerArgs);
 	}

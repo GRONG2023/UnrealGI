@@ -54,6 +54,11 @@ FORCEINLINE LmVectorRegister LmMakeVectorRegister( float X, float Y, float Z, fl
 	return _mm_setr_ps( X, Y, Z, W );
 }
 
+FORCEINLINE LmVectorRegister LmMakeVectorRegister( double X, double Y, double Z, double W )
+{
+	return _mm_setr_ps((float)X, (float)Y, (float)Z, (float)W);
+}
+
 /** Vector that represents (1,1,1,1) */
 static const LmVectorRegister LM_SSE_ONE = LmMakeVectorRegister( 1.0f, 1.0f, 1.0f, 1.0f );
 
@@ -416,10 +421,10 @@ FORCEINLINE void LmVectorMatrixMultiply( void *Result, const void* Matrix1, cons
 }
 
 /**
- * Calculate the inverse of an FMatrix.
+ * Calculate the inverse of an FMatrix44f.
  *
- * @param DstMatrix		FMatrix pointer to where the result should be stored
- * @param SrcMatrix		FMatrix pointer to the Matrix to be inversed
+ * @param DstMatrix		FMatrix44f pointer to where the result should be stored
+ * @param SrcMatrix		FMatrix44f pointer to the Matrix to be inversed
  */
 #define LmVectorMatrixInverse( DstMatrix, SrcMatrix ) D3DXMatrixInverse( (D3DXMATRIX*) DstMatrix, NULL, (const D3DXMATRIX*)SrcMatrix )
 

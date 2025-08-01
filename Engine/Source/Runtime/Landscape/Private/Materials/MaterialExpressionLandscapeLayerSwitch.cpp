@@ -5,7 +5,12 @@
 #include "Engine/Texture.h"
 #include "EngineGlobals.h"
 #include "MaterialCompiler.h"
+#include "MaterialHLSLGenerator.h"
+#include "MaterialHLSLTree.h"
 #include "Materials/Material.h"
+#include "LandscapeUtils.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MaterialExpressionLandscapeLayerSwitch)
 
 #define LOCTEXT_NAMESPACE "Landscape"
 
@@ -28,8 +33,6 @@ UMaterialExpressionLandscapeLayerSwitch::UMaterialExpressionLandscapeLayerSwitch
 	};
 	static FConstructorStatics ConstructorStatics;
 
-	bIsParameterExpression = true;
-
 #if WITH_EDITORONLY_DATA
 	MenuCategories.Add(ConstructorStatics.NAME_Landscape);
 
@@ -42,11 +45,6 @@ UMaterialExpressionLandscapeLayerSwitch::UMaterialExpressionLandscapeLayerSwitch
 #if WITH_EDITOR
 bool UMaterialExpressionLandscapeLayerSwitch::IsResultMaterialAttributes(int32 OutputIndex)
 {
-	if (ContainsInputLoop())
-	{
-		// If there is a loop anywhere in this expression's inputs then we can't risk checking them
-		return false;
-	}
 	bool bLayerUsedIsMaterialAttributes = LayerUsed.Expression != nullptr && LayerUsed.Expression->IsResultMaterialAttributes(LayerUsed.OutputIndex);
 	bool bLayerNotUsedIsMaterialAttributes = LayerNotUsed.Expression != nullptr && LayerNotUsed.Expression->IsResultMaterialAttributes(LayerNotUsed.OutputIndex);
 	return bLayerUsedIsMaterialAttributes || bLayerNotUsedIsMaterialAttributes;
@@ -54,9 +52,11 @@ bool UMaterialExpressionLandscapeLayerSwitch::IsResultMaterialAttributes(int32 O
 
 int32 UMaterialExpressionLandscapeLayerSwitch::Compile(class FMaterialCompiler* Compiler, int32 OutputIndex)
 {
+	const bool bTextureArrayEnabled = UE::Landscape::UseWeightmapTextureArray(Compiler->GetShaderPlatform());
 	const int32 WeightCode = Compiler->StaticTerrainLayerWeight(
 		ParameterName,
-		PreviewUsed ? Compiler->Constant(1.0f) : INDEX_NONE
+		PreviewUsed ? Compiler->Constant(1.0f) : INDEX_NONE,
+		bTextureArrayEnabled
 		);
 
 	int32 ReturnCode = INDEX_NONE;
@@ -78,6 +78,20 @@ int32 UMaterialExpressionLandscapeLayerSwitch::Compile(class FMaterialCompiler* 
 
 	return ReturnCode;
 }
+
+bool UMaterialExpressionLandscapeLayerSwitch::GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const
+{
+	using namespace UE::HLSLTree;
+
+	const FExpression* Inputs[] = {
+		LayerNotUsed.TryAcquireHLSLExpression(Generator, Scope),
+		LayerUsed.TryAcquireHLSLExpression(Generator, Scope)
+	};
+
+	OutExpression = Generator.GetTree().NewExpression<Material::FExpressionLandscapeLayerSwitch>(Inputs, ParameterName, PreviewUsed!=0);
+	return OutExpression != nullptr;
+}
+
 #endif // WITH_EDITOR
 
 UObject* UMaterialExpressionLandscapeLayerSwitch::GetReferencedTexture() const
@@ -85,10 +99,25 @@ UObject* UMaterialExpressionLandscapeLayerSwitch::GetReferencedTexture() const
 	return GEngine->WeightMapPlaceholderTexture;
 }
 
+UMaterialExpression::ReferencedTextureArray UMaterialExpressionLandscapeLayerSwitch::GetReferencedTextures() const
+{
+	return { GEngine->WeightMapPlaceholderTexture, GEngine->WeightMapArrayPlaceholderTexture };
+}
+
 #if WITH_EDITOR
+FString UMaterialExpressionLandscapeLayerSwitch::GetEditableName() const
+{
+	return ParameterName.ToString();
+}
+
+void UMaterialExpressionLandscapeLayerSwitch::SetEditableName(const FString& NewName)
+{
+	ParameterName = *NewName;
+}
+
 void UMaterialExpressionLandscapeLayerSwitch::GetCaption(TArray<FString>& OutCaptions) const
 {
-	OutCaptions.Add(TEXT("Layer Switch"));
+	OutCaptions.Add(TEXT("Landscape Layer Switch"));
 	OutCaptions.Add(FString::Printf(TEXT("'%s'"), *ParameterName.ToString()));
 }
 
@@ -113,7 +142,7 @@ void UMaterialExpressionLandscapeLayerSwitch::Serialize(FStructuredArchive::FRec
 {
 	Super::Serialize(Record);
 
-	if (Record.GetUnderlyingArchive().UE4Ver() < VER_UE4_FIX_TERRAIN_LAYER_SWITCH_ORDER)
+	if (Record.GetUnderlyingArchive().UEVer() < VER_UE4_FIX_TERRAIN_LAYER_SWITCH_ORDER)
 	{
 		Swap(LayerUsed, LayerNotUsed);
 	}
@@ -124,29 +153,18 @@ void UMaterialExpressionLandscapeLayerSwitch::PostLoad()
 {
 	Super::PostLoad();
 
-	if (GetLinkerUE4Version() < VER_UE4_FIXUP_TERRAIN_LAYER_NODES)
+	if (GetLinkerUEVersion() < VER_UE4_FIXUP_TERRAIN_LAYER_NODES)
 	{
 		UpdateParameterGuid(true, true);
 	}
 }
 
-
-FGuid& UMaterialExpressionLandscapeLayerSwitch::GetParameterExpressionId()
+#if WITH_EDITOR
+void UMaterialExpressionLandscapeLayerSwitch::GetLandscapeLayerNames(TArray<FName>& OutLayers) const
 {
-	return ExpressionGUID;
+	OutLayers.AddUnique(ParameterName);
 }
-
-
-void UMaterialExpressionLandscapeLayerSwitch::GetAllParameterInfo(TArray<FMaterialParameterInfo> &OutParameterInfo, TArray<FGuid> &OutParameterIds, const FMaterialParameterInfo& InBaseParameterInfo) const
-{
-	int32 CurrentSize = OutParameterInfo.Num();
-	FMaterialParameterInfo NewParameter(ParameterName, InBaseParameterInfo.Association, InBaseParameterInfo.Index);
-	OutParameterInfo.AddUnique(NewParameter);
-
-	if (CurrentSize != OutParameterInfo.Num())
-	{
-		OutParameterIds.Add(ExpressionGUID);
-	}
-}
+#endif // WITH_EDITOR
 
 #undef LOCTEXT_NAMESPACE
+

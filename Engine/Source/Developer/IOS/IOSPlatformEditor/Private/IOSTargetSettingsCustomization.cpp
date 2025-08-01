@@ -10,7 +10,7 @@
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Layout/SWidgetSwitcher.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "IOSRuntimeSettings.h"
 #include "PropertyHandle.h"
 #include "DetailLayoutBuilder.h"
@@ -36,6 +36,9 @@
 #include "Interfaces/ITargetPlatform.h"
 #include "Interfaces/ITargetPlatformModule.h"
 #include "IOSPlatformEditorModule.h"
+#include "HAL/PlatformFileManager.h"
+#include "UEFreeImage.h"
+#include "XcodeProjectSettings.h"
 
 #define LOCTEXT_NAMESPACE "IOSTargetSettings"
 DEFINE_LOG_CATEGORY_STATIC(LogIOSTargetSettings, Log, All);
@@ -59,34 +62,64 @@ TSharedRef<IDetailCustomization> FIOSTargetSettingsCustomization::MakeInstance()
 }
 
 FIOSTargetSettingsCustomization::FIOSTargetSettingsCustomization()
-	: EngineInfoPath(FString::Printf(TEXT("%sBuild/IOS/UE4Game-Info.plist"), *FPaths::EngineDir()))
+	: EngineInfoPath(FString::Printf(TEXT("%sBuild/IOS/UnrealGame-Info.plist"), *FPaths::EngineDir()))
 	, GameInfoPath(FString::Printf(TEXT("%sBuild/IOS/Info.plist"), *FPaths::ProjectDir()))
 	, EngineGraphicsPath(FString::Printf(TEXT("%sBuild/IOS/Resources/Graphics"), *FPaths::EngineDir()))
 	, GameGraphicsPath(FString::Printf(TEXT("%sBuild/IOS/Resources/Graphics"), *FPaths::ProjectDir()))
-{
-	new (IconNames) FPlatformIconInfo(TEXT("Icon20.png"), LOCTEXT("NotificationIcon_iPhone", "iPhone Notification Icon"), FText::GetEmpty(), 20, 20, FPlatformIconInfo::Optional);
-	new (IconNames) FPlatformIconInfo(TEXT("Icon20@2x.png"), LOCTEXT("NotificationIcon_iPhoneRetina", "iPhone Retina Notification Icon"), FText::GetEmpty(), 40, 40, FPlatformIconInfo::Optional);
-	new (IconNames) FPlatformIconInfo(TEXT("Icon20@3x.png"), LOCTEXT("NotificationIcon_iPhoneRetina_HD", "iPhone Retina HD Notification Icon"), FText::GetEmpty(), 60, 60, FPlatformIconInfo::Optional);
-	new (IconNames) FPlatformIconInfo(TEXT("Icon29.png"), LOCTEXT("SettingsIcon_iPhone", "iPhone Settings Icon"), FText::GetEmpty(), 29, 29, FPlatformIconInfo::Optional);// also iOS6 spotlight search
-	new (IconNames) FPlatformIconInfo(TEXT("Icon29@2x.png"), LOCTEXT("SettingsIcon_iPhoneRetina", "iPhone Retina Settings Icon"), FText::GetEmpty(), 58, 58, FPlatformIconInfo::Optional); // also iOS6 spotlight search
-	new (IconNames) FPlatformIconInfo(TEXT("Icon29@3x.png"), LOCTEXT("SettingsIcon_iPhoneRetina_HD", "iPhone Retina HD Settings Icon"), FText::GetEmpty(), 87, 87, FPlatformIconInfo::Optional); // also iOS6 spotlight search
-	new (IconNames) FPlatformIconInfo(TEXT("Icon40.png"), LOCTEXT("SpotlightIcon_iOS7", "iOS7 Spotlight Icon"), FText::GetEmpty(), 40, 40, FPlatformIconInfo::Optional);
-	new (IconNames) FPlatformIconInfo(TEXT("Icon40@2x.png"), LOCTEXT("SpotlightIcon_Retina_iOS7", "Retina iOS7 Spotlight Icon"), FText::GetEmpty(), 80, 80, FPlatformIconInfo::Optional);
-	new (IconNames) FPlatformIconInfo(TEXT("Icon40@3x.png"), LOCTEXT("SpotlightIcon_Retina_HD_iOS7", "Retina HD iOS7 Spotlight Icon"), FText::GetEmpty(), 120, 120, FPlatformIconInfo::Optional);
-	new (IconNames) FPlatformIconInfo(TEXT("Icon50.png"), LOCTEXT("SpotlightIcon_iPad_iOS6", "iPad iOS6 Spotlight Icon"), FText::GetEmpty(), 50, 50, FPlatformIconInfo::Optional);
-	new (IconNames) FPlatformIconInfo(TEXT("Icon50@2x.png"), LOCTEXT("SpotlightIcon_iPadRetina_iOS6", "iPad Retina iOS6 Spotlight Icon"), FText::GetEmpty(), 100, 100, FPlatformIconInfo::Optional);
-	new (IconNames) FPlatformIconInfo(TEXT("Icon57.png"), LOCTEXT("AppIcon_iPhone_iOS6", "iPhone iOS6 App Icon"), FText::GetEmpty(), 57, 57, FPlatformIconInfo::Required);
-	new (IconNames) FPlatformIconInfo(TEXT("Icon57@2x.png"), LOCTEXT("AppIcon_iPhoneRetina_iOS6", "iPhone Retina iOS6 App Icon"), FText::GetEmpty(), 114, 114, FPlatformIconInfo::Required);
-	new (IconNames) FPlatformIconInfo(TEXT("Icon60@2x.png"), LOCTEXT("AppIcon_iPhoneRetina_iOS7", "iPhone Retina iOS7 App Icon"), FText::GetEmpty(), 120, 120, FPlatformIconInfo::Required);
-	new (IconNames)FPlatformIconInfo(TEXT("Icon60@3x.png"), LOCTEXT("AppIcon_iPhoneRetina_iOS8", "iPhone Plus Retina iOS8 App Icon"), FText::GetEmpty(), 180, 180, FPlatformIconInfo::Required);
-	new (IconNames)FPlatformIconInfo(TEXT("Icon72.png"), LOCTEXT("AppIcon_iPad_iOS6", "iPad iOS6 App Icon"), FText::GetEmpty(), 72, 72, FPlatformIconInfo::Required);
-	new (IconNames) FPlatformIconInfo(TEXT("Icon72@2x.png"), LOCTEXT("AppIcon_iPadRetina_iOS6", "iPad Retina iOS6 App Icon"), FText::GetEmpty(), 144, 144, FPlatformIconInfo::Required);
-	new (IconNames) FPlatformIconInfo(TEXT("Icon76.png"), LOCTEXT("AppIcon_iPad_iOS7", "iPad iOS7 App Icon"), FText::GetEmpty(), 76, 76, FPlatformIconInfo::Required);
-	new (IconNames) FPlatformIconInfo(TEXT("Icon76@2x.png"), LOCTEXT("AppIcon_iPadRetina_iOS7", "iPad Retina iOS7 App Icon"), FText::GetEmpty(), 152, 152, FPlatformIconInfo::Required);
-	new (IconNames)FPlatformIconInfo(TEXT("Icon83.5@2x.png"), LOCTEXT("AppIcon_iPadProRetina_iOS9", "iPad Pro Retina iOS9 App Icon"), FText::GetEmpty(), 167, 167, FPlatformIconInfo::Required);
-	new (IconNames)FPlatformIconInfo(TEXT("Icon1024.png"), LOCTEXT("AppIcon_Marketing", "Marketing Icon"), FText::GetEmpty(), 1024, 1024, FPlatformIconInfo::Required);
+	, TVOSEngineGraphicsPath(FString::Printf(TEXT("%sBuild/TVOS/Resources/Graphics"), *FPaths::EngineDir()))
+	, TVOSGameGraphicsPath(FString::Printf(TEXT("%sBuild/TVOS/Resources/Graphics"), *FPaths::ProjectDir()))
 
+{
+
+    // Default AppIcons copied at the payload's root. See https://developer.apple.com/design/human-interface-guidelines/ios/icons-and-images/app-icon/
+   
+	new (IconNames)FPlatformIconInfo(TEXT("Icon1024.png"), LOCTEXT("AppIcon_Marketing", "Marketing Icon (1024x1024)\n\nOther iOS icons sizes can be generated from the Marketing Icon."), FText::GetEmpty(), 1024, 1024, FPlatformIconInfo::Required); // App Store
+
+	new (IconNames) FPlatformIconInfo(TEXT("Icon60@2x.png"), LOCTEXT("Default_iPhone_AppIcon", "Default iPhone Icon (120x120)"), FText::GetEmpty(), 120, 120, FPlatformIconInfo::Required); // iPhone
+    new (IconNames) FPlatformIconInfo(TEXT("Icon76@2x.png"), LOCTEXT("Default_iPad_AppIcon", "Default iPad App Icon (152x152)"), FText::GetEmpty(), 152, 152, FPlatformIconInfo::Required); // iPad, iPad Mini
+ 
+    //From here, all the icons are part of the asset catalog (Assets.car)
+
+    // Required in the asset catalog
+    new (IconNames)FPlatformIconInfo(TEXT("Icon83.5@2x.png"), LOCTEXT("iPad_Pro_Retina_App_Icon", "iPad Pro Retina App Icon (167x167)"), FText::GetEmpty(), 167, 167, FPlatformIconInfo::Required); // iPad Pro
+
+    // From here icons are optional
+    new (IconNames)FPlatformIconInfo(TEXT("Icon60@3x.png"), LOCTEXT("3x_iPhone_App_Icon", "3x iPhone App Icon (180x180)"), FText::GetEmpty(), 180, 180, FPlatformIconInfo::Optional); // iPhone
+
+    new (IconNames) FPlatformIconInfo(TEXT("Icon40@3x.png"), LOCTEXT("3x_iPhone_Spotlight_Icon", "3x iPhone Spotlight Icon (120x120)"), FText::GetEmpty(), 120, 120, FPlatformIconInfo::Optional); // iPhone
+    new (IconNames) FPlatformIconInfo(TEXT("Icon40@2x.png"), LOCTEXT("Default_Spotlight_Icon", "Default Spotlight Icon (80x80)"), FText::GetEmpty(), 80, 80, FPlatformIconInfo::Optional); // iPhone, iPad Pro, iPad, iPad Mini
+
+    new (IconNames) FPlatformIconInfo(TEXT("Icon29@3x.png"), LOCTEXT("3x_iPhone_Settings_Icon", "3x iPhone Settings Icon (87x87)"), FText::GetEmpty(), 87, 87, FPlatformIconInfo::Optional); // iPhone
+    new (IconNames) FPlatformIconInfo(TEXT("Icon29@2x.png"), LOCTEXT("Default_Settings_Icon", "Default Settings Icon (58x58)"), FText::GetEmpty(), 58, 58, FPlatformIconInfo::Optional); // iPhone, iPad Pro, iPad, iPad Mini
+
+    new (IconNames) FPlatformIconInfo(TEXT("Icon20@3x.png"), LOCTEXT("3x_iPhone_Notification_Icon", "3x iPhone Notification Icon (60x60)"), FText::GetEmpty(), 60, 60, FPlatformIconInfo::Optional); // iPhone
+    new (IconNames) FPlatformIconInfo(TEXT("Icon20@2x.png"), LOCTEXT("Default_Notification_Icon", "Default Notification Icon (40x40)"), FText::GetEmpty(), 40, 40, FPlatformIconInfo::Optional); // iPhone, iPad Pro, iPad, iPad Mini
+
+	// LaunchScreen iOS and tvOS
 	new (LaunchImageNames)FPlatformIconInfo(TEXT("LaunchScreenIOS.png"), LOCTEXT("LaunchImageIOS", "Launch Screen Image"), LOCTEXT("LaunchImageIOSDesc", "This image is used for the Launch Screen when custom launch screen storyboards are not in use. The image is used in both portait and landscape modes and will be uniformly scaled to occupy the full width or height as necessary for of all devices, so if your app supports both a square image is recommended. The png file supplied must not have an alpha channel."), -1, -1, FPlatformIconInfo::Required);
+
+	// Icons and Shelf Images for tvOS
+
+    // Used to generate top shelf images
+    new (TvOSImageNames)FPlatformIconInfo(TEXT("TopShelfWide-2320x720@2x.png"), LOCTEXT("2x_TVOS_Top_Shelf_Wide", "2x Top Shelf Wide (4640x1440)\n\nOther tvOS Topshelf Image sizes can be generated from it."), FText::GetEmpty(), 4640, 1440, FPlatformIconInfo::Required);
+
+    // Generated top shelf image
+    new (TvOSImageNames)FPlatformIconInfo(TEXT("TopShelfWide-2320x720.png"), LOCTEXT("TVOS_Top_Shelf_Wide", "Top Shelf Wide (2320x720)"), FText::GetEmpty(), 2320, 720, FPlatformIconInfo::Optional);
+
+    // Used to generate other tvOS icons
+    new (TvOSImageNames)FPlatformIconInfo(TEXT("Icon_Large_Front.png"), LOCTEXT("TVOS_Icon_Large_Front", "Icon Large Front (1280x768)\n\nOther tvOS icons sizes can be generated from it."), FText::GetEmpty(), 1280, 768, FPlatformIconInfo::Required);
+
+    // Generated icons
+    new (TvOSImageNames)FPlatformIconInfo(TEXT("Icon_Large_Middle.png"), LOCTEXT("TVOS_Icon_Large_Middle", "Icon Large Middle (1280x768)"), FText::GetEmpty(), 1280, 768, FPlatformIconInfo::Required);
+    new (TvOSImageNames)FPlatformIconInfo(TEXT("Icon_Large_Back.png"), LOCTEXT("TVOS_Icon_Large_Back", "Icon Large Back (1280x768)"), FText::GetEmpty(), 1280, 768, FPlatformIconInfo::Required);
+    
+    new (TvOSImageNames)FPlatformIconInfo(TEXT("Icon_Medium_Front.png"), LOCTEXT("TVOS_Icon_Medium_Front", "Icon Medium Front (800x480)"), FText::GetEmpty(), 800, 480, FPlatformIconInfo::Required);
+    new (TvOSImageNames)FPlatformIconInfo(TEXT("Icon_Medium_Middle.png"), LOCTEXT("TVOS_Icon_Medium_Middle", "Icon Medium Middle (800x480)"), FText::GetEmpty(), 800, 480, FPlatformIconInfo::Required);
+    new (TvOSImageNames)FPlatformIconInfo(TEXT("Icon_Medium_Back.png"), LOCTEXT("TVOS_Icon_Medium_Back", "Icon Medium Back (800x480)"), FText::GetEmpty(), 800, 480, FPlatformIconInfo::Required);
+
+    new (TvOSImageNames)FPlatformIconInfo(TEXT("Icon_Small_Front.png"), LOCTEXT("TVOS_Icon_Small_Front", "Icon Small Front (400x240)"), FText::GetEmpty(), 400, 240, FPlatformIconInfo::Optional);
+    new (TvOSImageNames)FPlatformIconInfo(TEXT("Icon_Small_Middle.png"), LOCTEXT("TVOS_Icon_Small_Middle", "Icon Small Middle (400x240)"), FText::GetEmpty(), 400, 240, FPlatformIconInfo::Optional);
+    new (TvOSImageNames)FPlatformIconInfo(TEXT("Icon_Small_Back.png"), LOCTEXT("TVOS_Icon_Small_Back", "Icon Small Back (400x240)"), FText::GetEmpty(), 400, 240, FPlatformIconInfo::Optional);
 
 	bShowAllProvisions = false;
 	bShowAllCertificates = false;
@@ -102,7 +135,7 @@ FIOSTargetSettingsCustomization::~FIOSTargetSettingsCustomization()
 	if (IPPProcess.IsValid())
 	{
 		IPPProcess = NULL;
-		FTicker::GetCoreTicker().RemoveTicker(TickerHandle);
+		FTSTicker::GetCoreTicker().RemoveTicker(TickerHandle);
 	}
 
 	FIOSPlatformEditorModule::OnSelect.RemoveAll(this);
@@ -117,6 +150,8 @@ void FIOSTargetSettingsCustomization::CustomizeDetails(IDetailLayoutBuilder& Det
 	BuildIconSection(DetailLayout);
 
 	BuildRemoteBuildingSection(DetailLayout);
+    
+    BuildSecondaryRemoteMacBuildingSection(DetailLayout);
 
 	AudioPluginWidgetManager.BuildAudioCategory(DetailLayout, FString(TEXT("IOS")));
 
@@ -282,11 +317,8 @@ void FIOSTargetSettingsCustomization::BuildPListSection(IDetailLayoutBuilder& De
 	IDetailCategoryBuilder& OrientationCategory = DetailLayout.EditCategory(TEXT("Orientation"));
 	IDetailCategoryBuilder& FileSystemCategory = DetailLayout.EditCategory(TEXT("FileSystem"));
 	IDetailCategoryBuilder& RenderCategory = DetailLayout.EditCategory(TEXT("Rendering"));
-	IDetailCategoryBuilder& OSInfoCategory = DetailLayout.EditCategory(TEXT("OS Info"));
-	IDetailCategoryBuilder& DeviceCategory = DetailLayout.EditCategory(TEXT("Devices"));
 	IDetailCategoryBuilder& BuildCategory = DetailLayout.EditCategory(TEXT("Build"));
 	IDetailCategoryBuilder& OnlineCategory = DetailLayout.EditCategory(TEXT("Online"));
-	IDetailCategoryBuilder& ExtraCategory = DetailLayout.EditCategory(TEXT("Extra PList Data"));
 	MobileProvisionProperty = DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UIOSRuntimeSettings, MobileProvision));
 	BuildCategory.AddProperty(MobileProvisionProperty)
 		.Visibility(EVisibility::Hidden);
@@ -306,6 +338,7 @@ void FIOSTargetSettingsCustomization::BuildPListSection(IDetailLayoutBuilder& De
 	BuildCategory.AddProperty(IOSTeamIDHandle)
 		.Visibility(EVisibility::Hidden);
 		BuildCategory.AddCustomRow(LOCTEXT("IOSTeamID", "IOSTeamID"), false)
+            .EditCondition(!UXcodeProjectSettings::ShouldDisableIOSSettings(), nullptr)
 #if !PLATFORM_MAC
 			.Visibility(EVisibility::Hidden)
 #endif // PLATFORM_MAC
@@ -369,7 +402,20 @@ void FIOSTargetSettingsCustomization::BuildPListSection(IDetailLayoutBuilder& De
 			]
 		];*/
 
+    ProvisionCategory.AddCustomRow(LOCTEXT("ModernXcodeSigningLabel", "ModernXcodeSigning"), false)
+        .Visibility(UXcodeProjectSettings::ShouldDisableIOSSettings() ? EVisibility::Visible : EVisibility::Hidden)
+        .WholeRowWidget
+        .MinDesiredWidth(0.f)
+        .MaxDesiredWidth(0.f)
+        .HAlign(HAlign_Fill)
+        [
+            SNew( STextBlock )
+            .Text( LOCTEXT( "ModernXcodeSigningText", "While Modern Xcode is enabled, code signing is handled by \"Xcode Projects\" section") )
+            .AutoWrapText( true )
+        ];
+    
 	ProvisionCategory.AddCustomRow(LOCTEXT("ProvisionLabel", "Provision"), false)
+        .EditCondition(!UXcodeProjectSettings::ShouldDisableIOSSettings(), nullptr)
 		.WholeRowWidget
 		.MinDesiredWidth(0.f)
 		.MaxDesiredWidth(0.f)
@@ -469,8 +515,8 @@ void FIOSTargetSettingsCustomization::BuildPListSection(IDetailLayoutBuilder& De
 							[
 								SNew(SRichTextBlock)
 								.Text(LOCTEXT("ProvisionMessage", "<RichTextBlock.TextHighlight>Note</>: If no provision is selected the one in green will be used to provision the IPA."))
-								.TextStyle(FEditorStyle::Get(), "MessageLog")
-								.DecoratorStyleSet(&FEditorStyle::Get())
+								.TextStyle(FAppStyle::Get(), "MessageLog")
+								.DecoratorStyleSet(&FAppStyle::Get())
 								.AutoWrapText(true)
 							]
 
@@ -527,6 +573,7 @@ void FIOSTargetSettingsCustomization::BuildPListSection(IDetailLayoutBuilder& De
 		];
 
 	ProvisionCategory.AddCustomRow(LOCTEXT("CertificateLabel", "Certificate"), false)
+        .EditCondition(!UXcodeProjectSettings::ShouldDisableIOSSettings(), nullptr)
 		.WholeRowWidget
 		.MinDesiredWidth(0.f)
 		.MaxDesiredWidth(0.f)
@@ -628,8 +675,8 @@ void FIOSTargetSettingsCustomization::BuildPListSection(IDetailLayoutBuilder& De
 								[
 									SNew(SRichTextBlock)
 									.Text(LOCTEXT("CertificateMessage", "<RichTextBlock.TextHighlight>Note</>: If no certificate is selected then the one in green will be used to sign the IPA."))
-									.TextStyle(FEditorStyle::Get(), "MessageLog")
-									.DecoratorStyleSet(&FEditorStyle::Get())
+									.TextStyle(FAppStyle::Get(), "MessageLog")
+									.DecoratorStyleSet(&FAppStyle::Get())
 									.AutoWrapText(true)
 								]
 								+ SHorizontalBox::Slot()
@@ -683,27 +730,6 @@ void FIOSTargetSettingsCustomization::BuildPListSection(IDetailLayoutBuilder& De
 				]
 			]
 		];
-	
-	BundleCategory.AddCustomRow(LOCTEXT("UpgradeInfo", "Upgrade Info"), false)
-	.WholeRowWidget
-	[
-		SNew(SBorder)
-		.Padding(1)
-		[
-			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot()
-			.Padding(FMargin(10, 10, 10, 10))
-			.FillWidth(1.0f)
-			[
-				SNew(SRichTextBlock)
-				.Text(LOCTEXT("IOSUpgradeInfoMessage", "<RichTextBlock.TextHighlight>Note to users from 4.6 or earlier</>: We now <RichTextBlock.TextHighlight>GENERATE</> an Info.plist when building, so if you have customized your .plist file, you will need to put all of your changes into the below settings. Note that we don't touch the .plist file that is in your project directory, so you can use it as reference."))
-				.TextStyle(FEditorStyle::Get(), "MessageLog")
-				.DecoratorStyleSet(&FEditorStyle::Get())
-				.AutoWrapText(true)
-				// + SRichTextBlock::HyperlinkDecorator(TEXT("browser"), FSlateHyperlinkRun::FOnClick::CreateStatic(&OnBrowserLinkClicked))
-			 ]
-		 ]
-	 ];
 
 	// Show properties that are gated by the plist being present and writable
 	RunningIPPProcess = false;
@@ -728,6 +754,7 @@ void FIOSTargetSettingsCustomization::BuildPListSection(IDetailLayoutBuilder& De
 		Category.AddProperty(PropertyHandle) \
 		.Visibility(EVisibility::Hidden); \
 		Category.AddCustomRow(LOCTEXT("BundleIdentifier", "BundleIdentifier"), false) \
+        .EditCondition(!UXcodeProjectSettings::ShouldDisableIOSSettings(), nullptr) \
 		.NameContent() \
 		[ \
 			SNew(SHorizontalBox) \
@@ -769,10 +796,6 @@ void FIOSTargetSettingsCustomization::BuildPListSection(IDetailLayoutBuilder& De
 	FSimpleDelegate OnUpdateOSVersionWarning = FSimpleDelegate::CreateSP(this, &FIOSTargetSettingsCustomization::UpdateOSVersionWarning);
 	FSimpleDelegate OnEnableMetalMRT = FSimpleDelegate::CreateSP(this, &FIOSTargetSettingsCustomization::UpdateMetalMRTWarning);
 
-	/* MinOSPropertyHandle = DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UIOSRuntimeSettings, MinimumiOSVersion));
-	MinOSPropertyHandle->SetOnPropertyValueChanged(OnUpdateShaderStandardWarning);
-	OSInfoCategory.AddProperty(MinOSPropertyHandle);*/
-
 	SETUP_PLIST_PROP(BundleDisplayName, BundleCategory);
 	SETUP_PLIST_PROP(BundleName, BundleCategory);
 	SETUP_STATUS_PROP(BundleIdentifier, BundleCategory);
@@ -797,7 +820,7 @@ void FIOSTargetSettingsCustomization::BuildPListSection(IDetailLayoutBuilder& De
 
     // Handle max. shader version a little specially.
     {
-        ShaderVersionPropertyHandle = DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UIOSRuntimeSettings, MaxShaderLanguageVersion));
+        ShaderVersionPropertyHandle = DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UIOSRuntimeSettings, MetalLanguageVersion));
 		ShaderVersionPropertyHandle->SetOnPropertyValueChanged(OnUpdateShaderStandardWarning);
 		
 		// Drop-downs for setting type of lower and upper bound normalization
@@ -844,7 +867,7 @@ void FIOSTargetSettingsCustomization::BuildPListSection(IDetailLayoutBuilder& De
 		MinOSPropertyHandle->SetOnPropertyValueChanged(OnUpdateOSVersionWarning);
 
 		// Drop-downs for setting type of lower and upper bound normalization
-		IDetailPropertyRow& MinOSPropertyRow = OSInfoCategory.AddProperty(MinOSPropertyHandle.ToSharedRef());
+		IDetailPropertyRow& MinOSPropertyRow = BuildCategory.AddProperty(MinOSPropertyHandle.ToSharedRef());
 		MinOSPropertyRow.CustomWidget()
 		.NameContent()
 		[
@@ -880,11 +903,6 @@ void FIOSTargetSettingsCustomization::BuildPListSection(IDetailLayoutBuilder& De
 
 		UpdateOSVersionWarning();
 	}
-
-	SETUP_PLIST_PROP(bSupportsIPad, DeviceCategory);
-	SETUP_PLIST_PROP(bSupportsIPhone, DeviceCategory);
-	SETUP_PLIST_PROP(AdditionalPlistData, ExtraCategory);
-
 #undef SETUP_SOURCEONLY_PROP
 }
 
@@ -892,7 +910,7 @@ void FIOSTargetSettingsCustomization::BuildPListSection(IDetailLayoutBuilder& De
 void FIOSTargetSettingsCustomization::BuildRemoteBuildingSection(IDetailLayoutBuilder& DetailLayout)
 {
 #if PLATFORM_WINDOWS
-	IDetailCategoryBuilder& BuildCategory = DetailLayout.EditCategory(TEXT("Build"));
+	IDetailCategoryBuilder& BuildCategory = DetailLayout.EditCategory(TEXT("Remote Build"));
 
 	// Sub group we wish to add remote building options to.
 	FText RemoteBuildingGroupName = LOCTEXT("RemoteBuildingGroupName", "Remote Build Options");
@@ -909,31 +927,31 @@ void FIOSTargetSettingsCustomization::BuildRemoteBuildingSection(IDetailLayoutBu
 		[
 			SNew(SHorizontalBox)
 			+ SHorizontalBox::Slot()
-			.Padding(FMargin(0, 1, 0, 1))
-			.FillWidth(1.0f)
-			[
-				SNew(STextBlock)
-				.Text(LOCTEXT("RemoteServerNameLabel", "Remote Server Name"))
-				.Font(DetailLayout.GetDetailFont())
-			]
+		.Padding(FMargin(0, 1, 0, 1))
+		.FillWidth(1.0f)
+		[
+			SNew(STextBlock)
+			.Text(LOCTEXT("RemoteServerNameLabel", "Remote Server Name"))
+		.Font(DetailLayout.GetDetailFont())
 		]
-		.ValueContent()
+		]
+	.ValueContent()
 		.MinDesiredWidth(150.0f)
 		[
 			SNew(SHorizontalBox)
 			+ SHorizontalBox::Slot()
-			.Padding(FMargin(0.0f, 8.0f))
-			[
-				SNew(SEditableTextBox)
-				.IsEnabled(this, &FIOSTargetSettingsCustomization::IsImportEnabled)
-				.Text(this, &FIOSTargetSettingsCustomization::GetBundleText, RemoteServerNamePropertyHandle)
-				.Font(DetailLayout.GetDetailFont())
-				.SelectAllTextOnCommit(true)
-				.SelectAllTextWhenFocused(true)
-				.ClearKeyboardFocusOnCommit(false)
-				.ToolTipText(RemoteServerNamePropertyHandle->GetToolTipText())
-				.OnTextCommitted(this, &FIOSTargetSettingsCustomization::OnRemoteServerChanged, RemoteServerNamePropertyHandle)
-			]
+		.Padding(FMargin(0.0f, 8.0f))
+		[
+			SNew(SEditableTextBox)
+			.IsEnabled(this, &FIOSTargetSettingsCustomization::IsImportEnabled)
+		.Text(this, &FIOSTargetSettingsCustomization::GetBundleText, RemoteServerNamePropertyHandle)
+		.Font(DetailLayout.GetDetailFont())
+		.SelectAllTextOnCommit(true)
+		.SelectAllTextWhenFocused(true)
+		.ClearKeyboardFocusOnCommit(false)
+		.ToolTipText(RemoteServerNamePropertyHandle->GetToolTipText())
+		.OnTextCommitted(this, &FIOSTargetSettingsCustomization::OnRemoteServerChanged, RemoteServerNamePropertyHandle)
+		]
 
 		];
 
@@ -950,36 +968,36 @@ void FIOSTargetSettingsCustomization::BuildRemoteBuildingSection(IDetailLayoutBu
 	RSyncUsernamePropertyRow
 		.ToolTip(RSyncUsernamePropertyHandle->GetToolTipText())
 		.CustomWidget()
-			.NameContent()
-			[
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot()
-				.Padding(FMargin(0, 1, 0, 1))
-				.FillWidth(1.0f)
-				[
-					SNew(STextBlock)
-					.Text(LOCTEXT("RSyncUserNameLabel", "RSync User Name"))
-					.Font(DetailLayout.GetDetailFont())
-				]
-			]
-			.ValueContent()
-			.MinDesiredWidth(150.0f)
-			[
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot()
-				.Padding(FMargin(0.0f, 8.0f))
-				[
-					SNew(SEditableTextBox)
-					.IsEnabled(this, &FIOSTargetSettingsCustomization::IsImportEnabled)
-					.Text(this, &FIOSTargetSettingsCustomization::GetBundleText, RSyncUsernamePropertyHandle)
-					.Font(DetailLayout.GetDetailFont())
-					.SelectAllTextOnCommit(true)
-					.SelectAllTextWhenFocused(true)
-					.ClearKeyboardFocusOnCommit(false)
-					.ToolTipText(RSyncUsernamePropertyHandle->GetToolTipText())
-					.OnTextCommitted(this, &FIOSTargetSettingsCustomization::OnRemoteServerChanged, RSyncUsernamePropertyHandle)
-				]
-			];
+		.NameContent()
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+		.Padding(FMargin(0, 1, 0, 1))
+		.FillWidth(1.0f)
+		[
+			SNew(STextBlock)
+			.Text(LOCTEXT("RSyncUserNameLabel", "RSync User Name"))
+		.Font(DetailLayout.GetDetailFont())
+		]
+		]
+	.ValueContent()
+		.MinDesiredWidth(150.0f)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+		.Padding(FMargin(0.0f, 8.0f))
+		[
+			SNew(SEditableTextBox)
+			.IsEnabled(this, &FIOSTargetSettingsCustomization::IsImportEnabled)
+		.Text(this, &FIOSTargetSettingsCustomization::GetBundleText, RSyncUsernamePropertyHandle)
+		.Font(DetailLayout.GetDetailFont())
+		.SelectAllTextOnCommit(true)
+		.SelectAllTextWhenFocused(true)
+		.ClearKeyboardFocusOnCommit(false)
+		.ToolTipText(RSyncUsernamePropertyHandle->GetToolTipText())
+		.OnTextCommitted(this, &FIOSTargetSettingsCustomization::OnRemoteServerChanged, RSyncUsernamePropertyHandle)
+		]
+		];
 
 
 	// Add Remote Server Override Build Path 
@@ -1010,51 +1028,206 @@ void FIOSTargetSettingsCustomization::BuildRemoteBuildingSection(IDetailLayoutBu
 		[
 			SNew(SVerticalBox)
 			+ SVerticalBox::Slot()
-				.AutoHeight()
-				[
-					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot()
-					.Padding(FMargin(0, 5, 0, 10))
-					.AutoWidth()
-					[
-						SNew(SButton)
-						.HAlign(HAlign_Center)
-						.VAlign(VAlign_Center)
-						.OnClicked(this, &FIOSTargetSettingsCustomization::OnGenerateSSHKey)
-						.IsEnabled(this, &FIOSTargetSettingsCustomization::IsImportEnabled)
-						[
-							SNew(STextBlock)
-							.Text(GenerateSSHText)
-						]
-					]
-				]
+		.AutoHeight()
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+		.Padding(FMargin(0, 5, 0, 10))
+		.AutoWidth()
+		[
+			SNew(SButton)
+			.HAlign(HAlign_Center)
+		.VAlign(VAlign_Center)
+		.OnClicked(this, &FIOSTargetSettingsCustomization::OnGenerateSSHKey, true)
+		.IsEnabled(this, &FIOSTargetSettingsCustomization::IsImportEnabled)
+		[
+			SNew(STextBlock)
+			.Text(GenerateSSHText)
+		]
+		]
+		]
 		];
 #endif
 }
 
+void FIOSTargetSettingsCustomization::BuildSecondaryRemoteMacBuildingSection(IDetailLayoutBuilder& DetailLayout)
+{
+#if PLATFORM_WINDOWS
+	IDetailCategoryBuilder& BuildCategory = DetailLayout.EditCategory(TEXT("Remote Build"));
+
+	// Sub group we wish to add remote building options to.
+	FText RemoteBuildingGroupName = LOCTEXT("SecondaryRemoteBuildingGroupName", "Secondary Remote Build Options");
+	IDetailGroup& RemoteBuildingGroup = BuildCategory.AddGroup(*RemoteBuildingGroupName.ToString(), RemoteBuildingGroupName, false);
+
+	// Remote Server Name Property
+	TSharedRef<IPropertyHandle> RemoteServerNamePropertyHandle = DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UIOSRuntimeSettings, SecondaryRemoteServerName));
+
+	IDetailPropertyRow& RemoteServerNamePropertyRow = RemoteBuildingGroup.AddPropertyRow(RemoteServerNamePropertyHandle);
+	RemoteServerNamePropertyRow
+		.ToolTip(RemoteServerNamePropertyHandle->GetToolTipText())
+		.CustomWidget()
+		.NameContent()
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+		.Padding(FMargin(0, 1, 0, 1))
+		.FillWidth(1.0f)
+		[
+			SNew(STextBlock)
+			.Text(LOCTEXT("SecondaryRemoteServerNameLabel", "Secondary Remote Server Name"))
+		.Font(DetailLayout.GetDetailFont())
+		]
+		]
+	.ValueContent()
+		.MinDesiredWidth(150.0f)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+		.Padding(FMargin(0.0f, 8.0f))
+		[
+			SNew(SEditableTextBox)
+			.IsEnabled(this, &FIOSTargetSettingsCustomization::IsImportEnabled)
+		.Text(this, &FIOSTargetSettingsCustomization::GetBundleText, RemoteServerNamePropertyHandle)
+		.Font(DetailLayout.GetDetailFont())
+		.SelectAllTextOnCommit(true)
+		.SelectAllTextWhenFocused(true)
+		.ClearKeyboardFocusOnCommit(false)
+		.ToolTipText(RemoteServerNamePropertyHandle->GetToolTipText())
+		.OnTextCommitted(this, &FIOSTargetSettingsCustomization::OnRemoteServerChanged, RemoteServerNamePropertyHandle)
+		]
+
+		];
+
+
+
+	// Add Use RSync Property
+	TSharedRef<IPropertyHandle> UseRSyncPropertyHandle = DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UIOSRuntimeSettings, bUseRSync));
+	BuildCategory.AddProperty(UseRSyncPropertyHandle)
+		.Visibility(EVisibility::Hidden);
+
+	// Add RSync Username Property
+	TSharedRef<IPropertyHandle> RSyncUsernamePropertyHandle = DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UIOSRuntimeSettings, SecondaryRSyncUsername));
+	IDetailPropertyRow& RSyncUsernamePropertyRow = RemoteBuildingGroup.AddPropertyRow(RSyncUsernamePropertyHandle);
+	RSyncUsernamePropertyRow
+		.ToolTip(RSyncUsernamePropertyHandle->GetToolTipText())
+		.CustomWidget()
+		.NameContent()
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+		.Padding(FMargin(0, 1, 0, 1))
+		.FillWidth(1.0f)
+		[
+			SNew(STextBlock)
+			.Text(LOCTEXT("SecondaryRSyncUserNameLabel", "Secondary RSync User Name"))
+		.Font(DetailLayout.GetDetailFont())
+		]
+		]
+	.ValueContent()
+		.MinDesiredWidth(150.0f)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+		.Padding(FMargin(0.0f, 8.0f))
+		[
+			SNew(SEditableTextBox)
+			.IsEnabled(this, &FIOSTargetSettingsCustomization::IsImportEnabled)
+		.Text(this, &FIOSTargetSettingsCustomization::GetBundleText, RSyncUsernamePropertyHandle)
+		.Font(DetailLayout.GetDetailFont())
+		.SelectAllTextOnCommit(true)
+		.SelectAllTextWhenFocused(true)
+		.ClearKeyboardFocusOnCommit(false)
+		.ToolTipText(RSyncUsernamePropertyHandle->GetToolTipText())
+		.OnTextCommitted(this, &FIOSTargetSettingsCustomization::OnRemoteServerChanged, RSyncUsernamePropertyHandle)
+		]
+		];
+
+
+	// Add Remote Server Override Build Path 
+	TSharedRef<IPropertyHandle> RemoteServerOverrideBuildPathPropertyHandle = DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UIOSRuntimeSettings, SecondaryRemoteServerOverrideBuildPath));
+	IDetailPropertyRow& RemoteServerOverrideBuildPathPropertyRow = RemoteBuildingGroup.AddPropertyRow(RemoteServerOverrideBuildPathPropertyHandle);
+	RemoteServerOverrideBuildPathPropertyRow
+		.ToolTip(RemoteServerOverrideBuildPathPropertyHandle->GetToolTipText());
+
+	// Add existing SSH path label.
+	TSharedRef<IPropertyHandle> SSHPrivateKeyLocationPropertyHandle = DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UIOSRuntimeSettings, SecondarySSHPrivateKeyLocation));
+	IDetailPropertyRow& SSHPrivateKeyLocationPropertyRow = RemoteBuildingGroup.AddPropertyRow(SSHPrivateKeyLocationPropertyHandle);
+	SSHPrivateKeyLocationPropertyRow
+		.ToolTip(SSHPrivateKeyLocationPropertyHandle->GetToolTipText());
+
+	// cwRsync path
+	TSharedRef<IPropertyHandle> CwRsyncOverridePathPropertyHandle = DetailLayout.GetProperty(GET_MEMBER_NAME_CHECKED(UIOSRuntimeSettings, SecondaryCwRsyncInstallPath));
+	IDetailPropertyRow& CwRsyncOverridePathPropertyRow = RemoteBuildingGroup.AddPropertyRow(CwRsyncOverridePathPropertyHandle);
+
+	const FText GenerateSSHText = LOCTEXT("SecondaryGenerateSSHKey", "Secondary Generate SSH Key");
+
+	// Add a generate key button
+	RemoteBuildingGroup.AddWidgetRow()
+		.FilterString(GenerateSSHText)
+		.WholeRowWidget
+		.MinDesiredWidth(0.f)
+		.MaxDesiredWidth(0.f)
+		.HAlign(HAlign_Fill)
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot()
+		.AutoHeight()
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+		.Padding(FMargin(0, 5, 0, 10))
+		.AutoWidth()
+		[
+			SNew(SButton)
+			.HAlign(HAlign_Center)
+		.VAlign(VAlign_Center)
+		.OnClicked(this, &FIOSTargetSettingsCustomization::OnGenerateSSHKey, false)
+		.IsEnabled(this, &FIOSTargetSettingsCustomization::IsImportEnabled)
+		[
+			SNew(STextBlock)
+			.Text(GenerateSSHText)
+		]
+		]
+		]
+		];
+#endif
+}
 
 void FIOSTargetSettingsCustomization::BuildIconSection(IDetailLayoutBuilder& DetailLayout)
 {
-	IDetailCategoryBuilder& RequiredIconCategory = DetailLayout.EditCategory(TEXT("Required Icons"));
-	IDetailCategoryBuilder& OptionalIconCategory = DetailLayout.EditCategory(TEXT("Optional Icons"));
+	IDetailCategoryBuilder& RequiredIconCategoryIOS = DetailLayout.EditCategory("RequiredIOSIcons", LOCTEXT("RequiredIOSIcons", "Required Icons (iPhone and iPad)"));
+    IDetailCategoryBuilder& OptionalIconCategoryIOS = DetailLayout.EditCategory("OptionalIOSIcons", LOCTEXT("OptionalIOSIcons", "Optional Icons (iPhone and iPad)"));
 
-	// Add the icons
+	// Add the iOS icons
 	for (const FPlatformIconInfo& Info : IconNames)
 	{
 		FVector2D IconImageMaxSize(Info.IconRequiredSize);
 		IconImageMaxSize.X = FMath::Min(IconImageMaxSize.X, 150.0f);
 		IconImageMaxSize.Y = FMath::Min(IconImageMaxSize.Y, 150.0f);
-		IDetailCategoryBuilder& IconCategory = (Info.RequiredState == FPlatformIconInfo::Required) ? RequiredIconCategory : OptionalIconCategory;
+		IDetailCategoryBuilder& IconCategory = (Info.RequiredState == FPlatformIconInfo::Required) ? RequiredIconCategoryIOS : OptionalIconCategoryIOS;
 		BuildImageRow(DetailLayout, IconCategory, Info, IconImageMaxSize);
 	}
 
-	// Add the launch images
-	IDetailCategoryBuilder& LaunchImageCategory = DetailLayout.EditCategory(FName("LaunchScreen"));
-	const FVector2D LaunchImageMaxSize(150.0f, 150.0f);
-	for (const FPlatformIconInfo& Info : LaunchImageNames)
+	// Add the tvOS content
+    IDetailCategoryBuilder& RequiredIconCategoryTvOS = DetailLayout.EditCategory("RequiredTVOSAssets", LOCTEXT("RequiredTVOSAssets", "Required Assets (AppleTV)"));
+    IDetailCategoryBuilder& OptionalIconCategoryTvOS = DetailLayout.EditCategory("OptionalTVOSAssets", LOCTEXT("OptionalTVOSAssets", "Optional Assets (AppleTV)"));
+
+	const FVector2D TvOSImageMaxSize(150.0f, 150.0f);
+	for (const FPlatformIconInfo& Info : TvOSImageNames)
 	{
-		BuildImageRow(DetailLayout, LaunchImageCategory, Info, LaunchImageMaxSize);
+        IDetailCategoryBuilder& ImageCategory = (Info.RequiredState == FPlatformIconInfo::Required) ? RequiredIconCategoryTvOS : OptionalIconCategoryTvOS;
+		BuildImageRow(DetailLayout, ImageCategory, Info, TvOSImageMaxSize, true);
 	}
+    
+    
+    // Add the launch images
+    IDetailCategoryBuilder& LaunchImageCategory = DetailLayout.EditCategory(FName("LaunchScreen"));
+    const FVector2D LaunchImageMaxSize(150.0f, 150.0f);
+    for (const FPlatformIconInfo& Info : LaunchImageNames)
+    {
+        BuildImageRow(DetailLayout, LaunchImageCategory, Info, LaunchImageMaxSize);
+    }
+
 }
 
 
@@ -1099,41 +1272,99 @@ void FIOSTargetSettingsCustomization::CopySetupFilesIntoProject()
 	SavedLayoutBuilder->ForceRefreshDetails();
 }
 
-void FIOSTargetSettingsCustomization::BuildImageRow(IDetailLayoutBuilder& DetailLayout, IDetailCategoryBuilder& Category, const FPlatformIconInfo& Info, const FVector2D& MaxDisplaySize)
+void FIOSTargetSettingsCustomization::BuildImageRow(IDetailLayoutBuilder& DetailLayout, IDetailCategoryBuilder& Category, const FPlatformIconInfo& Info, const FVector2D& MaxDisplaySize, bool bIsTVOS)
 {
-	const FString AutomaticImagePath = EngineGraphicsPath / Info.IconPath;
-	const FString TargetImagePath = GameGraphicsPath / Info.IconPath;
+    FString AutomaticImagePath = EngineGraphicsPath / Info.IconPath;
+	FString TargetImagePath = GameGraphicsPath / Info.IconPath;
+    FString SourceImagePath = FPaths::GetPath(FPaths::GetProjectFilePath()) + TEXT("/Build/IOS/Resources/Graphics/Icon1024.png");
 
-	Category.AddCustomRow(Info.IconName)
-		.NameContent()
-		[
-			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot()
-			.Padding(FMargin(0, 1, 0, 1))
-			.FillWidth(1.0f)
-			[
-				SNew(STextBlock)
-				.Text(Info.IconName)
-				.Font(DetailLayout.GetDetailFont())
-				// IconDescription is not used, repurpose for tooltip
-				.ToolTipText(Info.IconDescription)
-			]
-		]
-		.ValueContent()
-		.MaxDesiredWidth(400.0f)
-		.MinDesiredWidth(100.0f)
-		[
-			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot()
-			.FillWidth(1.0f)
-			.VAlign(VAlign_Center)
-			[
-				SNew(SExternalImageReference, AutomaticImagePath, TargetImagePath)
-				.RequiredSize(Info.IconRequiredSize)
-				.MaxDisplaySize(MaxDisplaySize)
-				.DeleteTargetWhenDefaultChosen(true)
-			]
-		];
+	if (bIsTVOS)
+	{
+		AutomaticImagePath = TVOSEngineGraphicsPath / Info.IconPath;
+		TargetImagePath = TVOSGameGraphicsPath / Info.IconPath;
+        SourceImagePath = FPaths::GetPath(FPaths::GetProjectFilePath()) + TEXT("/Build/TVOS/Resources/Graphics/Icon_Large_Front.png");
+
+        if (Info.IconName.ToString().Contains("Top Shelf"))
+        {
+             SourceImagePath = FPaths::GetPath(FPaths::GetProjectFilePath()) + TEXT("/Build/TVOS/Resources/Graphics/TopShelfWide-2320x720@2x.png");
+        }
+	}
+
+    if (Info.RequiredState == FPlatformIconInfo::Required)
+    {
+        Category.AddCustomRow(Info.IconName)
+            .EditCondition(!UXcodeProjectSettings::ShouldDisableIOSSettings(), nullptr)
+            .NameContent()
+            [
+                SNew(SHorizontalBox)
+                + SHorizontalBox::Slot()
+                .Padding(FMargin(0, 1, 0, 1))
+                .FillWidth(1.0f)
+                [
+                    SNew(STextBlock)
+                    .Text(Info.IconName)
+                    .Font(DetailLayout.GetDetailFont())
+                    // IconDescription is not used, repurpose for tooltip
+                    .ToolTipText(Info.IconDescription)
+                ]
+            ]
+            .ValueContent()
+            .MaxDesiredWidth(400.0f)
+            .MinDesiredWidth(100.0f)
+            [
+                SNew(SHorizontalBox)
+                + SHorizontalBox::Slot()
+                .FillWidth(1.0f)
+                .VAlign(VAlign_Center)
+                [
+                    SNew(SExternalImageReference, AutomaticImagePath, TargetImagePath)
+                    .RequiredSize(Info.IconRequiredSize)
+                    .MaxDisplaySize(MaxDisplaySize)
+					.GenerateImageVisibility(this, &FIOSTargetSettingsCustomization::ShouldShowGenerateButtonForIcon, Info.IconName.ToString().Contains("Launch Screen Image") || Info.IconName.ToString().Contains("Marketing Icon") ||
+                                             Info.IconName.ToString().Contains("Icon Large Front (1280x768)") || Info.IconName.ToString().Contains("2x Top Shelf Wide (4640x1440)"), SourceImagePath)
+					.GenerateImageToolTipText(LOCTEXT("GenerateFromOtherIcon", "Generate from Bigger Image (see image tooltip)"))
+					.OnGenerateImageClicked(this, &FIOSTargetSettingsCustomization::OnGenerateImageClicked, SourceImagePath, TargetImagePath, Info.IconRequiredSize)
+                    .DeleteTargetWhenDefaultChosen(true)
+                ]
+            ];
+    }
+    else
+    {
+        Category.AddCustomRow(Info.IconName)
+            .EditCondition(!UXcodeProjectSettings::ShouldDisableIOSSettings(), nullptr)
+            .NameContent()
+            [
+                SNew(SHorizontalBox)
+                + SHorizontalBox::Slot()
+                .Padding(FMargin(0, 1, 0, 1))
+                .FillWidth(1.0f)
+                [
+                    SNew(STextBlock)
+                    .Text(Info.IconName)
+                    .Font(DetailLayout.GetDetailFont())
+                    // IconDescription is not used, repurpose for tooltip
+                    .ToolTipText(Info.IconDescription)
+                ]
+            ]
+            .ValueContent()
+            .MaxDesiredWidth(400.0f)
+            .MinDesiredWidth(100.0f)
+            [
+                SNew(SHorizontalBox)
+                + SHorizontalBox::Slot()
+                .FillWidth(1.0f)
+                .VAlign(VAlign_Center)
+                [
+                    SNew(SExternalImageReference, "", TargetImagePath)
+                    .RequiredSize(Info.IconRequiredSize)
+                    .MaxDisplaySize(MaxDisplaySize)
+					.GenerateImageVisibility(this, &FIOSTargetSettingsCustomization::ShouldShowGenerateButtonForIcon, Info.IconName.ToString().Contains("Launch Screen Image") || Info.IconName.ToString().Contains("Marketing Icon") ||
+                                             Info.IconName.ToString().Contains("Icon Large Front (1280x768)") || Info.IconName.ToString().Contains("2x Top Shelf Wide (4640x1440)"), SourceImagePath)
+					.GenerateImageToolTipText(LOCTEXT("GenerateFromOtherIcon", "Generate from Bigger Image (see image tooltip)"))
+					.OnGenerateImageClicked(this, &FIOSTargetSettingsCustomization::OnGenerateImageClicked, SourceImagePath, TargetImagePath, Info.IconRequiredSize)
+				]
+            ];
+    }
 }
 
 void FIOSTargetSettingsCustomization::FindRequiredFiles()
@@ -1143,7 +1374,7 @@ void FIOSTargetSettingsCustomization::FindRequiredFiles()
 	BundleIdentifier = BundleIdentifier.Replace(TEXT("_"), TEXT(""));
 #if PLATFORM_MAC
 	FString CmdExe = TEXT("/bin/sh");
-	FString ScriptPath = FPaths::ConvertRelativePathToFull(FPaths::EngineDir() / TEXT("Build/BatchFiles/Mac/RunMono.sh"));
+	FString ScriptPath = FPaths::ConvertRelativePathToFull(FPaths::EngineDir() / TEXT("Build/BatchFiles/RunDotnet.sh"));
 	FString IPPPath = FPaths::ConvertRelativePathToFull(FPaths::EngineDir() / TEXT("Binaries/DotNET/IOS/IPhonePackager.exe"));
 	FString CommandLine = FString::Printf(TEXT("\"%s\" \"%s\" certificates Engine -bundlename \"%s\""), *ScriptPath, *IPPPath, *(BundleIdentifier));
 #else
@@ -1154,7 +1385,7 @@ void FIOSTargetSettingsCustomization::FindRequiredFiles()
 	OutputMessage = TEXT("");
 	IPPProcess->OnOutput().BindStatic(&OnOutput);
 	IPPProcess->Launch();
-	TickerHandle = FTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FIOSTargetSettingsCustomization::UpdateStatusDelegate), 1.0f);
+	TickerHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FIOSTargetSettingsCustomization::UpdateStatusDelegate), 1.0f);
 	if (ProvisionInfoSwitcher.IsValid())
 	{
 		ProvisionInfoSwitcher->SetActiveWidgetIndex(0);
@@ -1223,7 +1454,7 @@ FReply FIOSTargetSettingsCustomization::OnInstallProvisionClicked()
 		BundleIdentifier = BundleIdentifier.Replace(TEXT("_"), TEXT(""));
 #if PLATFORM_MAC
 		FString CmdExe = TEXT("/bin/sh");
-		FString ScriptPath = FPaths::ConvertRelativePathToFull(FPaths::EngineDir() / TEXT("Build/BatchFiles/Mac/RunMono.sh"));
+		FString ScriptPath = FPaths::ConvertRelativePathToFull(FPaths::EngineDir() / TEXT("Build/BatchFiles/RunDotnet.sh"));
 		FString IPPPath = FPaths::ConvertRelativePathToFull(FPaths::EngineDir() / TEXT("Binaries/DotNET/IOS/IPhonePackager.exe"));
 		FString CommandLine = FString::Printf(TEXT("\"%s\" \"%s\" Install Engine -project \"%s\" -provision \"%s\" -bundlename \"%s\""), *ScriptPath, *IPPPath, *ProjectPath, *ProvisionPath, *BundleIdentifier);
 #else
@@ -1234,7 +1465,7 @@ FReply FIOSTargetSettingsCustomization::OnInstallProvisionClicked()
 		OutputMessage = TEXT("");
 		IPPProcess->OnOutput().BindStatic(&OnOutput);
 		IPPProcess->Launch();
-		TickerHandle = FTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FIOSTargetSettingsCustomization::UpdateStatusDelegate), 10.0f);
+		TickerHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FIOSTargetSettingsCustomization::UpdateStatusDelegate), 10.0f);
 		if (ProvisionInfoSwitcher.IsValid())
 		{
 			ProvisionInfoSwitcher->SetActiveWidgetIndex(1);
@@ -1243,6 +1474,64 @@ FReply FIOSTargetSettingsCustomization::OnInstallProvisionClicked()
 	}
 
 	return FReply::Handled();
+}
+
+FReply FIOSTargetSettingsCustomization::OnGenerateImageClicked(const FString SourceImagePath, const FString TargetImagePath, FIntPoint IconRequiredSize)
+{
+	if (FPaths::FileExists(*TargetImagePath))
+	{
+		const EAppReturnType::Type Answer = FMessageDialog::Open(EAppMsgType::YesNo, FText::FromString(TEXT("File already exists. Do you want to overwrite it ?")));
+		if (Answer == EAppReturnType::No)
+		{
+			return FReply::Handled();
+		}
+	}
+
+	if (ensure(FPaths::FileExists(*SourceImagePath)))
+	{
+		FUEFreeImageWrapper::FreeImage_Initialise();
+		if (!FUEFreeImageWrapper::IsValid())
+		{
+			FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("Generate_FreeImageFailure", "The FreeImage library could not be correctly initialized."));
+			return FReply::Unhandled();
+		}
+
+		FREE_IMAGE_FORMAT FileType = FIF_UNKNOWN;
+		FileType = FreeImage_GetFileType(TCHAR_TO_FICHAR(*SourceImagePath), 0);
+		if (FileType == FIF_UNKNOWN)
+		{
+			FileType = FreeImage_GetFIFFromFilename(TCHAR_TO_FICHAR(*SourceImagePath));
+			if (FileType == FIF_UNKNOWN)
+			{
+				FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("Generate_UnknownFileType", "An unknown filetype error occurred while trying to resize the image."));
+				return FReply::Unhandled();
+			}
+		}
+
+		FIBITMAP* Bitmap = FreeImage_Load(FileType, TCHAR_TO_FICHAR(*SourceImagePath), 0);
+		if (Bitmap == nullptr)
+		{
+			FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("Generate_LoadFailed", "The image file could not be loaded while trying to resize it."));
+			return FReply::Unhandled();
+		}
+
+		FIBITMAP* RescaledImage;
+		FREE_IMAGE_FORMAT FifW;
+        if ((RescaledImage = FreeImage_Rescale(Bitmap, IconRequiredSize.X, IconRequiredSize.Y, FREE_IMAGE_FILTER::FILTER_LANCZOS3)) == nullptr ||
+                (FifW = FreeImage_GetFIFFromFilename(TCHAR_TO_FICHAR(*TargetImagePath))) == FIF_UNKNOWN ||
+                !FreeImage_Save(FifW, RescaledImage, TCHAR_TO_FICHAR(*TargetImagePath), 0))
+            {
+                FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("Generate_ResizeSaveFailed", "An error occurred while resizing or saving the icon file."));
+                return FReply::Unhandled();
+            }
+        
+		return FReply::Handled();
+	}
+	else
+	{
+		FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("Generate_OpenFailed", "The image file could not be found."));
+		return FReply::Unhandled();
+	}
 }
 
 FReply FIOSTargetSettingsCustomization::OnInstallCertificateClicked()
@@ -1280,7 +1569,7 @@ FReply FIOSTargetSettingsCustomization::OnInstallCertificateClicked()
 		CertPath = FPaths::ConvertRelativePathToFull(OpenFilenames[0]);
 #if PLATFORM_MAC
 		FString CmdExe = TEXT("/bin/sh");
-		FString ScriptPath = FPaths::ConvertRelativePathToFull(FPaths::EngineDir() / TEXT("Build/BatchFiles/Mac/RunMono.sh"));
+		FString ScriptPath = FPaths::ConvertRelativePathToFull(FPaths::EngineDir() / TEXT("Build/BatchFiles/RunDotnet.sh"));
 		FString IPPPath = FPaths::ConvertRelativePathToFull(FPaths::EngineDir() / TEXT("Binaries/DotNET/IOS/IPhonePackager.exe"));
 		FString CommandLine = FString::Printf(TEXT("\"%s\" \"%s\" Install Engine -project \"%s\" -certificate \"%s\" -bundlename \"%s\""), *ScriptPath, *IPPPath, *ProjectPath, *CertPath, *BundleIdentifier);
 #else
@@ -1291,7 +1580,7 @@ FReply FIOSTargetSettingsCustomization::OnInstallCertificateClicked()
 		OutputMessage = TEXT("");
 		IPPProcess->OnOutput().BindStatic(&OnOutput);
 		IPPProcess->Launch();
-		TickerHandle = FTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FIOSTargetSettingsCustomization::UpdateStatusDelegate), 10.0f);
+		TickerHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FIOSTargetSettingsCustomization::UpdateStatusDelegate), 10.0f);
 		if (CertificateInfoSwitcher.IsValid())
 		{
 			CertificateInfoSwitcher->SetActiveWidgetIndex(1);
@@ -1308,28 +1597,47 @@ FReply FIOSTargetSettingsCustomization::OnCertificateRequestClicked()
 	return FReply::Handled();
 }
 
-FReply FIOSTargetSettingsCustomization::OnGenerateSSHKey()
+FReply FIOSTargetSettingsCustomization::OnGenerateSSHKey(bool IsPrimary)
 {
 	// see if the key is already generated
 	const UIOSRuntimeSettings& Settings = *GetDefault<UIOSRuntimeSettings>();
 
 	FString RemoteServerAddress;
 	FString RemoteServerPort;
+	FString RSyncUsername;
 	int32	colonIndex;
 
-	if(Settings.RemoteServerName.FindChar(':', colonIndex))
+	if (IsPrimary)
 	{
-		RemoteServerAddress = Settings.RemoteServerName.Left(colonIndex);
-		RemoteServerPort = Settings.RemoteServerName.RightChop(colonIndex + 1);
+		if (Settings.RemoteServerName.FindChar(':', colonIndex))
+		{
+			RemoteServerAddress = Settings.RemoteServerName.Left(colonIndex);
+			RemoteServerPort = Settings.RemoteServerName.RightChop(colonIndex + 1);
+		}
+		else
+		{
+			RemoteServerAddress = Settings.RemoteServerName;
+			RemoteServerPort = "22";
+		}
+		RSyncUsername = Settings.RSyncUsername;
 	}
 	else
 	{
-		RemoteServerAddress = Settings.RemoteServerName;
-		RemoteServerPort = "22";
+		if (Settings.SecondaryRemoteServerName.FindChar(':', colonIndex))
+		{
+			RemoteServerAddress = Settings.SecondaryRemoteServerName.Left(colonIndex);
+			RemoteServerPort = Settings.SecondaryRemoteServerName.RightChop(colonIndex + 1);
+		}
+		else
+		{
+			RemoteServerAddress = Settings.SecondaryRemoteServerName;
+			RemoteServerPort = "22";
+		}
+		RSyncUsername = Settings.SecondaryRSyncUsername;
 	}
 
 	FString Path = FPlatformMisc::GetEnvironmentVariable(TEXT("APPDATA"));
-	FString Destination = FString::Printf(TEXT("%s\\Unreal Engine\\UnrealBuildTool\\SSHKeys\\%s\\%s\\RemoteToolChainPrivate.key"), *Path, *RemoteServerAddress, *(Settings.RSyncUsername));
+	FString Destination = FString::Printf(TEXT("%s\\Unreal Engine\\UnrealBuildTool\\SSHKeys\\%s\\%s\\RemoteToolChainPrivate.key"), *Path, *RemoteServerAddress, *RSyncUsername);
 	if (FPaths::FileExists(Destination))
 	{
 		FString MessagePrompt = FString::Printf(TEXT("An SSH Key already exists.  Do you want to replace this key?"));
@@ -1343,7 +1651,7 @@ FReply FIOSTargetSettingsCustomization::OnGenerateSSHKey()
 	FString CwRsyncPath = Settings.CwRsyncInstallPath.Path;
 	if (CwRsyncPath.IsEmpty() || !FPaths::DirectoryExists(CwRsyncPath))
 	{
-		// If no user specified directory try the UE4 bundled directory
+		// If no user specified directory try the bundled ThirdPartyNotUE directory
 		CwRsyncPath = FPaths::ConvertRelativePathToFull(FPaths::EngineDir() / TEXT("Extras\\ThirdPartyNotUE\\cwrsync\\bin"));
 	}
 
@@ -1367,7 +1675,7 @@ FReply FIOSTargetSettingsCustomization::OnGenerateSSHKey()
 	OutputMessage = TEXT("");
 	IPPProcess = MakeShareable(new FMonitoredProcess(CmdExe, CommandLine, false, false));
 	IPPProcess->Launch();
-	TickerHandle = FTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FIOSTargetSettingsCustomization::UpdateStatusDelegate), 10.0f);
+	TickerHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FIOSTargetSettingsCustomization::UpdateStatusDelegate), 10.0f);
 	RunningIPPProcess = true;
 
 	return FReply::Handled();
@@ -1377,11 +1685,11 @@ const FSlateBrush* FIOSTargetSettingsCustomization::GetProvisionStatus() const
 {
 	if( bProvisionInstalled )
 	{
-		return FEditorStyle::GetBrush("Automation.Success");
+		return FAppStyle::GetBrush("Icons.Success");
 	}
 	else
 	{
-		return FEditorStyle::GetBrush("Automation.Fail");
+		return FAppStyle::GetBrush("Icons.Error");
 	}
 }
 
@@ -1389,11 +1697,11 @@ const FSlateBrush* FIOSTargetSettingsCustomization::GetCertificateStatus() const
 {
 	if( bCertificateInstalled )
 	{
-		return FEditorStyle::GetBrush("Automation.Success");
+		return FAppStyle::GetBrush("Icons.Success");
 	}
 	else
 	{
-		return FEditorStyle::GetBrush("Automation.Fail");
+		return FAppStyle::GetBrush("Icons.Error");
 	}
 }
 
@@ -1676,7 +1984,7 @@ TSharedRef<SWidget> FIOSTargetSettingsCustomization::OnGetShaderVersionContent()
 {
 	FMenuBuilder MenuBuilder(true, NULL);
 	
-	UEnum* Enum = FindObjectChecked<UEnum>(ANY_PACKAGE, TEXT("EIOSMetalShaderStandard"), true);
+	UEnum* Enum = FindObjectChecked<UEnum>(nullptr, TEXT("/Script/IOSRuntimeSettings.EIOSMetalShaderStandard"), true);
 	
 	for (int32 i = 0; i < Enum->GetMaxEnumValue(); i++)
 	{
@@ -1695,7 +2003,7 @@ FText FIOSTargetSettingsCustomization::GetShaderVersionDesc() const
 	uint8 EnumValue;
 	ShaderVersionPropertyHandle->GetValue(EnumValue);
 	
-	UEnum* Enum = FindObjectChecked<UEnum>(ANY_PACKAGE, TEXT("EIOSMetalShaderStandard"), true);
+	UEnum* Enum = FindObjectChecked<UEnum>(nullptr, TEXT("/Script/IOSRuntimeSettings.EIOSMetalShaderStandard"), true);
 	
 	if (EnumValue < Enum->GetMaxEnumValue() && Enum->IsValidEnumValue(EnumValue))
 	{
@@ -1709,7 +2017,7 @@ TSharedRef<SWidget> FIOSTargetSettingsCustomization::OnGetMinVersionContent()
 {
 	FMenuBuilder MenuBuilder(true, NULL);
 
-	UEnum* Enum = FindObjectChecked<UEnum>(ANY_PACKAGE, TEXT("EIOSVersion"), true);
+	UEnum* Enum = FindObjectChecked<UEnum>(nullptr, TEXT("/Script/IOSRuntimeSettings.EIOSVersion"), true);
 
 	for (int32 i = 0; i < Enum->GetMaxEnumValue(); i++)
 	{
@@ -1728,7 +2036,7 @@ FText FIOSTargetSettingsCustomization::GetMinVersionDesc() const
 	uint8 EnumValue;
 	MinOSPropertyHandle->GetValue(EnumValue);
 
-	UEnum* Enum = FindObjectChecked<UEnum>(ANY_PACKAGE, TEXT("EIOSVersion"), true);
+	UEnum* Enum = FindObjectChecked<UEnum>(nullptr, TEXT("/Script/IOSRuntimeSettings.EIOSVersion"), true);
 
 	if (EnumValue < Enum->GetMaxEnumValue() && Enum->IsValidEnumValue(EnumValue))
 	{
@@ -1740,38 +2048,17 @@ FText FIOSTargetSettingsCustomization::GetMinVersionDesc() const
 
 void FIOSTargetSettingsCustomization::SetShaderStandard(int32 Value)
 {
-	FPropertyAccess::Result Res = ShaderVersionPropertyHandle->SetValue((uint8)Value);
-	check(Res == FPropertyAccess::Success);
-	
-	if (MinOSPropertyHandle.IsValid())
-	{
-		FText Message;
-		
-		uint8 EnumValue = (uint8)EIOSVersion::IOS_12;
-		if (MinOSPropertyHandle.IsValid())
-		{
-			MinOSPropertyHandle->GetValue(EnumValue);
-		}
-		
-		bool bMRTEnabled = false;
-		if (MRTPropertyHandle.IsValid())
-		{
-			MRTPropertyHandle->GetValue(bMRTEnabled);
-		}
-		
-		// make sure we never set the min version to less than current supported
-		if (((EIOSVersion)EnumValue < EIOSVersion::IOS_12))
-		{
-			SetMinVersion((int32)EIOSVersion::IOS_12);
-		}
+    FPropertyAccess::Result Res = ShaderVersionPropertyHandle->SetValue((uint8)Value);
+    check(Res == FPropertyAccess::Success);
 
-		
-		ShaderVersionWarningTextBox->SetError(Message);
-	}
-	else
-	{
-		ShaderVersionWarningTextBox->SetError(TEXT(""));
-	}
+    if (MinOSPropertyHandle.IsValid())
+    {
+        uint8 IOSVersion = (uint8)EIOSVersion::IOS_Minimum;
+        if (MinOSPropertyHandle.IsValid())
+        {
+            MinOSPropertyHandle->GetValue(IOSVersion);
+        }
+    }
 }
 
 void FIOSTargetSettingsCustomization::UpdateShaderStandardWarning()
@@ -1784,22 +2071,19 @@ void FIOSTargetSettingsCustomization::UpdateShaderStandardWarning()
 
 void FIOSTargetSettingsCustomization::UpdateOSVersionWarning()
 {
-	if (MRTPropertyHandle.IsValid() && ShaderVersionPropertyHandle.IsValid() && MinOSPropertyHandle.IsValid())
+    uint8 EnumValue;
+    MinOSPropertyHandle->GetValue(EnumValue);
+
+    if (MRTPropertyHandle.IsValid() && ShaderVersionPropertyHandle.IsValid() && MinOSPropertyHandle.IsValid())
 	{
 		bool bMRTEnabled = false;
 		MRTPropertyHandle->GetValue(bMRTEnabled);
 		
 		if (bMRTEnabled)
 		{
-			uint8 EnumValue;
-			MinOSPropertyHandle->GetValue(EnumValue);
-			if (EnumValue < (uint8)EIOSVersion::IOS_12)
+			if (EnumValue < (uint8)EIOSVersion::IOS_Minimum)
 			{
-				SetMinVersion((int32)EIOSVersion::IOS_12);
-				
-				FText Message;
-				Message = LOCTEXT("MetalMRTStandardv1.2","Enabling the Desktop Forward Renderer Metal requires Shader Standard v2.0 which increases the minimum operating system requirement for Metal from iOS 10.0 or later to iOS 11.0 or later.");
-				IOSVersionWarningTextBox->SetError(Message);
+				SetMinVersion((int32)EIOSVersion::IOS_Minimum);
 			}
 		}
 		else
@@ -1808,6 +2092,19 @@ void FIOSTargetSettingsCustomization::UpdateOSVersionWarning()
 			IOSVersionWarningTextBox->SetError(Message);
 		}
 	}
+    
+    IOSVersionWarningTextBox->SetError(TEXT(""));
+
+
+    uint8 ShaderStandard;
+    ShaderVersionPropertyHandle->GetValue(ShaderStandard);
+    switch (ShaderStandard)
+    {
+        case (int32)EIOSMetalShaderStandard::IOSMetalSLStandard_Minimum:
+        case (int32)EIOSMetalShaderStandard::IOSMetalSLStandard_2_4:
+            if (EnumValue < (uint8)EIOSVersion::IOS_15) {IOSVersionWarningTextBox->SetError(TEXT("iOS15 is the Minimum for Metal 2.4")); return;}
+            break;
+    }
 }
 
 void FIOSTargetSettingsCustomization::UpdateMetalMRTWarning()
@@ -1821,23 +2118,15 @@ void FIOSTargetSettingsCustomization::UpdateMetalMRTWarning()
 		{
 			uint8 EnumValue;
 			MinOSPropertyHandle->GetValue(EnumValue);
-			if (EnumValue < (uint8)EIOSVersion::IOS_12)
+			if (EnumValue < (uint8)EIOSVersion::IOS_Minimum)
 			{
-				SetMinVersion((int32)EIOSVersion::IOS_12);
-				
-				FText Message;
-				Message = LOCTEXT("MetalMRTStandardv1.2","Enabling the Desktop Forward Renderer Metal requires Shader Standard v2.0 which increases the minimum operating system requirement for Metal from iOS 10.0 or later to iOS 11.0 or later.");
-				IOSVersionWarningTextBox->SetError(Message);
+				SetMinVersion((int32)EIOSVersion::IOS_Minimum);
 			}
 			
 			ShaderVersionPropertyHandle->GetValue(EnumValue);
-			if (EnumValue < (uint8)EIOSMetalShaderStandard::IOSMetalSLStandard_2_0)
+			if (EnumValue < (int32)EIOSMetalShaderStandard::IOSMetalSLStandard_2_4)
 			{
-				SetShaderStandard((int32)EIOSMetalShaderStandard::IOSMetalSLStandard_2_0);
-				
-				FText Message;
-				Message = LOCTEXT("MetalMRTStandardv1.2","Enabling the Desktop Forward Renderer Metal requires Shader Standard v2.0 which increases the minimum operating system requirement for Metal from iOS 10.0 or later to iOS 11.0 or later.");
-				ShaderVersionWarningTextBox->SetError(Message);
+				SetShaderStandard((int32)EIOSMetalShaderStandard::IOSMetalSLStandard_Minimum);
 			}
 		}
 		else
@@ -1857,6 +2146,18 @@ void FIOSTargetSettingsCustomization::SetMinVersion(int32 Value)
 {
 	FPropertyAccess::Result Res = MinOSPropertyHandle->SetValue((uint8)Value);
 	check(Res == FPropertyAccess::Success);
+}
+
+EVisibility FIOSTargetSettingsCustomization::ShouldShowGenerateButtonForIcon(bool bCannotBeGenerated, const FString ImageToCheck) const
+{
+	if (!bCannotBeGenerated && FPlatformFileManager::Get().GetPlatformFile().FileExists(*ImageToCheck))
+	{
+		return EVisibility::Visible;
+	}
+	else
+	{
+		return EVisibility::Collapsed;
+	}
 }
 
 //////////////////////////////////////////////////////////////////////////

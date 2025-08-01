@@ -3,7 +3,7 @@
 #include "Misc/PreLoadFile.h"
 #include "HAL/Event.h"
 #include "HAL/FileManager.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "Async/AsyncFileHandle.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeLock.h"
@@ -74,7 +74,6 @@ void FPreLoadFile::KickOffRead()
 			{
 				Data = ReadRequest->GetReadResults();
 				CompletionEvent->Trigger();
-				delete AsyncReadHandle;
 			};
 			AsyncReadHandle->ReadRequest(0, FileSize, EAsyncIOPriorityAndFlags::AIOP_High, &ReadCallbackFunction);
 		}
@@ -85,12 +84,11 @@ void FPreLoadFile::KickOffRead()
 
 			FileSize = -1;
 			CompletionEvent->Trigger();
-			delete AsyncReadHandle;
 		}
 	};
 
 	AsyncReadHandle = FPlatformFileManager::Get().GetPlatformFile().OpenAsyncRead(*Path);
-	AsyncReadHandle->SizeRequest(&SizeCallbackFunction);
+	SizeRequestHandle = AsyncReadHandle->SizeRequest(&SizeCallbackFunction);
 
 #else
 
@@ -112,7 +110,6 @@ void FPreLoadFile::KickOffRead()
 		}
 		// it's possible pak files with the file weren't mounted yet, so note that we didn't find it, and try again in TakeOwnership time
 		bFailedToOpenInKickOff = true;
-
 	}
 #endif
 }	
@@ -143,7 +140,14 @@ void* FPreLoadFile::TakeOwnershipOfLoadedData(int64* OutFileSize)
 			CompletionEvent->Wait();
 		}
 	}
-	
+
+#if PLATFORM_CAN_ASYNC_PRELOAD_FILES
+	delete SizeRequestHandle;
+	delete AsyncReadHandle;
+	SizeRequestHandle = nullptr;
+	AsyncReadHandle = nullptr;
+#endif
+
 	FPlatformProcess::ReturnSynchEventToPool(CompletionEvent);
 	CompletionEvent = nullptr;
 

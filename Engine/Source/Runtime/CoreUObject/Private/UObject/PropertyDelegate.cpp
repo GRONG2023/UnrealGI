@@ -8,14 +8,18 @@
 #include "UObject/PropertyHelper.h"
 #include "UObject/LinkerPlaceholderFunction.h"
 #include "Serialization/ArchiveUObjectFromStructuredArchive.h"
-
-// WARNING: This should always be the last include in any file that needs it (except .generated.h)
-#include "UObject/UndefineUPropertyMacros.h"
+#include "Hash/Blake3.h"
 
 /*-----------------------------------------------------------------------------
 	FDelegateProperty.
 -----------------------------------------------------------------------------*/
 IMPLEMENT_FIELD(FDelegateProperty)
+
+FDelegateProperty::FDelegateProperty(FFieldVariant InOwner, const UECodeGen_Private::FDelegatePropertyParams& Prop)
+	: FDelegateProperty_Super(InOwner, (const UECodeGen_Private::FPropertyParamsBaseWithOffset&)Prop)
+{
+	SignatureFunction = Prop.SignatureFunctionFunc ? Prop.SignatureFunctionFunc() : nullptr;
+}
 
 #if WITH_EDITORONLY_DATA
 FDelegateProperty::FDelegateProperty(UField* InField)
@@ -50,7 +54,7 @@ void FDelegateProperty::InstanceSubobjects(void* Data, void const* DefaultData, 
 				Template = DefaultDelegate.GetUObject();
 			}
 
-			UObject* NewUObject = InstanceGraph->InstancePropertyValue(Template, CurrentUObject, InOwner, HasAnyPropertyFlags(CPF_Transient), false, true);
+			UObject* NewUObject = InstanceGraph->InstancePropertyValue(Template, CurrentUObject, InOwner, EInstancePropertyValueFlags::AllowSelfReference | EInstancePropertyValueFlags::DoNotCreateNewInstance);
 			DestDelegate.BindUFunction(NewUObject, DestDelegate.GetFunctionName());
 		}
 	}
@@ -58,25 +62,17 @@ void FDelegateProperty::InstanceSubobjects(void* Data, void const* DefaultData, 
 
 bool FDelegateProperty::Identical( const void* A, const void* B, uint32 PortFlags ) const
 {
+	check(A);
+
 	const FScriptDelegate* DA = (const FScriptDelegate*)A;
 	const FScriptDelegate* DB = (const FScriptDelegate*)B;
-	
+
 	if (!DB)
 	{
-		return DA->GetFunctionName() == NAME_None;
+		return !DA->IsBound();
 	}
-
-	if (DA->GetUObject() != DB->GetUObject())
-	{
-		return false;
-	}
-
-	if (DA->GetFunctionName() != DB->GetFunctionName())
-	{
-		return false;
-	}
-
-	return true;
+	
+	return *DA == *DB;
 }
 
 
@@ -136,26 +132,47 @@ FString FDelegateProperty::GetCPPTypeForwardDeclaration() const
 	return FString();
 }
 
-void FDelegateProperty::ExportTextItem( FString& ValueStr, const void* PropertyValue, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
+void FDelegateProperty::ExportText_Internal( FString& ValueStr, const void* PropertyValueOrContainer, EPropertyPointerType PropertyPointerType, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
 {
-	if (0 != (PortFlags & PPF_ExportCpp))
+	auto ExportDelegateAsText = [&ValueStr](FScriptDelegate* ScriptDelegate)
 	{
-		ValueStr += TEXT("{}");
-		return;
+		check(ScriptDelegate != NULL);
+		bool bDelegateHasValue = ScriptDelegate->GetFunctionName() != NAME_None;
+		ValueStr += FString::Printf(TEXT("%s.%s"),
+			ScriptDelegate->GetUObject() != NULL ? *ScriptDelegate->GetUObject()->GetName() : TEXT("(null)"),
+			*ScriptDelegate->GetFunctionName().ToString());
+	};
+	
+	if (PropertyPointerType == EPropertyPointerType::Container && HasGetter())
+	{
+		FScriptDelegate LocalScriptDelegate;
+		GetValue_InContainer(PropertyValueOrContainer, &LocalScriptDelegate);
+		ExportDelegateAsText(&LocalScriptDelegate);
 	}
-
-	FScriptDelegate* ScriptDelegate = (FScriptDelegate*)PropertyValue;
-	check(ScriptDelegate != NULL);
-	bool bDelegateHasValue = ScriptDelegate->GetFunctionName() != NAME_None;
-	ValueStr += FString::Printf( TEXT("%s.%s"),
-		ScriptDelegate->GetUObject() != NULL ? *ScriptDelegate->GetUObject()->GetName() : TEXT("(null)"),
-		*ScriptDelegate->GetFunctionName().ToString() );
+	else
+	{
+		FScriptDelegate* ScriptDelegate = (FScriptDelegate*)PointerToValuePtr(PropertyValueOrContainer, PropertyPointerType);
+		ExportDelegateAsText(ScriptDelegate);
+	}
 }
 
 
-const TCHAR* FDelegateProperty::ImportText_Internal( const TCHAR* Buffer, void* PropertyValue, int32 PortFlags, UObject* Parent, FOutputDevice* ErrorText ) const
+const TCHAR* FDelegateProperty::ImportText_Internal( const TCHAR* Buffer, void* ContainerOrPropertyPtr, EPropertyPointerType PropertyPointerType, UObject* Parent, int32 PortFlags, FOutputDevice* ErrorText ) const
 {
-	return DelegatePropertyTools::ImportDelegateFromText( *(FScriptDelegate*)PropertyValue, SignatureFunction, Buffer, Parent, ErrorText );
+	const TCHAR* Result = nullptr;
+	if (PropertyPointerType == EPropertyPointerType::Container && HasSetter())
+	{
+		FScriptDelegate LocalScriptDelegate;
+		Result = DelegatePropertyTools::ImportDelegateFromText(*(FScriptDelegate*)&LocalScriptDelegate, SignatureFunction, Buffer, Parent, ErrorText);
+		SetValue_InContainer(ContainerOrPropertyPtr, LocalScriptDelegate);
+	}
+	else
+	{
+		void* PropertyValue = PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType);
+		Result = DelegatePropertyTools::ImportDelegateFromText(*(FScriptDelegate*)PropertyValue, SignatureFunction, Buffer, Parent, ErrorText);
+	}
+
+	return Result;
 }
 
 void FDelegateProperty::Serialize( FArchive& Ar )
@@ -190,6 +207,21 @@ bool FDelegateProperty::SameType(const FProperty* Other) const
 	return Super::SameType(Other) && (SignatureFunction == ((FDelegateProperty*)Other)->SignatureFunction);
 }
 
+#if WITH_EDITORONLY_DATA
+void FDelegateProperty::AppendSchemaHash(FBlake3& Builder, bool bSkipEditorOnly) const
+{
+	Super::AppendSchemaHash(Builder, bSkipEditorOnly);
+	if (SignatureFunction)
+	{
+		// Hash the function's name instead of recursively hashing the function; the function's schema does not impact how we serialize our pointer to it
+		FNameBuilder ObjectPath;
+		SignatureFunction->GetPathName(nullptr, ObjectPath);
+		Builder.Update(ObjectPath.GetData(), ObjectPath.Len() * sizeof(ObjectPath.GetData()[0]));
+	}
+}
+#endif
+
+
 void FDelegateProperty::BeginDestroy()
 {
 #if USE_CIRCULAR_DEPENDENCY_LOAD_DEFERRING
@@ -201,5 +233,3 @@ void FDelegateProperty::BeginDestroy()
 
 	Super::BeginDestroy();
 }
-
-#include "UObject/DefineUPropertyMacros.h"

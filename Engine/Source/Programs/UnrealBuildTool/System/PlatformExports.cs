@@ -3,9 +3,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
 
 namespace UnrealBuildTool
 {
@@ -34,17 +33,6 @@ namespace UnrealBuildTool
 		}
 
 		/// <summary>
-		/// Gets the default architecture for a given platform
-		/// </summary>
-		/// <param name="Platform">The platform to get the default architecture for</param>
-		/// <param name="ProjectFile">Project file to read settings from</param>
-		/// <returns>The default architecture</returns>
-		public static string GetDefaultArchitecture(UnrealTargetPlatform Platform, FileReference ProjectFile)
-		{
-			return UEBuildPlatform.GetBuildPlatform(Platform).GetDefaultArchitecture(ProjectFile);
-		}
-
-		/// <summary>
 		/// Checks whether the given project has a default build configuration
 		/// </summary>
 		/// <param name="ProjectFile">The project file</param>
@@ -52,8 +40,8 @@ namespace UnrealBuildTool
 		/// <returns>True if the project uses the default build configuration</returns>
 		public static bool HasDefaultBuildConfig(FileReference ProjectFile, UnrealTargetPlatform Platform)
 		{
-			UEBuildPlatform BuildPlat = UEBuildPlatform.GetBuildPlatform(Platform, true);
-			return (BuildPlat == null)? true : BuildPlat.HasDefaultBuildConfig(Platform, ProjectFile.Directory);
+			UEBuildPlatform.TryGetBuildPlatform(Platform, out UEBuildPlatform? BuildPlat);
+			return (BuildPlat == null) ? true : BuildPlat.HasDefaultBuildConfig(Platform, ProjectFile.Directory);
 		}
 
 		/// <summary>
@@ -64,7 +52,7 @@ namespace UnrealBuildTool
 		/// <returns>True if the project requires a build for the platform</returns>
 		public static bool RequiresBuild(FileReference ProjectFile, UnrealTargetPlatform Platform)
 		{
-			UEBuildPlatform BuildPlat = UEBuildPlatform.GetBuildPlatform(Platform, true);
+			UEBuildPlatform.TryGetBuildPlatform(Platform, out UEBuildPlatform? BuildPlat);
 			return (BuildPlat == null) ? false : BuildPlat.RequiresBuild(Platform, ProjectFile.Directory);
 		}
 
@@ -84,7 +72,7 @@ namespace UnrealBuildTool
 		/// <returns>All platform folder names</returns>
 		public static string[] GetIncludedFolderNames(UnrealTargetPlatform Platform)
 		{
-			UEBuildPlatform BuildPlatform = UEBuildPlatform.GetBuildPlatform(Platform, false);
+			UEBuildPlatform BuildPlatform = UEBuildPlatform.GetBuildPlatform(Platform);
 			return BuildPlatform.GetIncludedFolderNames().ToArray();
 		}
 
@@ -95,38 +83,31 @@ namespace UnrealBuildTool
 		/// <returns>Array of folder names</returns>
 		public static string[] GetExcludedFolderNames(UnrealTargetPlatform Platform)
 		{
-			UEBuildPlatform BuildPlatform = UEBuildPlatform.GetBuildPlatform(Platform, false);
+			UEBuildPlatform BuildPlatform = UEBuildPlatform.GetBuildPlatform(Platform);
 			return BuildPlatform.GetExcludedFolderNames().ToArray();
-		}
-
-		/// <summary>
-		/// Returns the respective platform sdk version string
-		/// </summary>
-		/// <param name="Platform">The target platform to query</param>
-		public static string GetRequiredSDKString(UnrealTargetPlatform Platform)
-		{
-			UEBuildPlatform BuildPlatform = UEBuildPlatform.GetBuildPlatform(Platform, false);
-			return BuildPlatform.GetRequiredSDKString();
 		}
 
 		/// <summary>
 		/// Check whether the given platform supports XGE
 		/// </summary>
 		/// <param name="Platform">Platform to check</param>
+		/// <param name="Logger">Logger for output</param>
 		/// <returns>True if the platform supports XGE</returns>
-		public static bool CanUseXGE(UnrealTargetPlatform Platform)
+		public static bool CanUseXGE(UnrealTargetPlatform Platform, ILogger Logger)
 		{
-			return UEBuildPlatform.IsPlatformAvailable(Platform) && UEBuildPlatform.GetBuildPlatform(Platform).CanUseXGE() && XGE.IsAvailable();
+			return UEBuildPlatform.IsPlatformAvailable(Platform) && UEBuildPlatform.GetBuildPlatform(Platform).CanUseXGE() && XGE.IsAvailable(Logger);
 		}
 
 		/// <summary>
 		/// Check whether the given platform supports the parallel executor in UAT
 		/// </summary>
 		/// <param name="Platform">Platform to check</param>
+		/// <param name="Logger">Logger for output</param>
 		/// <returns>True if the platform supports the parallel executor in UAT</returns>
-		public static bool CanUseParallelExecutor(UnrealTargetPlatform Platform)
+		[Obsolete]
+		public static bool CanUseParallelExecutor(UnrealTargetPlatform Platform, ILogger Logger)
 		{
-			return UEBuildPlatform.IsPlatformAvailable(Platform) && UEBuildPlatform.GetBuildPlatform(Platform).CanUseParallelExecutor();
+			return true;
 		}
 
 		/// <summary>
@@ -134,8 +115,14 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="OutXgConsoleExe">On success, receives the path to the XGE console executable</param>
 		/// <returns>True if the path was found, false otherwise</returns>
-		public static bool TryGetXgConsoleExecutable(out string OutXgConsoleExe)
+		public static bool TryGetXgConsoleExecutable(out string? OutXgConsoleExe)
 		{
+			if (!OperatingSystem.IsWindows())
+			{
+				OutXgConsoleExe = null;
+				return false;
+			}
+
 			return XGE.TryGetXgConsoleExecutable(out OutXgConsoleExe);
 		}
 
@@ -159,14 +146,16 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// Initialize UBT in the context of another host process (presumably UAT)
 		/// </summary>
+		/// <param name="CommandLineArgs">Command Line arguments that UBT may need access to for initializing platforms</param>
+		/// <param name="Logger">Logger for output</param>
 		/// <returns>True if initialization was successful</returns>
-		public static bool Initialize()
+		public static bool Initialize(string[] CommandLineArgs, ILogger Logger)
 		{
 			// Read the XML configuration files
-			XmlConfig.ReadConfigFiles(null);
+			XmlConfig.ReadConfigFiles(null, null, Logger);
 
 			// Register all the platform classes
-			UEBuildPlatform.RegisterPlatforms(false, false);
+			UEBuildPlatform.RegisterPlatforms(false, false, CommandLineArgs, Logger);
 			return true;
 		}
 	}

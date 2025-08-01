@@ -96,6 +96,10 @@ namespace DatasmithGameThread
 	{
 		bool bEngineInitialized = GEngineLoop.PreInit(*PreInitCommandArgs) == 0;
 
+		// Workaround for UdpMessaging not starting processing until PostDefault stage - UE-179092
+		// And since Datasmith plugins are built without WITH_ENGINE FEngineLoop::LoadStartupModules is not called which effectively skips PostDefault stage
+		IPluginManager::Get().LoadModulesForEnabledPlugins(ELoadingPhase::PostDefault);
+
 		// Make sure all UObject classes are registered and default properties have been initialized
 		ProcessNewlyLoadedUObjects();
 
@@ -105,7 +109,7 @@ namespace DatasmithGameThread
 		if ( GLog )
 		{
 			// Make sure Logger is set on the right thread
-			GLog->SetCurrentThreadAsMasterThread();
+			GLog->SetCurrentThreadAsPrimaryThread();
 
 			if ( bSuppressLogs )
 			{
@@ -130,7 +134,7 @@ namespace DatasmithGameThread
 			// Set the current thread on the Logger
 			if ( GLog )
 			{
-				GLog->SetCurrentThreadAsMasterThread();
+				GLog->SetCurrentThreadAsPrimaryThread();
 			}
 
 			// Re-attach task graph to new game thread
@@ -162,6 +166,9 @@ FDatasmithGameThread::FDatasmithGameThread(FString&& InPreInitCommandArgs, const
 
 uint32 FDatasmithGameThread::Run()
 {
+	// We need to explicitly flag this thread as the GameThread to avoid errors.
+	FTaskTagScope Scope(ETaskTag::EGameThread);
+
 	// init
 	bKeepRunning = true;
 	OnInit();
@@ -171,7 +178,7 @@ uint32 FDatasmithGameThread::Run()
 	{
 		FTaskGraphInterface::Get().ProcessThreadUntilIdle(ENamedThreads::GameThread);
 		FStats::AdvanceFrame(false);
-		FTicker::GetCoreTicker().Tick(FApp::GetDeltaTime());
+		FTSTicker::GetCoreTicker().Tick(FApp::GetDeltaTime());
 		FSlateApplication::Get().PumpMessages();
 		FSlateApplication::Get().Tick();
 
@@ -231,6 +238,13 @@ void FDatasmithGameThread::RequestExit()
 
 void FDatasmithGameThread::OnInit()
 {
+	// Make sure that external engine path is normalized and ends with a '/'
+	FPaths::NormalizeDirectoryName(ForeignEngineDir);
+	if (!ForeignEngineDir.IsEmpty() && ForeignEngineDir[ForeignEngineDir.Len() - 1] != TEXT('/'))
+	{
+		ForeignEngineDir += TEXT("/");
+	}
+
 	GForeignEngineDir = *ForeignEngineDir;
 	bool bInitSucceded = DatasmithGameThread::InitializeInCurrentThread(PreInitCommandArgs, bSuppressLogs);
 
@@ -320,16 +334,20 @@ bool FDatasmithExporterManager::Initialize(const FInitOptions& InitOptions)
 
 		if (InitOptions.bUseDatasmithExporterUI)
 		{
-			checkf(InitOptions.RemoteEngineDirPath, TEXT("Datasmith exporter UI need a path to its minimal engine folder"));
+			checkf(InitOptions.RemoteEngineDirPath != nullptr, TEXT("Datasmith exporter UI need a path to its minimal engine folder"));
 
 			// Start a custom game thread
 			GDatasmithGameThread = MakeShared<FDatasmithGameThread>(MoveTemp(CmdLine), InitOptions);
 			TFuture<bool> OnInitDoneFuture = GDatasmithGameThread->GetOnInitDoneFuture();
 			GMainThreadAsRunnable = FRunnableThread::Create(GDatasmithGameThread.Get(), TEXT("DatasmithMainThread"));
 			bEngineInitialized = OnInitDoneFuture.Get();
+
+			// Remove the ETaskTag::EStaticInit tag on the current thread as it can cause this thread to compete with the main thread we just created.
+			FTaskTagScope::SetTagNone();
 		}
 		else
 		{
+			FTaskTagScope Scope(ETaskTag::EGameThread);
 			bEngineInitialized = DatasmithGameThread::InitializeInCurrentThread(CmdLine, InitOptions.bSuppressLogs);
 		}
 

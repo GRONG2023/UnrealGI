@@ -13,11 +13,20 @@
 class FEvent;
 class FRunnableThread;
 
+namespace UE
+{
+	namespace Cook
+	{
+		class ICookOnTheFlyServerConnection;
+		class FCookOnTheFlyMessage;
+	}
+}
+
 class FODSCMessageHandler : public IPlatformFile::IFileServerMessageHandler
 {
 public:
-	FODSCMessageHandler(EShaderPlatform InShaderPlatform);
-	FODSCMessageHandler(const TArray<FString>& InMaterials, EShaderPlatform InShaderPlatform, bool InbCompileChangedShaders);
+	FODSCMessageHandler(EShaderPlatform InShaderPlatform, ERHIFeatureLevel::Type InFeatureLevel, EMaterialQualityLevel::Type InQualityLevel, ODSCRecompileCommand InRecompileCommandType);
+	FODSCMessageHandler(const TArray<FString>& InMaterials, const FString& ShaderTypesToLoad, EShaderPlatform InShaderPlatform, ERHIFeatureLevel::Type InFeatureLevel, EMaterialQualityLevel::Type InQualityLevel, ODSCRecompileCommand InRecompileCommandType);
 	/** Subclass fills out an archive to send to the server */
 	virtual void FillPayload(FArchive& Payload) override;
 
@@ -28,23 +37,39 @@ public:
 
 	const TArray<FString>& GetMaterialsToLoad() const;
 	const TArray<uint8>& GetMeshMaterialMaps() const;
+	const TArray<uint8>& GetGlobalShaderMap() const;
 	bool ReloadGlobalShaders() const;
 
 private:
+	/** The time when this command was issued.  This isn't serialized to the cooking server. */
+	double RequestStartTime = 0.0;
+
 	/** The materials we send over the network and expect maps for on the return */
 	TArray<FString> MaterialsToLoad;
+
+	/** The names of shader type file names to compile shaders for. */
+	FString ShaderTypesToLoad;
 
 	/** Which shader platform we are compiling for */
 	EShaderPlatform ShaderPlatform;
 
+	/** Which feature level to compile for. */
+	ERHIFeatureLevel::Type FeatureLevel;
+
+	/** Which material quality level to compile for. */
+	EMaterialQualityLevel::Type QualityLevel;
+
 	/** Whether or not to recompile changed shaders */
-	bool bCompileChangedShaders = false;
+	ODSCRecompileCommand RecompileCommandType = ODSCRecompileCommand::None;
 
 	/** The payload for compiling a specific set of shaders. */
 	TArray<FODSCRequestPayload> RequestBatch;
 
 	/** The serialized shader maps from across the network */
 	TArray<uint8> OutMeshMaterialMaps;
+
+	/** The serialized global shader map from across the network */
+	TArray<uint8> OutGlobalShaderMap;
 };
 
 /**
@@ -56,7 +81,7 @@ class FODSCThread
 {
 public:
 
-	FODSCThread();
+	FODSCThread(const FString& HostIP);
 	virtual ~FODSCThread();
 
 	/**
@@ -78,25 +103,38 @@ public:
 	 * Add a shader compile request to be processed by this thread.
 	 *
 	 * @param MaterialsToCompile - List of material names to submit compiles for.
+	 * @param ShaderTypesToLoad - List of shader types to submit compiles for.
 	 * @param ShaderPlatform - Which shader platform to compile for.
-	 * @param bCompileChangedShaders - Whether or not we shouhld recompile shaders that have changed.
+	 * @param RecompileCommandType - Whether we should recompile changed or global shaders.
 	 *
 	 * @return false if no longer needs ticking
 	 */
-	void AddRequest(const TArray<FString>& MaterialsToCompile, EShaderPlatform ShaderPlatform, bool bCompileChangedShaders);
+	void AddRequest(const TArray<FString>& MaterialsToCompile, const FString& ShaderTypesToLoad, EShaderPlatform ShaderPlatform, ERHIFeatureLevel::Type FeatureLevel, EMaterialQualityLevel::Type QualityLevel, ODSCRecompileCommand RecompileCommandType);
 
 	/**
 	 * Add a request to compile a pipeline (VS/PS) of shaders.  The results are submitted and processed in an async manner.
 	 *
 	 * @param ShaderPlatform - Which shader platform to compile for.
+	 * @param FeatureLevel - Which feature level to compile for.
+	 * @param QualityLevel - Which material quality level to compile for.
 	 * @param MaterialName - The name of the material to compile.
 	 * @param VertexFactoryName - The name of the vertex factory type we should compile.
 	 * @param PipelineName - The name of the shader pipeline we should compile.
 	 * @param ShaderTypeNames - The shader type names of all the shader stages in the pipeline.
+	 * @param PermutationId - The permutation ID of the shader we should compile.
 	 *
 	 * @return false if no longer needs ticking
 	 */
-	void AddShaderPipelineRequest(EShaderPlatform ShaderPlatform, const FString& MaterialName, const FString& VertexFactoryName, const FString& PipelineName, const TArray<FString>& ShaderTypeNames);
+	void AddShaderPipelineRequest(
+		EShaderPlatform ShaderPlatform,
+		ERHIFeatureLevel::Type FeatureLevel,
+		EMaterialQualityLevel::Type QualityLevel,
+		const FString& MaterialName,
+		const FString& VertexFactoryName,
+		const FString& PipelineName,
+		const TArray<FString>& ShaderTypeNames,
+		int32 PermutationId
+	);
 
 	/**
 	 * Get completed requests.  Clears internal arrays.  Called on Game thread.
@@ -159,4 +197,9 @@ private:
 
 	/** Holds an event signaling the thread to wake up. */
 	FEvent* WakeupEvent;
+
+	void SendMessageToServer(IPlatformFile::IFileServerMessageHandler* Handler);
+
+	/** Special connection to the cooking server.  This is only used to send recompileshaders commands on. */
+	TUniquePtr<UE::Cook::ICookOnTheFlyServerConnection> CookOnTheFlyServerConnection;
 };

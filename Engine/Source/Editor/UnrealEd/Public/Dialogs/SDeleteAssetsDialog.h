@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Misc/Attribute.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Layout/Visibility.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Input/Reply.h"
@@ -39,7 +39,7 @@ public:
 		SLATE_ARGUMENT(FName, Style)
 
 		// The parent window hosting this dialog
-		SLATE_ATTRIBUTE(TSharedPtr<SWindow>, ParentWindow)
+		SLATE_ARGUMENT(TSharedPtr<SWindow>, ParentWindow)
 
 		/** When specified, the path box will request this fixed size. */
 		SLATE_ATTRIBUTE(FOptionalSize, WidthOverride)
@@ -147,8 +147,7 @@ private:
 	/** The model used for deleting assets */
 	TSharedPtr<FAssetDeleteModel> DeleteModel;
 
-	// Attributes
-	TAttribute< TSharedPtr< SWindow > > ParentWindow;
+	TWeakPtr<SWindow> ParentWindow;
 
 	// Widgets
 	TSharedPtr< SBorder > RootContainer;
@@ -159,9 +158,6 @@ private:
 
 	/** The selected asset we're going to consolidate the would be deleted assets into. */
 	FAssetData ConsolidationAsset;
-
-	/** The thumbnail pool used by the replace references asset picker. */
-	TSharedPtr<FAssetThumbnailPool> AssetThumbnailPool;
 
 	/** The consolidation asset thumbnail */
 	TSharedPtr<class FAssetThumbnail> ConsolidationAssetThumbnail;

@@ -1,7 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #include "VisualLogger/VisualLoggerBinaryFileDevice.h"
 #include "HAL/FileManager.h"
-#include "Misc/Paths.h"
 #include "Misc/ConfigCacheIni.h"
 #include "VisualLogger/VisualLogger.h"
 
@@ -26,7 +25,7 @@ void FVisualLoggerBinaryFileDevice::Cleanup(bool bReleaseMemory)
 
 }
 
-void FVisualLoggerBinaryFileDevice::StartRecordingToFile(float TimeStamp)
+void FVisualLoggerBinaryFileDevice::StartRecordingToFile(double TimeStamp)
 {
 	if (FileArchive != nullptr)
 	{
@@ -44,7 +43,7 @@ void FVisualLoggerBinaryFileDevice::StartRecordingToFile(float TimeStamp)
 	FileArchive = IFileManager::Get().CreateFileWriter(*FullFilename);
 }
 
-void FVisualLoggerBinaryFileDevice::StopRecordingToFile(float TimeStamp)
+void FVisualLoggerBinaryFileDevice::StopRecordingToFile(double TimeStamp)
 {
 	if (FileArchive == nullptr)
 	{
@@ -106,9 +105,9 @@ void FVisualLoggerBinaryFileDevice::Serialize(const UObject* LogOwner, FName Own
 	{
 		FVisualLoggerHelpers::Serialize(*FileArchive, FrameCache);
 		FrameCache.Reset();
+		LastLogTimeStamp = LogEntry.TimeStamp;
 	}
 
-	LastLogTimeStamp = LogEntry.TimeStamp;
 	FrameCache.Add(FVisualLogEntryItem(OwnerName, OwnerClassName, LogEntry));
 }
 #endif

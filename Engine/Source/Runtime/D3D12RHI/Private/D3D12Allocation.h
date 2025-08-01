@@ -5,7 +5,22 @@ D3D12Allocation.h: A Collection of allocators
 =============================================================================*/
 
 #pragma once
+
 #include "D3D12Resources.h"
+#include "D3D12PoolAllocator.h"
+
+#define SUB_ALLOCATED_DEFAULT_ALLOCATIONS	1
+
+// Enable pool allocator by default only on Windows until all initial issues have been resolved.
+// Xbox is currently using the buddy allocator with a lot smaller pool sizes so the alignment waste is a lot less
+// It also has less of a problem with committed resource allocations
+#if !defined(USE_BUFFER_POOL_ALLOCATOR)
+#define USE_BUFFER_POOL_ALLOCATOR (PLATFORM_WINDOWS)
+#endif
+
+#if !defined(USE_TEXTURE_POOL_ALLOCATOR)
+#define USE_TEXTURE_POOL_ALLOCATOR (PLATFORM_WINDOWS)
+#endif
 
 // Segregated free list texture allocator
 // Description:
@@ -58,44 +73,27 @@ FORCEINLINE uint32 GetTypeHash(const FD3D12SegListAllocatorLeakTrack& S)
 }
 
 
-
-
+const uint32 kD3D12ManualSubAllocationAlignment = 256;
 
 class FD3D12SegList;
 
 class FD3D12ResourceAllocator : public FD3D12DeviceChild, public FD3D12MultiNodeGPUObject
 {
 public:
-
-	struct FInitConfig
-	{
-		bool operator==(const FInitConfig& InOther) const
-		{
-			return HeapType == InOther.HeapType && 
-				HeapFlags && InOther.HeapFlags && 
-				ResourceFlags == InOther.ResourceFlags && 
-				InitialResourceState == InOther.InitialResourceState;
-		}
-
-		D3D12_HEAP_TYPE HeapType;
-		D3D12_HEAP_FLAGS HeapFlags;
-		D3D12_RESOURCE_FLAGS ResourceFlags;
-		D3D12_RESOURCE_STATES InitialResourceState;
-	};
-
+	
 	FD3D12ResourceAllocator(FD3D12Device* ParentDevice,
 		FRHIGPUMask VisibleNodes,
-		const FInitConfig& InInitConfig,
+		const FD3D12ResourceInitConfig& InInitConfig,
 		const FString& Name,
 		uint32 MaxSizeForPooling);
 	~FD3D12ResourceAllocator();
 
-	const FInitConfig& GetInitConfig() const { return InitConfig; }
+	const FD3D12ResourceInitConfig& GetInitConfig() const { return InitConfig; }
 	const uint32 GetMaximumAllocationSizeForPooling() const { return MaximumAllocationSizeForPooling; }
 
 protected:
 
-	const FInitConfig InitConfig;
+	const FD3D12ResourceInitConfig InitConfig;
 	const FString DebugName;
 	bool Initialized;
 
@@ -125,7 +123,7 @@ protected:
 // Based on reference implementation by MSFT: billkris
 
 // Unfortunately the api restricts the minimum size of a placed buffer resource to 64k
-#define MIN_PLACED_BUFFER_SIZE (64 * 1024)
+#define MIN_PLACED_RESOURCE_SIZE (64 * 1024)
 #define D3D_BUFFER_ALIGNMENT (64 * 1024)
 
 #if defined(D3D12RHI_TRACK_DETAILED_STATS)
@@ -139,30 +137,17 @@ protected:
 
 class FD3D12BuddyAllocator : public FD3D12ResourceAllocator
 {
-public:
-
-	enum class EAllocationStrategy
-	{
-		// This strategy uses Placed Resources to sub-allocate a buffer out of an underlying ID3D12Heap.
-		// The benefit of this is that each buffer can have it's own resource state and can be treated
-		// as any other buffer. The downside of this strategy is the API limitation which enforces
-		// the minimum buffer size to 64k leading to large internal fragmentation in the allocator
-		kPlacedResource,
-		// The alternative is to manually sub-allocate out of a single large buffer which allows block
-		// allocation granularity down to 1 byte. However, this strategy is only really valid for buffers which
-		// will be treated as read-only after their creation (i.e. most Index and Vertex buffers). This 
-		// is because the underlying resource can only have one state at a time.
-		kManualSubAllocation
-	};
+public:	
 
 	FD3D12BuddyAllocator(FD3D12Device* ParentDevice,
 		FRHIGPUMask VisibleNodes,
-		const FInitConfig& InInitConfig,
+		const FD3D12ResourceInitConfig& InInitConfig,
 		const FString& Name,
-		EAllocationStrategy InAllocationStrategy,
+		EResourceAllocationStrategy InAllocationStrategy,
 		uint32 MaxSizeForPooling,
 		uint32 InMaxBlockSize,
-		uint32 InMinBlockSize);
+		uint32 InMinBlockSize,
+		HeapId InTraceParentHeapId);
 
 	bool TryAllocate(uint32 SizeInBytes, uint32 Alignment, FD3D12ResourceLocation& ResourceLocation);
 
@@ -190,7 +175,7 @@ public:
 	inline uint32 GetTotalSizeUsed() const { return TotalSizeUsed; }
 	inline uint64 GetAllocationOffsetInBytes(const FD3D12BuddyAllocatorPrivateData& AllocatorPrivateData) const { return uint64(AllocatorPrivateData.Offset) * MinBlockSize; }
 
-	inline FD3D12Heap* GetBackingHeap() { check(AllocationStrategy == EAllocationStrategy::kPlacedResource); return BackingHeap.GetReference(); }
+	inline FD3D12Heap* GetBackingHeap() { check(AllocationStrategy == EResourceAllocationStrategy::kPlacedResource); return BackingHeap.GetReference(); }
 
 	inline bool IsOwner(FD3D12ResourceLocation& ResourceLocation)
 	{
@@ -201,7 +186,7 @@ protected:
 
 	const uint32 MaxBlockSize;
 	const uint32 MinBlockSize;
-	const FD3D12BuddyAllocator::EAllocationStrategy AllocationStrategy;
+	const EResourceAllocationStrategy AllocationStrategy;
 
 	TRefCountPtr<FD3D12Resource> BackingResource;
 	TRefCountPtr<FD3D12Heap> BackingHeap;
@@ -223,6 +208,7 @@ private:
 	uint64 LastUsedFrameFence;
 	uint32 MaxOrder;
 	uint32 TotalSizeUsed;
+	HeapId TraceHeapId;
 
 	bool HeapFullMessageDisplayed;
 
@@ -267,15 +253,16 @@ public:
 
 	FD3D12MultiBuddyAllocator(FD3D12Device* ParentDevice,
 		FRHIGPUMask VisibleNodes,
-		const FInitConfig& InInitConfig,
+		const FD3D12ResourceInitConfig& InInitConfig,
 		const FString& Name,
-		FD3D12BuddyAllocator::EAllocationStrategy InAllocationStrategy,
+		EResourceAllocationStrategy InAllocationStrategy,
 		uint32 InMaxAllocationSize,
 		uint32 InDefaultPoolSize,
-		uint32 InMinBlockSize);
+		uint32 InMinBlockSize,
+		HeapId InTraceParentHeapId);
 	~FD3D12MultiBuddyAllocator();
 
-	const FD3D12BuddyAllocator::EAllocationStrategy GetAllocationStrategy() const { return AllocationStrategy; }
+	const EResourceAllocationStrategy GetAllocationStrategy() const { return AllocationStrategy; }
 
 	bool TryAllocate(uint32 SizeInBytes, uint32 Alignment, FD3D12ResourceLocation& ResourceLocation);
 
@@ -298,11 +285,14 @@ protected:
 
 	FD3D12BuddyAllocator* CreateNewAllocator(uint32 InMinSizeInBytes);
 
-	const FD3D12BuddyAllocator::EAllocationStrategy AllocationStrategy;
+	const EResourceAllocationStrategy AllocationStrategy;
 	const uint32 MinBlockSize;
 	const uint32 DefaultPoolSize;
 
 	TArray<FD3D12BuddyAllocator*> Allocators;
+
+private:
+	HeapId TraceHeapId;
 };
 
 //-----------------------------------------------------------------------------
@@ -316,7 +306,7 @@ public:
 
 	FD3D12BucketAllocator(FD3D12Device* ParentDevice,
 		FRHIGPUMask VisibleNodes,
-		const FInitConfig& InInitConfig,
+		const FD3D12ResourceInitConfig& InInitConfig,
 		const FString& Name,
 		uint64 InBlockRetentionFrameCount);
 
@@ -372,38 +362,38 @@ private:
 	const uint64 BlockRetentionFrameCount;
 };
 
-#ifdef USE_BUCKET_ALLOCATOR
-typedef FD3D12BucketAllocator FD3D12AllocatorType;
-#else
-typedef FD3D12MultiBuddyAllocator FD3D12AllocatorType;
-#endif
 
 //-----------------------------------------------------------------------------
-//	FD3D12DynamicHeapAllocator
+//	FD3D12UploadHeapAllocator
 //-----------------------------------------------------------------------------
 // This is designed for allocation of scratch memory such as temporary staging buffers
 // or shadow buffers for dynamic resources.
-class FD3D12DynamicHeapAllocator : public FD3D12AdapterChild, public FD3D12MultiNodeGPUObject
+class FD3D12UploadHeapAllocator : public FD3D12AdapterChild, public FD3D12DeviceChild, public FD3D12MultiNodeGPUObject
 {
 public:
 
-	FD3D12DynamicHeapAllocator(FD3D12Adapter* InParent, FD3D12Device* InParentDevice, const FString& InName, FD3D12BuddyAllocator::EAllocationStrategy InAllocationStrategy,
-		uint32 InMaxSizeForPooling,
-		uint32 InMaxBlockSize,
-		uint32 InMinBlockSize);
+	FD3D12UploadHeapAllocator(FD3D12Adapter* InParent, FD3D12Device* InParentDevice, const FString& InName);
 
-	void Init();
-
-	// Allocates <size> bytes from the end of an available resource heap.
-	void* AllocUploadResource(uint32 size, uint32 alignment, FD3D12ResourceLocation& ResourceLocation);
-
-	void CleanUpAllocations(uint64 InFrameLag);
-
+	void Init() {}
 	void Destroy();
 
-private:
+	// Allocates <size> bytes from the end of an available resource heap.
+	void* AllocUploadResource(uint32 InSize, uint32 InAlignment, FD3D12ResourceLocation& ResourceLocation);
+	void* AllocFastConstantAllocationPage(uint32 InSize, uint32 InAlignment, FD3D12ResourceLocation& ResourceLocation);
 
-	FD3D12AllocatorType Allocator;
+	void CleanUpAllocations(uint64 InFrameLag);
+	void UpdateMemoryStats();
+
+private:
+	HeapId						TraceHeapId;
+	// Buddy allocator used for all 'small' allocation - fast but aligns to power of 2
+	FD3D12MultiBuddyAllocator	SmallBlockAllocator;
+	// Pool allocator for all bigger allocations - less fast but less alignment waste
+	FCriticalSection			BigBlockCS;
+	FD3D12PoolAllocator			BigBlockAllocator;
+	// Seperate buddy allocator used for the fast constant allocator pages which get always freed within the same frame by default
+	// (different allocator to avoid fragmentation with the other pools - always the same size allocations)
+	FD3D12MultiBuddyAllocator	FastConstantPageAllocator;
 };
 
 //-----------------------------------------------------------------------------
@@ -412,20 +402,27 @@ private:
 class FD3D12DefaultBufferPool : public FD3D12DeviceChild, public FD3D12MultiNodeGPUObject
 {
 public:
-	FD3D12DefaultBufferPool(FD3D12Device* InParent, FD3D12AllocatorType* InAllocator);
+	FD3D12DefaultBufferPool(FD3D12Device* InParent, FD3D12MultiBuddyAllocator* InAllocator);
 	~FD3D12DefaultBufferPool() { delete Allocator; }
 
-	bool SupportsAllocation(D3D12_HEAP_TYPE InHeapType, D3D12_RESOURCE_FLAGS InResourceFlags, EBufferUsageFlags InBufferUsage, ED3D12ResourceStateMode InResourceStateMode) const;
-	void AllocDefaultResource(D3D12_HEAP_TYPE InHeapType, const D3D12_RESOURCE_DESC& Desc, EBufferUsageFlags InBufferUsage, ED3D12ResourceStateMode InResourceStateMode, FD3D12ResourceLocation& ResourceLocation, uint32 Alignment, const TCHAR* Name);
+	bool SupportsAllocation(D3D12_HEAP_TYPE InHeapType, D3D12_RESOURCE_FLAGS InResourceFlags, EBufferUsageFlags InBufferUsage, ED3D12ResourceStateMode InResourceStateMode, uint32 Alignment) const;
+	void AllocDefaultResource(D3D12_HEAP_TYPE InHeapType, const D3D12_RESOURCE_DESC& InDesc, EBufferUsageFlags InBufferUsage, ED3D12ResourceStateMode InResourceStateMode,
+		D3D12_RESOURCE_STATES InCreateState, uint32 InAlignment, const TCHAR* InName, FD3D12ResourceLocation& ResourceLocation);
 	void CleanUpAllocations(uint64 InFrameLag);
-	void UpdateMemoryStats(uint32& IOMemoryAllocated, uint32& IOMemoryUsed, uint32& IOMemoryFree, uint32& IOAlignmentWaste, uint32& IOAllocatedPageCount, uint32& IOFullPageCount);
+	void UpdateMemoryStats(uint32& IOMemoryAllocated, uint32& IOMemoryUsed, uint32& IOMemoryFree, uint32& IOMemoryEndFree, uint32& IOAlignmentWaste, uint32& IOAllocatedPageCount, uint32& IOFullPageCount);
 
-	static FD3D12ResourceAllocator::FInitConfig GetResourceAllocatorInitConfig(D3D12_HEAP_TYPE InHeapType, D3D12_RESOURCE_FLAGS InResourceFlags, EBufferUsageFlags InBufferUsage);
-	static FD3D12BuddyAllocator::EAllocationStrategy GetBuddyAllocatorAllocationStrategy(D3D12_RESOURCE_FLAGS InResourceFlags, ED3D12ResourceStateMode InResourceStateMode);
+	static FD3D12ResourceInitConfig GetResourceAllocatorInitConfig(D3D12_HEAP_TYPE InHeapType, D3D12_RESOURCE_FLAGS InResourceFlags, EBufferUsageFlags InBufferUsage);
+	static EResourceAllocationStrategy GetResourceAllocationStrategy(D3D12_RESOURCE_FLAGS InResourceFlags, ED3D12ResourceStateMode InResourceStateMode, uint32 Alignment);
 
 private:
-	FD3D12AllocatorType* Allocator;
+	FD3D12MultiBuddyAllocator* Allocator;
 };
+
+#if USE_BUFFER_POOL_ALLOCATOR
+typedef FD3D12PoolAllocator FD3D12BufferPool;
+#else
+typedef FD3D12DefaultBufferPool FD3D12BufferPool;
+#endif
 
 // FD3D12DefaultBufferAllocator
 //
@@ -435,16 +432,22 @@ public:
 	FD3D12DefaultBufferAllocator(FD3D12Device* InParent, FRHIGPUMask VisibleNodes);
 
 	// Grab a buffer from the available buffers or create a new buffer if none are available
-	void AllocDefaultResource(D3D12_HEAP_TYPE InHeapType, const D3D12_RESOURCE_DESC& pDesc, EBufferUsageFlags InBufferUsage,	ED3D12ResourceStateMode InResourceStateMode, FD3D12ResourceLocation& ResourceLocation, uint32 Alignment, const TCHAR* Name);
+	void AllocDefaultResource(D3D12_HEAP_TYPE InHeapType, const D3D12_RESOURCE_DESC& pDesc, EBufferUsageFlags InBufferUsage, ED3D12ResourceStateMode InResourceStateMode, D3D12_RESOURCE_STATES InCreateState, FD3D12ResourceLocation& ResourceLocation, uint32 Alignment, const TCHAR* Name);
 	void FreeDefaultBufferPools();
-	void CleanupFreeBlocks(uint64 InFrameLag);
+	void BeginFrame(FRHICommandListBase& RHICmdList);
+	void CleanupFreeBlocks(uint64 InFrameLag);	
 	void UpdateMemoryStats();
+
+	static bool IsPlacedResource(D3D12_RESOURCE_FLAGS InResourceFlags, ED3D12ResourceStateMode InResourceStateMode, uint32 Alignment);
+	static D3D12_RESOURCE_STATES GetDefaultInitialResourceState(D3D12_HEAP_TYPE InHeapType, EBufferUsageFlags InBufferFlags, ED3D12ResourceStateMode InResourceStateMode);
 
 private:
 
-	FD3D12DefaultBufferPool* CreateBufferPool(D3D12_HEAP_TYPE InHeapType, D3D12_RESOURCE_FLAGS InResourceFlags, EBufferUsageFlags InBufferUsage, ED3D12ResourceStateMode InResourceStateMode);
+	FD3D12BufferPool* CreateBufferPool(D3D12_HEAP_TYPE InHeapType, D3D12_RESOURCE_FLAGS InResourceFlags, EBufferUsageFlags InBufferUsage, ED3D12ResourceStateMode InResourceStateMode, uint32 Alignment);
 
-	TArray<FD3D12DefaultBufferPool*> DefaultBufferPools;
+	TArray<FD3D12BufferPool*> DefaultBufferPools;
+	FCriticalSection CS;
+	HeapId TraceHeapId;
 };
 
 //-----------------------------------------------------------------------------
@@ -464,6 +467,8 @@ struct FD3D12FastAllocatorPage
 		, NextFastAllocOffset(0)
 		, FastAllocData(nullptr)
 		, FrameFence(0) {};
+
+	~FD3D12FastAllocatorPage();
 
 	void Reset()
 	{
@@ -530,12 +535,8 @@ class FD3D12FastConstantAllocator : public FD3D12DeviceChild, public FD3D12Multi
 public:
 	FD3D12FastConstantAllocator(FD3D12Device* Parent, FRHIGPUMask VisibiltyMask);
 
-#if USE_STATIC_ROOT_SIGNATURE
 	void* Allocate(uint32 Bytes, class FD3D12ResourceLocation& OutLocation, FD3D12ConstantBufferView* OutCBView);
-#else
-	void* Allocate(uint32 Bytes, class FD3D12ResourceLocation& OutLocation);
-#endif
-
+	void ClearResource() { UnderlyingResource.Clear(); }
 
 private:
 	FD3D12ResourceLocation UnderlyingResource;
@@ -563,7 +564,7 @@ private:
 		ArrayIdx(Idx),
 		FirstFreeOffset(0)
 	{
-		this->SetHeap(NewHeap);
+		this->SetHeap(NewHeap, TEXT("SegListHeap"));
 		BeginTrackingResidency(HeapSize);
 	}
 
@@ -911,14 +912,42 @@ private:
 //	FD3D12TextureAllocator
 //-----------------------------------------------------------------------------
 
-#if D3D12RHI_SEGREGATED_TEXTURE_ALLOC
+#if USE_TEXTURE_POOL_ALLOCATOR
 class FD3D12TextureAllocatorPool : public FD3D12DeviceChild, public FD3D12MultiNodeGPUObject
 {
 public:
 	FD3D12TextureAllocatorPool(FD3D12Device* Device, FRHIGPUMask VisibilityNode);
 
-	HRESULT AllocateTexture(D3D12_RESOURCE_DESC Desc, const D3D12_CLEAR_VALUE* ClearValue, uint8 UEFormat, FD3D12ResourceLocation& TextureLocation, const D3D12_RESOURCE_STATES InitialState, const TCHAR* Name);
+	HRESULT AllocateTexture(FD3D12ResourceDesc Desc, const D3D12_CLEAR_VALUE* ClearValue, EPixelFormat UEFormat, FD3D12ResourceLocation& TextureLocation, const D3D12_RESOURCE_STATES InitialState, const TCHAR* Name);
+	
+	void BeginFrame(FRHICommandListBase& RHICmdList);
+	void CleanUpAllocations();
+	void Destroy();
+	bool GetMemoryStats(uint64& OutTotalAllocated, uint64& OutTotalUnused) const;
 
+private:
+	
+	enum class EPoolType
+	{
+		ReadOnly4K,
+		ReadOnly,
+		RenderTarget,
+		UAV,
+		Count,
+	};
+
+	FD3D12PoolAllocator* PoolAllocators[(int)EPoolType::Count];
+	HeapId TraceHeapId;
+};
+#elif D3D12RHI_SEGREGATED_TEXTURE_ALLOC
+class FD3D12TextureAllocatorPool : public FD3D12DeviceChild, public FD3D12MultiNodeGPUObject
+{
+public:
+	FD3D12TextureAllocatorPool(FD3D12Device* Device, FRHIGPUMask VisibilityNode);
+
+	HRESULT AllocateTexture(FD3D12ResourceDesc Desc, const D3D12_CLEAR_VALUE* ClearValue, EPixelFormat UEFormat, FD3D12ResourceLocation& TextureLocation, const D3D12_RESOURCE_STATES InitialState, const TCHAR* Name);
+
+	void BeginFrame(FRHICommandListBase& RHICmdList) {}
 	void CleanUpAllocations()
 	{
 		ReadOnlyTexturePool.CleanUpAllocations();
@@ -941,11 +970,11 @@ private:
 class FD3D12TextureAllocator : public FD3D12MultiBuddyAllocator
 {
 public:
-	FD3D12TextureAllocator(FD3D12Device* Device, FRHIGPUMask VisibleNodes, const FString& Name, uint32 HeapSize, D3D12_HEAP_FLAGS Flags);
+	FD3D12TextureAllocator(FD3D12Device* Device, FRHIGPUMask VisibleNodes, const FString& Name, uint32 HeapSize, D3D12_HEAP_FLAGS Flags, HeapId InTraceParentHeapId);
 
 	~FD3D12TextureAllocator();
 
-	HRESULT AllocateTexture(D3D12_RESOURCE_DESC Desc, const D3D12_CLEAR_VALUE* ClearValue, FD3D12ResourceLocation& TextureLocation, const D3D12_RESOURCE_STATES InitialState, const TCHAR* Name);
+	HRESULT AllocateTexture(FD3D12ResourceDesc Desc, const D3D12_CLEAR_VALUE* ClearValue, FD3D12ResourceLocation& TextureLocation, const D3D12_RESOURCE_STATES InitialState, const TCHAR* Name);
 };
 
 class FD3D12TextureAllocatorPool : public FD3D12DeviceChild, public FD3D12MultiNodeGPUObject
@@ -953,13 +982,16 @@ class FD3D12TextureAllocatorPool : public FD3D12DeviceChild, public FD3D12MultiN
 public:
 	FD3D12TextureAllocatorPool(FD3D12Device* Device, FRHIGPUMask VisibilityNode);
 
-	HRESULT AllocateTexture(D3D12_RESOURCE_DESC Desc, const D3D12_CLEAR_VALUE* ClearValue, uint8 UEFormat, FD3D12ResourceLocation& TextureLocation, const D3D12_RESOURCE_STATES InitialState, const TCHAR* Name);
-
+	HRESULT AllocateTexture(FD3D12ResourceDesc Desc, const D3D12_CLEAR_VALUE* ClearValue, EPixelFormat UEFormat, FD3D12ResourceLocation& TextureLocation, const D3D12_RESOURCE_STATES InitialState, const TCHAR* Name);
+	
+	void BeginFrame(FRHICommandListBase& RHICmdList) {}
 	void CleanUpAllocations() { ReadOnlyTexturePool.CleanUpAllocations(0); }
 
 	void Destroy() { ReadOnlyTexturePool.Destroy(); }
+	bool GetMemoryStats(uint64& OutTotalAllocated, uint64& OutTotalUnused) const { OutTotalAllocated = 0; OutTotalUnused = 0; return false; }
 
 private:
+	HeapId TraceHeapId;
 	FD3D12TextureAllocator ReadOnlyTexturePool;
 };
 #endif

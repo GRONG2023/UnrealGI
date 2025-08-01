@@ -2,17 +2,23 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "MovieSceneSection.h"
 #include "Channels/MovieSceneBoolChannel.h"
+#include "CoreMinimal.h"
+#include "CoreTypes.h"
+#include "MovieSceneSection.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "MovieSceneBoolSection.generated.h"
+
+class FArchive;
+class UObject;
 
 /**
  * A single bool section.
  */
-UCLASS(MinimalAPI)
-class UMovieSceneBoolSection 
+UCLASS()
+class MOVIESCENE_API UMovieSceneBoolSection 
 	: public UMovieSceneSection
 {
 	GENERATED_UCLASS_BODY()
@@ -52,7 +58,7 @@ public:
 	/**
 	 * Set a flag indicating that the actual property that this bool represents is the opposite of the values stored in this section
 	 */
-	MOVIESCENE_API void SetIsExternallyInverted(bool bInIsExternallyInverted);
+	void SetIsExternallyInverted(bool bInIsExternallyInverted);
 
 protected:
 

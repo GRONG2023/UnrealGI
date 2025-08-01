@@ -41,14 +41,6 @@ struct FChaosCollisionEventData
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Data")
 	FVector Impulse;
 
-	// The particle of the collision event
-	//UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Data")
-	Chaos::FGeometryParticle* Particle;
-
-	// The level set of the collision event
-	//UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Data")
-	Chaos::FGeometryParticle* Levelset;
-
 	FChaosCollisionEventData()
 		: Location(FVector::ZeroVector)
 		, Normal(FVector::ZeroVector)
@@ -57,8 +49,6 @@ struct FChaosCollisionEventData
 		, Mass1(0.0f)
 		, Mass2(0.0f)
 		, Impulse(FVector::ZeroVector)
-		, Particle(nullptr)
-		, Levelset(nullptr)
 	{
 	}
 };
@@ -116,14 +106,14 @@ struct FChaosCollisionEventRequestSettings
 	{}
 };
 
-class GEOMETRYCOLLECTIONENGINE_API FChaosCollisionEventFilter : public IChaosEventFilter<Chaos::FCollisionDataArray, TArray<FChaosCollisionEventData>, EChaosCollisionSortMethod>
+class FChaosCollisionEventFilter : public IChaosEventFilter<Chaos::FCollisionDataArray, TArray<FChaosCollisionEventData>, EChaosCollisionSortMethod>
  {
 public:
 
 	FChaosCollisionEventFilter(FChaosCollisionEventRequestSettings* FilterSettingsIn) : CollisionEventRequestSettings(FilterSettingsIn) {}
 
-	virtual void FilterEvents(const FTransform& ChaosComponentTransform, const Chaos::FCollisionDataArray& RawCollisionDataArray) override;
-	virtual void SortEvents(TArray<FChaosCollisionEventData>& InOutCollisionEvents, EChaosCollisionSortMethod SortMethod, const FTransform& InTransform) override;
+	GEOMETRYCOLLECTIONENGINE_API virtual void FilterEvents(const FTransform& ChaosComponentTransform, const Chaos::FCollisionDataArray& RawCollisionDataArray) override;
+	GEOMETRYCOLLECTIONENGINE_API virtual void SortEvents(TArray<FChaosCollisionEventData>& InOutCollisionEvents, EChaosCollisionSortMethod SortMethod, const FTransform& InTransform) override;
 
 private:
 	FChaosCollisionEventFilter() : CollisionEventRequestSettings(nullptr) { check(false);  }

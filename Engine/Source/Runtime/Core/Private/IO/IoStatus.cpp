@@ -1,6 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "IO/IoDispatcher.h"
+#include "IO/IoStatus.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformString.h"
+#include "HAL/UnrealMemory.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Math/UnrealMathUtility.h"
+
+DEFINE_LOG_CATEGORY_STATIC(LogIoStatus, Log, All);
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -21,7 +29,7 @@ FIoStatus::~FIoStatus()
 FIoStatus::FIoStatus(EIoErrorCode Code)
 :	ErrorCode(Code)
 {
-	ErrorMessage[0] = 0;
+	ErrorMessage[0] = TEXT('\0');
 }
 
 FIoStatus::FIoStatus(EIoErrorCode Code, const FStringView& InErrorMessage)
@@ -29,7 +37,7 @@ FIoStatus::FIoStatus(EIoErrorCode Code, const FStringView& InErrorMessage)
 {
 	const int32 ErrorMessageLength = FMath::Min(MaxErrorMessageLength - 1, InErrorMessage.Len());
 	FPlatformString::Convert(ErrorMessage, ErrorMessageLength, InErrorMessage.GetData(), ErrorMessageLength);
-	ErrorMessage[ErrorMessageLength] = 0;
+	ErrorMessage[ErrorMessageLength] = TEXT('\0');
 }
 
 FIoStatus& FIoStatus::operator=(const FIoStatus& Other)
@@ -43,7 +51,7 @@ FIoStatus& FIoStatus::operator=(const FIoStatus& Other)
 FIoStatus& FIoStatus::operator=(const EIoErrorCode InErrorCode)
 {
 	ErrorCode = InErrorCode;
-	ErrorMessage[0] = 0;
+	ErrorMessage[0] = TEXT('\0');
 
 	return *this;
 }
@@ -61,7 +69,7 @@ FString FIoStatus::ToString() const
 
 void StatusOrCrash(const FIoStatus& Status)
 {
-	UE_LOG(LogIoDispatcher, Fatal, TEXT("I/O Error '%s'"), *Status.ToString());
+	UE_LOG(LogIoStatus, Fatal, TEXT("I/O Error '%s'"), *Status.ToString());
 }
 
 //////////////////////////////////////////////////////////////////////////

@@ -146,7 +146,8 @@ public:
 	~FSlateOpenGLRenderer();
 
 	/** FSlateRenderer interface */
-	virtual FSlateDrawBuffer& GetDrawBuffer() override;
+	virtual FSlateDrawBuffer& AcquireDrawBuffer() override;
+	virtual void ReleaseDrawBuffer( FSlateDrawBuffer& InWindowDrawBuffer ) override;
 	virtual bool Initialize() override;
 	virtual void Destroy() override {}
 	virtual void DrawWindows( FSlateDrawBuffer& InWindowDrawBuffer ) override;
@@ -158,10 +159,12 @@ public:
 	virtual void RestoreSystemResolution(const TSharedRef<SWindow> InWindow) override {}
 	virtual void ReleaseDynamicResource( const FSlateBrush& Brush ) override;
 	virtual bool GenerateDynamicImageResource(FName ResourceName, uint32 Width, uint32 Height, const TArray< uint8 >& Bytes) override;
-	virtual FSlateResourceHandle GetResourceHandle( const FSlateBrush& Brush ) override;
+	virtual bool GenerateDynamicImageResource(FName ResourceName, FSlateTextureDataRef TextureData) override;
+	virtual FSlateResourceHandle GetResourceHandle(const FSlateBrush& Brush, FVector2f LocalSize, float DrawScale) override;
 	virtual void RemoveDynamicBrushResource( TSharedPtr<FSlateDynamicImageBrush> BrushToRemove ) override;
 	virtual void LoadStyleResources(const ISlateStyle& Style) override;
 	virtual FSlateUpdatableTexture* CreateUpdatableTexture(uint32 Width, uint32 Height) override;
+	virtual FSlateUpdatableTexture* CreateSharedHandleTexture(void* SharedHandle) override;
 	virtual void ReleaseUpdatableTexture(FSlateUpdatableTexture* Texture) override;
 	virtual ISlateAtlasProvider* GetTextureAtlasProvider() override;
 	virtual FCriticalSection* GetResourceCriticalSection() override;
@@ -176,7 +179,7 @@ private:
 	 * @param WindowSize    The Size of the window in pixels
 	 * @param InViewport    The viewport to resize
 	 */
-	void Private_ResizeViewport( const FVector2D& WindowSize, FSlateOpenGLViewport& InViewport, bool bFullscreen );
+	void Private_ResizeViewport( FVector2f WindowSize, FSlateOpenGLViewport& InViewport, bool bFullscreen );
 private:
 	/** View matrix to use when rendering */
 	FMatrix ViewMatrix;

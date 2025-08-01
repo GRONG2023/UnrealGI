@@ -3,12 +3,17 @@
 #pragma once
 
 #include "EntitySystem/MovieSceneEntityInstantiatorSystem.h"
+#include "EntitySystem/MovieSceneEntitySystem.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
 
 #include "MovieSceneBoundObjectInstantiator.generated.h"
 
+class UObject;
 
-UCLASS()
-class MOVIESCENE_API UMovieSceneGenericBoundObjectInstantiator : public UMovieSceneEntityInstantiatorSystem
+
+UCLASS(MinimalAPI)
+class UMovieSceneGenericBoundObjectInstantiator : public UMovieSceneEntityInstantiatorSystem
 {
 	GENERATED_BODY()
 
@@ -16,6 +21,6 @@ class MOVIESCENE_API UMovieSceneGenericBoundObjectInstantiator : public UMovieSc
 
 private:
 
-	virtual void OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents) override final;
+	MOVIESCENE_API virtual void OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents) override final;
 };
 

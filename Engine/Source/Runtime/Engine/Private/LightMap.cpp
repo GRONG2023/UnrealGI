@@ -5,25 +5,28 @@
 =============================================================================*/
 
 #include "LightMap.h"
+#include "Components/PrimitiveComponent.h"
+#include "Engine/Level.h"
+#include "Misc/QueuedThreadPool.h"
 #include "ShadowMap.h"
 #include "Engine/ShadowMapTexture2D.h"
 #include "UnrealEngine.h"
 #include "Interfaces/ITargetPlatform.h"
+#include "RenderUtils.h"
 #include "StaticLighting.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/LightComponent.h"
-#include "Engine/InstancedStaticMesh.h"
-#include "UObject/UObjectHash.h"
+#include "UObject/RenderingObjectVersion.h"
 #include "UObject/UObjectIterator.h"
 #include "Misc/FeedbackContext.h"
-#include "UObject/Package.h"
 #include "GameFramework/WorldSettings.h"
 #include "Engine/MapBuildDataRegistry.h"
 #include "VT/LightmapVirtualTexture.h"
 #include "VT/VirtualTexture.h"
 #include "EngineModule.h"
-#include "Misc/PackageName.h"
 #include "ProfilingDebugging/LoadTimeTracker.h"
+#include "TextureResource.h"
+#include "DataDrivenShaderPlatformInfo.h"
 
 #define VISUALIZE_PACKING 0
 
@@ -160,13 +163,13 @@ FString ULightMapTexture2D::GetDesc()
 static void DumpLightmapSizeOnDisk()
 {
 	UE_LOG(LogLightMap,Log,TEXT("Lightmap size on disk"));
-	UE_LOG(LogLightMap,Log,TEXT("Source (KB),Source is PNG,Platform Data (KB),Lightmap"));
+	UE_LOG(LogLightMap,Log,TEXT("Source (KB),Source is Compressed,Platform Data (KB),Lightmap"));
 	for (TObjectIterator<ULightMapTexture2D> It; It; ++It)
 	{
 		ULightMapTexture2D* Lightmap = *It;
 		UE_LOG(LogLightMap,Log,TEXT("%f,%d,%f,%s"),
 			Lightmap->Source.GetSizeOnDisk() / 1024.0f,
-			Lightmap->Source.IsPNGCompressed(),
+			Lightmap->Source.IsSourceCompressed(),
 			Lightmap->CalcTextureMemorySizeEnum(TMC_AllMips) / 1024.0f,
 			*Lightmap->GetPathName()
 			);
@@ -307,14 +310,8 @@ struct FLightMapAllocation
 			{
 				// TODO: We currently only support one LOD of static lighting in foliage
 				// Need to create per-LOD instance data to fix that
-				MeshBuildData->PerInstanceLightmapData[InstanceIndex].LightmapUVBias = LightMap->GetCoordinateBias();
-
-				const int32 RenderIndex = Component->GetRenderIndex(InstanceIndex);
-				if (RenderIndex != INDEX_NONE)
-				{
-					Component->InstanceUpdateCmdBuffer.SetLightMapData(RenderIndex, MeshBuildData->PerInstanceLightmapData[InstanceIndex].LightmapUVBias);
-					Component->MarkRenderStateDirty();
-				}
+				MeshBuildData->PerInstanceLightmapData[InstanceIndex].LightmapUVBias = FVector2f(LightMap->GetCoordinateBias());
+				Component->SetBakedLightingDataChanged(InstanceIndex);
 			}
 		}
 	}
@@ -813,7 +810,7 @@ bool FLightMapPendingTexture::AddElement(FLightMapAllocationGroup& AllocationGro
 			bool bPerformDistanceCheck = true;
 
 			// Don't pack together lightmaps that are too far apart
-			if (bPerformDistanceCheck && NewBounds.SphereRadius > GMaxLightmapRadius && NewBounds.SphereRadius > (Bounds.SphereRadius + SMALL_NUMBER))
+			if (bPerformDistanceCheck && NewBounds.SphereRadius > GMaxLightmapRadius && NewBounds.SphereRadius > (Bounds.SphereRadius + UE_SMALL_NUMBER))
 			{
 				return false;
 			}
@@ -920,7 +917,7 @@ static void GenerateLightmapMipsAndDilateColor(int32 NumMips, int32 TextureSizeX
 				}
 				else if(Coverage)
 				{
-					DestColor = ( AccumulatedColor / Coverage ).Quantize();
+					DestColor = ( AccumulatedColor / Coverage ).QuantizeRound();
 					DestCoverage = Coverage / (MipFactorX * MipFactorY);
 				}
 				else
@@ -977,7 +974,7 @@ static void GenerateLightmapMipsAndDilateColor(int32 NumMips, int32 TextureSizeX
 
 					if(Coverage)
 					{
-						DestColor = (AccumulatedColor / Coverage).Quantize();
+						DestColor = (AccumulatedColor / Coverage).QuantizeRound();
 						DestCoverage = -1;
 					}
 				}
@@ -1190,7 +1187,7 @@ void FLightMapPendingTexture::CreateUObjects()
 	++GLightmapCounter;
 	
 	// Only build VT lightmaps if they are enabled
-	const bool bUseVirtualTextures = (CVarVirtualTexturedLightMaps.GetValueOnAnyThread() != 0) && UseVirtualTexturing(GMaxRHIFeatureLevel);
+	const bool bUseVirtualTextures = (CVarVirtualTexturedLightMaps.GetValueOnAnyThread() != 0) && UseVirtualTexturing(GMaxRHIShaderPlatform);
 	const bool bIncludeNonVirtualTextures = !bUseVirtualTextures || (CVarIncludeNonVirtualTexturedLightMaps.GetValueOnAnyThread() != 0);
 	
 	if (bIncludeNonVirtualTextures)
@@ -1559,7 +1556,6 @@ void FLightMapPendingTexture::EncodeCoefficientTexture(int32 CoefficientIndex, U
 	FormatSettings.SRGB = false;
 	FormatSettings.CompressionNoAlpha = CoefficientIndex >= LQ_LIGHTMAP_COEF_INDEX;
 	FormatSettings.CompressionNone = !GCompressLightmaps;
-	//FormatSettings.bForcePVRTC4 = true;
 	Texture->SetLayerFormatSettings(LayerIndex, FormatSettings);
 
 	if (bEncodeVirtualTexture)
@@ -1614,14 +1610,14 @@ void FLightMapPendingTexture::EncodeCoefficientTexture(int32 CoefficientIndex, U
 		auto& Allocation = Allocations[AllocationIndex];
 		for (int k = 0; k < 2; k++)
 		{
-			Allocation->LightMap->ScaleVectors[CoefficientIndex + k] = FVector4(
+			Allocation->LightMap->ScaleVectors[CoefficientIndex + k] = FVector4f(
 				Allocation->Scale[CoefficientIndex + k][0],
 				Allocation->Scale[CoefficientIndex + k][1],
 				Allocation->Scale[CoefficientIndex + k][2],
 				Allocation->Scale[CoefficientIndex + k][3]
 			);
 
-			Allocation->LightMap->AddVectors[CoefficientIndex + k] = FVector4(
+			Allocation->LightMap->AddVectors[CoefficientIndex + k] = FVector4f(
 				Allocation->Add[CoefficientIndex + k][0],
 				Allocation->Add[CoefficientIndex + k][1],
 				Allocation->Add[CoefficientIndex + k][2],
@@ -1822,7 +1818,6 @@ void FLightMapPendingTexture::StartEncoding(ULevel* LightingScenario, ITextureCo
 		Texture->Filter	= GUseBilinearLightmaps ? TF_Default : TF_Nearest;
 		Texture->LODGroup = TEXTUREGROUP_Lightmap;
 		Texture->LightmapFlags = ELightMapFlags( LightmapFlags );
-		Texture->bForcePVRTC4 = true;
 
 		EncodeCoefficientTexture(CoefficientIndex, Texture, 0u, TextureColor, false);
 	}
@@ -1870,6 +1865,9 @@ void FLightMapPendingTexture::StartEncoding(ULevel* LightingScenario, ITextureCo
 			VirtualTexture->CompressionNoAlpha = false;
 			VirtualTexture->CompressionNone = !GCompressLightmaps;
 			VirtualTexture->LossyCompressionAmount = CVarVTEnableLossyCompressLightmaps.GetValueOnAnyThread() ? TLCA_Default : TLCA_None;
+
+			// VirtualTexture->OodleTextureSdkVersion will be set to latest by default constructor
+			//  dynamic/generated textures use latest OodleTextureSdkVersion
 
 			FTextureFormatSettings DefaultFormatSettings;
 			VirtualTexture->GetDefaultFormatSettings(DefaultFormatSettings);
@@ -2228,7 +2226,7 @@ TRefCountPtr<FLightMap2D> FLightMap2D::AllocateInstancedLightMap(UObject* LightM
 	{
 		for (int32 ColorIndex = 0; ColorIndex < 4; ColorIndex++)
 		{
-			Scale[CoefficientIndex][ColorIndex] = FMath::Max(MaxCoefficient[CoefficientIndex][ColorIndex] - MinCoefficient[CoefficientIndex][ColorIndex], DELTA);
+			Scale[CoefficientIndex][ColorIndex] = FMath::Max(MaxCoefficient[CoefficientIndex][ColorIndex] - MinCoefficient[CoefficientIndex][ColorIndex], UE_DELTA);
 			Add[CoefficientIndex][ColorIndex] = MinCoefficient[CoefficientIndex][ColorIndex];
 		}
 	}
@@ -2380,19 +2378,6 @@ TRefCountPtr<FLightMap2D> FLightMap2D::AllocateInstancedLightMap(UObject* LightM
 #endif //WITH_EDITOR
 }
 
-#if WITH_EDITOR
-
-struct FCompareLightmaps
-{
-	FORCEINLINE bool operator()(const FLightMapAllocationGroup& A, const FLightMapAllocationGroup& B) const
-	{
-		// Order descending by total size of allocation
-		return A.TotalTexels > B.TotalTexels;
-	}
-};
-
-#endif //WITH_EDITOR
-
 /**
  * Executes all pending light-map encoding requests.
  * @param	bLightingSuccessful	Whether the lighting build was successful or not.
@@ -2403,7 +2388,7 @@ void FLightMap2D::EncodeTextures( UWorld* InWorld, ULevel* LightingScenario, boo
 #if WITH_EDITOR
 	if (bLightingSuccessful)
 	{
-		const bool bUseVirtualTextures = (CVarVirtualTexturedLightMaps.GetValueOnAnyThread() != 0) && UseVirtualTexturing(GMaxRHIFeatureLevel);
+		const bool bUseVirtualTextures = (CVarVirtualTexturedLightMaps.GetValueOnAnyThread() != 0) && UseVirtualTexturing(GMaxRHIShaderPlatform);
 		const bool bIncludeNonVirtualTextures = !bUseVirtualTextures || (CVarIncludeNonVirtualTexturedLightMaps.GetValueOnAnyThread() != 0);
 
 		GWarn->BeginSlowTask( NSLOCTEXT("LightMap2D", "BeginEncodingLightMapsTask", "Encoding light-maps"), false );
@@ -2412,9 +2397,9 @@ void FLightMap2D::EncodeTextures( UWorld* InWorld, ULevel* LightingScenario, boo
 
 		if (!bIncludeNonVirtualTextures)
 		{
-			// If we exclusively using VT lightmaps, don't need to worry about max size of a given texture sheet
-			// Also just make square textures, don't need 2x1 aspect ratio
-			PackedLightAndShadowMapTextureSizeX = 32 * 1024; // FTextureLayout uses uint16 for size in some places
+			// If we exclusively using VT lightmaps, just make square textures, don't need 2x1 aspect ratio
+			// YW: while it's possible to create huge VT lightmaps (like 32k), it hurts multithread lightmap encoding performance seriously.
+			// Packed lightmaps with 1k - 2k resolution should be enough to reduce drawcalls
 			PackedLightAndShadowMapTextureSizeY = PackedLightAndShadowMapTextureSizeX;
 		}
 
@@ -2454,7 +2439,7 @@ void FLightMap2D::EncodeTextures( UWorld* InWorld, ULevel* LightingScenario, boo
 		}
 
 		// Sort the light-maps in descending order by size.
-		Sort(PendingLightMaps.GetData(), PendingLightMaps.Num(), FCompareLightmaps());
+		Algo::SortBy(PendingLightMaps, &FLightMapAllocationGroup::TotalTexels, TGreater<>());
 
 		// Allocate texture space for each light-map.
 		TArray<FLightMapPendingTexture*> PendingTextures;
@@ -2493,7 +2478,7 @@ void FLightMap2D::EncodeTextures( UWorld* InWorld, ULevel* LightingScenario, boo
 				int32 NewTextureSizeY = PackedLightAndShadowMapTextureSizeY;
 
 				// Assumes identically-sized allocations, fit into the smallest 2x1 rectangle
-				const int32 AllocationCountX = FMath::CeilToInt(FMath::Sqrt(FMath::DivideAndRoundUp(PendingGroup.Allocations.Num() * 2 * MaxHeight, MaxWidth)));
+				const int32 AllocationCountX = FMath::CeilToInt(FMath::Sqrt(static_cast<float>(FMath::DivideAndRoundUp(PendingGroup.Allocations.Num() * 2 * MaxHeight, MaxWidth))));
 				const int32 AllocationCountY = FMath::DivideAndRoundUp(PendingGroup.Allocations.Num(), AllocationCountX);
 				const int32 AllocationSizeX = AllocationCountX * MaxWidth;
 				const int32 AllocationSizeY = AllocationCountY * MaxHeight;
@@ -2619,7 +2604,7 @@ int32 FLightMap2D::EncodeShadowTexture(ULevel* LightingScenario, struct FLightMa
 	{
 		FLightMapAllocation& Allocation = *PendingTexture.Allocations[AllocationIndex];
 		bool bChannelUsed[4] = { 0 };
-		FVector4 InvUniformPenumbraSize(0, 0, 0, 0);
+		FVector4f InvUniformPenumbraSize(0, 0, 0, 0);
 
 		for (int32 ChannelIndex = 0; ChannelIndex < 4; ChannelIndex++)
 		{
@@ -2982,9 +2967,9 @@ void FLightMap2D::Serialize(FArchive& Ar)
 
 	FLightMap::Serialize(Ar);
 
-	const bool bUsingVTLightmaps = (CVarVirtualTexturedLightMaps.GetValueOnAnyThread() != 0) && UseVirtualTexturing(GMaxRHIFeatureLevel, Ar.CookingTarget());
+	const bool bUsingVTLightmaps = (CVarVirtualTexturedLightMaps.GetValueOnAnyThread() != 0) && UseVirtualTexturing(GMaxRHIShaderPlatform, Ar.CookingTarget());
 
-	if( Ar.IsLoading() && Ar.UE4Ver() < VER_UE4_LOW_QUALITY_DIRECTIONAL_LIGHTMAPS )
+	if( Ar.IsLoading() && Ar.UEVer() < VER_UE4_LOW_QUALITY_DIRECTIONAL_LIGHTMAPS )
 	{
 		for(uint32 CoefficientIndex = 0;CoefficientIndex < 3;CoefficientIndex++)
 		{
@@ -2995,7 +2980,7 @@ void FLightMap2D::Serialize(FArchive& Ar)
 			Ar << Dummy2;
 		}
 	}
-	else if( Ar.IsLoading() && Ar.UE4Ver() < VER_UE4_COMBINED_LIGHTMAP_TEXTURES )
+	else if( Ar.IsLoading() && Ar.UEVer() < VER_UE4_COMBINED_LIGHTMAP_TEXTURES )
 	{
 		for( uint32 CoefficientIndex = 0; CoefficientIndex < 4; CoefficientIndex++ )
 		{
@@ -3013,9 +2998,9 @@ void FLightMap2D::Serialize(FArchive& Ar)
 			bool bStripLQLightmaps = !Ar.CookingTarget()->SupportsFeature(ETargetPlatformFeatures::LowQualityLightmaps) || bUsingVTLightmaps;
 			bool bStripHQLightmaps = !Ar.CookingTarget()->SupportsFeature(ETargetPlatformFeatures::HighQualityLightmaps) || bUsingVTLightmaps;
 
-			ULightMapTexture2D* Dummy = NULL;
-			ULightMapTexture2D*& Texture1 = bStripHQLightmaps ? Dummy : Textures[0];
-			ULightMapTexture2D*& Texture2 = bStripLQLightmaps ? Dummy : Textures[1];
+			TObjectPtr<ULightMapTexture2D> Dummy;
+			auto& Texture1 = bStripHQLightmaps ? Dummy : Textures[0];
+			auto& Texture2 = bStripLQLightmaps ? Dummy : Textures[1];
 			Ar << Texture1;
 			Ar << Texture2;
 		}
@@ -3025,19 +3010,19 @@ void FLightMap2D::Serialize(FArchive& Ar)
 			Ar << Textures[1];
 		}
 
-		if (Ar.UE4Ver() >= VER_UE4_SKY_LIGHT_COMPONENT)
+		if (Ar.UEVer() >= VER_UE4_SKY_LIGHT_COMPONENT)
 		{
 			if (Ar.IsCooking())
 			{
 				bool bStripHQLightmaps = !Ar.CookingTarget()->SupportsFeature(ETargetPlatformFeatures::HighQualityLightmaps) || bUsingVTLightmaps;
 
-				ULightMapTexture2D* Dummy = NULL;
-				ULightMapTexture2D*& SkyTexture = bStripHQLightmaps ? Dummy : SkyOcclusionTexture;
+				TObjectPtr<ULightMapTexture2D> Dummy;
+				auto& SkyTexture = bStripHQLightmaps ? Dummy : SkyOcclusionTexture;
 				Ar << SkyTexture;
 
-				if (Ar.UE4Ver() >= VER_UE4_AO_MATERIAL_MASK)
+				if (Ar.UEVer() >= VER_UE4_AO_MATERIAL_MASK)
 				{
-					ULightMapTexture2D*& MaskTexture = bStripHQLightmaps ? Dummy : AOMaterialMaskTexture;
+					auto& MaskTexture = bStripHQLightmaps ? Dummy : AOMaterialMaskTexture;
 					Ar << MaskTexture;
 				}
 			}
@@ -3045,7 +3030,7 @@ void FLightMap2D::Serialize(FArchive& Ar)
 			{
 				Ar << SkyOcclusionTexture;
 
-				if (Ar.UE4Ver() >= VER_UE4_AO_MATERIAL_MASK)
+				if (Ar.UEVer() >= VER_UE4_AO_MATERIAL_MASK)
 				{
 					Ar << AOMaterialMaskTexture;
 				}
@@ -3085,9 +3070,9 @@ void FLightMap2D::Serialize(FArchive& Ar)
 						bool bStripLQLightmaps = !Ar.CookingTarget()->SupportsFeature(ETargetPlatformFeatures::LowQualityLightmaps);
 						bool bStripHQLightmaps = !Ar.CookingTarget()->SupportsFeature(ETargetPlatformFeatures::HighQualityLightmaps);
 
-						ULightMapVirtualTexture2D* Dummy = NULL;
-						ULightMapVirtualTexture2D*& Texture1 = bStripHQLightmaps ? Dummy : VirtualTextures[0];
-						ULightMapVirtualTexture2D*& Texture2 = bStripLQLightmaps ? Dummy : VirtualTextures[1];
+						TObjectPtr<ULightMapVirtualTexture2D> Dummy;
+						auto& Texture1 = bStripHQLightmaps ? Dummy : VirtualTextures[0];
+						auto& Texture2 = bStripLQLightmaps ? Dummy : VirtualTextures[1];
 						Ar << Texture1;
 						Ar << Texture2;
 					}
@@ -3194,21 +3179,21 @@ FLightMapInteraction FLightMap2D::GetInteraction(ERHIFeatureLevel::Type InFeatur
 
 	int32 LightmapIndex = bHighQuality ? 0 : 1;
 
-	const bool bUseVirtualTextures = (CVarVirtualTexturedLightMaps.GetValueOnAnyThread() != 0) && UseVirtualTexturing(InFeatureLevel);
+	const bool bUseVirtualTextures = (CVarVirtualTexturedLightMaps.GetValueOnAnyThread() != 0) && UseVirtualTexturing(GetFeatureLevelShaderPlatform(InFeatureLevel));
 	if (!bUseVirtualTextures)
 	{
-		bool bValidTextures = Textures[LightmapIndex] && Textures[LightmapIndex]->Resource;
+		bool bValidTextures = Textures[LightmapIndex] && Textures[LightmapIndex]->GetResource();
 
 		// When the FLightMap2D is first created, the textures aren't set, so that case needs to be handled.
 		if (bValidTextures)
 		{
-			return FLightMapInteraction::Texture(Textures, SkyOcclusionTexture, AOMaterialMaskTexture, ScaleVectors, AddVectors, CoordinateScale, CoordinateBias, bHighQuality);
+			return FLightMapInteraction::Texture(ToRawPtrArray(Textures), SkyOcclusionTexture, AOMaterialMaskTexture, ScaleVectors, AddVectors, CoordinateScale, CoordinateBias, bHighQuality);
 		}
 	}
 	else
 	{
 		// Preview lightmaps don't stream from disk, thus no FVirtualTexture2DResource
-		bool bValidVirtualTexture = VirtualTextures[LightmapIndex] && (VirtualTextures[LightmapIndex]->Resource != nullptr || VirtualTextures[LightmapIndex]->bPreviewLightmap);
+		bool bValidVirtualTexture = VirtualTextures[LightmapIndex] && (VirtualTextures[LightmapIndex]->GetResource() != nullptr || VirtualTextures[LightmapIndex]->bPreviewLightmap);
 		if (bValidVirtualTexture)
 		{
 			return FLightMapInteraction::InitVirtualTexture(VirtualTextures[LightmapIndex], ScaleVectors, AddVectors, CoordinateScale, CoordinateBias, bHighQuality);
@@ -3224,11 +3209,11 @@ FShadowMapInteraction FLightMap2D::GetShadowInteraction(ERHIFeatureLevel::Type I
 
 	int32 LightmapIndex = bHighQuality ? 0 : 1;
 
-	const bool bUseVirtualTextures = (CVarVirtualTexturedLightMaps.GetValueOnAnyThread() != 0) && UseVirtualTexturing(InFeatureLevel);
+	const bool bUseVirtualTextures = (CVarVirtualTexturedLightMaps.GetValueOnAnyThread() != 0) && UseVirtualTexturing(GetFeatureLevelShaderPlatform(InFeatureLevel));
 	if (bUseVirtualTextures)
 	{
 		// Preview lightmaps don't stream from disk, thus no FVirtualTexture2DResource
-		const bool bValidVirtualTexture = VirtualTextures[LightmapIndex] && (VirtualTextures[LightmapIndex]->Resource != nullptr || VirtualTextures[LightmapIndex]->bPreviewLightmap);
+		const bool bValidVirtualTexture = VirtualTextures[LightmapIndex] && (VirtualTextures[LightmapIndex]->GetResource() != nullptr || VirtualTextures[LightmapIndex]->bPreviewLightmap);
 		if (bValidVirtualTexture)
 		{
 			return FShadowMapInteraction::InitVirtualTexture(VirtualTextures[LightmapIndex], CoordinateScale, CoordinateBias, bShadowChannelValid, InvUniformPenumbraSize);
@@ -3245,13 +3230,8 @@ void FLegacyLightMap1D::Serialize(FArchive& Ar)
 
 	UObject* Owner;
 
-#if !USE_NEW_BULKDATA
 	TQuantizedLightSampleBulkData<FQuantizedDirectionalLightSample> DirectionalSamples;
 	TQuantizedLightSampleBulkData<FQuantizedSimpleLightSample> SimpleSamples;
-#else
-	FUntypedBulkData2<FQuantizedDirectionalLightSample> DirectionalSamples;
-	FUntypedBulkData2<FQuantizedSimpleLightSample> SimpleSamples;
-#endif
 
 	Ar << Owner;
 
@@ -3265,53 +3245,6 @@ void FLegacyLightMap1D::Serialize(FArchive& Ar)
 
 	SimpleSamples.Serialize( Ar, Owner, INDEX_NONE, false );
 }
-
-/*-----------------------------------------------------------------------------
-	FQuantizedLightSample version of bulk data.
------------------------------------------------------------------------------*/
-
-/**
- * Returns whether single element serialization is required given an archive. This e.g.
- * can be the case if the serialization for an element changes and the single element
- * serialization code handles backward compatibility.
- */
-template<class QuantizedLightSampleType>
-bool TQuantizedLightSampleBulkData<QuantizedLightSampleType>::RequiresSingleElementSerialization( FArchive& Ar )
-{
-	return false;
-}
-
-/**
- * Returns size in bytes of single element.
- *
- * @return Size in bytes of single element
- */
-template<class QuantizedLightSampleType>
-int32 TQuantizedLightSampleBulkData<QuantizedLightSampleType>::GetElementSize() const
-{
-	return sizeof(QuantizedLightSampleType);
-}
-
-/**
- * Serializes an element at a time allowing and dealing with endian conversion and backward compatiblity.
- * 
- * @param Ar			Archive to serialize with
- * @param Data			Base pointer to data
- * @param ElementIndex	Element index to serialize
- */
-template<class QuantizedLightSampleType>
-void TQuantizedLightSampleBulkData<QuantizedLightSampleType>::SerializeElement( FArchive& Ar, void* Data, int64 ElementIndex )
-{
-	QuantizedLightSampleType* QuantizedLightSample = (QuantizedLightSampleType*)Data + ElementIndex;
-	// serialize as colors
-	const uint32 NumCoefficients = sizeof(QuantizedLightSampleType) / sizeof(FColor);
-	for(int32 CoefficientIndex = 0; CoefficientIndex < NumCoefficients; CoefficientIndex++)
-	{
-		uint32 ColorDWORD = QuantizedLightSample->Coefficients[CoefficientIndex].DWColor();
-		Ar << ColorDWORD;
-		QuantizedLightSample->Coefficients[CoefficientIndex] = FColor(ColorDWORD);
-	} 
-};
 
 FArchive& operator<<(FArchive& Ar, FLightMap*& R)
 {
@@ -3364,7 +3297,7 @@ FArchive& operator<<(FArchive& Ar, FLightMap*& R)
 			}
 
 			// Dump old lightmaps
-			if (Ar.UE4Ver() < VER_UE4_COMBINED_LIGHTMAP_TEXTURES)
+			if (Ar.UEVer() < VER_UE4_COMBINED_LIGHTMAP_TEXTURES)
 			{
 				delete R; // safe because if we're loading we new'd this above
 				R = nullptr;
@@ -3426,53 +3359,100 @@ FLightmapResourceCluster::~FLightmapResourceCluster()
 	check(AllocatedVT == nullptr);
 }
 
-void FLightmapResourceCluster::UpdateUniformBuffer(ERHIFeatureLevel::Type InFeatureLevel)
-{
-	FLightmapResourceCluster* Cluster = this;
-
-	ENQUEUE_RENDER_COMMAND(SetFeatureLevel)(
-		[Cluster, InFeatureLevel](FRHICommandList& RHICmdList)
-	{
-		Cluster->SetFeatureLevel(InFeatureLevel);
-		Cluster->UpdateUniformBuffer_RenderThread();
-	});
-}
-
 bool FLightmapResourceCluster::GetUseVirtualTexturing() const
 {
-	return (CVarVirtualTexturedLightMaps.GetValueOnRenderThread() != 0) && UseVirtualTexturing(GetFeatureLevel());
+	return (CVarVirtualTexturedLightMaps.GetValueOnRenderThread() != 0) && UseVirtualTexturing(GetFeatureLevelShaderPlatform(GetFeatureLevel()));
 }
 
-void FLightmapResourceCluster::UpdateUniformBuffer_RenderThread()
+// Two stage initialization of FLightmapResourceCluster
+// 1. when UMapBuildDataRegistry is post-loaded and render resource is initialized
+// 2. when the level is made visible (ULevel::InitializeRenderingResources()), which calls UMapBuildDataRegistry::InitializeClusterRenderingResources() and fills FeatureLevel
+// When both parts are provided, TryInitialize() creates the final UB with actual content
+// Otherwise UniformBuffer is created with empty parameters
+void FLightmapResourceCluster::TryInitializeUniformBuffer()
 {
-	check(IsInRenderingThread());
+	FRHICommandListBase& RHICmdList = FRHICommandListImmediate::Get();
 
 	FLightmapResourceClusterShaderParameters Parameters;
-	GetLightmapClusterResourceParameters(GetFeatureLevel(), Input, GetUseVirtualTexturing() ? AcquireAllocatedVT() : nullptr, Parameters);
 
-	RHIUpdateUniformBuffer(UniformBuffer, &Parameters);
+	if (HasValidFeatureLevel())
+	{
+		ConditionalCreateAllocatedVT();
+		GetLightmapClusterResourceParameters(GetFeatureLevel(), Input, GetUseVirtualTexturing() ? GetAllocatedVT() : nullptr, Parameters);
+	}
+	else
+	{
+		GetLightmapClusterResourceParameters(GMaxRHIFeatureLevel, FLightmapClusterResourceInput(), nullptr, Parameters);
+	}
+
+	if (!UniformBuffer.IsValid())
+	{
+		UniformBuffer = FLightmapResourceClusterShaderParameters::CreateUniformBuffer(Parameters, UniformBuffer_MultiFrame);
+	}
+	else
+	{
+		RHICmdList.UpdateUniformBuffer(UniformBuffer, &Parameters);
+	}
+}
+
+void FLightmapResourceCluster::SetFeatureLevelAndInitialize(const FStaticFeatureLevel InFeatureLevel)
+{
+	check(IsInRenderingThread());
+	SetFeatureLevel(InFeatureLevel);
+	if(IsInitialized() && GIsRHIInitialized)
+	{
+		TryInitializeUniformBuffer();
+	}
+}
+
+void FLightmapResourceCluster::UpdateUniformBuffer()
+{
+	FRHICommandListBase& RHICmdList = FRHICommandListImmediate::Get();
+
+	if (UniformBuffer.IsValid())
+	{
+		check(HasValidFeatureLevel());
+	
+		FLightmapResourceClusterShaderParameters Parameters;
+		GetLightmapClusterResourceParameters(GetFeatureLevel(), Input, GetUseVirtualTexturing() ? GetAllocatedVT() : nullptr, Parameters);
+
+		RHICmdList.UpdateUniformBuffer(UniformBuffer, &Parameters);
+	}
 }
 
 static void OnVirtualTextureDestroyed(const FVirtualTextureProducerHandle& InHandle, void* Baton)
 {
 	FLightmapResourceCluster* Cluster = static_cast<FLightmapResourceCluster*>(Baton);
 	Cluster->ReleaseAllocatedVT();
-	Cluster->UpdateUniformBuffer_RenderThread();
+	Cluster->ConditionalCreateAllocatedVT();
+	Cluster->UpdateUniformBuffer();
 }
 
-IAllocatedVirtualTexture* FLightmapResourceCluster::AcquireAllocatedVT() const
+const IAllocatedVirtualTexture* FLightmapResourceCluster::GetAllocatedVT() const
+{
+	check(IsInParallelRenderingThread());
+	return AllocatedVT;
+}
+
+void FLightmapResourceCluster::ConditionalCreateAllocatedVT()
 {
 	check(IsInRenderingThread());
+	check(HasValidFeatureLevel());
+	
+	const ULightMapVirtualTexture2D* VirtualTexture = Input.LightMapVirtualTextures[AllowHighQualityLightmaps(GetFeatureLevel()) ? 0 : 1];
+	
+#if WITH_EDITOR
+	// Compilation is still pending, this function will be called back once compilation finishes.
+	if (VirtualTexture && VirtualTexture->IsCompiling())
+	{
+		return;
+	}
+#endif
 
-	bool bHighQuality = AllowHighQualityLightmaps(GetFeatureLevel());
-
-	int32 LightmapIndex = bHighQuality ? 0 : 1;
-
-	const ULightMapVirtualTexture2D* VirtualTexture = Input.LightMapVirtualTextures[LightmapIndex];
-	if (!AllocatedVT && VirtualTexture && VirtualTexture->Resource)
+	if (!AllocatedVT && VirtualTexture && VirtualTexture->GetResource())
 	{
 		check(VirtualTexture->VirtualTextureStreaming);
-		const FVirtualTexture2DResource* Resource = (FVirtualTexture2DResource*)VirtualTexture->Resource;
+		const FVirtualTexture2DResource* Resource = (FVirtualTexture2DResource*)VirtualTexture->GetResource();
 		const FVirtualTextureProducerHandle ProducerHandle = Resource->GetProducerHandle();
 
 		GetRendererModule().AddVirtualTextureProducerDestroyedCallback(ProducerHandle, &OnVirtualTextureDestroyed, const_cast<FLightmapResourceCluster*>(this));
@@ -3514,8 +3494,6 @@ IAllocatedVirtualTexture* FLightmapResourceCluster::AcquireAllocatedVT() const
 
 		AllocatedVT = GetRendererModule().AllocateVirtualTexture(VTDesc);
 	}
-
-	return AllocatedVT;
 }
 
 void FLightmapResourceCluster::ReleaseAllocatedVT()
@@ -3528,25 +3506,10 @@ void FLightmapResourceCluster::ReleaseAllocatedVT()
 	}
 }
 
-void FLightmapResourceCluster::InitRHI()
+void FLightmapResourceCluster::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	SCOPED_LOADTIMER(FLightmapResourceCluster_InitRHI);
-
-	FLightmapResourceClusterShaderParameters Parameters;
-
-	// Lightmap resources are normally created before the feature level is known, so we'll use defaults and rely on a subsequent call to UpdateUniformBuffer()
-	// to set the correct level and update things accordingly. However, when we're coming from FRenderResource::ChangeFeatureLevel(), the feature level
-	// has already been set, so we can go ahead and use the correct level and input from the start (UpdateUniformBuffer() is not being called in that case).
-	if (HasValidFeatureLevel())
-	{
-		GetLightmapClusterResourceParameters(GetFeatureLevel(), Input, GetUseVirtualTexturing() ? AcquireAllocatedVT() : nullptr, Parameters);
-	}
-	else
-	{
-		GetLightmapClusterResourceParameters(GMaxRHIFeatureLevel, FLightmapClusterResourceInput(), nullptr, Parameters);
-	}
-
-	UniformBuffer = FLightmapResourceClusterShaderParameters::CreateUniformBuffer(Parameters, UniformBuffer_MultiFrame);
+	TryInitializeUniformBuffer();
 }
 
 void FLightmapResourceCluster::ReleaseRHI()

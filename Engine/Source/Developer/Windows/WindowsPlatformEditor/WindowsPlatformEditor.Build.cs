@@ -10,26 +10,13 @@ public class WindowsPlatformEditor : ModuleRules
 			new string[] {
 				"Core",
 				"CoreUObject",
-				"InputCore",
-				"DesktopPlatform",
-				"Engine",
-				"MainFrame",
-				"Slate",
-				"SlateCore",
-				"EditorStyle",
-				"PropertyEditor",
-				"SharedSettingsWidgets",
-				"SourceControl",
+				
 				"WindowsTargetPlatform",
-				"TargetPlatform",
-				"MaterialShaderQualitySettings",
-				"RenderCore",
 			}
 		);
 
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
-				"GameProjectGeneration",
 				"Settings",
 			}
 		);

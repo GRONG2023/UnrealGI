@@ -4,7 +4,6 @@
 
 #include "CoreMinimal.h"
 #include "Misc/FeedbackContext.h"
-#include "Windows/WindowsHWrapper.h"
 #include "Windows/AllowWindowsPlatformTypes.h"
 #include <CommCtrl.h>
 
@@ -19,7 +18,9 @@ public:
 	FWindowsNativeFeedbackContext();
 	virtual ~FWindowsNativeFeedbackContext();
 
-	virtual void Serialize( const TCHAR* V, ELogVerbosity::Type Verbosity, const class FName& Category ) override;
+	virtual void Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const FName& Category) override;
+	virtual void Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const FName& Category, double Time) override;
+	virtual void SerializeRecord(const UE::FLogRecord& Record) override;
 
 	virtual bool ReceivedUserCancel() override;
 	virtual void StartSlowTask( const FText& Task, bool bShouldShowCancelButton=false ) override;

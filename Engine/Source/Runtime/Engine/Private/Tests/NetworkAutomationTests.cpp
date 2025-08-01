@@ -1,10 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 
-#include "CoreMinimal.h"
-#include "Misc/AutomationTest.h"
-#include "EngineGlobals.h"
 #include "Engine/Engine.h"
+#include "Engine/EngineTypes.h"
 #include "Tests/AutomationCommon.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -67,20 +65,6 @@ bool FMultiplayer4PlayerTest::RunTest(const FString& Parameters)
 		}
 		END_NETWORK_AUTOMATION_COMMAND(InvitePlayers, i)
 	}
-
-
-	START_NETWORK_AUTOMATION_COMMAND(PerformanceHost)
-	{
-		ADD_LATENT_AUTOMATION_COMMAND(FEnqueuePerformanceCaptureCommands());
-	}
-	END_NETWORK_AUTOMATION_COMMAND(PerformanceHost, EMultiplayerAutomationRoles::Host)
-
-
-	START_NETWORK_AUTOMATION_COMMAND(PerformanceClient0)
-	{
-		ADD_LATENT_AUTOMATION_COMMAND(FEnqueuePerformanceCaptureCommands());
-	}
-	END_NETWORK_AUTOMATION_COMMAND(PerformanceClient0, EMultiplayerAutomationRoles::Client0)
 
 	return true;
 }

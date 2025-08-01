@@ -2,7 +2,8 @@
 
 #include "Commandlets/DiffAssetRegistriesCommandlet.h"
 
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/IAssetRegistry.h"
 
 #include "UObject/Class.h"
 #include "PlatformInfo.h"
@@ -170,8 +171,11 @@ int32 UDiffAssetRegistriesCommandlet::Main(const FString& FullCommandLine)
 		UE_LOG(LogDiffAssets, Error, TEXT("No platform specified on the commandline use \"-platform=<platform>\"."));
 	}
 
+	TArray<FString> LocalSearchPaths = AssetRegistrySearchPath;
+	LocalSearchPaths.AddUnique(TEXT("[buildversion]"));
+
 	auto FindAssetRegistryPath = [&](const FString& PathVal, FString& OutPath) {
-			for (const FString& SearchPath : AssetRegistrySearchPath)
+			for (const FString& SearchPath : LocalSearchPaths)
 			{
 				FString FinalSearchPath = SearchPath;
 				FinalSearchPath.ReplaceInline(TEXT("[buildversion]"), *PathVal);
@@ -185,7 +189,6 @@ int32 UDiffAssetRegistriesCommandlet::Main(const FString& FullCommandLine)
 			return false;
 		};
 
-	// const TCHAR* AssetRegistrySubPath = TEXT("/Metadata/DevelopmentAssetRegistry.bin");
 	const FString* OldPathVal = Params.Find(FString(TEXT("OldPath")));
 	if (OldPathVal)
 	{
@@ -253,7 +256,8 @@ int32 UDiffAssetRegistriesCommandlet::Main(const FString& FullCommandLine)
 	FPaths::NormalizeFilename(OldPath);
 
 	// try to discern platform
-	/*if (NewPath.Contains(AssetRegistrySubPath))
+	/*FString AssetRegistrySubPath = FString::Printf(TEXT("/Metadata/%s"), GetDevelopmentAssetRegistryFilename());
+	if (NewPath.Contains(AssetRegistrySubPath))
 	{
 		FString NewPlatformDir = NewPath.Left(NewPath.Find(AssetRegistrySubPath));
 		FString PlatformPath = FPaths::GetCleanFilename(NewPlatformDir);
@@ -298,7 +302,8 @@ void UDiffAssetRegistriesCommandlet::FillChangelists(FString Branch, FString CL,
 					FString PostContentPath;
 					if (DepotPathName.Split(BasePath, nullptr, &PostContentPath))
 					{
-						if (!PostContentPath.IsEmpty() && !PostContentPath.StartsWith(TEXT("Cinematics")) && !PostContentPath.StartsWith(TEXT("Developers")) && !PostContentPath.StartsWith(TEXT("Maps/Test_Maps")))
+						if (!PostContentPath.IsEmpty() && !PostContentPath.StartsWith(TEXT("Cinematics")) &&
+							!PostContentPath.StartsWith(FPaths::DevelopersFolderName()) && !PostContentPath.StartsWith(TEXT("Maps/Test_Maps")))
 						{
 							const FString PostContentPathWithoutExtension = FPaths::GetBaseFilename(PostContentPath, false);
 							const FString FullPackageName = AssetPath + PostContentPathWithoutExtension;
@@ -336,7 +341,8 @@ void UDiffAssetRegistriesCommandlet::FillChangelists(FString Branch, FString CL,
 					FString PostContentPath;
 					if (DepotPathName.Split(BasePath, nullptr, &PostContentPath))
 					{
-						if (!PostContentPath.IsEmpty() && !PostContentPath.StartsWith(TEXT("Cinematics")) && !PostContentPath.StartsWith(TEXT("Developers")) && !PostContentPath.StartsWith(TEXT("Maps/Test_Maps")))
+						if (!PostContentPath.IsEmpty() && !PostContentPath.StartsWith(TEXT("Cinematics")) &&
+							!PostContentPath.StartsWith(FPaths::DevelopersFolderName()) && !PostContentPath.StartsWith(TEXT("Maps/Test_Maps")))
 						{
 							const FString PostContentPathWithoutExtension = FPaths::GetBaseFilename(PostContentPath, false);
 							const FString FullPackageName = AssetPath + PostContentPathWithoutExtension;
@@ -360,18 +366,6 @@ void UDiffAssetRegistriesCommandlet::FillChangelists(FString Branch, FString CL,
 				}
 			}
 		}
-	}
-}
-
-void rescale(int bytes, double &value, int &exp)
-{
-	value = bytes;
-	value = fabs(value);
-
-	while (value > 1024.0)
-	{
-		value /= 1024.0;
-		exp++;
 	}
 }
 
@@ -410,7 +404,7 @@ void UDiffAssetRegistriesCommandlet::ConsistencyCheck(const FString& OldPath, co
 			return;
 		}
 
-		if (!OldState.Load(SerializedAssetData))
+		if (!NewState.Load(SerializedAssetData))
 		{
 			UE_LOG(LogDiffAssets, Error, TEXT("Failed to parse file '%s' as asset registry."), *NewPath);
 			return;
@@ -424,7 +418,7 @@ void UDiffAssetRegistriesCommandlet::ConsistencyCheck(const FString& OldPath, co
 	}
 	// We're looking for packages that the Cooked check says are modified, but that the Guid check says are not
 	// We're ignoring new packages for this, as those are obviously going to change
-	TSet<FName> GuidModified, CookModified;
+	TSet<FName> HashModified, CookModified;
 	TSet<FName> New;
 
 	for (const TPair<FName, const FAssetPackageData*>& Pair : NewState.GetAssetPackageDataMap())
@@ -439,11 +433,9 @@ void UDiffAssetRegistriesCommandlet::ConsistencyCheck(const FString& OldPath, co
 		}
 		else
 		{
-			PRAGMA_DISABLE_DEPRECATION_WARNINGS
-			if (Data->PackageGuid != PrevData->PackageGuid)
-			PRAGMA_ENABLE_DEPRECATION_WARNINGS
+			if (Data->GetPackageSavedHash() != PrevData->GetPackageSavedHash())
 			{
-				GuidModified.Add(Name);
+				HashModified.Add(Name);
 			}
 			if (Data->CookedHash != PrevData->CookedHash)
 			{
@@ -452,8 +444,8 @@ void UDiffAssetRegistriesCommandlet::ConsistencyCheck(const FString& OldPath, co
 		}
 	}
 
-	// recurse through the referencer lists to fill out GuidModified
-	TArray<FName> Recurse = GuidModified.Array();
+	// recurse through the referencer lists to fill out HashModified
+	TArray<FName> Recurse = HashModified.Array();
 	
 	for (int32 RecurseIndex = 0; RecurseIndex < Recurse.Num(); RecurseIndex++)
 	{
@@ -464,27 +456,27 @@ void UDiffAssetRegistriesCommandlet::ConsistencyCheck(const FString& OldPath, co
 		for (const FAssetIdentifier& Referencer : Referencers)
 		{
 			FName ReferencerPackage = Referencer.PackageName;
-			if (!New.Contains(ReferencerPackage) && !GuidModified.Contains(ReferencerPackage))
+			if (!New.Contains(ReferencerPackage) && !HashModified.Contains(ReferencerPackage))
 			{
-				GuidModified.Add(ReferencerPackage);
+				HashModified.Add(ReferencerPackage);
 				Recurse.Add(ReferencerPackage);
 			}
 		}
 	}
 
-	int64 changes = 0;
-	int64 change_bytes = 0;
+	int64 Changes = 0;
+	int64 ChangeBytes = 0;
 
-	// find all entries of CookModified that do not exist in GuidModified
+	// find all entries of CookModified that do not exist in HashModified
 	const TMap<FName, const FAssetPackageData*>& PackageMap = NewState.GetAssetPackageDataMap();
 	for (FName const &Package : CookModified)
 	{
 		const FAssetPackageData* Data = PackageMap[Package];
 
-		if (!GuidModified.Contains(Package))
+		if (!HashModified.Contains(Package) && Data->DiskSize >= 0)
 		{
-			++changes;
-			change_bytes += Data->DiskSize;
+			++Changes;
+			ChangeBytes += Data->DiskSize;
 			if (bIsVerbose)
 			{
 				UE_LOG(LogDiffAssets, Display, TEXT("%s : %d bytes"), *Package.ToString(), Data->DiskSize);
@@ -492,13 +484,25 @@ void UDiffAssetRegistriesCommandlet::ConsistencyCheck(const FString& OldPath, co
 		}
 	}
 
-	double change_value = 0.0;
-	int change_exp = 0;
+	double ChangeValue = 0.0;
+	int32 ChangeExp = 0;
 
-	rescale(change_bytes, change_value, change_exp);
+	auto Rescale = [](int64 Bytes, double& Value, int32& Exp)
+	{
+		Value = Bytes;
+		Value = fabs(Value);
+
+		while (Value > 1024.0)
+		{
+			Value /= 1024.0;
+			Exp++;
+		}
+	};
+
+	Rescale(ChangeBytes, ChangeValue, ChangeExp);
 
 	UE_LOG(LogDiffAssets, Display, TEXT("Summary:"));
-	UE_LOG(LogDiffAssets, Display, TEXT("%d nondeterministic cooks, %8.3f %cB"), changes, change_value, " KMGTP"[change_exp]);
+	UE_LOG(LogDiffAssets, Display, TEXT("%d nondeterministic cooks, %8.3f %cB"), Changes, ChangeValue, TCHAR(" KMGTP"[ChangeExp]));
 }
 
 bool	UDiffAssetRegistriesCommandlet::IsInRelevantChunk(FAssetRegistryState& InRegistryState, FName InAssetPath)
@@ -509,10 +513,13 @@ bool	UDiffAssetRegistriesCommandlet::IsInRelevantChunk(FAssetRegistryState& InRe
 
 	}
 	TArrayView<FAssetData const* const> Assets = InRegistryState.GetAssetsByPackageName(InAssetPath);
-
-	if (Assets.Num() && Assets[0]->ChunkIDs.Num())
+	if (!Assets.IsEmpty())
 	{
-		return Assets[0]->ChunkIDs.Contains(DiffChunkID);
+		const FAssetData::FChunkArrayView ChunkIDs = Assets[0]->GetChunkIDs();
+		if (!ChunkIDs.IsEmpty())
+		{
+			return ChunkIDs.Contains(DiffChunkID);
+		}
 	}
 
 	return true;
@@ -524,10 +531,10 @@ FName UDiffAssetRegistriesCommandlet::GetClassName(FAssetRegistryState& InRegist
 	{
 		TArrayView<FAssetData const * const> Assets = InRegistryState.GetAssetsByPackageName(InAssetPath);
 
-		FName NewName = NAME_None;
+		FName NewName;
 		if (Assets.Num() > 0)
 		{
-			NewName = Assets[0]->AssetClass;
+			NewName = Assets[0]->AssetClassPath.GetAssetName();
 		}
 		else
 		{
@@ -552,15 +559,15 @@ TArray<int32> UDiffAssetRegistriesCommandlet::GetAssetChunks(FAssetRegistryState
 	if (ChunkIdByAssetPath.Contains(InAssetPath) == false)
 	{
 		TArrayView<FAssetData const* const> Assets = InRegistryState.GetAssetsByPackageName(InAssetPath);
-
-		if (Assets.Num() > 0 && Assets[0]->ChunkIDs.Num() > 0)
+		const FAssetData::FChunkArrayView ChunkIDs = Assets.IsEmpty() ? FAssetData::FChunkArrayView() : Assets[0]->GetChunkIDs();
+		if (!ChunkIDs.IsEmpty())
 		{
-			if (Assets[0]->ChunkIDs.Num() > 1)
+			if (ChunkIDs.Num() > 1)
 			{
 				UE_LOG(LogDiffAssets, Log, TEXT("Multiple ChunkIds for asset %s"), *InAssetPath.ToString());
 			}
 
-			for (int32 id : Assets[0]->ChunkIDs)
+			for (int32 id : ChunkIDs)
 			{
 				ChangesByChunk.FindOrAdd(id).IncludedAssets.Add(InAssetPath);
 				ChunkIdByAssetPath.Add(InAssetPath, id);
@@ -874,34 +881,13 @@ void UDiffAssetRegistriesCommandlet::LogChangedFiles(FArchive *CSVFile, FString 
 
 			if (CSVFile)
 			{
-				CSVFile->Logf(TEXT("%c,%s,%s,%d,%d,%d,%s"), classification, *AssetPath.ToString(), *ClassName.ToString(), ChangeInfo.ChangedBytes, PrevData->DiskSize, Changelist, *GetChunkIDString(NewState));
+				CSVFile->Logf(TEXT("%c,%s,%s,%d,%d,%d,%s"), TCHAR(classification), *AssetPath.ToString(), *ClassName.ToString(), ChangeInfo.ChangedBytes, PrevData->DiskSize, Changelist, *GetChunkIDString(NewState));
 			}
 
 			if (bIsVerbose)
 			{
-				UE_LOG(LogDiffAssets, Display, TEXT("%c %s : (Class=%s,NewSize=%d bytes,OldSize=%d bytes)"), classification, *AssetPath.ToString(), *ClassName.ToString(), ChangeInfo.ChangedBytes, PrevData->DiskSize);
+				UE_LOG(LogDiffAssets, Display, TEXT("%c %s : (Class=%s,NewSize=%d bytes,OldSize=%d bytes)"), TCHAR(classification), *AssetPath.ToString(), *ClassName.ToString(), ChangeInfo.ChangedBytes, PrevData->DiskSize);
 			}
-			//UE_LOG(LogDiffAssets, Display, TEXT("Source file changed: %s"), (flags & EAssetFlags::GuidChange) ? TEXT("true") : TEXT("false"));
-			/*if ((flags & EAssetFlags::GuidChange) && bMatchChangelists)
-			{
-				UE_LOG(LogDiffAssets, Display, TEXT("Last change: %d"), Changelist);
-			}*/
-#if 0			
-			TArray<FAssetIdentifier> Dependencies;
-			NewState.GetDependencies(AssetPath, Dependencies, EAssetRegistryDependencyType::Hard);
-			if (Dependencies.Num() > 0)
-			{
-				UE_LOG(LogDiffAssets, Display, TEXT("Dependency changes:"));
-
-				for (const FAssetIdentifier& Dependency : Dependencies)
-				{
-					if (AssetPathToSourceChanged.FindOrAdd(Dependency.PackageName))
-					{
-						UE_LOG(LogDiffAssets, Display, TEXT("  %s: %d"), *Dependency.PackageName.ToString(), AssetPathToChangelist.FindOrAdd(Dependency.PackageName));
-					}
-				}
-			}
-#endif
 		}
 		else if (ChangeInfo.Deletes)
 		{
@@ -1168,9 +1154,7 @@ void UDiffAssetRegistriesCommandlet::DiffAssetRegistries(const FString& OldPath,
 				New.Add(Name);
 				RecordAdd(Name, *Data);
 			}
-			PRAGMA_DISABLE_DEPRECATION_WARNINGS
-			else if (Data->PackageGuid != PrevData->PackageGuid)
-			PRAGMA_ENABLE_DEPRECATION_WARNINGS
+			else if (Data->GetPackageSavedHash() != PrevData->GetPackageSavedHash())
 			{
 				Modified.Add(Name);
 			}
@@ -1244,9 +1228,7 @@ void UDiffAssetRegistriesCommandlet::DiffAssetRegistries(const FString& OldPath,
 			{
 				RecordEdit(Name, *Data, *PrevData);
 				AssetPathFlags.FindOrAdd(Name) |= EAssetFlags::HashChange;
-				PRAGMA_DISABLE_DEPRECATION_WARNINGS
-				if (Data->PackageGuid != PrevData->PackageGuid)
-				PRAGMA_ENABLE_DEPRECATION_WARNINGS
+				if (Data->GetPackageSavedHash() != PrevData->GetPackageSavedHash())
 				{
 					AssetPathFlags.FindOrAdd(Name) |= EAssetFlags::GuidChange;
 				}

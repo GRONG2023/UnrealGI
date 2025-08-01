@@ -7,7 +7,11 @@
 #include "ObjectTools.h"
 #include "FileHelpers.h"
 #include "EditorReimportHandler.h"
-#include "Misc/BlacklistNames.h"
+#include "Misc/NamePermissionList.h"
+#include "InterchangeManager.h"
+#include "InterchangeFactoryBase.h"
+#include "Framework/Notifications/NotificationManager.h"
+#include "Widgets/Notifications/SNotificationList.h"
 
 class FImportFilesByPath : public IImportSubsystemTask
 {
@@ -92,7 +96,7 @@ public:
 			{
 				FilesAndDestinations.RemoveAt(ReImportIndexes[IndexToRemove]);
 			}
-			AssetToolsModule.Get().ImportAssets(ImportFiles, RootDestinationPath, nullptr, true, &FilesAndDestinations);
+			AssetToolsModule.Get().ImportAssets(ImportFiles, RootDestinationPath, nullptr, true, &FilesAndDestinations, true);
 		}
 	}
 
@@ -110,24 +114,49 @@ UImportSubsystem::UImportSubsystem()
 
 void UImportSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
+	auto AttachDelegates = [this]()
+	{
+		//Hook on Interchange manager to know when to broadcast import/reimport
+		UInterchangeManager& InterchangeManager = UInterchangeManager::GetInterchangeManager();
+		InterchangeManager.OnAssetPostImport.AddUObject(this, &UImportSubsystem::InterchangeBroadcastAssetPostImport);
+		InterchangeManager.OnAssetPostReimport.AddUObject(this, &UImportSubsystem::InterchangeBroadcastAssetPostReimport);
+	};
 
+	if (GEngine)
+	{
+		AttachDelegates();
+	}
+	else
+	{
+		FCoreDelegates::OnPostEngineInit.AddLambda(AttachDelegates);
+	}
+
+	//Unregister before the Interchange manager get destroy
+	UInterchangeManager& InterchangeManager = UInterchangeManager::GetInterchangeManager();
+	InterchangeManager.OnPreDestroyInterchangeManager.AddLambda([this]()
+	{
+		//Unhook interchange manager import/reimport delegates
+		UInterchangeManager& InterchangeManager = UInterchangeManager::GetInterchangeManager();
+		InterchangeManager.OnAssetPostImport.RemoveAll(this);
+		InterchangeManager.OnAssetPostReimport.RemoveAll(this);
+	});
 }
 
 void UImportSubsystem::Deinitialize()
 {
-
 }
 
 void UImportSubsystem::ImportNextTick(const TArray<FString>& Files, const FString& DestinationPath)
 {
 	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
-	if (!AssetToolsModule.Get().GetWritableFolderBlacklist()->PassesStartsWithFilter(DestinationPath))
+	if (!AssetToolsModule.Get().GetWritableFolderPermissionList()->PassesStartsWithFilter(DestinationPath))
 	{
 		AssetToolsModule.Get().NotifyBlockedByWritableFolderFilter();
 		return;
 	}
-
+	
 	PendingTasks.Enqueue(MakeShared<FImportFilesByPath>(Files, DestinationPath));
+
 	GEditor->GetTimerManager()->SetTimerForNextTick(this, &UImportSubsystem::HandleNextTick);
 }
 
@@ -175,3 +204,14 @@ void UImportSubsystem::BroadcastAssetPostLODImport(UObject* InObject, int32 inLO
 	OnAssetPostLODImport_BP.Broadcast(InObject, inLODIndex);
 }
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+void UImportSubsystem::InterchangeBroadcastAssetPostImport(UObject* InCreatedObject)
+{
+	UFactory* NullFactory = nullptr;
+	BroadcastAssetPostImport(NullFactory, InCreatedObject);
+}
+
+void UImportSubsystem::InterchangeBroadcastAssetPostReimport(UObject* InCreatedObject)
+{
+	BroadcastAssetReimport(InCreatedObject);
+}

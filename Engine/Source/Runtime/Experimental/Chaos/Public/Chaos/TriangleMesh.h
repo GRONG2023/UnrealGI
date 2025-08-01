@@ -7,8 +7,19 @@
 #include "Chaos/SegmentMesh.h"
 #include "Containers/ContainersFwd.h"
 
+#include "AABBTree.h"
+
 namespace Chaos
 {
+	template <typename TPayloadType, typename T> class THierarchicalSpatialHash;
+
+	template<typename T> struct TTriangleCollisionPoint;
+
+	namespace Softs
+	{
+	class FPBDFlatWeightMap;
+	}
+
 	class FTriangleMesh
 	{
 	public:
@@ -41,6 +52,9 @@ namespace Chaos
 		CHAOS_API TSet<int32> GetVertices() const;
 		/** Returns the unique set of vertices used by this triangle mesh. */
 		CHAOS_API void GetVertexSet(TSet<int32>& VertexSet) const;
+
+		/** Returns the unique set of vertices used by this triangle mesh. */
+		CHAOS_API void GetVertexSetAsArray(TArray<int32>& VertexSet) const;
 
 		/**
 		 * Extends the vertex range.
@@ -137,22 +151,27 @@ namespace Chaos
 		/** The GetFaceNormals functions assume Counter Clockwise triangle windings in a Left Handed coordinate system
 			If this is not the case the returned face normals may be inverted
 		*/
-		CHAOS_API TArray<FVec3> GetFaceNormals(const TConstArrayView<FVec3>& Points, const bool ReturnEmptyOnError = true) const;
-		CHAOS_API void GetFaceNormals(TArray<FVec3>& Normals, const TConstArrayView<FVec3>& Points, const bool ReturnEmptyOnError = true) const;
+		template <typename T>
+		TArray<TVec3<T>> GetFaceNormals(const TConstArrayView<TVec3<T>>& Points, const bool ReturnEmptyOnError = true) const;
+		template <typename T>
+		void GetFaceNormals(TArray<TVec3<T>>& Normals, const TConstArrayView<TVec3<T>>& Points, const bool ReturnEmptyOnError = true) const;
 		FORCEINLINE TArray<FVec3> GetFaceNormals(const FParticles& InParticles, const bool ReturnEmptyOnError = true) const
-		{ return GetFaceNormals(InParticles.X(), ReturnEmptyOnError); }
+		{ return GetFaceNormals(TConstArrayView<FVec3>(InParticles.X()), ReturnEmptyOnError); }
 
-		CHAOS_API TArray<FVec3> GetPointNormals(const TConstArrayView<FVec3>& points, const bool ReturnEmptyOnError = true);
+		CHAOS_API TArray<FVec3> GetPointNormals(const TConstArrayView<FVec3>& points, const bool ReturnEmptyOnError = true, const bool bUseGlobalArray=false);
 		FORCEINLINE TArray<FVec3> GetPointNormals(const FParticles& InParticles, const bool ReturnEmptyOnError = true)
-		{ return GetPointNormals(InParticles.X(), ReturnEmptyOnError); }
-
+		{ return GetPointNormals(TConstArrayView<FVec3>(InParticles.X()), ReturnEmptyOnError); }
+		
 		CHAOS_API void GetPointNormals(TArrayView<FVec3> PointNormals, const TConstArrayView<FVec3>& FaceNormals, const bool bUseGlobalArray);
 		/** \brief Get per-point normals. 
 		 * This const version of this function requires \c GetPointToTriangleMap() 
 		 * to be called prior to invoking this function. 
 		 * @param bUseGlobalArray When true, fill the array from the StartIdx to StartIdx + NumIndices - 1 positions, otherwise fill the array from the 0 to NumIndices - 1 positions.
 		 */
-		CHAOS_API void GetPointNormals(TArrayView<FVec3> PointNormals, const TConstArrayView<FVec3>& FaceNormals, const bool bUseGlobalArray) const;
+		template <typename T>
+		CHAOS_API void GetPointNormals(TArrayView<TVec3<T>> PointNormals, const TConstArrayView<TVec3<T>>& FaceNormals, const bool bUseGlobalArray) const;
+
+		CHAOS_API void GetPointNormals(TArrayView<TVec3<FRealSingle>> PointNormals, const TConstArrayView<TVec3<FRealSingle>>& FaceNormals, const bool bUseGlobalArray) const;
 
 		static CHAOS_API FTriangleMesh GetConvexHullFromParticles(const TConstArrayView<FVec3>& points);
 		/** Deprecated. Use TArrayView version. */
@@ -160,13 +179,23 @@ namespace Chaos
 		{ return GetConvexHullFromParticles(InParticles.X()); }
 
 		/**
+		 * @brief Note that the SegmentMesh is lazily calculated (this method is not threadsafe unless it is known that the SegmentMesh is already up to date)
 		 * @ret The connectivity of this mesh represented as a collection of unique segments.
 		 */
-		CHAOS_API FSegmentMesh& GetSegmentMesh();
-		/** @ret A map from all face indices, to the indices of their associated edges. */
-		CHAOS_API const TArray<TVec3<int32>>& GetFaceToEdges();
-		/** @ret A map from all edge indices, to the indices of their containing faces. */
-		CHAOS_API const TArray<TVec2<int32>>& GetEdgeToFaces();
+		CHAOS_API const FSegmentMesh& GetSegmentMesh() const;
+		/**
+		 * @brief Note that this data is lazily calculated with the SegmentMesh (this method is not threadsafe unless it is known that the SegmentMesh is already up to date)
+		 * @ret A map from all face indices, to the indices of their associated edges.
+		 */
+		CHAOS_API const TArray<TVec3<int32>>& GetFaceToEdges() const;
+		/**
+		 * @brief Note that this data is lazily calculated with the SegmentMesh (this method is not threadsafe unless it is known that the SegmentMesh is already up to date)
+		 * @ret A map from all edge indices, to the indices of their containing faces. 
+		 */
+		CHAOS_API const TArray<TVec2<int32>>& GetEdgeToFaces() const;
+
+		UE_DEPRECATED(5.1, "Non-const access to GetSegmentMesh will be removed. Use const version instead.")
+		FSegmentMesh& GetSegmentMesh() { return const_cast<FSegmentMesh&>(const_cast<const FTriangleMesh*>(this)->GetSegmentMesh()); }
 
 		/**
 		 * @ret Curvature between adjacent faces, specified on edges in radians.
@@ -227,14 +256,15 @@ namespace Chaos
 		CHAOS_API void RemoveDuplicateElements();
 		CHAOS_API void RemoveDegenerateElements();
 
-		static FORCEINLINE void InitEquilateralTriangleXY(FTriangleMesh& TriMesh, FParticles& Particles)
+		template <typename T>
+		static FORCEINLINE void InitEquilateralTriangleXY(FTriangleMesh& TriMesh, TParticles<T, 3>& Particles)
 		{
 			const int32 Idx = Particles.Size();
 			Particles.AddParticles(3);
 			// Left handed
-			Particles.X(Idx + 0) = FVec3(0., 0.8083, 0.);
-			Particles.X(Idx + 1) = FVec3(0.7, -0.4041, 0.);
-			Particles.X(Idx + 2) = FVec3(-0.7, -0.4041, 0.);
+			Particles.X(Idx + 0) = FVec3((T)0., (T)0.8083, (T)0.);
+			Particles.X(Idx + 1) = FVec3((T)0.7, (T)-0.4041, (T)0.);
+			Particles.X(Idx + 2) = FVec3((T)-0.7, (T)-0.4041, (T)0.);
 
 			TArray<TVec3<int32>> Elements;
 			Elements.SetNum(1);
@@ -242,14 +272,15 @@ namespace Chaos
 
 			TriMesh.Init(MoveTemp(Elements));
 		}
-		static FORCEINLINE void InitEquilateralTriangleYZ(FTriangleMesh& TriMesh, FParticles& Particles)
+		template <typename T>
+		static FORCEINLINE void InitEquilateralTriangleYZ(FTriangleMesh& TriMesh, TParticles<T, 3>& Particles)
 		{
 			const int32 Idx = Particles.Size();
 			Particles.AddParticles(3);
 			// Left handed
-			Particles.X(Idx + 0) = FVec3(0., 0., 0.8083);
-			Particles.X(Idx + 1) = FVec3(0., 0.7, -0.4041);
-			Particles.X(Idx + 2) = FVec3(0., -0.7, -0.4041);
+			Particles.SetX(Idx + 0, FVec3((T)0., (T)0., (T)0.8083));
+			Particles.SetX(Idx + 1, FVec3((T)0., (T)0.7, (T)-0.4041));
+			Particles.SetX(Idx + 2, FVec3((T)0., (T)-0.7, (T)-0.4041));
 
 			TArray<TVec3<int32>> Elements;
 			Elements.SetNum(1);
@@ -257,6 +288,45 @@ namespace Chaos
 
 			TriMesh.Init(MoveTemp(Elements));
 		}
+
+		// BVH-based collision queries
+		template<typename T>
+		using TBVHType = TAABBTree<int32, TAABBTreeLeafArray<int32, /*bComputeBounds=*/false, T>, /*bMutable=*/true, T>;
+
+		template<typename T>
+		void BuildBVH(const TConstArrayView<TVec3<T>>& Points, TBVHType<T>& BVH) const;
+
+		// NOTE: This method assumes the BVH has already been built/fitted to Points.
+		template<typename T>
+		bool PointProximityQuery(const TBVHType<T>& BVH, const TConstArrayView<TVec3<T>>& Points, const int32 PointIndex, const TVec3<T>& PointPosition, const T PointThickness, const T ThisThickness, 
+			TFunctionRef<bool (const int32 PointIndex, const int32 TriangleIndex)> BroadphaseTest, TArray<TTriangleCollisionPoint<T>>& Result) const;
+
+		template<typename T>
+		bool EdgeIntersectionQuery(const TBVHType<T>& BVH, const TConstArrayView<TVec3<T>>& Points, const int32 EdgeIndex, const TVec3<T>& EdgePosition1, const TVec3<T>& EdgePosition2,
+			TFunctionRef<bool(const int32 EdgeIndex, const int32 TriangleIndex)> BroadphaseTest, TArray<TTriangleCollisionPoint<T>>& Result) const;
+
+		//! Returns \c false if \p Point is outside of the smooth normal cone, where a smooth projection doesn't exist.
+		template<typename T>
+		bool SmoothProject(const TBVHType<T>& BVH, const TConstArrayView<FVec3>& Points, const TArray<FVec3>& PointNormals,
+			const FVec3& Point, int32& TriangleIndex, FVec3& Weights, const int32 MaxIters=10) const;
+
+		template<typename T>
+		using TSpatialHashType = THierarchicalSpatialHash<int32, T>;
+
+		// Hierarchy will only go down to lods as small as MinSpatialLodSize.
+		template<typename T>
+		void BuildSpatialHash(const TConstArrayView<TVec3<T>>& Points, TSpatialHashType<T>& SpatialHash, const T MinSpatialLodSize = (T)0.) const;
+		void BuildSpatialHash(const TConstArrayView<TVec3<FRealSingle>>& Points, TSpatialHashType<FRealSingle>& SpatialHash, const Softs::FPBDFlatWeightMap& PointThicknesses, int32 ThicknessMapIndexOffset, const FRealSingle MinSpatialLodSize = 0.f) const;
+
+		template<typename T>
+		bool PointProximityQuery(const TSpatialHashType<T>& SpatialHash, const TConstArrayView<TVec3<T>>& Points, const int32 PointIndex, const TVec3<T>& PointPosition, const T PointThickness, const T ThisThickness,
+			TFunctionRef<bool(const int32 PointIndex, const int32 TriangleIndex)> BroadphaseTest, TArray<TTriangleCollisionPoint<T>>& Result) const;
+		bool PointProximityQuery(const TSpatialHashType<FRealSingle>& SpatialHash, const TConstArrayView<TVec3<FRealSingle>>& Points, const int32 PointIndex, const TVec3<FRealSingle>& PointPosition, const FRealSingle PointThickness, const Softs::FPBDFlatWeightMap& ThisThicknesses,
+			const FRealSingle ThisThicknessExtraMultiplier, int32 ThicknessMapIndexOffset, TFunctionRef<bool(const int32 PointIndex, const int32 TriangleIndex)> BroadphaseTest, TArray<TTriangleCollisionPoint<FRealSingle>>& Result) const;
+
+		template<typename T>
+		bool EdgeIntersectionQuery(const TSpatialHashType<T>& SpatialHash, const TConstArrayView<TVec3<T>>& Points, const int32 EdgeIndex, const TVec3<T>& EdgePosition1, const TVec3<T>& EdgePosition2,
+			TFunctionRef<bool(const int32 EdgeIndex, const int32 TriangleIndex)> BroadphaseTest, TArray<TTriangleCollisionPoint<T>>& Result) const;
 		
 	private:
 		CHAOS_API void InitHelper(const int32 StartIdx, const int32 EndIdx, const bool CullDegenerateElements=true);
@@ -280,9 +350,9 @@ namespace Chaos
 		mutable TArray<TArray<int32>> MPointToTriangleMap;  // !! Unlike the TArrayView returned by GetPointToTriangleMap, this array starts at 0 for the point of index MStartIdx. Use GlobalToLocal to access with a global index. Note that this array's content is always indexed in global index.
 		mutable TMap<int32, TSet<int32>> MPointToNeighborsMap;
 
-		FSegmentMesh MSegmentMesh;
-		TArray<TVec3<int32>> MFaceToEdges;
-		TArray<TVec2<int32>> MEdgeToFaces;
+		mutable FSegmentMesh MSegmentMesh;
+		mutable TArray<TVec3<int32>> MFaceToEdges;
+		mutable TArray<TVec2<int32>> MEdgeToFaces;
 
 		int32 MStartIdx;
 		int32 MNumIndices;
@@ -291,12 +361,3 @@ namespace Chaos
 	template <typename T>
 	using TTriangleMesh = FTriangleMesh;
 }
-
-// Support ISPC enable/disable in non-shipping builds
-#if !INTEL_ISPC
-const bool bChaos_TriangleMesh_ISPC_Enabled = false;
-#elif UE_BUILD_SHIPPING
-const bool bChaos_TriangleMesh_ISPC_Enabled = true;
-#else
-extern CHAOS_API bool bChaos_TriangleMesh_ISPC_Enabled;
-#endif

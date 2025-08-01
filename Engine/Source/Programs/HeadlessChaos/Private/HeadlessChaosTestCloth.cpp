@@ -5,12 +5,14 @@
 #include "HeadlessChaos.h"
 #include "HeadlessChaosTestUtility.h"
 
+#include "Chaos/PBDSoftsEvolutionFwd.h"
 #include "Chaos/PBDEvolution.h"
 #include "Chaos/GeometryParticles.h"
 #include "Chaos/PBDAxialSpringConstraints.h"
 #include "Chaos/PBDSpringConstraints.h"
 #include "Chaos/TriangleMesh.h"
 #include "Chaos/Utilities.h"
+#include "GeometryCollection/ManagedArrayCollection.h"
 
 #include "Modules/ModuleManager.h"
 
@@ -19,19 +21,17 @@ namespace ChaosTest {
 	using namespace Chaos;
 	DEFINE_LOG_CATEGORY_STATIC(LogChaosTestCloth, Verbose, All);
 
-	using FPBDEvolution = FPBDEvolution;
-
-	TUniquePtr<FPBDEvolution> InitPBDEvolution(
+	TUniquePtr<Softs::FPBDEvolution> InitPBDEvolution(
 		const int32 NumIterations=1,
-		const FReal CollisionThickness=KINDA_SMALL_NUMBER,
-		const FReal SelfCollisionThickness=KINDA_SMALL_NUMBER,
-		const FReal Friction=0.0,
-		const FReal Damping=0.04)
+		const Softs::FSolverReal CollisionThickness=KINDA_SMALL_NUMBER,
+		const Softs::FSolverReal SelfCollisionThickness=KINDA_SMALL_NUMBER,
+		const Softs::FSolverReal Friction=0.0,
+		const Softs::FSolverReal Damping=0.04)
 	{
-		Chaos::FPBDParticles Particles;
-		Chaos::FKinematicGeometryClothParticles RigidParticles;
-		TUniquePtr<FPBDEvolution> Evolution(
-			new FPBDEvolution(
+		Chaos::Softs::FSolverParticles Particles;
+		Chaos::Softs::FSolverCollisionParticles RigidParticles;
+		TUniquePtr<Softs::FPBDEvolution> Evolution(
+			new Softs::FPBDEvolution(
 				MoveTemp(Particles),
 				MoveTemp(RigidParticles),
 				{},
@@ -46,14 +46,14 @@ namespace ChaosTest {
 	template <class TEvolutionPtr>
 	void InitSingleParticle(
 		TEvolutionPtr& Evolution,
-		const FVec3& Position = FVec3(0),
-		const FVec3& Velocity = FVec3(0),
-		const FReal Mass = 1.0)
+		const Softs::FSolverVec3& Position = Softs::FSolverVec3(0),
+		const Softs::FSolverVec3& Velocity = Softs::FSolverVec3(0),
+		const Softs::FSolverReal Mass = 1.0)
 	{
 		auto& Particles = Evolution->Particles();
 		const uint32 Idx = Particles.Size();
 		Particles.AddParticles(1);
-		Particles.X(Idx) = Position;
+		Particles.SetX(Idx, Position);
 		Particles.V(Idx) = Velocity;
 		Particles.M(Idx) = Mass;
 		Particles.InvM(Idx) = 1.0 / Mass;
@@ -63,24 +63,25 @@ namespace ChaosTest {
 	void InitTriMesh_EquilateralTri(
 		FTriangleMesh& TriMesh,
 		TEvolutionPtr& Evolution, 
-		const FVec3& XOffset=FVec3(0))
+		const Softs::FSolverVec3& XOffset=Softs::FSolverVec3(0))
 	{
 		auto& Particles = Evolution->Particles();
 		const uint32 InitialNumParticles = Particles.Size();
+
 		FTriangleMesh::InitEquilateralTriangleYZ(TriMesh, Particles);
 
 		// Initialize particles.  Use 1/3 area of connected triangles for particle mass.
 		for (uint32 i = InitialNumParticles; i < Particles.Size(); i++)
 		{
-			Particles.X(i) += XOffset;
-			Particles.V(i) = Chaos::FVec3(0);
+			Particles.SetX(i, Particles.GetX(i) + XOffset);
+			Particles.V(i) = Chaos::Softs::FSolverVec3(0);
 			Particles.M(i) = 0;
 		}
 		for (const Chaos::TVec3<int32>& Tri : TriMesh.GetElements())
 		{
-			const FReal TriArea = 0.5 * Chaos::FVec3::CrossProduct(
-				Particles.X(Tri[1]) - Particles.X(Tri[0]),
-				Particles.X(Tri[2]) - Particles.X(Tri[0])).Size();
+			const Softs::FSolverReal TriArea = 0.5 * Chaos::Softs::FSolverVec3::CrossProduct(
+				Particles.GetX(Tri[1]) - Particles.GetX(Tri[0]),
+				Particles.GetX(Tri[2]) - Particles.GetX(Tri[0])).Size();
 			for (int32 i = 0; i < 3; i++)
 			{
 				Particles.M(Tri[i]) += TriArea / 3;
@@ -97,7 +98,7 @@ namespace ChaosTest {
 	void AddEdgeLengthConstraint(
 		TEvolutionPtr& Evolution,
 		const TArray<Chaos::TVec3<int32>>& Topology,
-		const FReal Stiffness)
+		const Softs::FSolverReal Stiffness)
 	{
 		check(Stiffness >= 0. && Stiffness <= 1.);
 		// TODO: Use Add AddConstraintRuleRange
@@ -114,7 +115,7 @@ namespace ChaosTest {
 	void AddAxialConstraint(
 		TEvolutionPtr& Evolution,
 		TArray<Chaos::TVec3<int32>>&& Topology,
-		const FReal Stiffness)
+		const Softs::FSolverReal Stiffness)
 	{
 		check(Stiffness >= 0. && Stiffness <= 1.);
 		// TODO: Use Add AddConstraintRuleRange
@@ -138,7 +139,7 @@ namespace ChaosTest {
 		Evolution->SetIterations(NumTimeStepsPerFrame);
 
 		check(FPS > 0);
-		const FReal Dt = 1.0 / FPS;
+		const Softs::FSolverReal Dt = 1.0 / FPS;
 		for (uint32 i = 0; i < NumFrames; i++)
 		{
 			Evolution->AdvanceOneTimeStep(Dt);
@@ -146,39 +147,39 @@ namespace ChaosTest {
 	}
 
 	template <class TParticleContainer>
-	TArray<Chaos::FVec3> CopyPoints(const TParticleContainer& Particles)
+	TArray<Chaos::Softs::FSolverVec3> CopyPoints(const TParticleContainer& Particles)
 	{
-		TArray<Chaos::FVec3> Points;
+		TArray<Chaos::Softs::FSolverVec3> Points;
 		Points.SetNum(Particles.Size());
 
 		for (uint32 i = 0; i < Particles.Size(); i++)
-			Points[i] = Particles.X(i);
+			Points[i] = Particles.GetX(i);
 
 		return Points;
 	}
 
 	template <class TParticleContainer>
-	void Reset(TParticleContainer& Particles, const TArray<Chaos::FVec3>& Points)
+	void Reset(TParticleContainer& Particles, const TArray<Chaos::Softs::FSolverVec3>& Points)
 	{
 		for (uint32 i = 0; i < Particles.Size(); i++)
 		{
-			Particles.X(i) = Points[i];
-			Particles.V(i) = Chaos::FVec3(0);
+			Particles.SetX(i, Points[i]);
+			Particles.V(i) = Chaos::Softs::FSolverVec3(0);
 		}
 	}
 
-	TArray<FVec3> GetDifference(const TArray<FVec3>& A, const TArray<FVec3>& B)
+	TArray<Softs::FSolverVec3> GetDifference(const TArray<Softs::FSolverVec3>& A, const TArray<Softs::FSolverVec3>& B)
 	{
-		TArray<FVec3> C;
+		TArray<Softs::FSolverVec3> C;
 		C.SetNum(A.Num());
 		for (int32 i = 0; i < A.Num(); i++)
 			C[i] = A[i] - B[i];
 		return C;
 	}
 
-	TArray<FReal> GetMagnitude(const TArray<Chaos::FVec3>& V)
+	TArray<Softs::FSolverReal> GetMagnitude(const TArray<Chaos::Softs::FSolverVec3>& V)
 	{
-		TArray<FReal> M;
+		TArray<Softs::FSolverReal> M;
 		M.SetNum(V.Num());
 		for (int32 i = 0; i < V.Num(); i++)
 			M[i] = V[i].Size();
@@ -204,29 +205,29 @@ namespace ChaosTest {
 
 	template <class TV>
 	bool RunDropTest(
-		TUniquePtr<FPBDEvolution>& Evolution,
-		const FReal GravMag,
+		TUniquePtr<Softs::FPBDEvolution>& Evolution,
+		const Softs::FSolverReal GravMag,
 		const TV& GravDir,
 		const TArray<TV>& InitialPoints,
 		const int32 SubFrameSteps,
-		const FReal DistTolerance,
+		const Softs::FSolverReal DistTolerance,
 		const char* TestID)
 	{
-		const FReal PreTime = Evolution->GetTime();
+		const Softs::FSolverReal PreTime = Evolution->GetTime();
 		AdvanceTime(Evolution, 24, SubFrameSteps); // 1 second
-		const FReal PostTime = Evolution->GetTime();
+		const Softs::FSolverReal PostTime = Evolution->GetTime();
 		EXPECT_NEAR(PostTime-PreTime, 1.0, KINDA_SMALL_NUMBER)
 			<< TestID
 			<< "Evolution advanced time by " << (PostTime - PreTime)
 			<< " seconds, expected 1.0 seconds.";
 
-		const TArray<FVec3> PostPoints = CopyPoints(Evolution->Particles());
-		const TArray<FVec3> Diff = GetDifference(PostPoints, InitialPoints);
-		const TArray<FReal> ScalarDiff = GetMagnitude(Diff);
+		const TArray<Softs::FSolverVec3> PostPoints = CopyPoints(Evolution->Particles());
+		const TArray<Softs::FSolverVec3> Diff = GetDifference(PostPoints, InitialPoints);
+		const TArray<Softs::FSolverReal> ScalarDiff = GetMagnitude(Diff);
 
 		// All points did the same thing
 		int32 Idx = 0;
-		EXPECT_TRUE(AllSame(ScalarDiff, Idx, (FReal)0.1))
+		EXPECT_TRUE(AllSame(ScalarDiff, Idx, (Softs::FSolverReal)0.1))
 			<< TestID
 			<< "Points fell different distances - Index 0: "
 			<< ScalarDiff[0] << " != Index " 
@@ -234,15 +235,15 @@ namespace ChaosTest {
 			<< ScalarDiff[Idx] << " +/- 0.1.";
 
 		// Fell the right amount
-		EXPECT_NEAR(ScalarDiff[0], (FReal)0.5 * GravMag, DistTolerance)
+		EXPECT_NEAR(ScalarDiff[0], (Softs::FSolverReal)0.5 * GravMag, DistTolerance)
 			<< TestID
 			<< "Points fell by " << ScalarDiff[0] 
-			<< ", expected " << ((FReal)0.5 * GravMag)
+			<< ", expected " << ((Softs::FSolverReal)0.5 * GravMag)
 			<< " +/- " << DistTolerance << "."; 
 
 		// Fell the right direction
-		const FReal DirDot = Chaos::FVec3::DotProduct(GravDir, Diff[0].GetSafeNormal());
-		EXPECT_NEAR(DirDot, (FReal)1.0, (FReal)KINDA_SMALL_NUMBER)
+		const Softs::FSolverReal DirDot = Chaos::Softs::FSolverVec3::DotProduct(GravDir, Diff[0].GetSafeNormal());
+		EXPECT_NEAR(DirDot, (Softs::FSolverReal)1.0, (Softs::FSolverReal)KINDA_SMALL_NUMBER)
 			<< TestID
 			<< "Points fell in different directions.";
 
@@ -251,23 +252,23 @@ namespace ChaosTest {
 
 	void DeformableGravity()
 	{
-		const FReal DistTol = 0.0002;
+		const Softs::FSolverReal DistTol = 0.0002;
 
 		//
 		// Initialize solver and gravity
 		//
 
-		TUniquePtr<FPBDEvolution> Evolution = InitPBDEvolution();
+		TUniquePtr<Softs::FPBDEvolution> Evolution = InitPBDEvolution();
 
-		const FVec3 GravDir(0, 0, -1);
-		const FReal GravMag = 980.665;
+		const Softs::FSolverVec3 GravDir(0, 0, -1);
+		const Softs::FSolverReal GravMag = 980.665;
 
 		//
 		// Drop a single particle
 		//
 
 		InitSingleParticle(Evolution);
-		TArray<FVec3> InitialPoints = CopyPoints(Evolution->Particles());
+		TArray<Softs::FSolverVec3> InitialPoints = CopyPoints(Evolution->Particles());
 
 		RunDropTest(Evolution, GravMag, GravDir, InitialPoints, 1, DistTol, "Single point falling under gravity, iters: 1 - ");
 		Reset(Evolution->Particles(), InitialPoints);
@@ -305,7 +306,7 @@ namespace ChaosTest {
 
 	void EdgeConstraints()
 	{
-		TUniquePtr<FPBDEvolution> Evolution = InitPBDEvolution();
+		TUniquePtr<Softs::FPBDEvolution> Evolution = InitPBDEvolution();
 		FTriangleMesh TriMesh;
 		auto& Particles = Evolution->Particles();
 		Particles.AddParticles(2145);
@@ -324,4 +325,280 @@ namespace ChaosTest {
 		AddAxialConstraint(Evolution, MoveTemp(Triangles), 1.0);
 	}
 
+	void ClothCollection()
+	{
+		FManagedArrayCollection ManagedArrayCollection;
+
+		const FName DataGroup("Data");
+		TManagedArray<int32> Value;
+		ManagedArrayCollection.AddExternalAttribute<int32>("Value", DataGroup, Value);
+
+		const FName ViewGroup("View");
+		FManagedArrayCollection::FConstructionParameters DataDependency(DataGroup);
+		TManagedArray<int32> ValueStart;
+		TManagedArray<int32> ValueEnd;
+		TManagedArray<int32> Id;
+		ManagedArrayCollection.AddExternalAttribute<int32>("ValueStart", ViewGroup, ValueStart, DataDependency);
+		ManagedArrayCollection.AddExternalAttribute<int32>("ValueEnd", ViewGroup, ValueEnd, DataDependency);
+		ManagedArrayCollection.AddExternalAttribute<int32>("Id", ViewGroup, Id);
+
+		auto InsertView = [&ManagedArrayCollection, &Value, &ValueStart, &ValueEnd, &Id, &DataGroup, &ViewGroup](int32 ViewPosition, int32 NumValues)
+			{
+				check(ViewPosition <= ManagedArrayCollection.NumElements(ViewGroup));
+				EXPECT_TRUE(ManagedArrayCollection.InsertElements(1, ViewPosition, ViewGroup) == ViewPosition);
+
+				static int32 ViewId = 0;
+				Id[ViewPosition] = ViewId++;
+
+				if (NumValues)
+				{
+					int32 PrevValuePosition = INDEX_NONE;
+					for (int32 Index = ViewPosition - 1; Index >= 0; --Index)
+					{
+						if (ValueEnd[Index] != INDEX_NONE)
+						{
+							PrevValuePosition = ValueEnd[Index];
+							break;
+						}
+					}
+					const int32 ValuePosition = PrevValuePosition + 1;
+
+					EXPECT_TRUE(ManagedArrayCollection.InsertElements(NumValues, ValuePosition, DataGroup) == ValuePosition);
+			
+					ValueStart[ViewPosition] = ValuePosition;
+					ValueEnd[ViewPosition] = ValuePosition + NumValues - 1;
+
+					for (int32 ValueIndex = ValueStart[ViewPosition]; ValueIndex <= ValueEnd[ViewPosition]; ++ValueIndex)
+					{
+						Value[ValueIndex] = Id[ViewPosition];
+					}
+				}
+				else
+				{
+					ValueStart[ViewPosition] = INDEX_NONE;
+					ValueEnd[ViewPosition] = INDEX_NONE;
+				}
+			};
+
+		auto RemoveViews = [&ManagedArrayCollection, &ValueStart, &ValueEnd, &DataGroup, &ViewGroup](int32 ViewPosition, int32 NumViews)
+			{
+				const int32 ViewStart = ViewPosition;
+				const int32 ViewEnd = ViewPosition + NumViews - 1;
+
+				for (int32 ViewIndex = ViewStart; ViewIndex <= ViewEnd; ++ViewIndex)
+				{
+					// Remove data
+					const int32 Position = ValueStart[ViewIndex];
+					if (Position != INDEX_NONE)
+					{
+						const int32 NumValues = ValueEnd[ViewIndex] - ValueStart[ViewIndex] + 1;
+						ManagedArrayCollection.RemoveElements(DataGroup, NumValues, Position);
+					}
+				}
+				// Remove views
+				ManagedArrayCollection.RemoveElements(ViewGroup, NumViews, ViewPosition);
+			};
+
+		auto SetViewSize = [&ManagedArrayCollection, &Value, &ValueStart, &ValueEnd, &Id, &DataGroup, &ViewGroup](int32 ViewIndex, int32 InNumValues)
+			{
+				check(InNumValues >= 0);
+
+				int32& Start = ValueStart[ViewIndex];
+				int32& End = ValueEnd[ViewIndex];
+				check(Start != INDEX_NONE || End == INDEX_NONE);
+
+				const int32 NumValues = (Start == INDEX_NONE) ? 0 : End - Start + 1;
+
+				if (const int32 Delta = InNumValues - NumValues)
+				{
+					if (Delta > 0)
+					{
+						// Find a previous valid index range to insert after when the range is empty
+						auto ComputeEnd = [&ValueEnd](int32 ViewIndex)->int32
+						{
+							for (int32 Index = ViewIndex; Index >= 0; --Index)
+							{
+								if (ValueEnd[Index] != INDEX_NONE)
+								{
+									return ValueEnd[Index];
+								}
+							}
+							return INDEX_NONE;
+						};
+
+						// Grow the array
+						const int32 Position = ComputeEnd(ViewIndex) + 1;
+						ManagedArrayCollection.InsertElements(Delta, Position, DataGroup);
+
+						// Update Start/End
+						if (!NumValues)
+						{
+							Start = Position;
+						}
+						End = Start + InNumValues - 1;
+
+						// Fill the test values with the id check
+						for (int32 ValueIndex = Start; ValueIndex <= End; ++ValueIndex)
+						{
+							Value[ValueIndex] = Id[ViewIndex];
+						}
+
+					}
+					else
+					{
+						// Shrink the array
+						const int32 Position = Start + InNumValues;
+						ManagedArrayCollection.RemoveElements(DataGroup, -Delta, Position);
+
+						// Update Start/End
+						if (InNumValues)
+						{
+							End = Position - 1;
+						}
+						else
+						{
+							End = Start = INDEX_NONE;
+						}
+					}
+				}
+				const int32 Size = ValueEnd[ViewIndex] - ValueStart[ViewIndex] + 1;
+				check(
+					(InNumValues == 0 && ValueStart[ViewIndex] == INDEX_NONE && ValueEnd[ViewIndex] == INDEX_NONE) ||
+					(InNumValues == Size && ValueStart[ViewIndex] != INDEX_NONE && ValueEnd[ViewIndex] != INDEX_NONE));
+		};
+
+		auto HasKeptIntegrity = [&Value , &ValueStart, &ValueEnd, &Id]()->bool
+			{
+				EXPECT_TRUE(ValueEnd.Num() == ValueStart.Num() && Id.Num() == ValueStart.Num());
+				for (int32 ViewIndex = 0; ViewIndex < ValueStart.Num(); ++ViewIndex)
+				{
+					if (ValueStart[ViewIndex] == INDEX_NONE || ValueEnd[ViewIndex] == INDEX_NONE)
+					{
+						if (ValueStart[ViewIndex] != ValueEnd[ViewIndex])
+						{
+							return false;
+						}
+						continue;
+					}
+					for (int32 ValueIndex = ValueStart[ViewIndex]; ValueIndex <= ValueEnd[ViewIndex]; ++ValueIndex)
+					{
+						if (Value[ValueIndex] != Id[ViewIndex])
+						{
+							return false;
+						}
+					}
+				}
+				return true;
+			};
+
+		auto HasKeptOrder = [&Value, &ValueStart, &ValueEnd, &Id]()->bool
+		{
+			int32 PrevValueEnd = -1;
+			for (int32 ViewIndex = 0; ViewIndex < ValueStart.Num(); ++ViewIndex)
+			{
+				if (ValueStart[ViewIndex] == INDEX_NONE)
+				{
+					check(ValueEnd[ViewIndex] == INDEX_NONE);
+					continue;
+				}
+				if (ValueStart[ViewIndex] != PrevValueEnd + 1)
+				{
+					return false;
+				}
+				PrevValueEnd = ValueEnd[ViewIndex];
+			}
+			return PrevValueEnd == Value.Num() - 1;
+		};
+
+		// Insert 5 views from the start of the array
+		for (int32 Index = 0; Index < 5; ++Index)
+		{
+			InsertView(0, (Index + 1) * 100);
+		}
+		// Insert 2 more views for testing consecutive empty views
+		for (int32 Index = 0; Index < 2; ++Index)
+		{
+			InsertView(0, 0);
+		}
+		EXPECT_TRUE(HasKeptIntegrity());
+		EXPECT_TRUE(HasKeptOrder());
+
+		// Add 1 view in the middle of the array
+		InsertView(ManagedArrayCollection.NumElements(ViewGroup) / 2, 500);
+		EXPECT_TRUE(HasKeptIntegrity());
+		EXPECT_TRUE(HasKeptOrder());
+
+		// Add 1 view at the end of the array
+		InsertView(ManagedArrayCollection.NumElements(ViewGroup), 1000);
+		EXPECT_TRUE(HasKeptIntegrity());
+		EXPECT_TRUE(HasKeptOrder());
+
+		// Remove 1 view from the start of the array
+		RemoveViews(0, 1);
+		EXPECT_TRUE(HasKeptIntegrity());
+		EXPECT_TRUE(HasKeptOrder());
+
+		// Remove 1 view from the end of the array
+		RemoveViews(ManagedArrayCollection.NumElements(ViewGroup) - 1, 1);
+		EXPECT_TRUE(HasKeptIntegrity());
+		EXPECT_TRUE(HasKeptOrder());
+
+		// Remove 2 views from the middle
+		RemoveViews(ManagedArrayCollection.NumElements(ViewGroup) / 2, 2);
+		EXPECT_TRUE(HasKeptIntegrity());
+		EXPECT_TRUE(HasKeptOrder());
+
+		// Remove all remaining 5 views
+		RemoveViews(0, 5);
+		EXPECT_TRUE(ManagedArrayCollection.NumElements(ViewGroup) == 0);
+		EXPECT_TRUE(ManagedArrayCollection.NumElements(DataGroup) == 0);
+
+		// Insert 5 empty views
+		for (int32 Index = 0; Index < 5; ++Index)
+		{
+			InsertView(0, 0);
+		}
+		EXPECT_TRUE(HasKeptIntegrity());
+		EXPECT_TRUE(HasKeptOrder());
+
+		// Resize view 1
+		SetViewSize(1, 11);
+		EXPECT_TRUE(HasKeptIntegrity());
+		EXPECT_TRUE(HasKeptOrder());
+
+		// Resize view 2
+		SetViewSize(2, 22);
+		EXPECT_TRUE(HasKeptIntegrity());
+		EXPECT_TRUE(HasKeptOrder());
+
+		// Resize view 3
+		SetViewSize(3, 33);
+		EXPECT_TRUE(HasKeptIntegrity());
+		EXPECT_TRUE(HasKeptOrder());
+
+		// Remove view 2
+		RemoveViews(2, 1);
+		EXPECT_TRUE(HasKeptIntegrity());
+		EXPECT_TRUE(HasKeptOrder());
+		
+		// Resize view 1 to 0
+		SetViewSize(1, 0);
+		EXPECT_TRUE(HasKeptIntegrity());
+		EXPECT_TRUE(HasKeptOrder());
+
+		// Resize view 3 to 33
+		SetViewSize(3, 33);
+		EXPECT_TRUE(HasKeptIntegrity());
+		EXPECT_TRUE(HasKeptOrder());
+
+		// Resize view 3 to 0
+		SetViewSize(3, 0);
+		EXPECT_TRUE(HasKeptIntegrity());
+		EXPECT_TRUE(HasKeptOrder());
+
+		// Resize view 0
+		SetViewSize(0, 1);
+		EXPECT_TRUE(HasKeptIntegrity());
+		EXPECT_TRUE(HasKeptOrder());
+	}
 } // namespace ChaosTest

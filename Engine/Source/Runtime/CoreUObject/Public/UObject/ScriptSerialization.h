@@ -11,7 +11,7 @@
 #ifdef VISUAL_ASSIST_HACK
 	EExprToken SerializeExpr( int32&, FArchive& );
 	int32 iCode=0;
-	FArchive Ar;
+	FNullArchive Ar;
 	TArray<uint8> Script;
 	EExprToken Expr = (EExprToken)0;
 #endif
@@ -124,6 +124,22 @@
 	}
 #endif	//	XFERPTR
 
+#ifndef XFERTOBJPTR
+	#define XFERTOBJPTR() \
+	{ \
+		TObjectPtr<UObject> AlignedPtr; \
+		if (!Ar.IsLoading()) \
+		{ \
+			FMemory::Memcpy(&AlignedPtr, &Script[iCode], sizeof(ScriptPointerType)); \
+		} \
+			Ar << AlignedPtr; \
+		if (!Ar.IsSaving()) \
+		{ \
+			FMemory::Memcpy(&Script[iCode], &AlignedPtr, sizeof(ScriptPointerType)); \
+		} \
+		iCode += sizeof(ScriptPointerType); \
+	}
+#endif	//	XFERTOBJPTR
 
 #ifndef XFER_FUNC_POINTER
 	#define XFER_FUNC_POINTER	XFERPTR(UStruct*)
@@ -139,6 +155,10 @@
 
 #ifndef XFER_OBJECT_POINTER
 	#define XFER_OBJECT_POINTER(Type)	XFERPTR(Type)
+#endif
+
+#ifndef XFER_TOBJECT_PTR
+	#define XFER_TOBJECT_PTR	XFERTOBJPTR
 #endif
 
 #ifndef FIXUP_EXPR_OBJECT_POINTER
@@ -157,7 +177,7 @@
 
 	switch( Expr )
 	{
-		case EX_PrimitiveCast:
+		case EX_Cast:
 		{
 			// A type conversion.
 			XFER(uint8); //which kind of conversion
@@ -229,10 +249,15 @@
 			break;
 		}
 		case EX_PushExecutionFlow:
-			{
-				XFER(CodeSkipSizeType);		// location to push
-				break;
-			}
+		{
+			XFER(CodeSkipSizeType);		// location to push
+			break;
+		}
+		case EX_NothingInt32:
+		{
+			XFER(int32);
+			break;
+		}
 		case EX_Nothing:
 		case EX_EndOfScript:
 		case EX_EndFunctionParms:
@@ -354,6 +379,11 @@
 			XFER(float);
 			break;
 		}
+		case EX_DoubleConst:
+		{
+			XFER(double);
+			break;
+		}
 		case EX_StringConst:
 		{
 			XFERSTRING();
@@ -371,14 +401,44 @@
 		}
 		case EX_ObjectConst:
 		{
-			XFER_OBJECT_POINTER(UObject*);
-			FIXUP_EXPR_OBJECT_POINTER(UObject*);
+			XFER_TOBJECT_PTR();
+			FIXUP_EXPR_OBJECT_POINTER(TObjectPtr<UObject>);
 
 			break;
 		}
 		case EX_SoftObjectConst:
 		{
-			SerializeExpr(iCode, Ar);
+			// if collecting references inform the archive of the reference:
+			if (Ar.IsSaving() && Ar.IsObjectReferenceCollector())
+			{
+				XFER(uint8);
+				Expr = (EExprToken)Script[iCode - 1];
+				check(Expr == EX_StringConst || Expr == EX_UnicodeStringConst);
+				FString LongPath;
+				if (Expr == EX_StringConst)
+				{
+					LongPath = (ANSICHAR*)&Script[iCode];
+					XFERSTRING();
+				}
+				else
+				{
+					LongPath = FString((UCS2CHAR*)&Script[iCode]);
+
+					// Inline combine any surrogate pairs in the data when loading into a UTF-32 string
+					StringConv::InlineCombineSurrogates(LongPath);
+					XFERUNICODESTRING();
+				}
+				FSoftObjectPath Path(LongPath);
+				Ar << Path;
+				// we can't patch the path, but we could log an attempt to do so
+				// or change the implementation to support patching (allocating 
+				// these strings in a special region or distinct object)
+			}
+			else
+			{
+				// else just write the string literal instructions:
+				SerializeExpr(iCode, Ar);
+			}
 			break;
 		}
 		case EX_FieldPathConst:
@@ -393,22 +453,53 @@
 		}
 		case EX_RotationConst:
 		{
-			XFER(int32); XFER(int32); XFER(int32);
+			if(Ar.UEVer() >= EUnrealEngineObjectUE5Version::LARGE_WORLD_COORDINATES)
+			{
+				XFER(int64); XFER(int64); XFER(int64);
+			}
+			else
+			{
+				XFER(int32); XFER(int32); XFER(int32);
+			}
 			break;
 		}
 		case EX_VectorConst:
+		{
+			if(Ar.UEVer() >= EUnrealEngineObjectUE5Version::LARGE_WORLD_COORDINATES)
+			{
+				XFER(double); XFER(double); XFER(double);
+			}
+			else
+			{
+				XFER(float); XFER(float); XFER(float);
+			}
+			break;
+		}
+		case EX_Vector3fConst:
 		{
 			XFER(float); XFER(float); XFER(float);
 			break;
 		}
 		case EX_TransformConst:
 		{
-			// Rotation
-			XFER(float); XFER(float); XFER(float); XFER(float);
-			// Translation
-			XFER(float); XFER(float); XFER(float);
-			// Scale
-			XFER(float); XFER(float); XFER(float);
+			if(Ar.UEVer() >= EUnrealEngineObjectUE5Version::LARGE_WORLD_COORDINATES)
+			{
+				// Rotation
+				XFER(double); XFER(double); XFER(double); XFER(double);
+				// Translation
+				XFER(double); XFER(double); XFER(double);
+				// Scale
+				XFER(double); XFER(double); XFER(double);
+			}
+			else
+			{
+				// Rotation
+				XFER(float); XFER(float); XFER(float); XFER(float);
+				// Translation
+				XFER(float); XFER(float); XFER(float);
+				// Scale
+				XFER(float); XFER(float); XFER(float);
+			}
 			break;
 		}
 		case EX_StructConst:
@@ -421,7 +512,7 @@
 		case EX_SetArray:
 		{
 			// If not loading, or its a newer version
-			if((!GetLinker()) || !Ar.IsLoading() || (Ar.UE4Ver() >= VER_UE4_CHANGE_SETARRAY_BYTECODE))
+			if((!GetLinker()) || !Ar.IsLoading() || (Ar.UEVer() >= VER_UE4_CHANGE_SETARRAY_BYTECODE))
 			{
 				// Array property to assign to
 				EExprToken TargetToken = SerializeExpr( iCode, Ar );
@@ -465,6 +556,12 @@
 			XFERPTR(FProperty*);	// Val property
 			XFER(int32);			// Number of elements
 			while (SerializeExpr(iCode, Ar) != EX_EndMapConst);
+			break;
+		}
+		case EX_BitFieldConst:
+		{
+			XFERPTR(FProperty*);	// Bit property
+			XFER(uint8);			// bit value
 			break;
 		}
 		case EX_ByteConst:
@@ -543,11 +640,29 @@
 			break;
 		}
 		case EX_ArrayGetByRef:
-			{
-				SerializeExpr( iCode, Ar );
-				SerializeExpr( iCode, Ar );
-				break;
-			}
+		{
+			SerializeExpr( iCode, Ar );
+			SerializeExpr( iCode, Ar );
+			break;
+		}
+		case EX_AutoRtfmTransact:
+		{
+			XFER(int32); // Transaction id
+			XFER(CodeSkipSizeType); // Code offset.
+			while( SerializeExpr( iCode, Ar ) != EX_AutoRtfmStopTransact ); // Parms.
+			break;
+		}
+		case EX_AutoRtfmStopTransact:
+		{
+			XFER(int32); // transaction id
+			XFER(int8); // stop mode
+			break;
+		}
+		case EX_AutoRtfmAbortIfNot:
+		{
+			SerializeExpr(iCode,Ar);
+			break;
+		}
 		default:
 		{
 			// This should never occur.

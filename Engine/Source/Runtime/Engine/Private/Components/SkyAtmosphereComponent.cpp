@@ -2,22 +2,27 @@
 
 #include "Components/SkyAtmosphereComponent.h"
 
-#include "Atmosphere/AtmosphericFogComponent.h"
 #include "Components/ArrowComponent.h"
 #include "Components/BillboardComponent.h"
 #include "Engine/MapBuildDataRegistry.h"
-#include "Internationalization/Text.h"
+#include "Engine/Level.h"
+#include "Engine/Texture2D.h"
+#include "Engine/World.h"
 #include "Logging/MessageLog.h"
-#include "Logging/TokenizedMessage.h"
 #include "Misc/MapErrors.h"
 #include "Misc/UObjectToken.h"
-#include "Rendering/SkyAtmosphereCommonData.h"
+#include "SceneInterface.h"
 #include "UObject/UObjectIterator.h"
+#include "SceneManagement.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Components/DirectionalLightComponent.h"
+#include "UObject/UE5MainStreamObjectVersion.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SkyAtmosphereComponent)
 
 #if WITH_EDITOR
 #include "ObjectEditorUtils.h"
+#include "Rendering/StaticLightingSystemInterface.h"
 #endif
 
 #define LOCTEXT_NAMESPACE "SkyAtmosphereComponent"
@@ -50,9 +55,9 @@ USkyAtmosphereComponent::USkyAtmosphereComponent(const FObjectInitializer& Objec
 	RayleighScatteringScale = RayleightScatteringRaw.B;
 	RayleighExponentialDistribution = EarthRayleighScaleHeight;
 
-	MieScattering = FColor(FColor::White);
+	MieScattering = FColor::White;
 	MieScatteringScale = 0.003996f;
-	MieAbsorption = FColor(FColor::White);
+	MieAbsorption = FColor::White;
 	MieAbsorptionScale = 0.000444f;
 	MieAnisotropy = 0.8f;
 	MieExponentialDistribution = EarthMieScaleHeight;
@@ -73,6 +78,9 @@ USkyAtmosphereComponent::USkyAtmosphereComponent(const FObjectInitializer& Objec
 	AerialPerspectiveStartDepth = 0.1f;
 
 	TraceSampleCountScale = 1.0f;
+
+	bHoldout = false;
+	bRenderInMainPass = true;
 
 	memset(OverrideAtmosphericLight, 0, sizeof(OverrideAtmosphericLight));
 
@@ -206,7 +214,6 @@ void USkyAtmosphereComponent::CheckForErrors()
 	{
 		UWorld* ThisWorld = Owner->GetWorld();
 		bool bMultipleFound = false;
-		bool bLegacyAtmosphericFogFound = false;
 
 		if (ThisWorld)
 		{
@@ -215,32 +222,16 @@ void USkyAtmosphereComponent::CheckForErrors()
 				USkyAtmosphereComponent* Component = *ComponentIt;
 
 				if (Component != this
-					&& !Component->IsPendingKill()
+					&& IsValid(Component)
 					&& Component->GetVisibleFlag()
 					&& Component->GetOwner()
 					&& ThisWorld->ContainsActor(Component->GetOwner())
-					&& !Component->GetOwner()->IsPendingKill())
+					&& IsValid(Component->GetOwner()))
 				{
 					bMultipleFound = true;
 					break;
 				}
 			}
-			PRAGMA_DISABLE_DEPRECATION_WARNINGS 
-			for (TObjectIterator<UAtmosphericFogComponent> ComponentIt; ComponentIt; ++ComponentIt)
-			{
-				UAtmosphericFogComponent* Component = *ComponentIt;
-
-				if (!Component->IsPendingKill()
-					&& Component->GetVisibleFlag()
-					&& Component->GetOwner()
-					&& ThisWorld->ContainsActor(Component->GetOwner())
-					&& !Component->GetOwner()->IsPendingKill())
-				{
-					bLegacyAtmosphericFogFound = true;
-					break;
-				}
-			}
-			PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		}
 
 		if (bMultipleFound)
@@ -249,13 +240,6 @@ void USkyAtmosphereComponent::CheckForErrors()
 				->AddToken(FUObjectToken::Create(Owner))
 				->AddToken(FTextToken::Create(LOCTEXT("MapCheck_Message_MultipleSkyAtmosphere", "Multiple sky atmosphere are active, only one can be enabled per world.")))
 				->AddToken(FMapErrorToken::Create(FMapErrors::MultipleSkyAtmospheres));
-		}
-		if (bLegacyAtmosphericFogFound)
-		{
-			FMessageLog("MapCheck").Error()
-				->AddToken(FUObjectToken::Create(Owner))
-				->AddToken(FTextToken::Create(LOCTEXT("MapCheck_Message_MultipleSkyAtmosphereType", "A SkyAtmosphere and a legacy AtmosphericFog components are both active, we recommend to have only one enabled per world.")))
-				->AddToken(FMapErrorToken::Create(FMapErrors::MultipleSkyAtmosphereTypes));
 		}
 	}
 }
@@ -283,21 +267,30 @@ void USkyAtmosphereComponent::PostEditChangeProperty(FPropertyChangedEvent& Prop
 		{
 			SendRenderTransformCommand();
 		}
+
+#if WITH_EDITOR
+		FStaticLightingSystemInterface::OnSkyAtmosphereModified.Broadcast();
+#endif
+
 	}
 }
 
 #endif // WITH_EDITOR
 
-void USkyAtmosphereComponent::PostInterpChange(FProperty* PropertyThatChanged)
-{
-	Super::PostInterpChange(PropertyThatChanged);
-	MarkRenderStateDirty();
-}
-
 void USkyAtmosphereComponent::Serialize(FArchive& Ar)
 {
 	Super::Serialize(Ar);
-	Ar << bStaticLightingBuiltGUID;
+
+	Ar.UsingCustomVersion(FUE5MainStreamObjectVersion::GUID);
+
+	// Only load the lighting GUID if
+	if( (Ar.CustomVer(FUE5MainStreamObjectVersion::GUID) >= FUE5MainStreamObjectVersion::RemovedAtmosphericFog && Ar.IsLoading() && bIsAtmosphericFog) //Loading an AtmosphereFog component into a SkyAtmosphere component
+		|| (Ar.IsSaving() && bIsAtmosphericFog)	// Saving an AtmosphereFog component as a SkyAtmosphere component
+		|| !bIsAtmosphericFog) // Saving / Loading a regular SkyAtmosphere
+	{
+		// Only load that for SkyAtmosphere or AtmosphericFog component that have already been converted
+		Ar << bStaticLightingBuiltGUID;
+	}
 }
 
 void USkyAtmosphereComponent::OverrideAtmosphereLightDirection(int32 AtmosphereLightIndex, const FVector& LightDirection)
@@ -313,10 +306,46 @@ void USkyAtmosphereComponent::OverrideAtmosphereLightDirection(int32 AtmosphereL
 	}
 }
 
+bool USkyAtmosphereComponent::IsAtmosphereLightDirectionOverriden(int32 AtmosphereLightIndex)
+{
+	check(AtmosphereLightIndex >= 0 && AtmosphereLightIndex < NUM_ATMOSPHERE_LIGHTS);
+	if (AtmosphereLightIndex >= 0 && AtmosphereLightIndex < NUM_ATMOSPHERE_LIGHTS)
+	{
+		return OverrideAtmosphericLight[AtmosphereLightIndex];
+	}
+	return false;
+}
+
+FVector USkyAtmosphereComponent::GetOverridenAtmosphereLightDirection(int32 AtmosphereLightIndex)
+{
+	check(AtmosphereLightIndex >= 0 && AtmosphereLightIndex < NUM_ATMOSPHERE_LIGHTS);
+	if (AtmosphereLightIndex >= 0 && AtmosphereLightIndex < NUM_ATMOSPHERE_LIGHTS)
+	{
+		return OverrideAtmosphericLightDirection[AtmosphereLightIndex];
+	}
+	return FVector::ZeroVector;
+}
+
+void USkyAtmosphereComponent::ResetAtmosphereLightDirectionOverride(int32 AtmosphereLightIndex)
+{
+	check(AtmosphereLightIndex >= 0 && AtmosphereLightIndex < NUM_ATMOSPHERE_LIGHTS);
+	if (AtmosphereLightIndex >= 0 && AtmosphereLightIndex < NUM_ATMOSPHERE_LIGHTS)
+	{
+		OverrideAtmosphericLight[AtmosphereLightIndex] = false;
+		OverrideAtmosphericLightDirection[AtmosphereLightIndex] = FVector::ZeroVector;
+	}
+}
+
 void USkyAtmosphereComponent::GetOverrideLightStatus(bool* OutOverrideAtmosphericLight, FVector* OutOverrideAtmosphericLightDirection) const
 {
 	memcpy(OutOverrideAtmosphericLight, OverrideAtmosphericLight, sizeof(OverrideAtmosphericLight));
 	memcpy(OutOverrideAtmosphericLightDirection, OverrideAtmosphericLightDirection, sizeof(OverrideAtmosphericLightDirection));
+}
+
+void USkyAtmosphereComponent::SetPositionToMatchDeprecatedAtmosphericFog()
+{
+	TransformMode = ESkyAtmosphereTransformMode::PlanetTopAtComponentTransform;
+	SetWorldLocation(FVector(0.0f, 0.0f, -100000.0f));
 }
 
 #define SKY_DECLARE_BLUEPRINT_SETFUNCTION(MemberType, MemberName) void USkyAtmosphereComponent::Set##MemberName(MemberType NewValue)\
@@ -336,6 +365,9 @@ void USkyAtmosphereComponent::GetOverrideLightStatus(bool* OutOverrideAtmospheri
 		MarkRenderStateDirty();\
 	}\
 }\
+
+SKY_DECLARE_BLUEPRINT_SETFUNCTION(float, BottomRadius);
+SKY_DECLARE_BLUEPRINT_SETFUNCTION(const FColor&, GroundAlbedo);
 
 SKY_DECLARE_BLUEPRINT_SETFUNCTION(float, AtmosphereHeight);
 SKY_DECLARE_BLUEPRINT_SETFUNCTION(float, MultiScatteringFactor);
@@ -358,15 +390,31 @@ SKY_DECLARE_BLUEPRINT_SETFUNCTION_LINEARCOEFFICIENT(SkyLuminanceFactor);
 SKY_DECLARE_BLUEPRINT_SETFUNCTION(float, AerialPespectiveViewDistanceScale);
 SKY_DECLARE_BLUEPRINT_SETFUNCTION(float, HeightFogContribution);
 
+void USkyAtmosphereComponent::SetHoldout(bool bNewHoldout)
+{
+	if (bHoldout != bNewHoldout)
+	{
+		bHoldout = bNewHoldout;
+		MarkRenderStateDirty();
+	}
+}
+
+void USkyAtmosphereComponent::SetRenderInMainPass(bool bValue)
+{
+	if (bRenderInMainPass != bValue)
+	{
+		bRenderInMainPass = bValue;
+		MarkRenderStateDirty();
+	}
+}
+
 FLinearColor USkyAtmosphereComponent::GetAtmosphereTransmitanceOnGroundAtPlanetTop(UDirectionalLightComponent* DirectionalLight)
 {
 	if(DirectionalLight != nullptr)
 	{
 		FAtmosphereSetup AtmosphereSetup(*this);
-		const FLinearColor TransmittanceAtZenith = AtmosphereSetup.GetTransmittanceAtGroundLevel(FVector(0.0f, 0.0f, 1.0f));
 		const FLinearColor TransmittanceAtDirLight = AtmosphereSetup.GetTransmittanceAtGroundLevel(-DirectionalLight->GetDirection());
-		// In 4.27, transmittance is the ratio of transmittance at zenith and current position (for the sun illuminance to be what artist species when at zenith).
-		return TransmittanceAtDirLight / TransmittanceAtZenith;
+		return TransmittanceAtDirLight;
 	}
 	return FLinearColor::White;
 }
@@ -443,6 +491,8 @@ ASkyAtmosphere::ASkyAtmosphere(const FObjectInitializer& ObjectInitializer)
 FSkyAtmosphereSceneProxy::FSkyAtmosphereSceneProxy(const USkyAtmosphereComponent* InComponent)
 	: bStaticLightingBuilt(false)
 	, AtmosphereSetup(*InComponent)
+	, bHoldout(InComponent->bHoldout > 0)
+	, bRenderInMainPass(InComponent->bRenderInMainPass > 0)
 {
 	SkyLuminanceFactor = InComponent->SkyLuminanceFactor;
 	AerialPespectiveViewDistanceScale = InComponent->AerialPespectiveViewDistanceScale;
@@ -451,8 +501,6 @@ FSkyAtmosphereSceneProxy::FSkyAtmosphereSceneProxy(const USkyAtmosphereComponent
 	TraceSampleCountScale = InComponent->TraceSampleCountScale;
 
 	InComponent->GetOverrideLightStatus(OverrideAtmosphericLight, OverrideAtmosphericLightDirection);
-
-	TransmittanceAtZenith = AtmosphereSetup.GetTransmittanceAtGroundLevel(FVector(0.0f, 0.0f, 1.0f));
 }
 
 FSkyAtmosphereSceneProxy::~FSkyAtmosphereSceneProxy()
@@ -470,5 +518,6 @@ FVector FSkyAtmosphereSceneProxy::GetAtmosphereLightDirection(int32 AtmosphereLi
 
 
 #undef LOCTEXT_NAMESPACE
+
 
 

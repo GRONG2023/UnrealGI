@@ -2,6 +2,11 @@
 
 #pragma once
 
+// HEADER_UNIT_SKIP - Internal
+
+#include "Trace/Detail/Writer.inl"
+
+namespace UE {
 namespace Trace {
 namespace Private {
 
@@ -13,9 +18,12 @@ template <int BufferSize>
 class TWriteBufferRedirect
 {
 public:
+	enum : uint16 { ActiveRedirection = 0xffff };
+
 					TWriteBufferRedirect();
 					~TWriteBufferRedirect();
 	void			Close();
+	void			Abandon();
 	uint8*			GetData();
 	uint32			GetSize() const;
 	uint32			GetCapacity() const;
@@ -34,6 +42,8 @@ inline TWriteBufferRedirect<BufferSize>::TWriteBufferRedirect()
 	Reset();
 	PrevBuffer = GTlsWriteBuffer;
 	GTlsWriteBuffer = &Buffer;
+	Buffer.Size = uint16(BufferSize);
+	Buffer.ThreadId = ActiveRedirection;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -53,6 +63,13 @@ inline void TWriteBufferRedirect<BufferSize>::Close()
 	}
 
 	GTlsWriteBuffer = PrevBuffer;
+	PrevBuffer = nullptr;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+template <int BufferSize>
+inline void TWriteBufferRedirect<BufferSize>::Abandon()
+{
 	PrevBuffer = nullptr;
 }
 
@@ -88,3 +105,4 @@ inline void TWriteBufferRedirect<BufferSize>::Reset()
 
 } // namespace Private
 } // namespace Trace
+} // namespace UE

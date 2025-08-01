@@ -7,9 +7,12 @@
 #include "Misc/FrameTime.h"
 #include "Misc/ScopedSlowTask.h"
 #include "Sections/MovieSceneSubSection.h"
+#include "Sections/MovieSceneSubSection.h"
+#include "Tracks/MovieSceneSubTrack.h"
 #include "MovieScene.h"
 #include "MovieSceneSection.h"
 #include "MovieSceneTrack.h"
+#include "MovieSceneSequence.h"
 #include "Channels/MovieSceneChannelProxy.h"
 #include "Channels/MovieSceneChannel.h"
 
@@ -55,6 +58,8 @@ TRange<FFrameNumber> MigrateFrameRange(const TRange<FFrameNumber>& SourceRange, 
 void MigrateFrameTimes(FFrameRate SourceRate, FFrameRate DestinationRate, UMovieSceneSection* Section)
 {
 	Section->Modify();
+	const bool bSectionWasLocked = Section->IsLocked();
+	Section->SetIsLocked(false);
 
 	TRangeBound<FFrameNumber> NewLowerBound, NewUpperBound;
 
@@ -84,15 +89,7 @@ void MigrateFrameTimes(FFrameRate SourceRate, FFrameRate DestinationRate, UMovie
 		Section->SetPostRollFrames(NewPostRollFrameCount.Value);
 	}
 
-	if (Section->IsA(UMovieSceneSubSection::StaticClass()))
-	{
-		UMovieSceneSubSection* SubSection = Cast<UMovieSceneSubSection>(Section);
-		if (SubSection->Parameters.StartFrameOffset.Value > 0)
-		{
-			FFrameNumber NewStartFrameOffset = ConvertFrameTime(FFrameTime(SubSection->Parameters.StartFrameOffset), SourceRate, DestinationRate).FloorToFrame();
-			SubSection->Parameters.StartFrameOffset = NewStartFrameOffset;
-		}
-	}
+	Section->MigrateFrameTimes(SourceRate, DestinationRate);
 
 	Section->Easing.AutoEaseInDuration    = ConvertFrameTime(Section->Easing.AutoEaseInDuration,    SourceRate, DestinationRate).FloorToFrame().Value;
 	Section->Easing.AutoEaseOutDuration   = ConvertFrameTime(Section->Easing.AutoEaseOutDuration,   SourceRate, DestinationRate).FloorToFrame().Value;
@@ -106,6 +103,8 @@ void MigrateFrameTimes(FFrameRate SourceRate, FFrameRate DestinationRate, UMovie
 			Channel->ChangeFrameResolution(SourceRate, DestinationRate);
 		}
 	}
+
+	Section->SetIsLocked(bSectionWasLocked);
 }
 
 void MigrateFrameTimes(FFrameRate SourceRate, FFrameRate DestinationRate, UMovieSceneTrack* Track)
@@ -119,9 +118,9 @@ void MigrateFrameTimes(FFrameRate SourceRate, FFrameRate DestinationRate, UMovie
 	}
 }
 
-void TimeHelpers::MigrateFrameTimes(FFrameRate SourceRate, FFrameRate DestinationRate, UMovieScene* MovieScene)
+void TimeHelpers::MigrateFrameTimes(FFrameRate SourceRate, FFrameRate DestinationRate, UMovieScene* MovieScene, bool bApplyRecursively)
 {
-	int32 TotalNumTracks = MovieScene->GetMasterTracks().Num() + (MovieScene->GetCameraCutTrack() ? 1 : 0);
+	int32 TotalNumTracks = MovieScene->GetTracks().Num() + (MovieScene->GetCameraCutTrack() ? 1 : 0);
 	for (const FMovieSceneBinding& Binding : MovieScene->GetBindings())
 	{
 		TotalNumTracks += Binding.GetTracks().Num();
@@ -131,16 +130,41 @@ void TimeHelpers::MigrateFrameTimes(FFrameRate SourceRate, FFrameRate Destinatio
 	SlowTask.MakeDialogDelayed(0.25f, true);
 
 	MovieScene->Modify();
+#if WITH_EDITOR
+	const bool bMovieSceneReadOnly = MovieScene->IsReadOnly();
+	MovieScene->SetReadOnly(false);
+#endif
 
 	MovieScene->SetPlaybackRange(MigrateFrameRange(MovieScene->GetPlaybackRange(), SourceRate, DestinationRate));
 #if WITH_EDITORONLY_DATA
 	MovieScene->SetSelectionRange(MigrateFrameRange(MovieScene->GetSelectionRange(), SourceRate, DestinationRate));
 #endif
 
-	for (UMovieSceneTrack* Track : MovieScene->GetMasterTracks())
+	for (UMovieSceneTrack* Track : MovieScene->GetTracks())
 	{
 		SlowTask.EnterProgressFrame();
 		UE::MovieScene::MigrateFrameTimes(SourceRate, DestinationRate, Track);
+
+		// We iterate through recursively here (and not in MigrateFrameTimes) so that the movie scene is taken
+		// into account for locking/modifying/etc.
+		if (bApplyRecursively && Track->IsA<UMovieSceneSubTrack>())
+		{
+			for (UMovieSceneSection* Section : Track->GetAllSections())
+			{
+				UMovieSceneSubSection* SubSection = Cast<UMovieSceneSubSection>(Section);
+				if (SubSection)
+				{
+					if (UMovieSceneSequence* SubSequence = SubSection->GetSequence())
+					{
+						UMovieScene* ChildMovieScene = SubSequence->GetMovieScene();
+						if (ChildMovieScene)
+						{
+							TimeHelpers::MigrateFrameTimes(SourceRate, DestinationRate, ChildMovieScene, bApplyRecursively);
+						}
+					}
+				}
+			}
+		}
 	}
 
 	if (UMovieSceneTrack* Track = MovieScene->GetCameraCutTrack())
@@ -158,7 +182,28 @@ void TimeHelpers::MigrateFrameTimes(FFrameRate SourceRate, FFrameRate Destinatio
 		}
 	}
 
+	{
+		TArray<FMovieSceneMarkedFrame> MarkedFrames = MovieScene->GetMarkedFrames();
+
+		// Clear the marked frames as the returned array is immutable
+		MovieScene->DeleteMarkedFrames();
+
+		for (FMovieSceneMarkedFrame& MarkedFrame : MarkedFrames)
+		{
+			MarkedFrame.FrameNumber = ConvertFrameTime(MarkedFrame.FrameNumber, SourceRate, DestinationRate).RoundToFrame();
+
+			// Add it back in
+			MovieScene->AddMarkedFrame(MarkedFrame);
+		}
+
+		// Ensure they're in order as they may not have been before.
+		MovieScene->SortMarkedFrames();
+
+	}
 	MovieScene->SetTickResolutionDirectly(DestinationRate);
+#if WITH_EDITOR
+	MovieScene->SetReadOnly(bMovieSceneReadOnly);
+#endif
 }
 
 } // namespace MovieScene

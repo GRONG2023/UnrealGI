@@ -1,8 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Factories/FbxSceneImportOptionsStaticMesh.h"
-#include "Factories/FbxStaticMeshImportData.h"
+
+#include "Containers/EnumAsByte.h"
+#include "Factories/FbxMeshImportData.h"
 #include "Factories/FbxSceneImportOptions.h"
+#include "Factories/FbxStaticMeshImportData.h"
+#include "Math/MathFwd.h"
+#include "Math/Rotator.h"
+#include "Math/Vector.h"
+#include "Misc/AssertionMacros.h"
+#include "UObject/UnrealNames.h"
 
 
 UFbxSceneImportOptionsStaticMesh::UFbxSceneImportOptionsStaticMesh(const FObjectInitializer& ObjectInitializer)
@@ -10,7 +18,6 @@ UFbxSceneImportOptionsStaticMesh::UFbxSceneImportOptionsStaticMesh(const FObject
 	, StaticMeshLODGroup(NAME_None)
 	, bAutoGenerateCollision(true)
 	, bRemoveDegenerates(true)
-	, bBuildAdjacencyBuffer(true)
 	, bBuildReversedIndexBuffer(true)
 	, bGenerateLightmapUVs(true)
 	, bOneConvexHullPerUCX(true)
@@ -25,7 +32,6 @@ void UFbxSceneImportOptionsStaticMesh::FillStaticMeshInmportData(UFbxStaticMeshI
 	check(StaticMeshImportData != nullptr);
 	check(SceneImportOptions != nullptr);
 	StaticMeshImportData->bAutoGenerateCollision = bAutoGenerateCollision;
-	StaticMeshImportData->bBuildAdjacencyBuffer = bBuildAdjacencyBuffer;
 	StaticMeshImportData->bBuildReversedIndexBuffer = bBuildReversedIndexBuffer;
 	StaticMeshImportData->bGenerateLightmapUVs = bGenerateLightmapUVs;
 	StaticMeshImportData->bOneConvexHullPerUCX = bOneConvexHullPerUCX;

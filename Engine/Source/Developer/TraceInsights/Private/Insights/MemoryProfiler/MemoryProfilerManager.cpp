@@ -2,11 +2,16 @@
 
 #include "MemoryProfilerManager.h"
 
+#include "MessageLogModule.h"
 #include "Modules/ModuleManager.h"
-#include "TraceServices/AnalysisService.h"
-#include "TraceServices/Model/Memory.h"
+#include "Widgets/Docking/SDockTab.h"
 #include "WorkspaceMenuStructure.h"
 #include "WorkspaceMenuStructureModule.h"
+
+// TraceServices
+#include "Common/ProviderLock.h"
+#include "TraceServices/Model/AllocationsProvider.h"
+#include "TraceServices/Model/Memory.h"
 
 // Insights
 #include "Insights/Common/InsightsMenuBuilder.h"
@@ -54,9 +59,12 @@ FMemoryProfilerManager::FMemoryProfilerManager(TSharedRef<FUICommandList> InComm
 	, bIsAvailable(false)
 	, CommandList(InCommandList)
 	, ActionManager(this)
-	, ProfilerWindow(nullptr)
+	, ProfilerWindowWeakPtr()
 	, bIsTimingViewVisible(false)
+	, bIsMemInvestigationViewVisible(false)
 	, bIsMemTagTreeViewVisible(false)
+	, bIsModulesViewVisible(false)
+	, LogListingName(TEXT("MemoryInsights"))
 {
 }
 
@@ -75,7 +83,7 @@ void FMemoryProfilerManager::Initialize(IUnrealInsightsModule& InsightsModule)
 
 	// Register tick functions.
 	OnTick = FTickerDelegate::CreateSP(this, &FMemoryProfilerManager::Tick);
-	OnTickHandle = FTicker::GetCoreTicker().AddTicker(OnTick, 0.0f);
+	OnTickHandle = FTSTicker::GetCoreTicker().AddTicker(OnTick, 0.0f);
 
 	FMemoryProfilerCommands::Register();
 	BindCommands();
@@ -94,12 +102,22 @@ void FMemoryProfilerManager::Shutdown()
 	}
 	bIsInitialized = false;
 
+	// If the MessageLog module was already unloaded as part of the global Shutdown process, do not load it again.
+	if (FModuleManager::Get().IsModuleLoaded("MessageLog"))
+	{
+		FMessageLogModule& MessageLogModule = FModuleManager::LoadModuleChecked<FMessageLogModule>("MessageLog");
+		if (MessageLogModule.IsRegisteredLogListing(GetLogListingName()))
+		{
+			MessageLogModule.UnregisterLogListing(GetLogListingName());
+		}
+	}
+
 	FInsightsManager::Get()->GetSessionChangedEvent().RemoveAll(this);
 
 	FMemoryProfilerCommands::Unregister();
 
 	// Unregister tick function.
-	FTicker::GetCoreTicker().RemoveTicker(OnTickHandle);
+	FTSTicker::GetCoreTicker().RemoveTicker(OnTickHandle);
 
 	FMemoryProfilerManager::Instance.Reset();
 
@@ -118,13 +136,16 @@ FMemoryProfilerManager::~FMemoryProfilerManager()
 void FMemoryProfilerManager::BindCommands()
 {
 	ActionManager.Map_ToggleTimingViewVisibility_Global();
+	ActionManager.Map_ToggleMemInvestigationViewVisibility_Global();
 	ActionManager.Map_ToggleMemTagTreeViewVisibility_Global();
+	ActionManager.Map_ToggleModulesViewVisibility_Global();
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void FMemoryProfilerManager::RegisterMajorTabs(IUnrealInsightsModule& InsightsModule)
 {
+#if !WITH_EDITOR
 	const FInsightsMajorTabConfig& Config = InsightsModule.FindMajorTabConfig(FInsightsManagerTabs::MemoryProfilerTabId);
 
 	if (Config.bIsAvailable)
@@ -134,11 +155,12 @@ void FMemoryProfilerManager::RegisterMajorTabs(IUnrealInsightsModule& InsightsMo
 			FOnSpawnTab::CreateRaw(this, &FMemoryProfilerManager::SpawnTab), FCanSpawnTab::CreateRaw(this, &FMemoryProfilerManager::CanSpawnTab))
 			.SetDisplayName(Config.TabLabel.IsSet() ? Config.TabLabel.GetValue() : LOCTEXT("MemoryProfilerTabTitle", "Memory Insights"))
 			.SetTooltipText(Config.TabTooltip.IsSet() ? Config.TabTooltip.GetValue() : LOCTEXT("MemoryProfilerTooltipText", "Open the Memory Insights tab."))
-			.SetIcon(Config.TabIcon.IsSet() ? Config.TabIcon.GetValue() : FSlateIcon(FInsightsStyle::GetStyleSetName(), "MemoryProfiler.Icon.Small"));
+			.SetIcon(Config.TabIcon.IsSet() ? Config.TabIcon.GetValue() : FSlateIcon(FInsightsStyle::GetStyleSetName(), "Icons.MemoryProfiler"));
 
 		TSharedRef<FWorkspaceItem> Group = Config.WorkspaceGroup.IsValid() ? Config.WorkspaceGroup.ToSharedRef() : FInsightsManager::Get()->GetInsightsMenuBuilder()->GetInsightsToolsGroup();
 		TabSpawnerEntry.SetGroup(Group);
 	}
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -178,6 +200,14 @@ bool FMemoryProfilerManager::CanSpawnTab(const FSpawnTabArgs& Args) const
 
 void FMemoryProfilerManager::OnTabClosed(TSharedRef<SDockTab> TabBeingClosed)
 {
+	{
+		TSharedPtr<SMemoryProfilerWindow> ProfilerWindow = GetProfilerWindow();
+		if (ProfilerWindow.IsValid())
+		{
+			ProfilerWindow->CloseMemAllocTableTreeTabs();
+		}
+	}
+
 	RemoveProfilerWindow();
 
 	// Disable TabClosed delegate.
@@ -220,12 +250,12 @@ bool FMemoryProfilerManager::Tick(float DeltaTime)
 	// Check if session has Memory events (to spawn the tab), but not too often.
 	if (!bIsAvailable && AvailabilityCheck.Tick())
 	{
-		uint32 TagCount = 0;
+		bool bShouldBeAvailable = false;
 
-		TSharedPtr<const Trace::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
+		TSharedPtr<const TraceServices::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
 		if (Session.IsValid())
 		{
-			Trace::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
+			TraceServices::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
 
 			if (Session->IsAnalysisComplete())
 			{
@@ -233,8 +263,25 @@ bool FMemoryProfilerManager::Tick(float DeltaTime)
 				AvailabilityCheck.Disable();
 			}
 
-			const Trace::IMemoryProvider& MemoryProvider = Trace::ReadMemoryProvider(*Session.Get());
-			TagCount = MemoryProvider.GetTagCount();
+			const TraceServices::IMemoryProvider* MemoryProvider = TraceServices::ReadMemoryProvider(*Session.Get());
+			if (MemoryProvider)
+			{
+				uint32 TagCount = MemoryProvider->GetTagCount();
+				if (TagCount > 0)
+				{
+					bShouldBeAvailable = true;
+				}
+			}
+
+			const TraceServices::IAllocationsProvider* AllocationsProvider = TraceServices::ReadAllocationsProvider(*Session.Get());
+			if (AllocationsProvider)
+			{
+				TraceServices::FProviderReadScopeLock _(*AllocationsProvider);
+				if (AllocationsProvider->IsInitialized())
+				{
+					bShouldBeAvailable = true;
+				}
+			}
 		}
 		else
 		{
@@ -242,9 +289,13 @@ bool FMemoryProfilerManager::Tick(float DeltaTime)
 			AvailabilityCheck.Disable();
 		}
 
-		if (TagCount > 0)
+		if (bShouldBeAvailable)
 		{
 			bIsAvailable = true;
+
+			FMessageLogModule& MessageLogModule = FModuleManager::LoadModuleChecked<FMessageLogModule>("MessageLog");
+			MessageLogModule.RegisterLogListing(GetLogListingName(), LOCTEXT("MemoryInsights", "Memory Insights"));
+			MessageLogModule.EnableMessageLogDisplay(true);
 
 #if !WITH_EDITOR
 			const FName& TabId = FInsightsManagerTabs::MemoryProfilerTabId;
@@ -298,6 +349,19 @@ void FMemoryProfilerManager::ShowHideTimingView(const bool bIsVisible)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+void FMemoryProfilerManager::ShowHideMemInvestigationView(const bool bIsVisible)
+{
+	bIsMemInvestigationViewVisible = bIsVisible;
+
+	TSharedPtr<SMemoryProfilerWindow> Wnd = GetProfilerWindow();
+	if (Wnd.IsValid())
+	{
+		Wnd->ShowHideTab(FMemoryProfilerTabs::MemInvestigationViewID, bIsVisible);
+	}
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 void FMemoryProfilerManager::ShowHideMemTagTreeView(const bool bIsVisible)
 {
 	bIsMemTagTreeViewVisible = bIsVisible;
@@ -306,6 +370,37 @@ void FMemoryProfilerManager::ShowHideMemTagTreeView(const bool bIsVisible)
 	if (Wnd.IsValid())
 	{
 		Wnd->ShowHideTab(FMemoryProfilerTabs::MemTagTreeViewID, bIsVisible);
+	}
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void FMemoryProfilerManager::ShowHideModulesView(const bool bIsVisible)
+{
+	bIsModulesViewVisible = bIsVisible;
+
+	TSharedPtr<SMemoryProfilerWindow> Wnd = GetProfilerWindow();
+	if (Wnd.IsValid())
+	{
+		Wnd->ShowHideTab(FMemoryProfilerTabs::ModulesViewID, bIsVisible);
+	}
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void FMemoryProfilerManager::OnWindowClosedEvent()
+{
+	// Need to close MemAlloc window to prevent it being saved in the layout and spawning as an "Unregister Tab" on the next application start. 
+	TSharedPtr<SMemoryProfilerWindow> Wnd = GetProfilerWindow();
+	if (Wnd.IsValid())
+	{
+		Wnd->CloseMemAllocTableTreeTabs();
+
+		TSharedPtr<STimingView> TimingView = Wnd->GetTimingView();
+		if (TimingView.IsValid())
+		{
+			TimingView->CloseQuickFindTab();
+		}
 	}
 }
 

@@ -1,7 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "InstallBundleUtils.h"
-#include "InstallBundleManagerPrivatePCH.h"
+
+#include "InstallBundleManagerPrivate.h"
 #include "Misc/App.h"
 
 #include "HAL/PlatformApplicationMisc.h"
@@ -12,9 +13,13 @@
 #include "Misc/CoreDelegates.h"
 #include "Misc/Paths.h"
 #include "Misc/FileHelper.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "Serialization/JsonSerializerMacros.h"
 #include "Stats/Stats.h"
+
+#include "Algo/AnyOf.h"
+#include "Algo/AllOf.h"
+#include "Algo/Find.h"
 
 namespace InstallBundleUtil
 {
@@ -51,6 +56,114 @@ namespace InstallBundleUtil
 		return Prefix;
 	}
 
+	bool HasInstallBundleInConfig(const FString& BundleName)
+	{
+		const FConfigFile* InstallBundleConfig = GConfig->FindConfigFile(GInstallBundleIni);
+		if (InstallBundleConfig)
+		{
+			const FString SectionName = InstallBundleUtil::GetInstallBundleSectionPrefix() + BundleName;
+			return InstallBundleConfig->DoesSectionExist(*SectionName);
+		}
+		return false;
+	}
+
+	bool AllInstallBundlePredicate(const FConfigFile& InstallBundleConfig, const FString& Section)
+	{ 
+		return true; 
+	}
+
+	bool IsPlatformInstallBundlePredicate(const FConfigFile& InstallBundleConfig, const FString& Section)
+	{
+		FString PlatformChunkName;
+		InstallBundleConfig.GetString(*Section, TEXT("PlatformChunkName"), PlatformChunkName);
+
+		int32 ChunkID = 0;
+		if (PlatformChunkName.IsEmpty() && InstallBundleConfig.GetInt(*Section, TEXT("PlatformChunkID"), ChunkID) && ChunkID < 0)
+		{
+			return false;
+		}
+
+		return true;
+	}
+
+	TArray<TPair<FString, TArray<FRegexPattern>>> LoadBundleRegexFromConfig(
+		const FConfigFile& InstallBundleConfig, 
+		TFunctionRef<bool(const FConfigFile& InstallBundleConfig, const FString& Section)> SectionPredicate /*= AllInstallBundlePredicate*/)
+	{
+		TArray<TPair<FString, TArray<FRegexPattern>>> BundleRegexList; // BundleName -> FileRegex
+
+		for (const TPair<FString, FConfigSection>& Pair : InstallBundleConfig)
+		{
+			const FString& Section = Pair.Key;
+			if (!Section.StartsWith(InstallBundleUtil::GetInstallBundleSectionPrefix()))
+				continue;
+
+			if (!SectionPredicate(InstallBundleConfig, Section))
+				continue;
+
+			TArray<FString> StrSearchRegexPatterns;
+			if (!InstallBundleConfig.GetArray(*Section, TEXT("FileRegex"), StrSearchRegexPatterns))
+				continue;
+
+			TArray<FRegexPattern> SearchRegexPatterns;
+			SearchRegexPatterns.Reserve(StrSearchRegexPatterns.Num());
+			for (const FString& Str : StrSearchRegexPatterns)
+			{
+				SearchRegexPatterns.Emplace(Str, ERegexPatternFlags::CaseInsensitive);
+			}
+
+			const FString BundleName = Section.RightChop(InstallBundleUtil::GetInstallBundleSectionPrefix().Len());
+			BundleRegexList.Emplace(TPair<FString, TArray<FRegexPattern>>(BundleName, MoveTemp(SearchRegexPatterns)));
+		}
+
+		BundleRegexList.StableSort([&InstallBundleConfig](const TPair<FString, TArray<FRegexPattern>>& PairA, const TPair<FString, TArray<FRegexPattern>>& PairB) -> bool
+		{
+			int32 BundleAOrder = INT_MAX;
+			int32 BundleBOrder = INT_MAX;
+
+			const FString SectionA = InstallBundleUtil::GetInstallBundleSectionPrefix() + PairA.Key;
+			const FString SectionB = InstallBundleUtil::GetInstallBundleSectionPrefix() + PairB.Key;
+
+			if (!InstallBundleConfig.GetInt(*SectionA, TEXT("Order"), BundleAOrder))
+			{
+				UE_LOG(LogInstallBundleManager, Warning, TEXT("Bundle Section %s doesn't have an order"), *SectionA);
+			}
+
+			if (!InstallBundleConfig.GetInt(*SectionB, TEXT("Order"), BundleBOrder))
+			{
+				UE_LOG(LogInstallBundleManager, Warning, TEXT("Bundle Section %s doesn't have an order"), *SectionB);
+			}
+
+			return BundleAOrder < BundleBOrder;
+		});
+
+		return BundleRegexList;
+	}
+
+	bool MatchBundleRegex(
+		const TArray<TPair<FString, TArray<FRegexPattern>>>& BundleRegexList,
+		const FString& Path,
+		FString& OutBundleName)
+	{
+		const TPair<FString, TArray<FRegexPattern>>* BundleRegexPair = Algo::FindByPredicate(BundleRegexList,
+			[&Path](const TPair<FString, TArray<FRegexPattern>>& Pair)
+			{
+				const TArray<FRegexPattern>& SearchRegexPatterns = Pair.Value;
+				return Algo::AnyOf(SearchRegexPatterns, [&Path](const FRegexPattern& Pattern)
+				{
+					return FRegexMatcher(Pattern, Path).FindNext();
+				});
+			});
+
+		if (BundleRegexPair)
+		{
+			OutBundleName = BundleRegexPair->Key;
+			return true;
+		}
+
+		return false;
+	}
+
 	FName FInstallBundleManagerKeepAwake::Tag(TEXT("InstallBundleManagerKeepAwake"));
 	FName FInstallBundleManagerKeepAwake::TagWithRendering(TEXT("InstallBundleManagerKeepAwakeWithRendering"));
 
@@ -77,6 +190,42 @@ namespace InstallBundleUtil
 		}
 	}
 
+	std::atomic<int32> InstallBundleSuppressAnalyticsCounter = 0;
+
+	FInstallBundleSuppressAnalytics::FInstallBundleSuppressAnalytics()
+		: bIsEnabled(false)
+	{
+	}
+
+	FInstallBundleSuppressAnalytics::~FInstallBundleSuppressAnalytics()
+	{
+		Disable();
+	}
+
+	void FInstallBundleSuppressAnalytics::Enable()
+	{
+		if (!bIsEnabled)
+		{
+			bIsEnabled = true;
+			ensure(InstallBundleSuppressAnalyticsCounter++ >= 0);
+		}
+	}
+
+	void FInstallBundleSuppressAnalytics::Disable()
+	{
+		if (bIsEnabled)
+		{
+			bIsEnabled = false;
+			ensure(--InstallBundleSuppressAnalyticsCounter >= 0);
+		}
+	}
+
+	bool FInstallBundleSuppressAnalytics::IsEnabled()
+	{
+		return InstallBundleSuppressAnalyticsCounter > 0;
+	}
+
+
 	void StartInstallBundleAsyncIOTask(TArray<TUniquePtr<FInstallBundleTask>>& Tasks, TUniqueFunction<void()> WorkFunc, TUniqueFunction<void()> OnComplete)
 	{
 		TUniquePtr<FInstallBundleTask> Task = MakeUnique<FInstallBundleTask>(MoveTemp(WorkFunc), MoveTemp(OnComplete));
@@ -101,7 +250,7 @@ namespace InstallBundleUtil
 			if (Task->IsDone())
 			{
 				FinishedTasks.Add(MoveTemp(Task));
-				Tasks.RemoveAtSwap(i, 1, false);
+				Tasks.RemoveAtSwap(i, 1, EAllowShrinking::No);
 			}
 			else
 			{
@@ -129,7 +278,7 @@ namespace InstallBundleUtil
 	void FContentRequestStatsMap::StatsBegin(FName BundleName)
 	{
 		FContentRequestStats& Stats = StatsMap.FindOrAdd(BundleName);
-		if (ensureAlwaysMsgf(Stats.bOpen, TEXT("StatsBegin - Stat closed for %s"), *BundleName.ToString()) == false)
+		if (false == ensureAlwaysMsgf(Stats.bOpen, TEXT("StatsBegin - Stat closed for %s"), *BundleName.ToString()))
 		{
 			Stats = FContentRequestStats();
 		}
@@ -141,8 +290,14 @@ namespace InstallBundleUtil
 	{
 		FContentRequestStats& Stats = StatsMap.FindOrAdd(BundleName);
 
-		if (ensureAlwaysMsgf(Stats.bOpen, TEXT("StatsEnd - Stat closed for %s"), *BundleName.ToString()))
+		ensureAlwaysMsgf(Stats.bOpen && Stats.StartTime > 0, TEXT("StatsEnd - Stat closed for %s"), *BundleName.ToString());
+		if (Stats.bOpen)
 		{
+			ensureAlwaysMsgf(
+				Algo::AllOf(Stats.StateStats, 
+					[](const TPair<FString, FContentRequestStateStats>& Pair) { return !Pair.Value.bOpen; }),
+				TEXT("StatsEnd - StateStat open for %s"), *BundleName.ToString());
+
 			Stats.EndTime = FPlatformTime::Seconds();
 			Stats.bOpen = false;
 		}
@@ -150,20 +305,29 @@ namespace InstallBundleUtil
 
 	void FContentRequestStatsMap::StatsReset(FName BundleName)
 	{
-		StatsMap.Remove(BundleName);
+		if (FContentRequestStats* Stats = StatsMap.Find(BundleName))
+		{
+			ensureAlwaysMsgf(!Stats->bOpen, TEXT("StatsReset - Stat open for %s"), *BundleName.ToString());
+			ensureAlwaysMsgf(
+				Algo::AllOf(Stats->StateStats,
+					[](const TPair<FString, FContentRequestStateStats>& Pair) { return !Pair.Value.bOpen; }),
+				TEXT("StatsReset - StateStat open for %s"), *BundleName.ToString());
+
+			StatsMap.Remove(BundleName);
+		}
 	}
 
 	void FContentRequestStatsMap::StatsBegin(FName BundleName, const TCHAR* State)
 	{
 		FContentRequestStats& Stats = StatsMap.FindOrAdd(BundleName);
-		if (ensureAlwaysMsgf(Stats.bOpen, TEXT("StatsBegin - Stat closed for %s - %s"), *BundleName.ToString(), State) == false)
+		if (false == ensureAlwaysMsgf(Stats.bOpen, TEXT("StatsBegin - Stat closed for %s - %s"), *BundleName.ToString(), State))
 		{
 			Stats = FContentRequestStats();
 			Stats.StartTime = FPlatformTime::Seconds();
 		}
 
 		FContentRequestStateStats& StateStats = Stats.StateStats.FindOrAdd(State);
-		if (ensureAlwaysMsgf(StateStats.bOpen, TEXT("StatsBegin - StateStat closed for %s - %s"), *BundleName.ToString(), State) == false)
+		if (false == ensureAlwaysMsgf(StateStats.bOpen, TEXT("StatsBegin - StateStat closed for %s - %s"), *BundleName.ToString(), State))
 		{
 			StateStats = FContentRequestStateStats();
 		}
@@ -174,14 +338,14 @@ namespace InstallBundleUtil
 	void FContentRequestStatsMap::StatsEnd(FName BundleName, const TCHAR* State, uint64 DataSize /*= 0*/)
 	{
 		FContentRequestStats& Stats = StatsMap.FindOrAdd(BundleName);
-		if (ensureAlwaysMsgf(Stats.bOpen, TEXT("StatsEnd - Stat closed for %s - %s"), *BundleName.ToString(), State) == false)
+		if (false == ensureAlwaysMsgf(Stats.bOpen && Stats.StartTime > 0, TEXT("StatsEnd - Stat closed for %s - %s"), *BundleName.ToString(), State))
 		{
 			Stats = FContentRequestStats();
 			Stats.StartTime = FPlatformTime::Seconds();
 		}
 
 		FContentRequestStateStats& StateStats = Stats.StateStats.FindOrAdd(State);
-		if(ensureAlwaysMsgf(StateStats.bOpen, TEXT("StatsEnd - StateStat closed for %s - %s"), *BundleName.ToString(), State))
+		if (ensureAlwaysMsgf(StateStats.bOpen && StateStats.StartTime > 0, TEXT("StatsEnd - StateStat closed for %s - %s"), *BundleName.ToString(), State))
 		{
 			StateStats.EndTime = FPlatformTime::Seconds();
 			StateStats.DataSize = DataSize;
@@ -830,7 +994,7 @@ namespace InstallBundleUtil
 				//Only setup a tick function if we would use it
 				if ((bShouldAutoUpdateTimersInTick || bShouldSaveDirtyStatsOnTick) && !TickHandle.IsValid())
 				{
-					TickHandle = FTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FPersistentStatContainerBase::Tick));
+					TickHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FPersistentStatContainerBase::Tick));
 				}
 
 				//Only setup Foreground/Background delegates if we should be using them to swap stats
@@ -852,7 +1016,7 @@ namespace InstallBundleUtil
 		{
 			if (TickHandle.IsValid())
 			{
-				FTicker::GetCoreTicker().RemoveTicker(TickHandle);
+				FTSTicker::GetCoreTicker().RemoveTicker(TickHandle);
 				TickHandle.Reset();
 			}
 
@@ -1103,6 +1267,7 @@ namespace InstallBundleUtil
 
 		void FPersistentStatContainerBase::OnApp_EnteringBackground()
 		{
+			SCOPED_ENTER_BACKGROUND_EVENT(STAT_InstallBundle_OnApp_EnteringBackground);
 			OnBackground_HandleBundleStats();
 			OnBackground_HandleSessionStats();
 		}

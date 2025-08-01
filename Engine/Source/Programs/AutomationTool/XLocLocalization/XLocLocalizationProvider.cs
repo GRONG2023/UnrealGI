@@ -11,6 +11,12 @@ using System.Security.Cryptography;
 using AutomationTool;
 using UnrealBuildTool;
 using EpicGames.Localization;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+
+using static AutomationTool.CommandUtils;
+
+#pragma warning disable SYSLIB0014
 
 namespace EpicGames.XLocLocalization
 {
@@ -58,7 +64,7 @@ namespace EpicGames.XLocLocalization
 			Config = new XLocConfig();
 		}
 
-		public override void DownloadProjectFromLocalizationProvider(string ProjectName, ProjectImportExportInfo ProjectImportInfo)
+		public async override Task DownloadProjectFromLocalizationProvider(string ProjectName, ProjectImportExportInfo ProjectImportInfo)
 		{
 			var XLocApiClient = CreateXLocApiClient();
 
@@ -86,6 +92,8 @@ namespace EpicGames.XLocLocalization
 			{
 				XLocApiClient.Close();
 			}
+
+			await Task.CompletedTask;
 		}
 
 		private void DownloadLatestPOFile(XLocApiClient XLocApiClient, string AuthToken, string Culture, string Platform, ProjectImportExportInfo ProjectImportInfo)
@@ -101,12 +109,12 @@ namespace EpicGames.XLocLocalization
 			}
 			catch (Exception Ex)
 			{
-				BuildCommand.LogWarning("RequestLatestBuild failed for {0}. {1}", Culture, Ex);
+				Logger.LogWarning(Ex, "RequestLatestBuild failed for {Culture}. {Ex}", Culture, Ex);
 				return;
 			}
 			if (String.IsNullOrEmpty(LatestBuildXml))
 			{
-				Console.WriteLine("[IGNORED] '{0}' has no build data ({1})", XLocFilename, Culture);
+				Logger.LogInformation("[IGNORED] '{0}' has no build data ({1})", XLocFilename, Culture);
 				return;
 			}
 
@@ -169,7 +177,7 @@ namespace EpicGames.XLocLocalization
 				{
 					if (Response.StatusCode != HttpStatusCode.OK)
 					{
-						BuildCommand.LogWarning("HTTP Request to '{0}' failed. {1}", POFileUri, Response.StatusDescription);
+						Logger.LogWarning("HTTP Request to '{Url}' failed. {Status}", POFileUri, Response.StatusDescription);
 						return;
 					}
 
@@ -190,7 +198,7 @@ namespace EpicGames.XLocLocalization
 							using (var FileStream = ExportFile.Open(FileMode.Create))
 							{
 								ResponseStream.CopyTo(FileStream);
-								Console.WriteLine("[SUCCESS] Exporting: '{0}' as '{1}' ({2})", XLocFilename, ExportFile.FullName, Culture);
+								Logger.LogInformation("[SUCCESS] Exporting: '{File}' as '{ExportFile}' ({Culture})", XLocFilename, ExportFile.FullName, Culture);
 							}
 
 							if (ExportFileWasReadOnly)
@@ -221,7 +229,7 @@ namespace EpicGames.XLocLocalization
 							// Add/check out backed up POs from OneSky.
 							if (CommandUtils.P4Enabled)
 							{
-								UE4Build.AddBuildProductsToChangelist(PendingChangeList, new List<string>() { ExportFileCopy.FullName });
+								UnrealBuild.AddBuildProductsToChangelist(PendingChangeList, new List<string>() { ExportFileCopy.FullName });
 							}
 						}
 					}
@@ -229,7 +237,7 @@ namespace EpicGames.XLocLocalization
 			}
 		}
 
-		public override void UploadProjectToLocalizationProvider(string ProjectName, ProjectImportExportInfo ProjectExportInfo)
+		public async override Task UploadProjectToLocalizationProvider(string ProjectName, ProjectImportExportInfo ProjectExportInfo)
 		{
 			var XLocApiClient = CreateXLocApiClient();
 			var TransferServiceClient = CreateTransferServiceClient();
@@ -267,6 +275,8 @@ namespace EpicGames.XLocLocalization
 				XLocApiClient.Close();
 				TransferServiceClient.Close();
 			}
+
+			await Task.CompletedTask;
 		}
 
 		private void UploadLatestPOFile(TransferServiceClient TransferServiceClient, string AuthToken, string Culture, string Platform, ProjectImportExportInfo ProjectExportInfo)
@@ -317,11 +327,9 @@ namespace EpicGames.XLocLocalization
 			Binding.SendTimeout = new TimeSpan(0, 1, 0);
 			Binding.AllowCookies = false;
 			Binding.BypassProxyOnLocal = false;
-			Binding.HostNameComparisonMode = HostNameComparisonMode.StrongWildcard;
 			Binding.MaxBufferSize = 2147483647;
 			Binding.MaxBufferPoolSize = 5242880;
 			Binding.MaxReceivedMessageSize = 2147483647;
-			Binding.MessageEncoding = WSMessageEncoding.Text;
 			Binding.TextEncoding = Encoding.UTF8;
 			Binding.TransferMode = TransferMode.Buffered;
 			Binding.UseDefaultWebProxy = true;
@@ -364,16 +372,16 @@ namespace EpicGames.XLocLocalization
 				{
 					return RequestAuthToken(XLocApiClient);
 				}
-				catch (Exception Ex)
+				catch
 				{
 					if (++Count < MAX_COUNT)
 					{
-						BuildCommand.LogWarning("RequestAuthToken attempt {0}/{1} failed. Retrying...", Count, MAX_COUNT);
+						Logger.LogWarning("RequestAuthToken attempt {Count}/{Total} failed. Retrying...", Count, MAX_COUNT);
 						continue;
 					}
 
-					BuildCommand.LogWarning("RequestAuthToken attempt {0}/{1} failed.", Count, MAX_COUNT);
-					throw Ex;
+					Logger.LogWarning("RequestAuthToken attempt {Count}/{Total} failed.", Count, MAX_COUNT);
+					throw;
 				}
 			}
 		}
@@ -412,21 +420,31 @@ namespace EpicGames.XLocLocalization
 		{
 			return new Dictionary<string, string>
 			{
-				{ "en", "E" },		// English
-				{ "fr", "F" },		// French
-				{ "it", "I" },		// Italian
-				{ "de", "G" },		// German
-				{ "es", "S" },		// Spanish
-				{ "es-419", "Y" },	// LatAm Spanish
-				{ "ru", "R" },		// Russian
-				{ "pl", "P" },		// Polish
-				{ "ar", "A" },		// Arabic
-				{ "ko", "K" },		// Korean
-				{ "ja", "J" },		// Japanese
-				{ "zh-Hans", "2" },	// Simp Chinese
-				{ "zh-Hant", "1" },	// Trad Chinese
-				{ "tr", "3" },		// Turkish
-				{ "pt-BR", "$" },	// Brazilian Portuguese
+				{ "en", "E" },			// English
+				{ "en-US", "9" },		// English (US)
+				{ "en-GB", "6" },		// English (British)
+				{ "en-HK", "en-HK" },	// English (Hong Kong)
+				{ "fr", "F" },			// French
+				{ "fr-CA", "Q"},		// French (Canadian)
+				{ "it", "I" },			// Italian
+				{ "de", "G" },			// German
+				{ "es", "S" },			// Spanish
+				{ "es-419", "Y" },		// Spanish (Latin American)
+				{ "da", "D" },			// Danish
+				{ "nl", "U" },			// Dutch
+				{ "fi", "B" },			// Finnish
+				{ "sv", "W" },			// Swedish
+				{ "ru", "R" },			// Russian
+				{ "pl", "P" },			// Polish
+				{ "ar", "A" },			// Arabic
+				{ "ko", "K" },			// Korean
+				{ "ja", "J" },			// Japanese
+				{ "zh-Hans", "2" },		// Chinese (Simplified)
+				{ "zh-Hant", "1" },		// Chinese (Traditional)
+				{ "tr", "3" },			// Turkish
+				{ "th", "T" },			// Thai
+				{ "pt", "O" },			// Portuguese
+				{ "pt-BR", "$" },		// Portuguese (Brazilian)
 			};
 		}
 	}

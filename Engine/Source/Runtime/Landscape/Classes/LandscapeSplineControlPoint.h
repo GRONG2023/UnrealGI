@@ -36,7 +36,7 @@ struct FLandscapeSplineConnection
 
 	// Segment connected to this control point
 	UPROPERTY()
-	ULandscapeSplineSegment* Segment;
+	TObjectPtr<ULandscapeSplineSegment> Segment;
 
 	// Which end of the segment is connected to this control point
 	UPROPERTY()
@@ -110,11 +110,11 @@ class ULandscapeSplineControlPoint : public UObject
 
 	/** Mesh to use on the control point */
 	UPROPERTY(EditAnywhere, Category=Mesh)
-	UStaticMesh* Mesh;
+	TObjectPtr<UStaticMesh> Mesh;
 
 	/** Overrides mesh's materials */
 	UPROPERTY(EditAnywhere, Category=Mesh)
-	TArray<UMaterialInterface*> MaterialOverrides;
+	TArray<TObjectPtr<UMaterialInterface>> MaterialOverrides;
 
 	/** Scale of the control point mesh */
 	UPROPERTY(EditAnywhere, Category=Mesh)
@@ -123,9 +123,8 @@ class ULandscapeSplineControlPoint : public UObject
 	UPROPERTY()
 	uint32 bEnableCollision_DEPRECATED:1;
 
-	/** Name of the collision profile to use for this spline */
-	UPROPERTY(EditAnywhere, Category=Mesh)
-	FName CollisionProfileName;
+	UPROPERTY()
+	FName CollisionProfileName_DEPRECATED;
 
 	/** Whether the Control Point Mesh should cast a shadow. */
 	UPROPERTY(EditAnywhere, Category=Mesh)
@@ -171,7 +170,7 @@ class ULandscapeSplineControlPoint : public UObject
 	 * The material also needs to be set up to output to a virtual texture. 
 	 */
 	UPROPERTY(EditAnywhere, Category = VirtualTexture, meta = (DisplayName = "Draw in Virtual Textures"))
-	TArray<URuntimeVirtualTexture*> RuntimeVirtualTextures;
+	TArray<TObjectPtr<URuntimeVirtualTexture>> RuntimeVirtualTextures;
 
 	/** Lod bias for rendering to runtime virtual texture. */
 	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = VirtualTexture, meta = (DisplayName = "Virtual Texture LOD Bias", UIMin = "-7", UIMax = "8"))
@@ -221,7 +220,7 @@ protected:
 
 	/** Control point mesh */
 	UPROPERTY(TextExportTransient)
-	UControlPointMeshComponent* LocalMeshComponent;
+	TObjectPtr<UControlPointMeshComponent> LocalMeshComponent;
 
 #if WITH_EDITORONLY_DATA
 	/** World reference for if mesh component is stored in another streaming level */
@@ -238,6 +237,8 @@ public:
 	const TArray<FLandscapeSplineInterpPoint>& GetPoints() const { return Points; }
 
 #if WITH_EDITOR
+	bool SupportsForeignSplineMesh() const;
+
 	// Get the name of the best connection point (socket) to use for a particular destination
 	virtual FName GetBestConnectionTo(FVector Destination) const;
 
@@ -251,7 +252,7 @@ public:
 	virtual void SetSplineSelected(bool bInSelected);
 
 	/** Calculates rotation from connected segments */
-	virtual void AutoCalcRotation();
+	virtual void AutoCalcRotation(bool bAlwaysRotateForward);
 
 	/**  */
 	virtual void AutoFlipTangents();
@@ -268,6 +269,8 @@ public:
 
 	const TSoftObjectPtr<UWorld>& GetForeignWorld() const { return ForeignWorld; }
 	FGuid GetModificationKey() const { return ModificationKey; }
+
+	LANDSCAPE_API FName GetCollisionProfileName() const;
 #endif // WITH_EDITOR
 
 	//~ Begin UObject Interface

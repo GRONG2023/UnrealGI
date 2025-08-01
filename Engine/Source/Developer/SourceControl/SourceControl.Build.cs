@@ -6,30 +6,47 @@ public class SourceControl : ModuleRules
 {
 	public SourceControl(ReadOnlyTargetRules Target) : base(Target)
 	{
-        PrivateIncludePaths.Add("Developer/SourceControl/Private");
-
 		PublicDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
 				"CoreUObject",
-				"InputCore",
+				"DeveloperSettings",
 			}
 		);
 
-		PublicDefinitions.Add("SOURCE_CONTROL_WITH_SLATE=1");
+		if (Target.bUsesSlate)
+		{
+			PublicDefinitions.Add("SOURCE_CONTROL_WITH_SLATE=1");
+			PublicDependencyModuleNames.AddRange(
+				new string[] {
+					"SlateCore",
+				}
+			);
+
+			PrivateDependencyModuleNames.AddRange(
+				new string[] {
+					"Slate",
+					"RenderCore",
+					"RHI"
+				}
+			);
+		}
+		else
+		{
+			PublicDefinitions.Add("SOURCE_CONTROL_WITH_SLATE=0");
+		}
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
-				"Slate",
-				"SlateCore",
-				"EditorStyle"
+				"AssetRegistry"
 			}
 		);
 
-        if (Target.bBuildEditor)
-        {
+		if (Target.bBuildEditor)
+		{
 			PrivateDependencyModuleNames.AddRange(
-                new string[] {
+				new string[] {
+					"EditorFramework",
 					"Engine",
 					"UnrealEd",
 				}
@@ -42,7 +59,7 @@ public class SourceControl : ModuleRules
 			);
 
 			CircularlyReferencedDependentModules.Add("UnrealEd");
-        }
+		}
 
 		if (Target.bBuildDeveloperTools)
 		{
@@ -57,5 +74,7 @@ public class SourceControl : ModuleRules
 		{
 			PrecompileForTargets = PrecompileTargetsType.Any;
 		}
+
+		UnsafeTypeCastWarningLevel = WarningLevel.Error;
 	}
 }

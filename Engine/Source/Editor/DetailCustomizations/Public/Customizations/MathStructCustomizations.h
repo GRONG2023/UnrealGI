@@ -2,13 +2,25 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "Widgets/SWidget.h"
+#include "CoreTypes.h"
+#include "Delegates/Delegate.h"
 #include "IPropertyTypeCustomization.h"
+#include "Internationalization/Text.h"
+#include "Math/UnitConversion.h"
+#include "Misc/Optional.h"
 #include "PropertyHandle.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateEnums.h"
+#include "Widgets/Input/NumericTypeInterface.h"
+#include "Widgets/SWidget.h"
 
 class FDetailWidgetRow;
 class IDetailChildrenBuilder;
+class SWidget;
+struct FSlateBrush;
 
 /**
  * Base class for math struct customization (e.g, vector, rotator, color)                                                              
@@ -51,9 +63,35 @@ public:
 	*/
 	bool IsValueEnabled(TWeakPtr<IPropertyHandle> WeakHandlePtr) const;
 	
+	// Argument struct for ExtractNumericMetadata, to make it easier to add new metadata to extract.
+	template <typename NumericType>
+	struct FNumericMetadata
+	{
+		TOptional<NumericType> MinValue;
+		TOptional<NumericType> MaxValue;
+		TOptional<NumericType> SliderMinValue;
+		TOptional<NumericType> SliderMaxValue;
+		TSharedPtr<INumericTypeInterface<NumericType>> TypeInterface;
+		NumericType SliderExponent;
+		NumericType Delta;
+		int32 LinearDeltaSensitivity;
+		float ShiftMultiplier;
+		float CtrlMultiplier;
+		bool bSupportDynamicSliderMaxValue;
+		bool bSupportDynamicSliderMinValue;
+		bool bAllowSpinBox;
+	};
+
 	/** Utility function that will extract common Math related numeric metadata */	
 	template <typename NumericType>
-	DETAILCUSTOMIZATIONS_API static void ExtractNumericMetadata(TSharedRef<IPropertyHandle>& PropertyHandle, TOptional<NumericType>& MinValue, TOptional<NumericType>& MaxValue, TOptional<NumericType>& SliderMinValue, TOptional<NumericType>& SliderMaxValue, NumericType& SliderExponent, NumericType& Delta, int32 &ShiftMouseMovePixelPerDelta, bool& SupportDynamicSliderMaxValue, bool& SupportDynamicSliderMinValue);
+	DETAILCUSTOMIZATIONS_API static void ExtractNumericMetadata(TSharedRef<IPropertyHandle>& PropertyHandle, FNumericMetadata<NumericType>& MetadataOut);
+
+	template <typename NumericType>
+	UE_DEPRECATED(5.0, "Use ExtractNumericMetadata overload with struct argument instead.")
+		DETAILCUSTOMIZATIONS_API static void ExtractNumericMetadata(TSharedRef<IPropertyHandle>& PropertyHandle, TOptional<NumericType>& MinValue,
+			TOptional<NumericType>& MaxValue, TOptional<NumericType>& SliderMinValue, TOptional<NumericType>& SliderMaxValue,
+			NumericType& SliderExponent, NumericType& Delta, int32& ShiftMouseMovePixelPerDelta,
+			bool& bSupportDynamicSliderMaxValue, bool& bSupportDynamicSliderMinValue);
 
 protected:
 
@@ -122,6 +160,13 @@ protected:
 	template<typename NumericType>
 	void SetValue(NumericType NewValue, EPropertyValueSetFlags::Type Flags, TWeakPtr<IPropertyHandle> WeakHandlePtr);
 
+	/**
+	 * Gets the tooltip for the value. Displays the property name and the current value
+	 * 
+	 * @praram WeakHandlePtr Handle to the property to get the value from
+	 */
+	template <typename NumericType>
+	FText OnGetValueToolTip(TWeakPtr<IPropertyHandle> WeakHandlePtr) const;
 private:
 
 	/** Gets the brush to use for the lock icon. */
@@ -132,6 +177,8 @@ private:
 
 	/** Called when the user toggles preserve ratio. */
 	void OnPreserveScaleRatioToggled(ECheckBoxState NewState, TWeakPtr<IPropertyHandle> PropertyHandle);
+
+	FReply OnNormalizeClicked(TWeakPtr<IPropertyHandle> PropertyHandle);
 
 private:
 

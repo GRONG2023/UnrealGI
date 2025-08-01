@@ -2,32 +2,62 @@
 
 
 #include "SGraphActionMenu.h"
-#include "Framework/Application/SlateApplication.h"
-#include "Widgets/Text/SRichTextBlock.h"
-#include "Widgets/Layout/SScrollBorder.h"
-#include "EditorStyleSet.h"
-#include "Styling/CoreStyle.h"
-#include "GraphEditorDragDropAction.h"
+
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
 #include "EdGraphSchema_K2.h"
-#include "K2Node.h"
 #include "EdGraphSchema_K2_Actions.h"
-#include "GraphActionNode.h"
-#include "Widgets/SToolTip.h"
-#include "IDocumentation.h"
 #include "EditorCategoryUtils.h"
-#include "Editor/EditorPerProjectUserSettings.h"
-#include "BlueprintPaletteFavorites.h"
-#include "Widgets/Input/SEditableTextBox.h"
-#include "Widgets/Input/SSearchBox.h"
-#include "Widgets/Text/SInlineEditableTextBlock.h"
+#include "Fonts/SlateFontInfo.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Views/ITypedTableView.h"
+#include "GraphActionNode.h"
+#include "GraphEditorDragDropAction.h"
+#include "IDocumentation.h"
+#include "Input/DragAndDrop.h"
+#include "Input/Events.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Internationalization.h"
+#include "K2Node.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Layout/Visibility.h"
 #include "Math/NumericLimits.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/CString.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/CoreStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/SlateTypes.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
+#include "Widgets/Input/SSearchBox.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SScrollBorder.h"
+#include "Widgets/Layout/SSeparator.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SNullWidget.h"
+#include "Widgets/SToolTip.h"
+#include "Widgets/Text/SInlineEditableTextBlock.h"
+#include "Widgets/Text/SRichTextBlock.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Widgets/Views/STableRow.h"
+
+class ITableRow;
+class SWidget;
+struct FGeometry;
+struct FSlateBrush;
 
 #define LOCTEXT_NAMESPACE "GraphActionMenu"
 
 //////////////////////////////////////////////////////////////////////////
 
 template<typename ItemType>
-class SCategoryHeaderTableRow : public STableRow < ItemType >
+class SCategoryHeaderTableRow : public STableRow<ItemType>
 {
 public:
 	SLATE_BEGIN_ARGS(SCategoryHeaderTableRow)
@@ -38,25 +68,23 @@ public:
 	void Construct(const FArguments& InArgs, const TSharedRef<STableViewBase>& InOwnerTableView)
 	{
 		STableRow<ItemType>::ChildSlot
-		.Padding(0.0f, 2.0f, 0.0f, 0.0f)
+		.Padding(0.0f, 2.0f, .0f, 0.0f)
 		[
 			SAssignNew(ContentBorder, SBorder)
 			.BorderImage(this, &SCategoryHeaderTableRow::GetBackgroundImage)
-			.Padding(FMargin(0.0f, 3.0f))
-			.BorderBackgroundColor(FLinearColor(.6, .6, .6, 1.0f))
+			.Padding(FMargin(3.0f, 5.0f))
 			[
 				SNew(SHorizontalBox)
-
 				+ SHorizontalBox::Slot()
 				.VAlign(VAlign_Center)
-				.Padding(2.0f, 2.0f, 2.0f, 2.0f)
+				.Padding(5.0f)
 				.AutoWidth()
 				[
 					SNew(SExpanderArrow, STableRow< ItemType >::SharedThis(this))
 				]
-
 				+ SHorizontalBox::Slot()
 				.VAlign(VAlign_Center)
+				.AutoWidth()
 				[
 					InArgs._Content.Widget
 				]
@@ -65,7 +93,7 @@ public:
 
 		STableRow < ItemType >::ConstructInternal(
 			typename STableRow< ItemType >::FArguments()
-			.Style(FEditorStyle::Get(), "DetailsView.TreeView.TableRow")
+			.Style(FAppStyle::Get(), "DetailsView.TreeView.TableRow")
 			.ShowSelection(false),
 			InOwnerTableView
 			);
@@ -75,11 +103,11 @@ public:
 	{
 		if ( STableRow<ItemType>::IsHovered() )
 		{
-			return STableRow<ItemType>::IsItemExpanded() ? FEditorStyle::GetBrush("DetailsView.CategoryTop_Hovered") : FEditorStyle::GetBrush("DetailsView.CollapsedCategory_Hovered");
+			return FAppStyle::Get().GetBrush("Brushes.Secondary");
 		}
 		else
 		{
-			return STableRow<ItemType>::IsItemExpanded() ? FEditorStyle::GetBrush("DetailsView.CategoryTop") : FEditorStyle::GetBrush("DetailsView.CollapsedCategory");
+			return FAppStyle::Get().GetBrush("Brushes.Header");
 		}
 	}
 
@@ -98,6 +126,18 @@ public:
 		return nullptr;
 	}
 
+	FReply OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
+	{
+		if (MouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
+		{
+			STableRow<ItemType>::ToggleExpansion();
+			return FReply::Handled();
+		}
+		else
+		{
+			return FReply::Unhandled();
+		}
+	}
 private:
 	TSharedPtr<SBorder> ContentBorder;
 };
@@ -265,9 +305,14 @@ FString SGraphActionMenu::LastUsedFilterText;
 
 void SGraphActionMenu::Construct( const FArguments& InArgs, bool bIsReadOnly/* = true*/ )
 {
+	this->SelectedSuggestionScore = TNumericLimits<float>::Lowest();
+	this->SelectedSuggestionSourceIndex = INDEX_NONE;
 	this->SelectedSuggestion = INDEX_NONE;
 	this->bIgnoreUIUpdate = false;
 	this->bUseSectionStyling = InArgs._UseSectionStyling;
+	this->bAllowPreselectedItemActivation = InArgs._bAllowPreselectedItemActivation;
+	this->bAutomaticallySelectSingleAction = InArgs._bAutomaticallySelectSingleAction;
+	this->DefaultRowExpanderBaseIndentLevel = InArgs._DefaultRowExpanderBaseIndentLevel;
 
 	this->bAutoExpandActionMenu = InArgs._AutoExpandActionMenu;
 	this->bShowFilterTextBox = InArgs._ShowFilterTextBox;
@@ -279,6 +324,7 @@ void SGraphActionMenu::Construct( const FArguments& InArgs, bool bIsReadOnly/* =
 	this->OnCategoryDragged = InArgs._OnCategoryDragged;
 	this->OnCreateWidgetForAction = InArgs._OnCreateWidgetForAction;
 	this->OnCreateCustomRowExpander = InArgs._OnCreateCustomRowExpander;
+	this->OnGetActionList = InArgs._OnGetActionList;
 	this->OnCollectAllActions = InArgs._OnCollectAllActions;
 	this->OnCollectStaticSections = InArgs._OnCollectStaticSections;
 	this->OnCategoryTextCommitted = InArgs._OnCategoryTextCommitted;
@@ -290,6 +336,18 @@ void SGraphActionMenu::Construct( const FArguments& InArgs, bool bIsReadOnly/* =
 	this->OnActionMatchesName = InArgs._OnActionMatchesName;	
 	this->DraggedFromPins = InArgs._DraggedFromPins;
 	this->GraphObj = InArgs._GraphObj;
+
+	// Default graph action list (also provides an empty source list to start with)
+	AllActions = MakeShared<FGraphActionListBuilderBase>();
+	
+	if(OnGetActionList.IsBound())
+	{
+		// If we are obtaining a new action list at refresh time, ensure that the indirect collection delegate is unbound
+		if (!ensureMsgf(!OnCollectAllActions.IsBound(), TEXT("The OnCollectAllActions delegate is bound, but will not be invoked, because OnGetActionList has also been bound and will be used to obtain the action list for this menu. To resolve this, one of these events should be removed from its construction.")))
+		{
+			OnCollectAllActions.Unbind();
+		}
+	}
 
 	// If a delegate for filtering text is passed in, assign it so that it will be used instead of the built-in filter box
 	if(InArgs._OnGetFilterText.IsBound())
@@ -349,16 +407,41 @@ void SGraphActionMenu::Construct( const FArguments& InArgs, bool bIsReadOnly/* =
 
 	// Get all actions.
 	RefreshAllActions(false);
+
+	if(bAutomaticallySelectSingleAction)
+	{
+		TArray<TSharedPtr<FGraphActionNode>> ActionNodes;
+		FilteredRootAction->GetAllActionNodes(ActionNodes);
+
+		if(ActionNodes.Num() == 1)
+		{
+			OnItemSelected(ActionNodes[0], ESelectInfo::Direct);
+		}
+	}
 }
 
 void SGraphActionMenu::RefreshAllActions(bool bPreserveExpansion, bool bHandleOnSelectionEvent/*=true*/)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(SGraphActionMenu::RefreshAllActions);
+
 	// Save Selection (of only the first selected thing)
 	TArray< TSharedPtr<FGraphActionNode> > SelectedNodes = TreeView->GetSelectedItems();
 	TSharedPtr<FGraphActionNode> SelectedAction = SelectedNodes.Num() > 0 ? SelectedNodes[0] : nullptr;
 
-	AllActions.Empty();
-	OnCollectAllActions.ExecuteIfBound(AllActions);
+	if (OnGetActionList.IsBound())
+	{
+		// Obtain the source action list directly.
+		AllActions = OnGetActionList.Execute();
+	}
+	else
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(SGraphActionMenu::CollectAllActions);
+
+		// Collect actions into our local list context.
+		AllActions->Empty();
+		OnCollectAllActions.ExecuteIfBound(*AllActions);
+	}
+
 	GenerateFilteredItems(bPreserveExpansion);
 
 	// Re-apply selection #0 if possible
@@ -646,8 +729,29 @@ void RestoreExpansionState(TSharedPtr< STreeView<ItemType> > InTree, const TArra
 	}
 }
 
+void SGraphActionMenu::UpdateForNewActions(int32 IdxStart)
+{
+	check(bAlphaSortItems && bSortItemsRecursively);
+
+	FScoreResults Results = ScoreAndAddActions(IdxStart);
+	UpdateActiveSelection(Results);
+
+	if (ShouldExpandNodes())
+	{
+		// Expand all
+		FilteredRootAction->ExpandAllChildren(TreeView);
+	}
+
+	TreeView->RequestTreeRefresh();
+}
+
 void SGraphActionMenu::GenerateFilteredItems(bool bPreserveExpansion)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(SGraphActionMenu::GenerateFilteredItems);
+
+	SelectedSuggestionScore = TNumericLimits<float>::Lowest();
+	SelectedSuggestionSourceIndex = INDEX_NONE;
+
 	// First, save off current expansion state
 	TSet< TSharedPtr<FGraphActionNode> > OldExpansionState;
 	if(bPreserveExpansion)
@@ -670,118 +774,13 @@ void SGraphActionMenu::GenerateFilteredItems(bool bPreserveExpansion)
 		}
 	}
 	
-	// Trim and sanitized the filter text (so that it more likely matches the action descriptions)
-	FString TrimmedFilterString = FText::TrimPrecedingAndTrailing(GetFilterText()).ToString();
+	FScoreResults Results = ScoreAndAddActions();
 
-	// Remember the last filter string to that external clients can access it
-	LastUsedFilterText = TrimmedFilterString;
-
-	// Tokenize the search box text into a set of terms; all of them must be present to pass the filter
-	TArray<FString> FilterTerms;
-	TrimmedFilterString.ParseIntoArray(FilterTerms, TEXT(" "), true);
-	for (FString& String : FilterTerms)
-	{
-		String = String.ToLower();
-	}
-
-	// Generate a list of sanitized versions of the strings
-	TArray<FString> SanitizedFilterTerms;
-	for (int32 iFilters = 0; iFilters < FilterTerms.Num() ; iFilters++)
-	{
-		FString EachString = FName::NameToDisplayString( FilterTerms[iFilters], false );
-		EachString = EachString.Replace( TEXT( " " ), TEXT( "" ) );
-		SanitizedFilterTerms.Add( EachString );
-	}
-	ensure( SanitizedFilterTerms.Num() == FilterTerms.Num() );// Both of these should match !
-
-	const bool bRequiresFiltering = FilterTerms.Num() > 0;
-	float BestMatchCount = TNumericLimits<float>::Lowest();
-	int32 BestMatchIndex = INDEX_NONE;
-
-	// Get the schema of the graph that we are in so that we can correctly get the action weight
-	const UEdGraphSchema* ActionSchema = GraphObj ? GraphObj->GetSchema() : GetDefault<UEdGraphSchema>();
-	check(ActionSchema);
-
-	for (int32 CurTypeIndex=0; CurTypeIndex < AllActions.GetNumActions(); ++CurTypeIndex)
-	{
-		FGraphActionListBuilderBase::ActionGroup& CurrentAction = AllActions.GetAction( CurTypeIndex );
-
-		// If we're filtering, search check to see if we need to show this action
-		bool bShowAction = true;
-		float EachWeight = TNumericLimits<float>::Lowest();
-		if (bRequiresFiltering)
-		{
-			// Combine the actions string, separate with \n so terms don't run into each other, and remove the spaces (incase the user is searching for a variable)
-			// In the case of groups containing multiple actions, they will have been created and added at the same place in the code, using the same description
-			// and keywords, so we only need to use the first one for filtering.
-			const FString& SearchText = CurrentAction.GetSearchTextForFirstAction();
-
-			FString EachTermSanitized;
-			for (int32 FilterIndex = 0; (FilterIndex < FilterTerms.Num()) && bShowAction; ++FilterIndex)
-			{
-				const bool bMatchesTerm = (SearchText.Contains(FilterTerms[FilterIndex], ESearchCase::CaseSensitive) || (SearchText.Contains(SanitizedFilterTerms[FilterIndex], ESearchCase::CaseSensitive) == true));
-				bShowAction = bShowAction && bMatchesTerm;
-			}
-
-			// Only if we are going to show the action do we want to generate the weight of the filter text
-			if (bShowAction)
-			{
-				// Get the 'weight' of this in relation to the filter
-				EachWeight = ActionSchema->GetActionFilteredWeight(CurrentAction, FilterTerms, SanitizedFilterTerms, DraggedFromPins);
-			}
-		}
-
-		if (bShowAction)
-		{
-			// If this action has a greater relevance than others, cache its index.
-			if( EachWeight > BestMatchCount )
-			{
-				BestMatchCount = EachWeight;
-				BestMatchIndex = CurTypeIndex;
-			}
-			FilteredRootAction->AddChild(CurrentAction);
-		}
-	}
 	FilteredRootAction->SortChildren(bAlphaSortItems, bSortItemsRecursively);
 
 	TreeView->RequestTreeRefresh();
 
-	// Update the filtered list (needs to be done in a separate pass because the list is sorted as items are inserted)
-	FilteredActionNodes.Empty();
-	FilteredRootAction->GetLeafNodes(FilteredActionNodes);
-
-	// Get _all_ new nodes (flattened tree basically)
-	TArray< TSharedPtr<FGraphActionNode> > AllNodes;
-	FilteredRootAction->GetAllNodes(AllNodes);
-
-	// If theres a BestMatchIndex find it in the actions nodes and select it (maybe this should check the current selected suggestion first ?)
-	if( BestMatchIndex != INDEX_NONE ) 
-	{
-		FGraphActionListBuilderBase::ActionGroup& FilterSelectAction = AllActions.GetAction( BestMatchIndex );
-		if( FilterSelectAction.Actions[0].IsValid() == true )
-		{
-			for (int32 iNode = 0; iNode < FilteredActionNodes.Num() ; iNode++)
-			{
-				if( FilteredActionNodes[ iNode ].Get()->GetPrimaryAction() == FilterSelectAction.Actions[ 0 ] )
-				{
-					SelectedSuggestion = iNode;
-				}
-			}	
-		}	
-	}
-
-	// Make sure the selected suggestion stays within the filtered list
-	if ((SelectedSuggestion >= 0) && (FilteredActionNodes.Num() > 0))
-	{
-		//@TODO: Should try to actually maintain the highlight on the same item if it survived the filtering
-		SelectedSuggestion = FMath::Clamp<int32>(SelectedSuggestion, 0, FilteredActionNodes.Num() - 1);
-		MarkActiveSuggestion();
-	}
-	else
-	{
-		SelectedSuggestion = INDEX_NONE;
-	}
-
+	UpdateActiveSelection(Results);
 
 	if (ShouldExpandNodes())
 	{
@@ -790,6 +789,10 @@ void SGraphActionMenu::GenerateFilteredItems(bool bPreserveExpansion)
 	}
 	else
 	{
+		// Get _all_ new nodes (flattened tree basically)
+		TArray< TSharedPtr<FGraphActionNode> > AllNodes;
+		FilteredRootAction->GetAllNodes(AllNodes);
+
 		// Expand to match the old state
 		RestoreExpansionState< TSharedPtr<FGraphActionNode> >(TreeView, AllNodes, OldExpansionState, CompareGraphActionNode);
 	}
@@ -800,7 +803,7 @@ bool SGraphActionMenu::ShouldExpandNodes() const
 {
 	// Expand all the categories that have filter results, or when there are only a few to show
 	const bool bFilterActive = !GetFilterText().IsEmpty();
-	const bool bOnlyAFewTotal = AllActions.GetNumActions() < 10;
+	const bool bOnlyAFewTotal = AllActions->GetNumActions() < 10;
 
 	return bFilterActive || bOnlyAFewTotal || bAutoExpandActionMenu;
 }
@@ -898,12 +901,10 @@ TSharedRef<ITableRow> SGraphActionMenu::MakeWidget( TSharedPtr<FGraphActionNode>
 	}
 	else
 	{
-		const FTableRowStyle* Style = bUseSectionStyling ? &FEditorStyle::Get().GetWidgetStyle<FTableRowStyle>("TableView.DarkRow") : &FCoreStyle::Get().GetWidgetStyle<FTableRowStyle>("TableView.Row");
-
 		TableRow = SNew(STableRow< TSharedPtr<FGraphActionNode> >, OwnerTable)
-			.Style(Style)
 			.OnDragDetected(this, &SGraphActionMenu::OnItemDragDetected)
-			.ShowSelection(!InItem->IsSeparator());
+			.ShowSelection(!InItem->IsSeparator())
+			.bAllowPreselectedItemActivation(bAllowPreselectedItemActivation);
 	}
 
 	TSharedPtr<SHorizontalBox> RowContainer;
@@ -981,17 +982,13 @@ TSharedRef<ITableRow> SGraphActionMenu::MakeWidget( TSharedPtr<FGraphActionNode>
 			.Visibility(EVisibility::HitTestInvisible)
 
 			+ SVerticalBox::Slot()
-			.AutoHeight()
+			.VAlign(VAlign_Center)
 			// Add some empty space before the line, and a tiny bit after it
-			.Padding( 0.0f, 5.f, 0.0f, 5.f )
+			.Padding( 0.0f, 1.f, 0.0f, 1.f )
 			[
-				SNew( SBorder )
-
-				// We'll use the border's padding to actually create the horizontal line
-				.Padding(FEditorStyle::GetMargin(TEXT("Menu.Separator.Padding")))
-
-				// Separator graphic
-				.BorderImage( FEditorStyle::GetBrush( TEXT( "Menu.Separator" ) ) )
+				SNew(SSeparator)
+				.SeparatorImage(FAppStyle::Get().GetBrush("Menu.Separator"))
+				.Thickness(1.0f)
 			];
 		}
 		else
@@ -1003,8 +1000,9 @@ TSharedRef<ITableRow> SGraphActionMenu::MakeWidget( TSharedPtr<FGraphActionNode>
 			[
 				SNew(SRichTextBlock)
 				.Text(SectionTitle)
-				.DecoratorStyleSet(&FEditorStyle::Get())
-				.TextStyle(FEditorStyle::Get(), "DetailsView.CategoryTextStyle")
+				.TransformPolicy(ETextTransformPolicy::ToUpper)
+				.DecoratorStyleSet(&FAppStyle::Get())
+				.TextStyle(FAppStyle::Get(), "DetailsView.CategoryTextStyle")
 			]
 
 			+ SHorizontalBox::Slot()
@@ -1037,7 +1035,7 @@ TSharedRef<ITableRow> SGraphActionMenu::MakeWidget( TSharedPtr<FGraphActionNode>
 	{
 		ExpanderWidget =
 			SNew(SExpanderArrow, TableRow)
-			.BaseIndentLevel(1);
+			.BaseIndentLevel(DefaultRowExpanderBaseIndentLevel);
 	}
 
 	RowContainer->AddSlot()
@@ -1235,9 +1233,9 @@ void SGraphActionMenu::MarkActiveSuggestion()
 
 void SGraphActionMenu::AddReferencedObjects( FReferenceCollector& Collector )
 {
-	for (int32 CurTypeIndex=0; CurTypeIndex < AllActions.GetNumActions(); ++CurTypeIndex)
+	for (int32 CurTypeIndex = 0; CurTypeIndex < AllActions->GetNumActions(); ++CurTypeIndex)
 	{
-		FGraphActionListBuilderBase::ActionGroup& Action = AllActions.GetAction( CurTypeIndex );
+		FGraphActionListBuilderBase::ActionGroup& Action = AllActions->GetAction(CurTypeIndex);
 
 		for ( int32 ActionIndex = 0; ActionIndex < Action.Actions.Num(); ActionIndex++ )
 		{
@@ -1283,6 +1281,127 @@ void SGraphActionMenu::OnSetExpansionRecursive(TSharedPtr<FGraphActionNode> InTr
 	}
 }
 
+SGraphActionMenu::FScoreResults SGraphActionMenu::ScoreAndAddActions(int32 StartingIndex)
+{
+	// Trim and sanitized the filter text (so that it more likely matches the action descriptions)
+	FString TrimmedFilterString = FText::TrimPrecedingAndTrailing(GetFilterText()).ToString();
+
+	// Remember the last filter string to that external clients can access it
+	LastUsedFilterText = TrimmedFilterString;
+
+	// Tokenize the search box text into a set of terms; all of them must be present to pass the filter
+	TArray<FString> FilterTerms;
+	TrimmedFilterString.ParseIntoArray(FilterTerms, TEXT(" "), true);
+	for (FString& String : FilterTerms)
+	{
+		String = String.ToLower();
+	}
+
+	// Generate a list of sanitized versions of the strings
+	TArray<FString> SanitizedFilterTerms;
+	for (int32 iFilters = 0; iFilters < FilterTerms.Num(); iFilters++)
+	{
+		FString EachString = FName::NameToDisplayString(FilterTerms[iFilters], false);
+		EachString = EachString.Replace(TEXT(" "), TEXT(""));
+		SanitizedFilterTerms.Add(EachString);
+	}
+	ensure(SanitizedFilterTerms.Num() == FilterTerms.Num());// Both of these should match !
+
+	const bool bRequiresFiltering = FilterTerms.Num() > 0;
+	float BestMatchCount = SelectedSuggestionScore;
+	int32 BestMatchIndex = SelectedSuggestionSourceIndex;
+
+	// Get the schema of the graph that we are in so that we can correctly get the action weight
+	const UEdGraphSchema* ActionSchema = GraphObj ? GraphObj->GetSchema() : GetDefault<UEdGraphSchema>();
+	check(ActionSchema);
+
+	bool bIsPartialBuild = StartingIndex != INDEX_NONE;
+	const int32 NumActions = AllActions->GetNumActions();
+	for (int32 CurTypeIndex = bIsPartialBuild ? StartingIndex : 0; CurTypeIndex < NumActions; ++CurTypeIndex)
+	{
+		FGraphActionListBuilderBase::ActionGroup& CurrentAction = AllActions->GetAction(CurTypeIndex);
+
+		// If we're filtering, search check to see if we need to show this action
+		bool bShowAction = true;
+		float EachWeight = TNumericLimits<float>::Lowest();
+
+		const FString& SearchText = CurrentAction.GetSearchTextForFirstAction();
+		for (int32 FilterIndex = 0; (FilterIndex < FilterTerms.Num()) && bShowAction; ++FilterIndex)
+		{
+			const bool bMatchesTerm = (SearchText.Contains(FilterTerms[FilterIndex], ESearchCase::CaseSensitive) || (SearchText.Contains(SanitizedFilterTerms[FilterIndex], ESearchCase::CaseSensitive) == true));
+			bShowAction = bMatchesTerm;
+		}
+
+		if (!bShowAction)
+		{
+			continue;
+		}
+
+		if (bRequiresFiltering)
+		{
+			// Get the 'weight' of this in relation to the filter
+			EachWeight = ActionSchema->GetActionFilteredWeight(CurrentAction, FilterTerms, SanitizedFilterTerms, DraggedFromPins);
+			// If this action has a greater relevance than others, cache its index.
+			if (EachWeight > BestMatchCount)
+			{
+				BestMatchCount = EachWeight;
+				BestMatchIndex = CurTypeIndex;
+			}
+		}
+
+		if (bIsPartialBuild)
+		{
+			FilteredRootAction->AddChildAlphabetical(CurrentAction);
+		}
+		else
+		{
+			FilteredRootAction->AddChild(CurrentAction);
+		}
+	}
+
+	return {BestMatchIndex, BestMatchCount};
+}
+
+void SGraphActionMenu::UpdateActiveSelection(SGraphActionMenu::FScoreResults ForResults)
+{
+	int32 BestMatchIndex = ForResults.BestMatchIndex;
+	float BestMatchCount = ForResults.BestMatchScore;
+	// Update the filtered list (needs to be done in a separate pass because the list is sorted as items are inserted)
+	FilteredActionNodes.Reset();
+	FilteredRootAction->GetLeafNodes(FilteredActionNodes);
+
+	// If theres a BestMatchIndex find it in the actions nodes and select it (maybe this should check the current selected suggestion first ?)
+	if (BestMatchIndex != INDEX_NONE)
+	{
+		FGraphActionListBuilderBase::ActionGroup& FilterSelectAction = AllActions->GetAction(BestMatchIndex);
+		if (FilterSelectAction.Actions[0].IsValid() == true)
+		{
+			for (int32 iNode = 0; iNode < FilteredActionNodes.Num(); iNode++)
+			{
+				if (FilteredActionNodes[iNode].Get()->GetPrimaryAction() == FilterSelectAction.Actions[0])
+				{
+					SelectedSuggestion = iNode;
+					SelectedSuggestionScore = BestMatchCount;
+					SelectedSuggestionSourceIndex = BestMatchIndex;
+				}
+			}
+		}
+	}
+
+	// Make sure the selected suggestion stays within the filtered list
+	if ((SelectedSuggestion >= 0) && (FilteredActionNodes.Num() > 0))
+	{
+		//@TODO: Should try to actually maintain the highlight on the same item if it survived the filtering
+		SelectedSuggestion = FMath::Clamp<int32>(SelectedSuggestion, 0, FilteredActionNodes.Num() - 1);
+		MarkActiveSuggestion();
+	}
+	else
+	{
+		SelectedSuggestionScore = TNumericLimits<float>::Lowest();
+		SelectedSuggestionSourceIndex = INDEX_NONE;
+		SelectedSuggestion = INDEX_NONE;
+	}
+}
 /////////////////////////////////////////////////////
 
 #undef LOCTEXT_NAMESPACE

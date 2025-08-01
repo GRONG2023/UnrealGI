@@ -15,10 +15,12 @@
 #include "Perception/AISense_Prediction.h"
 #include "Perception/AISense_Touch.h"
 
-#if WITH_GAMEPLAY_DEBUGGER
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AISense)
+
+#if WITH_GAMEPLAY_DEBUGGER_MENU
 #include "GameplayDebuggerTypes.h"
 #include "GameplayDebuggerCategory.h"
-#endif
+#endif // WITH_GAMEPLAY_DEBUGGER_MENU
 
 const float UAISense::SuspendNextUpdate = FLT_MAX;
 
@@ -27,10 +29,6 @@ UAISense::UAISense(const FObjectInitializer& ObjectInitializer)
 	, TimeUntilNextUpdate(SuspendNextUpdate)
 	, SenseID(FAISenseID::InvalidID())
 {
-	PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	DefaultExpirationAge = FAIStimulus::NeverHappenedAge;
-	PRAGMA_ENABLE_DEPRECATION_WARNINGS
-
 	bNeedsForgettingNotification = false;
 
 	if (HasAnyFlags(RF_ClassDefaultObject) == false)
@@ -107,6 +105,13 @@ void UAISense::RegisterWrappedEvent(UAISenseEvent& PerceptionEvent)
 	UE_VLOG(GetPerceptionSystem(), LogAIPerception, Error, TEXT("%s did not override UAISense::RegisterWrappedEvent!"), *GetName());
 }
 
+#if WITH_GAMEPLAY_DEBUGGER_MENU
+void UAISense::DescribeSelfToGameplayDebugger(const UAIPerceptionSystem& PerceptionSystem, FGameplayDebuggerCategory& DebuggerCategory) const
+{
+	DebuggerCategory.AddTextLine(FString::Printf(TEXT("%s"), *SenseID.Name.ToString()));
+}
+#endif // WITH_GAMEPLAY_DEBUGGER_MENU
+
 //----------------------------------------------------------------------//
 // 
 //----------------------------------------------------------------------//
@@ -131,14 +136,14 @@ FString UAISenseConfig::GetSenseName() const
 		const bool bHasSeparator = CachedSenseName.FindLastChar(TEXT('_'), SeparatorIdx);
 		if (bHasSeparator)
 		{
-			CachedSenseName.MidInline(SeparatorIdx + 1, MAX_int32, false);
+			CachedSenseName.MidInline(SeparatorIdx + 1, MAX_int32, EAllowShrinking::No);
 		}
 	}
 
 	return CachedSenseName;
 }
 
-#if WITH_GAMEPLAY_DEBUGGER
+#if WITH_GAMEPLAY_DEBUGGER_MENU
 static FString DescribeColorHelper(const FColor& Color)
 {
 	const int32 MaxColors = GColorList.GetColorsNum();
@@ -162,7 +167,7 @@ void UAISenseConfig::DescribeSelfToGameplayDebugger(const UAIPerceptionComponent
 			);
 	}
 }
-#endif // WITH_GAMEPLAY_DEBUGGER
+#endif // WITH_GAMEPLAY_DEBUGGER_MENU
 
 //----------------------------------------------------------------------//
 // 
@@ -198,7 +203,7 @@ void UAISenseConfig_Sight::PostEditChangeChainProperty(FPropertyChangedChainEven
 }
 #endif // WITH_EDITOR
 
-#if WITH_GAMEPLAY_DEBUGGER
+#if WITH_GAMEPLAY_DEBUGGER_MENU
 void UAISenseConfig_Sight::DescribeSelfToGameplayDebugger(const UAIPerceptionComponent* PerceptionComponent, FGameplayDebuggerCategory* DebuggerCategory) const
 {
 	if (PerceptionComponent == nullptr || DebuggerCategory == nullptr)
@@ -211,10 +216,10 @@ void UAISenseConfig_Sight::DescribeSelfToGameplayDebugger(const UAIPerceptionCom
 
 	// don't call Super implementation on purpose, replace color description line
 	DebuggerCategory->AddTextLine(
-		FString::Printf(TEXT("%s: {%s}%s {white}rangeIN:{%s}%s {white} rangeOUT:{%s}%s"), *GetSenseName(),
+		FString::Printf(TEXT("%s: {%s}%s {white}rangeIN:{%s} %.2f (%s) {white} rangeOUT:{%s} %.2f (%s)"), *GetSenseName(),
 			*GetDebugColor().ToString(), *DescribeColorHelper(GetDebugColor()),
-			*SightRangeColor.ToString(), *DescribeColorHelper(SightRangeColor),
-			*LoseSightRangeColor.ToString(), *DescribeColorHelper(LoseSightRangeColor))
+			*SightRangeColor.ToString(), SightRadius, *DescribeColorHelper(SightRangeColor),
+			*LoseSightRangeColor.ToString(), LoseSightRadius, *DescribeColorHelper(LoseSightRangeColor))
 		);
 
 	const AActor* BodyActor = PerceptionComponent->GetBodyActor();
@@ -237,7 +242,7 @@ void UAISenseConfig_Sight::DescribeSelfToGameplayDebugger(const UAIPerceptionCom
 		DebuggerCategory->AddShape(FGameplayDebuggerShape::MakeSegment(RootLocation + (BodyFacing * NearClippingRadius), RootLocation + (RightDirection * NearClippingRadius), SightRangeColor));
 	}
 }
-#endif // WITH_GAMEPLAY_DEBUGGER
+#endif // WITH_GAMEPLAY_DEBUGGER_MENU
 
 //----------------------------------------------------------------------//
 // UAISenseConfig_Hearing
@@ -254,7 +259,7 @@ TSubclassOf<UAISense> UAISenseConfig_Hearing::GetSenseImplementation() const
 	return *Implementation; 
 }
 
-#if WITH_GAMEPLAY_DEBUGGER
+#if WITH_GAMEPLAY_DEBUGGER_MENU
 void UAISenseConfig_Hearing::DescribeSelfToGameplayDebugger(const UAIPerceptionComponent* PerceptionComponent, FGameplayDebuggerCategory* DebuggerCategory) const
 {
 	if (PerceptionComponent == nullptr || DebuggerCategory == nullptr)
@@ -279,13 +284,9 @@ void UAISenseConfig_Hearing::DescribeSelfToGameplayDebugger(const UAIPerceptionC
 		FVector OwnerLocation = BodyActor->GetActorLocation();
 		
 		DebuggerCategory->AddShape(FGameplayDebuggerShape::MakeCylinder(OwnerLocation, HearingRange, 25.0f, HearingRangeColor));
-		if (bUseLoSHearing)
-		{
-			DebuggerCategory->AddShape(FGameplayDebuggerShape::MakeCylinder(OwnerLocation, LoSHearingRange, 25.0f, LoSHearingRangeColor));
-		}
 	}
 }
-#endif // WITH_GAMEPLAY_DEBUGGER
+#endif // WITH_GAMEPLAY_DEBUGGER_MENU
 
 //----------------------------------------------------------------------//
 // UAISenseConfig_Prediction
@@ -325,3 +326,4 @@ TSubclassOf<UAISense> UAISenseConfig_Touch::GetSenseImplementation() const
 {
 	return UAISense_Touch::StaticClass();
 }
+

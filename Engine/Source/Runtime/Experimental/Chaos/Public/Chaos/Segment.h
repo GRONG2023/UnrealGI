@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
+#include "Chaos/Core.h"
+
 namespace Chaos
 {
 	template<class T>
@@ -8,10 +10,15 @@ namespace Chaos
 	{
 	public:
 		TSegment() {}
-		TSegment(const TVec3<T>& x1, const TVec3<T>& x2)
-			: MPoint(x1)
-			, MAxis(x2 - x1)
+		TSegment(const TVec3<T>& X1, const TVec3<T>& X2)
+			: MPoint(X1)
+			, MAxis(X2 - X1)
 			, MLength(MAxis.SafeNormalize())
+		{ }
+		TSegment(const TVec3<T>& X1, const TVec3<T>& Axis, const T Length)
+			: MPoint(X1)
+			, MAxis(Axis)
+			, MLength(Length)
 		{ }
 
 		FORCEINLINE bool IsConvex() const { return true; }
@@ -26,10 +33,12 @@ namespace Chaos
 
 		FORCEINLINE FReal GetLength() const { return MLength; }
 
-		TVec3<T> Support(const TVec3<T>& Direction, const T Thickness) const
+		TVec3<T> Support(const TVec3<T>& Direction, const T Thickness, int32& VertexIndex) const
 		{
 			const T Dot = TVec3<T>::DotProduct(Direction, MAxis);
-			const TVec3<T> FarthestCap = Dot >= 0 ? GetX2() : GetX1();	//orthogonal we choose either
+			const bool bIsSecond = Dot >= 0;
+			const TVec3<T> FarthestCap = bIsSecond? GetX2() : GetX1();	//orthogonal we choose either
+			VertexIndex = bIsSecond ? 1 : 0;
 			//We want N / ||N|| and to avoid inf
 			//So we want N / ||N|| < 1 / eps => N eps < ||N||, but this is clearly true for all eps < 1 and N > 0
 			T SizeSqr = Direction.SizeSquared();
@@ -41,16 +50,27 @@ namespace Chaos
 			return FarthestCap + (NormalizedDirection * Thickness);
 		}
 
-		FORCEINLINE_DEBUGGABLE TVec3<T> SupportCore(const TVec3<T>& Direction) const
+		FORCEINLINE_DEBUGGABLE TVec3<T> SupportCore(const TVec3<T>& Direction, int32& VertexIndex) const
 		{
 			const T Dot = TVec3<T>::DotProduct(Direction, MAxis);
-			const TVec3<T> FarthestCap = Dot >= 0 ? GetX2() : GetX1();	//orthogonal we choose either
+			const bool bIsSecond = Dot >= 0;
+			const TVec3<T> FarthestCap = bIsSecond ? GetX2() : GetX1();	//orthogonal we choose either
+			VertexIndex = bIsSecond  ? 1 : 0;
 			return FarthestCap;
 		}
 
 		FORCEINLINE void Serialize(FArchive &Ar) 
 		{
-			Ar << MPoint << MAxis << MLength;
+			Ar << MPoint << MAxis;
+			
+			FRealSingle LengthFloat = (FRealSingle)MLength; // LWC_TODO : potential precision loss, to be changed when we can serialize FReal as double
+			Ar << LengthFloat;
+			MLength = (T)LengthFloat;
+		}
+
+		FString ToString() const
+		{
+			return FString::Printf(TEXT("Segment: Point: [%f, %f, %f], Axis: [%f, %f, %f], Length: %f"), MPoint.X, MPoint.Y, MPoint.Z, MAxis.X, MAxis.Y, MAxis.Z, MLength);
 		}
 
 		FORCEINLINE TAABB<T, 3> BoundingBox() const

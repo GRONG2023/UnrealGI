@@ -23,25 +23,26 @@
 #include "LandscapeEditorModule.h"
 #include "LandscapeEditorObject.h"
 #include "Landscape.h"
-
+#include "LandscapeUtils.h"
+#include "Styling/AppStyle.h"
 #include "DetailLayoutBuilder.h"
 #include "IDetailPropertyRow.h"
 #include "DetailCategoryBuilder.h"
 #include "PropertyCustomizationHelpers.h"
+#include "Subsystems/AssetEditorSubsystem.h"
 
 #include "SLandscapeEditor.h"
 #include "Dialogs/DlgPickAssetPath.h"
 #include "ObjectTools.h"
 #include "ScopedTransaction.h"
 #include "DesktopPlatformModule.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 
 #include "LandscapeRender.h"
 #include "Materials/MaterialExpressionLandscapeVisibilityMask.h"
 #include "LandscapeEdit.h"
 #include "IDetailGroup.h"
 #include "Widgets/SBoxPanel.h"
-#include "Editor/EditorStyle/Private/SlateEditorStyle.h"
 
 #define LOCTEXT_NAMESPACE "LandscapeEditor.TargetLayers"
 
@@ -81,7 +82,7 @@ void FLandscapeEditorDetailCustomization_TargetLayers::CustomizeDetails(IDetailL
 		SNew(SMultiLineEditableTextBox)
 		.IsReadOnly(true)
 		.Font(DetailBuilder.GetDetailFontBold())
-		.BackgroundColor(TAttribute<FSlateColor>::Create(TAttribute<FSlateColor>::FGetter::CreateLambda([]() { return FEditorStyle::GetColor("ErrorReporting.WarningBackgroundColor"); })))
+		.BackgroundColor(TAttribute<FSlateColor>::Create(TAttribute<FSlateColor>::FGetter::CreateLambda([]() { return FAppStyle::GetColor("ErrorReporting.WarningBackgroundColor"); })))
 		.Text(LOCTEXT("Visibility_Tip", "Note: There are some areas where visibility painting is disabled because Component/Proxy don't have a \"Landscape Visibility Mask\" node in their material."))
 		.AutoWrapText(true)
 		.IsEnabled(TAttribute<bool>::Create(TAttribute<bool>::FGetter::CreateLambda([LandscapeEdMode]() { return LandscapeEdMode->HasValidLandscapeEditLayerSelection(); })))
@@ -121,8 +122,10 @@ bool FLandscapeEditorDetailCustomization_TargetLayers::ShouldShowPaintingRestric
 	{
 		const FName CurrentToolName = LandscapeEdMode->CurrentTool->GetToolName();
 
+		// Tool target type "Invalid" means Weightmap with no valid paint layer, so technically, it is weightmap and we therefore choose to show PaintingRestriction : 
 		if ((LandscapeEdMode->CurrentToolTarget.TargetType == ELandscapeToolTargetType::Weightmap && CurrentToolName != TEXT("BlueprintBrush"))
-			|| LandscapeEdMode->CurrentToolTarget.TargetType == ELandscapeToolTargetType::Visibility)
+			|| (LandscapeEdMode->CurrentToolTarget.TargetType == ELandscapeToolTargetType::Invalid)
+			|| (LandscapeEdMode->CurrentToolTarget.TargetType == ELandscapeToolTargetType::Visibility))
 		{
 			return true;
 		}
@@ -203,7 +206,7 @@ void FLandscapeEditorCustomNodeBuilder_TargetLayers::GenerateHeaderRowContent(FD
 		[
 			SNew(STextBlock)
 			.Font(IDetailLayoutBuilder::GetDetailFont())
-			.Text(FText::FromString(TEXT("Layers")))
+			.Text(LOCTEXT("LayersLabel", "Layers"))
 		];
 
 	if (LandscapeEdMode->CurrentToolMode->SupportedTargetTypes & ELandscapeToolTargetTypeMask::Weightmap)
@@ -218,7 +221,7 @@ void FLandscapeEditorCustomNodeBuilder_TargetLayers::GenerateHeaderRowContent(FD
 			.Padding(0.0f, 0.0f, 0.0f, 0.0f)
 			[
 				SNew(SComboButton)
-				.ComboButtonStyle(FEditorStyle::Get(), "ToolbarComboButton")
+				.ComboButtonStyle(FAppStyle::Get(), "ToolbarComboButton")
 				.ForegroundColor(FSlateColor::UseForeground())
 				.HasDownArrow(true)
 				.ContentPadding(FMargin(1, 0))
@@ -237,7 +240,7 @@ void FLandscapeEditorCustomNodeBuilder_TargetLayers::GenerateHeaderRowContent(FD
 						+SOverlay::Slot()
 						[
 							SNew(SImage)
-							.Image(FEditorStyle::GetBrush("LandscapeEditor.Target_DisplayOrder.Default"))
+							.Image(FAppStyle::GetBrush("LandscapeEditor.Target_DisplayOrder.Default"))
 						]	
 						+SOverlay::Slot()
 						[
@@ -254,7 +257,7 @@ void FLandscapeEditorCustomNodeBuilder_TargetLayers::GenerateHeaderRowContent(FD
 			.Padding(5.0f, 0.0f, 0.0f, 0.0f)
 			[
 				SNew(SComboButton)
-				.ComboButtonStyle(FEditorStyle::Get(), "ToolbarComboButton")
+				.ComboButtonStyle(FAppStyle::Get(), "ToolbarComboButton")
 				.ForegroundColor(FSlateColor::UseForeground())
 				.HasDownArrow(true)
 				.ContentPadding(FMargin(1, 0))
@@ -274,7 +277,7 @@ void FLandscapeEditorCustomNodeBuilder_TargetLayers::GenerateHeaderRowContent(FD
 						.HeightOverride(16.0f)
 						[
 							SNew(SImage)
-							.Image(FEditorStyle::GetBrush("GenericViewButton"))
+							.Image(FAppStyle::GetBrush("GenericViewButton"))
 						]
 					]
 				]
@@ -338,7 +341,7 @@ TSharedRef<SWidget> FLandscapeEditorCustomNodeBuilder_TargetLayers::GetTargetLay
 {
 	FMenuBuilder MenuBuilder(/*bInShouldCloseWindowAfterMenuSelection=*/true, nullptr, nullptr, /*bCloseSelfOnly=*/ true);
 
-	MenuBuilder.BeginSection("TargetLayerUnusedType", LOCTEXT("UnusedTypeHeading", "Layer Visilibity"));
+	MenuBuilder.BeginSection("TargetLayerUnusedType", LOCTEXT("UnusedTypeHeading", "Layer Visibility"));
 	{
 		MenuBuilder.AddMenuEntry(
 			LOCTEXT("TargetLayerShowUnusedLayer", "Show all layers"),
@@ -411,8 +414,8 @@ const FSlateBrush* FLandscapeEditorCustomNodeBuilder_TargetLayers::GetTargetLaye
 	{
 		switch (LandscapeEdMode->UISettings->TargetDisplayOrder)
 		{
-			case ELandscapeLayerDisplayMode::Alphabetical: return FEditorStyle::Get().GetBrush("LandscapeEditor.Target_DisplayOrder.Alphabetical");
-			case ELandscapeLayerDisplayMode::UserSpecific: return FEditorStyle::Get().GetBrush("LandscapeEditor.Target_DisplayOrder.Custom");
+			case ELandscapeLayerDisplayMode::Alphabetical: return FAppStyle::Get().GetBrush("LandscapeEditor.Target_DisplayOrder.Alphabetical");
+			case ELandscapeLayerDisplayMode::UserSpecific: return FAppStyle::Get().GetBrush("LandscapeEditor.Target_DisplayOrder.Custom");
 		}
 	}
 
@@ -455,10 +458,10 @@ void FLandscapeEditorCustomNodeBuilder_TargetLayers::GenerateChildContent(IDetai
 			.OnDragDetected(this, &FLandscapeEditorCustomNodeBuilder_TargetLayers::HandleDragDetected)
 			.IsEnabled(TAttribute<bool>::Create(TAttribute<bool>::FGetter::CreateLambda([LandscapeEdMode]() { return LandscapeEdMode->HasValidLandscapeEditLayerSelection(); })));
 
-		TargetLayerList->SetDropIndicator_Above(*FEditorStyle::GetBrush("LandscapeEditor.TargetList.DropZone.Above"));
-		TargetLayerList->SetDropIndicator_Below(*FEditorStyle::GetBrush("LandscapeEditor.TargetList.DropZone.Below"));
+		TargetLayerList->SetDropIndicator_Above(*FAppStyle::GetBrush("LandscapeEditor.TargetList.DropZone.Above"));
+		TargetLayerList->SetDropIndicator_Below(*FAppStyle::GetBrush("LandscapeEditor.TargetList.DropZone.Below"));
 
-		ChildrenBuilder.AddCustomRow(FText::FromString(FString(TEXT("Layers"))))
+		ChildrenBuilder.AddCustomRow(LOCTEXT("LayersLabel", "Layers"))
 			.Visibility(EVisibility::Visible)
 			[
 				TargetLayerList.ToSharedRef()
@@ -502,42 +505,42 @@ TSharedPtr<SWidget> FLandscapeEditorCustomNodeBuilder_TargetLayers::GenerateRow(
 			return RowWidget;
 		}
 	}
-	
+
 	if (Target->TargetType != ELandscapeToolTargetType::Weightmap)
 	{
 		RowWidget = SNew(SLandscapeEditorSelectableBorder)
-			.Padding(0)
+			.Padding(0.0f)
 			.VAlign(VAlign_Center)
 			.OnContextMenuOpening_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnTargetLayerContextMenuOpening, Target)
 			.OnSelected_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnTargetSelectionChanged, Target)
-			.IsSelected_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetTargetLayerIsSelected, Target)			
+			.IsSelected_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetTargetLayerIsSelected, Target)
 			.Visibility(this, &FLandscapeEditorCustomNodeBuilder_TargetLayers::ShouldShowLayer, Target)
 			[
 				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.VAlign(VAlign_Center)
-				.Padding(FMargin(2))
-				[
-					SNew(SImage)
-					.Image(FEditorStyle::GetBrush(Target->TargetType == ELandscapeToolTargetType::Heightmap ? TEXT("LandscapeEditor.Target_Heightmap") : TEXT("LandscapeEditor.Target_Visibility")))
-				]
-				+ SHorizontalBox::Slot()
-				.VAlign(VAlign_Center)
-				.Padding(4, 0)
-				[
-					SNew(SVerticalBox)
-					+ SVerticalBox::Slot()
-					.AutoHeight()
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
 					.VAlign(VAlign_Center)
-					.Padding(0, 2)
+					.Padding(FMargin(2))
 					[
-						SNew(STextBlock)
-						.Font(IDetailLayoutBuilder::GetDetailFont())
-						.Text(Target->TargetName)
-						.ShadowOffset(FVector2D::UnitVector)
+						SNew(SImage)
+							.Image(FAppStyle::GetBrush(Target->TargetType == ELandscapeToolTargetType::Heightmap ? TEXT("LandscapeEditor.Target_Heightmap") : TEXT("LandscapeEditor.Target_Visibility")))
 					]
-				]
+					+ SHorizontalBox::Slot()
+					.VAlign(VAlign_Center)
+					.Padding(4, 0)
+					[
+						SNew(SVerticalBox)
+							+ SVerticalBox::Slot()
+							.AutoHeight()
+							.VAlign(VAlign_Center)
+							.Padding(0, 2)
+							[
+								SNew(STextBlock)
+									.Font(IDetailLayoutBuilder::GetDetailFont())
+									.Text(Target->TargetName)
+									.ColorAndOpacity_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetTargetTextColor, Target)
+							]
+					]
 			];
 	}
 	else
@@ -545,233 +548,245 @@ TSharedPtr<SWidget> FLandscapeEditorCustomNodeBuilder_TargetLayers::GenerateRow(
 		static const FSlateColorBrush SolidWhiteBrush = FSlateColorBrush(FColorList::White);
 
 		RowWidget = SNew(SLandscapeEditorSelectableBorder)
-			.Padding(0)
+			.Padding(0.0f)
 			.VAlign(VAlign_Center)
 			.OnContextMenuOpening_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnTargetLayerContextMenuOpening, Target)
 			.OnSelected_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnTargetSelectionChanged, Target)
 			.IsSelected_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetTargetLayerIsSelected, Target)
 			.Visibility(this, &FLandscapeEditorCustomNodeBuilder_TargetLayers::ShouldShowLayer, Target)
-			[				
+			[
 				SNew(SHorizontalBox)
 
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.VAlign(VAlign_Center)
-				[
-					SNew(SBox)
-					.Padding(FMargin(2.0f, 0.0f, 2.0f, 0.0f))
-					[
-						SNew(SImage)
-						.Image(FCoreStyle::Get().GetBrush("VerticalBoxDragIndicator"))
-					]
-				]
-
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.VAlign(VAlign_Center)
-				.Padding(FMargin(2))
-				[
-					SNew(SBox)
-					.Visibility_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetDebugModeLayerUsageVisibility, Target)
-					.WidthOverride(48)
-					.HeightOverride(48)
-					[
-						SNew(SImage)
-						.Image(FCoreStyle::Get().GetBrush("WhiteBrush"))
-						.ColorAndOpacity_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetLayerUsageDebugColor, Target)
-					]
-				]
-
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.VAlign(VAlign_Center)
-				.Padding(FMargin(2))
-				[
-					(Target->bValid)
-					? (TSharedRef<SWidget>)(
-					SNew(SLandscapeAssetThumbnail, Target->ThumbnailMIC.Get(), ThumbnailPool)
-					.Visibility_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetDebugModeLayerUsageVisibility_Invert, Target)
-					.ThumbnailSize(FIntPoint(48, 48))
-					)
-					: (TSharedRef<SWidget>)(
-					SNew(SImage)
-					.Visibility_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetDebugModeLayerUsageVisibility_Invert, Target)
-					.Image(FEditorStyle::GetBrush(TEXT("LandscapeEditor.Target_Invalid")))
-					)
-				]
-				+ SHorizontalBox::Slot()
-				.VAlign(VAlign_Center)
-				.Padding(4, 0)
-				[
-					SNew(SVerticalBox)
-					+ SVerticalBox::Slot()
-					.AutoHeight()
-					.VAlign(VAlign_Center)
-					.Padding(0, 2, 0, 0)
-					[
-						SNew(SHorizontalBox)
-						+ SHorizontalBox::Slot()
-						[
-							SNew(STextBlock)
-							.Font(IDetailLayoutBuilder::GetDetailFont())
-							.Text(Target->TargetName)
-							.ShadowOffset(FVector2D::UnitVector)
-						]
-						+ SHorizontalBox::Slot()
-						.HAlign(HAlign_Right)
-						[
-							SNew(STextBlock)
-							.Visibility_Lambda([=] { return (Target->LayerInfoObj.IsValid() && Target->LayerInfoObj->bNoWeightBlend) ? EVisibility::Visible : EVisibility::Collapsed; })
-							.Font(IDetailLayoutBuilder::GetDetailFont())
-							.Text(LOCTEXT("NoWeightBlend", "No Weight-Blend"))
-							.ShadowOffset(FVector2D::UnitVector)
-						]
-					]
-					+ SVerticalBox::Slot()
-					.AutoHeight()
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
 					.VAlign(VAlign_Center)
 					[
-						SNew(SHorizontalBox)
-						.Visibility_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetTargetLayerInfoSelectorVisibility, Target)
-						+ SHorizontalBox::Slot()
-						.FillWidth(1)
-						.VAlign(VAlign_Center)
-						[
-							SNew(SObjectPropertyEntryBox)
-							.IsEnabled((bool)Target->bValid)
-							.ObjectPath(Target->LayerInfoObj != NULL ? Target->LayerInfoObj->GetPathName() : FString())
-							.AllowedClass(ULandscapeLayerInfoObject::StaticClass())
-							.OnObjectChanged_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnTargetLayerSetObject, Target)
-							.OnShouldFilterAsset_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::ShouldFilterLayerInfo, Target->LayerName)
-							.AllowClear(false)
-						]
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.VAlign(VAlign_Center)
-						[
-							SNew(SComboButton)
-							.ButtonStyle( FEditorStyle::Get(), "HoverHintOnly" )
-							.HasDownArrow(false)
-							.ContentPadding(4.0f)
-							.ForegroundColor(FSlateColor::UseForeground())
-							.IsFocusable(false)
-							.ToolTipText(LOCTEXT("Tooltip_Create", "Create Layer Info"))
-							.IsEnabled_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetTargetLayerCreateEnabled, Target)
-							.OnGetMenuContent_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnGetTargetLayerCreateMenu, Target)
-							.ButtonContent()
+						SNew(SBox)
+							.Padding(FMargin(2.0f, 0.0f, 2.0f, 0.0f))
 							[
 								SNew(SImage)
-								.Image(FEditorStyle::GetBrush("LandscapeEditor.Target_Create"))
+									.Image(FCoreStyle::Get().GetBrush("VerticalBoxDragIndicator"))
 							]
-						]
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.VAlign(VAlign_Center)
-						[
-							SNew(SButton)
-							.ButtonStyle( FEditorStyle::Get(), "HoverHintOnly" )
-							.ContentPadding(4.0f)
-							.ForegroundColor(FSlateColor::UseForeground())
-							.IsFocusable(false)
-							.ToolTipText(LOCTEXT("Tooltip_MakePublic", "Make Layer Public (move layer info into asset file)"))
-							.Visibility_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetTargetLayerMakePublicVisibility, Target)
-							.OnClicked_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnTargetLayerMakePublicClicked, Target)
-							[
-								SNew(SImage)
-								.Image(FEditorStyle::GetBrush("LandscapeEditor.Target_MakePublic"))
-							]
-						]
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.VAlign(VAlign_Center)
-						[
-							SNew(SButton)
-							.ButtonStyle( FEditorStyle::Get(), "HoverHintOnly" )
-							.ContentPadding(4.0f)
-							.ForegroundColor(FSlateColor::UseForeground())
-							.IsFocusable(false)
-							.ToolTipText(LOCTEXT("Tooltip_Delete", "Delete Layer"))
-							.Visibility_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetTargetLayerDeleteVisibility, Target)
-							.OnClicked_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnTargetLayerDeleteClicked, Target)
-							[
-								SNew(SImage)
-								.Image(FEditorStyle::GetBrush("LandscapeEditor.Target_Delete"))
-							]
-						]
 					]
-					+ SVerticalBox::Slot()
-					.AutoHeight()
+
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.VAlign(VAlign_Center)
+					.Padding(FMargin(2))
 					[
-						SNew(SHorizontalBox)
-						.Visibility_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetLayersSubstractiveBlendVisibility, Target)
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.Padding(0, 2, 2, 2)
-						[
-							SNew(SCheckBox)
-							.IsChecked_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::IsLayersSubstractiveBlendChecked, Target)
-							.OnCheckStateChanged_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnLayersSubstractiveBlendChanged, Target)
+						SNew(SBox)
+							.Visibility_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetDebugModeLayerUsageVisibility, Target)
+							.WidthOverride(48.0f)
+							.HeightOverride(48.0f)
 							[
-								SNew(STextBlock)
-								.Text(LOCTEXT("SubtractiveBlend", "Subtractive Blend"))
+								SNew(SImage)
+									.Image(FCoreStyle::Get().GetBrush("WhiteBrush"))
+									.ColorAndOpacity_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetLayerUsageDebugColor, Target)
 							]
-						]
 					]
-					+ SVerticalBox::Slot()
-					.AutoHeight()
+
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.VAlign(VAlign_Center)
+					.Padding(FMargin(2))
 					[
-						SNew(SHorizontalBox)
-						.Visibility_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetDebugModeColorChannelVisibility, Target)
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.Padding(0, 2, 2, 2)
-						[
-							SNew(SCheckBox)
-							.IsChecked_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::DebugModeColorChannelIsChecked, Target, 0)
-							.OnCheckStateChanged_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnDebugModeColorChannelChanged, Target, 0)
-							[
-								SNew(STextBlock)
-								.Text(LOCTEXT("ViewMode.Debug_None", "None"))
-							]
-						]
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.Padding(2)
-						[
-							SNew(SCheckBox)
-							.IsChecked_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::DebugModeColorChannelIsChecked, Target, 1)
-							.OnCheckStateChanged_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnDebugModeColorChannelChanged, Target, 1)
-							[
-								SNew(STextBlock)
-								.Text(LOCTEXT("ViewMode.Debug_R", "R"))
-							]
-						]
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.Padding(2)
-						[
-							SNew(SCheckBox)
-							.IsChecked_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::DebugModeColorChannelIsChecked, Target, 2)
-							.OnCheckStateChanged_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnDebugModeColorChannelChanged, Target, 2)
-							[
-								SNew(STextBlock)
-								.Text(LOCTEXT("ViewMode.Debug_G", "G"))
-							]
-						]
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.Padding(2)
-						[
-							SNew(SCheckBox)
-							.IsChecked_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::DebugModeColorChannelIsChecked, Target, 4)
-							.OnCheckStateChanged_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnDebugModeColorChannelChanged, Target, 4)
-							[
-								SNew(STextBlock)
-								.Text(LOCTEXT("ViewMode.Debug_B", "B"))
-							]
-						]
+						(Target->bValid)
+							? (TSharedRef<SWidget>)(
+								SNew(SLandscapeAssetThumbnail, Target->ThumbnailMIC.Get(), ThumbnailPool)
+								.Visibility_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetDebugModeLayerUsageVisibility_Invert, Target)
+								.ThumbnailSize(FIntPoint(48, 48))
+								// Open landscape layer info asset on double-click on the thumbnail : 
+								.OnAccessAsset_Lambda([Target](UObject* InObject)
+								{ 
+									// Note : the object being returned here is the landscape MIC so it's not what we use for opening the landscape layer info asset : 
+									if ((Target->TargetType == ELandscapeToolTargetType::Weightmap) && (Target->LayerInfoObj != nullptr))
+									{
+										UAssetEditorSubsystem* AssetEditorSubsystem = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
+										return AssetEditorSubsystem->OpenEditorForAsset(Target->LayerInfoObj.Get());
+									}
+									return false;
+								}))
+							: (TSharedRef<SWidget>)(
+								SNew(SImage)
+								.Visibility_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetDebugModeLayerUsageVisibility_Invert, Target)
+								.Image(FAppStyle::GetBrush(TEXT("LandscapeEditor.Target_Invalid")))
+								)
 					]
-				]
+					+ SHorizontalBox::Slot()
+					.VAlign(VAlign_Center)
+					.Padding(4, 0)
+					[
+						SNew(SVerticalBox)
+							+ SVerticalBox::Slot()
+							.AutoHeight()
+							.VAlign(VAlign_Center)
+							.Padding(0, 2, 0, 0)
+							[
+								SNew(SHorizontalBox)
+									+ SHorizontalBox::Slot()
+									[
+										SNew(STextBlock)
+											.Font(IDetailLayoutBuilder::GetDetailFont())
+											.Text(Target->TargetName)
+											.ColorAndOpacity_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetTargetTextColor, Target)
+									]
+									+ SHorizontalBox::Slot()
+									.HAlign(HAlign_Right)
+									[
+										SNew(STextBlock)
+											.Visibility_Lambda([=] { return (Target->LayerInfoObj.IsValid() && Target->LayerInfoObj->bNoWeightBlend) ? EVisibility::Visible : EVisibility::Collapsed; })
+											.Font(IDetailLayoutBuilder::GetDetailFont())
+											.Text(LOCTEXT("NoWeightBlend", "No Weight-Blend"))
+											.ColorAndOpacity_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetTargetTextColor, Target)
+									]
+							]
+							+ SVerticalBox::Slot()
+							.AutoHeight()
+							.VAlign(VAlign_Center)
+							[
+								SNew(SHorizontalBox)
+									.Visibility_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetTargetLayerInfoSelectorVisibility, Target)
+									+ SHorizontalBox::Slot()
+									.FillWidth(1)
+									.VAlign(VAlign_Center)
+									[
+										SNew(SObjectPropertyEntryBox)
+											.IsEnabled((bool)Target->bValid)
+											.ObjectPath(Target->LayerInfoObj != NULL ? Target->LayerInfoObj->GetPathName() : FString())
+											.AllowedClass(ULandscapeLayerInfoObject::StaticClass())
+											.OnObjectChanged_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnTargetLayerSetObject, Target)
+											.OnShouldFilterAsset_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::ShouldFilterLayerInfo, Target->LayerName)
+											.AllowCreate(false)
+											.AllowClear(false)
+									]
+									+ SHorizontalBox::Slot()
+									.AutoWidth()
+									.VAlign(VAlign_Center)
+									[
+										SNew(SComboButton)
+											.ButtonStyle(FAppStyle::Get(), "HoverHintOnly")
+											.HasDownArrow(false)
+											.ContentPadding(4.0f)
+											.ForegroundColor(FSlateColor::UseForeground())
+											.IsFocusable(false)
+											.ToolTipText(LOCTEXT("Tooltip_Create", "Create Layer Info"))
+											.IsEnabled_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetTargetLayerCreateEnabled, Target)
+											.OnGetMenuContent_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnGetTargetLayerCreateMenu, Target)
+											.ButtonContent()
+											[
+												SNew(SImage)
+													.Image(FAppStyle::GetBrush("LandscapeEditor.Target_Create"))
+											]
+									]
+									+ SHorizontalBox::Slot()
+									.AutoWidth()
+									.VAlign(VAlign_Center)
+									[
+										SNew(SButton)
+											.ButtonStyle(FAppStyle::Get(), "HoverHintOnly")
+											.ContentPadding(4.0f)
+											.ForegroundColor(FSlateColor::UseForeground())
+											.IsFocusable(false)
+											.ToolTipText(LOCTEXT("Tooltip_MakePublic", "Make Layer Public (move layer info into asset file)"))
+											.Visibility_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetTargetLayerMakePublicVisibility, Target)
+											.OnClicked_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnTargetLayerMakePublicClicked, Target)
+											[
+												SNew(SImage)
+													.Image(FAppStyle::GetBrush("LandscapeEditor.Target_MakePublic"))
+											]
+									]
+									+ SHorizontalBox::Slot()
+									.AutoWidth()
+									.VAlign(VAlign_Center)
+									[
+										SNew(SButton)
+											.ButtonStyle(FAppStyle::Get(), "HoverHintOnly")
+											.ContentPadding(4.0f)
+											.ForegroundColor(FSlateColor::UseForeground())
+											.IsFocusable(false)
+											.ToolTipText(LOCTEXT("Tooltip_Delete", "Delete Layer"))
+											.Visibility_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetTargetLayerDeleteVisibility, Target)
+											.OnClicked_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnTargetLayerDeleteClicked, Target)
+											[
+												SNew(SImage)
+													.Image(FAppStyle::GetBrush("LandscapeEditor.Target_Delete"))
+											]
+									]
+							]
+							+ SVerticalBox::Slot()
+							.AutoHeight()
+							[
+								SNew(SHorizontalBox)
+									.Visibility_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetLayersSubstractiveBlendVisibility, Target)
+									+ SHorizontalBox::Slot()
+									.AutoWidth()
+									.Padding(0, 2, 2, 2)
+									[
+										SNew(SCheckBox)
+											.IsChecked_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::IsLayersSubstractiveBlendChecked, Target)
+											.OnCheckStateChanged_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnLayersSubstractiveBlendChanged, Target)
+											[
+												SNew(STextBlock)
+													.Text(LOCTEXT("SubtractiveBlend", "Subtractive Blend"))
+													.ColorAndOpacity_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetTargetTextColor, Target)
+											]
+									]
+							]
+							+ SVerticalBox::Slot()
+							.AutoHeight()
+							[
+								SNew(SHorizontalBox)
+									.Visibility_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::GetDebugModeColorChannelVisibility, Target)
+									+ SHorizontalBox::Slot()
+									.AutoWidth()
+									.Padding(0, 2, 2, 2)
+									[
+										SNew(SCheckBox)
+											.IsChecked_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::DebugModeColorChannelIsChecked, Target, 0)
+											.OnCheckStateChanged_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnDebugModeColorChannelChanged, Target, 0)
+											[
+												SNew(STextBlock)
+													.Text(LOCTEXT("ViewMode.Debug_None", "None"))
+											]
+									]
+									+ SHorizontalBox::Slot()
+									.AutoWidth()
+									.Padding(2)
+									[
+										SNew(SCheckBox)
+											.IsChecked_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::DebugModeColorChannelIsChecked, Target, 1)
+											.OnCheckStateChanged_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnDebugModeColorChannelChanged, Target, 1)
+											[
+												SNew(STextBlock)
+													.Text(LOCTEXT("ViewMode.Debug_R", "R"))
+											]
+									]
+									+ SHorizontalBox::Slot()
+									.AutoWidth()
+									.Padding(2)
+									[
+										SNew(SCheckBox)
+											.IsChecked_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::DebugModeColorChannelIsChecked, Target, 2)
+											.OnCheckStateChanged_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnDebugModeColorChannelChanged, Target, 2)
+											[
+												SNew(STextBlock)
+													.Text(LOCTEXT("ViewMode.Debug_G", "G"))
+											]
+									]
+									+ SHorizontalBox::Slot()
+									.AutoWidth()
+									.Padding(2)
+									[
+										SNew(SCheckBox)
+											.IsChecked_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::DebugModeColorChannelIsChecked, Target, 4)
+											.OnCheckStateChanged_Static(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnDebugModeColorChannelChanged, Target, 4)
+											[
+												SNew(STextBlock)
+													.Text(LOCTEXT("ViewMode.Debug_B", "B"))
+											]
+									]
+							]
+					]
 			];
 	}
 
@@ -904,24 +919,15 @@ TSharedPtr<SWidget> FLandscapeEditorCustomNodeBuilder_TargetLayers::OnTargetLaye
 	if (Target->TargetType == ELandscapeToolTargetType::Heightmap || Target->LayerInfoObj != NULL)
 	{
 		FMenuBuilder MenuBuilder(true, NULL);
-
+		
 		MenuBuilder.BeginSection("LandscapeEditorLayerActions", LOCTEXT("LayerContextMenu.Heading", "Layer Actions"));
 		{
-			// Export
-			FUIAction ExportAction = FUIAction(FExecuteAction::CreateStatic(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnExportLayer, Target));
-			MenuBuilder.AddMenuEntry(LOCTEXT("LayerContextMenu.Export", "Export to file"), FText(), FSlateIcon(), ExportAction);
-
-			// Import
-			FUIAction ImportAction = FUIAction(FExecuteAction::CreateStatic(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnImportLayer, Target));
-			MenuBuilder.AddMenuEntry(LOCTEXT("LayerContextMenu.Import", "Import from file"), FText(), FSlateIcon(), ImportAction);
-
-			// Reimport
-			const FString& ReimportPath = Target->GetReimportFilePath();
-
-			if (!ReimportPath.IsEmpty())
+			FEdModeLandscape* LandscapeEdMode = GetEditorMode();
+			if (LandscapeEdMode)
 			{
-				FUIAction ReImportAction = FUIAction(FExecuteAction::CreateStatic(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnReimportLayer, Target));
-				MenuBuilder.AddMenuEntry(FText::Format(LOCTEXT("LayerContextMenu.ReImport", "Reimport from {0}"), FText::FromString(ReimportPath)), FText(), FSlateIcon(), ReImportAction);
+				FUIAction LandscapeHeightmapChangeToolsAction = FUIAction(FExecuteAction::CreateStatic(&FLandscapeEditorCustomNodeBuilder_TargetLayers::OnHeightmapLayerContextMenu, Target));
+				MenuBuilder.AddMenuEntry(LOCTEXT("LayerContextMenu.Heightmap", "Import From/Export To File..."),
+										LOCTEXT("LayerContextMenu.HeightmapToolTip", "Opens the Landscape Import tool in order to import / export heightmaps from / to external files."), FSlateIcon(), LandscapeHeightmapChangeToolsAction);
 			}
 
 			if (Target->TargetType == ELandscapeToolTargetType::Weightmap)
@@ -962,6 +968,7 @@ void FLandscapeEditorCustomNodeBuilder_TargetLayers::OnExportLayer(const TShared
 	FEdModeLandscape* LandscapeEdMode = GetEditorMode();
 	if (LandscapeEdMode)
 	{
+		check(!LandscapeEdMode->IsGridBased());
 		IDesktopPlatform* DesktopPlatform = FDesktopPlatformModule::Get();
 
 		ULandscapeInfo* LandscapeInfo = Target->LandscapeInfo.Get();
@@ -1024,6 +1031,7 @@ void FLandscapeEditorCustomNodeBuilder_TargetLayers::OnImportLayer(const TShared
 	FEdModeLandscape* LandscapeEdMode = GetEditorMode();
 	if (LandscapeEdMode)
 	{
+		check(!LandscapeEdMode->IsGridBased());
 		IDesktopPlatform* DesktopPlatform = FDesktopPlatformModule::Get();
 
 		ULandscapeInfo* LandscapeInfo = Target->LandscapeInfo.Get();
@@ -1079,7 +1087,17 @@ void FLandscapeEditorCustomNodeBuilder_TargetLayers::OnReimportLayer(const TShar
 	FEdModeLandscape* LandscapeEdMode = GetEditorMode();
 	if (LandscapeEdMode)
 	{
+		check(!LandscapeEdMode->IsGridBased());
 		LandscapeEdMode->ReimportData(*Target);
+	}
+}
+
+void FLandscapeEditorCustomNodeBuilder_TargetLayers::OnHeightmapLayerContextMenu(const TSharedRef<FLandscapeTargetListInfo> Target)
+{
+	FEdModeLandscape* LandscapeEdMode = GetEditorMode();
+	if (LandscapeEdMode)
+	{
+		LandscapeEdMode->SetCurrentTool("ImportExport");
 	}
 }
 
@@ -1143,7 +1161,7 @@ void FLandscapeEditorCustomNodeBuilder_TargetLayers::OnRebuildMICs(const TShared
 {
 	if (Target->LandscapeInfo.IsValid())
 	{
-		Target->LandscapeInfo.Get()->UpdateAllComponentMaterialInstances();
+		Target->LandscapeInfo.Get()->UpdateAllComponentMaterialInstances(/*bInvalidateCombinationMaterials = */true);
 	}
 }
 
@@ -1286,13 +1304,8 @@ void FLandscapeEditorCustomNodeBuilder_TargetLayers::OnTargetLayerCreateClicked(
 		ULevel* Level = Target->Owner->GetLevel();
 
 		// Build default layer object name and package name
-		FName LayerObjectName = FName(*FString::Printf(TEXT("%s_LayerInfo"), *LayerName.ToString()));
-		FString Path = Level->GetOutermost()->GetName() + TEXT("_sharedassets/");
-		if (Path.StartsWith("/Temp/"))
-		{
-			Path = FString("/Game/") + Path.RightChop(FString("/Temp/").Len());
-		}
-		FString PackageName = Path + LayerObjectName.ToString();
+		FName LayerObjectName;
+		FString PackageName = UE::Landscape::GetLayerInfoObjectPackageName(Level, LayerName, LayerObjectName);
 
 		TSharedRef<SDlgPickAssetPath> NewLayerDlg =
 			SNew(SDlgPickAssetPath)
@@ -1305,7 +1318,10 @@ void FLandscapeEditorCustomNodeBuilder_TargetLayers::OnTargetLayerCreateClicked(
 			LayerObjectName = FName(*NewLayerDlg->GetAssetName().ToString());
 
 			UPackage* Package = CreatePackage( *PackageName);
-			ULandscapeLayerInfoObject* LayerInfo = NewObject<ULandscapeLayerInfoObject>(Package, LayerObjectName, RF_Public | RF_Standalone | RF_Transactional);
+
+			// Do not pass RF_Transactional to NewObject, or the asset will mark itself as garbage on Undo (which is not a well-supported path, potentially causing crashes)
+			ULandscapeLayerInfoObject* LayerInfo = NewObject<ULandscapeLayerInfoObject>(Package, LayerObjectName, RF_Public | RF_Standalone);
+			LayerInfo->SetFlags(RF_Transactional);	// we add RF_Transactional after creation, so that future edits _are_ recorded in undo
 			LayerInfo->LayerName = LayerName;
 			LayerInfo->bNoWeightBlend = bNoWeightBlend;
 
@@ -1510,6 +1526,11 @@ void FLandscapeEditorCustomNodeBuilder_TargetLayers::OnDebugModeColorChannelChan
 	}
 }
 
+FSlateColor FLandscapeEditorCustomNodeBuilder_TargetLayers::GetTargetTextColor(const TSharedRef<FLandscapeTargetListInfo> InTarget)
+{
+	return FLandscapeEditorCustomNodeBuilder_TargetLayers::GetTargetLayerIsSelected(InTarget) ? FStyleColors::ForegroundHover : FSlateColor::UseForeground();
+}
+
 //////////////////////////////////////////////////////////////////////////
 
 void SLandscapeEditorSelectableBorder::Construct(const FArguments& InArgs)
@@ -1568,14 +1589,14 @@ const FSlateBrush* SLandscapeEditorSelectableBorder::GetBorder() const
 	if (bIsSelected)
 	{
 		return bHovered
-			? FEditorStyle::GetBrush("LandscapeEditor.TargetList", ".RowSelectedHovered")
-			: FEditorStyle::GetBrush("LandscapeEditor.TargetList", ".RowSelected");
+			? FAppStyle::GetBrush("LandscapeEditor.TargetList", ".RowSelectedHovered")
+			: FAppStyle::GetBrush("LandscapeEditor.TargetList", ".RowSelected");
 	}
 	else
 	{
 		return bHovered
-			? FEditorStyle::GetBrush("LandscapeEditor.TargetList", ".RowBackgroundHovered")
-			: FEditorStyle::GetBrush("LandscapeEditor.TargetList", ".RowBackground");
+			? FAppStyle::GetBrush("LandscapeEditor.TargetList", ".RowBackgroundHovered")
+			: FAppStyle::GetBrush("LandscapeEditor.TargetList", ".RowBackground");
 	}
 }
 
@@ -1600,7 +1621,7 @@ FTargetLayerDragDropOp::~FTargetLayerDragDropOp()
 TSharedPtr<SWidget> FTargetLayerDragDropOp::GetDefaultDecorator() const
 {
 	return SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("ContentBrowser.AssetDragDropTooltipBackground"))
+			.BorderImage(FAppStyle::GetBrush("ContentBrowser.AssetDragDropTooltipBackground"))
 			.Content()
 			[
 				WidgetToShow.ToSharedRef()

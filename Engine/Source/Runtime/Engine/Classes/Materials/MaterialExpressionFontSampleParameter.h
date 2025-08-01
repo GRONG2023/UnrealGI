@@ -6,6 +6,7 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "Misc/Guid.h"
+#include "MaterialTypes.h"
 #include "Materials/MaterialExpressionFontSample.h"
 #include "MaterialExpressionFontSampleParameter.generated.h"
 
@@ -29,11 +30,9 @@ class UMaterialExpressionFontSampleParameter : public UMaterialExpressionFontSam
 	UPROPERTY(EditAnywhere, Category=MaterialExpressionFontSampleParameter)
 	FName Group;
 
-#if WITH_EDITORONLY_DATA
 	/** Controls where the this parameter is displayed in a material instance parameter list. The lower the number the higher up in the parameter list. */
 	UPROPERTY(EditAnywhere, Category = MaterialExpressionFontSampleParameter)
 	int32 SortPriority = 32;
-#endif
 
 	//~ Begin UMaterialExpression Interface
 #if WITH_EDITOR
@@ -48,15 +47,37 @@ class UMaterialExpressionFontSampleParameter : public UMaterialExpressionFontSam
 	virtual FName GetParameterName() const override { return ParameterName; }
 	virtual void SetParameterName(const FName& Name) override { ParameterName = Name; }
 	virtual void ValidateParameterName(const bool bAllowDuplicateName) override;
-	virtual void SetValueToMatchingExpression(UMaterialExpression* OtherExpression) override;
+	virtual bool GetParameterValue(FMaterialParameterMetadata& OutMeta) const override
+	{
+		OutMeta.Value = FMaterialParameterValue(Font, FontTexturePage);
+		OutMeta.Description = Desc;
+		OutMeta.ExpressionGuid = ExpressionGUID;
+		OutMeta.Group = Group;
+		OutMeta.SortPriority = SortPriority;
+		OutMeta.AssetPath = GetAssetPathName();
+		return true;
+	}
+	virtual bool SetParameterValue(const FName& Name, const FMaterialParameterMetadata& Meta, EMaterialExpressionSetParameterValueFlags Flags) override
+	{
+		if (Meta.Value.Type == EMaterialParameterType::Font)
+		{
+			if (SetParameterValue(Name, Meta.Value.Font.Value, Meta.Value.Font.Page, Flags))
+			{
+				if (EnumHasAnyFlags(Flags, EMaterialExpressionSetParameterValueFlags::AssignGroupAndSortPriority))
+				{
+					Group = Meta.Group;
+					SortPriority = Meta.SortPriority;
+				}
+				return true;
+			}
+		}
+		return false;
+	}
 #endif
 	//~ End UMaterialExpression Interface
 	
-	/** Return whether this is the named parameter, and fill in its value */
-	bool IsNamedParameter(const FHashedMaterialParameterInfo& ParameterInfo, UFont*& OutFontValue, int32& OutFontPage) const;
-
 #if WITH_EDITOR
-	bool SetParameterValue(FName InParameterName, UFont* InFontValue, int32 InFontPage);
+	bool SetParameterValue(FName InParameterName, UFont* InFontValue, int32 InFontPage, EMaterialExpressionSetParameterValueFlags Flags = EMaterialExpressionSetParameterValueFlags::None);
 #endif
 
 	/**
@@ -64,12 +85,10 @@ class UMaterialExpressionFontSampleParameter : public UMaterialExpressionFontSam
 	*/
 	virtual void SetDefaultFont();
 	
-	ENGINE_API virtual FGuid& GetParameterExpressionId() override
+	virtual FGuid& GetParameterExpressionId() override
 	{
 		return ExpressionGUID;
 	}
-
-	void GetAllParameterInfo(TArray<FMaterialParameterInfo> &OutParameterInfo, TArray<FGuid> &OutParameterIds, const FMaterialParameterInfo& InBaseParameterInfo) const;
 };
 
 

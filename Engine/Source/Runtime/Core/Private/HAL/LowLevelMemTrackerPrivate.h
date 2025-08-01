@@ -22,7 +22,7 @@
 #endif
 
 // Enable storing the full tag for each alloc if (1) arbitrary names tags are allowed or (2) Stats are allowed (stats use names tags) or (3) Asset tags are allowed (assets use names tags)
-#define LLM_ENABLED_FULL_TAGS LLM_ALLOW_NAMES_TAGS || LLM_ALLOW_STATS || LLM_ALLOW_ASSETS_TAGS
+#define LLM_ENABLED_FULL_TAGS (LLM_ALLOW_NAMES_TAGS || LLM_ALLOW_STATS || LLM_ALLOW_ASSETS_TAGS)
 
 // Whether to enable running with reduced threads. This is currently enabled because the engine crashes with -norenderthread
 #define LLM_ENABLED_REDUCE_THREADS 0
@@ -44,12 +44,40 @@
 // Disable if you need a little more memory or speed
 #define LLM_ENABLED_TRACK_PEAK_MEMORY 1
 
-
-
 namespace UE
 {
 namespace LLMPrivate
 {
+	struct FTagDataNameKey
+	{
+		FName Name;
+		ELLMTagSet TagSet;
+		
+		FTagDataNameKey(FName InName, ELLMTagSet InTagSet) :
+			Name(InName),
+			TagSet(InTagSet)
+		{
+		}
+
+		friend uint32 GetTypeHash(const FTagDataNameKey& Key)
+		{
+			constexpr uint32 HashPrime = 101;
+			return GetTypeHash(Key.Name) + HashPrime * static_cast<uint32>(Key.TagSet);
+		}
+
+		friend bool operator==(const FTagDataNameKey& A, const FTagDataNameKey& B)
+		{
+			return A.Name == B.Name && A.TagSet == B.TagSet;
+		}
+
+		friend bool operator!=(const FTagDataNameKey& A, const FTagDataNameKey& B)
+		{
+			return (A.Name != B.Name || A.TagSet != B.TagSet);
+		}
+
+		FTagDataNameKey() = delete;
+	};
+
 	/**
 	 * FTagData: Description of the properties of a Tag that can be used in LLM_SCOPE
 	 */
@@ -57,29 +85,37 @@ namespace LLMPrivate
 	{
 	public:
 
-		FTagData(FName InName, FName InDisplayName, FName InParentName, FName InStatName, FName InSummaryStatName, bool bInHasEnumTag, ELLMTag InEnumTag, ETagReferenceSource InReferenceSource);
-		FTagData(FName InName, FName InDisplayName, const FTagData* InParent, FName InStatName, FName InSummaryStatName, bool bInHasEnumTag, ELLMTag InEnumTag, ETagReferenceSource InReferenceSource);
+		FTagData(FName InName, ELLMTagSet InTagSet, FName InDisplayName, FName InParentName, FName InStatName,
+			FName InSummaryStatName, bool bInHasEnumTag, ELLMTag InEnumTag, ETagReferenceSource InReferenceSource);
+		FTagData(FName InName, ELLMTagSet InTagSet, FName InDisplayName, const FTagData* InParent, FName InStatName,
+			FName InSummaryStatName, bool bInHasEnumTag, ELLMTag InEnumTag, ETagReferenceSource InReferenceSource);
 		~FTagData();
 
 		bool IsParentConstructed() const;
 		bool IsFinishConstructed() const;
 		FName GetName() const;
 		FName GetDisplayName() const;
-		FString GetDisplayPath() const;
-		void AppendDisplayPath(FStringBuilderBase& Result) const;
+		void GetDisplayPath(FStringBuilderBase& Result, int32 MaxLen=-1) const;
+		void AppendDisplayPath(FStringBuilderBase& Result, int32 MaxLen=-1) const;
 		const FTagData* GetParent() const;
 		FName GetParentName() const;
+		FName GetParentNameSafeBeforeFinishConstruct() const;
 		FName GetStatName() const;
 		FName GetSummaryStatName() const;
 		ELLMTag GetEnumTag() const;
+		ELLMTagSet GetTagSet() const;
 		bool HasEnumTag() const;
 		const FTagData* GetContainingEnumTagData() const;
 		ELLMTag GetContainingEnum() const;
 		ETagReferenceSource GetReferenceSource() const;
 		int32 GetIndex() const;
+		bool IsReportable() const;
+		bool IsStatsReportable() const;
 
 		void SetParent(const FTagData* InParent);
 		void SetIndex(int32 InIndex);
+		void SetIsReportable(bool bInReportable);
+		void SetIsStatsReportable(bool bInReportable);
 		void SetFinishConstructed();
 
 		// These functions are normally invalid - these properties should be immutable - but are called for EnumTags during bootstrapping
@@ -105,15 +141,17 @@ namespace LLMPrivate
 		int32 Index;
 		ELLMTag EnumTag;
 		ETagReferenceSource ReferenceSource;
+		ELLMTagSet TagSet;
 		bool bIsFinishConstructed;
 		bool bParentIsName;
 		bool bHasEnumTag;
+		bool bIsReportable;
 	};
 
 	// TagData container types that use FLLMAllocator
-	class FTagDataNameMap : public TMap<FName, FTagData*, FDefaultSetLLMAllocator>
+	class FTagDataNameMap : public TMap<FTagDataNameKey, FTagData*, FDefaultSetLLMAllocator>
 	{
-		using TMap<FName, FTagData*, FDefaultSetLLMAllocator>::TMap;
+		using TMap<FTagDataNameKey, FTagData*, FDefaultSetLLMAllocator>::TMap;
 	};
 	class FConstTagDataArray : public TArray<const FTagData*, FDefaultLLMAllocator>
 	{
@@ -147,23 +185,39 @@ namespace LLMPrivate
 #if LLM_ENABLED_TRACK_PEAK_MEMORY
 		int64 PeakSize = 0;
 #endif
+		int64 SizeInSnapshot = 0;
 		int64 ExternalAmount = 0;
 		bool bExternalValid = false;
 		bool bExternalAddToTotal = false;
 
-		int64 GetSize(bool bTrackPeaks) const
+		int64 GetSize(UE::LLM::ESizeParams SizeParams) const
 		{
+			int64 CurrentSize = Size;
+
 #if LLM_ENABLED_TRACK_PEAK_MEMORY
-			if (bTrackPeaks)
+			if (EnumHasAnyFlags(SizeParams, UE::LLM::ESizeParams::ReportPeak))
 			{
-				return PeakSize;
+				CurrentSize = PeakSize;
 			}
-			else
 #endif
+			// Note, this will also subtract the snapshotted size from PeakSize if that flag is enabled
+			if (EnumHasAnyFlags(SizeParams, UE::LLM::ESizeParams::RelativeToSnapshot))
 			{
-				return Size;
+				CurrentSize = FMath::Clamp<int64>(CurrentSize - SizeInSnapshot, 0, INT64_MAX);
 			}
+
+			return CurrentSize;
 		};
+
+		void CaptureSnapshot()
+		{
+			SizeInSnapshot = Size;
+		}
+
+		void ClearSnapshot()
+		{
+			SizeInSnapshot = 0;
+		}
 	};
 	typedef TFastPointerLLMMap<const FTagData*, FTrackerTagSizeData> FTrackerTagSizeMap;
 

@@ -13,41 +13,44 @@ namespace UE4ChunkedArray_Private
 	template <typename ChunkType, typename ElementType, uint32 NumElementsPerChunk>
 	struct TChunkedArrayIterator
 	{
-		TChunkedArrayIterator(ChunkType** InChunk, ChunkType** InLastChunk, ElementType* InElem)
-			: Elem (InElem)
-			, Chunk(InChunk)
-			, LastChunk(InLastChunk)
-		{
-		}
-
-		ElementType* Elem;
-		ChunkType**  Chunk;
-		ChunkType**  LastChunk;
+		ChunkType**	Chunk;
+		uint32		Count = 0;
+		uint32		ElementIndex = 0;
 
 		ElementType& operator*() const
 		{
-			return *Elem;
+			return (*Chunk)->Elements[ElementIndex];
 		}
 
 		void operator++()
 		{
-			++Elem;
-			if (Chunk != LastChunk && Elem == (*Chunk)->Elements + NumElementsPerChunk)
+			++ElementIndex;
+			if (ElementIndex >= NumElementsPerChunk)
 			{
+				ElementIndex = 0;
 				++Chunk;
-				Elem = (*Chunk)->Elements;
 			}
+
+			++Count;
 		}
 
-		friend bool operator!=(const TChunkedArrayIterator& Lhs, const TChunkedArrayIterator& Rhs)
+		bool operator!=(const TChunkedArrayIterator& Rhs) const
 		{
-			return Lhs.Elem != Rhs.Elem;
+			return Count < Rhs.Count;
 		}
 	};
 }
 
+// Forward declarations
+
+template<typename InElementType, uint32 TargetBytesPerChunk, typename AllocatorType>
+class TChunkedArray;
+
+template <typename T, uint32 TargetBytesPerChunk, typename AllocatorType>
+void* operator new(size_t Size, TChunkedArray<T, TargetBytesPerChunk, AllocatorType>& ChunkedArray);
+
 /** An array that uses multiple allocations to avoid allocation failure due to fragmentation. */
-template<typename InElementType, uint32 TargetBytesPerChunk = 16384 >
+template<typename InElementType, uint32 TargetBytesPerChunk = 16384, typename AllocatorType = FDefaultAllocator >
 class TChunkedArray
 {
 	using ElementType = InElementType;
@@ -71,30 +74,24 @@ public:
 
 private:
 	template <typename ArrayType>
-	FORCEINLINE static typename TEnableIf<TContainerTraits<ArrayType>::MoveWillEmptyContainer>::Type MoveOrCopy(ArrayType& ToArray, ArrayType& FromArray)
+	FORCEINLINE static void Move(ArrayType& ToArray, ArrayType& FromArray)
 	{
 		ToArray.Chunks      = (ChunksType&&)FromArray.Chunks;
 		ToArray.NumElements = FromArray.NumElements;
 		FromArray.NumElements = 0;
 	}
 
-	template <typename ArrayType>
-	FORCEINLINE static typename TEnableIf<!TContainerTraits<ArrayType>::MoveWillEmptyContainer>::Type MoveOrCopy(ArrayType& ToArray, ArrayType& FromArray)
-	{
-		ToArray = FromArray;
-	}
-
 public:
 	TChunkedArray(TChunkedArray&& Other)
 	{
-		MoveOrCopy(*this, Other);
+		this->Move(*this, Other);
 	}
 
 	TChunkedArray& operator=(TChunkedArray&& Other)
 	{
 		if (this != &Other)
 		{
-			MoveOrCopy(*this, Other);
+			this->Move(*this, Other);
 		}
 
 		return *this;
@@ -128,6 +125,18 @@ public:
 		const int32 ChunkElementIndex = ElementIndex % NumElementsPerChunk;
 		return Chunks[ChunkIndex].Elements[ChunkElementIndex];
 	}
+
+	/**
+	 * Returns true if the chunked array is empty and contains no elements. 
+	 *
+	 * @returns True if the chunked array is empty.
+	 * @see Num
+	 */
+	bool IsEmpty() const
+	{
+		return NumElements == 0;
+	}
+
 	int32 Num() const 
 	{ 
 		return NumElements; 
@@ -199,14 +208,14 @@ public:
 		checkSlow(NumElements>=0);
 
 		const int32 OldNum = NumElements;
-		for (int32 i = 0; i < Count; i++)
+		const int32 NewNumElements = OldNum + Count;
+		const int32 NewNumChunks = (NewNumElements + NumElementsPerChunk - 1)/NumElementsPerChunk;
+		NumElements = NewNumElements;
+		for (int32 NumChunks = Chunks.Num(); NumChunks < NewNumChunks; ++NumChunks)
 		{
-			if (NumElements % NumElementsPerChunk == 0)
-			{
-				Chunks.Add(new FChunk);
-			}
-			NumElements++;
+			Chunks.Add(new FChunk);
 		}
+
 		return OldNum;
 	}
 
@@ -224,7 +233,7 @@ public:
 			{
 				const int32 NumElementsInCurrentChunk = FMath::Min<int32>(NumElements - ChunkIndex * NumElementsPerChunk, NumElementsPerChunk);
 				check(NumElementsInCurrentChunk > 0);
-				FMemory::Memcpy(CopyDestPtr, &Chunks[ChunkIndex].Elements[0], NumElementsInCurrentChunk * sizeof(ElementType));
+				FMemory::Memcpy(CopyDestPtr, &Chunks[ChunkIndex].Elements[0], NumElementsInCurrentChunk * sizeof(ElementType)); //-V598
 				CopyDestPtr += NumElementsInCurrentChunk;
 			}
 		}
@@ -258,8 +267,6 @@ public:
 
 protected:
 
-	friend struct TContainerTraits<TChunkedArray<ElementType, TargetBytesPerChunk>>;
-
 	enum { NumElementsPerChunk = TargetBytesPerChunk / sizeof(ElementType) };
 
 	/** A chunk of the array's elements. */
@@ -270,7 +277,7 @@ protected:
 	};
 
 	/** The chunks of the array's elements. */
-	typedef TIndirectArray<FChunk> ChunksType;
+	typedef TIndirectArray<FChunk, AllocatorType> ChunksType;
 	ChunksType Chunks;
 
 	/** The number of elements in the array. */
@@ -283,48 +290,29 @@ private:
 public:
 	FIterType begin()
 	{
-		int32 Num = NumElements;
-		FChunk** ChunkPtr = Chunks.GetData();
-		FChunk** LastChunkPtr = Chunks.GetData() + (Num ? Num - 1 : 0) / NumElementsPerChunk;
-		return FIterType(ChunkPtr, LastChunkPtr, ChunkPtr ? (*ChunkPtr)->Elements : nullptr);
+		return FIterType{Chunks.GetData()};
 	}
 
 	FConstIterType begin() const
 	{
-		int32 Num = NumElements;
-		const FChunk** ChunkPtr = Chunks.GetData();
-		const FChunk** LastChunkPtr = Chunks.GetData() + (Num ? Num - 1 : 0) / NumElementsPerChunk;
-		return FConstIterType(ChunkPtr, LastChunkPtr, ChunkPtr ? (*ChunkPtr)->Elements : nullptr);
+		return FConstIterType{Chunks.GetData()};
 	}
 
 	FIterType end()
 	{
-		int32 Num = NumElements;
-		bool bBeyondLastChunk = Num && (Num % NumElementsPerChunk) == 0;
-		FChunk** ChunkPtr = Chunks.GetData() + (Num / NumElementsPerChunk) + (bBeyondLastChunk ? -1 : 0); // do not read off the end of the chunk array!
-		FChunk** LastChunkPtr = Chunks.GetData() + (Num ? Num - 1 : 0) / NumElementsPerChunk;
-		return FIterType(ChunkPtr, LastChunkPtr, ChunkPtr ? (*ChunkPtr)->Elements + (bBeyondLastChunk ? NumElementsPerChunk : (Num % NumElementsPerChunk))  : nullptr);
+		return FIterType{nullptr, uint32(NumElements)};
 	}
 
 	FConstIterType end() const
 	{
-		int32 Num = NumElements;
-		bool bBeyondLastChunk = Num && Num % NumElementsPerChunk == 0;
-		const FChunk** ChunkPtr = Chunks.GetData() + (Num / NumElementsPerChunk) + (bBeyondLastChunk ? -1 : 0); // do not read off the end of the chunk array!
-		const FChunk** LastChunkPtr = Chunks.GetData() + (Num ? Num - 1 : 0) / NumElementsPerChunk;
-		return FConstIterType(ChunkPtr, LastChunkPtr, ChunkPtr ? (*ChunkPtr)->Elements + (bBeyondLastChunk ? NumElementsPerChunk : (Num % NumElementsPerChunk)) : nullptr);
+		return FConstIterType{nullptr, uint32(NumElements)};
 	}
 };
 
 
-template <typename ElementType, uint32 TargetBytesPerChunk>
-struct TContainerTraits<TChunkedArray<ElementType, TargetBytesPerChunk> > : public TContainerTraitsBase<TChunkedArray<ElementType, TargetBytesPerChunk> >
-{
-	enum { MoveWillEmptyContainer = TContainerTraits<typename TChunkedArray<ElementType, TargetBytesPerChunk>::ChunksType>::MoveWillEmptyContainer };
-};
 
-
-template <typename T,uint32 TargetBytesPerChunk> void* operator new( size_t Size, TChunkedArray<T,TargetBytesPerChunk>& ChunkedArray )
+template <typename T,uint32 TargetBytesPerChunk, typename AllocatorType> 
+void* operator new( size_t Size, TChunkedArray<T,TargetBytesPerChunk, AllocatorType>& ChunkedArray )
 {
 	check(Size == sizeof(T));
 	const int32 Index = ChunkedArray.Add(1);

@@ -35,7 +35,7 @@ class UPlayMontageCallbackProxy : public UObject
 
 	// Called to perform the query internally
 	UFUNCTION(BlueprintCallable, meta = (BlueprintInternalUseOnly = "true"))
-	static UPlayMontageCallbackProxy* CreateProxyObjectForPlayMontage(
+	static ANIMGRAPHRUNTIME_API UPlayMontageCallbackProxy* CreateProxyObjectForPlayMontage(
 		class USkeletalMeshComponent* InSkeletalMeshComponent, 
 		class UAnimMontage* MontageToPlay, 
 		float PlayRate = 1.f, 
@@ -44,21 +44,21 @@ class UPlayMontageCallbackProxy : public UObject
 
 public:
 	//~ Begin UObject Interface
-	virtual void BeginDestroy() override;
+	ANIMGRAPHRUNTIME_API virtual void BeginDestroy() override;
 	//~ End UObject Interface
 
 protected:
 	UFUNCTION()
-	void OnMontageBlendingOut(UAnimMontage* Montage, bool bInterrupted);
+	ANIMGRAPHRUNTIME_API void OnMontageBlendingOut(UAnimMontage* Montage, bool bInterrupted);
 
 	UFUNCTION()
-	void OnMontageEnded(UAnimMontage* Montage, bool bInterrupted);
+	ANIMGRAPHRUNTIME_API void OnMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
 	UFUNCTION()
-	void OnNotifyBeginReceived(FName NotifyName, const FBranchingPointNotifyPayload& BranchingPointNotifyPayload);
+	ANIMGRAPHRUNTIME_API void OnNotifyBeginReceived(FName NotifyName, const FBranchingPointNotifyPayload& BranchingPointNotifyPayload);
 
 	UFUNCTION()
-	void OnNotifyEndReceived(FName NotifyName, const FBranchingPointNotifyPayload& BranchingPointNotifyPayload);
+	ANIMGRAPHRUNTIME_API void OnNotifyEndReceived(FName NotifyName, const FBranchingPointNotifyPayload& BranchingPointNotifyPayload);
 
 private:
 	TWeakObjectPtr<UAnimInstance> AnimInstancePtr;
@@ -71,7 +71,9 @@ private:
 	FOnMontageBlendingOutStarted BlendingOutDelegate;
 	FOnMontageEnded MontageEndedDelegate;
 
-	void PlayMontage(
+protected:
+	// Attempts to play a montage with the specified settings. Returns whether it started or not.
+	ANIMGRAPHRUNTIME_API bool PlayMontage(
 		class USkeletalMeshComponent* InSkeletalMeshComponent,
 		class UAnimMontage* MontageToPlay,
 		float PlayRate = 1.f,

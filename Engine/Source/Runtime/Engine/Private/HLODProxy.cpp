@@ -1,24 +1,34 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/HLODProxy.h"
+
+#include "Concepts/StaticStructProvider.h"
+#include "Engine/Level.h"
 #include "Engine/LODActor.h"
+#include "Engine/World.h"
 #include "GameFramework/WorldSettings.h"
+#include "HLOD/HLODProxyDesc.h"
+#include "Materials/Material.h"
 
 #if WITH_EDITOR
+#include "Algo/ForEach.h"
+#include "DerivedDataCacheKey.h"
 #include "Misc/ConfigCacheIni.h"
-#include "Serialization/ArchiveObjectCrc32.h"
+#include "Serialization/ArchiveCrc32.h"
 #include "HierarchicalLOD.h"
 #include "ObjectTools.h"
 #endif
-#include "Interfaces/ITargetPlatformManagerModule.h"
-#include "Materials/MaterialInstance.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Engine/Texture.h"
 #include "Engine/StaticMesh.h"
 #include "PhysicsEngine/BodySetup.h"
+#include "StaticMeshComponentLODInfo.h"
 #include "LevelUtils.h"
 #include "Engine/LevelStreaming.h"
-#include "Math/UnrealMathUtility.h"
+#include "StaticMeshResources.h"
+#include "UObject/ObjectSaveContext.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(HLODProxy)
 
 #if WITH_EDITOR
 
@@ -109,14 +119,16 @@ void UHLODProxy::Clean()
 	if (GetDefault<UHierarchicalLODSettings>()->bSaveLODActorsToHLODPackages)
 	{
 		UWorld* World = Cast<UWorld>(OwningMap.ToSoftObjectPath().ResolveObject());
-		if (World)
+
+		// Don't check HLODs for levels that are not visible, as they haven't got any LODActors yet, which means they'll always get cleaned out and dirtied.
+		if (World && World->PersistentLevel->bIsVisible)
 		{
 			UpdateHLODDescs(World->PersistentLevel);
 		}
 	}
 	else if (HLODActors.Num() > 0)
 	{
-		for (TMap<UHLODProxyDesc*, FHLODProxyMesh>::TIterator ItHLODActor = HLODActors.CreateIterator(); ItHLODActor; ++ItHLODActor)
+		for (auto ItHLODActor = HLODActors.CreateIterator(); ItHLODActor; ++ItHLODActor)
 		{
 			RemoveAssets(ItHLODActor.Value());
 		}
@@ -151,9 +163,9 @@ void UHLODProxy::DeletePackage()
 	ObjectTools::DeleteObjectsUnchecked({ Package });
 }
 
-void UHLODProxy::PreSave(const class ITargetPlatform* TargetPlatform)
+void UHLODProxy::PreSave(FObjectPreSaveContext ObjectSaveContext)
 {
-	Super::PreSave(TargetPlatform);
+	Super::PreSave(ObjectSaveContext);
 
 	if (!OwningMap.IsValid())
 	{
@@ -162,7 +174,7 @@ void UHLODProxy::PreSave(const class ITargetPlatform* TargetPlatform)
 
 	// Always rebuild key on save here.
 	// We don't do this while cooking as keys rely on platform derived data which is context-dependent during cook
-	if (!GIsCookerLoadingPackage)
+	if (!ObjectSaveContext.IsCooking())
 	{
 		if (GetDefault<UHierarchicalLODSettings>()->bSaveLODActorsToHLODPackages)
 		{
@@ -200,7 +212,7 @@ void UHLODProxy::UpdateHLODDescs(const ULevel* InLevel)
 
 	// For each HLODProxyDesc stored in this proxy, ensure that it is up to date with the associated LODActor
 	// Purge the HLODProxyDesc that are unused (not referenced by any LODActor)
-	for (TMap<UHLODProxyDesc*, FHLODProxyMesh>::TIterator ItHLODActor = HLODActors.CreateIterator(); ItHLODActor; ++ItHLODActor)
+	for (auto ItHLODActor = HLODActors.CreateIterator(); ItHLODActor; ++ItHLODActor)
 	{
 		UHLODProxyDesc* HLODProxyDesc = ItHLODActor.Key();
 		ALODActor** LODActor = LODActors.Find(HLODProxyDesc);
@@ -223,13 +235,13 @@ const AActor* UHLODProxy::FindFirstActor(const ALODActor* LODActor)
 {
 	auto RecursiveFindFirstActor = [&](const ALODActor* InLODActor)
 	{
-		const AActor* FirstActor = InLODActor->SubActors.IsValidIndex(0) ? InLODActor->SubActors[0] : nullptr;
+		const AActor* FirstActor = InLODActor->SubActors.IsValidIndex(0) ? ToRawPtr(InLODActor->SubActors[0]) : nullptr;
 		while (FirstActor != nullptr && FirstActor->IsA<ALODActor>())
 		{
 			const ALODActor* SubLODActor = Cast<ALODActor>(FirstActor);
 			if (SubLODActor)
 			{
-				FirstActor = SubLODActor->SubActors.IsValidIndex(0) ? SubLODActor->SubActors[0] : nullptr; 
+				FirstActor = SubLODActor->SubActors.IsValidIndex(0) ? ToRawPtr(SubLODActor->SubActors[0]) : nullptr; 
 			}
 			else
 			{
@@ -277,7 +289,7 @@ void UHLODProxy::ExtractStaticMeshComponentsFromLODActor(const ALODActor* LODAct
 			}
 			else
 			{
-				ChildActor->GetComponents<UStaticMeshComponent>(ChildComponents);
+				ChildActor->GetComponents(ChildComponents);
 			}
 
 			InOutComponents.Append(ChildComponents);
@@ -301,7 +313,7 @@ void UHLODProxy::ExtractComponents(const ALODActor* LODActor, TArray<UPrimitiveC
 			}
 			else
 			{
-				Actor->GetComponents<UStaticMeshComponent>(Components);
+				Actor->GetComponents(Components);
 			}
 
 			Components.RemoveAll([&](UStaticMeshComponent* Val)
@@ -316,7 +328,7 @@ void UHLODProxy::ExtractComponents(const ALODActor* LODActor, TArray<UPrimitiveC
 
 uint32 UHLODProxy::GetCRC(UMaterialInterface* InMaterialInterface, uint32 InCRC)
 {
-	TArray<uint8> KeyBuffer;
+	FArchiveCrc32 Ar(InCRC);
 
 	UMaterialInterface* MaterialInterface = InMaterialInterface;
 	while(MaterialInterface)
@@ -326,18 +338,18 @@ uint32 UHLODProxy::GetCRC(UMaterialInterface* InMaterialInterface, uint32 InCRC)
 		{
 			if(UMaterialInstanceConstant* MIC = Cast<UMaterialInstanceConstant>(MI))
 			{
-				KeyBuffer.Append((uint8*)&MIC->ParameterStateId, sizeof(FGuid));
+				Ar << MIC->ParameterStateId;
 			}
 			MaterialInterface = MI->Parent;
 		}
 		else if(UMaterial* Material = Cast<UMaterial>(MaterialInterface))
 		{
-			KeyBuffer.Append((uint8*)&Material->StateId, sizeof(FGuid));
+			Ar << Material->StateId;
 			MaterialInterface = nullptr;
 		}
 	}
 
-	return FCrc::MemCrc32(KeyBuffer.GetData(), KeyBuffer.Num(), InCRC);
+	return Ar.GetCrc();
 }
 
 uint32 UHLODProxy::GetCRC(UTexture* InTexture, uint32 InCRC)
@@ -348,7 +360,19 @@ uint32 UHLODProxy::GetCRC(UTexture* InTexture, uint32 InCRC)
          FTexturePlatformData* PlatformData = *InTexture->GetRunningPlatformData();
          if (PlatformData != nullptr)
          {
-             return FCrc::StrCrc32(*PlatformData->DerivedDataKey, InCRC);
+			 if (const FString* KeyString = PlatformData->DerivedDataKey.TryGet<FString>())
+			 {
+				 return FCrc::StrCrc32(**KeyString, InCRC);
+			 }
+			 else if (const UE::DerivedData::FCacheKeyProxy* KeyProxy = PlatformData->DerivedDataKey.TryGet<UE::DerivedData::FCacheKeyProxy>())
+			 {
+				 const UE::DerivedData::FCacheKey* Key = KeyProxy->AsCacheKey();
+				 FAnsiStringView BucketStringView = Key->Bucket.ToString();
+				 FArchiveCrc32 Ar(InCRC);
+				 Ar.Serialize(const_cast<ANSICHAR*>(BucketStringView.GetData()), BucketStringView.Len());
+				 Ar.Serialize(const_cast<FIoHash*>(&Key->Hash), sizeof(FIoHash));
+				 return Ar.GetCrc();
+			 }
          }
      }
  
@@ -356,51 +380,60 @@ uint32 UHLODProxy::GetCRC(UTexture* InTexture, uint32 InCRC)
      return FCrc::StrCrc32(*InTexture->GetPathName(), InCRC);
 }
 
-uint32 UHLODProxy::GetCRC(UStaticMesh* InStaticMesh, uint32 InCRC)
+uint32 UHLODProxy::GetCRC(UStaticMesh* InStaticMesh, uint32 InCRC, bool bInConsiderPhysicData)
 {
-	TArray<uint8> KeyBuffer;
+	FArchiveCrc32 Ar(InCRC);
 
 	// Default to just the path name if we don't have render data
 	FString DerivedDataKey = InStaticMesh->GetRenderData() ? InStaticMesh->GetRenderData()->DerivedDataKey : InStaticMesh->GetPathName();
-	KeyBuffer.Append((uint8*)DerivedDataKey.GetCharArray().GetData(), DerivedDataKey.GetCharArray().Num() * DerivedDataKey.GetCharArray().GetTypeSize());
+	Ar << DerivedDataKey;
 
-	const int32 LightMapCoordinateIndex = InStaticMesh->GetLightMapCoordinateIndex();
-	KeyBuffer.Append((uint8*)&LightMapCoordinateIndex, sizeof(int32));
-	if(InStaticMesh->GetBodySetup())
+	int32 LightMapCoordinateIndex = InStaticMesh->GetLightMapCoordinateIndex();
+	Ar << LightMapCoordinateIndex;
+
+	if (bInConsiderPhysicData)
 	{
-		// Incorporate physics data
-		KeyBuffer.Append((uint8*)&InStaticMesh->GetBodySetup()->BodySetupGuid, sizeof(FGuid));;
+		if (UBodySetup* BodySetup = InStaticMesh->GetBodySetup())
+		{
+			// Incorporate physics data
+			Ar << InStaticMesh->GetBodySetup()->BodySetupGuid;
+		}
 	}
-	return FCrc::MemCrc32(KeyBuffer.GetData(), KeyBuffer.Num(), InCRC);
+
+	return Ar.GetCrc();
 }
 
-static void AppendRoundedTransform(const FRotator& ComponentRotation, const FVector& ComponentLocation, const FVector& ComponentScale, TArray<uint8>& OutKeyBuffer)
+static void AppendRoundedTransform(const FRotator& ComponentRotation, const FVector& ComponentLocation, const FVector& ComponentScale, FArchive& Ar)
 {
 	// Include transform - round sufficiently to ensure stability
 	FIntVector Location(FMath::RoundToInt(ComponentLocation.X), FMath::RoundToInt(ComponentLocation.Y), FMath::RoundToInt(ComponentLocation.Z));
-	OutKeyBuffer.Append((uint8*)&Location, sizeof(Location));
-	FVector RotationVector(ComponentRotation.GetNormalized().Vector());
-	FIntVector Rotation(FMath::RoundToInt(RotationVector.X), FMath::RoundToInt(RotationVector.Y), FMath::RoundToInt(RotationVector.Z));
-	OutKeyBuffer.Append((uint8*)&Rotation, sizeof(Rotation));
-	FIntVector Scale(FMath::RoundToInt(ComponentScale.X), FMath::RoundToInt(ComponentScale.Y), FMath::RoundToInt(ComponentScale.Z));
-	OutKeyBuffer.Append((uint8*)&Scale, sizeof(Scale));
+	Ar << Location;
+
+	FRotator Rotator(ComponentRotation.GetDenormalized());
+	const int32 MAX_DEGREES = 360;
+	FIntVector Rotation(FMath::RoundToInt(Rotator.Pitch) % MAX_DEGREES, FMath::RoundToInt(Rotator.Yaw) % MAX_DEGREES, FMath::RoundToInt(Rotator.Roll) % MAX_DEGREES);
+	Ar << Rotation;
+
+	const float SCALE_FACTOR = 100;
+	FIntVector Scale(FMath::RoundToInt(ComponentScale.X * SCALE_FACTOR), FMath::RoundToInt(ComponentScale.Y * SCALE_FACTOR), FMath::RoundToInt(ComponentScale.Z * SCALE_FACTOR));
+	Ar << Scale;
 }
 
-static void AppendRoundedTransform(const FTransform& InTransform, TArray<uint8>& OutKeyBuffer)
+static void AppendRoundedTransform(const FTransform& InTransform, FArchive& Ar)
 {
-	AppendRoundedTransform(InTransform.Rotator(), InTransform.GetLocation(), InTransform.GetScale3D(), OutKeyBuffer);
+	AppendRoundedTransform(InTransform.Rotator(), InTransform.GetLocation(), InTransform.GetScale3D(), Ar);
 }
 
-static int32 GetTransformCRC(const FTransform& InTransform, uint32 InCRC)
+uint32 UHLODProxy::GetCRC(const FTransform& InTransform, uint32 InCRC)
 {
-	TArray<uint8> KeyBuffer;
-	AppendRoundedTransform(InTransform, KeyBuffer);
-	return FCrc::MemCrc32(KeyBuffer.GetData(), KeyBuffer.Num(), InCRC);
+	FArchiveCrc32 Ar(InCRC);
+	AppendRoundedTransform(InTransform, Ar);
+	return Ar.GetCrc();
 }
 
 uint32 UHLODProxy::GetCRC(UStaticMeshComponent* InComponent, uint32 InCRC, const FTransform& TransformComponents)
 {
-	TArray<uint8> KeyBuffer;
+	FArchiveCrc32 Ar(InCRC);
 
 	FVector  ComponentLocation = InComponent->GetComponentLocation();
 	FRotator ComponentRotation = InComponent->GetComponentRotation();
@@ -408,78 +441,90 @@ uint32 UHLODProxy::GetCRC(UStaticMeshComponent* InComponent, uint32 InCRC, const
 
 	ComponentLocation = TransformComponents.TransformPosition(ComponentLocation);
 	ComponentRotation = TransformComponents.TransformRotation(ComponentRotation.Quaternion()).Rotator();
-	AppendRoundedTransform(ComponentRotation, ComponentLocation, ComponentScale, KeyBuffer);
+	AppendRoundedTransform(ComponentRotation, ComponentLocation, ComponentScale, Ar);
 
 	// Include other relevant properties
-	KeyBuffer.Append((uint8*)&InComponent->ForcedLodModel, sizeof(int32));
-	bool bUseMaxLODAsImposter = InComponent->bUseMaxLODAsImposter;
-	KeyBuffer.Append((uint8*)&bUseMaxLODAsImposter, sizeof(bool));
+	Ar << InComponent->ForcedLodModel;
+	Ar << InComponent->HLODBatchingPolicy;
 	bool bCastShadow = InComponent->CastShadow;
-	KeyBuffer.Append((uint8*)&bCastShadow, sizeof(bool));
+	Ar << bCastShadow;
 	bool bCastStaticShadow = InComponent->bCastStaticShadow;
-	KeyBuffer.Append((uint8*)&bCastStaticShadow, sizeof(bool));
+	Ar << bCastStaticShadow;
 	bool bCastDynamicShadow = InComponent->bCastDynamicShadow;
-	KeyBuffer.Append((uint8*)&bCastDynamicShadow, sizeof(bool));
+	Ar << bCastDynamicShadow;
 	bool bCastFarShadow = InComponent->bCastFarShadow;
-	KeyBuffer.Append((uint8*)&bCastFarShadow, sizeof(bool));
+	Ar << bCastFarShadow;
 	int32 Width, Height;
 	InComponent->GetLightMapResolution(Width, Height);
-	KeyBuffer.Append((uint8*)&Width, sizeof(int32));
-	KeyBuffer.Append((uint8*)&Height, sizeof(int32));
+	Ar << Width;
+	Ar << Height;
+
+	if (!InComponent->GetCustomPrimitiveData().Data.IsEmpty())
+	{
+		Ar << InComponent->GetCustomPrimitiveData();
+	}
 	
 	// incorporate vertex colors
 	for(FStaticMeshComponentLODInfo& LODInfo : InComponent->LODData)
 	{
 		if(LODInfo.OverrideVertexColors)
 		{
-			KeyBuffer.Append((uint8*)LODInfo.OverrideVertexColors->GetVertexData(), LODInfo.OverrideVertexColors->GetNumVertices() * LODInfo.OverrideVertexColors->GetStride());
+			Ar.Serialize((uint8*)LODInfo.OverrideVertexColors->GetVertexData(), LODInfo.OverrideVertexColors->GetNumVertices() * LODInfo.OverrideVertexColors->GetStride());
 		}
 	}
 
-	return FCrc::MemCrc32(KeyBuffer.GetData(), KeyBuffer.Num(), InCRC);
+	// Include instances data in case of a ISMC
+	if (UInstancedStaticMeshComponent* ISMC = Cast<UInstancedStaticMeshComponent>(InComponent))
+	{
+		for (const FInstancedStaticMeshInstanceData& InstanceData : ISMC->PerInstanceSMData)
+		{
+			AppendRoundedTransform(FTransform(InstanceData.Transform), Ar);
+		}
+
+		Ar << ISMC->PerInstanceSMCustomData;
+		Ar << ISMC->InstancingRandomSeed;
+
+		for (FInstancedStaticMeshRandomSeed& ISMCRandomSeed : ISMC->AdditionalRandomSeeds)
+		{
+			Ar << ISMCRandomSeed.StartInstanceIndex;
+			Ar << ISMCRandomSeed.RandomSeed;
+		}
+	}
+
+	return Ar.GetCrc();
 }
 
 // Key that forms the basis of the HLOD proxy key. Bump this key (i.e. generate a new GUID) when you want to force a rebuild of ALL HLOD proxies
-#define HLOD_PROXY_BASE_KEY		TEXT("174C29B19AB34A21894058E058F253B3")
-
-namespace 
-{
-	class FHLODProxyCRCArchive : public FArchive
-	{
-	public:
-		FHLODProxyCRCArchive()
-			: Hash(0)
-		{
-			SetIsLoading(false);
-			SetIsSaving(true);
-			SetUseUnversionedPropertySerialization(true);
-		}
-
-		uint32 GetHash() const
-		{
-			return Hash;
-		}
-
-	private:
-		virtual FArchive& operator<<(class UObject*& Value) override { check(0); return *this; }
-		virtual FArchive& operator<<(class FName& Value) override { check(0); return *this; }
-
-		virtual void Serialize(void* Data, int64 Num) override
-		{
-			Hash = FCrc::MemCrc32(Data, Num, Hash);
-		}
-
-		uint32 Hash;
-	};
-}
+#define HLOD_PROXY_BASE_KEY		TEXT("136F4B1AD66E47808C62C1F9CC87CC1F")
 
 FName UHLODProxy::GenerateKeyForActor(const ALODActor* LODActor, bool bMustUndoLevelTransform)
 {
 	FString Key = HLOD_PROXY_BASE_KEY;
 
+	UWorld* LODActorWorld = LODActor->GetLevel()->GetTypedOuter<UWorld>();
+	const TArray<FHierarchicalSimplification>& HierarchicalLODSetups = LODActorWorld->GetWorldSettings()->GetHierarchicalLODSetup();
+
+	// If the HLOD aren't created with collision data, no need to consider this when computing the checksum
+	bool bConsiderPhysicData = false;
+	if (HierarchicalLODSetups.IsValidIndex(LODActor->LODLevel - 1))
+	{
+		const FHierarchicalSimplification& HLODSettings = HierarchicalLODSetups[LODActor->LODLevel - 1];
+		switch (HLODSettings.SimplificationMethod)
+		{
+		case EHierarchicalSimplificationMethod::Simplify:
+			bConsiderPhysicData = HLODSettings.ProxySetting.bCreateCollision;
+			break;
+		case EHierarchicalSimplificationMethod::Merge:
+			bConsiderPhysicData = HLODSettings.MergeSetting.bMergePhysicsData;
+			break;
+		default:
+			bConsiderPhysicData = false;
+		}
+	}
+	
 	// Base us off the unique object ID
 	{
-		const UObject* Obj = LODActor->ProxyDesc ? Cast<const UObject>(LODActor->ProxyDesc) : Cast<const UObject>(LODActor);
+		const UObject* Obj = LODActor->ProxyDesc ? ToRawPtr(Cast<const UObject>(LODActor->ProxyDesc)) : Cast<const UObject>(LODActor);
 		FUniqueObjectGuid ObjectGUID = FUniqueObjectGuid::GetOrCreateIDForObject(Obj);
 		Key += TEXT("_");
 		Key += ObjectGUID.GetGuid().ToString(EGuidFormats::Digits);
@@ -494,15 +539,14 @@ FName UHLODProxy::GenerateKeyForActor(const ALODActor* LODActor, bool bMustUndoL
 			TArray<FHierarchicalSimplification>& BuildLODLevelSettings = LODActor->GetLevel()->GetWorldSettings()->GetHierarchicalLODSetup();
 			if(BuildLODLevelSettings.IsValidIndex(LODActor->LODLevel - 1))
 			{
-				FHierarchicalSimplification BuildLODLevelSetting = BuildLODLevelSettings[LODActor->LODLevel - 1];
-				FHLODProxyCRCArchive Ar;
-				FHierarchicalSimplification::StaticStruct()->SerializeItem(Ar, &BuildLODLevelSetting, nullptr);
-				CRC = HashCombine(CRC, Ar.GetHash());
+				FArchiveCrc32 Ar(CRC);
+				Ar << BuildLODLevelSettings[LODActor->LODLevel - 1];
+				CRC = Ar.GetCrc();
 			}
 		}
 
 		// HLODBakingTransform
-		CRC = GetTransformCRC(LODActor->GetLevel()->GetWorldSettings()->HLODBakingTransform, CRC);
+		CRC = GetCRC(LODActor->GetLevel()->GetWorldSettings()->HLODBakingTransform, CRC);
 
 		// screen size + override
 		{
@@ -516,10 +560,9 @@ FName UHLODProxy::GenerateKeyForActor(const ALODActor* LODActor, bool bMustUndoL
 		{
 			if (LODActor->bOverrideMaterialMergeSettings)
 			{
-				FMaterialProxySettings MaterialProxySettings = LODActor->MaterialSettings;
-				FHLODProxyCRCArchive Ar;
-				FMaterialProxySettings::StaticStruct()->SerializeItem(Ar, &MaterialProxySettings, nullptr);
-				CRC = HashCombine(CRC, Ar.GetHash());
+				FArchiveCrc32 Ar(CRC);
+				Ar << const_cast<ALODActor*>(LODActor)->MaterialSettings;
+				CRC = Ar.GetCrc();
 			}
 		}
 
@@ -573,7 +616,7 @@ FName UHLODProxy::GenerateKeyForActor(const ALODActor* LODActor, bool bMustUndoL
 				if(UStaticMesh* StaticMesh = StaticMeshComponent->GetStaticMesh())
 				{
 					// CRC static mesh
-					ComponentCRC = GetCRC(StaticMesh, ComponentCRC);
+					ComponentCRC = GetCRC(StaticMesh, ComponentCRC, bConsiderPhysicData);
 
 					// CRC materials
 					const int32 NumMaterials = StaticMeshComponent->GetNumMaterials();
@@ -652,14 +695,14 @@ void UHLODProxy::PostLoad()
 
 void UHLODProxy::DestroyObject(UObject* InObject)
 {
-	if (!InObject->IsPendingKill())
+	if (IsValid(InObject))
 	{
 		InObject->MarkPackageDirty();
 
 		InObject->ClearFlags(RF_Public | RF_Standalone);
 		InObject->SetFlags(RF_Transient);
 		InObject->Rename(nullptr, GetTransientPackage());
-		InObject->MarkPendingKill();
+		InObject->MarkAsGarbage();
 	
 		if (InObject->IsRooted())
 		{
@@ -676,6 +719,8 @@ void UHLODProxy::RemoveAssets(const FHLODProxyMesh& ProxyMesh)
 	UStaticMesh* StaticMesh = const_cast<UStaticMesh*>(ProxyMesh.GetStaticMesh());
 	if (StaticMesh)
 	{
+		FStaticMeshComponentRecreateRenderStateContext RecreateRenderStateContext(StaticMesh);
+
 		// Destroy every materials
 		for (const FStaticMaterial& StaticMaterial : StaticMesh->GetStaticMaterials())
 		{
@@ -704,13 +749,11 @@ void UHLODProxy::RemoveAssets(const FHLODProxyMesh& ProxyMesh)
 		if (StaticMesh->GetOutermost() == Outermost)
 		{
 			DestroyObject(StaticMesh);
-		}
 
-		// Notify the LOD Actor that the static mesh just marked for deletion is no longer usable,
-		// so that it regenerates its render thread state to no longer point to the deleted mesh.
-		if (ALODActor* LODActor = ProxyMesh.GetLODActor().Get())
-		{
-			LODActor->SetStaticMesh(nullptr);
+			Algo::ForEach(RecreateRenderStateContext.GetComponentsUsingMesh(StaticMesh), [](UStaticMeshComponent* Component)
+			{
+				Component->SetStaticMesh(nullptr);
+			});
 		}
 	}
 }
@@ -719,10 +762,14 @@ bool UHLODProxy::SetHLODBakingTransform(const FTransform& InTransform)
 {
 	bool bChanged = false;
 
-	for (TMap<UHLODProxyDesc*, FHLODProxyMesh>::TIterator ItHLODActor = HLODActors.CreateIterator(); ItHLODActor; ++ItHLODActor)
+	int32 NewTransformCRC = GetCRC(InTransform);
+
+	for (auto ItHLODActor = HLODActors.CreateIterator(); ItHLODActor; ++ItHLODActor)
 	{
 		UHLODProxyDesc* HLODProxyDesc = ItHLODActor.Key();
-		if (!HLODProxyDesc->HLODBakingTransform.Equals(InTransform))
+
+		int32 OldTransformCRC = GetCRC(HLODProxyDesc->HLODBakingTransform);
+		if (OldTransformCRC != NewTransformCRC)
 		{
 			HLODProxyDesc->HLODBakingTransform = InTransform;
 			bChanged = true;
@@ -734,7 +781,7 @@ bool UHLODProxy::SetHLODBakingTransform(const FTransform& InTransform)
 
 #endif // #if WITH_EDITOR
 
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST) || WITH_EDITOR
 
 bool UHLODProxy::ContainsDataForActor(const ALODActor* InLODActor) const
 {
@@ -780,3 +827,4 @@ bool UHLODProxy::ContainsDataForActor(const ALODActor* InLODActor) const
 }
 
 #endif
+

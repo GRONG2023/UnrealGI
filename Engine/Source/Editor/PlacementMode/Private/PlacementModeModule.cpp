@@ -5,15 +5,15 @@
 #include "Modules/ModuleManager.h"
 #include "UObject/Object.h"
 #include "Misc/Guid.h"
-#include "Misc/BlacklistNames.h"
+#include "Misc/NamePermissionList.h"
 #include "UObject/Class.h"
 #include "UObject/UObjectHash.h"
 #include "UObject/UObjectIterator.h"
 #include "Textures/SlateIcon.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
+#include "Framework/Application/SlateApplication.h"
 #include "GameFramework/Actor.h"
 #include "ActorFactories/ActorFactory.h"
-#include "ActorFactories/ActorFactoryAtmosphericFog.h"
 #include "ActorFactories/ActorFactoryBoxReflectionCapture.h"
 #include "ActorFactories/ActorFactoryBoxVolume.h"
 #include "ActorFactories/ActorFactoryCharacter.h"
@@ -22,6 +22,7 @@
 #include "ActorFactories/ActorFactoryEmptyActor.h"
 #include "ActorFactories/ActorFactoryPawn.h"
 #include "ActorFactories/ActorFactoryExponentialHeightFog.h"
+#include "ActorFactories/ActorFactoryLocalFogVolume.h"
 #include "ActorFactories/ActorFactorySkyAtmosphere.h"
 #include "ActorFactories/ActorFactoryVolumetricCloud.h"
 #include "ActorFactories/ActorFactoryPlayerStart.h"
@@ -38,21 +39,32 @@
 #include "Engine/StaticMesh.h"
 #include "GameFramework/Volume.h"
 #include "Engine/PostProcessVolume.h"
-#include "AssetData.h"
+#include "LevelEditorActions.h"
+#include "AssetRegistry/AssetData.h"
 #include "EditorModeRegistry.h"
 #include "EditorModes.h"
 #include "IAssetTools.h"
 #include "IAssetTypeActions.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "ActorPlacementInfo.h"
 #include "IPlacementModeModule.h"
-#include "PlacementMode.h"
+#include "Subsystems/PlacementSubsystem.h"
+#include "ToolMenus.h"
 #include "AssetToolsModule.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "ActorFactories/ActorFactoryPlanarReflection.h"
 #include "SPlacementModeTools.h"
-#include "Classes/EditorStyleSettings.h"
+#include "AssetSelection.h"
 
+namespace PlacementModeModuleLocals
+{
+	FActorPlacementInfo MakePlacementInfo(const FPlaceableItem& Item)
+	{
+		FString ObjectString = Item.AssetData.IsValid() ? Item.AssetData.GetObjectPathString() : FString();
+		FString FactoryString = Item.AssetFactory ? Item.AssetFactory.GetObject()->GetPathName() : FString();
+		return FActorPlacementInfo(ObjectString, FactoryString);
+	}
+}
 
 TOptional<FLinearColor> GetBasicShapeColorOverride()
 {
@@ -73,13 +85,15 @@ TOptional<FLinearColor> GetBasicShapeColorOverride()
 }
 
 FPlacementModeModule::FPlacementModeModule()
-	: CategoryBlacklist(MakeShareable(new FBlacklistNames()))
+	: CategoryPermissionList(MakeShareable(new FNamePermissionList()))
 {
-	CategoryBlacklist->OnFilterChanged().AddRaw(this, &FPlacementModeModule::OnCategoryBlacklistChanged);
+	CategoryPermissionList->OnFilterChanged().AddRaw(this, &FPlacementModeModule::OnCategoryPermissionListChanged);
 }
 
 void FPlacementModeModule::StartupModule()
 {
+	using namespace PlacementModeModuleLocals;
+
 	TArray< FString > RecentlyPlacedAsStrings;
 	GConfig->GetArray(TEXT("PlacementMode"), TEXT("RecentlyPlaced"), RecentlyPlacedAsStrings, GEditorPerProjectIni);
 
@@ -87,12 +101,6 @@ void FPlacementModeModule::StartupModule()
 	{
 		RecentlyPlaced.Add(FActorPlacementInfo(RecentlyPlacedAsStrings[Index]));
 	}
-
-	FEditorModeRegistry::Get().RegisterMode<FPlacementMode>(
-		FBuiltinEditorModes::EM_Placement,
-		NSLOCTEXT("PlacementMode", "DisplayName", "Place"),
-		FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.PlacementMode", "LevelEditor.PlacementMode.Small"),
-		GetDefault<UEditorStyleSettings>()->bEnableLegacyEditorModeUI, 0);
 
 	IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
 	AssetRegistry.OnAssetRemoved().AddRaw(this, &FPlacementModeModule::OnAssetRemoved);
@@ -112,6 +120,7 @@ void FPlacementModeModule::StartupModule()
 	RegisterPlacementCategory(
 		FPlacementCategoryInfo(
 			NSLOCTEXT("PlacementMode", "RecentlyPlaced", "Recently Placed"),
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "PlacementBrowser.Icons.Recent"),
 			FBuiltInPlacementCategories::RecentlyPlaced(),
 			TEXT("PMRecentlyPlaced"),
 			TNumericLimits<int32>::Lowest(),
@@ -125,6 +134,7 @@ void FPlacementModeModule::StartupModule()
 		RegisterPlacementCategory(
 			FPlacementCategoryInfo(
 				NSLOCTEXT("PlacementMode", "Basic", "Basic"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "PlacementBrowser.Icons.Basic"),
 				CategoryName,
 				TEXT("PMBasic"),
 				10
@@ -137,17 +147,7 @@ void FPlacementModeModule::StartupModule()
 		Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryPawn::StaticClass(), SortOrder += 10)));
 		Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryPointLight::StaticClass(), SortOrder += 10)));
 		Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryPlayerStart::StaticClass(), SortOrder += 10)));
-		// Cube
-		Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryBasicShape::StaticClass(), FAssetData(LoadObject<UStaticMesh>(nullptr, *UActorFactoryBasicShape::BasicCube.ToString())), FName("ClassThumbnail.Cube"), BasicShapeColorOverride, SortOrder += 10, NSLOCTEXT("PlacementMode", "Cube", "Cube"))));
-		// Sphere
-		Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryBasicShape::StaticClass(), FAssetData(LoadObject<UStaticMesh>(nullptr, *UActorFactoryBasicShape::BasicSphere.ToString())), FName("ClassThumbnail.Sphere"), BasicShapeColorOverride, SortOrder += 10, NSLOCTEXT("PlacementMode", "Sphere", "Sphere"))));
-		// Cylinder
-		Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryBasicShape::StaticClass(), FAssetData(LoadObject<UStaticMesh>(nullptr, *UActorFactoryBasicShape::BasicCylinder.ToString())), FName("ClassThumbnail.Cylinder"), BasicShapeColorOverride, SortOrder += 10, NSLOCTEXT("PlacementMode", "Cylinder", "Cylinder"))));
-		// Cone
-		Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryBasicShape::StaticClass(), FAssetData(LoadObject<UStaticMesh>(nullptr, *UActorFactoryBasicShape::BasicCone.ToString())), FName("ClassThumbnail.Cone"), BasicShapeColorOverride, SortOrder += 10, NSLOCTEXT("PlacementMode", "Cone", "Cone"))));
-		// Plane
-		Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryBasicShape::StaticClass(), FAssetData(LoadObject<UStaticMesh>(nullptr, *UActorFactoryBasicShape::BasicPlane.ToString())), FName("ClassThumbnail.Plane"), BasicShapeColorOverride, SortOrder += 10, NSLOCTEXT("PlacementMode", "Plane", "Plane"))));
-
+	
 		Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryTriggerBox::StaticClass(), SortOrder += 10)));
 		Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryTriggerSphere::StaticClass(), SortOrder += 10)));
 	}
@@ -158,6 +158,7 @@ void FPlacementModeModule::StartupModule()
 		RegisterPlacementCategory(
 			FPlacementCategoryInfo(
 				NSLOCTEXT("PlacementMode", "Lights", "Lights"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "PlacementBrowser.Icons.Lights"),
 				CategoryName,
 				TEXT("PMLights"),
 				20
@@ -173,11 +174,65 @@ void FPlacementModeModule::StartupModule()
 	}
 
 	{
+
+		int32 SortOrder = 0;
+		FName CategoryName = FBuiltInPlacementCategories::Shapes();
+		RegisterPlacementCategory(
+			FPlacementCategoryInfo(
+				NSLOCTEXT("PlacementMode", "Shapes", "Shapes"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "ClassIcon.Cube"),
+				CategoryName,
+				TEXT("PMShapes"),
+				25	
+				)
+			);
+
+		static const FText CubeText = NSLOCTEXT("PlacementMode", "Cube", "Cube");
+		static const FText SphereText = NSLOCTEXT("PlacementMode", "Sphere", "Sphere");
+		static const FText CylinderText = NSLOCTEXT("PlacementMode", "Cylinder", "Cylinder");
+		static const FText ConeText = NSLOCTEXT("PlacementMode", "Cone", "Cone");
+		static const FText PlaneText = NSLOCTEXT("PlacementMode", "Plane", "Plane");
+
+		FPlacementCategory* Category = Categories.Find(CategoryName);
+		// Cube
+		{
+			TSharedPtr<FPlaceableItem> Cube = MakeShareable(new FPlaceableItem(*UActorFactoryBasicShape::StaticClass(), FAssetData(LoadObject<UStaticMesh>(nullptr, *UActorFactoryBasicShape::BasicCube.ToString())), FName("ClassThumbnail.Cube"), FName("ClassIcon.Cube"), BasicShapeColorOverride, SortOrder += 10, CubeText));
+			ManuallyCreatedPlaceableItems.Add(MakePlacementInfo(*Cube), Cube);
+			Category->Items.Add(CreateID(), Cube);
+		}
+		// Sphere
+		{
+			TSharedPtr<FPlaceableItem> Sphere = MakeShareable(new FPlaceableItem(*UActorFactoryBasicShape::StaticClass(), FAssetData(LoadObject<UStaticMesh>(nullptr, *UActorFactoryBasicShape::BasicSphere.ToString())), FName("ClassThumbnail.Sphere"), FName("ClassIcon.Sphere"), BasicShapeColorOverride, SortOrder += 10, SphereText));
+			ManuallyCreatedPlaceableItems.Add(MakePlacementInfo(*Sphere), Sphere);
+			Category->Items.Add(CreateID(), Sphere);
+		}
+		// Cylinder
+		{
+			TSharedPtr<FPlaceableItem> Cylinder = MakeShareable(new FPlaceableItem(*UActorFactoryBasicShape::StaticClass(), FAssetData(LoadObject<UStaticMesh>(nullptr, *UActorFactoryBasicShape::BasicCylinder.ToString())), FName("ClassThumbnail.Cylinder"), FName("ClassIcon.Cylinder"), BasicShapeColorOverride, SortOrder += 10, CylinderText));
+			ManuallyCreatedPlaceableItems.Add(MakePlacementInfo(*Cylinder), Cylinder);
+			Category->Items.Add(CreateID(), Cylinder);
+		}
+		// Cone
+		{
+			TSharedPtr<FPlaceableItem> Cone = MakeShareable(new FPlaceableItem(*UActorFactoryBasicShape::StaticClass(), FAssetData(LoadObject<UStaticMesh>(nullptr, *UActorFactoryBasicShape::BasicCone.ToString())), FName("ClassThumbnail.Cone"), FName("ClassIcon.Cone"), BasicShapeColorOverride, SortOrder += 10, ConeText));
+			ManuallyCreatedPlaceableItems.Add(MakePlacementInfo(*Cone), Cone);
+			Category->Items.Add(CreateID(), Cone);
+		}
+		// Plane
+		{
+			TSharedPtr<FPlaceableItem> Plane = MakeShareable(new FPlaceableItem(*UActorFactoryBasicShape::StaticClass(), FAssetData(LoadObject<UStaticMesh>(nullptr, *UActorFactoryBasicShape::BasicPlane.ToString())), FName("ClassThumbnail.Plane"), FName("ClassIcon.Plane"), BasicShapeColorOverride, SortOrder += 10, PlaneText));
+			ManuallyCreatedPlaceableItems.Add(MakePlacementInfo(*Plane), Plane);
+			Category->Items.Add(CreateID(), Plane);
+		}
+	}
+
+	{
 		int32 SortOrder = 0;
 		FName CategoryName = FBuiltInPlacementCategories::Visual();
 		RegisterPlacementCategory(
 			FPlacementCategoryInfo(
 				NSLOCTEXT("PlacementMode", "VisualEffects", "Visual Effects"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "PlacementBrowser.Icons.VisualEffects"),
 				CategoryName,
 				TEXT("PMVisual"),
 				30
@@ -191,16 +246,17 @@ void FPlacementModeModule::StartupModule()
 		Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactorySkyAtmosphere::StaticClass(), SortOrder += 10)));
 		Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryVolumetricCloud::StaticClass(), SortOrder += 10)));
 		Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryExponentialHeightFog::StaticClass(), SortOrder += 10)));
+		Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryLocalFogVolume::StaticClass(), SortOrder += 10)));
 		Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactorySphereReflectionCapture::StaticClass(), SortOrder += 10)));
 		Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryBoxReflectionCapture::StaticClass(), SortOrder += 10)));
 		Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryPlanarReflection::StaticClass(), SortOrder += 10)));
 		Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryDeferredDecal::StaticClass(), SortOrder += 10)));
-		Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryAtmosphericFog::StaticClass(), SortOrder += 10)));
 	}
 
 	RegisterPlacementCategory(
 		FPlacementCategoryInfo(
 			NSLOCTEXT("PlacementMode", "Volumes", "Volumes"),
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "PlacementBrowser.Icons.Volumes"),
 			FBuiltInPlacementCategories::Volumes(),
 			TEXT("PMVolumes"),
 			40
@@ -210,40 +266,144 @@ void FPlacementModeModule::StartupModule()
 	RegisterPlacementCategory(
 		FPlacementCategoryInfo(
 			NSLOCTEXT("PlacementMode", "AllClasses", "All Classes"),
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "PlacementBrowser.Icons.All"),
 			FBuiltInPlacementCategories::AllClasses(),
 			TEXT("PMAllClasses"),
 			50
 		)
 	);
 
+	if (FSlateApplication::IsInitialized())
+	{
+		// Given a Category Name, this will add a section and all the placeable items in that section directly into the menu
+		auto GenerateQuickCreateSection = [this](const FName& SectionName, UToolMenu* InMenu, int MaxItems = 20)
+		{
+			FPlacementCategory* Category = Categories.Find(SectionName);
+			FToolMenuSection& Section = InMenu->AddSection(SectionName, Category->DisplayName);
 
-	BasicShapeThumbnails.Add(UActorFactoryBasicShape::BasicCube.ToString(), TEXT("ClassThumbnail.Cube"));
-	BasicShapeThumbnails.Add(UActorFactoryBasicShape::BasicSphere.ToString(), TEXT("ClassThumbnail.Sphere"));
-	BasicShapeThumbnails.Add(UActorFactoryBasicShape::BasicCylinder.ToString(), TEXT("ClassThumbnail.Cylinder"));
-	BasicShapeThumbnails.Add(UActorFactoryBasicShape::BasicCone.ToString(), TEXT("ClassThumbnail.Cone"));
-	BasicShapeThumbnails.Add(UActorFactoryBasicShape::BasicPlane.ToString(), TEXT("ClassThumbnail.Plane"));
+			int count = 1;
+			for (auto& Pair : Category->Items)
+			{
+				TSharedPtr<const FPlaceableItem> Item = Pair.Value;
+				FToolMenuEntry& NewEntry = Section.AddEntry(
+					FToolMenuEntry::InitWidget(Item->AssetData.AssetName, SNew(SPlacementAssetMenuEntry, Item), FText(), true, true)
+				);
+
+				if (++count > MaxItems)
+					break;
+			}
+		};
+
+		auto GenerateCategorySubMenu = [this](UToolMenu* InMenu, const FName& InSectionName, const FText& InSectionDisplayName, const FName& PlacementCategory)
+		{
+			
+			RegenerateItemsForCategory(PlacementCategory);
+			FPlacementCategory* Category = Categories.Find(PlacementCategory);
+			if (!Category->Items.IsEmpty())
+			{
+				FToolMenuSection* InSection = InMenu->FindSection(InSectionName);	
+				if (InSection == nullptr)
+				{
+					InSection = &(InMenu->AddSection(InSectionName, InSectionDisplayName));
+				}
+
+				FToolMenuEntry& AllSubMenu = InSection->AddSubMenu(PlacementCategory,
+					Category->DisplayName,
+					FText::GetEmpty(),
+					FNewToolMenuDelegate::CreateLambda([this, PlacementCategory](UToolMenu* InMenu)
+					{
+						FToolMenuSection& Section = InMenu->AddSection(PlacementCategory);
+						RegenerateItemsForCategory(PlacementCategory);
+						FPlacementCategory* Category = Categories.Find(PlacementCategory);
+						for (auto& Pair : Category->Items)
+						{
+							TSharedPtr<const FPlaceableItem> Item = Pair.Value;
+							FToolMenuEntry& NewEntry = Section.AddEntry(
+								FToolMenuEntry::InitWidget(Item->AssetData.AssetName, SNew(SPlacementAssetMenuEntry, Item), FText(), true, true)
+							);
+						}
+					})
+				);
+				AllSubMenu.Icon = Category->DisplayIcon;
+			}
+		};
+
+		
+		UToolMenu* ContentMenu = UToolMenus::Get()->ExtendMenu("LevelEditor.LevelEditorToolBar.AddQuickMenu");
+		FName CreateSectionName = TEXT("PMQCreateMenu");
+		FText CreateSectionDisplayName = NSLOCTEXT("PlacementMode", "PMQCreateMenu", "Place Actors");
+
+		GenerateCategorySubMenu(ContentMenu, CreateSectionName, CreateSectionDisplayName, FBuiltInPlacementCategories::Basic());
+
+		// All Subcategories as submenus
+		FName CategoriesSectionName = TEXT("CreateAllCategories");
+		ContentMenu->AddDynamicSection(CategoriesSectionName,
+			FNewToolMenuDelegate::CreateLambda([this, CreateSectionName, CreateSectionDisplayName, GenerateCategorySubMenu](UToolMenu* InMenu)
+			{
+				TArray<FPlacementCategoryInfo> SortedCategories;
+				GetSortedCategories(SortedCategories);
+				for (auto CategoryInfo : SortedCategories)
+				{
+					// Skip Basic and Recent since we add those later
+					if (CategoryInfo.UniqueHandle == FBuiltInPlacementCategories::Basic() ||
+						CategoryInfo.UniqueHandle == FBuiltInPlacementCategories::RecentlyPlaced())
+						continue;
+
+					GenerateCategorySubMenu(InMenu, CreateSectionName, CreateSectionDisplayName, CategoryInfo.UniqueHandle);
+				}
+			}
+		), FToolMenuInsert(NAME_None, EToolMenuInsertType::First));
+
+
+		// Recents Section, limit to 5 items
+		const FName& RecentName = FBuiltInPlacementCategories::RecentlyPlaced();
+
+		ContentMenu->AddDynamicSection(RecentName,
+			FNewToolMenuDelegate::CreateLambda([this, GenerateQuickCreateSection, GenerateCategorySubMenu, CreateSectionName, CreateSectionDisplayName](UToolMenu* InMenu)
+			{
+				const FName& RecentName = FBuiltInPlacementCategories::RecentlyPlaced();
+				FPlacementCategory* RecentCategory = Categories.Find(RecentName);
+				RefreshRecentlyPlaced();
+				GenerateQuickCreateSection(RecentName, InMenu, 5);
+			}
+		));
+
+		// Open Placement Browser Panel
+		FToolMenuSection& BrowserSection = ContentMenu->AddSection(TEXT("PlacementBrowserMenuSection"), FText::GetEmpty(), FToolMenuInsert(RecentName, EToolMenuInsertType::Before));
+
+		BrowserSection.AddMenuEntry(FLevelEditorCommands::Get().OpenPlaceActors);
+
+	} // end FSlateApplication::IsInitialized()
+
 }
 
 void FPlacementModeModule::PreUnloadCallback()
 {
-	FEditorModeRegistry::Get().UnregisterMode(FBuiltinEditorModes::EM_Placement);
-
 	FAssetRegistryModule* AssetRegistryModule = FModuleManager::GetModulePtr<FAssetRegistryModule>("AssetRegistry");
 	if (AssetRegistryModule)
 	{
-		AssetRegistryModule->Get().OnAssetRemoved().RemoveAll(this);
-		AssetRegistryModule->Get().OnAssetRenamed().RemoveAll(this);
-		AssetRegistryModule->Get().OnAssetAdded().RemoveAll(this);
-		AssetRegistryModule->Get().OnFilesLoaded().RemoveAll(this);
+		IAssetRegistry* AssetRegistry = AssetRegistryModule->TryGet();
+		if (AssetRegistry)
+		{
+			AssetRegistry->OnAssetRemoved().RemoveAll(this);
+			AssetRegistry->OnAssetRenamed().RemoveAll(this);
+			AssetRegistry->OnAssetAdded().RemoveAll(this);
+			AssetRegistry->OnFilesLoaded().RemoveAll(this);
+		}
 	}
 }
 
-void FPlacementModeModule::AddToRecentlyPlaced(const TArray<UObject *>& PlacedObjects, UActorFactory* FactoryUsed /* = NULL */)
+void FPlacementModeModule::AddToRecentlyPlaced(const TArray<UObject*>& PlacedObjects, UActorFactory* FactoryUsed /* = NULL */)
+{
+	AddToRecentlyPlaced(PlacedObjects, TScriptInterface<IAssetFactoryInterface>(FactoryUsed));
+}
+
+void FPlacementModeModule::AddToRecentlyPlaced(const TArray< UObject* >& PlacedObjects, TScriptInterface<IAssetFactoryInterface> FactoryUsed)
 {
 	FString FactoryPath;
 	if (FactoryUsed != NULL)
 	{
-		FactoryPath = FactoryUsed->GetPathName();
+		FactoryPath = FactoryUsed.GetObject()->GetPathName();
 	}
 
 	TArray< UObject* > FilteredPlacedObjects;
@@ -316,7 +476,7 @@ void FPlacementModeModule::OnAssetRenamed(const FAssetData& AssetData, const FSt
 	{
 		if (RecentlyPlacedItem.ObjectPath == OldObjectPath)
 		{
-			RecentlyPlacedItem.ObjectPath = AssetData.ObjectPath.ToString();
+			RecentlyPlacedItem.ObjectPath = AssetData.GetObjectPathString();
 			break;
 		}
 	}
@@ -341,14 +501,19 @@ void FPlacementModeModule::OnInitialAssetsScanComplete()
 
 void FPlacementModeModule::AddToRecentlyPlaced(UObject* Asset, UActorFactory* FactoryUsed /* = NULL */)
 {
+	AddToRecentlyPlaced(Asset, TScriptInterface<IAssetFactoryInterface>(FactoryUsed));
+}
+
+void FPlacementModeModule::AddToRecentlyPlaced(UObject* Asset, TScriptInterface<IAssetFactoryInterface> FactoryUsed)
+{
 	TArray< UObject* > Assets;
 	Assets.Add(Asset);
 	AddToRecentlyPlaced(Assets, FactoryUsed);
 }
 
-TSharedRef<SWidget> FPlacementModeModule::CreatePlacementModeBrowser()
+TSharedRef<SWidget> FPlacementModeModule::CreatePlacementModeBrowser(TSharedRef<SDockTab> ParentTab)
 {
-	return SNew(SPlacementModeTools);
+	return SNew(SPlacementModeTools, ParentTab);
 }
 
 bool FPlacementModeModule::RegisterPlacementCategory(const FPlacementCategoryInfo& Info)
@@ -365,7 +530,7 @@ bool FPlacementModeModule::RegisterPlacementCategory(const FPlacementCategoryInf
 
 void FPlacementModeModule::UnregisterPlacementCategory(FName Handle)
 {
-	if (Categories.Remove(Handle))
+	if (Categories.Remove(Handle) && !IsEngineExitRequested())
 	{
 		PlacementModeCategoryListChanged.Broadcast();
 	}
@@ -383,7 +548,7 @@ void FPlacementModeModule::GetSortedCategories(TArray<FPlacementCategoryInfo>& O
 	OutCategories.Reset(Categories.Num());
 	for (const FName& Name : SortedNames)
 	{
-		if (CategoryBlacklist->PassesFilter(Name))
+		if (CategoryPermissionList->PassesFilter(Name))
 		{
 			OutCategories.Add(Categories[Name]);
 		}
@@ -392,11 +557,16 @@ void FPlacementModeModule::GetSortedCategories(TArray<FPlacementCategoryInfo>& O
 
 TOptional<FPlacementModeID> FPlacementModeModule::RegisterPlaceableItem(FName CategoryName, const TSharedRef<FPlaceableItem>& InItem)
 {
+	using namespace PlacementModeModuleLocals;
+
 	FPlacementCategory* Category = Categories.Find(CategoryName);
 	if (Category && !Category->CustomGenerator)
 	{
 		FPlacementModeID ID = CreateID(CategoryName);
 		Category->Items.Add(ID.UniqueID, InItem);
+
+		ManuallyCreatedPlaceableItems.Add(MakePlacementInfo(*InItem), InItem);
+
 		return ID;
 	}
 	return TOptional<FPlacementModeID>();
@@ -404,10 +574,17 @@ TOptional<FPlacementModeID> FPlacementModeModule::RegisterPlaceableItem(FName Ca
 
 void FPlacementModeModule::UnregisterPlaceableItem(FPlacementModeID ID)
 {
+	using namespace PlacementModeModuleLocals;
+
 	FPlacementCategory* Category = Categories.Find(ID.Category);
 	if (Category)
 	{
-		Category->Items.Remove(ID.UniqueID);
+		TSharedPtr<FPlaceableItem> Item;
+		Category->Items.RemoveAndCopyValue(ID.UniqueID, Item);
+		if (Item)
+		{
+			ManuallyCreatedPlaceableItems.Remove(MakePlacementInfo(*Item));
+		}
 	}
 }
 
@@ -497,26 +674,61 @@ void FPlacementModeModule::RefreshRecentlyPlaced()
 
 	for (const FActorPlacementInfo& RecentlyPlacedItem : RecentlyPlaced)
 	{
+		// First check if it's a manually created entry
+		TWeakPtr<FPlaceableItem>* ManualItem = ManuallyCreatedPlaceableItems.Find(RecentlyPlacedItem);
+		if (ManualItem)
+		{
+			if (ManualItem->IsValid())
+			{
+				Category->Items.Add(CreateID(), ManualItem->Pin());
+				continue;
+			}
+
+			// A dead pointer here could theoretically be the result of an unregistered category that had 
+			// items manually registered but not manually unregistered. Just remove the dead pointer and
+			// try the other approaches.
+			ManuallyCreatedPlaceableItems.Remove(RecentlyPlacedItem);
+		}
+
 		UObject* Asset = FindObject<UObject>(nullptr, *RecentlyPlacedItem.ObjectPath);
 
 		// If asset is pending delete, it will not be marked as RF_Standalone, in which case we skip it
-		if (Asset != nullptr && Asset->HasAnyFlags(RF_Standalone))
+		if (Asset == nullptr || !Asset->HasAnyFlags(RF_Standalone))
 		{
-			FAssetData AssetData = AssetRegistryModule.Get().GetAssetByObjectPath(*RecentlyPlacedItem.ObjectPath);
+			continue;
+		}
 
-			if (AssetData.IsValid())
+		FAssetData AssetData = AssetRegistryModule.Get().GetAssetByObjectPath(FSoftObjectPath(RecentlyPlacedItem.ObjectPath));
+
+		if (!AssetData.IsValid())
+		{
+			continue;
+		}
+
+		TScriptInterface<IAssetFactoryInterface> Factory;
+		if (RecentlyPlacedItem.Factory.IsEmpty())
+		{
+			// The factory portion of the recently placed data is frequently null because it only gets set
+			// high up in the drop if we gave a specific factory (see FLevelEditorViewportClient::DropObjectsAtCoordinates).
+			// Otherwise, the actually used factory is gotten from the placement subsystem later based on the asset data.
+			// So, we do the same kind of lookup here if we don't have a factory.
+			if (UPlacementSubsystem* PlacementSubsystem = GEditor->GetEditorSubsystem<UPlacementSubsystem>())
 			{
-				UActorFactory* Factory = FindObject<UActorFactory>(nullptr, *RecentlyPlacedItem.Factory);
-				TSharedPtr<FPlaceableItem> Ptr = MakeShareable(new FPlaceableItem(Factory, AssetData));
-				if (FString* FoundThumbnail = BasicShapeThumbnails.Find(RecentlyPlacedItem.ObjectPath))
-				{
-					Ptr->ClassThumbnailBrushOverride = FName(**FoundThumbnail);
-					Ptr->bAlwaysUseGenericThumbnail = true;
-					Ptr->AssetTypeColorOverride = GetBasicShapeColorOverride();
-				}
-				Category->Items.Add(CreateID(), Ptr);
+				Factory = PlacementSubsystem->FindAssetFactoryFromAssetData(AssetData);
 			}
 		}
+		else
+		{
+			Factory = FindObject<UObject>(nullptr, *RecentlyPlacedItem.Factory);
+		}
+
+		if (!Factory)
+		{
+			continue;
+		}
+
+		TSharedPtr<FPlaceableItem> Ptr = MakeShareable(new FPlaceableItem(Factory, AssetData));
+		Category->Items.Add(CreateID(), Ptr);
 	}
 }
 
@@ -561,11 +773,11 @@ void FPlacementModeModule::RefreshAllPlaceableClasses()
 	Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryEmptyActor::StaticClass())));
 	Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryCharacter::StaticClass())));
 	Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryPawn::StaticClass())));
-	Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryBasicShape::StaticClass(), FAssetData(LoadObject<UStaticMesh>(nullptr, *UActorFactoryBasicShape::BasicCube.ToString())), FName("ClassThumbnail.Cube"), GetBasicShapeColorOverride(), TOptional<int32>(), NSLOCTEXT("PlacementMode", "Cube", "Cube"))));
-	Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryBasicShape::StaticClass(), FAssetData(LoadObject<UStaticMesh>(nullptr, *UActorFactoryBasicShape::BasicSphere.ToString())), FName("ClassThumbnail.Sphere"), GetBasicShapeColorOverride(), TOptional<int32>(), NSLOCTEXT("PlacementMode", "Sphere", "Sphere"))));
-	Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryBasicShape::StaticClass(), FAssetData(LoadObject<UStaticMesh>(nullptr, *UActorFactoryBasicShape::BasicCylinder.ToString())), FName("ClassThumbnail.Cylinder"), GetBasicShapeColorOverride(), TOptional<int32>(), NSLOCTEXT("PlacementMode", "Cylinder", "Cylinder"))));
-	Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryBasicShape::StaticClass(), FAssetData(LoadObject<UStaticMesh>(nullptr, *UActorFactoryBasicShape::BasicCone.ToString())), FName("ClassThumbnail.Cone"), GetBasicShapeColorOverride(), TOptional<int32>(), NSLOCTEXT("PlacementMode", "Cone", "Cone"))));
-	Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryBasicShape::StaticClass(), FAssetData(LoadObject<UStaticMesh>(nullptr, *UActorFactoryBasicShape::BasicPlane.ToString())), FName("ClassThumbnail.Plane"), GetBasicShapeColorOverride(), TOptional<int32>(), NSLOCTEXT("PlacementMode", "Plane", "Plane"))));
+	Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryBasicShape::StaticClass(), FAssetData(LoadObject<UStaticMesh>(nullptr, *UActorFactoryBasicShape::BasicCube.ToString())), FName("ClassThumbnail.Cube"), FName("ClassIcon.Cube"), GetBasicShapeColorOverride(), TOptional<int32>(), NSLOCTEXT("PlacementMode", "Cube", "Cube"))));
+	Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryBasicShape::StaticClass(), FAssetData(LoadObject<UStaticMesh>(nullptr, *UActorFactoryBasicShape::BasicSphere.ToString())), FName("ClassThumbnail.Sphere"), FName("ClassIcon.Sphere"), GetBasicShapeColorOverride(), TOptional<int32>(), NSLOCTEXT("PlacementMode", "Sphere", "Sphere"))));
+	Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryBasicShape::StaticClass(), FAssetData(LoadObject<UStaticMesh>(nullptr, *UActorFactoryBasicShape::BasicCylinder.ToString())), FName("ClassThumbnail.Cylinder"), FName("ClassIcon.Cylinder"), GetBasicShapeColorOverride(), TOptional<int32>(), NSLOCTEXT("PlacementMode", "Cylinder", "Cylinder"))));
+	Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryBasicShape::StaticClass(), FAssetData(LoadObject<UStaticMesh>(nullptr, *UActorFactoryBasicShape::BasicCone.ToString())), FName("ClassThumbnail.Cone"), FName("ClassIcon.Cone"), GetBasicShapeColorOverride(), TOptional<int32>(), NSLOCTEXT("PlacementMode", "Cone", "Cone"))));
+	Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(*UActorFactoryBasicShape::StaticClass(), FAssetData(LoadObject<UStaticMesh>(nullptr, *UActorFactoryBasicShape::BasicPlane.ToString())), FName("ClassThumbnail.Plane"), FName("ClassIcon.Plane"), GetBasicShapeColorOverride(), TOptional<int32>(), NSLOCTEXT("PlacementMode", "Plane", "Plane"))));
 
 	// Make a map of UClasses to ActorFactories that support them
 	const TArray< UActorFactory *>& ActorFactories = GEditor->ActorFactories;
@@ -611,6 +823,10 @@ void FPlacementModeModule::RefreshAllPlaceableClasses()
 			Category->Items.Add(CreateID(), MakeShareable(new FPlaceableItem(ActorFactory, FAssetData(*ClassIt))));
 		}
 	}
+
+	Category->Items.ValueSort([&](const TSharedPtr<FPlaceableItem>& A, const TSharedPtr<FPlaceableItem>& B) {
+		return A->DisplayName.CompareTo(B->DisplayName) < 0;
+		});
 }
 
 FGuid FPlacementModeModule::CreateID()
@@ -637,13 +853,45 @@ bool FPlacementModeModule::PassesFilters(const TSharedPtr<FPlaceableItem>& Item)
 	{
 		if (PredicatePair.Value(Item))
 		{
-			return true;
+			bool bPlaceable = true;
+			UClass* AssetClass = Item->AssetData.GetClass();
+			if (AssetClass == UClass::StaticClass())
+			{
+				UClass* Class = Cast<UClass>(Item->AssetData.GetAsset());
+
+				bPlaceable = AssetSelectionUtils::IsClassPlaceable(Class);
+			}
+			else if (AssetClass && AssetClass->IsChildOf<UBlueprint>())
+			{
+				// For blueprints, attempt to determine placeability from its tag information
+
+				FString TagValue;
+
+				if (Item->AssetData.GetTagValue(FBlueprintTags::NativeParentClassPath, TagValue) && !TagValue.IsEmpty())
+				{
+					// If the native parent class can't be placed, neither can the blueprint
+					UClass* NativeParentClass = UClass::TryFindTypeSlow<UClass>(FPackageName::ExportTextPathToObjectPath(TagValue));
+
+					bPlaceable = AssetSelectionUtils::IsChildBlueprintPlaceable(NativeParentClass);
+				}
+
+				if (bPlaceable && Item->AssetData.GetTagValue(FBlueprintTags::ClassFlags, TagValue) && !TagValue.IsEmpty())
+				{
+					// Check to see if this class is placeable from its class flags
+
+					const int32 NotPlaceableFlags = CLASS_NotPlaceable | CLASS_Deprecated | CLASS_Abstract;
+					uint32 ClassFlags = FCString::Atoi(*TagValue);
+
+					bPlaceable = (ClassFlags & NotPlaceableFlags) == CLASS_None;
+				}
+			}
+			return bPlaceable;
 		}
 	}
 	return false;
 }
 
-void FPlacementModeModule::OnCategoryBlacklistChanged()
+void FPlacementModeModule::OnCategoryPermissionListChanged()
 {
 	PlacementModeCategoryListChanged.Broadcast();
 }

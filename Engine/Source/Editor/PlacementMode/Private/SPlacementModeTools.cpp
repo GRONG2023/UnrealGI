@@ -1,22 +1,29 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SPlacementModeTools.h"
-#include "Application/SlateApplicationBase.h"
 #include "Widgets/Layout/SSpacer.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Layout/SScrollBar.h"
 #include "Widgets/Views/SListView.h"
 #include "Widgets/Input/SCheckBox.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "EditorModeManager.h"
 #include "EditorModes.h"
+#include "Framework/Application/SlateApplication.h"
 #include "AssetThumbnail.h"
 #include "LevelEditor.h"
-#include "PlacementMode.h"
+#include "LevelEditorActions.h"
+#include "LevelEditorViewport.h"
 #include "ContentBrowserDataDragDropOp.h"
 #include "EditorClassUtils.h"
 #include "Widgets/Input/SSearchBox.h"
+#include "ClassIconFinder.h"
+#include "Widgets/Docking/SDockTab.h"
+#include "ThumbnailRendering/ThumbnailManager.h"
+#include "AssetSelection.h"
+#include "ActorFactories/ActorFactory.h"
+#include "ScopedTransaction.h"
 
 #define LOCTEXT_NAMESPACE "PlacementMode"
 
@@ -100,12 +107,12 @@ public:
 	SLATE_ARGUMENT( TOptional<FLinearColor>, AssetTypeColorOverride )
 	SLATE_END_ARGS()
 
+
 	void Construct( const FArguments& InArgs, const FAssetData& InAsset)
 	{
 		Asset = InAsset;
 
-		FLevelEditorModule& LevelEditorModule = FModuleManager::LoadModuleChecked<FLevelEditorModule>( "LevelEditor" );
-		TSharedPtr<FAssetThumbnailPool> ThumbnailPool = LevelEditorModule.GetFirstLevelEditor()->GetThumbnailPool();
+		TSharedPtr<FAssetThumbnailPool> ThumbnailPool = UThumbnailManager::Get().GetSharedThumbnailPool();
 
 		Thumbnail = MakeShareable(new FAssetThumbnail(Asset, InArgs._Width, InArgs._Height, ThumbnailPool));
 
@@ -152,7 +159,7 @@ void SPlacementAssetEntry::Construct(const FArguments& InArgs, const TSharedPtr<
 		AssetEntryToolTip = FSlateApplicationBase::Get().MakeToolTip(
 			FText::Format(LOCTEXT("ItemInternalsTooltip", "Native Name: {0}\nAsset Path: {1}\nFactory Class: {2}"), 
 			FText::FromString(Item->NativeName), 
-			FText::FromName(Item->AssetData.ObjectPath),
+			FText::FromString(Item->AssetData.GetObjectPathString()),
 			FText::FromString(Item->Factory ? Item->Factory->GetClass()->GetName() : TEXT("None"))));
 	}
 
@@ -171,7 +178,7 @@ void SPlacementAssetEntry::Construct(const FArguments& InArgs, const TSharedPtr<
 		AssetEntryToolTip = FSlateApplicationBase::Get().MakeToolTip(Item->DisplayName);
 	}
 
-	const FButtonStyle& ButtonStyle = FEditorStyle::GetWidgetStyle<FButtonStyle>( "PlacementBrowser.Asset" );
+	const FButtonStyle& ButtonStyle = FAppStyle::GetWidgetStyle<FButtonStyle>( "PlacementBrowser.Asset" );
 
 	NormalImage = &ButtonStyle.Normal;
 	HoverImage = &ButtonStyle.Hovered;
@@ -186,57 +193,75 @@ void SPlacementAssetEntry::Construct(const FArguments& InArgs, const TSharedPtr<
 	}
 
 	ChildSlot
+	.Padding(FMargin(8.f, 2.f, 12.f, 2.f))
 	[
-		SNew( SBorder )
-		.BorderImage( this, &SPlacementAssetEntry::GetBorder )
-		.Cursor( EMouseCursor::GrabHand )
-		.ToolTip( AssetEntryToolTip )
-		[
-			SNew( SHorizontalBox )
 
-			+ SHorizontalBox::Slot()
-			.Padding( 0 )
-			.AutoWidth()
+		SNew(SOverlay)
+
+		+SOverlay::Slot()
+		[
+			SNew(SBorder)
+			.BorderImage( FAppStyle::Get().GetBrush("PlacementBrowser.Asset.Background"))
+			.Cursor( EMouseCursor::GrabHand )
+			.ToolTip( AssetEntryToolTip )
+			.Padding(0)
 			[
-				// Drop shadow border
-				SNew( SBorder )
-				.Padding( 4 )
-				.BorderImage( FEditorStyle::GetBrush( "ContentBrowser.ThumbnailShadow" ) )
+
+				SNew( SHorizontalBox )
+
+				+ SHorizontalBox::Slot()
+				.Padding(8.0f, 4.f)
+				.AutoWidth()
+				.HAlign(HAlign_Center)
+				.VAlign(VAlign_Center)
 				[
 					SNew( SBox )
-					.WidthOverride( 35 )
-					.HeightOverride( 35 )
+					.WidthOverride(40)
+					.HeightOverride(40)
 					[
 						SNew( SPlacementAssetThumbnail, Item->AssetData )
 						.ClassThumbnailBrushOverride( Item->ClassThumbnailBrushOverride )
 						.AlwaysUseGenericThumbnail( Item->bAlwaysUseGenericThumbnail )
-						.AssetTypeColorOverride( Item->AssetTypeColorOverride )
+						.AssetTypeColorOverride( FLinearColor::Transparent )
+					]
+				]
+
+				+ SHorizontalBox::Slot()
+				.VAlign(VAlign_Fill)
+				.Padding(0)
+				[
+
+					SNew(SBorder)
+					.BorderImage(FAppStyle::Get().GetBrush("PlacementBrowser.Asset.LabelBack"))
+					[
+						SNew( SHorizontalBox)
+						+SHorizontalBox::Slot()
+						.Padding(9, 0, 0, 1)
+						.VAlign(VAlign_Center)
+						[
+							SNew( STextBlock )
+							.TextStyle( FAppStyle::Get(), "PlacementBrowser.Asset.Name" )
+							.Text( Item->DisplayName )
+							.HighlightText(InArgs._HighlightText)
+						]
+
+						+ SHorizontalBox::Slot()
+						.VAlign(VAlign_Center)
+						.AutoWidth()
+						[
+							DocWidget
+						]
 					]
 				]
 			]
+		]
 
-			+ SHorizontalBox::Slot()
-			.VAlign(VAlign_Center)
-			.Padding(2, 0, 4, 0)
-			[
-				SNew( SVerticalBox )
-				+SVerticalBox::Slot()
-				.Padding(0, 0, 0, 1)
-				.AutoHeight()
-				[
-					SNew( STextBlock )
-					.TextStyle( FEditorStyle::Get(), "PlacementBrowser.Asset.Name" )
-					.Text( Item->DisplayName )
-					.HighlightText(InArgs._HighlightText)
-				]
-			]
-
-			+ SHorizontalBox::Slot()
-			.VAlign(VAlign_Center)
-			.AutoWidth()
-			[
-				DocWidget
-			]
+		+SOverlay::Slot()
+		[
+			SNew(SBorder)
+			.BorderImage( this, &SPlacementAssetEntry::GetBorder )
+			.Cursor( EMouseCursor::GrabHand )
+			.ToolTip( AssetEntryToolTip )
 		]
 	];
 }
@@ -277,7 +302,7 @@ FReply SPlacementAssetEntry::OnDragDetected(const FGeometry& MyGeometry, const F
 
 	if( MouseEvent.IsMouseButtonDown( EKeys::LeftMouseButton ) )
 	{
-		return FReply::Handled().BeginDragDrop( FContentBrowserDataDragDropOp::Legacy_New( MakeArrayView(&Item->AssetData, 1), TArrayView<const FString>(), Item->Factory ) );
+		return FReply::Handled().BeginDragDrop(FAssetDragDropOp::New(Item->AssetData, Item->AssetFactory));
 	}
 	else
 	{
@@ -306,6 +331,249 @@ const FSlateBrush* SPlacementAssetEntry::GetBorder() const
 	}
 }
 
+
+void SPlacementAssetMenuEntry::Construct(const FArguments& InArgs, const TSharedPtr<const FPlaceableItem>& InItem)
+{	
+	bIsPressed = false;
+
+	check(InItem.IsValid());
+
+	Item = InItem;
+
+	AssetImage = nullptr;
+
+	TSharedPtr< SHorizontalBox > ActorType = SNew( SHorizontalBox );
+
+	const bool bIsClass = Item->AssetData.GetClass() == UClass::StaticClass();
+	const bool bIsActor = bIsClass ? CastChecked<UClass>(Item->AssetData.GetAsset())->IsChildOf(AActor::StaticClass()) : false;
+
+	AActor* DefaultActor = nullptr;
+	if (Item->Factory != nullptr)
+	{
+		DefaultActor = Item->Factory->GetDefaultActor(Item->AssetData);
+	}
+	else if (bIsActor)
+	{
+		DefaultActor = CastChecked<AActor>(CastChecked<UClass>(Item->AssetData.GetAsset())->ClassDefaultObject);
+	}
+
+	UClass* DocClass = nullptr;
+	TSharedPtr<IToolTip> AssetEntryToolTip;
+	if(DefaultActor != nullptr)
+	{
+		DocClass = DefaultActor->GetClass();
+		AssetEntryToolTip = FEditorClassUtils::GetTooltip(DefaultActor->GetClass());
+	}
+
+	if (!AssetEntryToolTip.IsValid())
+	{
+		AssetEntryToolTip = FSlateApplicationBase::Get().MakeToolTip(Item->DisplayName);
+	}
+	
+	const FButtonStyle& ButtonStyle = FAppStyle::Get().GetWidgetStyle<FButtonStyle>( "Menu.Button" );
+	const float MenuIconSize = FAppStyle::Get().GetFloat("Menu.MenuIconSize");
+
+	Style = &ButtonStyle;
+
+	// Create doc link widget if there is a class to link to
+	TSharedRef<SWidget> DocWidget = SNew(SSpacer);
+	if(DocClass != NULL)
+	{
+		DocWidget = FEditorClassUtils::GetDocumentationLinkWidget(DocClass);
+		DocWidget->SetCursor( EMouseCursor::Default );
+	}
+
+	ChildSlot
+	.HAlign(HAlign_Fill)
+	.VAlign(VAlign_Fill)
+	[
+		SNew(SBorder)
+		.BorderImage( this, &SPlacementAssetMenuEntry::GetBorder )
+		.Cursor( EMouseCursor::GrabHand )
+		.ToolTip( AssetEntryToolTip )
+		.Padding(FMargin(27.f, 3.f, 5.f, 3.f))
+		[
+			SNew( SHorizontalBox )
+
+			+ SHorizontalBox::Slot()
+			.Padding(14.0f, 0.f, 10.f, 0.0f)
+			.AutoWidth()
+			.HAlign(HAlign_Center)
+			.VAlign(VAlign_Center)
+			[
+				SNew(SBox)
+				.WidthOverride(MenuIconSize)
+				.HeightOverride(MenuIconSize)
+				[
+					SNew(SImage)
+					.Image(this, &SPlacementAssetMenuEntry::GetIcon)
+					.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+				]
+			]
+
+			+ SHorizontalBox::Slot()
+			.FillWidth(1.f)
+			.Padding(1.f, 0.f, 0.f, 0.f)
+			.VAlign(VAlign_Center)
+			.HAlign(HAlign_Left)
+			[
+
+				SNew( STextBlock )
+				.ColorAndOpacity(FSlateColor::UseForeground())
+				.Text( Item->DisplayName )
+			]
+
+
+			+ SHorizontalBox::Slot()
+			.VAlign(VAlign_Center)
+			.HAlign(HAlign_Right)
+			.AutoWidth()
+			[
+				SNew(SImage)
+                .ColorAndOpacity(FSlateColor::UseSubduedForeground())
+				.Image(FAppStyle::Get().GetBrush("Icons.DragHandle"))
+			]
+		]
+	];
+}
+
+
+const FSlateBrush* SPlacementAssetMenuEntry::GetIcon() const
+{
+
+	if (AssetImage != nullptr)
+	{
+		return AssetImage;
+	}
+
+	if (Item->ClassIconBrushOverride != NAME_None)
+	{
+		AssetImage = FSlateIconFinder::FindCustomIconBrushForClass(nullptr, TEXT("ClassIcon"), Item->ClassIconBrushOverride);
+	}
+	else
+	{
+		AssetImage = FSlateIconFinder::FindIconBrushForClass(FClassIconFinder::GetIconClassForAssetData(Item->AssetData));
+	}
+
+	return AssetImage;
+}
+
+
+FReply SPlacementAssetMenuEntry::OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
+{
+	if ( MouseEvent.GetEffectingButton() == EKeys::LeftMouseButton )
+	{
+		bIsPressed = true;
+
+		return FReply::Handled().DetectDrag( SharedThis( this ), MouseEvent.GetEffectingButton() );
+	}
+
+	return FReply::Unhandled();
+}
+
+FReply SPlacementAssetMenuEntry::OnMouseButtonUp(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
+{
+	if ( MouseEvent.GetEffectingButton() == EKeys::LeftMouseButton )
+	{
+		bIsPressed = false;
+
+		UActorFactory* Factory = Item->Factory;
+		if (!Item->Factory)
+		{
+			// If no actor factory was found or failed, add the actor from the uclass
+			UClass* AssetClass = Item->AssetData.GetClass();
+			if (AssetClass)
+			{
+				UObject* ClassObject = AssetClass->GetDefaultObject();
+				FActorFactoryAssetProxy::GetFactoryForAssetObject(ClassObject);
+			}
+		}
+
+		{
+			// Note: Capture the add and the move within a single transaction, so that the placed actor position is calculated correctly by the transaction diff
+			FScopedTransaction Transaction(NSLOCTEXT("UnrealEd", "CreateActor", "Create Actor"));
+
+			AActor* NewActor = FLevelEditorActionCallbacks::AddActor(Factory, Item->AssetData, nullptr);
+			if (NewActor && GCurrentLevelEditingViewportClient)
+			{
+				GEditor->MoveActorInFrontOfCamera(*NewActor,
+					GCurrentLevelEditingViewportClient->GetViewLocation(),
+					GCurrentLevelEditingViewportClient->GetViewRotation().Vector()
+				);
+			}
+		}
+
+		if (!MouseEvent.IsControlDown())
+		{
+			FSlateApplication::Get().DismissAllMenus();
+		}
+
+		return FReply::Handled();
+	}
+
+	return FReply::Unhandled();
+}
+
+FReply SPlacementAssetMenuEntry::OnDragDetected(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
+{
+	bIsPressed = false;
+
+	if (FEditorDelegates::OnAssetDragStarted.IsBound())
+	{
+		TArray<FAssetData> DraggedAssetDatas;
+		DraggedAssetDatas.Add( Item->AssetData );
+		FEditorDelegates::OnAssetDragStarted.Broadcast( DraggedAssetDatas, Item->Factory );
+		return FReply::Handled();
+	}
+
+	if( MouseEvent.IsMouseButtonDown( EKeys::LeftMouseButton ) )
+	{
+		return FReply::Handled().BeginDragDrop(FAssetDragDropOp::New(Item->AssetData, Item->AssetFactory));
+	}
+	else
+	{
+		return FReply::Handled();
+	}
+}
+
+bool SPlacementAssetMenuEntry::IsPressed() const
+{
+	return bIsPressed;
+}
+
+const FSlateBrush* SPlacementAssetMenuEntry::GetBorder() const
+{
+	if ( IsPressed() )
+	{
+		return &(Style->Pressed);
+	}
+	else if ( IsHovered() )
+	{
+		return &(Style->Hovered);
+	}
+	else
+	{
+		return &(Style->Normal);
+	}
+}
+
+FSlateColor SPlacementAssetMenuEntry::GetForegroundColor() const
+{
+	if (IsPressed())
+	{
+		return Style->PressedForeground;
+	}
+	else if (IsHovered())
+	{
+		return Style->HoveredForeground;
+	}
+	else
+	{
+		return Style->NormalForeground;
+	}
+}
+
+
 SPlacementModeTools::~SPlacementModeTools()
 {
 	if ( IPlacementModeModule::IsAvailable() )
@@ -318,7 +586,7 @@ SPlacementModeTools::~SPlacementModeTools()
 	}
 }
 
-void SPlacementModeTools::Construct( const FArguments& InArgs )
+void SPlacementModeTools::Construct( const FArguments& InArgs, TSharedRef<SDockTab> ParentTab )
 {
 	bRefreshAllClasses = false;
 	bRefreshRecentlyPlaced = false;
@@ -326,17 +594,15 @@ void SPlacementModeTools::Construct( const FArguments& InArgs )
 
 	ActiveTabName = FBuiltInPlacementCategories::Basic();
 
-	FPlacementMode* PlacementEditMode = (FPlacementMode*)GLevelEditorModeTools().GetActiveMode( FBuiltinEditorModes::EM_Placement );
-	if (PlacementEditMode)
-	{
-		PlacementEditMode->AddValidFocusTargetForPlacement(SharedThis(this));
-	}
+	ParentTab->SetOnTabDrawerOpened(FSimpleDelegate::CreateSP(this, &SPlacementModeTools::OnTabDrawerOpened));
 
 	SearchTextFilter = MakeShareable(new FPlacementAssetEntryTextFilter(
 		FPlacementAssetEntryTextFilter::FItemToStringArray::CreateStatic(&PlacementViewFilter::GetBasicStrings)
 		));
 
-	Tabs = SNew(SVerticalBox).Visibility(this, &SPlacementModeTools::GetTabsVisibility);
+	SAssignNew(CategoryFilterPtr, SUniformWrapPanel)
+	.HAlign(HAlign_Center)
+	.SlotPadding(FMargin(2.0f, 1.0f));
 
 	UpdatePlacementCategories();
 
@@ -348,68 +614,88 @@ void SPlacementModeTools::Construct( const FArguments& InArgs )
 		SNew( SVerticalBox )
 
 		+ SVerticalBox::Slot()
-		.Padding(4)
 		.AutoHeight()
 		[
-			SAssignNew( SearchBoxPtr, SSearchBox )
-			.HintText(LOCTEXT("SearchPlaceables", "Search Classes"))
-			.OnTextChanged(this, &SPlacementModeTools::OnSearchChanged)
-			.OnTextCommitted(this, &SPlacementModeTools::OnSearchCommitted)
+			SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+			.Padding(8)
+			[
+				SAssignNew( SearchBoxPtr, SSearchBox )
+				.HintText(LOCTEXT("SearchPlaceables", "Search Classes"))
+				.OnTextChanged(this, &SPlacementModeTools::OnSearchChanged)
+				.OnTextCommitted(this, &SPlacementModeTools::OnSearchCommitted)
+			]
 		]
 
 		+ SVerticalBox::Slot()
-		.Padding( 0 )
+		.AutoHeight()
+		.HAlign(HAlign_Fill)
 		[
-			SNew(SHorizontalBox)
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
+			SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+			.Padding(FMargin(8.f, 6.f, 8.f, 8.f))
+			.HAlign(HAlign_Fill)
+			.Visibility(this, &SPlacementModeTools::GetTabsVisibility)
 			[
-				Tabs.ToSharedRef()
+				CategoryFilterPtr.ToSharedRef()
+			]
+		]
+
+
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		[
+			SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+			.Padding(FMargin(8.f, 6.f, 8.f, 8.f))
+			.HAlign(HAlign_Center)
+			.Visibility(this, &SPlacementModeTools::GetTabsVisibility)
+			[
+				SAssignNew(FilterLabelPtr, STextBlock)
+				.Text(LOCTEXT("CategoryLabel", "CategoryLabel"))
+				.Font(FAppStyle::Get().GetFontStyle("SmallFontBold"))
+				.TransformPolicy(ETextTransformPolicy::ToUpper)
+			]
+		]
+
+		+ SVerticalBox::Slot()
+		.Padding(FMargin(0.0f, 3.f))
+		[
+			SNew(SOverlay)
+
+			+ SOverlay::Slot()
+			.HAlign(HAlign_Center)
+			.VAlign(VAlign_Fill)
+			.Padding(12.f)
+			[
+				SNew(STextBlock)
+				.Text(LOCTEXT("NoResultsFound", "No Results Found"))
+				.Visibility(this, &SPlacementModeTools::GetFailedSearchVisibility)
 			]
 
-			+ SHorizontalBox::Slot()
+			+ SOverlay::Slot()
 			[
-				SNew(SBorder)
-				.Padding(FMargin(3))
-				.BorderImage(FEditorStyle::GetBrush("ToolPanel.DarkGroupBorder"))
+				SAssignNew(CustomContent, SBox)
+			]
+
+			+ SOverlay::Slot()
+			[
+				SAssignNew(DataDrivenContent, SBox)
 				[
-					SNew(SOverlay)
+					SNew(SHorizontalBox)
 
-					+ SOverlay::Slot()
-					.HAlign(HAlign_Center)
-					.VAlign(VAlign_Fill)
+					+ SHorizontalBox::Slot()
 					[
-						SNew(STextBlock)
-						.Text(LOCTEXT("NoResultsFound", "No Results Found"))
-						.Visibility(this, &SPlacementModeTools::GetFailedSearchVisibility)
+						SAssignNew(ListView, SListView<TSharedPtr<FPlaceableItem>>)
+						.ListItemsSource(&FilteredItems)
+						.OnGenerateRow(this, &SPlacementModeTools::OnGenerateWidgetForItem)
+						.ExternalScrollbar(ScrollBar)
 					]
 
-					+ SOverlay::Slot()
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
 					[
-						SAssignNew(CustomContent, SBox)
-					]
-
-					+ SOverlay::Slot()
-					[
-						SAssignNew(DataDrivenContent, SBox)
-						[
-							SNew(SHorizontalBox)
-
-							+ SHorizontalBox::Slot()
-							[
-								SAssignNew(ListView, SListView<TSharedPtr<FPlaceableItem>>)
-								.ListItemsSource(&FilteredItems)
-								.OnGenerateRow(this, &SPlacementModeTools::OnGenerateWidgetForItem)
-								.ExternalScrollbar(ScrollBar)
-							]
-
-							+ SHorizontalBox::Slot()
-							.AutoWidth()
-							[
-								ScrollBar
-							]
-						]
+						ScrollBar
 					]
 				]
 			]
@@ -421,41 +707,7 @@ void SPlacementModeTools::Construct( const FArguments& InArgs )
 	PlacementModeModule.OnAllPlaceableAssetsChanged().AddSP(this, &SPlacementModeTools::RequestRefreshAllClasses);
 	PlacementModeModule.OnPlaceableItemFilteringChanged().AddSP(this, &SPlacementModeTools::RequestUpdateShownItems);
 	PlacementModeModule.OnPlacementModeCategoryListChanged().AddSP(this, &SPlacementModeTools::UpdatePlacementCategories);
-}
-
-TSharedRef< SWidget > SPlacementModeTools::CreatePlacementGroupTab( const FPlacementCategoryInfo& Info )
-{
-	return SNew( SCheckBox )
-	.Style( FEditorStyle::Get(), "PlacementBrowser.Tab" )
-	.OnCheckStateChanged( this, &SPlacementModeTools::OnPlacementTabChanged, Info.UniqueHandle )
-	.IsChecked( this, &SPlacementModeTools::GetPlacementTabCheckedState, Info.UniqueHandle )
-	[
-		SNew( SOverlay )
-
-		+ SOverlay::Slot()
-		.VAlign( VAlign_Center )
-		[
-			SNew(SSpacer)
-			.Size( FVector2D( 1, 30 ) )
-		]
-
-		+ SOverlay::Slot()
-		.Padding( FMargin(6, 0, 15, 0) )
-		.VAlign( VAlign_Center )
-		[
-			SNew( STextBlock )
-			.TextStyle( FEditorStyle::Get(), "PlacementBrowser.Tab.Text" )
-			.Text( Info.DisplayName )
-		]
-
-		+ SOverlay::Slot()
-		.VAlign( VAlign_Fill )
-		.HAlign( HAlign_Left )
-		[
-			SNew(SImage)
-			.Image( this, &SPlacementModeTools::PlacementGroupBorderImage, Info.UniqueHandle )
-		]
-	];
+	PlacementModeModule.OnPlacementModeCategoryRefreshed().AddSP(this, &SPlacementModeTools::OnCategoryRefresh);
 }
 
 FName SPlacementModeTools::GetActiveTab() const
@@ -469,7 +721,6 @@ void SPlacementModeTools::SetActiveTab(FName TabName)
 	{
 		ActiveTabName = TabName;
 		IPlacementModeModule::Get().RegenerateItemsForCategory(ActiveTabName);
-		bUpdateShownItems = true;
 	}
 }
 
@@ -490,11 +741,13 @@ void SPlacementModeTools::UpdateShownItems()
 
 		CustomContent->SetVisibility(EVisibility::Visible);
 		DataDrivenContent->SetVisibility(EVisibility::Collapsed);
+
+		FilterLabelPtr->SetText(Category->DisplayName);
 	}
 	else
 	{
 		FilteredItems.Reset();
-		
+
 		if (IsSearchActive())
 		{
 			auto Filter = [&](const TSharedPtr<FPlaceableItem>& Item) { return SearchTextFilter->PassesFilter(*Item); };
@@ -518,6 +771,7 @@ void SPlacementModeTools::UpdateShownItems()
 		CustomContent->SetVisibility(EVisibility::Collapsed);
 		DataDrivenContent->SetVisibility(EVisibility::Visible);
 		ListView->RequestListRefresh();
+		FilterLabelPtr->SetText(Category->DisplayName);
 	}
 }
 
@@ -548,31 +802,24 @@ EVisibility SPlacementModeTools::GetTabsVisibility() const
 TSharedRef<ITableRow> SPlacementModeTools::OnGenerateWidgetForItem(TSharedPtr<FPlaceableItem> InItem, const TSharedRef<STableViewBase>& OwnerTable)
 {
 	return SNew(STableRow<TSharedPtr<FPlaceableItem>>, OwnerTable)
+		.Style(&FAppStyle::Get(), "PlacementBrowser.PlaceableItemRow")
 		[
 			SNew(SPlacementAssetEntry, InItem.ToSharedRef())
 			.HighlightText(this, &SPlacementModeTools::GetHighlightText)
 		];
 }
 
-void SPlacementModeTools::OnPlacementTabChanged( ECheckBoxState NewState, FName CategoryName )
+void SPlacementModeTools::OnCategoryChanged(const ECheckBoxState NewState, FName InCategory)
 {
-	if ( NewState == ECheckBoxState::Checked )
+	if (NewState == ECheckBoxState::Checked)
 	{
-		SetActiveTab(CategoryName);
+		SetActiveTab(InCategory);
 	}
 }
 
-const FSlateBrush* SPlacementModeTools::PlacementGroupBorderImage( FName CategoryName ) const
+void SPlacementModeTools::OnTabDrawerOpened()
 {
-	if ( ActiveTabName == CategoryName )
-	{
-		static FName PlacementBrowserActiveTabBarBrush( "PlacementBrowser.ActiveTabBar" );
-		return FEditorStyle::GetBrush( PlacementBrowserActiveTabBarBrush );
-	}
-	else
-	{
-		return nullptr;
-	}
+	FSlateApplication::Get().SetKeyboardFocus(SearchBoxPtr, EFocusCause::SetDirectly);
 }
 
 void SPlacementModeTools::RequestUpdateShownItems()
@@ -596,12 +843,20 @@ void SPlacementModeTools::RequestRefreshAllClasses()
 	}
 }
 
+void SPlacementModeTools::OnCategoryRefresh(FName CategoryName)
+{
+	if (GetActiveTab() == CategoryName)
+	{
+		RequestUpdateShownItems();
+	}
+}
+
 void SPlacementModeTools::UpdatePlacementCategories()
 {
 	bool BasicTabExists = false;
 	FName TabToActivate;
 
-	Tabs->ClearChildren();
+	CategoryFilterPtr->ClearChildren();
 
 	TArray<FPlacementCategoryInfo> Categories;
 	IPlacementModeModule::Get().GetSortedCategories(Categories);
@@ -617,11 +872,20 @@ void SPlacementModeTools::UpdatePlacementCategories()
 			TabToActivate = ActiveTabName;
 		}
 
-		Tabs->AddSlot()
-			.AutoHeight()
+		CategoryFilterPtr->AddSlot()
+		[
+			SNew(SCheckBox)
+			.Padding(FMargin(4.f, 4.f))
+			.Style( &FAppStyle::Get(),  "PaletteToolBar.Tab" )
+			.OnCheckStateChanged(this, &SPlacementModeTools::OnCategoryChanged, Category.UniqueHandle)
+			.IsChecked(this, &SPlacementModeTools::GetPlacementTabCheckedState, Category.UniqueHandle)
+			.ToolTipText(Category.DisplayName)
 			[
-				CreatePlacementGroupTab(Category)
-			];
+				SNew(SImage)
+				.ColorAndOpacity(FSlateColor::UseForeground())
+				.Image(Category.DisplayIcon.GetIcon())
+			]
+		];
 	}
 
 	if (TabToActivate.IsNone())
@@ -645,38 +909,18 @@ void SPlacementModeTools::Tick( const FGeometry& AllottedGeometry, const double 
 	{
 		IPlacementModeModule::Get().RegenerateItemsForCategory(FBuiltInPlacementCategories::AllClasses());
 		bRefreshAllClasses = false;
-		bUpdateShownItems = true;
 	}
 
 	if (bRefreshRecentlyPlaced)
 	{
 		IPlacementModeModule::Get().RegenerateItemsForCategory(FBuiltInPlacementCategories::RecentlyPlaced());
 		bRefreshRecentlyPlaced = false;
-		bUpdateShownItems = true;
 	}
 
 	if (bUpdateShownItems)
 	{
 		UpdateShownItems();
 	}
-}
-
-FReply SPlacementModeTools::OnKeyDown( const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent )
-{
-	FReply Reply = FReply::Unhandled();
-
-	if ( InKeyEvent.GetKey() == EKeys::Escape )
-	{
-		FPlacementMode* PlacementEditMode = (FPlacementMode*)GLevelEditorModeTools().GetActiveMode( FBuiltinEditorModes::EM_Placement );
-		// Catch potential nullptr
-		if (ensureMsgf(PlacementEditMode, TEXT("PlacementEditMode was null, but SPlacementModeTools is still accepting KeyDown events")))
-		{
-			PlacementEditMode->StopPlacing();
-		}
-		Reply = FReply::Handled();
-	}
-
-	return Reply;
 }
 
 void SPlacementModeTools::OnSearchChanged(const FText& InFilterText)

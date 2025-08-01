@@ -8,7 +8,7 @@
 #include "Layout/Geometry.h"
 #include "Widgets/SNullWidget.h"
 #include "Layout/ArrangedWidget.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 
 class FJsonValue;
 class FWidgetPath;
@@ -77,6 +77,12 @@ public:
 	virtual FText GetWidgetClippingText() const = 0;
 
 	/**
+	 * @return The LayerId the widget were painted from
+	 */
+	virtual int32 GetWidgetLayerId() const = 0;
+	virtual int32 GetWidgetLayerIdOut() const = 0;
+
+	/**
 	 * @return The bool indicating whether or not the widget we were initialized from reports as Focusable
 	 */
 	virtual bool GetWidgetFocusable() const = 0;
@@ -115,6 +121,16 @@ public:
 	 * @return The bool indicating whether or not the widget we were initialized from reports is an Invalidation Root
 	 */
 	virtual bool GetWidgetIsInvalidationRoot() const = 0;
+
+	/**
+	 * @return the numbers of registered slate attributes on the widget we were initialized from
+	 */
+	virtual int32 GetWidgetAttributeCount() const = 0;
+
+	/**
+	 * @return the numbers of registered slate attributes marked as "update when collapsed" on the widget we were initialized from
+	 */
+	virtual int32 GetWidgetCollapsedAttributeCount() const = 0;
 
 	/**
 	 * The human readable location for widgets that are defined in C++ is the file and line number
@@ -186,7 +202,7 @@ public:
 	/**
 	 * @return The local size of the widget we were initialized from
 	 */
-	const FVector2D& GetLocalSize() const;
+	FVector2f GetLocalSize() const;
 
 	/**
 	 * @return The basic hit-test of the widget we were initialized from
@@ -271,6 +287,8 @@ public:
 	virtual bool GetWidgetVisible() const override;
 	virtual bool GetWidgetVisibilityInherited() const override;
 	virtual FText GetWidgetClippingText() const override;
+	virtual int32 GetWidgetLayerId() const override;
+	virtual int32 GetWidgetLayerIdOut() const override;
 	virtual bool GetWidgetFocusable() const override;
 	virtual bool GetWidgetNeedsTick() const override;
 	virtual bool GetWidgetIsVolatile() const override;
@@ -280,6 +298,8 @@ public:
 	virtual FText GetWidgetReadableLocation() const override;
 	virtual FString GetWidgetFile() const override;
 	virtual int32 GetWidgetLineNumber() const override;
+	virtual int32 GetWidgetAttributeCount() const override;
+	virtual int32 GetWidgetCollapsedAttributeCount() const override;
 	virtual bool HasValidWidgetAssetData() const override;
 	virtual FAssetData GetWidgetAssetData() const override;
 	virtual FVector2D GetWidgetDesiredSize() const override;
@@ -327,6 +347,8 @@ public:
 	virtual FText GetWidgetTypeAndShortName() const override;
 	virtual FText GetWidgetVisibilityText() const override;
 	virtual FText GetWidgetClippingText() const override;
+	virtual int32 GetWidgetLayerId() const override;
+	virtual int32 GetWidgetLayerIdOut() const override;
 	virtual bool GetWidgetVisible() const override;
 	virtual bool GetWidgetVisibilityInherited() const override;
 	virtual bool GetWidgetFocusable() const override;
@@ -338,6 +360,8 @@ public:
 	virtual FText GetWidgetReadableLocation() const override;
 	virtual FString GetWidgetFile() const override;
 	virtual int32 GetWidgetLineNumber() const override;
+	virtual int32 GetWidgetAttributeCount() const override;
+	virtual int32 GetWidgetCollapsedAttributeCount() const override;
 	virtual bool HasValidWidgetAssetData() const override;
 	virtual FAssetData GetWidgetAssetData() const override;
 	virtual FVector2D GetWidgetDesiredSize() const override;
@@ -403,6 +427,10 @@ private:
 	/** The clipping string of the widget at the point it was passed to Initialize */
 	FText CachedWidgetClippingText;
 
+	/** The LayerId of the widget */
+	int32 CachedWidgetLayerId;
+	int32 CachedWidgetLayerIdOut;
+
 	/** The human readable location (source file for C++ widgets, asset name for UMG widgets) of the widget at the point it was passed to Initialize */
 	FText CachedWidgetReadableLocation;
 
@@ -411,6 +439,12 @@ private:
 
 	/** The line number of the file that the widget was created from at the point it was passed to Initialize (for C++ widgets) */
 	int32 CachedWidgetLineNumber;
+
+	/** The number of slate attributes registered on the SWidget. */
+	int32 CachedWidgetAttributeCount;
+	
+	/** The number of slate attributes registered on the SWidget marked as "update when collapsed". */
+	int32 CachedWidgetCollapsedAttributeCount;
 
 	/** The name of the asset that the widget was created from at the point it was passed to Initialize (for UMG widgets) */
 	FAssetData CachedWidgetAssetData;
@@ -540,6 +574,12 @@ public:
 	static FText GetWidgetClippingText(const TSharedPtr<const SWidget>& InWidget);
 
 	/**
+	 * @return The current LayerId for the given widget
+	 */
+	static int32 GetWidgetLayerId(const TSharedPtr<const SWidget>& InWidget);
+	static int32 GetWidgetLayerIdOut(const TSharedPtr<const SWidget>& InWidget);
+
+	/**
 	* @return The current focusability for the given widget
 	*/
 	static bool GetWidgetFocusable(const TSharedPtr<const SWidget>& InWidget);
@@ -549,6 +589,8 @@ public:
 	static bool GetWidgetIsVolatileIndirectly(const TSharedPtr<const SWidget>& InWidget);
 	static bool GetWidgetHasActiveTimers(const TSharedPtr<const SWidget>& InWidget);
 	static bool GetWidgetIsInvalidationRoot(const TSharedPtr<const SWidget>& InWidget);
+	static int32 GetWidgetAttributeCount(const TSharedPtr<const SWidget>& InWidget);
+	static int32 GetWidgetCollapsedAttributeCount(const TSharedPtr<const SWidget>& InWidget);
 	
 	/**
 	 * The human readable location for widgets that are defined in C++ is the file and line number

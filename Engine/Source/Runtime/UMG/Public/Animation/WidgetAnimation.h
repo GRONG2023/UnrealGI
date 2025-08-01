@@ -7,15 +7,12 @@
 #include "UObject/ScriptMacros.h"
 #include "MovieSceneSequence.h"
 #include "Animation/WidgetAnimationBinding.h"
+#include "Animation/WidgetAnimationEvents.h"
 #include "WidgetAnimation.generated.h"
 
 class UMovieScene;
 class UUserWidget;
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnWidgetAnimationPlaybackStatusChanged);
-
-DECLARE_DYNAMIC_DELEGATE(FWidgetAnimationDynamicEvent);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE(FWidgetAnimationDynamicEvents);
 
 /**
  * 
@@ -36,7 +33,7 @@ public:
 	static UMG_API UWidgetAnimation* GetNullAnimation();
 
 	/** @return The friendly name of the animation */
-	UMG_API const FString& GetDisplayLabel() const
+	const FString& GetDisplayLabel() const
 	{
 		return DisplayLabel;
 	}
@@ -65,16 +62,6 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category="Animation")
 	UMG_API float GetEndTime() const;
-
-#if WITH_EDITORONLY_DATA
-	/** Fires when the widget animation starts playing. */
-	UPROPERTY()
-	FOnWidgetAnimationPlaybackStatusChanged OnAnimationStarted_DEPRECATED;
-
-	/** Fires when the widget animation is finished. */
-	UPROPERTY()
-	FOnWidgetAnimationPlaybackStatusChanged OnAnimationFinished_DEPRECATED;
-#endif
 
 	// These animation binding functions were added so that we could cleanly upgrade assets
 	// from before animation sharing, they don't actually modify the animation, they just pipe
@@ -111,7 +98,7 @@ public:
 	virtual void UnbindObjects(const FGuid& ObjectId, const TArray<UObject*>& InObjects, UObject* InContext) override {}
 	virtual void UnbindInvalidObjects(const FGuid& ObjectId, UObject* InContext) override {}
 	virtual void LocateBoundObjects(const FGuid& ObjectId, UObject* Context, TArray<UObject*, TInlineAllocator<1>>& OutObjects) const override;
-	virtual UObject* CreateDirectorInstance(IMovieScenePlayer& Player, FMovieSceneSequenceID SequenceID) override;
+	virtual UObject* CreateDirectorInstance(TSharedRef<const FSharedPlaybackState> SharedPlaybackState, FMovieSceneSequenceID SequenceID) override;
 #if WITH_EDITOR
 	virtual ETrackSupport IsTrackSupported(TSubclassOf<class UMovieSceneTrack> InTrackClass) const override;
 #endif
@@ -141,7 +128,7 @@ public:
 
 	/** Pointer to the movie scene that controls this animation. */
 	UPROPERTY()
-	UMovieScene* MovieScene;
+	TObjectPtr<UMovieScene> MovieScene;
 
 	/**  */
 	UPROPERTY()

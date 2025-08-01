@@ -4,11 +4,20 @@
 
 #include "CoreMinimal.h"
 
+#if SOURCE_CONTROL_WITH_SLATE
+#include "Textures/SlateIcon.h"
+#endif //SOURCE_CONTROL_WITH_SLATE
+
 class ISourceControlRevision;
 class ISourceControlState;
 
 typedef TSharedRef<class ISourceControlState, ESPMode::ThreadSafe> FSourceControlStateRef;
 typedef TSharedPtr<class ISourceControlState, ESPMode::ThreadSafe> FSourceControlStatePtr;
+
+class ISourceControlChangelist;
+
+typedef TSharedRef<class ISourceControlChangelist, ESPMode::ThreadSafe> FSourceControlChangelistRef;
+typedef TSharedPtr<class ISourceControlChangelist, ESPMode::ThreadSafe> FSourceControlChangelistPtr;
 
 /**
  * An abstraction of the state of a file under source control
@@ -17,6 +26,24 @@ class ISourceControlState : public TSharedFromThis<ISourceControlState, ESPMode:
 {
 public:
 	enum { INVALID_REVISION = -1 };
+
+	struct FResolveInfo
+	{
+		FString RemoteFile;
+		FString BaseFile;
+		FString RemoteRevision;
+		FString BaseRevision;
+
+		bool IsValid() const
+		{
+			return !RemoteRevision.IsEmpty() && !RemoteFile.IsEmpty();
+		}
+
+		operator bool() const
+		{
+			return IsValid();
+		}
+	};
 
 	/**
 	 * Virtual destructor
@@ -53,22 +80,44 @@ public:
 	virtual TSharedPtr<class ISourceControlRevision, ESPMode::ThreadSafe> FindHistoryRevision( const FString& InRevision ) const = 0;
 
 	/**
-	 * Get the revision that we should use as a base when performing a three wage merge, does not refresh source control state
+	 * Get the revision that we should use as a base when performing a three way merge, does not refresh source control state
 	 * @returns a revision identifier or NULL if none exist
 	 */
-	virtual TSharedPtr<class ISourceControlRevision, ESPMode::ThreadSafe> GetBaseRevForMerge() const = 0;
+	UE_DEPRECATED(5.3, "Use GetResolveInfo() and FindHistoryRevision() instead")
+	virtual TSharedPtr<class ISourceControlRevision, ESPMode::ThreadSafe> GetBaseRevForMerge() const final { return FindHistoryRevision(GetResolveInfo().BaseRevision); }
+
+	/**
+	 * Get the file and revision number of the base and remote assets considered in a merge resolve
+	 * @returns a valid FResolveInfo if the asset is being resolved, otherwise FResolveInfo::IsValid() will return false
+	 */
+	virtual FResolveInfo GetResolveInfo() const {return {};}
+
+	/**
+	 * Get the revision that we are currently synced to
+	 * @returns a revision identifier or NULL if none exist
+	 */
+	virtual TSharedPtr<class ISourceControlRevision, ESPMode::ThreadSafe> GetCurrentRevision() const = 0;
+
+#if SOURCE_CONTROL_WITH_SLATE
+	/**
+	 * Gets the icon we should use to display the state in a UI.
+	 */
+	virtual FSlateIcon GetIcon() const = 0;
+#endif // SOURCE_CONTROL_WITH_SLATE
 
 	/**
 	 * Get the name of the icon graphic we should use to display the state in a UI.
 	 * @returns the name of the icon to display
 	 */
-	virtual FName GetIconName() const = 0;
+	UE_DEPRECATED(5.0, "GetIconName has been replaced by GetIcon.")
+	virtual FName GetIconName() const { return NAME_None; }
 		
 	/**
 	 * Get the name of the small icon graphic we should use to display the state in a UI.
 	 * @returns the name of the icon to display
 	 */	
-	virtual FName GetSmallIconName() const = 0;
+	UE_DEPRECATED(5.0, "GetSmallIconName has been replaced by GetIcon.")
+	virtual FName GetSmallIconName() const { return NAME_None; }
 
 	/**
 	 * Get a text representation of the state
@@ -126,6 +175,8 @@ public:
 	*/
 	virtual bool GetOtherBranchHeadModification(FString& HeadBranchOut, FString& ActionOut, int32& HeadChangeListOut) const = 0;
 
+	virtual FSourceControlChangelistPtr GetCheckInIdentifier() const;
+
 	/** Get whether this file is up-to-date with the version in source control */
 	virtual bool IsCurrent() const = 0;
 
@@ -166,9 +217,42 @@ public:
 	virtual bool CanAdd() const = 0;
 
 	/** Get whether this file is in a conflicted state */
-	virtual bool IsConflicted() const = 0;
+	virtual bool IsConflicted() const
+	{
+		return GetResolveInfo().IsValid();
+	}
 
 	/** Get whether this file can be reverted, i.e. its changes are discarded and the file will no longer be checked-out. */
 	virtual bool CanRevert() const = 0;
+
+	/** Gets the warnings messages associated with this state, if any. Ex 'checkout by other', 'out of date', etc). */
+	virtual TOptional<FText> GetWarningText() const
+	{ 
+		TOptional<FText> WarningText;
+		if (IsConflicted() ||
+			!IsCurrent() ||
+			IsCheckedOutOther() ||
+			(!IsCheckedOut() && (IsCheckedOutInOtherBranch() || IsModifiedInOtherBranch())))
+		{
+			WarningText.Emplace(GetDisplayTooltip()); // The tooltip text usually describe well enough the warning.
+		}
+		return WarningText;
+	}
+
+	/** Gets the status message associated with this state, if any. This is a superset of the GetWarningText that also includes IsCheckedOut. */
+	virtual TOptional<FText> GetStatusText() const
+	{
+		TOptional<FText> StatusText = GetWarningText();
+		if (!StatusText.IsSet() && IsCheckedOut())
+		{
+			StatusText.Emplace(GetDisplayTooltip());
+		}
+		return StatusText;
+	}
 };
+
+inline FSourceControlChangelistPtr ISourceControlState::GetCheckInIdentifier() const
+{
+	return {};
+}
 

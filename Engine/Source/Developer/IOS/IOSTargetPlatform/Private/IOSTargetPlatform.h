@@ -25,14 +25,14 @@
 /**
  * FIOSTargetPlatform, abstraction for cooking iOS platforms
  */
-class FIOSTargetPlatform : public TTargetPlatformBase<FIOSPlatformProperties>
+class FIOSTargetPlatform : public TNonDesktopTargetPlatformBase<FIOSPlatformProperties>
 {
 public:
 
 	/**
 	 * Default constructor.
 	 */
-	IOSTARGETPLATFORM_API FIOSTargetPlatform(bool bInISTVOS, bool bInIsClientOnly);
+	IOSTARGETPLATFORM_API FIOSTargetPlatform(bool bInISTVOS, bool bInIsVisionOS, bool bInIsClientOnly);
 
 	/**
 	 * Destructor.
@@ -41,39 +41,6 @@ public:
 
 public:
 
-	//~ Begin TTargetPlatformBase Interface
-
-	virtual bool IsServerOnly( ) const override
-	{
-		return false;
-	}
-
-	virtual bool IsClientOnly() const override
-	{
-		return bIsClientOnly;
-	}
-
-	//~ End TTargetPlatformBase Interface
-
-public:
-
-	//~ Begin ITargetPlatform Interface
-	
-	// this is used for cooking to a separate directory, NOT for runtime. Runtime TVOS is still "IOS"
-	virtual FString PlatformName() const override
-	{
-		if (bIsTVOS)
-		{
-			return bIsClientOnly ? "TVOSClient" : "TVOS";
-		}
-		return bIsClientOnly ? "IOSClient" : "IOS";
-	}
-
-    virtual FString IniPlatformName() const override
-    {
-        return "IOS";
-    }
-    
 	virtual void EnableDeviceCheck(bool OnOff) override;
 
 	virtual void GetAllDevices( TArray<ITargetDevicePtr>& OutDevices ) const override;
@@ -86,16 +53,7 @@ public:
 	virtual ITargetDevicePtr GetDefaultDevice( ) const override;
 
 	virtual ITargetDevicePtr GetDevice( const FTargetDeviceId& DeviceId ) override;
-
-	virtual bool IsRunningPlatform( ) const override
-	{
-		#if PLATFORM_IOS && WITH_EDITOR
-			return true;
-		#else
-			return false;
-		#endif
-	}
-
+		
 	virtual bool SupportsFeature( ETargetPlatformFeatures Feature ) const override;
 
 	virtual bool CanSupportRemoteShaderCompile() const override;
@@ -103,13 +61,15 @@ public:
 	virtual bool IsSdkInstalled(bool bProjectHasCode, FString& OutTutorialPath) const override;
 	virtual int32 CheckRequirements(bool bProjectHasCode, EBuildConfiguration Configuration, bool bRequiresAssetNativization, FString& OutTutorialPath, FString& OutDocumentationPath, FText& CustomizedLogMessage) const override;
 
+	virtual void GetAllPossibleShaderFormats( TArray<FName>& OutFormats ) const override;
+
+	virtual void GetAllTargetedShaderFormats( TArray<FName>& OutFormats ) const override;
+
+	virtual void GetPlatformSpecificProjectAnalytics( TArray<struct FAnalyticsEventAttribute>& AnalyticsParamArray ) const override;
 
 #if WITH_ENGINE
 	virtual void GetReflectionCaptureFormats( TArray<FName>& OutFormats ) const override;
 
-	virtual void GetAllPossibleShaderFormats( TArray<FName>& OutFormats ) const override;
-
-	virtual void GetAllTargetedShaderFormats( TArray<FName>& OutFormats ) const override;
 	virtual const class FStaticMeshLODSettings& GetStaticMeshLODSettings( ) const override
 	{
 		return StaticMeshLODSettings;
@@ -128,9 +88,6 @@ public:
 		TextureLODSettings = InTextureLODSettings;
 	}
 
-	virtual FName GetWaveFormat( const class USoundWave* Wave ) const override;
-	virtual void GetAllWaveFormats(TArray<FName>& OutFormat) const override;
-
 #endif // WITH_ENGINE
 
 	virtual void GetBuildProjectSettingKeys(FString& OutSection, TArray<FString>& InBoolKeys, TArray<FString>& InIntKeys, TArray<FString>& InStringKeys) const override
@@ -139,7 +96,6 @@ public:
 		InBoolKeys.Add(TEXT("bGeneratedSYMFile"));
 		InBoolKeys.Add(TEXT("bGeneratedSYMBundle"));
 		InBoolKeys.Add(TEXT("bGenerateXCArchive"));
-		InBoolKeys.Add(TEXT("bShipForBitcode"));
 		if (bIsTVOS)
 		{
 			InStringKeys.Add(TEXT("MinimumTVOSVersion"));
@@ -150,18 +106,6 @@ public:
 		}
 	}
 
-	DECLARE_DERIVED_EVENT(FIOSTargetPlatform, ITargetPlatform::FOnTargetDeviceDiscovered, FOnTargetDeviceDiscovered);
-	virtual FOnTargetDeviceDiscovered& OnDeviceDiscovered( ) override
-	{
-		return DeviceDiscoveredEvent;
-	}
-
-	DECLARE_DERIVED_EVENT(FIOSTargetPlatform, ITargetPlatform::FOnTargetDeviceLost, FOnTargetDeviceLost);
-	virtual FOnTargetDeviceLost& OnDeviceLost( ) override
-	{
-		return DeviceLostEvent;
-	}
-
 	//~ Begin ITargetPlatform Interface
 
 	virtual bool UsesDistanceFields() const override
@@ -169,17 +113,7 @@ public:
 		return bDistanceField;
 	}
 
-protected:
-
-	/**
-	 * Sends a ping message over the network to find devices running the launch daemon.
-	 */
-	void PingNetworkDevices( );
-
 private:
-
-	// Handles when the ticker fires.
-	bool HandleTicker( float DeltaTime );
 
 	// Handles received pong messages from the LauncherDaemon.
 	void HandlePongMessage( const FIOSLaunchDaemonPong& Message, const TSharedRef<IMessageContext, ESPMode::ThreadSafe>& Context );
@@ -191,29 +125,27 @@ private:
 	
 	// true if this is targeting TVOS vs IOS
 	bool bIsTVOS;
-
-	// true if this is a client-only TP
-	bool bIsClientOnly;
+	bool bIsVisionOS;
 
 	// Contains all discovered IOSTargetDevices over the network.
 	TMap<FTargetDeviceId, FIOSTargetDevicePtr> Devices;
 
-	// Holds a delegate to be invoked when the widget ticks.
-	FTickerDelegate TickDelegate;
-
-	// Handle to the registered TickDelegate.
-	FDelegateHandle TickDelegateHandle;
-
 	// Holds the message endpoint used for communicating with the LaunchDaemon.
 	TSharedPtr<FMessageEndpoint, ESPMode::ThreadSafe> MessageEndpoint;
+
+	// r.Mobile.ShadingPath value
+	int32 MobileShadingPath;
 
 	// true if DistanceField is enabled
 	bool bDistanceField;
 
-#if WITH_ENGINE
-	// Holds the Engine INI settings, for quick use.
-	FConfigFile EngineSettings;
+	// r.Mobile.Forward.EnableClusteredReflections value
+	bool bMobileForwardEnableClusteredReflections;
 
+	// r.Mobile.VirtualTextures value
+	bool bMobileVirtualTextures;
+
+#if WITH_ENGINE
 	// Holds the cache of the target LOD settings.
 	const UTextureLODSettings* TextureLODSettings;
 
@@ -224,11 +156,4 @@ private:
     // holds usb device helper
 	FIOSDeviceHelper DeviceHelper;
 
-private:
-
-	// Holds an event delegate that is executed when a new target device has been discovered.
-	FOnTargetDeviceDiscovered DeviceDiscoveredEvent;
-
-	// Holds an event delegate that is executed when a target device has been lost, i.e. disconnected or timed out.
-	FOnTargetDeviceLost DeviceLostEvent;
 };

@@ -21,7 +21,7 @@ FBackgroundHttpRequestImpl::FBackgroundHttpRequestImpl()
 
 bool FBackgroundHttpRequestImpl::ProcessRequest()
 {
-	UE_LOG(LogBackgroundHttpRequest, Display, TEXT("Processing Request - RequestID:%s"), *GetRequestID());
+	UE_LOG(LogBackgroundHttpRequest, Verbose, TEXT("Processing Request - RequestID:%s"), *GetRequestID());
 	FBackgroundHttpModule::Get().GetBackgroundHttpManager()->AddRequest(SharedThis(this));
 
 	return true;
@@ -43,19 +43,24 @@ void FBackgroundHttpRequestImpl::PauseRequest()
 void FBackgroundHttpRequestImpl::ResumeRequest()
 {
     //for now a resume is just wrapping a restart in the general case
-    UE_LOG(LogBackgroundHttpRequest, Display, TEXT("Pausing Request (through restart) - RequestID:%s"), *GetRequestID());
+    UE_LOG(LogBackgroundHttpRequest, Display, TEXT("Resuming Request (through restart) - RequestID:%s"), *GetRequestID());
     ProcessRequest();
 }
 
 void FBackgroundHttpRequestImpl::OnBackgroundDownloadComplete()
 {
+	//The complete delegate should only be firing on the game thread 
+	//so that requestors don't have to worry about thread safety unexpectedly
+	ensureAlwaysMsgf(IsInGameThread(), TEXT("Called from un-expected thread! Potential error in an implementation of background downloads!"));
+
 	FBackgroundHttpModule::Get().GetBackgroundHttpManager()->RemoveRequest(SharedThis(this));
 
 	//Determine if this was a success or not
 	FBackgroundHttpResponsePtr SetResponse = GetResponse();
 	const bool bWasSuccess = SetResponse.IsValid() ? EHttpResponseCodes::IsOk(SetResponse->GetResponseCode()) : false;
+	const FString ResponseTempLocation = Response.IsValid() ? Response->GetTempContentFilePath() : TEXT("None");
 
-	UE_LOG(LogBackgroundHttpRequest, Display, TEXT("Download Complete - RequestID:%s | bWasSuccess:%d "), *GetRequestID(), (int)(bWasSuccess));
+	UE_LOG(LogBackgroundHttpRequest, Display, TEXT("Download Complete - RequestID:%s | bWasSuccess:%d | ResponseTempLocation:%s"), *GetRequestID(), (int)(bWasSuccess), *ResponseTempLocation);
 
 	//First, send a delegate out for this request completing
 	OnProcessRequestComplete().ExecuteIfBound(SharedThis(this), bWasSuccess);
@@ -75,7 +80,12 @@ void FBackgroundHttpRequestImpl::NotifyNotificationObjectOfComplete(bool bWasSuc
 	if (DownloadCompleteNotificationObject.IsValid())
 	{
 		const int32 SharedRefCount = DownloadCompleteNotificationObject.GetSharedReferenceCount();
-		UE_LOG(LogBackgroundHttpRequest, Display, TEXT("Removing Reference to DownloadCompleteNotificationObject - bWasSuccess:%d | CurrentSharedRefCount:%d"), (int)(bWasSuccess), SharedRefCount);
+		UE_LOG(LogBackgroundHttpRequest, VeryVerbose, TEXT("Removing Reference to DownloadCompleteNotificationObject - bWasSuccess:%d | CurrentSharedRefCount:%d"), (int)(bWasSuccess), SharedRefCount);
+
+		if (SharedRefCount == 1)
+		{
+			UE_LOG(LogBackgroundHttpRequest, Display, TEXT("Removing Final Reference to DownloadCompleteNotificationObject!"));
+		}
 
 		DownloadCompleteNotificationObject->NotifyOfDownloadResult(bWasSuccess);
 		DownloadCompleteNotificationObject.Reset();
@@ -105,8 +115,10 @@ void FBackgroundHttpRequestImpl::CompleteWithExistingResponseData(FBackgroundHtt
 {
 	Response = BackgroundResponse;
 
-	const bool bHasValidResponse = Response.IsValid();	
-	UE_LOG(LogBackgroundHttpRequest, Display, TEXT("Completing Download With Existing Response Data - RequestID:%s | bHasValidResponse:%d"), *GetRequestID(), (int)(bHasValidResponse));
+	const bool bHasValidResponse = Response.IsValid();
+	const FString ResponseTempLocation = Response.IsValid() ? Response->GetTempContentFilePath() : TEXT("None");
+
+	UE_LOG(LogBackgroundHttpRequest, Verbose, TEXT("Completing Download With Existing Response Data - RequestID:%s | bHasValidResponse:%d | ResponseTempDownloadLocation:%s"), *GetRequestID(), (int)(bHasValidResponse), *ResponseTempLocation);
 
 	OnBackgroundDownloadComplete();
 }

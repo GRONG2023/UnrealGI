@@ -7,27 +7,43 @@
 #include "Math/Plane.h"
 #include "Math/Matrix.h"
 
-class FTranslationMatrix
-	: public FMatrix
+namespace UE {
+namespace Math {
+
+template<typename T>
+struct TTranslationMatrix
+	: public TMatrix<T>
 {
 public:
 
 	/** Constructor translation matrix based on given vector */
-	FTranslationMatrix(const FVector& Delta);
+	TTranslationMatrix(const TVector<T>& Delta);
 
+	// Conversion to other type.
+	template<typename FArg, TEMPLATE_REQUIRES(!std::is_same_v<T, FArg>)>
+	explicit TTranslationMatrix(const TTranslationMatrix<FArg>& From) : TMatrix<T>(From) {}
+	
 	/** Matrix factory. Return an FMatrix so we don't have type conversion issues in expressions. */
-	static FMatrix Make(FVector const& Delta)
+	static TMatrix<T> Make(TVector<T> const& Delta)
 	{
-		return FTranslationMatrix(Delta);
+		return TTranslationMatrix<T>(Delta);
 	}
 };
 
-
-FORCEINLINE FTranslationMatrix::FTranslationMatrix(const FVector& Delta)
-	: FMatrix(
-		FPlane(1.0f,	0.0f,	0.0f,	0.0f),
-		FPlane(0.0f,	1.0f,	0.0f,	0.0f),
-		FPlane(0.0f,	0.0f,	1.0f,	0.0f),
-		FPlane(Delta.X,	Delta.Y,Delta.Z,1.0f)
+template<typename T>
+FORCEINLINE TTranslationMatrix<T>::TTranslationMatrix(const TVector<T>& Delta)
+	: TMatrix<T>(
+		TPlane<T>(1.0f,		0.0f,	0.0f,	0.0f),
+		TPlane<T>(0.0f,		1.0f,	0.0f,	0.0f),
+		TPlane<T>(0.0f,		0.0f,	1.0f,	0.0f),
+		TPlane<T>(Delta.X,	Delta.Y,Delta.Z,1.0f)
 	)
 { }
+	
+} // namespace Math
+} // namespace UE
+
+UE_DECLARE_LWC_TYPE(TranslationMatrix, 44);
+
+template<> struct TIsUECoreVariant<FTranslationMatrix44f> { enum { Value = true }; };
+template<> struct TIsUECoreVariant<FTranslationMatrix44d> { enum { Value = true }; };

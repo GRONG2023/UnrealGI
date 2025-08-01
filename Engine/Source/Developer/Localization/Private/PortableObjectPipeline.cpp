@@ -9,6 +9,8 @@
 #include "Internationalization/TextNamespaceUtil.h"
 #include "LocTextHelper.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PortableObjectPipeline)
+
 DEFINE_LOG_CATEGORY_STATIC(LogPortableObjectPipeline, Log, All);
 
 namespace
@@ -65,7 +67,7 @@ namespace
 
 	void BuildCollapsedManifest(FLocTextHelper& InLocTextHelper, const ELocalizedTextCollapseMode InTextCollapseMode, FCollapsedData& OutCollapsedData, TSharedPtr<FInternationalizationManifest>& OutPlatformAgnosticManifest, TMap<FName, TSharedRef<FInternationalizationManifest>>& OutPerPlatformManifests)
 	{
-		// Always add the split platforms so that they generate an empty manifest if there are no entries for that platform in the master manifest
+		// Always add the split platforms so that they generate an empty manifest if there are no entries for that platform in the platform agnostic manifest
 		OutPlatformAgnosticManifest = MakeShared<FInternationalizationManifest>();
 		for (const FString& SplitPlatformName : InLocTextHelper.GetPlatformsToSplit())
 		{
@@ -308,6 +310,8 @@ namespace
 			}
 		}
 
+		UE_LOG(LogPortableObjectPipeline, Log, TEXT("Imported file %s"), *InPOFilePath);
+
 		if (bModifiedArchive)
 		{
 			// Trim any dead entries out of the archive
@@ -338,7 +342,7 @@ namespace
 		}
 
 		NewPortableObject.SetProjectName(FPaths::GetBaseFilename(InPOFilePath));
-		NewPortableObject.CreateNewHeader();
+		NewPortableObject.CreateNewHeader(InLocTextHelper.GetCopyrightNotice());
 		UpdatePOFileHeaderForSettings(NewPortableObject, InTextCollapseMode, InPOFormat);
 
 		// Add each manifest entry to the PO file
@@ -437,6 +441,8 @@ namespace
 			UE_LOG(LogPortableObjectPipeline, Error, TEXT("Could not write file %s"), *InPOFilePath);
 			return false;
 		}
+
+		UE_LOG(LogPortableObjectPipeline, Log, TEXT("Exported file %s"), *InPOFilePath);
 
 		return true;
 	}
@@ -739,3 +745,4 @@ void PortableObjectPipeline::ParseBasicPOFileEntry(const FPortableObjectEntry& P
 		OutTranslation = ConditionPOStringForArchive(POEntry.MsgStr[0]);
 	}
 }
+

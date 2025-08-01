@@ -5,18 +5,19 @@
 	Size-related particle module implementations.
 =============================================================================*/
 
-#include "CoreMinimal.h"
-#include "ParticleHelper.h"
+#include "ParticleEmitterInstances.h"
 #include "Particles/ParticleSystemComponent.h"
 #include "Distributions/DistributionVectorConstant.h"
 #include "Distributions/DistributionVectorUniform.h"
 #include "Distributions/DistributionVectorConstantCurve.h"
+#include "Particles/ParticleModule.h"
 #include "Particles/Size/ParticleModuleSizeBase.h"
 #include "Particles/Size/ParticleModuleSize.h"
 #include "Particles/Size/ParticleModuleSize_Seeded.h"
 #include "Particles/Size/ParticleModuleSizeMultiplyLife.h"
 #include "Particles/Size/ParticleModuleSizeScale.h"
 #include "Particles/Size/ParticleModuleSizeScaleBySpeed.h"
+#include "Particles/TypeData/ParticleModuleTypeDataBase.h"
 #include "Particles/TypeData/ParticleModuleTypeDataGpu.h"
 #include "Particles/ParticleLODLevel.h"
 #include "Particles/ParticleModuleRequired.h"
@@ -91,10 +92,10 @@ void UParticleModuleSize::SpawnEx(FParticleEmitterInstance* Owner, int32 Offset,
 {
 	SPAWN_INIT;
 	FVector Size		 = StartSize.GetValue(Owner->EmitterTime, Owner->Component, 0, InRandomStream);
-	Particle.Size	+= Size;
+	Particle.Size	+= (FVector3f)Size;
 
 	AdjustParticleBaseSizeForUVFlipping(Size, Owner->CurrentLODLevel->RequiredModule->UVFlippingMode, *InRandomStream);
-	Particle.BaseSize += Size;
+	Particle.BaseSize += (FVector3f)Size;
 }
 
 /*-----------------------------------------------------------------------------
@@ -219,7 +220,7 @@ void UParticleModuleSizeMultiplyLife::Update(FParticleEmitterInstance* Owner, in
 	{
 		if (FastDistribution)
 		{
-			FVector SizeScale;
+			FVector3f SizeScale;
 			// fast path
 			BEGIN_UPDATE_LOOP;
 				FastDistribution->GetValue3None(Particle.RelativeTime, &SizeScale.X);
@@ -234,7 +235,7 @@ void UParticleModuleSizeMultiplyLife::Update(FParticleEmitterInstance* Owner, in
 		{
 			BEGIN_UPDATE_LOOP
 			{
-				FVector SizeScale = LifeMultiplier.GetValue(Particle.RelativeTime, Owner->Component);
+				FVector3f SizeScale(LifeMultiplier.GetValue(Particle.RelativeTime, Owner->Component));
 				FPlatformMisc::Prefetch(ParticleData, (ParticleIndices[i+1] * ParticleStride));
 				FPlatformMisc::Prefetch(ParticleData, (ParticleIndices[i+1] * ParticleStride) + PLATFORM_CACHE_LINE_SIZE);
 				Particle.Size.X *= SizeScale.X;
@@ -266,7 +267,7 @@ void UParticleModuleSizeMultiplyLife::Update(FParticleEmitterInstance* Owner, in
 		{
 			BEGIN_UPDATE_LOOP
 			{
-				FVector SizeScale = LifeMultiplier.GetValue(Particle.RelativeTime, Owner->Component);
+				FVector3f SizeScale(LifeMultiplier.GetValue(Particle.RelativeTime, Owner->Component));
 				FPlatformMisc::Prefetch(ParticleData, (ParticleIndices[i+1] * ParticleStride));
 				FPlatformMisc::Prefetch(ParticleData, (ParticleIndices[i+1] * ParticleStride) + PLATFORM_CACHE_LINE_SIZE);
 				if(MultiplyX)
@@ -368,14 +369,14 @@ bool UParticleModuleSizeScale::IsValidForLODLevel(UParticleLODLevel* LODLevel, F
 void UParticleModuleSizeScale::Spawn(FParticleEmitterInstance* Owner, int32 Offset, float SpawnTime, FBaseParticle* ParticleBase)
 {
 	SPAWN_INIT;
-	FVector ScaleFactor = SizeScale.GetValue(Particle.RelativeTime, Owner->Component);
+	FVector3f ScaleFactor(SizeScale.GetValue(Particle.RelativeTime, Owner->Component));
 	Particle.Size = GetParticleBaseSize(*ParticleBase) * ScaleFactor;
 }
 
 void UParticleModuleSizeScale::Update(FParticleEmitterInstance* Owner, int32 Offset, float DeltaTime)
 {
 	BEGIN_UPDATE_LOOP;
-		FVector ScaleFactor = SizeScale.GetValue(Particle.RelativeTime, Owner->Component);
+		FVector3f ScaleFactor(SizeScale.GetValue(Particle.RelativeTime, Owner->Component));
 		Particle.Size = GetParticleBaseSize(Particle) * ScaleFactor;
 	END_UPDATE_LOOP;
 }
@@ -410,7 +411,7 @@ void UParticleModuleSizeScaleBySpeed::Update(FParticleEmitterInstance* Owner, in
 		FVector Size = Scale * Particle.Velocity.Size();
 		Size = Size.ComponentMax(FVector(1.0f));
 		Size = Size.ComponentMin(ScaleMax);
-		Particle.Size = GetParticleBaseSize(Particle) * Size;
+		Particle.Size = GetParticleBaseSize(Particle) * (FVector3f)Size;
 	END_UPDATE_LOOP;
 }
 

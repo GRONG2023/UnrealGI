@@ -6,8 +6,6 @@ namespace UnrealBuildTool.Rules
 	{
         public FieldSystemEngine(ReadOnlyTargetRules Target) : base(Target)
 		{
-            PublicIncludePaths.Add(ModuleDirectory + "/Public");
-
 			PublicDependencyModuleNames.AddRange(
 				new string[]
 				{
@@ -18,6 +16,7 @@ namespace UnrealBuildTool.Rules
                     "RHI",
 					"Chaos",
 					"ChaosSolverEngine",
+					"PhysicsCore",
                 }
                 );
 

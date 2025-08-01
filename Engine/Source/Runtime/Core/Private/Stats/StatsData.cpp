@@ -5,9 +5,12 @@
 #include "Misc/CoreStats.h"
 #if STATS
 
-#include "Containers/LockFreeFixedSizeAllocator.h"
-#include "HAL/IConsoleManager.h"
 #include "Async/TaskGraphInterfaces.h"
+#include "Containers/LockFreeFixedSizeAllocator.h"
+#include "Containers/StringView.h"
+#include "Misc/StringBuilder.h"
+#include "HAL/IConsoleManager.h"
+#include "Misc/AsciiSet.h"
 
 DECLARE_CYCLE_STAT(TEXT("Broadcast"),STAT_StatsBroadcast,STATGROUP_StatSystem);
 DECLARE_CYCLE_STAT(TEXT("Condense"),STAT_StatsCondense,STATGROUP_StatSystem);
@@ -26,8 +29,8 @@ const FName FStatConstants::NAME_ThreadGroup = FStatConstants::ThreadGroupName;
 const FName FStatConstants::RAW_SecondsPerCycle = FStatNameAndInfo( GET_STATFNAME( STAT_SecondsPerCycle ), true ).GetRawName();
 const FName FStatConstants::NAME_NoCategory = FName(TEXT("STATCAT_None"));
 
-const FString FStatConstants::StatsFileExtension = TEXT( ".ue4stats" );
-const FString FStatConstants::StatsFileRawExtension = TEXT( ".ue4statsraw" );
+const FString FStatConstants::StatsFileExtension = TEXT( ".uestats" );
+const FString FStatConstants::StatsFileRawExtension = TEXT( ".uestatsraw" );
 
 const FString FStatConstants::ThreadNameMarker = TEXT( "Thread_" );
 
@@ -199,7 +202,7 @@ void FRawStatStackNode::AddNameHierarchy(int32 CurrentPrefixDepth)
 			for (int32 Index = 0; Index < ChildArray.Num(); Index++)
 			{
 				FRawStatStackNode& Child = *ChildArray[Index];
-				new (ChildNames) TArray<FName>();
+				ChildNames.AddDefaulted();
 				TArray<FName>& ParsedNames = ChildNames[Index];
 
 				TArray<FString> Parts;
@@ -207,7 +210,7 @@ void FRawStatStackNode::AddNameHierarchy(int32 CurrentPrefixDepth)
 				if (Name.StartsWith(TEXT("//")))
 				{
 					// we won't add hierarchy for grouped stats
-					new (ParsedNames) FName(Child.Meta.NameAndInfo.GetRawName());
+					ParsedNames.Add(Child.Meta.NameAndInfo.GetRawName());
 				}
 				else
 				{
@@ -217,7 +220,7 @@ void FRawStatStackNode::AddNameHierarchy(int32 CurrentPrefixDepth)
 					ParsedNames.Empty(Parts.Num());
 					for (int32 PartIndex = 0; PartIndex < Parts.Num(); PartIndex++)
 					{
-						new (ParsedNames) FName(*Parts[PartIndex]);
+						ParsedNames.Add(*Parts[PartIndex]);
 					}
 				}
 			}
@@ -424,21 +427,21 @@ void FRawStatStackNode::DebugPrintLeafFilterInner(TCHAR const* Filter, int32 Dep
 
 void FRawStatStackNode::Encode(TArray<FStatMessage>& OutStats) const
 {
-	FStatMessage* NewStat = new (OutStats) FStatMessage(Meta);
+	FStatMessage& NewStat = OutStats.Add_GetRef(Meta);
 	if (Children.Num())
 	{
-		NewStat->NameAndInfo.SetField<EStatOperation>(EStatOperation::ChildrenStart);
+		NewStat.NameAndInfo.SetField<EStatOperation>(EStatOperation::ChildrenStart);
 		for (TMap<FName, FRawStatStackNode*>::TConstIterator It(Children); It; ++It)
 		{
 			FRawStatStackNode const* Child = It.Value();
 			Child->Encode(OutStats);
 		}
-		FStatMessage* EndStat = new (OutStats) FStatMessage(Meta);
-		EndStat->NameAndInfo.SetField<EStatOperation>(EStatOperation::ChildrenEnd);
+		FStatMessage& EndStat = OutStats.Emplace_GetRef(Meta);
+		EndStat.NameAndInfo.SetField<EStatOperation>(EStatOperation::ChildrenEnd);
 	}
 	else
 	{
-		NewStat->NameAndInfo.SetField<EStatOperation>(EStatOperation::Leaf);
+		NewStat.NameAndInfo.SetField<EStatOperation>(EStatOperation::Leaf);
 	}
 }
 
@@ -804,6 +807,16 @@ void FStatsThreadState::ProcessMetaDataOnly(TArray<FStatMessage>& Data)
 	}
 }
 
+void FStatsThreadState::ProcessMetaDataOnly(TArray64<FStatMessage>& Data)
+{
+	for (int64 Index = 0; Index < Data.Num(); Index++)
+	{
+		FStatMessage& Item = Data[Index];
+		EStatOperation::Type Op = Item.NameAndInfo.GetField<EStatOperation>();
+		check(Op == EStatOperation::SetLongName);
+		FindOrAddMetaData(Item);
+	}
+}
 
 void FStatsThreadState::ToggleFindMemoryExtensiveStats()
 {
@@ -832,26 +845,32 @@ void FStatsThreadState::ProcessNonFrameStats(FStatMessagesArray& Data, TSet<FNam
 			{
 				UE_LOG(LogStats, Fatal, TEXT( "Stat %s was not cleared every frame, but was used with a scope cycle counter." ), *Item.NameAndInfo.GetRawName().ToString() );
 			}
+#if UE_STATS_MEMORY_PROFILER_ENABLED
+			else if (Op == EStatOperation::Memory)
+			{
+				// Ignore any memory messages, they shouldn't be treated as regular stats messages.
+			}
+#endif //UE_STATS_MEMORY_PROFILER_ENABLED
+			else if (Op == EStatOperation::SpecialMessageMarker)
+			{
+				// Ignore special messages, they shouldn't be treated as regular stats messages.
+			}
 			else
 			{
-				// Ignore any memory or special messages, they shouldn't be treated as regular stats messages.
-				if( Op != EStatOperation::Memory && Op != EStatOperation::SpecialMessageMarker )
+				FStatMessage* Result = NotClearedEveryFrame.Find(Item.NameAndInfo.GetRawName());
+				if (!Result)
 				{
-					FStatMessage* Result = NotClearedEveryFrame.Find(Item.NameAndInfo.GetRawName());
-					if (!Result)
+					UE_LOG(LogStats, Error, TEXT( "Stat %s was cleared every frame, but we don't have metadata for it. Data loss." ), *Item.NameAndInfo.GetRawName().ToString() );
+				}
+				else
+				{
+					if (NonFrameStatsFound)
 					{
-						UE_LOG(LogStats, Error, TEXT( "Stat %s was cleared every frame, but we don't have metadata for it. Data loss." ), *Item.NameAndInfo.GetRawName().ToString() );
+						NonFrameStatsFound->Add(Item.NameAndInfo.GetRawName());
 					}
-					else
-					{
-						if (NonFrameStatsFound)
-						{
-							NonFrameStatsFound->Add(Item.NameAndInfo.GetRawName());
-						}
-						FStatsUtils::AccumulateStat(*Result, Item);
-						Item = *Result; // now just write the accumulated value back into the stream
-						check(Item.NameAndInfo.GetField<EStatOperation>() == EStatOperation::Set);
-					}
+					FStatsUtils::AccumulateStat(*Result, Item);
+					Item = *Result; // now just write the accumulated value back into the stream
+					check(Item.NameAndInfo.GetField<EStatOperation>() == EStatOperation::Set);
 				}
 			}
 		}
@@ -1027,6 +1046,22 @@ void FStatsThreadState::AddToHistoryAndEmpty(FStatPacketArray& NewData)
 	check(History.Num() <= HistoryFrames * 2 + 5);
 	check(CondensedStackHistory.Num() <= HistoryFrames * 2 + 5);
 	check(GoodFrames.Num() <= HistoryFrames * 2 + 5);
+#if DO_CHECK
+	if (BadFrames.Num() > HistoryFrames * 2 + 5)
+	{
+		UE_LOG(LogStats, Display, TEXT("BadFrames.Num(): %d, History.Num(): %d, HistoryFrames: %d"), BadFrames.Num(), History.Num(), HistoryFrames);
+		UE_LOG(LogStats, Display, TEXT("CurrentGameFrame: %lld, CurrentRenderFrame: %lld, LastFullFrameMetaAndNonFrame: %lld"), CurrentGameFrame, CurrentRenderFrame, LastFullFrameMetaAndNonFrame);
+		for (int64 BadFrame : BadFrames)
+		{
+			UE_LOG(LogStats, Display, TEXT("Bad frame: %lld"), BadFrame);
+		}
+		for (auto It = History.CreateIterator(); It; ++It)
+		{
+			const int64 HistoryFrame = It.Key();
+			UE_LOG(LogStats, Display, TEXT("History frame: %lld"), HistoryFrame);
+		}
+	}
+#endif
 	check(BadFrames.Num() <= HistoryFrames * 2 + 5);
 }
 
@@ -1485,10 +1520,12 @@ void FStatsThreadState::GetRawStackStats(int64 TargetFrame, FRawStatStackNode& R
 
 					}
 				}
-				else if( Op == EStatOperation::Memory )
+#if UE_STATS_MEMORY_PROFILER_ENABLED
+				else if (Op == EStatOperation::Memory)
 				{
 					// Should never happen.
 				}
+#endif //UE_STATS_MEMORY_PROFILER_ENABLED
 				else if (OutNonStackStats)
 				{
 					FStatsUtils::AddNonStackStats( LongName, Item, Op, ThisFrameNonStackStats );
@@ -1510,7 +1547,7 @@ void FStatsThreadState::GetRawStackStats(int64 TargetFrame, FRawStatStackNode& R
 	{
 		for (TMap<FName, FStatMessage>::TConstIterator It(ThisFrameNonStackStats); It; ++It)
 		{
-			new (*OutNonStackStats) FStatMessage(It.Value());
+			OutNonStackStats->Add(It.Value());
 		}
 	}
 }
@@ -1675,8 +1712,8 @@ FName FStatsThreadState::GetStatThreadName( const FStatPacket& Packet ) const
 
 void FStatsThreadState::Condense(int64 TargetFrame, TArray<FStatMessage>& OutStats) const
 {
-	new (OutStats) FStatMessage(FStatConstants::AdvanceFrame.GetEncodedName(), EStatOperation::AdvanceFrameEventGameThread, TargetFrame, false);
-	new (OutStats) FStatMessage(FStatConstants::AdvanceFrame.GetEncodedName(), EStatOperation::AdvanceFrameEventRenderThread, TargetFrame, false);
+	OutStats.Emplace(FStatConstants::AdvanceFrame.GetEncodedName(), EStatOperation::AdvanceFrameEventGameThread, TargetFrame, false);
+	OutStats.Emplace(FStatConstants::AdvanceFrame.GetEncodedName(), EStatOperation::AdvanceFrameEventRenderThread, TargetFrame, false);
 	FRawStatStackNode Root;
 	GetRawStackStats(TargetFrame, Root, &OutStats);
 	TArray<FStatMessage> StackStats;
@@ -1756,7 +1793,7 @@ void FStatsThreadState::AddMissingStats(TArray<FStatMessage>& Dest, TSet<FName> 
 		FStatMessage const* Zero = ShortNameToLongName.Find(*It);
 		if (Zero)
 		{
-			new (Dest) FStatMessage(*Zero);
+			Dest.Add(*Zero);
 		}
 	}
 }
@@ -1840,6 +1877,10 @@ FString FStatsUtils::DebugPrint(FStatMessage const& Item)
 		else if (Item.NameAndInfo.GetFlag(EStatMetaFlags::IsCycle))
 		{
 			Result = FString::Printf(TEXT("%.3fms"), FPlatformTime::ToMilliseconds64(Item.GetValue_int64()));
+		}
+		else if (Item.NameAndInfo.GetFlag(EStatMetaFlags::IsMemory))
+		{
+			Result = FString::Printf(TEXT("%.3fMB"), (double)Item.GetValue_int64() / 1024.0 / 1024.0);
 		}
 		else
 		{
@@ -1997,9 +2038,11 @@ void FStatsUtils::AccumulateStat(FStatMessage& Dest, FStatMessage const& Item, E
 					StatOpMaxVal_Int64( Dest.NameAndInfo, Dest.GetValue_int64(), Item.GetValue_int64() );
 					break;
 
+#if UE_STATS_MEMORY_PROFILER_ENABLED
 				// Nothing here at this moment.
 				case EStatOperation::Memory:
 					break;
+#endif //UE_STATS_MEMORY_PROFILER_ENABLED
 
 				default:
 					check(0);
@@ -2025,9 +2068,11 @@ void FStatsUtils::AccumulateStat(FStatMessage& Dest, FStatMessage const& Item, E
 					Dest.GetValue_double() = FMath::Max<double>(Dest.GetValue_double(), Item.GetValue_double());
 					break;
 
+#if UE_STATS_MEMORY_PROFILER_ENABLED
 				// Nothing here at this moment.
 				case EStatOperation::Memory:
 					break;
+#endif //UE_STATS_MEMORY_PROFILER_ENABLED
 
 				default:
 					check(0);
@@ -2043,7 +2088,7 @@ void FStatsUtils::AccumulateStat(FStatMessage& Dest, FStatMessage const& Item, E
 	}
 }
 
-FString FStatsUtils::FromEscapedFString(const TCHAR* Escaped)
+FString FStatsUtils::FromEscapedString(const TCHAR* Escaped)
 {
 	FString Result;
 	FString Input(Escaped);
@@ -2057,7 +2102,7 @@ FString FStatsUtils::FromEscapedFString(const TCHAR* Escaped)
 				break;
 			}
 			Result += Input.Left(Index);
-			Input.RightChopInline(Index + 1, false);
+			Input.RightChopInline(Index + 1, EAllowShrinking::No);
 
 		}
 		{
@@ -2069,55 +2114,31 @@ FString FStatsUtils::FromEscapedFString(const TCHAR* Escaped)
 				break;
 			}
 			FString Number = Input.Left(IndexEnd);
-			Input.RightChopInline(IndexEnd + 1, false);
+			Input.RightChopInline(IndexEnd + 1, EAllowShrinking::No);
 			Result.AppendChar(TCHAR(uint32(FCString::Atoi64(*Number))));
 		}
 	}
 	return Result;
 }
 
-FString FStatsUtils::ToEscapedFString(const TCHAR* Source)
+void FStatsUtils::ToEscapedString(FStringView Input, FStringBuilderBase& Output)
 {
-	FString Invalid(INVALID_NAME_CHARACTERS);
-	Invalid += TEXT("$");
-
-	FString Output;
-	FString Input(Source);
-	int32 StartValid = 0;
-	int32 NumValid = 0;
-
-	for (int32 i = 0; i < Input.Len(); i++)
+	constexpr FAsciiSet InvalidChars = FAsciiSet(INVALID_NAME_CHARACTERS) + '$';
+	while (true)
 	{
-		int32 Index = 0;
-		if (!Invalid.FindChar(Input[i], Index))
+		FStringView ValidInput = FAsciiSet::FindPrefixWithout(Input, InvalidChars);
+		Output.Append(ValidInput);
+
+		if (ValidInput.end() == Input.end())
 		{
-			NumValid++;
+			break;
 		}
-		else
-		{
-			// Copy the valid range so far
-			Output += Input.Mid(StartValid, NumValid);
 
-			// Reset valid ranges
-			StartValid = i + 1;
-			NumValid = 0;
+		// Replace the invalid character with a special string
+		Output << '$' << static_cast<uint32>(*ValidInput.end()) << '$';
 
-			// Replace the invalid character with a special string
-			Output += FString::Printf(TEXT("$%u$"), uint32(Input[i]));
-		}
+		Input.RemovePrefix(ValidInput.Len() + 1);
 	}
-
-	// Just return the input if the entire string was valid
-	if (StartValid == 0 && NumValid == Input.Len())
-	{
-		return Input;
-	}
-	else if (NumValid > 0)
-	{
-		// Copy the remaining valid part
-		Output += Input.Mid(StartValid, NumValid);
-	}
-	return Output;
 }
 
 

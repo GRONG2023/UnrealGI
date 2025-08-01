@@ -10,17 +10,7 @@
 
 static FString GetBindingName(const TSharedPtr<FCEFJSScripting>& Scripting, const FProperty* ValueProperty)
 {
-	//@todo samz - HACK
-	static const bool bIsKairos = FParse::Param(FCommandLine::Get(), TEXT("KairosOnly"));
-	if (bIsKairos)
-	{
-		// skip lowercasing property field names for compatibility with FNativeJSStructSerializerBackend/FMobileJSStructSerializerBackend
-		return ValueProperty->GetName();
-	}
-	else
-	{
-		return Scripting->GetBindingName(ValueProperty);
-	}
+	return Scripting->GetBindingName(ValueProperty);
 }
 
 /* Private methods
@@ -125,7 +115,7 @@ void FCEFJSStructSerializerBackend::BeginStructure(const FStructSerializerState&
 	if (State.KeyProperty != nullptr)
 	{
 		FString KeyString;
-		State.KeyProperty->ExportTextItem(KeyString, State.KeyData, nullptr, nullptr, PPF_None);
+		State.KeyProperty->ExportTextItem_Direct(KeyString, State.KeyData, nullptr, nullptr, PPF_None);
 
 		CefRefPtr<CefDictionaryValue> DictionaryValue = CefDictionaryValue::Create();
 		Stack.Push(StackItem(KeyString, DictionaryValue));
@@ -278,13 +268,13 @@ void FCEFJSStructSerializerBackend::WriteProperty(const FStructSerializerState& 
 	}
 
 	// classes & objects
-	else if (State.FieldType == FClassProperty::StaticClass())
+	else if (FClassProperty* ClassProperty = CastField<FClassProperty>(State.ValueProperty))
 	{
-		Add(State, CastFieldChecked<FClassProperty>(State.ValueProperty)->GetPropertyValue_InContainer(State.ValueData, ArrayIndex)->GetPathName());
+		Add(State, ClassProperty->GetPropertyValue_InContainer(State.ValueData, ArrayIndex)->GetPathName());
 	}
-	else if (State.FieldType == FObjectProperty::StaticClass())
+	else if (FObjectProperty* ObjectProperty = CastField<FObjectProperty>(State.ValueProperty))
 	{
-		Add(State, CastFieldChecked<FObjectProperty>(State.ValueProperty)->GetPropertyValue_InContainer(State.ValueData, ArrayIndex));
+		Add(State, ObjectProperty->GetPropertyValue_InContainer(State.ValueData, ArrayIndex));
 	}
 
 	// unsupported property type

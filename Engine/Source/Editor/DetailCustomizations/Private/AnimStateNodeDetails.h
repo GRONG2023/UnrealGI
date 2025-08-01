@@ -2,10 +2,10 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "IDetailCustomization.h"
 #include "AnimTransitionNodeDetails.h"
+#include "Templates/SharedPointer.h"
 
+class IDetailCustomization;
 class IDetailLayoutBuilder;
 
 class FAnimStateNodeDetails : public FAnimTransitionNodeDetails
@@ -16,5 +16,9 @@ public:
 
 	/** IDetailCustomization interface */
 	virtual void CustomizeDetails( IDetailLayoutBuilder& DetailBuilder ) override;
+
+private:
+	
+	void GenerateAnimationStateEventRow(IDetailCategoryBuilder& SegmentCategory, const FText & StateEventLabel, const FString & TransitionName);
 };
 

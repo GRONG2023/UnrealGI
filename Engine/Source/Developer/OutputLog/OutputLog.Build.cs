@@ -10,22 +10,43 @@ public class OutputLog : ModuleRules
 			new string[] {
 				"Core",
 				"CoreUObject", // @todo Mac: for some reason it's needed to link in debug on Mac
-                "InputCore",
+				"EngineSettings",
+				"InputCore",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
-                "TargetPlatform",
-                "DesktopPlatform"
+				"TargetPlatform",
+				"DesktopPlatform",
+				"ToolWidgets",
+				"ToolMenus",
 			}
 		);
 
 		if (Target.bBuildEditor)
-        {
-            PrivateDependencyModuleNames.AddRange(
+		{
+			PrivateDependencyModuleNames.AddRange(
 				new string[] {
-                        "UnrealEd"
+					"EditorFramework",
+					"StatusBar",
+					"UnrealEd",
 				}
 			);
-        }
-    }
+		}
+
+		if (Target.bBuildEditor || Target.bBuildDeveloperTools)
+		{
+			PrivateIncludePathModuleNames.AddRange(
+				new string[] {
+					"WorkspaceMenuStructure",
+				}
+			);
+		}
+
+		if (Target.bCompileAgainstEngine)
+		{
+			// Required for output log drawer in editor / engine builds. 
+			PrivateDependencyModuleNames.Add("Engine");
+		}
+
+		UnsafeTypeCastWarningLevel = WarningLevel.Error;
+	}
 }

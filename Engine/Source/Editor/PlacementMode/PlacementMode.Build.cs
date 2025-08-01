@@ -16,13 +16,14 @@ public class PlacementMode : ModuleRules
                 "InputCore",
                 "Slate",
 				"SlateCore",
-                "UnrealEd",
+				"EditorFramework",
+				"UnrealEd",
                 "ContentBrowser",
 				"ContentBrowserData",
                 "CollectionManager",
                 "LevelEditor",
                 "AssetTools",
-                "EditorStyle"
+                "ToolMenus",
             } 
         );
     }

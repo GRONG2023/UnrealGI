@@ -13,6 +13,7 @@
 #include "Widgets/SWindow.h"
 #include "Widgets/Layout/SBorder.h"
 #include "MoviePlayer.h"
+#include "MoviePlayerProxyServer.h"
 #include "TickableObjectRenderThread.h"
 
 #include "Misc/CoreDelegates.h"
@@ -25,6 +26,12 @@ class FMoviePlayerWidgetRenderer
 public:
 	FMoviePlayerWidgetRenderer(TSharedPtr<SWindow> InMainWindow, TSharedPtr<SVirtualWindow> InVirtualRenderWindowWindow, FSlateRenderer* InRenderer);
 
+	/**
+	 * Call this enable or disable DPI scale. *
+	 *
+	 * @param bInIsEanbled True to apply a DPI scale.
+	 */
+	void EnableDPIScale(bool bShouldEnable);
 	void DrawWindow(float DeltaTime);
 
 private:
@@ -40,11 +47,14 @@ private:
 	FSlateRenderer* SlateRenderer;
 
 	FViewportRHIRef ViewportRHI;
+
+	/** If true then apply a DPI scale. */
+	bool bIsDPIScaleEnabled;
 };
 
 /** An implementation of the movie player/loading screen we will use */
 class FDefaultGameMoviePlayer : public FTickableObjectRenderThread, public IGameMoviePlayer,
-	public TSharedFromThis<FDefaultGameMoviePlayer>
+	public IMoviePlayerProxyServer, public TSharedFromThis<FDefaultGameMoviePlayer>
 {
 public:
 	static void Create()
@@ -79,14 +89,24 @@ public:
 	virtual bool IsMovieCurrentlyPlaying() const override;
 	virtual bool LoadingScreenIsPrepared() const override;
 	virtual void SetupLoadingScreenFromIni() override;
+	virtual void SetViewportDPIScale(float InViewportDPIScale) override;
 	
+	bool IsInitialized() const override { return bInitialized; }
+
 	/** Check if the initial movie(s) is still playing */
 	virtual bool IsStartupMoviePlaying() const override { return IsMoviePlaying; };
 
 	virtual FOnPrepareLoadingScreen& OnPrepareLoadingScreen() override { return OnPrepareLoadingScreenDelegate; }
 	virtual FOnMoviePlaybackStarted& OnMoviePlaybackStarted() override { return OnMoviePlaybackStartedDelegate; }
+	virtual FOnMoviePlaybackTick& OnMoviePlaybackTick() override { return OnMoviePlaybackTickDelegate; }
 	virtual FOnMoviePlaybackFinished& OnMoviePlaybackFinished() override { return OnMoviePlaybackFinishedDelegate; }
 	virtual FOnMovieClipFinished& OnMovieClipFinished() override { return OnMovieClipFinishedDelegate; }
+	
+	/** IMoviePlayerProxyServer interface. */
+	virtual void BlockingStarted() override;
+	virtual void BlockingTick() override;
+	virtual void BlockingFinished() override;
+	virtual void SetIsSlateThreadAllowed(bool bInIsSlateThreadAllowed) override;
 
 	/** FTickableObjectRenderThread interface */
 	virtual void Tick( float DeltaTime ) override;
@@ -107,6 +127,8 @@ public:
 	virtual void ForceCompletion() override;
 	virtual void Suspend() override;
 	virtual void Resume() override;
+
+	virtual void SetIsPlayOnBlockingEnabled(bool bIsEnabled) override;
 
 	float GetViewportDPIScale() const;
 
@@ -132,10 +154,10 @@ private:
 	
 	/** Called via a delegate in the engine when maps start to load */
 	void OnPreLoadMap(const FString& LevelName);
-	
+
 	/** Called via a delegate in the engine when maps finish loading */
 	void OnPostLoadMap(UWorld* LoadedWorld);
-	
+
 	/** Check if the device can render on a parallel thread on the initial loading*/
 	bool CanPlayMovie() const;
 private:
@@ -184,6 +206,9 @@ private:
 	
 	FOnMoviePlaybackStarted OnMoviePlaybackStartedDelegate;
 
+	/** Called periodically when the game thread is blocked and a movie is playing. */
+	FOnMoviePlaybackTick OnMoviePlaybackTickDelegate;
+
 	FOnMoviePlaybackFinished OnMoviePlaybackFinishedDelegate;
 
 	FOnMovieClipFinished OnMovieClipFinishedDelegate;
@@ -194,6 +219,11 @@ private:
 	/** True if the movie player has been initialized */
 	bool bInitialized;
 
+	/** If true then play movie when blocking starts, if false then play movie on loadmap. */
+	bool bIsPlayOnBlockingEnabled;
+	/** If true then we can use the Slate thread. */
+	bool bIsSlateThreadAllowed;
+
 	/** Critical section to allow the slate loading thread and the render thread to safely utilize the synchronization mechanism for ticking Slate. */
 	FCriticalSection SyncMechanismCriticalSection;
 
@@ -202,6 +232,16 @@ private:
 
 	/** DPIScaler parented to the UserWidgetHolder to ensure correct scaling */
 	TSharedPtr<class SDPIScaler> UserWidgetDPIScaler;
+
+	/** Scale used by UserWidgetDPIScaler. */
+	float ViewportDPIScale;
+
+	/** Counts blocking starts - blocking finishes. */
+	int32 BlockingRefCount;
+	/** Last time we were able to tick during blocking. */
+	double LastBlockingTickTime;
+	/** Handle to our async loading update function. */
+	FDelegateHandle OnAsyncLoadingFlushUpdateDelegateHandle;
 
 private:
 	/** Singleton handle */

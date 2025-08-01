@@ -6,6 +6,8 @@ public class AppFramework : ModuleRules
 {
 	public AppFramework(ReadOnlyTargetRules Target) : base(Target)
 	{
+		NumIncludedBytesPerUnityCPPOverride = 196608; // best unity size found from using UBT ProfileUnitySizes mode
+
 		PublicDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
@@ -19,18 +21,6 @@ public class AppFramework : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
 				"InputCore",
-			}
-		);
-
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				"Runtime/AppFramework/Private",
-                "Runtime/AppFramework/Private/Framework",
-                "Runtime/AppFramework/Private/Framework/Testing",
-				"Runtime/AppFramework/Private/Widgets",
-                "Runtime/AppFramework/Private/Widgets/Colors",
-                "Runtime/AppFramework/Private/Widgets/Testing",
-                "Runtime/AppFramework/Private/Widgets/Workflow",
 			}
 		);
 

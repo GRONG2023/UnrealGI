@@ -14,12 +14,15 @@
 #include "HAL/LowLevelMemTracker.h"
 #include "ContentStreaming.h"
 
-// 186ms of 44.1KHz data
-// 372ms of 22KHz data
-#define MONO_PCM_BUFFER_SAMPLES		8192
-#define MONO_PCM_BUFFER_SIZE		( MONO_PCM_BUFFER_SAMPLES * sizeof( int16 ) )
+// 100ms of 48KHz data
+// 108ms of 44.1KHz data
+// 218ms of 22KHz data
+constexpr int32 MONO_PCM_BUFFER_SAMPLES = 4800;
+constexpr uint32 MONO_PCM_SAMPLE_SIZE = sizeof(int16);
+constexpr uint32 MONO_PCM_BUFFER_SIZE = MONO_PCM_BUFFER_SAMPLES * MONO_PCM_SAMPLE_SIZE;
 
 struct FSoundQualityInfo;
+class FStreamedAudioChunkSeekTable;
 
 /**
  * Interface class to decompress various types of audio data
@@ -43,7 +46,7 @@ public:
 	* @param	InSrcBufferDataSize	Size of compressed data
 	* @param	QualityInfo			Quality Info (to be filled out). This can be null in the case of most implementations of FSoundBuffer::ReadCompressedInfo
 	*/
-	ENGINE_API virtual bool ReadCompressedInfo(const uint8* InSrcBufferData, uint32 InSrcBufferDataSize, struct FSoundQualityInfo* QualityInfo) = 0;
+	virtual bool ReadCompressedInfo(const uint8* InSrcBufferData, uint32 InSrcBufferDataSize, struct FSoundQualityInfo* QualityInfo) = 0;
 
 	/**
 	* Decompresses data to raw PCM data.
@@ -54,7 +57,7 @@ public:
 	*
 	* @return	bool		true if the end of the data was reached (for both single shot and looping sounds)
 	*/
-	ENGINE_API virtual bool ReadCompressedData(uint8* Destination, bool bLooping, uint32 BufferSize) = 0;
+	virtual bool ReadCompressedData(uint8* Destination, bool bLooping, uint32 BufferSize) = 0;
 
 	/**
 	 * Seeks to time (Some formats might not be seekable)
@@ -62,16 +65,21 @@ public:
 	virtual void SeekToTime(const float SeekTime) = 0;
 
 	/**
+	* Seeks to specific frame in the audio (Some formats might not be seekable)
+	*/
+	virtual void SeekToFrame(const uint32 Frame) = 0;
+
+	/**
 	* Decompress an entire data file to a TArray
 	*/
-	ENGINE_API virtual void ExpandFile(uint8* DstBuffer, struct FSoundQualityInfo* QualityInfo) = 0;
+	virtual void ExpandFile(uint8* DstBuffer, struct FSoundQualityInfo* QualityInfo) = 0;
 
 	/**
 	* Sets decode to half-rate
 	*
 	* @param	HalfRate	Whether Half rate is enabled
 	*/
-	ENGINE_API virtual void EnableHalfRate(bool HalfRate) = 0;
+	virtual void EnableHalfRate(bool HalfRate) = 0;
 
 	/**
 	 * Gets the size of the source buffer originally passed to the info class (bytes)
@@ -88,6 +96,12 @@ public:
 	* Gets the preferred size for a streaming buffer for this decompression scheme
 	*/
 	virtual int GetStreamBufferSize() const = 0;
+
+	/**
+	* Returns whether this instance can be cast to a IStreamedCompressedInfo. Surprisingly
+	* SupportsStreaming doesn't work for this.
+	*/
+	virtual bool IsStreamedCompressedInfo() const { return false; }
 
 	////////////////////////////////////////////////////////////////
 	// Following functions are optional if streaming is supported //
@@ -117,21 +131,17 @@ public:
 	* @param	Wave			Wave that will be read from to retrieve necessary chunk
 	* @param	QualityInfo		Quality Info (to be filled out)
 	*/
-	bool StreamCompressedInfo(USoundWave* Wave, struct FSoundQualityInfo* QualityInfo)
-	{
-		StreamingSoundWave = Wave;
-
-		return StreamCompressedInfoInternal(Wave, QualityInfo);
-	}
+	ENGINE_API bool StreamCompressedInfo(USoundWave* Wave, struct FSoundQualityInfo* QualityInfo);
+	ENGINE_API bool StreamCompressedInfo(const FSoundWaveProxyPtr& Wave, struct FSoundQualityInfo* QualityInfo);
 
 	/**
 	*  Returns true if a non-recoverable error has occurred.
 	*/
-	virtual bool HasError() const { return false; }
+	ENGINE_API virtual bool HasError() const;
 
 protected:
 	/** Internal override implemented by subclasses. */
-	virtual bool StreamCompressedInfoInternal(USoundWave* Wave, struct FSoundQualityInfo* QualityInfo) = 0;
+	virtual bool StreamCompressedInfoInternal(const FSoundWaveProxyPtr& InWaveProxy, struct FSoundQualityInfo* QualityInfo) = 0;
 
 public:
 
@@ -139,12 +149,12 @@ public:
 	* Decompresses streamed data to raw PCM data.
 	*
 	* @param	Destination	where to place the decompressed sound
-	* @param	bLooping	whether to loop the sound by seeking to the start, or pad the buffer with zeroes
+	* @param	bLooping	whether to loop the sound by seeking to the start, or pad the buffer with zeros
 	* @param	BufferSize	number of bytes of PCM data to create
 	*
 	* @return	bool		true if the end of the data was reached (for both single shot and looping sounds)
 	*/
-	virtual bool StreamCompressedData(uint8* Destination, bool bLooping, uint32 BufferSize) {return false;}
+	virtual bool StreamCompressedData(uint8* Destination, bool bLooping, uint32 BufferSize, int32& OutNumBytesStreamed) { OutNumBytesStreamed = -1; return false; }
 
 	/**
 	 * Gets the chunk index that was last read from (for Streaming Manager requests)
@@ -157,10 +167,11 @@ public:
 	virtual int32 GetCurrentChunkOffset() const {return -1;}
 
 	/** Return the streaming sound wave used by this decoder. Returns nullptr if there is not a streaming sound wave. */
-	virtual USoundWave* GetStreamingSoundWave() { return StreamingSoundWave; }
+	virtual const FSoundWaveProxyPtr& GetStreamingSoundWave() { return StreamingSoundWave; }
 
 protected:
-	USoundWave* StreamingSoundWave;
+	mutable bool bHasError = false;
+	FSoundWaveProxyPtr StreamingSoundWave;
 };
 
 /** Struct used to store the results of a decode operation. **/
@@ -183,28 +194,30 @@ struct FDecodeResult
 /** 
  * Default implementation of a streamed compressed audio format.
  * Can be subclassed to support streaming of a specific asset format. Handles all 
- * the platform independent aspects of file format streaming for you (dealing with UE4 streamed assets)
+ * the platform independent aspects of file format streaming for you (dealing with UE streamed assets)
  */
 class IStreamedCompressedInfo : public ICompressedAudioInfo
 {
 public:
-	IStreamedCompressedInfo();
+	ENGINE_API IStreamedCompressedInfo();
 	virtual ~IStreamedCompressedInfo() {}
 
 	//~ Begin ICompressedInfo Interface
 	ENGINE_API virtual bool ReadCompressedInfo(const uint8* InSrcBufferData, uint32 InSrcBufferDataSize, FSoundQualityInfo* QualityInfo) override;
 	ENGINE_API virtual bool ReadCompressedData(uint8* Destination, bool bLooping, uint32 BufferSize) override;
-	ENGINE_API virtual void SeekToTime(const float SeekTime) override {};
+	ENGINE_API virtual void SeekToTime(const float SeekTime) override;
+	ENGINE_API virtual void SeekToFrame(const uint32 SeekFrame) override;
 	ENGINE_API virtual void ExpandFile(uint8* DstBuffer, struct FSoundQualityInfo* QualityInfo) override;
-	ENGINE_API virtual void EnableHalfRate(bool HalfRate) override {};
+	virtual void EnableHalfRate(bool HalfRate) override {};
 	virtual uint32 GetSourceBufferSize() const override { return SrcBufferDataSize; }
 	virtual bool UsesVorbisChannelOrdering() const override { return false; }
 	virtual int GetStreamBufferSize() const override { return  MONO_PCM_BUFFER_SIZE; }
 	virtual bool SupportsStreaming() const override { return true; }
-	virtual bool StreamCompressedInfoInternal(USoundWave* Wave, FSoundQualityInfo* QualityInfo) override;
-	virtual bool StreamCompressedData(uint8* Destination, bool bLooping, uint32 BufferSize) override;
+	ENGINE_API virtual bool StreamCompressedInfoInternal(const FSoundWaveProxyPtr& InWaveProxy, FSoundQualityInfo* QualityInfo) override;
+	ENGINE_API virtual bool StreamCompressedData(uint8* Destination, bool bLooping, uint32 BufferSize, int32& OutNumBytesStreamed) override;
 	virtual int32 GetCurrentChunkIndex() const override { return CurrentChunkIndex; }
 	virtual int32 GetCurrentChunkOffset() const override { return SrcBufferOffset; }
+	virtual bool IsStreamedCompressedInfo() const override { return true; }
 	//~ End ICompressedInfo Interface
 
 	/** Parse the header information from the input source buffer data. This is dependent on compression format. */
@@ -225,16 +238,18 @@ public:
 	/** The size of the decode PCM buffer size. */
 	virtual uint32 GetMaxFrameSizeSamples() const = 0;
 
+	int32 GetStreamSeekBlockIndex() const { return StreamSeekBlockIndex; }
+	int32 GetStreamSeekBlockOffset() const { return StreamSeekBlockOffset; }
 protected:
 
 	/** Reads from the internal source audio buffer stream of the given data size. */
-	uint32	Read(void *Outbuffer, uint32 DataSize);
+	ENGINE_API uint32	Read(void *Outbuffer, uint32 DataSize);
 
 	/**
 	* Decompresses a frame of data to PCM buffer
 	*
 	* @param FrameSize Size of the frame in bytes
-	* @return The amount of samples that were decompressed (< 0 indicates error)
+	* @return The number of audio frames that were decompressed (< 0 indicates error)
 	*/
 	int32 DecompressToPCMBuffer(uint16 FrameSize);
 
@@ -271,7 +286,14 @@ protected:
 	 * @param[out] OutChunkSize the size of the chunk.
 	 * @return a pointer to the chunk if it's loaded, nullptr otherwise.
 	 */
-	const uint8* GetLoadedChunk(USoundWave* InSoundWave, uint32 ChunkIndex, uint32& OutChunkSize);
+	ENGINE_API const uint8* GetLoadedChunk(const FSoundWaveProxyPtr& InSoundWave, uint32 ChunkIndex, uint32& OutChunkSize);
+
+	/**
+	 * Gets the current chunks seektable instance (or creates one)
+	 * @return the currently loaded chunk seektable
+	 */
+	const FStreamedAudioChunkSeekTable& GetCurrentSeekTable() const;
+	FStreamedAudioChunkSeekTable& GetCurrentSeekTable();
 
 	/** bool set before ParseHeader. Whether we are streaming a file or not. */
 	bool bIsStreaming;
@@ -285,8 +307,6 @@ protected:
 	uint32 AudioDataOffset;
 	/** The chunk index where the actual audio data starts. */
 	uint32 AudioDataChunkIndex;
-	/** Sample rate of the source file */
-	uint16 SampleRate;
 	/** The total sample count of the source file. */
 	uint32 TrueSampleCount;
 	/** How many samples we've currently read in the source file. */
@@ -308,13 +328,72 @@ protected:
 	/** The current chunk index in the streamed chunks. */
 	int32 CurrentChunkIndex;
 	/** Whether or not to print the chunk fail message. */
-	bool bPrintChunkFailMessage;
+	int32 PrintChunkFailMessageCount = 0;
+	/** A counter of when we started the last request (for gauging latency) */
+	uint64 StartTimeInCycles = 0;
 	/** Number of bytes of padding used, overridden in some implementations. Defaults to 0. */
 	uint32 SrcBufferPadding;
 	/** Chunk Handle to ensure that this chunk of streamed audio is not deleted while we are using it. */
-	FAudioChunkHandle CurCompressedChunkHandle;
+	FAudioChunkHandle CurCompressedChunkHandle;		
+	/** If there's a chunked seek-table present, this contains the current chunks portion. */
+	TPimplPtr<FStreamedAudioChunkSeekTable> CurrentChunkSeekTable;
+	/** 
+		When a streaming seek request comes down, this is the block we are going to. INDEX_NONE means no seek pending.
+		When using the legacy streaming system this is read on a thread other than the decompression thread
+		to prime the correct chunk, so it needs an atomic. It's only ever _set_ on one thread, and the read
+		has no timing restrictions, so no lock is necessary. Also the legacy streamer isn't used anymore anyway.
+
+		This and StreamSeekBlockOffset are expected to be set by the codec's SeekToTime() function.
+	*/
+	std::atomic<int32> StreamSeekBlockIndex;
+	/** When a streaming seek request comes down, this is the offset in to the block we want to start decoding from. */
+	int32 StreamSeekBlockOffset;
+
+	/** If using the Chunked seek-tables, we request the seek in samples so we can resolve after the chunk table loads. */
+	uint32 StreamSeekToAudioFrames = INDEX_NONE;	
 };
 
+struct IAudioInfoFactory 
+{	
+	virtual ~IAudioInfoFactory() = default;
+	virtual ICompressedAudioInfo* Create() = 0;	
+};
+struct IAudioInfoFactoryRegistry
+{
+	static ENGINE_API IAudioInfoFactoryRegistry& Get();
+	virtual ~IAudioInfoFactoryRegistry() = default;
+	virtual void Register(IAudioInfoFactory*, FName) = 0;
+	virtual void Unregister(IAudioInfoFactory*, FName) = 0;
+	virtual IAudioInfoFactory* Find(FName InName) const = 0;
+	
+	// Convenience helper.
+	ICompressedAudioInfo* Create(FName InName)
+	{
+		if (IAudioInfoFactory* Factory = Find(InName))
+		{
+			return Factory->Create();
+		}
+		return nullptr;
+	}
+};
+
+class FSimpleAudioInfoFactory : public IAudioInfoFactory
+{
+public:
+	FSimpleAudioInfoFactory(TFunction<ICompressedAudioInfo*(void)> InLambda, FName InFormatName)
+	:  CreateLamda(InLambda), FormatName(InFormatName)
+	{
+		IAudioInfoFactoryRegistry::Get().Register(this, FormatName);
+	}
+	virtual ~FSimpleAudioInfoFactory() 
+	{
+		IAudioInfoFactoryRegistry::Get().Unregister(this, FormatName);
+	}
+	virtual ICompressedAudioInfo* Create() override { return CreateLamda(); }
+private:
+	TFunction<ICompressedAudioInfo* ()> CreateLamda;
+	FName FormatName;
+};
 
 /**
  * Asynchronous audio decompression
@@ -457,7 +536,7 @@ public:
 			RETURN_QUICK_DECLARE_CYCLE_STAT(FAsyncRealtimeAudioProceduralWorker, STATGROUP_ThreadPoolAsyncTasks);
 		}
 		else
-		{
+		{ //-V523
 			RETURN_QUICK_DECLARE_CYCLE_STAT(FAsyncRealtimeAudioDecompressWorker, STATGROUP_ThreadPoolAsyncTasks);
 		}
 	}

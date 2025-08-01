@@ -14,14 +14,16 @@
 #include "Widgets/Views/STableViewBase.h"
 #include "Widgets/Views/STableRow.h"
 #include "Widgets/Input/SComboBox.h"
-#include "Developer/AutomationWindow/Private/SAutomationGraphicalResultBox.h"
-#include "Developer/AutomationWindow/Private/SAutomationTestTreeView.h"
+#include "SAutomationGraphicalResultBox.h"
+#include "Widgets/Views/STreeView.h"
 
 #if WITH_EDITOR
-#include "IAssetRegistry.h"
+#include "AssetRegistry/IAssetRegistry.h"
 #endif
 
 class FAutomationFilter;
+class FAutomationGroupFilter;
+struct FAutomatedTestFilter;
 class FAutomationTestPresetManager;
 class FUICommandList;
 class SAutomationWindowCommandBar;
@@ -33,6 +35,9 @@ template< typename ItemType > class TTextFilter;
 /** Columns for the test tree view */
 namespace AutomationTestWindowConstants
 {
+	const FName Checked( TEXT("Checked") );
+	const FName Skipped( TEXT("Skipped") );
+	const FName SkippedOptions( TEXT("SkippedOptions") );
 	const FName Title( TEXT("Name") );
 	const FName SmokeTest( TEXT("SmokeTest") );
 	const FName RequiredDeviceCount( TEXT("RequiredDeviceCount") );
@@ -111,7 +116,7 @@ public:
 	static TArray<FString> SaveExpandedTestNames(TSet<TSharedPtr<IAutomationReport>> ExpandedItems);
 
 	// Expanded the given item if its name is in the array of strings given.
-	static void ExpandItemsInList(TSharedPtr<SAutomationTestTreeView<TSharedPtr<IAutomationReport>>> InTestTable, TSharedPtr<IAutomationReport> InReport, TArray<FString> ItemsToExpand);
+	static void ExpandItemsInList(TSharedPtr<STreeView<TSharedPtr<IAutomationReport>>> InTestTable, TSharedPtr<IAutomationReport> InReport, TArray<FString> ItemsToExpand);
 
 protected:
 
@@ -184,6 +189,14 @@ private:
 	TSharedRef< SWidget > MakeAutomationWindowToolBar( const TSharedRef<FUICommandList>& InCommandList );
 
 	/**
+	 * Static: Creates a filter toolbar widget for the automation window.
+	 *
+	 * @return The new widget.
+	 */
+	static TSharedRef< SWidget > MakeAutomationFilterToolBar(const TSharedRef<FUICommandList>& InCommandList, TSharedPtr<class SAutomationWindow> InLevelEditor);
+	TSharedRef< SWidget > MakeAutomationFilterToolBar(const TSharedRef<FUICommandList>& InCommandList);
+
+	/**
 	 * Static: Creates the test options menu widget.
 	 *
 	 * @return	The new widget.
@@ -200,6 +213,14 @@ private:
 	TSharedRef< SWidget > GenerateGroupOptionsMenuContent( );
 
 	/**
+	 * Static: Creates the Presets menu widget.
+	 *
+	 * @return The new widget.
+	 */
+	static TSharedRef< SWidget >GeneratePresetsMenuContent( TWeakPtr<class SAutomationWindow> InAutomationWindow );
+	TSharedRef< SWidget > GeneratePresetsMenuContent();
+
+	/**
 	* Static: Creates the test history options menu widget.
 	*
 	* @return The new widget.
@@ -208,18 +229,18 @@ private:
 	TSharedRef< SWidget > GenerateTestHistoryMenuContent();
 
 	/**
-	 * Creates a combo item for the preset list.
-	 *
-	 * @return New combo item widget.
-	 */
-	TSharedRef<SWidget> GeneratePresetComboItem(TSharedPtr<FAutomationTestPreset> InItem);
-
-	/**
 	 * Creates a combo item for the requested filter.
 	 *
 	 * @return New combo item widget.
 	 */
 	TSharedRef<SWidget> GenerateRequestedFilterComboItem(TSharedPtr<FString> InItem);
+
+	/**
+	 * Creates a combo item for a test group.
+	 *
+	 * @return New combo item widget.
+	 */
+	TSharedRef<SWidget> GenerateGroupComboItem(TSharedPtr<FString> InItem);
 		
 	/**
 	 * Populates OutSearchStrings with the strings that should be used in searching.
@@ -228,6 +249,12 @@ private:
 	 * @param OutSearchStrings An array of stings to use.
 	 */
 	void PopulateReportSearchStrings( const TSharedPtr< IAutomationReport >& Report, OUT TArray< FString >& OutSearchStrings ) const;
+
+	/** Callback for a test expansion changing */
+	void OnExpansionChanged(TSharedPtr<IAutomationReport> InItem, bool bExpanded);
+
+	/** Recursively expands subgroups as a reaction on expansion change (expands single-item subgroups without leafs recursively) */
+	void ExpandSingleItemSubgroups(TSharedPtr<IAutomationReport> InItem, bool bExpanded);
 
 	/** Gets children tests for a node in the hierarchy */
 	void OnGetChildren(TSharedPtr<IAutomationReport> InItem, TArray<TSharedPtr<IAutomationReport> >& OutItems);
@@ -283,10 +310,16 @@ private:
 	
 	/** Returns if we're considering tests on content within the developer folders */
 	bool IsDeveloperDirectoryIncluded() const;
-	
+
 	/** Toggles the consideration of tests within developer folders */
 	void OnToggleDeveloperDirectoryIncluded();
-	
+
+	/** Returns if we're considering tests from exclude list only */
+	bool IsExcludedTestsFilterOn() const;
+
+	/** Toggles the consideration of tests from exclude list only */
+	void OnToggleExcludedTestsFilter();
+
 	/** Returns if we're filtering based on if the test is a "smoke" test */
 	bool IsSmokeTestFilterOn() const;
 	
@@ -305,18 +338,33 @@ private:
 	/** Toggles filtering of tests based on error condition */
 	void OnToggleErrorFilter();
 	
-	/** Returns if analytics should be sent to the back end*/
+	/** Returns if analytics should be sent to the back end */
 	ECheckBoxState IsSendAnalyticsCheckBoxChecked() const;
 
-	/** Toggles if we are sending analytics results from the tests*/
+	/** Toggles if we are sending analytics results from the tests */
 	void HandleSendAnalyticsBoxCheckStateChanged(ECheckBoxState CheckBoxState);
+
+	/** Returns if PIE should be kept open when test pass end */
+	ECheckBoxState KeepPIEOpenCheckBoxChecked() const;
+
+	/** Toggles if PIE should be kept open when test pass end */
+	void HandleKeepPIEOpenBoxCheckStateChanged(ECheckBoxState CheckBoxState);
+
+	/** Returns if we should automatically expand single-item test subgroups */
+	ECheckBoxState AutoExpandSingleItemSubgroupsCheckBoxChecked() const;
+
+	/** Toggles if automatic expansion of single-item subgroups is enabled */
+	void HandleAutoExpandSingleItemSubgroupsCheckStateChanged(ECheckBoxState CheckBoxState);
 
 	/** Returns if a device group is enabled */
 	ECheckBoxState IsDeviceGroupCheckBoxIsChecked(const int32 DeviceGroupFlag) const;
 	
 	/** Toggles a device group flag */
 	void HandleDeviceGroupCheckStateChanged(ECheckBoxState CheckBoxState, const int32 DeviceGroupFlag);
-	
+
+	/** Sitches presets in the Presets Menu of Preset ComboButton */
+	void HandlePresetCheckStateChanged(ECheckBoxState CheckBoxState, const int32 EntryIndex, TSharedPtr<TArray<TSharedPtr<SCheckBox>>> CheckBoxes);
+
 	/** Sets the number of times to repeat the tests */
 	void OnChangeRepeatCount(int32 InNewValue);
 	
@@ -432,23 +480,20 @@ private:
 	bool ExpandToTest(TSharedPtr<IAutomationReport> InRoot, TSharedPtr<IAutomationReport> InReport);
 #endif
 
-	/** Handles the new preset button being clicked. */
-	FReply HandleNewPresetClicked();
-
 	/** Handles the save preset button being clicked. */
 	FReply HandleSavePresetClicked();
 
-	/** Handles the remove preset button being clicked. */
-	FReply HandleRemovePresetClicked();
+	/** Handles the create new preset menu item being clicked. */
+	void OnNewPresetClicked();
 
-	/** Should the add preset button be enabled. */
-	bool IsAddButtonEnabled() const;
+	/** Handles the remove preset menu item being clicked. */
+	void OnRemovePresetClicked();
+
+	/** Handles the rename preset menu item being clicked. */
+	void OnRenamePresetClicked();
 
 	/** Should the save preset button be enabled. */
 	bool IsSaveButtonEnabled() const;
-
-	/** Should the remove preset button be enabled. */
-	bool IsRemoveButtonEnabled() const;
 
 	/** Handles if the preset combo box should be visible. */
 	EVisibility HandlePresetComboVisibility( ) const;
@@ -456,13 +501,16 @@ private:
 	/** Handles if the add preset text box should be visible. */
 	EVisibility HandlePresetTextVisibility( ) const;
 
+	/** Handles if the groups combo box should be visible. */
+	EVisibility HandleGroupsVisibility() const;
+
 	/** Called when the user commits the text in the add preset text box. */
 	void HandlePresetTextCommited( const FText& CommittedText, ETextCommit::Type CommitType );
 
-	/** Called when the user selects a new preset from the preset combo box. */
-	void HandlePresetChanged( TSharedPtr<FAutomationTestPreset> Item, ESelectInfo::Type SelectInfo );
 	/** Called when the user changes the requested test filter */
 	void HandleRequesteFilterChanged(TSharedPtr<FString> Item, ESelectInfo::Type SelectInfo);
+	/** Called when the user changes the test group */
+	void HandleGroupChanged(TSharedPtr<FString> Item, ESelectInfo::Type SelectInfo);
 
 	/** Expands the test tree to show all enabled tests. */
 	void ExpandEnabledTests( TSharedPtr< IAutomationReport > InReport );
@@ -471,6 +519,8 @@ private:
 	FText GetPresetComboText() const;
 	/** Gets the text to display for the requested filter combo box. */
 	FText GetRequestedFilterComboText() const;
+	/** Gets the combo box text to display for the selected group. */
+	FText GetGroupComboText() const;
 
 	/**
 	 * Handle the copy button clicked in the command bar.
@@ -520,7 +570,7 @@ private:
 	}
 
 #if WITH_EDITOR
-	void OnAssetRegistryFileLoadProgress(const IAssetRegistry::FFileLoadProgressUpdateData& ProgressUpdateData);
+	void OnAssetRegistryFilesLoaded();
 #endif
 
 private:
@@ -540,11 +590,8 @@ private:
 	/** Must maintain a widget size so the header and row icons can line up. */
 	const float ColumnWidth;
 
-	/** Global checkbox to enable/disable all visible tests. */
-	TSharedPtr< SCheckBox > HeaderCheckbox;
-
 	/** The list of all valid tests. */
-	TSharedPtr< SAutomationTestTreeView< TSharedPtr< IAutomationReport > > > TestTable;
+	TSharedPtr< STreeView< TSharedPtr< IAutomationReport > > > TestTable;
 	
 	/** Widget for header platform icons. */
 	TSharedPtr< SHorizontalBox > PlatformsHBox;
@@ -570,6 +617,9 @@ private:
 	/** The automation general filter - for smoke tests / warnings and Errors. */
 	TSharedPtr< FAutomationFilter > AutomationGeneralFilter;
 
+	/** The automation group filter - filters tests based on selected group filter. */
+	TSharedPtr< FAutomationGroupFilter > AutomationGroupFilter;
+
 	/** The automation filter collection - contains the automation filters. */
 	TSharedPtr< AutomationFilterCollection > AutomationFilters;
 
@@ -591,8 +641,17 @@ private:
 	/** Which type of window style to use for the test background. */
 	EAutomationTestBackgroundStyle::Type TestBackgroundType;
 
-	/** True if we are creating a new preset (The add preset text box is visible). */
+	/** True if we are creating a new preset (The add/rename preset text box is visible). */
 	bool bAddingTestPreset;
+
+	/** True if we are renaming a new preset (The add/rename preset text box is visible). */
+	bool bRenamingTestPreset;
+
+	/** Flag to enable display of the text labels in the toolbar. */
+	bool bIsLabelVisibilityEnabled;
+
+	/** Flag to enable auto expand of subgroups that have single-item groups without children. */
+	bool bAutoExpandSingleItemSubgroups;
 
 	/** Holds a pointer to the preset manager. */
 	TSharedPtr<FAutomationTestPresetManager> TestPresetManager;
@@ -600,18 +659,22 @@ private:
 	/** Holds the currently selected preset. */
 	TSharedPtr<FAutomationTestPreset> SelectedPreset;
 
-	/** Holds a pointer to the preset combo box widget. */
-	TSharedPtr< SComboBox< TSharedPtr<FAutomationTestPreset> > > PresetComboBox;
+	/** Holds a pointer to the preset combo button widget. */
+	TSharedPtr< STextBlock > PresetComboButtonText;
 
 	/** Holds a pointer to the preset combo box widget. */
 	TSharedPtr< SComboBox< TSharedPtr<FString> > >	RequestedFilterComboBox;
 	TArray< TSharedPtr< FString > >					RequestedFilterComboList;
 
+	/** Holds a pointer to the groups combo box widget. */
+	TSharedPtr< SComboBox< TSharedPtr<FString> > >	GroupComboBox;
+	TArray< TSharedPtr< FString > >					GroupComboList;
+
+	/** Map for fast access of test group filters by name. */
+	TMap< FString, TArray<FAutomatedTestFilter> > GroupFiltersMap;
+
 	/** Holds a pointer to the preset text box. */
 	TSharedPtr<SEditableTextBox> PresetTextBox;
-
-	/** Hold a pointer to the test tables header row. */
-	TSharedPtr<SHeaderRow> TestTableHeaderRow;
 
 	/** List of expanded test items to preserve during a refresh */
 	TArray<FString> SavedExpandedItems;

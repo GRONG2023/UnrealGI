@@ -22,8 +22,13 @@
 	Add FramePro.cpp to your project to allow FramePro to communicate with your application.
 */
 //------------------------------------------------------------------------
+#ifdef __UNREAL__
 #include "FramePro/FrameProUE4.h"
 #include "FramePro/FramePro.h"
+#else
+#include "FrameProUE4.h"
+#include "FramePro.h"
+#endif
 
 //------------------------------------------------------------------------
 //                         FRAMEPRO_PLATFORM_UE4
@@ -126,7 +131,7 @@
 		//------------------------------------------------------------------------
 		int64 Platform::GetTimerFrequency()
 		{
-			return (int64)(1.0 / FPlatformTime::GetSecondsPerCycle());
+			return (int64)(1.0 / FPlatformTime::GetSecondsPerCycle64());
 		}
 
 		//------------------------------------------------------------------------
@@ -144,25 +149,25 @@
 		//------------------------------------------------------------------------
 		Platform::Enum Platform::GetPlatformEnum()
 		{
-			#if defined(FRAMEPRO_UE4_PLATFORM) //@EPIC: allow external definition
-				return FRAMEPRO_UE4_PLATFORM;  //@EPIC end
+			//@EPIC: allow external definition + NDA platforms removed
+			#if defined(FRAMEPRO_UNREAL_PLATFORM)
+				return FRAMEPRO_UNREAL_PLATFORM;
+			//@EPIC end
 			#elif PLATFORM_WINDOWS
 				return Platform::Windows;
 			#elif PLATFORM_LINUX
 				return Platform::Linux;
-			#elif PLATFORM_PS4
-				return Platform::PS4;
+			#elif PLATFORM_UNIX
+				return Platform::Linux;
 			#elif PLATFORM_ANDROID
 				return Platform::Android;
 			#elif PLATFORM_MAC
 				return Platform::Mac;
 			#elif PLATFORM_IOS
 				return Platform::iOS;
-			#elif PLATFORM_SWITCH
-				return Platform::Switch;
 			#else
 				//@EPIC: begin - useful error
-				#error unknown platform or FRAMEPRO_UE4_PLATFORM not defined
+				#error unknown platform or FRAMEPRO_UNREAL_PLATFORM not defined
 				//@EPIC: end
 			#endif
 		}
@@ -170,13 +175,13 @@
 		//------------------------------------------------------------------------
 		void* Platform::CreateContextSwitchRecorder(Allocator* p_allocator)
 		{
-			return GenericPlatform::CreateContextSwitchRecorder(p_allocator);
+				return GenericPlatform::CreateContextSwitchRecorder(p_allocator);
 		}
 
 		//------------------------------------------------------------------------
 		void Platform::DestroyContextSwitchRecorder(void* p_context_switch_recorder, Allocator* p_allocator)
 		{
-			GenericPlatform::DestroyContextSwitchRecorder(p_context_switch_recorder, p_allocator);
+				GenericPlatform::DestroyContextSwitchRecorder(p_context_switch_recorder, p_allocator);
 		}
 
 		//------------------------------------------------------------------------
@@ -184,40 +189,38 @@
 			void* p_context_switch_recorder,
 			ContextSwitchCallbackFunction p_callback,
 			void* p_context,
-			DynamicString& error)
+			DynamicString& error,
+			Allocator* p_allocator)
 		{
-			return GenericPlatform::StartRecordingContextSitches(
-				p_context_switch_recorder,
-				p_callback,
-				p_context,
-				error);
+				FRAMEPRO_UNREFERENCED(p_allocator);
+
+				return GenericPlatform::StartRecordingContextSitches(
+					p_context_switch_recorder,
+					p_callback,
+					p_context,
+					error);
 		}
 
 		//------------------------------------------------------------------------
 		void Platform::StopRecordingContextSitches(void* p_context_switch_recorder)
 		{
-			GenericPlatform::StopRecordingContextSitches(p_context_switch_recorder);
+				GenericPlatform::StopRecordingContextSitches(p_context_switch_recorder);
 		}
 
 		//------------------------------------------------------------------------
 		void Platform::FlushContextSwitches(void* p_context_switch_recorder)
 		{
-			GenericPlatform::FlushContextSwitches(p_context_switch_recorder);
+				GenericPlatform::FlushContextSwitches(p_context_switch_recorder);
 		}
 
 		//------------------------------------------------------------------------
-		#if PLATFORM_PS4
-			namespace EnumModulesPS4 { void EnumerateModules(Array<ModulePacket*>& module_packets, Allocator* p_allocator); }
+		#if defined(FRAMEPRO_ENUM_MODULES_PLATFORM) && FRAMEPRO_ENUMERATE_ALL_MODULES
+			namespace FRAMEPRO_ENUM_MODULES_PLATFORM { void EnumerateModules(Array<ModulePacket*>& module_packets, Allocator* p_allocator); }
 		#endif
 
 		//------------------------------------------------------------------------
 		#if PLATFORM_LINUX
 			namespace EnumModulesLinux { void EnumerateModules(Array<ModulePacket*>& module_packets, Allocator* p_allocator); }
-		#endif
-
-		//------------------------------------------------------------------------
-		#if PLATFORM_SWITCH
-			namespace EnumModulesSwitch { void EnumerateModules(Array<ModulePacket*>& module_packets, Allocator* p_allocator); }
 		#endif
 
 		//------------------------------------------------------------------------
@@ -228,12 +231,13 @@
 					EnumModulesWindows::EnumerateModules(module_packets, p_allocator);
 				#elif PLATFORM_LINUX
 					EnumModulesLinux::EnumerateModules(module_packets, p_allocator);
-				#elif PLATFORM_PS4
-					EnumModulesPS4::EnumerateModules(module_packets, p_allocator);
-				#elif PLATFORM_SWITCH
-					EnumModulesSwitch::EnumerateModules(module_packets, p_allocator);
+				#elif defined(FRAMEPRO_ENUM_MODULES_PLATFORM)
+					FRAMEPRO_ENUM_MODULES_PLATFORM::EnumerateModules(module_packets, p_allocator);
 				#else
 					ModulePacket* p_module_packet = (ModulePacket*)p_allocator->Alloc(sizeof(ModulePacket));
+					if (!p_module_packet)
+						return;
+
 					memset(p_module_packet, 0, sizeof(ModulePacket));
 
 					p_module_packet->m_PacketType = PacketType::ModulePacket;
@@ -430,15 +434,15 @@
 			{
 				return false;
 			}
-			
+
 			FString ProcessName = FPaths::GetCleanFilename(ProcessNameOrPath);
-			const char* p_process_name = TCHAR_TO_ANSI(*ProcessName);
+			const auto p_process_name = StringCast<ANSICHAR>(*ProcessName);
 //@EPIC END
-			size_t length = strlen(p_process_name);
+			size_t length = strlen(p_process_name.Get());
 			size_t max_length = max_name_length - 1;
 
 			int copy_length = length < max_length ? length : max_length;
-			FCStringAnsi::Strncpy( p_name, p_process_name, copy_length);
+			FCStringAnsi::Strncpy(p_name, p_process_name.Get(), copy_length);
 
 			return true;
 		}
@@ -459,7 +463,8 @@
 				p_event = FPlatformProcess::GetSynchEventFromPool(!auto_reset);
 			}
 			else
-			{				
+			{
+				PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #if PLATFORM_WINDOWS
 				p_event = new FEventWin();
 				p_event->Create(!auto_reset);
@@ -470,6 +475,7 @@
 				checkf(false, TEXT("unsupported platform for -nothreading"));
 				return;
 #endif
+				PRAGMA_ENABLE_DEPRECATION_WARNINGS
 			}
 //@EPIC END
 			GetOSEvent(p_os_event_mem) = p_event;
@@ -511,7 +517,7 @@
 		int Platform::WaitEvent(void* p_os_event_mem, int timeout)
 		{
 			FEvent* p_event = GetOSEvent(p_os_event_mem);
-			return (timeout==-1) ? p_event->Wait() : p_event->Wait(timeout);
+			return (timeout==-1) ? p_event->Wait(MAX_uint32, !FramePro::IsConnected()) : p_event->Wait(timeout, !FramePro::IsConnected());
 		}
 
 		//------------------------------------------------------------------------
@@ -603,13 +609,13 @@
 				else
 				{
 #if PLATFORM_WINDOWS
-					CreateThread( NULL, 0, (LPTHREAD_START_ROUTINE)mp_ThreadMain, mp_Context, 0, NULL );
+					CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)mp_ThreadMain, mp_Context, 0, NULL);
 #elif PLATFORM_USE_PTHREADS
-					typedef void *(*PthreadEntryPoint)(void *arg);
+					typedef void* (*PthreadEntryPoint)(void* arg);
 					pthread_t thread_id;
-					pthread_create( &thread_id, nullptr, (PthreadEntryPoint)mp_ThreadMain, mp_Context );
+					pthread_create(&thread_id, nullptr, (PthreadEntryPoint)mp_ThreadMain, mp_Context);
 #else
-					checkf(false,TEXT("unsupported platform for -nothreading"));
+					checkf(false, TEXT("unsupported platform for -nothreading"));
 #endif
 				}
 //@EPIC END
@@ -639,7 +645,7 @@
 		}
 
 		//------------------------------------------------------------------------
-		void Platform::CreateThread(
+		bool Platform::CreateThread(
 			void* p_os_thread_mem,
 			int os_thread_mem_size,
 			ThreadMain p_thread_main,
@@ -649,6 +655,8 @@
 			FRAMEPRO_ASSERT(os_thread_mem_size >= sizeof(UE4Thread*));
 
 			GetOSThread(p_os_thread_mem) = new UE4Thread(p_thread_main, p_context);
+
+			return true;
 		}
 
 		//------------------------------------------------------------------------
@@ -696,10 +704,10 @@
 		void Platform::GetRecordingFolder(char* p_path, int max_path_length)
 		{
 			FString path = FPaths::ProfilingDir() + TEXT("FramePro/");
-			char* p_ansi_path = TCHAR_TO_ANSI(*path);
-			int length = strlen(p_ansi_path) + 1;
+			const auto p_ansi_path = StringCast<ANSICHAR>(*path);
+			int length = strlen(p_ansi_path.Get()) + 1;
 			FRAMEPRO_ASSERT(length <= max_path_length);
-			memcpy(p_path, p_ansi_path, length);
+			memcpy(p_path, p_ansi_path.Get(), length);
 		}
 
 		//------------------------------------------------------------------------

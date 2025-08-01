@@ -1,9 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #include "Animation/AnimNotifies/AnimNotifyState_DisableRootMotion.h"
 #include "Animation/AnimNotifies/AnimNotify.h"
-#include "Animation/AnimSequenceBase.h"
 #include "Animation/AnimMontage.h"
 #include "Animation/AnimInstance.h"
+#include "Components/SkeletalMeshComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNotifyState_DisableRootMotion)
 
 UAnimNotifyState_DisableRootMotion::UAnimNotifyState_DisableRootMotion(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)

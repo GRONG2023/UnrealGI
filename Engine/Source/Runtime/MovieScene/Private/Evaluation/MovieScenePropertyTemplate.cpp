@@ -2,6 +2,8 @@
 
 #include "Evaluation/MovieScenePropertyTemplate.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieScenePropertyTemplate)
+
 static TMovieSceneAnimTypeIDContainer<FString> PropertyTypeIDs;
 
 // Default property ID to our own type - this implies an empty property
@@ -12,8 +14,8 @@ PropertyTemplate::FSectionData::FSectionData()
 
 void PropertyTemplate::FSectionData::Initialize(FName InPropertyName, FString InPropertyPath)
 {
-	PropertyBindings = MakeShareable(new FTrackInstancePropertyBindings(InPropertyName, MoveTemp(InPropertyPath)));
 	PropertyID = PropertyTypeIDs.GetAnimTypeID(InPropertyPath);
+	PropertyBindings = MakeShareable(new FTrackInstancePropertyBindings(InPropertyName, MoveTemp(InPropertyPath)));
 }
 
 FMovieScenePropertySectionTemplate::FMovieScenePropertySectionTemplate(FName PropertyName, const FString& InPropertyPath)

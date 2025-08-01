@@ -8,19 +8,12 @@ namespace UnrealBuildTool.Rules
 		{
             PublicIncludePathModuleNames.Add("SignalProcessing");
 
-
-            PrivateIncludePaths.AddRange(
-				new string[]
-				{
-					"Runtime/AudioMixerCore/Private",
-				}
-			);
-
 			PrivateDependencyModuleNames.AddRange(
 				new string[]
                 {
                     "Core",
-					"SignalProcessing"
+					"SignalProcessing",
+					"TraceLog"
                 }
 			);
 		}

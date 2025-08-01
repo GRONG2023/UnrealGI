@@ -8,14 +8,15 @@ UFbxStaticMeshImportData::UFbxStaticMeshImportData(const FObjectInitializer& Obj
 {
 	StaticMeshLODGroup = NAME_None;
 	bRemoveDegenerates = true;
-	bBuildAdjacencyBuffer = true;
 	bBuildReversedIndexBuffer = true;
+	bBuildNanite = false;
 	bGenerateLightmapUVs = true;
 	bOneConvexHullPerUCX = true;
 	bAutoGenerateCollision = true;
 	bTransformVertexToAbsolute = true;
 	bBakePivotInVertex = false;
 	VertexOverrideColor = FColor(255, 255, 255, 255);
+	DistanceFieldResolutionScale = 1.0f;
 }
 
 UFbxStaticMeshImportData* UFbxStaticMeshImportData::GetImportDataForStaticMesh(UStaticMesh* StaticMesh, UFbxStaticMeshImportData* TemplateForCreation)

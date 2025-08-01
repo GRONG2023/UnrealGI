@@ -1,12 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Debug/DebugDrawService.h"
+#include "SceneView.h"
 #include "UObject/Package.h"
 #include "Engine/Canvas.h"
-#include "Engine/Engine.h"
-#include "IXRTrackingSystem.h"
 
-TArray<TArray<FDebugDrawDelegate> > UDebugDrawService::Delegates;
+#include UE_INLINE_GENERATED_CPP_BY_NAME(DebugDrawService)
+
+FCriticalSection UDebugDrawService::DelegatesLock;
+
+TArray<UDebugDrawService::FDebugDrawMulticastDelegate> UDebugDrawService::Delegates;
 FEngineShowFlags UDebugDrawService::ObservedFlags(ESFIM_Editor);
 
 UDebugDrawService::UDebugDrawService(const FObjectInitializer& ObjectInitializer)
@@ -17,40 +20,36 @@ UDebugDrawService::UDebugDrawService(const FObjectInitializer& ObjectInitializer
 
 FDelegateHandle UDebugDrawService::Register(const TCHAR* Name, const FDebugDrawDelegate& NewDelegate)
 {
-	check(IsInGameThread());
-
-	int32 Index = FEngineShowFlags::FindIndexByName(Name);
+	const int32 Index = FEngineShowFlags::FindIndexByName(Name);
 
 	FDelegateHandle Result;
 	if (Index != INDEX_NONE)
 	{
+		FScopeLock ScopeLock(&DelegatesLock);
 		if (Index >= Delegates.Num())
 		{
 			Delegates.AddZeroed(Index - Delegates.Num() + 1);
 		}
-		Delegates[Index].Add(NewDelegate);
-		Result = Delegates[Index].Last().GetHandle();
+		Result = Delegates[Index].Add(NewDelegate);
 		ObservedFlags.SetSingleFlag(Index, true);
 	}
 	return Result;
 }
 
-void UDebugDrawService::Unregister(FDelegateHandle HandleToRemove)
+void UDebugDrawService::Unregister(const FDelegateHandle HandleToRemove)
 {
-	check(IsInGameThread());
-
-	TArray<FDebugDrawDelegate>* DelegatesArray = Delegates.GetData();
-	for (int32 Flag = 0; Flag < Delegates.Num(); ++Flag, ++DelegatesArray)
+	FScopeLock ScopeLock(&DelegatesLock);
+	for (int32 Flag = 0; Flag < Delegates.Num(); ++Flag)
 	{
-		check(DelegatesArray); //it shouldn't happen, but to be sure
-		const uint32 Index = DelegatesArray->IndexOfByPredicate([=](const FDebugDrawDelegate& Delegate){ return Delegate.GetHandle() == HandleToRemove; });
-		if (Index != INDEX_NONE)
+		FDebugDrawMulticastDelegate& MulticastDelegate = Delegates[Flag];
+		if (MulticastDelegate.Remove(HandleToRemove))
 		{
-			DelegatesArray->RemoveAtSwap(Index, 1, false);
-			if (DelegatesArray->Num() == 0)
+			if (MulticastDelegate.IsBound() == false)
 			{
 				ObservedFlags.SetSingleFlag(Flag, false);
 			}
+
+			break;
 		}
 	}	
 }
@@ -67,7 +66,7 @@ void UDebugDrawService::Draw(const FEngineShowFlags Flags, FViewport* Viewport, 
 		}
 	}
 
-	// Canvas must be initialize every draw because the FCanvas passed in is on the stack in some senarioes.
+	// Canvas must be initialized every draw because the FCanvas passed in is on the stack in some scenarios.
 	CanvasObject->Init(View->UnscaledViewRect.Width(), View->UnscaledViewRect.Height(), View, Canvas);
 
 	CanvasObject->Update();	
@@ -79,28 +78,20 @@ void UDebugDrawService::Draw(const FEngineShowFlags Flags, FViewport* Viewport, 
 
 void UDebugDrawService::Draw(const FEngineShowFlags Flags, UCanvas* Canvas)
 {
-	if (Canvas == NULL)
+	if (Canvas == nullptr || Canvas->Canvas == nullptr)
 	{
 		return;
 	}
-	
+
+	FScopeLock ScopeLock(&DelegatesLock);
 	for (int32 FlagIndex = 0; FlagIndex < Delegates.Num(); ++FlagIndex)
 	{
-		if (Flags.GetSingleFlag(FlagIndex) && ObservedFlags.GetSingleFlag(FlagIndex) && Delegates[FlagIndex].Num() > 0)
-		{
-			for (int32 i = Delegates[FlagIndex].Num() - 1; i >= 0; --i)
-			{
-				FDebugDrawDelegate& Delegate = Delegates[FlagIndex][i];
+		FDebugDrawMulticastDelegate& MulticastDelegate = Delegates[FlagIndex];
 
-				if (Delegate.IsBound())
-				{
-					Delegate.Execute(Canvas, NULL);
-				}
-				else
-				{
-					Delegates[FlagIndex].RemoveAtSwap(i, 1, /*bAllowShrinking=*/false);
-				}
-			}
+		if (Flags.GetSingleFlag(FlagIndex) && ObservedFlags.GetSingleFlag(FlagIndex))
+		{
+			MulticastDelegate.Broadcast(Canvas, nullptr);
 		}
 	}
 }
+

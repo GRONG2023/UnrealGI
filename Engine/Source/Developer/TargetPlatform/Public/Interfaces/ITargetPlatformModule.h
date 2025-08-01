@@ -4,24 +4,31 @@
 
 #include "CoreMinimal.h"
 #include "Modules/ModuleInterface.h"
+#include "Interfaces/ITargetPlatform.h"
+#include "Interfaces/ITargetPlatformSettings.h"
 
-class ITargetPlatform;
 
+class ITargetPlatformControlsModule;
+class ITargetPlatformSettingsModule;
+class ITargetPlatformControls;
 /**
  * Interface for target platform modules.
  */
 class ITargetPlatformModule
 	: public IModuleInterface
 {
+
 public:
 
-protected:
-	virtual ITargetPlatform* GetTargetPlatform()
+	/** Virtual destructor. */
+	virtual ~ITargetPlatformModule()
 	{
-		return nullptr;
-	};
-	
-public:
+		for (ITargetPlatform* TP : AllTargetPlatforms)
+		{
+			delete TP;
+		}
+		AllTargetPlatforms.Empty();
+	}
 
 	/**
 	 * Gets the module's target platforms. This should be overridden by each platform, but 
@@ -29,19 +36,30 @@ public:
 	 *
 	 * @return The target platform.
 	 */
-	virtual TArray<ITargetPlatform*> GetTargetPlatforms()
+	TArray<ITargetPlatform*> GetTargetPlatforms()
 	{
-		TArray<ITargetPlatform*> TargetPlatforms;
-		ITargetPlatform* TargetPlatform = GetTargetPlatform();
-		if (TargetPlatform != nullptr)
+		if (AllTargetPlatforms.Num() == 0)
 		{
-			TargetPlatforms.Add(TargetPlatform);
+			GetTargetPlatforms(AllTargetPlatforms, PlatformSettings, PlatformControls);
 		}
-		return TargetPlatforms;
+
+		return AllTargetPlatforms;
 	}
 
-public:
+	TArray<ITargetPlatformSettings*> PlatformSettings;
+	TArray<ITargetPlatformControls*> PlatformControls;
 
-	/** Virtual destructor. */
-	virtual ~ITargetPlatformModule() { }
+protected:
+
+	/**
+	 * This is where each platform module will fill out an array
+	*/
+	virtual void GetTargetPlatforms(TArray<ITargetPlatform*>& TargetPlatforms) = 0;
+	virtual void GetTargetPlatforms(TArray<ITargetPlatform*>& TargetPlatforms, TArray<ITargetPlatformSettings*> TargetPlatformSettings, TArray<ITargetPlatformControls*> TargetPlatformControls)
+	{
+		GetTargetPlatforms(TargetPlatforms);
+	}
+private:
+	/** Holds the target platforms. */
+	TArray<ITargetPlatform*> AllTargetPlatforms;
 };

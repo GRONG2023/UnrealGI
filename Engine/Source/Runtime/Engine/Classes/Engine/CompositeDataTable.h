@@ -56,6 +56,9 @@ class UCompositeDataTable
 	// Support for runtime modification of parent tables
 	// Be aware this can be slow and can cause hitches during gameplay
 	ENGINE_API void AppendParentTables(const TArray<UDataTable*>& NewTables);
+	ENGINE_API void RemoveParentTables(const TArray<UDataTable*>& TablesToRemove);
+	ENGINE_API void AddParentTable(const TObjectPtr<UDataTable>& TableToAdd);
+	ENGINE_API void RemoveParentTable(const TObjectPtr<UDataTable>& TableToRemove);
 
 protected:
 
@@ -74,11 +77,11 @@ protected:
 	// Parent tables
 	// Tables with higher indices override data in tables with lower indices
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Tables)
-	TArray<UDataTable*> ParentTables;
+	TArray<TObjectPtr<UDataTable>> ParentTables;
 
 	// temporary copy used to detect changes so we can update delegates correctly on removal
 	UPROPERTY(transient)
-	TArray<UDataTable*> OldParentTables;
+	TArray<TObjectPtr<UDataTable>> OldParentTables;
 
 #if WITH_EDITORONLY_DATA
 	TMap<FName, ERowState> RowSourceMap;

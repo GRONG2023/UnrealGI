@@ -10,6 +10,7 @@ struct PERSONA_API FPersonaTabs
 	// Selection Details
 	static const FName MorphTargetsID;
 	static const FName AnimCurveViewID;
+	static const FName AnimCurveMetadataEditorID;
 	static const FName SkeletonTreeViewID;
 	// Skeleton Pose manager
 	static const FName RetargetManagerID;
@@ -39,11 +40,14 @@ struct PERSONA_API FPersonaTabs
 	static const FName CurveNameManagerID;
 	static const FName BlendProfileManagerID;
 	static const FName AnimMontageSectionsID;
+	static const FName PoseWatchManagerID;
 
 	// Advanced Preview Scene
 	static const FName AdvancedPreviewSceneSettingsID;
 	static const FName DetailsID;
+	static const FName FindReplaceID;
 
+	static const FName ToolboxID;
 private:
 	FPersonaTabs() {}
 };

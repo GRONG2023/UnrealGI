@@ -2,34 +2,46 @@
 
 #pragma once
 
-#include "CoreTypes.h"
-#include "Misc/OutputDevice.h"
 #include "Containers/Array.h"
+#include "Containers/StringFwd.h"
 #include "Containers/UnrealString.h"
-#include "Templates/SharedPointer.h"
+#include "CoreGlobals.h"
+#include "CoreTypes.h"
+#include "HAL/CriticalSection.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformTime.h"
 #include "Internationalization/Text.h"
+#include "Misc/OutputDevice.h"
 #include "Misc/ScopeLock.h"
 #include "Misc/SlowTask.h"
 #include "Misc/SlowTaskStack.h"
+#include "Misc/Guid.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UniquePtr.h"
+#include "Templates/UnrealTemplate.h"
 
 class FContextSupplier;
 class SBuildProgressWidget;
+struct FSlowTask;
 
 /** A context for displaying modal warning messages. */
-class CORE_API FFeedbackContext
+class FFeedbackContext
 	: public FOutputDevice
 {
 public:
+	CORE_API virtual void Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const FName& Category) override;
+	CORE_API virtual void Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const FName& Category, double Time) override;
+	CORE_API virtual void SerializeRecord(const UE::FLogRecord& Record) override;
 
 	/** Ask the user a binary question, returning their answer */
-	virtual bool YesNof( const FText& Question ) { return false; }
+	CORE_API virtual bool YesNof( const FText& Question );
 	
 	/**
 	 * Whether or not the user has canceled out of the progress dialog
 	 * (i.e. the ongoing slow task or the last one that ran).
 	 * The user cancel flag is reset when starting a new root slow task.
 	 */
-	virtual bool ReceivedUserCancel() { return false; };
+	virtual bool ReceivedUserCancel() { return false; }
 	
 	/** Public const access to the current state of the scope stack */
 	FORCEINLINE const FSlowTaskStack& GetScopeStack() const
@@ -37,12 +49,24 @@ public:
 		return ScopeStack;
 	}
 
+	DECLARE_EVENT_OneParam(FFeedbackContext, FOnStartSlowTask, const FText& TaskName );
+	FOnStartSlowTask& OnStartSlowTask() { return StartSlowTaskEvent; }
+
+	DECLARE_EVENT_TwoParams(FFeedbackContext, FOnFinalizeSlowTask, const FText& TaskName, double DurationInSeconds);
+	FOnFinalizeSlowTask& OnFinalizeSlowTask() { return FinalizeSlowTaskEvent; }
+
+	DECLARE_EVENT_TwoParams(FFeedbackContext, FOnStartSlowTaskWithGuid, FGuid Guid, const FText& TaskName);
+	FOnStartSlowTaskWithGuid& OnStartSlowTaskWithGuid() { return StartSlowTaskWithGuidEvent; }
+
+	DECLARE_EVENT_TwoParams(FFeedbackContext, FOnFinalizeSlowTaskWithGuid, FGuid Guid, double DurationInSeconds);
+	FOnFinalizeSlowTaskWithGuid& OnFinalizeSlowTaskWithGuid() { return FinalizeSlowTaskWithGuidEvent; }
+
 	/**** Legacy API - not deprecated as it's still in heavy use, but superceded by FScopedSlowTask ****/
-	void BeginSlowTask( const FText& Task, bool ShowProgressDialog, bool bShowCancelButton=false );
-	void UpdateProgress( int32 Numerator, int32 Denominator );
-	void StatusUpdate( int32 Numerator, int32 Denominator, const FText& StatusText );
-	void StatusForceUpdate( int32 Numerator, int32 Denominator, const FText& StatusText );
-	void EndSlowTask();
+	CORE_API void BeginSlowTask( const FText& Task, bool ShowProgressDialog, bool bShowCancelButton=false );
+	CORE_API void UpdateProgress( int32 Numerator, int32 Denominator );
+	CORE_API void StatusUpdate( int32 Numerator, int32 Denominator, const FText& StatusText );
+	CORE_API void StatusForceUpdate( int32 Numerator, int32 Denominator, const FText& StatusText );
+	CORE_API void EndSlowTask();
 	/**** end legacy API ****/
 
 protected:
@@ -52,7 +76,12 @@ protected:
 	 */
 	virtual void StartSlowTask( const FText& Task, bool bShowCancelButton=false )
 	{
+		TaskName = Task;
+		TaskGuid = FGuid::NewGuid();
+		TaskStartTime = FPlatformTime::Seconds();
 		GIsSlowTask = true;
+		StartSlowTaskEvent.Broadcast(TaskName);
+		StartSlowTaskWithGuidEvent.Broadcast(TaskGuid, TaskName);
 	}
 
 	/**
@@ -60,6 +89,9 @@ protected:
 	 */
 	virtual void FinalizeSlowTask( )
 	{
+		const double TaskDuration = FPlatformTime::Seconds() - TaskStartTime;
+		FinalizeSlowTaskEvent.Broadcast(TaskName, TaskDuration);
+		FinalizeSlowTaskWithGuidEvent.Broadcast(TaskGuid, TaskDuration);
 		GIsSlowTask = false;
 	}
 
@@ -71,21 +103,28 @@ protected:
 	virtual void ProgressReported( const float TotalProgressInterp, FText DisplayMessage ) {}
 
 	/** Called to check whether we are playing in editor when starting a slow task */
-	virtual bool IsPlayingInEditor() const;
+	CORE_API virtual bool IsPlayingInEditor() const;
+
+	CORE_API ELogVerbosity::Type ResolveVerbosity(ELogVerbosity::Type Verbosity) const;
+
+	CORE_API void FormatLine(FStringBuilderBase& Out, const TCHAR* V, ELogVerbosity::Type Verbosity, const FName& Category, double Time, ELogVerbosity::Type* OutVerbosity = nullptr) const;
+	CORE_API void FormatRecordLine(FStringBuilderBase& Out, const UE::FLogRecord& Record, ELogVerbosity::Type* OutVerbosity = nullptr) const;
 
 public:
-	virtual FContextSupplier* GetContext() const { return NULL; }
-	virtual void SetContext( FContextSupplier* InSupplier ) {}
+	virtual FContextSupplier* GetContext() const { return nullptr; }
+	virtual void SetContext(FContextSupplier* InContext) {}
 
 	/** Shows/Closes Special Build Progress dialogs */
 	virtual TWeakPtr<class SBuildProgressWidget> ShowBuildProgressWindow() {return TWeakPtr<class SBuildProgressWidget>();}
 	virtual void CloseBuildProgressWindow() {}
 
-	bool	TreatWarningsAsErrors;
+	/** Promote any logged warnings so that they act as errors */
+	bool TreatWarningsAsErrors = false;
+	/** Demote any logged errors so that they act as warnings; takes priority over TreatWarningsAsErrors */
+	bool TreatErrorsAsWarnings = false;
 
-	FFeedbackContext();
-
-	virtual ~FFeedbackContext();
+	CORE_API FFeedbackContext();
+	CORE_API virtual ~FFeedbackContext();
 
 	/** Gets warnings history */
 	void GetWarnings(TArray<FString>& OutWarnings) const
@@ -125,8 +164,11 @@ public:
 	}
 
 private:
-	FFeedbackContext(const FFeedbackContext&);
-	FFeedbackContext& operator=(const FFeedbackContext&);
+	CORE_API void AddToHistory(const TCHAR* V, ELogVerbosity::Type Verbosity, const FName& Category, double Time);
+	CORE_API void AddRecordToHistory(const UE::FLogRecord& Record);
+
+	CORE_API FFeedbackContext(const FFeedbackContext&);
+	CORE_API FFeedbackContext& operator=(const FFeedbackContext&);
 
 	/** Warnings history */
 	TArray<FString> Warnings;
@@ -134,6 +176,17 @@ private:
 	TArray<FString> Errors;
 	/** Guard for the errors and warnings history */
 	mutable FCriticalSection WarningsAndErrorsCritical;
+
+	/** The name of any task we are running */
+	FText TaskName;
+
+	double TaskStartTime;
+	FOnStartSlowTask StartSlowTaskEvent;
+	FOnFinalizeSlowTask FinalizeSlowTaskEvent;
+	
+	FGuid TaskGuid;
+	FOnStartSlowTaskWithGuid StartSlowTaskWithGuidEvent;
+	FOnFinalizeSlowTaskWithGuid FinalizeSlowTaskWithGuidEvent;
 
 protected:
 	
@@ -160,10 +213,10 @@ protected:
 	TArray<TUniquePtr<FSlowTask>> LegacyAPIScopes;
 
 	/** Ask that the UI be updated as a result of the scope stack changing */
-	void RequestUpdateUI(bool bForceUpdate = false);
+	CORE_API void RequestUpdateUI(bool bForceUpdate = false);
 
 	/** Update the UI as a result of the scope stack changing */
-	void UpdateUI();
+	CORE_API void UpdateUI();
 
 	/**
 	 * Adds a new warning message to warnings history.
@@ -174,6 +227,11 @@ protected:
 		FScopeLock WarningsAndErrorsLock(&WarningsAndErrorsCritical);
 		Warnings.Add(InWarning);
 	}
+	void AddWarning(FString&& InWarning)
+	{
+		FScopeLock WarningsAndErrorsLock(&WarningsAndErrorsCritical);
+		Warnings.Add(MoveTemp(InWarning));
+	}
 
 	/**
 	* Adds a new error message to errors history.
@@ -183,5 +241,10 @@ protected:
 	{
 		FScopeLock WarningsAndErrorsLock(&WarningsAndErrorsCritical);
 		Errors.Add(InError);
+	}
+	void AddError(FString&& InError)
+	{
+		FScopeLock WarningsAndErrorsLock(&WarningsAndErrorsCritical);
+		Errors.Add(MoveTemp(InError));
 	}
 };

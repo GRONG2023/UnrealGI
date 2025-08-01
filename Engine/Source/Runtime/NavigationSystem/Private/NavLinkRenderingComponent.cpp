@@ -8,13 +8,15 @@
 #include "Engine/Engine.h"
 #include "MaterialShared.h"
 #include "Materials/Material.h"
+#include "Materials/MaterialRenderProxy.h"
 #include "Engine/CollisionProfile.h"
 #include "SceneManagement.h"
-#include "NavAreas/NavArea.h"
 #include "AI/Navigation/NavLinkDefinition.h"
 #include "NavLinkRenderingProxy.h"
 #include "NavLinkHostInterface.h"
 #include "NavMesh/RecastNavMesh.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(NavLinkRenderingComponent)
 
 //----------------------------------------------------------------------//
 // UNavLinkRenderingComponent
@@ -40,7 +42,6 @@ FBoxSphereBounds UNavLinkRenderingComponent::CalcBounds(const FTransform& InLoca
 	if (LinkOwnerActor != NULL)
 	{
 		FBox BoundingBox(ForceInit);
-		const FTransform LocalToWorld = LinkOwnerActor->ActorToWorld();
 
 		INavLinkHostInterface* LinkOwnerHost = Cast<INavLinkHostInterface>(LinkOwnerActor);
 		if (LinkOwnerHost != NULL)
@@ -74,7 +75,10 @@ FBoxSphereBounds UNavLinkRenderingComponent::CalcBounds(const FTransform& InLoca
 			}
 		}
 
-		return FBoxSphereBounds(BoundingBox).TransformBy(LocalToWorld);
+		// BoundingBox is in actor space. Incorporate provided InLocalToWorld transform via component space.
+		const FTransform ActorToWorld = LinkOwnerActor->ActorToWorld();
+		const FTransform WorldToComponent = GetComponentTransform().Inverse();
+		return FBoxSphereBounds(BoundingBox).TransformBy(ActorToWorld * WorldToComponent * InLocalToWorld);
 	}
 
 	return FBoxSphereBounds(ForceInitToZero);
@@ -86,13 +90,13 @@ FPrimitiveSceneProxy* UNavLinkRenderingComponent::CreateSceneProxy()
 }
 
 #if WITH_EDITOR
-bool UNavLinkRenderingComponent::ComponentIsTouchingSelectionBox(const FBox& InSelBBox, const FEngineShowFlags& ShowFlags, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const
+bool UNavLinkRenderingComponent::ComponentIsTouchingSelectionBox(const FBox& InSelBBox, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const
 {
 	// NavLink rendering components not treated as 'selectable' in editor
 	return false;
 }
 
-bool UNavLinkRenderingComponent::ComponentIsTouchingSelectionFrustum(const FConvexVolume& InFrustum, const FEngineShowFlags& ShowFlags, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const
+bool UNavLinkRenderingComponent::ComponentIsTouchingSelectionFrustum(const FConvexVolume& InFrustum, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const
 {
 	// NavLink rendering components not treated as 'selectable' in editor
 	return false;
@@ -146,37 +150,19 @@ SIZE_T FNavLinkRenderingProxy::GetTypeHash() const
 
 void FNavLinkRenderingProxy::StorePointLinks(const FTransform& InLocalToWorld, const TArray<FNavigationLink>& LinksArray)
 {
-	const FNavigationLink* Link = LinksArray.GetData();
-	for (int32 LinkIndex = 0; LinkIndex < LinksArray.Num(); ++LinkIndex, ++Link)
-	{	
-		FNavLinkDrawing LinkDrawing;
-		LinkDrawing.Left = InLocalToWorld.TransformPosition(Link->Left);
-		LinkDrawing.Right = InLocalToWorld.TransformPosition(Link->Right);
-		LinkDrawing.Direction = Link->Direction;
-		LinkDrawing.Color = UNavArea::GetColor(Link->GetAreaClass());
-		LinkDrawing.SnapRadius = Link->SnapRadius;
-		LinkDrawing.SnapHeight = Link->bUseSnapHeight ? Link->SnapHeight : -1.0f;
-		LinkDrawing.SupportedAgentsBits = Link->SupportedAgents.PackedBits;
-		OffMeshPointLinks.Add(LinkDrawing);
+	OffMeshPointLinks.Reserve(OffMeshPointLinks.Num() + LinksArray.Num());
+	for (const FNavigationLink& Link : LinksArray)
+	{
+		OffMeshPointLinks.Emplace(InLocalToWorld, Link);
 	}
 }
 
 void FNavLinkRenderingProxy::StoreSegmentLinks(const FTransform& InLocalToWorld, const TArray<FNavigationSegmentLink>& LinksArray)
 {
-	const FNavigationSegmentLink* Link = LinksArray.GetData();
-	for (int32 LinkIndex = 0; LinkIndex < LinksArray.Num(); ++LinkIndex, ++Link)
-	{	
-		FNavLinkSegmentDrawing LinkDrawing;
-		LinkDrawing.LeftStart = InLocalToWorld.TransformPosition(Link->LeftStart);
-		LinkDrawing.LeftEnd = InLocalToWorld.TransformPosition(Link->LeftEnd);
-		LinkDrawing.RightStart = InLocalToWorld.TransformPosition(Link->RightStart);
-		LinkDrawing.RightEnd = InLocalToWorld.TransformPosition(Link->RightEnd);
-		LinkDrawing.Direction = Link->Direction;
-		LinkDrawing.Color = UNavArea::GetColor(Link->GetAreaClass());
-		LinkDrawing.SnapRadius = Link->SnapRadius;
-		LinkDrawing.SnapHeight = Link->bUseSnapHeight ? Link->SnapHeight : -1.0f;
-		LinkDrawing.SupportedAgentsBits = Link->SupportedAgents.PackedBits;
-		OffMeshSegmentLinks.Add(LinkDrawing);
+	OffMeshSegmentLinks.Reserve(OffMeshSegmentLinks.Num() + LinksArray.Num());
+	for (const FNavigationSegmentLink& Link : LinksArray)
+	{
+		OffMeshSegmentLinks.Emplace(InLocalToWorld, Link);
 	}
 }
 
@@ -197,16 +183,19 @@ void FNavLinkRenderingProxy::GetDynamicMeshElements(const TArray<const FSceneVie
 				if (NavMesh != NULL)
 				{
 					AgentMask = NavMesh->IsDrawingEnabled() ? AgentMask | (1 << DataIndex) : AgentMask;
-					if (NavMesh->AgentMaxStepHeight > 0 && NavMesh->IsDrawingEnabled())
+#if WITH_RECAST
+					const float AgentMaxStepHeight = NavMesh->GetAgentMaxStepHeight(ENavigationDataResolution::Default);
+					if (AgentMaxStepHeight > 0 && NavMesh->IsDrawingEnabled())
 					{
-						StepHeights.Add(NavMesh->AgentMaxStepHeight);
+						StepHeights.Add(AgentMaxStepHeight);
 					}
+#endif // WITH_RECAST
 				}
 			}
 		}
 
 		static const FColor RadiusColor(150, 160, 150, 48);
-		FMaterialRenderProxy* const MeshColorInstance = new(FMemStack::Get()) FColoredMaterialRenderProxy(GEngine->DebugMeshMaterial->GetRenderProxy(), RadiusColor);
+		FMaterialRenderProxy* const MeshColorInstance = &Collector.AllocateOneFrameResource<FColoredMaterialRenderProxy>(GEngine->DebugMeshMaterial->GetRenderProxy(), RadiusColor);
 
 		for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
 		{
@@ -238,7 +227,9 @@ void FNavLinkRenderingProxy::GetLinkMeshes(const TArray<FNavLinkDrawing>& OffMes
 		{
 			continue;
 		}
-		const uint32 Segments = FPlatformMath::Max<uint32>(LinkArcHeight*(Link.Right - Link.Left).Size() / 10, 8);
+		const FVector::FReal RealSegments = FMath::Max(LinkArcHeight * (Link.Right - Link.Left).Size() / 10., 8.);
+		check(RealSegments >= 0 && RealSegments <= (FVector::FReal)TNumericLimits<uint32>::Max());
+		const uint32 Segments = static_cast<uint32>(RealSegments);
 		DrawArc(PDI, Link.Left, Link.Right, LinkArcHeight, Segments, Link.Color, SDPG_World, 3.5f);
 		const FVector VOffset(0,0,FVector::Dist(Link.Left, Link.Right)*1.333f);
 
@@ -281,8 +272,12 @@ void FNavLinkRenderingProxy::GetLinkMeshes(const TArray<FNavLinkDrawing>& OffMes
 		{
 			continue;
 		}
-		const uint32 SegmentsStart = FPlatformMath::Max<uint32>(SegmentArcHeight*(Link.RightStart - Link.LeftStart).Size() / 10, 8);
-		const uint32 SegmentsEnd = FPlatformMath::Max<uint32>(SegmentArcHeight*(Link.RightEnd-Link.LeftEnd).Size()/10, 8);
+		const FVector::FReal RealSegmentsStart = FMath::Max(SegmentArcHeight * (Link.RightStart - Link.LeftStart).Size() / 10., 8.);
+		const FVector::FReal RealSegmentsEnd= FMath::Max(SegmentArcHeight * (Link.RightEnd - Link.LeftEnd).Size() / 10., 8.);
+		check(RealSegmentsStart >= 0 && RealSegmentsStart <= (FVector::FReal)TNumericLimits<uint32>::Max());
+		check(RealSegmentsEnd >= 0 && RealSegmentsEnd <= (FVector::FReal)TNumericLimits<uint32>::Max());
+		const uint32 SegmentsStart = static_cast<uint32>(RealSegmentsStart);
+		const uint32 SegmentsEnd = static_cast<uint32>(RealSegmentsEnd);
 		DrawArc(PDI, Link.LeftStart, Link.RightStart, SegmentArcHeight, SegmentsStart, Link.Color, SDPG_World, 3.5f);
 		DrawArc(PDI, Link.LeftEnd, Link.RightEnd, SegmentArcHeight, SegmentsEnd, Link.Color, SDPG_World, 3.5f);
 		const FVector VOffset(0,0,FVector::Dist(Link.LeftStart, Link.RightStart)*1.333f);
@@ -346,7 +341,9 @@ void FNavLinkRenderingProxy::DrawLinks(FPrimitiveDrawInterface* PDI, TArray<FNav
 			continue;
 		}
 
-		const uint32 Segments = FPlatformMath::Max<uint32>(LinkArcHeight*(Link.Right-Link.Left).Size()/10, 8);
+		const FVector::FReal RealSegments = FMath::Max(LinkArcHeight * (Link.Right - Link.Left).Size() / 10., 8.);
+		check(RealSegments >= 0 && RealSegments <= (FVector::FReal)TNumericLimits<uint32>::Max());
+		const uint32 Segments = static_cast<uint32>(RealSegments);
 		DrawArc(PDI, Link.Left, Link.Right, LinkArcHeight, Segments, Link.Color, SDPG_World, 3.5f);
 		const FVector VOffset(0,0,FVector::Dist(Link.Left, Link.Right)*1.333f);
 
@@ -390,8 +387,12 @@ void FNavLinkRenderingProxy::DrawLinks(FPrimitiveDrawInterface* PDI, TArray<FNav
 			continue;
 		}
 
-		const uint32 SegmentsStart = FPlatformMath::Max<uint32>(SegmentArcHeight*(Link.RightStart-Link.LeftStart).Size()/10, 8);
-		const uint32 SegmentsEnd = FPlatformMath::Max<uint32>(SegmentArcHeight*(Link.RightEnd-Link.LeftEnd).Size()/10, 8);
+		const FVector::FReal RealSegmentsStart = FMath::Max(SegmentArcHeight * (Link.RightStart - Link.LeftStart).Size() / 10., 8.);
+		const FVector::FReal RealSegmentsEnd = FMath::Max(SegmentArcHeight * (Link.RightEnd - Link.LeftEnd).Size() / 10., 8.);
+		check(RealSegmentsStart >= 0 && RealSegmentsStart <= (FVector::FReal)TNumericLimits<uint32>::Max());
+		check(RealSegmentsEnd >= 0 && RealSegmentsEnd <= (FVector::FReal)TNumericLimits<uint32>::Max());
+		const uint32 SegmentsStart = static_cast<uint32>(RealSegmentsStart);
+		const uint32 SegmentsEnd = static_cast<uint32>(RealSegmentsEnd);
 		DrawArc(PDI, Link.LeftStart, Link.RightStart, SegmentArcHeight, SegmentsStart, Link.Color, SDPG_World, 3.5f);
 		DrawArc(PDI, Link.LeftEnd, Link.RightEnd, SegmentArcHeight, SegmentsEnd, Link.Color, SDPG_World, 3.5f);
 		const FVector VOffset(0,0,FVector::Dist(Link.LeftStart, Link.RightStart)*1.333f);
@@ -455,5 +456,6 @@ uint32 FNavLinkRenderingProxy::GetMemoryFootprint( void ) const
 
 uint32 FNavLinkRenderingProxy::GetAllocatedSize( void ) const 
 { 
-	return(FPrimitiveSceneProxy::GetAllocatedSize() + OffMeshPointLinks.GetAllocatedSize() + OffMeshSegmentLinks.GetAllocatedSize());
+	return IntCastChecked<uint32>(FPrimitiveSceneProxy::GetAllocatedSize() + OffMeshPointLinks.GetAllocatedSize() + OffMeshSegmentLinks.GetAllocatedSize());
 }
+

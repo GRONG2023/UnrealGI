@@ -10,7 +10,7 @@
 
 TSharedPtr<FSlateDynamicImageBrush> FSlateDynamicImageBrush::CreateWithImageData(
 	const FName InTextureName,
-	const FVector2D& InImageSize,
+	const UE::Slate::FDeprecateVector2DParameter& InImageSize,
 	const TArray<uint8>& InImageData,
 	const FLinearColor& InTint,
 	ESlateBrushTileType::Type InTiling,
@@ -18,7 +18,8 @@ TSharedPtr<FSlateDynamicImageBrush> FSlateDynamicImageBrush::CreateWithImageData
 {
 	TSharedPtr<FSlateDynamicImageBrush> Brush;
 	if (FSlateApplicationBase::IsInitialized() &&
-		FSlateApplicationBase::Get().GetRenderer()->GenerateDynamicImageResource(InTextureName, InImageSize.X, InImageSize.Y, InImageData))
+		InImageSize.X > 0.f && InImageSize.Y > 0.f &&
+		FSlateApplicationBase::Get().GetRenderer()->GenerateDynamicImageResource(InTextureName, (uint32)InImageSize.X, (uint32)InImageSize.Y, InImageData))
 	{
 		Brush = MakeShareable(new FSlateDynamicImageBrush(
 			InTextureName,

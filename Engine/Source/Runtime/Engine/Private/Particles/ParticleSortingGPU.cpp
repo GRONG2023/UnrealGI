@@ -5,15 +5,14 @@
 ==============================================================================*/
 
 #include "Particles/ParticleSortingGPU.h"
-#include "UniformBuffer.h"
-#include "ShaderParameters.h"
-#include "Shader.h"
-#include "SceneUtils.h"
-#include "ParticleHelper.h"
 #include "Particles/ParticleSimulationGPU.h"
+#include "PipelineStateCache.h"
 #include "ShaderParameterUtils.h"
 #include "GlobalShader.h"
 #include "GPUSort.h"
+#include "DataDrivenShaderPlatformInfo.h"
+#include "RHIContext.h"
+#include "ShaderParameterMacros.h"
 
 /*------------------------------------------------------------------------------
 	Shaders used to generate particle sort keys.
@@ -26,7 +25,7 @@
  * Uniform buffer parameters for generating particle sort keys.
  */
 BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT( FParticleKeyGenParameters, )
-	SHADER_PARAMETER( FVector4, ViewOrigin )
+	SHADER_PARAMETER( FVector4f, ViewOrigin )
 	SHADER_PARAMETER( uint32, ChunksPerGroup )
 	SHADER_PARAMETER( uint32, ExtraChunkCount )
 	SHADER_PARAMETER( uint32, OutputOffset )
@@ -47,17 +46,18 @@ class FParticleSortKeyGenCS : public FGlobalShader
 
 public:
 
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return RHISupportsComputeShaders(Parameters.Platform);
-	}
-
 	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
 	{
 		FGlobalShader::ModifyCompilationEnvironment( Parameters, OutEnvironment );
 		OutEnvironment.SetDefine( TEXT("THREAD_COUNT"), PARTICLE_KEY_GEN_THREAD_COUNT );
 		OutEnvironment.SetDefine( TEXT("TEXTURE_SIZE_X"), GParticleSimulationTextureSizeX );
 		OutEnvironment.SetDefine( TEXT("TEXTURE_SIZE_Y"), GParticleSimulationTextureSizeY );
+	}
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		// this shader writes to a 2 component RWBuffer, which is not supported in GLES
+		return !IsMobilePlatform(Parameters.Platform);
 	}
 
 	/** Default constructor. */
@@ -76,69 +76,29 @@ public:
 		OutParticleIndices.Bind( Initializer.ParameterMap, TEXT("OutParticleIndices") );
 	}
 
-	/**
-	 * Set output buffers for this shader.
-	 */
-	void SetOutput(FRHICommandList& RHICmdList, FRHIUnorderedAccessView* OutKeysUAV, FRHIUnorderedAccessView* OutIndicesUAV )
-	{
-		FRHIComputeShader* ComputeShaderRHI = RHICmdList.GetBoundComputeShader();
-		if ( OutKeys.IsBound() )
-		{
-			RHICmdList.SetUAVParameter(ComputeShaderRHI, OutKeys.GetBaseIndex(), OutKeysUAV);
-		}
-		if ( OutParticleIndices.IsBound() )
-		{
-			RHICmdList.SetUAVParameter(ComputeShaderRHI, OutParticleIndices.GetBaseIndex(), OutIndicesUAV);
-		}
-	}
-
-	/**
-	 * Set input parameters.
-	 */
 	void SetParameters(
-		FRHICommandList& RHICmdList,
-		FParticleKeyGenUniformBufferRef& UniformBuffer,
+		FRHIBatchedShaderParameters& BatchedParameters,
+		const FParticleKeyGenParameters& KeyGenParameters,
+		FRHIUnorderedAccessView* OutKeysUAV,
+		FRHIUnorderedAccessView* OutIndicesUAV,
+		FRHITexture2D* PositionTextureRHI,
 		FRHIShaderResourceView* InIndicesSRV
 		)
 	{
-		FRHIComputeShader* ComputeShaderRHI = RHICmdList.GetBoundComputeShader();
-		SetUniformBufferParameter(RHICmdList, ComputeShaderRHI, GetUniformBufferParameter<FParticleKeyGenParameters>(), UniformBuffer );
-		if ( InParticleIndices.IsBound() )
-		{
-			RHICmdList.SetShaderResourceViewParameter(ComputeShaderRHI, InParticleIndices.GetBaseIndex(), InIndicesSRV);
-		}
+		FParticleKeyGenUniformBufferRef KeyGenUniformBuffer = FParticleKeyGenUniformBufferRef::CreateUniformBufferImmediate(KeyGenParameters, UniformBuffer_SingleDraw);
+		SetUniformBufferParameter(BatchedParameters, GetUniformBufferParameter<FParticleKeyGenParameters>(), KeyGenUniformBuffer);
+
+		SetUAVParameter(BatchedParameters, OutKeys, OutKeysUAV);
+		SetUAVParameter(BatchedParameters, OutParticleIndices, OutIndicesUAV);
+		SetTextureParameter(BatchedParameters, PositionTexture, PositionTextureRHI);
+		SetSRVParameter(BatchedParameters, InParticleIndices, InIndicesSRV);
 	}
 
-	/**
-	 * Set the texture from which particle positions can be read.
-	 */
-	void SetPositionTextures(FRHICommandList& RHICmdList, FRHITexture2D* PositionTextureRHI)
+	void UnsetParameters(FRHIBatchedShaderUnbinds& BatchedUnbinds)
 	{
-		FRHIComputeShader* ComputeShaderRHI = RHICmdList.GetBoundComputeShader();
-		if (PositionTexture.IsBound())
-		{
-			RHICmdList.SetShaderTexture(ComputeShaderRHI, PositionTexture.GetBaseIndex(), PositionTextureRHI);
-		}
-	}
-
-	/**
-	 * Unbinds any buffers that have been bound.
-	 */
-	void UnbindBuffers(FRHICommandList& RHICmdList)
-	{
-		FRHIComputeShader* ComputeShaderRHI = RHICmdList.GetBoundComputeShader();
-		if ( InParticleIndices.IsBound() )
-		{
-			RHICmdList.SetShaderResourceViewParameter(ComputeShaderRHI, InParticleIndices.GetBaseIndex(), nullptr);
-		}
-		if ( OutKeys.IsBound() )
-		{
-			RHICmdList.SetUAVParameter(ComputeShaderRHI, OutKeys.GetBaseIndex(), nullptr);
-		}
-		if ( OutParticleIndices.IsBound() )
-		{
-			RHICmdList.SetUAVParameter(ComputeShaderRHI, OutParticleIndices.GetBaseIndex(), nullptr);
-		}
+		UnsetSRVParameter(BatchedUnbinds, InParticleIndices);
+		UnsetUAVParameter(BatchedUnbinds, OutKeys);
+		UnsetUAVParameter(BatchedUnbinds, OutParticleIndices);
 	}
 
 private:
@@ -172,23 +132,20 @@ int32 GenerateParticleSortKeys(
 	int32 BatchId
 	)
 {
-	check(FeatureLevel == ERHIFeatureLevel::SM5 || FeatureLevel == ERHIFeatureLevel::ES3_1);
+	check(FeatureLevel >= ERHIFeatureLevel::SM5);
 
 	FParticleKeyGenParameters KeyGenParameters;
-	FParticleKeyGenUniformBufferRef KeyGenUniformBuffer;
 	const uint32 MaxGroupCount = 128;
 	int32 TotalParticleCount = 0;
 
 	// Grab the shader, set output.
 	TShaderMapRef<FParticleSortKeyGenCS> KeyGenCS(GetGlobalShaderMap(FeatureLevel));
-	RHICmdList.SetComputeShader(KeyGenCS.GetComputeShader());
-	KeyGenCS->SetOutput(RHICmdList, KeyBufferUAV, SortedVertexBufferUAV);
-	KeyGenCS->SetPositionTextures(RHICmdList, PositionTextureRHI);
+	SetComputePipelineState(RHICmdList, KeyGenCS.GetComputeShader());
 
-	FRHITransitionInfo UAVTransitions[] = { 
-		FRHITransitionInfo(KeyBufferUAV, ERHIAccess::Unknown, ERHIAccess::ERWNoBarrier),
-		FRHITransitionInfo(SortedVertexBufferUAV, ERHIAccess::Unknown, ERHIAccess::ERWNoBarrier),
-	};
+
+	// TR-KeyGen : No sync needed between tasks since they update different parts of the data (assuming it's ok if cache line overlap).
+	RHICmdList.BeginUAVOverlap({ KeyBufferUAV, SortedVertexBufferUAV });
+
 	// For each simulation, generate keys and store them in the sorting buffers.
 	for (const FParticleSimulationSortInfo& SortInfo : SimulationsToSort)
 	{
@@ -199,25 +156,24 @@ int32 GenerateParticleSortKeys(
 			const uint32 AlignedParticleCount = ((ParticleCount + PARTICLE_KEY_GEN_THREAD_COUNT - 1) & (~(PARTICLE_KEY_GEN_THREAD_COUNT - 1)));
 			const uint32 ChunkCount = AlignedParticleCount / PARTICLE_KEY_GEN_THREAD_COUNT;
 			const uint32 GroupCount = FMath::Clamp<uint32>( ChunkCount, 1, MaxGroupCount );
-			KeyGenParameters.ViewOrigin = SortInfo.ViewOrigin;
+			KeyGenParameters.ViewOrigin = FVector3f(SortInfo.ViewOrigin); // LWC_TODO: precision loss
 			KeyGenParameters.ChunksPerGroup = ChunkCount / GroupCount;
 			KeyGenParameters.ExtraChunkCount = ChunkCount % GroupCount;
 			KeyGenParameters.OutputOffset = SortInfo.AllocationInfo.BufferOffset;
 			KeyGenParameters.EmitterKey = (uint32)SortInfo.AllocationInfo.ElementIndex << 16;
 			KeyGenParameters.KeyCount = ParticleCount;
-			KeyGenUniformBuffer = FParticleKeyGenUniformBufferRef::CreateUniformBufferImmediate( KeyGenParameters, UniformBuffer_SingleDraw );
 
-			// Dispatch.
-			KeyGenCS->SetParameters(RHICmdList, KeyGenUniformBuffer, SortInfo.VertexBufferSRV);
+			SetShaderParametersLegacyCS(RHICmdList, KeyGenCS, KeyGenParameters, KeyBufferUAV, SortedVertexBufferUAV, PositionTextureRHI, SortInfo.VertexBufferSRV);
+
 			DispatchComputeShader(RHICmdList, KeyGenCS.GetShader(), GroupCount, 1, 1);
-
-			// TR-KeyGen : No sync needed between tasks since they update different parts of the data (assuming it's ok if cache line overlap).
-			RHICmdList.Transition(MakeArrayView(UAVTransitions, UE_ARRAY_COUNT(UAVTransitions)));
 		}
 	}
 
 	// Clear the output buffer.
-	KeyGenCS->UnbindBuffers(RHICmdList);
+	UnsetShaderParametersLegacyCS(RHICmdList, KeyGenCS);
+
+	RHICmdList.EndUAVOverlap({ KeyBufferUAV, SortedVertexBufferUAV });
+
 	return TotalParticleCount;
 }
 
@@ -228,25 +184,21 @@ int32 GenerateParticleSortKeys(
 /**
  * Initialize RHI resources.
  */
-void FParticleSortBuffers::InitRHI()
+void FParticleSortBuffers::InitRHI(FRHICommandListBase& RHICmdList)
 {
-	if (GetFeatureLevel() >= ERHIFeatureLevel::ES3_1)
+	for (int32 BufferIndex = 0; BufferIndex < 2; ++BufferIndex)
 	{
-		for (int32 BufferIndex = 0; BufferIndex < 2; ++BufferIndex)
-		{
-			FRHIResourceCreateInfo CreateInfo;
-			CreateInfo.DebugName = TEXT("PartialSortKeyBuffer");
+		FRHIResourceCreateInfo CreateInfo(TEXT("PartialSortKeyBuffer"));
 
-			KeyBuffers[BufferIndex] = RHICreateVertexBuffer( BufferSize * sizeof(uint32), BUF_Static | BUF_ShaderResource | BUF_UnorderedAccess, CreateInfo);
-			KeyBufferSRVs[BufferIndex] = RHICreateShaderResourceView( KeyBuffers[BufferIndex], /*Stride=*/ sizeof(uint32), PF_R32_UINT );
-			KeyBufferUAVs[BufferIndex] = RHICreateUnorderedAccessView( KeyBuffers[BufferIndex], PF_R32_UINT );
+		KeyBuffers[BufferIndex] = RHICmdList.CreateVertexBuffer( BufferSize * sizeof(uint32), BUF_Static | BUF_ShaderResource | BUF_UnorderedAccess, CreateInfo);
+		KeyBufferSRVs[BufferIndex] = RHICmdList.CreateShaderResourceView( KeyBuffers[BufferIndex], /*Stride=*/ sizeof(uint32), PF_R32_UINT );
+		KeyBufferUAVs[BufferIndex] = RHICmdList.CreateUnorderedAccessView( KeyBuffers[BufferIndex], PF_R32_UINT );
 
-			CreateInfo.DebugName = TEXT("PartialSortVertexBuffer");
-			VertexBuffers[BufferIndex] = RHICreateVertexBuffer( BufferSize * sizeof(uint32), BUF_Static | BUF_ShaderResource | BUF_UnorderedAccess, CreateInfo);
+		CreateInfo.DebugName = TEXT("PartialSortVertexBuffer");
+		VertexBuffers[BufferIndex] = RHICmdList.CreateVertexBuffer( BufferSize * sizeof(uint32), BUF_Static | BUF_ShaderResource | BUF_UnorderedAccess, CreateInfo);
 
-			VertexBufferSortSRVs[BufferIndex] = RHICreateShaderResourceView(VertexBuffers[BufferIndex], /*Stride=*/ sizeof(uint32), PF_R32_UINT);
-			VertexBufferSortUAVs[BufferIndex] = RHICreateUnorderedAccessView(VertexBuffers[BufferIndex], PF_R32_UINT);
-		}
+		VertexBufferSortSRVs[BufferIndex] = RHICmdList.CreateShaderResourceView(VertexBuffers[BufferIndex], /*Stride=*/ sizeof(uint32), PF_R32_UINT);
+		VertexBufferSortUAVs[BufferIndex] = RHICmdList.CreateUnorderedAccessView(VertexBuffers[BufferIndex], PF_R32_UINT);
 	}
 }
 

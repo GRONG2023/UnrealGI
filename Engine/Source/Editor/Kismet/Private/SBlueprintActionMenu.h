@@ -3,23 +3,36 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/Array.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "GraphEditor.h"
+#include "HAL/PlatformMath.h"
+#include "Internationalization/Text.h"
 #include "Layout/Margin.h"
 #include "Layout/Visibility.h"
+#include "Math/Vector2D.h"
+#include "Misc/Attribute.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateEnums.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/Views/SExpanderArrow.h"
 #include "Widgets/Layout/SBorder.h"
-#include "EdGraph/EdGraphSchema.h"
-#include "GraphEditor.h"
+#include "Widgets/Views/SExpanderArrow.h"
 
 class FBlueprintEditor;
 class SBlueprintContextTargetMenu;
 class SEditableTextBox;
 class SGraphActionMenu;
+class SWidget;
 class UEdGraph;
+class UEdGraphPin;
 struct FBlueprintActionContext;
 struct FCustomExpanderData;
+struct FEdGraphSchemaAction;
+struct FGraphActionListBuilderBase;
+struct FBlueprintActionMenuBuilder;
 
 /*******************************************************************************
 * SBlueprintActionMenu
@@ -51,6 +64,10 @@ public:
 
 	TSharedRef<SEditableTextBox> GetFilterTextBox();
 
+	// SWidget interface
+	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
+	// End of SWidget interface
+
 protected:
 	/** UI Callback functions */
 	EVisibility GetTypeImageVisibility() const;
@@ -64,13 +81,19 @@ protected:
 	TSharedRef<SWidget> OnCreateWidgetForAction(struct FCreateWidgetForActionData* const InCreateData);
 
 	/** Callback used to populate all actions list in SGraphActionMenu */
-	void CollectAllActions(FGraphActionListBuilderBase& OutAllActions);
+	TSharedRef<FGraphActionListBuilderBase> OnGetActionList();
 
 	/**  */
 	void ConstructActionContext(FBlueprintActionContext& ContextDescOut);
 
-	/** Functioin to try to insert a promote to variable entry if it is possible to do so. */
+	/** Function to try to insert a promote to variable entry if it is possible to do so. */
 	void TryInsertPromoteToVariable(FBlueprintActionContext const& Context, FGraphActionListBuilderBase& OutAllActions);
+
+	/** Invoked when an available namespace is selected for import. */
+	void OnNamespaceSelectedForImport(const FString& InNamespace);
+
+	/** Gathers the list of namespaces to exclude from the import menu. */
+	void OnGetNamespacesToExcludeFromImportMenu(TSet<FString>& OutNamespacesToExclude);
 
 private:
 	UEdGraph* GraphObj;
@@ -84,6 +107,7 @@ private:
 	TSharedPtr<SGraphActionMenu> GraphActionMenu;
 	TWeakPtr<FBlueprintEditor> EditorPtr;
 	TSharedPtr<SBlueprintContextTargetMenu> ContextTargetSubMenu;
+	TSharedPtr<FBlueprintActionMenuBuilder> ContextMenuBuilder;
 
 	bool bActionExecuted;
 };

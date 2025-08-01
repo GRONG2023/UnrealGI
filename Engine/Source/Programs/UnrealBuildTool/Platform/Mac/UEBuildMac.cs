@@ -1,13 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-
 using System;
 using System.Collections.Generic;
 using System.Text;
-using System.Diagnostics;
-using System.IO;
-using Tools.DotNETCommon;
-using System.Linq;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
+using UnrealBuildBase;
 
 namespace UnrealBuildTool
 {
@@ -24,6 +22,13 @@ namespace UnrealBuildTool
 		public bool bEnableAddressSanitizer = false;
 
 		/// <summary>
+		/// Enables LibFuzzer.
+		/// </summary>
+		[CommandLine("-EnableLibFuzzer")]
+		[XmlConfigFile(Category = "BuildConfiguration", Name = "bEnableLibFuzzer")]
+		public bool bEnableLibFuzzer = false;
+
+		/// <summary>
 		/// Enables thread sanitizer (TSan).
 		/// </summary>
 		[CommandLine("-EnableTSan")]
@@ -36,6 +41,26 @@ namespace UnrealBuildTool
 		[CommandLine("-EnableUBSan")]
 		[XmlConfigFile(Category = "BuildConfiguration", Name = "bEnableUndefinedBehaviorSanitizer")]
 		public bool bEnableUndefinedBehaviorSanitizer = false;
+
+		/// <summary>
+		/// Enables the generation of .dsym files. This can be disabled to enable faster iteration times during development.
+		/// </summary>
+		[CommandLine("-EnableDSYM", Value = "true")]
+		[XmlConfigFile(Category = "BuildConfiguration", Name = "bUseDSYMFiles")]
+		public bool bUseDSYMFiles = false;
+
+		/// <summary>
+		/// Disables clang build verification checks on static libraries
+		/// </summary>
+		[CommandLine("-skipclangvalidation", Value = "true")]
+		[XmlConfigFile(Category = "BuildConfiguration", Name = "bSkipClangValidation")]
+		public bool bSkipClangValidation = false;
+
+		/// <summary>
+		/// Enables runtime ray tracing support.
+		/// </summary>
+		[ConfigFile(ConfigHierarchyType.Engine, "/Script/MacTargetPlatform.MacTargetSettings", "bEnableRayTracing")]
+		public bool bEnableRayTracing = false;
 	}
 
 	/// <summary>
@@ -61,53 +86,209 @@ namespace UnrealBuildTool
 		/// Accessors for fields on the inner TargetRules instance
 		/// </summary>
 		#region Read-only accessor properties 
-		#if !__MonoCS__
-		#pragma warning disable CS1591
-		#endif
+#pragma warning disable CS1591
 
-		public bool bEnableAddressSanitizer
-		{
-			get { return Inner.bEnableAddressSanitizer; }
-		}
+		public bool bEnableAddressSanitizer => Inner.bEnableAddressSanitizer;
 
-		public bool bEnableThreadSanitizer
-		{
-			get { return Inner.bEnableThreadSanitizer; }
-		}
+		public bool bEnableLibFuzzer => Inner.bEnableLibFuzzer;
 
-		public bool bEnableUndefinedBehaviorSanitizer
-		{
-			get { return Inner.bEnableUndefinedBehaviorSanitizer; }
-		}		
+		public bool bEnableThreadSanitizer => Inner.bEnableThreadSanitizer;
 
-		#if !__MonoCS__
-		#pragma warning restore CS1591
-		#endif
+		public bool bEnableUndefinedBehaviorSanitizer => Inner.bEnableUndefinedBehaviorSanitizer;
+
+		public bool bSkipClangValidation => Inner.bSkipClangValidation;
+
+		public bool bEnableRayTracing => Inner.bEnableRayTracing;
+
+#pragma warning restore CS1591
 		#endregion
 	}
 
-	class MacPlatform : UEBuildPlatform
+	class MacArchitectureConfig : UnrealArchitectureConfig
 	{
-		MacPlatformSDK SDK;
-
-		public MacPlatform(MacPlatformSDK InSDK) : base(UnrealTargetPlatform.Mac)
+		public MacArchitectureConfig()
+			: base(UnrealArchitectureMode.SingleTargetCompileSeparately, new[] { UnrealArch.X64, UnrealArch.Arm64 })
 		{
-			SDK = InSDK;
 		}
 
-		public override SDKStatus HasRequiredSDKsInstalled()
+		public override UnrealArch GetHostArchitecture()
 		{
-			return SDK.HasRequiredSDKsInstalled();
+			return MacExports.IsRunningOnAppleArchitecture ? UnrealArch.Arm64 : UnrealArch.X64;
 		}
 
-		public override bool CanUseXGE()
+		public override string ConvertToReadableArchitecture(UnrealArch Architecture)
 		{
-			return false;
+			if (Architecture == UnrealArch.X64)
+			{
+				return "Intel";
+			}
+			if (Architecture == UnrealArch.Arm64)
+			{
+				return "Apple";
+			}
+			return base.ConvertToReadableArchitecture(Architecture);
 		}
 
-		public override bool CanUseDistcc()
+		public override UnrealArchitectures ActiveArchitectures(FileReference? ProjectFile, string? TargetName)
 		{
-			return true;
+			return GetProjectArchitectures(ProjectFile, TargetName, false, false);
+		}
+
+		public override UnrealArchitectures DistributionArchitectures(FileReference? ProjectFile, string? TargetName)
+		{
+			return GetProjectArchitectures(ProjectFile, TargetName, false, true);
+		}
+
+		public override UnrealArchitectures ProjectSupportedArchitectures(FileReference? ProjectFile, string? TargetName = null)
+		{
+			return GetProjectArchitectures(ProjectFile, TargetName, true, false);
+		}
+
+		private static Dictionary<string, UnrealArchitectures> ProjectArchitectureCache = new();
+		private UnrealArchitectures GetProjectArchitectures(FileReference? ProjectFile, string? TargetName, bool bGetAllSupported, bool bIsDistributionMode)
+		{
+			string Key = $"{ProjectFile}{TargetName}{bGetAllSupported}{bIsDistributionMode}";
+			lock (ProjectArchitectureCache)
+			{
+				UnrealArchitectures? CachedArches;
+				if (ProjectArchitectureCache.TryGetValue(Key, out CachedArches))
+				{
+					return CachedArches;
+				}
+			}
+
+			bool bIsEditor = false;
+			bool bIsBuildMachine = Unreal.IsBuildMachine();
+
+			// get project ini from ProjetFile, or if null, then try to get it from the target rules
+			if (TargetName != null)
+			{
+				RulesAssembly RulesAsm;
+				if (ProjectFile == null)
+				{
+					RulesAsm = RulesCompiler.CreateEngineRulesAssembly(Unreal.IsEngineInstalled(), false, false, Log.Logger);
+				}
+				else
+				{
+					RulesAsm = RulesCompiler.CreateProjectRulesAssembly(ProjectFile, Unreal.IsEngineInstalled(), false, false, Log.Logger);
+				}
+
+				try
+				{
+					// CreateTargetRules here needs to have an UnrealArchitectures object, because otherwise with 'null', it will call
+					// back to this function to get the ActiveArchitectures! in this case the arch is unimportant
+					UnrealArchitectures DummyArchitectures = new(UnrealArch.X64);
+					TargetRules? Rules = RulesAsm.CreateTargetRules(TargetName, UnrealTargetPlatform.Mac, UnrealTargetConfiguration.Development, DummyArchitectures, ProjectFile, null, Log.Logger, bSkipValidation:true);
+					bIsEditor = Rules.Type == TargetType.Editor;
+
+					// the projectfile passed in may be a game's uproject file that we are compiling a program in the context of, 
+					// but we still want the settings for the program
+					if (Rules.Type == TargetType.Program)
+					{
+						ProjectFile = Rules.ProjectFile;
+					}
+				}
+				catch (Exception)
+				{
+					// do nothing if it fails, assume no project
+				}
+			}
+
+			ConfigHierarchy EngineIni = ConfigCache.ReadHierarchy(ConfigHierarchyType.Engine, ProjectFile?.Directory, UnrealTargetPlatform.Mac);
+
+			// get values from project ini
+			string SupportKey = bIsEditor ? "EditorTargetArchitecture" : "TargetArchitecture";
+			string DefaultKey = bIsEditor ? "EditorDefaultArchitecture" : "DefaultArchitecture";
+			string SupportedArchitecture;
+			string DefaultArchitecture;
+			bool bBuildAllSupportedOnBuildMachine;
+			EngineIni.GetString("/Script/MacTargetPlatform.MacTargetSettings", SupportKey, out SupportedArchitecture);
+			EngineIni.GetString("/Script/MacTargetPlatform.MacTargetSettings", DefaultKey, out DefaultArchitecture);
+			EngineIni.GetBool("/Script/MacTargetPlatform.MacTargetSettings", "bBuildAllSupportedOnBuildMachine", out bBuildAllSupportedOnBuildMachine);
+			SupportedArchitecture = SupportedArchitecture.ToLower();
+			DefaultArchitecture = DefaultArchitecture.ToLower();
+
+			bool bSupportsArm64 = SupportedArchitecture.Contains("universal") || SupportedArchitecture.Contains("apple");
+			bool bSupportsX86 = SupportedArchitecture.Contains("universal") || SupportedArchitecture.Contains("intel");
+
+			// make sure we found a good value
+			if (!bSupportsArm64 && !bSupportsX86)
+			{
+				throw new BuildException($"Unknown {SupportKey} value found ('{SupportedArchitecture}') in .ini");
+			}
+
+			// choose a supported architecture(s) based on desired type
+			List<UnrealArch> Architectures = new();
+
+			// return all supported if getting supported, compiling for distribution, or we want active, and "all" is selected
+			if (bGetAllSupported || bIsDistributionMode || DefaultArchitecture.Equals("all", StringComparison.InvariantCultureIgnoreCase) ||
+				(bIsBuildMachine && bBuildAllSupportedOnBuildMachine))
+			{
+				if (bSupportsArm64)
+				{
+					Architectures.Add(UnrealArch.Arm64);
+				}
+				if (bSupportsX86)
+				{
+					Architectures.Add(UnrealArch.X64);
+				}
+			}
+			else if (DefaultArchitecture.Contains("host"))
+			{
+				// if we don't support Arm, then always use X64, otherwise use whatever the host arch is
+				Architectures.Add(bSupportsArm64 ? UnrealArch.Host.Value : UnrealArch.X64);
+			}
+			else if (DefaultArchitecture.Contains("apple"))
+			{
+				if (!bSupportsArm64)
+				{
+					throw new BuildException($"{DefaultKey} is set to {DefaultArchitecture}, but AppleSilicon is not a supported architecture");
+				}
+				Architectures.Add(UnrealArch.Arm64);
+			}
+			else if (DefaultArchitecture.Contains("intel"))
+			{
+				if (!bSupportsX86)
+				{
+					throw new BuildException($"{DefaultKey} is set to {DefaultArchitecture}, but Intel is not a supported architecture");
+				}
+				Architectures.Add(UnrealArch.X64);
+			}
+			else
+			{
+				throw new BuildException($"Unknown {DefaultKey} value found ('{DefaultArchitecture}') in .ini");
+			}
+
+			UnrealArchitectures Result = new UnrealArchitectures(Architectures);
+			lock (ProjectArchitectureCache)
+			{
+				ProjectArchitectureCache.Add(Key, Result);
+			}
+			return Result;
+		}
+	}
+
+	abstract class AppleBuildPlatform : UEBuildPlatform
+	{
+		public AppleBuildPlatform(UnrealTargetPlatform Platform, UEBuildPlatformSDK SDK, UnrealArchitectureConfig ArchitectureConfig, ILogger Logger)
+			: base(Platform, SDK, ArchitectureConfig, Logger)
+		{
+
+		}
+
+		public override void GetExternalBuildMetadata(FileReference? ProjectFile, StringBuilder Metadata)
+		{
+			base.GetExternalBuildMetadata(ProjectFile, Metadata);
+			
+			Metadata.AppendLine("xcode-select: {0}", AppleToolChainSettings.XcodeDeveloperDir);
+		}
+	}
+
+	class MacPlatform : AppleBuildPlatform
+	{
+		public MacPlatform(UEBuildPlatformSDK InSDK, ILogger InLogger)
+			: base(UnrealTargetPlatform.Mac, InSDK, new MacArchitectureConfig(), InLogger)
+		{
 		}
 
 		public override bool CanUseFASTBuild()
@@ -116,19 +297,53 @@ namespace UnrealBuildTool
 		}
 
 		public override void ResetTarget(TargetRules Target)
-		{			
+		{
 		}
 
 		public override void ValidateTarget(TargetRules Target)
 		{
+			if (!String.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CLANG_STATIC_ANALYZER_MODE")))
+			{
+				Target.StaticAnalyzer = StaticAnalyzer.Default;
+				Target.StaticAnalyzerOutputType = (Environment.GetEnvironmentVariable("CLANG_ANALYZER_OUTPUT")?.Contains("html", StringComparison.OrdinalIgnoreCase) == true) ? StaticAnalyzerOutputType.Html : StaticAnalyzerOutputType.Text;
+				Target.StaticAnalyzerMode = String.Equals(Environment.GetEnvironmentVariable("CLANG_STATIC_ANALYZER_MODE"), "shallow", StringComparison.OrdinalIgnoreCase) ? StaticAnalyzerMode.Shallow : StaticAnalyzerMode.Deep;
+			}
+			else if (Target.StaticAnalyzer == StaticAnalyzer.Clang)
+			{
+				Target.StaticAnalyzer = StaticAnalyzer.Default;
+			}
+
+			// Disable linking and ignore build outputs if we're using a static analyzer
+			if (Target.StaticAnalyzer == StaticAnalyzer.Default)
+			{
+				Target.bDisableLinking = true;
+				Target.bIgnoreBuildOutputs = true;
+
+				// Clang static analysis requires non unity builds
+				Target.bUseUnityBuild = false;
+
+				// Disable chaining PCHs for the moment because it is crashing clang
+				Target.bChainPCHs = false;
+			}
+
 			if (BuildHostPlatform.Current.Platform != UnrealTargetPlatform.Mac)
 			{
 				// @todo: Temporarily disable precompiled header files when building remotely due to errors
 				Target.bUsePCHFiles = false;
 			}
 
+			// Mac-Arm todo - Remove this all when we feel confident no more x86-only plugins will come around
+			bool bCompilingForArm = Target.Architectures.Contains(UnrealArch.Arm64);
+			if (bCompilingForArm && Target.Name != "UnrealHeaderTool")
+			{
+				Target.DisablePlugins.AddRange(new string[]
+				{
+					// Currently none need to be disabled, but add names of plugins here that are incompatible with arm64
+				});
+			}
+
 			// Needs OS X 10.11 for Metal. The remote toolchain has not been initialized yet, so just assume it's a recent SDK.
-			if ((BuildHostPlatform.Current.Platform != UnrealTargetPlatform.Mac || MacToolChain.Settings.MacOSSDKVersionFloat >= 10.11f) && Target.bCompileAgainstEngine)
+			if ((BuildHostPlatform.Current.Platform != UnrealTargetPlatform.Mac || MacToolChain.Settings.SDKVersionFloat >= 10.11f) && Target.bCompileAgainstEngine)
 			{
 				Target.GlobalDefinitions.Add("HAS_METAL=1");
 				Target.ExtraModuleNames.Add("MetalRHI");
@@ -139,61 +354,51 @@ namespace UnrealBuildTool
 			}
 
 			// Force using the ANSI allocator if ASan is enabled
-			string AddressSanitizer = Environment.GetEnvironmentVariable("ENABLE_ADDRESS_SANITIZER");
-			if(Target.MacPlatform.bEnableAddressSanitizer || (AddressSanitizer != null && AddressSanitizer == "YES"))
+			string? AddressSanitizer = Environment.GetEnvironmentVariable("ENABLE_ADDRESS_SANITIZER");
+			if (Target.MacPlatform.bEnableAddressSanitizer || (AddressSanitizer != null && AddressSanitizer == "YES"))
 			{
 				Target.GlobalDefinitions.Add("FORCE_ANSI_ALLOCATOR=1");
 			}
 
 			Target.GlobalDefinitions.Add("GL_SILENCE_DEPRECATION=1");
 
-			Target.bUsePDBFiles = !Target.bDisableDebugInfo && ShouldCreateDebugInfo(new ReadOnlyTargetRules(Target));
+			Target.bUsePDBFiles = Target.DebugInfo != DebugInfoMode.None && ShouldCreateDebugInfo(new ReadOnlyTargetRules(Target));
+			Target.bUsePDBFiles &= Target.MacPlatform.bUseDSYMFiles;
 
 			// we always deploy - the build machines need to be able to copy the files back, which needs the full bundle
 			Target.bDeployAfterCompile = true;
 
 			Target.bCheckSystemHeadersForModification = BuildHostPlatform.Current.Platform != UnrealTargetPlatform.Mac;
-
-			// Mac-Arm todo - Do we need to compile in two passes so we can set this differently?
-			bool bCompilingForArm = Target.Architecture.IndexOf("arm", StringComparison.OrdinalIgnoreCase) >= 0;
-			bool bCompilingMultipleArchitectures = Target.Architecture.Contains("+");
-			Target.bCompileISPC = !bCompilingForArm;
-			Target.bUsePCHFiles = !bCompilingMultipleArchitectures;
 		}
 
-		/// <summary>
-		/// Returns true since we can do this on Mac (with some caveats, that may necessitate this being an option)
-		/// </summary>
-		/// <param name="InArchitectures">Architectures that are being built</param>
-		public override bool CanBuildArchitecturesInSinglePass(IEnumerable<string> InArchitectures)
+		static HashSet<FileReference> ValidatedLibs = new();
+		public override void ValidateModule(UEBuildModule Module, ReadOnlyTargetRules Target)
 		{
-			return true;
-		}
+			base.ValidateModule(Module, Target);
 
-		/// <summary>
-		/// Allows the platform to override whether the architecture name should be appended to the name of binaries.
-		/// </summary>
-		/// <returns>True if the architecture name should be appended to the binary</returns>
-		public override bool RequiresArchitectureSuffix()
-		{
-			return false;
+			if (BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Mac && !Target.MacPlatform.bSkipClangValidation)
+			{
+				ApplePlatformSDK SDK = (ApplePlatformSDK?)GetSDK() ?? new ApplePlatformSDK(Logger);
+				// Validate the added public libraries
+				lock (ValidatedLibs)
+				{
+					foreach (FileReference LibLoc in Module.PublicLibraries)
+					{
+						if (ValidatedLibs.Contains(LibLoc))
+						{
+							continue;
+						}
+						ValidatedLibs.Add(LibLoc);
+					}
+				}
+			}
 		}
-
-		/// <summary>
-		/// Get the default architecture for a project. This may be overriden on the command line to UBT.
-		/// </summary>
-		/// <param name="ProjectFile">Optional project to read settings from </param>
-		public override string GetDefaultArchitecture(FileReference ProjectFile)
-		{
-			// by default use Intel.
-			return MacExports.DefaultArchitecture;
-		}		
 
 		/// <summary>
 		/// Determines if the given name is a build product for a target.
 		/// </summary>
 		/// <param name="FileName">The name to check</param>
-		/// <param name="NamePrefixes">Target or application names that may appear at the start of the build product name (eg. "UE4Editor", "ShooterGameEditor")</param>
+		/// <param name="NamePrefixes">Target or application names that may appear at the start of the build product name (eg. "UnrealEditor", "ShooterGameEditor")</param>
 		/// <param name="NameSuffixes">Suffixes which may appear at the end of the build product name</param>
 		/// <returns>True if the string matches the name of a build product, false otherwise</returns>
 		public override bool IsBuildProduct(string FileName, string[] NamePrefixes, string[] NameSuffixes)
@@ -236,10 +441,10 @@ namespace UnrealBuildTool
 			{
 				case UEBuildBinaryType.DynamicLinkLibrary:
 				case UEBuildBinaryType.Executable:
-					return Target.bUsePDBFiles ? new string[] {".dSYM"} : new string[] {};
+					return Target.bUsePDBFiles ? new string[] { ".dSYM" } : new string[] { };
 				case UEBuildBinaryType.StaticLibrary:
 				default:
-					return new string [] {};
+					return new string[] { };
 			}
 		}
 
@@ -252,9 +457,23 @@ namespace UnrealBuildTool
 		/// <param name="Target">The target being build</param>
 		public override void ModifyModuleRulesForOtherPlatform(string ModuleName, ModuleRules Rules, ReadOnlyTargetRules Target)
 		{
+			// don't do any target platform stuff if SDK is not available
+			if (!UEBuildPlatform.IsPlatformAvailableForTarget(Platform, Target))
+			{
+				return;
+			}
+
+			if (Target.Platform == UnrealTargetPlatform.Win64 && Target.Type == TargetType.Editor)
+			{
+				// because remote IOS building needs the new XcodeProject Settings to show up in the editor, we bring in the Mac bits that expose it
+				if (ModuleName == "Engine")
+				{
+					Rules.DynamicallyLoadedModuleNames.AddAll("MacTargetPlatform", "MacPlatformEditor");
+				}
+			}
 		}
 
-		public override DirectoryReference GetBundleDirectory(ReadOnlyTargetRules Rules, List<FileReference> OutputFiles)
+		public override DirectoryReference? GetBundleDirectory(ReadOnlyTargetRules Rules, List<FileReference> OutputFiles)
 		{
 			if (Rules.bIsBuildingConsoleApplication)
 			{
@@ -262,7 +481,7 @@ namespace UnrealBuildTool
 			}
 			else
 			{
-				return OutputFiles[0].Directory.ParentDirectory.ParentDirectory;
+				return OutputFiles[0].Directory.ParentDirectory!.ParentDirectory;
 			}
 		}
 
@@ -270,10 +489,12 @@ namespace UnrealBuildTool
 		/// For platforms that need to output multiple files per binary (ie Android "fat" binaries)
 		/// this will emit multiple paths. By default, it simply makes an array from the input
 		/// </summary>
-		public override List<FileReference> FinalizeBinaryPaths(FileReference BinaryName, FileReference ProjectFile, ReadOnlyTargetRules Target)
+		public override List<FileReference> FinalizeBinaryPaths(FileReference BinaryName, FileReference? ProjectFile, ReadOnlyTargetRules Target)
 		{
 			List<FileReference> BinaryPaths = new List<FileReference>();
-			if (Target.bIsBuildingConsoleApplication || !String.IsNullOrEmpty(BinaryName.GetExtension()))
+			// ModernXcode now builds binary outside of .app, instead Xcode will be responsible of generating .app
+			if (AppleExports.UseModernXcode(ProjectFile) ||
+				(Target.bIsBuildingConsoleApplication || !String.IsNullOrEmpty(BinaryName.GetExtension())))
 			{
 				BinaryPaths.Add(BinaryName);
 			}
@@ -309,10 +530,6 @@ namespace UnrealBuildTool
 				if (Target.bForceBuildTargetPlatforms)
 				{
 					Rules.DynamicallyLoadedModuleNames.Add("MacTargetPlatform");
-					Rules.DynamicallyLoadedModuleNames.Add("MacNoEditorTargetPlatform");
-					Rules.DynamicallyLoadedModuleNames.Add("MacClientTargetPlatform");
-					Rules.DynamicallyLoadedModuleNames.Add("MacServerTargetPlatform");
-					Rules.DynamicallyLoadedModuleNames.Add("AllDesktopTargetPlatform");
 				}
 
 				if (bBuildShaderFormats)
@@ -339,6 +556,11 @@ namespace UnrealBuildTool
 			CompileEnvironment.Definitions.Add("PLATFORM_MAC=1");
 			CompileEnvironment.Definitions.Add("PLATFORM_APPLE=1");
 
+			if (Target.MacPlatform.bEnableRayTracing && Target.Type != TargetType.Server)
+			{
+				CompileEnvironment.Definitions.Add("RHI_RAYTRACING=1");
+			}
+
 			CompileEnvironment.Definitions.Add("WITH_TTS=0");
 			CompileEnvironment.Definitions.Add("WITH_SPEECH_RECOGNITION=0");
 		}
@@ -351,7 +573,7 @@ namespace UnrealBuildTool
 		public override bool ShouldCreateDebugInfo(ReadOnlyTargetRules Target)
 		{
 			// Always generate debug symbols on the build machines.
-			bool IsBuildMachine = Environment.GetEnvironmentVariable("IsBuildMachine") == "1";
+			bool IsBuildMachine = Unreal.IsBuildMachine();
 
 			switch (Target.Configuration)
 			{
@@ -373,69 +595,55 @@ namespace UnrealBuildTool
 		/// <returns>New toolchain instance.</returns>
 		public override UEToolChain CreateToolChain(ReadOnlyTargetRules Target)
 		{
-			MacToolChainOptions Options = MacToolChainOptions.None;
+			ClangToolChainOptions Options = ClangToolChainOptions.None;
 
-			string AddressSanitizer = Environment.GetEnvironmentVariable("ENABLE_ADDRESS_SANITIZER");
-			string ThreadSanitizer = Environment.GetEnvironmentVariable("ENABLE_THREAD_SANITIZER");
-			string UndefSanitizerMode = Environment.GetEnvironmentVariable("ENABLE_UNDEFINED_BEHAVIOR_SANITIZER");
+			string? AddressSanitizer = Environment.GetEnvironmentVariable("ENABLE_ADDRESS_SANITIZER");
+			string? ThreadSanitizer = Environment.GetEnvironmentVariable("ENABLE_THREAD_SANITIZER");
+			string? UndefSanitizerMode = Environment.GetEnvironmentVariable("ENABLE_UNDEFINED_BEHAVIOR_SANITIZER");
 
-			if(Target.MacPlatform.bEnableAddressSanitizer || (AddressSanitizer != null && AddressSanitizer == "YES"))
+			if (Target.MacPlatform.bEnableAddressSanitizer || (AddressSanitizer != null && AddressSanitizer == "YES"))
 			{
-				Options |= MacToolChainOptions.EnableAddressSanitizer;
+				Options |= ClangToolChainOptions.EnableAddressSanitizer;
 			}
-			if(Target.MacPlatform.bEnableThreadSanitizer || (ThreadSanitizer != null && ThreadSanitizer == "YES"))
+			if (Target.MacPlatform.bEnableThreadSanitizer || (ThreadSanitizer != null && ThreadSanitizer == "YES"))
 			{
-				Options |= MacToolChainOptions.EnableThreadSanitizer;
+				Options |= ClangToolChainOptions.EnableThreadSanitizer;
 			}
-			if(Target.MacPlatform.bEnableUndefinedBehaviorSanitizer || (UndefSanitizerMode != null && UndefSanitizerMode == "YES"))
+			if (Target.MacPlatform.bEnableUndefinedBehaviorSanitizer || (UndefSanitizerMode != null && UndefSanitizerMode == "YES"))
 			{
-				Options |= MacToolChainOptions.EnableUndefinedBehaviorSanitizer;
+				Options |= ClangToolChainOptions.EnableUndefinedBehaviorSanitizer;
 			}
-			if(Target.bShouldCompileAsDLL)
+			if (Target.bShouldCompileAsDLL)
 			{
-				Options |= MacToolChainOptions.OutputDylib;
+				Options |= ClangToolChainOptions.OutputDylib;
 			}
 
-			return new MacToolChain(Target.ProjectFile, Options);
+			return new MacToolChain(Target, Options, Logger);
 		}
 
-		/// <summary>
-		/// Deploys the given target
-		/// </summary>
-		/// <param name="Receipt">Receipt for the target being deployed</param>
+		/// <inheritdoc/>
 		public override void Deploy(TargetReceipt Receipt)
 		{
-			new UEDeployMac().PrepTargetForDeployment(Receipt);
-		}
-	}
-
-	class MacPlatformSDK : UEBuildPlatformSDK
-	{
-		protected override SDKStatus HasRequiredManualSDKInternal()
-		{
-			return SDKStatus.Valid;
+			new UEDeployMac(Logger).PrepTargetForDeployment(Receipt);
 		}
 	}
 
 	class MacPlatformFactory : UEBuildPlatformFactory
 	{
-		public override UnrealTargetPlatform TargetPlatform
-		{
-			get { return UnrealTargetPlatform.Mac; }
-		}
+		public override UnrealTargetPlatform TargetPlatform => UnrealTargetPlatform.Mac;
 
 		/// <summary>
 		/// Register the platform with the UEBuildPlatform class
 		/// </summary>
-		public override void RegisterBuildPlatforms()
+		public override void RegisterBuildPlatforms(ILogger Logger)
 		{
-			MacPlatformSDK SDK = new MacPlatformSDK();
-			SDK.ManageAndValidateSDK();
+			ApplePlatformSDK SDK = new ApplePlatformSDK(Logger);
 
 			// Register this build platform for Mac
-			UEBuildPlatform.RegisterBuildPlatform(new MacPlatform(SDK));
+			UEBuildPlatform.RegisterBuildPlatform(new MacPlatform(SDK, Logger), Logger);
 			UEBuildPlatform.RegisterPlatformWithGroup(UnrealTargetPlatform.Mac, UnrealPlatformGroup.Apple);
 			UEBuildPlatform.RegisterPlatformWithGroup(UnrealTargetPlatform.Mac, UnrealPlatformGroup.Desktop);
+			UEBuildPlatform.RegisterPlatformWithGroup(UnrealTargetPlatform.Mac, UnrealPlatformGroup.PosixOS);
 		}
 	}
 }

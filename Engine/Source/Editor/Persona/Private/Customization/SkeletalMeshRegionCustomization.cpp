@@ -2,10 +2,13 @@
 
 #include "Customization/SkeletalMeshRegionCustomization.h"
 
+#include "Engine/SkeletalMesh.h"
+#include "Engine/SkeletalMeshSampling.h"
+#include "Engine/SkinnedAssetCommon.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/Class.h"
 #include "IDetailsView.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "PropertyHandle.h"
 #include "DetailLayoutBuilder.h"
@@ -15,7 +18,7 @@
 #include "Widgets/Input/SNumericEntryBox.h"
 
 #include "Animation/AnimSequence.h"
-#include "Animation/BlendSpaceBase.h"
+#include "Animation/BlendSpace.h"
 #include "Animation/BlendSpace1D.h"
 #include "SAnimationBlendSpaceGridWidget.h"
 #include "PropertyCustomizationHelpers.h"
@@ -189,7 +192,10 @@ TSharedRef<SWidget> FNiagaraSkeletalMeshRegionMaterialFilterDetails::HandleMater
 
 void FNiagaraSkeletalMeshRegionMaterialFilterDetails::HandleMaterialNameComboBoxSelectionChanged(TSharedPtr<FName> StringItem, ESelectInfo::Type SelectInfo)
 {
-	MaterialNameHandle->SetValue(*StringItem);
+	if (StringItem)
+	{
+		MaterialNameHandle->SetValue(*StringItem);
+	}
 }
 
 void FNiagaraSkeletalMeshRegionMaterialFilterDetails::OnComboOpening()

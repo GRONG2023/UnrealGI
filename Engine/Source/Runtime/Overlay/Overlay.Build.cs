@@ -21,21 +21,6 @@ namespace UnrealBuildTool.Rules
                     "UMG",
                 }
             );
-
-            PublicIncludePaths.AddRange(
-                new string[]
-                {
-                    "Runtime/Overlay/Public",
-                }
-            );
-
-            PrivateIncludePaths.AddRange(
-				new string[] {
-					"Runtime/Overlay/Private",
-					"Runtime/Overlay/Private/Assets",
-					"Runtime/Overlay/Private/Factories",
-				}
-			);
         }
 	}
 }

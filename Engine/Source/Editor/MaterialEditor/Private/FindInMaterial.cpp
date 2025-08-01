@@ -4,7 +4,7 @@
 #include "Layout/WidgetPath.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Widgets/Images/SImage.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "MaterialGraph/MaterialGraphNode_Comment.h"
 #include "MaterialGraph/MaterialGraphNode.h"
 #include "Materials/MaterialExpressionComment.h"
@@ -58,11 +58,8 @@ FText FFindInMaterialResult::GetCategory() const
 	{
 		return LOCTEXT("PinCategory", "Pin");
 	}
-	else
-	{
-		return LOCTEXT("NodeCategory", "Node");
-	}
-	return FText::GetEmpty();
+
+	return LOCTEXT("NodeCategory", "Node");
 }
 
 TSharedRef<SWidget> FFindInMaterialResult::CreateIcon() const
@@ -73,22 +70,22 @@ TSharedRef<SWidget> FFindInMaterialResult::CreateIcon() const
 	{
 		if (ResolvedPin->PinType.IsArray())
 		{
-			Brush = FEditorStyle::GetBrush(TEXT("GraphEditor.ArrayPinIcon"));
+			Brush = FAppStyle::GetBrush(TEXT("GraphEditor.ArrayPinIcon"));
 		}
 		else if (ResolvedPin->PinType.bIsReference)
 		{
-			Brush = FEditorStyle::GetBrush(TEXT("GraphEditor.RefPinIcon"));
+			Brush = FAppStyle::GetBrush(TEXT("GraphEditor.RefPinIcon"));
 		}
 		else
 		{
-			Brush = FEditorStyle::GetBrush(TEXT("GraphEditor.PinIcon"));
+			Brush = FAppStyle::GetBrush(TEXT("GraphEditor.PinIcon"));
 		}
 		const UEdGraphSchema* Schema = ResolvedPin->GetSchema();
-		IconColor = Schema->GetPinTypeColor(ResolvedPin->PinType);
-	}
+			IconColor = Schema->GetPinTypeColor(ResolvedPin->PinType);
+		}
 	else if (GraphNode.IsValid())
 	{
-		Brush = FEditorStyle::GetBrush(TEXT("GraphEditor.NodeGlyph"));
+		Brush = FAppStyle::GetBrush(TEXT("GraphEditor.NodeGlyph"));
 	}
 
 	return 	SNew(SImage)
@@ -163,7 +160,7 @@ void SFindInMaterial::Construct(const FArguments& InArgs, TSharedPtr<FMaterialEd
 		.Padding(0.f, 4.f, 0.f, 0.f)
 		[
 			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("Menu.Background"))
+			.BorderImage(FAppStyle::GetBrush("Menu.Background"))
 			[
 				SAssignNew(TreeView, STreeViewType)
 				.ItemHeight(24)
@@ -261,13 +258,17 @@ void SFindInMaterial::MatchTokens(const TArray<FString> &Tokens)
 	RootSearchResult.Reset();
 
 	UEdGraph* Graph = MaterialEditorPtr.Pin()->Material->MaterialGraph;
+	MatchTokensInGraph(Graph, Tokens);
+}
 
+void SFindInMaterial::MatchTokensInGraph(const UEdGraph* Graph, const TArray<FString>& Tokens)
+{
 	if (Graph == NULL)
 	{
 		return;
 	}
 
-	RootSearchResult = FSearchResult(new FFindInMaterialResult(FString("BehaviorTreeRoot")));
+	RootSearchResult = FSearchResult(new FFindInMaterialResult(FString("MaterialTreeRoot")));
 
 	for (auto It(Graph->Nodes.CreateConstIterator()); It; ++It)
 	{
@@ -339,73 +340,58 @@ void SFindInMaterial::MatchTokens(const TArray<FString> &Tokens)
 			ItemsFound.Add(NodeResult);
 		}
 	}
+
+	for (const UEdGraph* Subgraph : Graph->SubGraphs)
+	{
+		MatchTokensInGraph(Subgraph, Tokens);
+	}
 }
 
 TSharedRef<ITableRow> SFindInMaterial::OnGenerateRow(FSearchResult InItem, const TSharedRef<STableViewBase>& OwnerTable)
 {
-	bool bIsACategoryWidget = false;//!bIsInFindWithinBlueprintMode && !InItem->Parent.IsValid();
+	FString CommentText = InItem->GetCommentText();
 
-	if (bIsACategoryWidget)
-	{
-		return SNew(STableRow< TSharedPtr<FFindInMaterialResult> >, OwnerTable)
+	return SNew(STableRow< TSharedPtr<FFindInMaterialResult> >, OwnerTable)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
 			[
-				SNew(SBorder)
+				InItem->CreateIcon()
+			]
+			+ SHorizontalBox::Slot()
+				.AutoWidth()
 				.VAlign(VAlign_Center)
-				.BorderImage(FEditorStyle::GetBrush("PropertyWindow.CategoryBackground"))
-				.Padding(FMargin(2.0f))
-				.ForegroundColor(FEditorStyle::GetColor("PropertyWindow.CategoryForeground"))
+				.Padding(2, 0)
 				[
 					SNew(STextBlock)
 					.Text(FText::FromString(InItem->Value))
-					.ToolTipText(LOCTEXT("BlueprintCatSearchToolTip", "Blueprint"))
+					.HighlightText(HighlightText)
+					.ToolTipText(FText::Format(LOCTEXT("MaterialResultSearchToolTipFmt", "{0} : {1}"), InItem->GetCategory(), FText::FromString(InItem->Value)))
 				]
-			];
-	}
-	else // Functions/Event/Pin widget
-	{
-		FString CommentText = InItem->GetCommentText();
-
-		return SNew(STableRow< TSharedPtr<FFindInMaterialResult> >, OwnerTable)
-			[
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
+			+ SHorizontalBox::Slot()
+				.FillWidth(1)
+				.HAlign(HAlign_Right)
+				.VAlign(VAlign_Center)
+				.Padding(2, 0)
 				[
-					InItem->CreateIcon()
+					SNew(STextBlock)
+					.Text(FText::FromString(InItem->GetValueText()))
+					.HighlightText(HighlightText)
 				]
-				+ SHorizontalBox::Slot()
-					.AutoWidth()
-					.VAlign(VAlign_Center)
-					.Padding(2, 0)
-					[
-						SNew(STextBlock)
-						.Text(FText::FromString(InItem->Value))
-						.HighlightText(HighlightText)
-						.ToolTipText(FText::Format(LOCTEXT("BlueprintResultSearchToolTipFmt", "{0} : {1}"), InItem->GetCategory(), FText::FromString(InItem->Value)))
-					]
-				+ SHorizontalBox::Slot()
-					.FillWidth(1)
-					.HAlign(HAlign_Right)
-					.VAlign(VAlign_Center)
-					.Padding(2, 0)
-					[
-						SNew(STextBlock)
-						.Text(FText::FromString(InItem->GetValueText()))
-						.HighlightText(HighlightText)
-					]
-				+ SHorizontalBox::Slot()
-					.FillWidth(1)
-					.HAlign(HAlign_Right)
-					.VAlign(VAlign_Center)
-					.Padding(2, 0)
-					[
-						SNew(STextBlock)
-						.Text(CommentText.IsEmpty() ? FText::GetEmpty() : FText::Format(LOCTEXT("NodeCommentFmt", "Node Comment:[{0}]"), FText::FromString(CommentText)))
-						.ColorAndOpacity(FLinearColor::Yellow)
-						.HighlightText(HighlightText)
-					]
-			];
-	}
+			+ SHorizontalBox::Slot()
+				.FillWidth(1)
+				.HAlign(HAlign_Right)
+				.VAlign(VAlign_Center)
+				.Padding(2, 0)
+				[
+					SNew(STextBlock)
+					.Text(CommentText.IsEmpty() ? FText::GetEmpty() : FText::Format(LOCTEXT("NodeCommentFmt", "Node Comment:[{0}]"), FText::FromString(CommentText)))
+					.ColorAndOpacity(FLinearColor::Yellow)
+					.HighlightText(HighlightText)
+				]
+		];
 }
 
 void SFindInMaterial::OnGetChildren(FSearchResult InItem, TArray< FSearchResult >& OutChildren)

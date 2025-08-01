@@ -29,6 +29,11 @@ public:
 
 private:
 
+	FText GetWidgetsSourceName() const
+	{
+		return WidgetInfo->GetWidgetReadableLocation();
+	}
+
 	FText GetWidgetsDesiredSize() const
 	{
 		return FText::FromString(WidgetInfo->GetWidgetDesiredSize().ToString());
@@ -67,6 +72,18 @@ private:
 	FText GetHasActiveTimers() const
 	{
 		return (WidgetInfo->GetWidgetHasActiveTimers()) ? TrueText : FalseText;
+	}
+
+	FText GetLiveAttributeName() const;
+
+	FText GetAttributeCount() const
+	{
+		return FText::AsNumber(WidgetInfo->GetWidgetAttributeCount());
+	}
+
+	FText GetCollapsedAttributeCount() const
+	{
+		return FText::AsNumber(WidgetInfo->GetWidgetCollapsedAttributeCount());
 	}
 
 	FText GetIsVisible() const

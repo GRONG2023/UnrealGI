@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Linux/LinuxPlatformApplicationMisc.h"
+#include "Null/NullPlatformApplicationMisc.h"
 #include "Misc/CommandLine.h"
 #include "Misc/App.h"
 #include "HAL/ThreadHeartBeat.h"
@@ -232,13 +233,21 @@ void UngrabAllInputImpl()
 {
 	if (GInitializedSDL)
 	{
-		SDL_Window * GrabbedWindow = SDL_GetGrabbedWindow();
+		SDL_Window* GrabbedWindow = SDL_GetGrabbedWindow();
 		if (GrabbedWindow)
 		{
 			SDL_SetWindowGrab(GrabbedWindow, SDL_FALSE);
-			SDL_SetKeyboardGrab(GrabbedWindow, SDL_FALSE);
+			SDL_SetWindowKeyboardGrab(GrabbedWindow, SDL_FALSE);
 		}
-		SDL_ConfineCursor(nullptr, nullptr);
+
+		SDL_Window* MouseFocusedWindow = SDL_GetMouseFocus();
+		if (MouseFocusedWindow)
+		{
+			SDL_SetWindowMouseRect(MouseFocusedWindow, nullptr);
+		}
+
+		SDL_SetRelativeMouseMode(SDL_FALSE);
+		SDL_ShowCursor(SDL_ENABLE);
 		SDL_CaptureMouse(SDL_FALSE);
 	}
 }
@@ -251,6 +260,7 @@ uint32 FLinuxPlatformApplicationMisc::WindowStyle()
 void FLinuxPlatformApplicationMisc::PreInit()
 {
 	MessageBoxExtCallback = MessageBoxExtImpl;
+	FApp::SetHasFocusFunction(&FLinuxPlatformApplicationMisc::IsThisApplicationForeground);
 }
 
 void FLinuxPlatformApplicationMisc::Init()
@@ -313,11 +323,10 @@ bool FLinuxPlatformApplicationMisc::InitSDL()
 		SDL_version RunTimeSDLVersion;
 		SDL_VERSION(&CompileTimeSDLVersion);
 		SDL_GetVersion(&RunTimeSDLVersion);
-		int SdlRevisionNum = SDL_GetRevisionNumber();
 		FString SdlRevision = UTF8_TO_TCHAR(SDL_GetRevision());
-		UE_LOG(LogInit, Log, TEXT("Initialized SDL %d.%d.%d revision: %d (%s) (compiled against %d.%d.%d)"),
+		UE_LOG(LogInit, Log, TEXT("Initialized SDL %d.%d.%d revision: %s (compiled against %d.%d.%d)"),
 			RunTimeSDLVersion.major, RunTimeSDLVersion.minor, RunTimeSDLVersion.patch,
-			SdlRevisionNum, *SdlRevision,
+			*SdlRevision,
 			CompileTimeSDLVersion.major, CompileTimeSDLVersion.minor, CompileTimeSDLVersion.patch
 			);
 
@@ -405,6 +414,11 @@ class FFeedbackContext* FLinuxPlatformApplicationMisc::GetFeedbackContext()
 
 GenericApplication* FLinuxPlatformApplicationMisc::CreateApplication()
 {
+	if (FParse::Param(FCommandLine::Get(), TEXT("RenderOffScreen")))
+	{
+		return FNullPlatformApplicationMisc::CreateApplication();
+	}
+
 	return FLinuxApplication::CreateLinuxApplication();
 }
 
@@ -442,7 +456,7 @@ void FLinuxPlatformApplicationMisc::PumpMessages( bool bFromMainLoop )
 			}
 		}
 
-		bool bHasFocus = FApp::UseVRFocus() ? FApp::HasVRFocus() : FLinuxPlatformApplicationMisc::IsThisApplicationForeground();
+		bool bHasFocus = FApp::HasFocus();
 
 		// if its our window, allow sound, otherwise apply multiplier
 		FApp::SetVolumeMultiplier( bHasFocus ? 1.0f : FApp::GetUnfocusedVolumeMultiplier() );
@@ -481,6 +495,8 @@ namespace LinuxPlatformApplicationMisc
 
 float FLinuxPlatformApplicationMisc::GetDPIScaleFactorAtPoint(float X, float Y)
 {
+	float Scale = 1.0f;
+
 	if ((GIsEditor || IS_PROGRAM) && IsHighDPIAwarenessEnabled())
 	{
 		FDisplayMetrics DisplayMetrics;
@@ -488,30 +504,43 @@ float FLinuxPlatformApplicationMisc::GetDPIScaleFactorAtPoint(float X, float Y)
 		// find the monitor
 		int32 XInt = static_cast<int32>(X);
 		int32 YInt = static_cast<int32>(Y);
+		static bool bHaveShownDPIWarnings = false;
+		int NumWarningsShown = 0;
 		for(int Idx = 0, NumMonitors = DisplayMetrics.MonitorInfo.Num(); Idx < NumMonitors; ++Idx)
 		{
 			const FMonitorInfo & MonitorInfo = DisplayMetrics.MonitorInfo[Idx];
-
-			if (MonitorInfo.DisplayRect.Left <= XInt && MonitorInfo.DisplayRect.Right > XInt &&
-				MonitorInfo.DisplayRect.Top <= YInt && MonitorInfo.DisplayRect.Bottom > YInt)
+			float HorzDPI = 1.0f, VertDPI = 1.0f;
+			if (SDL_GetDisplayDPI(Idx, nullptr, &HorzDPI, &VertDPI) == 0)
 			{
-				float HorzDPI = 1.0f, VertDPI = 1.0f;
-				if (SDL_GetDisplayDPI(Idx, nullptr, &HorzDPI, &VertDPI) == 0)
+				if (MonitorInfo.DisplayRect.Left <= XInt && MonitorInfo.DisplayRect.Right > XInt &&
+					MonitorInfo.DisplayRect.Top <= YInt && MonitorInfo.DisplayRect.Bottom > YInt)
 				{
-					float Scale = LinuxPlatformApplicationMisc::QuantizeScale((HorzDPI + VertDPI) / 192.0f);	// average between two scales (divided by 96.0f)
+					Scale = LinuxPlatformApplicationMisc::QuantizeScale((HorzDPI + VertDPI) / 192.0f);	// average between two scales (divided by 96.0f)
 					UE_LOG(LogLinux, Verbose, TEXT("Scale at X=%f, Y=%f: %f (monitor=#%d, HDPI=%f (horz scale: %f), VDPI=%f (vert scale: %f))"), X, Y, Scale, Idx, HorzDPI, HorzDPI / 96.0f, VertDPI, VertDPI / 96.0f);
-					return Scale;
+
+					// There is a bug in the X11 RandR library in some versions of Linux that can return a bonkers scale.  Even on an 8K display,
+					// it's unlikely that we'd need more than a 4x scale, so capping there for now
+					if(Scale > 4.0f)
+						Scale = 1.0f;
 				}
-				else
+			}
+			else
+			{
+				if (!bHaveShownDPIWarnings)
 				{
-					// this can also happen for headless, so don't use Warning here
-					UE_LOG(LogLinux, Log, TEXT("Could not get DPI information for monitor #%d, assuming 1.0f"), Idx);
-					break;	// should fall-through to 1.0f
+					UE_LOG(LogLinux, Log, TEXT("Could not get DPI information for monitor #%d, assuming it to have 1.0f scale"), Idx);
+					++NumWarningsShown;
 				}
 			}
 		}
+
+		if(NumWarningsShown > 0)
+		{
+			bHaveShownDPIWarnings = true;
+		}
 	}
-	return 1.0f;
+
+	return Scale;
 }
 
 void FLinuxPlatformApplicationMisc::ClipboardCopy(const TCHAR* Str)

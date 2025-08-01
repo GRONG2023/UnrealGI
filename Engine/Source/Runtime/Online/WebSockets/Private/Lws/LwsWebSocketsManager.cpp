@@ -20,6 +20,8 @@
 #include "Misc/Fork.h"
 #include "Stats/Stats.h"
 
+LLM_DEFINE_TAG(WebSockets);
+
 namespace {
 	static const struct lws_extension LwsExtensions[] = {
 		{
@@ -53,6 +55,9 @@ FLwsWebSocketsManager::FLwsWebSocketsManager()
 
 	ThreadMinimumSleepTimeInSeconds = 0.0f;
 	GConfig->GetDouble(TEXT("WebSockets.LibWebSockets"), TEXT("ThreadMinimumSleepTimeInSeconds"), ThreadMinimumSleepTimeInSeconds, GEngineIni);
+
+	GConfig->GetBool(TEXT("LwsWebSocket"), TEXT("bDisableDomainAllowlist"), bDisableDomainAllowlist, GEngineIni);
+	GConfig->GetBool(TEXT("LwsWebSocket"), TEXT("bDisableCertValidation"), bDisableCertValidation, GEngineIni);
 }
 
 FLwsWebSocketsManager& FLwsWebSocketsManager::Get()
@@ -74,7 +79,7 @@ void FLwsWebSocketsManager::InitWebSockets(TArrayView<const FString> Protocols)
 
 		// We need to hold on to the converted strings
 		ANSICHAR* Converted = static_cast<ANSICHAR*>(FMemory::Malloc(ConvertName.Length() + 1));
-		FCStringAnsi::Strcpy(Converted, ConvertName.Length(), ConvertName.Get());
+		FCStringAnsi::Strcpy(Converted, ConvertName.Length(), (const ANSICHAR*)ConvertName.Get());
 		lws_protocols LwsProtocol;
 		FMemory::Memset(&LwsProtocol, 0, sizeof(LwsProtocol));
 		LwsProtocol.name = Converted;
@@ -108,13 +113,17 @@ void FLwsWebSocketsManager::InitWebSockets(TArrayView<const FString> Protocols)
 	ContextInfo.max_http_header_data2 = MaxHttpHeaderData;
 	ContextInfo.pt_serv_buf_size = MaxHttpHeaderData;
 	
+	int32 PingPongInterval = 0;
+	GConfig->GetInt(TEXT("WebSockets.LibWebSockets"), TEXT("PingPongInterval"), PingPongInterval, GEngineIni);
+	ContextInfo.ws_ping_pong_interval = PingPongInterval;
+
 	// HTTP proxy
 	const FString& ProxyAddress = FHttpModule::Get().GetProxyAddress();
 	TOptional<FTCHARToUTF8> Converter;
 	if (!ProxyAddress.IsEmpty())
 	{
 		Converter.Emplace(*ProxyAddress);
-		ContextInfo.http_proxy_address = Converter->Get();
+		ContextInfo.http_proxy_address = (const char*)Converter->Get();
 	}
 
 #if WITH_SSL
@@ -152,7 +161,7 @@ void FLwsWebSocketsManager::InitWebSockets(TArrayView<const FString> Protocols)
 	
 	int32 ThreadStackSize = 128 * 1024;
 	GConfig->GetInt(TEXT("WebSockets.LibWebSockets"), TEXT("ThreadStackSize"), ThreadStackSize, GEngineIni);
-	Thread = FForkProcessHelper::CreateForkableThread(this, TEXT("LibwebsocketsThread"), 128 * 1024, TPri_Normal, FPlatformAffinity::GetNoAffinityMask());
+	Thread = FForkProcessHelper::CreateForkableThread(this, TEXT("LibwebsocketsThread"), 128 * 1024, TPri_BelowNormal, FPlatformAffinity::GetNoAffinityMask());
 	if (!Thread)
 	{
 		UE_LOG(LogWebSockets, Error, TEXT("FLwsWebSocketsManager failed to initialize thread!"));
@@ -163,7 +172,7 @@ void FLwsWebSocketsManager::InitWebSockets(TArrayView<const FString> Protocols)
 
 	// Setup our game thread tick
 	FTickerDelegate TickDelegate = FTickerDelegate::CreateRaw(this, &FLwsWebSocketsManager::GameThreadTick);
-	TickHandle = FBackgroundableTicker::GetCoreTicker().AddTicker(TickDelegate, 0.0f);
+	TickHandle = FTSBackgroundableTicker::GetCoreTicker().AddTicker(TickDelegate, 0.0f);
 }
 
 void FLwsWebSocketsManager::ShutdownWebSockets()
@@ -171,7 +180,7 @@ void FLwsWebSocketsManager::ShutdownWebSockets()
 	QUICK_SCOPE_CYCLE_COUNTER(STAT_FLwsWebSocketsManager_ShutdownWebSockets);
 	if (TickHandle.IsValid())
 	{
-		FBackgroundableTicker::GetCoreTicker().RemoveTicker(TickHandle);
+		FTSBackgroundableTicker::GetCoreTicker().RemoveTicker(TickHandle);
 		TickHandle.Reset();
 	}
 
@@ -184,6 +193,11 @@ void FLwsWebSocketsManager::ShutdownWebSockets()
 
 	if (LwsContext)
 	{
+		if (!Sockets.IsEmpty())
+		{
+			lws_cancel_service(LwsContext);
+		}
+
 		lws_context_destroy(LwsContext);
 		LwsContext = nullptr;
 	}
@@ -237,8 +251,6 @@ uint32 FLwsWebSocketsManager::Run()
 void FLwsWebSocketsManager::Stop()
 {
 	ExitRequest.Set(true);
-	// Safe to call from other threads
-	lws_cancel_service(LwsContext);
 }
 
 void FLwsWebSocketsManager::Exit()
@@ -354,7 +366,7 @@ int FLwsWebSocketsManager::CallbackWrapper(lws* Connection, lws_callback_reasons
 void FLwsWebSocketsManager::Tick()
 {
 	QUICK_SCOPE_CYCLE_COUNTER(STAT_FLwsWebSocketsManager_Tick);
-	LLM_SCOPE(ELLMTag::Networking);
+	LLM_SCOPE_BYTAG(WebSockets);
 
 	{
 		FLwsWebSocket* SocketToStart;
@@ -398,7 +410,11 @@ TSharedRef<IWebSocket> FLwsWebSocketsManager::CreateWebSocket(const FString& Url
 		UpgradeHeaderString += FString::Printf(TEXT("%s: %s\r\n"), *OneHeader.Key, *OneHeader.Value);
 	}
 
-	FLwsWebSocketRef Socket = MakeShared<FLwsWebSocket>(Url, Protocols, UpgradeHeaderString);
+	// default memory limit for IWebSocket text messages
+	int TextMessageMemoryLimit = 1024 * 1024;
+	GConfig->GetInt(TEXT("WebSockets"), TEXT("TextMessageMemoryLimit"), TextMessageMemoryLimit, GEngineIni);
+
+	FLwsWebSocketRef Socket = MakeShared<FLwsWebSocket>(FLwsWebSocket::FPrivateToken{}, Url, Protocols, UpgradeHeaderString, TextMessageMemoryLimit);
 	return Socket;
 }
 

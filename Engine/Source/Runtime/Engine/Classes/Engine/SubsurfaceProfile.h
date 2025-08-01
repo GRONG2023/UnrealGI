@@ -7,6 +7,8 @@
 #include "RenderResource.h"
 #include "SubsurfaceProfile.generated.h"
 
+#define MAX_SUBSURFACE_PROFILE_COUNT 256
+
 // struct with all the settings we want in USubsurfaceProfile, separate to make it easer to pass this data around in the engine.
 USTRUCT(BlueprintType)
 struct FSubsurfaceProfileStruct
@@ -23,28 +25,42 @@ struct FSubsurfaceProfileStruct
 	* Controls how far light goes into the subsurface in the Red, Green and Blue channel. It is scaled by Mean Free path distance.
 	*/
 	UPROPERTY(Category = "Burley Normalized", EditAnywhere, BlueprintReadOnly, meta = (ClampMin = "0.001", UIMax = "1.0", ClampMax = "1.0", HideAlphaChannel, editcondition = "bEnableBurley"))
-		FLinearColor MeanFreePathColor; //MeanFreePathLength;
+	FLinearColor MeanFreePathColor; //MeanFreePathLength;
 	
 	/**
 	* Subsurface mean free path distance in world/unreal units (cm)
 	*/
 	UPROPERTY(Category = "Burley Normalized", EditAnywhere, BluePrintReadOnly, meta = (ClampMin = "0.1", UIMax = "50.0", ClampMax = "50.0", editcondition = "bEnableBurley"))
-		float MeanFreePathDistance;
+	float MeanFreePathDistance;
 
 	/**
 	* Control the scale of world/unreal units (cm)
 	*/
 	UPROPERTY(Category = "Burley Normalized", EditAnywhere, BlueprintReadOnly, meta = (ClampMin = "0.1", UIMax = "50.0", ClampMax = "50.0", editcondition = "bEnableBurley"))
-		float WorldUnitScale;
+	float WorldUnitScale;
 
 	/**
 	* Effective only when Burley subsurface scattering is enabled in cmd.
 	*/
-	UPROPERTY(Category = "Burley Normalized", EditAnywhere, BlueprintReadOnly)
+	UPROPERTY(Category = "Burley Normalized", EditAnywhere, BlueprintReadOnly, meta = (editcondition = "false", EditConditionHides))
 	bool  bEnableBurley;
 
+	/**
+	 * Switch to use Mean Free Path, otherwise use diffuse mean free path.
+	 */
+	UPROPERTY(Category = "Burley Normalized", EditAnywhere, BlueprintReadOnly, meta = (editcondition = "false", EditConditionHides))
+	bool  bEnableMeanFreePath;
+
+	/**
+	* Specifies the how much of the diffuse light gets into the material,
+	* can be seen as a per-channel mix factor between the original image,
+	* and the SSS-filtered image. It introduces Non-PBR looks.
+	*/
+	UPROPERTY(Category = "Burley Normalized", EditAnywhere, BlueprintReadOnly, meta = (HideAlphaChannel, editcondition = "bEnableBurley"))
+	FLinearColor Tint;
+
 	/** in world/unreal units (cm) */
-	UPROPERTY(Category = "SubsurfaceProfileStruct", EditAnywhere, BlueprintReadOnly, meta = (ClampMin = "0.1", UIMax = "50.0", ClampMax = "1000.0", editcondition = "!bEnableBurley"))
+	UPROPERTY(Category = "SubsurfaceProfileStruct", EditAnywhere, BlueprintReadOnly, meta = (ClampMin = "0.1", UIMax = "50.0", ClampMax = "1000.0", DeprecatedProperty, editcondition = "!bEnableBurley", EditConditionHides))
 	float ScatterRadius;
 
 	/**
@@ -52,7 +68,7 @@ struct FSubsurfaceProfileStruct
 	* can be seen as a per-channel mix factor between the original image,
 	* and the SSS-filtered image (called "strength" in SeparableSSS, default there: 0.48, 0.41, 0.28)
 	*/
-	UPROPERTY(Category = "SubsurfaceProfileStruct", EditAnywhere, BlueprintReadOnly, meta = (HideAlphaChannel, editcondition = "!bEnableBurley"))
+	UPROPERTY(Category = "SubsurfaceProfileStruct", EditAnywhere, BlueprintReadOnly, meta = (HideAlphaChannel, DeprecatedProperty, editcondition = "!bEnableBurley", EditConditionHides))
 	FLinearColor SubsurfaceColor;
 
 	/**
@@ -60,13 +76,13 @@ struct FSubsurfaceProfileStruct
 	* produced by the subsurface scattering events, can be used to fine tune the color of the gradients
 	* (called "falloff" in SeparableSSS, default there: 1, 0.37, 0.3)
 	*/
-	UPROPERTY(Category = "SubsurfaceProfileStruct", EditAnywhere, BlueprintReadOnly, meta = (HideAlphaChannel, editcondition = "!bEnableBurley"))
+	UPROPERTY(Category = "SubsurfaceProfileStruct", EditAnywhere, BlueprintReadOnly, meta = (HideAlphaChannel, DeprecatedProperty, editcondition = "!bEnableBurley", EditConditionHides))
 	FLinearColor FalloffColor;
 
-	UPROPERTY(Category = "SubsurfaceProfileStruct", EditAnywhere, BlueprintReadOnly, meta = (HideAlphaChannel))
+	UPROPERTY(Category = "Burley Normalized", EditAnywhere, BlueprintReadOnly, meta = (HideAlphaChannel))
 	FLinearColor BoundaryColorBleed;
 
-	UPROPERTY(Category = "Transmission", EditAnywhere, BlueprintReadOnly, meta = (ClampMin = "0.01", UIMax = "1.0", ClampMax = "1.0"))
+	UPROPERTY(Category = "Transmission", EditAnywhere, BlueprintReadOnly, meta = (ClampMin = "0.01", UIMax = "100.0", ClampMax = "100.0", SliderExponent="24"))
 	float ExtinctionScale;
 	
 	UPROPERTY(Category = "Transmission", EditAnywhere, BlueprintReadOnly, meta = (ClampMin = "0.01", UIMax = "0.99", ClampMax = "1.0"))
@@ -91,7 +107,7 @@ struct FSubsurfaceProfileStruct
 	* Transmission tint control. It is multiplied on the transmission results. Works only when Burley is enabled.
 	*/
 	UPROPERTY(Category = "Transmission", EditAnywhere, BlueprintReadOnly, meta = (ClampMin = "0.001", UIMax = "1.0", ClampMax = "1.0", HideAlphaChannel))
-		FLinearColor TransmissionTintColor;
+	FLinearColor TransmissionTintColor;
 
 	// constructor
 	FSubsurfaceProfileStruct()
@@ -115,6 +131,9 @@ struct FSubsurfaceProfileStruct
 		MeanFreePathDistance = 1.2f*2.229f;
 		WorldUnitScale = 0.1f;
 		TransmissionTintColor = FLinearColor(1.0f, 1.0f, 1.0f);
+		Tint = FLinearColor(1.0f, 1.0f, 1.0f);
+
+		bEnableMeanFreePath = false;
 	}
 
 	void Invalidate()
@@ -190,13 +209,15 @@ public:
 
 	// @return can be 0 if there is no SubsurfaceProfile
 	struct IPooledRenderTarget* GetTexture(FRHICommandListImmediate& RHICmdList);
+	struct IPooledRenderTarget* GetTexture();
 
+	struct IPooledRenderTarget* GetSSProfilesPreIntegratedTexture(class FRDGBuilder& GraphBuilder, EShaderPlatform ShaderPlatform);
 
 	//~ Begin FRenderResource Interface.
 	/**
 	* Release textures when device is lost/destroyed.
 	*/
-	virtual void ReleaseDynamicRHI() override;
+	virtual void ReleaseRHI() override;
 
 	// for debugging, can be removed
 	void Dump();
@@ -243,3 +264,21 @@ static const int32 SUBSURFACE_KERNEL_SIZE = 3;
 
 // lives on the render thread
 extern ENGINE_API TGlobalResource<FSubsurfaceProfileTexture> GSubsurfaceProfileTextureObject;
+
+// Initializes or updates the contents of the subsurface profile texture.
+ENGINE_API void UpdateSubsurfaceProfileTexture(class FRDGBuilder& GraphBuilder, EShaderPlatform ShaderPlatform);
+
+// Returns the subsurface profile texture if it exists, or null.
+ENGINE_API FRHITexture* GetSubsurfaceProfileTexture();
+
+// Returns the subsurface profile texture if it exists, or black.
+ENGINE_API FRHITexture* GetSubsurfaceProfileTextureWithFallback();
+
+// Returns the Preintegrated texture if it exists, or black.
+ENGINE_API FRHITexture* GetSSProfilesPreIntegratedTextureWithFallback();
+
+// Returns the subsurface profile ID shader parameter name
+ENGINE_API FName GetSubsurfaceProfileParameterName();
+
+// Returns the subsurface profile ID for a given Sub-surface Profile object
+ENGINE_API float GetSubsurfaceProfileId(const USubsurfaceProfile* In);

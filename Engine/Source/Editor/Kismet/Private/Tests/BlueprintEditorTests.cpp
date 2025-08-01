@@ -21,8 +21,9 @@
 #include "Engine/StaticMesh.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "Engine/BlueprintGeneratedClass.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Editor.h"
+#include "UObject/SavePackage.h"
 
 #include "Kismet2/KismetEditorUtilities.h"
 #include "EdGraphSchema_K2.h"
@@ -38,13 +39,13 @@
 #include "BlueprintEditorModes.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "ComponentAssetBroker.h"
-#include "ARFilter.h"
+#include "AssetRegistry/ARFilter.h"
 
 #include "ScopedTransaction.h"
 #include "ObjectTools.h"
 
 // Automation
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Tests/AutomationTestSettings.h"
 #include "Tests/AutomationEditorCommon.h"
 #include "Tests/AutomationEditorPromotionCommon.h"
@@ -221,7 +222,7 @@ namespace BlueprintEditorPromotionUtils
 		// Recompile skeleton because of the new component we added
 		FKismetEditorUtilities::GenerateBlueprintSkeleton(InBlueprint, true);
 
-		CurrentBlueprintEditor->UpdateSCSPreview(true);
+		CurrentBlueprintEditor->UpdateSubobjectPreview(true);
 
 		return NewNode;
 	}
@@ -1093,7 +1094,12 @@ namespace BlueprintEditorPromotionTestHelper
 				BlueprintPackage->SetDirtyFlag(true);
 				BlueprintPackage->FullyLoad();
 				const FString PackagePath = FEditorPromotionTestUtilities::GetGamePath() + TEXT("/") + BlueprintEditorPromotionUtils::BlueprintNameString;
-				bool bBlueprintSaved = UPackage::SavePackage(BlueprintPackage, NULL, RF_Standalone, *FPackageName::LongPackageNameToFilename(PackagePath, FPackageName::GetAssetPackageExtension()), GLog, nullptr, false, true, SAVE_None);
+				FSavePackageArgs SaveArgs;
+				SaveArgs.TopLevelFlags = RF_Standalone;
+				SaveArgs.Error = GLog;
+				bool bBlueprintSaved = UPackage::SavePackage(BlueprintPackage, nullptr,
+					*FPackageName::LongPackageNameToFilename(PackagePath, FPackageName::GetAssetPackageExtension()),
+					SaveArgs);
 				Test->TestTrue(*FString::Printf(TEXT("Blueprint saved successfully (%s)"), *BlueprintObject->GetName()), bBlueprintSaved);
 			}
 		}
@@ -1113,7 +1119,7 @@ namespace BlueprintEditorPromotionTestHelper
 
 				Test->AddInfo(TEXT("Promoted the return pin on the add mesh node to a variable"));
 
-				const FName OldVarName(TEXT("NewVar_0")); // Default variable name
+				const FName OldVarName(TEXT("NewVar")); // Default variable name
 				const FName NewVarName(TEXT("MyMesh"));
 				FBlueprintEditorUtils::RenameMemberVariable(BlueprintObject, OldVarName, NewVarName);
 				Test->TestNotEqual(TEXT("New variable was renamed"), FBlueprintEditorUtils::FindMemberVariableGuidByName(BlueprintObject, OldVarName), FBlueprintEditorUtils::FindMemberVariableGuidByName(BlueprintObject, NewVarName));

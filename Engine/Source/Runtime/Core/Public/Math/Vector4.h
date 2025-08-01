@@ -7,31 +7,59 @@
 #include "Math/UnrealMathUtility.h"
 #include "Containers/UnrealString.h"
 #include "Misc/Parse.h"
+#include "Misc/LargeWorldCoordinatesSerializer.h"
 #include "Logging/LogMacros.h"
 #include "Math/Vector2D.h"
 #include "Math/Vector.h"
 #include "Serialization/MemoryLayout.h"
 
+namespace UE
+{
+namespace Math
+{
+
 /**
  * A 4D homogeneous vector, 4x1 FLOATs, 16-byte aligned.
  */
-MS_ALIGN(16) struct FVector4
+template<typename T>
+struct alignas(16) TVector4
 {
-public:
+	// Can't have a TEMPLATE_REQUIRES in the declaration because of the forward declarations, so check for allowed types here.
+	static_assert(TIsFloatingPoint<T>::Value, "TVector4 only supports float and double types.");
 
-	/** The vector's X-component. */
-	float X;
-
-	/** The vector's Y-component. */
-	float Y;
-
-	/** The vector's Z-component. */
-	float Z;
-
-	/** The vector's W-component. */
-	float W;
 
 public:
+	using FReal = T;
+
+	union
+	{
+		struct
+		{
+			/** The vector's X-component. */
+			T X;
+
+			/** The vector's Y-component. */
+			T Y;
+
+			/** The vector's Z-component. */
+			T Z;
+
+			/** The vector's W-component. */
+			T W;
+		};
+
+		UE_DEPRECATED(all, "For internal use only")
+		T XYZW[4];
+	};
+
+public:
+
+	/**
+	 * Constructor from 3D TVector. W is set to 1.
+	 *
+	 * @param InVector 3D Vector to set first three components.
+	 */
+	TVector4(const UE::Math::TVector<T>& InVector);
 
 	/**
 	 * Constructor.
@@ -39,14 +67,60 @@ public:
 	 * @param InVector 3D Vector to set first three components.
 	 * @param InW W Coordinate.
 	 */
-	FVector4(const FVector& InVector, float InW = 1.0f);
+	template<typename FArg, TEMPLATE_REQUIRES(std::is_arithmetic<FArg>::value)>
+	FORCEINLINE TVector4(const UE::Math::TVector<T>& InVector, FArg InW)
+		: X(InVector.X)
+		, Y(InVector.Y)
+		, Z(InVector.Z)
+		, W((T)InW)
+	{
+		DiagnosticCheckNaN();
+	}
+
+	/**
+	 * Constructor allowing copying of an TVector4 whilst setting up a new W component.
+	 * @param InVector 4D Vector to set first three components.
+	 * @param InOverrideW Replaces W Coordinate of InVector.
+	 */
+
+	template<typename FArg, TEMPLATE_REQUIRES(std::is_arithmetic<FArg>::value)>
+	FORCEINLINE TVector4(const UE::Math::TVector4<T>& InVector, FArg OverrideW)
+		: X(InVector.X)
+		, Y(InVector.Y)
+		, Z(InVector.Z)
+		, W((T)OverrideW)
+	{
+		DiagnosticCheckNaN();
+	}
 
 	/**
 	 * Creates and initializes a new vector from a color value.
 	 *
 	 * @param InColour Color used to set vector.
 	 */
-	FVector4(const FLinearColor& InColor);
+	FORCEINLINE TVector4(const FLinearColor& InColor)
+		: X(InColor.R)
+		, Y(InColor.G)
+		, Z(InColor.B)
+		, W(InColor.A)
+	{
+		DiagnosticCheckNaN();
+	}
+
+	/**
+	 * Creates and initializes a new vector from a color RGB and W
+	 *
+	 * @param InColour Color used to set XYZ.
+	 * @param InOverrideW
+	 */
+	FORCEINLINE TVector4(const FLinearColor& InColor, T InOverrideW)
+		: X(InColor.R)
+		, Y(InColor.G)
+		, Z(InColor.B)
+		, W(InOverrideW)
+	{
+		DiagnosticCheckNaN();
+	}
 
 	/**
 	 * Creates and initializes a new vector from the specified components.
@@ -56,7 +130,7 @@ public:
 	 * @param InZ Z Coordinate.
 	 * @param InW W Coordinate.
 	 */
-	explicit FVector4(float InX = 0.0f, float InY = 0.0f, float InZ = 0.0f, float InW = 1.0f);
+	explicit TVector4(T InX = 0.0f, T InY = 0.0f, T InZ = 0.0f, T InW = 1.0f);
 
 	/**
 	 * Creates and initializes a new vector from the specified 2D vectors.
@@ -64,23 +138,42 @@ public:
 	 * @param InXY A 2D vector holding the X- and Y-components.
 	 * @param InZW A 2D vector holding the Z- and W-components.
 	 */
-	explicit FVector4(FVector2D InXY, FVector2D InZW);
+	explicit TVector4(TVector2<T> InXY, TVector2<T> InZW);
 
 	/**
 	 * Creates and initializes a new vector from an int vector value.
 	 *
 	 * @param InVector IntVector used to set vector.
 	 */
-	FVector4(const FIntVector4& InVector);
+	TVector4(const FIntVector4& InVector);
 
 	/**
 	 * Creates and initializes a new vector to zero.
 	 *
 	 * @param EForceInit Force Init Enum.
 	 */
-	explicit FVector4(EForceInit);
+	explicit TVector4(EForceInit);
+
+	/**
+	 * Creates an uninitialized new vector.
+	 *
+	 * @param ENoInit Force uninitialized enum.
+	 */
+	TVector4(ENoInit);
 
 public:
+
+	// To satisfy UE::Geometry type
+	static TVector4<T> Zero()
+	{
+		return TVector4(T(0), T(0), T(0), T(0));
+	}
+
+	// To satisfy UE::Geometry type
+	static TVector4<T> One()
+	{
+		return TVector4(T(1), T(1), T(1), T(1));
+	}
 
 	/**
 	 * Access a specific component of the vector.
@@ -88,7 +181,7 @@ public:
 	 * @param ComponentIndex The index of the component.
 	 * @return Reference to the desired component.
 	 */
-	FORCEINLINE float& operator[](int32 ComponentIndex);
+	FORCEINLINE T& operator[](int32 ComponentIndex);
 
 	/**
 	 * Access a specific component of the vector.
@@ -96,7 +189,7 @@ public:
 	 * @param ComponentIndex The index of the component.
 	 * @return Copy of the desired component.
 	 */
-	FORCEINLINE float operator[](int32 ComponentIndex) const;
+	FORCEINLINE T operator[](int32 ComponentIndex) const;
 
 	// Unary operators.
 
@@ -105,7 +198,7 @@ public:
 	 *
 	 * @return A negated copy of the vector.
 	 */
-	FORCEINLINE FVector4 operator-() const;
+	FORCEINLINE TVector4<T> operator-() const;
 
 	/**
 	 * Gets the result of adding a vector to this.
@@ -113,7 +206,7 @@ public:
 	 * @param V The vector to add.
 	 * @return The result of vector addition.
 	 */
-	FORCEINLINE FVector4 operator+(const FVector4& V) const;
+	FORCEINLINE TVector4<T> operator+(const TVector4<T>& V) const;
 
 	/**
 	 * Adds another vector to this one.
@@ -121,7 +214,7 @@ public:
 	 * @param V The other vector to add.
 	 * @return Copy of the vector after addition.
 	 */
-	FORCEINLINE FVector4 operator+=(const FVector4& V);
+	FORCEINLINE TVector4<T> operator+=(const TVector4<T>& V);
 
 	/**
 	 * Gets the result of subtracting a vector from this.
@@ -129,7 +222,7 @@ public:
 	 * @param V The vector to subtract.
 	 * @return The result of vector subtraction.
 	 */
-	FORCEINLINE FVector4 operator-(const FVector4& V) const;
+	FORCEINLINE TVector4<T> operator-(const TVector4<T>& V) const;
 
 	/**
 	 * Subtracts another vector to this one.
@@ -137,7 +230,7 @@ public:
 	 * @param V The other vector to subtract.
 	 * @return Copy of the vector after subtraction.
 	 */
-	FORCEINLINE FVector4 operator-=(const FVector4& V);
+	FORCEINLINE TVector4<T> operator-=(const TVector4<T>& V);
 
 	/**
 	 * Gets the result of scaling this vector.
@@ -145,7 +238,11 @@ public:
 	 * @param Scale The scaling factor.
 	 * @return The result of vector scaling.
 	 */
-	FORCEINLINE FVector4 operator*(float Scale) const;
+	template<typename FArg, TEMPLATE_REQUIRES(std::is_arithmetic<FArg>::value)>
+	FORCEINLINE TVector4<T> operator*(FArg Scale) const
+	{
+		return TVector4(X * Scale, Y * Scale, Z * Scale, W * Scale);
+	}
 
 	/**
 	 * Gets the result of dividing this vector.
@@ -153,7 +250,12 @@ public:
 	 * @param Scale What to divide by.
 	 * @return The result of division.
 	 */
-	FVector4 operator/(float Scale) const;
+	template<typename FArg, TEMPLATE_REQUIRES(std::is_arithmetic<FArg>::value)>
+	FORCEINLINE TVector4<T> operator/(FArg Scale) const
+	{
+		const T RScale = T(1.0f) / Scale;
+		return TVector4(X * RScale, Y * RScale, Z * RScale, W * RScale);
+	}
 
 	/**
 	 * Gets the result of dividing this vector.
@@ -161,7 +263,7 @@ public:
 	 * @param V What to divide by.
 	 * @return The result of division.
 	 */
-	FVector4 operator/(const FVector4& V) const;
+	TVector4<T> operator/(const TVector4<T>& V) const;
 
 	/**
 	 * Gets the result of multiplying a vector with this.
@@ -169,7 +271,7 @@ public:
 	 * @param V The vector to multiply.
 	 * @return The result of vector multiplication.
 	 */
-	FVector4 operator*(const FVector4& V) const;
+	TVector4<T> operator*(const TVector4<T>& V) const;
 
 	/**
 	 * Gets the result of multiplying a vector with another Vector (component wise).
@@ -177,7 +279,7 @@ public:
 	 * @param V The vector to multiply.
 	 * @return The result of vector multiplication.
 	 */
-	FVector4 operator*=(const FVector4& V);
+	TVector4<T> operator*=(const TVector4<T>& V);
 
 	/**
 	 * Gets the result of dividing a vector with another Vector (component wise).
@@ -185,7 +287,7 @@ public:
 	 * @param V The vector to divide with.
 	 * @return The result of vector multiplication.
 	 */
-	FVector4 operator/=(const FVector4& V);
+	TVector4<T> operator/=(const TVector4<T>& V);
 
 	/**
 	 * Gets the result of scaling this vector.
@@ -193,42 +295,27 @@ public:
 	 * @param Scale The scaling factor.
 	 * @return The result of vector scaling.
 	 */
-	FVector4 operator*=(float S);
-
-	/**
-	 * Calculates 3D Dot product of two 4D vectors.
-	 *
-	 * @param V1 The first vector.
-	 * @param V2 The second vector.
-	 * @return The 3D Dot product.
-	 */
-	friend FORCEINLINE float Dot3(const FVector4& V1, const FVector4& V2)
+	template<typename FArg, TEMPLATE_REQUIRES(std::is_arithmetic<FArg>::value)>
+	FORCEINLINE TVector4<T> operator*=(FArg Scale)
 	{
-		return V1.X*V2.X + V1.Y*V2.Y + V1.Z*V2.Z;
+		X *= Scale; Y *= Scale; Z *= Scale; W *= Scale;
+		DiagnosticCheckNaN();
+		return *this;
 	}
 
 	/**
-	 * Calculates 4D Dot product.
+	 * Gets the result of scaling this vector by 1/Scale.
 	 *
-	 * @param V1 The first vector.
-	 * @param V2 The second vector.
-	 * @return The 4D Dot Product.
+	 * @param Scale The inverse scaling factor.
+	 * @return The result of vector scaling by 1/Scale.
 	 */
-	friend FORCEINLINE float Dot4(const FVector4& V1, const FVector4& V2)
+	template<typename FArg, TEMPLATE_REQUIRES(std::is_arithmetic<FArg>::value)>
+	FORCEINLINE TVector4<T> operator/=(FArg Scale)
 	{
-		return V1.X*V2.X + V1.Y*V2.Y + V1.Z*V2.Z + V1.W*V2.W;
-	}
-
-	/**
-	 * Scales a vector.
-	 *
-	 * @param Scale The scaling factor.
-	 * @param V The vector to scale.
-	 * @return The result of scaling.
-	 */
-	friend FORCEINLINE FVector4 operator*(float Scale, const FVector4& V)
-	{
-		return V.operator*(Scale);
+		const T RV = T(1.0f) / Scale;
+		X *= RV; Y *= RV; Z *= RV; W *= RV;
+		DiagnosticCheckNaN();
+		return *this;
 	}
 
 	/**
@@ -237,7 +324,7 @@ public:
 	 * @param V The other vector.
 	 * @return true if the two vectors are the same, otherwise false.
 	 */
-	bool operator==(const FVector4& V) const;
+	bool operator==(const TVector4<T>& V) const;
 
 	/**
 	 * Checks for inequality against another vector.
@@ -245,7 +332,7 @@ public:
 	 * @param V The other vector.
 	 * @return true if the two vectors are different, otherwise false.
 	 */
-	bool operator!=(const FVector4& V) const;
+	bool operator!=(const TVector4<T>& V) const;
 
 	/**
 	 * Calculate Cross product between this and another vector.
@@ -253,7 +340,7 @@ public:
 	 * @param V The other vector.
 	 * @return The Cross product.
 	 */
-	FVector4 operator^(const FVector4& V) const;
+	TVector4<T> operator^(const TVector4<T>& V) const;
 
 public:
 
@@ -265,7 +352,7 @@ public:
 	 * @param Index The index of the component.
 	 * @return Reference to the component.
 	 */
-	float& Component(int32 Index);
+	T& Component(int32 Index);
 
 	/**
 	* Gets a specific component of the vector.
@@ -273,7 +360,7 @@ public:
 	* @param Index The index of the component.
 	* @return Reference to the component.
 	*/
-	const float& Component(int32 Index) const;
+	const T& Component(int32 Index) const;
 
 	/**
 	 * Error tolerant comparison.
@@ -282,7 +369,7 @@ public:
 	 * @param Tolerance Error Tolerance.
 	 * @return true if the two vectors are equal within specified tolerance, otherwise false.
 	 */
-	bool Equals(const FVector4& V, float Tolerance=KINDA_SMALL_NUMBER) const;
+	bool Equals(const TVector4<T>& V, T Tolerance=UE_KINDA_SMALL_NUMBER) const;
 
 	/**
 	 * Check if the vector is of unit length, with specified tolerance.
@@ -290,7 +377,7 @@ public:
 	 * @param LengthSquaredTolerance Tolerance against squared length.
 	 * @return true if the vector is a unit vector within the specified tolerance.
 	 */
-	bool IsUnit3(float LengthSquaredTolerance = KINDA_SMALL_NUMBER) const;
+	bool IsUnit3(T LengthSquaredTolerance = UE_KINDA_SMALL_NUMBER) const;
 
 	/**
 	 * Get a textual representation of the vector.
@@ -301,7 +388,7 @@ public:
 
 	/**
 	 * Initialize this Vector based on an FString. The String is expected to contain X=, Y=, Z=, W=.
-	 * The FVector4 will be bogus when InitFromString returns false.
+	 * The TVector4 will be bogus when InitFromString returns false.
 	 *
 	 * @param InSourceString	FString containing the vector values.
 	 * @return true if the X,Y,Z values were read successfully; false otherwise.
@@ -314,27 +401,27 @@ public:
 	 * @param Tolerance Minimum squared length of vector for normalization.
 	 * @return A normalized copy of the vector or a zero vector.
 	 */
-	FORCEINLINE FVector4 GetSafeNormal(float Tolerance = SMALL_NUMBER) const;
+	FORCEINLINE TVector4 GetSafeNormal(T Tolerance = UE_SMALL_NUMBER) const;
 
 	/**
 	 * Calculates normalized version of vector without checking if it is non-zero.
 	 *
 	 * @return Normalized version of vector.
 	 */
-	FORCEINLINE FVector4 GetUnsafeNormal3() const;
+	FORCEINLINE TVector4 GetUnsafeNormal3() const;
 
 	/**
 	 * Return the FRotator orientation corresponding to the direction in which the vector points.
 	 * Sets Yaw and Pitch to the proper numbers, and sets roll to zero because the roll can't be determined from a vector.
 	 * @return FRotator from the Vector's direction.
 	 */
-	CORE_API FRotator ToOrientationRotator() const;
+	CORE_API TRotator<T> ToOrientationRotator() const;
 
 	/**
 	 * Return the Quaternion orientation corresponding to the direction in which the vector points.
 	 * @return Quaternion from the Vector's direction.
 	 */
-	CORE_API FQuat ToOrientationQuat() const;
+	CORE_API TQuat<T> ToOrientationQuat() const;
 
 	/**
 	 * Return the FRotator orientation corresponding to the direction in which the vector points.
@@ -343,7 +430,10 @@ public:
 	 * @return FRotator from the Vector's direction.
 	 * @see ToOrientationRotator()
 	 */
-	CORE_API FRotator Rotation() const;
+	FORCEINLINE TRotator<T> Rotation() const
+	{
+		return ToOrientationRotator();
+	}
 
 	/**
 	 * Set all of the vectors coordinates.
@@ -353,58 +443,58 @@ public:
 	 * @param InZ New Z Coordinate.
 	 * @param InW New W Coordinate.
 	 */
-	FORCEINLINE void Set(float InX, float InY, float InZ, float InW);
+	FORCEINLINE void Set(T InX, T InY, T InZ, T InW);
 
 	/**
 	 * Get the length of this vector not taking W component into account.
 	 *
 	 * @return The length of this vector.
 	 */
-	float Size3() const;
+	T Size3() const;
 
 	/**
 	 * Get the squared length of this vector not taking W component into account.
 	 *
 	 * @return The squared length of this vector.
 	 */
-	float SizeSquared3() const;
+	T SizeSquared3() const;
 
 	/**
 	 * Get the length (magnitude) of this vector, taking the W component into account
 	 *
 	 * @return The length of this vector
 	 */
-	float Size() const;
+	T Size() const;
 
 	/**
 	 * Get the squared length of this vector, taking the W component into account
 	 *
 	 * @return The squared length of this vector
 	 */
-	float SizeSquared() const;
+	T SizeSquared() const;
 
 	/** Utility to check if there are any non-finite values (NaN or Inf) in this vector. */
 	bool ContainsNaN() const;
 
 	/** Utility to check if all of the components of this vector are nearly zero given the tolerance. */
-	bool IsNearlyZero3(float Tolerance = KINDA_SMALL_NUMBER) const;
+	bool IsNearlyZero3(T Tolerance = UE_KINDA_SMALL_NUMBER) const;
 
 	/** Reflect vector. */
-	FVector4 Reflect3(const FVector4& Normal) const;
+	TVector4<T> Reflect3(const TVector4<T>& Normal) const;
 
 	/**
 	 * Find good arbitrary axis vectors to represent U and V axes of a plane,
 	 * given just the normal.
 	 */
-	void FindBestAxisVectors3(FVector4& Axis1, FVector4& Axis2) const;
+	void FindBestAxisVectors3(TVector4<T>& Axis1, TVector4<T>& Axis2) const;
 
 #if ENABLE_NAN_DIAGNOSTIC
 	FORCEINLINE void DiagnosticCheckNaN()
 	{
 		if (ContainsNaN())
 		{
-			logOrEnsureNanError(TEXT("FVector contains NaN: %s"), *ToString());
-			*this = FVector4(FVector::ZeroVector);
+			logOrEnsureNanError(TEXT("FVector4 contains NaN: %s"), *ToString());
+			*this = TVector4();
 
 		}
 	}
@@ -412,19 +502,9 @@ public:
 	FORCEINLINE void DiagnosticCheckNaN() { }
 #endif
 
+private:
+	bool SerializeFromVector3(FName StructTag, FArchive&Ar);
 public:
-
-	/**
-	 * Serializer.
-	 *
-	 * @param Ar The Serialization Archive.
-	 * @param V The vector being serialized.
-	 * @return Reference to the Archive after serialization.
-	 */
-	friend FArchive& operator<<(FArchive& Ar, FVector4& V)
-	{
-		return Ar << V.X << V.Y << V.Z << V.W;
-	}
 
 	bool Serialize(FArchive& Ar)
 	{
@@ -432,49 +512,74 @@ public:
 		return true;
 	}
 
-} GCC_ALIGN(16);
+	bool SerializeFromMismatchedTag(FName StructTag, FArchive& Ar);
+	
+	// Conversion from other type: double->float
+	template<typename FArg, TEMPLATE_REQUIRES(std::is_same_v<FArg, double> && std::is_same_v<T, float>)>
+	explicit TVector4(const TVector4<FArg>& From) : TVector4<T>((T)From.X, (T)From.Y, (T)From.Z, (T)From.W) {}
 
-DECLARE_INTRINSIC_TYPE_LAYOUT(FVector4);
+	// Conversion from other type: float->double
+	template<typename FArg, TEMPLATE_REQUIRES(std::is_same_v<FArg, float> && std::is_same_v<T, double>)>
+	explicit TVector4(const TVector4<FArg>& From) : TVector4<T>((T)From.X, (T)From.Y, (T)From.Z, (T)From.W) {}
 
+	/**
+	 * Creates a hash value from a TVector4.
+	 *
+	 * @param Vector the vector to create a hash value for
+	 *
+	 * @return The hash value from the components
+	 */
+	FORCEINLINE friend uint32 GetTypeHash(const UE::Math::TVector4<T>& Vector)
+	{
+		return FCrc::MemCrc_DEPRECATED(&Vector, sizeof(Vector));
+	}
+};
 
 /**
- * Creates a hash value from a FVector4.
+ * Serializer.
  *
- * @param Vector the vector to create a hash value for
- *
- * @return The hash value from the components
+ * @param Ar The Serialization Archive.
+ * @param V The vector being serialized.
+ * @return Reference to the Archive after serialization.
  */
-FORCEINLINE uint32 GetTypeHash(const FVector4& Vector)
+inline FArchive& operator<<(FArchive& Ar, TVector4<float>& V)
 {
-	// Note: this assumes there's no padding in FVector that could contain uncompared data.
-	return FCrc::MemCrc_DEPRECATED(&Vector,sizeof(Vector));
+	return Ar << V.X << V.Y << V.Z << V.W;
+}
+
+inline FArchive& operator<<(FArchive& Ar, TVector4<double>& V)
+{
+	if (Ar.UEVer() >= EUnrealEngineObjectUE5Version::LARGE_WORLD_COORDINATES)
+	{
+		Ar << V.X << V.Y << V.Z << V.W;
+	}
+	else
+	{
+		checkf(Ar.IsLoading(), TEXT("float -> double conversion applied outside of load!"));
+		// Stored as floats, so serialize float and copy.
+		float X, Y, Z, W;
+		Ar << X << Y << Z << W;
+		V = TVector4<double>(X, Y, Z, W);
+	}
+	return Ar;
 }
 
 
-/* FVector4 inline functions
+/* TVector4 inline functions
  *****************************************************************************/
 
-FORCEINLINE FVector4::FVector4(const FVector& InVector,float InW)
+template<typename T>
+FORCEINLINE TVector4<T>::TVector4(const UE::Math::TVector<T>& InVector)
 	: X(InVector.X)
 	, Y(InVector.Y)
 	, Z(InVector.Z)
-	, W(InW)
+	, W(1.0f)
 {
 	DiagnosticCheckNaN();
 }
 
-
-FORCEINLINE FVector4::FVector4(const FLinearColor& InColor)
-	: X(InColor.R)
-	, Y(InColor.G)
-	, Z(InColor.B)
-	, W(InColor.A)
-{
-	DiagnosticCheckNaN();
-}
-
-
-FORCEINLINE FVector4::FVector4(float InX,float InY,float InZ,float InW)
+template<typename T>
+FORCEINLINE TVector4<T>::TVector4(T InX, T InY, T InZ, T InW)
 	: X(InX)
 	, Y(InY)
 	, Z(InZ)
@@ -484,7 +589,8 @@ FORCEINLINE FVector4::FVector4(float InX,float InY,float InZ,float InW)
 }
 
 
-FORCEINLINE FVector4::FVector4(EForceInit)
+template<typename T>
+FORCEINLINE TVector4<T>::TVector4(EForceInit)
 	: X(0.f)
 	, Y(0.f)
 	, Z(0.f)
@@ -494,7 +600,14 @@ FORCEINLINE FVector4::FVector4(EForceInit)
 }
 
 
-FORCEINLINE FVector4::FVector4(FVector2D InXY, FVector2D InZW)
+template<typename T>
+FORCEINLINE TVector4<T>::TVector4(ENoInit)
+{
+}
+
+
+template<typename T>
+FORCEINLINE TVector4<T>::TVector4(TVector2<T> InXY, TVector2<T> InZW)
 	: X(InXY.X)
 	, Y(InXY.Y)
 	, Z(InZW.X)
@@ -503,27 +616,35 @@ FORCEINLINE FVector4::FVector4(FVector2D InXY, FVector2D InZW)
 	DiagnosticCheckNaN();
 }
 
-FORCEINLINE FVector4::FVector4(const FIntVector4& InVector)
-	: X((float)InVector.X)
-	, Y((float)InVector.Y)
-	, Z((float)InVector.Z)
-	, W((float)InVector.W)
+template<typename T>
+FORCEINLINE TVector4<T>::TVector4(const FIntVector4& InVector)
+	: X((T)InVector.X)
+	, Y((T)InVector.Y)
+	, Z((T)InVector.Z)
+	, W((T)InVector.W)
 {
 }
 
-FORCEINLINE float& FVector4::operator[](int32 ComponentIndex)
+template<typename T>
+FORCEINLINE T& TVector4<T>::operator[](int32 ComponentIndex)
 {
-	return (&X)[ ComponentIndex ];
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	return XYZW[ ComponentIndex ];
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 
-FORCEINLINE float FVector4::operator[](int32 ComponentIndex) const
+template<typename T>
+FORCEINLINE T TVector4<T>::operator[](int32 ComponentIndex) const
 {
-	return (&X)[ ComponentIndex ];
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	return XYZW[ ComponentIndex ];
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 
-FORCEINLINE void FVector4::Set(float InX, float InY, float InZ, float InW)
+template<typename T>
+FORCEINLINE void TVector4<T>::Set(T InX, T InY, T InZ, T InW)
 {
 	X = InX;
 	Y = InY;
@@ -534,19 +655,22 @@ FORCEINLINE void FVector4::Set(float InX, float InY, float InZ, float InW)
 }
 
 
-FORCEINLINE FVector4 FVector4::operator-() const
+template<typename T>
+FORCEINLINE TVector4<T> TVector4<T>::operator-() const
 {
-	return FVector4(-X, -Y, -Z, -W);
+	return TVector4(-X, -Y, -Z, -W);
 }
 
 
-FORCEINLINE FVector4 FVector4::operator+(const FVector4& V) const
+template<typename T>
+FORCEINLINE TVector4<T> TVector4<T>::operator+(const TVector4<T>& V) const
 {
-	return FVector4(X + V.X, Y + V.Y, Z + V.Z, W + V.W);
+	return TVector4(X + V.X, Y + V.Y, Z + V.Z, W + V.W);
 }
 
 
-FORCEINLINE FVector4 FVector4::operator+=(const FVector4& V)
+template<typename T>
+FORCEINLINE TVector4<T> TVector4<T>::operator+=(const TVector4<T>& V)
 {
 	X += V.X; Y += V.Y; Z += V.Z; W += V.W;
 	DiagnosticCheckNaN();
@@ -554,13 +678,15 @@ FORCEINLINE FVector4 FVector4::operator+=(const FVector4& V)
 }
 
 
-FORCEINLINE FVector4 FVector4::operator-(const FVector4& V) const
+template<typename T>
+FORCEINLINE TVector4<T> TVector4<T>::operator-(const TVector4<T>& V) const
 {
-	return FVector4(X - V.X, Y - V.Y, Z - V.Z, W - V.W);
+	return TVector4(X - V.X, Y - V.Y, Z - V.Z, W - V.W);
 }
 
 
-FORCEINLINE FVector4 FVector4::operator-=(const FVector4& V)
+template<typename T>
+FORCEINLINE TVector4<T> TVector4<T>::operator-=(const TVector4<T>& V)
 {
 	X -= V.X; Y -= V.Y; Z -= V.Z; W -= V.W;
 	DiagnosticCheckNaN();
@@ -568,71 +694,71 @@ FORCEINLINE FVector4 FVector4::operator-=(const FVector4& V)
 }
 
 
-FORCEINLINE FVector4 FVector4::operator*(float Scale) const
+template<typename T>
+FORCEINLINE TVector4<T> TVector4<T>::operator*(const TVector4<T>& V) const
 {
-	return FVector4(X * Scale, Y * Scale, Z * Scale, W * Scale);
+	return TVector4(X * V.X, Y * V.Y, Z * V.Z, W * V.W);
 }
 
 
-FORCEINLINE FVector4 FVector4::operator/(float Scale) const
+template<typename T>
+FORCEINLINE TVector4<T> TVector4<T>::operator^(const TVector4<T>& V) const
 {
-	const float RScale = 1.f/Scale;
-	return FVector4(X * RScale, Y * RScale, Z * RScale, W * RScale);
-}
-
-
-FORCEINLINE FVector4 FVector4::operator*(const FVector4& V) const
-{
-	return FVector4(X * V.X, Y * V.Y, Z * V.Z, W * V.W);
-}
-
-
-FORCEINLINE FVector4 FVector4::operator^(const FVector4& V) const
-{
-	return FVector4(
+	return TVector4(
 		Y * V.Z - Z * V.Y,
 		Z * V.X - X * V.Z,
 		X * V.Y - Y * V.X,
-		0.0f
+		T(0.0f)
 	);
 }
 
 
-FORCEINLINE float& FVector4::Component(int32 Index)
+template<typename T>
+FORCEINLINE T& TVector4<T>::Component(int32 Index)
 {
-	return (&X)[Index];
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	return XYZW[Index];
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
-FORCEINLINE const float& FVector4::Component(int32 Index) const
+template<typename T>
+FORCEINLINE const T& TVector4<T>::Component(int32 Index) const
 {
-	return (&X)[Index];
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	return XYZW[Index];
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
-FORCEINLINE bool FVector4::operator==(const FVector4& V) const
+template<typename T>
+FORCEINLINE bool TVector4<T>::operator==(const TVector4<T>& V) const
 {
 	return ((X == V.X) && (Y == V.Y) && (Z == V.Z) && (W == V.W));
 }
 
 
-FORCEINLINE bool FVector4::operator!=(const FVector4& V) const
+template<typename T>
+FORCEINLINE bool TVector4<T>::operator!=(const TVector4<T>& V) const
 {
 	return ((X != V.X) || (Y != V.Y) || (Z != V.Z) || (W != V.W));
 }
 
 
-FORCEINLINE bool FVector4::Equals(const FVector4& V, float Tolerance) const
+template<typename T>
+FORCEINLINE bool TVector4<T>::Equals(const TVector4<T>& V, T Tolerance) const
 {
 	return FMath::Abs(X-V.X) <= Tolerance && FMath::Abs(Y-V.Y) <= Tolerance && FMath::Abs(Z-V.Z) <= Tolerance && FMath::Abs(W-V.W) <= Tolerance;
 }
 
 
-FORCEINLINE FString FVector4::ToString() const
+template<typename T>
+FORCEINLINE FString TVector4<T>::ToString() const
 {
 	return FString::Printf(TEXT("X=%3.3f Y=%3.3f Z=%3.3f W=%3.3f"), X, Y, Z, W);
 }
 
 
-FORCEINLINE bool FVector4::InitFromString(const FString& InSourceString)
+template<typename T>
+FORCEINLINE bool TVector4<T>::InitFromString(const FString& InSourceString)
 {
 	X = Y = Z = 0;
 	W = 1.0f;
@@ -647,54 +773,62 @@ FORCEINLINE bool FVector4::InitFromString(const FString& InSourceString)
 }
 
 
-FORCEINLINE FVector4 FVector4::GetSafeNormal(float Tolerance) const
+template<typename T>
+FORCEINLINE TVector4<T> TVector4<T>::GetSafeNormal(T Tolerance) const
 {
-	const float SquareSum = X*X + Y*Y + Z*Z;
+	const T SquareSum = X*X + Y*Y + Z*Z;
 	if(SquareSum > Tolerance)
 	{
-		const float Scale = FMath::InvSqrt(SquareSum);
-		return FVector4(X*Scale, Y*Scale, Z*Scale, 0.0f);
+		const T Scale = FMath::InvSqrt(SquareSum);
+		return TVector4(X*Scale, Y*Scale, Z*Scale, 0.0f);
 	}
-	return FVector4(0.f);
+	return TVector4(T(0.f));
 }
 
 
-FORCEINLINE FVector4 FVector4::GetUnsafeNormal3() const
+template<typename T>
+FORCEINLINE TVector4<T> TVector4<T>::GetUnsafeNormal3() const
 {
-	const float Scale = FMath::InvSqrt(X*X+Y*Y+Z*Z);
-	return FVector4(X*Scale, Y*Scale, Z*Scale, 0.0f);
+	const T Scale = FMath::InvSqrt(X*X+Y*Y+Z*Z);
+	return TVector4(X*Scale, Y*Scale, Z*Scale, 0.0f);
 }
 
 
-FORCEINLINE float FVector4::Size3() const
+template<typename T>
+FORCEINLINE T TVector4<T>::Size3() const
 {
 	return FMath::Sqrt(X*X + Y*Y + Z*Z);
 }
 
 
-FORCEINLINE float FVector4::SizeSquared3() const
+template<typename T>
+FORCEINLINE T TVector4<T>::SizeSquared3() const
 {
 	return X*X + Y*Y + Z*Z;
 }
 
-FORCEINLINE float FVector4::Size() const
+template<typename T>
+FORCEINLINE T TVector4<T>::Size() const
 {
 	return FMath::Sqrt(X*X + Y*Y + Z*Z + W*W);
 }
 
-FORCEINLINE float FVector4::SizeSquared() const
+template<typename T>
+FORCEINLINE T TVector4<T>::SizeSquared() const
 {
 	return X*X + Y*Y + Z*Z + W*W;
 }
 
 
-FORCEINLINE bool FVector4::IsUnit3(float LengthSquaredTolerance) const
+template<typename T>
+FORCEINLINE bool TVector4<T>::IsUnit3(T LengthSquaredTolerance) const
 {
 	return FMath::Abs(1.0f - SizeSquared3()) < LengthSquaredTolerance;
 }
 
 
-FORCEINLINE bool FVector4::ContainsNaN() const
+template<typename T>
+FORCEINLINE bool TVector4<T>::ContainsNaN() const
 {
 	return (!FMath::IsFinite(X) || 
 			!FMath::IsFinite(Y) ||
@@ -703,7 +837,8 @@ FORCEINLINE bool FVector4::ContainsNaN() const
 }
 
 
-FORCEINLINE bool FVector4::IsNearlyZero3(float Tolerance) const
+template<typename T>
+FORCEINLINE bool TVector4<T>::IsNearlyZero3(T Tolerance) const
 {
 	return
 			FMath::Abs(X)<=Tolerance
@@ -711,29 +846,8 @@ FORCEINLINE bool FVector4::IsNearlyZero3(float Tolerance) const
 		&&	FMath::Abs(Z)<=Tolerance;
 }
 
-
-FORCEINLINE FVector4 FVector4::Reflect3(const FVector4& Normal) const
-{
-	return 2.0f * Dot3(*this, Normal) * Normal - *this;
-}
-
-
-FORCEINLINE void FVector4::FindBestAxisVectors3(FVector4& Axis1, FVector4& Axis2) const
-{
-	const float NX = FMath::Abs(X);
-	const float NY = FMath::Abs(Y);
-	const float NZ = FMath::Abs(Z);
-
-	// Find best basis vectors.
-	if(NZ>NX && NZ>NY)	Axis1 = FVector4(1,0,0);
-	else					Axis1 = FVector4(0,0,1);
-
-	Axis1 = (Axis1 - *this * Dot3(Axis1, *this)).GetSafeNormal();
-	Axis2 = Axis1 ^ *this;
-}
-
-
-FORCEINLINE FVector4 FVector4::operator*=(const FVector4& V)
+template<typename T>
+FORCEINLINE TVector4<T> TVector4<T>::operator*=(const TVector4<T>& V)
 {
 	X *= V.X; Y *= V.Y; Z *= V.Z; W *= V.W;
 	DiagnosticCheckNaN();
@@ -741,7 +855,8 @@ FORCEINLINE FVector4 FVector4::operator*=(const FVector4& V)
 }
 
 
-FORCEINLINE FVector4 FVector4::operator/=(const FVector4& V)
+template<typename T>
+FORCEINLINE TVector4<T> TVector4<T>::operator/=(const TVector4<T>& V)
 {
 	X /= V.X; Y /= V.Y; Z /= V.Z; W /= V.W;
 	DiagnosticCheckNaN();
@@ -749,35 +864,189 @@ FORCEINLINE FVector4 FVector4::operator/=(const FVector4& V)
 }
 
 
-FORCEINLINE FVector4 FVector4::operator*=(float S)
+template<typename T>
+FORCEINLINE TVector4<T> TVector4<T>::operator/(const TVector4<T>& V) const
 {
-	X *= S; Y *= S; Z *= S; W *= S;
-	DiagnosticCheckNaN();
-	return *this;
+	return TVector4(X / V.X, Y / V.Y, Z / V.Z, W / V.W);
 }
 
 
-FORCEINLINE FVector4 FVector4::operator/(const FVector4& V) const
+template <typename T>
+bool TVector4<T>::SerializeFromVector3(FName StructTag, FArchive& Ar)
 {
-	return FVector4(X / V.X, Y / V.Y, Z / V.Z, W / V.W);
+	// Upgrade Vector3 - only set X/Y/Z.  The W should already have been set to the property specific default and we don't want to trash it by forcing 0 or 1.
+	if(StructTag == NAME_Vector3f)
+	{
+		FVector3f AsVec;
+		Ar << AsVec;
+		X = (T)AsVec.X;
+		Y = (T)AsVec.Y;
+		Z = (T)AsVec.Z;		
+		return true;
+	}
+	else if(StructTag == NAME_Vector || StructTag == NAME_Vector3d)
+	{
+		FVector3d AsVec;	// Note: Vector relies on FVector3d serializer to handle float/double based on archive version.
+		Ar << AsVec;
+		X = (T)AsVec.X;
+		Y = (T)AsVec.Y;
+		Z = (T)AsVec.Z;		
+		return true;
+	}
+	return false;
 }
 
-template <> struct TIsPODType<FVector4> { enum { Value = true }; };
+
+} // namespace UE::Math
+} // namespace UE
+
+
+UE_DECLARE_LWC_TYPE(Vector4);
+
+template<> struct TIsPODType<FVector4f> { enum { Value = true }; };
+template<> struct TIsPODType<FVector4d> { enum { Value = true }; };
+template<> struct TIsUECoreVariant<FVector4f> { enum { Value = true }; };
+template<> struct TIsUECoreVariant<FVector4d> { enum { Value = true }; };
+template<> struct TCanBulkSerialize<FVector4f> { enum { Value = true }; };
+template<> struct TCanBulkSerialize<FVector4d> { enum { Value = true }; };
+DECLARE_INTRINSIC_TYPE_LAYOUT(FVector4f);
+DECLARE_INTRINSIC_TYPE_LAYOUT(FVector4d);
+
+
+template<>
+inline bool FVector4f::SerializeFromMismatchedTag(FName StructTag, FArchive& Ar)
+{	
+	if(SerializeFromVector3(StructTag, Ar))
+	{
+		return true;
+	}
+
+	return UE_SERIALIZE_VARIANT_FROM_MISMATCHED_TAG(Ar, Vector4, Vector4f, Vector4d);
+}
+
+template<>
+inline bool FVector4d::SerializeFromMismatchedTag(FName StructTag, FArchive& Ar)
+{
+	if(SerializeFromVector3(StructTag, Ar))
+	{
+		return true;
+	}
+
+	return UE_SERIALIZE_VARIANT_FROM_MISMATCHED_TAG(Ar, Vector4, Vector4d, Vector4f);
+}
+
+
+/**
+ * Calculates 3D Dot product of two 4D vectors.
+ *
+ * @param V1 The first vector.
+ * @param V2 The second vector.
+ * @return The 3D Dot product.
+ */
+
+template<typename T>
+FORCEINLINE T Dot3(const UE::Math::TVector4<T>& V1, const UE::Math::TVector4<T>& V2)
+{
+	return V1.X * V2.X + V1.Y * V2.Y + V1.Z * V2.Z;
+}
+
+
+/**
+ * Calculates 3D Dot product of one 4D vectors and one 3D vector
+ *
+ * @param V1 The first vector.
+ * @param V2 The second vector.
+ * @return The 3D Dot product.
+ */
+
+template<typename T>
+FORCEINLINE T Dot3(const UE::Math::TVector4<T>& V1, const UE::Math::TVector<T>& V2)
+{
+	return V1.X * V2.X + V1.Y * V2.Y + V1.Z * V2.Z;
+}
+
+template<typename T>
+FORCEINLINE T Dot3(const UE::Math::TVector<T>& V1, const UE::Math::TVector4<T>& V2)
+{
+	return V1.X * V2.X + V1.Y * V2.Y + V1.Z * V2.Z;
+}
+
+/**
+ * Calculates 4D Dot product.
+ *
+ * @param V1 The first vector.
+ * @param V2 The second vector.
+ * @return The 4D Dot Product.
+ */
+template<typename T>
+FORCEINLINE T Dot4(const UE::Math::TVector4<T>& V1, const UE::Math::TVector4<T>& V2)
+{
+	return V1.X * V2.X + V1.Y * V2.Y + V1.Z * V2.Z + V1.W * V2.W;
+}
+
+namespace UE
+{
+namespace Math
+{
+	/**
+	 * Scales a vector.
+	 *
+	 * @param Scale The scaling factor.
+	 * @param V The vector to scale.
+	 * @return The result of scaling.
+	 */
+	template<typename T, typename T2, TEMPLATE_REQUIRES(std::is_arithmetic<T2>::value)>
+	FORCEINLINE TVector4<T> operator*(T2 Scale, const TVector4<T>& V)
+	{
+		return V.operator*(Scale);
+	}
+
+
+	template<typename T>
+	FORCEINLINE TVector4<T> TVector4<T>::Reflect3(const TVector4<T>& Normal) const
+	{
+		return T(2.0f) * Dot3(*this, Normal) * Normal - *this;
+	}
+
+
+	template<typename T>
+	FORCEINLINE void TVector4<T>::FindBestAxisVectors3(TVector4<T>& Axis1, TVector4<T>& Axis2) const
+	{
+		const T NX = FMath::Abs(X);
+		const T NY = FMath::Abs(Y);
+		const T NZ = FMath::Abs(Z);
+
+		// Find best basis vectors.
+		if (NZ > NX && NZ > NY)	Axis1 = TVector4(1, 0, 0);
+		else					Axis1 = TVector4(0, 0, 1);
+
+		Axis1 = (Axis1 - *this * Dot3(Axis1, *this)).GetSafeNormal();
+		Axis2 = Axis1 ^ *this;
+	}
 
 
 /* FVector inline functions
- *****************************************************************************/
+*****************************************************************************/
 
-FORCEINLINE FVector::FVector( const FVector4& V )
+template<typename T>
+FORCEINLINE TVector<T>::TVector( const TVector4<T>& V )
 	: X(V.X), Y(V.Y), Z(V.Z)
-{
-	DiagnosticCheckNaN();
-}
+	{
+		DiagnosticCheckNaN();
+	}
+
 
 /* FVector2D inline functions
- *****************************************************************************/
+*****************************************************************************/
 
-FORCEINLINE FVector2D::FVector2D(const FVector4& V)
+template<typename T>
+FORCEINLINE TVector2<T>::TVector2( const TVector4<T>& V )
 	: X(V.X), Y(V.Y)
-{
-}
+	{
+		DiagnosticCheckNaN();
+	}
+
+} // namespace UE::Math
+} // namespace UE
+
+

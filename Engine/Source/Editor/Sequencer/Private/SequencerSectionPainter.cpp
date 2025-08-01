@@ -1,10 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SequencerSectionPainter.h"
+#include "MovieSceneSection.h"
 #include "MovieSceneTrack.h"
+#include "MVVM/ViewModels/SectionModel.h"
 
-FSequencerSectionPainter::FSequencerSectionPainter(FSlateWindowElementList& OutDrawElements, const FGeometry& InSectionGeometry, UMovieSceneSection& InSection)
-	: Section(InSection)
+FSequencerSectionPainter::FSequencerSectionPainter(FSlateWindowElementList& OutDrawElements, const FGeometry& InSectionGeometry, TSharedPtr<UE::Sequencer::FSectionModel> InSection)
+	: SectionModel(InSection)
 	, DrawElements(OutDrawElements)
 	, SectionGeometry(InSectionGeometry)
 	, LayerId(0)
@@ -21,12 +23,19 @@ FSequencerSectionPainter::~FSequencerSectionPainter()
 
 int32 FSequencerSectionPainter::PaintSectionBackground()
 {
-	return PaintSectionBackground(GetTrack()->GetColorTint());
+	FLinearColor TrackColor = FLinearColor(GetTrack()->GetColorTint());
+	FLinearColor SectionColor = FLinearColor(SectionModel->GetSection()->GetColorTint());
+
+	const float Alpha = SectionColor.A;
+	SectionColor.A = 1.f;
+
+	FLinearColor BackgroundColor = TrackColor * (1.f - Alpha) + SectionColor * Alpha;
+	return PaintSectionBackground(BackgroundColor);
 }
 
 UMovieSceneTrack* FSequencerSectionPainter::GetTrack() const
 {
-	return Section.GetTypedOuter<UMovieSceneTrack>();
+	return SectionModel->GetSection()->GetTypedOuter<UMovieSceneTrack>();
 }
 
 FLinearColor FSequencerSectionPainter::BlendColor(FLinearColor InColor)

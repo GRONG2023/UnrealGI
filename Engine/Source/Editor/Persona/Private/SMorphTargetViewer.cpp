@@ -15,6 +15,10 @@
 #include "HAL/PlatformApplicationMisc.h"
 #include "GPUSkinCache.h"
 #include "Engine/RendererSettings.h"
+#include "IPersonaPreviewScene.h"
+#include "SkeletalMeshAttributes.h"
+#include "Rendering/SkeletalMeshLODImporterData.h"
+#include "SkeletalRenderPublic.h"
 
 #define LOCTEXT_NAMESPACE "SMorphTargetViewer"
 
@@ -23,7 +27,6 @@ static const FName ColumnID_MorphTargetWeightLabel( "Weight" );
 static const FName ColumnID_MorphTargetEditLabel( "Edit" );
 static const FName ColumnID_MorphTargetVertCountLabel( "NumberOfVerts" );
 
-extern const float MaxMorphWeight;
 
 //////////////////////////////////////////////////////////////////////////
 // SMorphTargetListRow
@@ -149,8 +152,6 @@ TSharedRef< SWidget > SMorphTargetListRow::GenerateWidgetForColumn( const FName&
 				SNew( SSpinBox<float> )
 				.MinSliderValue(-1.f)
 				.MaxSliderValue(1.f)
-				.MinValue(-MaxMorphWeight)
-				.MaxValue(MaxMorphWeight)
 				.Value( this, &SMorphTargetListRow::GetWeight )
 				.OnValueChanged( this, &SMorphTargetListRow::OnMorphTargetWeightChanged )
 				.OnValueCommitted( this, &SMorphTargetListRow::OnMorphTargetWeightValueCommitted )
@@ -224,6 +225,10 @@ void SMorphTargetListRow::OnMorphTargetWeightChanged( float NewWeight )
 	// First change this item...
 	// the delta feature is a bit confusing when debugging morphtargets, and you're not sure why it's changing, so I'm disabling it for now. 
 	// I think in practice, you want each morph target to move independentaly. It is very unlikely you'd like to move multiple things together. 
+
+	const float MorphTargetMaxBlendWeight = UE::SkeletalRender::Settings::GetMorphTargetMaxBlendWeight();
+	NewWeight = FMath::Clamp(NewWeight, -MorphTargetMaxBlendWeight, MorphTargetMaxBlendWeight);
+
 #if 0 
 	float Delta = NewWeight - GetWeight();
 #endif
@@ -244,7 +249,7 @@ void SMorphTargetListRow::OnMorphTargetWeightChanged( float NewWeight )
 
 		if ( RowItem != Item ) // Don't do "this" row again if it's selected
 		{
-			RowItem->Weight = FMath::Clamp(RowItem->Weight + Delta, -MaxMorphWeight, MaxMorphWeight);
+			RowItem->Weight = FMath::Clamp(RowItem->Weight + Delta, -MorphTargetMaxBlendWeight, MorphTargetMaxBlendWeight);
 			RowItem->bAutoFillData = false;
 			MorphTargetViewer->AddMorphTargetOverride( RowItem->Name, RowItem->Weight, false );
 		}
@@ -256,8 +261,10 @@ void SMorphTargetListRow::OnMorphTargetWeightValueCommitted( float NewWeight, ET
 {
 	if (CommitType == ETextCommit::OnEnter || CommitType == ETextCommit::OnUserMovedFocus)
 	{
-		float NewValidWeight = FMath::Clamp(NewWeight, -MaxMorphWeight, MaxMorphWeight);
-		Item->Weight = NewValidWeight;
+		const float MorphTargetMaxBlendWeight = UE::SkeletalRender::Settings::GetMorphTargetMaxBlendWeight();
+		NewWeight = FMath::Clamp(NewWeight, -MorphTargetMaxBlendWeight, MorphTargetMaxBlendWeight);
+
+		Item->Weight = NewWeight;
 		Item->bAutoFillData = false;
 
 		MorphTargetViewer->AddMorphTargetOverride(Item->Name, Item->Weight, false);
@@ -271,7 +278,7 @@ void SMorphTargetListRow::OnMorphTargetWeightValueCommitted( float NewWeight, ET
 
 			if(RowItem != Item) // Don't do "this" row again if it's selected
 			{
-				RowItem->Weight = NewValidWeight;
+				RowItem->Weight = NewWeight;
 				RowItem->bAutoFillData = false;
 				MorphTargetViewer->AddMorphTargetOverride(RowItem->Name, RowItem->Weight, false);
 			}
@@ -328,7 +335,7 @@ void SMorphTargetViewer::Construct(const FArguments& InArgs, const TSharedRef<IP
 {
 	PreviewScenePtr = InPreviewScene;
 
-	SkeletalMesh = InPreviewScene->GetPreviewMeshComponent()->SkeletalMesh;
+	SkeletalMesh = InPreviewScene->GetPreviewMeshComponent()->GetSkeletalMeshAsset();
 	InPreviewScene->RegisterOnPreviewMeshChanged( FOnPreviewMeshChanged::CreateSP( this, &SMorphTargetViewer::OnPreviewMeshChanged ) );
 	InPreviewScene->RegisterOnMorphTargetsChanged(FSimpleDelegate::CreateSP(this, &SMorphTargetViewer::OnMorphTargetsChanged));
 	OnPostUndo.Add(FSimpleDelegate::CreateSP(this, &SMorphTargetViewer::OnPostUndo));
@@ -465,7 +472,7 @@ void SMorphTargetViewer::CreateMorphTargetList( const FString& SearchText )
 	if ( SkeletalMesh )
 	{
 		UDebugSkelMeshComponent* MeshComponent = PreviewScenePtr.Pin()->GetPreviewMeshComponent();
-		TArray<UMorphTarget*>& MorphTargets = SkeletalMesh->GetMorphTargets();
+		TArray<TObjectPtr<UMorphTarget>>& MorphTargets = SkeletalMesh->GetMorphTargets();
 
 		bool bDoFiltering = !SearchText.IsEmpty();
 
@@ -476,7 +483,7 @@ void SMorphTargetViewer::CreateMorphTargetList( const FString& SearchText )
 				continue; // Skip items that don't match our filter
 			}
 
-			int32 NumberOfVerts = (MorphTargets[I]->MorphLODModels.Num() > 0)? MorphTargets[I]->MorphLODModels[0].Vertices.Num() : 0;
+			int32 NumberOfVerts = (MorphTargets[I]->GetMorphLODModels().Num() > 0)? MorphTargets[I]->GetMorphLODModels()[0].Vertices.Num() : 0;
 
 			TSharedRef<FDisplayedMorphTargetInfo> Info = FDisplayedMorphTargetInfo::Make( MorphTargets[I]->GetFName(), NumberOfVerts);
 			if(MeshComponent)
@@ -515,25 +522,21 @@ bool SMorphTargetViewer::CanPerformDelete() const
 void SMorphTargetViewer::OnDeleteMorphTargets()
 {
 	TArray< TSharedPtr< FDisplayedMorphTargetInfo > > SelectedRows = MorphTargetListView->GetSelectedItems();
-	
-	for (int RowIndex = 0; RowIndex < SelectedRows.Num(); ++RowIndex)
+
+	// Clean up override usage
+	TArray<FName> MorphTargetNames;
+	for (int32 RowIndex = 0; RowIndex < SelectedRows.Num(); ++RowIndex)
 	{
 		UMorphTarget* MorphTarget = SkeletalMesh->FindMorphTarget(SelectedRows[RowIndex]->Name);
 		if(MorphTarget)
 		{
-			MorphTarget->RemoveFromRoot();
-			MorphTarget->ClearFlags(RF_Standalone);
-
-			FScopedTransaction Transaction(LOCTEXT("DeleteMorphTarget", "Delete Morph Target"));
-			SkeletalMesh->Modify();
-			MorphTarget->Modify();
-
-			//Clean up override usage
 			AddMorphTargetOverride(SelectedRows[RowIndex]->Name, 0.0f, true);
-
-			SkeletalMesh->UnregisterMorphTarget(MorphTarget);
+			MorphTargetNames.Add(SelectedRows[RowIndex]->Name);
 		}
 	}
+
+	// Remove from mesh
+	SkeletalMesh->RemoveMorphTargets(MorphTargetNames);
 
 	CreateMorphTargetList( NameFilterBox->GetText().ToString() );
 }
@@ -606,13 +609,16 @@ void SMorphTargetViewer::SetSelectedMorphTargets(const TArray<FName>& SelectedMo
 
 		if (SelectedMorphTargetNames.Num() > 0)
 		{
-			for (const FName& MorphTargetName : SelectedMorphTargetNames)
+			if (SkeletalMesh)
 			{
-				int32 MorphtargetIdx;
-				UMorphTarget* MorphTarget = SkeletalMesh->FindMorphTargetAndIndex(MorphTargetName, MorphtargetIdx);
-				if (MorphTarget != nullptr)
+				for (const FName& MorphTargetName : SelectedMorphTargetNames)
 				{
-					PreviewComponent->MorphTargetOfInterests.AddUnique(MorphTarget);
+					int32 MorphtargetIdx;
+					UMorphTarget* MorphTarget = SkeletalMesh->FindMorphTargetAndIndex(MorphTargetName, MorphtargetIdx);
+					if (MorphTarget != nullptr)
+					{
+						PreviewComponent->MorphTargetOfInterests.AddUnique(MorphTarget);
+					}
 				}
 			}
 

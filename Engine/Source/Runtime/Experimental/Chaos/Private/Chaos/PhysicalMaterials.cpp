@@ -90,17 +90,27 @@ namespace Chaos
 
 	const Chaos::THandleArray<FChaosPhysicsMaterial>& FPhysicalMaterialManager::GetMasterMaterials_External() const
 	{
-		return Materials;
+		return GetPrimaryMaterials_External();
 	}
 
 	const Chaos::THandleArray<FChaosPhysicsMaterialMask>& FPhysicalMaterialManager::GetMasterMaterialMasks_External() const
+	{
+		return GetPrimaryMaterialMasks_External();
+	}
+	
+	const Chaos::THandleArray<FChaosPhysicsMaterial>& FPhysicalMaterialManager::GetPrimaryMaterials_External() const
+	{
+		return Materials;
+	}
+
+	const Chaos::THandleArray<FChaosPhysicsMaterialMask>& FPhysicalMaterialManager::GetPrimaryMaterialMasks_External() const
 	{
 		return MaterialMasks;
 	}
 
 	FMaterialHandle FPhysicalMaterialManager::Create()
 	{
-		LLM_SCOPE(ELLMTag::Chaos);
+		LLM_SCOPE(ELLMTag::ChaosMaterial);
 
 		check(IsInGameThread());
 		FMaterialHandle OutHandle;
@@ -124,7 +134,7 @@ namespace Chaos
 
 	void FPhysicalMaterialManager::Destroy(FMaterialHandle InHandle)
 	{
-		LLM_SCOPE(ELLMTag::Chaos);
+		LLM_SCOPE(ELLMTag::ChaosMaterial);
 
 		check(IsInGameThread());
 		if(InHandle.InnerHandle.IsValid())

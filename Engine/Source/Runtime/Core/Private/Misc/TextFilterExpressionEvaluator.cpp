@@ -1,7 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Misc/TextFilterExpressionEvaluator.h"
+
+#include "Containers/SparseArray.h"
 #include "Math/BasicMathExpressionEvaluator.h"
+#include "Misc/CString.h"
+#include "Misc/ExpressionParserTypes.h"
+#include "Misc/Guid.h"
+#include "Templates/Function.h"
+#include "Templates/ValueOrError.h"
 
 namespace TextFilterExpressionParser
 {
@@ -9,8 +16,8 @@ namespace TextFilterExpressionParser
 	 * This contains all the symbols that can define breaking points between text and an operator
 	 * Note: We don't include + and - in this list as these are valid to use inside text and numbers, and should be consumed as part of the text token
 	 */
-	static const TCHAR BasicTextBreakingCharacters[]	= { '(', ')', '!', '&', '|', ' ' };						// ETextFilterExpressionEvaluatorMode::BasicString
-	static const TCHAR ComplexTextBreakingCharacters[]	= { '(', ')', '=', ':', '<', '>', '!', '&', '|', ' ' };	// ETextFilterExpressionEvaluatorMode::Complex
+	static const TCHAR BasicTextBreakingCharacters[]	= { TEXT('('), TEXT(')'), TEXT('!'), TEXT('&'), TEXT('|'), TEXT(' ') };						// ETextFilterExpressionEvaluatorMode::BasicString
+	static const TCHAR ComplexTextBreakingCharacters[]	= { TEXT('('), TEXT(')'), TEXT('='), TEXT(':'), TEXT('<'), TEXT('>'), TEXT('!'), TEXT('&'), TEXT('|'), TEXT(' ') };	// ETextFilterExpressionEvaluatorMode::Complex
 
 	const TCHAR* FSubExpressionStart::Monikers[]		= { TEXT("(") };
 	const TCHAR* FSubExpressionEnd::Monikers[]			= { TEXT(")") };
@@ -22,9 +29,9 @@ namespace TextFilterExpressionParser
 	const TCHAR* FGreater::Monikers[]					= { TEXT(">") };
 	const TCHAR* FGreaterOrEqual::Monikers[]			= { TEXT(">="), TEXT(">:") };
 
-	const TCHAR* FOr::Monikers[]						= { TEXT("OR"), TEXT("||"), TEXT("|") };
-	const TCHAR* FAnd::Monikers[]						= { TEXT("AND"), TEXT("&&"), TEXT("&") };
-	const TCHAR* FNot::Monikers[]						= { TEXT("NOT"), TEXT("!") };
+	const TCHAR* FOr::Monikers[]						= { TEXT("OR "), TEXT("OR("), TEXT("||"), TEXT("|") };
+	const TCHAR* FAnd::Monikers[]						= { TEXT("AND "), TEXT("AND("), TEXT("&&"), TEXT("&") };
+	const TCHAR* FNot::Monikers[]						= { TEXT("NOT "), TEXT("NOT("), TEXT("!") };
 
 	/** Consume an operator from the specified consumer's stream, if one exists at the current read position */
 	template<typename TSymbol>
@@ -62,8 +69,8 @@ namespace TextFilterExpressionParser
 	/** Transform the given string to remove any escape character sequences found in a quoted string */
 	void UnescapeQuotedString(FString& Str, const TCHAR InQuoteChar)
 	{
-		const TCHAR EscapedQuote[] = { '\\', InQuoteChar, 0 };
-		const TCHAR UnescapedQuote[] = { InQuoteChar, 0 };
+		const TCHAR EscapedQuote[] = { TEXT('\\'), InQuoteChar, TEXT('\0') };
+		const TCHAR UnescapedQuote[] = { InQuoteChar, TEXT('\0') };
 
 		// Unescape any literal quotes within the string
 		Str.ReplaceInline(EscapedQuote, UnescapedQuote);
@@ -80,19 +87,19 @@ namespace TextFilterExpressionParser
 		{
 			// Matched TextCmpExact - update the comparison mode and remove the + token from the start of the string
 			TextComparisonMode = ETextFilterTextComparisonMode::Exact;
-			InString.RemoveAt(0, 1, false);
+			InString.RemoveAt(0, 1, EAllowShrinking::No);
 		}
 		else if (InString.Len() > 2 && InString.StartsWith(TEXT("..."), ESearchCase::CaseSensitive))
 		{
 			// Matched TextCmpAnchor (pre-unary) - update the comparison mode and remove the ... token from the start of the string
 			TextComparisonMode = ETextFilterTextComparisonMode::EndsWith;
-			InString.RemoveAt(0, 3, false);
+			InString.RemoveAt(0, 3, EAllowShrinking::No);
 		}
 		else if (InString.Len() > 2 && InString.EndsWith(TEXT("..."), ESearchCase::CaseSensitive))
 		{
 			// Matched TextCmpAnchor (post-unary) - update the comparison mode and remove the ... token from the end of the string
 			TextComparisonMode = ETextFilterTextComparisonMode::StartsWith;
-			InString.RemoveAt(InString.Len() - 3, 3, false);
+			InString.RemoveAt(InString.Len() - 3, 3, EAllowShrinking::No);
 		}
 
 		// To preserve behavior with the old text filter, the final string may also contain a TextCmpInvert (-) operator (after stripping the TextCmpExact or TextCmpAnchor tokens from the start)
@@ -101,7 +108,7 @@ namespace TextFilterExpressionParser
 		{
 			// Matched TextCmpInvert - remove the - token from the start of the string
 			InvertResult = FTextToken::EInvertResult::Yes;
-			InString.RemoveAt(0, 1, false);
+			InString.RemoveAt(0, 1, EAllowShrinking::No);
 		}
 
 		// Finally, if our string starts and ends with a quote, we need to strip those off now
@@ -111,8 +118,8 @@ namespace TextFilterExpressionParser
 			if (InString[InString.Len() - 1] == QuoteChar)
 			{
 				// Remove the quotes
-				InString.RemoveAt(0, 1, false);
-				InString.RemoveAt(InString.Len() - 1, 1, false);
+				InString.RemoveAt(0, 1, EAllowShrinking::No);
+				InString.RemoveAt(InString.Len() - 1, 1, EAllowShrinking::No);
 			}
 		}
 
@@ -127,7 +134,7 @@ namespace TextFilterExpressionParser
 		FString FinalString;
 		FString CurrentQuotedString;
 
-		TCHAR QuoteChar = 0;
+		TCHAR QuoteChar = TEXT('\0');
 		int32 NumConsecutiveSlashes = 0;
 		TOptional<FStringToken> TextToken = Stream.ParseToken([&](TCHAR InC)
 		{
@@ -162,7 +169,7 @@ namespace TextFilterExpressionParser
 					FinalString.Append(CurrentQuotedString);
 
 					CurrentQuotedString.Reset();
-					QuoteChar = 0;
+					QuoteChar = TEXT('\0');
 				}
 
 				if (InC == '\\')

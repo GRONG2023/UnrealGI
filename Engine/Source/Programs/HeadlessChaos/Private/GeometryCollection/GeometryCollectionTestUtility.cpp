@@ -21,8 +21,8 @@ namespace GeometryCollectionTest {
 
 	TSharedPtr<FGeometryDynamicCollection> GeometryCollectionToGeometryDynamicCollection(const FGeometryCollection* InputCollection, EObjectStateTypeEnum DynamicStateDefault)
 	{
-		TSharedPtr<FGeometryDynamicCollection> NewCollection(new FGeometryDynamicCollection());
-		NewCollection->CopyAttribute(*InputCollection, FTransformCollection::TransformAttribute, FGeometryCollection::TransformGroup);
+		TSharedPtr<FGeometryDynamicCollection> NewCollection(new FGeometryDynamicCollection(InputCollection));
+		// TransformAttribute will be initialized by a lazy initializer pattern
 		NewCollection->CopyAttribute(*InputCollection, FTransformCollection::ParentAttribute, FGeometryCollection::TransformGroup);
 		NewCollection->CopyAttribute(*InputCollection, FTransformCollection::ChildrenAttribute, FGeometryCollection::TransformGroup);
 		NewCollection->CopyAttribute(*InputCollection, FGeometryCollection::SimulationTypeAttribute, FGeometryCollection::TransformGroup);
@@ -50,7 +50,7 @@ namespace GeometryCollectionTest {
 		RestCollection->SimulationType[2] = FGeometryCollection::ESimulationTypes::FST_Clustered;
 
 		GeometryCollectionAlgo::ParentTransforms(RestCollection.Get(), 2, { 0,1 });
-		RestCollection->Transform[2].SetTranslation(Position);
+		RestCollection->Transform[2].SetTranslation(FVector3f(Position));
 
 		return RestCollection;
 	}
@@ -68,7 +68,7 @@ namespace GeometryCollectionTest {
 		RestCollection->SimulationType[4] = FGeometryCollection::ESimulationTypes::FST_Clustered;
 
 		GeometryCollectionAlgo::ParentTransforms(RestCollection.Get(), 4, { 0,1,2,3 });
-		RestCollection->Transform[4].SetTranslation(Position);
+		RestCollection->Transform[4].SetTranslation(FVector3f(Position));
 
 		return RestCollection;
 	}
@@ -105,8 +105,8 @@ namespace GeometryCollectionTest {
 
 		GeometryCollectionAlgo::ParentTransforms(RestCollection.Get(), 2, { 0,1 });
 		GeometryCollectionAlgo::ParentTransforms(RestCollection.Get(), 3, { 2 });
-		RestCollection->Transform[2].SetTranslation(FVector(0.f, 10.f, 0.f));
-		RestCollection->Transform[3].SetTranslation(Position);
+		RestCollection->Transform[2].SetTranslation(FVector3f(0.f, 10.f, 0.f));
+		RestCollection->Transform[3].SetTranslation(FVector3f(Position));
 
 		return RestCollection;
 	}
@@ -143,7 +143,7 @@ namespace GeometryCollectionTest {
 		RestCollection->AppendGeometry(*GeometryCollection::MakeCubeElement(FTransform(FQuat::MakeFromEuler(FVector(0.f)), FVector(300,0,0)), FVector(1.0)));
 
 		RestCollection->AddElements(3, FGeometryCollection::TransformGroup);
-		RestCollection->Transform[6].SetTranslation(Position);
+		RestCollection->Transform[6].SetTranslation(FVector3f(Position));
 
 		// @todo(ClusteringUtils) This is a bad assumption, the state flags should be initialized to zero.
 		RestCollection->SimulationType[0] = FGeometryCollection::ESimulationTypes::FST_Rigid;
@@ -174,7 +174,7 @@ namespace GeometryCollectionTest {
 		RestCollection->AppendGeometry(*GeometryCollection::MakeCubeElement(FTransform(FQuat::MakeFromEuler(FVector(0.f)), FVector(500, 0, 0)), FVector(1.0)));
 
 		RestCollection->AddElements(3, FGeometryCollection::TransformGroup);
-		RestCollection->Transform[8].SetTranslation(Position);
+		RestCollection->Transform[8].SetTranslation(FVector3f(Position));
 
 		// @todo(ClusteringUtils) This is a bad assumption, the state flags should be initialized to zero.
 		RestCollection->SimulationType[0] = FGeometryCollection::ESimulationTypes::FST_Rigid;
@@ -239,41 +239,6 @@ namespace GeometryCollectionTest {
 		PhysicalMaterial->DisabledLinearThreshold = 0;
 		PhysicalMaterial->DisabledAngularThreshold = 0;
 	}
-
-	/*
-	FGeometryCollectionPhysicsProxy* RigidBodySetup(
-		TUniquePtr<Chaos::FChaosPhysicsMaterial> &PhysicalMaterial,
-		TSharedPtr<FGeometryCollection>& RestCollection,
-		TSharedPtr<FGeometryDynamicCollection>& DynamicCollection,
-		FInitFunc CustomFunc
-	)
-	{
-#if INCLUDE_CHAOS
-		auto InitFunc = [&RestCollection, &DynamicCollection, &PhysicalMaterial, &CustomFunc](FSimulationParameters& InParams)
-		{
-			InParams.RestCollection = RestCollection.Get();
-			InParams.DynamicCollection = DynamicCollection.Get();
-			InParams.PhysicalMaterial = MakeSerializable(PhysicalMaterial);
-			InParams.Shared.SizeSpecificData[0].CollisionType = ECollisionTypeEnum::Chaos_Volumetric;
-
-			if (CustomFunc != nullptr)
-			{
-				CustomFunc(InParams);
-			}
-
-			InParams.Simulating = true;
-			Chaos::FErrorReporter ErrorReporter;
-			BuildSimulationData(ErrorReporter, *RestCollection, InParams.Shared);
-		};
-
-		FGeometryCollectionPhysicsProxy* PhysObject = new FGeometryCollectionPhysicsProxy(nullptr, DynamicCollection.Get(), InitFunc, nullptr, nullptr);;
-		PhysObject->Initialize();
-		return PhysObject;
-#else
-		return nullptr;
-#endif
-	}
-	*/
 
 } // end namespace GeometryCollectionTest
 

@@ -7,6 +7,8 @@
 #include "NavigationSystem.h"
 #include "TimerManager.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(NavSystemConfigOverride)
+
 #if WITH_EDITORONLY_DATA
 #include "UObject/ConstructorHelpers.h"
 #include "Components/BillboardComponent.h"
@@ -23,6 +25,8 @@ ANavSystemConfigOverride::ANavSystemConfigOverride(const FObjectInitializer& Obj
 	RootComponent->Mobility = EComponentMobility::Static;
 
 #if WITH_EDITORONLY_DATA
+	bIsSpatiallyLoaded = false;
+	
 	SpriteComponent = CreateEditorOnlyDefaultSubobject<UBillboardComponent>(TEXT("Sprite"));
 
 	if (!IsRunningCommandlet())
@@ -124,7 +128,7 @@ void ANavSystemConfigOverride::OverrideNavSystem()
 				: FNavigationSystemRunMode::GameMode)
 			;
 
-		if (RunMode == FNavigationSystemRunMode::EditorMode)
+		if (FNavigationSystem::IsEditorRunMode(RunMode))
 		{
 			FNavigationSystem::AddNavigationSystemToWorld(*World, RunMode, NavigationSystemConfig, /*bInitializeForWorld=*/false, /*bOverridePreviousNavSys=*/true);
 #if WITH_EDITOR
@@ -150,7 +154,7 @@ void ANavSystemConfigOverride::PostRegisterAllComponents()
 
 	// ApplyConfig in PostRegisterAllComponents only for Editor worlds; applied in BeginPlay for Game worlds.
 	UWorld* World = GetWorld();
-	if (World == nullptr || World->IsGameWorld())
+	if (World == nullptr || World->IsGameWorld() || World->WorldType == EWorldType::Inactive)
 	{
 		return;
 	}
@@ -182,7 +186,7 @@ void ANavSystemConfigOverride::PostUnregisterAllComponents()
 
 	// ApplyConfig was performed in PostRegisterAllComponents for Editor worlds so nothing to unregister for Game worlds.
 	UWorld* World = GetWorld();
-	if (World == nullptr || World->IsGameWorld())
+	if (World == nullptr || World->IsGameWorld() || World->WorldType == EWorldType::Inactive || !World->IsInitialized() || World->IsBeingCleanedUp())
 	{
 		return;
 	}
@@ -242,3 +246,4 @@ void ANavSystemConfigOverride::PostEditChangeProperty(FPropertyChangedEvent& Pro
 	bNetLoadOnClient = bLoadOnClient;
 }
 #endif // WITH_EDITOR
+

@@ -1,13 +1,19 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ContentSourceProviders/FeaturePack/FeaturePackContentSourceProvider.h"
-#include "GenericPlatform/GenericPlatformFile.h"
-#include "HAL/PlatformFilemanager.h"
-#include "HAL/FileManager.h"
-#include "Modules/ModuleManager.h"
 
+#include "Delegates/Delegate.h"
 #include "DirectoryWatcherModule.h"
 #include "FeaturePackContentSource.h"
+#include "GenericPlatform/GenericPlatformFile.h"
+#include "HAL/FileManager.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformFileManager.h"
+#include "IContentSource.h"
+#include "Misc/Paths.h"
+#include "Modules/ModuleManager.h"
+#include "Templates/UniquePtr.h"
 
 
 class FFillArrayDirectoryVisitor : public IPlatformFile::FDirectoryVisitor
@@ -40,7 +46,7 @@ FFeaturePackContentSourceProvider::FFeaturePackContentSourceProvider()
 	RefreshFeaturePacks();
 }
 
-const TArray<TSharedRef<IContentSource>> FFeaturePackContentSourceProvider::GetContentSources()
+const TArray<TSharedRef<IContentSource>>& FFeaturePackContentSourceProvider::GetContentSources() const
 {
 	return ContentSources;
 }

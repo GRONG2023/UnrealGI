@@ -23,11 +23,11 @@ class ADirectionalLight
 	// Reference to editor visualization arrow
 private:
 	UPROPERTY()
-	UArrowComponent* ArrowComponent;
+	TObjectPtr<UArrowComponent> ArrowComponent;
 
 	/* EditorOnly reference to the light component to allow it to be displayed in the details panel correctly */
 	UPROPERTY(VisibleAnywhere, Category="Light")
-	UDirectionalLightComponent* DirectionalLightComponent;
+	TObjectPtr<UDirectionalLightComponent> DirectionalLightComponent;
 #endif
 
 public:
@@ -37,15 +37,17 @@ public:
 #if WITH_EDITOR
 	virtual void LoadedFromAnotherClass(const FName& OldClassName) override;
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	virtual bool CanChangeIsSpatiallyLoadedFlag() const override { return false; }
+	virtual FBox GetStreamingBounds() const override { return FBox(ForceInit); }
 #endif
 
 public:
 
 #if WITH_EDITORONLY_DATA
 	/** Returns ArrowComponent subobject **/
-	ENGINE_API UArrowComponent* GetArrowComponent() const { return ArrowComponent; }
+	UArrowComponent* GetArrowComponent() const { return ArrowComponent; }
 
 	/** Returns SkyAtmosphereComponent subobject */
-	ENGINE_API UDirectionalLightComponent* GetComponent() const { return DirectionalLightComponent; }
+	UDirectionalLightComponent* GetComponent() const { return DirectionalLightComponent; }
 #endif
 };

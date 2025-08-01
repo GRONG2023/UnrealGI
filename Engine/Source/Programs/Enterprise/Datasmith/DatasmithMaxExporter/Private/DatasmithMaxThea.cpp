@@ -3,18 +3,12 @@
 #include "DatasmithMaxWriter.h"
 
 #include "DatasmithExportOptions.h"
-#include "DatasmithMaxSceneParser.h"
+#include "DatasmithMaxSceneHelper.h"
 
 FString FDatasmithMaxMatWriter::DumpBitmapThea(TSharedPtr<IDatasmithCompositeTexture>& CompTex, BitmapTex* InBitmapTex, const TCHAR* Prefix, bool bForceInvert, bool bIsGrayscale)
 {
 	BitmapTex* Texture = (BitmapTex*)InBitmapTex->GetReference(0);
 	return DumpBitmap(CompTex, Texture, Prefix, bForceInvert, bIsGrayscale);
-}
-
-void FDatasmithMaxMatWriter::GetTheaTexmap(TSharedRef< IDatasmithScene > DatasmithScene, BitmapTex* InBitmapTex)
-{
-	BitmapTex* Texture = (BitmapTex*)InBitmapTex->GetReference(0);
-	GetRegularTexmap(DatasmithScene, Texture);
 }
 
 void FDatasmithMaxMatWriter::ExportTheaSubmaterial(TSharedRef< IDatasmithScene > DatasmithScene, TSharedPtr< IDatasmithShaderElement >& MaterialShader, Mtl* Material, EDSMaterialType MaterialType)
@@ -407,11 +401,6 @@ void FDatasmithMaxMatWriter::ExportTheaMaterial(TSharedRef< IDatasmithScene > Da
 	bool bClipByAmount = false;
 	float ClipAmount = 1.0;
 
-	bool bDisplaceEnabled = true;
-	Texmap* DisplaceTex = NULL;
-	int DisplaceSubdivs = 4;
-	float DisplaceAmount = 10;
-
 	bool bEmitEnabled = false;
 	int EmitMode = 0;
 	BMM_Color_fl EmitColor = 0;
@@ -468,10 +457,6 @@ void FDatasmithMaxMatWriter::ExportTheaMaterial(TSharedRef< IDatasmithScene > Da
 				StackedMtlWeight[2] = float(ParamBlock2->GetInt(ParamDefinition.ID, GetCOREInterface()->GetTime(), 6)) / 100.0f;
 				StackedMtlWeight[3] = float(ParamBlock2->GetInt(ParamDefinition.ID, GetCOREInterface()->GetTime(), 7)) / 100.0f;
 			}
-			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("disp_enabled")) == 0)
-			{
-				bDisplaceEnabled = ParamBlock2->GetInt(ParamDefinition.ID, GetCOREInterface()->GetTime()) != 0;
-			}
 			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("clip_enabled")) == 0)
 			{
 				bClipEnabled = ParamBlock2->GetInt(ParamDefinition.ID, GetCOREInterface()->GetTime()) != 0;
@@ -479,10 +464,6 @@ void FDatasmithMaxMatWriter::ExportTheaMaterial(TSharedRef< IDatasmithScene > Da
 			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("clip_tex")) == 0)
 			{
 				ClipTex = ParamBlock2->GetTexmap(ParamDefinition.ID, GetCOREInterface()->GetTime());
-			}
-			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("disp_tex")) == 0)
-			{
-				DisplaceTex = ParamBlock2->GetTexmap(ParamDefinition.ID, GetCOREInterface()->GetTime());
 			}
 			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("soft")) == 0)
 			{
@@ -495,14 +476,6 @@ void FDatasmithMaxMatWriter::ExportTheaMaterial(TSharedRef< IDatasmithScene > Da
 			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("visibilityValue")) == 0)
 			{
 				ClipAmount = ParamBlock2->GetFloat(ParamDefinition.ID, GetCOREInterface()->GetTime());
-			}
-			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("disp_height")) == 0)
-			{
-				DisplaceAmount = ParamBlock2->GetFloat(ParamDefinition.ID, GetCOREInterface()->GetTime()) * 2.0f;
-			}
-			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("disp_subdiv")) == 0)
-			{
-				DisplaceSubdivs = ParamBlock2->GetInt(ParamDefinition.ID, GetCOREInterface()->GetTime());
 			}
 			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("emit_enabled")) == 0)
 			{
@@ -561,16 +534,6 @@ void FDatasmithMaxMatWriter::ExportTheaMaterial(TSharedRef< IDatasmithScene > Da
 				Color.b = pow(Color.b, FDatasmithExportOptions::ColorGamma);
 				MaterialShader->GetTransComp()->AddSurface(FDatasmithMaxMatHelper::MaxColorToFLinearColor(Color));
 			}
-		}
-	}
-
-	if (bDisplaceEnabled)
-	{
-		if (DisplaceTex)
-		{
-			DumpTexture(DatasmithScene, MaterialShader->GetDisplaceComp(), DisplaceTex, DATASMITH_CLIPTEXNAME, DATASMITH_CLIPTEXNAME, false, true);
-			MaterialShader->SetDisplace( DisplaceAmount );
-			MaterialShader->SetDisplaceSubDivision( DisplaceSubdivs );
 		}
 	}
 
@@ -703,10 +666,6 @@ void FDatasmithMaxMatWriter::ExportTheaMaterial(TSharedRef< IDatasmithScene > Da
 
 	for (int i = 1; i < AllShaders.Num(); i++)
 	{
-		AllShaders[i]->SetDisplace( AllShaders[0]->GetDisplace() );
-		AllShaders[i]->SetDisplaceComp( AllShaders[0]->GetDisplaceComp() );
-		AllShaders[i]->SetDisplaceSubDivision( AllShaders[0]->GetDisplaceSubDivision() );
-
 		AllShaders[i]->SetEmitComp( AllShaders[0]->GetEmitComp() );
 		AllShaders[i]->SetEmitPower( AllShaders[0]->GetEmitPower() );
 		AllShaders[i]->SetEmitTemperature( AllShaders[0]->GetEmitTemperature() );

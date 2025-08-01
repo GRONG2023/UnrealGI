@@ -44,8 +44,9 @@ public:
 
 	/**
 	 * Check to see if the given platform name is supported as a target by the current project
+	 * @todo platformcleanup: Make this use IniPlatformName, not TargetPlatformName!! And other related functions in here
 	 *
-	 * @param	InPlatformName				Name of the platform to target (eg, WindowsNoEditor)
+	 * @param	InPlatformName				Name of the platform to target (eg, WindowsClient)
 	 * @param	bAllowSupportedIfEmptyList	Consider an empty list to mean that all platforms are supported targets?
 	 */
 	bool IsTargetPlatformSupported(const FName& InPlatformName, const bool bAllowSupportedIfEmptyList = true) const
@@ -104,6 +105,15 @@ public:
 	 *							loaded at the specified loading phase will be loaded during this call.
 	 */
 	virtual bool LoadModulesForProject( const ELoadingPhase::Type LoadingPhase ) = 0;
+
+	/**
+	* Replaces a referenced module with a new name
+	*
+	* @param	OriginalModuleName	Name of module to replace
+	* @param	NewModuleName		Name of replacement module
+	*
+	*/
+	virtual bool SubstituteModule(const FString& OriginalModuleName, const FString& NewModuleName) = 0;
 
 	/**
 	 * Callback for when modules for when LoadModulesForProject() completes loading for a specific phase.
@@ -165,7 +175,7 @@ public:
 	 * Update the list of supported target platforms for the target project based upon the parameters provided
 	 * 
 	 * @param	FilePath			The filepath where the project is stored.
-	 * @param	InPlatformName		Name of the platform to target (eg, WindowsNoEditor)
+	 * @param	InPlatformName		Name of the platform to target (eg, WindowsClient)
 	 * @param	bIsSupported		true if the platform should be supported by this project, false if it should not
 	 */
 	virtual void UpdateSupportedTargetPlatformsForProject(const FString& FilePath, const FName& InPlatformName, const bool bIsSupported) = 0;
@@ -173,7 +183,7 @@ public:
 	/**
 	 * Update the list of supported target platforms for the current project based upon the parameters provided
 	 * 
-	 * @param	InPlatformName		Name of the platform to target (eg, WindowsNoEditor)
+	 * @param	InPlatformName		Name of the platform to target (eg, WindowsClient)
 	 * @param	bIsSupported		true if the platform should be supported by this project, false if it should not
 	 */
 	virtual void UpdateSupportedTargetPlatformsForCurrentProject(const FName& InPlatformName, const bool bIsSupported) = 0;
@@ -242,7 +252,7 @@ public:
 	 *
 	 * @return	True if the project is an Enterprise project
 	 */
-	PROJECTS_API virtual bool IsEnterpriseProject() = 0;
+	virtual bool IsEnterpriseProject() = 0;
 
 	/**
 	 * Sets the enterprise flag value on the current project
@@ -260,8 +270,8 @@ public:
 	virtual bool IsSuppressingProjectFileWrite() const = 0;
 
 	/** Suppress project file writes. */
-	PROJECTS_API virtual void AddSuppressProjectFileWrite(const FName InName) = 0;
+	virtual void AddSuppressProjectFileWrite(const FName InName) = 0;
 
 	/** Removes suppression of project file writes. */
-	PROJECTS_API virtual void RemoveSuppressProjectFileWrite(const FName InName) = 0;
+	virtual void RemoveSuppressProjectFileWrite(const FName InName) = 0;
 };

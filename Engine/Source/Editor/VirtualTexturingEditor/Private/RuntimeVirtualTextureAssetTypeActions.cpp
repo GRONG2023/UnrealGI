@@ -2,17 +2,19 @@
 
 #include "RuntimeVirtualTextureAssetTypeActions.h"
 
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "ContentBrowserModule.h"
 #include "EditorSupportDelegates.h"
 #include "FileHelpers.h"
 #include "Framework/Commands/UIAction.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "IAssetRegistry.h"
+#include "AssetRegistry/IAssetRegistry.h"
 #include "IContentBrowserSingleton.h"
 #include "MaterialEditingLibrary.h"
+#include "AssetRegistry/AssetRegistryHelpers.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialExpressionRuntimeVirtualTextureSample.h"
+#include "Materials/MaterialExpressionTextureBase.h"
 #include "Materials/MaterialFunction.h"
 #include "Materials/MaterialInstance.h"
 #include "Materials/MaterialInterface.h"
@@ -27,41 +29,11 @@ DEFINE_LOG_CATEGORY_STATIC(LogRuntimeVirtualTextureFixMaterial, Log, Log);
 
 namespace
 {
-	void GetReferencersData(UObject *Object, UClass *MatchClass, TArray<FAssetData> &OutAssetDatas)
-	{
-		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-		IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
-
-		TArray<FAssetIdentifier> Referencers;
-		AssetRegistry.GetReferencers(Object->GetOuter()->GetFName(), Referencers);
-
-		for (auto AssetIdentifier : Referencers)
-		{
-			TArray<FAssetData> Assets;
-			AssetRegistry.GetAssetsByPackageName(AssetIdentifier.PackageName, Assets);
-
-			for (auto AssetData : Assets)
-			{
-				if (MatchClass != nullptr)
-				{
-					if (AssetData.GetClass()->IsChildOf(MatchClass))
-					{
-						OutAssetDatas.AddUnique(AssetData);
-					}
-				}
-				else
-				{
-					OutAssetDatas.AddUnique(AssetData);
-				}
-			}
-		}
-	}
-
 	template <class T> 
 	void GetReferencersOfType(UObject *Object, TArray<T*> &OutObjects)
 	{
 		TArray<FAssetData> AssetDatas;
-		GetReferencersData(Object, T::StaticClass(), AssetDatas);
+		UAssetRegistryHelpers::FindReferencersOfAssetOfClass(Object, { T::StaticClass() }, AssetDatas);
 
 		for (auto Data : AssetDatas)
 		{
@@ -114,7 +86,7 @@ namespace
 				Task.EnterProgressFrame();
 
 				bool bMaterialModified = false;
-				for (UMaterialExpression* Expression : Material->Expressions)
+				for (UMaterialExpression* Expression : Material->GetExpressions())
 				{
 					UMaterialExpressionRuntimeVirtualTextureSample* RVTSampleExpression = Cast<UMaterialExpressionRuntimeVirtualTextureSample>(Expression);
 					if (RVTSampleExpression)
@@ -153,8 +125,7 @@ namespace
 				Task.EnterProgressFrame();
 
 				bool bFunctionModified = false;
-				const TArray<UMaterialExpression*> *Expressions = Function->GetFunctionExpressions();
-				for (UMaterialExpression *Expression : *Expressions)
+				for (const TObjectPtr<UMaterialExpression>& Expression : Function->GetExpressions())
 				{
 					UMaterialExpressionRuntimeVirtualTextureSample* RVTSampleExpression = Cast<UMaterialExpressionRuntimeVirtualTextureSample>(Expression);
 					if (RVTSampleExpression)
@@ -216,7 +187,7 @@ FColor FAssetTypeActions_RuntimeVirtualTexture::GetTypeColor() const
 
 uint32 FAssetTypeActions_RuntimeVirtualTexture::GetCategories() 
 {
-	return EAssetTypeCategories::MaterialsAndTextures; 
+	return EAssetTypeCategories::Textures; 
 }
 
 void FAssetTypeActions_RuntimeVirtualTexture::GetActions(TArray<UObject*> const& InObjects, FMenuBuilder& MenuBuilder)
@@ -238,7 +209,7 @@ void FAssetTypeActions_RuntimeVirtualTexture::GetActions(TArray<UObject*> const&
 		MenuBuilder.AddMenuEntry(
 			LOCTEXT("RuntimeVirtualTexture_FixMaterialUsage", "Fix Material Usage"),
 			LOCTEXT("RuntimeVirtualTexture_FixMaterialUsageTooltip", "Find materials using this Runtime Virtual Texture and fix any mismatching content types."),
-			FSlateIcon(FEditorStyle::GetStyleSetName(), "ClassIcon.Texture2D"),
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "ClassIcon.Texture2D"),
 			FUIAction(
 				FExecuteAction::CreateSP(this, &FAssetTypeActions_RuntimeVirtualTexture::ExecuteFixMaterialUsage, RuntimeVirtualTextures[0]),
 				FCanExecuteAction()
@@ -254,8 +225,7 @@ void FAssetTypeActions_RuntimeVirtualTexture::ExecuteFindMaterials(TWeakObjectPt
 	URuntimeVirtualTexture* RuntimeVirtualTexture = Object.Get();
 	if (RuntimeVirtualTexture != nullptr)
 	{
-		GetReferencersData(RuntimeVirtualTexture, UMaterialInterface::StaticClass(), Materials);
-		GetReferencersData(RuntimeVirtualTexture, UMaterialFunction::StaticClass(), Materials);
+		UAssetRegistryHelpers::FindReferencersOfAssetOfClass(RuntimeVirtualTexture, { UMaterialInterface::StaticClass(), UMaterialFunction::StaticClass() }, Materials);
 	}
 
 	if (Materials.Num() > 0)

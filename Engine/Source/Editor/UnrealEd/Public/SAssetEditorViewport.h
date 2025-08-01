@@ -7,50 +7,32 @@
 #include "SEditorViewport.h"
 
 class FEditorViewportClient;
-class FAssetEditorViewportLayout;
+class FViewportTabContent;
+class FMenuBuilder;
+struct FAssetEditorViewportConstructionArgs;
 
-class UNREALED_API SAssetEditorViewport : public SEditorViewport
+class SAssetEditorViewport : public SEditorViewport
 {
 public:
 
 	SLATE_BEGIN_ARGS(SAssetEditorViewport)
-		: _ViewportType(LVT_Perspective)
-		, _Realtime(false)
-	{
-	}
+		{
+		}
 
-	SLATE_ARGUMENT(TWeakPtr<class FEditorModeTools>, EditorModeTools)
-		SLATE_ARGUMENT(TSharedPtr<class FAssetEditorViewportLayout>, ParentLayout)
+		SLATE_ATTRIBUTE(FVector2D, ViewportSize);
 		SLATE_ARGUMENT(TSharedPtr<FEditorViewportClient>, EditorViewportClient)
-		SLATE_ARGUMENT(ELevelViewportType, ViewportType)
-		SLATE_ARGUMENT(bool, Realtime)
-		SLATE_ARGUMENT(FName, ConfigKey)
-		SLATE_END_ARGS()
+	SLATE_END_ARGS()
 
-	void Construct(const FArguments& InArgs);
-	void OnSetViewportConfiguration(FName ConfigurationName);
-	bool IsViewportConfigurationSet(FName ConfigurationName) const;
+	UNREALED_API void Construct(const FArguments& InArgs, const FAssetEditorViewportConstructionArgs& InViewportConstructionArgs);
+	UNREALED_API void OnSetViewportConfiguration(FName ConfigurationName);
+	UNREALED_API bool IsViewportConfigurationSet(FName ConfigurationName) const;
 
-	void GenerateLayoutMenu(FMenuBuilder& MenuBuilder) const;
-
-	TWeakPtr<class FAssetEditorViewportLayout> ParentLayout;
+	UNREALED_API void GenerateLayoutMenu(FMenuBuilder& MenuBuilder) const;
 
 protected:
-	virtual void BindCommands() override;
+	UNREALED_API virtual void BindCommands() override;
 
-	TSharedRef<FEditorViewportClient> MakeEditorViewportClient() override 
-	{
-		if (!EditorViewportClient.IsValid())
-		{
-			EditorViewportClient = MakeShareable(new FEditorViewportClient(nullptr));
-		}
-		return EditorViewportClient.ToSharedRef();
-	};
-
-
-private:
-
-	// Viewport client
-	TSharedPtr<FEditorViewportClient> EditorViewportClient;
-
+	UNREALED_API virtual TSharedRef<FEditorViewportClient> MakeEditorViewportClient() override;
+	FName ConfigKey;
+	TWeakPtr<FViewportTabContent> ParentTabContent;
 };

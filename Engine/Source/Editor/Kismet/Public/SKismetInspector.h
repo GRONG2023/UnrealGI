@@ -3,21 +3,37 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/Set.h"
 #include "CoreMinimal.h"
-#include "SlateFwd.h"
+#include "Delegates/Delegate.h"
+#include "Framework/Text/SlateHyperlinkRun.h"
+#include "IStructureDetailsView.h"
+#include "Internationalization/Text.h"
 #include "Layout/Visibility.h"
-#include "Widgets/SWidget.h"
+#include "PropertyEditorDelegates.h"
+#include "SlateFwd.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
+#include "UObject/WeakFieldPtr.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
-#include "Framework/Text/SlateHyperlinkRun.h"
-#include "Editor/PropertyEditor/Public/PropertyEditorDelegates.h"
-#include "IStructureDetailsView.h"
-#include "UObject/WeakFieldPtr.h"
+#include "Widgets/SWidget.h"
 
 class FBlueprintEditor;
+class FProperty;
+class FStructOnScope;
 class IDetailsView;
 class SBorder;
+class SDockTab;
 class SMyBlueprint;
+class SWidget;
+class UObject;
+struct FGeometry;
+struct FPropertyChangedEvent;
 
 typedef TSet<class UObject*> FInspectorSelectionSet;
 
@@ -25,27 +41,29 @@ typedef TSet<class UObject*> FInspectorSelectionSet;
 // SKismetInspector
 
 /** Widget that shows properties and tools related to the selected node(s) */
-class KISMET_API SKismetInspector : public SCompoundWidget
+class KISMET_API SKismetInspector : public SCompoundWidget, public FGCObject
 {
 public:
 	SLATE_BEGIN_ARGS( SKismetInspector )
 		: _ShowPublicViewControl(false)
-		, _HideNameArea(false)
+		, _HideNameArea(true)
 		, _SetNotifyHook(true)
 		, _ShowTitleArea(false)
+		, _ShowLocalVariables(false)
 		{}
 
 		SLATE_ARGUMENT(TWeakPtr<FBlueprintEditor>, Kismet2)
 		SLATE_ARGUMENT(TWeakPtr<SMyBlueprint>, MyBlueprintWidget)
-		SLATE_ARGUMENT( bool, ShowPublicViewControl )
+		SLATE_ATTRIBUTE( bool, ShowPublicViewControl )
 		SLATE_ARGUMENT( bool, HideNameArea )
 		SLATE_ARGUMENT( FIsPropertyEditingEnabled, IsPropertyEditingEnabledDelegate )
 		SLATE_ARGUMENT( FOnFinishedChangingProperties::FDelegate, OnFinishedChangingProperties )
 		SLATE_ARGUMENT( FName, ViewIdentifier)
 		SLATE_ARGUMENT( bool, SetNotifyHook)
 		SLATE_ARGUMENT( bool, ShowTitleArea)
+		SLATE_ARGUMENT( bool, ShowLocalVariables)
 	SLATE_END_ARGS()
-
+	
 	void Construct(const FArguments& InArgs);
 
 	/** Options for ShowDetails */
@@ -101,6 +119,9 @@ public:
 	/** returns the list of selected objects */
 	const TArray< TWeakObjectPtr<UObject> >& GetSelectedObjects() const;
 
+	virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
+	virtual FString GetReferencerName() const override;
+
 protected:
 	/** Update the inspector window to show information on the supplied objects */
 	void UpdateFromObjects(const TArray<UObject*>& PropertyObjects, struct FKismetSelectionInfo& SelectionInfo, const FShowDetailsOptions& Options);
@@ -139,7 +160,7 @@ protected:
 	TSharedPtr<SBorder> ContextualEditingBorderWidget;
 
 	/** If true show the public view control */
-	bool bShowPublicView;
+	TAttribute<bool> bShowPublicView;
 
 	/** If true show the kismet inspector title widget */
 	bool bShowTitleArea;
@@ -160,7 +181,7 @@ protected:
 	bool bRefreshOnTick;
 
 	/** Holds the property objects that need to be displayed by the inspector starting on the next tick */
-	TArray<UObject*> RefreshPropertyObjects;
+	TArray<TObjectPtr<UObject>> RefreshPropertyObjects;
 
 	/** Details options that are used by the inspector on the next refresh. */
 	FShowDetailsOptions RefreshOptions;
@@ -207,5 +228,11 @@ protected:
 	ECheckBoxState GetPublicViewCheckboxState() const;
 	void SetPublicViewCheckboxState(ECheckBoxState InIsChecked);
 
-	bool IsAnyParentContainerSelected(const FPropertyAndParent& PropertyAndParent) const;
+	bool IsAnyParentOrContainerSelected(const FPropertyAndParent& PropertyAndParent) const;
+
+	/** Callback invoked after a value change on the selected object(s) */
+	void OnFinishedChangingProperties(const FPropertyChangedEvent& InPropertyChangedEvent);
+
+	/** Auto-import any namespaces associated with a property's value into the current editor context */
+	void ImportNamespacesForPropertyValue(const FProperty* InProperty) const;
 };

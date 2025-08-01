@@ -6,8 +6,10 @@
 #include "Editor.h"
 #include "Modules/ModuleManager.h"
 #include "PropertyEditorModule.h"
+#include "PropertyPermissionList.h"
 #include "IPropertyChangeListener.h"
 #include "MovieSceneSequence.h"
+#include "EntitySystem/MovieScenePropertySystemTypes.h"
 #include "ScopedTransaction.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogSequencerTools, Log, All);
@@ -138,6 +140,11 @@ FOnAnimatablePropertyChanged& FSequencerObjectChangeListener::GetOnAnimatablePro
 	return PropertyChangedEventMap.FindOrAdd( PropertyKey );
 }
 
+FOnAnimatablePropertyChanged& FSequencerObjectChangeListener::GetOnAnimatablePropertyChanged(const FProperty* Property)
+{
+	return PropertyPathChangedEventMap.FindOrAdd(Property);
+}
+
 FOnPropagateObjectChanges& FSequencerObjectChangeListener::GetOnPropagateObjectChanges()
 {
 	return OnPropagateObjectChanges;
@@ -190,10 +197,22 @@ bool IsHiddenFunction(const UStruct& PropertyStructure, FAnimatedPropertyKey Pro
 
 const FOnAnimatablePropertyChanged* FSequencerObjectChangeListener::FindPropertySetter(const UStruct& PropertyStructure, FAnimatedPropertyKey PropertyKey, const FProperty& Property) const
 {
-	const FOnAnimatablePropertyChanged* DelegatePtr = PropertyChangedEventMap.Find(PropertyKey);
-	if (DelegatePtr != nullptr)
+	const FArrayProperty* ArrayOwner = Property.GetTypedOwner<FArrayProperty>();
+	const FProperty* PropertyOrContainer = ArrayOwner ? ArrayOwner : &Property;
+
+	// If we are trying to set a property that exists within a container type (ie an array),
+	// we check for flags on the outer property but must not use setter functions that would not know the index to set
+	const bool bCanApplyFunction = PropertyOrContainer == &Property;
+
+	// Early return if explicitly supported
+	if (const FOnAnimatablePropertyChanged* DelegatePtr = PropertyPathChangedEventMap.Find(&Property))
 	{
-		FString PropertyVarName = Property.GetName();
+		return DelegatePtr;
+	}
+
+	if (const FOnAnimatablePropertyChanged* DelegatePtr = PropertyChangedEventMap.Find(PropertyKey))
+	{
+		FString PropertyVarName = PropertyOrContainer->GetName();
 
 		// If this is a bool property, strip off the 'b' so that the "Set" functions to be 
 		// found are, for example, "SetHidden" instead of "SetbHidden"
@@ -202,53 +221,45 @@ const FOnAnimatablePropertyChanged* FSequencerObjectChangeListener::FindProperty
 			PropertyVarName.RemoveFromStart("b", ESearchCase::CaseSensitive);
 		}
 
-		static const FString Set(TEXT("Set"));
-
-		const FString FunctionString = Set + PropertyVarName;
-
-		FName FunctionName = FName(*FunctionString);
-
-		static const FName DeprecatedFunctionName(TEXT("DeprecatedFunction"));
-		UFunction* Function = nullptr;
-		if (const UClass* Class = Cast<const UClass>(&PropertyStructure))
-		{
-			Function = Class->FindFunctionByName(FunctionName);
-		}
-		bool bFoundValidFunction = false;
-		if (Function && !Function->HasMetaData(DeprecatedFunctionName))
-		{
-			// FIXME: FTrackInstancePropertyBindings::InvokeSetterFunction doesn't support array properties.
-			if (!CastField<const FArrayProperty>(&Property))
-			{
-				bFoundValidFunction = true;
-			}
-		}
-
-		bool bFoundValidInterp = false;
-		bool bFoundEditDefaultsOnly = false;
-		bool bFoundEdit = false;
-
-		if (Property.HasAnyPropertyFlags(CPF_Interp))
-		{
-			bFoundValidInterp = true;
-		}
-
-		// @TODO: should we early out of our property path iteration if we find an "edit defaults only" property?
-		if (Property.HasAnyPropertyFlags(CPF_DisableEditOnInstance))
-		{
-			bFoundEditDefaultsOnly = true;
-		}
-		if (Property.HasAnyPropertyFlags(CPF_Edit))
-		{
-			bFoundEdit = true;
-		}
-
-		const bool bIsHiddenFunction = IsHiddenFunction(PropertyStructure, FAnimatedPropertyKey::FromProperty(&Property), Property.GetName());
-
-		// Valid if there's a setter function and the property is editable. Also valid if there's an interp keyword.
-		if (((bFoundValidFunction && bFoundEdit && !bFoundEditDefaultsOnly) || bFoundValidInterp) && !bIsHiddenFunction)
+		// Interp properties are always keyable
+		if (PropertyOrContainer->HasAnyPropertyFlags(CPF_Interp))
 		{
 			return DelegatePtr;
+		}
+
+		if (bCanApplyFunction)
+		{
+			// If the function is hidden, we cannot use it
+			if (IsHiddenFunction(PropertyStructure, FAnimatedPropertyKey::FromProperty(&Property), Property.GetName()))
+			{
+				return nullptr;
+			}
+
+			// If there is a native setter we can always animate the property
+			if (Property.HasSetter())
+			{
+				return DelegatePtr;
+			}
+	
+			// Check to see if we have a function of the form Set<PropertyName> that we can use
+			if (const UClass* Class = Cast<const UClass>(&PropertyStructure))
+			{
+				static const FString Set(TEXT("Set"));
+				static const FName DeprecatedFunctionName(TEXT("DeprecatedFunction"));
+
+				FName FunctionName = FName(*(Set + PropertyVarName));
+				UFunction* Function = Class->FindFunctionByName(FunctionName);
+
+				// @TODO: should we early out of our property path iteration if we find an "edit defaults only" property?
+				const bool bEditable           = Property.HasAnyPropertyFlags(CPF_Edit) && !Property.HasAnyPropertyFlags(CPF_DisableEditOnInstance);
+				const bool bFoundValidFunction = Function && !Function->HasMetaData(DeprecatedFunctionName);
+			
+				// Valid if there's a setter function and the property is editable.
+				if (bFoundValidFunction && bEditable)
+				{
+					return DelegatePtr;
+				}
+			}
 		}
 	}
 
@@ -261,6 +272,13 @@ bool FSequencerObjectChangeListener::CanKeyProperty(FCanKeyPropertyParams CanKey
 	FProperty* Property = nullptr;
 	FPropertyPath PropertyPath;
 	return CanKeyProperty_Internal(CanKeyPropertyParams, Delegate, Property, PropertyPath);
+}
+
+bool FSequencerObjectChangeListener::CanKeyProperty(FCanKeyPropertyParams KeyPropertyParams, FPropertyPath& OutPropertyPath) const
+{
+	FProperty* Property = nullptr;
+	FOnAnimatablePropertyChanged Delegate;
+	return CanKeyProperty_Internal(KeyPropertyParams, Delegate, Property, OutPropertyPath);
 }
 
 bool FSequencerObjectChangeListener::CanKeyProperty_Internal(FCanKeyPropertyParams CanKeyPropertyParams, FOnAnimatablePropertyChanged& InOutDelegate, FProperty*& InOutProperty, FPropertyPath& InOutPropertyPath) const
@@ -282,46 +300,69 @@ bool FSequencerObjectChangeListener::CanKeyProperty_Internal(FCanKeyPropertyPara
 		FProperty* Property = CanKeyPropertyParams.PropertyPath.GetPropertyInfo(Index).Property.Get();
 		if (Property)
 		{
-			const UStruct* PropertyContainer = CanKeyPropertyParams.FindPropertyContainer(Property);
-			if (PropertyContainer)
+			if (Property->IsA<FArrayProperty>())
 			{
+				continue;
+			}
+
+			const UStruct* PropertyOwner = CanKeyPropertyParams.FindPropertyOwner(Property);
+			if (!PropertyOwner)
+			{
+				continue;
+			}
+
+			if (!FPropertyEditorPermissionList::Get().DoesPropertyPassFilter(PropertyOwner, Property->GetFName()))
+			{
+				continue;
+			}
+
+			const UStruct* PropertyContainer = CanKeyPropertyParams.FindPropertyContainer(Property);
+			if (!PropertyContainer)
+			{
+				continue;
+			}
+
+			FAnimatedPropertyKey PropertyKey = FAnimatedPropertyKey::FromProperty(Property);
+
+			// If there is a custom accessor for this specific property path, it is animatable (as long as there is a supported track editor registered for the property type)
+			if (UE::MovieScene::GlobalCustomAccessorExists(CanKeyPropertyParams.ObjectClass, InOutPropertyPath.ToString(TEXT("."))))
+			{
+				if (const FOnAnimatablePropertyChanged* DelegatePtr = PropertyPathChangedEventMap.Find(Property))
 				{
-					FAnimatedPropertyKey PropertyKey = FAnimatedPropertyKey::FromProperty(Property);
-					const FOnAnimatablePropertyChanged* DelegatePtr = FindPropertySetter(*PropertyContainer, PropertyKey, *Property);
-					if (DelegatePtr != nullptr)
-					{
-						InOutProperty = Property;
-						InOutDelegate = *DelegatePtr;
-						return true;
-					}
+					InOutProperty = Property;
+					InOutDelegate = *DelegatePtr;
+					return true;
 				}
-
-
-				FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property);
-
-				// Check each level of the property hierarchy
-				FFieldClass* PropertyType = Property->GetClass();
-				while (PropertyType && PropertyType != FProperty::StaticClass())
+				if (const FOnAnimatablePropertyChanged* DelegatePtr = PropertyChangedEventMap.Find(PropertyKey))
 				{
-					FAnimatedPropertyKey Key = FAnimatedPropertyKey::FromPropertyTypeName(PropertyType->GetFName());
+					InOutProperty = Property;
+					InOutDelegate = *DelegatePtr;
+					return true;
+				}
+			}
 
-					// For object properties, check each parent type of the object (ie, so a track that animates UBaseClass ptrs can be used with a UDerivedClass property)
-					UClass* ClassType = (ObjectProperty && ObjectProperty->PropertyClass) ? ObjectProperty->PropertyClass->GetSuperClass() : nullptr;
-					while (ClassType)
-					{
-						Key.ObjectTypeName = ClassType->GetFName();
+			// Otherwise we check for magic named functions using the default logic
+			if (const FOnAnimatablePropertyChanged* DelegatePtr = FindPropertySetter(*PropertyContainer, PropertyKey, *Property))
+			{
+				InOutProperty = Property;
+				InOutDelegate = *DelegatePtr;
+				return true;
+			}
 
-						if (const FOnAnimatablePropertyChanged* DelegatePtr = FindPropertySetter(*PropertyContainer, Key, *Property))
-						{
-							InOutProperty = Property;
-							InOutDelegate = *DelegatePtr;
-							return true;
-						}
+			FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property);
 
-						ClassType = ClassType->GetSuperClass();
-					}
+			// Check each level of the property hierarchy
+			FFieldClass* PropertyType = Property->GetClass();
+			while (PropertyType && PropertyType != FProperty::StaticClass())
+			{
+				FAnimatedPropertyKey Key = FAnimatedPropertyKey::FromPropertyTypeName(PropertyType->GetFName());
 
-					Key.ObjectTypeName = NAME_None;
+				// For object properties, check each parent type of the object (ie, so a track that animates UBaseClass ptrs can be used with a UDerivedClass property)
+				UClass* ClassType = (ObjectProperty && ObjectProperty->PropertyClass) ? ObjectProperty->PropertyClass->GetSuperClass() : nullptr;
+				while (ClassType)
+				{
+					Key.ObjectTypeName = ClassType->GetFName();
+
 					if (const FOnAnimatablePropertyChanged* DelegatePtr = FindPropertySetter(*PropertyContainer, Key, *Property))
 					{
 						InOutProperty = Property;
@@ -329,9 +370,19 @@ bool FSequencerObjectChangeListener::CanKeyProperty_Internal(FCanKeyPropertyPara
 						return true;
 					}
 
-					// Look at the property's super class
-					PropertyType = PropertyType->GetSuperClass();
+					ClassType = ClassType->GetSuperClass();
 				}
+
+				Key.ObjectTypeName = NAME_None;
+				if (const FOnAnimatablePropertyChanged* DelegatePtr = FindPropertySetter(*PropertyContainer, Key, *Property))
+				{
+					InOutProperty = Property;
+					InOutDelegate = *DelegatePtr;
+					return true;
+				}
+
+				// Look at the property's super class
+				PropertyType = PropertyType->GetSuperClass();
 			}
 		}
 	}

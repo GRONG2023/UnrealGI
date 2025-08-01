@@ -2,20 +2,25 @@
 
 #pragma once
 
-#include "CoreTypes.h"
-#include "Templates/UnrealTemplate.h"
-#include "Misc/InlineValue.h"
-#include "Containers/ArrayView.h"
-#include "Curves/KeyHandle.h"
-#include "Channels/MovieSceneChannelTraits.h"
 #include "Channels/MovieSceneChannelHandle.h"
+#include "Channels/MovieSceneChannelTraits.h"
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
+#include "CoreTypes.h"
+#include "Curves/KeyHandle.h"
+#include "Evaluation/MovieSceneRootOverridePath.h"
+#include "Misc/FrameNumber.h"
+#include "Misc/InlineValue.h"
+#include "Misc/Optional.h"
+#include "Templates/Tuple.h"
+#include "Templates/UnrealTemplate.h"
 
 struct FMovieSceneChannelValueHelper;
 
 /**
  * Helper class that marshals user-facing data from an edit UI into particluar keys on various underlying channels
  */
-struct MOVIESCENE_API FMovieSceneKeyStructHelper
+struct FMovieSceneKeyStructHelper
 {
 	/**
 	 * Default construction
@@ -33,24 +38,24 @@ struct MOVIESCENE_API FMovieSceneKeyStructHelper
 	 *
 	 * @param InHelper    The utility class to add, bound to the key handle it wants to edit
 	 */
-	void Add(FMovieSceneChannelValueHelper&& InHelper);
+	MOVIESCENE_API void Add(FMovieSceneChannelValueHelper&& InHelper);
 
 	/**
 	 * Set the user facing values on the UI based on the unified starting time
 	 */
-	void SetStartingValues();
+	MOVIESCENE_API void SetStartingValues();
 
 	/**
 	 * Get unified starting time that should be shown on the UI
 	 */
-	TOptional<FFrameNumber> GetUnifiedKeyTime() const;
+	MOVIESCENE_API TOptional<FFrameNumber> GetUnifiedKeyTime() const;
 
 	/**
 	 * Propagate the user-facing UI values to the keys that are being represented in this class
 	 *
 	 * @param InUnifiedTime  A time to set all keys to
 	 */
-	void Apply(FFrameNumber InUnifiedTime);
+	MOVIESCENE_API void Apply(FFrameNumber InUnifiedTime);
 
 private:
 	/** Unified key time that represents all the keys */

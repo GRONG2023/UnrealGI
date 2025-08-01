@@ -6,6 +6,7 @@
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Images/SThrobber.h"
+#include "Widgets/Layout/SSpacer.h"
 
 void SSearchBox::Construct( const FArguments& InArgs )
 {
@@ -19,7 +20,7 @@ void SSearchBox::Construct( const FArguments& InArgs )
 	DelayChangeNotificationsWhileTyping = InArgs._DelayChangeNotificationsWhileTyping;
 	DelayChangeNotificationsWhileTypingSeconds = InArgs._DelayChangeNotificationsWhileTypingSeconds;
 
-	InactiveFont = InArgs._Style->TextBoxStyle.Font;
+	InactiveFont = InArgs._Style->TextBoxStyle.TextStyle.Font;
 	ActiveFont = InArgs._Style->ActiveFontInfo;
 
 	SEditableTextBox::Construct( SEditableTextBox::FArguments()
@@ -32,12 +33,13 @@ void SSearchBox::Construct( const FArguments& InArgs )
 		.ClearKeyboardFocusOnCommit( false )
 		.OnTextChanged( this, &SSearchBox::HandleTextChanged )
 		.OnTextCommitted( this, &SSearchBox::HandleTextCommitted )
+		.OnVerifyTextChanged( InArgs._OnVerifyTextChanged )
 		.MinDesiredWidth( InArgs._MinDesiredWidth )
 		.OnKeyDownHandler( InArgs._OnKeyDownHandler )
 	);
 
-	// If we want to have the buttons appear to the left of the text box we have to insert the slots instead of add them
-	int32 SlotIndex = InArgs._Style->bLeftAlignButtons ? 0 : Box->NumSlots();
+	// If we want to have the search result buttons appear to the left of the text box we have to insert the slots instead of add them
+	int32 SlotIndex = InArgs._Style->bLeftAlignSearchResultButtons ? 0 : Box->NumSlots();
 
 	// Add a throbber to show if there is a search running.
 	Box->InsertSlot(SlotIndex++)
@@ -56,10 +58,12 @@ void SSearchBox::Construct( const FArguments& InArgs )
 	// If a search delegate was bound, add a previous and next button
 	if (OnSearchDelegate.IsBound())
 	{
+		FMargin SearchResultPadding = InArgs._Style->bLeftAlignSearchResultButtons ? FMargin(5, 0, 2, 0) : FMargin(2, 0, 2, 0);
+
 		// Search result data text
 		Box->InsertSlot(SlotIndex++)
 		.AutoWidth()
-		.Padding(0, 0, 2, 0)
+		.Padding(SearchResultPadding)
 		.HAlign(HAlign_Center)
 		.VAlign(VAlign_Center)
 		[
@@ -116,45 +120,63 @@ void SSearchBox::Construct( const FArguments& InArgs )
 	}
 
 	// Add a search glass image so that the user knows this text box is for searching
-	Box->InsertSlot(SlotIndex++)
-	.AutoWidth()
-	.Padding(InArgs._Style->ImagePadding)
-	.HAlign(HAlign_Center)
-	.VAlign(VAlign_Center)
-	[
-		SNew(SImage)
-		.Visibility(this, &SSearchBox::GetSearchGlassVisibility)
-		.Image( &InArgs._Style->GlassImage )
-		.ColorAndOpacity( FSlateColor::UseForeground() )
-	];
+	int GlassImageSlotIndex = InArgs._Style->bLeftAlignGlassImageAndClearButton ? 0 : Box->NumSlots();
+
+	if (InArgs._Style->bLeftAlignSearchResultButtons == InArgs._Style->bLeftAlignGlassImageAndClearButton)
+	{
+		// if they are on the same side, Glass Image follows the search result buttons
+		GlassImageSlotIndex = SlotIndex;
+	}
+
+	const int32 ClearButtonIndex = GlassImageSlotIndex + 1;
+	
+	Box->InsertSlot(GlassImageSlotIndex)
+		.AutoWidth()
+		.Padding(InArgs._Style->ImagePadding)
+		.HAlign(HAlign_Center)
+		.VAlign(VAlign_Center)
+		[
+			SNew(SImage)
+			.Visibility(this, &SSearchBox::GetSearchGlassVisibility)
+			.Image(&InArgs._Style->GlassImage)
+			.ColorAndOpacity(FSlateColor::UseForeground())
+		];
 
 	// Add an X to clear the search whenever there is some text typed into it
-	Box->InsertSlot(SlotIndex++)
+	FMargin ClearButtonMargin = FMargin(2.f, 0.f);
+	Box->InsertSlot(ClearButtonIndex)
 	.AutoWidth()
-	.Padding(InArgs._Style->ImagePadding)
 	.HAlign(HAlign_Center)
 	.VAlign(VAlign_Center)
 	[
 		SNew(SButton)
 		.Visibility(this, &SSearchBox::GetXVisibility)
-		.ButtonStyle( FCoreStyle::Get(), "NoBorder" )
-		.ContentPadding(0)
+		.ButtonStyle(FAppStyle::Get(), "HoverOnlyButton")
+		.ContentPadding(ClearButtonMargin)
 		.HAlign(HAlign_Center)
 		.VAlign(VAlign_Center)
-		.OnClicked( this, &SSearchBox::OnClearSearch )
-		.ForegroundColor( FSlateColor::UseForeground() )
+		.OnClicked(this, &SSearchBox::OnClearSearch)
 		// Allow the button to steal focus so that the search text will be automatically committed. Afterwards focus will be returned to the text box.
 		// If the user is keyboard-centric, they'll "ctrl+a, delete" to clear the search
 		.IsFocusable(true)
 		[
 			SNew(SImage)
-			.Image( &InArgs._Style->ClearImage )
-			.ColorAndOpacity( FSlateColor::UseForeground() )
+			.Image(&InArgs._Style->ClearImage)
+			.ColorAndOpacity(FSlateColor::UseForeground())
 		]
+	];
+
+	// Padding at the end so that the text box grows long enough to host all buttons
+	// the text box needs extra space because it is rounded on both ends
+	Box->AddSlot()
+	.AutoWidth()
+	[
+		SNew(SSpacer)
+		.Size(FVector2d(7,0))
 	];
 }
 
-EActiveTimerReturnType SSearchBox::TriggerOnTextChanged( double InCurrentTime, float InDeltaTime, FText NewText )
+EActiveTimerReturnType SSearchBox::TriggerOnTextChanged( double, float, FText NewText )
 {
 	// Reset the flag first in case the delegate winds up triggering HandleTextChanged
 	ActiveTimerHandle.Reset();
@@ -186,6 +208,10 @@ void SSearchBox::HandleTextCommitted(const FText& NewText, ETextCommit::Type Com
 	if ( ActiveTimerHandle.IsValid() )
 	{
 		UnRegisterActiveTimer( ActiveTimerHandle.Pin().ToSharedRef() );
+		
+		// If there was a pending text change we need to fire it in case someone was cache the last value and
+		// ignoring changes during commit, or if they expected a change always before the commit.
+		OnTextChangedDelegate.ExecuteIfBound(NewText);
 	}
 
 	OnTextCommittedDelegate.ExecuteIfBound( NewText, CommitType );

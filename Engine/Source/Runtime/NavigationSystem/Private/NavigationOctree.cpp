@@ -2,17 +2,24 @@
 
 #include "NavigationOctree.h"
 #include "AI/Navigation/NavRelevantInterface.h"
+#include "Interfaces/Interface_AsyncCompilation.h"
 #include "NavigationSystem.h"
+#include "UObject/Package.h"
+
+LLM_DEFINE_TAG(NavigationOctree);
 
 
 //----------------------------------------------------------------------//
 // FNavigationOctree
 //----------------------------------------------------------------------//
-FNavigationOctree::FNavigationOctree(const FVector& Origin, float Radius)
+FNavigationOctree::FNavigationOctree(const FVector& Origin, FVector::FReal Radius)
 	: TOctree2<FNavigationOctreeElement, FNavigationOctreeSemantics>(Origin, Radius)
 	, DefaultGeometryGatheringMode(ENavDataGatheringMode::Instant)
 	, bGatherGeometry(false)
 	, NodesMemory(0)
+#if !UE_BUILD_SHIPPING	
+	, GatheringNavModifiersTimeLimitWarning(-1.0f)
+#endif // !UE_BUILD_SHIPPING	
 {
 	INC_DWORD_STAT_BY( STAT_NavigationMemory, sizeof(*this) );
 }
@@ -38,21 +45,23 @@ void FNavigationOctree::SetNavigableGeometryStoringMode(ENavGeometryStoringMode 
 
 void FNavigationOctree::DemandLazyDataGathering(FNavigationRelevantData& ElementData)
 {
-	UObject* ElementOb = ElementData.GetOwner();
-	if (ElementOb == nullptr)
+	LLM_SCOPE_BYTAG(NavigationOctree);
+
+	UObject* const NavRelevantObject = ElementData.GetOwner();
+	INavRelevantInterface* const NavRelevantInterface = Cast<INavRelevantInterface>(NavRelevantObject);
+	if (NavRelevantInterface == nullptr)
 	{
 		return;
 	}
 
 	bool bShrink = false;
-	const int32 OrgElementMemory = ElementData.GetGeometryAllocatedSize();
+	const int32 OrgElementMemory = IntCastChecked<int32>(ElementData.GetGeometryAllocatedSize());
 
 	if (ElementData.IsPendingLazyGeometryGathering() == true && ElementData.SupportsGatheringGeometrySlices() == false)
 	{
 		QUICK_SCOPE_CYCLE_COUNTER(STAT_RecastNavMeshGenerator_LazyGeometryExport);
-		UActorComponent& ActorComp = *CastChecked<UActorComponent>(ElementOb);
-		ComponentExportDelegate.ExecuteIfBound(&ActorComp, ElementData);
 
+		NavRelevantGeometryExportDelegate.ExecuteIfBound(*NavRelevantInterface, ElementData);
 		bShrink = true;
 
 		// mark this element as no longer needing geometry gathering
@@ -62,11 +71,32 @@ void FNavigationOctree::DemandLazyDataGathering(FNavigationRelevantData& Element
 	if (ElementData.IsPendingLazyModifiersGathering())
 	{
 		QUICK_SCOPE_CYCLE_COUNTER(STAT_RecastNavMeshGenerator_LazyModifiersExport);
-		INavRelevantInterface* NavElement = Cast<INavRelevantInterface>(ElementOb);
-		check(NavElement);
-		NavElement->GetNavigationData(ElementData);
+
+#if !UE_BUILD_SHIPPING
+		const bool bCanOutputDurationWarning = GatheringNavModifiersTimeLimitWarning >= 0.0f;
+		const double StartTime = bCanOutputDurationWarning ? FPlatformTime::Seconds() : 0.0f;
+#endif //!UE_BUILD_SHIPPING
+
+		NavRelevantInterface->GetNavigationData(ElementData);
 		ElementData.bPendingLazyModifiersGathering = false;
 		bShrink = true;
+
+#if !UE_BUILD_SHIPPING
+		// If GatheringNavModifiersWarningLimitTime is positive, it will print a Warning if the time taken to call GetNavigationData is more than GatheringNavModifiersWarningLimitTime			
+		if (bCanOutputDurationWarning)
+		{
+			const double DeltaTime = FPlatformTime::Seconds() - StartTime;
+			if (DeltaTime > GatheringNavModifiersTimeLimitWarning)
+			{
+				UE_LOG(LogNavigation, Warning, TEXT("The time (%f sec) for gathering navigation data on an INavRelevantInterface navigation element exceeded the time limit (%f sec) | NavElement = %s | NavElement's Owner = %s | Level = %s"),
+					DeltaTime,
+					GatheringNavModifiersTimeLimitWarning,
+					*GetNameSafe(NavRelevantObject),
+					*GetNameSafe(NavRelevantObject->GetOuter()),
+					*GetNameSafe(NavRelevantObject->GetOutermost()));
+			}
+		}
+#endif //!UE_BUILD_SHIPPING
 	}
 
 	if (bShrink)
@@ -77,19 +107,28 @@ void FNavigationOctree::DemandLazyDataGathering(FNavigationRelevantData& Element
 		ElementData.ValidateAndShrink();
 	}
 
-	const int32 ElementMemoryChange = ElementData.GetGeometryAllocatedSize() - OrgElementMemory;
-	const_cast<FNavigationOctree*>(this)->NodesMemory += ElementMemoryChange;
+	const int32 ElementMemoryChange = IntCastChecked<int32>(ElementData.GetGeometryAllocatedSize()) - OrgElementMemory;
+	NodesMemory += ElementMemoryChange;
 	INC_MEMORY_STAT_BY(STAT_Navigation_CollisionTreeMemory, ElementMemoryChange);
 }
 
 void FNavigationOctree::DemandChildLazyDataGathering(FNavigationRelevantData& ElementData, INavRelevantInterface& ChildNavInterface)
 {
+	LLM_SCOPE_BYTAG(NavigationOctree);
+
 	if (IsLazyGathering(ChildNavInterface))
 	{
 		ChildNavInterface.GetNavigationData(ElementData);
 		ElementData.ValidateAndShrink();
 	}
 }
+
+#if !UE_BUILD_SHIPPING	
+void FNavigationOctree::SetGatheringNavModifiersTimeLimitWarning(const float Threshold)
+{
+	GatheringNavModifiersTimeLimitWarning = Threshold;
+}
+#endif // !UE_BUILD_SHIPPING	
 
 bool FNavigationOctree::IsLazyGathering(const INavRelevantInterface& ChildNavInterface) const
 {
@@ -102,21 +141,42 @@ bool FNavigationOctree::IsLazyGathering(const INavRelevantInterface& ChildNavInt
 
 void FNavigationOctree::AddNode(UObject* ElementOb, INavRelevantInterface* NavElement, const FBox& Bounds, FNavigationOctreeElement& Element)
 {
-	// we assume NavElement is ElementOb already cast
-	Element.Bounds = Bounds;	
+	LLM_SCOPE_BYTAG(NavigationOctree);
+
+	if (UNLIKELY(!Bounds.IsValid || Bounds.GetSize().IsNearlyZero())) 
+	{
+		UE_LOG(LogNavigation, Warning, TEXT("%hs: %s bounds, ignoring %s."), __FUNCTION__, !Bounds.IsValid ? TEXT("Invalid") : TEXT("Empty"), *GetFullNameSafe(ElementOb));
+		return;
+	}
+	
+	Element.Bounds = Bounds;
 
 	if (NavElement)
 	{
+		checkf(ElementOb, TEXT("We assume NavElement is ElementOb already cast"));
+
+		Element.Data->bShouldSkipDirtyAreaOnAddOrRemove = NavElement && NavElement->ShouldSkipDirtyAreaOnAddOrRemove();
+
 		const bool bDoInstantGathering = !IsLazyGathering(*NavElement);
 
 		if (bGatherGeometry)
 		{
-			UActorComponent* ActorComp = Cast<UActorComponent>(ElementOb);
-			if (ActorComp)
+			bool bIsCompiling = false;
+#if WITH_EDITOR
+			const IInterface_AsyncCompilation* AsyncCompiledObject = Cast<IInterface_AsyncCompilation>(ElementOb);
+			bIsCompiling = AsyncCompiledObject && AsyncCompiledObject->IsCompiling();
+
+			UE_CLOG(bIsCompiling, LogNavigation, Warning, TEXT("%hs: Objects %s should not be considered relevant to navigation until associated asset compilation is completed."),
+				__FUNCTION__, *GetFullNameSafe(ElementOb));
+#endif
+
+			// Skip custom navigation export during async compilation, the node will be invalidated once
+			// compilation finishes.
+			if (!bIsCompiling)
 			{
 				if (bDoInstantGathering)
 				{
-					ComponentExportDelegate.ExecuteIfBound(ActorComp, *Element.Data);
+					NavRelevantGeometryExportDelegate.ExecuteIfBound(*NavElement, *Element.Data);
 				}
 				else
 				{
@@ -129,7 +189,29 @@ void FNavigationOctree::AddNode(UObject* ElementOb, INavRelevantInterface* NavEl
 		SCOPE_CYCLE_COUNTER(STAT_Navigation_GatheringNavigationModifiersSync);
 		if (bDoInstantGathering)
 		{
+#if !UE_BUILD_SHIPPING
+			const bool bCanOutputDurationWarning = GatheringNavModifiersTimeLimitWarning >= 0.0f;
+			const double StartTime = bCanOutputDurationWarning ? FPlatformTime::Seconds() : 0.0f;
+#endif //!UE_BUILD_SHIPPING
+
 			NavElement->GetNavigationData(*Element.Data);
+
+#if !UE_BUILD_SHIPPING
+			// If GatheringNavModifiersWarningLimitTime is positive, it will print a Warning if the time taken to call GetNavigationData is more than GatheringNavModifiersWarningLimitTime			
+			if (bCanOutputDurationWarning)
+			{
+				const double DeltaTime = FPlatformTime::Seconds() - StartTime;
+				if (DeltaTime > GatheringNavModifiersTimeLimitWarning)
+				{
+					UE_LOG(LogNavigation, Warning, TEXT("The time (%f sec) for gathering navigation data on an INavRelevantInterface navigation element exceeded the time limit (%f sec) | NavElement = %s | Element's Owner = %s | Level = %s"),
+						DeltaTime,
+						GatheringNavModifiersTimeLimitWarning,
+						*GetNameSafe(ElementOb),
+						*GetNameSafe(ElementOb->GetOuter()),
+						*GetNameSafe(ElementOb->GetOutermost()));
+				}
+			}
+#endif //!UE_BUILD_SHIPPING
 		}
 		else
 		{
@@ -151,7 +233,9 @@ void FNavigationOctree::AddNode(UObject* ElementOb, INavRelevantInterface* NavEl
 
 void FNavigationOctree::AppendToNode(const FOctreeElementId2& Id, INavRelevantInterface* NavElement, const FBox& Bounds, FNavigationOctreeElement& Element)
 {
-	FNavigationOctreeElement OrgData = GetElementById(Id);
+	LLM_SCOPE_BYTAG(NavigationOctree);
+
+	const FNavigationOctreeElement OrgData = GetElementById(Id);
 
 	Element = OrgData;
 	Element.Bounds = Bounds + OrgData.Bounds.GetBox();

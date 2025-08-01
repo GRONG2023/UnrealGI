@@ -18,54 +18,23 @@
 FMetalVertexShader::FMetalVertexShader(TArrayView<const uint8> InCode)
 {
 	FMetalCodeHeader Header;
-	Init(InCode, Header);
-
-#if PLATFORM_SUPPORTS_TESSELLATION_SHADERS
-	if (Header.Tessellation.Num())
-	{
-		auto const& Tess = Header.Tessellation[0];
-		TessellationOutputAttribs = Tess.TessellationOutputAttribs;
-		TessellationPatchCountBuffer = Tess.TessellationPatchCountBuffer;
-		TessellationIndexBuffer = Tess.TessellationIndexBuffer;
-		TessellationHSOutBuffer = Tess.TessellationHSOutBuffer;
-		TessellationHSTFOutBuffer = Tess.TessellationHSTFOutBuffer;
-		TessellationControlPointOutBuffer = Tess.TessellationControlPointOutBuffer;
-		TessellationControlPointIndexBuffer = Tess.TessellationControlPointIndexBuffer;
-		TessellationOutputControlPoints = Tess.TessellationOutputControlPoints;
-		TessellationDomain = Tess.TessellationDomain;
-		TessellationInputControlPoints = Tess.TessellationInputControlPoints;
-		TessellationMaxTessFactor = Tess.TessellationMaxTessFactor;
-		TessellationPatchesPerThreadGroup = Tess.TessellationPatchesPerThreadGroup;
-	}
-#endif // PLATFORM_SUPPORTS_TESSELLATION_SHADERS
+	Init(InCode, Header, MTLLibraryPtr());
 }
 
-FMetalVertexShader::FMetalVertexShader(TArrayView<const uint8> InCode, mtlpp::Library InLibrary)
+FMetalVertexShader::FMetalVertexShader(TArrayView<const uint8> InCode, MTLLibraryPtr InLibrary)
 {
 	FMetalCodeHeader Header;
 	Init(InCode, Header, InLibrary);
-
-#if PLATFORM_SUPPORTS_TESSELLATION_SHADERS
-	if (Header.Tessellation.Num())
-	{
-		auto const& Tess = Header.Tessellation[0];
-		TessellationOutputAttribs = Tess.TessellationOutputAttribs;
-		TessellationPatchCountBuffer = Tess.TessellationPatchCountBuffer;
-		TessellationIndexBuffer = Tess.TessellationIndexBuffer;
-		TessellationHSOutBuffer = Tess.TessellationHSOutBuffer;
-		TessellationHSTFOutBuffer = Tess.TessellationHSTFOutBuffer;
-		TessellationControlPointOutBuffer = Tess.TessellationControlPointOutBuffer;
-		TessellationControlPointIndexBuffer = Tess.TessellationControlPointIndexBuffer;
-		TessellationOutputControlPoints = Tess.TessellationOutputControlPoints;
-		TessellationDomain = Tess.TessellationDomain;
-		TessellationInputControlPoints = Tess.TessellationInputControlPoints;
-		TessellationMaxTessFactor = Tess.TessellationMaxTessFactor;
-		TessellationPatchesPerThreadGroup = Tess.TessellationPatchesPerThreadGroup;
-	}
-#endif // PLATFORM_SUPPORTS_TESSELLATION_SHADERS
 }
 
-mtlpp::Function FMetalVertexShader::GetFunction()
+MTLFunctionPtr FMetalVertexShader::GetFunction()
 {
 	return GetCompiledFunction();
 }
+
+#if PLATFORM_SUPPORTS_GEOMETRY_SHADERS
+MTLFunctionPtr FMetalVertexShader::GetObjectFunctionForGeometryEmulation()
+{
+    return GetCompiledFunction(false, 0);
+}
+#endif

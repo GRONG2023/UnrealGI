@@ -15,7 +15,7 @@ struct FPropertyChangedEvent;
 
 /** Supported input types */
 UENUM(BlueprintType)
-enum EFunctionInputType
+enum EFunctionInputType : int
 {
 	FunctionInput_Scalar,
 	FunctionInput_Vector2,
@@ -28,6 +28,8 @@ enum EFunctionInputType
 	FunctionInput_StaticBool,
 	FunctionInput_MaterialAttributes,
 	FunctionInput_TextureExternal,
+	FunctionInput_Bool,
+	FunctionInput_Substrate,
 	FunctionInput_MAX,
 };
 
@@ -61,7 +63,7 @@ class UMaterialExpressionFunctionInput : public UMaterialExpression
 
 	/** Value used to preview this input when editing the material function. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=MaterialExpressionFunctionInput, meta=(OverridingInputProperty = "Preview"))
-	FVector4 PreviewValue;
+	FVector4f PreviewValue;
 
 	/** Whether to use the preview value or texture as the default value for this input. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=MaterialExpressionFunctionInput)
@@ -107,9 +109,14 @@ class UMaterialExpressionFunctionInput : public UMaterialExpression
 	virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
 	virtual void GetCaption(TArray<FString>& OutCaptions) const override;
 
+
+	virtual bool IsResultSubstrateMaterial(int32 OutputIndex) override;
+	virtual void GatherSubstrateMaterialInfo(FSubstrateMaterialInfo& SubstrateMaterialInfo, int32 OutputIndex) override;
+	virtual FSubstrateOperator* SubstrateGenerateMaterialTopologyTree(class FMaterialCompiler* Compiler, class UMaterialExpression* Parent, int32 OutputIndex) override;
 	virtual bool IsResultMaterialAttributes(int32 OutputIndex) override;
 	virtual uint32 GetInputType(int32 InputIndex) override;
 	virtual uint32 GetOutputType(int32 OutputIndex) override;
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
 #endif // WITH_EDITOR
 	//~ End UMaterialExpression Interface
 
@@ -127,6 +134,9 @@ private:
 #if WITH_EDITOR
 	/** Helper function which compiles this expression for previewing. */
 	int32 CompilePreviewValue(FMaterialCompiler* Compiler);
+
+	/** Stashed data between a Pre/PostEditChange event */
+	FName InputNameBackup;
 #endif // WITH_EDITOR
 };
 

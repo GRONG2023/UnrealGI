@@ -9,6 +9,7 @@
 #include "Android/AndroidApplication.h"
 #include "Android/AndroidWindow.h"
 #include "Android/AndroidJava.h"
+#include "Misc/ConfigCacheIni.h"
 
 #include <jni.h>
 
@@ -29,16 +30,33 @@ FAndroidWebBrowserWindow::FAndroidWebBrowserWindow(FString InUrl, TOptional<FStr
 	, DocumentState(EWebBrowserDocumentState::NoDocument)
 	, ErrorCode(0)
 	, Scripting(new FMobileJSScripting(bInJSBindingToLoweringEnabled))
-	, AndroidWindowSize(FIntPoint(500, 500))
+	, AndroidWindowSize(FIntPoint(1024, 768))
 	, bIsDisabled(false)
 	, bIsVisible(true)
 	, bTickedLastFrame(true)
 {
+	// Deal with optional texture resolution override
+	FString WebViewTextureSize;
+	if (GConfig->GetString(TEXT("/Script/AndroidRuntimeSettings.AndroidRuntimeSettings"), TEXT("WebViewTextureSize"), WebViewTextureSize, GEngineIni))
+	{
+		TArray<FString> ResolutionVector;
+		int ParseCount = WebViewTextureSize.ParseIntoArray(ResolutionVector, TEXT(","), false);
+		ensureMsgf(ParseCount == 2, TEXT("WebViewTextureSize variable not properly formatted."));
+
+		if (ParseCount == 2)
+		{
+			int32 Width = FCString::Atof(*ResolutionVector[0]);
+			int32 Height = FCString::Atof(*ResolutionVector[1]);
+
+			AndroidWindowSize.X = FMath::Max(1, Width);
+			AndroidWindowSize.Y = FMath::Max(1, Height);
+		}
+	}
 }
 
 FAndroidWebBrowserWindow::~FAndroidWebBrowserWindow()
 {
-	CloseBrowser(true);
+	CloseBrowser(true, false);
 }
 
 void FAndroidWebBrowserWindow::LoadURL(FString NewURL)
@@ -83,7 +101,7 @@ FSlateShaderResource* FAndroidWebBrowserWindow::GetTexture(bool bIsPopup /*= fal
 
 bool FAndroidWebBrowserWindow::IsValid() const
 {
-	return false;
+	return BrowserWidget.IsValid();
 }
 
 bool FAndroidWebBrowserWindow::IsInitialized() const
@@ -113,27 +131,62 @@ FString FAndroidWebBrowserWindow::GetUrl() const
 
 bool FAndroidWebBrowserWindow::OnKeyDown(const FKeyEvent& InKeyEvent)
 {
+//	return BrowserWidget->OnKeyDown(FGeometry(), InKeyEvent).IsEventHandled();
 	return false;
 }
 
 bool FAndroidWebBrowserWindow::OnKeyUp(const FKeyEvent& InKeyEvent)
 {
+//	return BrowserWidget->OnKeyUp(FGeometry(), InKeyEvent).IsEventHandled();
 	return false;
 }
 
 bool FAndroidWebBrowserWindow::OnKeyChar(const FCharacterEvent& InCharacterEvent)
 {
+//	return BrowserWidget->OnKeyChar(FGeometry(), InCharacterEvent).IsEventHandled();
 	return false;
+}
+
+FVector2D FAndroidWebBrowserWindow::ConvertMouseEventToLocal(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent, bool bIsPopup)
+{
+	FGeometry MouseGeometry = MyGeometry;
+
+	float DPIScale = MouseGeometry.Scale;
+	FVector2D LocalPos = MouseGeometry.AbsoluteToLocal(MouseEvent.GetScreenSpacePosition()) * DPIScale;
+
+	return LocalPos;
 }
 
 FReply FAndroidWebBrowserWindow::OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent, bool bIsPopup)
 {
-	return FReply::Unhandled();
+	FReply Reply = FReply::Unhandled();
+/*
+	FKey Button = MouseEvent.GetEffectingButton();
+	bool bSupportedButton = (Button == EKeys::LeftMouseButton); // || Button == EKeys::RightMouseButton || Button == EKeys::MiddleMouseButton);
+
+	if (bSupportedButton)
+	{
+		Reply = FReply::Handled();
+		BrowserWidget->SendTouchDown(ConvertMouseEventToLocal(MyGeometry, MouseEvent, bIsPopup));
+	}
+*/
+	return Reply;
 }
 
 FReply FAndroidWebBrowserWindow::OnMouseButtonUp(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent, bool bIsPopup)
 {
-	return FReply::Unhandled();
+	FReply Reply = FReply::Unhandled();
+/*
+	FKey Button = MouseEvent.GetEffectingButton();
+	bool bSupportedButton = (Button == EKeys::LeftMouseButton); // || Button == EKeys::RightMouseButton || Button == EKeys::MiddleMouseButton);
+
+	if (bSupportedButton)
+	{
+		Reply = FReply::Handled();
+		BrowserWidget->SendTouchUp(ConvertMouseEventToLocal(MyGeometry, MouseEvent, bIsPopup));
+	}
+*/
+	return Reply;
 }
 
 FReply FAndroidWebBrowserWindow::OnMouseButtonDoubleClick(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent, bool bIsPopup)
@@ -143,7 +196,18 @@ FReply FAndroidWebBrowserWindow::OnMouseButtonDoubleClick(const FGeometry& MyGeo
 
 FReply FAndroidWebBrowserWindow::OnMouseMove(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent, bool bIsPopup)
 {
-	return FReply::Unhandled();
+	FReply Reply = FReply::Unhandled();
+/*
+	FKey Button = MouseEvent.GetEffectingButton();
+	bool bSupportedButton = (Button == EKeys::LeftMouseButton); // || Button == EKeys::RightMouseButton || Button == EKeys::MiddleMouseButton);
+
+	if (bSupportedButton)
+	{
+		Reply = FReply::Handled();
+		BrowserWidget->SendTouchMove(ConvertMouseEventToLocal(MyGeometry, MouseEvent, bIsPopup));
+	}
+*/
+	return Reply;
 }
 
 void FAndroidWebBrowserWindow::OnMouseLeave(const FPointerEvent& MouseEvent)
@@ -160,6 +224,11 @@ bool FAndroidWebBrowserWindow::GetSupportsMouseWheel() const
 }
 
 FReply FAndroidWebBrowserWindow::OnMouseWheel(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent, bool bIsPopup)
+{
+	return FReply::Unhandled();
+}
+
+FReply FAndroidWebBrowserWindow::OnTouchGesture(const FGeometry& MyGeometry, const FPointerEvent& GestureEvent, bool bIsPopup)
 {
 	return FReply::Unhandled();
 }
@@ -279,7 +348,7 @@ void FAndroidWebBrowserWindow::ExecuteJavascript(const FString& Script)
 	BrowserWidget->ExecuteJavascript(Script);
 }
 
-void FAndroidWebBrowserWindow::CloseBrowser(bool bForce)
+void FAndroidWebBrowserWindow::CloseBrowser(bool bForce, bool bBlockTillClosed /* ignored */)
 {
 	BrowserWidget->Close();
 }

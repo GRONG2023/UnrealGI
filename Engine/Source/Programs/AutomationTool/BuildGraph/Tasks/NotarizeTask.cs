@@ -11,10 +11,15 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 using UnrealBuildTool;
+using Microsoft.Extensions.Logging;
 
-namespace BuildGraph.Tasks
+using static AutomationTool.CommandUtils;
+
+#pragma warning disable SYSLIB0014
+
+namespace AutomationTool.Tasks
 {
 	/// <summary>
 	/// Parameters for a task that notarizes a dmg via the apple notarization process
@@ -53,7 +58,7 @@ namespace BuildGraph.Tasks
 	}
 
 	[TaskElement("Notarize", typeof(NotarizeTaskParameters))]
-	class NotarizeTask : CustomTask
+	class NotarizeTask : BgTaskImpl
 	{
 		/// <summary>
 		/// Parameters for the task
@@ -75,7 +80,7 @@ namespace BuildGraph.Tasks
 		/// <param name="Job">Information about the current job</param>
 		/// <param name="BuildProducts">Set of build products produced by this node.</param>
 		/// <param name="TagNameToFileSet">Mapping from tag names to the set of files they include</param>
-		public override void Execute(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
+		public override Task ExecuteAsync(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
 		{
 			// Ensure running on a mac.
 			if(BuildHostPlatform.Current.Platform != UnrealTargetPlatform.Mac)
@@ -91,95 +96,79 @@ namespace BuildGraph.Tasks
 			}
 
 			int ExitCode = 0;
-			CommandUtils.LogInformation("Uploading {0} to the notarization server...", Dmg.FullName);
-			string CommandLine = string.Format("altool --notarize-app --primary-bundle-id \"{0}\" --username \"{1}\" --password \"@keychain:{2}\" --file \"{3}\"", Parameters.BundleID, Parameters.UserName, Parameters.KeyChainID, Dmg.FullName);
-			string Output = CommandUtils.RunAndLog("xcrun", CommandLine, out ExitCode);
-			if(ExitCode != 0)
+			Logger.LogInformation("Uploading {Arg0} to the notarization server...", Dmg.FullName);
+			
+			// The notarytool will timeout after 5 retries or 1 hour. Whichever comes first.
+			const int MaxNumRetries = 5;
+			const int MaxTimeoutInMilliseconds = 3600000;
+			long TimeoutInMilliseconds = MaxTimeoutInMilliseconds;
+			string Output = "";
+
+			System.Diagnostics.Stopwatch TimeoutStopwatch = System.Diagnostics.Stopwatch.StartNew();
+			
+			for (int NumRetries = 0; NumRetries < MaxNumRetries; NumRetries++)
 			{
-				throw new AutomationException("--notarize-app failed with exit {0}", ExitCode);
+				string CommandLine = string.Format("notarytool submit \"{0}\" --keychain-profile \"{1}\" --wait --timeout \"{2}\"", Dmg.FullName, Parameters.KeyChainID, TimeoutInMilliseconds);
+				Output = CommandUtils.RunAndLog("xcrun", CommandLine, out ExitCode);
+				
+				if (ExitCode == 0)
+				{
+					break;
+				}
+				
+				if (TimeoutStopwatch.ElapsedMilliseconds >= TimeoutInMilliseconds)
+				{
+					Logger.LogInformation("notarytool timed out after {TimeoutInMilliseconds}ms.", TimeoutInMilliseconds);
+					TimeoutStopwatch.Stop();
+				}
+				else if (NumRetries < MaxNumRetries)
+				{
+					Logger.LogInformation("notarytool failed with exit {ExitCode} attempting retry {NumRetries} of {MaxNumRetries}", ExitCode, NumRetries, MaxNumRetries);
+					Thread.Sleep(2000);
+					TimeoutInMilliseconds = MaxTimeoutInMilliseconds - TimeoutStopwatch.ElapsedMilliseconds;
+					continue;
+				}
+
+
+				Logger.LogInformation("Retries have been exhausted");
+				throw new AutomationException("notarytool failed with exit {0}", ExitCode);
 			}
 
 			// Grab the UUID from the log
 			string RequestUUID = null;
 			try
 			{
-				RequestUUID = Regex.Match(Output, "RequestUUID = ([a-zA-Z0-9]{8}-[a-zA-Z0-9]{4}-[a-zA-Z0-9]{4}-[a-zA-Z0-9]{4}-[a-zA-Z0-9]{12})").Groups[1].Value.Trim();
+				RequestUUID = Regex.Match(Output, "id: ([a-zA-Z0-9]{8}-[a-zA-Z0-9]{4}-[a-zA-Z0-9]{4}-[a-zA-Z0-9]{4}-[a-zA-Z0-9]{12})").Groups[1].Value.Trim();
 			}
-			catch(Exception Ex)
+			catch (Exception Ex)
 			{
 				throw new AutomationException(Ex, "Couldn't get UUID from the log output {0}", Output);
 			}
 
-			// Wait 2 minutes for the server to associate this build with the UUID it passes back.
-			// Trying instantly just returns back and says it can't find it.
-			CommandUtils.LogInformation("Waiting 3 minutes for the UUID to propagate...");
-			Thread.Sleep(180000);
-
-			// Repeat for an hour until we get something back.
 			try
 			{
-				int Timeout = 0;
-				int WaitTime = 30000;
-				int MaxTimeout = 120;
-				while (Timeout < MaxTimeout)
+				MatchCollection StatusMatches = Regex.Matches(Output, "(?<=status: ).+");
+				// The last status update is the right one.
+				string Status = StatusMatches[StatusMatches.Count - 1].Value.ToLower();
+
+				if (Status == "accepted")
 				{
-					CommandLine = string.Format("altool --notarization-info {0} -u \"{1}\" -p \"@keychain:{2}\"", RequestUUID, Parameters.UserName, Parameters.KeyChainID);
-					Output = CommandUtils.RunAndLog("xcrun", CommandLine, out ExitCode);
-					if (ExitCode != 0)
+					if(Parameters.RequireStapling)
 					{
-						throw new AutomationException("--notarization-info failed with exit {0}", ExitCode);
-					}
-
-					Match StatusMatches = (new Regex("(?<=Status: ).+")).Match(Output);
-					string Status = StatusMatches.Value.ToLower();
-					Match LogFileURLMatches = (new Regex("(?<=LogFileURL: ).+")).Match(Output);
-					string LogFileUrl = LogFileURLMatches.Value;
-
-					if (Status == "invalid")
-					{
-						CommandUtils.LogInformation(GetLogFile(LogFileUrl));
-						throw new AutomationException("Could not notarize the app. See log output above.");
-					}
-					else if (Status == "in progress")
-					{
-						CommandUtils.LogInformation("Notarization still in progress, waiting 30 seconds...");
-						Thread.Sleep(WaitTime);
-					}
-					else if (Status == "success")
-					{
-						if (LogFileUrl == "(null)")
+						// once we have a log file, print it out, staple, and we're done.
+						Logger.LogInformation("{Text}", GetRequestLogs(RequestUUID));
+						string CommandLine = string.Format("stapler staple {0}", Dmg.FullName);
+						Output = CommandUtils.RunAndLog("xcrun", CommandLine, out ExitCode);
+						if (ExitCode != 0)
 						{
-							CommandUtils.LogInformation("Notarization success but no log file has been generated, waiting 30 seconds...");
-							Thread.Sleep(WaitTime);
-						}
-						else if(Parameters.RequireStapling)
-						{
-							// once we have a log file, print it out, staple, and we're done.
-							CommandUtils.LogInformation(GetLogFile(LogFileUrl));
-							CommandLine = string.Format("stapler staple {0}", Dmg.FullName);
-							Output = CommandUtils.RunAndLog("xcrun", CommandLine, out ExitCode);
-							if (ExitCode != 0)
-							{
-								throw new AutomationException("stapler failed with exit {0}", ExitCode);
-							}
-							break;
-						}
-						else
-						{
-							// Success, no need to run the stapler.
-							break;
+							throw new AutomationException("stapler failed with exit {0}", ExitCode);
 						}
 					}
-					else
-					{
-						CommandUtils.LogInformation("Status is? {0}", Status);
-						Thread.Sleep(WaitTime);
-					}
-					Timeout++;
 				}
-				if(Timeout == MaxTimeout)
+				else
 				{
-					throw new AutomationException("Did not get a response back from the notarization server after an hour. Aborting!");
+					Logger.LogError("{Text}", GetRequestLogs(RequestUUID));
+					throw new AutomationException($"Could not notarize the app. Request status: {0}. See log output above.", Status);
 				}
 			}
 			catch (Exception Ex)
@@ -190,35 +179,27 @@ namespace BuildGraph.Tasks
 				}
 				else
 				{
-					throw new AutomationException(Ex, "Querying for the notarization progress failed, output: {0}", Output);
+					throw new AutomationException(Ex, "Querying for the notarization result failed, output: {0}", Output);
 				}
 			}
+
+			return Task.CompletedTask;
 		}
 
-		private string GetLogFile(string Url)
+		private string GetRequestLogs(string RequestUUID)
 		{
-			HttpWebRequest Request = (HttpWebRequest)WebRequest.Create(Url);
-			Request.Method = "GET";
 			try
 			{
-				WebResponse Response = Request.GetResponse();
+				string LogCommand = string.Format("notarytool log {0} --keychain-profile \"{1}\"", RequestUUID, Parameters.KeyChainID);
+				IProcessResult LogResult = CommandUtils.Run("xcrun", LogCommand);
+
 				string ResponseContent = null;
-				using (StreamReader ResponseReader = new System.IO.StreamReader(Response.GetResponseStream(), Encoding.Default))
+				if (LogResult.bExitCodeSuccess)
 				{
-					ResponseContent = ResponseReader.ReadToEnd();
+					ResponseContent = LogResult.Output;
 				}
+
 				return ResponseContent;
-			}
-			catch (WebException Ex)
-			{
-				if (Ex.Response != null)
-				{
-					throw new AutomationException(Ex, string.Format("Request returned status: {0}, message: {1}", ((HttpWebResponse)Ex.Response).StatusCode, Ex.Message));
-				}
-				else
-				{
-					throw new AutomationException(Ex, string.Format("Request returned message: {0}", Ex.InnerException.Message));
-				}
 			}
 			catch (Exception Ex)
 			{

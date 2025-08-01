@@ -1,11 +1,21 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "MRUList.h"
+
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
+#include "CoreGlobals.h"
 #include "HAL/FileManager.h"
-#include "Misc/PackageName.h"
-#include "Misc/ConfigCacheIni.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
 #include "Logging/MessageLog.h"
-#include "AssetRegistryModule.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/CoreMiscDefines.h"
+#include "Misc/PackageName.h"
+#include "Modules/ModuleManager.h"
+#include "UObject/NameTypes.h"
 
 FMRUList::FMRUList(const FString& InINISection, const int32 InitMaxItems)
 	:	MaxItems( InitMaxItems ),
@@ -28,6 +38,12 @@ void FMRUList::Cull()
 	}
 }
 
+void FMRUList::ClearMRUItems()
+{
+	Items.Empty();
+
+	WriteToINI();
+}
 
 void FMRUList::ReadFromINI()
 {
@@ -59,7 +75,7 @@ void FMRUList::MoveToTop(int32 InItem)
 
 void FMRUList::AddMRUItem(const FString& InItem)
 {
-	check(FPackageName::IsValidLongPackageName(InItem));
+	checkf(FPackageName::IsValidLongPackageName(InItem), TEXT("FMRUList::AddMRUItem called with an invalid package name: %s"), *InItem);
 
 	// See if the item already exists in the list.  If so,
 	// move it to the top of the list and leave.
@@ -133,11 +149,18 @@ void FMRUList::InternalReadINI( TArray<FString>& OutItems, const FString& INISec
 				FString NewItem;
 				if (FPackageName::TryConvertFilenameToLongPackageName(CurItem, NewItem))
 				{
-					CurItem = NewItem;
+					if (NewItem != CurItem)
+					{
+						CurItem = NewItem;
+						bConvertedToNewFormat = true;
+					}
+					
 					OutItems.AddUnique(CurItem);
 				}
-
-				bConvertedToNewFormat = true;
+				else
+				{
+					bConvertedToNewFormat = true;
+				}
 			}
 			else
 			{
@@ -155,14 +178,17 @@ void FMRUList::InternalReadINI( TArray<FString>& OutItems, const FString& INISec
 
 void FMRUList::InternalWriteINI( const TArray<FString>& InItems, const FString& INISection, const FString& INIKeyBase )
 {
-	GConfig->EmptySection( *INISection, GEditorPerProjectIni );
-
-	for ( int32 ItemIdx = 0; ItemIdx < InItems.Num(); ++ItemIdx )
+	if (FConfigFile* ConfigFile = GConfig->Find(GEditorPerProjectIni))
 	{
-		GConfig->SetString( *INISection, *FString::Printf( TEXT("%s%d"), *INIKeyBase, ItemIdx ), *InItems[ ItemIdx ], GEditorPerProjectIni );
-	}
+		ConfigFile->Remove(*INISection);
 
-	GConfig->Flush( false, GEditorPerProjectIni );
+		for (int32 ItemIdx = 0; ItemIdx < InItems.Num(); ++ItemIdx)
+		{
+			ConfigFile->SetString(*INISection, *FString::Printf(TEXT("%s%d"), *INIKeyBase, ItemIdx), *InItems[ItemIdx]);
+		}
+
+		GConfig->Flush(false, GEditorPerProjectIni);
+	}
 }
 
 
@@ -172,9 +198,9 @@ bool FMRUList::VerifyMRUFile(int32 InItem, FString& OutPackageName)
 
 	// Handle redirector
 	const FString OriginalPackageName = Items[InItem];
-	const FName OriginalObjectPath = FName(*(OriginalPackageName + TEXT('.') + FPackageName::GetShortName(OriginalPackageName)));
+	const FSoftObjectPath OriginalObjectPath = FSoftObjectPath(*OriginalPackageName, *FPackageName::GetShortName(OriginalPackageName), {});
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-	const FName RedirectedObjectPath = AssetRegistryModule.Get().GetRedirectedObjectPath(OriginalObjectPath);
+	const FSoftObjectPath RedirectedObjectPath = AssetRegistryModule.Get().GetRedirectedObjectPath(OriginalObjectPath);
 
 	FString PackageName;
 	FString RedirectedPackageName;

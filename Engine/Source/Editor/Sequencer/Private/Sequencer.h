@@ -11,8 +11,8 @@
 #include "UObject/WeakInterfacePtr.h"
 #include "Widgets/SWidget.h"
 #include "SequencerNodeTree.h"
-#include "DisplayNodes/SequencerDisplayNode.h"
 #include "UObject/GCObject.h"
+#include "MovieSceneMarkedFrame.h"
 #include "MovieSceneSequenceID.h"
 #include "IMovieScenePlayer.h"
 #include "ITimeSlider.h"
@@ -27,10 +27,10 @@
 #include "ISequencer.h"
 #include "ISequencerModule.h"
 #include "ISequencerObjectChangeListener.h"
-#include "SequencerSelection.h"
 #include "SequencerSelectionPreview.h"
 #include "SequencerCustomizationManager.h"
-#include "Editor/EditorWidgets/Public/ITransportControl.h"
+#include "ITransportControl.h"
+#include "Evaluation/CameraCutPlaybackCapability.h"
 #include "Evaluation/MovieSceneSequenceTransform.h"
 #include "Evaluation/MovieScenePlayback.h"
 #include "Evaluation/MovieSceneEvaluationTemplateInstance.h"
@@ -39,6 +39,7 @@
 #include "SequencerSettings.h"
 #include "Curves/RichCurve.h"
 #include "Sections/MovieScene3DTransformSection.h"
+#include "SequencerTimeChangeUndoRedoProxy.h"
 
 class AActor;
 class ACameraActor;
@@ -46,8 +47,7 @@ class APlayerController;
 class FLevelEditorViewportClient;
 class FMenuBuilder;
 class FMovieSceneClipboard;
-class FSequencerObjectBindingNode;
-class FSequencerTrackNode;
+class FSequencerPropertyKeyedStatusHandler;
 class FViewportClient;
 class IDetailKeyframeHandler;
 class IAssetViewport;
@@ -66,25 +66,39 @@ class USequencerSettings;
 class UMovieSceneCopyableBinding;
 class UMovieSceneCompiledDataManager;
 class UMovieSceneCopyableTrack;
+class UMovieSceneNodeGroup;
+
 struct FMovieSceneTimeController;
 struct FMovieSceneSequencePlaybackParams;
 struct FMovieScenePossessable;
 struct FTransformData;
-struct ISequencerHotspot;
 struct FKeyAttributes;
 struct FNotificationInfo;
 struct FEditorViewportViewModifierParams;
+struct FMovieSceneMarkedFrame;
 
 enum class EMapChangeType : uint8;
+enum class ENearestKeyOption : uint8;
 
 namespace UE
 {
-namespace MovieScene
-{
+	namespace MovieScene
+	{
 
-	struct FInitialValueCache;
+		struct FInitialValueCache;
 
-} // namespace MovieScene
+	} // namespace MovieScene
+
+	namespace Sequencer
+	{
+
+		struct FViewModelTypeID;
+		class FSequenceModel;
+		class FSequencerEditorViewModel;
+		class FViewModel;
+		class FSequencerSelection;
+
+	} // namespace Sequencer
 } // namespace UE
 
 
@@ -96,7 +110,10 @@ class FSequencer final
 	, public FGCObject
 	, public FEditorUndoClient
 	, public FTickableEditorObject
+	, public UE::MovieScene::FCameraCutPlaybackCapability
 {
+	using FViewModel = UE::Sequencer::FViewModel;
+
 public:
 
 	/** Constructor */
@@ -115,7 +132,21 @@ public:
 	 * @param TrackEditorDelegates Delegates to call to create auto-key handlers for this sequencer.
 	 * @param EditorObjectBindingDelegates Delegates to call to create object bindings for this sequencer.
 	 */
-	void InitSequencer(const FSequencerInitParams& InitParams, const TSharedRef<ISequencerObjectChangeListener>& InObjectChangeListener, const TArray<FOnCreateTrackEditor>& TrackEditorDelegates, const TArray<FOnCreateEditorObjectBinding>& EditorObjectBindingDelegates);
+	void InitSequencer(const FSequencerInitParams& InitParams, const TSharedRef<ISequencerObjectChangeListener>& InObjectChangeListener, const TArray<FOnCreateTrackEditor>& TrackEditorDelegates, const TArray<FOnCreateEditorObjectBinding>& EditorObjectBindingDelegatess, const TArray<FOnCreateOutlinerColumn>& OutlinerColumnDelegates);
+
+	/**
+	 * Reinitializes sequencer after the playback context has changed
+	 *
+	 * The playback context changes when the user attaches the sequencer to a different world either
+	 * explicitly via the world dropdown picker, or indirectly when e.g. starting/stopping PIE.
+	 */
+	void OnPlaybackContextChanged();
+
+protected:
+
+	void InitRootSequenceInstance();
+
+public:
 
 	/** @return The current view range */
 	virtual FAnimatedRange GetViewRange() const override;
@@ -137,9 +168,9 @@ public:
 	 */
 	void SetSelectionRange(TRange<FFrameNumber> Range);
 	
-	virtual void SetSelectionRangeEnd() override;
+	virtual void SetSelectionRangeEnd(FFrameTime EndFrame) override;
 
-	virtual void SetSelectionRangeStart() override;
+	virtual void SetSelectionRangeStart(FFrameTime StartFrame) override;
 
 	/** Clear and reset the selection range. */
 	void ClearSelectionRange();
@@ -199,12 +230,14 @@ public:
 
 	bool IsPlaybackRangeLocked() const;
 	void TogglePlaybackRangeLocked();
+	void FocusPlaybackTime();
 	void ResetViewRange();
 	void ZoomViewRange(float InZoomDelta);
 	void ZoomInViewRange();
 	void ZoomOutViewRange();
 
 public:
+
 	/** Gets the tree of nodes which is used to populate the animation outliner. */
 	TSharedRef<FSequencerNodeTree> GetNodeTree()
 	{
@@ -226,13 +259,16 @@ public:
 		return bPerspectiveViewportCameraCutEnabled;
 	}
 
+	/** Gets the list of bindings for camera objects. */
+	virtual void GetCameraObjectBindings(TArray<FGuid>& OutBindingIDs) override;
+
 	/**
 	 * Pops the current focused movie scene from the stack.  The parent of this movie scene will be come the focused one
 	 */
-	void PopToSequenceInstance( FMovieSceneSequenceIDRef SequenceID );
+	virtual void PopToSequenceInstance( FMovieSceneSequenceIDRef SequenceID ) override;
 
 	/** Deletes the passed in sections. */
-	void DeleteSections(const TSet<TWeakObjectPtr<UMovieSceneSection> > & Sections);
+	void DeleteSections(const TSet<UMovieSceneSection*> & Sections);
 
 	/** Deletes the currently selected in keys. */
 	void DeleteSelectedKeys();
@@ -261,18 +297,20 @@ public:
 	/** Shrink time*/
 	void ShrinkTime(FFrameTime InDeltaTime);
 
-	/** Bake transform */
-	void BakeTransform();
-
-	/** Sync using source timecode */
-	void SyncSectionsUsingSourceTimecode();
-
 	/**
 	 * @return Movie scene tools used by the sequencer
 	 */
 	const TArray<TSharedPtr<ISequencerTrackEditor>>& GetTrackEditors() const
 	{
 		return TrackEditors;
+	}
+
+	/**
+	* @return Outliner Columns registered to the sequencer by column name
+	*/
+	const TMap<FName, TSharedPtr<UE::Sequencer::IOutlinerColumn>>& GetOutlinerColumns() const
+	{
+		return OutlinerColumns;
 	}
 
 public:
@@ -287,9 +325,10 @@ public:
 	void InvalidateGlobalMarkedFramesCache() { bGlobalMarkedFramesCached = false; }
 	void UpdateGlobalMarkedFramesCache();
 
-	/** 
-	  * Disables all global marked frames from all sub-sequences
-	  */
+	/** Toggle whether to show marked frames globally */
+	void ToggleShowMarkedFramesGlobally();
+
+	/** Disables all global marked frames from all sub-sequences */
 	void ClearGlobalMarkedFrames();
 
 protected:
@@ -298,6 +337,8 @@ protected:
 	void ToggleMarkAtPlayPosition();
 	void StepToNextMark();
 	void StepToPreviousMark();
+	bool AreMarkedFramesLocked() const;
+	void ToggleMarkedFramesLocked();
 
 	/**
 	 * @param InMarkIndex The marked frame index to set
@@ -324,14 +365,14 @@ public:
 	 *
 	 * @param	PossessableGuid		The guid of the possessable to convert
 	 */
-	void ConvertToSpawnable(TSharedRef<FSequencerObjectBindingNode> NodeToBeConverted);
+	void ConvertToSpawnable(TSharedRef<UE::Sequencer::FObjectBindingModel> NodeToBeConverted);
 
 	/**
 	 * Converts the specified spawnable GUID to a possessable
 	 *
 	 * @param	SpawnableGuid		The guid of the spawnable to convert
 	 */
-	void ConvertToPossessable(TSharedRef<FSequencerObjectBindingNode> NodeToBeConverted);
+	void ConvertToPossessable(TSharedRef<UE::Sequencer::FObjectBindingModel> NodeToBeConverted);
 
 	/**
 	 * Converts all the currently selected nodes to be spawnables, if possible
@@ -343,22 +384,7 @@ public:
 	 */
 	void ConvertSelectedNodesToPossessables();
 
-	/*
-	 * Set the spawnable level for the currently selected objects
-	 */
-	void SetSelectedNodesSpawnableLevel(FName InLevelName);
-
 protected:
-
-	/**
-	 * Attempts to add a new spawnable to the MovieScene for the specified asset, class, or actor
-	 *
-	 * @param	Object	The asset, class, or actor to add a spawnable for
-	 * @param	ActorFactory	Optional actor factory to use to create spawnable type
-	 *
-	 * @return	The spawnable ID, or invalid ID on failure
-	 */
-	FGuid AddSpawnable( UObject& Object, UActorFactory* ActorFactory = nullptr );
 
 	/**
 	 * Save default spawnable state for the currently selected objects
@@ -379,7 +405,7 @@ public:
 	 * @param TargetObjectGuid	Object to be targeted on dropping
 	 * @return					If true, this asset should be consumed
 	 */
-	virtual bool OnHandleAssetDropped( UObject* DroppedAsset, const FGuid& TargetObjectGuid );
+	bool OnHandleAssetDropped( UObject* DroppedAsset, const FGuid& TargetObjectGuid );
 	
 	/**
 	 * Called to delete all moviescene data from a node
@@ -387,7 +413,7 @@ public:
 	 * @param NodeToBeDeleted	Node with data that should be deleted
 	 * @return true if anything was deleted, otherwise false.
 	 */
-	virtual bool OnRequestNodeDeleted( TSharedRef<const FSequencerDisplayNode> NodeToBeDeleted, const bool bKeepState );
+	bool OnRequestNodeDeleted( TSharedRef<FViewModel> NodeToBeDeleted, const bool bKeepState );
 
 	/** Zooms to the edges of all currently selected sections and keys. */
 	void ZoomToFit();
@@ -437,15 +463,6 @@ public:
 	void BuildObjectBindingTrackMenu(FMenuBuilder& MenuBuilder, const TArray<FGuid>& ObjectBindings, const UClass* ObjectClass);
 
 	/**
-	 * Builds up the edit buttons for object binding nodes in the outliner
-	 * 
-	 * @param EditBox	    The edit box to add things to
-	 * @param ObjectBinding	The object binding of the selected node
-	 * @param ObjectClass	The class of the selected object
-	 */
-	void BuildObjectBindingEditButtons(TSharedPtr<SHorizontalBox> EditBox, const FGuid& ObjectBinding, const UClass* ObjectClass);
-
-	/**
 	 * Builds up the menu of folders to add selected nodes to
 	 *
 	 * @param MenuBuilder The menu builder to add things to.
@@ -488,25 +505,25 @@ public:
 	void OnTogglePilotCamera();
 	bool IsPilotCamera() const;
 
-	/** Set the new global time, accounting for looping options */
-	void SetLocalTimeLooped(FFrameTime InTime);
+	/** Sets the new global time calculated from local time and the given warp counter, accounting for looping options */
+	void SetLocalTimeLooped(FFrameTime InTime, FMovieSceneWarpCounter WarpCounter=FMovieSceneWarpCounter());
 
 	ESequencerLoopMode GetLoopMode() const;
 
 	EPlaybackMode::Type GetPlaybackMode() const;
 
 	/** @return The toolkit that this sequencer is hosted in (if any) */
-	TSharedPtr<IToolkitHost> GetToolkitHost() const { return ToolkitHost.Pin(); }
+	virtual TSharedPtr<IToolkitHost> GetToolkitHost() const override { return ToolkitHost.Pin(); }
 
 	const FSequencerHostCapabilities& GetHostCapabilities() const { return HostCapabilities; }
 
 	/** @return Whether or not this sequencer is used in the level editor */
-	bool IsLevelEditorSequencer() const { return bIsEditingWithinLevelEditor; }
+	virtual bool IsLevelEditorSequencer() const override { return bIsEditingWithinLevelEditor; }
 
 	/** @return Whether to show the curve editor or not */
-	void SetShowCurveEditor(bool bInShowCurveEditor);
+	virtual void SetShowCurveEditor(bool bInShowCurveEditor) override;
 	/** @return If the curve editor is currently visible. */
-	bool GetCurveEditorIsVisible() const;
+	virtual bool GetCurveEditorIsVisible() const override;
 
 	/** Called to save the current movie scene */
 	void SaveCurrentMovieScene();
@@ -521,39 +538,28 @@ public:
 	FText GetNavigateForwardTooltip() const;
 	FText GetNavigateBackwardTooltip() const;
 
-	/** Called when a user executes the assign actor to track menu item */
-	void AssignActor(FMenuBuilder& MenuBuilder, FGuid ObjectBinding);
-	FGuid DoAssignActor(AActor*const* InActors, int32 NumActors, FGuid ObjectBinding);
-
-	/** Called when a user executes the assign selected to track menu item */
-	void AddActorsToBinding(FGuid ObjectBinding, const TArray<AActor*>& InActors);
-	void ReplaceBindingWithActors(FGuid ObjectBinding, const TArray<AActor*>& InActors);
-	void RemoveActorsFromBinding(FGuid ObjectBinding, const TArray<AActor*>& InActors);
-	void RemoveAllBindings(FGuid ObjectBinding);
-	void RemoveInvalidBindings(FGuid ObjectBinding);
-
 	/** Called when a user executes the delete node menu item */
-	void DeleteNode(TSharedRef<FSequencerDisplayNode> NodeToBeDeleted, const bool bKeepState);
+	void DeleteNode(TSharedRef<FViewModel> NodeToBeDeleted, const bool bKeepState);
 	void DeleteSelectedNodes(const bool bKeepState);
 
 	/** @return The list of nodes which must be moved to move the current selected nodes */
-	TArray<TSharedRef<FSequencerDisplayNode> > GetSelectedNodesToMove();
-	TArray<TSharedRef<FSequencerDisplayNode> > GetSelectedNodesInFolders();
+	TArray<TSharedRef<FViewModel>> GetSelectedNodesToMove();
+	TArray<TSharedRef<FViewModel>> GetSelectedNodesInFolders();
 
 	/** Called when a user executes the move to new folder menu item */
 	void MoveSelectedNodesToNewFolder();
 	void RemoveSelectedNodesFromFolders();
-	void MoveNodeToFolder(TSharedRef<FSequencerDisplayNode> NodeToMove, UMovieSceneFolder* DestinationFolder);
+	void MoveNodeToFolder(TSharedRef<FViewModel> NodeToMove, UMovieSceneFolder* DestinationFolder);
 	void MoveSelectedNodesToFolder(UMovieSceneFolder* DestinationFolder);
 
 	/** Called when a user executes the copy track menu item */
-	void CopySelectedObjects(TArray<TSharedPtr<FSequencerObjectBindingNode>>& ObjectNodes, const TArray<UMovieSceneFolder*>& Folders, /*out*/ FString& ExportedText);
-	void CopySelectedTracks(TArray<TSharedPtr<FSequencerTrackNode>>& TrackNodes, const TArray<UMovieSceneFolder*>& Folders, /*out*/ FString& ExportedText);
+	void CopySelectedObjects(TArray<TSharedPtr<UE::Sequencer::FObjectBindingModel>>& ObjectNodes, const TArray<UMovieSceneFolder*>& Folders, /*out*/ FString& ExportedText);
+	void CopySelectedTracks(TArray<TSharedPtr<UE::Sequencer::FViewModel>>& TrackNodes, const TArray<UMovieSceneFolder*>& Folders, /*out*/ FString& ExportedText);
 	void CopySelectedFolders(const TArray<UMovieSceneFolder*>& Folders, /*out*/ FString& ExportedText);
-	void ExportObjectsToText(const TArray<UObject*>& ObjectsToExport, /*out*/ FString& ExportedText);
 
 	/** Called when a user executes the paste track menu item */
 	bool CanPaste(const FString& TextToImport);
+
 	/**
 	 * Attempts to paste from the clipboard
 	 * @return Whether the paste event was handled
@@ -561,17 +567,7 @@ public:
 	bool DoPaste(bool bClearSelection = false);
 	bool PasteTracks(const FString& TextToImport, UMovieSceneFolder* ParentFolder, const TArray<UMovieSceneFolder*>& InFolders, TArray<FNotificationInfo>& PasteErrors, bool bClearSelection = false);
 	bool PasteSections(const FString& TextToImport, TArray<FNotificationInfo>& PasteErrors);
-	bool PasteFolders(const FString& TextToImport, UMovieSceneFolder* ParentFolder, TArray<UMovieSceneFolder*>& OutFolders, TArray<FNotificationInfo>& PasteErrors);
 	bool PasteObjectBindings(const FString& TextToImport, UMovieSceneFolder* ParentFolder, const TArray<UMovieSceneFolder*>& InFolders, TArray<FNotificationInfo>& PasteErrors, bool bClearSelection = false);
-
-	void ImportTracksFromText(const FString& TextToImport, /*out*/ TArray<UMovieSceneCopyableTrack*>& ImportedTracks);
-	void ImportSectionsFromText(const FString& TextToImport, /*out*/ TArray<UMovieSceneSection*>& ImportedSections);
-	void ImportFoldersFromText(const FString& TextToImport, /*out*/ TArray<UMovieSceneFolder*>& ImportedFolders);
-	void ImportObjectBindingsFromText(const FString& TextToImport, /*out*/ TArray<UMovieSceneCopyableBinding*>& ImportedObjects);
-
-	/** Called when a user executes the active node menu item */
-	void ToggleNodeActive();
-	bool IsNodeActive() const;
 
 	/** Called when a user executes the locked node menu item */
 	void ToggleNodeLocked();
@@ -594,7 +590,7 @@ public:
 	bool CanRekey() const;
 	void Rekey();
 
-	void SelectKey(UMovieSceneSection* InSection, TSharedPtr<IKeyArea> InKeyArea, FKeyHandle KeyHandle, bool bToggle);
+	void SelectKey(UMovieSceneSection* InSection, TSharedPtr<UE::Sequencer::FChannelModel> InChannel, FKeyHandle KeyHandle, bool bToggle);
 
 	/** Updates the external selection to match the current sequencer selection. */
 	void SynchronizeExternalSelectionWithSequencerSelection();
@@ -616,13 +612,13 @@ public:
 
 	void OnSelectedNodesOnlyChanged();
 
-	TSharedPtr<FCurveEditor> GetCurveEditor() const
-	{
-		return CurveEditorModel;
-	}
+	void OnTimeDisplayFormatChanged();
 
 	/** Will create a custom menu if FSequencerViewParams::OnBuildCustomContextMenuForGuid is specified. */
 	void BuildCustomContextMenuForGuid(FMenuBuilder& MenuBuilder, FGuid ObjectBinding);
+
+	/** Set the color tint for the requested sections */
+	void SetSectionColorTint(TArray<UMovieSceneSection*> Sections, FColor ColorTint);
 
 public:
 
@@ -653,46 +649,12 @@ public:
 	/** Promote a clipboard to the top of the clipboard stack, and update its timestamp */
 	void OnClipboardUsed(TSharedPtr<FMovieSceneClipboard> Clipboard);
 
-	/** Create camera and set it as the current camera cut. */
-	void CreateCamera();
-
-	/** Called when a new camera is added. Locks the viewport to the NewCamera. */
-	void NewCameraAdded(ACameraActor* NewCamera, FGuid CameraGuid);
-
-	/** Attempts to automatically fix up broken actor references in the current scene. */
-	void FixActorReferences();
+	/** Attempts to automatically fix up possessables whose object class don't match the object class of their currently bound objects */
+	void FixPossessableObjectClass();
+	void FixPossessableObjectClassInternal(UMovieSceneSequence* Sequence, FMovieSceneSequenceIDRef SequenceID);
 
 	/** Rebinds all possessable references in the current sequence to update them to the latest referencing mechanism. */
 	void RebindPossessableReferences();
-
-	/** Imports the animation from an fbx file. */
-	void ImportFBX();
-	void ImportFBXOntoSelectedNodes();
-
-	/** Exports the animation to an fbx file. */
-	void ExportFBX();
-
-	/** Exports the animation to a camera anim asset. */
-	void ExportToCameraAnim();
-
-	/** */
-	void ShowReadOnlyError() const;
-
-public:
-	
-	/** Access the currently active track area edit tool */
-	const ISequencerEditTool* GetEditTool() const;
-
-	/** Get the current active hotspot */
-	TSharedPtr<ISequencerHotspot> GetHotspot() const;
-
-	/** Set the hotspot to something else */
-	void SetHotspot(TSharedPtr<ISequencerHotspot> NewHotspot);
-
-protected:
-
-	/** The current hotspot that can be set from anywhere to initiate drags */
-	TSharedPtr<ISequencerHotspot> Hotspot;
 
 public:
 
@@ -701,9 +663,6 @@ public:
 
 	/** Stop the sequencer from auto-scrolling */
 	void StopAutoscroll();
-
-	/** Scroll the sequencer vertically by the specified number of slate units */
-	void VerticalScroll(float ScrollAmountUnits);
 
 	/**
 	 * Update auto-scroll mechanics as a result of a new time position
@@ -718,6 +677,10 @@ public:
 	//~ FGCObject Interface
 	virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
 	virtual FString GetReferencerName() const override;
+
+private:
+	//object for undo redo support for changing time
+	FSequencerTimeChangedHandler TimeUndoRedoHandler;
 
 public:
 
@@ -736,6 +699,7 @@ public:
 	virtual TSharedRef<SWidget> GetSequencerWidget() const override;
 	virtual FMovieSceneSequenceIDRef GetRootTemplateID() const override { return ActiveTemplateIDs[0]; }
 	virtual FMovieSceneSequenceIDRef GetFocusedTemplateID() const override { return ActiveTemplateIDs.Top(); }
+	virtual const TArray<FMovieSceneSequenceID>& GetSubSequenceHierarchy() const override { return ActiveTemplateIDs; };
 	virtual UMovieSceneSubSection* FindSubSection(FMovieSceneSequenceID SequenceID) const override;
 	virtual UMovieSceneSequence* GetRootMovieSceneSequence() const override;
 	virtual UMovieSceneSequence* GetFocusedMovieSceneSequence() const override;
@@ -743,6 +707,7 @@ public:
 	virtual FMovieSceneRootEvaluationTemplateInstance& GetEvaluationTemplate() override { return RootTemplateInstance; }
 	virtual void ResetToNewRootSequence(UMovieSceneSequence& NewSequence) override;
 	virtual void FocusSequenceInstance(UMovieSceneSubSection& InSubSection) override;
+	virtual TSharedPtr<UE::Sequencer::FSequencerEditorViewModel> GetViewModel() const override;
 	virtual void SuppressAutoEvaluation(UMovieSceneSequence* Sequence, const FGuid& InSequenceSignature) override;
 	virtual EAutoChangeMode GetAutoChangeMode() const override;
 	virtual void SetAutoChangeMode(EAutoChangeMode AutoChangeMode) override;
@@ -758,10 +723,12 @@ public:
 	virtual FQualifiedFrameTime GetLocalTime() const override;
 	virtual FQualifiedFrameTime GetGlobalTime() const override;
 	virtual uint32 GetLocalLoopIndex() const override;
-	virtual void SetLocalTime(FFrameTime Time, ESnapTimeMode SnapTimeMode = ESnapTimeMode::STM_None) override;
-	virtual void SetLocalTimeDirectly(FFrameTime NewTime) override;
-	virtual void SetGlobalTime(FFrameTime Time) override;
+	virtual void SetLocalTime(FFrameTime Time, ESnapTimeMode SnapTimeMode = ESnapTimeMode::STM_None, bool bEvaluate = true) override;
+	virtual void SetLocalTimeDirectly(FFrameTime NewTime, bool bEvaluate = true) override;
+	virtual FFrameTime GetLastEvaluatedLocalTime() const override;
+	virtual void SetGlobalTime(FFrameTime Time, bool bEvaluate = true) override;
 	virtual void PlayTo(FMovieSceneSequencePlaybackParams PlaybackParams) override;
+	virtual void SnapSequencerTime(FFrameTime& InOutScrubTime) override;
 	virtual void RestorePlaybackSpeed() override;
 	virtual void SnapToClosestPlaybackSpeed() override;
 	virtual void RequestInvalidateCachedData() override { bNeedsInvalidateCachedData = true; }
@@ -770,32 +737,33 @@ public:
 	virtual void SetPerspectiveViewportPossessionEnabled(bool bEnabled) override;
 	virtual void SetPerspectiveViewportCameraCutEnabled(bool bEnabled) override;
 	virtual void RenderMovie(const TArray<UMovieSceneCinematicShotSection*>& InSections) const override;
+	virtual void RecreateCurveEditor() override;
 	virtual void EnterSilentMode() override;
 	virtual void ExitSilentMode() override;
 	virtual bool IsInSilentMode() const override { return SilentModeCount != 0; }
 	virtual FGuid GetHandleToObject(UObject* Object, bool bCreateHandleIfMissing = true, const FName& CreatedFolderName = NAME_None) override;
 	virtual ISequencerObjectChangeListener& GetObjectChangeListener() override;
+	virtual ISequencerPropertyKeyedStatusHandler& GetPropertyKeyedStatusHandler() override;
+
 protected:
 	virtual void NotifyMovieSceneDataChangedInternal() override;
 public:
 	virtual void NotifyMovieSceneDataChanged( EMovieSceneDataChangeType DataChangeType ) override;
 	virtual void RefreshTree() override;
 	virtual void UpdatePlaybackRange() override;
-	virtual void SetPlaybackSpeed(float InPlaybackSpeed) override { PlaybackSpeed = InPlaybackSpeed; }
+	virtual void SetPlaybackSpeed(float InPlaybackSpeed) override;
 	virtual float GetPlaybackSpeed() const override { return PlaybackSpeed; }
 	virtual TArray<FGuid> AddActors(const TArray<TWeakObjectPtr<AActor> >& InActors, bool bSelectActors = true) override;
+	virtual FGuid AddEmptyBinding() override;
 	virtual TArray<FGuid> ConvertToSpawnable(FGuid Guid) override;
 	virtual void AddSubSequence(UMovieSceneSequence* Sequence) override;
 	virtual bool CanKeyProperty(FCanKeyPropertyParams CanKeyPropertyParams) const override;
 	virtual void KeyProperty(FKeyPropertyParams KeyPropertyParams) override;
-	virtual FSequencerSelection& GetSelection() override;
-	virtual FSequencerSelectionPreview& GetSelectionPreview() override;
-	virtual void SuspendSelectionBroadcast() override;
-	virtual void ResumeSelectionBroadcast() override;
+	EPropertyKeyedStatus GetPropertyKeyedStatus(const IPropertyHandle& PropertyHandle) const override;
 	virtual void GetSelectedTracks(TArray<UMovieSceneTrack*>& OutSelectedTracks) override;
 	virtual void GetSelectedSections(TArray<UMovieSceneSection*>& OutSelectedSections) override;
 	virtual void GetSelectedFolders(TArray<UMovieSceneFolder*>& OutSelectedFolders) override;
-	virtual void GetSelectedKeyAreas(TArray<const IKeyArea*>& OutSelectedKeyAreas)  override;
+	virtual void GetSelectedKeyAreas(TArray<const IKeyArea*>& OutSelectedKeyAreas, bool bIncludeSelectedKeys = true)  override;
 	virtual void GetSelectedObjects(TArray<FGuid>& OutObjects) override;
 	virtual void SelectObject(FGuid ObjectBinding) override;
 	virtual void SelectTrack(UMovieSceneTrack* Track) override;
@@ -841,20 +809,23 @@ public:
 	virtual FGuid MakeNewSpawnable(UObject& SourceObject, UActorFactory* ActorFactory = nullptr, bool bSetupDefaults = true) override;
 	virtual bool IsReadOnly() const override;
 	virtual void ExternalSelectionHasChanged() override { SynchronizeSequencerSelectionWithExternalSelection(); }
+	virtual TSharedPtr<ISequencerTrackEditor> GetTrackEditor(UMovieSceneTrack* InTrack) override;
 	virtual void ObjectImplicitlyAdded(UObject* InObject) const override;
+	virtual void ObjectImplicitlyRemoved(UObject* InObject) const override;
+
 	/** Access the user-supplied settings object */
 	virtual USequencerSettings* GetSequencerSettings() const override { return Settings; }
-	virtual void SetSequencerSettings(USequencerSettings* InSettings) override { Settings = InSettings; }
+	virtual void SetSequencerSettings(USequencerSettings* InSettings) override;
 	virtual TSharedPtr<class ITimeSlider> GetTopTimeSliderWidget() const override;
 	virtual void ResetTimeController() override;
-	virtual void SetFilterOn(const FText& InName, bool bOn) override;
-
+	virtual void SetTrackFilterEnabled(const FText& InTrackFilterName, bool bEnabled) override;
+	virtual bool IsTrackFilterEnabled(const FText& InTrackFilterName) const override;
+	virtual TArray<FText> GetTrackFilterNames() const override;
 
 public:
 
 	// IMovieScenePlayer interface
 
-	virtual void UpdateCameraCut(UObject* CameraObject, const EMovieSceneCameraCutParams& CameraCutParams) override;
 	virtual void NotifyBindingsChanged() override;
 	virtual void SetViewportSettings(const TMap<FViewportClient*, EMovieSceneViewportParams>& ViewportParamsMap) override;
 	virtual void GetViewportSettings(TMap<FViewportClient*, EMovieSceneViewportParams>& ViewportParamsMap) const override;
@@ -862,6 +833,33 @@ public:
 	virtual void SetPlaybackStatus(EMovieScenePlayerStatus::Type InPlaybackStatus) override;
 	virtual FMovieSceneSpawnRegister& GetSpawnRegister() override { return *SpawnRegister; }
 	virtual bool IsPreview() const override { return SilentModeCount != 0; }
+	virtual UMovieSceneEntitySystemLinker* ConstructEntitySystemLinker() override;
+
+	/** Shortcut for GetEditorModel()->GetSelection() for backwards compat with existing code */
+	UE::Sequencer::FSequencerSelection& GetSelection();
+	FSequencerSelectionPreview& GetSelectionPreview();
+
+	/**
+	 * Gets the far time boundaries of the currently edited movie scene
+	 * If the scene has shots, it only takes the shot section boundaries
+	 * Otherwise, it finds the furthest boundaries of all sections
+	 */
+	TRange<FFrameNumber> GetTimeBounds() const;
+
+
+	/**
+	 * Gets the time boundaries of the root movie scene in local space. If this is a looping subsequence, this will include all loops.
+	 */
+	TRange<FFrameNumber> GetRootTimeBounds() const;
+
+protected:
+
+	// FCameraCutPlaybackCapability interface
+
+	virtual bool ShouldUpdateCameraCut() override { return IsPerspectiveViewportCameraCutEnabled(); }
+	virtual bool ShouldRestoreEditorViewports() override;
+	virtual float GetCameraBlendPlayRate() override;
+	virtual void OnCameraCutUpdated(const UE::MovieScene::FOnCameraCutUpdatedParams& Params) override;
 
 protected:
 
@@ -871,15 +869,11 @@ protected:
 	/** Reset data about a movie scene when pushing or popping a movie scene. */
 	void ResetPerMovieSceneData();
 
+	/** Forcibly refresh the UI */
+	void RefreshUI();
+
 	/** Update the time bounds to the focused movie scene */
 	void UpdateTimeBoundsToFocusedMovieScene();
-
-	/**
-	 * Gets the far time boundaries of the currently edited movie scene
-	 * If the scene has shots, it only takes the shot section boundaries
-	 * Otherwise, it finds the furthest boundaries of all sections
-	 */
-	TRange<FFrameNumber> GetTimeBounds() const;
 	
 	/**
 	 * Gets the time boundaries of the currently filtering shot sections.
@@ -898,19 +892,20 @@ protected:
 	 * Called to get the nearest key
 	 *
 	 * @param InTime The time to get the nearest key to
-	 * @param bSearchAllTracks If true this will search all tracks for a potential nearest.
-	 *						 False will return keys only from the currently selected track.
+	 * @param NearestKeyOption (ie. search keys/markers/all tracks)
 	 * @return NearestKey
 	 */
-	FFrameNumber OnGetNearestKey(FFrameTime InTime, bool bSearchAllTracks);
+	FFrameNumber OnGetNearestKey(FFrameTime InTime, ENearestKeyOption NearestKeyOption);
 
 	/**
 	 * Called when the scrub position is changed by the user
 	 * This will stop any playback from happening
 	 *
 	 * @param NewScrubPosition	The new scrub position
+	 * @param bScrubbing If scrubbing
+	 * @param bEvaluate  Do evaluate sequencer after changing time
 	 */
-	void OnScrubPositionChanged( FFrameTime NewScrubPosition, bool bScrubbing );
+	void OnScrubPositionChanged( FFrameTime NewScrubPosition, bool bScrubbing, bool bEvaluate);
 
 	/** Called when the user has begun scrubbing */
 	void OnBeginScrubbing();
@@ -951,9 +946,6 @@ protected:
 	/** Called when the scrub position parent sequence is changed */
 	void OnScrubPositionParentChanged(FMovieSceneSequenceID InScrubPositionParent);
 
-	/** Exports sequence to a FBX file */
-	void ExportFBXInternal(const FString& Filename, TArray<FGuid>& Bindings);
-
 protected:
 
 	/**
@@ -986,10 +978,9 @@ protected:
 
 	/** Get all the keys for the current sequencer selection */
 	virtual void GetKeysFromSelection(TUniquePtr<FSequencerKeyCollection>& KeyCollection, float DuplicateThresholdSeconds) override;
+	virtual FSequencerKeyCollection* GetKeyCollection() override;
 
-	void GetAllKeys(TUniquePtr<FSequencerKeyCollection>& KeyCollection, float DuplicateThresoldSeconds);
-
-	UMovieSceneSection* FindNextOrPreviousShot(UMovieSceneSequence* Sequence, FFrameNumber SearchFromTime, const bool bNext) const;
+	void GetAllKeys(TUniquePtr<FSequencerKeyCollection>& KeyCollection, float DuplicateThresoldSeconds) const;
 
 protected:
 	
@@ -1008,10 +999,6 @@ protected:
 	void StepBackward();
 	void JumpForward();
 	void JumpBackward();
-	void StepToNextKey();
-	void StepToPreviousKey();
-	void StepToNextCameraKey();
-	void StepToPreviousCameraKey();
 	void StepToNextShot();
 	void StepToPreviousShot();
 
@@ -1024,6 +1011,9 @@ protected:
 	/** Expand or collapse all nodes and descendants*/
 	void ExpandAllNodes();
 	void CollapseAllNodes();
+
+	/** Reset all enabled filters */
+	void ResetFilters();
 
 	/** Sort all nodes and their descendants by category then alphabetically */
 	void SortAllNodesAndDescendants();
@@ -1058,7 +1048,9 @@ protected:
 	virtual void PostRedo(bool bSuccess) override { PostUndo(bSuccess); }
 	// End of FEditorUndoClient
 
-	void OnSelectedOutlinerNodesChanged();
+	void OnSelectionChanged();
+	// Called on Tick after OnSelectionChanged has been called
+	void HandleSelectedOutlinerNodesChanged();
 
 	void AddNodeGroupsCollectionChangedDelegate();
 	void RemoveNodeGroupsCollectionChangedDelegate();
@@ -1068,29 +1060,14 @@ protected:
 public:
 	void AddSelectedNodesToNewNodeGroup();
 	void AddSelectedNodesToExistingNodeGroup(UMovieSceneNodeGroup* NodeGroup);
-	void AddNodesToExistingNodeGroup(const TArray<TSharedRef<FSequencerDisplayNode>>& Nodes, UMovieSceneNodeGroup* NodeGroup);
+	void AddNodesToExistingNodeGroup(TArrayView<const UE::Sequencer::TWeakViewModelPtr<UE::Sequencer::IOutlinerExtension>> InItems, UMovieSceneNodeGroup* NodeGroup);
 
 	void ClearFilters();
 
 private:
 
-	/** Updates a viewport client from camera cut data */
-	void UpdatePreviewLevelViewportClientFromCameraCut(FLevelEditorViewportClient& InViewportClient, UObject* InCameraObject, const EMovieSceneCameraCutParams& CameraCutParams);
-
 	/** Updates viewport clients' actor locks if they relate to sequencer cameras */
 	void UpdateLevelViewportClientsActorLocks();
-
-	/** Expands Possessables with multiple bindings into indidual Possessables for each binding */
-	TArray<FGuid> ExpandMultiplePossessableBindings(FGuid PossessableGuid);
-
-	/** Internal conversion function that doesn't perform expensive reset/update tasks */
-	TArray<FMovieSceneSpawnable*> ConvertToSpawnableInternal(FGuid PossessableGuid);
-
-	/** Internal conversion function that doesn't perform expensive reset/update tasks */
-	FMovieScenePossessable* ConvertToPossessableInternal(FGuid SpawnableGuid);
-
-	/** Recurses through a folder to replace converted GUID with new GUID */
-	bool ReplaceFolderBindingGUID(UMovieSceneFolder *Folder, FGuid Original, FGuid Converted);
 
 	/** Internal function to render movie for a given start/end time */
 	void RenderMovieInternal(TRange<FFrameNumber> Range, bool bSetFrameOverrides = false) const;
@@ -1101,6 +1078,9 @@ private:
 	/** Handles loading in previously recorded data. */
 	void OnLoadRecordedData();
 	
+	/** Adds the binding and selects the binding, throbs it. */
+	void OnAddBinding(const FGuid& ObjectBinding, UMovieScene* MovieScene) override;
+
 	/** Adds the track to the selected folder (if FGuid is invalid) and selects the track, throbs it, and notifies the sequence to rebuild any necessary data. */
 	void OnAddTrack(const TWeakObjectPtr<UMovieSceneTrack>& InTrack, const FGuid& ObjectBinding) override;
 
@@ -1108,7 +1088,7 @@ private:
 	void CalculateSelectedFolderAndPath(TArray<UMovieSceneFolder*>& OutSelectedParentFolders, FString& OutNewNodePath);
 
 	/** Returns the tail folder from the given Folder Path, creating each folder if needed. */
-	UMovieSceneFolder* CreateFoldersRecursively(const TArray<FName>& FolderPath, int32 FolderPathIndex, UMovieScene* OwningMovieScene, UMovieSceneFolder* ParentFolder, const TArray<UMovieSceneFolder*>& FoldersToSearch);
+	UMovieSceneFolder* CreateFoldersRecursively(const TArray<FName>& FolderPaths, int32 FolderPathIndex, UMovieScene* OwningMovieScene, UMovieSceneFolder* ParentFolder, TArrayView<UMovieSceneFolder* const> FoldersToSearch);
 
 	/** Create set playback start transport control */
 	TSharedRef<SWidget> OnCreateTransportSetPlaybackStart();
@@ -1123,7 +1103,7 @@ private:
 	TSharedRef<SWidget> OnCreateTransportSetPlaybackEnd();
 
 	/** Select keys and/or sections in a display node that fall into the current selection range. */
-	void SelectInSelectionRange(const TSharedRef<FSequencerDisplayNode>& DisplayNode, const TRange<FFrameNumber>& SelectionRange, bool bSelectKeys, bool bSelectSections);
+	void SelectInSelectionRange(const TSharedPtr<UE::Sequencer::FViewModel>& Item, const TRange<FFrameNumber>& SelectionRange, bool bSelectKeys, bool bSelectSections);
 	
 	/** Create loop mode transport control */
 	TSharedRef<SWidget> OnCreateTransportLoopMode();
@@ -1131,14 +1111,11 @@ private:
 	/** Create record transport control */
 	TSharedRef<SWidget> OnCreateTransportRecord();
 
-	/** Possess PIE viewports with the specified camera settings (a mirror of level viewport possession, but for game viewport clients) */
-	void PossessPIEViewports(UObject* CameraObject, const EMovieSceneCameraCutParams& CameraCutParams);
-
 	/** Update the locked subsequence range (displayed as playback range for subsequences), and root to local transform */
 	void UpdateSubSequenceData();
 
 	/** Adjust sequencer customizations based on the currently focused sequence */
-	void UpdateSequencerCustomizations();
+	void UpdateSequencerCustomizations(const UMovieSceneSequence* PreviousFocusedSequence);
 
 	/** Rerun construction scripts on bound actors */
 	void RerunConstructionScripts();
@@ -1146,11 +1123,8 @@ private:
 	/** Get actors that want to rerun construction scripts */
 	void GetConstructionScriptActors(UMovieScene*, FMovieSceneSequenceIDRef SequenceID, TSet<TWeakObjectPtr<AActor> >& BoundActors, TArray < TPair<FMovieSceneSequenceID, FGuid> >& BoundGuids);
 
-	/** Check whether we're viewing the master sequence or not */
-	bool IsViewingMasterSequence() const { return ActiveTemplateIDs.Num() == 1; }
-
-	/** Get the default key attributes to apply to newly created keys on the curve editor */
-	FKeyAttributes GetDefaultKeyAttributes() const;
+	/** Check whether we're viewing the root sequence or not */
+	bool IsViewingRootSequence() const { return ActiveTemplateIDs.Num() == 1; }
 
 	/** Recompile any dirty director blueprints in the sequence hierarchy */
 	void RecompileDirtyDirectors();
@@ -1158,9 +1132,19 @@ private:
 	void ToggleAsyncEvaluation();
 	bool UsesAsyncEvaluation();
 
+	void ToggleDynamicWeighting();
+	bool UsesDynamicWeighting();
+
 	void UpdateCachedPlaybackContextAndClient();
 
 	void UpdateCachedCameraActors();
+
+	int32 FindClosestPlaybackSpeed(float InPlaybackSpeed, bool bExactOnly = false) const;
+	void RestorePlaybackSpeedAfterPlay();
+
+	FGuid FindUnspawnedObjectGuid(UObject& InObject);
+	// Given the root sequence time, returns the local time and loop counter clamped to the maximum number of loops
+	void CalculateLocalTimeClamped(FFrameTime RootTime, const FMovieSceneSequenceTransform& RootToParentChainTransform, FFrameTime& OutTime, FMovieSceneWarpCounter& OutLoopCounter) const;
 
 public:
 
@@ -1176,16 +1160,15 @@ public:
 	/** Get the name of the movie renderer to use, defaults to the first available if the setting is empty */
 	FString GetMovieRendererName() const;
 
+	TSharedRef<SWidget> MakePlayTimeDisplay(const TSharedRef<INumericTypeInterface<double>>& InNumericTypeInterface);
+
 private:
 
 	/** Update the time bases for the current movie scene */
 	void UpdateTimeBases();
 
-	/** View modifier for level editor viewports. */
-	void ModifyViewportClientView(FEditorViewportViewModifierParams& Params);
-
 	/** User-supplied settings object for this sequencer */
-	USequencerSettings* Settings;
+	TObjectPtr<USequencerSettings> Settings;
 
 	/** Command list for sequencer commands (Sequencer widgets only). */
 	TSharedRef<FUICommandList> SequencerCommandBindings;
@@ -1198,6 +1181,10 @@ private:
 
 	/** List of tools we own */
 	TArray<TSharedPtr<ISequencerTrackEditor>> TrackEditors;
+	TMap<FObjectKey, TSharedPtr<ISequencerTrackEditor>> TrackEditorsByType;
+
+	/** List of Outliner column creators that are supported by the Sequencer. */
+	TMap<FName, TSharedPtr<UE::Sequencer::IOutlinerColumn>> OutlinerColumns;
 
 	/** List of object bindings we can use */
 	TArray<TSharedPtr<ISequencerEditorObjectBinding>> ObjectBindings;
@@ -1205,9 +1192,12 @@ private:
 	/** Listener for object changes being made while this sequencer is open*/
 	TSharedPtr<ISequencerObjectChangeListener> ObjectChangeListener;
 
+	/** Responsible for getting the keyed status of a property (whether it's keyed in current frame, other frame, etc)  */
+	TSharedPtr<FSequencerPropertyKeyedStatusHandler> PropertyKeyedStatusHandler;
+
 	/** Main sequencer widget */
 	TSharedPtr<SSequencer> SequencerWidget;
-	
+
 	/** Spawn register for keeping track of what is spawned */
 	TSharedPtr<FMovieSceneSpawnRegister> SpawnRegister;
 
@@ -1217,8 +1207,8 @@ private:
 	/** A copy of the supported features/capabilities we were initialized with. */
 	FSequencerHostCapabilities HostCapabilities;
 	
-	/** Active customizations. */
-	TArray<TUniquePtr<ISequencerCustomization>> ActiveCustomizations;
+	/** Active customization callbacks */
+	TArray<FOnSequencerPaste> OnPaste;
 
 	TWeakObjectPtr<UMovieSceneSequence> RootSequence;
 	FMovieSceneRootEvaluationTemplateInstance RootTemplateInstance;
@@ -1249,7 +1239,11 @@ private:
 	/** The last time range that was viewed */
 	TRange<double> LastViewRange;
 
+	/** The index of the playback speed in the supported playback speeds */
 	int32 CurrentSpeedIndex;
+
+	/** The index of the playback speed before we started playing */
+	int32 SpeedIndexBeforePlay;
 	
 	/** The view range before zooming */
 	TRange<double> ViewRangeBeforeZoom;
@@ -1290,13 +1284,19 @@ private:
 	FMovieScenePlaybackPosition PlayPosition;
 
 	/** Local loop index at the time we began scrubbing */
-	uint32 LocalLoopIndexOnBeginScrubbing;
+	int32 LocalLoopIndexOnBeginScrubbing;
 
 	/** Local loop index to add for the purposes of displaying it in the UI */
-	uint32 LocalLoopIndexOffsetDuringScrubbing;
+	int32 LocalLoopIndexOffsetDuringScrubbing;
+
+	/** MaxLocalLoopIndex as calculated in UpdateSubSequenceData. Used to ensure LocalTime is also clamped to the correct number of loops. */
+	int32 MaxLocalLoopIndex;
 
 	/** The playback speed */
 	float PlaybackSpeed;
+
+	/** The playback speed before we started playing */
+	float PlaybackSpeedBeforePlay;
 
 	/** The shuttle multiplier */
 	float ShuttleMultiplier;
@@ -1321,7 +1321,7 @@ private:
 		the MovieScene data can change many times per frame.) */
 	bool bNeedTreeRefresh;
 
-	FSequencerSelection Selection;
+	//FSequencerSelection Selection;
 	FSequencerSelectionPreview SelectionPreview;
 
 	/** Represents the tree of nodes to display in the animation outliner. */
@@ -1382,7 +1382,7 @@ private:
 	FOnActivateSequence OnActivateSequenceEvent;
 
 	/** Delegate for Curve Display Changed Event from the Curve Editor, which we than pass to the FOnCurveDisplayChanged delegate */
-	void OnCurveModelDisplayChanged(FCurveModel *InCurveModel, bool bDisplayed);
+	void OnCurveModelDisplayChanged(FCurveModel *InCurveModel, bool bDisplayed, const FCurveEditor* InCurveEditor);
 
 	int32 SilentModeCount;
 
@@ -1444,14 +1444,15 @@ private:
 	/** The range of the currently displayed sub sequence in relation to its parent section, in the resolution of the current sub sequence */
 	TRange<FFrameNumber> SubSequenceRange;
 
-	UMovieSceneCompiledDataManager* CompiledDataManager;
+	TObjectPtr<UMovieSceneCompiledDataManager> CompiledDataManager;
+	TSharedPtr<FMovieSceneEntitySystemRunner> Runner;
+
+	TSharedPtr<UE::MovieScene::IDeferredSignedObjectChangeHandler> DeferredSignedObjectChangeHandler;
 
 	TMap<FName, TFunction<void()>> CleanupFunctions;
 
 	/** Transient collection of keys that is used for jumping between keys contained within the current selection */
 	TUniquePtr<FSequencerKeyCollection> SelectedKeyCollection;
-
-	TSharedPtr<FCurveEditor> CurveEditorModel;
 
 	TSharedPtr<UE::MovieScene::FInitialValueCache> InitialValueCache;
 
@@ -1459,6 +1460,8 @@ private:
 	TOptional<TTuple<TWeakObjectPtr<UMovieSceneSequence>, FGuid>> SuppressAutoEvalSignature;
 
 	TUniquePtr<FObjectBindingTagCache> ObjectBindingTagCache;
+
+	TSharedPtr<UE::Sequencer::FSequencerEditorViewModel> ViewModel;
 
 	struct FCachedViewState
 	{
@@ -1478,26 +1481,11 @@ private:
 
 	FCachedViewState CachedViewState;
 	
-	struct FViewModifierInfo
-	{
-		bool bApplyViewModifier = false;
-		float BlendFactor = 1.f;
-		TWeakObjectPtr<AActor> PreviousCamera;
-		TWeakObjectPtr<AActor> NextCamera;
-	};
-	/** Information for previewing camera cut blends. This will be applied to the editor viewport during blends. */
-	FViewModifierInfo ViewModifierInfo;
-	/** Information cached before entering silent mode, so we can restore it afterwards. */
-	FViewModifierInfo CachedViewModifierInfo;
-	
-	/** Original editor camera info, for when previewing a sequence with a blend from/to gameplay. */
-	bool bHasPreAnimatedInfo;
-	FVector PreAnimatedViewportLocation;
-	FRotator PreAnimatedViewportRotation;
-	float PreAnimatedViewportFOV;
+	/** Frame time last evaluated at, needed to make sure we evaluate at the right time when interrogating values*/
+	FFrameTime LastEvaluatedLocalTime;
 
 	TOptional<FMovieSceneSequenceID> ScrubPositionParent;
 	/** Cache of all bound cameras in the sequence hierarchy */
-	TSet<AActor*> CachedCameraActors;
+	TMap<AActor*, FGuid> CachedCameraActors;
 	uint32 LastKnownStateSerial = 0;
 };

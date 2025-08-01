@@ -1,9 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using EpicGames.Core;
 using UnrealBuildTool;
 
 public class BuildPatchServices : ModuleRules
 {
+	[ConfigFile(ConfigHierarchyType.Engine, "BuildPatchServices")]
+	bool bEnableDiskOverflowStore = true;
+
 	public BuildPatchServices(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PublicDependencyModuleNames.AddRange(
@@ -20,26 +24,33 @@ public class BuildPatchServices : ModuleRules
 			}
 		);
 
-		PrivateIncludePaths.AddRange(
-			new string[]
-			{
-				"Runtime/Online/BuildPatchServices/Private",
-			}
-		);
-
 		PrivateDependencyModuleNames.AddRange(
 		new string[] {
 				"Analytics",
 				"AnalyticsET",
 				"HTTP",
 				"Json",
+				"VirtualFileCache",
 			}
 		);
 
-		PrivateIncludePathModuleNames.AddRange(
-			new string[] {
-				"HTTP"
-			}
-		);
+		if (EnableDiskOverflowStore)
+		{
+			PublicDefinitions.Add("ENABLE_PATCH_DISK_OVERFLOW_STORE=1");
+		}
+		else
+		{
+			PublicDefinitions.Add("ENABLE_PATCH_DISK_OVERFLOW_STORE=0");
+		}
+
+	}
+
+	protected bool EnableDiskOverflowStore
+	{
+		get
+		{
+			ConfigCache.ReadSettings(DirectoryReference.FromFile(Target.ProjectFile), Target.Platform, this);
+			return bEnableDiskOverflowStore;
+		}
 	}
 }

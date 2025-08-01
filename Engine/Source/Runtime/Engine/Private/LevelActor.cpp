@@ -1,48 +1,31 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 
-#include "CoreMinimal.h"
-#include "Misc/Paths.h"
-#include "Misc/OutputDeviceFile.h"
-#include "Stats/Stats.h"
-#include "HAL/IConsoleManager.h"
-#include "Misc/App.h"
 #include "UObject/Package.h"
 #include "Misc/PackageName.h"
-#include "UObject/ScriptStackTracker.h"
 #include "EngineStats.h"
-#include "EngineGlobals.h"
-#include "Engine/EngineTypes.h"
 #include "Engine/Level.h"
-#include "GameFramework/Actor.h"
-#include "GameFramework/Pawn.h"
-#include "CollisionQueryParams.h"
-#include "WorldCollision.h"
-#include "Engine/World.h"
-#include "Components/PrimitiveComponent.h"
 #include "AI/NavigationSystemBase.h"
-#include "Engine/Brush.h"
 #include "UObject/LinkerLoad.h"
-#include "UObject/CoreOnline.h"
 #include "GameFramework/OnlineReplStructs.h"
 #include "Engine/Engine.h"
 #include "Engine/LevelStreaming.h"
+#include "Engine/OverlapResult.h"
 #include "ContentStreaming.h"
 #include "EditorSupportDelegates.h"
 #include "GameFramework/GameModeBase.h"
-#include "AudioDeviceManager.h"
-#include "Logging/TokenizedMessage.h"
 #include "Logging/MessageLog.h"
 #include "Misc/MapErrors.h"
 #include "GameFramework/WorldSettings.h"
-#include "Engine/NetDriver.h"
+#include "Engine/DemoNetDriver.h"
 #include "Engine/Player.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "Net/Core/PropertyConditions/PropertyConditions.h"
 
 #include "Components/BoxComponent.h"
 #include "GameFramework/MovementComponent.h"
 
 #include "Misc/TimeGuard.h"
-#include "ProfilingDebugging/CsvProfiler.h"
 
 #define LOCTEXT_NAMESPACE "LevelActor"
 
@@ -259,6 +242,158 @@ void LineCheckTracker::CaptureLineCheck(int32 LineCheckFlags, const FVector* Ext
 /*-----------------------------------------------------------------------------
 	Level actor management.
 -----------------------------------------------------------------------------*/
+
+/** 
+ * Generates a 102-bits actor GUID:
+ *	- Bits 101-54 hold the user unique id.
+ *	- Bits 53-0 hold a microseconds timestamp.
+  *
+ * Notes:
+ *	- The timestamp is stored in microseconds for a total of 54 bits, enough to cover
+ *	  the next 570 years.
+ *	- The highest 72 bits are appended to the name in hexadecimal.
+ *	- The lowest 30 bits of the timestamp are stored in the name number. This is to
+ *	  minimize the total names generated for globally unique names (string part will
+ *	  change every ~17 minutes for a specific actor class).
+ *  - The name number bit 30 is reserved to know if this is a globally unique name. This
+ *	  is not 100% safe, but should cover most cases.
+ *  - The name number bit 31 is reserved to preserve the fast path name generation (see
+ *	  GFastPathUniqueNameGeneration).
+ *	- On some environments, cooking happens without network, so we can't retrieve the 
+ *	  MAC adress for spawned actors, assign a default one in this case.
+ **/
+class FActorGUIDGenerator
+{
+public:
+	FActorGUIDGenerator()
+		: Origin(FDateTime(2020, 1, 1))
+		, Counter(0)
+	{
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		TArray<uint8> MACAddress = FPlatformMisc::GetMacAddress();
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+		if (MACAddress.Num() == 6)
+		{
+			FMemory::Memcpy(UniqueID, MACAddress.GetData(), 6);
+		}
+		else if (IsRunningCommandlet())
+		{
+			FMemory::Memzero(UniqueID, 6);
+		}
+		else
+		{
+			const FString EpicAccountId = FPlatformMisc::GetEpicAccountId();
+			const uint32 UniqueUserId = GetTypeHash(EpicAccountId) ^ FPlatformProcess::GetCurrentProcessId();
+			const uint64 ElapsedUs = FDateTime::Now().GetTicks();
+
+			UniqueID[0] = UniqueUserId & 0xff;
+			UniqueID[1] = (UniqueUserId >> 8) & 0xff;
+			UniqueID[2] = (UniqueUserId >> 16) & 0xff;
+			UniqueID[3] = (UniqueUserId >> 24) & 0xff;
+			UniqueID[4] = ElapsedUs & 0xff;
+			UniqueID[5] = (ElapsedUs >> 8) & 0xff;
+		}
+	}
+
+	FName NewActorGUID(FName BaseName)
+	{
+		uint8 HighPart[9];
+
+		const FDateTime Now = FDateTime::Now();
+		check(Now > Origin);
+
+		const FTimespan Elapsed = FDateTime::Now() - Origin;
+		const uint64 ElapsedUs = (uint64)Elapsed.GetTotalMilliseconds() * 1000 + (Counter++ % 1000);
+
+		// Copy 48-bits unique id
+		FMemory::Memcpy(HighPart, UniqueID, 6);
+		
+		// Append the high part of the timestamp (will change every ~17 minutes)
+		const uint64 ElapsedUsHighPart = ElapsedUs >> 30;
+		FMemory::Memcpy(HighPart + 6, &ElapsedUsHighPart, 3);
+
+		// Make final name
+		TStringBuilderWithBuffer<TCHAR, NAME_SIZE> StringBuilder;
+		StringBuilder += BaseName.ToString();
+		StringBuilder += TEXT("_UAID_");
+
+		for (uint32 i=0; i<9; i++)
+		{
+			StringBuilder += NibbleToTChar(HighPart[i] >> 4);
+			StringBuilder += NibbleToTChar(HighPart[i] & 15);
+		}
+
+		return FName(*StringBuilder, (ElapsedUs & 0x3fffffff) | (1 << 30));
+	}
+	
+private:
+	FDateTime Origin;
+	uint8 UniqueID[6];
+	uint32 Counter;
+};
+
+FName FActorSpawnUtils::MakeUniqueActorName(ULevel* Level, const UClass* Class, FName BaseName, bool bGloballyUnique)
+{
+	FName NewActorName;
+
+	if (bGloballyUnique)
+	{
+		static FActorGUIDGenerator ActorGUIDGenerator;
+
+		do
+		{
+			NewActorName = ActorGUIDGenerator.NewActorGUID(BaseName);
+		}
+		while (StaticFindObjectFast(nullptr, Level, NewActorName));
+	}
+	else
+	{
+		NewActorName = MakeUniqueObjectName(Level, Class, BaseName);
+	}
+
+	return NewActorName;
+}
+
+bool FActorSpawnUtils::IsGloballyUniqueName(FName Name)
+{
+	if (Name.GetNumber() & (1 << 30))
+	{
+		const FString PlainName = Name.GetPlainNameString();
+		const int32 PlainNameLen = PlainName.Len();
+		
+		// Parse a name like this: StaticMeshActor_UAID_001122334455667788
+		if (PlainNameLen >= 24)
+		{
+			if (!FCString::Strnicmp(*PlainName + PlainNameLen - 24, TEXT("_UAID_"), 6))
+			{
+				for (uint32 i=0; i<18; i++)
+				{
+					if (!CheckTCharIsHex(PlainName[PlainNameLen - i - 1]))
+					{
+						return false;
+					}
+				}
+
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+FName FActorSpawnUtils::GetBaseName(FName Name)
+{
+	if (IsGloballyUniqueName(Name))
+	{
+		// Chop a name like this: StaticMeshActor_UAID_001122334455667788
+		return *Name.GetPlainNameString().LeftChop(24);
+	}
+
+	return *Name.GetPlainNameString();
+}
+
 // LOOKING_FOR_PERF_ISSUES
 #define PERF_SHOW_MULTI_PAWN_SPAWN_FRAMES (!(UE_BUILD_SHIPPING || UE_BUILD_TEST)) && (LOOKING_FOR_PERF_ISSUES || !WITH_EDITORONLY_DATA)
 
@@ -368,8 +503,13 @@ AActor* UWorld::SpawnActor( UClass* Class, FTransform const* UserTransformPtr, c
 		UE_LOG(LogSpawn, Warning, TEXT("SpawnActor failed because the given transform (%s) is invalid"), *(UserTransformPtr->ToString()));
 		return NULL;
 	}
-	
-#if WITH_EDITOR
+#if !WITH_EDITOR
+	else if (SpawnParameters.bForceGloballyUniqueName && !SpawnParameters.Name.IsNone())
+	{
+		UE_LOG(LogSpawn, Warning, TEXT("SpawnActor failed because a globally unique name was requested and an actor name was provided (%s)"), *SpawnParameters.Name.ToString());
+		return NULL;
+	}
+#else
 	if (SpawnParameters.OverridePackage && SpawnParameters.bCreateActorPackage)
 	{
 		UE_LOG(LogSpawn, Warning, TEXT("SpawnActor failed because both the OverridePackage and bCreateActorPackage are set"));
@@ -381,46 +521,78 @@ AActor* UWorld::SpawnActor( UClass* Class, FTransform const* UserTransformPtr, c
 	if (LevelToSpawnIn == NULL)
 	{
 		// Spawn in the same level as the owner if we have one.
-		LevelToSpawnIn = (SpawnParameters.Owner != NULL) ? SpawnParameters.Owner->GetLevel() : CurrentLevel;
+		LevelToSpawnIn = (SpawnParameters.Owner != NULL) ? SpawnParameters.Owner->GetLevel() : ToRawPtr(CurrentLevel);
 	}
 
-	FName NewActorName = SpawnParameters.Name;
-	AActor* Template = SpawnParameters.Template;
-		
-	if( !Template )
-	{
-		// Use class's default actor as a template.
-		Template = Class->GetDefaultObject<AActor>();
-	}
+	// Use class's default actor as a template if none provided.
+	AActor* Template = SpawnParameters.Template ? SpawnParameters.Template : Class->GetDefaultObject<AActor>();
 	check(Template);
+
+	FName NewActorName = SpawnParameters.Name;
+	UPackage* ExternalPackage = nullptr;
+	bool bNeedGloballyUniqueName = false;
+
+#if WITH_EDITOR
+	// Generate the actor's Guid
+	FGuid ActorGuid;
+	if (SpawnParameters.OverrideActorGuid.IsValid())
+	{
+		ActorGuid = SpawnParameters.OverrideActorGuid;
+	}
+	else
+	{
+		ActorGuid = FGuid::NewGuid();
+	}
+
+	// Generate and set the actor's external package if needed
+	if (SpawnParameters.OverridePackage)
+	{
+		ExternalPackage = SpawnParameters.OverridePackage;
+		bNeedGloballyUniqueName = true;
+	}
+	else if (LevelToSpawnIn->ShouldCreateNewExternalActors() && SpawnParameters.bCreateActorPackage && !(SpawnParameters.ObjectFlags & RF_Transient))
+	{
+		bNeedGloballyUniqueName = CastChecked<AActor>(Class->GetDefaultObject())->SupportsExternalPackaging();
+	}
+
+	if (!GIsEditor)
+	{
+		bNeedGloballyUniqueName = false;
+	}
+#else
+	// Override all previous logic if the spawn request a globally unique name
+	bNeedGloballyUniqueName |= SpawnParameters.bForceGloballyUniqueName;
+#endif
 
 	if (NewActorName.IsNone())
 	{
 		// If we are using a template object and haven't specified a name, create a name relative to the template, otherwise let the default object naming behavior in Stat
-		if (!Template->HasAnyFlags(RF_ClassDefaultObject))
-		{
-			NewActorName = MakeUniqueObjectName(LevelToSpawnIn, Template->GetClass(), *Template->GetFName().GetPlainNameString());
-		}
-	}
-	else if (StaticFindObjectFast(nullptr, LevelToSpawnIn, NewActorName))
-	{
-		// If the supplied name is already in use, then either fail in the requested manner or determine a new name to use if the caller indicates that's ok
+		const FName BaseName = Template->HasAnyFlags(RF_ClassDefaultObject) ? Class->GetFName() : *Template->GetFName().GetPlainNameString();
 
-		if (SpawnParameters.NameMode == FActorSpawnParameters::ESpawnActorNameMode::Requested)
+		NewActorName = FActorSpawnUtils::MakeUniqueActorName(LevelToSpawnIn, Template->GetClass(), BaseName, bNeedGloballyUniqueName);
+	}
+	else if (StaticFindObjectFast(nullptr, LevelToSpawnIn, NewActorName) || ((bNeedGloballyUniqueName != FActorSpawnUtils::IsGloballyUniqueName(NewActorName)) && (SpawnParameters.NameMode == FActorSpawnParameters::ESpawnActorNameMode::Requested)))
+	{
+		// If the supplied name is already in use or doesn't respect globally uniqueness, then either fail in the requested manner or determine a new name to use if the caller indicates that's ok
+		switch(SpawnParameters.NameMode)
 		{
-			NewActorName = MakeUniqueObjectName(LevelToSpawnIn, Template->GetClass(), *NewActorName.GetPlainNameString());
-		}
-		else
-		{
-			if (SpawnParameters.NameMode == FActorSpawnParameters::ESpawnActorNameMode::Required_Fatal)
-			{
-				UE_LOG(LogSpawn, Fatal, TEXT("An actor of name '%s' already exists in level '%s'."), *NewActorName.ToString(), *LevelToSpawnIn->GetFullName());
-			}
-			else if (SpawnParameters.NameMode == FActorSpawnParameters::ESpawnActorNameMode::Required_ErrorAndReturnNull)
-			{
-				UE_LOG(LogSpawn, Error, TEXT("An actor of name '%s' already exists in level '%s'."), *NewActorName.ToString(), *LevelToSpawnIn->GetFullName());
-			}
+		case FActorSpawnParameters::ESpawnActorNameMode::Requested:
+			NewActorName = FActorSpawnUtils::MakeUniqueActorName(LevelToSpawnIn, Template->GetClass(), FActorSpawnUtils::GetBaseName(NewActorName), bNeedGloballyUniqueName);
+			break;
+
+		case FActorSpawnParameters::ESpawnActorNameMode::Required_Fatal:
+			UE_LOG(LogSpawn, Fatal, TEXT("Cannot generate unique name for '%s' in level '%s'."), *NewActorName.ToString(), *LevelToSpawnIn->GetFullName());
 			return nullptr;
+
+		case FActorSpawnParameters::ESpawnActorNameMode::Required_ErrorAndReturnNull:
+			UE_LOG(LogSpawn, Error, TEXT("Cannot generate unique name for '%s' in level '%s'."), *NewActorName.ToString(), *LevelToSpawnIn->GetFullName());
+			return nullptr;
+
+		case FActorSpawnParameters::ESpawnActorNameMode::Required_ReturnNull:
+			return nullptr;
+
+		default:
+			check(0);
 		}
 	}
 
@@ -430,6 +602,19 @@ AActor* UWorld::SpawnActor( UClass* Class, FTransform const* UserTransformPtr, c
 		UE_LOG(LogSpawn, Warning, TEXT("Unable to spawn class '%s' due to client/server context."), *Class->GetName() );
 		return NULL;
 	}
+
+#if WITH_EDITOR
+	if (bNeedGloballyUniqueName && !ExternalPackage)
+	{
+		TStringBuilderWithBuffer<TCHAR, NAME_SIZE> ActorPath;
+		ActorPath += LevelToSpawnIn->GetPathName();
+		ActorPath += TEXT(".");
+		ActorPath += NewActorName.ToString();
+
+		// @todo FH: needs to handle mark package dirty and asset creation notification
+		ExternalPackage = ULevel::CreateActorPackage(LevelToSpawnIn->GetPackage(), LevelToSpawnIn->GetActorPackagingScheme(), *ActorPath);
+	}
+#endif
 
 	FTransform const UserTransform = UserTransformPtr ? *UserTransformPtr : FTransform::Identity;
 
@@ -478,37 +663,25 @@ AActor* UWorld::SpawnActor( UClass* Class, FTransform const* UserTransformPtr, c
 
 	EObjectFlags ActorFlags = SpawnParameters.ObjectFlags;
 
-	UPackage* ExternalPackage = nullptr;
-#if WITH_EDITOR
-	// Generate the actor's Guid
-	FGuid ActorGuid;
-	if (SpawnParameters.OverrideActorGuid.IsValid())
-	{
-		ActorGuid = SpawnParameters.OverrideActorGuid;
-	}
-	else
-	{
-		ActorGuid = FGuid::NewGuid();
-	}
-
-	// Generate and set the actor's external package if needed
-	// Set actor's package
-	if (SpawnParameters.OverridePackage)
-	{
-		ExternalPackage = SpawnParameters.OverridePackage;
-	}
-	else if (LevelToSpawnIn->IsUsingExternalActors() && SpawnParameters.bCreateActorPackage && !(SpawnParameters.ObjectFlags & RF_Transient))
-	{
-		// @todo FH: needs to handle mark package dirty and asset creation notification
-		ExternalPackage = ULevel::CreateActorPackage(LevelToSpawnIn->GetPackage(), ActorGuid);
-	}
-#endif
-
 	// actually make the actor object
 	AActor* const Actor = NewObject<AActor>(LevelToSpawnIn, Class, NewActorName, ActorFlags, Template, false/*bCopyTransientsFromClassDefaults*/, nullptr/*InInstanceGraph*/, ExternalPackage);
 	
 	check(Actor);
 	check(Actor->GetLevel() == LevelToSpawnIn);
+
+#if WITH_EDITOR
+	// UE5-Release: bHideFromSceneOutliner must be set before anything tries
+	// to create an FActorTreeItem in the Scene Outliner. Otherwise, the tree item will
+	// be created and will be visible in the Scene Outliner. 
+	// AActor::ClearActorLabel, called below, currently does that via FCoreDelegates::OnActorLabelChanged.
+	// A better fix should prevent the FActorTreeItem creation before the end of the spawning sequence.
+	if (SpawnParameters.bHideFromSceneOutliner)
+	{
+		FSetActorHiddenInSceneOutliner SetActorHidden(Actor);
+	}
+	Actor->bIsEditorPreviewActor = SpawnParameters.bTemporaryEditorActor;
+#endif //WITH_EDITOR
+
 
 #if ENABLE_SPAWNACTORTIMER
 	SpawnTimer.SetActorName(Actor->GetFName());
@@ -519,21 +692,20 @@ AActor* UWorld::SpawnActor( UClass* Class, FTransform const* UserTransformPtr, c
 
 	// Set the actor's guid
 	FSetActorGuid SetActorGuid(Actor, ActorGuid);
+#endif
 
 	if (SpawnParameters.OverrideParentComponent)
 	{
 		FActorParentComponentSetter::Set(Actor, SpawnParameters.OverrideParentComponent);
 	}
-#endif // WITH_EDITOR
+
+	if (SpawnParameters.CustomPreSpawnInitalization)
+	{
+		SpawnParameters.CustomPreSpawnInitalization(Actor);
+	}
 
 	if ( GUndo )
 	{
-		// if we are spawning an external actor, clear the dirty flag without capturing in the transaction beforehand
-		// This allows the transaction to capture the package as not being dirty when capturing its current state, which is what we need for proper external actor behavior
-		if (ExternalPackage)
-		{
-			LevelToSpawnIn->GetPackage()->ClearDirtyFlag();
-		}
 		ModifyLevel( LevelToSpawnIn );
 	}
 	LevelToSpawnIn->Actors.Add( Actor );
@@ -550,28 +722,20 @@ AActor* UWorld::SpawnActor( UClass* Class, FTransform const* UserTransformPtr, c
 	// tell the actor what method to use, in case it was overridden
 	Actor->SpawnCollisionHandlingMethod = CollisionHandlingMethod;
 
-#if WITH_EDITOR
-	if (SpawnParameters.bHideFromSceneOutliner)
-	{
-		FSetActorHiddenInSceneOutliner SetActorHidden(Actor);
-	}
-	Actor->bIsEditorPreviewActor = SpawnParameters.bTemporaryEditorActor;
-#endif //WITH_EDITOR
-
 	// Broadcast delegate before the actor and its contained components are initialized
 	OnActorPreSpawnInitialization.Broadcast(Actor);
 
-	Actor->PostSpawnInitialize(UserTransform, SpawnParameters.Owner, SpawnParameters.Instigator, SpawnParameters.IsRemoteOwned(), SpawnParameters.bNoFail, SpawnParameters.bDeferConstruction);
-
-	// if we are spawning an external actor, clear the dirty flag after post spawn initialize which might have dirtied the level package through running construction scripts
+	Actor->PostSpawnInitialize(UserTransform, SpawnParameters.Owner, SpawnParameters.Instigator, SpawnParameters.IsRemoteOwned(), SpawnParameters.bNoFail, SpawnParameters.bDeferConstruction, SpawnParameters.TransformScaleMethod);
+	
+	// If we are spawning an external actor, mark this package dirty
 	if (ExternalPackage)
 	{
-		LevelToSpawnIn->GetPackage()->ClearDirtyFlag();
+		ExternalPackage->MarkPackageDirty();
 	}
 
-	if (Actor->IsPendingKill() && !SpawnParameters.bNoFail)
+	if (!IsValid(Actor) && !SpawnParameters.bNoFail)
 	{
-		UE_LOG(LogSpawn, Log, TEXT("SpawnActor failed because the spawned actor %s IsPendingKill"), *Actor->GetPathName());
+		UE_LOG(LogSpawn, Log, TEXT("SpawnActor failed because the spawned actor %s is invalid"), *Actor->GetPathName());
 		return NULL;
 	}
 
@@ -583,6 +747,11 @@ AActor* UWorld::SpawnActor( UClass* Class, FTransform const* UserTransformPtr, c
 #if WITH_EDITOR
 	if (GIsEditor)
 	{
+		if (Actor->IsAsset() && Actor->GetPackage()->HasAnyPackageFlags(PKG_NewlyCreated))
+		{
+			FAssetRegistryModule::AssetCreated(Actor);
+		}
+
 		GEngine->BroadcastLevelActorAdded(Actor);
 	}
 #endif
@@ -704,6 +873,8 @@ bool UWorld::DestroyActor( AActor* ThisActor, bool bNetForce, bool bShouldModify
 	// Notify the texture streaming manager about the destruction of this actor.
 	IStreamingManager::Get().NotifyActorDestroyed( ThisActor );
 
+	OnActorDestroyed.Broadcast(ThisActor);
+
 	// Tell this actor it's about to be destroyed.
 	ThisActor->Destroyed();
 
@@ -742,7 +913,8 @@ bool UWorld::DestroyActor( AActor* ThisActor, bool bNetForce, bool bShouldModify
 		AActor* OldParentActor = RootComp->GetAttachParent()->GetOwner();
 		if (OldParentActor)
 		{
-			OldParentActor->Modify();
+			// Attachment is persisted on the child so modify both actors for Undo/Redo but do not mark the Parent package dirty
+			OldParentActor->Modify(/*bAlwaysMarkDirty=*/false);
 		}
 
 		ThisActor->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
@@ -763,13 +935,29 @@ bool UWorld::DestroyActor( AActor* ThisActor, bool bNetForce, bool bShouldModify
 		ThisActor->SetOwner(NULL);
 	}
 
-	ULevel* const ActorLevel = ThisActor->GetLevel();
-	if (ActorLevel)
+	if (ULevel* const ActorLevel = ThisActor->GetLevel())
 	{
-		ActorLevel->CreateReplicatedDestructionInfo(ThisActor);
+		UDemoNetDriver* DemoDriver = nullptr;
+
+		if (const FLevelCollection* LevelCollection = ActorLevel->GetCachedLevelCollection())
+		{
+			DemoDriver = LevelCollection->GetDemoNetDriver();
+		}
+
+		if (!DemoDriver)
+		{
+			DemoDriver = GetDemoNetDriver();
+		}
+
+		if (!DemoDriver || !DemoDriver->IsPlaying())
+		{
+			ActorLevel->CreateReplicatedDestructionInfo(ThisActor);
+		}
 	}
 
-	// Notify net drivers that this guy has been destroyed.
+	UE::Net::Private::FNetPropertyConditionManager::Get().NotifyObjectDestroyed(ThisActor);
+
+	// Notify net drivers that this actor has been destroyed.
 	if (FWorldContext* Context = GEngine->GetWorldContextFromWorld(this))
 	{
 		for (FNamedNetDriver& Driver : Context->ActiveNetDrivers)
@@ -782,9 +970,13 @@ bool UWorld::DestroyActor( AActor* ThisActor, bool bNetForce, bool bShouldModify
 	}
 	else if (WorldType != EWorldType::Inactive && !IsRunningCommandlet())
 	{
-		// Inactive worlds do not have a world context, otherwise only worlds in the middle of seamless travel should have no context,
-		// and in that case, we shouldn't be destroying actors on them until they have become the current world (i.e. CopyWorldData has been called)
-		UE_LOG(LogSpawn, Warning, TEXT("UWorld::DestroyActor: World has no context! World: %s, Actor: %s"), *GetName(), *ThisActor->GetPathName());
+		// If we are preloading this world, it's normal that we don't have a valid context yet.
+		if (!UWorld::WorldTypePreLoadMap.Find(GetOuter()->GetFName()))
+		{
+			// Inactive worlds do not have a world context, otherwise only worlds in the middle of seamless travel should have no context,
+			// and in that case, we shouldn't be destroying actors on them until they have become the current world (i.e. CopyWorldData has been called)
+			UE_LOG(LogSpawn, Warning, TEXT("UWorld::DestroyActor: World has no context! World: %s, Actor: %s"), *GetName(), *ThisActor->GetPathName());
+		}
 	}
 
 	// Remove the actor from the actor list.
@@ -803,13 +995,15 @@ bool UWorld::DestroyActor( AActor* ThisActor, bool bNetForce, bool bShouldModify
 #endif
 	}
 
+	OnActorRemovedFromWorld.Broadcast(ThisActor);
+
 	// Clean up the actor's components.
 	ThisActor->UnregisterAllComponents();
 
 	// Mark the actor and its direct components as pending kill.
-	ThisActor->MarkPendingKill();
+	ThisActor->MarkAsGarbage();
 	ThisActor->MarkPackageDirty();
-	ThisActor->MarkComponentsAsPendingKill();
+	ThisActor->MarkComponentsAsGarbage();
 
 	// Unregister the actor's tick function
 	const bool bRegisterTickFunctions = false;
@@ -931,7 +1125,8 @@ bool UWorld::FindTeleportSpot(const AActor* TestActor, FVector& TestLocation, FR
 	}
 
 	// first do only Z
-	const bool bZeroZ = FMath::IsNearlyZero(Adjust.Z, KINDA_SMALL_NUMBER);
+	const FVector::FReal ZeroThreshold = UE_KINDA_SMALL_NUMBER;
+	const bool bZeroZ = FMath::IsNearlyZero(Adjust.Z, ZeroThreshold);
 	if (!bZeroZ)
 	{
 		TestLocation.Z += Adjust.Z;
@@ -944,8 +1139,8 @@ bool UWorld::FindTeleportSpot(const AActor* TestActor, FVector& TestLocation, FR
 	}
 
 	// now try just XY
-	const bool bZeroX = FMath::IsNearlyZero(Adjust.X, KINDA_SMALL_NUMBER);
-	const bool bZeroY = FMath::IsNearlyZero(Adjust.Y, KINDA_SMALL_NUMBER);
+	const bool bZeroX = FMath::IsNearlyZero(Adjust.X, ZeroThreshold);
+	const bool bZeroY = FMath::IsNearlyZero(Adjust.Y, ZeroThreshold);
 	if (!bZeroX || !bZeroY)
 	{
 		const float X = bZeroX ? 0.f : Adjust.X;
@@ -1134,7 +1329,8 @@ static bool ComponentEncroachesBlockingGeometry_WithAdjustment(UWorld const* Wor
 				{
 					NumBlockingHits++;
 					FCollisionShape const NonShrunkenCollisionShape = PrimComp->GetCollisionShape();
-					bool bSuccess = OverlapComponent->ComputePenetration(MTDResult, NonShrunkenCollisionShape, TestWorldTransform.GetLocation(), TestWorldTransform.GetRotation());
+					const FBodyInstance* OverlapBodyInstance = OverlapComponent->GetBodyInstance(NAME_None, true, Overlaps[HitIdx].ItemIndex);
+					bool bSuccess = OverlapBodyInstance && OverlapBodyInstance->OverlapTest(TestWorldTransform.GetLocation(), TestWorldTransform.GetRotation(), NonShrunkenCollisionShape, &MTDResult);
 					if (bSuccess)
 					{
 						OutProposedAdjustment += MTDResult.Direction * MTDResult.Distance;
@@ -1153,7 +1349,7 @@ static bool ComponentEncroachesBlockingGeometry_WithAdjustment(UWorld const* Wor
 					if (bSuccess && FMath::IsNearlyZero(MTDResult.Distance))
 					{
 						FCollisionShape const ShrunkenCollisionShape = PrimComp->GetCollisionShape(-Epsilon);
-						bSuccess = OverlapComponent->ComputePenetration(MTDResult, ShrunkenCollisionShape, TestWorldTransform.GetLocation(), TestWorldTransform.GetRotation());
+						bSuccess = OverlapBodyInstance && OverlapBodyInstance->OverlapTest(TestWorldTransform.GetLocation(), TestWorldTransform.GetRotation(), ShrunkenCollisionShape, &MTDResult);
 						if (bSuccess)
 						{
 							OutProposedAdjustment += MTDResult.Direction * MTDResult.Distance;
@@ -1339,7 +1535,7 @@ void UWorld::LoadSecondaryLevels(bool bForce, TSet<FName>* FilenamesToSkip)
 				const FString StreamingLevelWorldAssetPackageName = StreamingLevel->GetWorldAssetPackageName();
 				if (FilenamesToSkip)
 				{
-					if (FPackageName::DoesPackageExist(StreamingLevelWorldAssetPackageName, NULL, &PackageFilename))
+					if (FPackageName::DoesPackageExist(StreamingLevelWorldAssetPackageName, &PackageFilename))
 					{
 						bSkipFile |= FilenamesToSkip->Contains( FName(*PackageFilename) );
 					}
@@ -1526,10 +1722,13 @@ void UWorld::IssueEditorLoadWarnings()
 
 		if (Level->FixupOverrideVertexColorsCount > 0)
 		{
-			TotalLoadTimeFromFixups += Level->FixupOverrideVertexColorsTime;
+			const double LevelFixupTime  = ((double)Level->FixupOverrideVertexColorsTimeMS) / 1000.0;
+			const uint32 LevelFixupCount = Level->FixupOverrideVertexColorsCount;
+
+			TotalLoadTimeFromFixups += LevelFixupTime;
 			FFormatNamedArguments Arguments;
-			Arguments.Add(TEXT("LoadTime"), FText::FromString(FString::Printf(TEXT("%.1fs"), Level->FixupOverrideVertexColorsTime)));
-			Arguments.Add(TEXT("NumComponents"), FText::FromString(FString::Printf(TEXT("%u"), Level->FixupOverrideVertexColorsCount)));
+			Arguments.Add(TEXT("LoadTime"), FText::FromString(FString::Printf(TEXT("%.1fs"), LevelFixupTime)));
+			Arguments.Add(TEXT("NumComponents"), FText::FromString(FString::Printf(TEXT("%u"), LevelFixupCount)));
 			Arguments.Add(TEXT("LevelName"), FText::FromString(Level->GetOutermost()->GetName()));
 			
 			FMessageLog("MapCheck").Info()
@@ -1552,7 +1751,7 @@ void UWorld::IssueEditorLoadWarnings()
 #endif // WITH_EDITOR
 
 
-AAudioVolume* UWorld::GetAudioSettings( const FVector& ViewLocation, FReverbSettings* OutReverbSettings, FInteriorSettings* OutInteriorSettings )
+AAudioVolume* UWorld::GetAudioSettings( const FVector& ViewLocation, FReverbSettings* OutReverbSettings, FInteriorSettings* OutInteriorSettings ) const
 {
 	// Find the highest priority volume encompassing the current view location.
 	for (AAudioVolume* Volume : AudioVolumes)
@@ -1599,11 +1798,8 @@ AAudioVolume* UWorld::GetAudioSettings( const FVector& ViewLocation, FReverbSett
 void UWorld::SetMapNeedsLightingFullyRebuilt(int32 InNumLightingUnbuiltObjects, int32 InNumUnbuiltReflectionCaptures)
 {
 #if !UE_BUILD_SHIPPING
-	static const TConsoleVariableData<int32>* AllowStaticLightingVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.AllowStaticLighting"));
-	const bool bAllowStaticLighting = (!AllowStaticLightingVar || AllowStaticLightingVar->GetValueOnGameThread() != 0);
-
 	AWorldSettings* WorldSettings = GetWorldSettings();
-	if (bAllowStaticLighting && WorldSettings && !WorldSettings->bForceNoPrecomputedLighting)
+	if (IsStaticLightingAllowed() && WorldSettings && !WorldSettings->bForceNoPrecomputedLighting)
 	{
 		check(IsInGameThread());
 		if ((NumLightingUnbuiltObjects != InNumLightingUnbuiltObjects && (NumLightingUnbuiltObjects == 0 || InNumLightingUnbuiltObjects == 0))

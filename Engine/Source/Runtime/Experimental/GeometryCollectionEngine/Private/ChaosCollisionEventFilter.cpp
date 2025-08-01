@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #include "ChaosCollisionEventFilter.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ChaosCollisionEventFilter)
+
 void FChaosCollisionEventFilter::FilterEvents(const FTransform& ChaosComponentTransform, const Chaos::FCollisionDataArray& RawCollisionDataArray)
 {
 	FilteredDataArray.Reset();
@@ -59,8 +61,6 @@ void FChaosCollisionEventFilter::FilterEvents(const FTransform& ChaosComponentTr
 			NewData.Mass1 = CollisionData.Mass1;
 			NewData.Mass2 = CollisionData.Mass2;
 			NewData.Impulse = CollisionData.AccumulatedImpulse;
-			NewData.Particle = CollisionData.Particle;
-			NewData.Levelset = CollisionData.Levelset;
 
 			FilteredDataArray.Add(NewData);
 
@@ -140,3 +140,4 @@ void FChaosCollisionEventFilter::SortEvents(TArray<FChaosCollisionEventData>& In
 		break;
 	}
 }
+

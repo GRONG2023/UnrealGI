@@ -154,7 +154,7 @@ namespace FbxAnimUtils
 										// Maya adds the name of the blendshape and an underscore to the front of the channel name, so remove it
 										if (ChannelName.StartsWith(BlendShapeName))
 										{
-											ChannelName.RightInline(ChannelName.Len() - (BlendShapeName.Len() + 1), false);
+											ChannelName.RightInline(ChannelName.Len() - (BlendShapeName.Len() + 1), EAllowShrinking::No);
 										}
 
 										FbxAnimCurve* Curve = Geometry->GetShapeChannel(BlendShapeIndex, ChannelIndex, (FbxAnimLayer*)AnimStack->GetMember(0));
@@ -162,8 +162,8 @@ namespace FbxAnimUtils
 										{
 											FRichCurve& RichCurve = InOutCurveTable->AddRichCurve(*ChannelName);
 											RichCurve.Reset();
-
-											FbxImporter->ImportCurve(Curve, RichCurve, AnimTimeSpan, 0.01f);
+											constexpr bool bNegative = false;
+											FbxImporter->ImportCurve(Curve, RichCurve, AnimTimeSpan, bNegative, 0.01f);
 										}
 									}
 								}
@@ -180,8 +180,8 @@ namespace FbxAnimUtils
 							{
 								FRichCurve& RichCurve = InOutCurveTable->AddRichCurve(*InCurveName);
 								RichCurve.Reset();
-
-								FbxImporter->ImportCurve(InCurve, RichCurve, AnimTimeSpan, 1.0f);
+								constexpr bool bNegative = false;
+								FbxImporter->ImportCurve(InCurve, RichCurve, AnimTimeSpan, bNegative, 1.0f);
 							});
 							return true;
 						}
@@ -220,6 +220,7 @@ namespace FbxAnimUtils
 	{
 		FbxProperty Property = InNode->GetFirstProperty();
 		UAnimationSettings* AnimationSettings = UAnimationSettings::Get();
+		const TArray<FString> CustomAttributeNamesToImport = AnimationSettings->GetBoneCustomAttributeNamesToImport();
 
 		while (Property.IsValid())
 		{
@@ -229,7 +230,7 @@ namespace FbxAnimUtils
 
 			if (CurveNode && Property.GetFlag(FbxPropertyFlags::eUserDefined) &&
 				CurveNode->IsAnimated() && FbxAnimUtils::IsSupportedCurveDataType(Property.GetPropertyDataType().GetType()) &&
-				!AnimationSettings->BoneCustomAttributesNames.ContainsByPredicate([&PropertyName](const FCustomAttributeSetting& CustomAttributeSetting) { return CustomAttributeSetting.Name.Equals(PropertyName, ESearchCase::IgnoreCase); }))
+				!CustomAttributeNamesToImport.Contains(PropertyName))
 			{
 				FString CurveName = UTF8_TO_TCHAR(CurveNode->GetName());
 				UE_LOG(LogFbx, Log, TEXT("CurveName : %s"), *CurveName);
@@ -261,16 +262,17 @@ namespace FbxAnimUtils
 	{
 		FbxProperty Property = InNode->GetFirstProperty();
 		UAnimationSettings* AnimationSettings = UAnimationSettings::Get();
+		const TArray<FString> CustomAttributeNamesToImport = AnimationSettings->GetBoneCustomAttributeNamesToImport();
 
 		while (Property.IsValid())
 		{
 			FbxAnimCurveNode* CurveNode = Property.GetCurveNode();
 			const FString PropertyName = UTF8_TO_TCHAR(Property.GetName());
 			const EFbxType PropertyType = Property.GetPropertyDataType().GetType();
-			const bool bIsTypeSupported = FbxAnimUtils::IsSupportedCurveDataType(PropertyType) || eFbxString == PropertyType;
+			const bool bIsTypeSupported = FbxAnimUtils::IsSupportedCurveDataType(PropertyType) || PropertyType == eFbxString || PropertyType == eFbxEnum;
 
 			if (Property.GetFlag(FbxPropertyFlags::eUserDefined) && bIsTypeSupported 
-				&& (bImportAllCustomAttributes || AnimationSettings->BoneCustomAttributesNames.ContainsByPredicate([&PropertyName](const FCustomAttributeSetting& CustomAttributeSetting) { return CustomAttributeSetting.Name.Equals(PropertyName, ESearchCase::IgnoreCase); })))
+				&& (bImportAllCustomAttributes || CustomAttributeNamesToImport.Contains(PropertyName)))
 			{
 				UE_LOG(LogFbx, Log, TEXT("PropertyName : %s"), *PropertyName);
 

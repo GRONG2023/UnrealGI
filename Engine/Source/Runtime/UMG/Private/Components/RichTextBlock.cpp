@@ -11,8 +11,11 @@
 #include "Framework/Text/RichTextMarkupProcessing.h"
 #include "Framework/Text/IRichTextMarkupParser.h"
 #include "Framework/Text/IRichTextMarkupWriter.h"
-#include "RenderingThread.h"
+#include "RenderDeferredCleanup.h"
 #include "Editor/WidgetCompilerLog.h"
+#include "Materials/MaterialInstanceDynamic.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(RichTextBlock)
 
 #define LOCTEXT_NAMESPACE "UMG"
 
@@ -38,17 +41,20 @@ private:
 };
 
 template< class ObjectType >
-FORCEINLINE SharedPointerInternals::FRawPtrProxy< ObjectType > MakeShareableDeferredCleanup(ObjectType* InObject)
+FORCEINLINE TSharedPtr< ObjectType > MakeShareableDeferredCleanup(ObjectType* InObject)
 {
 	return MakeShareable(InObject, [](ObjectType* ObjectToDelete) { BeginCleanup(new FDeferredDeletor<ObjectType>(ObjectToDelete)); });
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 URichTextBlock::URichTextBlock(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
-	Visibility = ESlateVisibility::SelfHitTestInvisible;
+	SetVisibilityInternal(ESlateVisibility::SelfHitTestInvisible);
 	TextTransformPolicy = ETextTransformPolicy::None;
+	TextOverflowPolicy = ETextOverflowPolicy::Clip;
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 void URichTextBlock::ReleaseSlateResources(bool bReleaseChildren)
 {
@@ -56,6 +62,7 @@ void URichTextBlock::ReleaseSlateResources(bool bReleaseChildren)
 
 	MyRichTextBlock.Reset();
 	StyleInstance.Reset();
+	InstanceDecorators.Empty();
 }
 
 TSharedRef<SWidget> URichTextBlock::RebuildWidget()
@@ -66,12 +73,12 @@ TSharedRef<SWidget> URichTextBlock::RebuildWidget()
 	CreateDecorators(CreatedDecorators);
 
 	TSharedRef<FRichTextLayoutMarshaller> Marshaller = FRichTextLayoutMarshaller::Create(CreateMarkupParser(), CreateMarkupWriter(), CreatedDecorators, StyleInstance.Get());
-
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	MyRichTextBlock =
 		SNew(SRichTextBlock)
 		.TextStyle(bOverrideDefaultStyle ? &DefaultTextStyleOverride : &DefaultTextStyle)
 		.Marshaller(Marshaller);
-	
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	return MyRichTextBlock.ToSharedRef();
 }
 
@@ -79,11 +86,17 @@ void URichTextBlock::SynchronizeProperties()
 {
 	Super::SynchronizeProperties();
 
-	MyRichTextBlock->SetText(Text);
-	MyRichTextBlock->SetTransformPolicy(TextTransformPolicy);
-	MyRichTextBlock->SetMinDesiredWidth(MinDesiredWidth);
+	if (MyRichTextBlock.IsValid())
+	{
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		MyRichTextBlock->SetText(Text);
+		MyRichTextBlock->SetTransformPolicy(TextTransformPolicy);
+		MyRichTextBlock->SetMinDesiredWidth(MinDesiredWidth);
 
-	Super::SynchronizeTextLayoutProperties( *MyRichTextBlock );
+		MyRichTextBlock->SetOverflowPolicy(TextOverflowPolicy);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+		Super::SynchronizeTextLayoutProperties(*MyRichTextBlock);
+	}
 }
 
 void URichTextBlock::UpdateStyleData()
@@ -111,6 +124,7 @@ void URichTextBlock::UpdateStyleData()
 	}
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 FText URichTextBlock::GetText() const
 {
 	if (MyRichTextBlock.IsValid())
@@ -151,7 +165,12 @@ void URichTextBlock::RebuildStyleInstance()
 	}
 }
 
-void URichTextBlock::SetTextStyleSet(class UDataTable* NewTextStyleSet)
+UDataTable* URichTextBlock::GetTextStyleSet() const
+{
+	return TextStyleSet;
+}
+
+void URichTextBlock::SetTextStyleSet(UDataTable* NewTextStyleSet)
 {
 	if (TextStyleSet != NewTextStyleSet)
 	{
@@ -185,6 +204,7 @@ const FTextBlockStyle& URichTextBlock::GetCurrentDefaultTextStyle() const
 		return DefaultTextStyle;
 	}
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 URichTextBlockDecorator* URichTextBlock::GetDecoratorByClass(TSubclassOf<URichTextBlockDecorator> DecoratorClass)
 {
@@ -224,6 +244,7 @@ TSharedPtr< IRichTextMarkupWriter > URichTextBlock::CreateMarkupWriter()
 	return FDefaultRichTextMarkupWriter::Create();
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void URichTextBlock::BeginDefaultStyleOverride()
 {
 	if (!bOverrideDefaultStyle)
@@ -233,6 +254,7 @@ void URichTextBlock::BeginDefaultStyleOverride()
 		DefaultTextStyleOverride = DefaultTextStyle;
 	}
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 #if WITH_EDITOR
 
@@ -246,6 +268,7 @@ void URichTextBlock::OnCreationFromPalette()
 	//Decorators.Add(NewObject<URichTextBlockDecorator>(this, NAME_None, RF_Transactional));
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void URichTextBlock::ValidateCompiledDefaults(IWidgetCompilerLog& CompileLog) const
 {
 	Super::ValidateCompiledDefaults(CompileLog);
@@ -258,13 +281,22 @@ void URichTextBlock::ValidateCompiledDefaults(IWidgetCompilerLog& CompileLog) co
 			FText::AsCultureInvariant(TextStyleSet->GetPathName())));
 	}
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 #endif //if WITH_EDITOR
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void URichTextBlock::SetDefaultTextStyle(const FTextBlockStyle& InDefaultTextStyle)
 {
 	BeginDefaultStyleOverride();
 	DefaultTextStyleOverride = InDefaultTextStyle;
+	ApplyUpdatedDefaultTextStyle();
+}
+
+void URichTextBlock::SetDefaultMaterial(UMaterialInterface* InMaterial)
+{
+	BeginDefaultStyleOverride();
+	DefaultTextStyleOverride.Font.FontMaterial = InMaterial;
 	ApplyUpdatedDefaultTextStyle();
 }
 
@@ -276,7 +308,54 @@ void URichTextBlock::ClearAllDefaultStyleOverrides()
 		ApplyUpdatedDefaultTextStyle();
 	}
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
+UMaterialInstanceDynamic* URichTextBlock::GetDefaultDynamicMaterial()
+{
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	TObjectPtr<UObject>& MaterialObject = bOverrideDefaultStyle ? DefaultTextStyleOverride.Font.FontMaterial : DefaultTextStyle.Font.FontMaterial;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+	if (UMaterialInterface* Material = Cast<UMaterialInterface>(MaterialObject.Get()))
+	{
+		UMaterialInstanceDynamic* DynamicMaterial = Cast<UMaterialInstanceDynamic>(Material);
+
+		if (!DynamicMaterial)
+		{
+			BeginDefaultStyleOverride();
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+			DynamicMaterial = UMaterialInstanceDynamic::Create(Material, this);
+			DefaultTextStyleOverride.Font.FontMaterial = DynamicMaterial;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+			ApplyUpdatedDefaultTextStyle();
+		}
+
+		return DynamicMaterial;
+	}
+
+	return nullptr;
+}
+
+void URichTextBlock::SetDecorators(const TArray<TSubclassOf<URichTextBlockDecorator>>& InDecoratorClasses)
+{
+	DecoratorClasses = InDecoratorClasses;
+
+	StyleInstance.Reset();
+	UpdateStyleData();
+
+	if (MyRichTextBlock.IsValid())
+	{
+		TArray<TSharedRef<ITextDecorator>> CreatedDecorators;
+		CreateDecorators(CreatedDecorators);
+
+		MyRichTextBlock->SetDecoratorStyleSet(StyleInstance.Get());
+		MyRichTextBlock->SetDecorators(CreatedDecorators);
+	}
+}
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void URichTextBlock::SetDefaultColorAndOpacity(FSlateColor InColorAndOpacity)
 {
 	BeginDefaultStyleOverride();
@@ -306,19 +385,82 @@ void URichTextBlock::SetDefaultFont(FSlateFontInfo InFontInfo)
 	ApplyUpdatedDefaultTextStyle();
 }
 
-void URichTextBlock::SetDefaultStrikeBrush(FSlateBrush& InStrikeBrush)
+void URichTextBlock::SetDefaultStrikeBrush(const FSlateBrush& InStrikeBrush)
 {
 	BeginDefaultStyleOverride();
 	DefaultTextStyleOverride.StrikeBrush = InStrikeBrush;
 	ApplyUpdatedDefaultTextStyle();
 }
 
-void URichTextBlock::SetJustification(ETextJustify::Type InJustification)
+void URichTextBlock::OnShapedTextOptionsChanged(FShapedTextOptions InShapedTextOptions)
 {
-	Super::SetJustification(InJustification);
+	Super::OnShapedTextOptionsChanged(InShapedTextOptions);
+	if (MyRichTextBlock.IsValid())
+	{
+		InShapedTextOptions.SynchronizeShapedTextProperties(*MyRichTextBlock);
+	}
+}
+
+void URichTextBlock::OnJustificationChanged(ETextJustify::Type InJustification)
+{
+	Super::OnJustificationChanged(InJustification);
 	if (MyRichTextBlock.IsValid())
 	{
 		MyRichTextBlock->SetJustification(InJustification);
+	}
+}
+
+void URichTextBlock::OnWrappingPolicyChanged(ETextWrappingPolicy InWrappingPolicy)
+{
+	Super::OnWrappingPolicyChanged(InWrappingPolicy);
+	if (MyRichTextBlock.IsValid())
+	{
+		MyRichTextBlock->SetWrappingPolicy(InWrappingPolicy);
+	}
+}
+
+void URichTextBlock::OnAutoWrapTextChanged(bool InAutoWrapText)
+{
+	Super::OnAutoWrapTextChanged(InAutoWrapText);
+	if (MyRichTextBlock.IsValid())
+	{
+		MyRichTextBlock->SetAutoWrapText(InAutoWrapText);
+	}
+}
+
+void URichTextBlock::OnWrapTextAtChanged(float InWrapTextAt)
+{
+	Super::OnWrapTextAtChanged(InWrapTextAt);
+	if (MyRichTextBlock.IsValid())
+	{
+		MyRichTextBlock->SetWrapTextAt(InWrapTextAt);
+	}
+}
+
+void URichTextBlock::OnLineHeightPercentageChanged(float InLineHeightPercentage)
+{
+	Super::OnLineHeightPercentageChanged(InLineHeightPercentage);
+	if (MyRichTextBlock.IsValid())
+	{
+		MyRichTextBlock->SetLineHeightPercentage(InLineHeightPercentage);
+	}
+}
+
+void URichTextBlock::OnApplyLineHeightToBottomLineChanged(bool InApplyLineHeightToBottomLine)
+{
+	Super::OnApplyLineHeightToBottomLineChanged(InApplyLineHeightToBottomLine);
+	if (MyRichTextBlock.IsValid())
+	{
+		MyRichTextBlock->SetApplyLineHeightToBottomLine(InApplyLineHeightToBottomLine);
+	}
+}
+
+void URichTextBlock::OnMarginChanged(const FMargin& InMargin)
+{
+	Super::OnMarginChanged(InMargin);
+	if (MyRichTextBlock.IsValid())
+	{
+		MyRichTextBlock->SetMargin(InMargin);
 	}
 }
 
@@ -330,6 +472,7 @@ void URichTextBlock::SetMinDesiredWidth(float InMinDesiredWidth)
 		MyRichTextBlock->SetMinDesiredWidth(InMinDesiredWidth);
 	}
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 void URichTextBlock::SetAutoWrapText(bool InAutoTextWrap)
 {
@@ -340,6 +483,7 @@ void URichTextBlock::SetAutoWrapText(bool InAutoTextWrap)
 	}
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void URichTextBlock::SetTextTransformPolicy(ETextTransformPolicy InTransformPolicy)
 {
 	TextTransformPolicy = InTransformPolicy;
@@ -349,6 +493,36 @@ void URichTextBlock::SetTextTransformPolicy(ETextTransformPolicy InTransformPoli
 	}
 }
 
+void URichTextBlock::SetTextOverflowPolicy(ETextOverflowPolicy InOverflowPolicy)
+{
+	TextOverflowPolicy = InOverflowPolicy;
+
+	if (MyRichTextBlock.IsValid())
+	{
+		MyRichTextBlock->SetOverflowPolicy(TextOverflowPolicy);
+	}
+}
+
+const FTextBlockStyle& URichTextBlock::GetDefaultTextStyleOverride() const
+{
+	return DefaultTextStyleOverride;
+}
+
+float URichTextBlock::GetMinDesiredWidth() const
+{
+	return MinDesiredWidth;
+}
+
+ETextTransformPolicy URichTextBlock::GetTransformPolicy() const
+{
+	return TextTransformPolicy;
+}
+
+ETextOverflowPolicy URichTextBlock::GetOverflowPolicy() const
+{
+	return TextOverflowPolicy;
+}
+
 void URichTextBlock::ApplyUpdatedDefaultTextStyle()
 {
 	if (MyRichTextBlock.IsValid())
@@ -356,7 +530,17 @@ void URichTextBlock::ApplyUpdatedDefaultTextStyle()
 		MyRichTextBlock->SetTextStyle(bOverrideDefaultStyle ? DefaultTextStyleOverride : DefaultTextStyle);
 	}
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+void URichTextBlock::RefreshTextLayout()
+{
+	if (MyRichTextBlock.IsValid())
+	{
+		MyRichTextBlock->Refresh();
+	}
+}
 
 /////////////////////////////////////////////////////
 
 #undef LOCTEXT_NAMESPACE
+

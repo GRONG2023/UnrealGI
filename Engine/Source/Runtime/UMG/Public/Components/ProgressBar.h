@@ -17,53 +17,49 @@ class USlateBrushAsset;
  *
  * * No Children
  */
-UCLASS()
-class UMG_API UProgressBar : public UWidget
+UCLASS(MinimalAPI)
+class UProgressBar : public UWidget
 {
 	GENERATED_UCLASS_BODY()
 	
 public:
-
+	UE_DEPRECATED(5.1, "Direct access to WidgetStyle is deprecated. Please use the getter or setter.")
 	/** The progress bar style */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Style", meta=( DisplayName="Style" ))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, Category="Style", meta=( DisplayName="Style" ))
 	FProgressBarStyle WidgetStyle;
 
-	/** Style used for the progress bar */
-	UPROPERTY()
-	USlateWidgetStyleAsset* Style_DEPRECATED;
-
-	/** The brush to use as the background of the progress bar */
-	UPROPERTY()
-	USlateBrushAsset* BackgroundImage_DEPRECATED;
-	
-	/** The brush to use as the fill image */
-	UPROPERTY()
-	USlateBrushAsset* FillImage_DEPRECATED;
-	
-	/** The brush to use as the marquee image */
-	UPROPERTY()
-	USlateBrushAsset* MarqueeImage_DEPRECATED;
-
+	UE_DEPRECATED(5.1, "Direct access to Percent is deprecated. Please use the getter or setter.")
 	/** Used to determine the fill position of the progress bar ranging 0..1 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Progress, meta=( UIMin = "0", UIMax = "1" ))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, FieldNotify, Getter, Setter, BlueprintSetter="SetPercent", Category="Progress", meta = (UIMin = "0", UIMax = "1"))
 	float Percent;
 
-	/** Defines if this progress bar fills Left to right or right to left */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Progress)
+	UE_DEPRECATED(5.1, "Direct access to BarFillType is deprecated. Please use the getter or setter.")
+	/** Defines the direction in which the progress bar fills */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, Category="Progress")
 	TEnumAsByte<EProgressBarFillType::Type> BarFillType;
+
+	UE_DEPRECATED(5.1, "Direct access to BarFillStyle is deprecated. Please use the getter or setter.")
+	/** Defines the visual style of the progress bar fill - scale or mask */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, Category="Progress")
+	TEnumAsByte<EProgressBarFillStyle::Type> BarFillStyle;
 	
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Progress)
+	UE_DEPRECATED(5.1, "Direct access to bIsMarquee is deprecated. Please use the getter or setter.")
+	/** */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, FieldNotify, Getter="UseMarquee", Setter="SetIsMarquee", BlueprintSetter="SetIsMarquee", Category="Progress")
 	bool bIsMarquee;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Progress)
+	UE_DEPRECATED(5.1, "Direct access to BorderPadding is deprecated. Please use the getter or setter.")
+	/** */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, Category="Progress")
 	FVector2D BorderPadding;
 
 	/** A bindable delegate to allow logic to drive the text of the widget */
 	UPROPERTY()
 	FGetFloat PercentDelegate;
 
+	UE_DEPRECATED(5.1, "Direct access to FillColorAndOpacity is deprecated. Please use the getter or setter.")
 	/** Fill Color and Opacity */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Appearance)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, FieldNotify, Getter, Setter, BlueprintSetter="SetFillColorAndOpacity", Category="Appearance")
 	FLinearColor FillColorAndOpacity;
 
 	/** */
@@ -72,38 +68,65 @@ public:
 
 public:
 	
+	/** */
+	UMG_API const FProgressBarStyle& GetWidgetStyle() const;
+
+	/**/
+	UMG_API void SetWidgetStyle(const FProgressBarStyle& InStyle);
+
+	/** */
+	UMG_API float GetPercent() const;
+
 	/** Sets the current value of the ProgressBar. */
 	UFUNCTION(BlueprintCallable, Category="Progress")
-	void SetPercent(float InPercent);
+	UMG_API void SetPercent(float InPercent);
 
-	/** Sets the fill color of the progress bar. */
-	UFUNCTION(BlueprintCallable, Category="Progress")
-	void SetFillColorAndOpacity(FLinearColor InColor);
+	/** */
+	UMG_API EProgressBarFillType::Type GetBarFillType() const;
+
+	/** */
+	UMG_API void SetBarFillType(EProgressBarFillType::Type InBarFillType);
+
+	/** */
+	UMG_API EProgressBarFillStyle::Type GetBarFillStyle() const;
+
+	/** */
+	UMG_API void SetBarFillStyle(EProgressBarFillStyle::Type InBarFillStyle);
+
+	/** */
+	UMG_API bool UseMarquee() const;
 
 	/** Sets the progress bar to show as a marquee. */
 	UFUNCTION(BlueprintCallable, Category="Progress")
-	void SetIsMarquee(bool InbIsMarquee);
+	UMG_API void SetIsMarquee(bool InbIsMarquee);
 
-	//TODO UMG Add Set BarFillType.
+	/** */
+	UMG_API FVector2D GetBorderPadding() const;
+
+	/** */
+	UMG_API void SetBorderPadding(FVector2D InBorderPadding);
+
+	/** */
+	UMG_API FLinearColor GetFillColorAndOpacity() const;
+
+	/** Sets the fill color of the progress bar. */
+	UFUNCTION(BlueprintCallable, Category="Progress")
+	UMG_API void SetFillColorAndOpacity(FLinearColor InColor);
 
 public:
 	
 	//~ Begin UWidget Interface
-	virtual void SynchronizeProperties() override;
+	UMG_API virtual void SynchronizeProperties() override;
 	//~ End UWidget Interface
 
 	//~ Begin UVisual Interface
-	virtual void ReleaseSlateResources(bool bReleaseChildren) override;
+	UMG_API virtual void ReleaseSlateResources(bool bReleaseChildren) override;
 	//~ End UVisual Interface
-
-	//~ Begin UObject Interface
-	virtual void PostLoad() override;
-	//~ End UObject Interface
 
 #if WITH_EDITOR
 	//~ Begin UWidget Interface
-	virtual const FText GetPaletteCategory() override;
-	virtual void OnCreationFromPalette() override;
+	UMG_API virtual const FText GetPaletteCategory() override;
+	UMG_API virtual void OnCreationFromPalette() override;
 	//~ End UWidget Interface
 #endif
 
@@ -112,7 +135,7 @@ protected:
 	TSharedPtr<SProgressBar> MyProgressBar;
 
 	//~ Begin UWidget Interface
-	virtual TSharedRef<SWidget> RebuildWidget() override;
+	UMG_API virtual TSharedRef<SWidget> RebuildWidget() override;
 	//~ End UWidget Interface
 
 	PROPERTY_BINDING_IMPLEMENTATION(FSlateColor, FillColorAndOpacity);

@@ -6,29 +6,31 @@
 #include "EditorModeManager.h"
 
 class FPreviewScene;
+class UWorld;
 
 //////////////////////////////////////////////////////////////////////////
 // FAssetEditorModeManager
 
-class UNREALED_API FAssetEditorModeManager : public FEditorModeTools, public TSharedFromThis<FAssetEditorModeManager>
+class FAssetEditorModeManager : public FEditorModeTools
 {
 public:
-	FAssetEditorModeManager();
-	virtual ~FAssetEditorModeManager();
+	UNREALED_API FAssetEditorModeManager();
+	UNREALED_API virtual ~FAssetEditorModeManager() override;
 
 	// FEditorModeTools interface
-	virtual class USelection* GetSelectedActors() const override;
-	virtual class USelection* GetSelectedObjects() const override;
-	virtual class USelection* GetSelectedComponents() const override;
-	virtual UWorld* GetWorld() const override;
+	UNREALED_API virtual USelection* GetSelectedActors() const override;
+	UNREALED_API virtual USelection* GetSelectedObjects() const override;
+	UNREALED_API virtual USelection* GetSelectedComponents() const override;
+	UNREALED_API virtual UWorld* GetWorld() const override;
 	// End of FEditorModeTools interface
 
-	void SetPreviewScene(class FPreviewScene* NewPreviewScene);
-	FPreviewScene* GetPreviewScene() const;
+	UNREALED_API virtual void SetPreviewScene(FPreviewScene* NewPreviewScene);
+	UNREALED_API FPreviewScene* GetPreviewScene() const;
 
 protected:
-	class USelection* ActorSet;
-	class USelection* ObjectSet;
-	class USelection* ComponentSet;
-	class FPreviewScene* PreviewScene;
+	USelection* ActorSet = nullptr;
+	USelection* ObjectSet = nullptr;
+	USelection* ComponentSet = nullptr;
+	FPreviewScene* PreviewScene = nullptr;
+	TWeakObjectPtr<UWorld> PreviewSceneWorld = nullptr;
 };

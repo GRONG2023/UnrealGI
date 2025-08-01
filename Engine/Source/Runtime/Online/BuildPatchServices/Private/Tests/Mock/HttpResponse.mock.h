@@ -58,16 +58,35 @@ namespace BuildPatchServices
 			return FString();
 		}
 
-		virtual int32 GetContentLength() const override
+		virtual uint64 GetContentLength() const override
 		{
 			MOCK_FUNC_NOT_IMPLEMENTED("FMockHttpRequest::GetContentLength");
-			return int32();
+			return uint64();
 		}
 
 		virtual const TArray<uint8>& GetContent() const override
 		{
 			MOCK_FUNC_NOT_IMPLEMENTED("FMockHttpRequest::GetContent");
 			static TArray<uint8> None;
+			return None;
+		}
+
+		virtual EHttpRequestStatus::Type GetStatus() const override
+		{
+			MOCK_FUNC_NOT_IMPLEMENTED("FMockHttpRequest::GetStatus");
+			return EHttpRequestStatus::Failed;
+		}
+
+		virtual EHttpFailureReason GetFailureReason() const override
+		{
+			MOCK_FUNC_NOT_IMPLEMENTED("FMockHttpRequest::GetFailureReason");
+			return EHttpFailureReason::Other;
+		}
+
+		virtual const FString& GetEffectiveURL() const override
+		{
+			MOCK_FUNC_NOT_IMPLEMENTED("FMockHttpRequest::GetEffectiveURL");
+			static FString None;
 			return None;
 		}
 	};

@@ -16,13 +16,14 @@
 #define APPLE_PROFILING_ENABLED (UE_BUILD_DEBUG | UE_BUILD_DEVELOPMENT)
 #endif
 
-#ifndef WITH_SIMULATOR
-#define WITH_SIMULATOR 0
+#ifndef WITH_IOS_SIMULATOR
+#define WITH_IOS_SIMULATOR 0
 #endif
 
 #define UE_DEBUG_BREAK_IMPL() PLATFORM_BREAK()
 
 #ifdef __OBJC__
+#if !__has_feature(objc_arc)
 
 class FScopeAutoreleasePool
 {
@@ -45,6 +46,7 @@ private:
 
 #define SCOPED_AUTORELEASE_POOL const FScopeAutoreleasePool PREPROCESSOR_JOIN(Pool,__LINE__);
 
+#endif // !__has_feature(objc_arc)
 #endif // __OBJC__
 
 /**
@@ -60,18 +62,7 @@ struct CORE_API FApplePlatformMisc : public FGenericPlatformMisc
 	static FString GetEnvironmentVariable(const TCHAR* VariableName);
 
 #if !UE_BUILD_SHIPPING
-	static bool IsDebuggerPresent()
-	{
-		// Based on http://developer.apple.com/library/mac/#qa/qa1361/_index.html
-
-		struct kinfo_proc Info;
-		int32 Mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid() };
-		SIZE_T Size = sizeof(Info);
-
-		sysctl( Mib, sizeof( Mib ) / sizeof( *Mib ), &Info, &Size, NULL, 0 );
-
-		return ( Info.kp_proc.p_flag & P_TRACED ) != 0;
-	}
+	static bool IsDebuggerPresent();
 #endif
 
 	FORCEINLINE static void MemoryBarrier()

@@ -9,6 +9,7 @@
 #include "CoreMinimal.h"
 #include "RenderResource.h"
 #include "TickableObjectRenderThread.h"
+#include "RHICommandList.h"
 
 /** A templated pool for resources that can only be freed at a 'safe' point in the frame. */
 template<typename ResourceType, class ResourcePoolPolicy, class ResourceCreationArguments>
@@ -50,21 +51,24 @@ public:
 	 * @param Args the argument object for construction.
 	 * @returns An initialised resource.
 	 */
-	ResourceType CreatePooledResource(ResourceCreationArguments Args)
+	ResourceType CreatePooledResource(FRHICommandListBase& RHICmdList, ResourceCreationArguments Args)
 	{
 		// Find the appropriate bucket based on size
 		const uint32 BucketIndex = Policy.GetPoolBucketIndex(Args);
 		TArray<FPooledResource>& PoolBucket = ResourceBuckets[BucketIndex];
-		if (PoolBucket.Num() > 0)
+
 		{
-			// Reuse the last entry in this size bucket
-			return PoolBucket.Pop().Resource;
+			FScopeLock Lock(&CS);
+
+			if (PoolBucket.Num() > 0)
+			{
+				// Reuse the last entry in this size bucket
+				return PoolBucket.Pop().Resource;
+			}
 		}
-		else
-		{
-			// Nothing usable was found in the free pool, create a new resource
-			return Policy.CreateResource(Args);
-		}
+
+		// Nothing usable was found in the free pool, create a new resource
+		return Policy.CreateResource(RHICmdList, Args);
 	}
 	
 	/** Release a resource back into the pool.
@@ -80,7 +84,9 @@ public:
 		// Add to this frame's array of free resources
 		const int32 SafeFrameIndex = GFrameNumberRenderThread % ResourcePoolPolicy::NumSafeFrames;
 		const uint32 BucketIndex = Policy.GetPoolBucketIndex(NewEntry.CreationArguments);
-		
+
+		FScopeLock Lock(&CS);
+	
 		SafeResourceBuckets[SafeFrameIndex][BucketIndex].Add(NewEntry);
 	}
 	
@@ -91,7 +97,9 @@ public:
 	{
 		uint32 NumToCleanThisFrame = ResourcePoolPolicy::NumToDrainPerFrame;
 		uint32 CullAfterFramesNum = ResourcePoolPolicy::CullAfterFramesNum;
-		
+
+		FScopeLock Lock(&CS);
+
 		if(!bForceDrainAll)
 		{
 			// Index of the bucket that is now old enough to be reused
@@ -160,7 +168,9 @@ private:
 		/** The frame the resource was freed */
 		uint32 FrameFreed;
 	};
-	
+
+	FCriticalSection CS;
+
 	// Pool of free Resources, indexed by bucket for constant size search time.
 	TArray<FPooledResource> ResourceBuckets[ResourcePoolPolicy::NumPoolBuckets];
 	
@@ -197,13 +207,24 @@ public:
 	 * @param Args the argument object for construction.
 	 * @returns An initialised resource or the policy's NullResource if not initialised.
 	 */
-	ResourceType CreatePooledResource(ResourceCreationArguments Args)
+	ResourceType CreatePooledResource(FRHICommandListBase& RHICmdList, ResourceCreationArguments Args)
 	{
-		ensure(IsInRenderingThread());
-
 		if (IsInitialized())
 		{
-			return TResourcePool<ResourceType, ResourcePoolPolicy, ResourceCreationArguments>::CreatePooledResource(Args);
+			return TResourcePool<ResourceType, ResourcePoolPolicy, ResourceCreationArguments>::CreatePooledResource(RHICmdList, Args);
+		}
+		else
+		{
+			return ResourceType();
+		}
+	}
+
+	UE_DEPRECATED(5.4, "CreatePooledResource requires an RHI command list.")
+	ResourceType CreatePooledResource(ResourceCreationArguments Args)
+	{
+		if (IsInitialized())
+		{
+			return TResourcePool<ResourceType, ResourcePoolPolicy, ResourceCreationArguments>::CreatePooledResource(FRHICommandListImmediate::Get(), Args);
 		}
 		else
 		{
@@ -216,8 +237,6 @@ public:
 	 */
 	void ReleasePooledResource(ResourceType Resource)
 	{
-		ensure(IsInRenderingThread());
-
 		if (IsInitialized())
 		{
 			TResourcePool<ResourceType, ResourcePoolPolicy, ResourceCreationArguments>::ReleasePooledResource(Resource);
@@ -243,7 +262,7 @@ public: // From FTickableObjectRenderThread
 	}
 	
 public: // From FRenderResource
-	virtual void InitRHI() override
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override
 	{
 		FTickableObjectRenderThread::Register();
 	}

@@ -13,263 +13,105 @@
 #include "PostProcess/SceneRenderTargets.h"
 #include "SceneRendering.h"
 #include "ScenePrivate.h"
+#include "DecalRenderingCommon.h"
 #include "DecalRenderingShared.h"
-#include "SceneTextureParameters.h"
+#include "RenderCore.h"
+#include "DataDrivenShaderPlatformInfo.h"
+#include "CompositionLighting/PostProcessDeferredDecals.h"
+#include "DBufferTextures.h"
 
-extern FRHIRasterizerState* GetDecalRasterizerState(EDecalRasterizerState DecalRasterizerState);
-extern void RenderMeshDecalsMobile(FRHICommandList& RHICmdList, const FViewInfo& View);
-void RenderDeferredDecalsMobile(FRHICommandList& RHICmdList, const FScene& Scene, const FViewInfo& View);
+void RenderMeshDecalsMobile(FRHICommandList& RHICmdList, const FViewInfo& View, EDecalRenderStage DecalRenderStage, EDecalRenderTargetMode RenderTargetMode);
+extern void RenderDeferredDecalsMobile(FRHICommandList& RHICmdList, const FScene& Scene, const FViewInfo& View, EDecalRenderStage DecalRenderStage, EDecalRenderTargetMode RenderTargetMode);
 
-FRHIBlendState* MobileForward_GetDecalBlendState(EDecalBlendMode DecalBlendMode)
-{
-	switch(DecalBlendMode)
-	{
-	case DBM_Translucent:
-	case DBM_DBuffer_Color:
-	case DBM_DBuffer_ColorNormal:
-	case DBM_DBuffer_ColorRoughness:
-	case DBM_DBuffer_ColorNormalRoughness:
-		return TStaticBlendState<CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha>::GetRHI();
-	case DBM_Stain:
-		// Modulate
-		return TStaticBlendState<CW_RGB, BO_Add, BF_DestColor, BF_InverseSourceAlpha>::GetRHI();
-	case DBM_Emissive:
-	case DBM_DBuffer_Emissive:
-		// Additive
-		return TStaticBlendState<CW_RGB, BO_Add, BF_SourceAlpha, BF_One>::GetRHI();
-	case DBM_AlphaComposite:
-	case DBM_DBuffer_AlphaComposite:
-		// Premultiplied alpha
-		return TStaticBlendState<CW_RGB, BO_Add, BF_One, BF_InverseSourceAlpha>::GetRHI();
-	default:
-		check(0);
-	};
-	return TStaticBlendState<CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha>::GetRHI();
-}
-
-FRHIBlendState* MobileDeferred_GetDecalBlendState(EDecalBlendMode DecalBlendMode, bool bHasNormal)
-{
-	switch (DecalBlendMode)
-	{
-	case DBM_Translucent:
-		if (bHasNormal)
-		{
-			return TStaticBlendState<
-				CW_RGB, BO_Add, BF_SourceAlpha, BF_One, BO_Add, BF_Zero, BF_One,				// Emissive
-				CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One,	// Normal
-				CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One,	// Metallic, Specular, Roughness
-				CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One	// BaseColor
-			>::GetRHI();
-		}
-		else
-		{
-			return TStaticBlendState<
-				CW_RGB, BO_Add, BF_SourceAlpha, BF_One, BO_Add, BF_Zero, BF_One,				// Emissive
-				CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One,						
-				CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One,	// Metallic, Specular, Roughness
-				CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One	// BaseColor
-			>::GetRHI();
-		}
-	case DBM_Stain:
-		if (bHasNormal)
-		{
-			return TStaticBlendState<
-				CW_RGB, BO_Add, BF_SourceAlpha, BF_One, BO_Add, BF_Zero, BF_One,				// Emissive
-				CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One,	// Normal
-				CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One,	// Metallic, Specular, Roughness
-				CW_RGB, BO_Add, BF_DestColor, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One	// BaseColor
-			>::GetRHI();
-		}
-		else
-		{
-			return TStaticBlendState<
-				CW_RGB, BO_Add, BF_SourceAlpha, BF_One, BO_Add, BF_Zero, BF_One,				// Emissive
-				CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One,						
-				CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One,	// Metallic, Specular, Roughness
-				CW_RGB, BO_Add, BF_DestColor, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One	// BaseColor
-			>::GetRHI();
-		}
-	case DBM_Emissive:
-	case DBM_DBuffer_Emissive:
-		return TStaticBlendState<
-			CW_RGB, BO_Add, BF_SourceAlpha, BF_One, BO_Add, BF_Zero, BF_One,	// Emissive
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One,				
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One,
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One
-		>::GetRHI();
-	
-	case DBM_DBuffer_EmissiveAlphaComposite:
-		return TStaticBlendState<
-			CW_RGB, BO_Add, BF_One,	 BF_One, BO_Add, BF_Zero, BF_One,	// Emissive
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One,				
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One,
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One
-		>::GetRHI();
-	
-	case DBM_AlphaComposite:
-	case DBM_DBuffer_AlphaComposite:
-		return TStaticBlendState<
-			CW_RGB, BO_Add, BF_One,  BF_One, BO_Add, BF_Zero, BF_One,	// Emissive
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One,				
-			CW_RGB, BO_Add, BF_One, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One,	// Metallic, Specular, Roughness
-			CW_RGB, BO_Add, BF_One, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One	// BaseColor
-		>::GetRHI();
-
-	case DBM_DBuffer_ColorNormalRoughness:
-		return TStaticBlendState<
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One,
-			CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One,	// Normal
-			CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One,	// Metallic, Specular, Roughness
-			CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One  // BaseColor
-		>::GetRHI();
-	
-	case DBM_DBuffer_ColorRoughness:
-		return TStaticBlendState<
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One,
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One,						
-			CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One,	// Metallic, Specular, Roughness
-			CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One  // BaseColor
-		>::GetRHI();
-
-	case DBM_DBuffer_ColorNormal:
-		return TStaticBlendState<
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One,
-			CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One,	// Normal
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One,						
-			CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One  // BaseColor
-		>::GetRHI();
-	
-	case DBM_DBuffer_NormalRoughness:
-		return TStaticBlendState<
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One,
-			CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One,	// Normal
-			CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One,	// Metallic, Specular, Roughness
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One
-		>::GetRHI();
-
-	case DBM_DBuffer_Color:
-		return TStaticBlendState<
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One,
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One,
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One,						
-			CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One  // BaseColor
-		>::GetRHI();
-
-	case DBM_DBuffer_Roughness:
-		return TStaticBlendState<
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One,
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One,
-			CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One,	// Metallic, Specular, Roughness
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One
-		>::GetRHI();
-	
-	case DBM_Normal:
-	case DBM_DBuffer_Normal:
-		return TStaticBlendState<
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One,
-			CW_RGB, BO_Add, BF_SourceAlpha, BF_InverseSourceAlpha, BO_Add, BF_Zero, BF_One,	// Normal
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One,						
-			CW_RGB, BO_Add, BF_Zero, BF_One, BO_Add, BF_Zero, BF_One
-		>::GetRHI();
-
-	case DBM_Volumetric_DistanceFunction:
-		return TStaticBlendState<>::GetRHI();
-	
-	case DBM_AmbientOcclusion:
-		return TStaticBlendState<CW_RED, BO_Add, BF_DestColor, BF_Zero>::GetRHI();
-	
-	default:
-		check(0);
-	};
-
-	return TStaticBlendState<>::GetRHI(); 
-}
-
-BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FMobileDecalPassUniformParameters, )
-	SHADER_PARAMETER_STRUCT(FMobileSceneTextureUniformParameters, SceneTextures)
-	SHADER_PARAMETER_SRV(Buffer<float4>, EyeAdaptationBuffer)
-END_GLOBAL_SHADER_PARAMETER_STRUCT()
-
-IMPLEMENT_STATIC_UNIFORM_BUFFER_STRUCT(FMobileDecalPassUniformParameters, "MobileDecalPass", SceneTextures);
-
-BEGIN_SHADER_PARAMETER_STRUCT(FMobileDecalPassParameters, )
-	SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FMobileDecalPassUniformParameters, Pass)
-	RENDER_TARGET_BINDING_SLOTS()
-END_SHADER_PARAMETER_STRUCT()
-
-TUniformBufferRef<FMobileDecalPassUniformParameters> CreateMobileDecalPassUniformBuffer(FRHICommandList& RHICmdList, const FViewInfo& View)
-{
-	FMobileDecalPassUniformParameters Parameters;
-	FSceneRenderTargets& SceneContext = FSceneRenderTargets::Get(RHICmdList);
-	SetupMobileSceneTextureUniformParameters(SceneContext, EMobileSceneTextureSetupMode::All, Parameters.SceneTextures);
-	Parameters.EyeAdaptationBuffer = GetEyeAdaptationBuffer(View);
-	return TUniformBufferRef<FMobileDecalPassUniformParameters>::CreateUniformBufferImmediate(Parameters, UniformBuffer_SingleFrame);
-}
-
-void FMobileSceneRenderer::RenderDecals(FRHICommandListImmediate& RHICmdList)
+static bool DoesPlatformSupportDecals(EShaderPlatform ShaderPlatform)
 {
 	if (!IsMobileHDR())
+	{
+		// Vulkan uses sub-pass to fetch SceneDepth
+		if (IsVulkanPlatform(ShaderPlatform) ||
+			IsSimulatedPlatform(ShaderPlatform) ||
+			// Some Androids support SceneDepth fetch
+			(IsAndroidOpenGLESPlatform(ShaderPlatform) && GSupportsShaderDepthStencilFetch))
+		{
+			return true;
+		}
+
+		// Metal needs DepthAux to fetch depth, and its not availle in LDR mode
+		return false;
+	}
+
+	// HDR always supports decals
+	return true;
+}
+
+void FMobileSceneRenderer::RenderDecals(FRHICommandList& RHICmdList, const FViewInfo& View, const FInstanceCullingDrawParams* InstanceCullingDrawParams)
+{
+	if (!DoesPlatformSupportDecals(View.GetShaderPlatform()) || !ViewFamily.EngineShowFlags.Decals || View.bIsPlanarReflection)
 	{
 		return;
 	}
 
+	CSV_SCOPED_TIMING_STAT_EXCLUSIVE(RenderDecals);
 	SCOPE_CYCLE_COUNTER(STAT_DecalsDrawTime);
+
+	const bool bIsMobileDeferred = IsMobileDeferredShadingEnabled(View.GetShaderPlatform());
+	const EDecalRenderStage DecalRenderStage = bIsMobileDeferred ? EDecalRenderStage::MobileBeforeLighting : bRequiresDBufferDecals ? EDecalRenderStage::Emissive : EDecalRenderStage::Mobile;
+	const EDecalRenderTargetMode RenderTargetMode = bIsMobileDeferred ? EDecalRenderTargetMode::SceneColorAndGBuffer : EDecalRenderTargetMode::SceneColor;
 
 	// Deferred decals
 	if (Scene->Decals.Num() > 0)
 	{
-		for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
-		{
-			const FViewInfo& View = Views[ViewIndex];
-
-			FUniformBufferRHIRef PassUniformBuffer = CreateMobileDecalPassUniformBuffer(RHICmdList, View);
-			FUniformBufferStaticBindings GlobalUniformBuffers(PassUniformBuffer);
-			SCOPED_UNIFORM_BUFFER_GLOBAL_BINDINGS(RHICmdList, GlobalUniformBuffers);
-
-			RenderDeferredDecalsMobile(RHICmdList, *Scene, View);
-		}
+		SCOPED_DRAW_EVENT(RHICmdList, Decals);
+		RenderDeferredDecalsMobile(RHICmdList, *Scene, View, DecalRenderStage, RenderTargetMode);
 	}
 
 	// Mesh decals
-	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
+	if (View.MeshDecalBatches.Num() > 0)
 	{
-		const FViewInfo& View = Views[ViewIndex];
-		if (View.MeshDecalBatches.Num() > 0)
-		{
-			FUniformBufferRHIRef PassUniformBuffer = CreateMobileDecalPassUniformBuffer(RHICmdList, View);
-			FUniformBufferStaticBindings GlobalUniformBuffers(PassUniformBuffer);
-			SCOPED_UNIFORM_BUFFER_GLOBAL_BINDINGS(RHICmdList, GlobalUniformBuffers);
+		SCOPED_DRAW_EVENT(RHICmdList, MeshDecals);
+		RenderMeshDecalsMobile(RHICmdList, View, DecalRenderStage, RenderTargetMode);
 
-			RenderMeshDecalsMobile(RHICmdList, View);
+		// MeshDecals use DrawDynamicMeshPass which may change BatchedPrimitive binding, so we need to restore it
+		FUniformBufferStaticSlot BatchedPrimitiveSlot = FInstanceCullingContext::GetUniformBufferViewStaticSlot(View.GetShaderPlatform());
+		if (IsUniformBufferStaticSlotValid(BatchedPrimitiveSlot) && InstanceCullingDrawParams->BatchedPrimitive)
+		{
+			FRHIUniformBuffer* BatchedPrimitiveBufferRHI = InstanceCullingDrawParams->BatchedPrimitive.GetUniformBuffer()->GetRHI();
+			check(BatchedPrimitiveBufferRHI);
+			RHICmdList.SetStaticUniformBuffer(BatchedPrimitiveSlot, BatchedPrimitiveBufferRHI);
 		}
 	}
 }
 
-void RenderDeferredDecalsMobile(FRHICommandList& RHICmdList, const FScene& Scene, const FViewInfo& View)
+void RenderDeferredDecalsMobile(FRHICommandList& RHICmdList, const FScene& Scene, const FViewInfo& View, EDecalRenderStage DecalRenderStage, EDecalRenderTargetMode RenderTargetMode)
 {
-	const bool bDeferredShading = IsMobileDeferredShadingEnabled(View.GetShaderPlatform());
-
-	FGraphicsPipelineStateInitializer GraphicsPSOInit;
-	RHICmdList.ApplyCachedRenderTargets(GraphicsPSOInit);
-
-	// Build a list of decals that need to be rendered for this view
+	int32 SortedDecalCount = 0;
 	FTransientDecalRenderDataList SortedDecals;
-	FDecalRendering::BuildVisibleDecalList(Scene, View, DRS_Mobile, &SortedDecals);
-	if (SortedDecals.Num())
+
+	if (!Scene.Decals.IsEmpty())
 	{
-		SCOPED_DRAW_EVENT(RHICmdList, DeferredDecals);
-		INC_DWORD_STAT_BY(STAT_Decals, SortedDecals.Num());
+		FTransientDecalRenderDataList VisibleDecals = DecalRendering::BuildVisibleDecalList(Scene.Decals, View);
+
+		// Build a list of decals that need to be rendered for this view
+		DecalRendering::BuildRelevantDecalList(VisibleDecals, DecalRenderStage, &SortedDecals);
+		SortedDecalCount = SortedDecals.Num();
+		INC_DWORD_STAT_BY(STAT_Decals, SortedDecalCount);
+	}
+
+	if (SortedDecalCount > 0)
+	{
+		FGraphicsPipelineStateInitializer GraphicsPSOInit;
+		RHICmdList.ApplyCachedRenderTargets(GraphicsPSOInit);
 
 		RHICmdList.SetViewport(View.ViewRect.Min.X, View.ViewRect.Min.Y, 0, View.ViewRect.Max.X, View.ViewRect.Max.Y, 1);
 		RHICmdList.SetStreamSource(0, GetUnitCubeVertexBuffer(), 0);
 
-		for (int32 DecalIndex = 0, DecalCount = SortedDecals.Num(); DecalIndex < DecalCount; DecalIndex++)
+		for (int32 DecalIndex = 0; DecalIndex < SortedDecalCount; DecalIndex++)
 		{
 			const FTransientDecalRenderData& DecalData = SortedDecals[DecalIndex];
-			const FDeferredDecalProxy& DecalProxy = *DecalData.DecalProxy;
+			const FDeferredDecalProxy& DecalProxy = *DecalData.Proxy;
 			const FMatrix ComponentToWorldMatrix = DecalProxy.ComponentTrans.ToMatrixWithScale();
-			const FMatrix FrustumComponentToClip = FDecalRendering::ComputeComponentToClipMatrix(View, ComponentToWorldMatrix);
-						
+			const FMatrix FrustumComponentToClip = DecalRendering::ComputeComponentToClipMatrix(View, ComponentToWorldMatrix);
+
 			const float ConservativeRadius = DecalData.ConservativeRadius;
 			const bool bInsideDecal = ((FVector)View.ViewMatrices.GetViewOrigin() - ComponentToWorldMatrix.GetOrigin()).SizeSquared() < FMath::Square(ConservativeRadius * 1.05f + View.NearClippingDistance * 2.0f);
 			bool bReverseHanded = false;
@@ -278,8 +120,8 @@ void RenderDeferredDecalsMobile(FRHICommandList& RHICmdList, const FScene& Scene
 				const auto& Scale3d = DecalProxy.ComponentTrans.GetScale3D();
 				bReverseHanded = Scale3d[0] * Scale3d[1] * Scale3d[2] < 0.f;
 			}
-			EDecalRasterizerState DecalRasterizerState = FDecalRenderingCommon::ComputeDecalRasterizerState(bInsideDecal, bReverseHanded, View.bReverseCulling);
-			GraphicsPSOInit.RasterizerState = GetDecalRasterizerState(DecalRasterizerState);
+			EDecalRasterizerState DecalRasterizerState = DecalRendering::GetDecalRasterizerState(bInsideDecal, bReverseHanded, View.bReverseCulling);
+			GraphicsPSOInit.RasterizerState = DecalRendering::GetDecalRasterizerState(DecalRasterizerState);
 
 			if (bInsideDecal)
 			{
@@ -297,20 +139,36 @@ void RenderDeferredDecalsMobile(FRHICommandList& RHICmdList, const FScene& Scene
 					false, CF_Always, SO_Keep, SO_Keep, SO_Keep,
 					GET_STENCIL_BIT_MASK(RECEIVE_DECAL, 1), 0x00>::GetRHI();
 			}
-			
-			if (bDeferredShading)
-			{
-				GraphicsPSOInit.BlendState = MobileDeferred_GetDecalBlendState(DecalData.FinalDecalBlendMode, DecalData.bHasNormal);
-			}
-			else
-			{
-				GraphicsPSOInit.BlendState = MobileForward_GetDecalBlendState(DecalData.FinalDecalBlendMode);
-			}
+
+			GraphicsPSOInit.BlendState = DecalRendering::GetDecalBlendState(DecalData.BlendDesc, DecalRenderStage, RenderTargetMode);
 
 			// Set shader params
-			FDecalRendering::SetShader(RHICmdList, GraphicsPSOInit, View, DecalData, DRS_Mobile, FrustumComponentToClip);
-			
+			DecalRendering::SetShader(RHICmdList, GraphicsPSOInit, 0, View, DecalData, DecalRenderStage, FrustumComponentToClip);
+
 			RHICmdList.DrawIndexedPrimitive(GetUnitCubeIndexBuffer(), 0, 0, 8, 0, UE_ARRAY_COUNT(GCubeIndices) / 3, 1);
 		}
+	}
+}
+
+void FMobileSceneRenderer::RenderDBuffer(FRDGBuilder& GraphBuilder, FSceneTextures& SceneTextures, FDBufferTextures& DBufferTextures, FInstanceCullingManager& InstanceCullingManager)
+{
+	RDG_EVENT_SCOPE(GraphBuilder, "RenderDBuffer");
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_RenderDBuffer);
+
+	const EShaderPlatform Platform = GetViewFamilyInfo(Views).GetShaderPlatform();
+
+	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
+	{
+		FViewInfo& View = Views[ViewIndex];
+
+		if (!View.ShouldRenderView())
+		{
+			continue;
+		}
+
+		FTransientDecalRenderDataList VisibleDecals = DecalRendering::BuildVisibleDecalList(Scene->Decals, View);
+
+		FDeferredDecalPassTextures DecalPassTextures = GetDeferredDecalPassTextures(GraphBuilder, View, SceneTextures, &DBufferTextures);
+		AddDeferredDecalPass(GraphBuilder, View, VisibleDecals, DecalPassTextures, InstanceCullingManager, EDecalRenderStage::BeforeBasePass);
 	}
 }

@@ -4,6 +4,8 @@
 
 #include "Templates/UniquePtr.h"
 
+class UBlueprint;
+
 struct FBlueprintDebugger
 {
 	// Initializes the global state of the debugger (commands, tab spawners, etc):
@@ -11,6 +13,9 @@ struct FBlueprintDebugger
 
 	// Destructor declaration purely so that we can pimpl:
 	~FBlueprintDebugger();
+
+	/** Sets the current debugged blueprint in the debugger */
+	void SetDebuggedBlueprint(UBlueprint* InBlueprint);
 
 private:
 	TUniquePtr< struct FBlueprintDebuggerImpl > Impl;

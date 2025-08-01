@@ -187,10 +187,9 @@ void FEnumEditorUtils::SetEnumeratorBitflagsTypeState(UUserDefinedEnum* Enum, bo
 	}
 }
 
-/** Reorder enumerators in enum. Swap an enumerator with given name, with previous or next (based on bDirectionUp parameter) */
-void FEnumEditorUtils::MoveEnumeratorInUserDefinedEnum(UUserDefinedEnum* Enum, int32 EnumeratorIndex, bool bDirectionUp)
+void FEnumEditorUtils::MoveEnumeratorInUserDefinedEnum(UUserDefinedEnum* Enum, int32 InitialEnumeratorIndex, int32 TargetIndex)
 {
-	if (!(Enum && (Enum->GetNameByIndex(EnumeratorIndex) != NAME_None)))
+	if (!Enum || Enum->GetNameByIndex(InitialEnumeratorIndex) == NAME_None || TargetIndex < 0 || TargetIndex >= Enum->NumEnums())
 	{
 		return;
 	}
@@ -203,17 +202,9 @@ void FEnumEditorUtils::MoveEnumeratorInUserDefinedEnum(UUserDefinedEnum* Enum, i
 	CopyEnumeratorsWithoutMax(Enum, OldNames);
 	Names = OldNames;
 
-	const bool bIsLast = ((Names.Num() - 1) == EnumeratorIndex);
-	const bool bIsFirst = (0 == EnumeratorIndex);
-
-	if (bDirectionUp && !bIsFirst)
-	{
-		Names.Swap(EnumeratorIndex, EnumeratorIndex - 1);
-	}
-	else if (!bDirectionUp && !bIsLast)
-	{
-		Names.Swap(EnumeratorIndex, EnumeratorIndex + 1);
-	}
+	TPair<FName, int64> EnumeratorToMove = Names[InitialEnumeratorIndex];
+	Names.RemoveAt(InitialEnumeratorIndex);
+	Names.Insert(EnumeratorToMove, TargetIndex);
 
 	// Clean up enum values.
 	for (int32 i = 0; i < Names.Num(); ++i)
@@ -363,9 +354,9 @@ void FEnumEditorUtils::BroadcastChanges(const UUserDefinedEnum* Enum, const TArr
 	{
 		static bool IsValid(UK2Node* Node)
 		{
-			return Node
+			return ::IsValid(Node)
 				&& (NULL != Cast<UEdGraph>(Node->GetOuter()))
-				&& !Node->HasAnyFlags(RF_Transient) && !Node->IsPendingKill();
+				&& !Node->HasAnyFlags(RF_Transient);
 		}
 	};
 
@@ -490,7 +481,7 @@ int64 FEnumEditorUtils::ResolveEnumerator(const UEnum* Enum, FArchive& Ar, int64
 			if (OldName.Value == EnumeratorValue)
 			{
 				const FName EnumeratorName = OldName.Key;
-				const int32 NewEnumValue = Enum->GetValueByName(EnumeratorName);
+				const int64 NewEnumValue = Enum->GetValueByName(EnumeratorName);
 				if(INDEX_NONE != NewEnumValue)
 				{
 					return NewEnumValue;

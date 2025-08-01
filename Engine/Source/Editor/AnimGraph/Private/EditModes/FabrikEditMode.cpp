@@ -1,9 +1,20 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "EditModes/FabrikEditMode.h"
+
+#include "AnimGraphNode_Base.h"
 #include "AnimGraphNode_Fabrik.h"
-#include "IPersonaPreviewScene.h"
+#include "Animation/AnimTypes.h"
 #include "Animation/DebugSkelMeshComponent.h"
+#include "BoneControllers/AnimNode_Fabrik.h"
+#include "Containers/EnumAsByte.h"
+#include "IPersonaPreviewScene.h"
+#include "Math/Transform.h"
+#include "Math/Vector.h"
+#include "Templates/Casts.h"
+
+class USkeletalMeshComponent;
+struct FBoneSocketTarget;
 
 void FFabrikEditMode::EnterMode(class UAnimGraphNode_Base* InEditorNode, struct FAnimNode_Base* InRuntimeNode)
 {
@@ -32,10 +43,15 @@ FVector FFabrikEditMode::GetWidgetLocation() const
 	return WidgetLoc;
 }
 
-FWidget::EWidgetMode FFabrikEditMode::GetWidgetMode() const
+UE::Widget::EWidgetMode FFabrikEditMode::GetWidgetMode() const
 {
 	// allow translation all the time for effectot target
-	return FWidget::WM_Translate;
+	return UE::Widget::WM_Translate;
+}
+
+bool FFabrikEditMode::UsesTransformWidget(UE::Widget::EWidgetMode InWidgetMode) const
+{
+	return InWidgetMode == UE::Widget::WM_Translate;
 }
 
 void FFabrikEditMode::DoTranslation(FVector& InTranslation)

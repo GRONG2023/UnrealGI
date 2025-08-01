@@ -2,25 +2,36 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Misc/Attribute.h"
-#include "Layout/Visibility.h"
-#include "Input/Reply.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/SCompoundWidget.h"
-#include "SSearchableComboBox.h"
+#include "AdvancedPreviewScene.h"
 #include "Animation/Skeleton.h"
-#include "PreviewScene.h"
+#include "Containers/Array.h"
+#include "Delegates/IDelegateInstance.h"
+#include "HAL/Platform.h"
 #include "IDetailCustomization.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Layout/Visibility.h"
+#include "Misc/Attribute.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
 
 class FEditorViewportClient;
-class FSceneViewport;
+class FString;
 class IDetailCategoryBuilder;
+class IDetailChildrenBuilder;
 class IDetailLayoutBuilder;
 class IPropertyHandle;
+class STextBlock;
 class SViewport;
+class SWidget;
 class UAnimSequence;
+class USceneComponent;
+struct FGeometry;
 
 class FAnimSequenceDetails : public IDetailCustomization
 {
@@ -56,7 +67,7 @@ private:
 	TSharedPtr<IPropertyHandle> RetargetSourceAssetHandle;
 
 	TSharedPtr<class SSearchableComboBox> RetargetSourceComboBox;
-	TArray< TSharedPtr< FString > >						RetargetSourceComboList;
+	TArray< TSharedPtr< FString > > RetargetSourceComboList;
 
 	TSharedRef<SWidget> MakeRetargetSourceComboWidget( TSharedPtr<FString> InItem );
 	void OnRetargetSourceChanged( TSharedPtr<FString> NewSelection, ESelectInfo::Type SelectInfo  );
@@ -71,6 +82,11 @@ private:
 	FDelegateHandle OnDelegateRetargetSourceChangedDelegateHandle;
 	void RegisterRetargetSourceChanged();
 	void DelegateRetargetSourceChanged();
+
+	// *** Animation Track Names ***
+	TSharedPtr<IPropertyHandle> AnimationTrackNamesHandle;
+	TArray<FName> AnimationTrackNamesList;
+	void GenerateAnimationTrackNameArrayElementWidget(TSharedRef<IPropertyHandle> PropertyHandle, int32 ArrayIndex, IDetailChildrenBuilder& ChildrenBuilder, IDetailLayoutBuilder* DetailLayout);
 
 	// button handler for Apply Compression
 	// cache all anim sequences that are selected
@@ -122,9 +138,9 @@ private:
 
 	/** Skeleton */
 	USkeleton* TargetSkeleton;
-	UAnimSequence* AnimRef;
+	UAnimSequence* PreviewAnimationSequence;
 
-	FPreviewScene PreviewScene;
+	FAdvancedPreviewScene PreviewScene;
 	class FFXSystemInterface* FXSystem;
 
 	TSharedPtr<STextBlock> Description;

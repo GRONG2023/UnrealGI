@@ -3,18 +3,21 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.IO;
 using System.Diagnostics;
-using System.Xml;
-using System.Text.RegularExpressions;
+using System.Diagnostics.CodeAnalysis;
+using System.IO;
 using System.Linq;
-using System.Reflection;
-using Microsoft.Win32;
-using System.Text;
-using Tools.DotNETCommon;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using System.Threading.Tasks;
+using System.Xml;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
+using Microsoft.Win32;
+using UnrealBuildBase;
+using UnrealBuildTool.Artifacts;
 
 namespace UnrealBuildTool
 {
@@ -39,7 +42,7 @@ namespace UnrealBuildTool
 		bool bStopXGECompilationAfterErrors = false;
 
 		/// <summary>
-		/// When set to false, XGE will not be When enabled, XGE will stop compiling targets after a compile error occurs.  Recommended, as it saves computing resources for others.
+		/// When set to false, XGE will not be enabled when running connected to the coordinator over VPN. Configure VPN-assigned subnets via the VpnSubnets parameter.
 		/// </summary>
 		[XmlConfigFile(Category = "XGE")]
 		static bool bAllowOverVpn = true;
@@ -48,32 +51,67 @@ namespace UnrealBuildTool
 		/// List of subnets containing IP addresses assigned by VPN
 		/// </summary>
 		[XmlConfigFile(Category = "XGE")]
-		static string[] VpnSubnets = null;
+		static string[]? VpnSubnets = null;
+
+		/// <summary>
+		/// Whether to allow remote linking
+		/// </summary>
+		[XmlConfigFile(Category = "XGE")]
+		static bool bAllowRemoteLinking = false;
+
+		/// <summary>
+		/// Whether to enable the VCCompiler=true setting. This requires an additional license for VC tools. 
+		/// </summary>
+		[XmlConfigFile(Category = "XGE")]
+		static bool bUseVCCompilerMode = false;
+
+		/// <summary>
+		/// Minimum number of actions to use XGE execution.
+		/// </summary>
+		[XmlConfigFile(Category = "XGE")]
+		public static int MinActions = 2;
+
+		/// <summary>
+		/// Check for a concurrent XGE build and treat the XGE executor as unavailable if it's in use.
+		/// This will allow UBT to fall back to another executor such as the parallel executor. 
+		/// </summary>
+		[XmlConfigFile(Category = "XGE")]
+		static bool bUnavailableIfInUse = false;
 
 		private const string ProgressMarkupPrefix = "@action";
 
-		public XGE()
+		private static List<string> CompileAutoRecover = new List<string> {
+			"C1060", // C1060: compiler is out of heap space
+			"C1076", // C1076: compiler limit: internal heap limit reached
+			"C2855", // C2855: command-line option 'X' inconsistent with precompiled header
+			"C3435", // C3435: character set 'X' is not supported
+			"C3859", // C3859: Failed to create virtual memory for PCH
+		};
+
+		private static List<string> LinkAutoRecover = new List<string> {
+			"Unexpected PDB error; OK (0)"
+		};
+
+		public XGE(ILogger Logger)
+			: base(Logger)
 		{
 			XmlConfig.ApplyTo(this);
 		}
 
-		public override string Name
-		{
-			get { return "XGE"; }
-		}
+		public override string Name => "XGE";
 
-		public static bool TryGetXgConsoleExecutable(out string OutXgConsoleExe)
+		public static bool TryGetXgConsoleExecutable([NotNullWhen(true)] out string? OutXgConsoleExe)
 		{
 			// Try to get the path from the registry
-			if(BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Win64)
+			if (OperatingSystem.IsWindows())
 			{
-				string XgConsoleExe;
-				if(TryGetXgConsoleExecutableFromRegistry(RegistryView.Registry32, out XgConsoleExe))
+				string? XgConsoleExe;
+				if (TryGetXgConsoleExecutableFromRegistry(RegistryView.Registry32, out XgConsoleExe))
 				{
 					OutXgConsoleExe = XgConsoleExe;
 					return true;
 				}
-				if(TryGetXgConsoleExecutableFromRegistry(RegistryView.Registry64, out XgConsoleExe))
+				if (TryGetXgConsoleExecutableFromRegistry(RegistryView.Registry64, out XgConsoleExe))
 				{
 					OutXgConsoleExe = XgConsoleExe;
 					return true;
@@ -92,21 +130,24 @@ namespace UnrealBuildTool
 			}
 
 			// Search the path for it
-			string PathVariable = Environment.GetEnvironmentVariable("PATH");
-			foreach (string SearchPath in PathVariable.Split(Path.PathSeparator))
+			string? PathVariable = Environment.GetEnvironmentVariable("PATH");
+			if (PathVariable != null)
 			{
-				try
+				foreach (string SearchPath in PathVariable.Split(Path.PathSeparator))
 				{
-					string PotentialPath = Path.Combine(SearchPath, XgConsole);
-					if(File.Exists(PotentialPath))
+					try
 					{
-						OutXgConsoleExe = PotentialPath;
-						return true;
+						string PotentialPath = Path.Combine(SearchPath, XgConsole);
+						if (File.Exists(PotentialPath))
+						{
+							OutXgConsoleExe = PotentialPath;
+							return true;
+						}
 					}
-				}
-				catch(ArgumentException)
-				{
-					// PATH variable may contain illegal characters; just ignore them.
+					catch (ArgumentException)
+					{
+						// PATH variable may contain illegal characters; just ignore them.
+					}
 				}
 			}
 
@@ -114,21 +155,22 @@ namespace UnrealBuildTool
 			return false;
 		}
 
-		private static bool TryGetXgConsoleExecutableFromRegistry(RegistryView View, out string OutXgConsoleExe)
+		[SupportedOSPlatform("windows")]
+		private static bool TryGetXgConsoleExecutableFromRegistry(RegistryView View, [NotNullWhen(true)] out string? OutXgConsoleExe)
 		{
 			try
 			{
-				using(RegistryKey BaseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, View))
+				using (RegistryKey BaseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, View))
 				{
-					using (RegistryKey Key = BaseKey.OpenSubKey("SOFTWARE\\Xoreax\\IncrediBuild\\Builder", false))
+					using (RegistryKey? Key = BaseKey.OpenSubKey("SOFTWARE\\Xoreax\\IncrediBuild\\Builder", false))
 					{
-						if(Key != null)
+						if (Key != null)
 						{
-							string Folder = Key.GetValue("Folder", null) as string;
-							if(!String.IsNullOrEmpty(Folder))
+							string? Folder = Key.GetValue("Folder", null) as string;
+							if (!String.IsNullOrEmpty(Folder))
 							{
 								string FileName = Path.Combine(Folder, "xgConsole.exe");
-								if(File.Exists(FileName))
+								if (File.Exists(FileName))
 								{
 									OutXgConsoleExe = FileName;
 									return true;
@@ -138,7 +180,7 @@ namespace UnrealBuildTool
 					}
 				}
 			}
-			catch(Exception Ex)
+			catch (Exception Ex)
 			{
 				Log.WriteException(Ex, null);
 			}
@@ -147,15 +189,16 @@ namespace UnrealBuildTool
 			return false;
 		}
 
-		static bool TryReadRegistryValue(RegistryHive Hive, RegistryView View, string KeyName, string ValueName, out string OutCoordinator)
+		[SupportedOSPlatform("windows")]
+		static bool TryReadRegistryValue(RegistryHive Hive, RegistryView View, string KeyName, string ValueName, [NotNullWhen(true)] out string? OutCoordinator)
 		{
 			using (RegistryKey BaseKey = RegistryKey.OpenBaseKey(Hive, View))
 			{
-				using (RegistryKey SubKey = BaseKey.OpenSubKey(KeyName))
+				using (RegistryKey? SubKey = BaseKey.OpenSubKey(KeyName))
 				{
 					if (SubKey != null)
 					{
-						string Coordinator = SubKey.GetValue(ValueName) as string;
+						string? Coordinator = SubKey.GetValue(ValueName) as string;
 						if (!String.IsNullOrEmpty(Coordinator))
 						{
 							OutCoordinator = Coordinator;
@@ -169,9 +212,9 @@ namespace UnrealBuildTool
 			return false;
 		}
 
-		static bool TryGetCoordinatorHost(out string OutCoordinator)
+		static bool TryGetCoordinatorHost([NotNullWhen(true)] out string? OutCoordinator)
 		{
-			if (BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Win64)
+			if (OperatingSystem.IsWindows())
 			{
 				const string KeyName = @"SOFTWARE\Xoreax\IncrediBuild\BuildService";
 				const string ValueName = "CoordHost";
@@ -191,7 +234,7 @@ namespace UnrealBuildTool
 		[DllImport("iphlpapi")]
 		static extern int GetBestInterface(uint dwDestAddr, ref int pdwBestIfIndex);
 
-		static NetworkInterface GetInterfaceForHost(string Host)
+		static NetworkInterface? GetInterfaceForHost(string Host)
 		{
 			if (BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Win64)
 			{
@@ -215,8 +258,13 @@ namespace UnrealBuildTool
 			return null;
 		}
 
-		public static bool IsHostOnVpn(string HostName)
+		public static bool IsHostOnVpn(string HostName, ILogger Logger)
 		{
+			if (!OperatingSystem.IsWindows())
+			{
+				return false;
+			}
+
 			// If there aren't any defined subnets, just early out
 			if (VpnSubnets == null || VpnSubnets.Length == 0)
 			{
@@ -233,7 +281,7 @@ namespace UnrealBuildTool
 			// Check if any network adapters have an IP within one of these subnets
 			try
 			{
-				NetworkInterface Interface = GetInterfaceForHost(HostName);
+				NetworkInterface? Interface = GetInterfaceForHost(HostName);
 				if (Interface != null && Interface.OperationalStatus == OperationalStatus.Up)
 				{
 					IPInterfaceProperties Properties = Interface.GetIPProperties();
@@ -244,7 +292,10 @@ namespace UnrealBuildTool
 						{
 							if (Subnet.Contains(AddressBytes))
 							{
-								Log.TraceInformationOnce("XGE coordinator {0} will be not be used over VPN (adapter '{1}' with IP {2} is in subnet {3}). Set <XGE><bAllowOverVpn>true</bAllowOverVpn></XGE> in BuildConfiguration.xml to override.", HostName, Interface.Description, UnicastAddressInfo.Address, Subnet);
+								if (!bAllowOverVpn)
+								{
+									Log.TraceInformationOnce("XGE coordinator {0} will be not be used over VPN (adapter '{1}' with IP {2} is in subnet {3}). Set <XGE><bAllowOverVpn>true</bAllowOverVpn></XGE> in BuildConfiguration.xml to override.", HostName, Interface.Description, UnicastAddressInfo.Address, Subnet);
+								}
 								return true;
 							}
 						}
@@ -253,14 +304,14 @@ namespace UnrealBuildTool
 			}
 			catch (Exception Ex)
 			{
-				Log.TraceWarning("Unable to check whether host {0} is connected to VPN:\n{1}", HostName, ExceptionUtils.FormatExceptionDetails(Ex));
+				Logger.LogWarning("Unable to check whether host {Host} is connected to VPN:\n{Ex}", HostName, ExceptionUtils.FormatExceptionDetails(Ex));
 			}
 			return false;
 		}
 
-		public static bool IsAvailable()
+		public static bool IsAvailable(ILogger Logger)
 		{
-			string XgConsoleExe;
+			string? XgConsoleExe;
 			if (!TryGetXgConsoleExecutable(out XgConsoleExe))
 			{
 				return false;
@@ -278,9 +329,9 @@ namespace UnrealBuildTool
 						return false;
 					}
 				}
-				catch(Exception Ex)
+				catch (Exception Ex)
 				{
-					Log.TraceLog("Unable to query for status of Incredibuild service: {0}", ExceptionUtils.FormatExceptionDetails(Ex));
+					Logger.LogDebug("Unable to query for status of Incredibuild service: {Ex}", ExceptionUtils.FormatExceptionDetails(Ex));
 					return false;
 				}
 			}
@@ -288,10 +339,30 @@ namespace UnrealBuildTool
 			// Check if we're connected over VPN
 			if (!bAllowOverVpn && VpnSubnets != null && VpnSubnets.Length > 0)
 			{
-				string CoordinatorHost;
-				if (TryGetCoordinatorHost(out CoordinatorHost) && IsHostOnVpn(CoordinatorHost))
+				string? CoordinatorHost;
+				if (TryGetCoordinatorHost(out CoordinatorHost) && IsHostOnVpn(CoordinatorHost, Logger))
 				{
 					return false;
+				}
+			}
+
+			// Check if there's an XGE build already running 
+			if (bUnavailableIfInUse)
+			{
+				Process XGEProcess = new Process()
+				{
+					StartInfo = new ProcessStartInfo(
+					XgConsoleExe,
+					"/Command=Unused /nowait /silent")  // The actual command here doesn't matter - it will fail with a different error code (1) than "in use" (4)
+					{
+						UseShellExecute = false
+					}
+				};
+				if (Utils.RunLocalProcess(XGEProcess) == 4)
+				{
+					Logger.LogWarning("Unable to use Incredibuild executor because a build is already in progress");
+					return false;
+
 				}
 			}
 
@@ -301,76 +372,66 @@ namespace UnrealBuildTool
 		// precompile the Regex needed to parse the XGE output (the ones we want are of the form "File (Duration at +time)"
 		//private static Regex XGEDurationRegex = new Regex(@"(?<Filename>.*) *\((?<Duration>[0-9:\.]+) at [0-9\+:\.]+\)", RegexOptions.ExplicitCapture);
 
-		public static void ExportActions(List<Action> ActionsToExecute)
+		public static void ExportActions(List<LinkedAction> ActionsToExecute, ILogger Logger)
 		{
-			for(int FileNum = 0;;FileNum++)
+			for (int FileNum = 0; ; FileNum++)
 			{
-				string OutFile = Path.Combine(UnrealBuildTool.EngineDirectory.FullName, "Intermediate", "Build", String.Format("UBTExport.{0}.xge.xml", FileNum.ToString("D3")));
-				if(!File.Exists(OutFile))
+				string OutFile = Path.Combine(Unreal.EngineDirectory.FullName, "Intermediate", "Build", String.Format("UBTExport.{0}.xge.xml", FileNum.ToString("D3")));
+				if (!File.Exists(OutFile))
 				{
-					ExportActions(ActionsToExecute, OutFile);
+					ExportActions(ActionsToExecute, OutFile, Logger);
 					break;
 				}
 			}
 		}
 
-		public static void ExportActions(List<Action> ActionsToExecute, string OutFile)
+		public static void ExportActions(List<LinkedAction> ActionsToExecute, string OutFile, ILogger Logger)
 		{
-			WriteTaskFile(ActionsToExecute, OutFile, ProgressWriter.bWriteMarkup, bXGEExport: true);
-			Log.TraceInformation("XGEEXPORT: Exported '{0}'", OutFile);
+			WriteTaskFile(ActionsToExecute, OutFile, ProgressWriter.bWriteMarkup, bXGEExport: true, Logger);
+			Logger.LogInformation("XGEEXPORT: Exported '{OutFile}'", OutFile);
 		}
 
-		public override bool ExecuteActions(List<Action> ActionsToExecute, bool bLogDetailedActionStats)
+		/// <inheritdoc/>
+		public override Task<bool> ExecuteActionsAsync(IEnumerable<LinkedAction> ActionsToExecute, ILogger Logger, IActionArtifactCache? actionArtifactCache)
 		{
-			bool XGEResult = true;
-
-			// Batch up XGE execution by actions with the same output event handler.
-			List<Action> ActionBatch = new List<Action>();
-			ActionBatch.Add(ActionsToExecute[0]);
-			for (int ActionIndex = 1; ActionIndex < ActionsToExecute.Count && XGEResult; ++ActionIndex)
-			{
-				Action CurrentAction = ActionsToExecute[ActionIndex];
-				ActionBatch.Add(CurrentAction);
-			}
-			if (ActionBatch.Count > 0 && XGEResult)
-			{
-				XGEResult = ExecuteActionBatch(ActionBatch);
-				ActionBatch.Clear();
-			}
-
-			return XGEResult;
+			return Task.FromResult(ExecuteActions(ActionsToExecute, Logger));
 		}
 
-		bool ExecuteActionBatch(List<Action> Actions)
+		bool ExecuteActions(IEnumerable<LinkedAction> Actions, ILogger Logger)
 		{
-			bool XGEResult = true;
-			if (Actions.Count > 0)
+			if (!Actions.Any())
 			{
-				// Write the actions to execute to a XGE task file.
-				string XGETaskFilePath = FileReference.Combine(UnrealBuildTool.EngineDirectory, "Intermediate", "Build", "XGETasks.xml").FullName;
-				WriteTaskFile(Actions, XGETaskFilePath, ProgressWriter.bWriteMarkup, false);
-
-				XGEResult = ExecuteTaskFileWithProgressMarkup(XGETaskFilePath, Actions.Count);
+				return true;
 			}
-			return XGEResult;
+
+			// Write the actions to execute to a XGE task file.
+			string XGETaskFilePath = FileReference.Combine(Unreal.EngineDirectory, "Intermediate", "Build", "XGETasks.xml").FullName;
+			WriteTaskFile(Actions, XGETaskFilePath, true, false, Logger);
+
+			return ExecuteTaskFileWithProgressMarkup(XGETaskFilePath, Actions.ToArray(), Logger);
 		}
 
 		/// <summary>
 		/// Writes a XGE task file containing the specified actions to the specified file path.
 		/// </summary>
-		static void WriteTaskFile(List<Action> InActions, string TaskFilePath, bool bProgressMarkup, bool bXGEExport)
+		static void WriteTaskFile(IEnumerable<LinkedAction> InActions, string TaskFilePath, bool bProgressMarkup, bool bXGEExport, ILogger Logger)
 		{
+			bool HostOnVpn = TryGetCoordinatorHost(out string? CoordinatorHost) && IsHostOnVpn(CoordinatorHost, Logger);
+
 			Dictionary<string, string> ExportEnv = new Dictionary<string, string>();
 
-			List<Action> Actions = InActions;
+			List<LinkedAction> Actions = InActions.ToList();
 			if (bXGEExport)
 			{
 				IDictionary CurrentEnvironment = Environment.GetEnvironmentVariables();
-				foreach (System.Collections.DictionaryEntry Pair in CurrentEnvironment)
+				foreach (Nullable<System.Collections.DictionaryEntry> Pair in CurrentEnvironment)
 				{
-					if (!UnrealBuildTool.InitialEnvironment.Contains(Pair.Key) || (string)(UnrealBuildTool.InitialEnvironment[Pair.Key]) != (string)(Pair.Value))
+					if (Pair.HasValue)
 					{
-						ExportEnv.Add((string)(Pair.Key), (string)(Pair.Value));
+						if (!UnrealBuildTool.InitialEnvironment!.Contains(Pair.Value.Key) || (string)(UnrealBuildTool.InitialEnvironment[Pair.Value.Key]!) != (string)(Pair.Value.Value!))
+						{
+							ExportEnv.Add((string)(Pair.Value.Key), (string)(Pair.Value.Value!));
+						}
 					}
 				}
 			}
@@ -413,21 +474,31 @@ namespace UnrealBuildTool
 
 			for (int ActionIndex = 0; ActionIndex < Actions.Count; ActionIndex++)
 			{
-				Action Action = Actions[ActionIndex];
+				LinkedAction Action = Actions[ActionIndex];
+
+				// Don't allow remote linking if on VPN.
+				bool CanExecuteRemotely = Action.bCanExecuteRemotely && Action.bCanExecuteRemotelyWithXGE;
+				if (CanExecuteRemotely && Action.ActionType == ActionType.Link)
+				{
+					if (HostOnVpn || !bAllowRemoteLinking)
+					{
+						CanExecuteRemotely = false;
+					}
+				}
 
 				// <Tool ... />
 				XmlElement ToolElement = XGETaskDocument.CreateElement("Tool");
 				ToolsElement.AppendChild(ToolElement);
-				ToolElement.SetAttribute("Name", string.Format("Tool{0}", ActionIndex));
-				ToolElement.SetAttribute("AllowRemote", Action.bCanExecuteRemotely.ToString());
+				ToolElement.SetAttribute("Name", String.Format("Tool{0}", ActionIndex));
+				ToolElement.SetAttribute("AllowRemote", CanExecuteRemotely.ToString());
 
 				// The XGE documentation says that 'AllowIntercept' must be set to 'true' for all tools where 'AllowRemote' is enabled
-				ToolElement.SetAttribute("AllowIntercept", Action.bCanExecuteRemotely.ToString());
+				ToolElement.SetAttribute("AllowIntercept", CanExecuteRemotely.ToString());
 
 				string OutputPrefix = "";
 				if (bProgressMarkup)
 				{
-					OutputPrefix += ProgressMarkupPrefix;
+					OutputPrefix += $"{ProgressMarkupPrefix}_{ActionIndex} ";
 				}
 				if (Action.bShouldOutputStatusDescription)
 				{
@@ -437,7 +508,7 @@ namespace UnrealBuildTool
 				{
 					ToolElement.SetAttribute("OutputPrefix", OutputPrefix);
 				}
-				if(Action.GroupNames.Count > 0)
+				if (Action.GroupNames.Count > 0)
 				{
 					ToolElement.SetAttribute("GroupPrefix", String.Format("** For {0} **", String.Join(" + ", Action.GroupNames)));
 				}
@@ -445,6 +516,14 @@ namespace UnrealBuildTool
 				ToolElement.SetAttribute("Params", Action.CommandArguments);
 				ToolElement.SetAttribute("Path", Action.CommandPath.FullName);
 				ToolElement.SetAttribute("SkipIfProjectFailed", "true");
+				if (Action.ActionType == ActionType.Compile && bUseVCCompilerMode)
+				{
+					string FileName = Action.CommandPath.GetFileName();
+					if (FileName.Equals("cl.exe", StringComparison.OrdinalIgnoreCase) || FileName.Equals("cl-filter.exe", StringComparison.OrdinalIgnoreCase))
+					{
+						ToolElement.SetAttribute("VCCompiler", "true");
+					}
+				}
 				if (Action.bIsGCCCompiler)
 				{
 					ToolElement.SetAttribute("AutoReserveMemory", "*.gch");
@@ -455,17 +534,21 @@ namespace UnrealBuildTool
 				}
 				ToolElement.SetAttribute(
 					"OutputFileMasks",
-					string.Join(
+					String.Join(
 						",",
-						Action.ProducedItems.ConvertAll<string>(
-							delegate(FileItem ProducedItem) { return ProducedItem.Location.GetFileName(); }
+						Action.ProducedItems.Select(
+							delegate (FileItem ProducedItem) { return ProducedItem.Location.GetFileName(); }
 							).ToArray()
 						)
 					);
 
-				if(Action.ActionType == ActionType.Link)
+				if (Action.ActionType == ActionType.Compile)
 				{
-					ToolElement.SetAttribute("AutoRecover", "Unexpected PDB error; OK (0)");
+					ToolElement.SetAttribute("AutoRecover", String.Join(',', CompileAutoRecover));
+				}
+				else if (Action.ActionType == ActionType.Link)
+				{
+					ToolElement.SetAttribute("AutoRecover", String.Join(',', LinkAutoRecover));
 				}
 			}
 
@@ -477,40 +560,32 @@ namespace UnrealBuildTool
 
 			for (int ActionIndex = 0; ActionIndex < Actions.Count; ActionIndex++)
 			{
-				Action Action = Actions[ActionIndex];
+				LinkedAction Action = Actions[ActionIndex];
 
 				// <Task ... />
 				XmlElement TaskElement = XGETaskDocument.CreateElement("Task");
 				ProjectElement.AppendChild(TaskElement);
 				TaskElement.SetAttribute("SourceFile", "");
-				if (!Action.bShouldOutputStatusDescription)
-				{
-					// If we were configured to not output a status description, then we'll instead
-					// set 'caption' text for this task, so that the XGE coordinator has something
-					// to display within the progress bars.  For tasks that are outputting a
-					// description, XGE automatically displays that text in the progress bar, so we
-					// only need to do this for tasks that output their own progress.
-					TaskElement.SetAttribute("Caption", Action.StatusDescription);
-				}
-				TaskElement.SetAttribute("Name", string.Format("Action{0}", ActionIndex));
-				TaskElement.SetAttribute("Tool", string.Format("Tool{0}", ActionIndex));
+				TaskElement.SetAttribute("Caption", Action.StatusDescription);
+				TaskElement.SetAttribute("Name", String.Format("Action{0}", ActionIndex));
+				TaskElement.SetAttribute("Tool", String.Format("Tool{0}", ActionIndex));
 				TaskElement.SetAttribute("WorkingDir", Action.WorkingDirectory.FullName);
 				TaskElement.SetAttribute("SkipIfProjectFailed", "true");
 				TaskElement.SetAttribute("AllowRestartOnLocal", "true");
 
 				// Create a semi-colon separated list of the other tasks this task depends on the results of.
 				List<string> DependencyNames = new List<string>();
-				foreach(Action PrerequisiteAction in Action.PrerequisiteActions)
+				foreach (LinkedAction PrerequisiteAction in Action.PrerequisiteActions)
 				{
 					if (Actions.Contains(PrerequisiteAction))
 					{
-						DependencyNames.Add(string.Format("Action{0}", Actions.IndexOf(PrerequisiteAction)));
+						DependencyNames.Add(String.Format("Action{0}", Actions.IndexOf(PrerequisiteAction)));
 					}
 				}
 
 				if (DependencyNames.Count > 0)
 				{
-					TaskElement.SetAttribute("DependsOn", string.Join(";", DependencyNames.ToArray()));
+					TaskElement.SetAttribute("DependsOn", String.Join(";", DependencyNames.ToArray()));
 				}
 			}
 
@@ -537,14 +612,16 @@ namespace UnrealBuildTool
 		/// <param name="TaskFilePath">- The path to the file containing the tasks to execute in XGE XML format.</param>
 		/// <param name="OutputEventHandler"></param>
 		/// <param name="ActionCount"></param>
+		/// <param name="Logger"></param>
 		/// <returns>Indicates whether the tasks were successfully executed.</returns>
-		bool ExecuteTaskFile(string TaskFilePath, DataReceivedEventHandler OutputEventHandler, int ActionCount)
+		[SuppressMessage("Interoperability", "CA1416:Validate platform compatibility", Justification = "Registry only checked on Windows HostPlatform")]
+		bool ExecuteTaskFile(string TaskFilePath, DataReceivedEventHandler OutputEventHandler, int ActionCount, ILogger Logger)
 		{
 			// A bug in the UCRT can cause XGE to hang on VS2015 builds. Figure out if this hang is likely to effect this build and workaround it if able.
 			// @todo: There is a KB coming that will fix this. Once that KB is available, test if it is present. Stalls will not be a problem if it is.
 			//
 			// Stalls are possible. However there is a workaround in XGE build 1659 and newer that can avoid the issue.
-			string XGEVersion = (BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Win64) ? (string)Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Xoreax\IncrediBuild\Builder", "Version", null) : null;
+			string? XGEVersion = (BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Win64) ? (string?)Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Xoreax\IncrediBuild\Builder", "Version", null) : null;
 			if (XGEVersion != null)
 			{
 				int XGEBuildNumber;
@@ -560,8 +637,8 @@ namespace UnrealBuildTool
 				}
 			}
 
-			string XgConsolePath;
-			if(!TryGetXgConsoleExecutable(out XgConsolePath))
+			string? XgConsolePath;
+			if (!TryGetXgConsoleExecutable(out XgConsolePath))
 			{
 				throw new BuildException("Unable to find xgConsole executable.");
 			}
@@ -571,13 +648,14 @@ namespace UnrealBuildTool
 
 			ProcessStartInfo XGEStartInfo = new ProcessStartInfo(
 				XgConsolePath,
-				string.Format("\"{0}\" /Rebuild /NoWait {1} /NoLogo {2} /ShowAgent /ShowTime {3}",
+				String.Format("\"{0}\" /Rebuild /NoWait {1} /NoLogo {2} /ShowAgent /ShowTime {3}",
 					TaskFilePath,
 					bStopXGECompilationAfterErrors ? "/StopOnErrors" : "",
 					SilentOption,
 					bXGENoWatchdogThread ? "/no_watchdog_thread" : "")
 				);
 			XGEStartInfo.UseShellExecute = false;
+			XGEStartInfo.Arguments += " /Title=\"UnrealBuildTool Compile\"";
 
 			// Use the IDE-integrated Incredibuild monitor to display progress.
 			XGEStartInfo.Arguments += " /UseIdeMonitor";
@@ -609,7 +687,7 @@ namespace UnrealBuildTool
 					XGEProcess.BeginErrorReadLine();
 				}
 
-				Log.TraceInformation("Distributing {0} action{1} to XGE",
+				Logger.LogInformation("Distributing {NumAction} action{ActionS} to XGE",
 					ActionCount,
 					ActionCount == 1 ? "" : "s");
 
@@ -627,35 +705,74 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// Executes the tasks in the specified file, parsing progress markup as part of the output.
 		/// </summary>
-		bool ExecuteTaskFileWithProgressMarkup(string TaskFilePath, int NumActions)
+		bool ExecuteTaskFileWithProgressMarkup(string TaskFilePath, LinkedAction[] Actions, ILogger Logger)
 		{
-			using (ProgressWriter Writer = new ProgressWriter("Compiling C++ source files...", false))
+			int NumActions = Actions.Length;
+			using (ProgressWriter Writer = new ProgressWriter("Compiling C++ source files...", false, Logger))
 			{
 				int NumCompletedActions = 0;
+				string ProgressText = String.Empty;
+				string CommandDescription = String.Empty;
+				HashSet<int> ReportedActionIndices = new();
 
 				// Create a wrapper delegate that will parse the output actions
 				DataReceivedEventHandler EventHandlerWrapper = (Sender, Args) =>
 				{
-					if(Args.Data != null)
+					if (Args.Data != null)
 					{
 						string Text = Args.Data;
 						if (Text.StartsWith(ProgressMarkupPrefix))
 						{
-							Writer.Write(++NumCompletedActions, NumActions);
+							// Code below should not need to be tested for success but if some logging from XGE is wrong we just gracefully ignore it and accept that counting might end up wrong
+							int ActionIndex = -1;
+							int MarkupLength = ProgressMarkupPrefix.Length;
+							int EndOfMarkupPrefix = Text.IndexOf(' ', MarkupLength);
+							if (EndOfMarkupPrefix != -1)
+							{
+								MarkupLength = EndOfMarkupPrefix + 1;
+								if (Int32.TryParse(Text.Substring(ProgressMarkupPrefix.Length + 1, EndOfMarkupPrefix - ProgressMarkupPrefix.Length - 1), out ActionIndex))
+								{
+									// We keep track of the actions that we have already reported so NumCompletedActions match up with NumActions
+									if (ReportedActionIndices.Add(ActionIndex))
+									{
+										Writer.Write(++NumCompletedActions, NumActions);
+									}
+								}
+							}
+							// Flush old progress text
+							if (!String.IsNullOrEmpty(ProgressText))
+							{
+								Logger.LogInformation("[{NumCompletedActions}/{NumActions}] Complete {ProgressText}", NumCompletedActions, NumActions, ProgressText);
+								ProgressText = String.Empty;
+							}
+
+							CommandDescription = ActionIndex != -1 ? Actions[ActionIndex].CommandDescription + " " : String.Empty;
 
 							// Strip out anything that is just an XGE timer. Some programs don't output anything except the progress text.
-							Text = Args.Data.Substring(ProgressMarkupPrefix.Length);
-							if(Text.StartsWith(" (") && Text.EndsWith(")"))
+							Text = Args.Data.Substring(MarkupLength);
+							if (Text.StartsWith(" (") && Text.EndsWith(")"))
 							{
+								// Write the progress text with the next line of output if the current doesn't have any status.
+								ProgressText = Text.Trim();
 								return;
 							}
+
+							Logger.LogInformation("[{NumCompletedActions}/{NumActions}] {CommandDescription}{Text}", NumCompletedActions, NumActions, CommandDescription, Text);
+							return;
 						}
-						Log.TraceInformation(Text);
+						if (!String.IsNullOrEmpty(ProgressText))
+						{
+							Logger.LogInformation("[{NumCompletedActions}/{NumActions}] {CommandDescription}{Text} {ProgressText}", NumCompletedActions, NumActions, CommandDescription, Text, ProgressText);
+							ProgressText = String.Empty;
+							CommandDescription = String.Empty;
+							return;
+						}
+						WriteToolOutput(Text);
 					}
 				};
 
 				// Run through the standard XGE executor
-				return ExecuteTaskFile(TaskFilePath, EventHandlerWrapper, NumActions);
+				return ExecuteTaskFile(TaskFilePath, EventHandlerWrapper, NumActions, Logger);
 			}
 		}
 	}

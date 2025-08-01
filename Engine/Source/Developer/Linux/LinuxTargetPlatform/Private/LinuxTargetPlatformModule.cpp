@@ -17,11 +17,6 @@
 #define LOCTEXT_NAMESPACE "FLinuxTargetPlatformModule"
 
 
-/**
- * Holds the target platform singleton.
- */
-static ITargetPlatform* Singleton = NULL;
-
 
 /**
  * Module for the Linux target platform.
@@ -30,25 +25,16 @@ class FLinuxTargetPlatformModule
 	: public ITargetPlatformModule
 {
 public:
-
-	/** Destructor. */
-	~FLinuxTargetPlatformModule( )
+	virtual void GetTargetPlatforms(TArray<ITargetPlatform*>& TargetPlatforms) override
 	{
-		Singleton = NULL;
-	}
-
-public:
-	
-	// ITargetPlatformModule interface
-
-	virtual ITargetPlatform* GetTargetPlatform( ) override
-	{
-		if (Singleton == NULL && TLinuxTargetPlatform<FLinuxPlatformProperties<true, false, false, false> >::IsUsable())
-		{
-			Singleton = new TLinuxTargetPlatform<FLinuxPlatformProperties<true, false, false, false> >();
-		}
-		
-		return Singleton;
+		// NoEditor TP
+		TargetPlatforms.Add(new TLinuxTargetPlatform<FLinuxPlatformProperties<false, false, false, false> >());
+		// Editor TP
+		TargetPlatforms.Add(new TLinuxTargetPlatform<FLinuxPlatformProperties<true, false, false, false> >());
+		// Server TP
+		TargetPlatforms.Add(new TLinuxTargetPlatform<FLinuxPlatformProperties<false, true, false, false> >());
+		// Client TP
+		TargetPlatforms.Add(new TLinuxTargetPlatform<FLinuxPlatformProperties<false, false, true, false> >());
 	}
 
 public:

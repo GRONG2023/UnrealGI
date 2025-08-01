@@ -6,20 +6,25 @@
 
 #pragma once
 #include "CoreMinimal.h"
-#include "UObject/Object.h"
+#include "HAL/Platform.h"
 #include "UObject/Interface.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "SequencerAnimationSupport.generated.h"
 
 class UAnimInstance;
 class UAnimSequenceBase;
+class UObject;
 
-UINTERFACE(meta = (CannotImplementInterfaceInBlueprint))
-class ANIMGRAPHRUNTIME_API USequencerAnimationSupport : public UInterface
+UINTERFACE(meta = (CannotImplementInterfaceInBlueprint), MinimalAPI)
+class USequencerAnimationSupport : public UInterface
 {
 	GENERATED_UINTERFACE_BODY()
 };
 
-class ANIMGRAPHRUNTIME_API ISequencerAnimationSupport
+class ISequencerAnimationSupport
 {
 	GENERATED_IINTERFACE_BODY()
 

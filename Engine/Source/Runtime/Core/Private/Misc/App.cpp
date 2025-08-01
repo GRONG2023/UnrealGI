@@ -4,12 +4,15 @@
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Misc/CoreDelegates.h"
 #include "Runtime/Launch/Resources/Version.h"
+#include "Serialization/CompactBinary.h"
 #include "HAL/LowLevelMemTracker.h"
 #include "BuildSettings.h"
 #include "UObject/DevObjectVersion.h"
 #include "Misc/EngineVersion.h"
 #include "Misc/NetworkVersion.h"
+#include "Misc/SecureHash.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogApp, Log, All);
 
@@ -20,8 +23,7 @@ DEFINE_LOG_CATEGORY_STATIC(LogApp, Log, All);
 bool FApp::bIsDebugGame = false;
 #endif
 
-FGuid FApp::InstanceId = FGuid::NewGuid();
-FGuid FApp::SessionId = FGuid::NewGuid();
+FGuid FApp::SessionId = ToGuid(FApp::GetSessionObjectId());
 FString FApp::SessionName = FString();
 FString FApp::SessionOwner = FString();
 FString FApp::GraphicsRHI = FString();
@@ -42,6 +44,7 @@ float FApp::VolumeMultiplier = 1.0f;
 float FApp::UnfocusedVolumeMultiplier = 0.0f;
 bool FApp::bUseVRFocus = false;
 bool FApp::bHasVRFocus = false;
+bool (*FApp::HasFocusFunction)() = nullptr;
 
 
 /* FApp static interface
@@ -57,11 +60,55 @@ const TCHAR* FApp::GetBuildVersion()
 	return BuildSettings::GetBuildVersion();
 }
 
+const TCHAR* FApp::GetBuildURL()
+{
+	if (FCoreDelegates::OnGetBuildURL.IsBound()) 
+	{
+		return FCoreDelegates::OnGetBuildURL.Execute();
+	}	
+	return BuildSettings::GetBuildURL();
+}	
+
 int32 FApp::GetEngineIsPromotedBuild()
 {
 	return BuildSettings::IsPromotedBuild()? 1 : 0;
 }
 
+bool FApp::GetIsWithDebugInfo()
+{
+	return BuildSettings::IsWithDebugInfo();
+}
+
+const TCHAR* FApp::GetExecutingJobURL()
+{
+	if (FCoreDelegates::OnGetExecutingJobURL.IsBound())
+	{
+		return FCoreDelegates::OnGetExecutingJobURL.Execute();
+	}
+
+	static const FString URL = []() -> FString {
+		FString HordeUrl = FPlatformMisc::GetEnvironmentVariable(TEXT("UE_HORDE_URL"));
+		if (HordeUrl.IsEmpty())
+		{
+			return FString();
+		}
+		FString HordeJobId = FPlatformMisc::GetEnvironmentVariable(TEXT("UE_HORDE_JOBID"));
+		if (HordeJobId.IsEmpty())
+		{
+			return FString();
+		}
+		FString HordeStepId = FPlatformMisc::GetEnvironmentVariable(TEXT("UE_HORDE_STEPID"));
+		if (HordeStepId.IsEmpty())
+		{
+			return FString::Printf(TEXT("%s/job/%s"), *HordeUrl, *HordeJobId);
+		}
+		else 
+		{
+			return FString::Printf(TEXT("%s/job/%s?step=%s"), *HordeUrl, *HordeJobId, *HordeStepId);
+		}
+	}();
+	return *URL;
+}
 
 FString FApp::GetEpicProductIdentifier()
 {
@@ -130,6 +177,7 @@ void FApp::InitializeSession()
 {
 	// parse session details on command line
 	FString InstanceIdString;
+	FGuid InstanceId = GetInstanceId();
 
 	if (FParse::Value(FCommandLine::Get(), TEXT("-InstanceId="), InstanceIdString))
 	{
@@ -137,11 +185,6 @@ void FApp::InitializeSession()
 		{
 			UE_LOG(LogInit, Warning, TEXT("Invalid InstanceId on command line: %s"), *InstanceIdString);
 		}
-	}
-
-	if (!InstanceId.IsValid())
-	{
-		InstanceId = FGuid::NewGuid();
 	}
 
 	FString SessionIdString;
@@ -229,13 +272,13 @@ bool FApp::IsEngineInstalled()
 	return EngineInstalledState == 1;
 }
 
-#if PLATFORM_WINDOWS && defined(__clang__)
-bool FApp::IsUnattended() // @todo clang: Workaround for missing symbol export
+bool FApp::IsUnattended()
 {
+	// FCommandLine::Get() will assert that the command line has been set.
+	// This function may not be used before FCommandLine::Set() is called.
 	static bool bIsUnattended = FParse::Param(FCommandLine::Get(), TEXT("UNATTENDED"));
 	return bIsUnattended || GIsAutomationTesting;
 }
-#endif
 
 bool FApp::ShouldUseThreadingForPerformance()
 {
@@ -299,9 +342,44 @@ void FApp::SetHasVRFocus(bool bInHasVRFocus)
 	bHasVRFocus = bInHasVRFocus;
 }
 
+void FApp::SetHasFocusFunction(bool (*InHasFocusFunction)())
+{
+	HasFocusFunction = InHasFocusFunction;
+}
+
+bool FApp::HasFocus()
+{
+	if (FApp::IsBenchmarking())
+	{
+		return true;
+	}
+
+	if (FApp::UseVRFocus())
+	{
+		return FApp::HasVRFocus();
+	}
+
+	// by default we assume we have focus, it's a worse thing to encounter a bug where focus is locked off, vs. locked on
+	bool bHasFocus = true;
+
+	// desktop platforms are more or less why we have this abstraction, to dip into ApplicationCore's Platform implementation
+#if PLATFORM_DESKTOP
+	check(HasFocusFunction);
+#endif
+
+	// call the HasFocusFunction, if we have one. otherwise fall back to the default
+	return HasFocusFunction ? HasFocusFunction() : bHasFocus;
+}
+
 void FApp::PrintStartupLogMessages()
 {
+	UE_LOG(LogInit, Log, TEXT("ExecutableName: %s"), FPlatformProcess::ExecutableName(false));
 	UE_LOG(LogInit, Log, TEXT("Build: %s"), FApp::GetBuildVersion());
+
+	UE_LOG(LogInit, Log, TEXT("Platform=%s"), ANSI_TO_TCHAR(FPlatformProperties::PlatformName()));
+	UE_LOG(LogInit, Log, TEXT("MachineId=%s"), *FPlatformMisc::GetLoginId());
+	UE_LOG(LogInit, Log, TEXT("DeviceId=%s"), *FPlatformMisc::GetDeviceId());
+
 	UE_LOG(LogInit, Log, TEXT("Engine Version: %s"), *FEngineVersion::Current().ToString());
 	UE_LOG(LogInit, Log, TEXT("Compatible Engine Version: %s"), *FEngineVersion::CompatibleWith().ToString());
 	UE_LOG(LogInit, Log, TEXT("Net CL: %u"), FNetworkVersion::GetNetworkCompatibleChangelist());
@@ -310,10 +388,18 @@ void FApp::PrintStartupLogMessages()
 	UE_LOG(LogInit, Log, TEXT("OS: %s (%s), CPU: %s, GPU: %s"), *OSLabel, *OSVersion, *FPlatformMisc::GetCPUBrand(), *FPlatformMisc::GetPrimaryGPUBrand());
 
 #if PLATFORM_64BITS
-	UE_LOG(LogInit, Log, TEXT("Compiled (64-bit): %s %s"), ANSI_TO_TCHAR(__DATE__), ANSI_TO_TCHAR(__TIME__));
+	UE_LOG(LogInit, Log, TEXT("Compiled (64-bit): %s %s"), BuildSettings::GetBuildDate(), BuildSettings::GetBuildTime());
 #else
-	UE_LOG(LogInit, Log, TEXT("Compiled (32-bit): %s %s"), ANSI_TO_TCHAR(__DATE__), ANSI_TO_TCHAR(__TIME__));
+	UE_LOG(LogInit, Log, TEXT("Compiled (32-bit): %s %s"), BuildSettings::GetBuildDate(), BuildSettings::GetBuildTime());
 #endif
+
+#if PLATFORM_CPU_ARM_FAMILY
+	UE_LOG(LogInit, Log, TEXT("Architecture: arm64"));
+#elif PLATFORM_CPU_X86_FAMILY
+	UE_LOG(LogInit, Log, TEXT("Architecture: x64"));
+#else
+#error No architecture defined!
+#endif // x64/arm
 
 	// Print compiler version info
 #if defined(__clang__)
@@ -345,6 +431,50 @@ void FApp::PrintStartupLogMessages()
 	//UE_LOG(LogInit, Log, TEXT("Character set: %s"), sizeof(TCHAR)==1 ? TEXT("ANSI") : TEXT("Unicode") );
 	UE_LOG(LogInit, Log, TEXT("Allocator: %s"), GMalloc->GetDescriptiveName());
 	UE_LOG(LogInit, Log, TEXT("Installed Engine Build: %d"), FApp::IsEngineInstalled() ? 1 : 0);
+	UE_LOG(LogInit, Log, TEXT("This binary is optimized with LTO: %s, PGO: %s, instrumented for PGO data collection: %s"),
+		PLATFORM_COMPILER_OPTIMIZATION_LTCG ? TEXT("yes") : TEXT("no"),
+		FPlatformMisc::IsPGOEnabled() ? TEXT("yes") : TEXT("no"),
+		FPlatformMisc::IsPGICapableBinary() ? TEXT("yes") : TEXT("no")
+	);
 
 	FDevVersionRegistration::DumpVersionsToLog();
+}
+
+FString FApp::GetZenStoreProjectId()
+{
+	FString ProjectId;
+	if (FParse::Value(FCommandLine::Get(), TEXT("-ZenStoreProject="), ProjectId))
+	{
+		return ProjectId;
+	}
+
+#if PLATFORM_DESKTOP
+	if (FPaths::IsProjectFilePathSet())
+	{
+		FString ProjectFilePath = FPaths::GetProjectFilePath();
+		FString AbsProjectFilePath = IFileManager::Get().ConvertToAbsolutePathForExternalAppForRead(*ProjectFilePath);
+		AbsProjectFilePath = FPaths::FindCorrectCase(AbsProjectFilePath);
+		FTCHARToUTF8 AbsProjectFilePathUTF8(*AbsProjectFilePath);
+
+		FString HashString = FMD5::HashBytes((unsigned char*)AbsProjectFilePathUTF8.Get(), AbsProjectFilePathUTF8.Length()).Left(8);
+		return FString::Printf(TEXT("%s.%.8s"), FApp::GetProjectName(), *HashString);
+	}
+	UE_LOG(LogInit, Fatal, TEXT("GetZenStoreProjectId() called before having a valid project file path"));
+#else
+	UE_LOG(LogInit, Fatal, TEXT("-ZenStoreProject command line argument is required to run from Zen"));
+#endif
+	return FString();
+}
+
+
+FGuid FApp::GetInstanceId()
+{
+	static FGuid InstanceId = FGuid::NewGuid();
+	return InstanceId;
+}
+
+const FCbObjectId& FApp::GetSessionObjectId()
+{
+	static const FCbObjectId SessionObjectId = FCbObjectId::NewObjectId();
+	return SessionObjectId;
 }

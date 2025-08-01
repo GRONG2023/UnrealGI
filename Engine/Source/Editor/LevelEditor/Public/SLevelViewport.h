@@ -11,11 +11,12 @@
 #include "Widgets/SWidget.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Framework/Commands/UICommandInfo.h"
+#include "SWorldPartitionViewportWidget.h"
 #include "EditorViewportClient.h"
 #include "Widgets/Layout/SScaleBox.h"
 #include "Widgets/SWindow.h"
 #include "Settings/LevelEditorViewportSettings.h"
-#include "SEditorViewport.h"
+#include "SAssetEditorViewport.h"
 #include "EditorModeManager.h"
 #include "IAssetViewport.h"
 #include "LevelEditorViewport.h"
@@ -30,25 +31,19 @@ class SCaptureRegionWidget;
 class SGameLayerManager;
 class UFoliageType;
 enum class EMapChangeType : uint8;
+enum ELabelAnchorMode : int;
 
 /**
  * Encapsulates an SViewport and an SLevelViewportToolBar
  */
-class LEVELEDITOR_API SLevelViewport : public SEditorViewport, public IAssetViewport
+class LEVELEDITOR_API SLevelViewport : public SAssetEditorViewport, public IAssetViewport
 {
 public:
 	SLATE_BEGIN_ARGS( SLevelViewport )
-		: _ViewportType( LVT_Perspective )
-		, _Realtime( false )
 		{}
 
-		SLATE_ARGUMENT( TWeakPtr<class FEditorModeTools>, EditorModeTools )
-		SLATE_ARGUMENT( TSharedPtr<class FLevelViewportLayout>, ParentLayout )
 		SLATE_ARGUMENT( TWeakPtr<ILevelEditor>, ParentLevelEditor )
 		SLATE_ARGUMENT( TSharedPtr<FLevelEditorViewportClient>, LevelEditorViewportClient )
-		SLATE_ARGUMENT( ELevelViewportType, ViewportType )
-		SLATE_ARGUMENT( bool, Realtime )
-		SLATE_ARGUMENT( FName, ConfigKey )
 	SLATE_END_ARGS()
 
 	SLevelViewport();
@@ -58,20 +53,17 @@ public:
 	/**
 	 * Constructs the viewport widget                   
 	 */
-	void Construct(const FArguments& InArgs);
+	void Construct(const FArguments& InArgs, const FAssetEditorViewportConstructionArgs& InConstructionArgs);
 
 	/**
 	 * Constructs the widgets for the viewport overlay
 	 */
 	void ConstructViewportOverlayContent();
 
-	TSharedRef<SWidget> GenerateLevelMenu() const;
-	FReply OnMenuClicked();
-
 	/**
 	 * Constructs the level editor viewport client
 	 */
-	void ConstructLevelEditorViewportClient( const FArguments& InArgs );
+	void ConstructLevelEditorViewportClient(FLevelEditorViewportInstanceSettings& ViewportInstanceSettings);
 
 	/**
 	 * @return true if the viewport is visible. false otherwise                  
@@ -135,7 +127,13 @@ public:
 	virtual void OnFocusViewportToSelection() override;
 	virtual EVisibility GetTransformToolbarVisibility() const override;
 	virtual UWorld* GetWorld() const override;
+	virtual void ToggleInViewportContextMenu() override;
 
+	virtual void HideInViewportContextMenu() override;
+	virtual bool CanToggleInViewportContextMenu() override;
+
+	static void EnableInViewportMenu();
+	FMargin GetContextMenuPadding() const;
 	/**
 	 * Called when the maximize command is executed                   
 	 */
@@ -180,6 +178,14 @@ public:
 	 * @param NewSelection	List of objects that are now selected
 	 */
 	void OnActorSelectionChanged(const TArray<UObject*>& NewSelection, bool bForceRefresh=false);
+
+	/**
+	 * Called on all viewports, when element selection changes.
+	 * 
+	 * @param SelectionSet  New selection
+	 * @param bForceRefresh Force refresh
+	 */
+	void OnElementSelectionChanged(const UTypedElementSelectionSet* SelectionSet, bool bForceRefresh);
 
 	/**
 	 * Called when game view should be toggled
@@ -261,6 +267,18 @@ public:
 	bool IsLockedCameraViewEnabled() const;
 
 	/**
+	 * Sets whether the viewport should allow cinematic control
+	 * 
+	 * @param Whether the viewport should allow cinematic control.
+     */
+	void SetAllowsCinematicControl(bool bAllow);
+
+	/**
+	 * @return Whether the viewport allows cinematic control.
+     */
+	bool GetAllowsCinematicControl() const;
+
+	/**
 	 * @return the fixed width that a column returned by CreateActorLockSceneOutlinerColumn expects to be
 	 */
 	static float GetActorLockSceneOutlinerColumnWidth();
@@ -293,17 +311,16 @@ public:
 	/** Get the parent level editor for this viewport */
 	TWeakPtr<ILevelEditor> GetParentLevelEditor() const { return ParentLevelEditor; }
 
-	/** Called to get the level text */
-	FText GetCurrentLevelText( bool bDrawOnlyLabel ) const;
+	/** @return whether the the actor editor context should be displayed for this viewport */
+	virtual bool IsActorEditorContextVisible() const;
 
 	/** Called to get the screen percentage preview text */
-	FText GetCurrentScreenPercentageText(bool bDrawOnlyLabel) const;
+	FText GetCurrentScreenPercentageText() const;
 
-	/** @return The visibility of the current level text display */
-	virtual EVisibility GetCurrentLevelTextVisibility() const;
-
-	/** @return The visibility of the current level button display */
-	virtual EVisibility GetCurrentLevelButtonVisibility() const;
+	UE_DEPRECATED(5.1, "GetCurrentLevelTextVisibility not used anymore.")
+	virtual EVisibility GetCurrentLevelTextVisibility() const { return EVisibility::Collapsed; }
+	UE_DEPRECATED(5.1, "GetCurrentLevelButtonVisibility not used anymore.")
+	virtual EVisibility GetCurrentLevelButtonVisibility() const { return EVisibility::Collapsed; }
 
 	/** @return The visibility of the current level text display */
 	virtual EVisibility GetSelectedActorsCurrentLevelTextVisibility() const;
@@ -327,6 +344,7 @@ public:
 	 * 
 	 * @param ConfigurationName		The name of the layout (for the names in namespace LevelViewportConfigurationNames)
 	 */
+	UE_DEPRECATED(5.1, "Moved to internal handling by FViewportTabContent. See FViewportTabContent::BindCommonViewportCommands")
 	void OnSetViewportConfiguration(FName ConfigurationName);
 
 	/**
@@ -335,18 +353,23 @@ public:
 	 * @param ConfigurationName		The name of the layout (for the names in namespace LevelViewportConfigurationNames)
 	 * @return						True, if the named layout is currently active
 	 */
+	UE_DEPRECATED(5.1, "Moved to internal handling by FViewportTabContent. See FViewportTabContent::BindCommonViewportCommands")
 	bool IsViewportConfigurationSet(FName ConfigurationName) const;
 
 	/** Get this level viewport widget's type within its parent layout */
+	UE_DEPRECATED(5.1, "Moved to internal handling by FViewportTabContent. See FViewportTabContent::BindCommonViewportCommands")
 	FName GetViewportTypeWithinLayout() const;
 
 	/** Set this level viewport widget's type within its parent layout */
+	UE_DEPRECATED(5.1, "Moved to internal handling by FViewportTabContent. See FViewportTabContent::BindCommonViewportCommands")
 	void SetViewportTypeWithinLayout(FName InLayoutType);
 
 	/** Activates the specified viewport type in the layout, if it's not already, or reverts to default if it is. */
+	UE_DEPRECATED(5.1, "Moved to internal handling by FViewportTabContent. See FViewportTabContent::BindCommonViewportCommands")
 	void ToggleViewportTypeActivationWithinLayout(FName InLayoutType);
 
 	/** Checks if the specified layout type matches our current viewport type. */
+	UE_DEPRECATED(5.1, "Moved to internal handling by FViewportTabContent. See FViewportTabContent::BindCommonViewportCommands")
 	bool IsViewportTypeWithinLayoutEqual(FName InLayoutType);
 
 	/** For the specified actor, See if we're forcing a preview */
@@ -385,6 +408,13 @@ public:
 	 * @param BookmarkIndex	The index of the bookmark to set
 	 */
 	void OnSetBookmark( int32 BookmarkIndex );
+
+	/**
+	 * Called to check if a bookmark is set
+	 *
+	 * @param BookmarkIndex	The index of the bookmark to check
+	 */
+	bool OnHasBookmarkSet(int32 BookmarkIndex);
 
 	/**
 	 * Called to jump to a bookmark
@@ -429,6 +459,7 @@ protected:
 	virtual const FSlateBrush* OnGetViewportBorderBrush() const override;
 	virtual FSlateColor OnGetViewportBorderColorAndOpacity() const override;
 	virtual EVisibility OnGetViewportContentVisibility() const override;
+	virtual EVisibility OnGetFocusedViewportIndicatorVisibility() const override;
 	virtual void BindCommands() override;
 private:
 	/** Flag to know if we need to update the previews which is handled in the tick. */
@@ -449,6 +480,9 @@ private:
 	 * Called when immersive mode is toggled by the user
 	 */
 	void OnToggleImmersive();
+
+	/** Called when moving tabs in and out of a sidebar is activated by the user */
+	void OnToggleSidebarTabs();
 
 	/**
 	* Called to determine whether the maximize mode of current viewport can be toggled
@@ -540,12 +574,12 @@ private:
 	void OnUseDefaultShowFlags(bool bUseSavedDefaults = false);
 
 	/**
-	 * Called to toggle allowing matinee to use this viewport to preview in
+	 * Called to toggle allowing sequencer to use this viewport to preview in
 	 */
 	void OnToggleAllowCinematicPreview();
 
 	/**
-	 * @return true if this viewport allows matinee to be previewed in it                   
+	 * @return true if this viewport allows cinematics to be previewed in it                   
 	 */
 	bool AllowsCinematicPreview() const;
 
@@ -554,6 +588,14 @@ private:
 	
 	/** Can we find the currently selected actor in the level script. */
 	bool CanFindSelectedInLevelScript() const;
+
+	/** Called to select the currently locked actor */
+	void OnSelectLockedActor();
+
+	/**
+	 * @return true if the currently locked actor is selectable
+	 */
+	bool CanExecuteSelectLockedActor() const;
 
 	/** Called to clear the current actor lock */
 	void OnActorUnlock();
@@ -586,6 +628,14 @@ private:
 	 *	@param bCreateDropPreview	If true, a drop preview actor will be spawned instead of a normal actor.
 	 */
 	bool HandlePlaceDraggedObjects(const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent, bool bCreateDropPreview);
+
+	/**
+	 * Tries to get assets from a drag and drop event.
+	 * 
+	 * @param DragDropEvent		Event to get assets from.
+	 * @param AssetDataArray	Asets will be added here.
+	 */
+	void GetAssetsFromDrag(const FDragDropEvent& DragDropEvent, TArray<FAssetData>& AssetDataArray);
 
 	/** SWidget Interface */
 	virtual FReply OnKeyDown( const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent ) override;
@@ -650,6 +700,8 @@ private:
 
 	/** Called in response to an actor being deleted in the level */
 	void OnLevelActorsRemoved(AActor* InActor);
+	
+	void OnEditorClose();
 
 	/** Gets whether the locked icon should be shown in the viewport because it is locked to an actor */
 	EVisibility GetLockedIconVisibility() const;
@@ -761,13 +813,14 @@ private:
 	 */
 	TSharedPtr<SWidget> InactiveViewportWidgetEditorContent;
 
+	/** 
+	 *  When PIE is active, the handle for the change feature level delegate
+	 */
+	FDelegateHandle PIEPreviewFeatureLevelChangedHandle;
+
 	/** Level viewport client */
 	TSharedPtr<FLevelEditorViewportClient> LevelViewportClient;
 
-	/** The brush to use if this viewport is the active viewport */
-	const FSlateBrush* ActiveBorder;
-	/** The brush to use if this viewport is an inactive viewport or not showing a border */
-	const FSlateBrush* NoBorder;
 	/** The brush to use if this viewport is in debug mode */
 	const FSlateBrush* DebuggingBorder;
 	/** The brush to use for a black background */
@@ -778,7 +831,8 @@ private:
 	const FSlateBrush* StartingSimulateBorder;
 	/** The brush to use when returning back to the editor from PIE or SIE mode */
 	const FSlateBrush* ReturningToEditorBorder;
-
+	/** The brush to use when the viewport is not maximized */
+	const FSlateBrush* NonMaximizedBorder;
 	/** Array of objects dropped during the OnDrop event */
 	TArray<UObject*> DroppedObjects;
 
@@ -876,8 +930,8 @@ private:
 	/** Storage for actors we always want to preview.  This comes from MU transactions .*/
 	TSet<TWeakObjectPtr<AActor>> AlwaysPreviewActors;
 
-	/** The slot index in the SOverlay for the PIE mouse control label */
-	int32 PIEOverlaySlotIndex;
+	/** The border in the SOverlay for the PIE mouse control label */
+	TSharedPtr<class SBorder> PIEOverlayBorder;
 
 	/** Separate curve to control fading out the PIE mouse control label */
 	FCurveSequence PIEOverlayAnim;
@@ -896,8 +950,13 @@ private:
 
 	/** Whether to show a full toolbar, or a compact one */
 	bool bShowFullToolbar;
+	TSharedPtr<class SWidget> InViewportMenuWrapper;
+	bool bIsInViewportMenuShowing;
+	bool bIsInViewportMenuInitialized;
+	TSharedPtr<class SInViewportDetails> InViewportMenu;
+	static bool bInViewportMenuEnabled;
 
-	TSharedPtr<class SMenuAnchor> LevelMenuAnchor;
+	TSharedPtr<SWorldPartitionViewportWidget> WorldPartitionViewportWidget;
 
 protected:
 	void LockActorInternal(AActor* NewActorToLock);

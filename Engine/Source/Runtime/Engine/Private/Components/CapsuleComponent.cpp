@@ -2,13 +2,16 @@
 
 
 #include "Components/CapsuleComponent.h"
-#include "WorldCollision.h"
+#include "CollisionShape.h"
+#include "PhysicsEngine/BodySetup.h"
 #include "PrimitiveViewRelevance.h"
 #include "PrimitiveSceneProxy.h"
 #include "SceneManagement.h"
 #include "PhysicsEngine/SphylElem.h"
-#include "PhysicsEngine/BodySetup.h"
 #include "PrimitiveSceneProxy.h"
+#include "UObject/UnrealType.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(CapsuleComponent)
 
 
 UCapsuleComponent::UCapsuleComponent(const FObjectInitializer& ObjectInitializer)
@@ -38,9 +41,10 @@ FPrimitiveSceneProxy* UCapsuleComponent::CreateSceneProxy()
 		FDrawCylinderSceneProxy(const UCapsuleComponent* InComponent)
 			:	FPrimitiveSceneProxy(InComponent)
 			,	bDrawOnlyIfSelected( InComponent->bDrawOnlyIfSelected )
-			,	CapsuleRadius( InComponent->CapsuleRadius )
-			,	CapsuleHalfHeight( InComponent->CapsuleHalfHeight )
+			,	CapsuleRadius( InComponent->GetScaledCapsuleRadius() )
+			,	CapsuleHalfHeight( InComponent->GetScaledCapsuleHalfHeight() )
 			,	ShapeColor( InComponent->ShapeColor )
+			,	LineThickness( InComponent->LineThickness )
 		{
 			bWillEverBeLit = false;
 		}
@@ -62,7 +66,7 @@ FPrimitiveSceneProxy* UCapsuleComponent::CreateSceneProxy()
 					const FLinearColor DrawCapsuleColor = GetViewSelectionColor(ShapeColor, *View, IsSelected(), IsHovered(), false, IsIndividuallySelected() );
 
 					FPrimitiveDrawInterface* PDI = Collector.GetPDI(ViewIndex);
-					DrawWireCapsule( PDI, LocalToWorld.GetOrigin(), LocalToWorld.GetScaledAxis( EAxis::X ), LocalToWorld.GetScaledAxis( EAxis::Y ), LocalToWorld.GetScaledAxis( EAxis::Z ), DrawCapsuleColor, CapsuleRadius, CapsuleHalfHeight, CapsuleSides, SDPG_World );
+					DrawWireCapsule( PDI, LocalToWorld.GetOrigin(), LocalToWorld.GetUnitAxis(EAxis::X), LocalToWorld.GetUnitAxis(EAxis::Y), LocalToWorld.GetUnitAxis(EAxis::Z), DrawCapsuleColor, CapsuleRadius, CapsuleHalfHeight, CapsuleSides, SDPG_World, LineThickness );
 				}
 			}
 		}
@@ -89,6 +93,7 @@ FPrimitiveSceneProxy* UCapsuleComponent::CreateSceneProxy()
 		const float		CapsuleRadius;
 		const float		CapsuleHalfHeight;
 		const FColor	ShapeColor;
+		const float		LineThickness;
 	};
 
 	return new FDrawCylinderSceneProxy( this );
@@ -118,9 +123,9 @@ void UCapsuleComponent::Serialize(FArchive& Ar)
 {
 	Super::Serialize(Ar);
 
-	if (Ar.IsLoading() && (Ar.UE4Ver() < VER_UE4_AFTER_CAPSULE_HALF_HEIGHT_CHANGE))
+	if (Ar.IsLoading() && (Ar.UEVer() < VER_UE4_AFTER_CAPSULE_HALF_HEIGHT_CHANGE))
 	{
-		if ((CapsuleHeight_DEPRECATED != 0.0f) || (Ar.UE4Ver() < VER_UE4_BLUEPRINT_VARS_NOT_READ_ONLY))
+		if ((CapsuleHeight_DEPRECATED != 0.0f) || (Ar.UEVer() < VER_UE4_BLUEPRINT_VARS_NOT_READ_ONLY))
 		{
 			CapsuleHalfHeight = CapsuleHeight_DEPRECATED;
 			CapsuleHeight_DEPRECATED = 0.0f;
@@ -183,8 +188,8 @@ void UCapsuleComponent::SetCapsuleSize(float NewRadius, float NewHalfHeight, boo
 }
 
 
-template <EShapeBodySetupHelper UpdateBodySetupAction>
-bool InvalidateOrUpdateCapsuleBodySetup(UBodySetup*& ShapeBodySetup, bool bUseArchetypeBodySetup, float CapsuleRadius, float CapsuleHalfHeight)
+template <EShapeBodySetupHelper UpdateBodySetupAction, typename BodySetupType>
+bool InvalidateOrUpdateCapsuleBodySetup(BodySetupType& ShapeBodySetup, bool bUseArchetypeBodySetup, float CapsuleRadius, float CapsuleHalfHeight)
 {
 	check((bUseArchetypeBodySetup && UpdateBodySetupAction == EShapeBodySetupHelper::InvalidateSharingIfStale) || (!bUseArchetypeBodySetup && UpdateBodySetupAction == EShapeBodySetupHelper::UpdateBodySetup));
 	check(ShapeBodySetup->AggGeom.SphylElems.Num() == 1);
@@ -249,3 +254,4 @@ bool UCapsuleComponent::AreSymmetricRotations(const FQuat& A, const FQuat& B, co
 	const FVector BUp = B.GetAxisZ();
 	return AUp.Equals(BUp);
 }
+

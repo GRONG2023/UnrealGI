@@ -4,6 +4,8 @@
 
 #include "CoreTypes.h"
 
+class FString;
+
 /** 
  * Enum that defines the verbosity levels of the logging system.
  * Also defines some non-verbosity levels that are hacks that allow
@@ -68,3 +70,11 @@ static_assert(!(ELogVerbosity::VerbosityMask & ELogVerbosity::BreakOnLog), "Bad 
  * @returns String representation of the verbosity enum
  */
 CORE_API const TCHAR* ToString(ELogVerbosity::Type Verbosity);
+
+/**
+ * Converts a string to verbosity 
+ * @param VerbosityString verbosity in string form (e.g., "Log", "Display", or "Fatal")
+ * @returns Parsed verbosity from the string (or Log if the string was invalid)
+ */
+extern CORE_API ELogVerbosity::Type ParseLogVerbosityFromString(const FString& VerbosityString);
+

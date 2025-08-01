@@ -5,20 +5,16 @@
 =============================================================================*/
 
 #include "Components/BrushComponent.h"
+#include "BodySetupEnums.h"
 #include "PrimitiveSceneProxy.h"
-#include "EngineGlobals.h"
-#include "RHI.h"
-#include "RenderingThread.h"
-#include "RenderResource.h"
-#include "VertexFactory.h"
-#include "PackedNormal.h"
-#include "LocalVertexFactory.h"
+#include "SceneInterface.h"
+#include "UObject/Package.h"
 #include "PrimitiveViewRelevance.h"
 #include "PrimitiveSceneProxy.h"
 #include "Model.h"
-#include "Engine/Brush.h"
-#include "MaterialShared.h"
 #include "Materials/Material.h"
+#include "Materials/MaterialRenderProxy.h"
+#include "GameFramework/ActorPrimitiveColorHandler.h"
 #include "GameFramework/Volume.h"
 #include "Engine/Polys.h"
 #include "Engine/Engine.h"
@@ -27,8 +23,9 @@
 #include "ActorEditorUtils.h"
 #include "SceneManagement.h"
 #include "PhysicsEngine/BodySetup.h"
-#include "StaticMeshResources.h"
 #include "DynamicMeshBuilder.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BrushComponent)
 
 DEFINE_LOG_CATEGORY_STATIC(LogBrushComponent, Log, All);
 
@@ -42,23 +39,26 @@ public:
 		NumEdges(0)
 	{
 #if WITH_EDITOR
-		Polys.Append(InModel->Polys->Element);
-		for(int32 PolyIndex = 0;PolyIndex < InModel->Polys->Element.Num();PolyIndex++)
+		if (!InModel->GetOutermost()->HasAnyPackageFlags(PKG_FilterEditorOnly))
 		{
-			NumEdges += InModel->Polys->Element[PolyIndex].Vertices.Num();
+			Polys.Append(InModel->Polys->Element);
+			for(int32 PolyIndex = 0;PolyIndex < InModel->Polys->Element.Num();PolyIndex++)
+			{
+				NumEdges += InModel->Polys->Element[PolyIndex].Vertices.Num();
+			}
 		}
 #endif
 	}
 
 	// FRenderResource interface.
-	virtual void InitRHI() override
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override
 	{
 		if(NumEdges)
 		{
-			FRHIResourceCreateInfo CreateInfo;
-			IndexBufferRHI = RHICreateIndexBuffer(sizeof(uint16),NumEdges * 2 * sizeof(uint16),BUF_Static, CreateInfo);
+			FRHIResourceCreateInfo CreateInfo(TEXT("FModelWireIndexBuffer"));
+			IndexBufferRHI = RHICmdList.CreateIndexBuffer(sizeof(uint16),NumEdges * 2 * sizeof(uint16),BUF_Static, CreateInfo);
 
-			uint16* DestIndex = (uint16*)RHILockIndexBuffer(IndexBufferRHI,0,NumEdges * 2 * sizeof(uint16),RLM_WriteOnly);
+			uint16* DestIndex = (uint16*)RHICmdList.LockBuffer(IndexBufferRHI,0,NumEdges * 2 * sizeof(uint16),RLM_WriteOnly);
 			uint16 BaseIndex = 0;
 			for(int32 PolyIndex = 0;PolyIndex < Polys.Num();PolyIndex++)
 			{
@@ -70,7 +70,7 @@ public:
 				}
 				BaseIndex += Poly.Vertices.Num();
 			}
-			RHIUnlockIndexBuffer(IndexBufferRHI);
+			RHICmdList.UnlockBuffer(IndexBufferRHI);
 		}
 	}
 
@@ -127,49 +127,41 @@ public:
 			// the brush color as the level color.
 			if ( bBuilder )
 			{
-				LevelColor = BrushColor;
+				ActorColor = BrushColor;
 			}
 			else
 			{
-				// Try to find a color for level coloration.
-				ULevel* Level = Owner->GetLevel();
-				ULevelStreaming* LevelStreaming = FLevelUtils::FindStreamingLevel( Level );
-				if ( LevelStreaming )
-				{
-					LevelColor = LevelStreaming->LevelColor;
-				}
+				ActorColor = FActorPrimitiveColorHandler::Get().GetPrimitiveColor(Component);
 			}
 		}
-
-		// Get a color for property coloration.
-		FColor NewPropertyColor;
-		GEngine->GetPropertyColorationColor( (UObject*)Component, NewPropertyColor );
-		PropertyColor = NewPropertyColor;
 
 #if WITH_EDITORONLY_DATA
-		TArray<FPoly> Polys;
-		Polys.Append(Component->Brush->Polys->Element);
-
-		TArray<FDynamicMeshVertex> OutVerts;
-
-		for (int32 PolyIndex = 0; PolyIndex < Polys.Num(); PolyIndex++)
+		if (!Component->GetOutermost()->HasAnyPackageFlags(PKG_FilterEditorOnly))
 		{
-			FPoly& Poly = Polys[PolyIndex];
-			for (int32 VertexIndex = 0; VertexIndex < Poly.Vertices.Num(); VertexIndex++)
-			{
-				FDynamicMeshVertex Vertex;
-				Vertex.Position = Poly.Vertices[VertexIndex];
-				Vertex.TangentX = FVector(1, 0, 0);
-				Vertex.TangentZ = FVector(0, 0, 1);
-				// TangentZ.w contains the sign of the tangent basis determinant. Assume +1
-				Vertex.TangentZ.Vector.W = 127;
-				Vertex.TextureCoordinate[0].X = 0.0f;
-				Vertex.TextureCoordinate[0].Y = 0.0f;
-				OutVerts.Push(Vertex);
-			}
-		}
+			TArray<FPoly> Polys;
+			Polys.Append(Component->Brush->Polys->Element);
 
-		VertexBuffers.InitFromDynamicVertex(&VertexFactory, OutVerts);
+			TArray<FDynamicMeshVertex> OutVerts;
+
+			for (int32 PolyIndex = 0; PolyIndex < Polys.Num(); PolyIndex++)
+			{
+				FPoly& Poly = Polys[PolyIndex];
+				for (int32 VertexIndex = 0; VertexIndex < Poly.Vertices.Num(); VertexIndex++)
+				{
+					FDynamicMeshVertex Vertex;
+					Vertex.Position = Poly.Vertices[VertexIndex];
+					Vertex.TangentX = FVector(1, 0, 0);
+					Vertex.TangentZ = FVector(0, 0, 1);
+					// TangentZ.w contains the sign of the tangent basis determinant. Assume +1
+					Vertex.TangentZ.Vector.W = 127;
+					Vertex.TextureCoordinate[0].X = 0.0f;
+					Vertex.TextureCoordinate[0].Y = 0.0f;
+					OutVerts.Push(Vertex);
+				}
+			}
+
+			VertexBuffers.InitFromDynamicVertex(&VertexFactory, OutVerts);
+		}
 #endif
 	}
 
@@ -228,13 +220,9 @@ public:
 					{
 						DrawColor = BrushColor;
 					}
-					else if(View->Family->EngineShowFlags.PropertyColoration)
+					else if(View->Family->EngineShowFlags.ActorColoration)
 					{
-						DrawColor = PropertyColor;
-					}
-					else if(View->Family->EngineShowFlags.LevelColoration)
-					{
-						DrawColor = LevelColor;
+						DrawColor = ActorColor;
 					}
 
 
@@ -251,7 +239,7 @@ public:
 							Collector.RegisterOneFrameMaterialProxy(SolidMaterialInstance);
 
 							FTransform GeomTransform(GetLocalToWorld());
-							BodySetup->AggGeom.GetAggGeom(GeomTransform, DrawColor.ToFColor(true), /*Material=*/SolidMaterialInstance, false, /*bSolid=*/ true, DrawsVelocity(), ViewIndex, Collector);
+							BodySetup->AggGeom.GetAggGeom(GeomTransform, DrawColor.ToFColor(true), /*Material=*/SolidMaterialInstance, false, /*bSolid=*/ true, AlwaysHasVelocity(), ViewIndex, Collector);
 						}
 					}
 					// WIREFRAME
@@ -288,7 +276,7 @@ public:
 							// If not, use the body setup for wireframe
 						{
 							FTransform GeomTransform(GetLocalToWorld());
-							BodySetup->AggGeom.GetAggGeom(GeomTransform, GetSelectionColor(DrawColor, IsSelected(), IsHovered()).ToFColor(true), /* Material=*/ NULL, false, /* bSolid=*/ false, DrawsVelocity(), ViewIndex, Collector);
+							BodySetup->AggGeom.GetAggGeom(GeomTransform, GetSelectionColor(DrawColor, IsSelected(), IsHovered()).ToFColor(true), /* Material=*/ NULL, false, /* bSolid=*/ false, AlwaysHasVelocity(), ViewIndex, Collector);
 						}
 
 					}
@@ -385,10 +373,10 @@ public:
 		return Result;
 	}
 
-	virtual void CreateRenderThreadResources() override
+	virtual void CreateRenderThreadResources(FRHICommandListBase& RHICmdList) override
 	{
 #if WITH_EDITORONLY_DATA
-		WireIndexBuffer.InitResource();
+		WireIndexBuffer.InitResource(RHICmdList);
 #endif
 
 	}
@@ -409,8 +397,7 @@ private:
 	uint32 bInManipulation : 1;
 
 	FColor BrushColor;
-	FLinearColor LevelColor;
-	FColor PropertyColor;
+	FLinearColor ActorColor;
 
 	/** Collision Response of this component**/
 	UBodySetup* BodySetup;
@@ -467,7 +454,7 @@ FBoxSphereBounds UBrushComponent::CalcBounds(const FTransform& LocalToWorld) con
 		{
 			for( int32 j=0; j<Brush->Polys->Element[i].Vertices.Num(); j++ )
 			{
-				Points.Add(Brush->Polys->Element[i].Vertices[j]);
+				Points.Add((FVector)Brush->Polys->Element[i].Vertices[j]);
 			}
 		}
 		return FBoxSphereBounds( Points.GetData(), Points.Num() ).TransformBy(LocalToWorld);
@@ -506,7 +493,7 @@ void UBrushComponent::PostLoad()
 	Super::PostLoad();
 
 	// Stop existing BrushComponents from generating mirrored collision mesh
-	if ((GetLinkerUE4Version() < VER_UE4_NO_MIRROR_BRUSH_MODEL_COLLISION) && (BrushBodySetup != NULL))
+	if ((GetLinkerUEVersion() < VER_UE4_NO_MIRROR_BRUSH_MODEL_COLLISION) && (BrushBodySetup != NULL))
 	{
 		BrushBodySetup->bGenerateMirroredCollision = false;
 	}
@@ -527,7 +514,7 @@ void UBrushComponent::PostLoad()
 #endif
 }
 
-uint8 UBrushComponent::GetStaticDepthPriorityGroup() const
+ESceneDepthPriorityGroup UBrushComponent::GetStaticDepthPriorityGroup() const
 {
 	ABrush* BrushOwner = Cast<ABrush>(GetOwner());
 
@@ -542,10 +529,9 @@ uint8 UBrushComponent::GetStaticDepthPriorityGroup() const
 	}
 }
 
-#if WITH_EDITOR
-static bool IsComponentTypeShown(AActor* Actor, const FEngineShowFlags& ShowFlags)
+bool UBrushComponent::IsShown(const FEngineShowFlags& ShowFlags) const
 {
-	if (Actor != nullptr)
+	if (const AActor* Actor = GetOwner())
 	{
 		return (Actor->IsA(AVolume::StaticClass())) ? ShowFlags.Volumes : ShowFlags.BSP;
 	}
@@ -553,13 +539,9 @@ static bool IsComponentTypeShown(AActor* Actor, const FEngineShowFlags& ShowFlag
 	return false;
 }
 
-bool UBrushComponent::ComponentIsTouchingSelectionBox(const FBox& InSelBBox, const FEngineShowFlags& ShowFlags, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const
+#if WITH_EDITOR
+bool UBrushComponent::ComponentIsTouchingSelectionBox(const FBox& InSelBBox, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const
 {
-	if (!IsComponentTypeShown(GetOwner(), ShowFlags))
-	{
-		return false;
-	}
-
 	if (Brush != nullptr && Brush->Polys != nullptr)
 	{
 		TArray<FVector> Vertices;
@@ -574,7 +556,7 @@ bool UBrushComponent::ComponentIsTouchingSelectionBox(const FBox& InSelBBox, con
 				{
 					for (const auto& Vertex : Poly.Vertices)
 					{
-						const FVector Location = GetComponentTransform().TransformPosition(Vertex);
+						const FVector Location = GetComponentTransform().TransformPosition((FVector)Vertex);
 						const bool bLocationIntersected = FMath::PointBoxIntersection(Location, InSelBBox);
 
 						// If the selection box doesn't have to encompass the entire component and any poly vertex intersects with the selection
@@ -595,10 +577,10 @@ bool UBrushComponent::ComponentIsTouchingSelectionBox(const FBox& InSelBBox, con
 					const int32 NumVerts = Poly.Vertices.Num();
 					if (NumVerts > 0)
 					{
-						FVector StartVert = GetComponentTransform().TransformPosition(Poly.Vertices[NumVerts - 1]);
+						FVector StartVert = GetComponentTransform().TransformPosition((FVector)Poly.Vertices[NumVerts - 1]);
 						for (int32 Index = 0; Index < NumVerts; ++Index)
 						{
-							const FVector EndVert = GetComponentTransform().TransformPosition(Poly.Vertices[Index]);
+							const FVector EndVert = GetComponentTransform().TransformPosition((FVector)Poly.Vertices[Index]);
 
 							if (FMath::LineBoxIntersection(InSelBBox, StartVert, EndVert, EndVert - StartVert))
 							{
@@ -621,7 +603,7 @@ bool UBrushComponent::ComponentIsTouchingSelectionBox(const FBox& InSelBBox, con
 				// The component must be entirely within the bounding box...
 				for (const auto& Vertex : Poly.Vertices)
 				{
-					const FVector Location = GetComponentTransform().TransformPosition(Vertex);
+					const FVector Location = GetComponentTransform().TransformPosition((FVector)Vertex);
 					const bool bLocationIntersected = FMath::PointBoxIntersection(Location, InSelBBox);
 
 					// If the selection box has to encompass the entire component and a poly vertex didn't intersect with the selection
@@ -642,13 +624,8 @@ bool UBrushComponent::ComponentIsTouchingSelectionBox(const FBox& InSelBBox, con
 }
 
 
-bool UBrushComponent::ComponentIsTouchingSelectionFrustum(const FConvexVolume& InFrustum, const FEngineShowFlags& ShowFlags, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const
+bool UBrushComponent::ComponentIsTouchingSelectionFrustum(const FConvexVolume& InFrustum, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const
 {
-	if (!IsComponentTypeShown(GetOwner(), ShowFlags))
-	{
-		return false;
-	}
-
 	if (Brush != nullptr && Brush->Polys != nullptr)
 	{
 		TArray<FVector> Vertices;
@@ -657,7 +634,7 @@ bool UBrushComponent::ComponentIsTouchingSelectionFrustum(const FConvexVolume& I
 		{
 			for (const auto& Vertex : Poly.Vertices)
 			{
-				const FVector Location = GetComponentTransform().TransformPosition(Vertex);
+				const FVector Location = GetComponentTransform().TransformPosition((FVector)Vertex);
 				const bool bIntersect = InFrustum.IntersectSphere(Location, 0.0f);
 
 				if (bIntersect && !bMustEncompassEntireComponent)
@@ -744,7 +721,7 @@ static FVector GetPolyCenter(const FPoly& Poly)
 	FVector Result = FVector::ZeroVector;
 	for (const auto& Vertex : Poly.Vertices)
 	{
-		Result += Vertex;
+		Result += (FVector)Vertex;
 	}
 
 	return Result / Poly.Vertices.Num();
@@ -774,15 +751,15 @@ bool UBrushComponent::HasInvertedPolys() const
 				{
 					// Calculate a nominal center point for the poly being tested for intersection
 					const FVector OtherPolyCenter = GetPolyCenter(OtherPoly);
-					const float Dot = FVector::DotProduct(Poly.Normal, OtherPoly.Normal);
+					const float Dot = FVector3f::DotProduct(Poly.Normal, OtherPoly.Normal);
 					// If normals are perpendicular, skip it - this implies that the poly normal is parallel to the plane
 					if (Dot != 0.0f)
 					{
-						const float Distance = FVector::DotProduct(OtherPolyCenter - PolyCenter, OtherPoly.Normal) / Dot;
+						const float Distance = FVector3f::DotProduct((FVector3f)OtherPolyCenter - (FVector3f)PolyCenter, OtherPoly.Normal) / Dot;
 						// Only consider intersections in the direction of the poly normal
 						if (Distance > 0.0f)
 						{
-							const FVector Intersection = PolyCenter + Poly.Normal * Distance;
+							const FVector Intersection = PolyCenter + (FVector)Poly.Normal * Distance;
 
 							// Does the ray intersect with the actual poly?
 							if (OtherPoly.OnPoly(Intersection))
@@ -813,3 +790,4 @@ bool UBrushComponent::HasInvertedPolys() const
 	return false;
 }
 #endif
+

@@ -11,8 +11,6 @@
 class FD3D12RayTracingPipelineState;
 class FD3D12RayTracingShaderTable;
 
-typedef FD3D12VertexBuffer FD3D12MemBuffer; // Generic GPU memory buffer
-
 // Built-in local root parameters that are always bound to all hit shaders
 struct FHitGroupSystemParameters
 {
@@ -21,16 +19,38 @@ struct FHitGroupSystemParameters
 	FHitGroupSystemRootConstants RootConstants;
 };
 
-class FD3D12RayTracingGeometry : public FRHIRayTracingGeometry
+class FD3D12RayTracingGeometry : public FRHIRayTracingGeometry, public FD3D12AdapterChild, public FD3D12ShaderResourceRenameListener, public FNoncopyable
 {
 public:
 
-	FD3D12RayTracingGeometry(const FRayTracingGeometryInitializer& Initializer);
+	FD3D12RayTracingGeometry(FRHICommandListBase& RHICmdList, FD3D12Adapter* Adapter, const FRayTracingGeometryInitializer& Initializer);
 	~FD3D12RayTracingGeometry();
 
+	virtual FRayTracingAccelerationStructureAddress GetAccelerationStructureAddress(uint64 GPUIndex) const final override
+	{
+		checkf(IsInRHIThread() || !IsRunningRHIInSeparateThread(), TEXT("Acceleration structure addresses can only be accessed on RHI timeline due to compaction and defragmentation."));
+		checkf(AccelerationStructureBuffers[GPUIndex], 
+			TEXT("Trying to get address of acceleration structure '%s' without allocated memory."), *DebugName.ToString());
+		return AccelerationStructureBuffers[GPUIndex]->ResourceLocation.GetGPUVirtualAddress();
+	}
+	virtual void SetInitializer(const FRayTracingGeometryInitializer& Initializer) final override;
+
+	void SetupHitGroupSystemParameters(uint32 InGPUIndex);
 	void TransitionBuffers(FD3D12CommandContext& CommandContext);
-	void BuildAccelerationStructure(FD3D12CommandContext& CommandContext, EAccelerationStructureBuildMode BuildMode);
-	void ConditionalCompactAccelerationStructure(FD3D12CommandContext& CommandContext);
+	void UpdateResidency(FD3D12CommandContext& CommandContext);
+	void CompactAccelerationStructure(FD3D12CommandContext& CommandContext, uint32 InGPUIndex, uint64 InSizeAfterCompaction);
+	void CreateAccelerationStructureBuildDesc(FD3D12CommandContext& CommandContext, EAccelerationStructureBuildMode BuildMode, D3D12_GPU_VIRTUAL_ADDRESS ScratchBufferAddress,
+											D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC& OutDesc, TArrayView<D3D12_RAYTRACING_GEOMETRY_DESC>& OutGeometryDescs) const;
+	
+	// Implement FD3D12ShaderResourceRenameListener interface
+	virtual void ResourceRenamed(FRHICommandListBase& RHICmdList, FD3D12BaseShaderResource* InRenamedResource, FD3D12ResourceLocation* InNewResourceLocation) override;
+
+	void RegisterAsRenameListener(uint32 InGPUIndex);
+	void UnregisterAsRenameListener(uint32 InGPUIndex);
+
+	void Swap(FD3D12RayTracingGeometry& Other);
+
+	void ReleaseUnderlyingResource();
 
 	bool bIsAccelerationStructureDirty[MAX_NUM_GPUS] = {};
 	void SetDirty(FRHIGPUMask GPUMask, bool bState)
@@ -44,33 +64,35 @@ public:
 	{
 		return bIsAccelerationStructureDirty[GPUIndex];
 	}
+	bool BuffersValid(uint32 GPUIndex) const;
 
-	uint32 IndexStride = 0; // 0 for non-indexed / implicit triangle list, 2 for uint16, 4 for uint32
-	uint32 IndexOffsetInBytes = 0;
-	uint32 TotalPrimitiveCount = 0; // Combined number of primitives in all mesh segments
+	using FRHIRayTracingGeometry::Initializer;
+	using FRHIRayTracingGeometry::SizeInfo;
 
-	D3D12_RAYTRACING_GEOMETRY_TYPE GeometryType = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+	static constexpr uint32 IndicesPerPrimitive = 3; // Triangle geometry only
 
-	TArray<FRayTracingGeometrySegment> Segments; // Defines addressable parts of the mesh that can be used for material assignment (one segment = one SBT record)
-	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS BuildFlags;
+	static FBufferRHIRef NullTransformBuffer; // Null transform for hidden sections
 
-	FIndexBufferRHIRef  RHIIndexBuffer;
-	static FVertexBufferRHIRef NullTransformBuffer; // Null transform for hidden sections
+	TRefCountPtr<FD3D12Buffer> AccelerationStructureBuffers[MAX_NUM_GPUS];
 
-	TRefCountPtr<FD3D12MemBuffer> AccelerationStructureBuffers[MAX_NUM_GPUS];
-	TRefCountPtr<FD3D12MemBuffer> ScratchBuffers[MAX_NUM_GPUS];
-
-	uint64 PostBuildInfoBufferReadbackFences[MAX_NUM_GPUS];
-	TRefCountPtr<FD3D12MemBuffer> PostBuildInfoBuffers[MAX_NUM_GPUS];
-	FStagingBufferRHIRef PostBuildInfoStagingBuffers[MAX_NUM_GPUS];
+	bool bRegisteredAsRenameListener[MAX_NUM_GPUS];
+	bool bHasPendingCompactionRequests[MAX_NUM_GPUS];
 
 	// Hit shader parameters per geometry segment
 	TArray<FHitGroupSystemParameters> HitGroupSystemParameters[MAX_NUM_GPUS];
 
-	FName DebugName;
+	FDebugName DebugName;
+	FName OwnerName;		// Store the path name of the owner object for resource tracking
+
+	// Array of geometry descriptions, one per segment (single-segment geometry is a common case).
+	// Only references CPU-accessible structures (no GPU resources).
+	// Used as a template for BuildAccelerationStructure() later.
+	TArray<D3D12_RAYTRACING_GEOMETRY_DESC, TInlineAllocator<1>> GeometryDescs;
+
+	uint64 AccelerationStructureCompactedSize = 0;
 };
 
-class FD3D12RayTracingScene : public FRHIRayTracingScene, public FD3D12AdapterChild
+class FD3D12RayTracingScene : public FRHIRayTracingScene, public FD3D12AdapterChild, public FNoncopyable
 {
 public:
 
@@ -79,19 +101,34 @@ public:
 	// Scaling beyond 5 total threads does not yield any speedup in practice.
 	static constexpr uint32 MaxBindingWorkers = 5; // RHI thread + 4 parallel workers.
 
-	FD3D12RayTracingScene(FD3D12Adapter* Adapter, const FRayTracingSceneInitializer& Initializer);
+	FD3D12RayTracingScene(FD3D12Adapter* Adapter, FRayTracingSceneInitializer2 Initializer);
 	~FD3D12RayTracingScene();
 
-	void BuildAccelerationStructure(FD3D12CommandContext& CommandContext, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS BuildFlags);
+	const FRayTracingSceneInitializer2& GetInitializer() const override final { return Initializer; }
+	uint32 GetLayerBufferOffset(uint32 LayerIndex) const override final { return Layers[LayerIndex].BufferOffset; }
 
-	TRefCountPtr<FD3D12MemBuffer> AccelerationStructureBuffers[MAX_NUM_GPUS];
-	bool bAccelerationStructureViewInitialized[MAX_NUM_GPUS] = {};
+	void BindBuffer(FRHIBuffer* Buffer, uint32 BufferOffset);
+	void ReleaseBuffer();
 
-	TArray<FRayTracingGeometryInstance> Instances;
+	void BuildAccelerationStructure(FD3D12CommandContext& CommandContext,
+		FD3D12Buffer* ScratchBuffer, uint32 ScratchBufferOffset,
+		FD3D12Buffer* InstanceBuffer, uint32 InstanceBufferOffset
+	);
 
-	// Unique list of geometries referenced by all instances in this scene.
-	// Any referenced geometry is kept alive while the scene is alive.
-	TArray<TRefCountPtr<FD3D12RayTracingGeometry>> Geometries;
+	struct FLayerData
+	{
+		D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS BuildInputs = {};
+		FRayTracingAccelerationStructureSize SizeInfo = {};
+		uint32 BufferOffset;
+		uint32 ScratchBufferOffset;
+	};
+
+	TArray<FLayerData> Layers;
+
+	TRefCountPtr<FD3D12Buffer> AccelerationStructureBuffers[MAX_NUM_GPUS];
+	uint32 BufferOffset = 0;
+
+	const FRayTracingSceneInitializer2 Initializer;
 
 	// Scene keeps track of child acceleration structure buffers to ensure
 	// they are resident when any ray tracing work is dispatched.
@@ -99,21 +136,11 @@ public:
 
 	void UpdateResidency(FD3D12CommandContext& CommandContext);
 
-	uint32 ShaderSlotsPerGeometrySegment = 1;
+	uint32 GetHitRecordBaseIndex(uint32 InstanceIndex, uint32 SegmentIndex) const { return (Initializer.SegmentPrefixSum[InstanceIndex] + SegmentIndex) * Initializer.ShaderSlotsPerGeometrySegment; }
 
-	// Exclusive prefix sum of `Instance.NumTransforms` for all instances in this scene. Used to emulate SV_InstanceID in hit shaders.
-	TArray<uint32> BaseInstancePrefixSum;
-
-	// Exclusive prefix sum of instance geometry segments is used to calculate SBT record address from instance and segment indices.
-	TArray<uint32> SegmentPrefixSum;
-	uint32 NumTotalSegments = 0;
-	uint32 GetHitRecordBaseIndex(uint32 InstanceIndex, uint32 SegmentIndex) const { return (SegmentPrefixSum[InstanceIndex] + SegmentIndex) * ShaderSlotsPerGeometrySegment; }
-
-	uint64 TotalPrimitiveCount = 0; // Combined number of primitives in all geometry instances
-
-	uint32 NumCallableShaderSlots = 0;
-	uint32 NumMissShaderSlots = 1; // always at least the default
-
+	// Array of hit group parameters per geometry segment across all scene instance geometries.
+	// Accessed as HitGroupSystemParametersCache[SegmentPrefixSum[InstanceIndex] + SegmentIndex].
+	// Only used for GPU 0 (secondary GPUs take the slow path).
 	TArray<FHitGroupSystemParameters> HitGroupSystemParametersCache;
 
 	// #dxr_todo UE-68230: shader tables should be explicitly registered and unregistered with the scene
@@ -122,12 +149,39 @@ public:
 
 	TMap<const FD3D12RayTracingPipelineState*, FD3D12RayTracingShaderTable*> ShaderTables[MAX_NUM_GPUS];
 
-	ERayTracingSceneLifetime Lifetime = RTSL_SingleFrame;
-	uint64 CreatedFrameFenceValue = 0;
-
 	uint64 LastCommandListID = 0;
 
-	FName DebugName;
+	bool bBuilt = false;
+};
+
+// Manages all the pending BLAS compaction requests
+class FD3D12RayTracingCompactionRequestHandler : FD3D12DeviceChild
+{
+public:
+
+	UE_NONCOPYABLE(FD3D12RayTracingCompactionRequestHandler)
+
+	FD3D12RayTracingCompactionRequestHandler(FD3D12Device* Device);
+	~FD3D12RayTracingCompactionRequestHandler()
+	{
+		check(PendingRequests.IsEmpty());
+	}
+
+	void RequestCompact(FD3D12RayTracingGeometry* InRTGeometry);
+	bool ReleaseRequest(FD3D12RayTracingGeometry* InRTGeometry);
+
+	void Update(FD3D12CommandContext& InCommandContext);
+
+private:
+
+	FCriticalSection CS;
+	TArray<FD3D12RayTracingGeometry*> PendingRequests;
+	TArray<FD3D12RayTracingGeometry*> ActiveRequests;
+	TArray<D3D12_GPU_VIRTUAL_ADDRESS> ActiveBLASGPUAddresses;
+
+	TRefCountPtr<FD3D12Buffer> PostBuildInfoBuffer;
+	FStagingBufferRHIRef PostBuildInfoStagingBuffer;
+	FD3D12SyncPointRef PostBuildInfoBufferReadbackSyncPoint;
 };
 
 #endif // D3D12_RHI_RAYTRACING

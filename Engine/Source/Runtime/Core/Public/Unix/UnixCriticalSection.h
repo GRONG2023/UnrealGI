@@ -3,9 +3,11 @@
 #pragma once
 
 #include "CoreTypes.h"
-#include "Misc/Timespan.h"
 #include "HAL/PThreadCriticalSection.h"
 #include "HAL/PThreadRWLock.h"
+#include "Misc/Timespan.h"
+
+class FString;
 
 /**
 	* Unix implementation of the FSystemWideCriticalSection. Uses exclusive file locking.

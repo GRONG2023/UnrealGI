@@ -1,12 +1,18 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Tracks/MovieScenePropertyTrack.h"
+
+#include "IMovieScenePlayer.h"
+#include "Channels/MovieSceneSectionChannelOverrideRegistry.h"
 #include "Algo/Sort.h"
+#include "MovieScene.h"
 #include "MovieSceneCommonHelpers.h"
 #include "MovieSceneTracksComponentTypes.h"
 #include "PropertyPathHelpers.h"
 #include "Systems/MovieScenePiecewiseBoolBlenderSystem.h"
 #include "UObject/Field.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieScenePropertyTrack)
 
 UMovieScenePropertyTrack::UMovieScenePropertyTrack(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -75,6 +81,59 @@ FText UMovieScenePropertyTrack::GetDefaultDisplayName() const
 	return FText::FromName(PropertyBinding.PropertyName);
 }
 
+FText UMovieScenePropertyTrack::GetDisplayNameToolTipText(const FMovieSceneLabelParams& LabelParams) const
+{
+	if (!LabelParams.BindingID.IsValid() || !LabelParams.Player)
+	{
+		return FText();
+	}
+	const TArrayView<TWeakObjectPtr<>> FoundBoundObjects = LabelParams.Player->FindBoundObjects(LabelParams.BindingID, LabelParams.SequenceID);
+	for (const TWeakObjectPtr<> BoundObject : FoundBoundObjects)
+	{
+		FTrackInstancePropertyBindings InstancePropertyBinding(GetPropertyName(), GetPropertyPath().ToString());
+		if (FProperty* BoundProperty = InstancePropertyBinding.GetProperty(*BoundObject))
+		{
+			FString PropertyName = BoundProperty->GetMetaData(TEXT("DisplayName"));
+			if (PropertyName.IsEmpty())
+			{
+				PropertyName = BoundProperty->GetName();
+			}
+
+			FString CategoryName = BoundProperty->GetMetaData(TEXT("Category")).Replace(TEXT("|"), TEXT(" \u00BB "));
+			if (!CategoryName.IsEmpty())
+			{
+				CategoryName.Append(TEXT(" \u00BB "));
+			}
+
+			return FText::FromString(FString::Printf(TEXT("%s%s\n(Path: %s)"), *CategoryName, *PropertyName, *InstancePropertyBinding.GetPropertyPath()));
+		}
+	}
+	
+	return FText::FromName(PropertyBinding.PropertyPath);
+}
+
+FSlateColor UMovieScenePropertyTrack::GetLabelColor(const FMovieSceneLabelParams& LabelParams) const
+{
+	// If there is no object binding extension, don't tint it
+	if (!LabelParams.BindingID.IsValid() || !LabelParams.Player)
+	{
+		return LabelParams.bIsDimmed ? FSlateColor::UseSubduedForeground() : FSlateColor::UseForeground();
+	}
+
+	// Return a normal colour if we have at least one bound object for which the property binding resolves
+	// correctly. Otherwise, return a red colour indicating a binding issue.
+	const TArrayView<TWeakObjectPtr<>> FoundBoundObjects = LabelParams.Player->FindBoundObjects(LabelParams.BindingID, LabelParams.SequenceID);
+	for (const TWeakObjectPtr<> BoundObject : FoundBoundObjects)
+	{
+		FTrackInstancePropertyBindings InstancePropertyBinding(GetPropertyName(), GetPropertyPath().ToString());
+		if (InstancePropertyBinding.GetProperty(*BoundObject))
+		{
+			return LabelParams.bIsDimmed ? FSlateColor::UseSubduedForeground() : FSlateColor::UseForeground();
+		}
+	}
+	return LabelParams.bIsDimmed ? FSlateColor(FLinearColor::Red.Desaturate(0.6f)) : FLinearColor::Red;
+}
+
 FName UMovieScenePropertyTrack::GetTrackName() const
 {
 	return UniqueTrackName;
@@ -139,14 +198,13 @@ bool UMovieScenePropertyTrack::IsEmpty() const
 	return Sections.Num() == 0;
 }
 
-
 TArray<UMovieSceneSection*, TInlineAllocator<4>> UMovieScenePropertyTrack::FindAllSections(FFrameNumber Time)
 {
 	TArray<UMovieSceneSection*, TInlineAllocator<4>> OverlappingSections;
 
 	for (UMovieSceneSection* Section : Sections)
 	{
-		if (Section->GetRange().Contains(Time))
+		if (MovieSceneHelpers::IsSectionKeyable(Section) && Section->GetRange().Contains(Time))
 		{
 			OverlappingSections.Add(Section);
 		}
@@ -182,10 +240,10 @@ UMovieSceneSection* UMovieScenePropertyTrack::FindOrExtendSection(FFrameNumber T
 {
 	Weight = 1.0f;
 	TArray<UMovieSceneSection*, TInlineAllocator<4>> OverlappingSections = FindAllSections(Time);
-	if (SectionToKey)
+	if (SectionToKey && MovieSceneHelpers::IsSectionKeyable(SectionToKey))
 	{
 		bool bCalculateWeight = false;
-		if (SectionToKey && !OverlappingSections.Contains(SectionToKey))
+		if (!OverlappingSections.Contains(SectionToKey))
 		{
 			if (SectionToKey->HasEndFrame() && SectionToKey->GetExclusiveEndFrame() <= Time)
 			{
@@ -329,10 +387,25 @@ void FMovieScenePropertyTrackEntityImportHelper::PopulateEvaluationField(UMovieS
 {
 	using namespace UE::MovieScene;
 
-	// Add the default entity for this section.
-	const int32 EntityIndex   = OutFieldBuilder->FindOrAddEntity(&Section, SectionPropertyValueImportingID);
-	const int32 MetaDataIndex = OutFieldBuilder->AddMetaData(InMetaData);
-	OutFieldBuilder->AddPersistentEntity(EffectiveRange, EntityIndex, MetaDataIndex);
+	int32 NumOverridenChannels = 0;
+	IMovieSceneChannelOverrideProvider* RegistryProvider = Cast<IMovieSceneChannelOverrideProvider>(&Section);
+	if (RegistryProvider)
+	{
+		if (UMovieSceneSectionChannelOverrideRegistry* OverrideRegistry = RegistryProvider->GetChannelOverrideRegistry(false))
+		{
+			NumOverridenChannels = OverrideRegistry->NumChannels();
+			OverrideRegistry->PopulateEvaluationFieldImpl(EffectiveRange, InMetaData, OutFieldBuilder, Section);
+		}
+	}
+
+	const int32 NumChannels = Section.GetChannelProxy().NumChannels();
+	if (NumChannels > NumOverridenChannels)
+	{
+		// Add the default entity for this section.
+		const int32 EntityIndex = OutFieldBuilder->FindOrAddEntity(&Section, SectionPropertyValueImportingID);
+		const int32 MetaDataIndex = OutFieldBuilder->AddMetaData(InMetaData);
+		OutFieldBuilder->AddPersistentEntity(EffectiveRange, EntityIndex, MetaDataIndex);
+	}
 
 	// Check if this section is animating a property with an edit-condition. If so, we need to also animate a boolean toggle
 	// that will be set to true while the main property is animated.
@@ -385,7 +458,10 @@ void FMovieScenePropertyTrackEntityImportHelper::PopulateEvaluationField(UMovieS
 					const FString EditConditionPropertyName = LeafProperty->GetMetaData("EditCondition");
 					if (!EditConditionPropertyName.IsEmpty())
 					{
-						EditConditionPropertyPath.Append(".");
+						if (!EditConditionPropertyPath.IsEmpty())
+						{
+							EditConditionPropertyPath.Append(".");
+						}
 						EditConditionPropertyPath.Append(EditConditionPropertyName);
 						bHasEditCondition = true;
 					}
@@ -403,7 +479,11 @@ void FMovieScenePropertyTrackEntityImportHelper::PopulateEvaluationField(UMovieS
 			FString EditConditionPropertyName = PropertyPathSegments[PropertyPathSegments.Num() - 1];
 			EditConditionPropertyName.InsertAt(0, TEXT("bOverride_"));
 
-			EditConditionPropertyPath.Append(".");
+
+			if (!EditConditionPropertyPath.IsEmpty())
+			{
+				EditConditionPropertyPath.Append(".");
+			}
 			EditConditionPropertyPath.Append(EditConditionPropertyName);
 			bHasEditCondition = true;
 		}
@@ -484,3 +564,4 @@ FName FMovieScenePropertyTrackEntityImportHelper::SanitizeBoolPropertyName(FName
 	PropertyVarName.RemoveFromStart("b", ESearchCase::CaseSensitive);
 	return FName(*PropertyVarName);
 }
+

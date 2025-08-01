@@ -2,7 +2,7 @@
 
 #pragma once 
 
-#include "CoreMinimal.h"
+#include "Math/Vector.h"
 
 /** Types of Collision Shapes that are used by Trace **/
 namespace ECollisionShape
@@ -21,10 +21,10 @@ struct FCollisionShape
 {
 	ECollisionShape::Type ShapeType;
 
-	static FORCEINLINE CONSTEXPR float MinBoxExtent() { return KINDA_SMALL_NUMBER; }
-	static FORCEINLINE CONSTEXPR float MinSphereRadius() { return KINDA_SMALL_NUMBER; }
-	static FORCEINLINE CONSTEXPR float MinCapsuleRadius() { return KINDA_SMALL_NUMBER; }
-	static FORCEINLINE CONSTEXPR float MinCapsuleAxisHalfHeight() { return KINDA_SMALL_NUMBER; }
+	static FORCEINLINE constexpr float MinBoxExtent() { return UE_KINDA_SMALL_NUMBER; }
+	static FORCEINLINE constexpr float MinSphereRadius() { return UE_KINDA_SMALL_NUMBER; }
+	static FORCEINLINE constexpr float MinCapsuleRadius() { return UE_KINDA_SMALL_NUMBER; }
+	static FORCEINLINE constexpr float MinCapsuleAxisHalfHeight() { return UE_KINDA_SMALL_NUMBER; }
 
 	/** Union that supports up to 3 floats **/
 	union
@@ -78,7 +78,7 @@ struct FCollisionShape
 	}
 
 	/** Utility function to Set Box and dimension */
-	void SetBox(const FVector& HalfExtent)
+	void SetBox(const FVector3f& HalfExtent)
 	{
 		ShapeType = ECollisionShape::Box;
 		Box.HalfExtentX = HalfExtent.X;
@@ -102,7 +102,7 @@ struct FCollisionShape
 	}
 
 	/** Utility function to set Capsule from Extent data */
-	void SetCapsule(const FVector& Extent)
+	void SetCapsule(const FVector3f& Extent)
 	{
 		ShapeType = ECollisionShape::Capsule;
 		Capsule.Radius = FMath::Max(Extent.X, Extent.Y);
@@ -193,6 +193,14 @@ struct FCollisionShape
 	static FCollisionShape MakeBox(const FVector& BoxHalfExtent)
 	{
 		FCollisionShape BoxShape;
+		BoxShape.SetBox(FVector3f(BoxHalfExtent));
+		return BoxShape;
+	}
+
+	/** Static utility function to make a box */
+	static FCollisionShape MakeBox(const FVector3f& BoxHalfExtent)
+	{
+		FCollisionShape BoxShape;
 		BoxShape.SetBox(BoxHalfExtent);
 		return BoxShape;
 	}
@@ -217,7 +225,11 @@ struct FCollisionShape
 	static FCollisionShape MakeCapsule(const FVector& Extent)
 	{
 		FCollisionShape CapsuleShape;
-		CapsuleShape.SetCapsule(Extent);
+		CapsuleShape.SetCapsule(FVector3f(Extent));
 		return CapsuleShape;
 	}
 };
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
+#endif

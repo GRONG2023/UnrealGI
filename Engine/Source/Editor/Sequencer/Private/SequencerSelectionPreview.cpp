@@ -1,99 +1,82 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SequencerSelectionPreview.h"
-#include "MovieSceneSection.h"
 
-void FSequencerSelectionPreview::SetSelectionState(FSequencerSelectedKey Key, ESelectionPreviewState InState)
+#include "HAL/PlatformCrt.h"
+#include "SequencerSelectedKey.h"
+#include "Templates/TypeHash.h"
+
+namespace UE::Sequencer { class FViewModel; }
+
+void FSequencerSelectionPreview::SetSelectionState(const UE::Sequencer::TWeakViewModelPtr<UE::Sequencer::FChannelModel>& Channel, FKeyHandle Key, ESelectionPreviewState InState)
 {
 	if (InState == ESelectionPreviewState::Undefined)
 	{
-		DefinedKeyStates.Remove(Key);
+		RawDefinedKeyStates.Remove(Key);
+		KeyHandleToModel.Remove(Key);
 	}
 	else
 	{
-		DefinedKeyStates.Add(Key, InState);
+		RawDefinedKeyStates.Add(Key, InState);
+		KeyHandleToModel.Add(Key, Channel);
 	}
 
 	CachedSelectionHash.Reset();
 }
 
-void FSequencerSelectionPreview::SetSelectionState(UMovieSceneSection* Section, ESelectionPreviewState InState)
+void FSequencerSelectionPreview::SetSelectionState(TWeakPtr<UE::Sequencer::FViewModel> InModel, ESelectionPreviewState InState)
 {
 	if (InState == ESelectionPreviewState::Undefined)
 	{
-		DefinedSectionStates.Remove(Section);
+		DefinedModelStates.Remove(InModel);
 	}
 	else
 	{
-		DefinedSectionStates.Add(Section, InState);
+		DefinedModelStates.Add(InModel, InState);
 	}
-
 	CachedSelectionHash.Reset();
 }
 
-void FSequencerSelectionPreview::SetSelectionState(TSharedRef<FSequencerDisplayNode> OutlinerNode, ESelectionPreviewState InState)
+ESelectionPreviewState FSequencerSelectionPreview::GetSelectionState(FKeyHandle Key) const
 {
-	if (InState == ESelectionPreviewState::Undefined)
-	{
-		DefinedOutlinerNodeStates.Remove(OutlinerNode);
-	}
-	else
-	{
-		DefinedOutlinerNodeStates.Add(OutlinerNode, InState);
-	}
-
-	CachedSelectionHash.Reset();
-}
-
-ESelectionPreviewState FSequencerSelectionPreview::GetSelectionState(const FSequencerSelectedKey& Key) const
-{
-	if (auto* State = DefinedKeyStates.Find(Key))
+	if (const ESelectionPreviewState* State = RawDefinedKeyStates.Find(Key))
 	{
 		return *State;
 	}
 	return ESelectionPreviewState::Undefined;
 }
 
-ESelectionPreviewState FSequencerSelectionPreview::GetSelectionState(UMovieSceneSection* Section) const
+
+ESelectionPreviewState FSequencerSelectionPreview::GetSelectionState(TWeakPtr<UE::Sequencer::FViewModel> InModel) const
 {
-	if (auto* State = DefinedSectionStates.Find(Section))
+	if (const ESelectionPreviewState* State = DefinedModelStates.Find(InModel))
 	{
 		return *State;
 	}
 	return ESelectionPreviewState::Undefined;
 }
 
-ESelectionPreviewState FSequencerSelectionPreview::GetSelectionState(TSharedRef<FSequencerDisplayNode> OutlinerNode) const
+UE::Sequencer::TViewModelPtr<UE::Sequencer::FChannelModel> FSequencerSelectionPreview::GetChannelForKey(FKeyHandle KeyHandle) const
 {
-	if (auto* State = DefinedOutlinerNodeStates.Find(OutlinerNode))
-	{
-		return *State;
-	}
-	return ESelectionPreviewState::Undefined;
+	return KeyHandleToModel.FindRef(KeyHandle).Pin();
 }
 
 void FSequencerSelectionPreview::Empty()
 {
 	EmptyDefinedKeyStates();
-	EmptyDefinedSectionStates();
-	EmptyDefinedOutlinerNodeStates();
+	EmptyDefinedModelStates();
 }
 
 void FSequencerSelectionPreview::EmptyDefinedKeyStates()
 {
-	DefinedKeyStates.Reset();
+	RawDefinedKeyStates.Reset();
+	KeyHandleToModel.Reset();
 	CachedSelectionHash.Reset();
 }
 
-void FSequencerSelectionPreview::EmptyDefinedSectionStates()
+void FSequencerSelectionPreview::EmptyDefinedModelStates()
 {
-	DefinedSectionStates.Reset();
-	CachedSelectionHash.Reset();
-}
-
-void FSequencerSelectionPreview::EmptyDefinedOutlinerNodeStates()
-{
-	DefinedOutlinerNodeStates.Reset();
+	DefinedModelStates.Reset();
 	CachedSelectionHash.Reset();
 }
 
@@ -103,15 +86,11 @@ uint32 FSequencerSelectionPreview::GetSelectionHash() const
 	{
 		uint32 NewHash = 0;
 
-		for (TPair<FSequencerSelectedKey, ESelectionPreviewState> Pair : DefinedKeyStates)
+		for (TPair<FKeyHandle, ESelectionPreviewState> Pair : RawDefinedKeyStates)
 		{
 			NewHash = HashCombine(NewHash, HashCombine(GetTypeHash(Pair.Key), GetTypeHash(Pair.Value)));
 		}
-		for (TPair<TWeakObjectPtr<UMovieSceneSection>, ESelectionPreviewState> Pair : DefinedSectionStates)
-		{
-			NewHash = HashCombine(NewHash, HashCombine(GetTypeHash(Pair.Key), GetTypeHash(Pair.Value)));
-		}
-		for (TPair<TSharedRef<FSequencerDisplayNode>, ESelectionPreviewState> Pair : DefinedOutlinerNodeStates)
+		for (TPair<TWeakPtr<UE::Sequencer::FViewModel>, ESelectionPreviewState> Pair : DefinedModelStates)
 		{
 			NewHash = HashCombine(NewHash, HashCombine(GetTypeHash(Pair.Key), GetTypeHash(Pair.Value)));
 		}

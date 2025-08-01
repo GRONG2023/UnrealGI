@@ -6,12 +6,12 @@
 #include "BehaviorTree/BTTaskNode.h"
 #include "BehaviorTree/BTAuxiliaryNode.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BTComposite_SimpleParallel)
+
 UBTComposite_SimpleParallel::UBTComposite_SimpleParallel(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
 	NodeName = "Simple Parallel";
-	bUseChildExecutionNotify = true;
-	bUseNodeDeactivationNotify = true;
-	bUseDecoratorsDeactivationCheck = true;
+	INIT_COMPOSITE_NODE_NOTIFY_FLAGS();
 	bApplyDecoratorScope = true;
 }
 
@@ -77,11 +77,13 @@ void UBTComposite_SimpleParallel::NotifyChildExecution(UBehaviorTreeComponent& O
 			
 			// notify decorators on main task, ignore observers updates in FakeSearchData - they are not allowed by parallel composite
 			FBehaviorTreeSearchData FakeSearchData(OwnerComp);
-			NotifyDecoratorsOnDeactivation(FakeSearchData, ChildIdx, NodeResult);
+			NotifyDecoratorsOnDeactivation(FakeSearchData, ChildIdx, NodeResult, true /*bIsRequestInSameInstance*/);
 
 			const int32 MyInstanceIdx = OwnerComp.FindInstanceContainingNode(this);
 
-			OwnerComp.UnregisterParallelTask(Children[EBTParallelChild::MainTask].ChildTask, MyInstanceIdx);
+			// use check() here not IntCastChecked() as MyInstanceIdx can be INDEX_NONE!
+			check(MyInstanceIdx < MAX_uint16);
+			OwnerComp.UnregisterParallelTask(Children[EBTParallelChild::MainTask].ChildTask, static_cast<uint16>(MyInstanceIdx));
 			if (NodeResult != EBTNodeResult::Aborted && !MyMemory->bRepeatMainTask)
 			{
 				// check if subtree should be aborted when task finished with success/failed result
@@ -142,6 +144,16 @@ bool UBTComposite_SimpleParallel::CanNotifyDecoratorsOnDeactivation(FBehaviorTre
 uint16 UBTComposite_SimpleParallel::GetInstanceMemorySize() const
 {
 	return sizeof(FBTParallelMemory);
+}
+
+void UBTComposite_SimpleParallel::InitializeMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryInit::Type InitType) const
+{
+	InitializeNodeMemory<FBTParallelMemory>(NodeMemory, InitType);
+}
+
+void UBTComposite_SimpleParallel::CleanupMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryClear::Type CleanupType) const
+{
+	CleanupNodeMemory<FBTParallelMemory>(NodeMemory, CleanupType);
 }
 
 bool UBTComposite_SimpleParallel::CanPushSubtree(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, int32 ChildIdx) const
@@ -210,3 +222,4 @@ FName UBTComposite_SimpleParallel::GetNodeIconName() const
 }
 
 #endif // WITH_EDITOR
+

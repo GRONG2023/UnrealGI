@@ -2,13 +2,21 @@
 
 #pragma once
 
+#include "Containers/Map.h"
 #include "CoreMinimal.h" // for DLLEXPORT (KISMET_API)
-
+#include "CoreTypes.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/SubclassOf.h"
 
+class FCompilerResultsLog;
+class FProperty;
+class FString;
 class UBlueprint;
 class UBlueprintCompilerExtension;
-class FCompilerResultsLog;
+class UClass;
+struct FCompilerNativizationOptions;
+struct FUObjectSerializeContext;
 
 struct FBPCompileRequest
 {
@@ -20,7 +28,7 @@ struct FBPCompileRequest
 	}
 
 	// BP that needs to be compiled:
-	UBlueprint* BPToCompile;
+	TObjectPtr<UBlueprint> BPToCompile;
 
 	// Legacy options for blueprint compilation:
 	EBlueprintCompileOptions CompileOptions;
@@ -56,11 +64,6 @@ struct KISMET_API FBlueprintCompilationManager
 	 */
 	static void CompileSynchronously(const FBPCompileRequest& Request);
 
-	/** 
-	 * Write c++ represenetation of the blueprint to OutHeaderSource and OutCppSource
-	 */
-	static void CompileSynchronouslyToCpp(UBlueprint* BP, TSharedPtr<FString> OutHeaderSource, TSharedPtr<FString> OutCppSource, const FCompilerNativizationOptions& NativizationOptions);
-	
 	/**
 	 * Adds a newly loaded blueprint to the compilation queue
 	 */

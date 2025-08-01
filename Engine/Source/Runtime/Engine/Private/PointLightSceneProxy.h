@@ -39,9 +39,6 @@ public:
 	,	bInverseSquared(Component->bUseInverseSquaredFalloff)
 	{
 		UpdateRadius(Component->AttenuationRadius);
-
-		// tiled deferred only supported for point/spot lights with 0 length
-		bTiledDeferredLightingSupported = (SourceLength == 0.0f);
 	}
 
 	virtual float GetSourceRadius() const override
@@ -54,7 +51,7 @@ public:
 		return bInverseSquared;
 	}
 
-	virtual void GetLightShaderParameters(FLightShaderParameters& PathTracingLightParameters) const override;
+	virtual void GetLightShaderParameters(FLightRenderParameters& LightParameters, uint32 Flags=0) const override;
 
 	virtual FVector GetPerObjectProjectedShadowProjectionPoint(const FBoxSphereBounds& SubjectBounds) const override
 	{

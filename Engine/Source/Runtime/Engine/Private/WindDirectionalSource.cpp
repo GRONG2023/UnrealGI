@@ -1,12 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/WindDirectionalSource.h"
+#include "SceneInterface.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Components/ArrowComponent.h"
 #include "Engine/Texture2D.h"
+#include "Engine/World.h"
 #include "SceneManagement.h"
 #include "Components/WindDirectionalSourceComponent.h"
 #include "Components/BillboardComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(WindDirectionalSource)
 
 AWindDirectionalSource::AWindDirectionalSource(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -90,7 +94,7 @@ bool FWindSourceSceneProxy::GetWindParameters(const FVector& EvaluatePosition, F
 		if (Distance <= Radius)
 		{
 			// Mimic Engine point light attenuation with a FalloffExponent of 1
-			const float RadialFalloff = FMath::Max(1.0f - ((EvaluatePosition - Position) / Radius).SizeSquared(), 0.0f);
+			const float RadialFalloff = FMath::Max<FVector::FReal>(1.0f - ((EvaluatePosition - Position) / Radius).SizeSquared(), 0.0f);
 			//WindDirectionAndSpeed = FVector4((EvaluatePosition - Position) / Distance * Strength * RadialFalloff, Speed); 
 
 			WindData.Direction = (EvaluatePosition - Position) / Distance;
@@ -284,4 +288,5 @@ bool UWindDirectionalSourceComponent::GetWindParameters(const FVector& EvaluateP
 
 	return bFoundWind;
 }
+
 

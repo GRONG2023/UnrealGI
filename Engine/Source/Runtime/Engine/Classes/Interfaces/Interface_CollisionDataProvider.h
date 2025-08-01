@@ -31,11 +31,25 @@ class IInterface_CollisionDataProvider
 	 */
 	virtual bool GetPhysicsTriMeshData(struct FTriMeshCollisionData* CollisionData, bool InUseAllTriData) { return false; }
 
+	/**	Returns an estimate of how much data would be retrieved by GetPhysicsTriMeshData.
+	 *
+	 * @param OutTriMeshEstimates - structure given by the caller to be filled with tri mesh estimate data
+	 * @return true if successful, false if unable to successfully fill in data structure
+	 */
+	virtual bool GetTriMeshSizeEstimates(struct FTriMeshCollisionDataEstimates& OutTriMeshEstimates, bool bInUseAllTriData) const { return false; }
+
 	/**	 Interface for checking if the implementing objects contains triangle mesh collision data 
 	 *
 	 * @return true if the implementing object contains triangle mesh data, false otherwise
 	 */
 	virtual bool ContainsPhysicsTriMeshData(bool InUseAllTriData) const { return false; }
+
+	/**
+	 * Poll for availability of asynchronously-populated triangle mesh collision data
+	 *
+	 * @return true if the triangle mesh collision can be accessed without blocking, false otherwise
+	 */
+	virtual bool PollAsyncPhysicsTriMeshData(bool InUseAllTriData) const { return true; }
 
 	/** Do we want to create a negative version of this mesh */
 	virtual bool WantsNegXTriMesh() { return false; }

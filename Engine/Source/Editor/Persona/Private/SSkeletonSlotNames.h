@@ -11,12 +11,13 @@
 #include "Toolkits/AssetEditorToolkit.h"
 #include "WorkflowOrientedApp/WorkflowTabFactory.h"
 #include "PersonaDelegates.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "IDocumentation.h"
 #include "Widgets/Views/STableViewBase.h"
 #include "Widgets/Views/STableRow.h"
 #include "Widgets/Views/STreeView.h"
 #include "EditorObjectsTracker.h"
+#include "EditorUndoClient.h"
 
 class FMenuBuilder;
 class IEditableSkeleton;
@@ -32,7 +33,7 @@ struct FNotificationInfo;
 struct FSkeletonSlotNamesSummoner : public FWorkflowTabFactory
 {
 public:
-	FSkeletonSlotNamesSummoner(TSharedPtr<class FAssetEditorToolkit> InHostingApp, const TSharedRef<class IEditableSkeleton>& InEditableSkeleton, FSimpleMulticastDelegate& InOnPostUndo, FOnObjectSelected InOnObjectSelected);
+	FSkeletonSlotNamesSummoner(TSharedPtr<class FAssetEditorToolkit> InHostingApp, const TSharedRef<class IEditableSkeleton>& InEditableSkeleton, FOnObjectSelected InOnObjectSelected);
 
 	virtual TSharedRef<SWidget> CreateTabBody(const FWorkflowTabSpawnInfo& Info) const override;
 
@@ -43,7 +44,6 @@ public:
 	}
 public:
 	TWeakPtr<class IEditableSkeleton> EditableSkeleton;
-	FSimpleMulticastDelegate& OnPostUndo;
 	FOnObjectSelected OnObjectSelected;
 };
 
@@ -82,7 +82,7 @@ protected:
 /** Widgets list type */
 typedef STreeView< TSharedPtr<FDisplayedSlotNameInfo> > SSlotNameListType;
 
-class SSkeletonSlotNames : public SCompoundWidget, public FGCObject
+class SSkeletonSlotNames : public SCompoundWidget, public FGCObject, public FSelfRegisteringEditorUndoClient
 {
 public:
 	SLATE_BEGIN_ARGS( SSkeletonSlotNames )
@@ -92,7 +92,7 @@ public:
 
 	SLATE_END_ARGS()
 public:
-	void Construct(const FArguments& InArgs, const TSharedRef<IEditableSkeleton>& InEditableSkeleton, FSimpleMulticastDelegate& InOnPostUndo);
+	void Construct(const FArguments& InArgs, const TSharedRef<IEditableSkeleton>& InEditableSkeleton);
 
 	/**
 	* Accessor so our rows can grab the filter text for highlighting
@@ -106,11 +106,19 @@ public:
 	/** Clears the detail view of whatever we displayed last */
 	void ClearDetailsView();
 
+	// FSelfRegisteringEditorUndoClient interface
+	virtual void PostUndo(bool bSuccess) override { PostUndoRedo(); }
+	virtual void PostRedo(bool bSuccess) override { PostUndoRedo(); }
+
 	/** This triggers a UI repopulation after undo has been called */
-	void PostUndo();
+	void PostUndoRedo();
 
 	// FGCObject interface start
 	virtual void AddReferencedObjects( FReferenceCollector& Collector ) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("SSkeletonSlotNames");
+	}
 	// FGCObject interface end
 
 private:
@@ -207,7 +215,7 @@ private:
 	void ReferenceWindowClosed(const TSharedRef<SWindow>& Window);
 
 	/** The skeleton we are currently editing */
-	TWeakPtr<class IEditableSkeleton> EditableSkeletonPtr;
+	TSharedPtr<class IEditableSkeleton> EditableSkeleton;
 
 	/** Delegate call to select an object & display its details */
 	FOnObjectSelected OnObjectSelected;

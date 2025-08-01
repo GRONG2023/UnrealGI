@@ -43,7 +43,7 @@ enum class EDrivenDestinationMode : uint8
  * This is the runtime version of a bone driven controller, which maps part of the state from one bone to another (e.g., 2 * source.x -> target.z)
  */
 USTRUCT()
-struct ANIMGRAPHRUNTIME_API FAnimNode_BoneDrivenController : public FAnimNode_SkeletalControlBase
+struct FAnimNode_BoneDrivenController : public FAnimNode_SkeletalControlBase
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -53,7 +53,7 @@ struct ANIMGRAPHRUNTIME_API FAnimNode_BoneDrivenController : public FAnimNode_Sk
 
 	/** Curve used to map from the source attribute to the driven attributes if present (otherwise the Multiplier will be used) */
 	UPROPERTY(EditAnywhere, Category=Mapping)
-	UCurveFloat* DrivingCurve;
+	TObjectPtr<UCurveFloat> DrivingCurve;
 
 	// Multiplier to apply to the input value (Note: Ignored when a curve is used)
 	UPROPERTY(EditAnywhere, Category=Mapping)
@@ -62,22 +62,22 @@ struct ANIMGRAPHRUNTIME_API FAnimNode_BoneDrivenController : public FAnimNode_Sk
 	// Minimum limit of the input value (mapped to RemappedMin, only used when limiting the source range)
 	// If this is rotation, the unit is radian
 	UPROPERTY(EditAnywhere, Category=Mapping, meta=(EditCondition=bUseRange, DisplayName="Source Range Min"))
-	float RangeMin;
+	double RangeMin;
 
 	// Maximum limit of the input value (mapped to RemappedMax, only used when limiting the source range)
 	// If this is rotation, the unit is radian
 	UPROPERTY(EditAnywhere, Category=Mapping, meta=(EditCondition=bUseRange, DisplayName="Source Range Max"))
-	float RangeMax;
+	double RangeMax;
 
 	// Minimum value to apply to the destination (remapped from the input range)
 	// If this is rotation, the unit is radian
 	UPROPERTY(EditAnywhere, Category=Mapping, meta=(EditCondition=bUseRange, DisplayName="Mapped Range Min"))
-	float RemappedMin;
+	double RemappedMin;
 
 	// Maximum value to apply to the destination (remapped from the input range)
 	// If this is rotation, the unit is radian
 	UPROPERTY(EditAnywhere, Category = Mapping, meta = (EditCondition = bUseRange, DisplayName="Mapped Range Max"))
-	float RemappedMax;
+	double RemappedMax;
 
 	/** Name of Morph Target to drive using the source attribute */
 	UPROPERTY(EditAnywhere, Category = "Destination (driven)")
@@ -147,29 +147,29 @@ public:
 	uint8 bAffectTargetScaleZ : 1;
 
 public:
-	FAnimNode_BoneDrivenController();
+	ANIMGRAPHRUNTIME_API FAnimNode_BoneDrivenController();
 
 	// FAnimNode_Base interface
-	virtual void GatherDebugData(FNodeDebugData& DebugData) override;
+	ANIMGRAPHRUNTIME_API virtual void GatherDebugData(FNodeDebugData& DebugData) override;
 	// End of FAnimNode_Base interface
 
 	// FAnimNode_SkeletalControlBase interface
-	virtual void EvaluateSkeletalControl_AnyThread(FComponentSpacePoseContext& Output, TArray<FBoneTransform>& OutBoneTransforms) override;
-	virtual void EvaluateComponentSpaceInternal(FComponentSpacePoseContext& Context);
-	virtual bool IsValidToEvaluate(const USkeleton* Skeleton, const FBoneContainer& RequiredBones) override;
+	ANIMGRAPHRUNTIME_API virtual void EvaluateSkeletalControl_AnyThread(FComponentSpacePoseContext& Output, TArray<FBoneTransform>& OutBoneTransforms) override;
+	ANIMGRAPHRUNTIME_API virtual void EvaluateComponentSpaceInternal(FComponentSpacePoseContext& Context);
+	ANIMGRAPHRUNTIME_API virtual bool IsValidToEvaluate(const USkeleton* Skeleton, const FBoneContainer& RequiredBones) override;
 	// End of FAnimNode_SkeletalControlBase interface
 
 #if WITH_EDITORONLY_DATA
 	// Upgrade a node from the output enum to the output bits (change made in FAnimationCustomVersion::BoneDrivenControllerMatchingMaya)
-	void ConvertTargetComponentToBits();
+	ANIMGRAPHRUNTIME_API void ConvertTargetComponentToBits();
 #endif
 
 protected:
 	
 	// FAnimNode_SkeletalControlBase protected interface
-	virtual void InitializeBoneReferences(const FBoneContainer& RequiredBones) override;
+	ANIMGRAPHRUNTIME_API virtual void InitializeBoneReferences(const FBoneContainer& RequiredBones) override;
 
 	/** Extracts the value used to drive the target bone or parameter */
-	const float ExtractSourceValue(const FTransform& InCurrentBoneTransform, const FTransform& InRefPoseBoneTransform);
+	ANIMGRAPHRUNTIME_API const double ExtractSourceValue(const FTransform& InCurrentBoneTransform, const FTransform& InRefPoseBoneTransform);
 	// End of FAnimNode_SkeletalControlBase protected interface
 };

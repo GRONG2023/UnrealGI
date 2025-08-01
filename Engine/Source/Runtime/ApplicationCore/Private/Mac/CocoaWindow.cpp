@@ -47,41 +47,23 @@ NSString* NSPerformDragOperation = @"NSPerformDragOperation";
 - (NSRect)openGLFrame
 {
 	SCOPED_AUTORELEASE_POOL;
-	if ([self styleMask] & NSWindowStyleMaskTexturedBackground)
-	{
-		return [self frame];
-	}
-	else
-	{
-		return [[self contentView] frame];
-	}
+	return [[self contentView] frame];
 }
 
 - (NSView*)openGLView
 {
 	SCOPED_AUTORELEASE_POOL;
-	if (FPlatformMisc::IsRunningOnMavericks() && [self styleMask] & (NSWindowStyleMaskTexturedBackground))
-	{
-		NSView* SuperView = [[self contentView] superview];
-		for (NSView* View in [SuperView subviews])
-		{
-			if ([View isKindOfClass:[FCocoaTextView class]])
-			{
-				return View;
-			}
-		}
-		return nil;
-	}
-	else
-	{
-		return [self contentView];
-	}
+	return [self contentView];
 }
 
 - (void)setAcceptsInput:(bool)InAcceptsInput
 {
 	bAcceptsInput = InAcceptsInput;
 }
+
+- (NSApplicationPresentationOptions)window:(NSWindow *)window willUseFullScreenPresentationOptions:(NSApplicationPresentationOptions)proposedOptions {
+		return proposedOptions;
+	  }
 
 - (void)setWindowMode:(EWindowMode::Type)NewWindowMode
 {
@@ -128,7 +110,7 @@ NSString* NSPerformDragOperation = @"NSPerformDragOperation";
 - (BOOL)canBecomeMainWindow
 {
 	SCOPED_AUTORELEASE_POOL;
-	return bAcceptsInput && ![self ignoresMouseEvents];
+	return bAcceptsInput && ![self ignoresMouseEvents] && self.AllowMainWindow;
 }
 
 - (BOOL)canBecomeKeyWindow
@@ -151,8 +133,7 @@ NSString* NSPerformDragOperation = @"NSPerformDragOperation";
 	{
 		MainThreadCall(^{
 			[super setAlphaValue:WindowAlpha];
-		}, UE4ShowEventMode, false);
-
+		}, UnrealShowEventMode, false);
 	}
 }
 
@@ -163,7 +144,7 @@ NSString* NSPerformDragOperation = @"NSPerformDragOperation";
 		bRenderInitialized = true;
 		MainThreadCall(^{
 			[super setAlphaValue:Opacity];
-		}, UE4ShowEventMode, false);
+		}, UnrealShowEventMode, false);
 	}
 }
 
@@ -300,7 +281,7 @@ NSString* NSPerformDragOperation = @"NSPerformDragOperation";
 					MacApplication->OnWindowActivationChanged(Window.ToSharedRef(), EWindowActivation::Activate);
 				}
 			}
-		}, @[ NSDefaultRunLoopMode, UE4ResizeEventMode, UE4ShowEventMode, UE4FullscreenEventMode, UE4CloseEventMode ], true);
+		}, @[ NSDefaultRunLoopMode, UnrealResizeEventMode, UnrealShowEventMode, UnrealFullscreenEventMode, UnrealCloseEventMode ], true);
 	}
 }
 
@@ -321,7 +302,7 @@ NSString* NSPerformDragOperation = @"NSPerformDragOperation";
 					MacApplication->OnWindowActivationChanged(Window.ToSharedRef(), EWindowActivation::Deactivate);
 				}
 			}
-		}, @[ NSDefaultRunLoopMode, UE4ResizeEventMode, UE4ShowEventMode, UE4FullscreenEventMode, UE4CloseEventMode ], true);
+		}, @[ NSDefaultRunLoopMode, UnrealResizeEventMode, UnrealShowEventMode, UnrealFullscreenEventMode, UnrealCloseEventMode ], true);
 	}
 }
 
@@ -480,7 +461,7 @@ NSString* NSPerformDragOperation = @"NSPerformDragOperation";
 					MacApplication->OnWindowWillResize(Window.ToSharedRef());
 				}
 			}
-		}, @[ NSDefaultRunLoopMode, UE4ResizeEventMode, UE4ShowEventMode, UE4FullscreenEventMode ], true);
+		}, @[ NSDefaultRunLoopMode, UnrealResizeEventMode, UnrealShowEventMode, UnrealFullscreenEventMode ], true);
 	}
 	return frameSize;
 }
@@ -556,7 +537,7 @@ NSString* NSPerformDragOperation = @"NSPerformDragOperation";
 
 - (void)UpdateAccessibilityView:(AccessibleWidgetId) InAccessibilityWindowId
 {
-	checkf(!IsInGameThread(), TEXT("Updating accessibility view in FCocoaWindow from Game Thread! Accessibility  can only be done on Main Thread!"));
+	checkf([NSThread isMainThread], TEXT("Updating accessibility view in FCocoaWindow from wrong Thread! Accessibility can only be done on Main Thread!"));
 	NSView* OpenGLView = [self openGLView];
 	// FCocoaAccessibilityView is the base class all custom NSViews must inherit from to support accessibility
 	if([OpenGLView isKindOfClass:[FCocoaAccessibilityView class]])
@@ -568,7 +549,7 @@ NSString* NSPerformDragOperation = @"NSPerformDragOperation";
 
 - (void)ClearAccessibilityView
 {
-	checkf(!IsInGameThread(), TEXT("Updating accessibility view in FCocoaWindow from Game Thread! Accessibility  can only be done on Main Thread!"));
+	checkf([NSThread isMainThread], TEXT("Updating accessibility view in FCocoaWindow from wrong Thread! Accessibility can only be done on Main Thread!"));
 	NSView* OpenGLView = [self openGLView];
 	// FCocoaAccessibilityView is the base class all custom NSViews must inherit from to support accessibility
 	if([OpenGLView isKindOfClass:[FCocoaAccessibilityView class]])
@@ -578,5 +559,19 @@ NSString* NSPerformDragOperation = @"NSPerformDragOperation";
 	}
 }
 #endif
+
+- (BOOL)AllowMainWindow
+{
+	switch (self.Type)
+	{
+		case EWindowType::Menu:
+		case EWindowType::ToolTip:
+		case EWindowType::Notification:
+		case EWindowType::CursorDecorator:
+			return false;
+		default:
+			return true;
+	}
+}
 
 @end

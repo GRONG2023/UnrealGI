@@ -10,24 +10,20 @@
 #include "AISense.generated.h"
 
 class APawn;
+class FGameplayDebuggerCategory;
 class UAIPerceptionSystem;
 class UAISenseEvent;
 
 DECLARE_DELEGATE_OneParam(FOnPerceptionListenerUpdateDelegate, const FPerceptionListener&);
 
-UCLASS(ClassGroup = AI, abstract, config = Engine)
-class AIMODULE_API UAISense : public UObject
+UCLASS(ClassGroup = AI, abstract, config = Engine, MinimalAPI)
+class UAISense : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
-	static const float SuspendNextUpdate;
+	static AIMODULE_API const float SuspendNextUpdate;
 
 protected:
-	UE_DEPRECATED(4.23, "This property will be removed in future versions. Use AISenseConfig::MaxAge instead.")
-	/** age past which stimulus of this sense are "forgotten". (DEPRECATED: This property will be removed in future versions. Use AISenseConfig::MaxAge instead.)*/
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AI Perception", config)
-	float DefaultExpirationAge;
-
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "AI Perception", config)
 	EAISenseNotifyType NotifyType;
 
@@ -46,7 +42,7 @@ protected:
 	
 private:
 	UPROPERTY()
-	UAIPerceptionSystem* PerceptionSystemInstance;
+	TObjectPtr<UAIPerceptionSystem> PerceptionSystemInstance;
 
 	/** then this count reaches 0 sense will be updated */
 	float TimeUntilNextUpdate;
@@ -54,21 +50,21 @@ private:
 	FAISenseID SenseID;
 
 protected:
-	/**	If bound will be called when new FPerceptionListener gets registers with AIPerceptionSystem */
+	/**	Called when a new FPerceptionListener registers with AIPerceptionSystem */
 	FOnPerceptionListenerUpdateDelegate OnNewListenerDelegate;
 
-	/**	If bound will be called when a FPerceptionListener's in AIPerceptionSystem change */
+	/**	Called when a registered FPerceptionListener changes */
 	FOnPerceptionListenerUpdateDelegate OnListenerUpdateDelegate;
 
-	/**	If bound will be called when a FPerceptionListener's in removed from AIPerceptionSystem */
+	/**	Called when a FPerceptionListener is removed from AIPerceptionSystem */
 	FOnPerceptionListenerUpdateDelegate OnListenerRemovedDelegate;
 				
 public:
 
-	virtual UWorld* GetWorld() const override;
+	AIMODULE_API virtual UWorld* GetWorld() const override;
 
 	/** use with caution! Needs to be called before any senses get instantiated or listeners registered. DOES NOT update any perceptions system instances */
-	static void HardcodeSenseID(TSubclassOf<UAISense> SenseClass, FAISenseID HardcodedID);
+	static AIMODULE_API void HardcodeSenseID(TSubclassOf<UAISense> SenseClass, FAISenseID HardcodedID);
 
 	static FAISenseID GetSenseID(const TSubclassOf<UAISense> SenseClass) { return SenseClass ? ((const UAISense*)SenseClass->GetDefaultObject())->SenseID : FAISenseID::InvalidID(); }
 	template<typename TSense>
@@ -80,7 +76,7 @@ public:
 
 	FORCEINLINE bool WantsUpdateOnlyOnPerceptionValueChange() const { return (NotifyType == EAISenseNotifyType::OnPerceptionChange); }
 
-	virtual void PostInitProperties() override;
+	AIMODULE_API virtual void PostInitProperties() override;
 
 	/** 
 	 *	@return should this sense be ticked now
@@ -103,11 +99,8 @@ public:
 	virtual void RegisterSource(AActor& SourceActors){}
 	virtual void UnregisterSource(AActor& SourceActors){}
 
-	UE_DEPRECATED(4.25, "This method is no longer used and will be removed in future versions. UnregisterSource is called by AActor.OnEndPlay delegate and will perform the cleanup.")
-	virtual void CleanseInvalidSources() {}
-
-	virtual void RegisterWrappedEvent(UAISenseEvent& PerceptionEvent);
-	virtual FAISenseID UpdateSenseID();
+	AIMODULE_API virtual void RegisterWrappedEvent(UAISenseEvent& PerceptionEvent);
+	AIMODULE_API virtual FAISenseID UpdateSenseID();
 
 	bool NeedsNotificationOnForgetting() const { return bNeedsForgettingNotification; }
 	virtual void OnListenerForgetsActor(const FPerceptionListener& Listener, AActor& ActorToForget) {}
@@ -118,22 +111,18 @@ public:
 	FORCEINLINE void OnListenerRemoved(const FPerceptionListener& RemovedListener) { OnListenerRemovedDelegate.ExecuteIfBound(RemovedListener); }
 	virtual void OnListenerConfigUpdated(const FPerceptionListener& UpdatedListener) { OnListenerUpdate(UpdatedListener); }
 
-	UE_DEPRECATED(4.23, "This method will be removed in future versions. Perception relies on AISenseConfig::MaxAge so the value returned is no longer used by the perception system.")
-	FORCEINLINE float GetDefaultExpirationAge() const
-	{
-		PRAGMA_DISABLE_DEPRECATION_WARNINGS
-		return DefaultExpirationAge; 
-		PRAGMA_ENABLE_DEPRECATION_WARNINGS
-	}
-
 	bool WantsNewPawnNotification() const { return bWantsNewPawnNotification; }
 	bool ShouldAutoRegisterAllPawnsAsSources() const { return bAutoRegisterAllPawnsAsSources; }
+
+#if WITH_GAMEPLAY_DEBUGGER_MENU
+	AIMODULE_API virtual void DescribeSelfToGameplayDebugger(const UAIPerceptionSystem& PerceptionSystem, FGameplayDebuggerCategory& DebuggerCategory) const;
+#endif // WITH_GAMEPLAY_DEBUGGER_MENU
 
 protected:
 	friend UAIPerceptionSystem;
 	/** gets called when perception system gets notified about new spawned pawn. 
 	 *	@Note: do not call super implementation. It's used to detect when subclasses don't override it */
-	virtual void OnNewPawn(APawn& NewPawn);
+	AIMODULE_API virtual void OnNewPawn(APawn& NewPawn);
 
 	/** @return time until next update */
 	virtual float Update() { return FLT_MAX; }
@@ -146,19 +135,12 @@ protected:
 
 	FORCEINLINE UAIPerceptionSystem* GetPerceptionSystem() { return PerceptionSystemInstance; }
 
-	void SetSenseID(FAISenseID Index);
+	AIMODULE_API void SetSenseID(FAISenseID Index);
 
 	/** returning pointer rather then a reference to prevent users from
 	 *	accidentally creating copies by creating non-reference local vars */
-	AIPerception::FListenerMap* GetListeners();
+	AIMODULE_API AIPerception::FListenerMap* GetListeners();
 
 	/** To be called only for BP-generated classes */
-	void ForceSenseID(FAISenseID SenseID);
-
-	UE_DEPRECATED(4.13, "Function removed, use AISenseConfig.GetDebugColor() instead.")
-	FColor GetDebugColor() const { return FColor::White; }
-	UE_DEPRECATED(4.13, "Function removed, use AISenseConfig.GetSenseName() instead.")
-	FString GetDebugName() const { return FString(); }
-	UE_DEPRECATED(4.13, "Function removed, use AISenseConfig.DescribeSelfToGameplayDebugger() instead.")
-	virtual FString GetDebugLegend() const { return FString(); };
+	AIMODULE_API void ForceSenseID(FAISenseID SenseID);
 };

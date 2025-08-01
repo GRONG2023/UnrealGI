@@ -15,17 +15,30 @@ struct FPostProcessSettings;
 struct FWorldContext;
 class UTexture;
 class FSceneViewFamily;
+class FSceneView;
+class FRHICommandListImmediate;
 class FTexture;
+
+struct FHeadMountedDisplayPassContext
+{
+	FHeadMountedDisplayPassContext(FRHICommandListImmediate& InRHICmdList, const FSceneView& InView)
+		: RHICmdList(InRHICmdList)
+		, View(InView)
+	{}
+
+	FRHICommandListImmediate& RHICmdList;
+	const FSceneView& View;
+};
 
 /**
  * HMD device interface
  */
 
-class HEADMOUNTEDDISPLAY_API IHeadMountedDisplay : public IModuleInterface
+class IHeadMountedDisplay : public IModuleInterface
 {
 
 public:
-	IHeadMountedDisplay();
+	HEADMOUNTEDDISPLAY_API IHeadMountedDisplay();
 
 	/**
 	 * Returns true if HMD is currently connected.  It may or may not be in use.
@@ -59,6 +72,7 @@ public:
 		int		DesktopX, DesktopY;
 		int		ResolutionX, ResolutionY;
 		int		WindowSizeX, WindowSizeY;
+		bool	bShouldTestResolution;
 
 		MonitorInfo() : MonitorId(0)
 			, DesktopX(0)
@@ -67,6 +81,7 @@ public:
 			, ResolutionY(0)
 			, WindowSizeX(0)
 			, WindowSizeY(0)
+			, bShouldTestResolution(false)
 		{
 		}
 
@@ -93,7 +108,7 @@ public:
 	/**
 	 * Returns eye render params, used from PostProcessHMD, RenderThread.
 	 */
-	virtual void	GetEyeRenderParams_RenderThread(const struct FRenderingCompositePassContext& Context, FVector2D& EyeToSrcUVScaleValue, FVector2D& EyeToSrcUVOffsetValue) const {}
+	virtual void	GetEyeRenderParams_RenderThread(const struct FHeadMountedDisplayPassContext& Context, FVector2D& EyeToSrcUVScaleValue, FVector2D& EyeToSrcUVOffsetValue) const {}
 
 	/**
 	 * Accessors to modify the interpupillary distance (meters)
@@ -133,14 +148,14 @@ public:
 	/**
 	* When implemented, creates a new post process node to provide platform-specific HMD distortion.
 	*/
-	virtual void CreateHMDPostProcessPass_RenderThread(class FRDGBuilder& GraphBuilder, const class FViewInfo& View, const struct FHMDDistortionInputs& Inputs, struct FScreenPassTexture& OutPass) const {}
+	virtual void CreateHMDPostProcessPass_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, const struct FHMDDistortionInputs& Inputs, struct FScreenPassTexture& OutPass) const {}
 
 public:
 
 	/**
 	 * Gets the current pixel density setting.
 	 */
-	virtual float GetPixelDenity() const { return 1.0f; }
+	virtual float GetPixelDenity() const { check(IsInGameThread() || IsInRenderingThread()); return 1.0f; }
 
 	/**
 	 * Sets the pixel density. This may cause render target resizing.
@@ -150,7 +165,7 @@ public:
 	/**
 	* Gets the ideal render target size for the device. See vr.pixeldensity description.
 	*/
-	virtual FIntPoint GetIdealRenderTargetSize() const { return FIntPoint(); }
+	virtual FIntPoint GetIdealRenderTargetSize() const { check(IsInGameThread() || IsInRenderingThread()); return FIntPoint(); }
 
 	/**
 	* Gets the ideal render target size for the debug canvas on the device.
@@ -197,15 +212,15 @@ public:
 	* Optional method to draw a view's hidden area mesh where supported.
 	* This can be used to avoid rendering pixels which are not included as input into the final distortion pass.
 	*/
-	virtual void DrawHiddenAreaMesh_RenderThread(class FRHICommandList& RHICmdList, EStereoscopicPass StereoPass) const {};
+	virtual void DrawHiddenAreaMesh(class FRHICommandList& RHICmdList, int32 ViewIndex) const {};
 
 	/**
 	* Optional method to draw a view's visible area mesh where supported.
 	* This can be used instead of a full screen quad to avoid rendering pixels which are not included as input into the final distortion pass.
 	*/
-	virtual void DrawVisibleAreaMesh_RenderThread(class FRHICommandList& RHICmdList, EStereoscopicPass StereoPass) const {};
+	virtual void DrawVisibleAreaMesh(class FRHICommandList& RHICmdList, int32 ViewIndex) const {};
 
-	virtual void DrawDistortionMesh_RenderThread(struct FRenderingCompositePassContext& Context, const FIntPoint& TextureSize) {}
+	virtual void DrawDistortionMesh_RenderThread(struct FHeadMountedDisplayPassContext& Context, const FIntPoint& TextureSize) {}
 
 	/**
 	 * This method is able to change screen settings right before any drawing occurs. 
@@ -240,15 +255,20 @@ public:
 	 * the regular desktop apps. In this case, FCoreDelegates::ApplicationWillEnterBackgroundDelegate and FCoreDelegates::ApplicationHasEnteredForegroundDelegate
 	 * reflect the state of VR focus (either the app should be rendered in HMD or not).
 	 */
-	virtual bool DoesAppUseVRFocus() const;
+	HEADMOUNTEDDISPLAY_API virtual bool DoesAppUseVRFocus() const;
 
 	/**
 	 * Returns true, if the app has VR focus, meaning if it is rendered in the HMD.
 	 */
-	virtual bool DoesAppHaveVRFocus() const;
+	HEADMOUNTEDDISPLAY_API virtual bool DoesAppHaveVRFocus() const;
 
 	/**
 	 * If true, scene rendering should be skipped.
 	 */
 	virtual bool IsRenderingPaused() const { return false; }
+
+	/**
+	 * Set the multiply and offset colors for composited images in the HMD
+	 */
+	virtual bool SetColorScaleAndBias(FLinearColor ColorScale, FLinearColor ColorBias) { return false;  };
 };

@@ -18,94 +18,6 @@ UClass* FAssetTypeActions_BlueprintGeneratedClass::GetSupportedClass() const
 	return UBlueprintGeneratedClass::StaticClass();
 }
 
-void FAssetTypeActions_BlueprintGeneratedClass::GetActions(const TArray<UObject*>& InObjects, FToolMenuSection& Section)
-{
-	TArray<TWeakObjectPtr<UBlueprintGeneratedClass>> BPGCs = GetTypedWeakObjectPtrs<UBlueprintGeneratedClass>(InObjects);
-
-	if (BPGCs.Num() == 1)
-	{
-		TAttribute<FText>::FGetter DynamicTooltipGetter;
-		DynamicTooltipGetter.BindSP(this, &FAssetTypeActions_BlueprintGeneratedClass::GetNewDerivedBlueprintTooltip, BPGCs[0]);
-		TAttribute<FText> DynamicTooltipAttribute = TAttribute<FText>::Create(DynamicTooltipGetter);
-
-		Section.AddMenuEntry(
-			"BlueprintGeneratedClass_NewDerivedBlueprint",
-			LOCTEXT("BlueprintGeneratedClass_NewDerivedBlueprint", "Create Child Blueprint Class"),
-			DynamicTooltipAttribute,
-			FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.CreateClassBlueprint"),
-			FUIAction(
-				FExecuteAction::CreateSP(this, &FAssetTypeActions_BlueprintGeneratedClass::ExecuteNewDerivedBlueprint, BPGCs[0]),
-				FCanExecuteAction::CreateSP(this, &FAssetTypeActions_BlueprintGeneratedClass::CanExecuteNewDerivedBlueprint, BPGCs[0])
-			)
-		);
-	}
-}
-
-UFactory* FAssetTypeActions_BlueprintGeneratedClass::GetFactoryForNewDerivedBlueprint(UBlueprintGeneratedClass* InBPGC) const
-{
-	UBlueprintFactory* Factory = NewObject<UBlueprintFactory>();
-	Factory->ParentClass = InBPGC;
-	return Factory;
-}
-
-UClass* FAssetTypeActions_BlueprintGeneratedClass::GetNewDerivedBlueprintClass() const
-{
-	return UBlueprint::StaticClass();
-}
-
-void FAssetTypeActions_BlueprintGeneratedClass::ExecuteNewDerivedBlueprint(TWeakObjectPtr<UBlueprintGeneratedClass> InObject)
-{
-	if (UBlueprintGeneratedClass* TargetParentClass = InObject.Get())
-	{
-		if (!FKismetEditorUtilities::CanCreateBlueprintOfClass(TargetParentClass))
-		{
-			FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("InvalidClassToMakeBlueprintFrom", "Invalid class with which to make a Blueprint."));
-			return;
-		}
-
-		FString Name;
-		FString PackageName;
-		CreateUniqueAssetName(TargetParentClass->GetOutermost()->GetName(), TEXT("_Child"), PackageName, Name);
-		const FString PackagePath = FPackageName::GetLongPackagePath(PackageName);
-
-		FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser");
-		ContentBrowserModule.Get().CreateNewAsset(Name, PackagePath, GetNewDerivedBlueprintClass(), GetFactoryForNewDerivedBlueprint(TargetParentClass));
-	}
-}
-
-FText FAssetTypeActions_BlueprintGeneratedClass::GetNewDerivedBlueprintTooltip(TWeakObjectPtr<UBlueprintGeneratedClass> InObject)
-{
-	if (!CanExecuteNewDerivedBlueprint(InObject))
-	{
-		return LOCTEXT("BlueprintGeneratedClass_NewDerivedBlueprintIsDeprecatedTooltip", "Compiled Blueprint class is deprecated, cannot derive a child Blueprint!");
-	}
-	else
-	{
-		return LOCTEXT("BlueprintGeneratedClass_NewDerivedBlueprintTooltip", "Creates a Child Blueprint Class based on the current compiled Blueprint, allowing you to create variants easily.");
-	}
-}
-
-bool FAssetTypeActions_BlueprintGeneratedClass::CanExecuteNewDerivedBlueprint(TWeakObjectPtr<UBlueprintGeneratedClass> InObject)
-{
-	UBlueprintGeneratedClass* BPGC = InObject.Get();
-	return BPGC && !BPGC->HasAnyClassFlags(CLASS_Deprecated);
-}
-
-//@todo
-
-//UThumbnailInfo* FAssetTypeActions_BlueprintGeneratedClass::GetThumbnailInfo(UObject* Asset) const
-//{
-//	// Blueprint thumbnail scenes are disabled for now
-//	UBlueprintGeneratedClass* BPGC = CastChecked<UBlueprintGeneratedClass>(Asset);
-//	UThumbnailInfo* ThumbnailInfo = BPGC->ThumbnailInfo;
-//	if (!ThumbnailInfo)
-//	{
-//		ThumbnailInfo = NewObject<USceneThumbnailInfo>(BPGC, NAME_None, RF_Transactional);
-//		BPGC->ThumbnailInfo = ThumbnailInfo;
-//	}
-//	return ThumbnailInfo;
-//}
-
 TWeakPtr<IClassTypeActions> FAssetTypeActions_BlueprintGeneratedClass::GetClassTypeActions(const FAssetData& AssetData) const
 {
 	// Blueprints get the class type actions for their parent native class.
@@ -118,9 +30,7 @@ TWeakPtr<IClassTypeActions> FAssetTypeActions_BlueprintGeneratedClass::GetClassT
 	}
 	if (!ParentClassName.IsEmpty())
 	{
-		UObject* Outer = nullptr;
-		ResolveName(Outer, ParentClassName, false, false);
-		ParentClass = FindObject<UClass>(ANY_PACKAGE, *ParentClassName);
+		ParentClass = UClass::TryFindTypeSlow<UClass>(FPackageName::ExportTextPathToObjectPath(ParentClassName));
 	}
 
 	if (ParentClass)

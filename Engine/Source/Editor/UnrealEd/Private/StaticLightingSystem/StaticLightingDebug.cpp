@@ -10,12 +10,17 @@
 #include "CanvasTypes.h"
 #include "Engine/Engine.h"
 #include "EngineGlobals.h"
+#include "SceneView.h"
+#include "StaticMeshComponentLODInfo.h"
 #include "StaticMeshResources.h"
 #include "StaticLightingSystem/StaticLightingPrivate.h"
 #include "LightMap.h"
 #include "Engine/MapBuildDataRegistry.h"
 #include "Components/ModelComponent.h"
 #include "Engine/StaticMesh.h"
+#include "TextureResource.h"
+
+#include <limits>
 
 /** Information about the texel that is selected */
 FSelectedLightmapSample GCurrentSelectedLightmapSample;
@@ -34,16 +39,16 @@ static void WriteTexel(UTexture2D* Texture, int32 X, int32 Y, FColor NewColor)
 		check(Y >= 0 && Y < Texture->GetSizeY());
 
 		// Only supporting uncompressed textures for now
-		if (Texture->PlatformData &&
-			Texture->PlatformData->PixelFormat == PF_B8G8R8A8)
+		if (Texture->GetPlatformData() &&
+			Texture->GetPlatformData()->PixelFormat == PF_B8G8R8A8)
 		{
 			// The runtime data needs to be fully cached in memory for this to work.
 			// These changes won't (and don't need to) persist.
-			if (Texture->PlatformData->TryInlineMipData(0, Texture))
+			if (Texture->GetPlatformData()->TryInlineMipData(0, Texture->GetPathName()))
 			{
 				// Release the texture's resources and block until the rendering thread is done accessing it
 				Texture->ReleaseResource();
-				FTexture2DMipMap& BaseMip = Texture->PlatformData->Mips[0];
+				FTexture2DMipMap& BaseMip = Texture->GetPlatformData()->Mips[0];
 				FColor* Data = (FColor*)BaseMip.BulkData.Lock( LOCK_READ_WRITE );
 				FColor& SelectedTexel = Data[Y * Texture->GetSizeX() + X];
 				// Write the new color
@@ -94,16 +99,16 @@ static bool UpdateSelectedTexel(
 			UTexture2D* CurrentLightmap = Lightmap2D->GetTexture( LightmapIndex );
 			{
 				// UV's in the lightmap atlas
-				int32 LightmapX = FMath::TruncToInt(LightmapUV.X * CurrentLightmap->GetSizeX());
-				int32 LightmapY = FMath::TruncToInt(LightmapUV.Y * .5f * CurrentLightmap->GetSizeY());
+				int32 LightmapX = FMath::TruncToInt32(LightmapUV.X * CurrentLightmap->GetSizeX());
+				int32 LightmapY = FMath::TruncToInt32(LightmapUV.Y * .5f * CurrentLightmap->GetSizeY());
 				// Write the selection color to the selected lightmap texel
 				WriteTexel(CurrentLightmap, LightmapX, LightmapY, GTexelSelectionColor);
 			}
 
 			{
 				// UV's in the lightmap atlas
-				int32 LightmapX = FMath::TruncToInt(LightmapUV.X * CurrentLightmap->GetSizeX());
-				int32 LightmapY = FMath::TruncToInt((LightmapUV.Y * .5f + .5f) * CurrentLightmap->GetSizeY());
+				int32 LightmapX = FMath::TruncToInt32(LightmapUV.X * CurrentLightmap->GetSizeX());
+				int32 LightmapY = FMath::TruncToInt32((LightmapUV.Y * .5f + .5f) * CurrentLightmap->GetSizeY());
 				// Write the selection color to the selected lightmap texel
 				WriteTexel(CurrentLightmap, LightmapX, LightmapY, GTexelSelectionColor);
 			}
@@ -125,13 +130,13 @@ static bool GetBarycentricWeights(
 	const FVector& Position2,
 	FVector InterpolatePosition,
 	float Tolerance,
-	float& PlaneDistance,
+	double& PlaneDistance,
 	FVector& BarycentricWeights
 	)
 {
 	BarycentricWeights = FVector::ZeroVector;
 	FVector TriangleNormal = (Position0 - Position1) ^ (Position2 - Position0);
-	float ParallelogramArea = TriangleNormal.Size();
+	FVector::FReal ParallelogramArea = TriangleNormal.Size();
 	FVector UnitTriangleNormal = TriangleNormal / ParallelogramArea;
 	PlaneDistance = UnitTriangleNormal | (InterpolatePosition - Position0);
 
@@ -141,14 +146,14 @@ static bool GetBarycentricWeights(
 
 	FVector NormalU = (InterpolatePosition - Position1) ^ (Position2 - InterpolatePosition);
 	// Signed area, if negative then InterpolatePosition is not in the triangle
-	float ParallelogramAreaU = NormalU.Size() * FMath::FloatSelect(NormalU | TriangleNormal, 1.0f, -1.0f);
-	float BaryCentricU = ParallelogramAreaU / ParallelogramArea;
+	FVector::FReal ParallelogramAreaU = NormalU.Size() * FMath::FloatSelect(NormalU | TriangleNormal, (FVector::FReal)1.0f, (FVector::FReal)-1.0f);
+	FVector::FReal BaryCentricU = ParallelogramAreaU / ParallelogramArea;
 
 	FVector NormalV = (InterpolatePosition - Position2) ^ (Position0 - InterpolatePosition);
-	float ParallelogramAreaV = NormalV.Size() * FMath::FloatSelect(NormalV | TriangleNormal, 1.0f, -1.0f);
-	float BaryCentricV = ParallelogramAreaV / ParallelogramArea;
+	FVector::FReal ParallelogramAreaV = NormalV.Size() * FMath::FloatSelect(NormalV | TriangleNormal, (FVector::FReal)1.0f, (FVector::FReal)-1.0f);
+	FVector::FReal BaryCentricV = ParallelogramAreaV / ParallelogramArea;
 
-	float BaryCentricW = 1.0f - BaryCentricU - BaryCentricV;
+	FVector::FReal BaryCentricW = 1.0f - BaryCentricU - BaryCentricV;
 	if (BaryCentricU > -Tolerance && BaryCentricV > -Tolerance && BaryCentricW > -Tolerance)
 	{
 		BarycentricWeights = FVector(BaryCentricU, BaryCentricV, BaryCentricW);
@@ -214,7 +219,7 @@ void SetDebugLightmapSample(TArray<UActorComponent*>* Components, UModel* Model,
 
 				if (bUseTextureMap)
 				{
-					float ClosestPlaneDistance = FLT_MAX;
+					double ClosestPlaneDistance = std::numeric_limits<double>::max();
 					FVector ClosestPlaneBaryCentricWeights;
 					int32 ClosestPlaneTriangleIndex = -1;
 
@@ -226,11 +231,11 @@ void SetDebugLightmapSample(TArray<UActorComponent*>* Components, UModel* Model,
 						uint32 Index2 = Indices[TriangleIndex + 2];
 
 						// Transform positions to world space
-						FVector Position0 = SMComponent->GetComponentTransform().TransformPosition(LODModel.VertexBuffers.PositionVertexBuffer.VertexPosition(Index0));
-						FVector Position1 = SMComponent->GetComponentTransform().TransformPosition(LODModel.VertexBuffers.PositionVertexBuffer.VertexPosition(Index1));
-						FVector Position2 = SMComponent->GetComponentTransform().TransformPosition(LODModel.VertexBuffers.PositionVertexBuffer.VertexPosition(Index2));
+						FVector Position0 = SMComponent->GetComponentTransform().TransformPosition((FVector)LODModel.VertexBuffers.PositionVertexBuffer.VertexPosition(Index0));
+						FVector Position1 = SMComponent->GetComponentTransform().TransformPosition((FVector)LODModel.VertexBuffers.PositionVertexBuffer.VertexPosition(Index1));
+						FVector Position2 = SMComponent->GetComponentTransform().TransformPosition((FVector)LODModel.VertexBuffers.PositionVertexBuffer.VertexPosition(Index2));
 
-						float PlaneDistance;
+						double PlaneDistance;
 						FVector BaryCentricWeights;
 						// Continue if click location is in the triangle and get its barycentric weights
 						if (GetBarycentricWeights(Position0, Position1, Position2, ClickLocation, TriangleTolerance, PlaneDistance, BaryCentricWeights))
@@ -251,9 +256,9 @@ void SetDebugLightmapSample(TArray<UActorComponent*>* Components, UModel* Model,
 						uint32 Index2 = Indices[ClosestPlaneTriangleIndex + 2];
 
 						// Fetch lightmap UV's
-						FVector2D LightmapUV0 = LODModel.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(Index0, StaticMesh->GetLightMapCoordinateIndex());
-						FVector2D LightmapUV1 = LODModel.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(Index1, StaticMesh->GetLightMapCoordinateIndex());
-						FVector2D LightmapUV2 = LODModel.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(Index2, StaticMesh->GetLightMapCoordinateIndex());
+						FVector2D LightmapUV0 = FVector2D(LODModel.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(Index0, StaticMesh->GetLightMapCoordinateIndex()));
+						FVector2D LightmapUV1 = FVector2D(LODModel.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(Index1, StaticMesh->GetLightMapCoordinateIndex()));
+						FVector2D LightmapUV2 = FVector2D(LODModel.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(Index2, StaticMesh->GetLightMapCoordinateIndex()));
 						// Interpolate lightmap UV's to the click location
 						FVector2D InterpolatedUV = LightmapUV0 * ClosestPlaneBaryCentricWeights.X + LightmapUV1 * ClosestPlaneBaryCentricWeights.Y + LightmapUV2 * ClosestPlaneBaryCentricWeights.Z;
 
@@ -265,8 +270,8 @@ void SetDebugLightmapSample(TArray<UActorComponent*>* Components, UModel* Model,
 							PaddedSizeY -= 2;
 						}
 
-						const int32 LocalX = FMath::TruncToInt(InterpolatedUV.X * PaddedSizeX);
-						const int32 LocalY = FMath::TruncToInt(InterpolatedUV.Y * PaddedSizeY);
+						const int32 LocalX = FMath::TruncToInt32(InterpolatedUV.X * PaddedSizeX);
+						const int32 LocalY = FMath::TruncToInt32(InterpolatedUV.Y * PaddedSizeY);
 						if (LocalX < 0 || LocalX >= PaddedSizeX
 							|| LocalY < 0 || LocalY >= PaddedSizeY)
 						{
@@ -292,13 +297,13 @@ void SetDebugLightmapSample(TArray<UActorComponent*>* Components, UModel* Model,
 					uint32 Index1 = Indices[SelectedTriangle + 1];
 					uint32 Index2 = Indices[SelectedTriangle + 2];
 
-					FVector2D LightmapUV0 = LODModel.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(Index0, StaticMesh->GetLightMapCoordinateIndex());
-					FVector2D LightmapUV1 = LODModel.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(Index1, StaticMesh->GetLightMapCoordinateIndex());
-					FVector2D LightmapUV2 = LODModel.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(Index2, StaticMesh->GetLightMapCoordinateIndex());
+					FVector2D LightmapUV0 = FVector2D(LODModel.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(Index0, StaticMesh->GetLightMapCoordinateIndex()));
+					FVector2D LightmapUV1 = FVector2D(LODModel.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(Index1, StaticMesh->GetLightMapCoordinateIndex()));
+					FVector2D LightmapUV2 = FVector2D(LODModel.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(Index2, StaticMesh->GetLightMapCoordinateIndex()));
 
 					FVector BaryCentricWeights;
-					BaryCentricWeights.X = FMath::FRandRange(0, 1);
-					BaryCentricWeights.Y = FMath::FRandRange(0, 1);
+					BaryCentricWeights.X = FMath::FRandRange(0.f, 1.f);
+					BaryCentricWeights.Y = FMath::FRandRange(0.f, 1.f);
 
 					if (BaryCentricWeights.X + BaryCentricWeights.Y >= 1)
 					{
@@ -320,8 +325,8 @@ void SetDebugLightmapSample(TArray<UActorComponent*>* Components, UModel* Model,
 						PaddedSizeY -= 2;
 					}
 
-					const int32 LocalX = FMath::TruncToInt(InterpolatedUV.X * PaddedSizeX);
-					const int32 LocalY = FMath::TruncToInt(InterpolatedUV.Y * PaddedSizeY);
+					const int32 LocalX = FMath::TruncToInt32(InterpolatedUV.X * PaddedSizeX);
+					const int32 LocalY = FMath::TruncToInt32(InterpolatedUV.Y * PaddedSizeY);
 					if (LocalX < 0 || LocalX >= PaddedSizeX
 						|| LocalY < 0 || LocalY >= PaddedSizeY)
 					{
@@ -348,7 +353,7 @@ void SetDebugLightmapSample(TArray<UActorComponent*>* Components, UModel* Model,
 			int32 ClosestElementIndex = -1;
 			uint32 ClosestTriangleIndex = 0;
 			FVector ClosestPlaneBaryCentricWeights = FVector(0);
-			float ClosestPlaneDistance = FLT_MAX;
+			double ClosestPlaneDistance = std::numeric_limits<double>::max();
 
 			for (int32 ModelIndex = 0; ModelIndex < World->GetCurrentLevel()->ModelComponents.Num(); ModelIndex++)
 			{
@@ -370,11 +375,11 @@ void SetDebugLightmapSample(TArray<UActorComponent*>* Components, UModel* Model,
 							uint32 Index2 = (*IndexBufferRef)->Indices[TriangleIndex + 2];
 
 							FModelVertex* ModelVertices = (FModelVertex*)Model->VertexBuffer.Vertices.GetData();
-							FVector Position0 = ModelVertices[Index0].Position;
-							FVector Position1 = ModelVertices[Index1].Position;
-							FVector Position2 = ModelVertices[Index2].Position;
+							FVector Position0 = (FVector)ModelVertices[Index0].Position;
+							FVector Position1 = (FVector)ModelVertices[Index1].Position;
+							FVector Position2 = (FVector)ModelVertices[Index2].Position;
 
-							float PlaneDistance;
+							double PlaneDistance;
 							FVector BaryCentricWeights;
 							// Continue if click location is in the triangle and get its barycentric weights
 							if (GetBarycentricWeights(Position0, Position1, Position2, ClickLocation, .001f, PlaneDistance, BaryCentricWeights))
@@ -409,9 +414,9 @@ void SetDebugLightmapSample(TArray<UActorComponent*>* Components, UModel* Model,
 				uint32 Index2 = (*IndexBufferRef)->Indices[ClosestTriangleIndex + 2];
 
 				// Fetch lightmap UV's
-				FVector2D LightmapUV0 = ModelVertices[Index0].ShadowTexCoord;
-				FVector2D LightmapUV1 = ModelVertices[Index1].ShadowTexCoord;
-				FVector2D LightmapUV2 = ModelVertices[Index2].ShadowTexCoord;
+				FVector2D LightmapUV0 = FVector2D(ModelVertices[Index0].ShadowTexCoord);
+				FVector2D LightmapUV1 = FVector2D(ModelVertices[Index1].ShadowTexCoord);
+				FVector2D LightmapUV2 = FVector2D(ModelVertices[Index2].ShadowTexCoord);
 				// Interpolate lightmap UV's to the click location
 				FVector2D InterpolatedUV = LightmapUV0 * ClosestPlaneBaryCentricWeights.X + LightmapUV1 * ClosestPlaneBaryCentricWeights.Y + LightmapUV2 * ClosestPlaneBaryCentricWeights.Z;
 
@@ -469,8 +474,8 @@ void SetDebugLightmapSample(TArray<UActorComponent*>* Components, UModel* Model,
 
 				// Apply the transform to the intersection position to find the local texel coordinates
 				const FVector4 StaticLightingTextureCoordinate = WorldToMap.TransformPosition(ClickLocation);
-				const int32 LocalX = FMath::TruncToInt(StaticLightingTextureCoordinate.X * PaddedSizeX);
-				const int32 LocalY = FMath::TruncToInt(StaticLightingTextureCoordinate.Y * PaddedSizeY);
+				const int32 LocalX = FMath::TruncToInt32(StaticLightingTextureCoordinate.X * PaddedSizeX);
+				const int32 LocalY = FMath::TruncToInt32(StaticLightingTextureCoordinate.Y * PaddedSizeY);
 				check(LocalX >= 0 && LocalX < PaddedSizeX && LocalY >= 0 && LocalY < PaddedSizeY);
 
 				const FMeshMapBuildData* MeshMapBuildData = Element.GetMeshMapBuildData();
@@ -517,26 +522,26 @@ void DrawStaticLightingDebugInfo(const FSceneView* View,FPrimitiveDrawInterface*
 				{
 					if (GDebugStaticLightingInfo.bCornerValid[CornerIndex])
 					{
-						PDI->DrawPoint(GDebugStaticLightingInfo.TexelCorners[CornerIndex] + CurrentVertex.VertexNormal * .04f, FLinearColor(0, 1, 1), 4.0f, SDPG_World);
+						PDI->DrawPoint(FVector4(GDebugStaticLightingInfo.TexelCorners[CornerIndex] + CurrentVertex.VertexNormal * .04f), FLinearColor(0, 1, 1), 4.0f, SDPG_World);
 					}
 				}
-				PDI->DrawPoint(CurrentVertex.VertexPosition, NormalColor, 4.0f, SDPG_World);
-				DrawWireSphere(PDI, CurrentVertex.VertexPosition, NormalColor, GDebugStaticLightingInfo.SampleRadius, 36, SDPG_World);
+				PDI->DrawPoint(FVector4(CurrentVertex.VertexPosition), NormalColor, 4.0f, SDPG_World);
+				DrawWireSphere(PDI, FVector4(CurrentVertex.VertexPosition), NormalColor, GDebugStaticLightingInfo.SampleRadius, 36, SDPG_World);
 			}
-			PDI->DrawLine(CurrentVertex.VertexPosition, CurrentVertex.VertexPosition + CurrentVertex.VertexNormal * 10, NormalColor, SDPG_World);
+			PDI->DrawLine(FVector4(CurrentVertex.VertexPosition), FVector4(CurrentVertex.VertexPosition + CurrentVertex.VertexNormal * 10), NormalColor, SDPG_World);
 		}
 
 		for (int32 RayIndex = 0; RayIndex < GDebugStaticLightingInfo.ShadowRays.Num(); RayIndex++)
 		{
 			const FDebugStaticLightingRay& CurrentRay = GDebugStaticLightingInfo.ShadowRays[RayIndex];
-			PDI->DrawLine(CurrentRay.Start, CurrentRay.End, CurrentRay.bHit ? FColor::Red : FColor::Green, SDPG_World);
+			PDI->DrawLine(FVector4(CurrentRay.Start), FVector4(CurrentRay.End), CurrentRay.bHit ? FColor::Red : FColor::Green, SDPG_World);
 		}
 		
 		for (int32 RayIndex = 0; RayIndex < GDebugStaticLightingInfo.PathRays.Num(); RayIndex++)
 		{
 			const FDebugStaticLightingRay& CurrentRay = GDebugStaticLightingInfo.PathRays[RayIndex];
 			const FColor RayColor = CurrentRay.bHit ? (CurrentRay.bPositive ? FColor(255,255,150) : FColor(150,150,150)) : FColor(50,50,255);
-			PDI->DrawLine(CurrentRay.Start, CurrentRay.End, RayColor, SDPG_World);
+			PDI->DrawLine(FVector4(CurrentRay.Start), FVector4(CurrentRay.End), RayColor, SDPG_World);
 		}
 
 		for (int32 RecordIndex = 0; RecordIndex < GDebugStaticLightingInfo.CacheRecords.Num(); RecordIndex++)
@@ -544,91 +549,91 @@ void DrawStaticLightingDebugInfo(const FSceneView* View,FPrimitiveDrawInterface*
 			const FDebugLightingCacheRecord& CurrentRecord = GDebugStaticLightingInfo.CacheRecords[RecordIndex];
 			if (CurrentRecord.bNearSelectedTexel)
 			{
-				DrawWireSphere(PDI, CurrentRecord.Vertex.VertexPosition + CurrentRecord.Vertex.VertexNormal * .1f, CurrentRecord.bAffectsSelectedTexel ? FColor(50, 255, 100) : FColor(100, 100, 100), CurrentRecord.Radius, 36, SDPG_World);
-				PDI->DrawLine(CurrentRecord.Vertex.VertexPosition, CurrentRecord.Vertex.VertexPosition + CurrentRecord.Vertex.VertexNormal * 12, CurrentRecord.bAffectsSelectedTexel ? FColor(50, 255, 100) : FColor(100, 100, 100), SDPG_World);
+				DrawWireSphere(PDI, FVector4(CurrentRecord.Vertex.VertexPosition + CurrentRecord.Vertex.VertexNormal * .1f), CurrentRecord.bAffectsSelectedTexel ? FColor(50, 255, 100) : FColor(100, 100, 100), CurrentRecord.Radius, 36, SDPG_World);
+				PDI->DrawLine(FVector4(CurrentRecord.Vertex.VertexPosition), FVector4(CurrentRecord.Vertex.VertexPosition + CurrentRecord.Vertex.VertexNormal * 12), CurrentRecord.bAffectsSelectedTexel ? FColor(50, 255, 100) : FColor(100, 100, 100), SDPG_World);
 			}
-			PDI->DrawPoint(CurrentRecord.Vertex.VertexPosition + CurrentRecord.Vertex.VertexNormal * .1f, FLinearColor(.5, 1, .5), 2.0f, SDPG_World);
+			PDI->DrawPoint(FVector4(CurrentRecord.Vertex.VertexPosition + CurrentRecord.Vertex.VertexNormal * .1f), FLinearColor(.5, 1, .5), 2.0f, SDPG_World);
 		}
 
 		for (int32 PhotonIndex = 0; PhotonIndex < GDebugStaticLightingInfo.DirectPhotons.Num(); PhotonIndex++)
 		{
 			const FDebugPhoton& CurrentPhoton = GDebugStaticLightingInfo.DirectPhotons[PhotonIndex];
-			PDI->DrawLine(CurrentPhoton.Position, CurrentPhoton.Position + CurrentPhoton.Direction * 50, FColor(200, 200, 100), SDPG_World);
+			PDI->DrawLine(FVector4(CurrentPhoton.Position), FVector4(CurrentPhoton.Position + CurrentPhoton.Direction * 50), FColor(200, 200, 100), SDPG_World);
 		}
 
 		for (int32 PhotonIndex = 0; PhotonIndex < GDebugStaticLightingInfo.IndirectPhotons.Num(); PhotonIndex++)
 		{
 			const FDebugPhoton& CurrentPhoton = GDebugStaticLightingInfo.IndirectPhotons[PhotonIndex];
-			PDI->DrawLine(CurrentPhoton.Position, CurrentPhoton.Position + CurrentPhoton.Direction, FColor(200, 100, 100), SDPG_World);
+			PDI->DrawLine(FVector4(CurrentPhoton.Position), FVector4(CurrentPhoton.Position + CurrentPhoton.Direction), FColor(200, 100, 100), SDPG_World);
 		}
 
 		for (int32 PhotonIndex = 0; PhotonIndex < GDebugStaticLightingInfo.IrradiancePhotons.Num(); PhotonIndex++)
 		{
 			const FDebugPhoton& CurrentPhoton = GDebugStaticLightingInfo.IrradiancePhotons[PhotonIndex];
-			PDI->DrawLine(CurrentPhoton.Position, CurrentPhoton.Position + CurrentPhoton.Direction * 50, FColor(150, 100, 250), SDPG_World);
+			PDI->DrawLine(FVector4(CurrentPhoton.Position), FVector4(CurrentPhoton.Position + CurrentPhoton.Direction * 50), FColor(150, 100, 250), SDPG_World);
 		}
 
 		for (int32 PhotonIndex = 0; PhotonIndex < GDebugStaticLightingInfo.GatheredPhotons.Num(); PhotonIndex++)
 		{
 			const FDebugPhoton& CurrentPhoton = GDebugStaticLightingInfo.GatheredPhotons[PhotonIndex];
-			PDI->DrawLine(CurrentPhoton.Position, CurrentPhoton.Position + CurrentPhoton.Normal * 50, FColor(100, 100, 100), SDPG_World);
-			PDI->DrawLine(CurrentPhoton.Position, CurrentPhoton.Position + CurrentPhoton.Direction * 50, FColor(50, 255, 100), SDPG_World);
-			PDI->DrawPoint(CurrentPhoton.Position + CurrentPhoton.Direction * .1f, FLinearColor(.5, 1, .5), 4.0f, SDPG_World);
+			PDI->DrawLine(FVector4(CurrentPhoton.Position), FVector4(CurrentPhoton.Position + CurrentPhoton.Normal * 50), FColor(100, 100, 100), SDPG_World);
+			PDI->DrawLine(FVector4(CurrentPhoton.Position), FVector4(CurrentPhoton.Position + CurrentPhoton.Direction * 50), FColor(50, 255, 100), SDPG_World);
+			PDI->DrawPoint(FVector4(CurrentPhoton.Position + CurrentPhoton.Direction * .1f), FLinearColor(.5, 1, .5), 4.0f, SDPG_World);
 		}
 
 		for (int32 PhotonIndex = 0; PhotonIndex < GDebugStaticLightingInfo.GatheredImportancePhotons.Num(); PhotonIndex++)
 		{
 			const FDebugPhoton& CurrentPhoton = GDebugStaticLightingInfo.GatheredImportancePhotons[PhotonIndex];
-			PDI->DrawLine(CurrentPhoton.Position, CurrentPhoton.Position + CurrentPhoton.Normal * 50, FColor(100, 100, 100), SDPG_World);
-			PDI->DrawLine(CurrentPhoton.Position, CurrentPhoton.Position + CurrentPhoton.Direction * 50, FColor(200, 100, 100), SDPG_World);
-			PDI->DrawPoint(CurrentPhoton.Position + CurrentPhoton.Direction * .1f, FLinearColor(.5, 1, .5), 4.0f, SDPG_World);
+			PDI->DrawLine(FVector4(CurrentPhoton.Position), FVector4(CurrentPhoton.Position + CurrentPhoton.Normal * 50), FColor(100, 100, 100), SDPG_World);
+			PDI->DrawLine(FVector4(CurrentPhoton.Position), FVector4(CurrentPhoton.Position + CurrentPhoton.Direction * 50), FColor(200, 100, 100), SDPG_World);
+			PDI->DrawPoint(FVector4(CurrentPhoton.Position + CurrentPhoton.Direction * .1f), FLinearColor(.5, 1, .5), 4.0f, SDPG_World);
 		}
 		const FColor NodeColor(150, 170, 180);
 		for (int32 NodeIndex = 0; NodeIndex < GDebugStaticLightingInfo.GatheredPhotonNodes.Num(); NodeIndex++)
 		{
 			const FDebugOctreeNode& CurrentNode = GDebugStaticLightingInfo.GatheredPhotonNodes[NodeIndex];
-			PDI->DrawLine(CurrentNode.Center + FVector(CurrentNode.Extent.X, CurrentNode.Extent.Y, CurrentNode.Extent.Z), CurrentNode.Center + FVector(-CurrentNode.Extent.X, CurrentNode.Extent.Y, CurrentNode.Extent.Z), NodeColor, SDPG_World);
-			PDI->DrawLine(CurrentNode.Center + FVector(CurrentNode.Extent.X, CurrentNode.Extent.Y, CurrentNode.Extent.Z), CurrentNode.Center + FVector(CurrentNode.Extent.X, -CurrentNode.Extent.Y, CurrentNode.Extent.Z), NodeColor, SDPG_World);
-			PDI->DrawLine(CurrentNode.Center + FVector(CurrentNode.Extent.X, CurrentNode.Extent.Y, CurrentNode.Extent.Z), CurrentNode.Center + FVector(CurrentNode.Extent.X, CurrentNode.Extent.Y, -CurrentNode.Extent.Z), NodeColor, SDPG_World);
+			PDI->DrawLine(FVector4(CurrentNode.Center) + FVector(CurrentNode.Extent.X, CurrentNode.Extent.Y, CurrentNode.Extent.Z), FVector4(CurrentNode.Center) + FVector(-CurrentNode.Extent.X, CurrentNode.Extent.Y, CurrentNode.Extent.Z), NodeColor, SDPG_World);
+			PDI->DrawLine(FVector4(CurrentNode.Center) + FVector(CurrentNode.Extent.X, CurrentNode.Extent.Y, CurrentNode.Extent.Z), FVector4(CurrentNode.Center) + FVector(CurrentNode.Extent.X, -CurrentNode.Extent.Y, CurrentNode.Extent.Z), NodeColor, SDPG_World);
+			PDI->DrawLine(FVector4(CurrentNode.Center) + FVector(CurrentNode.Extent.X, CurrentNode.Extent.Y, CurrentNode.Extent.Z), FVector4(CurrentNode.Center) + FVector(CurrentNode.Extent.X, CurrentNode.Extent.Y, -CurrentNode.Extent.Z), NodeColor, SDPG_World);
 			
-			PDI->DrawLine(CurrentNode.Center - FVector(CurrentNode.Extent.X, CurrentNode.Extent.Y, CurrentNode.Extent.Z), CurrentNode.Center - FVector(-CurrentNode.Extent.X, CurrentNode.Extent.Y, CurrentNode.Extent.Z), NodeColor, SDPG_World);
-			PDI->DrawLine(CurrentNode.Center - FVector(CurrentNode.Extent.X, CurrentNode.Extent.Y, CurrentNode.Extent.Z), CurrentNode.Center - FVector(CurrentNode.Extent.X, -CurrentNode.Extent.Y, CurrentNode.Extent.Z), NodeColor, SDPG_World);
-			PDI->DrawLine(CurrentNode.Center - FVector(CurrentNode.Extent.X, CurrentNode.Extent.Y, CurrentNode.Extent.Z), CurrentNode.Center - FVector(CurrentNode.Extent.X, CurrentNode.Extent.Y, -CurrentNode.Extent.Z), NodeColor, SDPG_World);
+			PDI->DrawLine(FVector4(CurrentNode.Center) - FVector(CurrentNode.Extent.X, CurrentNode.Extent.Y, CurrentNode.Extent.Z), FVector4(CurrentNode.Center) - FVector(-CurrentNode.Extent.X, CurrentNode.Extent.Y, CurrentNode.Extent.Z), NodeColor, SDPG_World);
+			PDI->DrawLine(FVector4(CurrentNode.Center) - FVector(CurrentNode.Extent.X, CurrentNode.Extent.Y, CurrentNode.Extent.Z), FVector4(CurrentNode.Center) - FVector(CurrentNode.Extent.X, -CurrentNode.Extent.Y, CurrentNode.Extent.Z), NodeColor, SDPG_World);
+			PDI->DrawLine(FVector4(CurrentNode.Center) - FVector(CurrentNode.Extent.X, CurrentNode.Extent.Y, CurrentNode.Extent.Z), FVector4(CurrentNode.Center) - FVector(CurrentNode.Extent.X, CurrentNode.Extent.Y, -CurrentNode.Extent.Z), NodeColor, SDPG_World);
 			
-			PDI->DrawLine(CurrentNode.Center + FVector(CurrentNode.Extent.X, -CurrentNode.Extent.Y, CurrentNode.Extent.Z), CurrentNode.Center + FVector(CurrentNode.Extent.X, -CurrentNode.Extent.Y, -CurrentNode.Extent.Z), NodeColor, SDPG_World);
-			PDI->DrawLine(CurrentNode.Center + FVector(CurrentNode.Extent.X, -CurrentNode.Extent.Y, CurrentNode.Extent.Z), CurrentNode.Center + FVector(-CurrentNode.Extent.X, -CurrentNode.Extent.Y, CurrentNode.Extent.Z), NodeColor, SDPG_World);
+			PDI->DrawLine(FVector4(CurrentNode.Center) + FVector(CurrentNode.Extent.X, -CurrentNode.Extent.Y, CurrentNode.Extent.Z), FVector4(CurrentNode.Center) + FVector(CurrentNode.Extent.X, -CurrentNode.Extent.Y, -CurrentNode.Extent.Z), NodeColor, SDPG_World);
+			PDI->DrawLine(FVector4(CurrentNode.Center) + FVector(CurrentNode.Extent.X, -CurrentNode.Extent.Y, CurrentNode.Extent.Z), FVector4(CurrentNode.Center) + FVector(-CurrentNode.Extent.X, -CurrentNode.Extent.Y, CurrentNode.Extent.Z), NodeColor, SDPG_World);
 
-			PDI->DrawLine(CurrentNode.Center + FVector(-CurrentNode.Extent.X, CurrentNode.Extent.Y, CurrentNode.Extent.Z), CurrentNode.Center + FVector(-CurrentNode.Extent.X, -CurrentNode.Extent.Y, CurrentNode.Extent.Z), NodeColor, SDPG_World);
-			PDI->DrawLine(CurrentNode.Center + FVector(-CurrentNode.Extent.X, CurrentNode.Extent.Y, CurrentNode.Extent.Z), CurrentNode.Center + FVector(-CurrentNode.Extent.X, CurrentNode.Extent.Y, -CurrentNode.Extent.Z), NodeColor, SDPG_World);
+			PDI->DrawLine(FVector4(CurrentNode.Center) + FVector(-CurrentNode.Extent.X, CurrentNode.Extent.Y, CurrentNode.Extent.Z), FVector4(CurrentNode.Center) + FVector(-CurrentNode.Extent.X, -CurrentNode.Extent.Y, CurrentNode.Extent.Z), NodeColor, SDPG_World);
+			PDI->DrawLine(FVector4(CurrentNode.Center) + FVector(-CurrentNode.Extent.X, CurrentNode.Extent.Y, CurrentNode.Extent.Z), FVector4(CurrentNode.Center) + FVector(-CurrentNode.Extent.X, CurrentNode.Extent.Y, -CurrentNode.Extent.Z), NodeColor, SDPG_World);
 
-			PDI->DrawLine(CurrentNode.Center + FVector(CurrentNode.Extent.X, CurrentNode.Extent.Y, -CurrentNode.Extent.Z), CurrentNode.Center + FVector(CurrentNode.Extent.X, -CurrentNode.Extent.Y, -CurrentNode.Extent.Z), NodeColor, SDPG_World);
-			PDI->DrawLine(CurrentNode.Center + FVector(CurrentNode.Extent.X, CurrentNode.Extent.Y, -CurrentNode.Extent.Z), CurrentNode.Center + FVector(-CurrentNode.Extent.X, CurrentNode.Extent.Y, -CurrentNode.Extent.Z), NodeColor, SDPG_World);
+			PDI->DrawLine(FVector4(CurrentNode.Center) + FVector(CurrentNode.Extent.X, CurrentNode.Extent.Y, -CurrentNode.Extent.Z), FVector4(CurrentNode.Center) + FVector(CurrentNode.Extent.X, -CurrentNode.Extent.Y, -CurrentNode.Extent.Z), NodeColor, SDPG_World);
+			PDI->DrawLine(FVector4(CurrentNode.Center) + FVector(CurrentNode.Extent.X, CurrentNode.Extent.Y, -CurrentNode.Extent.Z), FVector4(CurrentNode.Center) + FVector(-CurrentNode.Extent.X, CurrentNode.Extent.Y, -CurrentNode.Extent.Z), NodeColor, SDPG_World);
 		}
 
 		if (GDebugStaticLightingInfo.bDirectPhotonValid)
 		{
 			const FDebugPhoton& DirectPhoton = GDebugStaticLightingInfo.GatheredDirectPhoton;
-			PDI->DrawLine(DirectPhoton.Position, DirectPhoton.Position + DirectPhoton.Direction * 60, FColor(255, 255, 100), SDPG_World);
-			PDI->DrawPoint(DirectPhoton.Position + DirectPhoton.Direction * .1f, FLinearColor(1, 1, .5), 4.0f, SDPG_World);
+			PDI->DrawLine(FVector4(DirectPhoton.Position), FVector4(DirectPhoton.Position + DirectPhoton.Direction * 60), FColor(255, 255, 100), SDPG_World);
+			PDI->DrawPoint(FVector4(DirectPhoton.Position + DirectPhoton.Direction * .1f), FLinearColor(1, 1, .5), 4.0f, SDPG_World);
 		}
 
 		for (int32 RayIndex = 0; RayIndex < GDebugStaticLightingInfo.IndirectPhotonPaths.Num(); RayIndex++)
 		{
 			const FDebugStaticLightingRay& CurrentRay = GDebugStaticLightingInfo.IndirectPhotonPaths[RayIndex];
-			PDI->DrawLine(CurrentRay.Start, CurrentRay.End, FColor::White, SDPG_World);
+			PDI->DrawLine(FVector4(CurrentRay.Start), FVector4(CurrentRay.End), FColor::White, SDPG_World);
 		}
 
 		for (int32 SampleIndex = 0; SampleIndex < GDebugStaticLightingInfo.VolumeLightingSamples.Num(); SampleIndex++)
 		{
 			const FDebugVolumeLightingSample& CurrentSample = GDebugStaticLightingInfo.VolumeLightingSamples[SampleIndex];
-			PDI->DrawPoint(CurrentSample.Position, CurrentSample.AverageIncidentRadiance * GEngine->LightingOnlyBrightness, 12.0f, SDPG_World);
+			PDI->DrawPoint(FVector4(CurrentSample.Position), CurrentSample.AverageIncidentRadiance * GEngine->LightingOnlyBrightness, 12.0f, SDPG_World);
 		}
 
 		for (int32 RayIndex = 0; RayIndex < GDebugStaticLightingInfo.PrecomputedVisibilityRays.Num(); RayIndex++)
 		{
 			const FDebugStaticLightingRay& CurrentRay = GDebugStaticLightingInfo.PrecomputedVisibilityRays[RayIndex];
 			const FColor RayColor = CurrentRay.bHit ? (CurrentRay.bPositive ? FColor(255,255,150) : FColor(150,150,150)) : FColor(50,50,255);
-			PDI->DrawLine(CurrentRay.Start, CurrentRay.End, RayColor, SDPG_World);
+			PDI->DrawLine(FVector4(CurrentRay.Start), FVector4(CurrentRay.End), RayColor, SDPG_World);
 		}
 	}
 }
@@ -644,10 +649,10 @@ void DrawStaticLightingDebugInfo(const FSceneView* View, FCanvas* Canvas)
 			if (CurrentRecord.bNearSelectedTexel)
 			{
 				FVector2D PixelLocation;
-				if(View->ScreenToPixel(View->WorldToScreen(CurrentRecord.Vertex.VertexPosition),PixelLocation))
+				if(View->ScreenToPixel(View->WorldToScreen(FVector4(CurrentRecord.Vertex.VertexPosition)),PixelLocation))
 				{
 					const FColor TagColor = CurrentRecord.bAffectsSelectedTexel ? FColor(50,160,200) : FColor(120,120,120);
-					Canvas->DrawShadowedString(PixelLocation.X,PixelLocation.Y, *FString::FromInt(CurrentRecord.RecordId), GEngine->GetSmallFont(), TagColor);
+					Canvas->DrawShadowedString(static_cast<float>(PixelLocation.X), static_cast<float>(PixelLocation.Y), *FString::FromInt(CurrentRecord.RecordId), GEngine->GetSmallFont(), TagColor);
 				}
 			}
 		}
@@ -656,10 +661,10 @@ void DrawStaticLightingDebugInfo(const FSceneView* View, FCanvas* Canvas)
 		{
 			const FDebugPhoton& CurrentPhoton = GDebugStaticLightingInfo.GatheredImportancePhotons[PhotonIndex];
 			FVector2D PixelLocation;
-			if(View->ScreenToPixel(View->WorldToScreen(CurrentPhoton.Position),PixelLocation))
+			if(View->ScreenToPixel(View->WorldToScreen(FVector4(CurrentPhoton.Position)),PixelLocation))
 			{
 				const FColor TagColor = FColor(120,120,120);
-				Canvas->DrawShadowedString(PixelLocation.X,PixelLocation.Y, *FString::FromInt(CurrentPhoton.Id), GEngine->GetSmallFont(), TagColor);
+				Canvas->DrawShadowedString(static_cast<float>(PixelLocation.X), static_cast<float>(PixelLocation.Y), *FString::FromInt(CurrentPhoton.Id), GEngine->GetSmallFont(), TagColor);
 			}
 		}
 
@@ -669,10 +674,10 @@ void DrawStaticLightingDebugInfo(const FSceneView* View, FCanvas* Canvas)
 			if (CurrentRay.bHit && CurrentRay.bPositive)
 			{
 				FVector2D PixelLocation;
-				if(View->ScreenToPixel(View->WorldToScreen(CurrentRay.End),PixelLocation))
+				if(View->ScreenToPixel(View->WorldToScreen(FVector4(CurrentRay.End)),PixelLocation))
 				{
 					const FColor TagColor = FColor(180,180,120);
-					Canvas->DrawShadowedString(PixelLocation.X,PixelLocation.Y, *FString::FromInt(RayIndex), GEngine->GetSmallFont(), TagColor);
+					Canvas->DrawShadowedString(static_cast<float>(PixelLocation.X), static_cast<float>(PixelLocation.Y), *FString::FromInt(RayIndex), GEngine->GetSmallFont(), TagColor);
 				}
 			}
 		}

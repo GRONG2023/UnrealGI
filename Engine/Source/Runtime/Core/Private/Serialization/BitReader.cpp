@@ -1,15 +1,38 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Serialization/BitReader.h"
-#include "Math/UnrealMathUtility.h"
-#include "Logging/LogMacros.h"
+
 #include "CoreGlobals.h"
+#include "HAL/IConsoleManager.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Math/UnrealMathUtility.h"
+#include "Serialization/Archive.h"
+#include "Templates/UnrealTemplate.h"
+#include "Trace/Detail/Channel.h"
 
 PRAGMA_DISABLE_UNSAFE_TYPECAST_WARNINGS
 
 // Table.
 extern const uint8 GShift[8]={0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80};
 extern const uint8 GMask [8]={0x00,0x01,0x03,0x07,0x0f,0x1f,0x3f,0x7f};
+
+namespace UE::Net
+{
+	static bool GLogFatalOnOverflow = false;
+
+	static FAutoConsoleVariableRef CVarLogFatalOnOverflow(
+		TEXT("BitReader.LogFatalOnOverflow"),
+		GLogFatalOnOverflow,
+		TEXT("LogFatal if BitReader Overflows"));
+
+	static int32 GEnsureOnOverflow = 1;
+
+	static FAutoConsoleVariableRef CVarEnsureOnOverflow(
+		TEXT("net.BitReader.EnsureOnOverflow"),
+		GEnsureOnOverflow,
+		TEXT("Ensures if BitReader overflows. 'BitReader.LogFatalOnOverflow' takes precedence over this, if set."));
+}
 
 // Optimized arbitrary bit range memory copy routine.
 
@@ -117,7 +140,7 @@ void appBitsCpy( uint8* Dest, int32 DestBit, uint8* Src, int32 SrcBit, int32 Bit
 //
 // Reads bitstreams.
 //
-FBitReader::FBitReader(uint8* Src, int64 CountBits)
+FBitReader::FBitReader(const uint8* Src, int64 CountBits)
 	: Num(CountBits)
 	, Pos(0)
 {
@@ -181,11 +204,24 @@ void FBitReader::SetData( FBitReader& Src, int64 CountBits )
 	ClearError();
 
 	// Setup network version
-	this->SetEngineNetVer(Src.EngineNetVer());
-	this->SetGameNetVer(Src.GameNetVer());
+	SetNetVersionsFromArchive(Src);
 
 	Buffer.Empty();
 	Buffer.AddUninitialized( (CountBits+7)>>3 );
+	Src.SerializeBits(Buffer.GetData(), CountBits);
+}
+
+void FBitReader::ResetData(FBitReader& Src, int64 CountBits, int64 CountBitsWithSlack)
+{
+	Num = CountBits;
+	Pos = 0;
+	ClearError();
+
+	// Setup network version
+	this->SetNetVersionsFromArchive(Src);
+
+	Buffer.Reset((CountBitsWithSlack + 7) >> 3);
+	Buffer.AddUninitialized((CountBits + 7) >> 3);
 	Src.SerializeBits(Buffer.GetData(), CountBits);
 }
 
@@ -228,8 +264,23 @@ void FBitReader::CountMemory(FArchive& Ar) const
 
 void FBitReader::SetOverflowed(int64 LengthBits)
 {
-	UE_LOG(LogNetSerialization, Error, TEXT("FBitReader::SetOverflowed() called! (ReadLen: %i, Remaining: %i, Max: %i)"),
-			LengthBits, (Num - Pos), Num);
+	using namespace UE::Net;
+
+	if (GLogFatalOnOverflow)
+	{
+		UE_LOG(LogNetSerialization, Fatal, TEXT("FBitReader::SetOverflowed() called! (ReadLen: %i, Remaining: %i, Max: %i)"),
+				LengthBits, (Num - Pos), Num);
+	}
+	else if (GEnsureOnOverflow)
+	{
+		ensureMsgf(false, TEXT("FBitReader::SetOverflowed() called! (ReadLen: %i, Remaining: %i, Max: %i)"),
+					LengthBits, (Num - Pos), Num);
+	}
+	else
+	{
+		UE_LOG(LogNetSerialization, Error, TEXT("FBitReader::SetOverflowed() called! (ReadLen: %i, Remaining: %i, Max: %i)"),
+				LengthBits, (Num - Pos), Num);
+	}
 
 	SetError();
 }
@@ -294,6 +345,15 @@ void FBitReader::SerializeIntPacked(uint32& OutValue)
 	OutValue = Value;
 }
 
+void FBitReader::SetNetVersionsFromArchive(FArchive& Source)
+{
+	SetEngineNetVer(Source.EngineNetVer());
+	SetGameNetVer(Source.GameNetVer());
+	SetUEVer(Source.UEVer());
+	SetLicenseeUEVer(Source.LicenseeUEVer());
+	SetEngineVer(Source.EngineVer());
+}
+
 /*-----------------------------------------------------------------------------
 	FBitReader.
 -----------------------------------------------------------------------------*/
@@ -311,4 +371,4 @@ void FBitReaderMark::Copy( FBitReader& Reader, TArray<uint8> &Buffer )
 	}
 }
 
-PRAGMA_ENABLE_UNSAFE_TYPECAST_WARNINGS
+PRAGMA_RESTORE_UNSAFE_TYPECAST_WARNINGS

@@ -26,11 +26,11 @@ public class MainFrame : ModuleRules
 				"RenderCore",
 				"Slate",
 				"SlateCore",
-				"EditorStyle",
 				"SourceControl",
 				"SourceControlWindows",
 				"TargetPlatform",
 				"DesktopPlatform",
+				"EditorFramework",
 				"UnrealEd",
 				"WorkspaceMenuStructure",
 				"MessageLog",
@@ -38,33 +38,25 @@ public class MainFrame : ModuleRules
 				"TranslationEditor",
 				"Projects",
 				"DeviceProfileEditor",
-				"UndoHistory",
+				"UndoHistoryEditor",
 				"Analytics",
 				"ToolMenus",
 				"LauncherServices",
-				"DerivedDataCache",
+				"InterchangeCore",
+				"InterchangeEngine",
+				"ToolWidgets",
 			}
 		);
 
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
-				"AssetTools",
-				"DesktopPlatform",
+				"LauncherPlatform",
 				"GameProjectGeneration",
 				"ProjectTargetPlatformEditor",
 				"LevelEditor",
 				"Settings",
 				"SourceCodeAccess",
-				"Toolbox",
-				"LocalizationDashboard",
-			}
-		);
-
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				"Editor/MainFrame/Private",
-				"Editor/MainFrame/Private/Frame",
-				"Editor/MainFrame/Private/Menus",
+				"HotReload",
 			}
 		);
 
@@ -76,7 +68,7 @@ public class MainFrame : ModuleRules
 				"LevelEditor",
 				"SourceCodeAccess",
 				"HotReload",
-				"LocalizationDashboard",
+				"LocalizationDashboard", // not required but causes circular depends issues on Linux/Mac
 			}
 		);
 	}

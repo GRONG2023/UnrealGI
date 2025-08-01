@@ -2,18 +2,46 @@
 
 #include "BlueprintDebugger.h"
 
+#include "BlueprintEditorTabs.h"
 #include "CallStackViewer.h"
+#include "CoreGlobals.h"
 #include "Debugging/SKismetDebuggingView.h"
-#include "EditorStyleSet.h"
+#include "Delegates/Delegate.h"
+#include "Engine/Blueprint.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Commands/Commands.h"
+#include "Framework/Commands/InputChord.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandInfo.h"
+#include "Framework/Commands/UICommandList.h"
+#include "Framework/Docking/LayoutService.h"
 #include "Framework/Docking/TabManager.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Layout/WidgetPath.h"
-#include "WatchPointViewer.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Layout/Margin.h"
+#include "Misc/Attribute.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/CoreStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Templates/SharedPointer.h"
+#include "Textures/SlateIcon.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Docking/SDockTab.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/SBoxPanel.h"
 #include "WorkspaceMenuStructure.h"
 #include "WorkspaceMenuStructureModule.h"
+
+class SWidget;
+class SWindow;
 
 #define LOCTEXT_NAMESPACE "BlueprintDebugger"
 
@@ -34,15 +62,13 @@ struct FBlueprintDebuggerCommands : public TCommands<FBlueprintDebuggerCommands>
 	// End of TCommand<> interface
 
 	TSharedPtr<FUICommandInfo> ShowCallStackViewer;
-	TSharedPtr<FUICommandInfo> ShowWatchViewer;
 	TSharedPtr<FUICommandInfo> ShowExecutionTrace;
 };
 
 void FBlueprintDebuggerCommands::RegisterCommands()
 {
 	UI_COMMAND(ShowCallStackViewer, "Call Stack", "Toggles visibility of the Call Stack window", EUserInterfaceActionType::Check, FInputChord());
-	UI_COMMAND(ShowWatchViewer, "Watches", "Toggles visibility of the Watches window", EUserInterfaceActionType::Check, FInputChord());
-	UI_COMMAND(ShowExecutionTrace, "Execution Flow", "Toggles visibility of the Execution Flow window", EUserInterfaceActionType::Check, FInputChord());
+	UI_COMMAND(ShowExecutionTrace, "Data Flow", "Toggles visibility of the Data Flow window", EUserInterfaceActionType::Check, FInputChord());
 }
 
 struct FBlueprintDebuggerImpl
@@ -52,6 +78,9 @@ struct FBlueprintDebuggerImpl
 
 	/** Function registered with tab manager to create the bluepring debugger */
 	TSharedRef<SDockTab> CreateBluprintDebuggerTab(const FSpawnTabArgs& Args);
+
+	/** Sets the debugged blueprint in the debugger */
+	void SetDebuggedBlueprint(UBlueprint* InBlueprint);
 
 	TSharedPtr<FTabManager> DebuggingToolsTabManager;
 	TSharedPtr<FTabManager::FLayout> BlueprintDebuggerLayout;
@@ -64,32 +93,28 @@ private:
 	FBlueprintDebuggerImpl& operator=(FBlueprintDebuggerImpl&&);
 };
 
-const FName DebuggerAppName = FName(TEXT("DebuggerApp"));
-
 FBlueprintDebuggerImpl::FBlueprintDebuggerImpl()
 {
 	const IWorkspaceMenuStructure& MenuStructure = WorkspaceMenu::GetMenuStructure();
 
 	FBlueprintDebuggerCommands::Register();
-	FGlobalTabmanager::Get()->RegisterNomadTabSpawner(DebuggerAppName, FOnSpawnTab::CreateRaw(this, &FBlueprintDebuggerImpl::CreateBluprintDebuggerTab))
+	FGlobalTabmanager::Get()->RegisterNomadTabSpawner(FBlueprintEditorTabs::BlueprintDebuggerID, FOnSpawnTab::CreateRaw(this, &FBlueprintDebuggerImpl::CreateBluprintDebuggerTab))
 		.SetDisplayName(NSLOCTEXT("BlueprintDebugger", "TabTitle", "Blueprint Debugger"))
 		.SetTooltipText(NSLOCTEXT("BlueprintDebugger", "TooltipText", "Open the Blueprint Debugger tab."))
 		.SetGroup(MenuStructure.GetDeveloperToolsDebugCategory())
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "BlueprintDebugger.TabIcon"));
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "BlueprintDebugger.TabIcon"));
 }
 
 FBlueprintDebuggerImpl::~FBlueprintDebuggerImpl()
 {
 	if (FSlateApplication::IsInitialized())
 	{
-		FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(DebuggerAppName);
+		FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(FBlueprintEditorTabs::BlueprintDebuggerID);
 	}
-
-	const IWorkspaceMenuStructure& MenuStructure = WorkspaceMenu::GetMenuStructure();
 
 	if (DebuggingToolsTabManager.IsValid())
 	{
-		FGlobalTabmanager::Get()->UnregisterTabSpawner(DebuggerAppName);
+		FGlobalTabmanager::Get()->UnregisterTabSpawner(FBlueprintEditorTabs::BlueprintDebuggerID);
 		BlueprintDebuggerLayout = TSharedPtr<FTabManager::FLayout>();
 		DebuggingToolsTabManager = TSharedPtr<FTabManager>();
 	}
@@ -102,30 +127,25 @@ TSharedRef<SDockTab> FBlueprintDebuggerImpl::CreateBluprintDebuggerTab(const FSp
 		.TabRole(ETabRole::NomadTab)
 		.Label(NSLOCTEXT("BlueprintDebugger", "TabTitle", "Blueprint Debugger"));
 
-	if (!DebuggingToolsTabManager.IsValid())
-	{
-		DebuggingToolsTabManager = FGlobalTabmanager::Get()->NewTabManager(NomadTab);
-		// on persist layout will handle saving layout if the editor is shut down:
-		DebuggingToolsTabManager->SetOnPersistLayout(
-			FTabManager::FOnPersistLayout::CreateStatic(
-				[](const TSharedRef<FTabManager::FLayout>& InLayout)
+	DebuggingToolsTabManager = FGlobalTabmanager::Get()->NewTabManager(NomadTab);
+	// on persist layout will handle saving layout if the editor is shut down:
+	DebuggingToolsTabManager->SetOnPersistLayout(
+		FTabManager::FOnPersistLayout::CreateStatic(
+			[](const TSharedRef<FTabManager::FLayout>& InLayout)
+			{
+				if (InLayout->GetPrimaryArea().Pin().IsValid())
 				{
-					if (InLayout->GetPrimaryArea().Pin().IsValid())
-					{
-						FLayoutSaveRestore::SaveToConfig(GEditorLayoutIni, InLayout);
-					}
+					FLayoutSaveRestore::SaveToConfig(GEditorLayoutIni, InLayout);
 				}
-			)
-		);
-	}
-	else
-	{
-		ensure(BlueprintDebuggerLayout.IsValid());
-	}
+			}
+		)
+	);
+
+	// Register Toolbar
+	SKismetDebuggingView::TryRegisterDebugToolbar();
 
 	const FName ExecutionFlowTabName = FName(TEXT("ExecutionFlowApp"));
 	const FName CallStackTabName = CallStackViewer::GetTabName();
-	const FName WatchViewerTabName = WatchViewer::GetTabName();
 
 	TWeakPtr<FTabManager> DebuggingToolsTabManagerWeak = DebuggingToolsTabManager;
 	// On tab close will save the layout if the debugging window itself is closed,
@@ -144,45 +164,42 @@ TSharedRef<SDockTab> FBlueprintDebuggerImpl::CreateBluprintDebuggerTab(const FSp
 		, DebuggingToolsTabManagerWeak
 	));
 
-	if (!BlueprintDebuggerLayout.IsValid())
-	{
-		DebuggingToolsTabManager->RegisterTabSpawner(
-			ExecutionFlowTabName,
-			FOnSpawnTab::CreateStatic(
-				[](const FSpawnTabArgs&)->TSharedRef<SDockTab>
-				{
-				return SNew(SDockTab)
-					.TabRole(ETabRole::PanelTab)
-					.Label(NSLOCTEXT("BlueprintExecutionFlow", "TabTitle", "Execution Flow"))
-					[
-						SNew(SKismetDebuggingView)
-					];
-				}
-			)
+	DebuggingToolsTabManager->RegisterTabSpawner(
+		ExecutionFlowTabName,
+		FOnSpawnTab::CreateStatic(
+			[](const FSpawnTabArgs&)->TSharedRef<SDockTab>
+			{
+			const TSharedPtr<SKismetDebuggingView> KismetDebuggingView = SNew(SKismetDebuggingView)
+				.BlueprintToWatch(nullptr);
+			return SNew(SDockTab)
+				.TabRole(ETabRole::PanelTab)
+				.Label_Raw(KismetDebuggingView.Get(), &SKismetDebuggingView::GetTabLabel)
+				[
+					KismetDebuggingView.ToSharedRef()
+				];
+			}
 		)
-		.SetDisplayName(NSLOCTEXT("BlueprintDebugger", "ExecutionFlowTabTitle", "Blueprint Execution Flow"))
-		.SetTooltipText(NSLOCTEXT("BlueprintDebugger", "ExecutionFlowTooltipText", "Open the Blueprint Execution Flow tab."));
+	)
+	.SetDisplayName(NSLOCTEXT("BlueprintDebugger", "ExecutionFlowTabTitle", "Blueprint Data Flow"))
+	.SetTooltipText(NSLOCTEXT("BlueprintDebugger", "ExecutionFlowTooltipText", "Open the Blueprint Data Flow tab."));
 
-		CallStackViewer::RegisterTabSpawner(*DebuggingToolsTabManager);
-		WatchViewer::RegisterTabSpawner(*DebuggingToolsTabManager);
+	CallStackViewer::RegisterTabSpawner(*DebuggingToolsTabManager);
 
-		BlueprintDebuggerLayout = FTabManager::NewLayout("Standalone_BlueprintDebugger_Layout_v1")
-		->AddArea
+	BlueprintDebuggerLayout = FTabManager::NewLayout("Standalone_BlueprintDebugger_Layout_v2")
+	->AddArea
+	(
+		FTabManager::NewPrimaryArea()
+		->SetOrientation(Orient_Vertical)
+		->Split
 		(
-			FTabManager::NewPrimaryArea()
-			->SetOrientation(Orient_Vertical)
-			->Split
-			(
-				FTabManager::NewStack()
-				->SetSizeCoefficient(.4f)
-				->SetHideTabWell(true)
-				->AddTab(CallStackTabName, ETabState::OpenedTab)
-				->AddTab(WatchViewerTabName, ETabState::OpenedTab)
-				->AddTab(ExecutionFlowTabName, ETabState::OpenedTab)
-				->SetForegroundTab(CallStackTabName)
-			)
-		);
-	}
+			FTabManager::NewStack()
+			->SetSizeCoefficient(.4f)
+			->SetHideTabWell(true)
+			->AddTab(CallStackTabName, ETabState::OpenedTab)
+			->AddTab(ExecutionFlowTabName, ETabState::OpenedTab)
+			->SetForegroundTab(CallStackTabName)
+		)
+	);
 
 	BlueprintDebuggerLayout = FLayoutSaveRestore::LoadFromConfig(GEditorLayoutIni, BlueprintDebuggerLayout.ToSharedRef());
 
@@ -238,23 +255,6 @@ TSharedRef<SDockTab> FBlueprintDebuggerImpl::CreateBluprintDebuggerTab(const FSp
 	);
 
 	CommandList->MapAction(
-		FBlueprintDebuggerCommands::Get().ShowWatchViewer,
-		FExecuteAction::CreateStatic(
-			ToggleTabVisibility,
-			DebuggingToolsManagerWeak,
-			WatchViewerTabName
-		),
-		FCanExecuteAction::CreateStatic(
-			[]() { return true; }
-		),
-		FIsActionChecked::CreateStatic(
-			IsTabVisible,
-			DebuggingToolsManagerWeak,
-			WatchViewerTabName
-		)
-	);
-
-	CommandList->MapAction(
 		FBlueprintDebuggerCommands::Get().ShowExecutionTrace,
 		FExecuteAction::CreateStatic(
 			ToggleTabVisibility,
@@ -271,58 +271,53 @@ TSharedRef<SDockTab> FBlueprintDebuggerImpl::CreateBluprintDebuggerTab(const FSp
 		)
 	);
 
-	TWeakPtr<SWidget> OwningWidgetWeak = NomadTab;
-	TabContents->SetOnMouseButtonUp(
-		FPointerEventHandler::CreateStatic(
-			[]( /** The geometry of the widget*/
-				const FGeometry&,
-				/** The Mouse Event that we are processing */
-				const FPointerEvent& PointerEvent,
-				TWeakPtr<SWidget> InOwnerWeak,
-				TSharedPtr<FUICommandList> InCommandList) -> FReply
-			{
-				if (PointerEvent.GetEffectingButton() == EKeys::RightMouseButton)
-				{
-					// if the tab manager is still available then make a context window that allows users to
-					// show and hide tabs:
-					TSharedPtr<SWidget> InOwner = InOwnerWeak.Pin();
-					if (InOwner.IsValid())
-					{
-						FMenuBuilder MenuBuilder(true, InCommandList);
-
-						MenuBuilder.PushCommandList(InCommandList.ToSharedRef());
-						{
-							MenuBuilder.AddMenuEntry(FBlueprintDebuggerCommands::Get().ShowCallStackViewer);
-							MenuBuilder.AddMenuEntry(FBlueprintDebuggerCommands::Get().ShowWatchViewer);
-							MenuBuilder.AddMenuEntry(FBlueprintDebuggerCommands::Get().ShowExecutionTrace);
-						}
-						MenuBuilder.PopCommandList();
-
-
-						FWidgetPath WidgetPath = PointerEvent.GetEventPath() != nullptr ? *PointerEvent.GetEventPath() : FWidgetPath();
-						FSlateApplication::Get().PushMenu(InOwner.ToSharedRef(), WidgetPath, MenuBuilder.MakeWidget(), PointerEvent.GetScreenSpacePosition(), FPopupTransitionEffect(FPopupTransitionEffect::ContextMenu));
-
-						return FReply::Handled();
-					}
-				}
-				
-				return FReply::Unhandled();
-			}
-			, OwningWidgetWeak
-			, CommandList
-		)
+	FMenuBarBuilder MenuBarBuilder(CommandList);
+	MenuBarBuilder.AddPullDownMenu(
+		LOCTEXT("WindowMenuLabel", "Window"),
+		FText::GetEmpty(),
+		FNewMenuDelegate::CreateLambda([](FMenuBuilder& Builder) {
+			Builder.AddMenuEntry(FBlueprintDebuggerCommands::Get().ShowCallStackViewer);
+			Builder.AddMenuEntry(FBlueprintDebuggerCommands::Get().ShowExecutionTrace);
+			})
 	);
+	
+
+	TSharedRef<SWidget> MenuBarWidget = MenuBarBuilder.MakeWidget();
 
 	NomadTab->SetContent(
-		SNew(SBorder)
-		.BorderImage(FEditorStyle::GetBrush("ToolPanel.DarkGroupBorder"))
-		.Padding(FMargin(0.f, 2.f))
+		SNew(SVerticalBox)
+		+ SVerticalBox::Slot()
+		.AutoHeight()
 		[
-			TabContents
+			MenuBarWidget
+		]
+		+SVerticalBox::Slot()
+		[
+			SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.DarkGroupBorder"))
+			.Padding(FMargin(0.f, 2.f))
+			[
+				TabContents
+			]
 		]
 	);
+	
+
+	// Tell tab-manager about the multi-box for platforms with a global menu bar
+	DebuggingToolsTabManager->SetMenuMultiBox(MenuBarBuilder.GetMultiBox(), MenuBarWidget);
 
 	return NomadTab;
+}
+
+void FBlueprintDebuggerImpl::SetDebuggedBlueprint(UBlueprint* InBlueprint)
+{
+	static const FName ExecutionFlowTabName(TEXT("ExecutionFlowApp"));
+	TSharedPtr<SDockTab> DebuggingViewTab = DebuggingToolsTabManager->TryInvokeTab(ExecutionFlowTabName);
+	if (DebuggingViewTab.IsValid())
+	{
+		TSharedRef<SKismetDebuggingView> DebuggingViewWidget = StaticCastSharedRef<SKismetDebuggingView>(DebuggingViewTab->GetContent());
+		DebuggingViewWidget->SetBlueprintToWatch(InBlueprint);
+	}
 }
 
 FBlueprintDebugger::FBlueprintDebugger()
@@ -332,6 +327,11 @@ FBlueprintDebugger::FBlueprintDebugger()
 
 FBlueprintDebugger::~FBlueprintDebugger()
 {
+}
+
+void FBlueprintDebugger::SetDebuggedBlueprint(UBlueprint* InBlueprint)
+{
+	Impl->SetDebuggedBlueprint(InBlueprint);
 }
 
 #undef LOCTEXT_NAMESPACE 

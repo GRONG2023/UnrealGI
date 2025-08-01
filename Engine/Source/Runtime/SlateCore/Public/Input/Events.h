@@ -8,7 +8,9 @@
 #include "InputCoreTypes.h"
 #include "Types/SlateEnums.h"
 #include "GenericPlatform/GenericApplication.h"
+#include "GenericPlatform/GenericPlatformInputDeviceMapper.h"
 #include "Layout/Geometry.h"
+#include "Types/SlateVector2.h"
 #include "Events.generated.h"
 
 class FWidgetPath;
@@ -39,9 +41,6 @@ enum class EFocusCause : uint8
 	/** Focus was set in response to the owning window being activated. */
 	WindowActivate,
 };
-
-UE_DEPRECATED(4.18, "EKeyboardFocusCause is deprecated and was renamed to EFocusCause. Please use that type instead.")
-typedef EFocusCause EKeyboardFocusCause;
 
 /**
  * FFocusEvent is used when notifying widgets about keyboard focus changes
@@ -135,17 +134,17 @@ public:
 struct FVirtualPointerPosition
 {
 	FVirtualPointerPosition()
-		: CurrentCursorPosition(FVector2D::ZeroVector)
-		, LastCursorPosition(FVector2D::ZeroVector)
+		: CurrentCursorPosition(FVector2f::ZeroVector)
+		, LastCursorPosition(FVector2f::ZeroVector)
 	{}
 
-	FVirtualPointerPosition(const FVector2D& InCurrentCursorPosition, const FVector2D& InLastCursorPosition)
+	FVirtualPointerPosition(const UE::Slate::FDeprecateVector2DParameter& InCurrentCursorPosition, const UE::Slate::FDeprecateVector2DParameter& InLastCursorPosition)
 		: CurrentCursorPosition(InCurrentCursorPosition)
 		, LastCursorPosition(InLastCursorPosition)
 	{}
 
-	FVector2D CurrentCursorPosition;
-	FVector2D LastCursorPosition;
+	UE::Slate::FDeprecateVector2DResult CurrentCursorPosition;
+	UE::Slate::FDeprecateVector2DResult LastCursorPosition;
 };
 
 /**
@@ -165,6 +164,7 @@ public:
 		: ModifierKeys(FModifierKeysState())
 		, bIsRepeat(false)
 		, UserIndex(0)
+		, InputDeviceId(INPUTDEVICEID_NONE)
 		, EventPath(nullptr)
 	{ }
 
@@ -178,8 +178,19 @@ public:
 		: ModifierKeys(InModifierKeys)
 		, bIsRepeat(bInIsRepeat)
 		, UserIndex(InUserIndex)
+		, InputDeviceId(FInputDeviceId::CreateFromInternalId(InUserIndex))
 		, EventPath(nullptr)
 	{ }
+
+	FInputEvent(const FModifierKeysState& InModifierKeys, const FInputDeviceId InDeviceId, const bool bInIsRepeat)
+		: ModifierKeys(InModifierKeys)
+		, bIsRepeat(bInIsRepeat)
+		, InputDeviceId(InDeviceId)
+		, EventPath(nullptr)
+	{
+		// Set the User Index to the PlatformUser ID by default for backwards compatibility
+		UserIndex = GetPlatformUserId().GetInternalId();
+	}
 
 	/**
 	 * Virtual destructor.
@@ -320,6 +331,22 @@ public:
 		return UserIndex;
 	}
 
+	/**
+	 * Returns the input device that caused this event.
+	 */
+	FInputDeviceId GetInputDeviceId() const
+	{
+		return InputDeviceId;
+	}
+
+	/**
+	 * Returns the associated platform user that caused this event
+	 */
+	FPlatformUserId GetPlatformUserId() const
+	{
+		return IPlatformInputDeviceMapper::Get().GetUserForInputDevice(InputDeviceId);
+	}
+
 	/** The event path provides additional context for handling */
 	SLATECORE_API FGeometry FindGeometry(const TSharedRef<SWidget>& WidgetToFind) const;
 
@@ -354,6 +381,9 @@ protected:
 
 	// The index of the user that caused the event.
 	uint32 UserIndex;
+	
+	// The ID of the input device that caused this event.
+	FInputDeviceId InputDeviceId;
 
 	// Events are sent along paths. See (GetEventPath).
 	const FWidgetPath* EventPath;
@@ -408,6 +438,25 @@ public:
 		, CharacterCode(InCharacterCode)
 		, KeyCode(InKeyCode)
 	{ }
+	
+	FKeyEvent(const FKey InKey,
+			const FModifierKeysState& InModifierKeys, 
+			const FInputDeviceId InDeviceId,
+			const bool bInIsRepeat,
+			const uint32 InCharacterCode,
+			const uint32 InKeyCode,
+			const TOptional<int32> InOptionalSlateUserIndex = TOptional<int32>()
+	)
+		: FInputEvent(InModifierKeys, InDeviceId, bInIsRepeat)
+		, Key(InKey)
+		, CharacterCode(InCharacterCode)
+		, KeyCode(InKeyCode)
+	{
+		if (InOptionalSlateUserIndex.IsSet())
+		{
+			UserIndex = InOptionalSlateUserIndex.GetValue();
+		}
+	}
 
 	/**
 	 * Returns the name of the key for this event
@@ -503,6 +552,19 @@ public:
 		, AnalogValue(InAnalogValue)
 	{ }
 
+	FAnalogInputEvent(const FKey InKey,
+		const FModifierKeysState& InModifierKeys,
+		const FInputDeviceId InDeviceId,
+		const bool bInIsRepeat,
+		const uint32 InCharacterCode,
+		const uint32 InKeyCode,
+		const float InAnalogValue,
+		const TOptional<int32> InOptionalSlateUserIndex = TOptional<int32>()
+	)
+		: FKeyEvent(InKey, InModifierKeys, InDeviceId, bInIsRepeat, InCharacterCode, InKeyCode, InOptionalSlateUserIndex)
+		, AnalogValue(InAnalogValue)
+	{ }
+
 	/**
 	 * Returns the analog value between 0 and 1.
 	 * 0 being not pressed at all, 1 being fully pressed.
@@ -549,6 +611,11 @@ public:
 
 	FCharacterEvent(const TCHAR InCharacter, const FModifierKeysState& InModifierKeys, const uint32 InUserIndex, const bool bInIsRepeat)
 		: FInputEvent(InModifierKeys, InUserIndex, bInIsRepeat)
+		, Character(InCharacter)
+	{ }
+
+	FCharacterEvent(const TCHAR InCharacter, const FModifierKeysState& InModifierKeys, const FInputDeviceId InDeviceId, const bool bInIsRepeat)
+		: FInputEvent(InModifierKeys, InDeviceId, bInIsRepeat)
 		, Character(InCharacter)
 	{ }
 
@@ -624,9 +691,9 @@ public:
 	 * UStruct Constructor.  Not meant for normal usage.
 	 */
 	FPointerEvent()
-		: ScreenSpacePosition(FVector2D(0, 0))
-		, LastScreenSpacePosition(FVector2D(0, 0))
-		, CursorDelta(FVector2D(0, 0))
+		: ScreenSpacePosition(FVector2f(0.f, 0.f))
+		, LastScreenSpacePosition(FVector2f(0.f, 0.f))
+		, CursorDelta(FVector2f(0.f, 0.f))
 		, PressedButtons(&FTouchKeySet::EmptySet)
 		, EffectingButton()
 		, PointerIndex(0)
@@ -643,8 +710,8 @@ public:
 	/** Events are immutable once constructed. */
 	FPointerEvent(
 		uint32 InPointerIndex,
-		const FVector2D& InScreenSpacePosition,
-		const FVector2D& InLastScreenSpacePosition,
+		const UE::Slate::FDeprecateVector2DParameter& InScreenSpacePosition,
+		const UE::Slate::FDeprecateVector2DParameter& InLastScreenSpacePosition,
 		const TSet<FKey>& InPressedButtons,
 		FKey InEffectingButton,
 		float InWheelDelta,
@@ -653,7 +720,7 @@ public:
 		: FInputEvent(InModifierKeys, 0, false)
 		, ScreenSpacePosition(InScreenSpacePosition)
 		, LastScreenSpacePosition(InLastScreenSpacePosition)
-		, CursorDelta(InScreenSpacePosition - InLastScreenSpacePosition)
+		, CursorDelta(FVector2f(InScreenSpacePosition) - FVector2f(InLastScreenSpacePosition))
 		, PressedButtons(&InPressedButtons)
 		, EffectingButton(InEffectingButton)
 		, PointerIndex(InPointerIndex)
@@ -670,8 +737,8 @@ public:
 	FPointerEvent(
 		uint32 InUserIndex,
 		uint32 InPointerIndex,
-		const FVector2D& InScreenSpacePosition,
-		const FVector2D& InLastScreenSpacePosition,
+		const UE::Slate::FDeprecateVector2DParameter& InScreenSpacePosition,
+		const UE::Slate::FDeprecateVector2DParameter& InLastScreenSpacePosition,
 		const TSet<FKey>& InPressedButtons,
 		FKey InEffectingButton,
 		float InWheelDelta,
@@ -680,7 +747,7 @@ public:
 		: FInputEvent(InModifierKeys, InUserIndex, false)
 		, ScreenSpacePosition(InScreenSpacePosition)
 		, LastScreenSpacePosition(InLastScreenSpacePosition)
-		, CursorDelta(InScreenSpacePosition - InLastScreenSpacePosition)
+		, CursorDelta(FVector2f(InScreenSpacePosition) - FVector2f(InLastScreenSpacePosition))
 		, PressedButtons(&InPressedButtons)
 		, EffectingButton(InEffectingButton)
 		, PointerIndex(InPointerIndex)
@@ -695,11 +762,44 @@ public:
 	{ }
 
 	FPointerEvent(
+		FInputDeviceId InDeviceId,
+		uint32 InPointerIndex,
+		const UE::Slate::FDeprecateVector2DParameter& InScreenSpacePosition,
+		const UE::Slate::FDeprecateVector2DParameter& InLastScreenSpacePosition,
+		const TSet<FKey>& InPressedButtons,
+		FKey InEffectingButton,
+		float InWheelDelta,
+		const FModifierKeysState& InModifierKeys,
+		const TOptional<int32> InOptionalSlateUserIndex = TOptional<int32>()
+	)
+		: FInputEvent(InModifierKeys, InDeviceId, false)
+		, ScreenSpacePosition(InScreenSpacePosition)
+		, LastScreenSpacePosition(InLastScreenSpacePosition)
+		, CursorDelta(FVector2f(InScreenSpacePosition) - FVector2f(InLastScreenSpacePosition))
+		, PressedButtons(&InPressedButtons)
+		, EffectingButton(InEffectingButton)
+		, PointerIndex(InPointerIndex)
+		, TouchpadIndex(0)
+		, Force(1.0f)
+		, bIsTouchEvent(false)
+		, GestureType(EGestureEvent::None)
+		, WheelOrGestureDelta(0.0f, InWheelDelta)
+		, bIsDirectionInvertedFromDevice(false)
+		, bIsTouchForceChanged(false)
+		, bIsTouchFirstMove(false)
+	{
+		if (InOptionalSlateUserIndex.IsSet())
+		{
+			UserIndex = InOptionalSlateUserIndex.GetValue();
+		}
+	}
+
+	FPointerEvent(
 		uint32 InUserIndex,
 		uint32 InPointerIndex,
-		const FVector2D& InScreenSpacePosition,
-		const FVector2D& InLastScreenSpacePosition,
-		const FVector2D& InDelta,
+		const UE::Slate::FDeprecateVector2DParameter& InScreenSpacePosition,
+		const UE::Slate::FDeprecateVector2DParameter& InLastScreenSpacePosition,
+		const UE::Slate::FDeprecateVector2DParameter& InDelta,
 		const TSet<FKey>& InPressedButtons,
 		const FModifierKeysState& InModifierKeys
 	)
@@ -722,9 +822,9 @@ public:
 	/** A constructor for raw mouse events */
 	FPointerEvent(
 		uint32 InPointerIndex,
-		const FVector2D& InScreenSpacePosition,
-		const FVector2D& InLastScreenSpacePosition,
-		const FVector2D& InDelta,
+		const UE::Slate::FDeprecateVector2DParameter& InScreenSpacePosition,
+		const UE::Slate::FDeprecateVector2DParameter& InLastScreenSpacePosition,
+		const UE::Slate::FDeprecateVector2DParameter& InDelta,
 		const TSet<FKey>& InPressedButtons,
 		const FModifierKeysState& InModifierKeys
 	)
@@ -744,25 +844,11 @@ public:
 		, bIsTouchFirstMove(false)
 	{ }
 
-	/** A constructor for touch events */
-	UE_DEPRECATED(4.20, "FPointerEvent constructor now takes a Force parameter")
 	FPointerEvent(
 		uint32 InUserIndex,
 		uint32 InPointerIndex,
-		const FVector2D& InScreenSpacePosition,
-		const FVector2D& InLastScreenSpacePosition,
-		bool bPressLeftMouseButton,
-		const FModifierKeysState& InModifierKeys = FModifierKeysState(),
-		uint32 InTouchpadIndex=0
-	)
-	: FPointerEvent(InUserIndex, InPointerIndex, InScreenSpacePosition, InLastScreenSpacePosition, 1.0f, bPressLeftMouseButton, false, false, InModifierKeys, InTouchpadIndex)
-	{ }
-
-	FPointerEvent(
-		uint32 InUserIndex,
-		uint32 InPointerIndex,
-		const FVector2D& InScreenSpacePosition,
-		const FVector2D& InLastScreenSpacePosition,
+		const UE::Slate::FDeprecateVector2DParameter& InScreenSpacePosition,
+		const UE::Slate::FDeprecateVector2DParameter& InLastScreenSpacePosition,
 		float InForce,
 		bool bPressLeftMouseButton,
 		bool bInIsForceChanged = false,
@@ -773,7 +859,7 @@ public:
 	: FInputEvent(InModifierKeys, InUserIndex, false)
 		, ScreenSpacePosition(InScreenSpacePosition)
 		, LastScreenSpacePosition(InLastScreenSpacePosition)
-		, CursorDelta(InScreenSpacePosition - InLastScreenSpacePosition)
+		, CursorDelta(FVector2f(InScreenSpacePosition) - FVector2f(InLastScreenSpacePosition))
 		, PressedButtons(bPressLeftMouseButton ? &FTouchKeySet::StandardSet : &FTouchKeySet::EmptySet)
 		, EffectingButton(EKeys::LeftMouseButton)
 		, PointerIndex(InPointerIndex)
@@ -786,23 +872,59 @@ public:
 		, bIsTouchForceChanged(bInIsForceChanged)
 		, bIsTouchFirstMove(bInIsFirstMove)
 	{ }
+	
+	FPointerEvent(
+		FInputDeviceId InDeviceId,
+		uint32 InPointerIndex,
+		const UE::Slate::FDeprecateVector2DParameter& InScreenSpacePosition,
+		const UE::Slate::FDeprecateVector2DParameter& InLastScreenSpacePosition,
+		float InForce,
+		bool bPressLeftMouseButton,
+		bool bInIsForceChanged = false,
+		bool bInIsFirstMove = false,
+		const FModifierKeysState& InModifierKeys = FModifierKeysState(),
+		uint32 InTouchpadIndex=0,
+		const TOptional<int32> InOptionalSlateUserIndex = TOptional<int32>()
+	)
+	: FInputEvent(InModifierKeys, InDeviceId, false)
+		, ScreenSpacePosition(InScreenSpacePosition)
+		, LastScreenSpacePosition(InLastScreenSpacePosition)
+		, CursorDelta(FVector2f(InScreenSpacePosition) - FVector2f(InLastScreenSpacePosition))
+		, PressedButtons(bPressLeftMouseButton ? &FTouchKeySet::StandardSet : &FTouchKeySet::EmptySet)
+		, EffectingButton(EKeys::LeftMouseButton)
+		, PointerIndex(InPointerIndex)
+		, TouchpadIndex(InTouchpadIndex)
+		, Force(InForce)
+		, bIsTouchEvent(true)
+		, GestureType(EGestureEvent::None)
+		, WheelOrGestureDelta(0.0f, 0.0f)
+		, bIsDirectionInvertedFromDevice(false)
+		, bIsTouchForceChanged(bInIsForceChanged)
+		, bIsTouchFirstMove(bInIsFirstMove)
+	{
+		if (InOptionalSlateUserIndex.IsSet())
+		{
+			UserIndex = InOptionalSlateUserIndex.GetValue();
+		}
+	}
 
 	/** A constructor for gesture events */
 	FPointerEvent(
-		const FVector2D& InScreenSpacePosition,
-		const FVector2D& InLastScreenSpacePosition,
+		const UE::Slate::FDeprecateVector2DParameter& InScreenSpacePosition,
+		const UE::Slate::FDeprecateVector2DParameter& InLastScreenSpacePosition,
 		const TSet<FKey>& InPressedButtons,
 		const FModifierKeysState& InModifierKeys,
 		EGestureEvent InGestureType,
-		const FVector2D& InGestureDelta,
+		const UE::Slate::FDeprecateVector2DParameter& InGestureDelta,
 		bool bInIsDirectionInvertedFromDevice
 	)
 		: FInputEvent(InModifierKeys, 0, false)
 		, ScreenSpacePosition(InScreenSpacePosition)
 		, LastScreenSpacePosition(InLastScreenSpacePosition)
-		, CursorDelta(LastScreenSpacePosition - ScreenSpacePosition)
+		, CursorDelta(FVector2f(LastScreenSpacePosition) - FVector2f(ScreenSpacePosition))
 		, PressedButtons(&InPressedButtons)
 		, PointerIndex(0)
+		, TouchpadIndex(0)
 		, Force(1.0f)
 		, bIsTouchEvent(false)
 		, GestureType(InGestureType)
@@ -811,17 +933,28 @@ public:
 		, bIsTouchForceChanged(false)
 		, bIsTouchFirstMove(false)
 	{ }
+
+	/** A constructor to alter cursor positions */
+	FPointerEvent(
+		const FPointerEvent& Other,
+		const UE::Slate::FDeprecateVector2DParameter& InScreenSpacePosition,
+		const UE::Slate::FDeprecateVector2DParameter& InLastScreenSpacePosition)
+	{
+		*this = Other;
+		ScreenSpacePosition = InScreenSpacePosition;
+		LastScreenSpacePosition = InLastScreenSpacePosition;
+	}
 	
 public:
 
 	/** Returns The position of the cursor in screen space */
-	const FVector2D& GetScreenSpacePosition() const { return ScreenSpacePosition; }
+	const UE::Slate::FDeprecateVector2DResult& GetScreenSpacePosition() const { return ScreenSpacePosition; }
 
 	/** Returns the position of the cursor in screen space last time we handled an input event */
-	const FVector2D& GetLastScreenSpacePosition() const { return LastScreenSpacePosition; }
+	const UE::Slate::FDeprecateVector2DResult& GetLastScreenSpacePosition() const { return LastScreenSpacePosition; }
 
 	/** Returns the distance the mouse traveled since the last event was handled. */
-	const FVector2D& GetCursorDelta() const { return CursorDelta; }
+	const UE::Slate::FDeprecateVector2DResult& GetCursorDelta() const { return CursorDelta; }
 
 	/** Mouse buttons that are currently pressed */
 	bool IsMouseButtonDown( FKey MouseButton ) const { return PressedButtons->Contains( MouseButton ); }
@@ -830,7 +963,7 @@ public:
 	FKey GetEffectingButton() const { return EffectingButton; }
 	
 	/** How much did the mouse wheel turn since the last mouse event */
-	float GetWheelDelta() const { return WheelOrGestureDelta.Y; }
+	float GetWheelDelta() const { return UE_REAL_TO_FLOAT(WheelOrGestureDelta.Y); }
 
 	/** Returns the index of the user that caused the event */
 	int32 GetUserIndex() const { return UserIndex; }
@@ -857,36 +990,13 @@ public:
 	EGestureEvent GetGestureType() const { return GestureType; }
 
 	/** Returns the change in gesture value since the last gesture event of the same type. */
-	const FVector2D& GetGestureDelta() const { return WheelOrGestureDelta; }
+	const UE::Slate::FDeprecateVector2DResult& GetGestureDelta() const { return WheelOrGestureDelta; }
 
 	/** Is the gesture delta inverted */
 	bool IsDirectionInvertedFromDevice() const { return bIsDirectionInvertedFromDevice; }
 
 	/** Returns the full set of pressed buttons */
 	const TSet<FKey>& GetPressedButtons() const { return *PressedButtons; }
-
-	/** We override the assignment operator to allow generated code to compile with the const ref member. */
-	void operator=( const FPointerEvent& Other )
-	{
-		FInputEvent::operator=( Other );
-
-		// Pointer
-		ScreenSpacePosition = Other.ScreenSpacePosition;
-		LastScreenSpacePosition = Other.LastScreenSpacePosition;
-		CursorDelta = Other.CursorDelta;
-		PressedButtons = Other.PressedButtons;
-		EffectingButton = Other.EffectingButton;
-		UserIndex = Other.UserIndex;
-		PointerIndex = Other.PointerIndex;
-		TouchpadIndex = Other.TouchpadIndex;
-		Force = Other.Force;
-		bIsTouchEvent = Other.bIsTouchEvent;
-		GestureType = Other.GestureType;
-		WheelOrGestureDelta = Other.WheelOrGestureDelta;
-		bIsDirectionInvertedFromDevice = Other.bIsDirectionInvertedFromDevice;
-		bIsTouchForceChanged = Other.bIsTouchForceChanged;
-		bIsTouchFirstMove = Other.bIsTouchFirstMove;
-	}
 
 	SLATECORE_API virtual FText ToText() const override;
 
@@ -904,9 +1014,9 @@ public:
 
 private:
 
-	FVector2D ScreenSpacePosition;
-	FVector2D LastScreenSpacePosition;
-	FVector2D CursorDelta;
+	UE::Slate::FDeprecateVector2DResult ScreenSpacePosition;
+	UE::Slate::FDeprecateVector2DResult LastScreenSpacePosition;
+	UE::Slate::FDeprecateVector2DResult CursorDelta;
 	const TSet<FKey>* PressedButtons;
 	FKey EffectingButton;
 	uint32 PointerIndex;
@@ -914,7 +1024,7 @@ private:
 	float Force;
 	bool bIsTouchEvent;
 	EGestureEvent GestureType;
-	FVector2D WheelOrGestureDelta;
+	UE::Slate::FDeprecateVector2DResult WheelOrGestureDelta;
 	bool bIsDirectionInvertedFromDevice;
 	bool bIsTouchForceChanged;
 	bool bIsTouchFirstMove;
@@ -961,6 +1071,20 @@ public:
 		const FVector& InAcceleration
 	)
 		: FInputEvent(FModifierKeysState(), InUserIndex, false)
+		, Tilt(InTilt)
+		, RotationRate(InRotationRate)
+		, Gravity(InGravity)
+		, Acceleration(InAcceleration)
+	{ }
+
+	FMotionEvent(
+		const FInputDeviceId InDeviceId,
+		const FVector& InTilt, 
+		const FVector& InRotationRate, 
+		const FVector& InGravity, 
+		const FVector& InAcceleration
+	)
+		: FInputEvent(FModifierKeysState(), InDeviceId, false)
 		, Tilt(InTilt)
 		, RotationRate(InRotationRate)
 		, Gravity(InGravity)
@@ -1030,6 +1154,12 @@ public:
 
 	FNavigationEvent(const FModifierKeysState& InModifierKeys, const int32 InUserIndex, EUINavigation InNavigationType, ENavigationGenesis InNavigationGenesis)
 		: FInputEvent(InModifierKeys, InUserIndex, false)
+		, NavigationType(InNavigationType)
+		, NavigationGenesis(InNavigationGenesis)
+	{ }
+
+	FNavigationEvent(const FModifierKeysState& InModifierKeys, const FInputDeviceId InDeviceId, EUINavigation InNavigationType, ENavigationGenesis InNavigationGenesis)
+		: FInputEvent(InModifierKeys, InDeviceId, false)
 		, NavigationType(InNavigationType)
 		, NavigationGenesis(InNavigationGenesis)
 	{ }

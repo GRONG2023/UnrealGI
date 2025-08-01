@@ -13,16 +13,17 @@
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
 #include "Misc/FileHelper.h"
-#include "AssetRegistryModule.h"
 #include "AutomationControllerSettings.h"
+#include "AutomationGroupFilter.h"
+#include "Containers/Ticker.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogAutomationCommandLine, Log, All);
 
 /** States for running the automation process */
 enum class EAutomationTestState : uint8
 {
-	Initializing,		// 
 	Idle,				// Automation process is not running
+	Initializing,		//
 	FindWorkers,		// Find workers to run the tests
 	RequestTests,		// Find the tests that can be run on the workers
 	DoingRequestedWork,	// Do whatever was requested from the commandline
@@ -34,8 +35,9 @@ enum class EAutomationCommand : uint8
 	ListAllTests,			//List all tests for the session
 	RunCommandLineTests,	//Run only tests that are listed on the commandline
 	RunAll,					//Run all the tests that are supported
-	RunFilter,              //
-	Quit					//quit the app when tests are done
+	RunFilter,              //Run only tests that are tagged with this filter
+	Quit,					//quit the app when tests are done, uses forced exit
+	SoftQuit				//quit the app when tests are done without forced exit
 };
 
 
@@ -50,6 +52,7 @@ public:
 		DelayTimer = DefaultDelayTimer;
 		FindWorkersTimeout = DefaultFindWorkersTimeout;
 		FindWorkerAttempts = 0;
+		TestCount = 0;
 	}
 
 	void Init()
@@ -75,12 +78,13 @@ public:
 			TestsRefreshedHandle = AutomationController->OnTestsRefreshed().AddRaw(this, &FAutomationExecCmd::HandleRefreshTestCallback);
 		}
 
-		TickHandler = FTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FAutomationExecCmd::Tick));
+		if (!TickHandler.IsValid()) {
+			TickHandler = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FAutomationExecCmd::Tick));
+		}
 
 		int32 NumTestLoops = 1;
 		FParse::Value(FCommandLine::Get(), TEXT("TestLoops="), NumTestLoops);
 		AutomationController->SetNumPasses(NumTestLoops);
-		TestCount = 0;
 		SetUpFilterMapping();
 	}
 
@@ -92,6 +96,7 @@ public:
 		FilterMaps.Add("Stress", EAutomationTestFlags::StressFilter);
 		FilterMaps.Add("Perf", EAutomationTestFlags::PerfFilter);
 		FilterMaps.Add("Product", EAutomationTestFlags::ProductFilter);
+		FilterMaps.Add("All", EAutomationTestFlags::FilterMask);
 	}
 	
 	void Shutdown()
@@ -103,7 +108,7 @@ public:
 			AutomationController->OnTestsRefreshed().RemoveAll(this);
 		}
 
-		FTicker::GetCoreTicker().RemoveTicker(TickHandler);
+		FTSTicker::GetCoreTicker().RemoveTicker(TickHandler);
 	}
 
 	bool IsTestingComplete()
@@ -111,59 +116,53 @@ public:
 		// If the automation controller is no longer processing and we've reached the final stage of testing
 		if ((AutomationController->GetTestState() != EAutomationControllerModuleState::Running) && (AutomationTestState == EAutomationTestState::Complete) && (AutomationCommandQueue.Num() == 0))
 		{
-			// If an actual test was ran we then will let the user know how many of them were ran.
-			if (TestCount > 0)
-			{
-				UE_LOG(LogAutomationCommandLine, Display, TEXT("...Automation Test Queue Empty %d tests performed."), TestCount);
-				TestCount = 0;
-			}
+			UE_LOG(LogAutomationCommandLine, Display, TEXT("...Automation Test Queue Empty %d tests performed."), TestCount);
+			TestCount = 0;
 			return true;
 		}
 		return false;
 	}
 
-
-	
-	void GenerateTestNamesFromCommandLine(const TArray<FString>& AllTestNames, TArray<FString>& OutTestNames)
+	void GenerateTestNamesFromCommandLine(TSharedPtr <AutomationFilterCollection> InFilters, TArray<FString>& OutFilteredTestNames)
 	{
-		OutTestNames.Empty();
+		OutFilteredTestNames.Empty();
 		
 		//Split the argument names up on +
 		TArray<FString> ArgumentNames;
 		StringCommand.ParseIntoArray(ArgumentNames, TEXT("+"), true);
 
-		TArray<FAutomatedTestFilter> Filters;
-
 		// get our settings CDO where things are stored
 		UAutomationControllerSettings* Settings = UAutomationControllerSettings::StaticClass()->GetDefaultObject<UAutomationControllerSettings>();
 
 		// iterate through the arguments to build a filter list by doing the following -
-		// 1) If argument is a filter (filter:system) then make sure we only filter-in tests that start with that filter
+		// 1) If argument is a filter (StartsWith:system) then make sure we only filter-in tests that start with that filter
 		// 2) If argument is a group then expand that group into multiple filters based on ini entries
 		// 3) Otherwise just substring match (default behavior in 4.22 and earlier).
+		FAutomationGroupFilter* FilterAny = new FAutomationGroupFilter();
+		TArray<FAutomatedTestFilter> FiltersList;
 		for (int32 ArgumentIndex = 0; ArgumentIndex < ArgumentNames.Num(); ++ArgumentIndex)
 		{
 			const FString GroupPrefix = TEXT("Group:");
-			const FString FilterPrefix = TEXT("Filter:");
+			const FString FilterPrefix = TEXT("StartsWith:");
 
-			FString ArgumentName = ArgumentNames[ArgumentIndex];
+			FString ArgumentName = ArgumentNames[ArgumentIndex].TrimStartAndEnd();
 
 			// if the argument is a filter (e.g. Filter:System) then create a filter that matches from the start
 			if (ArgumentName.StartsWith(FilterPrefix))
 			{
-				FString FilterName = ArgumentName.RightChop(FilterPrefix.Len());
+				FString FilterName = ArgumentName.RightChop(FilterPrefix.Len()).TrimStart();
 
 				if (FilterName.EndsWith(TEXT(".")) == false)
 				{
 					FilterName += TEXT(".");
 				}
 
-				Filters.Add(FAutomatedTestFilter(FilterName, true));
+				FiltersList.Add(FAutomatedTestFilter(FilterName, true, false));
 			}
 			else if (ArgumentName.StartsWith(GroupPrefix))
 			{
 				// if the argument is a group (e.g. Group:Rendering) then seach our groups for one that matches
-				FString GroupName = ArgumentName.RightChop(GroupPrefix.Len());
+				FString GroupName = ArgumentName.RightChop(GroupPrefix.Len()).TrimStart();
 
 				bool FoundGroup = false;
 
@@ -176,10 +175,7 @@ public:
 						// if found add all this groups filters to our current list
 						if (GroupEntry->Filters.Num() > 0)
 						{
-							for (const FAutomatedTestFilter& GroupFilter : GroupEntry->Filters)
-							{
-								Filters.Add(GroupFilter);
-							}
+							FiltersList.Append(GroupEntry->Filters);
 						}
 						else
 						{
@@ -190,81 +186,39 @@ public:
 
 				if (!FoundGroup)
 				{
-					UE_LOG(LogAutomationCommandLine, Warning, TEXT("No matching group named %s"), *GroupName);
+					UE_LOG(LogAutomationCommandLine, Error, TEXT("No matching group named %s"), *GroupName);
 				}
 			}			
 			else
 			{
-				// old behavior of just string searching
-				ArgumentName = ArgumentName.TrimStart().Replace(TEXT(" "), TEXT(""));
-
 				bool bMatchFromStart = false;
-				//bool bMatchFromEnd = false;
+				bool bMatchFromEnd = false;
 
 				if (ArgumentName.StartsWith("^"))
 				{
 					bMatchFromStart = true;
 					ArgumentName.RightChopInline(1);
 				}
-
-				/*if (ArgumentName.EndsWith("$"))
+				if (ArgumentName.EndsWith("$"))
 				{
 					bMatchFromEnd = true;
 					ArgumentName.LeftChopInline(1);
-				}*/
-
-				// #agrant todo: restore in 4.26 when headers can be changed
-				Filters.Add(FAutomatedTestFilter(ArgumentName, bMatchFromStart/*, bMatchFromEnd*/));
-			}
-		}
-		
-		for (int32 TestIndex = 0; TestIndex < AllTestNames.Num(); ++TestIndex)
-		{
-			FString TestNamesNoWhiteSpaces = AllTestNames[TestIndex].Replace(TEXT(" "), TEXT(""));
-
-			for (const FAutomatedTestFilter& Filter : Filters)
-			{
-				// #agrant todo: remove in 4.26 when headers can be changed and we store this during parsing
-				bool bMatchFromEnd = false;
-				FString FilterString = Filter.Contains;
-				if (FilterString.EndsWith("$"))
-				{
-					bMatchFromEnd = true;
-					FilterString.LeftChopInline(1);
 				}
 
-bool bNeedStartMatch = Filter.MatchFromStart;
-bool bNeedEndMatch = bMatchFromEnd;
-bool bMeetsMatch = true;	// assume true
-
-// If we need to match at the start or end, 
-if (bNeedStartMatch || bNeedEndMatch)
-{
-	if (bNeedStartMatch)
-	{
-		bMeetsMatch = TestNamesNoWhiteSpaces.StartsWith(FilterString);
-	}
-
-	if (bNeedEndMatch && bMeetsMatch)
-	{
-		bMeetsMatch = TestNamesNoWhiteSpaces.EndsWith(FilterString);
-	}
-}
-else
-{
-	// match anywhere
-	bMeetsMatch = TestNamesNoWhiteSpaces.Contains(FilterString);
-}
-
-if (bMeetsMatch)
-{
-	OutTestNames.Add(AllTestNames[TestIndex]);
-	TestCount++;
-	break;
-}
+				FiltersList.Add(FAutomatedTestFilter(ArgumentName, bMatchFromStart, bMatchFromEnd));
 			}
 		}
 
+		if (!FiltersList.IsEmpty())
+		{
+			FilterAny->SetFilters(FiltersList);
+			InFilters->Add(MakeShareable(FilterAny));
+
+			// SetFilter applies all filters from the AutomationFilters array
+			AutomationController->SetFilter(InFilters);
+			// Fill OutFilteredTestNames array with filtered test names
+			AutomationController->GetFilteredTestNames(OutFilteredTestNames);
+		}
 	}
 
 	void FindWorkers(float DeltaTime)
@@ -310,29 +264,30 @@ if (bMeetsMatch)
 
 	void HandleRefreshTestCallback()
 	{
-		TArray<FString> AllTestNames;
+		TArray<FString> FilteredTestNames;
 
 		// This is called by the controller manager when it receives responses. We want to make sure it has a device, and we
 		// want to make sure it's called while we're waiting for a response
 		if (AutomationController->GetNumDeviceClusters() == 0 || AutomationTestState != EAutomationTestState::RequestTests)
 		{
-			UE_LOG(LogAutomationCommandLine, Log, TEXT("Ignoring refresh from ControllerManager. NumDeviceClusters=%d, CurrentState=%d"), AutomationController->GetNumDeviceClusters(), AutomationTestState);
+			UE_LOG(LogAutomationCommandLine, Log, TEXT("Ignoring refresh from ControllerManager. NumDeviceClusters=%d, CurrentState=%d"), AutomationController->GetNumDeviceClusters(), int(AutomationTestState));
 			return;
 		}
 
 		// We have found some workers
 		// Create a filter to add to the automation controller, otherwise we don't get any reports
-		AutomationController->SetFilter(MakeShareable(new AutomationFilterCollection()));
+		TSharedPtr <AutomationFilterCollection> AutomationFilters = MakeShareable(new AutomationFilterCollection());
+		AutomationController->SetFilter(AutomationFilters);
 		AutomationController->SetVisibleTestsEnabled(true);
-		AutomationController->GetEnabledTestNames(AllTestNames);
+		AutomationController->GetEnabledTestNames(FilteredTestNames);
 
 		//assume we won't run any tests
 		bool bRunTests = false;
 
 		if (AutomationCommand == EAutomationCommand::ListAllTests)
 		{
-			UE_LOG(LogAutomationCommandLine, Display, TEXT("Found %d Automation Tests"), AllTestNames.Num());
-			for ( const FString& TestName : AllTestNames )
+			UE_LOG(LogAutomationCommandLine, Display, TEXT("Found %d Automation Tests"), FilteredTestNames.Num());
+			for ( const FString& TestName : FilteredTestNames)
 			{
 				UE_LOG(LogAutomationCommandLine, Display, TEXT("\t'%s'"), *TestName);
 			}
@@ -342,8 +297,7 @@ if (bMeetsMatch)
 		}
 		else if (AutomationCommand == EAutomationCommand::RunCommandLineTests)
 		{
-			TArray<FString> FilteredTestNames;
-			GenerateTestNamesFromCommandLine(AllTestNames, FilteredTestNames);
+			GenerateTestNamesFromCommandLine(AutomationFilters, FilteredTestNames);
 			
 			if (FilteredTestNames.Num() == 0)
 			{
@@ -361,27 +315,26 @@ if (bMeetsMatch)
 
 			if (FilteredTestNames.Num())
 			{
-				AutomationController->StopTests();
-				AutomationController->SetEnabledTests(FilteredTestNames);
 				bRunTests = true;
 			}
 			else
 			{
 				AutomationTestState = EAutomationTestState::Complete;
 			}
-
-			// Clear delegate to avoid re-running tests due to multiple delegates being added or when refreshing session frontend
-			// The delegate will be readded in Init whenever a new command is executed
-			AutomationController->OnTestsRefreshed().Remove(TestsRefreshedHandle);
-			TestsRefreshedHandle.Reset();
 		}
 		else if (AutomationCommand == EAutomationCommand::RunFilter)
 		{
 			if (FilterMaps.Contains(StringCommand))
 			{
-				UE_LOG(LogAutomationCommandLine, Display, TEXT("Running %i Automation Tests"), AllTestNames.Num());
-				AutomationController->SetEnabledTests(AllTestNames);
-				bRunTests = true;
+				UE_LOG(LogAutomationCommandLine, Display, TEXT("Running %i Automation Tests"), FilteredTestNames.Num());
+				if (FilteredTestNames.Num() > 0)
+				{
+					bRunTests = true;
+				}
+				else
+				{
+					AutomationTestState = EAutomationTestState::Complete;
+				}
 			}
 			else
 			{
@@ -398,11 +351,19 @@ if (bMeetsMatch)
 		else if (AutomationCommand == EAutomationCommand::RunAll)
 		{
 			bRunTests = true;
-			TestCount = AllTestNames.Num();
 		}
 
 		if (bRunTests)
 		{
+			AutomationController->StopTests();
+			AutomationController->SetEnabledTests(FilteredTestNames);
+			TestCount = FilteredTestNames.Num();
+
+			// Clear delegate to avoid re-running tests due to multiple delegates being added or when refreshing session frontend
+			// The delegate will be readded in Init whenever a new command is executed
+			AutomationController->OnTestsRefreshed().Remove(TestsRefreshedHandle);
+			TestsRefreshedHandle.Reset();
+
 			AutomationController->RunTests();
 
 			// Set state to monitoring to check for test completion
@@ -431,10 +392,10 @@ if (bMeetsMatch)
 		{
 			case EAutomationTestState::Initializing:
 			{
-				FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-				if ( AssetRegistryModule.Get().IsLoadingAssets() == false )
+				if (AutomationController->IsReadyForTests())
 				{
 					AutomationTestState = EAutomationTestState::Idle;
+					UE_LOG(LogAutomationCommandLine, Display, TEXT("Ready to start automation"));
 				}
 				FindWorkerAttempts = 0;
 				break;
@@ -463,12 +424,12 @@ if (bMeetsMatch)
 				{
 					AutomationCommand = AutomationCommandQueue[0];
 					AutomationCommandQueue.RemoveAt(0);
-					if (AutomationCommand == EAutomationCommand::Quit)
+					if (AutomationCommand == EAutomationCommand::Quit || AutomationCommand == EAutomationCommand::SoftQuit)
 					{
-						if (AutomationCommandQueue.IsValidIndex(0))
+						if (AutomationCommandQueue.IsValidIndex(0) && !IsQuitQueued())
 						{
-							// Add Quit back to the end of the array.
-							AutomationCommandQueue.Add(EAutomationCommand::Quit);
+							// Add Quit and SoftQuit commands back to the end of the array.
+							AutomationCommandQueue.Add(AutomationCommand);
 							break;
 						}
 					}
@@ -476,7 +437,7 @@ if (bMeetsMatch)
 				}
 
 				// Only quit if Quit is the actual last element in the array.
-				if (AutomationCommand == EAutomationCommand::Quit)
+				if (AutomationCommand == EAutomationCommand::Quit || AutomationCommand == EAutomationCommand::SoftQuit)
 				{
 					if (!GIsCriticalError)
 					{
@@ -487,52 +448,91 @@ if (bMeetsMatch)
 						}
 					}
 					UE_LOG(LogAutomationCommandLine, Log, TEXT("Shutting down. GIsCriticalError=%d"), GIsCriticalError);
+					// some tools parse this.
 					UE_LOG(LogAutomationCommandLine, Display, TEXT("**** TEST COMPLETE. EXIT CODE: %d ****"), GIsCriticalError ? -1 : 0);
-					FPlatformMisc::RequestExitWithStatus(true, GIsCriticalError ? -1 : 0);
+					FPlatformMisc::RequestExitWithStatus(AutomationCommand == EAutomationCommand::SoftQuit ? false : true, GIsCriticalError ? -1 : 0);
+					// We have finished the testing, and results are available
 					AutomationTestState = EAutomationTestState::Complete;
+				}
+				else if (!IsAboutToRunTest())
+				{
+					// Register for the callback that tells us there are tests available
+					if (!TestsRefreshedHandle.IsValid()) {
+						TestsRefreshedHandle = AutomationController->OnTestsRefreshed().AddRaw(this, &FAutomationExecCmd::HandleRefreshTestCallback);
+					}
 				}
 				break;
 			}
 		}
 
-		return !IsTestingComplete();
+		if (IsTestingComplete())
+		{
+			AutomationTestState = EAutomationTestState::Idle;
+			TickHandler.Reset();
+			return false;
+		}
+		return true;
+	}
 
+	bool IsRunTestQueued()
+	{
+		for (auto Command : AutomationCommandQueue)
+		{
+			if (Command == EAutomationCommand::RunCommandLineTests
+				|| Command == EAutomationCommand::RunAll
+				|| Command == EAutomationCommand::RunFilter)
+			{
+				return true;
+			}
+		}
 
+		return false;
+	}
 
+	bool IsAboutToRunTest()
+	{
+		return (AutomationCommand == EAutomationCommand::RunCommandLineTests
+			|| AutomationCommand == EAutomationCommand::RunAll
+			|| AutomationCommand == EAutomationCommand::RunFilter);
+	}
 
-		
-		// some tools parse this.
-		// We have finished the testing, and results are available
+	bool IsQuitQueued()
+	{
+		for (auto Command : AutomationCommandQueue)
+		{
+			if (Command == EAutomationCommand::Quit
+				|| Command == EAutomationCommand::SoftQuit)
+			{
+				return true;
+			}
+		}
+
+		return false;
 	}
 	
+protected:
 	/** Console commands, see embeded usage statement **/
-	virtual bool Exec(UWorld*, const TCHAR* Cmd, FOutputDevice& Ar) override
+	virtual bool Exec_Dev(UWorld*, const TCHAR* Cmd, FOutputDevice& Ar) override
 	{
 		bool bHandled = false;
-		// Track whether we have a flag we care about passing through.
-		FString FlagToUse = "";
-
-		// Hackiest hack to ever hack a hack to get this test running.
-		if (FParse::Command(&Cmd, TEXT("RunPerfTests")))
-		{
-			Cmd = TEXT("Automation RunFilter Perf");
-		}
-		else if (FParse::Command(&Cmd, TEXT("RunProductTests")))
-		{
-			Cmd = TEXT("Automation RunFilter Product");
-		}
-
-		//figure out if we are handling this request
+		// figure out if we are handling this request
 		if (FParse::Command(&Cmd, TEXT("Automation")))
 		{
-			StringCommand.Empty();
+			// Early exit in case of a CVar input. ie: Automation.SkipStackWalk 1
+			if (FString(Cmd).StartsWith(TEXT(".")))
+			{
+				return false;
+			}
+
+			// Track whether we have a flag we care about passing through.
+			FString FlagToUse = "";
 
 			TArray<FString> CommandList;
-			StringCommand = Cmd;
-			StringCommand.ParseIntoArray(CommandList, TEXT(";"), true);
+			FString(Cmd).ParseIntoArray(CommandList, TEXT(";"), true);
+
+			Init();
 
 			//assume we handle this
-			Init();
 			bHandled = true;
 
 			for (int CommandIndex = 0; CommandIndex < CommandList.Num(); ++CommandIndex)
@@ -543,7 +543,7 @@ if (bMeetsMatch)
 					FString SessionString = TempCmd;
 					if (!FGuid::Parse(SessionString, SessionID))
 					{
-						Ar.Logf(TEXT("%s is not a valid session guid!"), *SessionString);
+						Ar.Logf(TEXT("Automation: %s is not a valid session guid!"), *SessionString);
 						bHandled = false;
 						break;
 					}
@@ -552,108 +552,182 @@ if (bMeetsMatch)
 				{
 					AutomationCommandQueue.Add(EAutomationCommand::ListAllTests);
 				}
+				else if (FParse::Command(&TempCmd, TEXT("Now")))
+				{
+					DelayTimer = 0.0f;
+				}
 				else if (FParse::Command(&TempCmd, TEXT("RunTests")) || FParse::Command(&TempCmd, TEXT("RunTest")))
 				{
-					if ( FParse::Command(&TempCmd, TEXT("Now")) )
+					if (FParse::Command(&TempCmd, TEXT("Now")))
 					{
 						DelayTimer = 0.0f;
+						continue;
 					}
 
 					//only one of these should be used
+					if (IsRunTestQueued())
+					{
+						Ar.Logf(TEXT("Automation: A test run is already Queued: %s. Only one run is supported at a time."), *StringCommand);
+						continue;
+					}
+
 					StringCommand = TempCmd;
 					Ar.Logf(TEXT("Automation: RunTests='%s' Queued."), *StringCommand);
 					AutomationCommandQueue.Add(EAutomationCommand::RunCommandLineTests);
 				}
 				else if (FParse::Command(&TempCmd, TEXT("SetMinimumPriority")))
 				{
-					StringCommand = TempCmd;
-					Ar.Logf(TEXT("Setting minimum priority of cases to run to: %s"), *StringCommand);
-					if (StringCommand.Contains(TEXT("Low")))
+					FlagToUse = TempCmd;
+					Ar.Logf(TEXT("Automation: Setting minimum priority of cases to run to: %s"), *FlagToUse);
+					if (FlagToUse.Contains(TEXT("Low")))
 					{
 						AutomationController->SetRequestedTestFlags(EAutomationTestFlags::PriorityMask);
 					}
-					else if (StringCommand.Contains(TEXT("Medium")))
+					else if (FlagToUse.Contains(TEXT("Medium")))
 					{
-						AutomationController->SetRequestedTestFlags(EAutomationTestFlags::MediumPriority);
+						AutomationController->SetRequestedTestFlags(EAutomationTestFlags::MediumPriorityAndAbove);
 					}
-					else if (StringCommand.Contains(TEXT("High")))
+					else if (FlagToUse.Contains(TEXT("High")))
 					{
 						AutomationController->SetRequestedTestFlags(EAutomationTestFlags::HighPriorityAndAbove);
 					}
-					else if (StringCommand.Contains(TEXT("Critical")))
+					else if (FlagToUse.Contains(TEXT("Critical")))
 					{
-						AutomationController->SetRequestedTestFlags(EAutomationTestFlags::ClientContext);
+						AutomationController->SetRequestedTestFlags(EAutomationTestFlags::CriticalPriority);
 					}
-					else if (StringCommand.Contains(TEXT("None")))
+					else if (FlagToUse.Contains(TEXT("None")))
 					{
 						AutomationController->SetRequestedTestFlags(0);
 					}
 					else
 					{
-						Ar.Logf(TEXT("%s is not a valid priority!\nValid priorities are Critical, High, Medium, Low, None"), *StringCommand);
+						Ar.Logf(TEXT("Automation: %s is not a valid priority!\nValid priorities are Critical, High, Medium, Low, None"), *FlagToUse);
 					}
 				}
 				else if (FParse::Command(&TempCmd, TEXT("SetPriority")))
 				{
-					StringCommand = TempCmd;
-					Ar.Logf(TEXT("Setting explicit priority of cases to run to: %s"), *StringCommand);
-					if (StringCommand.Contains(TEXT("Low")))
+					FlagToUse = TempCmd;
+					Ar.Logf(TEXT("Setting explicit priority of cases to run to: %s"), *FlagToUse);
+					if (FlagToUse.Contains(TEXT("Low")))
 					{
 						AutomationController->SetRequestedTestFlags(EAutomationTestFlags::LowPriority);
 					}
-					else if (StringCommand.Contains(TEXT("Medium")))
+					else if (FlagToUse.Contains(TEXT("Medium")))
 					{
 						AutomationController->SetRequestedTestFlags(EAutomationTestFlags::MediumPriority);
 					}
-					else if (StringCommand.Contains(TEXT("High")))
+					else if (FlagToUse.Contains(TEXT("High")))
 					{
 						AutomationController->SetRequestedTestFlags(EAutomationTestFlags::HighPriority);
 					}
-					else if (StringCommand.Contains(TEXT("Critical")))
+					else if (FlagToUse.Contains(TEXT("Critical")))
 					{
 						AutomationController->SetRequestedTestFlags(EAutomationTestFlags::CriticalPriority);
 					}
-					else if (StringCommand.Contains(TEXT("None")))
+					else if (FlagToUse.Contains(TEXT("None")))
 					{
 						AutomationController->SetRequestedTestFlags(0);
 					}
 
 					else
 					{
-						Ar.Logf(TEXT("%s is not a valid priority!\nValid priorities are Critical, High, Medium, Low, None"), *StringCommand);
+						Ar.Logf(TEXT("Automation: %s is not a valid priority!\nValid priorities are Critical, High, Medium, Low, None"), *StringCommand);
 					}
 				}
 				else if (FParse::Command(&TempCmd, TEXT("RunFilter")))
 				{
-					FlagToUse = TempCmd;
 					//only one of these should be used
+					if (IsRunTestQueued())
+					{
+						Ar.Logf(TEXT("Automation: A test run is already Queued: %s. Only one run is supported at a time."), *StringCommand);
+						continue;
+					}
+					FlagToUse = TempCmd;
 					StringCommand = TempCmd;
 					if (FilterMaps.Contains(FlagToUse))
 					{
 						AutomationController->SetRequestedTestFlags(FilterMaps[FlagToUse]);
-						Ar.Logf(TEXT("Running all tests for filter: %s"), *FlagToUse);
+						Ar.Logf(TEXT("Automation: RunFilter='%s' Queued."), *FlagToUse);
 					}
 					AutomationCommandQueue.Add(EAutomationCommand::RunFilter);
 				}
+				else if (FParse::Command(&TempCmd, TEXT("SetFilter")))
+				{
+					FlagToUse = TempCmd;
+					if (FilterMaps.Contains(FlagToUse))
+					{
+						AutomationController->SetRequestedTestFlags(FilterMaps[FlagToUse]);
+						Ar.Logf(TEXT("Automation: Setting test filter: %s"), *FlagToUse);
+					}
+				}
 				else if (FParse::Command(&TempCmd, TEXT("RunAll")))
 				{
+					//only one of these should be used
+					if (IsRunTestQueued())
+					{
+						Ar.Logf(TEXT("Automation: A test run is already Queued: %s. Only one run is supported at a time."), *StringCommand);
+						continue;
+					}
 					AutomationCommandQueue.Add(EAutomationCommand::RunAll);
-					Ar.Logf(TEXT("Running all available automated tests for this program. NOTE: This may take a while."));
+					Ar.Logf(TEXT("Automation: RunAll Queued. NOTE: This may take a while."));
 				}
 				else if (FParse::Command(&TempCmd, TEXT("Quit")))
 				{
+					if (IsQuitQueued())
+					{
+						Ar.Log(TEXT("Automation: Quit command is already Queued."));
+						continue;
+					}
 					AutomationCommandQueue.Add(EAutomationCommand::Quit);
 					Ar.Logf(TEXT("Automation: Quit Command Queued."));
 				}
-				else
+				else if (FParse::Command(&TempCmd, TEXT("SoftQuit")))
 				{
-					Ar.Logf(TEXT("Incorrect automation command syntax! Supported commands are: "));
+					if (IsQuitQueued())
+					{
+						Ar.Log(TEXT("Automation: Quit command is already Queued."));
+						continue;
+					}
+					AutomationCommandQueue.Add(EAutomationCommand::SoftQuit);
+					Ar.Logf(TEXT("Automation: SoftQuit Command Queued."));
+				}
+				else if (FParse::Command(&TempCmd, TEXT("IgnoreLogEvents")))
+				{
+					if (IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("Automation.CaptureLogEvents")))
+					{
+						Ar.Logf(TEXT("Automation: Suppressing Log Events"));
+						CVar->Set(false);
+					}					
+				}
+				else if (FParse::Command(&TempCmd, TEXT("EnableStereoTests")))
+				{
+					if (IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("Automation.EnableStereoTestVariants")))
+					{
+						Ar.Logf(TEXT("Automation: Enabling Stereo Test Variants"));
+						CVar->Set(true);
+					}
+				}
+				else if (FParse::Command(&TempCmd, TEXT("Help")))
+				{
+					Ar.Logf(TEXT("Supported commands are: "));
 					Ar.Logf(TEXT("\tAutomation StartRemoteSession <sessionid>"));
 					Ar.Logf(TEXT("\tAutomation List"));
 					Ar.Logf(TEXT("\tAutomation RunTests <test string>"));
-					Ar.Logf(TEXT("\tAutomation RunAll "));
+					Ar.Logf(TEXT("\tAutomation RunAll"));
 					Ar.Logf(TEXT("\tAutomation RunFilter <filter name>"));
+					Ar.Logf(TEXT("\tAutomation SetFilter <filter name>"));
+					Ar.Logf(TEXT("\tAutomation SetMinimumPriority <minimum priority>"));
+					Ar.Logf(TEXT("\tAutomation SetPriority <priority>"));
+					Ar.Logf(TEXT("\tAutomation Now"));
 					Ar.Logf(TEXT("\tAutomation Quit"));
+					Ar.Logf(TEXT("\tAutomation SoftQuit"));
+					Ar.Logf(TEXT("\tAutomation IgnoreLogEvents"));
+					Ar.Logf(TEXT("\tAutomation EnableStereoTests"));
+					bHandled = false;
+				}
+				else
+				{
+					Ar.Logf(TEXT("Unknown Automation command '%s'! Use Help command for a detailed list."), TempCmd);
 					bHandled = false;
 				}
 			}
@@ -678,9 +752,6 @@ private:
 	/** The current state of the automation process */
 	EAutomationTestState AutomationTestState;
 
-	/** The priority flags we would like to run */
-	EAutomationTestFlags::Type AutomationPriority;
-
 	/** What work was requested */
 	TArray<EAutomationCommand> AutomationCommandQueue;
 
@@ -703,7 +774,7 @@ private:
 	FGuid SessionID;
 
 	//so we can release control of the app and just get ticked like all other systems
-	FDelegateHandle TickHandler;
+	FTSTicker::FDelegateHandle TickHandler;
 
 	//Extra commandline params
 	FString StringCommand;

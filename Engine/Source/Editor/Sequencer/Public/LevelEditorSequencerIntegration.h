@@ -14,12 +14,16 @@ class AActor;
 class FExtender;
 class FMenuBuilder;
 class FSequencer;
+class FObjectPostSaveContext;
+class FObjectPreSaveContext;
+class SLevelViewport;
 class FUICommandList;
 class IAssetViewport;
 class ISequencer;
 class ULevel;
+class UToolMenu;
 struct FPropertyAndParent;
-
+struct FPilotedSpawnable;
 
 struct FLevelEditorSequencerIntegrationOptions
 {
@@ -27,11 +31,17 @@ struct FLevelEditorSequencerIntegrationOptions
 		: bRequiresLevelEvents(true)
 		, bRequiresActorEvents(false)
 		, bForceRefreshDetails(true)
+		, bAttachOutlinerColumns(true)
+		, bActivateSequencerEdMode(true)
+		, bSyncBindingsToActorLabels(true)
 	{}
 
 	bool bRequiresLevelEvents : 1;
 	bool bRequiresActorEvents : 1;
 	bool bForceRefreshDetails : 1;
+	bool bAttachOutlinerColumns : 1;
+	bool bActivateSequencerEdMode : 1;
+	bool bSyncBindingsToActorLabels : 1;
 };
 
 
@@ -88,10 +98,22 @@ public:
 private:
 
 	/** Called before the world is going to be saved. The sequencer puts everything back to its initial state. */
-	void OnPreSaveWorld(uint32 SaveFlags, UWorld* World);
+	void OnPreSaveWorld(UWorld* World, FObjectPreSaveContext ObjectSaveContext);
 
 	/** Called after the world has been saved. The sequencer updates to the animated state. */
-	void OnPostSaveWorld(uint32 SaveFlags, UWorld* World, bool bSuccess);
+	void OnPostSaveWorld(UWorld* World, FObjectPostSaveContext ObjectSaveContext);
+
+	/** Called before any number of external actors are going to be saved. The sequencer puts everything back to its initial state. */
+	void OnPreSaveExternalActors(UWorld* World);
+
+	/** Called after any number of external actors has been saved. The sequencer puts everything back to its initial state. */
+	void OnPostSaveExternalActors(UWorld* World);
+
+	/** Called before asset validation is run on assets. The sequencer puts everything back to its initial state. */
+	void OnPreAssetValidation();
+	
+	/** Called after asset validation has finished. The sequencer re-evaluates to hide the fact we did this from users. */
+	void OnPostAssetValidation();
 
 	/** Called after a level has been added */
 	void OnLevelAdded(ULevel* InLevel, UWorld* InWorld);
@@ -152,11 +174,9 @@ private:
 
 	void OnPropertyEditorOpened();
 
-	TSharedRef<FExtender> GetLevelViewportExtender(const TSharedRef<FUICommandList> CommandList, const TArray<AActor*> InActors);
+	void RegisterMenus();
 
-	TSharedRef<FExtender> OnExtendLevelEditorViewMenu(const TSharedRef<FUICommandList> CommandList);
-
-	void MakeBrowseToSelectedActorSubMenu(FMenuBuilder& MenuBuilder, AActor* Actor, const TArray<TPair<FMovieSceneSequenceID, FSequencer*> > FoundInSequences);
+	void MakeBrowseToSelectedActorSubMenu(UToolMenu* Menu);
 	void BrowseToSelectedActor(AActor* Actor, FSequencer* Sequencer, FMovieSceneSequenceID SequenceId);
 
 	bool IsPropertyReadOnly(const FPropertyAndParent& InPropertyAndParent);
@@ -164,12 +184,18 @@ private:
 private:
 
 	void ActivateSequencerEditorMode();
+	void DeactivateSequencerEditorMode();
 	void AddLevelViewportMenuExtender();
 	void ActivateDetailHandler(const FLevelEditorSequencerIntegrationOptions& Options);
 	void AttachOutlinerColumn();
 	void DetachOutlinerColumn();
 	void ActivateRealtimeViewports();
 	void RestoreRealtimeViewports();
+	void RestoreToSavedState(UWorld* World);
+	void ResetToAnimatedState(UWorld* World);
+
+	void BackupSpawnablePilotData();
+	void RestoreSpawnablePilotData();
 
 	struct FSequencerAndOptions
 	{
@@ -180,7 +206,10 @@ private:
 	};
 	TArray<FSequencerAndOptions> BoundSequencers;
 
+public:
+	
 	TSharedRef< ISceneOutlinerColumn > CreateSequencerInfoColumn( ISceneOutliner& SceneOutliner ) const;
+	TSharedRef< ISceneOutlinerColumn > CreateSequencerSpawnableColumn( ISceneOutliner& SceneOutliner ) const;
 
 private:
 
@@ -188,11 +217,14 @@ private:
 	void UpdateDetails(bool bForceRefresh = false);
 
 	FLevelEditorSequencerIntegration();
+	~FLevelEditorSequencerIntegration();
 
 private:
 	FAcquiredResources AcquiredResources;
 
 	TSharedPtr<class FDetailKeyframeHandlerWrapper> KeyFrameHandler;
+
+	TArray<FPilotedSpawnable> PilotedSpawnables;
 
 	bool bDeferUpdates;
 

@@ -12,7 +12,7 @@
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SComboButton.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Editor/EditorEngine.h"
 #include "StatsViewerModule.h"
 #include "PropertyEditorModule.h"
@@ -87,7 +87,7 @@ void SStatsViewer::Construct( const FArguments& InArgs )
 		.AutoHeight()
 		[
 			SNew( SBorder )
-			.BorderImage( FEditorStyle::GetBrush("ToolPanel.GroupBorder") )
+			.BorderImage( FAppStyle::GetBrush("ToolPanel.GroupBorder") )
 			.Padding(4.0f)
 			[
 				SNew( SHorizontalBox )
@@ -96,7 +96,7 @@ void SStatsViewer::Construct( const FArguments& InArgs )
 				.Padding(0.0f)
 				[
 					SNew( SComboButton )
-					.ContentPadding(3)
+					.ContentPadding(3.f)
 					.OnGetMenuContent( this, &SStatsViewer::OnGetDisplayMenuContent )
 					.ButtonContent()
 					[
@@ -111,7 +111,7 @@ void SStatsViewer::Construct( const FArguments& InArgs )
 				[
 					SNew( SButton )
 					.Visibility( this, &SStatsViewer::OnGetStatsVisibility )
-					.ContentPadding(3)
+					.ContentPadding(3.f)
 					.OnClicked( this, &SStatsViewer::OnRefreshClicked )
 					.Content()
 					[
@@ -126,7 +126,7 @@ void SStatsViewer::Construct( const FArguments& InArgs )
 				[
 					SNew( SButton )
 					.Visibility( this, &SStatsViewer::OnGetStatsVisibility )
-					.ContentPadding(3)
+					.ContentPadding(3.f)
 					.OnClicked( this, &SStatsViewer::OnExportClicked )
 					.Content()
 					[
@@ -140,7 +140,7 @@ void SStatsViewer::Construct( const FArguments& InArgs )
 				.Padding(0.0f)
 				[
 					SAssignNew( CustomContent, SBorder )
-					.BorderImage( FEditorStyle::GetBrush("NoBorder") )
+					.BorderImage( FAppStyle::GetBrush("NoBorder") )
 					.Padding(0.0f)
 					.Visibility( this, &SStatsViewer::OnGetStatsVisibility )
 				]
@@ -150,7 +150,7 @@ void SStatsViewer::Construct( const FArguments& InArgs )
 				.HAlign(HAlign_Right)
 				[
 					SAssignNew( CustomFilter, SBorder )
-					.BorderImage( FEditorStyle::GetBrush("NoBorder") )
+					.BorderImage( FAppStyle::GetBrush("NoBorder") )
 					.Padding(0.0f)
 				]
 			]
@@ -160,7 +160,7 @@ void SStatsViewer::Construct( const FArguments& InArgs )
 		.FillHeight(1.0f)
 		[
 			SNew( SBorder )
-			.BorderImage( FEditorStyle::GetBrush("ToolPanel.GroupBorder") )
+			.BorderImage( FAppStyle::GetBrush("ToolPanel.GroupBorder") )
 			.Visibility( this, &SStatsViewer::OnGetStatsVisibility )
 			.Padding(4.0f)
 			[
@@ -172,7 +172,7 @@ void SStatsViewer::Construct( const FArguments& InArgs )
 		.AutoHeight()
 		[	
 			SNew( SBorder )
-			.BorderImage( FEditorStyle::GetBrush("ToolPanel.GroupBorder") )
+			.BorderImage( FAppStyle::GetBrush("ToolPanel.GroupBorder") )
 			.Visibility( this, &SStatsViewer::OnGetStatsVisibility )
 			.Padding(4.0f)
 			[
@@ -193,7 +193,7 @@ void SStatsViewer::Construct( const FArguments& InArgs )
 				[
 					SNew( SComboButton )
 					.Visibility( this, &SStatsViewer::OnGetStatsVisibility )
-					.ContentPadding(2)
+					.ContentPadding(2.f)
 					.OnGetMenuContent( this, &SStatsViewer::OnGetFilterMenuContent )
 					.ButtonContent()
 					[
@@ -715,27 +715,27 @@ TSharedRef<SWidget> SStatsViewer::OnGetFilterMenuContent() const
 		int32 ColumnIndex = 0;
 		for (TFieldIterator<FProperty> PropertyIter( CurrentStats->GetEntryClass(), EFieldIteratorFlags::IncludeSuper ); PropertyIter; ++PropertyIter )
 		{
-			TWeakFieldPtr< FProperty > Property = *PropertyIter;
+			FProperty* Property = *PropertyIter;
 			if( Property->HasAnyPropertyFlags(CPF_AssetRegistrySearchable) )
 			{
-				FString FilterName = Property->GetDisplayNameText().ToString();
-				if( FilterName.Len() == 0 )
+				FText FilterName = Property->GetDisplayNameText();
+				if( FilterName.IsEmpty() )
 				{
-					FilterName = UEditorEngine::GetFriendlyName(Property.Get());
+					FilterName = FText::AsCultureInvariant(UEditorEngine::GetFriendlyName(Property));
 				}
 
-				FString FilterDesc = Property->GetToolTipText().ToString();
-				if( FilterDesc.Len() == 0 )
+				FText FilterDesc = Property->GetToolTipText();
+				if( FilterDesc.IsEmpty() )
 				{
-					FilterDesc = UEditorEngine::GetFriendlyName(Property.Get());
+					FilterDesc = FText::AsCultureInvariant(UEditorEngine::GetFriendlyName(Property));
 				}
 
 				FFormatNamedArguments Arguments;
-				Arguments.Add(TEXT("FilterName"), FText::FromString(FilterName));
-				Arguments.Add(TEXT("FilterDesc"), FText::FromString(FilterDesc));
+				Arguments.Add(TEXT("FilterName"), FilterName);
+				Arguments.Add(TEXT("FilterDesc"), FilterDesc);
 
 				MenuBuilder.AddMenuEntry( 
-					FText::FromString( FilterName ), 
+					FilterName, 
 					FText::Format( LOCTEXT( "FilterMenuEntry_Tooltip", "Search statistics by {FilterName}.\n{FilterDesc}" ), Arguments ), 
 					FSlateIcon(), 
 					FUIAction( 
@@ -805,7 +805,7 @@ void SStatsViewer::SetDisplayedStats( TSharedRef<IStatsPage> StatsPage )
 		{
 			CustomFilterWidget = SNew( SComboButton )
 				.Visibility( this, &SStatsViewer::OnGetObjectSetsVisibility )
-				.ContentPadding(3)
+				.ContentPadding(3.f)
 				.OnGetMenuContent( this, &SStatsViewer::OnGetObjectSetMenuContent )
 				.ButtonContent()
 				[

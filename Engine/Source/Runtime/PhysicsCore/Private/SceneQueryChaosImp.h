@@ -2,7 +2,10 @@
 
 #pragma once
 
-#if WITH_CHAOS
+#include "Math/MathFwd.h"
+#include "PhysicsInterfaceDeclaresCore.h"
+
+enum class EHitFlags : uint16;
 
 inline bool LowLevelRaycastImp(const FVector& Start, const FVector& Dir, float DeltaMag, const Chaos::FImplicitObject& Shape, const FTransform ActorTM, EHitFlags OutputFlags, FHitRaycast& Hit)
 {
@@ -21,4 +24,3 @@ inline bool LowLevelOverlapImp(const FTransform& GeomPose, const FPhysicsGeometr
 	//TODO_SQ_IMPLEMENTATION
 	return false;
 }
-#endif // WITH_CHAOS

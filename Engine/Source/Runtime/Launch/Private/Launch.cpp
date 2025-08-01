@@ -13,6 +13,7 @@
 #include "Misc/CoreDelegates.h"
 #include "Misc/EngineVersion.h"
 #include "Misc/ScopedSlowTask.h"
+#include "Misc/TrackedActivity.h"
 #if WITH_EDITOR
 	#include "UnrealEdGlobals.h"
 #endif
@@ -26,8 +27,6 @@ IMPLEMENT_MODULE(FDefaultModuleImpl, Launch);
 #if PLATFORM_WINDOWS || PLATFORM_MAC || PLATFORM_UNIX || PLATFORM_USE_GENERIC_LAUNCH_IMPLEMENTATION
 
 FEngineLoop	GEngineLoop;
-bool GIsConsoleExecutable = false;
-
 
 extern "C" int test_main(int argc, char ** argp)
 {
@@ -82,22 +81,28 @@ void LaunchStaticShutdownAfterError()
 	TermGamePhys();
 }
 
-#if WITH_EDITOR
-extern UNREALED_API FSecondsCounterData BlueprintCompileAndLoadTimerData;
-#endif
-
 /**
  * Static guarded main function. Rolled into own function so we can have error handling for debug/ release builds depending
  * on whether a debugger is attached or not.
  */
 int32 GuardedMain( const TCHAR* CmdLine )
 {
+	FTrackedActivity::GetEngineActivity().Update(TEXT("Starting"), FTrackedActivity::ELight::Yellow);
+
+	FTaskTagScope Scope(ETaskTag::EGameThread);
+
 #if !(UE_BUILD_SHIPPING)
-	if (FParse::Param(CmdLine, TEXT("waitforattach")))
+
+	// If "-waitforattach" or "-WaitForDebugger" was specified, halt startup and wait for a debugger to attach before continuing
+	if (FParse::Param(CmdLine, TEXT("waitforattach")) || FParse::Param(CmdLine, TEXT("WaitForDebugger")))
 	{
-		while (!FPlatformMisc::IsDebuggerPresent());
+		while (!FPlatformMisc::IsDebuggerPresent())
+		{
+			FPlatformProcess::Sleep(0.1f);
+		}
 		UE_DEBUG_BREAK();
 	}
+
 #endif
 
 	BootTimingPoint("DefaultMain");
@@ -125,10 +130,9 @@ int32 GuardedMain( const TCHAR* CmdLine )
 	// That will also use the user folder for installed builds so we don't write into program files or whatever.
 #if PLATFORM_WINDOWS
 	FCString::Strcpy(MiniDumpFilenameW, *FString::Printf(TEXT("unreal-v%i-%s.dmp"), FEngineVersion::Current().GetChangelist(), *FDateTime::Now().ToString()));
-
-	GIsConsoleExecutable = (GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_CHAR);
 #endif
 
+	FTrackedActivity::GetEngineActivity().Update(TEXT("Initializing"));
 	int32 ErrorLevel = EnginePreInit( CmdLine );
 
 	// exit if PreInit failed.
@@ -162,14 +166,12 @@ int32 GuardedMain( const TCHAR* CmdLine )
 	double EngineInitializationTime = FPlatformTime::Seconds() - GStartTime;
 	UE_LOG(LogLoad, Log, TEXT("(Engine Initialization) Total time: %.2f seconds"), EngineInitializationTime);
 
-#if WITH_EDITOR
-	UE_LOG(LogLoad, Log, TEXT("(Engine Initialization) Total Blueprint compile time: %.2f seconds"), BlueprintCompileAndLoadTimerData.GetTime());
-#endif
-
 	ACCUM_LOADTIME(TEXT("EngineInitialization"), EngineInitializationTime);
 
 	BootTimingPoint("Tick loop starting");
 	DumpBootTiming();
+
+	FTrackedActivity::GetEngineActivity().Update(TEXT("Ticking loop"), FTrackedActivity::ELight::Green);
 
 	// Don't tick if we're running an embedded engine - we rely on the outer
 	// application ticking us instead.

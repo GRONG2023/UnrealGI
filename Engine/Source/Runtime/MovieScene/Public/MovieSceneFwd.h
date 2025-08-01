@@ -9,10 +9,30 @@
 #include "MovieSceneSequenceID.h"
 #include "HAL/PreprocessorHelpers.h"
 
+#include "MovieSceneFwd.generated.h"
+
+#ifndef UE_MOVIESCENE_EVENTS
+	#define UE_MOVIESCENE_EVENTS WITH_EDITOR
+#endif
+
+#ifndef UE_MOVIESCENE_EXPENSIVE_CONSISTENCY_CHECKS
+	#define UE_MOVIESCENE_EXPENSIVE_CONSISTENCY_CHECKS 0
+#endif
+
+namespace UE
+{
+namespace MovieScene
+{
+
+class ISequenceDataEventHandler;
+
+} // namespace MovieScene
+} // namespace UE
+
 UENUM()
 namespace EMovieScenePlayerStatus
 {
-	enum Type
+	enum Type : int
 	{
 		Stopped,
 		Playing,
@@ -55,6 +75,9 @@ enum class EUpdateClockSource : uint8
 	/** Use current timecode provider for timing. Does not honor world or actor pause state. */
 	Timecode,
 
+	/** Debugging Tool: Hold on each whole frame for a Sequencer.SecondsPerFrame many wall-clock seconds before advancing to the next one. Does not honor world or actor pause state or time dilation and audio will be out of sync. */
+	PlayEveryFrame,
+
 	/** Custom clock source created and defined externally. */
 	Custom,
 };
@@ -81,6 +104,11 @@ enum class EMovieSceneSequenceFlags : uint8
 	 */
 	BlockingEvaluation = 1 << 1,
 
+	/**
+	 * Indicates that a sequence will utilize dynamic weighting when it is played back. Setting this flag ensures that initial values are cached correctly so the sequence can be blended into and out of
+	 */
+	DynamicWeighting = 1 << 2,
+
 	/** Symbolic entry for all flags that should be inherited by parent sequences when present on a sub sequence */
 	InheritedFlags = Volatile UMETA(Hidden),
 };
@@ -102,6 +130,8 @@ enum class EMovieSceneServerClientMask : uint8
 ENUM_CLASS_FLAGS(EMovieSceneServerClientMask)
 
 MOVIESCENE_API DECLARE_LOG_CATEGORY_EXTERN(LogMovieScene, Log, All);
+MOVIESCENE_API DECLARE_LOG_CATEGORY_EXTERN(LogMovieSceneECS, Log, All);
+
 DECLARE_STATS_GROUP(TEXT("Movie Scene Evaluation"), STATGROUP_MovieSceneEval, STATCAT_Advanced);
 
 MOVIESCENE_API FFrameRate GetLegacyConversionFrameRate();
@@ -119,7 +149,7 @@ MOVIESCENE_API FFrameNumber UpgradeLegacyMovieSceneTime(UObject* ErrorContext, F
 #endif
 
 
-#if PLATFORM_WINDOWS || PLATFORM_XBOXONE
+#if defined(_MSC_VER)
 	#define UE_MOVIESCENE_TODO_IMPL(x) __pragma (x)
 #else
 	#define UE_MOVIESCENE_TODO_IMPL(x) _Pragma (#x)

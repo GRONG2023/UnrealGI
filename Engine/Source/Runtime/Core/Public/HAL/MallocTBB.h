@@ -3,10 +3,12 @@
 #pragma once
 
 #include "CoreTypes.h"
-#include "HAL/PlatformMemory.h"
 #include "HAL/MemoryBase.h"
+#include "HAL/PlatformMemory.h"
 
-#if PLATFORM_SUPPORTS_TBB && TBB_ALLOCATOR_ALLOWED
+#define TBBMALLOC_ENABLED PLATFORM_SUPPORTS_TBB && TBB_ALLOCATOR_ALLOWED
+
+#if TBBMALLOC_ENABLED
 
 /**
  * TBB 64-bit scalable memory allocator.
@@ -44,4 +46,4 @@ protected:
 	}
 };
 
-#endif // PLATFORM_SUPPORTS_TBB && TBB_ALLOCATOR_ALLOWED
+#endif // TBBMALLOC_ENABLED

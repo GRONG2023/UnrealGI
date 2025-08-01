@@ -6,9 +6,11 @@ using System.IO;
 using System.Linq;
 using AutomationTool;
 using UnrealBuildTool;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 using System.Text.RegularExpressions;
 using System.Threading;
+using UnrealBuildBase;
+using Microsoft.Extensions.Logging;
 
 abstract class SyncProjectBase : BuildCommand
 {
@@ -40,7 +42,7 @@ abstract class SyncProjectBase : BuildCommand
 				RelativePath = CommandUtils.CombinePaths(PathSeparator.Slash, Path.GetFileNameWithoutExtension(RelativePath), RelativePath);
 			}
 
-			Log.TraceInformation("{0} not on disk. Searching P4 for {1}", InProjectArgument, RelativePath);
+			Logger.LogInformation("{InProjectArgument} not on disk. Searching P4 for {RelativePath}", InProjectArgument, RelativePath);
 
 			List<string> SearchPaths = new List<string>();
 			SearchPaths.Add("");
@@ -69,13 +71,13 @@ abstract class SyncProjectBase : BuildCommand
 					P4WhereRecord Record = GetP4RecordForPath(P4Path);
 					// make sure to sync with //workspace/path as it cleans up files if the user has stream switched
 					OutP4ProjectPath = Record.ClientFile;
-					Log.TraceInformation("Found project at {0}", OutP4ProjectPath);
+					Logger.LogInformation("Found project at {OutP4ProjectPath}", OutP4ProjectPath);
 					break;
 				}
 			}
 		}
 
-		Log.TraceVerbose("Resolved {0} to P4 Path {1}", InProjectArgument, OutP4ProjectPath);
+		Logger.LogDebug("Resolved {InProjectArgument} to P4 Path {OutP4ProjectPath}", InProjectArgument, OutP4ProjectPath);
 
 		return OutP4ProjectPath != null && OutProjectFile != null;
 	}
@@ -107,13 +109,28 @@ class SyncProject : SyncProjectBase
 {
 	public override ExitCode Execute()
 	{
-		LogInformation("************************* SyncProject");
+		if (!ParseParam("Deprecated"))
+		{
+			Logger.LogError("**************************************************************************");
+			Logger.LogError("The SyncProject command has been deprecated, and will be removed in an");
+			Logger.LogError("upcoming UnrealEngine release.");
+			Logger.LogError("");
+			Logger.LogError("Similar functionality is available through the UnrealGameSync command-line");
+			Logger.LogError("tool, which is supported on Windows, Mac and Linux.");
+			Logger.LogError("");
+			Logger.LogError("To ignore this warning and continue to using SyncProject anyway, add the");
+			Logger.LogError("-Deprecated argument to the command line.");
+			Logger.LogError("**************************************************************************");
+			return ExitCode.Error_Unknown;
+		}
+
+		Logger.LogInformation("************************* SyncProject");
 
 		// These are files that should always be synced because tools update them
 		string[] ForceSyncFiles = new string[]
 		{
 			"Engine/Build/Build.version",
-			"Engine/Source/Programs/DotNETCommon/MetaData.cs"
+			"Engine/Source/Programs/Shared/MetaData.cs"
 		};
 
 		// Parse the project filename (as a local path)
@@ -196,13 +213,13 @@ class SyncProject : SyncProjectBase
 			// See if the engine is in P4 too by checking the p4 location of a local file
 			if (!ProjectOnly)
 			{
-				string LocalEngineFile = CommandUtils.CombinePaths(CmdEnv.LocalRoot, "Engine", "Source", "UE4Editor.target.cs");
+				string LocalEngineFile = CommandUtils.CombinePaths(CmdEnv.LocalRoot, "Engine", "Source", "UnrealEditor.target.cs");
 				P4WhereRecord EngineRecord = GetP4RecordForPath(LocalEngineFile);
 
 				if (P4.FileExistsInDepot(EngineRecord.DepotFile))
 				{
 					// make sure to sync with //workspace/path as it cleans up files if the user has stream switched
-					P4EnginePath = EngineRecord.ClientFile.Replace("Engine/Source/UE4Editor.target.cs", "");
+					P4EnginePath = EngineRecord.ClientFile.Replace("Engine/Source/UnrealEditor.target.cs", "");
 					SyncPaths.Add(CommandUtils.CombinePaths(PathSeparator.Slash, P4EnginePath + "*"));
 					SyncPaths.Add(CommandUtils.CombinePaths(PathSeparator.Slash, P4EnginePath, "Engine", "..."));
 				}
@@ -222,7 +239,7 @@ class SyncProject : SyncProjectBase
 
 			foreach (var F in ForceSyncList)
 			{
-				LogInformation("Force-updating {0}", F);
+				Logger.LogInformation("Force-updating {F}", F);
 
 				string SyncCommand = string.Format("-f {0}@{1}", F, CL);
 
@@ -255,7 +272,7 @@ class SyncProject : SyncProjectBase
 			}
 			else
 			{
-				LogInformation("sync {0}", SyncCommand);
+				Logger.LogInformation("sync {SyncCommand}", SyncCommand);
 			}
 		}
 
@@ -282,10 +299,9 @@ class SyncProject : SyncProjectBase
 
 			if (GenerateProject)
 			{
-				Log.TraceVerbose("Generating project files for {0}", ProjectArgForEditor);
+				Logger.LogDebug("Generating project files for {ProjectArgForEditor}", ProjectArgForEditor);
 
-				if (BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Win64 ||
-					BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Win32)
+				if (BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Win64)
 				{
 					CommandUtils.Run("GenerateProjectFiles.bat", ProjectArgForEditor);
 				}
@@ -295,37 +311,39 @@ class SyncProject : SyncProjectBase
 				}
 			}
 
-			UE4Build Build = new UE4Build(this);
+			UnrealBuild Build = new UnrealBuild(this);
 			if (!Unversioned && !ProjectOnly)
 			{
-				LogInformation("Updating Version files to CL: {0}", CL);
+				Logger.LogInformation("Updating Version files to CL: {CL}", CL);
 				Build.UpdateVersionFiles(ActuallyUpdateVersionFiles: true, ChangelistNumberOverride: CL, IsPromotedOverride: false);
 			}
 
 			// Build everything
 			if (BuildProject && ExitStatus == ExitCode.Success)
 			{
-				Log.TraceVerbose("Building Editor for {0}", ProjectArgForEditor);
+				Logger.LogDebug("Building Editor for {ProjectArgForEditor}", ProjectArgForEditor);
 
 				// Invalidate the location of the Target.cs files incase they were synced
 				if (ProjectFile != null)
 				{
 					string TargetSourceDir = CommandUtils.CombinePaths(Path.GetDirectoryName(ProjectFile.FullName), "Source");
-					RulesCompiler.InvalidateRulesFileCache(TargetSourceDir);
+					Rules.InvalidateRulesFileCache(TargetSourceDir);
 				}
 
 				BuildEditor BuildCmd = new BuildEditor();
-				BuildCmd.Clean = ParseParam("clean");
-				BuildCmd.ProjectName = ProjectArgForEditor;
+				BuildCmd.Params = this.Params;
 				ExitStatus = BuildCmd.Execute();
 			}
-
-			if (OpenProject && ExitStatus == ExitCode.Success)
+			
+			// If both -build and -open are specified
+			// on the commandline, then we will rely on the successful build to call
+			// it's open of the editor. Otherwise just open the editor
+			if (!BuildProject && OpenProject && ExitStatus == ExitCode.Success)
 			{
-				Log.TraceVerbose("Opening Editor for {0}", ProjectArgForEditor);
+				Logger.LogDebug("Opening Editor for {ProjectArgForEditor}", ProjectArgForEditor);
 
 				OpenEditor OpenCmd = new OpenEditor();
-				OpenCmd.ProjectName = ProjectArgForEditor;
+				OpenCmd.Params = this.Params;
 				ExitStatus = OpenCmd.Execute();
 			}
 

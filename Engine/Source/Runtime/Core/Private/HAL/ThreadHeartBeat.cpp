@@ -13,15 +13,13 @@
 #include "Misc/CommandLine.h"
 #include "Misc/CoreDelegates.h"
 #include "HAL/ExceptionHandling.h"
+#include "GenericPlatform/GenericPlatformCrashContext.h"
 #include "Stats/Stats.h"
 #include "Async/TaskGraphInterfaces.h"
 #include "ProfilingDebugging/CsvProfiler.h"
 #include "Misc/App.h"
 #include "Misc/Fork.h"
 
-#if PLATFORM_SWITCH
-#include "SwitchPlatformCrashContext.h"
-#endif
 // When enabled, the heart beat thread will call abort() when a hang
 // is detected, rather than performing stack back-traces and logging.
 #define MINIMAL_FATAL_HANG_DETECTION	(PLATFORM_USE_MINIMAL_HANG_DETECTION && 1)
@@ -29,25 +27,6 @@
 #ifndef UE_ASSERT_ON_HANG
 	#define UE_ASSERT_ON_HANG 0
 #endif
-
-#ifndef WALK_STACK_ON_HITCH_DETECTED
-	#define WALK_STACK_ON_HITCH_DETECTED 0
-#endif
-
-#ifndef NEEDS_DEBUG_INFO_ON_PRESENT_HANG
-#define NEEDS_DEBUG_INFO_ON_PRESENT_HANG 0
-#endif
-
-// Enabling AttempStuckThreadResuscitation will add a check for early hung thread detection and pass the ThreadId through the OnStuck
-// delegate, allowing the platform to boost it's priority or other action to get the thread scheduled again.
-// Core.System StuckDuration can be changed to alter the time that the OnStuck delegate is triggered. Currently defaults to 1.0 second
-static bool AttemptStuckThreadResuscitation = false;
-
-static FAutoConsoleVariableRef CVarAttemptStuckThreadResuscitation(
-	TEXT("AttemptStuckThreadResuscitation"),
-	AttemptStuckThreadResuscitation,
-	TEXT("Attempt to resusicate stuck thread by boosting priority. Enabled by default\n"),
-	ECVF_Default);
 
 // The maximum clock time steps for the hang and hitch detectors.
 // These are the amounts the clocks are allowed to advance by before another tick is required.
@@ -97,6 +76,8 @@ FThreadHeartBeat::FThreadHeartBeat()
 	, LastHungThreadId(InvalidThreadId)
 	, LastStuckThreadId(InvalidThreadId)
 	, bHangsAreFatal(false)
+	, GlobalSuspendCount(0)
+	, CheckpointSuspendCount(0)
 	, Clock(HangDetectorClock_MaxTimeStep_MS / 1000)
 {
 	// Start with the frame-present based hang detection disabled. This will be automatically enabled on
@@ -178,25 +159,8 @@ void FORCENOINLINE FThreadHeartBeat::OnPresentHang(double HangDuration)
 #if MINIMAL_FATAL_HANG_DETECTION
 
 	LastHungThreadId = FThreadHeartBeat::PresentThreadId;
-#if PLATFORM_SWITCH
-	FPlatformCrashContext::UpdateDynamicData();
-#endif
-#if NEEDS_DEBUG_INFO_ON_PRESENT_HANG
-	extern void GetRenderThreadSublistDispatchTaskDebugInfo(bool&, bool&, bool&, bool&, int32&);
+	FGenericCrashContext::SetEngineData(TEXT("HungThread"), TEXT("Present"));
 
-	bool bTmpIsNull;
-	bool bTmpIsComplete;
-	bool bTmpClearedOnGT;
-	bool bTmpClearedOnRT;
-	int32 TmpNumIncompletePrereqs;
-	GetRenderThreadSublistDispatchTaskDebugInfo(bTmpIsNull, bTmpIsComplete, bTmpClearedOnGT, bTmpClearedOnRT, TmpNumIncompletePrereqs);
-
-	volatile bool bIsNull = bTmpIsNull;
-	volatile bool bIsComplete = bTmpIsComplete;
-	volatile bool bClearedOnGT = bTmpClearedOnGT;
-	volatile bool bClearedOnRT = bTmpClearedOnRT;
-	volatile int32 NumIncompletePrereqs = TmpNumIncompletePrereqs;
-#endif
 	// We want to avoid all memory allocations if a hang is detected.
 	// Force a crash in a way that will generate a crash report.
 
@@ -218,9 +182,11 @@ void FORCENOINLINE FThreadHeartBeat::OnHang(double HangDuration, uint32 ThreadTh
 #if MINIMAL_FATAL_HANG_DETECTION
 
 	LastHungThreadId = ThreadThatHung;
-#if PLATFORM_SWITCH
-	FPlatformCrashContext::UpdateDynamicData();
-#endif
+	FGenericCrashContext::SetEngineData(TEXT("HungThread"), LexToString(ThreadThatHung));
+
+	// Delegate implementation will be called from the hang detector thread and not from the hung thread
+	OnHangDelegate.ExecuteIfBound(ThreadThatHung);
+
 	// We want to avoid all memory allocations if a hang is detected.
 	// Force a crash in a way that will generate a crash report.
 
@@ -277,9 +243,17 @@ void FORCENOINLINE FThreadHeartBeat::OnHang(double HangDuration, uint32 ThreadTh
 
 		const FString ErrorMessage = FString::Printf(TEXT("Hang detected on %s:%s%s%sCheck log for full callstack."), *ThreadName, LINE_TERMINATOR, *StackTrimmed, LINE_TERMINATOR);
 
-#if PLATFORM_DESKTOP
+#if PLATFORM_USE_REPORT_ENSURE
 		UE_LOG(LogCore, Error, TEXT("%s"), *ErrorMessage);
-		GLog->PanicFlushThreadedLogs();
+
+		if (bHangsAreFatal)
+		{
+			GLog->Panic();
+		}
+		else
+		{
+			GLog->FlushThreadedLogs(EOutputDeviceRedirectorFlushOptions::Async);
+		}
 
 		// Skip macros and FDebug, we always want this to fire
 		ReportHang(*ErrorMessage, StackFrames, NumStackFrames, ThreadThatHung);
@@ -293,7 +267,7 @@ void FORCENOINLINE FThreadHeartBeat::OnHang(double HangDuration, uint32 ThreadTh
 					*NSLOCTEXT("MessageDialog", "ReportHangError_Title", "Application Hang Detected").ToString());
 			}
 
-			FPlatformMisc::RequestExit(true);
+			FPlatformMisc::RequestExit(true, TEXT("FThreadHeartbeat::OnHang"));
 		}
 #else
 		if (bHangsAreFatal)
@@ -376,12 +350,7 @@ void FThreadHeartBeat::InitSettings()
 
 	// Default to 25 seconds if not overridden in config.
 	double NewHangDuration = 25.0;
-
-#if	PLATFORM_PRESENT_HANG_DETECTION_ON_BY_DEFAULT
-	double NewPresentDuration = 25.0;
-#else
 	double NewPresentDuration = 0.0;
-#endif //PLATFORM_PRESENT_HANG_DETECTION_ON_BY_DEFAULT
 
 	bool bNewHangsAreFatal = !!(UE_ASSERT_ON_HANG);
 
@@ -395,7 +364,7 @@ void FThreadHeartBeat::InitSettings()
 		const double MinStuckDuration = 1.0;
 		if (NewStuckDuration > 0.0 && NewStuckDuration < MinStuckDuration)
 		{
-			UE_LOG(LogCore, Warning, TEXT("HangDuration is set to %.4fs which is a very short time for hang detection. Changing to %.2fs."), NewStuckDuration, MinStuckDuration);
+			UE_LOG(LogCore, Warning, TEXT("StuckDuration is set to %.4fs which is a very short time for stuck detection. Changing to %.2fs."), NewStuckDuration, MinStuckDuration);
 			NewStuckDuration = MinStuckDuration;
 		}
 
@@ -424,6 +393,23 @@ void FThreadHeartBeat::InitSettings()
 	CurrentPresentDuration = ConfigPresentDuration * HangDurationMultiplier;
 
 	bHangsAreFatal = bNewHangsAreFatal;
+
+	// Update the existing thread and present hang durations.
+	// Only increase existing thread's heartbeats.
+	// We don't want to decrease here, threads and present logic will pick up a smaller hang duration 
+	// the next time they call HeartBeat() or PresentFrame().
+	for (TPair<uint32, FHeartBeatInfo>& Pair : ThreadHeartBeat)
+	{
+		if (Pair.Value.HangDuration < CurrentHangDuration)
+		{
+			Pair.Value.HangDuration = CurrentHangDuration;
+		}
+	}
+	
+	if (PresentHeartBeat.HangDuration < CurrentPresentDuration)
+	{
+		PresentHeartBeat.HangDuration = CurrentPresentDuration;
+	}
 }
 
 void FThreadHeartBeat::HeartBeat(bool bReadConfig)
@@ -587,7 +573,7 @@ uint32 FThreadHeartBeat::CheckHeartBeat(double& OutHangDuration)
 				}
 			}
 
-			if (AttemptStuckThreadResuscitation && (LongestStuckThreadId != InvalidThreadId))
+			if (LongestStuckThreadId != InvalidThreadId)
 			{
 				// Is there a currently stuck thread. Replace it.
 				if (LastStuckThreadId != LongestStuckThreadId)
@@ -667,7 +653,7 @@ void FThreadHeartBeat::MonitorCheckpointStart(FName EndCheckpoint, double TimeTo
 		HeartBeatInfo.LastHeartBeatTime = Clock.Seconds();
 		HeartBeatInfo.HangDuration = TimeToReachCheckpoint;
 		HeartBeatInfo.HeartBeatName = EndCheckpoint;
-		HeartBeatInfo.SuspendedCount = 0;
+		HeartBeatInfo.SuspendedCount = CheckpointSuspendCount;
 	}
 #endif
 }
@@ -689,7 +675,8 @@ uint32 FThreadHeartBeat::CheckCheckpointHeartBeat(double& OutHangDuration)
 {
 	// Editor and debug builds run too slow to measure them correctly
 #if USE_HANG_DETECTION
-	bool CheckBeats = IsEnabled();
+	static bool bCheckpointDisabled = FParse::Param(FCommandLine::Get(), TEXT("nocheckpointhangdetector"));
+	bool CheckBeats = IsEnabled() && !bCheckpointDisabled;
 
 	if (CheckBeats)
 	{
@@ -712,9 +699,7 @@ uint32 FThreadHeartBeat::CheckCheckpointHeartBeat(double& OutHangDuration)
 						HeartBeatInfo.LastHangTime = CurrentTime;
 						OutHangDuration = HeartBeatInfo.HangDuration;
 						LastHungThreadId = FPlatformTLS::GetCurrentThreadId();
-#if PLATFORM_SWITCH
-						FPlatformCrashContext::UpdateDynamicData();
-#endif
+
 						*((uint32*)3) = 0xe0000001;
 
 						return 0;
@@ -761,9 +746,11 @@ void FThreadHeartBeat::SuspendHeartBeat(bool bAllThreads)
 
 	// Suspend the checkpoint heartbeats
 	{
-		FScopeLock HeartBeatLock(&CheckpointHeartBeatCritical);
 		if (!bAllThreads)
 		{
+			FScopeLock HeartBeatLock(&CheckpointHeartBeatCritical);
+			check(CheckpointSuspendCount >= 0);
+			++CheckpointSuspendCount;
 			for (TPair<FName, FHeartBeatInfo>& HeartBeatEntry : CheckpointHeartBeat)
 			{
 				HeartBeatEntry.Value.Suspend();
@@ -780,9 +767,16 @@ void FThreadHeartBeat::ResumeHeartBeat(bool bAllThreads)
 	bool bLastThreadResumed = false;
 	{
 		FScopeLock HeartBeatLock(&HeartBeatCritical);
+
 		const double CurrentTime = Clock.Seconds();
 		if (bAllThreads)
 		{
+			if (GlobalSuspendCount.GetValue() == 0)
+			{
+				// Resume without matching Suspend, ignore it
+				return;
+			}
+		
 			if (GlobalSuspendCount.Decrement() == 0)
 			{
 				bLastThreadResumed = true;
@@ -808,8 +802,8 @@ void FThreadHeartBeat::ResumeHeartBeat(bool bAllThreads)
 
 	// Resume the checkpoint heartbeats
 	{
-		FScopeLock HeartBeatLock(&CheckpointHeartBeatCritical);
 		const double CurrentTime = Clock.Seconds();
+		FScopeLock HeartBeatLock(&CheckpointHeartBeatCritical);
 		if (bAllThreads)
 		{
 			if (bLastThreadResumed)
@@ -822,6 +816,8 @@ void FThreadHeartBeat::ResumeHeartBeat(bool bAllThreads)
 		}
 		else
 		{
+			check(CheckpointSuspendCount > 0);
+			CheckpointSuspendCount--;
 			for (TPair<FName, FHeartBeatInfo>& HeartBeatEntry : CheckpointHeartBeat)
 			{
 				HeartBeatEntry.Value.Resume(CurrentTime);
@@ -833,14 +829,16 @@ void FThreadHeartBeat::ResumeHeartBeat(bool bAllThreads)
 
 bool FThreadHeartBeat::IsBeating()
 {
-	uint32 ThreadId = FPlatformTLS::GetCurrentThreadId();
-	FScopeLock HeartBeatLock(&HeartBeatCritical);
-	FHeartBeatInfo* HeartBeatInfo = ThreadHeartBeat.Find(ThreadId);
-	if (HeartBeatInfo && HeartBeatInfo->SuspendedCount == 0)
+	if (GlobalSuspendCount.GetValue() == 0)
 	{
-		return true;
+		uint32 ThreadId = FPlatformTLS::GetCurrentThreadId();
+		FScopeLock HeartBeatLock(&HeartBeatCritical);
+		FHeartBeatInfo* HeartBeatInfo = ThreadHeartBeat.Find(ThreadId);
+		if (HeartBeatInfo && HeartBeatInfo->SuspendedCount == 0)
+		{
+			return true;
+		}
 	}
-
 	return false;
 }
 
@@ -861,33 +859,17 @@ void FThreadHeartBeat::SetDurationMultiplier(double NewMultiplier)
 	InitSettings();
 
 	UE_LOG(LogCore, Display, TEXT("Setting hang detector multiplier to %.4fs. New hang duration: %.4fs. New present duration: %.4fs."), NewMultiplier, CurrentHangDuration, CurrentPresentDuration);
-
-	// Update the existing thread's hang durations.
-	for (TPair<uint32, FHeartBeatInfo>& Pair : ThreadHeartBeat)
-	{
-		// Only increase existing thread's heartbeats.
-		// We don't want to decrease here, otherwise reducing the multiplier could cause a false detection.
-		// Threads will pick up a smaller hang duration the next time they call HeartBeat().
-		if (Pair.Value.HangDuration < CurrentHangDuration)
-		{
-			Pair.Value.HangDuration = CurrentHangDuration;
-		}
-	}
-
-	if (PresentHeartBeat.HangDuration < CurrentPresentDuration)
-	{
-		PresentHeartBeat.HangDuration = CurrentPresentDuration;
-	}
 #endif
 }
 
 FGameThreadHitchHeartBeatThreaded::FGameThreadHitchHeartBeatThreaded()
 	: Thread(nullptr)
-	, HangDuration(-1.f)
+#if USE_HITCH_DETECTION
 	, bWalkStackOnHitch(false)
 	, FirstStartTime(0.0)
 	, FrameStartTime(0.0)
 	, SuspendedCount(0)
+#endif
 	, Clock(HitchDetectorClock_MaxTimeStep_MS / 1000.0)
 {
 	// We don't care about programs for now so no point in spawning the extra thread
@@ -943,6 +925,7 @@ FGameThreadHitchHeartBeatThreaded* FGameThreadHitchHeartBeatThreaded::GetNoInit(
 //~ Begin FRunnable Interface.
 bool FGameThreadHitchHeartBeatThreaded::Init()
 {
+	StopTaskCounter.Reset();
 	return true;
 }
 
@@ -954,13 +937,15 @@ void FGameThreadHitchHeartBeatThreaded::InitSettings()
 	static float CmdLine_HangDuration = 0.0f;
 	static bool CmdLine_StackWalk = false;
 
+	float OldHangDuration = HangDuration;
+
 	if (bFirst)
 	{
 		bHasCmdLine = FParse::Value(FCommandLine::Get(), TEXT("hitchdetection="), CmdLine_HangDuration);
 		CmdLine_StackWalk = FParse::Param(FCommandLine::Get(), TEXT("hitchdetectionstackwalk"));
 
 		// Determine whether to start suspended
-		bool bStartSuspended = false;
+		bStartSuspended = false;
 		if (GConfig)
 		{
 			GConfig->GetBool(TEXT("Core.System"), TEXT("GameThreadHeartBeatStartSuspended"), bStartSuspended, GEngineIni);
@@ -1012,7 +997,12 @@ void FGameThreadHitchHeartBeatThreaded::InitSettings()
 			bWalkStackOnHitch = false;
 		}
 	}
-	
+
+	if (OldHangDuration != HangDuration)
+	{
+		UE_LOG(LogCore, Display, TEXT("Hitch detector threshold: %dms"), int32(HangDuration * 1000.0f));
+	}
+
 	// Start the heart beat thread if it hasn't already been started.
 	if (Thread == nullptr && (FPlatformProcess::SupportsMultithreading() || FForkProcessHelper::SupportsMultithreadingPostFork()) && HangDuration > 0)
 	{
@@ -1177,9 +1167,22 @@ void FGameThreadHitchHeartBeatThreaded::ResumeHeartBeat()
 #endif
 }
 
+bool FGameThreadHitchHeartBeatThreaded::IsStartedSuspended()
+{
+#if USE_HITCH_DETECTION
+	return bStartSuspended;
+#else
+	return true;
+#endif
+}
+
 double FGameThreadHitchHeartBeatThreaded::GetFrameStartTime()
 {
+#if USE_HITCH_DETECTION
 	return FrameStartTime;
+#else
+	return 0.0;
+#endif
 }
 
 double FGameThreadHitchHeartBeatThreaded::GetCurrentTime()

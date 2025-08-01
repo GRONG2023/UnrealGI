@@ -3,10 +3,13 @@
 #include "Evaluation/MovieScene3DPathTemplate.h"
 #include "Evaluation/MovieSceneTemplateCommon.h"
 #include "MovieSceneCommonHelpers.h"
+#include "MovieSceneTracksPropertyTypes.h"
 #include "GameFramework/Actor.h"
 #include "Components/SplineComponent.h"
 #include "Evaluation/MovieSceneEvaluation.h"
 #include "IMovieScenePlayer.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieScene3DPathTemplate)
 
 
 DECLARE_CYCLE_STAT(TEXT("Path Track Evaluate"), MovieSceneEval_PathTrack_Evaluate, STATGROUP_MovieSceneEval);
@@ -160,7 +163,9 @@ struct F3DPathExecutionToken
 				Eval(SceneComponent, SplineComponent, Location, Rotation);
 				
 				SceneComponent->SetMobility(EComponentMobility::Movable);
-				SceneComponent->SetRelativeLocationAndRotation(Location, Rotation);
+
+				UE::MovieScene::FIntermediate3DTransform Transform(Location, Rotation, FVector(1.0));
+				UE::MovieScene::FIntermediate3DTransform::ApplyTranslationAndRotationTo(SceneComponent, Transform);
 			}
 		}
 	}
@@ -195,3 +200,4 @@ void FMovieScene3DPathSectionTemplate::Evaluate(const FMovieSceneEvaluationOpera
 		ExecutionTokens.Add(F3DPathExecutionToken(PathBindingID, Timing, FrontAxisEnum, UpAxisEnum, bFollow, bReverse, bForceUpright));
 	}
 }
+

@@ -7,13 +7,15 @@ public class StaticMeshEditor : ModuleRules
 {
 	public StaticMeshEditor(ReadOnlyTargetRules Target) : base(Target)
 	{
+		PrivateIncludePaths.AddRange(
+			new string[] {
+				System.IO.Path.Combine(GetModuleDirectory("UnrealEd"), "Private"),
+			}
+		);
+
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
 				"AssetRegistry",
-				"Kismet",
-				"EditorWidgets",
-				"MeshUtilities",
-                "PropertyEditor",
                 "MeshReductionInterface",
             }
 		);
@@ -27,9 +29,9 @@ public class StaticMeshEditor : ModuleRules
                 "InputCore",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
 				"RenderCore",
 				"RHI",
+				"EditorFramework",
 				"UnrealEd",
 				"TargetPlatform",
 				"RawMesh",
@@ -39,8 +41,16 @@ public class StaticMeshEditor : ModuleRules
                 "JsonUtilities",
                 "AdvancedPreviewScene",
                 "DesktopPlatform",
-                "DesktopWidgets"
-            }
+                "DesktopWidgets",
+				"EditorSubsystem",
+				"MeshDescription",
+				"StaticMeshDescription",
+				"ToolMenus",
+				"DetailCustomizations",
+				"StatusBar",
+				"WorkspaceMenuStructure",
+				"PhysicsUtilities",
+			}
 		);
 
 		DynamicallyLoadedModuleNames.AddRange(
@@ -48,7 +58,6 @@ public class StaticMeshEditor : ModuleRules
 				"SceneOutliner",
 				"ClassViewer",
 				"ContentBrowser",
-				"WorkspaceMenuStructure",
                 "MeshReductionInterface",
             }
 		);

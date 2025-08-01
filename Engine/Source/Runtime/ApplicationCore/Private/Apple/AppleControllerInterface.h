@@ -3,8 +3,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "GenericPlatform/IForceFeedbackSystem.h"
 #include "Misc/CoreMisc.h"
+#include "GenericPlatform/IInputInterface.h"
 #include "GenericPlatform/GenericApplicationMessageHandler.h"
 #import <GameController/GameController.h>
 
@@ -16,7 +16,8 @@ enum ControllerType
 	SiriRemote,
 	ExtendedGamepad,
 	XboxGamepad,
-	DualShockGamepad
+	DualShockGamepad,
+    DualSenseGamepad
 };
 
 enum PlayerIndex
@@ -25,13 +26,41 @@ enum PlayerIndex
 	PlayerTwo,
 	PlayerThree,
 	PlayerFour,
-	PlayerUnset
+	
+	PlayerUnset = -1
+};
+
+enum class EAppleControllerEventType : int32
+{
+    Invalid,
+    Connect,
+    Disconnect,
+    BecomeCurrent
+};
+
+struct FDeferredAppleControllerEvent
+{
+	FDeferredAppleControllerEvent(EAppleControllerEventType InEventType, GCController* InController)
+	: EventType(InEventType)
+	, Controller([InController retain])
+	{}
+	FDeferredAppleControllerEvent(const FDeferredAppleControllerEvent& Other)
+	{
+		EventType = Other.EventType;
+		Controller = [Other.Controller retain];
+	}
+	~FDeferredAppleControllerEvent()
+	{
+		[Controller release];
+	}
+    EAppleControllerEventType EventType;
+    GCController* Controller;
 };
 
 /**
  * Interface class for Apple Controllers
  */
-class FAppleControllerInterface : public IForceFeedbackSystem
+class FAppleControllerInterface : public IInputInterface
 {
 public:
 
@@ -53,7 +82,7 @@ public:
 	void SendControllerEvents();
 
 	/**
-	 * IForceFeedbackSystem implementation
+	 * Force Feedback implementation
 	 */
 	virtual void SetForceFeedbackChannelValue(int32 ControllerId, FForceFeedbackChannelType ChannelType, float Value) override {}
 	virtual void SetForceFeedbackChannelValues(int32 ControllerId, const FForceFeedbackValues &values) override {}
@@ -76,7 +105,10 @@ public:
 protected:
 
 	FAppleControllerInterface( const TSharedRef< FGenericApplicationMessageHandler >& InMessageHandler );
+	
+	void SignalEvent(EAppleControllerEventType InEventType, GCController* InController);
 
+private:
 
 	void HandleConnection(GCController* Controller);
 	void HandleDisconnect(GCController* Controller);
@@ -105,10 +137,14 @@ protected:
 		bool bNeedsReferenceAttitude;
 		bool bHasReferenceAttitude;
 #endif
-        
-        // Deprecated but buttonMenu in iOS 14 is not working in current Beta (August 2020).
+
+		// Workaround for unreliable buttonMenu behavior since iOS/tvOS 14
         bool bPauseWasPressed;
 	};
+	
+	// Controller Event Callbacks are on the main thread - defer to tick processing
+	FCriticalSection DeferredEventCS;
+	TArray<FDeferredAppleControllerEvent> DeferredEvents;
 	
     // there is a hardcoded limit of 4 controllers in the API
 	FUserController Controllers[4];

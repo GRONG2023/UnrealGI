@@ -2,61 +2,72 @@
 
 #include "Components/MultiLineEditableTextBox.h"
 #include "UObject/ConstructorHelpers.h"
+#include "UObject/UE5MainStreamObjectVersion.h"
+#include "UObject/UE5ReleaseStreamObjectVersion.h"
 #include "Engine/Font.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Input/SMultiLineEditableTextBox.h"
+#include "Styling/DefaultStyleCache.h"
+#include "Styling/UMGCoreStyle.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MultiLineEditableTextBox)
 
 #define LOCTEXT_NAMESPACE "UMG"
 
 /////////////////////////////////////////////////////
 // UMultiLineEditableTextBox
 
-static FEditableTextBoxStyle* DefaultMultiLineEditableTextBoxStyle = nullptr;
-static FTextBlockStyle* DefaultMultiLineEditableTextBoxTextStyle = nullptr;
-
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 UMultiLineEditableTextBox::UMultiLineEditableTextBox(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
-	ForegroundColor_DEPRECATED = FLinearColor::Black;
-	BackgroundColor_DEPRECATED = FLinearColor::White;
-	ReadOnlyForegroundColor_DEPRECATED = FLinearColor::Black;
+	WidgetStyle = UE::Slate::Private::FDefaultStyleCache::GetRuntime().GetEditableTextBoxStyle();
+#if WITH_EDITOR
+	TextStyle_DEPRECATED = WidgetStyle.TextStyle;
+#endif
 
-	if (DefaultMultiLineEditableTextBoxStyle == nullptr)
+	if (!IsRunningDedicatedServer())
 	{
-		// HACK: THIS SHOULD NOT COME FROM CORESTYLE AND SHOULD INSTEAD BE DEFINED BY ENGINE TEXTURES/PROJECT SETTINGS
-		DefaultMultiLineEditableTextBoxStyle = new FEditableTextBoxStyle(FCoreStyle::Get().GetWidgetStyle<FEditableTextBoxStyle>("NormalEditableTextBox"));
-
-		// Unlink UMG default colors from the editor settings colors.
-		DefaultMultiLineEditableTextBoxStyle->UnlinkColors();
-	}
-
-	if (DefaultMultiLineEditableTextBoxTextStyle == nullptr)
-	{
-		// HACK: THIS SHOULD NOT COME FROM CORESTYLE AND SHOULD INSTEAD BE DEFINED BY ENGINE TEXTURES/PROJECT SETTINGS
-		DefaultMultiLineEditableTextBoxTextStyle = new FTextBlockStyle(FCoreStyle::Get().GetWidgetStyle<FTextBlockStyle>("NormalText"));
-
-		// Unlink UMG default colors from the editor settings colors.
-		DefaultMultiLineEditableTextBoxTextStyle->UnlinkColors();
+		static ConstructorHelpers::FObjectFinder<UFont> DefaultFontObj(*UWidget::GetDefaultFontName());
+		FSlateFontInfo Font(DefaultFontObj.Object, 24, FName("Regular"));
+		//The FSlateFontInfo just created doesn't contain a composite font (while the default from the WidgetStyle does),
+		//so in the case the Font object is replaced by a null one, we have to keep the composite one as a fallback.
+		Font.CompositeFont = WidgetStyle.TextStyle.Font.CompositeFont;
 	}
 	
-	WidgetStyle = *DefaultMultiLineEditableTextBoxStyle;
-	TextStyle = *DefaultMultiLineEditableTextBoxTextStyle;
+#if WITH_EDITOR 
+	if (IsEditorWidget())
+	{
+		WidgetStyle = UE::Slate::Private::FDefaultStyleCache::GetEditor().GetEditableTextBoxStyle();
+		TextStyle_DEPRECATED = WidgetStyle.TextStyle;
+
+		// The CDO isn't an editor widget and thus won't use the editor style, call post edit change to mark difference from CDO
+		PostEditChange();
+	}
+
+	bIsFontDeprecationDone = false;
+#endif // WITH_EDITOR
 
 	bIsReadOnly = false;
 	AllowContextMenu = true;
 	VirtualKeyboardDismissAction = EVirtualKeyboardDismissAction::TextChangeOnDismiss;
 	AutoWrapText = true;
+}
 
-	if (!IsRunningDedicatedServer())
+void UMultiLineEditableTextBox::Serialize(FArchive& Ar)
+{
+	Ar.UsingCustomVersion(FUE5ReleaseStreamObjectVersion::GUID);
+
+	Super::Serialize(Ar);
+
+#if WITH_EDITOR
+	if (Ar.IsLoading() && !bIsFontDeprecationDone && GetLinkerCustomVersion(FUE5ReleaseStreamObjectVersion::GUID) < FUE5ReleaseStreamObjectVersion::RemoveDuplicatedStyleInfo)
 	{
-		static ConstructorHelpers::FObjectFinder<UFont> RobotoFontObj(*UWidget::GetDefaultFontName());
-		Font_DEPRECATED = FSlateFontInfo(RobotoFontObj.Object, 12, FName("Bold"));
-
-		WidgetStyle.SetFont(Font_DEPRECATED);
-		WidgetStyle.SetForegroundColor(ForegroundColor_DEPRECATED);
-		WidgetStyle.SetBackgroundColor(BackgroundColor_DEPRECATED);
-		WidgetStyle.SetReadOnlyForegroundColor(ReadOnlyForegroundColor_DEPRECATED);
+		TextStyle_DEPRECATED.SetFont(WidgetStyle.Font_DEPRECATED);
+		WidgetStyle.SetTextStyle(TextStyle_DEPRECATED);
+		bIsFontDeprecationDone = true;
 	}
+#endif
 }
 
 void UMultiLineEditableTextBox::ReleaseSlateResources(bool bReleaseChildren)
@@ -70,7 +81,6 @@ TSharedRef<SWidget> UMultiLineEditableTextBox::RebuildWidget()
 {
 	MyEditableTextBlock = SNew(SMultiLineEditableTextBox)
 		.Style(&WidgetStyle)
-		.TextStyle(&TextStyle)
 		.AllowContextMenu(AllowContextMenu)
 		.IsReadOnly(bIsReadOnly)
 //		.MinDesiredWidth(MinimumDesiredWidth)
@@ -93,6 +103,11 @@ void UMultiLineEditableTextBox::SynchronizeProperties()
 {
 	Super::SynchronizeProperties();
 
+	if (!MyEditableTextBlock.IsValid())
+	{
+		return;
+	}
+
 	TAttribute<FText> HintTextBinding = PROPERTY_BINDING(FText, HintText);
 
 	MyEditableTextBlock->SetStyle(&WidgetStyle);
@@ -110,13 +125,75 @@ void UMultiLineEditableTextBox::SynchronizeProperties()
 	Super::SynchronizeTextLayoutProperties(*MyEditableTextBlock);
 }
 
-void UMultiLineEditableTextBox::SetJustification(ETextJustify::Type InJustification)
+void UMultiLineEditableTextBox::OnShapedTextOptionsChanged(FShapedTextOptions InShapedTextOptions)
 {
-	Super::SetJustification(InJustification);
+	Super::OnShapedTextOptionsChanged(InShapedTextOptions);
+	if (MyEditableTextBlock.IsValid())
+	{
+		InShapedTextOptions.SynchronizeShapedTextProperties(*MyEditableTextBlock);
+	}
+}
 
+void UMultiLineEditableTextBox::OnJustificationChanged(ETextJustify::Type InJustification)
+{
+	Super::OnJustificationChanged(InJustification);
 	if (MyEditableTextBlock.IsValid())
 	{
 		MyEditableTextBlock->SetJustification(InJustification);
+	}
+}
+
+void UMultiLineEditableTextBox::OnWrappingPolicyChanged(ETextWrappingPolicy InWrappingPolicy)
+{
+	Super::OnWrappingPolicyChanged(InWrappingPolicy);
+	if (MyEditableTextBlock.IsValid())
+	{
+		MyEditableTextBlock->SetWrappingPolicy(InWrappingPolicy);
+	}
+}
+
+void UMultiLineEditableTextBox::OnAutoWrapTextChanged(bool InAutoWrapText)
+{
+	Super::OnAutoWrapTextChanged(InAutoWrapText);
+	if (MyEditableTextBlock.IsValid())
+	{
+		MyEditableTextBlock->SetAutoWrapText(InAutoWrapText);
+	}
+}
+
+void UMultiLineEditableTextBox::OnWrapTextAtChanged(float InWrapTextAt)
+{
+	Super::OnWrapTextAtChanged(InWrapTextAt);
+	if (MyEditableTextBlock.IsValid())
+	{
+		MyEditableTextBlock->SetWrapTextAt(InWrapTextAt);
+	}
+}
+
+void UMultiLineEditableTextBox::OnLineHeightPercentageChanged(float InLineHeightPercentage)
+{
+	Super::OnLineHeightPercentageChanged(InLineHeightPercentage);
+	if (MyEditableTextBlock.IsValid())
+	{
+		MyEditableTextBlock->SetLineHeightPercentage(InLineHeightPercentage);
+	}
+}
+
+void UMultiLineEditableTextBox::OnApplyLineHeightToBottomLineChanged(bool InApplyLineHeightToBottomLine)
+{
+	Super::OnApplyLineHeightToBottomLineChanged(InApplyLineHeightToBottomLine);
+	if (MyEditableTextBlock.IsValid())
+	{
+		MyEditableTextBlock->SetApplyLineHeightToBottomLine(InApplyLineHeightToBottomLine);
+	}
+}
+
+void UMultiLineEditableTextBox::OnMarginChanged(const FMargin& InMargin)
+{
+	Super::OnMarginChanged(InMargin);
+	if (MyEditableTextBlock.IsValid())
+	{
+		MyEditableTextBlock->SetMargin(InMargin);
 	}
 }
 
@@ -132,11 +209,25 @@ FText UMultiLineEditableTextBox::GetText() const
 
 void UMultiLineEditableTextBox::SetText(FText InText)
 {
-	Text = InText;
-	if ( MyEditableTextBlock.IsValid() )
+	if (SetTextInternal(InText))
 	{
-		MyEditableTextBlock->SetText(Text);
+		if (MyEditableTextBlock.IsValid())
+		{
+			MyEditableTextBlock->SetText(Text);
+		}
+		BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::Text);
 	}
+}
+
+bool UMultiLineEditableTextBox::SetTextInternal(const FText& InText)
+{
+	if (!Text.IdenticalTo(InText, ETextIdenticalModeFlags::DeepCompare | ETextIdenticalModeFlags::LexicalCompareInvariants))
+	{
+		Text = InText;
+		return true;
+	}
+
+	return false;
 }
 
 FText UMultiLineEditableTextBox::GetHintText() const
@@ -168,6 +259,11 @@ void UMultiLineEditableTextBox::SetError(FText InError)
 	}
 }
 
+bool UMultiLineEditableTextBox::GetIsReadOnly() const
+{
+	return bIsReadOnly;
+}
+
 void UMultiLineEditableTextBox::SetIsReadOnly(bool bReadOnly)
 {
 	bIsReadOnly = bReadOnly;
@@ -178,70 +274,42 @@ void UMultiLineEditableTextBox::SetIsReadOnly(bool bReadOnly)
 	}
 }
 
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
 void UMultiLineEditableTextBox::SetTextStyle(const FTextBlockStyle& InTextStyle)
 {
-	TextStyle = InTextStyle;
+	WidgetStyle.SetTextStyle(InTextStyle);
 
 	if (MyEditableTextBlock.IsValid())
 	{
-		MyEditableTextBlock->SetTextStyle(&TextStyle);
+		MyEditableTextBlock->SetTextStyle(&InTextStyle);
+	}
+}
+
+void UMultiLineEditableTextBox::SetForegroundColor(FLinearColor color)
+{
+	if(MyEditableTextBlock.IsValid())
+	{
+		MyEditableTextBlock->SetForegroundColor(color);
 	}
 }
 
 void UMultiLineEditableTextBox::HandleOnTextChanged(const FText& InText)
 {
-	OnTextChanged.Broadcast(InText);
+	if (SetTextInternal(InText))
+	{
+		BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::Text);
+		OnTextChanged.Broadcast(InText);
+	}
 }
 
 void UMultiLineEditableTextBox::HandleOnTextCommitted(const FText& InText, ETextCommit::Type CommitMethod)
 {
+	if (SetTextInternal(InText))
+	{
+		BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::Text);
+	}
 	OnTextCommitted.Broadcast(InText, CommitMethod);
-}
-
-void UMultiLineEditableTextBox::PostLoad()
-{
-	Super::PostLoad();
-
-	if ( GetLinkerUE4Version() < VER_UE4_DEPRECATE_UMG_STYLE_ASSETS )
-	{
-		if ( Style_DEPRECATED != nullptr )
-		{
-			const FEditableTextBoxStyle* StylePtr = Style_DEPRECATED->GetStyle<FEditableTextBoxStyle>();
-			if ( StylePtr != nullptr )
-			{
-				WidgetStyle = *StylePtr;
-			}
-
-			Style_DEPRECATED = nullptr;
-		}
-	}
-
-	if (GetLinkerUE4Version() < VER_UE4_DEPRECATE_UMG_STYLE_OVERRIDES)
-	{
-		if (Font_DEPRECATED.HasValidFont())
-		{
-			WidgetStyle.Font = Font_DEPRECATED;
-			Font_DEPRECATED = FSlateFontInfo();
-		}
-
-		if (ForegroundColor_DEPRECATED != FLinearColor::Black)
-		{
-			WidgetStyle.ForegroundColor = ForegroundColor_DEPRECATED;
-			ForegroundColor_DEPRECATED = FLinearColor::Black;
-		}
-
-		if (BackgroundColor_DEPRECATED != FLinearColor::White)
-		{
-			WidgetStyle.BackgroundColor = BackgroundColor_DEPRECATED;
-			BackgroundColor_DEPRECATED = FLinearColor::White;
-		}
-
-		if (ReadOnlyForegroundColor_DEPRECATED != FLinearColor::Black)
-		{
-			WidgetStyle.ReadOnlyForegroundColor = ReadOnlyForegroundColor_DEPRECATED;
-			ReadOnlyForegroundColor_DEPRECATED = FLinearColor::Black;
-		}
-	}
 }
 
 #if WITH_EDITOR
@@ -256,3 +324,4 @@ const FText UMultiLineEditableTextBox::GetPaletteCategory()
 /////////////////////////////////////////////////////
 
 #undef LOCTEXT_NAMESPACE
+

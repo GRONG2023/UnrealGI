@@ -1,6 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ProfilerDataSource.h"
+
+#if STATS
+
 #include "Containers/MapBuilder.h"
 #include "ProfilerStream.h"
 #include "ProfilerDataProvider.h"
@@ -122,7 +125,7 @@ const uint32 FGraphDataSource::GetNumFrames() const
 
 const float FGraphDataSource::GetTotalTimeMS() const
 {
-	return ProfilerSession->GetDataProvider()->GetTotalTimeMS();
+	return static_cast<float>(ProfilerSession->GetDataProvider()->GetTotalTimeMS());
 }
 
 const TSharedRef<IDataProvider> FGraphDataSource::GetDataProvider() const
@@ -154,7 +157,7 @@ FCombinedGraphDataSource::FCombinedGraphDataSource( const uint32 InStatID, const
 const FVector FCombinedGraphDataSource::GetUncachedValueFromTimeRange( const float StartTimeMS, const float EndTimeMS ) const
 {
 	// X=Min, Y=Max, Z=Avg
-	FVector AggregatedValue( (TGraphDataType)MAX_int32, (TGraphDataType)MIN_int32, 0.0f );
+	FVector3f AggregatedValue( (TGraphDataType)MAX_int32, (TGraphDataType)MIN_int32, 0.0f );
 
 	const uint32 NumSources = GraphDataSources.Num();
 	const float InvNumSources = 1.0f / (float)NumSources;
@@ -170,7 +173,7 @@ const FVector FCombinedGraphDataSource::GetUncachedValueFromTimeRange( const flo
 	}
 	AggregatedValue.Z *= InvNumSources;
 
-	return AggregatedValue;
+	return (FVector)AggregatedValue;
 }
 
 void FCombinedGraphDataSource::GetStartIndicesFromTimeRange( const float StartTimeMS, const float EndTimeMS, TMap<FGuid,uint32>& out_StartIndices ) const
@@ -566,3 +569,5 @@ FString EEventGraphTypes::ToDescription( const EEventGraphTypes::Type EventGraph
 }
 
 #undef LOCTEXT_NAMESPACE
+
+#endif // STATS

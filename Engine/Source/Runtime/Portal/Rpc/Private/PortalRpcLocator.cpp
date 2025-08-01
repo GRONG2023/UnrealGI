@@ -20,7 +20,7 @@ public:
 
 	virtual ~FPortalRpcLocatorImpl()
 	{
-		FTicker::GetCoreTicker().RemoveTicker(TickerHandle);
+		FTSTicker::GetCoreTicker().RemoveTicker(TickerHandle);
 	}
 
 public:
@@ -68,9 +68,7 @@ private:
 		}
 
 		// @todo sarge: implement actual product GUID
-		// message is going to be deleted by FMemory::Free() (see FMessageContext destructor), so allocate it with Malloc
-		void* Memory = FMemory::Malloc(sizeof(FPortalRpcLocateServer));
-		MessageEndpoint->Publish(new(Memory) FPortalRpcLocateServer(FGuid(), EngineVersion, MacAddress, UserId), EMessageScope::Network);
+		MessageEndpoint->Publish(FMessageEndpoint::MakeMessage<FPortalRpcLocateServer>(FGuid(), EngineVersion, MacAddress, UserId), EMessageScope::Network);
 
 		return true;
 	}
@@ -85,7 +83,11 @@ private:
 		MessageEndpoint = FMessageEndpoint::Builder("FPortalRpcLocator")
 			.Handling<FPortalRpcServer>(this, &FPortalRpcLocatorImpl::HandleMessage);
 
-		TickerHandle = FTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FPortalRpcLocatorImpl::HandleTicker), PORTAL_RPC_LOCATE_INTERVAL);
+		// this can return null in shipping builds, when MessageBus is disabled
+		if (MessageEndpoint)
+		{
+			TickerHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FPortalRpcLocatorImpl::HandleTicker), PORTAL_RPC_LOCATE_INTERVAL);
+		}
 	}
 	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
@@ -111,7 +113,7 @@ private:
 	FSimpleDelegate ServerLostDelegate;
 
 	/** Handle to the registered ticker. */
-	FDelegateHandle TickerHandle;
+	FTSTicker::FDelegateHandle TickerHandle;
 
 	friend FPortalRpcLocatorFactory;
 };

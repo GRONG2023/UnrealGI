@@ -22,8 +22,8 @@ enum class ESourceBusChannels : uint8
 };
 
 // A source bus is a type of USoundBase and can be "played" like any sound.
-UCLASS(hidecategories= (Compression, SoundWave, Streaming, Subtitles, Analysis, Format, Loading, Info, ImportSettings), ClassGroup = Sound, meta = (BlueprintSpawnableComponent))
-class ENGINE_API USoundSourceBus : public USoundWave
+UCLASS(hidecategories= (Compression, SoundWave, Streaming, Subtitles, Analysis, Format, Loading, Info, ImportSettings), ClassGroup = Sound, meta = (BlueprintSpawnableComponent), MinimalAPI)
+class USoundSourceBus : public USoundWave
 {
 	GENERATED_UCLASS_BODY()
 
@@ -37,26 +37,49 @@ public:
 	UPROPERTY(EditAnywhere, Category = BusProperties, meta = (UIMin = 0.0, ClampMin = 0.0))
 	float SourceBusDuration;
 
-	/** Audio bus to use to use as audio for this source bus. This source bus will sonify the audio from the audio bus. */
+	/** Audio bus to use as audio for this source bus. This source bus will sonify the audio from the audio bus. */
 	UPROPERTY(EditAnywhere, Category = BusProperties)
-	UAudioBus* AudioBus;
+	TObjectPtr<UAudioBus> AudioBus;
 
 	/** Stop the source bus when the volume goes to zero. */
 	UPROPERTY(meta = (DeprecatedProperty))
 	uint32 bAutoDeactivateWhenSilent:1;
 
 	//~ Begin UObject Interface.
-	virtual void PostLoad() override;
+	ENGINE_API virtual void PostLoad() override;
 #if WITH_EDITOR
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	virtual bool CanVisualizeAsset() const override
+	{
+		return false;
+	}
+
+	ENGINE_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+
+	// Override the SoundWave behavior so that we don't ask DDC for compressed data.
+	virtual void BeginCacheForCookedPlatformData(const ITargetPlatform* TargetPlatform) override {};
+	virtual bool IsCachedCookedPlatformDataLoaded(const ITargetPlatform* TargetPlatform) override { return true; };
+	virtual void ClearCachedCookedPlatformData(const ITargetPlatform* TargetPlatform) override {};
+
 #endif // WITH_EDITOR
 	//~ End UObject Interface.
 
+	//~ Begin USoundWave Interface
+#if WITH_EDITORONLY_DATA
+	virtual void CachePlatformData(bool bAsyncCache = false) override {};
+	virtual void BeginCachePlatformData() override {}
+	virtual void FinishCachePlatformData() override {};	
+#endif	//WITH_EDITOR_ONLY_DATA
+	virtual void SerializeCookedPlatformData(FArchive& Ar) override {}
+	//~ End USoundWave Interface
+
 	//~ Begin USoundBase Interface.
-	virtual bool IsPlayable() const override;
-	virtual float GetDuration() override;
+	ENGINE_API virtual bool IsPlayable() const override;
+	ENGINE_API virtual float GetDuration() const override;
 	//~ End USoundBase Interface.
 
 protected:
-	void Init();
+	ENGINE_API void Init();
+	
+	// SourceBus doesn't represent a wav file, don't do anything when serializing cue points
+	virtual void SerializeCuePoints(FArchive& Ar, const bool bIsLoadingFromCookedArchive) {}
 };

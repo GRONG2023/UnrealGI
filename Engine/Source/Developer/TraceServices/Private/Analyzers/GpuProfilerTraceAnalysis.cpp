@@ -1,9 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
+
 #include "GpuProfilerTraceAnalysis.h"
+
 #include "AnalysisServicePrivate.h"
 #include "Common/Utils.h"
+#include "HAL/LowLevelMemTracker.h"
 
-FGpuProfilerAnalyzer::FGpuProfilerAnalyzer(Trace::FAnalysisSession& InSession, Trace::FTimingProfilerProvider& InTimingProfilerProvider)
+namespace TraceServices
+{
+
+FGpuProfilerAnalyzer::FGpuProfilerAnalyzer(FAnalysisSession& InSession, FTimingProfilerProvider& InTimingProfilerProvider)
 	: Session(InSession)
 	, TimingProfilerProvider(InTimingProfilerProvider)
 	, Timeline(TimingProfilerProvider.EditGpuTimeline())
@@ -23,7 +29,9 @@ void FGpuProfilerAnalyzer::OnAnalysisBegin(const FOnAnalysisContext& Context)
 
 bool FGpuProfilerAnalyzer::OnEvent(uint16 RouteId, EStyle Style, const FOnEventContext& Context)
 {
-	Trace::FAnalysisSessionEditScope _(Session);
+	LLM_SCOPE_BYNAME(TEXT("Insights/FGpuProfilerAnalyzer"));
+
+	FAnalysisSessionEditScope _(Session);
 
 	const auto& EventData = Context.EventData;
 
@@ -32,16 +40,24 @@ bool FGpuProfilerAnalyzer::OnEvent(uint16 RouteId, EStyle Style, const FOnEventC
 	case RouteId_EventSpec:
 	{
 		uint32 EventType = EventData.GetValue<uint32>("EventType");
-		const auto& Name = EventData.GetArray<uint16>("Name");
+		const auto& Name = EventData.GetArray<UTF16CHAR>("Name");
 
-		const FString EventName(Name.Num(), Name.GetData());
-		EventTypeMap.Add(EventType, TimingProfilerProvider.AddGpuTimer(*EventName));
+		auto NameTChar = StringCast<TCHAR>(Name.GetData(), Name.Num());
+		uint32* TimerIndexPtr = EventTypeMap.Find(EventType);
+		if (!TimerIndexPtr)
+		{
+			EventTypeMap.Add(EventType, TimingProfilerProvider.AddGpuTimer(FStringView(NameTChar.Get(), NameTChar.Length())));
+		}
+		else
+		{
+			TimingProfilerProvider.SetTimerName(*TimerIndexPtr, FStringView(NameTChar.Get(), NameTChar.Length()));
+		}
 		break;
 	}
 	case RouteId_Frame:
 	case RouteId_Frame2:
 	{
-		Trace::FTimingProfilerProvider::TimelineInternal& ThisTimeline = (RouteId == RouteId_Frame) ? Timeline : Timeline2;
+		TraceServices::FTimingProfilerProvider::TimelineInternal& ThisTimeline = (RouteId == RouteId_Frame) ? Timeline : Timeline2;
 		double& ThisMinTime = (RouteId == RouteId_Frame) ? MinTime : MinTime2;
 		const auto& Data = EventData.GetArray<uint8>("Data");
 		const uint8* BufferPtr = Data.GetData();
@@ -75,14 +91,14 @@ bool FGpuProfilerAnalyzer::OnEvent(uint16 RouteId, EStyle Style, const FOnEventC
 				BufferPtr += sizeof(uint32);
 				if (EventTypeMap.Contains(EventType))
 				{
-					Trace::FTimingProfilerEvent Event;
+					FTimingProfilerEvent Event;
 					Event.TimerIndex = EventTypeMap[EventType];
 					ThisTimeline.AppendBeginEvent(LastTime, Event);
 				}
 				else
 				{
-					Trace::FTimingProfilerEvent Event;
-					Event.TimerIndex = TimingProfilerProvider.AddGpuTimer(TEXT("<unknown>"));
+					FTimingProfilerEvent Event;
+					Event.TimerIndex = TimingProfilerProvider.AddGpuTimer(TEXTVIEW("<unknown>"));
 					EventTypeMap.Add(EventType, Event.TimerIndex);
 					ThisTimeline.AppendBeginEvent(LastTime, Event);
 				}
@@ -107,3 +123,5 @@ bool FGpuProfilerAnalyzer::OnEvent(uint16 RouteId, EStyle Style, const FOnEventC
 
 	return true;
 }
+
+} // namespace TraceServices

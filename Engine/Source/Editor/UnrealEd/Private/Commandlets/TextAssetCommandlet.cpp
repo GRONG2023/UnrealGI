@@ -11,6 +11,7 @@
 #include "Logging/LogMacros.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#include "UObject/Linker.h"
 #include "UObject/UObjectIterator.h"
 #include "Stats/StatsMisc.h"
 #include "Misc/FileHelper.h"
@@ -103,18 +104,18 @@ namespace StringConstants
 
 inline void WriteSimpleSchemaField(FStructuredArchiveRecord Record, const TCHAR* FieldName, FString& Type, FSimpleSchemaFieldPropertyGenerator PropertiesCallback = FSimpleSchemaFieldPropertyGenerator())
 {
-	FStructuredArchiveRecord FieldRecord = Record.EnterField(SA_FIELD_NAME(FieldName)).EnterRecord();
+	FStructuredArchiveRecord FieldRecord = Record.EnterField(FieldName).EnterRecord();
 	FieldRecord << SA_VALUE(TEXT("type"), Type);
 
 	if (PropertiesCallback)
 	{
-		FStructuredArchiveRecord PropertiesRecord = FieldRecord.EnterField(SA_FIELD_NAME(TEXT("properties"))).EnterRecord();
+		FStructuredArchiveRecord PropertiesRecord = FieldRecord.EnterField(TEXT("properties")).EnterRecord();
 		TArray<FString> Required;
 		PropertiesCallback(PropertiesRecord, Required);
 		if (Required.Num() > 0)
 		{
 			int32 NumRequired = Required.Num();
-			FStructuredArchiveArray RequiredArray = FieldRecord.EnterField(SA_FIELD_NAME(TEXT("required"))).EnterArray(NumRequired);
+			FStructuredArchiveArray RequiredArray = FieldRecord.EnterField(TEXT("required")).EnterArray(NumRequired);
 			for (FString& RequiredProperty : Required)
 			{
 				RequiredArray.EnterElement() << RequiredProperty;
@@ -140,7 +141,7 @@ void GeneratePropertySchema(FProperty* Property, FStructuredArchiveRecord Record
 		WriteSimpleSchemaField(Record, TEXT("__InnerStructName"), StringConstants::String);
 		WriteSimpleSchemaField(Record, TEXT("__Value"), StringConstants::Array);
 
-		FStructuredArchiveRecord ItemsRecord = Record.EnterRecord(SA_FIELD_NAME(TEXT("items")));
+		FStructuredArchiveRecord ItemsRecord = Record.EnterRecord(TEXT("items"));
 	}
 	else
 	{
@@ -216,6 +217,7 @@ void GenerateClassSchema(UClass* Class, FStructuredArchiveRecord Record, TArray<
 	}
 }
 
+#if WITH_TEXT_ARCHIVE_SUPPORT
 void GenerateSchema()
 {
 	//static const FName NAME_SpecificClass(TEXT("TextAssetTestObject"));
@@ -239,7 +241,7 @@ void GenerateSchema()
 		{
 			if (NAME_SpecificClass == NAME_None || Class->GetFName() == NAME_SpecificClass)
 			{
-				FStructuredArchiveRecord ClassRecord = RootRecord.EnterRecord(SA_FIELD_NAME(*Class->GetFullName()));
+				FStructuredArchiveRecord ClassRecord = RootRecord.EnterRecord(*Class->GetFullName());
 				ClassRecord << SA_VALUE(*StringConstants::Type, StringConstants::Object);
 
 				WriteSimpleSchemaField(ClassRecord, TEXT("__Class"), StringConstants::Object);
@@ -252,6 +254,7 @@ void GenerateSchema()
 
 	StructuredArchive.Close();
 }
+#endif
 
 bool UTextAssetCommandlet::DoTextAssetProcessing(const FString& InCommandLine)
 {
@@ -305,8 +308,6 @@ bool UTextAssetCommandlet::DoTextAssetProcessing(const FProcessingArgs& InArgs)
 
 	RepairDamagedFiles();
 
-	TArray<FString> Blacklist;
-
 	switch (InArgs.ProcessingMode)
 	{
 	case ETextAssetCommandletMode::FindMismatchedSerializers:
@@ -314,7 +315,11 @@ bool UTextAssetCommandlet::DoTextAssetProcessing(const FProcessingArgs& InArgs)
 		return true;
 
 	case ETextAssetCommandletMode::GenerateSchema:
+#if WITH_TEXT_ARCHIVE_SUPPORT
 		GenerateSchema();
+#else 
+		UE_LOG(LogTextAsset, Error, TEXT("Unable to generate schema when compiled with WITH_TEXT_ARCHIVE_SUPPORT=0"));
+#endif
 		break;
 
 	default:
@@ -394,15 +399,6 @@ bool UTextAssetCommandlet::DoTextAssetProcessing(const FProcessingArgs& InArgs)
 
 		bIgnore = bIgnore || (InputAssetFilename.Contains(TEXT("_BuiltData")));
 
-		for (const FString& BlacklistItem : Blacklist)
-		{
-			if (InputAssetFilename.Contains(BlacklistItem))
-			{
-				bIgnore = true;
-				break;
-			}
-		}
-
 		if (bIgnore)
 		{
 			continue;
@@ -444,8 +440,8 @@ bool UTextAssetCommandlet::DoTextAssetProcessing(const FProcessingArgs& InArgs)
 	const FString FailedDiffsPath = FPaths::ProjectSavedDir() / TEXT("FailedDiffs");
 	IFileManager::Get().DeleteDirectory(*FailedDiffsPath, false, true);
 
-	float TotalPackageLoadTime = 0.0;
-	float TotalPackageSaveTime = 0.0;
+	double TotalPackageLoadTime = 0.0;
+	double TotalPackageSaveTime = 0.0;
 
 	FArchive* CSVWriter = nullptr;
 	if (InArgs.CSVFilename.Len() > 0)
@@ -472,14 +468,13 @@ bool UTextAssetCommandlet::DoTextAssetProcessing(const FProcessingArgs& InArgs)
 		int64 NumFiles = 0;
 		FString MaxTimePackage;
 		FString MinTimePackage;
-		float IterationPackageLoadTime = 0.0;
-		float IterationPackageSaveTime = 0.0;
+		double IterationPackageLoadTime = 0.0;
+		double IterationPackageSaveTime = 0.0;
 		double ThisPackageLoadTime = 0.0;
 
 		TArray<FString> PhaseSuccess;
 		TArray<TArray<FString>> PhaseFails;
 		PhaseFails.AddDefaulted(3);
-		TArray<FString> IntermediateFilenames;
 
 		for (const TTuple<FString, FString>& FileToProcess : FilesToProcess)
 		{
@@ -488,8 +483,6 @@ bool UTextAssetCommandlet::DoTextAssetProcessing(const FProcessingArgs& InArgs)
 			FString DestinationFilename = FileToProcess.Get<1>();
 
 			TRACE_CPUPROFILER_EVENT_SCOPE_TEXT(*SourceFilename);
-
-			IntermediateFilenames.Empty();
 
 			double StartTime = FPlatformTime::Seconds();
 
@@ -516,7 +509,7 @@ bool UTextAssetCommandlet::DoTextAssetProcessing(const FProcessingArgs& InArgs)
 				// Firstly, do a resave of the package
 				UPackage* OriginalPackage = LoadPackage(nullptr, *SourceLongPackageName, LOAD_None);
 				IFileManager::Get().Delete(*SourceFilename, false, true, true);
-				SavePackageHelper(OriginalPackage, SourceFilename, RF_Standalone, GWarn, nullptr, SAVE_KeepGUID);
+				SavePackageHelper(OriginalPackage, SourceFilename, RF_Standalone, GWarn, SAVE_KeepGUID);
 				CollectGarbage(RF_NoFlags, true);
 
 				// Make a copy of the resaved source package which we can use as the base revision for each test
@@ -623,7 +616,7 @@ bool UTextAssetCommandlet::DoTextAssetProcessing(const FProcessingArgs& InArgs)
 						
 						{
 							TRACE_CPUPROFILER_EVENT_SCOPE(SavePackage); 
-							SavePackageHelper(Package, *WorkingFilenames[Bucket], RF_Standalone, GWarn, nullptr, SAVE_KeepGUID);
+							SavePackageHelper(Package, *WorkingFilenames[Bucket], RF_Standalone, GWarn, SAVE_KeepGUID);
 						}
 						
 						{
@@ -704,14 +697,6 @@ bool UTextAssetCommandlet::DoTextAssetProcessing(const FProcessingArgs& InArgs)
 				IFileManager::Get().Delete(*SourceFilename, false, true, true);
 				IFileManager::Get().Move(*SourceFilename, *SourceBackupFilename);
 
-				if (!bDisableCleanup)
-				{
-					for (const FString& IntermediateFilename : IntermediateFilenames)
-					{
-						IFileManager::Get().Delete(*IntermediateFilename, false, true, true);
-					}
-				}
-
 				if (!bPhasesMatched[0])
 				{
 					UE_LOG(LogTextAsset, Display, TEXT("-----------------------------------------------------------------------------------------"));
@@ -770,7 +755,7 @@ bool UTextAssetCommandlet::DoTextAssetProcessing(const FProcessingArgs& InArgs)
 						SCOPE_SECONDS_COUNTER(Timer);
 						TRACE_CPUPROFILER_EVENT_SCOPE(UTextAssetCommandlet::SavePackage);
 						IFileManager::Get().Delete(*DestinationFilename, false, true, true);
-						bSaveSuccessful = SavePackageHelper(Package, *DestinationFilename, RF_Standalone, GWarn, nullptr, SAVE_KeepGUID);
+						bSaveSuccessful = SavePackageHelper(Package, *DestinationFilename, RF_Standalone, GWarn, SAVE_KeepGUID);
 					}
 					TotalPackageSaveTime += Timer;
 					IterationPackageSaveTime += Timer;
@@ -783,7 +768,7 @@ bool UTextAssetCommandlet::DoTextAssetProcessing(const FProcessingArgs& InArgs)
 						TRACE_CPUPROFILER_EVENT_SCOPE(UTextAssetCommandlet::VerifyJson);
 						FArchive* File = IFileManager::Get().CreateFileReader(*DestinationFilename);
 						TSharedPtr< FJsonObject > RootObject;
-						TSharedRef< TJsonReader<char> > Reader = TJsonReaderFactory<char>::Create(File);
+						TSharedRef< TJsonReader<UTF8CHAR> > Reader = TJsonReaderFactory<UTF8CHAR>::Create(File);
 						ensure(FJsonSerializer::Deserialize(Reader, RootObject));
 						delete File;
 					}

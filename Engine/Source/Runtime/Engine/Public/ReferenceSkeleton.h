@@ -15,7 +15,7 @@ struct FMeshBoneInfo
 	// Bone's name.
 	FName Name;
 
-	// 0/NULL if this is the root bone. 
+	// INDEX_NONE if this is the root bone. 
 	int32 ParentIndex;
 
 #if WITH_EDITORONLY_DATA
@@ -30,14 +30,6 @@ struct FMeshBoneInfo
 		, ParentIndex(InParentIndex)
 #if WITH_EDITORONLY_DATA
 		, ExportName(InExportName)
-#endif
-	{}
-
-	FMeshBoneInfo(const FMeshBoneInfo& Other)
-		: Name(Other.Name)
-		, ParentIndex(Other.ParentIndex)
-#if WITH_EDITORONLY_DATA
-		, ExportName(Other.ExportName)
 #endif
 	{}
 
@@ -69,26 +61,36 @@ class USkeleton;
 struct FReferenceSkeleton;
 
 // Allow modifications to a reference skeleton while guaranteeing that virtual bones remain valid.
-struct ENGINE_API FReferenceSkeletonModifier
+struct FReferenceSkeletonModifier
 {
 private:
 	FReferenceSkeleton& RefSkeleton;
 	const USkeleton*	Skeleton;
 public:
 	FReferenceSkeletonModifier(FReferenceSkeleton& InRefSkel, const USkeleton* InSkeleton) : RefSkeleton(InRefSkel), Skeleton(InSkeleton) {}
-	~FReferenceSkeletonModifier();
+	ENGINE_API FReferenceSkeletonModifier(USkeleton* InSkeleton);
+	ENGINE_API ~FReferenceSkeletonModifier();
 
 	// Update the reference pose transform of the specified bone
-	void UpdateRefPoseTransform(const int32 BoneIndex, const FTransform& BonePose);
+	ENGINE_API void UpdateRefPoseTransform(const int32 BoneIndex, const FTransform& BonePose);
 
 	// Add a new bone. BoneName must not already exist! ParentIndex must be valid.
-	void Add(const FMeshBoneInfo& BoneInfo, const FTransform& BonePose);
+	ENGINE_API void Add(const FMeshBoneInfo& BoneInfo, const FTransform& BonePose, const bool bAllowMultipleRoots = false);
 
+	// Remove a bone. BoneName must be valid.
+	ENGINE_API void Remove(const FName& BoneName, const bool bRemoveChildren);
+
+	// Rename a bone. InOldName must be valid and InNewName not already a bone name.
+	ENGINE_API void Rename(const FName& InOldName, const FName& InNewName);
+
+	// Change bone's parent. InBoneName must be valid and InParentName can be Name_NONE to unparent.
+	ENGINE_API int32 SetParent(const FName& InBoneName, const FName& InParentName, const bool bAllowMultipleRoots = false);
+	
 	/** Find Bone Index from BoneName. Precache as much as possible in speed critical sections! */
-	int32 FindBoneIndex(const FName& BoneName) const;
+	ENGINE_API int32 FindBoneIndex(const FName& BoneName) const;
 
 	/** Accessor to private data. Const so it can't be changed recklessly. */
-	const TArray<FMeshBoneInfo> & GetRefBoneInfo() const;
+	ENGINE_API const TArray<FMeshBoneInfo> & GetRefBoneInfo() const;
 
 	const FReferenceSkeleton& GetReferenceSkeleton() const { return RefSkeleton; }
 };
@@ -203,9 +205,21 @@ private:
 			|| ((BoneIndex > 0) && RawRefBoneInfo.IsValidIndex(BoneInfo.ParentIndex) && (BoneInfo.ParentIndex < BoneIndex))));
 	}
 
+	/** Remove InBoneName and its children if bRemoveChildren == true. */
+	void Remove(const FName InBoneName, const bool bRemoveChildren);
+
+	/** Rename InBoneName with InNewName. */
+	void Rename(const FName InBoneName, const FName InNewName);
+
+	/** Set InParentName as InBoneName's parent. */
+	int32 SetParent(const FName InBoneName, const FName InParentName);
+
 	// Help us translate a virtual bone source into a raw bone source (for evaluating virtual bone transform)
 	int32 GetRawSourceBoneIndex(const USkeleton* Skeleton, const FName& SourceBoneName) const;
 
+	// very slow search function for all children (raw or final)
+	int32 GetChildrenInternal(int32 InParentBoneIndex, TArray<int32>& OutChildren, const bool bRaw) const;
+	
 public:
 	ENGINE_API void RebuildRefSkeleton(const USkeleton* Skeleton, bool bRebuildNameMap);
 
@@ -249,6 +263,22 @@ public:
 		return RawRefBonePose;
 	}
 
+	const TMap<FName, int32>& GetRawNameToIndexMap() const { return RawNameToIndexMap; }
+	
+	/** Returns an array of raw bone names. */
+	TArray<FName> GetRawRefBoneNames() const
+	{
+		TArray<FName> BoneNames;
+		BoneNames.Reserve(RawRefBoneInfo.Num());
+
+		for (const FMeshBoneInfo& BoneInfo : RawRefBoneInfo)
+		{
+			BoneNames.Add(BoneInfo.Name);
+		}
+
+		return BoneNames;
+	}
+	
 	void Empty(int32 Size=0)
 	{
 		RawRefBoneInfo.Empty(Size);
@@ -349,20 +379,23 @@ public:
 
 	bool BoneIsChildOf(const int32 ChildBoneIndex, const int32 ParentBoneIndex) const
 	{
-		// Bones are in strictly increasing order.
-		// So child must have an index greater than his parent.
-		if( ChildBoneIndex > ParentBoneIndex )
+		if (ParentBoneIndex != INDEX_NONE)
 		{
-			int32 BoneIndex = GetParentIndex(ChildBoneIndex);
-			do
+			// Bones are in strictly increasing order.
+			// So child must have an index greater than its parent.
+			if (ChildBoneIndex > ParentBoneIndex)
 			{
-				if( BoneIndex == ParentBoneIndex )
+				int32 BoneIndex = GetParentIndex(ChildBoneIndex);
+				do
 				{
-					return true;
-				}
-				BoneIndex = GetParentIndex(BoneIndex);
+					if (BoneIndex == ParentBoneIndex)
+					{
+						return true;
+					}
+					BoneIndex = GetParentIndex(BoneIndex);
 
-			} while (BoneIndex != INDEX_NONE);
+				} while (BoneIndex != INDEX_NONE);
+			}
 		}
 
 		return false;
@@ -403,7 +436,8 @@ public:
 	SIZE_T GetDataSize() const;
 
 	// very slow search function for all children
-	int32 GetDirectChildBones(int32 ParentBoneIndex, TArray<int32> & Children) const;
-	friend FArchive & operator<<(FArchive & Ar, FReferenceSkeleton & F);
+	ENGINE_API int32 GetDirectChildBones(int32 ParentBoneIndex, TArray<int32> & Children) const;
+	ENGINE_API int32 GetRawDirectChildBones(int32 ParentBoneIndex, TArray<int32> & Children) const;
+	ENGINE_API friend FArchive & operator<<(FArchive & Ar, FReferenceSkeleton & F);
 	friend FReferenceSkeletonModifier;
 };

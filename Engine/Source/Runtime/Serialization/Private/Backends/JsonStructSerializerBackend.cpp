@@ -19,7 +19,7 @@ void FJsonStructSerializerBackend::BeginArray(const FStructSerializerState& Stat
 	else if (State.KeyProperty != nullptr)
 	{
 		FString KeyString;
-		State.KeyProperty->ExportTextItem(KeyString, State.KeyData, nullptr, nullptr, PPF_None);
+		State.KeyProperty->ExportTextItem_Direct(KeyString, State.KeyData, nullptr, nullptr, PPF_None);
 		JsonWriter->WriteArrayStart(KeyString);
 	}
 	else
@@ -44,7 +44,7 @@ void FJsonStructSerializerBackend::BeginStructure(const FStructSerializerState& 
 		else if (State.KeyProperty != nullptr)
 		{
 			FString KeyString;
-			State.KeyProperty->ExportTextItem(KeyString, State.KeyData, nullptr, nullptr, PPF_None);
+			State.KeyProperty->ExportTextItem_Direct(KeyString, State.KeyData, nullptr, nullptr, PPF_None);
 			JsonWriter->WriteObjectStart(KeyString);
 		}
 		else
@@ -173,20 +173,10 @@ void FJsonStructSerializerBackend::WriteProperty(const FStructSerializerState& S
 	}
 
 	// classes & objects
-	else if (State.FieldType == FClassProperty::StaticClass())
-	{
-		UObject* const& Value = CastFieldChecked<FClassProperty>(State.ValueProperty)->GetPropertyValue_InContainer(State.ValueData, ArrayIndex);
-		WritePropertyValue(State, Value ? Value->GetPathName() : FString());
-	}
 	else if (State.FieldType == FSoftClassProperty::StaticClass())
 	{
 		FSoftObjectPtr const& Value = CastFieldChecked<FSoftClassProperty>(State.ValueProperty)->GetPropertyValue_InContainer(State.ValueData, ArrayIndex);
 		WritePropertyValue(State, Value.IsValid() ? Value->GetPathName() : FString());
-	}
-	else if (State.FieldType == FObjectProperty::StaticClass())
-	{
-		UObject* const& Value = CastFieldChecked<FObjectProperty>(State.ValueProperty)->GetPropertyValue_InContainer(State.ValueData, ArrayIndex);
-		WritePropertyValue(State, Value ? Value->GetPathName() : FString());
 	}
 	else if (State.FieldType == FWeakObjectProperty::StaticClass())
 	{
@@ -197,6 +187,14 @@ void FJsonStructSerializerBackend::WriteProperty(const FStructSerializerState& S
 	{
 		FSoftObjectPtr const& Value = CastFieldChecked<FSoftObjectProperty>(State.ValueProperty)->GetPropertyValue_InContainer(State.ValueData, ArrayIndex);
 		WritePropertyValue(State, Value.ToString());
+	}
+	else if (FObjectProperty* ObjectProperty = CastField<FObjectProperty>(State.ValueProperty))
+	{
+		// @TODO: Could this be expanded to include everything derived from FObjectPropertyBase?
+		// Generic handling for a property type derived from FObjectProperty that is obtainable as a pointer and will be stored using its path.
+		// This must come after all the more specialized handlers for object property types.
+		UObject* const Value = ObjectProperty->GetObjectPropertyValue_InContainer(State.ValueData, ArrayIndex);
+		WritePropertyValue(State, Value ? Value->GetPathName() : FString());
 	}
 
 	// unsupported property type

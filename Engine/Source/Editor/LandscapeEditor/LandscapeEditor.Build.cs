@@ -10,39 +10,37 @@ public class LandscapeEditor : ModuleRules
 			new string[] {
 				"Core",
 				"CoreUObject",
+				"Json",
 				"ApplicationCore",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
 				"Engine",
 				"Landscape",
                 "LandscapeEditorUtilities",
                 "RenderCore",
                 "RHI",
                 "InputCore",
+				"ImageCore",
+				"EditorFramework",
 				"UnrealEd",
 				"PropertyEditor",
 				"ImageWrapper",
                 "EditorWidgets",
                 "Foliage",
-				"ViewportInteraction",
-				"VREditor",
+				"ToolMenus",
+				"ToolWidgets",
+				"SourceControl",
+				"DirectoryWatcher",
+				"DeveloperSettings",
+				"PlacementMode"
 			}
 			);
 
-		CircularlyReferencedDependentModules.AddRange(
-			new string[]
-			{
-				"ViewportInteraction",
-				"VREditor"
-			}
-		);
 
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
 				"MainFrame",
 				"DesktopPlatform",
-				"ContentBrowser",
                 "AssetTools",
 				"LevelEditor"
 			}
@@ -55,7 +53,7 @@ public class LandscapeEditor : ModuleRules
 			}
 			);
 
-		if (Target.Platform == UnrealTargetPlatform.Win64 || Target.Platform == UnrealTargetPlatform.Win32)
+		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
 			// VS2015 updated some of the CRT definitions but not all of the Windows SDK has been updated to match.
 			// Microsoft provides this shim library to enable building with VS2015 until they fix everything up.
@@ -67,7 +65,7 @@ public class LandscapeEditor : ModuleRules
 		}
 
 		// KissFFT is used by the smooth tool.
-		if (Target.Platform == UnrealTargetPlatform.Win64 || Target.Platform == UnrealTargetPlatform.Win32 || Target.Platform == UnrealTargetPlatform.Mac || Target.Platform == UnrealTargetPlatform.Linux)
+		if (Target.Platform == UnrealTargetPlatform.Win64 || Target.Platform == UnrealTargetPlatform.Mac || Target.Platform == UnrealTargetPlatform.Linux)
 		{
 			AddEngineThirdPartyPrivateStaticDependencies(Target, "Kiss_FFT");
 		}

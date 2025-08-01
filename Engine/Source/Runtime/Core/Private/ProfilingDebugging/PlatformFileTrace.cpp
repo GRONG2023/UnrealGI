@@ -20,11 +20,22 @@ UE_TRACE_CHANNEL(FileChannel)
 
 UE_TRACE_EVENT_BEGIN(PlatformFile, BeginOpen)
 	UE_TRACE_EVENT_FIELD(uint64, Cycle)
+	UE_TRACE_EVENT_FIELD(UE::Trace::WideString, Path)
 UE_TRACE_EVENT_END()
 
 UE_TRACE_EVENT_BEGIN(PlatformFile, EndOpen)
 	UE_TRACE_EVENT_FIELD(uint64, Cycle)
 	UE_TRACE_EVENT_FIELD(uint64, FileHandle)
+UE_TRACE_EVENT_END()
+
+UE_TRACE_EVENT_BEGIN(PlatformFile, BeginReOpen)
+	UE_TRACE_EVENT_FIELD(uint64, Cycle)
+	UE_TRACE_EVENT_FIELD(uint64, OldFileHandle)
+UE_TRACE_EVENT_END()
+
+UE_TRACE_EVENT_BEGIN(PlatformFile, EndReOpen)
+	UE_TRACE_EVENT_FIELD(uint64, Cycle)
+	UE_TRACE_EVENT_FIELD(uint64, NewFileHandle)
 UE_TRACE_EVENT_END()
 
 UE_TRACE_EVENT_BEGIN(PlatformFile, BeginClose)
@@ -76,10 +87,10 @@ namespace
 
 void FPlatformFileTrace::BeginOpen(const TCHAR* Path)
 {
-	uint16 PathSize = (FCString::Strlen(Path) + 1) * sizeof(TCHAR);
-	UE_TRACE_LOG(PlatformFile, BeginOpen, FileChannel, PathSize)
+	int32 PathLength = FCString::Strlen(Path);
+	UE_TRACE_LOG(PlatformFile, BeginOpen, FileChannel)
 		<< BeginOpen.Cycle(FPlatformTime::Cycles64())
-		<< BeginOpen.Attachment(Path, PathSize);
+		<< BeginOpen.Path(Path, PathLength);
 }
 
 void FPlatformFileTrace::EndOpen(uint64 FileHandle)
@@ -99,10 +110,31 @@ void FPlatformFileTrace::EndOpen(uint64 FileHandle)
 
 void FPlatformFileTrace::FailOpen(const TCHAR* Path)
 {
-	// TODO: Separate event for failure in the trace?
 	UE_TRACE_LOG(PlatformFile, EndOpen, FileChannel)
 		<< EndOpen.Cycle(FPlatformTime::Cycles64())
 		<< EndOpen.FileHandle(uint64(-1));
+}
+
+void FPlatformFileTrace::BeginReOpen(uint64 OldFileHandle)
+{
+	UE_TRACE_LOG(PlatformFile, BeginReOpen, FileChannel)
+		<< BeginReOpen.Cycle(FPlatformTime::Cycles64())
+		<< BeginReOpen.OldFileHandle(OldFileHandle);
+}
+
+void FPlatformFileTrace::EndReOpen(uint64 NewFileHandle)
+{
+	UE_TRACE_LOG(PlatformFile, EndReOpen, FileChannel)
+		<< EndReOpen.Cycle(FPlatformTime::Cycles64())
+		<< EndReOpen.NewFileHandle(NewFileHandle);
+#if PLATFORMFILETRACE_DEBUG_ENABLED
+	{
+		FScopeLock OpenHandlesScopeLock(&OpenHandlesLock);
+		++OpenHandles.FindOrAdd(NewFileHandle, 0);
+	}
+#else
+	++OpenFileHandleCount;
+#endif
 }
 
 void FPlatformFileTrace::BeginClose(uint64 FileHandle)
@@ -144,7 +176,6 @@ void FPlatformFileTrace::EndClose(uint64 FileHandle)
 
 void FPlatformFileTrace::FailClose(uint64 FileHandle)
 {
-	// TODO: Separate event for failure in the trace?
 	UE_TRACE_LOG(PlatformFile, EndClose, FileChannel)
 		<< EndClose.Cycle(FPlatformTime::Cycles64());
 }

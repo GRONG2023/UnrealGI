@@ -10,8 +10,8 @@
 
 #include "IOSAudioDevice.h"
 #include "AudioEffect.h"
-#include "ADPCMAudioInfo.h"
 #include "AudioPluginUtilities.h"
+#include "AudioDecompress.h"
 
 DEFINE_LOG_CATEGORY(LogIOSAudio);
 
@@ -291,12 +291,6 @@ void FIOSAudioDevice::HandleError(const TCHAR* InLogOutput, bool bTeardown)
 		Teardown();
 	}
 }
-
-class ICompressedAudioInfo* FIOSAudioDevice::CreateCompressedAudioInfo(USoundWave* SoundWave)
-{
-	return new FADPCMAudioInfo();
-}
-
 
 FAudioEffectsManager* FIOSAudioDevice::CreateEffectsManager()
 {

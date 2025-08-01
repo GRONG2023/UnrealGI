@@ -5,6 +5,9 @@
 #include "HAL/IConsoleManager.h"
 #include "Serialization/ArchiveCountMem.h"
 #include "Features/IModularFeatures.h"
+#include "UObject/AssetRegistryTagsContext.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(GeometryCollectionCache)
 
 DEFINE_LOG_CATEGORY(LogGeometryCollectionCache);
 
@@ -36,9 +39,18 @@ void UGeometryCollectionCache::SetSupportedCollection(const UGeometryCollection*
 
 void UGeometryCollectionCache::GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const
 {
-	OutTags.Add(FAssetRegistryTag(TagName_Name, SupportedCollection ? SupportedCollection->GetName() : FString(TEXT("None")), FAssetRegistryTag::TT_Alphabetical));
-	OutTags.Add(FAssetRegistryTag(TagName_IdGuid, SupportedCollection ? SupportedCollection->GetIdGuid().ToString() : FString(TEXT("INVALID")), FAssetRegistryTag::TT_Hidden));
-	OutTags.Add(FAssetRegistryTag(TagName_StateGuid, SupportedCollection ? CompatibleCollectionState.ToString() : FString(TEXT("INVALID")), FAssetRegistryTag::TT_Hidden));
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+	Super::GetAssetRegistryTags(OutTags);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void UGeometryCollectionCache::GetAssetRegistryTags(FAssetRegistryTagsContext Context) const
+{
+	Super::GetAssetRegistryTags(Context);
+
+	Context.AddTag(FAssetRegistryTag(TagName_Name, SupportedCollection ? SupportedCollection->GetName() : FString(TEXT("None")), FAssetRegistryTag::TT_Alphabetical));
+	Context.AddTag(FAssetRegistryTag(TagName_IdGuid, SupportedCollection ? SupportedCollection->GetIdGuid().ToString() : FString(TEXT("INVALID")), FAssetRegistryTag::TT_Hidden));
+	Context.AddTag(FAssetRegistryTag(TagName_StateGuid, SupportedCollection ? CompatibleCollectionState.ToString() : FString(TEXT("INVALID")), FAssetRegistryTag::TT_Hidden));
 }
 
 UGeometryCollectionCache* UGeometryCollectionCache::CreateCacheForCollection(const UGeometryCollection* InCollection)
@@ -87,3 +99,4 @@ void UGeometryCollectionCache::ProcessRawRecordedDataInternal(const FRecordedTra
 {
 	RecordedData = FRecordedTransformTrack::ProcessRawRecordedData(InTrack);
 }
+

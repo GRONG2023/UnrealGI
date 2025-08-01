@@ -29,7 +29,7 @@ FRuntimeVirtualTextureFinalizer::FRuntimeVirtualTextureFinalizer(
 
 bool FRuntimeVirtualTextureFinalizer::IsReady()
 {
-	return RuntimeVirtualTexture::IsSceneReadyToRender(Scene->GetRenderScene());
+	return RuntimeVirtualTexture::IsSceneReadyToRender(Scene);
 }
 
 void FRuntimeVirtualTextureFinalizer::InitProducer(const FVirtualTextureProducerHandle& ProducerHandle)
@@ -42,11 +42,6 @@ void FRuntimeVirtualTextureFinalizer::InitProducer(const FVirtualTextureProducer
 		// We only need to do this once. If the associated scene proxy is removed this finalizer will also be destroyed.
 		const uint32 VirtualTextureSceneIndex = RenderScene->GetRuntimeVirtualTextureSceneIndex(ProducerId);
 		RuntimeVirtualTextureMask = 1 << VirtualTextureSceneIndex;
-
-		// Store the ProducerHandle in the FRuntimeVirtualTextureSceneProxy object.
-		// This is a bit of a hack: the proxy needs to know the producer handle but can't know it on proxy creation because the producer registration is deferred to the render thread.
-		check(ProducerHandle.PackedValue != 0);
-		RenderScene->RuntimeVirtualTextures[VirtualTextureSceneIndex]->ProducerHandle = ProducerHandle;
 
 		//todo[vt]: 
 		// Add a slow render path inside RenderPage() when this check fails. 
@@ -61,8 +56,11 @@ void FRuntimeVirtualTextureFinalizer::AddTile(FTileEntry& Tile)
 	Tiles.Add(Tile);
 }
 
-void FRuntimeVirtualTextureFinalizer::Finalize(FRHICommandListImmediate& RHICmdList)
+void FRuntimeVirtualTextureFinalizer::Finalize(FRDGBuilder& GraphBuilder)
 {
+	RDG_EVENT_SCOPE(GraphBuilder, "RuntimeVirtualTextureFinalize");
+	RDG_GPU_MASK_SCOPE(GraphBuilder, FRHIGPUMask::All());
+
 	RuntimeVirtualTexture::FRenderPageBatchDesc RenderPageBatchDesc;
 	RenderPageBatchDesc.Scene = Scene->GetRenderScene();
 	RenderPageBatchDesc.RuntimeVirtualTextureMask = RuntimeVirtualTextureMask;
@@ -72,12 +70,12 @@ void FRuntimeVirtualTextureFinalizer::Finalize(FRHICommandListImmediate& RHICmdL
 	RenderPageBatchDesc.MaxLevel = Desc.MaxLevel;
 	RenderPageBatchDesc.bClearTextures = bClearTextures;
 	RenderPageBatchDesc.bIsThumbnails = false;
-	RenderPageBatchDesc.DebugType = ERuntimeVirtualTextureDebugType::None;
+	RenderPageBatchDesc.FixedColor = FLinearColor::Transparent;
 	
 	for (int LayerIndex = 0; LayerIndex < RuntimeVirtualTexture::MaxTextureLayers; ++LayerIndex)
 	{
 		RenderPageBatchDesc.Targets[LayerIndex].Texture = Tiles[0].Targets[LayerIndex].TextureRHI != nullptr ? Tiles[0].Targets[LayerIndex].TextureRHI->GetTexture2D() : nullptr;
-		RenderPageBatchDesc.Targets[LayerIndex].UAV = Tiles[0].Targets[LayerIndex].UnorderedAccessViewRHI;
+		RenderPageBatchDesc.Targets[LayerIndex].PooledRenderTarget = Tiles[0].Targets[LayerIndex].PooledRenderTarget;
 	}
 
 	int32 BatchSize = 0;
@@ -115,7 +113,7 @@ void FRuntimeVirtualTextureFinalizer::Finalize(FRHICommandListImmediate& RHICmdL
 		if (++BatchSize == RuntimeVirtualTexture::EMaxRenderPageBatch || bBreakBatchForTextures)
 		{
 			RenderPageBatchDesc.NumPageDescs = BatchSize;
-			RuntimeVirtualTexture::RenderPages(RHICmdList, RenderPageBatchDesc);
+			RuntimeVirtualTexture::RenderPages(GraphBuilder, RenderPageBatchDesc);
 			BatchSize = 0;
 		}
 
@@ -124,7 +122,7 @@ void FRuntimeVirtualTextureFinalizer::Finalize(FRHICommandListImmediate& RHICmdL
 			for (int LayerIndex = 0; LayerIndex < RuntimeVirtualTexture::MaxTextureLayers; ++LayerIndex)
 			{
 				RenderPageBatchDesc.Targets[LayerIndex].Texture = Tiles[0].Targets[LayerIndex].TextureRHI != nullptr ? Tiles[0].Targets[LayerIndex].TextureRHI->GetTexture2D() : nullptr;
-				RenderPageBatchDesc.Targets[LayerIndex].UAV = Tiles[0].Targets[LayerIndex].UnorderedAccessViewRHI;
+				RenderPageBatchDesc.Targets[LayerIndex].PooledRenderTarget = Tiles[0].Targets[LayerIndex].PooledRenderTarget;
 			}
 		}
 	}
@@ -132,7 +130,7 @@ void FRuntimeVirtualTextureFinalizer::Finalize(FRHICommandListImmediate& RHICmdL
 	if (BatchSize > 0)
 	{
 		RenderPageBatchDesc.NumPageDescs = BatchSize;
-		RuntimeVirtualTexture::RenderPages(RHICmdList, RenderPageBatchDesc);
+		RuntimeVirtualTexture::RenderPages(GraphBuilder, RenderPageBatchDesc);
 	}
 
 	Tiles.SetNumUnsafeInternal(0);
@@ -151,6 +149,7 @@ FRuntimeVirtualTextureProducer::FRuntimeVirtualTextureProducer(
 }
 
 FVTRequestPageResult FRuntimeVirtualTextureProducer::RequestPageData(
+	FRHICommandList& RHICmdList,
 	const FVirtualTextureProducerHandle& ProducerHandle,
 	uint8 LayerMask,
 	uint8 vLevel,
@@ -162,14 +161,12 @@ FVTRequestPageResult FRuntimeVirtualTextureProducer::RequestPageData(
 
 	FVTRequestPageResult result;
 	result.Handle = 0;
-	//todo[vt]:
-	// Returning Saturated instead of Pending here because higher level ignores Pending for locked pages. Need to fix that...
-	result.Status = Finalizer.IsReady() ? EVTRequestPageStatus::Available : EVTRequestPageStatus::Saturated;
+	result.Status = Finalizer.IsReady() ? EVTRequestPageStatus::Available : EVTRequestPageStatus::Pending;
 	return result;
 }
 
 IVirtualTextureFinalizer* FRuntimeVirtualTextureProducer::ProducePageData(
-	FRHICommandListImmediate& RHICmdList,
+	FRHICommandList& RHICmdList,
 	ERHIFeatureLevel::Type FeatureLevel,
 	EVTProducePageFlags Flags,
 	const FVirtualTextureProducerHandle& ProducerHandle,

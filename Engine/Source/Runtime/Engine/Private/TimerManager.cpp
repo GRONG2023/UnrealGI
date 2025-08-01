@@ -5,13 +5,14 @@
 =============================================================================*/
 
 #include "TimerManager.h"
-#include "HAL/IConsoleManager.h"
+#include "Containers/StringConv.h"
+#include "Engine/GameInstance.h"
+#include "Logging/LogScopedCategoryAndVerbosityOverride.h"
 #include "Misc/CoreDelegates.h"
-#include "Engine/World.h"
+#include "ProfilingDebugging/CsvProfiler.h"
+#include "Stats/StatsTrace.h"
 #include "UnrealEngine.h"
 #include "Misc/TimeGuard.h"
-#include "ProfilingDebugging/CsvProfiler.h"
-#include "Algo/Transform.h"
 #include "HAL/PlatformStackWalk.h"
 
 DECLARE_CYCLE_STAT(TEXT("SetTimer"), STAT_SetTimer, STATGROUP_Engine);
@@ -47,6 +48,18 @@ static FAutoConsoleVariableRef CVarMaxExpiredTimersToLog(
 	TEXT("TimerManager.MaxExpiredTimersToLog"), 
 	MaxExpiredTimersToLog,
 	TEXT("Maximum number of TimerData exceeding the threshold to log in a single frame."));
+
+#ifndef UE_ENABLE_DUMPALLTIMERLOGSTHRESHOLD
+#define UE_ENABLE_DUMPALLTIMERLOGSTHRESHOLD !UE_BUILD_SHIPPING
+#endif
+
+#if UE_ENABLE_DUMPALLTIMERLOGSTHRESHOLD
+static int32 DumpAllTimerLogsThreshold = -1;
+static FAutoConsoleVariableRef CVarDumpAllTimerLogsThreshold(
+	TEXT("TimerManager.DumpAllTimerLogsThreshold"),
+	DumpAllTimerLogsThreshold,
+	TEXT("Threshold (in count of active timers) at which to dump info about all active timers to logs. -1 means this is disabled. NOTE: This will only be dumped once per process launch."));
+#endif // #if UE_ENABLE_DUMPALLTIMERLOGSTHRESHOLD
 
 
 #if UE_ENABLE_TRACKING_TIMER_SOURCES
@@ -95,7 +108,6 @@ struct FTimerSourceList
 	{
 		FString FunctionNameStr;
 		FString ObjectNameStr;
-		bool bDynDelegate = false;
 
 		if (Delegate.FuncDelegate.IsBound())
 		{
@@ -136,7 +148,6 @@ struct FTimerSourceList
 		{
 			const FName FuncFName = Delegate.FuncDynDelegate.GetFunctionName();
 			FunctionNameStr = FuncFName.ToString();
-			bDynDelegate = true;
 
 			UClass* SourceClass = nullptr;
 			if (const UObject* Object = Delegate.FuncDynDelegate.GetUObject())
@@ -253,7 +264,7 @@ FTimerManager::FTimerManager(UGameInstance* GameInstance)
 {
 	if (IsRunningDedicatedServer())
 	{
-		// Off by default, renable if needed
+		// Off by default, reenable if needed
 		//FCoreDelegates::OnHandleSystemError.AddRaw(this, &FTimerManager::OnCrash);
 	}
 
@@ -450,7 +461,12 @@ FTimerHandle FTimerManager::K2_FindDynamicTimerHandle(FTimerDynamicDelegate InDy
 	return Result;
 }
 
-void FTimerManager::InternalSetTimer(FTimerHandle& InOutHandle, FTimerUnifiedDelegate&& InDelegate, float InRate, bool InbLoop, float InFirstDelay)
+void FTimerManager::InternalSetTimer(FTimerHandle& InOutHandle, FTimerUnifiedDelegate&& InDelegate, float InRate, bool bInLoop, float InFirstDelay)
+{
+	InternalSetTimer(InOutHandle, MoveTemp(InDelegate), InRate, FTimerManagerTimerParameters{ .bLoop = bInLoop, .FirstDelay = InFirstDelay });
+}
+
+void FTimerManager::InternalSetTimer(FTimerHandle& InOutHandle, FTimerUnifiedDelegate&& InDelegate, float InRate, const FTimerManagerTimerParameters& InTimerParameters)
 {
 	SCOPE_CYCLE_COUNTER(STAT_SetTimer);
 
@@ -471,7 +487,8 @@ void FTimerManager::InternalSetTimer(FTimerHandle& InOutHandle, FTimerUnifiedDel
 		NewTimerData.TimerDelegate = MoveTemp(InDelegate);
 
 		NewTimerData.Rate = InRate;
-		NewTimerData.bLoop = InbLoop;
+		NewTimerData.bLoop = InTimerParameters.bLoop;
+		NewTimerData.bMaxOncePerFrame = InTimerParameters.bMaxOncePerFrame;
 		NewTimerData.bRequiresDelegate = NewTimerData.TimerDelegate.IsBound();
 
 		// Set level collection
@@ -481,7 +498,7 @@ void FTimerManager::InternalSetTimer(FTimerHandle& InOutHandle, FTimerUnifiedDel
 			NewTimerData.LevelCollection = OwningWorld->GetActiveLevelCollection()->GetType();
 		}
 
-		const float FirstDelay = (InFirstDelay >= 0.f) ? InFirstDelay : InRate;
+		const float FirstDelay = (InTimerParameters.FirstDelay >= 0.f) ? InTimerParameters.FirstDelay : InRate;
 
 		FTimerHandle NewTimerHandle;
 		if (HasBeenTickedThisFrame())
@@ -678,7 +695,7 @@ void FTimerManager::PauseTimer(FTimerHandle InHandle)
 			{
 				int32 IndexIndex = ActiveTimerHeap.Find(InHandle);
 				check(IndexIndex != INDEX_NONE);
-				ActiveTimerHeap.HeapRemoveAt(IndexIndex, FTimerHeapOrder(Timers), /*bAllowShrinking=*/ false);
+				ActiveTimerHeap.HeapRemoveAt(IndexIndex, FTimerHeapOrder(Timers), EAllowShrinking::No);
 			}
 			break;
 
@@ -749,6 +766,16 @@ void FTimerManager::UnPauseTimer(FTimerHandle InHandle)
 	PausedTimerSet.Remove(InHandle);
 }
 
+FTimerData::FTimerData()
+	: bLoop(false)
+	, bMaxOncePerFrame(false)
+	, bRequiresDelegate(false)
+	, Status(ETimerStatus::Active)
+	, Rate(0)
+	, ExpireTime(0)
+	, LevelCollection(ELevelCollectionType::DynamicSourceLevels)
+{}
+
 // ---------------------------------
 // Public members
 // ---------------------------------
@@ -810,6 +837,38 @@ void FTimerManager::Tick(float DeltaTime)
 	UWorld* const OwningWorld = OwningGameInstance ? OwningGameInstance->GetWorld() : nullptr;
 	UWorld* const LevelCollectionWorld = OwningWorld;
 
+#if UE_ENABLE_DUMPALLTIMERLOGSTHRESHOLD
+	// Dump timer info to logs if we have way too many timers active.
+	UE_SUPPRESS(LogEngine, Warning,
+	{
+		if (DumpAllTimerLogsThreshold > 0 && ActiveTimerHeap.Num() > DumpAllTimerLogsThreshold)
+		{
+			static bool bAlreadyLogged = false;
+			if(!bAlreadyLogged)
+			{
+				bAlreadyLogged = true;
+			
+				UE_LOG(LogEngine, Warning, TEXT("Number of active Timers (%d) has exceeded DumpAllTimerLogsThreshold (%d)!  Dumping all timer info to log:"), ActiveTimerHeap.Num(), DumpAllTimerLogsThreshold);
+
+				TArray<const FTimerData*> ValidActiveTimers;
+				ValidActiveTimers.Reserve(ActiveTimerHeap.Num());
+				for (FTimerHandle Handle : ActiveTimerHeap)
+				{
+					if (const FTimerData* Data = FindTimer(Handle))
+					{
+						ValidActiveTimers.Add(Data);
+					}
+				}
+
+				for (const FTimerData* Data : ValidActiveTimers)
+				{
+					DescribeFTimerDataSafely(*GLog, *Data);
+				}
+			}
+		}
+	});
+#endif // #if UE_ENABLE_DUMPALLTIMERLOGSTHRESHOLD
+
 	while (ActiveTimerHeap.Num() > 0)
 	{
 		FTimerHandle TopHandle = ActiveTimerHeap.HeapTop();
@@ -820,7 +879,7 @@ void FTimerManager::Tick(float DeltaTime)
 
 		if (Top->Status == ETimerStatus::ActivePendingRemoval)
 		{
-			ActiveTimerHeap.HeapPop(TopHandle, FTimerHeapOrder(Timers), /*bAllowShrinking=*/ false);
+			ActiveTimerHeap.HeapPop(TopHandle, FTimerHeapOrder(Timers), EAllowShrinking::No);
 			RemoveTimer(TopHandle);
 			continue;
 		}
@@ -844,7 +903,7 @@ void FTimerManager::Tick(float DeltaTime)
 			FScopedLevelCollectionContextSwitch LevelContext(LevelCollectionIndex, LevelCollectionWorld);
 
 			// Remove it from the heap and store it while we're executing
-			ActiveTimerHeap.HeapPop(CurrentlyExecutingTimer, FTimerHeapOrder(Timers), /*bAllowShrinking=*/ false);
+			ActiveTimerHeap.HeapPop(CurrentlyExecutingTimer, FTimerHeapOrder(Timers), EAllowShrinking::No);
 			Top->Status = ETimerStatus::Executing;
 
 			// Determine how many times the timer may have elapsed (e.g. for large DeltaTime on a short looping timer)
@@ -880,7 +939,7 @@ void FTimerManager::Tick(float DeltaTime)
 				// Update Top pointer, in case it has been invalidated by the Execute call
 				Top = FindTimer(CurrentlyExecutingTimer);
 				checkf(!Top || !WillRemoveTimerAssert(CurrentlyExecutingTimer), TEXT("RemoveTimer(CurrentlyExecutingTimer) - due to fail after Execute()"));
-				if (!Top || Top->Status != ETimerStatus::Executing)
+				if (!Top || Top->Status != ETimerStatus::Executing || Top->bMaxOncePerFrame)
 				{
 					break;
 				}

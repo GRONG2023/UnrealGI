@@ -109,23 +109,23 @@ public:
 	//~ ITargetDevice interface
 
 	virtual bool Connect() override;
-	virtual bool Deploy(const FString& SourceFolder, FString& OutAppId) override;
 	virtual void Disconnect() override;
 	virtual int32 GetProcessSnapshot(TArray<FTargetDeviceProcessInfo>& OutProcessInfos) override;
 	virtual ETargetDeviceTypes GetDeviceType() const override;
+	virtual ETargetDeviceConnectionTypes GetDeviceConnectionType() const override;
 	virtual FTargetDeviceId GetId() const override;
 	virtual FString GetName() const override;
 	virtual FString GetOperatingSystemName() override;
+	virtual FString GetModelId() const override;
+	virtual FString GetOSVersion() const override;
 	virtual const class ITargetPlatform& GetTargetPlatform() const override;
 	virtual bool IsConnected() override;
 	virtual bool IsDefault() const override;
-	virtual bool Launch(const FString& InAppId, EBuildConfiguration InBuildConfiguration, EBuildTargetType TargetType, const FString& Params, uint32* OutProcessId) override;
 	virtual bool PowerOff(bool Force) override;
 	virtual bool PowerOn() override;
+	virtual bool IsAuthorized() const override { return bIsDeviceAuthorized; }
 	virtual bool Reboot(bool bReconnect = false) override;
-	virtual bool Run(const FString& ExecutablePath, const FString& Params, uint32* OutProcessId) override;
 	virtual bool SupportsFeature(ETargetDeviceFeatures Feature) const;
-	virtual bool SupportsSdkVersion(const FString& VersionString) const override;
 	virtual bool TerminateProcess(const int64 ProcessId) override;
 	virtual void SetUserCredentials(const FString& UserName, const FString& UserPassword) override;
 	virtual bool GetUserCredentials(FString& OutUserName, FString& OutUserPassword) override;
@@ -177,8 +177,20 @@ private:
 	/** Name of device */
 	FString DeviceName;
 
+	// Holds a flag indicating whether the device is USB / OTA comms authorized
+	bool bIsDeviceAuthorized;
+
 	/** Type of device */
 	ETargetDeviceTypes DeviceType;
+
+	/** The specific model identifier of the device */
+	FString DeviceModelId;
+
+	/** The iOS/tvOS/iPadOS OS version */
+	FString DeviceOSVersion;
+
+	/** Type of device connection (USB or Wifi) */
+	ETargetDeviceConnectionTypes DeviceConnectionType;
 
 public:
 
@@ -210,28 +222,75 @@ public:
 		DeviceName = InDeviceName;
 	}
 
+	/** Sets the modelId of the device */
+	void SetModelId(const FString InModelId)
+	{
+		DeviceModelId = InModelId;
+	}
+
+	/** Sets the OS version of the device */
+	void SetOSVersion(const FString InOSVersion)
+	{
+		DeviceOSVersion = InOSVersion;
+	}
+
+	/**
+	 * Sets the device's authorization state.
+	 *
+	 * @param bInIsAuthorized - Whether the device is authorized for USB communications.
+	 */
+	void SetAuthorized(bool bInIsAuthorized)
+	{
+		bIsDeviceAuthorized = bInIsAuthorized;
+	}
+
 	/** Sets the type of the device */
 	void SetDeviceType(const FString InDeviceTypeString)
 	{
-		if (InDeviceTypeString == TEXT("Browser"))
+		if (InDeviceTypeString.Contains(TEXT("Browser")))
 		{
 			DeviceType = ETargetDeviceTypes::Browser;
 		}
-		else if (InDeviceTypeString == TEXT("Console"))
+		else if (InDeviceTypeString.Contains(TEXT("Console")))
 		{
 			DeviceType = ETargetDeviceTypes::Console;
 		}
-		else if (InDeviceTypeString == TEXT("Phone"))
+		else if (InDeviceTypeString.Contains(TEXT("Phone")))
 		{
 			DeviceType = ETargetDeviceTypes::Phone;
 		}
-		else if (InDeviceTypeString == TEXT("Tablet"))
+		else if (InDeviceTypeString.Contains(TEXT("Tablet")))
+		{
+			DeviceType = ETargetDeviceTypes::Tablet;
+		}
+		else if (InDeviceTypeString.Contains(TEXT("iPad")))
 		{
 			DeviceType = ETargetDeviceTypes::Tablet;
 		}
 		else
 		{
 			DeviceType = ETargetDeviceTypes::Indeterminate;
+		}
+	}
+
+	/** Sets the connection type (usb/wifi) of the device */
+	void SetDeviceConnectionType(const FString InDeviceConnectionTypeString)
+	{
+		if (InDeviceConnectionTypeString == TEXT("Network"))
+		{
+			DeviceConnectionType = ETargetDeviceConnectionTypes::Wifi;
+		}
+		else if (InDeviceConnectionTypeString == TEXT("USB"))
+		{
+			DeviceConnectionType = ETargetDeviceConnectionTypes::USB;
+		}
+		else if (InDeviceConnectionTypeString == TEXT("Simulator"))
+		{
+			DeviceConnectionType = ETargetDeviceConnectionTypes::Simulator;
+		}
+		else
+		{
+			DeviceConnectionType = ETargetDeviceConnectionTypes::Unknown;
 		}
 	}
 

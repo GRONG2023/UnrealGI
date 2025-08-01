@@ -11,6 +11,7 @@
 #include "UObject/Package.h"
 #include "UObject/UObjectIterator.h"
 #include "Engine/Blueprint.h"
+#include "EngineLogs.h"
 #include "MemberReference.generated.h"
 
 /** Helper struct to allow us to redirect properties and functions through renames and additionally between classes if necessary */
@@ -70,27 +71,27 @@ protected:
 	 * if it is a native delegate signature function (declared globally). Should 
 	 * be NULL if bSelfContext is true.  
 	 */
-	UPROPERTY()
-	mutable UObject* MemberParent;
+	UPROPERTY(SaveGame)
+	mutable TObjectPtr<UObject> MemberParent;
 
 	/**  */
-	UPROPERTY()
+	UPROPERTY(SaveGame)
 	mutable FString MemberScope;
 
 	/** Name of variable */
-	UPROPERTY()
+	UPROPERTY(SaveGame)
 	mutable FName MemberName;
 
 	/** The Guid of the variable */
-	UPROPERTY()
+	UPROPERTY(SaveGame)
 	mutable FGuid MemberGuid;
 
 	/** Whether or not this should be a "self" context */
-	UPROPERTY()
+	UPROPERTY(SaveGame)
 	mutable bool bSelfContext;
 
 	/** Whether or not this property has been deprecated */
-	UPROPERTY()
+	UPROPERTY(SaveGame)
 	mutable bool bWasDeprecated;
 	
 public:
@@ -131,27 +132,26 @@ public:
 		{
 			MemberParent = ParentAsClass->GetAuthoritativeClass();
 		}
+#endif
 
 		MemberGuid.Invalidate();
 		if (OwnerClass != nullptr)
 		{
 			UBlueprint::GetGuidFromClassByFieldName<TFieldType>(OwnerClass, InField->GetFName(), MemberGuid);
 		}
-#endif
 	}
 
+#if WITH_EDITOR
 	template<class TFieldType>
 	void SetFromField(const typename TFieldType::BaseFieldClass* InField, UClass* SelfScope)
 	{
 		UClass* OwnerClass = InField->GetOwnerClass();
 
 		FGuid FieldGuid;
-#if WITH_EDITOR
 		if (OwnerClass != nullptr)
 		{
 			UBlueprint::GetGuidFromClassByFieldName<TFieldType>(OwnerClass, InField->GetFName(), FieldGuid);
 		}
-#endif
 
 		SetGivenSelfScope(InField->GetFName(), FieldGuid, OwnerClass, SelfScope);
 	}
@@ -163,9 +163,7 @@ public:
 		UClass* ParentAsClass = GetMemberParentClass();
 		if ((ParentAsClass != nullptr) && (SelfScope != nullptr))
 		{
-#if WITH_EDITOR
 			UBlueprint::GetGuidFromClassByFieldName<TFieldType>((ParentAsClass), MemberName, MemberGuid);
-#endif
 			SetGivenSelfScope(MemberName, MemberGuid, ParentAsClass, SelfScope);
 		}
 		else
@@ -173,10 +171,11 @@ public:
 			// We no longer have enough information to known if we've done the right thing, and just have to hope...
 		}
 	}
+#endif
 
 	/** Set to a non-'self' member, so must include reference to class owning the member. */
 	ENGINE_API void SetExternalMember(FName InMemberName, TSubclassOf<class UObject> InMemberParentClass);
-	ENGINE_API void SetExternalMember(FName InMemberName, TSubclassOf<class UObject> InMemberParentClass, FGuid& InMemberGuid);
+	ENGINE_API void SetExternalMember(FName InMemberName, TSubclassOf<class UObject> InMemberParentClass, const FGuid& InMemberGuid);
 
 	/** Set to reference a global field (intended for things like natively defined delegate signatures) */
 	ENGINE_API void SetGlobalField(FName InFieldName, UPackage* InParentPackage);
@@ -186,7 +185,7 @@ public:
 
 	/** Set up this reference to a 'self' member name */
 	ENGINE_API void SetSelfMember(FName InMemberName);
-	ENGINE_API void SetSelfMember(FName InMemberName, FGuid& InMemberGuid);
+	ENGINE_API void SetSelfMember(FName InMemberName, const FGuid& InMemberGuid);
 
 	/** Set up this reference to a 'self' member name, scoped to a struct */
 	ENGINE_API void SetLocalMember(FName InMemberName, UStruct* InScope, const FGuid InMemberGuid);
@@ -208,7 +207,7 @@ public:
 
 #if WITH_EDITOR
 	/** Reset the member name only. Intended for use primarily as a helper method for rename operations. */
-	ENGINE_API void SetMemberName(FName NewName)
+	void SetMemberName(FName NewName)
 	{
 		MemberName = NewName;
 	}
@@ -273,32 +272,10 @@ private:
 #endif
 
 protected:
+#if WITH_EDITOR
 	/** Only intended for backwards compat! */
 	ENGINE_API void SetGivenSelfScope(const FName InMemberName, const FGuid InMemberGuid, TSubclassOf<class UObject> InMemberParentClass, TSubclassOf<class UObject> SelfScope) const;
-
-	template<class TFieldType>
-	TFieldType* ResolveUFunction() const
-	{
-		return nullptr;
-	}
-
-	template<class TFieldType>
-	TFieldType* ResolveUField(FFieldClass* InClass, UPackage* TargetPackage) const
-	{
-		return nullptr;
-	}
-	template<class TFieldType>
-	TFieldType* ResolveUField(UClass* InClass, UPackage* TargetPackage) const
-	{
-		return FindObject<TFieldType>(TargetPackage, *MemberName.ToString());;
-	}
-
-	template<class TFieldType>
-	UObject* GetFieldOuter(TFieldType Field) const
-	{
-		return Field->GetOuter();
-	}
-
+#endif
 public:
 
 	/** Get the class that owns this member */
@@ -321,7 +298,7 @@ public:
 	}
 
 	/** Compares with another MemberReference to see if they are identical */
-	bool IsSameReference(FMemberReference& InReference)
+	bool IsSameReference(const FMemberReference& InReference) const
 	{
 		return 
 			bSelfContext == InReference.bSelfContext &&
@@ -342,178 +319,55 @@ public:
 	{
 		return bSelfContext ? SelfScope : GetMemberParentClass();
 	}
-	
-	template <class TFieldClassA, class TFieldClassB>
-	bool CompareClassesHelper(const TFieldClassA* ClassA, const TFieldClassB* ClassB) const
-	{
-		return ClassA == ClassB;
-	}
 
 	/** 
 	 *	Returns the member FProperty/UFunction this reference is pointing to, or NULL if it no longer exists 
 	 *	Derives 'self' scope from supplied Blueprint node if required
-	 *	Will check for redirects and fix itself up if one is found.
+	 *	Will check for redirects and fix itself up if one is found (when WITH_EDITOR, or when bAlwaysFollowRedirects is true).
 	 */
 	template<class TFieldType>
-	TFieldType* ResolveMember(UClass* SelfScope = nullptr) const
+	TFieldType* ResolveMember(UClass* SelfScope = nullptr, const bool bAlwaysFollowRedirects = false) const
 	{
-		TFieldType* ReturnField = nullptr;
-
-		bool bUseUpToDateClass = SelfScope && SelfScope->GetAuthoritativeClass() != SelfScope;
-
-		if(bSelfContext && SelfScope == nullptr)
-		{
-			UE_LOG(LogBlueprint, Warning, TEXT("FMemberReference::ResolveMember (%s) bSelfContext == true, but no scope supplied!"), *MemberName.ToString() );
-		}
-
-		// Check if the member reference is function scoped
-		if(IsLocalScope())
-		{
-			UStruct* MemberScopeStruct = FindUField<UStruct>(SelfScope, *MemberScope);
-
-			// Find in target scope
-			ReturnField = FindUFieldOrFProperty(MemberScopeStruct, MemberName).Get<TFieldType>();
-
-#if WITH_EDITOR
-			if(ReturnField == nullptr)
-			{
-				// If the property was not found, refresh the local variable name and try again
-				const FName RenamedMemberName = RefreshLocalVariableName(SelfScope);
-				if (RenamedMemberName != NAME_None)
-				{
-					ReturnField = FindUFieldOrFProperty(MemberScopeStruct, MemberName).Get<TFieldType>();
-				}
-			}
-#endif
-		}
-		else
-		{
-			// Look for remapped member
-			UClass* TargetScope = GetScope(SelfScope);
-#if WITH_EDITOR
-			if( TargetScope != nullptr &&  !GIsSavingPackage )
-			{
-				ReturnField = FindRemappedField<TFieldType>(TargetScope, MemberName, true);
-			}
-
-			if(ReturnField != nullptr)
-			{
-				// Fix up this struct, we found a redirect
-				MemberName = ReturnField->GetFName();
-				MemberParent = Cast<UClass>(GetFieldOuter(static_cast<typename TFieldType::BaseFieldClass*>(ReturnField)));
-
-				MemberGuid.Invalidate();
-				UBlueprint::GetGuidFromClassByFieldName<TFieldType>(TargetScope, MemberName, MemberGuid);
-
-				if (UClass* ParentAsClass = GetMemberParentClass())
-				{
-					ParentAsClass = ParentAsClass->GetAuthoritativeClass();
-					MemberParent  = ParentAsClass;
-
-					// Re-evaluate self-ness against the redirect if we were given a valid SelfScope
-					// For functions and multicast delegates we don't want to go from not-self to self as the target pin type should remain consistent
-					if (SelfScope != nullptr && (bSelfContext || (!CompareClassesHelper(TFieldType::StaticClass(), UFunction::StaticClass()) && !CompareClassesHelper(TFieldType::StaticClass(), FMulticastDelegateProperty::StaticClass()))))
-					{
-						SetGivenSelfScope(MemberName, MemberGuid, ParentAsClass, SelfScope);
-					}
-				}	
-			}
-			else
-#endif
-			if (TargetScope != nullptr)
-			{
-#if WITH_EDITOR
-				TargetScope = GetClassToUse(TargetScope, bUseUpToDateClass);
-				if (TargetScope)
-#endif
-				{
-					// Find in target scope or in the sparse class data
-					UScriptStruct* SparseClassDataStruct = TargetScope->GetSparseClassDataStruct();
-					if (SparseClassDataStruct)
-					{
-						ReturnField = FindUFieldOrFProperty(SparseClassDataStruct, MemberName).Get<TFieldType>();
-					}
-					if (ReturnField == nullptr)
-					{
-						ReturnField = FindUFieldOrFProperty(TargetScope, MemberName).Get<TFieldType>();
-					}
-				}
-
-#if WITH_EDITOR
-
-				// If the reference variable is valid we need to make sure that our GUID matches
-				if (ReturnField != nullptr)
-				{
-					UBlueprint::GetGuidFromClassByFieldName<TFieldType>(TargetScope, MemberName, MemberGuid);
-				}
-				// If we have a GUID find the reference variable and make sure the name is up to date and find the field again
-				// For now only variable references will have valid GUIDs.  Will have to deal with finding other names subsequently
-				else if (MemberGuid.IsValid())
-				{
-					const FName RenamedMemberName = UBlueprint::GetFieldNameFromClassByGuid<TFieldType>(TargetScope, MemberGuid);
-					if (RenamedMemberName != NAME_None)
-					{
-						MemberName = RenamedMemberName;
-						ReturnField = FindUFieldOrFProperty(TargetScope, MemberName).Get<TFieldType>();
-					}
-				}
-#endif
-			}
-			else if (UPackage* TargetPackage = GetMemberParentPackage())
-			{
-				ReturnField = ResolveUField<TFieldType>(TFieldType::StaticClass(), TargetPackage);
-			}
-			// For backwards compatibility: as of CL 2412156, delegate signatures 
-			// could have had a null MemberParentClass (for those natively 
-			// declared outside of a class), we used to rely on the following 
-			// FindObject<>; however this was not reliable (hence the addition 
-			// of GetMemberParentPackage(), etc.)
-			else if (MemberName.ToString().EndsWith(HEADER_GENERATED_DELEGATE_SIGNATURE_SUFFIX))
-			{
-				ReturnField = ResolveUFunction<TFieldType>();
-				if (ReturnField != nullptr)
-				{
-					UE_LOG(LogBlueprint, Display, TEXT("Generic delegate signature ref (%s). Explicitly setting it to: '%s'. Make sure this is correct (there could be multiple native delegate types with this name)."), *MemberName.ToString(), *ReturnField->GetPathName());
-					MemberParent = ReturnField->GetOutermost();
-				}
-			}
-		}
-
-		// Check to see if the member has been deprecated
-		if (FProperty* Property = FFieldVariant(ReturnField).Get<FProperty>())
-		{
-			bWasDeprecated = Property->HasAnyPropertyFlags(CPF_Deprecated);
-		}
-
-		return ReturnField;
+		return static_cast<TFieldType*>(ResolveMemberProperty(SelfScope, bAlwaysFollowRedirects, TFieldType::StaticClass()));
+	}
+	template<>
+	UFunction* ResolveMember(UClass* SelfScope, const bool bAlwaysFollowRedirects) const
+	{
+		return ResolveMemberFunction(SelfScope, bAlwaysFollowRedirects);
 	}
 
+	/** ResolveMember overload for UBlueprint, uses the skeleton class so it can be more up to date */
 	template<class TFieldType>
 	TFieldType* ResolveMember(UBlueprint* SelfScope)
 	{
 		return ResolveMember<TFieldType>(SelfScope->SkeletonGeneratedClass);
 	}
 
-#if WITH_EDITOR
 	/**
 	 * Searches the field redirect map for the specified named field in the scope, and returns the remapped field if found
 	 *
 	 * @param	FieldClass		UClass of field type we are looking for
 	 * @param	InitialScope	The scope the field was initially defined in.  The function will search up into parent scopes to attempt to find remappings
 	 * @param	InitialName		The name of the field to attempt to find a redirector for
-	 * @param	bInitialScopeMustBeOwnerOfField		if true the InitialScope must be Child of the field's owner
+	 * @param	bInitialScopeMustBeOwnerOfFieldForParentScopeRedirect If true, and a redirect is found in a parent scope, and the targetscope of the redirect
+	 *          is a child scope of the parent scope that is not the initial scope or a parent of the initial scope, then the redirect will be ignored.
 	 * @return	The remapped field, if one exists
 	 */
-	ENGINE_API static UField* FindRemappedField(UClass *FieldClass, UClass* InitialScope, FName InitialName, bool bInitialScopeMustBeOwnerOfField = false);
-	ENGINE_API static FField* FindRemappedField(FFieldClass* FieldClass, UClass* InitialScope, FName InitialName, bool bInitialScopeMustBeOwnerOfField = false);
+	ENGINE_API static UField* FindRemappedField(UClass *FieldClass, UClass* InitialScope, FName InitialName,
+		bool bInitialScopeMustBeOwnerOfFieldForParentScopeRedirect = false);
+	ENGINE_API static FField* FindRemappedField(FFieldClass* FieldClass, UClass* InitialScope, FName InitialName,
+		bool bInitialScopeMustBeOwnerOfFieldForParentScopeRedirect = false);
 
 	/** Templated version of above, extracts FieldClass and Casts result */
 	template<class TFieldType>
-	static TFieldType* FindRemappedField(UClass* InitialScope, FName InitialName, bool bInitialScopeMustBeOwnerOfField = false)
+	static TFieldType* FindRemappedField(UClass* InitialScope, FName InitialName,
+		bool bInitialScopeMustBeOwnerOfFieldForParentScopeRedirect = false)
 	{
-		return FFieldVariant(FindRemappedField(TFieldType::StaticClass(), InitialScope, InitialName, bInitialScopeMustBeOwnerOfField)).Get<TFieldType>();
+		return FFieldVariant(FindRemappedField(TFieldType::StaticClass(), InitialScope, InitialName,
+			bInitialScopeMustBeOwnerOfFieldForParentScopeRedirect)).Get<TFieldType>();
 	}
 
+#if WITH_EDITOR
 	/** Init the field redirect map (if not already done) from .ini file entries */
 	ENGINE_API static void InitFieldRedirectMap();
 
@@ -525,6 +379,11 @@ protected:
 	/** @return the 'real' generated class for blueprint classes, but only if we're already passed through CompileClassLayout */
 	ENGINE_API static UClass* GetClassToUse(UClass* InClass, bool bUseUpToDateClass);
 #endif
+	template<class TFieldType, class TFieldTypeClass>
+	TFieldType* ResolveMemberImpl(UClass* SelfScope, TFieldTypeClass* FieldClas, const bool bAlwaysFollowRedirects, const bool bIsUFunctionOrMulticastDelegate) const;
+
+	ENGINE_API FProperty* ResolveMemberProperty(UClass* SelfScope, const bool bAlwaysFollowRedirects, FFieldClass* FieldClass) const;
+	ENGINE_API UFunction* ResolveMemberFunction(UClass* SelfScope, const bool bAlwaysFollowRedirects) const;
 
 public:
 	template<class TFieldType>
@@ -564,39 +423,3 @@ public:
 	}
 };
 
-
-template<>
-inline UFunction* FMemberReference::ResolveUFunction() const
-{
-	UFunction* ReturnField = nullptr;
-	FString const StringName = MemberName.ToString();
-	for (TObjectIterator<UPackage> PackageIt; PackageIt && (ReturnField == nullptr); ++PackageIt)
-	{
-		if (PackageIt->HasAnyPackageFlags(PKG_CompiledIn) == false)
-		{
-			continue;
-		}
-
-		// NOTE: this could return the wrong field (if there are 
-		//       two like-named delegates defined in separate packages)
-		ReturnField = FindObject<UFunction>(*PackageIt, *StringName);
-	}
-	return ReturnField;
-}
-
-template<>
-inline UObject* FMemberReference::GetFieldOuter(FField* Field) const
-{
-	return Field->GetOwner<UObject>();
-}
-
-template <>
-inline bool FMemberReference::CompareClassesHelper(const UClass* ClassA, const FFieldClass* ClassB) const
-{
-	return false;
-}
-template <>
-inline bool FMemberReference::CompareClassesHelper(const FFieldClass* ClassA, const UClass* ClassB) const
-{
-	return false;
-}

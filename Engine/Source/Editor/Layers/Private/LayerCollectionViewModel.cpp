@@ -105,6 +105,7 @@ void FLayerCollectionViewModel::BindCommands()
 		FExecuteAction::CreateSP( this, &FLayerCollectionViewModel::MakeAllLayersVisible_Executed ),
 		FCanExecuteAction::CreateSP( this, &FLayerCollectionViewModel::MakeAllLayersVisible_CanExecute ) );
 
+
 	ActionList.MapAction( Commands.RequestRenameLayer,
 		FExecuteAction::CreateSP( this, &FLayerCollectionViewModel::RequestRenameLayer_Executed ),
 		FCanExecuteAction::CreateSP( this, &FLayerCollectionViewModel::RequestRenameLayer_CanExecute ) );
@@ -202,7 +203,6 @@ void FLayerCollectionViewModel::OnFilterChanged()
 void FLayerCollectionViewModel::Refresh()
 {
 	WorldLayers->UpdateAllActorsVisibility( true, true );
-
 	OnLayersChanged( ELayersAction::Reset, NULL, NAME_None );
 }
 
@@ -296,7 +296,7 @@ void FLayerCollectionViewModel::DestructivelyPurgeInvalidViewModels( TArray< TWe
 		const auto Layer = LayerViewModel->GetDataSource(); 
 
 		//Remove any viewmodels with invalid datasources or whose datasources 
-		//are no longer in the master list of layers
+		//are no longer in the list of layers
 		if( !Layer.IsValid() || InLayers.Remove( Layer ) == 0 )
 		{
 			AllLayerViewModels.RemoveAt( LayerIndex );
@@ -363,29 +363,6 @@ void FLayerCollectionViewModel::AppendSelectLayerNames( TArray< FName >& OutLaye
 	}
 }
 
-
-void FLayerCollectionViewModel::DeleteLayer_Executed()
-{
-	if( SelectedLayers.Num() == 0 )
-	{
-		return;
-	}
-
-	TArray< FName > SelectedLayerNames;
-	AppendSelectLayerNames( SelectedLayerNames );
-
-	const FScopedTransaction Transaction( LOCTEXT("DeleteLayer", "Delete Layer") );
-
-	WorldLayers->DeleteLayers( SelectedLayerNames );
-}
-
-
-bool FLayerCollectionViewModel::DeleteLayer_CanExecute() const
-{
-	return SelectedLayers.Num() > 0;
-}
-
-
 void FLayerCollectionViewModel::AddActorsToNewLayer( TArray< TWeakObjectPtr< AActor > > Actors )
 {
 	const FScopedTransaction Transaction( LOCTEXT("AddActorsToNewLayer", "Add Selected Actors to New Layer") );
@@ -394,7 +371,6 @@ void FLayerCollectionViewModel::AddActorsToNewLayer( TArray< TWeakObjectPtr< AAc
 
 	SetSelectedLayer( NewLayerName );
 }
-
 
 FName FLayerCollectionViewModel::GenerateUniqueLayerName() const
 {
@@ -411,6 +387,29 @@ FName FLayerCollectionViewModel::GenerateUniqueLayerName() const
 }
 
 
+// DeleteLayer ----------------------------------------------------------------
+void FLayerCollectionViewModel::DeleteLayer_Executed()
+{
+	if (SelectedLayers.Num() == 0)
+	{
+		return;
+	}
+
+	TArray< FName > SelectedLayerNames;
+	AppendSelectLayerNames(SelectedLayerNames);
+
+	const FScopedTransaction Transaction(LOCTEXT("DeleteLayer", "Delete Layer"));
+
+	WorldLayers->DeleteLayers(SelectedLayerNames);
+}
+
+bool FLayerCollectionViewModel::DeleteLayer_CanExecute() const
+{
+	return SelectedLayers.Num() > 0;
+}
+
+
+// CreateEmptyLayer -----------------------------------------------------------
 void FLayerCollectionViewModel::CreateEmptyLayer_Executed()
 {
 	const FScopedTransaction Transaction( LOCTEXT("CreateEmptyLayer", "Create Empty Layer") );
@@ -425,13 +424,13 @@ void FLayerCollectionViewModel::CreateEmptyLayer_Executed()
 	}
 }
 
-
 bool FLayerCollectionViewModel::CreateEmptyLayer_CanExecute() const
 {
 	return true;
 }
 
 
+// AddSelectedActorsToNewLayer ------------------------------------------------
 void FLayerCollectionViewModel::AddSelectedActorsToNewLayer_Executed()
 {
 	const FScopedTransaction Transaction( LOCTEXT("AddSelectedActorsToNewLayer", "Add Actors to New Layer") );
@@ -446,13 +445,13 @@ void FLayerCollectionViewModel::AddSelectedActorsToNewLayer_Executed()
 	}
 }
 
-
 bool FLayerCollectionViewModel::AddSelectedActorsToNewLayer_CanExecute() const
 {
 	return Editor->GetSelectedActorCount() > 0;
 }
 
 
+// AddSelectedActorsToSelectedLayer -------------------------------------------
 void FLayerCollectionViewModel::AddSelectedActorsToSelectedLayer_Executed()
 {
 	if( SelectedLayers.Num() == 0 )
@@ -468,13 +467,13 @@ void FLayerCollectionViewModel::AddSelectedActorsToSelectedLayer_Executed()
 	WorldLayers->AddSelectedActorsToLayers( SelectedLayerNames );
 }
 
-
 bool FLayerCollectionViewModel::AddSelectedActorsToSelectedLayer_CanExecute() const
 {
 	return SelectedLayers.Num() > 0 && Editor->GetSelectedActorCount() > 0;
 }
 
 
+// RemoveSelectedActorsFromSelectedLayer --------------------------------------
 void FLayerCollectionViewModel::RemoveSelectedActorsFromSelectedLayer_Executed()
 {
 	if( SelectedLayers.Num() == 0 )
@@ -490,13 +489,13 @@ void FLayerCollectionViewModel::RemoveSelectedActorsFromSelectedLayer_Executed()
 	WorldLayers->RemoveSelectedActorsFromLayers( SelectedLayerNames );
 }
 
-
 bool FLayerCollectionViewModel::RemoveSelectedActorsFromSelectedLayer_CanExecute() const
 {
 	return SelectedLayers.Num() > 0 && Editor->GetSelectedActorCount() > 0;
 }
 
 
+// SelectActors ---------------------------------------------------------------
 void FLayerCollectionViewModel::SelectActors_Executed()
 {
 	if( SelectedLayers.Num() == 0 )
@@ -519,13 +518,13 @@ void FLayerCollectionViewModel::SelectActors_Executed()
 	WorldLayers->SelectActorsInLayers( SelectedLayerNames, bSelectActors, bNotifySelectActors, bSelectEvenIfHidden );
 }
 
-
 bool FLayerCollectionViewModel::SelectActors_CanExecute() const
 {
 	return SelectedLayers.Num() > 0;
 }
 
 
+// AppendActorsToSelection ----------------------------------------------------
 void FLayerCollectionViewModel::AppendActorsToSelection_Executed()
 {
 	if( SelectedLayers.Num() == 0 )
@@ -544,13 +543,13 @@ void FLayerCollectionViewModel::AppendActorsToSelection_Executed()
 	WorldLayers->SelectActorsInLayers( SelectedLayerNames, bSelect, bNotifySelectActors, bSelectEvenIfHidden );
 }
 
-
 bool FLayerCollectionViewModel::AppendActorsToSelection_CanExecute() const
 {
 	return SelectedLayers.Num() > 0;
 }
 
 
+// DeselectActors -------------------------------------------------------------
 void FLayerCollectionViewModel::DeselectActors_Executed()
 {
 	if( SelectedLayers.Num() == 0 )
@@ -568,12 +567,13 @@ void FLayerCollectionViewModel::DeselectActors_Executed()
 	WorldLayers->SelectActorsInLayers( SelectedLayerNames, bSelect, bNotifySelectActors );
 }
 
-
 bool FLayerCollectionViewModel::DeselectActors_CanExecute() const
 {
 	return SelectedLayers.Num() > 0;
 }
 
+
+// ToggleLayerVisibility ------------------------------------------------------
 void FLayerCollectionViewModel::ToggleLayerVisibility( const TSharedPtr<FLayerViewModel>& InLayer )
 {
 	if ( SelectedLayers.Find( InLayer ) == INDEX_NONE )
@@ -602,6 +602,8 @@ void FLayerCollectionViewModel::ToggleLayerVisibility( const TSharedPtr<FLayerVi
 	}
 }
 
+
+// ToggleSelectedLayersVisibility ---------------------------------------------
 void FLayerCollectionViewModel::ToggleSelectedLayersVisibility_Executed()
 {
 	if( SelectedLayers.Num() == 0 )
@@ -617,25 +619,26 @@ void FLayerCollectionViewModel::ToggleSelectedLayersVisibility_Executed()
 	WorldLayers->ToggleLayersVisibility( SelectedLayerNames );
 }
 
-
 bool FLayerCollectionViewModel::ToggleSelectedLayersVisibility_CanExecute() const
 {
 	return SelectedLayers.Num() > 0;
 }
 
 
+// MakeAllLayersVisible -------------------------------------------------------
 void FLayerCollectionViewModel::MakeAllLayersVisible_Executed()
 {
 	const FScopedTransaction Transaction( LOCTEXT("MakeAllLayersVisible", "Make All Layers Visible") );
 	WorldLayers->MakeAllLayersVisible();
 }
 
-
 bool FLayerCollectionViewModel::MakeAllLayersVisible_CanExecute() const
 {
 	return AllLayerViewModels.Num() > 0;
 }
 
+
+// RequestRenameLayer ---------------------------------------------------------
 void FLayerCollectionViewModel::RequestRenameLayer_Executed()
 {
 	if(SelectedLayers.Num() == 1)

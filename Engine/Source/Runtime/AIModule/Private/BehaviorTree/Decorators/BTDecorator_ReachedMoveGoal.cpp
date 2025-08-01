@@ -2,6 +2,9 @@
 
 #include "BehaviorTree/Decorators/BTDecorator_ReachedMoveGoal.h"
 #include "AIController.h"
+#include "Navigation/PathFollowingComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BTDecorator_ReachedMoveGoal)
 
 UBTDecorator_ReachedMoveGoal::UBTDecorator_ReachedMoveGoal(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
@@ -29,3 +32,4 @@ FName UBTDecorator_ReachedMoveGoal::GetNodeIconName() const
 }
 
 #endif	// WITH_EDITOR
+

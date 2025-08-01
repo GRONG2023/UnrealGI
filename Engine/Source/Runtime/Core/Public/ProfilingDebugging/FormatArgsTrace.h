@@ -2,11 +2,14 @@
 
 #pragma once
 
-#include "CoreTypes.h"
+#include <CoreTypes.h>
+#include "Containers/ContainerAllocationPolicies.h"
+#include "Math/UnrealMathUtility.h"
 #include "Misc/CString.h"
 #include "Templates/IsFloatingPoint.h"
-#include "Templates/UnrealTypeTraits.h"
 #include "Templates/UnrealTemplate.h"
+#include "Templates/UnrealTypeTraits.h"
+#include "Traits/IsCharType.h"
 
 struct FFormatArgsTrace
 {
@@ -20,6 +23,28 @@ struct FFormatArgsTrace
 		FormatArgTypeCode_CategoryString = 3 << FormatArgTypeCode_CategoryBitShift,
 	};
 
+	// Convenient alias to use when allowing overflow for very large messages
+	template <int InlineSize>
+	using TBufferWithOverflow = TArray<uint8, TInlineAllocator<InlineSize>>;
+
+	// Encode arguments in any type of resizable array
+	template <typename BufferType, typename... Types>
+	static int32 EncodeArgumentsWithArray(BufferType& Array, Types... FormatArgs)
+	{
+		constexpr int32 FormatArgsCount = sizeof...(FormatArgs);
+		static_assert(FormatArgsCount < 256, "Maximum number of arguments is 256");
+		const int32 FormatArgsSize = 1 + FormatArgsCount + int32(GetArgumentsEncodedSize(FormatArgs...));
+		Array.SetNumUninitialized(FormatArgsSize);
+		uint8* Buffer = Array.GetData();
+		uint8* TypeCodesBufferPtr = Buffer;
+		*TypeCodesBufferPtr++ = uint8(FormatArgsCount);
+		uint8* PayloadBufferPtr = TypeCodesBufferPtr + FormatArgsCount;
+		EncodeArgumentsInternal(TypeCodesBufferPtr, PayloadBufferPtr, FormatArgs...);
+		check(PayloadBufferPtr - Buffer == FormatArgsSize);
+		return FormatArgsSize;
+	}
+
+	// Encode arguments in a fixed size buffer
 	template <int BufferSize, typename... Types>
 	static uint16 EncodeArguments(uint8(&Buffer)[BufferSize], Types... FormatArgs)
 	{
@@ -48,25 +73,26 @@ private:
 	template <typename T>
 	struct TIsStringArgument
 	{
-		enum { Value = TAnd<TIsPointer<T>, TIsCharType<typename TRemoveCV<typename TRemovePointer<T>::Type>::Type>>::Value };
+		enum { Value = TAnd<TIsPointer<T>, TIsCharType<std::remove_cv_t<typename TRemovePointer<T>::Type>>>::Value };
 	};
 
-	template <typename T>
-	constexpr static typename TEnableIf<!TIsStringArgument<T>::Value, uint64>::Type GetArgumentEncodedSize(T Argument)
+	template <typename T, typename CharType = std::remove_cv_t<typename TRemovePointer<T>::Type>>
+	constexpr static uint64 GetArgumentEncodedSize(T Argument)
 	{
-		return sizeof(T);
-	}
-
-	template <typename T, typename CharType = typename TRemoveCV<typename TRemovePointer<T>::Type>::Type>
-	static typename TEnableIf<TIsStringArgument<T>::Value, uint64>::Type GetArgumentEncodedSize(T Argument)
-	{
-		if (Argument != nullptr)
+		if constexpr (TIsStringArgument<T>::Value)
 		{
-			return (TCString<CharType>::Strlen(Argument) + 1) * sizeof(CharType);
+			if (Argument != nullptr)
+			{
+				return FMath::Min<int32>((int32)UINT16_MAX, (TCString<CharType>::Strlen(Argument) + 1) * sizeof(CharType));
+			}
+			else
+			{
+				return sizeof(CharType);
+			}
 		}
 		else
 		{
-			return sizeof(CharType);
+			return sizeof(T);
 		}
 	}
 
@@ -82,54 +108,54 @@ private:
 	}
 
 	template <typename T>
-	static typename TEnableIf<TAnd<TNot<TIsFloatingPoint<T>>, TNot<TIsStringArgument<T>>>::Value>::Type EncodeArgumentInternal(uint8*& TypeCodesPtr, uint8*& PayloadPtr, T Argument)
+	static void EncodeArgumentInternal(uint8*& TypeCodesPtr, uint8*& PayloadPtr, T Argument)
 	{
-		*TypeCodesPtr++ = FormatArgTypeCode_CategoryInteger | sizeof(T);
-
-#if PLATFORM_SUPPORTS_UNALIGNED_LOADS
-		*reinterpret_cast<T*>(PayloadPtr) = Argument;
-#else
-		// For ARM targets, it's possible that using __packed here would be preferable
-		// but I have not checked the codegen -- it's possible that the compiler generates
-		// the same code for this fixed size memcpy
-		memcpy(PayloadPtr, &Argument, sizeof Argument);
-#endif
-
-		PayloadPtr += sizeof(T);
-	}
-
-	template <typename T>
-	static typename TEnableIf<TIsFloatingPoint<T>::Value>::Type EncodeArgumentInternal(uint8*& TypeCodesPtr, uint8*& PayloadPtr, T Argument)
-	{
-		*TypeCodesPtr++ = FormatArgTypeCode_CategoryFloatingPoint | sizeof(T);
-
-#if PLATFORM_SUPPORTS_UNALIGNED_LOADS
-		*reinterpret_cast<T*>(PayloadPtr) = Argument;
-#else
-		// For ARM targets, it's possible that using __packed here would be preferable
-		// but I have not checked the codegen -- it's possible that the compiler generates
-		// the same code for this fixed size memcpy
-		memcpy(PayloadPtr, &Argument, sizeof Argument);
-#endif
-
-		PayloadPtr += sizeof(T);
-	}
-
-	template <typename T, typename CharType = typename TRemoveCV<typename TRemovePointer<T>::Type>::Type>
-	static typename TEnableIf<TIsStringArgument<T>::Value>::Type EncodeArgumentInternal(uint8*& TypeCodesPtr, uint8*& PayloadPtr, T Argument)
-	{
-		*TypeCodesPtr++ = FormatArgTypeCode_CategoryString | sizeof(CharType);
-		if (Argument != nullptr)
+		if constexpr (TIsStringArgument<T>::Value)
 		{
-			uint16 Length = (uint16)((TCString<CharType>::Strlen(Argument) + 1) * sizeof(CharType));
-			memcpy(PayloadPtr, Argument, Length);
-			PayloadPtr += Length;
+			using CharType = std::remove_cv_t<typename TRemovePointer<T>::Type>;
+
+			*TypeCodesPtr++ = FormatArgTypeCode_CategoryString | sizeof(CharType);
+			if (Argument != nullptr)
+			{
+				uint16 SizeBytes = (uint16)FMath::Min<int32>((int32)UINT16_MAX, (TCString<CharType>::Strlen(Argument) + 1) * sizeof(CharType));
+				memcpy(PayloadPtr, Argument, SizeBytes);
+				if (UNLIKELY(SizeBytes == UINT16_MAX))
+				{
+					const CharType Ellipsis[4] = {L'.', L'.', L'.', L'\0'};
+					// Patch ellipsis to the end of the string. Make sure write is aligned
+					void* PatchPoint = PayloadPtr + SizeBytes - sizeof(Ellipsis) - (SizeBytes % sizeof(CharType));
+					memcpy(PatchPoint, Ellipsis, sizeof(Ellipsis));
+				}
+				PayloadPtr += SizeBytes;
+			}
+			else
+			{
+				CharType Terminator { 0 };
+				memcpy(PayloadPtr, &Terminator, sizeof(CharType));
+				PayloadPtr += sizeof(CharType);
+			}
 		}
 		else
 		{
-			CharType Terminator { 0 };
-			memcpy(PayloadPtr, &Terminator, sizeof(CharType));
-			PayloadPtr += sizeof(CharType);
+			if constexpr (std::is_floating_point_v<T>)
+			{
+				*TypeCodesPtr++ = FormatArgTypeCode_CategoryFloatingPoint | sizeof(T);
+			}
+			else
+			{
+				*TypeCodesPtr++ = FormatArgTypeCode_CategoryInteger | sizeof(T);
+			}
+
+#if PLATFORM_SUPPORTS_UNALIGNED_LOADS
+			*reinterpret_cast<T*>(PayloadPtr) = Argument;
+#else
+			// For ARM targets, it's possible that using __packed here would be preferable
+			// but I have not checked the codegen -- it's possible that the compiler generates
+			// the same code for this fixed size memcpy
+			memcpy(PayloadPtr, &Argument, sizeof Argument);
+#endif
+
+			PayloadPtr += sizeof(T);
 		}
 	}
 

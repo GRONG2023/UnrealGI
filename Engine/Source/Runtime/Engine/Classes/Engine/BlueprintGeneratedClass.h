@@ -2,17 +2,17 @@
 
 #pragma once
 
+#include "Blueprint/BlueprintPropertyGuidProvider.h"
 #include "CoreMinimal.h"
 #include "Containers/IndirectArray.h"
+#include "FieldNotificationId.h"
 #include "Stats/Stats.h"
 #include "UObject/ObjectMacros.h"
 #include "Misc/Guid.h"
 #include "UObject/Class.h"
 #include "UObject/UnrealType.h"
 #include "EdGraph/EdGraphPin.h"
-
-// WARNING: This should always be the last include in any file that needs it (except .generated.h)
-#include "UObject/UndefineUPropertyMacros.h"
+#include "Containers/SortedMap.h"
 
 #include "BlueprintGeneratedClass.generated.h"
 
@@ -21,12 +21,11 @@ class UActorComponent;
 class UDynamicBlueprintBinding;
 class UInheritableComponentHandler;
 class UTimelineTemplate;
+class UClassCookedMetaData;
+class UEdGraphPin;
 
 DECLARE_MEMORY_STAT_EXTERN(TEXT("Persistent Uber Graph Frame memory"), STAT_PersistentUberGraphFrameMemory, STATGROUP_Memory, );
 DECLARE_MEMORY_STAT_EXTERN(TEXT("BPComp Instancing Fast Path memory"), STAT_BPCompInstancingFastPathMemory, STATGROUP_Memory, );
-
-class UEdGraphPin;
-
 
 USTRUCT()
 struct FNodeToCodeAssociation
@@ -197,7 +196,7 @@ private:
 };
 
 USTRUCT()
-struct ENGINE_API FBlueprintDebugData
+struct FBlueprintDebugData
 {
 	GENERATED_USTRUCT_BODY()
 	FBlueprintDebugData()
@@ -405,7 +404,7 @@ public:
 		//@TODO: Nasty expansion behavior during compile time
 		if (bBreakpointSite)
 		{
-			new (DebugNodeLineNumbers) FNodeToCodeAssociation(SourceNode, InFunction, CodeOffset);
+			DebugNodeLineNumbers.Emplace(SourceNode, InFunction, CodeOffset);
 			DebugNodeIndexLookup.Add(SourceNode, DebugNodeLineNumbers.Num() - 1);
 		}
 
@@ -500,12 +499,12 @@ public:
 };
 
 USTRUCT()
-struct ENGINE_API FEventGraphFastCallPair
+struct FEventGraphFastCallPair
 {
 	GENERATED_USTRUCT_BODY()
 
 	UPROPERTY()
-	UFunction* FunctionToPatch = nullptr;
+	TObjectPtr<UFunction> FunctionToPatch = nullptr;
 
 	UPROPERTY()
 	int32 EventGraphCallOffset = 0;
@@ -513,7 +512,7 @@ struct ENGINE_API FEventGraphFastCallPair
 
 /** A single changed Blueprint component property. */
 USTRUCT()
-struct ENGINE_API FBlueprintComponentChangedPropertyInfo
+struct FBlueprintComponentChangedPropertyInfo
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -527,7 +526,7 @@ struct ENGINE_API FBlueprintComponentChangedPropertyInfo
 
 	/** The parent struct (owner) of the changed property. */
 	UPROPERTY()
-	UStruct* PropertyScope;
+	TObjectPtr<UStruct> PropertyScope;
 
 	/** Default constructor. */
 	FBlueprintComponentChangedPropertyInfo()
@@ -539,7 +538,7 @@ struct ENGINE_API FBlueprintComponentChangedPropertyInfo
 
 /** Cooked data for a Blueprint component template. */
 USTRUCT()
-struct ENGINE_API FBlueprintCookedComponentInstancingData
+struct FBlueprintCookedComponentInstancingData
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -569,23 +568,23 @@ struct ENGINE_API FBlueprintCookedComponentInstancingData
 	}
 
 	/** Destructor. */
-	~FBlueprintCookedComponentInstancingData();
+	ENGINE_API ~FBlueprintCookedComponentInstancingData();
 
 	/** Builds/returns the internal property list that's used for serialization. This is a linked list of FProperty references. */
-	const FCustomPropertyListNode* GetCachedPropertyList() const;
+	ENGINE_API const FCustomPropertyListNode* GetCachedPropertyList() const;
 
 	/** Called at load time to generate the internal cached property data stream from serialization of the source template object. */
-	void BuildCachedPropertyDataFromTemplate(UActorComponent* SourceTemplate);
+	ENGINE_API void BuildCachedPropertyDataFromTemplate(UActorComponent* SourceTemplate);
 
 	/** Returns the internal property data stream that's used for fast binary object serialization when instancing components at runtime. */
 	const TArray<uint8>& GetCachedPropertyData() const { return CachedPropertyData; }
 
 protected:
 	/** Internal method used to help recursively build the cached property list for serialization. */
-	void BuildCachedPropertyList(FCustomPropertyListNode** CurrentNode, const UStruct* CurrentScope, int32* CurrentSourceIdx = nullptr) const;
+	ENGINE_API void BuildCachedPropertyList(FCustomPropertyListNode** CurrentNode, const UStruct* CurrentScope, int32* CurrentSourceIdx = nullptr) const;
 
 	/** Internal method used to help recursively build a cached sub property list from an array property for serialization. */
-	void BuildCachedArrayPropertyList(const FArrayProperty* ArraySubPropertyNode, FCustomPropertyListNode** CurrentNode, int32* CurrentSourceIdx) const;
+	ENGINE_API void BuildCachedArrayPropertyList(const FArrayProperty* ArraySubPropertyNode, FCustomPropertyListNode** CurrentNode, int32* CurrentSourceIdx) const;
 
 private:
 	/** Internal property list that's used in binary object serialization at component instancing time. */
@@ -607,14 +606,14 @@ struct FBPComponentClassOverride
 
 	/** The class to use when constructing the component. */
 	UPROPERTY()
-	UClass* ComponentClass;
+	TObjectPtr<const UClass> ComponentClass;
 
 	FBPComponentClassOverride()
 		: ComponentClass(nullptr)
 	{
 	}
 
-	FBPComponentClassOverride(FName InComponentName, UClass* InComponentClass)
+	FBPComponentClassOverride(FName InComponentName, const UClass* InComponentClass)
 		: ComponentName(InComponentName)
 		, ComponentClass(InComponentClass)
 	{
@@ -626,8 +625,8 @@ struct FBPComponentClassOverride
 	}
 };
 
-UCLASS()
-class ENGINE_API UBlueprintGeneratedClass : public UClass
+UCLASS(NeedsDeferredDependencyLoading, MinimalAPI)
+class UBlueprintGeneratedClass : public UClass, public IBlueprintPropertyGuidProvider
 {
 	GENERATED_UCLASS_BODY()
 
@@ -636,10 +635,6 @@ public:
 	UPROPERTY(AssetRegistrySearchable)
 	int32	NumReplicatedProperties;
 
-	/** Flag used to indicate if this class has a nativized parent in a cooked build. */
-	UPROPERTY()
-	uint8 bHasNativizedParent:1;
-
 	/** Flag used to indicate if this class has data to support the component instancing fast path. */
 	UPROPERTY()
 	uint8 bHasCookedComponentInstancingData:1;
@@ -647,7 +642,7 @@ public:
 #if WITH_EDITORONLY_DATA
 	/** Used to check if this class has sparse data that can be serialized. This will be false when loading the data if it hasn't already been saved out. */
 	UPROPERTY()
-	uint32 bIsSparseClassDataSerializable : 1;
+	uint8 bIsSparseClassDataSerializable:1;
 #endif // WITH_EDITORONLY_DATA
 
 private:
@@ -657,35 +652,38 @@ private:
 public:
 	/** Array of objects containing information for dynamically binding delegates to functions in this blueprint */
 	UPROPERTY()
-	TArray<class UDynamicBlueprintBinding*> DynamicBindingObjects;
+	TArray<TObjectPtr<class UDynamicBlueprintBinding>> DynamicBindingObjects;
 
 	/** Array of component template objects, used by AddComponent function */
 	UPROPERTY()
-	TArray<class UActorComponent*> ComponentTemplates;
+	TArray<TObjectPtr<class UActorComponent>> ComponentTemplates;
 
 	/** Array of templates for timelines that should be created */
 	UPROPERTY()
-	TArray<class UTimelineTemplate*> Timelines;
+	TArray<TObjectPtr<class UTimelineTemplate>> Timelines;
 
 	/** Array of blueprint overrides of component classes in parent classes */
 	UPROPERTY()
 	TArray<FBPComponentClassOverride> ComponentClassOverrides;
 
+	/** The name of the properties with FieldNotify */
+	UPROPERTY()
+	TArray<FFieldNotificationId> FieldNotifies;
+
+	int32 FieldNotifiesStartBitNumber = 0;
+
 	/** 'Simple' construction script - graph of components to instance */
 	UPROPERTY()
-	class USimpleConstructionScript* SimpleConstructionScript;
+	TObjectPtr<class USimpleConstructionScript> SimpleConstructionScript;
 
 	/** Stores data to override (in children classes) components (created by SCS) from parent classes */
 	UPROPERTY()
-	class UInheritableComponentHandler* InheritableComponentHandler;
-
-	UPROPERTY()
-	class UStructProperty* UberGraphFramePointerProperty_DEPRECATED;
+	TObjectPtr<class UInheritableComponentHandler> InheritableComponentHandler;
 	
 	FStructProperty* UberGraphFramePointerProperty;
 
 	UPROPERTY()
-	UFunction* UberGraphFunction;
+	TObjectPtr<UFunction> UberGraphFunction;
 
 #if VALIDATE_UBER_GRAPH_PERSISTENT_FRAME
 	uint32 UberGraphFunctionKey;
@@ -700,15 +698,19 @@ public:
 
 #if WITH_EDITORONLY_DATA
 	UPROPERTY(Transient)
-	UObject* OverridenArchetypeForCDO;
+	TObjectPtr<UObject> OverridenArchetypeForCDO;
 
 	/** Property guid map */
 	UPROPERTY()
 	TMap<FName,FGuid> PropertyGuids;
 
 	UPROPERTY(Transient)
-	TArray<UFunction*> CalledFunctions;
+	TArray<TObjectPtr<UFunction>> CalledFunctions;
 #endif //WITH_EDITORONLY_DATA
+
+	/** Property guid map (if any), for use only when this BP is cooked */
+	UPROPERTY()
+	TMap<FName, FGuid> CookedPropertyGuids;
 
 	// Mapping of changed properties & data to apply when instancing components in a cooked build (one entry per named AddComponent node template for fast lookup at runtime).
 	// Note: This is not currently utilized by the editor; it is a runtime optimization for cooked builds only. It assumes that the component class structure does not change.
@@ -722,63 +724,103 @@ public:
 	 * @param OutBlueprintParents	Array with the blueprints used to generate this class and its parents.  0th = this, Nth = least derived BP-based parent
 	 * @return						true if there were no status errors in any of the parent blueprints, otherwise false
 	 */
-	static bool GetGeneratedClassesHierarchy(const UClass* InClass, TArray<const UBlueprintGeneratedClass*>& OutBPGClasses);
+	static ENGINE_API bool GetGeneratedClassesHierarchy(const UClass* InClass, TArray<const UBlueprintGeneratedClass*>& OutBPGClasses);
 
-	UInheritableComponentHandler* GetInheritableComponentHandler(const bool bCreateIfNecessary = false);
+	/**
+	 * Iterate over all BPGCs used to generate this class and its parents, calling InFunc on them. First element is the BPGC used to generate InClass
+	 *
+	 * @param InClass				The class to get the blueprint lineage for
+	 * @param InFunc				Function that will be called for each BPGC. Must return true to continue iteration, or false to stop.
+	 * @return						true if there were no status errors in any of the parent blueprints, otherwise false
+	 */
+	static ENGINE_API bool ForEachGeneratedClassInHierarchy(const UClass* InClass, TFunctionRef<bool(const UBlueprintGeneratedClass*)> InFunc);
+
+	ENGINE_API UInheritableComponentHandler* GetInheritableComponentHandler(const bool bCreateIfNecessary = false);
 
 	/** Find the object in the TemplateObjects array with the supplied name */
-	UActorComponent* FindComponentTemplateByName(const FName& TemplateName) const;
+	ENGINE_API UActorComponent* FindComponentTemplateByName(const FName& TemplateName) const;
 
 	/** Create Timeline objects for this Actor based on the Timelines array*/
-	static void CreateComponentsForActor(const UClass* ThisClass, AActor* Actor);
-	static void CreateTimelineComponent(AActor* Actor, const UTimelineTemplate* TimelineTemplate);
+	static ENGINE_API void CreateComponentsForActor(const UClass* ThisClass, AActor* Actor);
+	static ENGINE_API void CreateTimelineComponent(AActor* Actor, const UTimelineTemplate* TimelineTemplate);
 
-	// UObject interface
-	virtual void Serialize(FArchive& Ar) override;
-	virtual void PostLoad() override;
-	virtual void PostInitProperties() override;
-	virtual void GetPreloadDependencies(TArray<UObject*>& OutDeps) override;
-	virtual void GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const override;
-	virtual FPrimaryAssetId GetPrimaryAssetId() const override;
-	virtual bool NeedsLoadForServer() const override;
-	virtual bool NeedsLoadForClient() const override;
-	virtual bool NeedsLoadForEditorGame() const override;
-	virtual bool CanBeClusterRoot() const override;
+	/** Called by the UE::FieldNotification::IClassDescriptor. */
+	ENGINE_API void ForEachFieldNotify(TFunctionRef<bool(::UE::FieldNotification::FFieldId FieldId)> Callback, bool bIncludeSuper) const;
+	ENGINE_API void InitializeFieldNotifies();
+
 #if WITH_EDITOR
-	virtual UClass* RegenerateClass(UClass* ClassToRegenerate, UObject* PreviousCDO) override;
-#endif	//WITH_EDITOR
-	virtual bool IsAsset() const override;
+	/**
+	 * Called during serialization to allow the class to stash any sparse class data that needs to 
+	 * be conformed against the archetype once the CDO is available.
+	 */
+	ENGINE_API virtual void PrepareToConformSparseClassData(UScriptStruct* SparseClassDataArchetypeStruct);
 
-	// End UObject interface
+	/**
+	 * Called to conform any pending sparse class data stashed by PrepareToConformSparseClassData.
+	 * @note Called either prior to generating the CDO (compile-on-load) or after loading the CDO.
+	 */
+	ENGINE_API virtual void ConformSparseClassData(UObject* Object);
+#endif
 
-	// UClass interface
+	//~ IBlueprintPropertyGuidProvider interface
+	ENGINE_API virtual FName FindBlueprintPropertyNameFromGuid(const FGuid& PropertyGuid) const override final;
+	ENGINE_API virtual FGuid FindBlueprintPropertyGuidFromName(const FName PropertyName) const override final;
+	// End IBlueprintPropertyGuidProvider interface
+
+	//~ UObject interface
+	ENGINE_API virtual void Serialize(FArchive& Ar) override;
+	ENGINE_API virtual void PostLoad() override;
+	ENGINE_API virtual void PostInitProperties() override;
+	ENGINE_API virtual void GetPreloadDependencies(TArray<UObject*>& OutDeps) override;
+	ENGINE_API virtual void GetAssetRegistryTags(FAssetRegistryTagsContext Context) const override;
+	UE_DEPRECATED(5.4, "Implement the version that takes FAssetRegistryTagsContext instead.")
+	ENGINE_API virtual void GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const override;
 #if WITH_EDITOR
-	virtual UClass* GetAuthoritativeClass() override;
-	virtual void ConditionalRecompileClass(FUObjectSerializeContext* InLoadContext) override;
-	virtual void FlushCompilationQueueForLevel() override;
-	virtual UObject* GetArchetypeForCDO() const override;
-#endif //WITH_EDITOR
-	virtual void SerializeDefaultObject(UObject* Object, FStructuredArchive::FSlot Slot) override;
-	virtual void PostLoadDefaultObject(UObject* Object) override;
-	virtual bool IsFunctionImplementedInScript(FName InFunctionName) const override;
-	virtual uint8* GetPersistentUberGraphFrame(UObject* Obj, UFunction* FuncToCheck) const override;
-	virtual void CreatePersistentUberGraphFrame(UObject* Obj, bool bCreateOnlyIfEmpty = false, bool bSkipSuperClass = false, UClass* OldClass = nullptr) const override;
-	virtual void DestroyPersistentUberGraphFrame(UObject* Obj, bool bSkipSuperClass = false) const override;
-	virtual void Link(FArchive& Ar, bool bRelinkExistingProperties) override;
-	virtual void PurgeClass(bool bRecompilingOnLoad) override;
-	virtual void Bind() override;
-	virtual void GetDefaultObjectPreloadDependencies(TArray<UObject*>& OutDeps) override;
-	virtual UObject* FindArchetype(const UClass* ArchetypeClass, const FName ArchetypeName) const override;
+	ENGINE_API virtual void GetAdditionalAssetDataObjectsForCook(FArchiveCookContext& CookContext, 
+		TArray<UObject*>& OutObjects) const override;
+	ENGINE_API virtual void PostLoadAssetRegistryTags(const FAssetData& InAssetData, TArray<FAssetRegistryTag>& OutTagsAndValuesToUpdate) const;
+#endif //~ WITH_EDITOR
+	ENGINE_API virtual FPrimaryAssetId GetPrimaryAssetId() const override;
+	ENGINE_API virtual bool NeedsLoadForServer() const override;
+	ENGINE_API virtual bool NeedsLoadForClient() const override;
+	ENGINE_API virtual bool NeedsLoadForEditorGame() const override;
+	ENGINE_API virtual bool CanBeClusterRoot() const override;
+#if WITH_EDITOR
+	ENGINE_API virtual UClass* RegenerateClass(UClass* ClassToRegenerate, UObject* PreviousCDO) override;
+	ENGINE_API virtual void PreSaveRoot(FObjectPreSaveRootContext ObjectSaveContext) override;
+	ENGINE_API virtual void PostSaveRoot(FObjectPostSaveRootContext ObjectSaveContext) override;
+#endif	//~ WITH_EDITOR
+	ENGINE_API virtual bool IsAsset() const override;
+	//~ End UObject interface
 
-	virtual void InitPropertiesFromCustomList(uint8* DataPtr, const uint8* DefaultDataPtr) override;
-	virtual void SetupObjectInitializer(FObjectInitializer& ObjectInitializer) const override;
+	//~ UClass interface
+#if WITH_EDITOR
+	ENGINE_API virtual UClass* GetAuthoritativeClass() override;
+	ENGINE_API virtual void ConditionalRecompileClass(FUObjectSerializeContext* InLoadContext) override;
+	ENGINE_API virtual void FlushCompilationQueueForLevel() override;
+	ENGINE_API virtual UObject* GetArchetypeForCDO() const override;
+#endif //~ WITH_EDITOR
+	ENGINE_API virtual void SerializeDefaultObject(UObject* Object, FStructuredArchive::FSlot Slot) override;
+	ENGINE_API virtual void PostLoadDefaultObject(UObject* Object) override;
+	ENGINE_API virtual bool IsFunctionImplementedInScript(FName InFunctionName) const override;
+	ENGINE_API virtual uint8* GetPersistentUberGraphFrame(UObject* Obj, UFunction* FuncToCheck) const override;
+	ENGINE_API virtual void CreatePersistentUberGraphFrame(UObject* Obj, bool bCreateOnlyIfEmpty = false, bool bSkipSuperClass = false, UClass* OldClass = nullptr) const override;
+	ENGINE_API virtual void DestroyPersistentUberGraphFrame(UObject* Obj, bool bSkipSuperClass = false) const override;
+	ENGINE_API virtual void Link(FArchive& Ar, bool bRelinkExistingProperties) override;
+	ENGINE_API virtual void PurgeClass(bool bRecompilingOnLoad) override;
+	ENGINE_API virtual void Bind() override;
+	ENGINE_API virtual void GetDefaultObjectPreloadDependencies(TArray<UObject*>& OutDeps) override;
+	ENGINE_API virtual UObject* FindArchetype(const UClass* ArchetypeClass, const FName ArchetypeName) const override;
+
+	ENGINE_API virtual void InitPropertiesFromCustomList(uint8* DataPtr, const uint8* DefaultDataPtr) override;
+	ENGINE_API virtual void SetupObjectInitializer(FObjectInitializer& ObjectInitializer) const override;
 
 protected:
 
-	virtual FName FindPropertyNameFromGuid(const FGuid& PropertyGuid) const override;
-	virtual FGuid FindPropertyGuidFromName(const FName InName) const override;
-	virtual bool ArePropertyGuidsAvailable() const override;
-	// End UClass interface
+	ENGINE_API virtual FName FindPropertyNameFromGuid(const FGuid& PropertyGuid) const override;
+	ENGINE_API virtual FGuid FindPropertyGuidFromName(const FName InName) const override;
+	ENGINE_API virtual bool ArePropertyGuidsAvailable() const override;
+	//~ End UClass interface
 
 	/**
 	* Returns a linked list of properties with default values that differ from the parent default object. If non-NULL, only these properties will
@@ -797,7 +839,7 @@ protected:
 	* @param	DataPtr				destination address (where to start copying values to)
 	* @param	DefaultDataPtr		source address (where to start copying the defaults data from)
 	*/
-	static void InitPropertiesFromCustomList(const FCustomPropertyListNode* InPropertyList, UStruct* InStruct, uint8* DataPtr, const uint8* DefaultDataPtr);
+	static ENGINE_API void InitPropertiesFromCustomList(const FCustomPropertyListNode* InPropertyList, UStruct* InStruct, uint8* DataPtr, const uint8* DefaultDataPtr);
 
 	/**
 	* Helper method to assist with initializing from an array property with an explicit item list.
@@ -807,23 +849,32 @@ protected:
 	* @param	DataPtr				destination address (where to start copying values to)
 	* @param	DefaultDataPtr		source address (where to start copying the defaults data from)
 	*/
-	static void InitArrayPropertyFromCustomList(const FArrayProperty* ArrayProperty, const FCustomPropertyListNode* InPropertyList, uint8* DataPtr, const uint8* DefaultDataPtr);
+	static ENGINE_API void InitArrayPropertyFromCustomList(const FArrayProperty* ArrayProperty, const FCustomPropertyListNode* InPropertyList, uint8* DataPtr, const uint8* DefaultDataPtr);
 
-	/** Check for and handle manual application of default value overrides to component subobjects that were inherited from a nativized parent class */
-	static void CheckAndApplyComponentTemplateOverrides(UObject* InClassDefaultObject);
+
+	/**
+	* Helper method to assist with initializing a property from sub property list
+	*
+	* @param	Property					the property to copy
+	* @param	CustomPropertySubListNode	the list node of the sub property to copy
+	* @param	PropertyValue				destination address (where to start copying values to)
+	* @param	DefaultPropertyValue		source address (where to start copying the defaults data from)
+	* @return	true if the method was able to copy the property successfully via the sub custom property list
+	*/
+	static ENGINE_API bool InitPropertyFromSubPropertyList(const FProperty* Property, const FCustomPropertyListNode* SubPropertyList, uint8* PropertyValue, const uint8* DefaultPropertyValue);
 
 public:
 
 	/** Called when the custom list of properties used during post-construct initialization needs to be rebuilt (e.g. after serialization and recompilation). */
-	void UpdateCustomPropertyListForPostConstruction();
+	ENGINE_API void UpdateCustomPropertyListForPostConstruction();
 
-	static void AddReferencedObjectsInUbergraphFrame(UObject* InThis, FReferenceCollector& Collector);
+	static ENGINE_API void AddReferencedObjectsInUbergraphFrame(UObject* InThis, FReferenceCollector& Collector);
 
-	static FName GetUberGraphFrameName();
-	static bool UsePersistentUberGraphFrame();
+	static ENGINE_API FName GetUberGraphFrameName();
+	static ENGINE_API bool UsePersistentUberGraphFrame();
 
 	/** Whether or not to use "fast path" component instancing. */
-	bool UseFastPathComponentInstancing();
+	ENGINE_API bool UseFastPathComponentInstancing();
 
 #if WITH_EDITORONLY_DATA
 	FBlueprintDebugData DebugData;
@@ -836,43 +887,57 @@ public:
 #endif
 
 	/** Bind functions on supplied actor to delegates */
-	static void BindDynamicDelegates(const UClass* ThisClass, UObject* InInstance);
+	static ENGINE_API void BindDynamicDelegates(const UClass* ThisClass, UObject* InInstance);
 
 	// Finds the desired dynamic binding object for this blueprint generated class
-	static UDynamicBlueprintBinding* GetDynamicBindingObject(const UClass* ThisClass, UClass* BindingClass);
+	static ENGINE_API UDynamicBlueprintBinding* GetDynamicBindingObject(const UClass* ThisClass, UClass* BindingClass);
 
 #if WITH_EDITOR
 	/** Unbind functions on supplied actor from delegates */
-	static void UnbindDynamicDelegates(const UClass* ThisClass, UObject* InInstance);
+	static ENGINE_API void UnbindDynamicDelegates(const UClass* ThisClass, UObject* InInstance);
 
 	/** Unbind functions on supplied actor from delegates tied to a specific property */
-	void UnbindDynamicDelegatesForProperty(UObject* InInstance, const FObjectProperty* InObjectProperty);
+	ENGINE_API void UnbindDynamicDelegatesForProperty(UObject* InInstance, const FObjectProperty* InObjectProperty);
 #endif
 
 	/** called to gather blueprint replicated properties */
-	virtual void GetLifetimeBlueprintReplicationList(TArray<class FLifetimeProperty>& OutLifetimeProps) const;
-	/** called prior to replication of an instance of this BP class */
-	virtual void InstancePreReplication(UObject* Obj, class IRepChangedPropertyTracker& ChangedPropertyTracker) const
-	{
-		UBlueprintGeneratedClass* SuperBPClass = Cast<UBlueprintGeneratedClass>(GetSuperStruct());
-		if (SuperBPClass != NULL)
-		{
-			SuperBPClass->InstancePreReplication(Obj, ChangedPropertyTracker);
-		}
-	}
+	ENGINE_API virtual void GetLifetimeBlueprintReplicationList(TArray<class FLifetimeProperty>& OutLifetimeProps) const;
 
 protected:
 	/** Internal helper method used to recursively build the custom property list that's used for post-construct initialization. */
-	bool BuildCustomPropertyListForPostConstruction(FCustomPropertyListNode*& InPropertyList, UStruct* InStruct, const uint8* DataPtr, const uint8* DefaultDataPtr);
+	ENGINE_API bool BuildCustomPropertyListForPostConstruction(FCustomPropertyListNode*& InPropertyList, UStruct* InStruct, const uint8* DataPtr, const uint8* DefaultDataPtr);
 
 	/** Internal helper method used to recursively build a custom property list from an array property used for post-construct initialization. */
-	bool BuildCustomArrayPropertyListForPostConstruction(FArrayProperty* ArrayProperty, FCustomPropertyListNode*& InPropertyList, const uint8* DataPtr, const uint8* DefaultDataPtr, int32 StartIndex = 0);
+	ENGINE_API bool BuildCustomArrayPropertyListForPostConstruction(FArrayProperty* ArrayProperty, FCustomPropertyListNode*& InPropertyList, const uint8* DataPtr, const uint8* DefaultDataPtr, int32 StartIndex = 0);
 
 private:
 	/** List of native class-owned properties that differ from defaults. This is used to optimize property initialization during post-construction by minimizing the number of native class-owned property values that get copied to the new instance. */
 	TIndirectArray<FCustomPropertyListNode> CustomPropertyListForPostConstruction;
 	/** In some cases UObject::ConditionalPostLoad() code calls PostLoadDefaultObject() on a class that's still being serialized. */
 	FCriticalSection SerializeAndPostLoadCritical;
-};
 
-#include "UObject/DefineUPropertyMacros.h"
+	using FEditorTags = TSortedMap<FName, FString, FDefaultAllocator, FNameFastLess>;
+
+#if WITH_EDITORONLY_DATA
+	ENGINE_API void GetEditorTags(FEditorTags& Tags) const;
+
+	/** Editor-only asset registry tags on cooked BPGC */
+	FEditorTags CookedEditorTags;
+
+protected:
+	ENGINE_API virtual TSubclassOf<UClassCookedMetaData> GetCookedMetaDataClass() const;
+
+private:
+	ENGINE_API UClassCookedMetaData* NewCookedMetaData();
+	ENGINE_API const UClassCookedMetaData* FindCookedMetaData();
+	ENGINE_API void PurgeCookedMetaData();
+
+	UPROPERTY()
+	TObjectPtr<UClassCookedMetaData> CachedCookedMetaDataPtr;
+#endif // WITH_EDITORONLY_DATA
+
+#if WITH_EDITORONLY_DATA
+	TWeakObjectPtr<UScriptStruct> SparseClassDataPendingConformStruct = nullptr;
+	void* SparseClassDataPendingConform = nullptr;
+#endif // WITH_EDITORONLY_DATA
+};

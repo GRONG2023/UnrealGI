@@ -7,13 +7,16 @@
 #include "CADInterfacesModule.h"
 #include "CADToolsModule.h"
 
+#ifdef USE_TECHSOFT_SDK
+#include "TechSoftInterface.h"
+#endif
+
 #include "Modules/ModuleManager.h"
 
 IMPLEMENT_APPLICATION(DatasmithCADWorker, "DatasmithCADWorker");
 DEFINE_LOG_CATEGORY(LogDatasmithCADWorker);
 
-#define EXIT_MISSING_CORETECH_MODULE 2
-
+#define EXIT_MISSING_CAD_MODULE 2
 
 void GetParameter(int32 Argc, TCHAR* Argv[], const FString& InParam, FString& OutValue)
 {
@@ -46,10 +49,11 @@ int32 Main(int32 Argc, TCHAR * Argv[])
 {
 	UE_SET_LOG_VERBOSITY(LogDatasmithCADWorker, Verbose);
 
-#ifndef USE_KERNEL_IO_SDK
-	UE_LOG(LogDatasmithCADWorker, Error, TEXT("Missing CoreTech module. DatasmithCADWorker is not functional."));
-	return EXIT_MISSING_CORETECH_MODULE;
+#if !defined(USE_TECHSOFT_SDK)
+	UE_LOG(LogDatasmithCADWorker, Error, TEXT("Missing CAD module. DatasmithCADWorker is not functional."));
+	return EXIT_MISSING_CAD_MODULE;
 #else
+
 	FString ServerPID;
 	FString ServerPort;
 	FString CacheDirectory;
@@ -61,7 +65,11 @@ int32 Main(int32 Argc, TCHAR * Argv[])
 	GetParameter(Argc, Argv, "-CacheVersion", CacheVersion);
 	GetParameter(Argc, Argv, "-EnginePluginsDir", EnginePluginsPath);
 
-	CADLibrary::InitializeCoreTechInterface();
+	if (!CADLibrary::TechSoftInterface::TECHSOFT_InitializeKernel(*EnginePluginsPath))
+	{
+		UE_LOG(LogDatasmithCADWorker, Error, TEXT("TechSoft interface cannot be initialized. CADInterfaces module is not available."));
+		return EXIT_FAILURE;
+	}
 
 	if (ICADInterfacesModule::Get().GetAvailability() != ECADInterfaceAvailability::Available)
 	{
@@ -80,8 +88,10 @@ int32 Main(int32 Argc, TCHAR * Argv[])
 	FDatasmithCADWorkerImpl Worker(FCString::Atoi(*ServerPID), FCString::Atoi(*ServerPort), EnginePluginsPath, CacheDirectory);
 	Worker.Run();
 
+	FDatasmithCADWorkerImpl::bProcessIsRunning = false;
+
 	return EXIT_SUCCESS;
-#endif // USE_KERNEL_IO_SDK
+#endif // USE_TECHSOFT_SDK
 }
 
 int32 Filter(uint32 Code, struct _EXCEPTION_POINTERS *Ep)
@@ -103,12 +113,15 @@ INT32_MAIN_INT32_ARGC_TCHAR_ARGV()
 	}
 	__except (Filter(GetExceptionCode(), GetExceptionInformation()))
 	{
+		FDatasmithCADWorkerImpl::bProcessIsRunning = false;
 		Result = EXIT_FAILURE;
 	}
 
-	FCoreDelegates::OnExit.Broadcast();
+	FEngineLoop::AppPreExit();
+	FModuleManager::Get().UnloadModulesAtShutdown();
+	FEngineLoop::AppExit();
 
-	FPlatformMisc::RequestExit(false);
+	FPlatformMisc::RequestExit(true);
 
 	return Result;
 }

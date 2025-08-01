@@ -1,55 +1,46 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/PropertyTag.h"
 #include "UObject/UnrealType.h"
-#include "UObject/UnrealTypePrivate.h"
-#include "UObject/LinkerLoad.h"
-#include "UObject/PropertyHelper.h"
+
 #include "Misc/ScopeExit.h"
-#include "Serialization/ArchiveUObjectFromStructuredArchive.h"
+#include "UObject/PropertyHelper.h"
+#include "UObject/UnrealTypePrivate.h"
+#include "UObject/UObjectThreadContext.h"
 
-// WARNING: This should always be the last include in any file that needs it (except .generated.h)
-#include "UObject/UndefineUPropertyMacros.h"
-
-namespace UE4SetProperty_Private
+namespace UESetProperty_Private
 {
 	/**
 	 * Checks if any of the elements in the set compare equal to the one passed.
 	 *
-	 * @param  SetHelper  The set to search through.
-	 * @param  Index      The index in the set to start searching from.
-	 * @param  Num        The number of elements to compare.
+	 * @param  SetHelper    The set to search through.
+	 * @param  LogicalIndex The index in the set to start searching from.
+	 * @param  Num          The number of elements to compare.
 	 */
-	bool AnyEqual(const FScriptSetHelper& SetHelper, int32 Index, int32 Num, const uint8* ElementToCompare, uint32 PortFlags)
+	bool AnyEqual(const FScriptSetHelper& SetHelper, const int32 LogicalIndex, int32 Num, const uint8* ElementToCompare, uint32 PortFlags)
 	{
-		FProperty* ElementProp = SetHelper.GetElementProperty();
+		const FProperty* ElementProp = SetHelper.GetElementProperty();
 
-		for (; Num; --Num)
+		FScriptSetHelper::FIterator Iterator(SetHelper, LogicalIndex);
+		for (; Iterator && Num; --Num, ++Iterator)
 		{
-			while (!SetHelper.IsValidIndex(Index))
-			{
-				++Index;
-			}
-
-			if (ElementProp->Identical(SetHelper.GetElementPtr(Index), ElementToCompare, PortFlags))
+			if (ElementProp->Identical(SetHelper.GetElementPtr(Iterator), ElementToCompare, PortFlags))
 			{
 				return true;
 			}
-
-			++Index;
 		}
 
 		return false;
 	}
 
-	bool RangesContainSameAmountsOfVal(const FScriptSetHelper& SetHelperA, int32 IndexA, const FScriptSetHelper& SetHelperB, int32 IndexB, int32 Num, const uint8* ElementToCompare, uint32 PortFlags)
+	bool RangesContainSameAmountsOfVal(const FScriptSetHelper& SetHelperA, const int32 LogicalIndexA, const FScriptSetHelper& SetHelperB, const int32 LogicalIndexB, int32 Num, const uint8* ElementToCompare, uint32 PortFlags)
 	{
-		FProperty* ElementProp = SetHelperA.GetElementProperty();
+		const FProperty* ElementProp = SetHelperA.GetElementProperty();
 
 		// Ensure that both sets are the same type
 		check(ElementProp == SetHelperB.GetElementProperty());
+
+		FScriptSetHelper::FIterator IteratorA(SetHelperA, LogicalIndexA);
+		FScriptSetHelper::FIterator IteratorB(SetHelperB, LogicalIndexB);
 
 		int32 CountA = 0;
 		int32 CountB = 0;
@@ -60,18 +51,8 @@ namespace UE4SetProperty_Private
 				return CountA == CountB;
 			}
 
-			while (!SetHelperA.IsValidIndex(IndexA))
-			{
-				++IndexA;
-			}
-
-			while (!SetHelperB.IsValidIndex(IndexB))
-			{
-				++IndexB;
-			}
-
-			const uint8* ElementA = SetHelperA.GetElementPtr(IndexA);
-			const uint8* ElementB = SetHelperB.GetElementPtr(IndexB);
+			const uint8* ElementA = SetHelperA.GetElementPtr(IteratorA);
+			const uint8* ElementB = SetHelperB.GetElementPtr(IteratorB);
 			if (ElementProp->Identical(ElementA, ElementToCompare, PortFlags))
 			{
 				++CountA;
@@ -82,15 +63,15 @@ namespace UE4SetProperty_Private
 				++CountB;
 			}
 
-			++IndexA;
-			++IndexB;
+			++IteratorA;
+			++IteratorB;
 			--Num;
 		}
 	}
 
-	bool IsPermutation(const FScriptSetHelper& SetHelperA, const FScriptSetHelper& SetHelperB, uint32 PortFlags)
+	bool IsPermutation(const FScriptSetHelper& SetHelperA, const FScriptSetHelper& SetHelperB, const uint32 PortFlags)
 	{
-		FProperty* ElementProp = SetHelperA.GetElementProperty();
+		const FProperty* ElementProp = SetHelperA.GetElementProperty();
 
 		// Ensure that both maps are the same type
 		check(ElementProp == SetHelperB.GetElementProperty());
@@ -102,8 +83,8 @@ namespace UE4SetProperty_Private
 		}
 
 		// Skip over common initial sequence
-		int32 IndexA = 0;
-		int32 IndexB = 0;
+		FScriptSetHelper::FIterator IteratorA(SetHelperA);
+		FScriptSetHelper::FIterator IteratorB(SetHelperB);
 		for (;;)
 		{
 			if (Num == 0)
@@ -111,35 +92,25 @@ namespace UE4SetProperty_Private
 				return true;
 			}
 
-			while (!SetHelperA.IsValidIndex(IndexA))
-			{
-				++IndexA;
-			}
-
-			while (!SetHelperB.IsValidIndex(IndexB))
-			{
-				++IndexB;
-			}
-
-			const uint8* ElementA = SetHelperA.GetElementPtr(IndexA);
-			const uint8* ElementB = SetHelperB.GetElementPtr(IndexB);
+			const uint8* ElementA = SetHelperA.GetElementPtr(IteratorA);
+			const uint8* ElementB = SetHelperB.GetElementPtr(IteratorB);
 			if (!ElementProp->Identical(ElementA, ElementB, PortFlags))
 			{
 				break;
 			}
 
-			++IndexA;
-			++IndexB;
+			++IteratorA;
+			++IteratorB;
 			--Num;
 		}
 
-		int32 FirstIndexA = IndexA;
-		int32 FirstIndexB = IndexB;
-		int32 FirstNum    = Num;
+		const int32 FirstIndexA = IteratorA.GetLogicalIndex();
+		const int32 FirstIndexB = IteratorB.GetLogicalIndex();
+		const int32 FirstNum    = Num;
 		for (;;)
 		{
-			const uint8* ElementA = SetHelperA.GetElementPtr(IndexA);
-			if (!AnyEqual(SetHelperA, FirstIndexA, FirstNum - Num, ElementA, PortFlags) && !RangesContainSameAmountsOfVal(SetHelperA, IndexA, SetHelperB, IndexB, Num, ElementA, PortFlags))
+			const uint8* ElementA = SetHelperA.GetElementPtr(IteratorA);
+			if (!AnyEqual(SetHelperA, FirstIndexA, FirstNum - Num, ElementA, PortFlags) && !RangesContainSameAmountsOfVal(SetHelperA, FirstIndexA, SetHelperB, FirstIndexB, FirstNum, ElementA, PortFlags))
 			{
 				return false;
 			}
@@ -150,15 +121,7 @@ namespace UE4SetProperty_Private
 				return true;
 			}
 
-			while (!SetHelperA.IsValidIndex(IndexA))
-			{
-				++IndexA;
-			}
-
-			while (!SetHelperB.IsValidIndex(IndexB))
-			{
-				++IndexB;
-			}
+			++IteratorA;
 		}
 	}
 }
@@ -173,7 +136,16 @@ FSetProperty::FSetProperty(FFieldVariant InOwner, const FName& InName, EObjectFl
 }
 
 FSetProperty::FSetProperty(FFieldVariant InOwner, const FName& InName, EObjectFlags InObjectFlags, int32 InOffset, EPropertyFlags InFlags)
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 : FSetProperty_Super(InOwner, InName, InObjectFlags, InOffset, InFlags)
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+{
+	// This is expected to be set post-construction by AddCppProperty
+	ElementProp = nullptr;
+}
+
+FSetProperty::FSetProperty(FFieldVariant InOwner, const UECodeGen_Private::FSetPropertyParams& Prop)
+	: FSetProperty_Super(InOwner, (const UECodeGen_Private::FPropertyParamsBaseWithOffset&)Prop)
 {
 	// This is expected to be set post-construction by AddCppProperty
 	ElementProp = nullptr;
@@ -242,7 +214,7 @@ bool FSetProperty::Identical(const void* A, const void* B, uint32 PortFlags) con
 		return false;
 	}
 
-	return UE4SetProperty_Private::IsPermutation(SetHelperA, SetHelperB, PortFlags);
+	return UESetProperty_Private::IsPermutation(SetHelperA, SetHelperB, PortFlags);
 }
 
 void FSetProperty::GetPreloadDependencies(TArray<UObject*>& OutDeps)
@@ -284,74 +256,126 @@ void FSetProperty::SerializeItem(FStructuredArchive::FSlot Slot, void* Value, co
 
 	if (UnderlyingArchive.IsLoading())
 	{
+		FUObjectSerializeContext* Context = FUObjectThreadContext::Get().GetSerializeContext();
+
 		if (Defaults)
 		{
 			CopyValuesInternal(Value, Defaults, 1);
 		}
-		else
-		{
-			SetHelper.EmptyElements();
-		}
-
-		uint8* TempElementStorage = nullptr;
-		ON_SCOPE_EXIT
-		{
-			if (TempElementStorage)
-			{
-				ElementProp->DestroyValue(TempElementStorage);
-				FMemory::Free(TempElementStorage);
-			}
-		};
 
 		// Delete any explicitly-removed elements
 		int32 NumElementsToRemove = 0;
-		FStructuredArchive::FArray ElementsToRemoveArray = Record.EnterArray(SA_FIELD_NAME(TEXT("ElementsToRemove")), NumElementsToRemove);
+		FStructuredArchive::FArray ElementsToRemoveArray = Record.EnterArray(TEXT("ElementsToRemove"), NumElementsToRemove);
 
-		if (NumElementsToRemove)
+		if (!Defaults || SetHelper.Num() == 0) // Faster loading path when loading elements into an empty set
 		{
-			TempElementStorage = (uint8*)FMemory::Malloc(SetLayout.Size);
-			ElementProp->InitializeValue(TempElementStorage);
-
-			FSerializedPropertyScope SerializedProperty(UnderlyingArchive, ElementProp, this);
-			for (; NumElementsToRemove; --NumElementsToRemove)
+			if (NumElementsToRemove)
 			{
-				// Read key into temporary storage
-				ElementProp->SerializeItem(ElementsToRemoveArray.EnterElement(), TempElementStorage);
-
-				// If the key is in the map, remove it
-				const int32 Found = SetHelper.FindElementIndex(TempElementStorage);
-				if (Found != INDEX_NONE)
+				TOptional<TGuardValue<bool>> SerializeUnknownProperty;
+				if (Context)
 				{
-					SetHelper.RemoveAt(Found);
+					SerializeUnknownProperty.Emplace(Context->bSerializeUnknownProperty, false);
 				}
+
+				// Load and discard elements to remove, set is empty
+				void* TempElementStorage = FMemory::Malloc(SetLayout.Size);
+				ElementProp->InitializeValue(TempElementStorage);
+
+				FSerializedPropertyScope SerializedProperty(UnderlyingArchive, ElementProp, this);
+				for (; NumElementsToRemove; --NumElementsToRemove)
+				{
+					ElementProp->SerializeItem(ElementsToRemoveArray.EnterElement(), TempElementStorage);
+				}
+
+				ElementProp->DestroyValue(TempElementStorage);
+				FMemory::Free(TempElementStorage);
+			}
+
+			int32 Num = 0;
+			FStructuredArchive::FArray ElementsArray = Record.EnterArray(TEXT("Elements"), Num);
+
+			// Empty and reserve then deserialize elements directly into set memory
+			SetHelper.EmptyElements(Num);
+			for (; Num; --Num)
+			{
+				int32 Index = SetHelper.AddDefaultValue_Invalid_NeedsRehash();
+				UE::FSerializedPropertyPathIndexScope SerializedPropertyPathIndex(Context, Index, UE::ESerializedPropertyPathNotify::Yes);
+				ElementProp->SerializeItem(ElementsArray.EnterElement(), SetHelper.GetElementPtrWithoutCheck(Index));
 			}
 		}
-
-		int32 Num = 0;
-		FStructuredArchive::FArray ElementsArray = Record.EnterArray(SA_FIELD_NAME(TEXT("Elements")), Num);
-
-		// Allocate temporary key space if we haven't allocated it already above
-		if (Num != 0 && !TempElementStorage)
+		else // Slower loading path that mutates non-empty set
 		{
-			TempElementStorage = (uint8*)FMemory::Malloc(SetLayout.Size);
-			ElementProp->InitializeValue(TempElementStorage);
-		}
-
-		FSerializedPropertyScope SerializedProperty(UnderlyingArchive, ElementProp, this);
-		// Read remaining items into container
-		for (; Num; --Num)
-		{
-			// Read key into temporary storage
-			ElementProp->SerializeItem(ElementsArray.EnterElement(), TempElementStorage);
-
-			// Add a new entry if the element doesn't currently exist in the set
-			if (SetHelper.FindElementIndex(TempElementStorage) == INDEX_NONE)
+			uint8* TempElementStorage = nullptr;
+			ON_SCOPE_EXIT
 			{
-				const int32 NewElementIndex = SetHelper.AddDefaultValue_Invalid_NeedsRehash();
-				uint8* NewElementPtr = SetHelper.GetElementPtrWithoutCheck(NewElementIndex);
+				if (TempElementStorage)
+				{
+					ElementProp->DestroyValue(TempElementStorage);
+					FMemory::Free(TempElementStorage);
+				}
+			};
 
-				// Copy over deserialized key from temporary storage
-				ElementProp->CopyCompleteValue_InContainer(NewElementPtr, TempElementStorage);
+			if (NumElementsToRemove)
+			{
+				TOptional<TGuardValue<bool>> SerializeUnknownProperty;
+				if (Context)
+				{
+					SerializeUnknownProperty.Emplace(Context->bSerializeUnknownProperty, false);
+				}
+
+				TempElementStorage = (uint8*)FMemory::Malloc(SetLayout.Size);
+				ElementProp->InitializeValue(TempElementStorage);
+
+				FSerializedPropertyScope SerializedProperty(UnderlyingArchive, ElementProp, this);
+				for (; NumElementsToRemove; --NumElementsToRemove)
+				{
+					// Read key into temporary storage
+					ElementProp->SerializeItem(ElementsToRemoveArray.EnterElement(), TempElementStorage);
+
+					// If the key is in the map, remove it
+					const int32 Found = SetHelper.FindElementIndex(TempElementStorage);
+					if (Found != INDEX_NONE)
+					{
+						SetHelper.RemoveAt(Found);
+					}
+				}
+			}
+
+			int32 Num = 0;
+			FStructuredArchive::FArray ElementsArray = Record.EnterArray(TEXT("Elements"), Num);
+
+			// Allocate temporary key space if we haven't allocated it already above
+			if (Num != 0 && !TempElementStorage)
+			{
+				TempElementStorage = (uint8*)FMemory::Malloc(SetLayout.Size);
+				ElementProp->InitializeValue(TempElementStorage);
+			}
+
+			// Disable serialization of unknown properties until the TODO in the loop is addressed.
+			TOptional<TGuardValue<bool>> SerializeUnknownProperty;
+			if (Context)
+			{
+				SerializeUnknownProperty.Emplace(Context->bSerializeUnknownProperty, false);
+			}
+
+			FSerializedPropertyScope SerializedProperty(UnderlyingArchive, ElementProp, this);
+			// Read remaining items into container
+			for (; Num; --Num)
+			{
+				// TODO: SetIndex on Context->SerializedPropertyPath and remove the element from the bag later if it existed.
+
+				// Read key into temporary storage
+				ElementProp->SerializeItem(ElementsArray.EnterElement(), TempElementStorage);
+
+				// Add a new entry if the element doesn't currently exist in the set
+				if (SetHelper.FindElementIndex(TempElementStorage) == INDEX_NONE)
+				{
+					const int32 NewElementIndex = SetHelper.AddDefaultValue_Invalid_NeedsRehash();
+					uint8* NewElementPtr = SetHelper.GetElementPtrWithoutCheck(NewElementIndex);
+
+					// Copy over deserialized key from temporary storage
+					ElementProp->CopyCompleteValue_InContainer(NewElementPtr, TempElementStorage);
+				}
 			}
 		}
 
@@ -367,25 +391,19 @@ void FSetProperty::SerializeItem(FStructuredArchive::FSlot Slot, void* Value, co
 		// Determine how many keys are missing from the object
 		if (Defaults)
 		{
-			for (int32 Index = 0, Count = DefaultsHelper.Num(); Count; ++Index)
+			for (FScriptSetHelper::FIterator Iterator(DefaultsHelper); Iterator; ++Iterator)
 			{
-				uint8* DefaultElementPtr = DefaultsHelper.GetElementPtrWithoutCheck(Index);
-
-				if (DefaultsHelper.IsValidIndex(Index))
+				const uint8* DefaultElementPtr = DefaultsHelper.GetElementPtr(Iterator);
+				if (SetHelper.FindElementIndex(DefaultElementPtr) == INDEX_NONE)
 				{
-					if (SetHelper.FindElementIndex(DefaultElementPtr) == INDEX_NONE)
-					{
-						Indices.Add(Index);
-					}
-
-					--Count;
+					Indices.Add(Iterator.GetInternalIndex());
 				}
 			}
 		}
 
 		// Write out the removed elements
 		int32 RemovedElementsNum = Indices.Num();
-		FStructuredArchive::FArray RemovedElementsArray = Record.EnterArray(SA_FIELD_NAME(TEXT("ElementsToRemove")), RemovedElementsNum);
+		FStructuredArchive::FArray RemovedElementsArray = Record.EnterArray(TEXT("ElementsToRemove"), RemovedElementsNum);
 		
 		{
 			FSerializedPropertyScope SerializedProperty(UnderlyingArchive, ElementProp, this);
@@ -399,25 +417,20 @@ void FSetProperty::SerializeItem(FStructuredArchive::FSlot Slot, void* Value, co
 		if (Defaults)
 		{
 			Indices.Reset();
-			for (int32 Index = 0, Count = SetHelper.Num(); Count; ++Index)
+			for (FScriptSetHelper::FIterator Iterator(SetHelper); Iterator; ++Iterator)
 			{
-				if (SetHelper.IsValidIndex(Index))
+				const uint8* ValueElement = SetHelper.GetElementPtr(Iterator);
+				const uint8* DefaultElement = DefaultsHelper.FindElementPtr(ValueElement);
+
+				if (!DefaultElement)
 				{
-					uint8* ValueElement   = SetHelper.GetElementPtrWithoutCheck(Index);
-					uint8* DefaultElement = DefaultsHelper.FindElementPtr(ValueElement);
-
-					if (!DefaultElement)
-					{
-						Indices.Add(Index);
-					}
-
-					--Count;
+					Indices.Add(Iterator.GetInternalIndex());
 				}
 			}
 
 			// Write out differences from defaults
 			int32 Num = Indices.Num();
-			FStructuredArchive::FArray ElementsArray = Record.EnterArray(SA_FIELD_NAME(TEXT("Elements")), Num);
+			FStructuredArchive::FArray ElementsArray = Record.EnterArray(TEXT("Elements"), Num);
 
 			FSerializedPropertyScope SerializedProperty(UnderlyingArchive, ElementProp, this);
 			for (int32 Index : Indices)
@@ -430,19 +443,14 @@ void FSetProperty::SerializeItem(FStructuredArchive::FSlot Slot, void* Value, co
 		else
 		{
 			int32 Num = SetHelper.Num();
-			FStructuredArchive::FArray ElementsArray = Record.EnterArray(SA_FIELD_NAME(TEXT("Elements")), Num);
+			FStructuredArchive::FArray ElementsArray = Record.EnterArray(TEXT("Elements"), Num);
 
 			FSerializedPropertyScope SerializedProperty(UnderlyingArchive, ElementProp, this);
-			for (int32 Index = 0; Num; ++Index)
+
+			for (FScriptSetHelper::FIterator Iterator(SetHelper); Iterator; ++Iterator)
 			{
-				if (SetHelper.IsValidIndex(Index))
-				{
-					uint8* ElementPtr = SetHelper.GetElementPtrWithoutCheck(Index);
-
-					ElementProp->SerializeItem(ElementsArray.EnterElement(), ElementPtr);
-
-					--Num;
-				}
+				uint8* ElementPtr = SetHelper.GetElementPtr(Iterator);
+				ElementProp->SerializeItem(ElementsArray.EnterElement(), ElementPtr);
 			}
 		}
 	}
@@ -510,23 +518,38 @@ FString FSetProperty::GetCPPType(FString* ExtendedTypeText, uint32 CPPExportFlag
 	return GetCPPTypeCustom(ExtendedTypeText, CPPExportFlags, ElementTypeText, ElementExtendedTypeText);
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 FString FSetProperty::GetCPPTypeForwardDeclaration() const
 {
 	checkSlow(ElementProp);
 	return ElementProp->GetCPPTypeForwardDeclaration();
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
-void FSetProperty::ExportTextItem(FString& ValueStr, const void* PropertyValue, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope) const
+void FSetProperty::ExportText_Internal(FString& ValueStr, const void* ContainerOrPropertyPtr, EPropertyPointerType PropertyPointerType, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope) const
 {
-	if (0 != (PortFlags & PPF_ExportCpp))
-	{
-		ValueStr += TEXT("{}");
-		return;
-	}
-
 	checkSlow(ElementProp);
 
-	FScriptSetHelper SetHelper(this, PropertyValue);
+	uint8* TempSetStorage = nullptr;
+	void* PropertyValuePtr = nullptr;
+	if (PropertyPointerType == EPropertyPointerType::Container && HasGetter())
+	{
+		// Allocate temporary map as we first need to initialize it with the value provided by the getter function and then export it
+		TempSetStorage = (uint8*)AllocateAndInitializeValue();
+		PropertyValuePtr = TempSetStorage;
+		FProperty::GetValue_InContainer(ContainerOrPropertyPtr, PropertyValuePtr);
+	}
+	else
+	{
+		PropertyValuePtr = PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType);
+	}
+
+	ON_SCOPE_EXIT
+	{
+		DestroyAndFreeValue(TempSetStorage);
+	};
+
+	FScriptSetHelper SetHelper(this, PropertyValuePtr);
 
 	if (SetHelper.Num() == 0)
 	{
@@ -587,7 +610,7 @@ void FSetProperty::ExportTextItem(FString& ValueStr, const void* PropertyValue, 
 					PropDefault = PropData;
 				}
 
-				ElementProp->ExportTextItem(ValueStr, PropData, PropDefault, Parent, PortFlags | PPF_Delimited, ExportRootScope);
+				ElementProp->ExportTextItem_Direct(ValueStr, PropData, PropDefault, Parent, PortFlags | PPF_Delimited, ExportRootScope);
 
 				--Count;
 			}
@@ -619,7 +642,7 @@ void FSetProperty::ExportTextItem(FString& ValueStr, const void* PropertyValue, 
 					PropDefault = PropData;
 				}
 
-				ElementProp->ExportTextItem(ValueStr, PropData, PropDefault, Parent, PortFlags | PPF_Delimited, ExportRootScope);
+				ElementProp->ExportTextItem_Direct(ValueStr, PropData, PropDefault, Parent, PortFlags | PPF_Delimited, ExportRootScope);
 
 				--Count;
 			}
@@ -629,11 +652,44 @@ void FSetProperty::ExportTextItem(FString& ValueStr, const void* PropertyValue, 
 	}
 }
 
-const TCHAR* FSetProperty::ImportText_Internal(const TCHAR* Buffer, void* Data, int32 PortFlags, UObject* Parent, FOutputDevice* ErrorText) const
+const TCHAR* FSetProperty::ImportText_Internal(const TCHAR* Buffer, void* ContainerOrPropertyPtr, EPropertyPointerType PropertyPointerType, UObject* Parent, int32 PortFlags, FOutputDevice* ErrorText) const
 {
 	checkSlow(ElementProp);
 
-	FScriptSetHelper SetHelper(this, Data);
+	FScriptSetHelper SetHelper(this, PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType));
+	uint8* TempSetStorage = nullptr;
+	uint8* TempElementStorage = nullptr;
+	bool bSuccess = true;
+
+	ON_SCOPE_EXIT
+	{
+		FMemory::Free(TempElementStorage);
+
+		// If we are returning because of an error, remove any already-added elements from the map before returning
+		// to ensure we're not left with a partial state.
+		if (!bSuccess)
+		{
+			SetHelper.EmptyElements();
+		}
+
+		if (TempSetStorage)
+		{
+			// TempSet is used by property setter so if it was allocated call the setter now
+			FProperty::SetValue_InContainer(ContainerOrPropertyPtr, TempSetStorage);
+
+			// Destroy and free the temp set used by property setter
+			DestroyAndFreeValue(TempSetStorage);
+		}
+	};
+
+	if (PropertyPointerType == EPropertyPointerType::Container && HasSetter())
+	{
+		// Allocate temporary set as we first need to initialize it with the parsed items and then use the setter to update the property
+		TempSetStorage = (uint8*)AllocateAndInitializeValue();
+		// Reinitialize the set helper with the temp value
+		SetHelper = FScriptSetHelper(this, TempSetStorage);
+	}
+
 	SetHelper.EmptyElements();
 
 	// If we export an empty array we export an empty string, so ensure that if we're passed an empty string
@@ -649,21 +705,11 @@ const TCHAR* FSetProperty::ImportText_Internal(const TCHAR* Buffer, void* Data, 
 		return Buffer + 1;
 	}
 
-	uint8* TempElementStorage = (uint8*)FMemory::Malloc(ElementProp->ElementSize);
+	TempElementStorage = (uint8*)FMemory::Malloc(ElementProp->ElementSize);
+	// From this point failure should empty the set
+	bSuccess = false;
 
-	bool bSuccess = false;
-	ON_SCOPE_EXIT
-	{
-		FMemory::Free(TempElementStorage);
-
-		// If we are returning because of an error, remove any already-added elements from the map before returning
-		// to ensure we're not left with a partial state.
-		if (!bSuccess)
-		{
-			SetHelper.EmptyElements();
-		}
-	};
-
+	check(ElementProp->GetOffset_ForInternal() == 0);
 	for (;;)
 	{
 		ElementProp->InitializeValue(TempElementStorage);
@@ -673,7 +719,7 @@ const TCHAR* FSetProperty::ImportText_Internal(const TCHAR* Buffer, void* Data, 
 		};
 
 		// Read key into temporary storage
-		Buffer = ElementProp->ImportText(Buffer, TempElementStorage, PortFlags | PPF_Delimited, Parent, ErrorText);
+		Buffer = ElementProp->ImportText_Direct(Buffer, TempElementStorage, Parent, PortFlags | PPF_Delimited, ErrorText);
 		if (!Buffer)
 		{
 			return nullptr;
@@ -763,7 +809,7 @@ void FSetProperty::DestroyValueInternal(void* Data) const
 	FScriptSetHelper SetHelper(this, Data);
 	SetHelper.EmptyElements();
 
-	//@todo UE4 potential double destroy later from this...would be ok for a script set, but still
+	//@todo UE potential double destroy later from this...would be ok for a script set, but still
 	((FScriptSet*)Data)->~FScriptSet();
 }
 
@@ -800,31 +846,20 @@ void FSetProperty::InstanceSubobjects(void* Data, void const* DefaultData, UObje
 	{
 		FScriptSetHelper DefaultSetHelper(this, DefaultData);
 
-		for (int32 Index = 0, Num = SetHelper.Num(); Num; ++Index)
+		for (FScriptSetHelper::FIterator It(SetHelper); It; ++It)
 		{
-			if (SetHelper.IsValidIndex(Index))
-			{
-				uint8* ElementPtr        = SetHelper.GetElementPtr(Index);
-				uint8* DefaultElementPtr = DefaultSetHelper.FindElementPtr(ElementPtr, Index);
+			uint8* ElementPtr = SetHelper.GetElementPtr(It);
+			const uint8* DefaultElementPtr = DefaultSetHelper.FindElementPtr(ElementPtr, It.GetLogicalIndex());
 
-				ElementProp->InstanceSubobjects(ElementPtr, DefaultElementPtr, InOwner, InstanceGraph);
-
-				--Num;
-			}
+			ElementProp->InstanceSubobjects(ElementPtr, DefaultElementPtr, InOwner, InstanceGraph);
 		}
 	}
 	else
 	{
-		for (int32 Index = 0, Num = SetHelper.Num(); Num; ++Index)
+		for (FScriptSetHelper::FIterator It(SetHelper); It; ++It)
 		{
-			if (SetHelper.IsValidIndex(Index))
-			{
-				uint8* ElementPtr = SetHelper.GetElementPtr(Index);
-
-				ElementProp->InstanceSubobjects(ElementPtr, nullptr, InOwner, InstanceGraph);
-
-				--Num;
-			}
+			uint8* ElementPtr = SetHelper.GetElementPtr(It);
+			ElementProp->InstanceSubobjects(ElementPtr, nullptr, InOwner, InstanceGraph);
 		}
 	}
 }
@@ -835,159 +870,189 @@ bool FSetProperty::SameType(const FProperty* Other) const
 	return Super::SameType(Other) && ElementProp && ElementProp->SameType(SetProp->ElementProp);
 }
 
-EConvertFromTypeResult FSetProperty::ConvertFromType(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct)
+EConvertFromTypeResult FSetProperty::ConvertFromType(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct, const uint8* Defaults)
 {
+	// Ar related calls in this function must be mirrored in FSetProperty::SerializeItem
 	FArchive& UnderlyingArchive = Slot.GetUnderlyingArchive();
 
-	// Ar related calls in this function must be mirrored in FSetProperty::ConvertFromType
 	checkSlow(ElementProp);
 
-	// Ar related calls in this function must be mirrored in FSetProperty::SerializeItem
-	if (Tag.Type == NAME_SetProperty)
+	if (FStructProperty* ElementPropAsStruct = CastField<FStructProperty>(ElementProp))
 	{
-		if (Tag.InnerType != NAME_None && Tag.InnerType != ElementProp->GetID())
+		if (!ElementPropAsStruct->Struct || (ElementPropAsStruct->Struct->GetCppStructOps() && !ElementPropAsStruct->Struct->GetCppStructOps()->HasGetTypeHash()))
 		{
+			// If the type we contain is no longer hashable, we're going to drop the saved data here.
+			// This can happen if the native GetTypeHash function is removed.
+			ensureMsgf(false, TEXT("Set Property %s has an unhashable type %s and will lose its saved data. Package: %s"),
+				*Tag.Name.ToString(), *ElementPropAsStruct->Struct->GetFName().ToString(), *UnderlyingArchive.GetArchiveName());
+
 			FScriptSetHelper ScriptSetHelper(this, ContainerPtrToValuePtr<void>(Data));
+			ScriptSetHelper.EmptyElements();
 
-			uint8* TempElementStorage = nullptr;
-			ON_SCOPE_EXIT
-			{
-				if (TempElementStorage)
-				{
-					ElementProp->DestroyValue(TempElementStorage);
-					FMemory::Free(TempElementStorage);
-				}
-			};
-
-			FPropertyTag InnerPropertyTag;
-			InnerPropertyTag.Type = Tag.InnerType;
-			InnerPropertyTag.ArrayIndex = 0;
-
-			bool bConversionSucceeded = true;
-
-			FStructuredArchive::FRecord ValueRecord = Slot.EnterRecord();
-
-			// When we saved this instance we wrote out any elements that were in the 'Default' instance but not in the 
-			// instance that was being written. Presumably we were constructed from our defaults and must now remove 
-			// any of the elements that were not present when we saved this Set:
-			int32 NumElementsToRemove = 0;
-			FStructuredArchive::FArray ElementsToRemoveArray = ValueRecord.EnterArray(SA_FIELD_NAME(TEXT("ElementsToRemove")), NumElementsToRemove);
-
-			if(NumElementsToRemove)
-			{
-				TempElementStorage = (uint8*)FMemory::Malloc(SetLayout.Size);
-				ElementProp->InitializeValue(TempElementStorage);
-
-				if (ElementProp->ConvertFromType(InnerPropertyTag, ElementsToRemoveArray.EnterElement(), TempElementStorage, DefaultsStruct) == EConvertFromTypeResult::Converted)
-				{
-					int32 Found = ScriptSetHelper.FindElementIndex(TempElementStorage);
-					if (Found != INDEX_NONE)
-					{
-						ScriptSetHelper.RemoveAt(Found);
-					}
-
-					for (int32 I = 1; I < NumElementsToRemove; ++I)
-					{
-						verify(ElementProp->ConvertFromType(InnerPropertyTag, ElementsToRemoveArray.EnterElement(), TempElementStorage, DefaultsStruct) == EConvertFromTypeResult::Converted);
-
-						Found = ScriptSetHelper.FindElementIndex(TempElementStorage);
-						if (Found != INDEX_NONE)
-						{
-							ScriptSetHelper.RemoveAt(Found);
-						}
-					}
-				}
-				else
-				{
-					bConversionSucceeded = false;
-				}
-			}
-
-			int32 Num = 0;
-			FStructuredArchive::FArray ElementsArray = ValueRecord.EnterArray(SA_FIELD_NAME(TEXT("Elements")), Num);
-
-			if(bConversionSucceeded)
-			{
-				if (Num != 0)
-				{
-					// Allocate temporary key space if we haven't allocated it already above
-					if( TempElementStorage == nullptr )
-					{
-						TempElementStorage = (uint8*)FMemory::Malloc(SetLayout.Size);
-						ElementProp->InitializeValue(TempElementStorage);
-					}
-
-					// and read the first entry, we have to check for conversion possibility again because 
-					// NumElementsToRemove may not have run (in fact, it likely did not):
-					if (ElementProp->ConvertFromType(InnerPropertyTag, ElementsArray.EnterElement(), TempElementStorage, DefaultsStruct) == EConvertFromTypeResult::Converted)
-					{
-						if (ScriptSetHelper.FindElementIndex(TempElementStorage) == INDEX_NONE)
-						{
-							const int32 NewElementIndex = ScriptSetHelper.AddDefaultValue_Invalid_NeedsRehash();
-							uint8* NewElementPtr = ScriptSetHelper.GetElementPtrWithoutCheck(NewElementIndex);
-
-							// Copy over deserialized key from temporary storage
-							ElementProp->CopyCompleteValue_InContainer(NewElementPtr, TempElementStorage);
-						}
-
-						// Read remaining items into container
-						for (int32 I = 1; I < Num; ++I)
-						{
-							// Read key into temporary storage
-							verify(ElementProp->ConvertFromType(InnerPropertyTag, ElementsArray.EnterElement(), TempElementStorage, DefaultsStruct) == EConvertFromTypeResult::Converted);
-
-							// Add a new entry if the element doesn't currently exist in the set
-							if (ScriptSetHelper.FindElementIndex(TempElementStorage) == INDEX_NONE)
-							{
-								const int32 NewElementIndex = ScriptSetHelper.AddDefaultValue_Invalid_NeedsRehash();
-								uint8* NewElementPtr = ScriptSetHelper.GetElementPtrWithoutCheck(NewElementIndex);
-
-								// Copy over deserialized key from temporary storage
-								ElementProp->CopyCompleteValue_InContainer(NewElementPtr, TempElementStorage);
-							}
-						}
-					}
-					else
-					{
-						bConversionSucceeded = false;
-					}
-				}
-
-				ScriptSetHelper.Rehash();
-			}
-
-			// if we could not convert the property ourself, then indicate that calling code needs to advance the property
-			if(!bConversionSucceeded)
-			{
-				UE_LOG(LogClass, Warning, TEXT("Set Element Type mismatch in %s of %s - Previous (%s) Current (%s) for package: %s"), *Tag.Name.ToString(), *GetName(), *Tag.InnerType.ToString(), *ElementProp->GetID().ToString(), *UnderlyingArchive.GetArchiveName() );
-			}
-
-			return bConversionSucceeded ? EConvertFromTypeResult::Converted : EConvertFromTypeResult::CannotConvert;
-		}
-
-		if(FStructProperty* ElementPropAsStruct = CastField<FStructProperty>(ElementProp))
-		{
-			if(!ElementPropAsStruct->Struct || (ElementPropAsStruct->Struct->GetCppStructOps() && !ElementPropAsStruct->Struct->GetCppStructOps()->HasGetTypeHash()) )
-			{
-				// If the type we contain is no longer hashable, we're going to drop the saved data here. This can
-				// happen if the native GetTypeHash function is removed.
-				ensureMsgf(false, TEXT("FSetProperty %s with tag %s has an unhashable type %s and will lose its saved data"), *GetName(), *Tag.Name.ToString(), *ElementProp->GetID().ToString());
-
-				FScriptSetHelper ScriptSetHelper(this, ContainerPtrToValuePtr<void>(Data));
-				ScriptSetHelper.EmptyElements();
-
-				return EConvertFromTypeResult::CannotConvert;
-			}
+			return EConvertFromTypeResult::CannotConvert;
 		}
 	}
 
-	return EConvertFromTypeResult::UseSerializeItem;
+	if (Tag.Type != NAME_SetProperty)
+	{
+		return EConvertFromTypeResult::UseSerializeItem;
+	}
+
+	const FPackageFileVersion Version = UnderlyingArchive.UEVer();
+	if (Version >= EUnrealEngineObjectUE5Version::PROPERTY_TAG_COMPLETE_TYPE_NAME)
+	{
+		if (CanSerializeFromTypeName(Tag.GetType()))
+		{
+			return EConvertFromTypeResult::UseSerializeItem;
+		}
+	}
+	else
+	{
+		const FName InnerTypeName = Tag.GetType().GetParameterName(0);
+		if (InnerTypeName.IsNone() || InnerTypeName == ElementProp->GetID())
+		{
+			return EConvertFromTypeResult::UseSerializeItem;
+		}
+	}
+
+	FScriptSetHelper ScriptSetHelper(this, ContainerPtrToValuePtr<void>(Data));
+
+	uint8* TempElementStorage = nullptr;
+	ON_SCOPE_EXIT
+	{
+		if (TempElementStorage)
+		{
+			ElementProp->DestroyAndFreeValue(TempElementStorage);
+		}
+	};
+
+	FPropertyTag InnerPropertyTag;
+	InnerPropertyTag.SetType(Tag.GetType().GetParameter(0));
+	InnerPropertyTag.Name = Tag.Name;
+	InnerPropertyTag.ArrayIndex = 0;
+
+	bool bConversionSucceeded = true;
+
+	FStructuredArchive::FRecord ValueRecord = Slot.EnterRecord();
+
+	// When we saved this instance we wrote out any elements that were in the 'Default' instance but not in the
+	// instance that was being written. Presumably we were constructed from our defaults and must now remove
+	// any of the elements that were not present when we saved this Set:
+	int32 NumElementsToRemove = 0;
+	FStructuredArchive::FArray ElementsToRemoveArray = ValueRecord.EnterArray(TEXT("ElementsToRemove"), NumElementsToRemove);
+
+	if (NumElementsToRemove)
+	{
+		TempElementStorage = (uint8*)ElementProp->AllocateAndInitializeValue();
+
+		EConvertFromTypeResult ConvertResult = ElementProp->ConvertFromType(InnerPropertyTag, ElementsToRemoveArray.EnterElement(), TempElementStorage, DefaultsStruct, nullptr);
+		if (ConvertResult == EConvertFromTypeResult::Converted || ConvertResult == EConvertFromTypeResult::Serialized)
+		{
+			int32 Found = ScriptSetHelper.FindElementIndex(TempElementStorage);
+			if (Found != INDEX_NONE)
+			{
+				ScriptSetHelper.RemoveAt(Found);
+			}
+
+			for (int32 I = 1; I < NumElementsToRemove; ++I)
+			{
+				ConvertResult = ElementProp->ConvertFromType(InnerPropertyTag, ElementsToRemoveArray.EnterElement(), TempElementStorage, DefaultsStruct, nullptr);
+				check(ConvertResult == EConvertFromTypeResult::Converted || ConvertResult == EConvertFromTypeResult::Serialized);
+
+				Found = ScriptSetHelper.FindElementIndex(TempElementStorage);
+				if (Found != INDEX_NONE)
+				{
+					ScriptSetHelper.RemoveAt(Found);
+				}
+			}
+		}
+		else
+		{
+			bConversionSucceeded = false;
+		}
+	}
+
+	int32 Num = 0;
+	FStructuredArchive::FArray ElementsArray = ValueRecord.EnterArray(TEXT("Elements"), Num);
+
+	if (bConversionSucceeded)
+	{
+		if (Num != 0)
+		{
+			// Allocate temporary key space if we haven't allocated it already above
+			if (TempElementStorage == nullptr)
+			{
+				TempElementStorage = (uint8*)ElementProp->AllocateAndInitializeValue();
+			}
+
+			// and read the first entry, we have to check for conversion possibility again because 
+			// NumElementsToRemove may not have run (in fact, it likely did not):
+			EConvertFromTypeResult ConvertResult = ElementProp->ConvertFromType(InnerPropertyTag, ElementsArray.EnterElement(), TempElementStorage, DefaultsStruct, nullptr);
+			if (ConvertResult == EConvertFromTypeResult::Converted || ConvertResult == EConvertFromTypeResult::Serialized)
+			{
+				if (ScriptSetHelper.FindElementIndex(TempElementStorage) == INDEX_NONE)
+				{
+					const int32 NewElementIndex = ScriptSetHelper.AddDefaultValue_Invalid_NeedsRehash();
+					uint8* NewElementPtr = ScriptSetHelper.GetElementPtrWithoutCheck(NewElementIndex);
+
+					// Copy over deserialized key from temporary storage
+					ElementProp->CopyCompleteValue_InContainer(NewElementPtr, TempElementStorage);
+				}
+
+				// Read remaining items into container
+				for (int32 I = 1; I < Num; ++I)
+				{
+					// Read key into temporary storage
+					ConvertResult = ElementProp->ConvertFromType(InnerPropertyTag, ElementsArray.EnterElement(), TempElementStorage, DefaultsStruct, nullptr);
+					check(ConvertResult == EConvertFromTypeResult::Converted || ConvertResult == EConvertFromTypeResult::Serialized);
+
+					// Add a new entry if the element doesn't currently exist in the set
+					if (ScriptSetHelper.FindElementIndex(TempElementStorage) == INDEX_NONE)
+					{
+						const int32 NewElementIndex = ScriptSetHelper.AddDefaultValue_Invalid_NeedsRehash();
+						uint8* NewElementPtr = ScriptSetHelper.GetElementPtrWithoutCheck(NewElementIndex);
+
+						// Copy over deserialized key from temporary storage
+						ElementProp->CopyCompleteValue_InContainer(NewElementPtr, TempElementStorage);
+					}
+				}
+			}
+			else
+			{
+				bConversionSucceeded = false;
+			}
+
+			ScriptSetHelper.Rehash();
+		}
+	}
+
+	// if we could not convert the property ourself, then indicate that calling code needs to advance the property
+	if (!bConversionSucceeded)
+	{
+		UE::FPropertyTypeNameBuilder Builder;
+		ElementProp->SaveTypeName(Builder);
+		UE_LOG(LogClass, Warning, TEXT("Set Element Type mismatch in %s - Previous (%s) Current (%s) for package: %s"),
+			*WriteToString<32>(Tag.Name), *WriteToString<32>(InnerPropertyTag.GetType()), *WriteToString<32>(Builder.Build()), *UnderlyingArchive.GetArchiveName());
+	}
+
+	return bConversionSucceeded ? EConvertFromTypeResult::Converted : EConvertFromTypeResult::CannotConvert;
 }
+
+#if WITH_EDITORONLY_DATA
+void FSetProperty::AppendSchemaHash(FBlake3& Builder, bool bSkipEditorOnly) const
+{
+	Super::AppendSchemaHash(Builder, bSkipEditorOnly);
+	if (ElementProp)
+	{
+		ElementProp->AppendSchemaHash(Builder, bSkipEditorOnly);
+	}
+}
+#endif
 
 void FScriptSetHelper::Rehash()
 {
 	// Moved out-of-line to maybe fix a weird link error
-	Set->Rehash(SetLayout, [=](const void* Src) {
+	Set->Rehash(SetLayout, [this](const void* Src) {
 		return ElementProp->GetValueTypeHash(Src);
 	});
 }
@@ -1010,4 +1075,69 @@ void FSetProperty::GetInnerFields(TArray<FField*>& OutFields)
 	}
 }
 
-#include "UObject/DefineUPropertyMacros.h"
+void* FSetProperty::GetValueAddressAtIndex_Direct(const FProperty* Inner, void* InValueAddress, const int32 LogicalIndex) const
+{
+	checkf(Inner == ElementProp, TEXT("Inner property must be identical to ElementProp"));
+
+	FScriptSetHelper SetHelper(this, InValueAddress);
+	const int32 InternalIndex = SetHelper.FindInternalIndex(LogicalIndex);
+	if (InternalIndex != INDEX_NONE)
+	{
+		return SetHelper.GetElementPtrWithoutCheck(InternalIndex);
+	}
+
+	return nullptr;
+}
+
+bool FSetProperty::UseBinaryOrNativeSerialization(const FArchive& Ar) const
+{
+	if (Super::UseBinaryOrNativeSerialization(Ar))
+	{
+		return true;
+	}
+
+	const FProperty* LocalElementProp = ElementProp;
+	check(LocalElementProp);
+	return LocalElementProp->UseBinaryOrNativeSerialization(Ar);
+}
+
+bool FSetProperty::LoadTypeName(UE::FPropertyTypeName Type, const FPropertyTag* Tag)
+{
+	if (!Super::LoadTypeName(Type, Tag))
+	{
+		return false;
+	}
+
+	const UE::FPropertyTypeName ElementType = Type.GetParameter(0);
+	FField* Field = FField::TryConstruct(ElementType.GetName(), this, GetFName(), RF_NoFlags);
+	if (FProperty* Property = CastField<FProperty>(Field); Property && Property->LoadTypeName(ElementType, Tag))
+	{
+		ElementProp = Property;
+		return true;
+	}
+	delete Field;
+	return false;
+}
+
+void FSetProperty::SaveTypeName(UE::FPropertyTypeNameBuilder& Type) const
+{
+	Super::SaveTypeName(Type);
+
+	const FProperty* LocalElementProp = ElementProp;
+	check(LocalElementProp);
+	Type.BeginParameters();
+	LocalElementProp->SaveTypeName(Type);
+	Type.EndParameters();
+}
+
+bool FSetProperty::CanSerializeFromTypeName(UE::FPropertyTypeName Type) const
+{
+	if (!Super::CanSerializeFromTypeName(Type))
+	{
+		return false;
+	}
+
+	const FProperty* LocalElementProp = ElementProp;
+	check(LocalElementProp);
+	return LocalElementProp->CanSerializeFromTypeName(Type.GetParameter(0));
+}

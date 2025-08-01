@@ -2,6 +2,9 @@
 
 #include "Subsystems/WorldSubsystem.h"
 #include "Engine/World.h"
+#include "Subsystems/Subsystem.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(WorldSubsystem)
 
 // ----------------------------------------------------------------------------------
 
@@ -9,6 +12,11 @@ UWorldSubsystem::UWorldSubsystem()
 	: USubsystem()
 {
 
+}
+
+UWorld& UWorldSubsystem::GetWorldRef() const
+{
+	return *CastChecked<UWorld>(GetOuter(), ECastCheckedType::NullChecked);
 }
 
 UWorld* UWorldSubsystem::GetWorld() const
@@ -28,7 +36,7 @@ bool UWorldSubsystem::ShouldCreateSubsystem(UObject* Outer) const
 	return DoesSupportWorldType(World->WorldType);
 }
 
-bool UWorldSubsystem::DoesSupportWorldType(EWorldType::Type WorldType) const
+bool UWorldSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
 {
 	return WorldType == EWorldType::Game || WorldType == EWorldType::Editor || WorldType == EWorldType::PIE;
 }
@@ -51,8 +59,9 @@ bool UTickableWorldSubsystem::IsAllowedToTick() const
 {
 	// No matter what IsTickable says, don't let CDOs or uninitialized world subsystems tick :
 	// Note: even if GetTickableTickType was overridden by the child class and returns something else than ETickableTickType::Never for CDOs, 
-	//  it's probably a mistake, so by default, don't allow ticking. If the child class really intends its CDO to tick, he can always override IsAllowedToTick...
-	return !IsTemplate() && bInitialized;
+	//  it's probably a mistake, so by default, don't allow ticking. If the child class really intends its CDO to tick, it can always override IsAllowedToTick...
+	// NOTE: `bInitialized` must be checked first as `IsTemplate()` might access a dangling `Outer` if we are awaiting GC but `Outer` has already been deleted.
+	return bInitialized && !IsTemplate();
 }
 
 void UTickableWorldSubsystem::Tick(float DeltaTime)
@@ -71,3 +80,4 @@ void UTickableWorldSubsystem::Deinitialize()
 	check(bInitialized);
 	bInitialized = false;
 }
+

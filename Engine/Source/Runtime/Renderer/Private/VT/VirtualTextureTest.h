@@ -19,7 +19,7 @@ public:
 					FVirtualTextureTest( uint32 SizeX, uint32 SizeY, uint32 SizeZ );
 	virtual			~FVirtualTextureTest();
 
-	virtual bool	RequestPageData( uint8 vLevel, uint64 vAddress, void* RESTRICT& Location ) /*const*/ override;
+	virtual bool	RequestPageData( FRHICommandList& RHICmdList, uint8 vLevel, uint64 vAddress, void* RESTRICT& Location ) /*const*/ override;
 	virtual void	ProducePageData( FRHICommandList& RHICmdList, ERHIFeatureLevel::Type FeatureLevel, uint8 vLevel, uint64 vAddress, uint16 pAddress, void* RESTRICT Location ) /*const*/ override;
 	virtual void    DumpToConsole(bool verbose) override;
 };
@@ -32,10 +32,10 @@ public:
 					~FVirtualTextureTestType();
 
 	// FRenderResource interface
-	virtual void	InitDynamicRHI() override;
-	virtual void	ReleaseDynamicRHI() override;
+	virtual void	InitRHI(FRHICommandListBase& RHICmdList) override;
+	virtual void	ReleaseRHI() override;
 	
-	FRHITexture*	GetPhysicalTexture() const		{ return PhysicalTexture->GetRenderTargetItem().ShaderResourceTexture; }
+	FRHITexture*	GetPhysicalTexture() const		{ return PhysicalTexture->GetRHI(); }
 	FRHITexture*	GetPageTableTexture() const;
 	
 	FTexturePagePool*		Pool;

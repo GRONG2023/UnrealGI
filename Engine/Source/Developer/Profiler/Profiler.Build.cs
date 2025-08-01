@@ -6,41 +6,35 @@ public class Profiler : ModuleRules
 {
 	public Profiler( ReadOnlyTargetRules Target ) : base(Target)
 	{
-		PrivateIncludePaths.AddRange
-		(
-			new string[] {
-				"Developer/Profiler/Private",
-				"Developer/Profiler/Private/Widgets",
-			}
-		);
+		UnsafeTypeCastWarningLevel = WarningLevel.Error;
 
-		PublicDependencyModuleNames.AddRange
-		(
+		PublicDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
+				"CoreUObject",
 				"ApplicationCore",
-                "InputCore",
+				"InputCore",
 				"RHI",
 				"RenderCore",
 				"Slate",
-                "EditorStyle",
 				"ProfilerClient",
 				"DesktopPlatform",
 			}
 		);
 
-        if (Target.bBuildEditor)
-        {
-            PrivateDependencyModuleNames.AddRange(
-                new string[] {
+		if (Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.AddRange(
+				new string[] {
 					"Engine",
 				}
-            );
-        }
+			);
+		}
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
 				"SlateCore",
+				"ToolWidgets"
 			}
 		);
 

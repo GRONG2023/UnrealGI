@@ -18,9 +18,11 @@
 #include "Textures/SlateIcon.h"
 #include "Framework/Docking/TabManager.h"
 #include "MoviePlayerSettings.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Settings/ProjectPackagingSettings.h"
+#if WITH_UNREAL_TARGET_DEVELOPER_TOOLS
 #include "Interfaces/IProjectTargetPlatformEditorModule.h"
+#endif
 #include "ISettingsCategory.h"
 #include "ISettingsContainer.h"
 #include "ISettingsEditorModel.h"
@@ -34,7 +36,7 @@
 
 
 #include "AISystem.h"
-#include "Runtime/Slate/Public/SlateSettings.h"
+#include "SlateSettings.h"
 
 #define LOCTEXT_NAMESPACE "FProjectSettingsViewerModule"
 
@@ -95,7 +97,7 @@ public:
 		FGlobalTabmanager::Get()->RegisterNomadTabSpawner(ProjectSettingsTabName, FOnSpawnTab::CreateRaw(this, &FProjectSettingsViewerModule::HandleSpawnSettingsTab))
 			.SetDisplayName(LOCTEXT("ProjectSettingsTabTitle", "Project Settings"))
 			.SetMenuType(ETabSpawnerMenuType::Hidden)
-			.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "ProjectSettings.TabIcon"));
+			.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "ProjectSettings.TabIcon"));
 	}
 
 	virtual void ShutdownModule() override
@@ -205,6 +207,7 @@ protected:
 			GetMutableDefault<UProjectPackagingSettings>()
 		);
 
+#if WITH_UNREAL_TARGET_DEVELOPER_TOOLS
 		// platforms settings
 		TWeakPtr<SWidget> ProjectTargetPlatformEditorPanel = FModuleManager::LoadModuleChecked<IProjectTargetPlatformEditorModule>("ProjectTargetPlatformEditor").CreateProjectTargetPlatformEditorPanel();
 		SettingsModule.RegisterSettings("Project", "Project", "SupportedPlatforms",
@@ -212,6 +215,7 @@ protected:
 			LOCTEXT("ProjectSupportedPlatformsSettingsDescription", "Specify which platforms your project supports."),
 			ProjectTargetPlatformEditorPanel.Pin().ToSharedRef()
 		);
+#endif
 
 		// movie settings
 		SettingsModule.RegisterSettings("Project", "Project", "Movies",

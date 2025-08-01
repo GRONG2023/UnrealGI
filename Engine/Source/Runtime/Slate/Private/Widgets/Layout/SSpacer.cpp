@@ -2,15 +2,23 @@
 
 #include "Widgets/Layout/SSpacer.h"
 
+SLATE_IMPLEMENT_WIDGET(SSpacer)
+void SSpacer::PrivateRegisterAttributes(FSlateAttributeInitializer& AttributeInitializer)
+{
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION(AttributeInitializer, SpacerSize, EInvalidateWidgetReason::Layout);
+}
 
-/**
- * Construct this widget
- *
- * @param	InArgs	The declaration data for this widget
- */
+SSpacer::SSpacer()
+	: SpacerSize(*this, FVector2D::ZeroVector)
+	, bIsSpacerSizeBound(false)
+{
+	SetCanTick(false);
+	bCanSupportFocus = false;
+}
+
 void SSpacer::Construct( const FArguments& InArgs )
 {
-	SpacerSize = InArgs._Size;
+	SetSize(InArgs._Size);
 }
 
 

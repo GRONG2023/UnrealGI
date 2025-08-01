@@ -9,68 +9,20 @@ D3D12Query.h: Implementation of D3D12 Query
 class FD3D12RenderQuery : public FRHIRenderQuery, public FD3D12DeviceChild, public FD3D12LinkedAdapterObject<FD3D12RenderQuery>
 {
 public:
-	/** Refcounted storage to result buffer because it could be holding the last valid reference if we have more than n active batches per frame */
-	TRefCountPtr<FD3D12Resource> ResultBuffer;
+	FD3D12RenderQuery(FD3D12Device* Parent, ERenderQueryType InQueryType);
+	~FD3D12RenderQuery();
 
-	/** The cached query result. */
-	uint64 Result;
+	ERenderQueryType const Type;
 
-	// A timestamp so that LDA query results only handle object from the most recent frames.
-	uint32 Timestamp;
+	// Signaled when the result is available. Nullptr if the query has never been used.
+	FD3D12SyncPointRef SyncPoint;
 
-	/** The query's index in its heap. */
-	uint32 HeapIndex;
-
-	/** The Frame the query was submitted on. */
-	uint32 FrameSubmitted;
-
-	/** The query's type. */
-	const ERenderQueryType Type;
-
-	/** True if the query's result is cached. */
-	bool bResultIsCached : 1;
-
-	/** True if the query has been resolved. */
-	bool bResolved : 1;
-
-	/** Initialization constructor. */
-	FD3D12RenderQuery(FD3D12Device* Parent, ERenderQueryType InQueryType) :
-		FD3D12DeviceChild(Parent),
-		ResultBuffer(nullptr),
-		Result(0),
-		Timestamp(0),
-		Type(InQueryType)
-	{
-		Reset();
-	}
-
-	inline void Reset()
-	{
-		ResultBuffer = nullptr;
-		HeapIndex = INDEX_NONE;
-		bResultIsCached = false;
-		bResolved = false;		
-		FrameSubmitted = -1;
-	}
-
-	// Indicate the command list that was used to resolve the query.
-	inline void MarkResolved(FD3D12CommandListHandle& CommandList, FD3D12Resource* InResultBuffer)
-	{
-		CLSyncPoint = CommandList;
-		ResultBuffer = InResultBuffer;
-		bResolved = true;
-	}
-
-	inline FD3D12CLSyncPoint& GetSyncPoint()
-	{
-		// Sync point is only valid if we've resolved the query.
-		check(bResolved);
-		return CLSyncPoint;
-	}
-
-private:
-	// When the query result is ready on the GPU.
-	FD3D12CLSyncPoint CLSyncPoint;
+	// The query result, read from the GPU. Heap allocated since it is
+	// accessed by the interrupt thread, and needs to outlive the RHI object.
+	uint64* Result;
+	
+	// The current query location for occlusion queries.
+	FD3D12QueryLocation ActiveLocation;
 };
 
 template<>
@@ -79,183 +31,110 @@ struct TD3D12ResourceTraits<FRHIRenderQuery>
 	typedef FD3D12RenderQuery TConcreteType;
 };
 
-// This class handles query heaps
-class FD3D12QueryHeap : public FD3D12DeviceChild, public FD3D12SingleNodeGPUObject
+// Wraps an ID3D12QueryHeap and its readback buffer. Used by command contexts to create timestamp and occlusion queries.
+// Ref-counting is used to recycle the heaps on parent device when all refering command lists have completed on the GPU.
+class FD3D12QueryHeap final : public FD3D12SingleNodeGPUObject
 {
+	// All query heaps are allocated to fill a single 64KB page
+	static constexpr uint32 MaxHeapSize = 65536;
+
 private:
-	struct QueryBatch
-	{
-	public:
-		uint32 StartElement;    							// The first element in the batch (inclusive)
-		uint32 ElementCount;    							// The number of elements in the batch
-		bool bOpen;             							// Is the batch still open for more begin/end queries?
+	friend FD3D12Device;
+	friend FD3D12QueryLocation;
 
-		TRefCountPtr<ID3D12QueryHeap> UsedQueryHeap;		// The query heap where all elements reside
-		TRefCountPtr<FD3D12Resource> UsedResultBuffer;		// The buffer where all query results are stored
-		
-		// A list of all FD3D12RenderQuery objects used in the batch. 
-		// This is used to set when each queries' result is ready to be read.
-		TArray<FD3D12RenderQuery*> RenderQueries;
+	FD3D12QueryHeap(FD3D12QueryHeap const&) = delete;
+	FD3D12QueryHeap(FD3D12QueryHeap&&) = delete;
 
-		QueryBatch()
-		{
-			RenderQueries.Reserve(256);
-			Clear();
-		}
-
-		inline void Clear()
-		{
-			StartElement = 0;
-			ElementCount = 0;
-			bOpen = false;
-			RenderQueries.Reset();
-
-			UsedQueryHeap = nullptr;
-			UsedResultBuffer = nullptr;
-		}
-	};
+	FD3D12QueryHeap(FD3D12Device* Device, D3D12_QUERY_TYPE QueryType, D3D12_QUERY_HEAP_TYPE HeapType);
 
 public:
-	FD3D12QueryHeap(class FD3D12Device* InParent, const D3D12_QUERY_TYPE InQueryType, uint32 InQueryHeapCount, uint32 InMaxActiveBatches);
+	~FD3D12QueryHeap();
 
-	void Init();
-	void Destroy();
+	FD3D12Device* const Device;
+	D3D12_QUERY_TYPE const QueryType;
+	D3D12_QUERY_HEAP_TYPE const HeapType;
+	uint32 const NumQueries;
 
-	// Start tracking a new batch of begin/end query calls that will be resolved together
-	void StartQueryBatch(FD3D12CommandContext& CmdContext, uint32 NumQueriesInBatch);
-	// Stop tracking the current batch of begin/end query calls that will be resolved together.
-	void EndQueryBatchAndResolveQueryData(FD3D12CommandContext& CmdContext);  
-
-	uint32 AllocQuery(FD3D12CommandContext& CmdContext); // Some query types don't need a BeginQuery call. Instead just alloc a slot to EndQuery with.
-	void BeginQuery(FD3D12CommandContext& CmdContext, FD3D12RenderQuery* RenderQuery); // Obtain a query from the store of available queries
-	void EndQuery(FD3D12CommandContext& CmdContext, FD3D12RenderQuery* RenderQuery);
-
-private:
-	uint32 GetNextElement(uint32 InElement); // Get the next element, after the specified element. Handles overflow.
-
-	uint32 GetNextBatchElement(uint32 InBatchElement);
-
-	void CreateQueryHeap();
-	void DestroyQueryHeap();
-
-	uint64 GetResultBufferOffsetForElement(uint32 InElement) const { return ResultSize * InElement; };
-
-private:
-	QueryBatch CurrentQueryBatch;                       // The current recording batch.
-
-	TArray<QueryBatch> ActiveQueryBatches;              // List of active query batches. The data for these is in use.
-	uint32 LastBatch;                                   // The index of the newest batch.
-
-	uint32 ActiveAllocatedElementCount;					// The number of elements that are in use (Active). Between the head and the tail.
-
-	uint32 LastAllocatedElement;						// The last element that was allocated for BeginQuery
-	const D3D12_QUERY_TYPE QueryType;
-	uint32 QueryHeapCount;
-	TRefCountPtr<ID3D12QueryHeap> ActiveQueryHeap;		// The query heap where all elements reside
-	FD3D12ResidencyHandle ActiveQueryHeapResidencyHandle;
-	TRefCountPtr<FD3D12Resource> ActiveResultBuffer;	// The buffer where all query results are stored
-
-	static const uint32 ResultSize = 8;					// The byte size of a result for a single query
-};
-
-/**
- * A simple linear query allocator.
- * Never resolve or cleanup until results are explicitly requested.
- * Begin/EndQuery are thread-safe but other methods are not. Make sure no thread may
- * call Begin/EndQuery before calling ResolveAndGetResults.
- * Only used by ProfileGPU and FD3D12SubmissionGapRecorder to hold command list start/end timestamp queries currently
- */
-class FD3D12LinearQueryHeap final : public FD3D12DeviceChild, public FD3D12SingleNodeGPUObject
-{
-public:
-	enum EHeapState
+	// The byte size of a result for a single query
+	uint32 GetResultSize() const
 	{
-		HS_Open,
-		HS_Closed
-	};
+		switch (QueryType)
+		{
+		default: checkNoEntry(); [[fallthrough]];
+		case D3D12_QUERY_TYPE_TIMESTAMP:
+		case D3D12_QUERY_TYPE_OCCLUSION:
+			return sizeof(uint64);
 
-	FD3D12LinearQueryHeap(class FD3D12Device* InParent, D3D12_QUERY_HEAP_TYPE InHeapType, int32 InChunkSize);
-	~FD3D12LinearQueryHeap();
-
-	/**
-	 * Allocate a slot on query heap and queue a BeginQuery command to the given list
-	 * @param CmdListHandle - a handle to the command list where BeginQuery will be called
-	 * @return index of the allocated query
-	 */
-	int32 BeginQuery(FD3D12CommandListHandle CmdListHandle);
-
-	/**
-	* Allocate a slot on query heap and queue an EndQuery command to the given list
-	* @param CmdListHandle - a handle to the command list where EndQuery will be called
-	* @return index of the allocated query
-	*/
-	int32 EndQuery(FD3D12CommandListHandle CmdListHandle);
-
-	/**
-	* Resolve new queries and get results for a query batch
-	* @param QueryResults - results of the query batch
-	* @param Token - a token that identifies the query batch to get results from. Ignored if bWait is true
-	* @param bWait - whether to wait for the current resolve and its results
-	* @return a new token of the query batch that has just been resolved. INDEX_NONE if bWait is true
-	*/
-	uint64 ResolveAndGetResults(TArray<uint64>& QueryResults, uint64 Token, bool bWait);
-
-	int32 GetNextFreeIdx() const
-	{
-		return HeadSlot.Load(EMemoryOrder::Relaxed) - TailSlot;
+		case D3D12_QUERY_TYPE_PIPELINE_STATISTICS:
+			return sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS);
+		}
 	}
 
+	ID3D12QueryHeap* GetD3DQueryHeap() const { return D3DQueryHeap; }
+	FD3D12Resource* GetResultBuffer() const { return ResultBuffer; }
+
+	FD3D12ResidencyHandle& GetHeapResidencyHandle() { return ResidencyHandle; }
+
+	// Ref-counting used for object pool recycling.
+	uint32 AddRef() { return uint32(NumRefs.Increment()); }
+	uint32 Release();
+
 private:
-	static D3D12_QUERY_TYPE HeapTypeToQueryType(D3D12_QUERY_HEAP_TYPE HeapType);
+	TRefCountPtr<FD3D12Resource> ResultBuffer;
+	uint8 const* ResultPtr = nullptr;
+	TRefCountPtr<ID3D12QueryHeap> D3DQueryHeap;
+	FD3D12ResidencyHandle ResidencyHandle;
 
-	void GetQueryBatchResults(TArray<uint64>& QueryResults, uint64 Token);
+	FThreadSafeCounter NumRefs;
+};
 
-	uint64 StoreQueryBatch(FD3D12CommandListHandle Handle, TRefCountPtr<FD3D12Resource> ResultBuffer, int32 Offset, int32 NumResults);
+inline void FD3D12QueryLocation::CopyResultTo(void* Dst) const
+{
+	check(Dst);
+	check(Index < Heap->NumQueries);
+	check(Heap->ResultPtr);
 
-	/** Returns an index to the allocated heap slot */
-	int32 AllocateQueryHeapSlot();
-	
-	/** Grow the allocator's backing memory */
-	void Grow();
+	void const* Src = Heap->ResultPtr + Index * Heap->GetResultSize();
+	FMemory::Memcpy(Dst, Src, Heap->GetResultSize());
+}
 
-	/** Helper to create a new query heap */
-	void CreateQueryHeap(int32 NumQueries, ID3D12QueryHeap** OutHeap, FD3D12ResidencyHandle& OutResidencyHandle);
+template <typename TValueType>
+inline TValueType FD3D12QueryLocation::GetResult() const
+{
+	check(sizeof(TValueType) >= Heap->GetResultSize());
 
-	/** Helper to create a readback buffer used to hold query results */
-	void CreateResultBuffer(uint64 SizeInBytes, FD3D12Resource** OutBuffer);
+	TValueType Value;
+	CopyResultTo(&Value);
+	return Value;
+}
 
-	/** Release all allocated query heaps and detach them from residency manager */
-	void ReleaseResources();
+inline bool FD3D12QueryRange::IsFull() const
+{
+	return End >= Heap->NumQueries;
+}
 
-	struct FChunk
-	{
-		TRefCountPtr<ID3D12QueryHeap> QueryHeap;
-		FD3D12ResidencyHandle QueryHeapResidencyHandle;
-	};
+class FD3D12QueryAllocator
+{
+public:
+	FD3D12QueryAllocator(FD3D12Device* Device, ED3D12QueueType const QueueType, D3D12_QUERY_TYPE QueryType)
+		: Device(Device)
+		, QueueType(QueueType)
+		, QueryType(QueryType)
+	{}
 
-	struct FQueryBatch
-	{
-		FD3D12CommandListHandle Handle;
-		TRefCountPtr<FD3D12Resource> RBuffer;
-		uint64 StoredCLGeneration;
-		uint64 Token;
-		int32 Offset;
-		int32 NResults;
-	};
+	FD3D12Device*    const Device;
+	ED3D12QueueType  const QueueType;
+	D3D12_QUERY_TYPE const QueryType;
 
-	/** Size in bytes of a single query result */
-	static constexpr SIZE_T ResultSize = sizeof(uint64);
+	// Allocate a query on a query heap, returning its location.
+	// The "target" is where the interrupt thread will write the result when completed by the GPU.
+	FD3D12QueryLocation Allocate(ED3D12QueryType Type, void* Target);
 
-	const D3D12_QUERY_HEAP_TYPE QueryHeapType;
-	const D3D12_QUERY_TYPE QueryType;
-	const int32 ChunkSize;
-	const int32 SlotToHeapIdxShift;
-	TAtomic<int32> HeadSlot;
-	int32 TailSlot;
-	int32 MaxNumQueries;
-	EHeapState HeapState;
-	uint64 NextToken;
-	TArray<FChunk, TInlineAllocator<2>> AllocatedChunks;
-	TArray<FQueryBatch, TInlineAllocator<2>> PendingQueryBatches;
-	FCriticalSection CS;
+	// Resets the allocator and returns the used query ranges
+	void CloseAndReset(TArray<FD3D12QueryRange>& OutRanges);
+
+	bool HasQueries() const	{ return !(Ranges.Num() == 0 || Ranges[0].Start == Ranges[0].End); }
+
+private:
+	TArray<FD3D12QueryRange> Ranges;
 };

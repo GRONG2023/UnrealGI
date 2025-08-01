@@ -2,13 +2,31 @@
 
 #include "Curves/KeyHandle.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(KeyHandle)
+
 
 FKeyHandle::FKeyHandle()
 {
-	static uint32 LastKeyHandleIndex = 1;
+	static std::atomic<uint32> LastKeyHandleIndex = 1;
 	Index = ++LastKeyHandleIndex;
 
-	check(LastKeyHandleIndex != 0); // check in the unlikely event that this overflows
+	if (Index == 0)
+	{
+		// If we are cooking, allow wrap-around
+		if (IsRunningCookCommandlet())
+		{
+			// Skip indices until it's not 0 anymore as we can't 
+			// assign without loss of thread-safety.
+			while (Index == 0)
+			{
+				Index = ++LastKeyHandleIndex;
+			}
+		}
+		else
+		{
+			check(Index != 0); // check in the unlikely event that this overflows
+		}
+	}
 }
 
 FKeyHandle::FKeyHandle(uint32 SpecificIndex)
@@ -20,16 +38,23 @@ FKeyHandle FKeyHandle::Invalid()
 	return FKeyHandle(0);
 }
 
+void FKeyHandleMap::Initialize(TArrayView<const FKeyHandle> InKeyHandles)
+{
+	Empty(InKeyHandles.Num());
+
+	for (int32 Index = 0; Index < InKeyHandles.Num(); ++Index)
+	{
+		const FKeyHandle& Handle = InKeyHandles[Index];
+		KeyHandles.Add(Handle);
+		KeyHandlesToIndices.Add(Handle, Index);
+	}
+}
+
 /* FKeyHandleMap interface
  *****************************************************************************/
 
 void FKeyHandleMap::Add( const FKeyHandle& InHandle, int32 InIndex )
 {
-	for (auto It = KeyHandlesToIndices.CreateIterator(); It; ++It)
-	{
-		int32& KeyIndex = It.Value();
-		if (KeyIndex >= InIndex) { ++KeyIndex; }
-	}
 
 	if (InIndex > KeyHandles.Num())
 	{
@@ -43,6 +68,14 @@ void FKeyHandleMap::Add( const FKeyHandle& InHandle, int32 InIndex )
 	}
 	else
 	{
+		if (InIndex < KeyHandles.Num())
+		{
+			for (auto It = KeyHandlesToIndices.CreateIterator(); It; ++It)
+			{
+				int32& KeyIndex = It.Value();
+				if (KeyIndex >= InIndex) { ++KeyIndex; }
+			}
+		}
 		KeyHandles.Insert(InHandle, InIndex);
 	}
 
@@ -63,10 +96,17 @@ void FKeyHandleMap::SetKeyHandles(int32 Num)
 }
 
 
-void FKeyHandleMap::Empty()
+void FKeyHandleMap::Empty(int32 ExpectedNumElements)
 {
-	KeyHandlesToIndices.Empty();
-	KeyHandles.Empty();
+	KeyHandlesToIndices.Empty(ExpectedNumElements);
+	KeyHandles.Empty(ExpectedNumElements);
+}
+
+
+void FKeyHandleMap::Reserve(int32 NumElements)
+{
+	KeyHandlesToIndices.Reserve(NumElements);
+	KeyHandles.Reserve(NumElements);
 }
 
 
@@ -141,50 +181,20 @@ void FKeyHandleMap::EnsureIndexHasAHandle(int32 KeyIndex)
 int32 FKeyHandleLookupTable::GetIndex(FKeyHandle KeyHandle)
 {
 	const int32* Index = KeyHandlesToIndices.Find(KeyHandle);
-	if (!Index)
-	{
-		// If it's not even in the map, there's no way this could be a valid handle for this container
-		return INDEX_NONE;
-	}
-	else if (KeyHandles.IsValidIndex(*Index) && KeyHandles[*Index] == KeyHandle)
-	{
-		return *Index;
-	}
-
-	// slow lookup and cache
-	const int32 NewCacheIndex = KeyHandles.IndexOfByPredicate(
-		[KeyHandle](const TOptional<FKeyHandle>& PredKeyHandle)
-		{
-			return PredKeyHandle.IsSet() && PredKeyHandle.GetValue() == KeyHandle;
-		}
-	);
-
-	if (NewCacheIndex == INDEX_NONE)
-	{
-		return INDEX_NONE;
-	}
-
-	KeyHandlesToIndices.Add(KeyHandle, NewCacheIndex);
-	return NewCacheIndex;
+	return Index ? *Index : INDEX_NONE;
 }
 
 FKeyHandle FKeyHandleLookupTable::FindOrAddKeyHandle(int32 Index)
 {
-	if (KeyHandles.IsValidIndex(Index) && KeyHandles[Index].IsSet())
+	if (KeyHandles.IsValidIndex(Index))
 	{
-		return KeyHandles[Index].GetValue();
-	}
-	
-	int32 NumToAdd = Index + 1 - KeyHandles.Num();
-	if (NumToAdd > 0)
-	{
-		KeyHandles.AddDefaulted(NumToAdd);
+		return KeyHandles[Index];
 	}
 
 	// Allocate a new key handle
 	FKeyHandle NewKeyHandle;
 
-	KeyHandles[Index] = NewKeyHandle;
+	KeyHandles.Insert(Index, NewKeyHandle);
 	KeyHandlesToIndices.Add(NewKeyHandle, Index);
 
 	return NewKeyHandle;
@@ -194,14 +204,19 @@ void FKeyHandleLookupTable::MoveHandle(int32 OldIndex, int32 NewIndex)
 {
 	if (KeyHandles.IsValidIndex(OldIndex))
 	{
-		TOptional<FKeyHandle> Handle = KeyHandles[OldIndex];
+		FKeyHandle Handle = KeyHandles[OldIndex];
 
-		KeyHandles.RemoveAt(OldIndex, 1, false);
-		KeyHandles.Insert(Handle, NewIndex);
-		if (Handle.IsSet())
+		KeyHandles.RemoveAt(OldIndex);
+		RelocateKeyHandles(OldIndex, -1);
+
+		if (NewIndex < KeyHandles.GetMaxIndex())
 		{
-			KeyHandlesToIndices.Add(Handle.GetValue(), NewIndex);
+			// Move proceeding keys forward to make space
+			RelocateKeyHandles(NewIndex, 1);
 		}
+
+		KeyHandles.Insert(NewIndex, Handle);
+		KeyHandlesToIndices.Add(Handle, NewIndex);
 	}
 }
 
@@ -209,24 +224,26 @@ FKeyHandle FKeyHandleLookupTable::AllocateHandle(int32 Index)
 {
 	FKeyHandle NewKeyHandle;
 
-	int32 NumToAdd = Index + 1 - KeyHandles.Num();
-	if (NumToAdd > 0)
+	if (Index < KeyHandles.GetMaxIndex())
 	{
-		KeyHandles.AddDefaulted(NumToAdd);
+		// Move proceeding keys forward to make space
+		RelocateKeyHandles(Index, 1);
 	}
 
-	KeyHandles.Insert(NewKeyHandle, Index);
+	KeyHandles.Insert(Index, NewKeyHandle);
 	KeyHandlesToIndices.Add(NewKeyHandle, Index);
 	return NewKeyHandle;
 }
 
 void FKeyHandleLookupTable::DeallocateHandle(int32 Index)
 {
-	TOptional<FKeyHandle> KeyHandle = KeyHandles[Index];
-	KeyHandles.RemoveAt(Index, 1, false);
-	if (KeyHandle.IsSet())
+	if (KeyHandles.IsValidIndex(Index))
 	{
-		KeyHandlesToIndices.Remove(KeyHandle.GetValue());
+		KeyHandlesToIndices.Remove(KeyHandles[Index]);
+		KeyHandles.RemoveAt(Index, 1);
+
+		// Move proceeding keys into the gap we just made
+		RelocateKeyHandles(Index+1, -1);
 	}
 }
 
@@ -241,9 +258,77 @@ bool FKeyHandleLookupTable::Serialize(FArchive& Ar)
 	// We're only concerned with Undo/Redo transactions
 	if (Ar.IsTransacting())
 	{
-		Ar << KeyHandles;
+		// Serialize the sparse array so as to preserve indices (by default it only serializes valid entries)
+		int32 NumHandles = KeyHandles.GetMaxIndex();
+		Ar << NumHandles;
+
+		FKeyHandle InvalidHandle = FKeyHandle::Invalid();
+
+		if (Ar.IsLoading())
+		{
+			KeyHandles.Empty(NumHandles);
+			for (int32 Index = 0; Index < NumHandles; ++Index)
+			{
+				FKeyHandle Handle = InvalidHandle;
+				Ar << Handle;
+				if (Handle != InvalidHandle)
+				{
+					KeyHandles.Insert(Index, Handle);
+				}
+			}
+		}
+		else if (Ar.IsSaving())
+		{
+			for (int32 Index = 0; Index < NumHandles; ++Index)
+			{
+				FKeyHandle Handle = KeyHandles.IsAllocated(Index) ? KeyHandles[Index] : InvalidHandle;
+				Ar << Handle;
+			}
+		}
+
 		Ar << KeyHandlesToIndices;
 	}
 
 	return true;
+}
+
+void FKeyHandleLookupTable::RelocateKeyHandles(int32 StartAtIndex, int32 DeltaIndex)
+{
+	if (DeltaIndex == 0)
+	{
+		return;
+	}
+
+	const int32 OldNumKeys = KeyHandles.GetMaxIndex();
+	const int32 NewNumKeys = KeyHandles.GetMaxIndex() + DeltaIndex;
+
+	// Iterate forwards when removing elements, and backwards when adding elements
+	const int32 StartIndex = DeltaIndex > 0 ? OldNumKeys-1   : StartAtIndex;
+	const int32 EndIndex   = DeltaIndex > 0 ? StartAtIndex-1 : OldNumKeys;
+	const int32 Inc        = DeltaIndex > 0 ? -1             : 1;
+
+	if (DeltaIndex > 0)
+	{
+		// Reserve enough space for the new elements
+		KeyHandles.Reserve(NewNumKeys);
+	}
+
+	// Move handles and fixup indices
+	for (int32 FixupIndex = StartIndex; FixupIndex != EndIndex; FixupIndex += Inc)
+	{
+		if (KeyHandles.IsAllocated(FixupIndex))
+		{
+			FKeyHandle Handle = KeyHandles[FixupIndex];
+
+			KeyHandles.Insert(FixupIndex+DeltaIndex, Handle);
+			KeyHandlesToIndices.Add(Handle, FixupIndex+DeltaIndex);
+
+			KeyHandles.RemoveAt(FixupIndex);
+		}
+	}
+
+	if (DeltaIndex < 0)
+	{
+		KeyHandles.Shrink();
+	}
 }

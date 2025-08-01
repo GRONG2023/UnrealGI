@@ -9,7 +9,7 @@
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Framework/Docking/WorkspaceItem.h"
 #include "Framework/Docking/TabManager.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Interfaces/ITargetPlatform.h"
 #include "Models/DeviceDetailsCommands.h"
 #include "Widgets/Apps/SDeviceApps.h"
@@ -58,30 +58,31 @@ void SDeviceManager::Construct(const FArguments& InArgs, const TSharedRef<ITarge
 	// create & initialize tab manager
 	TabManager = FGlobalTabmanager::Get()->NewTabManager(ConstructUnderMajorTab);
 	TSharedRef<FWorkspaceItem> AppMenuGroup = TabManager->AddLocalWorkspaceMenuCategory(LOCTEXT("DeviceManagerMenuGroupName", "Device Manager"));
+	TabManager->SetAllowWindowMenuBar(true);
 
 	TabManager->RegisterTabSpawner(DeviceBrowserTabId, FOnSpawnTab::CreateRaw(this, &SDeviceManager::HandleTabManagerSpawnTab, DeviceBrowserTabId))
 		.SetDisplayName(LOCTEXT("DeviceBrowserTabTitle", "Device Browser"))
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "DeviceDetails.Tabs.Tools"))
+		.SetIcon(FSlateIcon(FAppStyle::Get().GetStyleSetName(), "Icons.Settings"))
 		.SetGroup(AppMenuGroup);
 
 	TabManager->RegisterTabSpawner(DeviceDetailsTabId, FOnSpawnTab::CreateRaw(this, &SDeviceManager::HandleTabManagerSpawnTab, DeviceDetailsTabId))
 		.SetDisplayName(LOCTEXT("DeviceDetailsTabTitle", "Device Details"))
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "DeviceDetails.Tabs.Tools"))
+		.SetIcon(FSlateIcon(FAppStyle::Get().GetStyleSetName(), "Icons.Settings"))
 		.SetGroup(AppMenuGroup);
 
 	TabManager->RegisterTabSpawner(DeviceAppsTabId, FOnSpawnTab::CreateRaw(this, &SDeviceManager::HandleTabManagerSpawnTab, DeviceAppsTabId))
 		.SetDisplayName(LOCTEXT("DeviceAppsTabTitle", "Deployed Apps"))
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "DeviceDetails.Tabs.Tools"))
+		.SetIcon(FSlateIcon(FAppStyle::Get().GetStyleSetName(), "Icons.Settings"))
 		.SetGroup(AppMenuGroup);
 
 	TabManager->RegisterTabSpawner(DeviceProcessesTabId, FOnSpawnTab::CreateRaw(this, &SDeviceManager::HandleTabManagerSpawnTab, DeviceProcessesTabId))
 		.SetDisplayName(LOCTEXT("DeviceProcessesTabTitle", "Running Processes"))
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "DeviceDetails.Tabs.Tools"))
+		.SetIcon(FSlateIcon(FAppStyle::Get().GetStyleSetName(), "Icons.Settings"))
 		.SetGroup(AppMenuGroup);
 
 	TabManager->RegisterTabSpawner(DeviceToolbarTabId, FOnSpawnTab::CreateRaw(this, &SDeviceManager::HandleTabManagerSpawnTab, DeviceToolbarTabId))
 		.SetDisplayName(LOCTEXT("DeviceToolbarTabTitle", "Toolbar"))
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "DeviceDetails.Tabs.Tools"))
+		.SetIcon(FSlateIcon(FAppStyle::Get().GetStyleSetName(), "Icons.Settings"))
 		.SetGroup(AppMenuGroup);
 
 	// create tab layout
@@ -134,26 +135,16 @@ void SDeviceManager::Construct(const FArguments& InArgs, const TSharedRef<ITarge
 		"Window"
 	);
 
+	TSharedRef<SWidget> MenuWidget = MenuBarBuilder.MakeWidget();
+
 	// construct children
 	ChildSlot
 	[
-		SNew(SVerticalBox)
-
-		+ SVerticalBox::Slot()
-			.AutoHeight()
-			[
-				MenuBarBuilder.MakeWidget()
-			]
-	
-		+ SVerticalBox::Slot()
-			.FillHeight(1.0f)
-			[
-				TabManager->RestoreFrom(Layout, ConstructUnderWindow).ToSharedRef()
-			]
+		TabManager->RestoreFrom(Layout, ConstructUnderWindow).ToSharedRef()
 	];
 
 	// Tell tab-manager about the multi-box for platforms with a global menu bar
-	TabManager->SetMenuMultiBox(MenuBarBuilder.GetMultiBox());
+	TabManager->SetMenuMultiBox(MenuBarBuilder.GetMultiBox(), MenuWidget);
 }
 
 
@@ -279,7 +270,7 @@ bool SDeviceManager::HandleConnectActionCanExecute()
 	{
 		ITargetDevicePtr TargetDevice = DeviceService->GetDevice();
 
-		if (TargetDevice.IsValid() && TargetDevice->GetTargetPlatform().SupportsFeature(ETargetPlatformFeatures::SdkConnectDisconnect))
+		if (TargetDevice.IsValid() && TargetDevice->GetPlatformSettings().SupportsFeature(ETargetPlatformFeatures::SdkConnectDisconnect))
 		{
 			return !TargetDevice->IsConnected();
 		}
@@ -316,7 +307,7 @@ bool SDeviceManager::HandleDisconnectActionCanExecute()
 	{
 		ITargetDevicePtr TargetDevice = DeviceService->GetDevice();
 
-		if (TargetDevice.IsValid() && TargetDevice->GetTargetPlatform().SupportsFeature(ETargetPlatformFeatures::SdkConnectDisconnect))
+		if (TargetDevice.IsValid() && TargetDevice->GetPlatformSettings().SupportsFeature(ETargetPlatformFeatures::SdkConnectDisconnect))
 		{
 			return TargetDevice->IsConnected();
 		}

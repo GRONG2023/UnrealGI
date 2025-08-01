@@ -11,7 +11,7 @@ class IAIPerceptionListenerInterface;
 class UAISenseEvent;
 
 USTRUCT(BlueprintType)
-struct AIMODULE_API FAIDamageEvent
+struct FAIDamageEvent
 {	
 	GENERATED_USTRUCT_BODY()
 
@@ -34,30 +34,30 @@ struct AIMODULE_API FAIDamageEvent
 	
 	/** Damaged actor */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sense")
-	AActor* DamagedActor;
+	TObjectPtr<AActor> DamagedActor;
 
 	/** Actor that instigated damage. Can be None */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sense")
-	AActor* Instigator;
+	TObjectPtr<AActor> Instigator;
 
 	/** Optional named identifier for the damage. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sense")
 	FName Tag;
 	
-	FAIDamageEvent();
-	FAIDamageEvent(AActor* InDamagedActor, AActor* InInstigator, float DamageAmount, const FVector& EventLocation, const FVector& InHitLocation = FAISystem::InvalidLocation, FName InTag = NAME_None);
-	void Compile();
+	AIMODULE_API FAIDamageEvent();
+	AIMODULE_API FAIDamageEvent(AActor* InDamagedActor, AActor* InInstigator, float DamageAmount, const FVector& EventLocation, const FVector& InHitLocation = FAISystem::InvalidLocation, FName InTag = NAME_None);
+	AIMODULE_API void Compile();
 
 	bool IsValid() const
 	{
 		return DamagedActor != nullptr;
 	}
 
-	IAIPerceptionListenerInterface* GetDamagedActorAsPerceptionListener() const;
+	AIMODULE_API IAIPerceptionListenerInterface* GetDamagedActorAsPerceptionListener() const;
 };
 
-UCLASS(ClassGroup=AI)
-class AIMODULE_API UAISense_Damage : public UAISense
+UCLASS(ClassGroup=AI, MinimalAPI)
+class UAISense_Damage : public UAISense
 {
 	GENERATED_UCLASS_BODY()
 
@@ -65,13 +65,13 @@ class AIMODULE_API UAISense_Damage : public UAISense
 	TArray<FAIDamageEvent> RegisteredEvents;
 
 public:		
-	void RegisterEvent(const FAIDamageEvent& Event);	
-	virtual void RegisterWrappedEvent(UAISenseEvent& PerceptionEvent) override;
+	AIMODULE_API void RegisterEvent(const FAIDamageEvent& Event);	
+	AIMODULE_API virtual void RegisterWrappedEvent(UAISenseEvent& PerceptionEvent) override;
 
 	/** EventLocation will be reported as Instigator's location at the moment of event happening*/
 	UFUNCTION(BlueprintCallable, Category = "AI|Perception", meta = (WorldContext="WorldContextObject", AdvancedDisplay="HitLocation"))
-	static void ReportDamageEvent(UObject* WorldContextObject, AActor* DamagedActor, AActor* Instigator, float DamageAmount, FVector EventLocation, FVector HitLocation, FName Tag = NAME_None);
+	static AIMODULE_API void ReportDamageEvent(UObject* WorldContextObject, AActor* DamagedActor, AActor* Instigator, float DamageAmount, FVector EventLocation, FVector HitLocation, FName Tag = NAME_None);
 
 protected:
-	virtual float Update() override;
+	AIMODULE_API virtual float Update() override;
 };

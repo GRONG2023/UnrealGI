@@ -73,11 +73,6 @@ public class FDatasmithFacadeUEPbrMaterial : FDatasmithFacadeBaseMaterial {
     return ret;
   }
 
-  public FDatasmithFacadeExpressionInput GetWorldDisplacement() {
-    FDatasmithFacadeExpressionInput ret = new FDatasmithFacadeExpressionInput(DatasmithFacadeCSharpPINVOKE.FDatasmithFacadeUEPbrMaterial_GetWorldDisplacement(swigCPtr), true);
-    return ret;
-  }
-
   public FDatasmithFacadeExpressionInput GetRefraction() {
     FDatasmithFacadeExpressionInput ret = new FDatasmithFacadeExpressionInput(DatasmithFacadeCSharpPINVOKE.FDatasmithFacadeUEPbrMaterial_GetRefraction(swigCPtr), true);
     return ret;
@@ -85,6 +80,21 @@ public class FDatasmithFacadeUEPbrMaterial : FDatasmithFacadeBaseMaterial {
 
   public FDatasmithFacadeExpressionInput GetAmbientOcclusion() {
     FDatasmithFacadeExpressionInput ret = new FDatasmithFacadeExpressionInput(DatasmithFacadeCSharpPINVOKE.FDatasmithFacadeUEPbrMaterial_GetAmbientOcclusion(swigCPtr), true);
+    return ret;
+  }
+
+  public FDatasmithFacadeExpressionInput GetClearCoat() {
+    FDatasmithFacadeExpressionInput ret = new FDatasmithFacadeExpressionInput(DatasmithFacadeCSharpPINVOKE.FDatasmithFacadeUEPbrMaterial_GetClearCoat(swigCPtr), true);
+    return ret;
+  }
+
+  public FDatasmithFacadeExpressionInput GetClearCoatRoughness() {
+    FDatasmithFacadeExpressionInput ret = new FDatasmithFacadeExpressionInput(DatasmithFacadeCSharpPINVOKE.FDatasmithFacadeUEPbrMaterial_GetClearCoatRoughness(swigCPtr), true);
+    return ret;
+  }
+
+  public FDatasmithFacadeExpressionInput GetWorldPositionOffset() {
+    FDatasmithFacadeExpressionInput ret = new FDatasmithFacadeExpressionInput(DatasmithFacadeCSharpPINVOKE.FDatasmithFacadeUEPbrMaterial_GetWorldPositionOffset(swigCPtr), true);
     return ret;
   }
 

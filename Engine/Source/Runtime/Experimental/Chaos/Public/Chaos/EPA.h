@@ -1,12 +1,24 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
+
+// HEADER_UNIT_SKIP - Internal
+
 #include "Chaos/Simplex.h"
 #include <queue>
 #include "ChaosCheck.h"
 #include "ChaosLog.h"
+#include "Templates/Function.h"
 
 namespace Chaos
 {
+
+inline constexpr int32 ArraySizeEPA = 16;
+
+// Array type used in EPA to avoid heap allocation for small convex shapes
+// @todo(chaos): The inline size was picked to avoid allocations in box-box collision - it might need adjusting after more general purpose testing
+// @todo(chaos): We might also consider different inline sizes based on array use-case (e.g., Entries array versus Border array)
+template<typename T>
+using TEPAWorkingArray = TArray<T, TInlineAllocator<32>>;
 
 template <typename T>
 FORCEINLINE const TVec3<T> MinkowskiVert(const TVec3<T>* VertsABuffer, const TVec3<T>* VertsBBuffer, const int32 Idx)
@@ -25,26 +37,41 @@ struct TEPAEntry
 	TVector<int32,3> AdjEdges;	//Adjacent edges (idx in adjacent face)
 	bool bObsolete;	//indicates that an entry can be skipped (became part of bigger polytope)
 
-	bool operator>(const TEPAEntry<T>& Other) const
+	FORCEINLINE bool operator>(const TEPAEntry<T>& Other) const
 	{
 		return Distance > Other.Distance;
 	}
 
-	bool Initialize(const TVec3<T>* VerticesA, const TVec3<T>* VerticesB, int32 InIdx0, int32 InIdx1, int32 InIdx2, const TVector<int32,3>& InAdjFaces, const TVector<int32,3>& InAdjEdges)
+	static constexpr T SelectEpsilon(float FloatEpsilon, double DoubleEpsilon)
 	{
-		const TVec3<T>& V0 = MinkowskiVert(VerticesA, VerticesB, InIdx0);
-		const TVec3<T>& V1 = MinkowskiVert(VerticesA, VerticesB, InIdx1);
-		const TVec3<T>& V2 = MinkowskiVert(VerticesA, VerticesB, InIdx2);
+		if (sizeof(T) <= sizeof(float))
+		{
+			return FloatEpsilon;
+		}
+		else
+		{
+			return DoubleEpsilon;
+		}
+	}
+
+	FORCEINLINE_DEBUGGABLE bool Initialize(const TVec3<T>* VerticesA, const TVec3<T>* VerticesB, int32 InIdx0, int32 InIdx1, int32 InIdx2, const TVector<int32,3>& InAdjFaces, const TVector<int32,3>& InAdjEdges)
+	{
+		const TVec3<T> V0 = MinkowskiVert(VerticesA, VerticesB, InIdx0);
+		const TVec3<T> V1 = MinkowskiVert(VerticesA, VerticesB, InIdx1);
+		const TVec3<T> V2 = MinkowskiVert(VerticesA, VerticesB, InIdx2);
 
 		const TVec3<T> V0V1 = V1 - V0;
 		const TVec3<T> V0V2 = V2 - V0;
 		const TVec3<T> Norm = TVec3<T>::CrossProduct(V0V1, V0V2);
-		PlaneNormal = Norm.GetSafeNormal();
-		constexpr T Eps = 1e-4;
-		if (PlaneNormal.SizeSquared() < Eps)
+		const T NormLenSq = Norm.SizeSquared();
+		// We have the square of the size of a cross product, so we need the distance margin to be a power of 4
+		// Verbosity emphasizes that
+		const T Eps = TEPAEntry::SelectEpsilon(1.e-4f * 1.e-4f * 1.e-4f * 1.e-4f, 1.e-8 * 1.e-8 * 1.e-8 * 1.e-8);
+		if (NormLenSq < Eps)
 		{
 			return false;
 		}
+		PlaneNormal = Norm * FMath::InvSqrt(NormLenSq);
 		
 		IdxBuffer[0] = InIdx0;
 		IdxBuffer[1] = InIdx1;
@@ -89,7 +116,7 @@ struct TEPAEntry
 		Distance = -Distance;
 	}
 
-	T DistanceToPlane(const TVec3<T>& X) const
+	FORCEINLINE_DEBUGGABLE T DistanceToPlane(const TVec3<T>& X) const
 	{
 		return TVec3<T>::DotProduct(PlaneNormal, X) - Distance;
 	}
@@ -124,8 +151,8 @@ struct TEPAEntry
 	}
 };
 
-template <typename T, typename SupportALambda, typename SupportBLambda >
-bool InitializeEPA(TArray<TVec3<T>>& VertsA, TArray<TVec3<T>>& VertsB, const SupportALambda& SupportA, const SupportBLambda& SupportB, TArray<TEPAEntry<T>>& OutEntries, TVec3<T>& OutTouchNormal)
+template <typename T>
+bool InitializeEPA(TArray<TVec3<T>>& VertsA, TArray<TVec3<T>>& VertsB, TFunctionRef<TVector<T, 3>(const TVec3<T>& V)> SupportA, TFunctionRef<TVector<T, 3>(const TVec3<T>& V)> SupportB, TEPAWorkingArray<TEPAEntry<T>>& OutEntries, TVec3<T>& OutTouchNormal)
 {
 	const int32 NumVerts = VertsA.Num();
 	check(VertsB.Num() == NumVerts);
@@ -197,9 +224,9 @@ bool InitializeEPA(TArray<TVec3<T>>& VertsA, TArray<TVec3<T>>& VertsB, const Sup
 				AddFartherPoint(Orthog);
 				AddFartherPoint(Orthog2);
 
-				bValid = OutEntries[0].Initialize(VertsA.GetData(), VertsB.GetData(), 1, 2, 3, { 3, 1, 2 }, { 1,1, 1 });
-				bValid &= OutEntries[1].Initialize(VertsA.GetData(), VertsB.GetData(), 0, 3, 2, { 2,0,3 }, { 2, 1, 0 });
-				bValid &= OutEntries[2].Initialize(VertsA.GetData(), VertsB.GetData(), 0, 1, 3, { 3,0, 1 }, { 2,2,0 });
+				bValid = OutEntries[0].Initialize(VertsA.GetData(), VertsB.GetData(), 1, 2, 3, { 3,1,2 }, { 1,1,1 });
+				bValid &= OutEntries[1].Initialize(VertsA.GetData(), VertsB.GetData(), 0, 3, 2, { 2,0,3 }, { 2,1,0 });
+				bValid &= OutEntries[2].Initialize(VertsA.GetData(), VertsB.GetData(), 0, 1, 3, { 3,0,1 }, { 2,2,0 });
 				bValid &= OutEntries[3].Initialize(VertsA.GetData(), VertsB.GetData(), 0, 2, 1, { 1,0,2 }, { 2,0,0 });
 
 				if(!bValid)
@@ -226,9 +253,9 @@ bool InitializeEPA(TArray<TVec3<T>>& VertsA, TArray<TVec3<T>>& VertsB, const Sup
 
 				AddFartherPoint(Base.PlaneNormal);
 
-				bValid = OutEntries[0].Initialize(VertsA.GetData(), VertsB.GetData(), 1, 2, 3, { 3, 1, 2 }, { 1,1, 1 });
-				bValid &= OutEntries[1].Initialize(VertsA.GetData(), VertsB.GetData(), 0, 3, 2, { 2,0,3 }, { 2, 1, 0 });
-				bValid &= OutEntries[2].Initialize(VertsA.GetData(), VertsB.GetData(), 0, 1, 3, { 3,0, 1 }, { 2,2,0 });
+				bValid = OutEntries[0].Initialize(VertsA.GetData(), VertsB.GetData(), 1, 2, 3, { 3,1,2 }, { 1,1,1 });
+				bValid &= OutEntries[1].Initialize(VertsA.GetData(), VertsB.GetData(), 0, 3, 2, { 2,0,3 }, { 2,1,0 });
+				bValid &= OutEntries[2].Initialize(VertsA.GetData(), VertsB.GetData(), 0, 1, 3, { 3,0,1 }, { 2,2,0 });
 
 				if(!bValid)
 				{
@@ -240,9 +267,9 @@ bool InitializeEPA(TArray<TVec3<T>>& VertsA, TArray<TVec3<T>>& VertsB, const Sup
 		}
 		case 4:
 		{
-			bValid = OutEntries[0].Initialize(VertsA.GetData(), VertsB.GetData(), 1, 2, 3, { 3, 1, 2 }, { 1,1, 1 });
-			bValid &= OutEntries[1].Initialize(VertsA.GetData(), VertsB.GetData(), 0, 3, 2, { 2,0,3 }, { 2, 1, 0 });
-			bValid &= OutEntries[2].Initialize(VertsA.GetData(), VertsB.GetData(), 0, 1, 3, { 3,0, 1 }, { 2,2,0 });
+			bValid = OutEntries[0].Initialize(VertsA.GetData(), VertsB.GetData(), 1, 2, 3, { 3,1,2 }, { 1,1,1 });
+			bValid &= OutEntries[1].Initialize(VertsA.GetData(), VertsB.GetData(), 0, 3, 2, { 2,0,3 }, { 2,1,0 });
+			bValid &= OutEntries[2].Initialize(VertsA.GetData(), VertsB.GetData(), 0, 1, 3, { 3,0,1 }, { 2,2,0 });
 			bValid &= OutEntries[3].Initialize(VertsA.GetData(), VertsB.GetData(), 0, 2, 1, { 1,0,2 }, { 2,0,0 });
 			
 			if(!bValid)
@@ -288,6 +315,15 @@ bool InitializeEPA(TArray<TVec3<T>>& VertsA, TArray<TVec3<T>>& VertsB, const Sup
 	return bValid;
 }
 
+template <typename T, typename SupportALambda, typename SupportBLambda >
+bool InitializeEPA(TArray<TVec3<T>>& VertsA, TArray<TVec3<T>>& VertsB, const SupportALambda& SupportA, const SupportBLambda& SupportB, TEPAWorkingArray<TEPAEntry<T>>& OutEntries, TVec3<T>& OutTouchNormal)
+{
+	TFunctionRef<TVector<T, 3>(const TVec3<T>& V)> SupportARef(SupportA);
+	TFunctionRef<TVector<T, 3>(const TVec3<T>& V)> SupportBRef(SupportB);
+
+	return InitializeEPA<T>(VertsA, VertsB, SupportARef, SupportBRef, OutEntries, OutTouchNormal);
+}
+
 struct FEPAFloodEntry
 {
 	int32 EntryIdx;
@@ -295,9 +331,8 @@ struct FEPAFloodEntry
 };
 
 template <typename T>
-void EPAComputeVisibilityBorder(TArray<TEPAEntry<T>>& Entries, int32 EntryIdx, const TVec3<T>& W, TArray<FEPAFloodEntry>& OutBorderEdges)
+void EPAComputeVisibilityBorder(TEPAWorkingArray<TEPAEntry<T>>& Entries, int32 EntryIdx, const TVec3<T>& W, TEPAWorkingArray<FEPAFloodEntry>& OutBorderEdges, TEPAWorkingArray<FEPAFloodEntry> &ToVisitStack)
 {
-	TArray<FEPAFloodEntry> ToVisitStack;
 	{
 		TEPAEntry<T>& Entry = Entries[EntryIdx];
 		for (int i = 0; i < 3; ++i)
@@ -311,11 +346,11 @@ void EPAComputeVisibilityBorder(TArray<TEPAEntry<T>>& Entries, int32 EntryIdx, c
 
 	while (ToVisitStack.Num() && Iteration++ < MaxIteration)
 	{
-		const FEPAFloodEntry FloodEntry = ToVisitStack.Pop(false);
+		const FEPAFloodEntry FloodEntry = ToVisitStack.Pop(EAllowShrinking::No);
 		TEPAEntry<T>& Entry = Entries[FloodEntry.EntryIdx];
 		if (!Entry.bObsolete)
 		{
-			if (Entry.DistanceToPlane(W) < 0)
+			if (Entry.DistanceToPlane(W) <= TEPAEntry<T>::SelectEpsilon(1.e-4f, 1.e-8))
 			{
 				//W can't see this triangle so mark the edge as a border
 				OutBorderEdges.Add(FloodEntry);
@@ -388,8 +423,10 @@ enum class EEPAResult
 	MaxIterations,				// We have a contact point, but did not reach the target tolerance before we hit the iteration limit - result accuracy is unknown
 	Degenerate,					// We hit a degenerate condition in EPA which prevents a solution from being generated (result is invalid but objects may be penetrating)
 	BadInitialSimplex,			// The initial setup did not provide a polytope containing the origin (objects are separated)
+	NoValidContact,             // No valid contact have been found, no contacts will be returned
 };
 
+UE_DEPRECATED(5.3, "Not used")
 inline const bool IsEPASuccess(EEPAResult EPAResult)
 {
 	return (EPAResult == EEPAResult::Ok) || (EPAResult == EEPAResult::MaxIterations);
@@ -402,8 +439,17 @@ inline const bool IsEPASuccess(EEPAResult EPAResult)
 // Expanding Polytope Algorithm for finding the contact point for overlapping convex polyhedra.
 // See e.g., "Collision Detection in Interactive 3D Environments" (Gino van den Bergen, 2004)
 // or "Real-time Collision Detection with Implicit Objects" (Leif Olvang, 2010)
-template <typename T, typename SupportALambda, typename SupportBLambda>
-EEPAResult EPA(TArray<TVec3<T>>& VertsABuffer, TArray<TVec3<T>>& VertsBBuffer, const SupportALambda& SupportA, const SupportBLambda& SupportB, T& OutPenetration, TVec3<T>& OutDir, TVec3<T>& WitnessA, TVec3<T>& WitnessB)
+template <typename T, typename TSupportA, typename TSupportB>
+EEPAResult EPA(TArray<TVec3<T>>& VertsABuffer, TArray<TVec3<T>>& VertsBBuffer, const TSupportA& SupportA, const TSupportB& SupportB, T& OutPenetration, TVec3<T>& OutDir, TVec3<T>& WitnessA, TVec3<T>& WitnessB, const FReal Eps = 1.e-2f)
+{
+	const TFunctionRef<TVector<T, 3>(const TVec3<T>& V)> SupportFuncA(SupportA);
+	const TFunctionRef<TVector<T, 3>(const TVec3<T>& V)> SupportFuncB(SupportB);
+	return EPA<T>(VertsABuffer, VertsBBuffer, SupportFuncA, SupportFuncB, OutPenetration, OutDir, WitnessA, WitnessB, Eps);
+}
+
+template <typename T>
+EEPAResult EPA(TArray<TVec3<T>>& VertsABuffer, TArray<TVec3<T>>& VertsBBuffer, const TFunctionRef<TVector<T, 3>(const TVec3<T>& V)>& SupportA,
+	const TFunctionRef<TVector<T, 3>(const TVec3<T>& V)>& SupportB, T& OutPenetration, TVec3<T>& OutDir, TVec3<T>& WitnessA, TVec3<T>& WitnessB, const FReal EpsRel = 1.e-2f)
 {
 	struct FEPAEntryWrapper
 	{
@@ -416,14 +462,10 @@ EEPAResult EPA(TArray<TVec3<T>>& VertsABuffer, TArray<TVec3<T>>& VertsBBuffer, c
 		}
 	};
 
-	T UpperBound = TNumericLimits<T>::Max();
-	T LowerBound = TNumericLimits<T>::Lowest();
-
-	// @todo(chaos): Should we pass in Eps? Does it need to match anything used in GJK?
-	constexpr T Eps = 1e-2;
 	constexpr T OriginInsideEps = 0.0f;
 
-	TArray<TEPAEntry<T>> Entries;
+	TEPAWorkingArray<TEPAEntry<T>> Entries;
+
 	if(!InitializeEPA(VertsABuffer,VertsBBuffer,SupportA,SupportB, Entries, OutDir))
 	{
 		//either degenerate or a touching hit. Either way return penetration 0
@@ -441,29 +483,39 @@ EEPAResult EPA(TArray<TVec3<T>>& VertsABuffer, TArray<TVec3<T>>& VertsBBuffer, c
 	}
 #endif
 	
-	std::priority_queue<FEPAEntryWrapper, std::vector<FEPAEntryWrapper>, std::greater<FEPAEntryWrapper>> Queue;
+	TEPAWorkingArray<int32> Queue;
 	for(int32 Idx = 0; Idx < Entries.Num(); ++Idx)
 	{
 		//ensure(Entries[Idx].Distance > -Eps);
 		// Entries[Idx].Distance <= 0.0f is true if the origin is a bit out of the polytope (we need to support this case for robustness)
 		if(Entries[Idx].Distance <= 0.0f || Entries[Idx].IsOriginProjectedInside(VertsABuffer.GetData(), VertsBBuffer.GetData(), OriginInsideEps))
 		{
-			Queue.push(FEPAEntryWrapper {&Entries, Idx});
+			Queue.Add(Idx);
 		}
 	}
-	
+
+	TEPAWorkingArray<FEPAFloodEntry> VisibilityBorder;
+	TEPAWorkingArray<FEPAFloodEntry> VisibilityBorderToVisitStack;
+
 	//TEPAEntry<T> BestEntry;
 	//BestEntry.Distance = 0;
-	TEPAEntry<T> LastEntry = Queue.size() > 0 ? Entries[Queue.top().Idx] : Entries[0];
-
-	TArray<FEPAFloodEntry> VisibilityBorder;
+	TEPAEntry<T> LastEntry = Queue.Num() > 0 ? Entries[Queue.Last()] : Entries[0];
+	T UpperBound = TNumericLimits<T>::Max();
+	T LowerBound = TNumericLimits<T>::Lowest();
+	bool bQueueDirty = true;
 	int32 Iteration = 0;
 	int32 constexpr MaxIterations = 128;
 	EEPAResult ResultStatus = EEPAResult::MaxIterations;
-	while (Queue.size() && (Iteration++ < MaxIterations))
+	while (Queue.Num() && (Iteration++ < MaxIterations))
 	{
-		int32 EntryIdx = Queue.top().Idx;
-		Queue.pop();
+		if (bQueueDirty)
+		{
+			// Avoiding UE's Sort here because it has a call to FMath::Loge. The std version calls insertion sort when possible
+			std::sort(Queue.GetData(), Queue.GetData() + Queue.Num(), [&Entries](const int32 L, const int32 R) { return Entries[L] > Entries[R]; });
+			bQueueDirty = false;
+		}
+
+		int32 EntryIdx = Queue.Pop(EAllowShrinking::No);
 		TEPAEntry<T>& Entry = Entries[EntryIdx];
 		//bool bBadFace = Entry.IsOriginProjectedInside(VertsABuffer.GetData(), VertsBBuffer.GetData());
 		{
@@ -496,8 +548,10 @@ EEPAResult EPA(TArray<TVec3<T>>& VertsABuffer, TArray<TVec3<T>>& VertsBBuffer, c
 
 		LowerBound = Entry.Distance;
 
-		//It's possible the origin is not contained by the CSO. In this case the upper bound will be negative, at which point we should just exit. Maybe return a different enum value?
-		if (FMath::Abs(UpperBound - LowerBound) <= Eps)
+		// It's possible the origin is not contained by the CSO, probably because of numerical error. 
+		// In this case the upper bound will be negative, at which point we should just exit. 
+		const T UpperBoundTolerance = (T(1) + EpsRel) * FMath::Abs(LowerBound);
+		if (UpperBound <= UpperBoundTolerance)
 		{
 			ResultStatus = EEPAResult::Ok;
 			LastEntry = Entry;
@@ -523,7 +577,8 @@ EEPAResult EPA(TArray<TVec3<T>>& VertsABuffer, TArray<TVec3<T>>& VertsBBuffer, c
 
 		Entry.bObsolete = true;
 		VisibilityBorder.Reset();
-		EPAComputeVisibilityBorder(Entries, EntryIdx, W, VisibilityBorder);
+		VisibilityBorderToVisitStack.Reset();
+		EPAComputeVisibilityBorder(Entries, EntryIdx, W, VisibilityBorder, VisibilityBorderToVisitStack);
 		const int32 NumBorderEdges = VisibilityBorder.Num();
 		const int32 FirstIdxInBatch = Entries.Num();
 		int32 NewIdx = FirstIdxInBatch;
@@ -565,7 +620,8 @@ EEPAResult EPA(TArray<TVec3<T>>& VertsABuffer, TArray<TVec3<T>>& VertsBBuffer, c
 					// NewEntry.Distance <= 0.0f is if the origin is a bit out of the polytope
 					if (NewEntry.Distance <= 0.0f || NewEntry.IsOriginProjectedInside(VertsABuffer.GetData(), VertsBBuffer.GetData(), OriginInsideEps))
 					{
-						Queue.push(FEPAEntryWrapper{ &Entries, NewIdx });
+						Queue.Add(NewIdx);
+						bQueueDirty = true;
 					}
 				}
 
@@ -589,4 +645,5 @@ EEPAResult EPA(TArray<TVec3<T>>& VertsABuffer, TArray<TVec3<T>>& VertsBBuffer, c
 	
 	return ResultStatus;
 }
+
 }

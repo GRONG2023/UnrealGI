@@ -12,14 +12,20 @@
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Input/SComboButton.h"
-#include "EditorStyleSet.h"
-#include "AssetData.h"
+#include "Styling/AppStyle.h"
+#include "AssetRegistry/AssetData.h"
 #include "AssetThumbnail.h"
 #include "PropertyHandle.h"
 #include "Presentation/PropertyEditor/PropertyEditor.h"
 #include "PropertyCustomizationHelpers.h"
 
+class FAssetThumbnail;
+class FPropertyEditor;
+class IPropertyHandle;
+class SBorder;
+class SComboButton;
 class UFactory;
+class FDetailWidgetRow;
 
 /**
  * A widget used to edit Asset-type properties (UObject-derived properties).
@@ -37,50 +43,50 @@ public:
 		Null,
 		// The pointed to actor is fully loaded in memory
 		Loaded,
+		// The pointed to actor exists because the pointed to map is loaded but not the actor
+		Exists,
 		// The pointed to actor is unknown because the pointed to map is not loaded 
 		Unknown,
 		// This is a known bad reference, the owning map is loaded but the actor does not exist
 		Error,
 	};
 
-	SLATE_BEGIN_ARGS( SPropertyEditorAsset )
-		: _AssetFont( FEditorStyle::GetFontStyle("PropertyEditor.AssetName.Font") ) 
-		, _ClassFont( FEditorStyle::GetFontStyle("PropertyEditor.AssetClass.Font") ) 
-		, _DisplayThumbnail(true)
+	SLATE_BEGIN_ARGS(SPropertyEditorAsset)
+		: _DisplayThumbnail(true)
 		, _DisplayUseSelected(true)
 		, _DisplayBrowse(true)
 		, _EnableContentPicker(true)
-		, _DisplayCompactSize(false)
+		, _DisplayCompactSize(true)
 		, _ThumbnailPool(nullptr)
-		, _ThumbnailSize(FIntPoint(64, 64))
+		, _ThumbnailSize(FIntPoint(48, 48))
 		, _ObjectPath()
 		, _Class(nullptr)
 		, _CustomContentSlot()
-		, _ResetToDefaultSlot()
-		{}
-		SLATE_ATTRIBUTE( FSlateFontInfo, AssetFont )
-		SLATE_ATTRIBUTE( FSlateFontInfo, ClassFont )
-		SLATE_ARGUMENT( TOptional<bool>, AllowClear )
-		SLATE_ARGUMENT( bool, DisplayThumbnail )
-		SLATE_ARGUMENT( bool, DisplayUseSelected )
-		SLATE_ARGUMENT( bool, DisplayBrowse )
-		SLATE_ARGUMENT( bool, EnableContentPicker)
-		SLATE_ARGUMENT( bool, DisplayCompactSize)
-		SLATE_ARGUMENT( TSharedPtr<FAssetThumbnailPool>, ThumbnailPool )
-		SLATE_ARGUMENT( FIntPoint, ThumbnailSize )
-		SLATE_ATTRIBUTE( FString, ObjectPath )
-		SLATE_ARGUMENT( UClass*, Class )
-		SLATE_ARGUMENT( TOptional<TArray<UFactory*>>, NewAssetFactories )
-		SLATE_EVENT( FOnSetObject, OnSetObject )
+	{}
+		SLATE_ARGUMENT(TOptional<bool>, AllowClear)
+		SLATE_ARGUMENT(TOptional<bool>, AllowCreate)
+		SLATE_ARGUMENT(bool, DisplayThumbnail)
+		SLATE_ARGUMENT(bool, DisplayUseSelected)
+		SLATE_ARGUMENT(bool, DisplayBrowse)
+		SLATE_EVENT(FSimpleDelegate, OnBrowseOverride)
+		SLATE_ARGUMENT(bool, EnableContentPicker)
+		SLATE_ARGUMENT(bool, DisplayCompactSize)
+		SLATE_ARGUMENT(TSharedPtr<FAssetThumbnailPool>, ThumbnailPool)
+		SLATE_ARGUMENT(FIntPoint, ThumbnailSize)
+		SLATE_ATTRIBUTE(FString, ObjectPath)
+		SLATE_ARGUMENT(const UClass*, Class)
+		SLATE_ARGUMENT(TOptional<TArray<UFactory*>>, NewAssetFactories)
+		SLATE_EVENT(FOnSetObject, OnSetObject)
 		SLATE_EVENT(FOnShouldFilterAsset, OnShouldFilterAsset)
-		SLATE_NAMED_SLOT( FArguments, CustomContentSlot )
-		SLATE_NAMED_SLOT( FArguments, ResetToDefaultSlot )
-		SLATE_ARGUMENT( TSharedPtr<IPropertyHandle>, PropertyHandle )
-		SLATE_ARGUMENT( TArray<FAssetData>, OwnerAssetDataArray)
+		SLATE_NAMED_SLOT(FArguments, CustomContentSlot)
+		SLATE_ARGUMENT(TSharedPtr<IPropertyHandle>, PropertyHandle)
+		SLATE_ARGUMENT(TArray<FAssetData>, OwnerAssetDataArray)
+		SLATE_EVENT(FOnShouldFilterActor, OnShouldFilterActor)
+		SLATE_ARGUMENT(TOptional<FDetailWidgetRow*>, InWidgetRow)
 
 	SLATE_END_ARGS()
 
-	static bool Supports( const TSharedRef< class FPropertyEditor >& InPropertyEditor );
+	static bool Supports( const TSharedRef<FPropertyEditor>& InPropertyEditor );
 	static bool Supports( const FProperty* NodeProperty );
 
 	/**
@@ -94,6 +100,8 @@ public:
 
 	void GetDesiredWidth( float& OutMinDesiredWidth, float &OutMaxDesiredWidth );
 
+	void OpenComboButton();
+
 	/** Override the tick method so we can check for thumbnail differences & update if necessary */
 	virtual void Tick( const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime ) override;
 
@@ -103,23 +111,21 @@ private:
 		UObject* Object;
 		FSoftObjectPath ObjectPath;
 		FAssetData AssetData;
+		UObject* EditorPathOwner;
 
-		FObjectOrAssetData( UObject* InObject = nullptr )
-			: Object( InObject )
-			, ObjectPath( Object )
-		{
-			AssetData = InObject != nullptr && !InObject->IsA<AActor>() ? FAssetData( InObject ) : FAssetData();
-		}
+		FObjectOrAssetData(UObject* InObject = nullptr, UObject* EditorPathOwner = nullptr);
 
 		FObjectOrAssetData( const FSoftObjectPath& InObjectPath )
 			: Object(nullptr)
 			, ObjectPath(InObjectPath)
+			, EditorPathOwner(nullptr)
 		{}
 
 		FObjectOrAssetData( const FAssetData& InAssetData )
-			: Object( nullptr )
+			: Object(nullptr)
 			, ObjectPath( InAssetData.ToSoftObjectPath() )
 			, AssetData( InAssetData )
+			, EditorPathOwner(nullptr)
 		{}
 
 		bool IsValid() const
@@ -213,13 +219,13 @@ private:
 	 * or the Class value this widget was constructed with.
 	 * @returns the UClass to display
 	 */
-	UClass* GetDisplayedClass() const;
+	const UClass* GetDisplayedClass() const;
 
 	/** 
 	 * Delegate for handling selection in the asset browser.
 	 * @param	Object	The chosen asset
 	 */
-	void OnAssetSelected( const struct FAssetData& AssetData );
+	void OnAssetSelected( const FAssetData& AssetData );
 
 	/** 
 	 * Delegate for handling selection in the scene outliner.
@@ -271,13 +277,13 @@ private:
 	 * @param	OutReason	When returning false, the reason it was not allowed
 	 * @returns true if the object can be dropped
 	 */
-	bool OnAssetDraggedOver( const UObject* InObject, FText& OutReason ) const;
+	bool OnAssetDraggedOver( TArrayView<FAssetData> InAssets, FText& OutReason ) const;
 
 	/** 
 	 * Delegate handling dropping an object on this widget
 	 * @param	InObject	The object we are dropping
 	 */
-	void OnAssetDropped( UObject* InObject );
+	void OnAssetDropped( const FDragDropEvent&, TArrayView<FAssetData> InAssets );
 
 	/** 
 	 * Delegate handling ctrl+c
@@ -288,6 +294,21 @@ private:
 	 * Delegate handling ctrl+v
 	 */
 	void OnPaste();
+
+	/**
+	 * @return True if the (optionally tagged) input contents can be pasted
+	 */
+	bool CanPasteFromText(const FString& InTag, const FString& InText) const;
+
+	/**
+	 * Delegate handling pasting an optionally tagged text snippet
+	 */
+	void OnPasteFromText(const FString& InTag, const FString& InText, const TOptional<FGuid>& InOperationId);
+
+	/**
+	 * Handle pasting an optionally tagged text snippet
+	 */
+	void PasteFromText(const FString& InTag, const FString& InText);
 
 	/**
 	 * @return True of the current clipboard contents can be pasted
@@ -309,7 +330,7 @@ private:
 	bool CanSetBasedOnAssetReferenceFilter( const FAssetData& InAssetData, FText* OutOptionalFailureReason = nullptr ) const;
 
 	/** @return Returns the property handle most relevant */
-	TSharedPtr<class IPropertyHandle> GetMostSpecificPropertyHandle() const;
+	TSharedPtr<IPropertyHandle> GetMostSpecificPropertyHandle() const;
 
 	/**
 	 * Gets the class of the supplied property for use within the PropertyEditorAsset widget. Asserts if the property
@@ -333,19 +354,19 @@ private:
 	 */
 	void InitializeAssetDataTags(const FProperty* Property);
 
-	/** @return Returns true if the asset is relevant for this property*/
-	bool IsAssetAllowed(const FAssetData& InAssetData);
+	/** @return Returns true if the asset is excluded for this property*/
+	bool IsAssetFiltered(const FAssetData& InAssetData);
 
 private:
 
 	/** Main combobutton */
-	TSharedPtr< class SComboButton > AssetComboButton;
+	TSharedPtr<SComboButton> AssetComboButton;
 
 	/** The border surrounding the thumbnail image. */
-	TSharedPtr< class SBorder > ThumbnailBorder;
+	TSharedPtr<SBorder> ThumbnailBorder;
 
 	/** The property editor, if any */
-	TSharedPtr<class FPropertyEditor> PropertyEditor;
+	TSharedPtr<FPropertyEditor> PropertyEditor;
 
 	/** Path to the object being edited instead of accessing the value directly with a property handle */
 	TAttribute<FString> ObjectPath;
@@ -354,7 +375,7 @@ private:
 	mutable FAssetData CachedAssetData;
 
 	/** The class of the object we are editing */
-	UClass* ObjectClass;
+	const UClass* ObjectClass;
 
 	/** Classes that can be used with this property */
 	TArray<const UClass*> AllowedClassFilters;
@@ -374,11 +395,26 @@ private:
 	/** Whether the asset can be 'None' in this case */
 	bool bAllowClear;
 
+	/** Whether the asset can be created from the asset picker */
+	bool bAllowCreate;
+
 	/** Whether the object we are editing is an Actor (i.e. requires a Scene Outliner to be displayed) */
 	bool bIsActor;
 
 	/** Whether the classes in the AllowedClassFilters list are exact or whether valid classes can be derived. */
 	bool bExactClass;
+
+	/** Wheter the property is a soft reference */
+	bool bIsSoftObjectPath;
+
+	/** Editor Path context if any */
+	UObject* EditorPathOwner;
+
+	/** The number of additional buttons this picker has. */
+	int32 NumButtons;
+
+	/** Base attribute passed to specify whether this editor is enabled */ 
+	TAttribute<bool> OnIsEnabled;
 
 	/** Delegate to call when our object value is set */
 	FOnSetObject OnSetObject;
@@ -387,10 +423,13 @@ private:
 	FOnShouldFilterAsset OnShouldFilterAsset;
 
 	/** Thumbnail for the asset */
-	TSharedPtr<class FAssetThumbnail> AssetThumbnail;
+	TSharedPtr<FAssetThumbnail> AssetThumbnail;
 
 	/** The property handle, if any */
-	TSharedPtr<class IPropertyHandle> PropertyHandle;
+	TSharedPtr<IPropertyHandle> PropertyHandle;
+
+	/** Delegate for filtering valid actors */
+	FOnShouldFilterActor OnShouldFilterActor;
 
 	/*
 	 * The reference object on which the picker will assign the picked asset, if any.

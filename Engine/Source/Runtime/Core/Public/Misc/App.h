@@ -2,25 +2,33 @@
 
 #pragma once
 
-#include "CoreTypes.h"
-#include "Templates/UnrealTemplate.h"
 #include "Containers/Array.h"
 #include "Containers/UnrealString.h"
-#include "Misc/Parse.h"
-#include "UObject/NameTypes.h"
 #include "CoreGlobals.h"
+#include "CoreTypes.h"
 #include "Delegates/Delegate.h"
-#include "Misc/Guid.h"
-#include "Misc/CoreMisc.h"
-#include "Misc/CommandLine.h"
-#include "Misc/Optional.h"
-#include "Misc/QualifiedFrameTime.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMisc.h"
 #include "HAL/PlatformProcess.h"
+#include "Misc/Build.h"
+#include "Misc/CString.h"
+#include "Misc/CommandLine.h"
+#include "Misc/CoreMisc.h"
+#include "Misc/FrameRate.h"
+#include "Misc/Guid.h"
+#include "Misc/Optional.h"
+#include "Misc/Parse.h"
+#include "Misc/QualifiedFrameTime.h"
+#include "Misc/Timecode.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/NameTypes.h"
+
+class FCbObjectId;
 
 /**
  * Provides information about the application.
  */
-class CORE_API FApp
+class FApp
 {
 public:
 
@@ -29,21 +37,21 @@ public:
 	 *
 	 * @return The branch name.
 	 */
-	static FString GetBranchName();
+	static CORE_API FString GetBranchName();
 
 	/**
 	 * Gets the application's build configuration, i.e. Debug or Shipping.
 	 *
 	 * @return The build configuration.
 	 */
-	static EBuildConfiguration GetBuildConfiguration();
+	static CORE_API EBuildConfiguration GetBuildConfiguration();
 
 	/**
 	 * Gets the target type of the current application (eg. client, server, etc...)
 	 *
 	 * @return The build target type
 	 */
-	static EBuildTargetType GetBuildTargetType();
+	static CORE_API EBuildTargetType GetBuildTargetType();
 
 #if UE_BUILD_DEVELOPMENT
 	/**
@@ -51,7 +59,7 @@ public:
 	 *
 	 * @param Whether we're running in debug game or not.
 	 */
-	static void SetDebugGame(bool bIsDebugGame);
+	static CORE_API void SetDebugGame(bool bIsDebugGame);
 #endif
 
 	/*
@@ -59,37 +67,53 @@ public:
 	*
 	* @return The build version
 	*/
-	static const TCHAR* GetBuildVersion();
+	static CORE_API const TCHAR* GetBuildVersion();
+	
+	/* 
+	 * Gets the URL for a job which created these binaries. 
+	 * This may not be accessible if you are not part of the organization that created this build. 
+	 * May be overridden with FCoreDelegates::OnGetBuildURL
+	 */
+	static CORE_API const TCHAR* GetBuildURL();
+
+	/* 
+	 * Gets the URL for the currently running Horde job/step if any. 
+	 * May be overridden with FCoreDelegates::OnGetExecutingJobURL
+	 */ 
+	static CORE_API const TCHAR* GetExecutingJobURL();
+
+	/* Returns whether the binaries were built with debug info */
+	static CORE_API bool GetIsWithDebugInfo();
 
 	/**
 	 * Gets the date at which this application was built.
 	 *
 	 * @return Build date string.
 	 */
-	static FString GetBuildDate();
+	static CORE_API FString GetBuildDate();
 
 	/**
 	 * Gets the name of the graphics RHI currently in use.
 	 *
 	 * @return name of Graphics RHI
 	 */
-	static FString GetGraphicsRHI();
+	static CORE_API FString GetGraphicsRHI();
 
 	/**
 	 * Sets the Graphics RHI currently in use
 	 */
-	static void SetGraphicsRHI(FString RHIString);
+	static CORE_API void SetGraphicsRHI(FString RHIString);
 
 
 	/**
 	 * Gets the value of ENGINE_IS_PROMOTED_BUILD.
 	 */
-	static int32 GetEngineIsPromotedBuild();
+	static CORE_API int32 GetEngineIsPromotedBuild();
 
 	/**
 	 * Gets the identifier for the unreal engine
 	 */
-	static FString GetEpicProductIdentifier();
+	static CORE_API FString GetEpicProductIdentifier();
 
 	/**
 	 * Gets the name of the current project.
@@ -102,7 +126,7 @@ public:
 	}
 
 	/**
-	 * Gets the name of the application, i.e. "UE4" or "Rocket".
+	 * Gets the name of the application, i.e. "UE" or "Rocket".
 	 *
 	 * @todo need better application name discovery. this is quite horrible and may not work on future platforms.
 	 * @return Application name string.
@@ -174,7 +198,7 @@ public:
 		// At the moment Strcpy is not safe as we don't check the buffer size on all platforms, so we use strncpy here.
 		FCString::Strncpy(GInternalProjectName, InProjectName, UE_ARRAY_COUNT(GInternalProjectName));
 		// And make sure the ProjectName string is null terminated.
-		GInternalProjectName[UE_ARRAY_COUNT(GInternalProjectName) - 1] = 0;
+		GInternalProjectName[UE_ARRAY_COUNT(GInternalProjectName) - 1] = TEXT('\0');
 	}
 
 public:
@@ -212,6 +236,13 @@ public:
 	}
 
 	/**
+	 * Gets the Zen store project id for the current application instance.
+	 *
+	 * @return Zen store project id.
+	 */
+	static CORE_API FString GetZenStoreProjectId();
+
+	/**
 	 * Gets the globally unique identifier of this application instance.
 	 *
 	 * Every running instance of the engine has a globally unique instance identifier
@@ -220,10 +251,7 @@ public:
 	 * @return Instance identifier, or an invalid GUID if there is no local instance.
 	 * @see GetSessionId
 	 */
-	FORCEINLINE static FGuid GetInstanceId()
-	{
-		return InstanceId;
-	}
+	static CORE_API FGuid GetInstanceId();
 
 	/**
 	 * Gets the name of this application instance.
@@ -254,6 +282,14 @@ public:
 	}
 
 	/**
+	 * Gets the identifier of the session that this application is part of as a FCbObject.
+	 *
+	 * @return Session identifier
+	 * @see GetSessionId
+	 */
+	static CORE_API const FCbObjectId& GetSessionObjectId();
+
+	/**
 	 * Gets the name of the session that this application is part of, if any.
 	 *
 	 * @return Session name string.
@@ -281,7 +317,7 @@ public:
 	/**
 	 * Initializes the application session.
 	 */
-	static void InitializeSession();
+	static CORE_API void InitializeSession();
 
 	/**
 	 * Check whether the specified user is authorized to interact with this session.
@@ -316,7 +352,7 @@ public:
 	 */
 	FORCEINLINE static bool IsThisInstance(const FGuid& InInstanceId)
 	{
-		return (InInstanceId == InstanceId);
+		return (InInstanceId == GetInstanceId());
 	};
 
 	/**
@@ -369,6 +405,20 @@ public:
 	}
 
 	/**
+	 * Checks whether this application can render anything or produce a derived data needed for rednering.
+	 * Certain application types never render, but produce DDC used during rendering and as such need to step into some rendering paths.
+	 *
+	 * A meaningful distinction from FApp::CanEverRender() is that commandlets like cooker will have FApp::CanEverRender() == false, but FApp::CanEverRenderOrProduceRenderData() == true.
+	 * As such, this function can be used to guard paths that e.g. load assets' render data.
+	 *
+	 * @return true if the application can render, false otherwise.
+	 */
+	INLINE_CANEVERRENDER static bool CanEverRenderOrProduceRenderData()
+	{
+		return !FPlatformProperties::RequiresCookedData() || FApp::CanEverRender();
+	}
+
+	/**
 	 * Checks whether this application can render audio.
 	 * Certain application types produce sound, while for others this can be controlled via the -nosound cmdline.
 	 * This can be used for decisions like omitting code paths that make no sense on servers or games running in headless mode (e.g. automated tests).
@@ -400,19 +450,19 @@ public:
 	 *
 	 * @return true if the application is installed, false otherwise.
 	 */
-	static bool IsInstalled();
+	static CORE_API bool IsInstalled();
 
 	/**
 	 * Checks whether the engine components of this application have been installed.
 	 *
-	 * In binary UE4 releases, the engine can be installed while the game is not. The game IsInstalled()
+	 * In binary Unreal Engine releases, the engine can be installed while the game is not. The game IsInstalled()
 	 * setting will take precedence over this flag.
 	 *
 	 * To override, pass -engineinstalled or -enginenotinstalled on the command line.
 	 *
 	 * @return true if the engine is installed, false otherwise.
 	 */
-	static bool IsEngineInstalled();
+	static CORE_API bool IsEngineInstalled();
 
 	/**
 	 * Checks whether this application runs unattended.
@@ -422,17 +472,7 @@ public:
 	 *
 	 * @return true if the application runs unattended, false otherwise.
 	 */
-#if ( !PLATFORM_WINDOWS ) || ( !defined(__clang__) )
-	static bool IsUnattended()
-	{
-		// FCommandLine::Get() will assert that the command line has been set.
-		// This function may not be used before FCommandLine::Set() is called.
-		static bool bIsUnattended = FParse::Param(FCommandLine::Get(), TEXT("UNATTENDED"));
-		return bIsUnattended || GIsAutomationTesting;
-	}
-#else
-	static bool IsUnattended(); // @todo clang: Workaround for missing symbol export
-#endif
+	static CORE_API bool IsUnattended();
 
 	/**
 	 * Checks whether the application should run multi-threaded for performance critical features.
@@ -442,7 +482,7 @@ public:
 	 *
 	 * @return true if this isn't a server, has more than one core, does not have a -onethread command line options, etc.
 	 */
-	static bool ShouldUseThreadingForPerformance();
+	static CORE_API bool ShouldUseThreadingForPerformance();
 
 	/**
 	 * Checks whether application is in benchmark mode.
@@ -491,7 +531,11 @@ public:
 	 */
 	static bool UseFixedTimeStep()
 	{
+#if WITH_FIXED_TIME_STEP_SUPPORT
 		return bUseFixedTimeStep;
+#else
+		return false;
+#endif
 	}
 
 	/**
@@ -626,7 +670,7 @@ public:
 	 *
 	 * @return the current timecode.
 	 */
-	static FTimecode GetTimecode();
+	static CORE_API FTimecode GetTimecode();
 
 	/**
 	 * Get the frame rate of the current frame time.
@@ -634,7 +678,7 @@ public:
 	 *
 	 * @return the current timecode frame rate.
 	 */
-	static FFrameRate GetTimecodeFrameRate();
+	static CORE_API FFrameRate GetTimecodeFrameRate();
 
 	/**
 	 * Gets a frame number generated by the engine's timecode provider.
@@ -701,19 +745,19 @@ public:
 	 * 
 	 * @return Volume multiplier to use when app loses focus
 	 */
-	static float GetUnfocusedVolumeMultiplier();
+	static CORE_API float GetUnfocusedVolumeMultiplier();
 
 	/**
 	* Sets the Unfocused Volume Multiplier
 	*/
-	static void SetUnfocusedVolumeMultiplier(float InVolumeMultiplier);
+	static CORE_API void SetUnfocusedVolumeMultiplier(float InVolumeMultiplier);
 
 	/**
 	 * Sets if VRFocus should be used.
 	 *
 	 * @param  bInUseVRFocus	new bUseVRFocus value
 	 */
-	static void SetUseVRFocus(bool bInUseVRFocus);
+	static CORE_API void SetUseVRFocus(bool bInUseVRFocus);
 
 	/**
 	 * Gets if VRFocus should be used
@@ -728,7 +772,7 @@ public:
 	 *
 	 * @param  bInVRFocus	new VRFocus value
 	 */
-	static void SetHasVRFocus(bool bInHasVRFocus);
+	static CORE_API void SetHasVRFocus(bool bInHasVRFocus);
 
 	/**
 	 * Gets VRFocus, which indicates that the application should continue to render 
@@ -739,84 +783,97 @@ public:
 		return bHasVRFocus;
 	}
 	
+	/**
+	 * Sets HasFocus, which is a function that indicates that the application window has focus.
+	 *
+	 * @param  InHasFocusFunction	address of a function that can query the focus state, typically &FPlatformApplicationMisc::IsThisApplicationForeground
+	 */
+	static CORE_API void SetHasFocusFunction(bool (*InHasFocusFunction)());
+
+	/**
+	 * Gets Focus, Indicates that the application should continue to render
+	 * Audio and Video as if it had window focus, even though it may not.
+	 */
+	static CORE_API bool HasFocus();
+
 	/* If the random seed started with a constant or on time, can be affected by -FIXEDSEED or -BENCHMARK */
-	static bool bUseFixedSeed;
+	static CORE_API bool bUseFixedSeed;
 
 	/* Print all initial startup logging */
-	static void PrintStartupLogMessages();
+	static CORE_API void PrintStartupLogMessages();
 
 private:
 
 #if UE_BUILD_DEVELOPMENT
 	/** The current build configuration */
-	static bool bIsDebugGame;
+	static CORE_API bool bIsDebugGame;
 #endif
 
-	/** Holds the instance identifier. */
-	static FGuid InstanceId;
-
 	/** Holds the session identifier. */
-	static FGuid SessionId;
+	static CORE_API FGuid SessionId;
 
 	/** Holds the session name. */
-	static FString SessionName;
+	static CORE_API FString SessionName;
 
 	/** Holds the name of the user that launched session. */
-	static FString SessionOwner;
+	static CORE_API FString SessionOwner;
 
 	/** Holds the name the graphics RHI currently in use*/
-	static FString GraphicsRHI;
+	static CORE_API FString GraphicsRHI;
 
 	/** List of authorized session users. */
-	static TArray<FString> SessionUsers;
+	static CORE_API TArray<FString> SessionUsers;
 
 	/** Holds a flag indicating whether this is a standalone session. */
-	static bool Standalone;
+	static CORE_API bool Standalone;
 
 	/** Holds a flag Whether we are in benchmark mode or not. */
-	static bool bIsBenchmarking;
+	static CORE_API bool bIsBenchmarking;
 
 	/** Holds a flag whether we want to use a fixed time step or not. */
-	static bool bUseFixedTimeStep;
+	static CORE_API bool bUseFixedTimeStep;
 
 	/** Holds time step if a fixed delta time is wanted. */
-	static double FixedDeltaTime;
+	static CORE_API double FixedDeltaTime;
 
 	/** Holds current time. */
-	static double CurrentTime;
+	static CORE_API double CurrentTime;
 
 	/** Holds previous value of CurrentTime. */
-	static double LastTime;
+	static CORE_API double LastTime;
 
 	/** Holds current delta time in seconds. */
-	static double DeltaTime;
+	static CORE_API double DeltaTime;
 
 	/** Holds time we spent sleeping in UpdateTimeAndHandleMaxTickRate() if our frame time was smaller than one allowed by target FPS. */
-	static double IdleTime;
+	static CORE_API double IdleTime;
 
 	/** Holds the amount of IdleTime that was LONGER than we tried to sleep. The OS can't sleep the exact amount of time, so this measures that overshoot. */
-	static double IdleTimeOvershoot;
+	static CORE_API double IdleTimeOvershoot;
 
 	/** Holds overall game time. */
-	static double GameTime;
+	static CORE_API double GameTime;
 
 	/** Holds the current frame time and framerate. */
-	static TOptional<FQualifiedFrameTime> CurrentFrameTime;
+	static CORE_API TOptional<FQualifiedFrameTime> CurrentFrameTime;
 
 	/** Holds if we should generate a drop frame timecode when the frame rate does support it. */
-	static bool bUseDropFrameFormatWhenSupported;
+	static CORE_API bool bUseDropFrameFormatWhenSupported;
 
 	/** Use to affect the app volume when it loses focus */
-	static float VolumeMultiplier;
+	static CORE_API float VolumeMultiplier;
 
 	/** Read from config to define the volume when app loses focus */
-	static float UnfocusedVolumeMultiplier;
+	static CORE_API float UnfocusedVolumeMultiplier;
 
 	/** Holds a flag indicating if VRFocus should be used */
-	static bool bUseVRFocus;
+	static CORE_API bool bUseVRFocus;
 
 	/** Holds a flag indicating if app has focus in side the VR headset */
-	static bool bHasVRFocus;
+	static CORE_API bool bHasVRFocus;
+
+	/** Holds a function address that can indicate if application has focus */
+	static CORE_API bool (*HasFocusFunction)();
 };
 
 

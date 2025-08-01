@@ -219,16 +219,22 @@ public:
 	virtual IDatasmithExpressionInput& GetEmissiveColor() = 0;
 	virtual IDatasmithExpressionInput& GetOpacity() = 0;
 	virtual IDatasmithExpressionInput& GetNormal() = 0;
-	virtual IDatasmithExpressionInput& GetWorldDisplacement() = 0;
 	virtual IDatasmithExpressionInput& GetRefraction() = 0;
 	virtual IDatasmithExpressionInput& GetAmbientOcclusion() = 0;
+	virtual IDatasmithExpressionInput& GetClearCoat() = 0;
+	virtual IDatasmithExpressionInput& GetClearCoatRoughness() = 0;
+	virtual IDatasmithExpressionInput& GetWorldPositionOffset() = 0;
 	virtual IDatasmithExpressionInput& GetMaterialAttributes() = 0;
 
+	/** InBlendMode must match the values of EBlendMode from EngineTypes.h */
 	virtual int GetBlendMode() const = 0;
-	virtual void SetBlendMode( int bInBlendMode ) = 0;
+	virtual void SetBlendMode( int InBlendMode ) = 0;
 
 	virtual bool GetTwoSided() const = 0;
 	virtual void SetTwoSided( bool bTwoSided ) = 0;
+
+	virtual bool GetIsThinSurface() const = 0;
+	virtual void SetIsThinSurface(bool bIsThinSurface) = 0;
 
 	virtual bool GetUseMaterialAttributes() const = 0;
 	virtual void SetUseMaterialAttributes( bool bInUseMaterialAttributes ) = 0;
@@ -240,6 +246,10 @@ public:
 	virtual float GetOpacityMaskClipValue() const = 0;
 	virtual void SetOpacityMaskClipValue(float InClipValue) = 0;
 
+	virtual int GetTranslucencyLightingMode() const = 0;
+	/** InMode must match the values of ETranslucencyLightingMode from EngineTypes.h */
+	virtual void SetTranslucencyLightingMode(int InMode) = 0;
+
 	virtual int32 GetExpressionsCount() const = 0;
 	virtual IDatasmithMaterialExpression* GetExpression( int32 Index ) = 0;
 	virtual int32 GetExpressionIndex( const IDatasmithMaterialExpression* Expression ) const = 0;
@@ -249,6 +259,7 @@ public:
 	template< typename T >
 	T* AddMaterialExpression()
 	{
+		return nullptr;
 	}
 
 	/** Reset all expression to their default values and remove all connections */

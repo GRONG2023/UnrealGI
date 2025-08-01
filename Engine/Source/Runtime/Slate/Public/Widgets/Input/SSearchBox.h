@@ -17,7 +17,7 @@
 class FActiveTimerHandle;
 
 /** A text box that is used for searching. Meant to be as easy to use as possible with as few options as possible. */
-class SLATE_API SSearchBox : public SEditableTextBox
+class SSearchBox : public SEditableTextBox
 {
 
 public:
@@ -47,6 +47,7 @@ public:
 		, _IsSearching(false)
 		, _OnTextChanged()
 		, _OnTextCommitted()
+		, _OnVerifyTextChanged()
 		, _OnSearch()
 		, _SelectAllTextWhenFocused( true )
 		, _DelayChangeNotificationsWhileTyping( true )
@@ -74,6 +75,9 @@ public:
 		/** Invoked whenever the text is committed (e.g. user presses enter) */
 		SLATE_EVENT( FOnTextCommitted, OnTextCommitted )
 
+		/** Called whenever the text is changed programmatically or interactively by the user */
+		SLATE_EVENT( FOnVerifyTextChanged, OnVerifyTextChanged )
+	
 		/** This will add a next and previous button to your search box */
 		SLATE_EVENT( FOnSearch, OnSearch )
 
@@ -92,9 +96,11 @@ public:
 		/** Callback delegate to have first chance handling of the OnKeyDown event */
 		SLATE_EVENT(FOnKeyDown, OnKeyDownHandler)
 
+		/** Optional callback to allow for special functionality to be invoked when the search glass button is clicked */
+		SLATE_EVENT(FOnClicked, OnSearchGlassClicked)
 	SLATE_END_ARGS()
 
-	void Construct( const FArguments& InArgs );
+	SLATE_API void Construct( const FArguments& InArgs );
 
 private:
 

@@ -1,25 +1,46 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "InternationalizationSettingsModelDetails.h"
-#include "Misc/Paths.h"
-#include "Internationalization/Culture.h"
-#include "UObject/Class.h"
-#include "UObject/UObjectHash.h"
-#include "UObject/UObjectIterator.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/SCompoundWidget.h"
-#include "Styling/SlateTypes.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Input/SComboButton.h"
-#include "Widgets/Input/SCheckBox.h"
+
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "DetailCategoryBuilder.h"
 #include "DetailLayoutBuilder.h"
 #include "DetailWidgetRow.h"
-#include "DetailCategoryBuilder.h"
-#include "InternationalizationSettingsModel.h"
 #include "EdGraph/EdGraphSchema.h"
+#include "Fonts/SlateFontInfo.h"
+#include "Framework/SlateDelegates.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Culture.h"
+#include "Internationalization/CulturePointer.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/LocalizedTextSourceTypes.h"
+#include "Internationalization/Text.h"
+#include "Internationalization/TextLocalizationManager.h"
+#include "InternationalizationSettingsModel.h"
+#include "Layout/Children.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
 #include "SCulturePicker.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/Casts.h"
+#include "Types/SlateEnums.h"
+#include "Types/SlateStructs.h"
+#include "UObject/Class.h"
+#include "UObject/UObjectIterator.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SCheckBox.h"
+#include "Widgets/Input/SComboButton.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/Text/STextBlock.h"
+
+class SWidget;
+class UObject;
 
 #define LOCTEXT_NAMESPACE "InternationalizationSettingsModelDetails"
 
@@ -37,13 +58,15 @@ namespace
 
 		FLocalizedCulturesFlyweight()
 		{
+			constexpr bool bIncludeDerivedCultures = false;
+
 			{
 				const TArray<FString> LocalizedCultureNames = FTextLocalizationManager::Get().GetLocalizedCultureNames(ELocalizationLoadFlags::Editor);
-				LocalizedCulturesForEditor = FInternationalization::Get().GetAvailableCultures(LocalizedCultureNames, true);
+				LocalizedCulturesForEditor = FInternationalization::Get().GetAvailableCultures(LocalizedCultureNames, bIncludeDerivedCultures);
 			}
 			{
 				const TArray<FString> LocalizedCultureNames = FTextLocalizationManager::Get().GetLocalizedCultureNames(ELocalizationLoadFlags::Game);
-				LocalizedCulturesForGame = FInternationalization::Get().GetAvailableCultures(LocalizedCultureNames, true);
+				LocalizedCulturesForGame = FInternationalization::Get().GetAvailableCultures(LocalizedCultureNames, bIncludeDerivedCultures);
 			}
 		}
 	};
@@ -87,29 +110,15 @@ namespace
 		{
 			FCulturePtr EditorLanguage = FInternationalization::Get().GetCurrentLanguage();
 
-			const auto& OnSelectionChangedLambda = [=](FCulturePtr& SelectedCulture, ESelectInfo::Type SelectInfo)
+			const auto& OnSelectionChangedLambda = [this](const FCulturePtr& SelectedCulture, ESelectInfo::Type SelectInfo)
 			{
 				if (SettingsModel.IsValid())
 				{
-					FInternationalization& I18N = FInternationalization::Get();
-					const bool bSetLanguageAndLocale = I18N.GetCurrentLanguage() == I18N.GetCurrentLocale();
-
 					SettingsModel->SetEditorLanguage(SelectedCulture.IsValid() ? SelectedCulture->GetName() : TEXT(""));
-					if (bSetLanguageAndLocale)
-					{
-						SettingsModel->SetEditorLocale(SelectedCulture.IsValid() ? SelectedCulture->GetName() : TEXT(""));
-					}
-
 					if (SelectedCulture.IsValid())
 					{
-						if (bSetLanguageAndLocale)
-						{
-							I18N.SetCurrentLanguageAndLocale(SelectedCulture->GetName());
-						}
-						else
-						{
-							I18N.SetCurrentLanguage(SelectedCulture->GetName());
-						}
+						FInternationalization& I18N = FInternationalization::Get();
+						I18N.SetCurrentLanguage(SelectedCulture->GetName());
 
 						// Find all Schemas and force a visualization cache clear
 						for (TObjectIterator<UClass> ClassIt; ClassIt; ++ClassIt)
@@ -129,7 +138,7 @@ namespace
 				}
 			};
 
-			const auto& IsCulturePickableLambda = [=](FCulturePtr Culture) -> bool
+			const auto& IsCulturePickableLambda = [this](FCulturePtr Culture) -> bool
 			{
 				TArray<FString> CultureNames = Culture->GetPrioritizedParentCultureNames();
 				for (const FString& CultureName : CultureNames)
@@ -146,11 +155,12 @@ namespace
 				.InitialSelection(EditorLanguage)
 				.OnSelectionChanged_Lambda(OnSelectionChangedLambda)
 				.IsCulturePickable_Lambda(IsCulturePickableLambda)
-				.DisplayNameFormat(SCulturePicker::ECultureDisplayFormat::ActiveAndNativeCultureDisplayName);
+				.DisplayNameFormat(SCulturePicker::ECultureDisplayFormat::ActiveAndNativeCultureDisplayName)
+				.ViewMode(SCulturePicker::ECulturesViewMode::Flat);
 
 			return SNew(SBox)
-				.MaxDesiredHeight(300.0f)
-				.WidthOverride(300.0f)
+				.MaxDesiredHeight(500.0f)
+				.WidthOverride(350.0f)
 				[
 					CulturePicker
 				];
@@ -196,7 +206,7 @@ namespace
 		{
 			FCulturePtr EditorLocale = FInternationalization::Get().GetCurrentLocale();
 
-			const auto& OnSelectionChangedLambda = [=](FCulturePtr& SelectedCulture, ESelectInfo::Type SelectInfo)
+			const auto& OnSelectionChangedLambda = [this](const FCulturePtr& SelectedCulture, ESelectInfo::Type SelectInfo)
 			{
 				if (SettingsModel.IsValid())
 				{
@@ -236,8 +246,8 @@ namespace
 				.DisplayNameFormat(SCulturePicker::ECultureDisplayFormat::ActiveAndNativeCultureDisplayName);
 
 			return SNew(SBox)
-				.MaxDesiredHeight(300.0f)
-				.WidthOverride(300.0f)
+				.MaxDesiredHeight(500.0f)
+				.WidthOverride(350.0f)
 				[
 					CulturePicker
 				];
@@ -307,7 +317,7 @@ namespace
 				}
 			}
 
-			const auto& CulturePickerSelectLambda = [=](FCulturePtr& SelectedCulture, ESelectInfo::Type SelectInfo)
+			const auto& CulturePickerSelectLambda = [this](const FCulturePtr& SelectedCulture, ESelectInfo::Type SelectInfo)
 			{
 				if (SettingsModel.IsValid())
 				{
@@ -324,7 +334,7 @@ namespace
 					PreviewGameCultureComboButton->SetIsOpen(false);
 				}
 			};
-			const auto& CulturePickerIsPickableLambda = [=](FCulturePtr Culture) -> bool
+			const auto& CulturePickerIsPickableLambda = [this](FCulturePtr Culture) -> bool
 			{
 				TArray<FString> CultureNames = Culture->GetPrioritizedParentCultureNames();
 				for (const FString& CultureName : CultureNames)
@@ -337,13 +347,15 @@ namespace
 				return false;
 			};
 			return SNew(SBox)
-				.MaxDesiredHeight(300.0f)
-				.WidthOverride(300.0f)
+				.MaxDesiredHeight(500.0f)
+				.WidthOverride(350.0f)
 				[
 					SNew(SCulturePicker)
 					.InitialSelection(PreviewGameCulture)
 					.OnSelectionChanged_Lambda(CulturePickerSelectLambda)
 					.IsCulturePickable_Lambda(CulturePickerIsPickableLambda)
+					.DisplayNameFormat(SCulturePicker::ECultureDisplayFormat::ActiveAndNativeCultureDisplayName)
+					.ViewMode(SCulturePicker::ECulturesViewMode::Flat)
 					.CanSelectNone(true)
 				];
 		}

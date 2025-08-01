@@ -17,6 +17,8 @@
 #include "Widgets/Views/STableRow.h"
 #include "Widgets/Views/SListPanel.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(STableViewBase)
+
 namespace ListConstants
 {
 	static const float OvershootMax = 150.0f;
@@ -31,11 +33,11 @@ FTableViewDimensions::FTableViewDimensions(EOrientation InOrientation)
 
 
 FTableViewDimensions::FTableViewDimensions(EOrientation InOrientation, float X, float Y)
-	: FTableViewDimensions(InOrientation, FVector2D(X, Y))
+	: FTableViewDimensions(InOrientation, FVector2f(X, Y))
 {
 }
 
-FTableViewDimensions::FTableViewDimensions(EOrientation InOrientation, const FVector2D& Size)
+FTableViewDimensions::FTableViewDimensions(EOrientation InOrientation, const UE::Slate::FDeprecateVector2DParameter& Size)
 	: FTableViewDimensions(InOrientation)
 {
 	if (InOrientation == Orient_Vertical)
@@ -50,7 +52,7 @@ FTableViewDimensions::FTableViewDimensions(EOrientation InOrientation, const FVe
 	}
 }
 
-void STableViewBase::ConstructChildren( const TAttribute<float>& InItemWidth, const TAttribute<float>& InItemHeight, const TAttribute<EListItemAlignment>& InItemAlignment, const TSharedPtr<SHeaderRow>& InHeaderRow, const TSharedPtr<SScrollBar>& InScrollBar, EOrientation InScrollOrientation, const FOnTableViewScrolled& InOnTableViewScrolled )
+void STableViewBase::ConstructChildren( const TAttribute<float>& InItemWidth, const TAttribute<float>& InItemHeight, const TAttribute<EListItemAlignment>& InItemAlignment, const TSharedPtr<SHeaderRow>& InHeaderRow, const TSharedPtr<SScrollBar>& InScrollBar, EOrientation InScrollOrientation, const FOnTableViewScrolled& InOnTableViewScrolled, const FScrollBarStyle* InScrollBarStyle, const bool bInPreventThrottling )
 {
 	bItemsNeedRefresh = true;
 	
@@ -69,6 +71,15 @@ void STableViewBase::ConstructChildren( const TAttribute<float>& InItemWidth, co
 		.ItemAlignment(InItemAlignment)
 		.ListOrientation(Orientation);
 
+	PinnedItemsPanel = SNew(SListPanel)
+		.Clipping(GetClipping())
+		.ItemWidth(InItemWidth)
+		.ItemHeight(InItemHeight)
+		.NumDesiredItems(this, &STableViewBase::GetNumPinnedItems)
+		.ItemAlignment(InItemAlignment)
+		.ListOrientation(Orientation)
+		.Visibility(this, &STableViewBase::GetPinnedItemsVisiblity);
+
 	TSharedPtr<SWidget> ListAndScrollbar;
 	if (InScrollBar)
 	{
@@ -82,7 +93,9 @@ void STableViewBase::ConstructChildren( const TAttribute<float>& InItemWidth, co
 	{
 		ScrollBar = SNew(SScrollBar)
 			.OnUserScrolled(this, &STableViewBase::ScrollBar_OnUserScrolled)
-			.Orientation(Orientation);
+			.Orientation(Orientation)
+			.Style(InScrollBarStyle ? InScrollBarStyle : &FAppStyle::Get().GetWidgetStyle<FScrollBarStyle>("ScrollBar"))
+			.PreventThrottling(bInPreventThrottling);
 
 		const FOptionalSize ScrollBarSize(16.f);
 
@@ -92,13 +105,23 @@ void STableViewBase::ConstructChildren( const TAttribute<float>& InItemWidth, co
 				+SHorizontalBox::Slot()
 				.FillWidth(1)
 				[
-					ItemsPanel.ToSharedRef()
+					SNew(SVerticalBox)
+					+SVerticalBox::Slot()
+					.AutoHeight()
+					[
+						PinnedItemsPanel.ToSharedRef()
+					]
+					+SVerticalBox::Slot()
+					.FillHeight(1)
+					[
+						ItemsPanel.ToSharedRef()
+					]
 				]
 				+SHorizontalBox::Slot()
 				.AutoWidth()
 				[
 					SNew(SBox)
-					.WidthOverride( FOptionalSize( 16 ) )
+					.WidthOverride(ScrollBarSize)
 					[
 						ScrollBar.ToSharedRef()
 					]
@@ -110,7 +133,17 @@ void STableViewBase::ConstructChildren( const TAttribute<float>& InItemWidth, co
 				+SVerticalBox::Slot()
 				.FillHeight(1)
 				[
-					ItemsPanel.ToSharedRef()
+					SNew(SVerticalBox)
+					+SVerticalBox::Slot()
+					.AutoHeight()
+					[
+						PinnedItemsPanel.ToSharedRef()
+					]
+					+SVerticalBox::Slot()
+					.FillHeight(1)
+					[
+						ItemsPanel.ToSharedRef()
+					]
 				]
 				+SVerticalBox::Slot()
 				.AutoHeight()
@@ -246,7 +279,10 @@ void STableViewBase::Tick( const FGeometry& AllottedGeometry, const double InCur
 	if (ItemsPanel.IsValid())
 	{
 		FGeometry PanelGeometry = FindChildGeometry( AllottedGeometry, ItemsPanel.ToSharedRef() );
-		if ( bItemsNeedRefresh || PanelGeometryLastTick.GetLocalSize() != PanelGeometry.GetLocalSize())
+
+		bool bPanelGeometryChanged = PanelGeometryLastTick.GetLocalSize() != PanelGeometry.GetLocalSize();
+		
+		if ( bItemsNeedRefresh || bPanelGeometryChanged)
 		{
 			PanelGeometryLastTick = PanelGeometry;
 			
@@ -254,10 +290,9 @@ void STableViewBase::Tick( const FGeometry& AllottedGeometry, const double InCur
 			const EScrollIntoViewResult ScrollIntoViewResult = ScrollIntoView(PanelGeometry);
 
 			double TargetScrollOffset = GetTargetScrollOffset();
-
-			if (bEnableAnimatedScrolling)
+			if((bStartedTouchInteraction && bEnableTouchAnimatedScrolling) || (!bStartedTouchInteraction && bEnableAnimatedScrolling))
 			{
-				CurrentScrollOffset = FMath::FInterpTo(CurrentScrollOffset, TargetScrollOffset, InDeltaTime, 12.f);
+				CurrentScrollOffset = FMath::FInterpTo(CurrentScrollOffset, TargetScrollOffset, (double)InDeltaTime, 12.0);
 				if (FMath::IsNearlyEqual(CurrentScrollOffset, TargetScrollOffset, 0.01))
 				{
 					CurrentScrollOffset = TargetScrollOffset;
@@ -288,10 +323,7 @@ void STableViewBase::Tick( const FGeometry& AllottedGeometry, const double InCur
 				CurrentScrollOffset = TargetScrollOffset = DesiredScrollOffset;
 			}
 			
-			// FMath::Fractional() is insufficient here as it casts to int32 (too small for the integer part of a float when the scroll offset is enormous), so we do a double/int64 version here.
-			double FirstLineScrollOffset = CurrentScrollOffset / NumItemsPerLine;
-			FirstLineScrollOffset = FirstLineScrollOffset - (int64)FirstLineScrollOffset;
-			ItemsPanel->SetFirstLineScrollOffset(FirstLineScrollOffset);
+			ItemsPanel->SetFirstLineScrollOffset(GetFirstLineScrollOffset());
 
 			if (AllowOverscroll == EAllowOverscroll::Yes)
 			{
@@ -340,12 +372,15 @@ void STableViewBase::Tick( const FGeometry& AllottedGeometry, const double InCur
 				// Notify as soon as we've made a widget for the item, even if we still have scrolling to do
 				NotifyItemScrolledIntoView();
 			}
-
 			if (ScrollIntoViewResult == EScrollIntoViewResult::Deferred || CurrentScrollOffset != TargetScrollOffset)
 			{
 				// Either we haven't made the item yet or we still have scrolling to do, so we'll need another refresh next frame
 				// We call this rather than just leave bItemsNeedRefresh as true to ensure that EnsureTickToRefresh is registered
 				RequestLayoutRefresh();
+			}
+			else if (CurrentScrollOffset == TargetScrollOffset)
+			{
+				NotifyFinishedScrolling();
 			}
 		}
 	}
@@ -361,7 +396,7 @@ void STableViewBase::ScrollBar_OnUserScrolled( float InScrollOffsetFraction )
 
 FReply STableViewBase::OnPreviewMouseButtonDown( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent )
 {
-	if (MouseEvent.IsTouchEvent())
+	if (bEnableTouchScrolling && MouseEvent.IsTouchEvent())
 	{
 		// Clear any inertia 
 		this->InertialScrollManager.ClearScrollVelocity();
@@ -436,7 +471,7 @@ FReply STableViewBase::OnMouseButtonUp( const FGeometry& MyGeometry, const FPoin
 		if ( HasMouseCapture() )
 		{
 			FSlateRect ListScreenSpaceRect = MyGeometry.GetLayoutBoundingRect();
-			FVector2D CursorPosition = MyGeometry.LocalToAbsolute( SoftwareCursorPosition );
+			FVector2f CursorPosition = MyGeometry.LocalToAbsolute( SoftwareCursorPosition );
 
 			FIntPoint BestPositionInList(
 				FMath::RoundToInt( FMath::Clamp( CursorPosition.X, ListScreenSpaceRect.Left, ListScreenSpaceRect.Right ) ),
@@ -454,7 +489,7 @@ FReply STableViewBase::OnMouseButtonUp( const FGeometry& MyGeometry, const FPoin
 
 FReply STableViewBase::OnMouseMove( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent )
 {	
-	if( MouseEvent.IsMouseButtonDown( EKeys::RightMouseButton ) && !MouseEvent.IsTouchEvent())
+	if( bEnableRightClickScrolling && MouseEvent.IsMouseButtonDown( EKeys::RightMouseButton ) && !MouseEvent.IsTouchEvent() && bIsPointerScrollingEnabled )
 	{
 		// We only care about deltas along the scroll axis
 		FTableViewDimensions CursorDeltaDimensions(Orientation, MouseEvent.GetCursorDelta());
@@ -508,7 +543,7 @@ FReply STableViewBase::OnMouseMove( const FGeometry& MyGeometry, const FPointerE
 
 void STableViewBase::OnMouseEnter( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent )
 {
-	if ( MouseEvent.IsTouchEvent() )
+	if (bEnableTouchScrolling && MouseEvent.IsTouchEvent())
 	{
 		if ( !bStartedTouchInteraction )
 		{
@@ -538,7 +573,7 @@ void STableViewBase::OnMouseLeave( const FPointerEvent& MouseEvent )
 
 FReply STableViewBase::OnMouseWheel( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent )
 {
-	if( !MouseEvent.IsControlDown() )
+	if( bIsPointerScrollingEnabled && !MouseEvent.IsControlDown() )
 	{
 		// Make sure scroll velocity is cleared so it doesn't fight with the mouse wheel input
 		this->InertialScrollManager.ClearScrollVelocity();
@@ -599,7 +634,7 @@ FReply STableViewBase::OnTouchStarted( const FGeometry& MyGeometry, const FPoint
 
 FReply STableViewBase::OnTouchMoved( const FGeometry& MyGeometry, const FPointerEvent& InTouchEvent )
 {
-	if (bStartedTouchInteraction)
+	if (bIsPointerScrollingEnabled && bEnableTouchScrolling && bStartedTouchInteraction)
 	{
 		// We only care about deltas along the scroll axis
 		FTableViewDimensions CursorDeltaDimensions(Orientation, InTouchEvent.GetCursorDelta());
@@ -611,7 +646,7 @@ FReply STableViewBase::OnTouchMoved( const FGeometry& MyGeometry, const FPointer
 		
 		TickScrollDelta -= ScrollByAmount;
 
-		if (FSlateApplication::Get().HasTraveledFarEnoughToTriggerDrag(InTouchEvent, PressedScreenSpacePosition))
+		if (FSlateApplication::Get().HasTraveledFarEnoughToTriggerDrag(InTouchEvent, PressedScreenSpacePosition, Orientation))
 		{
 			// Make sure the active timer is registered to update the inertial scroll
 			if ( !bIsScrollingActiveTimerRegistered )
@@ -620,20 +655,23 @@ FReply STableViewBase::OnTouchMoved( const FGeometry& MyGeometry, const FPointer
 				RegisterActiveTimer(0.f, FWidgetActiveTimerDelegate::CreateSP(this, &STableViewBase::UpdateInertialScroll));
 			}
 
-			const float AmountScrolled = this->ScrollBy( MyGeometry, -ScrollByAmount, EAllowOverscroll::Yes );
+			const float AmountScrolled = this->ScrollBy( MyGeometry, -ScrollByAmount, AllowOverscroll );
+			if (AmountScrolled != 0)
+			{
+				ScrollBar->BeginScrolling();
 
-			ScrollBar->BeginScrolling();
-
-			// The user has moved the list some amount; they are probably
-			// trying to scroll. From now on, the list assumes the user is scrolling
-			// until they lift their finger.
-			return FReply::Handled().CaptureMouse( AsShared() );
+				// The user has moved the list some amount; they are probably
+				// trying to scroll. From now on, the list assumes the user is scrolling
+				// until they lift their finger.
+				return HasMouseCapture() ? FReply::Handled() : FReply::Handled().CaptureMouse(AsShared());
+			}
 		}
-		return FReply::Handled();
+
+		return FReply::Unhandled();
 	}
 	else
 	{
-		return FReply::Handled();
+		return FReply::Unhandled();
 	}
 }
 
@@ -650,7 +688,7 @@ FReply STableViewBase::OnTouchEnded( const FGeometry& MyGeometry, const FPointer
 	}
 	else
 	{
-		return FReply::Handled();
+		return FReply::Unhandled();
 	}
 }
 
@@ -689,9 +727,33 @@ bool STableViewBase::IsPendingRefresh() const
 	return bItemsNeedRefresh || ItemsPanel->IsRefreshPending();
 }
 
+bool STableViewBase::ComputeVolatility() const
+{
+	return BackgroundBrush.IsBound();
+}
+
 int32 STableViewBase::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const
 {
-	int32 NewLayerId = SCompoundWidget::OnPaint( Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled );
+	int32 NewLayerId = LayerId;
+
+	const FSlateBrush* BackgroundBrushResource = BackgroundBrush.Get();
+	if ( BackgroundBrushResource && BackgroundBrushResource->DrawAs != ESlateBrushDrawType::NoDrawType )
+	{
+
+		const bool bIsEnabled = ShouldBeEnabled(bParentEnabled);
+		const ESlateDrawEffect DrawEffects = bIsEnabled ? ESlateDrawEffect::None : ESlateDrawEffect::DisabledEffect;
+
+		FSlateDrawElement::MakeBox(
+				OutDrawElements,
+				++NewLayerId,
+				AllottedGeometry.ToPaintGeometry(),
+				BackgroundBrushResource,
+				DrawEffects,
+				BackgroundBrushResource->GetTint(InWidgetStyle) * InWidgetStyle.GetColorAndOpacityTint() 
+		);
+	}
+
+	NewLayerId = SCompoundWidget::OnPaint( Args, AllottedGeometry, MyCullingRect, OutDrawElements, NewLayerId, InWidgetStyle, bParentEnabled );
 
 	if( !bShowSoftwareCursor )
 	{
@@ -699,11 +761,12 @@ int32 STableViewBase::OnPaint( const FPaintArgs& Args, const FGeometry& Allotted
 	}
 
 	const FSlateBrush* Brush = FCoreStyle::Get().GetBrush(TEXT("SoftwareCursor_Grab"));
+	const FVector2f CursorSize = Brush->ImageSize / AllottedGeometry.Scale;
 
 	FSlateDrawElement::MakeBox(
 		OutDrawElements,
 		++NewLayerId,
-		AllottedGeometry.ToPaintGeometry( SoftwareCursorPosition - ( Brush->ImageSize / 2 ), Brush->ImageSize ),
+		AllottedGeometry.ToPaintGeometry(CursorSize, FSlateLayoutTransform(SoftwareCursorPosition - (CursorSize / .5f ))),
 		Brush
 		);
 
@@ -721,6 +784,7 @@ STableViewBase::STableViewBase( ETableViewMode::Type InTableViewMode )
 	, SoftwareCursorPosition( ForceInitToZero )
 	, bShowSoftwareCursor( false )
 	, WheelScrollMultiplier(GetGlobalScrollAmount())
+	, BackgroundBrush(FStyleDefaults::GetNoBrush())
 	, bIsScrollingActiveTimerRegistered( false )
 	, Overscroll()
 	, AllowOverscroll(EAllowOverscroll::Yes)
@@ -760,12 +824,12 @@ float STableViewBase::ScrollTo( float InScrollOffset)
 	const float NewScrollOffset = FMath::Clamp( InScrollOffset, -10.0f, GetNumItemsBeingObserved()+10.0f );
 	float AmountScrolled = FMath::Abs( DesiredScrollOffset - NewScrollOffset );
 
-	SetScrollOffset( NewScrollOffset );
-	
-	if ( bWasAtEndOfList && NewScrollOffset >= DesiredScrollOffset )
+	if (bWasAtEndOfList && NewScrollOffset >= DesiredScrollOffset)
 	{
 		AmountScrolled = 0;
 	}
+
+	SetScrollOffset( NewScrollOffset );
 
 	return AmountScrolled;
 }
@@ -812,6 +876,21 @@ void STableViewBase::SetScrollbarVisibility(const EVisibility InVisibility)
 	}
 }
 
+EVisibility STableViewBase::GetScrollbarVisibility() const
+{
+	return ScrollBar ? ScrollBar->ShouldBeVisible() : EVisibility::Collapsed;
+}
+
+bool STableViewBase::IsScrollbarNeeded() const
+{
+	if (ScrollBar)
+	{
+		return ScrollBar->IsNeeded();
+	}
+
+	return false;
+}
+
 void STableViewBase::SetFixedLineScrollOffset(TOptional<double> InFixedLineScrollOffset)
 {
 	if (FixedLineScrollOffset != InFixedLineScrollOffset)
@@ -826,9 +905,40 @@ void STableViewBase::SetIsScrollAnimationEnabled(bool bInEnableScrollAnimation)
 	bEnableAnimatedScrolling = bInEnableScrollAnimation;
 }
 
+void STableViewBase::SetEnableTouchAnimatedScrolling(bool bInEnableTouchAnimatedScrolling)
+{
+	bEnableTouchAnimatedScrolling = bInEnableTouchAnimatedScrolling;
+}
+
+void STableViewBase::SetAllowOverscroll(EAllowOverscroll InAllowOverscroll)
+{
+	AllowOverscroll = InAllowOverscroll;
+}
+
+void STableViewBase::SetIsRightClickScrollingEnabled(const bool bInEnableRightClickScrolling)
+{
+	bEnableRightClickScrolling = bInEnableRightClickScrolling;
+}
+
+void STableViewBase::SetIsTouchScrollingEnabled(const bool bInEnableTouchScrolling)
+{
+	bEnableTouchScrolling = bInEnableTouchScrolling;
+	ensureMsgf(!bStartedTouchInteraction, TEXT("TouchScrollingEnabled flag should not be changed while scrolling."));
+}
+
 void STableViewBase::SetWheelScrollMultiplier(float NewWheelScrollMultiplier)
 {
 	WheelScrollMultiplier = NewWheelScrollMultiplier;
+}
+
+void STableViewBase::SetIsPointerScrollingEnabled(bool bInIsPointerScrollingEnabled)
+{
+	bIsPointerScrollingEnabled = bInIsPointerScrollingEnabled;
+}
+
+void STableViewBase::SetBackgroundBrush(const TAttribute<const FSlateBrush*>& InBackgroundBrush)
+{
+	BackgroundBrush.SetImage(*this, InBackgroundBrush);
 }
 
 void STableViewBase::InsertWidget( const TSharedRef<ITableRow> & WidgetToInset )
@@ -852,6 +962,32 @@ void STableViewBase::ClearWidgets()
 	ItemsPanel->ClearItems();
 }
 
+const FChildren* STableViewBase::GetConstructedTableItems() const
+{
+	return ItemsPanel->GetChildren();
+}
+
+void STableViewBase::InsertPinnedWidget( const TSharedRef<SWidget> & WidgetToInset )
+{
+	PinnedItemsPanel->AddSlot(0)
+	[
+		WidgetToInset
+	];
+}
+
+void STableViewBase::AppendPinnedWidget( const TSharedRef<SWidget>& WidgetToAppend )
+{
+	PinnedItemsPanel->AddSlot()
+	[
+		WidgetToAppend
+	];
+}
+
+void STableViewBase::ClearPinnedWidgets()
+{
+	PinnedItemsPanel->ClearItems();
+}
+
 float STableViewBase::GetItemWidth() const
 {
 	return GetItemSize().X;
@@ -862,7 +998,7 @@ float STableViewBase::GetItemHeight() const
 	return GetItemSize().Y;
 }
 
-FVector2D STableViewBase::GetItemSize() const
+UE::Slate::FDeprecateVector2DResult STableViewBase::GetItemSize() const
 {
 	FTableViewDimensions ItemDimensions = ItemsPanel->GetItemSize(PanelGeometryLastTick);
 	ItemDimensions.LineAxis += ItemsPanel->GetItemPadding(PanelGeometryLastTick);
@@ -889,14 +1025,35 @@ int32 STableViewBase::GetNumItemsPerLine() const
 	return 1;
 }
 
+float STableViewBase::GetFirstLineScrollOffset() const
+{
+	// FMath::Fractional() is insufficient here as it casts to int32 (too small for the integer part of a float when
+	// the scroll offset is enormous), so we do a double/int64 version here.
+	const double FirstLineScrollOffset = CurrentScrollOffset / GetNumItemsPerLine();
+	return FirstLineScrollOffset - (int64)FirstLineScrollOffset;
+}
+
 void STableViewBase::NavigateToWidget(const uint32 UserIndex, const TSharedPtr<SWidget>& NavigationDestination, ENavigationSource NavigationSource) const
 {
 	FSlateApplication::Get().NavigateToWidget(UserIndex, NavigationDestination, NavigationSource);
 }
 
+int32 STableViewBase::FindChildUnderPosition(FArrangedChildren& ArrangedChildren, const FVector2D& ArrangedSpacePosition) const
+{
+	if (ItemsPanel.IsValid())
+	{
+		const FGeometry MyGeometry = ItemsPanel->GetCachedGeometry();
+		ItemsPanel->ArrangeChildren(MyGeometry, ArrangedChildren, true);
+
+		return ItemsPanel->FindChildUnderPosition(ArrangedChildren, ArrangedSpacePosition);
+	}
+
+	return INDEX_NONE;
+}
+
 void STableViewBase::OnRightMouseButtonUp(const FPointerEvent& MouseEvent)
 {
-	const FVector2D& SummonLocation = MouseEvent.GetScreenSpacePosition();
+	FVector2f SummonLocation = MouseEvent.GetScreenSpacePosition();
 	const bool bShouldOpenContextMenu = !IsRightClickScrolling();
 	const bool bContextMenuOpeningBound = OnContextMenuOpening.IsBound();
 
@@ -956,6 +1113,11 @@ void STableViewBase::ScrollToBottom()
 	RequestLayoutRefresh();
 }
 
+bool STableViewBase::IsScrolling() const
+{
+	return ScrollBar->IsScrolling();
+}
+
 FVector2D STableViewBase::GetScrollDistance()
 {
 	return FVector2D( 0, ScrollBar->DistanceFromTop() );
@@ -983,6 +1145,16 @@ bool STableViewBase::CanUseInertialScroll( float ScrollAmount ) const
 	// We allow sampling for the inertial scroll if we are not in the overscroll region,
 	// Or if we are scrolling outwards of the overscroll region
 	return CurrentOverscroll == 0.f || FMath::Sign(CurrentOverscroll) != FMath::Sign(ScrollAmount);
+}
+
+int32 STableViewBase::GetNumPinnedItems() const
+{
+	return PinnedItemsPanel->GetChildren()->Num();
+}
+
+EVisibility STableViewBase::GetPinnedItemsVisiblity() const
+{
+	return PinnedItemsPanel->GetChildren()->Num() != 0 ? EVisibility::Visible : EVisibility::Collapsed;
 }
 
 static const TBitArray<> EmptyBitArray = TBitArray<>();

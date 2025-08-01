@@ -1,5 +1,20 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+#include "TraceAnalysisModule.h"
+
 #include "Modules/ModuleManager.h"
 
-IMPLEMENT_MODULE(FDefaultModuleImpl, TraceAnalysis);
+////////////////////////////////////////////////////////////////////////////////
+void FTraceAnalysisModule::StartupModule()
+{
+}
+
+////////////////////////////////////////////////////////////////////////////////
+FName FTraceAnalysisModule::GetMessageLogName()
+{
+	static FName Name("TraceAnalysis");
+	return Name;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+IMPLEMENT_MODULE(FTraceAnalysisModule, TraceAnalysis);

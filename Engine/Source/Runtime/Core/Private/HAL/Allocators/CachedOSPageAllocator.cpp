@@ -9,7 +9,7 @@
 
 void* FCachedOSPageAllocator::AllocateImpl(SIZE_T Size, uint32 CachedByteLimit, FFreePageBlock* First, FFreePageBlock* Last, uint32& FreedPageBlocksNum, SIZE_T& CachedTotal, FCriticalSection* Mutex)
 {
-	if (!FPlatformMemory::BinnedPlatformHasMemoryPoolForThisSize(Size) && (Size <= CachedByteLimit / 4))
+	if (!IsOSAllocation(Size, CachedByteLimit))
 	{
 		if (First != Last)
 		{
@@ -60,7 +60,7 @@ void* FCachedOSPageAllocator::AllocateImpl(SIZE_T Size, uint32 CachedByteLimit, 
 			void* Ptr = nullptr;
 			{
 #if UE_ALLOW_OSMEMORYLOCKFREE
-				FScopeUnlock FScopeUnlock(Mutex);
+				FScopeUnlock ScopeUnlock(Mutex);
 #endif
 				Ptr = FPlatformMemory::BinnedAllocFromOS(Size);
 			}
@@ -86,19 +86,19 @@ void* FCachedOSPageAllocator::AllocateImpl(SIZE_T Size, uint32 CachedByteLimit, 
 	void* Ret = nullptr;
 	{
 #if UE_ALLOW_OSMEMORYLOCKFREE
-		FScopeUnlock FScopeUnlock(Mutex);
+		FScopeUnlock ScopeUnlock(Mutex);
 #endif
 		Ret = FPlatformMemory::BinnedAllocFromOS(Size);
 	}
 	return Ret;
 }
 
-void FCachedOSPageAllocator::FreeImpl(void* Ptr, SIZE_T Size, uint32 NumCacheBlocks, uint32 CachedByteLimit, FFreePageBlock* First, uint32& FreedPageBlocksNum, SIZE_T& CachedTotal, FCriticalSection* Mutex)
+void FCachedOSPageAllocator::FreeImpl(void* Ptr, SIZE_T Size, uint32 NumCacheBlocks, uint32 CachedByteLimit, FFreePageBlock* First, uint32& FreedPageBlocksNum, SIZE_T& CachedTotal, FCriticalSection* Mutex, bool ThreadIsTimeCritical)
 {
-	if (FPlatformMemory::BinnedPlatformHasMemoryPoolForThisSize(Size) || Size > CachedByteLimit / 4)
+	if (IsOSAllocation(Size, CachedByteLimit))
 	{
 #if UE_ALLOW_OSMEMORYLOCKFREE
-		FScopeUnlock FScopeUnlock(Mutex);
+		FScopeUnlock ScopeUnlock(Mutex);
 #endif
 		FPlatformMemory::BinnedFreeToOS(Ptr, Size);
 		return;
@@ -117,7 +117,7 @@ void FCachedOSPageAllocator::FreeImpl(void* Ptr, SIZE_T Size, uint32 NumCacheBlo
 		}
 		{
 #if UE_ALLOW_OSMEMORYLOCKFREE
-			FScopeUnlock FScopeUnlock(Mutex);
+			FScopeUnlock ScopeUnlock(Mutex);
 #endif
 			FPlatformMemory::BinnedFreeToOS(FreePtr, FreeSize);
 		}

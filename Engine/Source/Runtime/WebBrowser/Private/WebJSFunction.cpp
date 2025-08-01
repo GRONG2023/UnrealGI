@@ -3,9 +3,10 @@
 #include "WebJSFunction.h"
 #include "WebJSScripting.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(WebJSFunction)
+
 #if WITH_CEF3
 #if PLATFORM_WINDOWS
-#include "Windows/WindowsHWrapper.h"
 #include "Windows/AllowWindowsPlatformTypes.h"
 #include "Windows/AllowWindowsPlatformAtomics.h"
 #endif
@@ -132,3 +133,4 @@ void FWebJSCallbackBase::Invoke(int32 ArgCount, FWebJSParam Arguments[], bool bI
 		Scripting->InvokeJSFunction(CallbackId, ArgCount, Arguments, bIsError);
 	}
 }
+

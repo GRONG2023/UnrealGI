@@ -6,21 +6,21 @@
 
 #include "MetalRHIPrivate.h"
 #include "MetalRHIRenderQuery.h"
-#include "MetalCommandBufferFence.h"
 #include "MetalProfiler.h"
 #include "MetalLLM.h"
 #include "MetalCommandBuffer.h"
 #include "HAL/PThreadEvent.h"
-
+#include "RenderCore.h"
 
 //------------------------------------------------------------------------------
 
 #pragma mark - Metal RHI Private Query Buffer Resource Class -
 
 
-FMetalQueryBuffer::FMetalQueryBuffer(FMetalContext* InContext, FMetalBuffer InBuffer)
-	: Pool(InContext->GetQueryBufferPool())
-	, Buffer(MoveTemp(InBuffer))
+FMetalQueryBuffer::FMetalQueryBuffer(FMetalContext* InContext, FMetalBufferPtr InBuffer)
+	: FRHIResource(RRT_TimestampCalibrationQuery)
+	, Pool(InContext->GetQueryBufferPool())
+	, Buffer(InBuffer)
 	, WriteOffset(0)
 {
 	// void
@@ -44,8 +44,9 @@ FMetalQueryBuffer::~FMetalQueryBuffer()
 uint64 FMetalQueryBuffer::GetResult(uint32 Offset)
 {
 	uint64 Result = 0;
-	@autoreleasepool {
-		Result = *((uint64 const*)(((uint8*)Buffer.GetContents()) + Offset));
+    MTL_SCOPED_AUTORELEASE_POOL;
+    {
+		Result = *((uint64 const*)(((uint8*)Buffer->Contents()) + Offset));
 	}
 	return Result;
 }
@@ -92,9 +93,9 @@ void FMetalQueryBufferPool::Allocate(FMetalQueryResult& NewQuery)
 
 FMetalQueryBuffer* FMetalQueryBufferPool::GetCurrentQueryBuffer()
 {
-	if (!IsValidRef(CurrentBuffer) || (CurrentBuffer->Buffer.GetStorageMode() != mtlpp::StorageMode::Shared && CurrentBuffer->WriteOffset > 0))
+	if (!IsValidRef(CurrentBuffer) || (CurrentBuffer->Buffer->GetMTLBuffer()->storageMode() != MTL::StorageModeShared && CurrentBuffer->WriteOffset > 0))
 	{
-		FMetalBuffer Buffer;
+		FMetalBufferPtr Buffer;
 		if (Buffers.Num())
 		{
 			Buffer = Buffers.Pop();
@@ -104,9 +105,17 @@ FMetalQueryBuffer* FMetalQueryBufferPool::GetCurrentQueryBuffer()
 			LLM_SCOPE_METAL(ELLMTagMetal::Buffers);
 			LLM_PLATFORM_SCOPE_METAL(ELLMTagMetal::Buffers);
 
-			METAL_GPUPROFILE(FScopedMetalCPUStats CPUStat(FString::Printf(TEXT("AllocBuffer: %llu, %llu"), EQueryBufferMaxSize, mtlpp::ResourceOptions::StorageModeShared)));
-			Buffer = GetMetalDeviceContext().GetResourceHeap().CreateBuffer(EQueryBufferMaxSize, 16, BUF_Dynamic, FMetalCommandQueue::GetCompatibleResourceOptions((mtlpp::ResourceOptions)(BUFFER_CACHE_MODE | mtlpp::ResourceOptions::HazardTrackingModeUntracked | mtlpp::ResourceOptions::StorageModeShared)), true);
-			FMemory::Memzero((((uint8*)Buffer.GetContents())), EQueryBufferMaxSize);
+			METAL_GPUPROFILE(FScopedMetalCPUStats CPUStat(FString::Printf(TEXT("AllocBuffer: %llu, %llu"), EQueryBufferMaxSize, MTL::ResourceStorageModeShared)));
+			
+			MTL::ResourceOptions HazardTrackingMode = MTL::ResourceHazardTrackingModeUntracked;
+			static bool bSupportsHeaps = GetMetalDeviceContext().SupportsFeature(EMetalFeaturesHeaps);
+			if(bSupportsHeaps)
+			{
+				HazardTrackingMode = MTL::ResourceHazardTrackingModeTracked;
+			}
+			
+			Buffer = GetMetalDeviceContext().GetResourceHeap().CreateBuffer(EQueryBufferMaxSize, 16, BUF_Dynamic, FMetalCommandQueue::GetCompatibleResourceOptions((MTL::ResourceOptions)(BUFFER_CACHE_MODE | HazardTrackingMode | MTL::ResourceStorageModeShared)), true);
+			FMemory::Memzero((((uint8*)Buffer->Contents())), EQueryBufferMaxSize);
 
 #if STATS || ENABLE_LOW_LEVEL_MEM_TRACKER
 			MetalLLM::LogAllocBuffer(Context->GetDevice(), Buffer);
@@ -127,9 +136,9 @@ void FMetalQueryBufferPool::ReleaseCurrentQueryBuffer()
 	}
 }
 
-void FMetalQueryBufferPool::ReleaseQueryBuffer(FMetalBuffer& Buffer)
+void FMetalQueryBufferPool::ReleaseQueryBuffer(FMetalBufferPtr Buffer)
 {
-	Buffers.Add(MoveTemp(Buffer));
+	Buffers.Add(Buffer);
 }
 
 
@@ -205,11 +214,11 @@ void FMetalRHIRenderQuery::Begin(FMetalContext* Context, TSharedPtr<FMetalComman
 
 			if ((GMaxRHIFeatureLevel >= ERHIFeatureLevel::SM5) && GetMetalDeviceContext().SupportsFeature(EMetalFeaturesCountingQueries))
 			{
-				Context->GetCurrentState().SetVisibilityResultMode(mtlpp::VisibilityResultMode::Counting, Buffer.Offset);
+				Context->GetCurrentState().SetVisibilityResultMode(MTL::VisibilityResultModeCounting, Buffer.Offset);
 			}
 			else
 			{
-				Context->GetCurrentState().SetVisibilityResultMode(mtlpp::VisibilityResultMode::Boolean, Buffer.Offset);
+				Context->GetCurrentState().SetVisibilityResultMode(MTL::VisibilityResultModeBoolean, Buffer.Offset);
 			}
 			if (BatchFence.IsValid())
 			{
@@ -242,12 +251,12 @@ void FMetalRHIRenderQuery::End(FMetalContext* Context)
 		{
 			// switch back to non-occlusion rendering
 			check(Buffer.CommandBufferFence.IsValid());
-			Context->GetCurrentState().SetVisibilityResultMode(mtlpp::VisibilityResultMode::Disabled, 0);
+			Context->GetCurrentState().SetVisibilityResultMode(MTL::VisibilityResultModeDisabled, 0);
 
 			// For unique, unbatched, queries insert the fence now
 			if (!Buffer.bBatchFence)
 			{
-				Context->InsertCommandBufferFence(*(Buffer.CommandBufferFence));
+				Context->InsertCommandBufferFence(Buffer.CommandBufferFence, FMetalCommandBufferCompletionHandler());
 			}
 			break;
 		}
@@ -277,19 +286,22 @@ void FMetalRHIRenderQuery::End(FMetalContext* Context)
 			}
 
 			// Insert the fence to wait on the current command buffer
-			Context->InsertCommandBufferFence(*(Buffer.CommandBufferFence), [this](mtlpp::CommandBuffer const& CmdBuffer)
+            FMetalCommandBufferCompletionHandler Handler;
+            Handler.BindLambda([this](MTL::CommandBuffer* CmdBuffer)
 			{
 				Result = 0;
 				
-#if PLATFORM_MAC
-				if(FPlatformMisc::MacOSXVersionCompare(10,15,0) >= 0)
-#endif
-				{
-					// If there are no commands in the command buffer then this can be zero
-					// In this case GPU start time is also not correct - we need to fall back standard behaviour
-					// Only seen empty command buffers at the very end of a frame
-					Result = uint64((CmdBuffer.GetGpuEndTime() / 1000.0) / FPlatformTime::GetSecondsPerCycle64());
-				}
+                // If there are no commands in the command buffer then this can be zero
+                // In this case GPU start time is also not correct - we need to fall back standard behaviour
+                // Only seen empty command buffers at the very end of a frame
+                if (IsRHIDeviceApple())
+                {
+                    Result = uint64(CmdBuffer->GPUEndTime() - CmdBuffer->GPUStartTime()) * 1000;
+                }
+                else
+                {
+                    Result = uint64((CmdBuffer->GPUEndTime() / 1000.0) / FPlatformTime::GetSecondsPerCycle64());
+                }
 				
 				if(Result == 0)
 				{
@@ -304,6 +316,8 @@ void FMetalRHIRenderQuery::End(FMetalContext* Context)
 				this->Release();
 			});
 
+            Context->InsertCommandBufferFence(Buffer.CommandBufferFence, Handler);
+                                              
 			// Submit the current command buffer, marking this is as a break of a logical command buffer for render restart purposes
 			// This is necessary because we use command-buffer completion to emulate timer queries as Metal has no such API
 			Context->SubmitCommandsHint(EMetalSubmitFlagsCreateCommandBuffer|EMetalSubmitFlagsBreakCommandBuffer);
@@ -340,9 +354,10 @@ bool FMetalRHIRenderQuery::GetResult(uint64& OutNumPixels, bool bWait, uint32 GP
 				FRHICommandListExecutor::GetImmediateCommandList().ImmediateFlush(EImmediateFlushType::FlushRHIThread);
 			}
 
-			uint32 IdleStart = FPlatformTime::Cycles();
-
-			bOK = Buffer.Wait(WaitMS);
+			{
+				FRenderThreadIdleScope IdleScope(ERenderThreadIdleTypes::WaitingForGPUQuery);
+				bOK = Buffer.Wait(WaitMS);
+			}
 
 			// Result is written in one of potentially many command buffer completion handlers
 			// But the command buffer wait above may return before the query completion handler fires
@@ -350,16 +365,6 @@ bool FMetalRHIRenderQuery::GetResult(uint64& OutNumPixels, bool bWait, uint32 GP
 			if (bOK && (Type == RQT_AbsoluteTime) && QueryWrittenEvent != nullptr)
 			{
 				QueryWrittenEvent->Wait();
-			}
-
-			if (IsInRHIThread())
-			{
-				GWorkingRHIThreadStallTime += FPlatformTime::Cycles() - IdleStart;
-			}
-			else
-			{
-				GRenderThreadIdle[ERenderThreadIdleTypes::WaitingForGPUQuery] += FPlatformTime::Cycles() - IdleStart;
-				GRenderThreadNumIdle[ERenderThreadIdleTypes::WaitingForGPUQuery]++;
 			}
 
 			// Never wait for a failed signal again.

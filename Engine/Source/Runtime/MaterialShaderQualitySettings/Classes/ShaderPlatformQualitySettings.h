@@ -6,8 +6,12 @@
 #include "UObject/ObjectMacros.h"
 #include "UObject/Object.h"
 #include "SceneTypes.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "RHIDefinitions.h"
+#endif
 #include "ShaderPlatformQualitySettings.generated.h"
+
+enum EShaderPlatform : uint16;
 
 /**
 * 
@@ -19,10 +23,10 @@ enum class EMobileShadowQuality : uint8
 	NoFiltering,
 	// Medium quality, 1x1 PCF filtering.
 	PCF_1x1 UMETA(DisplayName = "1x1 PCF"),
-	// Medium/High quality, 2x2 PCF filtering.
-	PCF_2x2 UMETA(DisplayName = "2x2 PCF"),
-	// Highest quality, 3x3 PCF filtering.
-	PCF_3x3 UMETA(DisplayName = "3x3 PCF")
+	// Medium/High quality, 3x3 PCF filtering.
+	PCF_3x3 UMETA(DisplayName = "3x3 PCF"),
+	// Highest quality, 5x5 PCF filtering.
+	PCF_5x5 UMETA(DisplayName = "5x5 PCF")
 };
 
 // FMaterialQualityOverrides represents the full set of possible material overrides per quality level.
@@ -38,10 +42,9 @@ public:
 		, bForceFullyRough(false)
 		, bForceNonMetal(false)
 		, bForceDisableLMDirectionality(false)
-		, bForceLQReflections(false)
 		, bForceDisablePreintegratedGF(false)
 		, bDisableMaterialNormalCalculation(false)
-		, MobileShadowQuality(EMobileShadowQuality::PCF_2x2)
+		, MobileShadowQuality(EMobileShadowQuality::PCF_3x3)
 	{
 	}
 
@@ -60,9 +63,6 @@ public:
 	UPROPERTY(EditAnywhere, Config, Meta = (DisplayName = "Disable Lightmap directionality"), Category = "Quality")
 	bool bForceDisableLMDirectionality;
 
-	UPROPERTY(EditAnywhere, Config, Meta = (DisplayName = "Force low quality reflections"), Category = "Quality")
-	bool bForceLQReflections;
-
 	UPROPERTY(EditAnywhere, Config, Meta = (DisplayName = "Force not use preintegrated GF for simple IBL"), Category = "Quality")
 	bool bForceDisablePreintegratedGF;
 
@@ -77,8 +77,8 @@ public:
 };
 
 
-UCLASS(config = Engine, defaultconfig, perObjectConfig)
-class MATERIALSHADERQUALITYSETTINGS_API UShaderPlatformQualitySettings : public UObject
+UCLASS(config = Engine, defaultconfig, perObjectConfig, MinimalAPI)
+class UShaderPlatformQualitySettings : public UObject
 {
 public:
 	GENERATED_UCLASS_BODY()
@@ -92,9 +92,9 @@ public:
 		return QualityOverrides[(int32)QualityLevel];
 	}
 
-	const FMaterialQualityOverrides& GetQualityOverrides(EMaterialQualityLevel::Type QualityLevel) const;
-	void BuildHash(EMaterialQualityLevel::Type QualityLevel, class FSHAHash& OutHash) const;
-	void AppendToHashState(EMaterialQualityLevel::Type QualityLevel, class FSHA1& HashState) const;
+	MATERIALSHADERQUALITYSETTINGS_API const FMaterialQualityOverrides& GetQualityOverrides(EMaterialQualityLevel::Type QualityLevel) const;
+	MATERIALSHADERQUALITYSETTINGS_API void BuildHash(EMaterialQualityLevel::Type QualityLevel, class FSHAHash& OutHash) const;
+	MATERIALSHADERQUALITYSETTINGS_API void AppendToHashState(EMaterialQualityLevel::Type QualityLevel, class FSHA1& HashState) const;
 	
 	virtual const TCHAR* GetConfigOverridePlatform() const override
 	{

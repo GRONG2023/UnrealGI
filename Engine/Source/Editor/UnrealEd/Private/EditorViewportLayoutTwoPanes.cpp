@@ -6,6 +6,7 @@
 #include "Misc/ConfigCacheIni.h"
 #include "Modules/ModuleManager.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Widgets/Layout/SSplitter.h"
 
 
 namespace ViewportLayoutTwoPanesDefs
@@ -14,12 +15,9 @@ namespace ViewportLayoutTwoPanesDefs
 	static const float DefaultSplitterPercentage = 0.5f;
 }
 
-
 template <EOrientation TOrientation>
-TSharedRef<SWidget> TEditorViewportLayoutTwoPanes<TOrientation>::MakeViewportLayout(TFunction<TSharedRef<SEditorViewport>(void)> &Func, const FString& LayoutString)
+TSharedRef<SWidget> TEditorViewportLayoutTwoPanes<TOrientation>::MakeViewportLayout(TSharedPtr<FAssetEditorViewportLayout> InParentLayout, const FString& SpecificLayoutString)
 {
-	FString SpecificLayoutString = GetTypeSpecificLayoutString(LayoutString);
-
 	FString ViewportKey0, ViewportKey1;
 	FString ViewportType0, ViewportType1;
 	float SplitterPercentage = ViewportLayoutTwoPanesDefs::DefaultSplitterPercentage;
@@ -41,23 +39,22 @@ TSharedRef<SWidget> TEditorViewportLayoutTwoPanes<TOrientation>::MakeViewportLay
 			TTypeFromString<float>::FromString(SplitterPercentage, *PercentageString);
 		}
 	}
+
 	// Set up the viewports
 	FAssetEditorViewportConstructionArgs Args;
-	Args.ParentLayout = AsShared();
+	Args.ParentLayout = InParentLayout;
 	Args.IsEnabled = FSlateApplication::Get().GetNormalExecutionAttribute();
 
 	Args.bRealtime = false;
 	Args.ConfigKey = *ViewportKey0;
 	Args.ViewportType = LVT_OrthoXY;
-	TSharedRef<IEditorViewportLayoutEntity> Viewport0 = FactoryViewport(Func, *ViewportType0, Args);
+	TSharedRef<SWidget> Viewport0 = InParentLayout->FactoryViewport(*ViewportType0, Args);
+	PerspectiveViewportConfigKey = *ViewportKey0;
 
 	Args.bRealtime = !FPlatformMisc::IsRemoteSession();
 	Args.ConfigKey = *ViewportKey1;
 	Args.ViewportType = LVT_Perspective;
-	TSharedRef<IEditorViewportLayoutEntity> Viewport1 = FactoryViewport(Func, *ViewportType1, Args);
-
-	Viewports.Add(*ViewportKey0, Viewport0);
-	Viewports.Add(*ViewportKey1, Viewport1);
+	TSharedRef<SWidget> Viewport1 = InParentLayout->FactoryViewport(*ViewportType1, Args);
 
 	SplitterWidget =
 		SNew(SSplitter)
@@ -65,26 +62,59 @@ TSharedRef<SWidget> TEditorViewportLayoutTwoPanes<TOrientation>::MakeViewportLay
 		+ SSplitter::Slot()
 		.Value(SplitterPercentage)
 		[
-			Viewport0->AsWidget()
+			Viewport0
 		]
 	+ SSplitter::Slot()
 		.Value(1.0f - SplitterPercentage)
 		[
-			Viewport1->AsWidget()
+			Viewport1
 		];
 
 	return SplitterWidget.ToSharedRef();
 }
 
-
-/**
-* Function avoids linker errors on the template class functions in this cpp file.
-* It avoids the need to put the contents of this file into the header.
-* It doesn't get called.
-*/
-void EditorViewportLayoutTwoPanes_LinkErrorFixFunc()
+template <EOrientation TOrientation>
+void TEditorViewportLayoutTwoPanes<TOrientation>::ReplaceWidget(TSharedRef<SWidget> OriginalWidget, TSharedRef<SWidget> ReplacementWidget)
 {
-	check(0);
-	FEditorViewportLayoutTwoPanesVert DummyVert;
-	FEditorViewportLayoutTwoPanesHoriz DummyHoriz;
+	bool bWasFound = false;
+
+	for (int32 SlotIdx = 0; SlotIdx < SplitterWidget->GetChildren()->Num(); SlotIdx++)
+	{
+		if (SplitterWidget->GetChildren()->GetChildAt(SlotIdx) == OriginalWidget)
+		{
+			SplitterWidget->SlotAt(SlotIdx)
+				[
+					ReplacementWidget
+				];
+			bWasFound = true;
+			break;
+		}
+	}
+
+	// Source widget should have already been a content widget for the splitter
+	check(bWasFound);
 }
+
+template <EOrientation TOrientation>
+void TEditorViewportLayoutTwoPanes<TOrientation>::SaveLayoutString(const FString& SpecificLayoutString) const
+{
+	const FString& IniSection = FLayoutSaveRestore::GetAdditionalLayoutConfigIni();
+
+	check(SplitterWidget->GetChildren()->Num() == 2);
+	float Percentage = SplitterWidget->SlotAt(0).GetSizeValue();
+
+	GConfig->SetString(*IniSection, *(SpecificLayoutString + TEXT(".Percentage")), *TTypeToString<float>::ToString(Percentage), GEditorPerProjectIni);
+}
+
+const FName& FEditorViewportLayoutTwoPanesVert::GetLayoutTypeName() const
+{
+	return EditorViewportConfigurationNames::TwoPanesVert;
+}
+
+const FName& FEditorViewportLayoutTwoPanesHoriz::GetLayoutTypeName() const
+{
+	return EditorViewportConfigurationNames::TwoPanesHoriz;
+}
+
+template class TEditorViewportLayoutTwoPanes<EOrientation::Orient_Vertical>;
+template class TEditorViewportLayoutTwoPanes<EOrientation::Orient_Horizontal>;

@@ -4,8 +4,13 @@ using UnrealBuildTool;
 
 public class AudioCaptureRtAudio : ModuleRules
 {
+	protected virtual bool WithRtAudio { get => false; }
+
 	public AudioCaptureRtAudio(ReadOnlyTargetRules Target) : base(Target)
 	{
+		// RtAudio throws exceptions for errors.
+		bEnableExceptions = true;
+
 		PrivateDependencyModuleNames.Add("Core");
 		PrivateDependencyModuleNames.Add("AudioCaptureCore");
 
@@ -17,11 +22,6 @@ public class AudioCaptureRtAudio : ModuleRules
 			// Allow us to use direct sound
 			AddEngineThirdPartyPrivateStaticDependencies(Target, "DirectSound");
 		}
-		else if(Target.Platform == UnrealTargetPlatform.XboxOne)
-        {
-            PublicDefinitions.Add("WITH_RTAUDIO=1");
-            PublicDefinitions.Add("WITH_AUDIOCAPTURE=1");
-        }
 		else if(Target.Platform == UnrealTargetPlatform.Mac)
         {
             PublicFrameworks.AddRange(new string[] { "CoreAudio", "AudioUnit", "AudioToolbox" });
@@ -30,7 +30,7 @@ public class AudioCaptureRtAudio : ModuleRules
         }
 		else
 		{
-			PublicDefinitions.Add("WITH_RTAUDIO=0");
+			PublicDefinitions.Add($"WITH_RTAUDIO={(WithRtAudio?"1":"0")}");
 		}
 	}
 }

@@ -9,6 +9,9 @@
 #include "EngineGlobals.h"
 #include "Engine/Engine.h"
 #include "Misc/RuntimeErrors.h"
+#include "GameFramework/PlayerController.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(FunctionalTestingManager)
 
 #if WITH_EDITOR
 
@@ -42,7 +45,7 @@ namespace FFunctionalTesting
 ////----------------------------------------------------------------------//
 //void FFuncTestingTickHelper::Tick(float DeltaTime)
 //{
-//	if (Manager->IsPendingKill() == false)
+//	if (IsValid(Manager))
 //	{
 //		Manager->TickMe(DeltaTime);
 //	}
@@ -160,11 +163,12 @@ void UFunctionalTestingManager::TriggerFirstValidTest()
 {
 	UWorld* World = GetWorld();
 	check(World);
-	bIsRunning = World->GetNavigationSystem() != nullptr;
+	bIsRunning = true;
 
 	const bool bIsWorldInitialized =
 		World->AreActorsInitialized() &&
-		!UNavigationSystemV1::IsNavigationBeingBuilt(World);
+		(!World->GetWorldSettings()->IsNavigationSystemEnabled() || !UNavigationSystemV1::IsNavigationBeingBuilt(World)) &&
+		(World->GetNumPlayerControllers() != 0) && World->GetFirstPlayerController()->GetPawnOrSpectator() != nullptr;
 
 	if (bInitialDelayApplied == true && bIsWorldInitialized)
 	{
@@ -295,6 +299,7 @@ void UFunctionalTestingManager::AllTestsDone()
 	{
 		OnTestsComplete.Broadcast();
 		bFinished = true;
+		IFunctionalTestingModule::Get().SetManager(nullptr);
 		RemoveFromRoot();
 	}
 }
@@ -329,7 +334,7 @@ bool UFunctionalTestingManager::RunFirstValidTest()
 
 			// first param is the test name. Look for it		
 			const FString TestName = TestParams[0];
-			TestParams.RemoveAt(0, 1, /*bAllowShrinking=*/false);
+			TestParams.RemoveAt(0, 1, EAllowShrinking::No);
 
 			AFunctionalTest* TestToRun = nullptr;
 			for (TActorIterator<AFunctionalTest> It(World); It; ++It)
@@ -401,7 +406,7 @@ bool UFunctionalTestingManager::RunFirstValidTest()
 
 			if (bRemove)
 			{
-				TestsLeft.RemoveAtSwap(Index, 1, false);
+				TestsLeft.RemoveAtSwap(Index, 1, EAllowShrinking::No);
 			}
 		}
 	}
@@ -423,3 +428,4 @@ void UFunctionalTestingManager::SetReproString(FString ReproString)
 		ReproString.ParseIntoArray(TestReproStrings, FFunctionalTesting::ReproStringTestSeparator, /*InCullEmpty=*/true);
 	}
 }
+

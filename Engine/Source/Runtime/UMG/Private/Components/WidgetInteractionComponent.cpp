@@ -1,16 +1,21 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Components/WidgetInteractionComponent.h"
+#include "UMGPrivate.h"
 #include "CollisionQueryParams.h"
 #include "Components/PrimitiveComponent.h"
+#include "Engine/GameViewportClient.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "Components/ArrowComponent.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Application/SlateUser.h"
 #include "Kismet/GameplayStatics.h"
 #include "DrawDebugHelpers.h"
+#include "GenericPlatform/GenericPlatformInputDeviceMapper.h"
 
 #include "Components/WidgetComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(WidgetInteractionComponent)
 
 
 #define LOCTEXT_NAMESPACE "WidgetInteraction"
@@ -60,7 +65,8 @@ void UWidgetInteractionComponent::Activate(bool bReset)
 {
 	Super::Activate(bReset);
 
-	if ( FSlateApplication::IsInitialized() )
+	// Only create another user in a real world. FindOrCreateVirtualUser changes focus
+	if ( FSlateApplication::IsInitialized() && !GetWorld()->IsPreviewWorld())
 	{
 		if ( !VirtualUser.IsValid() )
 		{
@@ -157,7 +163,13 @@ UWidgetInteractionComponent::FWidgetTraceResult UWidgetInteractionComponent::Per
 			FCollisionQueryParams Params(SCENE_QUERY_STAT(WidgetInteractionComponentTrace));
 			Params.AddIgnoredComponents(PrimitiveChildren);
 
-			APlayerController* PlayerController = GetWorld()->GetFirstPlayerController();
+			const UWorld* World = GetWorld();
+			APlayerController* PlayerController = World ? World->GetFirstPlayerController():nullptr;
+			if (!PlayerController)
+			{
+				UE_LOG(LogUMG, Warning, TEXT("Widget Interaction Component cannot perform trace without a valid PlayerController."));
+				return FWidgetTraceResult();
+			}
 			ULocalPlayer* LocalPlayer = PlayerController->GetLocalPlayer();
 			
 			if ( LocalPlayer && LocalPlayer->ViewportClient )
@@ -444,28 +456,51 @@ void UWidgetInteractionComponent::PressPointerKey(FKey Key)
 	FWidgetPath WidgetPathUnderFinger = LastWidgetPath.ToWidgetPath();
 
 	ensure(PointerIndex >= 0);
+
 	FPointerEvent PointerEvent;
+
+	// Find the primary input device for this Slate User
+	FInputDeviceId InputDeviceId = INPUTDEVICEID_NONE;
+	if (TSharedPtr<FSlateUser> SlateUser = FSlateApplication::Get().GetUser(VirtualUser->GetUserIndex()))
+	{
+		FPlatformUserId PlatUser = SlateUser->GetPlatformUserId();
+		InputDeviceId = IPlatformInputDeviceMapper::Get().GetPrimaryInputDeviceForUser(PlatUser);
+	}
+
+	// Just in case there was no input device assigned to this virtual user, get the default platform
+	// input device
+	if (!InputDeviceId.IsValid())
+	{
+		InputDeviceId = IPlatformInputDeviceMapper::Get().GetDefaultInputDevice();
+	}
+	
 	if (Key.IsTouch())
 	{
 		PointerEvent = FPointerEvent(
-			VirtualUser->GetUserIndex(),
+			InputDeviceId,
 			(uint32)PointerIndex,
 			LocalHitLocation,
 			LastLocalHitLocation,
 			1.0f,
-			false);
+			false,
+			false,
+			false,
+			FModifierKeysState(),
+			0,
+			VirtualUser->GetUserIndex());		
 	}
 	else
 	{
 		PointerEvent = FPointerEvent(
-			VirtualUser->GetUserIndex(),
+			InputDeviceId,
 			(uint32)PointerIndex,
 			LocalHitLocation,
 			LastLocalHitLocation,
 			PressedKeys,
 			Key,
 			0.0f,
-			ModifierKeys);
+			ModifierKeys,
+			VirtualUser->GetUserIndex());
 	}
 	
 		
@@ -496,27 +531,49 @@ void UWidgetInteractionComponent::ReleasePointerKey(FKey Key)
 
 	ensure(PointerIndex >= 0);
 	FPointerEvent PointerEvent;
+
+	// Find the primary input device for this Slate User
+	FInputDeviceId InputDeviceId = INPUTDEVICEID_NONE;
+	if (TSharedPtr<FSlateUser> SlateUser = FSlateApplication::Get().GetUser(VirtualUser->GetUserIndex()))
+	{
+		FPlatformUserId PlatUser = SlateUser->GetPlatformUserId();
+		InputDeviceId = IPlatformInputDeviceMapper::Get().GetPrimaryInputDeviceForUser(PlatUser);
+	}
+
+	// Just in case there was no input device assigned to this virtual user, get the default platform
+	// input device
+	if (!InputDeviceId.IsValid())
+	{
+		InputDeviceId = IPlatformInputDeviceMapper::Get().GetDefaultInputDevice();
+	}
+
 	if (Key.IsTouch())
 	{
 		PointerEvent = FPointerEvent(
-			VirtualUser->GetUserIndex(),
+			InputDeviceId,
 			(uint32)PointerIndex,
 			LocalHitLocation,
 			LastLocalHitLocation,
-			1.0f,
-			false);
+			0.0f,
+			false,
+			false,
+			false,
+			FModifierKeysState(),
+			0,
+			VirtualUser->GetUserIndex());
 	}
 	else
 	{
 		PointerEvent = FPointerEvent(
-			VirtualUser->GetUserIndex(),
+			InputDeviceId,
 			(uint32)PointerIndex,
 			LocalHitLocation,
 			LastLocalHitLocation,
 			PressedKeys,
 			Key,
 			0.0f,
-			ModifierKeys);
+			ModifierKeys,
+			VirtualUser->GetUserIndex());
 	}
 		
 	FReply Reply = FSlateApplication::Get().RoutePointerUpEvent(WidgetPathUnderFinger, PointerEvent);
@@ -533,16 +590,20 @@ bool UWidgetInteractionComponent::PressKey(FKey Key, bool bRepeat)
 	uint32 KeyCode, CharCode;
 	GetKeyAndCharCodes(Key, bHasKeyCode, KeyCode, bHasCharCode, CharCode);
 
-	FKeyEvent KeyEvent(Key, ModifierKeys, VirtualUser->GetUserIndex(), bRepeat, KeyCode, CharCode);
-	bool DownResult = FSlateApplication::Get().ProcessKeyDownEvent(KeyEvent);
+	FKeyEvent KeyEvent(Key, ModifierKeys, VirtualUser->GetUserIndex(), bRepeat, CharCode, KeyCode);
+	bool bDownResult = FSlateApplication::Get().ProcessKeyDownEvent(KeyEvent);
 
+	bool bKeyCharResult = false;
 	if (bHasCharCode)
 	{
-		FCharacterEvent CharacterEvent(CharCode, ModifierKeys, VirtualUser->GetUserIndex(), bRepeat);
-		return FSlateApplication::Get().ProcessKeyCharEvent(CharacterEvent);
+		if (CharCode <= 0xD7FF || (CharCode >= 0xE000 && CharCode <= 0xFFFF)) // This is a valid UTF16 char from Basic Multilangual Plane
+		{
+			FCharacterEvent CharacterEvent(static_cast<const TCHAR>(CharCode), ModifierKeys, VirtualUser->GetUserIndex(), bRepeat);
+			bKeyCharResult = FSlateApplication::Get().ProcessKeyCharEvent(CharacterEvent);
+		}
 	}
 
-	return DownResult;
+	return bDownResult || bKeyCharResult;
 }
 
 bool UWidgetInteractionComponent::ReleaseKey(FKey Key)
@@ -556,7 +617,7 @@ bool UWidgetInteractionComponent::ReleaseKey(FKey Key)
 	uint32 KeyCode, CharCode;
 	GetKeyAndCharCodes(Key, bHasKeyCode, KeyCode, bHasCharCode, CharCode);
 
-	FKeyEvent KeyEvent(Key, ModifierKeys, VirtualUser->GetUserIndex(), false, KeyCode, CharCode);
+	FKeyEvent KeyEvent(Key, ModifierKeys, VirtualUser->GetUserIndex(), false, CharCode, KeyCode);
 	return FSlateApplication::Get().ProcessKeyUpEvent(KeyEvent);
 }
 
@@ -681,3 +742,4 @@ FVector2D UWidgetInteractionComponent::Get2DHitLocation() const
 }
 
 #undef LOCTEXT_NAMESPACE
+

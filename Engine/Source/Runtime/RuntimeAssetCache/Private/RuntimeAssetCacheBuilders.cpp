@@ -90,7 +90,7 @@ void URuntimeAssetCacheBuilder_ObjectBase::GetFromCacheAsyncComplete(int32 Handl
 		// Once complete, call GetFromCacheAsync() again and it will loop back to this function, but should succeed.
 		if (!bProcessedCacheMiss)
 		{
-			bProcessedCacheMiss = true;
+			bProcessedCacheMiss = -1;
 			OnAssetCacheMiss();
 		}
 		else
@@ -118,9 +118,9 @@ void UExampleTextureCacheBuilder::OnAssetCacheMiss_Implementation()
 
 void UExampleTextureCacheBuilder::SerializeAsset(FArchive& Ar)
 {
-	if (Texture && Texture->PlatformData)
+	if (Texture && Texture->GetPlatformData())
 	{
-		FTexturePlatformData* PlatformData = Texture->PlatformData;
+		FTexturePlatformData* PlatformData = Texture->GetPlatformData();
 		UEnum* PixelFormatEnum = UTexture::GetPixelFormatEnum();
 
 		Ar << PlatformData->SizeX;
@@ -184,7 +184,7 @@ void UExampleTextureCacheBuilder::SerializeAsset(FArchive& Ar)
 			PlatformData->Mips.Empty(NumMips);
 			for (int32 MipIndex = 0; MipIndex < NumMips; ++MipIndex)
 			{
-				PlatformData->Mips.Add(new FTexture2DMipMap());
+				PlatformData->Mips.Add(new FTexture2DMipMap(0, 0));
 			}
 		}
 
@@ -192,8 +192,12 @@ void UExampleTextureCacheBuilder::SerializeAsset(FArchive& Ar)
 		for (int32 MipIndex = FirstMip; MipIndex < LastMip; ++MipIndex)
 		{
 			FTexture2DMipMap& Mip = PlatformData->Mips[MipIndex];
-			Ar << Mip.SizeX;
-			Ar << Mip.SizeY;
+			int32 SizeX = Mip.SizeX;
+			int32 SizeY = Mip.SizeY;
+			Ar << SizeX;
+			Ar << SizeY;
+			Mip.SizeX = SizeX;
+			Mip.SizeY = SizeY;
 
 			int32 BulkDataSizeInBytes = Mip.BulkData.GetBulkDataSize();
 			Ar << BulkDataSizeInBytes;
@@ -225,7 +229,7 @@ void UExampleTextureCacheBuilder::OnAssetPreLoad()
 {
 	// Create an object to load the data into
 	UTexture2D* NewTexture = NewObject<UTexture2D>();
-	NewTexture->PlatformData = new FTexturePlatformData();
+	NewTexture->SetPlatformData(new FTexturePlatformData());
 	NewTexture->NeverStream = true;
 
 	SetAsset(NewTexture);

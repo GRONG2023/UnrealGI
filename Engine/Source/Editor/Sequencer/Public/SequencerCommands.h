@@ -4,9 +4,15 @@
 
 #include "CoreMinimal.h"
 #include "Framework/Commands/Commands.h"
-#include "EditorStyleSet.h"
+#include "Internationalization/Internationalization.h"
+#include "Styling/AppStyle.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
 
-class FSequencerCommands : public TCommands<FSequencerCommands>
+class FUICommandInfo;
+
+class SEQUENCER_API FSequencerCommands : public TCommands<FSequencerCommands>
 {
 
 public:
@@ -15,12 +21,18 @@ public:
 		"Sequencer",
 		NSLOCTEXT("Contexts", "Sequencer", "Sequencer"),
 		NAME_None, // "MainFrame" // @todo Fix this crash
-		FEditorStyle::GetStyleSetName() // Icon Style Set
+		FAppStyle::GetAppStyleSetName() // Icon Style Set
 	)
 	{}
 	
 	/** Toggle play */
 	TSharedPtr< FUICommandInfo > TogglePlay;
+
+	/** Toggle play viewport*/
+	TSharedPtr< FUICommandInfo > TogglePlayViewport;
+
+	/** Scrub time in the viewport*/
+	TSharedPtr< FUICommandInfo > ScrubTimeViewport;
 
 	/** Play forward */
 	TSharedPtr< FUICommandInfo > PlayForward;
@@ -30,7 +42,13 @@ public:
 
 	/** Jump to end of playback */
 	TSharedPtr< FUICommandInfo > JumpToEnd;
-	
+
+	/** Jump to start of playback */
+	TSharedPtr< FUICommandInfo > JumpToStartViewport;
+
+	/** Jump to end of playback */
+	TSharedPtr< FUICommandInfo > JumpToEndViewport;
+
 	/** Shuttle forward */
 	TSharedPtr< FUICommandInfo > ShuttleForward;
 
@@ -50,10 +68,10 @@ public:
 	TSharedPtr< FUICommandInfo > StepBackward;
 
 	/** Step forward */
-	TSharedPtr< FUICommandInfo > StepForward2;
+	TSharedPtr< FUICommandInfo > StepForwardViewport;
 
 	/** Step backward */
-	TSharedPtr< FUICommandInfo > StepBackward2;
+	TSharedPtr< FUICommandInfo > StepBackwardViewport;
 
 	/** Jump forward */
 	TSharedPtr< FUICommandInfo > JumpForward;
@@ -67,12 +85,6 @@ public:
 	/** Step to previous key */
 	TSharedPtr< FUICommandInfo > StepToPreviousKey;
 
-	/** Step to next camera key */
-	TSharedPtr< FUICommandInfo > StepToNextCameraKey;
-
-	/** Step to previous camera key */
-	TSharedPtr< FUICommandInfo > StepToPreviousCameraKey;
-
 	/** Step to next shot */
 	TSharedPtr< FUICommandInfo > StepToNextShot;
 
@@ -84,6 +96,9 @@ public:
 
 	/** Set end playback range */
 	TSharedPtr< FUICommandInfo > SetEndPlaybackRange;
+
+	/** Focus the view range on the current playback time without changing zoom level */
+	TSharedPtr< FUICommandInfo > FocusPlaybackTime;
 
 	/** Reset the view range to the playback range */
 	TSharedPtr< FUICommandInfo > ResetViewRange;
@@ -124,11 +139,26 @@ public:
 	/** When enabled, enables a single asynchronous evaluation once per-frame. When disabled, forces a full blocking evaluation every time this sequence is evaluated (should be avoided for real-time content). */
 	TSharedPtr< FUICommandInfo > ToggleAsyncEvaluation;
 
+	/** When enabled, all blendable tracks will always cache their initial values to ensure that they are able to correctly blend in/out when dynamic weights are being used. */
+	TSharedPtr< FUICommandInfo > ToggleDynamicWeighting;
+
+	/** Toggle resetting the playhead when navigating in and out of subsequences */
+	TSharedPtr< FUICommandInfo > ToggleResetPlayheadWhenNavigating;
+
 	/** Toggle constraining the time cursor to the playback range while scrubbing */
 	TSharedPtr< FUICommandInfo > ToggleKeepCursorInPlaybackRangeWhileScrubbing;
 
 	/** Toggle constraining the playback range to the section bounds */
 	TSharedPtr< FUICommandInfo > ToggleKeepPlaybackRangeInSectionBounds;
+
+	/** Toggle auto expand outliner tree on child selection */
+	TSharedPtr< FUICommandInfo > ToggleAutoExpandNodesOnSelection;
+
+	/**
+	 * Toggle whether unlocking a camera cut track should return the viewport to its original location, or keep it where
+	 * the camera cut was.
+	 */
+	TSharedPtr< FUICommandInfo > ToggleRestoreOriginalViewportOnCameraCutUnlock;
 
 	/** Expand/collapse nodes */
 	TSharedPtr< FUICommandInfo > ToggleExpandCollapseNodes;
@@ -144,6 +174,9 @@ public:
 
 	/** Sort all nodes and descendants */
 	TSharedPtr< FUICommandInfo > SortAllNodesAndDescendants;
+
+	/** Reset all enabled filters */
+	TSharedPtr< FUICommandInfo > ResetFilters;
 
 	/** Sets the upper bound of the selection range */
 	TSharedPtr< FUICommandInfo > SetSelectionRangeEnd;
@@ -169,11 +202,17 @@ public:
 	/** Select all keys and sections backward from the current time */
 	TSharedPtr< FUICommandInfo > SelectBackward;
 
+	/** Select none */
+	TSharedPtr< FUICommandInfo > SelectNone;
+
 	/** Add selected actors to sequencer */
 	TSharedPtr< FUICommandInfo > AddActorsToSequencer;
 
 	/** Sets a key at the current time for the selected actor */
 	TSharedPtr< FUICommandInfo > SetKey;
+
+	/** Sets the interp tangent mode for the selected keys to smart auto */
+	TSharedPtr< FUICommandInfo > SetInterpolationCubicSmartAuto;
 
 	/** Sets the interp tangent mode for the selected keys to auto */
 	TSharedPtr< FUICommandInfo > SetInterpolationCubicAuto;
@@ -256,6 +295,15 @@ public:
 	/** Step to previous mark */
 	TSharedPtr< FUICommandInfo > StepToPreviousMark;
 
+	/** Toggle locking marks */
+	TSharedPtr< FUICommandInfo > ToggleMarksLocked;
+
+	/** Toggle show marked frames globally */
+	TSharedPtr< FUICommandInfo > ToggleShowMarkedFramesGlobally;
+
+	/** Clear global marked frames */
+	TSharedPtr< FUICommandInfo > ClearGlobalMarkedFrames;
+
 	/** Rotates through the supported formats for displaying times/frames/timecode. */
 	TSharedPtr< FUICommandInfo > ChangeTimeDisplayFormat;
 
@@ -286,12 +334,6 @@ public:
 	/** Remove selected nodes from folder. */
 	TSharedPtr< FUICommandInfo > RemoveFromFolder;
 
-	/** Bake transform. */
-	TSharedPtr< FUICommandInfo > BakeTransform;
-
-	/** Sync sections using source timecode. */
-	TSharedPtr< FUICommandInfo > SyncSectionsUsingSourceTimecode;
-
 	/** Turns the range slider on and off. */
 	TSharedPtr< FUICommandInfo > ToggleShowRangeSlider;
 
@@ -316,6 +358,12 @@ public:
 	/** Toggles whether or not snap to key times while scrubbing. */
 	TSharedPtr< FUICommandInfo > ToggleSnapPlayTimeToKeys;
 
+	/** Toggles whether or not snap to section bounds while scrubbing. */
+	TSharedPtr< FUICommandInfo > ToggleSnapPlayTimeToSections;
+
+	/** Toggles whether or not snap to markers while scrubbing. */
+	TSharedPtr< FUICommandInfo > ToggleSnapPlayTimeToMarkers;
+
 	/** Toggles whether or not the play time should snap to the selected interval. */
 	TSharedPtr< FUICommandInfo > ToggleSnapPlayTimeToInterval;
 
@@ -331,11 +379,17 @@ public:
 	/** Finds the viewed sequence asset in the content browser. */
 	TSharedPtr< FUICommandInfo > FindInContentBrowser;
 
-	/** Toggles whether to show combined keys at the top node level. */
-	TSharedPtr< FUICommandInfo > ToggleCombinedKeyframes;
+	/** Toggles whether to show layer bars to edit keyframes in bulk. */
+	TSharedPtr< FUICommandInfo > ToggleLayerBars;
+
+	/** Show/hide key bar connectors for quickly retiming pairs of keys*/
+	TSharedPtr< FUICommandInfo > ToggleKeyBars;
 
 	/** Toggles whether to show channel colors in the track area. */
 	TSharedPtr< FUICommandInfo > ToggleChannelColors;
+
+	/** Toggles whether to show the info button in the playback controls. */
+	TSharedPtr< FUICommandInfo > ToggleShowInfoButton;
 
 	/** Turns auto scroll on and off. */
 	TSharedPtr< FUICommandInfo > ToggleAutoScroll;
@@ -379,20 +433,11 @@ public:
 	/** Restores all animated state for the current sequence. */
 	TSharedPtr< FUICommandInfo > RestoreAnimatedState;
 
-	/** Attempts to fix broken actor references. */
-	TSharedPtr< FUICommandInfo > FixActorReferences;
+	/** Attempts to fix possessables whose object class don't match the object class of their currently bound objects. */
+	TSharedPtr< FUICommandInfo > FixPossessableObjectClass;
 
 	/** Rebinds all possessable references with their current bindings. */
 	TSharedPtr< FUICommandInfo > RebindPossessableReferences;
-
-	/** Imports animation from fbx. */
-	TSharedPtr< FUICommandInfo > ImportFBX;
-
-	/** Exports animation to fbx. */
-	TSharedPtr< FUICommandInfo > ExportFBX;
-
-	/** Exports animation to camera anim. */
-	TSharedPtr< FUICommandInfo > ExportToCameraAnim;
 
 	/** Toggle whether we should evaluate sub sequences in isolation */
 	TSharedPtr< FUICommandInfo > ToggleEvaluateSubSequencesInIsolation;
@@ -409,8 +454,23 @@ public:
 	/** Sets a scale key at the current time for the selected actor */
 	TSharedPtr< FUICommandInfo > AddScaleKey;
 
+	/** Set the key to a specified time */
+	TSharedPtr< FUICommandInfo > SetKeyTime;
+
+	/** Set the selected key's time to the current time */
+	TSharedPtr< FUICommandInfo > Rekey;
+
+	/** Snap selected keys to frame */
+	TSharedPtr< FUICommandInfo > SnapToFrame;
+
+	/** Deletes the selected keys */
+	TSharedPtr< FUICommandInfo > DeleteKeys;
+
 	/** Toggle piloting the last camera or the camera cut camera */
 	TSharedPtr< FUICommandInfo > TogglePilotCamera;
+
+	/** Forcibly refresh the UI */
+	TSharedPtr< FUICommandInfo > RefreshUI;
 
 	/**
 	 * Initialize commands

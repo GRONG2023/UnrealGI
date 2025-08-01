@@ -11,9 +11,13 @@ using System.Threading.Tasks;
 using System.Reflection;
 using ImageMagick;
 using UnrealBuildTool;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Extensions.Logging;
+using Logging = Microsoft.Extensions.Logging;
+
+using static AutomationTool.CommandUtils;
 
 namespace Gauntlet
 {
@@ -27,54 +31,17 @@ namespace Gauntlet
 			set { InnerParams = value; }
 		}
 
+		public static readonly DateTime ProgramStartTime = DateTime.UtcNow;
+
 		static string InnerTempDir;
 		static string InnerLogDir;
-		static string InnerUE4RootDir;
+		static string InnerUnrealRootDir;
 		static object InnerLockObject = new object();
 		static List<Action> InnerAbortHandlers;
 		static List<Action> InnerPostAbortHandlers = new List<Action>();
 		public static bool CancelSignalled { get; private set; }
 
-		/// <summary>
-		/// Get the worker id of this Gauntlet instance
-		/// returns -1 if instance is not a member of a worker group
-		/// </summary>
-		public static int WorkerID
-		{
-			get
-			{
-				int Default = -1;
-				return Params.ParseValue("workerid", Default);
-			}
 
-		}
-
-		/// <summary>
-		/// Get the worker pool id of the host worker, pools are assigned to teams such as QA, Automation, etc
-		/// returns -1 if instance is not running on a worker pool
-		/// </summary>
-		public static int WorkerPoolID
-		{
-			get
-			{
-				int Default = -1;
-				return Params.ParseValue("workerpoolid", Default);
-			}
-
-		}
-
-
-		/// <summary>
-		/// Returns true if Gauntlet instance is a member of a worker group
-		/// </summary>
-		public static bool IsWorker
-		{
-			get
-			{
-				return WorkerID != -1;
-			}
-		}
-		
 		/// <summary>
 		/// Returns the device pool id 
 		/// </summary>
@@ -84,7 +51,8 @@ namespace Gauntlet
 			{
 				return Params.ParseValue("devicepool", "");
 			}
-		}		
+		}
+
 
 		public static string TempDir
 		{
@@ -120,16 +88,16 @@ namespace Gauntlet
 			}
 		}
 
-		public static string UE4RootDir
+		public static string UnrealRootDir
 		{
 			get
 			{
-				if (String.IsNullOrEmpty(InnerUE4RootDir))
+				if (String.IsNullOrEmpty(InnerUnrealRootDir))
 				{
-					InnerUE4RootDir = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(Assembly.GetEntryAssembly().GetOriginalLocation()), "..", "..", ".."));
+					InnerUnrealRootDir = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(Assembly.GetEntryAssembly().GetOriginalLocation()), "..", "..", "..", ".."));
 				}
 
-				return InnerUE4RootDir;
+				return InnerUnrealRootDir;
 			}
 
 		}
@@ -140,8 +108,9 @@ namespace Gauntlet
 		/// </summary>
 		public static string LongPathPrefix
 		{
-			get { return Path.DirectorySeparatorChar == '\\' ? @"\\?\" : ""; }
+			get { return Path.DirectorySeparatorChar == '\\'? @"\\?\" : ""; }
 		}
+
 
 		/// <summary>
 		/// Acquired and released during the main Tick of the Gauntlet systems. Use this before touchung anything global scope from a 
@@ -192,7 +161,10 @@ namespace Gauntlet
 		/// </summary>
 		public static List<Action> PostAbortHandlers { get { return InnerPostAbortHandlers; } }
 
-
+		/// <summary>
+		/// Used by network functions that need to deal with multiple adapters
+		/// </summary>
+		public static string PreferredNetworkDomain {  get { return "epicgames.net";  } }
 	}
 
 	/// <summary>
@@ -228,7 +200,7 @@ namespace Gauntlet
 			}
 		}
 
-		static StreamWriter LogFile = null;
+		static TextWriter LogFile = null;
 
 		static List<Action<string>> Callbacks;
 
@@ -236,6 +208,7 @@ namespace Gauntlet
 
 		static int SanitizationSuspendCount = 0;
 
+		static ILogger Logger = EpicGames.Core.Log.Logger;
 
 		public static void AddCallback(Action<string> CB)
 		{
@@ -271,7 +244,7 @@ namespace Gauntlet
 
 				try
 				{
-					LogFile = new StreamWriter(Outpath);
+					LogFile = TextWriter.Synchronized(new StreamWriter(Outpath));
 				}
 				catch (UnauthorizedAccessException Ex)
 				{
@@ -296,7 +269,7 @@ namespace Gauntlet
 			{
 				if (CommandUtils.IsBuildMachine)
 				{
-					OutputMessage("<-- Suspend Log Parsing -->");
+					Logger.LogInformation("<-- Suspend Log Parsing -->");
 				}
 			}
 		}
@@ -307,7 +280,7 @@ namespace Gauntlet
 			{
 				if (CommandUtils.IsBuildMachine)
 				{
-					OutputMessage("<-- Resume Log Parsing -->");
+					Logger.LogInformation("<-- Resume Log Parsing -->");
 				}
 			}
 		}
@@ -344,15 +317,16 @@ namespace Gauntlet
 		}
 
 		/// <summary>
-		/// Outputs the message to the console with an optional prefix and sanitization. Sanitizing
-		/// allows errors and exceptions to be passed through to logs without triggering CIS warnings
-		/// about out log
+		/// Outputs the message to the console with an optional log level and sanitization.
+		/// Sanitizing allows errors and exceptions to be passed through to logs without triggering CIS warnings about out log
 		/// </summary>
 		/// <param name="Message"></param>
-		/// <param name="Prefix"></param>
+		/// <param name="EventId"></param>
+		/// <param name="Level"></param>
 		/// <param name="Sanitize"></param>
+		/// <param name="Args"></param>
 		/// <returns></returns>
-		static private void OutputMessage(string Message, string Prefix="", bool Sanitize=true)
+		static private void OutputMessage(string Message, Logging.EventId EventId, Logging.LogLevel Level = Logging.LogLevel.Information, bool Sanitize=true, params object[] Args)
 		{
 			// EC detects error statements in the log as a failure. Need to investigate best way of 
 			// reporting errors, but not errors we've handled from tools.
@@ -373,22 +347,48 @@ namespace Gauntlet
 				}		
 			}
 
-			if (string.IsNullOrEmpty(Prefix) == false)
+			if (Globals.Params.ParseParam("timestamp"))
 			{
-				Message = Prefix + ": " + Message;
+				TimeSpan ElapsedTime = DateTime.UtcNow - Globals.ProgramStartTime;
+				Message = "[" + ElapsedTime.ToString() + "] " + Message;
 			}
 
-			// TODO - Remove all Gauntlet logging and switch to UBT log?
-			CommandUtils.LogInformation(Message);
+			Logger.Log(Level, EventId, Message, Args);
 
-			if (LogFile != null)
+			if (LogFile != null || Callbacks != null)
 			{
-				LogFile.WriteLine(Message);
-			}
+				try
+				{
+					if (Args.Length > 0)
+					{
+						// Adjust Message and Arguments for string.Format
+						int Index = 0;
+						string SequenceMessage = Regex.Replace(Message, @"\{[^{}:]+(:[^{}]+)?\}", M => "{" + Index++.ToString() + M.Groups[1].Value + "}", RegexOptions.IgnoreCase);
+						if (Index > Args.Length)
+						{
+							Args = Args.Concat(Enumerable.Repeat("null", Index - Args.Length)).ToArray();
+						}
+						else if (Index < Args.Length)
+						{
+							Args = Args.Take(Index).ToArray();
+						}
+						Message = string.Format(SequenceMessage, Args);
+					}
 
-			if (Callbacks != null)
-			{
-				Callbacks.ForEach(A => A(Message));
+					if (LogFile != null)
+					{
+						LogFile.WriteLine(Message);
+					}
+
+					if (Callbacks != null)
+					{
+						Callbacks.ForEach(A => A(Message));
+					}
+				}
+				catch (Exception Ex)
+				{
+					Logger.LogWarning(KnownLogEvents.Gauntlet, "Exception logging '{Message}'. {Exception}", Message, Ex.ToString());
+				}
 			}
 		}	
 
@@ -396,15 +396,15 @@ namespace Gauntlet
 		{
 			if (IsVerbose)
 			{
-				Verbose(string.Format(Format, Args));
+				Verbose(KnownLogEvents.Gauntlet, Format, Args);
 			}
 		}
 
-		static public void Verbose(string Message)
+		static public void Verbose(Logging.EventId EventId, string Format, params object[] Args)
 		{
 			if (IsVerbose)
 			{
-				OutputMessage(Message);
+				OutputMessage(Format, EventId, Args: Args);
 			}
 		}
 
@@ -412,44 +412,44 @@ namespace Gauntlet
 		{
 			if (IsVeryVerbose)
 			{
-				VeryVerbose(string.Format(Format, Args));
+				VeryVerbose(KnownLogEvents.Gauntlet, Format, Args);
 			}
 		}
 
-		static public void VeryVerbose(string Message)
+		static public void VeryVerbose(Logging.EventId EventId, string Format, params object[] Args)
 		{
 			if (IsVeryVerbose)
 			{
-				OutputMessage(Message);
+				OutputMessage(Format, EventId, Args: Args);
 			}
 		}
 
 		static public void Info(string Format, params object[] Args)
 		{
-			Info(string.Format(Format, Args));
+			Info(KnownLogEvents.Gauntlet, Format, Args);
 		}
 
-		static public void Info(string Message)
+		static public void Info(Logging.EventId EventId, string Format, params object[] Args)
 		{
-			OutputMessage(Message);
+			OutputMessage(Format, EventId, Args: Args);
 		}
 
 		static public void Warning(string Format, params object[] Args)
 		{
-			Warning(string.Format(Format, Args));
+			Warning(KnownLogEvents.Gauntlet, Format, Args);
 		}
 
-		static public void Warning(string Message)
+		static public void Warning(Logging.EventId EventId, string Format, params object[] Args)
 		{
-			OutputMessage(Message, "Warning");
+			OutputMessage(Format, EventId, Logging.LogLevel.Warning, Args: Args);
 		}
 		static public void Error(string Format, params object[] Args)
 		{
-			Error(string.Format(Format, Args));
+			Error(KnownLogEvents.Gauntlet, Format, Args);
 		}
-		static public void Error(string Message)
-		{		
-			OutputMessage(Message, "Error", false);
+		static public void Error(Logging.EventId EventId, string Format, params object[] Args)
+		{
+			OutputMessage(Format, EventId, Logging.LogLevel.Error, false, Args);
 		}
 	}
 
@@ -474,6 +474,29 @@ namespace Gauntlet
 			}
 
 			return HashString;
+		}
+
+		public static string ComputeHash(string Input, HashAlgorithm Algo, int MaxLength = 0)
+		{
+			if (string.IsNullOrEmpty(Input))
+			{
+				return "0";
+			}
+
+			byte[] Hash = Algo.ComputeHash(Encoding.UTF8.GetBytes(Input));
+			var SBuilder = new StringBuilder();
+
+			for (int i = 0; i < Hash.Length; i++)
+			{
+				SBuilder.Append(Hash[i].ToString("x2"));
+				if (MaxLength > 0 && SBuilder.Length >= MaxLength)
+				{
+					if (SBuilder.Length > MaxLength) { SBuilder.Remove(MaxLength, 1); }
+					break;
+				}
+			}
+
+			return SBuilder.ToString();
 		}
 	}
 
@@ -515,43 +538,41 @@ namespace Gauntlet
 
 	namespace Utils
 	{
-		
 		public class TestConstructor
 		{
-
 			/// <summary>
-			/// Helper function that returns the type of an object based on namespace and name
+			/// Helper function that returns the type of an object based on namespaces and name
 			/// </summary>
-			/// <param name="Namespace"></param>
+			/// <param name="Namespaces"></param>
 			/// <param name="TestName"></param>
 			/// <returns></returns>
 			private static Type GetTypeForTest(string TestName, IEnumerable<string> Namespaces)
 			{
 				var SearchAssemblies = AppDomain.CurrentDomain.GetAssemblies();
 
-				// turn foo into [n1.foo, n2.foo, foo]
-				IEnumerable<string> FullNames;
+				// turn foo into [foo, n1.foo, n2.foo]
+				IEnumerable<string> FullNames = new[] { TestName };
 
 				if (Namespaces != null)
 				{
-					FullNames = Namespaces.Select(N => N + "." + TestName);
-				}
-				else
-				{
-					FullNames = new[] { TestName };
+					FullNames = FullNames.Concat(Namespaces.Select(N => N + "." + TestName));
 				}
 
 				Log.VeryVerbose("Will search {0} for test {1}", string.Join(" ", FullNames), TestName);
-				
-				// find all types from loaded assemblies that implement testnode
-					List < Type> CandidateTypes = new List<Type>();
 
-				foreach (var Assembly in AppDomain.CurrentDomain.GetAssemblies())
+				// find all types from loaded assemblies that implement testnode
+				List<Type> CandidateTypes = new List<Type>();
+				foreach (Assembly Assembly in ScriptManager.AllScriptAssemblies)
 				{
 					foreach (var Type in Assembly.GetTypes())
 					{
 						if (typeof(ITestNode).IsAssignableFrom(Type))
 						{
+							// If there is an Exact match, just take it
+							if (Type.FullName == TestName)
+							{
+								return Type;
+							}
 							CandidateTypes.Add(Type);
 						}
 					}
@@ -560,35 +581,73 @@ namespace Gauntlet
 				Log.VeryVerbose("Possible candidates for {0}: {1}", TestName, string.Join(" ", CandidateTypes));
 
 				// check our expanded names.. need to search in namespace order
+				IList<Type> MatchingTypes = new List<Type>();
 				foreach (string UserTypeName in FullNames)
 				{
 					// Even tho the user might have specified N1.Foo it still might be Other.N1.Foo so only
 					// compare based on the number of namespaces that were specified.
-					foreach (var Type in CandidateTypes)
+					foreach (Type Candidate in CandidateTypes)
 					{
 						string[] UserNameComponents = UserTypeName.Split('.');
-						string[] TypeNameComponents = Type.FullName.Split('.');
+						string[] TypeNameComponents = Candidate.FullName.Split('.');
 
 						int MissingUserComponents = TypeNameComponents.Length - UserNameComponents.Length;
 
 						if (MissingUserComponents > 0)
 						{
-							// 
 							TypeNameComponents = TypeNameComponents.Skip(MissingUserComponents).ToArray();
 						}
 
-						var Difference = TypeNameComponents.Except(UserNameComponents, StringComparer.OrdinalIgnoreCase);
+						IEnumerable<string> Difference = TypeNameComponents.Except(UserNameComponents, StringComparer.OrdinalIgnoreCase);
 
 						if (Difference.Count() == 0)
 						{
-							Log.VeryVerbose("Considering {0} as best match for {1}", Type, TestName);
-							return Type;
+							Log.VeryVerbose("Found match {0} for user type {1}", Candidate.FullName, UserTypeName);
+
+							// If we have any namespaces, add the candidate
+							if(Namespaces.Count() > 0)
+							{
+								MatchingTypes.Add(Candidate);
+							}
+
+							// No namespaces, just return the first type found
+							else
+							{
+								return Candidate;
+							}
 						}
 					}
 				}
 
+				// If user has specified at least 1 namespace, we prioritize types that include a provided namespace over types that do not.
+				// For example, in the case of the supplied parameters: TestName = BootTest, Namespaces = {"Game"}
+				// We prioritize "Game.BootTest" over "UE.BootTest".
+				// In the case of multiple name spaces, we default to the first test found within a namespace.
+				// For example, in the case of the supplied parameters: TestName = BootTest, Namespaces = {"Game", "UE"}
+				// We select "Game.BootTest" over "UE.BootTest".
+				// If you maintain many tests with the same base name, you should be as explicit as possible with Namespaces!
+				foreach(string Namespace in Namespaces)
+				{
+					foreach(Type Match in MatchingTypes)
+					{
+						// Split off the namespace
+						string TypeNamespace = Match.FullName.Replace(Match.Name, string.Empty);
 
-				throw new AutomationException("Unable to find type {0} in assemblies. Namespaces= {1}.", TestName, Namespaces);
+						// If it matches one of namespaces, return it
+						if (TypeNamespace.Contains(Namespace))
+						{
+							return Match;
+						}
+					}
+				}
+
+				// If nothing found from the prefered namespaces, then return the first item with less amount of steps.
+				if(MatchingTypes.Count() > 0)
+				{
+					return MatchingTypes.OrderBy(M => M.FullName.Split('.').Length).First();
+				}
+
+				throw new AutomationException("Unable to find type {0} in assemblies. Namespaces={1}.", TestName, string.Join(", ", Namespaces));
 			}
 
 
@@ -753,10 +812,19 @@ namespace Gauntlet
 		public static class InterfaceHelpers
 		{
 
-			public static IEnumerable<InterfaceType> FindImplementations<InterfaceType>()
+			public static IEnumerable<InterfaceType> FindImplementations<InterfaceType>(bool bIncludeCompiledScripts = false)
 				where InterfaceType : class
 			{
-				var AllTypes = Assembly.GetExecutingAssembly().GetTypes().Where(T => typeof(InterfaceType).IsAssignableFrom(T));
+				HashSet<Type> AllTypes = new HashSet<Type>(Assembly.GetExecutingAssembly().GetTypes().Where(T => typeof(InterfaceType).IsAssignableFrom(T)));
+
+				if (bIncludeCompiledScripts)
+				{
+					foreach (Assembly Assembly in ScriptManager.AllScriptAssemblies)
+					{
+						List<Type> AssemblyTypes = Assembly.GetTypes().Where(T => typeof(InterfaceType).IsAssignableFrom(T)).ToList();
+						AllTypes.UnionWith(AssemblyTypes);
+					}
+				}
 
 				List<InterfaceType> ConstructedTypes = new List<InterfaceType>();
 
@@ -771,8 +839,25 @@ namespace Gauntlet
 						ConstructedTypes.Add(NewInstance);
 					}
 				}
-				
+
 				return ConstructedTypes;
+			}
+			/// <summary>
+			/// Check if the method signature is overridden.
+			/// </summary>
+			/// <param name="ClassType"></param>
+			/// <param name="MethodName"></param>
+			/// <param name="Signature"></param>
+			/// <returns></returns>
+			public static bool HasOverriddenMethod(Type ClassType, string MethodName, Type[] Signature)
+			{
+				MethodInfo Method = ClassType.GetMethod(MethodName, Signature);
+				if (Method == null)
+				{
+					throw new Exception(string.Format("Unknown method {0} from {1} with signature {2}.", MethodName, ClassType.Name, Signature.ToString()));
+				}
+				bool IsOverridden = Method.GetBaseDefinition().DeclaringType != Method.DeclaringType;
+				return Method.GetBaseDefinition().DeclaringType != Method.DeclaringType;
 			}
 
 		}
@@ -905,17 +990,17 @@ namespace Gauntlet
 				// find all files. If a directory get them all, else use the pattern/regex
 				if (Options.IsDirectoryPattern)
 				{
-					SourceFiles = SourceDir.GetFiles("*", Options.Recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly);
+					SourceFiles = GetFiles(SourceDir, "*", Options.Recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly);
 				}
 				else
 				{
 					if (Options.Regex == null)
 					{
-						SourceFiles = SourceDir.GetFiles(Options.Pattern, Options.Recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly);
+						SourceFiles = GetFiles(SourceDir, Options.Pattern, Options.Recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly);
 					}
 					else
 					{
-						SourceFiles = SourceDir.GetFiles("*", Options.Recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly);
+						SourceFiles = GetFiles(SourceDir, "*", Options.Recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly);
 
 						SourceFiles = SourceFiles.Where(F => Options.Regex.IsMatch(F.Name));
 					}
@@ -926,7 +1011,7 @@ namespace Gauntlet
 
 				if (IsMirroring)
 				{
-					DestFiles = DestDir.GetFiles("*", SearchOption.AllDirectories);
+					DestFiles = GetFiles(DestDir, "*", SearchOption.AllDirectories);
 
 					foreach (FileInfo Info in DestFiles)
 					{
@@ -1042,7 +1127,7 @@ namespace Gauntlet
 						{
 							// avoid an UnauthorizedAccessException by making sure file isn't read only
 							DestInfo.IsReadOnly = false;
-							DestInfo.Delete();
+							Delete(DestInfo);
 						}
 						catch (Exception Ex)
 						{
@@ -1053,13 +1138,13 @@ namespace Gauntlet
 					// delete empty directories
 					DirectoryInfo DestDirInfo = new DirectoryInfo(DestDirPath);
 
-					DirectoryInfo[] AllSubDirs = DestDirInfo.GetDirectories("*", SearchOption.AllDirectories);
+					DirectoryInfo[] AllSubDirs = GetDirectories(DestDirInfo, "*", SearchOption.AllDirectories);
 
 					foreach (DirectoryInfo SubDir in AllSubDirs)
 					{
 						try
 						{
-							if (SubDir.GetFiles().Length == 0 && SubDir.GetDirectories().Length == 0)
+							if (GetFiles(SubDir).Length == 0 && GetDirectories(SubDir).Length == 0)
 							{
 								if (Options.Verbose)
 								{
@@ -1070,7 +1155,7 @@ namespace Gauntlet
 									Log.Verbose("Deleting empty dir {0}", SubDir.FullName);
 								}
 
-								SubDir.Delete(true);
+								Delete(SubDir, true);
 							}
 						}
 						catch (Exception Ex)
@@ -1120,7 +1205,7 @@ namespace Gauntlet
 								Log.Verbose("Copying to {0}", DestInfo.FullName);
 							}
 
-							SrcInfo.CopyTo(DestInfo.FullName, true);
+							DestInfo = SrcInfo.CopyTo(DestInfo.FullName, true);
 
 							// Clear attributes and set last write time
 							DestInfo.Attributes = FileAttributes.Normal;
@@ -1137,10 +1222,7 @@ namespace Gauntlet
 							}
 							else
 							{
-								using (var PauseEC = new ScopedSuspendECErrorParsing())
-								{
-									Log.Error("File Copy failed with {0}.", ex.Message);
-								}
+								Log.Info("File Copy failed with {0}.", ex.Message);
 
 								// Warn with message if we're exceeding long path, otherwise throw an exception
 								const int MAX_PATH = 260;
@@ -1160,9 +1242,9 @@ namespace Gauntlet
 									Copied = true;
 
 									// Filter out some known unneeded files which can cause this warning, and log the message instead
-									string[] Blacklist = new string[]{ "UE4CC-XboxOne", "PersistentDownloadDir" };
+									string[] Denylist = new string[]{ "UECC-", "PersistentDownloadDir" };
 									string Message = string.Format("Long path file copy failed with {0}.  Please verify that this file is not required.", ex.Message);
-									if ( Blacklist.FirstOrDefault(B => { return SrcInfo.FullName.IndexOf(B, StringComparison.OrdinalIgnoreCase) >= 0; }) == null)
+									if (Denylist.FirstOrDefault(B => { return SrcInfo.FullName.IndexOf(B, StringComparison.OrdinalIgnoreCase) >= 0; }) == null)
 									{
 										Log.Warning(Message); 
 									}
@@ -1245,6 +1327,12 @@ namespace Gauntlet
 				}
 				
 				string RootPath = Path.GetPathRoot(InPath); // get drive's letter
+
+				if (string.IsNullOrEmpty(RootPath))
+				{
+					return false;
+				}
+
 				DriveInfo driveInfo = new System.IO.DriveInfo(RootPath); // get info about the drive
 				return driveInfo.DriveType == DriveType.Network; // return true if a network drive
 			}
@@ -1282,10 +1370,10 @@ namespace Gauntlet
 					return;
 				}
 
-				foreach (DirectoryInfo SubDir in Di.GetDirectories())
+				foreach (DirectoryInfo SubDir in GetDirectories(Di))
 				{
 					bool HasFile = 
-						SubDir.GetFiles().Where(F => {
+						GetFiles(SubDir).Where(F => {
 							int DaysOld = (DateTime.Now - F.LastWriteTime).Days;				
 							
 							if (DaysOld >= Days)
@@ -1303,7 +1391,7 @@ namespace Gauntlet
 						Log.Info("Removing old directory {0}", SubDir.Name);
 						try
 						{
-							SubDir.Delete(true);
+							Delete(SubDir, true);
 						}
 						catch (Exception Ex)
 						{
@@ -1315,6 +1403,204 @@ namespace Gauntlet
 						CleanupMarkedDirectories(SubDir.FullName, Days);
 					}
 				}				
+			}
+
+			/// <summary>
+			/// Wrap DirectoryInfo.GetFiles() and retry once if exception is "A retry should be performed."
+			/// </summary>
+			public static FileInfo[] GetFiles(DirectoryInfo Directory)
+			{
+				FileInfo[] Files = null;
+				try
+				{
+					Files = Directory.GetFiles();
+				}
+				catch (Exception ex)
+				{
+					if (ex.ToString().Contains("A retry should be performed"))
+					{
+						Log.Info("Retrying Directory.GetFiles() once.");
+						Files = Directory.GetFiles();
+					}
+					else
+					{
+						throw;
+					}
+				}
+				return Files;
+			}
+
+			/// <summary>
+			/// Wrap DirectoryInfo.GetFiles(Pattern, SearchOption) and retry once if exception is "A retry should be performed."
+			/// </summary>
+			public static FileInfo[] GetFiles(DirectoryInfo Directory, string Pattern, SearchOption SearchOption)
+			{
+				FileInfo[] Files = null;
+				try
+				{
+					Files = Directory.GetFiles(Pattern, SearchOption);
+				}
+				catch (Exception ex)
+				{
+					if (ex.ToString().Contains("A retry should be performed"))
+					{
+						Log.Info("Retrying Directory.GetFiles(Pattern, SearchOption) once.");
+						Files = Directory.GetFiles(Pattern, SearchOption);
+					}
+					else
+					{
+						throw;
+					}
+				}
+				return Files;
+			}
+
+			/// <summary>
+			/// Wrap DirectoryInfo.GetDirectories() and retry once if exception is "A retry should be performed."
+			/// </summary>
+			public static DirectoryInfo[] GetDirectories(DirectoryInfo Directory)
+			{
+				DirectoryInfo[] Directories = null;
+				try
+				{
+					Directories = Directory.GetDirectories();
+				}
+				catch (Exception ex)
+				{
+					if (ex.ToString().Contains("A retry should be performed"))
+					{
+						Log.Info("Retrying Directory.GetDirectories() once.");
+						Directories = Directory.GetDirectories();
+					}
+					else
+					{
+						throw;
+					}
+				}
+				return Directories;
+			}
+
+			/// <summary>
+			/// Wrap DirectoryInfo.GetDirectories(Pattern, SearchOption) and retry once if exception is "A retry should be performed."
+			/// </summary>
+			public static DirectoryInfo[] GetDirectories(DirectoryInfo Directory, string Pattern, SearchOption SearchOption)
+			{
+				DirectoryInfo[] Directories = null;
+				try
+				{
+					Directories = Directory.GetDirectories(Pattern, SearchOption);
+				}
+				catch (Exception ex)
+				{
+					if (ex.ToString().Contains("A retry should be performed"))
+					{
+						Log.Info("Retrying Directory.GetDirectories(Pattern, SearchOption) once.");
+						Directories = Directory.GetDirectories(Pattern, SearchOption);
+					}
+					else
+					{
+						throw;
+					}
+				}
+				return Directories;
+			}
+
+
+			/// <summary>
+			/// Wrap DirectoryInfo.GetFileSystemInfos(Pattern, SearchOption) and retry once if exception is "A retry should be performed."
+			/// </summary>
+			/// <param name="Directory"></param>
+			/// <param name="Pattern"></param>
+			/// <param name="SearchOption"></param>
+			/// <returns></returns>
+			public static FileSystemInfo[] GetFileSystemInfos(DirectoryInfo Directory, string Pattern, SearchOption SearchOption)
+			{
+				FileSystemInfo[] FileInfos = null;
+				try
+				{
+					FileInfos = Directory.GetFileSystemInfos(Pattern, SearchOption);
+				}
+				catch (Exception ex)
+				{
+					if (ex.ToString().Contains("A retry should be performed"))
+					{
+						Log.Info("Retrying Directory.GetFileSystemInfos(Pattern, SearchOption) once.");
+						FileInfos = Directory.GetFileSystemInfos(Pattern, SearchOption);
+					}
+					else
+					{
+						throw;
+					}
+				}
+				return FileInfos;
+			}
+
+			/// <summary>
+			/// Deletes the specified directory
+			/// </summary>
+			/// <param name="Directory">The directory to delete</param>
+			/// <param name="bRecursive">Whether or not subdirectories and it's contents should also be deleted</param>
+			/// <param name="bForce">If true, a second attempt will me made at file deletion after setting file attributes to normal</param>
+			public static void Delete(DirectoryInfo Directory, bool bRecursive, bool bForce = false)
+			{
+				try
+				{
+					Directory.Delete(bRecursive);
+				}
+				catch (Exception Ex)
+				{
+					if (Ex.ToString().Contains("A retry should be performed"))
+					{
+						Log.Info("Retrying deletion once.");
+						Directory.Delete(bRecursive);
+					}
+					else if(bForce)
+					{
+						Log.Info("Setting files in {Directory} to have normal attributes (no longer read-only) and retrying deletion.", Directory);
+						Directory.Attributes = FileAttributes.Normal;
+
+						foreach(FileSystemInfo Info in Directory.EnumerateFiles("*", SearchOption.AllDirectories))
+						{
+							Info.Attributes = FileAttributes.Normal;
+							Info.Delete(); // throw exceptions here because we have requested a force clean
+						}
+					}
+					else
+					{
+						Log.Warning("Failed to delete directory {Directory}!", Directory);
+					}
+				}
+			}
+
+			/// <summary>
+			/// Deletes the specified file
+			/// </summary>
+			/// <param name="File">The file to delete</param>
+			/// <param name="bForce">If true, a second attempt will me made at file deletion after setting file attributes to normal</param>
+			public static void Delete(FileInfo File, bool bForce = false)
+			{
+				try
+				{
+					File.Delete();
+				}
+				catch (Exception Ex)
+				{
+					if (Ex.ToString().Contains("A retry should be performed"))
+					{
+						Log.Info("Retrying deletion once.");
+						File.Delete();
+					}
+					else if (bForce)
+					{
+						Log.Info("Setting files {File} to have normal attributes (no longer read-only) and retrying deletion.", File);
+						File.Attributes = FileAttributes.Normal;
+						File.Delete(); // throw exceptions here because we have requested a force clean
+					}
+					else
+					{
+						Log.Warning("Failed to delete directory {Directory}!", File);
+					}
+				}
 			}
 
 			/// <summary>
@@ -1341,7 +1627,7 @@ namespace Gauntlet
 
 				DirectoryInfo Di = new DirectoryInfo(InPath);
 
-				var Files = Di.GetFiles().Where(f => Extensions.Contains(f.Extension.ToLower()));
+				var Files = SystemHelpers.GetFiles(Di).Where(f => Extensions.Contains(f.Extension.ToLower()));
 
 				return Files;
 			}
@@ -1480,20 +1766,20 @@ namespace Gauntlet
 
 					foreach (FileInfo File in FilesToCleanUp)
 					{
-						File.Delete();
+						SystemHelpers.Delete(File);
 					}
 				}
-				catch (System.Exception Ex)
+				catch (Exception Ex)
 				{
 					Log.Warning("ConvertImages failed: {0}", Ex);
 					try
 					{
 						if (DeleteOriginals)
 						{
-							Files.ToList().ForEach(F => F.Delete());
+							Files.ToList().ForEach(F => SystemHelpers.Delete(F));
 						}
 					}
-					catch (System.Exception e)
+					catch (Exception e)
 					{
 						Log.Warning("Cleaning up original files failed: {0}", e);
 					}
@@ -1544,6 +1830,124 @@ namespace Gauntlet
 			Files = Files.Where(F => Pattern.IsMatch(F));
 
 			return Files.ToArray();
+		}
+
+		/// <summary>
+		/// Returns true if any part of the specified path contains 'Component'. E.g. c:\Temp\Foo\Bar would return true for 'Foo'
+		/// </summary>
+		/// <param name="InPath">Path to search</param>
+		/// <param name="InComponent">Component to look for</param>
+		/// <param name="InPartialMatch">Whether a partial match is ok. E.g 'Fo' instead of 'Foo'</param>
+		/// <returns></returns>
+		public static bool PathContainsComponent(string InPath, string InComponent, bool InPartialMatch=false)
+		{
+			// normalize and split the path
+			var Components = new DirectoryInfo(InPath).FullName.Split(Path.DirectorySeparatorChar);
+
+			return InPartialMatch
+				? Components.Any(S => S.Contains(InComponent, StringComparison.OrdinalIgnoreCase))
+				: Components.Any(S => S.Equals(InComponent, StringComparison.OrdinalIgnoreCase));
+		}
+
+		/// <summary>
+		/// Returns subdirectories that match the specified regular expression, searching up to the specified maximum depth
+		/// </summary>
+		/// <param name="BaseDir">Directory to start searching in</param>
+		/// <param name="RegexPattern">Regular expression to match on</param>
+		/// <param name="RecursionDepth">Depth to search (-1 = unlimited)</param>
+		/// <returns></returns>
+		public static IEnumerable<DirectoryInfo> FindMatchingDirectories(string BaseDir, string RegexPattern, int RecursionDepth=0)
+		{
+			List<DirectoryInfo> Found = new List<DirectoryInfo>();
+
+			List<DirectoryInfo> Candidates = new List<DirectoryInfo>(Utils.SystemHelpers.GetDirectories(new DirectoryInfo(BaseDir)));
+
+			Regex Pattern = new Regex(RegexPattern, RegexOptions.IgnoreCase);
+
+			int CurrentDepth = 0;
+
+			do
+			{
+				IEnumerable<DirectoryInfo> MatchingDirs = Candidates.Where(D => Pattern.IsMatch(D.Name));
+
+				Found.AddRange(MatchingDirs);
+
+				// recurse
+				Candidates = Candidates.SelectMany(D => Utils.SystemHelpers.GetDirectories(D)).ToList();
+
+			} while (Candidates.Any() && (CurrentDepth++ < RecursionDepth || RecursionDepth == -1)); ;
+
+			return Found;
+		}
+
+		/// <summary>
+		/// Returns files, that match the specified regular expression, ignoring case, in the provided folder,
+		/// searching up to a maximum depth
+		/// </summary>
+		/// <param name="BaseDir">Directory to start searching in</param>
+		/// <param name="RegexPattern">Regular expression pattern to match on</param>
+		/// <param name="RecursionDepth">Optional depth to search (-1 = unlimited)</param>
+		/// <returns></returns>
+		public static IEnumerable<FileInfo> FindMatchingFiles(string BaseDir, string RegexPattern, int RecursionDepth = 0)
+		{
+			Regex RegExObj = new Regex(RegexPattern, RegexOptions.IgnoreCase);
+
+			return MatchFiles(BaseDir, RegExObj, RecursionDepth);
+		}
+
+		/// <summary>
+		/// Returns files that match a specified regular expression in the provided folder, searching up to a maximum depth
+		/// </summary>
+		/// <param name="BaseDir">Directory to start searching in</param>
+		/// <param name="RegExObj">RegEx to match on</param>
+		/// <param name="RecursionDepth">Optional depth to search (-1 = unlimited)</param>
+		/// <returns></returns>
+		public static IEnumerable<FileInfo> FindMatchingFiles(string BaseDir, Regex RegExObj, int RecursionDepth = 0)
+		{
+			return MatchFiles(BaseDir, RegExObj, RecursionDepth);
+		}
+
+		/// <summary>
+		/// Returns files that match the given RegEx from the provided folder, searching up to a maximum depth
+		/// </summary>
+		/// <param name="BaseDir">Directory to start searching in</param>
+		/// <param name="RegExObj">RegEx to match on</param>
+		/// <param name="RecursionDepth">Depth to search (-1 = unlimited)</param>
+		/// <returns></returns>
+		private static IEnumerable<FileInfo> MatchFiles(string BaseDir, Regex RegExObj, int RecursionDepth)
+		{
+			List<FileInfo> Found = new List<FileInfo>();
+
+			IEnumerable<DirectoryInfo> CandidateDirs = new DirectoryInfo[] { new DirectoryInfo(BaseDir) };
+
+			int CurrentDepth = 0;
+
+			do
+			{
+				// check for matching files in this set of directories
+				IEnumerable<FileInfo> MatchingFiles = CandidateDirs.SelectMany(D => Utils.SystemHelpers.GetFiles(D)).Where(F => RegExObj.IsMatch(F.Name));
+
+				Found.AddRange(MatchingFiles);
+
+				// recurse into this set of directories
+				CandidateDirs = CandidateDirs.SelectMany(D => Utils.SystemHelpers.GetDirectories(D)).ToList();
+
+			} while (CandidateDirs.Any() && (CurrentDepth++ < RecursionDepth || RecursionDepth == -1)); ;
+
+			return Found;
+		}
+	}
+
+	public static class FileUtils
+	{
+		/// <summary>
+		/// Sanitize filename
+		/// </summary>
+		/// <param name="Name"></param>
+		/// <returns></returns>
+		static public string SanitizeFilename(string Name)
+		{
+			return Regex.Replace(Name, @"[^a-z0-9_\-.]+", "_", RegexOptions.IgnoreCase);
 		}
 	}
 

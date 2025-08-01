@@ -21,8 +21,10 @@
 #include "IPropertyTableRow.h"
 #include "BusyCursor.h"
 #include "ScopedTransaction.h"
+#include "StaticMeshComponentLODInfo.h"
 #include "Widgets/Input/STextEntryPopup.h"
 #include "Engine/LevelStreaming.h"
+#include "Engine/MapBuildDataRegistry.h"
 
 #define LOCTEXT_NAMESPACE "Editor.StatsViewer.StaticMeshLightingInfo"
 
@@ -61,7 +63,7 @@ struct StaticMeshLightingInfoStatsGenerator
 			break;
 		case StaticMeshLightingInfoObjectSets_SelectedLevels:
 			{
-				TArray<class ULevel*>& SelectedLevels = InWorld->GetSelectedLevels();
+				TArray<TObjectPtr<class ULevel>>& SelectedLevels = InWorld->GetSelectedLevels();
 				for(auto It = SelectedLevels.CreateIterator(); It; ++It)
 				{
 					ULevel* Level = *It;
@@ -131,6 +133,26 @@ struct StaticMeshLightingInfoStatsGenerator
 			Entry->StaticMeshComponent = InComponent;
 			Entry->StaticMesh = InComponent->GetStaticMesh();
 			
+			// Show all of the lightmap texture names so we can correlate meshes with the actual texture data
+			// for debugging encoding concerns. Only do this if we have static lighting enabled/built (LODData exists)
+			if (InComponent->LODData.Num())
+			{
+				const FMeshMapBuildData* MeshMapBuildData = InComponent->GetMeshMapBuildData(InComponent->LODData[0]);
+				if (MeshMapBuildData && MeshMapBuildData->LightMap)
+				{
+					TArray<UTexture2D*> Textures;
+					FLightMap2D* LightMap2D = MeshMapBuildData->LightMap->GetLightMap2D();
+					if (LightMap2D)
+					{
+						LightMap2D->GetReferencedTextures(Textures);
+					}
+					for (UTexture2D* Texture : Textures)
+					{
+						Entry->LightmapTextureNames.Add(Texture->GetName());
+					}
+				}
+			}
+
 			Entry->TextureLightMapMemoryUsage = (float)TextureLightMapMemoryUsage / 1024.0f;
 			Entry->TextureShadowMapMemoryUsage = (float)TextureShadowMapMemoryUsage / 1024.0f;
 			Entry->VertexLightMapMemoryUsage = (float)VertexLightMapMemoryUsage / 1024.0f;
@@ -258,7 +280,7 @@ TSharedPtr<SWidget> FStaticMeshLightingInfoStatsPage::GetCustomWidget(TWeakPtr<I
 		.HAlign(HAlign_Fill)
 		[
 			SAssignNew(SwapComboButton, SComboButton)
-			.ContentPadding(3)
+			.ContentPadding(3.f)
 			.OnGetMenuContent( this, &FStaticMeshLightingInfoStatsPage::OnGetSwapComboButtonMenuContent, InParentStatsViewer )
 			.ButtonContent()
 			[
@@ -273,7 +295,7 @@ TSharedPtr<SWidget> FStaticMeshLightingInfoStatsPage::GetCustomWidget(TWeakPtr<I
 		.HAlign(HAlign_Fill)
 		[
 			SAssignNew(SetToComboButton, SComboButton)
-			.ContentPadding(3)
+			.ContentPadding(3.f)
 			.OnGetMenuContent( this, &FStaticMeshLightingInfoStatsPage::OnGetSetToComboButtonMenuContent, InParentStatsViewer )
 			.ButtonContent()
 			[

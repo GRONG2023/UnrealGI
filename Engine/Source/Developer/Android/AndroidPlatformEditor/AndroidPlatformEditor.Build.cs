@@ -6,6 +6,7 @@ public class AndroidPlatformEditor : ModuleRules
 {
 	public AndroidPlatformEditor(ReadOnlyTargetRules Target) : base(Target)
 	{
+		UnsafeTypeCastWarningLevel = WarningLevel.Error; 
 		BinariesSubFolder = "Android";
 
 		PrivateDependencyModuleNames.AddRange(
@@ -15,8 +16,7 @@ public class AndroidPlatformEditor : ModuleRules
 				"InputCore",
 				"Engine",
 				"Slate",
-				"SlateCore",
-				"EditorStyle",
+				"SlateCore",				
                 "EditorWidgets",
                 "DesktopWidgets",
 				"PropertyEditor",
@@ -24,7 +24,7 @@ public class AndroidPlatformEditor : ModuleRules
 				"SourceControl",
 				"AndroidRuntimeSettings",
                 "AndroidDeviceDetection",
-                "TargetPlatform",
+                "DesktopPlatform",
                 "RenderCore",
                 "RHI",
                 "MaterialShaderQualitySettings",

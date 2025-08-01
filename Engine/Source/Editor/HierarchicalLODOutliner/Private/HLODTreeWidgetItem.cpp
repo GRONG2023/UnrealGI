@@ -1,14 +1,37 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "HLODTreeWidgetItem.h"
-#include "SlateOptMacros.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Views/STreeView.h"
-#include "EditorStyleSet.h"
-#include "HierarchicalLODType.h"
+
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
 #include "DragAndDrop/ActorDragDropGraphEdOp.h"
-#include "LODActorItem.h"
+#include "HAL/Platform.h"
+#include "HLODOutlinerDragDrop.h"
+#include "HierarchicalLODType.h"
 #include "IHierarchicalLODUtilities.h"
+#include "ITreeItem.h"
+#include "Input/DragAndDrop.h"
+#include "Input/Events.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Internationalization.h"
+#include "LODActorItem.h"
+#include "Layout/Margin.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "SlateOptMacros.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Types/SlateEnums.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SNullWidget.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Widgets/Views/SExpanderArrow.h"
+#include "Widgets/Views/STableViewBase.h"
+#include "Widgets/Views/STreeView.h"
+
+class SWidget;
+struct FGeometry;
+struct FSlateBrush;
 
 #define LOCTEXT_NAMESPACE "HLODTreeWidgetItem"
 
@@ -16,7 +39,7 @@ namespace HLODOutliner
 {
 	static void UpdateOperationDecorator(const FDragDropEvent& Event, const FDragValidationInfo& ValidationInfo)
 	{
-		const FSlateBrush* Icon = ValidationInfo.IsValid() ? FEditorStyle::GetBrush(TEXT("Graph.ConnectorFeedback.OK")) : FEditorStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Error"));
+		const FSlateBrush* Icon = ValidationInfo.IsValid() ? FAppStyle::GetBrush(TEXT("Graph.ConnectorFeedback.OK")) : FAppStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Error"));
 
 		FDragDropOperation* Operation = Event.GetOperation().Get();
 		if (Operation)
@@ -180,20 +203,24 @@ BEGIN_SLATE_FUNCTION_BUILD_OPTIMIZATION
 	}
 
 
-		TSharedRef<SWidget> SHLODWidgetItem::GenerateWidgetForColumn(const FName& ColumnName)
+	TSharedRef<SWidget> SHLODWidgetItem::GenerateWidgetForColumn(const FName& ColumnName)
 	{
+		const float DefaultColumnHorizontalPadding = 24.0f;
+		const float LastColumnHorizontalPadding = 8.0f;
+
 		if (ColumnName == TEXT("SceneActorName"))
 		{
 			return SNew(SHorizontalBox)
-
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
+				.Padding(4.0f, 0.0f, 0.0f, 0.0f)
 				.VAlign(VAlign_Center)
 				[
 					SNew(SExpanderArrow, SharedThis(this))
+					.IndentAmount(20)
 				]
 
-			+ SHorizontalBox::Slot()
+				+ SHorizontalBox::Slot()
 				.AutoWidth()
 				.Padding(2.0f, 0.0f)
 				.VAlign(VAlign_Center)
@@ -210,6 +237,7 @@ BEGIN_SLATE_FUNCTION_BUILD_OPTIMIZATION
 			return SNew(SHorizontalBox)
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
+				.Padding(DefaultColumnHorizontalPadding, 0.0f)
 				.VAlign(VAlign_Center)
 				[
 					SNew(STextBlock)
@@ -224,6 +252,7 @@ BEGIN_SLATE_FUNCTION_BUILD_OPTIMIZATION
 			return SNew(SHorizontalBox)
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
+				.Padding(DefaultColumnHorizontalPadding, 0.0f)
 				.VAlign(VAlign_Center)
 				[
 					SNew(STextBlock)
@@ -238,6 +267,7 @@ BEGIN_SLATE_FUNCTION_BUILD_OPTIMIZATION
 			return SNew(SHorizontalBox)
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
+				.Padding(DefaultColumnHorizontalPadding, 0.0f)
 				.VAlign(VAlign_Center)
 				[
 					SNew(STextBlock)
@@ -252,6 +282,7 @@ BEGIN_SLATE_FUNCTION_BUILD_OPTIMIZATION
 			return SNew(SHorizontalBox)
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
+				.Padding(LastColumnHorizontalPadding, 0.0f)
 				.VAlign(VAlign_Center)
 				[
 					SNew(STextBlock)
@@ -259,8 +290,6 @@ BEGIN_SLATE_FUNCTION_BUILD_OPTIMIZATION
 					.ColorAndOpacity(this, &SHLODWidgetItem::GetTint)
 				];
 		}
-
-
 		else
 		{
 			return SNullWidget::NullWidget;

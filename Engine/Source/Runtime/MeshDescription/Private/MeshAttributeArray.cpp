@@ -2,23 +2,35 @@
 
 #include "MeshAttributeArray.h"
 #include "UObject/EditorObjectVersion.h"
+#include "UObject/ReleaseObjectVersion.h"
+#include "UObject/UE5MainStreamObjectVersion.h"
 
 
-FArchive& operator<<( FArchive& Ar, FAttributesSetEntry& Entry )
+FArchive& operator<<(FArchive& Ar, FAttributesSetEntry& Entry)
 {
-	if( Ar.IsLoading() )
+	if (Ar.IsLoading())
 	{
 		uint32 AttributeType;
 		Ar << AttributeType;
-		Entry.CreateArrayOfType( AttributeType );
-		Entry.Ptr->Serialize( Ar );
+
+		uint32 Extent = 1;
+		if (Ar.CustomVer(FReleaseObjectVersion::GUID) == FReleaseObjectVersion::MeshDescriptionNewFormat ||
+			Ar.CustomVer(FUE5MainStreamObjectVersion::GUID) >= FUE5MainStreamObjectVersion::MeshDescriptionNewFormat)
+		{
+			Ar << Extent;
+		}
+
+		Entry.CreateArrayOfType(AttributeType, Extent);
+		Entry.Ptr->Serialize(Ar);
 	}
 	else
 	{
-		check( Entry.Ptr.IsValid() );
+		check(Entry.Ptr.IsValid());
 		uint32 AttributeType = Entry.Ptr->GetType();
 		Ar << AttributeType;
-		Entry.Ptr->Serialize( Ar );
+		uint32 Extent = Entry.Ptr->GetExtent();
+		Ar << Extent;
+		Entry.Ptr->Serialize(Ar);
 	}
 
 	return Ar;
@@ -44,6 +56,7 @@ void SerializeLegacy( FArchive& Ar, FAttributesSetBase& AttributesSet )
 FArchive& operator<<( FArchive& Ar, FAttributesSetBase& AttributesSet )
 {
 	Ar.UsingCustomVersion( FEditorObjectVersion::GUID );
+	Ar.UsingCustomVersion( FReleaseObjectVersion::GUID );
 
 	if( Ar.IsLoading() && Ar.CustomVer( FEditorObjectVersion::GUID ) < FEditorObjectVersion::MeshDescriptionNewAttributeFormat )
 	{
@@ -53,9 +66,9 @@ FArchive& operator<<( FArchive& Ar, FAttributesSetBase& AttributesSet )
 		check( NumAttributeTypes == 7 );
 
 		AttributesSet.Map.Empty();
-		SerializeLegacy<FVector4>( Ar, AttributesSet );
-		SerializeLegacy<FVector>( Ar, AttributesSet );
-		SerializeLegacy<FVector2D>( Ar, AttributesSet );
+		SerializeLegacy<FVector4f>( Ar, AttributesSet );
+		SerializeLegacy<FVector3f>( Ar, AttributesSet );
+		SerializeLegacy<FVector2f>( Ar, AttributesSet );
 		SerializeLegacy<float>( Ar, AttributesSet );
 		SerializeLegacy<int>( Ar, AttributesSet );
 		SerializeLegacy<bool>( Ar, AttributesSet );
@@ -107,7 +120,28 @@ void FAttributesSetBase::Remap( const TSparseArray<int32>& IndexRemap )
 
 	for( auto& MapEntry : Map )
 	{
-		MapEntry.Value->Remap( IndexRemap );
-		check( MapEntry.Value->GetNumElements() == NumElements );
+		if (MapEntry.Value->GetNumChannels() > 0)
+		{
+			MapEntry.Value->Remap( IndexRemap );
+			check( MapEntry.Value->GetNumElements() == NumElements );
+		}
+	}
+}
+
+
+void FAttributesSetBase::AppendAttributesFrom(const FAttributesSetBase& OtherAttributesSet)
+{
+	check(OtherAttributesSet.NumElements == NumElements);
+
+	for (const auto& MapPair : OtherAttributesSet.Map)
+	{
+		if (Map.Contains(MapPair.Key))
+		{
+			UE_LOG(LogMeshDescription, Log, TEXT("Appending attribute '%s' which already exists."), *MapPair.Key.ToString());
+		}
+		else
+		{
+			Map.Add(MapPair.Key, MapPair.Value);
+		}
 	}
 }

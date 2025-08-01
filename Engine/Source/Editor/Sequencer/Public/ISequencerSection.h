@@ -2,14 +2,27 @@
 
 #pragma once
 
+#include "Channels/MovieSceneChannelHandle.h"
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
 #include "Curves/KeyHandle.h"
+#include "HAL/Platform.h"
 #include "Input/Reply.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/SNullWidget.h"
+#include "Internationalization/Text.h"
 #include "Layout/Margin.h"
+#include "Math/Vector2D.h"
+#include "Misc/FrameNumber.h"
+#include "Misc/Guid.h"
 #include "MovieSceneSection.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/SNullWidget.h"
+#include "Widgets/SWidget.h"
+
+#include "ISequencerSection.generated.h"
 
 class FMenuBuilder;
 class FSequencerSectionPainter;
@@ -17,11 +30,24 @@ class IDetailsView;
 class ISequencer;
 class ISequencerSection;
 class ISequencerTrackEditor;
+class SWidget;
+struct FGeometry;
+struct FKeyHandle;
+struct FPointerEvent;
 struct FSlateBrush;
+template <typename ElementType> class TRange;
+struct FMovieSceneChannelMetaData;
+
+namespace UE::Sequencer
+{
+	class FCategoryModel;
+	class FChannelModel;
+	struct FViewDensityInfo;
+}
 
 /** Enumerates which edge is being resized */
 UENUM()
-enum ESequencerSectionResizeMode
+enum ESequencerSectionResizeMode : int
 {
 	SSRM_LeadingEdge,
 	SSRM_TrailingEdge
@@ -35,9 +61,9 @@ namespace SequencerSectionConstants
 	/** The size of each key */
 	const FVector2D KeySize(12.0f, 12.0f);
 
-	const float DefaultSectionGripSize = 7.0f;
+	const float DefaultSectionGripSize = 8.0f;
 
-	const float DefaultSectionHeight = 15.f;
+	const float DefaultSectionHeight = 27.f;
 
 	const FName SelectionColorName("SelectionColor");
 
@@ -67,6 +93,16 @@ struct FSequencerSectionPropertyDetailsViewCustomizationParams
 class ISequencerSection
 {
 public:
+	/** Structure used during key area creation to group channels by their group name */
+	struct FChannelData
+	{
+		/** Handle to the channel */
+		FMovieSceneChannelHandle Channel;
+
+		/** The channel's editor meta data */
+		const FMovieSceneChannelMetaData& MetaData;
+	};
+
 	virtual ~ISequencerSection(){}
 	/**
 	 * The MovieSceneSection data being visualized
@@ -127,6 +163,11 @@ public:
 	virtual FText GetSectionToolTip() const { return GetSectionTitle(); }
 
 	/**
+	 * @return The local section time
+	 */
+	virtual TOptional<FFrameTime> GetSectionTime(FSequencerSectionPainter& InPainter) const { return TOptional<FFrameTime>(); }
+
+	/**
 	 * @return The amount of padding to apply to non-interactive portions of the section interface (such as section text)
 	 */
 	virtual FMargin GetContentPadding() const { return FMargin(11.f, 6.f); }
@@ -139,11 +180,32 @@ public:
 	SEQUENCER_API virtual void GenerateSectionLayout( class ISectionLayoutBuilder& LayoutBuilder );
 
 	/**
+	 * Create a custom category model
+	 */
+	virtual TSharedPtr<UE::Sequencer::FCategoryModel> ConstructCategoryModel(FName InCategoryName, const FText& InDisplayText, TArrayView<const FChannelData> Channels) const { return nullptr; }
+
+	/**
+	 * Create a custom channel model
+	 */
+	virtual TSharedPtr<UE::Sequencer::FChannelModel> ConstructChannelModel(FName InCategoryName, const FMovieSceneChannelHandle& InChannelHandle) const { return nullptr; }
+
+	/**
 	 * @return The height of the section
 	 */
-	virtual float GetSectionHeight() const { return SequencerSectionConstants::DefaultSectionHeight; }
-	
+	UE_DEPRECATED(5.4, "Please call GetSectionHeight(const FViewDensityInfo& ViewDensity) instead.")
+	SEQUENCER_API virtual float GetSectionHeight() const;
+	SEQUENCER_API virtual float GetSectionHeight(const UE::Sequencer::FViewDensityInfo& ViewDensity) const;
+
+
+	/**
+	 * @return The width of the section drag handles
+	 */
 	virtual float GetSectionGripSize() const { return SequencerSectionConstants::DefaultSectionGripSize; }
+
+	/**
+	 * @ return The size of keyframe widgets
+	 */
+	virtual FVector2D GetKeySize() const { return SequencerSectionConstants::KeySize; }
 
 	/**
 	 * @return Whether or not the user can resize this section.

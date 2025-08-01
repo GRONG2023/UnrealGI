@@ -32,6 +32,8 @@ public:
 	virtual FCompileFinishedDelegate& GetCompileFinishedDelegate() override final;
 	virtual FShowConsoleDelegate& GetShowConsoleDelegate() override final;
 	virtual FSetVisibleDelegate& GetSetVisibleDelegate() override final;
+	virtual bool HasReinstancingProcess() override final;
+	virtual bool ShowCompileFinishNotification() override final;
 
 private:
 	std::wstring ProcessGroupName;

@@ -16,20 +16,21 @@
 /**
  * Slate tool tip widget
  */
-class SLATE_API SToolTip
+class SToolTip
 	: public SCompoundWidget
 	, public IToolTip
 {
 public:
+	DECLARE_DELEGATE_OneParam(FOnSetInteractiveWindowLocation, FVector2D&);
 
 	SLATE_BEGIN_ARGS( SToolTip )
 		: _Text()
 		, _Content()
 		, _Font(FCoreStyle::Get().GetFontStyle("ToolTip.Font"))
-		, _ColorAndOpacity( FSlateColor::UseForeground())
 		, _TextMargin(FMargin(8.0f))
 		, _BorderImage(FCoreStyle::Get().GetBrush("ToolTip.Background"))
 		, _IsInteractive(false)
+		, _OnSetInteractiveWindowLocation()
 	{ }
 
 		/** The text displayed in this tool tip */
@@ -41,9 +42,6 @@ public:
 		/** The font to use for this tool tip */
 		SLATE_ATTRIBUTE(FSlateFontInfo, Font)
 		
-		/** Font color and opacity */
-		SLATE_ATTRIBUTE(FSlateColor, ColorAndOpacity)
-		
 		/** Margin between the tool tip border and the text content */
 		SLATE_ATTRIBUTE(FMargin, TextMargin)
 
@@ -53,6 +51,9 @@ public:
 		/** Whether the tooltip should be considered interactive */
 		SLATE_ATTRIBUTE(bool, IsInteractive)
 
+		/** Hook to modify or override the desired location (in screen space) for interactive tooltip windows. By default, the previous frame's cursor position will be used. */
+		SLATE_EVENT(FOnSetInteractiveWindowLocation, OnSetInteractiveWindowLocation)
+
 	SLATE_END_ARGS()
 
 	/**
@@ -60,7 +61,7 @@ public:
 	 *
 	 * @param	InArgs	The declaration data for this widget
 	 */
-	void Construct( const FArguments& InArgs );
+	SLATE_API void Construct( const FArguments& InArgs );
 
 public:
 
@@ -76,14 +77,14 @@ public:
 		return ToolTipContent.ToSharedRef();
 	}
 
-	virtual void SetContentWidget(const TSharedRef<SWidget>& InContentWidget) override;
-	virtual void ResetContentWidget () override;
+	SLATE_API virtual void SetContentWidget(const TSharedRef<SWidget>& InContentWidget) override;
+	SLATE_API virtual void ResetContentWidget () override;
 
-	virtual bool IsEmpty( ) const override;
-	virtual bool IsInteractive( ) const override;
+	SLATE_API virtual bool IsEmpty( ) const override;
+	SLATE_API virtual bool IsInteractive( ) const override;
 	virtual void OnOpening() override { }
 	virtual void OnClosed() override { }
-
+	SLATE_API virtual void OnSetInteractiveWindowLocation(FVector2D& InOutDesiredLocation) const override;
 
 	virtual const FText& GetTextTooltip() const
 	{
@@ -92,7 +93,7 @@ public:
 
 public:
 
-	static float GetToolTipWrapWidth();
+	static SLATE_API float GetToolTipWrapWidth();
 
 private:
 
@@ -107,9 +108,6 @@ private:
 
 	// Font used for the text displayed (where applicable)
 	TAttribute<FSlateFontInfo> Font;
-	
-	// Color and opacity used for the text displayed (where applicable)
-	TAttribute<FSlateColor> ColorAndOpacity;
 
 	// Margin between the tool tip border and the text content
 	TAttribute<FMargin> TextMargin;
@@ -119,4 +117,7 @@ private:
 	
 	// Whether the tooltip should be considered interactive.
 	TAttribute<bool> bIsInteractive;
+
+	// Optional delegate to modify or override the desired location for an interactive tooltip.
+	FOnSetInteractiveWindowLocation OnSetInteractiveWindowLocationDelegate;
 };

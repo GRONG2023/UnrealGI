@@ -7,7 +7,6 @@
 #pragma once
 
 #include "BoundShaderStateCache.h"
-#include "D3D11ShaderResources.h"
 
 interface ID3D11DeviceContext;
 typedef ID3D11DeviceContext FD3D11DeviceContext;
@@ -40,13 +39,11 @@ public:
 
 struct FD3D11ShaderData
 {
-	FD3D11ShaderResourceTable			ShaderResourceTable;
-	TArray<FName>						UniformBuffers;
+	FShaderResourceTable				ShaderResourceTable;
 	TArray<FUniformBufferStaticSlot>	StaticSlots;
 	TArray<FShaderCodeVendorExtension>	VendorExtensions;
 	bool								bShaderNeedsGlobalConstantBuffer;
 	bool								bIsSm6Shader;
-	uint16								OutputMask;
 	uint16								UAVMask;
 };
 
@@ -73,24 +70,6 @@ public:
 
 	/** The shader resource. */
 	TRefCountPtr<ID3D11GeometryShader> Resource;
-};
-
-class FD3D11HullShader : public FRHIHullShader, public FD3D11ShaderData
-{
-public:
-	enum { StaticFrequency = SF_Hull };
-
-	/** The shader resource. */
-	TRefCountPtr<ID3D11HullShader> Resource;
-};
-
-class FD3D11DomainShader : public FRHIDomainShader, public FD3D11ShaderData
-{
-public:
-	enum { StaticFrequency = SF_Domain };
-
-	/** The shader resource. */
-	TRefCountPtr<ID3D11DomainShader> Resource;
 };
 
 class FD3D11PixelShader : public FRHIPixelShader, public FD3D11ShaderData
@@ -124,8 +103,6 @@ public:
 	TRefCountPtr<ID3D11InputLayout> InputLayout;
 	TRefCountPtr<ID3D11VertexShader> VertexShader;
 	TRefCountPtr<ID3D11PixelShader> PixelShader;
-	TRefCountPtr<ID3D11HullShader> HullShader;
-	TRefCountPtr<ID3D11DomainShader> DomainShader;
 	TRefCountPtr<ID3D11GeometryShader> GeometryShader;
 
 	bool bShaderNeedsGlobalConstantBuffer[SF_NumStandardFrequencies];
@@ -136,8 +113,6 @@ public:
 		FRHIVertexDeclaration* InVertexDeclarationRHI,
 		FRHIVertexShader* InVertexShaderRHI,
 		FRHIPixelShader* InPixelShaderRHI,
-		FRHIHullShader* InHullShaderRHI,
-		FRHIDomainShader* InDomainShaderRHI,
 		FRHIGeometryShader* InGeometryShaderRHI,
 		ID3D11Device* Direct3DDevice
 		);
@@ -149,80 +124,111 @@ public:
 	 */
 	FORCEINLINE FD3D11VertexShader*   GetVertexShader() const   { return (FD3D11VertexShader*)CacheLink.GetVertexShader(); }
 	FORCEINLINE FD3D11PixelShader*    GetPixelShader() const    { return (FD3D11PixelShader*)CacheLink.GetPixelShader(); }
-	FORCEINLINE FD3D11HullShader*     GetHullShader() const     { return (FD3D11HullShader*)CacheLink.GetHullShader(); }
-	FORCEINLINE FD3D11DomainShader*   GetDomainShader() const   { return (FD3D11DomainShader*)CacheLink.GetDomainShader(); }
 	FORCEINLINE FD3D11GeometryShader* GetGeometryShader() const { return (FD3D11GeometryShader*)CacheLink.GetGeometryShader(); }
 };
 
 /** The base class of resources that may be bound as shader resources. */
-class FD3D11BaseShaderResource : public IRefCountedObject
+class FD3D11ViewableResource
 {
 public:
-	FD3D11BaseShaderResource() {}
+	~FD3D11ViewableResource()
+	{
+		checkf(!HasLinkedViews(), TEXT("All linked views must have been removed before the underlying resource can be deleted."));
+	}
+
+	bool HasLinkedViews() const
+	{
+		return LinkedViews != nullptr;
+	}
+
+	void UpdateLinkedViews();
+
+private:
+	friend class FD3D11ShaderResourceView;
+	friend class FD3D11UnorderedAccessView;
+	class FD3D11View* LinkedViews = nullptr;
 };
 
 /** Texture base class. */
-class D3D11RHI_API FD3D11TextureBase : public FD3D11BaseShaderResource
+class FD3D11Texture final : public FRHITexture, public FD3D11ViewableResource
 {
 public:
-
-	FD3D11TextureBase(
-		class FD3D11DynamicRHI* InD3DRHI,
+	D3D11RHI_API explicit FD3D11Texture(
+		const FRHITextureCreateDesc& InDesc,
 		ID3D11Resource* InResource,
 		ID3D11ShaderResourceView* InShaderResourceView,
 		int32 InRTVArraySize,
 		bool bInCreatedRTVsPerSlice,
-		const TArray<TRefCountPtr<ID3D11RenderTargetView> >& InRenderTargetViews,
-		TRefCountPtr<ID3D11DepthStencilView>* InDepthStencilViews
-		) 
-	: D3DRHI(InD3DRHI)
-	, IHVResourceHandle(nullptr)
-	, MemorySize(0)
-	, BaseShaderResource(this)
-	, Resource(InResource)
-	, ShaderResourceView(InShaderResourceView)
-	, RenderTargetViews(InRenderTargetViews)
-	, bCreatedRTVsPerSlice(bInCreatedRTVsPerSlice)
-	, RTVArraySize(InRTVArraySize)
-	, NumDepthStencilViews(0)	
-	{
-		// Set the DSVs for all the access type combinations
-		if ( InDepthStencilViews != nullptr )
-		{
-			for (uint32 Index = 0; Index < FExclusiveDepthStencil::MaxIndex; Index++)
-			{
-				DepthStencilViews[Index] = InDepthStencilViews[Index];
-				// New Monolithic Graphics drivers have optional "fast calls" replacing various D3d functions
-				// You can't use fast version of XXSetShaderResources (called XXSetFastShaderResource) on dynamic or d/s targets
-				if ( DepthStencilViews[Index] != NULL )
-					NumDepthStencilViews++;
-			}
-		}
-	}
+		TConstArrayView<TRefCountPtr<ID3D11RenderTargetView>> InRenderTargetViews,
+		TConstArrayView<TRefCountPtr<ID3D11DepthStencilView>> InDepthStencilViews
+	);
 
-	virtual ~FD3D11TextureBase() {}
+	enum EAliasResourceParam { CreateAlias };
+	D3D11RHI_API explicit FD3D11Texture(FD3D11Texture const& Other, const FString& Name, EAliasResourceParam);
+	D3D11RHI_API void AliasResource(FD3D11Texture const& Other);
 
-	int32 GetMemorySize() const
-	{
-		return MemorySize;
-	}
+	D3D11RHI_API virtual ~FD3D11Texture();
 
-	void SetMemorySize( int32 InMemorySize )
+	inline uint64 GetMemorySize() const
 	{
-		MemorySize = InMemorySize;
+		return RHICalcTexturePlatformSize(GetDesc()).Size;
 	}
 
 	// Accessors.
-	ID3D11Resource* GetResource() const { return Resource; }
-	ID3D11ShaderResourceView* GetShaderResourceView() const { return ShaderResourceView; }
-	FD3D11BaseShaderResource* GetBaseShaderResource() const { return BaseShaderResource; }
+	inline ID3D11Resource* GetResource() const { return Resource; }
+	inline ID3D11ShaderResourceView* GetShaderResourceView() const { return ShaderResourceView; }
 
-	void SetIHVResourceHandle(void* InHandle)
+	inline bool IsCubemap() const
+	{
+		FRHITextureDesc const& Desc = GetDesc();
+		return Desc.Dimension == ETextureDimension::TextureCube || Desc.Dimension == ETextureDimension::TextureCubeArray;
+	}
+
+	inline ID3D11Texture2D* GetD3D11Texture2D() const
+	{
+		check(Resource);
+		check(GetDesc().Dimension == ETextureDimension::Texture2D
+		   || GetDesc().Dimension == ETextureDimension::Texture2DArray
+		   || GetDesc().Dimension == ETextureDimension::TextureCube
+		   || GetDesc().Dimension == ETextureDimension::TextureCubeArray);
+
+		return static_cast<ID3D11Texture2D*>(Resource.GetReference());
+	}
+
+	inline ID3D11Texture3D* GetD3D11Texture3D() const
+	{
+		check(Resource);
+		check(GetDesc().Dimension == ETextureDimension::Texture3D);
+
+		return static_cast<ID3D11Texture3D*>(Resource.GetReference());
+	}
+
+	inline bool IsTexture3D() const
+	{
+		return GetDesc().Dimension == ETextureDimension::Texture3D;
+	}
+
+	virtual inline void* GetNativeResource() const override
+	{
+		return GetResource();
+	}
+
+	virtual inline void* GetNativeShaderResourceView() const override
+	{
+		return GetShaderResourceView();
+	}
+
+	virtual inline void* GetTextureBaseRHI() override
+	{
+		return this;
+	}
+
+	inline void SetIHVResourceHandle(void* InHandle)
 	{
 		IHVResourceHandle = InHandle;
 	}
 
-	void* GetIHVResourceHandle() const
+	inline void* GetIHVResourceHandle() const
 	{
 		return IHVResourceHandle;
 	}
@@ -231,7 +237,7 @@ public:
 	 * Get the render target view for the specified mip and array slice.
 	 * An array slice of -1 is used to indicate that no array slice should be required. 
 	 */
-	ID3D11RenderTargetView* GetRenderTargetView(int32 MipIndex, int32 ArraySliceIndex) const
+	inline ID3D11RenderTargetView* GetRenderTargetView(int32 MipIndex, int32 ArraySliceIndex) const
 	{
 		int32 ArrayIndex = MipIndex;
 
@@ -252,57 +258,35 @@ public:
 		}
 		return 0;
 	}
-	ID3D11DepthStencilView* GetDepthStencilView(FExclusiveDepthStencil AccessType) const
+
+	inline ID3D11DepthStencilView* GetDepthStencilView(FExclusiveDepthStencil AccessType) const
 	{ 
 		return DepthStencilViews[AccessType.GetIndex()]; 
 	}
 
-	// New Monolithic Graphics drivers have optional "fast calls" replacing various D3d functions
-	// You can't use fast version of XXSetShaderResources (called XXSetFastShaderResource) on dynamic or d/s targets
-	bool HasDepthStencilView()
+#if RHI_ENABLE_RESOURCE_INFO
+	virtual bool GetResourceInfo(FRHIResourceInfo& OutResourceInfo) const override
 	{
-		return ( NumDepthStencilViews > 0 );
-	}	
-
-	void AliasResources(FD3D11TextureBase* Texture)
-	{
-		check(MemorySize == Texture->MemorySize);
-		check(bCreatedRTVsPerSlice == Texture->bCreatedRTVsPerSlice);
-		check(RTVArraySize == Texture->RTVArraySize);
-
-		// If we're creating an aliased texture, make sure we handle this case correctly.
-		if (Texture->NumDepthStencilViews && !NumDepthStencilViews)
-		{
-			NumDepthStencilViews = Texture->NumDepthStencilViews;
-		}
-
-		check(NumDepthStencilViews == Texture->NumDepthStencilViews);
-
-		// Do not copy the BaseShaderResource from the source texture (this is initialized correctly here, and is used for
-		// state caching logic).
-		Resource = Texture->Resource;
-		ShaderResourceView = Texture->ShaderResourceView;
-		RenderTargetViews = Texture->RenderTargetViews;
-
-		for (uint32 Index = 0; Index < NumDepthStencilViews; Index++)
-		{
-			DepthStencilViews[Index] = Texture->DepthStencilViews[Index];
-		}
+		OutResourceInfo = FRHIResourceInfo{};
+		OutResourceInfo.Name = GetName();
+		OutResourceInfo.Type = GetType();
+		OutResourceInfo.VRamAllocation.AllocationSize = GetMemorySize();
+		return true;
 	}
+#endif
 
-protected:
+	/**
+	* Locks one of the texture's mip-maps.
+	* @return A pointer to the specified texture data.
+	*/
+	D3D11RHI_API void* Lock(class FD3D11DynamicRHI* D3DRHI, uint32 MipIndex, uint32 ArrayIndex, EResourceLockMode LockMode, uint32& DestStride, bool bForceLockDeferred = false, uint64* OutLockedByteCount = nullptr);
 
-	/** The D3D11 RHI that created this texture. */
-	FD3D11DynamicRHI* D3DRHI;
+	/** Unlocks a previously locked mip-map. */
+	D3D11RHI_API void Unlock(class FD3D11DynamicRHI* D3DRHI, uint32 MipIndex, uint32 ArrayIndex);
 
+private:
 	//Resource handle for use by IHVs for SLI and other purposes.
-	void* IHVResourceHandle;
-
-	/** Amount of memory allocated by this texture, in bytes. */
-	int32 MemorySize;
-
-	/** Pointer to the base shader resource. Usually the object itself, but not for texture references. */
-	FD3D11BaseShaderResource* BaseShaderResource;
+	void* IHVResourceHandle = nullptr;
 
 	/** The texture resource. */
 	TRefCountPtr<ID3D11Resource> Resource;
@@ -313,280 +297,14 @@ protected:
 	/** A render targetable view of the texture. */
 	TArray<TRefCountPtr<ID3D11RenderTargetView> > RenderTargetViews;
 
-	bool bCreatedRTVsPerSlice;
-
-	int32 RTVArraySize;
-
 	/** A depth-stencil targetable view of the texture. */
 	TRefCountPtr<ID3D11DepthStencilView> DepthStencilViews[FExclusiveDepthStencil::MaxIndex];
 
-	/** Number of Depth Stencil Views - used for fast call tracking. */
-	uint32	NumDepthStencilViews;	
+	int32 RTVArraySize;
+
+	uint8 bCreatedRTVsPerSlice : 1;
+	uint8 bAlias : 1;
 };
-
-/** 2D texture (vanilla, cubemap or 2D array) */
-template<typename BaseResourceType>
-class D3D11RHI_API TD3D11Texture2D : public BaseResourceType, public FD3D11TextureBase
-{
-public:
-
-	/** Flags used when the texture was created */
-	ETextureCreateFlags Flags;
-
-	/** Initialization constructor. */
-	TD3D11Texture2D(
-		class FD3D11DynamicRHI* InD3DRHI,
-		ID3D11Texture2D* InResource,
-		ID3D11ShaderResourceView* InShaderResourceView,
-		bool bInCreatedRTVsPerSlice,
-		int32 InRTVArraySize,
-		const TArray<TRefCountPtr<ID3D11RenderTargetView> >& InRenderTargetViews,
-		TRefCountPtr<ID3D11DepthStencilView>* InDepthStencilViews,
-		uint32 InSizeX,
-		uint32 InSizeY,
-		uint32 InSizeZ,
-		uint32 InNumMips,
-		uint32 InNumSamples,
-		EPixelFormat InFormat,
-		bool bInCubemap,
-		ETextureCreateFlags InFlags,
-		bool bInPooled,
-		const FClearValueBinding& InClearValue
-#if PLATFORM_SUPPORTS_VIRTUAL_TEXTURES
-		, void* InRawTextureMemory = nullptr
-#endif
-		)
-	: BaseResourceType(
-		InSizeX,
-		InSizeY,
-		InSizeZ,
-		InNumMips,
-		InNumSamples,
-		InFormat,
-		InFlags,
-		InClearValue
-		)
-	, FD3D11TextureBase(
-		InD3DRHI,
-		InResource,
-		InShaderResourceView, 
-		InRTVArraySize,
-		bInCreatedRTVsPerSlice,
-		InRenderTargetViews,
-		InDepthStencilViews
-		)
-	, Flags(InFlags)
-	, bCubemap(bInCubemap)
-	, bPooled(bInPooled)
-#if PLATFORM_SUPPORTS_VIRTUAL_TEXTURES
-	, RawTextureMemory(InRawTextureMemory)
-#endif
-	{
-	}
-
-	virtual ~TD3D11Texture2D();
-
-	/**
-	 * Locks one of the texture's mip-maps.
-	 * @return A pointer to the specified texture data.
-	 */
-	void* Lock(uint32 MipIndex,uint32 ArrayIndex,EResourceLockMode LockMode,uint32& DestStride,bool bForceLockDeferred = false);
-
-	/** Unlocks a previously locked mip-map. */
-	void Unlock(uint32 MipIndex,uint32 ArrayIndex);
-
-	// Accessors.
-	ID3D11Texture2D* GetResource() const { return (ID3D11Texture2D*)FD3D11TextureBase::GetResource(); }
-	bool IsCubemap() const { return bCubemap; }
-
-	/** FRHITexture override.  See FRHITexture::GetNativeResource() */
-	virtual void* GetNativeResource() const override final
-	{ 
-		return GetResource();
-	}
-	virtual void* GetNativeShaderResourceView() const override final
-	{
-		return GetShaderResourceView();
-	}
-	virtual void* GetTextureBaseRHI() override final
-	{
-		return static_cast<FD3D11TextureBase*>(this);
-	}
-
-
-	// IRefCountedObject interface.
-	virtual uint32 AddRef() const
-	{
-		return FRHIResource::AddRef();
-	}
-	virtual uint32 Release() const
-	{
-		return FRHIResource::Release();
-	}
-	virtual uint32 GetRefCount() const
-	{
-		return FRHIResource::GetRefCount();
-	}
-#if PLATFORM_SUPPORTS_VIRTUAL_TEXTURES
-	void* GetRawTextureMemory() const
-	{
-		return RawTextureMemory;
-	}
-#endif
-
-private:
-
-	/** Whether the texture is a cube-map. */
-	const uint32 bCubemap : 1;
-	/** Whether the texture can be pooled. */
-	const uint32 bPooled : 1;
-#if PLATFORM_SUPPORTS_VIRTUAL_TEXTURES
-	void* RawTextureMemory;
-#endif
-};
-
-/** 3D Texture */
-class FD3D11Texture3D : public FRHITexture3D, public FD3D11TextureBase
-{
-public:
-
-	/** Initialization constructor. */
-	FD3D11Texture3D(
-		class FD3D11DynamicRHI* InD3DRHI,
-		ID3D11Texture3D* InResource,
-		ID3D11ShaderResourceView* InShaderResourceView,
-		const TArray<TRefCountPtr<ID3D11RenderTargetView> >& InRenderTargetViews,
-		uint32 InSizeX,
-		uint32 InSizeY,
-		uint32 InSizeZ,
-		uint32 InNumMips,
-		EPixelFormat InFormat,
-		ETextureCreateFlags InFlags,
-		const FClearValueBinding& InClearValue
-		)
-	: FRHITexture3D(InSizeX,InSizeY,InSizeZ,InNumMips,InFormat,InFlags,InClearValue)
-	, FD3D11TextureBase(
-		InD3DRHI,
-		InResource,
-		InShaderResourceView,
-		1,
-		false,
-		InRenderTargetViews,
-		NULL
-		)
-	{
-	}
-
-	virtual ~FD3D11Texture3D();
-	
-	// Accessors.
-	ID3D11Texture3D* GetResource() const { return (ID3D11Texture3D*)FD3D11TextureBase::GetResource(); }
-	
-	virtual void* GetTextureBaseRHI() override final
-	{
-		return static_cast<FD3D11TextureBase*>(this);
-	}
-
-	// IRefCountedObject interface.
-	virtual uint32 AddRef() const
-	{
-		return FRHIResource::AddRef();
-	}
-	virtual uint32 Release() const
-	{
-		return FRHIResource::Release();
-	}
-	virtual uint32 GetRefCount() const
-	{
-		return FRHIResource::GetRefCount();
-	}
-};
-
-class FD3D11BaseTexture2D : public FRHITexture2D
-{
-public:
-	FD3D11BaseTexture2D(uint32 InSizeX, uint32 InSizeY, uint32 InSizeZ, uint32 InNumMips, uint32 InNumSamples, EPixelFormat InFormat, ETextureCreateFlags InFlags, const FClearValueBinding& InClearValue)
-	: FRHITexture2D(InSizeX,InSizeY,InNumMips,InNumSamples,InFormat,InFlags, InClearValue)
-	{}
-	uint32 GetSizeZ() const { return 0; }
-};
-
-class FD3D11BaseTexture2DArray : public FRHITexture2DArray
-{
-public:
-	FD3D11BaseTexture2DArray(uint32 InSizeX, uint32 InSizeY, uint32 InSizeZ, uint32 InNumMips, uint32 InNumSamples, EPixelFormat InFormat, ETextureCreateFlags InFlags, const FClearValueBinding& InClearValue)
-	: FRHITexture2DArray(InSizeX,InSizeY,InSizeZ,InNumMips,InNumSamples, InFormat,InFlags,InClearValue)
-	{}
-};
-
-class FD3D11BaseTextureCube : public FRHITextureCube
-{
-public:
-	FD3D11BaseTextureCube(uint32 InSizeX, uint32 InSizeY, uint32 InSizeZ, uint32 InNumMips, uint32 InNumSamples, EPixelFormat InFormat, ETextureCreateFlags InFlags, const FClearValueBinding& InClearValue)
-	: FRHITextureCube(InSizeX,InNumMips,InFormat,InFlags,InClearValue)
-	, SliceCount(InSizeZ)
-	{ check(InNumSamples == 1); }
-	uint32 GetSizeX() const { return GetSize(); }
-	uint32 GetSizeY() const { return GetSize(); } //-V524
-	uint32 GetSizeZ() const { return SliceCount; }
-
-private:
-	uint32 SliceCount;
-};
-
-typedef TD3D11Texture2D<FRHITexture>              FD3D11Texture;
-typedef TD3D11Texture2D<FD3D11BaseTexture2D>      FD3D11Texture2D;
-typedef TD3D11Texture2D<FD3D11BaseTexture2DArray> FD3D11Texture2DArray;
-typedef TD3D11Texture2D<FD3D11BaseTextureCube>    FD3D11TextureCube;
-
-/** Texture reference class. */
-class FD3D11TextureReference : public FRHITextureReference, public FD3D11TextureBase
-{
-public:
-	FD3D11TextureReference(class FD3D11DynamicRHI* InD3DRHI, FLastRenderTimeContainer* LastRenderTime)
-		: FRHITextureReference(LastRenderTime)
-		, FD3D11TextureBase(InD3DRHI,NULL,NULL, 0, false,TArray<TRefCountPtr<ID3D11RenderTargetView> >(),NULL)
-	{
-		BaseShaderResource = NULL;
-	}
-
-	void SetReferencedTexture(FRHITexture* InTexture, FD3D11BaseShaderResource* InBaseShaderResource, ID3D11ShaderResourceView* InSRV)
-	{
-		ShaderResourceView = InSRV;
-		BaseShaderResource = InBaseShaderResource;
-		FRHITextureReference::SetReferencedTexture(InTexture);
-	}
-
-	virtual void* GetTextureBaseRHI() override final
-	{
-		return static_cast<FD3D11TextureBase*>(this);
-	}
-	// IRefCountedObject interface.
-	virtual uint32 AddRef() const
-	{
-		return FRHIResource::AddRef();
-	}
-	virtual uint32 Release() const
-	{
-		return FRHIResource::Release();
-	}
-	virtual uint32 GetRefCount() const
-	{
-		return FRHIResource::GetRefCount();
-	}
-};
-
-/** Given a pointer to a RHI texture that was created by the D3D11 RHI, returns a pointer to the FD3D11TextureBase it encapsulates. */
-FORCEINLINE FD3D11TextureBase* GetD3D11TextureFromRHITexture(FRHITexture* Texture)
-{
-	if (!Texture)
-	{
-		return NULL;
-	}
-	FD3D11TextureBase* Result((FD3D11TextureBase*)Texture->GetTextureBaseRHI());
-	check(Result);
-	return Result;
-}
 
 
 /** D3D11 render query */
@@ -616,9 +334,6 @@ public:
 
 };
 
-/** Updates tracked stats for a buffer. */
-extern void UpdateBufferStats(TRefCountPtr<ID3D11Buffer> Buffer, bool bAllocating);
-
 /** Forward declare the constants ring buffer. */
 class FD3D11ConstantsRingBuffer;
 
@@ -645,143 +360,54 @@ public:
 	/** Allocation in the constants ring buffer if applicable. */
 	FRingAllocation RingAllocation;
 
-	/** Resource table containing RHI references. */
-	TArray<TRefCountPtr<FRHIResource> > ResourceTable;
-
 	/** Initialization constructor. */
-	FD3D11UniformBuffer(class FD3D11DynamicRHI* InD3D11RHI, const FRHIUniformBufferLayout& InLayout, ID3D11Buffer* InResource,const FRingAllocation& InRingAllocation)
+	FD3D11UniformBuffer(class FD3D11DynamicRHI* InD3D11RHI, const FRHIUniformBufferLayout* InLayout, ID3D11Buffer* InResource,const FRingAllocation& InRingAllocation, bool bInAllocatedFromPool)
 	: FRHIUniformBuffer(InLayout)
 	, Resource(InResource)
 	, RingAllocation(InRingAllocation)
 	, D3D11RHI(InD3D11RHI)
+	, bAllocatedFromPool(bInAllocatedFromPool)
 	{}
 
 	virtual ~FD3D11UniformBuffer();
 
+	// Provides public non-const access to ResourceTable.
+	// @todo refactor uniform buffers to perform updates as a member function, so this isn't necessary.
+	TArray<TRefCountPtr<FRHIResource>>& GetResourceTable() { return ResourceTable; }
+
 private:
 	class FD3D11DynamicRHI* D3D11RHI;
+	bool bAllocatedFromPool;
 };
 
-/** Index buffer resource class that stores stride information. */
-class FD3D11IndexBuffer : public FRHIIndexBuffer, public FD3D11BaseShaderResource
+/** Buffer resource class. */
+class FD3D11Buffer : public FRHIBuffer, public FD3D11ViewableResource
 {
 public:
 
-	/** The index buffer resource */
 	TRefCountPtr<ID3D11Buffer> Resource;
 
-	FD3D11IndexBuffer() = default;
-
-	FD3D11IndexBuffer(ID3D11Buffer* InResource, uint32 InStride, uint32 InSize, uint32 InUsage)
-	: FRHIIndexBuffer(InStride,InSize,InUsage)
-	, Resource(InResource)
+	FD3D11Buffer(ID3D11Buffer* InResource, FRHIBufferDesc const& InDesc)
+		: FRHIBuffer(InDesc)
+		, Resource(InResource)
 	{}
 
-	virtual ~FD3D11IndexBuffer()
+	// FRHIResource overrides
+#if RHI_ENABLE_RESOURCE_INFO
+	bool GetResourceInfo(FRHIResourceInfo& OutResourceInfo) const override
 	{
-		if (Resource)
-		{
-			UpdateBufferStats(Resource, false);
-		}
+		OutResourceInfo = FRHIResourceInfo{};
+		OutResourceInfo.Name = GetName();
+		OutResourceInfo.Type = GetType();
+		OutResourceInfo.VRamAllocation.AllocationSize = GetSize();
+		return true;
 	}
+#endif
 
-	void Swap(FD3D11IndexBuffer& Other)
-	{
-		FRHIIndexBuffer::Swap(Other);
-		Resource.Swap(Other.Resource);
-	}
+	virtual ~FD3D11Buffer();
 
-	void ReleaseUnderlyingResource()
-	{
-		check(Resource);
-		UpdateBufferStats(Resource, false);
-		Resource = nullptr;
-		FRHIIndexBuffer::ReleaseUnderlyingResource();
-	}
-
-	// IRefCountedObject interface.
-	virtual uint32 AddRef() const
-	{
-		return FRHIResource::AddRef();
-	}
-	virtual uint32 Release() const
-	{
-		return FRHIResource::Release();
-	}
-	virtual uint32 GetRefCount() const
-	{
-		return FRHIResource::GetRefCount();
-	}
-};
-
-/** Structured buffer resource class. */
-class FD3D11StructuredBuffer : public FRHIStructuredBuffer, public FD3D11BaseShaderResource
-{
-public:
-
-	TRefCountPtr<ID3D11Buffer> Resource;
-
-	FD3D11StructuredBuffer(ID3D11Buffer* InResource, uint32 InStride, uint32 InSize, uint32 InUsage)
-	: FRHIStructuredBuffer(InStride,InSize,InUsage)
-	, Resource(InResource)
-	{
-	}
-
-	virtual ~FD3D11StructuredBuffer()
-	{
-		UpdateBufferStats(Resource, false);
-	}
-	
-	// IRefCountedObject interface.
-	virtual uint32 AddRef() const
-	{
-		return FRHIResource::AddRef();
-	}
-	virtual uint32 Release() const
-	{
-		return FRHIResource::Release();
-	}
-	virtual uint32 GetRefCount() const
-	{
-		return FRHIResource::GetRefCount();
-	}
-};
-
-/** Vertex buffer resource class. */
-class FD3D11VertexBuffer : public FRHIVertexBuffer, public FD3D11BaseShaderResource
-{
-public:
-
-	TRefCountPtr<ID3D11Buffer> Resource;
-
-	FD3D11VertexBuffer() = default;
-
-	FD3D11VertexBuffer(ID3D11Buffer* InResource, uint32 InSize, uint32 InUsage)
-	: FRHIVertexBuffer(InSize,InUsage)
-	, Resource(InResource)
-	{}
-
-	virtual ~FD3D11VertexBuffer()
-	{
-		if (Resource)
-		{
-			UpdateBufferStats(Resource, false);
-		}
-	}
-
-	void Swap(FD3D11VertexBuffer& SrcBuffer)
-	{
-		FRHIVertexBuffer::Swap(SrcBuffer);
-		Resource.Swap(SrcBuffer.Resource);
-	}
-
-	void ReleaseUnderlyingResource()
-	{
-		check(Resource);
-		UpdateBufferStats(Resource, false);
-		Resource = nullptr;
-		FRHIVertexBuffer::ReleaseUnderlyingResource();
-	}
+	void TakeOwnership(FD3D11Buffer& Other);
+	void ReleaseOwnership();
 
 	// IRefCountedObject interface.
 	virtual uint32 AddRef() const
@@ -810,6 +436,7 @@ public:
 
 	void* Lock(uint32 Offset, uint32 NumBytes) override;
 	void Unlock() override;
+	uint64 GetGPUSizeBytes() const override { return ShadowBufferSize; }
 
 private:
 	FD3D11DeviceContext* Context;
@@ -817,44 +444,46 @@ private:
 	uint32 ShadowBufferSize;
 };
 
-/** Shader resource view class. */
-class FD3D11ShaderResourceView : public FRHIShaderResourceView
+namespace D3D11BufferStats
+{
+	void UpdateUniformBufferStats(ID3D11Buffer* Buffer, int64 BufferSize, bool bAllocating);
+	void UpdateBufferStats(FD3D11Buffer& Buffer, bool bAllocating);
+}
+
+class FD3D11View : public TIntrusiveLinkedList<FD3D11View>
 {
 public:
-	
-	TRefCountPtr<ID3D11ShaderResourceView> View;
-	TRefCountPtr<FD3D11BaseShaderResource> Resource;
-
-	FD3D11ShaderResourceView(ID3D11ShaderResourceView* InView,FD3D11BaseShaderResource* InResource)
-	: View(InView)
-	, Resource(InResource)
-	{}
-
-	void Rename(ID3D11ShaderResourceView* InView, FD3D11BaseShaderResource* InResource)
+	virtual ~FD3D11View()
 	{
-		View = InView;
-		Resource = InResource;
+		Unlink();
 	}
+
+	virtual void UpdateView() = 0;
+};
+
+/** Shader resource view class. */
+class FD3D11ShaderResourceView final : public FRHIShaderResourceView, public FD3D11View
+{
+public:
+	TRefCountPtr<ID3D11ShaderResourceView> View;
+
+	FD3D11ShaderResourceView(FRHICommandListBase& RHICmdList, FRHIViewableResource* Resource, FRHIViewDesc const& ViewDesc);
+	FD3D11ViewableResource* GetBaseResource() const;
+
+	virtual void UpdateView() override;
 };
 
 /** Unordered access view class. */
-class FD3D11UnorderedAccessView : public FRHIUnorderedAccessView
+class FD3D11UnorderedAccessView final : public FRHIUnorderedAccessView, public FD3D11View
 {
 public:
-	
 	TRefCountPtr<ID3D11UnorderedAccessView> View;
-	TRefCountPtr<FD3D11BaseShaderResource> Resource;	
-	void* IHVResourceHandle;
-	
-	FD3D11UnorderedAccessView(ID3D11UnorderedAccessView* InView,FD3D11BaseShaderResource* InResource)
-	: View(InView)
-	, Resource(InResource)
-	, IHVResourceHandle(nullptr)
-	{}
-};
 
-void ReturnPooledTexture2D(int32 MipCount, EPixelFormat PixelFormat, ID3D11Texture2D* InResource);
-void ReleasePooledTextures();
+	FD3D11UnorderedAccessView(FRHICommandListBase& RHICmdList, FRHIViewableResource* Resource, FRHIViewDesc const& ViewDesc);
+	FD3D11ViewableResource* GetBaseResource() const;
+
+	virtual void UpdateView() override;
+};
 
 template<class T>
 struct TD3D11ResourceTraits
@@ -876,16 +505,6 @@ struct TD3D11ResourceTraits<FRHIGeometryShader>
 	typedef FD3D11GeometryShader TConcreteType;
 };
 template<>
-struct TD3D11ResourceTraits<FRHIHullShader>
-{
-	typedef FD3D11HullShader TConcreteType;
-};
-template<>
-struct TD3D11ResourceTraits<FRHIDomainShader>
-{
-	typedef FD3D11DomainShader TConcreteType;
-};
-template<>
 struct TD3D11ResourceTraits<FRHIPixelShader>
 {
 	typedef FD3D11PixelShader TConcreteType;
@@ -901,31 +520,6 @@ struct TD3D11ResourceTraits<FRHIBoundShaderState>
 	typedef FD3D11BoundShaderState TConcreteType;
 };
 template<>
-struct TD3D11ResourceTraits<FRHITexture3D>
-{
-	typedef FD3D11Texture3D TConcreteType;
-};
-template<>
-struct TD3D11ResourceTraits<FRHITexture>
-{
-	typedef FD3D11Texture TConcreteType;
-};
-template<>
-struct TD3D11ResourceTraits<FRHITexture2D>
-{
-	typedef FD3D11Texture2D TConcreteType;
-};
-template<>
-struct TD3D11ResourceTraits<FRHITexture2DArray>
-{
-	typedef FD3D11Texture2DArray TConcreteType;
-};
-template<>
-struct TD3D11ResourceTraits<FRHITextureCube>
-{
-	typedef FD3D11TextureCube TConcreteType;
-};
-template<>
 struct TD3D11ResourceTraits<FRHIRenderQuery>
 {
 	typedef FD3D11RenderQuery TConcreteType;
@@ -936,19 +530,9 @@ struct TD3D11ResourceTraits<FRHIUniformBuffer>
 	typedef FD3D11UniformBuffer TConcreteType;
 };
 template<>
-struct TD3D11ResourceTraits<FRHIIndexBuffer>
+struct TD3D11ResourceTraits<FRHIBuffer>
 {
-	typedef FD3D11IndexBuffer TConcreteType;
-};
-template<>
-struct TD3D11ResourceTraits<FRHIStructuredBuffer>
-{
-	typedef FD3D11StructuredBuffer TConcreteType;
-};
-template<>
-struct TD3D11ResourceTraits<FRHIVertexBuffer>
-{
-	typedef FD3D11VertexBuffer TConcreteType;
+	typedef FD3D11Buffer TConcreteType;
 };
 template<>
 struct TD3D11ResourceTraits<FRHIStagingBuffer>

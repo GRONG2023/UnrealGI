@@ -18,8 +18,8 @@
 #include "PropertyEditorModule.h"
 #include "Customizations/SlateBrushCustomization.h"
 #include "Customizations/SlateFontInfoCustomization.h"
-
 #include "Customizations/WidgetTypeCustomization.h"
+#include "Customizations/WidgetChildTypeCustomization.h"
 #include "Customizations/WidgetNavigationCustomization.h"
 #include "Customizations/CanvasSlotCustomization.h"
 #include "Customizations/HorizontalAlignmentCustomization.h"
@@ -31,6 +31,8 @@
 #include "WidgetBlueprintEditorUtils.h"
 #include "ScopedTransaction.h"
 #include "Styling/SlateIconFinder.h"
+#include "UMGEditorModule.h"
+#include "WidgetEditingProjectSettings.h"
 
 #define LOCTEXT_NAMESPACE "UMG"
 
@@ -41,30 +43,42 @@ void SWidgetDetailsView::Construct(const FArguments& InArgs, TSharedPtr<FWidgetB
 	// Create a property view
 	FPropertyEditorModule& EditModule = FModuleManager::Get().GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
 
-	FNotifyHook* NotifyHook = this;
-	FDetailsViewArgs DetailsViewArgs(
-		/*bUpdateFromSelection=*/ false,
-		/*bLockable=*/ false,
-		/*bAllowSearch=*/ true,
-		FDetailsViewArgs::HideNameArea,
-		/*bHideSelectionTip=*/ true,
-		/*InNotifyHook=*/ NotifyHook,
-		/*InSearchInitialKeyFocus=*/ false,
-		/*InViewIdentifier=*/ NAME_None);
-	DetailsViewArgs.DefaultsOnlyVisibility = EEditDefaultsOnlyNodeVisibility::Automatic;
+	FDetailsViewArgs DetailsViewArgs;
+	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+	DetailsViewArgs.bHideSelectionTip = true;
+	DetailsViewArgs.NotifyHook = this;
 
 	PropertyView = EditModule.CreateDetailView(DetailsViewArgs);
 
 	// Create a handler for keyframing via the details panel
-	TSharedRef<IDetailKeyframeHandler> KeyframeHandler = MakeShareable( new FUMGDetailKeyframeHandler( InBlueprintEditor ) );
-	PropertyView->SetKeyframeHandler( KeyframeHandler );
+	if (FWidgetBlueprintEditorUtils::GetRelevantSettings(BlueprintEditor)->bEnableWidgetAnimationEditor)
+	{
+		TSharedRef<IDetailKeyframeHandler> KeyframeHandler = MakeShareable(new FUMGDetailKeyframeHandler(InBlueprintEditor));
+		PropertyView->SetKeyframeHandler(KeyframeHandler);
+	}
 
 	// Create a handler for property binding via the details panel
 	TSharedRef<FDetailWidgetExtensionHandler> BindingHandler = MakeShareable( new FDetailWidgetExtensionHandler( InBlueprintEditor ) );
 	PropertyView->SetExtensionHandler(BindingHandler);
 
+	// Handle EditDefaultsOnly and EditInstanceOnly flags
+	PropertyView->SetIsPropertyVisibleDelegate(FIsPropertyVisible::CreateSP(this, &SWidgetDetailsView::IsPropertyVisible));
+
 	// Notify us of object selection changes so we can update the package re-mapping
 	PropertyView->SetOnObjectArrayChanged(FOnObjectArrayChanged::CreateSP(this, &SWidgetDetailsView::OnPropertyViewObjectArrayChanged));
+
+	PropertyView->SetIsPropertyEditingEnabledDelegate(FIsPropertyEditingEnabled::CreateSP(this, &SWidgetDetailsView::IsDetailsPanelEditingAllowed));
+
+	TSharedRef<SWidget> IsVariableCheckbox =
+		SNew(SCheckBox)
+		.IsChecked(this, &SWidgetDetailsView::GetIsVariable)
+		.OnCheckStateChanged(this, &SWidgetDetailsView::HandleIsVariableChanged)
+		.IsEnabled(this, &SWidgetDetailsView::IsDetailsPanelEditingAllowed)
+		.Padding(FMargin(3.0f, 1.0f, 18.0f, 1.0f))
+		[
+			SNew(STextBlock)
+			.Text(LOCTEXT("IsVariable", "Is Variable"))
+		];
 
 	ChildSlot
 	[
@@ -72,33 +86,32 @@ void SWidgetDetailsView::Construct(const FArguments& InArgs, TSharedPtr<FWidgetB
 
 		+ SVerticalBox::Slot()
 		.AutoHeight()
-		.Padding(0, 2)
+		.Padding(0.0f, 2.0f)
 		[
-			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush(TEXT("ToolPanel.GroupBorder")))
-			.Visibility(this, &SWidgetDetailsView::GetBorderAreaVisibility)
+			SAssignNew(BorderArea, SBorder)
+			.BorderImage(FAppStyle::GetBrush(TEXT("ToolPanel.GroupBorder")))
 			[
 				SNew(SVerticalBox)
 
 				+ SVerticalBox::Slot()
 				.AutoHeight()
-				.Padding(4)
+				.Padding(4.0f)
 				[
 					SNew(SHorizontalBox)
 					.Visibility(this, &SWidgetDetailsView::GetCategoryAreaVisibility)
 
 					+ SHorizontalBox::Slot()
 					.AutoWidth()
-					.Padding(0, 0, 3, 0)
+					.Padding(0.0f, 0.0f, 3.0f, 0.0f)
 					.VAlign(VAlign_Center)
 					[
 						SNew(SImage)
-						.Image(FEditorStyle::GetBrush(TEXT("UMGEditor.CategoryIcon")))
+						.Image(FAppStyle::GetBrush(TEXT("UMGEditor.CategoryIcon")))
 					]
 
 					+ SHorizontalBox::Slot()
 					.AutoWidth()
-					.Padding(0, 0, 6, 0)
+					.Padding(0.0f, 0.0f, 6.0f, 0.0f)
 					[
 						SNew(SBox)
 						.WidthOverride(200.0f)
@@ -116,23 +129,24 @@ void SWidgetDetailsView::Construct(const FArguments& InArgs, TSharedPtr<FWidgetB
 
 				+ SVerticalBox::Slot()
 				.AutoHeight()
-				.Padding(4)
+				.Padding(4.0f)
 				[
 					SNew(SHorizontalBox)
 					.Visibility(this, &SWidgetDetailsView::GetNameAreaVisibility)
 
 					+ SHorizontalBox::Slot()
 					.AutoWidth()
-					.Padding(0, 0, 3, 0)
+					.Padding(0.0f, 0.0f, 3.0f, 0.0f)
 					.VAlign(VAlign_Center)
 					[
 						SNew(SImage)
 						.Image(this, &SWidgetDetailsView::GetNameIcon)
+						.ColorAndOpacity(FSlateColor::UseForeground())
 					]
 
 					+ SHorizontalBox::Slot()
 					.AutoWidth()
-					.Padding(0, 0, 6, 0)
+					.Padding(0.0f, 0.0f, 6.0f, 0.0f)
 					[
 						SNew(SBox)
 						.WidthOverride(200.0f)
@@ -142,7 +156,7 @@ void SWidgetDetailsView::Construct(const FArguments& InArgs, TSharedPtr<FWidgetB
 							.SelectAllTextWhenFocused(true)
 							.HintText(LOCTEXT("Name", "Name"))
 							.Text(this, &SWidgetDetailsView::GetNameText)
-							.IsEnabled(this, &SWidgetDetailsView::IsSingleObjectSelected)
+							.IsEnabled(this, &SWidgetDetailsView::IsWidgetNameFieldEnabled)
 							.OnTextChanged(this, &SWidgetDetailsView::HandleNameTextChanged)
 							.OnTextCommitted(this, &SWidgetDetailsView::HandleNameTextCommitted)
 						]
@@ -151,19 +165,12 @@ void SWidgetDetailsView::Construct(const FArguments& InArgs, TSharedPtr<FWidgetB
 					+ SHorizontalBox::Slot()
 					.AutoWidth()
 					[
-						SNew(SCheckBox)
-						.IsChecked(this, &SWidgetDetailsView::GetIsVariable)
-						.OnCheckStateChanged(this, &SWidgetDetailsView::HandleIsVariableChanged)
-						.Padding(FMargin(3,1,3,1))
-						[
-							SNew(STextBlock)
-							.Text(LOCTEXT("IsVariable", "Is Variable"))
-						]
+						FWidgetBlueprintEditorUtils::GetRelevantSettings(BlueprintEditor)->bEnableMakeVariable ? IsVariableCheckbox : SNullWidget::NullWidget
 					]
 
 					+ SHorizontalBox::Slot()
 					.AutoWidth()
-					.Padding(15,0,0,0)
+					.VAlign(VAlign_Center)
 					[
 						SAssignNew(ClassLinkArea, SBox)
 					]
@@ -196,10 +203,8 @@ SWidgetDetailsView::~SWidgetDetailsView()
 	}
 
 	// Unregister the property type layouts
-	static FName PropertyEditor("PropertyEditor");
-	FPropertyEditorModule& PropertyModule = FModuleManager::GetModuleChecked<FPropertyEditorModule>(PropertyEditor);
-
 	PropertyView->UnregisterInstancedCustomPropertyTypeLayout(TEXT("Widget"));
+	PropertyView->UnregisterInstancedCustomPropertyTypeLayout(TEXT("WidgetChild"));
 	PropertyView->UnregisterInstancedCustomPropertyTypeLayout(TEXT("WidgetNavigation"));
 	PropertyView->UnregisterInstancedCustomPropertyTypeLayout(TEXT("PanelSlot"));
 	PropertyView->UnregisterInstancedCustomPropertyTypeLayout(TEXT("EHorizontalAlignment"));
@@ -212,20 +217,33 @@ SWidgetDetailsView::~SWidgetDetailsView()
 
 void SWidgetDetailsView::RegisterCustomizations()
 {
-	PropertyView->RegisterInstancedCustomPropertyLayout(UWidget::StaticClass(), FOnGetDetailCustomizationInstance::CreateStatic(&FBlueprintWidgetCustomization::MakeInstance, BlueprintEditor.Pin().ToSharedRef(), BlueprintEditor.Pin()->GetBlueprintObj()));
+	check(BlueprintEditor.Pin());
+	TSharedRef<FWidgetBlueprintEditor> BlueprintEditorRef = BlueprintEditor.Pin().ToSharedRef();
 
-	static FName PropertyEditor("PropertyEditor");
-	FPropertyEditorModule& PropertyModule = FModuleManager::GetModuleChecked<FPropertyEditorModule>(PropertyEditor);
-
-	PropertyView->RegisterInstancedCustomPropertyTypeLayout(TEXT("Widget"), FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FWidgetTypeCustomization::MakeInstance, BlueprintEditor.Pin().ToSharedRef()), nullptr);
-	PropertyView->RegisterInstancedCustomPropertyTypeLayout(TEXT("WidgetNavigation"), FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FWidgetNavigationCustomization::MakeInstance, BlueprintEditor.Pin().ToSharedRef()));
-	PropertyView->RegisterInstancedCustomPropertyTypeLayout(TEXT("PanelSlot"), FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FCanvasSlotCustomization::MakeInstance, BlueprintEditor.Pin()->GetBlueprintObj()));
+	PropertyView->RegisterInstancedCustomPropertyLayout(UWidget::StaticClass(), FOnGetDetailCustomizationInstance::CreateStatic(&FBlueprintWidgetCustomization::MakeInstance, BlueprintEditorRef, BlueprintEditorRef->GetBlueprintObj()));
+	PropertyView->RegisterInstancedCustomPropertyTypeLayout(TEXT("Widget"), FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FWidgetTypeCustomization::MakeInstance, BlueprintEditorRef), nullptr);
+	PropertyView->RegisterInstancedCustomPropertyTypeLayout(TEXT("WidgetChild"), FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FWidgetChildTypeCustomization::MakeInstance, BlueprintEditor.Pin().ToSharedRef()), nullptr);
+	PropertyView->RegisterInstancedCustomPropertyTypeLayout(TEXT("WidgetNavigation"), FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FWidgetNavigationCustomization::MakeInstance, BlueprintEditorRef));
+	PropertyView->RegisterInstancedCustomPropertyTypeLayout(TEXT("PanelSlot"), FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FCanvasSlotCustomization::MakeInstance, BlueprintEditorRef->GetBlueprintObj()));
 	PropertyView->RegisterInstancedCustomPropertyTypeLayout(TEXT("EHorizontalAlignment"), FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FHorizontalAlignmentCustomization::MakeInstance));
 	PropertyView->RegisterInstancedCustomPropertyTypeLayout(TEXT("EVerticalAlignment"), FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FVerticalAlignmentCustomization::MakeInstance));
 	PropertyView->RegisterInstancedCustomPropertyTypeLayout(TEXT("SlateChildSize"), FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FSlateChildSizeCustomization::MakeInstance));
 	PropertyView->RegisterInstancedCustomPropertyTypeLayout(TEXT("SlateBrush"), FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FSlateBrushStructCustomization::MakeInstance, false));
 	PropertyView->RegisterInstancedCustomPropertyTypeLayout(TEXT("SlateFontInfo"), FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FSlateFontInfoStructCustomization::MakeInstance));
 	PropertyView->RegisterInstancedCustomPropertyTypeLayout(TEXT("ETextJustify"), FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FTextJustifyCustomization::MakeInstance));
+
+	TWeakPtr<FWidgetBlueprintEditor> WeakBlueprintEditor = BlueprintEditor;
+	IUMGEditorModule& UMGEditorModule = FModuleManager::LoadModuleChecked<IUMGEditorModule>("UMGEditor");
+	for (const IUMGEditorModule::FCustomPropertyTypeLayout& Layout : UMGEditorModule.GetAllInstancedCustomPropertyTypeLayout())
+	{
+		if (Layout.Type.GetAssetName().IsValid() && Layout.Delegate.IsBound())
+		{
+			PropertyView->RegisterInstancedCustomPropertyTypeLayout(Layout.Type.GetAssetName(), FOnGetPropertyTypeCustomizationInstance::CreateLambda([LocalDelegate = Layout.Delegate, WeakBlueprintEditor]
+				{
+					return LocalDelegate.Execute(WeakBlueprintEditor);
+				}));
+		}
+	}
 }
 
 void SWidgetDetailsView::OnEditorSelectionChanging()
@@ -244,32 +262,38 @@ void SWidgetDetailsView::OnEditorSelectionChanged()
 	SelectedObjects.Empty();
 	PropertyView->SetObjects(SelectedObjects);
 
+	TOptional<bool> bIsWidgetSelection;
+
 	// Add any selected widgets to the list of pending selected objects.
-	TSet< FWidgetReference > SelectedWidgets = BlueprintEditor.Pin()->GetSelectedWidgets();
-	if ( SelectedWidgets.Num() > 0 )
+	const TSet<FWidgetReference>& SelectedWidgets = BlueprintEditor.Pin()->GetSelectedWidgets();
+	for ( const FWidgetReference& WidgetRef : SelectedWidgets )
 	{
-		for ( FWidgetReference& WidgetRef : SelectedWidgets )
-		{
-			// Edit actions will go directly to the preview widget, changes will be
-			// propagated to the template via SWidgetDetailsView::NotifyPostChange
-			SelectedObjects.Add(WidgetRef.GetPreview());
-		}
+		// Edit actions will go directly to the preview widget, changes will be
+		// propagated to the template via SWidgetDetailsView::NotifyPostChange
+		SelectedObjects.Add(WidgetRef.GetPreview());
+		bIsWidgetSelection = true;
 	}
 
 	// Add any selected objects (non-widgets) to the pending selected objects.
-	TSet< TWeakObjectPtr<UObject> > Selection = BlueprintEditor.Pin()->GetSelectedObjects();
-	for ( TWeakObjectPtr<UObject> Selected : Selection )
+	const TSet<TWeakObjectPtr<UObject>>& Selection = BlueprintEditor.Pin()->GetSelectedObjects();
+	for ( const TWeakObjectPtr<UObject> Selected : Selection )
 	{
 		if ( UObject* S = Selected.Get() )
 		{
 			SelectedObjects.Add(S);
+			bIsWidgetSelection = bIsWidgetSelection.Get(true) && Cast<UWidget>(S) != nullptr;
 		}
 	}
+
+	BorderArea->SetVisibility(bIsWidgetSelection.Get(false) ? EVisibility::Visible : EVisibility::Collapsed);
 
 	// If only 1 valid selected object exists, update the class link to point to the right class.
 	if ( SelectedObjects.Num() == 1 && SelectedObjects[0].IsValid() )
 	{
-		ClassLinkArea->SetContent(FEditorClassUtils::GetSourceLink(SelectedObjects[0]->GetClass(), TWeakObjectPtr<UObject>()));
+		FEditorClassUtils::FSourceLinkParams SourceLinkParams;
+		SourceLinkParams.bUseDefaultFormat = true;
+
+		ClassLinkArea->SetContent(FEditorClassUtils::GetSourceLink(SelectedObjects[0]->GetClass(), SourceLinkParams));
 	}
 	else
 	{
@@ -318,6 +342,44 @@ void SWidgetDetailsView::ClearFocusIfOwned()
 	}
 }
 
+bool SWidgetDetailsView::IsDetailsPanelEditingAllowed() const 
+{
+	return !SelectedObjects.ContainsByPredicate([](const TWeakObjectPtr<UObject> WeakObj)
+		{
+			if (UObject* ObjPtr = WeakObj.Get())
+			{
+				if (UWidget* Widget = Cast<UWidget>(ObjPtr))
+				{
+					return Widget->IsLockedInDesigner();
+				}
+			}
+			return false;
+		});
+}
+
+bool SWidgetDetailsView::IsWidgetNameFieldEnabled() const
+{
+	return IsSingleObjectSelected() && IsDetailsPanelEditingAllowed();
+}
+
+bool SWidgetDetailsView::IsPropertyVisible(const FPropertyAndParent& PropertyAndParent) const
+{
+	const FProperty& Property = PropertyAndParent.Property;
+
+	const bool bIsEditDefaultsOnly = Property.HasAnyPropertyFlags(CPF_DisableEditOnInstance);
+	const bool bIsEditInstanceOnly = Property.HasAnyPropertyFlags(CPF_DisableEditOnTemplate);
+	if (bIsEditDefaultsOnly || bIsEditInstanceOnly)
+	{
+		// EditDefaultsOnly properties are only visible when the CDO/root is selected, EditInstanceOnly are only visible when the CDO/root is *not* selected
+		const bool bIsCDOSelected = IsWidgetCDOSelected();
+		if ((bIsEditDefaultsOnly && !bIsCDOSelected) || (bIsEditInstanceOnly && bIsCDOSelected))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 bool SWidgetDetailsView::IsWidgetCDOSelected() const
 {
 	if ( SelectedObjects.Num() == 1 )
@@ -330,18 +392,9 @@ bool SWidgetDetailsView::IsWidgetCDOSelected() const
 		{
 			return true;
 		}
-		else if (Widget && !Widget->HasAnyFlags(RF_ClassDefaultObject))
-		{
-			return false;
-		}
 	}
 
 	return false;
-}
-
-EVisibility SWidgetDetailsView::GetBorderAreaVisibility() const
-{
-	return (SelectedObjects.Num() == 0) ? EVisibility::Collapsed : EVisibility::Visible;
 }
 
 EVisibility SWidgetDetailsView::GetNameAreaVisibility() const
@@ -360,6 +413,8 @@ void SWidgetDetailsView::HandleCategoryTextCommitted(const FText& Text, ETextCom
 	{
 		if ( UUserWidget* Widget = Cast<UUserWidget>(SelectedObjects[0].Get()) )
 		{
+			ensureMsgf(IsWidgetCDOSelected(), TEXT("You can ony change the category if you are the preview widget."));
+
 			UUserWidget* WidgetCDO = Widget->GetClass()->GetDefaultObject<UUserWidget>();
 			WidgetCDO->PaletteCategory = Text;
 
@@ -369,6 +424,17 @@ void SWidgetDetailsView::HandleCategoryTextCommitted(const FText& Text, ETextCom
 
 			// Immediately force a rebuild so that all palettes update to show it in a new category.
 			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+			// MarkBlueprintAsStructurallyModified will invalidate the selection. Reselect it.
+			if (TSharedPtr<FWidgetBlueprintEditor> Editor = BlueprintEditor.Pin())
+			{
+				if (Editor->GetPreview())
+				{
+					TSet<UObject*> NewSelectedObjects;
+					NewSelectedObjects.Add(Editor->GetPreview());
+					Editor->SelectObjects(NewSelectedObjects);
+				}
+			}
 		}
 	}
 }
@@ -481,7 +547,10 @@ void SWidgetDetailsView::HandleNameTextCommitted(const FText& Text, ETextCommit:
 			if ( HandleVerifyNameTextChanged(Text, DummyText) )
 			{
 				UWidget* Widget = Cast<UWidget>(SelectedObjects[0].Get());
-				FWidgetBlueprintEditorUtils::RenameWidget(BlueprintEditor.Pin().ToSharedRef(), Widget->GetFName(), Text.ToString());
+				if (!Widget->GetLabelText().EqualToCaseIgnored(Text))
+				{
+					FWidgetBlueprintEditorUtils::RenameWidget(BlueprintEditor.Pin().ToSharedRef(), Widget->GetFName(), Text.ToString());
+				}
 			}
 		}
 		IsReentrant = false;

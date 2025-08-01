@@ -2,10 +2,22 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "HAL/Platform.h"
 #include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "MovieSceneToolsProjectSettings.generated.h"
+
+UENUM()
+enum class EMovieSceneToolsPropertyTrackType
+{
+	FloatTrack,
+	DoubleTrack
+};
 
 USTRUCT()
 struct FMovieSceneToolsPropertyTrackSettings
@@ -33,6 +45,10 @@ struct FMovieSceneToolsFbxSettings
 	/** The property track setting to map to */
 	UPROPERTY(config, EditAnywhere, Category=TrackSettings)
 	FMovieSceneToolsPropertyTrackSettings PropertyPath;
+
+	/** Type of property track to map to */
+	UPROPERTY(config, EditAnywhere, Category=TrackSettings)
+	EMovieSceneToolsPropertyTrackType PropertyType = EMovieSceneToolsPropertyTrackType::FloatTrack;
 };
 
 // Settings for the level sequences
@@ -52,9 +68,17 @@ public:
 	UPROPERTY(config, EditAnywhere, Category=Timeline, meta=(ClampMin=0.00001f, Units=s))
 	float DefaultDuration;
 
+	/** The default directory for the subsequences. */
+	UPROPERTY(config, EditAnywhere, Category=Shots)
+	FString SubsequenceDirectory;
+
 	/** The default directory for the shots. */
 	UPROPERTY(config, EditAnywhere, Category=Shots)
 	FString ShotDirectory;
+
+	/** The default prefix for subsequence names. */
+	UPROPERTY(config, EditAnywhere, Category=Shots)
+	FString SubsequencePrefix;
 
 	/** The default prefix for shot names. */
 	UPROPERTY(config, EditAnywhere, Category=Shots)
@@ -80,13 +104,9 @@ public:
 	UPROPERTY(config, EditAnywhere, Category=Shots, meta = (UIMin = "1", UIMax = "10"))
 	uint32 FirstTakeNumber;
 
-	/** A single character separator between the shot number and the take number. */
+	/** Character separator between the shot number and the take number. */
 	UPROPERTY(config, EditAnywhere, Category=Shots)
 	FString TakeSeparator;
-
-	/** A single character separator between the take number and the sub sequence name. */
-	UPROPERTY(config, EditAnywhere, Category=Shots)
-	FString SubSequenceSeparator;
 
 	/** Mapping between fbx property name and property track path */
 	UPROPERTY(config, EditAnywhere, Category=TrackSettings)

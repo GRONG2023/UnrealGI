@@ -1,9 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "SUniformToolbarPanel.h"
+#include "Framework/MultiBox/SUniformToolbarPanel.h"
 #include "Layout/LayoutUtils.h"
 #include "Widgets/Input/SComboButton.h"
 #include "Widgets/Images/SImage.h"
+#include "Styling/ToolBarStyle.h"
 
 SUniformToolbarPanel::SUniformToolbarPanel()
 : Children(this)
@@ -25,32 +26,25 @@ void SUniformToolbarPanel::Construct( const FArguments& InArgs )
 
 	ClippedIndex = INDEX_NONE;
 
-	Children.Reserve( InArgs.Slots.Num() );
-	for (FSlot* ChildSlot : InArgs.Slots)
-	{
-		Children.Add( ChildSlot );
-	}
+	Children.AddSlots(MoveTemp(const_cast<TArray<FSlot::FSlotArguments>&>(InArgs._Slots)));
 
-	// Add the optional dropdown arrow as a child.  
-	FSlot& NewSlot = *(new FSlot());
-
-	NewSlot
-	[
+	const FToolBarStyle& ToolBarStyle = StyleSet->GetWidgetStyle<FToolBarStyle>(StyleName);
+	
+	// Add the optional dropdown arrow as a child.
+	Children.AddSlot(FSlot::FSlotArguments(MakeUnique<FSlot>(
 		SAssignNew(Dropdown, SComboButton)
 		.HasDownArrow(false)
-		.ButtonStyle(StyleSet, ISlateStyle::Join(StyleName, ".Button"))
-		.ContentPadding(0)
+		.ButtonStyle(&ToolBarStyle.ButtonStyle)
+		.ContentPadding(0.f)
 		.ToolTipText(NSLOCTEXT("Slate", "ExpandToolbar", "Click to expand toolbar"))
 		.OnGetMenuContent(InArgs._OnDropdownOpened)
 		.Cursor(EMouseCursor::Default)
 		.ButtonContent()
 		[
 			SNew(SImage)
-			.Image(StyleSet->GetBrush(StyleName, ".Expand"))
+			.Image(&ToolBarStyle.ExpandBrush)
 		]
-	];
-
-	Children.Add(&NewSlot);
+		)));
 }
 
 void SUniformToolbarPanel::OnArrangeChildren( const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren ) const
@@ -117,8 +111,8 @@ void SUniformToolbarPanel::OnArrangeChildren( const FGeometry& AllottedGeometry,
 							FVector2D(XAxisResult.Size, YAxisResult.Size)
 						);
 
-					WidgetExtents = FMath::TruncToFloat(ArrangedChild.Geometry.AbsolutePosition.X + ArrangedChild.Geometry.GetLocalSize().X * ArrangedChild.Geometry.Scale);
-					AllottedGeometryExtents = FMath::TruncToFloat((AllottedGeometry.AbsolutePosition.X + AllottedGeometry.GetLocalSize().X * AllottedGeometry.Scale) - ClippedChildrenDropDownDesiredSize.X);
+					WidgetExtents = FMath::TruncToInt(ArrangedChild.Geometry.AbsolutePosition.X + ArrangedChild.Geometry.GetLocalSize().X * ArrangedChild.Geometry.Scale);
+					AllottedGeometryExtents = FMath::TruncToInt((AllottedGeometry.AbsolutePosition.X + AllottedGeometry.GetLocalSize().X * AllottedGeometry.Scale) - ClippedChildrenDropDownDesiredSize.X);
 
 				}
 				else
@@ -129,8 +123,8 @@ void SUniformToolbarPanel::OnArrangeChildren( const FGeometry& AllottedGeometry,
 							FVector2D(XAxisResult.Size, YAxisResult.Size)
 						);
 
-					WidgetExtents = FMath::TruncToFloat(ArrangedChild.Geometry.AbsolutePosition.Y + ArrangedChild.Geometry.GetLocalSize().Y * ArrangedChild.Geometry.Scale);
-					AllottedGeometryExtents = FMath::TruncToFloat((AllottedGeometry.AbsolutePosition.Y + AllottedGeometry.GetLocalSize().Y * AllottedGeometry.Scale) - ClippedChildrenDropDownDesiredSize.Y);
+					WidgetExtents = FMath::TruncToInt(ArrangedChild.Geometry.AbsolutePosition.Y + ArrangedChild.Geometry.GetLocalSize().Y * ArrangedChild.Geometry.Scale);
+					AllottedGeometryExtents = FMath::TruncToInt((AllottedGeometry.AbsolutePosition.Y + AllottedGeometry.GetLocalSize().Y * AllottedGeometry.Scale) - ClippedChildrenDropDownDesiredSize.Y);
 
 				}
 
@@ -236,14 +230,14 @@ void SUniformToolbarPanel::SetSlotPadding(TAttribute<FMargin> InSlotPadding)
 	Invalidate(EInvalidateWidgetReason::Layout);
 }
 
-
-SUniformToolbarPanel::FSlot& SUniformToolbarPanel::AddSlot()
+SUniformToolbarPanel::FSlot::FSlotArguments SUniformToolbarPanel::Slot()
 {
-	FSlot& NewSlot = *(new FSlot());
+	return FSlot::FSlotArguments(MakeUnique<FSlot>());
+}
 
-	Children.Insert( &NewSlot, Children.Num()-1);
-
-	return NewSlot;
+SUniformToolbarPanel::FScopedWidgetSlotArguments SUniformToolbarPanel::AddSlot()
+{
+	return FScopedWidgetSlotArguments{ MakeUnique<FSlot>(), Children, INDEX_NONE };
 }
 
 bool SUniformToolbarPanel::RemoveSlot( const TSharedRef<SWidget>& SlotWidget )

@@ -13,9 +13,13 @@
 #include "Misc/ICompressionFormat.h"
 
 #include "Misc/MemoryReadStream.h"
+
+#include "Compression/OodleDataCompression.h"
+#include "Compression/CompressionUtil.h" // for extra logging only
+
 // #include "TargetPlatformBase.h"
 THIRD_PARTY_INCLUDES_START
-#include "ThirdParty/zlib/zlib-1.2.5/Inc/zlib.h"
+#include "zlib.h"
 THIRD_PARTY_INCLUDES_END
 
 THIRD_PARTY_INCLUDES_START
@@ -30,6 +34,7 @@ DECLARE_STATS_GROUP( TEXT( "Compression" ), STATGROUP_Compression, STATCAT_Advan
 
 PRAGMA_DISABLE_UNSAFE_TYPECAST_WARNINGS
 
+// static class members for registered plugin/module compression formats :
 TMap<FName, struct ICompressionFormat*> FCompression::CompressionFormats;
 FCriticalSection FCompression::CompressionFormatsCriticalSection;
 
@@ -67,6 +72,7 @@ static uint32 appGZIPVersion()
  */
 static bool appCompressMemoryZLIB(void* CompressedBuffer, int32& CompressedSize, const void* UncompressedBuffer, int32 UncompressedSize, int32 BitWindow, int32 CompLevel)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(appCompressMemoryZLIB);
 	DECLARE_SCOPE_CYCLE_COUNTER(TEXT("Compress Memory ZLIB"), STAT_appCompressMemoryZLIB, STATGROUP_Compression);
 
 	ensureMsgf(CompLevel >= Z_DEFAULT_COMPRESSION, TEXT("CompLevel must be >= Z_DEFAULT_COMPRESSION"));
@@ -120,6 +126,7 @@ static bool appCompressMemoryZLIB(void* CompressedBuffer, int32& CompressedSize,
 
 static bool appCompressMemoryGZIP(void* CompressedBuffer, int32& CompressedSize, const void* UncompressedBuffer, int32 UncompressedSize)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(appCompressMemoryGZIP);
 	DECLARE_SCOPE_CYCLE_COUNTER( TEXT( "Compress Memory GZIP" ), STAT_appCompressMemoryGZIP, STATGROUP_Compression );
 
 	z_stream gzipstream;
@@ -150,21 +157,19 @@ static bool appCompressMemoryGZIP(void* CompressedBuffer, int32& CompressedSize,
 	gzipstream.avail_out = CompressedSize;
 
 	int status = 0;
-	bool bOperationSucceeded = false;
 	while ((status = deflate(&gzipstream, Z_FINISH)) == Z_OK);
-	if (status == Z_STREAM_END)
-	{
-		bOperationSucceeded = true;
-		deflateEnd(&gzipstream);
-	}
+	deflateEnd(&gzipstream);
 
 	// Propagate compressed size from intermediate variable back into out variable.
 	CompressedSize = gzipstream.total_out;
+
+	bool bOperationSucceeded = (status == Z_STREAM_END);
 	return bOperationSucceeded;
 }
 
 static int appCompressMemoryBoundGZIP(int32 UncompressedSize)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(appCompressMemoryBoundGZIP);
 	DECLARE_SCOPE_CYCLE_COUNTER(TEXT("Compress Memory Bound GZIP"), STAT_appCompressMemoryBoundGZIP, STATGROUP_Compression);
 	z_stream gzipstream;
 	gzipstream.zalloc = &zalloc;
@@ -199,6 +204,7 @@ static int appCompressMemoryBoundGZIP(int32 UncompressedSize)
  */
 bool appUncompressMemoryGZIP(void* UncompressedBuffer, int32 UncompressedSize, const void* CompressedBuffer, int32 CompressedSize)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(appUncompressMemoryGZIP);
 	DECLARE_SCOPE_CYCLE_COUNTER(TEXT("Uncompress Memory GZIP"), STAT_appUncompressMemoryGZIP, STATGROUP_Compression);
 
 	// Zlib wants to use unsigned long.
@@ -260,6 +266,7 @@ bool appUncompressMemoryGZIP(void* UncompressedBuffer, int32 UncompressedSize, c
  */
 bool appUncompressMemoryZLIB( void* UncompressedBuffer, int32 UncompressedSize, const void* CompressedBuffer, int32 CompressedSize, int32 BitWindow )
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(appUncompressMemoryZLIB);
 	DECLARE_SCOPE_CYCLE_COUNTER( TEXT( "Uncompress Memory ZLIB" ), STAT_appUncompressMemoryZLIB, STATGROUP_Compression );
 
 	// Zlib wants to use unsigned long.
@@ -299,9 +306,9 @@ bool appUncompressMemoryZLIB( void* UncompressedBuffer, int32 UncompressedSize, 
 	}
 
 	// These warnings will be compiled out in shipping.
-	UE_CLOG(Result == Z_MEM_ERROR, LogCompression, Warning, TEXT("appUncompressMemoryZLIB failed: Error: Z_MEM_ERROR, not enough memory!"));
-	UE_CLOG(Result == Z_BUF_ERROR, LogCompression, Warning, TEXT("appUncompressMemoryZLIB failed: Error: Z_BUF_ERROR, not enough room in the output buffer!"));
-	UE_CLOG(Result == Z_DATA_ERROR, LogCompression, Warning, TEXT("appUncompressMemoryZLIB failed: Error: Z_DATA_ERROR, input data was corrupted or incomplete!"));
+	UE_CLOG(Result == Z_MEM_ERROR, LogCompression, Warning, TEXT("appUncompressMemoryZLIB failed: Error: Z_MEM_ERROR, not enough memory! (%s)"), UTF8_TO_TCHAR(stream.msg));
+	UE_CLOG(Result == Z_BUF_ERROR, LogCompression, Warning, TEXT("appUncompressMemoryZLIB failed: Error: Z_BUF_ERROR, not enough room in the output buffer! (%s)"), UTF8_TO_TCHAR(stream.msg));
+	UE_CLOG(Result == Z_DATA_ERROR, LogCompression, Warning, TEXT("appUncompressMemoryZLIB failed: Error: Z_DATA_ERROR, input data was corrupted or incomplete! (%s)"), UTF8_TO_TCHAR(stream.msg));
 
 	bool bOperationSucceeded = (Result == Z_OK);
 
@@ -316,6 +323,7 @@ bool appUncompressMemoryZLIB( void* UncompressedBuffer, int32 UncompressedSize, 
 
 bool appUncompressMemoryStreamZLIB(void* UncompressedBuffer, int32 UncompressedSize, IMemoryReadStream* Stream, int64 StreamOffset, int32 CompressedSize, int32 BitWindow)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(appUncompressMemoryStreamZLIB);
 	DECLARE_SCOPE_CYCLE_COUNTER(TEXT("Uncompress Memory ZLIB"), STAT_appUncompressMemoryZLIB, STATGROUP_Compression);
 
 	int64 ChunkOffset = 0;
@@ -379,40 +387,13 @@ TAtomic<uint64> FCompression::CompressorSrcBytes(0);
 /** Nubmer of bytes after compression.		*/
 TAtomic<uint64> FCompression::CompressorDstBytes(0);
 
-static ECompressionFlags CheckGlobalCompressionFlags(ECompressionFlags Flags)
-{
-	static bool GAlwaysBiasCompressionForSize = false;
-	if(FPlatformProperties::HasEditorOnlyData())
-	{
-		static bool GTestedCmdLine = false;
-		if(!GTestedCmdLine && FCommandLine::IsInitialized())
-		{
-			GTestedCmdLine = true;
-			// Override compression settings wrt size.
-			GAlwaysBiasCompressionForSize = FParse::Param(FCommandLine::Get(),TEXT("BIASCOMPRESSIONFORSIZE"));
-		}
-	}
-
-	// Always bias for speed if option is set.
-	if(GAlwaysBiasCompressionForSize)
-	{
-		int32 NewFlags = Flags;
-		NewFlags &= ~COMPRESS_BiasSpeed;
-		NewFlags |= COMPRESS_BiasMemory;
-		Flags = (ECompressionFlags)NewFlags;
-	}
-
-	return Flags;
-}
-
-
 uint32 FCompression::GetCompressorVersion(FName FormatName)
 {
-	if (FormatName == NAME_Zlib)
+	if (FormatName == NAME_None || FormatName == NAME_LZ4)
 	{
-		return appZLIBVersion();
+		return 0;
 	}
-	else if (FormatName == NAME_Gzip)
+	else if (FormatName == NAME_Zlib || FormatName == NAME_Gzip)
 	{
 		return appZLIBVersion();
 	}
@@ -432,9 +413,19 @@ uint32 FCompression::GetCompressorVersion(FName FormatName)
 ICompressionFormat* FCompression::GetCompressionFormat(FName FormatName, bool bErrorOnFailure)
 {
 	FScopeLock Lock(&CompressionFormatsCriticalSection);
+
 	ICompressionFormat** ExistingFormat = CompressionFormats.Find(FormatName);
 	if (ExistingFormat == nullptr)
 	{
+		if ( FormatName == NAME_Oodle )
+		{
+			// Oodle ICompressionFormat is created on first use :
+			// inside CompressionFormatsCriticalSection lock
+			FOodleDataCompression::CompressionFormatInitOnFirstUseFromLock();
+
+			// OodleDataCompressionFormatInitOnFirstUseFromLock added it to the ModularFeatures list
+		}
+
 		TArray<ICompressionFormat*> Features = IModularFeatures::Get().GetModularFeatureImplementations<ICompressionFormat>(COMPRESSION_FORMAT_FEATURE_NAME);
 
 		for (ICompressionFormat* CompressionFormat : Features)
@@ -476,17 +467,42 @@ FName FCompression::GetCompressionFormatFromDeprecatedFlags(ECompressionFlags Fl
 			return NAME_Gzip;
 		// COMPRESS_Custom was a temporary solution to third party compression before we had plugins working, and it was only ever used with oodle, we just assume Oodle with Custom
 		case COMPRESS_Custom:
-			return TEXT("Oodle");
+			return NAME_Oodle;
+		default:
+			break;
 	}
 
 	return NAME_None;
 }
 
+int32 FCompression::GetMaximumCompressedSize(FName FormatName, int32 UncompressedSize, ECompressionFlags Flags, int32 CompressionData)
+{
+	if (FormatName == NAME_None)
+	{
+		return UncompressedSize;
+	}
+	else if ( FormatName == NAME_Oodle )
+	{
+		//	avoid calling CompressMemoryBound in the Decoder because it creates an ICompressionFormat for Oodle
+		//	and initializes encoders
+
+		return FOodleDataCompression::GetMaximumCompressedSize(UncompressedSize);
+	}
+	else
+	{
+		return CompressMemoryBound(FormatName,UncompressedSize,Flags,CompressionData);
+	}
+}
+
 int32 FCompression::CompressMemoryBound(FName FormatName, int32 UncompressedSize, ECompressionFlags Flags, int32 CompressionData)
 {
 	int32 CompressionBound = UncompressedSize;
-
-	if (FormatName == NAME_Zlib)
+	
+	if (FormatName == NAME_None)
+	{
+		return UncompressedSize;
+	}
+	else if (FormatName == NAME_Zlib)
 	{
 		// Zlib's compressBounds gives a better (smaller) value, but only for the default bit window.
 		if (CompressionData == 0 || CompressionData == DEFAULT_ZLIB_BIT_WINDOW)
@@ -518,17 +534,90 @@ int32 FCompression::CompressMemoryBound(FName FormatName, int32 UncompressedSize
 		}
 	}
 
+	// this will fail if there was an int32 overflow (CompressionBound will be negative)
+	check( CompressionBound >= UncompressedSize );
+
 	return CompressionBound;
 }
 
 
+
+bool FCompression::CompressMemoryIfWorthDecompressing(FName FormatName, int32 MinBytesSaved, int32 MinPercentSaved, void* CompressedBuffer, int32& CompressedSize, const void* UncompressedBuffer, int32 UncompressedSize, ECompressionFlags Flags, int32 CompressionData)
+{
+	// returns false if we could compress,
+	//	but it's not worth the time to decompress
+	//	you should store the data uncompressed instead
+
+	if ( UncompressedSize <= MinBytesSaved )
+	{
+		// if input size is smaller than the number of bytes we need to save
+		// no need to even try encoding
+		// also saves encode time
+		// NOTE : this check applies even for compressor who say "bNeedsWorthItCheck = false" , eg. Oodle
+		return false;
+	}
+	
+	bool bNeedsWorthItCheck = false;
+	
+	if (FormatName == NAME_Oodle)
+	{
+		// Oodle does its own internal "worth it" check
+		bNeedsWorthItCheck = false;
+	}
+	else if (FormatName == NAME_Zlib || FormatName == NAME_Gzip || FormatName == NAME_LZ4)
+	{
+		bNeedsWorthItCheck = true;
+	}
+	else
+	{
+		ICompressionFormat* Format = GetCompressionFormat(FormatName);
+
+		if ( ! Format ) return false;
+
+		bNeedsWorthItCheck = ! Format->DoesOwnWorthDecompressingCheck();
+	}
+
+	bool bCompressSucceeded = CompressMemory(FormatName,CompressedBuffer,CompressedSize,UncompressedBuffer,UncompressedSize,Flags,CompressionData);
+
+	if ( ! bCompressSucceeded )
+	{
+		// compression actually failed
+		return false;
+	}
+
+	if ( ! bNeedsWorthItCheck )
+	{
+		// ICompressionFormat does own "worth it" check, don't do our own
+		// do check for expansion because that's how they signal "not worth it"
+		//	(CompressMemory is not allowed to return false)
+		return ( CompressedSize < UncompressedSize );
+	}
+
+	// we got compression, but do we want it ?
+	
+	// check if the decode time on load is worth the size savings
+	// Oodle uses much more sophisticated models for this
+	// here we replicate the Pak file logic :
+
+	// must save at least MinBytesSaved regardless of percentage (for small files)
+	// also checks CompressedSize >= UncompressedSize
+	int32 BytesSaved = UncompressedSize - CompressedSize;
+	if ( BytesSaved < MinBytesSaved )
+	{
+		return false;
+	}
+
+	// Check the saved compression ratio, if it's too low just store uncompressed. 
+	// For example, saving 64 KB per 1 MB is about 6%.
+	return (int64)BytesSaved * 100 >= (int64)UncompressedSize * MinPercentSaved;
+}
+
 bool FCompression::CompressMemory(FName FormatName, void* CompressedBuffer, int32& CompressedSize, const void* UncompressedBuffer, int32 UncompressedSize, ECompressionFlags Flags, int32 CompressionData)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FCompression::CompressMemory);
 	uint64 CompressorStartTime = FPlatformTime::Cycles64();
 
 	bool bCompressSucceeded = false;
-
-	Flags = CheckGlobalCompressionFlags(Flags);
 
 	if (FormatName == NAME_Zlib)
 	{
@@ -549,10 +638,11 @@ bool FCompression::CompressMemory(FName FormatName, void* CompressedBuffer, int3
 	else
 	{
 		// let the format module compress it
+		// Oodle will make the OodleCompressionFormat here
 		ICompressionFormat* Format = GetCompressionFormat(FormatName);
 		if (Format)
 		{
-			bCompressSucceeded = Format->Compress(CompressedBuffer, CompressedSize, UncompressedBuffer, UncompressedSize, CompressionData);
+			bCompressSucceeded = Format->Compress(CompressedBuffer, CompressedSize, UncompressedBuffer, UncompressedSize, CompressionData, Flags);
 		}
 	}
 
@@ -573,15 +663,18 @@ bool FCompression::CompressMemory(FName FormatName, void* CompressedBuffer, int3
 
 FString FCompression::GetCompressorDDCSuffix(FName FormatName)
 {
-	FString DDCSuffix = FString::Printf(TEXT("%s_VER%D_"), *FormatName.ToString(), FCompression::GetCompressorVersion(FormatName));
+	FString DDCSuffix = FString::Printf(TEXT("%s_VER%d_"), *FormatName.ToString(), FCompression::GetCompressorVersion(FormatName));
 
-
-	if (FormatName == NAME_Zlib)
+	if (FormatName == NAME_None || FormatName == NAME_LZ4 )
+	{
+		// nothing
+	}
+	else if (FormatName == NAME_Zlib)
 	{
 		// hardcoded zlib
 		DDCSuffix += ZLIB_DERIVEDDATA_VER;
 	}
-	if (FormatName == NAME_Gzip)
+	else if (FormatName == NAME_Gzip)
 	{
 		DDCSuffix += GZIP_DERIVEDDATA_VER;
 	}
@@ -602,6 +695,7 @@ DECLARE_FLOAT_ACCUMULATOR_STAT(TEXT("Uncompressor total time"),STAT_Uncompressor
 
 bool FCompression::UncompressMemory(FName FormatName, void* UncompressedBuffer, int32 UncompressedSize, const void* CompressedBuffer, int32 CompressedSize, ECompressionFlags Flags, int32 CompressionData)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FCompression::UncompressMemory);
 	SCOPED_NAMED_EVENT(FCompression_UncompressMemory, FColor::Cyan);
 	// Keep track of time spent uncompressing memory.
 	STAT(double UncompressorStartTime = FPlatformTime::Seconds();)
@@ -623,12 +717,20 @@ bool FCompression::UncompressMemory(FName FormatName, void* UncompressedBuffer, 
 		// hardcoded lz4
 		bUncompressSucceeded = LZ4_decompress_safe((const char*)CompressedBuffer, (char*)UncompressedBuffer, CompressedSize, UncompressedSize) > 0;
 	}
+	else if (FormatName == NAME_Oodle)
+	{
+		// hardcoded Oodle
+		// can decode Oodle data without creating Oodle ICompressionFormat
+		bUncompressSucceeded = FOodleDataCompression::Decompress(UncompressedBuffer,UncompressedSize,CompressedBuffer,CompressedSize);
+	}
 	else
 	{
 		// let the format module compress it
 		ICompressionFormat* Format = GetCompressionFormat(FormatName);
 		if (Format)
 		{
+			// @todo Oodle : UncompressedSize is read-write to Format->Uncompress but that's not actually used
+			//	-> get rid of that
 			bUncompressSucceeded = Format->Uncompress(UncompressedBuffer, UncompressedSize, CompressedBuffer, CompressedSize, CompressionData);
 		}
 	}
@@ -643,7 +745,11 @@ bool FCompression::UncompressMemory(FName FormatName, void* UncompressedBuffer, 
 			FFailOnUncompressErrors()
 				: Value(true) // fail by default
 			{
-				GConfig->GetBool(TEXT("Core.System"), TEXT("FailOnUncompressErrors"), Value, GEngineIni);
+				// very early decodes of first paks could be before this config is loaded
+				if ( GConfig )
+				{
+					GConfig->GetBool(TEXT("Core.System"), TEXT("FailOnUncompressErrors"), Value, GEngineIni);
+				}
 			}
 		} FailOnUncompressErrors;
 		if (!FailOnUncompressErrors.Value)
@@ -652,6 +758,13 @@ bool FCompression::UncompressMemory(FName FormatName, void* UncompressedBuffer, 
 		}
 		// Always log an error
 		UE_LOG(LogCompression, Error, TEXT("FCompression::UncompressMemory - Failed to uncompress memory (%d/%d) from address %p using format %s, this may indicate the asset is corrupt!"), CompressedSize, UncompressedSize, CompressedBuffer, *FormatName.ToString());
+		// this extra logging is added to understand shader decompression errors, see UE-159777
+		const int32 MaxSizeToLogOut = 16384;
+		if (FormatName == NAME_Oodle && CompressedSize <= MaxSizeToLogOut)
+		{
+			UE_LOG(LogCompression, Error, TEXT("FCompression::UncompressMemory - Logging compressed data (%d bytes) as a hex dump for investigation"), CompressedSize);
+			FCompressionUtil::LogHexDump(reinterpret_cast<const uint8*>(CompressedBuffer), CompressedSize, 0, CompressedSize);
+		}
 	}
 
 #if	STATS
@@ -666,6 +779,8 @@ bool FCompression::UncompressMemory(FName FormatName, void* UncompressedBuffer, 
 
 bool FCompression::UncompressMemoryStream(FName FormatName, void* UncompressedBuffer, int32 UncompressedSize, IMemoryReadStream* Stream, int64 StreamOffset, int32 CompressedSize, ECompressionFlags Flags, int32 CompressionData)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FCompression::UncompressMemoryStream);
+
 	int64 ContiguousChunkSize = 0;
 	const void* ContiguousMemory = Stream->Read(ContiguousChunkSize, StreamOffset, CompressedSize);
 	bool bUncompressResult = false;
@@ -876,8 +991,11 @@ void* FCompressedGrowableBuffer::Access( int32 Offset )
 
 bool FCompression::IsFormatValid(FName FormatName)
 {
+	//@todo Oodle make NAME_None a valid compressor
+	// FormatName == NAME_None || 
+
 	// build in formats are always valid
-	if (FormatName == NAME_Zlib || FormatName == NAME_Gzip)
+	if ( FormatName == NAME_Zlib || FormatName == NAME_Gzip || FormatName == NAME_LZ4 || FormatName == NAME_Oodle)
 	{
 		return true;
 	}
@@ -888,7 +1006,7 @@ bool FCompression::IsFormatValid(FName FormatName)
 
 bool FCompression::VerifyCompressionFlagsValid(int32 InCompressionFlags)
 {
-	const int32 CompressionFlagsMask = COMPRESS_DeprecatedFormatFlagsMask | COMPRESS_OptionsFlagsMask;
+	const int32 CompressionFlagsMask = COMPRESS_DeprecatedFormatFlagsMask | COMPRESS_OptionsFlagsMask | COMPRESS_ForPurposeMask;
 	if (InCompressionFlags & (~CompressionFlagsMask))
 	{
 		return false;
@@ -902,4 +1020,4 @@ bool FCompression::VerifyCompressionFlagsValid(int32 InCompressionFlags)
 /***********************
   Deprecated functions
 ***********************/
-PRAGMA_ENABLE_UNSAFE_TYPECAST_WARNINGS
+PRAGMA_RESTORE_UNSAFE_TYPECAST_WARNINGS

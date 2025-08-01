@@ -26,7 +26,7 @@ struct FChildEntityFactory
 
 	int32 GetCurrentIndex() const;
 
-	void Apply(UMovieSceneEntitySystemLinker* Linker, const FEntityAllocation* ParentAllocation);
+	void Apply(UMovieSceneEntitySystemLinker* Linker, FEntityAllocationProxy ParentAllocationProxy);
 	
 	void Add(int32 EntityIndex)
 	{
@@ -84,38 +84,6 @@ protected:
 	{}
 };
 
-
-struct FMutualEntityInitializer
-{
-	virtual ~FMutualEntityInitializer(){}
-
-	bool IsRelevant(const FComponentMask& InType) const
-	{
-		return InType.Contains(ComponentA) && InType.Contains(ComponentB);
-	}
-
-	FComponentTypeID GetComponentA() const
-	{
-		return ComponentA;
-	}
-
-	FComponentTypeID GetComponentB() const
-	{
-		return ComponentB;
-	}
-
-	virtual void Run(const FEntityRange& Range) = 0;
-
-protected:
-
-	FComponentTypeID ComponentA, ComponentB;
-
-	explicit FMutualEntityInitializer(FComponentTypeID InComponentA, FComponentTypeID InComponentB)
-		: ComponentA(InComponentA), ComponentB(InComponentB)
-	{
-		check(ComponentA && ComponentB);
-	}
-};
 
 
 }	// using namespace MovieScene

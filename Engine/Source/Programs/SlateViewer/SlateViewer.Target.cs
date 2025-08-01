@@ -5,6 +5,7 @@ using System.Collections.Generic;
 
 [SupportedPlatforms(UnrealPlatformClass.Desktop)]
 [SupportedPlatforms("IOS")]
+[SupportedPlatforms("Android")]
 public class SlateViewerTarget : TargetRules
 {
 	public SlateViewerTarget(TargetInfo Target) : base(Target)
@@ -13,7 +14,10 @@ public class SlateViewerTarget : TargetRules
 		LinkType = TargetLinkType.Monolithic;
 
 		LaunchModuleName = "SlateViewer";
-		ExtraModuleNames.Add("EditorStyle");
+		if (bBuildEditor)
+		{
+			ExtraModuleNames.Add("EditorStyle");
+		}
 
 		bBuildDeveloperTools = false;
 

@@ -4,10 +4,9 @@
 
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
+#include "MaterialValueType.h"
 #include "Materials/MaterialExpressionScalarParameter.h"
 #include "MaterialExpressionCurveAtlasRowParameter.generated.h"
-
-
 
 UCLASS(collapsecategories, hidecategories=(Object, MaterialExpressionScalarParameter), MinimalAPI)
 class UMaterialExpressionCurveAtlasRowParameter : public UMaterialExpressionScalarParameter
@@ -15,10 +14,10 @@ class UMaterialExpressionCurveAtlasRowParameter : public UMaterialExpressionScal
 	GENERATED_UCLASS_BODY()
 
 	UPROPERTY(EditAnywhere, Category=MaterialExpressionCurveAtlasRowParameter)
-	class UCurveLinearColor* Curve;
+	TObjectPtr<class UCurveLinearColor> Curve;
 
 	UPROPERTY(EditAnywhere, Category = MaterialExpressionCurveAtlasRowParameter)
-	class UCurveLinearColorAtlas* Atlas;
+	TObjectPtr<class UCurveLinearColorAtlas> Atlas;
 
 	UPROPERTY()
 	FExpressionInput InputTime;
@@ -28,6 +27,9 @@ class UMaterialExpressionCurveAtlasRowParameter : public UMaterialExpressionScal
 	virtual bool CanReferenceTexture() const { return true; }
 
 #if WITH_EDITOR
+	virtual bool GetParameterValue(FMaterialParameterMetadata& OutMeta) const override;
+	virtual bool SetParameterValue(const FName& Name, const FMaterialParameterMetadata& Meta, EMaterialExpressionSetParameterValueFlags Flags) override;
+
 	virtual uint32 GetInputType(int32 InputIndex) override 
 	{
 		return MCT_Float;
@@ -41,7 +43,8 @@ class UMaterialExpressionCurveAtlasRowParameter : public UMaterialExpressionScal
 	{
 		OutCaptions.Empty();
 		OutCaptions.Add(TEXT(""));
-	};
+	}
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
 //~ Begin UMaterialExpression Interface
 	virtual FName GetInputName(int32 InputIndex) const override
 	{

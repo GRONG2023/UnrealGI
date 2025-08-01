@@ -35,6 +35,8 @@ struct FKeyPropertyResult
 		bHandleCreated |= A.bHandleCreated;
 		bTrackCreated |= A.bTrackCreated;
 		bKeyCreated |= A.bKeyCreated;
+		SectionsCreated.Append(A.SectionsCreated);
+		SectionsKeyed.Append(A.SectionsKeyed);
 	}
 
 	/* Was the track modified in any way? */
@@ -51,6 +53,9 @@ struct FKeyPropertyResult
 
 	/* Was a section created */
 	TArray<TWeakObjectPtr<UMovieSceneSection> > SectionsCreated;
+
+	/* Was a section keyed */
+	TArray<TWeakObjectPtr<UMovieSceneSection> > SectionsKeyed;
 };
 
 /** Delegate for adding keys for a property
@@ -126,7 +131,42 @@ public:
 	FFindOrCreateTrackResult FindOrCreateTrackForObject( const FGuid& ObjectHandle, TSubclassOf<UMovieSceneTrack> TrackClass, FName PropertyName = NAME_None, bool bCreateTrackIfMissing = true );
 
 	template<typename TrackClass>
-	struct FFindOrCreateMasterTrackResult
+	struct FFindOrCreateRootTrackResult
+	{
+		FFindOrCreateRootTrackResult() : Track(nullptr), bWasCreated(false) {}
+
+		TrackClass* Track;
+		bool bWasCreated;
+	};
+
+	/**
+	 * Find or add a track of the specified type in the focused movie scene.
+	 *
+	 * @param TrackClass The class of the track to find or add.
+	 * @return The track results.
+	 */
+	template<typename TrackClass>
+	FFindOrCreateRootTrackResult<TrackClass> FindOrCreateRootTrack()
+	{
+		FFindOrCreateRootTrackResult<TrackClass> Result;
+		bool bTrackExisted;
+
+		UMovieScene* MovieScene = GetSequencer()->GetFocusedMovieSceneSequence()->GetMovieScene();
+		Result.Track = MovieScene->FindTrack<TrackClass>();
+		bTrackExisted = Result.Track != nullptr;
+
+		if (Result.Track == nullptr)
+		{
+			Result.Track = MovieScene->AddTrack<TrackClass>();
+		}
+
+		Result.bWasCreated = bTrackExisted == false && Result.Track != nullptr;
+		return Result;
+	}
+
+	template<typename TrackClass> struct
+	UE_DEPRECATED(5.2, "FFindOrCreateMasterTrackResult is deprecated. Please use FFindOrCreateRootTrackResult instead")
+	FFindOrCreateMasterTrackResult
 	{
 		FFindOrCreateMasterTrackResult() : Track(nullptr), bWasCreated(false) {}
 
@@ -135,30 +175,32 @@ public:
 	};
 
 	/**
-	 * Find or add a master track of the specified type in the focused movie scene.
+	 * Find or add a track of the specified type in the focused movie scene.
 	 *
 	 * @param TrackClass The class of the track to find or add.
 	 * @return The track results.
 	 */
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS // Suppress compiler warning on return of deprecated function
 	template<typename TrackClass>
+	UE_DEPRECATED(5.2, "FindOrCreateMasterTrack is deprecated. Please use FindOrCreateRootTrack instead")
 	FFindOrCreateMasterTrackResult<TrackClass> FindOrCreateMasterTrack()
 	{
 		FFindOrCreateMasterTrackResult<TrackClass> Result;
 		bool bTrackExisted;
 
 		UMovieScene* MovieScene = GetSequencer()->GetFocusedMovieSceneSequence()->GetMovieScene();
-		Result.Track = MovieScene->FindMasterTrack<TrackClass>();
+		Result.Track = MovieScene->FindTrack<TrackClass>();
 		bTrackExisted = Result.Track != nullptr;
 
 		if (Result.Track == nullptr)
 		{
-			Result.Track = MovieScene->AddMasterTrack<TrackClass>();
+			Result.Track = MovieScene->AddTrack<TrackClass>();
 		}
 
 		Result.bWasCreated = bTrackExisted == false && Result.Track != nullptr;
 		return Result;
 	}
-
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	/** @return The sequencer bound to this handler */
 	const TSharedPtr<ISequencer> GetSequencer() const;
@@ -173,9 +215,10 @@ public:
 
 	virtual void BindCommands(TSharedRef<FUICommandList> SequencerCommandBindings) override;
 	virtual void BuildAddTrackMenu(FMenuBuilder& MenuBuilder) override;
-	virtual void BuildObjectBindingEditButtons(TSharedPtr<SHorizontalBox> EditBox, const FGuid& ObjectBinding, const UClass* ObjectClass) override;
+	virtual void BuildObjectBindingColumnWidgets(TFunctionRef<TSharedRef<SHorizontalBox>()> GetEditBox, const UE::Sequencer::TViewModelPtr<UE::Sequencer::FObjectBindingModel>& ObjectBinding, const UE::Sequencer::FCreateOutlinerViewParams& InParams, const FName& InColumnName) override;
 	virtual void BuildObjectBindingTrackMenu(FMenuBuilder& MenuBuilder, const TArray<FGuid>& ObjectBindings, const UClass* ObjectClass) override;
 	virtual TSharedPtr<SWidget> BuildOutlinerEditWidget(const FGuid& ObjectBinding, UMovieSceneTrack* Track, const FBuildEditWidgetParams& Params) override;
+	virtual TSharedPtr<SWidget> BuildOutlinerColumnWidget(const FBuildColumnWidgetParams& Params, const FName& ColumnName) override;
 	virtual void BuildTrackContextMenu( FMenuBuilder& MenuBuilder, UMovieSceneTrack* Track ) override;
 	virtual bool HandleAssetAdded(UObject* Asset, const FGuid& TargetObjectGuid) override;
 	virtual bool OnAllowDrop(const FDragDropEvent& DragDropEvent, FSequencerDragDropParams& DragDropParams) override;
@@ -183,8 +226,6 @@ public:
 
 	virtual void OnInitialize() override;
 	virtual void OnRelease() override;
-
-	virtual int32 PaintTrackArea(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle);
 
 	virtual bool SupportsType( TSubclassOf<class UMovieSceneTrack> TrackClass ) const override = 0;
 	virtual bool SupportsSequence(UMovieSceneSequence* InSequence) const override { return true; }

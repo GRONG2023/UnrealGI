@@ -1,26 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "GameFramework/CheatManager.h"
-#include "HAL/FileManager.h"
-#include "Misc/Paths.h"
+#include "Engine/ServerStatReplicator.h"
 #include "Misc/OutputDeviceFile.h"
+#include "GameFramework/CheatManagerDefines.h"
 #include "Misc/ConfigCacheIni.h"
-#include "Misc/App.h"
 #include "Misc/FileHelper.h"
 #include "UObject/UObjectIterator.h"
 #include "Misc/PackageName.h"
-#include "EngineDefines.h"
+#include "Engine/GameViewportClient.h"
 #include "GameFramework/DamageType.h"
-#include "InputCoreTypes.h"
-#include "GameFramework/Actor.h"
-#include "GameFramework/Pawn.h"
-#include "CollisionQueryParams.h"
-#include "WorldCollision.h"
-#include "Engine/World.h"
-#include "AI/NavigationSystemBase.h"
-#include "UObject/Package.h"
-#include "GameFramework/PlayerController.h"
-#include "GameFramework/Volume.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/LevelStreaming.h"
 #include "Engine/LocalPlayer.h"
@@ -39,6 +28,9 @@
 #include "Misc/CoreDelegates.h"
 #include "Engine/NetConnection.h"
 #include "HAL/PlatformApplicationMisc.h"
+#include "Engine/DamageEvents.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(CheatManager)
 
 DEFINE_LOG_CATEGORY_STATIC(LogCheatManager, Log, All);
 
@@ -58,6 +50,23 @@ UWorld* UCheatManagerExtension::GetWorld() const
 	return GetOuterUCheatManager()->GetWorld();
 }
 
+APlayerController* UCheatManagerExtension::GetPlayerController() const
+{
+	return GetOuterUCheatManager()->GetPlayerController();
+}
+
+void UCheatManagerExtension::AddedToCheatManager_Implementation()
+{
+}
+
+void UCheatManagerExtension::RemovedFromCheatManager_Implementation()
+{
+}
+
+void UCheatManagerExtension::DoExtensionSpecificBugItLog(FOutputDevice& OutputFile)
+{
+}
+
 UCheatManager::UCheatManager(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 	, bToggleAILogging(false)
@@ -69,6 +78,15 @@ UCheatManager::UCheatManager(const FObjectInitializer& ObjectInitializer)
 	DebugTraceDrawNormalLength = 30.0f;
 	DebugTraceChannel = ECC_Pawn;
 	bDebugCapsuleTraceComplex = false;
+}
+
+void UCheatManager::OnPlayerEndPlayed(AActor* Player, EEndPlayReason::Type EndPlayReason)
+{
+	for (UCheatManagerExtension* CheatExtension : CheatManagerExtensions)
+	{
+		CheatExtension->RemovedFromCheatManager();
+	}
+	CheatManagerExtensions.Empty();
 }
 
 bool UCheatManager::ProcessConsoleExec(const TCHAR* Cmd, FOutputDevice& Ar, UObject* Executor)
@@ -105,7 +123,10 @@ bool UCheatManager::ProcessConsoleExec(const TCHAR* Cmd, FOutputDevice& Ar, UObj
 
 				if ((Function != nullptr) && Function->HasAnyFunctionFlags(FUNC_BlueprintAuthorityOnly))
 				{
-					MyPC->ServerExec(Cmd);
+					if(ensureMsgf(GAllowActorScriptExecutionInEditor == false, TEXT("GAllowActorScriptExecutionInEditor must be false when executing commands.")))
+					{
+						MyPC->ServerExec(Cmd);
+					}
 					return true;
 				}
 			}
@@ -126,10 +147,18 @@ bool UCheatManager::ProcessConsoleExec(const TCHAR* Cmd, FOutputDevice& Ar, UObj
 
 void UCheatManager::FreezeFrame(float delay)
 {
-	FCanUnpause DefaultCanUnpause;
-	DefaultCanUnpause.BindUObject( GetOuterAPlayerController(), &APlayerController::DefaultCanUnpause );
-	GetWorld()->GetAuthGameMode()->SetPause(GetOuterAPlayerController(),DefaultCanUnpause);
-	GetWorld()->PauseDelay = GetWorld()->TimeSeconds + delay;
+	if (UWorld* World = GetWorld())
+	{
+		if (AGameModeBase* GameMode = World->GetAuthGameMode())
+		{
+			check(GetOuterAPlayerController() != NULL);
+
+			FCanUnpause DefaultCanUnpause;
+			DefaultCanUnpause.BindUObject(GetOuterAPlayerController(), &APlayerController::DefaultCanUnpause);
+			GameMode->SetPause(GetOuterAPlayerController(), DefaultCanUnpause);
+			World->PauseDelay = World->TimeSeconds + delay;
+		}
+	}
 }
 
 void UCheatManager::Teleport()
@@ -311,7 +340,7 @@ void UCheatManager::DestroyAll(TSubclassOf<AActor> aClass)
 	for (TActorIterator<AActor> It(GetWorld(),aClass); It; ++It)
 	{
 		AActor* A = *It;
-		if (!A->IsPendingKill())
+		if (IsValidChecked(A))
 		{
 			APawn* Pawn = Cast<APawn>(A);
 			if (Pawn != NULL)
@@ -338,8 +367,7 @@ void UCheatManager::DestroyAllPawnsExceptTarget()
 		for (TActorIterator<APawn> It(GetWorld(), APawn::StaticClass()); It; ++It)
 		{
 			APawn* Pawn = *It;
-			checkSlow(Pawn);
-			if (!Pawn->IsPendingKill())
+			if (IsValidChecked(Pawn))
 			{
 				if ((Pawn != HitPawnTarget) && Cast<APlayerController>(Pawn->Controller) == NULL)
 				{
@@ -412,15 +440,7 @@ void UCheatManager::Summon( const FString& ClassName )
 	bool bSpawnedActor = false;
 	if ( bIsValidClassName )
 	{
-		UClass* NewClass = NULL;
-		if ( FPackageName::IsShortPackageName(ClassName) )
-		{
-			NewClass = FindObject<UClass>(ANY_PACKAGE, *ClassName);
-		}
-		else
-		{
-			NewClass = FindObject<UClass>(NULL, *ClassName);
-		}
+		UClass* NewClass = UClass::TryFindTypeSlow<UClass>(ClassName);
 
 		if( NewClass )
 		{
@@ -519,7 +539,7 @@ void UCheatManager::ViewActor( FName ActorName)
 	for (FActorIterator It(GetWorld()); It; ++It)
 	{
 		AActor* A = *It;
-		if (A && !A ->IsPendingKill())
+		if (IsValid(A))
 		{
 			if ( A->GetFName() == ActorName )
 			{
@@ -539,7 +559,7 @@ void UCheatManager::ViewClass( TSubclassOf<AActor> DesiredClass )
 	for (TActorIterator<AActor> It(GetWorld(), DesiredClass); It; ++It)
 	{
 		AActor* TestActor = *It;
-		if (!TestActor->IsPendingKill())
+		if (IsValidChecked(TestActor))
 		{
 			AActor* Other = TestActor;
 			if (bFound || (First == NULL))
@@ -596,6 +616,7 @@ void UCheatManager::SetLevelStreamingStatus(FName PackageName, bool bShouldBeLoa
 					LevelStatus.bNewShouldBeLoaded = bShouldBeLoaded;
 					LevelStatus.bNewShouldBeVisible = bShouldBeVisible;
 					LevelStatus.bNewShouldBlockOnLoad = false;
+					LevelStatus.bNewShouldBlockOnUnload = false;
 					LevelStatus.LODIndex = INDEX_NONE;
 				}
 				PC->ClientUpdateMultipleLevelsStreamingStatus(LevelStatuses);
@@ -621,8 +642,7 @@ void UCheatManager::StreamLevelOut(FName PackageName)
 
 void UCheatManager::ToggleDebugCamera()
 {
-	ADebugCameraController* const DCC = Cast<ADebugCameraController>(GetOuter());
-	if (DCC)
+	if (IsDebugCameraActive())
 	{
 		DisableDebugCamera();
 	}
@@ -630,6 +650,11 @@ void UCheatManager::ToggleDebugCamera()
 	{
 		EnableDebugCamera();
 	}
+}
+
+bool UCheatManager::IsDebugCameraActive() const
+{
+	return GetOuter() ? GetOuter()->IsA<ADebugCameraController>() : false;
 }
 
 void UCheatManager::EnableDebugCamera()
@@ -669,6 +694,7 @@ void UCheatManager::InitCheatManager()
 {
 	ReceiveInitCheatManager(); //BP Initialization event
 	OnCheatManagerCreatedDelegate.Broadcast(this);
+	GetOuterAPlayerController()->OnEndPlay.AddDynamic(this, &UCheatManager::OnPlayerEndPlayed);
 }
 
 void UCheatManager::BeginDestroy()
@@ -783,7 +809,7 @@ void UCheatManager::TickCollisionDebug()
 				if(bHit)
 				{
 					AddCapsuleSweepDebugInfo(ViewLoc, End, Result.ImpactPoint, Result.Normal, Result.ImpactNormal, Result.Location, DebugCapsuleHalfHeight, DebugCapsuleRadius, false, (Result.bStartPenetrating && Result.bBlockingHit)? true: false);
-					UE_LOG(LogCollision, Log, TEXT("Collision component (%s) : Actor (%s)"), *GetNameSafe(Result.Component.Get()), *GetNameSafe(Result.GetActor()));
+					UE_LOG(LogCollision, Log, TEXT("Collision component (%s) : Actor (%s)"), *GetNameSafe(Result.Component.Get()), *Result.HitObjectHandle.GetName());
 				}
 			}
 		}
@@ -841,7 +867,7 @@ void UCheatManager::TickCollisionDebug()
 			}
 			else
 			{
-				DrawDebugCapsule(GetWorld(), TraceInfo.HitLocation, TraceInfo.CapsuleHalfHeight, TraceInfo.CapsuleRadius, FQuat::Identity, CurrentColor.Quantize());
+				DrawDebugCapsule(GetWorld(), TraceInfo.HitLocation, TraceInfo.CapsuleHalfHeight, TraceInfo.CapsuleRadius, FQuat::Identity, CurrentColor.QuantizeRound());
 			}
 			DrawDebugDirectionalArrow(GetWorld(), TraceInfo.HitNormalStart, TraceInfo.HitNormalEnd, 5.f, FColor(255,64,64), SDPG_World);
 		}
@@ -1204,7 +1230,7 @@ void UCheatManager::CheatScript(FString ScriptName)
 	UConsole* ConsoleToDisplayResults = (LocalPlayer && LocalPlayer->ViewportClient) ? LocalPlayer->ViewportClient->ViewportConsole : nullptr;
 
 	// Run commands from the ini
-	FConfigSection const* const CommandsToRun = GConfig->GetSectionPrivate(*FString::Printf(TEXT("CheatScript.%s"), *ScriptName), 0, 1, GGameIni);
+	const FConfigSection* CommandsToRun = GConfig->GetSection(*FString::Printf(TEXT("CheatScript.%s"), *ScriptName), 0, GGameIni);
 
 	if (CommandsToRun)
 	{
@@ -1264,6 +1290,19 @@ void UCheatManager::LogOutBugItGoToLogFile( const FString& InScreenShotDesc, con
 #endif // ALLOW_DEBUG_FILES
 }
 
+bool UCheatManager::DoGameSpecificBugItLog(FOutputDevice& OutputFile)
+{
+	for (UCheatManagerExtension* Extension : CheatManagerExtensions)
+	{
+		if (Extension)
+		{
+			Extension->DoExtensionSpecificBugItLog(OutputFile);
+		}
+	}
+
+	return true;
+}
+
 AActor* UCheatManager::GetTarget(APlayerController* PlayerController, struct FHitResult& OutHit)
 {
     if ((PlayerController == NULL) || (PlayerController->PlayerCameraManager == NULL))
@@ -1279,8 +1318,8 @@ AActor* UCheatManager::GetTarget(APlayerController* PlayerController, struct FHi
     bool bHit = GetWorld()->LineTraceSingleByChannel(OutHit, CamLoc, CamRot.Vector() * 100000.f + CamLoc, ECC_Pawn, TraceParams);
     if (bHit)
     {
-        check(OutHit.GetActor() != NULL);
-        return OutHit.GetActor();
+        check(OutHit.HitObjectHandle.FetchActor() != nullptr);
+		return OutHit.HitObjectHandle.FetchActor();
     }
     return NULL;
 }
@@ -1331,19 +1370,27 @@ void UCheatManager::DestroyServerStatReplicator()
 
 void UCheatManager::ToggleServerStatReplicatorClientOverwrite()
 {
-	AServerStatReplicator* ServerStatReplicator = FindObject<AServerStatReplicator>(ANY_PACKAGE, TEXT("ServerStatReplicatorInst"));
-	if (ServerStatReplicator != nullptr)
+	APlayerController* PlayerController = GetOuterAPlayerController();
+	if (ensure(PlayerController))
 	{
-		ServerStatReplicator->bOverwriteClientStats = !ServerStatReplicator->bOverwriteClientStats;
+		AServerStatReplicator* ServerStatReplicator = FindObject<AServerStatReplicator>(PlayerController->GetLevel(), TEXT("ServerStatReplicatorInst"));
+		if (ServerStatReplicator != nullptr)
+		{
+			ServerStatReplicator->bOverwriteClientStats = !ServerStatReplicator->bOverwriteClientStats;
+		}
 	}
 }
 
 void UCheatManager::ToggleServerStatReplicatorUpdateStatNet()
 {
-	AServerStatReplicator* ServerStatReplicator = FindObject<AServerStatReplicator>(ANY_PACKAGE, TEXT("ServerStatReplicatorInst"));
-	if (ServerStatReplicator != nullptr)
+	APlayerController* PlayerController = GetOuterAPlayerController();
+	if (ensure(PlayerController))
 	{
-		ServerStatReplicator->bUpdateStatNet = !ServerStatReplicator->bUpdateStatNet;
+		AServerStatReplicator* ServerStatReplicator = FindObject<AServerStatReplicator>(PlayerController->GetLevel(), TEXT("ServerStatReplicatorInst"));
+		if (ServerStatReplicator != nullptr)
+		{
+			ServerStatReplicator->bUpdateStatNet = !ServerStatReplicator->bUpdateStatNet;
+		}
 	}
 }
 
@@ -1356,7 +1403,11 @@ void UCheatManager::AddCheatManagerExtension(UCheatManagerExtension* CheatObject
 {
 	if (ensure(CheatObject))
 	{
-		CheatManagerExtensions.AddUnique(CheatObject);
+		if (!CheatManagerExtensions.Contains(CheatObject))
+		{
+			CheatManagerExtensions.Add(CheatObject);
+			CheatObject->AddedToCheatManager();
+		}
 	}
 }
 
@@ -1364,7 +1415,12 @@ void UCheatManager::RemoveCheatManagerExtension(UCheatManagerExtension* CheatObj
 {
 	if (ensure(CheatObject))
 	{
-		CheatManagerExtensions.Remove(CheatObject);
+		int32 CheatExtensionIdx = CheatManagerExtensions.IndexOfByKey(CheatObject);
+		if (CheatExtensionIdx != INDEX_NONE)
+		{
+			CheatManagerExtensions.RemoveAt(CheatExtensionIdx);
+			CheatObject->RemovedFromCheatManager();
+		}
 	}
 }
 
@@ -1414,4 +1470,10 @@ void UCheatManager::UnregisterFromOnCheatManagerCreated(FDelegateHandle Delegate
 	OnCheatManagerCreatedDelegate.Remove(DelegateHandle);
 }
 
+APlayerController* UCheatManager::GetPlayerController() const
+{
+	return GetOuterAPlayerController();
+}
+
 #undef LOCTEXT_NAMESPACE
+

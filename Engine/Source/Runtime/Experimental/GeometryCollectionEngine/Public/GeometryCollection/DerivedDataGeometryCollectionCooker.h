@@ -15,10 +15,6 @@ class FDerivedDataGeometryCollectionCooker : public FDerivedDataPluginInterface
 {
 public:
 	FDerivedDataGeometryCollectionCooker(UGeometryCollection& InGeometryCollection);
-	void SetOverrideVersion(const TCHAR* InOverrideVersion)
-	{
-		OverrideVersion = InOverrideVersion;
-	}
 
 	virtual const TCHAR* GetPluginName() const override
 	{
@@ -46,14 +42,33 @@ public:
 	virtual bool Build(TArray<uint8>& OutData) override;
 
 	/** Return true if we can build **/
-	bool CanBuild()
+	bool CanBuild() const
 	{
 		return true;
 	}
 
 private:
 	UGeometryCollection& GeometryCollection;
-	const TCHAR* OverrideVersion;	//force load old ddc content
 };
 
-#endif	//WITH_EDITOR
+
+class FDerivedDataGeometryCollectionRenderDataCooker : public FDerivedDataPluginInterface
+{
+public:
+	FDerivedDataGeometryCollectionRenderDataCooker(UGeometryCollection& InGeometryCollection) : GeometryCollection(InGeometryCollection) {}
+
+	virtual const TCHAR* GetPluginName() const override { return TEXT("GeometryCollectionRenderData"); }
+	virtual const TCHAR* GetVersionString() const override;
+	virtual FString GetPluginSpecificCacheKeySuffix() const override;
+	virtual bool IsBuildThreadsafe() const override { return false;	}
+	virtual bool IsDeterministic() const override {	return true; }
+	virtual FString GetDebugContextString() const override;
+	virtual bool Build(TArray<uint8>& OutData) override;
+
+	bool CanBuild() const { return true; }
+
+private:
+	UGeometryCollection& GeometryCollection;
+};
+
+#endif	// WITH_EDITOR

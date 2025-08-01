@@ -19,7 +19,7 @@ DECLARE_LOG_CATEGORY_EXTERN(MemoryProfiler, Log, All);
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 /**
- * This class manages the Memory Profiler (Asset Memory Insights) state and settings.
+ * This class manages the Memory Profiler (Memory Insights) state and settings.
  */
 class FMemoryProfilerManager : public TSharedFromThis<FMemoryProfilerManager>, public IInsightsComponent
 {
@@ -51,10 +51,11 @@ public:
 	virtual void Shutdown() override;
 	virtual void RegisterMajorTabs(IUnrealInsightsModule& InsightsModule) override;
 	virtual void UnregisterMajorTabs() override;
+	virtual void OnWindowClosedEvent() override;
 
 	//////////////////////////////////////////////////
 
-	/** @returns UI command list for the Memory Profiler manager. */
+	/** @return UI command list for the Memory Profiler manager. */
 	const TSharedRef<FUICommandList> GetCommandList() const;
 
 	/** @return an instance of the Memory Profiler commands. */
@@ -63,23 +64,13 @@ public:
 	/** @return an instance of the Memory Profiler action manager. */
 	static FMemoryProfilerActionManager& GetActionManager();
 
-	void AssignProfilerWindow(const TSharedRef<SMemoryProfilerWindow>& InProfilerWindow)
-	{
-		ProfilerWindow = InProfilerWindow;
-	}
-
-	void RemoveProfilerWindow()
-	{
-		ProfilerWindow.Reset();
-	}
-
 	/**
 	 * Converts profiler window weak pointer to a shared pointer and returns it.
 	 * Make sure the returned pointer is valid before trying to dereference it.
 	 */
-	TSharedPtr<class SMemoryProfilerWindow> GetProfilerWindow() const
+	TSharedPtr<SMemoryProfilerWindow> GetProfilerWindow() const
 	{
-		return ProfilerWindow.Pin();
+		return ProfilerWindowWeakPtr.Pin();
 	}
 
 	FMemorySharedState* GetSharedState();
@@ -87,17 +78,25 @@ public:
 	////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Getters and setters used by Toggle Commands.
 
-	/** @return true, if the Timing view is visible */
 	const bool IsTimingViewVisible() const { return bIsTimingViewVisible; }
 	void SetTimingViewVisible(const bool bIsVisible) { bIsTimingViewVisible = bIsVisible; }
 	void ShowHideTimingView(const bool bIsVisible);
 
-	/** @return true, if the Export Details tree view is visible */
+	const bool IsMemInvestigationViewVisible() const { return bIsMemInvestigationViewVisible; }
+	void SetMemInvestigationViewVisible(const bool bIsVisible) { bIsMemInvestigationViewVisible = bIsVisible; }
+	void ShowHideMemInvestigationView(const bool bIsVisible);
+
 	const bool IsMemTagTreeViewVisible() const { return bIsMemTagTreeViewVisible; }
 	void SetMemTagTreeViewVisible(const bool bIsVisible) { bIsMemTagTreeViewVisible = bIsVisible; }
 	void ShowHideMemTagTreeView(const bool bIsVisible);
 
+	const bool IsModulesViewVisible() const { return bIsModulesViewVisible; }
+	void SetModulesViewVisible(const bool bIsVisible) { bIsModulesViewVisible = bIsVisible; }
+	void ShowHideModulesView(const bool bIsVisible);
+
 	////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	const FName& GetLogListingName() const { return LogListingName; }
 
 	void OnSessionChanged();
 
@@ -116,6 +115,16 @@ private:
 	/** Updates this manager, done through FCoreTicker. */
 	bool Tick(float DeltaTime);
 
+	void AssignProfilerWindow(const TSharedRef<SMemoryProfilerWindow>& InProfilerWindow)
+	{
+		ProfilerWindowWeakPtr = InProfilerWindow;
+	}
+
+	void RemoveProfilerWindow()
+	{
+		ProfilerWindowWeakPtr.Reset();
+	}
+
 private:
 	bool bIsInitialized;
 	bool bIsAvailable;
@@ -125,7 +134,7 @@ private:
 	FTickerDelegate OnTick;
 
 	/** Handle to the registered OnTick. */
-	FDelegateHandle OnTickHandle;
+	FTSTicker::FDelegateHandle OnTickHandle;
 
 	/** List of UI commands for this manager. This will be filled by this and corresponding classes. */
 	TSharedRef<FUICommandList> CommandList;
@@ -133,14 +142,23 @@ private:
 	/** An instance of the Memory Profiler action manager. */
 	FMemoryProfilerActionManager ActionManager;
 
-	/** A weak pointer to the Memory Profiler window. */
-	TWeakPtr<class SMemoryProfilerWindow> ProfilerWindow;
+	/** A weak pointer to the Memory Insights window. */
+	TWeakPtr<SMemoryProfilerWindow> ProfilerWindowWeakPtr;
 
 	/** If the Timing view is visible or hidden. */
 	bool bIsTimingViewVisible;
 
-	/** If the Categories tree view is visible or hidden. */
+	/** If the Memory Investigation (Alloc Queries) view is visible or hidden. */
+	bool bIsMemInvestigationViewVisible;
+
+	/** If the LLM Tags tree view is visible or hidden. */
 	bool bIsMemTagTreeViewVisible;
+
+	/** If the Modules view is visible or hidden. */
+	bool bIsModulesViewVisible;
+
+	/** The name of the Memory Insights log listing. */
+	FName LogListingName;
 
 	/** A shared pointer to the global instance of the Memory Profiler manager. */
 	static TSharedPtr<FMemoryProfilerManager> Instance;

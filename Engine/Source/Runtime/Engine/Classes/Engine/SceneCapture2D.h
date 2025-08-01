@@ -20,7 +20,7 @@ class ASceneCapture2D : public ASceneCapture
 private:
 	/** Scene capture component. */
 	UPROPERTY(Category = DecalActor, VisibleAnywhere, BlueprintReadOnly, meta=(AllowPrivateAccess = "true"))
-	class USceneCaptureComponent2D* CaptureComponent2D;
+	TObjectPtr<class USceneCaptureComponent2D> CaptureComponent2D;
 
 public:
 	UFUNCTION(BlueprintCallable, Category="Rendering")
@@ -29,5 +29,5 @@ public:
 	ENGINE_API virtual void CalcCamera(float DeltaTime, struct FMinimalViewInfo& OutMinimalViewInfo) override;
 
 	/** Returns CaptureComponent2D subobject **/
-	ENGINE_API class USceneCaptureComponent2D* GetCaptureComponent2D() const { return CaptureComponent2D; }
+	class USceneCaptureComponent2D* GetCaptureComponent2D() const { return CaptureComponent2D; }
 };

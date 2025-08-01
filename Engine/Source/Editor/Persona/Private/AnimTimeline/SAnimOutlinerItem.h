@@ -6,7 +6,7 @@
 #include "Widgets/Views/STableViewBase.h"
 #include "Widgets/Views/STableRow.h"
 #include "Widgets/Views/STreeView.h"
-#include "AnimTimelineTrack.h"
+#include "AnimTimeline/AnimTimelineTrack.h"
 
 class FAnimObject;
 class SAnimTrack;
@@ -36,7 +36,6 @@ public:
 	virtual FVector2D ComputeDesiredSize(float LayoutScaleMultiplier) const override;
 	virtual void OnMouseEnter(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
 	virtual void OnMouseLeave(const FPointerEvent& MouseEvent) override;
-	virtual bool IsHovered() const override;
 
 	/** SMultiColumnTableRow interface */
 	virtual TSharedRef<SWidget> GenerateWidgetForColumn(const FName& ColumnId) override;
@@ -54,6 +53,9 @@ private:
 	/** Get the label text for this item */
 	FText GetLabelText() const;
 
+	/** Get the hover state for this item */
+	bool ShouldAppearHovered() const;
+
 private:
 	/** The track that we represent */
 	TWeakPtr<FAnimTimelineTrack> Track;
@@ -66,4 +68,7 @@ private:
 
 	/** Text to highlight when searching */
 	TAttribute<FText> HighlightText;
+	
+	/** Keep an internal IsHovered flag*/
+	bool bHovered;
 };

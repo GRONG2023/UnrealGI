@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "IPAddressBSD.h"
+
+#include "Math/NumericLimits.h"
 #include "SocketSubsystemBSD.h"
 
 #if PLATFORM_HAS_BSD_SOCKETS || PLATFORM_HAS_BSD_IPV6_SOCKETS
@@ -172,7 +174,7 @@ void FInternetAddrBSD::SetIp(const TCHAR* InAddr, bool& bIsValid)
 	if (AddressString.Contains("]:") || (FirstColonIndex == LastColonIndex && LastColonIndex != INDEX_NONE))
 	{
 		Port = AddressString.RightChop(LastColonIndex + 1);
-		AddressString.LeftInline(LastColonIndex, false);
+		AddressString.LeftInline(LastColonIndex, EAllowShrinking::No);
 	}
 
 	// Strip these for backwards compatibility.
@@ -316,13 +318,20 @@ void FInternetAddrBSD::SetPort(int32 InPort)
 #if PLATFORM_HAS_BSD_IPV6_SOCKETS
 	if (GetProtocolType() == FNetworkProtocolTypes::IPv6)
 	{
-		((sockaddr_in6*)&Addr)->sin6_port = htons(InPort);
+		((sockaddr_in6*)&Addr)->sin6_port = htons(IntCastChecked<uint16>(InPort));
 		return;
 	}
 #endif
 
-	((sockaddr_in*)&Addr)->sin_port = htons(InPort);
+	((sockaddr_in*)&Addr)->sin_port = htons(IntCastChecked<uint16>(InPort));
 }
+
+/** Report whether the port is in a valid range for SetPort. */
+bool FInternetAddrBSD::IsPortValid(int32 InPort) const
+{
+	return 0 <= InPort && InPort <= MAX_uint16;
+}
+
 
 int32 FInternetAddrBSD::GetPort() const
 {
@@ -460,7 +469,7 @@ FString FInternetAddrBSD::ToString(bool bAppendPort) const
 			const int32 InterfaceMarkerIndex = IPv6Str.Find("%", ESearchCase::CaseSensitive, ESearchDir::FromEnd);
 			if (InterfaceMarkerIndex != INDEX_NONE)
 			{
-				IPv6Str.LeftInline(InterfaceMarkerIndex, false);
+				IPv6Str.LeftInline(InterfaceMarkerIndex, EAllowShrinking::No);
 			}
 
 			// Using dynamic formatting strings are deprecated.
@@ -570,13 +579,12 @@ SOCKLEN FInternetAddrBSD::GetStorageSize() const
 	{
 		return sizeof(sockaddr_in);
 	}
-	else
-	{
+
 #if PLATFORM_HAS_BSD_IPV6_SOCKETS
-		return sizeof(sockaddr_in6);
-#endif
-	}
+	return sizeof(sockaddr_in6);
+#else
 	return sizeof(sockaddr_storage);
+#endif
 }
 
 uint32 FInternetAddrBSD::GetTypeHash() const
@@ -589,7 +597,7 @@ uint32 FInternetAddrBSD::GetTypeHash() const
 	}
 	else if (CurrentFamily == FNetworkProtocolTypes::IPv6)
 	{
-		return ::GetTypeHash(*ToString(true));
+		return FCrc::Strihash_DEPRECATED(*ToString(true));
 	}
 
 	return 0;

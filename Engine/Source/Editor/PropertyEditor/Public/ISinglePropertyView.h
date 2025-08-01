@@ -25,12 +25,16 @@ struct FSinglePropertyParams
 
 	/** Whether or not to show the name */
 	EPropertyNamePlacement::Type NamePlacement;
+
+	/** Whether to hide an asset thumbnail, if available */
+	bool bHideAssetThumbnail;
 		
 	FSinglePropertyParams()
 		: NameOverride(FText::GetEmpty())
 		, Font()
 		, NotifyHook( NULL )
 		, NamePlacement( EPropertyNamePlacement::Left )
+		, bHideAssetThumbnail( false )
 	{
 	}
 };
@@ -45,6 +49,9 @@ class ISinglePropertyView : public SCompoundWidget
 public:
 	/** Sets the object to view/edit on the widget */
 	virtual void SetObject( UObject* InObject ) = 0;
+
+	/** Sets the struct to view/edit on the widget */
+	virtual void SetStruct( const TSharedPtr<class IStructureDataProvider>& InStruct) = 0;
 
 	/** Sets a delegate called when the property value changes */
 	virtual void SetOnPropertyValueChanged( FSimpleDelegate& InOnPropertyValueChanged ) = 0;

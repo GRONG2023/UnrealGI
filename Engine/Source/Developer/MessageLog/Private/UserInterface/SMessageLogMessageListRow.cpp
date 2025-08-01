@@ -7,10 +7,11 @@
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Views/SListView.h"
-#include "EditorStyleSet.h"
 #include "Misc/UObjectToken.h"
 #include "Widgets/Input/SHyperlink.h"
 #include "Internationalization/Regex.h"
+#include "Styling/StyleColors.h"
+#include "AssetRegistry/AssetDataToken.h"
 
 #define LOCTEXT_NAMESPACE "SMessageLogMessageListRow"
 
@@ -22,7 +23,7 @@ TSharedRef<SWidget> SMessageLogMessageListRow::CreateHyperlink(const TSharedRef<
 	return SNew(SHyperlink)
 		.Text(InMessageToken->ToText())
 		.ToolTipText(InToolTip)
-		.TextStyle(FEditorStyle::Get(), "MessageLog")
+		.TextStyle(FAppStyle::Get(), "MessageLog")
 		.OnNavigate(this, &SMessageLogMessageListRow::HandleHyperlinkNavigate, InMessageToken);
 }
 
@@ -86,7 +87,6 @@ TSharedRef<SWidget> SMessageLogMessageListRow::GenerateWidget()
 	}
 
 	return SNew(SHorizontalBox)
-
 		+ SHorizontalBox::Slot()
 		.AutoWidth()
 		.HAlign(HAlign_Center)
@@ -97,33 +97,41 @@ TSharedRef<SWidget> SMessageLogMessageListRow::GenerateWidget()
 			[
 				(SeverityImageName == NAME_None)
 				? SNullWidget::NullWidget
-				: static_cast<TSharedRef<SWidget>>(SNew(SImage)
-				.Image(FEditorStyle::GetBrush(SeverityImageName)))
+				: static_cast<TSharedRef<SWidget>>(
+					SNew(SBox)
+					.HAlign(HAlign_Center)
+					.VAlign(VAlign_Center)
+					.WidthOverride(16)
+					.HeightOverride(16)
+					[
+						SNew(SImage)
+						.Image(FAppStyle::Get().GetBrush(SeverityImageName))
+					])
 			]
 		]
 
 	+ SHorizontalBox::Slot()
-		.FillWidth(1.0f)
-		.VAlign(VAlign_Center)
-		[
-			MessageBox
-		]
+	.FillWidth(1.0f)
+	.VAlign(VAlign_Center)
+	[
+		MessageBox
+	]
 
 	+ SHorizontalBox::Slot()
-		.AutoWidth()
-		.HAlign(HAlign_Right)
-		.VAlign(VAlign_Center)
-		.Padding(1.0f)
+	.AutoWidth()
+	.HAlign(HAlign_Right)
+	.VAlign(VAlign_Center)
+	.Padding(1.0f)
+	[
+		!HasLinks
+		? SNullWidget::NullWidget
+		: static_cast<TSharedRef<SWidget>>(SNew(SBorder)
+		.BorderImage(FAppStyle::Get().GetBrush("ToolPanel.GroupBorder"))
+		.Padding(FMargin(0.0f, 1.0f, 10.0f, 1.0f))
 		[
-			!HasLinks
-			? SNullWidget::NullWidget
-			: static_cast<TSharedRef<SWidget>>(SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
-			.Padding(FMargin(0.0f, 1.0f, 10.0f, 1.0f))
-			[
-				LinkBox
-			])
-		];
+			LinkBox
+		])
+	];
 }
 
 void SMessageLogMessageListRow::CreateMessage(const TSharedRef<SHorizontalBox>& InHorzBox, const TSharedRef<IMessageToken>& InMessageToken, float Padding)
@@ -148,23 +156,33 @@ void SMessageLogMessageListRow::CreateMessage(const TSharedRef<SHorizontalBox>& 
 					.Content()
 					[
 						SNew(SImage)
-						.Image(FEditorStyle::GetBrush(ImageToken->GetImageName()))
+						.Image(FAppStyle::Get().GetBrush(ImageToken->GetImageName()))
 					];
 			}
 			else
 			{
 				RowContent = SNew(SImage)
-					.Image(FEditorStyle::GetBrush(ImageToken->GetImageName()));
+					.Image(FAppStyle::Get().GetBrush(ImageToken->GetImageName()));
 			}
 		}
 	}
 		break;
 
+	case EMessageToken::AssetData:
+	{
+		const TSharedRef<FAssetDataToken> AssetDataToken = StaticCastSharedRef<FAssetDataToken>(InMessageToken);
+
+		IconBrushName = FName("Icons.Search");
+		RowContent = CreateHyperlink(InMessageToken, FAssetDataToken::DefaultOnGetAssetDisplayName().IsBound()
+			? FAssetDataToken::DefaultOnGetAssetDisplayName().Execute(AssetDataToken->GetAssetData(), true)
+			: InMessageToken->ToText());
+	}
+		break;
 	case EMessageToken::Object:
 	{
 		const TSharedRef<FUObjectToken> UObjectToken = StaticCastSharedRef<FUObjectToken>(InMessageToken);
 
-		IconBrushName = FName("PropertyWindow.Button_Browse");
+		IconBrushName = FName("Icons.Search");
 
 		UObject* Object = nullptr;
 
@@ -203,7 +221,7 @@ void SMessageLogMessageListRow::CreateMessage(const TSharedRef<SHorizontalBox>& 
 		break;
 	case EMessageToken::EdGraph:
 	{
-		IconBrushName = FName("PropertyWindow.Button_Browse");
+		IconBrushName = FName("Icons.Search");
 		RowContent = CreateHyperlink(InMessageToken, InMessageToken->ToText());
 	}
 	break;
@@ -215,7 +233,8 @@ void SMessageLogMessageListRow::CreateMessage(const TSharedRef<SHorizontalBox>& 
 		RowContent = SNew(SHyperlink)
 			.Text(InMessageToken->ToText())
 			.ToolTipText(ActionToken->GetActionDescription())
-			.TextStyle(FEditorStyle::Get(), "MessageLog")
+			.TextStyle(FAppStyle::Get(), "MessageLog")
+			.IsEnabled_Raw(this, &SMessageLogMessageListRow::GetActionLinkEnable, ActionToken)
 			.OnNavigate(this, &SMessageLogMessageListRow::HandleActionHyperlinkNavigate, ActionToken);
 
 		TokenContentVisbility = TAttribute<EVisibility>::Create(TAttribute<EVisibility>::FGetter::CreateRaw(this, &SMessageLogMessageListRow::GetActionLinkVisibility, ActionToken));
@@ -226,7 +245,7 @@ void SMessageLogMessageListRow::CreateMessage(const TSharedRef<SHorizontalBox>& 
 	{
 		const TSharedRef<FAssetNameToken> AssetNameToken = StaticCastSharedRef<FAssetNameToken>(InMessageToken);
 
-		IconBrushName = FName("PropertyWindow.Button_Browse");
+		IconBrushName = FName("Icons.Search");
 		RowContent = CreateHyperlink(InMessageToken, AssetNameToken->ToText());
 	}
 		break;
@@ -237,6 +256,94 @@ void SMessageLogMessageListRow::CreateMessage(const TSharedRef<SHorizontalBox>& 
 			RowContent = SNew(STextBlock)
 				.ColorAndOpacity(FSlateColor::UseSubduedForeground())
 				.Text(TextToken->GetTextAttribute());
+	}
+		break;
+
+	case EMessageToken::Text:
+	{
+		if (InMessageToken->GetOnMessageTokenActivated().IsBound())
+		{
+			RowContent = CreateHyperlink(InMessageToken, InMessageToken->ToText());
+		}
+		else
+		{
+			FString MessageString = InMessageToken->ToText().ToString();
+			const TSharedRef<FTextToken> TextToken = StaticCastSharedRef<FTextToken>(InMessageToken);
+
+			// ^((?:[\w]\:|\\)(?:(?:\\[a-z_\-\s0-9\.]+)+)\.(?:cpp|h))\((\d+)\)
+			// https://regex101.com/r/ccAnMS/1
+			FRegexPattern FileAndLinePattern(TEXT("^((?:[\\w]\\:|\\\\)(?:(?:\\\\[A-Za-z_\\-\\s0-9\\.]+)+)\\.(?:cpp|h))\\((\\d+)\\)"));
+			if (!TextToken->IsSourceLinkOnLeft())
+			{
+				FileAndLinePattern = FRegexPattern(TEXT("((?:[\\w]\\:|\\\\)(?:(?:\\\\[A-Za-z_\\-\\s0-9\\.]+)+)\\.(?:cpp|h))\\((\\d+)\\)$"));
+			}
+
+			FRegexMatcher FileAndLineRegexMatcher(FileAndLinePattern, MessageString);
+
+			TSharedRef<SWidget> SourceLink = SNullWidget::NullWidget;
+
+			if ( FileAndLineRegexMatcher.FindNext() )
+			{
+				FString FileName = FileAndLineRegexMatcher.GetCaptureGroup(1);
+				int32 LineNumber = FCString::Atoi(*FileAndLineRegexMatcher.GetCaptureGroup(2));
+
+				// Remove the hyperlink from the message, since we're splitting it into its own string.
+				if (TextToken->IsSourceLinkOnLeft())
+				{
+					MessageString.RightChopInline(FileAndLineRegexMatcher.GetMatchEnding(), EAllowShrinking::No);
+				}
+				else
+				{
+					MessageString.LeftChopInline(FileAndLineRegexMatcher.GetCaptureGroup(0).Len(), EAllowShrinking::No);
+				}
+
+				SourceLink = SNew(SHyperlink)
+					.Style(FAppStyle::Get(), "Common.GotoNativeCodeHyperlink")
+					.TextStyle(FAppStyle::Get(), "MessageLog")
+					.OnNavigate_Lambda([=] { FSlateApplication::Get().GotoLineInSource(FileName, LineNumber); })
+					.Text(FText::FromString(FileAndLineRegexMatcher.GetCaptureGroup(0)));
+			}
+
+			if (TextToken->IsSourceLinkOnLeft())
+			{
+				RowContent = SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(0)
+					[
+						SourceLink
+					]
+				+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(FMargin(0.f, 4.f))
+					[
+						SNew(STextBlock)
+						.Text(FText::FromString(MessageString))
+					.ColorAndOpacity(FSlateColor::UseForeground())
+					.TextStyle(FAppStyle::Get(), "MessageLog")
+					];
+			}
+			else
+			{
+				RowContent = SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(FMargin(0.f, 4.f))
+					[
+						SNew(STextBlock)
+						.Text(FText::FromString(MessageString))
+					.ColorAndOpacity(FSlateColor::UseForeground())
+					.TextStyle(FAppStyle::Get(), "MessageLog")
+					]
+				+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(0)
+					[
+						SourceLink
+					];
+			}
+
+		}
 	}
 		break;
 
@@ -254,62 +361,8 @@ void SMessageLogMessageListRow::CreateMessage(const TSharedRef<SHorizontalBox>& 
 			DocumentationToken->GetPreviewExcerptLink(),
 			DocumentationToken->GetPreviewExcerptName())
 			)
-			.TextStyle(FEditorStyle::Get(), "MessageLog")
+			.TextStyle(FAppStyle::Get(), "MessageLog")
 			.OnNavigate(this, &SMessageLogMessageListRow::HandleDocsHyperlinkNavigate, DocumentationToken->GetDocumentationLink());
-	}
-		break;
-
-	case EMessageToken::Text:
-	{
-		if (InMessageToken->GetOnMessageTokenActivated().IsBound())
-		{
-			RowContent = CreateHyperlink(InMessageToken, InMessageToken->ToText());
-		}
-		else
-		{
-			FString MessageString = InMessageToken->ToText().ToString();
-
-			// ^((?:[\w]\:|\\)(?:(?:\\[a-z_\-\s0-9\.]+)+)\.(?:cpp|h))\((\d+)\)
-			// https://regex101.com/r/vV4cV7/1
-			FRegexPattern FileAndLinePattern(TEXT("^((?:[\\w]\\:|\\\\)(?:(?:\\\\[a-z_\\-\\s0-9\\.]+)+)\\.(?:cpp|h))\\((\\d+)\\)"));
-			FRegexMatcher FileAndLineRegexMatcher(FileAndLinePattern, MessageString);
-
-			TSharedRef<SWidget> SourceLink = SNullWidget::NullWidget;
-
-			if ( FileAndLineRegexMatcher.FindNext() )
-			{
-				FString FileName = FileAndLineRegexMatcher.GetCaptureGroup(1);
-				int32 LineNumber = FCString::Atoi(*FileAndLineRegexMatcher.GetCaptureGroup(2));
-
-				// Remove the hyperlink from the message, since we're splitting it into its own string.
-				MessageString.RightChopInline(FileAndLineRegexMatcher.GetMatchEnding(), false);
-
-				SourceLink = SNew(SHyperlink)
-					.Style(FEditorStyle::Get(), "Common.GotoNativeCodeHyperlink")
-					.TextStyle(FEditorStyle::Get(), "MessageLog")
-					.OnNavigate_Lambda([=] { FSlateApplication::Get().GotoLineInSource(FileName, LineNumber); })
-					.Text(FText::FromString(FileAndLineRegexMatcher.GetCaptureGroup(0)));
-			}
-
-			RowContent = SNew(SHorizontalBox)
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(0)
-			[
-				SourceLink
-			]
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(0)
-			[
-				SNew(STextBlock)
-				.ColorAndOpacity(FSlateColor::UseSubduedForeground())
-				.TextStyle(FEditorStyle::Get(), "Log.Normal")
-				.Text(FText::FromString(MessageString))
-			];
-		}
 	}
 		break;
 
@@ -321,11 +374,20 @@ void SMessageLogMessageListRow::CreateMessage(const TSharedRef<SHorizontalBox>& 
 		RowContent = SNew(SHyperlink)
 			.Text(LOCTEXT("TutorialLabel", "Tutorial"))
 			.ToolTipText(LOCTEXT("TutorialTokenToolTip", "Click to open tutorial"))
-			.TextStyle(FEditorStyle::Get(), "MessageLog")
+			.TextStyle(FAppStyle::Get(), "MessageLog")
 			.OnNavigate(this, &SMessageLogMessageListRow::HandleTutorialHyperlinkNavigate, TutorialToken->GetTutorialAssetName());
 	}
 		break;
 #endif
+
+	case EMessageToken::Actor:
+	{
+		const TSharedRef<FActorToken> ActorToken = StaticCastSharedRef<FActorToken>(InMessageToken);
+
+		IconBrushName = FName("Icons.Search");
+		RowContent = CreateHyperlink(InMessageToken, ActorToken->ToText());
+	}
+		break;
 	}
 
 	if (RowContent.IsValid())
@@ -346,16 +408,16 @@ void SMessageLogMessageListRow::CreateMessage(const TSharedRef<SHorizontalBox>& 
 					? SNullWidget::NullWidget
 					: static_cast<TSharedRef<SWidget>>(SNew(SImage)
 					.ColorAndOpacity(FSlateColor::UseForeground())
-					.Image(FEditorStyle::GetBrush(IconBrushName)))
+					.Image(FAppStyle::Get().GetBrush(IconBrushName)))
 				]
 
 				+ SHorizontalBox::Slot()
-					.AutoWidth()
-					.VAlign(VAlign_Center)
-					.Padding(2.0f, 0.0f, 0.0f, 0.0f)
-					[
-						RowContent.ToSharedRef()
-					]
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				.Padding(2.0f, 0.0f, 0.0f, 0.0f)
+				[
+					RowContent.ToSharedRef()
+				]
 			];
 	}
 }

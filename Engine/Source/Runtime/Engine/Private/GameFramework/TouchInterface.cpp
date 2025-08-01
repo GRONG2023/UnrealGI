@@ -2,9 +2,10 @@
 
 #include "GameFramework/TouchInterface.h"
 #include "Engine/Texture2D.h"
-#include "Styling/CoreStyle.h"
 #include "Widgets/Input/SVirtualJoystick.h"
 #include "Slate/DeferredCleanupSlateBrush.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(TouchInterface)
 
 UTouchInterface::UTouchInterface(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -34,12 +35,13 @@ void UTouchInterface::Activate(TSharedPtr<SVirtualJoystick> VirtualJoystick)
 			FTouchInputControl Control = Controls[ControlIndex];
 			SVirtualJoystick::FControlInfo* SlateControl = new(SlateControls)SVirtualJoystick::FControlInfo;
 
+			SlateControl->bTreatAsButton = Control.bTreatAsButton;
 			SlateControl->Image1 = Control.Image1 ? StaticCastSharedRef<ISlateBrushSource>(FDeferredCleanupSlateBrush::CreateBrush(Control.Image1)) : TSharedPtr<ISlateBrushSource>();
 			SlateControl->Image2 = Control.Image2 ? StaticCastSharedRef<ISlateBrushSource>(FDeferredCleanupSlateBrush::CreateBrush(Control.Image2)) : TSharedPtr<ISlateBrushSource>();
 			SlateControl->Center = Control.Center;
 			SlateControl->VisualSize = Control.VisualSize;
 			SlateControl->ThumbSize = Control.ThumbSize;
-			if (Control.InputScale.SizeSquared() > FMath::Square(DELTA))
+			if (Control.InputScale.SizeSquared() > FMath::Square(UE_DELTA))
 			{
 				SlateControl->InputScale = Control.InputScale;
 			}
@@ -52,3 +54,4 @@ void UTouchInterface::Activate(TSharedPtr<SVirtualJoystick> VirtualJoystick)
 		VirtualJoystick->SetControls(SlateControls);
 	}
 }
+

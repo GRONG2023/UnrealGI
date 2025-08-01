@@ -180,7 +180,7 @@ FReply SAdvancedPreviewDetailsTab::AddProfileButtonClick()
 	
 	// Try to create a valid profile name when one is added
 	bool bFoundValidName = false;
-	int ProfileAppendNum = DefaultSettings->Profiles.Num();
+	int32 ProfileAppendNum = FMath::Max(0, DefaultSettings->Profiles.Num() - 1);
 	FString NewProfileName;
 	while (!bFoundValidName)
 	{
@@ -232,7 +232,7 @@ void SAdvancedPreviewDetailsTab::OnAssetViewerSettingsRefresh(const FName& InPro
 {
 	if (InPropertyName == GET_MEMBER_NAME_CHECKED(FPreviewSceneProfile, ProfileName) || InPropertyName == GET_MEMBER_NAME_CHECKED(FPreviewSceneProfile, bSharedProfile))
 	{
-		UpdateProfileNames();
+		Refresh();
 	}
 }
 
@@ -241,15 +241,9 @@ void SAdvancedPreviewDetailsTab::CreateSettingsView()
 	// Create a property view
 	FPropertyEditorModule& EditModule = FModuleManager::Get().GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
 
-	FDetailsViewArgs DetailsViewArgs(
-		/*bUpdateFromSelection=*/ false,
-		/*bLockable=*/ false,
-		/*bAllowSearch=*/ true,
-		FDetailsViewArgs::HideNameArea,
-		/*bHideSelectionTip=*/ true,
-		/*InNotifyHook=*/ nullptr,
-		/*InSearchInitialKeyFocus=*/ false,
-		/*InViewIdentifier=*/ NAME_None);
+	FDetailsViewArgs DetailsViewArgs;
+	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+	DetailsViewArgs.bHideSelectionTip = true;
 	DetailsViewArgs.DefaultsOnlyVisibility = EEditDefaultsOnlyNodeVisibility::Automatic;
 	DetailsViewArgs.bShowOptions = false;
 	DetailsViewArgs.bAllowMultipleTopLevelObjects = true;

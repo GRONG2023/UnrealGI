@@ -5,13 +5,15 @@
 
 #include "MovieScene.h"
 #include "MovieSceneSequence.h"
+#include "MVVM/Selection/Selection.h"
+#include "MVVM/ViewModels/SequencerEditorViewModel.h"
 
 #include "Algo/Count.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Input/SHyperlink.h"
 #include "Widgets/Layout/SBorder.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 
 #define LOCTEXT_NAMESPACE "SSequencerTreeFilterStatusBar"
 
@@ -26,28 +28,28 @@ void SSequencerTreeFilterStatusBar::Construct(const FArguments& InArgs, TSharedP
 
 		+ SHorizontalBox::Slot()
 		.AutoWidth()
-		[
-			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
-			.Padding(FMargin(3.0f, 3.0f))
-			.Visibility(EVisibility::HitTestInvisible)
-			[
-				SAssignNew(TextBlock, STextBlock)
-			]
-		]
-
-		+ SHorizontalBox::Slot()
-		.AutoWidth()
 		.Padding(FMargin(3.f, 0.f, 0.f, 0.f))
 		[
 			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 			.Padding(FMargin(3.0f, 3.0f))
 			[
 				SNew(SHyperlink)
 				.Visibility(this, &SSequencerTreeFilterStatusBar::GetVisibilityFromFilter)
 				.Text(LOCTEXT("ClearFilters", "clear"))
 				.OnNavigate(this, &SSequencerTreeFilterStatusBar::ClearFilters)
+			]
+		]
+	
+		+ SHorizontalBox::Slot()
+		.AutoWidth()
+		[
+			SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+			.Padding(FMargin(3.0f, 3.0f))
+			.Visibility(EVisibility::HitTestInvisible)
+			[
+				SAssignNew(TextBlock, STextBlock)
 			]
 		]
 	];
@@ -70,6 +72,8 @@ EVisibility SSequencerTreeFilterStatusBar::GetVisibilityFromFilter() const
 
 void SSequencerTreeFilterStatusBar::UpdateText()
 {
+	using namespace UE::Sequencer;
+
 	TSharedPtr<FSequencer> Sequencer = WeakSequencer.Pin();
 	if (!ensureAlways(Sequencer))
 	{
@@ -80,18 +84,18 @@ void SSequencerTreeFilterStatusBar::UpdateText()
 	FLinearColor NewColor = FLinearColor::White;
 
 	const TSharedRef<FSequencerNodeTree> NodeTree = Sequencer->GetNodeTree();
-	const TSet<TSharedRef<FSequencerDisplayNode>>& SelectedNodes = Sequencer->GetSelection().GetSelectedOutlinerNodes();
+	const FOutlinerSelection& SelectedOutlinerItems = Sequencer->GetViewModel()->GetSelection()->Outliner;
 
 	FFormatNamedArguments NamedArgs;
 	NamedArgs.Add("Total", NodeTree->GetTotalDisplayNodeCount());
 
-	const bool bHasSelection = SelectedNodes.Num() != 0;
+	const bool bHasSelection = SelectedOutlinerItems.Num() != 0;
 	const bool bHasFilter = NodeTree->HasActiveFilter();
 	const int32 NumFiltered = NodeTree->GetFilteredDisplayNodeCount();
 
 	if (bHasSelection)
 	{
-		NamedArgs.Add("NumSelected", SelectedNodes.Num());
+		NamedArgs.Add("NumSelected", SelectedOutlinerItems.Num());
 	}
 
 	if (bHasFilter)
@@ -132,6 +136,65 @@ void SSequencerTreeFilterStatusBar::UpdateText()
 
 	TextBlock->SetColorAndOpacity(NewColor);
 	TextBlock->SetText(NewText);
+}
+
+static double SequencerOpacityDurationSeconds = 2.0;
+
+void SSequencerTreeFilterStatusBar::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
+{
+	if (GetVisibility() == EVisibility::Visible && OpacityThrobEndTime != FLT_MAX)
+	{
+		if (IsHovered())
+		{
+			// Make sure the status bar stays visible and keep it from fading until OnUnhovered
+			ShowStatusBar();
+			FadeOutStatusBar();
+		}
+		else
+		{
+			double CurrentTime = FPlatformTime::Seconds();
+
+			float Opacity = 0.f;
+			if (OpacityThrobEndTime > CurrentTime)
+			{
+				double Difference = OpacityThrobEndTime - CurrentTime;
+				Opacity = Difference / SequencerOpacityDurationSeconds;
+			}
+
+			if (Opacity > 0.f)
+			{
+				FLinearColor BorderColor = GetColorAndOpacity();
+				BorderColor.A = Opacity;
+				SetColorAndOpacity(BorderColor);
+			}
+			else
+			{
+				SetVisibility(EVisibility::Hidden);
+			}
+		}
+	}
+
+	SCompoundWidget::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
+}
+
+void SSequencerTreeFilterStatusBar::ShowStatusBar()
+{
+	OpacityThrobEndTime = FLT_MAX;
+	FLinearColor BorderColor = GetColorAndOpacity();
+	BorderColor.A = 1.f;
+	SetColorAndOpacity(BorderColor);
+	SetVisibility(EVisibility::Visible);
+}
+
+void SSequencerTreeFilterStatusBar::HideStatusBar()
+{
+	SetVisibility(EVisibility::Hidden);
+}
+
+void SSequencerTreeFilterStatusBar::FadeOutStatusBar()
+{
+	// Show and then start fading out the status bar
+	OpacityThrobEndTime = FPlatformTime::Seconds() + SequencerOpacityDurationSeconds;
 }
 
 #undef LOCTEXT_NAMESPACE

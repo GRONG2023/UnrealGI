@@ -7,26 +7,25 @@
 #include "Editor/EditorPerProjectUserSettings.h"
 #include "MessageLogModule.h"
 #include "Logging/MessageLog.h"
+#include "Logging/StructuredLog.h"
 #include "Misc/UObjectToken.h"
 #include "SourceCodeNavigation.h"
-#include "Developer/HotReload/Public/IHotReload.h"
+#include "IHotReload.h"
 #include "EngineLogs.h"
 #include "Engine/Blueprint.h"
 #include "IMessageLogListing.h"
-#include "Settings/EditorProjectSettings.h"
+#include "Settings/BlueprintEditorProjectSettings.h"
 
 #if WITH_EDITOR
 
 #define LOCTEXT_NAMESPACE "Editor.Stats"
 
 const FName FCompilerResultsLog::Name(TEXT("CompilerResultsLog"));
-FCompilerResultsLog* FCompilerResultsLog::CurrentEventTarget = nullptr;
 FDelegateHandle FCompilerResultsLog::GetGlobalModuleCompilerDumpDelegateHandle;
 
 //////////////////////////////////////////////////////////////////////////
-// FCompilerResultsLog
+// FBacktrackMap
 
-/** Update the source backtrack map to note that NewObject was most closely generated/caused by the SourceObject */
 void FBacktrackMap::NotifyIntermediateObjectCreation(UObject* NewObject, UObject* SourceObject)
 {
 	// Chase the source to make sure it's really a top-level ('source code') node
@@ -39,7 +38,6 @@ void FBacktrackMap::NotifyIntermediateObjectCreation(UObject* NewObject, UObject
 	SourceBacktrackMap.Add(NewObject, SourceObject);
 }
 
-/** Update the pin source backtrack map to note that NewPin was most closely generated/caused by the SourcePin */
 void FBacktrackMap::NotifyIntermediatePinCreation(UEdGraphPin* NewPin, UEdGraphPin* SourcePin)
 {
 	check(NewPin->GetOwningNode() && SourcePin->GetOwningNode());
@@ -53,7 +51,6 @@ void FBacktrackMap::NotifyIntermediatePinCreation(UEdGraphPin* NewPin, UEdGraphP
 	PinSourceBacktrackMap.Add(NewPin, SourcePin);
 }
 
-/** Returns the true source object for the passed in object */
 UObject* FBacktrackMap::FindSourceObject(UObject* PossiblyDuplicatedObject)
 {
 	UObject** RemappedIfExisting = SourceBacktrackMap.Find(PossiblyDuplicatedObject);
@@ -91,7 +88,7 @@ UEdGraphPin* FBacktrackMap::FindSourcePin(UEdGraphPin* PossiblyDuplicatedPin)
 	}
 	else
 	{
-		// Not in the map, maybe its owning node was duplicated - and then maybe he GUID matches
+		// Not in the map, maybe its owning node was duplicated - and then maybe the GUID matches
 		// some node on the original node:
 		if (PossiblyDuplicatedPin)
 		{
@@ -133,18 +130,10 @@ FCompilerResultsLog::FCompilerResultsLog(bool bIsCompatibleWithEvents/* = true*/
 	, EventDisplayThresholdMs(0)
 {
 	CurrentEventScope = nullptr;
-	if(bIsCompatibleWithEvents && CurrentEventTarget == nullptr)
-	{
-		CurrentEventTarget = this;
-	}
 }
 
 FCompilerResultsLog::~FCompilerResultsLog()
 {
-	if(CurrentEventTarget == this)
-	{
-		CurrentEventTarget = nullptr;
-	}
 }
 
 void FCompilerResultsLog::Register()
@@ -217,6 +206,26 @@ bool FCompilerResultsLog::IsMessageEnabled(FName ID)
 	return true;
 }
 
+void FCompilerResultsLog::FEdGraphToken_Create(const UObject* InObject, FTokenizedMessage& OutMessage, TArray<UEdGraphNode*>& OutSourceNodes)
+{
+	FEdGraphToken::Create(InObject, this, OutMessage, OutSourceNodes);
+}
+
+void FCompilerResultsLog::FEdGraphToken_Create(const UEdGraphPin* InPin, FTokenizedMessage& OutMessage, TArray<UEdGraphNode*>& OutSourceNodes)
+{
+	FEdGraphToken::Create(InPin, this, OutMessage, OutSourceNodes);
+}
+
+void FCompilerResultsLog::FEdGraphToken_Create(const TCHAR* String, FTokenizedMessage& OutMessage, TArray<UEdGraphNode*>& OutSourceNodes)
+{
+	FEdGraphToken::Create(String, this, OutMessage, OutSourceNodes);
+}
+
+void FCompilerResultsLog::FEdGraphToken_Create(const FField* InField, FTokenizedMessage& OutMessage, TArray<UEdGraphNode*>& OutSourceNodes)
+{
+	FEdGraphToken::Create(InField, this, OutMessage, OutSourceNodes);
+}
+
 void FCompilerResultsLog::InternalLogSummary()
 {
 	if(CurrentEventScope.IsValid())
@@ -255,6 +264,7 @@ void FCompilerResultsLog::InternalLogSummary()
 
 		if(bLogDetailedResults)
 		{
+			// This will not do anything for the default BP compiler log
 			Note(*LOCTEXT("PerformanceSummaryHeading", "Performance summary:").ToString());
 			InternalLogEvent(*CurrentEventScope.Get());
 		}
@@ -294,7 +304,6 @@ bool FCompilerResultsLog::CommitPotentialMessages(UEdGraphNode* Source)
 	return false;
 }
 
-/** Update the source backtrack map to note that NewObject was most closely generated/caused by the SourceObject */
 void FCompilerResultsLog::NotifyIntermediateObjectCreation(UObject* NewObject, UObject* SourceObject)
 {
 	SourceBacktrackMap.NotifyIntermediateObjectCreation(NewObject, SourceObject);
@@ -305,7 +314,6 @@ void FCompilerResultsLog::NotifyIntermediatePinCreation(UEdGraphPin* NewPin, UEd
 	SourceBacktrackMap.NotifyIntermediatePinCreation(NewPin, SourcePPin);
 }
 
-/** Returns the true source object for the passed in object */
 UObject* FCompilerResultsLog::FindSourceObject(UObject* PossiblyDuplicatedObject)
 {
 	return SourceBacktrackMap.FindSourceObject(PossiblyDuplicatedObject);
@@ -439,21 +447,22 @@ void FCompilerResultsLog::InternalLogMessage(FName MessageID, const TSharedRef<F
 
 	if (!bSilentMode && (!bLogInfoOnly || (Severity == EMessageSeverity::Info)))
 	{
-		if (Severity == EMessageSeverity::CriticalError || Severity == EMessageSeverity::Error)
+		if (Severity == EMessageSeverity::Error)
 		{
 			if (IsRunningCommandlet())
-			{
-				UE_ASSET_LOG(LogBlueprint, Error, *SourcePath, TEXT("[Compiler] %s from Source: %s"), *Message->ToText().ToString(), *SourcePath);
+			{				
+				UE_LOGFMT_NSLOC(LogBlueprint, Error, "Blueprint", "CompilerError", "[Compiler] {ErrorMessage} from Source: {SourceFile}",
+												("ErrorMessage", Message->ToText().ToString()), ("SourceFile", SourcePath));
 			}
 			else
 			{
 				// in editor the compiler log is 'rich' and we don't need to annotate with the full blueprint path, just the name:
-				UE_ASSET_LOG(LogBlueprint, Error, *SourcePath, TEXT("[Compiler] %s"), *Message->ToText().ToString());
+				UE_ASSET_LOG(LogBlueprint, Error, *SourcePath, TEXT("[Compiler] %s"), *Message->ToText().ToString());				
 			}
 		}
 		else if (Severity == EMessageSeverity::Warning || Severity == EMessageSeverity::PerformanceWarning)
 		{
-			UE_ASSET_LOG(LogBlueprint, Warning, *SourcePath, TEXT("[Compiler] %s"), *Message->ToText().ToString());
+			UE_ASSET_LOG(LogBlueprint, Warning, *SourcePath, TEXT("[Compiler] %s"), *Message->ToText().ToString());			
 		}
 		else
 		{
@@ -531,7 +540,7 @@ TArray< TSharedRef<FTokenizedMessage> > FCompilerResultsLog::ParseCompilerLogDum
 		FString Line = MessageLines[i];
 		if (Line.EndsWith(TEXT("\r"), ESearchCase::CaseSensitive))
 		{
-			Line.LeftChopInline(1, false);
+			Line.LeftChopInline(1, EAllowShrinking::No);
 		}
 		Line.ConvertTabsToSpacesInline(4);
 		Line.TrimEndInline();
@@ -595,7 +604,7 @@ void FCompilerResultsLog::OnGotoError(const TSharedRef<IMessageToken>& Token)
 	FString FullPath, LineNumberString;
 	if (Token->ToText().ToString().Split(TEXT("("), &FullPath, &LineNumberString, ESearchCase::CaseSensitive))
 	{
-		LineNumberString.LeftChopInline(1, false); // remove right parenthesis
+		LineNumberString.LeftChopInline(1, EAllowShrinking::No); // remove right parenthesis
 		int32 LineNumber = FCString::Strtoi(*LineNumberString, NULL, 10);
 
 		FSourceCodeNavigation::OpenSourceFile( FullPath, LineNumber );
@@ -632,7 +641,7 @@ void FCompilerResultsLog::GetNodesFromTokens(const TArray<TSharedRef<IMessageTok
 			UObject* ObjectArgument = ObjectPtr.Get();
 			if(UEdGraphNode* Node = Cast<UEdGraphNode>(ObjectArgument))
 			{
-				OutOwnerNodes.Add(Node);
+				OutOwnerNodes.AddUnique(Node);
 			}
 		}
 		else if (Token->GetType() == EMessageToken::EdGraph)
@@ -644,18 +653,18 @@ void FCompilerResultsLog::GetNodesFromTokens(const TArray<TSharedRef<IMessageTok
 			{
 				if (PinBeingReferenced)
 				{
-					OutOwnerNodes.Add(Cast<UEdGraphNode>(PinBeingReferenced->GetOwningNodeUnchecked()));
+					OutOwnerNodes.AddUnique(Cast<UEdGraphNode>(PinBeingReferenced->GetOwningNodeUnchecked()));
 				}
 			}
 			else
 			{
-				OutOwnerNodes.Add(OwnerNode);
+				OutOwnerNodes.AddUnique(OwnerNode);
 			}
 		}
 	}
 }
 
-void FCompilerResultsLog::Append(FCompilerResultsLog const& Other)
+void FCompilerResultsLog::Append(FCompilerResultsLog const& Other, bool bWriteToSystemLog)
 {
 	for (TSharedRef<FTokenizedMessage> const& Message : Other.Messages)
 	{
@@ -678,11 +687,19 @@ void FCompilerResultsLog::Append(FCompilerResultsLog const& Other)
 				break;
 			}
 		}
-		Messages.Add(Message);
-		
+
 		TArray<UEdGraphNode*> OwnerNodes;
 		GetNodesFromTokens(Message->GetMessageTokens(), OwnerNodes);
-		AnnotateNode(OwnerNodes, Message);
+
+		if (bWriteToSystemLog)
+		{
+			InternalLogMessage(Message->GetIdentifier(), Message, OwnerNodes);
+		}
+		else
+		{
+			Messages.Add(Message);
+			AnnotateNode(OwnerNodes, Message);
+		}
 	}
 }
 

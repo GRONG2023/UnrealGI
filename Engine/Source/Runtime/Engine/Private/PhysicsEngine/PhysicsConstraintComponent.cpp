@@ -1,16 +1,20 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "PhysicsEngine/PhysicsConstraintComponent.h"
-#include "Components/PrimitiveComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/Texture2D.h"
-#include "Logging/TokenizedMessage.h"
 #include "Logging/MessageLog.h"
 #include "Misc/UObjectToken.h"
 #include "PhysicsEngine/PhysicsConstraintTemplate.h"
 #include "PhysicsEngine/PhysicsAsset.h"
 #include "PhysicsEngine/ConstraintUtils.h"
+#include "PhysicsEngine/PhysicsObjectExternalInterface.h"
+#include "PhysicsProxy/SingleParticlePhysicsProxy.h"
 #include "Components/BillboardComponent.h"
+#include "UObject/ICookInfo.h"
+#include "UObject/SoftObjectPath.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PhysicsConstraintComponent)
 
 #define LOCTEXT_NAMESPACE "ConstraintComponent"
 
@@ -132,16 +136,16 @@ int32 GetBoneIndexHelper(FName InBoneName, const USkeletalMeshComponent& SkelCom
 FTransform UPhysicsConstraintComponent::GetBodyTransformInternal(EConstraintFrame::Type Frame, FName InBoneName) const
 {
 	UPrimitiveComponent* PrimComp = GetComponentInternal(Frame);
-	if(!PrimComp)
+	if (!PrimComp)
 	{
 		return FTransform::Identity;
 	}
-	  
+
 	//Use GetComponentTransform() by default for all components
-	FTransform ResultTM = PrimComp->GetComponentTransform();
-		
+	FTransform ResultTM = FTransform::Identity;
+
 	// Skeletal case
-	if(const USkeletalMeshComponent* SkelComp = Cast<USkeletalMeshComponent>(PrimComp))
+	if (const USkeletalMeshComponent* SkelComp = Cast<USkeletalMeshComponent>(PrimComp))
 	{
 		const int32 BoneIndex = GetBoneIndexHelper(InBoneName, *SkelComp);
 		if (BoneIndex != INDEX_NONE)
@@ -155,6 +159,22 @@ FTransform UPhysicsConstraintComponent::GetBodyTransformInternal(EConstraintFram
 				FText::FromName(InBoneName), FText::FromString(GetPathNameSafe(this))));
 		}
 #endif // !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+	}
+	else if (Chaos::FPhysicsObject* InitialObject = PrimComp->GetPhysicsObjectByName(InBoneName))
+	{
+		FLockedReadPhysicsObjectExternalInterface Interface = FPhysicsObjectExternalInterface::LockRead({ &InitialObject, 1 });
+		if (Chaos::FPhysicsObject* PhysicsObject = Interface->GetRootObject(InitialObject))
+		{
+			ResultTM = Interface->GetTransform(PhysicsObject);
+		}
+		else
+		{
+			ResultTM = Interface->GetTransform(InitialObject);
+		}
+	}
+	else
+	{
+		ResultTM = PrimComp->GetComponentTransform();
 	}
 
 	return ResultTM;
@@ -237,6 +257,17 @@ FBodyInstance* UPhysicsConstraintComponent::GetBodyInstance(EConstraintFrame::Ty
 	return Instance;
 }
 
+Chaos::FPhysicsObject* UPhysicsConstraintComponent::GetPhysicsObject(EConstraintFrame::Type Frame) const
+{
+	UPrimitiveComponent* PrimComp = GetComponentInternal(Frame);
+	if (!PrimComp)
+	{
+		return nullptr;
+	}
+
+	const FName BoneName = (Frame == EConstraintFrame::Frame1) ? ConstraintInstance.ConstraintBone1 : ConstraintInstance.ConstraintBone2;
+	return PrimComp->GetPhysicsObjectByName(BoneName);
+}
 
 /** Wrapper that calls our constraint broken delegate */
 void UPhysicsConstraintComponent::OnConstraintBrokenWrapper(int32 ConstraintIndex)
@@ -244,18 +275,29 @@ void UPhysicsConstraintComponent::OnConstraintBrokenWrapper(int32 ConstraintInde
 	OnConstraintBroken.Broadcast(ConstraintIndex);
 }
 
+/** Wrapper that calls our plasticity delegate */
+void UPhysicsConstraintComponent::OnPlasticDeformationWrapper(int32 ConstraintIndex)
+{
+	OnPlasticDeformation.Broadcast(ConstraintIndex);
+}
+
 void UPhysicsConstraintComponent::InitComponentConstraint()
 {
 	// First we convert world space position of constraint into local space frames
 	UpdateConstraintFrames();
 
-	// Then we init the constraint
+	// Normally, we'd want to init the constraint using the FPhysicsObject that we get from the component.
+	// However, to ensure that we can preserve backward compatible behavior, we first check to see if the
+	// FBodyInstance exists first. This way the behavior w.r.t. grabbing welded bodies remains the same.
 	FBodyInstance* Body1 = GetBodyInstance(EConstraintFrame::Frame1);
 	FBodyInstance* Body2 = GetBodyInstance(EConstraintFrame::Frame2);
 
-	if (Body1 != nullptr || Body2 != nullptr)
+	Chaos::FPhysicsObject* Object1 = (Body1 && Body1->IsValidBodyInstance()) ? Body1->ActorHandle->GetPhysicsObject() : GetPhysicsObject(EConstraintFrame::Frame1);
+	Chaos::FPhysicsObject* Object2 = (Body2 && Body2->IsValidBodyInstance()) ? Body2->ActorHandle->GetPhysicsObject() : GetPhysicsObject(EConstraintFrame::Frame2);
+
+	if (Object1 || Object2)
 	{
-		ConstraintInstance.InitConstraint(Body1, Body2, GetConstraintScale(), this, FOnConstraintBroken::CreateUObject(this, &UPhysicsConstraintComponent::OnConstraintBrokenWrapper));
+		ConstraintInstance.InitConstraint(Object1, Object2, GetConstraintScale(), this, FOnConstraintBroken::CreateUObject(this, &UPhysicsConstraintComponent::OnConstraintBrokenWrapper));
 	}
 }
 
@@ -269,9 +311,24 @@ void UPhysicsConstraintComponent::OnConstraintBrokenHandler(FConstraintInstance*
 	OnConstraintBroken.Broadcast(BrokenConstraint->ConstraintIndex);
 }
 
+void UPhysicsConstraintComponent::OnPlasticDeformationHandler(FConstraintInstance* Constraint)
+{
+	OnPlasticDeformation.Broadcast(Constraint->ConstraintIndex);
+}
+
+
 float UPhysicsConstraintComponent::GetConstraintScale() const
 {
 	return GetComponentScale().GetAbsMin();
+}
+
+void UPhysicsConstraintComponent::GetConstrainedComponents(UPrimitiveComponent*& OutComponent1, FName& OutBoneName1, UPrimitiveComponent*& OutComponent2, FName& OutBoneName2)
+{
+	OutComponent1 = GetComponentInternal(EConstraintFrame::Frame1);
+	OutBoneName1 = ConstraintInstance.ConstraintBone1;
+
+	OutComponent2 = GetComponentInternal(EConstraintFrame::Frame2);
+	OutBoneName2 = ConstraintInstance.ConstraintBone2;
 }
 
 void UPhysicsConstraintComponent::SetConstrainedComponents(UPrimitiveComponent* Component1, FName BoneName1, UPrimitiveComponent* Component2, FName BoneName2)
@@ -319,6 +376,12 @@ void UPhysicsConstraintComponent::OnRegister()
 }
 #endif
 
+void UPhysicsConstraintComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	Super::EndPlay(EndPlayReason);
+	TermComponentConstraint();
+}
+
 void UPhysicsConstraintComponent::OnUnregister()
 {
 	Super::OnUnregister();
@@ -340,14 +403,14 @@ void UPhysicsConstraintComponent::PostLoad()
 	Super::PostLoad();
 
 	// Fix old content that used a ConstraintSetup
-	if ( GetLinkerUE4Version() < VER_UE4_ALL_PROPS_TO_CONSTRAINTINSTANCE && (ConstraintSetup_DEPRECATED != NULL) )
+	if ( GetLinkerUEVersion() < VER_UE4_ALL_PROPS_TO_CONSTRAINTINSTANCE && (ConstraintSetup_DEPRECATED != NULL) )
 	{
 		// Will have copied from setup into DefaultIntance inside
 		ConstraintInstance.CopyConstraintParamsFrom(&ConstraintSetup_DEPRECATED->DefaultInstance);
 		ConstraintSetup_DEPRECATED = NULL;
 	}
 
-	if (GetLinkerUE4Version() < VER_UE4_SOFT_CONSTRAINTS_USE_MASS)
+	if (GetLinkerUEVersion() < VER_UE4_SOFT_CONSTRAINTS_USE_MASS)
 	{
 		//In previous versions the mass was placed into the spring constant. This is correct because you use different springs for different mass - however, this makes tuning hard
 		//We now multiply mass into the spring constant. To fix old data we use CalculateMass which is not perfect but close (within 0.1kg)
@@ -400,9 +463,10 @@ void UPhysicsConstraintComponent::PostEditChangeChainProperty(FPropertyChangedCh
 
 void UPhysicsConstraintComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
-	Super::PostEditChangeProperty(PropertyChangedEvent);
 	UpdateConstraintFrames();
 	UpdateSpriteTexture();
+
+	Super::PostEditChangeProperty(PropertyChangedEvent);
 }
 
 void UPhysicsConstraintComponent::PostEditComponentMove(bool bFinished)
@@ -491,12 +555,12 @@ void UPhysicsConstraintComponent::UpdateConstraintFrames()
 
 	//Note that in the case where there is no body instance, the position is given in world space and there is no scaling.
 	const float RefScale = FMath::Max(GetConstraintScale(), 0.01f);
-	if(GetBodyInstance(EConstraintFrame::Frame1))
+	if(GetPhysicsObject(EConstraintFrame::Frame1))
 	{
 		ConstraintInstance.Pos1 /= RefScale;
 	}
 
-	if (GetBodyInstance(EConstraintFrame::Frame2))
+	if (GetPhysicsObject(EConstraintFrame::Frame2))
 	{
 		ConstraintInstance.Pos2 /= RefScale;
 	}
@@ -532,27 +596,83 @@ void UPhysicsConstraintComponent::SetDisableCollision(bool bDisableCollision)
 	ConstraintInstance.SetDisableCollision(bDisableCollision);
 }
 
+bool UPhysicsConstraintComponent::IsProjectionEnabled() const
+{
+	return ConstraintInstance.IsProjectionEnabled();
+}
+
+void UPhysicsConstraintComponent::SetProjectionEnabled(bool bInEnabled)
+{
+	if (bInEnabled)
+	{
+		ConstraintInstance.EnableProjection();
+	}
+	else
+	{
+		ConstraintInstance.DisableProjection();
+	}
+}
+
+void UPhysicsConstraintComponent::SetProjectionParams(float ProjectionLinearAlpha, float ProjectionAngularAlpha, float ProjectionLinearTolerance, float ProjectionAngularTolerance)
+{
+	ConstraintInstance.SetProjectionParams(IsProjectionEnabled(), ProjectionLinearAlpha, ProjectionAngularAlpha, ProjectionLinearTolerance, ProjectionAngularTolerance);
+}
+
+FConstraintInstanceAccessor UPhysicsConstraintComponent::GetConstraint()
+{
+	return FConstraintInstanceAccessor(this);
+}
+
+#if WITH_EDITOR
+static const TCHAR* GPhysicsConstraintHingeSpriteAssetName = TEXT("/Engine/EditorResources/S_KHinge.S_KHinge");
+static const TCHAR* GPhysicsConstraintPrismaticSpriteAssetName = TEXT("/Engine/EditorResources/S_KPrismatic.S_KPrismatic");
+static const TCHAR* GPhysicsConstraintJointSpriteAssetName = TEXT("/Engine/EditorResources/S_KBSJoint.S_KBSJoint");
+#endif
 
 #if WITH_EDITOR
 void UPhysicsConstraintComponent::UpdateSpriteTexture()
 {
 	if (SpriteComponent)
 	{
+		FCookLoadScope CookLoadScope(ECookLoadType::EditorOnly);
 		if (ConstraintUtils::IsHinge(ConstraintInstance))
 		{
-			SpriteComponent->SetSprite(LoadObject<UTexture2D>(NULL, TEXT("/Engine/EditorResources/S_KHinge.S_KHinge")));
+			SpriteComponent->SetSprite(LoadObject<UTexture2D>(NULL, GPhysicsConstraintHingeSpriteAssetName));
 		}
 		else if (ConstraintUtils::IsPrismatic(ConstraintInstance))
 		{
-			SpriteComponent->SetSprite(LoadObject<UTexture2D>(NULL, TEXT("/Engine/EditorResources/S_KPrismatic.S_KPrismatic")));
+			SpriteComponent->SetSprite(LoadObject<UTexture2D>(NULL, GPhysicsConstraintPrismaticSpriteAssetName));
 		}
 		else
 		{
-			SpriteComponent->SetSprite(LoadObject<UTexture2D>(NULL, TEXT("/Engine/EditorResources/S_KBSJoint.S_KBSJoint")));
+			SpriteComponent->SetSprite(LoadObject<UTexture2D>(NULL, GPhysicsConstraintJointSpriteAssetName));
 		}
 	}
 }
 #endif // WITH_EDITOR
+#if WITH_EDITORONLY_DATA
+void UPhysicsConstraintComponent::Serialize(FArchive& Ar)
+{
+	Super::Serialize(Ar);
+#if WITH_EDITOR
+	if (Ar.IsSaving() && Ar.IsObjectReferenceCollector() && !Ar.IsCooking())
+	{
+		FSoftObjectPathSerializationScope EditorOnlyScope(ESoftObjectPathCollectType::EditorOnlyCollect);
+		FSoftObjectPath SpriteAssets[]
+		{
+			FSoftObjectPath(GPhysicsConstraintHingeSpriteAssetName),
+			FSoftObjectPath(GPhysicsConstraintPrismaticSpriteAssetName),
+			FSoftObjectPath(GPhysicsConstraintJointSpriteAssetName)
+		};
+		for (FSoftObjectPath& SpriteAsset : SpriteAssets)
+		{
+			Ar << SpriteAsset;
+		}
+	}
+#endif
+}
+
+#endif
 
 void UPhysicsConstraintComponent::SetLinearPositionDrive( bool bEnableDriveX, bool bEnableDriveY, bool bEnableDriveZ )
 {
@@ -656,9 +776,9 @@ void UPhysicsConstraintComponent::SetLinearBreakable(bool bLinearBreakable, floa
 	ConstraintInstance.SetLinearBreakable(bLinearBreakable, LinearBreakThreshold);
 }
 
-void UPhysicsConstraintComponent::SetLinearPlasticity(bool bLinearPlasticity, float LinearPlasticityThreshold)
+void UPhysicsConstraintComponent::SetLinearPlasticity(bool bLinearPlasticity, float LinearPlasticityThreshold, EConstraintPlasticityType PlasticityType)
 {
-	ConstraintInstance.SetLinearPlasticity(bLinearPlasticity, LinearPlasticityThreshold);
+	ConstraintInstance.SetLinearPlasticity(bLinearPlasticity, LinearPlasticityThreshold, PlasticityType);
 }
 
 void UPhysicsConstraintComponent::SetAngularBreakable(bool bAngularBreakable, float AngularBreakThreshold)
@@ -669,6 +789,11 @@ void UPhysicsConstraintComponent::SetAngularBreakable(bool bAngularBreakable, fl
 void UPhysicsConstraintComponent::SetAngularPlasticity(bool bAngularPlasticity, float AngularPlasticityThreshold)
 {
 	ConstraintInstance.SetAngularPlasticity(bAngularPlasticity, AngularPlasticityThreshold);
+}
+
+void UPhysicsConstraintComponent::SetContactTransferScale(float ContactTransferScale)
+{
+	ConstraintInstance.SetContactTransferScale(ContactTransferScale);
 }
 
 float UPhysicsConstraintComponent::GetCurrentTwist() const
@@ -690,3 +815,4 @@ float UPhysicsConstraintComponent::GetCurrentSwing2() const
 }
 
 #undef LOCTEXT_NAMESPACE
+

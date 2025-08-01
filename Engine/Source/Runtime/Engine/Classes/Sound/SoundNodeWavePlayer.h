@@ -29,12 +29,18 @@ private:
 	TSoftObjectPtr<USoundWave> SoundWaveAssetPtr;
 
 	UPROPERTY(transient)
-	USoundWave* SoundWave;
+	TObjectPtr<USoundWave> SoundWave;
 
 	void OnSoundWaveLoaded(const FName& PackageName, UPackage * Package, EAsyncLoadingResult::Type Result, bool bAddToRoot);
 
 	uint8 bAsyncLoading:1;
 
+public:
+
+	UPROPERTY(EditAnywhere, Category=WavePlayer)
+	uint8 bLooping:1;
+
+private:
 	// Set to true when we enqueue a task to the game thread to load
 	// the asset associated with this thread.
 	// This only occurs if ClearAssetReferences() was called and we still tried to play this wave player,
@@ -43,10 +49,7 @@ private:
 
 public:
 
-	UPROPERTY(EditAnywhere, Category=WavePlayer)
-	uint32 bLooping:1;
-
-	ENGINE_API USoundWave* GetSoundWave() const { return SoundWave; }
+	USoundWave* GetSoundWave() const { return SoundWave; }
 	ENGINE_API void SetSoundWave(USoundWave* SoundWave);
 
 	//~ Begin UObject Interface
@@ -70,6 +73,7 @@ public:
 	//~ Begin USoundNodeAssetReferencer Interface
 	virtual void LoadAsset(bool bAddToRoot = false) override;
 	virtual void ClearAssetReferences() override;
+	virtual bool ContainsProceduralSoundReference() const override;
 	//~ End USoundNode Interface
 
 	// If this returns true, this wave player currently has an async load for the USoundWave in flight.

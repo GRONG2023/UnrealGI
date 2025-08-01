@@ -2,12 +2,12 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
 #include "UObject/Class.h"
 #include "UObject/WeakObjectPtr.h"
-#include "UObject/Package.h"
 #include "Templates/Casts.h"
 #include "Templates/RemoveReference.h"
+
+class FReferenceCollector;
 
 class FStructOnScope
 {
@@ -22,7 +22,7 @@ protected:
 	{
 		if (const UStruct* ScriptStructPtr = ScriptStruct.Get())
 		{
-			SampleStructMemory = (uint8*)FMemory::Malloc(ScriptStructPtr->GetStructureSize() ? ScriptStructPtr->GetStructureSize() : 1);
+			SampleStructMemory = (uint8*)FMemory::Malloc(ScriptStructPtr->GetStructureSize() ? ScriptStructPtr->GetStructureSize() : 1, ScriptStructPtr->GetMinAlignment());
 			ScriptStructPtr->InitializeStruct(SampleStructMemory);
 			OwnsMemory = true;
 		}
@@ -30,36 +30,10 @@ protected:
 
 public:
 
-	FStructOnScope()
-		: SampleStructMemory(nullptr)
-		, OwnsMemory(false)
-	{
-	}
-
-	FStructOnScope(const UStruct* InScriptStruct)
-		: ScriptStruct(InScriptStruct)
-		, SampleStructMemory(nullptr)
-		, OwnsMemory(false)
-	{
-		Initialize();
-	}
-
-	FStructOnScope(const UStruct* InScriptStruct, uint8* InData)
-		: ScriptStruct(InScriptStruct)
-		, SampleStructMemory(InData)
-		, OwnsMemory(false)
-	{
-	}
-
-	FStructOnScope(FStructOnScope&& InOther)
-	{
-		ScriptStruct = InOther.ScriptStruct;
-		SampleStructMemory = InOther.SampleStructMemory;
-		OwnsMemory = InOther.OwnsMemory;
-
-		InOther.OwnsMemory = false;
-		InOther.Reset();
-	}
+	COREUOBJECT_API FStructOnScope();
+	COREUOBJECT_API FStructOnScope(const UStruct* InScriptStruct);
+	COREUOBJECT_API FStructOnScope(const UStruct* InScriptStruct, uint8* InData);
+	COREUOBJECT_API FStructOnScope(FStructOnScope&& InOther);
 
 	FStructOnScope& operator=(FStructOnScope&& InOther)
 	{
@@ -100,15 +74,13 @@ public:
 		return ScriptStruct.Get();
 	}
 
-	virtual UPackage* GetPackage() const
+	TWeakObjectPtr<const UStruct>& GetStructPtr() 
 	{
-		return Package.Get();
+		return ScriptStruct;
 	}
-
-	virtual void SetPackage(UPackage* InPackage)
-	{
-		Package = InPackage;
-	}
+	
+	COREUOBJECT_API virtual UPackage* GetPackage() const;
+	COREUOBJECT_API virtual void SetPackage(UPackage* InPackage);
 
 	virtual bool IsValid() const
 	{
@@ -147,10 +119,7 @@ public:
 		OwnsMemory = false;
 	}
 
-	virtual ~FStructOnScope()
-	{
-		Destroy();
-	}
+	COREUOBJECT_API virtual ~FStructOnScope();
 
 	/** Re-initializes the scope with a specified UStruct */
 	void Initialize(TWeakObjectPtr<const UStruct> InScriptStruct)
@@ -159,14 +128,16 @@ public:
 		ScriptStruct = InScriptStruct;
 		Initialize();
 	}
+	
+	// If the struct definition is still available and there is struct memory to read from,
+	// add any object references in the struct data to the collector
+	COREUOBJECT_API void AddReferencedObjects(FReferenceCollector& Collector);
 };
 
 /**
  * Typed FStructOnScope that exposes type-safe access to the wrapped struct
- * @note The second template argument is there to restrict to type that are actually USTRUCT.
- *		It will be replaced to a static_assert with a better compiler error with a "is ustruct" type trait
  */
-template<typename T, typename = decltype(TBaseStructure<T>::Get())>
+template<typename T>
 class TStructOnScope final : public FStructOnScope
 {
 public:
@@ -346,7 +317,7 @@ public:
 		return const_cast<TStructOnScope*>(this)->CastChecked<U>();
 	}
 
-	friend FArchive& operator<<(FArchive& Ar, TStructOnScope& InStruct)
+	void Serialize(FArchive& Ar)
 	{
 		if (Ar.IsLoading())
 		{
@@ -358,30 +329,28 @@ public:
 				if (ScriptStructPtr == nullptr || !ScriptStructPtr->IsChildOf(TBaseStructure<T>::Get()))
 				{
 					Ar.SetError();
-					return Ar;
+					return;
 				}
-				InStruct.ScriptStruct = ScriptStructPtr;
-				InStruct.Initialize();
-				ScriptStructPtr->SerializeItem(Ar, InStruct.SampleStructMemory, nullptr);
+				ScriptStruct = ScriptStructPtr;
+				Initialize();
+				ScriptStructPtr->SerializeItem(Ar, SampleStructMemory, nullptr);
 			}
 		}
 		// Saving
 		else
 		{
 			FString StructPath;
-			if (UScriptStruct* ScriptStructPtr = const_cast<UScriptStruct*>(::Cast<UScriptStruct>(InStruct.ScriptStruct.Get())))
+			if (UScriptStruct* ScriptStructPtr = const_cast<UScriptStruct*>(::Cast<UScriptStruct>(ScriptStruct.Get())))
 			{
 				StructPath = ScriptStructPtr->GetPathName();
 				Ar << StructPath;
-				ScriptStructPtr->SerializeItem(Ar, InStruct.SampleStructMemory, nullptr);
+				ScriptStructPtr->SerializeItem(Ar, SampleStructMemory, nullptr);
 			}
 			else
 			{
 				Ar << StructPath;
 			}
 		}
-		
-		return Ar;
 	}
 
 private:
@@ -407,3 +376,14 @@ FORCEINLINE TStructOnScope<T> MakeStructOnScope(TArgs&&... Args)
 	Struct.template InitializeAs<U>(Forward<TArgs>(Args)...);
 	return Struct;
 }
+
+template<typename T>
+FArchive& operator<<(FArchive& Ar, TStructOnScope<T>& Struct)
+{
+	Struct.Serialize(Ar);
+	return Ar;
+}
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
+#endif

@@ -3,9 +3,11 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "IDesktopPlatform.h"
 #include "Modules/ModuleInterface.h"
 #include "Modules/ModuleManager.h"
-#include "IDesktopPlatform.h"
+
+class IDesktopPlatform;
 
 class FDesktopPlatformModule : public IModuleInterface
 {
@@ -17,6 +19,15 @@ public:
 	{
 		FDesktopPlatformModule& DesktopPlatformModule = FModuleManager::Get().LoadModuleChecked<FDesktopPlatformModule>("DesktopPlatform");
 		return DesktopPlatformModule.GetSingleton();
+	}
+
+	static IDesktopPlatform* TryGet()
+	{
+		if (FDesktopPlatformModule* DesktopPlatformModule = FModuleManager::Get().LoadModulePtr<FDesktopPlatformModule>("DesktopPlatform"))
+		{
+			return DesktopPlatformModule->GetSingleton();
+		}
+		return nullptr;
 	}
 
 private:

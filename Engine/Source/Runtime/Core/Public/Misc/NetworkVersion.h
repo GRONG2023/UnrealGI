@@ -2,10 +2,11 @@
 
 #pragma once
 
-#include "CoreTypes.h"
 #include "Containers/UnrealString.h"
-#include "Logging/LogMacros.h"
+#include "CoreTypes.h"
 #include "Delegates/Delegate.h"
+#include "Logging/LogMacros.h"
+#include "Misc/EngineNetworkCustomVersion.h"
 
 // The version number used for determining network compatibility. If zero, uses the engine compatible version.
 #define ENGINE_NET_VERSION  0
@@ -18,66 +19,75 @@ CORE_API DECLARE_LOG_CATEGORY_EXTERN( LogNetVersion, Log, All );
 class FNetworkReplayVersion
 {
 public:
-	FNetworkReplayVersion() : NetworkVersion( 0 ), Changelist( 0 )
+	FNetworkReplayVersion() 
+		: NetworkVersion(0)
+		, Changelist(0)
 	{
 	}
-	FNetworkReplayVersion( const FString& InAppString, const uint32 InNetworkVersion, const uint32 InChangelist ) : AppString( InAppString ), NetworkVersion( InNetworkVersion ), Changelist( InChangelist )
+
+	FNetworkReplayVersion(const FString& InAppString, const uint32 InNetworkVersion, const uint32 InChangelist) 
+		: AppString(InAppString)
+		, NetworkVersion(InNetworkVersion)
+		, Changelist(InChangelist)
 	{
 	}
 
 	FString		AppString;
+	/** This is a hash of compatible versions, and not pulled directly from any version enums. */
 	uint32		NetworkVersion;
 	uint32		Changelist;
 };
 
-enum EEngineNetworkVersionHistory
+/**
+ * List of runtime features that can affect network compatibility between two connections
+ */
+enum class EEngineNetworkRuntimeFeatures : uint16
 {
-	HISTORY_INITIAL = 1,
-	HISTORY_REPLAY_BACKWARDS_COMPAT = 2,			// Bump version to get rid of older replays before backwards compat was turned on officially
-	HISTORY_MAX_ACTOR_CHANNELS_CUSTOMIZATION = 3,	// Bump version because serialization of the actor channels changed
-	HISTORY_REPCMD_CHECKSUM_REMOVE_PRINTF = 4,		// Bump version since the way FRepLayoutCmd::CompatibleChecksum was calculated changed due to an optimization
-	HISTORY_NEW_ACTOR_OVERRIDE_LEVEL = 5,			// Bump version since a level reference was added to the new actor information
-	HISTORY_CHANNEL_NAMES = 6,						// Bump version since channel type is now an fname
-	HISTORY_CHANNEL_CLOSE_REASON = 7,				// Bump version to serialize a channel close reason in bunches instead of bDormant
-	HISTORY_ACKS_INCLUDED_IN_HEADER = 8,			// Bump version since acks are now sent as part of the header
-	HISTORY_NETEXPORT_SERIALIZATION = 9,			// Bump version due to serialization change to FNetFieldExport
-	HISTORY_NETEXPORT_SERIALIZE_FIX = 10,			// Bump version to fix net field export name serialization 
-	HISTORY_FAST_ARRAY_DELTA_STRUCT = 11,			// Bump version to allow fast array serialization, delta struct serialization.
-	HISTORY_FIX_ENUM_SERIALIZATION = 12,			// Bump version to fix enum net serialization issues.
-	HISTORY_OPTIONALLY_QUANTIZE_SPAWN_INFO = 13,	// Bump version to conditionally disable quantization for Scale, Location, and Velocity when spawning network actors.
-	HISTORY_JITTER_IN_HEADER = 14,					// Bump version since we added jitter clock time to packet headers and removed remote saturation
-	HISTORY_CLASSNETCACHE_FULLNAME = 15,			// Bump version to use full paths in GetNetFieldExportGroupForClassNetCache
-	HISTORY_REPLAY_DORMANCY = 16,					// Bump version to support dormancy properly in replays
-	HISTORY_ENUM_SERIALIZATION_COMPAT = 17,			// Bump version to include enum bits required for serialization into compat checksums, as well as unify enum and byte property enum serialization
-	// New history items go above here.
-
-	HISTORY_ENGINENETVERSION_PLUS_ONE,
-	HISTORY_ENGINENETVERSION_LATEST = HISTORY_ENGINENETVERSION_PLUS_ONE - 1,
+	None = 0,
+	IrisEnabled = 1 << None, // Are we running the Iris or Generic replication system
 };
+ENUM_CLASS_FLAGS(EEngineNetworkRuntimeFeatures);
 
-struct CORE_API FNetworkVersion
+struct FNetworkVersion
 {
 	/** Called in GetLocalNetworkVersion if bound */
 	DECLARE_DELEGATE_RetVal( uint32, FGetLocalNetworkVersionOverride );
-	static FGetLocalNetworkVersionOverride GetLocalNetworkVersionOverride;
+	static CORE_API FGetLocalNetworkVersionOverride GetLocalNetworkVersionOverride;
 
 	/** Called in IsNetworkCompatible if bound */
 	DECLARE_DELEGATE_RetVal_TwoParams( bool, FIsNetworkCompatibleOverride, uint32, uint32 );
-	static FIsNetworkCompatibleOverride IsNetworkCompatibleOverride;
+	static CORE_API FIsNetworkCompatibleOverride IsNetworkCompatibleOverride;
 
-	static uint32 GetNetworkCompatibleChangelist();
-	static uint32 GetReplayCompatibleChangelist();
-	static uint32 GetEngineNetworkProtocolVersion();
-	static uint32 GetGameNetworkProtocolVersion();
-	static uint32 GetEngineCompatibleNetworkProtocolVersion();
-	static uint32 GetGameCompatibleNetworkProtocolVersion();
+	/** Called in GetReplayCompatibleChangelist if bound */
+	DECLARE_DELEGATE_RetVal(uint32, FGetReplayCompatibleChangeListOverride);
+	static CORE_API FGetReplayCompatibleChangeListOverride GetReplayCompatibleChangeListOverride;
+
+	static CORE_API uint32 GetNetworkCompatibleChangelist();
+	static CORE_API uint32 GetReplayCompatibleChangelist();
+
+	UE_DEPRECATED(5.2, "Please use GetNetworkProtocolVersion instead.")
+	static CORE_API uint32 GetEngineNetworkProtocolVersion();
+	UE_DEPRECATED(5.2, "Please use GetNetworkProtocolVersion instead.")
+	static CORE_API uint32 GetGameNetworkProtocolVersion();
+
+	UE_DEPRECATED(5.2, "Please use GetCompatibleNetworkProtocolVersion instead.")
+	static CORE_API uint32 GetEngineCompatibleNetworkProtocolVersion();
+	UE_DEPRECATED(5.2, "Please use GetCompatibleNetworkProtocolVersion instead.")
+	static CORE_API uint32 GetGameCompatibleNetworkProtocolVersion();
+
+	static CORE_API uint32 GetNetworkProtocolVersion(const FGuid& VersionGuid);
+	static CORE_API uint32 GetCompatibleNetworkProtocolVersion(const FGuid& VersionGuid);
+
+	static CORE_API const FCustomVersionContainer& GetNetworkCustomVersions();
+
+	static CORE_API void RegisterNetworkCustomVersion(const FGuid& VersionGuid, int32 Version, int32 CompatibleVersion, const FName& FriendlyName);
 
 	/**
 	* Generates a version number, that by default, is based on a checksum of the engine version + project name + project version string
 	* Game/project code can completely override what this value returns through the GetLocalNetworkVersionOverride delegate
 	* If called with AllowOverrideDelegate=false, we will not call the game project override. (This allows projects to call base implementation in their project implementation)
 	*/
-	static uint32 GetLocalNetworkVersion( bool AllowOverrideDelegate=true );
+	static CORE_API uint32 GetLocalNetworkVersion( bool AllowOverrideDelegate=true );
 
 	/**
 	* Determine if a connection is compatible with this instance
@@ -88,12 +98,12 @@ struct CORE_API FNetworkVersion
 	*
 	* @return true if the two instances can communicate, false otherwise
 	*/
-	static bool IsNetworkCompatible( const uint32 LocalNetworkVersion, const uint32 RemoteNetworkVersion );
+	static CORE_API bool IsNetworkCompatible( const uint32 LocalNetworkVersion, const uint32 RemoteNetworkVersion );
 
 	/**
 	* Generates a special struct that contains information to send to replay server
 	*/
-	static FNetworkReplayVersion GetReplayVersion();
+	static CORE_API FNetworkReplayVersion GetReplayVersion();
 
 	/**
 	* Sets the project version used for networking. Needs to be a function to verify
@@ -102,18 +112,28 @@ struct CORE_API FNetworkVersion
 	* @param  InVersion
 	* @return void
 	*/
-	static void SetProjectVersion(const TCHAR* InVersion);
+	static CORE_API void SetProjectVersion(const TCHAR* InVersion);
 
 	/**
 	* Sets the game network protocol version used for networking and invalidate cached values
 	*/
-	static void SetGameNetworkProtocolVersion(uint32 GameNetworkProtocolVersion);
+	static CORE_API void SetGameNetworkProtocolVersion(uint32 GameNetworkProtocolVersion);
 
 	/**
 	* Sets the game compatible network protocol version used for networking and invalidate cached values
 	*/
-	static void SetGameCompatibleNetworkProtocolVersion(uint32 GameCompatibleNetworkProtocolVersion);
+	static CORE_API void SetGameCompatibleNetworkProtocolVersion(uint32 GameCompatibleNetworkProtocolVersion);
 
+	/**
+	 * Compares if the connection's runtime features are compatible with each other
+	 */
+	static CORE_API bool AreNetworkRuntimeFeaturesCompatible(EEngineNetworkRuntimeFeatures LocalFeatures, EEngineNetworkRuntimeFeatures RemoteFeatures);
+
+	/**
+	 * Build and return a string describing the status of the the network runtime features bitflag
+	 */
+	static CORE_API void DescribeNetworkRuntimeFeaturesBitset(EEngineNetworkRuntimeFeatures FeaturesBitflag, FStringBuilderBase& OutVerboseDescription);
+	
 	/**
 	* Returns the project version used by networking
 	* 
@@ -131,14 +151,21 @@ protected:
 	/**
 	* Used to allow BP only projects to override network versions
 	*/
-	static FString& GetProjectVersion_Internal();
+	static CORE_API FString& GetProjectVersion_Internal();
 
-	static bool		bHasCachedNetworkChecksum;
-	static uint32	CachedNetworkChecksum;
+	static CORE_API bool		bHasCachedNetworkChecksum;
+	static CORE_API uint32	CachedNetworkChecksum;
 
-	static uint32	EngineNetworkProtocolVersion;
-	static uint32	GameNetworkProtocolVersion;
+	static CORE_API bool		bHasCachedReplayChecksum;
+	static CORE_API uint32	CachedReplayChecksum;
 
-	static uint32	EngineCompatibleNetworkProtocolVersion;
-	static uint32	GameCompatibleNetworkProtocolVersion;
+	UE_DEPRECATED(5.2, "Now storing this value in NetworkCustomVersions, do not use directly.")
+	static CORE_API uint32	EngineNetworkProtocolVersion;
+	UE_DEPRECATED(5.2, "Now storing this value in NetworkCustomVersions, do not use directly.")
+	static CORE_API uint32	GameNetworkProtocolVersion;
+
+	UE_DEPRECATED(5.2, "Now storing this value in CompatibleNetworkCustomVersions, do not use directly.")
+	static CORE_API uint32	EngineCompatibleNetworkProtocolVersion;
+	UE_DEPRECATED(5.2, "Now storing this value in CompatibleNetworkCustomVersions, do not use directly.")
+	static CORE_API uint32	GameCompatibleNetworkProtocolVersion;
 };

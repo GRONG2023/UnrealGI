@@ -28,14 +28,15 @@ namespace UnrealBuildTool.Rules
 					"SlateCore",
                     "ApplicationCore",
 					"Engine",
+					"EditorFramework",
 					"UnrealEd",
-					"EditorStyle"
                 }
 			);
 
 			CircularlyReferencedDependentModules.AddRange(
 				new string[]
 				{
+					"MaterialShaderQualitySettings",
 					"UnrealEd"
 				}
 			);

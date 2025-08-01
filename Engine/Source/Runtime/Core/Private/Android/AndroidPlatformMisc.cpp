@@ -6,6 +6,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/App.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Misc/CoreDelegates.h"
 #include "Misc/FeedbackContext.h"
 #include "Misc/OutputDeviceRedirector.h"
 #include "HAL/IConsoleManager.h"
@@ -47,11 +48,11 @@
 
 #include "Android/AndroidPlatformStackWalk.h"
 #include "Android/AndroidSignals.h"
+#include "AndroidScudoMemoryTrace.h"
 
 #include "Misc/OutputDevice.h"
 #include "Logging/LogMacros.h"
 #include "Misc/OutputDeviceError.h"
-#include "Async/Async.h"
 
 #if USE_ANDROID_JNI
 extern AAssetManager * AndroidThunkCpp_GetAssetManager();
@@ -122,6 +123,7 @@ FString FAndroidMisc::DeviceMake; // make of the device we are running on eg. "s
 FString FAndroidMisc::DeviceModel; // model of the device we are running on eg "SAMSUNG-SGH-I437"
 FString FAndroidMisc::DeviceBuildNumber; // platform image build number of device "R16NW.G960NKSU1ARD6"
 FString FAndroidMisc::OSLanguage; // language code the device is set to eg "deu"
+FString FAndroidMisc::ProductName; // product/marketing name of the device, if available.
 
 // Build/API level we are running.
 int32 FAndroidMisc::AndroidBuildVersion = 0;
@@ -135,11 +137,18 @@ bool FAndroidMisc::bNeedsRestartAfterPSOPrecompile = false;
 // Key/Value pair variables from the optional configuration.txt
 TMap<FString, FString> FAndroidMisc::ConfigRulesVariables;
 
+static FCriticalSection AndroidThreadNamesLock;
+static TMap<uint32, const char*, TFixedSetAllocator<16>> AndroidThreadNames;
+
 EDeviceScreenOrientation FAndroidMisc::DeviceOrientation = EDeviceScreenOrientation::Unknown;
 
 extern void AndroidThunkCpp_ForceQuit();
 
 extern void AndroidThunkCpp_SetOrientation(int32 Value);
+
+extern void AndroidThunkCpp_SetCellularPreference(int32 Value);
+
+extern int32 AndroidThunkCpp_GetCellularPreference();
 
 // From AndroidFile.cpp
 extern FString GFontPathBase;
@@ -171,6 +180,8 @@ static void InitCpuThermalSensor()
 	CVarAndroidCPUThermalSensorFilePath->SetOnChangedCallback(FConsoleVariableDelegate::CreateStatic(&OverrideCpuThermalSensorFileFromCVar));
 
 	uint32 Counter = 0;
+	const uint32 INVALID_INDEX = -1;
+	uint32 CPUSensorIndex = INVALID_INDEX;
 	while (true)
 	{
 		char Buf[256] = "";
@@ -186,6 +197,12 @@ static void InitCpuThermalSensor()
 			}
 			*Ptr = 0;
 
+			if (strstr(Buf, "cpu-") && CPUSensorIndex == INVALID_INDEX)
+			{
+				CPUSensorIndex = Counter;
+				FCStringAnsi::Sprintf(AndroidCpuThermalSensorFileBuf, "/sys/devices/virtual/thermal/thermal_zone%u/temp", Counter);
+			}
+
 			UE_LOG(LogAndroid, Display, TEXT("Detected thermal sensor `%s` at /sys/devices/virtual/thermal/thermal_zone%u/temp"), ANSI_TO_TCHAR(Buf), Counter);
 			++Counter;
 		}
@@ -200,20 +217,28 @@ static void InitCpuThermalSensor()
 
 	for (uint32 i = 0; i < SensorLocations.Num(); ++i)
 	{
-		const char* SensorFilePath = TCHAR_TO_ANSI(*SensorLocations[i]);
+		auto ConvertedStr = StringCast<ANSICHAR>(*SensorLocations[i]);
+		const char* SensorFilePath = ConvertedStr.Get();
 		if (FILE* File = fopen(SensorFilePath, "r"))
 		{
 			FCStringAnsi::Strcpy(AndroidCpuThermalSensorFileBuf, SensorFilePath);
-			UE_LOG(LogAndroid, Display, TEXT("Selecting thermal sensor located at `%s`"), ANSI_TO_TCHAR(AndroidCpuThermalSensorFileBuf));
+			UE_LOG(LogAndroid, Display, TEXT("Selecting thermal sensor located at `%s`"), *SensorLocations[i]);
 			fclose(File);
 			return;
 		}
 	}
 
-	UE_LOG(LogAndroid, Display, TEXT("No CPU thermal sensor was detected. To manually override the sensor path set android.CPUThermalSensorFilePath CVar."));
+	if (CPUSensorIndex != INVALID_INDEX)
+	{
+		UE_LOG(LogAndroid, Display, TEXT("Selecting thermal sensor located at `%s`"), ANSI_TO_TCHAR(AndroidCpuThermalSensorFileBuf));
+	}
+	else
+	{
+		UE_LOG(LogAndroid, Display, TEXT("No CPU thermal sensor was detected. To manually override the sensor path set android.CPUThermalSensorFilePath CVar."));
+	}
 }
 
-void FAndroidMisc::RequestExit( bool Force )
+void FAndroidMisc::RequestExit( bool Force, const TCHAR* CallSite)
 {
 
 #if PLATFORM_COMPILER_OPTIMIZATION_PG_PROFILING
@@ -222,10 +247,18 @@ void FAndroidMisc::RequestExit( bool Force )
 	if (!GIsCriticalError)
 	{
 		PGO_WriteFile();
+		// exit now to avoid a possible second PGO write when AndroidMain exits.
+		Force = true;
 	}
 #endif
 
-	UE_LOG(LogAndroid, Log, TEXT("FAndroidMisc::RequestExit(%i)"), Force);
+	UE_LOG(LogAndroid, Log, TEXT("FAndroidMisc::RequestExit(%i, %s)"), Force,
+		CallSite ? CallSite : TEXT("<NoCallSiteInfo>"));
+	if (GLog)
+	{
+		GLog->Flush();
+	}
+
 	if (Force)
 	{
 #if USE_ANDROID_JNI
@@ -256,7 +289,7 @@ void FAndroidMisc::LocalPrint(const TCHAR *Message)
 {
 	// Builds for distribution should not have logging in them:
 	// http://developer.android.com/tools/publishing/preparing.html#publishing-configure
-#if !UE_BUILD_SHIPPING
+#if !UE_BUILD_SHIPPING || ENABLE_PGO_PROFILE
 	const int MAX_LOG_LENGTH = 4096;
 	// not static since may be called by different threads
 	wchar_t MessageBuffer[MAX_LOG_LENGTH];
@@ -285,7 +318,7 @@ void FAndroidMisc::LocalPrint(const TCHAR *Message)
 			}
 		}
 		*WritePtr = '\0';
-		__android_log_print(ANDROID_LOG_DEBUG, "UE4", "%ls", MessageBuffer);
+		__android_log_print(ANDROID_LOG_DEBUG, "UE", "%ls", MessageBuffer);
 	}
 #endif
 }
@@ -317,17 +350,17 @@ static struct
 	double	TimeOfChange;
 } CurrentVolume;
 
-#if USE_ANDROID_JNI
+#if USE_ANDROID_JNI && !USE_ANDROID_STANDALONE
 extern "C"
 {
 
-	JNIEXPORT void Java_com_epicgames_ue4_HeadsetReceiver_stateChanged(JNIEnv * jni, jclass clazz, jint state)
+	JNIEXPORT void Java_com_epicgames_unreal_HeadsetReceiver_stateChanged(JNIEnv * jni, jclass clazz, jint state)
 	{
 		FPlatformMisc::LowLevelOutputDebugStringf(TEXT("nativeHeadsetEvent(%i)"), state);
 		HeadPhonesArePluggedIn = (state == 1);
 	}
 
-	JNIEXPORT void Java_com_epicgames_ue4_VolumeReceiver_volumeChanged(JNIEnv * jni, jclass clazz, jint volume)
+	JNIEXPORT void Java_com_epicgames_unreal_VolumeReceiver_volumeChanged(JNIEnv * jni, jclass clazz, jint volume)
 	{
 		FPlatformMisc::LowLevelOutputDebugStringf(TEXT("nativeVolumeEvent(%i)"), volume);
 		ReceiversLock.Lock();
@@ -336,7 +369,7 @@ extern "C"
 		ReceiversLock.Unlock();
 	}
 
-	JNIEXPORT void Java_com_epicgames_ue4_BatteryReceiver_dispatchEvent(JNIEnv * jni, jclass clazz, jint status, jint level, jint temperature)
+	JNIEXPORT void Java_com_epicgames_unreal_BatteryReceiver_dispatchEvent(JNIEnv * jni, jclass clazz, jint status, jint level, jint temperature)
 	{
 		FPlatformMisc::LowLevelOutputDebugStringf(TEXT("nativeBatteryEvent(stat = %i, lvl = %i %, temp = %3.2f \u00B0C)"), status, level, float(temperature)/10.f);
 
@@ -365,7 +398,7 @@ extern "C"
 }
 #endif
 
-#if USE_ANDROID_JNI
+#if USE_ANDROID_JNI && !USE_ANDROID_STANDALONE
 
 // Manage Java side OS event receivers.
 static struct
@@ -377,13 +410,15 @@ static struct
 	jmethodID		StopReceiver;
 } JavaEventReceivers[] =
 {
-	{ "com/epicgames/ue4/VolumeReceiver",{ "volumeChanged", "(I)V",  (void *)Java_com_epicgames_ue4_VolumeReceiver_volumeChanged } },
-	{ "com/epicgames/ue4/BatteryReceiver",{ "dispatchEvent", "(III)V",(void *)Java_com_epicgames_ue4_BatteryReceiver_dispatchEvent } },
-	{ "com/epicgames/ue4/HeadsetReceiver",{ "stateChanged",  "(I)V",  (void *)Java_com_epicgames_ue4_HeadsetReceiver_stateChanged } },
+	{ "com/epicgames/unreal/VolumeReceiver",{ "volumeChanged", "(I)V",  (void *)Java_com_epicgames_unreal_VolumeReceiver_volumeChanged } },
+	{ "com/epicgames/unreal/BatteryReceiver",{ "dispatchEvent", "(III)V",(void *)Java_com_epicgames_unreal_BatteryReceiver_dispatchEvent } },
+	{ "com/epicgames/unreal/HeadsetReceiver",{ "stateChanged",  "(I)V",  (void *)Java_com_epicgames_unreal_HeadsetReceiver_stateChanged } },
 };
 
 void InitializeJavaEventReceivers()
 {
+	UE_LOG(LogAndroid, Log, TEXT("InitializeJavaEventReceivers"));
+
 	// Register natives to receive Volume, Battery, Headphones events
 	JNIEnv* JEnv = AndroidJavaEnv::GetJavaEnv();
 	if (nullptr != JEnv)
@@ -546,18 +581,18 @@ void FAndroidMisc::PlatformInit()
 	}
 #endif
 
-#if USE_ANDROID_JNI
+#if USE_ANDROID_JNI && !USE_ANDROID_STANDALONE
 	InitializeJavaEventReceivers();
 	AndroidOnBackgroundBinding = FCoreDelegates::ApplicationWillEnterBackgroundDelegate.AddStatic(EnableJavaEventReceivers, false);
 	AndroidOnForegroundBinding = FCoreDelegates::ApplicationHasEnteredForegroundDelegate.AddStatic(EnableJavaEventReceivers, true);
+
+	extern void AndroidThunkJava_AddNetworkListener();
+	AndroidThunkJava_AddNetworkListener();
 #endif
 
 	InitCpuThermalSensor();
 
-	UE_LOG(LogInit, Log, TEXT(" - This binary is optimized with LTO: %s, PGO: %s, instrumented for PGO data collection: %s"),
-		PLATFORM_COMPILER_OPTIMIZATION_LTCG ? TEXT("yes") : TEXT("no"),
-		FPlatformMisc::IsPGOEnabled() ? TEXT("yes") : TEXT("no"),
-		PLATFORM_COMPILER_OPTIMIZATION_PG_PROFILING ? TEXT("yes") : TEXT("no"));
+	AndroidScudoMemoryTrace::Init();
 }
 
 extern void AndroidThunkCpp_DismissSplashScreen();
@@ -568,7 +603,7 @@ void FAndroidMisc::PlatformTearDown()
 	StopTraceMarkers();
 #endif
 
-	auto RemoveBinding = [](FCoreDelegates::FApplicationLifetimeDelegate& ApplicationLifetimeDelegate, FDelegateHandle& DelegateBinding)
+	auto RemoveBinding = [](TMulticastDelegate<void()>& ApplicationLifetimeDelegate, FDelegateHandle& DelegateBinding)
 	{
 		if (DelegateBinding.IsValid())
 		{
@@ -581,13 +616,42 @@ void FAndroidMisc::PlatformTearDown()
 	RemoveBinding(FCoreDelegates::ApplicationHasEnteredForegroundDelegate, AndroidOnForegroundBinding);
 }
 
+void FAndroidMisc::UpdateDeviceOrientation()
+{
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_FAndroidMisc_UpdateDeviceOrientation);
+#if USE_ANDROID_JNI && !USE_ANDROID_STANDALONE
+	JNIEnv* JEnv = AndroidJavaEnv::GetJavaEnv();
+	if (JEnv)
+	{
+		static jmethodID getOrientationMethod = 0;
+
+		if (getOrientationMethod == 0)
+		{
+			jclass MainClass = AndroidJavaEnv::FindJavaClassGlobalRef("com/epicgames/unreal/GameActivity");
+			if (MainClass != nullptr)
+			{
+				getOrientationMethod = JEnv->GetMethodID(MainClass, "AndroidThunkJava_GetDeviceOrientation", "()I");
+				JEnv->DeleteGlobalRef(MainClass);
+			}
+		}
+
+		if (getOrientationMethod != 0)
+		{
+			DeviceOrientation = (EDeviceScreenOrientation)JEnv->CallIntMethod(AndroidJavaEnv::GetGameActivityThis(), getOrientationMethod);
+		}
+	}
+#endif
+}
+
 void FAndroidMisc::PlatformHandleSplashScreen(bool ShowSplashScreen)
 {
-#if USE_ANDROID_JNI
+#if USE_ANDROID_JNI && !USE_ANDROID_STANDALONE
 	if (!ShowSplashScreen)
 	{
 		AndroidThunkCpp_DismissSplashScreen();
 	}
+	// Update the device orientation in case the game thread is blocked
+	FAndroidMisc::UpdateDeviceOrientation();
 #endif
 }
 
@@ -612,8 +676,14 @@ const TCHAR* FAndroidMisc::GetSystemErrorMessage(TCHAR* OutBuffer, int32 BufferC
 		Error = errno;
 	}
 	char ErrorBuffer[1024];
-	strerror_r(Error, ErrorBuffer, 1024);
-	FCString::Strcpy(OutBuffer, BufferCount, UTF8_TO_TCHAR((const ANSICHAR*)ErrorBuffer));
+	if (strerror_r(Error, ErrorBuffer, 1024) == 0)
+	{
+		FCString::Strcpy(OutBuffer, BufferCount, UTF8_TO_TCHAR((const ANSICHAR*)ErrorBuffer));
+	}
+	else
+	{
+		*OutBuffer = TEXT('\0');
+	}
 	return OutBuffer;
 }
 
@@ -766,95 +836,13 @@ bool FAndroidMisc::UseRenderThread()
 	return true;
 }
 
-#if PLATFORM_LUMIN
-
 int32 FAndroidMisc::NumberOfCores()
-{
-//#if USE_ANDROID_JNI
-//	static int32 NumberOfCores = android_getCpuCount();
-//	return NumberOfCores;
-//#else
-	// WARNING: this function ignores edge cases like affinity mask changes (and even more fringe cases like CPUs going offline)
-	// in the name of performance (higher level code calls NumberOfCores() way too often...)
-	static int32 NumberOfCores = 0;
-	if (NumberOfCores == 0)
-	{
-		if (FParse::Param(FCommandLine::Get(), TEXT("usehyperthreading")))
-		{
-			NumberOfCores = NumberOfCoresIncludingHyperthreads();
-		}
-		else
-		{
-			cpu_set_t AvailableCpusMask;
-			CPU_ZERO(&AvailableCpusMask);
-
-			if (0 != sched_getaffinity(0, sizeof(AvailableCpusMask), &AvailableCpusMask))
-			{
-				NumberOfCores = 1;	// we are running on something, right?
-			}
-			else
-			{
-				// read the proc core counts and the proc max frequencies from cpuinfo because of 
-				// potential security restrictions on the sys mount
-				if (FILE* FileGlobalCpuStats = fopen("/proc/cpuinfo", "r"))
-				{
-					char LineBuffer[256] = { 0 };
-					do
-					{
-						char *Line = fgets(LineBuffer, UE_ARRAY_COUNT(LineBuffer), FileGlobalCpuStats);
-						if (Line == nullptr)
-						{
-							break;	// eof or an error
-						}
-						// count the number of processor entries in loop
-						// for Lumin one processor translates to one core
-						if (strstr(Line, "processor") == Line)
-						{
-							NumberOfCores += 1;
-						}
-					} while (1);
-					fclose(FileGlobalCpuStats);
-				}
-			}
-		}
-	}
-	return NumberOfCores;
-//#endif
-}
-
-
-int32 FAndroidMisc::NumberOfCoresIncludingHyperthreads()
 {
 #if USE_ANDROID_JNI
-	return FPlatformMisc::NumberOfCores();
-#else
-	// WARNING: this function ignores edge cases like affinity mask changes (and even more fringe cases like CPUs going offline)
-	// in the name of performance (higher level code calls NumberOfCores() way too often...)
-	static int32 NumCoreIds = 0;
-	if (NumCoreIds == 0)
-	{
-		cpu_set_t AvailableCpusMask;
-		CPU_ZERO(&AvailableCpusMask);
-
-		if (0 != sched_getaffinity(0, sizeof(AvailableCpusMask), &AvailableCpusMask))
-		{
-			NumCoreIds = 1;	// we are running on something, right?
-		}
-		else
-		{
-			return CPU_COUNT(&AvailableCpusMask);
-		}
-	}
-	return NumCoreIds;
-#endif
-}
-
-
-#else
-
-int32 FAndroidMisc::NumberOfCores()
-{
 	int32 NumberOfCores = android_getCpuCount();
+#else
+	int32 NumberOfCores = 0;
+#endif
 
 	static int CalculatedNumberOfCores = 0;
 	if (CalculatedNumberOfCores == 0)
@@ -878,7 +866,6 @@ int32 FAndroidMisc::NumberOfCoresIncludingHyperthreads()
 	return NumberOfCores();
 }
 
-#endif
 
 static FAndroidMisc::FCPUState CurrentCPUState;
 
@@ -932,7 +919,7 @@ FAndroidMisc::FCPUState& FAndroidMisc::GetCPUState(){
 		}
 		fclose(FileHandle);
 
-		double WallTime;
+		uint64_t WallTime;
 		double CPULoad[CurrentCPUState.CoreCount];
 		CurrentCPUState.AverageUtilization = 0.0;
 		for (size_t n = 0; n < CurrentCPUState.CoreCount; n++) {
@@ -948,7 +935,7 @@ FAndroidMisc::FCPUState& FAndroidMisc::GetCPUState(){
 				CPULoad[n] = 0;
 				continue;
 			}
-			CPULoad[n] = (WallTime - (double)IdleTime) * 100.0 / WallTime;
+			CPULoad[n] = ((double)WallTime - (double)IdleTime) * 100.0 / (double)WallTime;
 			CurrentCPUState.Utilization[n] = CPULoad[n];
 			CurrentCPUState.AverageUtilization += CPULoad[n];
 		}
@@ -1106,8 +1093,7 @@ void DefaultCrashHandler(const FAndroidCrashContext& Context)
 
 		if (GLog)
 		{
-			GLog->SetCurrentThreadAsMasterThread();
-			GLog->Flush();
+			GLog->Panic();
 		}
 
 		if (GWarn)
@@ -1204,7 +1190,7 @@ private:
 		FPlatformAtomics::AtomicStore(&handling_signal, 0);
 	}
 
-	static void HandleTargetSignal(int Signal, siginfo* Info, void* Context)
+	static void HandleTargetSignal(int Signal, siginfo* Info, void* Context, uint32 CrashingThreadId)
 	{
 		FPlatformStackWalk::HandleBackTraceSignal(Info, Context);
 	}
@@ -1323,8 +1309,8 @@ FString FAndroidMisc::GetFatalSignalMessage(int Signal, siginfo* Info)
 }
 
 // Making the signal handler available to track down issues with failing crash handler.
-static void (*GFatalSignalHandlerOverrideFunc)(int Signal, struct siginfo* Info, void* Context) = nullptr;
-void FAndroidMisc::OverrideFatalSignalHandler(void (*FatalSignalHandlerOverrideFunc)(int Signal, struct siginfo* Info, void* Context))
+static void (*GFatalSignalHandlerOverrideFunc)(int Signal, struct siginfo* Info, void* Context, uint32 CrashingThreadId) = nullptr;
+void FAndroidMisc::OverrideFatalSignalHandler(void (*FatalSignalHandlerOverrideFunc)(int Signal, struct siginfo* Info, void* Context, uint32 CrashingThreadId))
 {
 	GFatalSignalHandlerOverrideFunc = FatalSignalHandlerOverrideFunc;
 }
@@ -1377,11 +1363,11 @@ protected:
 		raise(Signal);
 	}
 
-	static void HandleTargetSignal(int Signal, siginfo* Info, void* Context)
+	static void HandleTargetSignal(int Signal, siginfo* Info, void* Context, uint32 CrashingThreadId)
 	{
 		if (GFatalSignalHandlerOverrideFunc)
 		{
-			GFatalSignalHandlerOverrideFunc(Signal, Info, Context);
+			GFatalSignalHandlerOverrideFunc(Signal, Info, Context, CrashingThreadId);
 		}
 		else
 		{
@@ -1391,7 +1377,7 @@ protected:
 			FString Message = FAndroidMisc::GetFatalSignalMessage(Signal, Info);
 			FAndroidCrashContext CrashContext(ECrashContextType::Crash, *Message);
 
-			CrashContext.InitFromSignal(Signal, Info, Context);
+			CrashContext.InitFromSignal(Signal, Info, Context, CrashingThreadId);
 			CrashContext.CaptureCrashInfo();
 			if (GCrashHandlerPointer)
 			{
@@ -1476,8 +1462,7 @@ void FAndroidMisc::TriggerCrashHandler(ECrashContextType InType, const TCHAR* In
 		// we dont flush logs during a fatal signal, malloccrash can cause us to deadlock.
 		if (GLog)
 		{
-			GLog->PanicFlushThreadedLogs();
-			GLog->Flush();
+			GLog->Panic();
 		}
 		if (GWarn)
 		{
@@ -1657,9 +1642,11 @@ void FAndroidMisc::PrepareMobileHaptics(EMobileHapticsType Type)
 void FAndroidMisc::TriggerMobileHaptics()
 {
 #if USE_ANDROID_JNI
-	extern void AndroidThunkCpp_Vibrate(int32 Duration);
-	// tiny little vibration
-	AndroidThunkCpp_Vibrate(10);
+	extern void AndroidThunkCpp_Vibrate(int32 Intensity, int32 Duration);
+	// directly play a small vibration one-shot
+	// note: this will do nothing if device is already playing force feedback (non-zero intensity)
+	// but will play and not be cancelled by force feedback since it only sends updates when not already above zero
+	AndroidThunkCpp_Vibrate(255, 10);
 #endif
 }
 
@@ -1714,7 +1701,7 @@ bool FAndroidMisc::FileExistsInPlatformPackage(const FString& RelativePath)
 	return false;
 }
 
-void FAndroidMisc::SetVersionInfo( FString InAndroidVersion, int32 InTargetSDKVersion, FString InDeviceMake, FString InDeviceModel, FString InDeviceBuildNumber, FString InOSLanguage )
+void FAndroidMisc::SetVersionInfo( FString InAndroidVersion, int32 InTargetSDKVersion, FString InDeviceMake, FString InDeviceModel, FString InDeviceBuildNumber, FString InOSLanguage, FString InProductName)
 {
 	AndroidVersion = InAndroidVersion;
 	AndroidMajorVersion = FCString::Atoi(*InAndroidVersion);
@@ -1723,8 +1710,8 @@ void FAndroidMisc::SetVersionInfo( FString InAndroidVersion, int32 InTargetSDKVe
 	DeviceModel = InDeviceModel;
 	DeviceBuildNumber = InDeviceBuildNumber;
 	OSLanguage = InOSLanguage;
-
-	UE_LOG(LogAndroid, Display, TEXT("Android Version Make Model BuildNumber Language: %s %s %s %s %s"), *AndroidVersion, *DeviceMake, *DeviceModel, *DeviceBuildNumber, *OSLanguage);
+	ProductName = InProductName;
+	UE_LOG(LogAndroid, Display, TEXT("Android Version: %s, Make: %s, Model: %s, BuildNumber: %s, Language: %s, Product name: %s"), *AndroidVersion, *DeviceMake, *DeviceModel, *DeviceBuildNumber, *OSLanguage, ProductName.IsEmpty() ? TEXT("[not set]") : *ProductName);
 }
 
 const FString FAndroidMisc::GetAndroidVersion()
@@ -1762,6 +1749,11 @@ const FString FAndroidMisc::GetOSLanguage()
 	return OSLanguage;
 }
 
+const FString FAndroidMisc::GetProductName()
+{
+	return ProductName;
+}
+
 const FString FAndroidMisc::GetProjectVersion() {
 	return FString::FromInt(GAndroidPackageVersion);
 }
@@ -1793,7 +1785,7 @@ int32 FAndroidMisc::GetAndroidBuildVersion()
 		JNIEnv* JEnv = AndroidJavaEnv::GetJavaEnv();
 		if (nullptr != JEnv)
 		{
-			jclass Class = AndroidJavaEnv::FindJavaClassGlobalRef("com/epicgames/ue4/GameActivity");
+			jclass Class = AndroidJavaEnv::FindJavaClassGlobalRef("com/epicgames/unreal/GameActivity");
 			if (nullptr != Class)
 			{
 				jfieldID Field = JEnv->GetStaticFieldID(Class, "ANDROID_BUILD_VERSION", "I");
@@ -1828,7 +1820,7 @@ bool FAndroidMisc::IsSupportedAndroidDevice()
 		JNIEnv* JEnv = AndroidJavaEnv::GetJavaEnv();
 		if (nullptr != JEnv)
 		{
-			jclass Class = AndroidJavaEnv::FindJavaClassGlobalRef("com/epicgames/ue4/GameActivity");
+			jclass Class = AndroidJavaEnv::FindJavaClassGlobalRef("com/epicgames/unreal/GameActivity");
 			if (nullptr != Class)
 			{
 				jfieldID Field = JEnv->GetStaticFieldID(Class, "bSupportedDevice", "Z");
@@ -1848,23 +1840,6 @@ bool FAndroidMisc::IsSupportedAndroidDevice()
 	return !bForceUnsupported;
 }
 #endif
-
-bool FAndroidMisc::ShouldDisablePluginAtRuntime(const FString& PluginName)
-{
-#if PLATFORM_ANDROID_ARM64 || PLATFORM_ANDROID_X64
-	// disable OnlineSubsystemGooglePlay for unsupported Android architectures
-	if (PluginName.Equals(TEXT("OnlineSubsystemGooglePlay")))
-	{
-		return true;
-	}
-#endif
-	return false;
-}
-
-void FAndroidMisc::SetThreadName(const char* name)
-{
-	pthread_setname_np(pthread_self(), name);
-}
 
 ///////////////////////////////////////////////////////////////////////////////
 //
@@ -2135,7 +2110,7 @@ typedef VkResult(VKAPI_PTR *PFN_vkEnumerateDeviceExtensionProperties)(VkPhysical
 
 ///////////////////////////////////////////////////////////////////////////////
 
-#define UE_VK_API_VERSION	VK_MAKE_VERSION(1, 0, 1)
+#define UE_VK_API_VERSION	VK_MAKE_VERSION(1, 1, 0)
 
 enum class EDeviceVulkanSupportStatus
 {
@@ -2171,9 +2146,9 @@ static EDeviceVulkanSupportStatus AttemptVulkanInit(void* VulkanLib)
 	VkApplicationInfo App;
 	FMemory::Memzero(App);
 	App.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-	App.pApplicationName = "UE4";
+	App.pApplicationName = "UE";
 	App.applicationVersion = 0;
-	App.pEngineName = "UE4";
+	App.pEngineName = "UE";
 	App.engineVersion = 0;
 	App.apiVersion = UE_VK_API_VERSION;
 
@@ -2332,7 +2307,7 @@ static void EstablishVulkanDeviceSupport()
 	}
 }
 
-bool IsDesktopVulkanAvailable()
+bool FAndroidMisc::IsDesktopVulkanAvailable()
 {
 	static int CachedDesktopVulkanAvailable = -1;
 
@@ -2477,7 +2452,7 @@ FString FAndroidMisc::GetVulkanVersion()
 	return VulkanVersionString;
 }
 
-TMap<FString, FString> FAndroidMisc::GetConfigRulesTMap()
+const TMap<FString, FString>& FAndroidMisc::GetConfigRulesTMap()
 {
 	return ConfigRulesVariables;
 }
@@ -2487,7 +2462,26 @@ FString* FAndroidMisc::GetConfigRulesVariable(const FString& Key)
 	return ConfigRulesVariables.Find(Key);
 }
 
-JNI_METHOD void Java_com_epicgames_ue4_GameActivity_nativeSetConfigRulesVariables(JNIEnv* jenv, jobject thiz, jobjectArray KeyValuePairs)
+bool FAndroidMisc::AllowThreadHeartBeat()
+{
+	static uint32 AllowThreadHeartBeatOnce = -1;
+	if (AllowThreadHeartBeatOnce == -1)
+	{
+		const FString* AllowThreadHeartBeatConfigVar = GetConfigRulesVariable(TEXT("EnableThreadHeartBeat"));
+		if (AllowThreadHeartBeatConfigVar)
+		{
+			AllowThreadHeartBeatOnce = (uint32)AllowThreadHeartBeatConfigVar->Equals("true", ESearchCase::IgnoreCase);
+		}
+		else
+		{
+			AllowThreadHeartBeatOnce = 0;
+		}
+	}
+
+	return AllowThreadHeartBeatOnce == 1;
+}
+
+JNI_METHOD void Java_com_epicgames_unreal_GameActivity_nativeSetConfigRulesVariables(JNIEnv* jenv, jobject thiz, jobjectArray KeyValuePairs)
 {
 	int32 Count = jenv->GetArrayLength(KeyValuePairs);
 	int32 Index = 0;
@@ -2502,19 +2496,9 @@ JNI_METHOD void Java_com_epicgames_ue4_GameActivity_nativeSetConfigRulesVariable
 
 extern bool AndroidThunkCpp_HasMetaDataKey(const FString& Key);
 
-bool FAndroidMisc::IsDaydreamApplication()
-{
-#if USE_ANDROID_JNI
-	static const bool bIsDaydreamApplication = AndroidThunkCpp_HasMetaDataKey(TEXT("com.epicgames.ue4.GameActivity.bDaydream"));
-	return bIsDaydreamApplication;
-#else
-	return false;
-#endif
-}
-
 static bool bDetectedDebugger = false;
 
-JNI_METHOD void Java_com_epicgames_ue4_GameActivity_nativeSetAndroidStartupState(JNIEnv* jenv, jobject thiz, jboolean bDebuggerAttached)
+JNI_METHOD void Java_com_epicgames_unreal_GameActivity_nativeSetAndroidStartupState(JNIEnv* jenv, jobject thiz, jboolean bDebuggerAttached)
 {
 	// if Java debugger attached, mark detected (but don't lose previous trigger state)
 	if (bDebuggerAttached)
@@ -2526,7 +2510,6 @@ JNI_METHOD void Java_com_epicgames_ue4_GameActivity_nativeSetAndroidStartupState
 #if !UE_BUILD_SHIPPING
 bool FAndroidMisc::IsDebuggerPresent()
 {
-	extern CORE_API bool GIgnoreDebugger;
 	if (GIgnoreDebugger)
 	{
 		return false;
@@ -2815,7 +2798,10 @@ bool FAndroidMisc::AreHeadPhonesPluggedIn()
 #define ANDROIDTHUNK_CONNECTION_TYPE_WIMAX 5
 #define ANDROIDTHUNK_CONNECTION_TYPE_BLUETOOTH 6
 
-ENetworkConnectionType FAndroidMisc::GetNetworkConnectionType()
+static bool bLastConnectionTypeValid = false;
+static ENetworkConnectionType LastNetworkConnectionType = ENetworkConnectionType::None;
+
+static ENetworkConnectionType PrivateGetNetworkConnectionType()
 {
 #if USE_ANDROID_JNI
 	extern int32 AndroidThunkCpp_GetNetworkConnectionType();
@@ -2834,6 +2820,16 @@ ENetworkConnectionType FAndroidMisc::GetNetworkConnectionType()
 	return ENetworkConnectionType::Unknown;
 }
 
+ENetworkConnectionType FAndroidMisc::GetNetworkConnectionType()
+{
+	if (!bLastConnectionTypeValid)
+	{
+		LastNetworkConnectionType = PrivateGetNetworkConnectionType();
+		bLastConnectionTypeValid = true;
+	}
+	return LastNetworkConnectionType;
+}
+
 #if USE_ANDROID_JNI
 bool FAndroidMisc::HasActiveWiFiConnection()
 {
@@ -2842,6 +2838,20 @@ bool FAndroidMisc::HasActiveWiFiConnection()
 			ConnectionType == ENetworkConnectionType::WiMAX);
 }
 #endif
+
+JNI_METHOD void Java_com_epicgames_unreal_GameActivity_nativeNetworkChanged(JNIEnv* jenv, jobject thiz)
+{
+	LastNetworkConnectionType = PrivateGetNetworkConnectionType();
+	bLastConnectionTypeValid = true;
+	
+	if (FTaskGraphInterface::IsRunning())
+	{
+		FFunctionGraphTask::CreateAndDispatchWhenReady([]()
+		{
+			FCoreDelegates::OnNetworkConnectionChanged.Broadcast(FAndroidMisc::GetNetworkConnectionType());
+		}, TStatId(), NULL, ENamedThreads::GameThread);
+	}
+}
 
 static FAndroidMisc::ReInitWindowCallbackType OnReInitWindowCallback;
 
@@ -3009,10 +3019,16 @@ bool FAndroidMisc::Expand16BitIndicesTo32BitOnLoad()
 	return  (CVarMaliMidgardIndexingBug.GetValueOnAnyThread() > 0);
 }
 
+int FAndroidMisc::GetMobilePropagateAlphaSetting()
+{
+	extern int GAndroidPropagateAlpha;
+	return GAndroidPropagateAlpha;
+}
+
 TArray<int32> FAndroidMisc::GetSupportedNativeDisplayRefreshRates()
 {
 	TArray<int32> Result;
-#if USE_ANDROID_JNI
+#if USE_ANDROID_JNI && !USE_ANDROID_STANDALONE
 	extern TArray<int32> AndroidThunkCpp_GetSupportedNativeDisplayRefreshRates();
 	Result = AndroidThunkCpp_GetSupportedNativeDisplayRefreshRates();
 #else
@@ -3023,7 +3039,7 @@ TArray<int32> FAndroidMisc::GetSupportedNativeDisplayRefreshRates()
 
 bool FAndroidMisc::SetNativeDisplayRefreshRate(int32 RefreshRate)
 {
-#if USE_ANDROID_JNI
+#if USE_ANDROID_JNI && !USE_ANDROID_STANDALONE
 	extern bool AndroidThunkCpp_SetNativeDisplayRefreshRate(int32 RefreshRate);
 	return AndroidThunkCpp_SetNativeDisplayRefreshRate(RefreshRate);
 #else
@@ -3033,7 +3049,7 @@ bool FAndroidMisc::SetNativeDisplayRefreshRate(int32 RefreshRate)
 
 int32 FAndroidMisc::GetNativeDisplayRefreshRate()
 {
-#if USE_ANDROID_JNI
+#if USE_ANDROID_JNI && !USE_ANDROID_STANDALONE
 	extern int32 AndroidThunkCpp_GetNativeDisplayRefreshRate();
 	return AndroidThunkCpp_GetNativeDisplayRefreshRate();
 #else
@@ -3042,65 +3058,13 @@ int32 FAndroidMisc::GetNativeDisplayRefreshRate()
 
 }
 
-static FAndroidMemoryWarningContext GAndroidMemoryWarningContext;
-void (*GMemoryWarningHandler)(const FGenericMemoryWarningContext& Context) = NULL;
-
-static void SendMemoryWarningContext()
-	{
-	if (FTaskGraphInterface::IsRunning())
-	{
-		// Run on game thread to avoid mem handler callback getting confused.
-		AsyncTask(ENamedThreads::GameThread, [AndroidMemoryWarningContext = GAndroidMemoryWarningContext]()
-			{
-				if (GMemoryWarningHandler)
-				{
-					// note that we may also call this when recovering from low memory conditions. (i.e. not in low memory state.)
-					GMemoryWarningHandler(AndroidMemoryWarningContext);
-				}
-			});
-	}
-	else
-	{
-		const FAndroidMemoryWarningContext& Context = GAndroidMemoryWarningContext;
-		UE_LOG(LogAndroid, Warning, TEXT("Not calling memory warning handler, received too early. %d, %d %d %d"), Context.LastTrimMemoryState
-			   , Context.LastNativeMemoryAdvisorState, Context.MemoryAdvisorEstimatedAvailableMemoryMB, Context.OomScore);
-	}
-}
-
-void FAndroidMisc::UpdateOSMemoryStatus(EOSMemoryStatusCategory OSMemoryStatusCategory, int Value)
-{
-	switch (OSMemoryStatusCategory)
-	{
-		case EOSMemoryStatusCategory::OSTrim:
-			GAndroidMemoryWarningContext.LastTrimMemoryState = Value;
-			break;
-		default:
-			checkNoEntry();
-	}
-
-	SendMemoryWarningContext();
-}
-
 FORCEINLINE bool ValueOutsideThreshold(float Value, float BaseLine, float Threshold)
 {
 	return Value > BaseLine * (1.0f + Threshold)
 		|| Value < BaseLine * (1.0f - Threshold);
 }
 
-void FAndroidMisc::UpdateMemoryAdvisorState(int State, int EstimateAvailableMB, int OOMScore)
-{
-	bool bUpdate = GAndroidMemoryWarningContext.LastNativeMemoryAdvisorState != State;
-	bUpdate |= ValueOutsideThreshold(EstimateAvailableMB, GAndroidMemoryWarningContext.MemoryAdvisorEstimatedAvailableMemoryMB, GAndroidMemoryStateChangeThreshold);
-	bUpdate |= ValueOutsideThreshold(OOMScore, GAndroidMemoryWarningContext.OomScore, GAndroidMemoryStateChangeThreshold);
-
-	if (bUpdate)
-	{
-		GAndroidMemoryWarningContext.LastNativeMemoryAdvisorState = State;
-		GAndroidMemoryWarningContext.MemoryAdvisorEstimatedAvailableMemoryMB = EstimateAvailableMB;
-		GAndroidMemoryWarningContext.OomScore = OOMScore;
-		SendMemoryWarningContext();
-	}
-}
+void (*GMemoryWarningHandler)(const FGenericMemoryWarningContext& Context) = NULL;
 
 void FAndroidMisc::SetMemoryWarningHandler(void (*InHandler)(const FGenericMemoryWarningContext& Context))
 {
@@ -3142,14 +3106,53 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #endif // UE_SET_REQUEST_EXIT_ON_TICK_ONLY
 }
 
+void FAndroidMisc::RegisterThreadName(const char* Name, uint32 ThreadId)
+{
+	FScopeLock Lock(&AndroidThreadNamesLock);
+	if (!AndroidThreadNames.Contains(ThreadId))
+	{
+		AndroidThreadNames.Add(ThreadId, Name);
+	}
+}
+
+const char* FAndroidMisc::GetThreadName(uint32 ThreadId)
+{
+	FScopeLock Lock(&AndroidThreadNamesLock);
+	const char** ThreadName = AndroidThreadNames.Find(ThreadId);
+	return ThreadName ? *ThreadName : nullptr;
+}
+
 void FAndroidMisc::SetDeviceOrientation(EDeviceScreenOrientation NewDeviceOrentation)
 {
+	SetAllowedDeviceOrientation(NewDeviceOrentation);
+}
+
+void FAndroidMisc::SetCellularPreference(int32 Value)
+{
 #if USE_ANDROID_JNI
-	AndroidThunkCpp_SetOrientation(GetAndroidScreenOrientation(NewDeviceOrentation));
+	AndroidThunkCpp_SetCellularPreference(Value);
 #endif // USE_ANDROID_JNI
 }
 
+int32 FAndroidMisc::GetCellularPreference()
+{
+	int32 value = 0;
 #if USE_ANDROID_JNI
+	value = AndroidThunkCpp_GetCellularPreference();
+#endif // USE_ANDROID_JNI
+	return value;
+}
+
+void FAndroidMisc::SetAllowedDeviceOrientation(EDeviceScreenOrientation NewAllowedDeviceOrientation)
+{
+	AllowedDeviceOrientation = NewAllowedDeviceOrientation;
+
+#if USE_ANDROID_JNI && !USE_ANDROID_STANDALONE
+	AndroidThunkCpp_SetOrientation(GetAndroidScreenOrientation(NewAllowedDeviceOrientation));
+#endif // USE_ANDROID_JNI
+}
+
+#if USE_ANDROID_JNI && !USE_ANDROID_STANDALONE
 int32 FAndroidMisc::GetAndroidScreenOrientation(EDeviceScreenOrientation ScreenOrientation)
 {
 	EAndroidScreenOrientation AndroidScreenOrientation = EAndroidScreenOrientation::SCREEN_ORIENTATION_UNSPECIFIED;
@@ -3182,8 +3185,50 @@ int32 FAndroidMisc::GetAndroidScreenOrientation(EDeviceScreenOrientation ScreenO
 	case EDeviceScreenOrientation::LandscapeSensor:
 		AndroidScreenOrientation = EAndroidScreenOrientation::SCREEN_ORIENTATION_SENSOR_LANDSCAPE;
 		break;
+	case EDeviceScreenOrientation::FullSensor:
+		AndroidScreenOrientation = EAndroidScreenOrientation::SCREEN_ORIENTATION_SENSOR;
+		break;
 	}
 
 	return static_cast<int32>(AndroidScreenOrientation);
 }
-#endif // USE_ANDROID_JNI
+#endif // USE_ANDROID_JNI && !USE_ANDROID_STANDALONE
+
+extern void AndroidThunkCpp_ShowConsoleWindow();
+void FAndroidMisc::ShowConsoleWindow()
+{
+#if !UE_BUILD_SHIPPING && USE_ANDROID_JNI
+	AndroidThunkCpp_ShowConsoleWindow();
+#endif // !UE_BUILD_SHIPPING && USE_ANDROID_JNI
+}
+
+FDelegateHandle FAndroidMisc::AddNetworkListener(FCoreDelegates::FOnNetworkConnectionChanged::FDelegate&& InNewDelegate)
+{
+	// not really necessary since PlatformInit calls AddNetworkListener but doesn't hurt anything
+	if (!FCoreDelegates::OnNetworkConnectionChanged.IsBound())
+	{
+#if USE_ANDROID_JNI
+		extern void AndroidThunkJava_AddNetworkListener();
+		AndroidThunkJava_AddNetworkListener();
+#endif
+	}
+
+	return FCoreDelegates::OnNetworkConnectionChanged.Add(MoveTemp(InNewDelegate));
+}
+
+bool FAndroidMisc::RemoveNetworkListener(FDelegateHandle Handle)
+{
+	bool bSuccess = FCoreDelegates::OnNetworkConnectionChanged.Remove(Handle);
+
+	// we don't really want to remove listener since we're using it for GetNetworkConnectionType
+//	if (!FCoreDelegates::OnNetworkConnectionChanged.IsBound())
+//	{
+//#if USE_ANDROID_JNI
+//		extern void AndroidThunkJava_RemoveNetworkListener();
+//		AndroidThunkJava_RemoveNetworkListener();
+//#endif
+//	}
+
+	return bSuccess;
+}
+

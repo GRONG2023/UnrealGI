@@ -13,7 +13,7 @@
  * Enumerates background for the texture editor view port.
  */
 UENUM()
-enum ETextureEditorBackgrounds
+enum ETextureEditorBackgrounds : int
 {
 	TextureEditorBackground_SolidColor UMETA(DisplayName="Solid Color"),
 	TextureEditorBackground_Checkered UMETA(DisplayName="Checkered"),
@@ -21,10 +21,24 @@ enum ETextureEditorBackgrounds
 };
 
 UENUM()
-enum ETextureEditorVolumeViewMode
+enum ETextureEditorSampling : int
+{
+	TextureEditorSampling_Default UMETA(DisplayName = "Default Sampling"),
+	TextureEditorSampling_Point UMETA(DisplayName = "Nearest-Point Sampling"),
+};
+
+UENUM()
+enum ETextureEditorVolumeViewMode : int
 {
 	TextureEditorVolumeViewMode_DepthSlices UMETA(DisplayName="Depth Slices"),
 	TextureEditorVolumeViewMode_VolumeTrace UMETA(DisplayName="Trace Into Volume"),
+};
+
+UENUM()
+enum ETextureEditorCubemapViewMode : int
+{
+	TextureEditorCubemapViewMode_2DView UMETA(DisplayName = "2D View"),
+	TextureEditorCubemapViewMode_3DView UMETA(DisplayName = "3D View"),
 };
 
 UENUM()
@@ -50,9 +64,17 @@ public:
 	UPROPERTY(config)
 	TEnumAsByte<ETextureEditorBackgrounds> Background;
 
-	/** The type of display when viewing volume textures. */
+	/** The texture sampling mode used to render textures in the texture editor view port. */
+	UPROPERTY(config)
+	TEnumAsByte<ETextureEditorSampling> Sampling;
+
+	/** The view mode when previewing volume textures. */
 	UPROPERTY(config)
 	TEnumAsByte<ETextureEditorVolumeViewMode> VolumeViewMode;
+
+	/** The view mode when previewing cubemap textures. */
+	UPROPERTY(config)
+	TEnumAsByte<ETextureEditorCubemapViewMode> CubemapViewMode;
 
 	/** Background and foreground color used by Texture preview view ports. */
 	UPROPERTY(config, EditAnywhere, Category=Background)

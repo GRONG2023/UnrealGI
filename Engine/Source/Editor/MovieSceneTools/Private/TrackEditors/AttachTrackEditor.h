@@ -15,7 +15,7 @@
 #include "Templates/Function.h"
 #include "EntitySystem/Interrogation/MovieSceneInterrogationLinker.h"
 
-struct FMovieSceneFloatChannel;
+struct FMovieSceneDoubleChannel;
 
 class AActor;
 class FMenuBuilder;
@@ -67,6 +67,7 @@ public:
 	virtual void BuildObjectBindingTrackMenu(FMenuBuilder& MenuBuilder, const TArray<FGuid>& ObjectBindings, const UClass* ObjectClass) override;
 	virtual TSharedRef<ISequencerSection> MakeSectionInterface( UMovieSceneSection& SectionObject, UMovieSceneTrack& Track, FGuid ObjectBinding ) override;
 	virtual bool SupportsType( TSubclassOf<UMovieSceneTrack> Type ) const override;
+	virtual bool SupportsSequence(UMovieSceneSequence* InSequence) const override;
 
 	// FTrackEditorActorPicker
 	virtual bool IsActorPickable( const AActor* const ParentActor, FGuid ObjectBinding, UMovieSceneSection* InSection ) override;
@@ -84,7 +85,7 @@ private:
 
 	/** Helper for AddKeyInternal to offset child track's keys */
 	template<typename ModifierFuncType>
-	void CompensateChildTrack(const TRange<FFrameNumber>& InAttachRange, TArrayView<FMovieSceneFloatChannel*> Channels, TOptional<TArrayView<FMovieSceneFloatChannel*>> ParentChannels,
+	void CompensateChildTrack(const TRange<FFrameNumber>& InAttachRange, TArrayView<FMovieSceneDoubleChannel*> Channels, TOptional<TArrayView<FMovieSceneDoubleChannel*>> ParentChannels,
 		const ITransformEvaluator& InParentTransformEval, const ITransformEvaluator& InChildTransformEval, ETransformPreserveType InPreserveType, ModifierFuncType InModifyTransform);
 
 	/** Delegate for AnimatablePropertyChanged in AddKey */

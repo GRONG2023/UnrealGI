@@ -2,11 +2,11 @@
 
 
 #include "Sound/SoundNodeMature.h"
-#include "EngineGlobals.h"
 #include "Engine/Engine.h"
 #include "ActiveSound.h"
-#include "Sound/SoundWave.h"
 #include "Sound/SoundNodeWavePlayer.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SoundNodeMature)
 
 /*-----------------------------------------------------------------------------
        USoundNodeMature implementation.
@@ -167,3 +167,4 @@ void USoundNodeMature::PostLoad()
 		}
 	}
 }
+

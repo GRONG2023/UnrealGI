@@ -1,12 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
+#include "Chaos/Character/CharacterGroundConstraintContainer.h"
 #include "Chaos/PBDCollisionConstraints.h"
-#include "Chaos/PBDCollisionConstraintsPGS.h"
-#include "Chaos/PBDConstraintGraph.h"
 #include "Chaos/PBDRigidClustering.h"
 #include "Chaos/PBDRigidParticles.h"
-#include "Chaos/PBDConstraintRule.h"
 #include "Chaos/ParticleHandle.h"
 #include "Chaos/Transform.h"
 #include "Chaos/Framework/DebugSubstep.h"
@@ -15,9 +13,16 @@
 #include "Chaos/PBDRigidsSOAs.h"
 #include "Chaos/SpatialAccelerationCollection.h"
 #include "Chaos/PBDRigidsEvolutionFwd.h"
+#include "Chaos/Island/IslandManager.h"
+#include "Chaos/Island/IslandGroupManager.h"
 #include "Chaos/Defines.h"
 #include "Chaos/PendingSpatialData.h"
+#include "ProfilingDebugging/CsvProfiler.h"
+#include "RewindData.h"
+#include "ChaosVisualDebugger/ChaosVDContextProvider.h"
 
+// Enable support for Collision Test Mode (reset particle positions and constraints every tick for debugging)
+#define CHAOS_EVOLUTION_COLLISION_TESTMODE (!UE_BUILD_TEST && !UE_BUILD_SHIPPING)
 
 extern int32 ChaosRigidsEvolutionApplyAllowEarlyOutCVar;
 extern int32 ChaosRigidsEvolutionApplyPushoutAllowEarlyOutCVar;
@@ -26,6 +31,43 @@ extern int32 ChaosNumContactIterationsOverride;
 
 namespace Chaos
 {
+extern CHAOS_API int32 ForceNoCollisionIntoSQ;
+
+struct FBroadPhaseConfig
+{
+	enum 
+	{
+		Grid = 0,
+		Tree = 1,
+		TreeOfGrid = 2,
+		TreeAndGrid = 3,
+		TreeOfGridAndGrid = 4
+	};
+
+	// Broadphase Type from the enum above
+	int32 BroadphaseType;
+	int32 BVNumCells;
+	int32 MaxChildrenInLeaf;
+	int32 MaxTreeDepth;
+	int32 AABBMaxChildrenInLeaf;
+	int32 AABBMaxTreeDepth;
+	FRealSingle MaxPayloadSize;
+	int32 IterationsPerTimeSlice;
+
+	FBroadPhaseConfig()
+	{
+		BroadphaseType = Tree;
+		BVNumCells = 35;
+		MaxChildrenInLeaf = 5;
+		MaxTreeDepth = 200;
+		AABBMaxChildrenInLeaf = 500;
+		AABBMaxTreeDepth = 200;
+		MaxPayloadSize = 100000;
+		IterationsPerTimeSlice = 4000;
+	}
+};
+
+extern CHAOS_API FBroadPhaseConfig BroadPhaseConfig;
 
 extern CHAOS_API int32 FixBadAccelerationStructureRemoval;
 
@@ -34,7 +76,7 @@ class FChaosArchive;
 template <typename TPayload, typename T, int d>
 class ISpatialAccelerationCollection;
 
-struct CHAOS_API FEvolutionStats
+struct FEvolutionStats
 {
 	int32 ActiveCollisionPoints;
 	int32 ActiveShapes;
@@ -188,6 +230,8 @@ struct FSpatialAccelerationCacheHandle
 		return Cache->Bounds(EntryIdx);
 	}
 
+	bool LightWeightDisabled() const { return false; }
+
 	union
 	{
 		FSpatialAccelerationCache* GeometryParticles;	//using same name as particles SOA for template reuse, should probably rethink this
@@ -201,7 +245,7 @@ struct FSpatialAccelerationCacheHandle
 	};
 };
 
-struct CHAOS_API ISpatialAccelerationCollectionFactory
+struct ISpatialAccelerationCollectionFactory
 {
 	//Create an empty acceleration collection with the desired buckets. Chaos enqueues acceleration structure operations per bucket
 	virtual TUniquePtr<ISpatialAccelerationCollection<FAccelerationStructureHandle, FReal, 3>> CreateEmptyCollection() = 0;
@@ -210,7 +254,7 @@ struct CHAOS_API ISpatialAccelerationCollectionFactory
 	virtual bool IsBucketTimeSliced(uint16 BucketIdx) const = 0;
 
 	//Chaos creates new acceleration structures per bucket. Factory can change underlying type at runtime as well as number of buckets to AB test
-	virtual TUniquePtr<ISpatialAcceleration<FAccelerationStructureHandle, FReal, 3>> CreateAccelerationPerBucket_Threaded(const TConstParticleView<FSpatialAccelerationCache>& Particles, uint16 BucketIdx, bool ForceFullBuild) = 0;
+	virtual TUniquePtr<ISpatialAcceleration<FAccelerationStructureHandle, FReal, 3>> CreateAccelerationPerBucket_Threaded(const TConstParticleView<FSpatialAccelerationCache>& Particles, uint16 BucketIdx, bool ForceFullBuild, bool bDynamicTree, bool bBuildOverlapCache) = 0;
 
 	//Mask indicating which bucket is active. Spatial indices in inactive buckets fallback to bucket 0. Bit 0 indicates bucket 0 is active, Bit 1 indicates bucket 1 is active, etc...
 	virtual uint8 GetActiveBucketsMask() const = 0;
@@ -232,10 +276,10 @@ public:
 	typedef TFunction<void(FPBDRigidParticles&, const FReal, const FReal, const int32)> FKinematicUpdateRule;
 	typedef TFunction<void(TParticleView<FPBDRigidParticles>&)> FCaptureRewindRule;
 
-	CHAOS_API FPBDRigidsEvolutionBase(FPBDRigidsSOAs& InParticles, THandleArray<FChaosPhysicsMaterial>& InSolverPhysicsMaterials, int32 InNumIterations = 1, int32 InNumPushOutIterations = 1, bool InIsSingleThreaded = false);
+	CHAOS_API FPBDRigidsEvolutionBase(FPBDRigidsSOAs& InParticles, THandleArray<FChaosPhysicsMaterial>& InSolverPhysicsMaterials, bool InIsSingleThreaded = false);
 	CHAOS_API virtual ~FPBDRigidsEvolutionBase();
 
-	CHAOS_API TArray<FGeometryParticleHandle*> CreateStaticParticles(int32 NumParticles, const FUniqueIdx* ExistingIndices = nullptr, const FGeometryParticleParameters& Params = FGeometryParticleParameters())
+	TArray<FGeometryParticleHandle*> CreateStaticParticles(int32 NumParticles, const FUniqueIdx* ExistingIndices = nullptr, const FGeometryParticleParameters& Params = FGeometryParticleParameters())
 	{
 		auto NewParticles = Particles.CreateStaticParticles(NumParticles, ExistingIndices, Params);
 		for (auto& Particle : NewParticles)
@@ -245,7 +289,7 @@ public:
 		return NewParticles;
 	}
 
-	CHAOS_API TArray<FKinematicGeometryParticleHandle*> CreateKinematicParticles(int32 NumParticles, const FUniqueIdx* ExistingIndices = nullptr, const FKinematicGeometryParticleParameters& Params = FKinematicGeometryParticleParameters())
+	TArray<FKinematicGeometryParticleHandle*> CreateKinematicParticles(int32 NumParticles, const FUniqueIdx* ExistingIndices = nullptr, const FKinematicGeometryParticleParameters& Params = FKinematicGeometryParticleParameters())
 	{
 		auto NewParticles = Particles.CreateKinematicParticles(NumParticles, ExistingIndices, Params);
 		for (auto& Particle : NewParticles)
@@ -255,7 +299,7 @@ public:
 		return NewParticles;
 	}
 
-	CHAOS_API TArray<FPBDRigidParticleHandle*> CreateDynamicParticles(int32 NumParticles, const FUniqueIdx* ExistingIndices = nullptr, const FPBDRigidParticleParameters& Params = FPBDRigidParticleParameters())
+	TArray<FPBDRigidParticleHandle*> CreateDynamicParticles(int32 NumParticles, const FUniqueIdx* ExistingIndices = nullptr, const FPBDRigidParticleParameters& Params = FPBDRigidParticleParameters())
 	{
 		auto NewParticles = Particles.CreateDynamicParticles(NumParticles, ExistingIndices, Params);
 		for (auto& Particle : NewParticles)
@@ -265,7 +309,7 @@ public:
 		return NewParticles;
 	}
 
-	CHAOS_API TArray<TPBDRigidClusteredParticleHandle<FReal, 3>*> CreateClusteredParticles(int32 NumParticles,const FUniqueIdx* ExistingIndices = nullptr,  const FPBDRigidParticleParameters& Params = FPBDRigidParticleParameters())
+	TArray<TPBDRigidClusteredParticleHandle<FReal, 3>*> CreateClusteredParticles(int32 NumParticles,const FUniqueIdx* ExistingIndices = nullptr,  const FPBDRigidParticleParameters& Params = FPBDRigidParticleParameters())
 	{
 		auto NewParticles = Particles.CreateClusteredParticles(NumParticles, ExistingIndices, Params);
 		for (auto& Particle : NewParticles)
@@ -275,7 +319,7 @@ public:
 		return NewParticles;
 	}
 
-	CHAOS_API TArray<TPBDGeometryCollectionParticleHandle<FReal, 3>*> CreateGeometryCollectionParticles(int32 NumParticles,const FUniqueIdx* ExistingIndices = nullptr,  const FPBDRigidParticleParameters& Params = FPBDRigidParticleParameters())
+	TArray<TPBDGeometryCollectionParticleHandle<FReal, 3>*> CreateGeometryCollectionParticles(int32 NumParticles,const FUniqueIdx* ExistingIndices = nullptr,  const FPBDRigidParticleParameters& Params = FPBDRigidParticleParameters())
 	{
 		auto NewParticles = Particles.CreateGeometryCollectionParticles(NumParticles, ExistingIndices, Params);
 		for (auto& Particle : NewParticles)
@@ -285,76 +329,172 @@ public:
 		return NewParticles;
 	}
 
-	CHAOS_API void AddForceFunction(FForceRule ForceFunction) { ForceRules.Add(ForceFunction); }
-	CHAOS_API void AddImpulseFunction(FForceRule ImpulseFunction) { ImpulseRules.Add(ImpulseFunction); }
-	CHAOS_API void SetParticleUpdateVelocityFunction(FUpdateVelocityRule ParticleUpdate) { ParticleUpdateVelocity = ParticleUpdate; }
-	CHAOS_API void SetParticleUpdatePositionFunction(FUpdatePositionRule ParticleUpdate) { ParticleUpdatePosition = ParticleUpdate; }
-	CHAOS_API void SetCaptureRewindDataFunction(FCaptureRewindRule Rule){ CaptureRewindData = Rule; }
+	void AddForceFunction(FForceRule ForceFunction) { ForceRules.Add(ForceFunction); }
+	void AddImpulseFunction(FForceRule ImpulseFunction) { ImpulseRules.Add(ImpulseFunction); }
+	void SetParticleUpdatePositionFunction(FUpdatePositionRule ParticleUpdate) { ParticleUpdatePosition = ParticleUpdate; }
+	void SetCaptureRewindDataFunction(FCaptureRewindRule Rule){ CaptureRewindData = Rule; }
 
-	CHAOS_API TGeometryParticleHandles<FReal, 3>& GetParticleHandles() { return Particles.GetParticleHandles(); }
-	CHAOS_API const TGeometryParticleHandles<FReal, 3>& GetParticleHandles() const { return Particles.GetParticleHandles(); }
+	TGeometryParticleHandles<FReal, 3>& GetParticleHandles() { return Particles.GetParticleHandles(); }
+	const TGeometryParticleHandles<FReal, 3>& GetParticleHandles() const { return Particles.GetParticleHandles(); }
 
-	CHAOS_API FPBDRigidsSOAs& GetParticles() { return Particles; }
-	CHAOS_API const FPBDRigidsSOAs& GetParticles() const { return Particles; }
+	FPBDRigidsSOAs& GetParticles() { return Particles; }
+	const FPBDRigidsSOAs& GetParticles() const { return Particles; }
 
-	CHAOS_API void AddConstraintRule(FPBDConstraintGraphRule* ConstraintRule)
+	/** Reset the collisions warm starting when resimulate. Ideally we should store
+		  that in the RewindData history but probably too expensive for now */
+	virtual void ResetCollisions() {};
+
+	/**
+	* Register a constraint container with the evolution. Constraints added to the container will be solved during the tick.
+	* @note we do not currently support removing containers. In a few places we assume the ContainerId is persistent and equal to the array index.
+	*/
+	void AddConstraintContainer(FPBDConstraintContainer& InContainer, const int32 Priority = 0)
 	{
-		uint32 ContainerId = (uint32)ConstraintRules.Num();
-		ConstraintRules.Add(ConstraintRule);
-		ConstraintRule->BindToGraph(ConstraintGraph, ContainerId);
+		const int32 ContainerId = ConstraintContainers.Add(&InContainer);
+		InContainer.SetContainerId(ContainerId);
+
+		GetIslandManager().AddConstraintContainer(InContainer);
+		IslandGroupManager.AddConstraintContainer(InContainer, Priority);
 	}
 
-	CHAOS_API void SetNumIterations(int32 InNumIterations)
+	/**
+	* Set the number of iterations to perform in the constraint position-solve phase
+	*/
+	void SetNumPositionIterations(int32 InNumIterations)
 	{
-		NumIterations = InNumIterations;
+		IslandGroupManager.SetNumPositionIterations(InNumIterations);
 	}
 
-	CHAOS_API int32 GetNumIterations() const
+	/**
+	* Get the number of position iterations the solver is running
+	*/
+	int32 GetNumPositionIterations() const
 	{
-		return NumIterations;
+		return IslandGroupManager.GetIterationSettings().GetNumPositionIterations();
 	}
 
-	CHAOS_API void SetNumPushOutIterations(int32 InNumIterations)
+	/**
+	* Set the number of iterations to perform in the constraint velocity-solve phase
+	*/
+	void SetNumVelocityIterations(int32 InNumIterations)
 	{
-		NumPushOutIterations = InNumIterations;
+		IslandGroupManager.SetNumVelocityIterations(InNumIterations);
 	}
 
-	CHAOS_API int32 GetNumPushOutIterations() const
+	/**
+	* Get the number of velocity iterations the solver is running
+	*/
+	int32 GetNumVelocityIterations() const
 	{
-		return NumPushOutIterations;
+		return IslandGroupManager.GetIterationSettings().GetNumVelocityIterations();
 	}
 
-	CHAOS_API void EnableParticle(FGeometryParticleHandle* Particle, const FGeometryParticleHandle* ParentParticle)
+	/**
+	* Set the number of iterations to perform in the constraint projection phase
+	*/
+	void SetNumProjectionIterations(int32 InNumIterations)
 	{
-		Particles.EnableParticle(Particle);
-		ConstraintGraph.EnableParticle(Particle, ParentParticle);
+		IslandGroupManager.SetNumProjectionIterations(InNumIterations);
+	}
+
+	/**
+	* Get the number of projection iterations the solver is running
+	*/
+	int32 GetNumProjectionIterations() const
+	{
+		return IslandGroupManager.GetIterationSettings().GetNumProjectionIterations();
+	}
+
+	/**
+	* To be called after creating a particle in the Particles container
+	* @todo(chaos): We should add a particle creation API to the evolution
+	* @todo(chaos): This is (or could be) very similar to Enable/Disable - do we really need both?
+	*/
+	void RegisterParticle(FGeometryParticleHandle* Particle)
+	{
+		// Add to the graph if necessary. Only enabled dynamic particles are added at this stage. Kinematics
+		// and statics are ignored until referenced by a constraint.
+		if (FPBDRigidParticleHandle* Rigid = Particle->CastToRigidParticle())
+		{
+			if (Rigid->IsDynamic() && !Rigid->Disabled())
+			{
+				IslandManager.AddParticle(Particle);
+			}
+		}
+
+		CVD_TRACE_PARTICLE(Particle);
+
+		// Flag as dirty to update the spatial query acceleration structures
 		DirtyParticle(*Particle);
 	}
 
-	CHAOS_API void DisableParticle(FGeometryParticleHandle* Particle)
+	/**
+	* Enable a particle.Only enabled particles are simulated.
+	* If the particle has constraints connected to it they will also be enabled (assuming the other particles in the constraints are also enabled). 
+	*/
+	void EnableParticle(FGeometryParticleHandle* Particle)
 	{
-		RemoveParticleFromAccelerationStructure(*Particle);
-		Particles.DisableParticle(Particle);
-		ConstraintGraph.DisableParticle(Particle);
-		DisableConstraints(TSet<FGeometryParticleHandle*>({ Particle }));
+		Particles.EnableParticle(Particle);
+		EnableConstraints(Particle);
+		IslandManager.AddParticle(Particle);
+		DirtyParticle(*Particle, EPendingSpatialDataOperation::Add);
 	}
 
+	/**
+	* Disable a particle so that it is no longer simulated. This also disables all constraints connected to the particle.
+	*/
+	void DisableParticle(FGeometryParticleHandle* Particle)
+	{
+#if CHAOS_EVOLUTION_COLLISION_TESTMODE
+		TestModeParticleDisabled(Particle);
+#endif
+
+		// NOTE: kinematics must visit their graph edges to determine what islands they are in, so we must remove the 
+		// particle from the graph before we disable its constraints or we don't know what island(s) to wake.
+		IslandManager.RemoveParticle(Particle);
+
+		RemoveParticleFromAccelerationStructure(*Particle);
+		Particles.DisableParticle(Particle);
+		DisableConstraints(Particle);
+		DestroyTransientConstraints(Particle);
+
+		if (FPBDRigidParticleHandle* Rigid = Particle->CastToRigidParticle())
+		{
+			// This flag is only updated for moving kinematics, so make sure 
+			// we don't leave a residual value if we get enabled again
+			Rigid->ClearIsMovingKinematic();
+		}
+
+		CVD_TRACE_PARTICLE(Particle);
+	}
+
+	/**
+	* To be called when a particle geometry changes. We must clear collisions and anything else that may reference the prior shapes.
+	*/
+	void InvalidateParticle(FGeometryParticleHandle* Particle)
+	{
+		// Remove all constraints (collisions, joints etc) from the graph
+		IslandManager.RemoveParticleConstraints(Particle);
+
+		// Destroy all the transient constraints (collisions) because the particle has changed somehow (e.g. new shapes) and they may have cached the previous state
+		// @todo(chaos): if any other types depended on geometry, they would also need to be notified here. Maybe make this more specific and tell all types...
+		DestroyTransientConstraints(Particle);
+	}
+	
 	CHAOS_API void FlushExternalAccelerationQueue(FAccelerationStructure& Acceleration,FPendingSpatialDataQueue& ExternalQueue);
 
-	CHAOS_API void DisableParticles(TSet<FGeometryParticleHandle*> &ParticlesIn)
+	void DisableParticles(TSet<FGeometryParticleHandle*> &ParticlesIn)
 	{
 		for (FGeometryParticleHandle* Particle : ParticlesIn)
 		{
-			RemoveParticleFromAccelerationStructure(*Particle);
-			Particles.DisableParticle(Particle);
-			ConstraintGraph.DisableParticle(Particle);
+			DisableParticle(Particle);
 		}
-		DisableConstraints(ParticlesIn);
 	}
 
 	template <bool bPersistent>
-	FORCEINLINE_DEBUGGABLE void DirtyParticle(TGeometryParticleHandleImp<FReal, 3, bPersistent>& Particle)
+	FORCEINLINE_DEBUGGABLE void DirtyParticle(TGeometryParticleHandleImp<FReal, 3, bPersistent>& Particle, const EPendingSpatialDataOperation Op = EPendingSpatialDataOperation::Update)
 	{
+		ensure(Op != EPendingSpatialDataOperation::Delete); // Don't use the function to delete particles
 		const TPBDRigidParticleHandleImp<FReal, 3, bPersistent>* AsRigid = Particle.CastToRigidParticle();
 		if(AsRigid && AsRigid->Disabled())
 		{
@@ -364,6 +504,8 @@ public:
 			{
 				// For clustered particles, they may appear disabled but they're being driven by an internal (solver-owned) cluster parent.
 				// If this is the case we let the spatial data update with those particles, otherwise skip.
+				// Alternatively, the particle may be being driven by a cluster union. Disabled children of a cluster union should not be added
+				// to the SQ.
 				// #BGTODO consider converting MDisabled into a bitfield for multiple disable types (Disabled, DisabledDriven, etc.)
 				if(FPBDRigidParticleHandle* ClusterParentBase = AsClustered->ClusterIds().Id)
 				{
@@ -373,7 +515,26 @@ public:
 						{
 							return;
 						}
+
+						// We know we're an internal cluster now. If this was a GC internal proxy, we'd expect the 
+						// parent's proxy to be the same as the input particle's. If this is not the case, we know
+						// we're in a cluster union.
+						if (ClusterParent->PhysicsProxy() != Particle.PhysicsProxy())
+						{
+							return;
+						}
 					}
+					else
+					{
+						// There's probably no way we get here since if we're clustering the parent should always be a clustered.
+						ensure(false);
+						return;
+					}
+				}
+				else
+				{
+					// Disabled cluster particle that doesn't have a parent cluster. MUST BE IGNORED.
+					return;
 				}
 			}
 			else
@@ -384,335 +545,199 @@ public:
 		}
 
 		//only add to acceleration structure if it has collision
-		if (Particle.HasCollision())
+		if (Particle.HasCollision() || ForceNoCollisionIntoSQ)
 		{
-			//TODO: distinguish between new particles and dirty particles
+			//TODO: distinguish between new particles and dirty particles - Adds and updates are treated the same right now
 			const FUniqueIdx UniqueIdx = Particle.UniqueIdx();
 			FPendingSpatialData& SpatialData = InternalAccelerationQueue.FindOrAdd(UniqueIdx);
-			ensure(SpatialData.bDelete == false);
+			ensure(SpatialData.Operation != EPendingSpatialDataOperation::Delete);
+
+			SpatialData.Operation = Op;
 			SpatialData.AccelerationHandle = FAccelerationStructureHandle(Particle);
 			SpatialData.SpatialIdx = Particle.SpatialIdx();
 
 			auto& AsyncSpatialData = AsyncAccelerationQueue.FindOrAdd(UniqueIdx);
-			ensure(SpatialData.bDelete == false);
+			// ensure(AsyncSpatialData.Operation != EPendingSpatialDataOperation::Delete); // TODO: This may be hit: Potentially due to UniqueIdx reuse?
 			AsyncSpatialData = SpatialData;
 		}
 	}
 
-	CHAOS_API void DestroyParticle(FGeometryParticleHandle* Particle)
+	void DestroyParticle(FGeometryParticleHandle* Particle)
 	{
+#if CHAOS_EVOLUTION_COLLISION_TESTMODE
+		TestModeParticleDisabled(Particle);
+#endif
+
+		if (MRewindData)
+		{
+			MRewindData->RemoveObject(Particle);
+		}
+
 		RemoveParticleFromAccelerationStructure(*Particle);
-		UniqueIndicesPendingRelease.Add(Particle->UniqueIdx());
-		DisableConstraints(TSet<FGeometryParticleHandle*>({ Particle }));
-		ConstraintGraph.RemoveParticle(Particle);
+		DisconnectConstraints(TSet<FGeometryParticleHandle*>({ Particle }));
+		DestroyTransientConstraints(Particle);
+		IslandManager.RemoveParticle(Particle);
 		Particles.DestroyParticle(Particle);
 	}
 
 	/**
 	 * Preallocate buffers for creating \p Num particles.
 	 */
-	CHAOS_API void ReserveParticles(const int32 Num)
+	void ReserveParticles(const int32 Num)
 	{
-		if (const int32 NumNew = ConstraintGraph.ReserveParticles(Num))
+		if (const int32 NumNew = IslandManager.ReserveParticles(Num))
 		{
 			InternalAccelerationQueue.PendingData.Reserve(InternalAccelerationQueue.Num() + NumNew);
 			AsyncAccelerationQueue.PendingData.Reserve(AsyncAccelerationQueue.Num() + NumNew);
 		}
 	}
 
-	CHAOS_API void CreateParticle(FGeometryParticleHandle* ParticleAdded)
+	CHAOS_API void SetParticleObjectState(FPBDRigidParticleHandle* Particle, EObjectStateType ObjectState);
+
+	// Wake a dynamic particle and reset sleep counters for its island
+	CHAOS_API void WakeParticle(FPBDRigidParticleHandle* Particle);
+
+	CHAOS_API void SetParticleSleepType(FPBDRigidParticleHandle* Particle, ESleepType InSleepType);
+
+	CHAOS_API void DisableParticles(const TSet<FGeometryParticleHandle*>& InParticles);
+
+	/** remove a constraint from the constraint graph */
+	void RemoveConstraintFromConstraintGraph(FConstraintHandle* ConstraintHandle)
 	{
-		ConstraintGraph.AddParticle(ParticleAdded);
-		DirtyParticle(*ParticleAdded);
-	}
-
-	CHAOS_API void SetParticleObjectState(FPBDRigidParticleHandle* Particle, EObjectStateType ObjectState)
-	{
-		EObjectStateType InitialState = Particle->ObjectState();
-
-		Particle->SetObjectStateLowLevel(ObjectState);
-		Particles.SetDynamicParticleSOA(Particle);
-
-		if(InitialState != ObjectState)
+		if (ConstraintHandle->IsInConstraintGraph())
 		{
-			if (InitialState == EObjectStateType::Sleeping)
-			{
-				if (Particle->Island() != INDEX_NONE)
-				{
-					// GT has forced a wake so have to wake everything in the island
-					IslandsToWake.Enqueue(Particle->Island());
-				}
-			}
-			else if(ObjectState != EObjectStateType::Dynamic)
-			{
-				// even though we went to sleep, we should still report info back to GT
-				Particles.MarkTransientDirtyParticle(Particle);
-			}
+			IslandManager.RemoveConstraint(ConstraintHandle);
 		}
 	}
 
-	CHAOS_API void DisableParticles(const TSet<FGeometryParticleHandle*>& InParticles)
+	/** remove a list of constraints from the constraint graph */
+	void RemoveConstraintsFromConstraintGraph(const FConstraintHandleArray& Constraints)
 	{
-		for (FGeometryParticleHandle* Particle : InParticles)
+		for (FConstraintHandle* ConstraintHandle : Constraints)
 		{
-			Particles.DisableParticle(Particle);
-			RemoveParticleFromAccelerationStructure(*Particle);
-		}
-
-		ConstraintGraph.DisableParticles(InParticles);
-		DisableConstraints(InParticles);
-	}
-
-	CHAOS_API void WakeIslands()
-	{
-		TArray<int32> UniqueIslands;
-
-		// there could easily be duplicates, best to remove these since WakeIsland is potentially expensive call
-		int32 IslandIdx = 0;
-		while (!IslandsToWake.IsEmpty())
-		{
-			IslandsToWake.Dequeue(IslandIdx);
-			UniqueIslands.AddUnique(IslandIdx);
-		}
-
-		for (int32 Island : UniqueIslands)
-		{
-			WakeIsland(Island);
+			RemoveConstraintFromConstraintGraph(ConstraintHandle);
 		}
 	}
 
-	CHAOS_API void WakeIsland(const int32 Island)
+	/** 
+	* Disconnect constraints (all types except collisions) from a set of particles to be destroyed. 
+	* this will set the constraints to Enabled = false and set their respective bodies handles to nullptr.
+	* Once this is done, the constraints cannot be re-enabled.
+	* @note This only applies to persistent constraints (joints etc), not transient constraints (collisions)
+	* @see DestroyTransientConstraints()
+	*/
+	void DisconnectConstraints(const TSet<FGeometryParticleHandle*>& RemovedParticles)
 	{
-		ConstraintGraph.WakeIsland(Particles, Island);
-		//Update Particles SOAs
-		/*for (auto Particle : ContactGraph.GetIslandParticles(Island))
+		for (FPBDConstraintContainer* Container : ConstraintContainers)
 		{
-			ActiveIndices.Add(Particle);
-		}*/
-	}
+			Container->DisconnectConstraints(RemovedParticles);
+		}
 
-	CHAOS_API void DisableConstraints(const TSet<FGeometryParticleHandle*>& RemovedParticles)
-	{
 		for (FGeometryParticleHandle* ParticleHandle : RemovedParticles)
 		{
-			for (FConstraintHandle* BaseConstraintHandle : ParticleHandle->ParticleConstraints())
-			{
-				if (FPBDJointConstraintHandle* ConstraintHandle = BaseConstraintHandle->As<FPBDJointConstraintHandle>())
-				{
-					ConstraintGraph.RemoveConstraint(ConstraintHandle->GetConstraintIndex(), ConstraintHandle, ConstraintHandle->GetConstrainedParticles());
-				}
-			}
-		}
-
-
-		for (FPBDConstraintGraphRule* ConstraintRule : ConstraintRules)
-		{
-			ConstraintRule->DisableConstraints(RemovedParticles);
+			RemoveConstraintsFromConstraintGraph(ParticleHandle->ParticleConstraints());
+			ParticleHandle->ParticleConstraints().Reset();
 		}
 	}
 
-	CHAOS_API void ResetConstraints()
+	/** 
+	* Disconnect constraints (all types except collisions) from a particle to be removed (or destroyed)
+	* this will set the constraints to Enabled = false, but leave connections to the particles to support
+	* re-enabling at a later time.
+	* @note This only applies to persistent constraints (joints etc), not transient constraints (collisions)
+	* @see DestroyTransientConstraints()
+	*/
+	void DisableConstraints(FGeometryParticleHandle* ParticleHandle)
 	{
-		for(FPBDConstraintGraphRule* ConstraintRule : ConstraintRules)
+		for (FPBDConstraintContainer* Container : ConstraintContainers)
 		{
-			ConstraintRule->ResetConstraints();
+			Container->OnDisableParticle(ParticleHandle);
+		}
+
+		RemoveConstraintsFromConstraintGraph(ParticleHandle->ParticleConstraints());
+	}
+
+	/** 
+	* Enable constraints (all types except collisions) from the enabled particles; constraints will only become enabled if their particle end points are valid.
+	* @note This only applies to persistent constraints (joints etc), not transient constraints (collisions)
+	*/
+	void EnableConstraints(FGeometryParticleHandle* ParticleHandle)
+	{
+		for (FPBDConstraintContainer* Container : ConstraintContainers)
+		{
+			Container->OnEnableParticle(ParticleHandle);
 		}
 	}
 
-	//TEMP: this is only needed while clustering continues to use indices directly
-	const auto& GetActiveClusteredArray() const { return Particles.GetActiveClusteredArray(); }
-	const auto& GetNonDisabledClusteredArray() const { return Particles.GetNonDisabledClusteredArray(); }
+	/** 
+	* Clear all constraints from the system reeady for shut down 
+	*/
+	void ResetConstraints()
+	{
+		// Remove all the constraints from the graph
+		GetIslandManager().Reset();
 
-	CHAOS_API TSerializablePtr<FChaosPhysicsMaterial> GetPhysicsMaterial(const FGeometryParticleHandle* Particle) const { return Particle->AuxilaryValue(PhysicsMaterials); }
+		// Clear all particle lists of collisions and constraints
+		// (this could be performed by the constraint containers
+		// but it would be unnecessarily expensive to remove them
+		// one by one)
+		for (auto& Particle : Particles.GetAllParticlesView())
+		{
+			Particle.ParticleConstraints().Reset();
+			Particle.ParticleCollisions().Reset();
+		}
+
+		// Remove all constraints from the containers
+		for (FPBDConstraintContainer* Container : ConstraintContainers)
+		{
+			Container->ResetConstraints();
+		}
+	}
+
+	/**
+	* Destroy all transient constraints (collisions) involving the specified particle.
+	*/
+	virtual void DestroyTransientConstraints(FGeometryParticleHandle* Particle) {}
+	virtual void DestroyTransientConstraints() {}
+
+	const TParticleView<FPBDRigidClusteredParticles>& GetNonDisabledClusteredView() const { return Particles.GetNonDisabledClusteredView(); }
+
+	TSerializablePtr<FChaosPhysicsMaterial> GetPhysicsMaterial(const FGeometryParticleHandle* Particle) const { return Particle->AuxilaryValue(PhysicsMaterials); }
+
+	CHAOS_API const FChaosPhysicsMaterial* GetFirstPhysicsMaterial(const FGeometryParticleHandle* Particle) const;
 	
-	CHAOS_API const TUniquePtr<FChaosPhysicsMaterial> &GetPerParticlePhysicsMaterial(const FGeometryParticleHandle* Particle) const { return Particle->AuxilaryValue(PerParticlePhysicsMaterials); }
+	const TUniquePtr<FChaosPhysicsMaterial> &GetPerParticlePhysicsMaterial(const FGeometryParticleHandle* Particle) const { return Particle->AuxilaryValue(PerParticlePhysicsMaterials); }
 
-	CHAOS_API void SetPerParticlePhysicsMaterial(FGeometryParticleHandle* Particle, TUniquePtr<FChaosPhysicsMaterial> &InMaterial)
+	void SetPerParticlePhysicsMaterial(FGeometryParticleHandle* Particle, TUniquePtr<FChaosPhysicsMaterial> &InMaterial)
 	{
 		Particle->AuxilaryValue(PerParticlePhysicsMaterials) = MoveTemp(InMaterial);
+		IslandManager.UpdateParticleMaterial(Particle);
 	}
 
-	CHAOS_API void SetPhysicsMaterial(FGeometryParticleHandle* Particle, TSerializablePtr<FChaosPhysicsMaterial> InMaterial)
+	void SetPhysicsMaterial(FGeometryParticleHandle* Particle, TSerializablePtr<FChaosPhysicsMaterial> InMaterial)
 	{
 		check(!Particle->AuxilaryValue(PerParticlePhysicsMaterials)); //shouldn't be setting non unique material if a unique one already exists
 		Particle->AuxilaryValue(PhysicsMaterials) = InMaterial;
-	}
-
-	CHAOS_API const TArray<FGeometryParticleHandle*>& GetIslandParticles(const int32 Island) const { return ConstraintGraph.GetIslandParticles(Island); }
-	CHAOS_API int32 NumIslands() const { return ConstraintGraph.NumIslands(); }
-
-	void InitializeAccelerationStructures()
-	{
-		ConstraintGraph.InitializeGraph(Particles.GetNonDisabledView());
-
-		for (FPBDConstraintGraphRule* ConstraintRule : ConstraintRules)
-		{
-			ConstraintRule->AddToGraph();
-		}
-
-		ConstraintGraph.ResetIslands(Particles.GetNonDisabledDynamicView());
-
-		for (FPBDConstraintGraphRule* ConstraintRule : ConstraintRules)
-		{
-			ConstraintRule->InitializeAccelerationStructures();
-		}
+		IslandManager.UpdateParticleMaterial(Particle);
 	}
 
 	void PrepareTick()
 	{
-		for (FPBDConstraintGraphRule* ConstraintRule : ConstraintRules)
+		for (FPBDConstraintContainer* Container : ConstraintContainers)
 		{
-			ConstraintRule->PrepareTick();
+			Container->PrepareTick();
 		}
 	}
 
 	void UnprepareTick()
 	{
-		for (FPBDConstraintGraphRule* ConstraintRule : ConstraintRules)
+		for (FPBDConstraintContainer* Container : ConstraintContainers)
 		{
-			ConstraintRule->UnprepareTick();
+			Container->UnprepareTick();
 		}
 	}
 
-	void PrepareIteration(const FReal Dt)
-	{
-		for (FPBDConstraintGraphRule* ConstraintRule : ConstraintRules)
-		{
-			ConstraintRule->PrepareIteration(Dt);
-		}
-	}
-
-	void UnprepareIteration(const FReal Dt)
-	{
-		for (FPBDConstraintGraphRule* ConstraintRule : ConstraintRules)
-		{
-			ConstraintRule->UnprepareIteration(Dt);
-		}
-	}
-
-	void UpdateAccelerationStructures(int32 Island)
-	{
-		for (FPBDConstraintGraphRule* ConstraintRule : ConstraintRules)
-		{
-			ConstraintRule->UpdateAccelerationStructures(Island);
-		}
-	}
-
-	void ApplyConstraints(const FReal Dt, int32 Island)
-	{
-		UpdateAccelerationStructures(Island);
-
-		int32 LocalNumIterations = ChaosNumContactIterationsOverride >= 0 ? ChaosNumContactIterationsOverride : NumIterations;
-		// @todo(ccaulfield): track whether we are sufficiently solved and can early-out
-		for (int i = 0; i < LocalNumIterations; ++i)
-		{
-			bool bNeedsAnotherIteration = false;
-			for (FPBDConstraintGraphRule* ConstraintRule : PrioritizedConstraintRules)
-			{
-				bNeedsAnotherIteration |= ConstraintRule->ApplyConstraints(Dt, Island, i, LocalNumIterations);
-			}
-
-			if (ChaosRigidsEvolutionApplyAllowEarlyOutCVar && !bNeedsAnotherIteration)
-			{
-				break;
-			}
-		}
-	}
-
-	void ApplyKinematicTargets(const FReal Dt, const FReal StepFraction)
-	{
-		check(StepFraction > (FReal)0);
-		check(StepFraction <= (FReal)1);
-
-		// @todo(ccaulfield): optimize. Depending on the number of kinematics relative to the number that have 
-		// targets set, it may be faster to process a command list rather than iterate over them all each frame. 
-		const FReal MinDt = 1e-6f;
-		for (auto& Particle : Particles.GetActiveKinematicParticlesView())
-		{
-			TKinematicTarget<FReal, 3>& KinematicTarget = Particle.KinematicTarget();
-			const TRigidTransform<FReal, 3>& Previous = KinematicTarget.GetPrevious();
-			const FVec3 PrevX = Previous.GetTranslation();
-			const FRotation3 PrevR = Previous.GetRotation();
-
-			switch (KinematicTarget.GetMode())
-			{
-			case EKinematicTargetMode::None:
-				// Nothing to do
-				break;
-
-			case EKinematicTargetMode::Reset:
-			{
-				// Reset velocity and then switch to do-nothing mode
-				Particle.V() = FVec3(0, 0, 0);
-				Particle.W() = FVec3(0, 0, 0);
-				KinematicTarget.SetMode(EKinematicTargetMode::None);
-				Particles.MarkTransientDirtyParticle(Particle.Handle());
-				break;
-			}
-
-			case EKinematicTargetMode::Position:
-			{
-				// Move to kinematic target and update velocities to match
-				// Target positions only need to be processed once, and we reset the velocity next frame (if no new target is set)
-				FVec3 TargetPos;
-				FRotation3 TargetRot;
-				if (FMath::IsNearlyEqual(StepFraction, (FReal)1, KINDA_SMALL_NUMBER))
-				{
-					TargetPos = KinematicTarget.GetTarget().GetLocation();
-					TargetRot = KinematicTarget.GetTarget().GetRotation();
-					KinematicTarget.SetMode(EKinematicTargetMode::Reset);
-				}
-				else
-				{
-					TargetPos = FVec3::Lerp(PrevX, KinematicTarget.GetTarget().GetLocation(), StepFraction);
-					TargetRot = FRotation3::Slerp(PrevR, KinematicTarget.GetTarget().GetRotation(), StepFraction);
-				}
-				if (Dt > MinDt)
-				{
-					FVec3 V = FVec3::CalculateVelocity(PrevX, TargetPos, Dt);
-					Particle.V() = V;
-
-					FVec3 W = FRotation3::CalculateAngularVelocity(PrevR, TargetRot, Dt);
-					Particle.W() = W;
-				}
-				Particle.X() = TargetPos;
-				Particle.R() = TargetRot;
-				Particles.MarkTransientDirtyParticle(Particle.Handle());
-				break;
-			}
-
-			case EKinematicTargetMode::Velocity:
-			{
-				// Move based on velocity
-				Particle.X() = Particle.X() + Particle.V() * Dt;
-				Particle.R() = FRotation3::IntegrateRotationWithAngularVelocity(Particle.R(), Particle.W(), Dt);
-				Particles.MarkTransientDirtyParticle(Particle.Handle());
-				break;
-			}
-			}
-			
-			// Set previous velocities if we can
-			// Note: At present kininematics are in fact rigid bodies
-			auto* Rigid = Particle.CastToRigidParticle();
-			if (Rigid)
-			{
-				Rigid->PreV() = Rigid->V();
-				Rigid->PreW() = Rigid->W();
-
-				// Update the world bounds
-				if (Rigid->HasBounds())
-				{
-					const FAABB3& LocalBounds = Rigid->LocalBounds();
-					FAABB3 WorldSpaceBounds = LocalBounds.TransformedAABB(FRigidTransform3(Rigid->X(), Rigid->R()));
-					if (Rigid->CCDEnabled())
-					{
-						WorldSpaceBounds.ThickenSymmetrically(Rigid->V() * Dt);
-					}
-					Rigid->SetWorldSpaceInflatedBounds(WorldSpaceBounds);
-				}
-			}
-		}
-	}
+	CHAOS_API virtual void ApplyKinematicTargets(const FReal Dt, const FReal StepFraction) {}
 
 	/** Make a copy of the acceleration structure to allow for external modification.
 	    This is needed for supporting sync operations on SQ structure from game thread. You probably want to go through solver which maintains PendingExternal */
@@ -729,8 +754,21 @@ public:
 	/* Ticks computation of acceleration structures. Normally handled by Advance, but if not advancing can be called to incrementally build structures.*/
 	CHAOS_API void ComputeIntermediateSpatialAcceleration(bool bBlock = false);
 
-	CHAOS_API const FPBDConstraintGraph& GetConstraintGraph() const { return ConstraintGraph; }
-	CHAOS_API FPBDConstraintGraph& GetConstraintGraph() { return ConstraintGraph; }
+	UE_DEPRECATED(5.2, "Renamed to GetIslandManager")
+	const Private::FPBDIslandManager& GetConstraintGraph() const { return IslandManager; }
+	UE_DEPRECATED(5.2, "Renamed to GetIslandManager")
+	Private::FPBDIslandManager& GetConstraintGraph() { return IslandManager; }
+	
+	Private::FPBDIslandManager& GetIslandManager() { return IslandManager; }
+	const Private::FPBDIslandManager& GetIslandManager() const { return IslandManager; }
+	const Private::FPBDIslandGroupManager& GetIslandGroupManager() const { return IslandGroupManager; }
+
+
+	void SetResim(bool bInResim) { bIsResim = bInResim; }
+	const bool IsResimming() const { return bIsResim; }
+
+	void SetReset(bool bInReset) { bIsReset = bInReset; }
+	const bool IsResetting() const { return bIsReset; }
 
 	void Serialize(FChaosArchive& Ar);
 
@@ -740,9 +778,28 @@ public:
 		return Particles.GetUniqueIndices().GenerateUniqueIdx();
 	}
 
+	void ReleaseUniqueIdx(FUniqueIdx UniqueIdx)
+	{
+		UniqueIndicesPendingRelease.Add(UniqueIdx);
+	}
+
+	bool IsUniqueIndexPendingRelease(FUniqueIdx UniqueIdx) const
+	{
+		return UniqueIndicesPendingRelease.Contains(UniqueIdx) || PendingReleaseIndices.Contains(UniqueIdx);
+	}
+
+	void KillSafeAsyncTasks()
+	{
+		if (AccelerationStructureTaskComplete.GetReference() && !AccelerationStructureTaskComplete->IsComplete() && bAccelerationStructureTaskSignalKill != nullptr)
+		{
+			*bAccelerationStructureTaskSignalKill = true;			
+		}
+	}
+
 	bool AreAnyTasksPending() const
 	{
-		return (AccelerationStructureTaskComplete.GetReference() && !AccelerationStructureTaskComplete->IsComplete());
+		return AccelerationStructureTaskComplete.GetReference() && !AccelerationStructureTaskComplete->IsComplete() && 
+			(bAccelerationStructureTaskSignalKill == nullptr || bAccelerationStructureTaskStarted  == nullptr || *bAccelerationStructureTaskSignalKill == false || *bAccelerationStructureTaskStarted == true);
 	}
 
 	void SetCanStartAsyncTasks(bool bInCanStartAsyncTasks)
@@ -750,13 +807,30 @@ public:
 		bCanStartAsyncTasks = bInCanStartAsyncTasks;
 	}
 
+	void SetRewindData(FRewindData* RewindData)
+	{
+		MRewindData = RewindData;
+	}
+
+	FRewindData* GetRewindData()
+	{
+		return MRewindData;
+	}
+
+	CHAOS_API void DisableParticleWithRemovalEvent(FGeometryParticleHandle* Particle);
+	const TArray<FRemovalData>& GetAllRemovals() { return MAllRemovals; }
+	void ResetAllRemovals() { MAllRemovals.Reset(); }
+
+	void SetName(const FString& InName) { EvolutionName = InName; }
+	const FString& GetName() const { return EvolutionName; }
+
 protected:
 	int32 NumConstraints() const
 	{
 		int32 NumConstraints = 0;
-		for (const FPBDConstraintGraphRule* ConstraintRule : ConstraintRules)
+		for (const FPBDConstraintContainer* Container : ConstraintContainers)
 		{
-			NumConstraints += ConstraintRule->NumConstraints();
+			NumConstraints += Container->GetNumConstraints();
 		}
 		return NumConstraints;
 	}
@@ -768,9 +842,9 @@ public:
 		//TODO: at the moment we don't distinguish between the first time a particle is created and when it's just moved
 		// If we had this distinction we could simply remove the entry for the async queue
 		const FUniqueIdx UniqueIdx = ParticleHandle.UniqueIdx();
-		FPendingSpatialData& SpatialData = AsyncAccelerationQueue.FindOrAdd(UniqueIdx);
+		FPendingSpatialData& SpatialData = AsyncAccelerationQueue.FindOrAdd(UniqueIdx, EPendingSpatialDataOperation::Delete);
 
-		SpatialData.bDelete = true;
+		SpatialData.Operation = EPendingSpatialDataOperation::Delete;
 		SpatialData.SpatialIdx = ParticleHandle.SpatialIdx();
 		SpatialData.AccelerationHandle = FAccelerationStructureHandle(ParticleHandle);
 
@@ -782,81 +856,60 @@ public:
 		InternalAcceleration->RemoveElementFrom(SpatialData.AccelerationHandle, SpatialData.SpatialIdx);
 	}
 
+	
 protected:
 
 	void UpdateConstraintPositionBasedState(FReal Dt)
 	{
-		for (FPBDConstraintGraphRule* ConstraintRule : ConstraintRules)
+		// If any constraint container state depends on particle state, it gets updated here.
+		// E.g., we can create constraints between close particles etc. Collision detection 
+		// could be called from here, but currently is called explicitly elsewhere
+		for (FPBDConstraintContainer* ConstraintContainer : ConstraintContainers)
 		{
-			ConstraintRule->UpdatePositionBasedState(Dt);
+			ConstraintContainer->UpdatePositionBasedState(Dt);
 		}
 	}
 
 	void CreateConstraintGraph()
 	{
-		ConstraintGraph.InitializeGraph(Particles.GetNonDisabledView());
+		// Update the current state of the graph based on existing particles and constraints.
+		// Any new particles (from this tick) should have been added when they were enabled.
+		IslandManager.UpdateParticles();
 
-		for (FPBDConstraintGraphRule* ConstraintRule : ConstraintRules)
+		// Add all constraints to the graph.
+		// NOTE: in PersistentGraph mode, only new constraints need to be added and expired ones should be removed.
+		// In non-peristent mode, all constraints in awake islands are removed every tick and so all would need to be re-added here.
+		// @todo(chaos): it feels a bit inconsistent that particles are added when enabled, but constraints
+		// are added here. Currently it needs to be this way to properly support user changes to sleep state
+		// of particles, but we could probably make this cleaner.
+		for (FPBDConstraintContainer* ConstraintContainer : ConstraintContainers)
 		{
-			ConstraintRule->AddToGraph();
+			ConstraintContainer->AddConstraintsToGraph(GetIslandManager());
 		}
-
-		// Apply rules in priority order
-		// @todo(ccaulfield): only really needed when list or priorities change
-		PrioritizedConstraintRules = ConstraintRules;
-		PrioritizedConstraintRules.StableSort();
 	}
 
 	void CreateIslands()
 	{
-		ConstraintGraph.UpdateIslands(Particles.GetNonDisabledDynamicView(), Particles);
-
-		for (FPBDConstraintGraphRule* ConstraintRule : ConstraintRules)
-		{
-			ConstraintRule->InitializeAccelerationStructures();
-		}
-	}
-	
-	void UpdateVelocities(const FReal Dt, int32 Island)
-	{
-		ParticleUpdateVelocity(ConstraintGraph.GetIslandParticles(Island), Dt);
-	}
-
-	void ApplyPushOut(const FReal Dt, int32 Island)
-	{
-		int32 LocalNumPushOutIterations = ChaosNumPushOutIterationsOverride >= 0 ? ChaosNumPushOutIterationsOverride : NumPushOutIterations;
-		bool bNeedsAnotherIteration = true;
-		for (int32 It = 0; It < LocalNumPushOutIterations; ++It)
-		{
-			bNeedsAnotherIteration = false;
-			for (FPBDConstraintGraphRule* ConstraintRule : PrioritizedConstraintRules)
-			{
-				bNeedsAnotherIteration |= ConstraintRule->ApplyPushOut(Dt, Island, It, LocalNumPushOutIterations);
-			}
-
-			if (ChaosRigidsEvolutionApplyPushoutAllowEarlyOutCVar && !bNeedsAnotherIteration)
-			{
-				break;
-			}
-		}
+		// Package the constraints and particles into islands
+		IslandManager.UpdateIslands();
 	}
 
 	void FlushInternalAccelerationQueue();
 	void FlushAsyncAccelerationQueue();
 	void WaitOnAccelerationStructure();
+	static void CopyUnBuiltDynamicAccelerationStructures(const TMap<FSpatialAccelerationIdx, TUniquePtr<FSpatialAccelerationCache>>& SpatialAccelerationCache, FAccelerationStructure* InternalAcceleration, FAccelerationStructure* AsyncInternalAcceleration, FAccelerationStructure* AsyncExternalAcceleration);
+	static void CopyPristineAccelerationStructures(const TMap<FSpatialAccelerationIdx, TUniquePtr<FSpatialAccelerationCache>>& SpatialAccelerationCache, FAccelerationStructure* FromStructure, FAccelerationStructure* ToStructure, bool CheckPristine);
 
 	TArray<FForceRule> ForceRules;
 	TArray<FForceRule> ImpulseRules;
-	FUpdateVelocityRule ParticleUpdateVelocity;
 	FUpdatePositionRule ParticleUpdatePosition;
 	FKinematicUpdateRule KinematicUpdate;
 	FCaptureRewindRule CaptureRewindData;
-	TArray<FPBDConstraintGraphRule*> ConstraintRules;
-	TArray<FPBDConstraintGraphRule*> PrioritizedConstraintRules;
-	FPBDConstraintGraph ConstraintGraph;
+	TArray<FPBDConstraintContainer*> ConstraintContainers;
+	Private::FPBDIslandManager IslandManager;
+	Private::FPBDIslandGroupManager IslandGroupManager;
 	TArrayCollectionArray<TSerializablePtr<FChaosPhysicsMaterial>> PhysicsMaterials;
 	TArrayCollectionArray<TUniquePtr<FChaosPhysicsMaterial>> PerParticlePhysicsMaterials;
-	TArrayCollectionArray<int32> ParticleDisableCount;
 	TArrayCollectionArray<bool> Collided;
 
 	FPBDRigidsSOAs& Particles;
@@ -864,6 +917,7 @@ protected:
 	FAccelerationStructure* InternalAcceleration;
 	FAccelerationStructure* AsyncInternalAcceleration;
 	FAccelerationStructure* AsyncExternalAcceleration;
+	FRewindData* MRewindData = nullptr;
 
 	//internal thread will push into this and external thread will consume
 	TQueue<FAccelerationStructure*,EQueueMode::Spsc> ExternalStructuresQueue;
@@ -878,9 +932,10 @@ protected:
 
 	// Allows us to tell evolution to stop starting async tasks if we are trying to cleanup solver/evo.
 	bool bCanStartAsyncTasks;
-	TQueue<int32, EQueueMode::Mpsc> IslandsToWake;
 
 	TArray<FUniqueIdx> UniqueIndicesPendingRelease;
+
+	TArray<FRemovalData> MAllRemovals;
 public:
 	//The latest external timestamp we consumed inputs from, assigned to evolution when solver task executes, is used to stamp output data.
 	int32 LatestExternalTimestampConsumed_Internal;	
@@ -914,7 +969,7 @@ protected:
 
 	TMap<FSpatialAccelerationIdx, TUniquePtr<FSpatialAccelerationCache>> SpatialAccelerationCache;
 
-	FORCEINLINE_DEBUGGABLE void ApplyParticlePendingData(const FPendingSpatialData& PendingData, FAccelerationStructure& SpatialAcceleration, bool bUpdateCache);
+	FORCEINLINE_DEBUGGABLE void ApplyParticlePendingData(const FPendingSpatialData& PendingData, FAccelerationStructure& SpatialAcceleration, bool bUpdateCache, bool bUpdateDynamicTrees);
 
 	class FChaosAccelerationStructureTask
 	{
@@ -925,7 +980,9 @@ protected:
 			, FAccelerationStructure* InExternalAccelerationStructure
 			, bool InForceFullBuild
 			, bool InIsSingleThreaded
-			, bool bNeedsReset);
+			, bool bNeedsReset
+			, std::atomic<bool>** bOutStarted
+			, std::atomic<bool>** bOutKillTask);
 		static FORCEINLINE TStatId GetStatId();
 		static FORCEINLINE ENamedThreads::Type GetDesiredThread();
 		static FORCEINLINE ESubsequentsMode::Type GetSubsequentsMode();
@@ -938,14 +995,16 @@ protected:
 		bool IsForceFullBuild;
 		bool bIsSingleThreaded;
 		bool bNeedsReset;
+		std::atomic<bool> bStarted;
+		std::atomic<bool> bKillTask;
 
 	private:
-		void UpdateStructure(FAccelerationStructure* AccelerationStructure);
+		void UpdateStructure(FAccelerationStructure* AccelerationStructure, FAccelerationStructure* CopyToAccelerationStructure = nullptr);
 	};
 	FGraphEventRef AccelerationStructureTaskComplete;
+	std::atomic<bool>* bAccelerationStructureTaskStarted;
+	std::atomic<bool>* bAccelerationStructureTaskSignalKill;
 
-	int32 NumIterations;
-	int32 NumPushOutIterations;
 	TUniquePtr<ISpatialAccelerationCollectionFactory> SpatialCollectionFactory;
 
 	FAccelerationStructure* GetFreeSpatialAcceleration_Internal();
@@ -955,6 +1014,29 @@ protected:
 	void ReleasePendingIndices();
 
 	TArray<FUniqueIdx> PendingReleaseIndices;	//for now just assume a one frame delay, but may need something more general
+	bool bIsResim = false; 
+	bool bIsReset = false;
+
+	// Useful name for debugging. E.g., Indicates whether we are on client or server
+	FString EvolutionName;
+
+#if CHAOS_EVOLUTION_COLLISION_TESTMODE
+	// Test Mode for Collision issues (resets particle positions every tick for repeatable testing)
+	CHAOS_API void TestModeStep();
+	CHAOS_API void TestModeParticleDisabled(FGeometryParticleHandle* Particle);
+	CHAOS_API void TestModeSaveParticles();
+	CHAOS_API void TestModeSaveParticle(FGeometryParticleHandle* Particle);
+	CHAOS_API void TestModeUpdateSavedParticle(FGeometryParticleHandle* Particle);
+	CHAOS_API void TestModeRestoreParticles();
+	CHAOS_API void TestModeRestoreParticle(FGeometryParticleHandle* Particle);
+
+	struct FTestModeParticleData
+	{
+		FVec3 X, P, V, W;
+		FRotation3 R, Q;
+	};
+	TMap<FPBDRigidParticleHandle*, FTestModeParticleData> TestModeData;
+#endif
 };
 
 

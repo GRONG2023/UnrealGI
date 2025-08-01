@@ -6,8 +6,13 @@
 #include "CoreMinimal.h"
 #include "Stats/Stats.h"
 #include "Framework/Commands/Commands.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "BufferVisualizationMenuCommands.h"
+#include "NaniteVisualizationMenuCommands.h"
+#include "LumenVisualizationMenuCommands.h"
+#include "SubstrateVisualizationMenuCommands.h"
+#include "GroomVisualizationMenuCommands.h"
+#include "VirtualShadowMapVisualizationMenuCommands.h"
 
 /**
  * Public identifiers for the viewport layouts available in LevelViewportLayoutX.h files
@@ -44,7 +49,7 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 			TEXT("LevelViewport"), // Context name for fast lookup
 			NSLOCTEXT("Contexts", "LevelViewports", "Level Viewports"), // Localized context name for displaying
 			TEXT("EditorViewport"), // Parent context name.  
-			FEditorStyle::GetStyleSetName() // Icon Style Set
+			FAppStyle::GetAppStyleSetName() // Icon Style Set
 		),
 		ClearAllBookMarks(nullptr)
 	{
@@ -89,6 +94,9 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	/** Toggles immersive mode in the viewport */
 	TSharedPtr< FUICommandInfo > ToggleImmersive;
+	 
+	/** Toggles moving all tabs except the viewport to a sidebar or removing them from a sidebar */
+	TSharedPtr< FUICommandInfo > ToggleSidebarAllTabs;
 
 	/** Toggles maximize mode in the viewport */
 	TSharedPtr< FUICommandInfo > ToggleMaximize;
@@ -122,6 +130,12 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	/** Hides all layers */
 	TSharedPtr< FUICommandInfo > HideAllLayers;
+
+	/** Shows all DataLayers */
+	TSharedPtr< FUICommandInfo > ShowAllDataLayers;
+
+	/** Hides all DataLayers */
+	TSharedPtr< FUICommandInfo > HideAllDataLayers;
 
 	/** Shows all sprite categories */
 	TSharedPtr< FUICommandInfo > ShowAllSprites;
@@ -157,6 +171,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	TSharedPtr< FUICommandInfo > ClearAllBookmarks;
 
 	/** Actor pilot commands */
+	TSharedPtr< FUICommandInfo > SelectPilotedActor;
 	TSharedPtr< FUICommandInfo > EjectActorPilot;
 	TSharedPtr< FUICommandInfo > PilotSelectedActor;
 
@@ -199,10 +214,12 @@ public:
 	void RegisterShowSpriteCommands();
 
 private:
+#if STATS
 	/** Registers additional commands as they are loaded */
 	void HandleNewStatGroup(const TArray<FStatNameAndInfo>& NameAndInfos);
 	void HandleNewStat(const FName& InStatName, const FName& InStatCategory, const FText& InStatDescription);
 	int32 FindStatIndex(const TArray< FShowMenuCommand >* ShowStatCommands, const FString& InCommandName) const;
+#endif
 
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	// Dummy function that's never used.

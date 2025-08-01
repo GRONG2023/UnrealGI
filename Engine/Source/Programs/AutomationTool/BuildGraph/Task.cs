@@ -1,5 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using EpicGames.BuildGraph;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -8,32 +9,17 @@ using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
 using System.Xml;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using OpenTracing;
+using UnrealBuildBase;
 using UnrealBuildTool;
+using Microsoft.Extensions.Logging;
+using System.Runtime.InteropServices;
+
+using static AutomationTool.CommandUtils;
 
 namespace AutomationTool
 {
-	/// <summary>
-	/// Specifies validation that should be performed on a task parameter.
-	/// </summary>
-	public enum TaskParameterValidationType
-	{
-		/// <summary>
-		/// Allow any valid values for the field type.
-		/// </summary>
-		Default,
-
-		/// <summary>
-		/// A list of tag names separated by semicolons
-		/// </summary>
-		TagList,
-
-		/// <summary>
-		/// A file specification, which may contain tags and wildcards.
-		/// </summary>
-		FileSpec,
-	}
-
 	/// <summary>
 	/// Attribute to mark parameters to a task, which should be read as XML attributes from the script file.
 	/// </summary>
@@ -98,7 +84,7 @@ namespace AutomationTool
 		/// </summary>
 		/// <param name="Task">Task to add</param>
 		/// <returns>True if the task could be added, false otherwise</returns>
-		bool Add(CustomTask Task);
+		bool Add(BgTaskImpl Task);
 
 		/// <summary>
 		/// Execute all the tasks added to this executor.
@@ -107,22 +93,23 @@ namespace AutomationTool
 		/// <param name="BuildProducts">Set of build products produced by this node.</param>
 		/// <param name="TagNameToFileSet">Mapping from tag names to the set of files they include</param>
 		/// <returns>Whether the task succeeded or not. Exiting with an exception will be caught and treated as a failure.</returns>
-		void Execute(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet);
+		Task ExecuteAsync(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet);
 	}
 
 	/// <summary>
 	/// Base class for all custom build tasks
 	/// </summary>
-	public abstract class CustomTask
+	public abstract class BgTaskImpl
 	{
+		/// <summary>
+		/// Accessor for the default log interface
+		/// </summary>
+		protected static ILogger Logger => Log.Logger;
+
 		/// <summary>
 		/// Line number in a source file that this task was declared. Optional; used for log messages.
 		/// </summary>
-		public Tuple<FileReference, int> SourceLocation
-		{
-			get;
-			set;
-		}
+		public BgScriptLocation SourceLocation { get; set; }
 
 		/// <summary>
 		/// Execute this node.
@@ -131,7 +118,7 @@ namespace AutomationTool
 		/// <param name="BuildProducts">Set of build products produced by this node.</param>
 		/// <param name="TagNameToFileSet">Mapping from tag names to the set of files they include</param>
 		/// <returns>Whether the task succeeded or not. Exiting with an exception will be caught and treated as a failure.</returns>
-		public abstract void Execute(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet);
+		public abstract Task ExecuteAsync(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet);
 
 		/// <summary>
 		/// Creates a proxy to execute this node.
@@ -206,8 +193,19 @@ namespace AutomationTool
 		/// <param name="Prefix">Prefix for metadata entries</param>
 		public virtual void GetTraceMetadata(ITraceSpan Span, string Prefix)
 		{
-			Span.AddMetadata(Prefix + "source.file", SourceLocation.Item1.MakeRelativeTo(CommandUtils.RootDirectory));
-			Span.AddMetadata(Prefix + "source.line", SourceLocation.Item2.ToString());
+			Span.AddMetadata(Prefix + "source.file", SourceLocation.File.FullName);
+			Span.AddMetadata(Prefix + "source.line", SourceLocation.LineNumber.ToString());
+		}
+		
+		/// <summary>
+		/// Get properties to include in tracing info
+		/// </summary>
+		/// <param name="Span">The scope to add properties to</param>
+		/// <param name="Prefix">Prefix for metadata entries</param>
+		public virtual void GetTraceMetadata(ISpan Span, string Prefix)
+		{
+			Span.SetTag(Prefix + "source.file", SourceLocation.File.FullName);
+			Span.SetTag(Prefix + "source.line", SourceLocation.LineNumber);
 		}
 
 		/// <summary>
@@ -246,7 +244,7 @@ namespace AutomationTool
 		/// </summary>
 		/// <param name="TagList">List of tags separated by semicolons</param>
 		/// <returns>Tag names from this filespec</returns>
-		protected IEnumerable<string> FindTagNamesFromList(string TagList)
+		protected static IEnumerable<string> FindTagNamesFromList(string TagList)
 		{
 			if(!String.IsNullOrEmpty(TagList))
 			{
@@ -283,7 +281,7 @@ namespace AutomationTool
 		{
 			if(String.IsNullOrEmpty(Name))
 			{
-				return CommandUtils.RootDirectory;
+				return Unreal.RootDirectory;
 			}
 			else if(Path.IsPathRooted(Name))
 			{
@@ -291,7 +289,7 @@ namespace AutomationTool
 			}
 			else
 			{
-				return DirectoryReference.Combine(CommandUtils.RootDirectory, Name);
+				return DirectoryReference.Combine(Unreal.RootDirectory, Name);
 			}
 		}
 
@@ -326,7 +324,7 @@ namespace AutomationTool
 			// If we got a null reference, it's because the tag is not listed as an input for this node (see RunGraph.BuildSingleNode). Fill it in, but only with an error.
 			if(Files == null)
 			{
-				CommandUtils.LogError("Attempt to reference tag '{0}', which is not listed as a dependency of this node.", TagName);
+				Logger.LogError("Attempt to reference tag '{TagName}', which is not listed as a dependency of this node.", TagName);
 				Files = new HashSet<FileReference>();
 				TagNameToFileSet.Add(TagName, Files);
 			}
@@ -435,5 +433,80 @@ namespace AutomationTool
 		{
 			return Text.Split(';').Select(x => x.Trim()).Where(x => x.Length > 0).ToList();
 		}
+
+		/// <summary>
+		/// Name of the environment variable containing cleanup commands
+		/// </summary>
+		public const string CleanupScriptEnvVarName = "UE_HORDE_CLEANUP";
+
+		/// <summary>
+		/// Name of the environment variable containing lease cleanup commands
+		/// </summary>
+		public const string LeaseCleanupScriptEnvVarName = "UE_HORDE_LEASE_CLEANUP";
+
+		/// <summary>
+		/// Add cleanup commands to run after the step completes
+		/// </summary>
+		/// <param name="NewLines">Lines to add to the cleanup script</param>
+		/// <param name="Lease">Whether to add the commands to run on lease termination</param>
+		public static async Task AddCleanupCommandsAsync(IEnumerable<string> NewLines, bool Lease = false)
+		{
+			string CleanupScriptEnvVar = Environment.GetEnvironmentVariable(Lease? LeaseCleanupScriptEnvVarName : CleanupScriptEnvVarName);
+			if (!String.IsNullOrEmpty(CleanupScriptEnvVar))
+			{
+				FileReference CleanupScript = new FileReference(CleanupScriptEnvVar);
+				await FileReference.AppendAllLinesAsync(CleanupScript, NewLines);
+			}
+		}
+
+		/// <summary>
+		/// Name of the environment variable containing a file to write Horde graph updates to
+		/// </summary>
+		public const string GraphUpdateEnvVarName = "UE_HORDE_GRAPH_UPDATE";
+
+		/// <summary>
+		/// Updates the graph currently used by Horde
+		/// </summary>
+		/// <param name="Job">Context for the current job that is being executed</param>
+		public static void UpdateGraphForHorde(JobContext Job)
+		{
+			string exportGraphFile = Environment.GetEnvironmentVariable(GraphUpdateEnvVarName);
+			if (String.IsNullOrEmpty(exportGraphFile))
+			{
+				throw new Exception($"Missing environment variable {GraphUpdateEnvVarName}. This is required to update graphs on Horde.");
+			}
+
+			List<string> newParams = new List<string>();
+			newParams.Add("BuildGraph");
+			newParams.AddRange(Job.OwnerCommand.Params.Select(x => $"-{x}"));
+			newParams.RemoveAll(x => x.StartsWith("-SingleNode=", StringComparison.OrdinalIgnoreCase));
+			newParams.Add($"-HordeExport={exportGraphFile}");
+			newParams.Add($"-ListOnly");
+
+			string newCommandLine = CommandLineArguments.Join(newParams);
+			CommandUtils.RunUAT(CommandUtils.CmdEnv, newCommandLine, "bg");
+		}
+	}
+
+	/// <summary>
+	/// Legacy implementation of <see cref="BgTaskImpl"/> which operates synchronously
+	/// </summary>
+	public abstract class CustomTask : BgTaskImpl
+	{
+		/// <inheritdoc/>
+		public sealed override Task ExecuteAsync(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
+		{
+			Execute(Job, BuildProducts, TagNameToFileSet);
+			return Task.CompletedTask;
+		}
+
+		/// <summary>
+		/// Execute this node.
+		/// </summary>
+		/// <param name="Job">Information about the current job</param>
+		/// <param name="BuildProducts">Set of build products produced by this node.</param>
+		/// <param name="TagNameToFileSet">Mapping from tag names to the set of files they include</param>
+		/// <returns>Whether the task succeeded or not. Exiting with an exception will be caught and treated as a failure.</returns>
+		public abstract void Execute(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet);
 	}
 }

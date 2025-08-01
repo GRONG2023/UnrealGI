@@ -16,6 +16,7 @@
 
 //#include "LinuxNativeFeedbackContext.h"
 #include "ISlateFileDialogModule.h"
+#include "ISlateFontDialogModule.h" 
 
 #define LOCTEXT_NAMESPACE "DesktopPlatform"
 #define MAX_FILETYPES_STR 4096
@@ -100,7 +101,22 @@ bool FDesktopPlatformLinux::OpenDirectoryDialog(const void* ParentWindowHandle, 
 
 bool FDesktopPlatformLinux::OpenFontDialog(const void* ParentWindowHandle, FString& OutFontName, float& OutHeight, EFontImportFlags& OutFlags)
 {
-	STUBBED("FDesktopPlatformLinux::OpenFontDialog");
+	if (!FModuleManager::Get().IsModuleLoaded("SlateFontDialog"))
+	{
+		FModuleManager::Get().LoadModule("SlateFontDialog");
+	}
+
+	ISlateFontDialogModule* FontDialog = FModuleManager::GetModulePtr<ISlateFontDialogModule>("SlateFontDialog");
+	
+	if (FontDialog)
+	{
+		return FontDialog->OpenFontDialog(OutFontName, OutHeight, OutFlags);
+	}
+	else
+	{
+		UE_LOG(LogLinux, Warning, TEXT("Error reading results of font dialog"));
+	}
+	
 	return false;
 }
 
@@ -118,9 +134,29 @@ bool FDesktopPlatformLinux::RegisterEngineInstallation(const FString &RootDir, F
 		FString ConfigPath = FString(FPlatformProcess::ApplicationSettingsDir()) / FString(TEXT("UnrealEngine")) / FString(TEXT("Install.ini"));
 		ConfigFile.Read(ConfigPath);
 
-		FConfigSection &Section = ConfigFile.FindOrAdd(TEXT("Installations"));
-		OutIdentifier = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensInBraces);
-		Section.AddUnique(*OutIdentifier, RootDir);
+		// If this is an installed build, use that Guid instead of generating a new one
+		FString InstallationIdPath = FString(RootDir / "Engine" / "Build" / "InstalledBuild.txt");
+		FArchive* File = IFileManager::Get().CreateFileReader(*InstallationIdPath, FILEREAD_Silent);
+		if(File)
+		{
+			FFileHelper::LoadFileToString(OutIdentifier, *File);
+			OutIdentifier.TrimEndInline();
+			FGuid GuidCheck(OutIdentifier);
+			if(!GuidCheck.IsValid() && !OutIdentifier.StartsWith(TEXT("UE_")))
+			{
+				OutIdentifier = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphens);
+			}
+
+			File->Close();
+			delete File;
+		}
+		else
+		{
+			OutIdentifier = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphens);
+		}
+
+		ConfigFile.AddToSection(TEXT("Installations"), *OutIdentifier, RootDir);
+		OutIdentifier.RemoveFromStart(TEXT("UE_"));
 
 		ConfigFile.Dirty = true;
 		ConfigFile.Write(ConfigPath);
@@ -150,15 +186,15 @@ void FDesktopPlatformLinux::EnumerateEngineInstallations(TMap<FString, FString> 
 	FString ConfigPath = FString(FPlatformProcess::ApplicationSettingsDir()) / FString(TEXT("UnrealEngine")) / FString(TEXT("Install.ini"));
 	ConfigFile.Read(ConfigPath);
 
-	FConfigSection &Section = ConfigFile.FindOrAdd(TEXT("Installations"));
+	const FConfigSection* Section = ConfigFile.FindOrAddConfigSection(TEXT("Installations"));
 	// Remove invalid entries
 	// @todo The installations list might contain multiple keys for the same value. Do we have to remove them?
 	TArray<FName> KeysToRemove;
-	for (auto It : Section)
+	for (auto It : *Section)
 	{
-		const FString& EngineDir = It.Value.GetValue();
+		const FString& RootDir = It.Value.GetValue();
 		// We remove entries pointing to a folder that doesn't exist or was using the wrong path.
-		if (EngineDir.Contains(FPaths::EngineDir()) || !IFileManager::Get().DirectoryExists(*EngineDir))
+		if (RootDir.Contains(FPaths::EngineDir()) || !IFileManager::Get().DirectoryExists(*RootDir))
 		{
 			KeysToRemove.Add(It.Key);
 			ConfigFile.Dirty = true;
@@ -166,55 +202,113 @@ void FDesktopPlatformLinux::EnumerateEngineInstallations(TMap<FString, FString> 
 	}
 	for (auto Key : KeysToRemove)
 	{
-		Section.Remove(Key);
+		ConfigFile.RemoveKeyFromSection(TEXT("Installations"), Key);
 	}
 
 	FConfigSection SectionsToAdd;
 
 	// Iterate through all entries.
-	for (auto It : Section)
+	for (auto It : *Section)
 	{
-		FString EngineDir = It.Value.GetValue();
-		FPaths::NormalizeDirectoryName(EngineDir);
-		FPaths::CollapseRelativeDirectories(EngineDir);
+		FString NormalizedRootDir = It.Value.GetValue();
+		FPaths::NormalizeDirectoryName(NormalizedRootDir);
+		FPaths::CollapseRelativeDirectories(NormalizedRootDir);
 
 		FString EngineId;
-		const FName* Key = Section.FindKey(EngineDir);
+		const FName* Key = Section->FindKey(NormalizedRootDir);
 		if (Key == nullptr)
 		{
-			Key = SectionsToAdd.FindKey(EngineDir);
+			Key = SectionsToAdd.FindKey(NormalizedRootDir);
 		}
 
 		if (Key)
 		{
 			FGuid IdGuid;
 			FGuid::Parse(Key->ToString(), IdGuid);
-			EngineId = IdGuid.ToString(EGuidFormats::DigitsWithHyphensInBraces);
+			EngineId = IdGuid.ToString(EGuidFormats::DigitsWithHyphens);
 		}
 		else
 		{
-			if (!OutInstallations.FindKey(EngineDir))
+			if (!OutInstallations.FindKey(NormalizedRootDir))
 			{
-				EngineId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensInBraces);
-				SectionsToAdd.AddUnique(*EngineId, EngineDir);
+				EngineId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphens);
+				SectionsToAdd.AddUnique(*EngineId, NormalizedRootDir);
 
 				ConfigFile.Dirty = true;
 			}
 		}
-		if (!EngineId.IsEmpty() && !OutInstallations.Find(EngineId))
+
+		// local builds only, don't add entries that start with "UE_" which signifies a released build
+		if (!EngineId.IsEmpty() && !OutInstallations.Find(EngineId) && !EngineId.StartsWith(TEXT("UE_")))
 		{
-			OutInstallations.Add(EngineId, EngineDir);
+			OutInstallations.Add(EngineId, NormalizedRootDir);
 		}
 	}
 
 	for (auto It : SectionsToAdd)
 	{
-		Section.AddUnique(It.Key, It.Value.GetValue());
+		ConfigFile.AddUniqueToSection(TEXT("Installations"), It.Key, It.Value.GetValue());
 	}
 
 	ConfigFile.Write(ConfigPath);
 
 	IFileManager::Get().Delete(*UProjectPath);
+}
+
+void FDesktopPlatformLinux::EnumerateLauncherEngineInstallations(TMap<FString, FString> &OutInstallations)
+{
+	FConfigFile ConfigFile;
+	FString ConfigPath = FString(FPlatformProcess::ApplicationSettingsDir()) / FString(TEXT("UnrealEngine")) / FString(TEXT("Install.ini"));
+	ConfigFile.Read(ConfigPath);
+	
+	const FConfigSection* Section = ConfigFile.FindOrAddConfigSection(TEXT("Installations"));
+
+	FString InstallationIdPath = FString(FPaths::EngineDir() / "Build" / "InstalledBuild.txt");
+	FArchive* File = IFileManager::Get().CreateFileReader(*InstallationIdPath, FILEREAD_Silent);
+	if (File)
+	{
+		FString NormalizedRootDir = FPaths::RootDir();
+		FPaths::NormalizeDirectoryName(NormalizedRootDir);
+		FPaths::CollapseRelativeDirectories(NormalizedRootDir);
+
+		FString Id;
+		FFileHelper::LoadFileToString(Id, *File);
+		Id.TrimEndInline();
+
+		// if the user unzipped a new installed build into a previously registered directory, we need to fix up the key
+		const FName* OldKey = Section->FindKey(NormalizedRootDir);
+		if(OldKey && Id != OldKey->ToString())
+		{
+			ConfigFile.RemoveKeyFromSection(TEXT("Installations"), *OldKey);
+			ConfigFile.AddToSection(TEXT("Installations"), *Id, NormalizedRootDir);
+			ConfigFile.Write(ConfigPath);
+		}
+		File->Close();
+		delete File;
+	}
+
+	// now fill OutInstallations with only released builds
+	for (auto It : *Section)
+	{
+		const FString RootDir = It.Value.GetValue();
+		FString GuidOrId = It.Key.ToString();
+
+		// We skip entries pointing to a folder that doesn't exist or was using the wrong path.
+		if (RootDir.Contains(FPaths::EngineDir()) || !IFileManager::Get().DirectoryExists(*RootDir))
+		{
+			continue;
+		}
+
+		// released builds only, add entries starting with "UE_"
+		if(GuidOrId.RemoveFromStart(TEXT("UE_"), ESearchCase::CaseSensitive))
+		{
+			if(!OutInstallations.Contains(GuidOrId))
+			{
+				OutInstallations.Add(*GuidOrId, *RootDir);
+			}
+		}
+	}
+
 }
 
 bool FDesktopPlatformLinux::IsSourceDistribution(const FString &RootDir)
@@ -315,7 +409,7 @@ static bool CompareAndCheckDesktopFile(const TCHAR* DesktopFileName, const TCHAR
 		DesktopFileExecPath = Matcher.GetCaptureGroup(1);
 	}
 
-	if (DesktopFileExecPath.Compare("bash") != 0 && !FPaths::FileExists(*DesktopFileExecPath))
+	if (DesktopFileExecPath.Compare("bash") != 0 && !FPaths::FileExists(DesktopFileExecPath))
 	{
 		return false;
 	}
@@ -348,13 +442,45 @@ bool FDesktopPlatformLinux::UpdateFileAssociations()
 		return true;
 	}
 
-	// Install the icons, one for uprojects and one for the main Unreal Engine launcher.
+	// Install the png icons, one for uprojects and one for the main Unreal Engine launcher.
 	if (!RunXDGUtil(FString::Printf(TEXT("xdg-icon-resource install --novendor --mode user --context mimetypes --size 256 %sPrograms/UnrealVersionSelector/Private/Linux/Resources/Icon.png uproject"), *FPaths::EngineSourceDir())))
 	{
 		return false;
 	}
 
-	if (!RunXDGUtil(FString::Printf(TEXT("xdg-icon-resource install --novendor --mode user --context apps --size 256 %sRuntime/Launch/Resources/Linux/UE4.png ubinary"), *FPaths::EngineSourceDir())))
+	if (!RunXDGUtil(FString::Printf(TEXT("xdg-icon-resource install --novendor --mode user --context apps --size 256 %sRuntime/Launch/Resources/Linux/UnrealEngine.png ubinary"), *FPaths::EngineSourceDir())))
+	{
+		return false;
+	}
+
+	FString IconSource = FPaths::Combine(FPaths::EngineSourceDir(), TEXT("Programs/UnrealVersionSelector/Private/Linux/Resources/Icon.svg")); 
+	FString ProjectIconDestination = FPaths::Combine(FPlatformMisc::GetEnvironmentVariable(TEXT("HOME")), TEXT(".local/share/icons/hicolor/scalable/mimetypes")); 
+	FString BinaryIconDestination  = FPaths::Combine(FPlatformMisc::GetEnvironmentVariable(TEXT("HOME")), TEXT(".local/share/icons/hicolor/scalable/apps")); 
+
+	IFileManager& FileManager = IFileManager::Get();
+
+	// Ensure that the proper directories exist for svg icons as well
+	if (!FileManager.DirectoryExists(*ProjectIconDestination))
+	{
+		if (!FileManager.MakeDirectory(*ProjectIconDestination))
+		{
+			return false;
+		}
+	}
+	if (!FileManager.DirectoryExists(*BinaryIconDestination))
+	{
+		if (!FileManager.MakeDirectory(*BinaryIconDestination))
+		{
+			return false;
+		}
+	}
+
+	// Install the svg icons; this is done manually because xdg-icon-resource doesn't support installation of svg files
+	if (FileManager.Copy(*FPaths::Combine(ProjectIconDestination, TEXT("uproject.svg")), *IconSource) != COPY_OK)
+	{
+		return false;
+	}
+	if (FileManager.Copy(*FPaths::Combine(BinaryIconDestination, TEXT("ubinary.svg")), *IconSource) != COPY_OK)
 	{
 		return false;
 	}
@@ -419,7 +545,7 @@ bool FDesktopPlatformLinux::RunUnrealBuildTool(const FText& Description, const F
 	OutExitCode = 1;
 
 	// Get the path to UBT
-	FString UnrealBuildToolPath = RootDir / TEXT("Engine/Binaries/DotNET/UnrealBuildTool.exe");
+	FString UnrealBuildToolPath = GetUnrealBuildToolExecutableFilename(RootDir);
 	if(IFileManager::Get().FileSize(*UnrealBuildToolPath) < 0)
 	{
 		Warn->Logf(ELogVerbosity::Error, TEXT("Couldn't find UnrealBuildTool at '%s'"), *UnrealBuildToolPath);
@@ -429,19 +555,7 @@ bool FDesktopPlatformLinux::RunUnrealBuildTool(const FText& Description, const F
 	// Write the output
 	Warn->Logf(TEXT("Running %s %s"), *UnrealBuildToolPath, *Arguments);
 
-	// launch UBT with Mono
-	FString ScriptPath = FPaths::ConvertRelativePathToFull(RootDir / TEXT("Engine/Build/BatchFiles/Linux/RunMono.sh"));
-	FString CmdLineParams = FString::Printf(TEXT("\"%s\" \"%s\" %s"), *ScriptPath, *UnrealBuildToolPath, *Arguments);
-
-	// Spawn it with bash (and not sh) because of pushd
-	return FFeedbackContextMarkup::PipeProcessOutput(Description, TEXT("/bin/bash"), CmdLineParams, Warn, &OutExitCode) && OutExitCode == 0;
-}
-
-bool FDesktopPlatformLinux::IsUnrealBuildToolRunning()
-{
-	// For now assume that if mono application is running, we're running UBT
-	// @todo: we need to get the commandline for the mono process and check if UBT.exe is in there.
-	return FPlatformProcess::IsApplicationRunning(TEXT("mono"));
+	return FFeedbackContextMarkup::PipeProcessOutput(Description, UnrealBuildToolPath, Arguments, Warn, &OutExitCode) && OutExitCode == 0;
 }
 
 FFeedbackContext* FDesktopPlatformLinux::GetNativeFeedbackContext()
@@ -454,6 +568,11 @@ FFeedbackContext* FDesktopPlatformLinux::GetNativeFeedbackContext()
 FString FDesktopPlatformLinux::GetUserTempPath()
 {
 	return FString(FPlatformProcess::UserTempDir());
+}
+
+FString FDesktopPlatformLinux::GetOidcTokenExecutableFilename(const FString& RootDir) const
+{	
+	return FPaths::ConvertRelativePathToFull(RootDir / TEXT("Engine/Binaries/DotNET/OidcToken/linux-x64/OidcToken"));
 }
 
 #undef LOCTEXT_NAMESPACE

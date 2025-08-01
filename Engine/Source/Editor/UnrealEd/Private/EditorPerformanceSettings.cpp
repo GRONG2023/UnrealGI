@@ -1,13 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Editor/EditorPerformanceSettings.h"
-#include "EditorViewportClient.h"
-#include "Editor.h"
+#include "Settings/EditorProjectSettings.h"
 
-static TAutoConsoleVariable<int32> CVarOverrideDPIBasedEditorViewportScaling(
-	TEXT("Editor.OverrideDPIBasedEditorViewportScaling"),
-	0,
-	TEXT("Sets whether or not we should globally override screen percentage in editor and PIE viewports"),
+TAutoConsoleVariable<int32> CVarEditorViewportHighDPI(
+	TEXT("r.Editor.Viewport.HighDPI"), 1,
+	TEXT("Controls whether editor & PIE viewports can be displayed at high DPI."),
+	ECVF_Default);
+
+TAutoConsoleVariable<int32> CVarEditorViewportOverrideGameScreenPercentage(
+	TEXT("r.Editor.Viewport.OverridePIEScreenPercentage"), 1,
+	TEXT("Apply editor viewports' default screen percentage settings to game viewport clients in PIE."),
 	ECVF_Default);
 
 UEditorPerformanceSettings::UEditorPerformanceSettings(const FObjectInitializer& ObjectInitializer)
@@ -16,9 +19,20 @@ UEditorPerformanceSettings::UEditorPerformanceSettings(const FObjectInitializer&
 	, bThrottleCPUWhenNotForeground(true)
 	, bDisableRealtimeViewportsInRemoteSessions(true)
 	, bMonitorEditorPerformance(false)
-	, bOverrideDPIBasedEditorViewportScaling(false)
-	, bEnableSharedDDCPerformanceNotifications(true)
 	, bEnableScalabilityWarningIndicator(true)
+	, bDisplayHighDPIViewports(true)
+	, bOverridePIEScreenPercentage(true)
+	, RealtimeScreenPercentageMode(EEditorUserScreenPercentageModeOverride::ProjectDefault)
+	, MobileScreenPercentageMode(EEditorUserScreenPercentageModeOverride::ProjectDefault)
+	, VRScreenPercentageMode(EEditorUserScreenPercentageModeOverride::ProjectDefault)
+	, PathTracerScreenPercentageMode(EEditorUserScreenPercentageModeOverride::ProjectDefault)
+	, NonRealtimeScreenPercentageMode(EEditorUserScreenPercentageModeOverride::ProjectDefault)
+	, bOverrideManualScreenPercentage(false)
+	, ManualScreenPercentage(100.0f)
+	, bOverrideMinViewportRenderingResolution(false)
+	, MinViewportRenderingResolution(720)
+	, bOverrideMaxViewportRenderingResolution(false)
+	, MaxViewportRenderingResolution(2160)
 {
 
 }
@@ -27,30 +41,43 @@ void UEditorPerformanceSettings::PostInitProperties()
 {
 	Super::PostInitProperties();
 
-	CVarOverrideDPIBasedEditorViewportScaling->Set(bOverrideDPIBasedEditorViewportScaling, ECVF_SetByProjectSetting);
+	CVarEditorViewportHighDPI->Set(bDisplayHighDPIViewports != 0, ECVF_SetByProjectSetting);
+	CVarEditorViewportOverrideGameScreenPercentage->Set(bOverridePIEScreenPercentage != 0, ECVF_SetByProjectSetting);
 
+	if (FProperty* EnableVSyncProperty = GetClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(UEditorPerformanceSettings, bEnableVSync)))
+	{
+		ExportValuesToConsoleVariables(EnableVSyncProperty);
+	}
+
+	UEditorPerformanceProjectSettings::ExportResolutionValuesToConsoleVariables();
 }
 
 void UEditorPerformanceSettings::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 
-	ExportValuesToConsoleVariables(PropertyChangedEvent.Property);
-	if (PropertyChangedEvent.Property && (PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(UEditorPerformanceSettings, bOverrideDPIBasedEditorViewportScaling)))
+	if (!PropertyChangedEvent.Property)
 	{
-		// Tell all viewports to refresh their screen percentage when the dpi scaling override changes
-		for (FEditorViewportClient* Client : GEditor->GetAllViewportClients())
-		{
-			if (Client)
-			{
-				Client->RequestUpdateDPIScale();
-				Client->Invalidate();
-			}
-		}
-
-		if (GEngine->GameViewport)
-		{
-			GEngine->GameViewport->RequestUpdateDPIScale();
-		}
+		return;
+	}
+		
+	if (PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(UEditorPerformanceSettings, bDisplayHighDPIViewports) ||
+		PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(UEditorPerformanceSettings, RealtimeScreenPercentageMode) ||
+		PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(UEditorPerformanceSettings, MobileScreenPercentageMode) ||
+		PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(UEditorPerformanceSettings, VRScreenPercentageMode) ||
+		PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(UEditorPerformanceSettings, PathTracerScreenPercentageMode) ||
+		PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(UEditorPerformanceSettings, NonRealtimeScreenPercentageMode) ||
+		PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(UEditorPerformanceSettings, bOverrideManualScreenPercentage) ||
+		PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(UEditorPerformanceSettings, ManualScreenPercentage) ||
+		PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(UEditorPerformanceSettings, bOverrideMinViewportRenderingResolution) ||
+		PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(UEditorPerformanceSettings, MinViewportRenderingResolution) ||
+		PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(UEditorPerformanceSettings, bOverrideMaxViewportRenderingResolution) ||
+		PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(UEditorPerformanceSettings, MaxViewportRenderingResolution))
+	{
+		UEditorPerformanceProjectSettings::ExportResolutionValuesToConsoleVariables();
+	}
+	else
+	{
+		ExportValuesToConsoleVariables(PropertyChangedEvent.Property);
 	}
 }

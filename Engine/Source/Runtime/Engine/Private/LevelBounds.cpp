@@ -2,9 +2,12 @@
 
 #include "Engine/LevelBounds.h"
 #include "Engine/CollisionProfile.h"
-#include "EngineGlobals.h"
 #include "Components/BoxComponent.h"
 #include "Engine/Engine.h"
+#include "Engine/Level.h"
+#include "Engine/World.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(LevelBounds)
 
 // Default size of the box (scale)
 static const FVector DefaultLevelSize = FVector(1000.f);
@@ -32,6 +35,11 @@ ALevelBounds::ALevelBounds(const FObjectInitializer& ObjectInitializer)
 	bLevelBoundsDirty = true;
 	bUsingDefaultBounds = false;
 #endif
+
+#if WITH_EDITORONLY_DATA
+	bIsSpatiallyLoaded = false;
+#endif
+
 }
 
 void ALevelBounds::PostLoad()
@@ -56,7 +64,7 @@ FBox ALevelBounds::GetComponentsBoundingBox(bool bNonColliding, bool bIncludeFro
 				BoundsCenter + BoundsExtent);
 }
 
-FBox ALevelBounds::CalculateLevelBounds(ULevel* InLevel)
+FBox ALevelBounds::CalculateLevelBounds(const ULevel* InLevel)
 {
 	FBox LevelBounds(ForceInit);
 	
@@ -145,6 +153,11 @@ ETickableTickType ALevelBounds::GetTickableTickType() const
 
 bool ALevelBounds::IsTickable() const
 {
+	if (!IsValidChecked(this) || HasAnyFlags(RF_BeginDestroyed|RF_FinishDestroyed))
+	{
+		return false;
+	}
+
 	if (bAutoUpdateBounds)
 	{
 		UWorld* World = GetWorld();
@@ -269,5 +282,6 @@ void ALevelBounds::UnsubscribeFromUpdateEvents()
 
 
 #endif // WITH_EDITOR
+
 
 

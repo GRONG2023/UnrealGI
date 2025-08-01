@@ -12,11 +12,19 @@
 #include "Engine/EngineTypes.h"
 #include "GameFramework/Actor.h"
 #include "HitProxies.h"
+#include "Engine/Level.h"
 #include "Engine/World.h"
 #include "UObject/UObjectHash.h"
 #include "ProfilingDebugging/ProfilingHelpers.h"
 #include "GameFramework/WorldSettings.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "RendererInterface.h"
+#endif
+
+#if WITH_EDITOR
+#include "Algo/Accumulate.h"
+#include "Algo/Copy.h"
+#endif
 
 class FCanvas;
 class FViewport;
@@ -32,8 +40,8 @@ class UPrimitiveComponent;
 struct HActor : public HHitProxy
 {
 	DECLARE_HIT_PROXY( ENGINE_API )
-	AActor* Actor;
-	const UPrimitiveComponent* PrimComponent;
+	TObjectPtr<AActor> Actor;
+	TObjectPtr<const UPrimitiveComponent> PrimComponent;
 	int32 SectionIndex;
 	int32 MaterialIndex;
 
@@ -67,16 +75,10 @@ struct HActor : public HHitProxy
 		, MaterialIndex(InMaterialIndex)
 		{}
 
-	virtual void AddReferencedObjects( FReferenceCollector& Collector ) override
-	{
-		Collector.AddReferencedObject( Actor );
-		Collector.AddReferencedObject( PrimComponent );
-	}
-
-	virtual EMouseCursor::Type GetMouseCursor() override
-	{
-		return EMouseCursor::Crosshairs;
-	}
+	ENGINE_API virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
+	ENGINE_API virtual EMouseCursor::Type GetMouseCursor() override;
+	ENGINE_API virtual FTypedElementHandle GetElementHandle() const override;
+	ENGINE_API bool AlwaysAllowsTranslucentPrimitives() const override;
 };
 
 //
@@ -87,8 +89,8 @@ struct HBSPBrushVert : public HHitProxy
 {
 	DECLARE_HIT_PROXY( ENGINE_API );
 	TWeakObjectPtr<ABrush>	Brush;
-	FVector* Vertex;
-	HBSPBrushVert(ABrush* InBrush,FVector* InVertex):
+	FVector3f* Vertex;
+	HBSPBrushVert(ABrush* InBrush,FVector3f* InVertex):
 		HHitProxy(HPP_UI),
 		Brush(InBrush),
 		Vertex(InVertex)
@@ -109,7 +111,7 @@ struct HBSPBrushVert : public HHitProxy
 struct HStaticMeshVert : public HHitProxy
 {
 	DECLARE_HIT_PROXY( ENGINE_API );
-	AActor*	Actor;
+	TObjectPtr<AActor>	Actor;
 	FVector Vertex;
 	HStaticMeshVert(AActor* InActor,FVector InVertex):
 		HHitProxy(HPP_UI),
@@ -134,15 +136,8 @@ struct HTranslucentActor : public HActor
 		: HActor(InActor, InPrimComponent, InPriority)
 		{}
 
-	virtual EMouseCursor::Type GetMouseCursor() override
-	{
-		return EMouseCursor::Crosshairs;
-	}
-
-	virtual bool AlwaysAllowsTranslucentPrimitives() const override
-	{
-		return true;
-	}
+	ENGINE_API virtual EMouseCursor::Type GetMouseCursor() override;
+	ENGINE_API virtual bool AlwaysAllowsTranslucentPrimitives() const override;
 };
 
 
@@ -159,7 +154,7 @@ class FActorIteratorState
 {
 public:
 	/** Current world we are iterating upon						*/
-	UWorld* CurrentWorld;
+	const UWorld* CurrentWorld;
 	/** Results from the GetObjectsOfClass query				*/
 	TArray<UObject*> ObjectArray;
 	/** index of the current element in the object array		*/
@@ -180,12 +175,12 @@ public:
 	/**
 	 * Default ctor, inits everything
 	 */
-	FActorIteratorState( UWorld* InWorld, TSubclassOf<AActor> InClass ) :
+	FActorIteratorState(const UWorld* InWorld, const TSubclassOf<AActor> InClass) :
 		CurrentWorld( InWorld ),
 		Index( -1 ),
 		ReachedEnd( false ),
 		ConsideredCount( 0 ),
-		CurrentActor( NULL ),
+		CurrentActor(nullptr),
 		DesiredClass(InClass)
 	{
 		check(IsInGameThread());
@@ -224,11 +219,11 @@ public:
 		else
 #endif // WITH_EDITOR
 		{
-			EObjectFlags ExcludeFlags = RF_ClassDefaultObject;
-			GetObjectsOfClass(InClass, ObjectArray, true, ExcludeFlags, EInternalObjectFlags::PendingKill);
+			constexpr EObjectFlags ExcludeFlags = RF_ClassDefaultObject;
+			GetObjectsOfClass(InClass, ObjectArray, true, ExcludeFlags, EInternalObjectFlags::Garbage);
 		}
 
-		auto ActorSpawnedDelegate = FOnActorSpawned::FDelegate::CreateRaw(this, &FActorIteratorState::OnActorSpawned);
+		const auto ActorSpawnedDelegate = FOnActorSpawned::FDelegate::CreateRaw(this, &FActorIteratorState::OnActorSpawned);
 		ActorSpawnedDelegateHandle = CurrentWorld->AddOnActorSpawnedHandler(ActorSpawnedDelegate);
 	}
 
@@ -292,7 +287,7 @@ public:
 		int32             LocalIndex             = State->Index;
 		TArray<UObject*>& LocalObjectArray       = State->ObjectArray;
 		TArray<AActor*>&  LocalSpawnedActorArray = State->SpawnedActorArray;
-		UWorld*           LocalCurrentWorld      = State->CurrentWorld;
+		const UWorld*     LocalCurrentWorld      = State->CurrentWorld;
 		while(++LocalIndex < (LocalObjectArray.Num() + LocalSpawnedActorArray.Num()))
 		{
 			if (LocalIndex < LocalObjectArray.Num())
@@ -320,7 +315,7 @@ public:
 				}
 			}
 		}
-		State->CurrentActor = NULL;
+		State->CurrentActor = nullptr;
 		State->ReachedEnd = true;
 	}
 
@@ -383,7 +378,7 @@ protected:
 	{
 	}
 
-	TActorIteratorBase(UWorld* InWorld, TSubclassOf<AActor> InClass, EActorIteratorFlags InFlags)
+	TActorIteratorBase(const UWorld* InWorld, TSubclassOf<AActor> InClass, const EActorIteratorFlags InFlags)
 		: Flags(InFlags)
 	{
 		State.Emplace(InWorld, InClass);
@@ -396,9 +391,9 @@ protected:
 	 * @param	Actor	Actor to check
 	 * @return	true
 	 */
-	FORCEINLINE bool IsActorSuitable(AActor* Actor) const
+	FORCEINLINE bool IsActorSuitable(const AActor* Actor) const
 	{
-		if (EnumHasAnyFlags(Flags, EActorIteratorFlags::SkipPendingKill) && Actor->IsPendingKill())
+		if (EnumHasAnyFlags(Flags, EActorIteratorFlags::SkipPendingKill) && !IsValid(Actor))
 		{
 			return false;
 		}
@@ -418,7 +413,7 @@ protected:
 	 * @param Level the level to check for iteration
 	 * @return true if the level can be iterated, false otherwise
 	 */
-	FORCEINLINE bool CanIterateLevel(ULevel* Level) const
+	FORCEINLINE bool CanIterateLevel(const ULevel* Level) const
 	{
 		if (EnumHasAnyFlags(Flags, EActorIteratorFlags::OnlyActiveLevels))
 		{
@@ -462,9 +457,10 @@ public:
 	/**
 	 * Constructor
 	 *
-	 * @param  InWorld  The world whose actors are to be iterated over.
+	 * @param InWorld	The world whose actors are to be iterated over.
+	 * @param InFlags	Iteration flags indicating which types of levels and actors should be iterated
 	 */
-	explicit FActorIterator(UWorld* InWorld, EActorIteratorFlags InFlags = EActorIteratorFlags::OnlyActiveLevels | EActorIteratorFlags::SkipPendingKill)
+	explicit FActorIterator(const UWorld* InWorld, const EActorIteratorFlags InFlags = EActorIteratorFlags::OnlyActiveLevels | EActorIteratorFlags::SkipPendingKill)
 		: Super(InWorld, AActor::StaticClass(), InFlags)
 	{
 		++(*this);
@@ -473,10 +469,11 @@ public:
 	/**
 	 * Constructor
 	 *
-	 * @param  InWorld  The world whose actors are to be iterated over.
-	 * @param  InClass  The type of actors to be iterated over.
+	 * @param InWorld	The world whose actors are to be iterated over.
+	 * @param InClass	The type of actors to be iterated over.
+	 * @param InFlags	Iteration flags indicating which types of levels and actors should be iterated
 	 */
-	explicit FActorIterator(UWorld* InWorld, TSubclassOf<AActor> InClass, EActorIteratorFlags InFlags = EActorIteratorFlags::OnlyActiveLevels | EActorIteratorFlags::SkipPendingKill)
+	explicit FActorIterator(const UWorld* InWorld, const TSubclassOf<AActor> InClass, const EActorIteratorFlags InFlags = EActorIteratorFlags::OnlyActiveLevels | EActorIteratorFlags::SkipPendingKill)
 		: Super(InWorld, InClass, InFlags)
 	{
 		++(*this);
@@ -501,9 +498,10 @@ public:
 	/**
 	 * Constructor
 	 *
-	 * @param  InWorld  The world whose actors are to be iterated over.
+	 * @param InWorld	The world whose actors are to be iterated over.
+	 * @param InFlags	Iteration flags indicating which types of levels and actors should be iterated
 	 */
-	explicit FActorRange(UWorld* InWorld, EActorIteratorFlags InFlags = EActorIteratorFlags::OnlyActiveLevels | EActorIteratorFlags::SkipPendingKill)
+	explicit FActorRange(const UWorld* InWorld, const EActorIteratorFlags InFlags = EActorIteratorFlags::OnlyActiveLevels | EActorIteratorFlags::SkipPendingKill)
 		: Flags(InFlags)
 		, World(InWorld)
 	{
@@ -511,7 +509,7 @@ public:
 
 private:
 	EActorIteratorFlags	Flags;
-	UWorld*				World;
+	const UWorld* World;
 
 	friend FActorIterator begin(const FActorRange& Range) { return FActorIterator(Range.World, Range.Flags); }
 	friend FActorIterator end  (const FActorRange& Range) { return FActorIterator(EActorIteratorType::End); }
@@ -530,10 +528,11 @@ public:
 	/**
 	 * Constructor
 	 *
-	 * @param  InWorld  The world whose actors are to be iterated over.
-	 * @param  InClass  The subclass of actors to be iterated over.
+	 * @param InWorld	The world whose actors are to be iterated over.
+	 * @param InClass	The subclass of actors to be iterated over.
+	 * @param InFlags	Iteration flags indicating which types of levels and actors should be iterated
 	 */
-	explicit TActorIterator(UWorld* InWorld, TSubclassOf<ActorType> InClass = ActorType::StaticClass(), EActorIteratorFlags InFlags = EActorIteratorFlags::OnlyActiveLevels | EActorIteratorFlags::SkipPendingKill)
+	explicit TActorIterator(const UWorld* InWorld, TSubclassOf<ActorType> InClass = ActorType::StaticClass(), EActorIteratorFlags InFlags = EActorIteratorFlags::OnlyActiveLevels | EActorIteratorFlags::SkipPendingKill)
 		: Super(InWorld, InClass, InFlags)
 	{
 		++(*this);
@@ -578,10 +577,11 @@ public:
 	/**
 	 * Constructor
 	 *
-	 * @param  InWorld  The world whose actors are to be iterated over.
-	 * @param  InClass  The subclass of actors to be iterated over.
+	 * @param InWorld	The world whose actors are to be iterated over.
+	 * @param InClass	The subclass of actors to be iterated over.
+	 * @param InFlags	Iteration flags indicating which types of levels and actors should be iterated
 	 */
-	explicit TActorRange(UWorld* InWorld, TSubclassOf<ActorType> InClass = ActorType::StaticClass(), EActorIteratorFlags InFlags = EActorIteratorFlags::OnlyActiveLevels | EActorIteratorFlags::SkipPendingKill)
+	explicit TActorRange(const UWorld* InWorld, TSubclassOf<ActorType> InClass = ActorType::StaticClass(), const EActorIteratorFlags InFlags = EActorIteratorFlags::OnlyActiveLevels | EActorIteratorFlags::SkipPendingKill)
 		: Flags(InFlags)
 		, World(InWorld)
 		, Class(InClass)
@@ -590,7 +590,7 @@ public:
 
 private:
 	EActorIteratorFlags		Flags;
-	UWorld*					World;
+	const UWorld*			World;
 	TSubclassOf<ActorType>	Class;
 
 	friend TActorIterator<ActorType> begin(const TActorRange& Range) { return TActorIterator<ActorType>(Range.World, Range.Class, Range.Flags); }
@@ -609,9 +609,9 @@ public:
 	/**
 	 * Constructor
 	 *
-	 * @param  InWorld  The world whose actors are to be iterated over.
+	 * @param InWorld	The world whose actors are to be iterated over.
 	 */
-	explicit FSelectedActorIterator(UWorld* InWorld)
+	explicit FSelectedActorIterator(const UWorld* InWorld)
 		: Super(InWorld, AActor::StaticClass(), EActorIteratorFlags::SkipPendingKill | EActorIteratorFlags::OnlySelectedActors)
 	{
 		++(*this);
@@ -623,7 +623,7 @@ public:
 	 * @param  InWorld  The world whose actors are to be iterated over.
 	 * @param  InClass  The type of actors to be iterated over.
 	 */
-	explicit FSelectedActorIterator(UWorld* InWorld, TSubclassOf<AActor> InClass)
+	explicit FSelectedActorIterator(const UWorld* InWorld, const TSubclassOf<AActor> InClass)
 		: Super(InWorld, InClass, EActorIteratorFlags::SkipPendingKill | EActorIteratorFlags::OnlySelectedActors)
 	{
 		++(*this);
@@ -649,13 +649,13 @@ public:
 	 *
 	 * @param  InWorld  The world whose actors are to be iterated over.
 	 */
-	explicit FSelectedActorRange(UWorld* InWorld)
+	explicit FSelectedActorRange(const UWorld* InWorld)
 		: World(InWorld)
 	{
 	}
 
 private:
-	UWorld* World;
+	const UWorld* World;
 
 	friend FSelectedActorIterator begin(const FSelectedActorRange& Range) { return FSelectedActorIterator(Range.World); }
 	friend FSelectedActorIterator end  (const FSelectedActorRange& Range) { return FSelectedActorIterator(EActorIteratorType::End); }
@@ -664,7 +664,7 @@ private:
 /**
  * An output device that forwards output to both the log and the console.
  */
-class ENGINE_API FConsoleOutputDevice : public FStringOutputDevice
+class FConsoleOutputDevice : public FStringOutputDevice
 {
 	typedef FStringOutputDevice Super;
 
@@ -678,7 +678,7 @@ public:
 		Console(InConsole)
 	{}
 
-	virtual void Serialize(const TCHAR* Text, ELogVerbosity::Type Verbosity, const class FName& Category) override;
+	ENGINE_API virtual void Serialize(const TCHAR* Text, ELogVerbosity::Type Verbosity, const class FName& Category) override;
 
 private:
 
@@ -690,23 +690,40 @@ private:
 /**
  *	Renders stats
  *
- *	@param Viewport	The viewport to render to
- *	@param Canvas	Canvas object to use for rendering
+ *	@param InWorld			The World to render stats
+ *	@param Viewport			The viewport to render to
+ *	@param Canvas			Canvas object to use for rendering
  *	@param CanvasObject		Optional canvas object for visualizing properties
  *	@param DebugProperties	List of properties to visualize (in/out)
- *	@param ViewLocation	Location of camera
- *	@param ViewRotation	Rotation of camera
+ *	@param ViewLocation		Location of camera
+ *	@param ViewRotation		Rotation of camera
  */
 ENGINE_API void DrawStatsHUD( UWorld* InWorld, FViewport* Viewport, FCanvas* Canvas, UCanvas* CanvasObject, TArray<struct FDebugDisplayProperty>& DebugProperties, const FVector& ViewLocation, const FRotator& ViewRotation );
+
+/** SubLevel Actor breakdown information **/
+struct FSubLevelActorDetails
+{
+	FSubLevelActorDetails() :
+		Count(0)
+		, NativeClassName(NAME_None)
+	{
+	}
+
+	int32 Count;
+	FName NativeClassName;
+};
 
 /** SubLevel status information */
 struct FSubLevelStatus
 {
 	FName				PackageName;
+	FString				LevelLabel;
 	EStreamingStatus	StreamingStatus;
 	int32				LODIndex;
 	bool				bInConsiderList;
 	bool				bPlayerInside;
+	int32				ActorCount;
+	TMap<FName, FSubLevelActorDetails>	ActorMapToCount;
 };
 
 /**
@@ -714,7 +731,7 @@ struct FSubLevelStatus
  *	@param InWorld		World to gather sublevels stats from
  *	@return				sublevels status (streaming state, LOD index, where player is)
  */
-TArray<FSubLevelStatus> GetSubLevelsStatus( UWorld* InWorld );
+ENGINE_API TArray<FSubLevelStatus> GetSubLevelsStatus( UWorld* InWorld, bool SortByActorCount = false );
 
 #if !UE_BUILD_SHIPPING
 
@@ -733,20 +750,12 @@ struct FContentComparisonAssetInfo
 	}
 
 	/** operator == */
-	bool operator==(const FContentComparisonAssetInfo& Other)
+	bool operator==(const FContentComparisonAssetInfo& Other) const
 	{
 		return (
 			(AssetName == Other.AssetName) &&
 			(ResourceSize == Other.ResourceSize)
 			);
-	}
-
-	/** operator = */
-	FContentComparisonAssetInfo& operator=(const FContentComparisonAssetInfo& Other)
-	{
-		AssetName = Other.AssetName;
-		ResourceSize = Other.ResourceSize;
-		return *this;
 	}
 };
 
@@ -781,10 +790,10 @@ public:
 	/**
 	 *	Recursive function for collecting objects referenced by the given object.
 	 *
-	 *	@param	InStartObject			The object to collect the referencees for
+	 *	@param	InStartObject			The object to collect the references for
 	 *	@param	InCurrDepth				The current depth being processed
 	 *	@param	InMaxDepth				The maximum depth to traverse the reference chain
-	 *	@param	OutCollectReferences	The resulting referenced object list
+	 *	@param	OutCollectedReferences	The resulting referenced object list
 	 */
 	void RecursiveObjectCollection(UObject* InStartObject, int32 InCurrDepth, int32 InMaxDepth, TMap<UObject*,bool>& OutCollectedReferences);
 
@@ -806,7 +815,7 @@ namespace EngineUtils
 }
 
 /** Helper class for serializing flags describing which data have been stripped (if any). */
-class ENGINE_API FStripDataFlags
+class FStripDataFlags
 {
 	/** Serialized engine strip flags (up to 8 flags). */
 	uint8 GlobalStripFlags;
@@ -816,14 +825,22 @@ class ENGINE_API FStripDataFlags
 public:
 
 	/** Engine strip flags */
-	enum EStrippedData
+	enum class EStrippedData : uint8
 	{
 		None = 0,
 
-		/* Editor data */
-		Editor = 1,
-		/* All data not required for dedicated server to work correctly (usually includes editor data). */
-		Server = 2,
+		/* This flag means that Editor-only data is stripped */
+		EditorOnly = 1,
+		Editor UE_DEPRECATED(5.4, "Use EditorOnly value instead of Editor") = EditorOnly,
+
+		/* This flag means that AudioVisual data is stripped (e.g. target is dedicated server). */
+		AudioVisual = 2,
+		Server UE_DEPRECATED(5.4, "Use AudioVisual value instead of Server") = AudioVisual,
+
+		/* This flag means that all data needed to cook packages will be stripped. What it means is specific to 
+		  an asset type, and it might be a subset of both EditorOnly and AudioVisual. This flag is normally set, except
+		  when cooking for a "cooked cooker" target. */
+		NeededForCooking = 4,
 
 		// Add global flags here (up to 8 including the already defined ones).
 
@@ -840,7 +857,13 @@ public:
 	 * @param InClassFlags - User defined per class flags .
 	 * @param InVersion - Minimal strip version required to serialize strip flags
 	 */
-	FStripDataFlags( FArchive& Ar, uint8 InClassFlags = 0, int32 InVersion = VER_UE4_OLDEST_LOADABLE_PACKAGE );
+	ENGINE_API explicit FStripDataFlags(FArchive& Ar, uint8 InClassFlags = 0, const FPackageFileVersion& InVersion = GOldestLoadablePackageFileUEVersion);
+	UE_DEPRECATED(5.0, "Use the other overload that takes InVersion as a FPackageFileVersion. See the @FPackageFileVersion documentation for further details")
+	inline FStripDataFlags(FArchive& Ar, uint8 InClassFlags, int32 InVersion)
+		: FStripDataFlags(Ar, InClassFlags, FPackageFileVersion::CreateUE4Version(InVersion))
+	{
+
+	}
 
 	/** 
 	 * Constructor.
@@ -848,32 +871,52 @@ public:
 	 * when saving. Class flags also need to be defined by the user.
 	 *
 	 * @param Ar - Archive to serialize with.
+	 * @param InGlobalFlags Engine flags
 	 * @param InClassFlags - User defined per class flags.
 	 * @param InVersion - Minimal version required to serialize strip flags
 	 */
-	FStripDataFlags( FArchive& Ar, uint8 InGlobalFlags, uint8 InClassFlags, int32 InVersion = VER_UE4_OLDEST_LOADABLE_PACKAGE );
+	ENGINE_API FStripDataFlags( FArchive& Ar, uint8 InGlobalFlags, uint8 InClassFlags, const FPackageFileVersion& InVersion = GOldestLoadablePackageFileUEVersion);
+	UE_DEPRECATED(5.0, "Use the other overload that takes InVersion as a FPackageFileVersion. See the @FPackageFileVersion documentation for further details")
+	inline FStripDataFlags(FArchive& Ar, uint8 InGlobalFlags, uint8 InClassFlags, int32 InVersion)
+		: FStripDataFlags(Ar, InGlobalFlags, InClassFlags, FPackageFileVersion::CreateUE4Version(InVersion))
+	{
+
+	}
 
 	/**
 	* Constructor.
 	* Serializes strip data flags. Global (engine) flags are automatically generated from target platform
 	* when saving. Class flags need to be defined by the user.
 	*
-	* @param Ar - Archive to serialize with.
+	* @param Slot - Slot holding the archive to serialize with.
 	* @param InClassFlags - User defined per class flags .
 	* @param InVersion - Minimal strip version required to serialize strip flags
 	*/
-	FStripDataFlags(FStructuredArchive::FSlot Slot, uint8 InClassFlags = 0, int32 InVersion = VER_UE4_OLDEST_LOADABLE_PACKAGE);
+	ENGINE_API explicit FStripDataFlags(FStructuredArchive::FSlot Slot, uint8 InClassFlags = 0, const FPackageFileVersion& InVersion = GOldestLoadablePackageFileUEVersion);
+	UE_DEPRECATED(5.0, "Use the other overload that takes InVersion as a FPackageFileVersion. See the @FPackageFileVersion documentation for further details")
+	inline FStripDataFlags(FStructuredArchive::FSlot Slot, uint8 InClassFlags, int32 InVersion)
+		: FStripDataFlags(Slot, InClassFlags, FPackageFileVersion::CreateUE4Version(InVersion))
+	{
+
+	}
 
 	/**
 	* Constructor.
 	* Serializes strip data flags. Global (engine) flags are user defined and will not be automatically generated
 	* when saving. Class flags also need to be defined by the user.
 	*
-	* @param Ar - Archive to serialize with.
+	* @param Slot - Slot holding the archive to serialize with.
+	* @param InGlobalFlags - Engine flags.
 	* @param InClassFlags - User defined per class flags.
 	* @param InVersion - Minimal version required to serialize strip flags
 	*/
-	FStripDataFlags(FStructuredArchive::FSlot Slot, uint8 InGlobalFlags, uint8 InClassFlags, int32 InVersion = VER_UE4_OLDEST_LOADABLE_PACKAGE);
+	ENGINE_API FStripDataFlags(FStructuredArchive::FSlot Slot, uint8 InGlobalFlags, uint8 InClassFlags, const FPackageFileVersion& InVersion = GOldestLoadablePackageFileUEVersion);
+	UE_DEPRECATED(5.0, "Use the other overload that takes InVersion as a FPackageFileVersion. See the @FPackageFileVersion documentation for further details")
+	inline FStripDataFlags(FStructuredArchive::FSlot Slot, uint8 InGlobalFlags, uint8 InClassFlags, int32 InVersion)
+		: FStripDataFlags(Slot, InGlobalFlags, InClassFlags, FPackageFileVersion::CreateUE4Version(InVersion))
+	{
+
+	}
 
 	/**
 	 * Checks if FStripDataFlags::Editor flag is set or not
@@ -882,7 +925,17 @@ public:
 	 */
 	FORCEINLINE bool IsEditorDataStripped() const
 	{
-		return (GlobalStripFlags & FStripDataFlags::Editor) != 0;
+		return (GlobalStripFlags & static_cast<uint8>(FStripDataFlags::EStrippedData::EditorOnly)) != 0;
+	}
+
+	/**
+	 * Checks if FStripDataFlags::AudioVisual flag is set or not
+	 *
+	 * @return true if FStripDataFlags::AudioVisual is set, false otherwise.
+	 */
+	bool IsAudioVisualDataStripped() const
+	{
+		return (GlobalStripFlags & static_cast<uint8>(FStripDataFlags::EStrippedData::AudioVisual)) != 0;
 	}
 
 	/**
@@ -890,9 +943,20 @@ public:
 	 *
 	 * @return true if FStripDataFlags::Server is set, false otherwise.
 	 */
+	UE_DEPRECATED(5.4, "Use IsAudioVisualDataStripped instead.")
 	bool IsDataStrippedForServer() const
 	{
-		return (GlobalStripFlags & FStripDataFlags::Server) != 0;
+		return IsAudioVisualDataStripped();
+	}
+
+	/**
+	 * Checks if FStripDataFlags::NeededForCooking flag is set or not. It should be set for all non-content-worker targets
+	 *
+	 * @return true if FStripDataFlags::NeededForCooking is set, false otherwise.
+	 */
+	bool IsDataNeededForCookingStripped() const
+	{
+		return (GlobalStripFlags & static_cast<uint8>(FStripDataFlags::EStrippedData::NeededForCooking)) != 0;
 	}
 
 	/**
@@ -910,6 +974,6 @@ public:
 class UTexture;
 namespace VirtualTextureUtils
 {
-	/** Function that will test if the passed in texture is VT. If so, print to messaglog that the property does not support VT textures */
+	/** Function that will test if the passed in texture is VT. If so, print to Messagelog that the property does not support VT textures */
 	ENGINE_API void CheckAndReportInvalidUsage(const UObject* Owner, const FName& PropertyName, const UTexture* Texture);
 }

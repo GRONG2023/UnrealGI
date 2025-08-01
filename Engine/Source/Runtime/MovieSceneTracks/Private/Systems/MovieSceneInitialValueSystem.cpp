@@ -11,6 +11,8 @@
 #include "Systems/MovieScenePropertyInstantiator.h"
 #include "EntitySystem/Interrogation/MovieSceneInterrogatedPropertyInstantiator.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneInitialValueSystem)
+
 namespace UE
 {
 namespace MovieScene
@@ -56,7 +58,11 @@ struct FInitialValueMutation : IMovieSceneEntityMutation
 
 	virtual void CreateMutation(FEntityManager* EntityManager, FComponentMask* InOutEntityComponentTypes) const override
 	{
-		InOutEntityComponentTypes->Set(BuiltInComponents->InitialValueIndex);
+		if (IsCached())
+		{
+			InOutEntityComponentTypes->Set(BuiltInComponents->InitialValueIndex);
+		}
+		InOutEntityComponentTypes->Set(BuiltInComponents->Tags.HasAssignedInitialValue);
 	}
 
 	virtual void InitializeAllocation(FEntityAllocation* Allocation, const FComponentMask& AllocationType) const
@@ -77,6 +83,8 @@ struct FInitialValueMutation : IMovieSceneEntityMutation
 UMovieSceneInitialValueSystem::UMovieSceneInitialValueSystem(const FObjectInitializer& ObjInit)
 	: Super(ObjInit)
 {
+	SystemCategories = UE::MovieScene::EEntitySystemCategory::Core;
+
 	if (HasAnyFlags(RF_ClassDefaultObject))
 	{
 		DefineImplicitPrerequisite(UMovieScenePropertyInstantiatorSystem::StaticClass(), StaticClass());
@@ -116,6 +124,13 @@ void UMovieSceneInitialValueSystem::OnRun(FSystemTaskPrerequisites& InPrerequisi
 	FBuiltInComponentTypes* BuiltInComponents = FBuiltInComponentTypes::Get();
 
 	FInitialValueMutation Mutation(Linker);
+
+	// If we don't have any initial value processors, we've no work to do
+	if (Mutation.AnyInitialValue.NumComponents() == 0)
+	{
+		return;
+	}
+
 	if (Mutation.IsCached() && Linker->FindExtension<IInterrogationExtension>() == nullptr)
 	{
 		// When there is an initial value cache extension, we mutate anything with an initial value component on it by
@@ -126,6 +141,7 @@ void UMovieSceneInitialValueSystem::OnRun(FSystemTaskPrerequisites& InPrerequisi
 			Filter.Any(Mutation.AnyInitialValue);
 			Filter.All({ BuiltInComponents->Tags.NeedsLink });
 			Filter.None({ BuiltInComponents->InitialValueIndex });
+			Filter.None({ BuiltInComponents->Tags.HasAssignedInitialValue });
 
 			Linker->EntityManager.MutateAll(Filter, Mutation);
 		}
@@ -153,20 +169,11 @@ void UMovieSceneInitialValueSystem::OnRun(FSystemTaskPrerequisites& InPrerequisi
 		// When there is no caching extension, or we are interrogating we simply initialize any initial values directly without going through the cache
 		FEntityComponentFilter Filter;
 		Filter.Any(Mutation.AnyInitialValue);
+		Filter.Any({ BuiltInComponents->BoundObject, BuiltInComponents->Interrogation.OutputKey });
 		Filter.All({ BuiltInComponents->Tags.NeedsLink });
+		Filter.None({ BuiltInComponents->Tags.HasAssignedInitialValue });
 
-		for (FEntityAllocationIteratorItem Item : Linker->EntityManager.Iterate(&Filter))
-		{
-			const FEntityAllocation* Allocation     = Item.GetAllocation();
-			FComponentMask           AllocationType = Item.GetAllocationType();
-
-			FComponentTypeID InitialValueType = FComponentMask::BitwiseAND(AllocationType, Mutation.AnyInitialValue, EBitwiseOperatorFlags::MinSize).First();
-
-			IInitialValueProcessor* Processor = Mutation.PropertyTypeToProcessor.FindRef(InitialValueType);
-			if (ensure(Processor))
-			{
-				Processor->Process(Allocation, AllocationType);
-			}
-		}
+		Linker->EntityManager.MutateAll(Filter, Mutation);
 	}
 }
+

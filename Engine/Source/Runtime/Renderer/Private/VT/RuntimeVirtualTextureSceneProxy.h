@@ -33,9 +33,6 @@ public:
 	/** Unique ID for producer that this Proxy created. Used for finding this object and it's SceneIndex from the producer.  */
 	int32 ProducerId;
 
-	/** Handle for the producer that this Proxy initialized. This is only filled in by the render thread sometime after construction! */
-	FVirtualTextureProducerHandle ProducerHandle;
-
 	/** Pointer to linked URuntimeVirtualTexture. Not for dereferencing, just for pointer comparison. */
 	URuntimeVirtualTexture* VirtualTexture;
 
@@ -50,12 +47,20 @@ private:
 	/** Virtual texture size of the URuntimeVirtualTexture object. */
 	FIntPoint VirtualTextureSize;
 
+	/** Handle for the producer that this Proxy initialized. Used only for invalidation logic. */
+	FVirtualTextureProducerHandle ProducerHandle;
+	/** Space ID used by the virtual texture. Used only for invalidation logic. */
+	int32 SpaceID;
+
 	/** Maximum mip level to mark dirty. Can be less than the virtual texture's MaxLevel if we have streaming mips. */
 	int32 MaxDirtyLevel;
 	/** Array of dirty rectangles to process at the next flush. */
 	TArray<FIntRect> DirtyRects;
 	/** Combined dirty rectangle to process at the next flush. */
 	FIntRect CombinedDirtyRect;
+
+	/** DelegateHandle for on screen warning messages. */
+	FDelegateHandle OnScreenWarningDelegateHandle;
 
 	/** Static ProducerId counter. */
 	static int32 ProducerIdGenerator;

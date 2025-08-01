@@ -2,8 +2,14 @@
 
 #pragma once
 
+// HEADER_UNIT_SKIP - Included through other header
+
 #include "Misc/Char.h"
-#include "GenericPlatform/GenericPlatformString.h"
+#if PLATFORM_USE_GENERIC_STRING_IMPLEMENTATION
+	#include "GenericPlatform/GenericWidePlatformString.h"
+#else
+	#include "GenericPlatform/GenericPlatformString.h"
+#endif
 #include "GenericPlatform/GenericPlatformStricmp.h"
 #include <stdarg.h>
 #include <stdio.h>
@@ -19,11 +25,34 @@
 #pragma warning(disable : 4996) // 'function' was declared deprecated  (needed for the secure string functions)
 #pragma warning(disable : 4995) // 'function' was declared deprecated  (needed for the secure string functions)
 
-struct FMicrosoftPlatformString : public FGenericPlatformString
+struct FMicrosoftPlatformString :
+#if PLATFORM_USE_GENERIC_STRING_IMPLEMENTATION
+	public FGenericWidePlatformString
+#else
+	public FGenericPlatformString
+#endif
 {
+#if PLATFORM_USE_GENERIC_STRING_IMPLEMENTATION
+	using Super = FGenericWidePlatformString;
+#else
+	using Super = FGenericPlatformString;
+#endif
+
 	using FGenericPlatformString::Stricmp;
 	using FGenericPlatformString::Strncmp;
 	using FGenericPlatformString::Strnicmp;
+
+#if !PLATFORM_USE_GENERIC_STRING_IMPLEMENTATION
+	template <typename CharType>
+	static CharType* Strupr(CharType* Dest, SIZE_T DestCount)
+	{
+		for (CharType* Char = Dest; *Char && DestCount > 0; Char++, DestCount--)
+		{
+			*Char = TChar<CharType>::ToUpper(*Char);
+		}
+		return Dest;
+	}
+#endif
 
 	/** 
 	 * Wide character implementation 
@@ -43,11 +72,6 @@ struct FMicrosoftPlatformString : public FGenericPlatformString
 	static FORCEINLINE WIDECHAR* Strcat(WIDECHAR* Dest, SIZE_T DestCount, const WIDECHAR* Src)
 	{
 		return (WIDECHAR*)_tcscat(Dest, Src);
-	}
-
-	static FORCEINLINE WIDECHAR* Strupr(WIDECHAR* Dest, SIZE_T DestCount)
-	{
-		return (WIDECHAR*)_tcsupr(Dest);
 	}
 
 	static FORCEINLINE int32 Strcmp( const WIDECHAR* String1, const WIDECHAR* String2 )
@@ -125,18 +149,16 @@ struct FMicrosoftPlatformString : public FGenericPlatformString
 		return _tcstok_s(StrToken, Delim, Context);
 	}
 
-	UE_DEPRECATED(4.22, "GetVarArgs with DestSize and Count arguments has been deprecated - only DestSize should be passed")
-	static FORCEINLINE int32 GetVarArgs( WIDECHAR* Dest, SIZE_T DestSize, int32 Count, const WIDECHAR*& Fmt, va_list ArgPtr )
-	{
-		return GetVarArgs(Dest, DestSize, Fmt, ArgPtr);
-	}
-
+// Allow fallback to FGenericWidePlatformString::GetVarArgs when PLATFORM_USE_GENERIC_STRING_IMPLEMENTATION is set.
+#if PLATFORM_USE_GENERIC_STRING_IMPLEMENTATION
+	using Super::GetVarArgs;
+#else
 	static FORCEINLINE int32 GetVarArgs( WIDECHAR* Dest, SIZE_T DestSize, const WIDECHAR*& Fmt, va_list ArgPtr )
 	{
 		int32 Result = vswprintf(Dest, DestSize, Fmt, ArgPtr);
-		va_end( ArgPtr );
 		return Result;
 	}
+#endif
 
 	/** 
 	 * Ansi implementation 
@@ -146,20 +168,16 @@ struct FMicrosoftPlatformString : public FGenericPlatformString
 		return (ANSICHAR*)strcpy(Dest, Src);
 	}
 
-	static FORCEINLINE void Strncpy(ANSICHAR* Dest, const ANSICHAR* Src, SIZE_T MaxLen)
+	static FORCEINLINE ANSICHAR* Strncpy(ANSICHAR* Dest, const ANSICHAR* Src, SIZE_T MaxLen)
 	{
 		strncpy(Dest, Src, MaxLen);
 		Dest[MaxLen-1] = 0;
+		return Dest;
 	}
 
 	static FORCEINLINE ANSICHAR* Strcat(ANSICHAR* Dest, SIZE_T DestCount, const ANSICHAR* Src)
 	{
 		return (ANSICHAR*)strcat( Dest, Src );
-	}
-
-	static FORCEINLINE ANSICHAR* Strupr(ANSICHAR* Dest, SIZE_T DestCount)
-	{
-		return (ANSICHAR*)_strupr(Dest);
 	}
 
 	static FORCEINLINE int32 Strcmp( const ANSICHAR* String1, const ANSICHAR* String2 )
@@ -237,16 +255,9 @@ struct FMicrosoftPlatformString : public FGenericPlatformString
 		return strtok_s(StrToken, Delim, Context);
 	}
 
-	UE_DEPRECATED(4.22, "GetVarArgs with DestSize and Count arguments has been deprecated - only DestSize should be passed")
-	static FORCEINLINE int32 GetVarArgs( ANSICHAR* Dest, SIZE_T DestSize, int32 Count, const ANSICHAR*& Fmt, va_list ArgPtr )
-	{
-		return GetVarArgs(Dest, DestSize, Fmt, ArgPtr);
-	}
-
 	static FORCEINLINE int32 GetVarArgs( ANSICHAR* Dest, SIZE_T DestSize, const ANSICHAR*& Fmt, va_list ArgPtr )
 	{
 		int32 Result = vsnprintf( Dest, DestSize, Fmt, ArgPtr );
-		va_end( ArgPtr );
 		return (Result != -1 && Result < (int32)DestSize) ? Result : -1;
 	}
 
@@ -262,6 +273,104 @@ struct FMicrosoftPlatformString : public FGenericPlatformString
 	static FORCEINLINE int32 Strnlen( const UCS2CHAR* String, SIZE_T StringSize )
 	{
 		return _tcsnlen( (const WIDECHAR*)String, StringSize );
+	}
+
+	/**
+	 * UTF8CHAR implementation.
+	 */
+	static FORCEINLINE UTF8CHAR* Strcpy(UTF8CHAR* Dest, SIZE_T DestCount, const UTF8CHAR* Src)
+	{
+		return (UTF8CHAR*)Strcpy((ANSICHAR*)Dest, DestCount, (const ANSICHAR*)Src);
+	}
+
+	static FORCEINLINE UTF8CHAR* Strncpy(UTF8CHAR* Dest, const UTF8CHAR* Src, SIZE_T MaxLen)
+	{
+		return (UTF8CHAR*)Strncpy((ANSICHAR*)Dest, (const ANSICHAR*)Src, MaxLen);
+	}
+
+	static FORCEINLINE UTF8CHAR* Strcat(UTF8CHAR* Dest, SIZE_T DestCount, const UTF8CHAR* Src)
+	{
+		return (UTF8CHAR*)Strcat((ANSICHAR*)Dest, DestCount, (const ANSICHAR*)Src);
+	}
+
+	static FORCEINLINE int32 Strcmp(const UTF8CHAR* String1, const UTF8CHAR* String2)
+	{
+		return Strcmp((const ANSICHAR*)String1, (const ANSICHAR*)String2);
+	}
+
+	static FORCEINLINE int32 Strncmp(const UTF8CHAR* String1, const UTF8CHAR* String2, SIZE_T Count)
+	{
+		return Strncmp((const ANSICHAR*)String1, (const ANSICHAR*)String2, Count);
+	}
+	
+	static FORCEINLINE int32 Strlen(const UTF8CHAR* String)
+	{
+		return Strlen((const ANSICHAR*)String); 
+	}
+
+	static FORCEINLINE int32 Strnlen(const UTF8CHAR* String, SIZE_T StringSize)
+	{
+		return Strnlen((const ANSICHAR*)String, StringSize);
+	}
+
+	static FORCEINLINE const UTF8CHAR* Strstr(const UTF8CHAR* String, const UTF8CHAR* Find)
+	{
+		return (const UTF8CHAR*)Strstr((const ANSICHAR*)String, (const ANSICHAR*)Find);
+	}
+
+	static FORCEINLINE const UTF8CHAR* Strchr(const UTF8CHAR* String, UTF8CHAR C)
+	{
+		return (const UTF8CHAR*)Strchr((const ANSICHAR*)String, (ANSICHAR)C);
+	}
+
+	static FORCEINLINE const UTF8CHAR* Strrchr(const UTF8CHAR* String, UTF8CHAR C)
+	{
+		return (const UTF8CHAR*)Strrchr((const ANSICHAR*)String, (ANSICHAR)C);
+	}
+
+	static FORCEINLINE int32 Atoi(const UTF8CHAR* String)
+	{
+		return Atoi((const ANSICHAR*)String);
+	}
+
+	static FORCEINLINE int64 Atoi64(const UTF8CHAR* String)
+	{
+		return Atoi64((const ANSICHAR*)String);
+	}
+
+	static FORCEINLINE float Atof(const UTF8CHAR* String)
+	{
+		return Atof((const ANSICHAR*)String);
+	}
+
+	static FORCEINLINE double Atod(const UTF8CHAR* String)
+	{
+		return Atod((const ANSICHAR*)String);
+	}
+
+	static FORCEINLINE int32 Strtoi(const UTF8CHAR* Start, UTF8CHAR** End, int32 Base)
+	{
+		return Strtoi((const ANSICHAR*)Start, (ANSICHAR**)End, Base);
+	}
+
+	static FORCEINLINE int64 Strtoi64(const UTF8CHAR* Start, UTF8CHAR** End, int32 Base)
+	{
+		return Strtoi64((const ANSICHAR*)Start, (ANSICHAR**)End, Base);
+	}
+
+	static FORCEINLINE uint64 Strtoui64(const UTF8CHAR* Start, UTF8CHAR** End, int32 Base)
+	{
+		return Strtoui64((const ANSICHAR*)Start, (ANSICHAR**)End, Base);
+	}
+
+	static FORCEINLINE UTF8CHAR* Strtok(UTF8CHAR* StrToken, const UTF8CHAR* Delim, UTF8CHAR** Context)
+	{
+		return (UTF8CHAR*)Strtok((ANSICHAR*)StrToken, (const ANSICHAR*)Delim, (ANSICHAR**)Context);
+	}
+
+	static FORCEINLINE int32 GetVarArgs(UTF8CHAR* Dest, SIZE_T DestSize, const UTF8CHAR*& Fmt, va_list ArgPtr)
+	{
+		return GetVarArgs((ANSICHAR*)Dest, DestSize, *(const ANSICHAR**)&Fmt, ArgPtr);
 	}
 };
 

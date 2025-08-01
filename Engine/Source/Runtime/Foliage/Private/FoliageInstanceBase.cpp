@@ -4,6 +4,7 @@
 #include "Misc/PackageName.h"
 #include "InstancedFoliageActor.h"
 #include "InstancedFoliage.h"
+#include "Engine/Level.h"
 #include "Engine/WorldComposition.h"
 #include "UObject/FortniteMainBranchObjectVersion.h"
 
@@ -126,6 +127,7 @@ FFoliageInstanceBaseId FFoliageInstanceBaseCache::AddInstanceBaseId(UActorCompon
 	if (InComponent && !InComponent->IsCreatedByConstructionScript())
 	{
 		BaseId = GetInstanceBaseId(InComponent);
+		FFoliageInstanceBaseInfo BaseInfo(InComponent);
 		if (BaseId == FFoliageInstanceBaseCache::InvalidBaseId)
 		{
 			// generate next unique ID for base component
@@ -134,8 +136,6 @@ FFoliageInstanceBaseId FFoliageInstanceBaseCache::AddInstanceBaseId(UActorCompon
 				BaseId = NextBaseId++;
 			}
 			while (InstanceBaseMap.Contains(BaseId));
-			
-			FFoliageInstanceBaseInfo BaseInfo(InComponent);
 			
 			// more info for UE-30878
 			if (InstanceBaseInvMap.Contains(BaseInfo.BasePtr))
@@ -159,6 +159,11 @@ FFoliageInstanceBaseId FFoliageInstanceBaseCache::AddInstanceBaseId(UActorCompon
 				}
 			}
 		}
+		else
+		{
+			// Update BaseInfo
+			InstanceBaseMap[BaseId] = MoveTemp(BaseInfo);
+		}
 	}
 
 	return BaseId;
@@ -166,14 +171,8 @@ FFoliageInstanceBaseId FFoliageInstanceBaseCache::AddInstanceBaseId(UActorCompon
 
 FFoliageInstanceBaseId FFoliageInstanceBaseCache::GetInstanceBaseId(UActorComponent* InComponent) const
 {
-	if(InstanceBaseInvMap.Num() > 0)
+	if(InComponent && (InstanceBaseInvMap.Num() > 0))
 	{
-		// test if this component has allocated FSoftObjectPath, to avoid creating new one in FFoliageInstanceBasePtr ctor
-		if (!FSoftObjectPath(InComponent).IsValid())
-		{
-			return InvalidBaseId;
-		}
-
 		FFoliageInstanceBasePtr BasePtr(InComponent);
 		if (BasePtr.IsValid())
 		{

@@ -13,47 +13,6 @@ class ITargetDeviceProxy;
 
 struct FGuid;
 
-
-/** Type definition for shared pointers to instances of ITargetDeviceProxy. */
-UE_DEPRECATED(4.16, "ITargetDeviceProxyPtr is deprecated. Please use 'TSharedPtr<ITargetDeviceProxy>' instead!")
-typedef TSharedPtr<class ITargetDeviceProxy> ITargetDeviceProxyPtr;
-
-/** Type definition for shared references to instances of ITargetDeviceProxy. */
-UE_DEPRECATED(4.16, "ITargetDeviceProxyRef is deprecated. Please use 'TSharedPtr<ITargetDeviceProxy>' instead!")
-typedef TSharedRef<class ITargetDeviceProxy> ITargetDeviceProxyRef;
-
-
-/**
- * Delegate type for committed build deployments.
- *
- * The first parameter is the transaction identifier of the completed deployment.
- * The second parameter is the identifier of the deployed application (used for launching).
- */
-DECLARE_MULTICAST_DELEGATE_TwoParams(FOnTargetDeviceProxyDeployCommitted, const FGuid&, const FString&)
-
-/**
- * Delegate type for failed build deployments.
- *
- * The first parameter is the transaction identifier of the failed deployment.
- */
-DECLARE_MULTICAST_DELEGATE_OneParam(FOnTargetDeviceProxyDeployFailed, const FGuid&)
-
-/**
- * Delegate type for failed build launches.
- *
- * The first parameter is the application identifier of the failed launch.
- */
-DECLARE_MULTICAST_DELEGATE_OneParam(FOnTargetDeviceProxyLaunchFailed, const FString&)
-
-/**
- * Delegate type for successful build launches.
- *
- * The first parameter is the application identifier of the successful launch.
- * The second parameter is the process identifier of the launched application.
- */
-DECLARE_MULTICAST_DELEGATE_TwoParams(FOnTargetDeviceProxyLaunchSucceeded, const FString&, uint32)
-
-
 /**
  * Interface for target device proxies.
  */
@@ -248,6 +207,20 @@ public:
 	virtual const FString& GetType() const = 0;
 
 	/**
+	 * Gets the OS Version of the device
+	 *
+	 * @return Device OS VErsion.
+	 */
+	virtual const FString& GetOSVersion() const = 0;
+
+	/**
+	 * Gets the type of connection for this device.
+	 *
+	 * @return Device type.
+	 */
+	virtual const FString& GetConnectionType() const = 0;
+
+	/**
 	 * Checks whether the device is currently connected.
 	 *
 	 * @return true if the device is connected, false otherwise.
@@ -269,6 +242,13 @@ public:
 	virtual bool IsShared() const = 0;
 
 	/**
+	 * Checks whether this device is being simulated on a Simulator
+	 *
+	 * @return true if the device is being simulated, false otherwise.
+	 */
+	virtual bool IsSimulated() const = 0;
+	
+	/**
 	* Cancel the application running on the device
 	 * @param InVariant Variant of the device
 	 * @param ProcessIdentifier The bundle id
@@ -285,34 +265,6 @@ public:
 
 public:
 
-	/**
-	 * Deploys the specified list of files to the device.
-	 *
-	 * If the deployment succeeds, the OnDeployCommitted() delegate will return an
-	 * application identifier (AppId) that can be used to launch to the deployed
-	 * application. If deploymend fails, the OnDeployFailed() delegate will be invoked.
-	 *
-	 * @param InVariant Variant to deploy files on.
-	 * @param Files The files to deploy.
-	 * @param TransactionId The transaction identifier for the deployment.
-	 * @return true if deployment has been started, false otherwise.
-	 * @see Launch, OnDeployCommitted, OnDeployFailed
-	 */
-	virtual bool DeployApp(FName InVariant, const TMap<FString, FString>& Files, const FGuid& TransactionId) = 0;
-
-	/**
-	 * Launches a previously deployed build on the target device.
-	 *
-	 * If the launching fails, the OnLaunchFailed() delegate will be invoked.
-	 *
-	 * @param InVariant Variant to launch the app with.
-	 * @param AppId The identifier of the application to launch.
-	 * @param BuildConfiguration The build configuration to launch with.
-	 * @param Params The command line parameters to launch with.
-	 * @return true on success, false otherwise.
-	 * @see Deploy, OnLaunchFailed
-	 */
-	virtual bool LaunchApp(FName InVariant, const FString& AppId, EBuildConfiguration BuildConfiguration, const FString& Params) = 0;
 
 	/**
 	 * Powers off the device.
@@ -335,41 +287,6 @@ public:
 	 * @see PowerOff, PowerOn
 	 */
 	virtual void Reboot() = 0;
-
-	/**
-	 * Attempts to run an executable on the device.
-	 *
-	 * @param InVariant Variant to run the executable with.
-	 * @param ExecutablePath The path to the executable to run.
-	 * @param Params The command line parameters.
-	 */
-	virtual void Run(FName InVariant, const FString& ExecutablePath, const FString& Params) = 0;
-
-public:
-
-	/**
-	 * Returns a delegate to be invoked when a build has been deployed to the target device.
-	 *
-	 * @return The delegate.
-	 * @see DeployApp
-	 */
-	virtual FOnTargetDeviceProxyDeployCommitted& OnDeployCommitted() = 0;
-
-	/**
-	 * Returns a delegate to be invoked when a build failed to deploy to the target device.
-	 *
-	 * @return The delegate.
-	 * @see DeployApp
-	 */
-	virtual FOnTargetDeviceProxyDeployFailed& OnDeployFailed() = 0;
-
-	/**
-	 * Returns a delegate to be invoked when a build failed to launch on the target device.
-	 *
-	 * @return The delegate.
-	 * @see LaunchApp
-	 */
-	virtual FOnTargetDeviceProxyLaunchFailed& OnLaunchFailed() = 0;
 
 public:
 

@@ -2,20 +2,33 @@
 
 #pragma once
 
-#include "UObject/Object.h"
-#include "UObject/GCObject.h"
-#include "UObject/Class.h"
-#include "UObject/FieldPath.h"
-#include "MovieSceneKeyStruct.h"
-#include "Curves/KeyHandle.h"
 #include "Channels/MovieSceneChannelData.h"
 #include "Channels/MovieSceneChannelHandle.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "CoreTypes.h"
+#include "Curves/KeyHandle.h"
+#include "Misc/FrameNumber.h"
+#include "MovieSceneKeyStruct.h"
+#include "Templates/Casts.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/Class.h"
+#include "UObject/FieldPath.h"
+#include "UObject/GCObject.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/StructOnScope.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealType.h"
+
 #include "SequencerKeyStructGenerator.generated.h"
 
-class FSequencerKeyStructGenerator;
 class FArrayProperty;
-class FStructProperty;
 class FProperty;
+class FSequencerKeyStructGenerator;
+class FStructProperty;
+class UObject;
 
 /**
  * Struct type that is generated from an FMovieSceneChannel type to create a single edit interface for a key/value pair
@@ -27,6 +40,9 @@ public:
 	GENERATED_BODY()
 
 	UMovieSceneKeyStructType(const FObjectInitializer& ObjInit);
+
+	void InitializeStruct(void* InDest, int32 ArrayDim) const override;
+	void DestroyStruct(void* Dest, int32 ArrayDim) const override;
 
 	/**
 	 * Check whether this generated struct is complete and ready to be used
@@ -51,6 +67,9 @@ public:
 	/** The value property for this reflected struct, of the same type as SourceValuesProperty->Inner */
 	UPROPERTY()
 	TFieldPath<FProperty> DestValueProperty;
+
+private:
+	using UStruct::SetSuperStruct;
 };
 
 /**
@@ -134,7 +153,7 @@ public:
 private:
 
 	/** Mapping of instance name -> generated struct type for reference collection */
-	TMap<FName, UMovieSceneKeyStructType*> InstanceNameToGeneratedStruct;
+	TMap<FName, TObjectPtr<UMovieSceneKeyStructType>> InstanceNameToGeneratedStruct;
 
 	FSequencerKeyStructGenerator(){}
 	~FSequencerKeyStructGenerator(){}
@@ -145,9 +164,13 @@ private:
 	TSharedPtr<FStructOnScope> CreateInitialStructInstance(const void* SourceChannel, UMovieSceneKeyStructType* GeneratedStructType, int32 InitialKeyIndex);
 
 	/**
-	 * Applies reflected values from the key struct instance back into the channel
+	 * FGCObject Interface
 	 */
 	virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FSequencerKeyStructGenerator");
+	}
 
 	/**
 	 * Applies reflected values from the key struct instance back into the channel, called on user-interaction with the edit instance
@@ -175,6 +198,24 @@ inline UMovieSceneKeyStructType* InstanceGeneratedStruct(void* Channel, FSequenc
 template<typename ChannelType>
 void PostConstructKeyInstance(const TMovieSceneChannelHandle<ChannelType>& ChannelHandle, FKeyHandle InHandle, FStructOnScope* Struct)
 {
+	ChannelType* Channel = ChannelHandle.Get();
+	if (Channel)
+	{
+		const UMovieSceneKeyStructType* GeneratedStructType = CastChecked<const UMovieSceneKeyStructType>(Struct->GetStruct());
+		void* StructPtr = Struct->GetStructMemory();
+
+		const int32 InitialKeyIndex = Channel->GetData().GetIndex(InHandle);
+
+		// Copy the initial value into the struct
+		if (InitialKeyIndex != INDEX_NONE)
+		{
+			const uint8* SrcValueData  = GeneratedStructType->SourceValuesProperty->ContainerPtrToValuePtr<uint8>(Channel);
+			uint8*       DestValueData = GeneratedStructType->DestValueProperty->ContainerPtrToValuePtr<uint8>(StructPtr);
+
+			FScriptArrayHelper SourceValuesArray(GeneratedStructType->SourceValuesProperty.Get(), SrcValueData);
+			GeneratedStructType->SourceValuesProperty->Inner->CopyCompleteValue(DestValueData, SourceValuesArray.GetRawPtr(InitialKeyIndex));
+		}
+	}
 }
 
 template<typename ChannelType>

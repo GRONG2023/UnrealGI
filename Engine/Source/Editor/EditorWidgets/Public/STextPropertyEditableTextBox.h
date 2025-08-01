@@ -2,26 +2,50 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "Layout/Visibility.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Styling/SlateColor.h"
-#include "Input/Reply.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/SCompoundWidget.h"
+#include "Delegates/Delegate.h"
 #include "Fonts/SlateFontInfo.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Internationalization/TextPackageNamespaceUtil.h"
+#include "Layout/Visibility.h"
+#include "Misc/Attribute.h"
+#include "Misc/Optional.h"
+#include "Misc/TextFilter.h"
+#include "Styling/AppStyle.h"
 #include "Styling/CoreStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/SlateColor.h"
 #include "Styling/SlateTypes.h"
 #include "Styling/SlateWidgetStyleAsset.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/SlateEnums.h"
 #include "Types/SlateStructs.h"
+#include "UObject/NameTypes.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/SWidget.h"
 #include "Widgets/Views/SListView.h"
-#include "Misc/TextFilter.h"
-
-class SEditableTextBox;
-class SMultiLineEditableTextBox;
 
 class SComboButton;
+class SEditableTextBox;
+class SMultiLineEditableTextBox;
 class SSearchBox;
+class SWidget;
+class UObject;
+class UPackage;
+struct FFocusEvent;
+struct FGeometry;
+struct FSlateBrush;
 
 /** Interface to allow STextPropertyEditableTextBox to be used to edit both properties and Blueprint pins */
 class IEditableTextProperty
@@ -29,9 +53,9 @@ class IEditableTextProperty
 public:
 	enum class ETextPropertyEditAction : uint8
 	{
-		EditedNamespace,
-		EditedKey,
-		EditedSource,
+		EditedNamespace = (uint8)TextNamespaceUtil::ETextEditAction::Namespace,
+		EditedKey = (uint8)TextNamespaceUtil::ETextEditAction::Key,
+		EditedSource = (uint8)TextNamespaceUtil::ETextEditAction::SourceString,
 	};
 
 	virtual ~IEditableTextProperty() = default;
@@ -68,9 +92,6 @@ public:
 	virtual void GetStableTextId(const int32 InIndex, const ETextPropertyEditAction InEditAction, const FString& InTextSource, const FString& InProposedNamespace, const FString& InProposedKey, FString& OutStableNamespace, FString& OutStableKey) const = 0;
 #endif // USE_STABLE_LOCALIZATION_KEYS
 
-	/** Request a refresh of the property UI (eg, due to a size change) */
-	virtual void RequestRefresh() = 0;
-
 protected:
 #if USE_STABLE_LOCALIZATION_KEYS
 	/** Get the localization ID we should use for the given object, and the given text instance */
@@ -86,13 +107,15 @@ class EDITORWIDGETS_API STextPropertyEditableStringTableReference : public SComp
 {
 	SLATE_BEGIN_ARGS(STextPropertyEditableStringTableReference)
 		: _ComboStyle(&FCoreStyle::Get().GetWidgetStyle<FComboBoxStyle>("ComboBox"))
-		, _ButtonStyle(&FCoreStyle::Get().GetWidgetStyle<FButtonStyle>("Button"))
+		, _ButtonStyle(&FAppStyle::Get().GetWidgetStyle<FButtonStyle>("SimpleButton"))
 		, _AllowUnlink(false)
 		{}
 		/** The styling of the combobox */
 		SLATE_STYLE_ARGUMENT(FComboBoxStyle, ComboStyle)
 		/** The styling of the button */
 		SLATE_STYLE_ARGUMENT(FButtonStyle, ButtonStyle)
+		/** Font for comboboxes */
+		SLATE_ARGUMENT(FSlateFontInfo, Font)
 		/** Should we show an "unlink" button? */
 		SLATE_ARGUMENT(bool, AllowUnlink)
 	SLATE_END_ARGS()
@@ -182,7 +205,6 @@ public:
 	void Construct(const FArguments& Arguments, const TSharedRef<IEditableTextProperty>& InEditableTextProperty);
 	virtual bool SupportsKeyboardFocus() const override;
 	virtual FReply OnFocusReceived(const FGeometry& MyGeometry, const FFocusEvent& InFocusEvent) override;
-	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
 
 private:
 	void GetDesiredWidth(float& OutMinDesiredWidth, float& OutMaxDesiredWidth);
@@ -191,7 +213,7 @@ private:
 	bool IsSourceTextReadOnly() const;
 	bool IsIdentityReadOnly() const;
 	FText GetToolTipText() const;
-	EVisibility GetLocalizableVisibility() const;
+	bool IsTextLocalizable() const;
 
 	FText GetTextValue() const;
 	void OnTextChanged(const FText& NewText);
@@ -210,11 +232,12 @@ private:
 	FText GetPackageValue() const;
 #endif // USE_STABLE_LOCALIZATION_KEYS
 
-	ECheckBoxState GetLocalizableCheckState(bool bActiveState) const;
+	ECheckBoxState GetLocalizableCheckState() const;
 
-	void HandleLocalizableCheckStateChanged(ECheckBoxState InCheckboxState, bool bActiveState);
+	void HandleLocalizableCheckStateChanged(ECheckBoxState InCheckboxState);
 
-	EVisibility GetTextWarningImageVisibility() const;
+	FText GetAdvancedTextSettingsComboToolTip() const;
+	const FSlateBrush* GetAdvancedTextSettingsComboImage() const;
 
 	bool IsValidIdentity(const FText& InIdentity, FText* OutReason = nullptr, const FText* InErrorCtx = nullptr) const;
 
@@ -230,9 +253,7 @@ private:
 
 	TSharedPtr<SEditableTextBox> KeyEditableTextBox;
 
-	TOptional<float> PreviousHeight;
-
-	bool bIsMultiLine;
+	bool bIsMultiLine = false;
 
 	static FText MultipleValuesText;
 };

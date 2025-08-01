@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "CoreTypes.h"
 
 #if WITH_EDITOR
 #include "DerivedDataPluginInterface.h"
@@ -11,6 +11,7 @@
 #include "Animation/AnimCompressionTypes.h"
 
 struct FAnimCompressContext;
+struct FDerivedDataUsageStats;
 
 #if WITH_EDITOR
 
@@ -29,10 +30,11 @@ private:
 	const FString AssetDDCKey;
 
 	// FAnimCompressContext to use during compression if we don't pull from the DDC
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	TSharedPtr<FAnimCompressContext> CompressContext;
-
 public:
-	FDerivedDataAnimationCompression(const TCHAR* InTypeName, const FString& InAssetDDCKey, TSharedPtr<FAnimCompressContext> InCompressContext);
+	FDerivedDataAnimationCompression(const TCHAR* InTypeName, const FString& InAssetDDCKey, TSharedPtr<FAnimCompressContext> InCompressContext);	
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	virtual ~FDerivedDataAnimationCompression();
 
 	void SetCompressibleData(FCompressibleAnimRef InCompressibleAnimData)
@@ -59,6 +61,7 @@ public:
 		return AssetDDCKey;
 	}
 
+	virtual FString GetDebugContextString() const override;
 
 	virtual bool IsBuildThreadsafe() const override
 	{
@@ -73,5 +76,10 @@ public:
 		return DataToCompressPtr.IsValid();
 	}
 };
+
+namespace AnimSequenceCookStats
+{
+	extern FDerivedDataUsageStats UsageStats;
+}
 
 #endif	//WITH_EDITOR

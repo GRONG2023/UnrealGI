@@ -4,7 +4,6 @@
 
 #include "HAL/IConsoleManager.h"
 #include "Misc/CoreDelegates.h"
-#include "Features/IModularFeatures.h"
 #include "CameraPhotographyModule.h"
 #include "Engine/World.h"
 

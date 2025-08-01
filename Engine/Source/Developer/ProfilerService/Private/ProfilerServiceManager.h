@@ -205,9 +205,9 @@ private:
 
 #endif //STATS
 
-	void AddNewFrameHandleStatsThread();
+	void AddNewFrameHandleStatsPipe();
 
-	void RemoveNewFrameHandleStatsThread();
+	void RemoveNewFrameHandleStatsPipe();
 
 	/** Holds the messaging endpoint. */
 	TSharedPtr<FMessageEndpoint, ESPMode::ThreadSafe> MessageEndpoint;
@@ -239,7 +239,7 @@ private:
 	FTickerDelegate PingDelegate;
 
 	/** Handle to the registered PingDelegate */
-	FDelegateHandle PingDelegateHandle;
+	FTSTicker::FDelegateHandle PingDelegateHandle;
 
 	/** Handle to the registered HandleNewFrame delegate */
 	FDelegateHandle NewFrameDelegateHandle;

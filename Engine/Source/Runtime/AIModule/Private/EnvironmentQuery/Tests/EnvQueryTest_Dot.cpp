@@ -1,9 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "EnvironmentQuery/Tests/EnvQueryTest_Dot.h"
+#include "AITypes.h"
 #include "EnvironmentQuery/Items/EnvQueryItemType_VectorBase.h"
 #include "EnvironmentQuery/Contexts/EnvQueryContext_Querier.h"
 #include "EnvironmentQuery/Contexts/EnvQueryContext_Item.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(EnvQueryTest_Dot)
 
 UEnvQueryTest_Dot::UEnvQueryTest_Dot(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
@@ -87,11 +90,11 @@ void UEnvQueryTest_Dot::RunTest(FEnvQueryInstance& QueryInstance) const
 				switch (TestMode)
 				{
 					case EEnvTestDot::Dot3D:
-						DotValue = FVector::DotProduct(LineADirs[LineAIndex], LineBDirs[LineBIndex]);
+						DotValue = static_cast<float>(FVector::DotProduct(LineADirs[LineAIndex], LineBDirs[LineBIndex]));
 						break;
 
 					case EEnvTestDot::Dot2D:
-						DotValue = LineADirs[LineAIndex].CosineAngle2D(LineBDirs[LineBIndex]);
+						DotValue = static_cast<float>(LineADirs[LineAIndex].CosineAngle2D(LineBDirs[LineBIndex]));
 						break;
 
 					default:
@@ -130,6 +133,11 @@ void UEnvQueryTest_Dot::GatherLineDirections(TArray<FVector>& Directions, FEnvQu
 	
 	for (int32 FromIndex = 0; FromIndex < ContextLocationFrom.Num(); FromIndex++)
 	{
+		if (!FAISystem::IsValidLocation(ContextLocationFrom[FromIndex]))
+		{
+			continue;
+		}
+
 		TArray<FVector> ContextLocationTo;
 		if (IsContextPerItem(LineTo))
 		{
@@ -142,8 +150,11 @@ void UEnvQueryTest_Dot::GatherLineDirections(TArray<FVector>& Directions, FEnvQu
 		
 		for (int32 ToIndex = 0; ToIndex < ContextLocationTo.Num(); ToIndex++)
 		{
-			const FVector Dir = (ContextLocationTo[ToIndex] - ContextLocationFrom[FromIndex]).GetSafeNormal();
-			Directions.Add(Dir);
+			if (FAISystem::IsValidLocation(ContextLocationTo[ToIndex]))
+			{
+				const FVector Dir = (ContextLocationTo[ToIndex] - ContextLocationFrom[FromIndex]).GetSafeNormal();
+				Directions.Add(Dir);
+			}	
 		}
 	}
 }
@@ -221,3 +232,4 @@ FText UEnvQueryTest_Dot::GetDescriptionDetails() const
 {
 	return DescribeFloatTestParams();
 }
+

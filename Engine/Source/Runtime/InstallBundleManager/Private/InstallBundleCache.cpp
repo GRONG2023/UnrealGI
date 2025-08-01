@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "InstallBundleCache.h"
-#include "InstallBundleManagerPrivatePCH.h"
+#include "InstallBundleManagerPrivate.h"
 
 #define INSTALLBUNDLE_CACHE_CHECK_INVARIANTS (DO_CHECK && 0)
 #define INSTALLBUNDLE_CACHE_DUMP_INFO (0)
@@ -22,8 +22,10 @@ void FInstallBundleCache::AddOrUpdateBundle(EInstallBundleSourceType Source, con
 
 	FPerSourceBundleCacheInfo& Info = PerSourceCacheInfo.FindOrAdd(AddInfo.BundleName).FindOrAdd(Source);
 	Info.FullInstallSize = AddInfo.FullInstallSize;
+	Info.InstallOverheadSize = AddInfo.InstallOverheadSize;
 	Info.CurrentInstallSize = AddInfo.CurrentInstallSize;
 	Info.TimeStamp = AddInfo.TimeStamp;
+	Info.AgeScalar = FMath::Clamp(AddInfo.AgeScalar, 0.1, 1.0);
 
 	UpdateCacheInfoFromSourceInfo(AddInfo.BundleName);
 
@@ -45,23 +47,41 @@ void FInstallBundleCache::RemoveBundle(EInstallBundleSourceType Source, FName Bu
 	}
 }
 
-TOptional<FInstallBundleCacheBundleInfo> FInstallBundleCache::GetBundleInfo(EInstallBundleSourceType Source, FName BundleName)
+TOptional<FInstallBundleCacheBundleInfo> FInstallBundleCache::GetBundleInfo(FName BundleName) const
 {
-	CSV_SCOPED_TIMING_STAT(InstallBundleManager, FInstallBundleCache_GetBundleInfo);
-
 	TOptional<FInstallBundleCacheBundleInfo> Ret;
 
-	TMap<EInstallBundleSourceType, FPerSourceBundleCacheInfo>* SourcesMap = PerSourceCacheInfo.Find(BundleName);
+	if (FBundleCacheInfo* Info = CacheInfo.Find(BundleName))
+	{
+		FInstallBundleCacheBundleInfo& OutInfo = Ret.Emplace();
+		OutInfo.BundleName = BundleName;
+		OutInfo.FullInstallSize = Info->FullInstallSize;
+		OutInfo.InstallOverheadSize = Info->InstallOverheadSize;
+		OutInfo.CurrentInstallSize = Info->CurrentInstallSize;
+		OutInfo.TimeStamp = Info->TimeStamp;
+		OutInfo.AgeScalar = Info->AgeScalar;
+	}
+
+	return Ret;
+}
+
+TOptional<FInstallBundleCacheBundleInfo> FInstallBundleCache::GetBundleInfo(EInstallBundleSourceType Source, FName BundleName) const
+{
+	TOptional<FInstallBundleCacheBundleInfo> Ret;
+
+	const TMap<EInstallBundleSourceType, FPerSourceBundleCacheInfo>* SourcesMap = PerSourceCacheInfo.Find(BundleName);
 	if (SourcesMap)
 	{
-		FPerSourceBundleCacheInfo* SourceInfo = SourcesMap->Find(Source);
+		const FPerSourceBundleCacheInfo* SourceInfo = SourcesMap->Find(Source);
 		if (SourceInfo)
 		{
 			FInstallBundleCacheBundleInfo& OutInfo = Ret.Emplace();
 			OutInfo.BundleName = BundleName;
 			OutInfo.FullInstallSize = SourceInfo->FullInstallSize;
+			OutInfo.InstallOverheadSize = SourceInfo->InstallOverheadSize;
 			OutInfo.CurrentInstallSize = SourceInfo->CurrentInstallSize;
 			OutInfo.TimeStamp = SourceInfo->TimeStamp;
+			OutInfo.AgeScalar = SourceInfo->AgeScalar;
 		}
 	}
 
@@ -127,16 +147,11 @@ FInstallBundleCacheReserveResult FInstallBundleCache::Reserve(FName BundleName)
 		return Result;
 	}
 
-	if (BundleInfo->FullInstallSize <= BundleInfo->CurrentInstallSize)
-	{
-		BundleInfo->State = ECacheState::Reserved;
-		Result.Result = EInstallBundleCacheReserveResult::Success;
-		return Result;
-	}
-
-	const uint64 SizeNeeded = BundleInfo->FullInstallSize - BundleInfo->CurrentInstallSize;
+	const uint64 SizeNeeded = (BundleInfo->FullInstallSize <= BundleInfo->CurrentInstallSize) ?
+		BundleInfo->InstallOverheadSize :
+		BundleInfo->InstallOverheadSize + (BundleInfo->FullInstallSize - BundleInfo->CurrentInstallSize);
 	const uint64 UsedSize = GetUsedSize();
-	if(TotalSize >= UsedSize + SizeNeeded)
+	if (TotalSize >= UsedSize + SizeNeeded)
 	{
 		BundleInfo->State = ECacheState::Reserved;
 		Result.Result = EInstallBundleCacheReserveResult::Success;
@@ -148,15 +163,7 @@ FInstallBundleCacheReserveResult FInstallBundleCache::Reserve(FName BundleName)
 
 	// TODO: Bundles that have BundleSize > 0 or are PendingEvict should be 
 	// sorted to the beginning.  We should be able to stop iterating sooner in that case.
-	CacheInfo.ValueSort([](const FBundleCacheInfo& A, const FBundleCacheInfo& B)
-	{
-		if (A.bHintReqeusted == B.bHintReqeusted)
-		{
-			return A.TimeStamp < B.TimeStamp;
-		}
-		
-		return !A.bHintReqeusted && B.bHintReqeusted;
-	});
+	CacheInfo.ValueSort(FCacheSortPredicate());
 
 	uint64 CanFreeSpace = 0;
 	for (const TPair<FName, FBundleCacheInfo>& Pair : CacheInfo)
@@ -199,10 +206,73 @@ FInstallBundleCacheReserveResult FInstallBundleCache::Reserve(FName BundleName)
 	}
 
 #if INSTALLBUNDLE_CACHE_DUMP_INFO
-	GetStats(true);
+	GetStats(EInstallBundleCacheDumpToLog::Default, true);
 #endif // INSTALLBUNDLE_CACHE_DUMP_INFO
 
 	return Result;
+}
+
+FInstallBundleCacheFlushResult FInstallBundleCache::Flush(EInstallBundleSourceType* Source /*= nullptr*/)
+{
+	CSV_SCOPED_TIMING_STAT(InstallBundleManager, FInstallBundleCache_Flush);
+
+	FInstallBundleCacheFlushResult Result;
+
+	for (const TPair<FName, FBundleCacheInfo>& Pair : CacheInfo)
+	{
+		if (Pair.Value.State == ECacheState::Reserved)
+			continue;
+
+		if (Pair.Value.CurrentInstallSize == 0)
+			continue;
+
+		if (Source)
+		{
+			if (PerSourceCacheInfo.FindChecked(Pair.Key).Contains(*Source))
+			{
+				TArray<EInstallBundleSourceType>& SourcesToEvictFrom = Result.BundlesToEvict.Add(Pair.Key);
+				SourcesToEvictFrom.Add(*Source);
+			}
+		}
+		else
+		{
+			TArray<EInstallBundleSourceType>& SourcesToEvictFrom = Result.BundlesToEvict.Add(Pair.Key);
+			PerSourceCacheInfo.FindChecked(Pair.Key).GenerateKeyArray(SourcesToEvictFrom);
+		}
+	}
+
+#if INSTALLBUNDLE_CACHE_DUMP_INFO
+	GetStats(EInstallBundleCacheDumpToLog::Default, true);
+#endif // INSTALLBUNDLE_CACHE_DUMP_INFO
+
+	return Result;
+}
+
+bool FInstallBundleCache::Contains(FName BundleName) const
+{
+	return CacheInfo.Contains(BundleName);
+}
+
+bool FInstallBundleCache::Contains(EInstallBundleSourceType Source, FName BundleName) const
+{
+	const TMap<EInstallBundleSourceType, FPerSourceBundleCacheInfo>* SourcesMap = PerSourceCacheInfo.Find(BundleName);
+	if (SourcesMap)
+	{
+		return SourcesMap->Contains(Source);
+	}
+
+	return false;
+}
+
+bool FInstallBundleCache::IsReserved(FName BundleName) const
+{
+	const FBundleCacheInfo* BundleInfo = CacheInfo.Find(BundleName);
+	if (BundleInfo)
+	{
+		return BundleInfo->State == ECacheState::Reserved;
+	}
+
+	return false;
 }
 
 bool FInstallBundleCache::Release(FName BundleName)
@@ -220,8 +290,7 @@ bool FInstallBundleCache::Release(FName BundleName)
 		return true;
 	}
 
-	if (BundleInfo->State == ECacheState::Reserved || 
-		BundleInfo->State == ECacheState::PendingEvict)
+	if (BundleInfo->State == ECacheState::Reserved)
 	{
 		BundleInfo->State = ECacheState::Released;
 		return true;
@@ -254,6 +323,30 @@ bool FInstallBundleCache::SetPendingEvict(FName BundleName)
 	return false;
 }
 
+bool FInstallBundleCache::ClearPendingEvict(FName BundleName)
+{
+	CSV_SCOPED_TIMING_STAT(InstallBundleManager, FInstallBundleCache_ClearPendingEvict);
+
+	FBundleCacheInfo* BundleInfo = CacheInfo.Find(BundleName);
+	if (BundleInfo == nullptr)
+	{
+		return true;
+	}
+
+	if (BundleInfo->State == ECacheState::Released)
+	{
+		return true;
+	}
+
+	if (BundleInfo->State == ECacheState::PendingEvict)
+	{
+		BundleInfo->State = ECacheState::Released;
+		return true;
+	}
+
+	return false;
+}
+
 void FInstallBundleCache::HintRequested(FName BundleName, bool bRequested)
 {
 	CSV_SCOPED_TIMING_STAT(InstallBundleManager, FInstallBundleCache_HintRequested);
@@ -261,7 +354,15 @@ void FInstallBundleCache::HintRequested(FName BundleName, bool bRequested)
 	FBundleCacheInfo* BundleInfo = CacheInfo.Find(BundleName);
 	if (BundleInfo)
 	{
-		BundleInfo->bHintReqeusted = bRequested;
+		if (bRequested)
+		{
+			BundleInfo->HintReqeustedCount += 1;
+		}
+		else
+		{
+			BundleInfo->HintReqeustedCount -= 1;
+			check(BundleInfo->HintReqeustedCount >= 0);
+		}
 	}
 }
 
@@ -291,48 +392,150 @@ void FInstallBundleCache::CheckInvariants() const
 #endif // INSTALLBUNDLE_CACHE_CHECK_INVARIANTS
 }
 
-FInstallBundleCacheStats FInstallBundleCache::GetStats(bool bDumpToLog /*= false*/) const
+FInstallBundleCacheStats FInstallBundleCache::GetStats(EInstallBundleCacheDumpToLog DumpToLog /*= EInstallBundleCacheDumpToLog::None*/, bool bVerbose /*= false*/) const
 {
 	FInstallBundleCacheStats Stats;
 	Stats.CacheName = CacheName;
 	Stats.MaxSize = TotalSize;
 
+	bool bDumpToLog = DumpToLog != EInstallBundleCacheDumpToLog::None;
+
 	if (bDumpToLog)
 	{
-		UE_LOG(LogInstallBundleManager, Display, TEXT("\n"));
-		UE_LOG(LogInstallBundleManager, Display, TEXT("*Install Bundle Cache Stats %s"), *CacheName.ToString());
+		UE_LOG(LogInstallBundleManager, Display, TEXT(""));
+		UE_LOG(LogInstallBundleManager, Display, TEXT("* Install Bundle Cache Stats %s"), *CacheName.ToString());
+
+		// Dump info in eviction order
+		CacheInfo.ValueSort(FCacheSortPredicate());
 	}
 
-	for (const TPair<FName, FBundleCacheInfo>& CachePair : CacheInfo)
+	auto AddStats = [&Stats](const FBundleCacheInfo& Info)
 	{
-		const FBundleCacheInfo& Info = CachePair.Value;
-
 		Stats.UsedSize += Info.GetSize();
 
 		if (Info.State == ECacheState::Reserved)
 		{
 			Stats.ReservedSize += Info.CurrentInstallSize;
 		}
+	};
 
-		if (bDumpToLog && (Info.CurrentInstallSize > 0 || Info.State != ECacheState::Released))
-		{
-			UE_LOG(LogInstallBundleManager, Verbose, TEXT("*\tbundle %s"), *CachePair.Key.ToString());
-			UE_LOG(LogInstallBundleManager, Verbose, TEXT("*\t\tfull size: %" UINT64_FMT), Info.FullInstallSize);
-			UE_LOG(LogInstallBundleManager, Verbose, TEXT("*\t\tcurrent size: %" UINT64_FMT), Info.CurrentInstallSize);
-			UE_LOG(LogInstallBundleManager, Verbose, TEXT("*\t\treserved: %s"), (Info.State == ECacheState::Reserved) ? TEXT("true") : TEXT("false"));
-			UE_LOG(LogInstallBundleManager, Verbose, TEXT("*\t\ttimestamp: %s"), *Info.TimeStamp.ToString());
-		}
+	// Note: Yes this verbosity is correct and very non-intuitive
+
+#define INSTALLBUNDLECACHE_DEFAULT_LOG(Verbosity) \
+	if (Info.CurrentInstallSize > 0 || Info.State != ECacheState::Released) \
+	{ \
+		UE_LOG(LogInstallBundleManager, Verbosity, TEXT("* \tbundle %s"), *BundleName.ToString()) \
+		UE_LOG(LogInstallBundleManager, Verbosity, TEXT("* \t\tfull size: %" UINT64_FMT), Info.FullInstallSize) \
+		UE_LOG(LogInstallBundleManager, Verbosity, TEXT("* \t\toverhead size: %" UINT64_FMT), Info.InstallOverheadSize) \
+		UE_LOG(LogInstallBundleManager, Verbosity, TEXT("* \t\tcurrent size: %" UINT64_FMT), Info.CurrentInstallSize) \
+		UE_LOG(LogInstallBundleManager, Verbosity, TEXT("* \t\treserved: %s"), (Info.State == ECacheState::Reserved) ? TEXT("true") : TEXT("false")) \
+		UE_LOG(LogInstallBundleManager, Verbosity, TEXT("* \t\ttimestamp: %s"), *Info.TimeStamp.ToString()) \
+		UE_LOG(LogInstallBundleManager, Verbosity, TEXT("* \t\tage scale: %f"), Info.AgeScalar) \
 	}
+
+#define INSTALLBUNDLECACHE_CSV_HEADER_LOG(Verbosity) \
+	UE_LOG(LogInstallBundleManager, Verbosity, TEXT("* \tbundle, full size, overhead size, current size, diff, reserved, timestamp, age scale"))
+
+#define INSTALLBUNDLECACHE_CSV_LOG(Verbosity) \
+	if (Info.CurrentInstallSize > 0 || Info.State != ECacheState::Released) \
+	{ \
+		const TCHAR* Diff = TEXT("="); \
+		if (Info.FullInstallSize > Info.CurrentInstallSize) Diff = TEXT(">"); \
+		else if(Info.FullInstallSize < Info.CurrentInstallSize) Diff = TEXT("<"); \
+		UE_LOG(LogInstallBundleManager, Verbosity, TEXT("* \t%s, %" UINT64_FMT ", %" UINT64_FMT ", %" UINT64_FMT ", %s, %s, %s, %f"), *BundleName.ToString(), Info.FullInstallSize, Info.InstallOverheadSize, Info.CurrentInstallSize, Diff, (Info.State == ECacheState::Reserved) ? TEXT("true") : TEXT("false"), *Info.TimeStamp.ToString(), Info.AgeScalar) \
+	}
+
+	auto DumpToLog_Default = [](FName BundleName, const FBundleCacheInfo& Info)
+	{
+		INSTALLBUNDLECACHE_DEFAULT_LOG(Verbose);
+	};
+
+	auto DumpToLog_DefaultVerbose = [](FName BundleName, const FBundleCacheInfo& Info)
+	{
+		INSTALLBUNDLECACHE_DEFAULT_LOG(Display);
+	};
+
+	auto DumpToLog_CSV = [](FName BundleName, const FBundleCacheInfo& Info)
+	{
+		INSTALLBUNDLECACHE_CSV_LOG(Verbose);
+	};
+
+	auto DumpToLog_CSVVerbose = [](FName BundleName, const FBundleCacheInfo& Info)
+	{
+		INSTALLBUNDLECACHE_CSV_LOG(Display);
+	};
+
+	switch(DumpToLog)
+	{
+	default:
+	case EInstallBundleCacheDumpToLog::None:
+		for (const TPair<FName, FBundleCacheInfo>& CachePair : CacheInfo)
+		{
+			const FBundleCacheInfo& Info = CachePair.Value;
+			AddStats(Info);
+		}
+		break;
+		
+	case EInstallBundleCacheDumpToLog::Default:
+		if (bVerbose)
+		{
+			for (const TPair<FName, FBundleCacheInfo>& CachePair : CacheInfo)
+			{
+				const FBundleCacheInfo& Info = CachePair.Value;
+				AddStats(Info);
+				DumpToLog_DefaultVerbose(CachePair.Key, Info);
+			}
+		}
+		else
+		{
+			for (const TPair<FName, FBundleCacheInfo>& CachePair : CacheInfo)
+			{
+				const FBundleCacheInfo& Info = CachePair.Value;
+				AddStats(Info);
+				DumpToLog_Default(CachePair.Key, Info);
+			}
+		}
+		break;
+
+	case EInstallBundleCacheDumpToLog::CSV:
+		if (bVerbose)
+		{
+			INSTALLBUNDLECACHE_CSV_HEADER_LOG(Display);
+
+			for (const TPair<FName, FBundleCacheInfo>& CachePair : CacheInfo)
+			{
+				const FBundleCacheInfo& Info = CachePair.Value;
+				AddStats(Info);
+				DumpToLog_CSVVerbose(CachePair.Key, Info);
+			}
+		}
+		else
+		{
+			INSTALLBUNDLECACHE_CSV_HEADER_LOG(Verbose);
+
+			for (const TPair<FName, FBundleCacheInfo>& CachePair : CacheInfo)
+			{
+				const FBundleCacheInfo& Info = CachePair.Value;
+				AddStats(Info);
+				DumpToLog_CSV(CachePair.Key, Info);
+			}
+		}
+		break;
+	}
+
+#undef INSTALLBUNDLECACHE_CSV_LOG
+#undef INSTALLBUNDLECACHE_CSV_HEADER_LOG
+#undef INSTALLBUNDLECACHE_DEFAULT_LOG
 
 	Stats.FreeSize = GetFreeSpaceInternal(Stats.UsedSize);
 
 	if (bDumpToLog)
 	{
-		UE_LOG(LogInstallBundleManager, Display, TEXT("*\tsize: %" UINT64_FMT), Stats.MaxSize);
-		UE_LOG(LogInstallBundleManager, Display, TEXT("*\tused: %" UINT64_FMT), Stats.UsedSize);
-		UE_LOG(LogInstallBundleManager, Display, TEXT("*\treserved: %" UINT64_FMT), Stats.ReservedSize);
-		UE_LOG(LogInstallBundleManager, Display, TEXT("*\tfree: %" UINT64_FMT), Stats.FreeSize);
-		UE_LOG(LogInstallBundleManager, Display, TEXT("\n"));
+		UE_LOG(LogInstallBundleManager, Display, TEXT("* \tsize: %" UINT64_FMT), Stats.MaxSize);
+		UE_LOG(LogInstallBundleManager, Display, TEXT("* \tused: %" UINT64_FMT), Stats.UsedSize);
+		UE_LOG(LogInstallBundleManager, Display, TEXT("* \treserved: %" UINT64_FMT), Stats.ReservedSize);
+		UE_LOG(LogInstallBundleManager, Display, TEXT("* \tfree: %" UINT64_FMT), Stats.FreeSize);
+		UE_LOG(LogInstallBundleManager, Display, TEXT(""));
 	}
 
 	return Stats;
@@ -357,15 +560,27 @@ void FInstallBundleCache::UpdateCacheInfoFromSourceInfo(FName BundleName)
 	}
 
 	FDateTime TimeStamp = FDateTime::MinValue();
+	double AgeScalar = 1.0;
 	uint64 FullInstallSize = 0;
+	uint64 InstallOverheadSize = 0;
 	uint64 CurrentInstallSize = 0;
 	for (const TPair<EInstallBundleSourceType, FPerSourceBundleCacheInfo>& Pair : *SourcesMap)
 	{
 		FullInstallSize += Pair.Value.FullInstallSize;
+		InstallOverheadSize += Pair.Value.InstallOverheadSize;
 		CurrentInstallSize += Pair.Value.CurrentInstallSize;
-		if (Pair.Value.CurrentInstallSize > 0 && Pair.Value.TimeStamp > TimeStamp)
+
+		if (Pair.Value.CurrentInstallSize > 0)
 		{
-			TimeStamp = Pair.Value.TimeStamp;
+			if (Pair.Value.TimeStamp > TimeStamp)
+			{
+				TimeStamp = Pair.Value.TimeStamp;
+			}
+
+			if (Pair.Value.AgeScalar < AgeScalar)
+			{
+				AgeScalar = Pair.Value.AgeScalar;
+			}
 		}
 	}
 
@@ -373,6 +588,8 @@ void FInstallBundleCache::UpdateCacheInfoFromSourceInfo(FName BundleName)
 	checkf(BundleCacheInfo.FullInstallSize == FullInstallSize || BundleCacheInfo.State != ECacheState::Reserved, TEXT("Bundle %s: FullInstallSize should not be updated while a bundle is Reserved!"), *BundleName.ToString());
 
 	BundleCacheInfo.FullInstallSize = FullInstallSize;
+	BundleCacheInfo.InstallOverheadSize = InstallOverheadSize;
 	BundleCacheInfo.CurrentInstallSize = CurrentInstallSize;
 	BundleCacheInfo.TimeStamp = TimeStamp;
+	BundleCacheInfo.AgeScalar = AgeScalar;
 }

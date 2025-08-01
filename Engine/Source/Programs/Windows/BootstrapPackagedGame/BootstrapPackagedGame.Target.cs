@@ -1,22 +1,22 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
 using UnrealBuildTool;
 using System.Collections.Generic;
 
 [SupportedConfigurations(UnrealTargetConfiguration.Debug, UnrealTargetConfiguration.Development, UnrealTargetConfiguration.Shipping)]
+[SupportedPlatforms("Win64")]
 public class BootstrapPackagedGameTarget : TargetRules
 {
 	public BootstrapPackagedGameTarget(TargetInfo Target) : base(Target)
 	{
 		Type = TargetType.Program;
 		LinkType = TargetLinkType.Monolithic;
+		IncludeOrderVersion = EngineIncludeOrderVersion.Latest;
 		LaunchModuleName = "BootstrapPackagedGame";
 
 		bUseStaticCRT = true;
 
-		bUseUnityBuild = false;
 		bUseSharedPCHs = false;
-		bUseMallocProfiler = false;
 
 		// Disable all parts of the editor.
 		bBuildDeveloperTools = false;

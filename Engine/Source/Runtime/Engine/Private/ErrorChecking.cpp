@@ -5,14 +5,7 @@
 	Actor Error checking functions
   ===========================================================================*/
 
-#include "CoreMinimal.h"
-#include "Serialization/ArchiveUObject.h"
-#include "UObject/Class.h"
-#include "Engine/Brush.h"
-#include "GameFramework/Volume.h"
 #include "UObject/Package.h"
-#include "GameFramework/DefaultPhysicsVolume.h"
-#include "Logging/TokenizedMessage.h"
 #include "Logging/MessageLog.h"
 #include "Misc/UObjectToken.h"
 #include "Misc/MapErrors.h"
@@ -149,7 +142,7 @@ void ABrush::CheckForErrors()
 
 				for(int32 VertexIndex = 0;VertexIndex < Poly->Vertices.Num();VertexIndex++)
 				{
-					if(FMath::Abs(FPlane(Poly->Vertices[0],Poly->Normal).PlaneDot(Poly->Vertices[VertexIndex])) > THRESH_POINT_ON_PLANE)
+					if(FMath::Abs(FPlane((FVector)Poly->Vertices[0], (FVector)Poly->Normal).PlaneDot((FVector)Poly->Vertices[VertexIndex])) > UE_THRESH_POINT_ON_PLANE)
 					{
 						FFormatNamedArguments Arguments;
 						Arguments.Add(TEXT("ActorName"), FText::FromString(GetName()));
@@ -169,7 +162,7 @@ void ABrush::CheckForErrors()
 			}
 
 			// check for planar brushes which might mess up collision
-			if(Brush->Bounds.BoxExtent.Z < SMALL_NUMBER || Brush->Bounds.BoxExtent.Y < SMALL_NUMBER || Brush->Bounds.BoxExtent.X < SMALL_NUMBER)
+			if(Brush->Bounds.BoxExtent.Z < UE_SMALL_NUMBER || Brush->Bounds.BoxExtent.Y < UE_SMALL_NUMBER || Brush->Bounds.BoxExtent.X < UE_SMALL_NUMBER)
 			{
 				FFormatNamedArguments Arguments;
 				Arguments.Add(TEXT("ActorName"), FText::FromString(GetName()));
@@ -190,28 +183,27 @@ void AVolume::CheckForErrors()
 {
 	Super::CheckForErrors();
 
-	// The default physics volume can have zero area; it's extents aren't used, only the physics properties
-	if (IsA(ADefaultPhysicsVolume::StaticClass()))
+	// Some volumes do not need a valid collision component; for example:
+	// the default physics volume only uses the physics properties and not the extents - so it will have an area of zero
+	if (ShouldCheckCollisionComponentForErrors())
 	{
-		return;
-	}
-
-	if (GetRootComponent() == NULL)
-	{
-		FMessageLog("MapCheck").Warning()
-			->AddToken(FUObjectToken::Create(this))
-			->AddToken(FTextToken::Create(LOCTEXT( "MapCheck_Message_VolumeActorCollisionComponentNULL", "Volume actor has NULL collision component - please delete")))
-			->AddToken(FMapErrorToken::Create(FMapErrors::VolumeActorCollisionComponentNULL));
-	}
-	else
-	{
-		if (GetRootComponent()->Bounds.SphereRadius <= SMALL_NUMBER)
+		if (GetRootComponent() == NULL)
 		{
-			FFormatNamedArguments Arguments;
-			Arguments.Add(TEXT("ActorName"), FText::FromString(GetName()));
 			FMessageLog("MapCheck").Warning()
 				->AddToken(FUObjectToken::Create(this))
-				->AddToken(FTextToken::Create(LOCTEXT( "MapCheck_Message_VolumeActorZeroRadius", "Volume actor has a collision component with 0 radius - please delete")));
+				->AddToken(FTextToken::Create(LOCTEXT("MapCheck_Message_VolumeActorCollisionComponentNULL", "Volume actor has NULL collision component - please delete")))
+				->AddToken(FMapErrorToken::Create(FMapErrors::VolumeActorCollisionComponentNULL));
+		}
+		else
+		{
+			if (GetRootComponent()->Bounds.SphereRadius <= UE_SMALL_NUMBER)
+			{
+				FFormatNamedArguments Arguments;
+				Arguments.Add(TEXT("ActorName"), FText::FromString(GetName()));
+				FMessageLog("MapCheck").Warning()
+					->AddToken(FUObjectToken::Create(this))
+					->AddToken(FTextToken::Create(LOCTEXT("MapCheck_Message_VolumeActorZeroRadius", "Volume actor has a collision component with 0 radius - please delete")));
+			}
 		}
 	}
 }

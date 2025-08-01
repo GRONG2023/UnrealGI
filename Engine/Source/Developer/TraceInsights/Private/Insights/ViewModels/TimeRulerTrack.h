@@ -7,8 +7,10 @@
 
 // Insights
 #include "Insights/ViewModels/BaseTimingTrack.h"
+#include "Insights/ITimingViewSession.h"
 
 struct FDrawContext;
+class FMenuBuilder;
 struct FSlateBrush;
 class FTimingTrackViewport;
 
@@ -17,7 +19,7 @@ namespace Insights
 
 class ITimingViewExtender;
 
-class FTimeMarker
+class FTimeMarker : public  ITimeMarker
 {
 public:
 	FTimeMarker()
@@ -29,8 +31,10 @@ public:
 		, CrtTextWidth(0.0f)
 	{}
 
-	double GetTime() const { return Time; }
-	void SetTime(const double  InTime) { Time = InTime; }
+	virtual ~FTimeMarker() {}
+
+	double GetTime() const override { return Time; }
+	void SetTime(const double  InTime) override { Time = InTime; }
 
 	const FString& GetName() const { return Name; }
 	void SetName(const FString& InName) { Name = InName; }
@@ -74,8 +78,11 @@ public:
 
 	void SetSelection(const bool bInIsSelecting, const double InSelectionStartTime, const double InSelectionEndTime);
 
+	TArray<TSharedRef<Insights::FTimeMarker>>& GetTimeMarkers() { return TimeMarkers; }
+	const TArray<TSharedRef<Insights::FTimeMarker>>& GetTimeMarkers() const { return TimeMarkers; }
 	void AddTimeMarker(TSharedRef<Insights::FTimeMarker> InTimeMarker);
 	void RemoveTimeMarker(TSharedRef<Insights::FTimeMarker> InTimeMarker);
+	void RemoveAllTimeMarkers();
 
 	TSharedPtr<Insights::FTimeMarker> GetTimeMarkerByName(const FString& InTimeMarkerName);
 	TSharedPtr<Insights::FTimeMarker> GetTimeMarkerAtPos(const FVector2D& InPosition, const FTimingTrackViewport& InViewport);
@@ -89,25 +96,30 @@ public:
 	void Draw(const ITimingTrackDrawContext& Context) const override;
 	void PostDraw(const ITimingTrackDrawContext& Context) const override;
 
+	virtual void BuildContextMenu(FMenuBuilder& MenuBuilder) override;
+
 private:
 	void DrawTimeMarker(const ITimingTrackDrawContext& Context, const Insights::FTimeMarker& TimeMarker) const;
+	void ContextMenu_MoveTimeMarker_Execute(TSharedRef<Insights::FTimeMarker> InTimeMarker);
 
-public:
+private:
 	// Slate resources
 	const FSlateBrush* WhiteBrush;
 	const FSlateFontInfo Font;
 
-	// Smoothed mouse pos text width to avoid flickering
-	mutable float CrtMousePosTextWidth;
-
-private:
 	bool bIsSelecting;
 	double SelectionStartTime;
 	double SelectionEndTime;
 
+	// The last time value at mouse postion. Updated in PostDraw.
+	mutable double CrtMousePosTime;
+
+	// The smoothed width of "the text at mouse position" to avoid flickering. Updated in PostDraw.
+	mutable float CrtMousePosTextWidth;
+
 	/**
 	 * The sorted list of all registered time markers. It defines the draw order of time markers.
-	 * The time marker currenly scrubbing will be moved at the end of the list in order to be displayed on top of other markers.
+	 * The time marker currently scrubbing will be moved at the end of the list in order to be displayed on top of other markers.
 	 */
 	TArray<TSharedRef<Insights::FTimeMarker>> TimeMarkers;
 

@@ -18,7 +18,7 @@
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Input/SComboButton.h"
 #include "Widgets/Input/SCheckBox.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "EditorDirectories.h"
 #include "PropertyHandle.h"
 #include "DetailLayoutBuilder.h"
@@ -29,6 +29,8 @@
 #include "Interfaces/ITargetPlatformModule.h"
 #include "SExternalImageReference.h"
 #include "UnrealEngine.h"
+#include "RHIShaderFormatDefinitions.inl"
+#include "ShaderFormatsPropertyDetails.h"
 
 #if WITH_ENGINE
 #include "AudioDevice.h"
@@ -49,37 +51,84 @@ namespace WindowsTargetSettingsDetailsConstants
 	const FText DisabledTip = LOCTEXT("GitHubSourceRequiredToolTip", "This requires GitHub source.");
 }
 
-static FText GetFriendlyNameFromWindowsRHIName(const FString& InRHIName)
+static FText GetFriendlyNameFromWindowsShaderPlatform(FName InShaderPlatformName)
 {
+	const EShaderPlatform ShaderPlatform = ShaderFormatNameToShaderPlatform(InShaderPlatformName);
+
 	FText FriendlyRHIName;
-	if (InRHIName == TEXT("PCD3D_SM5"))
+	switch (ShaderPlatform)
 	{
+	case SP_PCD3D_SM6:
+		FriendlyRHIName = LOCTEXT("DirectX12", "DirectX 12 (SM6)");
+		break;
+	case SP_PCD3D_SM5:
 		FriendlyRHIName = LOCTEXT("DirectX11", "DirectX 11 & 12 (SM5)");
-	}
-	else if (InRHIName == TEXT("PCD3D_ES31"))
-	{
-		FriendlyRHIName = LOCTEXT("DirectXES31", "DirectX Mobile Emulation (ES3.1)");
-	}
-	else if (InRHIName == TEXT("SF_VULKAN_SM5"))
-	{
+		break;
+	case SP_PCD3D_ES3_1:
+		FriendlyRHIName = LOCTEXT("DirectXMobile", "DirectX Mobile Emulation (Mobile)");
+		break;
+	case SP_VULKAN_SM5:
 		FriendlyRHIName = LOCTEXT("VulkanSM5", "Vulkan (SM5)");
-	}
-	else if (InRHIName == TEXT("GLSL_150_ES31")
-		|| InRHIName == TEXT("SF_VULKAN_ES31_ANDROID") || InRHIName == TEXT("SF_VULKAN_ES31")
-		|| InRHIName == TEXT("GLSL_430"))
-	{
+		break;
+	case SP_VULKAN_SM6:
+		FriendlyRHIName = LOCTEXT("VulkanSM6", "Vulkan (SM6)");
+		break;
+
+	case SP_OPENGL_PCES3_1:
+	case SP_VULKAN_PCES3_1:
 		// Explicitly remove these formats as they are obsolete/not quite supported; users can still target them by adding them as +TargetedRHIs in the TargetPlatform ini.
 		FriendlyRHIName = FText::GetEmpty();
-	}
-	else
-	{
-		UE_LOG(LogEngine, Warning, TEXT("Unknown Windows target RHI %s"), *InRHIName);
+		break;
+
+	default:
+		UE_LOG(LogEngine, Warning, TEXT("Unknown Windows target RHI %s"), *InShaderPlatformName.ToString());
 		FriendlyRHIName = LOCTEXT("UnknownRHI", "UnknownRHI");
+		break;
 	}
 
 	return FriendlyRHIName;
 }
 
+static FText GetFriendlyNameForWindowsShaderPlatformCheckbox(FName InShaderPlatformName)
+{
+	const EShaderPlatform ShaderPlatform = ShaderFormatNameToShaderPlatform(InShaderPlatformName);
+
+	FText FriendlyName;
+
+	switch (ShaderPlatform)
+	{
+	case SP_PCD3D_SM6:
+	case SP_VULKAN_SM6:
+		FriendlyName = LOCTEXT("SM6", "SM6");
+		break;
+	case SP_PCD3D_SM5:
+	case SP_VULKAN_SM5:
+		FriendlyName = LOCTEXT("SM5", "SM5");
+		break;
+	case SP_PCD3D_ES3_1:
+		FriendlyName = LOCTEXT("Mobile", "Mobile");
+		break;
+	default:
+		break;
+	}
+
+	return FriendlyName;
+}
+
+static bool FilterShaderPlatform_D3D12(FName InShaderPlatform)
+{
+	return InShaderPlatform == NAME_PCD3D_SM6 || InShaderPlatform == NAME_PCD3D_SM5 || InShaderPlatform == NAME_PCD3D_ES3_1;
+}
+
+static bool FilterShaderPlatform_D3D11(FName InShaderPlatform)
+{
+	return InShaderPlatform == NAME_PCD3D_SM5 || InShaderPlatform == NAME_PCD3D_ES3_1;
+}
+
+static bool FilterShaderPlatform_Vulkan(FName InShaderPlatform)
+{
+	return InShaderPlatform == NAME_VULKAN_SM5 || InShaderPlatform == NAME_VULKAN_SM6;
+}
 
 TSharedRef<IDetailCustomization> FWindowsTargetSettingsDetails::MakeInstance()
 {
@@ -152,17 +201,15 @@ void FWindowsTargetSettingsDetails::CustomizeDetails( IDetailLayoutBuilder& Deta
 {
 	// Setup the supported/targeted RHI property view
 	ITargetPlatform* TargetPlatform = FModuleManager::GetModuleChecked<ITargetPlatformModule>("WindowsTargetPlatform").GetTargetPlatforms()[0];
-	TargetShaderFormatsDetails = MakeShareable(new FShaderFormatsPropertyDetails(&DetailBuilder));
-	TargetShaderFormatsDetails->CreateTargetShaderFormatsPropertyView(TargetPlatform, GetFriendlyNameFromWindowsRHIName);
 
-	TSharedRef<IPropertyHandle> MinOSProperty = DetailBuilder.GetProperty("MinimumOSVersion");
-	IDetailCategoryBuilder& OSInfoCategory = DetailBuilder.EditCategory(TEXT("OS Info"));
-	
-	// Setup edit condition and tool tip of Min OS property. Determined by whether the engine is installed or not.
-	bool bIsMinOSSelectionAvailable = FApp::IsEngineInstalled() == false;
-	IDetailPropertyRow& MinOSRow = OSInfoCategory.AddProperty(MinOSProperty);
-	MinOSRow.IsEnabled(bIsMinOSSelectionAvailable);
-	MinOSRow.ToolTip(bIsMinOSSelectionAvailable ? MinOSProperty->GetToolTipText() : WindowsTargetSettingsDetailsConstants::DisabledTip);
+	D3D12TargetShaderFormatsDetails = MakeShareable(new FShaderFormatsPropertyDetails(&DetailBuilder, TEXT("D3D12TargetedShaderFormats"), TEXT("D3D12 Targeted Shader Formats")));
+	D3D12TargetShaderFormatsDetails->CreateTargetShaderFormatsPropertyView(TargetPlatform, &GetFriendlyNameForWindowsShaderPlatformCheckbox, &FilterShaderPlatform_D3D12, ECategoryPriority::Important);
+
+	D3D11TargetShaderFormatsDetails = MakeShareable(new FShaderFormatsPropertyDetails(&DetailBuilder, TEXT("D3D11TargetedShaderFormats"), TEXT("D3D11 Targeted Shader Formats")));
+	D3D11TargetShaderFormatsDetails->CreateTargetShaderFormatsPropertyView(TargetPlatform, &GetFriendlyNameForWindowsShaderPlatformCheckbox, &FilterShaderPlatform_D3D11, ECategoryPriority::Important);
+
+	VulkanTargetShaderFormatsDetails = MakeShareable(new FShaderFormatsPropertyDetails(&DetailBuilder, TEXT("VulkanTargetedShaderFormats"), TEXT("Vulkan Targeted Shader Formats")));
+	VulkanTargetShaderFormatsDetails->CreateTargetShaderFormatsPropertyView(TargetPlatform, &GetFriendlyNameForWindowsShaderPlatformCheckbox, &FilterShaderPlatform_Vulkan, ECategoryPriority::Important);
 
 	// Next add the splash image customization
 	const FText EditorSplashDesc(LOCTEXT("EditorSplashLabel", "Editor Splash"));
@@ -283,29 +330,29 @@ void FWindowsTargetSettingsDetails::CustomizeDetails( IDetailLayoutBuilder& Deta
 	IDetailCategoryBuilder& AudioCategory = DetailBuilder.EditCategory("Audio");
 
 	// Here we add a callback when the 
-	TSharedPtr<IPropertyHandle> AudioStreamCachingPropertyHandle = DetailBuilder.GetProperty("bUseAudioStreamCaching");
-	IDetailCategoryBuilder& AudioStreamCachingCategory = DetailBuilder.EditCategory("Audio");
-	IDetailPropertyRow& AudioStreamCachingPropertyRow = AudioCategory.AddProperty(AudioStreamCachingPropertyHandle);
-	AudioStreamCachingPropertyRow.CustomWidget()
-		.NameContent()
-		[
-			AudioStreamCachingPropertyHandle->CreatePropertyNameWidget()
-		]
-		.ValueContent()
-		.MaxDesiredWidth(500.0f)
-		.MinDesiredWidth(100.0f)
-		[
-			SNew(SHorizontalBox)
-
-			+ SHorizontalBox::Slot()
-			.FillWidth(1.0f)
-			[
-				SNew(SCheckBox)
-				.OnCheckStateChanged(this, &FWindowsTargetSettingsDetails::HandleAudioStreamCachingToggled, AudioStreamCachingPropertyHandle)
-				.IsChecked(this, &FWindowsTargetSettingsDetails::GetAudioStreamCachingToggled, AudioStreamCachingPropertyHandle)
-				.ToolTipText(AudioStreamCachingPropertyHandle->GetToolTipText())
-			]
-		];
+// 	TSharedPtr<IPropertyHandle> AudioStreamCachingPropertyHandle = DetailBuilder.GetProperty("bUseAudioStreamCaching");
+// 	IDetailCategoryBuilder& AudioStreamCachingCategory = DetailBuilder.EditCategory("Audio");
+// 	IDetailPropertyRow& AudioStreamCachingPropertyRow = AudioCategory.AddProperty(AudioStreamCachingPropertyHandle);
+// 	AudioStreamCachingPropertyRow.CustomWidget()
+// 		.NameContent()
+// 		[
+// 			AudioStreamCachingPropertyHandle->CreatePropertyNameWidget()
+// 		]
+// 		.ValueContent()
+// 		.MaxDesiredWidth(500.0f)
+// 		.MinDesiredWidth(100.0f)
+// 		[
+// 			SNew(SHorizontalBox)
+// 
+// 			+ SHorizontalBox::Slot()
+// 			.FillWidth(1.0f)
+// 			[
+// 				SNew(SCheckBox)
+// 				.OnCheckStateChanged(this, &FWindowsTargetSettingsDetails::HandleAudioStreamCachingToggled, AudioStreamCachingPropertyHandle)
+// 				.IsChecked(this, &FWindowsTargetSettingsDetails::GetAudioStreamCachingToggled, AudioStreamCachingPropertyHandle)
+// 				.ToolTipText(AudioStreamCachingPropertyHandle->GetToolTipText())
+// 			]
+// 		];
 }
 
 bool FWindowsTargetSettingsDetails::HandlePreExternalIconCopy(const FString& InChosenImage)

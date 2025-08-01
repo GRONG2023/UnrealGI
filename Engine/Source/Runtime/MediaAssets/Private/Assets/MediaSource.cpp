@@ -2,6 +2,141 @@
 
 #include "MediaSource.h"
 
+#include "IMediaAssetsModule.h"
+#include "MediaAssetsPrivate.h"
+#include "MediaTexture.h"
+#include "Modules/ModuleManager.h"
+#include "Misc/Paths.h"
+#include "StreamMediaSource.h"
+
+#if WITH_EDITOR
+#include "MediaSourceRendererInterface.h"
+#include "UObject/Package.h"
+#endif
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MediaSource)
+
+static const FLazyName ImgMediaSmartCacheEnabledName(TEXT("ImgMediaSmartCacheEnabled"));
+static const FLazyName ImgMediaSmartCacheTimeToLookAheadName(TEXT("ImgMediaSmartCacheTimeToLookAhead"));
+
+void UMediaSource::SetCacheSettings(const FMediaSourceCacheSettings& Settings)
+{
+	SetMediaOptionBool(ImgMediaSmartCacheEnabledName, Settings.bOverride);
+	SetMediaOptionFloat(ImgMediaSmartCacheTimeToLookAheadName, Settings.TimeToLookAhead);
+}
+
+bool UMediaSource::GetCacheSettings(FMediaSourceCacheSettings& OutSettings) const
+{
+	if (!HasMediaOption(ImgMediaSmartCacheEnabledName))
+	{
+		return false;
+	}
+
+	if (!HasMediaOption(ImgMediaSmartCacheTimeToLookAheadName))
+	{
+		return false;
+	}
+
+	OutSettings.bOverride = GetMediaOption(ImgMediaSmartCacheEnabledName, false);
+	OutSettings.TimeToLookAhead = GetMediaOption(ImgMediaSmartCacheTimeToLookAheadName, 0.0f);
+	return true;
+}
+
+#if WITH_EDITOR
+
+void UMediaSource::GenerateThumbnail()
+{
+	if (MediaSourceRenderer == nullptr)
+	{
+		IMediaAssetsModule* MediaAssetsModule = FModuleManager::LoadModulePtr<IMediaAssetsModule>("MediaAssets");
+		if (MediaAssetsModule != nullptr)
+		{
+			MediaSourceRenderer = MediaAssetsModule->CreateMediaSourceRenderer();
+		}
+	}
+
+	if (MediaSourceRenderer != nullptr)
+	{
+		IMediaSourceRendererInterface* Interface = Cast<IMediaSourceRendererInterface>(MediaSourceRenderer);
+		if (Interface != nullptr)
+		{
+			ThumbnailImage = Interface->Open(this);
+		}
+	}
+}
+
+#endif // WITH_EDITOR
+
+void UMediaSource::RegisterSpawnFromFileExtension(const FString& Extension,
+	FMediaSourceSpawnDelegate InDelegate)
+{
+	TMap<FString, FMediaSourceSpawnDelegate>& Delegates =
+		GetSpawnFromFileExtensionDelegates();
+
+	Delegates.Emplace(Extension, InDelegate);
+}
+
+void UMediaSource::UnregisterSpawnFromFileExtension(const FString& Extension)
+{
+	TMap<FString, FMediaSourceSpawnDelegate>& Delegates =
+		GetSpawnFromFileExtensionDelegates();
+
+	Delegates.Remove(Extension);
+}
+
+UMediaSource* UMediaSource::SpawnMediaSourceForString(const FString& MediaPath, UObject* Outer)
+{
+	TObjectPtr<UMediaSource> MediaSource = nullptr;
+
+	// Is it a URL?
+	bool bIsUrl = MediaPath.Contains(TEXT("://"));
+	if (bIsUrl)
+	{
+		TObjectPtr<UStreamMediaSource> StreamMediaSource = NewObject<UStreamMediaSource>(Outer, NAME_None, RF_Transactional);
+		StreamMediaSource->StreamUrl = MediaPath;
+		MediaSource = StreamMediaSource;
+	}
+	else
+	{
+		// Do we know about this file extension?
+		FString FileExtension = FPaths::GetExtension(MediaPath);
+		TMap<FString, FMediaSourceSpawnDelegate>& Delegates =
+			GetSpawnFromFileExtensionDelegates();
+		FMediaSourceSpawnDelegate* Delegate = Delegates.Find(FileExtension);
+		if ((Delegate != nullptr) && (Delegate->IsBound()))
+		{
+			MediaSource = Delegate->Execute(MediaPath, Outer);
+		}
+	}
+
+	// Validate the media source.
+	if (MediaSource != nullptr)
+	{
+		if (!MediaSource->Validate())
+		{
+			UE_LOG(LogMediaAssets, Error, TEXT("Failed to validate %s"), *MediaPath);
+			MediaSource = nullptr;
+		}
+	}
+
+	return MediaSource;
+}
+
+TMap<FString, FMediaSourceSpawnDelegate>& UMediaSource::GetSpawnFromFileExtensionDelegates()
+{
+	static TMap<FString, FMediaSourceSpawnDelegate> Delegates;
+	return Delegates;
+}
+
+void UMediaSource::BeginDestroy()
+{
+#if WITH_EDITOR
+	MediaSourceRenderer = nullptr;
+#endif // WITH_EDITOR
+
+	Super::BeginDestroy();
+}
+
 /* IMediaOptions interface
  *****************************************************************************/
 
@@ -129,5 +264,6 @@ void UMediaSource::SetMediaOption(const FName& Key, FVariant& Value)
 {
 	MediaOptionsMap.Emplace(Key, Value);
 }
+
 
 

@@ -1,10 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "GenericPlatform/GenericApplication.h"
+#include "GenericPlatform/Accessibility/GenericAccessibleInterfaces.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/CoreDelegates.h"
 #include "Misc/CommandLine.h"
-#include "IInputDevice.h"
 
 const FGamepadKeyNames::Type FGamepadKeyNames::Invalid(NAME_None);
 
@@ -45,7 +45,14 @@ const FGamepadKeyNames::Type FGamepadKeyNames::RightStickDown("Gamepad_RightStic
 const FGamepadKeyNames::Type FGamepadKeyNames::RightStickRight("Gamepad_RightStick_Right");
 const FGamepadKeyNames::Type FGamepadKeyNames::RightStickLeft("Gamepad_RightStick_Left");
 
-TArray<FInputDeviceScope*> FInputDeviceScope::ScopeStack;
+namespace UE::InputDeviceScope::Private
+{
+TArray<FInputDeviceScope*>& GetScopeStack()
+{
+	static thread_local TArray<FInputDeviceScope*> ScopeStack;
+	return ScopeStack;
+}
+}
 
 FInputDeviceScope::FInputDeviceScope(IInputDevice* InInputDevice, FName InInputDeviceName, int32 InHardwareDeviceHandle, FString InHardwareDeviceIdentifier)
 	: InputDevice(InInputDevice)
@@ -53,31 +60,25 @@ FInputDeviceScope::FInputDeviceScope(IInputDevice* InInputDevice, FName InInputD
 	, HardwareDeviceHandle(InHardwareDeviceHandle)
 	, HardwareDeviceIdentifier(InHardwareDeviceIdentifier)
 {
-	if (ensure(IsInGameThread()))
-	{
-		// Add to scope stack
-		ScopeStack.Add(this);
-	}
+	// Add to scope stack
+	UE::InputDeviceScope::Private::GetScopeStack().Add(this);
 }
 
 FInputDeviceScope::~FInputDeviceScope()
 {
-	if (ensure(IsInGameThread()))
-	{
-		// This should always be the top of the stack
-		ensureMsgf((ScopeStack.Num() > 0 && ScopeStack.Last() == this), TEXT("FInputDeviceScope was not destroyed in correct order!"));
-		ScopeStack.Remove(this);
-	}
+	TArray<FInputDeviceScope*>& ScopeStack = UE::InputDeviceScope::Private::GetScopeStack();
+
+	// This should always be the top of the stack
+	ensureMsgf((ScopeStack.Num() > 0 && ScopeStack.Last() == this), TEXT("FInputDeviceScope was not destroyed in correct order!"));
+	ScopeStack.Remove(this);
 }
 
 const FInputDeviceScope* FInputDeviceScope::GetCurrent()
 {
-	if (ensure(IsInGameThread()))
+	TArray<FInputDeviceScope*>& ScopeStack = UE::InputDeviceScope::Private::GetScopeStack();
+	if (ScopeStack.Num() > 0)
 	{
-		if (ScopeStack.Num() > 0)
-		{
-			return ScopeStack.Last();
-		}
+		return ScopeStack.Last();
 	}
 	return nullptr;
 }
@@ -144,8 +145,8 @@ void FDisplayMetrics::ApplyDefaultSafeZones()
 	TitleSafePaddingSize = FVector4(0.0f, 0.0f, 0.0f, 0.0f);
 	bool bSetByCommandLine;
 	bSetByCommandLine = FParse::Value(FCommandLine::Get(), TEXT("SafeZonePaddingLeft="),   TitleSafePaddingSize.X);
-	bSetByCommandLine = FParse::Value(FCommandLine::Get(), TEXT("SafeZonePaddingRight="),  TitleSafePaddingSize.Y) || bSetByCommandLine;
-	bSetByCommandLine = FParse::Value(FCommandLine::Get(), TEXT("SafeZonePaddingTop="),    TitleSafePaddingSize.Z) || bSetByCommandLine;
+	bSetByCommandLine = FParse::Value(FCommandLine::Get(), TEXT("SafeZonePaddingTop="),  TitleSafePaddingSize.Y) || bSetByCommandLine;
+	bSetByCommandLine = FParse::Value(FCommandLine::Get(), TEXT("SafeZonePaddingRight="),    TitleSafePaddingSize.Z) || bSetByCommandLine;
 	bSetByCommandLine = FParse::Value(FCommandLine::Get(), TEXT("SafeZonePaddingBottom="), TitleSafePaddingSize.W) || bSetByCommandLine;
 
 	if (!bSetByCommandLine)
@@ -154,7 +155,7 @@ void FDisplayMetrics::ApplyDefaultSafeZones()
 		if (SafeZoneRatio < 1.0f)
 		{
 			const float HalfUnsafeRatio = (1.0f - SafeZoneRatio) * 0.5f;
-			TitleSafePaddingSize = FVector4(PrimaryDisplayWidth * HalfUnsafeRatio, PrimaryDisplayHeight * HalfUnsafeRatio, PrimaryDisplayWidth * HalfUnsafeRatio, PrimaryDisplayHeight * HalfUnsafeRatio);
+			TitleSafePaddingSize = FVector4((float)PrimaryDisplayWidth * HalfUnsafeRatio, (float)PrimaryDisplayHeight * HalfUnsafeRatio, (float)PrimaryDisplayWidth * HalfUnsafeRatio, (float)PrimaryDisplayHeight * HalfUnsafeRatio);
 		}
 	}
 
@@ -162,7 +163,7 @@ void FDisplayMetrics::ApplyDefaultSafeZones()
 	if (ActionSafeZoneRatio < 1.0f)
 	{
 		const float HalfUnsafeRatio = (1.0f - ActionSafeZoneRatio) * 0.5f;
-		ActionSafePaddingSize = FVector4(PrimaryDisplayWidth * HalfUnsafeRatio, PrimaryDisplayHeight * HalfUnsafeRatio, PrimaryDisplayWidth * HalfUnsafeRatio, PrimaryDisplayHeight * HalfUnsafeRatio);
+		ActionSafePaddingSize = FVector4((float)PrimaryDisplayWidth * HalfUnsafeRatio, (float)PrimaryDisplayHeight * HalfUnsafeRatio, (float)PrimaryDisplayWidth * HalfUnsafeRatio, (float)PrimaryDisplayHeight * HalfUnsafeRatio);
 	}
 }
 
@@ -198,3 +199,26 @@ void FDisplayMetrics::PrintToLog() const
 		UE_LOG(LogInit, Log, TEXT("      bIsPrimary: %s"), Info.bIsPrimary ? TEXT("true") : TEXT("false"));
 	}
 }
+
+GenericApplication::GenericApplication(const TSharedPtr< ICursor >& InCursor)
+	: Cursor(InCursor)
+	, MessageHandler(MakeShareable(new FGenericApplicationMessageHandler()))
+#if WITH_ACCESSIBILITY
+	, AccessibleMessageHandler(MakeShareable(new FGenericAccessibleMessageHandler()))
+#endif
+{
+
+}
+GenericApplication::~GenericApplication() = default;
+
+#if WITH_ACCESSIBILITY
+void GenericApplication::SetAccessibleMessageHandler(const TSharedRef<FGenericAccessibleMessageHandler>& InAccessibleMessageHandler)
+{
+	AccessibleMessageHandler = InAccessibleMessageHandler;
+}
+
+TSharedRef<FGenericAccessibleMessageHandler> GenericApplication::GetAccessibleMessageHandler() const
+{
+	return AccessibleMessageHandler;
+}
+#endif

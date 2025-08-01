@@ -32,7 +32,6 @@ public:
 		UseLegacyPaths		= 1 >> 1
 	};
 
-	
 	/**
 	 * Creates and initializes a new instance.
 	 *
@@ -47,9 +46,17 @@ public:
 
 	virtual TFuture<FImageComparisonResult> CompareScreenshotAsync(const FString& IncomingPath, const FAutomationScreenshotMetadata& MetaData, const EScreenShotCompareOptions Options) override;
 
-	virtual FScreenshotExportResult ExportScreenshotComparisonResult(FString ScreenshotName, FString ExportPath = TEXT("")) override;
+	virtual FScreenshotExportResult ExportScreenshotComparisonResult(FString ScreenshotName, FString ExportPath = TEXT(""), bool bOnlyIncoming = false) override;
 
-	virtual bool OpenComparisonReports(FString ImportPath, TArray<FComparisonReport>& OutReports) override;
+	TFuture<TSharedPtr<TArray<FComparisonReport>>> OpenComparisonReportsAsync(const FString& ImportPath) override;
+	
+	virtual FString GetIdealApprovedFolderForImage(const FAutomationScreenshotMetadata& MetaData) const override;
+
+	virtual TArray<FString> FindApprovedFiles(const FAutomationScreenshotMetadata& IncomingMetaData, const FString& FilePattern) const override;
+
+	virtual TSharedPtr<FImageComparisonResult> CompareImageSequence(const TMap<FString, FString>& Sequence, const FAutomationScreenshotMetadata& Metadata) override;
+
+	virtual void NotifyAutomationTestFrameworkOfImageComparison(const FImageComparisonResult& Result) override;
 
 	//~ End IScreenShotManager Interface
 
@@ -57,26 +64,24 @@ private:
 
 	FString	GetPathComponentForRHI(const FAutomationScreenshotMetadata& MetaData) const;
 	FString	GetPathComponentForPlatformAndRHI(const FAutomationScreenshotMetadata& MetaData) const;
-	FString GetPathComponentForTestImages(const FAutomationScreenshotMetadata& MetaData) const;
+	FString GetPathComponentForTestImages(const FAutomationScreenshotMetadata& MetaData, bool bIncludeVariantName) const;
 		
-	FString GetIdealApprovedFolderForImage(const FAutomationScreenshotMetadata& MetaData) const;
 
 	FString GetApprovedFolderForImageWithOptions(const FAutomationScreenshotMetadata& MetaData, EApprovedFolderOptions InOptions) const;
-
-	TArray<FString> FindApprovedImages(const FAutomationScreenshotMetadata& IncomingMetaData);
 
 	FString GetDefaultExportDirectory() const;
 
 	FImageComparisonResult CompareScreenshot(const FString& IncomingPath, const FAutomationScreenshotMetadata& MetaData, const EScreenShotCompareOptions Options);
 
-	void CopyDirectory(const FString& DestDir, const FString& SrcDir);
+	void CopyDirectory(const FString& DestDir, const FString& SrcDir, const FString& Pattern);
 
-	void BuildFallbackPlatformsListFromConfig(const UScreenShotComparisonSettings* ScreenShotSettings);
+	void BuildFallbackPlatformsListFromConfig();
 
 private:
 
 	FString ScreenshotTempDeltaFolder;
 	FString ScreenshotResultsFolder;
+	TSharedPtr<TArray<FString>> PendingComparisonReportPaths;
 
 	TMap<FString, FString> FallbackPlatforms;
 

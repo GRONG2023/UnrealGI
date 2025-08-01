@@ -2,8 +2,9 @@
 
 #include "NetworkingProfilerManager.h"
 
+#include "MessageLogModule.h"
 #include "Modules/ModuleManager.h"
-#include "TraceServices/AnalysisService.h"
+#include "Widgets/Docking/SDockTab.h"
 #include "WorkspaceMenuStructure.h"
 #include "WorkspaceMenuStructureModule.h"
 
@@ -51,6 +52,7 @@ FNetworkingProfilerManager::FNetworkingProfilerManager(TSharedRef<FUICommandList
 	, CommandList(InCommandList)
 	, ActionManager(this)
 	, ProfilerWindows()
+	, LogListingName(TEXT("NetworkingInsights"))
 {
 }
 
@@ -69,7 +71,7 @@ void FNetworkingProfilerManager::Initialize(IUnrealInsightsModule& InsightsModul
 
 	// Register tick functions.
 	OnTick = FTickerDelegate::CreateSP(this, &FNetworkingProfilerManager::Tick);
-	OnTickHandle = FTicker::GetCoreTicker().AddTicker(OnTick, 0.0f);
+	OnTickHandle = FTSTicker::GetCoreTicker().AddTicker(OnTick, 0.0f);
 
 	FNetworkingProfilerCommands::Register();
 	BindCommands();
@@ -88,12 +90,22 @@ void FNetworkingProfilerManager::Shutdown()
 	}
 	bIsInitialized = false;
 
+	// If the MessageLog module was already unloaded as part of the global Shutdown process, do not load it again.
+	if (FModuleManager::Get().IsModuleLoaded("MessageLog"))
+	{
+		FMessageLogModule& MessageLogModule = FModuleManager::LoadModuleChecked<FMessageLogModule>("MessageLog");
+		if (MessageLogModule.IsRegisteredLogListing(GetLogListingName()))
+		{
+			MessageLogModule.UnregisterLogListing(GetLogListingName());
+		}
+	}
+
 	FInsightsManager::Get()->GetSessionChangedEvent().RemoveAll(this);
 
 	FNetworkingProfilerCommands::Unregister();
 
 	// Unregister tick function.
-	FTicker::GetCoreTicker().RemoveTicker(OnTickHandle);
+	FTSTicker::GetCoreTicker().RemoveTicker(OnTickHandle);
 
 	FNetworkingProfilerManager::Instance.Reset();
 
@@ -136,7 +148,7 @@ void FNetworkingProfilerManager::RegisterMajorTabs(IUnrealInsightsModule& Insigh
 				.SetReuseTabMethod(FOnFindTabToReuse::CreateStatic(&NeverReuse))
 				.SetDisplayName(Config.TabLabel.IsSet() ? Config.TabLabel.GetValue() : LOCTEXT("NetworkingProfilerTabTitle", "Networking Insights"))
 				.SetTooltipText(Config.TabTooltip.IsSet() ? Config.TabTooltip.GetValue() : LOCTEXT("NetworkingProfilerTooltipText", "Open the Networking Insights tab."))
-				.SetIcon(Config.TabIcon.IsSet() ? Config.TabIcon.GetValue() : FSlateIcon(FInsightsStyle::GetStyleSetName(), "NetworkingProfiler.Icon.Small"));
+				.SetIcon(Config.TabIcon.IsSet() ? Config.TabIcon.GetValue() : FSlateIcon(FInsightsStyle::GetStyleSetName(), "Icons.NetworkingProfiler"));
 
 			TSharedRef<FWorkspaceItem> Group = Config.WorkspaceGroup.IsValid() ? Config.WorkspaceGroup.ToSharedRef() : FInsightsManager::Get()->GetInsightsMenuBuilder()->GetInsightsToolsGroup();
 			TabSpawnerEntry.SetGroup(Group);
@@ -224,10 +236,10 @@ bool FNetworkingProfilerManager::Tick(float DeltaTime)
 	{
 		uint32 NetTraceVersion = 0;
 
-		TSharedPtr<const Trace::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
+		TSharedPtr<const TraceServices::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
 		if (Session.IsValid())
 		{
-			Trace::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
+			TraceServices::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
 
 			if (Session->IsAnalysisComplete())
 			{
@@ -235,8 +247,11 @@ bool FNetworkingProfilerManager::Tick(float DeltaTime)
 				AvailabilityCheck.Disable();
 			}
 
-			const Trace::INetProfilerProvider& NetProfilerProvider = Trace::ReadNetProfilerProvider(*Session.Get());
-			NetTraceVersion = NetProfilerProvider.GetNetTraceVersion();
+			const TraceServices::INetProfilerProvider* NetProfilerProvider = TraceServices::ReadNetProfilerProvider(*Session.Get());
+			if (NetProfilerProvider)
+			{
+				NetTraceVersion = NetProfilerProvider->GetNetTraceVersion();
+			}
 		}
 		else
 		{
@@ -256,6 +271,10 @@ bool FNetworkingProfilerManager::Tick(float DeltaTime)
 				FGlobalTabmanager::Get()->TryInvokeTab(TabId);
 				FGlobalTabmanager::Get()->TryInvokeTab(TabId);
 			}
+
+			FMessageLogModule& MessageLogModule = FModuleManager::LoadModuleChecked<FMessageLogModule>("MessageLog");
+			MessageLogModule.RegisterLogListing(GetLogListingName(), LOCTEXT("NetworkingInsights", "Networking Profiler Insights"));
+			MessageLogModule.EnableMessageLogDisplay(true);
 
 			//int32 SpawnTabCount = 2; // we want to spawn 2 tabs
 			//for (int32 ReservedId = 0; SpawnTabCount > 0 && ReservedId < 10; ++ReservedId)

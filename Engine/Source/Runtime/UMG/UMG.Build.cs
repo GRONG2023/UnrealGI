@@ -6,56 +6,56 @@ public class UMG : ModuleRules
 {
 	public UMG(ReadOnlyTargetRules Target) : base(Target)
 	{
-        PrivateIncludePaths.AddRange(
-            new string[] {
-                "Runtime/UMG/Private" // For PCH includes (because they don't work with relative paths, yet)
-            })
-		;
-
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
+				"TraceLog",
 				"CoreUObject",
-                "Engine",
-                "InputCore",
+				"DeveloperSettings",
+				"Engine",
+				"InputCore",
 				"Slate",
 				"SlateCore",
 				"RenderCore",
 				"RHI",
+				"ApplicationCore"
 			}
 		);
 
-        PublicDependencyModuleNames.AddRange(
-            new string[] {
+		PublicDependencyModuleNames.AddRange(
+			new string[] {
+				"FieldNotification",
 				"HTTP",
 				"MovieScene",
-                "MovieSceneTracks",
-                "PropertyPath",
+				"MovieSceneTracks",
+				"PropertyPath",
 				"TimeManagement"
 			}
-        );
+		);
 
-        PrivateIncludePathModuleNames.AddRange(
-            new string[] {
+		PrivateIncludePathModuleNames.AddRange(
+			new string[] {
+				"SlateRHIRenderer",
 				"ImageWrapper",
-                 "TargetPlatform",
-            }
-        );
+				"TargetPlatform",
+			}
+		);
 
 		if (Target.Type != TargetType.Server)
 		{
-			PrivateIncludePathModuleNames.AddRange(
+			DynamicallyLoadedModuleNames.AddRange(
+				new string[] {
+					"ImageWrapper",
+				}
+			);
+
+			// Implementations depending on 'SlateRHIRenderer' should 
+			// be guarded with: '#if !UE_SERVER'.
+			PrivateDependencyModuleNames.AddRange(
 				new string[] {
 					"SlateRHIRenderer",
 				}
 			);
-
-            DynamicallyLoadedModuleNames.AddRange(
-                new string[] {
-				    "ImageWrapper",
-				    "SlateRHIRenderer",
-			    }
-            );
 		}
 	}
 }

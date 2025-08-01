@@ -1,7 +1,24 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "InstancedStaticMeshSCSEditorCustomization.h"
+
+#include "BlueprintEditorModule.h"
 #include "Components/InstancedStaticMeshComponent.h"
+#include "Components/SceneComponent.h"
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "EditorViewportClient.h"
+#include "HitProxies.h"
+#include "Math/Quat.h"
+#include "Math/RotationMatrix.h"
+#include "Math/ScaleMatrix.h"
+#include "Math/Transform.h"
+#include "Math/Vector.h"
+#include "Math/Vector4.h"
+#include "Misc/AssertionMacros.h"
+#include "Templates/Casts.h"
+#include "UObject/Object.h"
+#include "UnrealClient.h"
 
 TSharedRef<ISCSEditorCustomization> FInstancedStaticMeshSCSEditorCustomization::MakeInstance(TSharedRef< IBlueprintEditor > InBlueprintEditor)
 {
@@ -47,7 +64,7 @@ bool FInstancedStaticMeshSCSEditorCustomization::HandleViewportClick(const TShar
 		if (BlueprintEditorPtr.IsValid())
 		{
 			// Note: This will find and select any node associated with the component instance that's attached to the proxy (including visualizers)
-			BlueprintEditorPtr.Pin()->FindAndSelectSCSEditorTreeNode(InstancedStaticMeshInstanceProxy->Component, bIsCtrlKeyDown);
+			BlueprintEditorPtr.Pin()->FindAndSelectSubobjectEditorTreeNode(InstancedStaticMeshInstanceProxy->Component, bIsCtrlKeyDown);
 		}
 
 		return true;
@@ -56,12 +73,12 @@ bool FInstancedStaticMeshSCSEditorCustomization::HandleViewportClick(const TShar
 	return false;
 }
 
-bool FInstancedStaticMeshSCSEditorCustomization::HandleViewportDrag(class USceneComponent* InSceneComponent, class USceneComponent* InComponentTemplate, const FVector& InDeltaTranslation, const FRotator& InDeltaRotation, const FVector& InDeltaScale, const FVector& InPivot)
+bool FInstancedStaticMeshSCSEditorCustomization::HandleViewportDrag(const USceneComponent* InSceneComponent, USceneComponent* InComponentTemplate, const FVector& InDeltaTranslation, const FRotator& InDeltaRotation, const FVector& InDeltaScale, const FVector& InPivot)
 {
 	check(InSceneComponent->IsA(UInstancedStaticMeshComponent::StaticClass()));
 
-	UInstancedStaticMeshComponent* InstancedStaticMeshComponentScene = CastChecked<UInstancedStaticMeshComponent>(InSceneComponent);
-	UInstancedStaticMeshComponent* InstancedStaticMeshComponentTemplate = CastChecked<UInstancedStaticMeshComponent>(InComponentTemplate);
+	UInstancedStaticMeshComponent* InstancedStaticMeshComponentScene = const_cast<UInstancedStaticMeshComponent*>(CastChecked<const UInstancedStaticMeshComponent>(InSceneComponent));
+	UInstancedStaticMeshComponent* InstancedStaticMeshComponentTemplate = const_cast<UInstancedStaticMeshComponent*>(CastChecked<const UInstancedStaticMeshComponent>(InComponentTemplate));
 
 	// transform pivot into component's space
 	const FVector LocalPivot = InstancedStaticMeshComponentScene->GetComponentToWorld().InverseTransformPosition(InPivot);
@@ -138,12 +155,12 @@ bool FInstancedStaticMeshSCSEditorCustomization::HandleViewportDrag(class UScene
 	return bMovedInstance;
 }
 
-bool FInstancedStaticMeshSCSEditorCustomization::HandleGetWidgetLocation(class USceneComponent* InSceneComponent, FVector& OutWidgetLocation)
+bool FInstancedStaticMeshSCSEditorCustomization::HandleGetWidgetLocation(const USceneComponent* InSceneComponent, FVector& OutWidgetLocation)
 {
 	// location is average of selected instances
 	float SelectedInstanceCount = 0.0f;
 	FVector AverageLocation = FVector::ZeroVector;
-	UInstancedStaticMeshComponent* InstancedStaticMeshComponent = CastChecked<UInstancedStaticMeshComponent>(InSceneComponent);
+	UInstancedStaticMeshComponent* InstancedStaticMeshComponent = const_cast<UInstancedStaticMeshComponent*>(CastChecked<UInstancedStaticMeshComponent>(InSceneComponent));
 
 	// Ensure that selected instances are up-to-date
 	ValidateSelectedInstances(InstancedStaticMeshComponent);
@@ -166,14 +183,14 @@ bool FInstancedStaticMeshSCSEditorCustomization::HandleGetWidgetLocation(class U
 	return false;
 }
 
-bool FInstancedStaticMeshSCSEditorCustomization::HandleGetWidgetTransform(class USceneComponent* InSceneComponent, FMatrix& OutWidgetTransform)
+bool FInstancedStaticMeshSCSEditorCustomization::HandleGetWidgetTransform(const USceneComponent* InSceneComponent, FMatrix& OutWidgetTransform)
 {
 	// transform is first selected instance
 	bool bInstanceSelected = false;
-	UInstancedStaticMeshComponent* InstancedStaticMeshComponent = CastChecked<UInstancedStaticMeshComponent>(InSceneComponent);
+	const UInstancedStaticMeshComponent* InstancedStaticMeshComponent = CastChecked<UInstancedStaticMeshComponent>(InSceneComponent);
 
 	// Ensure that selected instances are up-to-date
-	ValidateSelectedInstances(InstancedStaticMeshComponent);
+	ValidateSelectedInstances(const_cast<UInstancedStaticMeshComponent*>(InstancedStaticMeshComponent));
 
 	for (int32 InstanceIndex = 0; InstanceIndex < InstancedStaticMeshComponent->SelectedInstances.Num(); InstanceIndex++)
 	{

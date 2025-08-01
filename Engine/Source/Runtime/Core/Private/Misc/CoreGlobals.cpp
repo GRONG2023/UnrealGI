@@ -7,14 +7,26 @@
 #include "HAL/IConsoleManager.h"
 #include "Modules/ModuleManager.h"
 #include "Misc/CoreStats.h"
+#include "Misc/TrackedActivity.h"
 #include "Misc/Compression.h"
+#include "Misc/CoreDelegates.h"
 #include "Misc/LazySingleton.h"
+#include "Misc/PlayInEditorLoadingScope.h"
+#include "Misc/CommandLine.h"
 #include "ProfilingDebugging/MiscTrace.h"
 #include "GenericPlatform/GenericPlatformCrashContext.h"
 
 #ifndef FAST_PATH_UNIQUE_NAME_GENERATION
 #define FAST_PATH_UNIQUE_NAME_GENERATION (!WITH_EDITORONLY_DATA)
 #endif
+
+#ifndef UE_PROJECT_NAME
+#define UE_PROJECT_NAME None
+#define UE_IS_GAME_AGNOSTIC true
+#else
+#define UE_IS_GAME_AGNOSTIC false
+#endif
+
 
 #define LOCTEXT_NAMESPACE "Core"
 
@@ -36,7 +48,6 @@ IMPLEMENT_MODULE( FCoreModule, Core );
 /*-----------------------------------------------------------------------------
 	Global variables.
 -----------------------------------------------------------------------------*/
-
 CORE_API FFeedbackContext*	GWarn						= nullptr;		/* User interaction and non critical warnings */
 FConfigCacheIni*			GConfig						= nullptr;		/* Configuration database cache */
 ITransaction*				GUndo						= nullptr;		/* Transaction tracker, non-NULL when a transaction is in progress */
@@ -47,10 +58,10 @@ CORE_API FMalloc**			GFixedMallocLocationPtr = nullptr;		/* Memory allocator poi
 class FPropertyWindowManager*	GPropertyWindowManager	= nullptr;		/* Manages and tracks property editing windows */
 
 /** For building call stack text dump in guard/unguard mechanism. */
-TCHAR GErrorHist[16384]	= TEXT("");
+TCHAR GErrorHist[16384] = {};
 
 /** For building exception description text dump in guard/unguard mechanism. */
-TCHAR GErrorExceptionDescription[4096] = TEXT( "" );
+TCHAR GErrorExceptionDescription[4096] = {};
 
 // We define our texts like this so that the header only needs to refer to references to FTexts,
 // as FText is only forward-declared there.
@@ -103,18 +114,18 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 /** If true, this executable is able to run all games (which are loaded as DLL's) **/
 #if UE_GAME || UE_SERVER
-	// In monolithic builds, implemented by the IMPLEMENT_GAME_MODULE macro or by UE4Game module.
+	// In monolithic builds, implemented by the IMPLEMENT_GAME_MODULE macro or by UnrealGame module.
 	#if !IS_MONOLITHIC
-		bool GIsGameAgnosticExe = true;
+		bool GIsGameAgnosticExe = UE_IS_GAME_AGNOSTIC;
 	#endif
 #else
-	// In monolithic Editor builds, implemented by the IMPLEMENT_GAME_MODULE macro or by UE4Game module.
+	// In monolithic Editor builds, implemented by the IMPLEMENT_GAME_MODULE macro or by UnrealGame module.
 	#if !IS_MONOLITHIC || !UE_EDITOR
 		// Otherwise only modular editors are game agnostic.
 		#if IS_PROGRAM || IS_MONOLITHIC
 			bool GIsGameAgnosticExe = false;
 		#else
-			bool GIsGameAgnosticExe = true;
+			bool GIsGameAgnosticExe = UE_IS_GAME_AGNOSTIC;
 		#endif
 	#endif //!IS_MONOLITHIC || !UE_EDITOR
 #endif
@@ -162,8 +173,18 @@ FUELibraryOverrideSettings GUELibraryOverrideSettings;
  */
 bool GIsRunningUnattendedScript = false;
 
+#if WITH_EDITOR
+bool					PRIVATE_GIsRunningCookCommandlet	= false;				/** Whether this executable is running the cook commandlet */
+bool					PRIVATE_GIsRunningDLCCookCommandlet = false;				/** Whether this executable is running the cook commandlet on a DLC plugin */
+namespace UE::Private
+{
+int32					GMultiprocessId = 0;
+}
+#endif
+
 #if WITH_ENGINE
 bool					PRIVATE_GIsRunningCommandlet		= false;				/** Whether this executable is running a commandlet (custom command-line processing code) */
+UClass*					PRIVATE_GRunningCommandletClass		= nullptr;				/** Class of running cook commandlet */
 bool					PRIVATE_GAllowCommandletRendering	= false;				/** If true, initialise RHI and set up scene for rendering even when running a commandlet. */
 bool					PRIVATE_GAllowCommandletAudio 		= false;				/** If true, allow audio even when running a commandlet. */
 #endif	// WITH_ENGINE
@@ -171,14 +192,12 @@ bool					PRIVATE_GAllowCommandletAudio 		= false;				/** If true, allow audio ev
 #if WITH_EDITORONLY_DATA
 bool					GIsEditor						= false;					/* Whether engine was launched for editing */
 bool					GIsImportingT3D					= false;					/* Whether editor is importing T3D */
-bool					GIsUCCMakeStandaloneHeaderGenerator = false;				/* Are we rebuilding script via the standalone header generator? */
 bool					GIsTransacting					= false;					/* true if there is an undo/redo operation in progress. */
 bool					GIntraFrameDebuggingGameThread	= false;					/* Indicates that the game thread is currently paused deep in a call stack; do not process any game thread tasks */
 bool					GFirstFrameIntraFrameDebugging	= false;					/* Indicates that we're currently processing the first frame of intra-frame debugging */
 #elif USING_CODE_ANALYSIS
 // These are always false during 'non-editor code analysis', just like they would be when #defined.
 bool					GIsEditor						= false;
-bool					GIsUCCMakeStandaloneHeaderGenerator = false;
 bool					GIntraFrameDebuggingGameThread	= false;
 bool					GFirstFrameIntraFrameDebugging	= false;
 #endif // !WITH_EDITORONLY_DATA
@@ -189,7 +208,7 @@ bool					GIsServer						= false;					/* Whether engine was launched as a server,
 bool					GIsCriticalError				= false;					/* An appError() has occured */
 bool					GIsGuarded						= false;					/* Whether execution is happening within main()/WinMain()'s try/catch handler */
 TSAN_ATOMIC(bool)		GIsRunning(false);											/* Whether execution is happening within MainLoop() */
-bool					GIsDuplicatingClassForReinstancing = false;					/* Whether we are currently using SDO on a UClass or CDO for live reinstancing */
+FIsDuplicatingClassForReinstancing	GIsDuplicatingClassForReinstancing;					        /* Whether we are currently using SDO on a UClass or CDO for live reinstancing */
 /** This specifies whether the engine was launched as a build machine process								*/
 bool					GIsBuildMachine					= false;
 /** This determines if we should output any log text.  If Yes then no log text should be emitted.			*/
@@ -229,20 +248,31 @@ FString				GInstallBundleIni;											/* Install Bundle ini filename*/
 FString				GDeviceProfilesIni;											/* Runtime DeviceProfiles ini filename - use LoadLocalIni for other platforms' DPs */
 FString				GGameplayTagsIni;											/* Gameplay tags for the GameplayTagManager */
 
-float					GNearClippingPlane				= 10.0f;				/* Near clipping plane */
+float				GNearClippingPlane					= 10.0f;				/* Near clipping plane */
+float				GNearClippingPlane_RenderThread		= 10.0f;				/* Near clipping plane (Render Thread accessible) */
 
 bool					GExitPurge						= false;
 
 FChunkedFixedUObjectArray* GCoreObjectArrayForDebugVisualizers = nullptr;
+
+namespace UE::CoreUObject::Private
+{
+	struct FStoredObjectPathDebug;
+	struct FObjectHandlePackageDebugData;
+}
+UE::CoreUObject::Private::FStoredObjectPathDebug* GCoreComplexObjectPathDebug = nullptr;
+UE::CoreUObject::Private::FObjectHandlePackageDebugData* GCoreObjectHandlePackageDebug = nullptr;
 #if PLATFORM_UNIX
 uint8** CORE_API GNameBlocksDebug = FNameDebugVisualizer::GetBlocks();
 FChunkedFixedUObjectArray*& CORE_API GObjectArrayForDebugVisualizers = GCoreObjectArrayForDebugVisualizers;
+UE::CoreUObject::Private::FStoredObjectPathDebug*& GComplexObjectPathDebug = GCoreComplexObjectPathDebug;
+UE::CoreUObject::Private::FObjectHandlePackageDebugData*& CORE_API GObjectHandlePackageDebug = GCoreObjectHandlePackageDebug;
 #endif
 
 /** Game name, used for base game directory and ini among other things										*/
 #if (!IS_MONOLITHIC && !IS_PROGRAM)
 // In modular game builds, the game name will be set when the application launches
-TCHAR					GInternalProjectName[64]					= TEXT("None");
+TCHAR					GInternalProjectName[64]					= TEXT(PREPROCESSOR_TO_STRING(UE_PROJECT_NAME));
 #elif !IS_MONOLITHIC && IS_PROGRAM
 // In non-monolithic programs builds, the game name will be set by the module, but not just yet, so we need to NOT initialize it!
 TCHAR					GInternalProjectName[64];
@@ -261,6 +291,22 @@ static void appNoop()
 {
 }
 
+bool GEngineStartupModuleLoadingComplete = false;
+CORE_API bool IsEngineStartupModuleLoadingComplete()
+{
+	return GEngineStartupModuleLoadingComplete;
+}
+
+CORE_API void SetEngineStartupModuleLoadingComplete()
+{
+	if (ensure(!GEngineStartupModuleLoadingComplete))
+	{
+		GEngineStartupModuleLoadingComplete = true;
+		SCOPED_BOOT_TIMING("OnAllModuleLoadingPhasesComplete.Broadcast");
+		FCoreDelegates::OnAllModuleLoadingPhasesComplete.Broadcast();
+	}
+}
+
 // This should be left non static to allow *edge* cases only in Core to extern and set this.
 bool GShouldRequestExit = false;
 
@@ -277,6 +323,8 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 void CORE_API RequestEngineExit(const TCHAR* ReasonString)
 {
 	ensureMsgf(ReasonString && FCString::Strlen(ReasonString) > 4, TEXT("RequestEngineExit must be given a valid reason (reason \"%s\""), ReasonString);
+
+	TRACE_BOOKMARK(TEXT("Engine exit requested (reason: %s)"), ReasonString);
 
 	FGenericCrashContext::SetEngineExit(true);
 
@@ -312,45 +360,66 @@ bool (*IsAsyncLoadingMultithreaded)() = &IsAsyncLoadingCoreInternal;
 void (*SuspendTextureStreamingRenderTasks)() = &appNoop;
 void (*ResumeTextureStreamingRenderTasks)() = &appNoop;
 
+static ELoaderType LoaderNotInitialized()
+{
+	return ELoaderType::NotInitialized;
+}
+ELoaderType (*GetLoaderType)() = &LoaderNotInitialized;
+
+const TCHAR* LexToString(ELoaderType Type)
+{
+	switch (Type)
+	{
+	case ELoaderType::NotInitialized:
+		return TEXT("NotInitialized");
+	case ELoaderType::LegacyLoader:
+		return TEXT("LegacyLoader");
+	case ELoaderType::EditorPackageLoader:
+		return TEXT("EditorPackageLoader");
+	case ELoaderType::ZenLoader:
+		return TEXT("ZenLoader");
+	default:
+		check(false);
+		return TEXT("");
+	}
+}
+
 /** Whether the editor is currently loading a package or not												*/
-bool					GIsEditorLoadingPackage				= false;
+bool					GIsEditorLoadingPackage			= false;
 /** Whether the cooker is currently loading a package or not												*/
-bool					GIsCookerLoadingPackage = false;
+bool					GIsCookerLoadingPackage			= false;
 /** Whether GWorld points to the play in editor world														*/
 bool					GIsPlayInEditorWorld			= false;
-/** Unique ID for multiple PIE instances running in one process */
-int32					GPlayInEditorID					= -1;
-/** Whether or not PIE was attempting to play from PlayerStart							*/
+/** Unique ID for multiple PIE instances running in one process												*/
+FPlayInEditorID			GPlayInEditorID;
+/** Whether or not PIE was attempting to play from PlayerStart												*/
 bool					GIsPIEUsingPlayerStart			= false;
 /** true if the runtime needs textures to be powers of two													*/
-bool					GPlatformNeedsPowerOfTwoTextures = false;
-/** Time at which FPlatformTime::Seconds() was first initialized (before main)											*/
+bool					GPlatformNeedsPowerOfTwoTextures= false;
+/** Time at which FPlatformTime::Seconds() was first initialized (before main)								*/
 double					GStartTime						= FPlatformTime::InitTiming();
 /** System time at engine init.																				*/
 FString					GSystemStartTime;
 /** Whether we are still in the initial loading proces.														*/
 bool					GIsInitialLoad					= true;
 /* Whether we are using the event driven loader */
-bool					GEventDrivenLoaderEnabled = false;
+bool					GEventDrivenLoaderEnabled		= false;
 
 /** Steadily increasing frame counter.																		*/
-TSAN_ATOMIC(uint64)		GFrameCounter(0);
+uint64					GFrameCounter					= 0;
+uint64					GFrameCounterRenderThread		= 0;
 
-uint64					GFrameCounterRenderThread(0);
 uint64					GLastGCFrame					= 0;
-/** The time input was sampled, in cycles. */
-uint64					GInputTime					= 0;
+/** The time input was sampled, in cycles.																	*/
+uint64					GInputTime						= 0;
 /** Incremented once per frame before the scene is being rendered. In split screen mode this is incremented once for all views (not for each view). */
 uint32					GFrameNumber					= 1;
 /** NEED TO RENAME, for RT version of GFrameTime use View.ViewFamily->FrameNumber or pass down from RT from GFrameTime). */
 uint32					GFrameNumberRenderThread		= 1;
-#if !(UE_BUILD_SHIPPING && WITH_EDITOR)
-// We cannot count on this variable to be accurate in a shipped game, so make sure no code tries to use it
 /** Whether we are the first instance of the game running.													*/
-#if !PLATFORM_UNIX
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 bool					GIsFirstInstance				= true;
-#endif
-#endif
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 /** Threshold for a frame to be considered a hitch (in milliseconds). */
 float GHitchThresholdMS = 60.0f;
 /** Size to break up data into when saving compressed data													*/
@@ -367,25 +436,30 @@ bool					GIsGameThreadIdInitialized		= false;
 void					(*GFlushStreamingFunc)(void)	  = &appNoop;
 /** Whether to emit begin/ end draw events.																	*/
 bool					GEmitDrawEvents					= false;
-/** Whether forward DrawEvents to the RHI or keep them only on the Commandlist. */
-bool					GCommandListOnlyDrawEvents		= false;
 /** Whether we want the rendering thread to be suspended, used e.g. for tracing.							*/
 bool					GShouldSuspendRenderingThread	= false;
 /** Determines what kind of trace should occur, NAME_None for none.											*/
 FLazyName				GCurrentTraceName;
 /** How to print the time in log output																		*/
-ELogTimes::Type			GPrintLogTimes					= ELogTimes::None;
-/** How to print the category in log output. */
-bool					GPrintLogCategory = true;
-/** How to print the verbosity in log output. */
-bool					GPrintLogVerbosity = true;
+ELogTimes::Type	GPrintLogTimes			= ELogTimes::None;
+/** How to print the category in log output.																*/
+TSAN_ATOMIC(bool)		GPrintLogCategory				= true;
+/** How to print the verbosity in log output.																*/
+TSAN_ATOMIC(bool)		GPrintLogVerbosity				= true;
 
 #if USE_HITCH_DETECTION
-bool				GHitchDetected = false;
+TSAN_ATOMIC(bool)				GHitchDetected(false);
 #endif
 
 /** Whether stats should emit named events for e.g. PIX.													*/
 int32					GCycleStatsShouldEmitNamedEvents = 0;
+
+/** Whether verbose stats should be also generate external profiler named events.
+* Thread sleep/wait stats or extremely high frequency cycle counting stats are disabled by default.
+* Has no effect if GCycleStatsShouldEmitNamedEvents is 0.
+*/
+bool					GShouldEmitVerboseNamedEvents = false;
+
 /** Disables some warnings and minor features that would interrupt a demo presentation						*/
 bool					GIsDemoMode						= false;
 /** Whether or not a unit test is currently being run														*/
@@ -400,26 +474,21 @@ bool					GEnableVREditorHacks = false;
 
 bool CORE_API			GIsGPUCrashed = false;
 
+#if !UE_BUILD_SHIPPING
+
+/** Whether we should ignore the attached debugger. */
+CORE_API bool			GIgnoreDebugger = false;
+
+#endif // #if !UE_BUILD_SHIPPING
+
 bool GetEmitDrawEvents()
 {
 	return GEmitDrawEvents;
 }
 
-bool CORE_API GetEmitDrawEventsOnlyOnCommandlist()
-{
-	return GCommandListOnlyDrawEvents;
-}
-
 void CORE_API SetEmitDrawEvents(bool EmitDrawEvents)
 {
 	GEmitDrawEvents = EmitDrawEvents;
-	GCommandListOnlyDrawEvents = !GEmitDrawEvents;
-}
-
-void CORE_API EnableEmitDrawEventsOnlyOnCommandlist()
-{
-	GCommandListOnlyDrawEvents = !GEmitDrawEvents;
-	GEmitDrawEvents = true;
 }
 
 void ToggleGDebugPUCrashedFlag(const TArray<FString>& Args)
@@ -438,6 +507,25 @@ static struct FBootTimingStart
 	}
 } GBootTimingStart;
 
+FEngineTrackedActivityScope::FEngineTrackedActivityScope(const TCHAR* Fmt, ...)
+{
+	va_list Args;
+	va_start(Args, Fmt);
+	TCHAR Str[4096];
+	FCString::GetVarArgs(Str, UE_ARRAY_COUNT(Str), Fmt, Args);
+	FTrackedActivity::GetEngineActivity().Push(Str);
+	va_end(Args);
+}
+
+FEngineTrackedActivityScope::FEngineTrackedActivityScope(const FString& Text)
+{
+	FTrackedActivity::GetEngineActivity().Push(*Text);
+}
+
+FEngineTrackedActivityScope::~FEngineTrackedActivityScope()
+{
+	FTrackedActivity::GetEngineActivity().Pop();
+}
 
 #define USE_BOOT_PROFILING 0
 
@@ -682,6 +770,7 @@ DEFINE_LOG_CATEGORY(LogNetSerialization);
 DEFINE_LOG_CATEGORY(LogMemory);
 DEFINE_LOG_CATEGORY(LogProfilingDebugging);
 DEFINE_LOG_CATEGORY(LogTemp);
+DEFINE_LOG_CATEGORY(LogVirtualization);
 
 // need another layer of macro to help using a define in a define
 #define DEFINE_LOG_CATEGORY_HELPER(A) DEFINE_LOG_CATEGORY(A)
@@ -692,4 +781,144 @@ DEFINE_LOG_CATEGORY(LogTemp);
 	DEFINE_LOG_CATEGORY_HELPER(PLATFORM_GLOBAL_LOG_CATEGORY_ALT);
 #endif
 
+thread_local bool PRIVATE_GIsDuplicatingClassForReinstancing = false;
+
+FIsDuplicatingClassForReinstancing& FIsDuplicatingClassForReinstancing::operator= (bool bOther)
+{
+	PRIVATE_GIsDuplicatingClassForReinstancing = bOther;
+	return *this;
+}
+
+FIsDuplicatingClassForReinstancing::operator bool() const
+{
+	return PRIVATE_GIsDuplicatingClassForReinstancing;
+}
+
+namespace PlayInEditorIDImpl
+{
+	int32 PRIVATE_GPlayInEditorID_GameThread = -1;
+	// We need to differentiate between the game-thread being identified as the loading thread during postload 
+	// and the actual loading thread to avoid scopes to overlap and race between both threads.
+	int32 PRIVATE_GPlayInEditorID_GameThreadAsLoadingThread = -2;
+	int32 PRIVATE_GPlayInEditorID_ActualLoadingThread = -2;
+
+	static int32* GetPointer()
+	{
+		if (IsInAsyncLoadingThread())
+		{
+			if (IsInGameThread())
+			{
+				return &PRIVATE_GPlayInEditorID_GameThreadAsLoadingThread;
+			}
+			else
+			{
+				return &PRIVATE_GPlayInEditorID_ActualLoadingThread;
+			}
+		}
+		else if (IsInGameThread())
+		{
+			return &PRIVATE_GPlayInEditorID_GameThread;
+		}
+
+		return nullptr;
+	}
+};
+
+int32 PRIVATE_GetGPlayInEditorID()
+{
+	if (int32* Pointer = PlayInEditorIDImpl::GetPointer())
+	{
+		return *Pointer;
+	}
+	else
+	{
+		// GPlayInEditorID doesn't have a value on worker threads. If it's needed, it should be captured in the task context.
+		return -1;
+	}
+}
+
+void PRIVATE_SetGPlayInEditorID(int32 InValue)
+{
+	if (int32* Pointer = PlayInEditorIDImpl::GetPointer())
+	{
+		*Pointer = InValue;
+	}
+	else
+	{
+		// There is no value on worker thread... so just do nothing here. -1 is always returned anyway.
+	}
+}
+
+namespace UE::Core::Private
+{
+	FPlayInEditorLoadingScope::FPlayInEditorLoadingScope(int32 PlayInEditorID)
+		: OldValue(PRIVATE_GetGPlayInEditorID())
+	{
+		PRIVATE_SetGPlayInEditorID(PlayInEditorID);
+	}
+
+	FPlayInEditorLoadingScope::~FPlayInEditorLoadingScope()
+	{
+		PRIVATE_SetGPlayInEditorID(OldValue);
+	}
+}
+
+FPlayInEditorID& FPlayInEditorID::operator= (int32 InOther)
+{
+	PRIVATE_SetGPlayInEditorID(InOther);
+	return *this;
+}
+
+FPlayInEditorID::operator int32() const
+{
+	int32 Value = PRIVATE_GetGPlayInEditorID();
+	checkf(Value != -2, TEXT("GPlayInEditorID has not been properly forwarded by the loading-thread."));
+	return Value;
+}
+
 #undef LOCTEXT_NAMESPACE
+
+bool IsRunningCookOnTheFly()
+{
+#if WITH_COTF
+	static struct FCookOnTheFlyCommandline
+	{
+		bool bParsed;
+		FCookOnTheFlyCommandline(const TCHAR* CmdLine)
+		{
+			FString Host;
+			bParsed = FParse::Value(CmdLine, TEXT("-FileHostIP="), Host);
+		}
+	} CookOnTheFlyCommandline(FCommandLine::Get());
+	
+	return CookOnTheFlyCommandline.bParsed;
+#else
+	return false;
+#endif
+}
+
+namespace UE
+{
+
+int32 GetMultiprocessId()
+{
+#if WITH_EDITOR
+	return UE::Private::GMultiprocessId;
+#else
+	return 0;
+#endif
+}
+
+}
+
+namespace UE::Private
+{
+
+void SetMultiprocessId(int32 MultiprocessId)
+{
+#if WITH_EDITOR
+	UE::Private::GMultiprocessId = MultiprocessId;
+#endif
+}
+
+}

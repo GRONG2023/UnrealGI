@@ -9,6 +9,7 @@
 #include "CoreMinimal.h"
 #include "ProfilingDebugging/ResourceSize.h"
 #include "RenderResource.h"
+#include "RayTracingGeometry.h"
 #include "LocalVertexFactory.h"
 #include "Components/SkinnedMeshComponent.h"
 #include "SkeletalRenderPublic.h"
@@ -16,32 +17,27 @@
 class FPrimitiveDrawInterface;
 class UMorphTarget;
 
-class ENGINE_API FSkeletalMeshObjectStatic : public FSkeletalMeshObject
+class FSkeletalMeshObjectStatic : public FSkeletalMeshObject
 {
 public:
 	/** @param	InSkeletalMeshComponent - skeletal mesh primitive we want to render */
-	FSkeletalMeshObjectStatic(USkinnedMeshComponent* InMeshComponent, FSkeletalMeshRenderData* InSkelMeshRenderData, ERHIFeatureLevel::Type InFeatureLevel);
-	virtual ~FSkeletalMeshObjectStatic();
+	ENGINE_API FSkeletalMeshObjectStatic(USkinnedMeshComponent* InMeshComponent, FSkeletalMeshRenderData* InSkelMeshRenderData, ERHIFeatureLevel::Type InFeatureLevel);
+	ENGINE_API virtual ~FSkeletalMeshObjectStatic();
 
 	//~ Begin FSkeletalMeshObject Interface
-	virtual void InitResources(USkinnedMeshComponent* InMeshComponent) override;
-	virtual void ReleaseResources() override;
-	virtual void Update(int32 LODIndex,USkinnedMeshComponent* InMeshComponent,const TArray<FActiveMorphTarget>& ActiveMorphTargets, const TArray<float>& MorphTargetWeights, EPreviousBoneTransformUpdateMode PreviousBoneTransformUpdateMode) override {};
+	ENGINE_API virtual void InitResources(USkinnedMeshComponent* InMeshComponent) override;
+	ENGINE_API virtual void ReleaseResources() override;
+	virtual void Update(int32 LODIndex,USkinnedMeshComponent* InMeshComponent,const FMorphTargetWeightMap& InActiveMorphTargets, const TArray<float>& MorphTargetWeights, EPreviousBoneTransformUpdateMode PreviousBoneTransformUpdateMode, const FExternalMorphWeightData& InExternalMorphWeightData) override {};
 	//virtual void UpdateRecomputeTangent(int32 MaterialIndex, int32 LODIndex, bool bRecomputeTangent) override {};
 	virtual void EnableOverlayRendering(bool bEnabled, const TArray<int32>* InBonesOfInterest, const TArray<UMorphTarget*>* InMorphTargetOfInterest) override {};
-	virtual void CacheVertices(int32 LODIndex, bool bForce) const override {};
 	virtual bool IsCPUSkinned() const override { return true; }
-	virtual const FVertexFactory* GetSkinVertexFactory(const FSceneView* View, int32 LODIndex, int32 ChunkIdx) const override;
-	virtual TArray<FTransform>* GetComponentSpaceTransforms() const override;
-	virtual const TArray<FMatrix>& GetReferenceToLocalMatrices() const override;
-
-	virtual int32 GetLOD() const override
-	{
-		return WorkingMinDesiredLODLevel;
-	}
+	ENGINE_API virtual const FVertexFactory* GetSkinVertexFactory(const FSceneView* View, int32 LODIndex, int32 ChunkIdx, ESkinVertexFactoryMode VFMode = ESkinVertexFactoryMode::Default) const override;
+	ENGINE_API virtual TArray<FTransform>* GetComponentSpaceTransforms() const override;
+	ENGINE_API virtual const TArray<FMatrix44f>& GetReferenceToLocalMatrices() const override;
+	virtual int32 GetLOD() const override;
 	//virtual const FTwoVectors& GetCustomLeftRightVectors(int32 SectionIndex) const override;
 	virtual void DrawVertexElements(FPrimitiveDrawInterface* PDI, const FMatrix& ToWorldSpace, bool bDrawNormals, bool bDrawTangents, bool bDrawBinormals) const override {};
-	virtual bool HaveValidDynamicData() override
+	virtual bool HaveValidDynamicData() const override
 	{ 
 		return false; 
 	}
@@ -106,6 +102,6 @@ private:
 	};
 
 	/** Render data for each LOD */
-	TArray<struct FSkeletalMeshObjectLOD> LODs;
+	TArray<FSkeletalMeshObjectLOD> LODs;
 };
 

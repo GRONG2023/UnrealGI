@@ -5,20 +5,20 @@
 	Particle trail2 emitter instance implementation.
 =============================================================================*/
 
-#include "CoreMinimal.h"
-#include "Stats/Stats.h"
-#include "EngineDefines.h"
-#include "EngineGlobals.h"
 #include "Components/MeshComponent.h"
-#include "Engine/Engine.h"
+#include "Engine/World.h"
 #include "Materials/Material.h"
-#include "ParticleHelper.h"
+#include "MaterialDomain.h"
 #include "ParticleEmitterInstances.h"
+#include "Particles/ParticleEmitter.h"
 #include "Particles/ParticleSystemComponent.h"
 #include "Particles/Event/ParticleModuleEventGenerator.h"
 #include "Particles/Lifetime/ParticleModuleLifetime.h"
+#include "Particles/ParticleModule.h"
 #include "Particles/Spawn/ParticleModuleSpawn.h"
+#include "Particles/ParticleSystem.h"
 #include "Particles/Spawn/ParticleModuleSpawnPerUnit.h"
+#include "Particles/Spawn/ParticleModuleSpawnBase.h"
 #include "Particles/Trail/ParticleModuleTrailSource.h"
 #include "Particles/TypeData/ParticleModuleTypeDataBase.h"
 #include "Particles/TypeData/ParticleModuleTypeDataAnimTrail.h"
@@ -26,6 +26,7 @@
 #include "Particles/ParticleLODLevel.h"
 #include "Particles/ParticleModuleRequired.h"
 #include "Scalability.h"
+#include "Stats/StatsTrace.h"
 /** trail stats */
 
 
@@ -227,14 +228,14 @@ void FParticleTrailsEmitterInstance_Base::UpdateBoundingBox(float DeltaTime)
 			for (int32 i = 0; i < LocalActiveParticles; i++)
 			{
 				DECLARE_PARTICLE_PTR(Particle, ParticleData + ParticleStride * ParticleIndices[i]);
-				FVector Size = Particle->Size * Scale;
+				FVector Size = (FVector)Particle->Size * Scale;
 				// Do linear integrator and update bounding box
 				bool bJustSpawned = (Particle->Flags & STATE_Particle_JustSpawned) != 0;
 				Particle->Flags &= ~STATE_Particle_JustSpawned;
 
 				//Don't update position for newly spawned particles. They already have a partial update applied during spawn.
 				bool bSkipUpdate = bJustSpawned && bSkipDoubleSpawnUpdate;
-				Particle->Location	+= bSkipUpdate ? FVector::ZeroVector : DeltaTime * Particle->Velocity;
+				Particle->Location	+= bSkipUpdate ? FVector::ZeroVector : FVector(DeltaTime * Particle->Velocity);
 				Particle->Rotation	+= bSkipUpdate ? 0.0f : DeltaTime * Particle->RotationRate;
 				Particle->Location	+= PositionOffsetThisTick;
 				FPlatformMisc::Prefetch(ParticleData, (ParticleIndices[i+1] * ParticleStride));
@@ -259,7 +260,7 @@ void FParticleTrailsEmitterInstance_Base::UpdateBoundingBox(float DeltaTime)
 				}
 
 				// Do angular integrator, and wrap result to within +/- 2 PI
-				Particle->Rotation	 = FMath::Fmod(Particle->Rotation, 2.f*(float)PI);
+				Particle->Rotation	 = FMath::Fmod(Particle->Rotation, 2.f*(float)UE_PI);
 			}
 			if (bUpdateBox)
 			{
@@ -318,7 +319,7 @@ void FParticleTrailsEmitterInstance_Base::ForceUpdateBoundingBox()
 			for (int32 i = 0; i < LocalActiveParticles; i++)
 			{
 				DECLARE_PARTICLE_PTR(Particle, ParticleData + ParticleStride * ParticleIndices[i]);
-				FVector AbsSize = (Particle->Size * Scale).GetAbs();
+				FVector AbsSize = ((FVector)Particle->Size * Scale).GetAbs();
 				TempMin = Particle->Location - AbsSize;
 				TempMax = Particle->Location + AbsSize;
 				MinPos = TempMin.ComponentMin(MinPos);
@@ -899,7 +900,7 @@ void TrailsBase_CalculateTangent(
 	NewTangent *= InCurrNextDelta;
 	NewTangent *= (1.0f / InOutCurrTrailData->SpawnedTessellationPoints);
 
-		InOutCurrTrailData->Tangent = NewTangent;
+		InOutCurrTrailData->Tangent = (FVector3f)NewTangent;
 }
 
 /**
@@ -1022,7 +1023,7 @@ bool FParticleRibbonEmitterInstance::GetSpawnPerUnitAmount(float DeltaTime, int3
 				{
 					if (ElapsedTime == 0)
 					{
-						ElapsedTime = KINDA_SMALL_NUMBER;
+						ElapsedTime = UE_KINDA_SMALL_NUMBER;
 					}
 					CurrentSourcePosition[InTrailIdx].DiagnosticCheckNaN();
 					LastSourcePosition[InTrailIdx].DiagnosticCheckNaN();
@@ -1033,7 +1034,7 @@ bool FParticleRibbonEmitterInstance::GetSpawnPerUnitAmount(float DeltaTime, int3
 				float CurrTangentDivisor = (ElapsedTime - TrailSpawnTimes[InTrailIdx]);
 				if (CurrTangentDivisor == 0)
 				{
-					CurrTangentDivisor = KINDA_SMALL_NUMBER;
+					CurrTangentDivisor = UE_KINDA_SMALL_NUMBER;
 				}
 				FVector CurrTangent = TravelDirection / CurrTangentDivisor;
 				CurrTangent.Normalize();
@@ -1412,7 +1413,7 @@ float FParticleRibbonEmitterInstance::Spawn(float DeltaTime)
 			TrailData->SpawnTime = ElapsedTime + StoredSpawnTime;
 			TrailData->SpawnDelta = SpawnIdx * Increment;
 			// Set the location and up vectors
-			TrailData->Up = CurrentUp;
+			TrailData->Up = (FVector3f)CurrentUp;
 
 			TrailData->bMovementSpawned = false;
 
@@ -1478,7 +1479,7 @@ float FParticleRibbonEmitterInstance::Spawn(float DeltaTime)
 					{
 						FVector PositionDelta = (StartParticle->Location - NextSpawnedParticle->Location);
 						float TimeDelta = StartTrailData->SpawnTime - NextSpawnedTrailData->SpawnTime;
-						StartTrailData->Tangent = PositionDelta / TimeDelta;
+						StartTrailData->Tangent = FVector3f(PositionDelta / TimeDelta);
 					}
 				}
 
@@ -1537,7 +1538,7 @@ float FParticleRibbonEmitterInstance::Spawn(float DeltaTime)
 							FVector PositionDelta = (StartParticle->Location - NextNextSpawnedParticle->Location);
 							float TimeDelta = StartTrailData->SpawnTime - NextNextSpawnedTrailData->SpawnTime;
 							NewTangent = PositionDelta / TimeDelta;
-							NextSpawnedTrailData->Tangent = NewTangent;
+							NextSpawnedTrailData->Tangent = (FVector3f)NewTangent;
 						}
 		 				else //if (NextNextSpawnedParticle == NULL)
 		 				{
@@ -1547,7 +1548,7 @@ float FParticleRibbonEmitterInstance::Spawn(float DeltaTime)
 		 					FVector PositionDelta = (StartParticle->Location - NextSpawnedParticle->Location);
 		 					float TimeDelta = StartTrailData->SpawnTime - NextSpawnedTrailData->SpawnTime;
 		 					NewTangent = PositionDelta / TimeDelta;
-		 					NextSpawnedTrailData->Tangent = NewTangent;
+		 					NextSpawnedTrailData->Tangent = (FVector3f)NewTangent;
 		 				}
 					}
 				}
@@ -1760,7 +1761,7 @@ bool FParticleRibbonEmitterInstance::Spawn_Source(float DeltaTime)
 						FVector PositionDelta = (CurrentSourcePosition[TrailIdx] - PositionOffsetThisTick - NextNextSpawnedParticle->Location);
 						float TimeDelta = ElapsedTime - NextNextSpawnedTrailData->SpawnTime;
 						
-						if (TimeDelta > SMALL_NUMBER)
+						if (TimeDelta > UE_SMALL_NUMBER)
 						{
 							NewTangent = PositionDelta / TimeDelta;
 						}
@@ -1793,18 +1794,18 @@ bool FParticleRibbonEmitterInstance::Spawn_Source(float DeltaTime)
 							{
 								float TimeStep = InvCount * (SpawnIdx + 1);
 								FVector CurrPosition = FMath::CubicInterp<FVector>(
-									NextNextSpawnedParticle->Location, NextNextSpawnedTrailData->Tangent,
+									NextNextSpawnedParticle->Location, (FVector)NextNextSpawnedTrailData->Tangent,
 									NextSpawnedParticle->Location, NewTangent * Diff, 
 									TimeStep);
 								FVector CurrTangent = FMath::CubicInterpDerivative<FVector>(
-									NextNextSpawnedParticle->Location, NextNextSpawnedTrailData->Tangent,
+									NextNextSpawnedParticle->Location, (FVector)NextNextSpawnedTrailData->Tangent,
 									NextSpawnedParticle->Location, NewTangent * Diff,
 									TimeStep);
 
 								// Trail specific...
 								CurrentParticle->OldLocation = CurrentParticle->Location;
 								CurrentParticle->Location = CurrPosition;
-								CurrentTrailData->Tangent = CurrTangent * InvCount;
+								CurrentTrailData->Tangent = FVector3f(CurrTangent * InvCount);
 
 								// Get the next particle in the trail (previous)
 								if ((SpawnIdx + 1) < NextSpawnedTrailData->SpawnedTessellationPoints)
@@ -1906,10 +1907,10 @@ bool FParticleRibbonEmitterInstance::Spawn_Source(float DeltaTime)
 				TrailData->Flags = TRAIL_EMITTER_SET_PREV(TrailData->Flags, TRAIL_EMITTER_NULL_PREV);
 				// Set the trail-specific data on this particle
 				TrailData->TrailIndex = TrailIdx;
-				TrailData->Tangent = CurrTangent * InvCount;
+				TrailData->Tangent = FVector3f(CurrTangent * InvCount);
 				TrailData->SpawnTime = ElapsedTime - StoredSpawnTime;
 				TrailData->SpawnDelta = TrueSpawnTime;
-				TrailData->Up = CurrUp;
+				TrailData->Up = (FVector3f)CurrUp;
 
 				TrailData->bMovementSpawned = true;
 
@@ -2516,9 +2517,9 @@ void FParticleRibbonEmitterInstance::DetermineVertexAndTriangleCount()
 					ParticleCount++;
 					// Determine the number of rendered interpolated points between these two particles
 					float CheckDistance = (CurrParticle->Location - PrevParticle->Location).Size();
-					FVector SrcTangent = CurrTrailData->Tangent;
+					FVector SrcTangent = (FVector)CurrTrailData->Tangent;
 					SrcTangent.Normalize();
-					FVector PrevTangent = PrevTrailData->Tangent;
+					FVector PrevTangent = (FVector)PrevTrailData->Tangent;
 					PrevTangent.Normalize();
 					if (bCheckTangentValue == true)
 					{
@@ -2982,7 +2983,7 @@ void FParticleAnimTrailEmitterInstance::RecalculateTangentAndInterpolationParam(
 	}
 		
 	CurrTrailData->InterpolationParameter = FMath::Sqrt(SegmentDistance);//Using centripetal as it is visually better and can be bounded more conveniently.
-	CurrTrailData->Tangent = Tangent;
+	CurrTrailData->Tangent = (FVector3f)Tangent;
 }
 
 /**
@@ -3210,7 +3211,7 @@ void FParticleAnimTrailEmitterInstance::SpawnParticle( int32& StartParticleIndex
 		}
 		Particle->Location = First;
 		Particle->OldLocation = First;
-		TrailData->Direction = Dir;
+		TrailData->Direction = (FVector3f)Dir;
 		TrailData->Length = Length;
 
 		bool bAddedParticle = false;
@@ -3407,7 +3408,14 @@ float FParticleAnimTrailEmitterInstance::Spawn(float DeltaTime)
 	// Handle growing arrays.
 	bool bProcessSpawn = true;
 	int32 TotalCount = ActiveParticles + NewCount;
-	if (TotalCount >= MaxActiveParticles)
+
+	constexpr int32 MaxTrailParticles = FMath::Min(TRAIL_EMITTER_NEXT_MASK >> TRAIL_EMITTER_NEXT_SHIFT, TRAIL_EMITTER_PREV_MASK >> TRAIL_EMITTER_PREV_SHIFT);
+	if (TotalCount >= MaxTrailParticles)
+	{
+		// Note the above test is >= as null is considered == max value
+		bProcessSpawn = false;
+	}
+	else if (TotalCount >= MaxActiveParticles)
 	{
 		if (DeltaTime < 0.25f)
 		{
@@ -3601,7 +3609,7 @@ void FParticleAnimTrailEmitterInstance::UpdateBoundingBox(float DeltaTime)
 
 			DECLARE_PARTICLE_PTR(FirstParticle, ParticleData + ParticleStride * ParticleIndices[0]);
 			FAnimTrailTypeDataPayload*	FirstPayload = ((FAnimTrailTypeDataPayload*)((uint8*)FirstParticle + TypeDataOffset));
-			FVector PrevParticleLocation = FirstParticle->Location;
+			FVector PrevParticleLocation = FirstParticle->Location + PositionOffsetThisTick;
 			float PrevParticleLength = FirstPayload->Length;
 
 			bool bSkipDoubleSpawnUpdate = !SpriteTemplate->bUseLegacySpawningBehavior;
@@ -3616,7 +3624,7 @@ void FParticleAnimTrailEmitterInstance::UpdateBoundingBox(float DeltaTime)
 				//Don't update position for newly spawned particles. They already have a partial update applied during spawn.
 				bool bSkipUpdate = bJustSpawned && bSkipDoubleSpawnUpdate;
 				// Do linear integrator and update bounding box
-				Particle->Location	+= bSkipUpdate ? FVector::ZeroVector : DeltaTime * Particle->Velocity;
+				Particle->Location	+= bSkipUpdate ? FVector::ZeroVector : FVector(DeltaTime * Particle->Velocity);
 				Particle->Rotation	+= bSkipUpdate ? 0.0f : DeltaTime * Particle->RotationRate;
 				Particle->Location	+= PositionOffsetThisTick;
 				
@@ -3651,7 +3659,7 @@ void FParticleAnimTrailEmitterInstance::UpdateBoundingBox(float DeltaTime)
 				}
 
 				// Do angular integrator, and wrap result to within +/- 2 PI
-				Particle->Rotation	 = FMath::Fmod(Particle->Rotation, 2.f*(float)PI);
+				Particle->Rotation	 = FMath::Fmod(Particle->Rotation, 2.f*(float)UE_PI);
 			}
 			if (bUpdateBox)
 			{

@@ -249,7 +249,7 @@ namespace Audio
 	// to determine how many values can be SIMD'd.
 	const int32 FUniformPartitionConvolution::NumSimdMask = 0xFFFFFFFC;
 
-	void FUniformPartitionConvolution::VectorComplexMultiplyAdd(const AlignedFloatBuffer& InA, const AlignedFloatBuffer& InB, AlignedFloatBuffer& Out) const
+	void FUniformPartitionConvolution::VectorComplexMultiplyAdd(const FAlignedFloatBuffer& InA, const FAlignedFloatBuffer& InB, FAlignedFloatBuffer& Out) const
 	{
 		check(InA.Num() == InB.Num());
 		check(Out.Num() == InA.Num());
@@ -265,7 +265,7 @@ namespace Audio
 		const float* InBData = InB.GetData();
 		float* OutData = Out.GetData();
 
-		const VectorRegister SignFlip = MakeVectorRegister(-1.f, 1.f, -1.f, 1.f);
+		const VectorRegister4Float SignFlip = MakeVectorRegisterFloat(-1.f, 1.f, -1.f, 1.f);
 
 		for (int32 i = 0; i < NumSimd; i += 4)
 		{
@@ -279,16 +279,16 @@ namespace Audio
 			// B1r B1i B2r B2i
 
 			// VectorA = A1r A1i A2r A2i
-			VectorRegister VectorInA = VectorLoadAligned(&InAData[i]);
+			VectorRegister4Float VectorInA = VectorLoad(&InAData[i]);
 			// Temp12 = A1i A1r A2i A2r
-			VectorRegister Temp1 = VectorSwizzle(VectorInA, 1, 0, 3, 2);
+			VectorRegister4Float Temp1 = VectorSwizzle(VectorInA, 1, 0, 3, 2);
 
 			// VectorB = B1r B1i B2r B2i
-			VectorRegister VectorInB = VectorLoadAligned(&InBData[i]);
+			VectorRegister4Float VectorInB = VectorLoad(&InBData[i]);
 			// Temp2 = B1r B1r B2r B2r
-			VectorRegister Temp2 = VectorSwizzle(VectorInB, 0, 0, 2, 2);
+			VectorRegister4Float Temp2 = VectorSwizzle(VectorInB, 0, 0, 2, 2);
 			// Temp3 = B1i B1i B2i B2i
-			VectorRegister Temp3 = VectorSwizzle(VectorInB, 1, 1, 3, 3);
+			VectorRegister4Float Temp3 = VectorSwizzle(VectorInB, 1, 1, 3, 3);
 
 
 			// VectorA = A1rB1r, A1iB1r, A2rB2r, A2iB2r
@@ -298,17 +298,14 @@ namespace Audio
 			Temp1 = VectorMultiply(Temp1, Temp3);
 
 			// Temp1 = -A1iB1i, A1rB1i, -A2iB2i, A2rb2i
-			Temp1 = VectorMultiply(Temp1, SignFlip);
-
-
 			// Temp1 = A1rB1r - A1iB1i, A1iB1r + A1rB1i, A2rB2r - A2iB2i, A2iB2r + A2rB2i
-			Temp1 = VectorAdd(VectorInA, Temp1);
+			Temp1 = VectorMultiplyAdd(Temp1, SignFlip, VectorInA);
 
 			// VectorOut = O1r + A1rB1r - A1iB1i, O1i + A1iB1r + A1rB1i, O2r + A2rB2r - A2iB2i, O2i + A2iB2r + A2rB2i
-			VectorRegister VectorOut = VectorLoadAligned(&OutData[i]);
+			VectorRegister4Float VectorOut = VectorLoad(&OutData[i]);
 			VectorOut = VectorAdd(Temp1, VectorOut);
 
-			VectorStoreAligned(VectorOut, &OutData[i]);
+			VectorStore(VectorOut, &OutData[i]);
 		}
 
 		for (int32 i = NumSimd; i < Num; i += 2)
@@ -321,11 +318,11 @@ namespace Audio
 	}
 
 	// Multiply aligned buffer by constant gain.
-	void FUniformPartitionConvolution::VectorMultiplyByConstant(const AlignedFloatBuffer& InBuffer, float InConstant, AlignedFloatBuffer& OutBuffer) const
+	void FUniformPartitionConvolution::VectorMultiplyByConstant(const FAlignedFloatBuffer& InBuffer, float InConstant, FAlignedFloatBuffer& OutBuffer) const
 	{
 		check(InBuffer.Num() == OutBuffer.Num());
 
-		VectorRegister VectorConstant = MakeVectorRegister(InConstant, InConstant, InConstant, InConstant);
+		VectorRegister4Float VectorConstant = MakeVectorRegisterFloat(InConstant, InConstant, InConstant, InConstant);
 
 		const int32 Num = InBuffer.Num();
 		const int32 NumSimd = Num & NumSimdMask;
@@ -335,11 +332,11 @@ namespace Audio
 
 		for (int32 i = 0; i < NumSimd; i += 4)
 		{
-			VectorRegister VectorIn = VectorLoadAligned(&InData[i]);
+			VectorRegister4Float VectorIn = VectorLoad(&InData[i]);
 
-			VectorRegister VectorOut = VectorMultiply(VectorIn, VectorConstant);
+			VectorRegister4Float VectorOut = VectorMultiply(VectorIn, VectorConstant);
 			
-			VectorStoreAligned(VectorOut, &OutData[i]);
+			VectorStore(VectorOut, &OutData[i]);
 		}
 
 		for (int32 i = NumSimd; i < Num; i++)
@@ -372,7 +369,7 @@ namespace Audio
 		FMemory::Memcpy(InputData, InSamples, BlockSize * sizeof(float));
 	}
 
-	const AlignedFloatBuffer& FUniformPartitionConvolution::FInput::GetTransformedBlock() const
+	const FAlignedFloatBuffer& FUniformPartitionConvolution::FInput::GetTransformedBlock() const
 	{
 		return OutputBuffer;
 	}
@@ -405,7 +402,7 @@ namespace Audio
 	{
 	}
 
-	AlignedFloatBuffer& FUniformPartitionConvolution::FOutput::GetTransformedBlock(int32 InBlockIndex)
+	FAlignedFloatBuffer& FUniformPartitionConvolution::FOutput::GetTransformedBlock(int32 InBlockIndex)
 	{
 		// Make block index relative to head index.
 		InBlockIndex = (HeadBlockIndex + InBlockIndex) % NumBlocks;
@@ -421,14 +418,14 @@ namespace Audio
 		HeadBlockIndex = (HeadBlockIndex + 1) % NumBlocks;
 
 		// Set tail block to zero
-		AlignedFloatBuffer& TailBuffer = Blocks[TailBlockIndex];
+		FAlignedFloatBuffer& TailBuffer = Blocks[TailBlockIndex];
 		FMemory::Memset(TailBuffer.GetData(), 0, NumFFTOutputFloats * sizeof(float));
 
 	}
 
 	void FUniformPartitionConvolution::FOutput::PopBlock(float* OutSamples)
 	{
-		const AlignedFloatBuffer& HeadBuffer = Blocks[HeadBlockIndex];
+		const FAlignedFloatBuffer& HeadBuffer = Blocks[HeadBlockIndex];
 		float* OutputData = OutputBuffer.GetData();
 
 		FFTAlgorithm->InverseComplexToReal(HeadBuffer.GetData(), OutputData);
@@ -520,7 +517,7 @@ namespace Audio
 		}
 	}
 
-	const AlignedFloatBuffer& FUniformPartitionConvolution::FImpulseResponse::GetTransformedBlock(int32 InBlockIndex) const
+	const FAlignedFloatBuffer& FUniformPartitionConvolution::FImpulseResponse::GetTransformedBlock(int32 InBlockIndex) const
 	{
 		return Blocks[InBlockIndex];
 	}

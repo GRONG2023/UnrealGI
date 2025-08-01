@@ -9,7 +9,6 @@ public class CollisionAnalyzer : ModuleRules
         PrivateIncludePathModuleNames.AddRange(
             new string[] {
 				"DesktopPlatform",
-				"MainFrame",
 			}
         );
 
@@ -20,7 +19,7 @@ public class CollisionAnalyzer : ModuleRules
                 "InputCore",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
+                
 				"Engine",
 				"WorkspaceMenuStructure",
 			}

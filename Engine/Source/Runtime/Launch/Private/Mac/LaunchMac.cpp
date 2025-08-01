@@ -32,8 +32,7 @@ void LogCrashCallstack(const FMacCrashContext& Context)
     Context.ReportCrash();
     if (GLog)
     {
-        GLog->SetCurrentThreadAsMasterThread();
-        GLog->Flush();
+        GLog->Panic();
     }
     if (GWarn)
     {
@@ -84,7 +83,7 @@ static int32 MacOSVersionCompare(const NSOperatingSystemVersion& VersionA, const
 	return 0;
 }
 
-@interface UE4AppDelegate : NSObject <NSApplicationDelegate, NSFileManagerDelegate>
+@interface UEAppDelegate : NSObject <NSApplicationDelegate, NSFileManagerDelegate>
 {
 #if WITH_EDITOR
 	NSString* Filename;
@@ -98,7 +97,7 @@ static int32 MacOSVersionCompare(const NSOperatingSystemVersion& VersionA, const
 
 @end
 
-@implementation UE4AppDelegate
+@implementation UEAppDelegate
 
 - (void)awakeFromNib
 {
@@ -125,13 +124,23 @@ static int32 MacOSVersionCompare(const NSOperatingSystemVersion& VersionA, const
 		
 		NSURL* BundleURL = [[NSRunningApplication currentApplication] bundleURL];
 		
-		NSDictionary* Configuration = [NSDictionary dictionaryWithObject: [NSArray arrayWithObject: ProjectName] forKey: NSWorkspaceLaunchConfigurationArguments];
+		NSWorkspaceOpenConfiguration* Configuration = [NSWorkspaceOpenConfiguration configuration];
+		[Configuration setCreatesNewApplicationInstance:YES];
+		[Configuration setPromptsUserIfNeeded:YES];
+		[Configuration setArguments:[NSArray arrayWithObject: ProjectName]];
+
+		[[NSWorkspace sharedWorkspace]
+			openApplicationAtURL: BundleURL
+			configuration: Configuration
+				completionHandler:^(NSRunningApplication * _Nullable app, NSError * _Nullable error)
+				{
+					if (error) {
+						NSLog(@"Failed to run the app: %@", error.localizedDescription);
+					}
+				}
+		];
 		
-		NSError* Error = nil;
-		
-		NSRunningApplication* NewInstance = [[NSWorkspace sharedWorkspace] launchApplicationAtURL:BundleURL options:(NSWorkspaceLaunchOptions)(NSWorkspaceLaunchAsync|NSWorkspaceLaunchNewInstance) configuration:Configuration error:&Error];
-		
-		return (NewInstance != nil);
+		return YES;
 	}
 	else
 	{
@@ -212,6 +221,11 @@ static int32 MacOSVersionCompare(const NSOperatingSystemVersion& VersionA, const
 	}
 }
 
+- (void) applicationWillTerminate:(NSNotification*)notification
+{
+	FTaskTagScope::SetTagStaticInit();
+}
+
 - (void) runGameThread:(id)Arg
 {
 	bool bIsBuildMachine = false;
@@ -245,7 +259,9 @@ static int32 MacOSVersionCompare(const NSOperatingSystemVersion& VersionA, const
 
 	if (GGuardedMainErrorLevel == 0)
 	{
-		[NSApp terminate: nil];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [NSApp terminate: nil];
+        });
 	}
 	else
 	{
@@ -261,9 +277,9 @@ static int32 MacOSVersionCompare(const NSOperatingSystemVersion& VersionA, const
 	NSDictionary* InfoDictionary = [[NSBundle mainBundle] infoDictionary];
 	NSString* MinimumSystemVersionString = (NSString*)InfoDictionary[@"LSMinimumSystemVersion"];
 	NSOperatingSystemVersion MinimumSystemVersion = { 0 };
-	NSOperatingSystemVersion CurrentSystemVersion = [[NSProcessInfo processInfo] operatingSystemVersion];
-	NSOperatingSystemVersion MinSupportedMacOSVersion = { 10, 14, 6 };
-	NSString* MinSupportedMacOSVersionString = @"10.14.6";
+	NSOperatingSystemVersion CurrentSystemVersion = FMacPlatformMisc::GetNSOperatingSystemVersion();
+	NSOperatingSystemVersion MinSupportedMacOSVersion = { 12, 0, 0 };
+	NSString* MinSupportedMacOSVersionString = @"12.0.0";
 
 	NSArray<NSString*>* VersionComponents = [MinimumSystemVersionString componentsSeparatedByString:@"."];
 	MinimumSystemVersion.majorVersion = [[VersionComponents objectAtIndex:0] integerValue];
@@ -329,6 +345,43 @@ static int32 MacOSVersionCompare(const NSOperatingSystemVersion& VersionA, const
 		}
 	}
 #endif // WITH_EDITOR
+	
+#if !IS_MONOLITHIC
+	// UE-172403: dlopen crash on Ventura [13.0~13.3)
+	if (MacOSVersionCompare(CurrentSystemVersion, {13, 0, 0}) >= 0 && MacOSVersionCompare(CurrentSystemVersion, {13, 3, 0}) < 0)
+	{
+		CFDictionaryRef SessionDictionary = CGSessionCopyCurrentDictionary();
+		const bool bIsWindowServerAvailable = SessionDictionary != nullptr;
+		NSString* const kDialogSuppressKey = @"VenturaCrashWarningDialogSuppression";
+		if (![[NSUserDefaults standardUserDefaults] boolForKey:kDialogSuppressKey]
+			&& bIsWindowServerAvailable)
+		{
+			NSAlert* AlertPanel = [NSAlert new];
+			[AlertPanel setAlertStyle:NSAlertStyleCritical];
+			[AlertPanel setInformativeText:@"Due to a conflict between certain versions of macOS Ventura and Unreal Editor, it is recommended to update to macOS 13.3 or later. Continuing may cause the editor to crash during load."];
+			[AlertPanel setMessageText:@"Please update to latest macOS"];
+			[AlertPanel setShowsSuppressionButton:YES];
+			[AlertPanel addButtonWithTitle:@"Continue"];
+			[AlertPanel addButtonWithTitle:@"Quit"];
+			
+			auto Result = [AlertPanel runModal];
+			if (AlertPanel.suppressionButton.state == NSControlStateValueOn)
+			{
+				[[NSUserDefaults standardUserDefaults] setBool:YES forKey:kDialogSuppressKey];
+			}
+			[AlertPanel release];
+
+			CFRelease(SessionDictionary);
+			
+			if (Result == NSAlertSecondButtonReturn)
+			{
+				_Exit(1);
+			}
+		}
+
+		fprintf(stderr, "Due to a conflict between certain versions of macOS Ventura and Unreal Editor, it is recommended to update to macOS 13.3 or later. Continuing may cause the editor to crash during load.\n");
+	}
+#endif
 
 	//install the custom quit event handler
     NSAppleEventManager* appleEventManager = [NSAppleEventManager sharedAppleEventManager];
@@ -376,6 +429,8 @@ extern bool GIsConsoleExecutable;
 
 INT32_MAIN_INT32_ARGC_TCHAR_ARGV()
 {
+	FTaskTagScope::SetTagNone();
+	
 	for (int32 Option = 1; Option < ArgC; Option++)
 	{
 		GSavedCommandLine += TEXT(" ");
@@ -409,7 +464,7 @@ INT32_MAIN_INT32_ARGC_TCHAR_ARGV()
 
 	SCOPED_AUTORELEASE_POOL;
 	[NSApplication sharedApplication];
-	[NSApp setDelegate:[UE4AppDelegate new]];
+	[NSApp setDelegate:[UEAppDelegate new]];
 	[NSApp run];
 	return GGuardedMainErrorLevel;
 }

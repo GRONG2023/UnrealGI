@@ -8,6 +8,8 @@
 #include "Framework/Application/IMenu.h"
 #include "Widgets/Input/IVirtualKeyboardEntry.h"
 
+#include "ISlateEditableTextWidget.generated.h"
+
 struct FTextLocation;
 
 enum class ECursorMoveMethod
@@ -127,7 +129,7 @@ private:
 
 	ECursorMoveGranularity Granularity;
 	ECursorMoveMethod Method;
-	FVector2D DirectionOrPosition;
+	FVector2f DirectionOrPosition;
 	ECursorAction Action;
 	float GeometryScale;
 };

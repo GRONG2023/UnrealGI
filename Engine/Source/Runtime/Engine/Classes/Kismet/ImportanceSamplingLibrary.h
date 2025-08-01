@@ -11,7 +11,7 @@
 UENUM(BlueprintType)
 namespace EImportanceWeight
 {
-	enum Type
+	enum Type : int
 	{
 		/** Importance from color luminance. */
 		Luminance,
@@ -34,7 +34,7 @@ namespace EImportanceWeight
 * Texture processed for importance sampling
 * Holds marginal PDF of the rows, as well as the PDF of each row
 */
-USTRUCT(BlueprintType, meta = (HasNativeMake = "Engine.ImportanceSamplingLibrary.MakeImportanceTexture", HasNativeBreak = "Engine.ImportanceSamplingLibrary.BreakImportanceTexture"))
+USTRUCT(BlueprintType, meta = (HasNativeMake = "/Script/Engine.ImportanceSamplingLibrary.MakeImportanceTexture", HasNativeBreak = "/Script/Engine.ImportanceSamplingLibrary.BreakImportanceTexture"))
 struct FImportanceTexture
 {
 	GENERATED_BODY();

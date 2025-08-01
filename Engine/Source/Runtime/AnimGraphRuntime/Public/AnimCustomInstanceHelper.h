@@ -26,13 +26,12 @@
 
 #pragma once
 #include "Animation/AnimInstance.h"
-#include "Components/SkeletalMeshComponent.h"
 #include "AnimSequencerInstance.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Engine/World.h"
 #include "SequencerAnimationSupport.h"
 
-
-PRAGMA_DISABLE_OPTIMIZATION
-class ANIMGRAPHRUNTIME_API FAnimCustomInstanceHelper
+class FAnimCustomInstanceHelper
 {
 public:
 	/** 
@@ -262,8 +261,6 @@ public:
 		
 			if (AnimInstance)
 			{
-				AnimInstance->Montage_Stop(0.0f);
-
 				const TArray<UAnimInstance*>& LinkedInstances = const_cast<const USkeletalMeshComponent*>(InSkeletalMeshComponent)->GetLinkedAnimInstances();
 				for (UAnimInstance* LinkedInstance : LinkedInstances)
 				{
@@ -276,7 +273,7 @@ public:
 
 			// Update space bases to reset it back to ref pose
 			InSkeletalMeshComponent->RefreshBoneTransforms();
-			InSkeletalMeshComponent->RefreshSlaveComponents();
+			InSkeletalMeshComponent->RefreshFollowerComponents();
 			InSkeletalMeshComponent->UpdateComponentToWorld();
 		}
 
@@ -289,6 +286,5 @@ public:
 
 private:
 	/** Helper function for BindToSkeletalMeshComponent */
-	static bool ShouldCreateCustomInstancePlayer(const USkeletalMeshComponent* SkeletalMeshComponent);
+	static ANIMGRAPHRUNTIME_API bool ShouldCreateCustomInstancePlayer(const USkeletalMeshComponent* SkeletalMeshComponent);
 };
-PRAGMA_ENABLE_OPTIMIZATION

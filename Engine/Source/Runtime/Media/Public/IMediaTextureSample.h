@@ -3,19 +3,26 @@
 #pragma once
 
 #include "CoreTypes.h"
+#include "IMediaTimeSource.h"
 #include "Math/Color.h"
 #include "Math/IntPoint.h"
+#include "Math/MathFwd.h"
 #include "Math/Matrix.h"
 #include "Math/Plane.h"
 #include "Misc/Optional.h"
 #include "Misc/Timecode.h"
 #include "Misc/Timespan.h"
 #include "Templates/SharedPointer.h"
-#include "IMediaTimeSource.h"
+
+#include "HDRHelper.h"
+#include "ColorManagementDefines.h"
+#include "ColorSpace.h"
+#include "MediaShaders.h"
 
 #if WITH_ENGINE
 	class FRHITexture;
 	class IMediaTextureSampleConverter;
+	class IMediaTextureSampleColorConverter;
 #endif
 
 
@@ -40,6 +47,9 @@ enum class EMediaTextureSampleFormat
 	/** Four 8-bit unsigned integer components (Blue, Green, Red, Alpha) per texel. */
 	CharBGRA,
 
+	/** Four 8-bit unsigned integer components (Blue, Green, Red, Alpha) per texel. */
+	CharRGBA,
+
 	/** Four 10-bit unsigned integer components (Blue, Green, Red) & 2-bit alpha per texel. */
 	CharBGR10A2,
 
@@ -58,6 +68,9 @@ enum class EMediaTextureSampleFormat
 	/** Four 8-bit unsigned integer components (YUY2 packing aka. YUNV, YUYV) per texel. */
 	CharYUY2,
 
+	/** Four 8-bit unsigned integer components (UYVY) per texel. */
+	Char2VUY,
+
 	/** Four 8-bit unsigned integer components (YVYU packing) per texel. */
 	CharYVYU,
 
@@ -70,8 +83,44 @@ enum class EMediaTextureSampleFormat
 	/** YUV v210 format which pack 6 pixel using 12 x 10bits components (128 bits block). */
 	YUVv210,
 
+	/** YUV v216 format which pack 2 pixel using 4 x 16bits components */
+	YUVv216,
+
 	/** 4:4:4:4 AY'CbCr 16-bit little endian full range alpha, video range Y'CbCr. */
 	Y416,
+
+	/** 4:4:4:4 AY'CbCr 32-bit little endian full range alpha, video range Y'CbCr. */
+	R4FL,
+
+	/** NV12-style encoded monochrome texture with 16 bits per channel, with the upper 10 bits used. */
+	P010,
+
+	/** DXT1. */
+	DXT1,
+
+	/** DXT5. */
+	DXT5,
+
+	/** BC4. */
+	BC4,
+
+	/** YCoCg colour space encoded in DXT5. */
+	YCoCg_DXT5,
+
+	/** YCoCg colour space encoded in DXT5, with a separate alpha texture encoded in BC4. */
+	YCoCg_DXT5_Alpha_BC4,
+
+	/** 3 planes of RGB1010102 data representing Y, U & V at 4:2:0 sampling. */
+	P010_RGB1010102,
+
+	/** RGBA 16-bit per component */
+	RGBA16,
+
+	/** ABGR 16-bit per component */
+	ABGR16,
+
+	/** ARGB 16-bit per component, big endian */
+	ARGB16_BIG,
 };
 
 namespace MediaTextureSampleFormat
@@ -79,6 +128,18 @@ namespace MediaTextureSampleFormat
 	 MEDIA_API const TCHAR* EnumToString(const EMediaTextureSampleFormat InSampleFormat);
 };
 
+/** Description of how the media texture sample is tiled (only used by tiled image sequences currently).*/
+struct FMediaTextureTilingDescription
+{
+	FIntPoint TileNum = FIntPoint::ZeroValue;
+	FIntPoint TileSize = FIntPoint::ZeroValue;
+	int32 TileBorderSize = 0;
+
+	FORCEINLINE bool IsValid() const
+	{
+		return TileNum.X > 0 && TileNum.Y > 0 && TileSize.X > 0 && TileSize.Y > 0;
+	}
+};
 
 enum class EMediaOrientation
 {
@@ -88,6 +149,7 @@ enum class EMediaOrientation
 	CW270
 };
 
+static constexpr float kMediaSample_HDR_NitsNormalizationFactor = 1.0f / 100.0f;
 
 /**
  * Interface for media texture samples.
@@ -104,7 +166,6 @@ enum class EMediaOrientation
 class IMediaTextureSample
 {
 public:
-
 	/**
 	 * Get the sample's frame buffer.
 	 *
@@ -135,6 +196,17 @@ public:
 	virtual uint8 GetNumMips() const
 	{
 		return 1;
+	}
+
+	/**
+	 * Get tile information (number, size and border size) of the sample.
+	 *
+	 * @return TileInfo struct
+	 * @note Default implementation provided as most samples will not feature tiles
+	 */
+	virtual FMediaTextureTilingDescription GetTilingDescription() const
+	{
+		return FMediaTextureTilingDescription();
 	}
 
 	/**
@@ -191,6 +263,16 @@ public:
 	 * @return texture sample converter
 	 */
 	virtual IMediaTextureSampleConverter* GetMediaTextureSampleConverter()
+	{ 
+		return nullptr; 
+	}
+
+	/**
+	 * Get a media texture sample color converter if sample implements it
+	 * @Note IMediaTextureSampleColorConverter will be applied after IMediaTextureSampleConverter if one is provided.
+	 * @return texture sample color converter
+	 */
+	virtual IMediaTextureSampleColorConverter* GetMediaTextureSampleColorConverter()
 	{ 
 		return nullptr; 
 	}
@@ -282,22 +364,117 @@ public:
 	/**
 	 * Get the YUV to RGB conversion matrix.
 	 *
-	 * Equivalent to MediaShaders::YuvToSrgbDefault Matrix.
+	 * Default is equivalent to MediaShaders::YuvToRgbRec709Scaled Matrix. NOTE: previously in UE4 this was YuvToRgbRec601Scaled
 	 *
 	 * @return Conversion Matrix
 	 */
 	virtual const FMatrix& GetYUVToRGBMatrix() const
 	{
-		static const FMatrix DefaultMatrix(
-			FPlane(1.164383f, 0.000000f, 1.596027f, 0.000000f),
-			FPlane(1.164383f, -0.391762f, -0.812968f, 0.000000f),
-			FPlane(1.164383f, 2.017232f, 0.000000f, 0.000000f),
-			FPlane(0.000000f, 0.000000f, 0.000000f, 0.000000f)
-		);
-
-		return DefaultMatrix;
+		return MediaShaders::YuvToRgbRec709Scaled;
 	}
 
+	/*
+	* Get full range color flag
+	*/
+	virtual bool GetFullRange() const
+	{
+		return false;
+	}
+	
+	/**
+	* Get complete 4x4 matrix to apply to the sample's pixels to yield RGB data in the sample's gamut
+	 *
+	 * @return Conversion Matrix
+	*/
+	virtual FMatrix44f GetSampleToRGBMatrix() const
+	{
+		FMatrix Pre = FMatrix::Identity;
+		FVector Off;
+		switch (GetFormat())
+		{
+			case EMediaTextureSampleFormat::R4FL:		Off = MediaShaders::YUVOffsetFloat; break;
+			case EMediaTextureSampleFormat::Y416:
+			case EMediaTextureSampleFormat::P010:
+			case EMediaTextureSampleFormat::YUVv216:	Off = MediaShaders::YUVOffset16bits; break;
+			case EMediaTextureSampleFormat::YUVv210:	Off = MediaShaders::YUVOffset10bits; break;
+			default:									Off = MediaShaders::YUVOffset8bits; break;
+		}
+		Pre.M[0][3] = -Off.X;
+		Pre.M[1][3] = -Off.Y;
+		Pre.M[2][3] = -Off.Z;
+		return FMatrix44f(MediaShaders::YuvToRgbRec709Scaled * Pre);	// assumes sRGB & video range
+	}
+
+	/**
+	 * Get Colorspace conversion matrix to convert to CIE1931 XYZ space
+	 * 
+	 * @return Conversion Matrix
+	 */
+	virtual FMatrix44d GetGamutToXYZMatrix() const
+	{
+		return FMatrix44d(GamutToXYZMatrix(EDisplayColorGamut::sRGB_D65));
+	}
+
+	/**
+	 * Get white point of color space of the data contain in the sample
+	 * 
+	 * @return White point
+	 */
+	virtual FVector2d GetWhitePoint() const
+	{
+		return UE::Color::GetWhitePoint(UE::Color::EWhitePoint::CIE1931_D65);
+	}
+
+	virtual FVector2d GetDisplayPrimaryRed() const
+	{
+		return FVector2d(0.64, 0.33);
+	}
+
+	virtual FVector2d GetDisplayPrimaryGreen() const
+	{
+		return FVector2d(0.30, 0.60);
+	}
+
+	virtual FVector2d GetDisplayPrimaryBlue() const
+	{
+		return FVector2d(0.15, 0.06);
+	}
+
+	/**
+	 * Get EOTF / "Gamma" / encoding type of data
+	 */
+	virtual UE::Color::EEncoding GetEncodingType() const
+	{
+		return IsOutputSrgb() ? UE::Color::EEncoding::sRGB : UE::Color::EEncoding::Linear;
+	}
+
+	/**
+	 * Get factor to normalize data from nits to scene color values
+	 */
+	virtual float GetHDRNitsNormalizationFactor() const
+	{
+		return (GetEncodingType() == UE::Color::EEncoding::sRGB || GetEncodingType() == UE::Color::EEncoding::Linear) ? 1.0f : kMediaSample_HDR_NitsNormalizationFactor;
+	}
+
+	/**
+	 * Get display mastering luminance information
+	 */
+	virtual bool GetDisplayMasteringLuminance(float& OutMin, float& OutMax) const
+	{
+		return false;
+	}
+
+	/**
+	 * Get maximum luminance information
+	 */
+	virtual bool GetMaxLuminanceLevels(uint16& OutCLL, uint16& OutFALL) const
+	{
+		return false;
+	}
+
+	/**
+	 * Reset sample to empty state
+	 */
 	virtual void Reset() { }
 	
 public:

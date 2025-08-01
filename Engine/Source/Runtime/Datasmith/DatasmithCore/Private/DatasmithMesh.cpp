@@ -7,6 +7,30 @@
 #include "Containers/Set.h"
 #include "Math/Color.h"
 
+namespace DatasmithMeshImpl
+{
+
+template<typename T>
+static void UpdateMD5SimpleType(FMD5& MD5, const T& Value)
+{
+	static_assert(TIsPODType<T>::Value, "Simple type required");
+	MD5.Update(reinterpret_cast<const uint8*>(&Value), sizeof(Value));
+}
+
+template<typename T>
+static void UpdateMD5Array(FMD5& MD5, TArray<T> Value)
+{
+	static_assert(TIsPODType<T>::Value, "This function requires POD array");
+	UpdateMD5SimpleType(MD5, Value.Num());
+	if (!Value.IsEmpty())
+	{
+		MD5.Update(reinterpret_cast<const uint8*>(Value.GetData()), Value.GetTypeSize()*Value.Num());
+	}
+}
+
+}
+
+
 class FDatasmithMesh::FDatasmithMeshImpl
 {
 public:
@@ -16,12 +40,14 @@ public:
 	bool GetIdInUse( int32 Id ) const;
 	int32 GetMaterialsCount() const { return IdsInUse.Num(); }
 
+	FMD5Hash CalculateHash() const;
+
 	FString Name;
 
-	TArray< FVector > Vertices;
+	TArray< FVector3f > Vertices;
 	TArray< uint32 > Indices;
 
-	TArray< FVector > Normals;
+	TArray< FVector3f > Normals;
 	TArray< int32 > MaterialIndices;
 
 	TArray< TArray< FVector2D > > UVs;
@@ -35,7 +61,7 @@ public:
 
 	int32 LightmapUVChannel;
 
-	FBox Extents;
+	FBox3f Extents;
 
 private:
 	TSet< int32 > IdsInUse;
@@ -55,6 +81,52 @@ void FDatasmithMesh::FDatasmithMeshImpl::SetIdInUse( int32 Id )
 bool FDatasmithMesh::FDatasmithMeshImpl::GetIdInUse( int32 Id ) const
 {
 	return IdsInUse.Contains(Id);
+}
+
+FMD5Hash FDatasmithMesh::FDatasmithMeshImpl::CalculateHash() const
+{
+	FMD5 MD5;
+
+	using namespace DatasmithMeshImpl;
+
+	UpdateMD5Array(MD5, Vertices);
+	UpdateMD5Array(MD5, Indices);
+
+	UpdateMD5Array(MD5, Normals);
+	UpdateMD5Array(MD5, MaterialIndices);
+
+	int32 UVChannelCount = UVs.Num();
+	UpdateMD5SimpleType(MD5, UVChannelCount);
+	for (const TArray<FVector2D>& UVChannel: UVs)
+	{
+		UpdateMD5Array(MD5, UVChannel);
+	}
+
+	check(UVChannelCount == UVIndices.Num()); // UV indices are per-channel
+	for (const TArray<int32>& UVChannelIndices: UVIndices)
+	{
+		UpdateMD5Array(MD5, UVChannelIndices);
+	}
+
+	UpdateMD5Array(MD5, FaceSmoothingMasks);
+	UpdateMD5Array(MD5, IndicesColor);
+	UpdateMD5SimpleType(MD5, LightmapUVChannel);
+
+	TArray<int32> IdsInUseArray = IdsInUse.Array();
+	IdsInUseArray.Sort();
+	UpdateMD5Array(MD5, IdsInUseArray);
+
+	int32 LODCount = LODs.Num();
+	UpdateMD5SimpleType(MD5, LODCount);
+	for (const FDatasmithMesh& LODMesh : LODs)
+	{
+		FMD5Hash LODHash = LODMesh.CalculateHash();
+		MD5.Update(LODHash.GetBytes(), LODHash.GetSize());
+	}
+
+	FMD5Hash Hash;
+	Hash.Set(MD5);
+	return Hash;
 }
 
 FDatasmithMesh::FDatasmithMesh()
@@ -95,6 +167,12 @@ FDatasmithMesh& FDatasmithMesh::operator=( FDatasmithMesh&& Other )
 	return *this;
 }
 
+FMD5Hash FDatasmithMesh::CalculateHash() const
+{
+	return Impl->CalculateHash();
+}
+
+
 void FDatasmithMesh::SetName(const TCHAR* InName)
 {
 	Impl->Name = InName;
@@ -114,10 +192,10 @@ void FDatasmithMesh::SetFacesCount(int32 NumFaces)
 	Impl->MaterialIndices.Init(0, NumFaces);
 
 	Impl->Normals.Empty(NumFaces * 3);
-	Impl->Normals.Init( FVector(ForceInitToZero), NumFaces * 3 );
+	Impl->Normals.Init( FVector3f::ZeroVector, NumFaces * 3 );
 
-	Impl->FaceSmoothingMasks.Empty( NumFaces * 3 );
-	Impl->FaceSmoothingMasks.AddZeroed( NumFaces * 3 );
+	Impl->FaceSmoothingMasks.Empty( NumFaces );
+	Impl->FaceSmoothingMasks.AddZeroed( NumFaces );
 
 	for ( TArray< int32 >& UVIndices : Impl->UVIndices )
 	{
@@ -172,7 +250,7 @@ bool FDatasmithMesh::IsMaterialIdUsed(int32 MaterialId) const
 void FDatasmithMesh::SetVerticesCount(int32 NumVerts)
 {
 	Impl->Vertices.Empty(NumVerts);
-	Impl->Vertices.Init( FVector(ForceInit), NumVerts );
+	Impl->Vertices.Init( FVector3f::ZeroVector, NumVerts );
 }
 
 int32 FDatasmithMesh::GetVerticesCount() const
@@ -184,7 +262,7 @@ void FDatasmithMesh::SetVertex(int32 Index, float X, float Y, float Z)
 {
 	if ( Impl->Vertices.IsValidIndex( Index ) )
 	{
-		FVector Vertex(X, Y, Z);
+		FVector3f Vertex(X, Y, Z);
 
 		Impl->Vertices[Index] = Vertex;
 
@@ -192,7 +270,7 @@ void FDatasmithMesh::SetVertex(int32 Index, float X, float Y, float Z)
 	}
 }
 
-FVector FDatasmithMesh::GetVertex(int32 Index) const
+FVector3f FDatasmithMesh::GetVertex(int32 Index) const
 {
 	if ( Impl->Vertices.IsValidIndex( Index ) )
 	{
@@ -200,7 +278,7 @@ FVector FDatasmithMesh::GetVertex(int32 Index) const
 	}
 	else
 	{
-		return FVector::ZeroVector;
+		return FVector3f::ZeroVector;
 	}
 }
 
@@ -208,11 +286,11 @@ void FDatasmithMesh::SetNormal(int32 Index, float X, float Y, float Z)
 {
 	if ( Impl->Normals.IsValidIndex( Index ) )
 	{
-		Impl->Normals[Index] = FVector(X, Y, Z).GetSafeNormal();
+		Impl->Normals[Index] = FVector3f(X, Y, Z).GetSafeNormal();
 	}
 }
 
-FVector FDatasmithMesh::GetNormal(int32 Index) const
+FVector3f FDatasmithMesh::GetNormal(int32 Index) const
 {
 	if ( Impl->Normals.IsValidIndex( Index ) )
 	{
@@ -220,7 +298,7 @@ FVector FDatasmithMesh::GetNormal(int32 Index) const
 	}
 	else
 	{
-		return FVector::ZeroVector;
+		return FVector3f::ZeroVector;
 	}
 }
 
@@ -249,8 +327,8 @@ void FDatasmithMesh::AddUVChannel()
 void FDatasmithMesh::RemoveUVChannel()
 {
 	const int32 Index = Impl->UVs.Num() - 1;
-	Impl->UVs.RemoveAt( Index, 1, false );
-	Impl->UVIndices.RemoveAt( Index, 1, false );
+	Impl->UVs.RemoveAt( Index, 1, EAllowShrinking::No);
+	Impl->UVIndices.RemoveAt( Index, 1, EAllowShrinking::No);
 
 }
 
@@ -454,13 +532,16 @@ float FDatasmithMesh::ComputeArea() const
 
 	for (int32 i = 0; i < NumFaces; i++)
 	{
-		Area += FDatasmithUtils::AreaTriangle3D( Impl->Vertices[ Impl->Indices[i + 0] ], Impl->Vertices[ Impl->Indices[i + 1] ], Impl->Vertices[ Impl->Indices[i + 2] ] );
+		Area += FDatasmithUtils::AreaTriangle3D(
+			Impl->Vertices[ Impl->Indices[3 * i + 0] ],
+			Impl->Vertices[ Impl->Indices[3 * i + 1] ],
+			Impl->Vertices[ Impl->Indices[3 * i + 2] ]);
 	}
 
 	return Area;
 }
 
-FBox FDatasmithMesh::GetExtents() const
+FBox3f FDatasmithMesh::GetExtents() const
 {
 	return Impl->Extents;
 }

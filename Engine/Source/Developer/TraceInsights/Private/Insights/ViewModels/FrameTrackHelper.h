@@ -14,7 +14,7 @@ struct FSlateBrush;
 class FFrameTrackViewport;
 class FSlateWindowElementList;
 
-namespace Trace
+namespace TraceServices
 {
 	struct FFrame;
 }
@@ -66,15 +66,27 @@ struct FFrameTrackSample
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+enum class EFrameTrackSeriesType : uint32
+{
+	Frame,
+	TimerFrameStats
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 struct FFrameTrackSeries
 {
 	int32 FrameType;
+	EFrameTrackSeriesType Type;
 	bool bIsVisible;
 	int32 NumAggregatedFrames; // total number of frames aggregated in samples; i.e. sum of all Sample.NumFrames
 	TArray<FFrameTrackSample> Samples; // the aggregated samples
+	FLinearColor Color;
+	FText Name;
 
-	explicit FFrameTrackSeries(int32 InFrameType)
+	explicit FFrameTrackSeries(int32 InFrameType, EFrameTrackSeriesType InType)
 		: FrameType(InFrameType)
+		, Type(InType)
 		, bIsVisible(true)
 		, NumAggregatedFrames(0)
 		, Samples()
@@ -90,6 +102,19 @@ struct FFrameTrackSeries
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+struct FTimerFrameStatsTrackSeries : public FFrameTrackSeries
+{
+	FTimerFrameStatsTrackSeries(int32 InFrameType, uint32 InTimerId)
+		: FFrameTrackSeries(InFrameType, EFrameTrackSeriesType::TimerFrameStats)
+		, TimerId(InTimerId)
+	{
+	}
+
+	uint32 TimerId;
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 class FFrameTrackSeriesBuilder
 {
 public:
@@ -101,7 +126,7 @@ public:
 	FFrameTrackSeriesBuilder(const FFrameTrackSeriesBuilder&) = delete;
 	FFrameTrackSeriesBuilder& operator=(const FFrameTrackSeriesBuilder&) = delete;
 
-	void AddFrame(const Trace::FFrame& Frame);
+	void AddFrame(const TraceServices::FFrame& Frame);
 
 	int32 GetNumAddedFrames() const { return NumAddedFrames; }
 

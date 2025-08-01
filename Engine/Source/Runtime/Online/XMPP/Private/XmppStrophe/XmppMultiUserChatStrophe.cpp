@@ -18,7 +18,7 @@
 #define TickRequesterId FName("StropheMultichat")
 
 FXmppMultiUserChatStrophe::FXmppMultiUserChatStrophe(FXmppConnectionStrophe& InConnectionManager)
-	: FTickerObjectBase(0.0f, FBackgroundableTicker::GetCoreTicker())
+	: FTSTickerObjectBase(0.0f, FTSBackgroundableTicker::GetCoreTicker())
 	, ConnectionManager(InConnectionManager)
 {
 
@@ -548,7 +548,7 @@ bool FXmppMultiUserChatStrophe::JoinPublicRoom(const FXmppRoomId& RoomId, const 
 
 bool FXmppMultiUserChatStrophe::JoinPrivateRoom(const FXmppRoomId& RoomId, const FString& Nickname, const FString& Password)
 {
-	UE_LOG(LogXmpp, Verbose, TEXT("MUC: JoinPrivateRoom RoomId=%s Nickname=%s Password=%s"), *RoomId, *Nickname, *Password);
+	UE_LOG(LogXmpp, Verbose, TEXT("MUC: JoinPrivateRoom RoomId=%s Nickname=%s"), *RoomId, *Nickname);
 
 	bool bSuccess = false;
 	FString ErrorStr;

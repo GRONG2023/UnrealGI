@@ -11,20 +11,20 @@
 class UBlackboardData;
 class UBTDecorator;
 
-UCLASS(BlueprintType)
-class AIMODULE_API UBehaviorTree : public UObject, public IBlackboardAssetProvider
+UCLASS(BlueprintType, MinimalAPI)
+class UBehaviorTree : public UObject, public IBlackboardAssetProvider
 {
 	GENERATED_UCLASS_BODY()
 
 	/** root node of loaded tree */
 	UPROPERTY()
-	UBTCompositeNode* RootNode;
+	TObjectPtr<UBTCompositeNode> RootNode;
 
 #if WITH_EDITORONLY_DATA
 
 	/** Graph for Behavior Tree */
 	UPROPERTY()
-	class UEdGraph*	BTGraph;
+	TObjectPtr<class UEdGraph>	BTGraph;
 
 	/** Info about the graphs we last edited */
 	UPROPERTY()
@@ -34,16 +34,16 @@ class AIMODULE_API UBehaviorTree : public UObject, public IBlackboardAssetProvid
 
 	// BEGIN IBlackboardAssetProvider
 	/** @return blackboard asset */
-	virtual UBlackboardData* GetBlackboardAsset() const override;
+	AIMODULE_API virtual UBlackboardData* GetBlackboardAsset() const override;
 	// END IBlackboardAssetProvider
 
 	/** blackboard asset for this tree */
 	UPROPERTY()
-	UBlackboardData* BlackboardAsset;
+	TObjectPtr<UBlackboardData> BlackboardAsset;
 
 	/** root level decorators, used by subtrees */
 	UPROPERTY()
-	TArray<UBTDecorator*> RootDecorators;
+	TArray<TObjectPtr<UBTDecorator>> RootDecorators;
 
 	/** logic operators for root level decorators, used by subtrees  */
 	UPROPERTY()

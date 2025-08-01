@@ -44,13 +44,13 @@ protected:
 private:
 
 	// Raw pointer to the drag operation, kept alive by AddReferencedObjects.
-	UDragDropOperation* DragOperation;
+	TObjectPtr<UDragDropOperation> DragOperation;
 
 	/** Source User Widget */
-	TSharedPtr<SObjectWidget> SourceUserWidget;
+	TWeakPtr<SObjectWidget> SourceUserWidget;
 
 	/** The viewport this drag/drop operation is associated with. */
-	UGameViewportClient* GameViewport;
+	TWeakObjectPtr<UGameViewportClient> GameViewport;
 
 	/** The widget used during the drag/drop action to show something being dragged. */
 	TSharedPtr<SWidget> DecoratorWidget;

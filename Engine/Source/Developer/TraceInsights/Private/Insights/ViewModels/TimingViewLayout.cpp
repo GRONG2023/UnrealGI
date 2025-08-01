@@ -10,6 +10,7 @@ void FTimingViewLayout::ForceNormalMode()
 	EventH = NormalLayoutEventH;
 	EventDY = NormalLayoutEventDY;
 	TimelineDY = NormalLayoutTimelineDY;
+	ChildTimelineDY = NormalLayoutChildTimelineDY;
 	MinTimelineH = NormalLayoutMinTimelineH;
 	TargetMinTimelineH = NormalLayoutMinTimelineH;
 }
@@ -22,6 +23,7 @@ void FTimingViewLayout::ForceCompactMode()
 	EventH = CompactLayoutEventH;
 	EventDY = CompactLayoutEventDY;
 	TimelineDY = CompactLayoutTimelineDY;
+	ChildTimelineDY = CompactLayoutChildTimelineDY;
 	MinTimelineH = CompactLayoutMinTimelineH;
 	TargetMinTimelineH = CompactLayoutMinTimelineH;
 }
@@ -49,6 +51,11 @@ bool FTimingViewLayout::Update()
 		{
 			TimelineDY -= LayoutTransitionSpeed;
 			bHasChanged = true;
+		}		
+		if (ChildTimelineDY > CompactLayoutChildTimelineDY)
+		{
+			ChildTimelineDY -= LayoutTransitionSpeed / 2;
+			bHasChanged = true;
 		}
 	}
 	else
@@ -66,6 +73,11 @@ bool FTimingViewLayout::Update()
 		if (TimelineDY < NormalLayoutTimelineDY)
 		{
 			TimelineDY += LayoutTransitionSpeed;
+			bHasChanged = true;
+		}		
+		if (ChildTimelineDY < NormalLayoutChildTimelineDY)
+		{
+			ChildTimelineDY += LayoutTransitionSpeed / 2;
 			bHasChanged = true;
 		}
 	}

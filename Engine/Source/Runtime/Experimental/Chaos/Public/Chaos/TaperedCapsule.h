@@ -3,6 +3,7 @@
 
 #include "Chaos/ImplicitObject.h"
 #include "Chaos/Core.h"
+#include "Chaos/TaperedCylinder.h"
 
 namespace Chaos
 {
@@ -108,7 +109,7 @@ namespace Chaos
 			const FVec3 OriginToX = x - Origin;
 			const FReal DistanceAlongAxis = FMath::Clamp(FVec3::DotProduct(OriginToX, Axis), (FReal)0.0, Height);
 			const FVec3 ClosestPoint = Origin + Axis * DistanceAlongAxis;
-			const FReal Radius = (Height > SMALL_NUMBER) ? FMath::Lerp(Radius1, Radius2, DistanceAlongAxis / Height) : FMath::Max(Radius1, Radius2);
+			const FReal Radius = (Height > UE_SMALL_NUMBER) ? FMath::Lerp(Radius1, Radius2, DistanceAlongAxis / Height) : FMath::Max(Radius1, Radius2);
 			OutNormal = (x - ClosestPoint);
 			const FReal NormalSize = OutNormal.SafeNormalize();
 			return NormalSize - Radius;
@@ -132,7 +133,7 @@ namespace Chaos
 			const FReal R2R2 = Radius2 * Radius2;
 			const FReal R1R2 = Radius1 * Radius2;
 			//  compute center of mass as a distance along the axis from the origin as the shape as the axis as a symmetry line 
-			FReal TaperedSectionCenterOfMass = (Height * (R1R1 + 2.*R1R2 + 3.*R2R2) / 4.*(R1R1 + R1R2 + R2R2));
+			FReal TaperedSectionCenterOfMass = (Height * (R1R1 + (FReal)2.0 * R1R2 + (FReal)3.0 * R2R2) / (FReal)4.0 * (R1R1 + R1R2 + R2R2));
 			FReal Hemisphere1CenterOfMass = -((FReal)3.0 * Radius1 / (FReal)8.0);
 			FReal Hemisphere2CenterOfMass = (Height + ((FReal)3.0 * Radius2 / (FReal)8.0));
 
@@ -150,7 +151,7 @@ namespace Chaos
 		FReal GetArea(const bool IncludeEndCaps = true) const { return GetArea(Height, Radius1, Radius2, IncludeEndCaps); }
 		static FReal GetArea(const FReal Height, const FReal Radius1, const FReal Radius2, const bool IncludeEndCaps)
 		{
-			static const FReal TwoPI = PI * 2;
+			static const FReal TwoPI = UE_PI * 2;
 			FReal AreaNoCaps = (FReal)0.0;
 			if (Radius1 == Radius2)
 			{
@@ -159,7 +160,7 @@ namespace Chaos
 			else
 			{
 				const FReal R1_R2 = Radius1 - Radius2;
-				AreaNoCaps = PI * (Radius1 + Radius2) * FMath::Sqrt((R1_R2 * R1_R2) + (Height * Height));
+				AreaNoCaps = UE_PI * (Radius1 + Radius2) * FMath::Sqrt((R1_R2 * R1_R2) + (Height * Height));
 			}
 			if (IncludeEndCaps)
 			{
@@ -191,12 +192,12 @@ namespace Chaos
 			const FReal R1R2 = R1 * R2;
 			const FReal R2R2 = R2 * R2;
 
-			const FReal Num1 = 2. * HH * (R1R1 + 3. * R1R2 + 6. * R2R2); // 2H^2 * (R1^2 + 3R1R2 + 6R2^2)
-			const FReal Num2 = 3. * (R1R1 * R1R1 + R1R1 * R1R2 + R1R2 * R1R2 + R1R2 * R2R2 + R2R2 * R2R2); // 3 * (R1^4 + R1^3R2 + R1^2R2^2 + R1R2^3 + R2^4)
-			const FReal Den1 = PI * (R1R1 + R1R2 + R2R2); // PI * (R1^2 + R1R2 + R2^2)
+			const FReal Num1 = (FReal)2.0 * HH * (R1R1 + (FReal)3.0 * R1R2 + (FReal)6.0 * R2R2); // 2H^2 * (R1^2 + 3R1R2 + 6R2^2)
+			const FReal Num2 = (FReal)3.0 * (R1R1 * R1R1 + R1R1 * R1R2 + R1R2 * R1R2 + R1R2 * R2R2 + R2R2 * R2R2); // 3 * (R1^4 + R1^3R2 + R1^2R2^2 + R1R2^3 + R2^4)
+			const FReal Den1 = UE_PI * (R1R1 + R1R2 + R2R2); // PI * (R1^2 + R1R2 + R2^2)
 
-			const FReal Diag12 = Mass * (Num1 + Num2) / (20. * Den1);
-			const FReal Diag3 = Mass * Num2 / (10. * Den1);
+			const FReal Diag12 = Mass * (Num1 + Num2) / ((FReal)20.0 * Den1);
+			const FReal Diag3 = Mass * Num2 / ((FReal)10.0 * Den1);
 
 			return FMatrix33(Diag12, Diag12, Diag3);
 		}
@@ -211,15 +212,35 @@ namespace Chaos
 
 		virtual uint32 GetTypeHash() const override
 		{
-			const uint32 OriginAxisHash = HashCombine(::GetTypeHash(Origin), ::GetTypeHash(Axis));
+			const uint32 OriginAxisHash = HashCombine(UE::Math::GetTypeHash(Origin), UE::Math::GetTypeHash(Axis));
 			const uint32 PropertyHash = HashCombine(::GetTypeHash(Height), HashCombine(::GetTypeHash(Radius1), ::GetTypeHash(Radius2)));
 
 			return HashCombine(OriginAxisHash, PropertyHash);
 		}
 
+#if INTEL_ISPC
+		// See PerParticlePBDCollisionConstraint.cpp
+		// ISPC code has matching structs for interpreting FImplicitObjects.
+		// This is used to verify that the structs stay the same.
+		struct FISPCDataVerifier
+		{
+			static constexpr int32 OffsetOfOrigin() { return offsetof(FTaperedCapsule, Origin); }
+			static constexpr int32 SizeOfOrigin() { return sizeof(FTaperedCapsule::Origin); }
+			static constexpr int32 OffsetOfAxis() { return offsetof(FTaperedCapsule, Axis); }
+			static constexpr int32 SizeOfAxis() { return sizeof(FTaperedCapsule::Axis); }
+			static constexpr int32 OffsetOfHeight() { return offsetof(FTaperedCapsule, Height); }
+			static constexpr int32 SizeOfHeight() { return sizeof(FTaperedCapsule::Height); }
+			static constexpr int32 OffsetOfRadius1() { return offsetof(FTaperedCapsule, Radius1); }
+			static constexpr int32 SizeOfRadius1() { return sizeof(FTaperedCapsule::Radius1); }
+			static constexpr int32 OffsetOfRadius2() { return offsetof(FTaperedCapsule, Radius2); }
+			static constexpr int32 SizeOfRadius2() { return sizeof(FTaperedCapsule::Radius2); }
+		};
+		friend FISPCDataVerifier;
+#endif // #if INTEL_ISPC
+
 	private:
 		//Phi is distance from closest point on plane1
-		FReal GetRadius(const FReal& Phi) const
+		FReal GetRadiusAtDistance(const FReal& Phi) const
 		{
 			const FReal Alpha = Phi / Height;
 			return FMath::Lerp(Radius1, Radius2, Alpha);
@@ -227,12 +248,12 @@ namespace Chaos
 
 		static FReal GetHemisphereVolume(const FReal Radius)
 		{
-			return (FReal)2.0 * PI * (Radius * Radius * Radius) / (FReal)3.0;
+			return (FReal)2.0 * UE_PI * (Radius * Radius * Radius) / (FReal)3.0;
 		}
 
 		static FReal GetTaperedSectionVolume(const FReal Height, const FReal Radius1, const FReal Radius2)
 		{
-			static const FReal PI_OVER_3 = PI / (FReal)3.0;
+			static const FReal PI_OVER_3 = UE_PI / (FReal)3.0;
 			return PI_OVER_3 * Height * (Radius1 * Radius1 + Radius1 * Radius2 + Radius2 * Radius2);
 		}
 
@@ -248,11 +269,11 @@ namespace Chaos
 		    const int32 NumPoints)
 		{
 			if (NumPoints <= 1 ||
-			    (Capsule.GetRadius1() <= KINDA_SMALL_NUMBER &&
-				 Capsule.GetRadius2() <= KINDA_SMALL_NUMBER))
+			    (Capsule.GetRadius1() <= UE_KINDA_SMALL_NUMBER &&
+				 Capsule.GetRadius2() <= UE_KINDA_SMALL_NUMBER))
 			{
 				const int32 Offset = Points.Num();
-				if (Capsule.GetHeight() <= KINDA_SMALL_NUMBER)
+				if (Capsule.GetHeight() <= UE_KINDA_SMALL_NUMBER)
 				{
 					Points.SetNumUninitialized(Offset + 1);
 					Points[Offset] = Capsule.GetCenter();
@@ -307,7 +328,7 @@ namespace Chaos
 			const int32 SpiralSeed = 0)
 		{
 			// Axis should be normalized.
-			checkSlow(FMath::Abs(Axis.Size() - 1.0) < KINDA_SMALL_NUMBER);
+			checkSlow(FMath::Abs(Axis.Size() - 1.0) < UE_KINDA_SMALL_NUMBER);
 
 			const int32 Offset = Points.Num();
 			ComputeGoldenSpiralPointsUnoriented(Points, Radius1, Radius2, Height, NumPoints, SpiralSeed);
@@ -316,7 +337,7 @@ namespace Chaos
 			// along the Z axis.  Transform them to where they should be.
 			const FReal HalfHeight = Height / 2;
 			const FRotation3 Rotation = FRotation3::FromRotatedVector(FVec3(0, 0, 1), Axis);
-			checkSlow(((Origin + Axis * Height) - (Rotation.RotateVector(FVec3(0, 0, Height)) + Origin)).Size() < KINDA_SMALL_NUMBER);
+			checkSlow(((Origin + Axis * Height) - (Rotation.RotateVector(FVec3(0, 0, Height)) + Origin)).Size() < UE_KINDA_SMALL_NUMBER);
 			for (int32 i = Offset; i < Points.Num(); i++)
 			{
 				FVec3& Point = Points[i];
@@ -370,10 +391,10 @@ namespace Chaos
 			const FReal Cap2Area = TSphere<FReal, 3>::GetArea(Radius2) / (FReal)2.;
 			const FReal TaperedSectionArea = FTaperedCapsule::GetArea(Height, Radius1, Radius2, /*IncludeEndCaps*/ false);
 			const FReal AllArea = TaperedSectionArea + Cap1Area + Cap2Area;
-			if (AllArea > KINDA_SMALL_NUMBER)
+			if (AllArea > UE_KINDA_SMALL_NUMBER)
 			{
-				NumPointsEndCap1 = static_cast<int32>(round(Cap1Area / AllArea * NumPoints));
-				NumPointsEndCap2 = static_cast<int32>(round(Cap2Area / AllArea * NumPoints));
+				NumPointsEndCap1 = static_cast<int32>(round(Cap1Area / AllArea * static_cast<FReal>(NumPoints)));
+				NumPointsEndCap2 = static_cast<int32>(round(Cap2Area / AllArea * static_cast<FReal>(NumPoints)));
 				NumPointsTaperedSection = NumPoints - NumPointsEndCap1 - NumPointsEndCap2;
 			}
 			else

@@ -5,6 +5,7 @@
 #include "BlueprintEditorTabs.h"
 #include "SBlueprintEditorToolbar.h"
 
+#include "UMGEditorModule.h"
 #include "WidgetBlueprintEditorToolbar.h"
 #include "BlueprintModes/WidgetBlueprintApplicationModes.h"
 #include "ToolMenus.h"
@@ -15,17 +16,10 @@
 FWidgetGraphApplicationMode::FWidgetGraphApplicationMode(TSharedPtr<FWidgetBlueprintEditor> InWidgetEditor)
 	: FWidgetBlueprintApplicationMode(InWidgetEditor, FWidgetBlueprintApplicationModes::GraphMode)
 {
-	TabLayout = FTabManager::NewLayout( "WidgetBlueprintEditor_Graph_Layout_v1" )
+	TabLayout = FTabManager::NewLayout( "WidgetBlueprintEditor_Graph_Layout_v2x1" )
 		->AddArea
 		(
 			FTabManager::NewPrimaryArea() ->SetOrientation(Orient_Vertical)
-			->Split
-			(
-				FTabManager::NewStack()
-				->SetSizeCoefficient( 0.186721f )
-				->SetHideTabWell(true)
-				->AddTab( InWidgetEditor->GetToolbarTabId(), ETabState::OpenedTab )
-			)
 			->Split
 			(
 				FTabManager::NewSplitter() ->SetOrientation(Orient_Horizontal)
@@ -75,12 +69,24 @@ FWidgetGraphApplicationMode::FWidgetGraphApplicationMode(TSharedPtr<FWidgetBluep
 			)
 		);
 	
-	// setup toolbar
-	//@TODO: Keep this in sync with AnimBlueprintMode.cpp
+	IUMGEditorModule& UMGEditorModule = FModuleManager::GetModuleChecked<IUMGEditorModule>("UMGEditor");
+	UMGEditorModule.OnRegisterTabsForEditor().Broadcast(*this, TabFactories);
+
+	// Add any extenders specified by the UMG Editor Module
+	// Note: Used by WidgetEditorModeUILayer to register the toolbox tab
+	if (LayoutExtender)
+	{
+		UMGEditorModule.OnRegisterLayoutExtensions().Broadcast(*LayoutExtender);
+		TabLayout->ProcessExtensions(*LayoutExtender);
+	}
+
 	ToolbarExtender = MakeShareable(new FExtender);
 	InWidgetEditor->GetWidgetToolbarBuilder()->AddWidgetBlueprintEditorModesToolbar(ToolbarExtender);
+	InWidgetEditor->RegisterModeToolbarIfUnregistered(GetModeName());
 
-	if (UToolMenu* Toolbar = InWidgetEditor->RegisterModeToolbarIfUnregistered(GetModeName()))
+	FName OutParentToolbarName;
+	FName ToolBarname = InWidgetEditor->GetToolMenuToolbarNameForMode(GetModeName(), OutParentToolbarName);
+	if (UToolMenu* Toolbar = UToolMenus::Get()->FindMenu(ToolBarname))
 	{
 		InWidgetEditor->GetToolbarBuilder()->AddCompileToolbar(Toolbar);
 		InWidgetEditor->GetToolbarBuilder()->AddScriptingToolbar(Toolbar);

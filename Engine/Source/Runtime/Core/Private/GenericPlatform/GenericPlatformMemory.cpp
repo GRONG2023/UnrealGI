@@ -21,6 +21,8 @@
 #include "Misc/MessageDialog.h"
 #include "Templates/UnrealTemplate.h"
 #include "HAL/IConsoleManager.h"
+#include "ProfilingDebugging/MemoryTrace.h"
+#include "ProfilingDebugging/CountersTrace.h"
 
 DEFINE_STAT(MCR_Physical);
 DEFINE_STAT(MCR_PhysicalLLM);
@@ -49,18 +51,46 @@ namespace GenericPlatformMemory
 		GLogPlatformMemoryStats,
 		TEXT("Report Platform Memory Stats)\n"),
 		ECVF_Default);
+
+	static float GMemoryPressureCriticalThresholdMB = 0;
+	static FAutoConsoleVariableRef CVarMemoryPressureCriticalThresholdMB(
+		TEXT("memory.MemoryPressureCriticalThresholdMB"),
+		GMemoryPressureCriticalThresholdMB,
+		TEXT("When the available physical memory drops below this threshold memory stats will consider this to be at critical pressure.\n"
+			"Where a platform can specifically state it's memory pressure this test maybe ignored.\n"
+			"0 (default) critical pressure will not use the threshold."),
+		ECVF_Default);
 }
 
-struct TUnalignedTester
+#if UE_CHECK_LARGE_ALLOCATIONS
+namespace UE::Memory::Private
 {
-	FGenericPlatformMemory::TUnaligned<uint8> A;
-	FGenericPlatformMemory::TUnaligned<uint16> B;
-	TUnalignedTester()
-	{
-		static_assert(STRUCT_OFFSET(TUnalignedTester, B) == 1, "TUnaligned failure.");
-	}
-};
+	// this is a console variable ref rather than auto console variable as it's used before the
+	// console manager has been set up
+	bool GEnableLargeAllocationChecks = false;
+	FAutoConsoleVariableRef CVarEnableLargeAllocationChecks(
+		TEXT("memory.EnableLargeAllocationChecks"),
+		GEnableLargeAllocationChecks,
+		TEXT("Turn on ensure which checks no single allocation is greater than 'LargeAllocationThreshold'"),
+		ECVF_Default);
+	int32 GLargeAllocationThreshold = 1 * 1024 * 1024 * 1024;
+	FAutoConsoleVariableRef CVarLargeAllocationThreshold(
+		TEXT("memory.LargeAllocationThreshold"),
+		GLargeAllocationThreshold,
+		TEXT("Maximum size a single allocation can be before setting off the ensure enabled by 'EnableLargeAllocationChecks'"),
+		ECVF_Default);
+}
+#endif
 
+TRACE_DECLARE_MEMORY_COUNTER(PlatformMemoryTotalPhysical, TEXT("PlatformMemory/TotalPhysical"));
+TRACE_DECLARE_MEMORY_COUNTER(PlatformMemoryTotalVirtual, TEXT("PlatformMemory/TotalVirtual"));
+TRACE_DECLARE_MEMORY_COUNTER(PlatformMemoryPageSize, TEXT("PlatformMemory/PageSize"));
+TRACE_DECLARE_MEMORY_COUNTER(PlatformMemoryAvailablePhysical, TEXT("PlatformMemory/AvailablePhysical"));
+TRACE_DECLARE_MEMORY_COUNTER(PlatformMemoryAvailableVirtual, TEXT("PlatformMemory/AvailableVirtual"));
+TRACE_DECLARE_MEMORY_COUNTER(PlatformMemoryUsedPhysical, TEXT("PlatformMemory/UsedPhysical"));
+TRACE_DECLARE_MEMORY_COUNTER(PlatformMemoryPeakUsedPhysical, TEXT("PlatformMemory/PeakUsedPhysical"));
+TRACE_DECLARE_MEMORY_COUNTER(PlatformMemoryUsedVirtual, TEXT("PlatformMemory/UsedVirtual"));
+TRACE_DECLARE_MEMORY_COUNTER(PlatformMemoryPeakUsedVirtual, TEXT("PlatformMemory/PeakUsedVirtual"));
 
 /** Helper class used to update platform memory stats. */
 struct FGenericStatsUpdater
@@ -94,6 +124,16 @@ struct FGenericStatsUpdater
 		SET_MEMORY_STAT( STAT_UsedVirtual, MemoryStats.UsedVirtual );
 		SET_MEMORY_STAT( STAT_PeakUsedVirtual, MemoryStats.PeakUsedVirtual );
 
+		TRACE_COUNTER_SET(PlatformMemoryTotalPhysical, MemoryStats.TotalPhysical);
+		TRACE_COUNTER_SET(PlatformMemoryTotalVirtual, MemoryStats.TotalVirtual);
+		TRACE_COUNTER_SET(PlatformMemoryPageSize, MemoryStats.PageSize);
+		TRACE_COUNTER_SET(PlatformMemoryAvailablePhysical, MemoryStats.AvailablePhysical);
+		TRACE_COUNTER_SET(PlatformMemoryAvailableVirtual, MemoryStats.AvailableVirtual);
+		TRACE_COUNTER_SET(PlatformMemoryUsedPhysical, MemoryStats.UsedPhysical);
+		TRACE_COUNTER_SET(PlatformMemoryPeakUsedPhysical, MemoryStats.PeakUsedPhysical);
+		TRACE_COUNTER_SET(PlatformMemoryUsedVirtual, MemoryStats.UsedVirtual);
+		TRACE_COUNTER_SET(PlatformMemoryPeakUsedVirtual, MemoryStats.PeakUsedVirtual);
+
 		// Platform specific stats.
 		FPlatformMemory::InternalUpdateStats( MemoryStats );
 	}
@@ -108,6 +148,16 @@ FGenericPlatformMemoryStats::FGenericPlatformMemoryStats()
 	, UsedVirtual( 0 )
 	, PeakUsedVirtual( 0 )
 {}
+
+FGenericPlatformMemoryStats::EMemoryPressureStatus FGenericPlatformMemoryStats::GetMemoryPressureStatus() const
+{
+	if (GenericPlatformMemory::GMemoryPressureCriticalThresholdMB > 0)
+	{
+		float AvailablePhysicalMB = float(AvailablePhysical / 1024 / 1024);
+		return AvailablePhysicalMB < GenericPlatformMemory::GMemoryPressureCriticalThresholdMB ? EMemoryPressureStatus::Critical : EMemoryPressureStatus::Nominal;
+	}
+	return EMemoryPressureStatus::Unknown;
+}
 
 bool FGenericPlatformMemory::bIsOOM = false;
 uint64 FGenericPlatformMemory::OOMAllocationSize = 0;
@@ -133,7 +183,8 @@ void FGenericPlatformMemory::SetupMemoryPools()
 
 		BackupOOMMemoryPool = FPlatformMemory::BinnedAllocFromOS(FPlatformMemory::GetBackMemoryPoolSize());
 
-		LLM(FLowLevelMemTracker::Get().OnLowLevelAlloc(ELLMTracker::Default, BackupOOMMemoryPool, FPlatformMemory::GetBackMemoryPoolSize()));
+		MemoryTrace_Alloc((uint64)BackupOOMMemoryPool, FPlatformMemory::GetBackMemoryPoolSize(), alignof(void*), EMemoryTraceRootHeap::SystemMemory);
+		LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelAlloc(ELLMTracker::Default, BackupOOMMemoryPool, FPlatformMemory::GetBackMemoryPoolSize()));
 	}
 }
 
@@ -144,7 +195,7 @@ void FGenericPlatformMemory::Init()
 #if	STATS
 	// Stats are updated only once per second.
 	const float PollingInterval = 1.0f;
-	FTicker::GetCoreTicker().AddTicker( FTickerDelegate::CreateStatic( &FGenericStatsUpdater::EnqueueUpdateStats ), PollingInterval );
+	FTSTicker::GetCoreTicker().AddTicker( FTickerDelegate::CreateStatic( &FGenericStatsUpdater::EnqueueUpdateStats ), PollingInterval );
 
 	// Update for the first time.
 	FGenericStatsUpdater::DoUpdateStats();
@@ -153,59 +204,81 @@ void FGenericPlatformMemory::Init()
 
 void FGenericPlatformMemory::OnOutOfMemory(uint64 Size, uint32 Alignment)
 {
-	// Update memory stats before we enter the crash handler.
-	OOMAllocationSize = Size;
-	OOMAllocationAlignment = Alignment;
-
-	// only call this code one time - if already OOM, abort
-	if (bIsOOM)
+	auto HandleOOM = [&]()
 	{
-		return;
-	}
-	bIsOOM = true;
+		// Update memory stats before we enter the crash handler.
+		OOMAllocationSize = Size;
+		OOMAllocationAlignment = Alignment;
 
-	FPlatformMemoryStats PlatformMemoryStats = FPlatformMemory::GetStats();
-	if (BackupOOMMemoryPool)
-	{
-		FPlatformMemory::BinnedFreeToOS(BackupOOMMemoryPool, FPlatformMemory::GetBackMemoryPoolSize());
-		UE_LOG(LogMemory, Warning, TEXT("Freeing %d bytes from backup pool to handle out of memory."), FPlatformMemory::GetBackMemoryPoolSize());
+		bIsOOM = true;
+
+		const int ErrorMsgSize = 256;
+		TCHAR ErrorMsg[ErrorMsgSize];
+		FPlatformMisc::GetSystemErrorMessage(ErrorMsg, ErrorMsgSize, 0);
+
+		FPlatformMemoryStats PlatformMemoryStats = FPlatformMemory::GetStats();
+		if (BackupOOMMemoryPool)
+		{
+			const uint32 BackupPoolSize = FPlatformMemory::GetBackMemoryPoolSize();
+			FPlatformMemory::BinnedFreeToOS(BackupOOMMemoryPool, BackupPoolSize);
+			UE_LOG(LogMemory, Warning, TEXT("Freeing %d bytes (%.1f MiB) from backup pool to handle out of memory."), BackupPoolSize, double(BackupPoolSize) / (1024 * 1024));
         
-		LLM(FLowLevelMemTracker::Get().OnLowLevelFree(ELLMTracker::Default, BackupOOMMemoryPool));
-	}
+			LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelFree(ELLMTracker::Default, BackupOOMMemoryPool));
+			MemoryTrace_Free((uint64)BackupOOMMemoryPool, EMemoryTraceRootHeap::SystemMemory);
+		}
 
-	UE_LOG(LogMemory, Warning, TEXT("MemoryStats:")\
-		TEXT("\n\tAvailablePhysical %llu")\
-		TEXT("\n\t AvailableVirtual %llu")\
-		TEXT("\n\t     UsedPhysical %llu")\
-		TEXT("\n\t PeakUsedPhysical %llu")\
-		TEXT("\n\t      UsedVirtual %llu")\
-		TEXT("\n\t  PeakUsedVirtual %llu"),
-		(uint64)PlatformMemoryStats.AvailablePhysical,
-		(uint64)PlatformMemoryStats.AvailableVirtual,
-		(uint64)PlatformMemoryStats.UsedPhysical,
-		(uint64)PlatformMemoryStats.PeakUsedPhysical,
-		(uint64)PlatformMemoryStats.UsedVirtual,
-		(uint64)PlatformMemoryStats.PeakUsedVirtual);
-	if (GWarn)
-	{
-		GMalloc->DumpAllocatorStats(*GWarn);
-	}
+		UE_LOG(LogMemory, Warning, TEXT("MemoryStats:"
+			"\n\tAvailablePhysical %llu (%.2f GiB)"
+			"\n\t AvailableVirtual %llu (%.2f GiB)"
+			"\n\t     UsedPhysical %llu (%.2f GiB)"
+			"\n\t PeakUsedPhysical %llu (%.2f GiB)"
+			"\n\t      UsedVirtual %llu (%.2f GiB)"
+			"\n\t  PeakUsedVirtual %llu (%.2f GiB)"),
+			(uint64)PlatformMemoryStats.AvailablePhysical, double(PlatformMemoryStats.AvailablePhysical) / (1024 * 1024 * 1024),
+			(uint64)PlatformMemoryStats.AvailableVirtual, double(PlatformMemoryStats.AvailableVirtual) / (1024 * 1024 * 1024),
+			(uint64)PlatformMemoryStats.UsedPhysical, double(PlatformMemoryStats.UsedPhysical) / (1024 * 1024 * 1024),
+			(uint64)PlatformMemoryStats.PeakUsedPhysical, double(PlatformMemoryStats.PeakUsedPhysical) / (1024 * 1024 * 1024),
+			(uint64)PlatformMemoryStats.UsedVirtual, double(PlatformMemoryStats.UsedVirtual) / (1024 * 1024 * 1024),
+			(uint64)PlatformMemoryStats.PeakUsedVirtual, double(PlatformMemoryStats.PeakUsedVirtual) / (1024 * 1024 * 1024)
+		);
+		if (GWarn)
+		{
+			GMalloc->DumpAllocatorStats(*GWarn);
+		}
 
-	// let any registered handlers go
-	FCoreDelegates::GetOutOfMemoryDelegate().Broadcast();
+		// let any registered handlers go
+		FCoreDelegates::GetOutOfMemoryDelegate().Broadcast();
 
-	UE_LOG(LogMemory, Fatal, TEXT("Ran out of memory allocating %llu bytes with alignment %u"), Size, Alignment);
+		// ErrorMsg might be unrelated to OoM error in some cases as the code that calls OnOutOfMemory could have called other system functions that modified errno
+		UE_LOG(LogMemory, Fatal, TEXT("Ran out of memory allocating %llu (%.1f MiB) bytes with alignment %u. Last error msg: %s."), Size, double(Size) / (1024 * 1024), Alignment, ErrorMsg);
+	};
+	
+	UE_CALL_ONCE(HandleOOM);
+	FPlatformProcess::SleepInfinite(); // Unreachable
 }
 
 FMalloc* FGenericPlatformMemory::BaseAllocator()
 {
-	return new FMallocAnsi();
+	static FMalloc* Instance = nullptr;
+	if (Instance != nullptr)
+	{
+		return Instance;
+	}
+
+	Instance = new FMallocAnsi();
+
+	return Instance;
 }
 
 FPlatformMemoryStats FGenericPlatformMemory::GetStats()
 {
 	UE_LOG(LogMemory, Warning, TEXT("FGenericPlatformMemory::GetStats not implemented on this platform"));
 	return FPlatformMemoryStats();
+}
+
+FPlatformMemoryStats FGenericPlatformMemory::GetStatsRaw()
+{
+	return FPlatformMemory::GetStats();
 }
 
 void FGenericPlatformMemory::GetStatsForMallocProfiler( FGenericMemoryStats& out_Stats )
@@ -484,4 +557,19 @@ bool FGenericPlatformMemory::GetLLMAllocFunctions(void*(*&OutAllocFunction)(size
 TArray<typename FGenericPlatformMemoryStats::FPlatformSpecificStat> FGenericPlatformMemoryStats::GetPlatformSpecificStats() const
 {
 	return TArray<FPlatformSpecificStat>();
+}
+
+uint64 FGenericPlatformMemoryStats::GetAvailablePhysical(bool bExcludeExtraDevMemory) const
+{
+	uint64 BytesAvailable = AvailablePhysical;
+
+#if !UE_BUILD_SHIPPING
+	if (bExcludeExtraDevMemory)
+	{
+		// FMath:Min to clamp at zero when ExtraDevelopmentMemory > AvailablePhysical
+		BytesAvailable -= FMath::Min(FPlatformMemory::GetExtraDevelopmentMemorySize(), BytesAvailable);
+	}
+#endif
+
+	return BytesAvailable;
 }

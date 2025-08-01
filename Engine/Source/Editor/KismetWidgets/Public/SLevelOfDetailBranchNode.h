@@ -3,10 +3,15 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Delegates/Delegate.h"
 #include "Misc/Attribute.h"
+#include "Templates/SharedPointer.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SWidget.h"
 #include "Widgets/SCompoundWidget.h"
+#include "Widgets/SWidget.h"
+
+class SWidget;
+struct FGeometry;
 
 /////////////////////////////////////////////////////
 // SLevelOfDetailBranchNode
@@ -39,6 +44,9 @@ public:
 	// SWidget interface
 	virtual void Tick( const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime ) override;
 	// End of SWidget interface
+
+	// Determine whether we need to show the low-detail slot or high-detail slot
+	void RefreshLODSlotContent();
 
 protected:
 	// What kind of slot was shown last frame

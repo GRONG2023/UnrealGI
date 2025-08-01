@@ -2,24 +2,46 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Misc/Attribute.h"
-#include "GameFramework/Actor.h"
-#include "Input/Reply.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/SNullWidget.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SCompoundWidget.h"
 #include "BlueprintUtilities.h"
+#include "Containers/Array.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "CoreMinimal.h"
+#include "Delegates/Delegate.h"
+#include "Engine/LevelStreaming.h"
 #include "Framework/Commands/InputChord.h"
 #include "Framework/Commands/UICommandList.h"
-#include "Engine/LevelStreaming.h"
+#include "GameFramework/Actor.h"
+#include "HAL/PlatformMath.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Math/Vector2D.h"
+#include "Misc/Attribute.h"
+#include "Misc/Guid.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateEnums.h"
+#include "Types/WidgetActiveTimerDelegate.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/SNullWidget.h"
+#include "Widgets/SWidget.h"
 
-class UEdGraph;
-struct FNotificationInfo;
-struct Rect;
-class FMenuBuilder;
+class FActiveTimerHandle;
 class FAssetEditorToolkit;
+class FMenuBuilder;
+class FReply;
+class SGraphPanel;
+class SWidget;
+class UEdGraph;
+class UEdGraphNode;
+class UEdGraphPin;
+struct FDiffSingleResult;
+struct FInputChord;
+struct FNotificationInfo;
+struct FPropertyChangedEvent;
+struct FSlateBrush;
+struct Rect;
 
 DECLARE_DELEGATE_ThreeParams( FOnNodeTextCommitted, const FText&, ETextCommit::Type, UEdGraphNode* );
 DECLARE_DELEGATE_RetVal_ThreeParams( bool, FOnNodeVerifyTextCommit, const FText&, UEdGraphNode*, FText& );
@@ -46,6 +68,8 @@ struct FGraphAppearanceInfo
 	FText ReadOnlyText;
 	/** Text to display if the graph is empty (to guide the user on what to do) */
 	FText InstructionText;
+	/** Bottom left warning text used for instance by Substrate */
+	FText WarningText;
 	/** Allows graphs to nicely fade instruction text (or completely hide it). */
 	TAttribute<float> InstructionFade;
 };
@@ -96,6 +120,12 @@ public:
 
 	DECLARE_DELEGATE_TwoParams( FOnDisallowedPinConnection, const UEdGraphPin*, const UEdGraphPin* );
 
+	DECLARE_DELEGATE( FOnDoubleClicked );
+
+	DECLARE_DELEGATE_OneParam( FOnNodeSingleClicked, UObject* );
+
+	DECLARE_DELEGATE_RetVal_TwoParams( FReply, FOnMouseButtonDown, const FGeometry&, const FPointerEvent& );
+
 	/** Info about events occurring in/on the graph */
 	struct FGraphEditorEvents
 	{
@@ -123,6 +153,12 @@ public:
 		FOnNodeSpawnedByKeymap OnNodeSpawnedByKeymap;
 		/** Called when the user generates a warning tooltip because a connection was invalid */
 		FOnDisallowedPinConnection OnDisallowedPinConnection;
+		/** Called when the graph itself is double clicked */
+		FOnDoubleClicked OnDoubleClicked;
+		/** Called when the graph is clicked */
+		FOnMouseButtonDown OnMouseButtonDown;
+		/** Called when a node is single-clicked without drag */
+		FOnNodeSingleClicked OnNodeSingleClicked;
 	};
 
 
@@ -132,7 +168,6 @@ public:
 		, _DisplayAsReadOnly(false)
 		, _IsEmpty(false)
 		, _GraphToEdit(NULL)
-		, _GraphToDiff(NULL)
 		, _AutoExpandActionMenu(false)
 		, _ShowGraphStateOverlay(true)
 		{}
@@ -145,7 +180,15 @@ public:
 		SLATE_ATTRIBUTE( FGraphAppearanceInfo, Appearance )
 		SLATE_EVENT( FEdGraphEvent, OnGraphModuleReloaded )
 		SLATE_ARGUMENT( UEdGraph*, GraphToEdit )
+	
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		UE_DEPRECATED(5.1, "GraphToDiff is no longer supported. Use DiffResults instead")
 		SLATE_ARGUMENT( UEdGraph*, GraphToDiff )
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	
+		SLATE_ARGUMENT( TSharedPtr<TArray<FDiffSingleResult>>, DiffResults )
+		SLATE_ATTRIBUTE( int32, FocusedDiffResult )
+	
 		SLATE_ARGUMENT( FGraphEditorEvents, GraphEvents)
 		SLATE_ARGUMENT( bool, AutoExpandActionMenu )
 		SLATE_ARGUMENT( TWeakPtr<FAssetEditorToolkit>, AssetEditorToolkit)
@@ -470,6 +513,32 @@ public:
 
 	UNREALED_API void FocusCommentNodes(TArray<UEdGraphNode*> &CommentNodes, TArray<UEdGraphNode*> &RelatedNodes);
 
+	virtual void OnCollapseNodes()
+	{
+		if (Implementation.IsValid())
+		{
+			Implementation->OnCollapseNodes();
+		}
+	}
+
+	virtual bool CanCollapseNodes() const
+	{
+		return Implementation.IsValid() ? Implementation->CanCollapseNodes() : false;
+	}
+
+	virtual void OnExpandNodes()
+	{
+		if (Implementation.IsValid())
+		{
+			Implementation->OnExpandNodes();
+		}
+	}
+
+	virtual bool CanExpandNodes() const
+	{
+		return Implementation.IsValid() ? Implementation->CanExpandNodes() : false;
+	}
+
 	virtual void OnAlignTop()
 	{
 		if (Implementation.IsValid())
@@ -567,6 +636,17 @@ public:
 
 	// Returns the first graph editor that is viewing the specified graph
 	UNREALED_API static TSharedPtr<SGraphEditor> FindGraphEditorForGraph(const UEdGraph* Graph);
+
+
+	/** Returns the graph panel used for this graph editor */
+	virtual SGraphPanel* GetGraphPanel() const
+	{
+		if (Implementation.IsValid())
+		{
+			return Implementation->GetGraphPanel();
+		}
+		return nullptr;
+	}
 
 protected:
 	/** Invoked when the underlying Graph is being changed. */

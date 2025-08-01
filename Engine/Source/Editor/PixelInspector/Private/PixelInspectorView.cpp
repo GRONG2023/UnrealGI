@@ -2,6 +2,9 @@
 
 #include "PixelInspectorView.h"
 
+#include "Containers/Array.h"
+#include "PixelInspectorResult.h"
+
 
 UPixelInspectorView::UPixelInspectorView(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -11,10 +14,10 @@ UPixelInspectorView::UPixelInspectorView(const FObjectInitializer& ObjectInitial
 		FinalColorContext[i] = FLinearColor::Green;
 	}
 	FinalColor = FLinearColor::Green;
-	SceneColor = FLinearColor::Green;
 	PreExposure = 1.f;
-	Luminance = 0.0f;
-	HdrColor = FLinearColor::Black;
+	SceneColorBeforePostProcessing = FLinearColor::Green;
+	SceneColorBeforeTonemap = FLinearColor::Black;
+	LuminanceBeforeTonemap = 0.0f;
 	Normal = FVector(0.0f);
 	PerObjectGBufferData = 0.0f;
 	Metallic = 0.0f;
@@ -60,10 +63,10 @@ void UPixelInspectorView::SetFromResult(PixelInspector::PixelInspectorResult &Re
 		}
 	}
 	
-	SceneColor = Result.SceneColor;
 	PreExposure = Result.PreExposure;
-	Luminance = Result.HdrLuminance;
-	HdrColor = Result.HdrColor;
+	SceneColorBeforePostProcessing = Result.SceneColorBeforePostProcessing;
+	SceneColorBeforeTonemap = Result.SceneColorBeforeTonemap;
+	LuminanceBeforeTonemap = Result.LuminanceBeforeTonemap;
 	Normal = Result.Normal;
 	PerObjectGBufferData = Result.PerObjectGBufferData;
 	Metallic = Result.Metallic;

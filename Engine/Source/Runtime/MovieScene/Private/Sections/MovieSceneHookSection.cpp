@@ -6,6 +6,8 @@
 #include "EntitySystem/BuiltInComponentTypes.h"
 #include "EntitySystem/MovieSceneEntitySystemLinker.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneHookSection)
+
 UMovieSceneHookSection::UMovieSceneHookSection(const FObjectInitializer& ObjInit)
 	: Super(ObjInit)
 {
@@ -46,7 +48,7 @@ void UMovieSceneHookSection::ImportTriggerEntity(UMovieSceneEntitySystemLinker* 
 	NewEvent.Hook.Interface = this;
 	NewEvent.Hook.ObjectBindingID = Params.GetObjectBindingID();
 
-	NewEvent.RootTime = Times[EventIndex] * Context.GetSequenceToRootTransform();
+	NewEvent.RootTime = Times[EventIndex] * Context.GetSequenceToRootSequenceTransform();
 	NewEvent.Type = EEvaluationHookEvent::Trigger;
 	NewEvent.SequenceID = ThisInstance.GetSequenceID();
 	NewEvent.TriggerIndex = EventIndex;

@@ -20,8 +20,8 @@
 #include "IImageWrapperModule.h"
 #include "Framework/Application/SlateApplication.h"
 #include "JsonObjectConverter.h"
-#include "SScreenShotImagePopup.h"
-#include "SAsyncImage.h"
+#include "Widgets/SScreenShotImagePopup.h"
+#include "Widgets/SAsyncImage.h"
 
 #define LOCTEXT_NAMESPACE "SScreenShotBrowser"
 
@@ -176,13 +176,6 @@ TSharedRef<SWidget> SScreenComparisonRow::GenerateWidgetForColumn(const FName& C
 
 			FSlateColor TextColor = FSlateColor::UseForeground();
 
-			FString Name = FString::Printf(TEXT("%s.%s"), *ModelMetaData->Context, *ModelMetaData->ScreenShotName);
-			if ((ModelMetaData->Context.Len() && ModelMetaData->TestName.Len())
-				|| !ModelMetaData->ScreenShotName.Len())
-			{
-				Name = FString::Printf(TEXT("%s.%s"), *ModelMetaData->Context, *ModelMetaData->TestName);
-			}
-
 			if (ComparisonResult.IsNew())
 			{
 				TextColor = FSlateColor(FLinearColor::Yellow);
@@ -193,12 +186,12 @@ TSharedRef<SWidget> SScreenComparisonRow::GenerateWidgetForColumn(const FName& C
 			}
 
 			return SNew(STextBlock)
-				.Text(FText::FromString(Name))
+				.Text(GetName())
 				.ColorAndOpacity(TextColor);
 		}
 		else
 		{
-			return SNew(STextBlock).Text(LOCTEXT("Unknown", "Unknown Test, no metadata discovered."));
+			return SNew(STextBlock).Text(GetName());
 		}
 	}
 	else if (ColumnName == "Date")
@@ -325,11 +318,11 @@ FText SScreenComparisonRow::GetAddNewButtonTooltip() const
 {
 	if (ISourceControlModule::Get().IsEnabled())
 	{
-		return LOCTEXT("AddNewToolTip", "Add new ground truth image to source control.");
+		return LOCTEXT("AddNewToolTip", "Add new ground truth image to revision control.");
 	}
 	else
 	{
-		return LOCTEXT("AddNewToolTip_Disabled", "Cannot add new ground truth image. Please connect to source control.");
+		return LOCTEXT("AddNewToolTip_Disabled", "Cannot add new ground truth image. Please connect to revision control.");
 	}
 }
 
@@ -343,7 +336,7 @@ bool SScreenComparisonRow::IsComparingAgainstPlatformFallback() const
 TSharedRef<SWidget> SScreenComparisonRow::BuildAddedView()
 {
 	const FImageComparisonResult& ComparisonResult = Model->Report.GetComparisonResult();
-	FString IncomingFile = FPaths::Combine(Model->Report.GetReportPath(), ComparisonResult.ReportIncomingFilePath);
+	FString IncomingFile = FPaths::Combine(Model->Report.GetReportRootDirectory(), ComparisonResult.ReportIncomingFilePath);
 
 	return
 		SNew(SVerticalBox)
@@ -410,7 +403,7 @@ TSharedRef<SWidget> SScreenComparisonRow::BuildComparisonPreview()
 {
 	const FImageComparisonResult& ComparisonResult = Model->Report.GetComparisonResult();
 
-	FString ApprovedFile = FPaths::Combine(Model->Report.GetReportPath(), ComparisonResult.ReportApprovedFilePath);
+	FString ApprovedFile = FPaths::Combine(Model->Report.GetReportRootDirectory(), ComparisonResult.ReportApprovedFilePath);
 
 	// If the actual approved file is on disk then use that so the tool-tip is more useful
 	if (IFileManager::Get().FileExists(*ComparisonResult.ApprovedFilePath))
@@ -418,8 +411,8 @@ TSharedRef<SWidget> SScreenComparisonRow::BuildComparisonPreview()
 		ApprovedFile = ComparisonResult.ApprovedFilePath;
 	}
 
-	FString IncomingFile = FPaths::Combine(Model->Report.GetReportPath(), ComparisonResult.ReportIncomingFilePath);
-	FString DeltaFile = FPaths::Combine(Model->Report.GetReportPath(), ComparisonResult.ReportComparisonFilePath);
+	FString IncomingFile = FPaths::Combine(Model->Report.GetReportRootDirectory(), ComparisonResult.ReportIncomingFilePath);
+	FString DeltaFile = FPaths::Combine(Model->Report.GetReportRootDirectory(), ComparisonResult.ReportComparisonFilePath);
 
 	// Create the screen shot data widget.
 	return 
@@ -596,7 +589,7 @@ FReply SScreenComparisonRow::OnCompareNewImage(const FGeometry& InGeometry, cons
 {
 
 	const FImageComparisonResult& ComparisonResult = Model->Report.GetComparisonResult();
-	FString IncomingFilePath = FPaths::Combine(Model->Report.GetReportPath(), ComparisonResult.ReportIncomingFilePath);
+	FString IncomingFilePath = FPaths::Combine(Model->Report.GetReportRootDirectory(), ComparisonResult.ReportIncomingFilePath);
 
 	TSharedPtr<FSlateDynamicImageBrush> UnapprovedImage = UnapprovedImageWidget->GetDynamicBrush();
 
@@ -653,6 +646,24 @@ FReply SScreenComparisonRow::OnImageClicked(const FGeometry& InGeometry, const F
 	FSlateApplication::Get().AddWindowAsNativeChild(PopupWindow, ParentWindow, true);
 
 	return FReply::Handled();
+}
+
+FText SScreenComparisonRow::GetName() const
+{
+	if (!Name.IsSet())
+	{
+		FString ModelName = Model->GetName();
+		if (!ModelName.IsEmpty())
+		{
+			Name = FText::FromString(ModelName);
+		}
+		else
+		{
+			Name = LOCTEXT("Unknown", "Unknown Test, no metadata discovered.");
+		}
+	}
+
+	return Name.GetValue();
 }
 
 #undef LOCTEXT_NAMESPACE

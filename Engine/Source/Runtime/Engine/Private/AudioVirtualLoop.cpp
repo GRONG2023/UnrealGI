@@ -1,10 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #include "AudioVirtualLoop.h"
 
-#include "ActiveSound.h"
 #include "Audio/AudioDebug.h"
 #include "AudioDevice.h"
-#include "Sound/SoundBase.h"
+#include "AudioMixerTrace.h"
 
 
 static int32 bVirtualLoopsEnabledCVar = 1;
@@ -43,6 +42,39 @@ FAutoConsoleVariableRef CVarVirtualLoopsUpdateRateMax(
 	ECVF_Default);
 
 
+#if UE_AUDIO_PROFILERTRACE_ENABLED
+UE_TRACE_EVENT_BEGIN(Audio, VirtualLoopVirtualize)
+	UE_TRACE_EVENT_FIELD(uint32, DeviceId)
+	UE_TRACE_EVENT_FIELD(uint64, Timestamp)
+	UE_TRACE_EVENT_FIELD(uint32, PlayOrder)
+	UE_TRACE_EVENT_FIELD(uint64, ComponentId)
+	UE_TRACE_EVENT_FIELD(UE::Trace::WideString, Name)
+UE_TRACE_EVENT_END()
+
+UE_TRACE_EVENT_BEGIN(Audio, VirtualLoopRealize)
+	UE_TRACE_EVENT_FIELD(uint32, DeviceId)
+	UE_TRACE_EVENT_FIELD(uint64, Timestamp)
+	UE_TRACE_EVENT_FIELD(uint32, PlayOrder)
+UE_TRACE_EVENT_END()
+
+UE_TRACE_EVENT_BEGIN(Audio, VirtualLoopUpdate)
+	UE_TRACE_EVENT_FIELD(uint32, DeviceId)
+	UE_TRACE_EVENT_FIELD(double, Timestamp)
+	UE_TRACE_EVENT_FIELD(uint32, PlayOrder)
+	UE_TRACE_EVENT_FIELD(float, TimeVirtualized)
+	UE_TRACE_EVENT_FIELD(float, PlaybackTime)
+	UE_TRACE_EVENT_FIELD(float, UpdateInterval)
+	UE_TRACE_EVENT_FIELD(double, LocationX)
+	UE_TRACE_EVENT_FIELD(double, LocationY)
+	UE_TRACE_EVENT_FIELD(double, LocationZ)
+	UE_TRACE_EVENT_FIELD(double, RotatorPitch)
+	UE_TRACE_EVENT_FIELD(double, RotatorYaw)
+	UE_TRACE_EVENT_FIELD(double, RotatorRoll)
+
+UE_TRACE_EVENT_END()
+#endif // UE_AUDIO_PROFILERTRACE_ENABLED
+
+
 FAudioVirtualLoop::FAudioVirtualLoop()
 	: TimeSinceLastUpdate(0.0f)
 	, TimeVirtualized(0.0f)
@@ -79,6 +111,11 @@ bool FAudioVirtualLoop::Virtualize(const FActiveSound& InActiveSound, FAudioDevi
 		return false;
 	}
 
+	if (InAudioDevice.CanHaveMultipleActiveSounds(InActiveSound.GetAudioComponentID()))
+	{
+		return false;
+	}
+
 	if (bDoRangeCheck && IsInAudibleRange(InActiveSound, &InAudioDevice))
 	{
 		return false;
@@ -87,6 +124,27 @@ bool FAudioVirtualLoop::Virtualize(const FActiveSound& InActiveSound, FAudioDevi
 	FActiveSound* ActiveSound = FActiveSound::CreateVirtualCopy(InActiveSound, InAudioDevice);
 	OutVirtualLoop.ActiveSound = ActiveSound;
 	OutVirtualLoop.CalculateUpdateInterval();
+
+	if (Audio::IParameterTransmitter* ParameterTransmitter = ActiveSound->GetTransmitter())
+	{
+		ParameterTransmitter->OnVirtualizeActiveSound();
+	}
+
+#if UE_AUDIO_PROFILERTRACE_ENABLED
+	const bool bChannelEnabled = UE_TRACE_CHANNELEXPR_IS_ENABLED(AudioChannel);
+	if (bChannelEnabled)
+	{
+		if (const FAudioDevice* AudioDevice = ActiveSound->AudioDevice)
+		{
+			UE_TRACE_LOG(Audio, VirtualLoopVirtualize, AudioChannel)
+				<< VirtualLoopVirtualize.DeviceId(static_cast<uint32>(AudioDevice->DeviceID))
+				<< VirtualLoopVirtualize.Timestamp(FPlatformTime::Cycles64())
+				<< VirtualLoopVirtualize.PlayOrder(ActiveSound->GetPlayOrder())
+				<< VirtualLoopVirtualize.ComponentId(ActiveSound->GetAudioComponentID())
+				<< VirtualLoopVirtualize.Name(Sound ? *Sound->GetPathName() : TEXT("N/A"));
+		}
+	}
+#endif // UE_AUDIO_PROFILERTRACE_ENABLED
 	return true;
 }
 
@@ -160,7 +218,7 @@ bool FAudioVirtualLoop::IsInAudibleRange(const FActiveSound& InActiveSound, cons
 		DistanceScale = InActiveSound.FocusData.DistanceScale;
 	}
 
-	DistanceScale = FMath::Max(DistanceScale, KINDA_SMALL_NUMBER);
+	DistanceScale = FMath::Max(DistanceScale, UE_KINDA_SMALL_NUMBER);
 	const FVector Location = InActiveSound.Transform.GetLocation();
 	return AudioDevice->LocationIsAudible(Location, InActiveSound.MaxDistance / DistanceScale);
 }
@@ -190,6 +248,8 @@ void FAudioVirtualLoop::UpdateFocusData(float DeltaTime)
 
 bool FAudioVirtualLoop::Update(float DeltaTime, bool bForceUpdate)
 {
+	check(ActiveSound);
+
 	// Keep playback time up-to-date as it may be used to evaluate whether or
 	// not virtual sound is eligible for playback when compared against
 	// actively playing sounds in concurrency checks.
@@ -216,6 +276,34 @@ bool FAudioVirtualLoop::Update(float DeltaTime, bool bForceUpdate)
 	Audio::FAudioDebugger::DrawDebugInfo(*this);
 #endif // ENABLE_AUDIO_DEBUG
 
+#if UE_AUDIO_PROFILERTRACE_ENABLED
+	const bool bChannelEnabled = UE_TRACE_CHANNELEXPR_IS_ENABLED(AudioChannel);
+	if (bChannelEnabled)
+	{
+		if (const FAudioDevice* AudioDevice = ActiveSound->AudioDevice)
+		{
+			const USoundBase* Sound = ActiveSound->GetSound();
+
+			const FTransform& Transform = ActiveSound->Transform;
+			const FVector& Location = Transform.GetLocation();
+			const FRotator Rotator = Transform.GetRotation().Rotator();
+			UE_TRACE_LOG(Audio, VirtualLoopUpdate, AudioChannel)
+				<< VirtualLoopUpdate.DeviceId(static_cast<uint32>(AudioDevice->DeviceID))
+				<< VirtualLoopUpdate.Timestamp(FPlatformTime::Cycles64())
+				<< VirtualLoopUpdate.PlayOrder(ActiveSound->GetPlayOrder())
+				<< VirtualLoopUpdate.TimeVirtualized(TimeVirtualized)
+				<< VirtualLoopUpdate.PlaybackTime(ActiveSound->PlaybackTime)
+				<< VirtualLoopUpdate.UpdateInterval(UpdateInterval)
+				<< VirtualLoopUpdate.LocationX(Location.X)
+				<< VirtualLoopUpdate.LocationY(Location.Y)
+				<< VirtualLoopUpdate.LocationZ(Location.Z)
+				<< VirtualLoopUpdate.RotatorPitch(Rotator.Pitch)
+				<< VirtualLoopUpdate.RotatorYaw(Rotator.Yaw)
+				<< VirtualLoopUpdate.RotatorRoll(Rotator.Roll);
+		}
+	}
+#endif // UE_AUDIO_PROFILERTRACE_ENABLED
+
 	UpdateFocusData(UpdateDelta);
 
 	// If not audible, update when will be checked again and return false
@@ -225,6 +313,33 @@ bool FAudioVirtualLoop::Update(float DeltaTime, bool bForceUpdate)
 		return false;
 	}
 
+	// Update parameters on virtual loop realization
+	if (Audio::IParameterTransmitter* ParameterTransmitter = ActiveSound->GetTransmitter())
+	{
+		uint64 AudioComponentID = ActiveSound->GetAudioComponentID();
+		if (AudioComponentID > 0)
+		{
+			if (UAudioComponent* AudioComponent = UAudioComponent::GetAudioComponentFromID(AudioComponentID))
+			{
+				// Use instance parameters which will not contain transient parameters
+				TArray<FAudioParameter> InstanceParams = AudioComponent->GetInstanceParameters();
+				ParameterTransmitter->OnRealizeVirtualizedActiveSound(MoveTemp(InstanceParams));
+			}
+		}
+	}
+
+#if UE_AUDIO_PROFILERTRACE_ENABLED
+	if (bChannelEnabled)
+	{
+		if (const FAudioDevice* AudioDevice = ActiveSound->AudioDevice)
+		{
+			UE_TRACE_LOG(Audio, VirtualLoopRealize, AudioChannel)
+				<< VirtualLoopRealize.DeviceId(static_cast<uint32>(AudioDevice->DeviceID))
+				<< VirtualLoopRealize.Timestamp(FPlatformTime::Cycles64())
+				<< VirtualLoopRealize.PlayOrder(ActiveSound->GetPlayOrder());
+		}
+	}
+#endif // UE_AUDIO_PROFILERTRACE_ENABLED
 	return true;
 }
 

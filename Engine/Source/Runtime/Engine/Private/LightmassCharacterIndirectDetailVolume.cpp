@@ -1,8 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Lightmass/LightmassCharacterIndirectDetailVolume.h"
+#include "Async/TaskGraphInterfaces.h"
 #include "Engine/CollisionProfile.h"
 #include "Components/BrushComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(LightmassCharacterIndirectDetailVolume)
 
 
 ALightmassCharacterIndirectDetailVolume::ALightmassCharacterIndirectDetailVolume(const FObjectInitializer& ObjectInitializer)
@@ -17,3 +20,4 @@ ALightmassCharacterIndirectDetailVolume::ALightmassCharacterIndirectDetailVolume
 	BrushColor.A = 255;
 
 }
+

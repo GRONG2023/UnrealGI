@@ -2,8 +2,8 @@
 
 #include "Camera/CameraModifier.h"
 #include "Camera/PlayerCameraManager.h"
-#include "Engine/Canvas.h"
-#include "DisplayDebugHelpers.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(CameraModifier)
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -93,6 +93,11 @@ bool UCameraModifier::IsDisabled() const
 	return bDisabled;
 }
 
+bool UCameraModifier::IsPendingDisable() const
+{
+	return bPendingDisable;
+}
+
 AActor* UCameraModifier::GetViewTarget() const
 {
 	return CameraOwner ? CameraOwner->GetViewTarget() : nullptr;
@@ -100,7 +105,23 @@ AActor* UCameraModifier::GetViewTarget() const
 
 void UCameraModifier::AddedToCamera( APlayerCameraManager* Camera ) 
 {
+	if (CameraOwner)
+	{
+		CameraOwner->OnDestroyed.RemoveDynamic(this, &UCameraModifier::OnCameraOwnerDestroyed);
+	}
 	CameraOwner = Camera;
+	if (CameraOwner)
+	{
+		CameraOwner->OnDestroyed.AddDynamic(this, &UCameraModifier::OnCameraOwnerDestroyed);
+	}
+}
+
+void UCameraModifier::OnCameraOwnerDestroyed(AActor* InOwner)
+{
+	if (InOwner == CameraOwner)
+	{
+		CameraOwner = nullptr;
+	}
 }
 
 UWorld* UCameraModifier::GetWorld() const
@@ -158,3 +179,4 @@ void UCameraModifier::DisplayDebug(class UCanvas* Canvas, const FDebugDisplayInf
 {
 
 }
+

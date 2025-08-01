@@ -67,7 +67,7 @@ void FMeshDescriptionOperations::RecomputeNormalsAndTangentsIfNeeded(FMeshDescri
 
 void FMeshDescriptionOperations::CreatePolygonNTB(FMeshDescription& MeshDescription, float ComparisonThreshold)
 {
-	FStaticMeshOperations::ComputePolygonTangentsAndNormals(MeshDescription, ComparisonThreshold);
+	FStaticMeshOperations::ComputeTriangleTangentsAndNormals(MeshDescription, ComparisonThreshold);
 }
 
 void FMeshDescriptionOperations::CreateNormals(FMeshDescription& MeshDescription, FMeshDescriptionOperations::ETangentOptions TangentOptions, bool bComputeTangent)
@@ -110,7 +110,12 @@ bool FMeshDescriptionOperations::GenerateUniqueUVsForStaticMesh(const FMeshDescr
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(FMeshDescriptionOperations::GenerateUniqueUVsForStaticMesh);
 
-	return FStaticMeshOperations::GenerateUniqueUVsForStaticMesh(MeshDescription, TextureResolution, bMergeIdenticalMaterials, OutTexCoords);
+	FStaticMeshOperations::FGenerateUVOptions GenerateUVOptions;
+	GenerateUVOptions.TextureResolution = TextureResolution;
+	GenerateUVOptions.bMergeTrianglesWithIdenticalAttributes = bMergeIdenticalMaterials;
+	GenerateUVOptions.UVMethod = FStaticMeshOperations::EGenerateUVMethod::Legacy;
+
+	return FStaticMeshOperations::GenerateUV(MeshDescription, GenerateUVOptions, OutTexCoords);
 }
 
 bool FMeshDescriptionOperations::AddUVChannel(FMeshDescription& MeshDescription)

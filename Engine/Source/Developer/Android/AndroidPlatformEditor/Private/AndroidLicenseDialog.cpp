@@ -19,9 +19,9 @@
 #include "Widgets/Input/SHyperlink.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SScrollBox.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Misc/SecureHash.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "Interfaces/IAndroidDeviceDetectionModule.h"
 #include "Interfaces/IAndroidDeviceDetection.h"
 #include "Interfaces/IMainFrameModule.h"
@@ -43,7 +43,7 @@ void SAndroidLicenseDialog::Construct(const FArguments& InArgs)
 	if (FileReader)
 	{
 		// Create buffer for file input
-		uint32 BufferSize = FileReader->TotalSize();
+		uint32 BufferSize = IntCastChecked<uint32>(FileReader->TotalSize());
 		uint8* Buffer = (uint8*)FMemory::Malloc(BufferSize);
 		FileReader->Serialize(Buffer, BufferSize);
 
@@ -83,7 +83,7 @@ void SAndroidLicenseDialog::Construct(const FArguments& InArgs)
 
 			if (LicenseEnd < BufferEnd)
 			{
-				int32 LicenseLength = LicenseEnd - LicenseStart;
+				int32 LicenseLength = IntCastChecked<int32>(LicenseEnd - LicenseStart);
 
 				{
 					const FUTF8ToTCHAR ConvertedString(reinterpret_cast<ANSICHAR*>(LicenseStart), LicenseLength);
@@ -104,7 +104,7 @@ void SAndroidLicenseDialog::Construct(const FArguments& InArgs)
 		+ SVerticalBox::Slot()
 		[
 			SAssignNew(ScrollBox, SScrollBox)
-			.Style(FEditorStyle::Get(), "ScrollBox")
+			.Style(FAppStyle::Get(), "ScrollBox")
 
 			+ SScrollBox::Slot()
 			[
@@ -115,7 +115,7 @@ void SAndroidLicenseDialog::Construct(const FArguments& InArgs)
 				[
 					SNew(SRichTextBlock)
 					.Text(FText::FromString(LicenseText))
-					.DecoratorStyleSet(&FEditorStyle::Get())
+					.DecoratorStyleSet(&FAppStyle::Get())
 					.AutoWrapText(true)
 					.Justification(ETextJustify::Left)
 				]
@@ -164,7 +164,7 @@ static FString GetLicensePath()
 	IAndroidDeviceDetection* DeviceDetection = AndroidDeviceDetection.GetAndroidDeviceDetection();
 	FString ADBPath = DeviceDetection->GetADBPath();
 
-	if (!FPaths::FileExists(*ADBPath))
+	if (!FPaths::FileExists(ADBPath))
 	{
 		return TEXT("");
 	}
@@ -267,9 +267,6 @@ FReply SAndroidLicenseDialog::OnAgree()
 
 FReply SAndroidLicenseDialog::OnCancel()
 {
-	// turn off Gradle checkbox
-	//GetMutableDefault<UAndroidRuntimeSettings>()->bEnableGradle = false;
-
 	TSharedRef<SWindow> ParentWindow = FSlateApplication::Get().FindWidgetWindow(AsShared()).ToSharedRef();
 	FSlateApplication::Get().RequestDestroyWindow(ParentWindow);
 	return FReply::Handled();

@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 // Pattern-Matching based on OSC 1.0 Protocol
 #include "Audio/AudioAddressPattern.h"
+#include "CoreGlobals.h"
 
 
 bool FAudioAddressPattern::BracePatternMatches(const FString& Pattern, int32 PatternStartIndex, int32 PatternEndIndex, const FString& Part, int32& PartIter)
@@ -46,7 +47,7 @@ bool FAudioAddressPattern::BracePatternMatches(const FString& Pattern, int32 Pat
 		{
 			bMatches = false;
 			PartIndex = PartIter;
-			while (Pattern[PatternIter] != ',' && PatternIter < PatternEndIndex)
+			while (PatternIter < PatternEndIndex && Pattern[PatternIter] != ',')
 			{
 				++PatternIter;
 			}

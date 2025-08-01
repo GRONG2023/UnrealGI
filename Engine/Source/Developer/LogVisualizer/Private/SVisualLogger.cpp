@@ -7,7 +7,6 @@
 #include "Modules/ModuleManager.h"
 #include "Async/Future.h"
 #include "Async/Async.h"
-#include "EngineGlobals.h"
 #include "Debug/DebugDrawService.h"
 #include "AI/NavigationSystemBase.h"
 #include "Engine/Engine.h"
@@ -19,12 +18,12 @@
 #include "LogVisualizerStyle.h"
 #include "VisualLoggerCommands.h"
 #include "Widgets/Docking/SDockTab.h"
-#include "LogVisualizerPrivate.h"
 #include "SVisualLoggerToolbar.h"
 #include "SVisualLoggerFilters.h"
 #include "SVisualLoggerView.h"
 #include "SVisualLoggerLogsList.h"
 #include "SVisualLoggerStatusView.h"
+#include "SVisualLoggerTab.h"
 #include "VisualLoggerTimeSliderController.h"
 #include "VisualLoggerRenderingActor.h"
 #include "VisualLoggerCanvasRenderer.h"
@@ -35,9 +34,11 @@
 #include "Editor/EditorEngine.h"
 #include "Editor.h"
 #endif
+#include "GameDelegates.h"
 #include "ISettingsModule.h"
 
 #include "VisualLogger/VisualLoggerBinaryFileDevice.h"
+#include "VisualLogger/VisualLoggerFilterVolume.h"
 
 #define LOCTEXT_NAMESPACE "SVisualLogger"
 
@@ -70,7 +71,7 @@ namespace
 		if (GIsEditor && EEngine != nullptr && World == nullptr)
 		{
 			// lets use PlayWorld during PIE/Simulate and regular world from editor otherwise, to draw debug information
-			World = EEngine->PlayWorld != nullptr ? EEngine->PlayWorld : EEngine->GetEditorWorldContext().World();
+			World = EEngine->PlayWorld != nullptr ? ToRawPtr(EEngine->PlayWorld) : EEngine->GetEditorWorldContext().World();
 		}
 
 #endif
@@ -109,14 +110,22 @@ SVisualLogger::SVisualLogger()
 
 SVisualLogger::~SVisualLogger()
 {
+#if WITH_EDITOR
+	FEditorDelegates::PostPIEStarted.Remove(PostPIEStartedHandle);
+	FGameDelegates::Get().GetEndPlayMapDelegate().RemoveAll(this);
+#endif
+		
+	TabManager->CloseAllAreas();
+	TabManager->UnregisterAllTabSpawners();
+
 	GEngine->OnWorldAdded().RemoveAll(this);
 
 	FVisualLogger::Get().RemoveDevice(InternalDevice.Get());
 	InternalDevice.Reset();
 
-	UWorld* World = NULL;
 #if WITH_EDITOR
-	ULogVisualizerSettings::StaticClass()->GetDefaultObject<ULogVisualizerSettings>()->SavePresistentData();
+	ULogVisualizerSettings::StaticClass()->GetDefaultObject<ULogVisualizerSettings>()->SavePersistentData();
+	ULogVisualizerSettings::StaticClass()->GetDefaultObject<ULogVisualizerSettings>()->OnSettingChanged().RemoveAll(this);
 #endif
 
 	if (LastUsedWorld.IsValid())
@@ -138,6 +147,10 @@ SVisualLogger::~SVisualLogger()
 	FLogVisualizer::Get().GetEvents().OnFiltersChanged.RemoveAll(this);
 	FLogVisualizer::Get().GetEvents().OnLogLineSelectionChanged.Unbind();
 	FLogVisualizer::Get().GetEvents().OnKeyboardEvent.Unbind();
+
+	GEngine->OnLevelActorAdded().RemoveAll(this);
+	GEngine->OnLevelActorDeleted().RemoveAll(this);
+	GEngine->OnActorMoved().RemoveAll(this);
 
 	FVisualLoggerDatabase::Get().Reset();
 }
@@ -162,7 +175,40 @@ void SVisualLogger::Construct(const FArguments& InArgs, const TSharedRef<SDockTa
 	FVisualLoggerDatabase::Get().GetEvents().OnNewItem.AddRaw(this, &SVisualLogger::OnNewItemHandler);
 	FVisualLoggerDatabase::Get().GetEvents().OnItemSelectionChanged.AddRaw(this, &SVisualLogger::OnItemsSelectionChanged);
 
+	LastUsedWorld = FVisualLoggerEditorInterface::Get()->GetWorld();
+	CollectFilterVolumes();
+	ProcessFilterVolumes();
+
+#if WITH_EDITOR
+	PostPIEStartedHandle = FEditorDelegates::PostPIEStarted.AddLambda([this](const bool bIsSimulating)
+	{
+		UWorld* World = FVisualLoggerEditorInterface::Get()->GetWorld();
+		if (World != nullptr && World != LastUsedWorld)
+		{
+			OnNewWorld(World);
+		}
+	});
+
+	// Note that we use EndPlay delegate instead of FEditorDelegates::EndPie since we want 
+	// the teardown of the PlayWorld to be completed so FVisualLoggerEditorInterface will return
+	// us the Editor world (if any) as the new world.
+	FGameDelegates::Get().GetEndPlayMapDelegate().AddLambda([this]()
+	{
+		UWorld* World = FVisualLoggerEditorInterface::Get()->GetWorld();
+		if (World != nullptr && World != LastUsedWorld)
+		{
+			OnNewWorld(World);
+		}
+	});
+
+	ULogVisualizerSettings::StaticClass()->GetDefaultObject<ULogVisualizerSettings>()->OnSettingChanged().AddRaw(this, &SVisualLogger::OnSettingsChanged);
+#endif
+
 	GEngine->OnWorldAdded().AddRaw(this, &SVisualLogger::OnNewWorld);
+
+	GEngine->OnLevelActorAdded().AddRaw(this, &SVisualLogger::OnLevelActorAdded);
+	GEngine->OnLevelActorDeleted().AddRaw(this, &SVisualLogger::OnLevelActorDeleted);
+	GEngine->OnActorMoved().AddRaw(this, &SVisualLogger::OnActorMoved);
 
 	//////////////////////////////////////////////////////////////////////////
 	// Command Action Lists
@@ -171,7 +217,7 @@ void SVisualLogger::Construct(const FArguments& InArgs, const TSharedRef<SDockTa
 
 	ULogVisualizerSettings* Settings = ULogVisualizerSettings::StaticClass()->GetDefaultObject<ULogVisualizerSettings>();
 	Settings->ConfigureVisLog();
-	Settings->LoadPresistentData();
+	Settings->LoadPersistentData();
 
 	ActionList.MapAction(Commands.StartRecording, FExecuteAction::CreateRaw(this, &SVisualLogger::HandleStartRecordingCommandExecute), FCanExecuteAction::CreateRaw(this, &SVisualLogger::HandleStartRecordingCommandCanExecute), FIsActionChecked(), FIsActionButtonVisible::CreateRaw(this, &SVisualLogger::HandleStartRecordingCommandIsVisible));
 	ActionList.MapAction(Commands.StopRecording, FExecuteAction::CreateRaw(this, &SVisualLogger::HandleStopRecordingCommandExecute), FCanExecuteAction::CreateRaw(this, &SVisualLogger::HandleStopRecordingCommandCanExecute), FIsActionChecked(), FIsActionButtonVisible::CreateRaw(this, &SVisualLogger::HandleStopRecordingCommandIsVisible));
@@ -195,6 +241,11 @@ void SVisualLogger::Construct(const FArguments& InArgs, const TSharedRef<SDockTa
 		FCanExecuteAction::CreateRaw(this, &SVisualLogger::HandleSaveCommandCanExecute),
 		FIsActionChecked(), 
 		FIsActionButtonVisible::CreateRaw(this, &SVisualLogger::HandleSaveCommandCanExecute));
+	ActionList.MapAction(Commands.Refresh,
+		FExecuteAction::CreateRaw(this, &SVisualLogger::HandleRefreshCommandExecute),
+		FCanExecuteAction::CreateRaw(this, &SVisualLogger::HandleRefreshCommandCanExecute),
+		FIsActionChecked(),
+		FIsActionButtonVisible::CreateRaw(this, &SVisualLogger::HandleRefreshCommandCanExecute));
 
 
 	// Tab Spawners
@@ -536,6 +587,17 @@ void SVisualLogger::HandleCameraCommandExecute()
 	}
 }
 
+bool SVisualLogger::HandleRefreshCommandCanExecute() const
+{
+	UWorld* World = FLogVisualizer::Get().GetWorld();
+	return FVisualLogger::Get().IsRecording() && World && World->IsEditorWorld();
+}
+
+void SVisualLogger::HandleRefreshCommandExecute()
+{
+	FVisualLogger::Get().Flush();
+}
+
 bool SVisualLogger::HandleLoadCommandCanExecute() const
 {
 	return true;
@@ -684,11 +746,6 @@ void SVisualLogger::ResetData()
 		MainView->ResetData();
 	}
 
-	if (VisualLoggerFilters.IsValid() && ULogVisualizerSettings::StaticClass()->GetDefaultObject<ULogVisualizerSettings>()->bResetDataWithNewSession)
-	{
-		VisualLoggerFilters->ResetData();
-	}
-
 	if (LogsList.IsValid())
 	{
 		LogsList->ResetData();
@@ -724,18 +781,88 @@ void SVisualLogger::ResetData()
 	FLogVisualizer::Get().GetTimeSliderController().Get()->GetTimeSliderArgs().OnScrubPositionChanged = FVisualLoggerTimeSliderArgs::FOnScrubPositionChanged::CreateRaw(this, &SVisualLogger::OnScrubPositionChanged);
 }
 
+void SVisualLogger::CollectFilterVolumes()
+{
+	FilterVolumesInLastUsedWorld.Reset();
+	for (TActorIterator<AActor> It(LastUsedWorld.Get(), AVisualLoggerFilterVolume::StaticClass()); It; ++It)
+	{
+		AVisualLoggerFilterVolume* Volume = Cast<AVisualLoggerFilterVolume>(*It);
+		FilterVolumesInLastUsedWorld.Emplace(Volume);
+	}
+}
+
+void SVisualLogger::ProcessFilterVolumes()
+{
+	FilterBoxes.Reset(FilterVolumesInLastUsedWorld.Num());
+	for (TWeakObjectPtr<const AVisualLoggerFilterVolume>& WeakVolume : FilterVolumesInLastUsedWorld)
+	{
+		if (const AVisualLoggerFilterVolume* Volume = WeakVolume.Get())
+		{
+			FilterBoxes.Add(Volume->GetBounds().GetBox());
+		}
+	}
+}
+
+void SVisualLogger::OnLevelActorAdded(AActor* Actor)
+{
+	if (AVisualLoggerFilterVolume* Volume = Cast<AVisualLoggerFilterVolume>(Actor))
+	{
+		FilterVolumesInLastUsedWorld.AddUnique(Volume);
+		ProcessFilterVolumes();
+		OnFiltersChanged();
+	}
+}
+
+void SVisualLogger::OnLevelActorDeleted(AActor* Actor)
+{
+	if (AVisualLoggerFilterVolume* Volume = Cast<AVisualLoggerFilterVolume>(Actor))
+	{
+		FilterVolumesInLastUsedWorld.Remove(Volume);
+		ProcessFilterVolumes();
+		OnFiltersChanged();
+	}
+}
+
+void SVisualLogger::OnActorMoved(AActor* Actor)
+{
+	if (AVisualLoggerFilterVolume* Volume = Cast<AVisualLoggerFilterVolume>(Actor))
+	{
+		ProcessFilterVolumes();
+		OnFiltersChanged();
+	}
+}
+
+void SVisualLogger::OnSettingsChanged(FName PropertyName)
+{
+	if (PropertyName == GET_MEMBER_NAME_CHECKED(ULogVisualizerSettings, bUseFilterVolumes))
+	{
+		// Note that we don't need to collect & process the volumes since their bookkeeping
+		// is not conditional to the flag, only the filtering.
+		OnFiltersChanged();
+	}
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(ULogVisualizerSettings, bSearchInsideLogs))
+	{
+		OnFiltersChanged();
+	}
+}
+
 void SVisualLogger::OnNewWorld(UWorld* NewWorld)
 {
 	LastUsedWorld = NewWorld;
 
-	AVisualLoggerRenderingActor* HelperActor = Cast<AVisualLoggerRenderingActor>(FVisualLoggerEditorInterface::Get()->GetHelperActor(LastUsedWorld.Get()));
-	if (ensure(HelperActor))
+	// Only reset data when activating a new game world, not when returning to the Editor world (i.e. after PIE)
+	if (!IsValid(NewWorld) ||
+		(NewWorld->IsGameWorld() && ULogVisualizerSettings::StaticClass()->GetDefaultObject<ULogVisualizerSettings>()->bResetDataWithNewSession))
 	{
-		if (LastUsedWorld.IsValid() == false || ULogVisualizerSettings::StaticClass()->GetDefaultObject<ULogVisualizerSettings>()->bResetDataWithNewSession)
-		{
-			ResetData();
-		}
+		ResetData();
+	}
 
+	CollectFilterVolumes();
+	ProcessFilterVolumes();
+
+	AVisualLoggerRenderingActor* HelperActor = Cast<AVisualLoggerRenderingActor>(FVisualLoggerEditorInterface::Get()->GetHelperActor(LastUsedWorld.Get()));
+	if (ensure(HelperActor != nullptr))
+	{
 		// reset data and simulate row/item selection to recreate rendering proxy with correct data
 		HelperActor->ResetRendering();
 		const TArray<FName>& SelectedRows = FVisualLoggerDatabase::Get().GetSelectedRows();
@@ -750,7 +877,7 @@ void SVisualLogger::OnNewWorld(UWorld* NewWorld)
 
 void SVisualLogger::OnObjectSelectionChanged(const TArray<FName>& RowNames)
 {
-	const float ScrubTime = FLogVisualizer::Get().GetTimeSliderController().Get()->GetTimeSliderArgs().ScrubPosition.Get();
+	const double ScrubTime = FLogVisualizer::Get().GetTimeSliderController().Get()->GetTimeSliderArgs().ScrubPosition.Get();
 	for (auto RowName : RowNames)
 	{
 		FVisualLoggerDBRow& DBRow = FVisualLoggerDatabase::Get().GetRowByName(RowName);
@@ -777,8 +904,6 @@ void SVisualLogger::OnItemsSelectionChanged(const FVisualLoggerDBRow& ChangedRow
 void SVisualLogger::OnFiltersChanged()
 {
 	const uint32 StartCycles = FPlatformTime::Cycles();
-
-	ULogVisualizerSettings* Settings = ULogVisualizerSettings::StaticClass()->GetDefaultObject<ULogVisualizerSettings>();
 	const FString QuickSearchStrng = FVisualLoggerFilters::Get().GetSearchString();
 
 	TArray<TFuture<void> > AllFutures;
@@ -821,12 +946,10 @@ void SVisualLogger::OnFiltersChanged()
 		FVisualLoggerDatabase::Get().SetRowVisibility(DBRow.GetOwnerName(), DBRow.GetNumberOfHiddenItems() != DBRow.GetItems().Num());
 	}
 
-
-	const uint32 EndCycles = FPlatformTime::Cycles();
 	const int32 BlockingCycles = int32(FPlatformTime::Cycles() - StartCycles);
 	{
 		const TArray<FName>& SelectedRows = FVisualLoggerDatabase::Get().GetSelectedRows();
-		const float ScrubTime = FLogVisualizer::Get().GetTimeSliderController()->GetTimeSliderArgs().ScrubPosition.Get();
+		const double ScrubTime = FLogVisualizer::Get().GetTimeSliderController()->GetTimeSliderArgs().ScrubPosition.Get();
 		{
 			for (auto RowName : SelectedRows)
 			{
@@ -849,7 +972,6 @@ void SVisualLogger::OnFiltersSearchChanged(const FText& Filter)
 
 	FVisualLoggerFilters::Get().SetSearchString(Filter.ToString());
 
-	ULogVisualizerSettings* Settings = ULogVisualizerSettings::StaticClass()->GetDefaultObject<ULogVisualizerSettings>();
 	const FString QuickSearchStrng = FVisualLoggerFilters::Get().GetSearchString();
 
 	TArray<TFuture<void> > AllFutures;
@@ -904,7 +1026,6 @@ void SVisualLogger::OnFiltersSearchChanged(const FText& Filter)
 		VisualLoggerCanvasRenderer->DirtyCachedData();
 	}
 
-	const uint32 EndCycles = FPlatformTime::Cycles();
 	const int32 BlockingCycles = int32(FPlatformTime::Cycles() - StartCycles);
 	UE_LOG(LogVisualLogger, Display, TEXT("SVisualLogger::OnFiltersSearchChanged: %5.2fms"), FPlatformTime::ToMilliseconds(BlockingCycles));
 }
@@ -912,6 +1033,11 @@ void SVisualLogger::OnFiltersSearchChanged(const FText& Filter)
 void SVisualLogger::OnNewItemHandler(const FVisualLoggerDBRow& DBRow, int32 ItemIndex)
 {
 	UpdateVisibilityForEntry(DBRow, ItemIndex);
+
+	// A new item can be hidden by the category filters by UpdateVisibilityForEntry.
+	// In such case, we might need to update row visibility/
+	// Note that this is not called within UpdateVisibilityForEntry since it can be called by async tasks.
+	FVisualLoggerDatabase::Get().SetRowVisibility(DBRow.GetOwnerName(), DBRow.GetNumberOfHiddenItems() != DBRow.GetItems().Num());
 }
 
 void SVisualLogger::UpdateVisibilityForEntry(const FVisualLoggerDBRow& DBRow, int32 ItemIndex)
@@ -922,6 +1048,9 @@ void SVisualLogger::UpdateVisibilityForEntry(const FVisualLoggerDBRow& DBRow, in
 
 	TArray<FVisualLoggerCategoryVerbosityPair> OutCategories;
 	FVisualLoggerHelpers::GetCategories(CurrentEntry.Entry, OutCategories);
+
+	bool bPassingFilter = true;
+
 	bool bHasValidCategories = false;
 	for (FVisualLoggerCategoryVerbosityPair& CategoryPair : OutCategories)
 	{
@@ -931,8 +1060,24 @@ void SVisualLogger::UpdateVisibilityForEntry(const FVisualLoggerDBRow& DBRow, in
 			break;
 		}
 	}
+	bPassingFilter &= bHasValidCategories;
 
-	if (Settings->bSearchInsideLogs && bHasValidCategories && SearchString.Len() > 0)
+	if (bPassingFilter && Settings->bUseFilterVolumes && FilterBoxes.Num() > 0 && CurrentEntry.Entry.bIsLocationValid)
+	{
+		bool bIsInsideAnyFilterVolume = false;
+		for (const FBox& Box : FilterBoxes)
+		{
+			if (Box.IsInside(CurrentEntry.Entry.Location))
+			{
+				bIsInsideAnyFilterVolume = true;
+				break;
+			}
+		}
+
+		bPassingFilter &= bIsInsideAnyFilterVolume;
+	}
+
+	if (bPassingFilter && Settings->bSearchInsideLogs && SearchString.Len() > 0)
 	{
 		bool bMatchSearchString = false;
 		for (const FVisualLogLine& CurrentLine : CurrentEntry.Entry.LogLines)
@@ -955,12 +1100,10 @@ void SVisualLogger::UpdateVisibilityForEntry(const FVisualLoggerDBRow& DBRow, in
 			}
 		}
 
-		FVisualLoggerDatabase::Get().GetRowByName(DBRow.GetOwnerName()).SetItemVisibility(ItemIndex, bMatchSearchString);
+		bPassingFilter &= bMatchSearchString;
 	}
-	else
-	{
-		FVisualLoggerDatabase::Get().GetRowByName(DBRow.GetOwnerName()).SetItemVisibility(ItemIndex, bHasValidCategories);
-	}
+
+	FVisualLoggerDatabase::Get().GetRowByName(DBRow.GetOwnerName()).SetItemVisibility(ItemIndex, bPassingFilter);
 }
 
 void SVisualLogger::OnLogLineSelectionChanged(TSharedPtr<struct FLogEntryItem> SelectedItem, int64 UserData, FName TagName)
@@ -976,10 +1119,10 @@ void SVisualLogger::OnLogLineSelectionChanged(TSharedPtr<struct FLogEntryItem> S
 	}
 }
 
-void SVisualLogger::OnScrubPositionChanged(float NewScrubPosition, bool bScrubbing)
+void SVisualLogger::OnScrubPositionChanged(double NewScrubPosition, bool bScrubbing)
 {
 	const TArray<FName> &SelectedRows = FVisualLoggerDatabase::Get().GetSelectedRows();
-	const float ScrubTime = FLogVisualizer::Get().GetTimeSliderController()->GetTimeSliderArgs().ScrubPosition.Get();
+	const double ScrubTime = FLogVisualizer::Get().GetTimeSliderController()->GetTimeSliderArgs().ScrubPosition.Get();
 	for (auto RowName : SelectedRows)
 	{
 		auto& DBRow = FVisualLoggerDatabase::Get().GetRowByName(RowName);
@@ -1016,9 +1159,9 @@ FReply SVisualLogger::OnKeyboardRedirection(const FGeometry& MyGeometry, const F
 	const FKey Key = InKeyEvent.GetKey();
 	if (Key == EKeys::Left || Key == EKeys::Right)
 	{
-		const float ScrubTime = FLogVisualizer::Get().GetTimeSliderController()->GetTimeSliderArgs().ScrubPosition.Get();
-		float NewTimeToSet = ScrubTime;
-		float BestTimeDifference = FLT_MAX;
+		const double ScrubTime = FLogVisualizer::Get().GetTimeSliderController()->GetTimeSliderArgs().ScrubPosition.Get();
+		double NewTimeToSet = ScrubTime;
+		double BestTimeDifference = MAX_dbl;
 
 		const int32 MoveDist = InKeyEvent.IsLeftControlDown() ? InKeyEvent.IsLeftShiftDown() ? 20 : 10 : 1;
 		for (auto RowName : SelectedRows)
@@ -1032,7 +1175,7 @@ FReply SVisualLogger::OnKeyboardRedirection(const FGeometry& MyGeometry, const F
 
 			if (Key == EKeys::Right)
 			{
-				float TimeDifference = DBRow.GetCurrentItem().Entry.TimeStamp - ScrubTime;
+				double TimeDifference = DBRow.GetCurrentItem().Entry.TimeStamp - ScrubTime;
 				if (TimeDifference > 0 && FMath::Abs(TimeDifference) < FMath::Abs(BestTimeDifference))
 				{
 					BestTimeDifference = TimeDifference;
@@ -1049,7 +1192,7 @@ FReply SVisualLogger::OnKeyboardRedirection(const FGeometry& MyGeometry, const F
 			}
 			else if (Key == EKeys::Left)
 			{
-				float TimeDifference = DBRow.GetCurrentItem().Entry.TimeStamp - ScrubTime;
+				double TimeDifference = DBRow.GetCurrentItem().Entry.TimeStamp - ScrubTime;
 				if (TimeDifference < 0 && FMath::Abs(TimeDifference) < FMath::Abs(BestTimeDifference))
 				{
 					BestTimeDifference = TimeDifference;

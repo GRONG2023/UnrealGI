@@ -1,9 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Systems/MovieSceneLevelVisibilitySystem.h"
+#include "Engine/Level.h"
 #include "EntitySystem/BuiltInComponentTypes.h"
 #include "EntitySystem/MovieSceneEntitySystemTask.h"
-#include "EntitySystem/MovieSceneMasterInstantiatorSystem.h"
+#include "EntitySystem/MovieSceneRootInstantiatorSystem.h"
 #include "EntitySystem/MovieSceneSpawnablesSystem.h"
 #include "EntitySystem/MovieSceneEntitySystemLinker.h"
 #include "MovieSceneTracksComponentTypes.h"
@@ -15,6 +16,8 @@
 #include "GameFramework/Actor.h"
 
 #include "Algo/Find.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneLevelVisibilitySystem)
 
 namespace UE
 {
@@ -47,7 +50,7 @@ void SetLevelVisibility(ULevelStreaming& Level, bool bVisible, EFlushLevelStream
 		ULevel* LoadedLevel = Level.GetLoadedLevel();
 		if (LoadedLevel != nullptr)
 		{
-			TArray<AActor*>& Actors = LoadedLevel->Actors;
+			auto& Actors = LoadedLevel->Actors;
 			for ( int32 ActorIndex = 0; ActorIndex < Actors.Num(); ++ActorIndex )
 			{
 				AActor* Actor = Actors[ActorIndex];
@@ -489,4 +492,5 @@ void UMovieSceneLevelVisibilitySystem::RestorePreAnimatedState(const FPreAnimati
 {
 	SharedData.RestoreLevels(Linker);
 }
+
 

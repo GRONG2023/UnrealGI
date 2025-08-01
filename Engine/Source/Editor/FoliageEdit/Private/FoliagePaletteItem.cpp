@@ -1,20 +1,50 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "FoliagePaletteItem.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/SToolTip.h"
-#include "Widgets/Input/SCheckBox.h"
-#include "Modules/ModuleManager.h"
-#include "Widgets/Images/SImage.h"
-#include "EditorStyleSet.h"
 
-#include "FoliageType.h"
-#include "FoliageType_InstancedStaticMesh.h"
-
+#include "AssetRegistry/AssetData.h"
 #include "AssetThumbnail.h"
+#include "AssetToolsModule.h"
+#include "Delegates/Delegate.h"
+#include "Engine/Blueprint.h"
+#include "FoliageEdMode.h"
+#include "FoliageType.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
 #include "IAssetTools.h"
 #include "IAssetTypeActions.h"
-#include "AssetToolsModule.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Margin.h"
+#include "Math/Interval.h"
+#include "Math/Vector2D.h"
+#include "Misc/Optional.h"
+#include "Modules/ModuleManager.h"
+#include "SFoliagePalette.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/SlateColor.h"
+#include "Templates/Casts.h"
+#include "Types/SlateEnums.h"
+#include "Types/SlateStructs.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/Package.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SCheckBox.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SNullWidget.h"
+#include "Widgets/SOverlay.h"
+#include "Widgets/SToolTip.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Widgets/Views/SExpanderArrow.h"
+
+class STableViewBase;
+class SWidget;
 
 #define LOCTEXT_NAMESPACE "FoliageEd_Mode"
 
@@ -104,13 +134,13 @@ TSharedRef<SToolTip> FFoliagePaletteItemModel::CreateTooltipWidget() const
 {
 	return 
 		SNew(SToolTip)
-		.TextMargin(1)
-		.BorderImage(FEditorStyle::GetBrush("ContentBrowser.TileViewTooltip.ToolTipBorder"))
+		.TextMargin(1.f)
+		.BorderImage(FAppStyle::GetBrush("ContentBrowser.TileViewTooltip.ToolTipBorder"))
 		.Visibility(this, &FFoliagePaletteItemModel::GetTooltipVisibility)
 		[
 			SNew(SBorder)
 			.Padding(3.f)
-			.BorderImage(FEditorStyle::GetBrush("ContentBrowser.TileViewTooltip.NonContentBorder"))
+			.BorderImage(FAppStyle::GetBrush("ContentBrowser.TileViewTooltip.NonContentBorder"))
 			[
 				SNew(SVerticalBox)
 
@@ -120,11 +150,11 @@ TSharedRef<SToolTip> FFoliagePaletteItemModel::CreateTooltipWidget() const
 					SNew(SBorder)
 					.Padding(FMargin(6.f))
 					.HAlign(HAlign_Left)
-					.BorderImage(FEditorStyle::GetBrush("ContentBrowser.TileViewTooltip.ContentBorder"))
+					.BorderImage(FAppStyle::GetBrush("ContentBrowser.TileViewTooltip.ContentBorder"))
 					[
 						SNew(STextBlock)
 						.Text(FText::FromName(DisplayFName))
-						.Font(FEditorStyle::GetFontStyle("ContentBrowser.TileViewTooltip.NameFont"))
+						.Font(FAppStyle::GetFontStyle("ContentBrowser.TileViewTooltip.NameFont"))
 						.HighlightText(this, &FFoliagePaletteItemModel::GetPaletteSearchText)
 					]
 				]
@@ -144,7 +174,7 @@ TSharedRef<SToolTip> FFoliagePaletteItemModel::CreateTooltipWidget() const
 						.Padding(6.f)
 						.HAlign(HAlign_Center)
 						.Visibility(this, &FFoliagePaletteItemModel::GetTooltipThumbnailVisibility)
-						.BorderImage(FEditorStyle::GetBrush("ContentBrowser.TileViewTooltip.ContentBorder"))
+						.BorderImage(FAppStyle::GetBrush("ContentBrowser.TileViewTooltip.ContentBorder"))
 						[
 							SNew(SBox)
 							.HeightOverride(64.f)
@@ -159,7 +189,7 @@ TSharedRef<SToolTip> FFoliagePaletteItemModel::CreateTooltipWidget() const
 					[
 						SNew(SBorder)
 						.Padding(6.f)
-						.BorderImage(FEditorStyle::GetBrush("ContentBrowser.TileViewTooltip.ContentBorder"))
+						.BorderImage(FAppStyle::GetBrush("ContentBrowser.TileViewTooltip.ContentBorder"))
 						[
 							SNew(SVerticalBox)
 
@@ -228,18 +258,19 @@ TSharedRef<SButton> FFoliagePaletteItemModel::CreateSaveAssetButton(TAttribute<E
 {
 	return 
 		SNew(SButton)
-		.ContentPadding(0)
-		.ButtonStyle(FEditorStyle::Get(), "ToggleButton")
+		.ButtonStyle(FAppStyle::Get(), "FoliageEditMode.FloatingButton")
 		.Visibility(InVisibility)
 		.IsEnabled(this, &FFoliagePaletteItemModel::IsSaveEnabled)
 		.OnClicked(this, &FFoliagePaletteItemModel::HandleSaveAsset)
 		.ToolTipText(LOCTEXT("SaveButtonToolTip", "Save foliage asset"))
-		.HAlign(HAlign_Center)
-		.VAlign(VAlign_Center)
+		.HAlign(HAlign_Right)
+		.VAlign(VAlign_Top)
+		.ContentPadding(0.f)
 		.Content()
 		[
 			SNew(SImage)
-			.Image(FEditorStyle::GetBrush("Level.SaveIcon16x"))
+	        .ColorAndOpacity(FSlateColor::UseForeground())
+			.Image(FAppStyle::Get().GetBrush("Icons.Save"))
 		];
 }
 
@@ -280,7 +311,7 @@ FText FFoliagePaletteItemModel::GetInstanceCountText(bool bRounded) const
 		};
 
 		int32 NumThousands = 0;
-		float DisplayValue = InstanceCountCurrentLevel;
+		double DisplayValue = InstanceCountCurrentLevel;
 		while (DisplayValue >= 1000.f && NumThousands < EInstanceCountMagnitude::Max)
 		{
 			DisplayValue /= 1000.f;
@@ -410,7 +441,7 @@ void SFoliagePaletteItemTile::Construct(const FArguments& InArgs, TSharedRef<STa
 
 	STableRow<FFoliageMeshUIInfoPtr>::Construct(
 		STableRow<FFoliageMeshUIInfoPtr>::FArguments()
-		.Style(FEditorStyle::Get(), "ContentBrowser.AssetListView.TableRow")
+		.Style(FAppStyle::Get(), "ContentBrowser.AssetListView.ColumnListTableRow")
 		.Padding(1.f)
 		.Content()
 		[
@@ -421,8 +452,8 @@ void SFoliagePaletteItemTile::Construct(const FArguments& InArgs, TSharedRef<STa
 			+ SOverlay::Slot()
 			[
 				SNew(SBorder)
-				.Padding(4.f)
-				.BorderImage(FEditorStyle::GetBrush("ContentBrowser.ThumbnailShadow"))
+				.Padding(2.f)
+				.BorderImage(FAppStyle::GetBrush("ContentBrowser.ThumbnailShadow"))
 				.ForegroundColor(FLinearColor::White)
 				.ColorAndOpacity(this, &SFoliagePaletteItemTile::GetTileColorAndOpacity)
 				[
@@ -437,9 +468,7 @@ void SFoliagePaletteItemTile::Construct(const FArguments& InArgs, TSharedRef<STa
 			.Padding(FMargin(3.f))
 			[
 				SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush("ContentBrowser.ThumbnailShadow"))
-				.BorderBackgroundColor(FLinearColor::Black)
-				.ForegroundColor(FLinearColor::White)
+				.BorderImage(FAppStyle::GetBrush("ContentBrowser.ThumbnailShadow"))
 				.Padding(3.f)
 				[
 					Model->CreateActivationCheckBox(IsSelectedGetter, CheckBoxVisibility)
@@ -450,7 +479,7 @@ void SFoliagePaletteItemTile::Construct(const FArguments& InArgs, TSharedRef<STa
 			+ SOverlay::Slot()
 			.HAlign(HAlign_Right)
 			.VAlign(VAlign_Top)
-			.Padding(FMargin(3.f))
+			.Padding(FMargin(2.f))
 			[
 				Model->CreateSaveAssetButton(SaveButtonVisibility)
 			]

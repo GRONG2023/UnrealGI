@@ -14,6 +14,7 @@
 #include "Animation/EditorAnimBaseObj.h"
 #include "STrack.h"
 #include "EditorUndoClient.h"
+#include "SAnimCurveEd.h"
 
 class FMenuBuilder;
 class SBorder;
@@ -92,7 +93,10 @@ public:
 	void FillElementSubMenuForTimes( FMenuBuilder& MenuBuilder );
 	void FillSlotSubMenu( FMenuBuilder& Menubuilder );
 
-	void OnNewSlotClicked();
+	void BuildNewSlotMenu(FMenuBuilder& InMenuBuilder);
+	void CreateNewSlot(FName InName);
+	bool CanCreateNewSlot(FName InName) const;
+
 	void OnNewSectionClicked(float DataPosX);
 	bool CanAddNewSection();
 
@@ -168,6 +172,7 @@ public:
 
 	UAnimPreviewInstance* GetPreviewInstance() const;
 
+	bool OnIsAnimAssetValid(const UAnimSequenceBase* AnimSequenceBase, FText* OutReason);
 public:
 
 	/** These are meant to be callbacks used by the montage editing UI widgets */

@@ -3,6 +3,7 @@
 #include "Linux/LinuxCursor.h"
 
 #include "Misc/App.h"
+#include "Misc/Paths.h"
 #include "Linux/LinuxApplication.h"
 #include "Linux/LinuxPlatformApplicationMisc.h"
 
@@ -82,21 +83,21 @@ FLinuxCursor::FLinuxCursor()
 			break;
 
 		case EMouseCursor::GrabHand:
-			//CursorHandle = LoadCursorFromFile((LPCTSTR)*(FString( FPlatformProcess::BaseDir() ) / FString::Printf( TEXT("%sEditor/Slate/Old/grabhand.cur"), *FPaths::EngineContentDir() )));
-			//if (CursorHandle == NULL)
-			//{
-			//	// Failed to load file, fall back
-				CursorHandle = SDL_CreateSystemCursor( SDL_SYSTEM_CURSOR_HAND );
-			//}
+			{
+				FString path(FPlatformProcess::BaseDir() / FPaths::EngineContentDir() / FString("Editor/Slate/Cursor/grabhand.bmp") );
+				SDL_Surface *surf = SDL_LoadBMP(TCHAR_TO_ANSI(*path));
+				CursorHandle = SDL_CreateColorCursor(surf, 15, 15);
+				SDL_FreeSurface(surf);
+			}
 			break;
 
 		case EMouseCursor::GrabHandClosed:
-			//CursorHandle = LoadCursorFromFile((LPCTSTR)*(FString( FPlatformProcess::BaseDir() ) / FString::Printf( TEXT("%sEditor/Slate/Old/grabhand_closed.cur"), *FPaths::EngineContentDir() )));
-			//if (CursorHandle == NULL)
-			//{
-			//	// Failed to load file, fall back
-				CursorHandle = SDL_CreateSystemCursor( SDL_SYSTEM_CURSOR_HAND );
-			//}
+			{
+				FString path(FPlatformProcess::BaseDir() / FPaths::EngineContentDir() / FString("Editor/Slate/Cursor/grabhand_closed.bmp") );
+				SDL_Surface *surf = SDL_LoadBMP(TCHAR_TO_ANSI(*path));
+				CursorHandle = SDL_CreateColorCursor(surf, 8, 8);
+				SDL_FreeSurface(surf);
+			}
 			break;
 
 		case EMouseCursor::SlashedCircle:
@@ -154,12 +155,12 @@ FLinuxCursor::~FLinuxCursor()
 			case EMouseCursor::CardinalCross:
 			case EMouseCursor::Crosshairs:
 			case EMouseCursor::Hand:
-			case EMouseCursor::GrabHand:
-			case EMouseCursor::GrabHandClosed:
 			case EMouseCursor::SlashedCircle:
 			case EMouseCursor::Custom:
 				// Standard shared cursors don't need to be destroyed
 				break;
+			case EMouseCursor::GrabHand:
+			case EMouseCursor::GrabHandClosed:
 			case EMouseCursor::EyeDropper:
 				SDL_FreeCursor(CursorHandles[CurCursorIndex]);
 				break;
@@ -311,11 +312,11 @@ static SDL_Rect GetConfinementRect(const RECT* const Bounds, const TSharedPtr<FL
 	int Bottom = 0;
 	SDL_GetWindowBordersSize(CurrentFocusWindow->GetHWnd(), &Top, &Left, &Bottom, &Right);
 
-	ConfineRect.x = FMath::TruncToInt(Bounds->left) + Left;
-	ConfineRect.y = FMath::TruncToInt(Bounds->top) - Top;
+	ConfineRect.x = Bounds->left + Left;
+	ConfineRect.y = Bounds->top - Top;
 
-	ConfineRect.w = FMath::TruncToInt(Bounds->right) - FMath::TruncToInt(Bounds->left) - 1;
-	ConfineRect.h = FMath::TruncToInt(Bounds->bottom) - FMath::TruncToInt(Bounds->top) - 1;
+	ConfineRect.w = Bounds->right - Bounds->left - 1;
+	ConfineRect.h = Bounds->bottom - Bounds->top - 1;
 
 	// TODO. For some reason the values from Bounds seem not to cover the SDL's window area.
 	// The cursor exceeds the right and bottom border of the window. This can be troublesome
@@ -344,7 +345,7 @@ void FLinuxCursor::Lock( const RECT* const Bounds )
 	// Lock/Unlock the cursor
 	if ( Bounds == nullptr )
 	{
-		SDL_ConfineCursor(CurrentFocusWindow->GetHWnd(), nullptr);
+		SDL_SetWindowMouseRect(CurrentFocusWindow->GetHWnd(), nullptr);
 	}
 	else
 	{
@@ -353,7 +354,7 @@ void FLinuxCursor::Lock( const RECT* const Bounds )
 		// We dont want to set a negative bounding region. If Top, Left, Bottom, Right are all 0
 		if (CursorClipRect.x >= 0 && CursorClipRect.y >= 0 && CursorClipRect.w > 0 && CursorClipRect.h > 0)
 		{
-			SDL_ConfineCursor(CurrentFocusWindow->GetHWnd(), &CursorClipRect);
+			SDL_SetWindowMouseRect(CurrentFocusWindow->GetHWnd(), &CursorClipRect);
 		}
 	}
 }

@@ -3,6 +3,8 @@
 #include "Channels/MovieSceneChannelData.h"
 #include "Misc/FrameRate.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneChannelData)
+
 namespace UE
 {
 namespace MovieScene
@@ -16,7 +18,7 @@ namespace MovieScene
 		OutIndex2 = Index2 < InTimes.Num() ? Index2 : INDEX_NONE;
 	}
 
-	void EvaluateTime(TArrayView<const FFrameNumber> InTimes, FFrameTime InTime, int32& OutIndex1, int32& OutIndex2, float& OutInterp)
+	void EvaluateTime(TArrayView<const FFrameNumber> InTimes, FFrameTime InTime, int32& OutIndex1, int32& OutIndex2, double& OutInterp)
 	{
 		const int32 Index2 = Algo::UpperBound(InTimes, InTime.FrameNumber);
 		const int32 Index1 = Index2 - 1;
@@ -30,7 +32,7 @@ namespace MovieScene
 			const int32 Time1 = InTimes[Index1].Value, Time2 = InTimes[Index2].Value;
 			const int32 Difference = Time2 - Time1;
 
-			OutInterp = (InTime.FrameNumber.Value - Time1) / float(Difference) + InTime.GetSubFrame() / Difference;
+			OutInterp = (InTime.AsDecimal() - Time1) / double(Difference);
 		}
 		else
 		{
@@ -89,8 +91,8 @@ namespace MovieScene
 } // namespace MovieScene
 } // namespace UE
 
-FMovieSceneChannelData::FMovieSceneChannelData(TArray<FFrameNumber>* InTimes, FKeyHandleLookupTable* InKeyHandles)
-	: Times(InTimes), KeyHandles(InKeyHandles)
+FMovieSceneChannelData::FMovieSceneChannelData(TArray<FFrameNumber>* InTimes, FKeyHandleLookupTable* InKeyHandles, FMovieSceneChannel* InChannel)
+	: Times(InTimes), KeyHandles(InKeyHandles), OwningChannel(InChannel)
 {}
 
 FKeyHandle FMovieSceneChannelData::GetHandle(int32 Index)
@@ -138,7 +140,7 @@ int32 FMovieSceneChannelData::AddKeyInternal(FFrameNumber InTime)
 int32 FMovieSceneChannelData::MoveKeyInternal(int32 KeyIndex, FFrameNumber InNewTime)
 {
 	check(Times->IsValidIndex(KeyIndex));
-
+	FFrameNumber OldTime = (*Times)[KeyIndex];
 	int32 NewIndex = Algo::LowerBound(*Times, InNewTime);
 	if (NewIndex < KeyIndex || NewIndex > KeyIndex+1)
 	{
@@ -150,17 +152,29 @@ int32 FMovieSceneChannelData::MoveKeyInternal(int32 KeyIndex, FFrameNumber InNew
 
 		// We have to remove the key and re-add it in the right place
 		// This could probably be done better by just shuffling up/down the items that need to move, without ever changing the size of the array
-		Times->RemoveAt(KeyIndex, 1, false);
+		Times->RemoveAt(KeyIndex, 1, EAllowShrinking::No);
 		Times->Insert(InNewTime, NewIndex);
 
 		if (KeyHandles)
 		{
 			KeyHandles->MoveHandle(KeyIndex, NewIndex);
 		}
+		if (OwningChannel && OwningChannel->OnKeyMovedEvent().IsBound())
+		{
+			TArray<FKeyMoveEventItem> Items;
+			Items.Add(FKeyMoveEventItem(KeyIndex, OldTime, NewIndex,InNewTime));
+			OwningChannel->OnKeyMovedEvent().Broadcast(OwningChannel, Items);
+		}
 		return NewIndex;
 	}
 	else
 	{
+		if (OwningChannel && OwningChannel->OnKeyMovedEvent().IsBound())
+		{
+			TArray<FKeyMoveEventItem> Items;
+			Items.Add(FKeyMoveEventItem(KeyIndex, OldTime, KeyIndex, InNewTime));
+			OwningChannel->OnKeyMovedEvent().Broadcast(OwningChannel, Items);
+		}
 		(*Times)[KeyIndex] = InNewTime;
 		return KeyIndex;
 	}
@@ -227,8 +241,27 @@ void FMovieSceneChannelData::GetKeyTimes(TArrayView<const FKeyHandle> InHandles,
 
 void FMovieSceneChannelData::Offset(FFrameNumber DeltaTime)
 {
-	for (FFrameNumber& Time : *Times)
+	if (OwningChannel == nullptr || OwningChannel->OnKeyMovedEvent().IsBound() == false)
 	{
-		Time += DeltaTime;
+		for (FFrameNumber& Time : *Times)
+		{
+			Time += DeltaTime;
+		}
 	}
+	else
+	{
+		TArray<FKeyMoveEventItem> Items;
+		for (int32 Index = 0; Index < Times->Num(); ++Index)
+		{
+			const FFrameNumber OldTime = (*Times)[Index];
+			FFrameNumber NewTime = OldTime + DeltaTime;
+			Items.Add(FKeyMoveEventItem(Index, OldTime, Index, NewTime));
+			(*Times)[Index] = NewTime;
+		}
+		OwningChannel->OnKeyMovedEvent().Broadcast(OwningChannel, Items);
+
+	}
+	
+
 }
+

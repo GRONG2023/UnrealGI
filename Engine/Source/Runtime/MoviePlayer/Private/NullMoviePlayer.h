@@ -37,6 +37,7 @@ public:
 	virtual void PassLoadingScreenWindowBackToGame() const override {}
 	virtual void SetupLoadingScreen(const FLoadingScreenAttributes& InLoadingScreenAttributes) override {}
 	virtual bool HasEarlyStartupMovie() const override { return false; }
+	virtual bool IsInitialized() const override { return false; }
 	virtual bool PlayEarlyStartupMovies() override { return false; }
 	virtual bool PlayMovie() override { return false; }
 	virtual void StopMovie() override {}
@@ -47,6 +48,7 @@ public:
 	virtual void SetupLoadingScreenFromIni() override {}
 	virtual FOnPrepareLoadingScreen& OnPrepareLoadingScreen() override { return OnPrepareLoadingScreenDelegate; }
 	virtual FOnMoviePlaybackStarted& OnMoviePlaybackStarted() override { return OnMoviePlaybackStartedDelegate; }
+	virtual FOnMoviePlaybackTick& OnMoviePlaybackTick() override { return OnMoviePlaybackTickDelegate; }
 	virtual FOnMoviePlaybackFinished& OnMoviePlaybackFinished() override { return OnMoviePlaybackFinishedDelegate; }
 	virtual FOnMovieClipFinished& OnMovieClipFinished() override { return OnMovieClipFinishedDelegate; }
 	virtual void SetSlateOverlayWidget(TSharedPtr<SWidget> NewOverlayWidget) override { }
@@ -66,6 +68,7 @@ private:
 	FOnPrepareLoadingScreen OnPrepareLoadingScreenDelegate;
 
 	FOnMoviePlaybackStarted OnMoviePlaybackStartedDelegate;
+	FOnMoviePlaybackTick OnMoviePlaybackTickDelegate;
 	FOnMoviePlaybackFinished OnMoviePlaybackFinishedDelegate;
 	FOnMovieClipFinished OnMovieClipFinishedDelegate;
 

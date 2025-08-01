@@ -12,7 +12,7 @@
 
 #if UE_ENABLE_ICU
 #include "Internationalization/TextHistory.h"
-#include "Internationalization/TextData.h"
+#include "HAL/IConsoleManager.h"
 
 THIRD_PARTY_INCLUDES_START
 	#include <unicode/utypes.h>
@@ -66,13 +66,32 @@ FString FTextChronoFormatter::AsDateTime(const FDateTime& DateTime, const EDateT
 	return ICUUtilities::ConvertString(FormattedString);
 }
 
+FString FTextChronoFormatter::AsDateTime(const FDateTime& DateTime, const FString& CustomPattern, const FString& TimeZone, const FCulture& TargetCulture)
+{
+	FInternationalization& I18N = FInternationalization::Get();
+	checkf(I18N.IsInitialized() == true, TEXT("FInternationalization is not initialized. An FText formatting method was likely used in static object initialization - this is not supported."));
+	const UDate ICUDate = I18N.Implementation->UEDateTimeToICUDate(DateTime);
+
+	const TSharedRef<const icu::DateFormat, ESPMode::ThreadSafe> ICUDateFormat(TargetCulture.Implementation->GetDateTimeFormatter(CustomPattern, TimeZone));
+	icu::UnicodeString FormattedString;
+	ICUDateFormat->format(ICUDate, FormattedString);
+
+	return ICUUtilities::ConvertString(FormattedString);
+}
+
 FString FTextTransformer::ToLower(const FString& InStr)
 {
+	FInternationalization& I18N = FInternationalization::Get();
+	checkf(I18N.IsInitialized() == true, TEXT("FInternationalization is not initialized. An FText formatting method was likely used in static object initialization - this is not supported."));
+	
 	return ICUUtilities::ConvertString(ICUUtilities::ConvertString(InStr).toLower());
 }
 
 FString FTextTransformer::ToUpper(const FString& InStr)
 {
+	FInternationalization& I18N = FInternationalization::Get();
+	checkf(I18N.IsInitialized() == true, TEXT("FInternationalization is not initialized. An FText formatting method was likely used in static object initialization - this is not supported."));
+
 	return ICUUtilities::ConvertString(ICUUtilities::ConvertString(InStr).toUpper());
 }
 
@@ -84,47 +103,48 @@ bool FText::IsWhitespace(const TCHAR Char)
 	return u_isWhitespace(ICUChar) != 0;
 }
 
-int32 FText::CompareTo( const FText& Other, const ETextComparisonLevel::Type ComparisonLevel ) const
+int32 FTextComparison::CompareTo( const FString& A, const FString& B, const ETextComparisonLevel::Type ComparisonLevel )
 {
 	const TSharedRef<const icu::Collator, ESPMode::ThreadSafe> Collator( FInternationalization::Get().GetCurrentLanguage()->Implementation->GetCollator(ComparisonLevel) );
 
-	// Create an iterator for 'this' so that we can interface with ICU
-	UCharIterator DisplayStringICUIterator;
-	FICUTextCharacterIterator DisplayStringIterator(FStringView(TextData->GetDisplayString()));
-	uiter_setCharacterIterator(&DisplayStringICUIterator, &DisplayStringIterator);
+	// Create an iterator for 'A' so that we can interface with ICU
+	FStringView AView = A;
+	UCharIterator ADisplayStringICUIterator;
+	FICUTextCharacterIterator ADisplayStringIterator(AView);
+	uiter_setCharacterIterator(&ADisplayStringICUIterator, &ADisplayStringIterator);
 
-	// Create an iterator for 'Other' so that we can interface with ICU
-	UCharIterator OtherDisplayStringICUIterator;
-	FICUTextCharacterIterator OtherDisplayStringIterator(FStringView(Other.TextData->GetDisplayString()));
-	uiter_setCharacterIterator(&OtherDisplayStringICUIterator, &OtherDisplayStringIterator);
+	// Create an iterator for 'B' so that we can interface with ICU
+	FStringView BView = B;
+	UCharIterator BDisplayStringICUIterator;
+	FICUTextCharacterIterator BDisplayStringIterator(BView);
+	uiter_setCharacterIterator(&BDisplayStringICUIterator, &BDisplayStringIterator);
 
 	UErrorCode ICUStatus = U_ZERO_ERROR;
-	const UCollationResult Result = Collator->compare(DisplayStringICUIterator, OtherDisplayStringICUIterator, ICUStatus);
+	const UCollationResult Result = Collator->compare(ADisplayStringICUIterator, BDisplayStringICUIterator, ICUStatus);
 
 	return Result;
 }
 
-int32 FText::CompareToCaseIgnored( const FText& Other ) const
+int32 FTextComparison::CompareToCaseIgnored( const FString& A, const FString& B )
 {
-	return CompareTo(Other, ETextComparisonLevel::Secondary);
+	return CompareTo(A, B, ETextComparisonLevel::Secondary);
 }
 
-bool FText::EqualTo( const FText& Other, const ETextComparisonLevel::Type ComparisonLevel ) const
+bool FTextComparison::EqualTo( const FString& A, const FString& B, const ETextComparisonLevel::Type ComparisonLevel )
 {
-	return CompareTo(Other, ComparisonLevel) == 0;
+	return CompareTo(A, B, ComparisonLevel) == 0;
 }
 
-bool FText::EqualToCaseIgnored( const FText& Other ) const
+bool FTextComparison::EqualToCaseIgnored( const FString& A, const FString& B )
 {
-	return EqualTo(Other, ETextComparisonLevel::Secondary);
+	return EqualTo(A, B, ETextComparisonLevel::Secondary);
 }
 
 class FText::FSortPredicate::FSortPredicateImplementation
 {
 public:
 	FSortPredicateImplementation(const ETextComparisonLevel::Type InComparisonLevel)
-		: ComparisonLevel(InComparisonLevel)
-		, ICUCollator(FInternationalization::Get().GetCurrentLanguage()->Implementation->GetCollator(InComparisonLevel))
+		: ICUCollator(FInternationalization::Get().GetCurrentLanguage()->Implementation->GetCollator(InComparisonLevel))
 	{
 	}
 
@@ -132,12 +152,12 @@ public:
 	{
 		// Create an iterator for 'A' so that we can interface with ICU
 		UCharIterator ADisplayStringICUIterator;
-		FICUTextCharacterIterator ADisplayStringIterator(FStringView(A.TextData->GetDisplayString()));
+		FICUTextCharacterIterator ADisplayStringIterator(FStringView(A.ToString()));
 		uiter_setCharacterIterator(&ADisplayStringICUIterator, &ADisplayStringIterator);
 
 		// Create an iterator for 'B' so that we can interface with ICU
 		UCharIterator BDisplayStringICUIterator;
-		FICUTextCharacterIterator BDisplayStringIterator(FStringView(B.TextData->GetDisplayString()));
+		FICUTextCharacterIterator BDisplayStringIterator(FStringView(B.ToString()));
 		uiter_setCharacterIterator(&BDisplayStringICUIterator, &BDisplayStringIterator);
 
 		UErrorCode ICUStatus = U_ZERO_ERROR;
@@ -147,7 +167,6 @@ public:
 	}
 
 private:
-	const ETextComparisonLevel::Type ComparisonLevel;
 	const TSharedRef<const icu::Collator, ESPMode::ThreadSafe> ICUCollator;
 };
 

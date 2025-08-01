@@ -3,6 +3,8 @@
 #include "Engine/RectLight.h"
 #include "Components/RectLightComponent.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(RectLight)
+
 ARectLight::ARectLight(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<URectLightComponent>(TEXT("LightComponent0")))
 {
@@ -10,16 +12,6 @@ ARectLight::ARectLight(const FObjectInitializer& ObjectInitializer)
 	RectLightComponent->Mobility = EComponentMobility::Stationary;
 
 	RootComponent = RectLightComponent;
-}
-
-void ARectLight::PostLoad()
-{
-	Super::PostLoad();
-
-	if (GetLightComponent()->Mobility == EComponentMobility::Static)
-	{
-		GetLightComponent()->LightFunctionMaterial = NULL;
-	}
 }
 
 #if WITH_EDITOR
@@ -32,4 +24,5 @@ void ARectLight::EditorApplyScale(const FVector& DeltaScale, const FVector* Pivo
 	PostEditChange();
 }
 #endif
+
 

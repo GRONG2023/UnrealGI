@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "IMessageContext.h"
 #include "IMessageSubscription.h"
 
 class IMessageReceiver;
@@ -27,7 +28,7 @@ public:
 	 * @param InReceivingThread The thread on which to receive messages on.
 	 * @param InScopeRange The message scope range to subscribe to.
 	 */
-	FMessageSubscription(const TSharedRef<IMessageReceiver, ESPMode::ThreadSafe>& InSubscriber, const FName& InMessageType, const FMessageScopeRange& InScopeRange)
+	FMessageSubscription(const TSharedRef<IMessageReceiver, ESPMode::ThreadSafe>& InSubscriber, const FTopLevelAssetPath& InMessageType, const FMessageScopeRange& InScopeRange)
 		: Enabled(true)
 		, MessageType(InMessageType)
 		, ScopeRange(InScopeRange)
@@ -48,7 +49,7 @@ public:
 		Enabled = true;
 	}
 
-	virtual FName GetMessageType() override
+	virtual FTopLevelAssetPath GetMessageTypePathName() override
 	{
 		return MessageType;
 	}
@@ -74,7 +75,7 @@ private:
 	bool Enabled;
 
 	/** Holds the type of subscribed messages. */
-	FName MessageType;
+	FTopLevelAssetPath MessageType;
 
 	/** Holds the range of message scopes to subscribe to. */
 	FMessageScopeRange ScopeRange;

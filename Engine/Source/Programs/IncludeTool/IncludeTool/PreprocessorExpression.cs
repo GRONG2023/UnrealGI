@@ -340,15 +340,35 @@ namespace IncludeTool
 				case "alignof":
 					throw new NotImplementedException();
 				case "__has_builtin":
+				case "__has_extension":
 				case "__has_feature":
 				case "__has_warning":
-					if(Tokens[Idx + 1].Text != "(" || Tokens[Idx + 3].Text != ")")
+				case "__is_identifier":
+					if (Tokens[Idx + 1].Text != "(" || Tokens[Idx + 3].Text != ")")
 					{
 						throw new NotImplementedException();
 					}
 					Idx += 4;
 					return 0;
+				case "__has_c_attribute":
+				case "__has_attribute":
+				case "__has_declspec_attribute":
+					// the argument can either be a single identifier or a scoped identifier. 
+					if (Tokens[Idx + 1].Text == "(")
+					{
+						Idx += 3; // 3 = __has_*, (, single_identifier
+						for (; Idx < Tokens.Count; ++Idx)
+						{
+							if (Tokens[Idx].Text == ")")
+							{
+								++Idx;
+								return 0;
+							}
+						}
+					}
+					throw new NotImplementedException();
 				case "__has_include":
+				case "__has_include_next":
 					if(Tokens[Idx + 1].Text == "(")
 					{
 						Idx += 4; // 4 = __has_inc, (, "" or <>
@@ -571,7 +591,7 @@ namespace IncludeTool
 		/// <param name="ExpectedResult">The expected value of the expression</param>
         static void RunTest(string Expression, long? ExpectedResult)
         {
-			TokenReader Reader = new TokenReader(Expression);
+			TokenReader Reader = new TokenReader("", Expression);
 
 			List<Token> Tokens = new List<Token>();
 			while (Reader.MoveNext() && Reader.Current.Text != "\n")

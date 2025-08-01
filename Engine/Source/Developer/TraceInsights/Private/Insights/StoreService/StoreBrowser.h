@@ -4,15 +4,17 @@
 
 #include "Async/AsyncWork.h"
 #include "CoreMinimal.h"
+#include "HAL/CriticalSection.h"
+#include "HAL/PlatformAtomics.h"
 #include "HAL/Runnable.h"
 #include "HAL/RunnableThread.h"
-#include "HAL/ThreadSafeBool.h"
-#include "HAL/CriticalSection.h"
-#include "Templates/Atomic.h"
 
+namespace UE
+{
 namespace Trace
 {
 	class FStoreClient;
+}
 }
 
 namespace Insights
@@ -25,23 +27,27 @@ struct FStoreBrowserTraceInfo
 	uint32 TraceId = 0;
 
 	uint64 ChangeSerial = 0;
-	int32 TraceIndex = -1;
 
 	FString Name;
-	//FString Uri;
+	FString Uri;
 
 	FDateTime Timestamp = 0;
 	uint64 Size = 0;
 
-	bool bIsLive = false;
-	uint32 IpAddress = 0;
-
-	bool bIsMetadataUpdated = false;
 	FString Platform;
 	FString AppName;
+	FString ProjectName;
 	FString CommandLine;
+	FString Branch;
+	FString BuildVersion;
+	uint32 Changelist;
 	EBuildConfiguration ConfigurationType = EBuildConfiguration::Unknown;
 	EBuildTargetType TargetType = EBuildTargetType::Unknown;
+
+	bool bIsLive = false;
+	std::atomic<uint8> MetadataUpdateCount = 1;
+
+	uint32 IpAddress = 0;
 
 	FStoreBrowserTraceInfo() = default;
 
@@ -71,34 +77,78 @@ public:
 
 	//////////////////////////////////////////////////
 
-	bool IsRunning() const { return bRunning; }
+	enum class EConnectionStatus : uint8
+	{
+		// Attempting connection
+		Connecting = 0,
+		// Values between (start,end) is interpreted as
+		// number of seconds until next reconnection attempt
+		SecondsToReconnectStart,
+		SecondsToReconnectEnd = 0xfd,
+		// No connection could be made, no more reconnection
+		// attempts are made.
+		NoConnection = 0xfe,
+		// Connection is active
+		Connected = 0xff
+	};
 
-	bool IsLocked() const { return bTracesLocked; }
-	void Lock() { check(!bTracesLocked); bTracesLocked = true; TracesCriticalSection.Lock(); }
-	uint64 GetLockedTracesChangeSerial() const { check(bTracesLocked); return TracesChangeSerial; }
-	const TArray<TSharedPtr<FStoreBrowserTraceInfo>>& GetLockedTraces() const { check(bTracesLocked); return Traces; }
-	const TMap<uint32, TSharedPtr<FStoreBrowserTraceInfo>>& GetLockedTraceMap() const { check(bTracesLocked); return TraceMap; }
-	void Unlock() { check(bTracesLocked); bTracesLocked = false; TracesCriticalSection.Unlock(); }
+	bool IsRunning() const { return bRunning; }
+	EConnectionStatus GetConnectionStatus() const { return ConnectionStatus; }
+
+	bool AreSettingsLocked() const { return bSettingsLocked; }
+	void LockSettings() { check(!bSettingsLocked); bSettingsLocked = true; SettingsCriticalSection.Lock(); }
+	void UnlockSettings() { check(bSettingsLocked); bSettingsLocked = false; SettingsCriticalSection.Unlock(); }
+	uint32 GetSettingsChangeSerial() const { check(bSettingsLocked); return SettingsChangeSerial; };
+	const FString& GetHost() const { check(bSettingsLocked); return Host; }
+	const FString& GetVersion() const { check(bSettingsLocked); return Version; }
+	uint32 GetRecorderPort() const {check(bSettingsLocked); return RecorderPort; }
+	uint32 GetStorePort() const { check(bSettingsLocked); return StorePort; }
+	const FString& GetStoreDirectory() const { check(bSettingsLocked); return StoreDirectory; }
+	const TArray<FString>& GetWatchDirectories() const { check(bSettingsLocked); return WatchDirectories; }
+
+	bool AreTracesLocked() const { return bTracesLocked; }
+	void LockTraces() { check(!bTracesLocked); bTracesLocked = true; TracesCriticalSection.Lock(); }
+	void UnlockTraces() { check(bTracesLocked); bTracesLocked = false; TracesCriticalSection.Unlock(); }
+	uint32 GetTracesChangeSerial() const { check(bTracesLocked); return TracesChangeSerial; }
+	const TArray<TSharedPtr<FStoreBrowserTraceInfo>>& GetTraces() const { check(bTracesLocked); return Traces; }
+	const TMap<uint32, TSharedPtr<FStoreBrowserTraceInfo>>& GetTraceMap() const { check(bTracesLocked); return TraceMap; }
+
+	void Refresh();
 
 private:
-	Trace::FStoreClient* GetStoreClient() const;
+	UE::Trace::FStoreClient* GetStoreClient() const;
+	FCriticalSection& GetStoreClientCriticalSection() const;
 
 	void UpdateTraces();
 	void ResetTraces();
 
-	void UpdateMetadata(FStoreBrowserTraceInfo& TraceSession);
+	void UpdateMetadata(TSharedPtr<FStoreBrowserTraceInfo> TraceInfoPtr);
 
 private:
 	// Thread safe bool for stopping the thread
-	FThreadSafeBool bRunning;
+	std::atomic<bool> bRunning = false;
 
-	// Thread for continously updating and caching info about trace store.
-	FRunnableThread* Thread;
+	// Thread for continuously updating and caching info about trace store.
+	FRunnableThread* Thread = nullptr;
+
+	std::atomic<EConnectionStatus> ConnectionStatus = EConnectionStatus::Connecting;
+
+	uint32 StoreChangeSerial = 0;
+	uint32 StoreSettingsChangeSerial = 0;
+
+	mutable FCriticalSection SettingsCriticalSection;
+	std::atomic<bool> bSettingsLocked = false; // for debugging, to ensure Get*() methods for settings are only called between Lock() - Unlock() calls.
+	uint32 SettingsChangeSerial = 0;
+	FString Host;
+	FString Version;
+	uint32 StorePort;
+	uint32 RecorderPort;
+	FString StoreDirectory;
+	TArray<FString> WatchDirectories;
 
 	mutable FCriticalSection TracesCriticalSection;
-	FThreadSafeBool bTracesLocked; // for debugging, to ensure GetLocked*() methods are only called between Lock() - Unlock() calls.
-	uint32 StoreChangeSerial;
-	uint64 TracesChangeSerial;
+	std::atomic<bool> bTracesLocked = false; // for debugging, to ensure Get*() methods for traces are only called between Lock() - Unlock() calls.
+	uint32 TracesChangeSerial = 0;
 	TArray<TSharedPtr<FStoreBrowserTraceInfo>> Traces;
 	TMap<uint32, TSharedPtr<FStoreBrowserTraceInfo>> TraceMap;
 	TMap<uint32, TSharedPtr<FStoreBrowserTraceInfo>> LiveTraceMap;

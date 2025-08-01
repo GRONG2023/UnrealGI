@@ -26,14 +26,16 @@ FConsoleSlateDebuggerPaint::FConsoleSlateDebuggerPaint()
 	, bLogWidgetName(false)
 	, bLogWidgetNameOnce(false)
 	, bLogWarningIfWidgetIsPaintedMoreThanOnce(true)
+	, bDebugGameWindowOnly(true)
 	, DrawBoxColor(1.0f, 1.0f, 0.0f, 0.2f)
 	, DrawQuadColor(1.0f, 1.0f, 1.0f, 1.0f)
 	, DrawWidgetNameColor(FColorList::SpicyPink)
 	, MaxNumberOfWidgetInList(20)
-	, CacheDuration(2.0)
+	, CacheDuration(2.0f)
+	, PIEWindowTag("PIEWindow")
 	, ShowPaintWidgetCommand(
 		TEXT("SlateDebugger.Paint.Start")
-		, TEXT("Start the painted widget debug tool. It shows when widgets are painted.")
+		, TEXT("Start the painted widget debug tool. Use to show widget that have been painted this frame.")
 		, FConsoleCommandDelegate::CreateRaw(this, &FConsoleSlateDebuggerPaint::StartDebugging))
 	, HidePaintWidgetCommand(
 		TEXT("SlateDebugger.Paint.Stop")
@@ -46,7 +48,7 @@ FConsoleSlateDebuggerPaint::FConsoleSlateDebuggerPaint()
 		, FConsoleVariableDelegate::CreateRaw(this, &FConsoleSlateDebuggerPaint::HandleEnabled))
 	, LogPaintedWidgetOnceCommand(
 		TEXT("SlateDebugger.Paint.LogOnce")
-		, TEXT("Log the widgets that has been painted during the last update once")
+		, TEXT("Log the names of all widgets that were painted during the last update.")
 		, FConsoleCommandDelegate::CreateRaw(this, &FConsoleSlateDebuggerPaint::HandleLogOnce))
 	, DisplayWidgetsNameListCommand(
 		TEXT("SlateDebugger.Paint.ToggleWidgetNameList"),
@@ -55,11 +57,15 @@ FConsoleSlateDebuggerPaint::FConsoleSlateDebuggerPaint()
 	, MaxNumberOfWidgetInListtRefCVar(
 		TEXT("SlateDebugger.Paint.MaxNumberOfWidgetDisplayedInList")
 		, MaxNumberOfWidgetInList
-		, TEXT("The max number of widget that will be displayed when DisplayWidgetNameList is active."))
+		, TEXT("The max number of widgets that will be displayed when DisplayWidgetNameList is active."))
 	, LogWarningIfWidgetIsPaintedMoreThanOnceRefCVar(
 		TEXT("SlateDebugger.Paint.LogWarningIfWidgetIsPaintedMoreThanOnce")
 		, bLogWarningIfWidgetIsPaintedMoreThanOnce
-		, TEXT("Option to log a warning if a widget is painted more than once in the same frame."))
+		, TEXT("Option to log a warning if a widget is painted more than once in a single frame."))
+	, OnlyGameWindow(
+		TEXT("SlateDebugger.Paint.OnlyGameWindow"),
+		bDebugGameWindowOnly,
+		TEXT("Option to only the debug the game window"))
 {
 	GConfig->GetBool(TEXT("SlateDebugger.Paint"), TEXT("bDisplayWidgetsNameList"), bDisplayWidgetsNameList, *GEditorPerProjectIni);
 	GConfig->GetBool(TEXT("SlateDebugger.Paint"), TEXT("bUseWidgetPathAsName"), bUseWidgetPathAsName, *GEditorPerProjectIni);
@@ -179,6 +185,14 @@ void FConsoleSlateDebuggerPaint::HandleEndWidgetPaint(const SWidget* Widget, con
 	const FConsoleSlateDebuggerUtility::TSWidgetId WidgetId = FConsoleSlateDebuggerUtility::GetId(Widget);
 	const FConsoleSlateDebuggerUtility::TSWindowId WindowId = FConsoleSlateDebuggerUtility::GetId(OutDrawElements.GetPaintWindow());
 
+	// Exclude all windows but the game window
+	SWindow* WindowToDrawIn = OutDrawElements.GetPaintWindow();
+	if (bDebugGameWindowOnly && (WindowToDrawIn->GetType() != EWindowType::GameWindow && WindowToDrawIn->GetTag() != PIEWindowTag))
+	{
+		return;
+	}
+
+
 	FPaintInfo* FoundItem = PaintedWidgets.Find(WidgetId);
 	if (FoundItem == nullptr)
 	{
@@ -222,12 +236,12 @@ void FConsoleSlateDebuggerPaint::HandlePaintDebugInfo(const FPaintArgs& InArgs, 
 	CacheDuration = FMath::Max(CacheDuration, 0.01f);
 	const double SlateApplicationCurrentTime = FSlateApplicationBase::Get().GetCurrentTime();
 
-	auto MakeText = [&](const FString& Text, const FVector2D& Location, const FLinearColor& Color)
+	auto MakeText = [&](const FString& Text, const FVector2f& Location, const FLinearColor& Color)
 	{
 		FSlateDrawElement::MakeText(
 			InOutDrawElements
 			, InOutLayerId
-			, InAllottedGeometry.ToPaintGeometry(Location, FVector2D(1.f, 1.f))
+			, InAllottedGeometry.ToPaintGeometry(FVector2f(1.f, 1.f), FSlateLayoutTransform(Location))
 			, Text
 			, FontInfo
 			, ESlateDrawEffect::None
@@ -238,7 +252,7 @@ void FConsoleSlateDebuggerPaint::HandlePaintDebugInfo(const FPaintArgs& InArgs, 
 	{
 		if (Itt.Value.Window == PaintWindow)
 		{
-			const double LerpValue = FMath::Clamp((SlateApplicationCurrentTime - Itt.Value.LastPaint) / CacheDuration, 0.0, 1.0);
+			const float LerpValue = FMath::Clamp((float)(SlateApplicationCurrentTime - Itt.Value.LastPaint) / CacheDuration, 0.0f, 1.0f);
 			const FGeometry Geometry = FGeometry::MakeRoot(Itt.Value.PaintSize, FSlateLayoutTransform(1.f, Itt.Value.PaintLocation));
 			const FPaintGeometry PaintGeometry = Geometry.ToPaintGeometry();
 
@@ -279,7 +293,7 @@ void FConsoleSlateDebuggerPaint::HandlePaintDebugInfo(const FPaintArgs& InArgs, 
 			{
 				if (NumberOfWidget < MaxNumberOfWidgetInList)
 				{
-					MakeText(Itt.Value.WidgetName, FVector2D(0, (12 * NumberOfWidget) + TextElementY), DrawWidgetNameColor);
+					MakeText(Itt.Value.WidgetName, FVector2f(0.f, (12.f * NumberOfWidget) + TextElementY), DrawWidgetNameColor);
 				}
 			}
 			++NumberOfWidget;
@@ -289,13 +303,13 @@ void FConsoleSlateDebuggerPaint::HandlePaintDebugInfo(const FPaintArgs& InArgs, 
 
 	{
 		FString NumberOfWidgetDrawn = FString::Printf(TEXT("Number of Widget Painted: %d"), NumberOfWidget);
-		MakeText(NumberOfWidgetDrawn, FVector2D(10, 10), DrawWidgetNameColor);
+		MakeText(NumberOfWidgetDrawn, FVector2f(10.f, 10.f), DrawWidgetNameColor);
 	}
 
 	if (bDisplayWidgetsNameList && NumberOfWidget > MaxNumberOfWidgetInList)
 	{
 		FString WidgetDisplayName = FString::Printf(TEXT("   %d more invalidations"), NumberOfWidget - MaxNumberOfWidgetInList);
-		MakeText(WidgetDisplayName, FVector2D(0.f, (12.f * NumberOfWidget) + TextElementY), FLinearColor::White);
+		MakeText(WidgetDisplayName, FVector2f(0.f, (12.f * NumberOfWidget) + TextElementY), FLinearColor::White);
 	}
 }
 

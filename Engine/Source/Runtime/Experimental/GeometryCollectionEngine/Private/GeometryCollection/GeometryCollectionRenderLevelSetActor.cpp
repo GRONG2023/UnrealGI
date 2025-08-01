@@ -6,8 +6,9 @@
 
 #include "Chaos/ArrayND.h"
 #include "Chaos/Vector.h"
+#include "Materials/Material.h"
 
-using namespace Chaos;
+#include UE_INLINE_GENERATED_CPP_BY_NAME(GeometryCollectionRenderLevelSetActor)
 
 DEFINE_LOG_CATEGORY_STATIC(LSR_LOG, Log, All);
 
@@ -125,6 +126,8 @@ void AGeometryCollectionRenderLevelSetActor::SyncLevelSetTransform(const FTransf
 
 bool AGeometryCollectionRenderLevelSetActor::SetLevelSetToRender(const Chaos::FLevelSet &LevelSet, const FTransform &LocalToWorld)
 {
+	using namespace Chaos;
+
 	// error case when the target volume texture isn't set
 	if (TargetVolumeTexture == NULL)
 	{
@@ -133,9 +136,9 @@ bool AGeometryCollectionRenderLevelSetActor::SetLevelSetToRender(const Chaos::FL
 	}
 
 	// get refs to the grid structures
-	const TArrayND<float, 3>& LevelSetPhiArray = LevelSet.GetPhiArray();
+	const TArrayND<FReal, 3>& LevelSetPhiArray = LevelSet.GetPhiArray();
 	const TArrayND<FVec3, 3>& LevelSetNormalsArray = LevelSet.GetNormalsArray();
-	const TUniformGrid<float, 3>& LevelSetGrid = LevelSet.GetGrid();
+	const TUniformGrid<FReal, 3>& LevelSetGrid = LevelSet.GetGrid();
 
 	const TVec3<int32>& Counts = LevelSetGrid.Counts();
 	

@@ -5,6 +5,8 @@
 #include "Components/PrimitiveComponent.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(TraceQueryTestResults)
+
 FString FTraceQueryTestNames::ToString() const
 {
 	return FString::Printf(TEXT("Component:%s, Actor:%s, PhysicalMaterial:%s"), *ComponentName.ToString(), *ActorName.ToString(), *PhysicalMaterialName.ToString());
@@ -47,11 +49,10 @@ FString UTraceQueryTestResults::ToString()
 void CaptureNameHelper(FTraceQueryTestNames& Names, FHitResult& HitResult)
 {
 	UPrimitiveComponent* HitComp = HitResult.GetComponent();
-	AActor* HitActor = HitResult.GetActor();
 	UPhysicalMaterial* PhysMat = HitResult.PhysMaterial.Get();
 
 	Names.ComponentName = HitComp ? HitComp->GetFName() : NAME_None;
-	Names.ActorName = HitActor ? HitActor->GetFName() : NAME_None;
+	Names.ActorName = HitResult.HitObjectHandle.IsValid() ? HitResult.HitObjectHandle.GetFName() : NAME_None;
 	Names.PhysicalMaterialName = PhysMat ? PhysMat->GetFName() : NAME_None;
 }
 
@@ -228,4 +229,5 @@ bool UTraceQueryTestResults::AssertEqual(const UTraceQueryTestResults* Expected,
 		}
 	}
 }
+
 

@@ -1,18 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "LoadTimeProfilerModule.h"
-#include "Analyzers/PlatformFileTraceAnalysis.h"
-#include "Analyzers/LoadTimeTraceAnalysis.h"
+
 #include "AnalysisServicePrivate.h"
-#include "Model/FileActivity.h"
+#include "Analyzers/LoadTimeTraceAnalysis.h"
+#include "Analyzers/PlatformFileTraceAnalysis.h"
 #include "HAL/FileManager.h"
+#include "Model/FileActivity.h"
+#include "TraceServices/Model/Bookmarks.h"
 
-namespace Trace
+namespace TraceServices
 {
-
-static const FName LoadTimeProfilerModuleName("TraceModule_LoadTimeProfiler");
-static const FName LoadTimeProfilerProviderName("LoadTimeProfiler");
-static const FName FileActivityProviderName("FileActivity");
 
 void BookmarksToCsv(const IBookmarkProvider& BookmarkProvider, const TCHAR* Filename, double CaptureStartTime, double CaptureEndTime)
 {
@@ -29,21 +27,23 @@ void BookmarksToCsv(const IBookmarkProvider& BookmarkProvider, const TCHAR* File
 
 void FLoadTimeProfilerModule::GetModuleInfo(FModuleInfo& OutModuleInfo)
 {
+	static const FName LoadTimeProfilerModuleName("TraceModule_LoadTimeProfiler");
+
 	OutModuleInfo.Name = LoadTimeProfilerModuleName;
 	OutModuleInfo.DisplayName = TEXT("Asset Loading");
 }
 
 void FLoadTimeProfilerModule::OnAnalysisBegin(IAnalysisSession& Session)
 {
-	FLoadTimeProfilerProvider* LoadTimeProfilerProvider = new FLoadTimeProfilerProvider(Session, EditCounterProvider(Session));
-	Session.AddProvider(LoadTimeProfilerProviderName, LoadTimeProfilerProvider);
+	TSharedPtr<FLoadTimeProfilerProvider> LoadTimeProfilerProvider = MakeShared<FLoadTimeProfilerProvider>(Session, EditCounterProvider(Session));
+	Session.AddProvider(GetLoadTimeProfilerProviderName(), LoadTimeProfilerProvider);
 	Session.AddAnalyzer(new FAsyncLoadingTraceAnalyzer(Session, *LoadTimeProfilerProvider));
-	FFileActivityProvider* FileActivityProvider = new FFileActivityProvider(Session);
-	Session.AddProvider(FileActivityProviderName, FileActivityProvider);
+	TSharedPtr<FFileActivityProvider> FileActivityProvider = MakeShared<FFileActivityProvider>(Session);
+	Session.AddProvider(GetFileActivityProviderName(), FileActivityProvider);
 	Session.AddAnalyzer(new FPlatformFileTraceAnalyzer(Session, *FileActivityProvider));
 }
 
-void FLoadTimeProfilerModule::GetLoggers(TArray<const TCHAR *>& OutLoggers)
+void FLoadTimeProfilerModule::GetLoggers(TArray<const TCHAR*>& OutLoggers)
 {
 	OutLoggers.Add(TEXT("LoadTime"));
 	OutLoggers.Add(TEXT("PlatformFile"));
@@ -53,12 +53,12 @@ void FLoadTimeProfilerModule::GenerateReports(const IAnalysisSession& Session, c
 {
 	double CaptureStartTime = -DBL_MAX;
 	double CaptureEndTime = DBL_MAX;
-	const IBookmarkProvider& BookmarkProvider = Trace::ReadBookmarkProvider(Session);
+	const IBookmarkProvider& BookmarkProvider = ReadBookmarkProvider(Session);
 	FString BeginCaptureBookmarkName;
 	FParse::Value(CmdLine, TEXT("-BeginCaptureBookmark="), BeginCaptureBookmarkName);
 	FString EndCaptureBookmarkName;
 	FParse::Value(CmdLine, TEXT("-EndCaptureBookmark="), EndCaptureBookmarkName);
-	
+
 
 	BookmarkProvider.EnumerateBookmarks(0.0, DBL_MAX, [BeginCaptureBookmarkName, EndCaptureBookmarkName, &CaptureStartTime, &CaptureEndTime](const FBookmark& Bookmark)
 	{
@@ -80,7 +80,7 @@ void FLoadTimeProfilerModule::GenerateReports(const IAnalysisSession& Session, c
 		CaptureEndTime = Session.GetDurationSeconds();
 	}
 
-	const ILoadTimeProfilerProvider* LoadTimeProfiler = Trace::ReadLoadTimeProfilerProvider(Session);
+	const ILoadTimeProfilerProvider* LoadTimeProfiler = ReadLoadTimeProfilerProvider(Session);
 	FString ReportDirectory = FString(OutputDirectory) / TEXT("LoadTimeProfiler");
 	if (LoadTimeProfiler)
 	{
@@ -88,9 +88,10 @@ void FLoadTimeProfilerModule::GenerateReports(const IAnalysisSession& Session, c
 		Table2Csv(*PackagesTable.Get(), *(ReportDirectory / TEXT("Packages.csv")));
 		TUniquePtr<ITable<FExportsTableRow>> ExportsTable(LoadTimeProfiler->CreateExportDetailsTable(CaptureStartTime, CaptureEndTime));
 		Table2Csv(*ExportsTable.Get(), *(ReportDirectory / TEXT("Exports.csv")));
-		Table2Csv(LoadTimeProfiler->GetRequestsTable(), *(ReportDirectory / TEXT("Requests.csv")));
+		TUniquePtr<ITable<FRequestsTableRow>> RequestsTable(LoadTimeProfiler->CreateRequestsTable(CaptureStartTime, CaptureEndTime));
+		Table2Csv(*RequestsTable.Get(), *(ReportDirectory / TEXT("Requests.csv")));
 	}
-	const IFileActivityProvider* FileActivityProvider = Trace::ReadFileActivityProvider(Session);
+	const IFileActivityProvider* FileActivityProvider = ReadFileActivityProvider(Session);
 	if (FileActivityProvider)
 	{
 		Table2Csv(FileActivityProvider->GetFileActivityTable(), *(FString(ReportDirectory) / TEXT("FileActivity.csv")));
@@ -104,14 +105,26 @@ void FLoadTimeProfilerModule::GenerateReports(const IAnalysisSession& Session, c
 	BookmarksToCsv(BookmarkProvider, *(FString(ReportDirectory) / TEXT("Bookmarks.csv")), CaptureStartTime, CaptureEndTime);
 }
 
+FName GetLoadTimeProfilerProviderName()
+{
+	static const FName Name("LoadTimeProfilerProvider");
+	return Name;
+}
+
 const ILoadTimeProfilerProvider* ReadLoadTimeProfilerProvider(const IAnalysisSession& Session)
 {
-	return Session.ReadProvider<ILoadTimeProfilerProvider>(LoadTimeProfilerProviderName);
+	return Session.ReadProvider<ILoadTimeProfilerProvider>(GetLoadTimeProfilerProviderName());
+}
+
+FName GetFileActivityProviderName()
+{
+	static const FName Name("FileActivityProvider");
+	return Name;
 }
 
 const IFileActivityProvider* ReadFileActivityProvider(const IAnalysisSession& Session)
 {
-	return Session.ReadProvider<IFileActivityProvider>(FileActivityProviderName);
+	return Session.ReadProvider<IFileActivityProvider>(GetFileActivityProviderName());
 }
 
-}
+} // namespace TraceServices

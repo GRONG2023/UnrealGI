@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AISystem.h"
+#include "Engine/GameInstance.h"
 #include "Modules/ModuleManager.h"
 #include "AIController.h"
 #include "Perception/AIPerceptionSystem.h"
@@ -12,6 +13,8 @@
 #include "BehaviorTree/BlackboardData.h"
 #include "Navigation/NavLocalGridManager.h"
 #include "Misc/CommandLine.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AISystem)
 
 DEFINE_STAT(STAT_AI_Overall);
 
@@ -26,8 +29,6 @@ UAISystem::UAISystem(const FObjectInitializer& ObjectInitializer)
 	bAcceptPartialPaths = true;
 	bAllowStrafing = false;
 	DefaultSightCollisionChannel = ECC_Visibility;
-
-	bEnableBTAITasks = false;
 
 	if (HasAnyFlags(RF_ClassDefaultObject))
 	{
@@ -45,7 +46,7 @@ UAISystem::UAISystem(const FObjectInitializer& ObjectInitializer)
 
 void UAISystem::BeginDestroy()
 {
-	CleanupWorld(true, true, NULL);
+	CleanupWorld(true, true);
 	Super::BeginDestroy();
 }
 
@@ -59,8 +60,6 @@ void UAISystem::PostInitProperties()
 
 		BehaviorTreeManager = NewObject<UBehaviorTreeManager>(this);
 		ensure(BehaviorTreeManager != nullptr);
-		EnvironmentQueryManager = NewObject<UEnvQueryManager>(this);
-		ensure(EnvironmentQueryManager != nullptr);
 		NavLocalGrids = NewObject<UNavLocalGridManager>(this);
 		ensure(NavLocalGrids != nullptr);
 
@@ -76,11 +75,20 @@ void UAISystem::PostInitProperties()
 			PerceptionSystem = NewObject<UAIPerceptionSystem>(this, PerceptionSystemClass, TEXT("PerceptionSystem"));
 		}
 
+		TSubclassOf<UEnvQueryManager> EnvQueryManagerClass = EnvQueryManagerClassName.IsValid() ? LoadClass<UEnvQueryManager>(NULL, *EnvQueryManagerClassName.ToString(), NULL, LOAD_None, NULL) : UEnvQueryManager::StaticClass();
+		if (EnvQueryManagerClass)
+		{
+			EnvironmentQueryManager = NewObject<UEnvQueryManager>(this, EnvQueryManagerClass, TEXT("EnvironmentQueryManager"));
+		}
+		ensure(EnvironmentQueryManager != nullptr);
+
 		if (WorldOuter)
 		{
-			FOnActorSpawned::FDelegate ActorSpawnedDelegate = FOnActorSpawned::FDelegate::CreateUObject(this, &UAISystem::OnActorSpawned);
+			const FOnActorSpawned::FDelegate ActorSpawnedDelegate = FOnActorSpawned::FDelegate::CreateUObject(this, &UAISystem::OnActorSpawned);
 			ActorSpawnedDelegateHandle = WorldOuter->AddOnActorSpawnedHandler(ActorSpawnedDelegate);
 		}
+
+		PawnBeginPlayDelegateHandle = APawn::OnPawnBeginPlay.AddUObject(this, &UAISystem::OnPawnBeginPlay);
 
 		ConditionalLoadDebuggerPlugin();
 	}
@@ -98,15 +106,23 @@ void UAISystem::StartPlay()
 
 void UAISystem::OnActorSpawned(AActor* SpawnedActor)
 {
+}
+
+void UAISystem::OnPawnBeginPlay(APawn* Pawn)
+{
+	check(Pawn);
+
 	if (PerceptionSystem == nullptr || PerceptionSystem->bHandlePawnNotification == false)
 	{
 		return;
 	}
 
-	APawn* AsPawn = Cast<APawn>(SpawnedActor);
-	if (AsPawn)
+	const UWorld* const PawnWorld = Pawn->GetWorld();
+	check(PawnWorld);
+
+	if (PawnWorld == GetWorld())
 	{
-		PerceptionSystem->OnNewPawn(*AsPawn);
+		PerceptionSystem->OnNewPawn(*Pawn);
 	}
 }
 
@@ -122,7 +138,12 @@ void UAISystem::WorldOriginLocationChanged(FIntVector OldOriginLocation, FIntVec
 
 void UAISystem::CleanupWorld(bool bSessionEnded, bool bCleanupResources, UWorld* NewWorld)
 {
-	Super::CleanupWorld(bSessionEnded, bCleanupResources, NewWorld);
+	CleanupWorld(bSessionEnded, bCleanupResources);
+}
+
+void UAISystem::CleanupWorld(bool bSessionEnded, bool bCleanupResources)
+{
+	Super::CleanupWorld(bSessionEnded, bCleanupResources);
 	
 	if (bCleanupResources)
 	{
@@ -132,6 +153,13 @@ void UAISystem::CleanupWorld(bool bSessionEnded, bool bCleanupResources, UWorld*
 			EnvironmentQueryManager = nullptr;
 		}
 	}
+
+	const UWorld* const WorldOuter = GetOuterWorld();
+	if (WorldOuter)
+	{
+		WorldOuter->RemoveOnActorSpawnedHandler(ActorSpawnedDelegateHandle);
+	}
+	APawn::OnPawnBeginPlay.Remove(PawnBeginPlayDelegateHandle);
 }
 
 void UAISystem::AIIgnorePlayers()
@@ -255,3 +283,4 @@ void UAISystem::LoadDebuggerPlugin()
 {
 	FModuleManager::LoadModulePtr< IModuleInterface >("GameplayDebugger");
 }
+

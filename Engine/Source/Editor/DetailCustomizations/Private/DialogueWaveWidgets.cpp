@@ -1,20 +1,56 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "DialogueWaveWidgets.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Editor.h"
-#include "Modules/ModuleManager.h"
-#include "SlateOptMacros.h"
-#include "Widgets/Layout/SWrapBox.h"
-#include "Widgets/Images/SImage.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Notifications/SErrorHint.h"
-#include "Widgets/Input/SComboButton.h"
-#include "Sound/DialogueVoice.h"
+
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
+#include "AssetThumbnail.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
 #include "DetailLayoutBuilder.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMath.h"
+#include "Input/Events.h"
+#include "Input/Reply.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Children.h"
+#include "Layout/Geometry.h"
+#include "Layout/Margin.h"
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
+#include "Modules/ModuleManager.h"
+#include "PropertyHandle.h"
 #include "SAssetDropTarget.h"
-#include "AssetRegistryModule.h"
-#include "Engine/Selection.h"
+#include "Selection.h"
+#include "SlateOptMacros.h"
+#include "SlotBase.h"
+#include "Sound/DialogueVoice.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateColor.h"
+#include "Templates/Casts.h"
+#include "Types/SlateStructs.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/WeakObjectPtr.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Input/SComboButton.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SSpacer.h"
+#include "Widgets/Layout/SWrapBox.h"
+#include "Widgets/Notifications/SErrorHint.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SNullWidget.h"
+#include "Widgets/SWidget.h"
+#include "Widgets/Text/STextBlock.h"
+
+class FDragDropEvent;
+class UClass;
 
 #define LOCTEXT_NAMESPACE "DialogueWaveDetails"
 
@@ -43,8 +79,8 @@ void SDialogueVoicePropertyEditor::Construct( const FArguments& InArgs, const TS
 		TSharedRef<SWidget> AssetWidget =
 			SNew( SAssetDropTarget )
 			.ToolTipText( this, &SDialogueVoicePropertyEditor::OnGetToolTip )
-			.OnIsAssetAcceptableForDrop( this, &SDialogueVoicePropertyEditor::OnIsAssetAcceptableForDrop )
-			.OnAssetDropped( this, &SDialogueVoicePropertyEditor::OnAssetDropped )
+			.OnAreAssetsAcceptableForDrop( this, &SDialogueVoicePropertyEditor::OnIsAssetAcceptableForDrop )
+			.OnAssetsDropped( this, &SDialogueVoicePropertyEditor::OnAssetDropped )
 			[
 				SNew( SBox )
 				.WidthOverride( ThumbnailSizeX ) 
@@ -114,8 +150,8 @@ void SDialogueVoicePropertyEditor::Construct( const FArguments& InArgs, const TS
 				[
 					SAssignNew( ComboButton, SComboButton )
 					.ToolTipText( this, &SDialogueVoicePropertyEditor::OnGetToolTip )
-					.ButtonStyle( FEditorStyle::Get(), "PropertyEditor.AssetComboStyle" )
-					.ForegroundColor(FEditorStyle::GetColor("PropertyEditor.AssetName.ColorAndOpacity"))
+					.ButtonStyle( FAppStyle::Get(), "PropertyEditor.AssetComboStyle" )
+					.ForegroundColor(FAppStyle::GetColor("PropertyEditor.AssetName.ColorAndOpacity"))
 					.OnGetMenuContent( this, &SDialogueVoicePropertyEditor::OnGetMenuContent )
 					.ContentPadding(2.0f)
 					.ButtonContent()
@@ -229,15 +265,15 @@ void SDialogueVoicePropertyEditor::CloseMenu()
 	ComboButton->SetIsOpen(false);
 }
 
-bool SDialogueVoicePropertyEditor::OnIsAssetAcceptableForDrop( const UObject* InObject ) const
+bool SDialogueVoicePropertyEditor::OnIsAssetAcceptableForDrop( TArrayView<FAssetData> InAssets ) const
 {
 	// Only dialogue voice can be dropped 
-	return InObject->IsA( UDialogueVoice::StaticClass() );
+	return Cast<UDialogueVoice>( InAssets[0].GetAsset() ) != nullptr;
 }
 
-void SDialogueVoicePropertyEditor::OnAssetDropped( UObject* Object )
+void SDialogueVoicePropertyEditor::OnAssetDropped( const FDragDropEvent&, TArrayView<FAssetData> InAssets )
 {
-	ReplaceDialogueVoice( CastChecked<UDialogueVoice>(Object) );
+	ReplaceDialogueVoice( CastChecked<UDialogueVoice>(InAssets[0].GetAsset()) );
 }
 
 FText SDialogueVoicePropertyEditor::GetDialogueVoiceDescription() const
@@ -402,14 +438,16 @@ void SDialogueVoicePropertyEditor::OnDialogueVoicePathChanged( const FText& NewT
 			
 		if( !NewString.IsEmpty() )
 		{
-			UObject* Package = ANY_PACKAGE;
 			if( NewString.Contains( TEXT(".") ) )
 			{
 				// Formatted text string, use the exact path instead of any package
-				Package = NULL;
+				DialogueVoiceToAssign = FindObject<UDialogueVoice>(nullptr, *NewString);
 			}
-
-			DialogueVoiceToAssign = Cast<UDialogueVoice>( StaticFindObject( UDialogueVoice::StaticClass(), Package, *NewString ) );		
+			else
+			{
+				DialogueVoiceToAssign = FindFirstObject<UDialogueVoice>(*NewString, EFindFirstObjectOptions::NativeFirst | EFindFirstObjectOptions::EnsureIfAmbiguous);
+			}
+	
 			if( !DialogueVoiceToAssign )
 			{
 				DialogueVoiceToAssign = Cast<UDialogueVoice>( StaticLoadObject( UDialogueVoice::StaticClass(), NULL, *NewString ) );
@@ -824,7 +862,7 @@ void SDialogueContextHeaderWidget::Construct( const FArguments& InArgs, const TS
 			.AutoWidth()
 			[
 				SNew( SImage )
-				.Image( FEditorStyle::GetBrush("DialogueWaveDetails.SpeakerToTarget") )
+				.Image( FAppStyle::GetBrush("DialogueWaveDetails.SpeakerToTarget") )
 				.ColorAndOpacity( FSlateColor::UseForeground() )
 			]
 			+SHorizontalBox::Slot()

@@ -77,6 +77,12 @@ UCSVImportFactory::UCSVImportFactory(const FObjectInitializer& ObjectInitializer
 	Formats.Add(TEXT("csv;Comma-separated values"));
 }
 
+bool UCSVImportFactory::IsAutomatedImport() const
+{
+	return Super::IsAutomatedImport()
+		|| AutomatedImportSettings.bForceAutomatedImport;
+}
+
 FText UCSVImportFactory::GetDisplayName() const
 {
 	return LOCTEXT("CSVImportFactoryDescription", "Comma Separated Values");
@@ -109,6 +115,30 @@ void UCSVImportFactory::CleanUp()
 	
 	bImportAll = false;
 	DataTableImportOptions = nullptr;
+}
+
+UObject* UCSVImportFactory::FactoryCreateFile(UClass* InClass, UObject* InParent, FName InName, EObjectFlags Flags, 
+	const FString& Filename, const TCHAR* Parms, FFeedbackContext* Warn, bool& bOutOperationCanceled)
+{
+	// ScriptFactoryCreateFile not implemented. We do not support blueprint/python subclasses of CSVImportFactory
+	FString FileExtension = FPaths::GetExtension(Filename);
+
+	// load as text
+	check(bText); // Set in constructor, so we do not need to support load as binary
+	{
+		FString Data;
+		if (!FFileHelper::LoadFileToString(Data, *Filename, FFileHelper::EHashOptions::None, FILEREAD_AllowWrite))
+		{
+			UE_LOG(LogCSVImportFactory, Error, TEXT("Failed to load file '%s' to string"), *Filename);
+			return nullptr;
+		}
+
+		ParseParms(Parms);
+		const TCHAR* Ptr = *Data;
+
+		return FactoryCreateText(InClass, InParent, InName, Flags, nullptr, *FileExtension, Ptr, Ptr + Data.Len(),
+			Warn, bOutOperationCanceled);
+	}
 }
 
 UObject* UCSVImportFactory::FactoryCreateText(UClass* InClass, UObject* InParent, FName InName, EObjectFlags Flags, UObject* Context, const TCHAR* Type, const TCHAR*& Buffer, const TCHAR* BufferEnd, FFeedbackContext* Warn, bool& bOutOperationCanceled)
@@ -167,6 +197,7 @@ UObject* UCSVImportFactory::FactoryCreateText(UClass* InClass, UObject* InParent
 		bHaveInfo = true;
 	}
 
+	ImportSettings.bDataIsJson = FString(Type).Equals(TEXT("json"), ESearchCase::IgnoreCase);
 	bool bDoImport = true;
 
 	// If we do not have the info we need, pop up window to ask for things
@@ -231,8 +262,8 @@ UObject* UCSVImportFactory::FactoryCreateText(UClass* InClass, UObject* InParent
 	if (bDoImport)
 	{
 		// Convert buffer to an FString (will this be slow with big tables?)
-		int32 NumChars = (BufferEnd - Buffer);
-		TArray<TCHAR>& StringChars = ImportSettings.DataToImport.GetCharArray();
+		int32 NumChars = UE_PTRDIFF_TO_INT32(BufferEnd - Buffer);
+		TArray<TCHAR, FString::AllocatorType>& StringChars = ImportSettings.DataToImport.GetCharArray();
 		StringChars.AddUninitialized(NumChars+1);
 		FMemory::Memcpy(StringChars.GetData(), Buffer, NumChars*sizeof(TCHAR));
 		StringChars.Last() = 0;
@@ -400,9 +431,7 @@ EReimportResult::Type UCSVImportFactory::Reimport(UObject* Obj, const FString& P
 
 TArray<FString> UCSVImportFactory::DoImportDataTable(const FCSVImportSettings& InImportSettings, UDataTable* TargetDataTable)
 {
-	// Are we importing JSON data?
-	const bool bIsJSON = CurrentFilename.EndsWith(TEXT(".json"));
-	if (bIsJSON)
+	if (InImportSettings.bDataIsJson)
 	{
 		return TargetDataTable->CreateTableFromJSONString(InImportSettings.DataToImport);
 	}
@@ -412,9 +441,7 @@ TArray<FString> UCSVImportFactory::DoImportDataTable(const FCSVImportSettings& I
 
 TArray<FString> UCSVImportFactory::DoImportCurveTable(const FCSVImportSettings& InImportSettings, UCurveTable* TargetCurveTable)
 {
-	// Are we importing JSON data?
-	const bool bIsJSON = CurrentFilename.EndsWith(TEXT(".json"));
-	if (bIsJSON)
+	if (InImportSettings.bDataIsJson)
 	{
 		return TargetCurveTable->CreateTableFromJSONString(InImportSettings.DataToImport, InImportSettings.ImportCurveInterpMode);
 	}
@@ -424,9 +451,7 @@ TArray<FString> UCSVImportFactory::DoImportCurveTable(const FCSVImportSettings& 
 
 TArray<FString> UCSVImportFactory::DoImportCurve(const FCSVImportSettings& InImportSettings, UCurveBase* TargetCurve)
 {
-	// Are we importing JSON data?
-	const bool bIsJSON = CurrentFilename.EndsWith(TEXT(".json"));
-	if (bIsJSON)
+	if (InImportSettings.bDataIsJson)
 	{
 		TArray<FString> Result;
 		Result.Add(LOCTEXT("Error_CannotImportCurveFromJSON", "Cannot import a curve from JSON. Please use CSV instead.").ToString());

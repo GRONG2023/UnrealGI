@@ -1,39 +1,25 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
+using AutomationTool;
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 using System.IO;
-using AutomationTool;
-using System.Runtime.Serialization;
+using System.Linq;
 using System.Net;
 using System.Reflection;
 using System.Text.RegularExpressions;
+using UnrealBuildBase;
 using UnrealBuildTool;
-using EpicGames.MCP.Automation;
+using Microsoft.Extensions.Logging;
+
+using static AutomationTool.CommandUtils;
 
 namespace EpicGames.MCP.Automation
 {
+	using EpicGames.Core;
 	using EpicGames.MCP.Config;
+	using System.ComponentModel;
+	using System.Globalization;
 	using System.Threading.Tasks;
-	using Tools.DotNETCommon;
-
-	public static class Extensions
-	{
-		public static Type[] SafeGetLoadedTypes(this Assembly Dll)
-		{
-			Type[] AllTypes;
-			try
-			{
-				AllTypes = Dll.GetTypes();
-			}
-			catch (ReflectionTypeLoadException e)
-			{
-				AllTypes = e.Types.Where(x => x != null).ToArray();
-			}
-			return AllTypes;
-		}
-	}
 
     /// <summary>
     /// Utility class to provide commit/rollback functionality via an RAII-like functionality.
@@ -84,82 +70,236 @@ namespace EpicGames.MCP.Automation
 	/// <summary>
 	/// Enum that defines the MCP backend-compatible platform
 	/// </summary>
-	public enum MCPPlatform
+	[TypeConverter(typeof(MCPPlatformTypeConverter))]
+	public partial struct MCPPlatform
 	{
+		#nullable enable
+		#region Private/boilerplate
+
+		// internal concrete name of the enum
+		private int Id;
+
+		// shared string instance registry - pass in a delegate to create a new one with a name that wasn't made yet
+		private static UniqueStringRegistry? StringRegistry;
+
+		// #jira UE-88908 if parts of a partial struct have each static member variables, their initialization order does not appear guaranteed
+		// here this means initializing "StringRegistry" directly to "new UniqueStringRegistry()" may not be executed before FindOrAddByName() has been called as part of initializing a static member variable of another part of the partial struct
+		private static UniqueStringRegistry GetUniqueStringRegistry()
+		{
+			if (StringRegistry == null)
+			{
+				StringRegistry = new UniqueStringRegistry();
+			}
+			return StringRegistry;
+		}
+
+		private MCPPlatform(string Name)
+		{
+			Id = GetUniqueStringRegistry().FindOrAddByName(Name);
+		}
+
+		private MCPPlatform(int InId)
+		{
+			Id = InId;
+		}
+
+		static private MCPPlatform FindOrAddByName(string Name)
+		{
+			return new MCPPlatform(GetUniqueStringRegistry().FindOrAddByName(Name));
+		}
+
+		/// <summary>
+		/// 
+		/// </summary>
+		/// <param name="A"></param>
+		/// <param name="B"></param>
+		/// <returns></returns>
+		public static bool operator ==(MCPPlatform A, MCPPlatform B)
+		{
+			return A.Id == B.Id;
+		}
+
+		/// <summary>
+		/// 
+		/// </summary>
+		/// <param name="A"></param>
+		/// <param name="B"></param>
+		/// <returns></returns>
+		public static bool operator !=(MCPPlatform A, MCPPlatform B)
+		{
+			return A.Id != B.Id;
+		}
+
+		/// <summary>
+		/// 
+		/// </summary>
+		/// <param name="B"></param>
+		/// <returns></returns>
+		public override bool Equals(object? B)
+		{
+			if (Object.ReferenceEquals(B, null))
+			{
+				return false;
+			}
+
+			return Id == ((MCPPlatform)B).Id;
+		}
+
+		/// <summary>
+		/// 
+		/// </summary>
+		/// <returns></returns>
+		public override int GetHashCode()
+		{
+			return Id;
+		}
+
+		#endregion
+
+		/// <summary>
+		/// Return the string representation
+		/// </summary>
+		/// <returns></returns>
+		public override string ToString()
+		{
+			return GetUniqueStringRegistry().GetStringForId(Id);
+		}
+
+		/// <summary>
+		/// Parse string into a MCPPlatform
+		/// </summary>
+		/// <param name="Name"></param>
+		/// <param name="Platform"></param>
+		/// <returns>True if parse succeeded</returns>
+		static public bool TryParse(string Name, out MCPPlatform Platform)
+		{
+			if (GetUniqueStringRegistry().HasString(Name))
+			{
+				Platform.Id = GetUniqueStringRegistry().FindOrAddByName(Name);
+				return true;
+			}
+			Platform.Id = -1;
+			return false;
+		}
+
+		/// <summary>
+		/// Parse string into a MCPPlatform
+		/// </summary>
+		/// <param name="Name"></param>
+		/// <returns></returns>
+		static public MCPPlatform Parse(string Name)
+		{
+			if (GetUniqueStringRegistry().HasString(Name))
+			{
+				return new MCPPlatform(Name);
+			}
+
+			throw new BuildException(string.Format("The platform name {0} is not a valid platform name. Valid names are ({1})", Name,
+				string.Join(",", GetUniqueStringRegistry().GetStringNames())));
+		}
+
+		/// <summary>
+		/// Get list of valid platforms
+		/// </summary>
+		/// <returns>MCPPlatform list</returns>
+		public static MCPPlatform[] GetValidPlatforms()
+		{
+			return Array.ConvertAll(GetUniqueStringRegistry().GetStringIds(), x => new MCPPlatform(x));
+		}
+
+		/// <summary>
+		/// Get list of valid platform names
+		/// </summary>
+		/// <returns>Platform name list</returns>
+		public static string[] GetValidPlatformNames()
+		{
+			return GetUniqueStringRegistry().GetStringNames();
+		}
+
 		/// <summary>
 		/// MCP uses Windows for Win64
 		/// </summary>
-		Windows,
+		public static MCPPlatform Windows = FindOrAddByName("Windows");
 
 		/// <summary>
 		/// 32 bit Windows
 		/// </summary>
-		Win32,
+		public static MCPPlatform Win32 = FindOrAddByName("Win32");
 
 		/// <summary>
 		/// Mac platform.
 		/// </summary>
-		Mac,
+		public static MCPPlatform Mac = FindOrAddByName("Mac");
 
 		/// <summary>
 		/// Linux platform.
 		/// </summary>
-		Linux,
+		public static MCPPlatform Linux = FindOrAddByName("Linux");
 
 		/// <summary>
 		/// IOS platform.
 		/// </summary>
-		IOS,
+		public static MCPPlatform IOS = FindOrAddByName("IOS");
 
 		/// <summary>
 		/// Android platform.
 		/// </summary>
-		Android,
+		public static MCPPlatform Android = FindOrAddByName("Android");
 
 		/// <summary>
 		/// WindowsCN Platform.
 		/// </summary>
-		WindowsCN,
+		public static MCPPlatform WindowsCN = FindOrAddByName("WindowsCN");
 
 		/// <summary>
 		/// IOSCN Platform.
 		/// </summary>
-		IOSCN,
+		public static MCPPlatform IOSCN = FindOrAddByName("IOSCN");
 
 		/// <summary>
 		/// AndroidCN Platform.
 		/// </summary>
-		AndroidCN,
+		public static MCPPlatform AndroidCN = FindOrAddByName("AndroidCN");
 
-		/// <summary>
-		/// PS4 platform
-		/// </summary>
-		PS4,
+	#nullable restore
+	}
 
-		/// <summary>
-		/// PS5 platform
-		/// </summary>
-		PS5,
+	internal class MCPPlatformTypeConverter : TypeConverter
+	{
+		public override bool CanConvertFrom(ITypeDescriptorContext context, Type sourceType)
+		{
+			if (sourceType == typeof(string))
+				return true;
 
-		/// <summary>
-		/// Switch platform
-		/// </summary>
-		Switch,
+			return base.CanConvertFrom(context, sourceType);
+		}
 
-		/// <summary>
-		/// Xbox One Platform
-		/// </summary>
-		XboxOne,
+		public override bool CanConvertTo(ITypeDescriptorContext context, Type destinationType)
+		{
+			if (destinationType == typeof(string))
+				return true;
 
-		/// <summary>
-		/// Xbox One with GDK Platform
-		/// </summary>
-		XboxOneGDK,
+			return base.CanConvertTo(context, destinationType);
+		}
 
-		/// <summary>
-		/// XSX platform
-		/// </summary>
-		XSX,
+		public override object ConvertFrom(ITypeDescriptorContext context, CultureInfo culture, object value)
+		{
+			if (value.GetType() == typeof(string))
+			{
+				return MCPPlatform.Parse((string)value);
+			}
+			return base.ConvertFrom(context, culture, value);
+		}
+
+		public override object ConvertTo(ITypeDescriptorContext context, CultureInfo culture, object value, Type destinationType)
+		{
+			if (destinationType == typeof(string))
+			{
+				MCPPlatform Platform = (MCPPlatform)value;
+				return Platform.ToString();
+			}
+			return base.ConvertTo(context, culture, value, destinationType);
+		}
 	}
 
 	/// <summary>
@@ -242,7 +382,7 @@ namespace EpicGames.MCP.Automation
 					return _ManifestFilename;
 				}
 
-				CommandUtils.LogInformation("Using legacy behavior of constructing manifest filename from appname, build version and platform. Update your code to specify manifest filename when constructing BuildPatchToolStagingInfo or call RetrieveManifestFilename to query it.");
+				Logger.LogInformation("Using legacy behavior of constructing manifest filename from appname, build version and platform. Update your code to specify manifest filename when constructing BuildPatchToolStagingInfo or call RetrieveManifestFilename to query it.");
 				var BaseFilename = string.Format("{0}{1}-{2}.manifest",
 					AppName,
 					BuildVersion,
@@ -265,49 +405,9 @@ namespace EpicGames.MCP.Automation
 			{
 				return MCPPlatform.Windows;
 			}
-			else if (TargetPlatform == UnrealTargetPlatform.Win32)
+			else if (MCPPlatform.TryParse(TargetPlatform.ToString(), out MCPPlatform Platform))
 			{
-				return MCPPlatform.Win32;
-			}
-			else if (TargetPlatform == UnrealTargetPlatform.Mac)
-			{
-				return MCPPlatform.Mac;
-			}
-			else if (TargetPlatform == UnrealTargetPlatform.Linux)
-			{
-				return MCPPlatform.Linux;
-			}
-			else if (TargetPlatform == UnrealTargetPlatform.IOS)
-			{
-				return MCPPlatform.IOS;
-			}
-			else if (TargetPlatform == UnrealTargetPlatform.Android)
-			{
-				return MCPPlatform.Android;
-			}
-			else if (TargetPlatform == UnrealTargetPlatform.PS4)
-			{
-				return MCPPlatform.PS4;
-			}
-			else if (TargetPlatform.ToString() == "PS5")
-			{
-				return MCPPlatform.PS5;
-			}
-			else if (TargetPlatform == UnrealTargetPlatform.XboxOne)
-			{
-				return MCPPlatform.XboxOne;
-			}
-			else if (TargetPlatform.ToString() == "XboxOneGDK")
-			{
-				return MCPPlatform.XboxOneGDK;
-			}
-			else if (TargetPlatform.ToString() == "XSX")
-			{
-				return MCPPlatform.XSX;
-			}
-			else if (TargetPlatform == UnrealTargetPlatform.Switch)
-			{
-				return MCPPlatform.Switch;
+				return Platform;
 			}
 			throw new AutomationException("Platform {0} is not properly supported by the MCP backend yet", TargetPlatform);
         }
@@ -321,54 +421,8 @@ namespace EpicGames.MCP.Automation
 			{
 				return UnrealTargetPlatform.Win64;
 			}
-			else if (TargetPlatform == MCPPlatform.Win32)
+			else if (UnrealTargetPlatform.TryParse(TargetPlatform.ToString(), out UnrealTargetPlatform ReturnValue))
 			{
-				return UnrealTargetPlatform.Win32;
-			}
-			else if (TargetPlatform == MCPPlatform.Mac)
-			{
-				return UnrealTargetPlatform.Mac;
-			}
-			else if (TargetPlatform == MCPPlatform.Linux)
-			{
-				return UnrealTargetPlatform.Linux;
-			}
-			else if (TargetPlatform == MCPPlatform.IOS)
-			{
-				return UnrealTargetPlatform.IOS;
-			}
-			else if (TargetPlatform == MCPPlatform.Android)
-			{
-				return UnrealTargetPlatform.Android;
-			}
-			else if (TargetPlatform == MCPPlatform.PS4)
-			{
-				return UnrealTargetPlatform.PS4;
-			}
-			else if (TargetPlatform == MCPPlatform.XboxOne)
-			{
-				return UnrealTargetPlatform.XboxOne;
-			}
-			else if (TargetPlatform == MCPPlatform.Switch)
-			{
-				return UnrealTargetPlatform.Switch;
-			}
-			else if (TargetPlatform == MCPPlatform.XboxOneGDK)
-			{
-				UnrealTargetPlatform ReturnValue;
-				UnrealTargetPlatform.TryParse("XboxOneGDK", out ReturnValue);
-				return ReturnValue;
-			}
-			else if (TargetPlatform == MCPPlatform.XSX)
-			{
-				UnrealTargetPlatform ReturnValue;
-				UnrealTargetPlatform.TryParse("XSX", out ReturnValue);
-				return ReturnValue;
-			}
-			else if (TargetPlatform == MCPPlatform.PS5)
-			{
-				UnrealTargetPlatform ReturnValue;
-				UnrealTargetPlatform.TryParse("PS5", out ReturnValue);
 				return ReturnValue;
 			}
 			throw new AutomationException("Platform {0} is not properly supported by the MCP backend yet", TargetPlatform);
@@ -591,8 +645,11 @@ namespace EpicGames.MCP.Automation
 			/// </summary>
 			Online_v140,
 			Online_v150,
+			Online_v151,
+			Online_v152,
+			Online_v160,
 
-			Online_Live = Online_v150
+			Online_Live = Online_v160
 		}
 
 		/// <summary>
@@ -640,6 +697,7 @@ namespace EpicGames.MCP.Automation
 			{
 				DataAgeThreshold = DEFAULT_DATA_AGE_THRESHOLD;
 				ChunkWindowSize = 1048576;
+				ResaveKnownChunks = false;
 			}
 
 			/// <summary>
@@ -693,6 +751,14 @@ namespace EpicGames.MCP.Automation
 			/// </summary>
 			public string AppLaunchCmdArgs;
 			/// <summary>
+			/// The custom uninstall action executable to launch right before product uninstall, relative to the build root.
+			/// </summary>
+			public string UninstallActionPath;
+			/// <summary>
+			/// The commandline to send to the custom uninstall action on launch.
+			/// </summary>
+			public string UninstallActionArgs;
+			/// <summary>
 			/// The list of prerequisite Ids that this prerequisite installer satisfies.
 			/// </summary>
 			public List<string> PrereqIds;
@@ -720,6 +786,10 @@ namespace EpicGames.MCP.Automation
 			/// Specifies the desired output FeatureLevel of BuildPatchTool, if this is not provided BPT will warn and default to LatestJson so that project scripts can be updated.
 			/// </summary>
 			public string FeatureLevel;
+			/// <summary>
+			/// Output includes all known chunks, not just new chunks generated
+			/// </summary>
+			public bool ResaveKnownChunks;
 			/// <summary>
 			/// Contains a list of custom string arguments to be embedded in the generated manifest file.
 			/// </summary>
@@ -783,6 +853,10 @@ namespace EpicGames.MCP.Automation
 			/// </summary>
 			public string FileAttributeList;
 			/// <summary>
+			/// List of artifact ids which will be used to generate patches, if this is left blank all artifact ids will be used
+			/// </summary>
+			public string AllowedlistArtifactIds;
+			/// <summary>
 			/// Specifies the client id allocated to you by Epic for uploading binaries to Epic's services.
 			/// </summary>
 			public string ClientId;
@@ -810,6 +884,14 @@ namespace EpicGames.MCP.Automation
 			/// The commandline to send to the app on launch.
 			/// </summary>
 			public string AppLaunchCmdArgs;
+			/// <summary>
+			/// The custom uninstall action executable to launch right before product uninstall, relative to the build root.
+			/// </summary>
+			public string UninstallActionPath;
+			/// <summary>
+			/// The commandline to send to the custom uninstall action on launch.
+			/// </summary>
+			public string UninstallActionArgs;
 			/// <summary>
 			/// The list of prerequisite Ids that this prerequisite installer satisfies.
 			/// </summary>
@@ -904,6 +986,55 @@ namespace EpicGames.MCP.Automation
 			public string CommandLineFile;
 		}
 
+
+		public class BinaryDeltaOptimizeOptions
+		{
+			public BinaryDeltaOptimizeOptions()
+			{
+			}
+
+			/// <summary>
+			/// The id of the artifact.
+			/// </summary>
+			public string ArtifactId;
+			/// <summary>
+			/// The build version to generate optimized deltas from 
+			/// </summary>
+			public string BuildVersionA;
+			/// <summary>
+			/// The build version to generate optimized deltas to 
+			/// </summary>
+			public string BuildVersionB;
+			/// <summary>
+			/// Specifies the client id allocated to you by Epic for uploading binaries to Epic's services.
+			/// </summary>
+			public string ClientId;
+			/// <summary>
+			/// Specifies the client secret allocated to you by Epic for uploading binaries to Epic's services.
+			/// </summary>
+			public string ClientSecret;
+			/// <summary>
+			/// Specifies the name of an environment variable containing the client secret allocated to you by Epic for uploading binaries to Epic's services.
+			/// </summary>
+			public string ClientSecretEnvVar;
+			/// <summary>
+			/// Specifies the id of the organization that this product belongs to.
+			/// </summary>
+			public string OrganizationId;
+			/// <summary>
+			/// Specifies the id of the product being uploaded.
+			/// </summary>
+			public string ProductId;
+			/// <summary>
+			/// File path to a file containing parameters for bpt to use (can be used in combination with parameters above, no duplicates)
+			/// </summary>
+			public string CommandLineFile;
+			/// <summary>
+			/// The directory which will receive the generated manifest and chunks.
+			/// </summary>
+			public string CloudDir;
+		}
+
 		public class ListBinariesOptions
 		{
 			public ListBinariesOptions()
@@ -983,6 +1114,54 @@ namespace EpicGames.MCP.Automation
 			}
 			public List<ListBinariesOutputBinary> Binaries;
 		}
+		public class ListBinariesOutputBinaryJsonFormat
+		{
+			public class ListBinariesOutputLabelJsonFormat
+			{
+				public string LabelName;
+				public string Platform;
+			}
+			public List<ListBinariesOutputLabelJsonFormat> Labels;
+			public string ArtifactId;
+			public string BuildVersion;
+			public DateTime Created;
+			public DateTime Updated;
+			public string ManifestHash;
+			public int Rvn;
+			
+			public ListBinariesOutput.ListBinariesOutputBinary.ListBinariesOutputManifestLocation ManifestLocation;
+			public bool IsResuable;
+
+			public ListBinariesOutput.ListBinariesOutputBinary ConvertToOutputBinary()
+			{
+				ListBinariesOutput.ListBinariesOutputBinary Result = new ListBinariesOutput.ListBinariesOutputBinary();
+				Result.Labels = new List<ListBinariesOutput.ListBinariesOutputBinary.ListBinariesOutputLabel>();
+				foreach (ListBinariesOutputLabelJsonFormat Label in Labels)
+				{
+					ListBinariesOutput.ListBinariesOutputBinary.ListBinariesOutputLabel NewLabel = new ListBinariesOutput.ListBinariesOutputBinary.ListBinariesOutputLabel();
+					if (MCPPlatform.TryParse(Label.Platform, out NewLabel.Platform) == false)
+					{
+						// skip platforms which don't have a resolvable platform
+						Logger.LogWarning("Unable to resolve MCP platform for Label {Arg0} platform string is {Arg1}", Label.LabelName, Label.Platform);
+						continue;
+					}
+					NewLabel.LabelName = Label.LabelName;
+					Result.Labels.Add(NewLabel);
+				}
+
+				Result.ArtifactId = ArtifactId;
+				Result.BuildVersion = BuildVersion;
+				Result.Created = Created;
+				Result.Updated = Updated;
+				Result.ManifestHash = ManifestHash;
+				Result.Rvn = Rvn;
+				Result.ManifestLocation = ManifestLocation;
+				Result.IsResuable = IsResuable;
+
+				return Result;
+			}
+		}
+
 
 		public class CopyBinaryOptions
 		{
@@ -1028,6 +1207,73 @@ namespace EpicGames.MCP.Automation
 			/// </summary>
 			public string CommandLineFile;
 		}
+
+		public class BuildPatchToolException : AutomationTool.AutomationException
+		{
+			public enum BPTErrorCode
+			{
+				Success,
+				Unknown,
+				Copy_Failed,
+				Copy_Failed_Binary_Exists,
+				Copy_Failed_No_Source_Binary,
+				Num
+			};
+			public BPTErrorCode ResolvedErrorCode;
+			public string[] LogFileLines;
+			public BuildPatchToolException(string StdOutLogFileName, AutomationTool.AutomationException Exception) : base(Exception.ErrorCode, Exception.Message)
+			{
+				ResolvedErrorCode = BPTErrorCode.Success;
+				LogFileLines = null;
+				// try to classify the type of error
+				Logger.LogInformation("Parsing log for build patch tool exception");
+				if (File.Exists(StdOutLogFileName))
+				{
+					LogFileLines = CommandUtils.ReadAllLines(StdOutLogFileName);
+					System.Text.RegularExpressions.Regex ErrorCodeRegex = new System.Text.RegularExpressions.Regex(@".*errors\.com\.epicgames\.artifact\.(?<errorCode>[A-Za-z_]*);");
+
+					foreach (string Line in LogFileLines)
+					{
+						System.Text.RegularExpressions.Match Match = ErrorCodeRegex.Match(Line);
+						if (Match.Success)
+						{
+							
+							// found an error code
+							if (ResolvedErrorCode == BPTErrorCode.Success)
+							{
+								ResolvedErrorCode = BPTErrorCode.Unknown;
+							}
+							string ErrorCodeString = Match.Groups[@"errorCode"].Value;
+							Logger.LogInformation("Found match for build patch tool exception \"{ErrorCodeString}\"", ErrorCodeString);
+							if (string.IsNullOrEmpty(ErrorCodeString) == false)
+							{
+								if (Enum.TryParse<BPTErrorCode>(ErrorCodeString, true, out ResolvedErrorCode))
+								{
+									break;
+								}
+							}
+						}
+					}
+				}
+			}
+
+			public void DumpLogFile()
+			{
+				Log.WriteLine(LogEventType.Console, "Dumping log file from last exception {0}", ToString());
+				// do the same as Process.StdOut
+				foreach (string LogFileLine in LogFileLines)
+				{
+					Log.WriteLine(LogEventType.Console, LogFileLine);
+				}
+}
+			public override string ToString()
+			{
+				return string.Format("{0}, ResolvedErrorCode: {1}", base.ToString(), ResolvedErrorCode.ToString());
+			}
+
+		}
+
+		
 
 
 
@@ -1116,7 +1362,7 @@ namespace EpicGames.MCP.Automation
 			public string ManifestA;
 			/// <summary>
 			/// The install tags to use for ManifestA.
-			/// </summary
+			/// </summary>
 			public HashSet<string> InstallTagsA;
 			/// <summary>
 			/// The file path to the update manifest.
@@ -1249,6 +1495,62 @@ namespace EpicGames.MCP.Automation
 			public ManifestDiff Differential;
 		}
 
+		public class BinaryDiffOptions
+		{
+			/// <summary>
+			/// The id of the artifact.
+			/// </summary>
+			public string ArtifactId;
+			/// <summary>
+			/// The install tags to use for ManifestA.
+			/// </summary>
+			public HashSet<string> InstallTagsA;
+			/// <summary>
+			/// The build version to generate optimized deltas from 
+			/// </summary>
+			public string BuildVersionA;
+			/// <summary>
+			/// The install tags to use for ManifestB.
+			/// </summary>
+			public HashSet<string> InstallTagsB;
+			/// <summary>
+			/// The build version to generate optimized deltas to 
+			/// </summary>
+			public string BuildVersionB;
+			/// <summary>
+			/// Specifies the client id allocated to you by Epic for uploading binaries to Epic's services.
+			/// </summary>
+			public string ClientId;
+			/// <summary>
+			/// Specifies the client secret allocated to you by Epic for uploading binaries to Epic's services.
+			/// </summary>
+			public string ClientSecret;
+			/// <summary>
+			/// Specifies the name of an environment variable containing the client secret allocated to you by Epic for uploading binaries to Epic's services.
+			/// </summary>
+			public string ClientSecretEnvVar;
+			/// <summary>
+			/// Specifies the id of the organization that this product belongs to.
+			/// </summary>
+			public string OrganizationId;
+			/// <summary>
+			/// Specifies the id of the product being uploaded.
+			/// </summary>
+			public string ProductId;
+			/// <summary>
+			/// File path to a file containing parameters for bpt to use (can be used in combination with parameters above, no duplicates)
+			/// </summary>
+			public string CommandLineFile;
+			/// <summary>
+			/// Tag sets to be compared between manifests 
+			/// </summary>
+			public List<HashSet<string>> CompareTagSets;
+			/// <summary>
+			/// Specifies in quotes the file path where the diff will be exported as a JSON object.
+			/// </summary>
+			public string OutputFile;
+		}
+
 		public class AutomationTestsOptions
 		{
 			/// <summary>
@@ -1288,7 +1590,7 @@ namespace EpicGames.MCP.Automation
 			/// from files that are not expected to be available. Most of the time this should be the union of all tags in TagSetSplit, unless tagging is changed between the two manifests.
 			/// An empty string must be included to include untagged files.
 			/// Leaving this variable null will include all files.
-			/// </summary
+			/// </summary>
 			public HashSet<string> PrevManifestTags;
 			/// <summary>
 			/// Optionally provide a list of tagsets to split chunkdb files on. First all data from the tagset at index 0 will be saved, then any extra data needed
@@ -1404,6 +1706,13 @@ namespace EpicGames.MCP.Automation
 		public abstract void Execute(CopyBinaryOptions Opts, ToolVersion Version = ToolVersion.Online_Live);
 
 		/// <summary>
+		/// Runs the Build Patch Tool executable to generate optimized deltas between the two binaries provided
+		/// </summary>
+		/// <param name="Opts">Parameters which will be passed to the Build Patch Tool generation process.</param>
+		/// <param name="Version">Which version of BuildPatchTool is desired.</param>
+		public abstract void Execute(BinaryDeltaOptimizeOptions Opts, ToolVersion Version = ToolVersion.Online_Live);
+
+		/// <summary>
 		/// Runs the Build Patch Tool executable to compactify a cloud directory using the supplied parameters.
 		/// </summary>
 		/// <param name="Opts">Parameters which will be passed to the Build Patch Tool compactify process.</param>
@@ -1431,6 +1740,14 @@ namespace EpicGames.MCP.Automation
 		/// <param name="Output">Will receive the data back for the diff.</param>
 		/// <param name="Version">Which version of BuildPatchTool is desired.</param>
 		public abstract void Execute(ManifestDiffOptions Opts, out ManifestDiffOutput Output, ToolVersion Version = ToolVersion.Live);
+
+		/// <summary>
+		/// Runs the Build Patch Tool executable to diff two binaries files logging out details.
+		/// </summary>
+		/// <param name="Opts">Parameters which will be passed to the Build Patch Tool manifest diff process.</param>
+		/// <param name="Output">Will receive the data back for the diff.</param>
+		/// <param name="Version">Which version of BuildPatchTool is desired.</param>
+		public abstract void Execute(BinaryDiffOptions Opts, out ManifestDiffOutput Output, ToolVersion Version = ToolVersion.Live);
 
 		/// <summary>
 		/// Runs the Build Patch Tool executable to evaluate built in automation testing.
@@ -1665,8 +1982,9 @@ namespace EpicGames.MCP.Automation
 		/// Gets an OAuth client token for an environment using the default client id and client secret
 		/// </summary>
 		/// <param name="McpConfig">A descriptor for the environment we want a token for</param>
+		/// <param name="bSuppressLogs">Whether to suppress output logs</param>
 		/// <returns>An OAuth client token for the specified environment.</returns>
-		public string GetClientToken(McpConfigData McpConfig)
+		public string GetClientToken(McpConfigData McpConfig, bool bSuppressLogs = false)
 		{
 			lock(CachedTokensLock)
 			{
@@ -1675,14 +1993,17 @@ namespace EpicGames.MCP.Automation
 					Tuple<string, DateTime> TokenWithExpiry = CachedTokens[McpConfig.Name];
 					if (TokenWithExpiry.Item2 > DateTime.UtcNow)
 					{
-						CommandUtils.LogInformation("Reusing client token for {0} with expiry {1:yyyy-MM-dd HH:mm:ss}", McpConfig.Name, TokenWithExpiry.Item2);
+						if(!bSuppressLogs)
+						{
+							Logger.LogInformation("Reusing client token for {Arg0} with expiry {1:yyyy-MM-dd HH:mm:ss}", McpConfig.Name, TokenWithExpiry.Item2);
+						}
 						return TokenWithExpiry.Item1;
 					}
 				}
 			}
 
 			DateTime Expiry;
-			string Result = GetClientToken(McpConfig, McpConfig.ClientId, McpConfig.ClientSecret, out Expiry);
+			string Result = GetClientToken(McpConfig, McpConfig.ClientId, McpConfig.ClientSecret.Invoke(), out Expiry);
 
 			lock(CachedTokensLock)
 			{
@@ -1694,7 +2015,10 @@ namespace EpicGames.MCP.Automation
 				{
 					CachedTokens.Add(McpConfig.Name, new Tuple<string, DateTime>(Result, Expiry));
 				}
-				CommandUtils.LogInformation("Obtained new client token for {0} with expiry {1:yyyy-MM-dd HH:mm:ss}", McpConfig.Name, Expiry);
+				if (!bSuppressLogs)
+				{
+					Logger.LogInformation("Obtained new client token for {Arg0} with expiry {1:yyyy-MM-dd HH:mm:ss}", McpConfig.Name, Expiry);
+				}
 			}
 			return Result;
 		}
@@ -1764,7 +2088,7 @@ namespace EpicGames.MCP.Automation
 		{
 			if (InstanceName == DEFAULT_INSTANCE_NAME)
 			{
-				CommandUtils.LogWarning("CloudStorageBase.GetByName called with {0}. This will return the same instance as Get().", DEFAULT_INSTANCE_NAME);
+				Logger.LogWarning("CloudStorageBase.GetByName called with {DEFAULT_INSTANCE_NAME}. This will return the same instance as Get().", DEFAULT_INSTANCE_NAME);
 			}
 			return GetByNameImpl(InstanceName);
 		}
@@ -2163,7 +2487,7 @@ namespace EpicGames.MCP.Automation
 				Assembly[] LoadedAssemblies = AppDomain.CurrentDomain.GetAssemblies();
 				foreach (var Dll in LoadedAssemblies)
 				{
-					Type[] AllTypes = Dll.GetTypes();
+					Type[] AllTypes = Dll.SafeGetLoadedTypes();
 					foreach (var PotentialConfigType in AllTypes)
 					{
 						if (PotentialConfigType != typeof(CatalogServiceBase) && typeof(CatalogServiceBase).IsAssignableFrom(PotentialConfigType))
@@ -2233,6 +2557,12 @@ namespace EpicGames.MCP.Config
                     Type[] AllTypes = Dll.SafeGetLoadedTypes();
                     foreach (var PotentialConfigType in AllTypes)
                     {
+						// do not attempt to instantiate abstract (base) configs
+						if(PotentialConfigType.IsAbstract)
+						{
+							continue;
+						}
+
                         if (PotentialConfigType != typeof(McpConfigData) && typeof(McpConfigData).IsAssignableFrom(PotentialConfigType))
                         {
                             try
@@ -2240,12 +2570,19 @@ namespace EpicGames.MCP.Config
                                 McpConfigData Config = Activator.CreateInstance(PotentialConfigType) as McpConfigData;
                                 if (Config != null)
                                 {
+                                    Config.Initialize(PotentialConfigType.Name);
                                     Configs.Add(Config.Name, Config);
                                 }
                             }
-                            catch
+                            catch (Exception Ex)
                             {
-                                BuildCommand.LogWarning("Unable to create McpConfig: {0}", PotentialConfigType.Name);
+                               	var Inner = Ex.InnerException;
+								while(null != Inner)
+								{
+									Logger.LogWarning("Exception encountered creating McpConfig [{Name}] with error: {Message}", PotentialConfigType.Name, Inner.Message);
+									Inner = Inner.InnerException;
+								}
+								Logger.LogWarning("Unable to create McpConfig [{Name}] with error: {Message} \n {Trace}", PotentialConfigType.Name, Ex.Message, Ex.StackTrace);
                             }
                         }
                     }
@@ -2264,7 +2601,15 @@ namespace EpicGames.MCP.Config
     // Class for storing mcp configuration data
     public class McpConfigData
     {
+		public McpConfigData() { }
+
+		[Obsolete("This constructor is deprecated. Use the alternative which accepts a Func<string> for the client secret.", false)]
 		public McpConfigData(string InName, string InAccountBaseUrl, string InFortniteBaseUrl, string InLauncherBaseUrl, string InBuildInfoV2BaseUrl, string InLauncherV2BaseUrl, string InCatalogBaseUrl, string InClientId, string InClientSecret)
+			: this(InName, InAccountBaseUrl, InFortniteBaseUrl, InLauncherBaseUrl, InBuildInfoV2BaseUrl, InLauncherV2BaseUrl, InCatalogBaseUrl, InClientId, () => InClientSecret)
+		{
+		}
+
+		public McpConfigData(string InName, string InAccountBaseUrl, string InFortniteBaseUrl, string InLauncherBaseUrl, string InBuildInfoV2BaseUrl, string InLauncherV2BaseUrl, string InCatalogBaseUrl, string InClientId, Func<string> InClientSecret)
         {
             Name = InName;
             AccountBaseUrl = InAccountBaseUrl;
@@ -2277,26 +2622,30 @@ namespace EpicGames.MCP.Config
             ClientSecret = InClientSecret;
         }
 
-        public string Name;
-        public string AccountBaseUrl;
-        public string FortniteBaseUrl;
-        public string LauncherBaseUrl;
-		public string BuildInfoV2BaseUrl;
-		public string LauncherV2BaseUrl;
-		public string CatalogBaseUrl;
-        public string ClientId;
-        public string ClientSecret;
+        public string Name { get; set; }
+        public string AccountBaseUrl { get; set; }
+        public string FortniteBaseUrl { get; set; }
+        public string LauncherBaseUrl { get; set; }
+		public string BuildInfoV2BaseUrl { get; set; }
+		public string LauncherV2BaseUrl { get; set; }
+		public string CatalogBaseUrl { get; set; }
+        public string ClientId { get; set; }
+        public Func<string> ClientSecret;
+
+		public virtual void Initialize(string ConfigName)
+		{
+		}
 
         public void SpewValues()
         {
-            CommandUtils.LogVerbose("Name : {0}", Name);
-            CommandUtils.LogVerbose("AccountBaseUrl : {0}", AccountBaseUrl);
-            CommandUtils.LogVerbose("FortniteBaseUrl : {0}", FortniteBaseUrl);
-            CommandUtils.LogVerbose("LauncherBaseUrl : {0}", LauncherBaseUrl);
-			CommandUtils.LogVerbose("BuildInfoV2BaseUrl : {0}", BuildInfoV2BaseUrl);
-			CommandUtils.LogVerbose("LauncherV2BaseUrl : {0}", LauncherV2BaseUrl);
-			CommandUtils.LogVerbose("CatalogBaseUrl : {0}", CatalogBaseUrl);
-            CommandUtils.LogVerbose("ClientId : {0}", ClientId);
+            Logger.LogDebug("Name : {Name}", Name);
+            Logger.LogDebug("AccountBaseUrl : {AccountBaseUrl}", AccountBaseUrl);
+            Logger.LogDebug("FortniteBaseUrl : {FortniteBaseUrl}", FortniteBaseUrl);
+            Logger.LogDebug("LauncherBaseUrl : {LauncherBaseUrl}", LauncherBaseUrl);
+			Logger.LogDebug("BuildInfoV2BaseUrl : {BuildInfoV2BaseUrl}", BuildInfoV2BaseUrl);
+			Logger.LogDebug("LauncherV2BaseUrl : {LauncherV2BaseUrl}", LauncherV2BaseUrl);
+			Logger.LogDebug("CatalogBaseUrl : {CatalogBaseUrl}", CatalogBaseUrl);
+            Logger.LogDebug("ClientId : {ClientId}", ClientId);
             // we don't really want this in logs CommandUtils.LogVerbose("ClientSecret : {0}", ClientSecret);
         }
     }

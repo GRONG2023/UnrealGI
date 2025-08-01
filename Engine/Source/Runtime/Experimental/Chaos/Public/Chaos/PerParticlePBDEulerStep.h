@@ -19,7 +19,7 @@ class FPerParticlePBDEulerStep : public FPerParticleRule
 	template<class T_PARTICLES>
 	inline void ApplyHelper(T_PARTICLES& InParticles, const FReal Dt, const int32 Index) const
 	{
-		InParticles.P(Index) = InParticles.X(Index) + InParticles.V(Index) * Dt;
+		InParticles.SetP(Index, InParticles.GetX(Index) + InParticles.GetV(Index) * Dt);
 	}
 
 	inline void Apply(FPBDParticles& InParticles, const FReal Dt, const int32 Index) const override //-V762
@@ -29,24 +29,24 @@ class FPerParticlePBDEulerStep : public FPerParticleRule
 
 	inline void Apply(TPBDRigidParticles<FReal, 3>& InParticles, const FReal Dt, const int32 Index) const override //-V762
 	{
-		FVec3 PCoM = FParticleUtilitiesXR::GetCoMWorldPosition(InParticles, Index);
-		FRotation3 QCoM = FParticleUtilitiesXR::GetCoMWorldRotation(InParticles, Index);
+		FVec3 PCoM = InParticles.XCom(Index);
+		FRotation3 QCoM = InParticles.RCom(Index);
 
-		PCoM = PCoM + InParticles.V(Index) * Dt;
-		QCoM = FRotation3::IntegrateRotationWithAngularVelocity(QCoM, InParticles.W(Index), Dt);
+		PCoM = PCoM + InParticles.GetV(Index) * Dt;
+		QCoM = FRotation3::IntegrateRotationWithAngularVelocity(QCoM, InParticles.GetW(Index), Dt);
 
-		FParticleUtilitiesPQ::SetCoMWorldTransform(InParticles, Index, PCoM, QCoM);
+		InParticles.SetTransformPQCom(Index, PCoM, QCoM);
 	}
 
 	inline void Apply(TTransientPBDRigidParticleHandle<FReal, 3>& Particle, const FReal Dt) const override
 	{
-		FVec3 PCoM = FParticleUtilitiesXR::GetCoMWorldPosition(&Particle);
-		FRotation3 QCoM = FParticleUtilitiesXR::GetCoMWorldRotation(&Particle);
+		FVec3 PCoM = Particle.XCom();
+		FRotation3 QCoM = Particle.RCom();
 
-		PCoM = PCoM + Particle.V() * Dt;
-		QCoM = FRotation3::IntegrateRotationWithAngularVelocity(QCoM, Particle.W(), Dt);
+		PCoM = PCoM + Particle.GetV() * Dt;
+		QCoM = FRotation3::IntegrateRotationWithAngularVelocity(QCoM, Particle.GetW(), Dt);
 
-		FParticleUtilitiesPQ::SetCoMWorldTransform(&Particle, PCoM, QCoM);
+		Particle.SetTransformPQCom(PCoM, QCoM);
 	}
 };
 

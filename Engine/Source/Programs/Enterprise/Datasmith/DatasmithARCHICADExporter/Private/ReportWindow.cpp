@@ -9,11 +9,6 @@
 #include "Utils/Error.h"
 #include "Utils/TaskCalledFromEventLoop.h"
 
-DISABLE_SDK_WARNINGS_START
-#include "DGDialog.hpp"
-#include "DGModule.hpp"
-DISABLE_SDK_WARNINGS_END
-
 BEGIN_NAMESPACE_UE_AC
 
 class FReportDialog : public DG::Palette,
@@ -119,7 +114,14 @@ class FReportDialog : public DG::Palette,
             MessagesTextEdit.SetSelection(Selection);
         }
 	}
-};
+
+#if PLATFORM_MAC & AC_VERSION > 25
+	virtual void ItemMouseExited(const DG::ItemMouseMoveEvent& /*ev*/) override {}
+	virtual void ItemMouseEntered(const DG::ItemMouseMoveEvent& /*ev*/) override {}
+	virtual short SpecMouseExited(const DG::ItemMouseMoveEvent& /*ev*/) override { return 0; }
+	virtual short SpecMouseEntered(const DG::ItemMouseMoveEvent& /*ev*/) override { return 0; }
+#endif
+					  };
 
 FReportDialog::FReportDialog()
 	: DG::Palette(ACAPI_GetOwnResModule(), LocalizeResId(kDlgReport), ACAPI_GetOwnResModule(), PaletteGuid)

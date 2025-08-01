@@ -13,7 +13,7 @@
 #include "MovieSceneSequence.h"
 #include "MovieSceneCommonHelpers.h"
 #include "Evaluation/MovieSceneEvaluationTemplateInstance.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "EngineUtils.h"
 #include "Camera/CameraComponent.h"
 
@@ -82,12 +82,20 @@ void FCameraCutSection::BuildSectionContextMenu(FMenuBuilder& MenuBuilder, const
 	if (CameraActor)
 	{
 		MenuBuilder.AddMenuSeparator();
+		
+		// GetCameraForFrame will return the Spawnable Template (for names) but we can't select those.
+		const bool bCanSelect = CameraActor->GetWorld() != nullptr;
+		const FText CameraNameLabel = FText::FromString(CameraActor->GetActorLabel());
+		const FText Tooltip = bCanSelect ?
+			FText::Format(LOCTEXT("SelectCameraTooltipFormat", "Select {0}"), CameraNameLabel) :
+			FText::Format(LOCTEXT("SelectCameraInvalidTooltipFormat", "Cannot Select {0} (Currently Unspawned)"), CameraNameLabel);
 
 		MenuBuilder.AddMenuEntry(
-			FText::Format(LOCTEXT("SelectCameraTextFormat", "Select {0}"), FText::FromString(CameraActor->GetActorLabel())),
-			FText::Format(LOCTEXT("SelectCameraTooltipFormat", "Select {0}"), FText::FromString(CameraActor->GetActorLabel())),
+			FText::Format(LOCTEXT("SelectCameraTextFormat", "Select {0}"), CameraNameLabel),
+			Tooltip,
 			FSlateIcon(),
-			FUIAction(FExecuteAction::CreateRaw(this, &FCameraCutSection::HandleSelectCameraMenuEntryExecute, CameraActor))
+			FUIAction(FExecuteAction::CreateRaw(this, &FCameraCutSection::HandleSelectCameraMenuEntryExecute, CameraActor),
+				FCanExecuteAction::CreateRaw(this, & FCameraCutSection::CanSelectCameraActor, CameraActor))
 		);
 	}
 
@@ -112,6 +120,8 @@ void FCameraCutSection::BuildSectionContextMenu(FMenuBuilder& MenuBuilder, const
 	{
 		return;
 	}
+
+	AllCameras.Sort([](const AActor& A, const AActor& B) { return A.GetActorLabel().Compare(B.GetActorLabel()) < 0; });
 
 	MenuBuilder.BeginSection(NAME_None, LOCTEXT("ChangeCameraMenuText", "Change Camera"));
 	{
@@ -162,9 +172,9 @@ FText FCameraCutSection::GetSectionTitle() const
 	return HandleThumbnailTextBlockText();
 }
 
-float FCameraCutSection::GetSectionHeight() const
+float FCameraCutSection::GetSectionHeight(const UE::Sequencer::FViewDensityInfo& ViewDensity) const
 {
-	return FViewportThumbnailSection::GetSectionHeight() + 10.f;
+	return FViewportThumbnailSection::GetSectionHeight(ViewDensity) + 10.f;
 }
 
 FMargin FCameraCutSection::GetContentPadding() const
@@ -174,9 +184,29 @@ FMargin FCameraCutSection::GetContentPadding() const
 
 int32 FCameraCutSection::OnPaintSection(FSequencerSectionPainter& InPainter) const
 {
-	static const FSlateBrush* FilmBorder = FEditorStyle::GetBrush("Sequencer.Section.FilmBorder");
-
 	InPainter.LayerId = InPainter.PaintSectionBackground();
+
+	// Draw a red frame around the edges to indicate an error since we can't highlight the error text right now.
+	AActor* CameraActor = GetCameraForFrame(Section->GetInclusiveStartFrame());
+	if (!CameraActor)
+	{
+		static const FSlateBrush* ErroredSectionOverlay = FAppStyle::Get().GetBrush("Sequencer.Section.ErroredSectionOverlay");
+		const ESlateDrawEffect DrawEffects = InPainter.bParentEnabled
+			? ESlateDrawEffect::None
+			: ESlateDrawEffect::DisabledEffect;
+
+		FLinearColor ErrorColor = FLinearColor::Red;
+		FSlateDrawElement::MakeBox(
+			InPainter.DrawElements,
+			InPainter.LayerId,
+			InPainter.SectionGeometry.ToPaintGeometry(InPainter.SectionGeometry.GetLocalSize() - FVector2D(1.f, 1.f), FSlateLayoutTransform(FVector2D(1.f, 1.f))),
+			ErroredSectionOverlay,
+			DrawEffects,
+			ErrorColor.CopyWithNewOpacity(0.8f)
+		);
+		InPainter.LayerId++;
+	}
+
 	return FViewportThumbnailSection::OnPaintSection(InPainter);
 }
 
@@ -188,6 +218,19 @@ FText FCameraCutSection::HandleThumbnailTextBlockText() const
 		return FText::FromString(CameraActor->GetActorLabel());
 	}
 
+	UMovieSceneCameraCutSection* CameraCutSection = Cast<UMovieSceneCameraCutSection>(Section);
+	if (CameraCutSection)
+	{
+		if(!CameraCutSection->GetCameraBindingID().IsValid())
+		{
+			return LOCTEXT("CameraBindingError_NoBinding", "No Object Binding specified.");
+		}
+		else
+		{
+			return LOCTEXT("CameraBindingError_MissingBinding", "Object Binding / Bound Object is missing!");
+		}
+	}
+
 	return FText::GetEmpty();
 }
 
@@ -195,9 +238,17 @@ FText FCameraCutSection::HandleThumbnailTextBlockText() const
 /* FCameraCutSection callbacks
  *****************************************************************************/
 
+bool FCameraCutSection::CanSelectCameraActor(AActor* InCamera) const
+{
+	return InCamera && InCamera->GetWorld();
+}
+
 void FCameraCutSection::HandleSelectCameraMenuEntryExecute(AActor* InCamera)
 {
-	GEditor->SelectActor(InCamera, true, true);
+	const bool bInSelected = true;
+	const bool bNotify = true;
+	const bool bSelectEventIfHidden = true;
+	GEditor->SelectActor(InCamera, bInSelected, bNotify, bSelectEventIfHidden);
 }
 
 void FCameraCutSection::HandleSetCameraMenuEntryExecute(AActor* InCamera)

@@ -4,23 +4,23 @@
 
 #include "Trace/Analyzer.h"
 #include "Containers/Map.h"
-#include "Model/CsvProfilerPrivate.h"
+#include "Model/CsvProfilerProviderPrivate.h"
 #include "ProfilingDebugging/MiscTrace.h"
 
-namespace Trace
+namespace TraceServices
 {
-	class IAnalysisSession;
-	class IFrameProvider;
-	class IThreadProvider;
-	class ICounterProvider;
-	class IEditableCounter;
-}
+
+class IAnalysisSession;
+class IFrameProvider;
+class IThreadProvider;
+class IEditableCounterProvider;
+class IEditableCounter;
 
 class FCsvProfilerAnalyzer
-	: public Trace::IAnalyzer
+	: public UE::Trace::IAnalyzer
 {
 public:
-	FCsvProfilerAnalyzer(Trace::IAnalysisSession& Session, Trace::FCsvProfilerProvider& CsvProfilerProvider, Trace::ICounterProvider& CounterProvider, const Trace::IFrameProvider& FrameProvider, const Trace::IThreadProvider& ThreadProvider);
+	FCsvProfilerAnalyzer(IAnalysisSession& Session, FCsvProfilerProvider& CsvProfilerProvider, IEditableCounterProvider& EditableCounterProvider, const IFrameProvider& FrameProvider, const IThreadProvider& ThreadProvider);
 	~FCsvProfilerAnalyzer();
 	virtual void OnAnalysisBegin(const FOnAnalysisContext& Context) override;
 	virtual bool OnEvent(uint16 RouteId, EStyle Style, const FOnEventContext& Context) override;
@@ -86,11 +86,11 @@ private:
 	{
 		uint64 ProviderHandle = uint64(-1);
 		uint64 ProviderCountHandle = uint64(-1);
-		Trace::IEditableCounter* Counter = nullptr;
-		int64 CurrentFrame = -1;
+		IEditableCounter* Counter = nullptr;
+		uint32 CurrentFrame = 0;
 		FStatSeriesValue CurrentValue;
 		int64 CurrentCount = 0;
-		Trace::ECsvStatSeriesType Type = Trace::CsvStatSeriesType_CustomStatInt;
+		ECsvStatSeriesType Type = CsvStatSeriesType_CustomStatInt;
 		ETraceFrameType FrameType = TraceFrameType_Game;
 	};
 
@@ -115,13 +115,12 @@ private:
 	FThreadState& GetThreadState(uint32 ThreadId);
 	FStatSeriesDefinition* CreateStatSeries(const TCHAR* Name, int32 CategoryIndex);
 	void DefineStatSeries(uint64 StatId, const TCHAR* Name, int32 CategoryIndex, bool bIsInline);
-	const TCHAR* GetStatSeriesName(const FStatSeriesDefinition* Definition, Trace::ECsvStatSeriesType Type, FThreadState& ThreadState, bool bIsCount);
-	FStatSeriesInstance& GetStatSeries(uint64 StatId, Trace::ECsvStatSeriesType Type, FThreadState& ThreadState);
+	const TCHAR* GetStatSeriesName(const FStatSeriesDefinition* Definition, ECsvStatSeriesType Type, FThreadState& ThreadState, bool bIsCount);
+	FStatSeriesInstance& GetStatSeries(uint64 StatId, ECsvStatSeriesType Type, FThreadState& ThreadState);
 	void HandleMarkerEvent(const FOnEventContext& Context, bool bIsExclusive, bool bIsBegin);
 	void HandleMarker(const FOnEventContext& Context, FThreadState& ThreadState, const FTimingMarker& Marker);
 	void HandleCustomStatEvent(const FOnEventContext& Context, bool bIsFloat);
 	void HandleEventEvent(const FOnEventContext& Context);
-	uint32 GetFrameNumberForTimestamp(ETraceFrameType FrameType, double Timestamp) const;
 	void Flush(FStatSeriesInstance& StatSeries);
 	void FlushIfNewFrame(FStatSeriesInstance& StatSeries, uint32 FrameNumber);
 	void FlushAtEndOfCapture(FStatSeriesInstance& StatSeries, uint32 CaptureEndFrame);
@@ -129,11 +128,11 @@ private:
 	void SetCustomStatValue(FStatSeriesInstance& StatSeries, uint32 FrameNumber, ECsvOpType OpType, int32 Value);
 	void SetCustomStatValue(FStatSeriesInstance& StatSeries, uint32 FrameNumber, ECsvOpType OpType, float Value);
 	
-	Trace::IAnalysisSession& Session;
-	Trace::FCsvProfilerProvider& CsvProfilerProvider;
-	Trace::ICounterProvider& CounterProvider;
-	const Trace::IFrameProvider& FrameProvider;
-	const Trace::IThreadProvider& ThreadProvider;
+	IAnalysisSession& Session;
+	FCsvProfilerProvider& CsvProfilerProvider;
+	IEditableCounterProvider& EditableCounterProvider;
+	const IFrameProvider& FrameProvider;
+	const IThreadProvider& ThreadProvider;
 
 	TMap<uint32, FThreadState*> ThreadStatesMap;
 	TMap<int32, const TCHAR*> CategoryMap;
@@ -148,3 +147,5 @@ private:
 
 	TArray<uint64> FrameBoundaries[TraceFrameType_Count];
 };
+
+} // namespace TraceServices

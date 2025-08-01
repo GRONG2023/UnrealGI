@@ -10,10 +10,14 @@
 #include "SimpleElementShaders.h"
 #include "ShaderParameterUtils.h"
 #include "PipelineStateCache.h"
+#include "RHIStaticStates.h"
+#include "DataDrivenShaderPlatformInfo.h"
 
 /*------------------------------------------------------------------------------
 	Batched element shaders for previewing normal maps.
-------------------------------------------------------------------------------*/
+
+ * Deprecated, do not use.  Use FBatchedElementTexture2DPreviewParameters instead with normal map flag. 
+-----------------------------------------------------------------------------*/
 
 /**
  * Simple pixel shader that reconstructs a normal for the purposes of visualization.
@@ -47,10 +51,9 @@ public:
 	 * Set shader parameters.
 	 * @param NormalMapTexture - The normal map texture to sample.
 	 */
-	void SetParameters(FRHICommandList& RHICmdList, const FTexture* NormalMapTexture)
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const FTexture* NormalMapTexture)
 	{
-		FRHIPixelShader* PixelShaderRHI = RHICmdList.GetBoundPixelShader();
-		SetTextureParameter(RHICmdList, PixelShaderRHI,Texture,TextureSampler,NormalMapTexture);
+		SetTextureParameter(BatchedParameters, Texture, TextureSampler, NormalMapTexture);
 	}
 
 private:
@@ -73,6 +76,8 @@ void FNormalMapBatchedElementParameters::BindShaders(
 	TShaderMapRef<FSimpleElementVS> VertexShader(GetGlobalShaderMap(InFeatureLevel));
 	TShaderMapRef<FSimpleElementNormalMapPS> PixelShader(GetGlobalShaderMap(InFeatureLevel));
 
+	// bad : this does not pass Gamma
+
 	GraphicsPSOInit.BoundShaderState.VertexDeclarationRHI = GSimpleElementVertexDeclaration.VertexDeclarationRHI;
 	GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShader.GetVertexShader();
 	GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
@@ -80,9 +85,9 @@ void FNormalMapBatchedElementParameters::BindShaders(
 
 	GraphicsPSOInit.BlendState = TStaticBlendState<>::GetRHI();
 
-	SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, EApplyRendertargetOption::ForceApply);
+	RHICmdList.ApplyCachedRenderTargets(GraphicsPSOInit);
+	SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
 
-	VertexShader->SetParameters(RHICmdList, InTransform);
-	PixelShader->SetParameters(RHICmdList, Texture);
+	SetShaderParametersLegacyVS(RHICmdList, VertexShader, InTransform);
+	SetShaderParametersLegacyPS(RHICmdList, PixelShader, Texture);
 }
-

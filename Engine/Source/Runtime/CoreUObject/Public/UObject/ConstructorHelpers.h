@@ -8,8 +8,11 @@
 
 #include "CoreMinimal.h"
 #include "Templates/SubclassOf.h"
-#include "UObject/Package.h"
 #include "UObject/GCObject.h"
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "UObject/Package.h"
+#endif
 
 namespace ConstructorHelpersInternal
 {
@@ -42,29 +45,7 @@ namespace ConstructorHelpersInternal
 	}
 
 	template<>
-	inline UPackage* FindOrLoadObject<UPackage>( FString& PathName, uint32 LoadFlags)
-	{
-		// If there is a dot, remove it.
-		int32 PackageDelimPos = INDEX_NONE;
-		PathName.FindChar( TCHAR('.'), PackageDelimPos );
-		if( PackageDelimPos != INDEX_NONE )
-		{
-			PathName.RemoveAt(PackageDelimPos,1,false);
-		}
-
-		// Find the package in memory. 
-		UPackage* PackagePtr = FindPackage( nullptr, *PathName );
-		if( !PackagePtr )
-		{
-			// If it is not in memory, try to load it.
-			PackagePtr = LoadPackage( nullptr, *PathName, LoadFlags);
-		}
-		if (PackagePtr)
-		{
-			PackagePtr->AddToRoot();
-		}
-		return PackagePtr;
-	}
+	COREUOBJECT_API UPackage* FindOrLoadObject<UPackage>(FString& PathName, uint32 LoadFlags);
 
 	inline UClass* FindOrLoadClass(FString& PathName, UClass* BaseClass)
 	{
@@ -93,13 +74,13 @@ namespace ConstructorHelpersInternal
 	}
 }
 
-struct COREUOBJECT_API ConstructorHelpers
+struct ConstructorHelpers
 {
 public:
 	template<class T>
 	struct FObjectFinder : public FGCObject
 	{
-		T* Object;
+		TObjectPtr<T> Object;
 		FObjectFinder(const TCHAR* ObjectToFind, uint32 InLoadFlags = LOAD_None)
 		{
 			CheckIfIsInConstructor(ObjectToFind);
@@ -129,7 +110,7 @@ public:
 	struct FObjectFinderOptional : public FGCObject
 	{
 	private:
-		T* Object;
+		TObjectPtr<T> Object;
 		const TCHAR* ObjectToFind;
 		uint32 LoadFlags;
 	public:
@@ -195,9 +176,7 @@ public:
 		
 		virtual void AddReferencedObjects( FReferenceCollector& Collector ) override
 		{
-			UClass* ReferencedClass = Class.Get();
-			Collector.AddReferencedObject(ReferencedClass);
-			Class = ReferencedClass;
+			Collector.AddReferencedObject(Class.GetGCPtr());
 		}
 
 		virtual FString GetReferencerName() const override
@@ -208,7 +187,7 @@ public:
 
 public:
 	/** If there is an object class, strips it off. */
-	static void StripObjectClass( FString& PathName, bool bAssertOnBadPath = false );
+	static COREUOBJECT_API void StripObjectClass( FString& PathName, bool bAssertOnBadPath = false );
 
 private:
 	static void ValidateObject(UObject *Object, const FString& PathName, const TCHAR* ObjectToFind)
@@ -225,9 +204,9 @@ private:
 #endif
 	}
 
-	static void FailedToFind(const TCHAR* ObjectToFind);
-	static void CheckFoundViaRedirect(UObject *Object, const FString& PathName, const TCHAR* ObjectToFind);
-	static void CheckIfIsInConstructor(const TCHAR* ObjectToFind);
+	static COREUOBJECT_API void FailedToFind(const TCHAR* ObjectToFind);
+	static COREUOBJECT_API void CheckFoundViaRedirect(UObject *Object, const FString& PathName, const TCHAR* ObjectToFind);
+	static COREUOBJECT_API void CheckIfIsInConstructor(const TCHAR* ObjectToFind);
 };
 
 

@@ -199,7 +199,7 @@ FString FCulture::CreateCultureName(const FString& LanguageCode, const FString& 
 
 FString FCulture::GetCanonicalName(const FString& Name)
 {
-	return FCultureImplementation::GetCanonicalName(Name);
+	return FCultureImplementation::GetCanonicalName(Name, FInternationalization::Get());
 }
 
 const FString& FCulture::GetName() const
@@ -300,7 +300,7 @@ ETextPluralForm FCulture::GetPluralForm(int32 Val, const ETextPluralType PluralT
 
 ETextPluralForm FCulture::GetPluralForm(double Val, const ETextPluralType PluralType) const
 {
-	if (FMath::IsNegativeDouble(Val))
+	if (Val < 0.0)
 	{
 		// Must be positive
 		Val *= -1.0;

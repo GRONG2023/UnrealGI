@@ -9,8 +9,11 @@
 #include "EditorUndoClient.h"
 #include "Toolkits/IToolkitHost.h"
 #include "ISkeletalMeshEditor.h"
+#include "SkeletalMeshNotifier.h"
 #include "Containers/ArrayView.h"
+#include "Async/Future.h"
 
+class IDetailLayoutBuilder;
 class IDetailsView;
 class IPersonaToolkit;
 class IPersonaViewport;
@@ -23,6 +26,8 @@ struct FViewportClick;
 struct FSkeletalMeshClothBuildParams;
 struct FToolMenuContext;
 class UToolMenu;
+class SSkeletalMeshEditorToolbox;
+class FSkeletalMeshEditorBinding;
 
 namespace SkeletalMeshEditorModes
 {
@@ -41,6 +46,8 @@ namespace SkeletalMeshEditorTabs
 	extern const FName MorphTargetsTab;
 	extern const FName MeshDetailsTab;
 	extern const FName AnimationMappingTab;
+	extern const FName CurveMetadataTab;
+	extern const FName FindReplaceTab;
 }
 
 class FSkeletalMeshEditor : public ISkeletalMeshEditor, public FGCObject, public FEditorUndoClient, public FTickableEditorObject
@@ -65,8 +72,14 @@ public:
 	virtual FLinearColor GetWorldCentricTabColorScale() const override;
 	virtual void InitToolMenuContext(FToolMenuContext& MenuContext) override;
 
+	virtual void AddViewportOverlayWidget(TSharedRef<SWidget> InOverlaidWidget) override;
+	virtual void RemoveViewportOverlayWidget(TSharedRef<SWidget> InOverlaidWidget) override;
+	
+	/** FBaseToolkit overrides */
+	virtual bool ProcessCommandBindings(const FKeyEvent& InKeyEvent) const override;
+	
 	//~ Begin FAssetEditorToolkit Interface.
-	virtual bool OnRequestClose() override;
+	virtual bool OnRequestClose(EAssetEditorCloseReason InCloseReason) override;
 	//~ End FAssetEditorToolkit Interface.
 
 	/** FEditorUndoClient interface */
@@ -81,11 +94,15 @@ public:
 	/** @return the documentation location for this editor */
 	virtual FString GetDocumentationLink() const override
 	{
-		return FString(TEXT("Engine/Animation/SkeletalMeshEditor"));
+		return FString(TEXT("AnimatingObjects/SkeletalMeshAnimation/Persona/Modes/Mesh"));
 	}
 
 	/** FGCObject interface */
 	virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FSkeletalMeshEditor");
+	}
 
 	/** Get the skeleton tree widget */
 	TSharedRef<class ISkeletonTree> GetSkeletonTree() const { return SkeletonTree.ToSharedRef(); }
@@ -94,24 +111,31 @@ public:
 
 	void HandleMeshDetailsCreated(const TSharedRef<class IDetailsView>& InDetailsView);
 
+	void HandleViewportCreated(const TSharedRef<class IPersonaViewport>& InViewport);
+
 	UObject* HandleGetAsset();
 
-private:
 	void HandleObjectsSelected(const TArray<UObject*>& InObjects);
 
-	void HandleObjectSelected(UObject* InObject);
+	// Returns the currently hosted toolkit. Can be invalid if no toolkit is being hosted.
+	TSharedPtr<IToolkit> GetHostedToolkit() const { return HostedToolkit; }
+	
+	virtual TSharedPtr<ISkeletalMeshEditorBinding> GetBinding() override;
 
+private:
+	void HandleObjectSelected(UObject* InObject);
+	
 	void HandleSelectionChanged(const TArrayView<TSharedPtr<ISkeletonTreeItem>>& InSelectedItems, ESelectInfo::Type InSelectInfo);
 
 	void HandleReimportMesh(int32 SourceFileIndex = INDEX_NONE);
 	void HandleReimportMeshWithNewFile(int32 SourceFileIndex = INDEX_NONE);
-	
-	bool HandleReimportMeshInternal(int32 SourceFileIndex = INDEX_NONE, bool bWithNewFile = false);
+	TFuture<bool> HandleReimportMeshInternal(int32 SourceFileIndex = INDEX_NONE, bool bWithNewFile = false);
+
 	void HandleReimportAllMesh(int32 SourceFileIndex = INDEX_NONE);
 	void HandleReimportAllMeshWithNewFile(int32 SourceFileIndex = INDEX_NONE);
+	void HandleReimportAllMeshInternal(int32 SourceFileIndex, bool bWithNewFile);
 
-	/** Callback for toggling UV drawing in the viewport */
-	void ToggleMeshSectionSelection();
+	void HandleOnPreviewSceneSettingsCustomized(IDetailLayoutBuilder& DetailBuilder);
 
 	/** Callback for checking whether the UV drawing is switched on. */
 	bool IsMeshSectionSelectionChecked() const;
@@ -119,7 +143,6 @@ private:
 	void HandleMeshClick(HActor* HitProxy, const FViewportClick& Click);
 
 	// Clothing menu handlers (builds and handles clothing context menu options)
-	void FillMeshClickMenu(FMenuBuilder& MenuBuilder, HActor* HitProxy, const FViewportClick& Click);
 	void FillApplyClothingAssetMenu(FMenuBuilder& MenuBuilder, int32 InLodIndex, int32 InSectionIndex);
 	void FillCreateClothingMenu(FMenuBuilder& MenuBuilder, int32 InLodIndex, int32 InSectionIndex);
 	void FillCreateClothingLodMenu(FMenuBuilder& MenuBuilder, int32 InLodIndex, int32 InSectionIndex);
@@ -147,7 +170,7 @@ private:
 private:
 	void ExtendMenu();
 
-	void RegisterToolbar();
+	void BakeMaterials();
 	void ExtendToolbar();
 
 	void BindCommands();
@@ -161,7 +184,7 @@ public:
 
 private:
 	/** The skeleton we are editing */
-	USkeletalMesh* SkeletalMesh;
+	TObjectPtr<USkeletalMesh> SkeletalMesh;
 
 	/** Toolbar extender */
 	TSharedPtr<FExtender> ToolbarExtender;
@@ -180,4 +203,45 @@ private:
 
 	/** Details panel */
 	TSharedPtr<class IDetailsView> DetailsView;
+
+	// The toolkit we're currently hosting.
+	TSharedPtr<IToolkit> HostedToolkit;
+
+	// The toolbox widget
+	TSharedPtr<SSkeletalMeshEditorToolbox> ToolboxWidget;
+
+	// Binding to send/receive skeletal mesh modifications
+	TSharedPtr<FSkeletalMeshEditorBinding> Binding;
+};
+
+/**
+ * FSkeletalMeshEditorNotifier
+ */
+
+class FSkeletalMeshEditorNotifier: public ISkeletalMeshNotifier
+{
+public:
+	FSkeletalMeshEditorNotifier(TSharedRef<FSkeletalMeshEditor> InEditor);
+	virtual void HandleNotification(const TArray<FName>& BoneNames, const ESkeletalMeshNotifyType InNotifyType) override;
+	
+private:
+	TWeakPtr<FSkeletalMeshEditor> Editor;
+};
+
+/**
+ * FSkeletalMeshEditorBinding
+ */
+
+class FSkeletalMeshEditorBinding: public ISkeletalMeshEditorBinding
+{
+public:
+	FSkeletalMeshEditorBinding(TSharedRef<FSkeletalMeshEditor> InEditor);
+
+	virtual ISkeletalMeshNotifier& GetNotifier() override;
+	virtual NameFunction GetNameFunction() override;
+	virtual TArray<FName> GetSelectedBones() const override;
+	
+private:
+	TWeakPtr<FSkeletalMeshEditor> Editor;
+	FSkeletalMeshEditorNotifier Notifier;
 };

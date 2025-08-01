@@ -2,6 +2,12 @@
 
 // [[ IncludeTool: Inline ]] // Markup to tell IncludeTool that this file is state changing and cannot be optimized out.
 
+// Suppress any macros that may conflict with name constant symbols.
+UE_PUSH_MACRO("TRUE")
+#undef TRUE
+UE_PUSH_MACRO("FALSE")
+#undef FALSE
+
 // Special zero value, meaning no name.
 REGISTER_NAME(0,None)
 
@@ -44,6 +50,8 @@ REGISTER_NAME(33,CoreUObject)
 
 // More class properties
 REGISTER_NAME(34,EnumProperty)
+REGISTER_NAME(35,OptionalProperty)
+
 
 // Special types.
 REGISTER_NAME(50,Cylinder)
@@ -68,6 +76,33 @@ REGISTER_NAME(68,Double)
 REGISTER_NAME(69,Quat)
 REGISTER_NAME(70,Self)
 REGISTER_NAME(71,Transform)
+REGISTER_NAME(72,Vector3f)
+REGISTER_NAME(73,Vector3d)
+REGISTER_NAME(74,Plane4f)
+REGISTER_NAME(75,Plane4d)
+REGISTER_NAME(76,Matrix44f)
+REGISTER_NAME(77,Matrix44d)
+REGISTER_NAME(78,Quat4f)
+REGISTER_NAME(79,Quat4d)
+REGISTER_NAME(80,Transform3f)
+REGISTER_NAME(81,Transform3d)
+REGISTER_NAME(82,Box3f)
+REGISTER_NAME(83,Box3d)
+REGISTER_NAME(84,BoxSphereBounds3f)
+REGISTER_NAME(85,BoxSphereBounds3d)
+REGISTER_NAME(86,Vector4f)			
+REGISTER_NAME(87,Vector4d)
+REGISTER_NAME(88,Rotator3f)
+REGISTER_NAME(89,Rotator3d)
+REGISTER_NAME(90,Vector2f)
+REGISTER_NAME(91,Vector2d)
+REGISTER_NAME(92,Box2D)
+REGISTER_NAME(93,Box2f)
+REGISTER_NAME(94,Box2d)
+REGISTER_NAME(95,IntVector)
+REGISTER_NAME(96,IntVector4)
+REGISTER_NAME(97,UintVector)
+REGISTER_NAME(98,UintVector4)
 
 // Object class names.
 REGISTER_NAME(100,Object)
@@ -79,6 +114,32 @@ REGISTER_NAME(105,Class)
 REGISTER_NAME(106,ScriptStruct)
 REGISTER_NAME(107,Function)
 REGISTER_NAME(108,Pawn)
+
+// Special types continued
+REGISTER_NAME(150, Int32Vector)
+REGISTER_NAME(151, Int64Vector)
+REGISTER_NAME(152, Uint32Vector)
+REGISTER_NAME(153, Uint64Vector)
+REGISTER_NAME(154, Int32Vector4)
+REGISTER_NAME(155, Int64Vector4)
+REGISTER_NAME(156, Uint32Vector4)
+REGISTER_NAME(157, Uint64Vector4)
+REGISTER_NAME(158, IntVector2)
+REGISTER_NAME(159, Int32Vector2)
+REGISTER_NAME(160, Int64Vector2)
+REGISTER_NAME(161, UintVector2)
+REGISTER_NAME(162, Uint32Vector2)
+REGISTER_NAME(163, Uint64Vector2)
+REGISTER_NAME(164, UintPoint)
+REGISTER_NAME(165, Int32Point)
+REGISTER_NAME(166, Int64Point)
+REGISTER_NAME(167, Uint32Point)
+REGISTER_NAME(168, Uint64Point)
+REGISTER_NAME(169, Ray)
+REGISTER_NAME(170, Ray3f)
+REGISTER_NAME(171, Ray3d)
+REGISTER_NAME(172, Sphere3f)
+REGISTER_NAME(173, Sphere3d)
 
 // Misc.
 REGISTER_NAME(200,State)
@@ -140,6 +201,7 @@ REGISTER_NAME(257, Zlib)
 REGISTER_NAME(258, Gzip)
 REGISTER_NAME(259, LZ4)
 REGISTER_NAME(260, Mobile)
+REGISTER_NAME(261, Oodle)
 
 // Online
 REGISTER_NAME(280,DGram)
@@ -157,6 +219,7 @@ REGISTER_NAME(291,MeshPort)
 REGISTER_NAME(292,MeshNetDriver)
 REGISTER_NAME(293,LiveStreamVoice)
 REGISTER_NAME(294,LiveStreamAnimation)
+REGISTER_NAME(295,DataStream)
 
 // Texture settings.
 REGISTER_NAME(300,Linear)
@@ -196,6 +259,9 @@ REGISTER_NAME(408,InterpCurveVector)
 REGISTER_NAME(409,InterpCurveTwoVectors)
 REGISTER_NAME(410,InterpCurveQuat)
 
+
+REGISTER_NAME(411,FrameRate)
+
 REGISTER_NAME(450,AI)
 REGISTER_NAME(451,NavMesh)
 
@@ -210,3 +276,7 @@ REGISTER_NAME(602,GameUserSettings)
 REGISTER_NAME(700,Filename)
 REGISTER_NAME(701,Lerp)
 REGISTER_NAME(702,Root)
+
+// Restore any macros suppressed at the top of this file.
+UE_POP_MACRO("TRUE")
+UE_POP_MACRO("FALSE")

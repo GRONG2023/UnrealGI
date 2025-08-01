@@ -15,7 +15,7 @@ struct FAnimInstanceProxy;
  */
 
 USTRUCT(BlueprintInternalUseOnly)
-struct ANIMGRAPHRUNTIME_API FAnimNode_CopyPoseFromMesh : public FAnimNode_Base
+struct FAnimNode_CopyPoseFromMesh : public FAnimNode_Base
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -27,7 +27,7 @@ struct ANIMGRAPHRUNTIME_API FAnimNode_CopyPoseFromMesh : public FAnimNode_Base
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Copy, meta = (NeverAsPin))
 	uint8 bUseAttachedParent : 1;
 
-	/* Copy curves also from SouceMeshComponent. This will copy the curves if this instance also contains */
+	/* Copy curves also from SouceMeshComponent. This will copy the curves if this instance also contains curve attributes */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Copy, meta = (NeverAsPin))
 	uint8 bCopyCurves : 1;
   
@@ -43,16 +43,16 @@ struct ANIMGRAPHRUNTIME_API FAnimNode_CopyPoseFromMesh : public FAnimNode_Base
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Copy, meta = (NeverAsPin))
 	FName RootBoneToCopy;
 
-	FAnimNode_CopyPoseFromMesh();
+	ANIMGRAPHRUNTIME_API FAnimNode_CopyPoseFromMesh();
 
 	// FAnimNode_Base interface
-	virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
-	virtual void CacheBones_AnyThread(const FAnimationCacheBonesContext& Context) override;
-	virtual void Update_AnyThread(const FAnimationUpdateContext& Context) override;
-	virtual void Evaluate_AnyThread(FPoseContext& Output) override;
-	virtual void GatherDebugData(FNodeDebugData& DebugData) override;
+	ANIMGRAPHRUNTIME_API virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
+	ANIMGRAPHRUNTIME_API virtual void CacheBones_AnyThread(const FAnimationCacheBonesContext& Context) override;
+	ANIMGRAPHRUNTIME_API virtual void Update_AnyThread(const FAnimationUpdateContext& Context) override;
+	ANIMGRAPHRUNTIME_API virtual void Evaluate_AnyThread(FPoseContext& Output) override;
+	ANIMGRAPHRUNTIME_API virtual void GatherDebugData(FNodeDebugData& DebugData) override;
 	virtual bool HasPreUpdate() const override { return true; }
-	virtual void PreUpdate(const UAnimInstance* InAnimInstance) override;
+	ANIMGRAPHRUNTIME_API virtual void PreUpdate(const UAnimInstance* InAnimInstance) override;
 	// End of FAnimNode_Base interface
 
 private:
@@ -65,18 +65,18 @@ private:
 	TWeakObjectPtr<USkeletalMesh>			CurrentlyUsedTargetMesh;
 	// cache of target space bases to source space bases
 	TMap<int32, int32> BoneMapToSource;
-	TMap<FName, SmartName::UID_Type> CurveNameToUIDMap;
+	TMap<int32, int32> SourceBoneToTarget;
 
 	// Cached transforms, copied on the game thread
 	TArray<FTransform> SourceMeshTransformArray;
 
 	// Cached curves, copied on the game thread
-	TMap<FName, float> SourceCurveList;
+	FBlendedHeapCurve SourceCurves;
 
 	// Cached attributes, copied on the game thread
-	FHeapCustomAttributes SourceCustomAttributes;
+	UE::Anim::FMeshAttributeContainer SourceCustomAttributes;
 
 	// reinitialize mesh component 
-	void ReinitializeMeshComponent(USkeletalMeshComponent* NewSkeletalMeshComponent, USkeletalMeshComponent* TargetMeshComponent);
-	void RefreshMeshComponent(USkeletalMeshComponent* TargetMeshComponent);
+	ANIMGRAPHRUNTIME_API void ReinitializeMeshComponent(USkeletalMeshComponent* NewSkeletalMeshComponent, USkeletalMeshComponent* TargetMeshComponent);
+	ANIMGRAPHRUNTIME_API void RefreshMeshComponent(USkeletalMeshComponent* TargetMeshComponent);
 };

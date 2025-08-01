@@ -2,17 +2,22 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/Array.h"
 #include "Containers/UnrealString.h"
+#include "CoreMinimal.h"
 #include "GenericPlatform/GenericPlatformCrashContext.h"
-#include "XmlFile.h"
+#include "HAL/Platform.h"
+#include "Misc/CString.h"
 #include "Misc/EngineVersion.h"
+#include "Templates/Function.h"
+#include "XmlFile.h"
+#include "XmlNode.h"
 
 enum class ECrashDescVersions : int32;
 enum class ECrashDumpMode : int32;
 class FXmlNode;
-struct FPrimaryCrashProperties;
 struct FAnalyticsEventAttribute;
+struct FPrimaryCrashProperties;
 
 /** PrimaryCrashProperties. Extracted from: FGenericCrashContext::SerializeContentToBuffer */
 /*
@@ -37,7 +42,7 @@ struct FAnalyticsEventAttribute;
 	"CommandLine"
 	"LanguageLCID"
 	"AppDefaultLocale"
-	"IsUE4Release"
+	"IsUERelease"
 	"UserName"
 	"BaseDir"
 	"RootDir"
@@ -224,7 +229,7 @@ struct FPrimaryCrashProperties
 
 	/** 
 	 * Encoded engine version. (AppVersion)
-	 * E.g. 4.3.0.0-2215663+UE4-Releases+4.3
+	 * E.g. 4.3.0.0-2215663+UE-Releases+4.3
 	 * BuildVersion-BuiltFromCL-BranchName
 	 * @EngineVersion	varchar(64)	
 	 * 
@@ -372,7 +377,7 @@ struct FPrimaryCrashProperties
 	FCrashProperty CrashReporterMessage;
 
 	/**
-	 *	Platform-specific UE4 Core value (integer).
+	 *	Platform-specific UE Core value (integer).
 	 */
 	FCrashProperty PlatformCallbackResult;
 

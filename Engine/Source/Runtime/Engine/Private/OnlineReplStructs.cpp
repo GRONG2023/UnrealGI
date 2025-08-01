@@ -8,10 +8,15 @@
 #include "UObject/CoreNet.h"
 #include "Serialization/MemoryWriter.h"
 #include "Serialization/MemoryReader.h"
-#include "UObject/PropertyPortFlags.h"
 #include "Dom/JsonValue.h"
 #include "EngineLogs.h"
 #include "Net/OnlineEngineInterface.h"
+#include "Misc/AsciiSet.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/OutputDeviceNull.h"
+#include "UObject/UnrealType.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(OnlineReplStructs)
 
 namespace
 {
@@ -43,6 +48,8 @@ ENUM_CLASS_FLAGS(EUniqueIdEncodingFlags);
 
 /** Use highest value for type for other (out of engine) oss type */
 const uint8 TypeHash_Other = 31;
+/** Use next highest value for V2 net id */
+const uint8 TypeHash_V2 = 30;
 
 FArchive& operator<<(FArchive& Ar, FUniqueNetIdRepl& UniqueNetId)
 {
@@ -107,17 +114,32 @@ inline uint8 GetTypeHashFromEncoding(EUniqueIdEncodingFlags inFlags)
  */
 void FUniqueNetIdRepl::MakeReplicationData()
 {
-	//LOG_SCOPE_VERBOSITY_OVERRIDE(LogNet, ELogVerbosity::VeryVerbose);
-	//UE_LOG(LogNet, VeryVerbose, TEXT("MakeReplicationData %s"), *ToString());
-
-	FString Contents;
 	if (IsValid())
 	{
-		Contents = UniqueNetId->ToString();
+		if (IsV1())
+		{
+			MakeReplicationDataV1();
+		}
+		else
+		{
+			MakeReplicationDataV2();
+		}
 	}
+	else
+	{
+		EUniqueIdEncodingFlags EncodingFlags = (EUniqueIdEncodingFlags::IsEncoded | EUniqueIdEncodingFlags::IsEmpty);
 
+		ReplicationBytes.Empty(sizeof(EncodingFlags));
+		FMemoryWriter Writer(ReplicationBytes);
+		Writer << EncodingFlags;
+	}
+}
+
+void FUniqueNetIdRepl::MakeReplicationDataV1()
+{
+	FString Contents = GetUniqueNetId()->ToString();
 	const int32 Length = Contents.Len();
-	if (Length > 0)
+	if (ensure(Length > 0))
 	{
 		// For now don't allow odd chars (HexToBytes adds a 0)
 		const bool bEvenChars = (Length % 2) == 0;
@@ -160,7 +182,7 @@ void FUniqueNetIdRepl::MakeReplicationData()
 		if (EnumHasAllFlags(EncodingFlags, EUniqueIdEncodingFlags::IsEncoded))
 		{
 			uint8 EncodedSize = static_cast<uint8>(EncodedSize32);
-			const int32 TotalBytes = sizeof(EncodingFlags) + sizeof(EncodedSize) + EncodedSize;
+			const int32 TotalBytes = sizeof(EncodingFlags) + sizeof(EncodedSize) + EncodedSize; // no optimization for TypeHash_Other
 			ReplicationBytes.Empty(TotalBytes);
 
 			FMemoryWriter Writer(ReplicationBytes);
@@ -181,7 +203,8 @@ void FUniqueNetIdRepl::MakeReplicationData()
 		}
 		else
 		{
-			ReplicationBytes.Empty(Length);
+			const int32 TotalBytes = sizeof(EncodingFlags) + sizeof(Length) + Length * sizeof(TCHAR); // no optimization for TypeHash_Other
+			ReplicationBytes.Empty(TotalBytes);
 
 			FMemoryWriter Writer(ReplicationBytes);
 			Writer << EncodingFlags;
@@ -198,18 +221,35 @@ void FUniqueNetIdRepl::MakeReplicationData()
 	{
 		EUniqueIdEncodingFlags EncodingFlags = (EUniqueIdEncodingFlags::IsEncoded | EUniqueIdEncodingFlags::IsEmpty);
 
-		ReplicationBytes.Empty();
+		ReplicationBytes.Empty(sizeof(EncodingFlags));
 		FMemoryWriter Writer(ReplicationBytes);
 		Writer << EncodingFlags;
-		//UE_LOG(LogNet, VeryVerbose, TEXT("Empty/Invalid UniqueId, serializing %d bytes"), ReplicationBytes.Num());
 	}
+}
+
+void FUniqueNetIdRepl::MakeReplicationDataV2()
+{
+	EUniqueIdEncodingFlags EncodingFlags = EUniqueIdEncodingFlags::IsEncoded;
+	EncodingFlags |= static_cast<EUniqueIdEncodingFlags>(TypeHash_V2 << 3);
+
+	UE::Online::FAccountId AccountId = GetV2();
+	UE::Online::EOnlineServices OnlineServicesType = AccountId.GetOnlineServicesType();
+	TArray<uint8> ReplicationData = UE::Online::FOnlineIdRegistryRegistry::Get().ToReplicationData(AccountId);
+	check(!ReplicationData.IsEmpty());
+
+	const int32 TotalBytes = sizeof(EncodingFlags) + sizeof(OnlineServicesType) + sizeof(TArray<uint8>::SizeType) + ReplicationData.Num();
+	ReplicationBytes.Empty(TotalBytes);
+	FMemoryWriter Writer(ReplicationBytes);
+	Writer << EncodingFlags;
+	Writer << OnlineServicesType;
+	Writer << ReplicationData;
 }
 
 void FUniqueNetIdRepl::UniqueIdFromString(FName Type, const FString& Contents)
 {
 	// Don't need to distinguish OSS interfaces here with world because we just want the create function below
-	FUniqueNetIdPtr UniqueNetIdPtr = UOnlineEngineInterface::Get()->CreateUniquePlayerId(Contents, Type);
-	SetUniqueNetId(UniqueNetIdPtr);
+	FUniqueNetIdWrapper UniqueNetIdWrapper = UOnlineEngineInterface::Get()->CreateUniquePlayerIdWrapper(Contents, Type);
+	SetUniqueNetId(UniqueNetIdWrapper.GetUniqueNetId());
 }
 
 bool FUniqueNetIdRepl::NetSerialize(FArchive& Ar, UPackageMap* Map, bool& bOutSuccess)
@@ -230,92 +270,25 @@ bool FUniqueNetIdRepl::NetSerialize(FArchive& Ar, UPackageMap* Map, bool& bOutSu
 	else if (Ar.IsLoading())
 	{
 		// @note: start by assuming a replicated nullptr unique id
-		UniqueNetId.Reset();
+		SetUniqueNetId(nullptr);
 
 		EUniqueIdEncodingFlags EncodingFlags = EUniqueIdEncodingFlags::NotEncoded;
 		Ar << EncodingFlags;
 		if (!Ar.IsError())
 		{
+			
 			if (EnumHasAllFlags(EncodingFlags, EUniqueIdEncodingFlags::IsEncoded))
 			{
 				if (!EnumHasAllFlags(EncodingFlags, EUniqueIdEncodingFlags::IsEmpty))
 				{
-					// Non empty and hex encoded
-					uint8 TypeHash = GetTypeHashFromEncoding(EncodingFlags);
-					if (TypeHash == 0)
+					const uint8 TypeHash = GetTypeHashFromEncoding(EncodingFlags);
+					if (TypeHash == TypeHash_V2)
 					{
-						// If no type was encoded, assume default
-						TypeHash = UOnlineEngineInterface::Get()->GetReplicationHashForSubsystem(UOnlineEngineInterface::Get()->GetDefaultOnlineSubsystemName());
-					}
-					FName Type;
-					bool bValidTypeHash = TypeHash != 0;
-					if (TypeHash == TypeHash_Other)
-					{
-						FString TypeString;
-						Ar << TypeString;
-						Type = FName(*TypeString);
-						if (Ar.IsError() || Type == NAME_None)
-						{
-							bValidTypeHash = false;
-						}
+						NetSerializeLoadV2(Ar, EncodingFlags, bOutSuccess);
 					}
 					else
 					{
-						Type = UOnlineEngineInterface::Get()->GetSubsystemFromReplicationHash(TypeHash);
-					}
-
-					if (bValidTypeHash)
-					{
-						// Get the size
-						uint8 EncodedSize = 0;
-						Ar << EncodedSize;
-						if (!Ar.IsError())
-						{
-							if (EncodedSize > 0)
-							{
-								uint8* TempBytes = (uint8*)FMemory_Alloca(EncodedSize);
-								Ar.Serialize(TempBytes, EncodedSize);
-								if (!Ar.IsError())
-								{
-									FString Contents = BytesToHex(TempBytes, EncodedSize);
-									if (Contents.Len() > 0)
-									{
-										if (Type != NAME_None)
-										{
-											// BytesToHex loses case
-											Contents.ToLowerInline();
-											if (EnumHasAllFlags(EncodingFlags, EUniqueIdEncodingFlags::IsPadded))
-											{
-												Contents.RightChopInline(1); // remove padded character
-											}
-											UniqueIdFromString(Type, Contents);
-										}
-										else
-										{
-											UE_LOG(LogNet, Warning, TEXT("Error with unique id type"));
-										}
-									}
-								}
-								else
-								{
-									UE_LOG(LogNet, Warning, TEXT("Error with encoded unique id contents"));
-								}
-							}
-							else
-							{
-								UE_LOG(LogNet, Warning, TEXT("Empty Encoding!"));
-							}
-
-							bOutSuccess = (EncodedSize == 0) || IsValid();
-						}
-						else
-						{
-							UE_LOG(LogNet, Warning, TEXT("Error with encoded unique id size"));
-						}
-					}
-					else
-					{
-						UE_LOG(LogNet, Warning, TEXT("Error with encoded type hash"));
+						NetSerializeLoadV1Encoded(Ar, EncodingFlags, bOutSuccess);
 					}
 				}
 				else
@@ -326,55 +299,7 @@ bool FUniqueNetIdRepl::NetSerialize(FArchive& Ar, UPackageMap* Map, bool& bOutSu
 			}
 			else
 			{
-				// Original FString serialization goes here
-				uint8 TypeHash = GetTypeHashFromEncoding(EncodingFlags);
-				if (TypeHash == 0)
-				{
-					// If no type was encoded, assume default
-					TypeHash = UOnlineEngineInterface::Get()->GetReplicationHashForSubsystem(UOnlineEngineInterface::Get()->GetDefaultOnlineSubsystemName());
-				}
-				FName Type;
-				bool bValidTypeHash = TypeHash != 0;
-				if (TypeHash == TypeHash_Other)
-				{
-					FString TypeString;
-					Ar << TypeString;
-					Type = FName(*TypeString);
-					if (Ar.IsError() || Type == NAME_None)
-					{
-						bValidTypeHash = false;
-					}
-				}
-				else
-				{
-					Type = UOnlineEngineInterface::Get()->GetSubsystemFromReplicationHash(TypeHash);
-				}
-
-				if (bValidTypeHash)
-				{
-					FString Contents;
-					Ar << Contents;
-					if (!Ar.IsError())
-					{
-						if (Type != NAME_None)
-						{
-							UniqueIdFromString(Type, Contents);
-							bOutSuccess = !Contents.IsEmpty();
-						}
-						else
-						{
-							UE_LOG(LogNet, Warning, TEXT("Error with unique id type"));
-						}
-					}
-					else
-					{
-						UE_LOG(LogNet, Warning, TEXT("Error with unencoded unique id"));
-					}
-				}
-				else
-				{
-					UE_LOG(LogNet, Warning, TEXT("Error with encoded type hash"));
-				}
+				NetSerializeLoadV1Unencoded(Ar, EncodingFlags, bOutSuccess);
 			}
 		}
 		else
@@ -386,29 +311,214 @@ bool FUniqueNetIdRepl::NetSerialize(FArchive& Ar, UPackageMap* Map, bool& bOutSu
 	return true;
 }
 
+void FUniqueNetIdRepl::NetSerializeLoadV1Encoded(FArchive& Ar, const EUniqueIdEncodingFlags EncodingFlags, bool& bOutSuccess)
+{
+	// Non empty and hex encoded
+	uint8 TypeHash = GetTypeHashFromEncoding(EncodingFlags);
+	if (TypeHash == 0)
+	{
+		// If no type was encoded, assume default
+		TypeHash = UOnlineEngineInterface::Get()->GetReplicationHashForSubsystem(UOnlineEngineInterface::Get()->GetDefaultOnlineSubsystemName());
+	}
+	FName Type;
+	bool bValidTypeHash = TypeHash != 0;
+	if (TypeHash == TypeHash_Other)
+	{
+		FString TypeString;
+		Ar << TypeString;
+		Type = FName(*TypeString);
+		if (Ar.IsError() || Type == NAME_None)
+		{
+			bValidTypeHash = false;
+		}
+	}
+	else
+	{
+		Type = UOnlineEngineInterface::Get()->GetSubsystemFromReplicationHash(TypeHash);
+	}
+
+	if (bValidTypeHash)
+	{
+		// Get the size
+		uint8 EncodedSize = 0;
+		Ar << EncodedSize;
+		if (!Ar.IsError())
+		{
+			if (EncodedSize > 0)
+			{
+				uint8* TempBytes = (uint8*)FMemory_Alloca(EncodedSize);
+				Ar.Serialize(TempBytes, EncodedSize);
+				if (!Ar.IsError())
+				{
+					FString Contents = BytesToHex(TempBytes, EncodedSize);
+					if (Contents.Len() > 0)
+					{
+						if (Type != NAME_None)
+						{
+							// BytesToHex loses case
+							Contents.ToLowerInline();
+							if (EnumHasAllFlags(EncodingFlags, EUniqueIdEncodingFlags::IsPadded))
+							{
+								Contents.RightChopInline(1); // remove padded character
+							}
+							UniqueIdFromString(Type, Contents);
+						}
+						else
+						{
+							UE_LOG(LogNet, Warning, TEXT("Error with unique id type"));
+						}
+					}
+				}
+				else
+				{
+					UE_LOG(LogNet, Warning, TEXT("Error with encoded unique id contents"));
+				}
+			}
+			else
+			{
+				UE_LOG(LogNet, Warning, TEXT("Empty Encoding!"));
+			}
+
+			bOutSuccess = (EncodedSize == 0) || IsValid();
+		}
+		else
+		{
+			UE_LOG(LogNet, Warning, TEXT("Error with encoded unique id size"));
+		}
+	}
+	else
+	{
+		UE_LOG(LogNet, Warning, TEXT("Error with encoded type hash"));
+	}
+}
+
+void FUniqueNetIdRepl::NetSerializeLoadV1Unencoded(FArchive& Ar, const EUniqueIdEncodingFlags EncodingFlags, bool& bOutSuccess)
+{
+	uint8 TypeHash = GetTypeHashFromEncoding(EncodingFlags);
+	if (TypeHash == 0)
+	{
+		// If no type was encoded, assume default
+		TypeHash = UOnlineEngineInterface::Get()->GetReplicationHashForSubsystem(UOnlineEngineInterface::Get()->GetDefaultOnlineSubsystemName());
+	}
+	FName Type;
+	bool bValidTypeHash = TypeHash != 0;
+	if (TypeHash == TypeHash_Other)
+	{
+		FString TypeString;
+		Ar << TypeString;
+		Type = FName(*TypeString);
+		if (Ar.IsError() || Type == NAME_None)
+		{
+			bValidTypeHash = false;
+		}
+	}
+	else
+	{
+		Type = UOnlineEngineInterface::Get()->GetSubsystemFromReplicationHash(TypeHash);
+	}
+
+	if (bValidTypeHash)
+	{
+		FString Contents;
+		Ar << Contents;
+		if (!Ar.IsError())
+		{
+			if (Type != NAME_None)
+			{
+				UniqueIdFromString(Type, Contents);
+				bOutSuccess = !Contents.IsEmpty();
+			}
+			else
+			{
+				UE_LOG(LogNet, Warning, TEXT("Error with unique id type"));
+			}
+		}
+		else
+		{
+			UE_LOG(LogNet, Warning, TEXT("Error with unencoded unique id"));
+		}
+	}
+	else
+	{
+		UE_LOG(LogNet, Warning, TEXT("Error with encoded type hash"));
+	}
+}
+
+void FUniqueNetIdRepl::NetSerializeLoadV2(FArchive& Ar, const EUniqueIdEncodingFlags EncodingFlags, bool& bOutSuccess)
+{
+	UE::Online::EOnlineServices OnlineServicesType;
+	Ar << OnlineServicesType;
+	TArray<uint8> ReplicationData;
+	Ar << ReplicationData;
+
+	const UE::Online::FAccountId AccountId = UE::Online::FOnlineIdRegistryRegistry::Get().ToAccountId(OnlineServicesType, ReplicationData);
+	check(AccountId.IsValid());
+	SetAccountId(AccountId);
+}
+
 bool FUniqueNetIdRepl::Serialize(FArchive& Ar)
 {
 	Ar << *this;
 	return true;
 }
 
-bool FUniqueNetIdRepl::ExportTextItem(FString& ValueStr, FUniqueNetIdRepl const& DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope) const
+bool FUniqueNetIdRepl::ShouldExportTextItemAsQuotedString(const FString& NetIdStr)
 {
-	if (0 != (PortFlags & EPropertyPortFlags::PPF_ExportCpp))
+	// Logic derived from FPropertyHelpers::ReadToken. If that would not parse the string, we need to wrap in quotes.
+
+	if (NetIdStr.IsEmpty())
 	{
 		return false;
 	}
 
+	constexpr FAsciiSet AlphaNumericChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+	constexpr FAsciiSet ValidChars = AlphaNumericChars + '_' + '-' + '+';
+
+	TCHAR FirstChar = NetIdStr[0];
+	const bool bFirstCharValid = AlphaNumericChars.Test(FirstChar) || FirstChar > 255;
+	if (!bFirstCharValid)
+	{
+		return true;
+	}
+
+	return !FAsciiSet::HasOnly(*NetIdStr, ValidChars);
+}
+
+bool FUniqueNetIdRepl::ExportTextItem(FString& ValueStr, FUniqueNetIdRepl const& DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope) const
+{
 	if (IsValid())
 	{
-		FName Type = UniqueNetId->GetType();
-		if (Type == UOnlineEngineInterface::Get()->GetDefaultOnlineSubsystemName())
+		if (IsV1())
 		{
-			ValueStr += FString::Printf(TEXT("%s"), *UniqueNetId->ToString());
+			FName Type = GetType();
+			const FString NetIdStr = ToString();
+			if (Type == UOnlineEngineInterface::Get()->GetDefaultOnlineSubsystemName())
+			{
+				if (ShouldExportTextItemAsQuotedString(NetIdStr))
+				{
+					ValueStr += FString::Printf(TEXT("\"%s\""), *NetIdStr);
+				}
+				else
+				{
+					ValueStr += NetIdStr;
+				}
+			}
+			else
+			{
+				if (ShouldExportTextItemAsQuotedString(NetIdStr))
+				{
+					ValueStr += FString::Printf(TEXT("%s:\"%s\""), *Type.ToString(), *NetIdStr);
+				}
+				else
+				{
+					ValueStr += FString::Printf(TEXT("%s:%s"), *Type.ToString(), *NetIdStr);
+				}
+				
+			}
 		}
 		else
 		{
-			ValueStr += FString::Printf(TEXT("%s:%s"), *Type.ToString(), *UniqueNetId->ToString());
+			ValueStr += ToDebugString();
 		}
 	}
 	else
@@ -438,7 +548,7 @@ bool FUniqueNetIdRepl::ImportTextItem(const TCHAR*& Buffer, int32 PortFlags, UOb
 		}
 		else
 		{
-			checkf(UOnlineEngineInterface::Get() && UOnlineEngineInterface::Get()->IsLoaded(), TEXT("Attempted to ImportText to FUniqueNetIdRepl while OSS is not loaded. Parent:%s"), *GetPathNameSafe(Parent));
+			check(UOnlineEngineInterface::Get());
 
 			FString Token;
 			if (const TCHAR* NewBuffer1 = FPropertyHelpers::ReadToken(Buffer, Token))
@@ -474,6 +584,7 @@ bool FUniqueNetIdRepl::ImportTextItem(const TCHAR*& Buffer, int32 PortFlags, UOb
 #if !NO_LOGGING
 		ErrorText->CategorizedLogf(LogNet.GetCategoryName(), ELogVerbosity::Warning, TEXT("Failed to import text to FUniqueNetIdRepl Parent:%s"), *GetPathNameSafe(Parent));
 #endif
+		return false;
 	}
 
 	return true;
@@ -483,7 +594,7 @@ TSharedRef<FJsonValue> FUniqueNetIdRepl::ToJson() const
 {
 	if (IsValid())
 	{
-		const FString JsonString = FString::Printf(TEXT("%s:%s"), *UniqueNetId->GetType().ToString(), *ToString());
+		const FString JsonString = FString::Printf(TEXT("%s:%s"), *GetType().ToString(), *ToString());
 		return MakeShareable(new FJsonValueString(JsonString));
 	}
 	else
@@ -531,7 +642,7 @@ void TestUniqueIdRepl(UWorld* InWorld)
 
 	bool bSetupSuccess = true;
 
-	FUniqueNetIdPtr UserId = UOnlineEngineInterface::Get()->GetUniquePlayerId(InWorld, 0);
+	FUniqueNetIdPtr UserId = UOnlineEngineInterface::Get()->GetUniquePlayerIdWrapper(InWorld, 0).GetUniqueNetId();
 
 	FUniqueNetIdRepl EmptyIdIn;
 	if (EmptyIdIn.IsValid())
@@ -547,9 +658,9 @@ void TestUniqueIdRepl(UWorld* InWorld)
 		bSetupSuccess = false;
 	}
 
-	FUniqueNetIdRepl OddStringIdIn(UOnlineEngineInterface::Get()->CreateUniquePlayerId(TEXT("abcde")));
-	FUniqueNetIdRepl NonHexStringIdIn(UOnlineEngineInterface::Get()->CreateUniquePlayerId(TEXT("thisisnothex")));
-	FUniqueNetIdRepl UpperCaseStringIdIn(UOnlineEngineInterface::Get()->CreateUniquePlayerId(TEXT("abcDEF")));
+	FUniqueNetIdRepl OddStringIdIn(UOnlineEngineInterface::Get()->CreateUniquePlayerIdWrapper(TEXT("abcde")));
+	FUniqueNetIdRepl NonHexStringIdIn(UOnlineEngineInterface::Get()->CreateUniquePlayerIdWrapper(TEXT("thisisnothex")));
+	FUniqueNetIdRepl UpperCaseStringIdIn(UOnlineEngineInterface::Get()->CreateUniquePlayerIdWrapper(TEXT("abcDEF")));
 
 #if 1
 #define WAYTOOLONG TEXT(\
@@ -563,7 +674,7 @@ void TestUniqueIdRepl(UWorld* InWorld)
 #define WAYTOOLONG TEXT("deadbeef")
 #endif
 
-	FUniqueNetIdRepl WayTooLongForHexEncodingIdIn(UOnlineEngineInterface::Get()->CreateUniquePlayerId(WAYTOOLONG));
+	FUniqueNetIdRepl WayTooLongForHexEncodingIdIn(UOnlineEngineInterface::Get()->CreateUniquePlayerIdWrapper(WAYTOOLONG));
 
 	CHECK_REPL_VALIDITY(OddStringIdIn, bSetupSuccess);
 	CHECK_REPL_VALIDITY(NonHexStringIdIn, bSetupSuccess);
@@ -571,20 +682,23 @@ void TestUniqueIdRepl(UWorld* InWorld)
 	CHECK_REPL_VALIDITY(WayTooLongForHexEncodingIdIn, bSetupSuccess);
 
 	static FName NAME_CustomOSS(TEXT("MyCustomOSS"));
-	FUniqueNetIdRepl CustomOSSIdIn(UOnlineEngineInterface::Get()->CreateUniquePlayerId(TEXT("a8d245fc-4b97-4150-a3cd-c2c91d8fc4b3"), NAME_CustomOSS));
-	FUniqueNetIdRepl CustomOSSEncodedIdIn(UOnlineEngineInterface::Get()->CreateUniquePlayerId(TEXT("0123456789abcdef"), NAME_CustomOSS));
-	FUniqueNetIdRepl CustomOSSPlusPrefixIn(UOnlineEngineInterface::Get()->CreateUniquePlayerId(TEXT("+123456"), NAME_CustomOSS));
-	FUniqueNetIdRepl CustomOSSOddIntegerStringIn(UOnlineEngineInterface::Get()->CreateUniquePlayerId(TEXT("123456789"), NAME_CustomOSS));
-	FUniqueNetIdRepl CustomOSSEvenIntegerStringIn(UOnlineEngineInterface::Get()->CreateUniquePlayerId(TEXT("1234567890"), NAME_CustomOSS));
+	FUniqueNetIdRepl CustomOSSIdIn(UOnlineEngineInterface::Get()->CreateUniquePlayerIdWrapper(TEXT("a8d245fc-4b97-4150-a3cd-c2c91d8fc4b3"), NAME_CustomOSS));
+	FUniqueNetIdRepl CustomOSSEncodedIdIn(UOnlineEngineInterface::Get()->CreateUniquePlayerIdWrapper(TEXT("0123456789abcdef"), NAME_CustomOSS));
+	FUniqueNetIdRepl CustomOSSPlusPrefixIn(UOnlineEngineInterface::Get()->CreateUniquePlayerIdWrapper(TEXT("+123456"), NAME_CustomOSS));
+	FUniqueNetIdRepl CustomOSSOddIntegerStringIn(UOnlineEngineInterface::Get()->CreateUniquePlayerIdWrapper(TEXT("123456789"), NAME_CustomOSS));
+	FUniqueNetIdRepl CustomOSSEvenIntegerStringIn(UOnlineEngineInterface::Get()->CreateUniquePlayerIdWrapper(TEXT("1234567890"), NAME_CustomOSS));
+	FUniqueNetIdRepl CustomOSSSeparatorsRequiringQuotedStringIn(UOnlineEngineInterface::Get()->CreateUniquePlayerIdWrapper(TEXT("1234_+_567|890"), NAME_CustomOSS));
 
 	CHECK_REPL_VALIDITY(CustomOSSIdIn, bSetupSuccess);
 	CHECK_REPL_VALIDITY(CustomOSSEncodedIdIn, bSetupSuccess);
 	CHECK_REPL_VALIDITY(CustomOSSPlusPrefixIn, bSetupSuccess);
 	CHECK_REPL_VALIDITY(CustomOSSOddIntegerStringIn, bSetupSuccess);
 	CHECK_REPL_VALIDITY(CustomOSSEvenIntegerStringIn, bSetupSuccess);
+	CHECK_REPL_VALIDITY(CustomOSSSeparatorsRequiringQuotedStringIn, bSetupSuccess);
 
 	bool bRegularSerializationSuccess = true;
 	bool bNetworkSerializationSuccess = true;
+	bool bTextItemSerializationSuccess = true;
 	if (bSetupSuccess)
 	{
 		// Regular Serialization (persistent/disk based using FString)
@@ -607,6 +721,7 @@ void TestUniqueIdRepl(UWorld* InWorld)
 				TestUniqueIdWriter << CustomOSSPlusPrefixIn;
 				TestUniqueIdWriter << CustomOSSOddIntegerStringIn;
 				TestUniqueIdWriter << CustomOSSEvenIntegerStringIn;
+				TestUniqueIdWriter << CustomOSSSeparatorsRequiringQuotedStringIn;
 			}
 
 			FUniqueNetIdRepl EmptyIdOut;
@@ -620,6 +735,7 @@ void TestUniqueIdRepl(UWorld* InWorld)
 			FUniqueNetIdRepl CustomOSSPlusPrefixOut;
 			FUniqueNetIdRepl CustomOSSOddIntegerStringOut;
 			FUniqueNetIdRepl CustomOSSEvenIntegerStringOut;
+			FUniqueNetIdRepl CustomOSSSeparatorsRequiringQuotedStringOut;
 
 			// Serialize Out
 			{
@@ -635,6 +751,7 @@ void TestUniqueIdRepl(UWorld* InWorld)
 				TestUniqueIdReader << CustomOSSPlusPrefixOut;
 				TestUniqueIdReader << CustomOSSOddIntegerStringOut;
 				TestUniqueIdReader << CustomOSSEvenIntegerStringOut;
+				TestUniqueIdReader << CustomOSSSeparatorsRequiringQuotedStringOut;
 			}
 
 			if (EmptyIdOut.IsValid())
@@ -659,6 +776,7 @@ void TestUniqueIdRepl(UWorld* InWorld)
 			CHECK_REPL_EQUALITY(CustomOSSPlusPrefixIn, CustomOSSPlusPrefixOut, bRegularSerializationSuccess);
 			CHECK_REPL_EQUALITY(CustomOSSOddIntegerStringIn, CustomOSSOddIntegerStringOut, bRegularSerializationSuccess);
 			CHECK_REPL_EQUALITY(CustomOSSEvenIntegerStringIn, CustomOSSEvenIntegerStringOut, bRegularSerializationSuccess);
+			CHECK_REPL_EQUALITY(CustomOSSSeparatorsRequiringQuotedStringIn, CustomOSSSeparatorsRequiringQuotedStringOut, bRegularSerializationSuccess);
 		}
 
 		// Network serialization (network/transient using MakeReplicationData)
@@ -691,6 +809,8 @@ void TestUniqueIdRepl(UWorld* InWorld)
 				EncodingFailures += bOutSuccess ? 0 : 1;
 				CustomOSSEvenIntegerStringIn.NetSerialize(TestUniqueIdWriter, nullptr, bOutSuccess);
 				EncodingFailures += bOutSuccess ? 0 : 1;
+				CustomOSSSeparatorsRequiringQuotedStringIn.NetSerialize(TestUniqueIdWriter, nullptr, bOutSuccess);
+				EncodingFailures += bOutSuccess ? 0 : 1;
 			}
 
 			if (EncodingFailures > 0)
@@ -712,6 +832,7 @@ void TestUniqueIdRepl(UWorld* InWorld)
 				FUniqueNetIdRepl CustomOSSPlusPrefixOut;
 				FUniqueNetIdRepl CustomOSSOddIntegerStringOut;
 				FUniqueNetIdRepl CustomOSSEvenIntegerStringOut;
+				FUniqueNetIdRepl CustomOSSSeparatorsRequiringQuotedStringOut;
 
 				// Serialize Out
 				uint8 DecodingFailures = 0;
@@ -740,6 +861,8 @@ void TestUniqueIdRepl(UWorld* InWorld)
 					DecodingFailures += bOutSuccess ? 0 : 1;
 					CustomOSSEvenIntegerStringOut.NetSerialize(TestUniqueIdReader, nullptr, bOutSuccess);
 					DecodingFailures += bOutSuccess ? 0 : 1;
+					CustomOSSSeparatorsRequiringQuotedStringOut.NetSerialize(TestUniqueIdReader, nullptr, bOutSuccess);
+					DecodingFailures += bOutSuccess ? 0 : 1;
 				}
 
 				if (DecodingFailures > 0)
@@ -757,7 +880,7 @@ void TestUniqueIdRepl(UWorld* InWorld)
 				if (EmptyIdIn != EmptyIdOut)
 				{
 					UE_LOG(LogNet, Warning, TEXT("EmptyId In/Out mismatch"));
-					bRegularSerializationSuccess = false;
+					bNetworkSerializationSuccess = false;
 				}
 
 				CHECK_REPL_EQUALITY(ValidIdIn, ValidIdOut, bNetworkSerializationSuccess);
@@ -770,19 +893,172 @@ void TestUniqueIdRepl(UWorld* InWorld)
 				CHECK_REPL_EQUALITY(CustomOSSPlusPrefixIn, CustomOSSPlusPrefixOut, bRegularSerializationSuccess);
 				CHECK_REPL_EQUALITY(CustomOSSOddIntegerStringIn, CustomOSSOddIntegerStringOut, bRegularSerializationSuccess);
 				CHECK_REPL_EQUALITY(CustomOSSEvenIntegerStringIn, CustomOSSEvenIntegerStringOut, bRegularSerializationSuccess);
+				CHECK_REPL_EQUALITY(CustomOSSSeparatorsRequiringQuotedStringIn, CustomOSSSeparatorsRequiringQuotedStringOut, bRegularSerializationSuccess);
+			}
+		}
+
+		// TextItem serialization
+		{
+			bool bOutSuccess = false;
+			const FUniqueNetIdRepl DefaultValue;
+
+			// Serialize In
+			FString EmptyIdTextItem;
+			FString ValidIdTextItem;
+			FString OddStringIdTextItem;
+			FString NonHexStringIdTextItem;
+			FString UpperCaseStringIdTextItem;
+			FString WayTooLongForHexEncodingIdTextItem;
+			FString CustomOSSIdTextItem;
+			FString CustomOSSEncodedIdTextItem;
+			FString CustomOSSPlusPrefixTextItem;
+			FString CustomOSSOddIntegerStringTextItem;
+			FString CustomOSSEvenIntegerStringTextItem;
+			FString CustomOSSSeparatorsRequiringQuotedStringTextItem;
+			uint8 ExportFailures = 0;
+			{
+				bOutSuccess = EmptyIdIn.ExportTextItem(EmptyIdTextItem, DefaultValue, nullptr, 0, nullptr);
+				ExportFailures += bOutSuccess ? 0 : 1;
+				bOutSuccess = ValidIdIn.ExportTextItem(ValidIdTextItem, DefaultValue, nullptr, 0, nullptr);
+				ExportFailures += bOutSuccess ? 0 : 1;
+				bOutSuccess = OddStringIdIn.ExportTextItem(OddStringIdTextItem, DefaultValue, nullptr, 0, nullptr);
+				ExportFailures += bOutSuccess ? 0 : 1;
+				bOutSuccess = NonHexStringIdIn.ExportTextItem(NonHexStringIdTextItem, DefaultValue, nullptr, 0, nullptr);
+				ExportFailures += bOutSuccess ? 0 : 1;
+				bOutSuccess = UpperCaseStringIdIn.ExportTextItem(UpperCaseStringIdTextItem, DefaultValue, nullptr, 0, nullptr);
+				ExportFailures += bOutSuccess ? 0 : 1;
+				bOutSuccess = WayTooLongForHexEncodingIdIn.ExportTextItem(WayTooLongForHexEncodingIdTextItem, DefaultValue, nullptr, 0, nullptr);
+				ExportFailures += bOutSuccess ? 0 : 1;
+				bOutSuccess = CustomOSSIdIn.ExportTextItem(CustomOSSIdTextItem, DefaultValue, nullptr, 0, nullptr);
+				ExportFailures += bOutSuccess ? 0 : 1;
+				bOutSuccess = CustomOSSEncodedIdIn.ExportTextItem(CustomOSSEncodedIdTextItem, DefaultValue, nullptr, 0, nullptr);
+				ExportFailures += bOutSuccess ? 0 : 1;
+				bOutSuccess = CustomOSSPlusPrefixIn.ExportTextItem(CustomOSSPlusPrefixTextItem, DefaultValue, nullptr, 0, nullptr);
+				ExportFailures += bOutSuccess ? 0 : 1;
+				bOutSuccess = CustomOSSOddIntegerStringIn.ExportTextItem(CustomOSSOddIntegerStringTextItem, DefaultValue, nullptr, 0, nullptr);
+				ExportFailures += bOutSuccess ? 0 : 1;
+				bOutSuccess = CustomOSSEvenIntegerStringIn.ExportTextItem(CustomOSSEvenIntegerStringTextItem, DefaultValue, nullptr, 0, nullptr);
+				ExportFailures += bOutSuccess ? 0 : 1;
+				bOutSuccess = CustomOSSSeparatorsRequiringQuotedStringIn.ExportTextItem(CustomOSSSeparatorsRequiringQuotedStringTextItem, DefaultValue, nullptr, 0, nullptr);
+				ExportFailures += bOutSuccess ? 0 : 1;
+			}
+
+			if (ExportFailures > 0) //-V547 Expression 'ExportFailures > 0' is always false - ExportTextItem always returns true
+			{
+				UE_LOG(LogNet, Warning, TEXT("There were %d export failures"), ExportFailures);
+				bTextItemSerializationSuccess = false;
+			}
+
+			if (bTextItemSerializationSuccess)
+			{
+				FOutputDeviceNull ErrorText;
+
+				FUniqueNetIdRepl EmptyIdOut;
+				FUniqueNetIdRepl ValidIdOut;
+				FUniqueNetIdRepl OddStringIdOut;
+				FUniqueNetIdRepl NonHexStringIdOut;
+				FUniqueNetIdRepl UpperCaseStringIdOut;
+				FUniqueNetIdRepl WayTooLongForHexEncodingIdOut;
+				FUniqueNetIdRepl CustomOSSIdOut;
+				FUniqueNetIdRepl CustomOSSEncodedIdOut;
+				FUniqueNetIdRepl CustomOSSPlusPrefixOut;
+				FUniqueNetIdRepl CustomOSSOddIntegerStringOut;
+				FUniqueNetIdRepl CustomOSSEvenIntegerStringOut;
+				FUniqueNetIdRepl CustomOSSSeparatorsRequiringQuotedStringOut;
+
+				// Serialize Out
+				uint8 ImportFailures = 0;
+				const TCHAR* Buffer = nullptr;
+				{
+					Buffer = *EmptyIdTextItem;
+					bOutSuccess = EmptyIdOut.ImportTextItem(Buffer, 0, nullptr, &ErrorText);
+					ImportFailures += bOutSuccess ? 0 : 1;
+
+					Buffer = *ValidIdTextItem;
+					bOutSuccess = ValidIdOut.ImportTextItem(Buffer, 0, nullptr, &ErrorText);
+					ImportFailures += bOutSuccess ? 0 : 1;
+
+					Buffer = *OddStringIdTextItem;
+					bOutSuccess = OddStringIdOut.ImportTextItem(Buffer, 0, nullptr, &ErrorText);
+					ImportFailures += bOutSuccess ? 0 : 1;
+
+					Buffer = *NonHexStringIdTextItem;
+					bOutSuccess = NonHexStringIdOut.ImportTextItem(Buffer, 0, nullptr, &ErrorText);
+					ImportFailures += bOutSuccess ? 0 : 1;
+
+					Buffer = *UpperCaseStringIdTextItem;
+					bOutSuccess = UpperCaseStringIdOut.ImportTextItem(Buffer, 0, nullptr, &ErrorText);
+					ImportFailures += bOutSuccess ? 0 : 1;
+
+					Buffer = *WayTooLongForHexEncodingIdTextItem;
+					bOutSuccess = WayTooLongForHexEncodingIdOut.ImportTextItem(Buffer, 0, nullptr, &ErrorText);
+					ImportFailures += bOutSuccess ? 0 : 1;
+
+					Buffer = *CustomOSSIdTextItem;
+					bOutSuccess = CustomOSSIdOut.ImportTextItem(Buffer, 0, nullptr, &ErrorText);
+					ImportFailures += bOutSuccess ? 0 : 1;
+
+					Buffer = *CustomOSSEncodedIdTextItem;
+					bOutSuccess = CustomOSSEncodedIdOut.ImportTextItem(Buffer, 0, nullptr, &ErrorText);
+					ImportFailures += bOutSuccess ? 0 : 1;
+
+					Buffer = *CustomOSSPlusPrefixTextItem;
+					bOutSuccess = CustomOSSPlusPrefixOut.ImportTextItem(Buffer, 0, nullptr, &ErrorText);
+					ImportFailures += bOutSuccess ? 0 : 1;
+
+					Buffer = *CustomOSSOddIntegerStringTextItem;
+					bOutSuccess = CustomOSSOddIntegerStringOut.ImportTextItem(Buffer, 0, nullptr, &ErrorText);
+					ImportFailures += bOutSuccess ? 0 : 1;
+
+					Buffer = *CustomOSSEvenIntegerStringTextItem;
+					bOutSuccess = CustomOSSEvenIntegerStringOut.ImportTextItem(Buffer, 0, nullptr, &ErrorText);
+					ImportFailures += bOutSuccess ? 0 : 1;
+
+					Buffer = *CustomOSSSeparatorsRequiringQuotedStringTextItem;
+					bOutSuccess = CustomOSSSeparatorsRequiringQuotedStringOut.ImportTextItem(Buffer, 0, nullptr, &ErrorText);
+					ImportFailures += bOutSuccess ? 0 : 1;
+				}
+
+				if (ImportFailures > 0)
+				{
+					UE_LOG(LogNet, Warning, TEXT("There were %d import failures"), ImportFailures);
+					bTextItemSerializationSuccess = false;
+				}
+
+				if (EmptyIdOut.IsValid())
+				{
+					UE_LOG(LogNet, Warning, TEXT("EmptyId %s should have been invalid"), *EmptyIdOut->ToDebugString());
+					bTextItemSerializationSuccess = false;
+				}
+
+				if (EmptyIdIn != EmptyIdOut)
+				{
+					UE_LOG(LogNet, Warning, TEXT("EmptyId In/Out mismatch"));
+					bTextItemSerializationSuccess = false;
+				}
+
+				CHECK_REPL_EQUALITY(ValidIdIn, ValidIdOut, bTextItemSerializationSuccess);
+				CHECK_REPL_EQUALITY(OddStringIdIn, OddStringIdOut, bTextItemSerializationSuccess);
+				CHECK_REPL_EQUALITY(NonHexStringIdIn, NonHexStringIdOut, bTextItemSerializationSuccess);
+				CHECK_REPL_EQUALITY(UpperCaseStringIdIn, UpperCaseStringIdOut, bTextItemSerializationSuccess);
+				CHECK_REPL_EQUALITY(WayTooLongForHexEncodingIdIn, WayTooLongForHexEncodingIdOut, bTextItemSerializationSuccess);
+				CHECK_REPL_EQUALITY(CustomOSSIdIn, CustomOSSIdOut, bTextItemSerializationSuccess);
+				CHECK_REPL_EQUALITY(CustomOSSEncodedIdIn, CustomOSSEncodedIdOut, bTextItemSerializationSuccess);
+				CHECK_REPL_EQUALITY(CustomOSSPlusPrefixIn, CustomOSSPlusPrefixOut, bTextItemSerializationSuccess);
+				CHECK_REPL_EQUALITY(CustomOSSOddIntegerStringIn, CustomOSSOddIntegerStringOut, bTextItemSerializationSuccess);
+				CHECK_REPL_EQUALITY(CustomOSSEvenIntegerStringIn, CustomOSSEvenIntegerStringOut, bTextItemSerializationSuccess);
+				CHECK_REPL_EQUALITY(CustomOSSSeparatorsRequiringQuotedStringIn, CustomOSSSeparatorsRequiringQuotedStringOut, bTextItemSerializationSuccess);
 			}
 		}
 	}
 
 	bool bPlatformSerializationSuccess = true;
-#if PLATFORM_XBOXONE || PLATFORM_PS4
-	if (bSetupSuccess)
+	FString NativePlatformService;
+	if (bSetupSuccess && 
+		GConfig->GetString(TEXT("OnlineSubsystem"), TEXT("NativePlatformService"), NativePlatformService, GEngineIni) && 
+		!NativePlatformService.IsEmpty())
 	{
-#if PLATFORM_XBOXONE
-		FUniqueNetIdPtr PlatformUserId = UOnlineEngineInterface::Get()->GetUniquePlayerId(InWorld, 0, FName(TEXT("LIVE")));
-#elif PLATFORM_PS4
-		FUniqueNetIdPtr PlatformUserId = UOnlineEngineInterface::Get()->GetUniquePlayerId(InWorld, 0, FName(TEXT("PS4")));
-#endif
+		FUniqueNetIdPtr PlatformUserId = UOnlineEngineInterface::Get()->GetUniquePlayerIdWrapper(InWorld, 0, FName(*NativePlatformService)).GetUniqueNetId();
 
 		FUniqueNetIdRepl ValidPlatformIdIn(PlatformUserId);
 		if (!ValidPlatformIdIn.IsValid() || PlatformUserId != ValidPlatformIdIn.GetUniqueNetId() || *PlatformUserId != *ValidPlatformIdIn)
@@ -833,7 +1109,6 @@ void TestUniqueIdRepl(UWorld* InWorld)
 			CHECK_REPL_EQUALITY(ValidPlatformIdIn, ValidPlatformIdOut, bPlatformSerializationSuccess);
 		}
 	}
-#endif
 
 	bool bJSONSerializationSuccess = true;
 	if (bSetupSuccess)
@@ -854,6 +1129,7 @@ void TestUniqueIdRepl(UWorld* InWorld)
 	UE_LOG(LogNet, Log, TEXT("	Setup: %s"), bSetupSuccess ? TEXT("PASS") : TEXT("FAIL"));
 	UE_LOG(LogNet, Log, TEXT("	Normal: %s"), bRegularSerializationSuccess ? (bSetupSuccess ? TEXT("PASS") : TEXT("SKIPPED")) : TEXT("FAIL"));
 	UE_LOG(LogNet, Log, TEXT("	Network: %s"), bNetworkSerializationSuccess ? (bSetupSuccess ? TEXT("PASS") : TEXT("SKIPPED")) : TEXT("FAIL"));
+	UE_LOG(LogNet, Log, TEXT("	TextItem: %s"), bTextItemSerializationSuccess ? (bSetupSuccess ? TEXT("PASS") : TEXT("SKIPPED")) : TEXT("FAIL"));
 	UE_LOG(LogNet, Log, TEXT("	Platform: %s"), bPlatformSerializationSuccess ? (bSetupSuccess ? TEXT("PASS") : TEXT("SKIPPED")) : TEXT("FAIL"));
 	UE_LOG(LogNet, Log, TEXT("	JSON: %s"), bJSONSerializationSuccess ? (bSetupSuccess ? TEXT("PASS") : TEXT("SKIPPED")) : TEXT("FAIL"));
 
@@ -862,3 +1138,4 @@ void TestUniqueIdRepl(UWorld* InWorld)
 
 #endif
 }
+

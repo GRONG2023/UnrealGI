@@ -4,16 +4,17 @@
 	TriggerActors.cpp: Trigger implementation
 =============================================================================*/
 
-#include "CoreMinimal.h"
-#include "Engine/EngineTypes.h"
-#include "GameFramework/Actor.h"
+#include "Async/TaskGraphInterfaces.h"
 #include "Components/BillboardComponent.h"
+#include "Engine/Texture2D.h"
+#include "Engine/TriggerBase.h"
 #include "Engine/TriggerBox.h"
 #include "Engine/TriggerCapsule.h"
 #include "Engine/TriggerSphere.h"
 #include "Components/BoxComponent.h"
 #include "Components/SphereComponent.h"
 #include "Components/CapsuleComponent.h"
+#include "UObject/ConstructorHelpers.h"
 namespace
 {
 	static const FColor TriggerBaseColor(100, 255, 100, 255);
@@ -33,6 +34,26 @@ ATriggerCapsule::ATriggerCapsule(const FObjectInitializer& ObjectInitializer)
 	if (UBillboardComponent* TriggerSpriteComponent = GetSpriteComponent())
 	{
 		TriggerSpriteComponent->SetupAttachment(CapsuleCollisionComponent);
+	}
+
+	if (GetSpriteComponent())
+	{
+		// Structure to hold one-time initialization
+		struct FConstructorStatics
+		{
+			ConstructorHelpers::FObjectFinderOptional<UTexture2D> TriggerTextureObject;
+			FName ID_Triggers;
+			FText NAME_Triggers;
+			FConstructorStatics()
+				: TriggerTextureObject(TEXT("/Engine/EditorResources/S_TriggerCapsule"))
+				, ID_Triggers(TEXT("Triggers"))
+				, NAME_Triggers(NSLOCTEXT("SpriteCategory", "Triggers", "Triggers"))
+			{
+			}
+		};
+		static FConstructorStatics ConstructorStatics;
+
+		GetSpriteComponent()->Sprite = ConstructorStatics.TriggerTextureObject.Get();
 	}
 #endif
 }
@@ -100,6 +121,26 @@ ATriggerBox::ATriggerBox(const FObjectInitializer& ObjectInitializer)
 	{
 		TriggerSpriteComponent->SetupAttachment(BoxCollisionComponent);
 	}
+
+	if (GetSpriteComponent())
+	{
+		// Structure to hold one-time initialization
+		struct FConstructorStatics
+		{
+			ConstructorHelpers::FObjectFinderOptional<UTexture2D> TriggerTextureObject;
+			FName ID_Triggers;
+			FText NAME_Triggers;
+			FConstructorStatics()
+				: TriggerTextureObject(TEXT("/Engine/EditorResources/S_TriggerBox"))
+					, ID_Triggers(TEXT("Triggers"))
+					, NAME_Triggers(NSLOCTEXT("SpriteCategory", "Triggers", "Triggers"))
+			{
+			}
+		};
+		static FConstructorStatics ConstructorStatics;
+
+		GetSpriteComponent()->Sprite = ConstructorStatics.TriggerTextureObject.Get();
+	}
 #endif
 }
 
@@ -115,15 +156,15 @@ void ATriggerBox::EditorApplyScale(const FVector& DeltaScale, const FVector* Piv
 		// can be changed without having to use the non-uniform scaling widget (which is
 		// inaccessable with spacebar widget cycling).
 		FVector Extent = BoxComponent->GetUnscaledBoxExtent() + FVector(0, 0, ModifiedScale.X);
-		Extent.Z = FMath::Max(0.0f, Extent.Z);
+		Extent.Z = FMath::Max<FVector::FReal>(0, Extent.Z);
 		BoxComponent->SetBoxExtent(Extent);
 	}
 	else
 	{
 		FVector Extent = BoxComponent->GetUnscaledBoxExtent() + FVector(ModifiedScale.X, ModifiedScale.Y, ModifiedScale.Z);
-		Extent.X = FMath::Max(0.0f, Extent.X);
-		Extent.Y = FMath::Max(0.0f, Extent.Y);
-		Extent.Z = FMath::Max(0.0f, Extent.Z);
+		Extent.X = FMath::Max<FVector::FReal>(0, Extent.X);
+		Extent.Y = FMath::Max<FVector::FReal>(0, Extent.Y);
+		Extent.Z = FMath::Max<FVector::FReal>(0, Extent.Z);
 		BoxComponent->SetBoxExtent(Extent);
 	}
 }
@@ -141,6 +182,26 @@ ATriggerSphere::ATriggerSphere(const FObjectInitializer& ObjectInitializer)
 	if (UBillboardComponent* TriggerSpriteComponent = GetSpriteComponent())
 	{
 		TriggerSpriteComponent->SetupAttachment(SphereCollisionComponent);
+	}
+
+	if (GetSpriteComponent())
+	{
+		// Structure to hold one-time initialization
+		struct FConstructorStatics
+		{
+			ConstructorHelpers::FObjectFinderOptional<UTexture2D> TriggerTextureObject;
+			FName ID_Triggers;
+			FText NAME_Triggers;
+			FConstructorStatics()
+				: TriggerTextureObject(TEXT("/Engine/EditorResources/S_TriggerSphere"))
+				, ID_Triggers(TEXT("Triggers"))
+				, NAME_Triggers(NSLOCTEXT("SpriteCategory", "Triggers", "Triggers"))
+			{
+			}
+		};
+		static FConstructorStatics ConstructorStatics;
+
+		GetSpriteComponent()->Sprite = ConstructorStatics.TriggerTextureObject.Get();
 	}
 #endif
 }

@@ -5,7 +5,9 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "Templates/SubclassOf.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "AI/Navigation/NavigationTypes.h"
+#endif //UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "EnvironmentQuery/EnvQueryTypes.h"
 #include "DataProviders/AIDataProvider.h"
 #include "EnvironmentQuery/Generators/EnvQueryGenerator_ProjectedPoints.h"
@@ -22,8 +24,8 @@ enum class EPointOnCircleSpacingMethod :uint8
 	ByNumberOfPoints
 };
 
-UCLASS(meta = (DisplayName = "Points: Circle"))
-class AIMODULE_API UEnvQueryGenerator_OnCircle : public UEnvQueryGenerator_ProjectedPoints
+UCLASS(meta = (DisplayName = "Points: Circle"), MinimalAPI)
+class UEnvQueryGenerator_OnCircle : public UEnvQueryGenerator_ProjectedPoints
 {
 	GENERATED_UCLASS_BODY()
 
@@ -31,17 +33,17 @@ class AIMODULE_API UEnvQueryGenerator_OnCircle : public UEnvQueryGenerator_Proje
 	UPROPERTY(EditDefaultsOnly, Category=Generator)
 	FAIDataProviderFloatValue CircleRadius;
 
-	/** items will be generated on a circle this much apart */
-	UPROPERTY(EditDefaultsOnly, Category = Generator)
-	FAIDataProviderFloatValue SpaceBetween;
-
-	/** this many items will be generated on a circle */
-	UPROPERTY(EditDefaultsOnly, Category = Generator)
-	FAIDataProviderIntValue NumberOfPoints;
-
 	/** how we are choosing where the points are in the circle */
 	UPROPERTY(EditDefaultsOnly, Category = Generator)
 	EPointOnCircleSpacingMethod PointOnCircleSpacingMethod;
+
+	/** items will be generated on a circle this much apart */
+	UPROPERTY(EditDefaultsOnly, Category = Generator, meta = (EditCondition = "PointOnCircleSpacingMethod == EPointOnCircleSpacingMethod::BySpaceBetween", EditConditionHides))
+	FAIDataProviderFloatValue SpaceBetween;
+
+	/** this many items will be generated on a circle */
+	UPROPERTY(EditDefaultsOnly, Category = Generator, meta = (EditCondition = "PointOnCircleSpacingMethod == EPointOnCircleSpacingMethod::ByNumberOfPoints", EditConditionHides))
+	FAIDataProviderIntValue NumberOfPoints;
 
 	/** If you generate items on a piece of circle you define direction of Arc cut here */
 	UPROPERTY(EditDefaultsOnly, Category=Generator, meta=(EditCondition="bDefineArc"))
@@ -73,25 +75,25 @@ class AIMODULE_API UEnvQueryGenerator_OnCircle : public UEnvQueryGenerator_Proje
 	UPROPERTY(EditAnywhere, Category=Generator, meta=(InlineEditConditionToggle))
 	uint32 bDefineArc:1;
 
-	virtual void PostLoad() override;
+	AIMODULE_API virtual void PostLoad() override;
 
-	virtual void GenerateItems(FEnvQueryInstance& QueryInstance) const override;
+	AIMODULE_API virtual void GenerateItems(FEnvQueryInstance& QueryInstance) const override;
 
-	virtual FText GetDescriptionTitle() const override;
-	virtual FText GetDescriptionDetails() const override;
+	AIMODULE_API virtual FText GetDescriptionTitle() const override;
+	AIMODULE_API virtual FText GetDescriptionDetails() const override;
 
 #if WITH_EDITOR
-	virtual void PostEditChangeProperty( struct FPropertyChangedEvent& PropertyChangedEvent) override;
+	AIMODULE_API virtual void PostEditChangeProperty( struct FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif // WITH_EDITOR
 
 protected:
-	FVector CalcDirection(FEnvQueryInstance& QueryInstance) const;
+	AIMODULE_API FVector CalcDirection(FEnvQueryInstance& QueryInstance) const;
 
-	void GenerateItemsForCircle(uint8* ContextRawData, UEnvQueryItemType* ContextItemType,
+	AIMODULE_API void GenerateItemsForCircle(uint8* ContextRawData, UEnvQueryItemType* ContextItemType,
 		const FVector& CenterLocation, const FVector& StartDirection,
 		const TArray<AActor*>& IgnoredActors,
 		int32 StepsCount, float AngleStep, FEnvQueryInstance& OutQueryInstance) const;
 
-	virtual void AddItemDataForCircle(uint8* ContextRawData, UEnvQueryItemType* ContextItemType, 
+	AIMODULE_API virtual void AddItemDataForCircle(uint8* ContextRawData, UEnvQueryItemType* ContextItemType, 
 		const TArray<FNavLocation>& Locations, FEnvQueryInstance& OutQueryInstance) const;
 };

@@ -2,6 +2,14 @@
 
 #include "SGraphPinDataTableRowName.h"
 
+#include "Containers/Array.h"
+#include "Engine/DataTable.h"
+#include "HAL/PlatformCrt.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
+
+class UEdGraphPin;
+
 void SGraphPinDataTableRowName::Construct(const FArguments& InArgs, UEdGraphPin* InGraphPinObj, class UDataTable* InDataTable)
 {
 	DataTable = InDataTable;
@@ -23,7 +31,6 @@ void SGraphPinDataTableRowName::PreChange(const UDataTable* Changed, FDataTableE
 
 void SGraphPinDataTableRowName::PostChange(const UDataTable* Changed, FDataTableEditorUtils::EDataTableChangeInfo Info)
 {
-	//FSoftObjectPath::InvalidateTag(); // Should be removed after UE-5615 is fixed
 	if (Changed && (Changed == DataTable.Get()) && (FDataTableEditorUtils::EDataTableChangeInfo::RowList == Info))
 	{
 		RefreshNameList();

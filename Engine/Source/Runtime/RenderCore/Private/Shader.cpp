@@ -7,8 +7,6 @@
 #include "Shader.h"
 #include "Misc/CoreMisc.h"
 #include "Misc/StringBuilder.h"
-#include "Stats/StatsMisc.h"
-#include "Serialization/MemoryWriter.h"
 #include "VertexFactory.h"
 #include "ProfilingDebugging/DiagnosticTable.h"
 #include "Interfaces/ITargetPlatform.h"
@@ -18,26 +16,34 @@
 #include "ShaderCore.h"
 #include "ShaderCompilerCore.h"
 #include "RenderUtils.h"
+#include "StereoRenderUtils.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/ScopeLock.h"
 #include "UObject/RenderingObjectVersion.h"
-#include "UObject/FortniteMainBranchObjectVersion.h"
-#include "Misc/ScopeRWLock.h"
 #include "ProfilingDebugging/LoadTimeTracker.h"
+#include "Misc/LargeWorldRenderPosition.h"
+#include "DataDrivenShaderPlatformInfo.h"
+#include "ShaderPlatformCachedIniValue.h"
+#include "ColorSpace.h"
 
 #if WITH_EDITORONLY_DATA
 #include "Interfaces/IShaderFormat.h"
 #endif
 
+#if RHI_RAYTRACING
+#include "RayTracingPayloadType.h"
+#endif
+
 DEFINE_LOG_CATEGORY(LogShaders);
-DECLARE_LOG_CATEGORY_CLASS(LogShaderWarnings, Log, Log);
 
 IMPLEMENT_TYPE_LAYOUT(FShader);
 IMPLEMENT_TYPE_LAYOUT(FShaderParameterBindings);
 IMPLEMENT_TYPE_LAYOUT(FShaderMapContent);
 IMPLEMENT_TYPE_LAYOUT(FShaderTypeDependency);
 IMPLEMENT_TYPE_LAYOUT(FShaderPipeline);
-IMPLEMENT_TYPE_LAYOUT(FShaderParameterInfo);
+IMPLEMENT_TYPE_LAYOUT(FShaderUniformBufferParameterInfo);
+IMPLEMENT_TYPE_LAYOUT(FShaderResourceParameterInfo);
+IMPLEMENT_TYPE_LAYOUT(FShaderLooseParameterInfo);
 IMPLEMENT_TYPE_LAYOUT(FShaderLooseParameterBufferInfo);
 IMPLEMENT_TYPE_LAYOUT(FShaderParameterMapInfo);
 
@@ -75,6 +81,15 @@ static TAutoConsoleVariable<int32> CVarUsePipelines(
 	1,
 	TEXT("Enable using Shader pipelines."));
 
+static TAutoConsoleVariable<int32> CVarRemoveUnusedInterpolators(
+	TEXT("r.Shaders.RemoveUnusedInterpolators"),
+	0,
+	TEXT("Enables removing unused interpolators mode when compiling shader pipelines.\n")
+	TEXT(" 0: Disable (default)\n")
+	TEXT(" 1: Enable removing unused"),
+	ECVF_ReadOnly
+);
+
 static TAutoConsoleVariable<int32> CVarSkipShaderCompression(
 	TEXT("r.Shaders.SkipCompression"),
 	0,
@@ -91,12 +106,13 @@ static TAutoConsoleVariable<int32> CVarAllowCompilingThroughWorkers(
 	ECVF_ReadOnly
 	);
 
-static TAutoConsoleVariable<int32> CVarShaderCompilerEmitWarningsOnLoad(
-	TEXT("r.ShaderCompiler.EmitWarningsOnLoad"),
-	0,
-	TEXT("When 1, shader compiler warnings are emitted to the log for all shaders as they are loaded."),
-	ECVF_Default
-);
+static TAutoConsoleVariable<int32> CVarShadersForceDXC(
+	TEXT("r.Shaders.ForceDXC"),
+	1,
+	TEXT("Forces DirectX Shader Compiler (DXC) to be used for all shaders instead of HLSLcc if supported.\n")
+	TEXT(" 1: Force new compiler for all shaders (default)\n")
+	TEXT(" 0: Disable"),
+	ECVF_ReadOnly);
 
 static TLinkedList<FShaderType*>*			GShaderTypeList = nullptr;
 static TLinkedList<FShaderPipelineType*>*	GShaderPipelineList = nullptr;
@@ -167,12 +183,8 @@ void FShaderParameterMap::VerifyBindingsAreComplete(const TCHAR* ShaderTypeName,
 		{
 			FString ErrorMessage = FString(TEXT("Found unbound parameters being used in shadertype ")) + ShaderTypeName + TEXT(" (VertexFactory: ") + VertexFactoryName + TEXT(")\n") + UnBoundParameters;
 
-			// There will be unbound parameters for Metal's "Hull" shader stage as it is merely a placeholder to provide binding indices to the RHI
-			if(!IsMetalPlatform((EShaderPlatform)Target.Platform) || Target.Frequency != SF_Hull)
-			{
-				// We use a non-Slate message box to avoid problem where we haven't compiled the shaders for Slate.
-				FPlatformMisc::MessageBoxExt(EAppMsgType::Ok, *ErrorMessage, TEXT("Error"));
-			}
+			// We use a non-Slate message box to avoid problem where we haven't compiled the shaders for Slate.
+			FPlatformMisc::MessageBoxExt(EAppMsgType::Ok, *ErrorMessage, TEXT("Error"));
 		}
 	}
 #endif // WITH_EDITORONLY_DATA
@@ -196,9 +208,25 @@ bool FShaderType::bInitializedSerializationHistory = false;
 
 static TArray<FShaderType*>& GetSortedShaderTypes(FShaderType::EShaderTypeForDynamicCast Type)
 {
-	static TArray<FShaderType*> SortedTypes[(uint32)FShaderType::EShaderTypeForDynamicCast::NumShaderTypes];
-	return SortedTypes[(uint32)Type];
+	static TArray<FShaderType*>* SortedTypesArray = new TArray<FShaderType*>[(uint32)FShaderType::EShaderTypeForDynamicCast::NumShaderTypes];
+	return SortedTypesArray[(uint32)Type];
 }
+
+
+namespace {
+
+uint32 RegisteredRayTracingPayloads = 0;
+uint32 RayTracingPayloadSizes[32] = {};
+TRaytracingPayloadSizeFunction RayTracingPayloadSizeFunctions[32] = {};
+
+bool IsRayTracingPayloadRegistered(ERayTracingPayloadType PayloadType)
+{
+	// make sure all bits are on in the registered bitmask
+	return (static_cast<uint32>(PayloadType) & RegisteredRayTracingPayloads) == static_cast<uint32>(PayloadType);
+}
+
+} // anonymous namespace
+
 
 FShaderType::FShaderType(
 	EShaderTypeForDynamicCast InShaderTypeForDynamicCast,
@@ -210,12 +238,15 @@ FShaderType::FShaderType(
 	int32 InTotalPermutationCount,
 	ConstructSerializedType InConstructSerializedRef,
 	ConstructCompiledType InConstructCompiledRef,
-	ModifyCompilationEnvironmentType InModifyCompilationEnvironmentRef,
 	ShouldCompilePermutationType InShouldCompilePermutationRef,
+	GetRayTracingPayloadTypeType InGetRayTracingPayloadTypeRef,
+#if WITH_EDITOR
+	ModifyCompilationEnvironmentType InModifyCompilationEnvironmentRef,
 	ValidateCompiledResultType InValidateCompiledResultRef,
+#endif // WITH_EDITOR
 	uint32 InTypeSize,
 	const FShaderParametersMetadata* InRootParametersMetadata
-	):
+):
 	ShaderTypeForDynamicCast(InShaderTypeForDynamicCast),
 	TypeLayout(&InTypeLayout),
 	Name(InName),
@@ -229,15 +260,16 @@ FShaderType::FShaderType(
 	TotalPermutationCount(InTotalPermutationCount),
 	ConstructSerializedRef(InConstructSerializedRef),
 	ConstructCompiledRef(InConstructCompiledRef),
-	ModifyCompilationEnvironmentRef(InModifyCompilationEnvironmentRef),
 	ShouldCompilePermutationRef(InShouldCompilePermutationRef),
+	GetRayTracingPayloadTypeRef(InGetRayTracingPayloadTypeRef),
+#if WITH_EDITOR
+	ModifyCompilationEnvironmentRef(InModifyCompilationEnvironmentRef),
 	ValidateCompiledResultRef(InValidateCompiledResultRef),
+#endif // WITH_EDITOR
 	RootParametersMetadata(InRootParametersMetadata),
 	GlobalListLink(this)
 {
 	FTypeLayoutDesc::Register(InTypeLayout);
-
-	bCachedUniformBufferStructDeclarations = false;
 
 	// This will trigger if an IMPLEMENT_SHADER_TYPE was in a module not loaded before InitializeShaderTypes
 	// Shader types need to be implemented in modules that are loaded before that
@@ -267,6 +299,25 @@ FShaderType::~FShaderType()
 	const int32 SortedIndex = Algo::BinarySearchBy(SortedTypes, HashedName, [](const FShaderType* InType) { return InType->GetHashedName(); });
 	check(SortedIndex != INDEX_NONE);
 	SortedTypes.RemoveAt(SortedIndex);
+}
+
+static TArray<const FShaderTypeRegistration*>* GShaderTypeRegistrationInstances = nullptr;
+TArray<const FShaderTypeRegistration*>& FShaderTypeRegistration::GetInstances()
+{
+	if (GShaderTypeRegistrationInstances == nullptr)
+	{
+		GShaderTypeRegistrationInstances = new TArray<const FShaderTypeRegistration*>();
+	}
+	return *GShaderTypeRegistrationInstances;
+}
+
+void FShaderTypeRegistration::CommitAll()
+{
+	for (const auto& Instance : GetInstances())
+	{
+		FShaderType& ShaderType = Instance->LazyShaderTypeAccessor(); // constructs and registers type
+	}
+	GetInstances().Empty();
 }
 
 TLinkedList<FShaderType*>*& FShaderType::GetTypeList()
@@ -356,19 +407,91 @@ FShader* FShaderType::ConstructCompiled(const FShader::CompiledShaderInitializer
 	return (*ConstructCompiledRef)(Initializer);
 }
 
+static bool ShouldCompileShaderFrequency(EShaderFrequency Frequency, EShaderPlatform ShaderPlatform)
+{
+	if (IsMobilePlatform(ShaderPlatform))
+	{
+		return Frequency == SF_Vertex || Frequency == SF_Pixel || Frequency == SF_Compute;
+	}
+
+	return true;
+}
+
 bool FShaderType::ShouldCompilePermutation(const FShaderPermutationParameters& Parameters) const
 {
-	return (*ShouldCompilePermutationRef)(Parameters);
+	return ShouldCompileShaderFrequency((EShaderFrequency)Frequency, Parameters.Platform) && (*ShouldCompilePermutationRef)(Parameters);
 }
+
+#if WITH_EDITOR
 
 void FShaderType::ModifyCompilationEnvironment(const FShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment) const
 {
 	(*ModifyCompilationEnvironmentRef)(Parameters, OutEnvironment);
+#if RHI_RAYTRACING
+	ERayTracingPayloadType RayTracingPayloadType = GetRayTracingPayloadType(Parameters.PermutationId);
+	switch (Frequency)
+	{
+		case SF_RayGen:
+		{
+			// Raygen shader can use any number of payloads, but must use at least one
+			checkf(RayTracingPayloadType != ERayTracingPayloadType::None, TEXT("Raygen shader %s did not declare which payload type(s) it uses. Make sure you override GetRayTracingPayloadType()"), Name);
+			break;
+		}
+		case SF_RayHitGroup:
+		case SF_RayMiss:
+		case SF_RayCallable:
+		{
+			// these shader types must know which payload type they are using
+			checkf(RayTracingPayloadType != ERayTracingPayloadType::None, TEXT("Raytracing shader %s did not declare which payload type(s) it uses. Make sure you override GetRayTracingPayloadType()"), Name);
+			checkf(FMath::CountBits(static_cast<uint32>(RayTracingPayloadType)) == 1, TEXT("Raytracing shader %s did not declare a unique payload type. Only one payload type is supported for this shader frequency."), Name);
+			break;
+		}
+		default:
+		{
+			// not a raytracing shader, specifying a payload type would suggest some confusion has occured
+			checkf(RayTracingPayloadType == ERayTracingPayloadType::None, TEXT("Non-Raytracing shader %s declared a payload type!"), Name);
+			break;
+		}
+	}
+	if (RayTracingPayloadType != ERayTracingPayloadType::None)
+	{
+		checkf(IsRayTracingPayloadRegistered(RayTracingPayloadType), TEXT("Raytracing shader %s is using a payload type (%u) which was never registered"), Name, RayTracingPayloadType);
+
+		OutEnvironment.SetDefineAndCompileArgument(TEXT("RT_PAYLOAD_TYPE"), static_cast<uint32>(RayTracingPayloadType));
+		OutEnvironment.SetDefineAndCompileArgument(TEXT("RT_PAYLOAD_MAX_SIZE"), GetRayTracingPayloadTypeMaxSize(RayTracingPayloadType));
+
+		if (   (uint32(RayTracingPayloadType) & uint32(ERayTracingPayloadType::RayTracingMaterial))
+			|| (uint32(RayTracingPayloadType) & uint32(ERayTracingPayloadType::GPULightmass))
+			)
+		{
+			// If any payload requires a fully simplified material, we force fully simplified material all the way.
+			// That is used to have material ray tracing shaders compressed to single slab.
+			// Smaller payload means faster performance and for some tracing this will be enough, e.g. reflected materials, lightmass diffuse interactions.
+			OutEnvironment.SetDefine(TEXT("SUBSTRATE_USE_FULLYSIMPLIFIED_MATERIAL"), 1);
+		}
+	}
+#endif
 }
 
 bool FShaderType::ValidateCompiledResult(EShaderPlatform Platform, const FShaderParameterMap& ParameterMap, TArray<FString>& OutError) const
 {
 	return (*ValidateCompiledResultRef)(Platform, ParameterMap, OutError);
+}
+
+void FShaderType::UpdateReferencedUniformBufferNames(const TMap<FString, TArray<const TCHAR*>>& ShaderFileToUniformBufferVariables)
+{
+	ReferencedUniformBufferNames.Empty();
+	GenerateReferencedUniformBufferNames(SourceFilename, Name, ShaderFileToUniformBufferVariables, ReferencedUniformBufferNames);
+}
+#endif // WITH_EDITOR
+
+ERayTracingPayloadType FShaderType::GetRayTracingPayloadType(const int32 PermutationId) const
+{
+#if RHI_RAYTRACING
+	return (*GetRayTracingPayloadTypeRef)(PermutationId);
+#else
+	return static_cast<ERayTracingPayloadType>(0);
+#endif
 }
 
 const FSHAHash& FShaderType::GetSourceHash(EShaderPlatform ShaderPlatform) const
@@ -378,6 +501,7 @@ const FSHAHash& FShaderType::GetSourceHash(EShaderPlatform ShaderPlatform) const
 
 void FShaderType::Initialize(const TMap<FString, TArray<const TCHAR*> >& ShaderFileToUniformBufferVariables)
 {
+#if WITH_EDITOR
 	//#todo-rco: Need to call this only when Initializing from a Pipeline once it's removed from the global linked list
 	if (!FPlatformProperties::RequiresCookedData())
 	{
@@ -390,7 +514,7 @@ void FShaderType::Initialize(const TMap<FString, TArray<const TCHAR*> >& ShaderF
 #if UE_BUILD_DEBUG
 			UniqueShaderTypes.Add(Type);
 #endif
-			GenerateReferencedUniformBuffers(Type->SourceFilename, Type->Name, ShaderFileToUniformBufferVariables, Type->ReferencedUniformBufferStructsCache);
+			Type->UpdateReferencedUniformBufferNames(ShaderFileToUniformBufferVariables);
 		}
 	
 #if UE_BUILD_DEBUG
@@ -402,6 +526,7 @@ void FShaderType::Initialize(const TMap<FString, TArray<const TCHAR*> >& ShaderF
 		}
 #endif
 	}
+#endif // WITH_EDITOR
 
 	bInitializedSerializationHistory = true;
 }
@@ -427,8 +552,10 @@ void* FShaderMapPointerTable::GetIndexedPointer(const FTypeLayoutDesc& TypeDesc,
 	return Ptr;
 }
 
-void FShaderMapPointerTable::SaveToArchive(FArchive& Ar, void* FrozenContent, bool bInlineShaderResources) const
+void FShaderMapPointerTable::SaveToArchive(FArchive& Ar, const FPlatformTypeLayoutParameters& LayoutParams, const void* FrozenObject) const
 {
+	FPointerTableBase::SaveToArchive(Ar, LayoutParams, FrozenObject);
+
 	int32 NumTypes = ShaderTypes.Num();
 	int32 NumVFTypes = VFTypes.Num();
 
@@ -450,9 +577,11 @@ void FShaderMapPointerTable::SaveToArchive(FArchive& Ar, void* FrozenContent, bo
 	}
 }
 
-void FShaderMapPointerTable::LoadFromArchive(FArchive& Ar, void* FrozenContent, bool bInlineShaderResources, bool bLoadedByCookedMaterial)
+bool FShaderMapPointerTable::LoadFromArchive(FArchive& Ar, const FPlatformTypeLayoutParameters& LayoutParams, void* FrozenObject)
 {
 	SCOPED_LOADTIMER(FShaderMapPointerTable_LoadFromArchive);
+
+	const bool bResult = FPointerTableBase::LoadFromArchive(Ar, LayoutParams, FrozenObject);
 
 	int32 NumTypes = 0;
 	int32 NumVFTypes = 0;
@@ -477,28 +606,33 @@ void FShaderMapPointerTable::LoadFromArchive(FArchive& Ar, void* FrozenContent, 
 		FVertexFactoryType* VFType = FVertexFactoryType::GetVFByName(TypeName);
 		VFTypes.LoadIndexedPointer(VFType);
 	}
+
+	return bResult;
 }
 
 FShaderCompiledShaderInitializerType::FShaderCompiledShaderInitializerType(
 	const FShaderType* InType,
+	const FShaderType::FParameters* InParameters,
 	int32 InPermutationId,
 	const FShaderCompilerOutput& CompilerOutput,
 	const FSHAHash& InMaterialShaderMapHash,
 	const FShaderPipelineType* InShaderPipeline,
 	const FVertexFactoryType* InVertexFactoryType
-) :
-	Type(InType),
-	Target(CompilerOutput.Target),
-	Code(CompilerOutput.ShaderCode.GetReadAccess()),
-	ParameterMap(CompilerOutput.ParameterMap),
-	OutputHash(CompilerOutput.OutputHash),
-	MaterialShaderMapHash(InMaterialShaderMapHash),
-	ShaderPipeline(InShaderPipeline),
-	VertexFactoryType(InVertexFactoryType),
-	NumInstructions(CompilerOutput.NumInstructions),
-	NumTextureSamplers(CompilerOutput.NumTextureSamplers),
-	CodeSize(CompilerOutput.ShaderCode.GetShaderCodeSize()),
-	PermutationId(InPermutationId)
+	) 
+	: Type(InType)
+	, Parameters(InParameters)
+	, Target(CompilerOutput.Target)
+	, Code(CompilerOutput.ShaderCode.GetReadAccess())
+	, ParameterMap(CompilerOutput.ParameterMap)
+	, OutputHash(CompilerOutput.OutputHash)
+	, MaterialShaderMapHash(InMaterialShaderMapHash)
+	, ShaderPipeline(InShaderPipeline)
+	, VertexFactoryType(InVertexFactoryType)
+	, NumInstructions(CompilerOutput.NumInstructions)
+	, NumTextureSamplers(CompilerOutput.NumTextureSamplers)
+	, CodeSize(CompilerOutput.ShaderCode.GetShaderCodeSize())
+	, PermutationId(InPermutationId)
+	, ShaderStatistics(CompilerOutput.ShaderStatistics)
 {
 }
 
@@ -532,9 +666,13 @@ FShader::FShader(const CompiledShaderInitializerType& Initializer)
 	, CodeSize(Initializer.CodeSize)
 #endif // WITH_EDITORONLY_DATA
 {
-#if WITH_EDITORONLY_DATA
 	checkSlow(Initializer.OutputHash != FSHAHash());
-	
+
+	// Only store a truncated hash to minimize memory overhead
+	static_assert(sizeof(SortKey) <= sizeof(Initializer.OutputHash.Hash));
+	FMemory::Memcpy(&SortKey, Initializer.OutputHash.Hash, sizeof(SortKey));
+
+#if WITH_EDITORONLY_DATA
 	OutputHash = Initializer.OutputHash;
 
 	// Store off the source hash that this shader was compiled with
@@ -545,6 +683,11 @@ FShader::FShader(const CompiledShaderInitializerType& Initializer)
 	{
 		// Store off the VF source hash that this shader was compiled with
 		VFSourceHash = Initializer.VertexFactoryType->GetSourceHash(Initializer.Target.GetPlatform());
+	}
+
+	for (const TPair<FString, FShaderStatVariant>& Pair : Initializer.ShaderStatistics)
+	{
+		ShaderStatistics.Add(FMemoryImageName(FName(Pair.Key)), Pair.Value);
 	}
 #endif // WITH_EDITORONLY_DATA
 
@@ -577,89 +720,97 @@ void FShader::Finalize(const FShaderMapResourceCode* Code)
 	ResourceIndex = NewResourceIndex;
 }
 
+template<class TType>
+static void CityHashArray(uint64& Hash, const TMemoryImageArray<TType>& Array)
+{
+	const int32 ArrayNum = Array.Num();
+	CityHash64WithSeed((const char*)&ArrayNum, sizeof(ArrayNum), Hash);
+	CityHash64WithSeed((const char*)Array.GetData(), Array.Num() * sizeof(TType), Hash);
+}
+
 void FShader::BuildParameterMapInfo(const TMap<FString, FParameterAllocation>& ParameterMap)
 {
-	for (int32 ParameterTypeIndex = 0; ParameterTypeIndex < (int32)EShaderParameterType::Num; ParameterTypeIndex++)
+	uint32 UniformCount = 0;
+	uint32 SamplerCount = 0;
+	uint32 SRVCount = 0;
+
+	for (TMap<FString, FParameterAllocation>::TConstIterator ParameterIt(ParameterMap); ParameterIt; ++ParameterIt)
 	{
-		EShaderParameterType CurrentParameterType = (EShaderParameterType)ParameterTypeIndex;
+		const FParameterAllocation& ParamValue = ParameterIt.Value();
 
-		if (CurrentParameterType == EShaderParameterType::LooseData)
+		switch (ParamValue.Type)
 		{
-			for (TMap<FString, FParameterAllocation>::TConstIterator ParameterIt(ParameterMap); ParameterIt; ++ParameterIt)
+		case EShaderParameterType::UniformBuffer:
+			UniformCount++;
+			break;
+		case EShaderParameterType::BindlessSampler:
+		case EShaderParameterType::Sampler:
+			SamplerCount++;
+			break;
+		case EShaderParameterType::BindlessSRV:
+		case EShaderParameterType::SRV:
+			SRVCount++;
+			break;
+		}
+	}
+
+	ParameterMapInfo.UniformBuffers.Empty(UniformCount);
+	ParameterMapInfo.TextureSamplers.Empty(SamplerCount);
+	ParameterMapInfo.SRVs.Empty(SRVCount);
+
+	auto GetResourceParameterMap = [this](EShaderParameterType ParameterType) -> TMemoryImageArray<FShaderResourceParameterInfo>*
+	{
+		switch (ParameterType)
+		{
+		case EShaderParameterType::Sampler:
+			return &ParameterMapInfo.TextureSamplers;
+		case EShaderParameterType::SRV:
+			return &ParameterMapInfo.SRVs;
+		case EShaderParameterType::BindlessSRV:
+			return &ParameterMapInfo.SRVs;
+		case EShaderParameterType::BindlessSampler:
+			return &ParameterMapInfo.TextureSamplers;
+		default:
+			return nullptr;
+		}
+	};
+
+	for (TMap<FString, FParameterAllocation>::TConstIterator ParameterIt(ParameterMap); ParameterIt; ++ParameterIt)
+	{
+		const FParameterAllocation& ParamValue = ParameterIt.Value();
+
+		if (ParamValue.Type == EShaderParameterType::LooseData)
+		{
+			bool bAddedToExistingBuffer = false;
+
+			for (int32 LooseParameterBufferIndex = 0; LooseParameterBufferIndex < ParameterMapInfo.LooseParameterBuffers.Num(); LooseParameterBufferIndex++)
 			{
-				const FParameterAllocation& ParamValue = ParameterIt.Value();
+				FShaderLooseParameterBufferInfo& LooseParameterBufferInfo = ParameterMapInfo.LooseParameterBuffers[LooseParameterBufferIndex];
 
-				if (ParamValue.Type == CurrentParameterType)
+				if (LooseParameterBufferInfo.BaseIndex == ParamValue.BufferIndex)
 				{
-					bool bAddedToExistingBuffer = false;
-
-					for (int32 LooseParameterBufferIndex = 0; LooseParameterBufferIndex < ParameterMapInfo.LooseParameterBuffers.Num(); LooseParameterBufferIndex++)
-					{
-						FShaderLooseParameterBufferInfo& LooseParameterBufferInfo = ParameterMapInfo.LooseParameterBuffers[LooseParameterBufferIndex];
-
-						if (LooseParameterBufferInfo.BaseIndex == ParamValue.BufferIndex)
-						{
-							FShaderParameterInfo ParameterInfo(ParamValue.BaseIndex, ParamValue.Size);
-							LooseParameterBufferInfo.Parameters.Add(ParameterInfo);
-							LooseParameterBufferInfo.Size += ParamValue.Size;
-							bAddedToExistingBuffer = true;
-						}
-					}
-
-					if (!bAddedToExistingBuffer)
-					{
-						FShaderLooseParameterBufferInfo NewParameterBufferInfo(ParamValue.BufferIndex, ParamValue.Size);
-
-						FShaderParameterInfo ParameterInfo(ParamValue.BaseIndex, ParamValue.Size);
-						NewParameterBufferInfo.Parameters.Add(ParameterInfo);
-
-						ParameterMapInfo.LooseParameterBuffers.Add(NewParameterBufferInfo);
-					}
+					LooseParameterBufferInfo.Parameters.Emplace(ParamValue.BaseIndex, ParamValue.Size);
+					LooseParameterBufferInfo.Size += ParamValue.Size;
+					bAddedToExistingBuffer = true;
 				}
+			}
+
+			if (!bAddedToExistingBuffer)
+			{
+				FShaderLooseParameterBufferInfo NewParameterBufferInfo(ParamValue.BufferIndex, ParamValue.Size);
+
+				NewParameterBufferInfo.Parameters.Emplace(ParamValue.BaseIndex, ParamValue.Size);
+
+				ParameterMapInfo.LooseParameterBuffers.Add(NewParameterBufferInfo);
 			}
 		}
-		else if (CurrentParameterType != EShaderParameterType::UAV)
+		else if (ParamValue.Type == EShaderParameterType::UniformBuffer)
 		{
-			int32 NumParameters = 0;
-
-			for (TMap<FString, FParameterAllocation>::TConstIterator ParameterIt(ParameterMap); ParameterIt; ++ParameterIt)
-			{
-				const FParameterAllocation& ParamValue = ParameterIt.Value();
-
-				if (ParamValue.Type == CurrentParameterType)
-				{
-					NumParameters++;
-				}
-			}
-
-			TMemoryImageArray<FShaderParameterInfo>* ParameterInfoArray = &ParameterMapInfo.UniformBuffers;
-
-			if (CurrentParameterType == EShaderParameterType::Sampler)
-			{
-				ParameterInfoArray = &ParameterMapInfo.TextureSamplers;
-			}
-			else if (CurrentParameterType == EShaderParameterType::SRV)
-			{
-				ParameterInfoArray = &ParameterMapInfo.SRVs;
-			}
-			else
-			{
-				check(CurrentParameterType == EShaderParameterType::UniformBuffer);
-			}
-
-			ParameterInfoArray->Empty(NumParameters);
-		
-			for (TMap<FString, FParameterAllocation>::TConstIterator ParameterIt(ParameterMap); ParameterIt; ++ParameterIt)
-			{
-				const FParameterAllocation& ParamValue = ParameterIt.Value();
-
-				if (ParamValue.Type == CurrentParameterType)
-				{
-					const uint16 BaseIndex = CurrentParameterType == EShaderParameterType::UniformBuffer ? ParamValue.BufferIndex : ParamValue.BaseIndex;
-					FShaderParameterInfo ParameterInfo(BaseIndex, ParamValue.Size);
-					ParameterInfoArray->Add(ParameterInfo);
-				}
-			}
+			ParameterMapInfo.UniformBuffers.Emplace(ParamValue.BufferIndex);
+		}
+		else if (TMemoryImageArray<FShaderResourceParameterInfo>* ParameterInfoArray = GetResourceParameterMap(ParamValue.Type))
+		{
+			ParameterInfoArray->Emplace(ParamValue.BaseIndex, ParamValue.BufferIndex, ParamValue.Type);
 		}
 	}
 
@@ -680,21 +831,15 @@ void FShader::BuildParameterMapInfo(const TMap<FString, FParameterAllocation>& P
 			CityHash64WithSeed((const char*)&Value, sizeof(Value), Hash);
 		};
 
-		const auto CityHashArray = [&](const TMemoryImageArray<FShaderParameterInfo>& Array)
-		{
-			CityHashValue(Array.Num());
-			CityHash64WithSeed((const char*)Array.GetData(), Array.Num() * sizeof(FShaderParameterInfo), Hash);
-		};
-
 		for (FShaderLooseParameterBufferInfo& Info : ParameterMapInfo.LooseParameterBuffers)
 		{
 			CityHashValue(Info.BaseIndex);
 			CityHashValue(Info.Size);
-			CityHashArray(Info.Parameters);
+			CityHashArray(Hash, Info.Parameters);
 		}
-		CityHashArray(ParameterMapInfo.UniformBuffers);
-		CityHashArray(ParameterMapInfo.TextureSamplers);
-		CityHashArray(ParameterMapInfo.SRVs);
+		CityHashArray(Hash, ParameterMapInfo.UniformBuffers);
+		CityHashArray(Hash, ParameterMapInfo.TextureSamplers);
+		CityHashArray(Hash, ParameterMapInfo.SRVs);
 	}
 
 	ParameterMapInfo.Hash = Hash;
@@ -704,24 +849,27 @@ const FSHAHash& FShader::GetOutputHash() const
 {
 #if WITH_EDITORONLY_DATA
 	return OutputHash;
-#endif
+#else
 	return ShaderSourceDefaultHash;
+#endif
 }
 
 const FSHAHash& FShader::GetHash() const 
 {
 #if WITH_EDITORONLY_DATA
 	return SourceHash;
-#endif
+#else
 	return ShaderSourceDefaultHash;
+#endif
 }
 
 const FSHAHash& FShader::GetVertexFactoryHash() const
 {
 #if WITH_EDITORONLY_DATA
 	return VFSourceHash;
-#endif
+#else
 	return ShaderSourceDefaultHash;
+#endif
 }
 
 const FTypeLayoutDesc& GetTypeLayoutDesc(const FPointerTableBase* PtrTable, const FShader& Shader)
@@ -792,24 +940,21 @@ static TArray<FShaderPipelineType*>& GetSortedShaderPipelineTypes(FShaderType::E
 
 FShaderPipelineType::FShaderPipelineType(
 	const TCHAR* InName,
-	const FShaderType* InVertexShader,
-	const FShaderType* InHullShader,
-	const FShaderType* InDomainShader,
-	const FShaderType* InGeometryShader,
+	const FShaderType* InVertexOrMeshShader,
+	const FShaderType* InGeometryOrAmplificationShader,
 	const FShaderType* InPixelShader,
+	bool bInIsMeshPipeline,
 	bool bInShouldOptimizeUnusedOutputs) :
 	Name(InName),
 	TypeName(Name),
 	HashedName(TypeName),
-	HashedPrimaryShaderFilename(InVertexShader->GetShaderFilename()),
+	HashedPrimaryShaderFilename(InVertexOrMeshShader->GetShaderFilename()),
 	GlobalListLink(this),
 	bShouldOptimizeUnusedOutputs(bInShouldOptimizeUnusedOutputs)
 {
 	checkf(Name && *Name, TEXT("Shader Pipeline Type requires a valid Name!"));
 
-	checkf(InVertexShader, TEXT("A Shader Pipeline always requires a Vertex Shader"));
-
-	checkf((InHullShader == nullptr && InDomainShader == nullptr) || (InHullShader != nullptr && InDomainShader != nullptr), TEXT("Both Hull & Domain shaders are needed for tessellation on Pipeline %s"), Name);
+	checkf(InVertexOrMeshShader, TEXT("A Shader Pipeline always requires a Vertex or Mesh Shader"));
 
 	//make sure the name is shorter than the maximum serializable length
 	check(FCString::Strlen(InName) < NAME_SIZE);
@@ -818,28 +963,19 @@ FShaderPipelineType::FShaderPipelineType(
 
 	if (InPixelShader)
 	{
-		check(InPixelShader->GetTypeForDynamicCast() == InVertexShader->GetTypeForDynamicCast());
+		check(InPixelShader->GetTypeForDynamicCast() == InVertexOrMeshShader->GetTypeForDynamicCast());
 		Stages.Add(InPixelShader);
 		AllStages[SF_Pixel] = InPixelShader;
 	}
-	if (InGeometryShader)
-	{
-		check(InGeometryShader->GetTypeForDynamicCast() == InVertexShader->GetTypeForDynamicCast());
-		Stages.Add(InGeometryShader);
-		AllStages[SF_Geometry] = InGeometryShader;
-	}
-	if (InDomainShader)
-	{
-		check(InDomainShader->GetTypeForDynamicCast() == InVertexShader->GetTypeForDynamicCast());
-		check(InHullShader->GetTypeForDynamicCast() == InVertexShader->GetTypeForDynamicCast());
-		Stages.Add(InDomainShader);
-		AllStages[SF_Domain] = InDomainShader;
 
-		Stages.Add(InHullShader);
-		AllStages[SF_Hull] = InHullShader;
+	if (InGeometryOrAmplificationShader)
+	{
+		check(InGeometryOrAmplificationShader->GetTypeForDynamicCast() == InVertexOrMeshShader->GetTypeForDynamicCast());
+		Stages.Add(InGeometryOrAmplificationShader);
+		AllStages[bInIsMeshPipeline ? SF_Amplification : SF_Geometry] = InGeometryOrAmplificationShader;
 	}
-	Stages.Add(InVertexShader);
-	AllStages[SF_Vertex] = InVertexShader;
+	Stages.Add(InVertexOrMeshShader);
+	AllStages[bInIsMeshPipeline ? SF_Mesh : SF_Vertex] = InVertexOrMeshShader;
 
 	for (uint32 FrequencyIndex = 0; FrequencyIndex < SF_NumStandardFrequencies; ++FrequencyIndex)
 	{
@@ -856,7 +992,7 @@ FShaderPipelineType::FShaderPipelineType(
 	GlobalListLink.LinkHead(GetTypeList());
 	GetNameToTypeMap().Add(HashedName, this);
 
-	TArray<FShaderPipelineType*>& SortedTypes = GetSortedShaderPipelineTypes(InVertexShader->GetTypeForDynamicCast());
+	TArray<FShaderPipelineType*>& SortedTypes = GetSortedShaderPipelineTypes(InVertexOrMeshShader->GetTypeForDynamicCast());
 	const int32 SortedIndex = Algo::LowerBoundBy(SortedTypes, HashedName, [](const FShaderPipelineType* InType) { return InType->GetHashedName(); });
 	SortedTypes.Insert(this, SortedIndex);
 
@@ -870,7 +1006,7 @@ FShaderPipelineType::~FShaderPipelineType()
 	GetNameToTypeMap().Remove(HashedName);
 	GlobalListLink.Unlink();
 
-	TArray<FShaderPipelineType*>& SortedTypes = GetSortedShaderPipelineTypes(AllStages[SF_Vertex]->GetTypeForDynamicCast());
+	TArray<FShaderPipelineType*>& SortedTypes = GetSortedShaderPipelineTypes(AllStages[HasMeshShader() ? SF_Mesh : SF_Vertex]->GetTypeForDynamicCast());
 	const int32 SortedIndex = Algo::BinarySearchBy(SortedTypes, HashedName, [](const FShaderPipelineType* InType) { return InType->GetHashedName(); });
 	check(SortedIndex != INDEX_NONE);
 	SortedTypes.RemoveAt(SortedIndex);
@@ -986,6 +1122,11 @@ const FShaderPipelineType* FShaderPipelineType::GetShaderPipelineTypeByName(cons
 	return FoundType ? *FoundType : nullptr;
 }
 
+bool FShaderPipelineType::ShouldOptimizeUnusedOutputs(EShaderPlatform Platform) const
+{
+	return bShouldOptimizeUnusedOutputs && RHISupportsShaderPipelines(Platform);
+}
+
 const FSHAHash& FShaderPipelineType::GetSourceHash(EShaderPlatform ShaderPlatform) const
 {
 	TArray<FString> Filenames;
@@ -994,6 +1135,18 @@ const FSHAHash& FShaderPipelineType::GetSourceHash(EShaderPlatform ShaderPlatfor
 		Filenames.Add(ShaderType->GetShaderFilename());
 	}
 	return GetShaderFilesHash(Filenames, ShaderPlatform);
+}
+
+bool FShaderPipelineType::ShouldCompilePermutation(const FShaderPermutationParameters& Parameters) const
+{
+	for (const FShaderType* ShaderType : Stages)
+	{
+		if (!ShaderType->ShouldCompilePermutation(Parameters))
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 void FShaderPipeline::AddShader(FShader* Shader, int32 PermutationId)
@@ -1276,44 +1429,96 @@ void DispatchComputeShader(
 void DispatchIndirectComputeShader(
 	FRHIComputeCommandList& RHICmdList,
 	FShader* Shader,
-	FRHIVertexBuffer* ArgumentBuffer,
+	FRHIBuffer* ArgumentBuffer,
 	uint32 ArgumentOffset)
 {
 	RHICmdList.DispatchIndirectComputeShader(ArgumentBuffer, ArgumentOffset);
 }
 
-bool IsDxcEnabledForPlatform(EShaderPlatform Platform)
+bool IsDxcEnabledForPlatform(EShaderPlatform Platform, bool bHlslVersion2021)
 {
+	// Check the generic console variable first (if DXC is supported)
+	if (FDataDrivenShaderPlatformInfo::GetSupportsDxc(Platform))
+	{
+		static FShaderPlatformCachedIniValue<bool> ShaderForceDXC(TEXT("r.Shaders.ForceDXC"));
+		if (bHlslVersion2021 || (ShaderForceDXC.Get(Platform) != 0))
+		{
+			return true;
+		}
+	}
+	// Check backend specific console variables next
 	if (IsD3DPlatform(Platform) && IsPCPlatform(Platform))
 	{
-		static const auto CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.D3D.ForceDXC"));
-		return (CVar && CVar->GetInt() != 0);
+		// D3D backend supports a precompile step for HLSL2021 which is separate from ForceDXC option
+		static const IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.D3D.ForceDXC"));
+		return ((CVar && CVar->GetInt() != 0));
 	}
 	if (IsOpenGLPlatform(Platform))
 	{
-		static const auto CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.OpenGL.ForceDXC"));
-		return (CVar && CVar->GetInt() != 0);
+		static const IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.OpenGL.ForceDXC"));
+		return (bHlslVersion2021 || (CVar && CVar->GetInt() != 0));
 	}
-	if (IsMetalPlatform(Platform))
+	// Hlslcc has been removed for Metal and Vulkan. There is only DXC now.
+	if (IsMetalPlatform(Platform) || IsVulkanPlatform(Platform))
 	{
-		// Hlslcc has been removed for Metal. There is only DXC now.
 		return true;
 	}
-	if (IsVulkanPlatform(Platform))
+	return false;
+}
+
+bool IsUsingEmulatedUniformBuffers(EShaderPlatform Platform)
+{
+	if (IsOpenGLPlatform(Platform))
 	{
-		static const auto CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Vulkan.ForceDXC"));
-		int32 VulkanForceDxc = (CVar ? CVar->GetInt() : 0);
-		const bool bIsVulkanMobile = IsVulkanMobilePlatform((EShaderPlatform)Platform) || IsVulkanMobileSM5Platform((EShaderPlatform)Platform);
-		const bool bIsDxcEnabledForDesktop = (VulkanForceDxc == 1 && !bIsVulkanMobile);
-		const bool bIsDxcEnabledForMobile = (VulkanForceDxc == 2 && bIsVulkanMobile);
-		const bool bIsDxcEnableForAll = (VulkanForceDxc == 3);
-		return (bIsDxcEnabledForDesktop || bIsDxcEnabledForMobile || bIsDxcEnableForAll);
+		// Currently DXC only supports emulated uniform buffers on GLES
+		static const auto CForceDXCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.OpenGL.ForceDXC"));
+		if (CForceDXCVar && CForceDXCVar->GetInt() != 0)
+		{
+			return true;
+		}
+
+		static auto* CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("OpenGL.UseEmulatedUBs"));
+		return (CVar && CVar->GetValueOnAnyThread() != 0);
 	}
+
 	return false;
 }
 
 void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 {
+	const FName ShaderFormatName = LegacyShaderPlatformToShaderFormat(Platform);
+
+	for (const FAutoConsoleObject* ConsoleObject : FAutoConsoleObject::AccessGeneralShaderChangeCvars())
+	{
+		FString ConsoleObjectName = IConsoleManager::Get().FindConsoleObjectName(ConsoleObject->AsVariable());
+		KeyString += TEXT("_");
+		KeyString += ConsoleObjectName;
+		KeyString += TEXT("_");
+		KeyString += ConsoleObject->AsVariable()->GetString();
+	}
+	if (IsMobilePlatform(Platform))
+	{
+		for (const FAutoConsoleObject* ConsoleObject : FAutoConsoleObject::AccessMobileShaderChangeCvars())
+		{
+			FString ConsoleObjectName = IConsoleManager::Get().FindConsoleObjectName(ConsoleObject->AsVariable());
+			KeyString += TEXT("_");
+			KeyString += ConsoleObjectName;
+			KeyString += TEXT("_");
+			KeyString += ConsoleObject->AsVariable()->GetString();
+		}
+	}
+	else if (IsConsolePlatform(Platform))
+	{
+		for (const FAutoConsoleObject* ConsoleObject : FAutoConsoleObject::AccessDesktopShaderChangeCvars())
+		{
+			FString ConsoleObjectName = IConsoleManager::Get().FindConsoleObjectName(ConsoleObject->AsVariable());
+			KeyString += TEXT("_");
+			KeyString += ConsoleObjectName;
+			KeyString += TEXT("_");
+			KeyString += ConsoleObject->AsVariable()->GetString();
+		}
+	}
+
 	// Globals that should cause all shaders to recompile when changed must be appended to the key here
 	// Key should be kept as short as possible while being somewhat human readable for debugging
 
@@ -1338,9 +1543,21 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 	}
 
 	{
-		static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.AllowStaticLighting"));
-		const bool bValue = CVar ? CVar->GetValueOnAnyThread() != 0 : true;
+		const bool bValue = IsStaticLightingAllowed();
 		KeyString += bValue ? TEXT("_SL") : TEXT("_NoSL");
+	}
+
+	{
+		static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.MaterialEditor.LWCTruncateMode"));
+		const int32 LWCTruncateValue = CVar ? CVar->GetValueOnAnyThread() : 0;
+		if (LWCTruncateValue == 1)
+		{
+			KeyString += TEXT("_LWC1");
+		}
+		else if (LWCTruncateValue == 2)
+		{
+			KeyString += TEXT("_LWC2");
+		}
 	}
 
 	{
@@ -1348,40 +1565,21 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 	}
 
 	{
-		static const auto CVarInstancedStereo = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("vr.InstancedStereo"));
-		static const auto CVarMobileMultiView = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("vr.MobileMultiView"));
-		static const auto CVarODSCapture = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("vr.ODSCapture"));
+		const UE::StereoRenderUtils::FStereoShaderAspects Aspects(Platform);
 
-		bool bIsInstancedStereo = (RHISupportsInstancedStereo(Platform) && (CVarInstancedStereo && CVarInstancedStereo->GetValueOnGameThread() != 0));
-		const bool bIsMultiView = (RHISupportsMultiView(Platform) && bIsInstancedStereo);
-
-		bool bIsMobileMultiView = (CVarMobileMultiView && CVarMobileMultiView->GetValueOnGameThread() != 0);
-		if (bIsMobileMultiView && !RHISupportsMobileMultiView(Platform))
-		{
-			// Native mobile multi-view is not supported, fall back to instancing if available
-			bIsMobileMultiView = bIsInstancedStereo = RHISupportsInstancedStereo(Platform);
-		}
-
-		const bool bIsODSCapture = CVarODSCapture && (CVarODSCapture->GetValueOnGameThread() != 0);
-
-		if (bIsInstancedStereo)
+		if (Aspects.IsInstancedStereoEnabled())
 		{
 			KeyString += TEXT("_VRIS");
-			
-			if (bIsMultiView)
+
+			if (Aspects.IsInstancedMultiViewportEnabled())
 			{
 				KeyString += TEXT("_MVIEW");
 			}
 		}
 
-		if (bIsMobileMultiView)
+		if (Aspects.IsMobileMultiViewEnabled())
 		{
 			KeyString += TEXT("_MMVIEW");
-		}
-
-		if (bIsODSCapture)
-		{
-			KeyString += TEXT("_ODSC");
 		}
 	}
 
@@ -1404,18 +1602,40 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 	}
 
 	{
-		KeyString += ShouldKeepShaderDebugInfo(Platform) ? TEXT("_NoStrip") : TEXT("");
+		// Extra data (names, etc)
+		KeyString += ShouldEnableExtraShaderData(ShaderFormatName) ? TEXT("_ExtraData") : TEXT("");
+		// Symbols and/or SymbolsInfo and version if symbols serialization changes
+		KeyString += ShouldGenerateShaderSymbols(ShaderFormatName) ? TEXT("_Symbols") : TEXT("");
+		KeyString += ShouldGenerateShaderSymbolsInfo(ShaderFormatName) ? TEXT("_SymbolsInfo") : TEXT("");
+		// Are symbols based on source or results
+		KeyString += ShouldAllowUniqueShaderSymbols(ShaderFormatName) ? TEXT("_FullDbg") : TEXT("");
 	}
 
 	{
-		static const auto CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Shaders.Optimize"));
-		KeyString += (CVar && CVar->GetInt() != 0) ? TEXT("") : TEXT("_NoOpt");
+		KeyString += ShouldOptimizeShaders(ShaderFormatName) ? TEXT("") : TEXT("_NoOpt");
 	}
 	
 	{
 		// Always default to fast math unless specified
 		static const auto CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Shaders.FastMath"));
 		KeyString += (CVar && CVar->GetInt() == 0) ? TEXT("_NoFastMath") : TEXT("");
+	}
+
+	{
+		static FShaderPlatformCachedIniValue<int32> CVarWarningsAsErrorsPerPlatform(TEXT("r.Shaders.WarningsAsErrors"));
+		if (const int32 Level = CVarWarningsAsErrorsPerPlatform.Get(Platform); Level != 0)
+		{
+			KeyString.Appendf(TEXT("_WX%d"), Level);
+		}
+	}
+	
+	{
+		static const auto CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Shaders.CheckLevel"));
+		// Note: Since 1 is the default, we don't modify the hash for this case, so as to not force a rebuild, and to keep the hash shorter.
+		if (CVar && (CVar->GetInt() == 0 || CVar->GetInt() == 2))
+		{
+			KeyString.Appendf(TEXT("_C%d"), CVar->GetInt());
+		}
 	}
 	
 	{
@@ -1441,16 +1661,20 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 	{
 		KeyString += TEXT("_NoPDO");
 	}
-	
-	if (IsD3DPlatform(Platform) && IsPCPlatform(Platform))
+
+	if (!AllowPerPixelShadingModels(Platform))
 	{
-		{
-			static const auto CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.D3D.RemoveUnusedInterpolators"));
-			if (CVar && CVar->GetInt() != 0)
-			{
-				KeyString += TEXT("_UnInt");
-			}
-		}
+		KeyString += TEXT("_NoPPSM");
+	}
+	
+	if (UseRemoveUnsedInterpolators(Platform) && !IsOpenGLPlatform(Platform))
+	{
+		KeyString += TEXT("_UnInt");
+	}
+
+	if (ForwardShadingForcesSkyLightCubemapBlending(Platform))
+	{
+		KeyString += TEXT("_FwdSkyBlnd");
 	}
 
 	if (IsMobilePlatform(Platform))
@@ -1459,15 +1683,13 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 			static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Mobile.DisableVertexFog"));
 			KeyString += (CVar && CVar->GetInt() != 0) ? TEXT("_NoVFog") : TEXT("");
 		}
-
-		{
-			static const auto* CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.Shadow.CSM.MaxMobileCascades"));
-			KeyString += (CVar) ? FString::Printf(TEXT("MMC%d"), CVar->GetValueOnAnyThread()) : TEXT("");
-		}	
 		
 		{
-			static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Mobile.ForceFullPrecisionInPS"));
-			KeyString += (CVar && CVar->GetInt() != 0) ? TEXT("_highp") : TEXT("");
+			static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Mobile.FloatPrecisionMode"));
+			if(CVar && CVar->GetInt() > 0)
+			{
+				KeyString.Appendf(TEXT("_highp%d"), CVar->GetInt());
+			}
 		}
 
 		{
@@ -1475,31 +1697,11 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 			KeyString += (CVar && CVar->GetInt() != 0) ? TEXT("_DLODT") : TEXT("");
 		}
 		
-		if (IsOpenGLPlatform(Platform))
-		{
-			static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("OpenGL.UseEmulatedUBs"));
-			KeyString += (CVar && CVar->GetInt() != 0) ? TEXT("_NoUB") : TEXT("");
-		}
-
-		if (IsVulkanPlatform(Platform))
-		{
-			static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Vulkan.UseRealUBs"));
-			if ((CVar && CVar->GetInt() == 0) || 
-				Platform == SP_VULKAN_ES3_1_ANDROID) // we force eUB on mobile Android
-			{
-				KeyString += TEXT("_NoUB");
-			}
-		}
+		KeyString += IsUsingEmulatedUniformBuffers(Platform) ? TEXT("_NoUB") : TEXT("");
 
 		{
-			static FShaderPlatformCachedIniValue<bool> MobileEnableMovableSpotlightsIniValue(TEXT("/Script/Engine.RendererSettings"), TEXT("r.Mobile.EnableMovableSpotlights"));
-			static FShaderPlatformCachedIniValue<bool> MobileEnableMovableSpotlightsShadowIniValue(TEXT("/Script/Engine.RendererSettings"), TEXT("r.Mobile.EnableMovableSpotlightsShadow"));
-
-			bool bMobileEnableMovableSpotlights = (MobileEnableMovableSpotlightsIniValue.Get(Platform) != 0);
-			KeyString += (bMobileEnableMovableSpotlights) ? TEXT("_MSPTL") : TEXT("");
-
-			bool bMobileEnableMovableSpotlightsShadow = (MobileEnableMovableSpotlightsShadowIniValue.Get(Platform) != 0);
-			KeyString += (bMobileEnableMovableSpotlights && bMobileEnableMovableSpotlightsShadow) ? TEXT("S") : TEXT("");
+			const bool bMobileMovableSpotlightShadowsEnabled = IsMobileMovableSpotlightShadowsEnabled(Platform);
+			KeyString += bMobileMovableSpotlightShadowsEnabled ? TEXT("S") : TEXT("");
 		}
 		
 		{
@@ -1512,64 +1714,79 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 			static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Mobile.SupportGPUScene"));
 			bool bMobileGpuScene = (CVar && CVar->GetInt() != 0);
 			KeyString += bMobileGpuScene ? TEXT("_MobGPUSc") : TEXT("");
-			if (bMobileGpuScene)
+		}
+
+		{
+			bool bIsMobileDeferredShading = IsMobileDeferredShadingEnabled(Platform);
+
+			if (bIsMobileDeferredShading)
 			{
-				// Mobile specific verify if we are using texturebuffer or texture2D
-				if (!GPUSceneUseTexture2D(Platform))
+				KeyString += (MobileUsesExtenedGBuffer(Platform) ? TEXT("_MobDShEx") : TEXT("_MobDSh"));
+			}
+			else
+			{
+				static IConsoleVariable* MobileForwardEnableClusteredReflectionsCVAR = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Mobile.Forward.EnableClusteredReflections"));
+				if (MobileForwardEnableClusteredReflectionsCVAR && MobileForwardEnableClusteredReflectionsCVAR->GetInt() != 0)
 				{
-					KeyString += TEXT("_TexBuf");
-				}
-				else
-				{
-					KeyString += TEXT("_Tex2D");
+					KeyString += TEXT("_MobFCR");
 				}
 			}
 		}
 
 		{
-			static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.MobileHDR"));
-			KeyString += (CVar && CVar->GetInt() != 0) ? TEXT("_MobileHDR") : TEXT("");
-		}
-
-		{
-			static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Mobile.ShadingPath"));
-			KeyString += (CVar && CVar->GetInt() != 0) ? TEXT("_MobDSh") : TEXT("");
-		}
-
-		{
 			static IConsoleVariable* MobileGTAOPreIntegratedTextureTypeCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Mobile.GTAOPreIntegratedTextureType"));
 			static IConsoleVariable* MobileAmbientOcclusionCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Mobile.AmbientOcclusion"));
-			static IConsoleVariable* MobileHDRCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.MobileHDR"));
 			int32 GTAOPreIntegratedTextureType = MobileGTAOPreIntegratedTextureTypeCVar ? MobileGTAOPreIntegratedTextureTypeCVar->GetInt() : 0;
-			KeyString += ((MobileAmbientOcclusionCVar && MobileAmbientOcclusionCVar->GetInt() != 0) && (MobileHDRCVar && MobileHDRCVar->GetInt() !=0)) ? FString::Printf(TEXT("_MobileAO_%d"), GTAOPreIntegratedTextureType) : TEXT("");
+			KeyString += ((MobileAmbientOcclusionCVar && MobileAmbientOcclusionCVar->GetInt() != 0) && IsMobileHDR()) ? FString::Printf(TEXT("_MobileAO_%d"), GTAOPreIntegratedTextureType) : TEXT("");
 		}
 
 		{
 			KeyString += IsMobileDistanceFieldEnabled(Platform) ? TEXT("_MobSDF") : TEXT("");
 		}
+
+		{
+			static FShaderPlatformCachedIniValue<bool> EnableCullBeforeFetchIniValue(TEXT("r.CullBeforeFetch"));
+			if (EnableCullBeforeFetchIniValue.Get(Platform) == 1)
+			{
+				KeyString += TEXT("_CBF");
+			}
+			static FShaderPlatformCachedIniValue<bool> EnableWarpCullingIniValue(TEXT("r.WarpCulling"));
+			if (EnableWarpCullingIniValue.Get(Platform) == 1)
+			{
+				KeyString += TEXT("_WC");
+			}
+		}
+
+		{
+			KeyString += MobileUsesFullDepthPrepass(Platform) ? TEXT("_MobFDP") : TEXT("");
+		}
 	}
 	else
 	{
-		if (IsOpenGLPlatform(Platform))
-		{
-			static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("OpenGL.UseEmulatedUBs"));
-			KeyString += (CVar && CVar->GetInt() != 0) ? TEXT("_NoUB") : TEXT("");
-		}
-
-		if (IsVulkanPlatform(Platform))
-		{
-			static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Vulkan.UseRealUBs"));
-			KeyString += (CVar && CVar->GetInt() == 0) ? TEXT("_NoUB") : TEXT("");
-		}
+		KeyString += IsUsingEmulatedUniformBuffers(Platform) ? TEXT("_NoUB") : TEXT("");
 	}
 
-	const FName ShaderFormatName = LegacyShaderPlatformToShaderFormat(Platform);
+	uint32 PlatformShadingModelsMask = GetPlatformShadingModelsMask(Platform);
+	if (PlatformShadingModelsMask != 0xFFFFFFFF)
+	{
+		KeyString +=  FString::Printf(TEXT("SMM_%X"), PlatformShadingModelsMask);
+	}
+
 	const IShaderFormat* ShaderFormat = GetTargetPlatformManagerRef().FindShaderFormat(ShaderFormatName);
 	if (ShaderFormat)
 	{
 		ShaderFormat->AppendToKeyString(KeyString);
 	}
-	
+
+	ITargetPlatform* TargetPlatform = GetTargetPlatformManagerRef().FindTargetPlatformWithSupport(TEXT("ShaderFormat"), ShaderFormatName);
+
+	uint32 SupportedHardwareMask = TargetPlatform ? TargetPlatform->GetSupportedHardwareMask() : 0;
+
+	if (SupportedHardwareMask != 0)
+	{
+		KeyString += FString::Printf(TEXT("_SHM_%X"), SupportedHardwareMask);
+	}
+
 	// Encode the Metal standard into the shader compile options so that they recompile if the settings change.
 	if (IsMetalPlatform(Platform))
 	{
@@ -1585,18 +1802,19 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 			KeyString += RHISupportsManualVertexFetch(Platform) ? TEXT("_MVF_") : TEXT("");
 		}
 		
-		uint32 ShaderVersion = RHIGetShaderLanguageVersion(Platform);
+		uint32 ShaderVersion = RHIGetMetalShaderLanguageVersion(Platform);
 		KeyString += FString::Printf(TEXT("_MTLSTD%u_"), ShaderVersion);
 		
 		bool bAllowFastIntrinsics = false;
 		bool bEnableMathOptimisations = true;
 		bool bForceFloats = false;
+        bool bSupportAppleA8 = false;
 		int32 IndirectArgumentTier = 0;
+        
 		if (IsPCPlatform(Platform))
 		{
 			GConfig->GetBool(TEXT("/Script/MacTargetPlatform.MacTargetSettings"), TEXT("UseFastIntrinsics"), bAllowFastIntrinsics, GEngineIni);
 			GConfig->GetBool(TEXT("/Script/MacTargetPlatform.MacTargetSettings"), TEXT("EnableMathOptimisations"), bEnableMathOptimisations, GEngineIni);
-			GConfig->GetBool(TEXT("/Script/MacTargetPlatform.MacTargetSettings"), TEXT("ForceFloats"), bForceFloats, GEngineIni);
 			GConfig->GetInt(TEXT("/Script/MacTargetPlatform.MacTargetSettings"), TEXT("IndirectArgumentTier"), IndirectArgumentTier, GEngineIni);
 		}
 		else
@@ -1605,6 +1823,7 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 			GConfig->GetBool(TEXT("/Script/IOSRuntimeSettings.IOSRuntimeSettings"), TEXT("EnableMathOptimisations"), bEnableMathOptimisations, GEngineIni);
 			GConfig->GetBool(TEXT("/Script/IOSRuntimeSettings.IOSRuntimeSettings"), TEXT("ForceFloats"), bForceFloats, GEngineIni);
 			GConfig->GetInt(TEXT("/Script/IOSRuntimeSettings.IOSRuntimeSettings"), TEXT("IndirectArgumentTier"), IndirectArgumentTier, GEngineIni);
+            GConfig->GetBool(TEXT("/Script/IOSRuntimeSettings.IOSRuntimeSettings"), TEXT("bSupportAppleA8"), bSupportAppleA8, GEngineIni);
 		}
 		
 		if (bAllowFastIntrinsics)
@@ -1623,6 +1842,11 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 			KeyString += TEXT("_FP32");
 		}
 		
+        if(bSupportAppleA8)
+        {
+            KeyString += TEXT("_A8GPU");
+        }
+        
 		KeyString += FString::Printf(TEXT("_IAB%d"), IndirectArgumentTier);
 		
 		// Shaders built for archiving - for Metal that requires compiling the code in a different way so that we can strip it later
@@ -1631,6 +1855,16 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 		if (bArchive)
 		{
 			KeyString += TEXT("_ARCHIVE");
+		}
+	}
+
+	if (Platform == SP_VULKAN_ES3_1_ANDROID || Platform == SP_VULKAN_SM5_ANDROID)
+	{
+		bool bStripReflect = true;
+		GConfig->GetBool(TEXT("/Script/AndroidRuntimeSettings.AndroidRuntimeSettings"), TEXT("bStripShaderReflection"), bStripReflect, GEngineIni);
+		if (!bStripReflect)
+		{
+			KeyString += TEXT("_NoStripReflect");
 		}
 	}
 
@@ -1645,8 +1879,6 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 			KeyString += TEXT("_SD");
 		}
 	}
-
-	ITargetPlatform* TargetPlatform = GetTargetPlatformManager()->FindTargetPlatformWithSupport(TEXT("ShaderFormat"), LegacyShaderPlatformToShaderFormat(Platform));
 
 	{
 		bool bForwardShading = false;
@@ -1669,10 +1901,25 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 	}
 
 	{
-		static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.PostProcessing.PropagateAlpha"));
-		if (CVar && CVar->GetValueOnAnyThread() > 0)
+		int PropagateAlphaType = 0;
+		if (IsMobilePlatform(Platform))
 		{
-			if (CVar->GetValueOnAnyThread() == 2)
+			static FShaderPlatformCachedIniValue<int32> MobilePropagateAlphaIniValue(TEXT("r.Mobile.PropagateAlpha"));
+			int MobilePropagateAlphaIniValueInt = MobilePropagateAlphaIniValue.Get((EShaderPlatform)Platform);
+			PropagateAlphaType = MobilePropagateAlphaIniValueInt > 0 ? 2 : 0;
+		}
+		else
+		{
+			static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.PostProcessing.PropagateAlpha"));
+			if (CVar)
+			{
+				PropagateAlphaType = CVar->GetValueOnAnyThread();
+			}
+		}
+
+		if (PropagateAlphaType > 0)
+		{
+			if (PropagateAlphaType == 2)
 			{
 				KeyString += TEXT("_SA2");
 			}
@@ -1681,6 +1928,12 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 				KeyString += TEXT("_SA");
 			}
 		}
+	}
+
+	if (TargetPlatform && 
+		TargetPlatform->SupportsFeature(ETargetPlatformFeatures::NormalmapLAEncodingMode))
+	{
+		KeyString += TEXT("_NLA");
 	}
 
 	{
@@ -1704,6 +1957,32 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 		}
 	}
 
+	bool bSupportLocalFogVolumes = false;
+	{
+		static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.SupportLocalFogVolumes"));
+		bSupportLocalFogVolumes = CVar && CVar->GetInt() > 0;
+		if (bSupportLocalFogVolumes)
+		{
+			KeyString += TEXT("_LFV");
+		}
+	}
+
+	{
+		if (DoesProjectSupportLumenRayTracedTranslucentRefraction())
+		{
+			KeyString += TEXT("_LTRRT");
+		}
+	}
+
+	{
+		static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.LocalFogVolume.ApplyOnTranslucent"));
+		const bool bLocalFogVolumesApplyOnTranclucent = CVar && CVar->GetInt() > 0;
+		if (bSupportLocalFogVolumes && bLocalFogVolumesApplyOnTranclucent)
+		{
+			KeyString += TEXT("_LFVTRA");
+		}
+	}
+
 	{
 		static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.SupportSkyAtmosphere"));
 		if (CVar && CVar->GetValueOnAnyThread() > 0)
@@ -1718,18 +1997,148 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 		}
 	}
 
+	const bool bNeedsSeparateMainDirLightTexture = IsWaterDistanceFieldShadowEnabled(Platform) || IsWaterVirtualShadowMapFilteringEnabled(Platform);
+	if (bNeedsSeparateMainDirLightTexture)
 	{
-		if (MaskedInEarlyPass(Platform))
+		KeyString += TEXT("_SLWSMDLT");
+	}
+
+	{
+		static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.SupportCloudShadowOnForwardLitTranslucent"));
+		if (CVar && CVar->GetValueOnAnyThread() > 0)
 		{
-			KeyString += TEXT("_EZPMM");
+			KeyString += TEXT("_CLDTRANS");
 		}
 	}
 
 	{
-		static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.DistanceFieldBuild.EightBit"));
+		const bool bTranslucentUsesLightRectLights = GetTranslucentUsesLightRectLights();
+		if (bTranslucentUsesLightRectLights)
+		{
+			KeyString += TEXT("_RECTTRANS");
+		}
+	}
+
+	{
+		const bool bTranslucentUsesLightIESProfiles = GetTranslucentUsesLightIESProfiles();
+		if (bTranslucentUsesLightIESProfiles)
+		{
+			KeyString += TEXT("_IESTRANS");
+		}
+	}
+
+	{
+		static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.Shadow.Virtual.TranslucentQuality"));
 		if (CVar && CVar->GetValueOnAnyThread() > 0)
 		{
-			KeyString += TEXT("_8u");
+			KeyString += TEXT("_VSMTRANSQUALITY");
+		}
+	}
+
+	if (GetHairStrandsUsesTriangleStrips())
+	{
+		KeyString += FString::Printf(TEXT("_STRDSTRIP"));
+	}
+
+	if (Substrate::IsSubstrateEnabled())
+	{
+		{
+			KeyString += TEXT("_SUBSTRATE");
+		}
+
+		{
+			KeyString += FString::Printf(TEXT("_BUDGET%u"), Substrate::GetBytePerPixel(Platform));
+		}
+
+		{
+			KeyString += FString::Printf(TEXT("_CLOSURE%u"), Substrate::GetClosurePerPixel(Platform));
+		}
+
+		if (Substrate::IsDBufferPassEnabled(Platform))
+		{
+			KeyString += FString::Printf(TEXT("_DBUFFERPASS"));
+		}
+
+		if (Substrate::IsBackCompatibilityEnabled())
+		{
+			KeyString += FString::Printf(TEXT("_BACKCOMPAT"));
+		}
+
+		if (Substrate::IsOpaqueRoughRefractionEnabled())
+		{
+			KeyString += FString::Printf(TEXT("_ROUGHDIFF"));
+		}
+
+		if (Substrate::GetNormalQuality() > 0)
+		{
+			KeyString += FString::Printf(TEXT("_STRTNRMQ"));
+		}
+
+		if (Substrate::IsAdvancedVisualizationEnabled())
+		{
+			KeyString += FString::Printf(TEXT("_ADVDEBUG"));
+		}
+
+		{
+			KeyString += FString::Printf(TEXT("_STSHQL%u"), Substrate::GetShadingQuality(Platform));
+		}
+
+		{
+			KeyString += FString::Printf(TEXT("_SSHEEN%u"), Substrate::GetSheenQuality(Platform));
+		}
+
+		if (Substrate::IsGlintEnabled(Platform))
+		{
+			KeyString += FString::Printf(TEXT("_STRTGLT"));
+		}
+
+		if (Substrate::IsSpecularProfileEnabled(Platform))
+		{
+			KeyString += FString::Printf(TEXT("_STRTSP"));
+		}
+	}
+
+	{
+		static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.Material.RoughDiffuse"));
+		if (CVar && CVar->GetValueOnAnyThread() > 0)
+		{
+			KeyString += FString::Printf(TEXT("_MATRDIFF"));
+		}
+	}
+
+	{
+		int32 LightFunctionAtlasFormat = GetLightFunctionAtlasFormat();
+		if (LightFunctionAtlasFormat > 0)
+		{
+			KeyString += FString::Printf(TEXT("_LFAC%u"), LightFunctionAtlasFormat);
+		}
+
+		bool bSingleLayerWaterUsesLightFunctionAtlas = GetSingleLayerWaterUsesLightFunctionAtlas();
+		if (bSingleLayerWaterUsesLightFunctionAtlas)
+		{
+			KeyString += FString::Printf(TEXT("_SLWLFA"));
+		}
+
+		bool bTranslucentUsesLightFunctionAtlas = GetTranslucentUsesLightFunctionAtlas();
+		if (bTranslucentUsesLightFunctionAtlas)
+		{
+			KeyString += FString::Printf(TEXT("_FWDLFA"));
+		}
+
+	}
+
+	{
+		static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.Material.EnergyConservation"));
+		if (CVar && CVar->GetValueOnAnyThread() > 0)
+		{
+			KeyString += FString::Printf(TEXT("_MATENERGY"));
+		}
+	}
+
+	{
+		if (MaskedInEarlyPass(Platform))
+		{
+			KeyString += TEXT("_EZPMM");
 		}
 	}
 	
@@ -1751,6 +2160,24 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 		}
 	}
 
+	if (FDataDrivenShaderPlatformInfo::GetSupportSceneDataCompressedTransforms(Platform))
+	{
+		KeyString += TEXT("_sdct");
+	}
+
+	if (FDataDrivenShaderPlatformInfo::GetSupportsVariableRateShading(Platform) && GRHIAttachmentVariableRateShadingEnabled)
+	{
+		KeyString += TEXT("_VRS");
+	}
+
+	{
+		static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.GBufferDiffuseSampleOcclusion"));
+		if (CVar && CVar->GetValueOnAnyThread() != 0)
+		{
+			KeyString += TEXT("_GDSO");
+		}
+	}
+
 	{
 		static const auto CVarVirtualTextureLightmaps = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.VirtualTexturedLightmaps"));
 		const bool VTLightmaps = CVarVirtualTextureLightmaps && CVarVirtualTextureLightmaps->GetValueOnAnyThread() != 0;
@@ -1758,19 +2185,64 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 		static const auto CVarVirtualTexture = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.VirtualTextures"));
 		bool VTTextures = CVarVirtualTexture && CVarVirtualTexture->GetValueOnAnyThread() != 0;
 
-		static const auto CVarMobileVirtualTexture = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.Mobile.VirtualTextures"));
+		static const auto CVarVTAnisotropic = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.VT.AnisotropicFiltering"));
+		int32 VTFiltering = CVarVTAnisotropic && CVarVTAnisotropic->GetValueOnAnyThread() != 0 ? 1 : 0;
+
 		if (IsMobilePlatform(Platform) && VTTextures)
 		{
-			VTTextures = (CVarMobileVirtualTexture->GetValueOnAnyThread() != 0);
+			static FShaderPlatformCachedIniValue<bool> MobileVirtualTexturesIniValue(TEXT("r.Mobile.VirtualTextures"));
+			VTTextures = (MobileVirtualTexturesIniValue.Get(Platform) != false);
+
+			if (VTTextures)
+			{
+				static FShaderPlatformCachedIniValue<bool> CVarVTMobileManualTrilinearFiltering(TEXT("r.VT.Mobile.ManualTrilinearFiltering"));
+				VTFiltering += (CVarVTMobileManualTrilinearFiltering.Get(Platform) ? 2 : 0);
+			}
 		}
 
 		const bool VTSupported = TargetPlatform != nullptr && TargetPlatform->SupportsFeature(ETargetPlatformFeatures::VirtualTextureStreaming);
 
-		static const auto CVarVTFactor = IConsoleManager::Get().FindConsoleVariable(TEXT("r.vt.FeedbackFactor")); check(CVarVTFactor);
-		const int32 VTFeedbackFactor = CVarVTFactor->GetInt(); 
+ 		KeyString += FString::Printf(TEXT("_VT-%d-%d-%d-%d"), VTLightmaps, VTTextures, VTSupported, VTFiltering);
+	}
 
-		auto tt = FString::Printf(TEXT("_VT-%d-%d-%d-%d"), VTLightmaps, VTTextures, VTSupported, VTFeedbackFactor);
- 		KeyString += tt;
+	{
+		const UE::Color::FColorSpace& WCS = UE::Color::FColorSpace::GetWorking();
+		if (!WCS.IsSRGB())
+		{
+			// The working color space is uniquely defined by its chromaticities (as loaded from renderer settings).
+			uint32 WCSHash = 0;
+			WCSHash ^= GetTypeHash(WCS.GetRedChromaticity());
+			WCSHash ^= GetTypeHash(WCS.GetGreenChromaticity());
+			WCSHash ^= GetTypeHash(WCS.GetBlueChromaticity());
+			WCSHash ^= GetTypeHash(WCS.GetWhiteChromaticity());
+			KeyString += FString::Printf(TEXT("_WCS-%u"), WCSHash);
+		}
+	}
+
+	{
+		static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.Shaders.RemoveDeadCode"));
+		if (CVar && CVar->GetValueOnAnyThread() != 0)
+		{
+			KeyString += TEXT("_MIN");
+		}
+	}
+
+	{
+		static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataBool(TEXT("r.ShaderCompiler.PreprocessedJobCache"));
+		if (CVar && CVar->GetValueOnAnyThread())
+		{
+			KeyString += TEXT("_PJC");
+		}
+	}
+
+	if (RHISupportsShaderRootConstants(Platform))
+	{
+		KeyString += TEXT("_SHRC");
+	}
+
+	if (RHISupportsShaderBundleDispatch(Platform))
+	{
+		KeyString += TEXT("_SHBD");
 	}
 
 	if (RHISupportsRenderTargetWriteMask(Platform))
@@ -1783,6 +2255,37 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 		KeyString += TEXT("_PPDBM");
 	}
 
+	if (FDataDrivenShaderPlatformInfo::GetSupportsDistanceFields(Platform))
+	{
+		KeyString += TEXT("_DF");
+	}
+
+	if (RHISupportsMeshShadersTier0(Platform))
+	{
+		KeyString += TEXT("_MS_T0");
+	}
+
+	if (RHISupportsMeshShadersTier1(Platform))
+	{
+		KeyString += TEXT("_MS_T1");
+	}
+
+	if (RHIGetBindlessSupport(Platform) != ERHIBindlessSupport::Unsupported)
+	{
+		const ERHIBindlessConfiguration ResourcesConfig = UE::ShaderCompiler::GetBindlessResourcesConfiguration(ShaderFormatName);
+		const ERHIBindlessConfiguration SamplersConfig = UE::ShaderCompiler::GetBindlessSamplersConfiguration(ShaderFormatName);
+
+		if (ResourcesConfig != ERHIBindlessConfiguration::Disabled)
+		{
+			KeyString += ResourcesConfig == ERHIBindlessConfiguration::RayTracingShaders ? TEXT("_BNDLSRTRES") : TEXT("_BNDLSRES");
+		}
+
+		if (SamplersConfig != ERHIBindlessConfiguration::Disabled)
+		{
+			KeyString += SamplersConfig == ERHIBindlessConfiguration::RayTracingShaders ? TEXT("_BNDLSRTSAM") : TEXT("_BNDLSSAM");
+		}
+	}
+
 	if (ShouldCompileRayTracingShadersForProject(Platform))
 	{
 		static const auto CVarCompileCHS = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RayTracing.CompileMaterialCHS"));
@@ -1793,6 +2296,21 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 			CVarCompileCHS && CVarCompileCHS->GetBool() ? 1 : 0,
 			CVarCompileAHS && CVarCompileAHS->GetBool() ? 1 : 0,
 			CVarTextureLod && CVarTextureLod->GetBool() ? 1 : 0);
+	}
+
+	if (DoesPlatformSupportHeterogeneousVolumes(Platform))
+	{
+		static const auto ShadowCVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.HeterogeneousVolumes.Shadows"));
+		if (ShadowCVar && ShadowCVar->GetValueOnAnyThread() != 0)
+		{
+			KeyString += TEXT("_HVSHADOW");
+		}
+
+		static const auto CompTranslucencyCVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.Translucency.HeterogeneousVolumes"));
+		if (CompTranslucencyCVar && CompTranslucencyCVar->GetValueOnAnyThread() != 0)
+		{
+			KeyString += TEXT("_HVCOMPTRANSL");
+		}
 	}
 
 	if (ForceSimpleSkyDiffuse(Platform))
@@ -1809,4 +2327,108 @@ void ShaderMapAppendKeyString(EShaderPlatform Platform, FString& KeyString)
 		const bool bSupportsAnisotropicMaterials = FDataDrivenShaderPlatformInfo::GetSupportsAnisotropicMaterials(Platform);
 		KeyString += FString::Printf(TEXT("_Aniso-%d"), bSupportsAnisotropicMaterials ? 1 : 0);
 	}
+
+	{
+		// add shader compression format
+		KeyString += TEXT("_Compr");
+		FName CompressionFormat = GetShaderCompressionFormat();
+		KeyString += CompressionFormat.ToString();
+		if (CompressionFormat == NAME_Oodle)
+		{
+			FOodleDataCompression::ECompressor OodleCompressor;
+			FOodleDataCompression::ECompressionLevel OodleLevel;
+			GetShaderCompressionOodleSettings(OodleCompressor, OodleLevel);
+			KeyString += FString::Printf(TEXT("_Compr%d_Lev%d"), static_cast<int32>(OodleCompressor), static_cast<int32>(OodleLevel));
+		}
+	}
+
+	{
+		// add whether or not non-pipelined shader types are included
+		KeyString += FString::Printf(TEXT("_ExclNonPipSh-%d"), ExcludeNonPipelinedShaderTypes(Platform));
+	}
+
+	KeyString += FString::Printf(TEXT("_LWC-%d"), FMath::FloorToInt(FLargeWorldRenderScalar::GetTileSize()));
+
+	uint64 ShaderPlatformPropertiesHash = FDataDrivenShaderPlatformInfo::GetShaderPlatformPropertiesHash(Platform);
+	KeyString += FString::Printf(TEXT("_%u"), ShaderPlatformPropertiesHash);
+
+	if (IsSingleLayerWaterDepthPrepassEnabled(Platform, GetMaxSupportedFeatureLevel(Platform)))
+	{
+		KeyString += TEXT("_SLWDP");
+	}
+
+	if (IsGPUSkinPassThroughSupported(Platform))
+	{
+		KeyString += TEXT("_SKPassThrough1");
+	}
+	else
+	{
+		KeyString += TEXT("_SKPassThrough0");
+	}
+
+	if (UseNanite(Platform))
+	{
+		static const auto CVarAllowTess = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Nanite.AllowTessellation"));
+		static const auto CVarAllowCSMat = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Nanite.AllowComputeMaterials"));
+		static const auto CVarAllowPSMat = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Nanite.AllowLegacyMaterials"));
+
+		KeyString.Appendf(
+			TEXT("_Nanite-Tess%dCSMat%dPSMat%d"),
+			CVarAllowTess ? CVarAllowTess->GetInt() : 0,
+			CVarAllowCSMat ? CVarAllowCSMat->GetInt() : 0,
+			CVarAllowPSMat ? CVarAllowPSMat->GetInt() : 0
+		);
+	}
+}
+
+EShaderPermutationFlags GetShaderPermutationFlags(const FPlatformTypeLayoutParameters& LayoutParams)
+{
+	EShaderPermutationFlags Result = EShaderPermutationFlags::None;
+
+	static bool bProjectSupportsCookedEditor = []()
+	{
+		bool bSupportCookedEditorConfigValue = false;
+		return GConfig->GetBool(TEXT("CookedEditorSettings"), TEXT("bSupportCookedEditor"), bSupportCookedEditorConfigValue, GGameIni) && bSupportCookedEditorConfigValue;
+	}();
+
+	if (bProjectSupportsCookedEditor || LayoutParams.WithEditorOnly())
+	{
+		Result |= EShaderPermutationFlags::HasEditorOnlyData;
+	}
+	return Result;
+}
+
+void RegisterRayTracingPayloadType(ERayTracingPayloadType PayloadType, uint32 PayloadSize, TRaytracingPayloadSizeFunction PayloadSizeFunction)
+{
+	// Make sure we haven't registered this payload type yet
+	uint32 PayloadTypeInt = static_cast<uint32>(PayloadType);
+	checkf(FMath::CountBits(PayloadTypeInt) == 1, TEXT("PayloadType should have only 1 bit set -- got %u"), PayloadTypeInt);
+	checkf(!IsRayTracingPayloadRegistered(PayloadType), TEXT("Payload type %u has already been registered"), PayloadTypeInt);
+	int32 PayloadIndex = FPlatformMath::CountTrailingZeros(PayloadTypeInt);
+	RayTracingPayloadSizeFunctions[PayloadIndex] = PayloadSizeFunction;
+	RayTracingPayloadSizes[PayloadIndex] = PayloadSizeFunction ? 0u : PayloadSize;
+	RegisteredRayTracingPayloads |= PayloadTypeInt;
+}
+
+uint32 GetRayTracingPayloadTypeMaxSize(ERayTracingPayloadType PayloadType)
+{
+	// Compute the largest payload size among all set bits
+	uint32 Result = 0;
+	checkf(IsRayTracingPayloadRegistered(PayloadType), TEXT("Payload type %u has not been registered"), PayloadType);
+	for (uint32 PayloadTypeInt = static_cast<uint32>(PayloadType); PayloadTypeInt;)
+	{
+		const int32 PayloadIndex = FPlatformMath::CountTrailingZeros(PayloadTypeInt);
+		if (RayTracingPayloadSizeFunctions[PayloadIndex] != nullptr)
+		{
+			Result = FMath::Max(Result, RayTracingPayloadSizeFunctions[PayloadIndex]());
+		}
+		else
+		{
+			Result = FMath::Max(Result, RayTracingPayloadSizes[PayloadIndex]);
+		}
+
+		// remove bit we just processed
+		PayloadTypeInt &= ~(1u << PayloadIndex);
+	}
+	return Result;
 }

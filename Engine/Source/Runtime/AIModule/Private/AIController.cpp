@@ -23,6 +23,10 @@
 #include "GameplayTasksComponent.h"
 #include "Tasks/GameplayTask_ClaimResource.h"
 #include "NetworkingDistanceConstants.h"
+#include "Navigation/PathFollowingComponent.h"
+#include "NavFilters/NavigationQueryFilter.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AIController)
 
 
 //----------------------------------------------------------------------//
@@ -38,10 +42,13 @@ AAIController::AAIController(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
 	bSetControlRotationFromPawnOrientation = true;
-	PathFollowingComponent = CreateDefaultSubobject<UPathFollowingComponent>(TEXT("PathFollowingComponent"));
-	PathFollowingComponent->OnRequestFinished.AddUObject(this, &AAIController::OnMoveCompleted);
+	PathFollowingComponent = CreateOptionalDefaultSubobject<UPathFollowingComponent>(TEXT("PathFollowingComponent"));
+	if (PathFollowingComponent)
+	{
+		PathFollowingComponent->OnRequestFinished.AddUObject(this, &AAIController::OnMoveCompleted);
+	}
 
-	ActionsComp = CreateDefaultSubobject<UPawnActionsComponent>("ActionsComp");
+	ActionsComp_DEPRECATED = CreateOptionalDefaultSubobject<UDEPRECATED_PawnActionsComponent>(TEXT("ActionsComp"));
 
 	bSkipExtraLOSChecks = true;
 	bWantsPlayerState = false;
@@ -62,7 +69,7 @@ void AAIController::PostInitializeComponents()
 {
 	Super::PostInitializeComponents();
 
-	if (bWantsPlayerState && !IsPendingKill() && (GetNetMode() != NM_Client))
+	if (bWantsPlayerState && IsValid(this) && (GetNetMode() != NM_Client))
 	{
 		InitPlayerState();
 	}
@@ -93,7 +100,7 @@ void AAIController::PostRegisterAllComponents()
 
 	// cache PerceptionComponent if not already set
 	// note that it's possible for an AI to not have a perception component at all
-	if (PerceptionComponent == NULL || PerceptionComponent->IsPendingKill() == true)
+	if (!IsValid(PerceptionComponent))
 	{
 		PerceptionComponent = FindComponentByClass<UAIPerceptionComponent>();
 	}
@@ -113,7 +120,6 @@ void AAIController::DisplayDebug(UCanvas* Canvas, const FDebugDisplayInfo& Debug
 {
 	Super::DisplayDebug(Canvas, DebugDisplay, YL, YPos);
 
-	static FName NAME_AI = FName(TEXT("AI"));
 	if (DebugDisplay.IsDisplayOn(NAME_AI))
 	{
 		if (PathFollowingComponent)
@@ -164,11 +170,6 @@ void AAIController::GrabDebugSnapshot(FVisualLogEntry* Snapshot) const
 	if (PerceptionComponent != nullptr)
 	{
 		PerceptionComponent->DescribeSelfToVisLog(Snapshot);
-	}
-
-	if (CachedGameplayTasksComponent != nullptr)
-	{
-		CachedGameplayTasksComponent->DescribeSelfToVisLog(Snapshot);
 	}
 }
 #endif // ENABLE_VISUAL_LOG
@@ -347,7 +348,7 @@ bool AAIController::LineOfSightTo(const AActor* Other, FVector ViewPoint, bool b
 	}
 
 	const FVector OtherActorLocation = Other->GetActorLocation();
-	const float DistSq = (OtherActorLocation - ViewPoint).SizeSquared();
+	const FVector::FReal DistSq = (OtherActorLocation - ViewPoint).SizeSquared();
 	if (DistSq > FARSIGHTTHRESHOLDSQUARED)
 	{
 		return false;
@@ -386,11 +387,11 @@ bool AAIController::LineOfSightTo(const AActor* Other, FVector ViewPoint, bool b
 		Points[3] = OtherActorLocation + FVector(OtherRadius, -1 * OtherRadius, 0);
 		int32 IndexMin = 0;
 		int32 IndexMax = 0;
-		float CurrentMax = (Points[0] - ViewPoint).SizeSquared();
-		float CurrentMin = CurrentMax;
+		FVector::FReal CurrentMax = (Points[0] - ViewPoint).SizeSquared();
+		FVector::FReal CurrentMin = CurrentMax;
 		for (int32 PointIndex = 1; PointIndex<4; PointIndex++)
 		{
-			const float NextSize = (Points[PointIndex] - ViewPoint).SizeSquared();
+			const FVector::FReal NextSize = (Points[PointIndex] - ViewPoint).SizeSquared();
 			if (NextSize > CurrentMin)
 			{
 				CurrentMin = NextSize;
@@ -467,7 +468,7 @@ void AAIController::UpdateControlRotation(float DeltaTime, bool bUpdatePawn)
 void AAIController::OnPossess(APawn* InPawn)
 {
 	// don't even try possessing pending-kill pawns
-	if (InPawn != nullptr && InPawn->IsPendingKill())
+	if (InPawn != nullptr && !IsValid(InPawn))
 	{
 		return;
 	}
@@ -508,8 +509,6 @@ void AAIController::OnPossess(APawn* InPawn)
 	if (CachedGameplayTasksComponent && !CachedGameplayTasksComponent->OnClaimedResourcesChange.Contains(this, GET_FUNCTION_NAME_CHECKED(AAIController, OnGameplayTaskResourcesClaimed)))
 	{
 		CachedGameplayTasksComponent->OnClaimedResourcesChange.AddDynamic(this, &AAIController::OnGameplayTaskResourcesClaimed);
-
-		REDIRECT_OBJECT_TO_VLOG(CachedGameplayTasksComponent, this);
 	}
 
 	if (Blackboard && Blackboard->GetBlackboardAsset())
@@ -534,9 +533,9 @@ void AAIController::OnUnPossess()
 		PathFollowingComponent->Cleanup();
 	}
 
-	if (bStopAILogicOnUnposses && BrainComponent)
+	if (bStopAILogicOnUnposses)
 	{
-		BrainComponent->Cleanup();
+		CleanupBrainComponent();
 	}
 
 	if (CachedGameplayTasksComponent && (CachedGameplayTasksComponent->GetOwner() == CurrentPawn))
@@ -627,8 +626,6 @@ FPathFollowingRequestResult AAIController::MoveTo(const FAIMoveRequest& MoveRequ
 		UE_VLOG(this, LogAINavigation, Error, TEXT("MoveTo request failed due missing PathFollowingComponent"));
 		return ResultData;
 	}
-
-	ensure(MoveRequest.GetNavigationFilter() || !DefaultNavigationFilterClass);
 
 	bool bCanRequestMove = true;
 	bool bAlreadyAtGoal = false;
@@ -746,12 +743,19 @@ void AAIController::StopMovement()
 {
 	// @note FPathFollowingResultFlags::ForcedScript added to make AITask_MoveTo instances 
 	// not ignore OnRequestFinished notify that's going to be sent out due to this call
-	PathFollowingComponent->AbortMove(*this, FPathFollowingResultFlags::MovementStop | FPathFollowingResultFlags::ForcedScript);
+	if (PathFollowingComponent)
+	{
+	    PathFollowingComponent->AbortMove(*this, FPathFollowingResultFlags::MovementStop | FPathFollowingResultFlags::ForcedScript);
+	}
 }
 
 bool AAIController::ShouldPostponePathUpdates() const
 {
-	return GetPathFollowingComponent()->HasStartedNavLinkMove() || Super::ShouldPostponePathUpdates();
+	if (PathFollowingComponent && PathFollowingComponent->HasStartedNavLinkMove())
+	{
+		return true;
+	}
+	return Super::ShouldPostponePathUpdates();
 }
 
 bool AAIController::BuildPathfindingQuery(const FAIMoveRequest& MoveRequest, FPathFindingQuery& Query) const
@@ -783,6 +787,12 @@ bool AAIController::BuildPathfindingQuery(const FAIMoveRequest& MoveRequest, FPa
 		FSharedConstNavQueryFilter NavFilter = UNavigationQueryFilter::GetQueryFilter(*NavData, this, MoveRequest.GetNavigationFilter());
 		Query = FPathFindingQuery(*this, *NavData, GetNavAgentLocation(), GoalLocation, NavFilter);
 		Query.SetAllowPartialPaths(MoveRequest.IsUsingPartialPaths());
+		Query.SetRequireNavigableEndLocation(MoveRequest.IsNavigableEndLocationRequired());
+		if (MoveRequest.IsApplyingCostLimitFromHeuristic())
+		{
+			const float HeuristicScale = NavFilter->GetHeuristicScale();
+			Query.CostLimit = FPathFindingQuery::ComputeCostLimitFromHeuristic(Query.StartLocation, Query.EndLocation, HeuristicScale, MoveRequest.GetCostLimitFactor(), MoveRequest.GetMinimumCostLimit()); 
+		}
 
 		if (PathFollowingComponent)
 		{
@@ -793,7 +803,14 @@ bool AAIController::BuildPathfindingQuery(const FAIMoveRequest& MoveRequest, FPa
 	}
 	else
 	{
-		UE_VLOG(this, LogAINavigation, Warning, TEXT("Unable to find NavigationData instance while calling AAIController::BuildPathfindingQuery"));
+		if (NavSys == nullptr)
+		{
+			UE_VLOG(this, LogAINavigation, Warning, TEXT("Unable AAIController::BuildPathfindingQuery due to no NavigationSystem present. Note that even pathfinding-less movement requires presence of NavigationSystem."));
+		}
+		else 
+		{
+			UE_VLOG(this, LogAINavigation, Warning, TEXT("Unable to find NavigationData instance while calling AAIController::BuildPathfindingQuery"));
+		}
 	}
 
 	return bResult;
@@ -867,6 +884,11 @@ bool AAIController::IsFollowingAPath() const
 	return (PathFollowingComponent != nullptr) && (PathFollowingComponent->GetStatus() != EPathFollowingStatus::Idle);
 }
 
+IPathFollowingAgentInterface* AAIController::GetPathFollowingAgent() const
+{
+	return PathFollowingComponent;
+}
+
 FVector AAIController::GetImmediateMoveDestination() const
 {
 	return (PathFollowingComponent) ? PathFollowingComponent->GetCurrentTargetLocation() : FVector::ZeroVector;
@@ -889,6 +911,11 @@ void AAIController::OnMoveCompleted(FAIRequestID RequestID, const FPathFollowing
 void AAIController::OnMoveCompleted(FAIRequestID RequestID, EPathFollowingResult::Type Result)
 {
 	// deprecated
+}
+
+FAIRequestID AAIController::GetCurrentMoveRequestID() const
+{
+	return GetPathFollowingComponent() ? GetPathFollowingComponent()->GetCurrentRequestId() : FAIRequestID::InvalidRequest;
 }
 
 bool AAIController::RunBehaviorTree(UBehaviorTree* BTAsset)
@@ -922,6 +949,7 @@ bool AAIController::RunBehaviorTree(UBehaviorTree* BTAsset)
 
 			BTComp = NewObject<UBehaviorTreeComponent>(this, TEXT("BTComponent"));
 			BTComp->RegisterComponent();
+			REDIRECT_OBJECT_TO_VLOG(BTComp, this);
 		}
 		
 		// make sure BrainComponent points at the newly created BT component
@@ -932,6 +960,14 @@ bool AAIController::RunBehaviorTree(UBehaviorTree* BTAsset)
 	}
 
 	return bSuccess;
+}
+
+void AAIController::CleanupBrainComponent()
+{
+	if (BrainComponent)
+	{
+		BrainComponent->Cleanup();
+	}
 }
 
 void AAIController::ClaimTaskResource(TSubclassOf<UGameplayTaskResource> ResourceClass)
@@ -1010,6 +1046,7 @@ bool AAIController::UseBlackboard(UBlackboardData* BlackboardAsset, UBlackboardC
 	if (Blackboard == nullptr)
 	{
 		Blackboard = NewObject<UBlackboardComponent>(this, TEXT("BlackboardComponent"));
+		REDIRECT_OBJECT_TO_VLOG(Blackboard, this);
 		if (Blackboard != nullptr)
 		{
 			InitializeBlackboard(*Blackboard, *BlackboardAsset);
@@ -1045,15 +1082,23 @@ bool AAIController::ShouldSyncBlackboardWith(const UBlackboardComponent& OtherBl
 bool AAIController::SuggestTossVelocity(FVector& OutTossVelocity, FVector Start, FVector End, float TossSpeed, bool bPreferHighArc, float CollisionRadius, bool bOnlyTraceUp)
 {
 	// pawn's physics volume gets 2nd priority
-	APhysicsVolume const* const PhysicsVolume = GetPawn() ? GetPawn()->GetPawnPhysicsVolume() : NULL;
+	APhysicsVolume const* const PhysicsVolume = GetPawn() ? GetPawn()->GetPhysicsVolume() : nullptr;
 	float const GravityOverride = PhysicsVolume ? PhysicsVolume->GetGravityZ() : 0.f;
 	ESuggestProjVelocityTraceOption::Type const TraceOption = bOnlyTraceUp ? ESuggestProjVelocityTraceOption::OnlyTraceWhileAscending : ESuggestProjVelocityTraceOption::TraceFullPath;
 
-	return UGameplayStatics::SuggestProjectileVelocity(this, OutTossVelocity, Start, End, TossSpeed, bPreferHighArc, CollisionRadius, GravityOverride, TraceOption);
+	UGameplayStatics::FSuggestProjectileVelocityParameters VelocityParams = UGameplayStatics::FSuggestProjectileVelocityParameters(this, Start, End, TossSpeed);
+	VelocityParams.bFavorHighArc = bPreferHighArc;
+	VelocityParams.CollisionRadius = CollisionRadius;
+	VelocityParams.OverrideGravityZ = GravityOverride;
+	VelocityParams.TraceOption = TraceOption;
+
+	return UGameplayStatics::SuggestProjectileVelocity(VelocityParams, OutTossVelocity);
 }
-bool AAIController::PerformAction(UPawnAction& Action, EAIRequestPriority::Type Priority, UObject* const InInstigator /*= NULL*/)
+bool AAIController::PerformAction(UDEPRECATED_PawnAction& Action, EAIRequestPriority::Type Priority, UObject* const InInstigator /*= NULL*/)
 {
-	return ActionsComp != NULL && ActionsComp->PushAction(Action, Priority, InInstigator);
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	return ActionsComp_DEPRECATED != NULL && ActionsComp_DEPRECATED->PushAction(Action, Priority, InInstigator);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 FString AAIController::GetDebugIcon() const
@@ -1104,3 +1149,4 @@ void AAIController::SetGenericTeamId(const FGenericTeamId& NewTeamID)
 		// @todo notify perception system that a controller changed team ID
 	}
 }
+

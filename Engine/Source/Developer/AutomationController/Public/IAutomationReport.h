@@ -4,6 +4,8 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
+#include "AutomationTestExcludelist.h"
+#include "AutomationState.h"
 #include "UObject/ObjectMacros.h"
 #include "IAutomationReport.generated.h"
 
@@ -21,56 +23,20 @@ typedef TSharedPtr<class IAutomationReport> IAutomationReportPtr;
 typedef TSharedRef<class IAutomationReport> IAutomationReportRef;
 
 
-/** Enumeration of unit test status for special dialog */
-UENUM()
-enum class EAutomationState : uint8
-{
-	NotRun,					// Automation test was not run
-	InProcess,				// Automation test is running now
-	Fail,					// Automation test was run and failed
-	Success,				// Automation test was run and succeeded
-	NotEnoughParticipants,	// Automation test was not run due to number of participants
-};
-
-
-inline const TCHAR* ToString(EAutomationState InType)
-{
-	switch (InType)
-	{
-		case (EAutomationState::NotRun) :
-		{
-			return TEXT("NotRun");
-		}
-		case (EAutomationState::Fail) :
-		{
-			return TEXT("Fail");
-		}
-		case (EAutomationState::Success) :
-		{
-			return TEXT("Pass");
-		}
-		case (EAutomationState::InProcess) :
-		{
-			return TEXT("InProgress");
-		}
-		case (EAutomationState::NotEnoughParticipants) :
-		{
-			return TEXT("NotEnoughParticipants");
-		}
-		default:
-		{
-			return TEXT("Invalid");
-		}
-	}
-	return TEXT("Invalid");
-}
-
 UENUM()
 enum class EAutomationArtifactType : uint8
 {
 	None,
 	Image,
 	Comparison
+};
+
+UENUM()
+enum class EComparisonFileTypes : uint8
+{
+	Unapproved,
+	Approved,
+	Difference
 };
 
 USTRUCT()
@@ -85,7 +51,7 @@ public:
 	{
 	}
 
-	FAutomationArtifact(FGuid InUniqueId, const FString& InName, EAutomationArtifactType InType, const TMap<FString, FString>& InLocalFiles)
+	FAutomationArtifact(FGuid InUniqueId, const FString& InName, EAutomationArtifactType InType, const TMap<EComparisonFileTypes, FString>& InLocalFiles)
 		: Id(InUniqueId)
 		, Name(InName)
 		, Type(InType)
@@ -105,11 +71,12 @@ public:
 	EAutomationArtifactType Type;
 
 	UPROPERTY()
-	TMap<FString, FString> Files;
+	TMap<EComparisonFileTypes, FString> Files;
 
 	// Local Files are the files generated during a testing run, once exported, the individual file paths
 	// should be stored in the Files map.
-	TMap<FString, FString> LocalFiles;
+
+	TMap<EComparisonFileTypes, FString> LocalFiles;
 };
 
 /**
@@ -172,7 +139,7 @@ public:
 	/* The time this test took to complete */
 	float Duration;
 
-	/* The name of the instance which reported these results */
+	/* The instance which reported these results */
 	FString GameInstance;
 
 	/** Artifacts generated during the run of the test. */
@@ -297,6 +264,9 @@ public:
 	/** Gets the names of all the enabled tests */
 	virtual void GetEnabledTestNames(TArray<FString>& OutEnabledTestNames, FString CurrentPath) const = 0;
 
+	/** Gets the names of all the filtered tests */
+	virtual void GetFilteredTestNames(TArray<FString>& OutFilteredTestNames, FString CurrentPath) const = 0;
+
 	/** Sets which tests are enabled based off the enabled tests list */
 	virtual void SetEnabledTests(const TArray<FString>& EnabledTests, FString CurrentPath) = 0;
 
@@ -391,6 +361,13 @@ public:
 	virtual EAutomationState GetState(const int32 ClusterIndex, const int32 PassIndex) const = 0;
 
 	/**
+	 * Set the state of the test (not run, in process, success, failure).
+	 *
+	 * @param State EAutomationState state to set.
+	 */
+	virtual void SetState(const EAutomationState State) = 0;
+
+	/**
 	 * Gets a copy of errors and warnings that were found
 	 *
 	 * @param ClusterIndex Index of the platform we are requesting test results for.
@@ -420,8 +397,8 @@ public:
 	 * @param ClusterIndex - Index of the platform reporting the results of this test.  See AutomationDeviceClusterManager.
 	 * @return the name of the device.
 	 */
-	virtual FString GetGameInstanceName( const int32 ClusterIndex ) = 0;
-
+	virtual FString GetGameInstanceName(const int32 ClusterIndex) = 0;
+	
 	/**
 	 * Add a child test to the hierarchy, creating internal tree nodes as needed.
 	 * If NewTestName is Editor.Maps.Loadall.TestName, this will create nodes for Editor, Maps, Loadall, and then a leaf node for the test name with the associated command line
@@ -514,6 +491,44 @@ public:
 
 	/** Stop the test which is creating this report. */
 	virtual void StopRunningTest() = 0;
+
+	/**
+	* Is the test need to be skipped.
+	*
+	* @param OutReasaon the related reason of the exclusion information
+	* @param OutWarn the related warning of the exclusion
+	* @return true if the test is inside exclude list.
+	*/
+	virtual bool IsToBeSkipped(FName* OutReason = nullptr, bool* OutWarn = nullptr) const = 0;
+
+	/**
+	* Is the test need to be skipped on specific conditions.
+	*
+	* @return true if the test is inside exclude list.
+	*/
+	virtual bool IsToBeSkippedOnConditions() const = 0;
+
+	/**
+	* Is the test is to be skipped through propagation.
+	*
+	* @return true if the test is inside exclude list via a propagation.
+	*/
+	virtual bool IsToBeSkippedByPropagation() const = 0;
+	
+	/**
+	* Add or remove test from exclude list.
+	*
+	* @param if true, add this item to the exclude list, remove otherwise.
+	*/
+	virtual void SetSkipFlag(bool bEnableSkip, const FAutomationTestExcludelistEntry* Template = nullptr, bool bFromPropagation = false) = 0;
+
+	/**
+	* Produce exclude options .
+	*
+	* @return exclude options based on report exclude info.
+	*/
+	virtual TSharedPtr<FAutomationTestExcludeOptions> GetExcludeOptions() = 0;
+
 
 	// Event that allows log to refresh once a test has finished
 	DECLARE_DELEGATE_OneParam(FOnSetResultsEvent, TSharedPtr<IAutomationReport>);

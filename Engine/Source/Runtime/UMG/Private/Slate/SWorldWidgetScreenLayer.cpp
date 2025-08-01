@@ -7,6 +7,7 @@
 #include "Blueprint/SlateBlueprintLibrary.h"
 #include "Engine/GameViewportClient.h"
 #include "Widgets/SViewport.h"
+#include "SceneView.h"
 #include "Slate/SGameLayerManager.h"
 
 static int32 GSlateWorldWidgetZOrder = 1;
@@ -17,6 +18,13 @@ static FAutoConsoleVariableRef CVarSlateWorldWidgetZOrder(
 	TEXT(" 0: Disable re-ordering\n")
 	TEXT(" 1: Re-order by distance (default, less batching, less artifacts when widgets overlap)"),
 	ECVF_Default
+	);
+
+static bool GSlateWorldWidgetIgnoreNotVisibleWidgets = false;
+static FAutoConsoleVariableRef CVarSlateWorldWidgetIgnoreNotVisibleWidgets(
+	TEXT("Slate.WorldWidgetIgnoreNotVisibleWidgets"),
+	GSlateWorldWidgetIgnoreNotVisibleWidgets,
+	TEXT("Whether to not update the position of world widgets if they are not visible - to prevent invalidating the whole layer unnecessarily")
 	);
 
 SWorldWidgetScreenLayer::FComponentEntry::FComponentEntry()
@@ -107,7 +115,7 @@ void SWorldWidgetScreenLayer::Tick(const FGeometry& AllottedGeometry, const doub
 			ULocalPlayer const* const LP = PlayerController->GetLocalPlayer();
 			if (LP && LP->ViewportClient)
 			{
-				bHasProjectionData = LP->GetProjectionData(ViewportClient->Viewport, eSSP_FULL, /*out*/ ProjectionData);
+				bHasProjectionData = LP->GetProjectionData(ViewportClient->Viewport, /*out*/ ProjectionData);
 				if (bHasProjectionData)
 				{
 					ViewProjectionMatrix = ProjectionData.ComputeViewProjectionMatrix();
@@ -123,13 +131,36 @@ void SWorldWidgetScreenLayer::Tick(const FGeometry& AllottedGeometry, const doub
 					FVector WorldLocation = SceneComponent->GetComponentLocation();
 
 					FVector2D ScreenPosition2D;
-					const bool bProjected = bHasProjectionData ? FSceneView::ProjectWorldToScreen(WorldLocation, ProjectionData.GetConstrainedViewRect(), ViewProjectionMatrix, ScreenPosition2D) : false;
+					const bool bProjected = [&Entry, bHasProjectionData, &WorldLocation, &ScreenPosition2D, &ProjectionData, &ViewProjectionMatrix]()
+					{
+						if (!bHasProjectionData)
+						{
+							return false;
+						}
+
+						if (GSlateWorldWidgetIgnoreNotVisibleWidgets && 
+							Entry.WidgetComponent && 
+							!Entry.WidgetComponent->IsWidgetVisible())
+						{
+							return false;
+						}
+
+						return FSceneView::ProjectWorldToScreen(WorldLocation, ProjectionData.GetConstrainedViewRect(), ViewProjectionMatrix, ScreenPosition2D);
+					}();
+
 					if (bProjected)
 					{
-						const float ViewportDist = FVector::Dist(ProjectionData.ViewOrigin, WorldLocation);
-						const FVector2D RoundedPosition2D(FMath::RoundToInt(ScreenPosition2D.X), FMath::RoundToInt(ScreenPosition2D.Y));
+						const double ViewportDist = FVector::Dist(ProjectionData.ViewOrigin, WorldLocation);
+						const FVector2D RoundedPosition2D(FMath::RoundToDouble(ScreenPosition2D.X), FMath::RoundToDouble(ScreenPosition2D.Y));
+
+						// If the root widget has pixel snapping disabled, then don't pixel snap the screen coordinates either otherwise
+						// it'll always jump between pixels. This saves needing an explicit flag on the widget component, and is probably 
+						// a better delegation of responsibility anyway, since changing the widget type can change the snapping as it wants
+						bool bDisablePixelSnapping = Entry.Widget->GetPixelSnapping() == EWidgetPixelSnapping::Disabled;
+						const FVector2D ScreenPositionToUse = bDisablePixelSnapping ? ScreenPosition2D : RoundedPosition2D;
+						
 						FVector2D ViewportPosition2D;
-						USlateBlueprintLibrary::ScreenToViewport(PlayerController, RoundedPosition2D, ViewportPosition2D);
+						USlateBlueprintLibrary::ScreenToViewport(PlayerController, ScreenPositionToUse, OUT ViewportPosition2D);
 
 						const FVector ViewportPosition(ViewportPosition2D.X, ViewportPosition2D.Y, ViewportDist);
 
@@ -147,26 +178,26 @@ void SWorldWidgetScreenLayer::Tick(const FGeometry& AllottedGeometry, const doub
 								FVector2D ComponentDrawSize = Entry.WidgetComponent->GetDrawSize();
 								FVector2D ComponentPivot = Entry.WidgetComponent->GetPivot();
 								
-								CanvasSlot->AutoSize(ComponentDrawSize.IsZero() || Entry.WidgetComponent->GetDrawAtDesiredSize());
-								CanvasSlot->Offset(FMargin(LocalPosition.X, LocalPosition.Y, ComponentDrawSize.X, ComponentDrawSize.Y));
-								CanvasSlot->Anchors(FAnchors(0, 0, 0, 0));
-								CanvasSlot->Alignment(ComponentPivot);
+								CanvasSlot->SetAutoSize(ComponentDrawSize.IsZero() || Entry.WidgetComponent->GetDrawAtDesiredSize());
+								CanvasSlot->SetOffset(FMargin(LocalPosition.X, LocalPosition.Y, ComponentDrawSize.X, ComponentDrawSize.Y));
+								CanvasSlot->SetAnchors(FAnchors(0, 0, 0, 0));
+								CanvasSlot->SetAlignment(ComponentPivot);
 								
 								if (GSlateWorldWidgetZOrder != 0)
 								{
-									CanvasSlot->ZOrder(-ViewportPosition.Z);
+									CanvasSlot->SetZOrder(static_cast<float>(- ViewportPosition.Z));
 								}
 							}
 							else
 							{
-								CanvasSlot->AutoSize(DrawSize.IsZero());
-								CanvasSlot->Offset(FMargin(LocalPosition.X, LocalPosition.Y, DrawSize.X, DrawSize.Y));
-								CanvasSlot->Anchors(FAnchors(0, 0, 0, 0));
-								CanvasSlot->Alignment(Pivot);
+								CanvasSlot->SetAutoSize(DrawSize.IsZero());
+								CanvasSlot->SetOffset(FMargin(LocalPosition.X, LocalPosition.Y, DrawSize.X, DrawSize.Y));
+								CanvasSlot->SetAnchors(FAnchors(0, 0, 0, 0));
+								CanvasSlot->SetAlignment(Pivot);
 
 								if (GSlateWorldWidgetZOrder != 0)
 								{
-									CanvasSlot->ZOrder(-ViewportPosition.Z);
+									CanvasSlot->SetZOrder(static_cast<float>( - ViewportPosition.Z));
 								}
 							}
 						}

@@ -35,7 +35,6 @@ void FWebBrowserViewport::Tick( const FGeometry& AllottedGeometry, double InCurr
 		// Forward the AllottedGeometry to the WebBrowserWindow so the IME implementation can use it
 		TSharedPtr<FCEFWebBrowserWindow> CefWebBrowserWindow = StaticCastSharedPtr<FCEFWebBrowserWindow>(WebBrowserWindow);
 		CefWebBrowserWindow->UpdateCachedGeometry(AllottedGeometry);
-		CefWebBrowserWindow->SetZoomLevelByPercentage(DPI);
 #endif
 	}
 }
@@ -94,6 +93,11 @@ FReply FWebBrowserViewport::OnMouseMove(const FGeometry& MyGeometry, const FPoin
 FReply FWebBrowserViewport::OnMouseWheel(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
 {
 	return WebBrowserWindow->OnMouseWheel(MyGeometry, MouseEvent, bIsPopup);
+}
+
+FReply FWebBrowserViewport::OnTouchGesture( const FGeometry& MyGeometry, const FPointerEvent& GestureEvent )
+{
+	return WebBrowserWindow->OnTouchGesture(MyGeometry, GestureEvent, bIsPopup);
 }
 
 FReply FWebBrowserViewport::OnMouseButtonDoubleClick(const FGeometry& InMyGeometry, const FPointerEvent& InMouseEvent)

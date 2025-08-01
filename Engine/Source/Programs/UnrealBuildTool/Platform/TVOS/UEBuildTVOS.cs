@@ -1,34 +1,19 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 using System;
-using System.Collections.Generic;
-using System.Text;
-using System.Diagnostics;
-using System.IO;
-using System.Xml;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
 
 namespace UnrealBuildTool
 {
 	class TVOSProjectSettings : IOSProjectSettings
 	{
 		/// <summary>
-		/// Which version of the iOS to allow at run time
-		/// </summary>
-		public override string RuntimeVersion
-		{
-			get { return "10.0"; }
-		}
-
-		/// <summary>
 		/// which devices the game is allowed to run on
 		/// </summary>
-		public override string RuntimeDevices
-		{
-			get { return "3"; }
-		}
+		public override string RuntimeDevices => "3";
 
-		public TVOSProjectSettings(FileReference ProjectFile, String Bundle)
+		public TVOSProjectSettings(FileReference? ProjectFile, String? Bundle)
 			: base(ProjectFile, UnrealTargetPlatform.TVOS, Bundle)
 		{
 		}
@@ -36,26 +21,17 @@ namespace UnrealBuildTool
 
 	class TVOSProvisioningData : IOSProvisioningData
 	{
-		public TVOSProvisioningData(TVOSProjectSettings ProjectSettings, bool bForDistribution)
-			: base(ProjectSettings, true, bForDistribution)
+		public TVOSProvisioningData(TVOSProjectSettings ProjectSettings, bool bForDistribution, ILogger Logger)
+			: base(ProjectSettings, true, bForDistribution, Logger)
 		{
 		}
 	}
 
 	class TVOSPlatform : IOSPlatform
-    {
-		public TVOSPlatform(IOSPlatformSDK InSDK)
-			: base(InSDK, UnrealTargetPlatform.TVOS)
+	{
+		public TVOSPlatform(UEBuildPlatformSDK InSDK, ILogger Logger)
+			: base(InSDK, UnrealTargetPlatform.TVOS, Logger)
 		{
-		}
-
-		// by default, use an empty architecture (which is really just a modifer to the platform for some paths/names)
-		public static string TVOSArchitecture = "";
-
-		// The current architecture - affects everything about how UBT operates on IOS
-		public override string GetDefaultArchitecture(FileReference ProjectFile)
-		{
-			return TVOSArchitecture;
 		}
 
 		public override void ValidateTarget(TargetRules Target)
@@ -71,24 +47,24 @@ namespace UnrealBuildTool
 			}
 		}
 
-		public new TVOSProjectSettings ReadProjectSettings(FileReference ProjectFile, string Bundle = "")
+		public new TVOSProjectSettings ReadProjectSettings(FileReference? ProjectFile, string Bundle = "")
 		{
 			return (TVOSProjectSettings)base.ReadProjectSettings(ProjectFile, Bundle);
 		}
 
-		protected override IOSProjectSettings CreateProjectSettings(FileReference ProjectFile, string Bundle)
+		protected override IOSProjectSettings CreateProjectSettings(FileReference? ProjectFile, string? Bundle)
 		{
 			return new TVOSProjectSettings(ProjectFile, Bundle);
 		}
 
 		public TVOSProvisioningData ReadProvisioningData(TVOSProjectSettings ProjectSettings, bool bForDistribution = false)
-        {
+		{
 			return (TVOSProvisioningData)base.ReadProvisioningData(ProjectSettings, bForDistribution);
 		}
 
 		protected override IOSProvisioningData CreateProvisioningData(IOSProjectSettings ProjectSettings, bool bForDistribution)
 		{
-			return new TVOSProvisioningData((TVOSProjectSettings)ProjectSettings, bForDistribution);
+			return new TVOSProvisioningData((TVOSProjectSettings)ProjectSettings, bForDistribution, Logger);
 		}
 
 		public override void ModifyModuleRulesForOtherPlatform(string ModuleName, ModuleRules Rules, ReadOnlyTargetRules Target)
@@ -96,12 +72,12 @@ namespace UnrealBuildTool
 			base.ModifyModuleRulesForOtherPlatform(ModuleName, Rules, Target);
 
 			// don't do any target platform stuff if SDK is not available
-			if (!UEBuildPlatform.IsPlatformAvailable(Platform))
+			if (!UEBuildPlatform.IsPlatformAvailableForTarget(Platform, Target))
 			{
 				return;
 			}
 
-			if ((Target.Platform == UnrealTargetPlatform.Win32) || (Target.Platform == UnrealTargetPlatform.Win64) || (Target.Platform == UnrealTargetPlatform.Mac))
+			if ((Target.Platform == UnrealTargetPlatform.Win64) || (Target.Platform == UnrealTargetPlatform.Mac))
 			{
 				// allow standalone tools to use targetplatform modules, without needing Engine
 				if (Target.bForceBuildTargetPlatforms)
@@ -111,7 +87,7 @@ namespace UnrealBuildTool
 				}
 			}
 		}
-    
+
 		/// <summary>
 		/// Setup the target environment for building
 		/// </summary>
@@ -136,36 +112,31 @@ namespace UnrealBuildTool
 		public override UEToolChain CreateToolChain(ReadOnlyTargetRules Target)
 		{
 			TVOSProjectSettings ProjectSettings = ((TVOSPlatform)UEBuildPlatform.GetBuildPlatform(UnrealTargetPlatform.TVOS)).ReadProjectSettings(Target.ProjectFile);
-			return new TVOSToolChain(Target, ProjectSettings);
+			return new TVOSToolChain(Target, ProjectSettings, Logger);
 		}
 
 		public override void Deploy(TargetReceipt Receipt)
 		{
-			new UEDeployTVOS().PrepTargetForDeployment(Receipt);
+			new UEDeployTVOS(Logger).PrepTargetForDeployment(Receipt);
 		}
 	}
 
 	class TVOSPlatformFactory : UEBuildPlatformFactory
 	{
-		public override UnrealTargetPlatform TargetPlatform
-		{
-			get { return UnrealTargetPlatform.TVOS; }
-		}
+		public override UnrealTargetPlatform TargetPlatform => UnrealTargetPlatform.TVOS;
 
 		/// <summary>
 		/// Register the platform with the UEBuildPlatform class
 		/// </summary>
-		public override void RegisterBuildPlatforms()
+		public override void RegisterBuildPlatforms(ILogger Logger)
 		{
-			IOSPlatformSDK SDK = new IOSPlatformSDK();
-			SDK.ManageAndValidateSDK();
+			ApplePlatformSDK SDK = new ApplePlatformSDK(Logger);
 
 			// Register this build platform for IOS
-			UEBuildPlatform.RegisterBuildPlatform(new TVOSPlatform(SDK));
+			UEBuildPlatform.RegisterBuildPlatform(new TVOSPlatform(SDK, Logger), Logger);
 			UEBuildPlatform.RegisterPlatformWithGroup(UnrealTargetPlatform.TVOS, UnrealPlatformGroup.Apple);
 			UEBuildPlatform.RegisterPlatformWithGroup(UnrealTargetPlatform.TVOS, UnrealPlatformGroup.IOS);
 		}
 	}
-
 }
 

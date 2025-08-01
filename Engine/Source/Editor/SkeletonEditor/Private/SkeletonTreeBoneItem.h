@@ -3,21 +3,31 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Styling/SlateColor.h"
 #include "Input/Reply.h"
+#include "ISkeletonTreeItem.h"
+#include "SkeletonTreeItem.h"
+#include "Animation/Skeleton.h"
+#include "BoneProxy.h"
+#include "UObject/GCObject.h"
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "Styling/SlateColor.h"
 #include "Layout/Visibility.h"
 #include "Widgets/SWidget.h"
 #include "Fonts/SlateFontInfo.h"
 #include "Widgets/Views/STableViewBase.h"
 #include "Widgets/Views/STableRow.h"
-#include "ISkeletonTreeItem.h"
-#include "SkeletonTreeItem.h"
-#include "Animation/Skeleton.h"
 #include "Widgets/Input/SComboButton.h"
-#include "BoneProxy.h"
-#include "UObject/GCObject.h"
+#endif
 
+
+class SComboButton;
+class SWidget;
 class UDebugSkelMeshComponent;
+struct EVisibility;
+struct FSlateBrush;
+struct FSlateColor;
+struct FSlateFontInfo;
 
 class FSkeletonTreeBoneItem : public FSkeletonTreeItem, public FGCObject
 {
@@ -28,7 +38,7 @@ public:
 
 	/** ISkeletonTreeItem interface */
 	virtual void GenerateWidgetForNameColumn(TSharedPtr< SHorizontalBox > Box, const TAttribute<FText>& FilterText, FIsSelected InIsSelected) override;
-	virtual TSharedRef< SWidget > GenerateWidgetForDataColumn(const FName& DataColumnName) override;
+	virtual TSharedRef< SWidget > GenerateWidgetForDataColumn(const FName& DataColumnName, FIsSelected InIsSelected) override;
 	virtual FName GetRowItemName() const override { return BoneName; }
 	virtual void HandleDragEnter(const FDragDropEvent& DragDropEvent) override;
 	virtual void HandleDragLeave(const FDragDropEvent& DragDropEvent) override;
@@ -38,6 +48,10 @@ public:
 
 	/** FGCObject interface */
 	virtual void AddReferencedObjects( FReferenceCollector& Collector ) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FSkeletonTreeBoneItem");
+	}
 
 	/** Check to see if the specified bone is weighted in the specified component */
 	bool IsBoneWeighted(int32 MeshBoneIndex, UDebugSkelMeshComponent* PreviewComponent);
@@ -56,7 +70,7 @@ private:
 	FSlateFontInfo GetBoneTextFont() const;
 
 	/** Get the text color based on bone part of skeleton or part of mesh */
-	FSlateColor GetBoneTextColor() const;
+	FSlateColor GetBoneTextColor(FIsSelected InIsSelected) const;
 
 	/** Brush of the icon */
 	const FSlateBrush* GetLODIcon() const;
@@ -73,18 +87,36 @@ private:
 	/** Get Title for Bone Translation Retargeting Mode menu. */
 	FText GetTranslationRetargetingModeMenuTitle() const;
 
-	/** Callback from a slider widget if the text entry or slider movement is used */
+	/** Callback from a slider widget if the text entry is used */
 	void OnBlendSliderCommitted(float NewValue, ETextCommit::Type CommitType);
+
+	/** Callback from a slider widget if the slider is used */
+	void OnBlendSliderChanged(float NewValue);
+
+	/** Callback from a slider widget when the user begins sliding */
+	void OnBeginBlendSliderMovement();
+
+	/** Callback from a slider widget when the user has finished sliding */
+	void OnEndBlendSliderMovement(float NewValue);
 
 	/** Set Translation Retargeting Mode for this bone. */
 	void SetBoneTranslationRetargetingMode(EBoneTranslationRetargetingMode::Type NewRetargetingMode);
 
-	/** Set current Blend Scale for this bone */
-	void SetBoneBlendProfileScale(float NewScale, bool bRecurse);
+	/** Get the current Blend Scale for this bone */
+	float GetBoneBlendProfileScale() const;
+
+	/** Get the max slider value supported by the selected blend profile's mode*/
+	TOptional<float> GetBlendProfileMaxSliderValue() const;
+
+	/** Get the min slider value supported by the selected blend profile's mode*/
+	TOptional<float> GetBlendProfileMinSliderValue() const;
+
+	/** Used to hide the Bone Profile row widget if there is no current Blend Profile */
+	EVisibility GetBoneBlendProfileVisibility() const;
 
 private:
 	/** Bone proxy object */
-	UBoneProxy* BoneProxy;
+	TObjectPtr<UBoneProxy> BoneProxy;
 
 	/** The actual bone data that we create Slate widgets to display */
 	FName BoneName;
@@ -98,4 +130,6 @@ private:
 	/** Reference to the retargeting combo button */
 	TSharedPtr<SComboButton> RetargetingComboButton;
 
+	/** True if the user is in a transaction when moving the blend profile slider */
+	bool bBlendSliderStartedTransaction;
 };

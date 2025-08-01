@@ -17,7 +17,7 @@ class UChildConnection
 	GENERATED_UCLASS_BODY()
 
 	UPROPERTY(transient)
-	class UNetConnection* Parent;
+	TObjectPtr<class UNetConnection> Parent;
 
 public:
 
@@ -71,7 +71,7 @@ public:
 
 	virtual void Tick(float DeltaSeconds) override
 	{
-		State = Parent->State;
+		SetConnectionState(Parent->GetConnectionState());
 	}
 
 	virtual void HandleClientPlayer(class APlayerController* PC, class UNetConnection* NetConnection) override;
@@ -79,4 +79,6 @@ public:
 
 	virtual void InitRemoteConnection(UNetDriver* InDriver, class FSocket* InSocket, const FURL& InURL, const class FInternetAddr& InRemoteAddr, EConnectionState InState, int32 InMaxPacket = 0, int32 InPacketOverhead = 0) override {}
 	virtual void InitLocalConnection(UNetDriver* InDriver, class FSocket* InSocket, const FURL& InURL, EConnectionState InState, int32 InMaxPacket = 0, int32 InPacketOverhead = 0) override {}
+
+	virtual void InitChildConnection(UNetDriver* InDriver, UNetConnection* InParent);
 };

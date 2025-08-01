@@ -25,7 +25,7 @@
 class UMaterialExpressionTextureSample;
 class FWebBrowserTextureSamplePool;
 
-class SAndroidWebBrowserWidget : public SLeafWidget
+class SAndroidWebBrowserWidget : public SViewport
 {
 	SLATE_BEGIN_ARGS(SAndroidWebBrowserWidget)
 		: _InitialURL("about:blank")
@@ -58,6 +58,18 @@ public:
 	void GoForward();
 	bool CanGoBack();
 	bool CanGoForward();
+
+	virtual FReply OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
+	virtual FReply OnMouseButtonUp(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
+	virtual FReply OnMouseMove(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
+
+	void SendTouchDown(FVector2D Position);
+	void SendTouchUp(FVector2D Position);
+	void SendTouchMove(FVector2D Position);
+
+	virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
+	virtual FReply OnKeyUp(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
+	virtual FReply OnKeyChar(const FGeometry& MyGeometry, const FCharacterEvent& InCharacterEvent) override;
 
 	// WebViewClient callbacks
 
@@ -96,9 +108,16 @@ protected:
 
 	TWeakPtr<FAndroidWebBrowserWindow> WebBrowserWindowPtr;
 private:
+	FVector2D ConvertMouseEventToLocal(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent);
 
 	/** Enable 3D appearance for Android. */
 	bool IsAndroid3DBrowser;
+
+	/** Should use bitmap rendering for 3D. */
+	bool bShouldUseBitmapRender;
+
+	/** Mouse captured */
+	bool bMouseCapture;
 
 	/** The Java side webbrowser interface. */
 	TSharedPtr<FJavaAndroidWebBrowser, ESPMode::ThreadSafe> JavaWebBrowser;

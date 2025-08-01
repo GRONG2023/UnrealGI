@@ -1,24 +1,22 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "SAnimTrackArea.h"
+#include "AnimTimeline/SAnimTrackArea.h"
 #include "Types/PaintArgs.h"
 #include "Layout/ArrangedChildren.h"
 #include "Rendering/DrawElements.h"
 #include "Layout/LayoutUtils.h"
 #include "Widgets/SWeakWidget.h"
-#include "EditorStyleSet.h"
-#include "SAnimTrack.h"
-#include "SAnimOutliner.h"
-#include "AnimTimelineTrack.h"
-#include "AnimModel.h"
-#include "AnimTimeSliderController.h"
+#include "Styling/AppStyle.h"
+#include "AnimTimeline/SAnimTrack.h"
+#include "AnimTimeline/SAnimOutliner.h"
+#include "AnimTimeline/AnimTimelineTrack.h"
+#include "AnimTimeline/AnimModel.h"
+#include "AnimTimeline/AnimTimeSliderController.h"
 
 FAnimTrackAreaSlot::FAnimTrackAreaSlot(const TSharedPtr<SAnimTrack>& InSlotContent)
+	: TAlignmentWidgetSlotMixin<FAnimTrackAreaSlot>(HAlign_Fill, VAlign_Top)
 {
 	TrackWidget = InSlotContent;
-	
-	HAlignment = HAlign_Fill;
-	VAlignment = VAlign_Top;
 
 	AttachWidget(
 		SNew(SWeakWidget)
@@ -53,7 +51,7 @@ void SAnimTrackArea::Empty()
 void SAnimTrackArea::AddTrackSlot(const TSharedRef<FAnimTimelineTrack>& InTrack, const TSharedPtr<SAnimTrack>& InSlot)
 {
 	TrackSlots.Add(InTrack, InSlot);
-	Children.Add(new FAnimTrackAreaSlot(InSlot));
+	Children.AddSlot(FAnimTrackAreaSlot::FSlotArguments(MakeUnique<FAnimTrackAreaSlot>(InSlot)));
 }
 
 TSharedPtr<SAnimTrack> SAnimTrackArea::FindTrackSlot(const TSharedRef<FAnimTimelineTrack>& InTrack)
@@ -78,8 +76,8 @@ void SAnimTrackArea::OnArrangeChildren(const FGeometry& AllottedGeometry, FArran
 
 		const FMargin Padding(0, CurChild.GetVerticalOffset(), 0, 0);
 
-		AlignmentArrangeResult XResult = AlignChild<Orient_Horizontal>(AllottedGeometry.GetLocalSize().X, CurChild, Padding, 1.0f, false);
-		AlignmentArrangeResult YResult = AlignChild<Orient_Vertical>(AllottedGeometry.GetLocalSize().Y, CurChild, Padding, 1.0f, false);
+		const AlignmentArrangeResult XResult = AlignChild<Orient_Horizontal>(static_cast<float>(AllottedGeometry.GetLocalSize().X), CurChild, Padding, 1.0f, false);
+		const AlignmentArrangeResult YResult = AlignChild<Orient_Vertical>(static_cast<float>(AllottedGeometry.GetLocalSize().Y), CurChild, Padding, 1.0f, false);
 
 		ArrangedChildren.AddWidget(ChildVisibility,
 			AllottedGeometry.MakeChild(
@@ -170,7 +168,7 @@ FReply SAnimTrackArea::OnMouseMove( const FGeometry& MyGeometry, const FPointerE
 {
 	UpdateHoverStates(MyGeometry, MouseEvent);
 
-	TSharedPtr<FAnimTimeSliderController> TimeSliderController = WeakTimeSliderController.Pin();
+	const TSharedPtr<FAnimTimeSliderController> TimeSliderController = WeakTimeSliderController.Pin();
 	if(TimeSliderController.IsValid())
 	{
 		FReply Reply = WeakTimeSliderController.Pin()->OnMouseMove(*this, MyGeometry, MouseEvent);
@@ -180,7 +178,7 @@ FReply SAnimTrackArea::OnMouseMove( const FGeometry& MyGeometry, const FPointerE
 		{
 			if (MouseEvent.IsMouseButtonDown(EKeys::RightMouseButton) && HasMouseCapture())
 			{
-				WeakOutliner.Pin()->ScrollByDelta(-MouseEvent.GetCursorDelta().Y);
+				WeakOutliner.Pin()->ScrollByDelta(static_cast<float>(-MouseEvent.GetCursorDelta().Y));
 			}
 		}
 

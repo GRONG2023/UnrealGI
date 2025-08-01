@@ -54,9 +54,7 @@ namespace BuildPatchServices
 	 * FBuildPatchFileConstructor
 	 * This class controls a thread that constructs files from a file list, given install details, and chunk availability notifications
 	 */
-	class FBuildPatchFileConstructor
-		: public FRunnable
-		, public IControllable
+	class FBuildPatchFileConstructor : public IControllable
 	{
 	public:
 
@@ -77,9 +75,7 @@ namespace BuildPatchServices
 		 */
 		~FBuildPatchFileConstructor();
 
-		// FRunnable interface begin.
-		virtual uint32 Run() override;
-		// FRunnable interface end.
+		void Run();
 
 		// IControllable interface begin.
 		virtual void SetPaused(bool bInIsPaused) override
@@ -92,17 +88,6 @@ namespace BuildPatchServices
 			bShouldAbort = true;
 		}
 		// IControllable interface end.
-
-		/**
-		 * Blocks the calling thread until this one has completed
-		 */
-		void Wait();
-
-		/**
-		 * Get whether the thread has finished working
-		 * @return	true if the thread completed
-		 */
-		bool IsComplete();
 
 		/**
 		 * Get the disk space that was required to perform the installation
@@ -124,24 +109,6 @@ namespace BuildPatchServices
 		FOnBeforeDeleteFile& OnBeforeDeleteFile();
 
 	private:
-
-		/**
-		 * Sets the bIsRunning flag
-		 * @param bRunning	Whether the thread is running
-		 */
-		void SetRunning(bool bRunning);
-
-		/**
-		 * Sets the bIsInited flag
-		 * @param bInited	Whether the thread successfully initialized
-		 */
-		void SetInited(bool bInited);
-
-		/**
-		 * Sets the bInitFailed flag
-		 * @param bFailed	Whether the thread failed on init
-		 */
-		void SetInitFailed(bool bFailed);
 
 		/**
 		 * Count additional bytes processed, and set new install progress value
@@ -172,11 +139,12 @@ namespace BuildPatchServices
 		/**
 		 * Constructs a particular file referenced by the given BuildManifest. The function takes an interface to a class that can provide availability information of chunks so that this
 		 * file construction process can be ran alongside chunk acquisition threads. It will Sleep while waiting for chunks that it needs.
+		 * @param BuildFilename		The relative build filename to use for construction.
 		 * @param FileManifest		The FFileManifest for the file to construct.
 		 * @param bResumeExisting	Whether we should resume from an existing file
 		 * @return	true if no file errors occurred
 		 */
-		bool ConstructFileFromChunks(const FFileManifest& FileManifest, bool bResumeExisting);
+		bool ConstructFileFromChunks(const FString& BuildFilename, const FFileManifest& FileManifest, bool bResumeExisting);
 
 		/**
 		 * Inserts the data data from a chunk into the destination file according to the chunk part info
@@ -197,18 +165,6 @@ namespace BuildPatchServices
 	private:
 		// The configuration for the constructor.
 		const FFileConstructorConfig Configuration;
-
-		// Hold a pointer to my thread for easier deleting.
-		FRunnableThread* Thread;
-
-		// A flag marking that we a running.
-		bool bIsRunning;
-
-		// A flag marking that we initialized correctly.
-		bool bIsInited;
-
-		// A flag marking that our init returned a failure (true means failed).
-		bool bInitFailed;
 
 		// A flag marking that we told the chunk cache to queue required downloads.
 		bool bIsDownloadStarted;

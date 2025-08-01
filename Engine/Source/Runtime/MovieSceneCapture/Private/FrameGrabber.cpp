@@ -58,17 +58,11 @@ void FViewportSurfaceReader::Resize(uint32 Width, uint32 Height)
 	ENQUEUE_RENDER_COMMAND(CreateCaptureFrameTexture)(
 		[Width, Height, This](FRHICommandListImmediate& RHICmdList)
 		{
-			FRHIResourceCreateInfo CreateInfo;
+			const FRHITextureCreateDesc Desc =
+				FRHITextureCreateDesc::Create2D(TEXT("FViewportSurfaceReader_ReadbackTexture"), Width, Height, This->PixelFormat)
+				.SetFlags(ETextureCreateFlags::CPUReadback);
 
-			This->ReadbackTexture = RHICreateTexture2D(
-				Width,
-				Height,
-				This->PixelFormat,
-				1,
-				1,
-				TexCreate_CPUReadback,
-				CreateInfo
-				);
+			This->ReadbackTexture = RHICreateTexture(Desc);
 		});
 }
 
@@ -124,9 +118,9 @@ void FViewportSurfaceReader::ResolveRenderTarget(FViewportSurfaceReader* RenderT
 		GRenderTargetPool.FindFreeElement(RHICmdList, OutputDesc, ResampleTexturePooledRenderTarget, TEXT("ResampleTexture"));
 		check(ResampleTexturePooledRenderTarget);
 
-		const FSceneRenderTargetItem& DestRenderTarget = ResampleTexturePooledRenderTarget->GetRenderTargetItem();
+		FRHITexture* DestRenderTarget = ResampleTexturePooledRenderTarget->GetRHI();
 
-		FRHIRenderPassInfo RPInfo(DestRenderTarget.TargetableTexture, ERenderTargetActions::Load_Store, ReadbackTexture);
+		FRHIRenderPassInfo RPInfo(DestRenderTarget, ERenderTargetActions::Load_Store);
 		RHICmdList.BeginRenderPass(RPInfo, TEXT("FrameGrabberResolveRenderTarget"));
 		{
 			RHICmdList.SetViewport(0, 0, 0.0f, TargetSize.X, TargetSize.Y, 1.0f);
@@ -148,19 +142,14 @@ void FViewportSurfaceReader::ResolveRenderTarget(FViewportSurfaceReader* RenderT
 			GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
 			GraphicsPSOInit.PrimitiveType = PT_TriangleList;
 
-			SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit);
+			SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
 
 			const bool bIsSourceBackBufferSameAsWindowSize = SourceBackBuffer->GetSizeX() == WindowSize.X && SourceBackBuffer->GetSizeY() == WindowSize.Y;
 			const bool bIsSourceBackBufferSameAsTargetSize = TargetSize.X == SourceBackBuffer->GetSizeX() && TargetSize.Y == SourceBackBuffer->GetSizeY();
 
-			if (bIsSourceBackBufferSameAsWindowSize || bIsSourceBackBufferSameAsTargetSize)
-			{
-				PixelShader->SetParameters(RHICmdList, TStaticSamplerState<SF_Point>::GetRHI(), SourceBackBuffer);
-			}
-			else
-			{
-				PixelShader->SetParameters(RHICmdList, TStaticSamplerState<SF_Bilinear>::GetRHI(), SourceBackBuffer);
-			}
+			FRHISamplerState* SamplerState = (bIsSourceBackBufferSameAsWindowSize || bIsSourceBackBufferSameAsTargetSize) ? TStaticSamplerState<SF_Point>::GetRHI() : TStaticSamplerState<SF_Bilinear>::GetRHI();
+
+			SetShaderParametersLegacyPS(RHICmdList, PixelShader, SamplerState, SourceBackBuffer);
 
 			float U = float(CaptureRect.Min.X) / float(SourceBackBuffer->GetSizeX());
 			float V = float(CaptureRect.Min.Y) / float(SourceBackBuffer->GetSizeY());
@@ -180,13 +169,16 @@ void FViewportSurfaceReader::ResolveRenderTarget(FViewportSurfaceReader* RenderT
 				EDRF_Default);
 		}
 		RHICmdList.EndRenderPass();
+		FGPUFenceRHIRef GPUFence = RHICreateGPUFence(TEXT("FrameGrabberReadbackFence"));
+		TransitionAndCopyTexture(RHICmdList, DestRenderTarget, ReadbackTexture, {});
+		RHICmdList.WriteGPUFence(GPUFence);
 
 		if (RenderToReadback)
 		{
 			void* ColorDataBuffer = nullptr;
 
 			int32 Width = 0, Height = 0;
-			RHICmdList.MapStagingSurface(RenderToReadback->ReadbackTexture, ColorDataBuffer, Width, Height);
+			RHICmdList.MapStagingSurface(RenderToReadback->ReadbackTexture, GPUFence.GetReference(), ColorDataBuffer, Width, Height);
 
 			Callback((FColor*)ColorDataBuffer, Width, Height);
 
@@ -386,7 +378,7 @@ void FFrameGrabber::OnBackBufferReadyToPresentCallback(SWindow& SlateWindow, con
 		}
 
 		Payload = RenderThread_PendingFramePayloads[0];
-		RenderThread_PendingFramePayloads.RemoveAt(0, 1, false);
+		RenderThread_PendingFramePayloads.RemoveAt(0, 1, EAllowShrinking::No);
 	}
 
 	if (FrameGrabLatency != GFrameGrabberFrameLatency)
@@ -418,7 +410,7 @@ void FFrameGrabber::OnBackBufferReadyToPresentCallback(SWindow& SlateWindow, con
 		PrevFrameTarget = nullptr;
 	}
 
-	Surfaces[ThisCaptureIndex].Surface.ResolveRenderTarget(PrevFrameTarget, BackBuffer, [=](FColor* ColorBuffer, int32 Width, int32 Height){
+	Surfaces[ThisCaptureIndex].Surface.ResolveRenderTarget(PrevFrameTarget, BackBuffer, [this, ThisCaptureIndex](FColor* ColorBuffer, int32 Width, int32 Height){
 		// Handle the frame
 		OnFrameReady(ThisCaptureIndex, ColorBuffer, Width, Height);
 	});

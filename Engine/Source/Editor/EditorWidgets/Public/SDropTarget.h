@@ -3,15 +3,28 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Styling/SlateColor.h"
+#include "CoreTypes.h"
+#include "Delegates/Delegate.h"
+#include "Framework/SlateDelegates.h"
+#include "Input/DragAndDrop.h"
 #include "Input/Reply.h"
 #include "Layout/Visibility.h"
+#include "Math/Color.h"
+#include "Misc/Attribute.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateColor.h"
+#include "Styling/StyleColors.h"
+#include "Templates/SharedPointer.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
-#include "EditorStyleSet.h"
 
 class FPaintArgs;
+class FSlateRect;
 class FSlateWindowElementList;
+class FWidgetStyle;
+class SWidget;
+struct FGeometry;
+struct FSlateBrush;
 
 /** 
  * A widget that displays a hover cue and handles dropping assets of allowed types onto this widget
@@ -19,53 +32,86 @@ class FSlateWindowElementList;
 class EDITORWIDGETS_API SDropTarget : public SCompoundWidget
 {
 public:
-	/** Called when a valid asset is dropped */
-	DECLARE_DELEGATE_RetVal_OneParam(FReply, FOnDrop, TSharedPtr<FDragDropOperation>);
-
 	DECLARE_DELEGATE_RetVal_OneParam(bool, FVerifyDrag, TSharedPtr<FDragDropOperation>);
+	DECLARE_DELEGATE_OneParam(FOnDragAction, const FDragDropEvent&);
+	DECLARE_DELEGATE_RetVal_OneParam(FReply, FOnDropDeprecated, TSharedPtr<FDragDropOperation>);
 
 	SLATE_BEGIN_ARGS(SDropTarget)
-		: _ValidColor(FLinearColor(0, 1, 0, 1))
-		, _InvalidColor(FLinearColor(1, 0, 0, 1))
-		, _BackgroundColor(FLinearColor(1, 1, 1, 0.50f))
-		, _BackgroundColorHover(FLinearColor(1, 1, 1, 0.25f))
-		, _VerticalImage(FEditorStyle::GetBrush("WideDash.Vertical"))
-		, _HorizontalImage(FEditorStyle::GetBrush("WideDash.Horizontal"))
-		, _BackgroundImage(FEditorStyle::GetBrush("WhiteBrush"))
+		: _ValidColor(FStyleColors::AccentBlue)
+		, _InvalidColor(FStyleColors::Error)
+		, _VerticalImage(FAppStyle::GetBrush("WideDash.Vertical"))
+		, _HorizontalImage(FAppStyle::GetBrush("WideDash.Horizontal"))
+		, _BackgroundImage(FAppStyle::GetBrush("DropTarget.Background"))
+		, _bOnlyRecognizeOnDragEnter(false)
+		, _bUseAllowDropCache(false)
 	{ }
+	
+		UE_DEPRECATED(5.0, "BackgroundColor has been removed. You may alter the background brush to get the same effect.")
+		FArguments& BackgroundColor(const FLinearColor& InBackgroundColor)
+		{
+			return Me();
+		}
+
+		UE_DEPRECATED(5.0, "BackgroundColorHover has been removed. You may alter the background brush when hovered to get the same effect.")
+		FArguments& BackgroundColorHover(const FLinearColor& InBackgroundColor)
+		{
+			return Me();
+		}
 		/* Content to display for the in the drop target */
 		SLATE_DEFAULT_SLOT( FArguments, Content )
 		/** The color of the vertical/horizontal images when the drop data is valid */
-		SLATE_ARGUMENT(FLinearColor, ValidColor)
+		SLATE_ARGUMENT(FSlateColor, ValidColor)
 		/** The color of the vertical/horizontal images when the drop data is not valid */
-		SLATE_ARGUMENT(FLinearColor, InvalidColor)
-		/** The color multiplier that is applied to the background image. */
-		SLATE_ARGUMENT(FLinearColor, BackgroundColor)
-		/** The color multiplier that is applied to the background image on hover. */
-		SLATE_ARGUMENT(FLinearColor, BackgroundColorHover)
+		SLATE_ARGUMENT(FSlateColor, InvalidColor)
 		/** Vertical border image that is used. */
 		SLATE_ARGUMENT(const FSlateBrush*, VerticalImage)
 		/** Horizontal border image that is used. */
 		SLATE_ARGUMENT(const FSlateBrush*, HorizontalImage)
 		/** The background image that is applied after the surface. */
-		SLATE_ARGUMENT(const FSlateBrush*, BackgroundImage)
+		SLATE_ATTRIBUTE(const FSlateBrush*, BackgroundImage)
 		/** Called when a valid asset is dropped */
-		SLATE_EVENT(FOnDrop, OnDrop)
+		SLATE_EVENT(FOnDrop, OnDropped)
 		/** Called to check if an asset is acceptable for dropping */
 		SLATE_EVENT(FVerifyDrag, OnAllowDrop)
 		/** Called to check if an asset is acceptable for dropping */
 		SLATE_EVENT(FVerifyDrag, OnIsRecognized)
+		SLATE_EVENT(FOnDragAction, OnDragEnter)
+		SLATE_EVENT(FOnDragAction, OnDragLeave)
+		/** When this is true, the drop target will only get recognized when entering while drag & dropping. */
+		SLATE_ATTRIBUTE(bool, bOnlyRecognizeOnDragEnter)
+		/** Whether to cache off the results of AllowDrop. Useful when then OnAllowDrop callback is expensive since it's called per frame. */
+		SLATE_ARGUMENT(bool, bUseAllowDropCache)
+
+		FOnDrop ConvertOnDropFn(const FOnDropDeprecated& LegacyDelegate)
+		{
+			return FOnDrop::CreateLambda([LegacyDelegate](const FGeometry&, const FDragDropEvent& DragDropEvent)
+			{
+				if (LegacyDelegate.IsBound())
+				{
+					return LegacyDelegate.Execute(DragDropEvent.GetOperation());
+				}
+
+				return FReply::Unhandled();
+			});
+		}
+		SLATE_EVENT_DEPRECATED(5.0, "Use OnDropped instead.", FOnDropDeprecated, OnDrop, OnDropped, ConvertOnDropFn)
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs );
 
+	void ClearAllowDropCache()
+	{
+		AllowDropCache.Reset();
+	}
+	
 protected:
 
 	bool AllowDrop(TSharedPtr<FDragDropOperation> DragDropOperation) const;
 
 	virtual bool OnAllowDrop(TSharedPtr<FDragDropOperation> DragDropOperation) const;
 	virtual bool OnIsRecognized(TSharedPtr<FDragDropOperation> DragDropOperation) const;
-
+	
+	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
 protected:
 	// SWidget interface
 	virtual FReply OnDragOver( const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent ) override;
@@ -91,17 +137,16 @@ private:
 	FVerifyDrag AllowDropEvent;
 	/** Delegate to call to check validity of the asset */
 	FVerifyDrag IsRecognizedEvent;
-
+	FOnDragAction OnDragEnterEvent;
+	FOnDragAction OnDragLeaveEvent;
+	/** Attribute to check if the drop target should only be useable when actually dragging over it. */
+	TAttribute<bool> bOnlyRecognizeOnDragEnter;
+	bool bUseAllowDropCache = false;
+	
 	/** The color of the vertical/horizontal images when the drop data is valid */
-	FLinearColor ValidColor;
+	FSlateColor ValidColor;
 	/** The color of the vertical/horizontal images when the drop data is not valid */
-	FLinearColor InvalidColor;
-	/** The color multiplier that is applied to the background image. */
-	FLinearColor BackgroundColor;
-	/** The color multiplier that is applied to the background image on hover. */
-	FLinearColor BackgroundColorHover;
-	/** The background image that is applied after the surface. */
-	const FSlateBrush* BackgroundImage;
+	FSlateColor InvalidColor;
 	/** Vertical border image that is used. */
 	const FSlateBrush* VerticalImage;
 	/** Horizontal border image that is used. */
@@ -113,4 +158,8 @@ private:
 	mutable bool bAllowDrop;
 	/** Is the drag operation currently over our airspace? */
 	mutable bool bIsDragOver;
+
+	mutable TOptional<bool> AllowDropCache;
+	bool bIsDragDropping = false;
+	bool bWasDragDroppingLastFrame = false;
 };

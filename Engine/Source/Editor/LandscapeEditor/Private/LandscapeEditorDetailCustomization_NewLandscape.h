@@ -7,14 +7,17 @@
 #include "Styling/SlateColor.h"
 #include "Input/Reply.h"
 #include "Widgets/SWidget.h"
-#include "Editor/LandscapeEditor/Private/LandscapeEdMode.h"
+#include "LandscapeEdMode.h"
 #include "LandscapeFileFormatInterface.h"
 #include "IDetailCustomization.h"
 #include "IPropertyTypeCustomization.h"
 #include "PropertyHandle.h"
-#include "Editor/LandscapeEditor/Private/LandscapeEditorDetailCustomization_Base.h"
+#include "LandscapeEditorDetailCustomization_Base.h"
+#include "LandscapeSubsystem.h"
 
 class IDetailLayoutBuilder;
+
+enum class ENewLandscapePreviewMode : uint8;
 
 /**
  * Slate widgets customizer for the "New Landscape" tool
@@ -34,7 +37,7 @@ public:
 	virtual void CustomizeDetails(IDetailLayoutBuilder& DetailBuilder) override;
 
 public:
-	static void SetScale(float NewValue, ETextCommit::Type, TSharedRef<IPropertyHandle> PropertyHandle);
+	static void SetScale(FVector::FReal NewValue, ETextCommit::Type, TSharedRef<IPropertyHandle> PropertyHandle);
 
 	static TSharedRef<SWidget> GetSectionSizeMenu(TSharedRef<IPropertyHandle> PropertyHandle);
 	static void OnChangeSectionSize(TSharedRef<IPropertyHandle> PropertyHandle, int32 NewSize);
@@ -55,12 +58,18 @@ public:
 
 	FText GetTotalComponentCount() const;
 
+	bool IsCreateButtonEnabled() const;
+	EVisibility GetNewLandscapeErrorVisibility() const;
+	FText GetNewLandscapeErrorText() const;
+	
 	FReply OnCreateButtonClicked();
 	FReply OnFillWorldButtonClicked();
 
-	static EVisibility GetVisibilityOnlyInNewLandscapeMode(ENewLandscapePreviewMode::Type value);
-	ECheckBoxState NewLandscapeModeIsChecked(ENewLandscapePreviewMode::Type value) const;
-	void OnNewLandscapeModeChanged(ECheckBoxState NewCheckedState, ENewLandscapePreviewMode::Type value);
+	static EVisibility GetVisibilityOnlyInNewLandscapeMode(ENewLandscapePreviewMode value);
+
+	/** Called to generate ImportLayer children */
+	void GenerateLayersArrayElementWidget(TSharedRef<IPropertyHandle> InPropertyHandle, int32 InArrayIndex, IDetailChildrenBuilder& InChildrenBuilder);
+	EVisibility GetLayerVisibility(TSharedRef<IPropertyHandle> InPropertyHandle) const;
 
 	// Import
 	static EVisibility GetHeightmapErrorVisibility(TSharedRef<IPropertyHandle> PropertyHandle_HeightmapImportResult);
@@ -75,35 +84,28 @@ public:
 
 	bool GetImportButtonIsEnabled() const;
 	FReply OnFitImportDataButtonClicked();
-	void ChooseBestComponentSizeForImport(FEdModeLandscape* LandscapeEdMode);
 
 	FText GetOverallResolutionTooltip() const;
 
 	// Import layers
 	EVisibility GetMaterialTipVisibility() const;
 
+	void ResetMaterialToDefault(TSharedPtr<IPropertyHandle> InPropertyHandle);
+	bool ShouldShowResetMaterialToDefault(TSharedPtr<IPropertyHandle> InPropertyHandle);
+
+	void ResetLocationToDefault(TSharedPtr<IPropertyHandle> InPropertyHandle);
+	bool ShouldShowResetLocationlToDefault(TSharedPtr<IPropertyHandle> InPropertyHandle);
+
+	void ResetRotationToDefault(TSharedPtr<IPropertyHandle> InPropertyHandle);
+	bool ShouldShowResetRotationToDefault(TSharedPtr<IPropertyHandle> InPropertyHandle);
+
+	void ResetScaleToDefault(TSharedPtr<IPropertyHandle> InPropertyHandle);
+	bool ShouldShowResetScaleToDefault(TSharedPtr<IPropertyHandle> InPropertyHandle);
+
 protected:
-	TArray<FLandscapeFileResolution> ImportResolutions;
+
 	bool bUsingSlider;
-};
 
-class FLandscapeEditorStructCustomization_FLandscapeImportLayer : public FLandscapeEditorStructCustomization_Base
-{
-public:
-	static TSharedRef<IPropertyTypeCustomization> MakeInstance();
-
-	virtual void CustomizeHeader(TSharedRef<IPropertyHandle> StructPropertyHandle, class FDetailWidgetRow& HeaderRow, IPropertyTypeCustomizationUtils& StructCustomizationUtils) override;
-	virtual void CustomizeChildren(TSharedRef<IPropertyHandle> StructPropertyHandle, class IDetailChildrenBuilder& ChildBuilder, IPropertyTypeCustomizationUtils& StructCustomizationUtils) override;
-
-public:
-	static FReply OnLayerFilenameButtonClicked(TSharedRef<IPropertyHandle> PropertyHandle_LayerFilename);
-	static bool ShouldFilterLayerInfo(const struct FAssetData& AssetData, FName LayerName);
-
-	static EVisibility GetImportLayerCreateVisibility(TSharedRef<IPropertyHandle> PropertyHandle_LayerInfo);
-	static TSharedRef<SWidget> OnGetImportLayerCreateMenu(TSharedRef<IPropertyHandle> PropertyHandle_LayerInfo, FName LayerName);
-	static void OnImportLayerCreateClicked(TSharedRef<IPropertyHandle> PropertyHandle_LayerInfo, FName LayerName, bool bNoWeightBlend);
-
-	static EVisibility GetErrorVisibility(TSharedRef<IPropertyHandle> PropertyHandle_ImportResult);
-	static FSlateColor GetErrorColor(TSharedRef<IPropertyHandle> PropertyHandle_ImportResult);
-	static FText GetErrorText(TSharedRef<IPropertyHandle> PropertyHandle_ErrorMessage);
+private:
+	static void AddComponents(ULandscapeInfo* InLandscapeInfo, ULandscapeSubsystem* InLandscapeSubsystem, const TArray<FIntPoint>& InComponentCoordinates, TArray<ALandscapeProxy*>& OutCreatedStreamingProxies);
 };

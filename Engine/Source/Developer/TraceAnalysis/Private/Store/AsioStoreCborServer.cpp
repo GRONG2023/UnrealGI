@@ -8,8 +8,8 @@
 #include "AsioTraceRelay.h"
 #include "CborPayload.h"
 
-namespace Trace
-{
+namespace UE {
+namespace Trace {
 
 ////////////////////////////////////////////////////////////////////////////////
 class FAsioStoreCborPeer
@@ -23,7 +23,6 @@ public:
 
 protected:
 	void					OnPayload();
-	void					OnConnect();
 	void					OnSessionCount();
 	void					OnSessionInfo();
 	void					OnStatus();
@@ -72,14 +71,6 @@ bool FAsioStoreCborPeer::IsOpen() const
 void FAsioStoreCborPeer::Close()
 {
 	Socket.Close();
-}
-
-////////////////////////////////////////////////////////////////////////////////
-void FAsioStoreCborPeer::OnConnect()
-{
-	TPayloadBuilder<> Builder(EStatusCode::Success);
-	Builder.AddInteger("version", int32(EStoreVersion::Value));
-	SendResponse(Builder.Done());
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -134,6 +125,7 @@ void FAsioStoreCborPeer::OnSessionInfo()
 	Builder.AddInteger("id", Session->GetId());
 	Builder.AddInteger("trace_id", Session->GetTraceId());
 	Builder.AddInteger("ip_address", Session->GetIpAddress());
+	Builder.AddInteger("control_port", Session->GetControlPort());
 	SendResponse(Builder.Done());
 }
 
@@ -141,6 +133,7 @@ void FAsioStoreCborPeer::OnSessionInfo()
 void FAsioStoreCborPeer::OnStatus()
 {
 	TPayloadBuilder<> Builder(EStatusCode::Success);
+	Builder.AddString("store_dir", TCHAR_TO_UTF8(Store.GetStoreDir()));
 	Builder.AddInteger("recorder_port", Recorder.GetPort());
 	Builder.AddInteger("change_serial", Store.GetChangeSerial());
 	SendResponse(Builder.Done());
@@ -225,8 +218,9 @@ void FAsioStoreCborPeer::OnTraceRead()
 ////////////////////////////////////////////////////////////////////////////////
 void FAsioStoreCborPeer::OnPayload()
 {
-	FAnsiStringView Method = Response.GetString("$method", "");
-	if (!Method.Len())
+	FUtf8StringView Request = Response.GetString("$request", "");
+	FUtf8StringView Path = Response.GetString("$path", "");
+	if (!Request.Len() || !Path.Len())
 	{
 		SendError(EStatusCode::BadRequest);
 		return;
@@ -236,25 +230,24 @@ void FAsioStoreCborPeer::OnPayload()
 		uint32	Hash;
 		void	(FAsioStoreCborPeer::*Func)();
 	} const DispatchTable[] = {
-		{ QuickStoreHash("connect"),		&FAsioStoreCborPeer::OnConnect },
-		{ QuickStoreHash("session/count"),	&FAsioStoreCborPeer::OnSessionCount },
-		{ QuickStoreHash("session/info"),	&FAsioStoreCborPeer::OnSessionInfo },
-		{ QuickStoreHash("status"),			&FAsioStoreCborPeer::OnStatus },
-		{ QuickStoreHash("trace/count"),	&FAsioStoreCborPeer::OnTraceCount },
-		{ QuickStoreHash("trace/info"),		&FAsioStoreCborPeer::OnTraceInfo },
-		{ QuickStoreHash("trace/read"),		&FAsioStoreCborPeer::OnTraceRead },
+		{ QuickStoreHash("v1/session/count"),	&FAsioStoreCborPeer::OnSessionCount },
+		{ QuickStoreHash("v1/session/info"),	&FAsioStoreCborPeer::OnSessionInfo },
+		{ QuickStoreHash("v1/status"),			&FAsioStoreCborPeer::OnStatus },
+		{ QuickStoreHash("v1/trace/count"),		&FAsioStoreCborPeer::OnTraceCount },
+		{ QuickStoreHash("v1/trace/info"),		&FAsioStoreCborPeer::OnTraceInfo },
+		{ QuickStoreHash("v1/trace/read"),		&FAsioStoreCborPeer::OnTraceRead },
 	};
 
-	uint32 MethodHash = QuickStoreHash(Method);
+	uint32 PathHash = QuickStoreHash(Path);
 	for (const auto& Row : DispatchTable)
 	{
-		if (Row.Hash == MethodHash)
+		if (Row.Hash == PathHash)
 		{
 			return (this->*(Row.Func))();
 		}
 	}
 
-	SendError(EStatusCode::MethodNotAllowed);
+	SendError(EStatusCode::NotFound);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -296,6 +289,11 @@ void FAsioStoreCborPeer::OnIoComplete(uint32 Id, int32 Size)
 		break;
 
 	case OpReadPayloadSize:
+		if (PayloadSize == 0 || PayloadSize > 1024)
+		{
+			SendError(EStatusCode::BadRequest);
+			break;
+		}
 		Socket.Read(Response.Reserve(PayloadSize), PayloadSize, this, OpReadPayload);
 		break;
 
@@ -447,3 +445,4 @@ FAsioTraceRelay* FAsioStoreCborServer::RelayTrace(uint32 Id)
 }
 
 } // namespace Trace
+} // namespace UE

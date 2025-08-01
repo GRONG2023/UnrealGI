@@ -5,6 +5,9 @@
 #include "EntitySystem/BuiltInComponentTypes.h"
 #include "EntitySystem/MovieSceneEntitySystemTask.h"
 #include "EntitySystem/MovieSceneEntitySystemLinker.h"
+#include "EntitySystem/MovieScenePreAnimatedStateSystem.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneHierarchicalBiasSystem)
 
 
 namespace UE
@@ -12,37 +15,63 @@ namespace UE
 namespace MovieScene
 {
 
+struct FEntityGroupSequenceKey
+{
+	FRootInstanceHandle RootInstance;
+	FEntityGroupID GroupID;
+	friend uint32 GetTypeHash(const FEntityGroupSequenceKey& In)
+	{
+		return HashCombine(GetTypeHash(In.RootInstance), GetTypeHash(In.GroupID));
+	}
+	friend bool operator==(const FEntityGroupSequenceKey& A, const FEntityGroupSequenceKey& B)
+	{
+		return A.RootInstance == B.RootInstance && A.GroupID == B.GroupID;
+	}
+};
+
 struct FHierarchicalBiasTask
 {
 	explicit FHierarchicalBiasTask(UMovieSceneEntitySystemLinker* InLinker)
 		: Linker(InLinker)
 	{}
 
-	void InitializeChannel(FMovieSceneBlendChannelID BlendChannel)
+	void InitializeGroup(FRootInstanceHandle RootInstanceHandle, FEntityGroupID GroupID)
 	{
-		MaxBiasByChannel.FindOrAdd(BlendChannel, MIN_int16);
+		MaxBiasByGroup.FindOrAdd(FEntityGroupSequenceKey{ RootInstanceHandle, GroupID }, MIN_int16);
 	}
 
 	bool HasAnyWork() const
 	{
-		return MaxBiasByChannel.Num() != 0;
+		return MaxBiasByGroup.Num() != 0;
 	}
 
-	void ForEachAllocation(const FEntityAllocation* Allocation, TRead<FMovieSceneEntityID> EntityIDs, TRead<FMovieSceneBlendChannelID> BlendChannels, TReadOptional<int16> OptHBiases)
+	void ForEachAllocation(FEntityAllocationIteratorItem Iterator, TRead<FMovieSceneEntityID> EntityIDs, TRead<FRootInstanceHandle> RootInstanceHandles, TRead<FEntityGroupID> GroupIDs, TReadOptional<int16> OptHBiases)
 	{
-		const int32 Num = Allocation->Num();
-		if (OptHBiases)
+		const int32 Num = Iterator.GetAllocation()->Num();
+		const FComponentMask& AllocationType = Iterator.GetAllocationType();
+		const bool bIgnoreBias = AllocationType.Contains(FBuiltInComponentTypes::Get()->Tags.IgnoreHierarchicalBias)
+			|| AllocationType.Contains(FBuiltInComponentTypes::Get()->HierarchicalBlendTarget);
+
+		if (bIgnoreBias)
 		{
 			for (int32 Index = 0; Index < Num; ++Index)
 			{
-				VisitChannel(EntityIDs[Index], BlendChannels[Index], OptHBiases[Index]);
+				FEntityGroupSequenceKey Key{ RootInstanceHandles[Index], GroupIDs[Index] };
+				ActiveContributorsByGroup.Add(Key, EntityIDs[Index]);
+			}
+		}
+		else if (OptHBiases)
+		{
+			for (int32 Index = 0; Index < Num; ++Index)
+			{
+				VisitGroup(EntityIDs[Index], RootInstanceHandles[Index], GroupIDs[Index], OptHBiases[Index]);
 			}
 		}
 		else
 		{
 			for (int32 Index = 0; Index < Num; ++Index)
 			{
-				VisitChannel(EntityIDs[Index], BlendChannels[Index], 0);
+				VisitGroup(EntityIDs[Index], RootInstanceHandles[Index], GroupIDs[Index], 0);
 			}
 		}
 	}
@@ -51,12 +80,12 @@ struct FHierarchicalBiasTask
 	{
 		FBuiltInComponentTypes* Components = FBuiltInComponentTypes::Get();
 
-		for (auto It = ActiveContributorsByChannel.CreateIterator(); It; ++It)
+		for (auto It = ActiveContributorsByGroup.CreateIterator(); It; ++It)
 		{
 			Linker->EntityManager.RemoveComponent(It.Value(), Components->Tags.Ignored);
 		}
 
-		for (auto It = InactiveContributorsByChannel.CreateIterator(); It; ++It)
+		for (auto It = InactiveContributorsByGroup.CreateIterator(); It; ++It)
 		{
 			Linker->EntityManager.AddComponent(It.Value(), Components->Tags.Ignored);
 		}
@@ -64,38 +93,40 @@ struct FHierarchicalBiasTask
 
 private:
 
-	void VisitChannel(FMovieSceneEntityID EntityID, FMovieSceneBlendChannelID BlendChannel, int16 HBias)
+	void VisitGroup(FMovieSceneEntityID EntityID, FRootInstanceHandle RootInstanceHandle, FEntityGroupID GroupID, int16 HBias)
 	{
-		// If this channel hasn't changed at all (ie InitializeChannel was not called for it) do nothing
-		if (int16* ExistingBias = MaxBiasByChannel.Find(BlendChannel))
+		FEntityGroupSequenceKey Key{ RootInstanceHandle, GroupID };
+
+		// If this group hasn't changed at all (ie InitializeGroup was not called for it) do nothing
+		if (int16* ExistingBias = MaxBiasByGroup.Find(Key))
 		{
 			if (HBias > *ExistingBias)
 			{
-				for (auto It = ActiveContributorsByChannel.CreateKeyIterator(BlendChannel); It; ++It)
+				for (auto It = ActiveContributorsByGroup.CreateKeyIterator(Key); It; ++It)
 				{
-					InactiveContributorsByChannel.Add(BlendChannel, It.Value());
+					InactiveContributorsByGroup.Add(Key, It.Value());
 					It.RemoveCurrent();
 				}
 
 				*ExistingBias = HBias;
-				ActiveContributorsByChannel.Add(BlendChannel, EntityID);
+				ActiveContributorsByGroup.Add(Key, EntityID);
 			}
 			else if (HBias == *ExistingBias)
 			{
-				ActiveContributorsByChannel.Add(BlendChannel, EntityID);
+				ActiveContributorsByGroup.Add(Key, EntityID);
 			}
 			else
 			{
-				InactiveContributorsByChannel.Add(BlendChannel, EntityID);
+				InactiveContributorsByGroup.Add(Key, EntityID);
 			}
 		}
 	}
 
-	TMap<FMovieSceneBlendChannelID, int16> MaxBiasByChannel;
+	TMap<FEntityGroupSequenceKey, int16> MaxBiasByGroup;
 
-	TMultiMap<FMovieSceneBlendChannelID, FMovieSceneEntityID> InactiveContributorsByChannel;
+	TMultiMap<FEntityGroupSequenceKey, FMovieSceneEntityID> InactiveContributorsByGroup;
 
-	TMultiMap<FMovieSceneBlendChannelID, FMovieSceneEntityID> ActiveContributorsByChannel;
+	TMultiMap<FEntityGroupSequenceKey, FMovieSceneEntityID> ActiveContributorsByGroup;
 
 	UMovieSceneEntitySystemLinker* Linker;
 };
@@ -109,9 +140,15 @@ UMovieSceneHierarchicalBiasSystem::UMovieSceneHierarchicalBiasSystem(const FObje
 {
 	using namespace UE::MovieScene;
 
+	SystemCategories = EEntitySystemCategory::Core;
+
 	if (HasAnyFlags(RF_ClassDefaultObject))
 	{
-		DefineComponentConsumer(GetClass(), FBuiltInComponentTypes::Get()->BlendChannelInput);
+		DefineComponentConsumer(GetClass(), FBuiltInComponentTypes::Get()->Group);
+
+		// Don't flag things with the Ignore tag (due to hierarchical biases) until all systems have
+		// had a chance to take them into account for pre-animated state.
+		DefineImplicitPrerequisite(UMovieSceneCachePreAnimatedStateSystem::StaticClass(), GetClass());
 	}
 }
 
@@ -120,7 +157,7 @@ bool UMovieSceneHierarchicalBiasSystem::IsRelevantImpl(UMovieSceneEntitySystemLi
 	using namespace UE::MovieScene;
 
 	FBuiltInComponentTypes* Components = FBuiltInComponentTypes::Get();
-	return InLinker->EntityManager.ContainsAllComponents({ Components->BlendChannelInput, Components->HierarchicalBias });
+	return InLinker->EntityManager.ContainsAllComponents({ Components->Group, Components->HierarchicalBias });
 }
 
 void UMovieSceneHierarchicalBiasSystem::OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents)
@@ -131,19 +168,23 @@ void UMovieSceneHierarchicalBiasSystem::OnRun(FSystemTaskPrerequisites& InPrereq
 
 	FHierarchicalBiasTask Task(Linker);
 
-	// First, add all the channels that have changed to the map
+	// First, add all the groups that have changed to the map
 	FEntityTaskBuilder()
-	.Read(Components->BlendChannelInput)
+	.Read(Components->RootInstanceHandle)
+	.Read(Components->Group)
 	.FilterAny({ Components->Tags.NeedsLink, Components->Tags.NeedsUnlink })
-	.Iterate_PerEntity(&Linker->EntityManager, [&Task](FMovieSceneBlendChannelID BlendChannel){ Task.InitializeChannel(BlendChannel); });
+	.Iterate_PerEntity(&Linker->EntityManager, [&Task](FRootInstanceHandle RootInstanceHandle, FEntityGroupID GroupID)
+			{ Task.InitializeGroup(RootInstanceHandle, GroupID); });
 
 	if (Task.HasAnyWork())
 	{
 		FEntityTaskBuilder()
 		.ReadEntityIDs()
-		.Read(Components->BlendChannelInput)
+		.Read(Components->RootInstanceHandle)
+		.Read(Components->Group)
 		.ReadOptional(Components->HierarchicalBias)
 		.FilterNone({ Components->Tags.NeedsUnlink })
 		.RunInline_PerAllocation(&Linker->EntityManager, Task);
 	}
 }
+

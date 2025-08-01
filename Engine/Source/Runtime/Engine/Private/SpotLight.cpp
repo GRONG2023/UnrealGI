@@ -1,8 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/SpotLight.h"
+#include "Async/TaskGraphInterfaces.h"
 #include "Components/ArrowComponent.h"
 #include "Components/SpotLightComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SpotLight)
 
 ASpotLight::ASpotLight(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<USpotLightComponent>(TEXT("LightComponent0")))
@@ -45,11 +48,6 @@ void ASpotLight::PostLoad()
 {
 	Super::PostLoad();
 
-	if (GetLightComponent()->Mobility == EComponentMobility::Static)
-	{
-		GetLightComponent()->LightFunctionMaterial = NULL;
-	}
-
 #if WITH_EDITORONLY_DATA
 	if(ArrowComponent)
 	{
@@ -63,7 +61,7 @@ void ASpotLight::LoadedFromAnotherClass(const FName& OldClassName)
 {
 	Super::LoadedFromAnotherClass(OldClassName);
 
-	if(GetLinkerUE4Version() < VER_UE4_REMOVE_LIGHT_MOBILITY_CLASSES)
+	if(GetLinkerUEVersion() < VER_UE4_REMOVE_LIGHT_MOBILITY_CLASSES)
 	{
 		static FName SpotLightStatic_NAME(TEXT("SpotLightStatic"));
 		static FName SpotLightMovable_NAME(TEXT("SpotLightMovable"));
@@ -138,4 +136,5 @@ void ASpotLight::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEv
 	}
 }
 #endif
+
 

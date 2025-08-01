@@ -25,9 +25,6 @@ public:
 	/** Returns a rect describing the main screen */
 	static FPlatformRect GetScreenRect();
 
-	/** Returns a rect describing the main screen */
-	static FPlatformRect GetUIWindowRect();
-
 	/** Returns a void pointer to the hWnd (for other apis)*/
 	virtual void* GetOSWindowHandle() const override { return Window; }
 
@@ -36,6 +33,10 @@ public:
 	/** Returns the rectangle of the screen the window is associated with */
 	virtual bool GetFullScreenInfo( int32& X, int32& Y, int32& Width, int32& Height ) const override;
 
+	/** Callbacks for Cvar changes "r.MobileContentScaleFactor" and "r.Mobile.DesiredResX/Y" respectively */
+	static void OnScaleFactorChanged(IConsoleVariable* CVar);
+	static void OnConsoleResolutionChanged(IConsoleVariable* CVar);
+		
 protected:
 	/** @return true if the native window is currently in fullscreen mode, false otherwise */
 	virtual EWindowMode::Type GetWindowMode() const override { return EWindowMode::Fullscreen; }

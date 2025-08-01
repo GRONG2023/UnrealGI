@@ -11,17 +11,17 @@
 #include "Chaos/Matrix.h"
 #include "Chaos/Particles.h"
 #include "Chaos/Rotation.h"
+#include "Chaos/RigidParticleControlFlags.h"
 #include "HAL/LowLevelMemTracker.h"
+#include "UObject/FortniteMainBranchObjectVersion.h"
 
 namespace Chaos
 {
 
-enum class EResimType : uint8
+enum class ESleepType : uint8
 {
-	FullResim,	//fully re-run simulation and keep results (any forces must be applied again)
-	//ResimWithPrevForces, //use previous forces and keep results (UNIMPLEMENTED)
-	ResimAsSlave //use previous forces and snap to previous results regardless of variation - used to push other objects away
-	//ResimAsKinematic //treat as kinematic (UNIMPLEMENTED)
+	MaterialSleep,	//physics material determines sleep threshold
+	NeverSleep		//never falls asleep
 };
 
 template<class T, int d>
@@ -52,11 +52,25 @@ constexpr int8 NumBitsNeeded(const int8 MaxValue)
 // Make a bitmask which covers the lowest NumBits bits with 1's.
 constexpr int8 LowBitsMask(const int8 NumBits)
 {
-	return NumBits == 0 ? 0 : (1 << (NumBits - 1)) | LowBitsMask(NumBits - 1);
+	return NumBits == 0 ? 0 : (int8)((1 << (NumBits - 1)) | LowBitsMask(NumBits - 1));
 }
 
 // Count N, the number of bits needed to store an object state
-static constexpr int8 ObjectStateBitCount = NumBitsNeeded((int8)EObjectStateType::Count - 1);
+static constexpr int8 ObjectStateBitCount = NumBitsNeeded((int8)EObjectStateType::Count - (int8)1);
+
+// RigidParticle data that is commonly accessed together.
+// This contains all properties accessed in the broadphase filtering (FSpatialAccelerationBroadPhase)
+// NOTE: not a member class for easier natvis
+struct FRigidParticleCoreData
+{
+	int32 CollisionGroup;							// 4 bytes
+	uint32 CollisionConstraintFlags;				// 4 bytes
+	FRigidParticleControlFlags ControlFlags;		// 1 byte
+	FRigidParticleTransientFlags TransientFlags;	// 1 byte
+	EObjectStateType ObjectState;					// 1 byte
+	EObjectStateType PreObjectState;				// 1 byte
+	bool bDisabled;									// 1 byte
+};
 
 template<class T, int d>
 class TRigidParticles : public TKinematicGeometryParticles<T, d>
@@ -66,89 +80,74 @@ public:
     using TParticles<T, d>::X;
     using TGeometryParticles<T, d>::R;
 
-	CHAOS_API TRigidParticles()
+	TRigidParticles()
 	    : TKinematicGeometryParticles<T, d>()
 	{
-		TArrayCollection::AddArray(&MVSmooth);
-		TArrayCollection::AddArray(&MWSmooth);
-		TArrayCollection::AddArray(&MF);
-		TArrayCollection::AddArray(&MT);
-		TArrayCollection::AddArray(&MLinearImpulse);
-		TArrayCollection::AddArray(&MAngularImpulse);
-		TArrayCollection::AddArray(&MI);
-		TArrayCollection::AddArray(&MInvI);
-		TArrayCollection::AddArray(&MM);
-		TArrayCollection::AddArray(&MInvM);
-		TArrayCollection::AddArray(&MCenterOfMass);
-		TArrayCollection::AddArray(&MRotationOfMass);
-		TArrayCollection::AddArray(&MLinearEtherDrag);
-		TArrayCollection::AddArray(&MAngularEtherDrag);
-		TArrayCollection::AddArray(&MCollisionParticles);
-		TArrayCollection::AddArray(&MCollisionGroup);
-		TArrayCollection::AddArray(&MCollisionConstraintFlags);
-		TArrayCollection::AddArray(&MDisabled);
-		TArrayCollection::AddArray(&MObjectState);
-		TArrayCollection::AddArray(&MPreObjectState);
-		TArrayCollection::AddArray(&MIsland);
-		TArrayCollection::AddArray(&MToBeRemovedOnFracture);
-		TArrayCollection::AddArray(&MGravityEnabled);
-		TArrayCollection::AddArray(&MOneWayInteraction);
-		TArrayCollection::AddArray(&MResimType);
-		TArrayCollection::AddArray(&bCCDEnabled);
+		RegisterArrays();
 	}
+
 	TRigidParticles(const TRigidParticles<T, d>& Other) = delete;
-	CHAOS_API TRigidParticles(TRigidParticles<T, d>&& Other)
+	TRigidParticles(TRigidParticles<T, d>&& Other)
 	    : TKinematicGeometryParticles<T, d>(MoveTemp(Other))
+		, CoreData(MoveTemp(Other.CoreData))
 		, MVSmooth(MoveTemp(Other.MVSmooth))
 		, MWSmooth(MoveTemp(Other.MWSmooth))
-		, MF(MoveTemp(Other.MF))
-		, MT(MoveTemp(Other.MT))
-		, MLinearImpulse(MoveTemp(Other.MLinearImpulse))
-		, MAngularImpulse(MoveTemp(Other.MAngularImpulse))
-		, MI(MoveTemp(Other.MI)), MInvI(MoveTemp(Other.MInvI))
+		, MAcceleration(MoveTemp(Other.MAcceleration))
+		, MAngularAcceleration(MoveTemp(Other.MAngularAcceleration))
+		, MLinearImpulseVelocity(MoveTemp(Other.MLinearImpulseVelocity))
+		, MAngularImpulseVelocity(MoveTemp(Other.MAngularImpulseVelocity))
+		, MI(MoveTemp(Other.MI))
+		, MInvI(MoveTemp(Other.MInvI))
+		, MInvIConditioning(MoveTemp(Other.MInvIConditioning))
 		, MM(MoveTemp(Other.MM))
 		, MInvM(MoveTemp(Other.MInvM))
 		, MCenterOfMass(MoveTemp(Other.MCenterOfMass))
 		, MRotationOfMass(MoveTemp(Other.MRotationOfMass))
+		, MLinearEtherDrag(MoveTemp(Other.MLinearEtherDrag))
+		, MAngularEtherDrag(MoveTemp(Other.MAngularEtherDrag))
+		, MaxLinearSpeedsSq(MoveTemp(Other.MaxLinearSpeedsSq))
+		, MaxAngularSpeedsSq(MoveTemp(Other.MaxAngularSpeedsSq))
+		, MInitialOverlapDepenetrationVelocity(MoveTemp(Other.MInitialOverlapDepenetrationVelocity))
+		, MSleepThresholdMultiplier(MoveTemp(Other.MSleepThresholdMultiplier))
 		, MCollisionParticles(MoveTemp(Other.MCollisionParticles))
-		, MCollisionGroup(MoveTemp(Other.MCollisionGroup))
-		, MCollisionConstraintFlags(MoveTemp(Other.MCollisionConstraintFlags))
-		, MObjectState(MoveTemp(Other.MObjectState))
-		, MPreObjectState(MoveTemp(Other.MPreObjectState))
-		, MGravityEnabled(MoveTemp(Other.MGravityEnabled))
-		, MOneWayInteraction(MoveTemp(Other.MOneWayInteraction))
-		, MResimType(MoveTemp(Other.MResimType))
-		, bCCDEnabled(MoveTemp(Other.bCCDEnabled))
+		, MSleepType(MoveTemp(Other.MSleepType))
+		, MSleepCounter(MoveTemp(Other.MSleepCounter))
+		, MDisableCounter(MoveTemp(Other.MDisableCounter))
 	{
+		RegisterArrays();
+	}
+
+	void RegisterArrays()
+	{
+		TArrayCollection::AddArray(&CoreData);
+
 		TArrayCollection::AddArray(&MVSmooth);
 		TArrayCollection::AddArray(&MWSmooth);
-		TArrayCollection::AddArray(&MF);
-		TArrayCollection::AddArray(&MT);
-		TArrayCollection::AddArray(&MLinearImpulse);
-		TArrayCollection::AddArray(&MAngularImpulse);
+		TArrayCollection::AddArray(&MAcceleration);
+		TArrayCollection::AddArray(&MAngularAcceleration);
+		TArrayCollection::AddArray(&MLinearImpulseVelocity);
+		TArrayCollection::AddArray(&MAngularImpulseVelocity);
 		TArrayCollection::AddArray(&MI);
 		TArrayCollection::AddArray(&MInvI);
+		TArrayCollection::AddArray(&MInvIConditioning);
 		TArrayCollection::AddArray(&MM);
 		TArrayCollection::AddArray(&MInvM);
 		TArrayCollection::AddArray(&MCenterOfMass);
 		TArrayCollection::AddArray(&MRotationOfMass);
 		TArrayCollection::AddArray(&MLinearEtherDrag);
 		TArrayCollection::AddArray(&MAngularEtherDrag);
+		TArrayCollection::AddArray(&MaxLinearSpeedsSq);
+		TArrayCollection::AddArray(&MaxAngularSpeedsSq);
+		TArrayCollection::AddArray(&MInitialOverlapDepenetrationVelocity);
+		TArrayCollection::AddArray(&MSleepThresholdMultiplier);
 		TArrayCollection::AddArray(&MCollisionParticles);
-		TArrayCollection::AddArray(&MCollisionGroup);
-		TArrayCollection::AddArray(&MCollisionConstraintFlags);
-		TArrayCollection::AddArray(&MDisabled);
-		TArrayCollection::AddArray(&MObjectState);
-		TArrayCollection::AddArray(&MPreObjectState);
-		TArrayCollection::AddArray(&MIsland);
-		TArrayCollection::AddArray(&MToBeRemovedOnFracture);
-		TArrayCollection::AddArray(&MGravityEnabled);
-		TArrayCollection::AddArray(&MOneWayInteraction);
-		TArrayCollection::AddArray(&MResimType);
-		TArrayCollection::AddArray(&bCCDEnabled);
+		TArrayCollection::AddArray(&MSleepType);
+		TArrayCollection::AddArray(&MSleepCounter);
+		TArrayCollection::AddArray(&MDisableCounter);
+
 	}
 
-	CHAOS_API virtual ~TRigidParticles()
+	virtual ~TRigidParticles()
 	{}
 
 	FORCEINLINE const TVector<T, d>& VSmooth(const int32 Index) const { return MVSmooth[Index]; }
@@ -157,23 +156,26 @@ public:
 	FORCEINLINE const TVector<T, d>& WSmooth(const int32 Index) const { return MWSmooth[Index]; }
 	FORCEINLINE TVector<T, d>& WSmooth(const int32 Index) { return MWSmooth[Index]; }
 
-	FORCEINLINE const TVector<T, d>& Torque(const int32 Index) const { return MT[Index]; }
-	FORCEINLINE TVector<T, d>& Torque(const int32 Index) { return MT[Index]; }
+	FORCEINLINE const TVector<T, d>& AngularAcceleration(const int32 Index) const { return MAngularAcceleration[Index]; }
+	FORCEINLINE TVector<T, d>& AngularAcceleration(const int32 Index) { return MAngularAcceleration[Index]; }
 
-	FORCEINLINE const TVector<T, d>& F(const int32 Index) const { return MF[Index]; }
-	FORCEINLINE TVector<T, d>& F(const int32 Index) { return MF[Index]; }
+	FORCEINLINE const TVector<T, d>& Acceleration(const int32 Index) const { return MAcceleration[Index]; }
+	FORCEINLINE TVector<T, d>& Acceleration(const int32 Index) { return MAcceleration[Index]; }
 
-	FORCEINLINE const TVector<T, d>& LinearImpulse(const int32 Index) const { return MLinearImpulse[Index]; }
-	FORCEINLINE TVector<T, d>& LinearImpulse(const int32 Index) { return MLinearImpulse[Index]; }
+	FORCEINLINE const TVector<T, d>& LinearImpulseVelocity(const int32 Index) const { return MLinearImpulseVelocity[Index]; }
+	FORCEINLINE TVector<T, d>& LinearImpulseVelocity(const int32 Index) { return MLinearImpulseVelocity[Index]; }
 
-	FORCEINLINE const TVector<T, d>& AngularImpulse(const int32 Index) const { return MAngularImpulse[Index]; }
-	FORCEINLINE TVector<T, d>& AngularImpulse(const int32 Index) { return MAngularImpulse[Index]; }
+	FORCEINLINE const TVector<T, d>& AngularImpulseVelocity(const int32 Index) const { return MAngularImpulseVelocity[Index]; }
+	FORCEINLINE TVector<T, d>& AngularImpulseVelocity(const int32 Index) { return MAngularImpulseVelocity[Index]; }
 
-	FORCEINLINE const PMatrix<T, d, d>& I(const int32 Index) const { return MI[Index]; }
-	FORCEINLINE PMatrix<T, d, d>& I(const int32 Index) { return MI[Index]; }
+	FORCEINLINE const TVec3<FRealSingle>& I(const int32 Index) const { return MI[Index]; }
+	FORCEINLINE TVec3<FRealSingle>& I(const int32 Index) { return MI[Index]; }
 
-	FORCEINLINE const PMatrix<T, d, d>& InvI(const int32 Index) const { return MInvI[Index]; }
-	FORCEINLINE PMatrix<T, d, d>& InvI(const int32 Index) { return MInvI[Index]; }
+	FORCEINLINE const TVec3<FRealSingle>& InvI(const int32 Index) const { return MInvI[Index]; }
+	FORCEINLINE TVec3<FRealSingle>& InvI(const int32 Index) { return MInvI[Index]; }
+
+	FORCEINLINE const TVec3<FRealSingle>& InvIConditioning(const int32 Index) const { return MInvIConditioning[Index]; }
+	FORCEINLINE TVec3<FRealSingle>& InvIConditioning(const int32 Index) { return MInvIConditioning[Index]; }
 
 	FORCEINLINE const T M(const int32 Index) const { return MM[Index]; }
 	FORCEINLINE T& M(const int32 Index) { return MM[Index]; }
@@ -193,47 +195,59 @@ public:
 	FORCEINLINE const T& AngularEtherDrag(const int32 index) const { return MAngularEtherDrag[index]; }
 	FORCEINLINE T& AngularEtherDrag(const int32 index) { return MAngularEtherDrag[index]; }
 
+	FORCEINLINE const T& MaxLinearSpeedSq(const int32 index) const { return MaxLinearSpeedsSq[index]; }
+	FORCEINLINE T& MaxLinearSpeedSq(const int32 index) { return MaxLinearSpeedsSq[index]; }
+
+	FORCEINLINE const T& MaxAngularSpeedSq(const int32 index) const { return MaxAngularSpeedsSq[index]; }
+	FORCEINLINE T& MaxAngularSpeedSq(const int32 index) { return MaxAngularSpeedsSq[index]; }
+
+	FORCEINLINE const FRealSingle& InitialOverlapDepenetrationVelocity(const int32 index) const { return MInitialOverlapDepenetrationVelocity[index]; }
+	FORCEINLINE FRealSingle& InitialOverlapDepenetrationVelocity(const int32 index) { return MInitialOverlapDepenetrationVelocity[index]; }
+
+	FORCEINLINE const FRealSingle& SleepThresholdMultiplier(const int32 Index) const { return MSleepThresholdMultiplier[Index]; }
+	FORCEINLINE FRealSingle& SleepThresholdMultiplier(const int32 Index) { return MSleepThresholdMultiplier[Index]; }
+
 	FORCEINLINE int32 CollisionParticlesSize(int32 Index) const { return MCollisionParticles[Index] == nullptr ? 0 : MCollisionParticles[Index]->Size(); }
 
-	void CHAOS_API CollisionParticlesInitIfNeeded(const int32 Index);
-	void CHAOS_API SetCollisionParticles(const int32 Index, TParticles<T, d>&& Particles);
+	void CollisionParticlesInitIfNeeded(const int32 Index);
+	void SetCollisionParticles(const int32 Index, TParticles<T, d>&& Particles);
 	
 	FORCEINLINE const TUniquePtr<TBVHParticles<T, d>>& CollisionParticles(const int32 Index) const { return MCollisionParticles[Index]; }
 	FORCEINLINE TUniquePtr<TBVHParticles<T, d>>& CollisionParticles(const int32 Index) { return MCollisionParticles[Index]; }
 
-	FORCEINLINE const int32 CollisionGroup(const int32 Index) const { return MCollisionGroup[Index]; }
-	FORCEINLINE int32& CollisionGroup(const int32 Index) { return MCollisionGroup[Index]; }
+	FORCEINLINE const int32 CollisionGroup(const int32 Index) const { return CoreData[Index].CollisionGroup; }
+	FORCEINLINE int32& CollisionGroup(const int32 Index) { return CoreData[Index].CollisionGroup; }
 
-	FORCEINLINE bool HasCollisionConstraintFlag(const ECollisionConstraintFlags Flag, const int32 Index) const { return (MCollisionConstraintFlags[Index] & (uint32)Flag) != 0; }
-	FORCEINLINE void AddCollisionConstraintFlag(const ECollisionConstraintFlags Flag, const int32 Index) { MCollisionConstraintFlags[Index] |= (uint32)Flag; }
-	FORCEINLINE void RemoveCollisionConstraintFlag(const ECollisionConstraintFlags Flag, const int32 Index) { MCollisionConstraintFlags[Index] &= ~(uint32)Flag; }
-	FORCEINLINE void ClearCollisionConstraintFlag(const int32 Index) { MCollisionConstraintFlags[Index] = (uint32)ECollisionConstraintFlags::CCF_None; }
-	FORCEINLINE uint32 CollisionConstraintFlag(const int32 Index) const { return MCollisionConstraintFlags[Index]; }
+	FORCEINLINE bool HasCollisionConstraintFlag(const ECollisionConstraintFlags Flag, const int32 Index) const { return (CoreData[Index].CollisionConstraintFlags & (uint32)Flag) != 0; }
+	FORCEINLINE void AddCollisionConstraintFlag(const ECollisionConstraintFlags Flag, const int32 Index) { CoreData[Index].CollisionConstraintFlags |= (uint32)Flag; }
+	FORCEINLINE void RemoveCollisionConstraintFlag(const ECollisionConstraintFlags Flag, const int32 Index) { CoreData[Index].CollisionConstraintFlags &= ~(uint32)Flag; }
+	FORCEINLINE void SetCollisionConstraintFlags(const int32 Index, const uint32 Flags) { CoreData[Index].CollisionConstraintFlags = Flags; }
+	FORCEINLINE uint32 CollisionConstraintFlags(const int32 Index) const { return CoreData[Index].CollisionConstraintFlags; }
 
-	FORCEINLINE const bool Disabled(const int32 Index) const { return MDisabled[Index]; }
+	FORCEINLINE const bool Disabled(const int32 Index) const { return CoreData[Index].bDisabled; }
 
-	FORCEINLINE bool& DisabledRef(const int32 Index) { return MDisabled[Index]; }
+	FORCEINLINE bool& DisabledRef(const int32 Index) { return CoreData[Index].bDisabled; }
 
 	// DisableParticle/EnableParticle on Evolution should be used. Don't disable particles with this.
     // Using this will break stuff. This is for solver's use only, and possibly some particle construction/copy code.
-	FORCEINLINE void SetDisabledLowLevel(const int32 Index, bool disabled) { MDisabled[Index] = disabled; }
+	FORCEINLINE void SetDisabledLowLevel(const int32 Index, bool InDisabled) { CoreData[Index].bDisabled = InDisabled; }
 
-	FORCEINLINE const bool ToBeRemovedOnFracture(const int32 Index) const { return MToBeRemovedOnFracture[Index]; }
-	FORCEINLINE bool& ToBeRemovedOnFracture(const int32 Index) { return MToBeRemovedOnFracture[Index]; }
+	FORCEINLINE const FRigidParticleControlFlags& ControlFlags(const int32 Index) const { return CoreData[Index].ControlFlags; }
+	FORCEINLINE FRigidParticleControlFlags& ControlFlags(const int32 Index) { return CoreData[Index].ControlFlags; }
 
-	FORCEINLINE const bool& GravityEnabled(const int32 Index) const { return MGravityEnabled[Index]; }
-	FORCEINLINE bool& GravityEnabled(const int32 Index) { return MGravityEnabled[Index]; }
+	FORCEINLINE const FRigidParticleTransientFlags& TransientFlags(const int32 Index) const { return CoreData[Index].TransientFlags; }
+	FORCEINLINE FRigidParticleTransientFlags& TransientFlags(const int32 Index) { return CoreData[Index].TransientFlags; }
 
-	FORCEINLINE const bool& OneWayInteraction(const int32 Index) const { return MOneWayInteraction[Index]; }
-	FORCEINLINE bool& OneWayInteraction(const int32 Index) { return MOneWayInteraction[Index]; }
+	FORCEINLINE ESleepType SleepType(const int32 Index) const { return MSleepType[Index]; }
+	FORCEINLINE ESleepType& SleepType(const int32 Index) { return MSleepType[Index]; }
 
-	FORCEINLINE EResimType ResimType(const int32 Index) const { return MResimType[Index]; }
-	FORCEINLINE EResimType& ResimType(const int32 Index) { return MResimType[Index]; }
+	FORCEINLINE int8 SleepCounter(const int32 Index) const { return MSleepCounter[Index]; }
+	FORCEINLINE int8& SleepCounter(const int32 Index) { return MSleepCounter[Index]; }
 
-	FORCEINLINE const bool& CCDEnabled(const int32 Index) const { return bCCDEnabled[Index]; }
-	FORCEINLINE bool& CCDEnabled(const int32 Index) { return bCCDEnabled[Index]; }
+	FORCEINLINE int8 DisableCounter(const int32 Index) const { return MDisableCounter[Index]; }
+	FORCEINLINE int8& DisableCounter(const int32 Index) { return MDisableCounter[Index]; }
 
-
+	// @todo(chaos): This data should be marshalled via the proxies like everything else. There is probably a particle recycling bug here.
 	FORCEINLINE TArray<TSleepData<T, d>>& GetSleepData() { return MSleepData; }
 	FORCEINLINE	void AddSleepData(TGeometryParticleHandle<T, d>* Particle, bool Sleeping)
 	{ 
@@ -245,7 +259,7 @@ public:
 		MSleepData.Add(SleepData);
 		SleepDataLock.WriteUnlock();
 	}
-	CHAOS_API void ClearSleepData()
+	void ClearSleepData()
 	{
 		SleepDataLock.WriteLock();
 		MSleepData.Empty();
@@ -253,11 +267,11 @@ public:
 	}
 	FORCEINLINE FRWLock& GetSleepDataLock() { return SleepDataLock; }
 
-	FORCEINLINE const EObjectStateType ObjectState(const int32 Index) const { return MObjectState[Index]; }
-	FORCEINLINE EObjectStateType& ObjectState(const int32 Index) { return MObjectState[Index]; }
+	FORCEINLINE const EObjectStateType ObjectState(const int32 Index) const { return CoreData[Index].ObjectState; }
+	FORCEINLINE EObjectStateType& ObjectState(const int32 Index) { return CoreData[Index].ObjectState; }
 
-	FORCEINLINE const EObjectStateType PreObjectState(const int32 Index) const { return MPreObjectState[Index]; }
-	FORCEINLINE EObjectStateType& PreObjectState(const int32 Index) { return MPreObjectState[Index]; }
+	FORCEINLINE const EObjectStateType PreObjectState(const int32 Index) const { return CoreData[Index].PreObjectState; }
+	FORCEINLINE EObjectStateType& PreObjectState(const int32 Index) { return CoreData[Index].PreObjectState; }
 
 	FORCEINLINE const bool Dynamic(const int32 Index) const { return ObjectState(Index) == EObjectStateType::Dynamic; }
 
@@ -265,22 +279,32 @@ public:
 
 	FORCEINLINE const bool HasInfiniteMass(const int32 Index) const { return MInvM[Index] == (T)0; }
 
-	FORCEINLINE const int32 Island(const int32 Index) const { return MIsland[Index]; }
-	FORCEINLINE int32& Island(const int32 Index) { return MIsland[Index]; }
-
-	FORCEINLINE FString ToString(int32 index) const
+	FORCEINLINE FString ToString(int32 Index) const
 	{
-		FString BaseString = TKinematicGeometryParticles<T, d>::ToString(index);
-		return FString::Printf(TEXT("%s, MF:%s, MT:%s, MLinearImpulse:%s, MAngularImpulse:%s, MI:%s, MInvI:%s, MM:%f, MInvM:%f, MCenterOfMass:%s, MRotationOfMass:%s, MCollisionParticles(num):%d, MCollisionGroup:%d, MDisabled:%d, MSleepring:%d, MIsland:%d"),
-			*BaseString, *F(index).ToString(), *Torque(index).ToString(), *LinearImpulse(index).ToString(), *AngularImpulse(index).ToString(),
-			*I(index).ToString(), *InvI(index).ToString(), M(index), InvM(index), *CenterOfMass(index).ToString(), *RotationOfMass(index).ToString(), CollisionParticlesSize(index),
-			CollisionGroup(index), Disabled(index), Sleeping(index), Island(index));
+		FString BaseString = TKinematicGeometryParticles<T, d>::ToString(Index);
+		return FString::Printf(TEXT("%s, MAcceleration:%s, MAngularAcceleration:%s, MLinearImpulseVelocity:%s, MAngularImpulseVelocity:%s, MI:%s, MInvI:%s, MM:%f, MInvM:%f, MCenterOfMass:%s, MRotationOfMass:%s, MCollisionParticles(num):%d, MCollisionGroup:%d, MDisabled:%d, MSleeping:%d"),
+			*BaseString, *Acceleration(Index).ToString(), *AngularAcceleration(Index).ToString(), *LinearImpulseVelocity(Index).ToString(), *AngularImpulseVelocity(Index).ToString(),
+			*I(Index).ToString(), *InvI(Index).ToString(), M(Index), InvM(Index), *CenterOfMass(Index).ToString(), *RotationOfMass(Index).ToString(), CollisionParticlesSize(Index),
+			CollisionGroup(Index), Disabled(Index), Sleeping(Index));
 	}
 
-	CHAOS_API virtual void Serialize(FChaosArchive& Ar) override
+	virtual void Serialize(FChaosArchive& Ar) override
 	{
 		TKinematicGeometryParticles<T,d>::Serialize(Ar);
-		
+
+		// To avoid bumping file version, serialize to/from previous structures
+		// If we aren't loading (i.e., we are saving or copying) CoreData will be valid, so copy that to the legacy structure
+		// Also, Particles do not know their island index and it should not be serialized (but it used to be)
+		// @todo(chaos): I think its time to bump the version number and clean up particle serialization!
+		FLegacyData LegacyData;
+		TArrayCollectionArray<int32> LegacyIslandIndex;
+
+		if (!Ar.IsLoading())
+		{
+			LegacyData.CopyFromCoreData(CoreData);
+			LegacyIslandIndex.SetNumZeroed(MCollisionParticles.Num());
+		}
+
 		Ar.UsingCustomVersion(FExternalPhysicsCustomObjectVersion::GUID);
 		if(Ar.CustomVer(FExternalPhysicsCustomObjectVersion::GUID) >= FExternalPhysicsCustomObjectVersion::KinematicCentersOfMass)
 		{
@@ -288,7 +312,35 @@ public:
 			Ar << MRotationOfMass;
 		}
 
-		Ar << MF << MT << MLinearImpulse << MAngularImpulse << MI << MInvI << MM << MInvM;
+		Ar << MAcceleration << MAngularAcceleration << MLinearImpulseVelocity << MAngularImpulseVelocity;
+
+		Ar.UsingCustomVersion(FFortniteMainBranchObjectVersion::GUID);
+		Ar.UsingCustomVersion(FUE5ReleaseStreamObjectVersion::GUID);
+		if (Ar.IsLoading() && Ar.CustomVer(FFortniteMainBranchObjectVersion::GUID) < FFortniteMainBranchObjectVersion::ChaosInertiaConvertedToVec3
+			&& Ar.CustomVer(FUE5ReleaseStreamObjectVersion::GUID) < FUE5ReleaseStreamObjectVersion::ChaosInertiaConvertedToVec3)
+		{
+			TArray<PMatrix<T, d, d>> IArray;
+			TArray<PMatrix<T, d, d>> InvIArray;
+			Ar << IArray << InvIArray;
+
+			for (int32 Idx = 0; Idx < IArray.Num(); ++Idx)
+			{
+				MI.Add(IArray[Idx].GetDiagonal());
+				MInvI.Add(InvIArray[Idx].GetDiagonal());
+			}
+		}
+		else
+		{
+			Ar << MI << MInvI;
+		}
+
+		MInvIConditioning.Resize(MInvI.Num());
+		for (int32 Index = 0; Index < MInvI.Num(); ++Index)
+		{
+			MInvIConditioning[Index] = TVec3<FRealSingle>(1);
+		}
+		
+		Ar << MM << MInvM;
 
 		Ar.UsingCustomVersion(FExternalPhysicsCustomObjectVersion::GUID);
 		if (Ar.CustomVer(FExternalPhysicsCustomObjectVersion::GUID) >= FExternalPhysicsCustomObjectVersion::AddDampingToRigids)
@@ -296,54 +348,81 @@ public:
 			Ar << MLinearEtherDrag << MAngularEtherDrag;
 		}
 
-		Ar << MCollisionParticles << MCollisionGroup << MIsland << MDisabled << MObjectState;
-		//todo: add gravity enabled when we decide how we want to handle serialization
+		Ar << MCollisionParticles << LegacyData.MCollisionGroup << LegacyIslandIndex << LegacyData.MDisabled << LegacyData.MObjectState << MSleepType;
+		// @todo(chaos): what about ControlFlags, TransientFlags, PreObjectState, SleepCounter, ..?
+
+		// If we loaded into the legacy structure, copy to CoreData
+		if (Ar.IsLoading())
+		{
+			LegacyData.CopyToCoreData(CoreData);
+		}
 	}
 
-	FORCEINLINE TArray<TVector<T, d>>& AllF() { return MF; }
-	FORCEINLINE TArray<TVector<T, d>>& AllT() { return MT; }
-	FORCEINLINE TArray<TVector<T, d>>& AllLinearImpulse() { return MLinearImpulse; }
-	FORCEINLINE TArray<TVector<T, d>>& AllAngularImpulse() { return MAngularImpulse; }
-	FORCEINLINE TArray<PMatrix<T, d, d>>& AllI() { return MI; }
-	FORCEINLINE TArray<PMatrix<T, d, d>>& AllInvI() { return MInvI; }
-	FORCEINLINE TArray<FReal>& AllM() { return MM; }
-	FORCEINLINE TArray<FReal>& AllInvM() { return MInvM; }
-	FORCEINLINE TArray<TVector<T, d>>& AllCenterOfMass() { return MCenterOfMass; }
-	FORCEINLINE TArray<TRotation<T, d>>& AllRotationOfMass() { return MRotationOfMass; }
-	FORCEINLINE TArray<FReal>& AllLinearEtherDrag() { return MLinearEtherDrag; }
-	FORCEINLINE TArray<FReal>& AllAngularEtherDrag() { return MAngularEtherDrag; }
-	FORCEINLINE TArray<bool>& AllDisabled() { return MDisabled; }
-	FORCEINLINE TArray<EObjectStateType>& AllObjectState() { return MObjectState; }
-	FORCEINLINE TArray<bool>& AllGravityEnabled() { return MGravityEnabled; }
-	FORCEINLINE TArray<bool>& AllCCDEnabled() { return bCCDEnabled; }
+	// Deprecated API
+	UE_DEPRECATED(5.3, "No longer supported") const int32 IslandIndex(const int32 Index) const { return INDEX_NONE; }
+	UE_DEPRECATED(5.3, "No longer supported") int32& IslandIndex(const int32 Index) { static int32 Dummy = INDEX_NONE; return Dummy; }
 
 private:
+	// Used during serialization to avoid bumping the file version as we switch to aggregated strunctures like FRigidParticleCoreData.
+	// Note: Only serialized data is needed here and not all data is serialized so some elements in the aggregates are not represented.
+	struct FLegacyData
+	{
+		TArrayCollectionArray<int32> MCollisionGroup;
+		TArrayCollectionArray<EObjectStateType> MObjectState;
+		TArrayCollectionArray<bool> MDisabled;
+
+		void CopyFromCoreData(const TArrayCollectionArray<FRigidParticleCoreData>& Source)
+		{
+			MCollisionGroup.Resize(Source.Num());
+			MObjectState.Resize(Source.Num());
+			MDisabled.Resize(Source.Num());
+
+			for (int32 Index = 0; Index < Source.Num(); ++Index)
+			{
+				MCollisionGroup[Index] = Source[Index].CollisionGroup;
+				MObjectState[Index] = Source[Index].ObjectState;
+				MDisabled[Index] = Source[Index].bDisabled;
+			}
+		}
+
+		void CopyToCoreData(TArrayCollectionArray<FRigidParticleCoreData>& Dest)
+		{
+			Dest.Resize(MCollisionGroup.Num());
+
+			for (int32 Index = 0; Index < Dest.Num(); ++Index)
+			{
+				Dest[Index].CollisionGroup = MCollisionGroup[Index];
+				Dest[Index].ObjectState = MObjectState[Index];
+				Dest[Index].bDisabled = MDisabled[Index];
+			}
+		}
+	};
+
+	TArrayCollectionArray<FRigidParticleCoreData> CoreData;
+
 	TArrayCollectionArray<TVector<T, d>> MVSmooth;
 	TArrayCollectionArray<TVector<T, d>> MWSmooth;
-	TArrayCollectionArray<TVector<T, d>> MF;
-	TArrayCollectionArray<TVector<T, d>> MT;
-	TArrayCollectionArray<TVector<T, d>> MLinearImpulse;
-	TArrayCollectionArray<TVector<T, d>> MAngularImpulse;
-	TArrayCollectionArray<PMatrix<T, d, d>> MI;
-	TArrayCollectionArray<PMatrix<T, d, d>> MInvI;
+	TArrayCollectionArray<TVector<T, d>> MAcceleration;
+	TArrayCollectionArray<TVector<T, d>> MAngularAcceleration;
+	TArrayCollectionArray<TVector<T, d>> MLinearImpulseVelocity;
+	TArrayCollectionArray<TVector<T, d>> MAngularImpulseVelocity;
+	TArrayCollectionArray<TVec3<FRealSingle>> MI;
+	TArrayCollectionArray<TVec3<FRealSingle>> MInvI;
+	TArrayCollectionArray<TVec3<FRealSingle>> MInvIConditioning;
 	TArrayCollectionArray<T> MM;
 	TArrayCollectionArray<T> MInvM;
 	TArrayCollectionArray<TVector<T,d>> MCenterOfMass;
 	TArrayCollectionArray<TRotation<T,d>> MRotationOfMass;
 	TArrayCollectionArray<T> MLinearEtherDrag;
 	TArrayCollectionArray<T> MAngularEtherDrag;
+	TArrayCollectionArray<T> MaxLinearSpeedsSq;
+	TArrayCollectionArray<T> MaxAngularSpeedsSq;
+	TArrayCollectionArray<FRealSingle> MInitialOverlapDepenetrationVelocity;
+	TArrayCollectionArray<FRealSingle> MSleepThresholdMultiplier;
 	TArrayCollectionArray<TUniquePtr<TBVHParticles<T, d>>> MCollisionParticles;
-	TArrayCollectionArray<int32> MCollisionGroup;
-	TArrayCollectionArray<uint32> MCollisionConstraintFlags;
-	TArrayCollectionArray<int32> MIsland;
-	TArrayCollectionArray<bool> MDisabled;
-	TArrayCollectionArray<bool> MToBeRemovedOnFracture;
-	TArrayCollectionArray<EObjectStateType> MObjectState;
-	TArrayCollectionArray<EObjectStateType> MPreObjectState;
-	TArrayCollectionArray<bool> MGravityEnabled;
-	TArrayCollectionArray<bool> MOneWayInteraction;
-	TArrayCollectionArray<EResimType> MResimType;
-	TArrayCollectionArray<bool> bCCDEnabled;
+	TArrayCollectionArray<ESleepType> MSleepType;
+	TArrayCollectionArray<int8> MSleepCounter;
+	TArrayCollectionArray<int8> MDisableCounter;
 
 	TArray<TSleepData<T, d>> MSleepData;
 	FRWLock SleepDataLock;
@@ -357,15 +436,5 @@ FChaosArchive& operator<<(FChaosArchive& Ar, TRigidParticles<T, d>& Particles)
 	Particles.Serialize(Ar);
 	return Ar;
 }
-
-#ifdef __clang__
-#if PLATFORM_WINDOWS
-extern template class TRigidParticles<FReal, 3>;
-#else
-extern template class CHAOS_API TRigidParticles<FReal, 3>;
-#endif
-#else
-extern template class TRigidParticles<FReal, 3>;
-#endif
 
 }

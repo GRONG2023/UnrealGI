@@ -20,18 +20,24 @@ namespace physx
 /**
  * ShapeComponent is a PrimitiveComponent that is represented by a simple geometrical shape (sphere, capsule, box, etc).
  */
-UCLASS(abstract, hidecategories=(Object,LOD,Lighting,TextureStreaming,Activation,"Components|Activation"), editinlinenew, meta=(BlueprintSpawnableComponent), showcategories=(Mobility))
-class ENGINE_API UShapeComponent : public UPrimitiveComponent
+UCLASS(abstract, hidecategories=(Object,LOD,Lighting,TextureStreaming,Activation,"Components|Activation"), editinlinenew, meta=(BlueprintSpawnableComponent), showcategories=(Mobility), MinimalAPI)
+class UShapeComponent : public UPrimitiveComponent
 {
 	GENERATED_UCLASS_BODY()
 
 	/** Description of collision */
 	UPROPERTY(transient, duplicatetransient)
-	class UBodySetup* ShapeBodySetup;
+	TObjectPtr<class UBodySetup> ShapeBodySetup;
 
-	/** Navigation area type (empty = default obstacle) */
-	UPROPERTY(EditAnywhere, Category = Navigation)
+#if WITH_EDITORONLY_DATA
+	/** Navigation area type (empty / none has no effect on underlying area type).
+	 *  Deprecated! Use AreaClassOverride / bUseSystemDefaultObstacleAreaClass instead. 
+	 *  NOTE Adding _DEPRECATED to this variable can causes known bugs when patching it up.
+	 */
+	UE_DEPRECATED(5.0, "AreaClass is deprecated, use AreaClassOverride / bUseSystemDefaultObstacleAreaClass instead!.")
+	UPROPERTY()
 	TSubclassOf<class UNavAreaBase> AreaClass;
+#endif // WITH_EDITORONLY_DATA
 
 	/** Color used to draw the shape. */
 	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadOnly, Category=Shape)
@@ -50,6 +56,20 @@ class ENGINE_API UShapeComponent : public UPrimitiveComponent
 	uint8 bDynamicObstacle : 1;
 
 protected:
+	/** Navigation area type override, null / none = no change to nav mesh.
+	 *  bDynamicObstacle must be true and bUseSystemDefaultAreaClass false to use this.
+	 */
+	UPROPERTY(EditAnywhere, Category = Navigation, meta = (EditCondition = "bDynamicObstacle && !bUseSystemDefaultObstacleAreaClass"))
+	TSubclassOf<class UNavAreaBase> AreaClassOverride;
+
+	/** Uses FNavigationSystem::GetDefaultObstacleArea() by default instead of AreaClassOverride, bDynamicObstacle must be true to use this.  */
+	UPROPERTY(EditAnywhere, Category = Navigation, meta = (EditCondition = "bDynamicObstacle"))
+	uint8 bUseSystemDefaultObstacleAreaClass : 1;
+
+	/** Used to control the line thickness when rendering */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Shape)
+	float LineThickness;
+	
 	/** If the body setup can be shared (i.e. there have been no alterations compared to the CDO)*/
 	uint8 bUseArchetypeBodySetup : 1;
 
@@ -72,20 +92,23 @@ protected:
 	template <typename ShapeElemType> void CreateShapeBodySetupIfNeeded();
 
 public:
+	// Set the LineThickness
+	UFUNCTION(BlueprintCallable, Category=Shape)
+	ENGINE_API void SetLineThickness(float Thickness);
 
 	//~ Begin UPrimitiveComponent Interface.
-	virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
-	virtual class UBodySetup* GetBodySetup() override;
-	virtual bool DoCustomNavigableGeometryExport(FNavigableGeometryExport& GeomExport) const override;
-	virtual void GetNavigationData(FNavigationRelevantData& Data) const override;
+	ENGINE_API virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
+	ENGINE_API virtual class UBodySetup* GetBodySetup() override;
+	ENGINE_API virtual bool DoCustomNavigableGeometryExport(FNavigableGeometryExport& GeomExport) const override;
+	ENGINE_API virtual void GetNavigationData(FNavigationRelevantData& Data) const override;
 	//~ End UPrimitiveComponent Interface.
 
 	//~ Begin INavRelevantInterface Interface
-	virtual bool IsNavigationRelevant() const override;
+	ENGINE_API virtual bool IsNavigationRelevant() const override;
 	//~ End INavRelevantInterface Interface
 
 	//~ Begin USceneComponent Interface
-	virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
+	ENGINE_API virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
 	virtual bool ShouldCollideWhenPlacing() const override
 	{
 		return bShouldCollideWhenPlacing || IsCollisionEnabled();
@@ -93,14 +116,23 @@ public:
 	//~ End USceneComponent Interface
 
 	//~ Begin UObject Interface.
+	ENGINE_API virtual void Serialize(FArchive& Ar) override;
+	virtual bool GetIgnoreBoundsForEditorFocus() const override { return true; }
+#if WITH_EDITORONLY_DATA
+	static ENGINE_API void DeclareConstructClasses(TArray<FTopLevelAssetPath>& OutConstructClasses, const UClass* SpecificSubclass);
+#endif
+
 #if WITH_EDITOR
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
-	virtual bool IgnoreBoundsForEditorFocus() const override { return true; }
+	ENGINE_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif // WITH_EDITOR
 	//~ End UObject Interface.
 
 	/** Update the body setup parameters based on shape information*/
-	virtual void UpdateBodySetup();
+	ENGINE_API virtual void UpdateBodySetup();
+
+	ENGINE_API TSubclassOf<class UNavAreaBase> GetDesiredAreaClass() const;
+	ENGINE_API void SetAreaClassOverride(TSubclassOf<class UNavAreaBase> InAreaClassOverride);
+	ENGINE_API void SetUseSystemDefaultObstacleAreaClass();
 };
 
 enum class EShapeBodySetupHelper

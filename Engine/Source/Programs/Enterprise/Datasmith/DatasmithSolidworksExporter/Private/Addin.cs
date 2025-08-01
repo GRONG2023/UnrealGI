@@ -6,10 +6,16 @@ using SolidWorks.Interop.swpublished;
 using SolidWorksTools;
 using SolidWorksTools.File;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Threading;
+using DatasmithSolidworks.Names;
+using Environment = System.Environment;
 
 namespace DatasmithSolidworks
 {
@@ -34,6 +40,73 @@ namespace DatasmithSolidworks
 		public ISldWorks SolidworksApp { get; private set; } = null;
 		public FDocument CurrentDocument { get; private set; } = null;
 
+		// DebugLog is enabled with DatasmithSolidworksDebugOutput conditional compilation symbol
+
+		class FDebugLog
+		{
+			private readonly int MainThreadId;
+			private ConcurrentQueue<string> MessagesQueue = new ConcurrentQueue<string>();
+			private Thread LogWriterThread;
+			private int Indentation = 0;
+
+			public FDebugLog(int InMainThreadId)
+			{
+				MainThreadId = InMainThreadId;
+				LogWriterThread = new Thread(() =>
+				{
+					LogWriterProc();
+				});
+
+				LogWriterThread.Start();
+			}
+
+			private void LogWriterProc()
+			{
+				string LogPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+					"UnrealDatasmithExporter/Saved/Logs/UnrealDatasmithSolidworksExporterDebug.log");
+
+				StreamWriter LogFile = new StreamWriter(LogPath);
+
+				while (true)
+				{
+					while (MessagesQueue.TryDequeue(out string Message))
+					{
+						LogFile.WriteLine(Message);
+					}
+					LogFile.Flush();
+
+					Thread.Sleep(10);
+				}
+			}
+
+			public void LogDebug(string Message)  
+			{
+				// todo: in general, Solidworks api shouldn't be called from another thread(it's slower) 
+				//   so better to identify all those places and fix them
+				// Debug.Assert(MainThreadId == Thread.CurrentThread.ManagedThreadId);
+				MessagesQueue.Enqueue(new string(' ', Indentation*2)+Message);
+			}
+
+			public void LogDebugThread(string Message)  
+			{
+				MessagesQueue.Enqueue(new string(' ', Indentation*2)+Message);
+			}
+
+			public void Dedent()
+			{
+				Indentation --;
+			}
+
+			public void Indent()
+			{
+				Indentation ++;
+			}
+		};
+
+		private FDebugLog DebugLog;
+
+		int SwThreadId;  // Main thread of Solidworks
+
 		public static Addin Instance { get; private set; } = null;
 
 		public Addin()
@@ -41,6 +114,8 @@ namespace DatasmithSolidworks
 			if (Instance == null)
 			{
 				Instance = this;
+				SwThreadId = Thread.CurrentThread.ManagedThreadId;
+				StartLogWriterTread();
 			}
 		}
 
@@ -81,8 +156,7 @@ namespace DatasmithSolidworks
 			object[] ObjDocuments = (object[])SolidworksApp.GetDocuments();
 			for (int Index = 0; Index < NumOpenDocs; Index++)
 			{
-				ModelDoc2 Doc = ObjDocuments[Index] as ModelDoc2;
-				if (Doc != null)
+				if (ObjDocuments[Index] is ModelDoc2 Doc)
 				{
 					CurrentOpenDocumentsSet.Add(GetDocumentId(Doc));
 				}
@@ -96,6 +170,8 @@ namespace DatasmithSolidworks
 				}
 			}
 		}
+
+		private bool bDatasmithFacadeDirectLinkInitialized = false;
 
 		public bool ConnectToSW(object InThisSW, int InCookie)
 		{
@@ -113,16 +189,38 @@ namespace DatasmithSolidworks
 
 			FDatasmithFacadeElement.SetCoordinateSystemType(FDatasmithFacadeElement.ECoordinateSystemType.RightHandedZup);
 
-			FDatasmithFacadeDirectLink.Init();
+			if (!bDatasmithFacadeDirectLinkInitialized)
+			{
+				FDatasmithFacadeDirectLink.Init();
+				bDatasmithFacadeDirectLinkInitialized = true;
+			}
 
 			FMaterial.InitializeMaterialTypes();
+
+			OnActiveDocChange();
 
 			return true;
 		}
 
+		private static int OnAppDestroy()
+		{
+			// Calling this only on App exit(see comment below)
+			FDatasmithFacadeDirectLink.Shutdown();
+			return 0;
+		}
+
 		public bool DisconnectFromSW()
 		{
-			FDatasmithFacadeDirectLink.Shutdown();
+			// Disabled Shutdown as Initing again crashes if the plugin is re-enabled in SW
+			// FDatasmithFacadeDirectLink.Shutdown it is required to have plugin dll unloaded but Solidworks doesn't unload the plugin assembly when plugin is disabled
+			// So, something like this doesn't work:
+			// if (bDatasmithFacadeDirectLinkInitialized)
+			// {
+			// 	FDatasmithFacadeDirectLink.Shutdown();
+			// 	bDatasmithFacadeDirectLinkInitialized = false;
+			// }
+			// At least make sure to close current connection
+			CurrentDocument?.MakeActive(false);
 
 			DetachEventHandlers();
 			DestroyToolbarCommands();
@@ -234,6 +332,7 @@ namespace DatasmithSolidworks
 				AppEvents.FileCloseNotify += new DSldWorksEvents_FileCloseNotifyEventHandler(OnFileClose);
 				AppEvents.CommandCloseNotify += new DSldWorksEvents_CommandCloseNotifyEventHandler(OnCommandClose);
 				AppEvents.OnIdleNotify += new DSldWorksEvents_OnIdleNotifyEventHandler(OnIdle);
+				AppEvents.DestroyNotify += OnAppDestroy;
 			}
 			catch {}
 		}
@@ -249,6 +348,8 @@ namespace DatasmithSolidworks
 				AppEvents.FileCloseNotify -= new DSldWorksEvents_FileCloseNotifyEventHandler(OnFileClose);
 				AppEvents.CommandCloseNotify -= new DSldWorksEvents_CommandCloseNotifyEventHandler(OnCommandClose);
 				AppEvents.OnIdleNotify -= new DSldWorksEvents_OnIdleNotifyEventHandler(OnIdle);
+				// AppEvents.DestroyNotify - don't teach destroy handler as Detach is called in DisconnectFromSW(which also executed on addin disable)
+				// and we need this handler to shutdown DirectLink(with all the Unreal engine) that we can do only once
 			}
 			catch {}
 		}
@@ -294,12 +395,10 @@ namespace DatasmithSolidworks
 			{
 				switch (InDoc.GetType())
 				{
-					case (int)swDocumentTypes_e.swDocPART: CurrentDocument = new FPartDocument(DocId, InDoc as PartDoc, null, null, null); break;
+					case (int)swDocumentTypes_e.swDocPART: CurrentDocument = new FPartDocument(DocId, InDoc as PartDoc, null, null, new FComponentName()); break;
 					case (int)swDocumentTypes_e.swDocASSEMBLY: CurrentDocument = new FAssemblyDocument(DocId, InDoc as AssemblyDoc, null); break;
 					default: throw new Exception("Unsupported document type");
 				}
-
-				CurrentDocument.Init();
 
 				OpenDocuments.Add(DocId, CurrentDocument);
 			}
@@ -323,7 +422,7 @@ namespace DatasmithSolidworks
 		{
 			if (CurrentDocument != null)
 			{
-				CurrentDocument.bDirectLinkAutoSync = !CurrentDocument.bDirectLinkAutoSync;
+				CurrentDocument.ToggleDirectLinkAutoSync();
 			}
 		}
 
@@ -334,7 +433,7 @@ namespace DatasmithSolidworks
 			// 2 Selects and disables the item
 			// 3 Selects and enables the item
 
-			if (CurrentDocument == null || CurrentDocument.DirectLinkSyncCount == 0)
+			if (CurrentDocument == null)
 			{
 				return 0;
 			}
@@ -518,5 +617,87 @@ namespace DatasmithSolidworks
 		}
 
 		#endregion
+
+		#region Logging
+
+		[Conditional("DatasmithSolidworksDebugOutput")]
+		private void StartLogWriterTread()
+		{
+			DebugLog = new FDebugLog(SwThreadId);
+		}
+
+		[Conditional("DatasmithSolidworksDebugOutput")]
+		public static void LogDebug(string Message)
+		{
+			Instance.DebugLog.LogDebug(Message);
+		}
+
+		[Conditional("DatasmithSolidworksDebugOutput")]
+		public static void LogDebugThread(string Message)  
+		{
+			Instance.DebugLog.LogDebugThread(Message);
+		}
+
+		[Conditional("DatasmithSolidworksDebugOutput")]
+		public static void LogIndent()  
+		{
+			Instance.DebugLog.Indent();
+		}
+
+		[Conditional("DatasmithSolidworksDebugOutput")]
+		public static void LogDedent()  
+		{
+			Instance.DebugLog.Dedent();
+		}
+
+		public static IDisposable LogScopedIndent()
+		{
+#if DatasmithSolidworksDebugOutput
+			return new FLogScopedIndent();
+#else
+			return null;
+#endif
+		}
+
+		private class FLogScopedIndent : IDisposable
+		{
+			public FLogScopedIndent()
+			{
+				LogIndent();
+			}
+
+			public void Dispose()
+			{
+				LogDedent();
+			}
+		}
+		#endregion
+
+	}
+
+	public static class DictionaryExtensions
+	{
+		public static V FindOrAdd<K, V>(this Dictionary<K, V> Map, K Key) 
+			where V : new()
+		{
+			if (!Map.TryGetValue(Key, out V Value))
+			{
+				Value = new V();
+				Map.Add(Key, Value);
+			}
+			return Value;
+		}
+
+		public static bool TryRemove<K, V>(this Dictionary<K, V> Map, K Key, out V OutValue) 
+		{
+			if (Map.TryGetValue(Key, out OutValue))
+			{
+				Map.Remove(Key);
+				return true;
+			}			
+			return false;
+
+
+		}
 	}
 }

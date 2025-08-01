@@ -3,7 +3,7 @@
 #include "TrackEditors/EventTrackEditor.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "GameFramework/Actor.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "UObject/Package.h"
 #include "Tracks/MovieSceneEventTrack.h"
 #include "ISequencerSection.h"
@@ -20,7 +20,7 @@
 #include "Sections/MovieSceneEventSection.h"
 #include "Sections/MovieSceneEventTriggerSection.h"
 #include "Sections/MovieSceneEventRepeaterSection.h"
-#include "SequencerUtilities.h"
+#include "MVVM/Views/ViewUtilities.h"
 #include "MovieSceneSequenceEditor.h"
 
 #define LOCTEXT_NAMESPACE "FEventTrackEditor"
@@ -98,7 +98,7 @@ void FEventTrackEditor::BuildAddTrackMenu(FMenuBuilder& MenuBuilder)
 			LOCTEXT("AddEventTooltip", "Adds a new event track that can trigger events on the timeline."),
 			FNewMenuDelegate::CreateRaw(this, &FEventTrackEditor::AddEventSubMenu, TArray<FGuid>()),
 			false,
-			FSlateIcon(FEditorStyle::GetStyleSetName(), "Sequencer.Tracks.Event")
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "Sequencer.Tracks.Event")
 		);
 	}
 }
@@ -159,13 +159,7 @@ TSharedPtr<SWidget> FEventTrackEditor::BuildOutlinerEditWidget(const FGuid& Obje
 		return MenuBuilder.MakeWidget();
 	};
 
-	return SNew(SHorizontalBox)
-	+ SHorizontalBox::Slot()
-	.AutoWidth()
-	.VAlign(VAlign_Center)
-	[
-		FSequencerUtilities::MakeAddButton(LOCTEXT("AddSection", "Section"), FOnGetContent::CreateLambda(SubMenuCallback), Params.NodeIsHovered, GetSequencer())
-	];
+	return UE::Sequencer::MakeAddButton(LOCTEXT("AddSection", "Section"), FOnGetContent::CreateLambda(SubMenuCallback), Params.ViewModel);
 }
 
 void FEventTrackEditor::BuildTrackContextMenu(FMenuBuilder& MenuBuilder, UMovieSceneTrack* Track)
@@ -198,7 +192,10 @@ void FEventTrackEditor::BuildTrackContextMenu(FMenuBuilder& MenuBuilder, UMovieS
 		FPropertyEditorModule& PropertyEditor = FModuleManager::Get().LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
 
 		// Create a details view for the track
-		FDetailsViewArgs DetailsViewArgs(false,false,false,FDetailsViewArgs::HideNameArea,true);
+		FDetailsViewArgs DetailsViewArgs;
+		DetailsViewArgs.bAllowSearch = false;
+		DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+		DetailsViewArgs.bHideSelectionTip = true;
 		DetailsViewArgs.DefaultsOnlyVisibility = EEditDefaultsOnlyNodeVisibility::Automatic;
 		DetailsViewArgs.bShowOptions = false;
 		DetailsViewArgs.ColumnWidth = 0.55f;
@@ -243,7 +240,7 @@ bool  FEventTrackEditor::SupportsSequence(UMovieSceneSequence* InSequence) const
 
 const FSlateBrush* FEventTrackEditor::GetIconBrush() const
 {
-	return FEditorStyle::GetBrush("Sequencer.Tracks.Event");
+	return FAppStyle::GetBrush("Sequencer.Tracks.Event");
 }
 
 /* FEventTrackEditor callbacks
@@ -284,11 +281,11 @@ void FEventTrackEditor::HandleAddEventTrackMenuEntryExecute(TArray<FGuid> InObje
 
 	if (!NewTracks.Num())
 	{
-		UMovieSceneEventTrack* NewMasterTrack = FocusedMovieScene->AddMasterTrack<UMovieSceneEventTrack>();
-		NewTracks.Add(NewMasterTrack);
+		UMovieSceneEventTrack* NewTrack = FocusedMovieScene->AddTrack<UMovieSceneEventTrack>();
+		NewTracks.Add(NewTrack);
 		if (GetSequencer().IsValid())
 		{
-			GetSequencer()->OnAddTrack(NewMasterTrack, FGuid());
+			GetSequencer()->OnAddTrack(NewTrack, FGuid());
 		}
 	}
 
@@ -314,7 +311,7 @@ void FEventTrackEditor::CreateNewSection(UMovieSceneTrack* Track, int32 RowIndex
 
 		FScopedTransaction Transaction(LOCTEXT("CreateNewSectionTransactionText", "Add Section"));
 
-		UMovieSceneSection* NewSection = NewObject<UMovieSceneSection>(Track, SectionType);
+		UMovieSceneSection* NewSection = NewObject<UMovieSceneSection>(Track, SectionType, NAME_None, RF_Transactional);
 		check(NewSection);
 
 		int32 OverlapPriority = 0;

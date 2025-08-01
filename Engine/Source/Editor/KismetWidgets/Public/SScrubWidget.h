@@ -2,16 +2,27 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "Misc/Attribute.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Delegates/Delegate.h"
+#include "Framework/SlateDelegates.h"
+#include "HAL/Platform.h"
 #include "Input/CursorReply.h"
 #include "Input/Reply.h"
-#include "Widgets/SCompoundWidget.h"
+#include "Math/Vector2D.h"
+#include "Misc/Attribute.h"
 #include "SCurveEditor.h"
+#include "Types/SlateEnums.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
 
 class FPaintArgs;
+class FSlateRect;
 class FSlateWindowElementList;
+class FText;
+class FWidgetStyle;
+struct FGeometry;
+struct FPointerEvent;
 
 /**
  * A Slate SpinBox resembles traditional spin boxes in that it is a widget that provides
@@ -23,6 +34,7 @@ DECLARE_DELEGATE_TwoParams( FOnCropAnimSequence, bool, float )
 DECLARE_DELEGATE_TwoParams( FOnAddAnimSequence, bool, int32 )
 DECLARE_DELEGATE_TwoParams( FOnAppendAnimSequence, bool, int32 )
 DECLARE_DELEGATE_TwoParams( FOnScrubBarDrag, int32, float)
+DECLARE_DELEGATE_TwoParams( FOnScrubBarCommit, int32, float)
 DECLARE_DELEGATE_OneParam( FOnReZeroAnimSequence, int32 )
 
 class KISMETWIDGETS_API SScrubWidget : public SCompoundWidget
@@ -34,6 +46,7 @@ public:
 		, _NumOfKeys(10)
 		, _SequenceLength()
 		, _bAllowZoom(false)
+		, _bDisplayAnimScrubBarEditing(true)
 		, _DisplayDrag(true)
 		, _OnValueChanged()
 		, _OnBeginSliderMovement()
@@ -49,6 +62,7 @@ public:
 		SLATE_ATTRIBUTE( uint32, NumOfKeys )
 		SLATE_ATTRIBUTE( float, SequenceLength )
 		SLATE_ARGUMENT( bool, bAllowZoom )
+		SLATE_ARGUMENT( bool, bDisplayAnimScrubBarEditing )
 		SLATE_ATTRIBUTE( bool, DisplayDrag )
 		/** Called when the value is changed by slider or typing */
 		SLATE_EVENT( FOnFloatValueChanged, OnValueChanged )
@@ -70,7 +84,8 @@ public:
 		SLATE_EVENT( FOnReZeroAnimSequence, OnReZeroAnimSequence )
 		/** Optional, additional values to draw on the timeline **/
 		SLATE_ATTRIBUTE( TArray<float>, DraggableBars )
-		SLATE_EVENT( FOnScrubBarDrag, OnBarDrag)
+		SLATE_EVENT( FOnScrubBarDrag, OnBarDrag )
+		SLATE_EVENT( FOnScrubBarCommit, OnBarCommit )
 	SLATE_END_ARGS()
 
 
@@ -138,6 +153,7 @@ private:
 	/** Dragagble bars are generic lines drawn on the scrub widget that can be dragged with the mouse. This is very bare bones and just represents drawing/moving float values */
 	TAttribute<TArray<float>>	DraggableBars;
 	FOnScrubBarDrag OnBarDrag;
+	FOnScrubBarCommit OnBarCommit;
 
 	/** Distance Dragged **/
 	float DistanceDragged;
@@ -146,7 +162,8 @@ private:
 	TAttribute<float> SequenceLength;
 	/** The number of decimal places to display */
 	bool bDragging;
-	bool bAllowZoom;	
+	bool bAllowZoom;
+	bool bDisplayAnimScrubBarEditing;
 	TAttribute<bool> bDisplayDrag;
 	/** If we are currently panning the panel*/
 	bool bPanning;

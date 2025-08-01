@@ -3,6 +3,8 @@
 #include "ProceduralFoliageInstance.h"
 #include "FoliageType_InstancedStaticMesh.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ProceduralFoliageInstance)
+
 FProceduralFoliageInstance::FProceduralFoliageInstance()
 : Rotation(ForceInit)
 , Location(ForceInit)
@@ -14,20 +16,6 @@ FProceduralFoliageInstance::FProceduralFoliageInstance()
 , bBlocker(false)
 , bAlive(true)
 {
-}
-
-FProceduralFoliageInstance::FProceduralFoliageInstance(const FProceduralFoliageInstance& Other)
-: Rotation(Other.Rotation)
-, Location(Other.Location)
-, Age(Other.Age)
-, Normal(Other.Normal)
-, Scale(Other.Scale)
-, Type(Other.Type)
-, BaseComponent(Other.BaseComponent)
-, bBlocker(Other.bBlocker)
-, bAlive(Other.bAlive)
-{
-
 }
 
 FProceduralFoliageInstance* GetLessFit(FProceduralFoliageInstance* A, FProceduralFoliageInstance* B)
@@ -93,3 +81,4 @@ void FProceduralFoliageInstance::TerminateInstance()
 {
 	bAlive = false;
 }
+

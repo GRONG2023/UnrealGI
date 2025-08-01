@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
+#include "Chaos/ParticleHandle.h"
 #include "Chaos/PerParticleRule.h"
 
 namespace Chaos
@@ -14,19 +15,19 @@ class FPerParticleInitForce : public FPerParticleRule
 
 	inline void Apply(FDynamicParticles& InParticles, const FReal Dt, const int Index) const override //-V762
 	{
-		InParticles.F(Index) = FVec3(0);
+		InParticles.Acceleration(Index) = FVec3(0);
 	}
 
 	inline void Apply(TRigidParticles<FReal, 3>& InParticles, const FReal Dt, const int Index) const override //-V762
 	{
-		InParticles.F(Index) = FVec3(0);
-		InParticles.Torque(Index) = FVec3(0);
+		InParticles.Acceleration(Index) = FVec3(0);
+		InParticles.AngularAcceleration(Index) = FVec3(0);
 	}
 
 	inline void Apply(TTransientPBDRigidParticleHandle<FReal, 3>& Particle, const FReal Dt) const override //-V762
 	{
-		Particle.F() = FVec3(0);
-		Particle.Torque() = FVec3(0);
+		Particle.Acceleration() = FVec3(0);
+		Particle.AngularAcceleration() = FVec3(0);
 	}
 };
 

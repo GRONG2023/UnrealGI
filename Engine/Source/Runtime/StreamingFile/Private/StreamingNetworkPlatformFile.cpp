@@ -297,17 +297,17 @@ bool FStreamingNetworkPlatformFile::ShouldBeUsed(IPlatformFile* Inner, const TCH
 		bResult = FParse::Param(CmdLine, TEXT("Streaming")) || !FPlatformMisc::SupportsLocalCaching();
 		if (FPlatformMisc::AllowLocalCaching())
 		{
-			//@todo. Platforms: Do we need to support 'in place' non-streaming cookonthefly?
 			// On desktop platforms, assume 'in place' execution - to prevent deletion of content, force streaming,
 			// unless it's explicitly allowed with -allowcaching (for automation tests with staged builds).
 			const bool bAllowCaching = FParse::Param(CmdLine, TEXT("AllowCaching"));
 
 			if (bResult == false && !bAllowCaching)
 			{
-				UE_LOG(LogStreamingPlatformFile, Warning, TEXT("Cooked desktop platforms do not support non-streaming. Forcing streaming on."));
+				UE_LOG(LogStreamingPlatformFile, Display, TEXT("Platform supports local caching, but requires explicitly specifying -AllowCaching to use it."));
 			}
 			bResult = bResult || !bAllowCaching;
 		}
+		UE_CLOG(bResult, LogStreamingPlatformFile, Display, TEXT("Using streaming network file system."));
 	}
 
 	return bResult;
@@ -343,7 +343,7 @@ bool FStreamingNetworkPlatformFile::InitializeInternal(IPlatformFile* Inner, con
 	if(SendPayloadAndReceiveResponse(Payload,Response))
 	{
 		// Receive the cooked version information.
-		int32 ServerPackageVersion = 0;
+		FPackageFileVersion ServerPackageVersion;
 		int32 ServerPackageLicenseeVersion = 0;
 		ProcessServerInitialResponse(Response, ServerPackageVersion, ServerPackageLicenseeVersion);
 
@@ -603,7 +603,7 @@ bool FStreamingNetworkPlatformFile::IterateDirectory(const TCHAR* InDirectory, I
 				bool bIsDirectory = It.Value() == 0;
 			
 				// visit (stripping off the path if needed)
-				RetVal = Visitor.Visit(bHadNoPath ? *FPaths::GetCleanFilename(It.Key()) : *It.Key(), bIsDirectory);
+				RetVal = Visitor.CallShouldVisitAndVisit(bHadNoPath ? *FPaths::GetCleanFilename(It.Key()) : *It.Key(), bIsDirectory);
 			}
 		}
 	}
@@ -633,7 +633,7 @@ bool FStreamingNetworkPlatformFile::IterateDirectoryRecursively(const TCHAR* InD
 				bool bIsDirectory = It.Value() == 0;
 
 				// visit!
-				RetVal = Visitor.Visit(*It.Key(), bIsDirectory);
+				RetVal = Visitor.CallShouldVisitAndVisit(*It.Key(), bIsDirectory);
 			}
 		}
 	}
@@ -751,36 +751,22 @@ void FStreamingNetworkPlatformFile::GetFileInfo(const TCHAR* Filename, FFileInfo
 	FString RelativeFilename = Filename;
 	MakeStandardNetworkFilename(RelativeFilename);
 
-	if (!CachedFileInfo.Contains(RelativeFilename))
+	FStreamingNetworkFileArchive Payload(NFS_Messages::GetFileInfo);
+	Payload << const_cast<FString&>(RelativeFilename);
+
+	// Send the filename over
+	FArrayReader Response;
+	if (SendPayloadAndReceiveResponse(Payload, Response) == false)
 	{
-		FStreamingNetworkFileArchive Payload(NFS_Messages::GetFileInfo);
-		Payload << const_cast<FString&>(RelativeFilename);
-
-//		if (RelativeFilename == TEXT("../../../UDKGame/Content/Maps/GDC12_Ice/GDC_2012_Throne_Cave.uasset"))
-//		{
-//			Info.ReadOnly = true;
-//		}
-
-		// Send the filename over
-		FArrayReader Response;
-		if (SendPayloadAndReceiveResponse(Payload, Response) == false)
-		{
-			return;
-		}
-
-		// Get info from the response
-		Response << Info.FileExists;
-		Response << Info.ReadOnly;
-		Response << Info.Size;
-		Response << Info.TimeStamp;
-		Response << Info.AccessTimeStamp;
-
-		CachedFileInfo.Add(RelativeFilename, Info);
+		return;
 	}
-	else
-	{
-		Info = *(CachedFileInfo.Find(RelativeFilename));
-	}
+
+	// Get info from the response
+	Response << Info.FileExists;
+	Response << Info.ReadOnly;
+	Response << Info.Size;
+	Response << Info.TimeStamp;
+	Response << Info.AccessTimeStamp;
 }
 
 

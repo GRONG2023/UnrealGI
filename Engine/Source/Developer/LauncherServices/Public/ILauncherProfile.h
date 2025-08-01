@@ -225,10 +225,23 @@ namespace ELauncherProfileValidationErrors
 		/** Using I/O store container file(s) requires using UnrealPak */
 		IoStoreRequiresPakFiles,
 
+		/** Build Target and Cook Variant mismatch */
+		BuildTargetCookVariantMismatch,
+
+		/** Build Target is required */
+		BuildTargetIsRequired,
+
+		/** FallbackBuild Target is required */
+		FallbackBuildTargetIsRequired,
+
+		/** Packaging and deploying are mutually exclusive */
+		CopyToDeviceRequiresNoPackaging,
+
 		Count
 	};
 }
 
+LAUNCHERSERVICES_API FString LexToStringLocalized(ELauncherProfileValidationErrors::Type Value);
 
 /** Type definition for shared pointers to instances of ILauncherProfile. */
 typedef TSharedPtr<class ILauncherSimpleProfile> ILauncherSimpleProfilePtr;
@@ -354,6 +367,9 @@ DECLARE_MULTICAST_DELEGATE_OneParam(FOnLauncherProfileDeployedDeviceGroupChanged
 
 /** Delegate type for a change in project */
 DECLARE_MULTICAST_DELEGATE(FOnProfileProjectChanged);
+
+/** Delegate type for a change in build target options */
+DECLARE_MULTICAST_DELEGATE(FOnProfileBuildTargetOptionsChanged);
 
 /** Delegate type for detecting if cook is finished
  *	Used when cooking from the editor.  Specific cook task will wait for the cook to be finished by the editor
@@ -513,6 +529,21 @@ public:
 	virtual EBuildConfiguration GetBuildConfiguration( ) const = 0;
 
 	/**
+	 * Checks whether the profile specifies a build target.
+	 *
+	 * @return true if the profile specifies a build target.
+	 */
+	virtual bool HasBuildTargetSpecified() const = 0;
+
+	/**
+	 * Gets the build target.
+	 *
+	 * @Return Target name to build/run (it would match a .Target.cs file)
+	 * @see SetBuildTarget
+	 */
+	virtual FString GetBuildTarget() const = 0;
+
+	/**
 	 * Gets the build configuration name of the cooker.
 	 *
 	 * @return Cook configuration name.
@@ -533,22 +564,6 @@ public:
 	 * @return Cook options string.
 	 */
 	virtual const FString& GetCookOptions( ) const = 0;
-
-
-	/**
-	 * Get the number of cookers we want to spawn during cooking
-	 *
-	 * @return number of cookers we want to spawn in addition to the master cooker
-	 */
-	virtual const int32 GetNumCookersToSpawn() const = 0;
-
-	/**
-	 * Set the number of cookers we want to spawn during cooking
-	 * 
-	 * @param InNumCookersToSpawn number of cookers we want to spawn in addition to the master cooker
-	 */
-	virtual void SetNumCookersToSpawn(const int32 InNumCookersToSpawn) = 0; 
-
 
 
 	virtual const bool GetSkipCookingEditorContent() const = 0; 
@@ -1017,10 +1032,28 @@ public:
 	virtual void SetBuildConfiguration( EBuildConfiguration Configuration ) = 0;
 
 	/**
+	 * Sets whether this profile specfies a build target.
+	 * 
+	 * @param Specified Whether a build target is specified.
+	 */
+	virtual void SetBuildTargetSpecified(bool Specified) = 0;
+
+	/** Notifies the profile that the fallback build target changed. */
+	virtual void FallbackBuildTargetUpdated() = 0;
+
+	/**
+	 * Sets the build target.
+	 *
+	 * @param TargetName The target name to set (it would match a .Target.cs file)
+	 * @see GetBuildTarget
+	 */
+	virtual void SetBuildTarget( const FString& TargetName ) = 0;
+
+	/**
 	 * Sets the build configuration of the cooker.
 	 *
 	 * @param Configuration The cooker's build configuration to set.
-	 * @see GetBuildConfigurationName
+	 * @see GetCookConfiguration
 	 */
 	virtual void SetCookConfiguration( EBuildConfiguration Configuration ) = 0;
 
@@ -1104,6 +1137,18 @@ public:
 
 	virtual void SetBasedOnReleaseVersionName(const FString& InBasedOnReleaseVersion) = 0;
 
+	virtual FString GetOriginalReleaseVersionName() const = 0;
+
+	virtual void SetOriginalReleaseVersionName(const FString& InOriginalReleaseVersion) = 0;
+
+	/**
+	* Provides a database of compressed iostore chunks to reuse during the
+	* staging process. See IoStoreUtilities.cpp ReferenceContainerGlobalFileName.
+	*/
+	virtual FString GetReferenceContainerGlobalFileName() const = 0;
+	virtual void SetReferenceContainerGlobalFileName(const FString& InReferenceContainerGlobalFileName) = 0;
+	virtual FString GetReferenceContainerCryptoKeysFileName() const = 0;
+	virtual void SetReferenceContainerCryptoKeysFileName(const FString& InReferenceContainerCryptoKeysFileName) = 0;
 
 	/**
 	 * Sets if we are going to generate a patch 
@@ -1291,6 +1336,13 @@ public:
 	virtual FOnProfileProjectChanged& OnProjectChanged() = 0;
 
 	/**
+	 * Access delegate used when build target options change.
+	 * 
+	 * @return The delegate.
+	 */
+	virtual FOnProfileBuildTargetOptionsChanged& OnBuildTargetOptionsChanged() = 0;
+
+	/**
 	 * Sets whether to use I/O store for optimized loading.
 	 * @param bUseIoStore Whether to use I/O store
 	 */
@@ -1304,6 +1356,19 @@ public:
 	virtual bool IsUsingIoStore() const = 0;
 
 	/**
+	 * Sets whether to use the Zen storage server
+	 * @param bUseZenStore Whether to use the Zen storage server
+	 */
+	virtual void SetUseZenStore(bool bUseZenStore) = 0;
+
+	/**
+	 * Using Zen storage server or not.
+	 *
+	 * @return true if using Zen storage server
+	 */
+	virtual bool IsUsingZenStore() const = 0;
+
+	/**
 	 * Sets whether to make a binary config file during packaging
 	 * @param bMakeBinaryConfig Whether to make a binary config file during staging
 	 */
@@ -1314,6 +1379,37 @@ public:
 	 * @return true to make binary config file
 	 */
 	virtual bool MakeBinaryConfig() const = 0;
+
+	/**
+	 * Sets whether or not the flash image/software on the device should attempt to be updated before running
+	 */
+	virtual void SetShouldUpdateDeviceFlash(bool bInShouldUpdateFlash) = 0;
+
+	/**
+	 * Whether or not the flash image/software on the device should attempt to be updated before running
+	 */
+	virtual bool ShouldUpdateDeviceFlash() const = 0;
+
+	/**
+	 * Sets whether or not the Device is a Simulator
+	 */
+	virtual void SetDeviceIsASimulator(bool bInIsDeviceASimualtor) = 0;
+
+	/**
+	 * Whether or not the Device is a Simulator
+	 */
+	virtual bool IsDeviceASimulator() const = 0;
+
+public:
+	/**
+	 * Helper function to get all of the build targets available for this profile, based on its current project & cook platforms
+	 */
+	virtual TArray<FString> GetExplicitBuildTargetNames() const = 0;
+
+	/**
+	 * Whether the profile will require an explicit -target=XXX parameter
+	 */
+	virtual bool RequiresExplicitBuildTargetName() const = 0;
 
 public:
 

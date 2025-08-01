@@ -24,26 +24,26 @@ class ANote : public AActor
 	// Reference to sprite visualization component
 private:
 	UPROPERTY()
-	class UBillboardComponent* SpriteComponent;
+	TObjectPtr<class UBillboardComponent> SpriteComponent;
 
 	// Reference to arrow visualization component
 	UPROPERTY()
-	class UArrowComponent* ArrowComponent;
+	TObjectPtr<class UArrowComponent> ArrowComponent;
 public:
 
 #endif // WITH_EDITORONLY_DATA
 
 #if WITH_EDITOR
 	//~ Begin AActor Interface
-	virtual void CheckForErrors() override;
+	ENGINE_API virtual void CheckForErrors() override;
 	//~ End AActor Interface
 #endif
 
 #if WITH_EDITORONLY_DATA
 	/** Returns SpriteComponent subobject **/
-	ENGINE_API class UBillboardComponent* GetSpriteComponent() const { return SpriteComponent; }
+	class UBillboardComponent* GetSpriteComponent() const { return SpriteComponent; }
 	/** Returns ArrowComponent subobject **/
-	ENGINE_API class UArrowComponent* GetArrowComponent() const { return ArrowComponent; }
+	class UArrowComponent* GetArrowComponent() const { return ArrowComponent; }
 #endif
 };
 

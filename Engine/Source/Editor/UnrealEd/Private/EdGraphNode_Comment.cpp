@@ -1,10 +1,21 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "EdGraphNode_Comment.h"
-#include "Layout/SlateRect.h"
 
 #include "GraphEditorSettings.h"
+#include "Internationalization/Internationalization.h"
 #include "Kismet2/Kismet2NameValidators.h"
+#include "Layout/SlateRect.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/AssertionMacros.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/UnrealType.h"
+
+class UEdGraphPin;
 
 #define LOCTEXT_NAMESPACE "EdGraph"
 
@@ -33,8 +44,8 @@ namespace FEdGraphNode_Comment_Utils
 UEdGraphNode_Comment::UEdGraphNode_Comment(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
-	NodeWidth = 400.0f;
-	NodeHeight = 100.0f;
+	NodeWidth = 400;
+	NodeHeight = 100;
 	FontSize = 18;
 	CommentColor = FLinearColor::White;
 	bColorCommentBubble = false;
@@ -107,7 +118,7 @@ FSlateIcon UEdGraphNode_Comment::GetIconAndTint(FLinearColor& OutColor) const
 {
 	OutColor = FLinearColor::White;
 	
-	static FSlateIcon Icon("EditorStyle", "GraphEditor.Comment_16x");
+	static FSlateIcon Icon(FAppStyle::GetAppStyleSetName(), "Icons.Comment");
 	return Icon;
 }
 
@@ -142,8 +153,8 @@ void UEdGraphNode_Comment::ResizeNode(const FVector2D& NewSize)
 {
 	if (bCanResizeNode) 
 	{
-		NodeHeight = NewSize.Y;
-		NodeWidth = NewSize.X;
+		NodeHeight = UE::LWC::FloatToIntCastChecked<int32>(NewSize.Y);
+		NodeWidth = UE::LWC::FloatToIntCastChecked<int32>(NewSize.X);
 	}
 }
 
@@ -153,7 +164,7 @@ void UEdGraphNode_Comment::AddNodeUnderComment(UObject* Object)
 	{
 		CommentDepth = FMath::Min( CommentDepth, ChildComment->CommentDepth - 1 );
 	}
-	NodesUnderComment.Add(Object);
+	NodesUnderComment.Add(ObjectPtrWrap(Object));
 }
 
 void UEdGraphNode_Comment::ClearNodesUnderComment()
@@ -163,17 +174,17 @@ void UEdGraphNode_Comment::ClearNodesUnderComment()
 
 void UEdGraphNode_Comment::SetBounds(const class FSlateRect& Rect)
 {
-	NodePosX = Rect.Left;
-	NodePosY = Rect.Top;
+	NodePosX = UE::LWC::FloatToIntCastChecked<int32>(Rect.Left);
+	NodePosY = UE::LWC::FloatToIntCastChecked<int32>(Rect.Top);
 
 	FVector2D Size = Rect.GetSize();
-	NodeWidth = Size.X;
-	NodeHeight = Size.Y;
+	NodeWidth = UE::LWC::FloatToIntCastChecked<int32>(Size.X);
+	NodeHeight = UE::LWC::FloatToIntCastChecked<int32>(Size.Y);
 }
 
 const FCommentNodeSet& UEdGraphNode_Comment::GetNodesUnderComment() const
 {
-	return NodesUnderComment;
+	return ObjectPtrDecay(NodesUnderComment);
 }
 
 void UEdGraphNode_Comment::OnRenameNode(const FString& NewName)
@@ -186,6 +197,20 @@ TSharedPtr<class INameValidatorInterface> UEdGraphNode_Comment::MakeNameValidato
 {
 	// Comments can be duplicated, etc...
 	return MakeShareable(new FDummyNameValidator(EValidatorResult::Ok));
+}
+
+bool UEdGraphNode_Comment::IsSelectedInEditor() const
+{
+	if (SelectionState == ESelectionState::Inherited)
+	{
+		return Super::IsSelectedInEditor();
+	}
+	return SelectionState == ESelectionState::Selected;
+}
+
+void UEdGraphNode_Comment::SetSelectionState(const ESelectionState InSelectionState)
+{
+	SelectionState = InSelectionState;
 }
 
 /////////////////////////////////////////////////////

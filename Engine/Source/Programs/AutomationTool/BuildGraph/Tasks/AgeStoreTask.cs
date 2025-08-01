@@ -6,10 +6,14 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Xml;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 using UnrealBuildTool;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 
-namespace Win.Automation
+using static AutomationTool.CommandUtils;
+
+namespace AutomationTool.Tasks
 {
 	/// <summary>
 	/// Parameters for a task that purges data from a symbol store after a given age
@@ -54,7 +58,7 @@ namespace Win.Automation
 	/// difference is that it uses the last modified time rather than last access time to determine which files to delete.
 	/// </summary>
 	[TaskElement("AgeStore", typeof(AgeStoreTaskParameters))]
-	public class AgeStoreTask : CustomTask
+	public class AgeStoreTask : BgTaskImpl
 	{
 		/// <summary>
 		/// Parameters for this task
@@ -75,11 +79,11 @@ namespace Win.Automation
 			try
 			{
 				Directory.Delete(true);
-                CommandUtils.LogInformation("Removed '{0}'", Directory.FullName);
+                Logger.LogInformation("Removed '{Arg0}'", Directory.FullName);
 			}
 			catch
 			{
-				CommandUtils.LogWarning("Couldn't delete '{0}' - skipping", Directory.FullName);
+				Logger.LogWarning("Couldn't delete '{Arg0}' - skipping", Directory.FullName);
 			}
 		}
 
@@ -88,11 +92,11 @@ namespace Win.Automation
 			try
 			{
 				File.Delete();
-				CommandUtils.LogInformation("Removed '{0}'", File.FullName);
+				Logger.LogInformation("Removed '{Arg0}'", File.FullName);
 			}
 			catch
 			{
-				CommandUtils.LogWarning("Couldn't delete '{0}' - skipping", File.FullName);
+				Logger.LogWarning("Couldn't delete '{Arg0}' - skipping", File.FullName);
 			}
 		}
 
@@ -114,14 +118,14 @@ namespace Win.Automation
 						string FilePointerName = File.ReadAllText(BuildVersionFile.FullName).Trim();
 						if(FilePointerName == Path.GetFileNameWithoutExtension(IndividualFilePath))
 						{
-							CommandUtils.LogInformation("Found existing build {0} in the BuildDir with matching individual file {1} - skipping.", BuildVersion, IndividualFilePath);
+							Logger.LogInformation("Found existing build {BuildVersion} in the BuildDir with matching individual file {IndividualFilePath} - skipping.", BuildVersion, IndividualFilePath);
 							return false;
 						}
 					}
 					// otherwise it's okay to just mark the entire folder for delete
 					else
 					{
-						CommandUtils.LogInformation("Found existing build {0} in the BuildDir - skipping.", BuildVersion);
+						Logger.LogInformation("Found existing build {BuildVersion} in the BuildDir - skipping.", BuildVersion);
 						return false;
 					}
 				}
@@ -177,7 +181,7 @@ namespace Win.Automation
 		/// <param name="Job">Information about the current job</param>
 		/// <param name="BuildProducts">Set of build products produced by this node.</param>
 		/// <param name="TagNameToFileSet">Mapping from tag names to the set of files they include</param>
-		public override void Execute(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
+		public override Task ExecuteAsync(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
 		{
 			// Get the list of symbol file name patterns from the platform.
 			Platform TargetPlatform = Platform.GetPlatform(Parameters.Platform);
@@ -206,13 +210,13 @@ namespace Win.Automation
 				}
 				else
 				{
-					CommandUtils.LogWarning("BuildDir of {0} was provided but it doesn't exist! Will not check buildversions against it.", Parameters.BuildDir);
+					Logger.LogWarning("BuildDir of {Arg0} was provided but it doesn't exist! Will not check buildversions against it.", Parameters.BuildDir);
 				}
 			}
 
 			// Get the time at which to expire files
 			DateTime ExpireTimeUtc = DateTime.UtcNow - TimeSpan.FromDays(Parameters.Days);
-            CommandUtils.LogInformation("Expiring all files before {0}...", ExpireTimeUtc);
+            Logger.LogInformation("Expiring all files before {ExpireTimeUtc}...", ExpireTimeUtc);
 
 			// Scan the store directory and delete old symbol files
 			DirectoryReference SymbolServerDirectory = ResolveDirectory(Parameters.StoreDir);
@@ -220,6 +224,7 @@ namespace Win.Automation
 			{
 				RecurseDirectory(ExpireTimeUtc, new DirectoryInfo(SymbolServerDirectory.FullName), DirectoryStructure, 0, Filter, ExistingBuilds, TargetPlatform.SymbolServerDeleteIndividualFiles);
 			});
+			return Task.CompletedTask;
 		}
 
 		/// <summary>

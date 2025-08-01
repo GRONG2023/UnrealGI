@@ -7,64 +7,64 @@ AndroidAffinity.h: Android affinity profile masks definitions.
 #pragma once
 
 #include "GenericPlatform/GenericPlatformAffinity.h"
+#include "AndroidPlatform.h"
 
 class FAndroidAffinity : public FGenericPlatformAffinity
 {
 private:
 	static uint64 GetLittleCoreMask();
-	const static uint64 AllCores = 0xFFFFFFFFFF;
+	const static uint64 AllCores = 0xFFFFFFFFFFFFFFFF;
 public:
-	static const CORE_API uint64 GetMainGameMask()
+	static const uint64 GetMainGameMask()
 	{
 		return GameThreadMask;
 	}
 
-	static const CORE_API uint64 GetRenderingThreadMask()
+	static const uint64 GetRenderingThreadMask()
 	{
 		return RenderingThreadMask;
 	}
 
-	static const CORE_API uint64 GetRHIThreadMask()
+	static const uint64 GetRHIThreadMask()
 	{
 		return AllCores;
 	}
 
-	static const CORE_API uint64 GetRTHeartBeatMask()
+	static const uint64 GetRTHeartBeatMask()
 	{
 		return GetLittleCoreMask();
 	}
 
-	static const CORE_API uint64 GetPoolThreadMask()
+	static const uint64 GetPoolThreadMask()
 	{
+#if ANDROID_USE_NICE_VALUE_THREADPRIORITY
+		return AllCores;
+#else
 		return GetLittleCoreMask();
+#endif
 	}
 
-	static const CORE_API uint64 GetTaskGraphThreadMask()
-	{
-		return GetLittleCoreMask();
-	}
-
-	static const CORE_API uint64 GetStatsThreadMask()
-	{
-		return GetLittleCoreMask();
-	}
-
-	static const CORE_API uint64 GetAudioThreadMask()
-	{
-		return GetLittleCoreMask();
-	}
-
-	static const CORE_API uint64 GetTaskGraphBackgroundTaskMask()
-	{
-		return GetLittleCoreMask();
-	}
-
-	static const CORE_API uint64 GetTaskGraphHighPriorityTaskMask()
+	static const uint64 GetTaskGraphThreadMask()
 	{
 		return AllCores;
 	}
 
-	static const CORE_API uint64 GetAsyncLoadingThreadMask()
+	static const uint64 GetAudioRenderThreadMask()
+	{
+		return GetLittleCoreMask();
+	}
+
+	static const uint64 GetTaskGraphBackgroundTaskMask()
+	{
+		return GetLittleCoreMask();
+	}
+
+	static const uint64 GetTaskGraphHighPriorityTaskMask()
+	{
+		return AllCores;
+	}
+
+	static const uint64 GetAsyncLoadingThreadMask()
 	{
 		return AllCores;
 	}
@@ -80,8 +80,8 @@ public:
 	}
 
 public:
-	static int64 GameThreadMask;
-	static int64 RenderingThreadMask;
+	static uint64 GameThreadMask;
+	static uint64 RenderingThreadMask;
 };
 
 typedef FAndroidAffinity FPlatformAffinity;

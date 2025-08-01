@@ -5,7 +5,7 @@
 #include "GameFramework/Actor.h"
 #include "Misc/PackageName.h"
 #include "Misc/MessageDialog.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Factories/BlueprintFactory.h"
 #include "ThumbnailRendering/SceneThumbnailInfo.h"
 #include "Kismet2/BlueprintEditorUtils.h"
@@ -46,7 +46,7 @@ void FAssetTypeActions_Blueprint::GetActions(const TArray<UObject*>& InObjects, 
 				"Blueprint_EditDefaults",
 				LOCTEXT("Blueprint_EditDefaults", "Edit Shared Defaults"),
 				LOCTEXT("Blueprint_EditDefaultsTooltip", "Edit the shared default properties of the selected blueprints."),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "Kismet.Tabs.BlueprintDefaults"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "Kismet.Tabs.BlueprintDefaults"),
 				FUIAction(
 					FExecuteAction::CreateSP( this, &FAssetTypeActions_Blueprint::ExecuteEditDefaults, Blueprints ),
 					FCanExecuteAction()
@@ -65,7 +65,7 @@ void FAssetTypeActions_Blueprint::GetActions(const TArray<UObject*>& InObjects, 
 			"Blueprint_NewDerivedBlueprint",
 			LOCTEXT("Blueprint_NewDerivedBlueprint", "Create Child Blueprint Class"),
 			DynamicTooltipAttribute,
-			FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.CreateClassBlueprint"),
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Blueprint"),
 			FUIAction(
 				FExecuteAction::CreateSP( this, &FAssetTypeActions_Blueprint::ExecuteNewDerivedBlueprint, Blueprints[0] ),
 				FCanExecuteAction::CreateSP( this, &FAssetTypeActions_Blueprint::CanExecuteNewDerivedBlueprint, Blueprints[0] )
@@ -240,22 +240,10 @@ bool FAssetTypeActions_Blueprint::ShouldUseDataOnlyEditor( const UBlueprint* Blu
 
 void FAssetTypeActions_Blueprint::PerformAssetDiff(UObject* OldAsset, UObject* NewAsset, const FRevisionInfo& OldRevision, const FRevisionInfo& NewRevision) const
 {
-	UBlueprint* OldBlueprint = CastChecked<UBlueprint>(OldAsset);
-	UBlueprint* NewBlueprint = CastChecked<UBlueprint>(NewAsset);
+	UBlueprint* OldBlueprint = Cast<UBlueprint>(OldAsset);
+	UBlueprint* NewBlueprint = Cast<UBlueprint>(NewAsset);
 
-	// sometimes we're comparing different revisions of one single asset (other 
-	// times we're comparing two completely separate assets altogether)
-	bool bIsSingleAsset = (NewBlueprint->GetName() == OldBlueprint->GetName());
-
-	FText WindowTitle = LOCTEXT("NamelessBlueprintDiff", "Blueprint Diff");
-	// if we're diffing one asset against itself 
-	if (bIsSingleAsset)
-	{
-		// identify the assumed single asset in the window's title
-		WindowTitle = FText::Format(LOCTEXT("Blueprint Diff", "{0} - Blueprint Diff"), FText::FromString(NewBlueprint->GetName()));
-	}
-
-	SBlueprintDiff::CreateDiffWindow(WindowTitle, OldBlueprint, NewBlueprint, OldRevision, NewRevision);
+	SBlueprintDiff::CreateDiffWindow(OldBlueprint, NewBlueprint, OldRevision, NewRevision, GetSupportedClass());
 }
 
 UThumbnailInfo* FAssetTypeActions_Blueprint::GetThumbnailInfo(UObject* Asset) const
@@ -297,7 +285,7 @@ TWeakPtr<IClassTypeActions> FAssetTypeActions_Blueprint::GetClassTypeActions(con
 	{
 		UObject* Outer = nullptr;
 		ResolveName(Outer, ParentClassName, false, false);
-		ParentClass = FindObject<UClass>(ANY_PACKAGE, *ParentClassName);
+		ParentClass = FindObject<UClass>(Outer, *ParentClassName);
 	}
 
 	if(ParentClass)

@@ -25,12 +25,18 @@ private:
 	UPROPERTY()
 	TSoftObjectPtr<class UObject> AttachedObject;
 
+#if WITH_EDITORONLY_DATA
 	UPROPERTY()
-	UObject* Object_DEPRECATED;
+	TObjectPtr<UObject> Object_DEPRECATED;
+#endif
 
 public:
 
-	FPreviewAttachedObjectPair() : Object_DEPRECATED(NULL) {}
+	FPreviewAttachedObjectPair()
+#if WITH_EDITORONLY_DATA
+		: Object_DEPRECATED(NULL)
+#endif
+	{}
 
 	/** The name of the attach point of the Object (for example a bone or socket name) */
 	UPROPERTY()
@@ -38,11 +44,13 @@ public:
 
 	void SaveAttachedObjectFromDeprecatedProperty()
 	{
+#if WITH_EDITORONLY_DATA
 		if (Object_DEPRECATED)
 		{
 			AttachedObject = Object_DEPRECATED;
 			Object_DEPRECATED = NULL;
 		}
+#endif
 	}
 
 	UObject* GetAttachedObject() const
@@ -131,7 +139,12 @@ public:
 	/** 
 	 * RemoveAtSwap passthrough
 	 */
-	ENGINE_API void RemoveAtSwap( int32 Index, int32 Count = 1, bool bAllowShrinking = true );
+	ENGINE_API void RemoveAtSwap( int32 Index, int32 Count = 1, EAllowShrinking AllowShrinking = EAllowShrinking::Yes);
+	UE_ALLOWSHRINKING_BOOL_DEPRECATED("RemoveAtSwap")
+	FORCEINLINE void RemoveAtSwap(int32 Index, int32 Count, bool bAllowShrinking)
+	{
+		RemoveAtSwap(Index, Count, bAllowShrinking ? EAllowShrinking::Yes : EAllowShrinking::No);
+	}
 
 	/**
 	 * Helper function to fix up attached objects after property deprecation

@@ -12,8 +12,8 @@ public:
 	FItemPropertyNode();
 	virtual ~FItemPropertyNode();
 
-	virtual uint8* GetValueBaseAddress(uint8* StartAddress, bool bIsSparseData) const override;
-	virtual uint8* GetValueAddress(uint8* StartAddress, bool bIsSparseData) const override;
+	virtual uint8* GetValueBaseAddress(uint8* StartAddress, bool bIsSparseData, bool bIsStruct) const override;
+	virtual uint8* GetValueAddress(uint8* StartAddress, bool bIsSparseData, bool bIsStruct) const override;
 
 	/**
 	 * Overridden function to get the derived object node
@@ -35,16 +35,6 @@ public:
 	virtual bool IsFavorite() const override;
 
 	/**
-	* Set the permission to display the favorite icon
-	*/
-	virtual void SetCanDisplayFavorite(bool CanDisplayFavoriteIcon) override;
-
-	/**
-	* Set the permission to display the favorite icon
-	*/
-	virtual bool CanDisplayFavorite() const override;
-
-	/**
 	 * @return The formatted display name for the property in this node                                                              
 	 */
 	virtual FText GetDisplayName() const override;
@@ -58,6 +48,11 @@ public:
 	 * @return The tooltip for the property in this node                                                              
 	 */
 	virtual FText GetToolTipText() const override;
+
+	/**
+	 * If this is node contains a FOptionalProperty, get its Value FPropertyNode node if set (may create the node if necessary).
+	 */
+	virtual TSharedPtr<FPropertyNode>& GetOrCreateOptionalValueNode() override;
 
 protected:
 	/**

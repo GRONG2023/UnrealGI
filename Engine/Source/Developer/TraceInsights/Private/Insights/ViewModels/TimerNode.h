@@ -51,8 +51,9 @@ typedef TWeakPtr<class FTimerNode> FTimerNodeWeak;
  */
 class FTimerNode : public Insights::FBaseTreeNode
 {
+	INSIGHTS_DECLARE_RTTI(FTimerNode, FBaseTreeNode)
+
 public:
-	static const FName TypeName;
 	static constexpr uint32 InvalidTimerId = uint32(-1);
 
 	static const FName GpuGroup;
@@ -60,14 +61,12 @@ public:
 
 public:
 	/** Initialization constructor for the timer node. */
-	FTimerNode(uint32 InTimerId, const TCHAR* InName, ETimerNodeType InType);
+	FTimerNode(uint32 InTimerId, const TCHAR* InName, ETimerNodeType InType, bool bInIsGroup);
 
 	/** Initialization constructor for the group node. */
 	explicit FTimerNode(const FName InGroupName);
 
 	virtual ~FTimerNode();
-
-	virtual const FName& GetTypeName() const override { return TypeName; }
 
 	/**
 	 * @return the timer id as provided by analyzer. It can be used as an index.
@@ -82,7 +81,7 @@ public:
 	/**
 	 * @return a type of this timer node or ETimerNodeType::Group for group nodes.
 	 */
-	const ETimerNodeType& GetType() const { return Type; }
+	ETimerNodeType GetType() const { return Type; }
 
 	/**
 	 * @return color of the node. Used when showing a graph series for a stats counter.
@@ -94,25 +93,33 @@ public:
 
 	bool IsAddedToGraph() const
 	{
-		return bIsAddedToGraph;
+		return NumGraphs > 0;
 	}
 
-	void SetAddedToGraphFlag(bool bOnOff)
+	void OnAddedToGraph()
 	{
-		bIsAddedToGraph = bOnOff;
+		++NumGraphs;
+	}
+
+	void OnRemovedFromGraph()
+	{
+		ensure(NumGraphs > 0);
+		--NumGraphs;
 	}
 
 	/**
 	 * @return the aggregated stats for this timer.
 	 */
-	const Trace::FTimingProfilerAggregatedStats& GetAggregatedStats() const { return AggregatedStats; }
-	Trace::FTimingProfilerAggregatedStats& GetAggregatedStats() { return AggregatedStats; }
+	const TraceServices::FTimingProfilerAggregatedStats& GetAggregatedStats() const { return AggregatedStats; }
+	TraceServices::FTimingProfilerAggregatedStats& GetAggregatedStats() { return AggregatedStats; }
 
 	void ResetAggregatedStats();
-	void SetAggregatedStats(const Trace::FTimingProfilerAggregatedStats& AggregatedStats);
+	void SetAggregatedStats(const TraceServices::FTimingProfilerAggregatedStats& AggregatedStats);
 
 	bool IsHotPath() const { return bIsHotPath; }
 	void SetIsHotPath(bool bOnOff) { bIsHotPath = bOnOff; }
+
+	bool GetSourceFileAndLine(FString& OutFile, uint32& OutLine) const;
 
 private:
 	/** The timer id provided by analyzer. It can also be used as an index. */
@@ -126,14 +133,15 @@ private:
 
 	/** Color of the node. */
 	FLinearColor Color;
-
-	bool bIsAddedToGraph;
+	
+	/** The number of graphs created for this timer. */
+	int32 NumGraphs;
 
 	/** True if this tree node is on the hot path. */
 	bool bIsHotPath;
 
 	/** Aggregated stats. */
-	Trace::FTimingProfilerAggregatedStats AggregatedStats;
+	TraceServices::FTimingProfilerAggregatedStats AggregatedStats;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

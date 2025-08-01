@@ -4,6 +4,8 @@
 	D3D12RootSignature.h: D3D12 Root Signatures
 =============================================================================*/
 
+#include "D3D12RootSignatureDefinitions.h"
+
 // Root parameter keys grouped by visibility.
 enum ERootParameterKeys
 {
@@ -19,14 +21,14 @@ enum ERootParameterKeys
 	GS_CBVs,
 	GS_RootCBVs,
 	GS_Samplers,
-	HS_SRVs,
-	HS_CBVs,
-	HS_RootCBVs,
-	HS_Samplers,
-	DS_SRVs,
-	DS_CBVs,
-	DS_RootCBVs,
-	DS_Samplers,
+	MS_SRVs,
+	MS_CBVs,
+	MS_RootCBVs,
+	MS_Samplers,
+	AS_SRVs,
+	AS_CBVs,
+	AS_RootCBVs,
+	AS_Samplers,
 	ALL_SRVs,
 	ALL_CBVs,
 	ALL_RootCBVs,
@@ -35,6 +37,8 @@ enum ERootParameterKeys
 	RPK_RootParameterKeyCount,
 };
 
+class FD3D12RootSignature;
+
 class FD3D12RootSignatureDesc
 {
 public:
@@ -42,16 +46,16 @@ public:
 
 	inline const D3D12_VERSIONED_ROOT_SIGNATURE_DESC& GetDesc() const { return RootDesc; }
 
-	static const D3D12_VERSIONED_ROOT_SIGNATURE_DESC& GetStaticGraphicsRootSignatureDesc();
-	static const D3D12_VERSIONED_ROOT_SIGNATURE_DESC& GetStaticComputeRootSignatureDesc();
-	static const D3D12_VERSIONED_ROOT_SIGNATURE_DESC& GetStaticRayTracingGlobalRootSignatureDesc();
-	static const D3D12_VERSIONED_ROOT_SIGNATURE_DESC& GetStaticRayTracingLocalRootSignatureDesc();
-
 	static constexpr uint32 MaxRootParameters = 32;	// Arbitrary max, increase as needed.
+
+	inline int8 GetRootConstantsSlot() const { return RootConstantsSlot; }
+	inline int8 GetDiagnosticBufferSlot() const { return DiagnosticBufferSlot; }
 
 private:
 
 	uint32 RootParametersSize;	// The size of all root parameters in the root signature. Size in DWORDs, the limit is 64.
+	int8 RootConstantsSlot = -1;
+	int8 DiagnosticBufferSlot = -1;
 	CD3DX12_ROOT_PARAMETER1 TableSlots[MaxRootParameters];
 	CD3DX12_DESCRIPTOR_RANGE1 DescriptorRanges[MaxRootParameters];
 	CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC RootDesc;
@@ -63,23 +67,13 @@ private:
 	// Struct for all the useful info we want per shader stage.
 	struct ShaderStage
 	{
-		ShaderStage()
-			: MaxCBVCount(0u)
-			, MaxSRVCount(0u)
-			, MaxSamplerCount(0u)
-			, MaxUAVCount(0u)
-			, CBVRegisterMask(0u)
-			, bVisible(false)
-		{
-		}
-
 		// TODO: Make these arrays and index into them by type instead of individual variables.
-		uint8 MaxCBVCount;
-		uint8 MaxSRVCount;
-		uint8 MaxSamplerCount;
-		uint8 MaxUAVCount;
-		CBVSlotMask CBVRegisterMask;
-		bool bVisible;
+		uint8 MaxCBVCount = 0;
+		uint8 MaxSRVCount = 0;
+		uint8 MaxSamplerCount = 0;
+		uint8 MaxUAVCount = 0;
+		CBVSlotMask CBVRegisterMask = 0;
+		bool bVisible = false;
 	};
 
 public:
@@ -91,20 +85,16 @@ public:
 	{
 		Init(InQBSS);
 	}
-	explicit FD3D12RootSignature(FD3D12Adapter* InParent, const D3D12_VERSIONED_ROOT_SIGNATURE_DESC& InDesc, uint32 BindingSpace = 0)
-		: FD3D12AdapterChild(InParent)
-	{
-		Init(InDesc, BindingSpace);
-	}
-	explicit FD3D12RootSignature(FD3D12Adapter* InParent, ID3DBlob* const InBlob, uint32 BindingSpace = 0)
-		: FD3D12AdapterChild(InParent)
-	{
-		Init(InBlob, BindingSpace);
-	}
 
 	void Init(const FD3D12QuantizedBoundShaderState& InQBSS);
 	void Init(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC& InDesc, uint32 BindingSpace = 0);
-	void Init(ID3DBlob* const InBlob, uint32 BindingSpace = 0);
+
+	void InitStaticGraphicsRootSignature(ED3D12RootSignatureFlags InFlags);
+	void InitStaticComputeRootSignatureDesc(ED3D12RootSignatureFlags InFlags);
+#if D3D12_RHI_RAYTRACING
+	void InitStaticRayTracingGlobalRootSignatureDesc(ED3D12RootSignatureFlags InFlags);
+	void InitStaticRayTracingLocalRootSignatureDesc(ED3D12RootSignatureFlags InFlags);
+#endif
 
 	ID3D12RootSignature* GetRootSignature() const { return RootSignature.GetReference(); }
 	ID3DBlob* GetRootSignatureBlob() const { return RootSignatureBlob.GetReference(); }
@@ -114,10 +104,10 @@ public:
 		switch (ShaderStage)
 		{
 		case SF_Vertex: return BindSlotMap[VS_Samplers];
+		case SF_Mesh: return BindSlotMap[MS_Samplers];
+		case SF_Amplification: return BindSlotMap[AS_Samplers];
 		case SF_Pixel: return BindSlotMap[PS_Samplers];
 		case SF_Geometry: return BindSlotMap[GS_Samplers];
-		case SF_Hull: return BindSlotMap[HS_Samplers];
-		case SF_Domain: return BindSlotMap[DS_Samplers];
 		case SF_Compute: return BindSlotMap[ALL_Samplers];
 
 		default: check(false);
@@ -130,10 +120,10 @@ public:
 		switch (ShaderStage)
 		{
 		case SF_Vertex: return BindSlotMap[VS_SRVs];
+		case SF_Mesh: return BindSlotMap[MS_SRVs];
+		case SF_Amplification: return BindSlotMap[AS_SRVs];
 		case SF_Pixel: return BindSlotMap[PS_SRVs];
 		case SF_Geometry: return BindSlotMap[GS_SRVs];
-		case SF_Hull: return BindSlotMap[HS_SRVs];
-		case SF_Domain: return BindSlotMap[DS_SRVs];
 		case SF_Compute: return BindSlotMap[ALL_SRVs];
 
 		default: check(false);
@@ -146,10 +136,10 @@ public:
 		switch (ShaderStage)
 		{
 		case SF_Vertex: return BindSlotMap[VS_CBVs];
+		case SF_Mesh: return BindSlotMap[MS_CBVs];
+		case SF_Amplification: return BindSlotMap[AS_CBVs];
 		case SF_Pixel: return BindSlotMap[PS_CBVs];
 		case SF_Geometry: return BindSlotMap[GS_CBVs];
-		case SF_Hull: return BindSlotMap[HS_CBVs];
-		case SF_Domain: return BindSlotMap[DS_CBVs];
 		case SF_Compute: return BindSlotMap[ALL_CBVs];
 
 		default: check(false);
@@ -162,10 +152,10 @@ public:
 		switch (ShaderStage)
 		{
 		case SF_Vertex: return BindSlotMap[VS_RootCBVs];
+		case SF_Mesh: return BindSlotMap[MS_RootCBVs];
+		case SF_Amplification: return BindSlotMap[AS_RootCBVs];
 		case SF_Pixel: return BindSlotMap[PS_RootCBVs];
 		case SF_Geometry: return BindSlotMap[GS_RootCBVs];
-		case SF_Hull: return BindSlotMap[HS_RootCBVs];
-		case SF_Domain: return BindSlotMap[DS_RootCBVs];
 
 		case SF_NumFrequencies:
 		case SF_Compute: return BindSlotMap[ALL_RootCBVs];
@@ -190,10 +180,16 @@ public:
 	inline bool HasUAVs() const { return bHasUAVs; }
 	inline bool HasSRVs() const { return bHasSRVs; }
 	inline bool HasCBVs() const { return bHasCBVs; }
+	inline bool HasRootCBs() const { return bHasRootCBs; }
+	inline bool HasTableResources() const { return bHasUAVs || bHasSRVs; }
+	inline bool HasTableConstants() const { return bHasCBVs; }
 	inline bool HasSamplers() const { return bHasSamplers; }
+	inline bool UsesDynamicResources() const { return bUsesDynamicResources; }
+	inline bool UsesDynamicSamplers() const { return bUsesDynamicSamplers; }
+
 	inline bool HasVS() const { return Stage[SF_Vertex].bVisible; }
-	inline bool HasHS() const { return Stage[SF_Hull].bVisible; }
-	inline bool HasDS() const { return Stage[SF_Domain].bVisible; }
+	inline bool HasMS() const { return Stage[SF_Mesh].bVisible; }
+	inline bool HasAS() const { return Stage[SF_Amplification].bVisible; }
 	inline bool HasGS() const { return Stage[SF_Geometry].bVisible; }
 	inline bool HasPS() const { return Stage[SF_Pixel].bVisible; }
 	inline bool HasCS() const { return Stage[SF_Compute].bVisible; }	// Root signatures can be used for Graphics and/or Compute because they exist in separate bind spaces.
@@ -205,6 +201,11 @@ public:
 
 	uint32 GetBindSlotOffsetInBytes(uint8 BindSlotIndex) const { check(BindSlotIndex < UE_ARRAY_COUNT(BindSlotOffsetsInDWORDs)); return 4 * BindSlotOffsetsInDWORDs[BindSlotIndex]; }
 	uint32 GetTotalRootSignatureSizeInBytes() const { return 4 * TotalRootSignatureSizeInDWORDs; }
+
+	inline int8 GetRootConstantsSlot() const { return RootConstantsSlot; }
+
+	// Returns root parameter slot for the internal shader diagnostic buffer (used for asserts, etc.) or -1 if not available.
+	inline int8 GetDiagnosticBufferSlot() const { return DiagnosticBufferSlot; }
 
 private:
 	void AnalyzeSignature(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC& Desc, uint32 BindingSpace);
@@ -223,10 +224,10 @@ private:
 		switch (SF)
 		{
 		case SF_Vertex: pBindSlot = &BindSlotMap[VS_Samplers]; break;
+		case SF_Mesh: pBindSlot = &BindSlotMap[MS_Samplers]; break;
+		case SF_Amplification: pBindSlot = &BindSlotMap[AS_Samplers]; break;
 		case SF_Pixel: pBindSlot = &BindSlotMap[PS_Samplers]; break;
 		case SF_Geometry: pBindSlot = &BindSlotMap[GS_Samplers]; break;
-		case SF_Hull: pBindSlot = &BindSlotMap[HS_Samplers]; break;
-		case SF_Domain: pBindSlot = &BindSlotMap[DS_Samplers]; break;
 
 		case SF_Compute:
 		case SF_NumFrequencies: pBindSlot = &BindSlotMap[ALL_Samplers]; break;
@@ -247,10 +248,10 @@ private:
 		switch (SF)
 		{
 		case SF_Vertex: pBindSlot = &BindSlotMap[VS_SRVs]; break;
+		case SF_Mesh: pBindSlot = &BindSlotMap[MS_SRVs]; break;
+		case SF_Amplification: pBindSlot = &BindSlotMap[AS_SRVs]; break;
 		case SF_Pixel: pBindSlot = &BindSlotMap[PS_SRVs]; break;
 		case SF_Geometry: pBindSlot = &BindSlotMap[GS_SRVs]; break;
-		case SF_Hull: pBindSlot = &BindSlotMap[HS_SRVs]; break;
-		case SF_Domain: pBindSlot = &BindSlotMap[DS_SRVs]; break;
 
 		case SF_Compute:
 		case SF_NumFrequencies: pBindSlot = &BindSlotMap[ALL_SRVs]; break;
@@ -271,10 +272,10 @@ private:
 		switch (SF)
 		{
 		case SF_Vertex: pBindSlot = &BindSlotMap[VS_CBVs]; break;
+		case SF_Mesh: pBindSlot = &BindSlotMap[MS_CBVs]; break;
+		case SF_Amplification: pBindSlot = &BindSlotMap[AS_CBVs]; break;
 		case SF_Pixel: pBindSlot = &BindSlotMap[PS_CBVs]; break;
 		case SF_Geometry: pBindSlot = &BindSlotMap[GS_CBVs]; break;
-		case SF_Hull: pBindSlot = &BindSlotMap[HS_CBVs]; break;
-		case SF_Domain: pBindSlot = &BindSlotMap[DS_CBVs]; break;
 
 		case SF_Compute:
 		case SF_NumFrequencies: pBindSlot = &BindSlotMap[ALL_CBVs]; break;
@@ -287,7 +288,6 @@ private:
 		*pBindSlot = RootParameterIndex;
 
 		bHasCBVs = true;
-		bHasRDTCBVs = true;
 	}
 
 	inline void SetCBVRDBindSlot(EShaderFrequency SF, uint8 RootParameterIndex)
@@ -296,10 +296,10 @@ private:
 		switch (SF)
 		{
 		case SF_Vertex: pBindSlot = &BindSlotMap[VS_RootCBVs]; break;
+		case SF_Mesh: pBindSlot = &BindSlotMap[MS_RootCBVs]; break;
+		case SF_Amplification: pBindSlot = &BindSlotMap[AS_RootCBVs]; break;
 		case SF_Pixel: pBindSlot = &BindSlotMap[PS_RootCBVs]; break;
 		case SF_Geometry: pBindSlot = &BindSlotMap[GS_RootCBVs]; break;
-		case SF_Hull: pBindSlot = &BindSlotMap[HS_RootCBVs]; break;
-		case SF_Domain: pBindSlot = &BindSlotMap[DS_RootCBVs]; break;
 
 		case SF_Compute:
 		case SF_NumFrequencies: pBindSlot = &BindSlotMap[ALL_RootCBVs]; break;
@@ -311,13 +311,13 @@ private:
 		check(*pBindSlot == 0xFF);
 		*pBindSlot = RootParameterIndex;
 
-		bHasCBVs = true;
-		bHasRDCBVs = true;
+		bHasRootCBs = true;
 	}
 
 	inline void SetUAVRDTBindSlot(EShaderFrequency SF, uint8 RootParameterIndex)
 	{
 		check(SF == SF_Pixel || SF == SF_Compute || SF == SF_NumFrequencies);
+
 		uint8* pBindSlot = &BindSlotMap[ALL_UAVs];
 
 		check(*pBindSlot == 0xFF);
@@ -443,16 +443,21 @@ private:
 	TRefCountPtr<ID3D12RootSignature> RootSignature;
 	uint8 BindSlotMap[RPK_RootParameterKeyCount];	// This map uses an enum as a key to lookup the root parameter index
 	ShaderStage Stage[SF_NumFrequencies];
-	bool bHasUAVs;
-	bool bHasSRVs;
-	bool bHasCBVs;
-	bool bHasRDTCBVs;
-	bool bHasRDCBVs;
-	bool bHasSamplers;
 	TRefCountPtr<ID3DBlob> RootSignatureBlob;
 
 	uint8 BindSlotOffsetsInDWORDs[FD3D12RootSignatureDesc::MaxRootParameters] = {};
 	uint8 TotalRootSignatureSizeInDWORDs = 0;
+	int8 RootConstantsSlot = -1;
+	int8 DiagnosticBufferSlot = -1;
+
+	uint8 bHasUAVs : 1;
+	uint8 bHasSRVs : 1;
+	uint8 bHasCBVs : 1;
+	uint8 bHasRootCBs : 1;
+	uint8 bHasSamplers : 1;
+	uint8 bHasVendorExtensionSpace : 1;
+	uint8 bUsesDynamicResources : 1;
+	uint8 bUsesDynamicSamplers : 1;
 };
 
 class FD3D12RootSignatureManager : public FD3D12AdapterChild

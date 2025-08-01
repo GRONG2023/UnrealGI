@@ -2,11 +2,16 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Widgets/SWidget.h"
+#include "Containers/Array.h"
+#include "Delegates/Delegate.h"
 #include "Engine/TextureDefines.h"
+#include "HAL/Platform.h"
 #include "IDetailCustomNodeBuilder.h"
-#include "UnrealClient.h"
+#include "Internationalization/Text.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
 
 class FDetailWidgetRow;
 class IDetailCategoryBuilder;
@@ -14,6 +19,7 @@ class IDetailChildrenBuilder;
 class IDetailLayoutBuilder;
 class IPropertyHandle;
 class IPropertyHandleArray;
+class SWidget;
 struct FTextureLODGroup;
 
 /**
@@ -46,6 +52,11 @@ private:
 	uint32 GetMaxLODSize() const;
 	void OnMaxLODSizeChanged(uint32 NewValue);
 	void OnMaxLODSizeCommitted(uint32 NewValue, ETextCommit::Type TextCommitType);
+
+	// Controls for the Max LOD Size VT property editing
+	uint32 GetMaxLODSizeVT() const;
+	void OnMaxLODSizeVTChanged(uint32 NewValue);
+	void OnMaxLODSizeVTCommitted(uint32 NewValue, ETextCommit::Type TextCommitType);
 
 	// Controls for the LOD Bias property editing
 	int32 GetLODBias() const;

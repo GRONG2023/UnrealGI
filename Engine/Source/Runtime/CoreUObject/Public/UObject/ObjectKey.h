@@ -2,8 +2,16 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
 #include "UObject/WeakObjectPtr.h"
+
+#include <type_traits>
+
+struct FObjectKey;
+
+namespace UE::CoreUObject::Private
+{
+	FObjectKey MakeObjectKey(int32 ObjectIndex, int32 ObjectSerialNumber);
+}
 
 /** FObjectKey is an immutable, copyable key which can be used to uniquely identify an object for the lifetime of the application */
 struct FObjectKey
@@ -11,14 +19,14 @@ struct FObjectKey
 public:
 	/** Default constructor */
 	FORCEINLINE FObjectKey()
-		: ObjectIndex(INDEX_NONE)
+		: ObjectIndex(UE::Core::Private::InvalidWeakObjectIndex)
 		, ObjectSerialNumber(0)
 	{
 	}
 
 	/** Construct from an object pointer */
 	FORCEINLINE FObjectKey(const UObject* Object)
-		: ObjectIndex(INDEX_NONE)
+		: ObjectIndex(UE::Core::Private::InvalidWeakObjectIndex)
 		, ObjectSerialNumber(0)
 	{
 		if (Object)
@@ -27,6 +35,14 @@ public:
 			ObjectIndex = Weak.ObjectIndex;
 			ObjectSerialNumber = Weak.ObjectSerialNumber;
 		}
+	}
+	template <
+		typename U,
+		decltype(ImplicitConv<const UObject*>(std::declval<U>()))* = nullptr
+	>
+	FORCEINLINE FObjectKey(U Object)
+		: FObjectKey(ImplicitConv<const UObject*>(Object))
+	{
 	}
 
 	/** Compare this key with another */
@@ -65,6 +81,12 @@ public:
 		return ObjectIndex > Other.ObjectIndex || (ObjectIndex == Other.ObjectIndex && ObjectSerialNumber >= Other.ObjectSerialNumber);
 	}
 
+	FORCEINLINE friend FArchive& operator<<(FArchive& Ar, FObjectKey& Key)
+	{
+		check(!Ar.IsPersistent());
+		return Ar << Key.ObjectIndex << Key.ObjectSerialNumber;
+	}
+
 	/**
 	 * Attempt to access the object from which this key was constructed.
 	 * @return The object used to construct this key, or nullptr if it is no longer valid
@@ -79,17 +101,36 @@ public:
 	}
 
 	/**
-	 * Attempt to access the object from which this key was constructed, even if it is marked as pending kill.
+	 * Attempt to access the object from which this key was constructed, even if it is marked as Garbage.
 	 * @return The object used to construct this key, or nullptr if it is no longer valid
 	 */
-	UObject* ResolveObjectPtrEvenIfPendingKill() const
+	UObject* ResolveObjectPtrEvenIfGarbage() const
 	{
 		FWeakObjectPtr WeakPtr;
 		WeakPtr.ObjectIndex = ObjectIndex;
 		WeakPtr.ObjectSerialNumber = ObjectSerialNumber;
 
-		constexpr bool bEvenIfPendingKill = true;
-		return WeakPtr.Get(bEvenIfPendingKill);
+		constexpr bool bEvenIfGarbage = true;
+		return WeakPtr.Get(bEvenIfGarbage);
+	}
+
+	UE_DEPRECATED(5.4, "Use ResolveObjectPtrEvenIfGarbage().")
+	UObject* ResolveObjectPtrEvenIfPendingKill() const
+	{
+		return ResolveObjectPtrEvenIfGarbage();
+	}
+
+	/**
+	 * Attempt to access the object from which this key was constructed, even if it is RF_PendingKill or RF_Unreachable
+	 * @return The object used to construct this key, or nullptr if it is no longer valid
+	 */
+	UObject* ResolveObjectPtrEvenIfUnreachable() const
+	{
+		FWeakObjectPtr WeakPtr;
+		WeakPtr.ObjectIndex = ObjectIndex;
+		WeakPtr.ObjectSerialNumber = ObjectSerialNumber;
+
+		return WeakPtr.GetEvenIfUnreachable();
 	}
 
 	/** Hash function */
@@ -99,6 +140,12 @@ public:
 	}
 
 private:
+	FObjectKey(int32 Index, int32 Serial)
+		: ObjectIndex(Index)
+		, ObjectSerialNumber(Serial)
+	{ }
+
+	friend FObjectKey UE::CoreUObject::Private::MakeObjectKey(int32 ObjectIndex, int32 ObjectSerialNumber);
 
 	int32		ObjectIndex;
 	int32		ObjectSerialNumber;
@@ -115,8 +162,12 @@ public:
 	FORCEINLINE TObjectKey() = default;
 
 	/** Construct from an object pointer */
-	FORCEINLINE TObjectKey(const ElementType* Object)
-		: ObjectKey(Object)
+	template <
+		typename U,
+		decltype(ImplicitConv<const InElementType*>(std::declval<U>()))* = nullptr
+	>
+	FORCEINLINE TObjectKey(U Object)
+		: ObjectKey(ImplicitConv<const InElementType*>(Object))
 	{
 	}
 
@@ -172,14 +223,24 @@ public:
 	}
 
 	/**
-	 * Attempt to access the object from which this key was constructed, even if it is marked as pending kill.
+	 * Attempt to access the object from which this key was constructed, even if it is marked as Garbage.
 	 * @return The object used to construct this key, or nullptr if it is no longer valid
 	 */
+	InElementType* ResolveObjectPtrEvenIfGarbage() const
+	{
+		return static_cast<InElementType*>(ObjectKey.ResolveObjectPtrEvenIfGarbage());
+	}
+
+	UE_DEPRECATED(5.4, "Use ResolveObjectPtrEvenIfGarbage().")
 	InElementType* ResolveObjectPtrEvenIfPendingKill() const
 	{
-		return static_cast<InElementType*>(ObjectKey.ResolveObjectPtrEvenIfPendingKill());
+		return static_cast<InElementType*>(ObjectKey.ResolveObjectPtrEvenIfGarbage());
 	}
 
 private:
 	FObjectKey ObjectKey;
 };
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
+#endif

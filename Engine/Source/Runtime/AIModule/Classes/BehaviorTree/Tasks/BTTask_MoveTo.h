@@ -6,7 +6,9 @@
 #include "UObject/ObjectMacros.h"
 #include "InputCoreTypes.h"
 #include "Templates/SubclassOf.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "NavFilters/NavigationQueryFilter.h"
+#endif
 #include "AITypes.h"
 #include "BehaviorTree/Tasks/BTTask_BlackboardBase.h"
 #include "BTTask_MoveTo.generated.h"
@@ -24,7 +26,6 @@ struct FBTMoveToTaskMemory
 
 	TWeakObjectPtr<UAITask_MoveTo> Task;
 
-	uint8 bWaitingForPath : 1;
 	uint8 bObserverCanFinishTask : 1;
 };
 
@@ -32,8 +33,8 @@ struct FBTMoveToTaskMemory
  * Move To task node.
  * Moves the AI pawn toward the specified Actor or Location blackboard entry using the navigation system.
  */
-UCLASS(config=Game)
-class AIMODULE_API UBTTask_MoveTo : public UBTTask_BlackboardBase
+UCLASS(config=Game, MinimalAPI)
+class UBTTask_MoveTo : public UBTTask_BlackboardBase
 {
 	GENERATED_UCLASS_BODY()
 
@@ -66,6 +67,10 @@ class AIMODULE_API UBTTask_MoveTo : public UBTTask_BlackboardBase
 	UPROPERTY(Category = Node, EditAnywhere, AdvancedDisplay)
 	uint32 bTrackMovingGoal : 1;
 
+	/** if set, the goal location will need to be navigable */
+	UPROPERTY(Category = Node, EditAnywhere, AdvancedDisplay)
+	uint32 bRequireNavigableEndLocation : 1;
+
 	/** if set, goal location will be projected on navigation data (navmesh) before using */
 	UPROPERTY(Category = Node, EditAnywhere, AdvancedDisplay)
 	uint32 bProjectGoalLocation : 1;
@@ -88,32 +93,30 @@ class AIMODULE_API UBTTask_MoveTo : public UBTTask_BlackboardBase
 	/** if set, move will use pathfinding. Not exposed on purpose, please use BTTask_MoveDirectlyToward */
 	uint32 bUsePathfinding : 1;
 
-	/** set automatically if move should use GameplayTasks */
-	uint32 bUseGameplayTasks : 1;
+	AIMODULE_API virtual EBTNodeResult::Type ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
+	AIMODULE_API virtual EBTNodeResult::Type AbortTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
+	AIMODULE_API virtual void OnTaskFinished(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTNodeResult::Type TaskResult) override;
+	AIMODULE_API virtual uint16 GetInstanceMemorySize() const override;
+	AIMODULE_API virtual void InitializeMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryInit::Type InitType) const override;
+	AIMODULE_API virtual void CleanupMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryClear::Type CleanupType) const override;
+	AIMODULE_API virtual void PostLoad() override;
 
-	virtual EBTNodeResult::Type ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
-	virtual EBTNodeResult::Type AbortTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
-	virtual void OnTaskFinished(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTNodeResult::Type TaskResult) override;
-	virtual void TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds) override;
-	virtual uint16 GetInstanceMemorySize() const override;
-	virtual void PostLoad() override;
+	AIMODULE_API virtual void OnGameplayTaskDeactivated(UGameplayTask& Task) override;
+	AIMODULE_API virtual void OnMessage(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, FName Message, int32 RequestID, bool bSuccess) override;
+	AIMODULE_API EBlackboardNotificationResult OnBlackboardValueChange(const UBlackboardComponent& Blackboard, FBlackboard::FKey ChangedKeyID);
 
-	virtual void OnGameplayTaskDeactivated(UGameplayTask& Task) override;
-	virtual void OnMessage(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, FName Message, int32 RequestID, bool bSuccess) override;
-	EBlackboardNotificationResult OnBlackboardValueChange(const UBlackboardComponent& Blackboard, FBlackboard::FKey ChangedKeyID);
-
-	virtual void DescribeRuntimeValues(const UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTDescriptionVerbosity::Type Verbosity, TArray<FString>& Values) const override;
-	virtual FString GetStaticDescription() const override;
+	AIMODULE_API virtual void DescribeRuntimeValues(const UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTDescriptionVerbosity::Type Verbosity, TArray<FString>& Values) const override;
+	AIMODULE_API virtual FString GetStaticDescription() const override;
 
 #if WITH_EDITOR
-	virtual FName GetNodeIconName() const override;
-	virtual void OnNodeCreated() override;
+	AIMODULE_API virtual FName GetNodeIconName() const override;
+	AIMODULE_API virtual void OnNodeCreated() override;
 #endif // WITH_EDITOR
 
 protected:
 
-	virtual EBTNodeResult::Type PerformMoveTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory);
+	AIMODULE_API virtual EBTNodeResult::Type PerformMoveTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory);
 	
 	/** prepares move task for activation */
-	virtual UAITask_MoveTo* PrepareMoveTask(UBehaviorTreeComponent& OwnerComp, UAITask_MoveTo* ExistingTask, FAIMoveRequest& MoveRequest);
+	AIMODULE_API virtual UAITask_MoveTo* PrepareMoveTask(UBehaviorTreeComponent& OwnerComp, UAITask_MoveTo* ExistingTask, FAIMoveRequest& MoveRequest);
 };

@@ -13,11 +13,17 @@
 UENUM()
 enum class EMacMetalShaderStandard : uint8
 {
-    /** Metal Shaders, supporting multiple viewports, Compatible With macOS 10.13.0 or later (std=osx-metal2.0) */
-    MacMetalSLStandard_2_0 = 3 UMETA(DisplayName="Metal v2.0 (10.13.0+)"),
-    
-    /** Metal Shaders, supporting indirect command buffers, Compatible With macOS 10.14.0 or later (std=osx-metal2.1) */
-    MacMetalSLStandard_2_1 = 4 UMETA(DisplayName="Metal v2.1 (10.14.0+)"),
+    /** Metal Shader 2.2 is the minimum*/
+    MacMetalSLStandard_Minimum = 0 UMETA(DisplayName="Minimum, Currently v2.2 (10.15+)"),
+    /** Metal Shaders Compatible With macOS 10.15 or later (std=osx-metal2.2) */
+    MacMetalSLStandard_2_2 = 5 UMETA(DisplayName="Metal v2.2 (10.15+)"),
+    /** Metal Shaders Compatible With macOS 11.0 or later (std=osx-metal2.3) */
+    MacMetalSLStandard_2_3 = 6 UMETA(DisplayName="Metal v2.3 (11.0+)"),
+    /** Metal Shaders Compatible With macOS 12.0 or later (std=osx-metal2.4) */
+    MacMetalSLStandard_2_4 = 7 UMETA(DisplayName="Metal v2.4 (12.0+)"),
+    /** Metal Shaders Compatible With macOS 13.0 or later (std=metal3.0) */
+    MacMetalSLStandard_3_0 = 8 UMETA(DisplayName="Metal v3.0 (13.0+)"),
+
 };
 
 UENUM()
@@ -29,8 +35,11 @@ enum class EMacTargetArchitecture : uint8
     /** Create Universal packages that run natively on all Macs */
     MacTargetArchitectureUniversal = 1 UMETA(DisplayName="Universal (Intel & Apple Silicon)"),
 
-    /** Create packages that can run natively on Apple Silicon Macs */
-    MacTargetArchitectureAppleSil = 2 UMETA(DisplayName="Apple Silicon"),
+	/** Create packages that can run natively on Apple Silicon Macs, and will not run on Intel Macs */
+	MacTargetArchitectureAppleSilicon = 2 UMETA(DisplayName="Apple Silicon"),
+
+	/** Create  packages that match the architecture of the Mac the package is made on */
+	MacTargetArchitectureHost = 3 UMETA(DisplayName="Host (Matches current machine)"),
 };
 
 
@@ -51,20 +60,50 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, config, Category=Rendering)
 	TArray<FString> TargetedRHIs;
-    
+	
+	/**
+	 * The set of architecture(s) this project supports for Editor builds
+	 * This defines which CPU architectures to target: x86_64 (Intel), arm64 (Apple Silicon) or Universal (Intel & Apple Silicon).
+	 * It is recommended to use Universal unless you have editor plugins or other libraries that do not support Apple Silicon
+	 */
+	UPROPERTY(EditAnywhere, config, Category=Packaging, meta = (DisplayName = "Supported Architecture(s) for Editor builds"))
+	EMacTargetArchitecture EditorTargetArchitecture;
+	
+	/**
+	 * The target Mac platform CPU architecture.
+	 * This defines which CPU architectures to target: x86_64 (Intel), arm64 (Apple Silicon) or Universal (Intel & Apple Silicon).
+	 * It is recommended to use Universal unless you have runtime plugins or other libraries that do not support Apple Silicon
+	 */
+	UPROPERTY(EditAnywhere, config, Category=Packaging, meta = (DisplayName = "Supported Architecture(s) for non-Editor builds"))
+	EMacTargetArchitecture TargetArchitecture;
+	
+	/**
+	 * The architecture to compile the Editor target
+	 * This defines which CPU architectures to target: x86_64 (Intel), arm64 (Apple Silicon) or Universal (Intel & Apple Silicon), or Host to match the machine doing the building
+	 * Can override with -Architecture= on the UBT commandline, or -EditorArchitecture=  on the BuildCookRun commandline
+	 */
+	UPROPERTY(EditAnywhere, config, Category=Packaging, meta = (DisplayName = "Architecture(s) when building Editor"))
+	EMacTargetArchitecture EditorDefaultArchitecture;
+	
+	/**
+	 * The architectures to compile non-Editor (games, programs, etc) targets for builds outside of Xcode
+	 * This defines which CPU architectures to target: x86_64 (Intel), arm64 (Apple Silicon) or Universal (Intel & Apple Silicon), or Host to match the machine doing the building
+	 * Can override with -Architecture= on the UBT commandline, or -GameArchitecture= or -ProgramArchitecture= on the BuildCookRun commandline
+	 */
+	UPROPERTY(EditAnywhere, config, Category=Packaging, meta = (DisplayName = "Architecture(s) when building non-Editor"))
+	EMacTargetArchitecture DefaultArchitecture;
+	
+	/**
+	 * If true, builds running on BuildMachines (when the 'IsBuildMachine' environment variable is set to 1) will compile all Supported architectures
+	 */
+	UPROPERTY(EditAnywhere, config, Category=Packaging, meta = (DisplayName = "Build all supported Architectures on Build Machines"))
+	bool bBuildAllSupportedOnBuildMachine;
+
     /**
-     * The maximum supported Metal shader langauge version.
-     * This defines what features may be used and OS versions supported.
+     * The Metal shader language version which will be used when compiling the shaders.
      */
-    UPROPERTY(EditAnywhere, config, Category=Packaging, meta = (DisplayName = "Architectures to Package For (Experimental)"))
-    EMacTargetArchitecture TargetArchitecture;
-    
-    /**
-     * The maximum supported Metal shader langauge version. 
-     * This defines what features may be used and OS versions supported.
-     */
-    UPROPERTY(EditAnywhere, config, Category=Rendering, meta = (DisplayName = "Max. Metal Shader Standard To Target", ConfigRestartRequired = true))
-    uint8 MaxShaderLanguageVersion;
+    UPROPERTY(EditAnywhere, config, Category=Rendering, meta = (DisplayName = "Metal Shader Standard To Target", ConfigRestartRequired = true))
+    int32 MetalLanguageVersion;
     
     /**
      * Whether to use the Metal shading language's "fast" intrinsics.
@@ -74,14 +113,6 @@ public:
      */
     UPROPERTY(EditAnywhere, config, Category=Rendering, meta = (DisplayName = "Use Fast-Math intrinsics", ConfigRestartRequired = true))
 	bool UseFastIntrinsics;
-	
-	/**
-	 * Whether to force Metal shaders to use 32bit floating point precision even when the shader uses half floats.
-	 * Half floats are much more efficient when they are availble but have less accuracy over large ranges,
-	 * as such some projects may need to use 32bit floats to ensure correct rendering.
-	 */
-	UPROPERTY(EditAnywhere, config, Category=Rendering, meta = (DisplayName = "Force 32bit Floating Point Precision", ConfigRestartRequired = true))
-	bool ForceFloats;
 	
 	/**
 	 * Whether to use of Metal shader-compiler's -ffast-math optimisations.
@@ -116,15 +147,19 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Audio", meta = (ClampMin = "0", UIMin = "0", DisplayName = "Number of Source Workers"))
 	int32 AudioNumSourceWorkers;
 
-	/** Which of the currently enabled spatialization plugins to use on Windows. */
+	/** Which of the currently enabled spatialization plugins to use. */
 	UPROPERTY(config, EditAnywhere, Category = "Audio")
 	FString SpatializationPlugin;
 
-	/** Which of the currently enabled reverb plugins to use on Windows. */
+	/** Which of the currently enabled source data override plugins to use. */
+	UPROPERTY(config, EditAnywhere, Category = "Audio")
+	FString SourceDataOverridePlugin;
+
+	/** Which of the currently enabled reverb plugins to use. */
 	UPROPERTY(config, EditAnywhere, Category = "Audio")
 	FString ReverbPlugin;
 
-	/** Which of the currently enabled occlusion plugins to use on Windows. */
+	/** Which of the currently enabled occlusion plugins to use. */
 	UPROPERTY(config, EditAnywhere, Category = "Audio")
 	FString OcclusionPlugin;
 	

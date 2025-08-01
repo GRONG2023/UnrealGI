@@ -4,6 +4,8 @@
 #include "Animation/AnimSequenceBase.h"
 #include "Animation/AnimSingleNodeInstance.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SingleAnimationPlayData)
+
 
 void FSingleAnimationPlayData::Initialize(UAnimSingleNodeInstance* Instance)
 {
@@ -32,9 +34,10 @@ void FSingleAnimationPlayData::ValidatePosition()
 		UAnimSequenceBase* SequenceBase = Cast<UAnimSequenceBase>(AnimToPlay);
 		if (SequenceBase)
 		{
-			Max = SequenceBase->SequenceLength;
+			Max = SequenceBase->GetPlayLength();
 		}
 	}
 
 	SavedPosition = FMath::Clamp<float>(SavedPosition, Min, Max);
 }
+

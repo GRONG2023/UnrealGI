@@ -1,26 +1,54 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SPlistEditor.h"
-#include "HAL/FileManager.h"
-#include "Misc/App.h"
-#include "Widgets/SOverlay.h"
-#include "Framework/Application/SlateApplication.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Widgets/Input/SEditableText.h"
-#include "Widgets/Input/SButton.h"
-#include "Misc/MessageDialog.h"
 
-#include "XmlFile.h"
+#include "Containers/StringConv.h"
+#include "DesktopPlatformModule.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Framework/Views/ITypedTableView.h"
+#include "HAL/FileManager.h"
+#include "HAL/PlatformMath.h"
+#include "HAL/PlatformMisc.h"
+#include "IDesktopPlatform.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Layout/Visibility.h"
+#include "Misc/App.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/MessageDialog.h"
+#include "Misc/Paths.h"
+#include "PListNode.h"
 #include "PListNodeArray.h"
 #include "PListNodeBoolean.h"
 #include "PListNodeDictionary.h"
 #include "PListNodeFile.h"
 #include "PListNodeString.h"
-#include "DesktopPlatformModule.h"
-
+#include "Serialization/Archive.h"
+#include "SlotBase.h"
+#include "Types/WidgetActiveTimerDelegate.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SEditableText.h"
 #include "Widgets/Input/SSearchBox.h"
+#include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SExpandableArea.h"
 #include "Widgets/Notifications/SNotificationList.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SOverlay.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Widgets/Views/SHeaderRow.h"
+#include "Widgets/Views/STableRow.h"
+#include "XmlFile.h"
+#include "XmlNode.h"
+
+class ITableRow;
+class SWidget;
+struct FGeometry;
+struct FKeyEvent;
+struct FPointerEvent;
+
 #define LOCTEXT_NAMESPACE "PListEditor"
 
 /** Constructs the main widget for the editor */
@@ -52,7 +80,7 @@ void SPListEditorPanel::Construct( const FArguments& InArgs )
 				+SVerticalBox::Slot()
 				[
 					SNew(SBorder)
-					.BorderImage( FEditorStyle::GetBrush("PListEditor.HeaderRow.Background") )
+					.BorderImage( FAppStyle::GetBrush("PListEditor.HeaderRow.Background") )
 					.Content()
 					[
 						SNew(SVerticalBox)
@@ -851,7 +879,7 @@ bool SPListEditorPanel::OpenFile(FString FilePath)
 		FText ErrorTitle = LOCTEXT("PListLoadFailDialogCaption", "Error");
 
 		// Show error message
-		FMessageDialog::Open( EAppMsgType::Ok, ErrorMessage, &ErrorTitle );
+		FMessageDialog::Open( EAppMsgType::Ok, ErrorMessage, ErrorTitle );
 		return false;
 	}
 	else
@@ -992,7 +1020,7 @@ bool SPListEditorPanel::PromptDelete()
 
 	FText DeleteMessage = LOCTEXT("PListDeleteConfirmation", "Are you sure you want to remove the selected entries? (This action is irreversible!)");
 	FText DeleteTitle = LOCTEXT("PListDeleteConfirmationCaption", "Confirm Removal");
-	EAppReturnType::Type ret = FMessageDialog::Open( EAppMsgType::YesNoYesAll, DeleteMessage, &DeleteTitle );
+	EAppReturnType::Type ret = FMessageDialog::Open( EAppMsgType::YesNoYesAll, DeleteMessage, DeleteTitle );
 	if(ret == EAppReturnType::Yes)
 	{
 		return true;
@@ -1021,7 +1049,7 @@ bool SPListEditorPanel::PromptSave()
 	FText DialogText = FText::Format( LOCTEXT("PListCloseTabSaveTextFormatting", "Save {FilePath}?"), Arguments );
 	FText DialogTitle = LOCTEXT("PListCloseTabSaveCaption", "Save");
 
-	EAppReturnType::Type ret = FMessageDialog::Open(EAppMsgType::YesNoCancel, DialogText, &DialogTitle );
+	EAppReturnType::Type ret = FMessageDialog::Open(EAppMsgType::YesNoCancel, DialogText, DialogTitle );
 	if(ret == EAppReturnType::Yes)
 	{
 		// Get the saving location if necessary (like on new files)
@@ -1061,7 +1089,7 @@ bool SPListEditorPanel::PromptSave()
 						FText OverwriteDialogText = FText::Format(OverwriteMessageFormatting, Args);
 						FText OverwriteDialogTitle = LOCTEXT("PListWarningCaption", "Warning");
 
-						EAppReturnType::Type RetVal = FMessageDialog::Open(EAppMsgType::YesNo, OverwriteDialogText, &OverwriteDialogTitle);
+						EAppReturnType::Type RetVal = FMessageDialog::Open(EAppMsgType::YesNo, OverwriteDialogText, OverwriteDialogTitle);
 						if(RetVal != EAppReturnType::Yes)
 						{
 							// Said not to overwrite (or clicked x) so bail out
@@ -1091,7 +1119,7 @@ bool SPListEditorPanel::PromptSave()
 			// Display Message
 			FText ValidationFailMessage = LOCTEXT("PListNodeValidationFail", "Cannot save file: Not all plist entries have valid input");
 			FText Title = LOCTEXT("PListWarningCaption", "Warning");
-			FMessageDialog::Open( EAppMsgType::Ok, ValidationFailMessage, &Title );
+			FMessageDialog::Open( EAppMsgType::Ok, ValidationFailMessage, Title );
 
 			// Cancel
 			return false;
@@ -1158,7 +1186,7 @@ FReply SPListEditorPanel::OnSaveClicked()
 		FText DialogText = FText::Format( LOCTEXT("PListOverwriteMessageFormatting", "Overwrite {FilePath}?"), Arguments );
 		FText DialogTitle = LOCTEXT("PListOverwriteCaption", "Warning");
 
-		EAppReturnType::Type ret = FMessageDialog::Open( EAppMsgType::YesNo, DialogText, &DialogTitle );
+		EAppReturnType::Type ret = FMessageDialog::Open( EAppMsgType::YesNo, DialogText, DialogTitle );
 		if(ret != EAppReturnType::Yes)
 		{
 			return FReply::Handled();
@@ -1202,7 +1230,7 @@ FReply SPListEditorPanel::OnSaveClicked()
 					FText DialogText = FText::Format( OverwriteMessageFormatting, Arguments );
 					FText DialogTitle = LOCTEXT("PListWarningCaption", "Warning");
 
-					EAppReturnType::Type RetVal = FMessageDialog::Open( EAppMsgType::YesNo, DialogText, &DialogTitle );
+					EAppReturnType::Type RetVal = FMessageDialog::Open( EAppMsgType::YesNo, DialogText, DialogTitle );
 					if(RetVal != EAppReturnType::Yes)
 					{
 						// Said not to overwrite (or clicked x) so bail out
@@ -1232,7 +1260,7 @@ FReply SPListEditorPanel::OnSaveClicked()
 		// Display Message
 		FText OverwriteMessage = LOCTEXT("PListNodeValidationFail", "Cannot save file: Not all plist entries have valid input");
 		FText DialogTitle = LOCTEXT("PListWarningCaption", "Warning");
-		FMessageDialog::Open(EAppMsgType::Ok, OverwriteMessage, &DialogTitle );
+		FMessageDialog::Open(EAppMsgType::Ok, OverwriteMessage, DialogTitle );
 
 		return FReply::Handled();
 	}
@@ -1310,7 +1338,7 @@ FReply SPListEditorPanel::OnSaveAsClicked()
 				FText DialogText = FText::Format( OverwriteMessageFormatting, Arguments );
 				FText DialogTitle = LOCTEXT("PListWarningCaption", "Warning");
 
-				EAppReturnType::Type RetVal = FMessageDialog::Open( EAppMsgType::YesNo, DialogText, &DialogTitle );
+				EAppReturnType::Type RetVal = FMessageDialog::Open( EAppMsgType::YesNo, DialogText, DialogTitle );
 				if(RetVal != EAppReturnType::Yes)
 				{
 					// Said not to overwrite (or clicked x) so bail out
@@ -1337,7 +1365,7 @@ FReply SPListEditorPanel::OnSaveAsClicked()
 		FText OverwriteMessage = LOCTEXT("PListNodeValidationFail", "Cannot save file: Not all plist entries have valid input");
 		FText DialogTitle = LOCTEXT("PListWarningCaption", "Warning");
 
-		FMessageDialog::Open( EAppMsgType::Ok, OverwriteMessage, &DialogTitle );
+		FMessageDialog::Open( EAppMsgType::Ok, OverwriteMessage, DialogTitle );
 
 		return FReply::Handled();
 	}

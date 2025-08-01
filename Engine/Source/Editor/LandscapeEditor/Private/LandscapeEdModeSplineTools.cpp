@@ -14,12 +14,14 @@
 #include "UObject/PropertyPortFlags.h"
 #include "EngineUtils.h"
 #include "EditorUndoClient.h"
-#include "UnrealWidget.h"
+#include "UnrealWidgetFwd.h"
 #include "EditorModeManager.h"
 #include "UnrealEdGlobals.h"
 #include "EditorViewportClient.h"
 #include "LandscapeToolInterface.h"
 #include "LandscapeProxy.h"
+#include "LandscapeSplineActor.h"
+#include "ILandscapeSplineInterface.h"
 #include "LandscapeEdMode.h"
 #include "ScopedTransaction.h"
 #include "LandscapeRender.h"
@@ -33,6 +35,7 @@
 #include "Algo/Copy.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "UnrealExporter.h"
+#include "UnrealWidget.h"
 
 
 #define LOCTEXT_NAMESPACE "Landscape"
@@ -45,15 +48,16 @@ class FLandscapeToolSplines : public FLandscapeTool, public FEditorUndoClient
 public:
 	FLandscapeToolSplines(FEdModeLandscape* InEdMode)
 		: EdMode(InEdMode)
-		, LandscapeInfo(NULL)
+		, LandscapeInfo(nullptr)
 		, SelectedSplineControlPoints()
 		, SelectedSplineSegments()
-		, DraggingTangent_Segment(NULL)
+		, DraggingTangent_Segment(nullptr)
 		, DraggingTangent_Length(0.0f)
 		, DraggingTangent_CacheCoordSpace(ECoordSystem::COORD_None)
 		, DraggingTangent_End(false)
 		, bMovingControlPoint(false)
 		, bAutoRotateOnJoin(true)
+		, bAlwaysRotateForward(false)
 		, bAutoChangeConnectionsOnMove(true)
 		, bDeleteLooseEnds(false)
 		, bCopyMeshToNewControlPoint(false)
@@ -90,17 +94,12 @@ public:
 		}
 	}
 
-	virtual const TCHAR* GetToolName() override { return TEXT("Splines"); }
-	virtual FText GetDisplayName() override { return NSLOCTEXT("UnrealEd", "LandscapeMode_Splines", "Splines"); };
-	virtual FText GetDisplayMessage() override { return NSLOCTEXT("UnrealEd", "LandscapeMode_Splines_Message", "Create a Landscape Spline to carve your landscape, modify blendmasks and deform meshes into roads and other linear features.  Spline mesh settings can be found in the details panel when you have  segments selected."); };
+	virtual const TCHAR* GetToolName() const override { return TEXT("Splines"); }
+	virtual FText GetDisplayName() const override { return NSLOCTEXT("UnrealEd", "LandscapeMode_Splines", "Splines"); };
+	virtual FText GetDisplayMessage() const override { return NSLOCTEXT("UnrealEd", "LandscapeMode_Splines_Message", "Create a Landscape Spline to carve your landscape, modify blendmasks and deform meshes into roads and other linear features.  Spline mesh settings can be found in the details panel when you have  segments selected."); };
 
 	virtual void SetEditRenderType() override { GLandscapeEditRenderMode = ELandscapeEditRenderMode::None | (GLandscapeEditRenderMode & ELandscapeEditRenderMode::BitMaskForMask); }
 	virtual bool SupportsMask() override { return false; }
-
-	void CreateSplineComponent(ALandscapeProxy* Proxy, FVector Scale3D)
-	{
-		Proxy->CreateSplineComponent(Scale3D);
-	}
 
 	void UpdatePropertiesWindows()
 	{
@@ -175,12 +174,13 @@ public:
 		Segment->Modify(false);
 		Segment->SetSplineSelected(true);
 
-		GLevelEditorModeTools().SetWidgetMode(FWidget::WM_Scale);
+		GLevelEditorModeTools().SetWidgetMode(UE::Widget::WM_Scale);
 	}
 
 	void SelectConnected()
 	{
-		TArray<ULandscapeSplineControlPoint*> ControlPointsToProcess = SelectedSplineControlPoints.Array();
+		TArray<ULandscapeSplineControlPoint*> ControlPointsToProcess =
+			ObjectPtrDecay(SelectedSplineControlPoints.Array());
 
 		while (ControlPointsToProcess.Num() > 0)
 		{
@@ -198,7 +198,7 @@ public:
 			}
 		}
 
-		TArray<ULandscapeSplineSegment*> SegmentsToProcess = SelectedSplineSegments.Array();
+		TArray<ULandscapeSplineSegment*> SegmentsToProcess = ObjectPtrDecay(SelectedSplineSegments.Array());
 
 		while (SegmentsToProcess.Num() > 0)
 		{
@@ -214,6 +214,39 @@ public:
 						SegmentsToProcess.Add(Connection.Segment);
 					}
 				}
+			}
+		}
+	}
+
+	void SelectAllSplineSegments(const ULandscapeInfo& InLandscapeInfo)
+	{
+		TArray<TScriptInterface<ILandscapeSplineInterface>> SplineActors(InLandscapeInfo.GetSplineActors());
+		for (TScriptInterface<ILandscapeSplineInterface> SplineActor : SplineActors)
+		{
+			if (ULandscapeSplinesComponent* SplineComponent = SplineActor->GetSplinesComponent())
+			{
+				SplineComponent->ForEachControlPoint([this](ULandscapeSplineControlPoint* ControlPoint) 
+				{ 
+					for (const FLandscapeSplineConnection& Connection : ControlPoint->ConnectedSegments)
+					{
+						if (!Connection.Segment->IsSplineSelected())
+						{
+							SelectSegment(Connection.Segment);
+						}
+					}
+				});
+			}
+		}
+	}
+
+	void SelectAllControlPoints(const ULandscapeInfo& InLandscapeInfo)
+	{
+		TArray<TScriptInterface<ILandscapeSplineInterface>> SplineActors(InLandscapeInfo.GetSplineActors());
+		for (TScriptInterface<ILandscapeSplineInterface> SplineActor : SplineActors)
+		{
+			if (ULandscapeSplinesComponent* SplineComponent = SplineActor->GetSplinesComponent())
+			{
+				SplineComponent->ForEachControlPoint([this](ULandscapeSplineControlPoint* ControlPoint) { SelectControlPoint(ControlPoint); });
 			}
 		}
 	}
@@ -293,7 +326,7 @@ public:
 		End->GetConnectionLocationAndRotation(NewSegment->Connections[1].SocketName, EndLocation, EndRotation);
 
 		// Set up tangent lengths
-		NewSegment->Connections[0].TangentLen = (EndLocation - StartLocation).Size();
+		NewSegment->Connections[0].TangentLen = static_cast<float>((EndLocation - StartLocation).Size());
 		NewSegment->Connections[1].TangentLen = NewSegment->Connections[0].TangentLen;
 
 		NewSegment->AutoFlipTangents();
@@ -340,13 +373,13 @@ public:
 		bool bUpdatedEnd = false;
 		if (bAutoRotateStart)
 		{
-			Start->AutoCalcRotation();
+			Start->AutoCalcRotation(bAlwaysRotateForward);
 			Start->UpdateSplinePoints();
 			bUpdatedStart = true;
 		}
 		if (bAutoRotateEnd)
 		{
-			End->AutoCalcRotation();
+			End->AutoCalcRotation(bAlwaysRotateForward);
 			End->UpdateSplinePoints();
 			bUpdatedEnd = true;
 		}
@@ -401,7 +434,7 @@ public:
 		End->GetConnectionLocationAndRotation(Segment->Connections[1].SocketName, EndLocation, EndRotation);
 
 		// Set up tangent lengths
-		Segment->Connections[0].TangentLen = (EndLocation - StartLocation).Size();
+		Segment->Connections[0].TangentLen = static_cast<float>((EndLocation - StartLocation).Size());
 		Segment->Connections[1].TangentLen = Segment->Connections[0].TangentLen;
 
 		Segment->AutoFlipTangents();
@@ -410,14 +443,14 @@ public:
 		bool bUpdatedEnd = false;
 		if (bAutoRotateStart)
 		{
-			Start->AutoCalcRotation();
+			Start->AutoCalcRotation(bAlwaysRotateForward);
 			Start->UpdateSplinePoints();
 			bUpdatedStart = true;
 		}
 
 		if (bAutoRotateEnd)
 		{
-			End->AutoCalcRotation();
+			End->AutoCalcRotation(bAlwaysRotateForward);
 			End->UpdateSplinePoints();
 			bUpdatedEnd = true;
 		}
@@ -663,7 +696,7 @@ public:
 			DuplicateCacheSplitSegmentParam = t;
 			DuplicateCacheSplitSegmentTangentLenStart = Segment->Connections[0].TangentLen;
 			DuplicateCacheSplitSegmentTangentLenEnd = Segment->Connections[1].TangentLen;
-			DuplicateCacheSplitSegmentTangentLen = Tangent.Size();
+			DuplicateCacheSplitSegmentTangentLen = static_cast<float>(Tangent.Size());
 		}
 
 		ULandscapeSplineControlPoint* NewControlPoint = NewObject<ULandscapeSplineControlPoint>(SplinesComponent, NAME_None, RF_Transactional);
@@ -694,7 +727,7 @@ public:
 		SplinesComponent->Segments.Add(NewSegment);
 
 		NewSegment->Connections[0].ControlPoint = NewControlPoint;
-		NewSegment->Connections[0].TangentLen = Tangent.Size() * (1 - t);
+		NewSegment->Connections[0].TangentLen = static_cast<float>(Tangent.Size() * (1 - t));
 		NewSegment->Connections[0].ControlPoint->ConnectedSegments.Add(FLandscapeSplineConnection(NewSegment, 0));
 		NewSegment->Connections[1].ControlPoint = Segment->Connections[1].ControlPoint;
 		NewSegment->Connections[1].TangentLen = Segment->Connections[1].TangentLen * (1 - t);
@@ -718,7 +751,7 @@ public:
 		Segment->Connections[0].TangentLen *= t;
 		Segment->Connections[1].ControlPoint->ConnectedSegments.Remove(FLandscapeSplineConnection(Segment, 1));
 		Segment->Connections[1].ControlPoint = NewControlPoint;
-		Segment->Connections[1].TangentLen = -Tangent.Size() * t;
+		Segment->Connections[1].TangentLen = static_cast<float>(-Tangent.Size() * t);
 		Segment->Connections[1].ControlPoint->ConnectedSegments.Add(FLandscapeSplineConnection(Segment, 1));
 
 		Segment->UpdateSplinePoints();
@@ -753,24 +786,17 @@ public:
 		Segment->FindNearest(LocalLocation, t0, Location0, Tangent0);
 		NewSegment->FindNearest(LocalLocation, t1, Location1, Tangent1);
 
-		float Len0 = Tangent0.Size();
-		float Len1 = Tangent1.Size();
-
 		ULandscapeSplineSegment* UseSegment;
 		if (FVector::Distance(LocalLocation, Location0) < FVector::Distance(LocalLocation, Location1))
 		{
 			t = DuplicateCacheSplitSegmentParam * t0;
 			tseg = t0;
-			Location = Location0;
-			Tangent = Tangent0;
 			UseSegment = Segment;
 		}
 		else
 		{
 			t = DuplicateCacheSplitSegmentParam + (1 - DuplicateCacheSplitSegmentParam) * t1;
 			tseg = t1;
-			Location = Location1;
-			Tangent = Tangent1;
 			UseSegment = NewSegment;
 		}
 		DuplicateCacheSplitSegmentParam = t;
@@ -868,6 +894,22 @@ public:
 		}
 	}
 
+	bool CanMoveSelectedToLevel() const
+	{
+		// Move to level only supportd on LandscapeProxy Splines
+		for (ULandscapeSplineControlPoint* ControlPoint : SelectedSplineControlPoints)
+		{
+			ULandscapeSplinesComponent* LandscapeSplinesComp = ControlPoint->GetOuterULandscapeSplinesComponent();
+			ALandscapeProxy* FromProxy = LandscapeSplinesComp ? Cast<ALandscapeProxy>(LandscapeSplinesComp->GetOuter()) : nullptr;
+			if (!FromProxy)
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+
 	void MoveSelectedToLevel()
 	{
 		TSet<ALandscapeProxy*> FromProxies;
@@ -895,15 +937,16 @@ public:
 			}
 		}
 				
-		if (ToLandscape && ToLandscape->SplineComponent)
+		ULandscapeSplinesComponent* SplineComponent = ToLandscape ? ToLandscape->GetSplinesComponent() : nullptr;
+		if (SplineComponent)
 		{
-			if (!ToLandscape->SplineComponent->IsRegistered())
+			if (!SplineComponent->IsRegistered())
 			{
-				ToLandscape->SplineComponent->RegisterComponent();
+				SplineComponent->RegisterComponent();
 			}
 			else
 			{
-				ToLandscape->SplineComponent->MarkRenderStateDirty();
+				SplineComponent->MarkRenderStateDirty();
 			}
 		}
 
@@ -930,64 +973,79 @@ public:
 
 	virtual bool BeginTool(FEditorViewportClient* ViewportClient, const FLandscapeToolTarget& InTarget, const FVector& InHitLocation) override
 	{
-		if (ViewportClient->IsCtrlPressed())
+		HHitProxy* HitProxy = ViewportClient->Viewport->GetHitProxy(ViewportClient->Viewport->GetMouseX(), ViewportClient->Viewport->GetMouseY());
+		if (HitProxy && ViewportClient->IsCtrlPressed())
 		{
 			LandscapeInfo = InTarget.LandscapeInfo.Get();
-			ALandscapeProxy* Landscape = nullptr;
+			ILandscapeSplineInterface* SplineOwner = nullptr;
 
 			// If we have a selection use the landscape of the selected spline
-			ULandscapeSplinesComponent* SplinesComponent = nullptr;
 			if (SelectedSplineControlPoints.Num() > 0)
 			{
 				ULandscapeSplineControlPoint* FirstPoint = *SelectedSplineControlPoints.CreateConstIterator();
-				SplinesComponent = FirstPoint->GetOuterULandscapeSplinesComponent();
+				ULandscapeSplinesComponent* SelectedSplinesComponent = FirstPoint->GetOuterULandscapeSplinesComponent();
 			
-				if (SplinesComponent)
+				if (SelectedSplinesComponent)
 				{
-					Landscape = SplinesComponent->GetTypedOuter<ALandscapeProxy>();
+					SplineOwner = SelectedSplinesComponent->GetSplineOwner();
 				}
 			}
 					
+			const bool bIsGridBased = EdMode->IsGridBased();
+
 			// Hit Test
-			if (!Landscape)
+			if (!SplineOwner)
 			{
-				HHitProxy* HitProxy = ViewportClient->Viewport->GetHitProxy(ViewportClient->Viewport->GetMouseX(), ViewportClient->Viewport->GetMouseY());
 				if (HitProxy->IsA(HActor::StaticGetType()))
 				{
 					HActor* ActorProxy = (HActor*)HitProxy;
-					if (ALandscapeProxy* Proxy = Cast<ALandscapeProxy>(ActorProxy->Actor))
+					// Here we want to make sure we are selecting the valid type (Grid based or not)
+					if (bIsGridBased)
 					{
-						Landscape = Proxy;
+						SplineOwner = Cast<ALandscapeSplineActor>(ActorProxy->Actor);
+					}
+					else
+					{
+						SplineOwner = Cast<ALandscapeProxy>(ActorProxy->Actor);
 					}
 				}
-
+			}
 				
-			}
-
-			// Default to Current level Landscape
-			if (!Landscape)
+			// Open transaction here because we might be creating an actor or later a spline component
+			FScopedTransaction Transaction(LOCTEXT("LandscapeSpline_AddControlPoint", "Add Landscape Spline Control Point"));
+			if (!SplineOwner)
 			{
-				Landscape = LandscapeInfo->GetCurrentLevelLandscapeProxy(true);
+				if (bIsGridBased)
+				{
+					// Create Spline Actor at World Position (InHitLocation is local to Landscape)
+					FVector WorldHitLocation = LandscapeInfo->LandscapeActor.Get()->LandscapeActorToWorld().TransformPosition(InHitLocation);
+					SplineOwner = LandscapeInfo->CreateSplineActor(WorldHitLocation);
+				}
+				else
+				{
+					// Default to Current level Landscape
+					SplineOwner = LandscapeInfo->GetCurrentLevelLandscapeProxy(true);
+				}
 			}
 
-			// No Landscape found
-			if (!Landscape)
+			// No Spline Owner found
+			if (!SplineOwner)
 			{
 				return false;
 			}
 
+			ULandscapeSplinesComponent* SplinesComponent = SplineOwner->GetSplinesComponent();
 			if (!SplinesComponent)
 			{
-				if (!Landscape->SplineComponent)
-				{
-					CreateSplineComponent(Landscape, FVector(1.0f) / Landscape->GetRootComponent()->GetRelativeScale3D());
-					check(Landscape->SplineComponent);
-				}
-				SplinesComponent = Landscape->SplineComponent;
+				SplineOwner->CreateSplineComponent();
+				SplinesComponent = SplineOwner->GetSplinesComponent();
+				check(SplinesComponent);
 			}
 
-			const FTransform LandscapeToSpline = Landscape->LandscapeActorToWorld().GetRelativeTransform(SplinesComponent->GetComponentTransform());
+			// Get Main Landscape Actor to Spline Component Transform
+			const FTransform LandscapeToSpline = SplineOwner->LandscapeActorToWorld().GetRelativeTransform(SplinesComponent->GetComponentTransform());
 
+			// Local to SplineComponent
 			AddControlPoint(SplinesComponent, LandscapeToSpline.TransformPosition(InHitLocation));
 
 			GUnrealEd->RedrawLevelEditingViewports();
@@ -1000,7 +1058,7 @@ public:
 
 	virtual void EndTool(FEditorViewportClient* ViewportClient) override
 	{
-		LandscapeInfo = NULL;
+		LandscapeInfo = nullptr;
 	}
 
 	virtual bool MouseMove(FEditorViewportClient* ViewportClient, FViewport* Viewport, int32 x, int32 y) override
@@ -1049,8 +1107,8 @@ public:
 
 		if (HitProxy)
 		{
-			ULandscapeSplineControlPoint* ClickedControlPoint = NULL;
-			ULandscapeSplineSegment* ClickedSplineSegment = NULL;
+			ULandscapeSplineControlPoint* ClickedControlPoint = nullptr;
+			ULandscapeSplineSegment* ClickedSplineSegment = nullptr;
 
 			if (HitProxy->IsA(HLandscapeSplineProxy_ControlPoint::StaticGetType()))
 			{
@@ -1088,7 +1146,7 @@ public:
 				}
 			}
 
-			if (ClickedControlPoint != NULL)
+			if (ClickedControlPoint != nullptr)
 			{
 				if (Click.IsShiftDown() && ClickedControlPoint->IsSplineSelected())
 				{
@@ -1105,7 +1163,7 @@ public:
 				GUnrealEd->RedrawLevelEditingViewports();
 				return true;
 			}
-			else if (ClickedSplineSegment != NULL)
+			else if (ClickedSplineSegment != nullptr)
 			{
 				// save info about what we grabbed
 				if (Click.IsShiftDown() && ClickedSplineSegment->IsSplineSelected())
@@ -1147,15 +1205,15 @@ public:
 
 				for (ULandscapeSplineControlPoint* ControlPoint : SelectedSplineControlPoints)
 				{
-					ControlPoint->AutoCalcRotation();
+					ControlPoint->AutoCalcRotation(bAlwaysRotateForward);
 					ControlPoint->UpdateSplinePoints();
 				}
 
 				for (ULandscapeSplineSegment* Segment : SelectedSplineSegments)
 				{
-					Segment->Connections[0].ControlPoint->AutoCalcRotation();
+					Segment->Connections[0].ControlPoint->AutoCalcRotation(bAlwaysRotateForward);
 					Segment->Connections[0].ControlPoint->UpdateSplinePoints();
-					Segment->Connections[1].ControlPoint->AutoCalcRotation();
+					Segment->Connections[1].ControlPoint->AutoCalcRotation(bAlwaysRotateForward);
 					Segment->Connections[1].ControlPoint->UpdateSplinePoints();
 				}
 
@@ -1243,9 +1301,9 @@ public:
 				int32 HitX = InViewport->GetMouseX();
 				int32 HitY = InViewport->GetMouseY();
 				HHitProxy* HitProxy = InViewport->GetHitProxy(HitX, HitY);
-				if (HitProxy != NULL)
+				if (HitProxy != nullptr)
 				{
-					ULandscapeSplineControlPoint* ClickedControlPoint = NULL;
+					ULandscapeSplineControlPoint* ClickedControlPoint = nullptr;
 
 					if (HitProxy->IsA(HLandscapeSplineProxy_ControlPoint::StaticGetType()))
 					{
@@ -1274,10 +1332,46 @@ public:
 						}
 					}
 
-					if (ClickedControlPoint != NULL)
+					if (ClickedControlPoint != nullptr)
 					{
-						FScopedTransaction Transaction(LOCTEXT("LandscapeSpline_AddSegment", "Add Landscape Spline Segment"));
+						// Merge Spline into the same actor if a single Control Point is currently selected and the ClickedControlPoint is from a different owner
+						if (SelectedSplineControlPoints.Num() == 1)
+						{
+							ULandscapeSplineControlPoint* SourceControlPoint = *SelectedSplineControlPoints.CreateIterator();
 
+							ULandscapeSplinesComponent* SourceComponent = SourceControlPoint->GetOuterULandscapeSplinesComponent();
+							ALandscapeSplineActor* SourceSplineActor = SourceComponent ? Cast<ALandscapeSplineActor>(SourceComponent->GetOuter()) : nullptr;
+
+							ULandscapeSplinesComponent* ClickedComponent = ClickedControlPoint->GetOuterULandscapeSplinesComponent();
+							ALandscapeSplineActor* ClickedSplineActor = ClickedComponent ? Cast<ALandscapeSplineActor>(ClickedComponent->GetOuter()) : nullptr;
+
+							if (SourceSplineActor && ClickedSplineActor && SourceSplineActor != ClickedSplineActor)
+							{
+								if (SourceSplineActor->GetLandscapeGuid() != ClickedSplineActor->GetLandscapeGuid())
+								{
+									UE_LOG(LogLandscapeEdMode, Warning, TEXT("Can't merge LandscapeSplineActors belonging to different Landscapes"));
+									return true;
+								}
+
+								FScopedTransaction Transaction(LOCTEXT("LandscapeSpline_MergeSpline", "Merge Spline"));
+								
+								ULandscapeInfo* SourceLandscapeInfo = SourceSplineActor->GetLandscapeInfo();
+								check(SourceLandscapeInfo);
+
+								SourceLandscapeInfo->MoveSpline(ClickedControlPoint, SourceSplineActor);
+								AddSegment(SourceControlPoint, ClickedControlPoint, true, true);
+
+								// Moving the spline should leave us with an empty actor that we can delete
+								if(ClickedComponent->GetControlPoints().Num() == 0)
+								{
+									ClickedSplineActor->GetWorld()->EditorDestroyActor(ClickedSplineActor, true);
+								}
+								
+								return true;
+							}
+						}
+
+						FScopedTransaction Transaction(LOCTEXT("LandscapeSpline_AddSegment", "Add Landscape Spline Segment"));
 						for (ULandscapeSplineControlPoint* ControlPoint : SelectedSplineControlPoints)
 						{
 							AddSegment(ControlPoint, ClickedControlPoint, bAutoRotateOnJoin, bAutoRotateOnJoin);
@@ -1302,16 +1396,17 @@ public:
 				HHitProxy* HitProxy = InViewport->GetHitProxy(HitX, HitY);
 				if (HitProxy)
 				{
-					ULandscapeSplineSegment* ClickedSplineSegment = NULL;
+					ULandscapeSplineSegment* ClickedSplineSegment = nullptr;
 					FTransform LandscapeToSpline;
 
 					if (HitProxy->IsA(HLandscapeSplineProxy_Segment::StaticGetType()))
 					{
 						HLandscapeSplineProxy_Segment* SplineProxy = (HLandscapeSplineProxy_Segment*)HitProxy;
 						ClickedSplineSegment = SplineProxy->SplineSegment;
-						ALandscapeProxy* LandscapeProxy = ClickedSplineSegment->GetTypedOuter<ALandscapeProxy>();
-						check(LandscapeProxy);
-						LandscapeToSpline = LandscapeProxy->LandscapeActorToWorld().GetRelativeTransform(ClickedSplineSegment->GetOuterULandscapeSplinesComponent()->GetComponentTransform());
+						ULandscapeSplinesComponent* SplineComponent = ClickedSplineSegment->GetOuterULandscapeSplinesComponent();
+						ILandscapeSplineInterface* SplineOwner = SplineComponent->GetSplineOwner();
+						check(SplineOwner);
+						LandscapeToSpline = SplineOwner->LandscapeActorToWorld().GetRelativeTransform(SplineComponent->GetComponentTransform());
 					}
 					else if (HitProxy->IsA(HActor::StaticGetType()))
 					{
@@ -1331,15 +1426,15 @@ public:
 										ClickedSplineSegment = SplineSegment;
 										// Find actual SplineComponent owner of the Segment (not the SplineComponent owner of the mesh)
 										SplineComponent = SplineSegment->GetTypedOuter<ULandscapeSplinesComponent>();
-										ALandscapeProxy* LandscapeProxy = CastChecked<ALandscapeProxy>(SplineComponent->GetOwner());
-										LandscapeToSpline = LandscapeProxy->LandscapeActorToWorld().GetRelativeTransform(SplineComponent->GetComponentTransform());
+										ILandscapeSplineInterface* SplineOwner = SplineComponent->GetSplineOwner();
+										LandscapeToSpline = SplineOwner->LandscapeActorToWorld().GetRelativeTransform(SplineComponent->GetComponentTransform());
 									}
 								}
 							}
 						}
 					}
 
-					if (ClickedSplineSegment != NULL)
+					if (ClickedSplineSegment != nullptr)
 					{
 						FVector HitLocation;
 						if (EdMode->LandscapeMouseTrace(InViewportClient, HitLocation))
@@ -1373,7 +1468,7 @@ public:
 						checkSlow(SelectedSplineControlPoints.Num() > 0);
 						bMovingControlPoint = true;
 
-						if (SelectedSplineControlPoints.Num() == 1 && InViewportClient->IsAltPressed() && InViewportClient->GetWidgetMode() == FWidget::WM_Translate && InViewportClient->GetCurrentWidgetAxis() != EAxisList::None)
+						if (SelectedSplineControlPoints.Num() == 1 && InViewportClient->IsAltPressed() && InViewportClient->GetWidgetMode() == UE::Widget::WM_Translate && InViewportClient->GetCurrentWidgetAxis() != EAxisList::None)
 						{
 							GEditor->BeginTransaction(LOCTEXT("LandscapeSpline_DuplicateControlPoint", "Duplicate Landscape Spline Control Point"));
 						}
@@ -1421,7 +1516,7 @@ public:
 					{
 						if (bDuplicatingControlPoint && bAutoRotateOnJoin)
 						{
-							ControlPoint->AutoCalcRotation();
+							ControlPoint->AutoCalcRotation(bAlwaysRotateForward);
 						}
 
 						ControlPoint->UpdateSplinePoints(true);
@@ -1438,7 +1533,7 @@ public:
 				{
 					DraggingTangent_Segment->UpdateSplinePoints(true);
 
-					DraggingTangent_Segment = NULL;
+					DraggingTangent_Segment = nullptr;
 
 					InViewportClient->SetWidgetCoordSystemSpace(DraggingTangent_CacheCoordSpace);
 					InViewportClient->SetRequiredCursorOverride(false);
@@ -1501,7 +1596,7 @@ public:
 					continue;
 				}
 
-				float CurrentAngle = FMath::Acos(FVector::DotProduct(LocalDrag, SegmentDirection) / (LocalDrag.Size() * SegmentDirection.Size()));
+				float CurrentAngle = static_cast<float>(FMath::Acos(FVector::DotProduct(LocalDrag, SegmentDirection) / (LocalDrag.Size() * SegmentDirection.Size())));
 
 				// Create a new segment if there is no segment within 90 degrees of drag direction.
 				// Otherwise split segment that is closest to the drag direction.
@@ -1523,7 +1618,7 @@ public:
 		{
 			SplitSegment(SegmentToSplit, Location);
 
-			FWidget::EWidgetMode WidgetMode = EdMode->GetModeManager()->GetWidgetMode(); 
+			UE::Widget::EWidgetMode WidgetMode = EdMode->GetModeManager()->GetWidgetMode(); 
 			SelectControlPoint(SplinesComponent->ControlPoints.Last());
 			EdMode->GetModeManager()->SetWidgetMode(WidgetMode);
 		}
@@ -1582,7 +1677,7 @@ public:
 	{
 		if (DraggingTangent_Segment)
 		{
-			InViewportClient->SetWidgetModeOverride(FWidget::WM_Translate);
+			InViewportClient->SetWidgetModeOverride(UE::Widget::WM_Translate);
 			InViewportClient->SetCurrentWidgetAxis(EAxisList::X);
 			return true;
 		}
@@ -1594,7 +1689,7 @@ public:
 	{
 		if (DraggingTangent_Segment)
 		{
-			InViewportClient->SetWidgetModeOverride(FWidget::WM_Scale);
+			InViewportClient->SetWidgetModeOverride(UE::Widget::WM_Scale);
 			InViewportClient->SetCurrentWidgetAxis(EAxisList::None);
 			return true;
 		}
@@ -1618,9 +1713,9 @@ public:
 			FVector ForwardVector = FQuatRotationMatrix(StartRotation.Quaternion()).TransformVector(FVector(1.0f, 0.0f, 0.0f));
 
 			FVector DragLocal = SplinesComponent->GetComponentTransform().InverseTransformVector(Drag);
-			float Angle = FMath::Acos(FVector::DotProduct(DragLocal, ForwardVector) / DragLocal.Size());
+			float Angle = static_cast<float>(FMath::Acos(FVector::DotProduct(DragLocal, ForwardVector) / DragLocal.Size()));
 			float OldTangentLen = Connection.TangentLen;
-			Connection.TangentLen = DraggingTangent_Length + (Angle < HALF_PI ? 2.0 : -2.0) * DragLocal.Size();
+			Connection.TangentLen = static_cast<float>(DraggingTangent_Length + (Angle < HALF_PI ? 2.0 : -2.0) * DragLocal.Size());
 
 			// Disallow a tangent of exactly 0 and don't allow tangents to flip
 			if ((Connection.TangentLen > 0 && OldTangentLen < 0) || 
@@ -1648,7 +1743,7 @@ public:
 			return true;
 		}
 
-		if (SelectedSplineControlPoints.Num() == 1 && InViewportClient->IsAltPressed() && InViewportClient->GetWidgetMode() == FWidget::WM_Translate && InViewportClient->GetCurrentWidgetAxis() != EAxisList::None)
+		if (SelectedSplineControlPoints.Num() == 1 && InViewportClient->IsAltPressed() && InViewportClient->GetWidgetMode() == UE::Widget::WM_Translate && InViewportClient->GetCurrentWidgetAxis() != EAxisList::None)
 		{
 			static const int MaxDuplicationDelay = 3;
 
@@ -1720,12 +1815,12 @@ public:
 		{
 			for (const FLandscapeListInfo& Info : EdMode->GetLandscapeList())
 			{
-				Info.Info->ForAllLandscapeProxies([this](ALandscapeProxy* Proxy)
+				Info.Info->ForAllSplineActors([this](TScriptInterface<ILandscapeSplineInterface> SplineOwner)
 				{
-					if (Proxy->SplineComponent)
+					if (ULandscapeSplinesComponent* SplineComponent = SplineOwner->GetSplinesComponent())
 					{
-						Algo::CopyIf(Proxy->SplineComponent->ControlPoints, SelectedSplineControlPoints, &ULandscapeSplineControlPoint::IsSplineSelected);
-						Algo::CopyIf(Proxy->SplineComponent->Segments,      SelectedSplineSegments,      &ULandscapeSplineSegment::IsSplineSelected);
+						Algo::CopyIf(SplineComponent->ControlPoints, SelectedSplineControlPoints, &ULandscapeSplineControlPoint::IsSplineSelected);
+						Algo::CopyIf(SplineComponent->Segments,      SelectedSplineSegments,      &ULandscapeSplineSegment::IsSplineSelected);
 					}
 				});
 			}
@@ -1734,16 +1829,16 @@ public:
 		{
 			for (const FLandscapeListInfo& Info : EdMode->GetLandscapeList())
 			{
-				Info.Info->ForAllLandscapeProxies([](ALandscapeProxy* Proxy)
+				Info.Info->ForAllSplineActors([](TScriptInterface<ILandscapeSplineInterface> SplineOwner)
 				{
-					if (Proxy->SplineComponent)
+					if (ULandscapeSplinesComponent* SplineComponent = SplineOwner->GetSplinesComponent())
 					{
-						for (ULandscapeSplineControlPoint* ControlPoint : Proxy->SplineComponent->ControlPoints)
+						for (ULandscapeSplineControlPoint* ControlPoint : SplineComponent->ControlPoints)
 						{
 							ControlPoint->SetSplineSelected(false);
 						}
 
-						for (ULandscapeSplineSegment* Segment : Proxy->SplineComponent->Segments)
+						for (ULandscapeSplineSegment* Segment : SplineComponent->Segments)
 						{
 							Segment->SetSplineSelected(false);
 						}
@@ -1765,11 +1860,11 @@ public:
 
 		for (const FLandscapeListInfo& Info : EdMode->GetLandscapeList())
 		{
-			Info.Info->ForAllLandscapeProxies([](ALandscapeProxy* Proxy)
+			Info.Info->ForAllSplineActors([this](TScriptInterface<ILandscapeSplineInterface> SplineOwner)
 			{
-				if (Proxy->SplineComponent)
+				if (ULandscapeSplinesComponent* SplineComponent = SplineOwner->GetSplinesComponent())
 				{
-					Proxy->SplineComponent->ShowSplineEditorMesh(true);
+					SplineComponent->ShowSplineEditorMesh(true);
 				}
 			});
 		}
@@ -1782,11 +1877,11 @@ public:
 
 		for (const FLandscapeListInfo& Info : EdMode->GetLandscapeList())
 		{
-			Info.Info->ForAllLandscapeProxies([](ALandscapeProxy* Proxy)
+			Info.Info->ForAllSplineActors([this](TScriptInterface<ILandscapeSplineInterface> SplineOwner)
 			{
-				if (Proxy->SplineComponent)
+				if (ULandscapeSplinesComponent* SplineComponent = SplineOwner->GetSplinesComponent())
 				{
-					Proxy->SplineComponent->ShowSplineEditorMesh(false);
+					SplineComponent->ShowSplineEditorMesh(false);
 				}
 			});
 		}
@@ -1806,7 +1901,7 @@ public:
 				FVector HandlePos1 = SplinesComponent->GetComponentTransform().TransformPosition(ControlPoint->Location + ControlPoint->Rotation.Vector() * 20);
 				DrawDashedLine(PDI, HandlePos0, HandlePos1, FColor::White, 20, SDPG_Foreground);
 
-				if (GLevelEditorModeTools().GetWidgetMode() == FWidget::WM_Scale && !Viewport->GetClient()->IsOrtho())
+				if (GLevelEditorModeTools().GetWidgetMode() == UE::Widget::WM_Scale && !Viewport->GetClient()->IsOrtho())
 				{
 					for (const FLandscapeSplineConnection& Connection : ControlPoint->ConnectedSegments)
 					{
@@ -1820,12 +1915,12 @@ public:
 						PDI->DrawLine(StartPos, HandlePos, TangentColor, SDPG_Foreground);
 						if (PDI->IsHitTesting()) PDI->SetHitProxy(new HLandscapeSplineProxy_Tangent(Connection.Segment, Connection.End));
 						PDI->DrawPoint(HandlePos, TangentColor, 10.0f, SDPG_Foreground);
-						if (PDI->IsHitTesting()) PDI->SetHitProxy(NULL);
+						if (PDI->IsHitTesting()) PDI->SetHitProxy(nullptr);
 					}
 				}
 			}
 
-			if (GLevelEditorModeTools().GetWidgetMode() == FWidget::WM_Scale && !Viewport->GetClient()->IsOrtho())
+			if (GLevelEditorModeTools().GetWidgetMode() == UE::Widget::WM_Scale && !Viewport->GetClient()->IsOrtho())
 			{
 				for (ULandscapeSplineSegment* Segment : SelectedSplineSegments)
 				{
@@ -1844,7 +1939,7 @@ public:
 						PDI->DrawLine(EndPos, EndHandlePos, TangentColor, SDPG_Foreground);
 						if (PDI->IsHitTesting()) PDI->SetHitProxy(new HLandscapeSplineProxy_Tangent(Segment, !!End));
 						PDI->DrawPoint(EndHandlePos, TangentColor, 10.0f, SDPG_Foreground);
-						if (PDI->IsHitTesting()) PDI->SetHitProxy(NULL);
+						if (PDI->IsHitTesting()) PDI->SetHitProxy(nullptr);
 					}
 				}
 			}
@@ -1882,17 +1977,17 @@ public:
 		return false;
 	}
 
-	virtual EAxisList::Type GetWidgetAxisToDraw(FWidget::EWidgetMode CheckMode) const override
+	virtual EAxisList::Type GetWidgetAxisToDraw(UE::Widget::EWidgetMode CheckMode) const override
 	{
 		if (SelectedSplineControlPoints.Num() > 0)
 		{
-			//if (CheckMode == FWidget::WM_Rotate
+			//if (CheckMode == UE::Widget::WM_Rotate
 			//	&& SelectedSplineControlPoints.Num() >= 2)
 			//{
 			//	return AXIS_X;
 			//}
 			//else
-			if (CheckMode != FWidget::WM_Scale)
+			if (CheckMode != UE::Widget::WM_Scale)
 			{
 				return EAxisList::XYZ;
 			}
@@ -2001,7 +2096,7 @@ public:
 	{
 		FString PasteString;
 		FPlatformApplicationMisc::ClipboardPaste(PasteString);
-		if (PasteString.StartsWith("BEGIN SPLINES"))
+		if (PasteString.StartsWith(FLandscapeSplineTextObjectFactory::SplineBeginTag))
 		{
 			return EEditAction::Process;
 		}
@@ -2083,8 +2178,22 @@ public:
 		}
 	}
 
-	void InternalProcessEditCopy(FString* OutData = NULL)
+	void InternalProcessEditCopy(FString* OutData = nullptr)
 	{
+		bool bFirstSplineLocation = true;
+		FVector SplineLocation;
+
+		auto GetSplineLocation = [&bFirstSplineLocation, &SplineLocation](ULandscapeSplineControlPoint* ControlPoint, const FVector& Location)
+		{
+			if (bFirstSplineLocation)
+			{
+				ILandscapeSplineInterface* SplineOwner = ControlPoint->GetOuterULandscapeSplinesComponent()->GetSplineOwner();
+				const FTransform LocalToWorld = ControlPoint->GetOuterULandscapeSplinesComponent()->GetComponentTransform();
+				SplineLocation = LocalToWorld.TransformPosition(ControlPoint->Location);
+				bFirstSplineLocation = false;
+			}
+		};
+
 		if (SelectedSplineControlPoints.Num() > 0 || SelectedSplineSegments.Num() > 0)
 		{
 			TArray<UObject*> Objects;
@@ -2093,10 +2202,12 @@ public:
 			// Control Points then segments
 			for (ULandscapeSplineControlPoint* ControlPoint : SelectedSplineControlPoints)
 			{
+				GetSplineLocation(ControlPoint, ControlPoint->Location);
 				Objects.Add(ControlPoint);
 			}
 			for (ULandscapeSplineSegment* Segment : SelectedSplineSegments)
 			{
+				GetSplineLocation(Segment->Connections[0].ControlPoint, Segment->Connections[0].ControlPoint->Location);
 				Objects.AddUnique(Segment->Connections[0].ControlPoint);
 				Objects.AddUnique(Segment->Connections[1].ControlPoint);
 			}
@@ -2109,14 +2220,15 @@ public:
 			FStringOutputDevice Ar;
 			const FExportObjectInnerContext Context;
 
-			Ar.Logf(TEXT("Begin Splines\r\n"));
+			Ar.Logf(TEXT("%s\r\n"), *FLandscapeSplineTextObjectFactory::SplineBeginTag);
+			Ar.Logf(TEXT("%s%s\r\n"), *FLandscapeSplineTextObjectFactory::SplineLocationTag, *SplineLocation.ToString());
 			for (UObject* Object : Objects)
 			{
-				UExporter::ExportToOutputDevice(&Context, Object, NULL, Ar, TEXT("copy"), 3, PPF_ExportsNotFullyQualified | PPF_Copy | PPF_Delimited, false);
+				UExporter::ExportToOutputDevice(&Context, Object, nullptr, Ar, TEXT("copy"), 3, PPF_ExportsNotFullyQualified | PPF_Copy | PPF_Delimited, false, Object->GetOuter());
 			}
-			Ar.Logf(TEXT("End Splines\r\n"));
+			Ar.Logf(TEXT("%s\r\n"), *FLandscapeSplineTextObjectFactory::SplineEndTag);
 
-			if (OutData != NULL)
+			if (OutData != nullptr)
 			{
 				*OutData = MoveTemp(Ar);
 			}
@@ -2127,25 +2239,42 @@ public:
 		}
 	}
 
-	void InternalProcessEditPaste(FString* InData = NULL, bool bOffset = false)
+	void InternalProcessEditPaste(FString* InData = nullptr, bool bOffset = false)
 	{
 		FScopedTransaction Transaction(LOCTEXT("LandscapeSpline_Paste", "Paste Landscape Splines"));
 
-		ALandscapeProxy* Landscape = EdMode->CurrentToolTarget.LandscapeInfo->GetCurrentLevelLandscapeProxy(true);
-		if (!Landscape)
+		TScriptInterface<ILandscapeSplineInterface> SplineOwner;
+		const bool bGridBased = EdMode->IsGridBased();
+		if (bGridBased)
+		{
+			if (ULandscapeInfo* CurrentLandscapeInfo = EdMode->CurrentToolTarget.LandscapeInfo.Get())
+			{
+				SplineOwner = CurrentLandscapeInfo->CreateSplineActor(FVector::ZeroVector);
+			}
+		}
+		else
+		{
+			SplineOwner = EdMode->CurrentToolTarget.LandscapeInfo->GetCurrentLevelLandscapeProxy(true);
+		}
+
+		if (!SplineOwner)
 		{
 			return;
 		}
-		if (!Landscape->SplineComponent)
+		
+		ULandscapeSplinesComponent* SplineComponent = SplineOwner->GetSplinesComponent();
+		if (!SplineComponent)
 		{
-			CreateSplineComponent(Landscape, FVector(1.0f) / Landscape->GetRootComponent()->GetRelativeScale3D());
-			check(Landscape->SplineComponent);
+			SplineOwner->CreateSplineComponent();
+			SplineComponent = SplineOwner->GetSplinesComponent();
+			check(SplineComponent);
 		}
-		Landscape->SplineComponent->Modify();
+		
+		SplineComponent->Modify();
 
-		const TCHAR* Data = NULL;
+		const TCHAR* Data = nullptr;
 		FString PasteString;
-		if (InData != NULL)
+		if (InData != nullptr)
 		{
 			Data = **InData;
 		}
@@ -2156,18 +2285,21 @@ public:
 		}
 
 		FLandscapeSplineTextObjectFactory Factory;
-		TArray<UObject*> OutObjects = Factory.ImportSplines(Landscape->SplineComponent, Data);
+		TArray<UObject*> OutObjects = Factory.ImportSplines(SplineComponent, Data);
+
+		if (ALandscapeSplineActor* SplineActor = Cast<ALandscapeSplineActor>(SplineOwner.GetObject()))
+		{
+			SplineActor->SetActorLocation(Factory.SplineLocation);
+		}
 
 		if (bOffset)
 		{
 			for (UObject* Object : OutObjects)
 			{
 				ULandscapeSplineControlPoint* ControlPoint = Cast<ULandscapeSplineControlPoint>(Object);
-				if (ControlPoint != NULL)
+				if (ControlPoint != nullptr)
 				{
-					Landscape->SplineComponent->ControlPoints.Add(ControlPoint);
 					ControlPoint->Location += FVector(500, 500, 0);
-
 					ControlPoint->UpdateSplinePoints();
 				}
 			}
@@ -2182,12 +2314,12 @@ protected:
 
 protected:
 	FEdModeLandscape* EdMode;
-	ULandscapeInfo* LandscapeInfo;
+	TObjectPtr<ULandscapeInfo> LandscapeInfo;
 
-	TSet<ULandscapeSplineControlPoint*> SelectedSplineControlPoints;
-	TSet<ULandscapeSplineSegment*> SelectedSplineSegments;
+	TSet<TObjectPtr<ULandscapeSplineControlPoint>> SelectedSplineControlPoints;
+	TSet<TObjectPtr<ULandscapeSplineSegment>> SelectedSplineSegments;
 
-	ULandscapeSplineSegment* DraggingTangent_Segment;
+	TObjectPtr<ULandscapeSplineSegment> DraggingTangent_Segment;
 	float DraggingTangent_Length;
 	ECoordSystem DraggingTangent_CacheCoordSpace;
 	uint32 DraggingTangent_End : 1;
@@ -2195,6 +2327,7 @@ protected:
 	uint32 bMovingControlPoint : 1;
 
 	uint32 bAutoRotateOnJoin : 1;
+	uint32 bAlwaysRotateForward : 1;
 	uint32 bAutoChangeConnectionsOnMove : 1;
 	uint32 bDeleteLooseEnds : 1;
 	uint32 bCopyMeshToNewControlPoint : 1;
@@ -2257,19 +2390,44 @@ void FEdModeLandscape::ShowSplineProperties()
 	}
 }
 
-void FEdModeLandscape::GetSelectedSplineOwners(TSet<ALandscapeProxy*>& SelectedSplineOwners) const
+void FEdModeLandscape::GetSelectedSplineOwners(TSet<AActor*>& SelectedSplineOwners) const
 {
 	for (ULandscapeSplineSegment* Segment : SplinesTool->SelectedSplineSegments)
 	{
-		SelectedSplineOwners.Add(Segment->GetTypedOuter<ALandscapeProxy>());
+		SelectedSplineOwners.Add(Segment->GetTypedOuter<AActor>());
 	}
 
 	for (ULandscapeSplineControlPoint* ControlPoint : SplinesTool->SelectedSplineControlPoints)
 	{
-		SelectedSplineOwners.Add(ControlPoint->GetTypedOuter<ALandscapeProxy>());
+		SelectedSplineOwners.Add(ControlPoint->GetTypedOuter<AActor>());
 	}
 }
 
+void FEdModeLandscape::SelectAllSplineControlPoints()
+{
+	ULandscapeInfo* CurrentLandscapeInfo = CurrentToolTarget.LandscapeInfo.Get();
+	if (SplinesTool && CurrentLandscapeInfo)
+	{
+		SplinesTool->ClearSelectedSegments();
+		SplinesTool->SelectAllControlPoints(*CurrentLandscapeInfo);
+
+		SplinesTool->UpdatePropertiesWindows();
+		GUnrealEd->RedrawLevelEditingViewports();
+	}
+}
+
+void FEdModeLandscape::SelectAllSplineSegments()
+{
+	ULandscapeInfo* CurrentLandscapeInfo = CurrentToolTarget.LandscapeInfo.Get();
+	if (SplinesTool && CurrentLandscapeInfo)
+	{
+		SplinesTool->ClearSelectedControlPoints();
+		SplinesTool->SelectAllSplineSegments(*CurrentLandscapeInfo);
+
+		SplinesTool->UpdatePropertiesWindows();
+		GUnrealEd->RedrawLevelEditingViewports();
+	}
+}
 
 void FEdModeLandscape::SelectAllConnectedSplineControlPoints()
 {
@@ -2315,6 +2473,16 @@ void FEdModeLandscape::SplineMoveToCurrentLevel()
 	}
 }
 
+bool FEdModeLandscape::CanMoveSplineToCurrentLevel() const
+{
+	if (SplinesTool)
+	{
+		return SplinesTool->CanMoveSelectedToLevel();
+	}
+
+	return false;
+}
+
 void FEdModeLandscape::UpdateSplineMeshLevels()
 {
 	FScopedTransaction Transaction(LOCTEXT("LandscapeSpline_UpdateSplineMeshes", "Update Spline Meshes Level"));
@@ -2342,6 +2510,23 @@ bool FEdModeLandscape::GetbUseAutoRotateOnJoin()
 		return SplinesTool->bAutoRotateOnJoin;
 	}
 	return true; // default value
+}
+
+void FEdModeLandscape::SetbAlwaysRotateForward(bool InbAlwaysRotateForward)
+{
+	if (SplinesTool /*&& SplinesTool == CurrentTool*/)
+	{
+		SplinesTool->bAlwaysRotateForward = InbAlwaysRotateForward;
+	}
+}
+
+bool FEdModeLandscape::GetbAlwaysRotateForward()
+{
+	if (SplinesTool /*&& SplinesTool == CurrentTool*/)
+	{
+		return SplinesTool->bAlwaysRotateForward;
+	}
+	return false; // default value
 }
 
 void FEdModeLandscape::InitializeTool_Splines()

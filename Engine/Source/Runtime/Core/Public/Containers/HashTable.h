@@ -2,16 +2,25 @@
 
 #pragma once
 
+#include "Containers/ContainerAllocationPolicies.h"
+#include "Containers/ContainerAllocationPolicies.h"
 #include "CoreTypes.h"
-#include "Containers/ContainerAllocationPolicies.h"
-#include "Serialization/MemoryImageWriter.h"
-#include "Serialization/MemoryLayout.h"
-#include "Serialization/MemoryImageWriter.h"
-#include "Containers/ContainerAllocationPolicies.h"
-#include "Misc/AssertionMacros.h"
+#include "HAL/PlatformAtomics.h"
+#include "HAL/PlatformCrt.h"
 #include "HAL/UnrealMemory.h"
 #include "Math/UnrealMathUtility.h"
+#include "Misc/AssertionMacros.h"
+#include "Serialization/MemoryImageWriter.h"
+#include "Serialization/MemoryImageWriter.h"
+#include "Serialization/MemoryLayout.h"
+#include "Templates/UnrealTemplate.h"
+
 #include <initializer_list>
+
+class FMemoryImageWriter;
+class FMemoryUnfreezeContent;
+class FPointerTableBase;
+class FSHA1;
 
 static FORCEINLINE uint32 MurmurFinalize32(uint32 Hash)
 {
@@ -189,30 +198,31 @@ public:
 					FHashTable( const FHashTable& Other );
 					~FHashTable();
 
-	void			Initialize(uint32 InHashSize = 1024, uint32 InIndexSize = 0);
-
 	void			Clear();
+	void			Clear( uint32 InHashSize, uint32 InIndexSize = 0 );
 	void			Free();
 	CORE_API void	Resize( uint32 NewIndexSize );
 
 	// Functions used to search
-	uint32			First( uint16 Key ) const;
+	uint32			First( uint32 Key ) const;
 	uint32			Next( uint32 Index ) const;
 	bool			IsValid( uint32 Index ) const;
-	bool			Contains( uint16 Key ) const;
 	
-	void			Add( uint16 Key, uint32 Index );
-	void			Remove( uint16 Key, uint32 Index );
+	void			Add( uint32 Key, uint32 Index );
+	void			Add_Concurrent( uint32 Key, uint32 Index );
+	void			Remove( uint32 Key, uint32 Index );
 
 	// Average # of compares per search
 	CORE_API float	AverageSearch() const;
+
+	FHashTable&		operator=(const FHashTable& Other);
 
 protected:
 	// Avoids allocating hash until first add
 	CORE_API static uint32	EmptyHash[1];
 
 	uint32			HashSize;
-	uint16			HashMask;
+	uint32			HashMask;
 	uint32			IndexSize;
 
 	uint32*			Hash;
@@ -221,58 +231,58 @@ protected:
 
 
 FORCEINLINE FHashTable::FHashTable( uint32 InHashSize, uint32 InIndexSize )
-	: HashSize( 0 )
+	: HashSize( InHashSize )
 	, HashMask( 0 )
-	, IndexSize( 0 )
+	, IndexSize( InIndexSize )
 	, Hash( EmptyHash )
-	, NextIndex( NULL )
+	, NextIndex( nullptr )
 {
-	if (InHashSize > 0u)
+	check( HashSize > 0 );
+	check( FMath::IsPowerOfTwo( HashSize ) );
+	
+	if( IndexSize )
 	{
-		Initialize(InHashSize, InIndexSize);
+		HashMask = HashSize - 1;
+		
+		Hash = new uint32[ HashSize ];
+		NextIndex = new uint32[ IndexSize ];
+
+		FMemory::Memset( Hash, 0xff, HashSize * 4 );
 	}
 }
 
 FORCEINLINE FHashTable::FHashTable( const FHashTable& Other )
-	: HashSize( 0 )
-	, HashMask( 0 )
-	, IndexSize( 0 )
+	: HashSize( Other.HashSize )
+	, HashMask( Other.HashMask )
+	, IndexSize( Other.IndexSize )
 	, Hash( EmptyHash )
-	, NextIndex( NULL )
 {
-	if (Other.HashSize > 0u)
+	if( IndexSize )
 	{
-		Initialize(Other.HashSize, Other.IndexSize);
+		Hash = new uint32[ HashSize ];
+		NextIndex = new uint32[ IndexSize ];
 
-		check(HashSize == Other.HashSize);
-		check(HashMask == Other.HashMask);
-		check(IndexSize == Other.IndexSize);
+		FMemory::Memcpy( Hash, Other.Hash, HashSize * 4 );
+		FMemory::Memcpy( NextIndex, Other.NextIndex, IndexSize * 4 );
+	}
+}
+
+FORCEINLINE FHashTable& FHashTable::operator=(const FHashTable& Other)
+{
+	Free();
+	HashSize = Other.HashSize;
+	HashMask = Other.HashMask;
+	IndexSize = Other.IndexSize;
+
+	if (IndexSize)
+	{
+		Hash = new uint32[HashSize];
+		NextIndex = new uint32[IndexSize];
 
 		FMemory::Memcpy(Hash, Other.Hash, HashSize * 4);
 		FMemory::Memcpy(NextIndex, Other.NextIndex, IndexSize * 4);
 	}
-}
-
-FORCEINLINE void FHashTable::Initialize(uint32 InHashSize, uint32 InIndexSize)
-{
-	check(HashSize == 0u);
-	check(IndexSize == 0u);
-
-	HashSize = InHashSize;
-	IndexSize = InIndexSize;
-
-	check(HashSize <= 0x10000);
-	check(FMath::IsPowerOfTwo(HashSize));
-
-	if (IndexSize)
-	{
-		HashMask = (uint16)(HashSize - 1);
-
-		Hash = new uint32[HashSize];
-		NextIndex = new uint32[IndexSize];
-
-		FMemory::Memset(Hash, 0xff, HashSize * 4);
-	}
+	return *this;
 }
 
 FORCEINLINE FHashTable::~FHashTable()
@@ -288,6 +298,27 @@ FORCEINLINE void FHashTable::Clear()
 	}
 }
 
+FORCEINLINE void FHashTable::Clear( uint32 InHashSize, uint32 InIndexSize )
+{
+	Free();
+
+	HashSize = InHashSize;
+	IndexSize = InIndexSize;
+
+	check( HashSize > 0 );
+	check( FMath::IsPowerOfTwo( HashSize ) );
+
+	if( IndexSize )
+	{
+		HashMask = HashSize - 1;
+		
+		Hash = new uint32[ HashSize ];
+		NextIndex = new uint32[ IndexSize ];
+
+		FMemory::Memset( Hash, 0xff, HashSize * 4 );
+	}
+}
+
 FORCEINLINE void FHashTable::Free()
 {
 	if( IndexSize )
@@ -299,12 +330,12 @@ FORCEINLINE void FHashTable::Free()
 		Hash = EmptyHash;
 		
 		delete[] NextIndex;
-		NextIndex = NULL;
+		NextIndex = nullptr;
 	}
 } 
 
 // First in hash chain
-FORCEINLINE uint32 FHashTable::First( uint16 Key ) const
+FORCEINLINE uint32 FHashTable::First( uint32 Key ) const
 {
 	Key &= HashMask;
 	return Hash[ Key ];
@@ -323,16 +354,11 @@ FORCEINLINE bool FHashTable::IsValid( uint32 Index ) const
 	return Index != ~0u;
 }
 
-FORCEINLINE bool FHashTable::Contains( uint16 Key ) const
-{
-	return First( Key ) != ~0u;
-}
-
-FORCEINLINE void FHashTable::Add( uint16 Key, uint32 Index )
+FORCEINLINE void FHashTable::Add( uint32 Key, uint32 Index )
 {
 	if( Index >= IndexSize )
 	{
-		Resize(FMath::Max<uint32>(32u, FMath::RoundUpToPowerOfTwo(Index + 1)));
+		Resize( FMath::Max< uint32 >( 32u, FMath::RoundUpToPowerOfTwo( Index + 1 ) ) );
 	}
 
 	Key &= HashMask;
@@ -340,7 +366,18 @@ FORCEINLINE void FHashTable::Add( uint16 Key, uint32 Index )
 	Hash[ Key ] = Index;
 }
 
-inline void FHashTable::Remove( uint16 Key, uint32 Index )
+// Safe for many threads to add concurrently.
+// Not safe to search the table while other threads are adding.
+// Will not resize. Only use for presized tables.
+FORCEINLINE void FHashTable::Add_Concurrent( uint32 Key, uint32 Index )
+{
+	check( Index < IndexSize );
+
+	Key &= HashMask;
+	NextIndex[ Index ] = FPlatformAtomics::InterlockedExchange( (int32*)&Hash[ Key ], Index );
+}
+
+inline void FHashTable::Remove( uint32 Key, uint32 Index )
 {
 	if( Index >= IndexSize )
 	{
@@ -374,11 +411,11 @@ class THashTable
 public:
 	using Allocator = InAllocator;
 
-	using ElementAllocatorType = typename TChooseClass<
+	using ElementAllocatorType = std::conditional_t<
 		Allocator::NeedsElementType,
 		typename Allocator::template ForElementType<uint32>,
 		typename Allocator::ForAnyElementType
-	>::Result;
+	>;
 
 	explicit THashTable(uint32 InHashSize = 1024, uint32 InIndexSize = 0);
 	THashTable(const THashTable& Other) = delete;
@@ -398,7 +435,6 @@ public:
 	uint32			First(uint16 Key) const;
 	uint32			Next(uint32 Index) const;
 	bool			IsValid(uint32 Index) const;
-	bool			Contains(uint16 Key) const;
 
 	void			Add(uint16 Key, uint32 Index);
 	void			Remove(uint16 Key, uint32 Index);
@@ -414,46 +450,34 @@ private:
 	uint32					HashMask;
 	uint32					IndexSize;
 
-	template<bool bFreezeMemoryImage, typename Dummy = void>
-	struct TSupportsFreezeMemoryImageHelper
-	{
-		static void WriteMemoryImage(FMemoryImageWriter& Writer, const THashTable&)
-		{
-			check(false);
-		}
-
-		static void CopyUnfrozen(const FMemoryUnfreezeContent& Context, const THashTable&, void* Dst) { new(Dst) THashTable(); }
-	};
-
-	template<typename Dummy>
-	struct TSupportsFreezeMemoryImageHelper<true, Dummy>
-	{
-		static void WriteMemoryImage(FMemoryImageWriter& Writer, const THashTable& Object)
-		{
-			Object.Hash.WriteMemoryImage(Writer, StaticGetTypeLayoutDesc<uint32>(), Object.HashMask + 1u);
-			Object.NextIndex.WriteMemoryImage(Writer, StaticGetTypeLayoutDesc<uint32>(), Object.IndexSize);
-			Writer.WriteBytes(Object.HashMask);
-			Writer.WriteBytes(Object.IndexSize);
-		}
-		static void CopyUnfrozen(const FMemoryUnfreezeContent& Context, const THashTable& Object, void* Dst)
-		{
-			THashTable* DstTable = new(Dst) THashTable(Object.HashMask + 1u, Object.IndexSize);
-			FMemory::Memcpy(DstTable->Hash.GetAllocation(), Object.Hash.GetAllocation(), (Object.HashMask + 1u) * 4);
-			FMemory::Memcpy(DstTable->NextIndex.GetAllocation(), Object.NextIndex.GetAllocation(), Object.IndexSize * 4);
-		}
-	};
-
 public:
 	void WriteMemoryImage(FMemoryImageWriter& Writer) const
 	{
-		static const bool bSupportsFreezeMemoryImage = TAllocatorTraits<Allocator>::SupportsFreezeMemoryImage;
-		TSupportsFreezeMemoryImageHelper<bSupportsFreezeMemoryImage>::WriteMemoryImage(Writer, *this);
+		if constexpr (TAllocatorTraits<Allocator>::SupportsFreezeMemoryImage)
+		{
+			this->Hash.WriteMemoryImage(Writer, StaticGetTypeLayoutDesc<uint32>(), this->HashMask + 1u);
+			this->NextIndex.WriteMemoryImage(Writer, StaticGetTypeLayoutDesc<uint32>(), this->IndexSize);
+			Writer.WriteBytes(this->HashMask);
+			Writer.WriteBytes(this->IndexSize);
+		}
+		else
+		{
+			check(false);
+		}
 	}
 
 	void CopyUnfrozen(const FMemoryUnfreezeContent& Context, void* Dst) const
 	{
-		static const bool bSupportsFreezeMemoryImage = TAllocatorTraits<Allocator>::SupportsFreezeMemoryImage;
-		TSupportsFreezeMemoryImageHelper<bSupportsFreezeMemoryImage>::CopyUnfrozen(Context, *this, Dst);
+		if constexpr (TAllocatorTraits<Allocator>::SupportsFreezeMemoryImage)
+		{
+			THashTable* DstTable = new(Dst) THashTable(this->HashMask + 1u, this->IndexSize);
+			FMemory::Memcpy(DstTable->Hash.GetAllocation(), this->Hash.GetAllocation(), (this->HashMask + 1u) * 4);
+			FMemory::Memcpy(DstTable->NextIndex.GetAllocation(), this->NextIndex.GetAllocation(), this->IndexSize * 4);
+		}
+		else
+		{
+			new(Dst) THashTable();
+		}
 	}
 };
 
@@ -525,12 +549,6 @@ FORCEINLINE bool THashTable<InAllocator>::IsValid(uint32 Index) const
 }
 
 template<typename InAllocator>
-FORCEINLINE bool THashTable<InAllocator>::Contains(uint16 Key) const
-{
-	return First(Key) != ~0u;
-}
-
-template<typename InAllocator>
 FORCEINLINE void THashTable<InAllocator>::Add(uint16 Key, uint32 Index)
 {
 	if (Index >= IndexSize)
@@ -590,26 +608,23 @@ namespace Freeze
 	}
 
 	template<typename InAllocator>
-	void IntrinsicUnfrozenCopy(const FMemoryUnfreezeContent& Context, const THashTable<InAllocator>& Object, void* OutDst)
+	uint32 IntrinsicUnfrozenCopy(const FMemoryUnfreezeContent& Context, const THashTable<InAllocator>& Object, void* OutDst)
 	{
 		Object.CopyUnfrozen(Context, OutDst);
+		return sizeof(Object);
 	}
 
 	template<typename InAllocator>
 	uint32 IntrinsicAppendHash(const THashTable<InAllocator>* DummyObject, const FTypeLayoutDesc& TypeDesc, const FPlatformTypeLayoutParameters& LayoutParams, FSHA1& Hasher)
 	{
-		// sizeof(TArray) changes depending on target platform 32bit vs 64bit
-		// For now, calculate the size manually
-		static_assert(sizeof(THashTable<InAllocator>) == sizeof(FMemoryImageUPtrInt) * 2 + sizeof(uint32) * 2, "Unexpected THashTable size");
-		const uint32 SizeFromFields = LayoutParams.GetMemoryImagePointerSize() * 2u + sizeof(uint32) * 2u;
-		return AppendHashForNameAndSize(TypeDesc.Name, SizeFromFields, Hasher);
+		return AppendHashForNameAndSize(TypeDesc.Name, sizeof(THashTable<InAllocator>), Hasher);
 	}
 
 	template<typename InAllocator>
 	uint32 IntrinsicGetTargetAlignment(const THashTable<InAllocator>* DummyObject, const FTypeLayoutDesc& TypeDesc, const FPlatformTypeLayoutParameters& LayoutParams)
 	{
-		// Assume alignment of array is drive by pointer
-		return FMath::Min(LayoutParams.GetMemoryImagePointerSize(), LayoutParams.MaxFieldAlignment);
+		// Assume alignment of hash-table is drive by pointer
+		return FMath::Min(8u, LayoutParams.MaxFieldAlignment);
 	}
 }
 

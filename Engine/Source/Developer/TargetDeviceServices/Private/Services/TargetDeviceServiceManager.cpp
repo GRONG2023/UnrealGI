@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "TargetDeviceServiceManager.h"
+#include "Services/TargetDeviceServiceManager.h"
 #include "TargetDeviceServicesPrivate.h"
 
 #include "IMessageBus.h"
@@ -12,7 +12,7 @@
 #include "IMessagingModule.h"
 
 #include "ITargetDeviceService.h"
-#include "TargetDeviceService.h"
+#include "Services/TargetDeviceService.h"
 
 
 
@@ -134,7 +134,7 @@ bool FTargetDeviceServiceManager::AddTargetDevice(ITargetDevicePtr InDevice)
 		return false;
 	}
 
-	const FString& DeviceName = InDevice->GetName();
+	FString DeviceName = InDevice->GetName();
 	ITargetDeviceServicePtr DeviceService = AddService(DeviceName);
 
 	if (DeviceService.IsValid())
@@ -153,15 +153,11 @@ bool FTargetDeviceServiceManager::AddTargetDevice(ITargetDevicePtr InDevice)
 
 void FTargetDeviceServiceManager::InitializeTargetPlatforms()
 {
-	TArray<ITargetPlatform*> Platforms = GetTargetPlatformManager()->GetTargetPlatforms();
-
-	for (int32 PlatformIndex = 0; PlatformIndex < Platforms.Num(); ++PlatformIndex)
+	ITargetPlatformControls::OnDeviceDiscovered().AddRaw(this, &FTargetDeviceServiceManager::HandleTargetPlatformDeviceDiscovered);
+	ITargetPlatformControls::OnDeviceLost().AddRaw(this, &FTargetDeviceServiceManager::HandleTargetPlatformDeviceLost);
+	
+	for (ITargetPlatform* Platform : GetTargetPlatformManager()->GetTargetPlatforms())
 	{
-		// set up target platform callbacks
-		ITargetPlatform* Platform = Platforms[PlatformIndex];
-		Platform->OnDeviceDiscovered().AddRaw(this, &FTargetDeviceServiceManager::HandleTargetPlatformDeviceDiscovered);
-		Platform->OnDeviceLost().AddRaw(this, &FTargetDeviceServiceManager::HandleTargetPlatformDeviceLost);
-
 		// add services for existing devices
 		TArray<ITargetDevicePtr> Devices;
 		Platform->GetAllDevices(Devices);
@@ -186,7 +182,7 @@ void FTargetDeviceServiceManager::LoadSettings()
 		return;
 	}
 
-	FConfigSection* OwnedDevices = GConfig->GetSectionPrivate(TEXT("TargetDeviceServices"), false, true, GEngineIni);
+	const FConfigSection* OwnedDevices = GConfig->GetSection(TEXT("TargetDeviceServices"), false, GEngineIni);
 	
 	if (OwnedDevices == nullptr)
 	{
@@ -194,7 +190,7 @@ void FTargetDeviceServiceManager::LoadSettings()
 	}
 
 	// for each entry in the INI file...
-	for (FConfigSection::TIterator It(*OwnedDevices); It; ++It)
+	for (FConfigSection::TConstIterator It(*OwnedDevices); It; ++It)
 	{
 		if (It.Key() != TEXT("StartupServices"))
 		{
@@ -329,19 +325,8 @@ void FTargetDeviceServiceManager::SaveSettings()
 
 void FTargetDeviceServiceManager::ShutdownTargetPlatforms()
 {
-	ITargetPlatformManagerModule* Module = FModuleManager::GetModulePtr<ITargetPlatformManagerModule>("TargetPlatform");
-	if (Module)
-	{
-		TArray<ITargetPlatform*> Platforms = Module->GetTargetPlatforms();
-
-		for (int32 PlatformIndex = 0; PlatformIndex < Platforms.Num(); ++PlatformIndex)
-		{
-			// set up target platform callbacks
-			ITargetPlatform* Platform = Platforms[PlatformIndex];
-			Platform->OnDeviceDiscovered().RemoveAll(this);
-			Platform->OnDeviceLost().RemoveAll(this);
-		}
-	}
+	ITargetPlatformControls::OnDeviceDiscovered().RemoveAll(this);
+	ITargetPlatformControls::OnDeviceLost().RemoveAll(this);
 }
 
 

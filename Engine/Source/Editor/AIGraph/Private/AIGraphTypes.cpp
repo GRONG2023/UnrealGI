@@ -10,13 +10,12 @@
 #include "Misc/PackageName.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Engine/Blueprint.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Editor.h"
 #include "ObjectEditorUtils.h"
 #include "Logging/MessageLog.h"
-#include "ARFilter.h"
-#include "AssetRegistryModule.h"
-#include "Misc/HotReloadInterface.h"
+#include "AssetRegistry/ARFilter.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 
 #define LOCTEXT_NAMESPACE "AIGraph"
 
@@ -32,6 +31,17 @@ FGraphNodeClassData::FGraphNodeClassData(UClass* InClass, const FString& InDepre
 	{
 		ClassName = InClass->GetName();
 	}
+}
+
+FGraphNodeClassData::FGraphNodeClassData(const FTopLevelAssetPath& InGeneratedClassPath, UClass* InClass) :
+	bIsHidden(0),
+	bHideParent(0),
+	Class(InClass),
+	AssetName(InGeneratedClassPath.GetAssetName().ToString()),
+	GeneratedClassPackage(InGeneratedClassPath.GetPackageName().ToString()),
+	ClassName(InGeneratedClassPath.GetAssetName().ToString())
+{
+	Category = GetCategory();
 }
 
 FGraphNodeClassData::FGraphNodeClassData(const FString& InAssetName, const FString& InGeneratedClassPackage, const FString& InClassName, UClass* InClass) :
@@ -66,7 +76,7 @@ FString FGraphNodeClassData::ToString() const
 		const int32 ShortNameIdx = ClassDesc.Find(TEXT("_"), ESearchCase::CaseSensitive);
 		if (ShortNameIdx != INDEX_NONE)
 		{
-			ClassDesc.MidInline(ShortNameIdx + 1, MAX_int32, false);
+			ClassDesc.MidInline(ShortNameIdx + 1, MAX_int32, EAllowShrinking::No);
 		}
 
 		return ClassDesc;
@@ -83,6 +93,11 @@ FString FGraphNodeClassData::GetClassName() const
 FString FGraphNodeClassData::GetDisplayName() const
 {
 	return Class.IsValid() ? Class->GetMetaData(TEXT("DisplayName")) : FString();
+}
+
+FText FGraphNodeClassData::GetTooltip() const
+{
+	return Class.IsValid() ? Class->GetToolTipText() : FText::GetEmpty();
 }
 
 FText FGraphNodeClassData::GetCategory() const
@@ -107,15 +122,9 @@ UClass* FGraphNodeClassData::GetClass(bool bSilent)
 		{
 			Package->FullyLoad();
 
-			UObject* Object = FindObject<UObject>(Package, *AssetName);
+			RetClass = FindObject<UClass>(Package, *ClassName);
 
 			GWarn->EndSlowTask();
-
-			UBlueprint* BlueprintOb = Cast<UBlueprint>(Object);
-			RetClass = BlueprintOb ? *BlueprintOb->GeneratedClass :
-				Object ? Object->GetClass() :
-				NULL;
-
 			Class = RetClass;
 		}
 		else
@@ -150,9 +159,8 @@ FGraphNodeClassHelper::FGraphNodeClassHelper(UClass* InRootClass)
 	AssetRegistryModule.Get().OnAssetAdded().AddRaw(this, &FGraphNodeClassHelper::OnAssetAdded);
 	AssetRegistryModule.Get().OnAssetRemoved().AddRaw(this, &FGraphNodeClassHelper::OnAssetRemoved);
 
-	// Register to have Populate called when doing a Hot Reload.
-	IHotReloadInterface& HotReloadSupport = FModuleManager::LoadModuleChecked<IHotReloadInterface>("HotReload");
-	HotReloadSupport.OnHotReload().AddRaw(this, &FGraphNodeClassHelper::OnHotReload);
+	// Register to have Populate called when doing a Reload.
+	FCoreUObjectDelegates::ReloadCompleteDelegate.AddRaw(this, &FGraphNodeClassHelper::OnReloadComplete);
 
 	// Register to have Populate called when a Blueprint is compiled.
 	GEditor->OnBlueprintCompiled().AddRaw(this, &FGraphNodeClassHelper::InvalidateCache);
@@ -166,17 +174,16 @@ FGraphNodeClassHelper::~FGraphNodeClassHelper()
 	// Unregister with the Asset Registry to be informed when it is done loading up files.
 	if (FModuleManager::Get().IsModuleLoaded(TEXT("AssetRegistry")))
 	{
-		FAssetRegistryModule& AssetRegistryModule = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-		AssetRegistryModule.Get().OnFilesLoaded().RemoveAll(this);
-		AssetRegistryModule.Get().OnAssetAdded().RemoveAll(this);
-		AssetRegistryModule.Get().OnAssetRemoved().RemoveAll(this);
-
-		// Unregister to have Populate called when doing a Hot Reload.
-		if (FModuleManager::Get().IsModuleLoaded(TEXT("HotReload")))
+		IAssetRegistry* AssetRegistry = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).TryGet();
+		if (AssetRegistry)
 		{
-			IHotReloadInterface& HotReloadSupport = FModuleManager::GetModuleChecked<IHotReloadInterface>("HotReload");
-			HotReloadSupport.OnHotReload().RemoveAll(this);
+			AssetRegistry->OnFilesLoaded().RemoveAll(this);
+			AssetRegistry->OnAssetAdded().RemoveAll(this);
+			AssetRegistry->OnAssetRemoved().RemoveAll(this);
 		}
+
+		// Unregister to have Populate called when doing a Reload.
+		FCoreUObjectDelegates::ReloadCompleteDelegate.RemoveAll(this);
 
 		// Unregister to have Populate called when a Blueprint is compiled.
 		if (UObjectInitialized())
@@ -252,7 +259,11 @@ bool FGraphNodeClassHelper::IsHidingParentClass(UClass* Class)
 bool FGraphNodeClassHelper::IsHidingClass(UClass* Class)
 {
 	static FName MetaHideInEditor = TEXT("HiddenNode");
-	return Class && Class->HasAnyClassFlags(CLASS_Native) && Class->HasMetaData(MetaHideInEditor);
+
+	return 
+		Class && 
+		((Class->HasAnyClassFlags(CLASS_Native) && Class->HasMetaData(MetaHideInEditor))
+		|| ForcedHiddenClasses.Contains(Class));
 }
 
 bool FGraphNodeClassHelper::IsPackageSaved(FName PackageName)
@@ -263,39 +274,42 @@ bool FGraphNodeClassHelper::IsPackageSaved(FName PackageName)
 
 void FGraphNodeClassHelper::OnAssetAdded(const struct FAssetData& AssetData)
 {
-	TSharedPtr<FGraphNodeClassNode> Node = CreateClassDataNode(AssetData);
-
-	TSharedPtr<FGraphNodeClassNode> ParentNode;
-	if (Node.IsValid())
+	if (AssetData.IsInstanceOf<UBlueprint>())
 	{
-		ParentNode = FindBaseClassNode(RootNode, Node->ParentClassName);
+		TSharedPtr<FGraphNodeClassNode> Node = CreateClassDataNode(AssetData);
 
-		if (!IsPackageSaved(AssetData.PackageName))
+		TSharedPtr<FGraphNodeClassNode> ParentNode;
+		if (Node.IsValid())
 		{
-			UnknownPackages.AddUnique(AssetData.PackageName);
-		}
-		else
-		{
-			const int32 PrevListCount = UnknownPackages.Num();
-			UnknownPackages.RemoveSingleSwap(AssetData.PackageName);
+			ParentNode = FindBaseClassNode(RootNode, Node->ParentClassName);
 
-			if (UnknownPackages.Num() != PrevListCount)
+			if (!IsPackageSaved(AssetData.PackageName))
 			{
-				OnPackageListUpdated.Broadcast();
+				UnknownPackages.AddUnique(AssetData.PackageName);
+			}
+			else
+			{
+				const int32 PrevListCount = UnknownPackages.Num();
+				UnknownPackages.RemoveSingleSwap(AssetData.PackageName);
+
+				if (UnknownPackages.Num() != PrevListCount)
+				{
+					OnPackageListUpdated.Broadcast();
+				}
 			}
 		}
-	}
 
-	if (ParentNode.IsValid())
-	{
-		ParentNode->AddUniqueSubNode(Node);
-		Node->ParentNode = ParentNode;
-	}
+		if (ParentNode.IsValid())
+		{
+			ParentNode->AddUniqueSubNode(Node);
+			Node->ParentNode = ParentNode;
+		}
 
-	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-	if (!AssetRegistryModule.Get().IsLoadingAssets())
-	{
-		UpdateAvailableBlueprintClasses();
+		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+		if (!AssetRegistryModule.Get().IsLoadingAssets())
+		{
+			UpdateAvailableBlueprintClasses();
+		}
 	}
 }
 
@@ -328,7 +342,7 @@ void FGraphNodeClassHelper::InvalidateCache()
 	UpdateAvailableBlueprintClasses();
 }
 
-void FGraphNodeClassHelper::OnHotReload(bool bWasTriggeredAutomatically)
+void FGraphNodeClassHelper::OnReloadComplete(EReloadCompleteReason Reason)
 {
 	InvalidateCache();
 }
@@ -337,24 +351,16 @@ TSharedPtr<FGraphNodeClassNode> FGraphNodeClassHelper::CreateClassDataNode(const
 {
 	TSharedPtr<FGraphNodeClassNode> Node;
 
-	FString AssetClassName;
 	FString AssetParentClassName;
-	if (AssetData.GetTagValue(FBlueprintTags::GeneratedClassPath, AssetClassName) && AssetData.GetTagValue(FBlueprintTags::ParentClassPath, AssetParentClassName))
+	if (AssetData.GetTagValue(FBlueprintTags::ParentClassPath, AssetParentClassName))
 	{
-		UObject* Outer1(NULL);
-		ResolveName(Outer1, AssetClassName, false, false);
-
 		UObject* Outer2(NULL);
 		ResolveName(Outer2, AssetParentClassName, false, false);
 
 		Node = MakeShareable(new FGraphNodeClassNode);
 		Node->ParentClassName = AssetParentClassName;
 
-		UObject* AssetOb = AssetData.IsAssetLoaded() ? AssetData.GetAsset() : NULL;
-		UBlueprint* AssetBP = Cast<UBlueprint>(AssetOb);
-		UClass* AssetClass = AssetBP ? *AssetBP->GeneratedClass : AssetOb ? AssetOb->GetClass() : NULL;
-
-		FGraphNodeClassData NewData(AssetData.AssetName.ToString(), AssetData.PackageName.ToString(), AssetClassName, AssetClass);
+		FGraphNodeClassData NewData(AssetData.AssetName.ToString(), AssetData.PackageName.ToString(), AssetData.AssetName.ToString() + TEXT("_C"), nullptr);
 		Node->Data = NewData;
 	}
 
@@ -398,22 +404,6 @@ void FGraphNodeClassHelper::FindAllSubClasses(TSharedPtr<FGraphNodeClassNode> No
 			FindAllSubClasses(Node->SubNodes[i], AvailableClasses);
 		}
 	}
-}
-
-UClass* FGraphNodeClassHelper::FindAssetClass(const FString& GeneratedClassPackage, const FString& AssetName)
-{
-	UPackage* Package = FindPackage(NULL, *GeneratedClassPackage);
-	if (Package)
-	{
-		UObject* Object = FindObject<UObject>(Package, *AssetName);
-		if (Object)
-		{
-			UBlueprint* BlueprintOb = Cast<UBlueprint>(Object);
-			return BlueprintOb ? *BlueprintOb->GeneratedClass : Object->GetClass();
-		}
-	}
-
-	return NULL;
 }
 
 void FGraphNodeClassHelper::BuildClassGraph()
@@ -464,17 +454,20 @@ void FGraphNodeClassHelper::BuildClassGraph()
 	}
 
 	// gather all blueprints
-	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-	TArray<FAssetData> BlueprintList;
-
-	FARFilter Filter;
-	Filter.ClassNames.Add(UBlueprint::StaticClass()->GetFName());
-	AssetRegistryModule.Get().GetAssets(Filter, BlueprintList);
-
-	for (int32 i = 0; i < BlueprintList.Num(); i++)
+	if (bGatherBlueprints)
 	{
-		TSharedPtr<FGraphNodeClassNode> NewNode = CreateClassDataNode(BlueprintList[i]);
-		NodeList.Add(NewNode);
+		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+		TArray<FAssetData> BlueprintList;
+
+		FARFilter Filter;
+		Filter.ClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
+		AssetRegistryModule.Get().GetAssets(Filter, BlueprintList, false);
+
+		for (int32 i = 0; i < BlueprintList.Num(); i++)
+		{
+			TSharedPtr<FGraphNodeClassNode> NewNode = CreateClassDataNode(BlueprintList[i]);
+			NodeList.Add(NewNode);
+		}
 	}
 
 	// build class tree
@@ -518,24 +511,42 @@ void FGraphNodeClassHelper::UpdateAvailableBlueprintClasses()
 {
 	if (FModuleManager::Get().IsModuleLoaded(TEXT("AssetRegistry")))
 	{
-		FAssetRegistryModule& AssetRegistryModule = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+		IAssetRegistry& AssetRegistry = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
 		const bool bSearchSubClasses = true;
 
-		TArray<FName> ClassNames;
-		TSet<FName> DerivedClassNames;
+		TArray<FTopLevelAssetPath> ClassNames;
+		TSet<FTopLevelAssetPath> DerivedClassNames;
 
 		for (TMap<UClass*, int32>::TIterator It(BlueprintClassCount); It; ++It)
 		{
 			ClassNames.Reset();
-			ClassNames.Add(It.Key()->GetFName());
+			ClassNames.Add(It.Key()->GetClassPathName());
 
 			DerivedClassNames.Empty(DerivedClassNames.Num());
-			AssetRegistryModule.Get().GetDerivedClassNames(ClassNames, TSet<FName>(), DerivedClassNames);
+			AssetRegistry.GetDerivedClassNames(ClassNames, TSet<FTopLevelAssetPath>(), DerivedClassNames);
 
 			int32& Count = It.Value();
 			Count = DerivedClassNames.Num();
 		}
 	}
+}
+
+void FGraphNodeClassHelper::AddForcedHiddenClass(UClass* Class)
+{
+	if (Class)
+	{
+		ForcedHiddenClasses.Add(Class);
+	}
+}
+
+void FGraphNodeClassHelper::SetForcedHiddenClasses(const TSet<UClass*>& Classes)
+{
+	ForcedHiddenClasses = Classes;
+}
+
+void FGraphNodeClassHelper::SetGatherBlueprints(const bool bGather)
+{
+	bGatherBlueprints = bGather;
 }
 
 #undef LOCTEXT_NAMESPACE

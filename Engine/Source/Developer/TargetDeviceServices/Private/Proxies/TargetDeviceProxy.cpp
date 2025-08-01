@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "TargetDeviceProxy.h"
+#include "Proxies/TargetDeviceProxy.h"
 
 #include "FileMessageAttachment.h"
 #include "HAL/PlatformProcess.h"
@@ -60,9 +60,12 @@ void FTargetDeviceProxy::UpdateFromMessage( const FTargetDeviceServicePong& Mess
 	HostUser = Message.HostUser;
 	Make = Message.Make;
 	Model = Message.Model;
+	Type = Message.Type;
 	Name = Aggregated? Message.AllDevicesName: Message.Name;
 	DeviceUser = Message.DeviceUser;
 	DeviceUserPassword = Message.DeviceUserPassword;
+	OSVersion = Message.OSVersion;
+	ConnectionType = Message.ConnectionType;
 	Shared = Message.Shared;
 	SupportsMultiLaunch = Message.SupportsMultiLaunch;
 	SupportsPowerOff = Message.SupportsPowerOff;
@@ -150,7 +153,7 @@ const FString FTargetDeviceProxy::GetTargetDeviceId(FName InVariant) const
 {
 	FString Variant;
 	// for an aggregate (All_<platform>_devices_on_<host>) proxy we have a list of associated devices
-	for (TSet<FString>::TConstIterator ItVariant(TargetDeviceVariants[InVariant == NAME_None? DefaultVariant: InVariant].DeviceIDs); ItVariant; ++ItVariant)
+	for (TSet<FString>::TConstIterator ItVariant(TargetDeviceVariants[(InVariant == NAME_None) ? DefaultVariant : InVariant].DeviceIDs); ItVariant; ++ItVariant)
 	{
 		// should return the first device
 		// this method is designed for physical devices, not aggregate proxies
@@ -258,33 +261,10 @@ bool FTargetDeviceProxy::HasVariant(FName InVariant) const
 }
 
 
-bool FTargetDeviceProxy::DeployApp(FName InVariant, const TMap<FString, FString>& Files, const FGuid& TransactionId)
-{
-	for (TMap<FString, FString>::TConstIterator It(Files); It; ++It)
-	{
-		TSharedRef<IMessageAttachment, ESPMode::ThreadSafe> FileAttachment = MakeShareable(new FFileMessageAttachment(It.Key()));
-		FString SourcePath = It.Key();
-
-		MessageEndpoint->Send(new FTargetDeviceServiceDeployFile(It.Value(), TransactionId), FileAttachment, MessageAddress);
-	}
-
-	MessageEndpoint->Send(new FTargetDeviceServiceDeployCommit(InVariant, TransactionId), MessageAddress);
-
-	return true;
-}
-
-
-bool FTargetDeviceProxy::LaunchApp(FName InVariant, const FString& AppId, EBuildConfiguration BuildConfiguration, const FString& Params)
-{
-	MessageEndpoint->Send(new FTargetDeviceServiceLaunchApp(InVariant, AppId, BuildConfiguration, Params), MessageAddress);
-
-	return true;
-}
-
 
 bool FTargetDeviceProxy::TerminateLaunchedProcess(FName InVariant, const FString& ProcessIdentifier)
 {
-	MessageEndpoint->Send(new FTargetDeviceServiceTerminateLaunchedProcess(InVariant, ProcessIdentifier), MessageAddress);
+	MessageEndpoint->Send(FMessageEndpoint::MakeMessage<FTargetDeviceServiceTerminateLaunchedProcess>(InVariant, ProcessIdentifier), MessageAddress);
 
 	return true;
 }
@@ -292,26 +272,21 @@ bool FTargetDeviceProxy::TerminateLaunchedProcess(FName InVariant, const FString
 
 void FTargetDeviceProxy::PowerOff(bool Force)
 {
-	MessageEndpoint->Send(new FTargetDeviceServicePowerOff(FPlatformProcess::UserName(false), Force), MessageAddress);
+	MessageEndpoint->Send(FMessageEndpoint::MakeMessage<FTargetDeviceServicePowerOff>(FPlatformProcess::UserName(false), Force), MessageAddress);
 }
 
 
 void FTargetDeviceProxy::PowerOn()
 {
-	MessageEndpoint->Send(new FTargetDeviceServicePowerOn(FPlatformProcess::UserName(false)), MessageAddress);
+	MessageEndpoint->Send(FMessageEndpoint::MakeMessage<FTargetDeviceServicePowerOn>(FPlatformProcess::UserName(false)), MessageAddress);
 }
 
 
 void FTargetDeviceProxy::Reboot()
 {
-	MessageEndpoint->Send(new FTargetDeviceServiceReboot(FPlatformProcess::UserName(false)), MessageAddress);
+	MessageEndpoint->Send(FMessageEndpoint::MakeMessage<FTargetDeviceServiceReboot>(FPlatformProcess::UserName(false)), MessageAddress);
 }
 
-
-void FTargetDeviceProxy::Run(FName InVariant, const FString& ExecutablePath, const FString& Params)
-{
-	MessageEndpoint->Send(new FTargetDeviceServiceRunExecutable(InVariant, ExecutablePath, Params), MessageAddress);
-}
 
 
 /* FTargetDeviceProxy implementation
@@ -319,35 +294,5 @@ void FTargetDeviceProxy::Run(FName InVariant, const FString& ExecutablePath, con
 
 void FTargetDeviceProxy::InitializeMessaging()
 {
-	MessageEndpoint = FMessageEndpoint::Builder(FName(*FString::Printf(TEXT("FTargetDeviceProxy (%s)"), *Name)))
-		.Handling<FTargetDeviceServiceDeployFinished>(this, &FTargetDeviceProxy::HandleDeployFinishedMessage)
-		.Handling<FTargetDeviceServiceLaunchFinished>(this, &FTargetDeviceProxy::HandleLaunchFinishedMessage);
-}
-
-/* FTargetDeviceProxy event handlers
-*****************************************************************************/
-
-void FTargetDeviceProxy::HandleDeployFinishedMessage(const FTargetDeviceServiceDeployFinished& Message, const TSharedRef<IMessageContext, ESPMode::ThreadSafe>& Context)
-{
-	if (Message.Succeeded)
-	{
-		DeployCommittedDelegate.Broadcast(Message.TransactionId, Message.AppID);
-	}
-	else
-	{
-		DeployFailedDelegate.Broadcast(Message.TransactionId);
-	}
-}
-
-
-void FTargetDeviceProxy::HandleLaunchFinishedMessage(const FTargetDeviceServiceLaunchFinished& Message, const TSharedRef<IMessageContext, ESPMode::ThreadSafe>& Context)
-{
-	if (Message.Succeeded)
-	{
-		LaunchSucceededDelegate.Broadcast(Message.AppID, Message.ProcessId);
-	}
-	else
-	{
-		LaunchFailedDelegate.Broadcast(Message.AppID);
-	}
+	MessageEndpoint = FMessageEndpoint::Builder(FName(*FString::Printf(TEXT("FTargetDeviceProxy (%s)"), *Name))).Build();
 }

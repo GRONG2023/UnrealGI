@@ -1,5 +1,8 @@
-// Copyright 2011-2019 Molecular Matters GmbH, all rights reserved.
+// Copyright 2011-2020 Molecular Matters GmbH, all rights reserved.
 
+// BEGIN EPIC MOD
+//#include PCH_INCLUDE
+// END EPIC MOD
 #include "LC_SymbolPatterns.h"
 
 
@@ -65,15 +68,6 @@ namespace symbolPatterns
 		"$initializer$"
 	};
 
-	extern const char* const WEAK_SYMBOL_PATTERNS[4] =
-	{
-		// these weak symbols are allowed per the standard and need to be special-cased in code
-		"??2",					// operator new
-		"??3",					// operator delete
-		"??_U",					// operator new[]
-		"??_V"					// operator delete[]
-	};
-	
 	extern const char* const STRING_LITERAL_PATTERNS[2] =
 	{
 		// in decorated form, a string literal is denoted by "??_C@_".
@@ -106,9 +100,9 @@ namespace symbolPatterns
 	};
 
 #if LC_64_BIT
-	extern const char* const EXCEPTION_RELATED_PATTERNS[16] =
+	extern const char* const EXCEPTION_RELATED_PATTERNS[17] =
 #else
-	extern const char* const EXCEPTION_RELATED_PATTERNS[10] =
+	extern const char* const EXCEPTION_RELATED_PATTERNS[11] =
 #endif
 	{
 		// used for C++ exception handling
@@ -120,14 +114,16 @@ namespace symbolPatterns
 		"?catch$",
 		"?fin$",
 		"?filt$",
-		"__catch$",
+		"__catch$",	// CL
+		"?catch$",	// Clang
 		"_CxxThrowException",
 		"__CxxFrameHandler",
 		"__GSHandlerCheck",
 #else
 		"__ehhandler$",
 		"__unwindfunclet$",
-		"__catch$",
+		"__catch$",	// CL
+		"?catch$",	// Clang
 		"__except_handler3",
 		"__except_handler4",
 #endif
@@ -160,9 +156,10 @@ namespace symbolPatterns
 #endif
 	};
 
-	extern const char* const EXCEPTION_CLAUSE_PATTERNS[1] =
+	extern const char* const EXCEPTION_CLAUSE_PATTERNS[2] =
 	{
-		"__catch$"
+		"__catch$",	// CL
+		"?catch$",	// Clang
 	};
 
 	extern const char* const RTC_PATTERNS[8] =
@@ -223,4 +220,27 @@ namespace symbolPatterns
 	{
 		"@?A0x"
 	};
+
+	// BEGIN EPIC MOD
+	extern const char* const UE_STATICS_BLOCK_PATTERNS[7] =
+	{
+		"*Z_Construct_UClass_*_Statics*",
+		"*Z_Construct_UEnum_*_Statics*",
+		"*Z_Construct_UFunction_*_Statics*",
+		"*Z_Construct_UDelegateFunction_*_Statics*",
+		"*Z_Construct_UScriptStruct_*_Statics*",
+		"*Z_Construct_UPackage_*_Statics*",
+		"*Z_CompiledInDeferFile_*_Statics*",
+	};
+
+	extern const char* const UE_REGISTER_PATTERNS[6] =
+	{
+		"?AutoInitialize",
+		"?Z_CompiledInDeferEnum_UEnum_",
+		"?Z_CompiledInDeferStruct_UScriptStruct_",
+		"?Z_CompiledInDeferCppStructOps_UScriptStruct_",
+		"?Z_CompiledInDeferPackage_UPackage_",
+		"?Z_CompiledInDeferFile_",
+	};
+	// END EPIC MOD
 }

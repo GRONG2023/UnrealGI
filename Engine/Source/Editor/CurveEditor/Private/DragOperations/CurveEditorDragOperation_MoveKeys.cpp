@@ -1,9 +1,28 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "DragOperations/CurveEditorDragOperation_MoveKeys.h"
-#include "CurveEditorScreenSpace.h"
+
+#include "Containers/ArrayView.h"
+#include "Containers/Map.h"
+#include "CoreTypes.h"
 #include "CurveEditor.h"
+#include "CurveEditorScreenSpace.h"
+#include "CurveEditorSelection.h"
+#include "CurveModel.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Math/NumericLimits.h"
+#include "Math/UnrealMathUtility.h"
+#include "Misc/AssertionMacros.h"
 #include "SCurveEditorView.h"
+#include "ScopedTransaction.h"
+#include "Templates/Tuple.h"
+#include "Templates/UniquePtr.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/UnrealType.h"
+
+struct FPointerEvent;
 
 void FCurveEditorDragOperation_MoveKeys::OnInitialize(FCurveEditor* InCurveEditor, const TOptional<FCurvePointHandle>& InCardinalPoint)
 {
@@ -19,6 +38,7 @@ void FCurveEditorDragOperation_MoveKeys::OnBeginDrag(FVector2D InitialPosition, 
 	KeysByCurve.Reset();
 	CurveEditor->SuppressBoundTransformUpdates(true);
 
+	LastMousePosition = CurrentPosition;
 	for (const TTuple<FCurveModelID, FKeyHandleSet>& Pair : CurveEditor->GetSelection().GetAll())
 	{
 		FCurveModelID CurveID = Pair.Key;
@@ -45,7 +65,8 @@ void FCurveEditorDragOperation_MoveKeys::OnBeginDrag(FVector2D InitialPosition, 
 void FCurveEditorDragOperation_MoveKeys::OnDrag(FVector2D InitialPosition, FVector2D CurrentPosition, const FPointerEvent& MouseEvent)
 {
 	TArray<FKeyPosition> NewKeyPositionScratch;
-	FVector2D MousePosition = CurveEditor->GetAxisSnap().GetSnappedPosition(InitialPosition, CurrentPosition, MouseEvent, SnappingState);
+	FVector2D MousePosition = CurveEditor->GetAxisSnap().GetSnappedPosition(InitialPosition,CurrentPosition, LastMousePosition, MouseEvent, SnappingState);
+	LastMousePosition = CurrentPosition;
 
 	for (FKeyData& KeyData : KeysByCurve)
 	{
@@ -71,8 +92,7 @@ void FCurveEditorDragOperation_MoveKeys::OnDrag(FVector2D InitialPosition, FVect
 
 		FCurveSnapMetrics SnapMetrics = CurveEditor->GetCurveSnapMetrics(KeyData.CurveID);
 
-		// If view is not absolute, snap based on the key that was grabbed, not all keys individually.
-		if (CardinalPoint.IsSet() && (View->IsTimeSnapEnabled() || View->IsValueSnapEnabled()) && View->ViewTypeID != ECurveEditorViewID::Absolute)
+		if (CardinalPoint.IsSet())
 		{
 			for (int KeyIndex = 0; KeyIndex < KeyData.StartKeyPositions.Num(); ++KeyIndex)
 			{
@@ -85,7 +105,9 @@ void FCurveEditorDragOperation_MoveKeys::OnDrag(FVector2D InitialPosition, FVect
 					{
 						DeltaInput = SnapMetrics.SnapInputSeconds(StartPosition.InputValue + DeltaInput) - StartPosition.InputValue;
 					}
-					if (View->IsValueSnapEnabled())
+
+					// If view is not absolute, snap based on the key that was grabbed, not all keys individually.
+					if (View->IsValueSnapEnabled() && View->ViewTypeID != ECurveEditorViewID::Absolute)
 					{
 						DeltaOutput = SnapMetrics.SnapOutput(StartPosition.OutputValue + DeltaOutput) - StartPosition.OutputValue;
 					}
@@ -98,10 +120,11 @@ void FCurveEditorDragOperation_MoveKeys::OnDrag(FVector2D InitialPosition, FVect
 			StartPosition.InputValue  += DeltaInput;
 			StartPosition.OutputValue += DeltaOutput;
 
-			// Snap keys individually if view mode is absolute.
+			StartPosition.InputValue = View->IsTimeSnapEnabled() ? SnapMetrics.SnapInputSeconds(StartPosition.InputValue) : StartPosition.InputValue;
+
+			// Snap value keys individually if view mode is absolute.
 			if (View->ViewTypeID == ECurveEditorViewID::Absolute)
 			{
-				StartPosition.InputValue  = View->IsTimeSnapEnabled() ? SnapMetrics.SnapInputSeconds(StartPosition.InputValue) : StartPosition.InputValue;
 				StartPosition.OutputValue = View->IsValueSnapEnabled() ? SnapMetrics.SnapOutput(StartPosition.OutputValue) : StartPosition.OutputValue;
 			}
 			
@@ -109,7 +132,9 @@ void FCurveEditorDragOperation_MoveKeys::OnDrag(FVector2D InitialPosition, FVect
 		}
 
 		Curve->SetKeyPositions(KeyData.Handles, NewKeyPositionScratch, EPropertyChangeType::Interactive);
-		KeyData.LastDraggedKeyPositions = NewKeyPositionScratch;
+
+		// Make sure the last dragged key positions are up to date
+		Curve->GetKeyPositions(KeyData.Handles, KeyData.LastDraggedKeyPositions);
 	}
 }
 
@@ -136,6 +161,54 @@ void FCurveEditorDragOperation_MoveKeys::OnEndDrag(FVector2D InitialPosition, FV
 	{
 		if (FCurveModel* Curve = CurveEditor->FindCurve(KeyData.CurveID))
 		{
+			// Gather all the final key time positions
+			TArray<FKeyPosition> KeyTimes;
+			for (int32 KeyIndex = 0; KeyIndex < KeyData.Handles.Num(); ++KeyIndex)
+			{
+				const FKeyHandle& KeyHandle = KeyData.Handles[KeyIndex];
+				FKeyPosition KeyTime = KeyData.LastDraggedKeyPositions[KeyIndex];
+				KeyTimes.Add(KeyTime);
+			}
+
+			// For each key time, look for all the keys that match
+			TArray<FKeyHandle> KeysToRemove;
+			for (const FKeyPosition& KeyTime : KeyTimes)
+			{
+				TArray<FKeyHandle> KeysInRange;
+				Curve->GetKeys(*CurveEditor, KeyTime.InputValue, KeyTime.InputValue, TNumericLimits<double>::Lowest(), TNumericLimits<double>::Max(), KeysInRange);
+
+				// If there's more than 1 key at this time, remove all but the keys that moved the largest amount
+				if (KeysInRange.Num() > 1)
+				{
+					double MaxDist = TNumericLimits<double>::Min();
+					FKeyHandle MaxKeyHandle;
+					for (const FKeyHandle& KeyInRange : KeysInRange)
+					{
+						int32 KeyDataIndex = KeyData.Handles.Find(KeyInRange);
+						if (KeyDataIndex != INDEX_NONE)
+						{
+							double Dist = FMath::Abs(KeyData.StartKeyPositions[KeyDataIndex].InputValue - KeyData.LastDraggedKeyPositions[KeyDataIndex].InputValue);
+							if (Dist > MaxDist)
+							{
+								MaxKeyHandle = KeyInRange;
+								MaxDist = Dist;
+							}
+						}
+					}
+
+					for (const FKeyHandle& KeyInRange : KeysInRange)
+					{
+						if (KeyInRange != MaxKeyHandle)
+						{
+							KeysToRemove.AddUnique(KeyInRange);
+						}
+					}
+				}
+			}
+
+			// Remove any keys that overlap before moving new keys on top
+			Curve->RemoveKeys(KeysToRemove);
+			// Then, move the keys
 			Curve->SetKeyPositions(KeyData.Handles, KeyData.LastDraggedKeyPositions, EPropertyChangeType::ValueSet);
 		}
 	}

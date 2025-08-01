@@ -7,7 +7,9 @@
 #include "Engine/Font.h"
 #include "CanvasItem.h"
 #include "Engine/Texture2D.h"
+#include "CanvasItem.h"
 #include "CanvasTypes.h"
+#include "TextureResource.h"
 
 UFontThumbnailRenderer::UFontThumbnailRenderer(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -36,7 +38,7 @@ void UFontThumbnailRenderer::GetThumbnailSize(UObject* Object, float Zoom, uint3
 		case EFontCacheType::Runtime:
 			if(Font->CompositeFont.DefaultTypeface.Fonts.Num() > 0)
 			{
-				OutWidth = OutHeight = Zoom * 256.0f;
+				OutWidth = OutHeight = static_cast<uint32>(Zoom * 256.0f);
 			}
 			break;
 
@@ -57,9 +59,9 @@ void UFontThumbnailRenderer::Draw(UObject* Object, int32 X, int32 Y, uint32 Widt
 		switch(Font->FontCacheType)
 		{
 		case EFontCacheType::Offline:
-			if(Font->Textures.Num() > 0 && Font->Textures[0])
+			if (Font->Textures.Num() > 0 && Font->Textures[0] && Font->Textures[0]->GetResource())
 			{
-				FCanvasTileItem TileItem(FVector2D(X, Y), Font->Textures[0]->Resource, FLinearColor::White);
+				FCanvasTileItem TileItem(FVector2D(X, Y), Font->Textures[0]->GetResource(), FLinearColor::White);
 				TileItem.BlendMode = (Font->ImportOptions.bUseDistanceFieldAlpha) ? SE_BLEND_TranslucentDistanceField : SE_BLEND_Translucent;
 				Canvas->DrawItem(TileItem);
 			}

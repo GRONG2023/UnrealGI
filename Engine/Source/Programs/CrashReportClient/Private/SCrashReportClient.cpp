@@ -5,7 +5,6 @@
 #if !CRASH_REPORT_UNATTENDED_ONLY
 
 #include "CrashReportClientStyle.h"
-#include "Styling/SlateStyle.h"
 #include "Styling/CoreStyle.h"
 #include "Widgets/Images/SThrobber.h"
 #include "CrashDescription.h"
@@ -42,12 +41,12 @@ static void OnViewCrashDirectory( const FSlateHyperlinkRun::FMetadata& Metadata)
 	}
 }
 
-void SCrashReportClient::Construct(const FArguments& InArgs, const TSharedRef<FCrashReportClient>& Client)
+void SCrashReportClient::Construct(const FArguments& InArgs, const TSharedRef<FCrashReportClient>& Client, bool bSimpleDialog)
 {
 	CrashReportClient = Client;
 	bHasUserCommentErrors = false;
+	bHideSubmitAndRestart = InArgs._bHideSubmitAndRestart;
 
-	auto CrashedAppName = FPrimaryCrashProperties::Get()->IsValid() ? FPrimaryCrashProperties::Get()->GameName : TEXT("");
 	FText CrashDetailedMessage = LOCTEXT("CrashDetailed", "We are very sorry that this crash occurred. Our goal is to prevent crashes like this from occurring in the future. Please help us track down and fix this crash by providing detailed information about what you were doing so that we may reproduce the crash and fix it quickly. You can also log a Bug Report with us using the <a id=\"browser\" href=\"https://epicsupport.force.com/unrealengine/s/\" style=\"Hyperlink\">Bug Submission Form</> and work directly with support staff to report this issue.\n\nThanks for your help in improving the Unreal Engine.");
 	if (FPrimaryCrashProperties::Get()->IsValid())
 	{
@@ -57,6 +56,22 @@ void SCrashReportClient::Construct(const FArguments& InArgs, const TSharedRef<FC
 			CrashDetailedMessage = FText::FromString(CrashDetailedMessageString);
 		}
 	}
+
+	if (bSimpleDialog)
+	{
+		ConstructSimpleDialog(Client, CrashDetailedMessage);
+	}
+	else
+	{ 
+		ConstructDetailedDialog(Client, CrashDetailedMessage);
+	}
+
+	FSlateApplication::Get().SetUnhandledKeyDownEventHandler(FOnKeyEvent::CreateSP(this, &SCrashReportClient::OnUnhandledKeyDown));
+}
+
+void SCrashReportClient::ConstructDetailedDialog(const TSharedRef<FCrashReportClient>& Client, const FText& CrashDetailedMessage)
+{
+	auto CrashedAppName = FPrimaryCrashProperties::Get()->IsValid() ? FPrimaryCrashProperties::Get()->GameName : TEXT("");
 
 	// Set the text displaying the name of the crashed app, if available
 	const FText CrashedAppText = CrashedAppName.IsEmpty() ?
@@ -70,7 +85,7 @@ void SCrashReportClient::Construct(const FArguments& InArgs, const TSharedRef<FC
 	ChildSlot
 	[
 		SNew(SBorder)
-		.BorderImage(FCoreStyle::Get().GetBrush("ToolPanel.GroupBorder"))
+		.BorderImage(FCrashReportClientStyle::Get().GetBrush("ToolPanel.GroupBorder"))
 		[
 			SNew(SVerticalBox)
 
@@ -104,7 +119,6 @@ void SCrashReportClient::Construct(const FArguments& InArgs, const TSharedRef<FC
 				SNew( SRichTextBlock )
 				.Text(CrashDetailedMessage)
 				.AutoWrapText(true)
-				.DecoratorStyleSet( &FCoreStyle::Get() )
 				+ SRichTextBlock::HyperlinkDecorator( TEXT("browser"), FSlateHyperlinkRun::FOnClick::CreateStatic( &OnBrowserLinkClicked ) )
 			]
 
@@ -248,7 +262,7 @@ void SCrashReportClient::Construct(const FArguments& InArgs, const TSharedRef<FC
 					SNew(STextBlock)
 					.AutoWrapText(true)
 					.IsEnabled( !FEngineBuildSettings::IsInternalBuild() )
-					.Text(LOCTEXT("IAgree", "I agree to be contacted by Epic Games via email if additional information about this crash would help fix it."))
+					.Text_Static(&SCrashReportClient::GetContactText)
 				]
 			]
 
@@ -281,6 +295,21 @@ void SCrashReportClient::Construct(const FArguments& InArgs, const TSharedRef<FC
 					SNew(SSpacer)
 				]
 
+#if PLATFORM_WINDOWS
+				+SHorizontalBox::Slot()
+				.HAlign(HAlign_Center)
+				.VAlign(VAlign_Center)
+				.AutoWidth()
+				.Padding( FMargin(6) )
+				[
+					SNew(SButton)
+					.ContentPadding( FMargin(8,2) )
+					.Text(LOCTEXT("CopyFiles", "Copy Files To Clipboard"))
+					.OnClicked(Client, &FCrashReportClient::CopyFilesToClipboard)
+					.Visibility(FCrashReportCoreConfig::Get().IsAllowedToCopyFilesToClipboard() ? EVisibility::Visible : EVisibility::Hidden)
+				]
+#endif
+
 				+SHorizontalBox::Slot()
 				.HAlign(HAlign_Center)
 				.VAlign(VAlign_Center)
@@ -292,6 +321,7 @@ void SCrashReportClient::Construct(const FArguments& InArgs, const TSharedRef<FC
 					.Text(LOCTEXT("Send", "Send and Close"))
 					.OnClicked(Client, &FCrashReportClient::Submit)
 					.IsEnabled(this, &SCrashReportClient::IsSendEnabled)
+					.ToolTipText_Static(&SCrashReportClient::GetSendTooltip)
 				]
 
 				+SHorizontalBox::Slot()
@@ -305,13 +335,80 @@ void SCrashReportClient::Construct(const FArguments& InArgs, const TSharedRef<FC
 					.Text(LOCTEXT("SendAndRestartEditor", "Send and Restart"))
 					.OnClicked(Client, &FCrashReportClient::SubmitAndRestart)
 					.IsEnabled(this, &SCrashReportClient::IsSendEnabled)
-				]			
+					.Visibility( bHideSubmitAndRestart || FCrashReportCoreConfig::Get().GetHideRestartOption() ? EVisibility::Collapsed : EVisibility::Visible )
+					.ToolTipText_Static(&SCrashReportClient::GetSendTooltip)
+				]
 			]
 		]
 	];
-
-	FSlateApplication::Get().SetUnhandledKeyDownEventHandler(FOnKeyEvent::CreateSP(this, &SCrashReportClient::OnUnhandledKeyDown));
 }
+
+void SCrashReportClient::ConstructSimpleDialog(const TSharedRef<FCrashReportClient>& Client, const FText& CrashDetailedMessage)
+{
+	FString CrashedAppName = FPrimaryCrashProperties::Get()->IsValid() ? FPrimaryCrashProperties::Get()->GameName : TEXT("");
+	// GameNames have taken on a number of prefixes over the years. Try to strip them all off.
+	if (!CrashedAppName.RemoveFromStart(TEXT("UE4-")))
+	{
+		if (!CrashedAppName.RemoveFromStart(TEXT("UE5-")))
+		{
+			CrashedAppName.RemoveFromStart(TEXT("UE-"));
+		}
+	}
+	CrashedAppName.RemoveFromEnd(TEXT("Game"));
+
+	ChildSlot
+	[
+		SNew(SBorder)
+		.BorderImage(FCrashReportClientStyle::Get().GetBrush("ToolPanel.GroupBorder"))
+		[
+			SNew(SVerticalBox)
+
+			// Stuff anchored to the top
+			+SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(4)
+			[
+				SNew(SHorizontalBox)
+				+SHorizontalBox::Slot()
+				.AutoWidth()
+				[
+					SNew(STextBlock)
+					.TextStyle(FCrashReportClientStyle::Get(), "Title")
+					.Text(FText::FromString(CrashedAppName))
+				]
+			]
+
+			+SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding( FMargin( 4, 10 ) )
+			[
+				SNew( SRichTextBlock )
+				.Text(CrashDetailedMessage)
+				.AutoWrapText(true)
+				+ SRichTextBlock::HyperlinkDecorator( TEXT("browser"), FSlateHyperlinkRun::FOnClick::CreateStatic( &OnBrowserLinkClicked ) )
+			]
+
+			// Stuff anchored to the bottom
+			+SVerticalBox::Slot()
+			.Padding( FMargin(4, 4+16, 4, 4) )
+			[
+				SNew(SHorizontalBox)
+
+				+SHorizontalBox::Slot()
+				.HAlign(HAlign_Right)
+				.VAlign(VAlign_Bottom)
+				.Padding( FMargin(6) )
+				[
+					SNew(SButton)
+					.ContentPadding( FMargin(8,2) )
+					.Text(LOCTEXT("Close", "Close"))
+					.OnClicked(Client, &FCrashReportClient::Close)
+				]		
+			]
+		]
+	];
+}
+
 
 FReply SCrashReportClient::OnUnhandledKeyDown(const FKeyEvent& InKeyEvent)
 {
@@ -348,9 +445,58 @@ EVisibility SCrashReportClient::IsHintTextVisible() const
 
 bool SCrashReportClient::IsSendEnabled() const
 {
-	bool bValidAppName = FPrimaryCrashProperties::Get()->IsValid() && !FPrimaryCrashProperties::Get()->GameName.IsEmpty();
+	const bool bValidAppName = FPrimaryCrashProperties::Get()->IsValid() && !FPrimaryCrashProperties::Get()->GameName.IsEmpty();
+	const bool bValidEndPoint = !FCrashReportCoreConfig::Get().GetReceiverAddress().IsEmpty() || !FCrashReportCoreConfig::Get().GetDataRouterURL().IsEmpty();
 
-	return bValidAppName && !bHasUserCommentErrors;
+	return bValidAppName && bValidEndPoint && !bHasUserCommentErrors;
+}
+
+FText SCrashReportClient::GetSendTooltip()
+{
+	// Optionally show a tooltip with the endpoint domain to the user. If the old receiver address is used it is
+	// just a IP number, so there is no point is showing that.
+	static FText CachedDomain = []() {
+		FStringView Endpoint = FCrashReportCoreConfig::Get().GetReceiverAddress();
+		bool bIsUrl = false;
+		if (Endpoint.IsEmpty())
+		{
+			Endpoint = FCrashReportCoreConfig::Get().GetDataRouterURL();
+			bIsUrl = true;
+		}
+		if (Endpoint.IsEmpty())
+		{
+			return LOCTEXT("SendTooltipEmpty", "No server specified.");
+		}
+		if (bIsUrl && FCrashReportCoreConfig::Get().GetShowEndpointInTooltip())
+		{
+			// Show only domain, not full url
+			const int32 Start = Endpoint.StartsWith(TEXT("https://")) ? 8 : 0;
+			Endpoint.RightChopInline(Start);
+			int32 End(INDEX_NONE);
+			Endpoint.FindChar('/', End);
+			Endpoint.LeftInline(End);
+			return FText::Format(LOCTEXT("SendTooltipUrl", "Send to {0}"), FText::FromStringView(Endpoint));
+		}
+		return LOCTEXT("SendTooltip", "Send to server");
+	}();
+	return CachedDomain;
+}
+
+FText SCrashReportClient::GetContactText()
+{
+	static FText CachedContactText = []()
+	{
+		const FStringView Company = FCrashReportCoreConfig::Get().GetCompanyName();
+		if (Company.IsEmpty())
+		{
+			return LOCTEXT("IAgreeNoCompany", "I agree to be contacted via email if additional information about this crash would help fix it.");
+		}
+		return FText::Format(
+			 LOCTEXT("IAgreeCompany", "I agree to be contacted by {0} via email if additional information about this crash would help fix it."),
+			 FText::FromStringView(Company)
+		);
+	}();
+	return CachedContactText;
 }
 
 #undef LOCTEXT_NAMESPACE

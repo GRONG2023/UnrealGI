@@ -2,18 +2,17 @@
 #pragma once
 
 #include "Chaos/Array.h"
-#include "Chaos/ConstraintHandle.h"
+#include "Chaos/Evolution/IndexedConstraintContainer.h"
 #include "Chaos/ParticleHandle.h"
-#include "Chaos/PBDConstraintContainer.h"
 
 namespace Chaos
 {
 	class FPBDRigidDynamicSpringConstraints;
 
-	class CHAOS_API FPBDRigidDynamicSpringConstraintHandle : public TContainerConstraintHandle<FPBDRigidDynamicSpringConstraints>
+	class FPBDRigidDynamicSpringConstraintHandle final : public TIndexedContainerConstraintHandle<FPBDRigidDynamicSpringConstraints>
 	{
 	public:
-		using Base = TContainerConstraintHandle<FPBDRigidDynamicSpringConstraints>;
+		using Base = TIndexedContainerConstraintHandle<FPBDRigidDynamicSpringConstraints>;
 		using FConstraintContainer = FPBDRigidDynamicSpringConstraints;
 
 		FPBDRigidDynamicSpringConstraintHandle() 
@@ -21,45 +20,58 @@ namespace Chaos
 		}
 
 		FPBDRigidDynamicSpringConstraintHandle(FConstraintContainer* InConstraintContainer, int32 InConstraintIndex) 
-			: TContainerConstraintHandle<FPBDRigidDynamicSpringConstraints>(StaticType(),InConstraintContainer, InConstraintIndex) 
+			: TIndexedContainerConstraintHandle<FPBDRigidDynamicSpringConstraints>(InConstraintContainer, InConstraintIndex)
 		{
 		}
 
-		static FConstraintHandle::EType StaticType() { return FConstraintHandle::EType::DynamicSpring; }
-		TVec2<FGeometryParticleHandle*> GetConstrainedParticles() const;
+		CHAOS_API virtual FParticlePair GetConstrainedParticles() const override final;
+
+		static const FConstraintHandleTypeID& StaticType()
+		{
+			static FConstraintHandleTypeID STypeID(TEXT("FRigidDynamicSpringConstraintHandle"), &FIndexedConstraintHandle::StaticType());
+			return STypeID;
+		}
 
 	protected:
 		using Base::ConstraintIndex;
-		using Base::ConstraintContainer;
+		using Base::ConcreteContainer;
 	};
 
-	class CHAOS_API FPBDRigidDynamicSpringConstraints : public FPBDConstraintContainer
+	class FPBDRigidDynamicSpringConstraints : public TPBDIndexedConstraintContainer<FPBDRigidDynamicSpringConstraints>
 	{
 	public:
-		using Base = FPBDConstraintContainer;
+		using Base = TPBDIndexedConstraintContainer<FPBDRigidDynamicSpringConstraints>;
 		using FConstrainedParticlePair = TVec2<FGeometryParticleHandle*>;
-		//static const int Dimensions = 3;
 		using FConstraintContainerHandle = FPBDRigidDynamicSpringConstraintHandle;
 		using FConstraintHandleAllocator = TConstraintHandleAllocator<FPBDRigidDynamicSpringConstraints>;
 		using FHandles = TArray<FConstraintContainerHandle*>;
 
 		FPBDRigidDynamicSpringConstraints(const FReal InStiffness = (FReal)1.)
-			: CreationThreshold(1), MaxSprings(1), Stiffness(InStiffness) 
+			: TPBDIndexedConstraintContainer<FPBDRigidDynamicSpringConstraints>(FConstraintContainerHandle::StaticType())
+			, CreationThreshold(1)
+			, MaxSprings(1)
+			, Stiffness(InStiffness) 
 		{}
 
 		FPBDRigidDynamicSpringConstraints(TArray<FConstrainedParticlePair>&& InConstraints, const FReal InCreationThreshold = (FReal)1., const int32 InMaxSprings = 1, const FReal InStiffness = (FReal)1.)
-			: Constraints(MoveTemp(InConstraints)), CreationThreshold(InCreationThreshold), MaxSprings(InMaxSprings), Stiffness(InStiffness)
+			: TPBDIndexedConstraintContainer<FPBDRigidDynamicSpringConstraints>(FConstraintContainerHandle::StaticType())
+			, Constraints(MoveTemp(InConstraints))
+			, CreationThreshold(InCreationThreshold)
+			, MaxSprings(InMaxSprings)
+			, Stiffness(InStiffness)
 		{
 			if (Constraints.Num() > 0)
 			{
 				Handles.Reserve(Constraints.Num());
 				Distances.Reserve(Constraints.Num());
 				SpringDistances.Reserve(Constraints.Num());
+				ConstraintSolverBodies.Reserve(Constraints.Num());
 				for (int32 ConstraintIndex = 0; ConstraintIndex < Constraints.Num(); ++ConstraintIndex)
 				{
 					Handles.Add(HandleAllocator.AllocHandle(this, ConstraintIndex));
 					Distances.Add({});
 					SpringDistances.Add({});
+					ConstraintSolverBodies.Add({ nullptr, nullptr });
 				}
 			}
 		}
@@ -88,6 +100,7 @@ namespace Chaos
 			Constraints.Add(InConstrainedParticles);
 			Distances.Add({});
 			SpringDistances.Add({});
+			ConstraintSolverBodies.Add({ nullptr, nullptr });
 			return Handles.Last();
 		}
 
@@ -108,6 +121,7 @@ namespace Chaos
 			Constraints.RemoveAtSwap(ConstraintIndex);
 			Distances.RemoveAtSwap(ConstraintIndex);
 			SpringDistances.RemoveAtSwap(ConstraintIndex);
+			ConstraintSolverBodies.RemoveAtSwap(ConstraintIndex);
 			Handles.RemoveAtSwap(ConstraintIndex);
 
 			// Update the handle for the constraint that was moved
@@ -137,7 +151,7 @@ namespace Chaos
 		/**
 		 * Set the maximum number of springs
 		 */
-		void SetMaxSprings(const FReal InMaxSprings)
+		void SetMaxSprings(const int32 InMaxSprings)
 		{
 			MaxSprings = InMaxSprings;
 		}
@@ -175,46 +189,46 @@ namespace Chaos
 			return Constraints[ConstraintIndex];
 		}
 
-
+		CHAOS_API void UpdatePositionBasedState(const FReal Dt);
 
 		//
-		// Island Rule API
+		// FConstraintContainer Implementation
 		//
+		virtual int32 GetNumConstraints() const override final { return NumConstraints(); }
+		virtual void ResetConstraints() override final {}
+		CHAOS_API virtual void AddConstraintsToGraph(Private::FPBDIslandManager& IslandManager) override final;
+		virtual void PrepareTick() override final {}
+		virtual void UnprepareTick() override final {}
 
-		void PrepareTick() {}
+		//
+		// TSimpleConstraintContainerSolver API - used by RBAN solvers
+		//
+		CHAOS_API void AddBodies(FSolverBodyContainer& SolverBodyContainer);
+		void GatherInput(const FReal Dt) {}
+		CHAOS_API void ScatterOutput(const FReal Dt);
+		CHAOS_API void ApplyPositionConstraints(const FReal Dt, const int32 It, const int32 NumIts);
+		void ApplyVelocityConstraints(const FReal Dt, const int32 It, const int32 NumIts) {}
+		void ApplyProjectionConstraints(const FReal Dt, const int32 It, const int32 NumIts) {}
 
-		void UnprepareTick() {}
-
-		void PrepareIteration(FReal Dt) {}
-
-		void UnprepareIteration(FReal Dt) {}
-
-		void UpdatePositionBasedState(const FReal Dt);
-
-		bool Apply(const FReal Dt, const TArray<FConstraintContainerHandle*>& InConstraintHandles, const int32 It, const int32 NumIts)
-		{
-			for (FConstraintContainerHandle* ConstraintHandle : InConstraintHandles)
-			{
-				ApplySingle(Dt, ConstraintHandle->GetConstraintIndex());
-			}
-
-			// TODO: Return true only if more iteration are needed
-			return true;
-		}
-
-		bool ApplyPushOut(const FReal Dt, const TArray<FConstraintContainerHandle*>& InConstraintHandles, const int32 It, const int32 NumIts)
-		{
-			return false;
-		}
+		//
+		// TIndexedConstraintContainerSolver API - used by World solvers
+		//
+		CHAOS_API void AddBodies(const TArrayView<int32>& ConstraintIndices, FSolverBodyContainer& SolverBodyContainer);
+		void GatherInput(const TArrayView<int32>& ConstraintIndices, const FReal Dt) {}
+		CHAOS_API void ScatterOutput(const TArrayView<int32>& ConstraintIndices, const FReal Dt);
+		CHAOS_API void ApplyPositionConstraints(const TArrayView<int32>& ConstraintIndices, const FReal Dt, const int32 It, const int32 NumIts);
+		void ApplyVelocityConstraints(const TArrayView<int32>& ConstraintIndices, const FReal Dt, const int32 It, const int32 NumIts) {}
+		void ApplyProjectionConstraints(const TArrayView<int32>& ConstraintIndices, const FReal Dt, const int32 It, const int32 NumIts) {}
 
 	protected:
 		using Base::GetConstraintIndex;
 		using Base::SetConstraintIndex;
 
 	private:
-		void ApplySingle(const FReal Dt, int32 ConstraintIndex) const;
+		CHAOS_API void AddBodies(const int32 ConstraintIndex, FSolverBodyContainer& SolverBodyContainer);
+		CHAOS_API void ApplySingle(const FReal Dt, int32 ConstraintIndex) const;
 
-		FVec3 GetDelta(const FVec3& WorldSpaceX1, const FVec3& WorldSpaceX2, const int32 ConstraintIndex, const int32 SpringIndex) const;
+		CHAOS_API FVec3 GetDelta(const FVec3& WorldSpaceX1, const FVec3& WorldSpaceX2, const int32 ConstraintIndex, const int32 SpringIndex) const;
 
 		TArray<FConstrainedParticlePair> Constraints;
 		TArray<TArray<TVec2<FVec3>>> Distances;
@@ -222,6 +236,8 @@ namespace Chaos
 		FReal CreationThreshold;
 		int32 MaxSprings;
 		FReal Stiffness;
+
+		TArray<FSolverBodyPtrPair> ConstraintSolverBodies;
 
 		FHandles Handles;
 		FConstraintHandleAllocator HandleAllocator;

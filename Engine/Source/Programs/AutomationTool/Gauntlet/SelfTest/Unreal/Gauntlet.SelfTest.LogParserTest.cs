@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Gauntlet;
 
 namespace Gauntlet.SelfTest
 {
@@ -46,10 +47,12 @@ namespace Gauntlet.SelfTest
 	{
 		public override void TickTest()
 		{
-
-			foreach (var Platform in new[] { "Win64Client", "PS4Client" })
+			HashSet<string> Platforms = new HashSet<string>();
+			Platforms.Add("Win64");
+			Platforms.Add(Gauntlet.Globals.Params.ParseValue("Platform", "Win64"));
+			foreach (var Platform in Platforms)
 			{
-				UnrealLogParser Parser = new UnrealLogParser(GetFileContents("OrionLogWithTestSuccess" + Platform + ".txt"));
+				UnrealLogParser Parser = new UnrealLogParser(GetFileContents("OrionLogWithTestSuccess" + Platform + "Client.txt"));
 
 				int ExitCode = 2;
 				Parser.GetTestExitCode(out ExitCode);
@@ -70,9 +73,12 @@ namespace Gauntlet.SelfTest
 	{
 		public override void TickTest()
 		{
-			foreach (var Platform in new[] { "Win64Client", "PS4Client" })
+			HashSet<string> Platforms = new HashSet<string>();
+			Platforms.Add("Win64");
+			Platforms.Add(Gauntlet.Globals.Params.ParseValue("Platform", "Win64"));
+			foreach (var Platform in Platforms)
 			{
-				UnrealLogParser Parser = new UnrealLogParser(GetFileContents("OrionLogWithEnsure" + Platform + ".txt"));
+				UnrealLogParser Parser = new UnrealLogParser(GetFileContents("OrionLogWithEnsure" + Platform + "Client.txt"));
 
 				var Ensures = Parser.GetEnsures();
 
@@ -98,11 +104,14 @@ namespace Gauntlet.SelfTest
 	{
 		public override void TickTest()
 		{
-			foreach (var Platform in new[] { "Win64Client", "PS4Client" })
+			HashSet<string> Platforms = new HashSet<string>();
+			Platforms.Add("Win64");
+			Platforms.Add(Gauntlet.Globals.Params.ParseValue("Platform", "Win64"));
+			foreach (var Platform in Platforms)
 			{
-				UnrealLogParser Parser = new UnrealLogParser(GetFileContents("OrionLogWithCheck" + Platform + ".txt"));
+				UnrealLogParser Parser = new UnrealLogParser(GetFileContents("OrionLogWithCheck" + Platform + "Client.txt"));
 
-				UnrealLogParser.CallstackMessage FatalError = Parser.GetFatalError();
+				UnrealLog.CallstackMessage FatalError = Parser.GetFatalError();
 
 				if (FatalError == null || FatalError.Callstack.Length < 8 || string.IsNullOrEmpty(FatalError.Message))
 				{
@@ -120,17 +129,32 @@ namespace Gauntlet.SelfTest
 	[TestGroup("Framework")]
 	class LogParserTestFatalError : TestUnrealLogParserBase
 	{
+		private int IncompleteLineLength = "0x0000000000236999  [Unknown File]".Length;
 		public override void TickTest()
 		{
-			foreach (var Platform in new[] { "Win64", "PS4" })
+			HashSet<string> Platforms = new HashSet<string>();
+			Platforms.Add("Win64");
+			Platforms.Add("Linux");
+			Platforms.Add(Gauntlet.Globals.Params.ParseValue("Platform", "Win64"));
+			foreach (var Platform in Platforms)
 			{
+				Log.Info("Processing log: {Path}", Platform + "FatalError" + ".txt");
 				UnrealLogParser Parser = new UnrealLogParser(GetFileContents(Platform + "FatalError" + ".txt"));
 
-				UnrealLogParser.CallstackMessage FatalError = Parser.GetFatalError();
+				UnrealLog.CallstackMessage FatalError = Parser.GetFatalError();
 
 				if (FatalError == null || FatalError.Callstack.Length == 0 || string.IsNullOrEmpty(FatalError.Message))
 				{
 					throw new TestException("LogParser returned incorrect assert info for {0}", Platform);
+				}
+				else
+				{
+					int IncompleteCallstackLineCount = FatalError.Callstack.Where(L => L.Length <= IncompleteLineLength).Count();
+					if(IncompleteCallstackLineCount > 0)
+					{
+						string Lines = string.Join("\n", FatalError.Callstack.Where(L => L.Length <= IncompleteLineLength));
+						throw new TestException("LogParser returned some incomplete callstack lines for {0}:\n{1}", Platform, Lines);
+					}
 				}
 			}			
 
@@ -143,11 +167,14 @@ namespace Gauntlet.SelfTest
 	{
 		public override void TickTest()
 		{
-			foreach (var Platform in new[] { "Win64Client", "PS4Client" })
+			HashSet<string> Platforms = new HashSet<string>();
+			Platforms.Add("Win64");
+			Platforms.Add(Gauntlet.Globals.Params.ParseValue("Platform", "Win64"));
+			foreach (var Platform in Platforms)
 			{
-				UnrealLogParser Parser = new UnrealLogParser(GetFileContents("OrionLogWithException" + Platform + ".txt"));
+				UnrealLogParser Parser = new UnrealLogParser(GetFileContents("OrionLogWithException" + Platform + "Client.txt"));
 
-				UnrealLogParser.CallstackMessage FatalError = Parser.GetFatalError();
+				UnrealLog.CallstackMessage FatalError = Parser.GetFatalError();
 
 				if (FatalError == null || FatalError.Callstack.Length == 0 || string.IsNullOrEmpty(FatalError.Message))
 				{
@@ -167,7 +194,8 @@ namespace Gauntlet.SelfTest
 	{
 		public override void TickTest()
 		{
-			UnrealLogParser Parser = new UnrealLogParser(GetFileContents("OrionPS4ClientLogWithPerf.txt"));
+			string Platform = Gauntlet.Globals.Params.ParseValue("Platform", "Win64");
+			UnrealLogParser Parser = new UnrealLogParser(GetFileContents("Orion" + Platform + "ClientLogWithPerf.txt"));
 
 			// Get warnings
 			bool HadExit = Parser.HasRequestExit();
@@ -191,7 +219,8 @@ namespace Gauntlet.SelfTest
 		{
 			const int ExpectedLines = 761;
 
-			UnrealLogParser Parser = new UnrealLogParser(GetFileContents("OrionPS4ClientLogWithPerf.txt"));
+			string Platform = Gauntlet.Globals.Params.ParseValue("Platform", "Win64");
+			UnrealLogParser Parser = new UnrealLogParser(GetFileContents("Orion" + Platform + "ClientLogWithPerf.txt"));
 
 			// Get warnings
 			IEnumerable<string> Lines = Parser.GetLogChannel("OrionMemory");
@@ -215,7 +244,8 @@ namespace Gauntlet.SelfTest
 		{
 			const int ExpectedWarnings = 21146;
 
-			UnrealLogParser Parser = new UnrealLogParser(GetFileContents("OrionPS4ClientLogWithPerf.txt"));
+			string Platform = Gauntlet.Globals.Params.ParseValue("Platform", "Win64");
+			UnrealLogParser Parser = new UnrealLogParser(GetFileContents("Orion" + Platform + "ClientLogWithPerf.txt"));
 
 			// Get warnings
 			IEnumerable<string> WarningLines = Parser.GetWarnings();
@@ -237,7 +267,8 @@ namespace Gauntlet.SelfTest
 		{
 			const int ExpectedErrors = 20;
 
-			UnrealLogParser Parser = new UnrealLogParser(GetFileContents("OrionPS4ClientLogWithPerf.txt"));
+			string Platform = Gauntlet.Globals.Params.ParseValue("Platform", "Win64");
+			UnrealLogParser Parser = new UnrealLogParser(GetFileContents("Orion" + Platform + "ClientLogWithPerf.txt"));
 
 			// Get warnings
 			IEnumerable<string> ErrorLines = Parser.GetErrors();
@@ -253,33 +284,13 @@ namespace Gauntlet.SelfTest
 
 	
 
-	/// <summary>
-	/// Tests that the logfile correctly finds an assert statement and callstack in a PS4 log
-	/// </summary>
-	/*[TestGroup("LogParser")]
-	class LogParserTestHealthReport : TestUnrealLogParserBase
-	{
-
-		public override void OnTick()
-		{
-
-			OrionTest.OrionHealthReport Report = new OrionTest.OrionHealthReport("OrionPS4ClientLogWithPerf.txt");
-
-			if (Report.LogCount == 0 || Report.EnsureCount == 0)
-			{
-				throw new TestException("LogParser returned incorrect assert info");
-			}
-
-			MarkComplete(TestResult.Passed);
-		}
-	}*/
-
 	[TestGroup("Framework")]
 	class LogParserPerfSummary : TestUnrealLogParserBase
 	{
 		public override void TickTest()
 		{
-			//string FilePath = Path.Combine(BaseDataPath, "OrionPS4ClientLogWithPerf.txt");
+			//string Platform = Gauntlet.Globals.Params.ParseValue("Platform", "Win64");
+			//string FilePath = Path.Combine(BaseDataPath, "Orion" + Platform + "ClientLogWithPerf.txt");
 
 			//OrionTest.PerformanceSummary Summary = new OrionTest.PerformanceSummary(File.ReadAllText(FilePath));
 

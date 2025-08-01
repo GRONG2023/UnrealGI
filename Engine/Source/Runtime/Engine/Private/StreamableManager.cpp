@@ -1,13 +1,19 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/StreamableManager.h"
-#include "UObject/WeakObjectPtr.h"
+#include "UObject/ICookInfo.h"
 #include "UObject/ObjectRedirector.h"
+#include "UObject/Package.h"
+#include "Misc/PackageAccessTrackingOps.h"
 #include "Misc/PackageName.h"
 #include "UObject/UObjectThreadContext.h"
 #include "HAL/IConsoleManager.h"
 #include "Tickable.h"
 #include "Serialization/LoadTimeTrace.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "Trace/Trace.h"
+#include "Trace/Trace.inl"
+#include <type_traits>
 
 DEFINE_LOG_CATEGORY_STATIC(LogStreamableManager, Log, All);
 
@@ -20,15 +26,30 @@ static FAutoConsoleVariableRef CVarStreamableDelegateDelayFrames(
 	ECVF_Default
 );
 
+// CVar to switch back to legacy behavior of non-specifically flushing async loading when waiting on a request handle
+static bool GStreamableFlushAllAsyncLoadRequestsOnWait = 0;
+static FAutoConsoleVariableRef CVarStreamableFlushAllAsyncLoadRequestsOnWait(
+	TEXT("s.StreamableFlushAllAsyncLoadRequestsOnWait"),
+	GStreamableFlushAllAsyncLoadRequestsOnWait,
+	TEXT("Flush async loading without a specific request ID when waiting on streamable handles."),
+	ECVF_Default
+);
+
+
+const FString FStreamableHandle::HandleDebugName_Preloading = FString(TEXT("Preloading"));
+const FString FStreamableHandle::HandleDebugName_AssetList = FString(TEXT("LoadAssetList"));
+const FString FStreamableHandle::HandleDebugName_CombinedHandle = FString(TEXT("CreateCombinedHandle"));
+
 /** Helper class that defers streamable manager delegates until the next frame */
 class FStreamableDelegateDelayHelper : public FTickableGameObject
 {
 public:
 
 	/** Adds a delegate to deferred list */
-	void AddDelegate(const FStreamableDelegate& Delegate, const FStreamableDelegate& CancelDelegate, TSharedPtr<FStreamableHandle> AssociatedHandle)
+	template<typename InStreamableDelegate>
+	void AddDelegate(InStreamableDelegate&& Delegate, InStreamableDelegate&& CancelDelegate, TSharedPtr<FStreamableHandle> AssociatedHandle)
 	{
-		FPendingDelegate* PendingDelegate = new FPendingDelegate(Delegate, CancelDelegate, AssociatedHandle);
+		FPendingDelegate* PendingDelegate = new FPendingDelegate(Forward<InStreamableDelegate>(Delegate), Forward<InStreamableDelegate>(CancelDelegate), AssociatedHandle);
 
 		{
 			FScopeLock Lock(&DataLock);
@@ -81,7 +102,7 @@ public:
 			}
 			if (!DelegatesForHandle->Head)
 			{
-				PendingDelegatesByHandle.Remove(AssociatedHandle);
+				RemovePendingDelegateInternal(AssociatedHandle);
 			}
 		}
 
@@ -137,7 +158,7 @@ public:
 					}
 					if (!DelegatesForHandle->Head)
 					{
-						PendingDelegatesByHandle.Remove(CurrentNode->RelatedHandle);
+						RemovePendingDelegateInternal(CurrentNode->RelatedHandle);
 					}
 				}
 				CurrentNode = NextNode;
@@ -196,10 +217,11 @@ private:
 		/** Frames left to delay */
 		int32 DelayFrames;
 
-		FPendingDelegate(const FStreamableDelegate& InDelegate, const FStreamableDelegate& InCancelDelegate, TSharedPtr<FStreamableHandle> InHandle)
-			: Delegate(InDelegate)
-			, CancelDelegate(InCancelDelegate)
-			, RelatedHandle(InHandle)
+		template<typename InStreamableDelegate>
+		FPendingDelegate(InStreamableDelegate&& InDelegate, InStreamableDelegate&& InCancelDelegate, TSharedPtr<FStreamableHandle> InHandle)
+			: Delegate(Forward<InStreamableDelegate>(InDelegate))
+			, CancelDelegate(Forward<InStreamableDelegate>(InCancelDelegate))
+			, RelatedHandle(MoveTemp(InHandle))
 			, DelayFrames(GStreamableDelegateDelayFrames)
 		{}
 	};
@@ -285,6 +307,17 @@ private:
 		}
 	};
 
+	inline void RemovePendingDelegateInternal(TSharedPtr<FStreamableHandle> Handle)
+	{
+		// requires DataLock by caller
+		PendingDelegatesByHandle.Remove(Handle);
+		if (PendingDelegatesByHandle.IsEmpty())
+		{
+			// release potentially big allocation after huge batches of streaming requests
+			PendingDelegatesByHandle.Empty(128);
+		}
+	}
+
 	FPendingDelegateList PendingDelegates;
 	TMap<TSharedPtr<FStreamableHandle>, FPendingDelegateList> PendingDelegatesByHandle;
 
@@ -292,6 +325,33 @@ private:
 };
 
 static FStreamableDelegateDelayHelper* StreamableDelegateDelayHelper = nullptr;
+
+
+TStreamableHandleContextDataTypeID FStreamableHandleContextDataBase::AllocateClassTypeId()
+{
+	static std::atomic<TStreamableHandleContextDataTypeID> TypeNum{0};
+	TStreamableHandleContextDataTypeID Result = TypeNum++;
+
+	checkf(Result != TStreamableHandleContextDataTypeIDInvalid, TEXT("Overflow in TypeNum: too many TStreamableHandleContextData subclasses. Change the TStreamableHandleContextDataTypeID typedef if more subclasses are needed."));
+	return Result;
+}
+
+
+FStreamableHandle::FStreamableHandle()
+	: bLoadCompleted(false)
+	, bReleased(false)
+	, bCanceled(false)
+	, bStalled(false)
+	, bReleaseWhenLoaded(false)
+	, bIsCombinedHandle(false)
+	, Priority(0)
+	, StreamablesLoading(0)
+	, OwningManager(nullptr)
+#if WITH_EDITOR
+	, CookLoadType(ECookLoadType::Unexpected)
+#endif
+{
+}
 
 bool FStreamableHandle::BindCompleteDelegate(FStreamableDelegate NewDelegate)
 {
@@ -301,7 +361,7 @@ bool FStreamableHandle::BindCompleteDelegate(FStreamableDelegate NewDelegate)
 		return false;
 	}
 
-	CompleteDelegate = NewDelegate;
+	CompleteDelegate = MoveTemp(NewDelegate);
 	return true;
 }
 
@@ -313,7 +373,7 @@ bool FStreamableHandle::BindCancelDelegate(FStreamableDelegate NewDelegate)
 		return false;
 	}
 
-	CancelDelegate = NewDelegate;
+	CancelDelegate = MoveTemp(NewDelegate);
 	return true;
 }
 
@@ -325,7 +385,7 @@ bool FStreamableHandle::BindUpdateDelegate(FStreamableUpdateDelegate NewDelegate
 		return false;
 	}
 
-	UpdateDelegate = NewDelegate;
+	UpdateDelegate = MoveTemp(NewDelegate);
 	return true;
 }
 
@@ -337,30 +397,45 @@ EAsyncPackageState::Type FStreamableHandle::WaitUntilComplete(float Timeout, boo
 	}
 
 	// We need to recursively start any stalled handles
-	TArray<TSharedRef<FStreamableHandle>> HandlesToStart;
-
-	HandlesToStart.Add(AsShared());
-
-	for (int32 i = 0; i < HandlesToStart.Num(); i++)
+	if (bStartStalledHandles)
 	{
-		TSharedRef<FStreamableHandle> Handle = HandlesToStart[i];
+		TArray<TSharedRef<FStreamableHandle>> HandlesToStart;
 
-		if (bStartStalledHandles && Handle->IsStalled())
-		{
-			// If we were stalled, start us now to avoid deadlocks
-			UE_LOG(LogStreamableManager, Warning, TEXT("FStreamableHandle::WaitUntilComplete called on stalled handle %s, forcing load even though resources may not have been acquired yet"), *Handle->GetDebugName());
-			Handle->StartStalledHandle();
-		}
+		HandlesToStart.Add(AsShared());
 
-		for (const TSharedPtr<FStreamableHandle>& ChildHandle : Handle->ChildHandles)
+		for (int32 i = 0; i < HandlesToStart.Num(); i++)
 		{
-			if (ChildHandle.IsValid())
+			TSharedRef<FStreamableHandle> Handle = HandlesToStart[i];
+
+			if (Handle->IsStalled())
 			{
-				HandlesToStart.Add(ChildHandle.ToSharedRef());
+				// If we were stalled, start us now to avoid deadlocks
+				UE_LOG(LogStreamableManager, Warning, TEXT("FStreamableHandle::WaitUntilComplete called on stalled handle %s, forcing load even though resources may not have been acquired yet"), *Handle->GetDebugName());
+				Handle->StartStalledHandle();
+			}
+
+			for (const TSharedPtr<FStreamableHandle>& ChildHandle : Handle->ChildHandles)
+			{
+				if (ChildHandle.IsValid())
+				{
+					HandlesToStart.Add(ChildHandle.ToSharedRef());
+				}
 			}
 		}
 	}
 
+	// If we have have a timeout we can't call FlushAsyncLoading so use ProcessAsyncLoadingUntilComplete 
+	if (Timeout == 0.0f && !GStreamableFlushAllAsyncLoadRequestsOnWait)
+	{
+		TArray<int32> RequestIds = OwningManager->GetAsyncLoadRequestIds(AsShared());
+		FlushAsyncLoading(RequestIds);	
+		if (ensureMsgf(HasLoadCompletedOrStalled(), TEXT("Flushing async loading by request id did not complete loading for streamable handle %s"), *GetDebugName()))
+		{
+			return EAsyncPackageState::Complete;
+		}
+		// If for some reason the streamables don't consider themselves complete, fall back to old codepath which flushes asyncing loading without specific IDs
+	}
+	 
 	// Finish when all handles are completed or stalled. If we started stalled above then there will be no stalled handles
 	EAsyncPackageState::Type State = ProcessAsyncLoadingUntilComplete([this]() { return HasLoadCompletedOrStalled(); }, Timeout);
 	
@@ -368,7 +443,6 @@ EAsyncPackageState::Type FStreamableHandle::WaitUntilComplete(float Timeout, boo
 	{
 		ensureMsgf(HasLoadCompletedOrStalled() || WasCanceled(), TEXT("WaitUntilComplete failed for streamable handle %s, async loading is done but handle is not complete"), *GetDebugName());
 	}
-
 	return State;
 }
 
@@ -392,20 +466,54 @@ bool FStreamableHandle::HasLoadCompletedOrStalled() const
 	return true;
 }
 
-void FStreamableHandle::GetRequestedAssets(TArray<FSoftObjectPath>& AssetList) const
+bool FStreamableHandle::IsHandleNameEmptyOrDefault() const
+{
+	// empty or "None"
+	if (DebugName.IsEmpty() || DebugName.Equals(FName(NAME_None).ToString()))
+	{
+		return true;
+	}
+
+	// a default value...
+	if (DebugName == HandleDebugName_AssetList || DebugName == HandleDebugName_CombinedHandle)
+	{
+		return true;
+	}
+	// a default generated debug name
+	else if (DebugName.StartsWith(HandleDebugName_Preloading))
+	{
+		return true;
+	}
+
+	return false;
+}
+
+void FStreamableHandle::SetDebugNameIfEmptyOrDefault(const FString& NewName)
+{
+	if (IsHandleNameEmptyOrDefault())
+	{
+		DebugName = NewName;
+	}
+}
+
+void FStreamableHandle::GetRequestedAssets(TArray<FSoftObjectPath>& AssetList, bool bIncludeChildren /*= true*/) const
 {
 	AssetList = RequestedAssets;
 
 	// Check child handles
-	for (const TSharedPtr<FStreamableHandle>& ChildHandle : ChildHandles)
+
+	if (bIncludeChildren)
 	{
-		TArray<FSoftObjectPath> ChildAssetList;
-
-		ChildHandle->GetRequestedAssets(ChildAssetList);
-
-		for (const FSoftObjectPath& ChildRef : ChildAssetList)
+		for (const TSharedPtr<FStreamableHandle>& ChildHandle : ChildHandles)
 		{
-			AssetList.AddUnique(ChildRef);
+			TArray<FSoftObjectPath> ChildAssetList;
+
+			ChildHandle->GetRequestedAssets(ChildAssetList);
+
+			for (const FSoftObjectPath& ChildRef : ChildAssetList)
+			{
+				AssetList.AddUnique(ChildRef);
+			}
 		}
 	}
 }
@@ -426,38 +534,10 @@ UObject* FStreamableHandle::GetLoadedAsset() const
 
 void FStreamableHandle::GetLoadedAssets(TArray<UObject *>& LoadedAssets) const
 {
-	if (HasLoadCompleted())
+	ForEachLoadedAsset([&LoadedAssets](UObject* LoadedAsset)
 	{
-		for (const FSoftObjectPath& Ref : RequestedAssets)
-		{
-			// Try manager, should be faster and will handle redirects better
-			if (IsActive())
-			{
-				LoadedAssets.Add(OwningManager->GetStreamed(Ref));
-			}
-			else
-			{
-				LoadedAssets.Add(Ref.ResolveObject());
-			}
-		}
-
-		// Check child handles
-		for (const TSharedPtr<FStreamableHandle>& ChildHandle : ChildHandles)
-		{
-			for (const FSoftObjectPath& Ref : ChildHandle->RequestedAssets)
-			{
-				// Try manager, should be faster and will handle redirects better
-				if (IsActive())
-				{
-					LoadedAssets.Add(OwningManager->GetStreamed(Ref));
-				}
-				else
-				{
-					LoadedAssets.Add(Ref.ResolveObject());
-				}
-			}
-		}
-	}
+		LoadedAssets.Add(LoadedAsset);
+	});
 }
 
 void FStreamableHandle::GetLoadedCount(int32& LoadedCount, int32& RequestedCount) const
@@ -535,7 +615,7 @@ void FStreamableHandle::CancelHandle()
 	bCanceled = true;
 	NotifyParentsOfCancellation();
 
-	ExecuteDelegate(CancelDelegate, SharedThis);
+	ExecuteDelegate(MoveTemp(CancelDelegate), SharedThis);
 	UnbindDelegates();
 
 	// Remove from referenced list. If it is stalled then it won't have been registered with
@@ -639,12 +719,40 @@ void FStreamableHandle::StartStalledHandle()
 	OwningManager->StartHandleRequests(AsShared());
 }
 
+bool FStreamableHandle::HasCompleteDelegate() const
+{
+	return CompleteDelegate.IsBound();
+}
+
+bool FStreamableHandle::HasCancelDelegate() const
+{
+	return CancelDelegate.IsBound();
+}
+
+bool FStreamableHandle::HasUpdateDelegate() const
+{
+	return UpdateDelegate.IsBound();
+}
+
+static void RemoveActiveHandle(FStreamable& Streamable, FStreamableHandle& Handle);		
+
 FStreamableHandle::~FStreamableHandle()
 {
-	check(IsInGameThread() || IsInGarbageCollectorThread());
+	checkf(IsInGameThread(), TEXT("Streamable handles aren't thread-safe and must be destroyed on the game thread"));
 
 	if (IsActive())
 	{
+		if (!bStalled)
+		{
+			for (const FSoftObjectPath&  RequestedAsset : RequestedAssets)
+			{
+				if (FStreamable* Streamable = OwningManager->FindStreamable(RequestedAsset))
+				{
+					RemoveActiveHandle(*Streamable, *this);
+				}
+			}
+		}
+
 		bReleased = true;
 		OwningManager = nullptr;
 		
@@ -659,7 +767,7 @@ void FStreamableHandle::CompleteLoad()
 	{
 		bLoadCompleted = true;
 
-		ExecuteDelegate(CompleteDelegate, AsShared(), CancelDelegate);
+		ExecuteDelegate(MoveTemp(CompleteDelegate), AsShared(), MoveTemp(CancelDelegate));
 		UnbindDelegates();
 
 		NotifyParentsOfCompletion();
@@ -804,7 +912,7 @@ void FStreamableHandle::AsyncLoadCallbackWrapper(const FName& PackageName, UPack
 	// Needed so we can bind with a shared pointer for safety
 	if (OwningManager)
 	{
-		OwningManager->AsyncLoadCallback(TargetName);
+		OwningManager->AsyncLoadCallback(TargetName, Package);
 
 		if (!HasLoadCompleted())
 		{
@@ -817,96 +925,214 @@ void FStreamableHandle::AsyncLoadCallbackWrapper(const FName& PackageName, UPack
 	}
 }
 
-void FStreamableHandle::ExecuteDelegate(const FStreamableDelegate& Delegate, TSharedPtr<FStreamableHandle> AssociatedHandle, const FStreamableDelegate& CancelDelegate)
+namespace UE::StreamableManager::Private
 {
-	if (Delegate.IsBound())
+	// Internal helper for executing delegates. This avoids code duplication by allowing the delegate to be moved or copied when deferred depending on which overload of ExecuteDelegate is called.
+	template<typename InStreamableDelegate>
+	void ExecuteDelegateInternal(InStreamableDelegate&& Delegate, TSharedPtr<FStreamableHandle> AssociatedHandle, InStreamableDelegate&& CancelDelegate)
 	{
-		if (GStreamableDelegateDelayFrames == 0)
-		{
-			// Execute it immediately
-			Delegate.Execute();
-		}
-		else
-		{
-			// Add to execution queue for next tick
-			if (!StreamableDelegateDelayHelper)
-			{
-				StreamableDelegateDelayHelper = new FStreamableDelegateDelayHelper;
-			}
+		using UnRefCvStreamableDelegate = std::remove_cv_t<std::remove_reference_t<InStreamableDelegate>>;
+		static_assert(std::is_same_v<UnRefCvStreamableDelegate, FStreamableDelegate>, "ExecuteDelegateInternal is only valid to be called with FStreamableDelegate.");
 
-			StreamableDelegateDelayHelper->AddDelegate(Delegate, CancelDelegate, AssociatedHandle);
+		if (Delegate.IsBound())
+		{
+			if (GStreamableDelegateDelayFrames == 0)
+			{
+				// Execute it immediately
+				Delegate.Execute();
+			}
+			else
+			{
+				// Add to execution queue for next tick
+				if (!StreamableDelegateDelayHelper)
+				{
+					StreamableDelegateDelayHelper = new FStreamableDelegateDelayHelper;
+				}
+
+				StreamableDelegateDelayHelper->AddDelegate(Forward<InStreamableDelegate>(Delegate), Forward<InStreamableDelegate>(CancelDelegate), MoveTemp(AssociatedHandle));
+			}
 		}
 	}
+}
+
+void FStreamableHandle::ExecuteDelegate(const FStreamableDelegate& Delegate, TSharedPtr<FStreamableHandle> AssociatedHandle, const FStreamableDelegate& CancelDelegate)
+{
+	UE::StreamableManager::Private::ExecuteDelegateInternal(Delegate, MoveTemp(AssociatedHandle), CancelDelegate);
+}
+
+void FStreamableHandle::ExecuteDelegate(FStreamableDelegate&& Delegate, TSharedPtr<FStreamableHandle> AssociatedHandle, FStreamableDelegate&& CancelDelegate)
+{
+	UE::StreamableManager::Private::ExecuteDelegateInternal(MoveTemp(Delegate), MoveTemp(AssociatedHandle), MoveTemp(CancelDelegate));
+}
+
+TSharedPtr<FStreamableHandle> FStreamableHandle::FindMatchingHandle(TFunction<bool(const FStreamableHandle&)> Predicate) const
+{
+	if (Predicate(*this))
+	{
+		return ConstCastSharedPtr<FStreamableHandle, const FStreamableHandle, ESPMode::ThreadSafe>(AsShared());
+	}
+
+	for (const TSharedPtr<FStreamableHandle>& ChildHandle : ChildHandles)
+	{
+		if (TSharedPtr<FStreamableHandle> MatchingHandleFromChildren = ChildHandle ? ChildHandle->FindMatchingHandle(Predicate) : nullptr)
+		{
+			return MatchingHandleFromChildren;
+		}
+	}
+
+	return nullptr;
+}
+
+TSharedPtr<FStreamableHandle> FStreamableHandle::CreateCombinedHandle(const TConstArrayView<TSharedPtr<FStreamableHandle>>& OtherHandles)
+{
+	static const EStreamableManagerCombinedHandleOptions MergeOptions 
+	= EStreamableManagerCombinedHandleOptions::MergeDebugNames | EStreamableManagerCombinedHandleOptions::SkipNulls | EStreamableManagerCombinedHandleOptions::RedirectParents;
+
+	TSharedPtr<FStreamableHandle> ThisAsShared{AsShared()};
+
+	if (FStreamableManager* Manager = GetOwningManager())
+	{
+		TArray<TSharedPtr<FStreamableHandle>> HandlesToUse{OtherHandles};
+		HandlesToUse.AddUnique(ThisAsShared);
+
+		return Manager->CreateCombinedHandle(HandlesToUse, HandleDebugName_CombinedHandle, MergeOptions);		
+	}
+
+	return nullptr;
+}
+
+TSharedPtr<FStreamableHandle> FStreamableHandle::GetOutermostHandle()
+{
+	if (ParentHandles.Num())
+	{
+		// have at least one parent handle.
+
+		if (ParentHandles.Num() == 1)
+		{
+			// can just return the outermost of our one parent
+			return ParentHandles[0].Pin()->GetOutermostHandle();
+		}
+
+		TArray<TWeakPtr<FStreamableHandle>> IterationArray;
+		IterationArray = ParentHandles;
+		TArray<TWeakPtr<FStreamableHandle>> NextItrArray;
+		bool bFoundParents = true;
+
+		while (bFoundParents)
+		{
+			for (const TWeakPtr<FStreamableHandle>& WeakHandle : IterationArray)
+			{
+				TSharedPtr<FStreamableHandle> Handle = WeakHandle.Pin();
+				if (Handle.IsValid())
+				{
+					// Append does the right thing with the allocation already, no need to handle it ourselves
+					NextItrArray.Append(Handle->ParentHandles);
+				}
+			}
+
+			// we didn't find parents if none of our handles we just checked had parent handles
+			bFoundParents = NextItrArray.Num() > 0;
+
+			if (!bFoundParents)
+			{
+				// we can't be in the loop if this array is empty...
+				// possible this can actually be more than one handle at this point - that's okay!
+				return IterationArray[0].Pin();
+			}
+
+			IterationArray = NextItrArray;
+			NextItrArray.Reset();
+		}
+	}
+	
+	// weren't able to resolve the maximum outermost (likely due to no parent)
+	return AsShared();
 }
 
 /** Internal object, one of these per object paths managed by this system */
 struct FStreamable
 {
-	/** Hard Pointer to object */
-	UObject* Target;
-	/** If this object is currently being loaded */
-	bool	bAsyncLoadRequestOutstanding;
-	/** If this object failed to load, don't try again */
-	bool	bLoadFailed;
+	/** Hard GC pointer to object */
+	TObjectPtr<UObject> Target = nullptr;
 
-	/** List of handles that are waiting for this to load. The same handle may be here multiple times with redirectors */
+	/** Live handles keeping this alive. Handles may be duplicated. */
+	TArray<FStreamableHandle*> ActiveHandles;
+
+	/** Handles waiting for this to load. Handles may be duplicated with redirectors. */
 	TArray< TSharedRef< FStreamableHandle> > LoadingHandles;
 
-	/** List of handles that are keeping this streamable in memory. The same handle may be here multiple times */
-	TArray< TWeakPtr< FStreamableHandle> > ActiveHandles;
+	/** Id for async load request with async loading system */
+	int32 RequestId = INDEX_NONE;
 
-	FStreamable()
-		: Target(nullptr)
-		, bAsyncLoadRequestOutstanding(false)
-		, bLoadFailed(false)
-	{
-	}
+	/** If this object is currently being loaded */
+	bool bAsyncLoadRequestOutstanding = false;
 
-	~FStreamable()
+	/** If this object failed to load, don't try again */
+	bool bLoadFailed = false;
+
+
+	void FreeHandles()
 	{
 		// Clear the loading handles 
-		for (int32 i = 0; i < LoadingHandles.Num(); i++)
+		for (TSharedRef<FStreamableHandle>& LoadingHandle : LoadingHandles)
 		{
-			LoadingHandles[i]->StreamablesLoading--;
+			LoadingHandle->StreamablesLoading--;
 		}
 		LoadingHandles.Empty();
 
 		// Cancel active handles, this list includes the loading handles
-		for (int32 i = 0; i < ActiveHandles.Num(); i++)
+		while (ActiveHandles.Num() > 0)
 		{
-			TSharedPtr<FStreamableHandle> ActiveHandle = ActiveHandles[i].Pin();
-
-			if (ActiveHandle.IsValid() && !ActiveHandle->bCanceled)
+			FStreamableHandle* ActiveHandle = ActiveHandles.Pop(EAllowShrinking::No);
+			if (!ActiveHandle->bCanceled)
 			{
 				// Full cancel isn't safe any more
 
 				ActiveHandle->bCanceled = true;
 				ActiveHandle->OwningManager = nullptr;
 
-				if (!ActiveHandle->bReleased)
+				if (ActiveHandle->bReleased)
 				{
-					FStreamableHandle::ExecuteDelegate(ActiveHandle->CancelDelegate, ActiveHandle);
-					ActiveHandle->UnbindDelegates();
+					ActiveHandle->NotifyParentsOfCancellation();
 				}
+				else
+				{
+					// Keep handle alive to stop the cancel callback from dropping the last reference
+					TSharedPtr<FStreamableHandle> SharedHandle = ActiveHandle->AsShared();
 
-				ActiveHandle->NotifyParentsOfCancellation();
-
+					FStreamableHandle::ExecuteDelegate(MoveTemp(ActiveHandle->CancelDelegate), SharedHandle);
+					ActiveHandle->UnbindDelegates();
+					ActiveHandle->NotifyParentsOfCancellation();
+				}
 			}
 		}
-		ActiveHandles.Empty();
 	}
 
-	void AddLoadingRequest(TSharedRef<FStreamableHandle> NewRequest)
+	void AddLoadingRequest(TSharedRef<FStreamableHandle>& NewRequest)
 	{
 		// With redirectors we can end up adding the same handle multiple times, this is unusual but supported
-		ActiveHandles.Add(NewRequest);
+		ActiveHandles.Add(&NewRequest.Get());
 
 		LoadingHandles.Add(NewRequest);
 		NewRequest->StreamablesLoading++;
 	}
 };
 
+void RemoveActiveHandle(FStreamable& Streamable, FStreamableHandle& Handle)
+{
+	TArray<FStreamableHandle*>& ActiveHandles = Streamable.ActiveHandles;
+	for (int32 Idx = Streamable.ActiveHandles.Num() - 1; Idx >= 0; --Idx)
+	{
+		if (ActiveHandles[Idx] == &Handle)
+		{
+			ActiveHandles.RemoveAtSwap(Idx, 1, EAllowShrinking::No);
+		}
+	}
+}
+	
+
 FStreamableManager::FStreamableManager()
+	: FGCObject(EFlags::AddStableNativeReferencesOnly)
 {
 	FCoreUObjectDelegates::GetPreGarbageCollectDelegate().AddRaw(this, &FStreamableManager::OnPreGarbageCollect);
 	bForceSynchronousLoads = false;
@@ -917,49 +1143,53 @@ FStreamableManager::~FStreamableManager()
 {
 	FCoreUObjectDelegates::GetPreGarbageCollectDelegate().RemoveAll(this);
 
-	for (TStreamableMap::TIterator It(StreamableItems); It; ++It)
+	for (const TPair<FSoftObjectPath, FStreamable*>& Pair : StreamableItems)
 	{
-		delete It.Value();
-		It.RemoveCurrent();
+		Pair.Value->FreeHandles();
+	}
+	
+	TStreamableMap TempStreamables;
+	Swap(TempStreamables, StreamableItems);
+	for (const TPair<FSoftObjectPath, FStreamable*>& TempPair : TempStreamables)
+	{
+		delete TempPair.Value;
 	}
 }
 
 void FStreamableManager::OnPreGarbageCollect()
 {
-	TSet<FSoftObjectPath> RedirectsToRemove;
-	TArray<FStreamable*> StreamablesToDelete;
+	TRACE_CPUPROFILER_EVENT_SCOPE(FStreamableManager::OnPreGarbageCollect);
 
-	// Remove any streamables with no active handles, as GC may have freed them
-	for (TStreamableMap::TIterator It(StreamableItems); It; ++It)
+	// Find streamables without active handles
+	TBitArray<> InactiveStreamables;
+	InactiveStreamables.SetNumUninitialized(StreamableItems.Num());
+	int32 Idx = 0;
+	for (const TPair<FSoftObjectPath, FStreamable*>& Pair : StreamableItems)
 	{
-		FStreamable* Existing = It.Value();
+		InactiveStreamables[Idx++] = Pair.Value->ActiveHandles.IsEmpty();
+	}
 
-		// Remove invalid handles, the weak pointers may be pointing to removed handles
-		for (int32 i = Existing->ActiveHandles.Num() - 1; i >= 0; i--)
+	int32 NumInactive = InactiveStreamables.CountSetBits();
+	if (NumInactive == 0)
+	{
+		return;
+	}
+
+	// Remove redirects
+	if (StreamableRedirects.Num() > 0)
+	{
+		TSet<FSoftObjectPath> RedirectsToRemove;
+		RedirectsToRemove.Reserve(NumInactive);
+
+		Idx = 0;
+		for (const TPair<FSoftObjectPath, FStreamable*>& Pair : StreamableItems)
 		{
-			TSharedPtr<FStreamableHandle> ActiveHandle = Existing->ActiveHandles[i].Pin();
-
-			if (!ActiveHandle.IsValid())
+			if (InactiveStreamables[Idx++])
 			{
-				Existing->ActiveHandles.RemoveAtSwap(i, 1, false);
+				RedirectsToRemove.Add(Pair.Key);
 			}
 		}
 
-		if (Existing->ActiveHandles.Num() == 0)
-		{
-			RedirectsToRemove.Add(It.Key());
-			StreamablesToDelete.Add(Existing);
-			It.RemoveCurrent();
-		}
-	}
-
-	for (FStreamable* StreamableToDelete : StreamablesToDelete)
-	{
-		delete StreamableToDelete;
-	}
-
-	if (RedirectsToRemove.Num() > 0)
-	{
 		for (TStreamableRedirects::TIterator It(StreamableRedirects); It; ++It)
 		{
 			if (RedirectsToRemove.Contains(It.Value().NewPath))
@@ -968,27 +1198,31 @@ void FStreamableManager::OnPreGarbageCollect()
 			}
 		}
 	}
+
+	// Delete and remove inactive streamables
+	Idx = 0;
+	for (TStreamableMap::TIterator It(StreamableItems); It; ++It)
+	{
+		if (InactiveStreamables[Idx++])
+		{
+			It->Value->FreeHandles();
+			delete It->Value;
+			It.RemoveCurrent();
+		}
+	}
 }
 
 void FStreamableManager::AddReferencedObjects(FReferenceCollector& Collector)
 {
 	// If there are active streamable handles in the editor, this will cause the user to Force Delete, which is irritating but necessary because weak pointers cannot be used here
-	for (TStreamableMap::TConstIterator It(StreamableItems); It; ++It)
+	for (auto& Pair : StreamableItems)
 	{
-		FStreamable* Existing = It.Value();
-		if (Existing->Target)
-		{
-			Collector.AddReferencedObject(Existing->Target);
-		}
+		Collector.AddStableReference(&Pair.Value->Target);
 	}
-
-	for (TStreamableRedirects::TIterator It(StreamableRedirects); It; ++It)
+	
+	for (TPair<FSoftObjectPath, FRedirectedPath>& Pair : StreamableRedirects)
 	{
-		FRedirectedPath& Existing = It.Value();
-		if (Existing.LoadedRedirector)
-		{
-			Collector.AddReferencedObject(Existing.LoadedRedirector);
-		}
+		Collector.AddStableReference(&Pair.Value.LoadedRedirector);
 	}
 }
 
@@ -1013,14 +1247,10 @@ bool FStreamableManager::GetReferencerPropertyName(UObject* Object, FString& Out
 			check(Existing);
 			if (Existing->Target == Object)
 			{
-				for (const TWeakPtr<FStreamableHandle>& WeakHandle : Existing->ActiveHandles)
+				if (Existing->ActiveHandles.Num() > 0)
 				{
-					TSharedPtr<FStreamableHandle> Handle = WeakHandle.Pin();
-					if (Handle.IsValid())
-					{
-						OutPropertyName = Handle->GetDebugName();
-						return true;
-					}
+					OutPropertyName = Existing->ActiveHandles[0]->GetDebugName();
+					return true;
 				}
 
 				if (Existing->LoadingHandles.Num() > 0)
@@ -1060,6 +1290,7 @@ FStreamable* FStreamableManager::StreamInternal(const FSoftObjectPath& InTargetN
 		{
 			UE_LOG(LogStreamableManager, Verbose, TEXT("     Already in progress %s"), *TargetName.ToString());
 			check(!Existing->Target); // should not be a load request unless the target is invalid
+			check(Existing->RequestId != INDEX_NONE);
 			ensure(IsAsyncLoading()); // Nothing should be pending if there is no async loading happening
 
 			// Don't return as we potentially want to sync load it
@@ -1119,12 +1350,34 @@ FStreamable* FStreamableManager::StreamInternal(const FSoftObjectPath& InTargetN
 			int32 FirstDot = Package.Find(TEXT("."), ESearchCase::CaseSensitive);
 			if (FirstDot != INDEX_NONE)
 			{
-				Package.LeftInline(FirstDot,false);
+				Package.LeftInline(FirstDot,EAllowShrinking::No);
 			}
 
-			Existing->bAsyncLoadRequestOutstanding = true;
-			Existing->bLoadFailed = false;
-			int32 RequestId = LoadPackageAsync(Package, FLoadPackageAsyncDelegate::CreateSP(Handle, &FStreamableHandle::AsyncLoadCallbackWrapper, TargetName), Priority);
+			FPackagePath PackagePath;
+			if (!FPackagePath::TryFromPackageName(Package, PackagePath))
+			{
+				UE_LOG(LogStreamableManager, Error, TEXT("Failed attempt to load %s; it is not a valid LongPackageName"), *Package);
+				Existing->bLoadFailed = true;
+				Existing->bAsyncLoadRequestOutstanding = false;
+			}
+			else
+			{
+				Existing->bLoadFailed = false;
+				Existing->bAsyncLoadRequestOutstanding = true;
+#if UE_WITH_PACKAGE_ACCESS_TRACKING
+				UE_TRACK_REFERENCING_PACKAGE_SCOPED(Handle->GetReferencerPackage(), Handle->GetRefencerPackageOp());
+#endif
+#if WITH_EDITOR
+				FCookLoadScope CookLoadScope(Handle->GetCookLoadType());
+#endif
+				// This may overwrite an existing request id, this is intentional - see comment above re: cancellation
+				Existing->RequestId = LoadPackageAsync(PackagePath,
+					NAME_None /* PackageNameToCreate */,
+					FLoadPackageAsyncDelegate::CreateSP(Handle, &FStreamableHandle::AsyncLoadCallbackWrapper, TargetName),
+					PKG_None /* InPackageFlags */,
+					INDEX_NONE /* InPIEInstanceID */,
+					Priority /* InPackagePriority */);
+			}
 		}
 	}
 	return Existing;
@@ -1136,13 +1389,24 @@ TSharedPtr<FStreamableHandle> FStreamableManager::RequestAsyncLoad(TArray<FSoftO
 
 	// Schedule a new callback, this will get called when all related async loads are completed
 	TSharedRef<FStreamableHandle> NewRequest = MakeShareable(new FStreamableHandle());
-	NewRequest->CompleteDelegate = DelegateToCall;
+	NewRequest->CompleteDelegate = MoveTemp(DelegateToCall);
 	NewRequest->OwningManager = this;
 	NewRequest->RequestedAssets = MoveTemp(TargetsToStream);
 #if (!PLATFORM_IOS && !PLATFORM_ANDROID)
 	NewRequest->DebugName = MoveTemp(DebugName);
 #endif
 	NewRequest->Priority = Priority;
+#if UE_WITH_PACKAGE_ACCESS_TRACKING
+	PackageAccessTracking_Private::FTrackedData* AccumulatedScopeData = PackageAccessTracking_Private::FPackageAccessRefScope::GetCurrentThreadAccumulatedData();
+	if (AccumulatedScopeData)
+	{
+		NewRequest->ReferencerPackage = AccumulatedScopeData->PackageName;
+		NewRequest->ReferencerPackageOp = AccumulatedScopeData->OpName;
+	}
+#endif
+#if WITH_EDITOR
+	NewRequest->CookLoadType = FCookLoadScope::GetCurrentValue();
+#endif
 
 	int32 NumValidRequests = NewRequest->RequestedAssets.Num();
 	
@@ -1156,9 +1420,9 @@ TSharedPtr<FStreamableHandle> FStreamableManager::RequestAsyncLoad(TArray<FSoftO
 			--NumValidRequests;
 			continue;
 		}
-		else if (FPackageName::IsShortPackageName(TargetName.GetAssetPathName()))
+		else if (FPackageName::IsShortPackageName(TargetName.GetLongPackageFName()))
 		{
-			UE_LOG(LogStreamableManager, Error, TEXT("RequestAsyncLoad called with invalid package name %s"), *TargetName.ToString());
+			UE_LOG(LogStreamableManager, Error, TEXT("RequestAsyncLoad(%s) called with invalid package name %s"), *DebugName, *TargetName.ToString());
 			NewRequest->CancelHandle();
 			return nullptr;
 		}
@@ -1168,7 +1432,7 @@ TSharedPtr<FStreamableHandle> FStreamableManager::RequestAsyncLoad(TArray<FSoftO
 	if (NumValidRequests == 0)
 	{
 		// Original array was empty or all null
-		UE_LOG(LogStreamableManager, Error, TEXT("RequestAsyncLoad called with empty or only null assets!"));
+		UE_LOG(LogStreamableManager, Display, TEXT("RequestAsyncLoad(%s) called with empty or only null assets!"), *DebugName);
 		NewRequest->CancelHandle();
 		return nullptr;
 	} 
@@ -1193,7 +1457,7 @@ TSharedPtr<FStreamableHandle> FStreamableManager::RequestAsyncLoad(TArray<FSoftO
 		}
 
 		// Some valid, some null
-		UE_LOG(LogStreamableManager, Warning, TEXT("RequestAsyncLoad called with both valid and null assets, null assets removed from %s!"), *RequestedSet);
+		UE_LOG(LogStreamableManager, Display, TEXT("RequestAsyncLoad(%s) called with both valid and null assets, null assets removed from %s!"), *DebugName, *RequestedSet);
 	}
 
 	if (TargetSet.Num() != NewRequest->RequestedAssets.Num())
@@ -1210,7 +1474,7 @@ TSharedPtr<FStreamableHandle> FStreamableManager::RequestAsyncLoad(TArray<FSoftO
 			RequestedSet += Asset.ToString();
 		}
 
-		UE_LOG(LogStreamableManager, Verbose, TEXT("RequestAsyncLoad called with duplicate assets, duplicates removed from %s!"), *RequestedSet);
+		UE_LOG(LogStreamableManager, Verbose, TEXT("RequestAsyncLoad(%s) called with duplicate assets, duplicates removed from %s!"), *DebugName, *RequestedSet);
 #endif
 
 		NewRequest->RequestedAssets = TargetSet.Array();
@@ -1307,8 +1571,45 @@ void FStreamableManager::StartHandleRequests(TSharedRef<FStreamableHandle> Handl
 	}
 }
 
+TArray<int32> FStreamableManager::GetAsyncLoadRequestIds(TSharedRef<FStreamableHandle> InitialHandle)
+{
+	TArray<TSharedPtr<FStreamableHandle>> Queue;
+	Queue.Reserve(1 + InitialHandle->ChildHandles.Num());
+	Queue.Add(InitialHandle.ToSharedPtr());	
+	
+	TArray<int32> RequestIds;
+	for (int32 i=0; i < Queue.Num(); ++i)
+	{
+		TSharedPtr<FStreamableHandle> Handle = Queue[i];
+		if (!Handle.IsValid()) 
+		{
+			 continue; 
+		}
+
+		Queue.Append(Handle->ChildHandles);	
+		
+		for (const FSoftObjectPath& Path : Handle->RequestedAssets)
+		{
+			FStreamable* Streamable = StreamableItems.FindRef(Path);
+			if (Streamable && Streamable->RequestId != INDEX_NONE)
+			{
+				RequestIds.Add(Streamable->RequestId);				
+			}
+		}
+	}
+	return RequestIds;
+}
+
+UE_TRACE_EVENT_BEGIN(Cpu, StreamableManager_LoadSynchronous, NoSync)
+	UE_TRACE_EVENT_FIELD(UE::Trace::WideString, AssetPath)
+UE_TRACE_EVENT_END()
+
 UObject* FStreamableManager::LoadSynchronous(const FSoftObjectPath& Target, bool bManageActiveHandle, TSharedPtr<FStreamableHandle>* RequestHandlePointer)
 {
+#if CPUPROFILERTRACE_ENABLED
+	UE_TRACE_LOG_SCOPED_T(Cpu, StreamableManager_LoadSynchronous, CpuChannel)
+		<< StreamableManager_LoadSynchronous.AssetPath(*WriteToWideString<FName::StringBufferSize>(Target));
+#endif // CPUPROFILERTRACE_ENABLED
 	TSharedPtr<FStreamableHandle> Request = RequestSyncLoad(Target, bManageActiveHandle, FString::Printf(TEXT("LoadSynchronous of %s"), *Target.ToString()));
 
 	if (RequestHandlePointer)
@@ -1331,12 +1632,28 @@ UObject* FStreamableManager::LoadSynchronous(const FSoftObjectPath& Target, bool
 	return nullptr;
 }
 
-void FStreamableManager::FindInMemory( FSoftObjectPath& InOutTargetName, struct FStreamable* Existing )
+void FStreamableManager::FindInMemory(FSoftObjectPath& InOutTargetName, struct FStreamable* Existing, UPackage* Package)
 {
 	check(Existing);
 	check(!Existing->bAsyncLoadRequestOutstanding);
 	UE_LOG(LogStreamableManager, Verbose, TEXT("     Searching in memory for %s"), *InOutTargetName.ToString());
-	Existing->Target = StaticFindObject(UObject::StaticClass(), nullptr, *InOutTargetName.ToString());
+	Existing->Target = nullptr;
+
+	UObject* Asset = Package ? 
+		StaticFindObjectFast(UObject::StaticClass(), Package, InOutTargetName.GetAssetFName()) :
+		StaticFindObject(UObject::StaticClass(), InOutTargetName.GetAssetPath(), /*ExactClass*/false);	
+	if (Asset)
+	{
+		if (InOutTargetName.IsAsset())
+		{
+			Existing->Target = Asset;
+		}
+		else if (InOutTargetName.IsSubobject())
+		{
+			Existing->Target = StaticFindObject(UObject::StaticClass(), Asset, *InOutTargetName.GetSubPathString());
+		}
+	}
+	checkSlow(Existing->Target == StaticFindObject(UObject::StaticClass(), nullptr, *InOutTargetName.ToString()));
 
 	if (Existing->Target && Existing->Target->HasAnyInternalFlags(EInternalObjectFlags::AsyncLoading))
 	{
@@ -1358,7 +1675,7 @@ void FStreamableManager::FindInMemory( FSoftObjectPath& InOutTargetName, struct 
 	}
 }
 
-void FStreamableManager::AsyncLoadCallback(FSoftObjectPath TargetName)
+void FStreamableManager::AsyncLoadCallback(FSoftObjectPath TargetName, UPackage* Package)
 {
 	check(IsInGameThread());
 
@@ -1372,7 +1689,7 @@ void FStreamableManager::AsyncLoadCallback(FSoftObjectPath TargetName)
 			Existing->bAsyncLoadRequestOutstanding = false;
 			if (!Existing->Target)
 			{
-				FindInMemory(TargetName, Existing);
+				FindInMemory(TargetName, Existing, Package);
 			}
 
 			CheckCompletedRequests(TargetName, Existing);
@@ -1389,7 +1706,7 @@ void FStreamableManager::AsyncLoadCallback(FSoftObjectPath TargetName)
 		{
 			// Async load failed to find the object
 			Existing->bLoadFailed = true;
-			UE_LOG(LogStreamableManager, Verbose, TEXT("    Failed async load."), *TargetName.ToString());
+			UE_LOG(LogStreamableManager, Verbose, TEXT("    Failed async load for %s"), *TargetName.ToString());
 		}
 	}
 	else
@@ -1457,11 +1774,11 @@ void FStreamableManager::RemoveReferencedAsset(const FSoftObjectPath& Target, TS
 	// This should always be in the active handles list
 	if (ensureMsgf(Existing, TEXT("Failed to find existing streamable for %s"), *Target.ToString()))
 	{
-		ensureMsgf(Existing->ActiveHandles.Remove(Handle) > 0, TEXT("Failed to remove active handle for %s"), *Target.ToString());
+		ensureMsgf(Existing->ActiveHandles.RemoveSwap(&Handle.Get(), EAllowShrinking::No) > 0, TEXT("Failed to remove active handle for %s"), *Target.ToString());
 
 		// Try removing from loading list if it's still there, this won't call the callback as it's being called from cancel
 		// This may remove more than one copy if streamables were merged
-		int32 LoadingRemoved = Existing->LoadingHandles.Remove(Handle);
+		int32 LoadingRemoved = Existing->LoadingHandles.RemoveSwap(Handle);
 		if (LoadingRemoved > 0)
 		{
 			Handle->StreamablesLoading -= LoadingRemoved;
@@ -1473,6 +1790,20 @@ void FStreamableManager::RemoveReferencedAsset(const FSoftObjectPath& Target, TS
 			}
 		}
 	}
+}
+
+bool FStreamableManager::AreAllAsyncLoadsComplete() const
+{
+	check(IsInGameThread());
+	for (const TPair<FSoftObjectPath, FStreamable*>& Item : StreamableItems)
+	{
+		const FStreamable* Streamable = Item.Value;
+		if (Streamable && Streamable->bAsyncLoadRequestOutstanding)
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 bool FStreamableManager::IsAsyncLoadComplete(const FSoftObjectPath& Target) const
@@ -1513,7 +1844,7 @@ void FStreamableManager::Unload(const FSoftObjectPath& Target)
 	}
 }
 
-TSharedPtr<FStreamableHandle> FStreamableManager::CreateCombinedHandle(const TArray<TSharedPtr<FStreamableHandle> >& ChildHandles, const FString& DebugName)
+TSharedPtr<FStreamableHandle> FStreamableManager::CreateCombinedHandle(const TConstArrayView<TSharedPtr<FStreamableHandle> >& ChildHandles, const FString& DebugName, EStreamableManagerCombinedHandleOptions Options)
 {
 	if (!ensure(ChildHandles.Num() > 0))
 	{
@@ -1525,17 +1856,89 @@ TSharedPtr<FStreamableHandle> FStreamableManager::CreateCombinedHandle(const TAr
 	NewRequest->bIsCombinedHandle = true;
 	NewRequest->DebugName = DebugName;
 
+	static const auto RemapHandleParentRelationship = [](TSharedPtr<FStreamableHandle>& IndividualHandle, TSharedRef<FStreamableHandle>& MergedHandle)
+	{
+		// break backlinking, inject new forelinking (such that our old parent handles now reference the new MergedHandle - our old parent's ChildHandles array will contain MergedHandle, and MergedHandle is our new Parent)...
+		for (int32 Index = 0, Num = IndividualHandle->ParentHandles.Num(); Index < Num; ++Index)
+		{
+			TSharedPtr<FStreamableHandle> Parent = IndividualHandle->ParentHandles[Index].Pin();
+
+			// even though we should run this check (via invoking this lambda) prior to adding MergedHandle to our ParentHandles, it is still possible if the array is not unique
+			if (Parent == MergedHandle)
+			{
+				continue;
+			}
+
+			if (Parent.IsValid())
+			{
+				const int32 FoundIndex = Parent->ChildHandles.Find(IndividualHandle);
+				if (ensure(Parent->ChildHandles.IsValidIndex(FoundIndex)))
+				{
+					// stomp the old link with the new merged handle
+					Parent->ChildHandles[FoundIndex] = MergedHandle;
+				}
+				else
+				{
+					// should be impossible, but at least we can add the merged handle for tracking purposes...
+					Parent->ChildHandles.Add(MergedHandle);
+				}
+				
+				MergedHandle->ParentHandles.Add(Parent);
+			}
+
+			// no longer need the parent handle reference in this handle's parents. The merged handle is within our parent handles, and has us in its ChildHandles.
+			IndividualHandle->ParentHandles.RemoveAtSwap(Index);
+			Index--;
+			Num--;
+		}
+	};
+
+	TStringBuilder<256> DebugNameBuilder;
+
+	if (EnumHasAllFlags(Options, EStreamableManagerCombinedHandleOptions::MergeDebugNames))
+	{
+		DebugNameBuilder.Appendf(TEXT("%s: Merged("), *DebugName);
+	}
+
+	bool bFormattingFirstPass = true;
 	for (TSharedPtr<FStreamableHandle> ChildHandle : ChildHandles)
 	{
-		if (!ensure(ChildHandle.IsValid()))
+		if (!ChildHandle.IsValid())
 		{
-			return nullptr;
+			if (EnumHasAllFlags(Options, EStreamableManagerCombinedHandleOptions::SkipNulls))
+			{
+				continue;
+			}
+			else
+			{
+				ensureMsgf(ChildHandle.IsValid(), TEXT("A child handle is not valid and SkipNulls flag was not used, returning nullptr"));
+				return nullptr;
+			}
 		}
 
 		ensure(ChildHandle->OwningManager == this);
 
+		if (EnumHasAllFlags(Options, EStreamableManagerCombinedHandleOptions::MergeDebugNames))
+		{
+			if (bFormattingFirstPass)
+			{
+				DebugNameBuilder.Appendf(TEXT("%s"), *ChildHandle->DebugName);
+				bFormattingFirstPass = false;
+			}
+			else
+			{
+				DebugNameBuilder.Appendf(TEXT(", %s"), *ChildHandle->DebugName);
+			}
+		}
+
+		if (EnumHasAllFlags(Options, EStreamableManagerCombinedHandleOptions::RedirectParents))
+		{
+			RemapHandleParentRelationship(ChildHandle, NewRequest);
+		}
+
 		ChildHandle->ParentHandles.Add(NewRequest);
 		NewRequest->ChildHandles.Add(ChildHandle);
+
 		if (ChildHandle->bLoadCompleted)
 		{
 			++NewRequest->CompletedChildCount;
@@ -1544,6 +1947,13 @@ TSharedPtr<FStreamableHandle> FStreamableManager::CreateCombinedHandle(const TAr
 		{
 			++NewRequest->CanceledChildCount;
 		}
+	}
+
+	if (EnumHasAllFlags(Options, EStreamableManagerCombinedHandleOptions::MergeDebugNames))
+	{
+		DebugNameBuilder += TEXT(")");
+
+		NewRequest->DebugName = *DebugNameBuilder;
 	}
 
 	// Add to pending list so these handles don't free when not referenced
@@ -1561,22 +1971,18 @@ bool FStreamableManager::GetActiveHandles(const FSoftObjectPath& Target, TArray<
 	FStreamable* Existing = FindStreamable(Target);
 	if (Existing && Existing->ActiveHandles.Num() > 0)
 	{
-		for (TWeakPtr<FStreamableHandle> WeakHandle : Existing->ActiveHandles)
+		for (FStreamableHandle* ActiveHandle : Existing->ActiveHandles)
 		{
-			TSharedPtr<FStreamableHandle> Handle = WeakHandle.Pin();
+			ensure(ActiveHandle->OwningManager == this);
 
-			if (Handle.IsValid())
+			TSharedRef<FStreamableHandle> HandleRef = ActiveHandle->AsShared();
+			if (!bOnlyManagedHandles || ManagedActiveHandles.Contains(HandleRef))
 			{
-				ensure(Handle->OwningManager == this);
-
-				TSharedRef<FStreamableHandle> HandleRef = Handle.ToSharedRef();
-				if (!bOnlyManagedHandles || ManagedActiveHandles.Contains(HandleRef))
-				{
-					// Only add each handle once, we can have duplicates in the source list
-					HandleList.AddUnique(HandleRef);
-				}
+				// Only add each handle once, we can have duplicates in the source list
+				HandleList.AddUnique(MoveTemp(HandleRef));
 			}
 		}
+
 		return HandleList.Num() > 0;
 	}
 
@@ -1595,7 +2001,7 @@ FSoftObjectPath FStreamableManager::ResolveRedirects(const FSoftObjectPath& Targ
 	return Target;
 }
 
-FSoftObjectPath FStreamableManager::HandleLoadedRedirector(UObjectRedirector* LoadedRedirector, FSoftObjectPath RequestedPath, struct FStreamable* RequestedStreamable)
+FSoftObjectPath FStreamableManager::HandleLoadedRedirector(UObjectRedirector* LoadedRedirector, FSoftObjectPath RequestedPath, FStreamable* RequestedStreamable)
 {
 	UE_LOG(LogStreamableManager, Verbose, TEXT("     Found redirect %s"), *LoadedRedirector->GetPathName());
 
@@ -1628,12 +2034,10 @@ FSoftObjectPath FStreamableManager::HandleLoadedRedirector(UObjectRedirector* Lo
 		// This may result in the same handle being in the list twice! But the rest of the code is ready for that
 		// We let LoadFailed and InProgress stay as false on the new streamable because we've successfully loaded an object
 
-		RequestedStreamable->LoadingHandles.Append((*FoundStreamable)->LoadingHandles);
-		(*FoundStreamable)->LoadingHandles.Empty();
+		RequestedStreamable->LoadingHandles.Append(MoveTemp((*FoundStreamable)->LoadingHandles));
+		RequestedStreamable->ActiveHandles.Append(MoveTemp((*FoundStreamable)->ActiveHandles));
 
-		RequestedStreamable->ActiveHandles.Append((*FoundStreamable)->ActiveHandles);
-		(*FoundStreamable)->ActiveHandles.Empty();
-
+		// No handles remain so need to FreeHandles()
 		delete *FoundStreamable;
 	}
 
@@ -1642,4 +2046,3 @@ FSoftObjectPath FStreamableManager::HandleLoadedRedirector(UObjectRedirector* Lo
 	
 	return NewPath;
 }
-

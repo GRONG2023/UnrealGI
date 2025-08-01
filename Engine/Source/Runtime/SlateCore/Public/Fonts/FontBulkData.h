@@ -8,36 +8,32 @@
 #include "Serialization/BulkData.h"
 #include "FontBulkData.generated.h"
 
-UCLASS()
-class SLATECORE_API UFontBulkData : public UObject
+UCLASS(MinimalAPI)
+class UFontBulkData : public UObject
 {
 	GENERATED_BODY()
 
 public:
 	/** Default constructor */
-	UFontBulkData();
+	SLATECORE_API UFontBulkData();
 
 	/** Construct the bulk font data from the given file */
-	void Initialize(const FString& InFontFilename);
+	SLATECORE_API void Initialize(const FString& InFontFilename);
 
 	/** Construct the bulk font data from the given data */
-	void Initialize(const void* const InFontData, const int32 InFontDataSizeBytes);
+	SLATECORE_API void Initialize(const void* const InFontData, const int64 InFontDataSizeBytes);
 
 	/** Locks the bulk font data and returns a read-only pointer to it */
-	const void* Lock(int32& OutFontDataSizeBytes) const;
+	SLATECORE_API const void* Lock(int64& OutFontDataSizeBytes) const;
 
 	/** Unlock the bulk font data, after which point the pointer returned by Lock no longer is valid */
-	void Unlock();
+	SLATECORE_API void Unlock();
 
 	/** Returns the size of the bulk data in bytes */
-	int32 GetBulkDataSize() const;
-
-	/** Returns the size of the bulk data on disk. This can differ from GetBulkDataSize if BULKDATA_SerializeCompressed is set */
-	UE_DEPRECATED(4.24, "This method should no longer be used")
-	int32 GetBulkDataSizeOnDisk() const;
+	SLATECORE_API int64 GetBulkDataSize() const;
 
 	// UObject interface
-	virtual void Serialize(FArchive& Ar) override;
+	SLATECORE_API virtual void Serialize(FArchive& Ar) override;
 
 private:
 	/** Internal bulk data */

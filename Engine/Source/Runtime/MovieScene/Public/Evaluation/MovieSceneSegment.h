@@ -23,6 +23,9 @@ enum class ESectionEvaluationFlags : uint8
 	PreRoll		= 0x01,
 	/** Segment resides inside the 'post-roll' time for the section */
 	PostRoll	= 0x02,
+
+	ForceKeepState = 0x04,
+	ForceRestoreState = 0x08,
 };
 ENUM_CLASS_FLAGS(ESectionEvaluationFlags);
 
@@ -69,6 +72,7 @@ struct FMovieSceneSegmentIdentifier
 template<> struct TStructOpsTypeTraits<FMovieSceneSegmentIdentifier> : public TStructOpsTypeTraitsBase2<FMovieSceneSegmentIdentifier>
 {
 	enum { WithSerializer = true, WithIdenticalViaEquality = true };
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
 
 /**
@@ -243,4 +247,5 @@ struct FMovieSceneSegment
 template<> struct TStructOpsTypeTraits<FMovieSceneSegment> : public TStructOpsTypeTraitsBase2<FMovieSceneSegment>
 {
 	enum { WithSerializer = true, WithCopy = true, WithIdenticalViaEquality = true };
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };

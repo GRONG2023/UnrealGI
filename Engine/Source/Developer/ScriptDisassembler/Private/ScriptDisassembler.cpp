@@ -140,6 +140,51 @@ float FKismetBytecodeDisassembler::ReadFLOAT(int32& ScriptIndex)
 	return Result.f;
 }
 
+double FKismetBytecodeDisassembler::ReadDOUBLE(int32& ScriptIndex)
+{
+	union { double d; int64 i; } Result;
+	Result.i = ReadQWORD(ScriptIndex);
+	return Result.d;
+}
+
+FVector FKismetBytecodeDisassembler::ReadFVECTOR(int32& ScriptIndex)
+{
+	FVector Vec;
+	Vec.X = ReadDOUBLE(ScriptIndex);
+	Vec.Y = ReadDOUBLE(ScriptIndex);
+	Vec.Z = ReadDOUBLE(ScriptIndex);
+	return Vec;
+}
+
+FRotator FKismetBytecodeDisassembler::ReadFROTATOR(int32& ScriptIndex)
+{
+	FRotator Rotator;
+	Rotator.Pitch = ReadDOUBLE(ScriptIndex);
+	Rotator.Yaw = ReadDOUBLE(ScriptIndex);
+	Rotator.Roll = ReadDOUBLE(ScriptIndex);
+	return Rotator;
+}
+
+FQuat FKismetBytecodeDisassembler::ReadFQUAT(int32& ScriptIndex)
+{
+	FQuat Quat;
+	Quat.X = ReadDOUBLE(ScriptIndex);
+	Quat.Y = ReadDOUBLE(ScriptIndex);
+	Quat.Z = ReadDOUBLE(ScriptIndex);
+	Quat.W = ReadDOUBLE(ScriptIndex);
+	return Quat;
+}
+
+FTransform FKismetBytecodeDisassembler::ReadFTRANSFORM(int32& ScriptIndex)
+{
+	FTransform Transform;
+	FQuat TmpRotation = ReadFQUAT(ScriptIndex);
+	FVector TmpTranslation = ReadFVECTOR(ScriptIndex);
+	FVector TmpScale = ReadFVECTOR(ScriptIndex);
+	Transform.SetComponents(TmpRotation, TmpTranslation, TmpScale);
+	return Transform;
+}
+
 CodeSkipSizeType FKismetBytecodeDisassembler::ReadSkipCount(int32& ScriptIndex)
 {
 #if SCRIPT_LIMIT_BYTECODE_TO_64KB
@@ -199,29 +244,95 @@ FString FKismetBytecodeDisassembler::ReadString16(int32& ScriptIndex)
 	return Result;
 }
 
-void FKismetBytecodeDisassembler::ProcessCastByte(int32 CastType, int32& ScriptIndex)
-{
-	// Expression of cast
-	SerializeExpr(ScriptIndex);
-}
-
 void FKismetBytecodeDisassembler::ProcessCommon(int32& ScriptIndex, EExprToken Opcode)
 {
+	static const TCHAR* CastNameTable[CST_Max] = {
+		TEXT("ObjectToInterface"),
+		TEXT("ObjectToBool"),
+		TEXT("InterfaceToBool"),
+		TEXT("DoubleToFloat"),
+		TEXT("FloatToDouble"),
+	};
+
+	auto PrintVariable = [&ScriptIndex, Opcode, this](FStringView VariableDescription)
+	{
+		FProperty* PropertyPtr = ReadPointer<FProperty>(ScriptIndex);
+		FString PropertyName = TEXT("(null)");
+		FString PropertyType = TEXT("(null)");
+		FString ParameterType;
+
+		if (PropertyPtr)
+		{
+			PropertyName = PropertyPtr->GetName();
+
+			FString ExtendedPropertyType;
+			PropertyType = PropertyPtr->GetCPPType(&ExtendedPropertyType);
+			PropertyType += ExtendedPropertyType;
+
+			if (PropertyPtr->HasAnyPropertyFlags(CPF_ParmFlags))
+			{
+				ParameterType = TEXT("(");
+				if (PropertyPtr->HasAnyPropertyFlags(CPF_Parm))
+				{
+					ParameterType += TEXT("Parameter,");
+				}
+
+				if (PropertyPtr->HasAnyPropertyFlags(CPF_OutParm))
+				{
+					ParameterType += TEXT("Out,");
+				}
+
+				if (PropertyPtr->HasAnyPropertyFlags(CPF_ReturnParm))
+				{
+					ParameterType += TEXT("Return,");
+				}
+
+				if (PropertyPtr->HasAnyPropertyFlags(CPF_RequiredParm))
+				{
+					ParameterType += TEXT("Required,");
+				}
+
+				if (PropertyPtr->HasAnyPropertyFlags(CPF_ReferenceParm))
+				{
+					ParameterType += TEXT("Reference,");
+				}
+
+				if (PropertyPtr->HasAnyPropertyFlags(CPF_ConstParm))
+				{
+					ParameterType += TEXT("Const,");
+				}
+
+				int32 LastCommaLocation = ParameterType.Len() - 1;
+				check(LastCommaLocation > 0);
+				ParameterType[LastCommaLocation] = TCHAR(')');
+			}
+		}
+
+		FString Output = 
+			FString::Printf(TEXT("%s $%X: %s of type %s named %s."), *Indents, (int32)Opcode, VariableDescription.GetData(), *PropertyType, *PropertyName);
+
+		if (ParameterType.Len() > 0)
+		{
+			Output += FString::Printf(TEXT(" Parameter flags: %s."), *ParameterType);
+		}
+
+		Ar.Logf(TEXT("%s"), *Output);
+	};
+
 	switch (Opcode)
 	{
-	case EX_PrimitiveCast:
+	case EX_Cast:
 		{
 			// A type conversion.
 			uint8 ConversionType = ReadBYTE(ScriptIndex);
-			Ar.Logf(TEXT("%s $%X: PrimitiveCast of type %d"), *Indents, (int32)Opcode, ConversionType);
+			check(CastNameTable[ConversionType] != nullptr);
+			Ar.Logf(TEXT("%s $%X: Cast of type %d (%s)"), *Indents, (int32)Opcode, ConversionType, CastNameTable[ConversionType]);
 			AddIndent();
 
 			Ar.Logf(TEXT("%s Argument:"), *Indents);
-			ProcessCastByte(ConversionType, ScriptIndex);
+			SerializeExpr(ScriptIndex);
 
-			//@TODO:
-			//Ar.Logf(TEXT("%s Expression:"), *Indents);
-			//SerializeExpr( ScriptIndex );
+			DropIndent();
 			break;
 		}
 	case EX_SetSet:
@@ -229,7 +340,7 @@ void FKismetBytecodeDisassembler::ProcessCommon(int32& ScriptIndex, EExprToken O
  			Ar.Logf(TEXT("%s $%X: set set"), *Indents, (int32)Opcode);
 			SerializeExpr(ScriptIndex);
 			ReadINT(ScriptIndex);
- 			while( SerializeExpr(ScriptIndex) != EX_EndSet)
+ 			while (SerializeExpr(ScriptIndex) != EX_EndSet)
  			{
  				// Set contents
  			}
@@ -261,7 +372,7 @@ void FKismetBytecodeDisassembler::ProcessCommon(int32& ScriptIndex, EExprToken O
  			Ar.Logf(TEXT("%s $%X: set map"), *Indents, (int32)Opcode);
 			SerializeExpr(ScriptIndex);
  			ReadINT(ScriptIndex);
- 			while( SerializeExpr(ScriptIndex) != EX_EndMap)
+ 			while (SerializeExpr(ScriptIndex) != EX_EndMap)
  			{
  				// Map contents
  			}
@@ -447,7 +558,7 @@ void FKismetBytecodeDisassembler::ProcessCommon(int32& ScriptIndex, EExprToken O
 			UStruct* StackNode = ReadPointer<UStruct>(ScriptIndex);
 			Ar.Logf(TEXT("%s $%X: Local Final Script Function (stack node %s::%s)"), *Indents, (int32)Opcode, StackNode ? *StackNode->GetOuter()->GetName() : TEXT("(null)"), StackNode ? *StackNode->GetName() : TEXT("(null)"));
 
-			while (SerializeExpr( ScriptIndex ) != EX_EndFunctionParms)
+			while (SerializeExpr(ScriptIndex) != EX_EndFunctionParms)
 			{
 				// Params
 			}
@@ -469,7 +580,6 @@ void FKismetBytecodeDisassembler::ProcessCommon(int32& ScriptIndex, EExprToken O
 			DropIndent();
 			break;
 		}
-
 	case EX_ComputedJump:
 		{
 			Ar.Logf(TEXT("%s $%X: Computed Jump, offset specified by expression:"), *Indents, (int32)Opcode);
@@ -480,7 +590,6 @@ void FKismetBytecodeDisassembler::ProcessCommon(int32& ScriptIndex, EExprToken O
 
 			break;
 		}
-
 	case EX_Jump:
 		{
 			CodeSkipSizeType SkipCount = ReadSkipCount(ScriptIndex);
@@ -489,32 +598,27 @@ void FKismetBytecodeDisassembler::ProcessCommon(int32& ScriptIndex, EExprToken O
 		}
 	case EX_LocalVariable:
 		{
-			FProperty* PropertyPtr = ReadPointer<FProperty>(ScriptIndex);
-			Ar.Logf(TEXT("%s $%X: Local variable named %s"), *Indents, (int32)Opcode, PropertyPtr ? *PropertyPtr->GetName() : TEXT("(null)"));
+			PrintVariable(TEXT("Local variable"));
 			break;
 		}
 	case EX_DefaultVariable:
 		{
-			FProperty* PropertyPtr = ReadPointer<FProperty>(ScriptIndex);
-			Ar.Logf(TEXT("%s $%X: Default variable named %s"), *Indents, (int32)Opcode, PropertyPtr ? *PropertyPtr->GetName() : TEXT("(null)"));
+			PrintVariable(TEXT("Default variable"));
 			break;
 		}
 	case EX_InstanceVariable:
 		{
-			FProperty* PropertyPtr = ReadPointer<FProperty>(ScriptIndex);
-			Ar.Logf(TEXT("%s $%X: Instance variable named %s"), *Indents, (int32)Opcode, PropertyPtr ? *PropertyPtr->GetName() : TEXT("(null)"));
+			PrintVariable(TEXT("Instance variable"));
 			break;
 		}
 	case EX_LocalOutVariable:
 		{
-			FProperty* PropertyPtr = ReadPointer<FProperty>(ScriptIndex);
-			Ar.Logf(TEXT("%s $%X: Local out variable named %s"), *Indents, (int32)Opcode, PropertyPtr ? *PropertyPtr->GetName() : TEXT("(null)"));
+			PrintVariable(TEXT("Local out variable"));
 			break;
 		}
 	case EX_ClassSparseDataVariable:
 		{
-			FProperty* PropertyPtr = ReadPointer<FProperty>(ScriptIndex);
-			Ar.Logf(TEXT("%s $%X: Class sparse data variable named %s"), *Indents, (int32)Opcode, PropertyPtr ? *PropertyPtr->GetName() : TEXT("(null)"));
+			PrintVariable(TEXT("Class sparse data variable"));
 			break;
 		}
 	case EX_InterfaceContext:
@@ -531,6 +635,12 @@ void FKismetBytecodeDisassembler::ProcessCommon(int32& ScriptIndex, EExprToken O
 	case EX_Nothing:
 		{
 			Ar.Logf(TEXT("%s $%X: EX_Nothing"), *Indents, (int32)Opcode);
+			break;
+		}
+	case EX_NothingInt32:
+		{
+			int32 Value = ReadINT(ScriptIndex);
+			Ar.Logf(TEXT("%s $%X: EX_NothingInt32 %d"), *Indents, (int32)Opcode, Value);
 			break;
 		}
 	case EX_EndOfScript:
@@ -621,7 +731,7 @@ void FKismetBytecodeDisassembler::ProcessCommon(int32& ScriptIndex, EExprToken O
 			UStruct* StackNode = ReadPointer<UStruct>(ScriptIndex);
 			Ar.Logf(TEXT("%s $%X: Final Function (stack node %s::%s)"), *Indents, (int32)Opcode, StackNode ? *StackNode->GetOuter()->GetName() : TEXT("(null)"), StackNode ? *StackNode->GetName() : TEXT("(null)"));
 
-			while (SerializeExpr( ScriptIndex ) != EX_EndFunctionParms)
+			while (SerializeExpr(ScriptIndex) != EX_EndFunctionParms)
 			{
 				// Params
 			}
@@ -633,7 +743,7 @@ void FKismetBytecodeDisassembler::ProcessCommon(int32& ScriptIndex, EExprToken O
 			Ar.Logf(TEXT("%s $%X: CallMulticastDelegate (signature %s::%s) delegate:"), *Indents, (int32)Opcode, StackNode ? *StackNode->GetOuter()->GetName() : TEXT("(null)"), StackNode ? *StackNode->GetName() : TEXT("(null)"));
 			SerializeExpr( ScriptIndex );
 			Ar.Logf(TEXT("Params:"));
-			while (SerializeExpr( ScriptIndex ) != EX_EndFunctionParms)
+			while (SerializeExpr(ScriptIndex) != EX_EndFunctionParms)
 			{
 				// Params
 			}
@@ -708,6 +818,12 @@ void FKismetBytecodeDisassembler::ProcessCommon(int32& ScriptIndex, EExprToken O
 		{
 			float ConstValue = ReadFLOAT(ScriptIndex);
 			Ar.Logf(TEXT("%s $%X: literal float %f"), *Indents, (int32)Opcode, ConstValue);
+			break;
+		}
+	case EX_DoubleConst:
+		{
+			double ConstValue = ReadDOUBLE(ScriptIndex);
+			Ar.Logf(TEXT("%s $%X: literal double %lf"), *Indents, (int32)Opcode, ConstValue);
 			break;
 		}
 	case EX_StringConst:
@@ -805,39 +921,34 @@ void FKismetBytecodeDisassembler::ProcessCommon(int32& ScriptIndex, EExprToken O
 		}
 	case EX_RotationConst:
 		{
-			float Pitch = ReadFLOAT(ScriptIndex);
-			float Yaw = ReadFLOAT(ScriptIndex);
-			float Roll = ReadFLOAT(ScriptIndex);
-
-			Ar.Logf(TEXT("%s $%X: literal rotation (%f,%f,%f)"), *Indents, (int32)Opcode, Pitch, Yaw, Roll);
+			const FRotator Rotator = ReadFROTATOR(ScriptIndex);
+			Ar.Logf(TEXT("%s $%X: literal rotation (%f,%f,%f)"), *Indents, (int32)Opcode, Rotator.Pitch, Rotator.Yaw, Rotator.Roll);
 			break;
 		}
 	case EX_VectorConst:
 		{
-			float X = ReadFLOAT(ScriptIndex);
-			float Y = ReadFLOAT(ScriptIndex);
-			float Z = ReadFLOAT(ScriptIndex);
-
-			Ar.Logf(TEXT("%s $%X: literal vector (%f,%f,%f)"), *Indents, (int32)Opcode, X, Y, Z);
+			FVector Vec = ReadFVECTOR(ScriptIndex);
+			Ar.Logf(TEXT("%s $%X: literal vector (%f,%f,%f)"), *Indents, (int32)Opcode, Vec.X, Vec.Y, Vec.Z);
+			break;
+		}
+	case EX_Vector3fConst:
+		{
+			FVector3f Vec = (FVector3f)ReadFVECTOR(ScriptIndex);
+			Ar.Logf(TEXT("%s $%X: literal float vector (%f,%f,%f)"), *Indents, (int32)Opcode, Vec.X, Vec.Y, Vec.Z);
 			break;
 		}
 	case EX_TransformConst:
 		{
-
-			float RotX = ReadFLOAT(ScriptIndex);
-			float RotY = ReadFLOAT(ScriptIndex);
-			float RotZ = ReadFLOAT(ScriptIndex);
-			float RotW = ReadFLOAT(ScriptIndex);
-
-			float TransX = ReadFLOAT(ScriptIndex);
-			float TransY = ReadFLOAT(ScriptIndex);
-			float TransZ = ReadFLOAT(ScriptIndex);
-
-			float ScaleX = ReadFLOAT(ScriptIndex);
-			float ScaleY = ReadFLOAT(ScriptIndex);
-			float ScaleZ = ReadFLOAT(ScriptIndex);
-
-			Ar.Logf(TEXT("%s $%X: literal transform R(%f,%f,%f,%f) T(%f,%f,%f) S(%f,%f,%f)"), *Indents, (int32)Opcode, TransX, TransY, TransZ, RotX, RotY, RotZ, RotW, ScaleX, ScaleY, ScaleZ);
+			const FTransform Transform = ReadFTRANSFORM(ScriptIndex);
+			const FQuat Rotation = Transform.GetRotation();
+			const FVector Translation = Transform.GetTranslation();
+			const FVector Scale = Transform.GetScale3D();
+			Ar.Logf(TEXT("%s $%X: literal transform R(%f,%f,%f,%f) T(%f,%f,%f) S(%f,%f,%f)"),
+				    *Indents,
+					(int32)Opcode, 
+					Rotation.X, Rotation.Y, Rotation.Z, Rotation.W,
+					Translation.X, Translation.Y, Translation.Z,
+					Scale.X, Scale.Y, Scale.Z);
 			break;
 		}
 	case EX_StructConst:
@@ -845,7 +956,7 @@ void FKismetBytecodeDisassembler::ProcessCommon(int32& ScriptIndex, EExprToken O
 			UScriptStruct* Struct = ReadPointer<UScriptStruct>(ScriptIndex);
 			int32 SerializedSize = ReadINT(ScriptIndex);
 			Ar.Logf(TEXT("%s $%X: literal struct %s (serialized size: %d)"), *Indents, (int32)Opcode, *Struct->GetName(), SerializedSize);
-			while( SerializeExpr(ScriptIndex) != EX_EndStructConst )
+			while (SerializeExpr(ScriptIndex) != EX_EndStructConst)
 			{
 				// struct contents
 			}
@@ -855,7 +966,7 @@ void FKismetBytecodeDisassembler::ProcessCommon(int32& ScriptIndex, EExprToken O
 		{
  			Ar.Logf(TEXT("%s $%X: set array"), *Indents, (int32)Opcode);
 			SerializeExpr(ScriptIndex);
- 			while( SerializeExpr(ScriptIndex) != EX_EndArray)
+ 			while (SerializeExpr(ScriptIndex) != EX_EndArray)
  			{
  				// Array contents
  			}
@@ -870,6 +981,13 @@ void FKismetBytecodeDisassembler::ProcessCommon(int32& ScriptIndex, EExprToken O
 			{
 				// Array contents
 			}
+			break;
+		}
+	case EX_BitFieldConst:
+		{
+			FProperty* BitProperty = ReadPointer<FProperty>(ScriptIndex);
+			uint8 ConstValue = ReadBYTE(ScriptIndex);
+			Ar.Logf(TEXT("%s $%X: set bit property %s to value %d"), *Indents, (int32)Opcode, *GetNameSafe(BitProperty), ConstValue);
 			break;
 		}
 	case EX_ByteConst:
@@ -1050,8 +1168,8 @@ void FKismetBytecodeDisassembler::ProcessCommon(int32& ScriptIndex, EExprToken O
 		}
 	case EX_SwitchValue:
 		{
-			const auto NumCases = ReadWORD(ScriptIndex);
-			const auto AfterSkip = ReadSkipCount(ScriptIndex);
+			const uint16 NumCases = ReadWORD(ScriptIndex);
+			const CodeSkipSizeType AfterSkip = ReadSkipCount(ScriptIndex);
 
 			Ar.Logf(TEXT("%s $%X: Switch Value %d cases, end in 0x%X"), *Indents, (int32)Opcode, NumCases, AfterSkip);
 			AddIndent();
@@ -1062,7 +1180,7 @@ void FKismetBytecodeDisassembler::ProcessCommon(int32& ScriptIndex, EExprToken O
 			{
 				Ar.Logf(TEXT("%s [%d] Case Index (label: 0x%X):"), *Indents, CaseIndex, ScriptIndex);
 				SerializeExpr(ScriptIndex);	// case index value term
-				const auto OffsetToNextCase = ReadSkipCount(ScriptIndex);
+				const CodeSkipSizeType OffsetToNextCase = ReadSkipCount(ScriptIndex);
 				Ar.Logf(TEXT("%s [%d] Offset to the next case: 0x%X"), *Indents, CaseIndex, OffsetToNextCase);
 				Ar.Logf(TEXT("%s [%d] Case Result:"), *Indents, CaseIndex);
 				SerializeExpr(ScriptIndex);	// case term
@@ -1081,6 +1199,42 @@ void FKismetBytecodeDisassembler::ProcessCommon(int32& ScriptIndex, EExprToken O
 			SerializeExpr(ScriptIndex);
 			SerializeExpr(ScriptIndex);
 			DropIndent();
+			break;
+		}
+	case EX_AutoRtfmTransact:
+		{
+			// Code offset.
+			int32 Value = ReadINT(ScriptIndex);				
+			CodeSkipSizeType SkipCount = ReadSkipCount(ScriptIndex);
+
+			Ar.Logf(TEXT("%s $%X: AutoRtfmTransact %d to offset 0x%X"), *Indents, (int32)Opcode, Value, SkipCount);
+
+			while (SerializeExpr(ScriptIndex) != EX_AutoRtfmStopTransact)
+			{
+				// Params
+			}
+			break;
+		}
+	case EX_AutoRtfmStopTransact:
+		{
+			int32 Value = ReadINT(ScriptIndex);
+			EAutoRtfmStopTransactMode Mode = EAutoRtfmStopTransactMode(ReadBYTE(ScriptIndex));
+
+			const TCHAR* ModeText = TEXT("");
+			switch(Mode)
+			{
+			case EAutoRtfmStopTransactMode::GracefulExit: ModeText = TEXT("GracefulExit"); break;
+			case EAutoRtfmStopTransactMode::AbortingExit: ModeText = TEXT("AbortingExit"); break;
+			case EAutoRtfmStopTransactMode::AbortingExitAndAbortParent: ModeText = TEXT("AbortingExitAndAbortParent"); break;
+			}
+
+			Ar.Logf(TEXT("%s $%X: EX_AutoRtfmStopTransact (%s) %d"), *Indents, (int32)Opcode, ModeText, Value);
+			break;
+		}
+	case EX_AutoRtfmAbortIfNot:
+		{
+			Ar.Logf(TEXT("%s $%X: EX_AutoRtfmAbortIfNot"), *Indents, (int32)Opcode);
+			SerializeExpr(ScriptIndex);
 			break;
 		}
 	default:

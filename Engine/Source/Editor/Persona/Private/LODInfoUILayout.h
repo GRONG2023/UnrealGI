@@ -11,6 +11,7 @@
 #include "UObject/Object.h"
 #include "IPersonaToolkit.h"
 #include "Engine/SkeletalMesh.h"
+#include "Engine/SkinnedAssetCommon.h"
 #include "LODInfoUILayout.generated.h"
 
 UCLASS(HideCategories=Object, MinimalAPI)
@@ -20,6 +21,7 @@ class ULODInfoUILayout : public UObject
 
 public:
 	void SetReferenceLODInfo(TWeakPtr<IPersonaToolkit> InPersonaToolkit, int32 InLODIndex);
+	void RefreshReferenceLODInfo();
 
 	TSharedPtr<IPersonaToolkit> GetPersonaToolkit() const
 	{

@@ -6,21 +6,33 @@
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/Views/STableRow.h"
+#include "Animation/SmartName.h"
+#include "Widgets/Input/SSearchBox.h"
+#include "PersonaDelegates.h"
 
 class IEditableSkeleton;
-
-DECLARE_DELEGATE_OneParam(FOnCurveNamePicked, const FName& /*PickedName*/)
 
 class SAnimCurvePicker : public SCompoundWidget
 {
 public:
+
+	/** Virtual destructor. */
+	virtual ~SAnimCurvePicker() override;
+	
 	SLATE_BEGIN_ARGS(SAnimCurvePicker) {}
 
-	SLATE_EVENT(FOnCurveNamePicked, OnCurveNamePicked)
+	SLATE_EVENT(FOnCurvePicked, OnCurvePicked)
 
+	SLATE_EVENT(FIsCurveNameMarkedForExclusion, IsCurveNameMarkedForExclusion)
+	
 	SLATE_END_ARGS()
 
-	void Construct(const FArguments& InArgs, const TSharedRef<IEditableSkeleton>& InEditableSkeleton);
+	/**
+	 * Construct this widget.
+	 * @param InArgs - The declaration data for this widget
+	 * @param InSkeleton - The skeleton from which the widget extracts curve information 
+	 */
+	void Construct(const FArguments& InArgs, const USkeleton* InSkeleton);
 
 private:
 	/** Refresh the list of available curves */
@@ -30,26 +42,35 @@ private:
 	void FilterAvailableCurves();
 
 	/** UI handlers */
-	void HandleSelectionChanged(TSharedPtr<FString> InItem, ESelectInfo::Type InSelectionType);
-	TSharedRef<ITableRow> HandleGenerateRow(TSharedPtr<FString> InItem, const TSharedRef<STableViewBase>& InOwnerTable);
+	void HandleSelectionChanged(TSharedPtr<FName> InItem, ESelectInfo::Type InSelectionType);
+	TSharedRef<ITableRow> HandleGenerateRow(TSharedPtr<FName> InItem, const TSharedRef<STableViewBase>& InOwnerTable);
 	void HandleFilterTextChanged(const FText& InFilterText);
 
 private:
 	/** Delegate fired when a curve name is picked */
-	FOnCurveNamePicked OnCurveNamePicked;
+	FOnCurvePicked OnCurvePicked;
+
+	/* Filter predicate to determine if curve should be excluded from the picker's curve list */
+	FIsCurveNameMarkedForExclusion IsCurveNameMarkedForExclusion;
 
 	/** The editable skeleton we use to grab curves from */
-	TWeakPtr<IEditableSkeleton> EditableSkeleton;
+	TWeakObjectPtr<const USkeleton> Skeleton;
 
 	/** The names of the curves we are displaying */
-	TArray<TSharedPtr<FString>> CurveNames;
+	TArray<TSharedPtr<FName>> CurveNames;
 
 	/** All the unique curve names we can find */
-	TSet<FString> UniqueCurveNames;
+	TSet<FName> UniqueCurveNames;
 
 	/** The string we use to filter curve names */
 	FString FilterText;
 
 	/** The list view used to display names */
-	TSharedPtr<SListView<TSharedPtr<FString>>> NameListView;
+	TSharedPtr<SListView<TSharedPtr<FName>>> NameListView;
+
+	/** The search box used to filter curves */
+	TSharedPtr<SSearchBox> SearchBox;
+
+	/** Whether we should show other skeleton's curves */
+	bool bShowOtherSkeletonCurves;
 };

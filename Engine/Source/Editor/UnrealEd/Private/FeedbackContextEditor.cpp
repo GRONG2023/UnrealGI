@@ -6,20 +6,23 @@
 #include "Modules/ModuleManager.h"
 #include "Fonts/FontMeasure.h"
 #include "Framework/Application/SlateApplication.h"
+#include "RenderingThread.h"
+#include "RenderDeferredCleanup.h"
+#include "RHI.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Notifications/SProgressBar.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Input/SButton.h"
 #include "Styling/CoreStyle.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Editor.h"
 #include "Dialogs/SBuildProgress.h"
 #include "Interfaces/IMainFrameModule.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "Engine/Engine.h"
-#include "StudioAnalytics.h"
 #include "AnalyticsEventAttribute.h"
+#include "Styling/StarshipCoreStyle.h"
 
 /** Called to cancel the slow task activity */
 DECLARE_DELEGATE( FOnCancelClickedDelegate );
@@ -33,7 +36,7 @@ DECLARE_DELEGATE_RetVal(bool, FReceiveUserCancelDelegate);
 class SSlowTaskWidget : public SBorder
 {
 	/** The maximum number of secondary bars to show on the widget */
-	static const int32 MaxNumSecondaryBars = 3;
+	static const int32 MaxNumSecondaryBars = 1;
 
 	/** The width of the dialog, and horizontal padding */
 	static const int32 FixedWidth = 600, FixedPaddingH = 24;
@@ -50,7 +53,7 @@ public:
 		SLATE_EVENT( FReceiveUserCancelDelegate, ReceiveUserCancelDelegate)
 
 		/** The feedback scope stack that we are presenting to the user */
-		SLATE_ARGUMENT( TWeakPtr<FSlowTaskStack>, ScopeStack )
+		SLATE_ARGUMENT(TWeakPtr<FSlowTaskStack>, ScopeStack)
 
 	SLATE_END_ARGS()
 
@@ -84,21 +87,21 @@ public:
 
 						+ SHorizontalBox::Slot()
 						[
-							SNew( STextBlock )
+							SNew(STextBlock)
 							.AutoWrapText(true)
-							.Text( this, &SSlowTaskWidget::GetProgressText, 0 )
+							.Text(this, &SSlowTaskWidget::GetProgressText, 0)
 							// The main font size dynamically changes depending on the content
-							.Font( this, &SSlowTaskWidget::GetMainTextFont )
+							.Font(this, &SSlowTaskWidget::GetMainTextFont)
 						]
 
 						+ SHorizontalBox::Slot()
 						.Padding(FMargin(5.f, 0, 0, 0))
 						.AutoWidth()
 						[
-							SNew( STextBlock )
-							.Text( this, &SSlowTaskWidget::GetPercentageText )
+							SNew(STextBlock )
+							.Text(this, &SSlowTaskWidget::GetPercentageText)
 							// The main font size dynamically changes depending on the content
-							.Font( FCoreStyle::GetDefaultFontStyle("Light", 14) )
+							.Font(FStarshipCoreStyle::GetDefaultFontStyle("NormalFont", 14))
 						]
 					]
 				]
@@ -107,13 +110,11 @@ public:
 				.AutoHeight()
 				[
 					SNew(SBox)
-					.HeightOverride(MainBarHeight)
+					.HeightOverride(static_cast<float>(MainBarHeight))
 					[
 						SNew(SProgressBar)
 						.BorderPadding(FVector2D::ZeroVector)
-						.Percent( this, &SSlowTaskWidget::GetProgressFraction, 0 )
-						.BackgroundImage( FEditorStyle::GetBrush("ProgressBar.ThinBackground") )
-						.FillImage( FEditorStyle::GetBrush("ProgressBar.ThinFill") )
+						.Percent(this, &SSlowTaskWidget::GetProgressFraction, 0)
 					]
 				]
 			]
@@ -143,17 +144,22 @@ public:
 		}
 
 		SBorder::Construct( SBorder::FArguments()
-			.BorderImage(FEditorStyle::GetBrush("Menu.Background"))
+			.BorderImage(FAppStyle::GetBrush("Brushes.Header"))
 			.VAlign(VAlign_Center)
 			.Padding(FMargin(FixedPaddingH))
 			[
 				SNew(SBox).
-				WidthOverride(FixedWidth) 
+				WidthOverride(static_cast<float>(FixedWidth))
 				[
 					VerticalBox 
 				]
 			]
 		);
+
+		for (int SecondaryBarIndex = 0; SecondaryBarIndex < MaxNumSecondaryBars; ++SecondaryBarIndex)
+		{
+			CreateSecondaryBar(SecondaryBarIndex + 1); // Index 0 is the main bar
+		}
 
 		// Make sure all our bars are set up
 		UpdateDynamicProgressBars();
@@ -172,44 +178,88 @@ private:
 	/** Updates the dynamic progress bars for this widget */
 	void UpdateDynamicProgressBars()
 	{
-		auto ScopeStack = WeakStack.Pin();
-		if (!ScopeStack.IsValid())
+		TSharedPtr<FSlowTaskStack> ScopeStackPtr = WeakStack.Pin();
+		if (!ScopeStackPtr.IsValid())
 		{
 			return;
 		}
+		const FSlowTaskStack &ScopeStack = *(ScopeStackPtr.Get());
 
 		static const double VisibleScopeThreshold = 0.5;
 
-		DynamicProgressIndices.Reset();
+		DynamicProgressIndices.Reset(MaxNumSecondaryBars + 1); // Add one for the main bar
 		
 		// Always show the first one
-		DynamicProgressIndices.Add(0);
+		DynamicProgressIndices.Emplace(0);
 
-		for (int32 Index = 1; Index < ScopeStack->Num() && DynamicProgressIndices.Num() <= MaxNumSecondaryBars - 1; ++Index)
+		const int32 ScopeCount = ScopeStack.Num();
+
+		// Start from the top of the stack to find the newest Important tasks, if there are any
+		for (int32 ReverseScopeIndex = ScopeCount - 1; ReverseScopeIndex > 0 && DynamicProgressIndices.Num() <= MaxNumSecondaryBars; --ReverseScopeIndex)
 		{
-			const auto* Scope = (*ScopeStack)[Index];
-
-			if (Scope->Visibility == ESlowTaskVisibility::ForceVisible)
+			const FSlowTask *const Scope = ScopeStack[ReverseScopeIndex];
+			if (Scope->Visibility == ESlowTaskVisibility::Important)
 			{
-				DynamicProgressIndices.Add(Index);
-			}
-			else if (Scope->Visibility == ESlowTaskVisibility::Default && !Scope->DefaultMessage.IsEmpty())
-			{
-				const auto TimeOpen = FPlatformTime::Seconds() - Scope->StartTime;
-
-				// We only show visible scopes if they have been opened a while
-				if (TimeOpen > VisibleScopeThreshold)
+				if (Scope->DefaultMessage.IsEmpty())
 				{
-					DynamicProgressIndices.Add(Index);
+					UE_LOG(LogSlate, Warning, TEXT("An important slow task had no default message, if this is intended this warning can be ignored."));
 				}
+
+				DynamicProgressIndices.Emplace(ReverseScopeIndex);
 			}
 		}
 
-		// Create progress bars for anything that we haven't cached yet
-		// We don't destroy old widgets, they just remain ghosted until shown again
-		for (int32 Index = SecondaryBars->GetChildren()->Num() + 1; Index < DynamicProgressIndices.Num(); ++Index)
+		// The Importants were added in reverse order, make sure to skip the first element: Data() + 1
+		Algo::Reverse(DynamicProgressIndices.GetData() + 1, DynamicProgressIndices.Num() - 1);
+				
+		for (int32 ScopeIndex = 1, InsertIndex = 1; ScopeIndex < ScopeCount && DynamicProgressIndices.Num() <= MaxNumSecondaryBars; ++ScopeIndex)
 		{
-			CreateSecondaryBar(Index);
+			const FSlowTask *const Scope = ScopeStack[ScopeIndex];
+			switch (Scope->Visibility)
+			{
+				case ESlowTaskVisibility::Default:
+				{
+					if (!Scope->DefaultMessage.IsEmpty())
+					{
+						const double TimeOpen = FPlatformTime::Seconds() - Scope->StartTime;
+
+						// We only show default scopes if they have been opened a while
+						if (TimeOpen > VisibleScopeThreshold)
+						{
+							DynamicProgressIndices.EmplaceAt(InsertIndex, ScopeIndex);
+							++InsertIndex;
+						}
+					}
+
+					break;
+				}
+
+				case ESlowTaskVisibility::ForceVisible:
+				{
+					if (Scope->DefaultMessage.IsEmpty())
+					{
+						UE_LOG(LogSlate, Warning, TEXT("A forced visible slow task had no default message, if this is intended this warning can be ignored."));
+					}
+
+					DynamicProgressIndices.EmplaceAt(InsertIndex, ScopeIndex);
+					++InsertIndex;
+
+					break;
+				}
+
+				case ESlowTaskVisibility::Important: // These have already been added
+				{
+					// Increase the insert index to start inserting after the already added Important task
+					++InsertIndex;
+					break;
+				}
+
+				// ESlowTaskVisibility::Invisible:
+				default:
+				{
+					break;
+				}
+			}
 		}
 	}
 
@@ -227,7 +277,6 @@ private:
 			[
 				SNew( STextBlock )
 				.Text( this, &SSlowTaskWidget::GetProgressText, Index )
-				.Font( FCoreStyle::GetDefaultFontStyle("Regular", 9) )
 				.ColorAndOpacity( FSlateColor::UseSubduedForeground() )
 			]
 
@@ -235,19 +284,11 @@ private:
 			.AutoHeight()
 			[
 				SNew(SBox)
-				.HeightOverride(SecondaryBarHeight)
+				.HeightOverride(static_cast<float>(SecondaryBarHeight))
 				[
-					SNew(SBorder)
-					.Padding(0)
-					.BorderImage(FEditorStyle::GetBrush("NoBorder"))
-					.ColorAndOpacity( this, &SSlowTaskWidget::GetSecondaryProgressBarTint, Index )
-					[
-						SNew(SProgressBar)
-						.BorderPadding(FVector2D::ZeroVector)
-						.Percent( this, &SSlowTaskWidget::GetProgressFraction, Index )
-						.BackgroundImage( FEditorStyle::GetBrush("ProgressBar.ThinBackground") )
-						.FillImage( FEditorStyle::GetBrush("ProgressBar.ThinFill") )
-					]
+					SNew(SProgressBar)
+					.BorderPadding(FVector2D::ZeroVector)
+					.Percent( this, &SSlowTaskWidget::GetProgressFraction, Index )
 				]
 			]
 		];
@@ -273,7 +314,7 @@ private:
 		TSharedRef<FSlateFontMeasure> MeasureService = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
 
 		const int32 MaxFontSize = 14;
-		FSlateFontInfo FontInfo = FCoreStyle::GetDefaultFontStyle("Light", MaxFontSize);
+		FSlateFontInfo FontInfo = FStarshipCoreStyle::GetDefaultFontStyle("NormalFont", MaxFontSize);
 
 		const FText MainText = GetProgressText(0);
 		const int32 MaxTextWidth = FixedWidth - FixedPaddingH*2;
@@ -330,7 +371,7 @@ private:
 
 	EVisibility GetSecondaryBarVisibility(int32 Index) const
 	{
-		return DynamicProgressIndices.IsValidIndex(Index) ? EVisibility::HitTestInvisible : EVisibility::Collapsed;
+		return DynamicProgressIndices.IsValidIndex(Index) ? EVisibility::HitTestInvisible : EVisibility::Hidden;
 	}
 
 	/** Called when the cancel button is clicked */
@@ -377,11 +418,14 @@ const int32 SSlowTaskWidget::SecondaryBarHeight;
 
 static void TickSlate(TSharedPtr<SWindow> SlowTaskWindow)
 {
-	// Avoid re-entrancy by ticking the active modal window again. This can happen if thhe slow task window is open and a sibling modal window is open as well.  We only tick slate if we are the active modal window or a child of the active modal window
+	// Avoid re-entrancy by ticking the active modal window again. This can happen if the slow task window is open and a sibling modal window is open as well.  We only tick slate if we are the active modal window or a child of the active modal window
 	if( SlowTaskWindow.IsValid() && ( FSlateApplication::Get().GetActiveModalWindow() == SlowTaskWindow || SlowTaskWindow->IsDescendantOf( FSlateApplication::Get().GetActiveModalWindow() ) ) )
 	{
+		// Testing if we are already ticking the rendering. That is to prevent a double "BeginFrame" in case the user wrongly uses the FSlateApplication::OnPreTick to start a slow task.
+		bool bIsTicking = FSlateApplication::Get().IsTicking();
+
 		// Mark begin frame
-		if (GIsRHIInitialized)
+		if (!bIsTicking && GIsRHIInitialized)
 		{
 			ENQUEUE_RENDER_COMMAND(BeginFrameCmd)([](FRHICommandListImmediate& RHICmdList) { RHICmdList.BeginFrame(); });
 		}
@@ -390,7 +434,7 @@ static void TickSlate(TSharedPtr<SWindow> SlowTaskWindow)
 		FSlateApplication::Get().Tick();
 
 		// End frame so frame fence number gets incremented
-		if (GIsRHIInitialized)
+		if (!bIsTicking && GIsRHIInitialized)
 		{
 			ENQUEUE_RENDER_COMMAND(EndFrameCmd)([](FRHICommandListImmediate& RHICmdList) { RHICmdList.EndFrame(); });
 		}
@@ -404,14 +448,6 @@ FFeedbackContextEditor::FFeedbackContextEditor()
 	: HasTaskBeenCancelled(false)
 {
 	
-}
-
-void FFeedbackContextEditor::Serialize( const TCHAR* V, ELogVerbosity::Type Verbosity, const class FName& Category )
-{
-	if( !GLog->IsRedirectingTo( this ) )
-	{
-		GLog->Serialize( V, Verbosity, Category );
-	}
 }
 
 void FFeedbackContextEditor::StartSlowTask( const FText& Task, bool bShowCancelButton )
@@ -469,15 +505,15 @@ void FFeedbackContextEditor::StartSlowTask( const FText& Task, bool bShowCancelB
 					OnCancelClicked = FOnCancelClickedDelegate::CreateRaw(this, &FFeedbackContextEditor::OnUserCancel);
 				}
 
-				const bool bFocusAndActivate = FPlatformApplicationMisc::IsThisApplicationForeground();
+				const bool bFocus = FApp::HasFocus();
 				FReceiveUserCancelDelegate ReceiveUserCancelDelegate = FReceiveUserCancelDelegate::CreateRaw(this, &FFeedbackContextEditor::ReceivedUserCancel);
 				TSharedRef<SWindow> SlowTaskWindowRef = SNew(SWindow)
 					.SizingRule(ESizingRule::Autosized)
 					.AutoCenter(EAutoCenter::PreferredWorkArea)
 					.IsPopupWindow(true)
 					.CreateTitleBar(true)
-					.ActivationPolicy(bFocusAndActivate ? EWindowActivationPolicy::Always : EWindowActivationPolicy::Never)
-					.FocusWhenFirstShown(bFocusAndActivate);
+					.ActivationPolicy(bFocus ? EWindowActivationPolicy::Always : EWindowActivationPolicy::Never)
+					.FocusWhenFirstShown(bFocus);
 
 				SlowTaskWindowRef->SetContent(
 					SNew(SSlowTaskWidget)
@@ -493,8 +529,6 @@ void FFeedbackContextEditor::StartSlowTask( const FText& Task, bool bShowCancelB
 
 				SlowTaskWindowRef->ShowWindow();
 
-				SlowTaskStartTime = FStudioAnalytics::GetAnalyticSeconds();
-
 				TickSlate(SlowTaskWindow.Pin());
 			}
 
@@ -507,12 +541,7 @@ void FFeedbackContextEditor::FinalizeSlowTask()
 {
 	auto Window = SlowTaskWindow.Pin();
 	if (Window.IsValid())
-	{
-		const double SlowTaskDialogTime = FStudioAnalytics::GetAnalyticSeconds() - SlowTaskStartTime;
-		
-		const FText TaskName = ScopeStack.Num() > 0 ? ScopeStack[0]->DefaultMessage : FText::GetEmpty();
-		FStudioAnalytics::FireEvent_Loading(TEXT("SlowTaskDialog"), SlowTaskDialogTime, { FAnalyticsEventAttribute(TEXT("Task"), TaskName.ToString()) });
-
+	{	
 		Window->SetContent(SNullWidget::NullWidget);
 		Window->RequestDestroyWindow();
 		SlowTaskWindow.Reset();
@@ -523,6 +552,8 @@ void FFeedbackContextEditor::FinalizeSlowTask()
 
 void FFeedbackContextEditor::ProgressReported( const float TotalProgressInterp, FText DisplayMessage )
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FFeedbackContextEditor::ProgressReported);
+
 	if (!(FPlatformSplash::IsShown() || BuildProgressWidget.IsValid() || SlowTaskWindow.IsValid()))
 	{
 		return;
@@ -534,8 +565,11 @@ void FFeedbackContextEditor::ProgressReported( const float TotalProgressInterp, 
 	{
 		// Get list of objects that are pending cleanup.
 		FPendingCleanupObjects* PendingCleanupObjects = GetPendingCleanupObjects();
-		// Flush rendering commands in the queue.
-		FlushRenderingCommands();
+		if (!PendingCleanupObjects->IsEmpty())
+		{
+			// Flush rendering commands in the queue.
+			FlushRenderingCommands();
+		}
 		// It is now safe to delete the pending clean objects.
 		delete PendingCleanupObjects;
 		// Keep track of time this operation was performed so we don't do it too often.
@@ -557,7 +591,7 @@ void FFeedbackContextEditor::ProgressReported( const float TotalProgressInterp, 
 				BuildProgressWidget->SetBuildStatusText(DisplayMessage);
 			}
 
-			BuildProgressWidget->SetBuildProgressPercent(TotalProgressInterp * 100, 100);
+			BuildProgressWidget->SetBuildProgressPercent(static_cast<int32>(TotalProgressInterp * 100), 100);
 			TickSlate(BuildProgressWindow.Pin());
 		}
 		else if (SlowTaskWindow.IsValid())
@@ -567,16 +601,37 @@ void FFeedbackContextEditor::ProgressReported( const float TotalProgressInterp, 
 	}
 	else if (FPlatformSplash::IsShown())
 	{
-		// Always show the top-most message
-		for (int i = ScopeStack.Num() - 1; i > -1; --i)
+		// look for important messages:
+		bool bFoundImportantMessage = false;
+		for (int32 i = ScopeStack.Num() - 1; i > -1; --i)
 		{
-			const FText ThisMessage = ScopeStack[i]->GetCurrentMessage();
-			if (!ThisMessage.IsEmpty())
+			if (ScopeStack[i]->Visibility == ESlowTaskVisibility::Important)
 			{
-				DisplayMessage = ThisMessage;
-				break;
+				const FText ThisMessage = ScopeStack[i]->GetCurrentMessage();
+				if (!ThisMessage.IsEmpty())
+				{
+					bFoundImportantMessage = true;
+					DisplayMessage = ThisMessage;
+					break;
+				}
 			}
 		}
+
+		// If nothing important, always show the top-most message
+		if (!bFoundImportantMessage)
+		{
+			for (int32 i = ScopeStack.Num() - 1; i > -1; --i)
+			{
+				const FText ThisMessage = ScopeStack[i]->GetCurrentMessage();
+				if (!ThisMessage.IsEmpty())
+				{
+					DisplayMessage = ThisMessage;
+					break;
+				}
+			}
+		}
+
+		int DisplayProgress = 0;
 
 		if (!DisplayMessage.IsEmpty())
 		{
@@ -605,9 +660,11 @@ void FFeedbackContextEditor::ProgressReported( const float TotalProgressInterp, 
 				}
 			}
 
-			DisplayMessage = FText::FromString(FString::Printf(TEXT("%3i%% - %s"), int(TotalProgressInterp * 100.f), *NewDisplayMessage));
+			DisplayProgress = int(TotalProgressInterp * 100.f);
+			DisplayMessage = FText::FromString(FString::Printf(TEXT("%i%% - %s"), DisplayProgress, *NewDisplayMessage));
 		}
 
+		FPlatformSplash::SetProgress(DisplayProgress);
 		FPlatformSplash::SetSplashText(SplashTextType::StartupProgress, *DisplayMessage.ToString());
 	}
 }
@@ -629,7 +686,7 @@ void FFeedbackContextEditor::OnUserCancel()
 TWeakPtr<class SBuildProgressWidget> FFeedbackContextEditor::ShowBuildProgressWindow()
 {
 	TSharedRef<SWindow> BuildProgressWindowRef = SNew(SWindow)
-		.ClientSize(FVector2D(500,200))
+		.ClientSize(FVector2D(600,200))
 		.IsPopupWindow(true);
 
 	BuildProgressWidget = SNew(SBuildProgressWidget);

@@ -7,7 +7,10 @@
 #include "UObject/UObjectIterator.h"
 
 #include "Blueprint/UserWidget.h"
-#include "Components/CanvasPanel.h"
+#include "Components/CanvasPanel.h"	
+#include "Components/GridPanel.h"
+#include "Components/HorizontalBox.h"
+#include "Components/VerticalBox.h"
 
 UUMGEditorProjectSettings::UUMGEditorProjectSettings()
 {
@@ -16,9 +19,27 @@ UUMGEditorProjectSettings::UUMGEditorProjectSettings()
 	bShowWidgetsFromEngineContent = false;
 	bShowWidgetsFromDeveloperContent = true;
 
+	bEnableMakeVariable = true;
+	bEnableWidgetAnimationEditor = true;
+	bEnablePaletteWindow = true;
+	bEnableLibraryWindow = true;
+	bEnableHierarchyWindow = true;
+	bEnableBindWidgetWindow = true;
+	bEnableNavigationSimulationWindow = true;
+
+	bUseEditorConfigPaletteFiltering = false;
+	bUseUserWidgetParentClassViewerSelector = true;
+	bUseUserWidgetParentDefaultClassViewerSelector = true;
+
 	bUseWidgetTemplateSelector = false;
-	DefaultRootWidget = UCanvasPanel::StaticClass();
-	DefaultWidgetParentClass = UUserWidget::StaticClass();
+	CommonRootWidgetClasses = {
+		UHorizontalBox::StaticClass(),
+		UVerticalBox::StaticClass(),
+		UGridPanel::StaticClass(),
+		UCanvasPanel::StaticClass()
+	};
+	DefaultRootWidget = nullptr;
+	FavoriteWidgetParentClasses.Add(UUserWidget::StaticClass());
 }
 
 #if WITH_EDITOR
@@ -34,83 +55,6 @@ FText UUMGEditorProjectSettings::GetSectionDescription() const
 }
 
 #endif
-
-bool UUMGEditorProjectSettings::CompilerOption_AllowBlueprintTick(const class UWidgetBlueprint* WidgetBlueprint) const
-{
-	return GetFirstCompilerOption(WidgetBlueprint, &FWidgetCompilerOptions::bAllowBlueprintTick, true);
-}
-
-bool UUMGEditorProjectSettings::CompilerOption_AllowBlueprintPaint(const class UWidgetBlueprint* WidgetBlueprint) const
-{
-	return GetFirstCompilerOption(WidgetBlueprint, &FWidgetCompilerOptions::bAllowBlueprintPaint, true);
-}
-
-EPropertyBindingPermissionLevel UUMGEditorProjectSettings::CompilerOption_PropertyBindingRule(const class UWidgetBlueprint* WidgetBlueprint) const
-{
-	return GetFirstCompilerOption(WidgetBlueprint, &FWidgetCompilerOptions::PropertyBindingRule, EPropertyBindingPermissionLevel::Allow);
-}
-
-TArray<UWidgetCompilerRule*> UUMGEditorProjectSettings::CompilerOption_Rules(const class UWidgetBlueprint* WidgetBlueprint) const
-{
-	TArray<UWidgetCompilerRule*> Rules;
-	GetCompilerOptionsForWidget(WidgetBlueprint, [&Rules](const FWidgetCompilerOptions& Options) {
-		for (const TSoftClassPtr<UWidgetCompilerRule>& RuleClassPtr : Options.Rules)
-		{
-			// The compiling rule may not be loaded yet in early loading phases, we'll
-			// just have to skip the rules in those cases.
-			RuleClassPtr.LoadSynchronous();
-			if (RuleClassPtr)
-			{
-				if (UWidgetCompilerRule* Rule = RuleClassPtr->GetDefaultObject<UWidgetCompilerRule>())
-				{
-					Rules.Add(Rule);
-				}
-			}
-		}
-		return false;
-	});
-	return Rules;
-}
-
-void UUMGEditorProjectSettings::GetCompilerOptionsForWidget(const UWidgetBlueprint* WidgetBlueprint, TFunctionRef<bool(const FWidgetCompilerOptions&)> Operator) const
-{
-	FString AssetPath = WidgetBlueprint->GetOutermost()->GetName();
-	FSoftObjectPath SoftObjectPath = WidgetBlueprint->GetPathName();
-	
-	// Don't apply the rules to the engine widgets.
-	if (AssetPath.StartsWith(TEXT("/Engine")))
-	{
-		return;
-	}
-
-	for (int32 DirectoryIndex = DirectoryCompilerOptions.Num() - 1; DirectoryIndex >= 0; DirectoryIndex--)
-	{
-		const FDirectoryWidgetCompilerOptions& CompilerOptions = DirectoryCompilerOptions[DirectoryIndex];
-
-		const FString& DirectoryPath = CompilerOptions.Directory.Path;
-		if (!DirectoryPath.IsEmpty())
-		{
-			if (AssetPath.StartsWith(DirectoryPath))
-			{
-				const bool bIgnoreWidget = CompilerOptions.IgnoredWidgets.ContainsByPredicate([&SoftObjectPath](const TSoftObjectPtr<UWidgetBlueprint>& IgnoredWidget) {
-					return IgnoredWidget.ToSoftObjectPath() == SoftObjectPath;
-				});
-
-				if (bIgnoreWidget)
-				{
-					continue;
-				}
-
-				if (Operator(CompilerOptions.Options))
-				{
-					return;
-				}
-			}
-		}
-	}
-
-	Operator(DefaultCompilerOptions);
-}
 
 #if WITH_EDITOR
 void UUMGEditorProjectSettings::PostEditChangeChainProperty(FPropertyChangedChainEvent& PropertyChangedEvent)
@@ -136,22 +80,3 @@ void UUMGEditorProjectSettings::PostEditChangeChainProperty(FPropertyChangedChai
 	}
 }
 #endif
-
-void UUMGEditorProjectSettings::PostInitProperties()
-{
-	Super::PostInitProperties();
-
-	if (Version < CurrentVersion)
-	{
-		for (int32 FromVersion = Version + 1; FromVersion <= CurrentVersion; FromVersion++)
-		{
-			PerformUpgradeStepForVersion(FromVersion);
-		}
-
-		Version = CurrentVersion;
-	}
-}
-
-void UUMGEditorProjectSettings::PerformUpgradeStepForVersion(int32 ForVersion)
-{
-}

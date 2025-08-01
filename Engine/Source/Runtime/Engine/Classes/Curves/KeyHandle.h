@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Containers/ArrayView.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/Class.h"
 #include "KeyHandle.generated.h"
@@ -70,10 +71,14 @@ public:
 	FKeyHandleMap( const FKeyHandleMap& Other ) {}
 	void operator=(const FKeyHandleMap& Other) {}
 
+	// Quickly initializes this map by clearing it and filling with KeyHandles in O(n) time, instead of O(n^2) if Add() was used in a loop.
+	void Initialize(TArrayView<const FKeyHandle> InKeyHandles);
+
 	/** TMap functionality */
 	void Add( const FKeyHandle& InHandle, int32 InIndex );
-	void Empty();
+	void Empty(int32 ExpectedNumElements = 0);
 	void Remove( const FKeyHandle& InHandle );
+	void Reserve(int32 NumElements);
 	const int32* Find(const FKeyHandle& InHandle) const { return KeyHandlesToIndices.Find(InHandle); }
 	const FKeyHandle* FindKey( int32 KeyIndex ) const;
 	int32 Num() const { return KeyHandlesToIndices.Num(); }
@@ -116,6 +121,7 @@ struct TStructOpsTypeTraits<FKeyHandleMap>
 		WithCopy = false,
 		WithIdenticalViaEquality = true,
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
 
 /**
@@ -181,8 +187,13 @@ public:
 	}
 
 private:
+
+	/** Relocate key handles and indices proceeding the specified index by shifting them forwards or backwards */
+	void RelocateKeyHandles(int32 StartAtIndex, int32 DeltaIndex);
+
+private:
 	/** Array of optional key handles that reside in corresponding indices for an externally owned serial data structure */
-	TArray<TOptional<FKeyHandle>> KeyHandles;
+	TSparseArray<FKeyHandle> KeyHandles;
 
 	/** Map of which key handles go to which indices. Indices may point to incorrect indices. Check against entry in KeyHandles array to verify. */
 	TMap<FKeyHandle, int32> KeyHandlesToIndices;
@@ -197,4 +208,5 @@ struct TStructOpsTypeTraits<FKeyHandleLookupTable>
 	{
 		WithSerializer = true,
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };

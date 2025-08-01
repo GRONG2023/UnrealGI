@@ -2,18 +2,20 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
+using OpenTracing;
+using OpenTracing.Util;
+using UnrealBuildBase;
 
 namespace UnrealBuildTool
 {
 	/// <summary>
 	/// Cleans build products and intermediates for the target. This deletes files which are named consistently with the target being built
-	/// (e.g. UE4Editor-Foo-Win64-Debug.dll) rather than an actual record of previous build products.
+	/// (e.g. UnrealEditor-Foo-Win64-Debug.dll) rather than an actual record of previous build products.
 	/// </summary>
 	[ToolMode("Clean", ToolModeOptions.XmlConfig | ToolModeOptions.BuildPlatforms | ToolModeOptions.SingleInstance)]
 	class CleanMode : ToolMode
@@ -35,7 +37,8 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="Arguments">Command-line arguments</param>
 		/// <returns>One of the values of ECompilationResult</returns>
-		public override int Execute(CommandLineArguments Arguments)
+		/// <param name="Logger"></param>
+		public override Task<int> ExecuteAsync(CommandLineArguments Arguments, ILogger Logger)
 		{
 			Arguments.ApplyTo(this);
 
@@ -45,190 +48,236 @@ namespace UnrealBuildTool
 			Arguments.ApplyTo(BuildConfiguration);
 
 			// Parse all the targets being built
-			List<TargetDescriptor> TargetDescriptors = TargetDescriptor.ParseCommandLine(Arguments, BuildConfiguration.bUsePrecompiled, bSkipRulesCompile);
+			List<TargetDescriptor> TargetDescriptors = TargetDescriptor.ParseCommandLine(Arguments, BuildConfiguration, Logger);
+
+			Clean(TargetDescriptors, BuildConfiguration, Logger);
+
+			return Task.FromResult(0);
+		}
+
+		public void Clean(List<TargetDescriptor> TargetDescriptors, BuildConfiguration BuildConfiguration, ILogger Logger)
+		{
+			using ScopedTimer CleanTimer = new ScopedTimer("CleanMode.Clean()", Logger);
+			using IScope Scope = GlobalTracer.Instance.BuildSpan("CleanMode.Clean()").StartActive();
+
 			if (TargetDescriptors.Count == 0)
 			{
 				throw new BuildException("No targets specified to clean");
 			}
 
-			// Also add implicit descriptors for cleaning UnrealBuildTool
-			if (!BuildConfiguration.bDoNotBuildUHT)
+			// Print out warning in Xcode to stop user from trying to make build folder deletable
+			if (Environment.GetEnvironmentVariable("UE_BUILD_FROM_XCODE") == "1" && Unreal.IsEngineInstalled())
 			{
-				const string UnrealHeaderToolTarget = "UnrealHeaderTool";
-
-				// Get a list of project files to clean UHT for
-				List<FileReference> ProjectFiles = new List<FileReference>();
-				foreach (TargetDescriptor TargetDesc in TargetDescriptors)
-				{
-					if (TargetDesc.Name != UnrealHeaderToolTarget && !RemoteMac.HandlesTargetPlatform(TargetDesc.Platform))
-					{
-						if (ProjectFiles.Count == 0)
-						{
-							ProjectFiles.Add(null);
-						}
-						if (TargetDesc.ProjectFile != null && !ProjectFiles.Contains(TargetDesc.ProjectFile))
-						{
-							ProjectFiles.Add(TargetDesc.ProjectFile);
-						}
-					}
-				}
-
-				// Add descriptors for cleaning UHT with all these projects
-				if (ProjectFiles.Count > 0)
-				{
-					UnrealTargetConfiguration Configuration = BuildConfiguration.bForceDebugUnrealHeaderTool ? UnrealTargetConfiguration.Debug : UnrealTargetConfiguration.Development;
-					string Architecture = UEBuildPlatform.GetBuildPlatform(BuildHostPlatform.Current.Platform).GetDefaultArchitecture(null);
-					foreach (FileReference ProjectFile in ProjectFiles)
-					{
-						TargetDescriptors.Add(new TargetDescriptor(ProjectFile, UnrealHeaderToolTarget, BuildHostPlatform.Current.Platform, Configuration, Architecture, null));
-					}
-				}
+				Logger.LogInformation("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~");
+				Logger.LogInformation("NOTICE: Please disregard the Xcode prepare clean failed message, we do NOT want Engine/Binaries/Mac to be deletable.");
+				Logger.LogInformation("NOTICE: Cleaning UnrealEditor.app will cause UE fail to launch, you will then need to repair it from Epic Games Launcher.");
+				Logger.LogInformation("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~");
 			}
 
 			// Output the list of targets that we're cleaning
-			Log.TraceInformation("Cleaning {0} binaries...", StringUtils.FormatList(TargetDescriptors.Select(x => x.Name).Distinct()));
+			Logger.LogInformation("Cleaning {TargetNames} binaries...", StringUtils.FormatList(TargetDescriptors.Select(x => x.Name).Distinct()));
 
 			// Loop through all the targets, and clean them all
 			HashSet<FileReference> FilesToDelete = new HashSet<FileReference>();
 			HashSet<DirectoryReference> DirectoriesToDelete = new HashSet<DirectoryReference>();
 
-			for (int Idx = 0; Idx < TargetDescriptors.Count; ++Idx)
+			using (ScopedTimer GatherTimer = new ScopedTimer("Find paths to clean", Logger))
 			{
-				TargetDescriptor TargetDescriptor = TargetDescriptors[Idx];
-
-				// Create the rules assembly
-				RulesAssembly RulesAssembly = RulesCompiler.CreateTargetRulesAssembly(TargetDescriptor.ProjectFile, TargetDescriptor.Name, bSkipRulesCompile, BuildConfiguration.bUsePrecompiled, TargetDescriptor.ForeignPlugin);
-
-				// Create the rules object
-				ReadOnlyTargetRules Target = new ReadOnlyTargetRules(RulesAssembly.CreateTargetRules(TargetDescriptor.Name, TargetDescriptor.Platform, TargetDescriptor.Configuration, TargetDescriptor.Architecture, TargetDescriptor.ProjectFile, TargetDescriptor.AdditionalArguments));
-
-				if (!bSkipPreBuildTargets && Target.PreBuildTargets.Count > 0)
+				for (int Idx = 0; Idx < TargetDescriptors.Count; ++Idx)
 				{
-					foreach (TargetInfo PreBuildTarget in Target.PreBuildTargets)
+					TargetDescriptor TargetDescriptor = TargetDescriptors[Idx];
+
+					// Create the rules assembly
+					RulesAssembly RulesAssembly = RulesCompiler.CreateTargetRulesAssembly(TargetDescriptor.ProjectFile, TargetDescriptor.Name, bSkipRulesCompile, BuildConfiguration.bForceRulesCompile, BuildConfiguration.bUsePrecompiled, TargetDescriptor.ForeignPlugin, TargetDescriptor.bBuildPluginAsLocal, Logger);
+
+					// Create the rules object
+					ReadOnlyTargetRules Target = new ReadOnlyTargetRules(RulesAssembly.CreateTargetRules(TargetDescriptor.Name, TargetDescriptor.Platform, TargetDescriptor.Configuration, TargetDescriptor.Architectures, TargetDescriptor.ProjectFile, TargetDescriptor.AdditionalArguments, Logger, TargetDescriptor.IsTestsTarget));
+
+					// Get the intermediate environment for this target
+					UnrealIntermediateEnvironment IntermediateEnvironment = TargetDescriptor.IntermediateEnvironment != UnrealIntermediateEnvironment.Default ? TargetDescriptor.IntermediateEnvironment : Target.IntermediateEnvironment;
+
+					if (!bSkipPreBuildTargets && Target.PreBuildTargets.Count > 0)
 					{
-						TargetDescriptor NewTarget = TargetDescriptor.FromTargetInfo(PreBuildTarget);
-						if (!TargetDescriptors.Contains(NewTarget))
+						foreach (TargetInfo PreBuildTarget in Target.PreBuildTargets)
 						{
-							TargetDescriptors.Add(NewTarget);
+							TargetDescriptor NewTarget = TargetDescriptor.FromTargetInfo(PreBuildTarget);
+							if (!TargetDescriptors.Contains(NewTarget))
+							{
+								TargetDescriptors.Add(NewTarget);
+							}
 						}
 					}
-				}
 
-				// Find the base folders that can contain binaries
-				List<DirectoryReference> BaseDirs = new List<DirectoryReference>();
-				BaseDirs.Add(UnrealBuildTool.EngineDirectory);
-				BaseDirs.Add(UnrealBuildTool.EnterpriseDirectory);
-				foreach (FileReference Plugin in Plugins.EnumeratePlugins(Target.ProjectFile))
-				{
-					BaseDirs.Add(Plugin.Directory);
-				}
-				if (Target.ProjectFile != null)
-				{
-					BaseDirs.Add(Target.ProjectFile.Directory);
-				}
-
-				// If we're running a precompiled build, remove anything under the engine folder
-				BaseDirs.RemoveAll(x => RulesAssembly.IsReadOnly(x));
-
-				// Get all the names which can prefix build products
-				List<string> NamePrefixes = new List<string>();
-				if (Target.Type != TargetType.Program)
-				{
-					NamePrefixes.Add(UEBuildTarget.GetAppNameForTargetType(Target.Type));
-				}
-				NamePrefixes.Add(Target.Name);
-
-				// Get the suffixes for this configuration
-				List<string> NameSuffixes = new List<string>();
-				if (Target.Configuration == Target.UndecoratedConfiguration)
-				{
-					NameSuffixes.Add("");
-				}
-				NameSuffixes.Add(String.Format("-{0}-{1}", Target.Platform.ToString(), Target.Configuration.ToString()));
-				if (!String.IsNullOrEmpty(Target.Architecture))
-				{
-					NameSuffixes.AddRange(NameSuffixes.ToArray().Select(x => x + Target.Architecture));
-				}
-
-				// Add all the makefiles and caches to be deleted
-				FilesToDelete.Add(TargetMakefile.GetLocation(Target.ProjectFile, Target.Name, Target.Platform, Target.Architecture, Target.Configuration));
-				FilesToDelete.UnionWith(SourceFileMetadataCache.GetFilesToClean(Target.ProjectFile));
-
-				// Add all the intermediate folders to be deleted
-				foreach (DirectoryReference BaseDir in BaseDirs)
-				{
-					foreach (string NamePrefix in NamePrefixes)
+					// Find the base folders that can contain binaries
+					List<DirectoryReference> BaseDirs = new List<DirectoryReference>();
+					BaseDirs.Add(Unreal.EngineDirectory);
+					foreach (FileReference Plugin in PluginsBase.EnumeratePlugins(Target.ProjectFile))
 					{
-						DirectoryReference GeneratedCodeDir = DirectoryReference.Combine(BaseDir, UEBuildTarget.GetPlatformIntermediateFolder(Target.Platform, Target.Architecture), NamePrefix, "Inc");
-						if (DirectoryReference.Exists(GeneratedCodeDir))
+						BaseDirs.Add(Plugin.Directory);
+					}
+					if (Target.ProjectFile != null)
+					{
+						BaseDirs.Add(Target.ProjectFile.Directory);
+					}
+
+					// If we're running a precompiled build, remove anything under the engine folder
+					BaseDirs.RemoveAll(x => RulesAssembly.IsReadOnly(x));
+
+					// Get all the names which can prefix build products
+					List<string> NamePrefixes = new List<string>();
+					if (Target.Type != TargetType.Program)
+					{
+						NamePrefixes.Add(UEBuildTarget.GetAppNameForTargetType(Target.Type));
+					}
+					NamePrefixes.Add(Target.Name);
+
+					// Get the suffixes for this configuration
+					List<string> NameSuffixes = new List<string>();
+					if (Target.Configuration == Target.UndecoratedConfiguration)
+					{
+						NameSuffixes.Add("");
+					}
+					NameSuffixes.Add(String.Format("-{0}-{1}", Target.Platform.ToString(), Target.Configuration.ToString()));
+					if (UnrealArchitectureConfig.ForPlatform(Target.Platform).RequiresArchitectureFilenames(Target.Architectures))
+					{
+						NameSuffixes.AddRange(NameSuffixes.ToArray().Select(x => x + Target.Architecture.ToString()));
+					}
+
+					// Add all the makefiles and caches to be deleted
+					FilesToDelete.Add(TargetMakefile.GetLocation(Target.ProjectFile, Target.Name, Target.Platform, Target.Architectures, Target.Configuration, IntermediateEnvironment));
+					FilesToDelete.UnionWith(SourceFileMetadataCache.GetFilesToClean(Target.ProjectFile));
+
+					// Add all the intermediate folders to be deleted
+					foreach (DirectoryReference BaseDir in BaseDirs)
+					{
+						foreach (string NamePrefix in NamePrefixes)
 						{
-							DirectoriesToDelete.Add(GeneratedCodeDir);
-						}
+							string NamePrefixWithEnv = UEBuildTarget.GetTargetIntermediateFolderName(NamePrefix, IntermediateEnvironment);
+							// This is actually wrong.. the generated code is not in this dir.. if changing "Target.Architectures" parameter to null it will delete the right files.
+							// However, this also means that it will cause a rebuild for both unity, nonunity and iwyu targets since they share this folder.
+							DirectoryReference GeneratedCodeDir = DirectoryReference.Combine(BaseDir, UEBuildTarget.GetPlatformIntermediateFolder(Target.Platform, Target.Architectures, false), NamePrefixWithEnv, "Inc");
+							if (DirectoryReference.Exists(GeneratedCodeDir))
+							{
+								DirectoriesToDelete.Add(GeneratedCodeDir);
+							}
 
-						DirectoryReference IntermediateDir = DirectoryReference.Combine(BaseDir, UEBuildTarget.GetPlatformIntermediateFolder(Target.Platform, Target.Architecture), NamePrefix, Target.Configuration.ToString());
-						if (DirectoryReference.Exists(IntermediateDir))
+							DirectoryReference IntermediateDir = DirectoryReference.Combine(BaseDir, UEBuildTarget.GetPlatformIntermediateFolder(Target.Platform, Target.Architectures, false), NamePrefixWithEnv, Target.Configuration.ToString());
+							if (DirectoryReference.Exists(IntermediateDir))
+							{
+								DirectoriesToDelete.Add(IntermediateDir);
+							}
+						}
+					}
+
+					// todo: handle external plugin intermediates, written to the Project's Intermediate/External directory
+
+					// List of additional files and directories to clean, specified by the target platform
+					List<FileReference> AdditionalFilesToDelete = new List<FileReference>();
+					List<DirectoryReference> AdditionalDirectoriesToDelete = new List<DirectoryReference>();
+
+					// Add all the build products from this target
+					string[] NamePrefixesArray = NamePrefixes.Distinct().ToArray();
+					string[] NameSuffixesArray = NameSuffixes.Distinct().ToArray();
+					foreach (DirectoryReference BaseDir in BaseDirs)
+					{
+						DirectoryReference BinariesDir = DirectoryReference.Combine(BaseDir, "Binaries", Target.Platform.ToString());
+						if (DirectoryReference.Exists(BinariesDir))
 						{
-							DirectoriesToDelete.Add(IntermediateDir);
+							UEBuildPlatform.GetBuildPlatform(Target.Platform).FindBuildProductsToClean(BinariesDir, NamePrefixesArray, NameSuffixesArray, AdditionalFilesToDelete, AdditionalDirectoriesToDelete);
 						}
 					}
-				}
 
-				// List of additional files and directories to clean, specified by the target platform
-				List<FileReference> AdditionalFilesToDelete = new List<FileReference>();
-				List<DirectoryReference> AdditionalDirectoriesToDelete = new List<DirectoryReference>();
+					// Get all the additional intermediate folders created by this platform
+					UEBuildPlatform.GetBuildPlatform(Target.Platform).FindAdditionalBuildProductsToClean(Target, AdditionalFilesToDelete, AdditionalDirectoriesToDelete);
 
-				// Add all the build products from this target
-				string[] NamePrefixesArray = NamePrefixes.Distinct().ToArray();
-				string[] NameSuffixesArray = NameSuffixes.Distinct().ToArray();
-				foreach (DirectoryReference BaseDir in BaseDirs)
-				{
-					DirectoryReference BinariesDir = DirectoryReference.Combine(BaseDir, "Binaries", Target.Platform.ToString());
-					if (DirectoryReference.Exists(BinariesDir))
-					{
-						UEBuildPlatform.GetBuildPlatform(Target.Platform).FindBuildProductsToClean(BinariesDir, NamePrefixesArray, NameSuffixesArray, AdditionalFilesToDelete, AdditionalDirectoriesToDelete);
-					}
-				}
-
-				// Get all the additional intermediate folders created by this platform
-				UEBuildPlatform.GetBuildPlatform(Target.Platform).FindAdditionalBuildProductsToClean(Target, AdditionalFilesToDelete, AdditionalDirectoriesToDelete);
-
-				// Add the platform's files and directories to the main list
-				FilesToDelete.UnionWith(AdditionalFilesToDelete);
-				DirectoriesToDelete.UnionWith(AdditionalDirectoriesToDelete);
-			}
-
-			// Delete all the directories, then all the files. By sorting the list of directories before we delete them, we avoid spamming the log if a parent directory is deleted first.
-			foreach (DirectoryReference DirectoryToDelete in DirectoriesToDelete.OrderBy(x => x.FullName))
-			{
-				if (DirectoryReference.Exists(DirectoryToDelete))
-				{
-					Log.TraceVerbose("    Deleting {0}{1}...", DirectoryToDelete, Path.DirectorySeparatorChar);
-					try
-					{
-						FileUtils.ForceDeleteDirectory(DirectoryToDelete);
-					}
-					catch (Exception Ex)
-					{
-						throw new BuildException(Ex, "Unable to delete {0} ({1})", DirectoryToDelete, Ex.Message.TrimEnd());
-					}
+					// Add the platform's files and directories to the main list
+					FilesToDelete.UnionWith(AdditionalFilesToDelete);
+					DirectoriesToDelete.UnionWith(AdditionalDirectoriesToDelete);
 				}
 			}
 
-			foreach (FileReference FileToDelete in FilesToDelete.OrderBy(x => x.FullName))
+			// Ensure no overlap between directories
+			using (ScopedTimer Timer = new ScopedTimer("Ensure no directory overlap", Logger))
 			{
-				if (FileReference.Exists(FileToDelete))
+				HashSet<DirectoryReference> SubdirectoriesToDelete = new(DirectoriesToDelete.Count);
+				foreach (DirectoryReference Directory in DirectoriesToDelete)
 				{
-					Log.TraceVerbose("    Deleting " + FileToDelete);
-					try
+					// Is this directory a subdirectory of some other directory that is being deleted?
+					for (DirectoryReference? DirectoryWalker = Directory.ParentDirectory; DirectoryWalker != null; DirectoryWalker = DirectoryWalker.ParentDirectory)
 					{
-						FileUtils.ForceDeleteFile(FileToDelete);
-					}
-					catch (Exception Ex)
-					{
-						throw new BuildException(Ex, "Unable to delete {0} ({1})", FileToDelete, Ex.Message.TrimEnd());
+						if (DirectoriesToDelete.Contains(DirectoryWalker))
+						{
+							SubdirectoriesToDelete.Add(Directory);
+							break;
+						}
 					}
 				}
+				DirectoriesToDelete.ExceptWith(SubdirectoriesToDelete);
 			}
+
+			// Remove any files that are contained within one of the directories
+			using (ScopedTimer Time = new ScopedTimer("Ensure no file overlap", Logger))
+			{
+				FilesToDelete.RemoveWhere(File =>
+				{
+					// Is this file in a subdirectory of some directory that is being deleted?
+					for (DirectoryReference? DirectoryWalker = File.Directory; DirectoryWalker != null; DirectoryWalker = DirectoryWalker.ParentDirectory)
+					{
+						if (DirectoriesToDelete.Contains(DirectoryWalker))
+						{
+							return true;
+						}
+					}
+					return false;
+				});
+			}
+
+			Task DeleteDirectories = Task.Run(() =>
+			{
+				using ScopedTimer Timer = new ScopedTimer($"Delete {DirectoriesToDelete.Count} directories", Logger);
+				Parallel.ForEach(DirectoriesToDelete, DirectoryToDelete =>
+				{
+					using ScopedTimer Timer = new ScopedTimer($"Delete directory '{DirectoryToDelete}'", Logger, bIncreaseIndent: false);
+
+					if (DirectoryReference.Exists(DirectoryToDelete))
+					{
+						Logger.LogDebug("    Deleting {DirectoryToDelete}...", $"{DirectoryToDelete}{Path.DirectorySeparatorChar}");
+
+						try
+						{
+							FileUtils.ForceDeleteDirectory(DirectoryToDelete);
+						}
+						catch (Exception Ex)
+						{
+							throw new BuildException(Ex, "Unable to delete {0} ({1})", DirectoryToDelete, Ex.Message.TrimEnd());
+						}
+					}
+				});
+			});
+
+			Task DeleteFiles = Task.Run(() =>
+			{
+				using ScopedTimer Timer = new ScopedTimer($"Delete {FilesToDelete.Count} files", Logger);
+				Parallel.ForEach(FilesToDelete, FileToDelete =>
+				{
+					if (FileReference.Exists(FileToDelete))
+					{
+						Logger.LogDebug("    Deleting {FileToDelete}...", FileToDelete);
+
+						try
+						{
+							FileUtils.ForceDeleteFile(FileToDelete);
+						}
+						catch (Exception Ex)
+						{
+							throw new BuildException(Ex, "Unable to delete {0} ({1})", FileToDelete, Ex.Message.TrimEnd());
+						}
+					}
+				});
+			});
+
+			DeleteDirectories.Wait();
+			DeleteFiles.Wait();
 
 			// Also clean all the remote targets
 			for (int Idx = 0; Idx < TargetDescriptors.Count; Idx++)
@@ -236,12 +285,10 @@ namespace UnrealBuildTool
 				TargetDescriptor TargetDescriptor = TargetDescriptors[Idx];
 				if (RemoteMac.HandlesTargetPlatform(TargetDescriptor.Platform))
 				{
-					RemoteMac RemoteMac = new RemoteMac(TargetDescriptor.ProjectFile);
-					RemoteMac.Clean(TargetDescriptor);
+					RemoteMac RemoteMac = new RemoteMac(TargetDescriptor.ProjectFile, Logger);
+					RemoteMac.Clean(TargetDescriptor, Logger);
 				}
 			}
-
-			return 0;
 		}
 	}
 }

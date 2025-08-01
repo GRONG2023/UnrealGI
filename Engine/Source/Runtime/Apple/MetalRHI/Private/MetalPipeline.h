@@ -3,11 +3,52 @@
 #pragma once
 
 #include "MetalRHIPrivate.h"
-#if METAL_DEBUG_OPTIONS
-#include "MetalDebugCommandEncoder.h"
-#endif
 
 #include "ShaderPipelineCache.h"
+
+/**
+ * The sampler, buffer and texture resource limits as defined here:
+ * https://developer.apple.com/library/ios/documentation/Miscellaneous/Conceptual/MetalProgrammingGuide/Render-Ctx/Render-Ctx.html
+ */
+#if PLATFORM_IOS
+#define METAL_MAX_BUFFERS 31
+#define METAL_MAX_TEXTURES 31
+typedef uint32 FMetalTextureMask;
+#elif PLATFORM_MAC
+#define METAL_MAX_BUFFERS 31
+#define METAL_MAX_TEXTURES 128
+typedef __uint128_t FMetalTextureMask;
+#else
+#error "Unsupported Platform!"
+#endif
+typedef uint32 FMetalBufferMask;
+typedef uint16 FMetalSamplerMask;
+
+/** A structure for quick mask-testing of shader-stage resource bindings */
+struct FMetalShaderResourceMask
+{
+    FMetalTextureMask TextureMask;
+    FMetalBufferMask BufferMask;
+    FMetalSamplerMask SamplerMask;
+};
+
+enum EMetalShaderFrequency
+{
+    EMetalShaderVertex = 0,
+    EMetalShaderFragment = 1,
+    EMetalShaderCompute = 2,
+    EMetalShaderStream = 3,
+    EMetalShaderRenderNum = 2,
+    EMetalShaderStagesNum = 4
+};
+
+enum EMetalLimits
+{
+    ML_MaxSamplers = 16, /** Maximum number of samplers */
+    ML_MaxBuffers = METAL_MAX_BUFFERS, /** Maximum number of buffers */
+    ML_MaxTextures = METAL_MAX_TEXTURES, /** Maximum number of textures - there are more textures available on Mac than iOS */
+    ML_MaxViewports = 16 /** Technically this may be different at runtime, but this is the likely absolute upper-bound */
+};
 
 enum EMetalPipelineHashBits
 {
@@ -18,7 +59,6 @@ enum EMetalPipelineHashBits
 
 	NumBits_BlendState = 7, //(x8=56),
 	NumBits_PrimitiveTopology = 2, //(x1=2)
-	NumBits_IndexType = 2, //(x1=2)
 	NumBits_AlphaToCoverage = 1, //(x1=1)
 };
 
@@ -33,8 +73,7 @@ enum EMetalPipelineHashOffsets
 	Offset_BlendState6 = Offset_BlendState5 + NumBits_BlendState,
 	Offset_BlendState7 = Offset_BlendState6 + NumBits_BlendState,
 	Offset_PrimitiveTopology = Offset_BlendState7 + NumBits_BlendState,
-	Offset_IndexType = Offset_PrimitiveTopology + NumBits_PrimitiveTopology,
-	Offset_RasterEnd = Offset_IndexType + NumBits_IndexType,
+	Offset_RasterEnd = Offset_PrimitiveTopology + NumBits_PrimitiveTopology,
 
 	Offset_RenderTargetFormat0 = 64,
 	Offset_RenderTargetFormat1 = Offset_RenderTargetFormat0 + NumBits_RenderTargetFormat,
@@ -68,49 +107,40 @@ private:
 	void OnShaderPipelineCachePrecompilationComplete(uint32 Count, double Seconds, const FShaderPipelineCache::FShaderCachePrecompileContext& ShaderCachePrecompileContext);
 };
 
-struct FMetalTessellationPipelineDesc
+class FMetalShaderPipeline
 {
-	FMetalTessellationPipelineDesc()
-	{
-	}
-	NSUInteger TessellationInputControlPointBufferIndex;
-	NSUInteger TessellationOutputControlPointBufferIndex;
-	NSUInteger TessellationPatchControlPointOutSize;
-	NSUInteger TessellationPatchConstBufferIndex;
-	NSUInteger TessellationInputPatchConstBufferIndex;
-	NSUInteger TessellationPatchConstOutSize;
-	NSUInteger TessellationTessFactorOutSize;
-	NSUInteger TessellationFactorBufferIndex;
-	NSUInteger TessellationPatchCountBufferIndex;
-	NSUInteger TessellationControlPointIndexBufferIndex;
-	NSUInteger TessellationIndexBufferIndex;
-};
-
-@interface FMetalShaderPipeline : FApplePlatformObject
-{
-@public
-	mtlpp::RenderPipelineState RenderPipelineState;
-	mtlpp::ComputePipelineState ComputePipelineState;
-	mtlpp::RenderPipelineState StreamPipelineState;
-	mtlpp::RenderPipelineState DebugPipelineState;
-	FMetalTessellationPipelineDesc TessellationPipelineDesc;
+public:
+    FMetalShaderPipeline() {};
+    ~FMetalShaderPipeline();
+    
+    void Init();
+    void InitResourceMask();
+    void InitResourceMask(EMetalShaderFrequency Frequency);
+    
+	MTLRenderPipelineStatePtr RenderPipelineState;
+    MTLComputePipelineStatePtr ComputePipelineState;
+    MTLRenderPipelineStatePtr StreamPipelineState;
 	TArray<uint32> BufferDataSizes[EMetalShaderStagesNum];
 	TMap<uint8, uint8> TextureTypes[EMetalShaderStagesNum];
-	FMetalDebugShaderResourceMask ResourceMask[EMetalShaderStagesNum];
-	mtlpp::RenderPipelineReflection RenderPipelineReflection;
-	mtlpp::RenderPipelineReflection StreamPipelineReflection;
-	mtlpp::ComputePipelineReflection ComputePipelineReflection;
+	FMetalShaderResourceMask ResourceMask[EMetalShaderStagesNum];
+    MTLRenderPipelineReflectionPtr RenderPipelineReflection;
+    MTLRenderPipelineReflectionPtr StreamPipelineReflection;
+    MTLComputePipelineReflectionPtr ComputePipelineReflection;
 #if METAL_DEBUG_OPTIONS
-	ns::String VertexSource;
-	ns::String DomainSource;
-	ns::String FragmentSource;
-	ns::String ComputeSource;
-	mtlpp::RenderPipelineDescriptor RenderDesc;
-	mtlpp::RenderPipelineDescriptor StreamDesc;
-	mtlpp::ComputePipelineDescriptor ComputeDesc;
+	NS::String* VertexSource = nullptr;
+	NS::String* FragmentSource = nullptr;
+	NS::String* ComputeSource = nullptr;
+#if PLATFORM_SUPPORTS_MESH_SHADERS
+    NS::String* MeshSource = nullptr;
+    NS::String* ObjectSource = nullptr;
 #endif
-}
-- (instancetype)init;
-- (void)initResourceMask;
-- (void)initResourceMask:(EMetalShaderFrequency)Frequency;
-@end
+    MTLRenderPipelineDescriptorPtr RenderDesc;
+	MTLMeshRenderPipelineDescriptorPtr MeshRenderDesc;
+    MTLRenderPipelineDescriptorPtr StreamDesc;
+    MTLComputePipelineDescriptorPtr ComputeDesc;
+#endif
+};
+
+void ShutdownPipelineCache();
+
+typedef TSharedPtr<FMetalShaderPipeline, ESPMode::ThreadSafe> FMetalShaderPipelinePtr;

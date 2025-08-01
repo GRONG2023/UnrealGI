@@ -5,18 +5,21 @@
 =============================================================================*/
 
 #include "GameFramework/GameMode.h"
-#include "EngineGlobals.h"
+#include "Engine/GameInstance.h"
 #include "Engine/Engine.h"
+#include "Engine/World.h"
+#include "GameFramework/WorldSettings.h"
 #include "Kismet/GameplayStatics.h"
 #include "Engine/NetDriver.h"
-#include "GameFramework/LocalMessage.h"
 #include "GameFramework/EngineMessage.h"
 #include "GameFramework/GameState.h"
 #include "GameFramework/PlayerState.h"
 #include "GameFramework/GameSession.h"
 #include "GameFramework/CheatManager.h"
 #include "GameDelegates.h"
-#include "GameMapsSettings.h"
+#include "MoviePlayerProxy.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(GameMode)
 
 namespace MatchState
 {
@@ -44,23 +47,6 @@ AGameMode::AGameMode(const FObjectInitializer& ObjectInitializer)
 	MaxInactivePlayers = 16;
 }
 
-FString AGameMode::GetDefaultGameClassPath(const FString& MapName, const FString& Options, const FString& Portal) const
-{
-	// This is called on the CDO
-	return GetClass()->GetPathName();
-}
-
-TSubclassOf<AGameMode> AGameMode::GetGameModeClass(const FString& MapName, const FString& Options, const FString& Portal) const
-{
-	// This is called on the CDO
-	return GetClass();
-}
-
-FString AGameMode::StaticGetFullGameClassName(FString const& Str)
-{
-	return UGameMapsSettings::GetGameModeForName(Str);
-}
-
 FString AGameMode::GetNetworkNumber()
 {
 	UNetDriver* NetDriver = GetWorld()->GetNetDriver();
@@ -83,7 +69,6 @@ void AGameMode::InitGame(const FString& MapName, const FString& Options, FString
 	}
 
 	// Bind to delegates
-	FGameDelegates::Get().GetMatineeCancelledDelegate().AddUObject(this, &AGameMode::MatineeCancelled);
 	FGameDelegates::Get().GetPendingConnectionLostDelegate().AddUObject(this, &AGameMode::NotifyPendingConnectionLost);
 	FGameDelegates::Get().GetPreCommitMapChangeDelegate().AddUObject(this, &AGameMode::PreCommitMapChange);
 	FGameDelegates::Get().GetPostCommitMapChangeDelegate().AddUObject(this, &AGameMode::PostCommitMapChange);
@@ -347,6 +332,7 @@ void AGameMode::SetMatchState(FName NewState)
 	}
 
 	UE_LOG(LogGameMode, Display, TEXT("Match State Changed from %s to %s"), *MatchState.ToString(), *NewState.ToString());
+	FMoviePlayerProxyBlock MoviePlayerProxyBlock;
 
 	MatchState = NewState;
 
@@ -402,7 +388,7 @@ void AGameMode::Tick(float DeltaSeconds)
 	}
 	if (GetMatchState() == MatchState::InProgress)
 	{
-		// Check to see if we should start the match
+		// Check to see if we should end the match
 		if (ReadyToEndMatch())
 		{
 			UE_LOG(LogGameMode, Log, TEXT("GameMode returned ReadyToEndMatch"));
@@ -537,11 +523,6 @@ int32 AGameMode::GetNumSpectators()
 	return NumSpectators;
 }
 
-void AGameMode::StartNewPlayer(APlayerController* NewPlayer)
-{
-
-}
-
 void AGameMode::HandleStartingNewPlayer_Implementation(APlayerController* NewPlayer)
 {
 	// If players should start as spectators, leave them in the spectator state
@@ -572,11 +553,6 @@ bool AGameMode::PlayerCanRestart_Implementation(APlayerController* Player)
 	}
 
 	return Super::PlayerCanRestart_Implementation(Player);
-}
-
-void AGameMode::SendPlayer( APlayerController* aPlayer, const FString& FURL )
-{
-	aPlayer->ClientTravel( FURL, TRAVEL_Relative );
 }
 
 bool AGameMode::GetTravelType()
@@ -653,7 +629,7 @@ void AGameMode::AddInactivePlayer(APlayerState* PlayerState, APlayerController* 
 			for (int32 Idx = 0; Idx < InactivePlayerArray.Num(); ++Idx)
 			{
 				APlayerState* const CurrentPlayerState = InactivePlayerArray[Idx];
-				if ((CurrentPlayerState == nullptr) || CurrentPlayerState->IsPendingKill())
+				if (!IsValid(CurrentPlayerState))
 				{
 					// already destroyed, just remove it
 					InactivePlayerArray.RemoveAt(Idx, 1);
@@ -714,7 +690,7 @@ bool AGameMode::FindInactivePlayer(APlayerController* PC)
 	for (int32 i=0; i < InactivePlayerArray.Num(); i++)
 	{
 		APlayerState* CurrentPlayerState = InactivePlayerArray[i];
-		if ( (CurrentPlayerState == nullptr) || CurrentPlayerState->IsPendingKill() )
+		if ( !IsValid(CurrentPlayerState) )
 		{
 			InactivePlayerArray.RemoveAt(i,1);
 			i--;
@@ -734,7 +710,7 @@ bool AGameMode::FindInactivePlayer(APlayerController* PC)
 			OldPlayerState->SetIsInactive(true);
 			// Set the uniqueId to nullptr so it will not kill the player's registration 
 			// in UnregisterPlayerWithSession()
-			OldPlayerState->SetUniqueId(nullptr);
+			OldPlayerState->SetUniqueId(FUniqueNetIdRepl());
 			OldPlayerState->Destroy();
 			PC->PlayerState->OnReactivated();
 			return true;
@@ -824,8 +800,6 @@ bool AGameMode::IsHandlingReplays()
 	return bHandleDedicatedServerReplays && GetNetMode() == ENetMode::NM_DedicatedServer;
 }
 
-void AGameMode::MatineeCancelled() {}
-
 void AGameMode::PreCommitMapChange(const FString& PreviousMapName, const FString& NextMapName) {}
 
 void AGameMode::PostCommitMapChange() {}
@@ -850,3 +824,4 @@ bool AGameMode::SpawnPlayerFromSimulate(const FVector& NewLocation, const FRotat
 
 	return Super::SpawnPlayerFromSimulate(NewLocation, NewRotation);
 }
+

@@ -16,6 +16,50 @@
 #include "swappy/swappyGL.h"
 #include "swappy/swappyGL_extra.h"
 #include "swappy/swappy_common.h"
+#include "HAL/Thread.h"
+#include "Misc/ScopeRWLock.h"
+
+struct FSwappyThreadManager : public SwappyThreadFunctions
+{
+	static FRWLock SwappyThreadManagerMutex;
+	static TMap<uint64, TUniquePtr<FThread>> Threads;
+	FSwappyThreadManager()
+	{
+		start = [](SwappyThreadId* thread_id, void* (*thread_func)(void*),
+			void* user_data)
+		{
+			FRWScopeLock Lock(SwappyThreadManagerMutex, SLT_Write);
+			static int ThreadCount = 0;
+			TUniquePtr<FThread> NewThread = MakeUnique<FThread>(*FString::Printf(TEXT("SwappyThread%d"), ThreadCount++), [thread_func, user_data]() {thread_func(user_data); });
+			if (NewThread->GetThreadId())
+			{
+				*thread_id = NewThread->GetThreadId();
+				Threads.Add(*thread_id, MoveTemp(NewThread));
+				return 0;
+			}			
+			return -1;
+		};
+
+		join = [](SwappyThreadId thread_id)
+		{
+			FRWScopeLock Lock(SwappyThreadManagerMutex, SLT_Write);
+			TUniquePtr<FThread> ThreadPtr;
+			if(ensure(Threads.RemoveAndCopyValue(thread_id, ThreadPtr)))
+			{
+				ThreadPtr->Join();
+			}
+		};
+
+		joinable = [](SwappyThreadId thread_id)
+		{
+			FRWScopeLock Lock(SwappyThreadManagerMutex, SLT_ReadOnly);
+			return Threads[thread_id]->IsJoinable();
+		};
+	}	
+}SwappyThreads;
+TMap<uint64, TUniquePtr<FThread>> FSwappyThreadManager::Threads;
+FRWLock FSwappyThreadManager::SwappyThreadManagerMutex;
+
 #endif
 
 #include "AndroidEGL.h"
@@ -45,16 +89,42 @@ void FAndroidOpenGLFramePacer::Init()
 }
 
 #if USE_ANDROID_OPENGL_SWAPPY
+
+namespace AndroidGL
+{
+	void SwappyPostWaitCallback(void*, int64_t cpu_time_ns, int64_t gpu_time_ns)
+	{
+		const double Frequency = 1.0;// FGPUTiming::GetTimingFrequency();
+		const double CyclesPerSecond = 1.0 / (Frequency * FPlatformTime::GetSecondsPerCycle64());
+		const double GPUTimeInSeconds = (double)gpu_time_ns / 1000000000.0;
+
+		GetDynamicRHI<FOpenGLDynamicRHI>()->RHISetExternalGPUTime(CyclesPerSecond * GPUTimeInSeconds);
+	}
+
+	void SetSwappyPostWaitCallback()
+	{
+		SwappyTracer Tracer = { 0 };
+		Tracer.postWait = AndroidGL::SwappyPostWaitCallback;
+		SwappyGL_injectTracer(&Tracer);
+	}
+};
+
 void FAndroidOpenGLFramePacer::InitSwappy()
 {
 	if (!bSwappyInit)
 	{
+		if( !FParse::Param(FCommandLine::Get(), TEXT("UseSwappyThreads")) )
+		{
+			Swappy_setThreadFunctions(&SwappyThreads);
+		}
 		// initialize Swappy
 		JNIEnv* Env = FAndroidApplication::GetJavaEnv();
 		if (ensure(Env))
 		{
 			FPlatformMisc::LowLevelOutputDebugStringf(TEXT("Init Swappy: version %d"), Swappy_version());
 			SwappyGL_init(Env, FJavaWrapper::GameActivityThis);
+
+			AndroidGL::SetSwappyPostWaitCallback();
 		}
 		bSwappyInit = true;
 	}
@@ -120,7 +190,7 @@ bool FAndroidOpenGLFramePacer::SupportsFramePaceInternal(int32 QueryFramePace, i
 		{
 			RefreshRatesString += FString::Printf(TEXT(" %d"), Rate);
 		}
-		UE_LOG(LogRHI, Log, TEXT("Supported Refresh Rates:%s"), *RefreshRatesString);
+		UE_LOG(LogRHI, Log, TEXT("FAndroidOpenGLFramePacer -> Supported Refresh Rates:%s"), *RefreshRatesString);
 
 		for (int32 Rate : RefreshRates)
 		{
@@ -162,6 +232,8 @@ bool FAndroidOpenGLFramePacer::SupportsFramePace(int32 QueryFramePace)
 
 bool FAndroidOpenGLFramePacer::SwapBuffers(bool bLockToVsync)
 {
+	SCOPED_NAMED_EVENT(STAT_OpenGLSwapBuffersTime, FColor::Red)
+
 #if !UE_BUILD_SHIPPING
 	if (FAndroidPlatformRHIFramePacer::CVarStallSwap.GetValueOnAnyThread() > 0.0f)
 	{
@@ -268,7 +340,7 @@ bool FAndroidOpenGLFramePacer::SwapBuffers(bool bLockToVsync)
 				);
 			}
 
-			float RefreshRate = AndroidThunkCpp_GetMetaDataFloat(TEXT("ue4.display.getRefreshRate"));
+			float RefreshRate = AndroidThunkCpp_GetMetaDataFloat(TEXT("unreal.display.getRefreshRate"));
 
 			UE_LOG(LogRHI, Log, TEXT("JNI Display getRefreshRate=%f"),
 				RefreshRate
@@ -342,7 +414,7 @@ bool FAndroidOpenGLFramePacer::SwapBuffers(bool bLockToVsync)
 							break;
 						}
 
-						static_cast<FOpenGLDynamicRHI*>(GDynamicRHI)->RHIPollOcclusionQueries();
+						GetDynamicRHI<FOpenGLDynamicRHI>()->RHIPollOcclusionQueries();
 					}
 				}
 			}

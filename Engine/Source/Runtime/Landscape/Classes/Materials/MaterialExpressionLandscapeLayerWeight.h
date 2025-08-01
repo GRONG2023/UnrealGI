@@ -7,14 +7,15 @@
 #include "UObject/ObjectMacros.h"
 #include "Misc/Guid.h"
 #include "MaterialExpressionIO.h"
+#include "MaterialValueType.h"
 #include "Materials/MaterialExpression.h"
 #include "MaterialExpressionLandscapeLayerWeight.generated.h"
 
 class UTexture;
 struct FMaterialParameterInfo;
 
-UCLASS(collapsecategories, hidecategories=Object)
-class LANDSCAPE_API UMaterialExpressionLandscapeLayerWeight : public UMaterialExpression
+UCLASS(collapsecategories, hidecategories=Object, MinimalAPI)
+class UMaterialExpressionLandscapeLayerWeight : public UMaterialExpression
 {
 	GENERATED_UCLASS_BODY()
 
@@ -31,42 +32,40 @@ class LANDSCAPE_API UMaterialExpressionLandscapeLayerWeight : public UMaterialEx
 	float PreviewWeight;
 
 	/** only used if Base is not hooked up */
-	UPROPERTY(EditAnywhere, Category = MaterialExpressionLandscapeLayerWeight)
+	UPROPERTY(EditAnywhere, Category = MaterialExpressionLandscapeLayerWeight, meta = (OverridingInputProperty = "Base"))
 	FVector ConstBase;
-
-	/** GUID that should be unique within the material, this is used for parameter renaming. */
-	UPROPERTY()
-	FGuid ExpressionGUID;
 
 public:
 
 	//~ Begin UMaterialExpression Interface
 #if WITH_EDITOR
-	virtual bool IsResultMaterialAttributes(int32 OutputIndex) override;
-	virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
-	virtual void GetCaption(TArray<FString>& OutCaptions) const override;
-	virtual bool MatchesSearchQuery(const TCHAR* SearchQuery) override;
+	LANDSCAPE_API virtual bool IsResultMaterialAttributes(int32 OutputIndex) override;
+	LANDSCAPE_API virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
+	virtual bool CanRenameNode() const override { return true; }
+	LANDSCAPE_API virtual FString GetEditableName() const override;
+	LANDSCAPE_API virtual void SetEditableName(const FString& NewName) override;
+	LANDSCAPE_API virtual void GetCaption(TArray<FString>& OutCaptions) const override;
+	LANDSCAPE_API virtual bool MatchesSearchQuery(const TCHAR* SearchQuery) override;
 #endif
-	virtual UObject* GetReferencedTexture() const override;
+	LANDSCAPE_API virtual UObject* GetReferencedTexture() const override;
+	LANDSCAPE_API virtual ReferencedTextureArray GetReferencedTextures() const override;
 	virtual bool CanReferenceTexture() const override { return true; }
 #if WITH_EDITOR
 	virtual uint32 GetInputType(int32 InputIndex) override {return MCT_Float | MCT_MaterialAttributes;}
-#endif //WITH_EDITOR
-	//~ End UMaterialExpression Interface
-
-	virtual FGuid& GetParameterExpressionId() override;
 
 	/**
-	 * Called to get list of parameter names for static parameter sets
+	 * Gets the landscape layer names
 	 */
-	void GetAllParameterInfo(TArray<FMaterialParameterInfo> &OutParameterInfo, TArray<FGuid> &OutParameterIds, const FMaterialParameterInfo& InBaseParameterInfox) const;
+	LANDSCAPE_API virtual void GetLandscapeLayerNames(TArray<FName>& OutLayers) const override;
+#endif //WITH_EDITOR
+	//~ End UMaterialExpression Interface
 
 	//~ Begin UObject Interface
 	/**
 	 * Do any object-specific cleanup required immediately after loading an object,
 	 * and immediately after any undo/redo.
 	 */
-	virtual void PostLoad() override;
+	LANDSCAPE_API virtual void PostLoad() override;
 	//~ End UObject Interface
 };
 

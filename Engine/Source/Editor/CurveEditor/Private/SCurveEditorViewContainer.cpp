@@ -1,18 +1,47 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SCurveEditorViewContainer.h"
-#include "SCurveEditorPanel.h"
-#include "SCurveEditorView.h"
-#include "Views/SInteractiveCurveEditorView.h"
 
-#include "DragOperations/CurveEditorDragOperation_Tangent.h"
-#include "DragOperations/CurveEditorDragOperation_MoveKeys.h"
+#include "CurveEditor.h"
+#include "CurveEditorSelection.h"
+#include "Delegates/Delegate.h"
+#include "DragOperations/CurveEditorDragOperation_Marquee.h"
 #include "DragOperations/CurveEditorDragOperation_Pan.h"
 #include "DragOperations/CurveEditorDragOperation_Zoom.h"
-#include "DragOperations/CurveEditorDragOperation_Marquee.h"
-
-#include "EditorStyleSet.h"
+#include "DragOperations/CurveEditorDragOperation_ScrubTime.h"
+#include "GenericPlatform/ICursor.h"
+#include "HAL/PlatformCrt.h"
+#include "ICurveEditorBounds.h"
+#include "ICurveEditorToolExtension.h"
+#include "ITimeSlider.h"
+#include "Input/Events.h"
+#include "InputCoreTypes.h"
+#include "Layout/Children.h"
+#include "Layout/Clipping.h"
+#include "Layout/Geometry.h"
+#include "Layout/Visibility.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/Attribute.h"
+#include "Rendering/DrawElements.h"
+#include "Rendering/RenderingCommon.h"
+#include "SCurveEditorPanel.h"
+#include "SCurveEditorView.h"
+#include "Slate/SRetainerWidget.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateBrush.h"
+#include "Templates/UniquePtr.h"
+#include "Types/SlateEnums.h"
+#include "Types/SlateStructs.h"
+#include "UObject/NameTypes.h"
+#include "Views/SInteractiveCurveEditorView.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/SWidget.h"
+#include "CurveEditorCommands.h"
+
+class FPaintArgs;
+class FSlateRect;
+class FWidgetStyle;
 
 #define LOCTEXT_NAMESPACE "SCurveEditorViewContainer"
 
@@ -46,14 +75,14 @@ FVector2D SCurveEditorViewContainer::ComputeDesiredSize(float) const
 		{
 			const FVector2D& ChildDesiredSize = Child.GetWidget()->GetDesiredSize();
 
-			FMargin SlotPadding = Child.SlotPadding.Get();
+			FMargin SlotPadding = Child.GetPadding();
 			MyDesiredSize.Y += SlotPadding.GetTotalSpaceAlong<Orient_Vertical>();
 
 			// For a vertical panel, we want to find the maximum desired width (including margin).
 			// That will be the desired width of the whole panel.
 			MyDesiredSize.X = FMath::Max(MyDesiredSize.X, ChildDesiredSize.X + SlotPadding.GetTotalSpaceAlong<Orient_Horizontal>());
 
-			if (Child.SizeParam.SizeRule == FSizeParam::SizeRule_Stretch)
+			if (Child.GetSizeRule() == FSizeParam::SizeRule_Stretch)
 			{
 				++NumStretchPanels;
 			}
@@ -65,7 +94,11 @@ FVector2D SCurveEditorViewContainer::ComputeDesiredSize(float) const
 	}
 
 	const float PanelHeight = CurveEditor->GetPanel()->GetScrollPanelGeometry().GetLocalSize().Y - 1.f;
-	MyDesiredSize.Y += FMath::Max(MinimumPanelHeight, (PanelHeight - MyDesiredSize.Y) / NumStretchPanels) * NumStretchPanels;
+
+	if (NumStretchPanels > 0)
+	{
+		MyDesiredSize.Y += FMath::Max(MinimumPanelHeight, (PanelHeight - MyDesiredSize.Y) / NumStretchPanels) * NumStretchPanels;
+	}
 
 	MyDesiredSize.Y = FMath::Max(MyDesiredSize.Y, PanelHeight);
 	return MyDesiredSize;
@@ -74,6 +107,15 @@ FVector2D SCurveEditorViewContainer::ComputeDesiredSize(float) const
 void SCurveEditorViewContainer::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
 {
 	ExpandInputBounds(AllottedGeometry.GetLocalSize().X);
+
+	//we manually check the child views since we can't rely on ::Tick being called since the RetainerWidget will stop them if not actually rendering
+	for (TSharedPtr<SCurveEditorView>& View : Views)
+	{
+		if (View)
+		{
+			View->CheckCacheAndInvalidateIfNeeded();
+		}
+	}
 
 	if (CurveEditor->GetCurrentTool())
 	{
@@ -85,8 +127,9 @@ int32 SCurveEditorViewContainer::OnPaint(const FPaintArgs& Args, const FGeometry
 {
 	const ESlateDrawEffect DrawEffects = ShouldBeEnabled(bParentEnabled) ? ESlateDrawEffect::None : ESlateDrawEffect::DisabledEffect;
 	
-	FSlateDrawElement::MakeBox(OutDrawElements, LayerId, AllottedGeometry.ToPaintGeometry(),
-		FEditorStyle::GetBrush("ToolPanel.GroupBorder"), DrawEffects);
+	static const FName BackgroundBrushName("Brushes.Panel");
+	const FSlateBrush* Background = FAppStyle::GetBrush(BackgroundBrushName);
+	FSlateDrawElement::MakeBox(OutDrawElements, LayerId, AllottedGeometry.ToPaintGeometry(), Background, DrawEffects, Background->GetTint(InWidgetStyle));
 
 	SVerticalBox::OnPaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
 
@@ -108,14 +151,31 @@ int32 SCurveEditorViewContainer::OnPaint(const FPaintArgs& Args, const FGeometry
 		PaintArgs.bDisplayScrubPosition = true;
 		PaintArgs.bDisplayMarkedFrames = false;
 		PaintArgs.PlaybackRangeArgs = FPaintPlaybackRangeArgs(
-			FEditorStyle::GetBrush("Sequencer.Timeline.PlayRange_Bottom_L"),
-			FEditorStyle::GetBrush("Sequencer.Timeline.PlayRange_Bottom_R"),
+			FAppStyle::GetBrush("Sequencer.Timeline.PlayRange_Bottom_L"),
+			FAppStyle::GetBrush("Sequencer.Timeline.PlayRange_Bottom_R"),
 			6.f);
 
 		TimeSliderController->OnPaintViewArea(AllottedGeometry, MyCullingRect, OutDrawElements, LayerId + CurveViewConstants::ELayerOffset::GridOverlays, bParentEnabled, PaintArgs);
 	}
 
 	return LayerId + CurveViewConstants::ELayerOffset::Last;
+}
+
+bool SCurveEditorViewContainer::IsScrubTimeKeyEvent(const FKeyEvent& InKeyEvent)
+{
+	const FCurveEditorCommands& Commands = FCurveEditorCommands::Get();
+	// Need to iterate through primary and secondary to make sure they are all pressed.
+	for (uint32 i = 0; i < static_cast<uint8>(EMultipleKeyBindingIndex::NumChords); ++i)
+	{
+		EMultipleKeyBindingIndex ChordIndex = static_cast<EMultipleKeyBindingIndex>(i);
+		const FInputChord& Chord = *Commands.ScrubTime->GetActiveChord(ChordIndex);
+		const bool bIsMovingTimeSlider = Chord.IsValidChord() && InKeyEvent.GetKey() == Chord.Key;
+		if (bIsMovingTimeSlider)
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 FReply SCurveEditorViewContainer::OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)
@@ -126,6 +186,28 @@ FReply SCurveEditorViewContainer::OnKeyDown(const FGeometry& MyGeometry, const F
 		DragOperation.Reset();
 		return FReply::Handled();
 	}
+
+	if (IsScrubTimeKeyEvent(InKeyEvent))
+	{
+		bIsScrubbingTime = true;
+		return FReply::Handled();
+	}
+	return FReply::Unhandled();
+}
+
+FReply SCurveEditorViewContainer::OnKeyUp(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)
+{
+	if (IsScrubTimeKeyEvent(InKeyEvent) && bIsScrubbingTime )
+	{
+		bIsScrubbingTime = false;
+		if (DragOperation.IsSet())
+		{
+			DragOperation->DragImpl->CancelDrag();
+			DragOperation.Reset();
+			return FReply::Handled();
+		}
+	}
+	
 	return FReply::Unhandled();
 }
 
@@ -145,11 +227,19 @@ FReply SCurveEditorViewContainer::OnMouseButtonDown(const FGeometry& MyGeometry,
 {
 	FVector2D MousePixel = MyGeometry.AbsoluteToLocal(MouseEvent.GetScreenSpacePosition());
 
-	// Marquee Selection
+	// Marquee Selection or time scrub
 	if (MouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
 	{
-		DragOperation = FCurveEditorDelayedDrag(MousePixel, MouseEvent.GetEffectingButton());
-		DragOperation->DragImpl = MakeUnique<FCurveEditorDragOperation_Marquee>(CurveEditor.Get());
+		if (bIsScrubbingTime)
+		{
+			DragOperation = FCurveEditorDelayedDrag(MousePixel, MouseEvent.GetEffectingButton());
+			DragOperation->DragImpl = MakeUnique<FCurveEditorDragOperation_ScrubTime>(CurveEditor.Get());
+		}
+		else
+		{
+			DragOperation = FCurveEditorDelayedDrag(MousePixel, MouseEvent.GetEffectingButton());
+			DragOperation->DragImpl = MakeUnique<FCurveEditorDragOperation_Marquee>(CurveEditor.Get());
+		}
 		return FReply::Handled();
 	}
 	// Middle Click + Alt Pan
@@ -326,20 +416,30 @@ void SCurveEditorViewContainer::AddView(TSharedRef<SCurveEditorView> ViewToAdd)
 	ViewToAdd->RelativeOrder = Views.Num();
 
 	Views.Add(ViewToAdd);
-	SVerticalBox::FSlot& Slot = AddSlot()
-	[
-		SNew(SBox)
-		.Padding(MakeAttributeSP(this, &SCurveEditorViewContainer::GetSlotPadding, InsertIndex))
-		.Clipping(EWidgetClipping::ClipToBounds)
+	SVerticalBox::FSlot* SlotPointer = nullptr;
+	AddSlot()
+		.Expose(SlotPointer)
 		[
-			ViewToAdd
+		SAssignNew(RetainerWidget, SRetainerWidget)
+		.RenderOnPhase(false)
+		.RenderOnInvalidation(false)
+		.bWarnOnInvalidSize(false)
+		[
+			SNew(SBox)
+			.Padding(MakeAttributeSP(this, &SCurveEditorViewContainer::GetSlotPadding, InsertIndex))
+			.Clipping(EWidgetClipping::ClipToBounds)
+			[
+				ViewToAdd
+			]
 		]
 	];
 
 	if (ViewToAdd->ShouldAutoSize())
 	{
-		Slot.AutoHeight();
+		SlotPointer->SetAutoHeight();
 	}
+
+	ViewToAdd->SetRetainerWidget(RetainerWidget);
 }
 
 void SCurveEditorViewContainer::Clear()

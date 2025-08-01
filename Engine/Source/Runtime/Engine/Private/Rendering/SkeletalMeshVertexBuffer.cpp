@@ -1,9 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Rendering/SkeletalMeshVertexBuffer.h"
+#include "Containers/ClosableMpscQueue.h"
 #include "EngineUtils.h"
-#include "SkeletalMeshTypes.h"
-#include "Rendering/SkeletalMeshLODModel.h"
+#include "EngineLogs.h"
+#include "Experimental/Containers/HazardPointer.h"
+#include "RHI.h"
+#include "SkeletalMeshLegacyCustomVersions.h"
 
 /**
 * Destructor
@@ -30,7 +33,7 @@ void FDummySkeletalMeshVertexBuffer::CleanUp()
 */
 FArchive& operator<<(FArchive& Ar, FDummySkeletalMeshVertexBuffer& VertexBuffer)
 {
-	FStripDataFlags StripFlags(Ar, 0, VER_UE4_STATIC_SKELETAL_MESH_SERIALIZATION_FIX);
+	FStripDataFlags StripFlags(Ar, 0, FPackageFileVersion::CreateUE4Version(VER_UE4_STATIC_SKELETAL_MESH_SERIALIZATION_FIX));
 
 	Ar << VertexBuffer.NumTexCoords;
 	Ar << VertexBuffer.bUseFullPrecisionUVs;
@@ -39,7 +42,7 @@ FArchive& operator<<(FArchive& Ar, FDummySkeletalMeshVertexBuffer& VertexBuffer)
 
 	Ar.UsingCustomVersion(FSkeletalMeshCustomVersion::GUID);
 
-	if (Ar.UE4Ver() >= VER_UE4_SUPPORT_GPUSKINNING_8_BONE_INFLUENCES && Ar.CustomVer(FSkeletalMeshCustomVersion::GUID) < FSkeletalMeshCustomVersion::UseSeparateSkinWeightBuffer)
+	if (Ar.UEVer() >= VER_UE4_SUPPORT_GPUSKINNING_8_BONE_INFLUENCES && Ar.CustomVer(FSkeletalMeshCustomVersion::GUID) < FSkeletalMeshCustomVersion::UseSeparateSkinWeightBuffer)
 	{
 		Ar << bBackCompatExtraBoneInfluences;
 	}
@@ -56,7 +59,7 @@ FArchive& operator<<(FArchive& Ar, FDummySkeletalMeshVertexBuffer& VertexBuffer)
 	}
 
 	// if Ar is counting, it still should serialize. Need to count VertexData
-	if (!StripFlags.IsDataStrippedForServer() || Ar.IsCountingMemory())
+	if (!StripFlags.IsAudioVisualDataStripped() || Ar.IsCountingMemory())
 	{
 		// Special handling for loading old content
 		if (Ar.IsLoading() && Ar.CustomVer(FSkeletalMeshCustomVersion::GUID) < FSkeletalMeshCustomVersion::UseSeparateSkinWeightBuffer)

@@ -11,7 +11,6 @@ using System.IO;
 using System.Diagnostics;
 using System.Xml;
 using System.Globalization;
-using Tools.DotNETCommon;
 using System.Linq;
 
 namespace iPhonePackager
@@ -126,7 +125,7 @@ namespace iPhonePackager
 
             // remap the gamename if necessary
             string GameName = Program.GameName;
-            if (GameName == "UE4Game")
+            if (GameName == "UnrealGame")
             {
                 if (Config.ProjectFile.Length > 0)
                 {

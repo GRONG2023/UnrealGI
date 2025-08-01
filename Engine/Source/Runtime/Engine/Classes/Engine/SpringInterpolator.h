@@ -118,12 +118,12 @@ namespace FRK4SpringInterpolatorUtils
 		return Value.GetAbsMax() < MaxAbsoluteValue;
 	}
 
-	static FORCEINLINE bool AreEqual(float A, float B, float ErrorTolerance = KINDA_SMALL_NUMBER)
+	static FORCEINLINE bool AreEqual(float A, float B, float ErrorTolerance = UE_KINDA_SMALL_NUMBER)
 	{
 		return FMath::IsNearlyEqual(A, B, ErrorTolerance);
 	}
 
-	static FORCEINLINE bool AreEqual(FVector A, FVector B, float ErrorTolerance = KINDA_SMALL_NUMBER)
+	static FORCEINLINE bool AreEqual(FVector A, FVector B, float ErrorTolerance = UE_KINDA_SMALL_NUMBER)
 	{
 		return A.Equals(B, ErrorTolerance);
 	}
@@ -145,9 +145,9 @@ protected:
 	RK4Integrator::FRK4State<T> State;
 
 public:
-	FRK4SpringInterpolator()
-		: StiffnessConstant(1.f)
-		, DampeningRatio(1.f)
+	FRK4SpringInterpolator(float InSpringStiffness = 1.f, float InDampeningRatio = 1.f)
+		: StiffnessConstant(InSpringStiffness)
+		, DampeningRatio(InDampeningRatio)
 		, bIsInitialized(false)
 		, bIsInMotion(false)
 		, TimeRemaining(0.f)

@@ -2,6 +2,8 @@
 
 #pragma once
 
+// HEADER_UNIT_SKIP - Not included directly
+
 #include "ProfilingDebugging/PlatformFileTrace.h"
 
 PRAGMA_DISABLE_UNSAFE_TYPECAST_WARNINGS
@@ -320,11 +322,16 @@ public:
 			}
 		}
 	}
+
 	virtual void CancelImpl() override
 	{
 		// no cancel support
 	}
 
+	virtual void ReleaseMemoryOwnershipImpl() override
+	{
+		DEC_MEMORY_STAT_BY(STAT_AsyncFileMemory, BytesToRead);
+	}
 };
 
 void FMicrosoftReadRequestWorker::DoWork()
@@ -349,7 +356,11 @@ public:
 		while (!*(volatile bool*)&bCompleteAndCallbackCalled);
 	}
 
-	virtual void CancelImpl()
+	virtual void CancelImpl() override
+	{
+	}
+
+	virtual void ReleaseMemoryOwnershipImpl() override
 	{
 	}
 };
@@ -370,7 +381,11 @@ public:
 		while (!*(volatile bool*)&bCompleteAndCallbackCalled);
 	}
 
-	virtual void CancelImpl()
+	virtual void CancelImpl() override
+	{
+	}
+
+	virtual void ReleaseMemoryOwnershipImpl() override
 	{
 	}
 };
@@ -517,4 +532,4 @@ const TCHAR* FMicrosoftReadRequest::GetFileNameForErrorMessagesAndPanicRetry()
 	return *Owner->FileNameForErrorMessagesAndPanicRetry;
 }
 
-PRAGMA_ENABLE_UNSAFE_TYPECAST_WARNINGS
+PRAGMA_RESTORE_UNSAFE_TYPECAST_WARNINGS

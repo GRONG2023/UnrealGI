@@ -9,7 +9,7 @@
 #include "Misc/NetworkGuid.h"
 #include "UObject/CoreNet.h"
 #include "EngineLogs.h"
-#include "Net/Core/Trace/Config.h"
+#include "Net/Core/Trace/NetTraceConfig.h"
 
 class UChannel;
 class UNetConnection;
@@ -19,7 +19,7 @@ extern const int32 MAX_BUNCH_SIZE;
 //
 // A bunch of data to send.
 //
-class ENGINE_API FOutBunch : public FNetBitWriter
+class FOutBunch : public FNetBitWriter
 {
 public:
 	// Variables.
@@ -33,6 +33,7 @@ public:
 	uint8					ReceivedAck:1;
 	uint8					bOpen:1;
 	uint8					bClose:1;
+	UE_DEPRECATED(5.3, "Replication pausing is deprecated")
 	uint8					bIsReplicationPaused:1;   // Replication on this channel is being paused by the server
 	uint8					bReliable:1;
 	uint8					bPartial:1;				// Not a complete bunch
@@ -68,9 +69,17 @@ public:
 #endif
 
 	// Functions.
-	FOutBunch();
-	FOutBunch( class UChannel* InChannel, bool bClose );
-	FOutBunch( UPackageMap * PackageMap, int64 InMaxBits = 1024 );
+	ENGINE_API FOutBunch();
+	ENGINE_API explicit FOutBunch(int64 InMaxBits);
+	ENGINE_API FOutBunch( class UChannel* InChannel, bool bClose );
+	ENGINE_API FOutBunch( UPackageMap * PackageMap, int64 InMaxBits = 1024 );
+
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	FOutBunch(FOutBunch&&) = default;
+	FOutBunch(const FOutBunch&) = default;
+	FOutBunch& operator=(FOutBunch&&) = default;
+	FOutBunch& operator=(const FOutBunch&) = default;
+	ENGINE_API PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	virtual ~FOutBunch();
 
@@ -89,7 +98,9 @@ public:
 		{
 			Str += FString::Printf(TEXT("CloseReason: %s "), LexToString(CloseReason));
 		}
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		Str += FString::Printf(TEXT("bIsReplicationPaused: %d "), bIsReplicationPaused);
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		Str += FString::Printf(TEXT("bReliable: %d "), bReliable);
 		Str += FString::Printf(TEXT("bPartial: %d//%d//%d "), bPartial, bPartialInitial, bPartialFinal);
 		Str += FString::Printf( TEXT( "bHasPackageMapExports: %d " ), bHasPackageMapExports );
@@ -100,13 +111,13 @@ public:
 		return Str;
 	}
 
-	virtual void CountMemory(FArchive& Ar) const override;
+	ENGINE_API virtual void CountMemory(FArchive& Ar) const override;
 };
 
 //
 // A bunch of data received from a channel.
 //
-class ENGINE_API FInBunch : public FNetBitReader
+class FInBunch : public FNetBitReader
 {
 public:
 	// Variables.
@@ -118,6 +129,7 @@ public:
 	int32				ChSequence;
 	uint8				bOpen:1;
 	uint8				bClose:1;
+	UE_DEPRECATED(5.3, "Replication pausing is deprecated")
 	uint8				bIsReplicationPaused:1;		// Replication on this channel is being paused by the server
 	uint8				bReliable:1;
 	uint8				bPartial:1;					// Not a complete bunch
@@ -144,7 +156,9 @@ public:
 		{
 			Str += FString::Printf(TEXT("CloseReason: %s "), LexToString(CloseReason));
 		}
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		Str += FString::Printf(TEXT("bIsReplicationPaused: %d "), bIsReplicationPaused);
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		Str += FString::Printf(TEXT("bReliable: %d "), bReliable);
 		Str += FString::Printf(TEXT("bPartial: %d//%d//%d "), bPartial, bPartialInitial, bPartialFinal);
 		Str += FString::Printf(TEXT("bHasPackageMapExports: %d "), bHasPackageMapExports );
@@ -157,10 +171,22 @@ public:
 	}
  
 	// Functions.
-	FInBunch( UNetConnection* InConnection, uint8* Src=NULL, int64 CountBits=0 );
-	FInBunch( FInBunch &InBunch, bool CopyBuffer );
+	ENGINE_API FInBunch( UNetConnection* InConnection, uint8* Src=NULL, int64 CountBits=0 );
+	ENGINE_API FInBunch( FInBunch &InBunch, bool CopyBuffer );
+
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	FInBunch(FInBunch&&) = default;
+	FInBunch(const FInBunch&) = default;
+	FInBunch& operator=(FInBunch&&) = default;
+	FInBunch& operator=(const FInBunch&) = default;
+	ENGINE_API PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	virtual void CountMemory(FArchive& Ar) const override;
+		
+	virtual uint32 EngineNetVer() const override;
+	virtual uint32 GameNetVer() const override;
+	virtual void SetEngineNetVer(const uint32 InEngineNetVer) override;
+	virtual void SetGameNetVer(const uint32 InGameNetVer) override;
 };
 
 /** out bunch for the control channel (special restrictions) */

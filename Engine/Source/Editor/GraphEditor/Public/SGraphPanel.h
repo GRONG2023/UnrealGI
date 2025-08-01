@@ -2,28 +2,56 @@
 
 #pragma once
 
+#include "Animation/CurveSequence.h"
+#include "BlueprintUtilities.h"
+#include "ConnectionDrawingPolicy.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "Misc/Guid.h"
-#include "Misc/Attribute.h"
+#include "Delegates/Delegate.h"
 #include "EdGraph/EdGraphPin.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Layout/Geometry.h"
+#include "GraphEditAction.h"
+#include "GraphEditor.h"
+#include "GraphSplineOverlapResult.h"
+#include "HAL/PlatformMath.h"
 #include "Input/Events.h"
 #include "Input/Reply.h"
-#include "Widgets/SWidget.h"
-#include "Animation/CurveSequence.h"
-#include "UObject/GCObject.h"
-#include "GraphEditor.h"
-#include "SNodePanel.h"
+#include "Layout/Clipping.h"
+#include "Layout/Geometry.h"
+#include "Math/Vector2D.h"
+#include "Misc/Attribute.h"
+#include "Misc/Guid.h"
 #include "SGraphNode.h"
-#include "GraphEditAction.h"
 #include "SGraphPin.h"
-#include "GraphSplineOverlapResult.h"
+#include "SNodePanel.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateEnums.h"
+#include "UObject/GCObject.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SWidget.h"
 
 class FActiveTimerHandle;
+class FArrangedChildren;
+class FDragDropEvent;
+class FPaintArgs;
+class FReferenceCollector;
+class FSlateRect;
 class FSlateWindowElementList;
+class FText;
+class FWidgetStyle;
+class IMenu;
 class IToolTip;
+class SGraphNode;
+class SWidget;
 class UEdGraph;
+class UEdGraphNode;
+class UObject;
+struct FAssetData;
+struct FDiffSingleResult;
+struct FEdGraphEditAction;
+struct FGuid;
 
 DECLARE_DELEGATE( FOnUpdateGraphPanel )
 
@@ -54,7 +82,6 @@ public:
 		, _OnSelectionChanged()
 		, _OnNodeDoubleClicked()
 		, _GraphObj( static_cast<UEdGraph*>(NULL) )
-		, _GraphObjToDiff( static_cast<UEdGraph*>(NULL) )
 		, _InitialZoomToFit( false )
 		, _IsEditable( true )
 		, _DisplayAsReadOnly( false )
@@ -70,7 +97,8 @@ public:
 		SLATE_EVENT( SGraphEditor::FOnDropActor, OnDropActor )
 		SLATE_EVENT( SGraphEditor::FOnDropStreamingLevel, OnDropStreamingLevel )
 		SLATE_ARGUMENT( class UEdGraph*, GraphObj )
-		SLATE_ARGUMENT( class UEdGraph*, GraphObjToDiff )
+		SLATE_ARGUMENT( TSharedPtr<TArray<FDiffSingleResult>>, DiffResults )
+		SLATE_ATTRIBUTE( int32, FocusedDiffResult )
 		SLATE_ARGUMENT( bool, InitialZoomToFit )
 		SLATE_ATTRIBUTE( bool, IsEditable )
 		SLATE_ATTRIBUTE( bool, DisplayAsReadOnly )
@@ -81,6 +109,9 @@ public:
 		SLATE_EVENT( SGraphEditor::FOnSpawnNodeByShortcut, OnSpawnNodeByShortcut )
 		SLATE_EVENT( FOnUpdateGraphPanel, OnUpdateGraphPanel )
 		SLATE_EVENT( SGraphEditor::FOnDisallowedPinConnection, OnDisallowedPinConnection )
+		SLATE_EVENT( SGraphEditor::FOnDoubleClicked, OnDoubleClicked )
+		SLATE_EVENT( SGraphEditor::FOnMouseButtonDown, OnMouseButtonDown )
+		SLATE_EVENT( SGraphEditor::FOnNodeSingleClicked, OnNodeSingleClicked )
 		//SLATE_ATTRIBUTE( FGraphAppearanceInfo, Appearance )
 	SLATE_END_ARGS()
 
@@ -107,7 +138,6 @@ public:
 	virtual FReply OnKeyDown( const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent ) override;
 	virtual bool SupportsKeyboardFocus() const override;
 	virtual void OnArrangeChildren( const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren ) const override;
-	virtual TSharedPtr<IToolTip> GetToolTip() override;
 	// End of SWidget interface
 
 	// SNodePanel interface
@@ -125,11 +155,21 @@ public:
 	void ArrangeChildrenForContextMenuSummon(const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren) const;
 	TSharedPtr<SWidget> SummonContextMenu(const FVector2D& WhereToSummon, const FVector2D& WhereToAddNode, UEdGraphNode* ForNode, UEdGraphPin* ForPin, const TArray<UEdGraphPin*>& DragFromPins);
 	void SummonCreateNodeMenuFromUICommand(uint32 NumNodesAdded);
+	void DismissContextMenu();
 
 	void OnBeginMakingConnection(UEdGraphPin* InOriginatingPin);
 	void OnBeginMakingConnection(FGraphPinHandle PinHandle);
 	void OnStopMakingConnection(bool bForceStop = false);
 	void PreservePinPreviewUntilForced();
+
+	/** Indicate that the connection from the given start to the given end pins is being relinked. A preview connection is being drawn for the relinked connection. */
+	void OnBeginRelinkConnection(const FGraphPinHandle& InSourcePinHandle, const FGraphPinHandle& InTargetPinHandle);
+
+	/** The relink connection operation either got cancelled or has successfully been executed. Preview connection won't be drawn anymore. */
+	void OnEndRelinkConnection(bool bForceStop = false);
+
+	/** True in case a connection is currently being relinked, false if not. */
+	bool IsRelinkingConnection() const;
 
 	/** Update this GraphPanel to match the data that it is observing. Expected to be called during ticking. */
 	void Update();
@@ -210,14 +250,26 @@ public:
 	/** Get a graph node widget from the specified GUID, if it applies to any nodes in this graph */
 	TSharedPtr<SGraphNode> GetNodeWidgetFromGuid(FGuid Guid) const;
 
+	/** Get a list of selected editor graph nodes from the selection manager. */
+	TArray<UEdGraphNode*> GetSelectedGraphNodes() const;
+
+	const FGraphSplineOverlapResult& GetPreviousFrameSplineOverlap() const { return PreviousFrameSplineOverlap; }
+
 private:
 
 	/** A map of guid -> graph nodes */
 	TMap<FGuid, TWeakPtr<SGraphNode>> NodeGuidMap;
 
+	/** List of currently relinked connections. */
+	TArray<FConnectionDrawingPolicy::FRelinkConnection> RelinkConnections;
+
 protected:
-	UEdGraph* GraphObj;
-	UEdGraph* GraphObjToDiff;//if it exists, this is 
+	TObjectPtr<UEdGraph> GraphObj;
+	
+	// if this graph is displaying the results of a diff, this will provide info
+	// on how to display the nodes
+	TSharedPtr<TArray<FDiffSingleResult>> DiffResults;
+	TAttribute<int32> FocusedDiffResult;
 
 	// Should we ignore the OnStopMakingConnection unless forced?
 	bool bPreservePinPreviewConnection;
@@ -235,6 +287,7 @@ protected:
 	/** Sometimes the panel draws a preview connector; e.g. when the user is connecting pins */
 	TArray< FGraphPinHandle > PreviewConnectorFromPins;
 	FVector2D PreviewConnectorEndpoint;
+	mutable bool bIsDrawStateCached = false;
 
 	/** Last mouse position seen, used for paint-centric highlighting */
 	FVector2D SavedMousePosForOnPaintEventLocalSpace;
@@ -277,6 +330,12 @@ protected:
 	/** Called when the user generates a warning tooltip because a connection was invalid */
 	SGraphEditor::FOnDisallowedPinConnection OnDisallowedPinConnection;
 
+	/** Called when the graph itself is double clicked */
+	SGraphEditor::FOnDoubleClicked OnDoubleClicked;
+
+	/** Called when the graph itself is clicked */
+	SGraphEditor::FOnMouseButtonDown OnClicked;
+	
 	/** Whether to draw the overlay indicating we're in PIE */
 	bool bShowPIENotification;
 
@@ -284,11 +343,11 @@ protected:
 	TAttribute<bool> ShowGraphStateOverlay;
 
 private:
-	/** Ordered list of user actions, as they came in */
-	TArray<FEdGraphEditAction> UserActions;
+	/** Set of nodes selected by the user, tracked while a visual update is pending */
+	TSet<TWeakObjectPtr<class UEdGraphNode>> UserSelectedNodes;
 
-	/** Map of recently added nodes for the panel (maps from added nodes to UserActions indices) */
-	TMap<const class UEdGraphNode*, int32> UserAddedNodes;
+	/** Set of user-added nodes for the panel, tracked while a visual update is pending */
+	TSet<const class UEdGraphNode*> UserAddedNodes;
 
 	/** Should the graph display all nodes in a read-only state (grayed)? This does not affect functionality of using them (IsEditable) */
 	TAttribute<bool> DisplayAsReadOnly;
@@ -309,7 +368,7 @@ private:
 	void UpdateSelectedNodesPositions(FVector2D PositionIncrement);
 
 	/** Handle updating the spline hover state */
-	void OnSplineHoverStateChanged(const FGraphSplineOverlapResult& NewSplineHoverState);
+	bool OnSplineHoverStateChanged(const FGraphSplineOverlapResult& NewSplineHoverState);
 
 	/** Returns the pin that we're considering as hovered if we are hovering over a spline; may be null */
 	class SGraphPin* GetBestPinFromHoveredSpline() const;
@@ -323,6 +382,12 @@ private:
 	/** Returns a pin that is under the mouse, given a specified node. Returns nullptr if no valid node is given or no pin found */
 	UEdGraphPin* GetPinUnderMouse(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent, TSharedPtr<SGraphNode> GraphNode) const;
 
+	/** If the spawned nodes were auto-wired from any of the dragged pins, then this will try to make the newly connected pin end up at SpawnGraphPosition */
+	void AdjustNewlySpawnedNodePositions(TArrayView<UEdGraphNode* const> SpawnedNodes, TArrayView<UEdGraphPin*> DraggedFromPins, FVector2D SpawnGraphPosition);
+
+	/** Will move a group of nodes by the amount needed for an anchor pin to be at a certain position */
+	void MoveNodesToAnchorPinAtGraphPosition(TArrayView<UEdGraphNode* const> NodesToMove, FGraphPinHandle PinToAnchor, FVector2D DesiredPinGraphPosition);
+
 	/** Handle to timer callback that allows the UI to refresh it's arrangement each tick, allows animations to occur within the UI */
 	TWeakPtr<FActiveTimerHandle> ActiveTimerHandleInvalidatePerTick;
 
@@ -331,4 +396,7 @@ private:
 
 	/** The current node factory to create nodes, pins and connections. Uses the static FNodeFactory if not set. */
 	TSharedPtr<class FGraphNodeFactory> NodeFactory;
+
+	/** Weak pointer to the last summoned context menu, for dismissing it when requested. */
+	TWeakPtr<IMenu> ContextMenu;
 };

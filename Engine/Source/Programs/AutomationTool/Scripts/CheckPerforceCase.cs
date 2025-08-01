@@ -6,6 +6,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using EpicGames.Core;
 
 namespace BuildScripts.Automation
 {
@@ -64,38 +66,38 @@ namespace BuildScripts.Automation
 				}
 			}
 
-			public int PrintIssues()
+			public int PrintIssues(ILogger Logger)
 			{
 				int NumIssues = 0;
 				foreach (IGrouping<string, KeyValuePair<string, TreeNode>> Group in ChildNodes.GroupBy(x => x.Key, StringComparer.OrdinalIgnoreCase))
 				{
 					if (Group.Count() > 1)
 					{
-						StringBuilder Message = new StringBuilder();
-						Message.AppendFormat("Inconsistent casing for {0}:", Group.First().Value.Path);
+						Logger.LogWarning(KnownLogEvents.AutomationTool_PerforceCase, "Inconsistent casing for {File}:", Group.First().Value.Path);
+
 						foreach (KeyValuePair<string, TreeNode> Pair in Group)
 						{
-							Message.AppendFormat("\n  Could be '{0}':", Pair.Key, Pair.Value.Count, (Pair.Value.Count == 1)? "file" : "files");
+							Logger.LogWarning(KnownLogEvents.AutomationTool_PerforceCase, "  Could be '{Rendering}':", Pair.Key);
 
 							int NumFiles = 0;
 							foreach (string File in Pair.Value.EnumerateFiles())
 							{
-								Message.AppendFormat("\n    {0}", File);
+								Logger.LogWarning(KnownLogEvents.AutomationTool_PerforceCase, "    {DepotFile}", new LogValue(LogValueType.DepotPath, File));
 								if (++NumFiles >= 10)
 								{
 									break;
 								}
 							}
 
-							Message.AppendFormat("\n    ({0} {1})", Pair.Value.Count, (Pair.Value.Count == 1) ? "file" : "files");
+							Logger.LogWarning(KnownLogEvents.AutomationTool_PerforceCase, "    ({NumFile} file(s))", Pair.Value.Count);
 						}
-						LogError(Message.ToString());
+
 						NumIssues++;
 					}
 
 					foreach (KeyValuePair<string, TreeNode> Pair in Group)
 					{
-						NumIssues += Pair.Value.PrintIssues();
+						NumIssues += Pair.Value.PrintIssues(Logger);
 					}
 				}
 				return NumIssues;
@@ -112,9 +114,9 @@ namespace BuildScripts.Automation
 			}
 
 			// Find all the matching files
-			LogInformation("Finding files matching {0}", Filter);
+			Logger.LogInformation("Finding files matching {Filter}", Filter);
 			List<string> Files = P4.Files(String.Format("-e {0}", Filter));
-			LogInformation("Found {0} files", Files.Count);
+			Logger.LogInformation("Found {Arg0} files", Files.Count);
 
 			// Build a tree of all the conflicting paths and print them out
 			TreeNode RootNode = new TreeNode("//");
@@ -122,12 +124,12 @@ namespace BuildScripts.Automation
 			{
 				if (!File.StartsWith("//", StringComparison.Ordinal))
 				{
-					LogWarning("File '{0}' does not start with '//'", File);
+					Logger.LogWarning("File '{File}' does not start with '//'", File);
 					continue;
 				}
 				RootNode.Add(File, 2);
 			}
-			RootNode.PrintIssues();
+			RootNode.PrintIssues(Logger);
 		}
 	}
 }

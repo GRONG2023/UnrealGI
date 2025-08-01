@@ -7,8 +7,8 @@
 #include "Textures/SlateIcon.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "AssetData.h"
-#include "EditorStyleSet.h"
+#include "AssetRegistry/AssetData.h"
+#include "Styling/AppStyle.h"
 #include "Layout/WidgetPath.h"
 #include "Framework/Application/MenuStack.h"
 #include "Framework/Application/SlateApplication.h"
@@ -169,9 +169,7 @@ void SRetargetSourceWindow::Construct(const FArguments& InArgs, const TSharedRef
 	EditableSkeletonPtr = InEditableSkeleton;
 
 	InOnPostUndo.Add(FSimpleDelegate::CreateSP( this, &SRetargetSourceWindow::PostUndo ) );
-
-	FText SkeletonName = FText::FromString(InEditableSkeleton->GetSkeleton().GetName());
-
+	
 	ChildSlot
 	[
 		SNew( SVerticalBox )
@@ -180,20 +178,6 @@ void SRetargetSourceWindow::Construct(const FArguments& InArgs, const TSharedRef
 		.AutoHeight()
 		[
 			SNew( SHorizontalBox )
-			+SHorizontalBox::Slot()
-			.AutoWidth()
-			[
-				SNew(STextBlock)
-				.Text(LOCTEXT("Skeleton_Label", "Current Skeleton "))
-				.Font(FEditorStyle::GetFontStyle("Persona.RetargetManager.BoldFont"))
-			]
-
-			+SHorizontalBox::Slot()
-			.HAlign(HAlign_Left)
-			[
-				SNew(STextBlock)
-				.Text(SkeletonName)
-			]
 
 			+SHorizontalBox::Slot()
 			.HAlign(HAlign_Right)
@@ -205,7 +189,7 @@ void SRetargetSourceWindow::Construct(const FArguments& InArgs, const TSharedRef
 				.HAlign(HAlign_Center)
 				.VAlign(VAlign_Center)
 				.Text(LOCTEXT("AddRetargetSourceButton_Label", "Add New"))
-				.ToolTipText(LOCTEXT("AddRetargetSourceButton_ToolTip", "Add new retarget source to the list. It won't add if one already exists."))
+				.ToolTipText(LOCTEXT("AddRetargetSourceButton_ToolTip", "Select a Skeletal Mesh asset to become a new retarget source for this Skeleton asset.\n\nRetarget Sources indicate what proportions a sequence was authored with so that animation is correctly retargeted to other proportions.\n\nThese become 'Retarget Source' options on sequences.\n\nRetarget Sources are only needed when an animation sequence is authored on a skeletal mesh with proportions that are different than the default skeleton asset."))
 			]
 
 			+SHorizontalBox::Slot()
@@ -218,7 +202,7 @@ void SRetargetSourceWindow::Construct(const FArguments& InArgs, const TSharedRef
 				.HAlign(HAlign_Center)
 				.VAlign(VAlign_Center)
 				.Text(LOCTEXT("UpdateAllRetargetSourceButton_Label", "Update All"))
-				.ToolTipText(LOCTEXT("UpdateAllRetargetSourceButton_ToolTip", "Use this to update all retarget source poses with latest mesh. If you want to update individual, use the context menu."))
+				.ToolTipText(LOCTEXT("UpdateAllRetargetSourceButton_ToolTip", "Use this to update all retarget source poses with latest mesh proportions. If you want to update individually, use the context menu."))
 			]
 		]
 
@@ -447,27 +431,33 @@ void SRetargetSourceWindow::OnAddRetargetSource()
 	FContentBrowserModule& ContentBrowserModule = FModuleManager::Get().LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
 
 	FAssetPickerConfig AssetPickerConfig;
-	AssetPickerConfig.Filter.ClassNames.Add(USkeletalMesh::StaticClass()->GetFName());
+	AssetPickerConfig.Filter.ClassPaths.Add(USkeletalMesh::StaticClass()->GetClassPathName());
 	AssetPickerConfig.OnAssetSelected = FOnAssetSelected::CreateSP(this, &SRetargetSourceWindow::OnAssetSelectedFromMeshPicker);
 	AssetPickerConfig.bAllowNullSelection = false;
 	AssetPickerConfig.InitialAssetViewType = EAssetViewType::Tile;
 
 	const USkeleton& Skeleton = EditableSkeletonPtr.Pin()->GetSkeleton();
 
-	FString SkeletonString = FAssetData(&Skeleton).GetExportTextName();
-	AssetPickerConfig.Filter.TagsAndValues.Add(USkeletalMesh::GetSkeletonMemberName(), SkeletonString);
+	AssetPickerConfig.OnShouldFilterAsset = FOnShouldFilterAsset::CreateLambda([&Skeleton](const FAssetData& InAssetData)
+	{
+		if(Skeleton.IsCompatibleForEditor(InAssetData))
+		{
+			return false;
+		}
+		return true;
+	});
 
 	TSharedRef<SWidget> Widget = SNew(SBox)
-		.WidthOverride(384)
-		.HeightOverride(768)
+		.WidthOverride(384.f)
+		.HeightOverride(768.f)
 		[
 			SNew(SBorder)
 			.BorderBackgroundColor(FLinearColor(0.25f, 0.25f, 0.25f, 1.f))
-			.Padding( 2 )
+			.Padding( 2.f )
 			[
 				SNew(SBorder)
-				.BorderImage( FEditorStyle::GetBrush("ToolPanel.GroupBorder") )
-				.Padding( 8 )
+				.BorderImage( FAppStyle::GetBrush("ToolPanel.GroupBorder") )
+				.Padding( 8.f )
 				[
 					ContentBrowserModule.Get().CreateAssetPicker(AssetPickerConfig)
 				]
@@ -615,5 +605,163 @@ FReply SRetargetSourceWindow::OnUpdateAllRetargetSourceButtonClicked()
 	OnRefreshRetargetSource(true);
 	return FReply::Handled();
 }
+
+void SCompatibleSkeletons::Construct(
+	const FArguments& InArgs,
+	const TSharedRef<IEditableSkeleton>& InEditableSkeleton,
+	FSimpleMulticastDelegate& InOnPostUndo)
+{
+	EditableSkeletonPtr = InEditableSkeleton;
+	UpdateCompatibleSkeletonAssets(InEditableSkeleton->GetSkeleton());
+
+	ChildSlot
+	[
+		SNew( SVerticalBox )
+		
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		[
+			SNew( SHorizontalBox )
+
+			+SHorizontalBox::Slot()
+			.HAlign(HAlign_Right)
+			.AutoWidth()
+			.Padding(2, 0)
+			[
+				SNew(SButton)
+				.OnClicked(FOnClicked::CreateSP(this, &SCompatibleSkeletons::OnAddSkeletonClicked))
+				.HAlign(HAlign_Center)
+				.VAlign(VAlign_Center)
+				.Text(LOCTEXT("AddCompatibleSkeletonButton_Label", "Add Skeleton"))
+				.ToolTipText(LOCTEXT("AddCompatibleSkeletonButton_ToolTip", "When Skeleton assets share an identical hierarchy, bone names and orientations they can be added to the Compatible Skeletons list. Animation assets authored on Compatible Skeletons can then be used in this Skeleton's Animation Blueprints."))
+			]
+
+			+SHorizontalBox::Slot()
+			.HAlign(HAlign_Right)
+			.AutoWidth()
+			.Padding(2, 0)
+			[
+				SNew(SButton)
+				.OnClicked(FOnClicked::CreateSP(this, &SCompatibleSkeletons::OnRemoveSkeletonClicked))
+				.HAlign(HAlign_Center)
+				.VAlign(VAlign_Center)
+				.Text(LOCTEXT("RemoveCompatibleSkeletonButton_Label", "Remove Selected"))
+				.ToolTipText(LOCTEXT("RemoveCompatibleSkeletonButton_ToolTip", "Remove the selected skeleton assets from the list of Compatible Skeletons."))
+			]
+		]
+
+		+ SVerticalBox::Slot()
+		.FillHeight( 1.0f )
+		.Padding(2.0f)
+		[
+			SAssignNew(CompatibleSkeletonListView, SListView<TSharedRef<FSoftObjectPath>>)
+			.ListItemsSource(&CompatibleSkeletonAssets)
+			.OnGenerateRow(this, &SCompatibleSkeletons::GenerateRowForItem)
+			.ItemHeight( 22.0f )
+		]
+	];
+}
+
+void SCompatibleSkeletons::UpdateCompatibleSkeletonAssets(const USkeleton& Skeleton)
+{
+	CompatibleSkeletonAssets.Empty();
+
+	const TArray<TSoftObjectPtr<USkeleton>>& CompatibleSkeletons = Skeleton.GetCompatibleSkeletons();
+	for (const TSoftObjectPtr<USkeleton>& SoftCompatibleSkeleton : CompatibleSkeletons)
+	{
+		TSharedRef<FSoftObjectPath> AssetPath = MakeShareable(new FSoftObjectPath(SoftCompatibleSkeleton.ToSoftObjectPath()));
+		CompatibleSkeletonAssets.Add(AssetPath);
+	}
+}
+
+FReply SCompatibleSkeletons::OnAddSkeletonClicked()
+{
+	// show list of skeletalmeshes that they can choose from
+	FContentBrowserModule& ContentBrowserModule = FModuleManager::Get().LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
+
+	FAssetPickerConfig AssetPickerConfig;
+	AssetPickerConfig.Filter.ClassPaths.Add(USkeleton::StaticClass()->GetClassPathName());
+	AssetPickerConfig.OnAssetSelected = FOnAssetSelected::CreateSP(this, &SCompatibleSkeletons::OnAssetSelectedFromSkeletonPicker);
+	AssetPickerConfig.bAllowNullSelection = false;
+	AssetPickerConfig.InitialAssetViewType = EAssetViewType::Tile;
+
+	const TSharedRef<SWidget> Widget = SNew(SBox)
+		.WidthOverride(384.f)
+		.HeightOverride(768.f)
+		[
+			SNew(SBorder)
+			.BorderBackgroundColor(FLinearColor(0.25f, 0.25f, 0.25f, 1.f))
+			.Padding( 2.f )
+			[
+				SNew(SBorder)
+				.BorderImage( FAppStyle::GetBrush("ToolPanel.GroupBorder") )
+				.Padding( 8.f )
+				[
+					ContentBrowserModule.Get().CreateAssetPicker(AssetPickerConfig)
+				]
+			]
+		];
+
+	FSlateApplication::Get().PushMenu(
+		AsShared(),
+		FWidgetPath(),
+		Widget,
+		FSlateApplication::Get().GetCursorPos(),
+		FPopupTransitionEffect( FPopupTransitionEffect::TopMenu )
+		);
+	
+	return FReply::Handled();
+}
+
+FReply SCompatibleSkeletons::OnRemoveSkeletonClicked()
+{
+	TArray<TSharedRef<FSoftObjectPath>> SelectedAssets = CompatibleSkeletonListView->GetSelectedItems();
+	for (TSharedRef<FSoftObjectPath>& SkeletonAssetPath : SelectedAssets)
+	{
+		USkeleton* SkeletonToRemove = Cast<USkeleton>(SkeletonAssetPath.Get().TryLoad());
+		EditableSkeletonPtr.Pin()->RemoveCompatibleSkeleton(SkeletonToRemove);
+	}
+
+	UpdateCompatibleSkeletonAssets(EditableSkeletonPtr.Pin()->GetSkeleton());
+	CompatibleSkeletonListView->RequestListRefresh();
+
+	FAssetNotifications::SkeletonNeedsToBeSaved(&EditableSkeletonPtr.Pin()->GetSkeleton());
+	
+	return FReply::Handled();
+}
+
+TSharedRef<ITableRow> SCompatibleSkeletons::GenerateRowForItem(TSharedRef<FSoftObjectPath> Item, const TSharedRef<STableViewBase>& OwnerTable) const
+{
+	return SNew(STableRow<TSharedPtr<USkeleton>>, OwnerTable)
+		.Content()
+		[
+			SNew(STextBlock).Text(FText::FromString(Item.Get().GetAssetName()))
+		];
+}
+
+void SCompatibleSkeletons::OnAssetSelectedFromSkeletonPicker(const FAssetData& AssetData)
+{
+	// make sure we haven't already added this asset as a compatible skeleton
+	const USkeleton& Skeleton = EditableSkeletonPtr.Pin()->GetSkeleton();
+	const FString AssetFullPath = AssetData.ToSoftObjectPath().ToString();
+	const TArray<TSoftObjectPtr<USkeleton>>& CompatibleSkeletons = Skeleton.GetCompatibleSkeletons();
+	for (const TSoftObjectPtr<USkeleton>& CompatibleSkeleton : CompatibleSkeletons)
+	{
+		if (CompatibleSkeleton.ToSoftObjectPath() == AssetData.ToSoftObjectPath())
+		{
+			FSlateApplication::Get().DismissAllMenus();
+			return;
+		}
+	}
+
+	const USkeleton* CompatibleSkeleton = CastChecked<USkeleton>(AssetData.GetAsset());
+	EditableSkeletonPtr.Pin()->AddCompatibleSkeleton(CompatibleSkeleton);
+	FAssetNotifications::SkeletonNeedsToBeSaved(&EditableSkeletonPtr.Pin()->GetSkeleton());
+	FSlateApplication::Get().DismissAllMenus();
+
+	UpdateCompatibleSkeletonAssets(EditableSkeletonPtr.Pin()->GetSkeleton());
+	CompatibleSkeletonListView->RequestListRefresh();
+}
+
 #undef LOCTEXT_NAMESPACE
 

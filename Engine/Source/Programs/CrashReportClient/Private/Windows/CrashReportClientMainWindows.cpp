@@ -5,14 +5,55 @@
 #include "CrashReportClientDefines.h"
 
 #if CRASH_REPORT_WITH_MTBF
-#include "EditorAnalyticsSession.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformAtomics.h"
 #include "HAL/PlatformStackWalk.h"
 #include "Serialization/Archive.h"
-#include "DiagnosticLogger.h"
+#include "CrashReportAnalyticsSessionSummary.h"
 #endif
+
+#include "Windows/AllowWindowsPlatformTypes.h"
+	#include <ShlObj.h>
+#include "Windows/HideWindowsPlatformTypes.h"
+
+void CopyDiagnosticFilesToClipboard(TConstArrayView<FString> Files)
+{
+	if( OpenClipboard(GetActiveWindow()) )
+	{
+		verify(EmptyClipboard());
+		HGLOBAL GlobalMem;
+		SIZE_T RequiredSize = sizeof(DROPFILES) + sizeof(TCHAR);
+		for (const FString& File : Files)
+		{
+			RequiredSize += (File.Len() * sizeof(TCHAR)) + sizeof(TCHAR);
+		}
+		GlobalMem = GlobalAlloc( GMEM_MOVEABLE, RequiredSize );
+		check(GlobalMem);
+		uint8* Data = (uint8*) GlobalLock( GlobalMem );
+		DROPFILES* Drop = (DROPFILES*)Data;
+		Drop->pFiles = sizeof(DROPFILES);
+		Drop->fWide = 1;
+		TCHAR* Dest = (TCHAR*)(Data + sizeof(DROPFILES));
+		TCHAR* End = (TCHAR*)(Data + RequiredSize);
+		for (const FString& File : Files)
+		{
+			FCString::Strncpy(Dest, *File, End - Dest);	
+			Dest += (File.Len() + 1);
+		}
+		GlobalUnlock( GlobalMem );
+		if( SetClipboardData( CF_HDROP, GlobalMem ) == NULL )
+		{
+			UE_LOG(LogWindows, Fatal,TEXT("SetClipboardData failed with error code %i"), (uint32)GetLastError() );
+		}
+
+		verify(CloseClipboard());
+	}
+	else
+	{
+		UE_LOG(LogWindows, Warning, TEXT("OpenClipboard failed with error code %i"), (uint32)GetLastError());
+	}
+}
 
 #if CRASH_REPORT_WITH_MTBF && !PLATFORM_SEH_EXCEPTIONS_DISABLED
 
@@ -25,37 +66,19 @@ void SaveCrcCrashException(EXCEPTION_POINTERS* ExceptionInfo)
 	static volatile int32 CrashCount = 0;
 	if (FPlatformAtomics::InterlockedIncrement(&CrashCount) == 1)
 	{
-		TCHAR CrashEventLog[64];
-		FCString::Sprintf(CrashEventLog, TEXT("CRC/Crash:%d"), ExceptionInfo->ExceptionRecord->ExceptionCode);
-		FDiagnosticLogger::Get().LogEvent(CrashEventLog);
-
-		uint64 MonitoredEditorPid;
-		if (FParse::Value(GetCommandLineW(), TEXT("-MONITOR="), MonitoredEditorPid))
-		{
-			FTimespan Timeout = FTimespan::FromSeconds(2);
-			if (FEditorAnalyticsSession::Lock(Timeout)) // This lock is reentrant for the same process.
-			{
-				FEditorAnalyticsSession MonitoredSession;
-				if (FEditorAnalyticsSession::FindSession(MonitoredEditorPid, MonitoredSession))
-				{
-					if (!MonitoredSession.SaveMonitorExceptCode(ExceptionInfo->ExceptionRecord->ExceptionCode))
-					{
-						FDiagnosticLogger::Get().LogEvent("CRC/ExceptCodeNotSaved");
-					}
-				}
-				FEditorAnalyticsSession::Unlock();
-			}
-		}
+		FCrashReportAnalyticsSessionSummary::Get().OnCrcCrashing(ExceptionInfo->ExceptionRecord->ExceptionCode);
 
 		if (ExceptionInfo->ExceptionRecord->ExceptionCode != STATUS_HEAP_CORRUPTION)
 		{
 			// Try to get the exception callstack to log to figure out why CRC crashed. This is not robust because this runs
 			// in the crashing processs and it allocates memory/use callstack, but we may still be able to get some useful data.
-			FPlatformStackWalk::InitStackWalking();
-			FPlatformStackWalk::StackWalkAndDump(CrashStackTrace, UE_ARRAY_COUNT(CrashStackTrace), 0);
-			if (CrashStackTrace[0] != 0)
+			if (FPlatformStackWalk::InitStackWalkingForProcess(FProcHandle()))
 			{
-				FDiagnosticLogger::Get().LogEvent(ANSI_TO_TCHAR(CrashStackTrace));
+				FPlatformStackWalk::StackWalkAndDump(CrashStackTrace, UE_ARRAY_COUNT(CrashStackTrace), 0);
+				if (CrashStackTrace[0] != 0)
+				{
+					FCrashReportAnalyticsSessionSummary::Get().LogEvent(ANSI_TO_TCHAR(CrashStackTrace));
+				}
 			}
 		}
 	}
@@ -127,7 +150,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInInstance, _In_opt_ HINSTANCE hPrevInstance,
 
 			if (Handle.IsValid())
 			{
-				FString PidPathname = FString::Printf(TEXT("%sue4-crc-pid-%d"), FPlatformProcess::UserTempDir(), MonitoredEditorPid);
+				FString PidPathname = FString::Printf(TEXT("%sue-crc-pid-%d"), FPlatformProcess::UserTempDir(), MonitoredEditorPid);
 				if (TUniquePtr<FArchive> Ar = TUniquePtr<FArchive>(IFileManager::Get().CreateFileWriter(*PidPathname, FILEWRITE_EvenIfReadOnly)))
 				{
 					*Ar << RespawnPid;

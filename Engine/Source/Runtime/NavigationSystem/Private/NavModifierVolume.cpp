@@ -11,12 +11,28 @@
 #include "Engine/CollisionProfile.h"
 #include "Model.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(NavModifierVolume)
+
+#if WITH_EDITOR
+namespace UE::Navigation::ModVolume::Private
+{
+	void OnNavAreaRegistrationChanged(ANavModifierVolume& ModifierVolume, const UWorld& World, const UClass* NavAreaClass)
+	{
+		if (NavAreaClass && NavAreaClass == ModifierVolume.GetAreaClass() && &World == ModifierVolume.GetWorld())
+		{
+			FNavigationSystem::UpdateActorData(ModifierVolume);
+		}
+	}
+} // UE::Navigation::ModVolumne::Private
+#endif // WITH_EDITOR
+
 //----------------------------------------------------------------------//
 // ANavModifierVolume
 //----------------------------------------------------------------------//
 ANavModifierVolume::ANavModifierVolume(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 	, AreaClass(UNavArea_Null::StaticClass())
+	, NavMeshResolution(ENavigationDataResolution::Invalid)
 {
 	if (GetBrushComponent())
 	{
@@ -25,22 +41,90 @@ ANavModifierVolume::ANavModifierVolume(const FObjectInitializer& ObjectInitializ
 	}
 }
 
+void ANavModifierVolume::PostInitProperties()
+{
+	Super::PostInitProperties();
+
+#if WITH_EDITOR
+	if (GIsEditor && !HasAnyFlags(RF_ClassDefaultObject))
+	{
+		OnNavAreaRegisteredDelegateHandle = UNavigationSystemBase::OnNavAreaRegisteredDelegate().AddUObject(this, &ANavModifierVolume::OnNavAreaRegistered);
+		OnNavAreaUnregisteredDelegateHandle = UNavigationSystemBase::OnNavAreaUnregisteredDelegate().AddUObject(this, &ANavModifierVolume::OnNavAreaUnregistered);
+	}
+#endif // WITH_EDITOR
+}
+
+void ANavModifierVolume::BeginDestroy()
+{
+	Super::BeginDestroy();
+
+#if WITH_EDITOR
+	if (GIsEditor && !HasAnyFlags(RF_ClassDefaultObject))
+	{
+		UNavigationSystemBase::OnNavAreaRegisteredDelegate().Remove(OnNavAreaRegisteredDelegateHandle);
+		UNavigationSystemBase::OnNavAreaUnregisteredDelegate().Remove(OnNavAreaUnregisteredDelegateHandle);
+	}
+#endif // WITH_EDITOR
+}
+
+#if WITH_EDITOR
+
+void ANavModifierVolume::PostRegisterAllComponents()
+{
+	Super::PostRegisterAllComponents();
+
+	if (RootComponent)
+	{
+		RootComponent->TransformUpdated.AddLambda([this](USceneComponent*, EUpdateTransformFlags, ETeleportType)
+			{
+				FNavigationSystem::UpdateActorData(*this);
+			});
+	}
+}
+
+void ANavModifierVolume::PostUnregisterAllComponents()
+{
+	if (RootComponent)
+	{
+		RootComponent->TransformUpdated.RemoveAll(this);
+	}
+
+	Super::PostUnregisterAllComponents();
+}
+
+// This function is only called if GIsEditor == true
+void ANavModifierVolume::OnNavAreaRegistered(const UWorld& World, const UClass* NavAreaClass)
+{
+	UE::Navigation::ModVolume::Private::OnNavAreaRegistrationChanged(*this, World, NavAreaClass);
+}
+
+// This function is only called if GIsEditor == true
+void ANavModifierVolume::OnNavAreaUnregistered(const UWorld& World, const UClass* NavAreaClass)
+{
+	UE::Navigation::ModVolume::Private::OnNavAreaRegistrationChanged(*this, World, NavAreaClass);
+}
+#endif // WITH_EDITOR
+
 void ANavModifierVolume::GetNavigationData(FNavigationRelevantData& Data) const
 {
 	if (Brush && AreaClass && AreaClass != FNavigationSystem::GetDefaultWalkableArea())
 	{
-		FAreaNavModifier AreaMod(GetBrushComponent(), AreaClass);
-		Data.Modifiers.Add(AreaMod);
+		Data.Modifiers.CreateAreaModifiers(GetBrushComponent(), AreaClass);
 	}
 
-	if (bMaskFillCollisionUnderneathForNavmesh)
+	if (GetBrushComponent()->Brush != nullptr)
 	{
-		if (GetBrushComponent()->Brush != nullptr)
+		if (bMaskFillCollisionUnderneathForNavmesh)
 		{
 			const FBox& Box = GetBrushComponent()->Brush->Bounds.GetBox();
-			FAreaNavModifier AreaMod(Box, GetBrushComponent()->GetComponentTransform(), AreaClass);
+			const FAreaNavModifier AreaMod(Box, GetBrushComponent()->GetComponentTransform(), AreaClass);
 			Data.Modifiers.SetMaskFillCollisionUnderneathForNavmesh(true);
 			Data.Modifiers.Add(AreaMod);
+		}
+
+		if (NavMeshResolution != ENavigationDataResolution::Invalid)
+		{
+			Data.Modifiers.SetNavMeshResolution(NavMeshResolution);
 		}
 	}
 }
@@ -108,3 +192,4 @@ void ANavModifierVolume::PostEditChangeProperty(FPropertyChangedEvent& PropertyC
 }
 
 #endif
+

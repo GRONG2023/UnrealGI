@@ -4,7 +4,6 @@
 
 #include "CoreMinimal.h"
 #include "GenericPlatform/IInputInterface.h"
-#include "GenericPlatform/IForceFeedbackSystem.h"
 #if !PLATFORM_TVOS
 #import <CoreMotion/CoreMotion.h>
 #endif
@@ -81,17 +80,13 @@ public:
 	void SendControllerEvents();
 	
 	/**
-	 * IForceFeedbackSystem implementation
+	 * IInputInterface implementation
 	 */
 	virtual void SetForceFeedbackChannelValue(int32 ControllerId, FForceFeedbackChannelType ChannelType, float Value) override;
 	virtual void SetForceFeedbackChannelValues(int32 ControllerId, const FForceFeedbackValues &values) override;
 
 	static APPLICATIONCORE_API void QueueTouchInput(const TArray<TouchInput>& InTouchEvents);
 	static void QueueKeyInput(int32 Key, int32 Char);
-
-	//~ Begin Exec Interface
-	virtual bool Exec(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar) override;
-	//~ End Exec Interface
 
 	void SetGamepadsAllowed(bool bAllowed) { bAllowControllers = bAllowed; }
 	void SetGamepadsBlockDeviceFeedback(bool bBlock) { bControllersBlockDeviceFeedback = bBlock; }
@@ -103,19 +98,22 @@ public:
     static bool IsKeyboardInhibited() { return bKeyboardInhibited; }
     
     NSData* GetGamepadGlyphRawData(const FGamepadKeyNames::Type& ButtonKey, uint32 ControllerIndex);
-    
+
+protected:
+
+	//~ Begin Exec Interface
+	virtual bool Exec_Runtime(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar) override;
+	//~ End Exec Interface
+
 private:
 
 	FIOSInputInterface( const TSharedRef< FGenericApplicationMessageHandler >& InMessageHandler );
 
-
-#if __IPHONE_OS_VERSION_MAX_ALLOWED >= 140000
     // handle disconnect and connect events
     void HandleMouseConnection(GCMouse* Mouse);
     void HandleMouseDisconnect(GCMouse* Mouse);
     void HandleKeyboardConnection(GCKeyboard* Keyboard);
     void HandleKeyboardDisconnect(GCKeyboard* Keyboard);
-#endif
 
     /**
 	 * Get the current Movement data from the device
@@ -142,12 +140,6 @@ private:
 
 	// can the game handle multiple gamepads at the same time (siri remote is a gamepad) ?
 	bool bGameSupportsMultipleActiveControllers;
-
-	// should the remote be used as virtual joystick vs touch events
-	bool bUseRemoteAsVirtualJoystick_DEPRECATED;
-
-	// should the tracking use the pad center as the virtual joystick center?
-	bool bUseRemoteAbsoluteDpadValues;
 
 	// bluetooth connected controllers will block force feedback.
 	bool bControllersBlockDeviceFeedback;

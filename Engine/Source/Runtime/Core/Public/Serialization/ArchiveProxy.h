@@ -46,6 +46,12 @@ public:
 		return *this;
 	}
 
+	virtual FArchive& operator<<(FObjectPtr& Value) override
+	{
+		InnerArchive << Value;
+		return *this;
+	}
+
 	virtual FArchive& operator<<(FLazyObjectPtr& Value) override
 	{
 		InnerArchive << Value;
@@ -138,14 +144,19 @@ public:
 		InnerArchive.Seek(InPos);
 	}
 
-	virtual void AttachBulkData(UObject* Owner, FUntypedBulkData* BulkData) override
+	virtual void AttachBulkData(UObject* Owner, FBulkData* BulkData) override
 	{
 		InnerArchive.AttachBulkData(Owner, BulkData);
 	}
 
-	virtual void DetachBulkData(FUntypedBulkData* BulkData, bool bEnsureBulkDataIsLoaded) override
+	virtual void DetachBulkData(FBulkData* BulkData, bool bEnsureBulkDataIsLoaded) override
 	{
 		InnerArchive.DetachBulkData(BulkData, bEnsureBulkDataIsLoaded);
+	}
+
+	virtual bool SerializeBulkData(class FBulkData& BulkData, const struct FBulkDataSerializationParams& Params) override
+	{
+		return InnerArchive.SerializeBulkData(BulkData, Params);
 	}
 
 	virtual bool Precache(int64 PrecacheOffset, int64 PrecacheSize) override
@@ -193,7 +204,7 @@ public:
 		InnerArchive.ResetCustomVersions();
 	}
 
-	virtual void MarkSearchableName(const UObject* TypeObject, const FName& ValueName) const override
+	virtual void MarkSearchableName(const TObjectPtr<const UObject>& TypeObject, const FName& ValueName) const override
 	{
 		InnerArchive.MarkSearchableName(TypeObject, ValueName);
 	}
@@ -230,6 +241,7 @@ public:
 
 	virtual void SetFilterEditorOnly(bool InFilterEditorOnly) override
 	{
+		FArchive::SetFilterEditorOnly(InFilterEditorOnly);
 		InnerArchive.SetFilterEditorOnly(InFilterEditorOnly);
 	}
 

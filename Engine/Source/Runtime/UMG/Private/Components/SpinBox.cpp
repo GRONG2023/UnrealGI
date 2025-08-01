@@ -3,13 +3,15 @@
 #include "Components/SpinBox.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Engine/Font.h"
+#include "Styling/DefaultStyleCache.h"
+#include "Styling/UMGCoreStyle.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SpinBox)
 
 #define LOCTEXT_NAMESPACE "UMG"
 
 /////////////////////////////////////////////////////
 // USpinBox
-
-static FSpinBoxStyle* DefaultSpinBoxStyle = nullptr;
 
 USpinBox::USpinBox(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -17,6 +19,7 @@ USpinBox::USpinBox(const FObjectInitializer& ObjectInitializer)
 	if (!IsRunningDedicatedServer())
 	{
 		static ConstructorHelpers::FObjectFinder<UFont> RobotoFontObj(*UWidget::GetDefaultFontName());
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		Font = FSlateFontInfo(RobotoFontObj.Object, 12, FName("Bold"));
 	}
 
@@ -28,23 +31,28 @@ USpinBox::USpinBox(const FObjectInitializer& ObjectInitializer)
 	MinFractionalDigits = 1;
 	MaxFractionalDigits = 6;
 	bAlwaysUsesDeltaSnap = false;
+	bEnableSlider = true;
 	Delta = 0;
 	SliderExponent = 1;
 	MinDesiredWidth = 0;
 	ClearKeyboardFocusOnCommit = false;
 	SelectAllTextOnCommit = true;
-	ForegroundColor = FSlateColor(FLinearColor::Black);
+	KeyboardType = EVirtualKeyboardType::Number;
 
-	if (DefaultSpinBoxStyle == nullptr)
+	WidgetStyle = UE::Slate::Private::FDefaultStyleCache::GetRuntime().GetSpinBoxStyle();
+	
+#if WITH_EDITOR 
+	if (IsEditorWidget())
 	{
-		// HACK: THIS SHOULD NOT COME FROM CORESTYLE AND SHOULD INSTEAD BE DEFINED BY ENGINE TEXTURES/PROJECT SETTINGS
-		DefaultSpinBoxStyle = new FSpinBoxStyle(FCoreStyle::Get().GetWidgetStyle<FSpinBoxStyle>("SpinBox"));
+		WidgetStyle = UE::Slate::Private::FDefaultStyleCache::GetEditor().GetSpinBoxStyle();
 
-		// Unlink UMG default colors from the editor settings colors.
-		DefaultSpinBoxStyle->UnlinkColors();
+		// The CDO isn't an editor widget and thus won't use the editor style, call post edit change to mark difference from CDO
+		PostEditChange();
 	}
+#endif // WITH_EDITOR
 
-	WidgetStyle = *DefaultSpinBoxStyle;
+	ForegroundColor = WidgetStyle.ForegroundColor;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 void USpinBox::ReleaseSlateResources(bool bReleaseChildren)
@@ -54,6 +62,7 @@ void USpinBox::ReleaseSlateResources(bool bReleaseChildren)
 	MySpinBox.Reset();
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 TSharedRef<SWidget> USpinBox::RebuildWidget()
 {
 	MySpinBox = SNew(SSpinBox<float>)
@@ -62,6 +71,7 @@ TSharedRef<SWidget> USpinBox::RebuildWidget()
 	.ClearKeyboardFocusOnCommit(ClearKeyboardFocusOnCommit)
 	.SelectAllTextOnCommit(SelectAllTextOnCommit)
 	.Justification(Justification)
+	.KeyboardType(EVirtualKeyboardType::AsKeyboardType(KeyboardType.GetValue()))
 	.OnValueChanged(BIND_UOBJECT_DELEGATE(FOnFloatValueChanged, HandleOnValueChanged))
 	.OnValueCommitted(BIND_UOBJECT_DELEGATE(FOnFloatValueCommitted, HandleOnValueCommitted))
 	.OnBeginSliderMovement(BIND_UOBJECT_DELEGATE(FSimpleDelegate, HandleOnBeginSliderMovement))
@@ -70,11 +80,18 @@ TSharedRef<SWidget> USpinBox::RebuildWidget()
 	
 	return MySpinBox.ToSharedRef();
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 void USpinBox::SynchronizeProperties()
 {
 	Super::SynchronizeProperties();
-
+	
+	if (!MySpinBox.IsValid())
+	{
+		return;
+	}
+	
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	MySpinBox->SetDelta(Delta);
 	MySpinBox->SetSliderExponent(SliderExponent);
 	MySpinBox->SetMinDesiredWidth(MinDesiredWidth);
@@ -84,6 +101,7 @@ void USpinBox::SynchronizeProperties()
 	MySpinBox->SetMinFractionalDigits(MinFractionalDigits);
 	MySpinBox->SetMaxFractionalDigits(MaxFractionalDigits);
 	MySpinBox->SetAlwaysUsesDeltaSnap(bAlwaysUsesDeltaSnap);
+	MySpinBox->SetEnableSlider(bEnableSlider);
 
 	// Set optional values
 	bOverride_MinValue ? SetMinValue(MinValue) : ClearMinValue();
@@ -91,37 +109,55 @@ void USpinBox::SynchronizeProperties()
 	bOverride_MinSliderValue ? SetMinSliderValue(MinSliderValue) : ClearMinSliderValue();
 	bOverride_MaxSliderValue ? SetMaxSliderValue(MaxSliderValue) : ClearMaxSliderValue();
 
+	MySpinBox->SetWidgetStyle(&WidgetStyle);
+	MySpinBox->InvalidateStyle();
+
+	MySpinBox->SetTextJustification(Justification);
+	MySpinBox->SetTextBlockFont(Font);
+	MySpinBox->SetTextClearKeyboardFocusOnCommit(ClearKeyboardFocusOnCommit);
+	MySpinBox->SetTextSelectAllTextOnCommit(ClearKeyboardFocusOnCommit);
+
 	// Always set the value last so that the max/min values are taken into account.
 	TAttribute<float> ValueBinding = PROPERTY_BINDING(float, Value);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	MySpinBox->SetValue(ValueBinding);
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 float USpinBox::GetValue() const
 {
-	if (MySpinBox.IsValid())
-	{
-		return MySpinBox->GetValue();
-	}
-
 	return Value;
 }
 
 void USpinBox::SetValue(float InValue)
 {
-	Value = InValue;
+	if (Value != InValue)
+	{
+		Value = InValue;
+		BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::Value);
+		if (MySpinBox.IsValid())
+		{
+			MySpinBox->SetValue(InValue);
+		}
+	}
+}
+
+const FSpinBoxStyle& USpinBox::GetWidgetStyle() const
+{
+	return WidgetStyle;
+}
+
+void USpinBox::SetWidgetStyle(const FSpinBoxStyle& InWidgetStyle)
+{
+	WidgetStyle = InWidgetStyle;
 	if (MySpinBox.IsValid())
 	{
-		MySpinBox->SetValue(InValue);
+		MySpinBox->InvalidateStyle();
 	}
 }
 
 int32 USpinBox::GetMinFractionalDigits() const
 {
-	if (MySpinBox.IsValid())
-	{
-		return MySpinBox->GetMinFractionalDigits();
-	}
-
 	return MinFractionalDigits;
 }
 
@@ -136,11 +172,6 @@ void USpinBox::SetMinFractionalDigits(int32 NewValue)
 
 int32 USpinBox::GetMaxFractionalDigits() const
 {
-	if (MySpinBox.IsValid())
-	{
-		return MySpinBox->GetMaxFractionalDigits();
-	}
-
 	return MaxFractionalDigits;
 }
 
@@ -173,13 +204,23 @@ void USpinBox::SetAlwaysUsesDeltaSnap(bool bNewValue)
 	}
 }
 
-float USpinBox::GetDelta() const
+bool USpinBox::GetEnableSlider() const
 {
+	return bEnableSlider;
+}
+
+void USpinBox::SetEnableSlider(bool bNewValue)
+{
+	bEnableSlider = bNewValue;
+
 	if (MySpinBox.IsValid())
 	{
-		return MySpinBox->GetDelta();
+		MySpinBox->SetEnableSlider(bNewValue);
 	}
+}
 
+float USpinBox::GetDelta() const
+{
 	return Delta;
 }
 
@@ -192,16 +233,96 @@ void USpinBox::SetDelta(float NewValue)
 	}
 }
 
+float USpinBox::GetSliderExponent() const
+{
+	return SliderExponent;
+}
+
+void USpinBox::SetSliderExponent(float NewValue)
+{
+	SliderExponent = NewValue;
+	if (MySpinBox.IsValid())
+	{
+		MySpinBox->SetSliderExponent(NewValue);
+	}
+}
+
+const FSlateFontInfo& USpinBox::GetFont() const
+{
+	return Font;
+}
+
+void USpinBox::SetFont(const FSlateFontInfo& InFont)
+{
+	Font = InFont;
+	if (MySpinBox.IsValid())
+	{
+		MySpinBox->SetTextBlockFont(InFont);
+	}
+}
+
+const ETextJustify::Type USpinBox::GetJustification() const
+{
+	return Justification;
+}
+
+void USpinBox::SetJustification(ETextJustify::Type InJustification)
+{
+	Justification = InJustification;
+	if (MySpinBox.IsValid())
+	{
+		MySpinBox->SetTextJustification(InJustification);
+	}
+}
+
+float USpinBox::GetMinDesiredWidth() const
+{
+	return MinDesiredWidth;
+}
+
+void USpinBox::SetMinDesiredWidth(float NewValue)
+{
+	MinDesiredWidth = NewValue;
+	if (MySpinBox.IsValid())
+	{
+		MySpinBox->SetMinDesiredWidth(NewValue);
+	}
+}
+
+bool USpinBox::GetClearKeyboardFocusOnCommit() const
+{
+	return ClearKeyboardFocusOnCommit;
+}
+
+void USpinBox::SetClearKeyboardFocusOnCommit(bool bNewValue)
+{
+	ClearKeyboardFocusOnCommit = bNewValue;
+	if (MySpinBox.IsValid())
+	{
+		MySpinBox->SetTextClearKeyboardFocusOnCommit(bNewValue);
+	}
+}
+
+bool USpinBox::GetSelectAllTextOnCommit() const
+{
+	return SelectAllTextOnCommit;
+}
+
+void USpinBox::SetSelectAllTextOnCommit(bool bNewValue)
+{
+	SelectAllTextOnCommit = bNewValue;
+	if (MySpinBox.IsValid())
+	{
+		MySpinBox->SetTextSelectAllTextOnCommit(bNewValue);
+	}
+}
+
 // MIN VALUE
 float USpinBox::GetMinValue() const
 {
 	float ReturnVal = TNumericLimits<float>::Lowest();
 
-	if (MySpinBox.IsValid())
-	{
-		ReturnVal = MySpinBox->GetMinValue();
-	}
-	else if (bOverride_MinValue)
+	if (bOverride_MinValue)
 	{
 		ReturnVal = MinValue;
 	}
@@ -233,11 +354,7 @@ float USpinBox::GetMaxValue() const
 {
 	float ReturnVal = TNumericLimits<float>::Max();
 
-	if (MySpinBox.IsValid())
-	{
-		ReturnVal = MySpinBox->GetMaxValue();
-	}
-	else if (bOverride_MaxValue)
+	if (bOverride_MaxValue)
 	{
 		ReturnVal = MaxValue;
 	}
@@ -268,11 +385,7 @@ float USpinBox::GetMinSliderValue() const
 {
 	float ReturnVal = TNumericLimits<float>::Min();
 
-	if (MySpinBox.IsValid())
-	{
-		ReturnVal = MySpinBox->GetMinSliderValue();
-	}
-	else if (bOverride_MinSliderValue)
+	if (bOverride_MinSliderValue)
 	{
 		ReturnVal = MinSliderValue;
 	}
@@ -304,11 +417,7 @@ float USpinBox::GetMaxSliderValue() const
 {
 	float ReturnVal = TNumericLimits<float>::Max();
 
-	if (MySpinBox.IsValid())
-	{
-		ReturnVal = MySpinBox->GetMaxSliderValue();
-	}
-	else if (bOverride_MaxSliderValue)
+	if (bOverride_MaxSliderValue)
 	{
 		ReturnVal = MaxSliderValue;
 	}
@@ -344,11 +453,24 @@ void USpinBox::SetForegroundColor(FSlateColor InForegroundColor)
 	}
 }
 
+FSlateColor USpinBox::GetForegroundColor() const
+{
+	return ForegroundColor;
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
 // Event handlers
 void USpinBox::HandleOnValueChanged(float InValue)
 {
 	if ( !IsDesignTime() )
 	{
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		if (Value != InValue)
+		{
+			Value = InValue;
+			BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::Value);
+		}
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		OnValueChanged.Broadcast(InValue);
 	}
 }
@@ -357,6 +479,13 @@ void USpinBox::HandleOnValueCommitted(float InValue, ETextCommit::Type CommitMet
 {
 	if ( !IsDesignTime() )
 	{
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		if (Value != InValue)
+		{
+			Value = InValue;
+			BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::Value);
+		}
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		OnValueCommitted.Broadcast(InValue, CommitMethod);
 	}
 }
@@ -377,26 +506,6 @@ void USpinBox::HandleOnEndSliderMovement(float InValue)
 	}
 }
 
-void USpinBox::PostLoad()
-{
-	Super::PostLoad();
-
-	if ( GetLinkerUE4Version() < VER_UE4_DEPRECATE_UMG_STYLE_ASSETS )
-	{
-		if ( Style_DEPRECATED != nullptr )
-		{
-			const FSpinBoxStyle* StylePtr = Style_DEPRECATED->GetStyle<FSpinBoxStyle>();
-			if ( StylePtr != nullptr )
-			{
-				WidgetStyle = *StylePtr;
-			}
-
-			Style_DEPRECATED = nullptr;
-		}
-	}
-}
-
-
 #if WITH_EDITOR
 
 const FText USpinBox::GetPaletteCategory()
@@ -409,3 +518,4 @@ const FText USpinBox::GetPaletteCategory()
 /////////////////////////////////////////////////////
 
 #undef LOCTEXT_NAMESPACE
+

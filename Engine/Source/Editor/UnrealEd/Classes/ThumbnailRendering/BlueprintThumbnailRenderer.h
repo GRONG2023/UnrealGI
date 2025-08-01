@@ -7,12 +7,13 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "CoreTypes.h"
 #include "UObject/ObjectMacros.h"
 #include "ThumbnailRendering/DefaultSizedThumbnailRenderer.h"
 #include "ThumbnailHelpers.h"
 #include "BlueprintThumbnailRenderer.generated.h"
 
+class UBlueprint;
 class FCanvas;
 class FRenderTarget;
 
@@ -31,7 +32,10 @@ class UBlueprintThumbnailRenderer : public UDefaultSizedThumbnailRenderer
 	// End UObject implementation
 
 	/** Notifies the thumbnail scene to refresh components for the specified blueprint */
-	void BlueprintChanged(class UBlueprint* Blueprint);
+	void BlueprintChanged(UBlueprint* Blueprint);
+
+private:
+	void OnBlueprintUnloaded(UBlueprint* Blueprint);
 
 private:
 	TClassInstanceThumbnailScene<FBlueprintThumbnailScene, 100> ThumbnailScenes;

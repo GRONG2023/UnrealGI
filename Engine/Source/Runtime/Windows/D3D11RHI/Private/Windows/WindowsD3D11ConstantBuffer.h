@@ -13,25 +13,24 @@ struct ID3D11Buffer;
 class FWinD3D11ConstantBuffer : public FD3D11ConstantBuffer
 {
 public:
-	FWinD3D11ConstantBuffer(FD3D11DynamicRHI* InD3DRHI, uint32 InSize = 0, uint32 SubBuffers = 1) :
-		FD3D11ConstantBuffer(InD3DRHI, InSize, SubBuffers),
-		Buffers(nullptr),
-		CurrentSubBuffer(0),
-		NumSubBuffers(SubBuffers)
+	FWinD3D11ConstantBuffer(FD3D11DynamicRHI* InD3DRHI) :
+		FD3D11ConstantBuffer(InD3DRHI)
 	{
 	}
 
 	// FRenderResource interface.
-	virtual void	InitDynamicRHI() override;
-	virtual void	ReleaseDynamicRHI() override;
+	virtual void	InitRHI(FRHICommandListBase& RHICmdList) override;
+	virtual void	ReleaseRHI() override;
 
 	/**
 	* Get the current pool buffer
 	*/
 	ID3D11Buffer* GetConstantBuffer() const
 	{
-		return Buffers[CurrentSubBuffer];
+		return SubBuffers[CurrentSubBuffer].Buffer.GetReference();
 	}
+
+	uint32 FindSubBufferForAllocationSize(uint64 InSize) const;
 
 	/**
 	* Unlocks the constant buffer so the data can be transmitted to the device
@@ -39,7 +38,12 @@ public:
 	bool CommitConstantsToDevice(bool bDiscardSharedConstants);
 
 private:
-	TRefCountPtr<ID3D11Buffer>* Buffers;
-	uint32	CurrentSubBuffer;
-	uint32	NumSubBuffers;
+	struct FSubBuffer
+	{
+		FSubBuffer(uint64 InSize) : Size(InSize) { }
+		TRefCountPtr<ID3D11Buffer> Buffer;
+		uint64 Size;
+	};
+	TArray<FSubBuffer> SubBuffers;
+	uint32	CurrentSubBuffer = 0;
 };

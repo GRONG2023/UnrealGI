@@ -24,14 +24,14 @@ struct FSkeletalMeshVertIndexAndZ
 
 struct FSoftSkinBuildVertex
 {
-	FVector			Position;
-	FVector			TangentX,	// Tangent, U-direction
+	FVector3f		Position;
+	FVector3f		TangentX,	// Tangent, U-direction
 					TangentY,	// Binormal, V-direction
 					TangentZ;	// Normal
-	FVector2D		UVs[MAX_TEXCOORDS]; // UVs
+	FVector2f		UVs[MAX_TEXCOORDS]; // UVs
 	FColor			Color;		// VertexColor
 	FBoneIndexType	InfluenceBones[MAX_TOTAL_INFLUENCES];
-	uint8			InfluenceWeights[MAX_TOTAL_INFLUENCES];
+	uint16			InfluenceWeights[MAX_TOTAL_INFLUENCES];
 	uint32 PointWedgeIdx;
 };
 
@@ -80,8 +80,8 @@ namespace SkeletalMeshTools
 {
 	inline bool SkeletalMesh_UVsEqual(const SkeletalMeshImportData::FMeshWedge& V1, const SkeletalMeshImportData::FMeshWedge& V2, const FOverlappingThresholds& OverlappingThresholds, const int32 UVIndex = 0)
 	{
-		const FVector2D& UV1 = V1.UVs[UVIndex];
-		const FVector2D& UV2 = V2.UVs[UVIndex];
+		const FVector2f& UV1 = V1.UVs[UVIndex];
+		const FVector2f& UV2 = V2.UVs[UVIndex];
 
 		if(FMath::Abs(UV1.X - UV2.X) > OverlappingThresholds.ThresholdUV)
 			return 0;
@@ -113,5 +113,4 @@ namespace SkeletalMeshTools
 	*/
 	void ChunkSkinnedVertices(TArray<FSkinnedMeshChunk*>& Chunks, TMap<uint32, TArray<FBoneIndexType>>& AlternateBoneIDs, int32 MaxBonesPerChunk);
 
-	void CalcBoneVertInfos(USkeletalMesh* SkeletalMesh, TArray<FBoneVertInfo>& Infos, bool bOnlyDominant);
 };

@@ -2,15 +2,19 @@
 
 #include "BehaviorTree/Decorators/BTDecorator_BlackboardBase.h"
 #include "BehaviorTree/BlackboardComponent.h"
+#include "AISystem.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BTDecorator_BlackboardBase)
 
 UBTDecorator_BlackboardBase::UBTDecorator_BlackboardBase(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
 	NodeName = "BlackboardBase";
 
-	bNotifyBecomeRelevant = true;
-	bNotifyCeaseRelevant = true;
+	INIT_DECORATOR_NODE_NOTIFY_FLAGS();
 
 	// empty KeySelector = allow everything
+
+	BlackboardKey.AllowNoneAsValue(GET_AI_CONFIG_VAR(bBlackboardKeyDecoratorAllowsNoneAsValue));
 }
 
 void UBTDecorator_BlackboardBase::InitializeFromAsset(UBehaviorTree& Asset)
@@ -72,6 +76,3 @@ FName UBTDecorator_BlackboardBase::GetNodeIconName() const
 
 #endif	// WITH_EDITOR
 
-//----------------------------------------------------------------------//
-// DEPRECATED
-//----------------------------------------------------------------------//

@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-
 #pragma once
 
-#include "VulkanPlatformDefines.h"
+#include "HAL/PreprocessorHelpers.h"
+
+#include COMPILED_PLATFORM_HEADER(VulkanPlatformDefines.h)

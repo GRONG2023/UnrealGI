@@ -2,15 +2,31 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "SlateFwd.h"
 #include "AddToProjectConfig.h"
+#include "Containers/Array.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "CoreMinimal.h"
+#include "Delegates/Delegate.h"
 #include "GameProjectGenerationModule.h"
+#include "HAL/Platform.h"
 #include "HardwareTargetingSettings.h"
+#include "Misc/Optional.h"
+#include "SlateFwd.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
 
-class UTemplateProjectDefs;
+class FText;
+class SNotificationItem;
+class UClass;
 class UTemplateCategories;
+class UTemplateProjectDefs;
+struct FAddToProjectConfig;
+struct FGuid;
+struct FModuleContextInfo;
+struct FNewClassInfo;
 struct FProjectDescriptor;
+
 enum class EClassDomain : uint8;
 struct FTemplateConfigValue;
 
@@ -26,7 +42,6 @@ struct FProjectInformation
 	bool bCopyStarterContent = false;
 	bool bIsBlankTemplate = false;
 	bool bIsEnterpriseProject = false;
-	bool bForceExtendedLuminanceRange; // See "r.DefaultFeature.AutoExposure.ExtendDefaultLuminanceRange"
 
 	// These are all optional, because there is an additional state introduced by hiding the setting in the template.
 	// In this case, the template author has chosen not to give the user a choice,
@@ -34,8 +49,8 @@ struct FProjectInformation
 	TOptional<bool> bEnableXR;
 	TOptional<bool> bEnableRaytracing;
 
-	TOptional<EHardwareClass::Type> TargetedHardware;
-	TOptional<EGraphicsPreset::Type> DefaultGraphicsPerformance;
+	TOptional<EHardwareClass> TargetedHardware;
+	TOptional<EGraphicsPreset> DefaultGraphicsPerformance;
 
 	/** The name of the feature pack to use as starter content. Must be located under FeaturePacks\. */
 	FString StarterContent;
@@ -91,6 +106,16 @@ public:
 		UserCanceled
 	};
 
+	/** Reload status when adding new code to the project */
+	enum class EReloadStatus : uint8
+	{
+		/** Code was built and reloaded */
+		Reloaded,
+
+		/** Code was not reloaded */
+		NotReloaded,
+	};
+
 	/** Returns true if the project filename is properly formed and does not conflict with another project */
 	static bool IsValidProjectFileForCreation(const FString& ProjectFile, FText& OutFailReason);
 
@@ -103,7 +128,7 @@ public:
 	/** Creates the specified project file and all required folders. If TemplateFile is non-empty, it will be used as the template for creation. On failure, OutFailReason will be populated. */
 	static bool CreateProject(const FProjectInformation& InProjectInfo, FText& OutFailReason, FText& OutFailLog, TArray<FString>* OutCreatedFiles = nullptr);
 
-	/** Prompts the user to update his project file, if necessary. */
+	/** Prompts the user to update their project file, if necessary. */
 	static void CheckForOutOfDateGameProjectFile();
 
 	/** Warn the user if the project filename is invalid in case they renamed it outside the editor */
@@ -138,6 +163,9 @@ public:
 	/** Adds new source code to the project. When returning Succeeded or FailedToHotReload, OutSyncFileAndLineNumber will be the the preferred target file to sync in the users code editing IDE, formatted for use with GenericApplication::GotoLineInSource */
 	static EAddCodeToProjectResult AddCodeToProject(const FString& NewClassName, const FString& NewClassPath, const FModuleContextInfo& ModuleInfo, const FNewClassInfo ParentClassInfo, const TSet<FString>& DisallowedHeaderNames, FString& OutHeaderFilePath, FString& OutCppFilePath, FText& OutFailReason);
 
+	/** Adds new source code to the project. When returning Succeeded or FailedToHotReload, OutSyncFileAndLineNumber will be the the preferred target file to sync in the users code editing IDE, formatted for use with GenericApplication::GotoLineInSource */
+	static EAddCodeToProjectResult AddCodeToProject(const FString& NewClassName, const FString& NewClassPath, const FModuleContextInfo& ModuleInfo, const FNewClassInfo ParentClassInfo, const TSet<FString>& DisallowedHeaderNames, FString& OutHeaderFilePath, FString& OutCppFilePath, FText& OutFailReason, EReloadStatus& OutReloadStatus);
+
 	/** Loads a list of template categories defined in the TemplateCategories.ini file in the specified folder */
 	static UTemplateCategories* LoadTemplateCategories(const FString& RootDir);
 
@@ -163,8 +191,13 @@ public:
 	/** Creates code project files for a new game project. On failure, OutFailReason and OutFailLog will be populated. */
 	static bool GenerateCodeProjectFiles(const FString& ProjectFilename, FText& OutFailReason, FText& OutFailLog);
 
-	/** Returns true if there are starter content files available for instancing into new projects. */
-	static bool IsStarterContentAvailableForNewProjects();
+	/** Returns true if there are engine starter content files available for instancing into new projects. */
+	static bool IsEngineStarterContentAvailable();
+
+	/** Returns true if the given project is referencing engine starter content pack. */
+	static bool IsUsingEngineStarterContent(const FProjectInformation& ProjectInfo);
+
+	/** Returns true if there are any starter content packs are available for given project. */
 	static bool IsStarterContentAvailableForProject(const FProjectInformation& ProjectInfo);
 
 	/**
@@ -225,7 +258,7 @@ public:
 	 * Update the list of supported target platforms based upon the parameters provided
 	 * This will take care of checking out and saving the updated .uproject file automatically
 	 *
-	 * @param	InPlatformName		Name of the platform to target (eg, WindowsNoEditor)
+	 * @param	InPlatformName		Name of the platform to target (eg, WindowsClient)
 	 * @param	bIsSupported		true if the platform should be supported by this project, false if it should not
 	 */
 	static void UpdateSupportedTargetPlatforms(const FName& InPlatformName, const bool bIsSupported);
@@ -265,6 +298,9 @@ public:
 
 	/** Checks the name for illegal characters */
 	static bool NameContainsOnlyLegalCharacters(const FString& TestName, FString& OutIllegalCharacters);
+
+	/** Checks the name to see if it matches platform module names */
+	static bool NameMatchesPlatformModuleName(const FString& TestName);
 
 	/** Returns a list of #include lines formed from InList */
 	static FString MakeIncludeList(const TArray<FString>& InList);
@@ -320,9 +356,6 @@ private:
 
 	/** Returns the include header path for a given fully specified, normalized file path */
 	static FString GetIncludePathForFile(const FString& InFullFilePath, const FString& ModuleRootPath);
-
-	/** Checks the name for an underscore and the existence of XB1 XDK */
-	static bool NameContainsUnderscoreAndXB1Installed(const FString& TestName);
 
 	/** Returns true if the project file exists on disk */
 	static bool ProjectFileExists(const FString& ProjectFile);
@@ -458,7 +491,7 @@ private:
 	static bool CheckoutGameProjectFile(const FString& ProjectFilename, FText& OutFailReason);
 
 	/** Internal handler for AddCodeToProject*/
-	static EAddCodeToProjectResult AddCodeToProject_Internal(const FString& NewClassName, const FString& NewClassPath, const FModuleContextInfo& ModuleInfo, const FNewClassInfo ParentClassInfo, const TSet<FString>& DisallowedHeaderNames, FString& OutHeaderFilePath, FString& OutCppFilePath, FText& OutFailReason);
+	static EAddCodeToProjectResult AddCodeToProject_Internal(const FString& NewClassName, const FString& NewClassPath, const FModuleContextInfo& ModuleInfo, const FNewClassInfo ParentClassInfo, const TSet<FString>& DisallowedHeaderNames, FString& OutHeaderFilePath, FString& OutCppFilePath, FText& OutFailReason, EReloadStatus& OutReloadStatus);
 
 	/** Internal handler for IsValidBaseClassForCreation */
 	DECLARE_DELEGATE_RetVal_OneParam(bool, FDoesClassNeedAPIExportCallback, const FString& /*ClassModuleName*/);

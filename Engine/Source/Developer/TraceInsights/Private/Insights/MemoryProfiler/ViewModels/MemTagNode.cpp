@@ -5,24 +5,23 @@
 // Insights
 #include "Insights/MemoryProfiler/MemoryProfilerManager.h"
 
-#define LOCTEXT_NAMESPACE "MemTagNode"
+#define LOCTEXT_NAMESPACE "FMemTagNode"
 
-const FName FMemTagNode::TypeName(TEXT("FMemTagNode"));
+INSIGHTS_IMPLEMENT_RTTI(FMemTagNode)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 FText FMemTagNode::GetTrackerText() const
 {
-	uint64 Trackers = GetTrackers();
-	if (Trackers == 0)
-	{
-		return FText::GetEmpty();
-	}
-
 	FMemorySharedState* SharedState = FMemoryProfilerManager::Get()->GetSharedState();
 	if (SharedState)
 	{
-		return FText::FromString(SharedState->TrackersToString(Trackers, TEXT(", ")));
+		Insights::FMemoryTrackerId TrackerId = GetMemTrackerId();
+		const Insights::FMemoryTracker* Tracker = SharedState->GetTrackerById(TrackerId);
+		if (Tracker)
+		{
+			return FText::FromString(Tracker->GetName());
+		}
 	}
 
 	return FText::GetEmpty();
@@ -32,12 +31,12 @@ FText FMemTagNode::GetTrackerText() const
 
 void FMemTagNode::ResetAggregatedStats()
 {
-	//AggregatedStats = Trace::FMemoryProfilerAggregatedStats();
+	//AggregatedStats = TraceServices::FMemoryProfilerAggregatedStats();
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 /*
-void FMemTagNode::SetAggregatedStats(const Trace::FMemoryProfilerAggregatedStats& InAggregatedStats)
+void FMemTagNode::SetAggregatedStats(const TraceServices::FMemoryProfilerAggregatedStats& InAggregatedStats)
 {
 	AggregatedStats = InAggregatedStats;
 }

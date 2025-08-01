@@ -18,13 +18,9 @@
 	#undef TicksPerSecond
 #endif
 
-DISABLE_SDK_WARNINGS_START
-
 #include "FileManager.h"
 #include "Paths.h"
 #include "Version.h"
-
-DISABLE_SDK_WARNINGS_END
 
 BEGIN_NAMESPACE_UE_AC
 
@@ -598,7 +594,9 @@ bool FSynchronizer::NeedAutoSyncUpdate() const
 void FSynchronizer::GetProjectPathAndName(GS::UniString* OutPath, GS::UniString* OutName)
 {
 	API_ProjectInfo ProjectInfo;
+#if AC_VERSION < 26
 	Zap(&ProjectInfo);
+#endif
 	GSErrCode GSErr = ACAPI_Environment(APIEnv_ProjectID, &ProjectInfo);
 	if (GSErr == NoError)
 	{
@@ -659,7 +657,7 @@ void FSynchronizer::DumpScene(const TSharedRef< IDatasmithScene >& InScene)
 	// If we change scene, we delete and recreate the folder
 	static int	   NbDumps = 0;
 	static FString PreviousFolderPath;
-	if (FolderPath != PreviousFolderPath)
+	if (!FolderPath.Equals(PreviousFolderPath))
 	{
 		NbDumps = 0;
 		PreviousFolderPath = FolderPath;

@@ -1,13 +1,35 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Internationalization/TextFormatter.h"
-#include "Misc/ScopeLock.h"
+
+#include "CoreGlobals.h"
+#include "CoreTypes.h"
+#include "HAL/LowLevelMemTracker.h"
+#include "HAL/PlatformProcess.h"
+#include "Internationalization/CulturePointer.h"
+#include "Internationalization/Internationalization.h"
 #include "Internationalization/TextFormatArgumentModifier.h"
 #include "Internationalization/TextHistory.h"
-#include "Internationalization/TextData.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/CString.h"
+#include "Misc/Char.h"
+#include "Misc/EnumClassFlags.h"
 #include "Misc/ExpressionParser.h"
+#include "Misc/Guid.h"
+#include "Misc/Optional.h"
+#include "Misc/ScopeLock.h"
+#include "Misc/ScopeRWLock.h"
 #include "Stats/Stats.h"
-#include "HAL/PlatformProcess.h"
+#include "Stats/Stats2.h"
+#include "Templates/Less.h"
+#include "Templates/Tuple.h"
+#include "Templates/UnrealTemplate.h"
+#include "Templates/ValueOrError.h"
+#include "Trace/Detail/Channel.h"
+#include "AutoRTFM/AutoRTFM.h"
+#include "Async/Mutex.h"
 
 #define LOCTEXT_NAMESPACE "TextFormatter"
 
@@ -189,7 +211,7 @@ TOptional<FExpressionError> ParseArgumentModifier(const FTextFormatPatternDefini
 	// Parse out the argument modifier parameter text
 	TOptional<FStringToken> Parameters;
 	{
-		TCHAR QuoteChar = 0;
+		TCHAR QuoteChar = TEXT('\0');
 		int32 NumConsecutiveSlashes = 0;
 		Parameters = Stream.ParseToken([&](TCHAR InC)
 		{
@@ -203,7 +225,7 @@ TOptional<FExpressionError> ParseArgumentModifier(const FTextFormatPatternDefini
 				{
 					if (NumConsecutiveSlashes%2 == 0)
 					{
-						QuoteChar = 0;
+						QuoteChar = TEXT('\0');
 					}
 				}
 				else
@@ -338,23 +360,28 @@ class FTextFormatData
 {
 public:
 	/**
+	 * Get the common "empty" instance to use for a default constructed FTextFormat.
+	 */
+	static TSharedRef<FTextFormatData, ESPMode::ThreadSafe> GetSharedEmptyInstance();
+
+	/**
 	 * Construct an instance from an FText.
 	 * The text will be immediately compiled. 
 	 */
-	FTextFormatData(FText&& InText, FTextFormatPatternDefinitionConstRef InPatternDef);
+	FTextFormatData(FText&& InText, ETextFormatFlags InFormatFlags, FTextFormatPatternDefinitionConstRef InPatternDef);
 
 	/**
 	 * Construct an instance from an FString.
 	 * The string will be immediately compiled. 
 	 */
-	FTextFormatData(FString&& InString, FTextFormatPatternDefinitionConstRef InPatternDef);
+	FTextFormatData(FString&& InString, ETextFormatFlags InFormatFlags, FTextFormatPatternDefinitionConstRef InPatternDef);
 
 	/**
 	 * Test to see whether this instance contains valid compiled data.
 	 */
 	FORCEINLINE bool IsValid() const
 	{
-		FScopeLock Lock(&CompiledDataCS);
+		UE::TScopeLock Lock(CompiledDataMutex);
 		return IsValid_NoLock();
 	}
 
@@ -369,7 +396,7 @@ public:
 	 */
 	FORCEINLINE bool ValidatePattern(const FCulturePtr& InCulture, TArray<FString>& OutValidationErrors)
 	{
-		FScopeLock Lock(&CompiledDataCS);
+		UE::TScopeLock Lock(CompiledDataMutex);
 		return ValidatePattern_NoLock(InCulture, OutValidationErrors);
 	}
 
@@ -378,7 +405,7 @@ public:
 	 */
 	FORCEINLINE FString Format(const FPrivateTextFormatArguments& InFormatArgs)
 	{
-		FScopeLock Lock(&CompiledDataCS);
+		UE::TScopeLock Lock(CompiledDataMutex);
 		return Format_NoLock(InFormatArgs);
 	}
 
@@ -387,7 +414,7 @@ public:
 	 */
 	FORCEINLINE void GetFormatArgumentNames(TArray<FString>& OutArgumentNames)
 	{
-		FScopeLock Lock(&CompiledDataCS);
+		UE::TScopeLock Lock(CompiledDataMutex);
 		return GetFormatArgumentNames_NoLock(OutArgumentNames);
 	}
 
@@ -414,8 +441,16 @@ public:
 	 */
 	FORCEINLINE FTextFormat::EExpressionType GetExpressionType() const
 	{
-		FScopeLock Lock(&CompiledDataCS);
+		UE::TScopeLock Lock(CompiledDataMutex);
 		return CompiledExpressionType;
+	}
+
+	/**
+	 * Get the format flags being used.
+	 */
+	FORCEINLINE ETextFormatFlags GetFormatFlags() const
+	{
+		return FormatFlags;
 	}
 
 	/**
@@ -475,6 +510,11 @@ private:
 	ESourceType SourceType;
 
 	/**
+	 * Flags controlling the behavior of the format.
+	 */
+	ETextFormatFlags FormatFlags;
+
+	/**
 	 * Definition of the pattern used during a text format.
 	 */
 	FTextFormatPatternDefinitionConstRef PatternDef;
@@ -485,95 +525,95 @@ private:
 	FText SourceText;
 
 	/**
-	 * Critical section protecting the compiled data from being modified concurrently.
+	 * Mutex protecting the compiled data from being modified concurrently.
 	 */
-	mutable FCriticalSection CompiledDataCS;
+	mutable UE::FMutex CompiledDataMutex;
 
 	/**
 	 * Copy of the string that was last compiled.
 	 * This allows the text to update via a culture change without immediately invalidating our compiled tokens.
 	 * If the data was constructed from an FString rather than an FText, then this is the string we were given and shouldn't be updated once the initial construction has happened.
-	 * Concurrent access protected by CompiledDataCS.
+	 * Concurrent access protected by CompiledDataMutex.
 	 */
 	FString SourceExpression;
 
 	/**
 	 * Lexed expression tokens generated from, and referencing, SourceExpression.
-	 * Concurrent access protected by CompiledDataCS.
+	 * Concurrent access protected by CompiledDataMutex.
 	 */
 	TArray<FExpressionToken> LexedExpression;
 
 	/**
 	 * Snapshot of the text that last time it was compiled into a format expression.
 	 * This is used to detect when the source text was changed and allow a re-compile.
-	 * Concurrent access protected by CompiledDataCS.
+	 * Concurrent access protected by CompiledDataMutex.
 	 */
 	FTextSnapshot CompiledTextSnapshot;
 
 	/**
 	 * The type of expression currently compiled.
-	 * Concurrent access protected by CompiledDataCS.
+	 * Concurrent access protected by CompiledDataMutex.
 	 */
 	FTextFormat::EExpressionType CompiledExpressionType;
 
 	/**
 	 * Holds the last compilation error (if any, when CompiledExpressionType == Invalid).
-	 * Concurrent access protected by CompiledDataCS.
+	 * Concurrent access protected by CompiledDataMutex.
 	 */
 	FString LastCompileError;
 
 	/**
 	 * The base length of the string that will go into the formatted string (no including any argument substitutions.
-	 * Concurrent access protected by CompiledDataCS.
+	 * Concurrent access protected by CompiledDataMutex.
 	 */
 	int32 BaseFormatStringLength;
 
 	/**
 	 * A multiplier to apply to the given argument count (base is 1, and 1 is added for every argument modifier that may make use of the arguments).
-	 * Concurrent access protected by CompiledDataCS.
+	 * Concurrent access protected by CompiledDataMutex.
 	 */
 	int32 FormatArgumentEstimateMultiplier;
 };
 
 
 FTextFormat::FTextFormat()
-	: TextFormatData(new FTextFormatData(FText(), FTextFormatPatternDefinition::GetDefault()))
+	: TextFormatData(FTextFormatData::GetSharedEmptyInstance())
 {
 }
 
-FTextFormat::FTextFormat(const FText& InText)
-	: TextFormatData(new FTextFormatData(CopyTemp(InText), FTextFormatPatternDefinition::GetDefault()))
+FTextFormat::FTextFormat(const FText& InText, ETextFormatFlags InFormatFlags)
+	: TextFormatData(MakeShared<FTextFormatData, ESPMode::ThreadSafe>(CopyTemp(InText), InFormatFlags, FTextFormatPatternDefinition::GetDefault()))
 {
 }
 
-FTextFormat::FTextFormat(const FText& InText, FTextFormatPatternDefinitionConstRef InCustomPatternDef)
-	: TextFormatData(new FTextFormatData(CopyTemp(InText), MoveTemp(InCustomPatternDef)))
+FTextFormat::FTextFormat(const FText& InText, FTextFormatPatternDefinitionConstRef InCustomPatternDef, ETextFormatFlags InFormatFlags)
+	: TextFormatData(MakeShared<FTextFormatData, ESPMode::ThreadSafe>(CopyTemp(InText), InFormatFlags, MoveTemp(InCustomPatternDef)))
 {
 }
 
-FTextFormat::FTextFormat(FString&& InString, FTextFormatPatternDefinitionConstRef InCustomPatternDef)
-	: TextFormatData(new FTextFormatData(MoveTemp(InString), MoveTemp(InCustomPatternDef)))
+FTextFormat::FTextFormat(FString&& InString, FTextFormatPatternDefinitionConstRef InCustomPatternDef, ETextFormatFlags InFormatFlags)
+	: TextFormatData(MakeShared<FTextFormatData, ESPMode::ThreadSafe>(MoveTemp(InString), InFormatFlags, MoveTemp(InCustomPatternDef)))
 {
 }
 
-FTextFormat FTextFormat::FromString(const FString& InString)
+FTextFormat FTextFormat::FromString(const FString& InString, ETextFormatFlags InFormatFlags)
 {
-	return FTextFormat(CopyTemp(InString), FTextFormatPatternDefinition::GetDefault());
+	return FTextFormat(CopyTemp(InString), FTextFormatPatternDefinition::GetDefault(), InFormatFlags);
 }
 
-FTextFormat FTextFormat::FromString(FString&& InString)
+FTextFormat FTextFormat::FromString(FString&& InString, ETextFormatFlags InFormatFlags)
 {
-	return FTextFormat(MoveTemp(InString), FTextFormatPatternDefinition::GetDefault());
+	return FTextFormat(MoveTemp(InString), FTextFormatPatternDefinition::GetDefault(), InFormatFlags);
 }
 
-FTextFormat FTextFormat::FromString(const FString& InString, FTextFormatPatternDefinitionConstRef InCustomPatternDef)
+FTextFormat FTextFormat::FromString(const FString& InString, FTextFormatPatternDefinitionConstRef InCustomPatternDef, ETextFormatFlags InFormatFlags)
 {
-	return FTextFormat(CopyTemp(InString), MoveTemp(InCustomPatternDef));
+	return FTextFormat(CopyTemp(InString), MoveTemp(InCustomPatternDef), InFormatFlags);
 }
 
-FTextFormat FTextFormat::FromString(FString&& InString, FTextFormatPatternDefinitionConstRef InCustomPatternDef)
+FTextFormat FTextFormat::FromString(FString&& InString, FTextFormatPatternDefinitionConstRef InCustomPatternDef, ETextFormatFlags InFormatFlags)
 {
-	return FTextFormat(MoveTemp(InString), MoveTemp(InCustomPatternDef));
+	return FTextFormat(MoveTemp(InString), MoveTemp(InCustomPatternDef), InFormatFlags);
 }
 
 bool FTextFormat::IsValid() const
@@ -601,6 +641,11 @@ FTextFormat::EExpressionType FTextFormat::GetExpressionType() const
 	return TextFormatData->GetExpressionType();
 }
 
+ETextFormatFlags FTextFormat::GetFormatFlags() const
+{
+	return TextFormatData->GetFormatFlags();
+}
+
 FTextFormatPatternDefinitionConstRef FTextFormat::GetPatternDefinition() const
 {
 	return TextFormatData->GetPatternDefinition();
@@ -617,16 +662,24 @@ void FTextFormat::GetFormatArgumentNames(TArray<FString>& OutArgumentNames) cons
 }
 
 
-FTextFormatData::FTextFormatData(FText&& InText, FTextFormatPatternDefinitionConstRef InPatternDef)
+TSharedRef<FTextFormatData, ESPMode::ThreadSafe> FTextFormatData::GetSharedEmptyInstance()
+{
+	static const TSharedRef<FTextFormatData> EmptyInstance = MakeShared<FTextFormatData, ESPMode::ThreadSafe>(FText(), ETextFormatFlags::Default, FTextFormatPatternDefinition::GetDefault());
+	return EmptyInstance;
+}
+
+FTextFormatData::FTextFormatData(FText&& InText, ETextFormatFlags InFormatFlags, FTextFormatPatternDefinitionConstRef InPatternDef)
 	: SourceType(ESourceType::Text)
+	, FormatFlags(InFormatFlags)
 	, PatternDef(MoveTemp(InPatternDef))
 	, SourceText(MoveTemp(InText))
 {
 	Compile_NoLock();
 }
 
-FTextFormatData::FTextFormatData(FString&& InString, FTextFormatPatternDefinitionConstRef InPatternDef)
+FTextFormatData::FTextFormatData(FString&& InString, ETextFormatFlags InFormatFlags, FTextFormatPatternDefinitionConstRef InPatternDef)
 	: SourceType(ESourceType::String)
+	, FormatFlags(InFormatFlags)
 	, PatternDef(MoveTemp(InPatternDef))
 	, SourceExpression(MoveTemp(InString))
 {
@@ -665,6 +718,7 @@ bool FTextFormatData::IsValid_NoLock() const
 void FTextFormatData::Compile_NoLock()
 {
 	SCOPE_CYCLE_COUNTER(STAT_TextFormatData_Compile);
+	LLM_SCOPE(ELLMTag::Localization);
 
 	LexedExpression.Reset();
 	if (SourceType == ESourceType::Text)
@@ -706,12 +760,19 @@ void FTextFormatData::Compile_NoLock()
 					// Peek to see if the next token is an argument modifier
 					if (const auto* ArgumentModifierToken = NextToken.Node.Cast<TextFormatTokens::FArgumentModifierTokenSpecifier>())
 					{
-						int32 ArgModLength = 0;
-						bool ArgModUsesFormatArgs = false;
-						ArgumentModifierToken->TextFormatArgumentModifier->EstimateLength(ArgModLength, ArgModUsesFormatArgs);
+						if (EnumHasAnyFlags(FormatFlags, ETextFormatFlags::EvaluateArgumentModifiers))
+						{
+							int32 ArgModLength = 0;
+							bool ArgModUsesFormatArgs = false;
+							ArgumentModifierToken->TextFormatArgumentModifier->EstimateLength(ArgModLength, ArgModUsesFormatArgs);
 
-						BaseFormatStringLength += ArgModLength;
-						FormatArgumentEstimateMultiplier += (ArgModUsesFormatArgs) ? 1 : 0;
+							BaseFormatStringLength += ArgModLength;
+							FormatArgumentEstimateMultiplier += (ArgModUsesFormatArgs) ? 1 : 0;
+						}
+						else
+						{
+							BaseFormatStringLength += ArgumentModifierToken->ModifierPatternLen + 1;
+						}
 
 						++TokenIndex; // walk over the argument token so that the next iteration will skip over the argument modifier
 						continue;
@@ -783,11 +844,14 @@ bool FTextFormatData::ValidatePattern_NoLock(const FCulturePtr& InCulture, TArra
 	const FCultureRef ResolvedCulture = InCulture ? InCulture.ToSharedRef() : FInternationalization::Get().GetCurrentLanguage();
 
 	bool bIsValidPattern = true;
-	for (const FExpressionToken& Token : LexedExpression)
+	if (EnumHasAnyFlags(FormatFlags, ETextFormatFlags::EvaluateArgumentModifiers))
 	{
-		if (const auto* ArgumentModifierToken = Token.Node.Cast<TextFormatTokens::FArgumentModifierTokenSpecifier>())
+		for (const FExpressionToken& Token : LexedExpression)
 		{
-			bIsValidPattern &= ArgumentModifierToken->TextFormatArgumentModifier->Validate(ResolvedCulture, OutValidationErrors);
+			if (const auto* ArgumentModifierToken = Token.Node.Cast<TextFormatTokens::FArgumentModifierTokenSpecifier>())
+			{
+				bIsValidPattern &= ArgumentModifierToken->TextFormatArgumentModifier->Validate(ResolvedCulture, OutValidationErrors);
+			}
 		}
 	}
 	return bIsValidPattern;
@@ -835,7 +899,16 @@ FString FTextFormatData::Format_NoLock(const FPrivateTextFormatArguments& InForm
 					// Peek to see if the next token is an argument modifier
 					if (const auto* ArgumentModifierToken = NextToken.Node.Cast<TextFormatTokens::FArgumentModifierTokenSpecifier>())
 					{
-						ArgumentModifierToken->TextFormatArgumentModifier->Evaluate(*PossibleArgumentValue, InFormatArgs, ResultString);
+						if (EnumHasAnyFlags(FormatFlags, ETextFormatFlags::EvaluateArgumentModifiers))
+						{
+							ArgumentModifierToken->TextFormatArgumentModifier->Evaluate(*PossibleArgumentValue, InFormatArgs, ResultString);
+						}
+						else
+						{
+							// If evaluation is disabled we just write the literal value of the argument modifier back into the final string...
+							ResultString.AppendChar(PatternDef->ArgModChar);
+							ResultString.AppendChars(ArgumentModifierToken->ModifierPatternStartPos, ArgumentModifierToken->ModifierPatternLen);
+						}
 						++TokenIndex; // walk over the argument token so that the next iteration will skip over the argument modifier
 						continue;
 					}
@@ -884,12 +957,15 @@ void FTextFormatData::GetFormatArgumentNames_NoLock(TArray<FString>& OutArgument
 
 			if (!bIsInArray)
 			{
-				OutArgumentNames.Add(FString(ArgumentToken->ArgumentNameLen, ArgumentToken->ArgumentNameStartPos));
+				OutArgumentNames.Add(FString::ConstructFromPtrSize(ArgumentToken->ArgumentNameStartPos, ArgumentToken->ArgumentNameLen));
 			}
 		}
 		else if (const auto* ArgumentModifierToken = Token.Node.Cast<TextFormatTokens::FArgumentModifierTokenSpecifier>())
 		{
-			ArgumentModifierToken->TextFormatArgumentModifier->GetFormatArgumentNames(OutArgumentNames);
+			if (EnumHasAnyFlags(FormatFlags, ETextFormatFlags::EvaluateArgumentModifiers))
+			{
+				ArgumentModifierToken->TextFormatArgumentModifier->GetFormatArgumentNames(OutArgumentNames);
+			}
 		}
 	}
 }
@@ -905,8 +981,13 @@ FTextFormatPatternDefinition::FTextFormatPatternDefinition()
 
 FTextFormatPatternDefinitionConstRef FTextFormatPatternDefinition::GetDefault()
 {
-	static FTextFormatPatternDefinitionConstRef DefaultFormatPatternDefinition = MakeShared<FTextFormatPatternDefinition, ESPMode::ThreadSafe>();
-	return DefaultFormatPatternDefinition;
+	FTextFormatPatternDefinitionConstRef* Result;
+	AutoRTFM::Open([&Result]()
+	{
+		static FTextFormatPatternDefinitionConstRef DefaultFormatPatternDefinition = MakeShared<FTextFormatPatternDefinition, ESPMode::ThreadSafe>();
+		Result = &DefaultFormatPatternDefinition;
+	});
+	return *Result;
 }
 
 const FTokenDefinitions& FTextFormatPatternDefinition::GetTextFormatDefinitions() const
@@ -931,19 +1012,19 @@ FTextFormatter& FTextFormatter::Get()
 
 void FTextFormatter::RegisterTextArgumentModifier(const FTextFormatString& InKeyword, FCompileTextArgumentModifierFuncPtr InCompileFunc)
 {
-	FScopeLock Lock(&TextArgumentModifiersCS);
+	FWriteScopeLock Lock(TextArgumentModifiersRW);
 	TextArgumentModifiers.Add(InKeyword, MoveTemp(InCompileFunc));
 }
 
 void FTextFormatter::UnregisterTextArgumentModifier(const FTextFormatString& InKeyword)
 {
-	FScopeLock Lock(&TextArgumentModifiersCS);
+	FWriteScopeLock Lock(TextArgumentModifiersRW);
 	TextArgumentModifiers.Remove(InKeyword);
 }
 
 FTextFormatter::FCompileTextArgumentModifierFuncPtr FTextFormatter::FindTextArgumentModifier(const FTextFormatString& InKeyword) const
 {
-	FScopeLock Lock(&TextArgumentModifiersCS);
+	FReadScopeLock Lock(TextArgumentModifiersRW);
 	return TextArgumentModifiers.FindRef(InKeyword);
 }
 
@@ -951,7 +1032,7 @@ FText FTextFormatter::Format(FTextFormat&& InFmt, FFormatNamedArguments&& InArgu
 {
 	FString ResultString = FormatStr(InFmt, InArguments, bInRebuildText, bInRebuildAsSource);
 
-	FText Result = FText(MakeShared<TGeneratedTextData<FTextHistory_NamedFormat>, ESPMode::ThreadSafe>(MoveTemp(ResultString), FTextHistory_NamedFormat(MoveTemp(InFmt), MoveTemp(InArguments))));
+	FText Result = FText(MakeRefCount<FTextHistory_NamedFormat>(MoveTemp(ResultString), MoveTemp(InFmt), MoveTemp(InArguments)));
 	if (!GIsEditor)
 	{
 		Result.Flags |= ETextFlag::Transient;
@@ -963,7 +1044,7 @@ FText FTextFormatter::Format(FTextFormat&& InFmt, FFormatOrderedArguments&& InAr
 {
 	FString ResultString = FormatStr(InFmt, InArguments, bInRebuildText, bInRebuildAsSource);
 
-	FText Result = FText(MakeShared<TGeneratedTextData<FTextHistory_OrderedFormat>, ESPMode::ThreadSafe>(MoveTemp(ResultString), FTextHistory_OrderedFormat(MoveTemp(InFmt), MoveTemp(InArguments))));
+	FText Result = FText(MakeRefCount<FTextHistory_OrderedFormat>(MoveTemp(ResultString), MoveTemp(InFmt), MoveTemp(InArguments)));
 	if (!GIsEditor)
 	{
 		Result.Flags |= ETextFlag::Transient;
@@ -975,7 +1056,7 @@ FText FTextFormatter::Format(FTextFormat&& InFmt, TArray<FFormatArgumentData>&& 
 {
 	FString ResultString = FormatStr(InFmt, InArguments, bInRebuildText, bInRebuildAsSource);
 
-	FText Result = FText(MakeShared<TGeneratedTextData<FTextHistory_ArgumentDataFormat>, ESPMode::ThreadSafe>(MoveTemp(ResultString), FTextHistory_ArgumentDataFormat(MoveTemp(InFmt), MoveTemp(InArguments))));
+	FText Result = FText(MakeRefCount<FTextHistory_ArgumentDataFormat>(MoveTemp(ResultString), MoveTemp(InFmt), MoveTemp(InArguments)));
 	if (!GIsEditor)
 	{
 		Result.Flags |= ETextFlag::Transient;
@@ -1034,7 +1115,7 @@ FString FTextFormatter::FormatStr(const FTextFormat& InFmt, const FFormatOrdered
 			// We have existing code that is incorrectly using names in the format string when providing ordered arguments
 			// ICU used to fallback to treating the index of the argument within the string as if it were the index specified 
 			// by the argument name, so we need to emulate that behavior to avoid breaking some format operations
-			UE_LOG(LogTextFormatter, Warning, TEXT("Failed to parse argument \"%s\" as a number (using \"%d\" as a fallback). Please check your format string for errors: \"%s\"."), *FString(ArgumentToken.ArgumentNameLen, ArgumentToken.ArgumentNameStartPos), ArgumentNumber, *FmtPattern);
+			UE_LOG(LogTextFormatter, Warning, TEXT("Failed to parse argument \"%s\" as a number (using \"%d\" as a fallback). Please check your format string for errors: \"%s\"."), *FString::ConstructFromPtrSize(ArgumentToken.ArgumentNameStartPos, ArgumentToken.ArgumentNameLen), ArgumentNumber, *FmtPattern);
 			ArgumentIndex = ArgumentNumber;
 		}
 		return InArguments.IsValidIndex(ArgumentIndex) ? &(InArguments[ArgumentIndex]) : nullptr;
@@ -1089,7 +1170,7 @@ FString FTextFormatter::Format(const FTextFormat& InFmt, const FPrivateTextForma
 			FmtText.Rebuild();
 		}
 
-		FmtPattern = FTextFormat(FmtText.BuildSourceString(), FmtPattern.GetPatternDefinition());
+		FmtPattern = FTextFormat(FmtText.BuildSourceString(), FmtPattern.GetPatternDefinition(), FmtPattern.GetFormatFlags());
 	}
 
 	return FmtPattern.TextFormatData->Format(InFormatArgs);

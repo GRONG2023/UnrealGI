@@ -2,34 +2,31 @@
 
 #include "Components/EditableTextBox.h"
 #include "UObject/ConstructorHelpers.h"
+#include "UObject/UE5MainStreamObjectVersion.h"
+#include "UObject/UE5ReleaseStreamObjectVersion.h"
 #include "Engine/Font.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Input/SEditableTextBox.h"
+#include "Styling/DefaultStyleCache.h"
+#include "Styling/UMGCoreStyle.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(EditableTextBox)
 
 #define LOCTEXT_NAMESPACE "UMG"
 
 /////////////////////////////////////////////////////
 // UEditableTextBox
 
-static FEditableTextBoxStyle* DefaultEditableTextBoxStyle = nullptr;
-
 UEditableTextBox::UEditableTextBox(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
-	ForegroundColor_DEPRECATED = FLinearColor::Black;
-	BackgroundColor_DEPRECATED = FLinearColor::White;
-	ReadOnlyForegroundColor_DEPRECATED = FLinearColor::Black;
-
-	if (!IsRunningDedicatedServer())
-	{
-		static ConstructorHelpers::FObjectFinder<UFont> RobotoFontObj(*UWidget::GetDefaultFontName());
-		Font_DEPRECATED = FSlateFontInfo(RobotoFontObj.Object, 12, FName("Bold"));
-	}
-
+#if WITH_EDITOR
+	bIsFontDeprecationDone = false;
+#endif
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	IsReadOnly = false;
 	IsPassword = false;
 	MinimumDesiredWidth = 0.0f;
-	Padding_DEPRECATED = FMargin(0, 0, 0, 0);
 	IsCaretMovedWhenGainFocus = true;
 	SelectAllTextWhenFocused = false;
 	RevertTextOnEscape = false;
@@ -37,21 +34,53 @@ UEditableTextBox::UEditableTextBox(const FObjectInitializer& ObjectInitializer)
 	SelectAllTextOnCommit = false;
 	AllowContextMenu = true;
 	VirtualKeyboardDismissAction = EVirtualKeyboardDismissAction::TextChangeOnDismiss;
+	OverflowPolicy = ETextOverflowPolicy::Clip;
 
-	if (DefaultEditableTextBoxStyle == nullptr)
+	WidgetStyle = UE::Slate::Private::FDefaultStyleCache::GetRuntime().GetEditableTextBoxStyle();
+
+	if (!IsRunningDedicatedServer())
 	{
-		// HACK: THIS SHOULD NOT COME FROM CORESTYLE AND SHOULD INSTEAD BE DEFINED BY ENGINE TEXTURES/PROJECT SETTINGS
-		DefaultEditableTextBoxStyle = new FEditableTextBoxStyle(FCoreStyle::Get().GetWidgetStyle<FEditableTextBoxStyle>("NormalEditableTextBox"));
+		static ConstructorHelpers::FObjectFinder<UFont> DefaultFontObj(*UWidget::GetDefaultFontName());
+		FSlateFontInfo Font(DefaultFontObj.Object, 24, FName("Regular"));
+		//The FSlateFontInfo just created doesn't contain a composite font (while the default from the WidgetStyle does),
+		//so in the case the Font object is replaced by a null one, we have to keep the composite one as a fallback.
+		Font.CompositeFont = WidgetStyle.TextStyle.Font.CompositeFont;
 
-		// Unlink UMG default colors from the editor settings colors.
-		DefaultEditableTextBoxStyle->UnlinkColors();
+		WidgetStyle.SetFont(Font);
 	}
+	
+#if WITH_EDITOR 
+	if (IsEditorWidget())
+	{
+		WidgetStyle = UE::Slate::Private::FDefaultStyleCache::GetEditor().GetEditableTextBoxStyle();
 
-	WidgetStyle = *DefaultEditableTextBoxStyle;
+		// The CDO isn't an editor widget and thus won't use the editor style, call post edit change to mark difference from CDO
+		PostEditChange();
+	}
+#endif // WITH_EDITOR
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 #if WITH_EDITORONLY_DATA
 	AccessibleBehavior = ESlateAccessibleBehavior::Auto;
 	bCanChildrenBeAccessible = false;
+#endif
+}
+
+void UEditableTextBox::Serialize(FArchive& Ar)
+{
+	Ar.UsingCustomVersion(FUE5ReleaseStreamObjectVersion::GUID);
+
+	Super::Serialize(Ar);
+
+#if WITH_EDITOR
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	if (Ar.IsLoading() && !bIsFontDeprecationDone && GetLinkerCustomVersion(FUE5ReleaseStreamObjectVersion::GUID) < FUE5ReleaseStreamObjectVersion::RemoveDuplicatedStyleInfo)
+	{
+		FTextBlockStyle& TextStyle = WidgetStyle.TextStyle;
+		TextStyle.SetFont(WidgetStyle.Font_DEPRECATED);
+		bIsFontDeprecationDone = true;
+	}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #endif
 }
 
@@ -62,10 +91,13 @@ void UEditableTextBox::ReleaseSlateResources(bool bReleaseChildren)
 	MyEditableTextBlock.Reset();
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 TSharedRef<SWidget> UEditableTextBox::RebuildWidget()
 {
 	MyEditableTextBlock = SNew(SEditableTextBox)
 		.Style(&WidgetStyle)
+		.IsReadOnly(IsReadOnly)
+		.IsPassword(IsPassword)
 		.MinDesiredWidth(MinimumDesiredWidth)
 		.IsCaretMovedWhenGainFocus(IsCaretMovedWhenGainFocus)
 		.SelectAllTextWhenFocused(SelectAllTextWhenFocused)
@@ -79,7 +111,8 @@ TSharedRef<SWidget> UEditableTextBox::RebuildWidget()
 		.VirtualKeyboardOptions(VirtualKeyboardOptions)
 		.VirtualKeyboardTrigger(VirtualKeyboardTrigger)
 		.VirtualKeyboardDismissAction(VirtualKeyboardDismissAction)
-		.Justification(Justification);
+		.Justification(Justification)
+		.OverflowPolicy(OverflowPolicy);
 
 	return MyEditableTextBlock.ToSharedRef();
 }
@@ -87,6 +120,11 @@ TSharedRef<SWidget> UEditableTextBox::RebuildWidget()
 void UEditableTextBox::SynchronizeProperties()
 {
 	Super::SynchronizeProperties();
+
+	if (!MyEditableTextBlock.IsValid())
+	{
+		return;
+	}
 
 	TAttribute<FText> TextBinding = PROPERTY_BINDING(FText, Text);
 	TAttribute<FText> HintTextBinding = PROPERTY_BINDING(FText, HintText);
@@ -105,6 +143,7 @@ void UEditableTextBox::SynchronizeProperties()
 	MyEditableTextBlock->SetAllowContextMenu(AllowContextMenu);
 	MyEditableTextBlock->SetVirtualKeyboardDismissAction(VirtualKeyboardDismissAction);
 	MyEditableTextBlock->SetJustification(Justification);
+	MyEditableTextBlock->SetOverflowPolicy(OverflowPolicy);
 
 	ShapedTextOptions.SynchronizeShapedTextProperties(*MyEditableTextBlock);
 }
@@ -121,11 +160,35 @@ FText UEditableTextBox::GetText() const
 
 void UEditableTextBox::SetText(FText InText)
 {
-	Text = InText;
-	if ( MyEditableTextBlock.IsValid() )
+	if (SetTextInternal(InText))
 	{
-		MyEditableTextBlock->SetText(Text);
+		if (MyEditableTextBlock.IsValid())
+		{
+			MyEditableTextBlock->SetText(Text);
+		}
+		BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::Text);
 	}
+}
+
+bool UEditableTextBox::SetTextInternal(const FText& InText)
+{
+	if (!Text.IdenticalTo(InText, ETextIdenticalModeFlags::DeepCompare | ETextIdenticalModeFlags::LexicalCompareInvariants))
+	{
+		Text = InText;
+		return true;
+	}
+
+	return false;
+}
+
+FText UEditableTextBox::GetHintText() const
+{
+	if (MyEditableTextBlock.IsValid())
+	{
+		return MyEditableTextBlock->GetHintText();
+	}
+
+	return HintText;
 }
 
 void UEditableTextBox::SetHintText(FText InText)
@@ -137,6 +200,100 @@ void UEditableTextBox::SetHintText(FText InText)
 	}
 }
 
+float UEditableTextBox::GetMinimumDesiredWidth() const
+{
+	return MinimumDesiredWidth;
+}
+
+void UEditableTextBox::SetMinDesiredWidth(float InMinDesiredWidth)
+{
+	MinimumDesiredWidth = InMinDesiredWidth;
+	if (MyEditableTextBlock.IsValid())
+	{
+		MyEditableTextBlock->SetMinimumDesiredWidth(MinimumDesiredWidth);
+	}
+}
+
+void UEditableTextBox::SetIsCaretMovedWhenGainFocus(bool bIsCaretMovedWhenGainFocus)
+{
+	IsCaretMovedWhenGainFocus = bIsCaretMovedWhenGainFocus;
+	if (MyEditableTextBlock.IsValid())
+	{
+		MyEditableTextBlock->SetIsCaretMovedWhenGainFocus(bIsCaretMovedWhenGainFocus);
+	}
+}
+
+bool UEditableTextBox::GetIsCaretMovedWhenGainFocus() const
+{
+	return IsCaretMovedWhenGainFocus;
+}
+
+void UEditableTextBox::SetSelectAllTextWhenFocused(bool bSelectAllTextWhenFocused)
+{
+	SelectAllTextWhenFocused = bSelectAllTextWhenFocused;
+	if (MyEditableTextBlock.IsValid())
+	{
+		MyEditableTextBlock->SetSelectAllTextWhenFocused(bSelectAllTextWhenFocused);
+	}
+}
+
+bool UEditableTextBox::GetSelectAllTextWhenFocused() const
+{
+	return SelectAllTextWhenFocused;
+}
+
+void UEditableTextBox::SetRevertTextOnEscape(bool bRevertTextOnEscape)
+{
+	RevertTextOnEscape = bRevertTextOnEscape;
+	if (MyEditableTextBlock.IsValid())
+	{
+		MyEditableTextBlock->SetRevertTextOnEscape(bRevertTextOnEscape);
+	}
+}
+
+bool UEditableTextBox::GetRevertTextOnEscape() const
+{
+	return RevertTextOnEscape;
+}
+
+void UEditableTextBox::SetClearKeyboardFocusOnCommit(bool bClearKeyboardFocusOnCommit)
+{
+	ClearKeyboardFocusOnCommit = bClearKeyboardFocusOnCommit;
+	if (MyEditableTextBlock.IsValid())
+	{
+		MyEditableTextBlock->SetClearKeyboardFocusOnCommit(bClearKeyboardFocusOnCommit);
+	}
+}
+
+bool UEditableTextBox::GetClearKeyboardFocusOnCommit() const
+{
+	return ClearKeyboardFocusOnCommit;
+}
+
+void UEditableTextBox::SetSelectAllTextOnCommit(bool bSelectAllTextOnCommit)
+{
+	SelectAllTextOnCommit = bSelectAllTextOnCommit;
+	if (MyEditableTextBlock.IsValid())
+	{
+		MyEditableTextBlock->SetSelectAllTextOnCommit(bSelectAllTextOnCommit);
+	}
+
+}
+
+bool UEditableTextBox::GetSelectAllTextOnCommit() const
+{
+	return SelectAllTextOnCommit;
+}
+
+void UEditableTextBox::SetForegroundColor(FLinearColor color)
+{
+	WidgetStyle.ForegroundColor = color;
+	if ( MyEditableTextBlock.IsValid() )
+	{
+		MyEditableTextBlock->SetForegroundColor(color);
+	}
+}
+
 void UEditableTextBox::SetError(FText InError)
 {
 	if ( MyEditableTextBlock.IsValid() )
@@ -145,13 +302,23 @@ void UEditableTextBox::SetError(FText InError)
 	}
 }
 
-void UEditableTextBox::SetIsReadOnly(bool bReadOnly)
+bool UEditableTextBox::GetIsReadOnly() const
 {
-	IsReadOnly = bReadOnly;
+	return IsReadOnly;
+}
+
+void UEditableTextBox::SetIsReadOnly(bool bIsReadOnly)
+{
+	IsReadOnly = bIsReadOnly;
 	if ( MyEditableTextBlock.IsValid() )
 	{
 		MyEditableTextBlock->SetIsReadOnly(IsReadOnly);
 	}
+}
+
+bool UEditableTextBox::GetIsPassword() const
+{
+	return IsPassword;
 }
 
 void UEditableTextBox::SetIsPassword(bool bIsPassword)
@@ -181,6 +348,12 @@ bool UEditableTextBox::HasError() const
 	return false;
 }
 
+
+ETextJustify::Type UEditableTextBox::GetJustification() const
+{
+	return Justification;
+}
+
 void UEditableTextBox::SetJustification(ETextJustify::Type InJustification)
 {
 	Justification = InJustification;
@@ -190,66 +363,38 @@ void UEditableTextBox::SetJustification(ETextJustify::Type InJustification)
 	}
 }
 
+ETextOverflowPolicy UEditableTextBox::GetTextOverflowPolicy() const
+{
+	return OverflowPolicy;
+}
+
+void UEditableTextBox::SetTextOverflowPolicy(ETextOverflowPolicy InOverflowPolicy)
+{
+	OverflowPolicy = InOverflowPolicy;
+	if (MyEditableTextBlock.IsValid())
+	{
+		MyEditableTextBlock->SetOverflowPolicy(InOverflowPolicy);
+	}
+}
+
 void UEditableTextBox::HandleOnTextChanged(const FText& InText)
 {
-	Text = InText;
-	OnTextChanged.Broadcast(InText);
+	if (SetTextInternal(InText))
+	{
+		BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::Text);
+		OnTextChanged.Broadcast(InText);
+	}
 }
 
 void UEditableTextBox::HandleOnTextCommitted(const FText& InText, ETextCommit::Type CommitMethod)
 {
-	Text = InText;
+	if (SetTextInternal(InText))
+	{
+		BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::Text);
+	}
 	OnTextCommitted.Broadcast(InText, CommitMethod);
 }
-
-void UEditableTextBox::PostLoad()
-{
-	Super::PostLoad();
-
-	if ( GetLinkerUE4Version() < VER_UE4_DEPRECATE_UMG_STYLE_ASSETS )
-	{
-		if ( Style_DEPRECATED != nullptr )
-		{
-			const FEditableTextBoxStyle* StylePtr = Style_DEPRECATED->GetStyle<FEditableTextBoxStyle>();
-			if ( StylePtr != nullptr )
-			{
-				WidgetStyle = *StylePtr;
-			}
-
-			Style_DEPRECATED = nullptr;
-		}
-	}
-
-	if (GetLinkerUE4Version() < VER_UE4_DEPRECATE_UMG_STYLE_OVERRIDES)
-	{
-		if (Font_DEPRECATED.HasValidFont())
-		{
-			WidgetStyle.Font = Font_DEPRECATED;
-			Font_DEPRECATED = FSlateFontInfo();
-		}
-
-		WidgetStyle.Padding = Padding_DEPRECATED;
-		Padding_DEPRECATED = FMargin(0);
-
-		if (ForegroundColor_DEPRECATED != FLinearColor::Black)
-		{
-			WidgetStyle.ForegroundColor = ForegroundColor_DEPRECATED;
-			ForegroundColor_DEPRECATED = FLinearColor::Black;
-		}
-
-		if (BackgroundColor_DEPRECATED != FLinearColor::White)
-		{
-			WidgetStyle.BackgroundColor = BackgroundColor_DEPRECATED;
-			BackgroundColor_DEPRECATED = FLinearColor::White;
-		}
-
-		if (ReadOnlyForegroundColor_DEPRECATED != FLinearColor::Black)
-		{
-			WidgetStyle.ReadOnlyForegroundColor = ReadOnlyForegroundColor_DEPRECATED;
-			ReadOnlyForegroundColor_DEPRECATED = FLinearColor::Black;
-		}
-	}
-}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 #if WITH_ACCESSIBILITY
 TSharedPtr<SWidget> UEditableTextBox::GetAccessibleWidget() const
@@ -270,3 +415,4 @@ const FText UEditableTextBox::GetPaletteCategory()
 /////////////////////////////////////////////////////
 
 #undef LOCTEXT_NAMESPACE
+

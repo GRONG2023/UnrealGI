@@ -8,6 +8,7 @@
 
 struct FMeshUVChannelInfo;
 class USkeletalMesh;
+class USkinnedAsset;
 struct FSkeletalMaterial;
 class UMorphTarget;
 struct FResourceSizeEx;
@@ -36,7 +37,7 @@ public:
 	/** Runtime LOD bias modifier for this skeletal mesh */
 	uint8 LODBiasModifier;
 
-	/** Whether ray tracing acceleration structures should be created for this mesh. Derived from owner USkeletalMesh. */
+	/** Whether ray tracing acceleration structures should be created for this mesh. Derived from owner USkinnedAsset. */
 	bool bSupportRayTracing;
 
 #if WITH_EDITORONLY_DATA
@@ -50,27 +51,30 @@ public:
 	TUniquePtr<class FSkeletalMeshRenderData> NextCachedRenderData;
 #endif
 
-	FSkeletalMeshRenderData();
-	~FSkeletalMeshRenderData();
+	ENGINE_API FSkeletalMeshRenderData();
+	ENGINE_API ~FSkeletalMeshRenderData();
 
 #if WITH_EDITOR
-	void Cache(const ITargetPlatform* TargetPlatform, USkeletalMesh* Owner);
-	FString GetDerivedDataKey(const ITargetPlatform* TargetPlatform, USkeletalMesh* Owner);
+	ENGINE_API void Cache(const ITargetPlatform* TargetPlatform, USkinnedAsset* Owner, class FSkinnedAssetCompilationContext* ContextPtr);
+	FString GetDerivedDataKey(const ITargetPlatform* TargetPlatform, USkinnedAsset* Owner);
 
-	void SyncUVChannelData(const TArray<FSkeletalMaterial>& ObjectData);
+	ENGINE_API void SyncUVChannelData(const TArray<FSkeletalMaterial>& ObjectData);
 #endif
 
 	/** Serialize to/from the specified archive.. */
-	void Serialize(FArchive& Ar, USkeletalMesh* Owner);
+	ENGINE_API void Serialize(FArchive& Ar, USkinnedAsset* Owner);
 
 	/** Initializes rendering resources. */
-	void InitResources(bool bNeedsVertexColors, TArray<UMorphTarget*>& InMorphTargets, USkeletalMesh* Owner);
+	ENGINE_API void InitResources(bool bNeedsVertexColors, TArray<UMorphTarget*>& InMorphTargets, USkinnedAsset* Owner);
 
 	/** Releases rendering resources. */
 	ENGINE_API void ReleaseResources();
 
 	/** Return the resource size */
-	void GetResourceSizeEx(FResourceSizeEx& CumulativeResourceSize);
+	ENGINE_API void GetResourceSizeEx(FResourceSizeEx& CumulativeResourceSize);
+
+	/** Get the estimated memory overhead of buffers marked as NeedsCPUAccess. */
+	ENGINE_API SIZE_T GetCPUAccessMemoryOverhead() const;
 
 	/** Returns true if this resource must be skinned on the CPU for the given feature level. */
 	ENGINE_API bool RequiresCPUSkinning(ERHIFeatureLevel::Type FeatureLevel) const;
@@ -79,10 +83,10 @@ public:
 	ENGINE_API bool RequiresCPUSkinning(ERHIFeatureLevel::Type FeatureLevel, int32 MinLODIdx) const;
 
 	/** Returns the number of bone influences per vertex. */
-	uint32 GetNumBoneInfluences() const;
+	ENGINE_API uint32 GetNumBoneInfluences() const;
 
 	/** Returns the number of bone influences per vertex starting at MinLODIdx. */
-	uint32 GetNumBoneInfluences(int32 MinLODIdx) const;
+	ENGINE_API uint32 GetNumBoneInfluences(int32 MinLODIdx) const;
 	
 	/**
 	* Computes the maximum number of bones per section used to render this mesh.
@@ -102,6 +106,9 @@ public:
 	{
 		return GetFirstValidLODIdx(FMath::Max<int32>(PendingFirstLODIdx, MinLODIdx));
 	}
+
+	/** Check if any rendersection casts shadows */
+	ENGINE_API bool AnyRenderSectionCastsShadows(int32 MinLODIdx) const;
 
 	/** 
 	 * Return the pending first LOD that can be used for rendering starting at MinLODIdx.

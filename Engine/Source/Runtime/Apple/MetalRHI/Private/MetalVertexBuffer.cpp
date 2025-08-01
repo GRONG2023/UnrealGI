@@ -20,87 +20,56 @@ DECLARE_MEMORY_STAT(TEXT("Used Device Buffer Memory"), STAT_MetalDeviceBufferMem
 #endif
 
 #if STATS
-#define METAL_INC_DWORD_STAT_BY(Type, Name, Size) \
-	switch(Type)	{ \
-		case RRT_UniformBuffer: INC_DWORD_STAT_BY(STAT_MetalUniform##Name, Size); break; \
-		case RRT_IndexBuffer: INC_DWORD_STAT_BY(STAT_MetalIndex##Name, Size); break; \
-		case RRT_StructuredBuffer: \
-		case RRT_VertexBuffer: INC_DWORD_STAT_BY(STAT_MetalVertex##Name, Size); break; \
-		default: break; \
-	}
+#define METAL_INC_DWORD_STAT_BY(Name, Size, Usage) do { if (EnumHasAnyFlags(Usage, BUF_IndexBuffer)) { INC_DWORD_STAT_BY(STAT_MetalIndex##Name, Size); } else { INC_DWORD_STAT_BY(STAT_MetalVertex##Name, Size); } } while (false)
 #else
-#define METAL_INC_DWORD_STAT_BY(Type, Name, Size)
+#define METAL_INC_DWORD_STAT_BY(Name, Size, Usage)
 #endif
 
-@implementation FMetalBufferData
-
-APPLE_PLATFORM_OBJECT_ALLOC_OVERRIDES(FMetalBufferData)
-
--(instancetype)init
+FMetalBufferData::~FMetalBufferData()
 {
-	id Self = [super init];
-	if (Self)
+    if (Data)
+    {
+        FMemory::Free(Data);
+        Data = nullptr;
+        Len = 0;
+    }
+}
+
+void FMetalBufferData::InitWithSize(uint32 Size)
+{
+    Data = (uint8*)FMemory::Malloc(Size);
+    Len = Size;
+    check(Data);
+}
+
+enum class EMetalBufferUsage
+{
+	None = 0,
+	GPUOnly = 1 << 0,
+	LinearTex = 1 << 1,
+};
+ENUM_CLASS_FLAGS(EMetalBufferUsage);
+
+static EMetalBufferUsage GetMetalBufferUsage(EBufferUsageFlags InUsage)
+{
+	EMetalBufferUsage Usage = EMetalBufferUsage::None;
+
+	if (EnumHasAnyFlags(InUsage, BUF_VertexBuffer))
 	{
-		self->Data = nullptr;
-		self->Len = 0;
+		Usage |= EMetalBufferUsage::LinearTex;
 	}
-	return Self;
-}
--(instancetype)initWithSize:(uint32)InSize
-{
-	id Self = [super init];
-	if (Self)
+
+	if (EnumHasAnyFlags(InUsage, BUF_IndexBuffer))
 	{
-		self->Data = (uint8*)FMemory::Malloc(InSize);
-		self->Len = InSize;
-		check(self->Data);
+		Usage |= (EMetalBufferUsage::GPUOnly | EMetalBufferUsage::LinearTex);
 	}
-	return Self;
-}
--(instancetype)initWithBytes:(void const*)InData length:(uint32)InSize
-{
-	id Self = [super init];
-	if (Self)
+
+	if (EnumHasAnyFlags(InUsage, BUF_StructuredBuffer))
 	{
-		self->Data = (uint8*)FMemory::Malloc(InSize);
-		self->Len = InSize;
-		check(self->Data);
-		FMemory::Memcpy(self->Data, InData, InSize);
+		Usage |= EMetalBufferUsage::GPUOnly;
 	}
-	return Self;
-}
--(void)dealloc
-{
-	if (self->Data)
-	{
-		FMemory::Free(self->Data);
-		self->Data = nullptr;
-		self->Len = 0;
-	}
-	[super dealloc];
-}
-@end
 
-
-FMetalVertexBuffer::FMetalVertexBuffer(uint32 InSize, uint32 InUsage)
-	: FRHIVertexBuffer(InSize, InUsage)
-	, FMetalRHIBuffer(InSize, InUsage|EMetalBufferUsage_LinearTex, RRT_VertexBuffer)
-{
-}
-
-FMetalVertexBuffer::~FMetalVertexBuffer()
-{
-}
-
-void FMetalVertexBuffer::Swap(FMetalVertexBuffer& Other)
-{
-	FRHIVertexBuffer::Swap(Other);
-	FMetalRHIBuffer::Swap(Other);
-}
-
-void FMetalRHIBuffer::Swap(FMetalRHIBuffer& Other)
-{
-	::Swap(*this, Other);
+	return Usage;
 }
 
 static bool CanUsePrivateMemory()
@@ -110,62 +79,68 @@ static bool CanUsePrivateMemory()
 
 bool FMetalRHIBuffer::UsePrivateMemory() const
 {
-	return (FMetalCommandQueue::SupportsFeature(EMetalFeaturesEfficientBufferBlits) && (Usage & (BUF_Dynamic|BUF_Static)))
-	|| (FMetalCommandQueue::SupportsFeature(EMetalFeaturesIABs) && (Usage & (BUF_ShaderResource|BUF_UnorderedAccess))) && !FMetalCommandQueue::IsUMASystem();
+	return (FMetalCommandQueue::SupportsFeature(EMetalFeaturesEfficientBufferBlits) && EnumHasAnyFlags(GetUsage(), BUF_Dynamic | BUF_Static))
+	|| (FMetalCommandQueue::SupportsFeature(EMetalFeaturesIABs) && EnumHasAnyFlags(GetUsage(), BUF_ShaderResource|BUF_UnorderedAccess)) 
+	&& !FMetalCommandQueue::IsUMASystem();
 }
 
-FMetalRHIBuffer::FMetalRHIBuffer(uint32 InSize, uint32 InUsage, ERHIResourceType InType)
-: Data(nullptr)
-, LastLockFrame(0)
-, CurrentIndex(0)
-, NumberOfBuffers(0)
-, CurrentLockMode(RLM_Num)
-, LockOffset(0)
-, LockSize(0)
-, Size(InSize)
-, Usage(InUsage)
-, Mode(BUFFER_STORAGE_MODE)
-, Type(InType)
+FMetalRHIBuffer::FMetalRHIBuffer(FRHICommandListBase& RHICmdList, FRHIBufferDesc const& InBufferDesc, FRHIResourceCreateInfo& CreateInfo)
+	: FRHIBuffer(InBufferDesc)
+	, Size(InBufferDesc.Size)
+	, Mode(BUFFER_STORAGE_MODE)
 {
-	// No life-time usage information? Enforce Dynamic.
-	if((Usage & (BUF_Static | BUF_Dynamic | BUF_Volatile)) == 0)
+#if METAL_RHI_RAYTRACING
+	if (EnumHasAnyFlags(InBufferDesc.Usage, BUF_AccelerationStructure))
 	{
-		Usage |= BUF_Dynamic;
+		AccelerationStructureHandle = GetMetalDeviceContext().GetDevice().NewAccelerationStructureWithSize(Size);
+		return;
 	}
-	
-	const bool bIsStatic = (Usage & BUF_Static) != 0;
-	const bool bIsDynamic = (Usage & BUF_Dynamic) != 0;
-	const bool bIsVolatile = (Usage & BUF_Volatile) != 0;
-	const bool bWantsView = (Usage & (BUF_ShaderResource | BUF_UnorderedAccess)) != 0;
-	
-	check(bIsStatic ^ bIsDynamic ^ bIsVolatile);
+#endif
 
-	Mode = UsePrivateMemory() ? mtlpp::StorageMode::Private : BUFFER_STORAGE_MODE;
-	Mode = CanUsePrivateMemory() ? mtlpp::StorageMode::Private : Mode;
+	const EMetalBufferUsage MetalUsage = GetMetalBufferUsage(InBufferDesc.Usage);
 	
-	if (InSize)
+	const bool bIsStatic  	= EnumHasAnyFlags(InBufferDesc.Usage, BUF_Static);
+	const bool bIsDynamic 	= EnumHasAnyFlags(InBufferDesc.Usage, BUF_Dynamic);
+	const bool bIsVolatile	= EnumHasAnyFlags(InBufferDesc.Usage, BUF_Volatile);
+	const bool bIsNull		= EnumHasAnyFlags(InBufferDesc.Usage, BUF_NullResource);
+	const bool bWantsView 	= EnumHasAnyFlags(InBufferDesc.Usage, BUF_ShaderResource | BUF_UnorderedAccess);
+	
+	uint32_t ValidateTypeCount = (uint32_t)bIsStatic + (uint32_t)bIsDynamic +
+								(uint32_t)bIsVolatile + (uint32_t)bIsNull;
+	
+	check(ValidateTypeCount == 1);
+
+	Mode = UsePrivateMemory() ? MTL::StorageModePrivate : BUFFER_STORAGE_MODE;
+	Mode = CanUsePrivateMemory() ? MTL::StorageModePrivate : Mode;
+	
+	if (InBufferDesc.Size)
 	{
-		checkf(InSize <= 1024 * 1024 * 1024, TEXT("Metal doesn't support buffers > 1GB"));
+		checkf(InBufferDesc.Size <= GetMetalDeviceContext().GetDevice()->maxBufferLength(), TEXT("Requested buffer size larger than supported by device."));
 		
 		// Temporary buffers less than the buffer page size - currently 4Kb - is better off going through the set*Bytes API if available.
 		// These can't be used for shader resources or UAVs if we want to use the 'Linear Texture' code path
-		if (!(InUsage & (BUF_UnorderedAccess|BUF_ShaderResource|EMetalBufferUsage_GPUOnly)) && (InUsage & BUF_Volatile) && InSize < MetalBufferPageSize && (InSize < MetalBufferBytesSize))
+		if (!bWantsView
+			&& bIsVolatile
+			&& !EnumHasAnyFlags(MetalUsage, EMetalBufferUsage::GPUOnly)
+			&& InBufferDesc.Size < MetalBufferPageSize
+			&& InBufferDesc.Size < MetalBufferBytesSize)
 		{
-			Data = [[FMetalBufferData alloc] initWithSize:InSize];
-			METAL_INC_DWORD_STAT_BY(Type, MemAlloc, InSize);
+            Data = new FMetalBufferData();
+            Data->InitWithSize(InBufferDesc.Size);
+			METAL_INC_DWORD_STAT_BY(MemAlloc, InBufferDesc.Size, InBufferDesc.Usage);
 		}
 		else
 		{
 #if PLATFORM_MAC
 			// Buffer can be blit encoder copied on lock/unlock, we need to know that the buffer size is large enough for copy operations that are in multiples of
 			// 4 bytes on macOS, iOS can be 1 byte.  Update size to know we have at least this much buffer memory, it will be larger in the end.
-			Size = Align(InSize, 4);
+			Size = Align(InBufferDesc.Size, 4);
 #endif
 			uint32 AllocSize = Size;
 			
-			if ((InUsage & EMetalBufferUsage_LinearTex) && !FMetalCommandQueue::SupportsFeature(EMetalFeaturesTextureBuffers))
+			if (EnumHasAnyFlags(MetalUsage, EMetalBufferUsage::LinearTex) && !FMetalCommandQueue::SupportsFeature(EMetalFeaturesTextureBuffers))
 			{
-				if (InUsage & BUF_UnorderedAccess)
+				if (EnumHasAnyFlags(InBufferDesc.Usage, BUF_UnorderedAccess))
 				{
 					// Padding for write flushing when not using linear texture bindings for buffers
 					AllocSize = Align(AllocSize + 512, 1024);
@@ -237,288 +212,123 @@ FMetalRHIBuffer::FMetalRHIBuffer(uint32 InSize, uint32 InUsage, ERHIResourceType
 			AllocSize = Align(AllocSize, RequestedBufferOffsetAlignment);
 			for(uint32 i = 0; i < NumberOfBuffers; i++)
 			{
-				FMetalBufferAndViews& Backing = BufferPool[i];
+				FMetalBufferPtr Buffer = nullptr;
 
 #if METAL_POOL_BUFFER_BACKING
-				FMetalPooledBufferArgs ArgsCPU(GetMetalDeviceContext().GetDevice(), AllocSize, Usage, Mode);
-				Backing.Buffer = GetMetalDeviceContext().CreatePooledBuffer(ArgsCPU);
-				Backing.Buffer.SetOwner(nullptr, false);
+				FMetalPooledBufferArgs ArgsCPU(GetMetalDeviceContext().GetDevice(), AllocSize, InBufferDesc.Usage, Mode);
+				Buffer = GetMetalDeviceContext().CreatePooledBuffer(ArgsCPU);
+				Buffer->SetOwner(nullptr, false);
 #else
-				
-				NSUInteger Options = (((NSUInteger) Mode) << mtlpp::ResourceStorageModeShift);
+				NS::UInteger Options = (((NS::UInteger) Mode) << MTL::ResourceStorageModeShift);
 				
 				METAL_GPUPROFILE(FScopedMetalCPUStats CPUStat(FString::Printf(TEXT("AllocBuffer: %llu, %llu"), AllocSize, Options)));
 				// Allocate one.
-				Backing.Buffer = FMetalBuffer(MTLPP_VALIDATE(mtlpp::Device, GetMetalDeviceContext().GetDevice(), SafeGetRuntimeDebuggingLevel() >= EMetalDebugLevelValidation, NewBuffer(AllocSize, (mtlpp::ResourceOptions) Options)), false);
-				
+				//Buffer = FMetalBuffer(MTLPP_VALIDATE(MTL::Device, GetMetalDeviceContext().GetDevice(), SafeGetRuntimeDebuggingLevel() >= EMetalDebugLevelValidation, NewBuffer(AllocSize, (mtlpp::ResourceOptions) Options)), false);
+                MTLBufferPtr BufferPtr = NS::TransferPtr(GetMetalDeviceContext().GetDevice()->newBuffer(AllocSize, (MTL::ResourceOptions) Options));
+                Buffer = FMetalBufferPtr(new FMetalBuffer(BufferPtr));
+                
 				#if STATS || ENABLE_LOW_LEVEL_MEM_TRACKER
-					MetalLLM::LogAllocBuffer(GetMetalDeviceContext().GetDevice(), Backing.Buffer);
+					MetalLLM::LogAllocBuffer(GetMetalDeviceContext().GetDevice(), Buffer);
 				#endif
-				INC_MEMORY_STAT_BY(STAT_MetalDeviceBufferMemory, Backing.Buffer.GetLength());
+				INC_MEMORY_STAT_BY(STAT_MetalDeviceBufferMemory, Buffer->GetLength());
 				
-				if (GMetalBufferZeroFill && Mode != mtlpp::StorageMode::Private)
+				if (GMetalBufferZeroFill && Mode != MTL::StorageModePrivate)
 				{
-					FMemory::Memset(((uint8*)Backing.Buffer.GetContents()), 0, Backing.Buffer.GetLength());
+					FMemory::Memset(((uint8*)Buffer->Contents()), 0, Buffer->GetLength());
 				}
 				
-				METAL_DEBUG_OPTION(GetMetalDeviceContext().ValidateIsInactiveBuffer(Backing.Buffer));
-				METAL_FATAL_ASSERT(Backing.Buffer, TEXT("Failed to create buffer of size %u and resource options %u"), Size, (uint32)Options);
+				METAL_DEBUG_OPTION(GetMetalDeviceContext().ValidateIsInactiveBuffer(Buffer->GetMTLBuffer().get(), Buffer->GetRange()));
+				METAL_FATAL_ASSERT(Buffer, TEXT("Failed to create buffer of size %u and resource options %u"), Size, (uint32)Options);
 				
 				if(bIsStatic)
 				{
-					[Backing.Buffer.GetPtr() setLabel:[NSString stringWithFormat:@"Static on frame %u", GetMetalDeviceContext().GetFrameNumberRHIThread()]];
+                    FString Label = FString::Printf(TEXT("Static on frame %u"), GetMetalDeviceContext().GetFrameNumberRHIThread());
+                    BufferPtr->setLabel(FStringToNSString(Label));
 				}
 				else
 				{
-					[Backing.Buffer.GetPtr() setLabel:[NSString stringWithFormat:@"buffer on frame %u", GetMetalDeviceContext().GetFrameNumberRHIThread()]];
+                    FString Label = FString::Printf(TEXT("Buffer on frame %u"), GetMetalDeviceContext().GetFrameNumberRHIThread());
+                    BufferPtr->setLabel(FStringToNSString(Label));
 				}
-				
 #endif
-			}
-			
-			for(FMetalBufferAndViews& Backing : BufferPool)
-			{
-				check(Backing.Buffer);
-				check(AllocSize <= Backing.Buffer.GetLength());
-				check(Backing.Buffer.GetStorageMode() == Mode);
-				check(Backing.Views.Num() == 0);
+                BufferPool[i] = Buffer;
+                
+                check(Buffer);
+                check(AllocSize <= Buffer->GetLength());
+                check(Buffer->GetMTLBuffer()->storageMode() == Mode);
 			}
 		}
+	}
+
+	if (CreateInfo.ResourceArray && InBufferDesc.Size > 0)
+	{
+		check(InBufferDesc.Size == CreateInfo.ResourceArray->GetResourceDataSize());
+
+		if (Data)
+		{
+			FMemory::Memcpy(Data->Data, CreateInfo.ResourceArray->GetResourceData(), InBufferDesc.Size);
+		}
+		else
+		{
+			if (Mode == MTL::StorageModePrivate)
+			{
+				if (RHICmdList.IsBottomOfPipe())
+				{
+					void* Backing = this->Lock(true, RLM_WriteOnly, 0, InBufferDesc.Size);
+					FMemory::Memcpy(Backing, CreateInfo.ResourceArray->GetResourceData(), InBufferDesc.Size);
+					this->Unlock();
+				}
+				else
+				{
+					void* Result = FMemory::Malloc(InBufferDesc.Size, 16);
+					FMemory::Memcpy(Result, CreateInfo.ResourceArray->GetResourceData(), InBufferDesc.Size);
+
+					RHICmdList.EnqueueLambda(
+						[this, Result, InSize = InBufferDesc.Size](FRHICommandListBase& RHICmdList)
+						{
+							void* Backing = this->Lock(true, RLM_WriteOnly, 0, InSize);
+							FMemory::Memcpy(Backing, Result, InSize);
+							this->Unlock();
+							FMemory::Free(Result);
+						});
+				}
+			}
+			else
+			{
+				FMetalBufferPtr TheBuffer = GetCurrentBuffer();
+                MTLBufferPtr MTLBuffer = TheBuffer->GetMTLBuffer();
+				FMemory::Memcpy(TheBuffer->Contents(), CreateInfo.ResourceArray->GetResourceData(), InBufferDesc.Size);
+#if PLATFORM_MAC
+				if (Mode == MTL::StorageModeManaged)
+				{
+					//MTLPP_VALIDATE(mtlpp::Buffer, TheBuffer, SafeGetRuntimeDebuggingLevel() >= EMetalDebugLevelValidation, DidModify(ns::Range(0, GMetalBufferZeroFill ? TheBuffer.GetLength() : InBufferDesc.Size)));
+                    
+                    NS::Range ModifyRange = NS::Range(TheBuffer->GetOffset(), TheBuffer->GetLength());
+                    MTLBuffer->didModifyRange(ModifyRange);
+				}
+#endif
+			}
+		}
+
+		// Discard the resource array's contents.
+		CreateInfo.ResourceArray->Discard();
 	}
 }
 
 FMetalRHIBuffer::~FMetalRHIBuffer()
 {
-	if(TransferBuffer)
-	{
-		METAL_INC_DWORD_STAT_BY(Type, MemFreed, TransferBuffer.GetLength());
-		SafeReleaseMetalBuffer(TransferBuffer);
-	}
-	
-	for(FMetalBufferAndViews& Backing : BufferPool)
-	{
-		check(Backing.Buffer);
-		
-		METAL_INC_DWORD_STAT_BY(Type, MemFreed, Backing.Buffer.GetLength());
-		SafeReleaseMetalBuffer(Backing.Buffer);
-		
-		for (auto& Pair : Backing.Views)
-		{
-			SafeReleaseMetalTexture(Pair.Value);
-			Pair.Value = nil;
-		}
-		Backing.Views.Empty();
-	}
-
-	if (Data)
-	{
-		METAL_INC_DWORD_STAT_BY(Type, MemFreed, Size);
-		SafeReleaseMetalObject(Data);
-	}
+    ReleaseOwnership();
 }
 
 void FMetalRHIBuffer::AllocTransferBuffer(bool bOnRHIThread, uint32 InSize, EResourceLockMode LockMode)
 {
 	check(!TransferBuffer);
-	FMetalPooledBufferArgs ArgsCPU(GetMetalDeviceContext().GetDevice(), InSize, BUF_Dynamic, mtlpp::StorageMode::Shared);
+	FMetalPooledBufferArgs ArgsCPU(GetMetalDeviceContext().GetDevice(), InSize, BUF_Dynamic, MTL::StorageModeShared);
 	TransferBuffer = GetMetalDeviceContext().CreatePooledBuffer(ArgsCPU);
-	TransferBuffer.SetOwner(nullptr, false);
-	check(TransferBuffer && TransferBuffer.GetPtr());
-	METAL_INC_DWORD_STAT_BY(Type, MemAlloc, InSize);
-	METAL_FATAL_ASSERT(TransferBuffer, TEXT("Failed to create buffer of size %u and storage mode %u"), InSize, (uint32)mtlpp::StorageMode::Shared);
-}
-
-void FMetalRHIBuffer::AllocLinearTextures(const LinearTextureMapKey& InLinearTextureMapKey)
-{
-	check(MetalIsSafeToUseRHIThreadResources());
-	
-	const bool bWantsView = ((Usage & (BUF_ShaderResource | BUF_UnorderedAccess)) != 0);
-	check(bWantsView);
-	{
-		FMetalBufferAndViews& CurrentBacking = GetCurrentBackingInternal();
-		FMetalBuffer& CurrentBuffer = CurrentBacking.Buffer;
-		
-		check(CurrentBuffer);
-		uint32 Length = CurrentBuffer.GetLength();
-		uint8 InFormat = InLinearTextureMapKey.Key;
-		const FMetalLinearTextureDescriptor& LinearTextureDesc = InLinearTextureMapKey.Value;
-		
-		mtlpp::PixelFormat MTLFormat = (mtlpp::PixelFormat)GMetalBufferFormats[InFormat].LinearTextureFormat;
-		
-		mtlpp::TextureDescriptor Desc;
-		NSUInteger TexUsage = mtlpp::TextureUsage::Unknown;
-		if (Usage & BUF_ShaderResource)
-		{
-			TexUsage |= mtlpp::TextureUsage::ShaderRead;
-		}
-		if (Usage & BUF_UnorderedAccess)
-		{
-			TexUsage |= mtlpp::TextureUsage::ShaderWrite;
-		}
-		
-		uint32 BytesPerElement = (0 == LinearTextureDesc.BytesPerElement) ? GPixelFormats[InFormat].BlockBytes : LinearTextureDesc.BytesPerElement;
-		if (MTLFormat == mtlpp::PixelFormat::RG11B10Float && MTLFormat != (mtlpp::PixelFormat)GPixelFormats[InFormat].PlatformFormat)
-		{
-			BytesPerElement = 4;
-		}
-
-		const uint32 MinimumByteAlignment = GetMetalDeviceContext().GetDevice().GetMinimumLinearTextureAlignmentForPixelFormat((mtlpp::PixelFormat)GMetalBufferFormats[InFormat].LinearTextureFormat);
-		const uint32 MinimumElementAlignment = MinimumByteAlignment / BytesPerElement;
-
-		uint32 Offset = LinearTextureDesc.StartOffsetBytes;
-		check(Offset % MinimumByteAlignment == 0);
-
-		uint32 NumElements = (UINT_MAX == LinearTextureDesc.NumElements) ? ((Size - Offset) / BytesPerElement) : LinearTextureDesc.NumElements;
-		NumElements = Align(NumElements, MinimumElementAlignment);
-
-		uint32 RowBytes = NumElements * BytesPerElement;
-
-		if (FMetalCommandQueue::SupportsFeature(EMetalFeaturesTextureBuffers))
-		{
-			NSUInteger Options = ((NSUInteger) Mode) << mtlpp::ResourceStorageModeShift;
-			Desc = mtlpp::TextureDescriptor::TextureBufferDescriptor(MTLFormat, NumElements, mtlpp::ResourceOptions(Options), mtlpp::TextureUsage(TexUsage));
-			Desc.SetAllowGPUOptimisedContents(false);
-		}
-		else
-		{
-			uint32 Width = NumElements;
-			uint32 Height = 1;
-
-			if (NumElements > GMaxTextureDimensions)
-			{
-				uint32 Dimension = GMaxTextureDimensions;
-				while ((NumElements % Dimension) != 0)
-				{
-					check(Dimension >= 1);
-					Dimension = (Dimension >> 1);
-				}
-
-				Width = Dimension;
-				Height = NumElements / Dimension;
-
-				// If we're just trying to fit as many elements as we can into
-				// the available buffer space, we can trim some padding at the
-				// end of the buffer in order to create widest possible linear
-				// texture that will fit.
-				if ((UINT_MAX == LinearTextureDesc.NumElements) && (Height > GMaxTextureDimensions))
-				{
-					Width = GMaxTextureDimensions;
-					Height = 1;
-
-					while ((Width * Height) < NumElements)
-					{
-						Height <<= 1;
-					}
-
-					while ((Width * Height) > NumElements)
-					{
-						Height -= 1;
-					}
-				}
-
-				checkf(Width <= GMaxTextureDimensions, TEXT("Calculated width %u is greater than maximum permitted %d when converting buffer of size %llu with element stride %u to a 2D texture with %u elements."), Width, (int32)GMaxTextureDimensions, Length, BytesPerElement, NumElements);
-				checkf(Height <= GMaxTextureDimensions, TEXT("Calculated height %u is greater than maximum permitted %d when converting buffer of size %llu with element stride %u to a 2D texture with %u elements."), Height, (int32)GMaxTextureDimensions, Length, BytesPerElement, NumElements);
-			}
-
-			RowBytes = Width * BytesPerElement;
-
-			check(RowBytes % MinimumByteAlignment == 0);
-			check((RowBytes * Height) + Offset <= Length);
-
-			Desc = mtlpp::TextureDescriptor::Texture2DDescriptor(MTLFormat, Width, Height, NO);
-			Desc.SetStorageMode(Mode);
-			Desc.SetCpuCacheMode(CurrentBuffer.GetCpuCacheMode());
-			Desc.SetUsage((mtlpp::TextureUsage)TexUsage);
-		}
-
-		for(FMetalBufferAndViews& Backing : BufferPool)
-		{
-			FMetalBuffer& Buffer = Backing.Buffer;
-			FMetalTexture NewTexture = MTLPP_VALIDATE(mtlpp::Buffer, Buffer, SafeGetRuntimeDebuggingLevel() >= EMetalDebugLevelValidation, NewTexture(Desc, Offset, RowBytes));
-			METAL_FATAL_ASSERT(NewTexture, TEXT("Failed to create linear texture, desc %s from buffer %s"), *FString([Desc description]), *FString([Buffer description]));
-			
-			check(GMetalBufferFormats[InFormat].LinearTextureFormat == mtlpp::PixelFormat::RG11B10Float || GMetalBufferFormats[InFormat].LinearTextureFormat == (mtlpp::PixelFormat)NewTexture.GetPixelFormat());
-			Backing.Views.Add(InLinearTextureMapKey, NewTexture);
-		}
-	}
-	
-	for(FMetalBufferAndViews& Backing : BufferPool)
-	{
-		LinearTextureMap& Views = Backing.Views;
-		check(Views.Find(InLinearTextureMapKey) != nullptr);
-	}
-}
-
-struct FMetalRHICommandCreateLinearTexture : public FRHICommand<FMetalRHICommandCreateLinearTexture>
-{
-	FMetalRHIBuffer* Buffer;
-	TRefCountPtr<FRHIResource> Parent;
-	EPixelFormat Format;
-	FMetalLinearTextureDescriptor LinearTextureDesc;
-	
-	FORCEINLINE_DEBUGGABLE FMetalRHICommandCreateLinearTexture(FMetalRHIBuffer* InBuffer, FRHIResource* InParent, EPixelFormat InFormat, const FMetalLinearTextureDescriptor* InLinearTextureDescriptor)
-		: Buffer(InBuffer)
-		, Parent(InParent)
-		, Format(InFormat)
-		, LinearTextureDesc()
-	{
-		if (InLinearTextureDescriptor)
-		{
-			LinearTextureDesc = *InLinearTextureDescriptor;
-		}
-	}
-	
-	virtual ~FMetalRHICommandCreateLinearTexture()
-	{
-	}
-	
-	void Execute(FRHICommandListBase& CmdList)
-	{
-		check(MetalIsSafeToUseRHIThreadResources());
-		Buffer->CreateLinearTexture(Format, Parent.GetReference(), &LinearTextureDesc);
-	}
-};
-
-void FMetalRHIBuffer::CreateLinearTexture(EPixelFormat InFormat, FRHIResource* InParent, const FMetalLinearTextureDescriptor* InLinearTextureDescriptor)
-{
-	if ((Usage & (BUF_UnorderedAccess|BUF_ShaderResource)) && GMetalBufferFormats[InFormat].LinearTextureFormat != mtlpp::PixelFormat::Invalid)
-	{
-		if (IsRunningRHIInSeparateThread() && !IsInRHIThread() && !FRHICommandListExecutor::GetImmediateCommandList().Bypass())
-		{
-			new (FRHICommandListExecutor::GetImmediateCommandList().AllocCommand<FMetalRHICommandCreateLinearTexture>()) FMetalRHICommandCreateLinearTexture(this, InParent, InFormat, InLinearTextureDescriptor);
-		}
-		else
-		{
-			check(MetalIsSafeToUseRHIThreadResources());
-			LinearTextureMapKey MapKey = (InLinearTextureDescriptor != nullptr) ? LinearTextureMapKey(InFormat, *InLinearTextureDescriptor) : LinearTextureMapKey(InFormat, FMetalLinearTextureDescriptor());
-			
-			FMetalBufferAndViews& Backing = GetCurrentBackingInternal();
-
-			FMetalTexture* ExistingTexture = Backing.Views.Find(MapKey);
-			if (!ExistingTexture)
-			{
-				AllocLinearTextures(MapKey);
-			}
-		}
-	}
-	
-}
-
-ns::AutoReleased<FMetalTexture> FMetalRHIBuffer::GetLinearTexture(EPixelFormat InFormat, const FMetalLinearTextureDescriptor* InLinearTextureDescriptor)
-{
-	ns::AutoReleased<FMetalTexture> Texture;
-	if ((Usage & (BUF_UnorderedAccess|BUF_ShaderResource)) && GMetalBufferFormats[InFormat].LinearTextureFormat != mtlpp::PixelFormat::Invalid)
-	{
-		LinearTextureMapKey MapKey = (InLinearTextureDescriptor != nullptr) ? LinearTextureMapKey(InFormat, *InLinearTextureDescriptor) : LinearTextureMapKey(InFormat, FMetalLinearTextureDescriptor());
-
-		FMetalBufferAndViews& Backing = GetCurrentBackingInternal();
-		FMetalTexture* ExistingTexture = Backing.Views.Find(MapKey);
-		if (ExistingTexture)
-		{
-			Texture = *ExistingTexture;
-		}
-	}
-	return Texture;
+	TransferBuffer->SetOwner(nullptr, false);
+	check(TransferBuffer);
+	METAL_INC_DWORD_STAT_BY(MemAlloc, InSize, GetUsage());
+	METAL_FATAL_ASSERT(TransferBuffer, TEXT("Failed to create buffer of size %u and storage mode %u"), InSize, (uint32)MTL::StorageModeShared);
 }
 
 void* FMetalRHIBuffer::Lock(bool bIsOnRHIThread, EResourceLockMode InLockMode, uint32 Offset, uint32 InSize)
@@ -539,17 +349,14 @@ void* FMetalRHIBuffer::Lock(bool bIsOnRHIThread, EResourceLockMode InLockMode, u
 	InSize = FMath::Min(Align(InSize, 4), Size - Offset);
 #endif
 	
-	// The system is very naughty and does not obey this rule
-//	check(LastLockFrame == 0 || LastLockFrame != GetMetalDeviceContext().GetFrameNumberRHIThread());
-	
 	const bool bWriteLock = InLockMode == RLM_WriteOnly;
-	const bool bIsStatic = (Usage & BUF_Static) != 0;
-	const bool bIsDynamic = (Usage & BUF_Dynamic) != 0;
-	const bool bIsVolatile = (Usage & BUF_Volatile) != 0;
+	const bool bIsStatic = EnumHasAnyFlags(GetUsage(), BUF_Static);
+	const bool bIsDynamic = EnumHasAnyFlags(GetUsage(), BUF_Dynamic);
+	const bool bIsVolatile = EnumHasAnyFlags(GetUsage(), BUF_Volatile);
 	
 	void* ReturnPointer = nullptr;
 	
-	uint32 Len = GetCurrentBacking().Buffer.GetLength(); // all buffers should have the same length or we are in trouble.
+	uint32 Len = GetCurrentBuffer()->GetLength(); // all buffers should have the same length or we are in trouble.
 	check(Len >= InSize);
 	
 	if(bWriteLock)
@@ -565,18 +372,21 @@ void* FMetalRHIBuffer::Lock(bool bIsOnRHIThread, EResourceLockMode InLockMode, u
 			// cycle to next allocation
 			AdvanceBackingIndex();
 		}
-		
-		if(Mode == mtlpp::StorageMode::Private)
+
+		// Use transfer buffer for writing into 'Static' buffers as they could be in use by GPU atm
+		// Initialization of 'Static' buffers still uses direct copy when possible
+		const bool bUseTransferBuffer = (Mode == MTL::StorageModePrivate || (Mode == MTL::StorageModeShared && bIsStatic));
+		if(bUseTransferBuffer)
 		{
 			FMetalFrameAllocator::AllocationEntry TempBacking = GetMetalDeviceContext().GetTransferAllocator()->AcquireSpace(Len);
 			GetMetalDeviceContext().NewLock(this, TempBacking);
 			check(TempBacking.Backing);
-			ReturnPointer = (uint8*) [TempBacking.Backing contents] + TempBacking.Offset;
+			ReturnPointer = (uint8*) TempBacking.Backing->contents() + TempBacking.Offset;
 		}
 		else
 		{
-			check(GetCurrentBacking().Buffer);
-			ReturnPointer = GetCurrentBackingInternal().Buffer.GetContents();
+			check(GetCurrentBuffer());
+			ReturnPointer = GetCurrentBuffer()->Contents();
 		}
 		check(ReturnPointer != nullptr);
 	}
@@ -586,45 +396,45 @@ void* FMetalRHIBuffer::Lock(bool bIsOnRHIThread, EResourceLockMode InLockMode, u
 		// assumes offset is 0 for reads.
 		check(Offset == 0);
 		
-		if(Mode == mtlpp::StorageMode::Private)
+		if(Mode == MTL::StorageModePrivate)
 		{
 			SCOPE_CYCLE_COUNTER(STAT_MetalBufferPageOffTime);
 			AllocTransferBuffer(true, Len, RLM_WriteOnly);
-			check(TransferBuffer.GetLength() >= InSize);
+			check(TransferBuffer->GetLength() >= InSize);
 			
 			// Synchronise the buffer with the CPU
-			GetMetalDeviceContext().CopyFromBufferToBuffer(GetCurrentBacking().Buffer, 0, TransferBuffer, 0, GetCurrentBacking().Buffer.GetLength());
+			GetMetalDeviceContext().CopyFromBufferToBuffer(GetCurrentBuffer(), 0, TransferBuffer, 0, GetCurrentBuffer()->GetLength());
 			
 			//kick the current command buffer.
 			GetMetalDeviceContext().SubmitCommandBufferAndWait();
 			
-			ReturnPointer = TransferBuffer.GetContents();
+			ReturnPointer = TransferBuffer->Contents();
 		}
 		#if PLATFORM_MAC
-		else if(Mode == mtlpp::StorageMode::Managed)
+		else if(Mode == MTL::StorageModeManaged)
 		{
 			SCOPE_CYCLE_COUNTER(STAT_MetalBufferPageOffTime);
 			
 			// Synchronise the buffer with the CPU
-			GetMetalDeviceContext().SynchroniseResource(GetCurrentBacking().Buffer);
+			GetMetalDeviceContext().SynchroniseResource(GetCurrentBuffer()->GetMTLBuffer().get());
 			
 			//kick the current command buffer.
 			GetMetalDeviceContext().SubmitCommandBufferAndWait();
 			
-			ReturnPointer = GetCurrentBackingInternal().Buffer.GetContents();
+			ReturnPointer = GetCurrentBuffer()->Contents();
 		}
 		#endif
 		else
 		{
 			// Shared
-			ReturnPointer = GetCurrentBackingInternal().Buffer.GetContents();
+            ReturnPointer = GetCurrentBuffer()->Contents();
 		}
 	} // Read Path
 	
 	
 	
-	check(GetCurrentBacking().Buffer);
-	check(!GetCurrentBacking().Buffer.IsAliasable());
+	check(GetCurrentBuffer());
+	check((!GetCurrentBuffer()->GetMTLBuffer()->heap() && !GetCurrentBuffer()->GetMTLBuffer()->isAliasable()) || GetCurrentBuffer()->GetMTLBuffer()->heap() != nullptr);
 	
 	check(ReturnPointer);
 	LockOffset = Offset;
@@ -644,49 +454,64 @@ void FMetalRHIBuffer::Unlock()
 {
 	check(MetalIsSafeToUseRHIThreadResources());
 
-	if(!Data)
+	if (!Data)
 	{
-		FMetalBufferAndViews& Backing = GetCurrentBackingInternal();
-		FMetalBuffer& CurrentBuffer = Backing.Buffer;
+		FMetalBufferPtr CurrentBuffer = GetCurrentBuffer();
 		
 		check(CurrentBuffer);
 		check(LockSize > 0);
 		const bool bWriteLock = CurrentLockMode == RLM_WriteOnly;
+		const bool bIsStatic = EnumHasAnyFlags(GetUsage(), BUF_Static);
 		
-		if(bWriteLock)
+		if (bWriteLock)
 		{
 			check(!TransferBuffer);
 			check(LockOffset == 0);
-			check(LockSize <= CurrentBuffer.GetLength());
-			if(Mode == mtlpp::StorageMode::Private)
+            check(LockSize <= CurrentBuffer->GetLength());
+
+			// Use transfer buffer for writing into 'Static' buffers as they could be in use by GPU atm
+			// Initialization of 'Static' buffers still uses direct copy when possible
+			const bool bUseTransferBuffer = (Mode == MTL::StorageModePrivate || (Mode == MTL::StorageModeShared && bIsStatic));
+			if (bUseTransferBuffer)
 			{
 				FMetalFrameAllocator::AllocationEntry Entry = GetMetalDeviceContext().FetchAndRemoveLock(this);
-				FMetalBuffer Transfer = Entry.Backing;
-				GetMetalDeviceContext().AsyncCopyFromBufferToBuffer(Transfer, Entry.Offset, CurrentBuffer, 0, LockSize);
+				
+                MTLBufferPtr Transfer = Entry.Backing;
+                FMetalBufferPtr TransferProxy = FMetalBufferPtr(new FMetalBuffer(Transfer, NS::Range(0, Transfer->length()), false));
+                                            
+				GetMetalDeviceContext().AsyncCopyFromBufferToBuffer(TransferProxy, Entry.Offset, CurrentBuffer, 0, LockSize);
 			}
 #if PLATFORM_MAC
-			else if(Mode == mtlpp::StorageMode::Managed)
+			else if (Mode == MTL::StorageModeManaged)
 			{
 				if (GMetalBufferZeroFill)
-					MTLPP_VALIDATE(mtlpp::Buffer, CurrentBuffer, SafeGetRuntimeDebuggingLevel() >= EMetalDebugLevelValidation, DidModify(ns::Range(0, CurrentBuffer.GetLength())));
+                {
+                    //MTLPP_VALIDATE(MTL::Buffer, CurrentBuffer, SafeGetRuntimeDebuggingLevel() >= EMetalDebugLevelValidation, DidModify(ns::Range(0, CurrentBuffer.GetLength())));
+                    CurrentBuffer->GetMTLBuffer()->didModifyRange(NS::Range(CurrentBuffer->GetOffset(), CurrentBuffer->GetLength()));
+                }
 				else
-					MTLPP_VALIDATE(mtlpp::Buffer, CurrentBuffer, SafeGetRuntimeDebuggingLevel() >= EMetalDebugLevelValidation, DidModify(ns::Range(LockOffset, LockSize)));
+                {
+                    //MTLPP_VALIDATE(MTL::Buffer, CurrentBuffer, SafeGetRuntimeDebuggingLevel() >= EMetalDebugLevelValidation, DidModify(ns::Range(LockOffset, LockSize)));
+                    CurrentBuffer->GetMTLBuffer()->didModifyRange(NS::Range(LockOffset + CurrentBuffer->GetOffset(), LockSize));
+                }
 			}
 #endif //PLATFORM_MAC
 			else
 			{
 				// shared buffers are always mapped so nothing happens
-				check(Mode == mtlpp::StorageMode::Shared);
+				check(Mode == MTL::StorageModeShared);
 			}
+
+			UpdateLinkedViews();
 		}
 		else
 		{
 			check(CurrentLockMode == RLM_ReadOnly);
 			if(TransferBuffer)
 			{
-				check(Mode == mtlpp::StorageMode::Private);
+				check(Mode == MTL::StorageModePrivate);
 				SafeReleaseMetalBuffer(TransferBuffer);
-				TransferBuffer = nil;
+				TransferBuffer = nullptr;
 			}
 		}
 	}
@@ -695,198 +520,161 @@ void FMetalRHIBuffer::Unlock()
 	CurrentLockMode = RLM_Num;
 	LockSize = 0;
 	LockOffset = 0;
-	LastLockFrame = GetMetalDeviceContext().GetFrameNumberRHIThread();
 }
 
-FVertexBufferRHIRef FMetalDynamicRHI::RHICreateVertexBuffer(uint32 Size, uint32 InUsage, ERHIAccess InResourceState, FRHIResourceCreateInfo& CreateInfo)
+void FMetalRHIBuffer::TakeOwnership(FMetalRHIBuffer& Other)
 {
-	check(0);
-	@autoreleasepool {
-	if (CreateInfo.bWithoutNativeResource)
-	{
-		return new FMetalVertexBuffer(0, 0);
-	}
-	
-	// make the RHI object, which will allocate memory
-	FMetalVertexBuffer* VertexBuffer = new FMetalVertexBuffer(Size, InUsage);
+    check(Other.CurrentLockMode == RLM_Num);
 
-	if (CreateInfo.ResourceArray)
-	{
-		check(Size >= CreateInfo.ResourceArray->GetResourceDataSize());
+    // Clean up any resource this buffer already owns
+    ReleaseOwnership();
 
-		// make a buffer usable by CPU
-		void* Buffer = ::RHILockVertexBuffer(VertexBuffer, 0, Size, RLM_WriteOnly);
-		
-		// copy the contents of the given data into the buffer
-		FMemory::Memcpy(Buffer, CreateInfo.ResourceArray->GetResourceData(), Size);
-		
-		::RHIUnlockVertexBuffer(VertexBuffer);
+    // Transfer ownership of Other's resources to this instance
+    FRHIBuffer::TakeOwnership(Other);
 
-		// Discard the resource array's contents.
-		CreateInfo.ResourceArray->Discard();
-	}
-	else if (VertexBuffer->Mode == mtlpp::StorageMode::Private)
-	{
-		check (!VertexBuffer->TransferBuffer);
-
-		if (GMetalBufferZeroFill && !FMetalCommandQueue::SupportsFeature(EMetalFeaturesFences))
-		{
-			for(FMetalRHIBuffer::FMetalBufferAndViews& Backing : VertexBuffer->BufferPool)
-			{
-				FMetalBuffer& TheBuffer = Backing.Buffer;
-				GetMetalDeviceContext().FillBuffer(TheBuffer, ns::Range(0, TheBuffer.GetLength()), 0);
-			}
-		}
-	}
-#if PLATFORM_MAC
-	else if (GMetalBufferZeroFill && VertexBuffer->Mode == mtlpp::StorageMode::Managed)
-	{
-		for(FMetalRHIBuffer::FMetalBufferAndViews& Backing : VertexBuffer->BufferPool)
-		{
-			FMetalBuffer& TheBuffer = Backing.Buffer;
-			GetMetalDeviceContext().FillBuffer(TheBuffer, ns::Range(0, TheBuffer.GetLength()), 0);
-			MTLPP_VALIDATE(mtlpp::Buffer, TheBuffer, SafeGetRuntimeDebuggingLevel() >= EMetalDebugLevelValidation, DidModify(ns::Range(0, TheBuffer)));
-		}
-	}
-#endif
-
-	return VertexBuffer;
-	}
+    TransferBuffer = Other.TransferBuffer;
+    BufferPool = Other.BufferPool;
+    Data = Other.Data;
+    CurrentIndex = Other.CurrentIndex;
+    NumberOfBuffers = Other.NumberOfBuffers;
+    CurrentLockMode = Other.CurrentLockMode;
+    LockOffset = Other.LockOffset;
+    LockSize = Other.LockSize;
+    Size = Other.Size;
+    Mode = Other.Mode;
+    
+    Other.TransferBuffer = nullptr;
+    Other.BufferPool.SetNum(0);
+    Other.Data = nullptr;
+    Other.CurrentIndex = 0;
+    Other.NumberOfBuffers = 0;
+    Other.CurrentLockMode = RLM_Num;
+    Other.LockOffset = 0;
+    Other.LockSize = 0;
+    Other.Size = 0;
 }
 
-void* FMetalDynamicRHI::LockVertexBuffer_BottomOfPipe(FRHICommandListImmediate& RHICmdList, FRHIVertexBuffer* VertexBufferRHI, uint32 Offset, uint32 Size, EResourceLockMode LockMode)
+void FMetalRHIBuffer::ReleaseOwnership()
 {
-	@autoreleasepool {
-	FMetalVertexBuffer* VertexBuffer = ResourceCast(VertexBufferRHI);
+    FRHIBuffer::ReleaseOwnership();
+    
+    if(TransferBuffer)
+    {
+        METAL_INC_DWORD_STAT_BY(MemFreed, TransferBuffer->GetLength(), GetUsage());
+        SafeReleaseMetalBuffer(TransferBuffer);
+    }
+    
+    for (FMetalBufferPtr Buffer : BufferPool)
+    {
+        check(Buffer);
+        
+        METAL_INC_DWORD_STAT_BY(MemFreed, Buffer->GetLength(), GetUsage());
+        SafeReleaseMetalBuffer(Buffer);
+    }
 
-	// default to vertex buffer memory
-	return (uint8*)VertexBuffer->Lock(true, LockMode, Offset, Size);
-	}
+    if (Data)
+    {
+        METAL_INC_DWORD_STAT_BY(MemFreed, Size, GetUsage());
+        auto ReleaseFunction = [ReleaseData=Data](){
+            delete ReleaseData;
+        };
+        SafeReleaseFunction(ReleaseFunction);
+    }
+
+#if METAL_RHI_RAYTRACING
+    if (EnumHasAnyFlags(GetUsage(), BUF_AccelerationStructure))
+    {
+        SafeReleaseMetalObject(AccelerationStructureHandle);
+        AccelerationStructureHandle = nullptr;
+    }
+#endif // METAL_RHI_RAYTRACING
 }
 
-void FMetalDynamicRHI::UnlockVertexBuffer_BottomOfPipe(FRHICommandListImmediate& RHICmdList, FRHIVertexBuffer* VertexBufferRHI)
+FBufferRHIRef FMetalDynamicRHI::RHICreateBuffer(FRHICommandListBase& RHICmdList, FRHIBufferDesc const& Desc, ERHIAccess /*ResourceState*/, FRHIResourceCreateInfo& CreateInfo)
 {
-	@autoreleasepool {
-	FMetalVertexBuffer* VertexBuffer = ResourceCast(VertexBufferRHI);
+    MTL_SCOPED_AUTORELEASE_POOL;
 
-	VertexBuffer->Unlock();
-	}
+    // No life-time usage information? Enforce Dynamic.
+    if (!EnumHasAnyFlags(Desc.Usage, BUF_Static | BUF_Dynamic | BUF_Volatile | BUF_NullResource))
+    {
+        FRHIBufferDesc Copy = Desc;
+        Copy.Usage |= BUF_Dynamic;
+
+        return new FMetalRHIBuffer(RHICmdList, Copy, CreateInfo);
+    }
+    else
+    {
+        return new FMetalRHIBuffer(RHICmdList, Desc, CreateInfo);
+    }
 }
 
-void FMetalDynamicRHI::RHICopyVertexBuffer(FRHIVertexBuffer* SourceBufferRHI, FRHIVertexBuffer* DestBufferRHI)
+void* FMetalDynamicRHI::LockBuffer_BottomOfPipe(FRHICommandListBase& RHICmdList, FRHIBuffer* BufferRHI, uint32 Offset, uint32 Size, EResourceLockMode LockMode)
 {
-	@autoreleasepool {
-		FMetalVertexBuffer* SrcVertexBuffer = ResourceCast(SourceBufferRHI);
-		FMetalVertexBuffer* DstVertexBuffer = ResourceCast(DestBufferRHI);
-		
-		const FMetalBuffer& TheSrcBuffer = SrcVertexBuffer->GetCurrentBuffer();
-		const FMetalBuffer& TheDstBuffer = DstVertexBuffer->GetCurrentBuffer();
-	
-		if (TheSrcBuffer && TheDstBuffer)
-		{
-			GetMetalDeviceContext().CopyFromBufferToBuffer(TheSrcBuffer, 0, TheDstBuffer, 0, FMath::Min(SrcVertexBuffer->GetSize(), DstVertexBuffer->GetSize()));
-		}
-		else if (TheDstBuffer)
-		{
-			FMetalPooledBufferArgs ArgsCPU(GetMetalDeviceContext().GetDevice(), SrcVertexBuffer->GetSize(), BUF_Dynamic, mtlpp::StorageMode::Shared);
-			FMetalBuffer TempBuffer = GetMetalDeviceContext().CreatePooledBuffer(ArgsCPU);
-			FMemory::Memcpy(TempBuffer.GetContents(), SrcVertexBuffer->Data->Data, SrcVertexBuffer->GetSize());
-			GetMetalDeviceContext().CopyFromBufferToBuffer(TempBuffer, 0, TheDstBuffer, 0, FMath::Min(SrcVertexBuffer->GetSize(), DstVertexBuffer->GetSize()));
-			SafeReleaseMetalBuffer(TempBuffer);
-		}
-		else
-		{
-			void const* SrcData = SrcVertexBuffer->Lock(true, RLM_ReadOnly, 0);
-			void* DstData = DstVertexBuffer->Lock(true, RLM_WriteOnly, 0);
-			FMemory::Memcpy(DstData, SrcData, FMath::Min(SrcVertexBuffer->GetSize(), DstVertexBuffer->GetSize()));
-			SrcVertexBuffer->Unlock();
-			DstVertexBuffer->Unlock();
-		}
-	}
+    MTL_SCOPED_AUTORELEASE_POOL;
+    
+	FMetalRHIBuffer* Buffer = ResourceCast(BufferRHI);
+
+	// default to buffer memory
+	return (uint8*)Buffer->Lock(true, LockMode, Offset, Size);
 }
 
-void FMetalRHIBuffer::Init_RenderThread(FRHICommandListImmediate& RHICmdList, uint32 InSize, uint32 InUsage, FRHIResourceCreateInfo& CreateInfo, FRHIResource* Resource)
+void FMetalDynamicRHI::UnlockBuffer_BottomOfPipe(FRHICommandListBase& RHICmdList, FRHIBuffer* BufferRHI)
 {
-	if (CreateInfo.ResourceArray)
-	{
-		check(InSize == CreateInfo.ResourceArray->GetResourceDataSize());
-		
-		if(Data)
-		{
-			FMemory::Memcpy(Data->Data, CreateInfo.ResourceArray->GetResourceData(), InSize);
-		}
-		else
-		{
-			if (Mode == mtlpp::StorageMode::Private)
-			{
-				if (RHICmdList.IsBottomOfPipe())
-				{
-					void* Backing = this->Lock(true, RLM_WriteOnly, 0, InSize);
-					FMemory::Memcpy(Backing, CreateInfo.ResourceArray->GetResourceData(), InSize);
-					this->Unlock();
-				}
-				else
-				{
-					void* Result = FMemory::Malloc(InSize, 16);
-					FMemory::Memcpy(Result, CreateInfo.ResourceArray->GetResourceData(), InSize);
-					
-					RHICmdList.EnqueueLambda(
-						[this, Result, InSize](FRHICommandList& RHICmdList)
-						{
-							void* Backing = this->Lock(true, RLM_WriteOnly, 0, InSize);
-							FMemory::Memcpy(Backing, Result, InSize);
-							this->Unlock();
-							FMemory::Free(Result);
-						});
-				}
-			}
-			else
-			{
-				FMetalBuffer& TheBuffer = GetCurrentBufferInternal();
-				FMemory::Memcpy(TheBuffer.GetContents(), CreateInfo.ResourceArray->GetResourceData(), InSize);
-	#if PLATFORM_MAC
-				if(Mode == mtlpp::StorageMode::Managed)
-				{
-					MTLPP_VALIDATE(mtlpp::Buffer, TheBuffer, SafeGetRuntimeDebuggingLevel() >= EMetalDebugLevelValidation, DidModify(ns::Range(0, GMetalBufferZeroFill ? TheBuffer.GetLength() : InSize)));
-				}
-	#endif
-			}
-		}
-		
-		// Discard the resource array's contents.
-		CreateInfo.ResourceArray->Discard();
-	}
+    MTL_SCOPED_AUTORELEASE_POOL;
+    
+    FMetalRHIBuffer* Buffer = ResourceCast(BufferRHI);
+	Buffer->Unlock();
 }
 
-FVertexBufferRHIRef FMetalDynamicRHI::CreateVertexBuffer_RenderThread(class FRHICommandListImmediate& RHICmdList, uint32 Size, uint32 InUsage, ERHIAccess InResourceState, FRHIResourceCreateInfo& CreateInfo)
+void FMetalDynamicRHI::RHICopyBuffer(FRHIBuffer* SourceBufferRHI, FRHIBuffer* DestBufferRHI)
 {
-	@autoreleasepool {
-		if (CreateInfo.bWithoutNativeResource)
-		{
-			return new FMetalVertexBuffer(0, 0);
-		}
-		
-		// make the RHI object, which will allocate memory
-		TRefCountPtr<FMetalVertexBuffer> VertexBuffer = new FMetalVertexBuffer(Size, InUsage);
-		
-		VertexBuffer->Init_RenderThread(RHICmdList, Size, InUsage, CreateInfo, VertexBuffer);
-		
-		return VertexBuffer.GetReference();
-	}
+    MTL_SCOPED_AUTORELEASE_POOL;
+    
+    FMetalRHIBuffer* SrcBuffer = ResourceCast(SourceBufferRHI);
+    FMetalRHIBuffer* DstBuffer = ResourceCast(DestBufferRHI);
+    
+    FMetalBufferPtr TheSrcBuffer = SrcBuffer->GetCurrentBuffer();
+    FMetalBufferPtr TheDstBuffer = DstBuffer->GetCurrentBuffer();
+
+    if (TheSrcBuffer && TheDstBuffer)
+    {
+        GetMetalDeviceContext().CopyFromBufferToBuffer(TheSrcBuffer, 0, TheDstBuffer, 0, FMath::Min(SrcBuffer->GetSize(), DstBuffer->GetSize()));
+    }
+    else if (TheDstBuffer)
+    {
+        FMetalPooledBufferArgs ArgsCPU(GetMetalDeviceContext().GetDevice(), SrcBuffer->GetSize(), BUF_Dynamic, MTL::StorageModeShared);
+        FMetalBufferPtr TempBuffer = GetMetalDeviceContext().CreatePooledBuffer(ArgsCPU);
+        FMemory::Memcpy(TempBuffer->Contents(), SrcBuffer->Data->Data, SrcBuffer->GetSize());
+        GetMetalDeviceContext().CopyFromBufferToBuffer(TempBuffer, 0, TheDstBuffer, 0, FMath::Min(SrcBuffer->GetSize(), DstBuffer->GetSize()));
+        SafeReleaseMetalBuffer(TempBuffer);
+    }
+    else
+    {
+        void const* SrcData = SrcBuffer->Lock(true, RLM_ReadOnly, 0);
+        void* DstData = DstBuffer->Lock(true, RLM_WriteOnly, 0);
+        FMemory::Memcpy(DstData, SrcData, FMath::Min(SrcBuffer->GetSize(), DstBuffer->GetSize()));
+        SrcBuffer->Unlock();
+        DstBuffer->Unlock();
+    }
 }
 
-void FMetalDynamicRHI::RHITransferVertexBufferUnderlyingResource(FRHIVertexBuffer* DestVertexBuffer, FRHIVertexBuffer* SrcVertexBuffer)
+void FMetalDynamicRHI::RHITransferBufferUnderlyingResource(FRHICommandListBase& RHICmdList, FRHIBuffer* DestBuffer, FRHIBuffer* SrcBuffer)
 {
-	check(DestVertexBuffer);
-	FMetalVertexBuffer* Dest = ResourceCast(DestVertexBuffer);
-	if (!SrcVertexBuffer)
-	{
-		TRefCountPtr<FMetalVertexBuffer> DeletionProxy = new FMetalVertexBuffer(0, 0);
-		Dest->Swap(*DeletionProxy);
-	}
-	else
-	{
-		FMetalVertexBuffer* Src = ResourceCast(SrcVertexBuffer);
-		Dest->Swap(*Src);
-	}
+    MTL_SCOPED_AUTORELEASE_POOL;
+    FMetalRHIBuffer* Dst = ResourceCast(DestBuffer);
+    FMetalRHIBuffer* Src = ResourceCast(SrcBuffer);
+
+    if (Src)
+    {
+        // The source buffer should not have any associated views.
+        check(!Src->HasLinkedViews());
+
+        Dst->TakeOwnership(*Src);
+    }
+    else
+    {
+        Dst->ReleaseOwnership();
+    }
+
+    Dst->UpdateLinkedViews();
 }

@@ -11,13 +11,16 @@
 #include "Engine/MeshMerging.h"
 #include "Engine/StaticMesh.h"
 #include "PerPlatformProperties.h"
+#include "PerQualityLevelProperties.h"
 
 struct FMeshDescription;
+class FPoly;
 class UStaticMeshSocket;
 class UAssetImportData;
 class UThumbnailInfo;
 class UModel;
 class UBodySetup;
+struct FKAggregateGeom;
 
 namespace UnFbx
 {
@@ -29,6 +32,8 @@ struct FExistingLODMeshData
 {
 	FMeshBuildSettings				ExistingBuildSettings;
 	FMeshReductionSettings			ExistingReductionSettings;
+	uint32							ExisitingMeshTrianglesCount;
+	uint32							ExisitingMeshVerticesCount;
 	TUniquePtr<FMeshDescription>	ExistingMeshDescription;
 	TArray<FStaticMaterial>			ExistingMaterials;
 	FPerPlatformFloat				ExistingScreenSize;
@@ -38,6 +43,8 @@ struct FExistingLODMeshData
 struct FExistingStaticMeshData
 {
 	TArray<FStaticMaterial> 	ExistingMaterials;
+
+	FExistingLODMeshData		HiResSourceData;
 
 	FMeshSectionInfoMap			ExistingSectionInfoMap;
 	TArray<FExistingLODMeshData>	ExistingLODData;
@@ -57,12 +64,13 @@ struct FExistingStaticMeshData
 	UBodySetup* ExistingBodySetup;
 
 	// A mapping of vertex positions to their color in the existing static mesh
-	TMap<FVector, FColor>		ExistingVertexColorData;
+	TMap<FVector3f, FColor>		ExistingVertexColorData;
 
 	float						LpvBiasMultiplier;
 	bool						bHasNavigationData;
 	FName						LODGroup;
 	FPerPlatformInt				MinLOD;
+	FPerQualityLevelInt			QualityLevelMinLOD;
 
 	int32						ImportVersion;
 
@@ -76,8 +84,18 @@ struct FExistingStaticMeshData
 	float						ExistingDistanceFieldSelfShadowBias;
 	bool						ExistingSupportUniformlyDistributedSampling;
 	bool						ExistingAllowCpuAccess;
-	FVector						ExistingPositiveBoundsExtension;
-	FVector						ExistingNegativeBoundsExtension;
+	FVector3f					ExistingPositiveBoundsExtension;
+	FVector3f					ExistingNegativeBoundsExtension;
+
+	bool						ExistingSupportPhysicalMaterialMasks;
+	bool						ExistingSupportGpuUniformlyDistributedSampling;
+	bool						ExistingSupportRayTracing;
+	int32						ExistingLODForOccluderMesh;
+	bool						ExistingForceMiplevelsToBeResident;
+	bool						ExistingNeverStream;
+	int32						ExistingNumCinematicMipLevels;
+
+	FMeshNaniteSettings			ExistingNaniteSettings;
 
 	UStaticMesh::FOnMeshChanged	ExistingOnMeshChanged;
 	UStaticMesh* ExistingComplexCollisionMesh = nullptr;
@@ -87,7 +105,7 @@ struct FExistingStaticMeshData
 
 namespace StaticMeshImportUtils
 {
-	UNREALED_API bool DecomposeUCXMesh(const TArray<FVector>& CollisionVertices, const TArray<int32>& CollisionFaceIdx, UBodySetup* BodySetup);
+	UNREALED_API bool DecomposeUCXMesh(const TArray<FVector3f>& CollisionVertices, const TArray<int32>& CollisionFaceIdx, UBodySetup* BodySetup);
 
 	/**
 	 *	Function for adding a box collision primitive to the supplied collision geometry based on the mesh of the box.
@@ -111,12 +129,14 @@ namespace StaticMeshImportUtils
 	 *	It checks that the AABB is square, and that all vertices are either at the
 	 *	center, or within 5% of the radius distance away.
 	 */
-	UNREALED_API bool AddSphereGeomFromVerts(const TArray<FVector>& Verts, FKAggregateGeom* AggGeom, const TCHAR* ObjName);
+	UNREALED_API bool AddSphereGeomFromVerts(const TArray<FVector3f>& Verts, FKAggregateGeom* AggGeom, const TCHAR* ObjName);
 
-	UNREALED_API bool AddCapsuleGeomFromVerts(const TArray<FVector>& Verts, FKAggregateGeom* AggGeom, const TCHAR* ObjName);
+	UNREALED_API bool AddCapsuleGeomFromVerts(const TArray<FVector3f>& Verts, FKAggregateGeom* AggGeom, const TCHAR* ObjName);
 
 	/** Utility for adding one convex hull from the given verts */
-	UNREALED_API bool AddConvexGeomFromVertices(const TArray<FVector>& Verts, FKAggregateGeom* AggGeom, const TCHAR* ObjName);
+	UNREALED_API bool AddConvexGeomFromVertices(const TArray<FVector3f>& Verts, FKAggregateGeom* AggGeom, const TCHAR* ObjName);
+
+	UNREALED_API TSharedPtr<FExistingStaticMeshData> SaveExistingStaticMeshData(UStaticMesh* ExistingMesh, bool bImportMaterials, int32 LodIndex);
 
 	UNREALED_API TSharedPtr<FExistingStaticMeshData> SaveExistingStaticMeshData(UStaticMesh* ExistingMesh, UnFbx::FBXImportOptions* ImportOptions, int32 LodIndex);
 

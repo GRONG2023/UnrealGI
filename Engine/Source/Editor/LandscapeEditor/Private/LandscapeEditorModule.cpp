@@ -1,11 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "LandscapeEditorModule.h"
+
 #include "Modules/ModuleManager.h"
 #include "Textures/SlateIcon.h"
 #include "Framework/Commands/UICommandList.h"
 #include "Framework/MultiBox/MultiBoxExtender.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "EditorModeRegistry.h"
 #include "EditorModeManager.h"
 #include "EditorModes.h"
@@ -17,18 +18,27 @@
 #include "Classes/ActorFactoryLandscape.h"
 #include "LandscapeFileFormatPng.h"
 #include "LandscapeFileFormatRaw.h"
-#include "Settings/EditorExperimentalSettings.h"
+#include "LandscapeEditorServices.h"
+#include "LandscapeImageFileCache.h"
+#include "SLandscapeLayerListDialog.h"
 
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "PropertyEditorModule.h"
 #include "LandscapeEditorDetails.h"
 #include "LandscapeEditorDetailCustomization_NewLandscape.h"
 #include "LandscapeEditorDetailCustomization_CopyPaste.h"
+#include "LandscapeEditorDetailCustomization_ImportLayers.h"
 #include "LandscapeSplineDetails.h"
+#include "LandscapeModule.h"
 
 #include "LevelEditor.h"
+#include "Filters/CustomClassFilterData.h"
+#include "ToolMenus.h"
+#include "Editor/EditorEngine.h"
+#include "LandscapeSubsystem.h"
 
 #include "LandscapeRender.h"
+#include "UObject/ObjectSaveContext.h"
 
 #define LOCTEXT_NAMESPACE "LandscapeEditor"
 
@@ -50,7 +60,7 @@ struct FRegisteredLandscapeWeightmapFileFormat
 	FRegisteredLandscapeWeightmapFileFormat(TSharedRef<ILandscapeWeightmapFileFormat> InFileFormat);
 };
 
-class FLandscapeEditorModule : public ILandscapeEditorModule
+class FLandscapeEditorModule : public ILandscapeEditorModule, public ILandscapeEditorServices
 {
 public:
 
@@ -61,17 +71,15 @@ public:
 	{
 		FLandscapeEditorCommands::Register();
 
-		PreSaveWorldHandle = FEditorDelegates::PreSaveWorld.AddRaw(this, &FLandscapeEditorModule::OnPreSaveWorld);
-
 		// register the editor mode
 		FEditorModeRegistry::Get().RegisterMode<FEdModeLandscape>(
 			FBuiltinEditorModes::EM_Landscape,
 			NSLOCTEXT("EditorModes", "LandscapeMode", "Landscape"),
-			FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.LandscapeMode", "LevelEditor.LandscapeMode.Small"),
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.LandscapeMode", "LevelEditor.LandscapeMode.Small"),
 			true,
 			300
 			);
-	
+
 		// register customizations
 		FPropertyEditorModule& PropertyModule = FModuleManager::GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
 		PropertyModule.RegisterCustomClassLayout("LandscapeEditorObject", FOnGetDetailCustomizationInstance::CreateStatic(&FLandscapeEditorDetails::MakeInstance));
@@ -97,6 +105,13 @@ public:
 		FLevelEditorModule& LevelEditorModule = FModuleManager::LoadModuleChecked<FLevelEditorModule>("LevelEditor");
 		LevelEditorModule.GetMenuExtensibilityManager()->AddExtender(ViewportMenuExtender);
 
+		// Add Level Editor Outliner Filter
+		if (TSharedPtr<FFilterCategory> EnvironmentFilterCategory = LevelEditorModule.GetOutlinerFilterCategory(FLevelEditorOutlinerBuiltInCategories::Environment()))
+		{
+			TSharedRef<FCustomClassFilterData> LandscapeActorClassData = MakeShared<FCustomClassFilterData>(ALandscape::StaticClass(), EnvironmentFilterCategory, FLinearColor::White);
+			LevelEditorModule.AddCustomClassFilterToOutliner(LandscapeActorClassData);
+		}
+		
 		// add actor factories
 		UActorFactoryLandscape* LandscapeActorFactory = NewObject<UActorFactoryLandscape>();
 		LandscapeActorFactory->NewActorClass = ALandscape::StaticClass();
@@ -111,6 +126,32 @@ public:
 		RegisterWeightmapFileFormat(MakeShareable(new FLandscapeWeightmapFileFormat_Png()));
 		RegisterHeightmapFileFormat(MakeShareable(new FLandscapeHeightmapFileFormat_Raw()));
 		RegisterWeightmapFileFormat(MakeShareable(new FLandscapeWeightmapFileFormat_Raw()));
+
+		//Landscape extended menu
+		UToolMenu* BuildMenu = UToolMenus::Get()->ExtendMenu("LevelEditor.MainMenu.Build");
+		if (BuildMenu)
+		{
+			FToolMenuSection& Section = BuildMenu->FindOrAddSection("LevelEditorLandscape");
+
+			FUIAction ActionBuildGrassMaps(FExecuteAction::CreateStatic(&UE::Landscape::BuildGrassMaps), FCanExecuteAction());
+			Section.AddMenuEntry(TEXT("BuildGrassMapsOnly"), LOCTEXT("BuildGrassMapsOnly", "Build Grass Maps Only"), LOCTEXT("BuildLandscapeGrassMaps", "Build landscape grass maps"), TAttribute<FSlateIcon>(), ActionBuildGrassMaps, EUserInterfaceActionType::Button);
+
+			FUIAction ActionBuildPhysicalMaterial(FExecuteAction::CreateStatic(&UE::Landscape::BuildPhysicalMaterial), FCanExecuteAction());
+			Section.AddMenuEntry(TEXT("BuildPhysicalMaterialOnly"), LOCTEXT("BuildPhysicalMaterialOnly", "Build Physical Material Only"), LOCTEXT("BuildLandscapePhysicalMaterial", "Build landscape physical material"), TAttribute<FSlateIcon>(), ActionBuildPhysicalMaterial, EUserInterfaceActionType::Button);
+		
+			FUIAction ActionBuildNanite(FExecuteAction::CreateStatic(&UE::Landscape::BuildNanite), FCanExecuteAction());
+			Section.AddMenuEntry(NAME_None, LOCTEXT("BuildNaniteOnly", "Build Nanite Only"), LOCTEXT("BuildLandscapeNanite", "Build Nanite representation"), TAttribute<FSlateIcon>(), ActionBuildNanite, EUserInterfaceActionType::Button);
+
+			FUIAction ActionSaveModifiedLandscapes(FExecuteAction::CreateStatic(&SaveModifiedLandscapes), FCanExecuteAction::CreateStatic(&HasModifiedLandscapes));
+			Section.AddMenuEntry(NAME_None,
+				LOCTEXT("SaveModifiedLandscapes", "Save Modified Landscapes"), LOCTEXT("SaveModifiedLandscapesToolTip", "Save landscapes that were modified outside of the editor mode"),
+				TAttribute<FSlateIcon>(), ActionSaveModifiedLandscapes, EUserInterfaceActionType::Button);
+		}
+		
+		ILandscapeModule& LandscapeModule = FModuleManager::GetModuleChecked<ILandscapeModule>("Landscape");
+		LandscapeModule.SetLandscapeEditorServices(this);
+
+		LandscapeImageFileCache.Reset(new FLandscapeImageFileCache());
 	}
 
 	/**
@@ -119,8 +160,6 @@ public:
 	virtual void ShutdownModule() override
 	{
 		FLandscapeEditorCommands::Unregister();
-
-		FEditorDelegates::PreSaveWorld.Remove(PreSaveWorldHandle);
 
 		// unregister the editor mode
 		FEditorModeRegistry::Get().UnregisterMode(FBuiltinEditorModes::EM_Landscape);
@@ -143,6 +182,13 @@ public:
 		// remove actor factories
 		// TODO - this crashes on shutdown
 		// GEditor->ActorFactories.RemoveAll([](const UActorFactory* ActorFactory) { return ActorFactory->IsA<UActorFactoryLandscape>(); });
+
+		ILandscapeModule& LandscapeModule = FModuleManager::GetModuleChecked<ILandscapeModule>("Landscape");
+		if (LandscapeModule.GetLandscapeEditorServices() == this)
+		{
+			LandscapeModule.SetLandscapeEditorServices(nullptr);
+		}
+		LandscapeImageFileCache.Reset();
 	}
 
 	static void ConstructLandscapeViewportMenu(FMenuBuilder& MenuBuilder)
@@ -175,12 +221,50 @@ public:
 				InMenuBuilder.EndSection();
 			}
 		};
-		MenuBuilder.AddSubMenu(LOCTEXT("LandscapeSubMenu", "Visualizers"), LOCTEXT("LandscapeSubMenu_ToolTip", "Select a Landscape visualiser"), FNewMenuDelegate::CreateStatic(&Local::BuildLandscapeVisualizersMenu));
+		MenuBuilder.AddSubMenu(
+			LOCTEXT("LandscapeSubMenu", "Visualizers"), 
+			LOCTEXT("LandscapeSubMenu_ToolTip", "Select a Landscape visualiser"), 
+			FNewMenuDelegate::CreateStatic(&Local::BuildLandscapeVisualizersMenu), 
+			false, 
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "EditorViewport.Visualizers")
+		);
+	}
+
+	static bool HasModifiedLandscapes()
+	{
+		if (UWorld* World = GEditor->GetEditorWorldContext().World())
+		{
+			if (ULandscapeSubsystem* LandscapeSubsystem = World->GetSubsystem<ULandscapeSubsystem>())
+			{
+				return  LandscapeSubsystem->HasModifiedLandscapes();
+			}
+		}
+
+		return false;
+	}
+
+	static void SaveModifiedLandscapes()
+	{
+		if (UWorld* World = GEditor->GetEditorWorldContext().World())
+		{
+			if (ULandscapeSubsystem* LandscapeSubsystem = World->GetSubsystem<ULandscapeSubsystem>())
+			{
+				LandscapeSubsystem->SaveModifiedLandscapes();
+			}
+		}
 	}
 
 	static void ChangeLandscapeViewMode(ELandscapeViewMode::Type ViewMode)
 	{
-		GLandscapeViewMode = ViewMode;
+		if (ViewMode != GLandscapeViewMode)
+		{
+			GLandscapeViewMode = ViewMode;
+
+			if (GEditor)
+			{
+				GEditor->RedrawAllViewports(/*bInvalidateHitProxies =*/false);
+			}
+		}
 	}
 
 	static bool IsLandscapeViewModeSelected(ELandscapeViewMode::Type ViewMode)
@@ -188,6 +272,9 @@ public:
 		return GLandscapeViewMode == ViewMode;
 	}
 
+	/**
+	 * ILandscapeEditorModule implementation
+	 */
 	virtual void RegisterHeightmapFileFormat(TSharedRef<ILandscapeHeightmapFileFormat> FileFormat) override
 	{
 		HeightmapFormats.Emplace(FileFormat);
@@ -232,15 +319,6 @@ public:
 		}
 	}
 
-	void OnPreSaveWorld(uint32 SaveFlags, class UWorld* World)
-	{
-		FEdModeLandscape* EdMode = (FEdModeLandscape*)GLevelEditorModeTools().GetActiveMode(FBuiltinEditorModes::EM_Landscape);
-		if (EdMode)
-		{
-			EdMode->OnPreSaveWorld(SaveFlags, World);
-		}
-	}
-
 	virtual const TCHAR* GetHeightmapImportDialogTypeString() const override;
 	virtual const TCHAR* GetWeightmapImportDialogTypeString() const override;
 
@@ -251,9 +329,16 @@ public:
 	virtual const ILandscapeWeightmapFileFormat* GetWeightmapFormatByExtension(const TCHAR* Extension) const override;
 
 	virtual TSharedPtr<FUICommandList> GetLandscapeLevelViewportCommandList() const override;
-		
+
+	FLandscapeImageFileCache& GetImageFileCache() const override;
+
+	/**
+	* ILandscapeEditorServices implementation
+	*/
+	virtual int32 GetOrCreateEditLayer(FName InEditLayerName, ALandscape* InTargetLandscape) override;
+	virtual void RefreshDetailPanel() override;
+
 protected:
-	FDelegateHandle PreSaveWorldHandle;
 	TSharedPtr<FExtender> ViewportMenuExtender;
 	TSharedPtr<FUICommandList> GlobalUICommandList;
 	TArray<FRegisteredLandscapeHeightmapFileFormat> HeightmapFormats;
@@ -262,6 +347,7 @@ protected:
 	mutable FString WeightmapImportDialogTypeString;
 	mutable FString HeightmapExportDialogTypeString;
 	mutable FString WeightmapExportDialogTypeString;
+	TUniquePtr<FLandscapeImageFileCache> LandscapeImageFileCache;
 };
 
 IMPLEMENT_MODULE(FLandscapeEditorModule, LandscapeEditor);
@@ -428,6 +514,34 @@ const ILandscapeWeightmapFileFormat* FLandscapeEditorModule::GetWeightmapFormatB
 TSharedPtr<FUICommandList> FLandscapeEditorModule::GetLandscapeLevelViewportCommandList() const
 {
 	return GlobalUICommandList;
+}
+
+FLandscapeImageFileCache& FLandscapeEditorModule::GetImageFileCache() const
+{
+	check(LandscapeImageFileCache != nullptr);
+	return *LandscapeImageFileCache;
+}
+
+int32 FLandscapeEditorModule::GetOrCreateEditLayer(FName InEditLayerName, ALandscape* InTargetLandscape)
+{
+	// Insertion logic is left to the user through modal drag + drop dialog : 
+	int32 ExistingLayerIndex = InTargetLandscape->GetLayerIndex(InEditLayerName);
+	if (ExistingLayerIndex == INDEX_NONE)
+	{
+		InTargetLandscape->CreateLayer(InEditLayerName);
+		TSharedPtr<SLandscapeLayerListDialog> Dialog = SNew(SLandscapeLayerListDialog, InTargetLandscape->LandscapeLayers);
+		Dialog->ShowModal();
+		ExistingLayerIndex = Dialog->GetInsertedLayerIndex();
+	}
+	return ExistingLayerIndex;
+}
+
+void FLandscapeEditorModule::RefreshDetailPanel()
+{
+	if (FEdModeLandscape* LandscapeMode = (FEdModeLandscape*)GLevelEditorModeTools().GetActiveMode(FBuiltinEditorModes::EM_Landscape))
+	{
+		LandscapeMode->RefreshDetailPanel();
+	}
 }
 
 #undef LOCTEXT_NAMESPACE

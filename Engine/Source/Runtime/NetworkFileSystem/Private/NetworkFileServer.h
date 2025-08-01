@@ -11,49 +11,32 @@
 class FInternetAddr;
 class FSocket;
 class ITargetPlatform;
-
+namespace UE::Cook
+{
+	class ICookOnTheFlyNetworkServer;
+	class ICookOnTheFlyClientConnection;
+	class FCookOnTheFlyRequest;
+}
 
 /**
  * This class wraps the server thread and network connection
  */
 class FNetworkFileServer
-	: public FRunnable
-	, public INetworkFileServer
+	: public INetworkFileServer
 {
 public:
 
 	/**
 	 * Creates and initializes a new instance.
 	 *
-	 * @param InPort The port number to bind to (0 = any available port).
-	 * @param InFileRequestDelegate 
+	 * @param InFileServerOptions Network file server options
 	 */
-	FNetworkFileServer( int32 InPort, FNetworkFileDelegateContainer InNetworkFileDelegateContainer, const TArray<ITargetPlatform*>& InActiveTargetPlatforms );
+	FNetworkFileServer(FNetworkFileServerOptions InFileServerOptions, TSharedRef<UE::Cook::ICookOnTheFlyNetworkServer> InCookOnTheFlyNetworkServer);
 
 	/**
 	 * Destructor.
 	 */
 	~FNetworkFileServer( );
-
-public:
-
-	// FRunnable Interface
-
-	virtual bool Init( ) override
-	{
-		return true;
-	}
-
-	virtual uint32 Run( ) override;
-
-	virtual void Stop( ) override
-	{
-		StopRequested.Set(true);
-	}
-
-	virtual void Exit( ) override;
-
-public:
 
 	// INetworkFileServer interface
 
@@ -63,29 +46,16 @@ public:
 	virtual int32 NumConnections() const override;
 	virtual void Shutdown() override;
 private:
+	void OnClientConnected(UE::Cook::ICookOnTheFlyClientConnection& Connection);
+	void OnClientDisconnected(UE::Cook::ICookOnTheFlyClientConnection& Connection);
+	bool HandleRequest(UE::Cook::ICookOnTheFlyClientConnection& Connection, const UE::Cook::FCookOnTheFlyRequest& Request);
 
-	// Holds the server (listening) socket.
-	FSocket* Socket;
+	// File server options
+	FNetworkFileServerOptions FileServerOptions;
 
-	// Holds the server thread object.
-	FRunnableThread* Thread;
-
-	// Holds the list of all client connections.
-	TArray< class FNetworkFileServerClientConnectionThreaded*> Connections;
-
-	// Holds a flag indicating whether the thread should stop executing
-	FThreadSafeCounter StopRequested;
-
-	// Is the Listner thread up and running. 
-	FThreadSafeCounter Running;
-
-public:
-
-	FNetworkFileDelegateContainer NetworkFileDelegates;
-
-	// cached copy of the active target platforms (if any)
-	const TArray<ITargetPlatform*> ActiveTargetPlatforms;
-
-	// Holds the address that the server is bound to.
-	TSharedPtr<FInternetAddr> ListenAddr;
+	TSharedPtr<UE::Cook::ICookOnTheFlyNetworkServer> CookOnTheFlyServer;
+	
+	// Holds all the client connections.
+	FCriticalSection ConnectionsCritical;
+	TMap<UE::Cook::ICookOnTheFlyClientConnection*, class FCookOnTheFlyNetworkFileServerConnection*> Connections;
 };

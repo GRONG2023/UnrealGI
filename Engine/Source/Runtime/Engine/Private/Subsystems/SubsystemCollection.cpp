@@ -8,6 +8,8 @@
 #include "Modules/ModuleManager.h"
 #include "Misc/PackageName.h"
 
+DEFINE_LOG_CATEGORY(LogSubsystemCollection);
+
 /** FSubsystemModuleWatcher class to hide the implementation of keeping the DynamicSystemModuleMap up to date*/
 class FSubsystemModuleWatcher
 {
@@ -25,12 +27,10 @@ private:
 	static FDelegateHandle ModulesChangedHandle;
 };
 
+// globals without thread protection must be accessed only from GameThread
 FDelegateHandle FSubsystemModuleWatcher::ModulesChangedHandle;
-
-
-
-TArray<FSubsystemCollectionBase*> FSubsystemCollectionBase::SubsystemCollections;
-TMap<FName, TArray<TSubclassOf<UDynamicSubsystem>>> FSubsystemCollectionBase::DynamicSystemModuleMap;
+static TArray<FSubsystemCollectionBase*> GlobalSubsystemCollections;
+static TMap<FName, TArray<TSubclassOf<UDynamicSubsystem>>> GlobalDynamicSystemModuleMap;
 
 FSubsystemCollectionBase::FSubsystemCollectionBase()
 	: Outer(nullptr)
@@ -48,6 +48,14 @@ FSubsystemCollectionBase::FSubsystemCollectionBase(UClass* InBaseType)
 
 USubsystem* FSubsystemCollectionBase::GetSubsystemInternal(UClass* SubsystemClass) const
 {
+#if WITH_EDITOR && UE_BUILD_SHIPPING
+	TStringBuilder<200> DebugSubsystemClassName;
+	if (SubsystemClass && IsEngineExitRequested())
+	{
+		SubsystemClass->GetFName().AppendString(DebugSubsystemClassName);
+	}
+#endif
+
 	USubsystem* SystemPtr = SubsystemMap.FindRef(SubsystemClass);
 
 	if (SystemPtr)
@@ -72,20 +80,26 @@ const TArray<USubsystem*>& FSubsystemCollectionBase::GetSubsystemArrayInternal(U
 	{
 		TArray<USubsystem*>& NewList = SubsystemArrayMap.Add(SubsystemClass);
 
-		for (auto Iter = SubsystemMap.CreateConstIterator(); Iter; ++Iter)
-		{
-			UClass* KeyClass = Iter.Key();
-			if (KeyClass->IsChildOf(SubsystemClass))
-			{
-				NewList.Add(Iter.Value());
-			}
-		}
+		PopulateSubsystemArrayInternal(SubsystemClass, NewList);
 
 		return NewList;
 	}
 
 	const TArray<USubsystem*>& List = SubsystemArrayMap.FindChecked(SubsystemClass);
 	return List;
+}
+
+void FSubsystemCollectionBase::PopulateSubsystemArrayInternal(UClass* SubsystemClass, TArray<USubsystem*>& SubsystemArray) const
+{
+	check(SubsystemArray.Num() == 0);
+	for (auto Iter = SubsystemMap.CreateConstIterator(); Iter; ++Iter)
+	{
+		UClass* KeyClass = Iter.Key();
+		if (KeyClass->IsChildOf(SubsystemClass))
+		{
+			SubsystemArray.Add(Iter.Value());
+		}
+	}
 }
 
 void FSubsystemCollectionBase::Initialize(UObject* NewOuter)
@@ -102,16 +116,21 @@ void FSubsystemCollectionBase::Initialize(UObject* NewOuter)
 	{
 		check(!bPopulating); //Populating collections on multiple threads?
 		
-		if (SubsystemCollections.Num() == 0)
+		//non-thread-safe use of Global lists, must be from GameThread:
+		check(IsInGameThread());
+
+		if (GlobalSubsystemCollections.Num() == 0)
 		{
 			FSubsystemModuleWatcher::InitializeModuleWatcher();
 		}
+
+		UE_LOG(LogSubsystemCollection, Verbose, TEXT("Initializing subsystem collection for %s with type %s"), *GetNameSafe(NewOuter), *GetNameSafe(BaseType));
 		
 		TGuardValue<bool> PopulatingGuard(bPopulating, true);
 
 		if (BaseType->IsChildOf(UDynamicSubsystem::StaticClass()))
 		{
-			for (const TPair<FName, TArray<TSubclassOf<UDynamicSubsystem>>>& SubsystemClasses : DynamicSystemModuleMap)
+			for (const TPair<FName, TArray<TSubclassOf<UDynamicSubsystem>>>& SubsystemClasses : GlobalDynamicSystemModuleMap)
 			{
 				for (const TSubclassOf<UDynamicSubsystem>& SubsystemClass : SubsystemClasses.Value)
 				{
@@ -134,15 +153,38 @@ void FSubsystemCollectionBase::Initialize(UObject* NewOuter)
 		}
 
 		// Statically track collections
-		SubsystemCollections.Add(this);
+		GlobalSubsystemCollections.Add(this);
 	}
+}
+
+FSubsystemCollectionBase::~FSubsystemCollectionBase()
+{
+	// Deinitialize should have been called before reaching GC object destruction phase
+	//  fix users that failed to call it!
+	// 
+	// TEMP disabled check so we can run without errors for now
+	// @todo fix the underlying issue and turn this check back on
+	//checkf( Outer == nullptr , TEXT("FSubsystemCollectionBase destructor called before Deinitialize!\n") );
+
+	// ensure that it is called even if client didn't
+	//	otherwise a deleted pointer is left in GlobalSubsystemCollections
+	Deinitialize();
 }
 
 void FSubsystemCollectionBase::Deinitialize()
 {
+	//non-thread-safe use of Global lists, must be from GameThread:
+	check(IsInGameThread());
+
+	// already Deinitialize'd :
+	if (Outer == nullptr)
+	{
+		return;
+	}
+
 	// Remove static tracking 
-	SubsystemCollections.Remove(this);
-	if (SubsystemCollections.Num() == 0)
+	GlobalSubsystemCollections.Remove(this);
+	if (GlobalSubsystemCollections.IsEmpty())
 	{
 		FSubsystemModuleWatcher::DeinitializeModuleWatcher();
 	}
@@ -153,7 +195,7 @@ void FSubsystemCollectionBase::Deinitialize()
 	{
 		UClass* KeyClass = Iter.Key();
 		USubsystem* Subsystem = Iter.Value();
-		if (Subsystem->GetClass() == KeyClass)
+		if (Subsystem != nullptr && Subsystem->GetClass() == KeyClass)
 		{
 			Subsystem->Deinitialize();
 			Subsystem->InternalOwningSubsystem = nullptr;
@@ -165,27 +207,32 @@ void FSubsystemCollectionBase::Deinitialize()
 
 USubsystem* FSubsystemCollectionBase::InitializeDependency(TSubclassOf<USubsystem> SubsystemClass)
 {
-	if (ensureMsgf(SubsystemClass, TEXT("Attempting to add invalid subsystem as dependancy."))
-		&& ensureMsgf(bPopulating, TEXT("InitializeDependancy() should only be called from System USubsystem::Initialization() implementations."))
-		&& ensureMsgf(SubsystemClass->IsChildOf(BaseType), TEXT("ClassType (%s) must be a subclass of BaseType(%s)."), *SubsystemClass->GetName(), *BaseType->GetName()))
+	USubsystem* Subsystem = nullptr;
+	if (ensureMsgf(SubsystemClass, TEXT("Attempting to add invalid subsystem as dependancy.")))
 	{
-		return AddAndInitializeSubsystem(SubsystemClass);
+		UE_LOG(LogSubsystemCollection, VeryVerbose, TEXT("Attempting to initialize subsystem dependency (%s)"), *SubsystemClass->GetName());
+
+		if (ensureMsgf(bPopulating, TEXT("InitializeDependancy() should only be called from System USubsystem::Initialization() implementations."))
+			&& ensureMsgf(SubsystemClass->IsChildOf(BaseType), TEXT("ClassType (%s) must be a subclass of BaseType(%s)."), *SubsystemClass->GetName(), *BaseType->GetName()))
+		{
+			Subsystem = AddAndInitializeSubsystem(SubsystemClass);
+		}
+
+		UE_CLOG(!Subsystem, LogSubsystemCollection, Log, TEXT("Failed to initialize subsystem dependency (%s)"), *SubsystemClass->GetName());
 	}
-	return nullptr;
+
+	return Subsystem;
 }
 
-void FSubsystemCollectionBase::AddReferencedObjects(FReferenceCollector& Collector)
+void FSubsystemCollectionBase::AddReferencedObjects(UObject* Referencer, FReferenceCollector& Collector)
 {
-	Collector.AddReferencedObjects(SubsystemMap);
-}
-
-FString FSubsystemCollectionBase::GetReferencerName() const
-{
-	return TEXT("FSubsystemCollectionBase");
+	Collector.AddStableReferenceMap(SubsystemMap);
 }
 
 USubsystem* FSubsystemCollectionBase::AddAndInitializeSubsystem(UClass* SubsystemClass)
 {
+	TGuardValue<bool> PopulatingGuard(bPopulating, true);
+
 	if (!SubsystemMap.Contains(SubsystemClass))
 	{
 		// Only add instances for non abstract Subsystems
@@ -194,11 +241,13 @@ USubsystem* FSubsystemCollectionBase::AddAndInitializeSubsystem(UClass* Subsyste
 			// Catch any attempt to add a subsystem of the wrong type
 			checkf(SubsystemClass->IsChildOf(BaseType), TEXT("ClassType (%s) must be a subclass of BaseType(%s)."), *SubsystemClass->GetName(), *BaseType->GetName());
 
-			// Do not create instances of classes aren't authoritative
+			// Do not create instances of classes that aren't authoritative.
 			if (SubsystemClass->GetAuthoritativeClass() != SubsystemClass)
 			{	
 				return nullptr;
 			}
+
+			UE_SCOPED_ENGINE_ACTIVITY(TEXT("Initializing Subsystem %s"), *SubsystemClass->GetName());
 
 			const USubsystem* CDO = SubsystemClass->GetDefaultObject<USubsystem>();
 			if (CDO->ShouldCreateSubsystem(Outer))
@@ -207,12 +256,25 @@ USubsystem* FSubsystemCollectionBase::AddAndInitializeSubsystem(UClass* Subsyste
 				SubsystemMap.Add(SubsystemClass,Subsystem);
 				Subsystem->InternalOwningSubsystem = this;
 				Subsystem->Initialize(*this);
+				
+				// Add this new subsystem to any existing maps of base classes to lists of subsystems
+				for (TPair<UClass*, TArray<USubsystem*>>& Pair : SubsystemArrayMap)
+				{
+					if (SubsystemClass->IsChildOf(Pair.Key))
+					{
+						Pair.Value.Add(Subsystem);
+					}
+				}
+
 				return Subsystem;
 			}
+
+			UE_LOG(LogSubsystemCollection, VeryVerbose, TEXT("Subsystem does not exist, but CDO choose to not create (%s)"), *SubsystemClass->GetName());
 		}
 		return nullptr;
 	}
 
+	UE_LOG(LogSubsystemCollection, VeryVerbose, TEXT("Subsystem already exists (%s)"), *SubsystemClass->GetName());
 	return SubsystemMap.FindRef(SubsystemClass);
 }
 
@@ -222,13 +284,36 @@ void FSubsystemCollectionBase::RemoveAndDeinitializeSubsystem(USubsystem* Subsys
 	USubsystem* SubsystemFound = SubsystemMap.FindAndRemoveChecked(Subsystem->GetClass());
 	check(Subsystem == SubsystemFound);
 
+	const UClass* SubsystemClass = Subsystem->GetClass();
+
+	for (auto& Pair : SubsystemArrayMap)
+	{
+		if (SubsystemClass->IsChildOf(Pair.Key))
+		{
+			Pair.Value.Remove(Subsystem);
+		}
+	}
+
 	Subsystem->Deinitialize();
 	Subsystem->InternalOwningSubsystem = nullptr;
 }
 
+void FSubsystemCollectionBase::ActivateExternalSubsystem(UClass* SubsystemClass)
+{
+	AddAllInstances(SubsystemClass);
+}
+
+void FSubsystemCollectionBase::DeactivateExternalSubsystem(UClass* SubsystemClass)
+{
+	RemoveAllInstances(SubsystemClass);
+}
+
 void FSubsystemCollectionBase::AddAllInstances(UClass* SubsystemClass)
 {
-	for (FSubsystemCollectionBase* SubsystemCollection : SubsystemCollections)
+	//non-thread-safe use of Global lists, must be from GameThread:
+	check(IsInGameThread());
+
+	for (FSubsystemCollectionBase* SubsystemCollection : GlobalSubsystemCollections)
 	{
 		if (SubsystemClass->IsChildOf(SubsystemCollection->BaseType))
 		{
@@ -239,7 +324,10 @@ void FSubsystemCollectionBase::AddAllInstances(UClass* SubsystemClass)
 
 void FSubsystemCollectionBase::RemoveAllInstances(UClass* SubsystemClass)
 {
-	ForEachObjectOfClass(SubsystemClass, [](UObject* SubsystemObj)
+	TArray<UObject*> SubsystemsToRemove;
+	GetObjectsOfClass(SubsystemClass, SubsystemsToRemove);
+
+	for(UObject* SubsystemObj : SubsystemsToRemove)
 	{
 		USubsystem* Subsystem = CastChecked<USubsystem>(SubsystemObj);
 
@@ -247,7 +335,7 @@ void FSubsystemCollectionBase::RemoveAllInstances(UClass* SubsystemClass)
 		{
 			Subsystem->InternalOwningSubsystem->RemoveAndDeinitializeSubsystem(Subsystem);
 		}
-	});
+	}
 }
 
 
@@ -272,6 +360,9 @@ void FSubsystemModuleWatcher::OnModulesChanged(FName ModuleThatChanged, EModuleC
 
 void FSubsystemModuleWatcher::InitializeModuleWatcher()
 {
+	//non-thread-safe use of Global lists, must be from GameThread:
+	check(IsInGameThread());
+
 	check(!ModulesChangedHandle.IsValid());
 
 	// Add Loaded Modules
@@ -288,7 +379,7 @@ void FSubsystemModuleWatcher::InitializeModuleWatcher()
 				const FName ModuleName = FPackageName::GetShortFName(ClassPackage->GetFName());
 				if (FModuleManager::Get().IsModuleLoaded(ModuleName))
 				{
-					TArray<TSubclassOf<UDynamicSubsystem>>& ModuleSubsystemClasses = FSubsystemCollectionBase::DynamicSystemModuleMap.FindOrAdd(ModuleName);
+					TArray<TSubclassOf<UDynamicSubsystem>>& ModuleSubsystemClasses = GlobalDynamicSystemModuleMap.FindOrAdd(ModuleName);
 					ModuleSubsystemClasses.Add(SubsystemClass);
 				}
 			}
@@ -309,7 +400,10 @@ void FSubsystemModuleWatcher::DeinitializeModuleWatcher()
 
 void FSubsystemModuleWatcher::AddClassesForModule(const FName& InModuleName)
 {
-	check(!FSubsystemCollectionBase::DynamicSystemModuleMap.Contains(InModuleName));
+	//non-thread-safe use of Global lists, must be from GameThread:
+	check(IsInGameThread());
+
+	check(! GlobalDynamicSystemModuleMap.Contains(InModuleName));
 
 	// Find the class package for this module
 	const UPackage* const ClassPackage = FindPackage(nullptr, *(FString("/Script/") + InModuleName.ToString()));
@@ -332,18 +426,21 @@ void FSubsystemModuleWatcher::AddClassesForModule(const FName& InModuleName)
 	}
 	if (SubsystemClasses.Num() > 0)
 	{
-		FSubsystemCollectionBase::DynamicSystemModuleMap.Add(InModuleName, MoveTemp(SubsystemClasses));
+		GlobalDynamicSystemModuleMap.Add(InModuleName, MoveTemp(SubsystemClasses));
 	}
 }
 void FSubsystemModuleWatcher::RemoveClassesForModule(const FName& InModuleName)
 {
-	TArray<TSubclassOf<UDynamicSubsystem>>* SubsystemClasses = FSubsystemCollectionBase::DynamicSystemModuleMap.Find(InModuleName);
+	//non-thread-safe use of Global lists, must be from GameThread:
+	check(IsInGameThread());
+
+	TArray<TSubclassOf<UDynamicSubsystem>>* SubsystemClasses = GlobalDynamicSystemModuleMap.Find(InModuleName);
 	if (SubsystemClasses)
 	{
 		for (TSubclassOf<UDynamicSubsystem>& SubsystemClass : *SubsystemClasses)
 		{
 			FSubsystemCollectionBase::RemoveAllInstances(SubsystemClass);
 		}
-		FSubsystemCollectionBase::DynamicSystemModuleMap.Remove(InModuleName);
+		GlobalDynamicSystemModuleMap.Remove(InModuleName);
 	}
 }

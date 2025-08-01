@@ -2,20 +2,32 @@
 
 
 #include "MRUFavoritesList.h"
-#include "HAL/FileManager.h"
-#include "Misc/PackageName.h"
-#include "Framework/Notifications/NotificationManager.h"
-#include "Widgets/Notifications/SNotificationList.h"
 
-const FString FMainMRUFavoritesList::FAVORITES_INI_SECTION = TEXT("FavoriteFiles");
+#include "CoreTypes.h"
+#include "Framework/Notifications/NotificationManager.h"
+#include "HAL/FileManager.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/PackageName.h"
+#include "Templates/SharedPointer.h"
+#include "Widgets/Notifications/SNotificationList.h"
 
 FMainMRUFavoritesList::FMainMRUFavoritesList()
 	: FMRUList( TEXT("MRU") )
+	, INIFavoritesSection(TEXT("FavoriteFiles"))
+{
+}
+FMainMRUFavoritesList::FMainMRUFavoritesList(const FString& IniSectionOverride, const int32 InitMaxItems)
+	: FMRUList(IniSectionOverride, InitMaxItems)
+	, INIFavoritesSection(TEXT("FavoriteFiles"))
 {
 }
 
-FMainMRUFavoritesList::FMainMRUFavoritesList(const FString& IniSectionOverride, const int32 InitMaxItems)
-	:FMRUList(IniSectionOverride, InitMaxItems)
+FMainMRUFavoritesList::FMainMRUFavoritesList(const FString& IniSectionOverride, const FString& IniFavoritesSectionOverride, const int32 InitMaxItems)
+	: FMRUList(IniSectionOverride, InitMaxItems)
+	, INIFavoritesSection(IniFavoritesSectionOverride)
 {
 }
 
@@ -32,14 +44,14 @@ void FMainMRUFavoritesList::ReadFromINI()
 	InternalReadINI( Items, INISection, TEXT("MRUItem"), GetMaxItems() );
 
 	// Read in the Favorite items
-	InternalReadINI( FavoriteItems, FAVORITES_INI_SECTION, TEXT("FavoritesItem"), MaxItems );	
+	InternalReadINI( FavoriteItems, INIFavoritesSection, TEXT("FavoritesItem"), MaxItems );
 }
 
 /** Save off the state of the MRU and favorites lists to the relevant INI file */
 void FMainMRUFavoritesList::WriteToINI() const
 {
 	InternalWriteINI( Items, INISection, TEXT("MRUItem") );
-	InternalWriteINI( FavoriteItems, FAVORITES_INI_SECTION, TEXT("FavoritesItem") );
+	InternalWriteINI( FavoriteItems, INIFavoritesSection, TEXT("FavoritesItem") );
 }
 
 /**
@@ -151,5 +163,60 @@ bool FMainMRUFavoritesList::VerifyFavoritesFile( int32 ItemIndex )
 		return false;
 	}
 
+	return true;
+}
+
+/**
+* Supplies an optional delegate that can be used to filter a given MRUFavorites item
+* Useful for dynamically verifying which items should be utilized at a given time
+*
+* @param DoesMRUFavoritesItemPassFilterDelegate The delegate to use
+*/
+void FMainMRUFavoritesList::RegisterDoesMRUFavoritesItemPassFilterDelegate(FDoesMRUFavoritesItemPassFilter DoesMRUFavoritesItemPassFilterDelegate)
+{
+	DoesMRUFavoritesItemPassFilter = DoesMRUFavoritesItemPassFilterDelegate;
+}
+
+/**
+* Unregisters the optional filter delegate
+*/
+void FMainMRUFavoritesList::UnregisterDoesMRUFavoritesItemPassFilterDelegate()
+{
+	DoesMRUFavoritesItemPassFilter = FDoesMRUFavoritesItemPassFilter();
+}
+
+/**
+* Checks the favorites item specified by the provided index against the optional 'DoesMRUFavoritesItemPassFilterDelegate'.
+*
+* @param ItemIndex Index of the favorites item to check
+*
+* @return true if the item specified by the index passes the filter or if no filter has been provided; false if it does not pass the filter
+*/
+bool FMainMRUFavoritesList::FavoritesItemPassesCurrentFilter(int32 ItemIndex) const
+{
+	check(FavoriteItems.IsValidIndex(ItemIndex));
+	if (DoesMRUFavoritesItemPassFilter.IsBound())
+	{
+		const FString& FavoriteItem = FavoriteItems[ItemIndex];
+		return DoesMRUFavoritesItemPassFilter.Execute(FavoriteItem);
+	}
+	return true;
+}
+
+/**
+* Checks the MRU item specified by the provided index against the optional 'DoesMRUFavoritesItemPassFilterDelegate'.
+*
+* @param ItemIndex Index of the MRU item to check
+*
+* @return true if the item specified by the index passes the filter or if no filter has been provided; false if it does not pass the filter
+*/
+bool FMainMRUFavoritesList::MRUItemPassesCurrentFilter(int32 ItemIndex) const
+{
+	check(Items.IsValidIndex(ItemIndex));
+	if (DoesMRUFavoritesItemPassFilter.IsBound())
+	{
+		const FString& MRUItem = Items[ItemIndex];
+		return DoesMRUFavoritesItemPassFilter.Execute(MRUItem);
+	}
 	return true;
 }

@@ -6,6 +6,15 @@
 #include "LandscapeEdit.h"
 #include "LandscapeRender.h"
 
+#if WITH_EDITOR
+
+#include "LandscapeHLODBuilder.h"
+
+uint32 ULandscapeComponent::UndoRedoModifiedComponentCount;
+TArray<ULandscapeComponent*> ULandscapeComponent::UndoRedoModifiedComponents;
+
+#endif
+
 FName FWeightmapLayerAllocationInfo::GetLayerName() const
 {
 	if (LayerInfo)
@@ -64,6 +73,11 @@ void ULandscapeComponent::UpdateEditToolRenderData()
 				LandscapeSceneProxy->SetUsedMaterialForVerification(UsedMaterialsForVerification);
 			});
 	}
+}
+
+TSubclassOf<UHLODBuilder> ULandscapeComponent::GetCustomHLODBuilderClass() const
+{
+	return ULandscapeHLODBuilder::StaticClass();
 }
 
 #endif

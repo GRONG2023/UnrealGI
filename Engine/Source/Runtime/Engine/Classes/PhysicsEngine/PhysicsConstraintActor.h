@@ -18,13 +18,13 @@ class APhysicsConstraintActor : public ARigidBodyBase
 	// Cached reference to constraint component
 private:
 	UPROPERTY(Category = ConstraintActor, VisibleAnywhere, BlueprintReadOnly, meta = (ExposeFunctionCategories = "JointDrive,Physics|Components|PhysicsConstraint", AllowPrivateAccess = "true"))
-	class UPhysicsConstraintComponent* ConstraintComp;
+	TObjectPtr<class UPhysicsConstraintComponent> ConstraintComp;
 public:
 	
 	UPROPERTY()
-	class AActor* ConstraintActor1_DEPRECATED;
+	TObjectPtr<class AActor> ConstraintActor1_DEPRECATED;
 	UPROPERTY()
-	class AActor* ConstraintActor2_DEPRECATED;
+	TObjectPtr<class AActor> ConstraintActor2_DEPRECATED;
 	UPROPERTY()
 	uint32 bDisableCollision_DEPRECATED:1;
 
@@ -37,7 +37,7 @@ public:
 
 public:
 	/** Returns ConstraintComp subobject **/
-	ENGINE_API class UPhysicsConstraintComponent* GetConstraintComp() const { return ConstraintComp; }
+	class UPhysicsConstraintComponent* GetConstraintComp() const { return ConstraintComp; }
 };
 
 

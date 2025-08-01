@@ -9,7 +9,6 @@
 #include "Framework/Application/SlateApplication.h"
 #include "Textures/SlateIcon.h"
 #include "Framework/Docking/TabManager.h"
-#include "EditorStyleSet.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "UserInterface/SMessageLog.h"
 #include "Model/MessageLogListingModel.h"
@@ -20,14 +19,15 @@
 #include "Logging/MessageLog.h"
 
 #if WITH_EDITOR
-	#include "Editor/WorkspaceMenuStructure/Public/WorkspaceMenuStructure.h"
-	#include "Editor/WorkspaceMenuStructure/Public/WorkspaceMenuStructureModule.h"
+	#include "WorkspaceMenuStructure.h"
+	#include "WorkspaceMenuStructureModule.h"
 #endif
 
 IMPLEMENT_MODULE( FMessageLogModule, MessageLog );
 
 TSharedRef<SDockTab> SpawnMessageLog( const FSpawnTabArgs& Args, TSharedRef<FMessageLogViewModel> MessageLogViewModel )
 {
+	LLM_SCOPE(ELLMTag::UI);
 	return SNew(SDockTab)
 		.TabRole(ETabRole::NomadTab)
 		[
@@ -52,17 +52,12 @@ void FMessageLogModule::StartupModule()
 	MessageLogViewModel->Initialize();
 
 #if WITH_EDITOR
-	TWeakPtr<FMessageLogViewModel> WeakMessageLogViewModel = MessageLogViewModel;
 	ModulesChangedHandle = FModuleManager::Get().OnModulesChanged().AddLambda(
-	[WeakMessageLogViewModel](FName InModuleName, EModuleChangeReason InReason)
+	[this](FName InModuleName, EModuleChangeReason InReason)
 	{
 		if (InReason == EModuleChangeReason::ModuleLoaded && InModuleName == "LevelEditor")
 		{
-			FGlobalTabmanager::Get()->RegisterNomadTabSpawner("MessageLog", FOnSpawnTab::CreateStatic(&SpawnMessageLog, WeakMessageLogViewModel.Pin().ToSharedRef()))
-				.SetDisplayName(NSLOCTEXT("UnrealEditor", "MessageLogTab", "Message Log"))
-				.SetTooltipText(NSLOCTEXT("UnrealEditor", "MessageLogTooltipText", "Open the Message Log tab."))
-				.SetGroup(WorkspaceMenu::GetMenuStructure().GetDeveloperToolsLogCategory())
-				.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "MessageLog.TabIcon"));
+			this->RegisterMessageLogSpawner(WorkspaceMenu::GetMenuStructure().GetDeveloperToolsLogCategory());
 		}
 	});
 #endif
@@ -86,16 +81,19 @@ void FMessageLogModule::ShutdownModule()
 
 TSharedRef<IMessageLogListing> FMessageLogModule::GetLogListing(const FName& LogName)
 {
+	LLM_SCOPE_BYTAG(EngineMisc_MessageLog);
 	return MessageLogViewModel->GetLogListingViewModel(LogName);
 }
 
 void FMessageLogModule::RegisterLogListing(const FName& LogName, const FText& LogLabel, const FMessageLogInitializationOptions& InitializationOptions)
 {
+	LLM_SCOPE_BYTAG(EngineMisc_MessageLog);
 	MessageLogViewModel->RegisterLogListingViewModel(LogName, LogLabel, InitializationOptions);
 }
 
 bool FMessageLogModule::UnregisterLogListing(const FName& LogName)
 {
+	LLM_SCOPE_BYTAG(EngineMisc_MessageLog);
 	return MessageLogViewModel->UnregisterLogListingViewModel(LogName);
 }	
 
@@ -106,12 +104,14 @@ bool FMessageLogModule::IsRegisteredLogListing(const FName& LogName) const
 
 TSharedRef<IMessageLogListing> FMessageLogModule::CreateLogListing(const FName& InLogName, const FMessageLogInitializationOptions& InitializationOptions)
 {
+	LLM_SCOPE_BYTAG(EngineMisc_MessageLog);
 	TSharedRef<FMessageLogListingModel> MessageLogListingModel = FMessageLogListingModel::Create( InLogName );
 	return FMessageLogListingViewModel::Create( MessageLogListingModel, FText(), InitializationOptions );
 }
 
 TSharedRef<SWidget> FMessageLogModule::CreateLogListingWidget(const TSharedRef<IMessageLogListing>& InMessageLogListing)
 {
+	LLM_SCOPE(ELLMTag::UI);
 	return SNew(SMessageLogListing, InMessageLogListing);
 }
 
@@ -132,4 +132,14 @@ void FMessageLogModule::OpenMessageLog(const FName& LogName)
 void FMessageLogModule::EnableMessageLogDisplay(bool bInCanDisplayMessageLog)
 {
 	bCanDisplayMessageLog = bInCanDisplayMessageLog;
+}
+
+void FMessageLogModule::RegisterMessageLogSpawner(const TSharedRef<FWorkspaceItem>& InGroup)
+{
+	LLM_SCOPE(ELLMTag::UI);
+	FGlobalTabmanager::Get()->RegisterNomadTabSpawner("MessageLog", FOnSpawnTab::CreateStatic(&SpawnMessageLog, MessageLogViewModel.ToSharedRef()))
+		.SetDisplayName(NSLOCTEXT("UnrealEditor", "MessageLogTab", "Message Log"))
+		.SetTooltipText(NSLOCTEXT("UnrealEditor", "MessageLogTooltipText", "Open the Message Log tab."))
+		.SetGroup(InGroup)
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "MessageLog.TabIcon"));
 }

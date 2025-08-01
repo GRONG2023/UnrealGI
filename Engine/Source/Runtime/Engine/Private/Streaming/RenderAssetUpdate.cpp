@@ -6,6 +6,7 @@ RenderAssetUpdate.cpp: Base class of helpers to stream in and out texture/mesh L
 
 #include "RenderAssetUpdate.h"
 #include "Engine/StreamableRenderAsset.h"
+#include "RenderingThread.h"
 #include "Streaming/TextureStreamingHelpers.h"
 #include "UObject/UObjectIterator.h"
 
@@ -85,7 +86,7 @@ void SuspendRenderAssetStreaming()
 				UStreamableRenderAsset* CurrentAsset = LockedAssets[LockedIndex];
 				if (CurrentAsset)
 				{
-					if (CurrentAsset->IsPendingKill() || CurrentAsset->HasAnyFlags(RF_BeginDestroyed|RF_FinishDestroyed))
+					if (!IsValid(CurrentAsset) || CurrentAsset->HasAnyFlags(RF_BeginDestroyed|RF_FinishDestroyed))
 					{
 						UE_LOG(LogContentStreaming, Error, TEXT("	%s"), *CurrentAsset->GetFullName());
 					}
@@ -288,6 +289,7 @@ void FRenderAssetUpdate::ScheduleAsyncTask()
 
 void FRenderAssetUpdate::FMipUpdateTask::DoWork()
 {
+	FTaskTagScope Scope(ETaskTag::EParallelGameThread);
 	check(PendingUpdate.IsValid());
 
 #if !UE_BUILD_SHIPPING

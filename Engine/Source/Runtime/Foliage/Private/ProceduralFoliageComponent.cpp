@@ -9,8 +9,17 @@
 #include "ProceduralFoliageTile.h"
 #include "ProceduralFoliageSpawner.h"
 #include "Engine/LevelBounds.h"
+#include "EngineUtils.h"
 #include "Misc/FeedbackContext.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ProceduralFoliageComponent)
+
+#if WITH_EDITOR
+#include "WorldPartition/WorldPartition.h"
+#include "WorldPartition/WorldPartitionSubsystem.h"
+#include "WorldPartition/DataLayer/DataLayerAsset.h"
+#include "WorldPartition/WorldPartitionActorLoaderInterface.h"
+#endif
 
 #define LOCTEXT_NAMESPACE "ProceduralFoliage"
 
@@ -29,7 +38,7 @@ UProceduralFoliageComponent::UProceduralFoliageComponent(const FObjectInitialize
 #endif
 }
 
-FBox2D GetTileRegion(const int32 X, const int32 Y, const float InnerSize, const float Overlap)
+static FBox2D GetTileRegion(const int32 X, const int32 Y, const float InnerSize, const float Overlap)
 {
 	// For tiles on the bottom and the left (that have no preceding neighbor to overlap them), have the
 	// tile fill that space with its own content
@@ -72,48 +81,113 @@ FBodyInstance* UProceduralFoliageComponent::GetBoundsBodyInstance() const
 	return nullptr;
 }
 
-void UProceduralFoliageComponent::GetTileLayout(FTileLayout& OutTileLayout) const
+UProceduralFoliageComponent::FGenerateProceduralContentParams UProceduralFoliageComponent::GetGenerateProceduralContentParams() const
 {
-	FBox Bounds = GetBounds();
-	if (Bounds.IsValid)
+	FGenerateProceduralContentParams Params;
+	Params.Bounds = GetBounds();
+	Params.FoliageSpawner = FoliageSpawner;
+	Params.ProceduralGuid = GetProceduralGuid();
+	Params.TileOverlap = TileOverlap;
+	Params.ProceduralVolumeInstance = GetBoundsBodyInstance();
+
+	return Params;
+}
+
+void UProceduralFoliageComponent::GetTileLayout(const FGenerateProceduralContentParams& InParams, FTileLayout& OutTileLayout)
+{
+	if (InParams.Bounds.IsValid)
 	{
 		// Determine the bottom-left-most tile that contains the min position (when accounting for overlap)
-		const FVector MinPosition = Bounds.Min + TileOverlap;
-		OutTileLayout.BottomLeftX = FMath::FloorToInt(MinPosition.X / FoliageSpawner->TileSize);
-		OutTileLayout.BottomLeftY = FMath::FloorToInt(MinPosition.Y / FoliageSpawner->TileSize);
+		const FVector MinPosition = InParams.Bounds.Min + InParams.TileOverlap;
+		OutTileLayout.BottomLeftX = FMath::FloorToInt(FloatCastChecked<float>(MinPosition.X / InParams.FoliageSpawner->TileSize, UE::LWC::DefaultFloatPrecision));
+		OutTileLayout.BottomLeftY = FMath::FloorToInt(FloatCastChecked<float>(MinPosition.Y / InParams.FoliageSpawner->TileSize, UE::LWC::DefaultFloatPrecision));
 
 		// Determine the total number of tiles along each active axis
-		const FVector MaxPosition = Bounds.Max - TileOverlap;
-		const int32 MaxXIdx = FMath::FloorToInt(MaxPosition.X / FoliageSpawner->TileSize);
-		const int32 MaxYIdx = FMath::FloorToInt(MaxPosition.Y / FoliageSpawner->TileSize);
+		const FVector MaxPosition = InParams.Bounds.Max - InParams.TileOverlap;
+		const int32 MaxXIdx = FMath::FloorToInt(FloatCastChecked<float>(MaxPosition.X / InParams.FoliageSpawner->TileSize, UE::LWC::DefaultFloatPrecision));
+		const int32 MaxYIdx = FMath::FloorToInt(FloatCastChecked<float>(MaxPosition.Y / InParams.FoliageSpawner->TileSize, UE::LWC::DefaultFloatPrecision));
 
 		OutTileLayout.NumTilesX = (MaxXIdx - OutTileLayout.BottomLeftX) + 1;
 		OutTileLayout.NumTilesY = (MaxYIdx - OutTileLayout.BottomLeftY) + 1;
 
-		OutTileLayout.HalfHeight = Bounds.GetExtent().Z;
+		OutTileLayout.HalfHeight = InParams.Bounds.GetExtent().Z;
 	}
 }
 
+void UProceduralFoliageComponent::GetTileLayout(FTileLayout& OutTileLayout) const
+{
+	GetTileLayout(GetGenerateProceduralContentParams(), OutTileLayout);
+}
+
+#if WITH_EDITOR
+void UProceduralFoliageComponent::LoadSimulatedRegion()
+{
+	if (GetOwner()->Implements<UWorldPartitionActorLoaderInterface>())
+	{
+		if (IWorldPartitionActorLoaderInterface::ILoaderAdapter* LoaderAdapter = Cast<IWorldPartitionActorLoaderInterface>(GetOwner())->GetLoaderAdapter())
+		{
+			LoaderAdapter->Load();
+		}
+	}
+}
+
+void UProceduralFoliageComponent::UnloadSimulatedRegion()
+{
+	if (GetOwner()->Implements<UWorldPartitionActorLoaderInterface>())
+	{
+		if (IWorldPartitionActorLoaderInterface::ILoaderAdapter* LoaderAdapter = Cast<IWorldPartitionActorLoaderInterface>(GetOwner())->GetLoaderAdapter())
+		{
+			LoaderAdapter->Unload();
+		}
+	}
+}
+
+bool UProceduralFoliageComponent::IsSimulatedRegionLoaded()
+{
+	if (GetOwner()->Implements<UWorldPartitionActorLoaderInterface>())
+	{
+		if (IWorldPartitionActorLoaderInterface::ILoaderAdapter* LoaderAdapter = Cast<IWorldPartitionActorLoaderInterface>(GetOwner())->GetLoaderAdapter())
+		{
+			return LoaderAdapter->IsLoaded();
+		}
+	}
+	return true;
+}
+#endif
+
 FVector UProceduralFoliageComponent::GetWorldPosition() const
 {
-	FBox Bounds = GetBounds();
-	if (!Bounds.IsValid || FoliageSpawner == nullptr)
+	return GetWorldPosition(GetGenerateProceduralContentParams());
+}
+
+FVector UProceduralFoliageComponent::GetWorldPosition(const FGenerateProceduralContentParams& InParams)
+{
+	if (!InParams.Bounds.IsValid || InParams.FoliageSpawner == nullptr)
 	{
 		return FVector::ZeroVector;
 	}
 	
 	FTileLayout TileLayout;
-	GetTileLayout(TileLayout);
+	GetTileLayout(InParams, TileLayout);
 
-	const float TileSize = FoliageSpawner->TileSize;
-	return FVector(TileLayout.BottomLeftX * TileSize, TileLayout.BottomLeftY * TileSize, Bounds.GetCenter().Z);
+	const float TileSize = InParams.FoliageSpawner->TileSize;
+	return FVector(TileLayout.BottomLeftX * TileSize, TileLayout.BottomLeftY * TileSize, InParams.Bounds.GetCenter().Z);
 }
 
-bool UProceduralFoliageComponent::ExecuteSimulation(TArray<FDesiredFoliageInstance>& OutInstances)
+bool UProceduralFoliageComponent::GenerateProceduralContent(TArray<FDesiredFoliageInstance>& OutInstances)
 {
 #if WITH_EDITOR
-	FBodyInstance* BoundsBodyInstance = GetBoundsBodyInstance();
-	if (FoliageSpawner)
+	LoadSimulatedRegion();
+	return GenerateProceduralContent(GetGenerateProceduralContentParams(), OutInstances);
+#else
+	return false;
+#endif
+}
+
+bool UProceduralFoliageComponent::GenerateProceduralContent(const FGenerateProceduralContentParams& InParams, TArray<FDesiredFoliageInstance>& OutInstances)
+{
+#if WITH_EDITOR
+	if (InParams.FoliageSpawner)
 	{
 		// Establish the counter used to check if the user has canceled the simulation
 		FThreadSafeCounter LastCancel;
@@ -121,12 +195,15 @@ bool UProceduralFoliageComponent::ExecuteSimulation(TArray<FDesiredFoliageInstan
 		FThreadSafeCounter* LastCancelPtr = &LastCancel;
 		
 		// Establish basic info about the tiles
-		const float TileSize = FoliageSpawner->TileSize;
-		const FVector WorldPosition = GetWorldPosition();
+		const float TileOverlap = InParams.TileOverlap;
+		const float TileSize = InParams.FoliageSpawner->TileSize;
+		const FVector WorldPosition = GetWorldPosition(InParams);
+		FVector2D GenerateLocation = FVector2D(InParams.Bounds.GetCenter());
+		const FVector::FReal GenerateMaxExtent = FVector2D(InParams.Bounds.GetExtent()).GetMax();
 		FTileLayout TileLayout;
-		GetTileLayout(TileLayout);
+		GetTileLayout(InParams, TileLayout);
 
-		FoliageSpawner->Simulate();
+		InParams.FoliageSpawner->Simulate();
 
 		TArray<TFuture< TArray<FDesiredFoliageInstance>* >> Futures;
 		for (int32 X = 0; X < TileLayout.NumTilesX; ++X)
@@ -134,7 +211,7 @@ bool UProceduralFoliageComponent::ExecuteSimulation(TArray<FDesiredFoliageInstan
 			for (int32 Y = 0; Y < TileLayout.NumTilesY; ++Y)
 			{
 				// We have to get the simulated tiles and create new ones to build on main thread
-				const UProceduralFoliageTile* Tile = FoliageSpawner->GetRandomTile(X + TileLayout.BottomLeftX, Y + TileLayout.BottomLeftY);
+				const UProceduralFoliageTile* Tile = InParams.FoliageSpawner->GetRandomTile(X + TileLayout.BottomLeftX, Y + TileLayout.BottomLeftY);
 				if (Tile == nullptr)	
 				{
 					// Simulation was either canceled or failed
@@ -142,12 +219,12 @@ bool UProceduralFoliageComponent::ExecuteSimulation(TArray<FDesiredFoliageInstan
 				}
 
 				// From the pool of simulated tiles, pick the neighbors of this tile
-				const UProceduralFoliageTile* RightTile = (X + 1 < TileLayout.NumTilesX) ? FoliageSpawner->GetRandomTile(X + TileLayout.BottomLeftX + 1, Y + TileLayout.BottomLeftY) : nullptr;
-				const UProceduralFoliageTile* TopTile = (Y + 1 < TileLayout.NumTilesY) ? FoliageSpawner->GetRandomTile(X + TileLayout.BottomLeftX, Y + TileLayout.BottomLeftY + 1) : nullptr;
-				const UProceduralFoliageTile* TopRightTile = (RightTile && TopTile) ? FoliageSpawner->GetRandomTile(X + TileLayout.BottomLeftX + 1, Y + TileLayout.BottomLeftY + 1) : nullptr;
+				const UProceduralFoliageTile* RightTile = (X + 1 < TileLayout.NumTilesX) ? InParams.FoliageSpawner->GetRandomTile(X + TileLayout.BottomLeftX + 1, Y + TileLayout.BottomLeftY) : nullptr;
+				const UProceduralFoliageTile* TopTile = (Y + 1 < TileLayout.NumTilesY) ? InParams.FoliageSpawner->GetRandomTile(X + TileLayout.BottomLeftX, Y + TileLayout.BottomLeftY + 1) : nullptr;
+				const UProceduralFoliageTile* TopRightTile = (RightTile && TopTile) ? InParams.FoliageSpawner->GetRandomTile(X + TileLayout.BottomLeftX + 1, Y + TileLayout.BottomLeftY + 1) : nullptr;
 
 				// Create a temp tile that will contain the composite contents of the tile after accounting for overlap
-				UProceduralFoliageTile* CompositeTile = FoliageSpawner->CreateTempTile();
+				UProceduralFoliageTile* CompositeTile = InParams.FoliageSpawner->CreateTempTile();
 
 				Futures.Add(Async(EAsyncExecution::ThreadPool, [=]()
 				{
@@ -160,7 +237,7 @@ bool UProceduralFoliageComponent::ExecuteSimulation(TArray<FDesiredFoliageInstan
 					//@todo proc foliage: Determine the composite contents of the tile (including overlaps) without copying everything to a temp tile
 
 					// Copy the base tile contents
-					const FBox2D BaseTile = GetTileRegion(X, Y, TileSize, TileOverlap);
+					const FBox2D BaseTile = GetTileRegion(X, Y, TileSize, InParams.TileOverlap);
 					Tile->CopyInstancesToTile(CompositeTile, BaseTile, FTransform::Identity, TileOverlap);
 
 
@@ -192,7 +269,7 @@ bool UProceduralFoliageComponent::ExecuteSimulation(TArray<FDesiredFoliageInstan
 					const FTransform TileTM(OrientedOffset + WorldPosition);
 
 					TArray<FDesiredFoliageInstance>* DesiredInstances = new TArray<FDesiredFoliageInstance>();
-					CompositeTile->ExtractDesiredInstances(*DesiredInstances, TileTM, ProceduralGuid, TileLayout.HalfHeight, BoundsBodyInstance, true);
+					CompositeTile->ExtractDesiredInstances(*DesiredInstances, TileTM, GenerateLocation, GenerateMaxExtent, InParams.ProceduralGuid, TileLayout.HalfHeight, InParams.ProceduralVolumeInstance, true);
 
 					return DesiredInstances;
 					
@@ -247,7 +324,7 @@ bool UProceduralFoliageComponent::ExecuteSimulation(TArray<FDesiredFoliageInstan
 			for (int Y = 0; Y < TileLayout.NumTilesY; ++Y)
 			{
 				TArray<FDesiredFoliageInstance>* DesiredInstances = Futures[FutureIdx++].Get();
-				OutInstances.Append(*DesiredInstances);
+				OutInstances.Append(MoveTemp(*DesiredInstances));
 				delete DesiredInstances;
 			}
 		}
@@ -267,29 +344,51 @@ void UProceduralFoliageComponent::PostEditImport()
 	ProceduralGuid = FGuid::NewGuid();
 }
 
-bool UProceduralFoliageComponent::GenerateProceduralContent(TArray <FDesiredFoliageInstance>& OutInstances)
+bool UProceduralFoliageComponent::ResimulateProceduralFoliage(TFunctionRef<void(const TArray<FDesiredFoliageInstance>&)> AddInstancesFunc)
 {
 #if WITH_EDITOR
-	return ExecuteSimulation(OutInstances);
+	if (FoliageSpawner)
+	{
+		TArray<FDesiredFoliageInstance> DesiredFoliageInstances;
+		if (GenerateProceduralContent(DesiredFoliageInstances))
+		{
+			if (DesiredFoliageInstances.Num() > 0)
+			{
+				{
+					// Remove old foliage instances
+					RemoveProceduralContent(false);
+				}
+
+				{
+					// Add new foliage instances
+					AddInstancesFunc(DesiredFoliageInstances);
+				}
+			}
+
+			return true;
+		}
+	}
 #endif
 
 	return false;
 }
 
-void UProceduralFoliageComponent::RemoveProceduralContent(bool InRebuildTree)
+void UProceduralFoliageComponent::RemoveProceduralContent(bool bInRebuildTree)
 {
 #if WITH_EDITOR
-	UWorld* World = GetWorld();
+	TSet<AInstancedFoliageActor*> OutModifiedActors;
+	RemoveProceduralContent(GetWorld(), GetProceduralGuid(), bInRebuildTree, OutModifiedActors);
+#endif
+}
 
-	for (ULevel* Level : World->GetLevels())
+void UProceduralFoliageComponent::RemoveProceduralContent(UWorld* InWorld, const FGuid& InProceduralGuid, bool bInRebuildTree, TSet<AInstancedFoliageActor*>& OutModifiedActors)
+{
+#if WITH_EDITOR
+	for (TActorIterator<AInstancedFoliageActor> It(InWorld); It; ++It)
 	{
-		if (Level)
+		if ((*It)->DeleteInstancesForProceduralFoliageComponent(InProceduralGuid, bInRebuildTree))
 		{
-			AInstancedFoliageActor* IFA = AInstancedFoliageActor::GetInstancedFoliageActorForLevel(Level);
-			if (IFA)
-			{
-				IFA->DeleteInstancesForProceduralFoliageComponent(this, InRebuildTree);
-			}
+			OutModifiedActors.Add(*It);
 		}
 	}
 #endif
@@ -297,23 +396,17 @@ void UProceduralFoliageComponent::RemoveProceduralContent(bool InRebuildTree)
 
 bool UProceduralFoliageComponent::HasSpawnedAnyInstances()
 {
-	bool bHasSpawnedInstances = false;
 #if WITH_EDITOR
-	UWorld* World = GetWorld();
-
-	for (ULevel* Level : World->GetLevels())
+	for (TActorIterator<AInstancedFoliageActor> It(GetWorld()); It; ++It)
 	{
-		if (Level)
+		if ((*It)->ContainsInstancesFromProceduralFoliageComponent(this))
 		{
-			AInstancedFoliageActor* IFA = AInstancedFoliageActor::GetInstancedFoliageActorForLevel(Level);
-			if (IFA)
-			{
-				bHasSpawnedInstances |= IFA->ContainsInstancesFromProceduralFoliageComponent(this);
-			}
+			return true;
 		}
 	}
 #endif
-	return bHasSpawnedInstances;
+	return false;
 }
 
 #undef LOCTEXT_NAMESPACE
+

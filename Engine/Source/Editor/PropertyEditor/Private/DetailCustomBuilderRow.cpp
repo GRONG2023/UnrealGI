@@ -11,6 +11,15 @@ FDetailCustomBuilderRow::FDetailCustomBuilderRow( TSharedRef<IDetailCustomNodeBu
 {
 }
 
+TOptional<FResetToDefaultOverride> FDetailCustomBuilderRow::GetCustomResetToDefault() const
+{
+	if (HeaderRow.IsValid())
+	{
+		return HeaderRow->GetCustomResetToDefault();
+	}
+	return TOptional<FResetToDefaultOverride>();
+}
+
 void FDetailCustomBuilderRow::Tick( float DeltaTime ) 
 {
 	return CustomNodeBuilder->Tick( DeltaTime );
@@ -37,14 +46,15 @@ void FDetailCustomBuilderRow::OnItemNodeInitialized( TSharedRef<FDetailItemNode>
 	IsParentEnabled = InIsParentEnabled;
 
 	const bool bUpdateFilteredNodes = true;
+
 	// Set a delegate on the interface that it will call to rebuild this nodes children
-	FSimpleDelegate OnRegenerateChildren = FSimpleDelegate::CreateSP( InTreeNode, &FDetailItemNode::GenerateChildren, bUpdateFilteredNodes );
+	CustomNodeBuilder->SetOnRebuildChildren(FSimpleDelegate::CreateSP(InTreeNode, &FDetailItemNode::GenerateChildren, bUpdateFilteredNodes));
 
-	CustomNodeBuilder->SetOnRebuildChildren( OnRegenerateChildren );
+	CustomNodeBuilder->SetOnToggleExpansion(FOnToggleNodeExpansion::CreateSP(InTreeNode, &FDetailItemNode::SetExpansionState));
 
-	HeaderRow = MakeShareable( new FDetailWidgetRow );
+	HeaderRow = MakeShared<FDetailWidgetRow>();
 
-	CustomNodeBuilder->GenerateHeaderRowContent( *HeaderRow );
+	CustomNodeBuilder->GenerateHeaderRowContent(*HeaderRow);
 }
 
 FName FDetailCustomBuilderRow::GetCustomBuilderName() const
@@ -59,7 +69,7 @@ TSharedPtr<IPropertyHandle> FDetailCustomBuilderRow::GetPropertyHandle() const
 
 void FDetailCustomBuilderRow::OnGenerateChildren( FDetailNodeList& OutChildren )
 {
-	ChildrenBuilder = MakeShareable( new FCustomChildrenBuilder( ParentCategory.Pin().ToSharedRef() ) );
+	ChildrenBuilder = MakeShared<FCustomChildrenBuilder>(ParentCategory.Pin().ToSharedRef());
 
 	CustomNodeBuilder->GenerateChildContent( *ChildrenBuilder );
 		
@@ -78,9 +88,9 @@ bool FDetailCustomBuilderRow::IsInitiallyCollapsed() const
 	return CustomNodeBuilder->InitiallyCollapsed();
 }
 
-FDetailWidgetRow FDetailCustomBuilderRow::GetWidgetRow()
+TSharedPtr<FDetailWidgetRow> FDetailCustomBuilderRow::GetWidgetRow() const
 {
-	return *HeaderRow;
+	return HeaderRow;
 }
 
 bool FDetailCustomBuilderRow::AreChildCustomizationsHidden() const

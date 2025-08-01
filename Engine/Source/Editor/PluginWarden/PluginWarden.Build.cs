@@ -8,7 +8,6 @@ public class PluginWarden : ModuleRules
 	{
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
-				"LauncherServices",
 			}
 		);
 
@@ -21,7 +20,7 @@ public class PluginWarden : ModuleRules
 				"InputCore",
 				"Slate",
 				"SlateCore",
-				"EditorStyle",
+				"EditorFramework",
 				"UnrealEd",
 				"PortalServices",
 				"LauncherPlatform",

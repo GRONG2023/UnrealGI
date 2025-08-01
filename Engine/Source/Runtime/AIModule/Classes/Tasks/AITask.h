@@ -4,6 +4,7 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "GameplayTask.h"
+#include "UObject/Package.h"
 #include "AITask.generated.h"
 
 class AActor;
@@ -19,62 +20,68 @@ enum class EAITaskPriority : uint8
 	Ultimate = 254,
 };
 
-UCLASS(Abstract, BlueprintType)
-class AIMODULE_API UAITask : public UGameplayTask
+UCLASS(Abstract, BlueprintType, MinimalAPI)
+class UAITask : public UGameplayTask
 {
 	GENERATED_BODY()
 protected:
 
 	UPROPERTY(BlueprintReadOnly, Category="AI|Tasks")
-	AAIController* OwnerController;
+	TObjectPtr<AAIController> OwnerController;
 
-	virtual void Activate() override;
+	AIMODULE_API virtual void Activate() override;
 
 public:
-	UAITask(const FObjectInitializer& ObjectInitializer);
+	AIMODULE_API UAITask(const FObjectInitializer& ObjectInitializer);
 
-	static AAIController* GetAIControllerForActor(AActor* Actor);
+	static AIMODULE_API AAIController* GetAIControllerForActor(AActor* Actor);
 	AAIController* GetAIController() const { return OwnerController; };
 
-	void InitAITask(AAIController& AIOwner, IGameplayTaskOwnerInterface& InTaskOwner, uint8 InPriority);
-	void InitAITask(AAIController& AIOwner, IGameplayTaskOwnerInterface& InTaskOwner);
+	AIMODULE_API void InitAITask(AAIController& AIOwner, IGameplayTaskOwnerInterface& InTaskOwner, uint8 InPriority);
+	AIMODULE_API void InitAITask(AAIController& AIOwner, IGameplayTaskOwnerInterface& InTaskOwner);
 
 	/** effectively adds UAIResource_Logic to the set of Claimed resources */
-	void RequestAILogicLocking();
+	AIMODULE_API void RequestAILogicLocking();
 
 	template <class T>
 	static T* NewAITask(AAIController& AIOwner, IGameplayTaskOwnerInterface& InTaskOwner, FName InstanceName = FName())
 	{
-		T* TaskInstance = NewObject<T>();
+		return NewAITask<T>(*T::StaticClass(), AIOwner, InTaskOwner, InstanceName);
+	}
+
+	template <class T>
+	static T* NewAITask(AAIController& AIOwner, IGameplayTaskOwnerInterface& InTaskOwner, EAITaskPriority InPriority, FName InstanceName = FName())
+	{
+		return NewAITask<T>(*T::StaticClass(), AIOwner, InTaskOwner, InPriority, InstanceName);
+	}
+
+	template <class T>
+	static T* NewAITask(AAIController& AIOwner, FName InstanceName = FName())
+	{
+		return NewAITask<T>(*T::StaticClass(), AIOwner, AIOwner, InstanceName);
+	}
+
+	template <class T>
+	static T* NewAITask(AAIController& AIOwner, EAITaskPriority InPriority, FName InstanceName = FName())
+	{
+		return NewAITask<T>(*T::StaticClass(), AIOwner, AIOwner, InPriority, InstanceName);
+	}
+
+	template <class T>
+	static T* NewAITask(const UClass& Class, AAIController& AIOwner, IGameplayTaskOwnerInterface& InTaskOwner, FName InstanceName = FName())
+	{
+		T* TaskInstance = NewObject<T>(GetTransientPackage(), &Class);
 		TaskInstance->InstanceName = InstanceName;
 		TaskInstance->InitAITask(AIOwner, InTaskOwner);
 		return TaskInstance;
 	}
 
 	template <class T>
-	static T* NewAITask(AAIController& AIOwner, IGameplayTaskOwnerInterface& InTaskOwner, EAITaskPriority InPriority, FName InstanceName = FName())
+	static T* NewAITask(const UClass& Class, AAIController& AIOwner, IGameplayTaskOwnerInterface& InTaskOwner, EAITaskPriority InPriority, FName InstanceName = FName())
 	{
-		T* TaskInstance = NewObject<T>();
+		T* TaskInstance = NewObject<T>(GetTransientPackage(), &Class);
 		TaskInstance->InstanceName = InstanceName;
 		TaskInstance->InitAITask(AIOwner, InTaskOwner, (uint8)InPriority);
-		return TaskInstance;
-	}
-
-	template <class T>
-	static T* NewAITask(AAIController& AIOwner, FName InstanceName = FName())
-	{
-		T* TaskInstance = NewObject<T>();
-		TaskInstance->InstanceName = InstanceName;
-		TaskInstance->InitAITask(AIOwner, AIOwner);
-		return TaskInstance;
-	}
-
-	template <class T>
-	static T* NewAITask(AAIController& AIOwner, EAITaskPriority InPriority, FName InstanceName = FName())
-	{
-		T* TaskInstance = NewObject<T>();
-		TaskInstance->InstanceName = InstanceName;
-		TaskInstance->InitAITask(AIOwner, AIOwner, (uint8)InPriority);
 		return TaskInstance;
 	}
 };

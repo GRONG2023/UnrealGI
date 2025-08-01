@@ -2,22 +2,24 @@
 
 #pragma once
 
-#include "CoreTypes.h"
 #include "Containers/UnrealString.h"
-#include "UObject/NameTypes.h"
-#include "Serialization/MemoryArchive.h"
+#include "CoreTypes.h"
+#include "Memory/MemoryFwd.h"
+#include "Memory/MemoryView.h"
 #include "Serialization/LargeMemoryData.h"
+#include "Serialization/MemoryArchive.h"
+#include "UObject/NameTypes.h"
 
 /**
 * Archive for storing a large amount of arbitrary data to memory
 */
-class CORE_API FLargeMemoryWriter : public FMemoryArchive
+class FLargeMemoryWriter : public FMemoryArchive
 {
 public:
 	
-	FLargeMemoryWriter(const int64 PreAllocateBytes = 0, bool bIsPersistent = false, const TCHAR* InFilename = nullptr);
+	CORE_API FLargeMemoryWriter(const int64 PreAllocateBytes = 0, bool bIsPersistent = false, const TCHAR* InFilename = nullptr);
 
-	virtual void Serialize(void* InData, int64 Num) override;
+	CORE_API virtual void Serialize(void* InData, int64 Num) override;
 
 	/**
 	* Returns the name of the Archive.  Useful for getting the name of the package a struct or object
@@ -25,7 +27,7 @@ public:
 	*
 	* This is overridden for the specific Archive Types
 	**/
-	virtual FString GetArchiveName() const override;
+	CORE_API virtual FString GetArchiveName() const override;
 
 	/**
 	 * Gets the total size of the data written
@@ -38,7 +40,16 @@ public:
 	/**
 	 * Returns the written data. To release this archive's ownership of the data, call ReleaseOwnership()
 	 */
-	uint8* GetData() const;
+	CORE_API uint8* GetData() const;
+
+	/**
+	 * Returns a view on the written data
+	 * 
+	 * The view does not own the memory, so you must make sure you keep the memory writer
+	 * alive while you are using the returned view.
+	 * 
+	 */
+	inline FMemoryView GetView() const { return MakeMemoryView(GetData(), Data.GetSize()); }
 
 	/** 
 	 * Releases ownership of the written data
@@ -49,6 +60,14 @@ public:
 	FORCEINLINE uint8* ReleaseOwnership()
 	{
 		return Data.ReleaseOwnership();
+	}
+
+	/**
+	 * Reserves memory such that the writer can contain at least Size number of bytes.
+	 */
+	void Reserve(int64 Size)
+	{
+		Data.Reserve(Size);
 	}
 
 private:

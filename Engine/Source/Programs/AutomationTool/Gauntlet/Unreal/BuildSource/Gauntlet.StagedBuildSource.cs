@@ -14,11 +14,15 @@ namespace Gauntlet
 
 	public class EditorBuild : IBuild 
 	{
+		public int PreferenceOrder { get { return 0; } }
+
 		public UnrealTargetPlatform Platform { get { return BuildHostPlatform.Current.Platform; } }
 
 		public UnrealTargetConfiguration Configuration { get; protected set; }
 
 		public BuildFlags Flags { get { return BuildFlags.CanReplaceCommandLine | BuildFlags.Loose; } }
+
+		public string Flavor { get { return ""; } }
 
 		public bool CanSupportRole(UnrealTargetRole InRoleType) { return InRoleType.UsesEditor(); }
 
@@ -33,6 +37,8 @@ namespace Gauntlet
 
 	public class PackagedBuild : IBuild
 	{
+		public virtual int PreferenceOrder { get { return 0; } }
+
 		public UnrealTargetPlatform Platform { get; protected set; }
 
 		public UnrealTargetConfiguration Configuration { get; protected set; }
@@ -41,23 +47,35 @@ namespace Gauntlet
 
 		public BuildFlags Flags { get; protected set; }
 
+		public string Flavor { get; protected set; }
+
 		public string BuildPath { get; protected set; }
 
-		public virtual bool CanSupportRole(UnrealTargetRole InRoleType) { return InRoleType == Role; }
+		public virtual bool CanSupportRole(UnrealTargetRole InRoleType)
+		{
+			if (InRoleType.IsEditor())
+			{
+				return Role.IsCookedEditor();
+			}
+			return InRoleType == Role;
+		}
 
-		public PackagedBuild(UnrealTargetPlatform InPlatform, UnrealTargetConfiguration InConfig, UnrealTargetRole InRole, string InBuildPath, BuildFlags InFlags)
+		public PackagedBuild(UnrealTargetPlatform InPlatform, UnrealTargetConfiguration InConfig, UnrealTargetRole InRole, string InBuildPath, BuildFlags InFlags, string InFlavor="")
 		{
 			Platform = InPlatform;
 			Configuration = InConfig;
 			Role = InRole;
 			BuildPath = InBuildPath;
-			Flags = InFlags | BuildFlags.Packaged;	// always add this.
+			Flags = InFlags | BuildFlags.Packaged;  // always add this.
+			Flavor = InFlavor;
 		}
 	}
 
 
 	public class StagedBuild : IBuild
 	{
+		public virtual int PreferenceOrder { get { return 1; } }
+
 		public UnrealTargetPlatform Platform { get; protected set; }
 
 		public UnrealTargetConfiguration Configuration { get; protected set; }
@@ -66,13 +84,22 @@ namespace Gauntlet
 
 		public BuildFlags Flags { get; protected set; }
 
+		public string Flavor { get; protected set; }
+
 		public string BuildPath { get; protected set; }
 
 		public string ExecutablePath { get; protected set; }
 
-		public virtual bool CanSupportRole(UnrealTargetRole InRoleType) { return InRoleType == Role; }
+		public virtual bool CanSupportRole(UnrealTargetRole InRoleType)
+		{
+			if (InRoleType.IsEditor())
+			{
+				return Role.IsCookedEditor();
+			}
+			return InRoleType == Role;
+		}
 
-		public StagedBuild(UnrealTargetPlatform InPlatform, UnrealTargetConfiguration InConfig, UnrealTargetRole InRole, string InBuildPath, string InExecutablePath)
+		public StagedBuild(UnrealTargetPlatform InPlatform, UnrealTargetConfiguration InConfig, UnrealTargetRole InRole, string InBuildPath, string InExecutablePath, string InFlavor="")
 		{
 			Platform = InPlatform;
 			Configuration = InConfig;
@@ -80,6 +107,7 @@ namespace Gauntlet
 			BuildPath = InBuildPath;
 			ExecutablePath = InExecutablePath;
 			Flags = BuildFlags.CanReplaceCommandLine | BuildFlags.CanReplaceExecutable | BuildFlags.Loose;
+			Flavor = InFlavor;
 		}
 
 		enum InstallStatus
@@ -142,14 +170,14 @@ namespace Gauntlet
 					Log.Verbose("\tCopying {0} to {1}", BuildPath, DestPath);
 					Utils.SystemHelpers.CopyDirectory(BuildPath, DestPath, Utils.SystemHelpers.CopyOptions.Mirror);
 				}
-				catch (Exception Ex)
+				catch
 				{
 					lock (Globals.MainLock)
 					{
 						LocalInstalls[InBuild].Status = InstallStatus.Error;
 					}
 
-					throw Ex;
+					throw;
 				}
 
 				lock (Globals.MainLock)
@@ -192,7 +220,7 @@ namespace Gauntlet
 			return DestPath;
 		}
 
-		public static IEnumerable<T> CreateFromPath<T>(UnrealTargetPlatform InPlatform, string InProjectName, string InPath, string InExecutableExtension)
+		public static IEnumerable<T> CreateFromPath<T>(UnrealTargetPlatform InPlatform, string InProjectName, string InPath, string InExecutableExtension, StagedBuildSource<T> VerificationBuildSource = null)
 			where T : StagedBuild
 		{
 			string BuildPath = InPath;
@@ -209,13 +237,17 @@ namespace Gauntlet
 				string EngineBinaryPath = Path.Combine(InPath, "Engine", "Binaries", InPlatform.ToString());
 				string GameBinaryPath = Path.Combine(InPath, InProjectName, "Binaries", InPlatform.ToString());
 
-				// Executable will either be Project*.exe or for content-only UE4Game.exe
-				string[] ExecutableMatches = new string[]
+				// Executable will either be Project*.exe or for content-only UnrealGame.exe
+				List<string> ExecutableMatches = new List<string>
 				{
 					ShortName + "*" + InExecutableExtension,
-					"UE4Game*" + InExecutableExtension,
+					"UnrealGame*" + InExecutableExtension,
 				};
-
+				foreach (KeyValuePair<string, UnrealTargetRole> ModuleAndRole in UnrealHelpers.CustomModuleToRoles)
+				{
+					ExecutableMatches.Add(string.Format("{0}*{1}", ModuleAndRole.Key, InExecutableExtension));
+				}
+				
 				// check 
 				// 1) Path/Project/Binaries/Platform
 				// 2) Path (content only builds on some platforms write out a stub exe here)
@@ -240,6 +272,11 @@ namespace Gauntlet
 						{
 							// Look at files & directories since apps on Mac are bundles
 							FileSystemInfo[] AppFiles = Di.GetFileSystemInfos(FileMatch);
+							if(string.IsNullOrEmpty(InExecutableExtension))
+							{
+								// Special case for empty extension (linux), filter out files with extension
+								AppFiles = AppFiles.Where(F => string.IsNullOrEmpty(F.Extension)).ToArray();
+							}
 							Binaries.AddRange(AppFiles);
 						}
 					}
@@ -249,26 +286,48 @@ namespace Gauntlet
 				{
 					UnrealTargetConfiguration Config = UnrealHelpers.GetConfigurationFromExecutableName(InProjectName, App.Name);
 					UnrealTargetRole Role = UnrealHelpers.GetRoleFromExecutableName(InProjectName, App.Name);
+					string Flavor = UnrealHelpers.GetBuildFlavorFromExecutableName(InProjectName, App.Name);
 
-					if (Config != UnrealTargetConfiguration.Unknown && Role != UnrealTargetRole.Unknown && !DiscoveredBuilds.Any(B => B.Configuration == Config))
+
+					// if we have a verificatio BuildSource object, verify the build is usable before we even create the build
+					if (VerificationBuildSource == null || VerificationBuildSource.ShouldMakeBuildAvailable(App.FullName))
 					{
-						// store the exe path as relative to the staged dir path
-						T NewBuild = Activator.CreateInstance(typeof(T), new object[] { InPlatform, Config, Role, InPath, Utils.SystemHelpers.MakePathRelative(App.FullName, InPath) }) as T;
-
-						if (App.Name.StartsWith("UE4Game", StringComparison.OrdinalIgnoreCase))
+						if (Config != UnrealTargetConfiguration.Unknown && Role != UnrealTargetRole.Unknown && !DiscoveredBuilds.Any(B => B.Configuration == Config && B.Role == Role && B.Flavor == Flavor))
 						{
-							NewBuild.Flags |= BuildFlags.ContentOnlyProject;
-						}
+							// store the exe path as relative to the staged dir path
+							T NewBuild = Activator.CreateInstance(typeof(T), new object[] { InPlatform, Config, Role, InPath, Utils.SystemHelpers.MakePathRelative(App.FullName, InPath), Flavor }) as T;
 
-						DiscoveredBuilds.Add(NewBuild);
+							if (App.Name.StartsWith("UnrealGame", StringComparison.OrdinalIgnoreCase))
+							{
+								NewBuild.Flags |= BuildFlags.ContentOnlyProject;
+							}
+
+							DiscoveredBuilds.Add(NewBuild);
+						}
 					}
 				}
 			}
 
 			return DiscoveredBuilds;
 		}
+
+		public static void CleanupInstalls()
+		{
+			lock (Globals.MainLock)
+			{
+				LocalInstalls.Clear();
+			}
+		}
 	}
 
+	public class NativeStagedBuild : StagedBuild
+	{
+		public NativeStagedBuild(UnrealTargetPlatform InPlatform, UnrealTargetConfiguration InConfig, UnrealTargetRole InRole, string InBuildPath, string InExecutablePath, string InFlavor = "")
+			: base(InPlatform, InConfig, InRole, InBuildPath, InExecutablePath, InFlavor)
+		{
+			Flags = BuildFlags.CanReplaceCommandLine | BuildFlags.Loose;
+		}
+	}
 
 	public abstract class StagedBuildSource<T> : IFolderBuildSource 
 		where T : StagedBuild
@@ -282,6 +341,11 @@ namespace Gauntlet
 		virtual public bool CanSupportPlatform(UnrealTargetPlatform InPlatform)
 		{
 			return InPlatform == Platform; 
+		}
+
+		virtual public bool ShouldMakeBuildAvailable(string AppPath)
+		{
+			return true;
 		}
 
 		virtual public string ExecutableExtension
@@ -339,7 +403,7 @@ namespace Gauntlet
 
 				foreach (DirectoryInfo Di in AllDirs)
 				{
-					IEnumerable<IBuild> FoundBuilds = StagedBuild.CreateFromPath<T>(Platform, InProjectName, Di.FullName, ExecutableExtension);
+					IEnumerable<IBuild> FoundBuilds = StagedBuild.CreateFromPath<T>(Platform, InProjectName, Di.FullName, ExecutableExtension, this);
 
 					if (FoundBuilds != null)
 					{

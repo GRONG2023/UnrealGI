@@ -7,14 +7,17 @@ using System.Text.RegularExpressions;
 using System.IO;
 using AutomationTool;
 using UnrealBuildTool;
-using Tools.DotNETCommon;
+using UnrealBuildBase;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
+using System.Security.Cryptography;
 
-public class MacPlatform : Platform
+public class MacPlatform : ApplePlatform
 {
 	/// <summary>
 	/// Default architecture to build projects for. Defaults to Intel
 	/// </summary>
-	protected string[] ProjectTargetArchitectures = { MacExports.IntelArchitecture };
+	protected UnrealArchitectures ProjectTargetArchitectures = new(UnrealArch.X64);
 
 	public MacPlatform()
 		: base(UnrealTargetPlatform.Mac)
@@ -34,23 +37,37 @@ public class MacPlatform : Platform
 
 			if (ConfigTargetArchicture.ToLower().Contains("intel"))
 			{
-				ProjectTargetArchitectures = new[] { MacExports.IntelArchitecture };
+				ProjectTargetArchitectures = new UnrealArchitectures(UnrealArch.X64);
 			}
 			else if (ConfigTargetArchicture.ToLower().Contains("apple"))
 			{
-				ProjectTargetArchitectures = new[] { MacExports.AppleArchitecture};
+				ProjectTargetArchitectures = new UnrealArchitectures(UnrealArch.Arm64);
 			}
 			else if (ConfigTargetArchicture.ToLower().Contains("universal"))
 			{
-				ProjectTargetArchitectures = new[] { MacExports.IntelArchitecture, MacExports.AppleArchitecture };
+				ProjectTargetArchitectures = new UnrealArchitectures(new[] { UnrealArch.X64, UnrealArch.Arm64 });
 			}
 		}		
 	}
 
+	public override DeviceInfo[] GetDevices()
+	{
+		List<DeviceInfo> Devices = new List<DeviceInfo>();
+
+		if (HostPlatform.Current.HostEditorPlatform == TargetPlatformType)
+		{
+			DeviceInfo LocalMachine = new DeviceInfo(TargetPlatformType, Unreal.MachineName, Unreal.MachineName,
+				Environment.OSVersion.Version.ToString(), "Computer", true, true);
+
+			Devices.Add(LocalMachine);
+		}
+
+		return Devices.ToArray();
+	}
 
 	public override string GetCookPlatform(bool bDedicatedServer, bool bIsClientOnly)
 	{
-		const string NoEditorCookPlatform = "MacNoEditor";
+		const string NoEditorCookPlatform = "Mac";
 		const string ServerCookPlatform = "MacServer";
 		const string ClientCookPlatform = "MacClient";
 
@@ -70,18 +87,7 @@ public class MacPlatform : Platform
 
 	public override string GetEditorCookPlatform()
 	{
-		return "Mac";
-	}
-
-	/// <summary>
-	/// Returns true if UAT can build this target for all Mac architectures
-	/// </summary>
-	/// <param name="InTarget"></param>
-	/// <param name="InParams"></param>
-	/// <returns></returns>
-	protected bool CanBuildTargetForAllArchitectures(UE4Build.BuildTarget InTarget, ProjectParams InParams)
-	{
-		return MacExports.TargetsWhitelistedForAppleSilicon.Contains(InTarget.TargetName, StringComparer.OrdinalIgnoreCase);
+		return "MacEditor";
 	}
 
 	/// <summary>
@@ -91,75 +97,21 @@ public class MacPlatform : Platform
 	/// <param name="Build"></param>
 	/// <param name="Agenda"></param>
 	/// <param name="Params"></param>
-	public override void PreBuildAgenda(UE4Build Build, UE4Build.BuildAgenda Agenda, ProjectParams Params)
+	public override void PreBuildAgenda(UnrealBuild Build, UnrealBuild.BuildAgenda Agenda, ProjectParams Params)
 	{
 		base.PreBuildAgenda(Build, Agenda, Params);
 
-		string LocalArchitecture = MacExports.HostArchitecture;
-
-		bool ProjectIsUniversal = ProjectTargetArchitectures.Count() > 1;
-
-		// Go through the agenda for all targets and set the architecture appropriately
-		foreach (UE4Build.BuildTarget Target in Agenda.Targets)
+		// Go through the agenda for all targets and set the architecture if needed
+		foreach (UnrealBuild.BuildTarget Target in Agenda.Targets)
 		{
-			bool IsTarget = Params.ClientCookedTargets.Contains(Target.TargetName) || Params.ServerCookedTargets.Contains(Target.TargetName);
-
-			// Default to Intel. 
-			string UBTArchitectureParam = MacExports.IntelArchitecture;
-
-			// Targets are easy. 
-			// - If the project is set to Intel/Apple we do that
-			// - If it's universal we build the local architecture unless distributing
-			// - SpecifiedArchitecture overrides these
-			if (IsTarget)
+			// if building for Distribution, and no arch is already specified, then get the distro architectures and use that for this build
+			// editors aren't usually distributed, so if we are doing distribution, it's probably not for the editor target, and we don't want to make universal 
+			// editors just to make a distribution client
+			if (Params.Distribution && !Target.TargetName.Contains("Editor") && !Target.UBTArgs.ToLower().Contains("-architecture="))
 			{
-				// If an architecture was specified, use that
-				if (!string.IsNullOrEmpty(Params.SpecifiedArchitecture))
-				{
-					UBTArchitectureParam = Params.SpecifiedArchitecture;
-					Log.TraceInformation("Building {0} as {1} due to -specifiedarchitecture", Target.TargetName, UBTArchitectureParam);
-				}
-				else
-				{
-					// If the project isn't marked as universal built what it's set to
-					if (!ProjectIsUniversal)
-					{
-						UBTArchitectureParam = ProjectTargetArchitectures.First();
-						Log.TraceInformation("Building {0} as {1}", Target.TargetName, UBTArchitectureParam);
-					}
-					else
-					{
-						// if it is universal, build everything for distribution or just the local architecture otherwise
-						if (Params.Distribution)
-						{
-							UBTArchitectureParam = string.Join("+", ProjectTargetArchitectures);
-							Log.TraceInformation("Building {0} as {1} for distribution", Target.TargetName, UBTArchitectureParam);
-						}
-						else
-						{
-							UBTArchitectureParam = LocalArchitecture;
-							Log.TraceInformation("Building {0} as {1} for local non-distribution", Target.TargetName, UBTArchitectureParam);
-						}
-					}
-				}
+				UnrealArchitectures DistroArches = UnrealArchitectureConfig.ForPlatform(UnrealTargetPlatform.Mac).DistributionArchitectures(Params.RawProjectPath, Target.TargetName);
+				Target.UBTArgs += " -architecture=" + DistroArches.ToString();
 			}
-			else
-			{
-				// We build tools for the local architecture if possible
-				if (CanBuildTargetForAllArchitectures(Target, Params) || LocalArchitecture == MacExports.IntelArchitecture)
-				{
-					UBTArchitectureParam = LocalArchitecture;
-					Log.TraceInformation("Building {0} as {1} for host", Target.TargetName, UBTArchitectureParam);
-				}
-				else if (MacExports.IsRunningOnAppleArchitecture)
-				{
-					// Tell them why to avoid confusion
-					Log.TraceInformation("Building {0} as {1} (arm64 not currently supported)", Target.TargetName, UBTArchitectureParam);
-					UBTArchitectureParam = MacExports.IntelArchitecture;
-				}
-			}
-
-			Target.UBTArgs += string.Format(" -architecture={0}", UBTArchitectureParam);
 		}
 	}
 
@@ -224,8 +176,8 @@ public class MacPlatform : Platform
 			SC.StageFile(StagedFileType.NonUFS, SplashImage);
 		}
 
-		// Stage the bootstrap executable
-		if (!Params.NoBootstrapExe)
+		// Stage the bootstrap executable (modern doesn't need it with full .apps)
+		if (!Params.NoBootstrapExe && !AppleExports.UseModernXcode(Params.RawProjectPath))
 		{
 			foreach (StageTarget Target in SC.StageTargets)
 			{
@@ -371,7 +323,7 @@ public class MacPlatform : Platform
 			string DestInfoPlist = File.ReadAllText(DestInfoPlistPath);
 
 			string AppIdentifier = GetValueFromInfoPlist(SrcInfoPlist, "CFBundleIdentifier");
-			if (AppIdentifier == "com.epicgames.UE4Game")
+			if (AppIdentifier == "com.epicgames.UnrealGame")
 			{
 				AppIdentifier = "";
 			}
@@ -406,7 +358,6 @@ public class MacPlatform : Platform
 			IProcessResult CommandResult = Run("otool", "-l \"" + ExePath + "\"", null, ERunOptions.None);
 			if (CommandResult.ExitCode == 0)
 			{
-				bool bModifiedWithInstallNameTool = false;
 				StringReader Reader = new StringReader(CommandResult.Output);
 				Regex RPathPattern = new Regex(@"^\s+path (?<rpath>.+)\s\(offset");
 				string ToRemovePattern = Params.CreateAppBundle ? "/../../../" : "@loader_path/../UE4/";
@@ -425,83 +376,92 @@ public class MacPlatform : Platform
 							if (RPath.Contains(ToRemovePattern))
 							{
 								Run("xcrun", "install_name_tool -delete_rpath \"" + RPath + "\" \"" + ExePath + "\"", null, ERunOptions.NoStdOutCapture);
-								bModifiedWithInstallNameTool = true;
 							}
 						}
 					}
-				}
-
-				// Now re-sign the exectuables if they were previously signed during staging. Modifying the binaries
-				// via install_name_tool _after_ signing them invalidates the signature.
-				if (bModifiedWithInstallNameTool && (Params.bCodeSign && !Params.SkipStage))
-				{
-					SC.StageTargetPlatform.SignExecutables(SC, Params);
 				}
 			}
 		}
 	}
 
-	public override void Package(ProjectParams Params, DeploymentContext SC, int WorkingCL)
+	private void FixupFrameworks(string TargetPath)
 	{
-		// package up the program, potentially with an installer for Mac
-		PrintRunTime();
+		DirectoryReference TargetCEFDir = DirectoryReference.Combine(new DirectoryReference(TargetPath), "Engine/Binaries/ThirdParty/CEF3/Mac");
+		DirectoryReference X86Framework = DirectoryReference.Combine(TargetCEFDir, "Chromium Embedded Framework x86.framework");
+		DirectoryReference X86Versions = DirectoryReference.Combine(X86Framework, "Versions");
+		DirectoryReference Arm64Framework = DirectoryReference.Combine(TargetCEFDir, "Chromium Embedded Framework arm64.framework");
+		DirectoryReference Arm64Versions = DirectoryReference.Combine(Arm64Framework, "Versions");
 
-		if (Params.Archive)
+		DirectoryReference EngineCEFDir = DirectoryReference.Combine(Unreal.EngineDirectory, "Binaries/ThirdParty/CEF3/Mac");
+		FileReference X86Zip = FileReference.Combine(EngineCEFDir, "Chromium Embedded Framework x86.framework.zip");
+		FileReference Arm64Zip = FileReference.Combine(EngineCEFDir, "Chromium Embedded Framework arm64.framework.zip");
+
+		// if the archive has a framework without Versions directory, it won't be allowed for App Store submission, so replace it with the zipped version
+		// that has the proper symlinks 
+		if (DirectoryReference.Exists(X86Framework) && !DirectoryReference.Exists(X86Versions))
 		{
-			// Remove extra RPATHs if we will be archiving the project
-			RemoveExtraRPaths(Params, SC);
+			Logger.LogInformation($"Replacing {X86Framework} with {X86Zip}...");
+
+			DirectoryReference.Delete(X86Framework, true);
+			Utils.RunLocalProcessAndLogOutput("/usr/bin/unzip", $"-q -o \"{X86Zip}\" -d \"{TargetCEFDir}\" -x \"__MACOSX/*\" \"*.DS_Store\"", Logger);
+		}
+		if (DirectoryReference.Exists(Arm64Framework) && !DirectoryReference.Exists(Arm64Versions))
+		{
+			Logger.LogInformation($"Replacing {Arm64Framework} with {Arm64Zip}...");
+
+			DirectoryReference.Delete(Arm64Framework, true);
+			Utils.RunLocalProcessAndLogOutput("/usr/bin/unzip", $"-q -o \"{Arm64Zip}\" -d \"{TargetCEFDir}\" -x \"__MACOSX/*\" \"*.DS_Store\"", Logger);
 		}
 	}
 
 	public override void ProcessArchivedProject(ProjectParams Params, DeploymentContext SC)
 	{
+		// nothing to do with modern
+		if (AppleExports.UseModernXcode(Params.RawProjectPath))
+		{
+			return;
+		}
+
 		if (Params.CreateAppBundle)
 		{
 			string ExeName = SC.StageExecutables[0];
-			string BundlePath = SC.IsCodeBasedProject ? CombinePaths(SC.ArchiveDirectory.FullName, ExeName + ".app") : BundlePath = CombinePaths(SC.ArchiveDirectory.FullName, SC.ShortProjectName + ".app");
+			string BundlePath = SC.IsCodeBasedProject ? CombinePaths(SC.ArchiveDirectory.FullName, ExeName + ".app") : CombinePaths(SC.ArchiveDirectory.FullName, SC.ShortProjectName + ".app");
 
 			if (SC.bIsCombiningMultiplePlatforms)
 			{
 				// when combining multiple platforms, don't merge the content into the .app, use the one in the Binaries directory
 				BundlePath = CombinePaths(SC.ArchiveDirectory.FullName, SC.ShortProjectName, "Binaries", "Mac", ExeName + ".app");
-				if (!Directory.Exists(BundlePath))
+				if (!DirectoryExists(BundlePath))
 				{
 					// if the .app wasn't there, just skip out (we don't require executables when combining)
 					return;
 				}
 			}
 
-			string TargetPath = CombinePaths(BundlePath, "Contents", "UE4");
+			string TargetPath = CombinePaths(BundlePath, "Contents", "UE");
 			if (!SC.bIsCombiningMultiplePlatforms)
 			{
-				if (Directory.Exists(BundlePath))
-				{
-					Directory.Delete(BundlePath, true);
-				}
+				DeleteDirectory(true, BundlePath);
 
 				string SourceBundlePath = CombinePaths(SC.ArchiveDirectory.FullName, SC.ShortProjectName, "Binaries", "Mac", ExeName + ".app");
-				if (!Directory.Exists(SourceBundlePath))
+				if (!DirectoryExists(SourceBundlePath))
 				{
 					SourceBundlePath = CombinePaths(SC.ArchiveDirectory.FullName, "Engine", "Binaries", "Mac", ExeName + ".app");
-					if (!Directory.Exists(SourceBundlePath))
+					if (!DirectoryExists(SourceBundlePath))
 					{
 						SourceBundlePath = CombinePaths(SC.ArchiveDirectory.FullName, "Engine", "Binaries", "Mac", "UE4.app");
 					}
 				}
-				Directory.Move(SourceBundlePath, BundlePath);
+				RenameDirectory(SourceBundlePath, BundlePath, true);
 
-				if (DirectoryExists(TargetPath))
-				{
-					Directory.Delete(TargetPath, true);
-				}
+				DeleteDirectory(true, TargetPath);
 
-				// First, move all files and folders inside the app bundle
 				string[] StagedFiles = Directory.GetFiles(SC.ArchiveDirectory.FullName, "*", SearchOption.TopDirectoryOnly);
 				foreach (string FilePath in StagedFiles)
 				{
 					string TargetFilePath = CombinePaths(TargetPath, Path.GetFileName(FilePath));
-					Directory.CreateDirectory(Path.GetDirectoryName(TargetFilePath));
-					File.Move(FilePath, TargetFilePath);
+					CreateDirectory(Path.GetDirectoryName(TargetFilePath));
+					RenameFile(FilePath, TargetFilePath, true);
 				}
 
 				string[] StagedDirectories = Directory.GetDirectories(SC.ArchiveDirectory.FullName, "*", SearchOption.TopDirectoryOnly);
@@ -511,59 +471,65 @@ public class MacPlatform : Platform
 					if (!DirName.EndsWith(".app"))
 					{
 						string TargetDirPath = CombinePaths(TargetPath, DirName);
-						Directory.CreateDirectory(Path.GetDirectoryName(TargetDirPath));
-						Directory.Move(DirPath, TargetDirPath);
+						CreateDirectory(Path.GetDirectoryName(TargetDirPath));
+						RenameDirectory(DirPath, TargetDirPath, true);
 					}
 				}
+
+				FixupFrameworks(TargetPath);
 			}
 
 			// Update executable name, icon and entry in Info.plist
 			string UE4GamePath = CombinePaths(BundlePath, "Contents", "MacOS", ExeName);
-			if (!SC.IsCodeBasedProject && ExeName != SC.ShortProjectName && File.Exists(UE4GamePath))
+			if (!SC.IsCodeBasedProject && ExeName != SC.ShortProjectName && FileExists(UE4GamePath))
 			{
 				string GameExePath = CombinePaths(BundlePath, "Contents", "MacOS", SC.ShortProjectName);
-				File.Delete(GameExePath);
-				File.Move(UE4GamePath, GameExePath);
+				DeleteFile(GameExePath);
+				RenameFile(UE4GamePath, GameExePath);
 
-				string DefaultIconPath = CombinePaths(BundlePath, "Contents", "Resources", "UE4Game.icns");
+				string DefaultIconPath = CombinePaths(BundlePath, "Contents", "Resources", "UnrealGame.icns");
 				string CustomIconSrcPath = CombinePaths(BundlePath, "Contents", "Resources", "Application.icns");
 				string CustomIconDestPath = CombinePaths(BundlePath, "Contents", "Resources", SC.ShortProjectName + ".icns");
-				if (File.Exists(CustomIconSrcPath))
+				if (FileExists(CustomIconSrcPath))
 				{
-					File.Delete(DefaultIconPath);
-					if (File.Exists(CustomIconDestPath))
-					{
-						File.Delete(CustomIconDestPath);
-					}
-					File.Move(CustomIconSrcPath, CustomIconDestPath);
+					DeleteFile(DefaultIconPath);
+					DeleteFile(CustomIconDestPath);
+					RenameFile(CustomIconSrcPath, CustomIconDestPath, true);
 				}
-				else if (File.Exists(DefaultIconPath))
+				else if (FileExists(DefaultIconPath))
 				{
-					if (File.Exists(CustomIconDestPath))
-					{
-						File.Delete(CustomIconDestPath);
-					}
-					File.Move(DefaultIconPath, CustomIconDestPath);
+					DeleteFile(CustomIconDestPath);
+					RenameFile(DefaultIconPath, CustomIconDestPath, true);
 				}
 
 				string InfoPlistPath = CombinePaths(BundlePath, "Contents", "Info.plist");
 				string InfoPlistContents = File.ReadAllText(InfoPlistPath);
 				InfoPlistContents = InfoPlistContents.Replace(ExeName, SC.ShortProjectName);
-				InfoPlistContents = InfoPlistContents.Replace("<string>UE4Game</string>", "<string>" + SC.ShortProjectName + "</string>");
-				File.Delete(InfoPlistPath);
-				File.WriteAllText(InfoPlistPath, InfoPlistContents);
+				InfoPlistContents = InfoPlistContents.Replace("<string>UnrealGame</string>", "<string>" + SC.ShortProjectName + "</string>");
+				DeleteFile(InfoPlistPath);
+				WriteAllText(InfoPlistPath, InfoPlistContents);
+
+				// we now need to re-sign the .app because we modified the .plist
+				// we codesign with ad-hoc, and if the Developer ID Application cert exists, attempt to use it, ignore any errors
+				Utils.RunLocalProcessAndReturnStdOut("/usr/bin/codesign", $"-f -s - \"{BundlePath}\"", null);
+				Utils.RunLocalProcessAndReturnStdOut("/usr/bin/codesign", $"-f -s \"Developer ID Application\" \"{BundlePath}\"", null);
 			}
+
+			// we now need to re-sign the .app because we modified the .plist
+			// we codesign with ad-hoc, and if the Developer ID Application cert exists, attempt to use it, ignore any errors
+			Utils.RunLocalProcessAndReturnStdOut("/usr/bin/codesign", $"-f -s - \"{BundlePath}\"", null);
+			Utils.RunLocalProcessAndReturnStdOut("/usr/bin/codesign", $"-f -s \"Developer ID Application\" \"{BundlePath}\"", null);
 
 			if (!SC.bIsCombiningMultiplePlatforms)
 			{
 				// creating these directories when the content isn't moved into the application causes it 
 				// to fail to load, and isn't needed
-				Directory.CreateDirectory(CombinePaths(TargetPath, "Engine", "Binaries", "Mac"));
-				Directory.CreateDirectory(CombinePaths(TargetPath, SC.ShortProjectName, "Binaries", "Mac"));
+				CreateDirectory(CombinePaths(TargetPath, "Engine", "Binaries", "Mac"));
+				CreateDirectory(CombinePaths(TargetPath, SC.ShortProjectName, "Binaries", "Mac"));
 			}
 
 			// Find any dSYM files in the Manifest_DebugFiles_Mac file, move them to the archive directory, and remove them from the manifest.
-			string[] DebugManifests = CommandUtils.FindFiles("Manifest_DebugFiles_Mac.txt", true, SC.ArchiveDirectory.FullName);
+			string[] DebugManifests = FindFiles("Manifest_DebugFiles_Mac.txt", true, SC.ArchiveDirectory.FullName);
 			if ( DebugManifests.Count() > 0 )
 			{
 				string DebugManifest=DebugManifests[0];
@@ -579,12 +545,12 @@ public class MacPlatform : Platform
 						string FoundDebugFile = ManifestLine.Substring(0, TabIndex);
 						if (FoundDebugFile.Contains(".dSYM"))
 						{
-							FoundDebugFile = CommandUtils.CombinePaths(TargetPath, FoundDebugFile);
+							FoundDebugFile = CombinePaths(TargetPath, FoundDebugFile);
 							string MovedDebugFile = CombinePaths(SC.ArchiveDirectory.FullName, Path.GetFileName(FoundDebugFile));
 
-							File.Move(FoundDebugFile, MovedDebugFile);
+							RenameFile(FoundDebugFile, MovedDebugFile);
 
-							Log.TraceInformation("Moving debug file: '{0}')", FoundDebugFile);
+							Logger.LogInformation("Moving debug file: '{FoundDebugFile}')", FoundDebugFile);
 							ManifestLines.RemoveAt(ManifestLineIndex);
 							ModifyManifest = true;
 						}
@@ -602,9 +568,9 @@ public class MacPlatform : Platform
 
 			if (ExeDSYMName != ProjectDSYMName)
 			{
-				if (File.Exists(ExeDSYMName))
+				if (FileExists(ExeDSYMName))
 				{
-					File.Move(ExeDSYMName, ProjectDSYMName);
+					RenameFile(ExeDSYMName, ProjectDSYMName);
 				}
 			}
 
@@ -614,7 +580,21 @@ public class MacPlatform : Platform
 
 	public override IProcessResult RunClient(ERunOptions ClientRunFlags, string ClientApp, string ClientCmdLine, ProjectParams Params)
 	{
-		if (!File.Exists(ClientApp))
+		if (AppleExports.UseModernXcode(Params.RawProjectPath))
+		{
+			// moden creates a full .app in the root of the Staged dir, but ClientApp as passed in is in Staged/Project/Binaries/Mac, which exists, but is not a full app
+			string ExeName = Path.GetFileNameWithoutExtension(ClientApp);
+			Int32 BaseDirLen = Params.BaseStageDirectory.Length;
+			string StageSubDir = ClientApp.Substring(BaseDirLen, ClientApp.IndexOf("/", BaseDirLen + 1) - BaseDirLen);
+			ClientApp = CombinePaths(Params.BaseStageDirectory, StageSubDir, $"{ExeName}.app/Contents/MacOS/{ExeName}");
+			if (!File.Exists(ClientApp))
+			{
+				// Could be blueprint only projects which ClientApp would be pointing at non-existing UnrealGame/UnrealClient
+				ExeName = Params.RawProjectPath.GetFileNameWithoutAnyExtensions();
+				ClientApp = CombinePaths(Params.BaseStageDirectory, StageSubDir, $"{ExeName}.app/Contents/MacOS/{ExeName}");
+			}
+		}
+		else if (!File.Exists(ClientApp))
 		{
 			if (Directory.Exists(ClientApp + ".app"))
 			{
@@ -653,40 +633,53 @@ public class MacPlatform : Platform
 
 	public override bool ShouldStageCommandLine(ProjectParams Params, DeploymentContext SC)
 	{
-		return false; // !String.IsNullOrEmpty(Params.StageCommandline) || !String.IsNullOrEmpty(Params.RunCommandline) || (!Params.IsCodeBasedProject && Params.NoBootstrapExe);
+		// modern mode doesn't use the Bootstrap wrapper app, so we always insert the commandline file into the .app so double-clicking the .app works
+		return AppleExports.UseModernXcode(Params.RawProjectPath); // !String.IsNullOrEmpty(Params.StageCommandline) || !String.IsNullOrEmpty(Params.RunCommandline) || (!Params.IsCodeBasedProject && Params.NoBootstrapExe);
 	}
 
 	public override bool SignExecutables(DeploymentContext SC, ProjectParams Params)
 	{
 		if (UnrealBuildTool.BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Mac)
 		{
-			// Sign everything we built
-			List<FileReference> FilesToSign = GetExecutableNames(SC);
-			LogInformation("RuntimeProjectRootDir: " + SC.RuntimeProjectRootDir);
-			foreach (var Exe in FilesToSign)
+			if (Params.Archive)
 			{
-				LogInformation("Signing: " + Exe);
-				string AppBundlePath = "";
-				if (Exe.IsUnderDirectory(DirectoryReference.Combine(SC.RuntimeProjectRootDir, "Binaries", SC.PlatformDir)))
-				{
-					LogInformation("Starts with Binaries");
-					AppBundlePath = CombinePaths(SC.RuntimeProjectRootDir.FullName, "Binaries", SC.PlatformDir, Path.GetFileNameWithoutExtension(Exe.FullName) + ".app");
-				}
-				else if (Exe.IsUnderDirectory(DirectoryReference.Combine(SC.RuntimeRootDir, "Engine/Binaries", SC.PlatformDir)))
-				{
-					LogInformation("Starts with Engine/Binaries");
-					AppBundlePath = CombinePaths("Engine/Binaries", SC.PlatformDir, Path.GetFileNameWithoutExtension(Exe.FullName) + ".app");
-				}
-				LogInformation("Signing: " + AppBundlePath);
-				CodeSign.SignMacFileOrFolder(AppBundlePath);
+				// Remove extra RPATHs if we will be archiving the project
+				Logger.LogInformation("Removing extraneous rpath entries");
+				RemoveExtraRPaths(Params, SC);
 			}
 
+			// with modern, the .app we'd want to sign is in the root of the staging directory, so this doesn't do anything,
+			// and that one is already signed. note this is only done when Staging, so it doesn't affect codesigning the editor
+			if (!AppleExports.UseModernXcode(Params.RawProjectPath))
+			{
+				// Sign everything we built
+				List<FileReference> FilesToSign = GetExecutableNames(SC);
+				Logger.LogInformation("{Text}", "RuntimeProjectRootDir: " + SC.RuntimeProjectRootDir);
+				foreach (var Exe in FilesToSign)
+				{
+					Logger.LogInformation("{Text}", "Signing: " + Exe);
+					string AppBundlePath = "";
+					if (Exe.IsUnderDirectory(DirectoryReference.Combine(SC.RuntimeProjectRootDir, "Binaries", SC.PlatformDir)))
+					{
+						Logger.LogInformation("Starts with Binaries");
+						AppBundlePath = CombinePaths(SC.RuntimeProjectRootDir.FullName, "Binaries", SC.PlatformDir, Path.GetFileNameWithoutExtension(Exe.FullName) + ".app");
+					}
+					else if (Exe.IsUnderDirectory(DirectoryReference.Combine(SC.RuntimeRootDir, "Engine/Binaries", SC.PlatformDir)))
+					{
+						Logger.LogInformation("Starts with Engine/Binaries");
+						AppBundlePath = CombinePaths("Engine/Binaries", SC.PlatformDir, Path.GetFileNameWithoutExtension(Exe.FullName) + ".app");
+					}
+
+					Logger.LogInformation("{Text}", "Signing: " + AppBundlePath);
+					CodeSign.SignMacFileOrFolder(AppBundlePath);
+				}
+			}
 		}
 		return true;
 	}
 
 	public override void StripSymbols(FileReference SourceFile, FileReference TargetFile)
 	{
-		MacExports.StripSymbols(SourceFile, TargetFile);
+		MacExports.StripSymbols(SourceFile, TargetFile, Log.Logger);
 	}
 }

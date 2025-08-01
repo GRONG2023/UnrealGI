@@ -30,6 +30,7 @@ public:
 	float		BarnDoorLength;
 	FRectLightRayTracingData* RayTracingData; // Render thread data only
 	UTexture*	SourceTexture;
+	uint32		RectAtlasId;
 
 	FRectLightSceneProxy(const URectLightComponent* Component);
 	virtual ~FRectLightSceneProxy();
@@ -39,7 +40,7 @@ public:
 	virtual bool HasSourceTexture() const override;
 
 	/** Accesses parameters needed for rendering the light. */
-	virtual void GetLightShaderParameters(FLightShaderParameters& LightParameters) const override;
+	virtual void GetLightShaderParameters(FLightRenderParameters& OutLightParameters, uint32 Flags=0) const override;
 
 	/**
 	* Sets up a projected shadow initializer for shadows from the entire scene.

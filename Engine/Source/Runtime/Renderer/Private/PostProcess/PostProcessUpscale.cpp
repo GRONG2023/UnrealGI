@@ -1,7 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "PostProcess/PostProcessUpscale.h"
-#include "SceneFilterRendering.h"
+#include "PostProcess/SceneFilterRendering.h"
+#include "DataDrivenShaderPlatformInfo.h"
+#include "SceneRendering.h"
 
 namespace
 {
@@ -51,7 +53,7 @@ TAutoConsoleVariable<int32> CVarUpscaleQuality(
 	TEXT(" 5: 36-tap Gaussian-filtered unsharp mask (very expensive, but good for extreme upsampling).\n"),
 	ECVF_Scalability | ECVF_RenderThreadSafe);
 
-FVector2D PaniniProjection(FVector2D OM, float d, float s)
+FVector2f PaniniProjection(FVector2f OM, float d, float s)
 {
 	float PaniniDirectionXZInvLength = 1.0f / FMath::Sqrt(1.0f + OM.X * OM.X);
 	float SinPhi = OM.X * PaniniDirectionXZInvLength;
@@ -59,7 +61,7 @@ FVector2D PaniniProjection(FVector2D OM, float d, float s)
 	float CosPhi = FMath::Sqrt(1.0f - SinPhi * SinPhi);
 	float S = (d + 1.0f) / (d + CosPhi);
 
-	return S * FVector2D(SinPhi, FMath::Lerp(TanTheta, TanTheta / CosPhi, s));
+	return S * FVector2f(SinPhi, FMath::Lerp(TanTheta, TanTheta / CosPhi, s));
 }
 } //! namespace
 
@@ -85,10 +87,10 @@ END_SHADER_PARAMETER_STRUCT()
 
 FPaniniProjectionParameters GetPaniniProjectionParameters(FPaniniProjectionConfig InPaniniConfig, const FViewInfo& View)
 {
-	const FVector2D FOVPerAxis = View.ViewMatrices.ComputeHalfFieldOfViewPerAxis();
-	const FVector2D ScreenPosToPaniniFactor = FVector2D(FMath::Tan(FOVPerAxis.X), FMath::Tan(FOVPerAxis.Y));
-	const FVector2D PaniniDirection = FVector2D(1.0f, 0.0f) * ScreenPosToPaniniFactor;
-	const FVector2D PaniniPosition = PaniniProjection(PaniniDirection, InPaniniConfig.D, InPaniniConfig.S);
+	const FVector2f FOVPerAxis = FVector2f(View.ViewMatrices.ComputeHalfFieldOfViewPerAxis());
+	const FVector2f ScreenPosToPaniniFactor = FVector2f(FMath::Tan(FOVPerAxis.X), FMath::Tan(FOVPerAxis.Y));
+	const FVector2f PaniniDirection = FVector2f(1.0f, 0.0f) * ScreenPosToPaniniFactor;
+	const FVector2f PaniniPosition = PaniniProjection(PaniniDirection, InPaniniConfig.D, InPaniniConfig.S);
 
 	const float WidthFit = ScreenPosToPaniniFactor.X / PaniniPosition.X;
 	const float ScreenPosScale = FMath::Lerp(1.0f, WidthFit, InPaniniConfig.ScreenFit);
@@ -182,8 +184,11 @@ FScreenPassTexture ISpatialUpscaler::AddDefaultUpscalePass(
 
 	if (!Output.IsValid())
 	{
-		FRDGTextureDesc OutputDesc = Inputs.SceneColor.Texture->Desc;
-		OutputDesc.Reset();
+		FRDGTextureDesc OutputDesc = FRDGTextureDesc::Create2D(
+			Inputs.SceneColor.Texture->Desc.Extent,
+			Inputs.SceneColor.Texture->Desc.Format,
+			FClearValueBinding::Black,
+			TexCreate_ShaderResource | TexCreate_RenderTargetable | GFastVRamConfig.Upscale);
 
 		if (Inputs.Stage == EUpscaleStage::PrimaryToSecondary)
 		{
@@ -197,8 +202,6 @@ FScreenPassTexture ISpatialUpscaler::AddDefaultUpscalePass(
 			OutputDesc.Extent = View.UnscaledViewRect.Max;
 			Output.ViewRect = View.UnscaledViewRect;
 		}
-
-		OutputDesc.Flags |= GFastVRamConfig.Upscale;
 
 		Output.Texture = GraphBuilder.CreateTexture(OutputDesc, TEXT("Upscale"));
 		Output.LoadAction = ERenderTargetLoadAction::EClear;
@@ -233,7 +236,7 @@ FScreenPassTexture ISpatialUpscaler::AddDefaultUpscalePass(
 	const TCHAR* StageName = StageNames[static_cast<uint32>(Inputs.Stage)];
 
 	GraphBuilder.AddPass(
-		RDG_EVENT_NAME("Upscale (%s) %dx%d", StageName, Output.ViewRect.Width(), Output.ViewRect.Height()),
+		RDG_EVENT_NAME("Upscale(%s Method=%d) %dx%d -> %dx%d", StageName, int32(Method), Inputs.SceneColor.ViewRect.Width(), Inputs.SceneColor.ViewRect.Height(), Output.ViewRect.Width(), Output.ViewRect.Height()),
 		PassParameters,
 		ERDGPassFlags::Raster,
 		[&View, bUsePaniniProjection, PixelShader, PassParameters, InputViewport, OutputViewport](FRHICommandList& RHICmdList)

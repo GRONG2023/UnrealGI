@@ -10,12 +10,12 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "LevelSequence.h"
 #include "Tracks/MovieSceneAudioTrack.h"
 #include "Sections/MovieSceneCinematicShotSection.h"
 #include "Tracks/MovieSceneCinematicShotTrack.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "XmlParser.h"
 
 #define LOCTEXT_NAMESPACE "FCPXMLMovieSceneTranslator"
@@ -84,10 +84,10 @@ bool FFCPXMLImporter::Import(UMovieScene* InMovieScene, FFrameRate InFrameRate, 
 		bSuccess = FCPXMLFile->Accept(ImportVisitor);
 
 		// Flip rows
-		if (ImportData->GetCinematicMasterTrackData(false).IsValid())
+		if (ImportData->GetCinematicData(false).IsValid())
 		{
 			int32 MaxVideoTrackRowIndex = ImportVisitor.GetMaxVideoTrackRowIndex();
-			for (TSharedPtr<FMovieSceneImportCinematicSectionData> SectionData : ImportData->GetCinematicMasterTrackData(false)->CinematicSections)
+			for (TSharedPtr<FMovieSceneImportCinematicSectionData> SectionData : ImportData->GetCinematicData(false)->CinematicSections)
 			{
 				if (SectionData.IsValid())
 				{
@@ -99,10 +99,10 @@ bool FFCPXMLImporter::Import(UMovieScene* InMovieScene, FFrameRate InFrameRate, 
 				}
 			}
 		}
-		if (ImportData->GetAudioMasterTrackData().IsValid())
+		if (ImportData->GetAudioData().IsValid())
 		{
 			int32 MaxAudioTrackRowIndex = ImportVisitor.GetMaxAudioTrackRowIndex();
-			for (TSharedPtr<FMovieSceneImportAudioSectionData> SectionData : ImportData->GetAudioMasterTrackData()->AudioSections)
+			for (TSharedPtr<FMovieSceneImportAudioSectionData> SectionData : ImportData->GetAudioData()->AudioSections)
 			{
 				if (SectionData.IsValid())
 				{

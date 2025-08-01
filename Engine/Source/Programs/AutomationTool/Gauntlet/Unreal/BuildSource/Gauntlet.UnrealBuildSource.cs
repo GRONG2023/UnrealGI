@@ -7,7 +7,7 @@ using UnrealBuildTool;
 using System.Text.RegularExpressions;
 using System.IO;
 using System.Linq;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 
 namespace Gauntlet
 {
@@ -49,11 +49,15 @@ namespace Gauntlet
 			{
 				foreach (string SearchPath in InSearchPaths)
 				{
-					DirectoryInfo SearchDir = new DirectoryInfo(Path.Combine(SearchPath, BuildRef));
-
-					if (SearchDir.Exists)
+					string AggregatedPath = Path.Combine(SearchPath, BuildRef);
+					if (AggregatedPath.Length > 0)
 					{
-						return SearchDir.FullName;
+						DirectoryInfo SearchDir = new DirectoryInfo(AggregatedPath);
+
+						if (SearchDir.Exists)
+						{
+							return SearchDir.FullName;
+						}
 					}
 				}
 
@@ -63,12 +67,7 @@ namespace Gauntlet
 
 		public bool CanSupportPlatform(UnrealTargetPlatform Platform)
 		{
-			// todo - need to return values of discovered builds
-			return Platform == UnrealTargetPlatform.Win64
-				|| Platform == UnrealTargetPlatform.PS4
-				|| Platform == UnrealTargetPlatform.XboxOne
-				|| Platform == UnrealTargetPlatform.Android
-				|| Platform == UnrealTargetPlatform.Mac;
+			return UnrealTargetPlatform.GetValidPlatforms().Contains(Platform);
 		}
 
 
@@ -246,6 +245,26 @@ namespace Gauntlet
 		}
 
 		/// <summary>
+		/// Adds the provided build to our list (calls ShouldMakeBuildAvailable to verify).
+		/// </summary>
+		/// <param name="InPlatform"></param>
+		/// <param name="NewBuild"></param>
+		virtual protected void AddBuild(IBuild NewBuild)
+		{
+			NewBuild = ShouldMakeBuildAvailable(NewBuild);
+
+			if (NewBuild != null)
+			{
+				if (!DiscoveredBuilds.ContainsKey(NewBuild.Platform))
+				{
+					DiscoveredBuilds[NewBuild.Platform] = new List<IBuild>();
+				}
+
+				DiscoveredBuilds[NewBuild.Platform].Add(NewBuild);
+			}
+		}
+
+		/// <summary>
 		/// Allows derived classes to nix or modify builds as they are discovered
 		/// </summary>
 		/// <param name="InBuild"></param>
@@ -254,6 +273,37 @@ namespace Gauntlet
 		{
 			return InBuild;
 		}
+
+		/// <summary>
+		/// Adds an Editor build to our list of available builds if one exists
+		/// </summary>
+		/// <param name="InUnrealPath"></param>
+		virtual protected IBuild CreateEditorBuild(DirectoryReference InUnrealPath, UnrealTargetConfiguration InConfiguration = UnrealTargetConfiguration.Development)
+		{
+			if (InUnrealPath != null)
+			{
+				// check for the editor
+				string EditorExe = Path.Combine(InUnrealPath.FullName, GetRelativeExecutablePath(UnrealTargetRole.Editor, BuildHostPlatform.Current.Platform, InConfiguration));
+
+				if (Utils.SystemHelpers.ApplicationExists(EditorExe))
+				{
+					EditorBuild NewBuild = new EditorBuild(EditorExe, InConfiguration);
+
+					return NewBuild;
+				}
+				else
+				{
+					Log.Info("No editor binaries found at {0}. Unable to create an editor build source.", EditorExe);
+				}
+			}
+			else
+			{
+				Log.Info("No path to Unreal found. Unable to create an editor build source.");
+			}
+
+			return null;
+		}
+
 
 		/// <summary>
 		/// True/false on whether we've tried to discover builds for the specified platform
@@ -270,7 +320,7 @@ namespace Gauntlet
 		/// for the provided platform
 		/// </summary>
 		/// <param name="InPlatform"></param>
-		void DiscoverBuilds(UnrealTargetPlatform InPlatform)
+		virtual protected void DiscoverBuilds(UnrealTargetPlatform InPlatform, UnrealTargetConfiguration InConfiguration = UnrealTargetConfiguration.Development)
 		{
 			if (!HaveDiscoveredBuilds(InPlatform))
 			{
@@ -280,10 +330,19 @@ namespace Gauntlet
 				// Add an editor build if this is our current platform.
 				if (InPlatform == BuildHostPlatform.Current.Platform)
 				{
-					AddBuild(CreateEditorBuild(UnrealPath));
+					IBuild EditorBuild = CreateEditorBuild(UnrealPath, InConfiguration);
+
+					if (EditorBuild == null)
+					{
+						Log.Info("Could not create editor build for project. Binaries are likely missing");
+					}
+					else
+					{
+						AddBuild(EditorBuild);
+					}
 				}
 
-				if (BuildPaths.Count() > 0)
+				if (BuildPaths.Any())
 				{
 					foreach (string Path in BuildPaths)
 					{
@@ -292,10 +351,16 @@ namespace Gauntlet
 
 						foreach (var BS in BuildSources)
 						{
+							if (!BS.BuildName.Contains(InPlatform.ToString(), StringComparison.OrdinalIgnoreCase))
+							{
+								continue;
+							}
+
 							IEnumerable<IBuild> Builds = BS.GetBuildsAtPath(ProjectName, Path);
 
 							foreach (IBuild Build in Builds)
 							{
+								Log.Info("Adding build {0} with flags {1} priority {2}", BS.BuildName, Build.Flags, Build.PreferenceOrder);
 								AddBuild(Build);
 							}
 						}
@@ -321,56 +386,15 @@ namespace Gauntlet
 		}
 
 		/// <summary>
-		/// Adds the provided build to our list (calls ShouldMakeBuildAvailable to verify).
-		/// </summary>
-		/// <param name="InPlatform"></param>
-		/// <param name="NewBuild"></param>
-		void AddBuild(IBuild NewBuild)
-		{
-			NewBuild = ShouldMakeBuildAvailable(NewBuild);
-
-			if (NewBuild != null)
-			{
-				if (!DiscoveredBuilds.ContainsKey(NewBuild.Platform))
-				{
-					DiscoveredBuilds[NewBuild.Platform] = new List<IBuild>();
-				}
-
-				DiscoveredBuilds[NewBuild.Platform].Add(NewBuild);
-			}
-		}
-
-		/// <summary>
-		/// Adds an Editor build to our list of available builds if one exists
-		/// </summary>
-		/// <param name="InUnrealPath"></param>
-		IBuild CreateEditorBuild(DirectoryReference InUnrealPath)
-		{
-			if (InUnrealPath != null)
-			{
-				// check for the editor
-				string EditorExe = Path.Combine(InUnrealPath.FullName, GetRelativeExecutablePath(UnrealTargetRole.Editor, BuildHostPlatform.Current.Platform, UnrealTargetConfiguration.Development));
-
-				if (Utils.SystemHelpers.ApplicationExists(EditorExe))
-				{
-					EditorBuild NewBuild = new EditorBuild(EditorExe, UnrealTargetConfiguration.Development);
-
-					return NewBuild;
-				}
-			}
-
-			return null;
-		}
-
-		/// <summary>
 		/// Returns all builds that match the specified parameters. If no builds have been discovered then that is performed first
 		/// </summary>
 		/// <param name="InRole"></param>
 		/// <param name="InPlatform"></param>
 		/// <param name="InConfiguration"></param>
 		/// <param name="InFlags"></param>
+		/// <param name="InFlavor">Optional special flavor of the build, e.g. asan/ubsan/clang/etc..., which can be added on top of a standard configuration.</param>
 		/// <returns></returns>
-		IEnumerable<IBuild> GetMatchingBuilds(UnrealTargetRole InRole, UnrealTargetPlatform? InPlatform, UnrealTargetConfiguration InConfiguration, BuildFlags InFlags)
+		IEnumerable<IBuild> GetMatchingBuilds(UnrealTargetRole InRole, UnrealTargetPlatform? InPlatform, UnrealTargetConfiguration InConfiguration, BuildFlags InFlags, string InFlavor="")
 		{
 			// can't get a build with no platform or if we have none
 			if (InPlatform == null)
@@ -380,7 +404,7 @@ namespace Gauntlet
 
 			if (!HaveDiscoveredBuilds(InPlatform.Value))
 			{
-				DiscoverBuilds(InPlatform.Value);
+				DiscoverBuilds(InPlatform.Value, InConfiguration);
 			}
 
 			IEnumerable<IBuild> PlatformBuilds = DiscoveredBuilds[InPlatform.Value];
@@ -389,7 +413,8 @@ namespace Gauntlet
 			{
 				if (B.CanSupportRole(InRole)
 					&& B.Configuration == InConfiguration
-					&& (B.Flags & InFlags) == InFlags)
+					&& (B.Flags & InFlags) == InFlags
+					&& (B.Flavor == InFlavor))
 				{
 					return true;
 				}
@@ -407,7 +432,8 @@ namespace Gauntlet
 				if ((InFlags & BuildFlags.CanReplaceExecutable) == BuildFlags.CanReplaceExecutable)
 				{
 					if (B.CanSupportRole(InRole)
-						&& (B.Flags & InFlags) == InFlags)
+						&& (B.Flags & InFlags) == InFlags
+						&& (B.Flavor == InFlavor))
 					{
 						Log.Warning("Build did not have configuration {0} for {1}, but selecting due to presence of -dev flag",
 							InConfiguration, InPlatform);
@@ -445,7 +471,7 @@ namespace Gauntlet
 			// Query our build list
 			if (Role.Platform != null)
 			{
-				var MatchingBuilds = GetMatchingBuilds(Role.RoleType, Role.Platform.Value, Role.Configuration, Role.RequiredBuildFlags);
+				var MatchingBuilds = GetMatchingBuilds(Role.RoleType, Role.Platform.Value, Role.Configuration, Role.RequiredBuildFlags, Role.RequiredFlavor);
 
 				if (MatchingBuilds.Count() > 0)
 				{
@@ -453,7 +479,7 @@ namespace Gauntlet
 				}
 			}
 
-			Reasons.Add(string.Format("No build at {0} that matches {1}", string.Join(",", BuildPaths), Role.ToString()));
+			Reasons.Add(string.Format("No build at {0} that matches {1} (RequiredFlags={2})", string.Join(",", BuildPaths), Role.ToString(), Role.RequiredBuildFlags.ToString()));
 
 			return false;
 		}
@@ -486,7 +512,7 @@ namespace Gauntlet
             Config.FilesToCopy = new List<UnrealFileToCopy>();
 
 			// new system of retrieving and encapsulating the info needed to install/launch. Android & Mac
-			Config.Build = GetMatchingBuilds(Role.RoleType, Role.Platform, Role.Configuration, Role.RequiredBuildFlags).FirstOrDefault();
+			Config.Build = GetMatchingBuilds(Role.RoleType, Role.Platform, Role.Configuration, Role.RequiredBuildFlags, Role.RequiredFlavor).OrderBy(B => B.PreferenceOrder).FirstOrDefault();
 
 			if (Config.Build == null && Role.IsNullRole() == false)
 			{
@@ -496,6 +522,8 @@ namespace Gauntlet
 				throw new AutomationException("No build found that can support a role of {0}.", Role);
 			}
 
+			Log.Info("Selected build {Build} for test run.", Config.Build.ToString());
+
 			if (Role.Options != null)
 			{
 				UnrealTestConfiguration ConfigOptions = Role.Options as UnrealTestConfiguration;
@@ -503,6 +531,7 @@ namespace Gauntlet
 			}
 
 			// Cleanup the commandline
+			Log.Info("Processing CommandLine {0}", Config.CommandLine);
 			Config.CommandLine = GenerateProcessedCommandLine(Config.CommandLine);
 
 			// Now add the project (the above code doesn't handle arguments without a leading - so do this last
@@ -549,7 +578,7 @@ namespace Gauntlet
 			// Break down Commandline into individual tokens 
 			Dictionary<string, string> CommandlineTokens = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 			// turn Name(p1,etc) into a collection of Name|(p1,etc) groups
-			MatchCollection Matches = Regex.Matches(InCommandLine, "(?<option>\\-?[\\w\\d.:\\[\\]\\/\\\\\\?]+)(=(?<value>(\"([^\"]*)\")|(\\S+)))?");
+			MatchCollection Matches = Regex.Matches(InCommandLine, "(?<option>\\-?[\\w\\d.:!\\[\\]\\/\\\\\\?]+)(=(?<value>(\"([^\"]*)\")|(\\S+)))?");
 
 			foreach (Match M in Matches)
 			{
@@ -608,43 +637,82 @@ namespace Gauntlet
 			return CommandlineToReturn;
 		}
 
-
 		/// <summary>
-		/// Given a platform, a build config, and true/false for client, returns the path to the binary for that config. E.g.
-		/// Win64, Shipping, false = Binaries\Win64\FooServer-Win64-Shipping.exe
+		/// Given a role, platform, and config, returns the path to the binary for that config. E.g. Binaries\Win64\FooServer-Win64-Shipping.exe
 		/// </summary>
+		/// <param name="TargetRole"></param>
 		/// <param name="TargetPlatform"></param>
-		/// <param name="BuildConfig"></param>
-		/// <param name="IsClient"></param>
+		/// <param name="TargetConfiguration"></param>
 		/// <returns></returns>
-		virtual public string GetRelativeExecutablePath(UnrealTargetRole TargetType, UnrealTargetPlatform TargetPlatform, UnrealTargetConfiguration TargetConfiguration)
+		virtual public string GetRelativeExecutablePath(UnrealTargetRole TargetRole, UnrealTargetPlatform TargetPlatform, UnrealTargetConfiguration TargetConfiguration)
 		{
 			string ExePath;
 
-			if (TargetType.UsesEditor())
+			if (TargetRole.UsesEditor() || TargetRole.IsEditor())
 			{
-				string ExeFileName = "UE4Editor";
-				if (TargetConfiguration != UnrealTargetConfiguration.Development)
+				bool HasCustomTarget = UnrealHelpers.CustomModuleToRoles.ContainsValue(UnrealTargetRole.Editor);
+				string EditorTarget = HasCustomTarget ? UnrealHelpers.CustomModuleToRoles.FirstOrDefault(M => M.Value == UnrealTargetRole.Editor).Key : string.Empty;
+				FileSystemReference EditorExe = null;
+
+				if (!HasCustomTarget)
 				{
-					ExeFileName += string.Format("-{0}-{1}", TargetPlatform.ToString(), TargetConfiguration.ToString());
+					try
+					{
+						EditorExe = ProjectUtils.GetProjectTarget(ProjectPath, UnrealBuildTool.TargetType.Editor, TargetPlatform, TargetConfiguration);
+					}
+					catch (Exception Ex)
+					{
+						string Message = string.Format("The project config is overriding build targets.\n"
+								+ "But no suitable editor build for {0} configuration found from target file.\n"
+								+ "{1}", TargetConfiguration, Ex.Message); 
+
+						if (BuildName.Equals("Editor", StringComparison.OrdinalIgnoreCase))
+						{
+							// An editor is being explicitly requested but no executable could be found from target file
+							// Hightlight the issue in the log and return an empty string to avoid taking an inappropriate editor
+							Log.Warning(Message);
+							return string.Empty;
+						}
+						Log.Info(Message);
+					}
 				}
 
-				ExeFileName += Platform.GetExeExtension(TargetPlatform);
+				if (EditorExe != null)
+				{
+					ExePath = EditorExe.FullName;
+					if (!string.IsNullOrEmpty(Globals.Params.ParseValue("EditorDir", null)))
+					{
+						/// Trim the Editor absolute path from what the target file provided as the editor dir is being overriden
+						/// https://regex101.com/r/7BttxH/1
+						ExePath = Regex.Replace(ExePath, @"(.+?)[/\\]((Engine[/\\])?Binaries[/\\].+)", "$2");
+					}
+				}
+				else
+				{
+					string ExeFileName = HasCustomTarget ? EditorTarget : "UnrealEditor";
+					if (TargetConfiguration != UnrealTargetConfiguration.Development)
+					{
+						ExeFileName += string.Format("-{0}-{1}", TargetPlatform.ToString(), TargetConfiguration.ToString());
+					}
 
-				ExePath = string.Format("Engine/Binaries/{0}/{1}", BuildHostPlatform.Current.Platform, ExeFileName);
+					ExeFileName += Platform.GetExeExtension(TargetPlatform);
+
+					string BasePath = HasCustomTarget ? Globals.Params.ParseValue("EditorDir", ProjectPath.Directory.FullName) : "Engine";
+					ExePath = string.Format("{0}/Binaries/{1}/{2}", BasePath, BuildHostPlatform.Current.Platform, ExeFileName);
+				}
 			}
 			else
 			{
 				string BuildType = "";
 
-				if (TargetType == UnrealTargetRole.Client)
+				if (TargetRole == UnrealTargetRole.Client)
 				{
 					if (!UsesSharedBuildType)
 					{
 						BuildType = "Client";
 					}
 				}
-				else if (TargetType == UnrealTargetRole.Server)
+				else if (TargetRole == UnrealTargetRole.Server)
 				{
 					if (!UsesSharedBuildType)
 					{
@@ -668,16 +736,16 @@ namespace Gauntlet
 					{
 						Flags |= BuildFlags.CanReplaceExecutable;
 					}
-                    if (Globals.Params.ParseParam("bulk"))
-                    {
-                        Flags |= BuildFlags.Bulk;
-                    }
+					if (Globals.Params.ParseParam("bulk"))
+					{
+						Flags |= BuildFlags.Bulk;
+					}
 					else if(Globals.Params.ParseParam("notbulk"))
 					{
 						Flags |= BuildFlags.NotBulk;
 					}
 
-                    var Build = GetMatchingBuilds(TargetType, TargetPlatform, TargetConfiguration, Flags).FirstOrDefault();
+					var Build = GetMatchingBuilds(TargetRole, TargetPlatform, TargetConfiguration, Flags, "").FirstOrDefault();
 
 					if (Build != null)
 					{
@@ -702,12 +770,12 @@ namespace Gauntlet
 
 					ExeFileName += Platform.GetExeExtension(TargetPlatform);
 
-					string BasePath = GetPlatformPath(TargetType, TargetPlatform);
+					string BasePath = GetPlatformPath(TargetRole, TargetPlatform);
 					string ProjectBinary = string.Format("{0}\\Binaries\\{1}\\{2}", ProjectName, TargetPlatform.ToString(), ExeFileName);
 					string StubBinary = Path.Combine(BasePath, ExeFileName);
 					string DevBinary = Path.Combine(Environment.CurrentDirectory, ProjectBinary);
 
-					string NonCodeProjectName = "UE4Game" + Platform.GetExeExtension(TargetPlatform);
+					string NonCodeProjectName = "UnrealGame" + Platform.GetExeExtension(TargetPlatform);
 					string NonCodeProjectBinary = Path.Combine(BasePath, "Engine", "Binaries", TargetPlatform.ToString());
 					NonCodeProjectBinary = Path.Combine(NonCodeProjectBinary, NonCodeProjectName);
 

@@ -2,6 +2,7 @@
 
 #include "AnimBlueprintCompilationContext.h"
 #include "AnimBlueprintCompiler.h"
+#include "AnimBlueprintExtension.h"
 
 TUniquePtr<IAnimBlueprintCompilationContext> IAnimBlueprintCompilationContext::Get(FKismetCompilerContext& InKismetCompiler)
 {
@@ -83,9 +84,34 @@ const TMap<UAnimGraphNode_Base*, FProperty*>& FAnimBlueprintCompilationContext::
 	return CompilerContext->AllocatedAnimNodes;
 }
 
-IAnimBlueprintCompilerHandler* FAnimBlueprintCompilationContext::GetHandlerInternal(FName InName) const
+const TMap<UAnimGraphNode_Base*, FProperty*>& FAnimBlueprintCompilationContext::GetAllocatedHandlerPropertiesByNodeImpl() const
 {
-	return CompilerContext->AnimBlueprintCompilerHandlerCollection.GetHandler<IAnimBlueprintCompilerHandler>(InName);
+	return CompilerContext->AllocatedAnimNodeHandlers;
+}
+
+void FAnimBlueprintCompilationContext::AddAttributesToNodeImpl(UAnimGraphNode_Base* InNode, TArrayView<const FName> InAttributes) const
+{
+	CompilerContext->AddAttributesToNode(InNode, InAttributes);
+}
+
+TArrayView<const FName> FAnimBlueprintCompilationContext::GetAttributesFromNodeImpl(UAnimGraphNode_Base* InNode) const
+{
+	return CompilerContext->GetAttributesFromNode(InNode);
+}
+
+bool FAnimBlueprintCompilationContext::IsAnimGraphNodeFoldedImpl(UAnimGraphNode_Base* InNode) const
+{
+	return CompilerContext->IsAnimGraphNodeFolded(InNode);
+}
+
+const IAnimBlueprintCompilationContext::FFoldedPropertyRecord* FAnimBlueprintCompilationContext::GetFoldedPropertyRecordImpl(UAnimGraphNode_Base* InNode, FName InPropertyName) const
+{
+	return CompilerContext->GetFoldedPropertyRecord(InNode, InPropertyName);
+}
+
+const FStructProperty* FAnimBlueprintCompilationContext::GetMutableDataPropertyImpl() const
+{
+	return CompilerContext->NewMutablesProperty;
 }
 
 FKismetCompilerContext* FAnimBlueprintCompilationContext::GetKismetCompiler() const
@@ -98,10 +124,15 @@ FCompilerResultsLog& FAnimBlueprintCompilationBracketContext::GetMessageLogImpl(
 	return CompilerContext->MessageLog;
 }
 
-IAnimBlueprintCompilerHandler* FAnimBlueprintCompilationBracketContext::GetHandlerInternal(FName InName) const
+const TMap<UAnimGraphNode_Base*, int32>& FAnimBlueprintCompilationBracketContext::GetAllocatedAnimNodeIndicesImpl() const
 {
-	return CompilerContext->AnimBlueprintCompilerHandlerCollection.GetHandler<IAnimBlueprintCompilerHandler>(InName);
-}	
+	return CompilerContext->AllocatedAnimNodeIndices;
+}
+
+const TMap<UAnimGraphNode_Base*, FProperty*>& FAnimBlueprintCompilationBracketContext::GetAllocatedHandlerPropertiesByNodeImpl() const
+{
+	return CompilerContext->AllocatedAnimNodeHandlers;
+}
 
 FCompilerResultsLog& FAnimBlueprintCopyTermDefaultsContext::GetMessageLogImpl() const
 {
@@ -126,9 +157,4 @@ UEdGraph* FAnimBlueprintPostExpansionStepContext::GetConsolidatedEventGraphImpl(
 const FKismetCompilerOptions& FAnimBlueprintPostExpansionStepContext::GetCompileOptionsImpl() const
 {
 	return CompilerContext->CompileOptions;
-}
-
-IAnimBlueprintCompilerHandler* FAnimBlueprintPostExpansionStepContext::GetHandlerInternal(FName InName) const
-{
-	return CompilerContext->AnimBlueprintCompilerHandlerCollection.GetHandler<IAnimBlueprintCompilerHandler>(InName);
 }

@@ -2,19 +2,25 @@
 #pragma once
 
 #include "ClothPhysicalMeshDataBase_Legacy.h"
+#include "Containers/Array.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "ClothPhysicalMeshDataNv_Legacy.generated.h"
+
+class UObject;
 
 /**
  * Deprecated, use FClothPhysicalMeshData instead.
  * NV specific spatial simulation data for a mesh.
  */
-UCLASS()
-class CLOTHINGSYSTEMRUNTIMENV_API UClothPhysicalMeshDataNv_Legacy: public UClothPhysicalMeshDataBase_Legacy
+UCLASS(MinimalAPI)
+class UClothPhysicalMeshDataNv_Legacy: public UClothPhysicalMeshDataBase_Legacy
 {
 	GENERATED_BODY()
 public:
-	UClothPhysicalMeshDataNv_Legacy();
-	virtual ~UClothPhysicalMeshDataNv_Legacy();
+	CLOTHINGSYSTEMRUNTIMENV_API UClothPhysicalMeshDataNv_Legacy();
+	CLOTHINGSYSTEMRUNTIMENV_API virtual ~UClothPhysicalMeshDataNv_Legacy();
 
 	// The distance that each vertex can move away from its reference (skinned) position
 	UPROPERTY()

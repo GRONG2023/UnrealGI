@@ -4,6 +4,7 @@
 #include "BoneIndices.h"
 #include "BonePose.h"
 #include "BoneControllers/AnimNode_RotationMultiplier.h"
+#include "Animation/AnimStats.h"
 #include "Animation/AnimTrace.h"
 
 /////////////////////////////////////////////////////
@@ -129,6 +130,8 @@ FQuat FAnimNode_RotationMultiplier::MultiplyQuatBasedOnSourceIndex(const FTransf
 void FAnimNode_RotationMultiplier::EvaluateSkeletalControl_AnyThread(FComponentSpacePoseContext& Output, TArray<FBoneTransform>& OutBoneTransforms)
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_ANIMNODE(EvaluateSkeletalControl_AnyThread)
+	ANIM_MT_SCOPE_CYCLE_COUNTER_VERBOSE(RotationMultiplier, !IsInGameThread());
+
 	check(OutBoneTransforms.Num() == 0);
 
 	if ( Multiplier != 0.f )

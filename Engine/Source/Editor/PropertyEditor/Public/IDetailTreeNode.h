@@ -108,6 +108,9 @@ struct FNodeWidgets
 	/** Layout data for the whole row widget. */
 	FNodeWidgetLayoutData WholeRowWidgetLayoutData;
 
+	/** Edit condition widget. */
+	TSharedPtr<SWidget> EditConditionWidget;
+
 	/** The actions which can be performed on the node widgets. */
 	FNodeWidgetActions Actions;
 };
@@ -116,6 +119,11 @@ class IDetailTreeNode
 {
 public:
 	virtual ~IDetailTreeNode() {}
+
+	/** 
+	 * @return Get the details view that this node is contained in.
+	 */
+	virtual class IDetailsView* GetNodeDetailsView() const = 0;
 
 	/**
 	 * @return The type of this node.  Should be used to determine any external styling to apply to the generated r ow
@@ -138,11 +146,12 @@ public:
 
 	/**
 	 * Gets the children of this tree node    
-	 * Note: Customizations can determine the visibility of children.  This will only return visible children
+	 * Note: Customizations can determine the visibility of children.  This will only return visible children if bInIgnoreVisibility if false
 	 *
-	 * @param OutChildren	The generated children
+	 * @param OutChildren			The generated children
+	 * @param bInIgnoreVisibility	Whether to return children regardless of visibility
 	 */
-	virtual void GetChildren(TArray<TSharedRef<IDetailTreeNode>>& OutChildren) = 0;
+	virtual void GetChildren(TArray<TSharedRef<IDetailTreeNode>>& OutChildren, const bool& bInIgnoreVisibility = false) = 0;
 
 	/**
 	 * Gets an identifier name for this node.  This is not a name formatted for display purposes, but can be useful for storing
@@ -150,10 +159,18 @@ public:
 	 */
 	virtual FName GetNodeName() const = 0;
 
+	/**
+	 * Get the property row that this node is represented by.
+	 */
 	virtual TSharedPtr<class IDetailPropertyRow> GetRow() const = 0;
 
 	/**
 	 * Gets the filter strings for this node in the tree.
 	 */
 	virtual void GetFilterStrings(TArray<FString>& OutFilterStrings) const = 0;
+
+	/**
+	 * Gets if this node should be initially collapsed by default.
+	 */
+	virtual bool GetInitiallyCollapsed() const = 0;
 };

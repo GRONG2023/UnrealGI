@@ -1,9 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ProfilerCommands.h"
+
+#if STATS
+
 #include "Misc/Paths.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Stats/StatsData.h"
 #include "ProfilerSession.h"
 #include "Widgets/SMultiDumpBrowser.h"
@@ -23,13 +26,13 @@ FProfilerCommands::FProfilerCommands()
 		TEXT( "ProfilerCommand" ), // Context name for fast lookup
 		NSLOCTEXT("Contexts", "ProfilerCommand", "Profiler Command"), // Localized context name for displaying
 		NAME_None, // Parent
-		FEditorStyle::GetStyleSetName() // Icon Style Set
+		FAppStyle::GetAppStyleSetName() // Icon Style Set
 	)
 { }
 
 
 /** UI_COMMAND takes long for the compile to optimize */
-PRAGMA_DISABLE_OPTIMIZATION
+UE_DISABLE_OPTIMIZATION_SHIP
 void FProfilerCommands::RegisterCommands()
 {
 	/*-----------------------------------------------------------------------------
@@ -68,7 +71,7 @@ void FProfilerCommands::RegisterCommands()
 
 	UI_COMMAND( EventGraph_SelectAllFrames, "Select all frames", "Selects all frames in the data graph and displays them in the event graph", EUserInterfaceActionType::Button, FInputChord() );
 }
-PRAGMA_ENABLE_OPTIMIZATION
+UE_ENABLE_OPTIMIZATION_SHIP
 
 //static_assert(sizeof(FProfilerActionManager) == 0, "Cannot contain any variables at this moment.");
 
@@ -202,7 +205,7 @@ void FProfilerActionManager::ProfilerManager_Load_Execute()
 			LOCTEXT("ProfilerManager_LoadFile_Desc", "Open profiler capture file...").ToString(),
 			ProfilingDirectory, 
 			TEXT(""), 
-			LOCTEXT("ProfilerManager_Load_FileFilter", "Stats files (*.ue4stats)|*.ue4stats|Raw Stats files (*.ue4statsraw)|*.ue4statsraw").ToString(), 
+			LOCTEXT("ProfilerManager_Load_FileFilter", "Stats files (*.uestats)|*.uestats|Raw Stats files (*.uestatsraw)|*.uestatsraw").ToString(), 
 			EFileDialogFlags::None,
 			OutFiles
 		);
@@ -250,7 +253,7 @@ void FProfilerActionManager::ProfilerManager_LoadMultiple_Execute()
 		if (!OutFolder.IsEmpty())
 		{
 			TArray<FString> FoundFiles;
-			FFileManagerGeneric::Get().FindFiles(FoundFiles, *OutFolder, TEXT(".ue4stats"));
+			FFileManagerGeneric::Get().FindFiles(FoundFiles, *OutFolder, TEXT(".uestats"));
 			for (FString &FilePath : FoundFiles)
 			{
 				const TCHAR* PathDelimiter = FPlatformMisc::GetDefaultPathSeparator();
@@ -354,3 +357,5 @@ bool FProfilerActionManager::OpenSettings_CanExecute() const
 }
 
 #undef LOCTEXT_NAMESPACE
+
+#endif // STATS

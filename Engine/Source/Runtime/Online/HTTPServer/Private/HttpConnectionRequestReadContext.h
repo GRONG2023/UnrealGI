@@ -8,6 +8,7 @@ struct FHttpConnection;
 
 class FSocket;
 
+DECLARE_LOG_CATEGORY_EXTERN(LogHttpConnectionRequestReadContext, Log, All);
 
 struct FHttpConnectionRequestReadContext final : public FHttpConnectionContext
 {
@@ -112,15 +113,6 @@ private:
 	 * @return true if content length is specified, false otherwise
 	 */
 	static bool ParseContentLength(const FHttpServerRequest& InRequest, int32& OutContentLength);
-
-	/**
-	 * Returns a decoded version of the percent-encoded passed in string
-	 *
-	 * @param EncodedString The percent encoded string to convert to string
-	 * @return The decoded string
-	 */
-	static FString UrlDecode(const FString& EncodedString);
-
 
 private:
 

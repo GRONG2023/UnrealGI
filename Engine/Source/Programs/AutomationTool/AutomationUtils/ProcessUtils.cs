@@ -9,7 +9,12 @@ using System.Diagnostics;
 using System.Management;
 using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using UnrealBuildTool;
+using UnrealBuildBase;
+using Microsoft.Extensions.Logging;
+
+using static AutomationTool.CommandUtils;
 
 namespace AutomationTool
 {
@@ -54,7 +59,7 @@ namespace AutomationTool
 		/// Creates a new process and adds it to the tracking list.
 		/// </summary>
 		/// <returns>New Process objects</returns>
-		public static IProcessResult CreateProcess(string AppName, bool bAllowSpew, bool bCaptureSpew, Dictionary<string, string> Env = null, LogEventType SpewVerbosity = LogEventType.Console, ProcessResult.SpewFilterCallbackType SpewFilterCallback = null)
+		public static IProcessResult CreateProcess(string AppName, bool bAllowSpew, bool bCaptureSpew, Dictionary<string, string> Env = null, LogEventType SpewVerbosity = LogEventType.Console, ProcessResult.SpewFilterCallbackType SpewFilterCallback = null, string WorkingDir = null)
 		{
 			var NewProcess = HostPlatform.Current.CreateProcess(AppName);
 			if (Env != null)
@@ -71,6 +76,11 @@ namespace AutomationTool
 					}
 				}
 			}
+			if (WorkingDir != null)
+			{
+				NewProcess.StartInfo.WorkingDirectory = WorkingDir;
+			}
+
 			var Result = new ProcessResult(AppName, NewProcess, bAllowSpew, bCaptureSpew, SpewVerbosity: SpewVerbosity, InSpewFilterCallback: SpewFilterCallback);
 			AddProcess(Result);
 			return Result;
@@ -102,34 +112,34 @@ namespace AutomationTool
 		/// </summary>
 		public static void KillAll()
 		{
-			List<IProcess> ProcessesToKill = new List<IProcess>();
+			List<IProcess> ProcessesToKill = null;
 			lock (SyncObject)
 			{
-				foreach (var ProcResult in ActiveProcesses)
-				{
-					if (!ProcResult.HasExited)
-					{
-						ProcessesToKill.Add(ProcResult);
-					}
-				}
+				ProcessesToKill = new List<IProcess>(ActiveProcesses);
 				ActiveProcesses.Clear();
 			}
-			// Remove processes that can't be killed
+
+			// Remove processes that have exited or can't be killed
 			for (int ProcessIndex = ProcessesToKill.Count - 1; ProcessIndex >= 0; --ProcessIndex )
 			{
-				var ProcessName = ProcessesToKill[ProcessIndex].GetProcessName();
+				IProcess Process =  ProcessesToKill[ProcessIndex];
+				var ProcessName = Process.GetProcessName();
+				if (Process.HasExited)
+				{
+					ProcessesToKill.RemoveAt(ProcessIndex);
+				}
 				if (!String.IsNullOrEmpty(ProcessName) && !CanBeKilled(ProcessName))
 				{
-					CommandUtils.LogLog("Ignoring process \"{0}\" because it can't be killed.", ProcessName);
+					Logger.LogDebug("Ignoring process \"{ProcessName}\" because it can't be killed.", ProcessName);
 					ProcessesToKill.RemoveAt(ProcessIndex);
 				}
 			}
 			if(ProcessesToKill.Count > 0)
 			{
-				CommandUtils.LogLog("Trying to kill {0} spawned processes.", ProcessesToKill.Count);
+				Logger.LogDebug("Trying to kill {Arg0} spawned processes.", ProcessesToKill.Count);
 				foreach (var Proc in ProcessesToKill)
 				{
-					CommandUtils.LogLog("  {0}", Proc.GetProcessName());
+					Logger.LogDebug("  {Arg0}", Proc.GetProcessName());
 				}
 				if (CommandUtils.IsBuildMachine)
 				{
@@ -143,12 +153,12 @@ namespace AutomationTool
 								if (!Proc.HasExited)
 								{
 									AllDone = false;
-									CommandUtils.LogLog("Waiting for process: {0}", Proc.GetProcessName());
+									Logger.LogDebug("Waiting for process: {Arg0}", Proc.GetProcessName());
 								}
 							}
 							catch (Exception)
 							{
-								CommandUtils.LogWarning("Exception Waiting for process");
+								Logger.LogWarning("Exception Waiting for process");
 								AllDone = false;
 							}
 						}
@@ -157,12 +167,12 @@ namespace AutomationTool
 							if (ProcessResult.HasAnyDescendants(Process.GetCurrentProcess()))
 							{
 								AllDone = false;
-								CommandUtils.LogInformation("Waiting for descendants of main process...");
+								Logger.LogInformation("Waiting for descendants of main process...");
 							}
 						}
 						catch (Exception Ex)
 						{
-							CommandUtils.LogWarning("Exception Waiting for descendants of main process. " + Ex);
+							Logger.LogWarning("{Text}", "Exception Waiting for descendants of main process. " + Ex);
 							AllDone = false;
 						}
 
@@ -180,27 +190,27 @@ namespace AutomationTool
 					{
 						if (!Proc.HasExited)
 						{
-							CommandUtils.LogLog("Killing process: {0}", ProcName);
-							Proc.StopProcess(false);
+							Logger.LogDebug("Killing process: {ProcName}", ProcName);
+							Proc.StopProcess();
 						}
 					}
 					catch (Exception Ex)
 					{
-						CommandUtils.LogWarning("Exception while trying to kill process {0}:", ProcName);
-						CommandUtils.LogWarning(LogUtils.FormatException(Ex));
+						Logger.LogWarning("Exception while trying to kill process {ProcName}:", ProcName);
+						Logger.LogWarning("{Text}", LogUtils.FormatException(Ex));
 					}
 				}
 				try
 				{
 					if (CommandUtils.IsBuildMachine && ProcessResult.HasAnyDescendants(Process.GetCurrentProcess()))
 					{
-						CommandUtils.LogLog("current process still has descendants, trying to kill them...");
+						Logger.LogDebug("current process still has descendants, trying to kill them...");
 						ProcessResult.KillAllDescendants(Process.GetCurrentProcess());
 					}
 				}
 				catch (Exception)
 				{
-					CommandUtils.LogWarning("Exception killing descendants of main process");
+					Logger.LogWarning("Exception killing descendants of main process");
 				}
 			}
 		}
@@ -212,11 +222,13 @@ namespace AutomationTool
 		void DisposeProcess();
 		void StdOut(object sender, DataReceivedEventArgs e);
 		void StdErr(object sender, DataReceivedEventArgs e);
-		int ExitCode{ get;set; }
-		string Output {get;}
-		Process ProcessObject {get;}
+		int ExitCode { get; set; }
+		bool bExitCodeSuccess { get; }
+		string Output { get; }
+		Process ProcessObject { get; }
 		string ToString();
 		void WaitForExit();
+		FileReference WriteOutputToFile(string FileName);
 	}
 	
 	/// <summary>
@@ -227,7 +239,7 @@ namespace AutomationTool
 		public delegate string SpewFilterCallbackType(string Message);
 
 		private int ProcessExitCode = -1;
-		private StringBuilder ProcessOutput;
+		private StringBuilder ProcessOutput = null;
 		private bool AllowSpew = true;
 		private LogEventType SpewVerbosity = LogEventType.Console;
 		private SpewFilterCallbackType SpewFilterCallback = null;
@@ -235,6 +247,8 @@ namespace AutomationTool
 		private Process Proc = null;
 		private AutoResetEvent OutputWaitHandle = new AutoResetEvent(false);
 		private AutoResetEvent ErrorWaitHandle = new AutoResetEvent(false);
+		private bool bStdOutSignalReceived = false;
+		private bool bStdErrSignalReceived = false;
 		private object ProcSyncObject;
 
 		public ProcessResult(string InAppName, Process InProc, bool bAllowSpew, bool bCaptureSpew = true, LogEventType SpewVerbosity = LogEventType.Console, SpewFilterCallbackType InSpewFilterCallback = null)
@@ -243,11 +257,8 @@ namespace AutomationTool
 			ProcSyncObject = new object();
 			Proc = InProc;
 			AllowSpew = bAllowSpew;
-			if(bCaptureSpew)
-			{
-				ProcessOutput = new StringBuilder();
-			}
-			else
+			ProcessOutput = bCaptureSpew ? new StringBuilder() : null;
+			if (!AllowSpew && !bCaptureSpew)
 			{
 				OutputWaitHandle.Set();
 				ErrorWaitHandle.Set();
@@ -260,13 +271,13 @@ namespace AutomationTool
 			}
 		}
 
-        ~ProcessResult()
-        {
-            if(Proc != null)
-            {
-                Proc.Dispose();
-            }
-        }
+		~ProcessResult()
+		{
+			if (Proc != null)
+			{
+				Proc.Dispose();
+			}
+		}
 
 		/// <summary>
 		/// Removes a process from the list of tracked processes.
@@ -276,29 +287,28 @@ namespace AutomationTool
 			ProcessManager.RemoveProcess(this);
 		}
 
-        /// <summary>
-        /// Log output of a remote process at a given severity.
-        /// To pretty up the output, we use a custom source so it will say the source of the process instead of this method name.
-        /// </summary>
-        /// <param name="Verbosity"></param>
-        /// <param name="Message"></param>
-        [MethodImplAttribute(MethodImplOptions.NoInlining)]
+		/// <summary>
+		/// Log output of a remote process at a given severity.
+		/// To pretty up the output, we use a custom source so it will say the source of the process instead of this method name.
+		/// </summary>
+		/// <param name="Verbosity"></param>
+		/// <param name="Message"></param>
 		private void LogOutput(LogEventType Verbosity, string Message)
 		{
-            Log.WriteLine(1, Verbosity, Message);
+			Log.WriteLine(Verbosity, Message);
 		}
-       
+
 		/// <summary>
 		/// Manually dispose of Proc and set it to null.
 		/// </summary>
-        public void DisposeProcess()
-        {
+		public void DisposeProcess()
+		{
 			if(Proc != null)
 			{
 				Proc.Dispose();
 				Proc = null;
 			}
-        }
+		}
 
 		/// <summary>
 		/// Process.OutputDataReceived event handler.
@@ -377,17 +387,6 @@ namespace AutomationTool
 		}
 
 		/// <summary>
-		/// Convenience operator for getting the exit code value.
-		/// </summary>
-		/// <param name="Result"></param>
-		/// <returns>Process exit code.</returns>
-		[Obsolete]
-		public static implicit operator int(ProcessResult Result)
-		{
-			return Result.ExitCode;
-		}
-
-		/// <summary>
 		/// Gets or sets the process exit code.
 		/// </summary>
 		public int ExitCode
@@ -395,6 +394,8 @@ namespace AutomationTool
 			get { return ProcessExitCode; }
 			set { ProcessExitCode = value; }
 		}
+
+		public bool bExitCodeSuccess => ExitCode == 0;
 
 		/// <summary>
 		/// Gets all std output the process generated.
@@ -479,61 +480,83 @@ namespace AutomationTool
 		public void WaitForExit()
 		{
 			bool bProcTerminated = false;
-			bool bStdOutSignalReceived = false;
-			bool bStdErrSignalReceived = false;
 			// Make sure the process objeect is valid.
 			lock (ProcSyncObject)
 			{
-				bProcTerminated = (Proc == null);
+				bProcTerminated = (Proc == null) || Proc.HasExited;
 			}
 			// Keep checking if we got all output messages until the process terminates.
-			if (!bProcTerminated)
+			Stopwatch Watch = Stopwatch.StartNew();
+			int MaxWaitUntilMessagesReceived = 60 * 1000;
+			int WaitTimeout = 500;
+			if (GlobalCommandLine.WaitForStdStreams >= 0)
 			{
-				// Check messages
-				int MaxWaitUntilMessagesReceived = 120;
-				while (MaxWaitUntilMessagesReceived > 0 && !(bStdOutSignalReceived && bStdErrSignalReceived))
+				MaxWaitUntilMessagesReceived = GlobalCommandLine.WaitForStdStreams;
+			}
+			if (MaxWaitUntilMessagesReceived > WaitTimeout)
+			{
+				WaitTimeout = 1 + (MaxWaitUntilMessagesReceived / 10);
+			}
+			while (!(bStdOutSignalReceived && bStdErrSignalReceived))
+			{
+				if (!bStdOutSignalReceived)
 				{
-					if (!bStdOutSignalReceived)
-					{
-						bStdOutSignalReceived = OutputWaitHandle.WaitOne(500);
-					}
-					if (!bStdErrSignalReceived)
-					{
-						bStdErrSignalReceived = ErrorWaitHandle.WaitOne(500);
-					}
-					// Check if the process terminated
-					lock (ProcSyncObject)
-					{
-						bProcTerminated = (Proc == null) || Proc.HasExited;
-					}
-					if (bProcTerminated)
-					{
-						// Process terminated but make sure we got all messages, don't wait forever though
-						MaxWaitUntilMessagesReceived--;
-					}
+					bStdOutSignalReceived = OutputWaitHandle.WaitOne(WaitTimeout);
 				}
-                if (!(bStdOutSignalReceived && bStdErrSignalReceived))
-                {
-					CommandUtils.LogLog("Waited for a long time for output of {0}, some output may be missing; we gave up.", AppName);
-                }
-
-				// Double-check if the process terminated
+				if (!bStdErrSignalReceived)
+				{
+					bStdErrSignalReceived = ErrorWaitHandle.WaitOne(WaitTimeout);
+				}
+				// Check if the process terminated
 				lock (ProcSyncObject)
 				{
 					bProcTerminated = (Proc == null) || Proc.HasExited;
-
-					if (Proc != null)
+				}
+				if (!bProcTerminated)
+				{
+					// Timeout starts when process has terminated
+					Watch.Restart();
+				}
+				else
+				{
+					if (Watch.ElapsedMilliseconds > MaxWaitUntilMessagesReceived)
 					{
-						if (!bProcTerminated)
-						{
-							// The process did not terminate yet but we've read all output messages, wait until the process terminates
-							Proc.WaitForExit();
-						}
-
-						ExitCode = Proc.ExitCode;
+						// Timeout passed, do not wait any longer
+						break;
 					}
 				}
 			}
+			if (!(bStdOutSignalReceived && bStdErrSignalReceived))
+			{
+				Logger.LogInformation("Waited for {0:n2}s for output of {AppName}, some output may be missing; we gave up.", Watch.Elapsed.TotalSeconds, AppName);
+			}
+
+			// Double-check if the process terminated
+			lock (ProcSyncObject)
+			{
+				bProcTerminated = (Proc == null) || Proc.HasExited;
+
+				if (Proc != null)
+				{
+					if (!bProcTerminated)
+					{
+						// The process did not terminate yet but we've read all output messages, wait until the process terminates
+						Proc.WaitForExit();
+					}
+
+					ExitCode = Proc.ExitCode;
+				}
+			}
+		}
+
+		public FileReference WriteOutputToFile(string FileName)
+		{
+			using (StreamWriter writer = new StreamWriter(FileName))
+			{
+				writer.Write(ProcessOutput);
+			}
+
+			return new FileReference(FileName);
 		}
 
 		/// <summary>
@@ -550,15 +573,18 @@ namespace AutomationTool
 			{
 				VisitedPids.Add(PossiblyRelatedId);
 				Process Parent = null;
-				using (ManagementObject ManObj = new ManagementObject(string.Format("win32_process.handle='{0}'", PossiblyRelatedId)))
+				if (OperatingSystem.IsWindows())
 				{
-					ManObj.Get();
-					int ParentId = Convert.ToInt32(ManObj["ParentProcessId"]);
-					if (ParentId == 0 || VisitedPids.Contains(ParentId))
+					using (ManagementObject ManObj = new ManagementObject(string.Format("win32_process.handle='{0}'", PossiblyRelatedId)))
 					{
-						return false;
+						ManObj.Get();
+						int ParentId = Convert.ToInt32(ManObj["ParentProcessId"]);
+						if (ParentId == 0 || VisitedPids.Contains(ParentId))
+						{
+							return false;
+						}
+						Parent = Process.GetProcessById(ParentId);  // will throw an exception if not spawned by us or not running
 					}
-					Parent = Process.GetProcessById(ParentId);  // will throw an exception if not spawned by us or not running
 				}
 				if (Parent != null)
 				{
@@ -598,7 +624,7 @@ namespace AutomationTool
 						IsOurDescendant(ProcessToKill, KillCandidate.Id, VisitedPids))
 					{
 						KilledPids.Add(KillCandidate.Id);
-						CommandUtils.LogLog("Trying to kill descendant pid={0}, name={1}", KillCandidate.Id, KillCandidate.ProcessName);
+						Logger.LogDebug("Trying to kill descendant pid={Arg0}, name={Arg1}", KillCandidate.Id, KillCandidate.ProcessName);
 						try
 						{
 							KillCandidate.Kill();
@@ -608,8 +634,8 @@ namespace AutomationTool
 						{
 							if(!KillCandidate.HasExited)
 							{
-								CommandUtils.LogWarning("Failed to kill descendant:");
-								CommandUtils.LogWarning(LogUtils.FormatException(Ex));
+								Logger.LogWarning("Failed to kill descendant:");
+								Logger.LogWarning("{Text}", LogUtils.FormatException(Ex));
 							}
 						}
 						break;  // exit the loop as who knows what else died, so let's get processes anew
@@ -618,15 +644,15 @@ namespace AutomationTool
 			} while (bKilledAChild);
 		}
 
-        /// <summary>
-        /// returns true if this process has any descendants
-        /// </summary>
-        /// <param name="ProcessToCheck">Process to check</param>
-        public static bool HasAnyDescendants(Process ProcessToCheck)
-        {
-            Process[] AllProcs = Process.GetProcesses();
-            foreach (Process KillCandidate in AllProcs)
-            {
+		/// <summary>
+		/// returns true if this process has any descendants
+		/// </summary>
+		/// <param name="ProcessToCheck">Process to check</param>
+		public static bool HasAnyDescendants(Process ProcessToCheck)
+		{
+			Process[] AllProcs = Process.GetProcesses();
+			foreach (Process KillCandidate in AllProcs)
+			{
 				// Silently skip InvalidOperationExceptions here, because it depends on the process still running. It may have terminated.
 				string ProcessName;
 				try
@@ -642,12 +668,12 @@ namespace AutomationTool
 				HashSet<int> VisitedPids = new HashSet<int>();
 				if (ProcessManager.CanBeKilled(ProcessName) && IsOurDescendant(ProcessToCheck, KillCandidate.Id, VisitedPids))
 				{
-					CommandUtils.LogLog("Descendant pid={0}, name={1}", KillCandidate.Id, ProcessName);
+					Logger.LogDebug("Descendant pid={Arg0}, name={ProcessName}", KillCandidate.Id, ProcessName);
 					return true;
 				}
-            }
-            return false;
-        }
+			}
+			return false;
+		}
 
 		public void StopProcess(bool KillDescendants = true)
 		{
@@ -663,29 +689,26 @@ namespace AutomationTool
 					Proc = null;
 				}
 				// Now actually kill the process and all its descendants if requested
-				if (KillDescendants)
-				{
-					KillAllDescendants(ProcToKill);
-				}
 				try
 				{
-					ProcToKill.Kill();
+					ProcToKill.Kill(KillDescendants);
 					ProcToKill.WaitForExit(60000);
 					if (!ProcToKill.HasExited)
 					{
-						CommandUtils.LogLog("Process {0} failed to exit.", ProcToKillName);
+						Logger.LogDebug("Process {ProcToKillName} failed to exit.", ProcToKillName);
 					}
 					else
 					{
-						CommandUtils.LogLog("Process {0} successfully exited.", ProcToKillName);
+						ExitCode = ProcToKill.ExitCode;
+						Logger.LogDebug("Process {ProcToKillName} successfully exited.", ProcToKillName);
 						OnProcessExited();
 					}
 					ProcToKill.Close();					
 				}
 				catch (Exception Ex)
 				{
-					CommandUtils.LogWarning("Exception while trying to kill process {0}:", ProcToKillName);
-					CommandUtils.LogWarning(LogUtils.FormatException(Ex));
+					Logger.LogWarning("Exception while trying to kill process {ProcToKillName}:", ProcToKillName);
+					Logger.LogWarning("{Text}", LogUtils.FormatException(Ex));
 				}
 			}
 		}
@@ -717,7 +740,7 @@ namespace AutomationTool
 			{
 				foreach (var Item in ExeToTimeInMs)
 				{
-					LogVerbose("Total {0}s to run " + Item.Key, Item.Value / 1000);
+					Logger.LogDebug("Total {Time}s to run {Exe}", Item.Value / 1000, Item.Key);
 				}
 				ExeToTimeInMs.Clear();
 			}
@@ -727,28 +750,52 @@ namespace AutomationTool
 		public enum ERunOptions
 		{
 			None = 0,
+			/// <summary>
+			/// If AllowSpew is set, then the redirected output from StdOut/StdErr is logged.
+			/// Not relevant when NoStdOutRedirect is set.
+			/// </summary>
 			AllowSpew = 1 << 0,
 			AppMustExist = 1 << 1,
 			NoWaitForExit = 1 << 2,
+			/// <summary>
+			/// If NoStdOutRedirect is set, then StdOut/StdErr output is not redirected, logged or captured.
+			/// Else, StdOut/StdErr is redirected and captured by default.
+			/// </summary>
 			NoStdOutRedirect = 1 << 3,
-            NoLoggingOfRunCommand = 1 << 4,
-            UTF8Output = 1 << 5,
+			NoLoggingOfRunCommand = 1 << 4,
+
+			/// <summary>
+			/// Output of the spawned process is expected to be encoded as UTF-8.
+			/// </summary>
+			UTF8Output = 1 << 5,
 
 			/// When specified with AllowSpew, the output will be TraceEventType.Verbose instead of TraceEventType.Information
 			SpewIsVerbose = 1 << 6,
-            /// <summary>
-            /// If NoLoggingOfRunCommand is set, it normally suppresses the run duration output. This turns it back on.
-            /// </summary>
-            LoggingOfRunDuration = 1 << 7,
+			/// <summary>
+			/// If NoLoggingOfRunCommand is set, it normally suppresses the run duration output. This turns it back on.
+			/// </summary>
+			LoggingOfRunDuration = 1 << 7,
 			/// <summary>
 			/// If set, a window is allowed to be created
 			/// </summary>
 			NoHideWindow = 1 << 8,
+			/// <summary>
+			/// If NoStdOutCapture is set, then the redirected output from StdOut/StdErr is not captured in the ProcessResult,
+			/// and ProcessResult.Output will return null.
+			/// Not relevant when NoStdOutRedirect is set.
+			/// </summary>
+			NoStdOutCapture = 1 << 9,
 
 			/// <summary>
-			/// Do not capture stdout in the process result
+			/// Output of the spawned process is expected to be encoded as UTF-16 (System.Text.UnicodeEncoding, in .NET terminology)
 			/// </summary>
-			NoStdOutCapture = 1 << 8,
+			UTF16Output = 1 << 10,
+
+			/// <summary>
+			/// If set, then use the shell to create the process, else the process will be created directly from the executable.
+			/// Will force NoStdOutRedirect since UseShellExecute is incompatible with redirection of stdout.
+			/// </summary>
+			UseShellExecute = 1 << 11,
 
 			Default = AllowSpew | AppMustExist,
 		}
@@ -763,6 +810,11 @@ namespace AutomationTool
 			if (FileExists(Quiet, App))
 			{
 				return App;
+			}
+
+			if (HostPlatform.Current.HostEditorPlatform == UnrealTargetPlatform.Win64 && !Path.HasExtension(App))
+			{
+				App += ".exe";
 			}
 
 			string ResolvedPath = null;
@@ -790,11 +842,11 @@ namespace AutomationTool
 
 			if (ResolvedPath != null)
 			{
-				Log.TraceVeryVerbose("Resolved {0} to {1}", App, ResolvedPath);
+				Logger.LogTrace("Resolved {App} to {ResolvedPath}", App, ResolvedPath);
 			}
 			else
 			{
-				Log.TraceVerbose("Could not resolve app {0}", App);
+				Logger.LogDebug("Could not resolve app {App}", App);
 			}
 
 			return ResolvedPath;
@@ -810,7 +862,7 @@ namespace AutomationTool
 		/// <param name="Env">Environment to pass to program.</param>
 		/// <param name="FilterCallback">Callback to filter log spew before output.</param>
 		/// <returns>Object containing the exit code of the program as well as it's stdout output.</returns>
-		public static IProcessResult Run(string App, string CommandLine = null, string Input = null, ERunOptions Options = ERunOptions.Default, Dictionary<string, string> Env = null, ProcessResult.SpewFilterCallbackType SpewFilterCallback = null, string Identifier = null)
+		public static IProcessResult Run(string App, string CommandLine = null, string Input = null, ERunOptions Options = ERunOptions.Default, Dictionary<string, string> Env = null, ProcessResult.SpewFilterCallbackType SpewFilterCallback = null, string Identifier = null, string WorkingDir = null)
 		{
 			App = ConvertSeparators(PathSeparator.Default, App);
 
@@ -823,6 +875,14 @@ namespace AutomationTool
 			// Check if the application exists, including the PATH directories.
 			if (Options.HasFlag(ERunOptions.AppMustExist) && !FileExists(Options.HasFlag(ERunOptions.NoLoggingOfRunCommand) ? true : false, App))
 			{
+				// in the case of something like "dotnet msbuild", split it up and put the msbuild on the commandline
+				// this could be generalized, but would have to account for spaces in the App part
+				if (App.StartsWith("dotnet "))
+				{
+					string[] Tokens = App.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+					App = Tokens[0];
+					CommandLine = $"{Tokens[1]} {CommandLine}";
+				}
 				string ResolvedPath = WhichApp(App);
 
 				if(string.IsNullOrEmpty(ResolvedPath))
@@ -835,27 +895,29 @@ namespace AutomationTool
 			var StartTime = DateTime.UtcNow;
 
 			LogEventType SpewVerbosity = Options.HasFlag(ERunOptions.SpewIsVerbose) ? LogEventType.Verbose : LogEventType.Console;
-            if (!Options.HasFlag(ERunOptions.NoLoggingOfRunCommand))
-            {
-                LogWithVerbosity(SpewVerbosity,"Running: " + App + " " + (String.IsNullOrEmpty(CommandLine) ? "" : CommandLine));
-            }
-
-			string PrevIndent = null;
-			if(Options.HasFlag(ERunOptions.AllowSpew))
+			if (!Options.HasFlag(ERunOptions.NoLoggingOfRunCommand))
 			{
-				PrevIndent = Tools.DotNETCommon.Log.Indent;
-				Tools.DotNETCommon.Log.Indent += "  ";
+				LogWithVerbosity(SpewVerbosity,"Running: " + App + " " + (String.IsNullOrEmpty(CommandLine) ? "" : CommandLine));
 			}
 
-			IProcessResult Result = ProcessManager.CreateProcess(App, Options.HasFlag(ERunOptions.AllowSpew), !Options.HasFlag(ERunOptions.NoStdOutCapture), Env, SpewVerbosity: SpewVerbosity, SpewFilterCallback: SpewFilterCallback);
-			try
+			bool bUseShellExecute = Options.HasFlag(ERunOptions.UseShellExecute);
+			bool bRedirectStdOut = !bUseShellExecute && !Options.HasFlag(ERunOptions.NoStdOutRedirect);
+			bool bAllowSpew = bRedirectStdOut && Options.HasFlag(ERunOptions.AllowSpew);
+			bool bCaptureSpew = bRedirectStdOut && !Options.HasFlag(ERunOptions.NoStdOutCapture);
+			IProcessResult Result = ProcessManager.CreateProcess(App, bAllowSpew, bCaptureSpew, Env, SpewVerbosity: SpewVerbosity, SpewFilterCallback: SpewFilterCallback, WorkingDir: WorkingDir);
+			using (LogIndentScope Scope = Options.HasFlag(ERunOptions.AllowSpew) ? new LogIndentScope("  ") : null)
 			{
 				Process Proc = Result.ProcessObject;
 
-				bool bRedirectStdOut = (Options & ERunOptions.NoStdOutRedirect) != ERunOptions.NoStdOutRedirect;
 				Proc.StartInfo.FileName = App;
-				Proc.StartInfo.Arguments = String.IsNullOrEmpty(CommandLine) ? "" : CommandLine;
-				Proc.StartInfo.UseShellExecute = false;
+
+				// Process Arguments follow windows conventions in .NET Core
+				// Which means single quotes ' are not considered quotes.
+				// see https://github.com/dotnet/runtime/issues/29857
+				// also see UE-102580
+				Proc.StartInfo.Arguments = String.IsNullOrEmpty(CommandLine) ? "" : CommandLine.Replace('\'', '\"');
+
+				Proc.StartInfo.UseShellExecute = bUseShellExecute;
 				if (bRedirectStdOut)
 				{
 					Proc.StartInfo.RedirectStandardOutput = true;
@@ -863,11 +925,32 @@ namespace AutomationTool
 					Proc.OutputDataReceived += Result.StdOut;
 					Proc.ErrorDataReceived += Result.StdErr;
 				}
-				Proc.StartInfo.RedirectStandardInput = Input != null;
+
+				// By default the standard input stream uses the current terminal input encoding (`Console.InputEncoding`),
+				// so let's make sure to set an explicit known input encoding (that doesn't produce a BOM).
+				if (Input != null)
+				{
+					Proc.StartInfo.RedirectStandardInput = true;
+
+					// Assume that if the application produces UTF-16, it also consumes UTF-16.
+					if ((Options & ERunOptions.UTF16Output) == ERunOptions.UTF16Output)
+					{
+						Proc.StartInfo.StandardInputEncoding = new UnicodeEncoding(false, false, false);
+					}
+					else
+					{
+						Proc.StartInfo.StandardInputEncoding = new UTF8Encoding(false);
+					}
+				}
+
 				Proc.StartInfo.CreateNoWindow = (Options & ERunOptions.NoHideWindow) == 0;
 				if ((Options & ERunOptions.UTF8Output) == ERunOptions.UTF8Output)
 				{
 					Proc.StartInfo.StandardOutputEncoding = new System.Text.UTF8Encoding(false, false);
+				}
+				else if ((Options & ERunOptions.UTF16Output) == ERunOptions.UTF16Output)
+				{
+					Proc.StartInfo.StandardOutputEncoding = new System.Text.UnicodeEncoding(false, false, false);
 				}
 				Proc.Start();
 
@@ -892,22 +975,19 @@ namespace AutomationTool
 					Result.ExitCode = -1;
 				}
 			}
-			finally
-			{
-				if(PrevIndent != null)
-				{
-					Tools.DotNETCommon.Log.Indent = PrevIndent;
-				}
-			}
 
 			if (!Options.HasFlag(ERunOptions.NoWaitForExit))
 			{
 				var BuildDuration = (DateTime.UtcNow - StartTime).TotalMilliseconds;
 				//AddRunTime(App, (int)(BuildDuration));
-				Result.ExitCode = Result.ProcessObject.ExitCode;
+				Process Proc = Result.ProcessObject;
+				if (Proc != null)
+				{
+					Result.ExitCode = Proc.ExitCode;
+				}
 				if (!Options.HasFlag(ERunOptions.NoLoggingOfRunCommand) || Options.HasFlag(ERunOptions.LoggingOfRunDuration))
 				{
-					LogWithVerbosity(SpewVerbosity, "Took {0}s to run {1}, ExitCode={2}", BuildDuration / 1000, Path.GetFileName(App), Result.ExitCode);
+					LogWithVerbosity(SpewVerbosity, "Took {0:n2}s to run {1}, ExitCode={2}", BuildDuration / 1000, Path.GetFileName(App), Result.ExitCode);
 				}
 				Result.OnProcessExited();
 				Result.DisposeProcess();
@@ -924,13 +1004,13 @@ namespace AutomationTool
 		/// <param name="LogName">Name of the logfile ( if null, executable name is used )</param>
 		/// <returns>The log file name.</returns>
 		public static string GetRunAndLogOnlyName(CommandEnvironment Env, string App, string LogName = null)
-        {
-            if (LogName == null)
-            {
-                LogName = Path.GetFileNameWithoutExtension(App);
-            }
-            return LogUtils.GetUniqueLogName(CombinePaths(Env.LogFolder, LogName));
-        }
+		{
+			if (LogName == null)
+			{
+				LogName = Path.GetFileNameWithoutExtension(App);
+			}
+			return LogUtils.GetUniqueLogName(CombinePaths(Env.LogFolder, LogName));
+		}
 
 		/// <summary>
 		/// Runs external program and writes the output to a logfile.
@@ -971,32 +1051,32 @@ namespace AutomationTool
 		/// <param name="Options">Defines the options how to run. See ERunOptions.</param>
 		/// <param name="FilterCallback">Callback to filter log spew before output.</param>
 		public static string RunAndLog(string App, string CommandLine, string Logfile = null, int MaxSuccessCode = 0, string Input = null, ERunOptions Options = ERunOptions.Default, Dictionary<string, string> EnvVars = null, ProcessResult.SpewFilterCallbackType SpewFilterCallback = null)
-        {
+		{
 			IProcessResult Result = Run(App, CommandLine, Input, Options, EnvVars, SpewFilterCallback);
-            if (!String.IsNullOrEmpty(Result.Output) && Logfile != null)
-            {
-                WriteToFile(Logfile, Result.Output);
-            }
-            else if (Logfile == null)
-            {
-                Logfile = "[No logfile specified]";
-            }
-            else
-            {
-                Logfile = "[None!, no output produced]";
-            }
+			if (!String.IsNullOrEmpty(Result.Output) && Logfile != null)
+			{
+				WriteToFile(Logfile, Result.Output);
+			}
+			else if (Logfile == null)
+			{
+				Logfile = "[No logfile specified]";
+			}
+			else
+			{
+				Logfile = "[None!, no output produced]";
+			}
 
-            if (Result.ExitCode > MaxSuccessCode || Result.ExitCode < 0)
-            {
-                throw new CommandFailedException((ExitCode)Result.ExitCode, String.Format("Command failed (Result:{3}): {0} {1}. See logfile for details: '{2}' ",
-                                                App, CommandLine, Path.GetFileName(Logfile), Result.ExitCode)){ OutputFormat = AutomationExceptionOutputFormat.Minimal };
-            }
-            if (!String.IsNullOrEmpty(Result.Output))
-            {
-                return Result.Output;
-            }
-            return "";
-        }
+			if (Result.ExitCode > MaxSuccessCode || Result.ExitCode < 0)
+			{
+				throw new CommandFailedException((ExitCode)Result.ExitCode, String.Format("Command failed (Result:{3}): {0} {1}. See logfile for details: '{2}' ",
+												App, CommandLine, Path.GetFileName(Logfile), Result.ExitCode)){ OutputFormat = AutomationExceptionOutputFormat.Minimal };
+			}
+			if (!String.IsNullOrEmpty(Result.Output))
+			{
+				return Result.Output;
+			}
+			return "";
+		}
 
 		/// <summary>
 		/// Runs external program and writes the output to a logfile.
@@ -1007,19 +1087,19 @@ namespace AutomationTool
 		/// <param name="FilterCallback">Callback to filter log spew before output.</param>
 		/// <returns>Whether the program executed successfully or not.</returns>
 		public static string RunAndLog(string App, string CommandLine, out int SuccessCode, string Logfile = null, Dictionary<string, string> EnvVars = null, ProcessResult.SpewFilterCallbackType SpewFilterCallback = null)
-        {
+		{
 			IProcessResult Result = Run(App, CommandLine, Env: EnvVars, SpewFilterCallback: SpewFilterCallback);
-            SuccessCode = Result.ExitCode;
-            if (Result.Output.Length > 0 && Logfile != null)
-            {
-                WriteToFile(Logfile, Result.Output);
-            }
-            if (!String.IsNullOrEmpty(Result.Output))
-            {
-                return Result.Output;
-            }
-            return "";
-        }
+			SuccessCode = Result.ExitCode;
+			if (Result.Output.Length > 0 && Logfile != null)
+			{
+				WriteToFile(Logfile, Result.Output);
+			}
+			if (!String.IsNullOrEmpty(Result.Output))
+			{
+				return Result.Output;
+			}
+			return "";
+		}
 
 		/// <summary>
 		/// Runs external program and writes the output to a logfile.
@@ -1031,9 +1111,9 @@ namespace AutomationTool
 		/// <param name="FilterCallback">Callback to filter log spew before output.</param>
 		/// <returns>Whether the program executed successfully or not.</returns>
 		public static string RunAndLog(CommandEnvironment Env, string App, string CommandLine, out int SuccessCode, string LogName = null, Dictionary<string, string> EnvVars = null, ProcessResult.SpewFilterCallbackType SpewFilterCallback = null)
-        {
+		{
 			return RunAndLog(App, CommandLine, out SuccessCode, GetRunAndLogOnlyName(Env, App, LogName), EnvVars, SpewFilterCallback);
-        }
+		}
 
 		/// <summary>
 		/// Runs UAT recursively
@@ -1048,11 +1128,11 @@ namespace AutomationTool
 			string LogSubdir = CombinePaths(CmdEnv.LogFolder, DirOnlyName, "");
 			for(int Attempt = 1;;Attempt++)
 			{
-                string[] ExistingFiles = FindFiles(DirOnlyName + "*", false, CmdEnv.LogFolder);
-                if (ExistingFiles.Length == 0)
-                {
-                    break;
-                }
+				string[] ExistingFiles = FindFiles(DirOnlyName + "*", false, CmdEnv.LogFolder);
+				if (ExistingFiles.Length == 0)
+				{
+					break;
+				}
 				if (Attempt == 1000)
 				{
 					throw new AutomationException("Couldn't seem to create a log subdir {0}", LogSubdir);
@@ -1075,7 +1155,7 @@ namespace AutomationTool
 				EnvironmentVars.Add(AutomationTool.EnvVarNames.LocalRoot, ""); // if we don't clear this out, it will think it is a build machine; it will rederive everything
 			}
 
-			IProcessResult Result = Run(CmdEnv.UATExe, CommandLine, null, ERunOptions.Default, EnvironmentVars, Identifier: Identifier);
+			IProcessResult Result = Run(Unreal.DotnetPath.FullName, $"\"{Env.AutomationToolDll}\" {CommandLine}", null, ERunOptions.Default, EnvironmentVars, Identifier: Identifier);
 			if (Result.ExitCode != 0)
 			{
 				throw new CommandFailedException(String.Format("Recursive UAT command failed (exit code {0})", Result.ExitCode)){ OutputFormat = AutomationExceptionOutputFormat.Silent };
@@ -1093,7 +1173,7 @@ namespace AutomationTool
 		{
 			while (!FileExists(LogFilename) && !LogProcess.HasExited)
 			{
-				LogInformation("Waiting for logging process to start...");
+				Logger.LogInformation("Waiting for logging process to start...");
 				Thread.Sleep(2000);
 			}
 			Thread.Sleep(1000);

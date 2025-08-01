@@ -7,7 +7,7 @@
 #include "TraceServices/Containers/Allocators.h"
 #include <limits>
 
-namespace Trace
+namespace TraceServices
 {
 
 struct FIntervalTimelineDefaultSettings
@@ -32,6 +32,8 @@ public:
 	virtual uint64 GetModCount() const override { return ModCount; }
 	virtual uint64 GetEventCount() const override { return Events.Num(); }
 	virtual const EventType& GetEvent(uint64 InIndex) const override { return Events[InIndex].Event; }
+	double GetEventStartTime(uint64 InIndex) const { return Events[InIndex].StartTime; }
+	double GetEventEndTime(uint64 InIndex) const { return Events[InIndex].EndTime; }
 	virtual double GetStartTime() const override { return Events.Num() > 0 ? Events[0].StartTime : 0.0; }
 	virtual double GetEndTime() const override { return Events.Num() > 0 ? Events[Events.Num() - 1].EndTime : 0.0; }
 	virtual void EnumerateEventsDownSampled(double IntervalStart, double IntervalEnd, double Resolution, typename ITimeline<EventType>::EventCallback Callback) const override { check(false); }
@@ -42,7 +44,7 @@ public:
 		{
 			Callback(true, InStartTime, InEvent);
 			Callback(false, InEndTime, InEvent);
-			return Trace::EEventEnumerate::Continue;
+			return EEventEnumerate::Continue;
 		});
 	}
 	
@@ -53,7 +55,7 @@ public:
 		while (Event)
 		{
 			const FEventPage* Page = EventIterator.GetCurrentPage();
-			if (Page->EndTime < IntervalStart || IntervalEnd < Page->BeginTime)
+			if ((Page->OpenEvents == 0 && Page->EndTime < IntervalStart) || IntervalEnd < Page->BeginTime)
 			{
 				if (!EventIterator.NextPage())
 				{
@@ -106,6 +108,7 @@ public:
 		LastPage->EndEventIndex = Index + 1;
 
 		++ModCount;
+		++LastPage->OpenEvents;
 
 		return Index;
 	}
@@ -121,6 +124,8 @@ public:
 		Page->EndTime = FMath::Max(Page->EndTime, EndTime);
 
 		++ModCount;
+		check(Page->OpenEvents>0);
+		--Page->OpenEvents;
 
 		return EventInternal.Event;
 	}
@@ -155,6 +160,7 @@ private:
 		uint64 EndEventIndex = 0;
 		FEventInternal* Items = nullptr;
 		uint64 Count = 0;
+		uint64 OpenEvents = 0;
 	};
 
 	TPagedArray<FEventInternal, FEventPage> Events;
@@ -163,4 +169,4 @@ private:
 	uint64 ModCount = 0;
 };
 
-}
+} // namespace TraceServices

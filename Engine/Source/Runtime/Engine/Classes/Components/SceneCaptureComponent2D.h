@@ -16,8 +16,8 @@ class FSceneInterface;
 /**
  *	Used to capture a 'snapshot' of the scene from a single plane and feed it to a render target.
  */
-UCLASS(hidecategories=(Collision, Object, Physics, SceneComponent), ClassGroup=Rendering, editinlinenew, meta=(BlueprintSpawnableComponent))
-class ENGINE_API USceneCaptureComponent2D : public USceneCaptureComponent
+UCLASS(hidecategories=(Collision, Object, Physics, SceneComponent), ClassGroup=Rendering, editinlinenew, meta=(BlueprintSpawnableComponent), MinimalAPI)
+class USceneCaptureComponent2D : public USceneCaptureComponent
 {
 	GENERATED_UCLASS_BODY()
 		
@@ -27,16 +27,32 @@ public:
 	TEnumAsByte<ECameraProjectionMode::Type> ProjectionType;
 
 	/** Camera field of view (in degrees). */
-	UPROPERTY(interp, EditAnywhere, BlueprintReadWrite, Category=Projection, meta=(DisplayName = "Field of View", UIMin = "5.0", UIMax = "170", ClampMin = "0.001", ClampMax = "360.0"))
+	UPROPERTY(interp, EditAnywhere, BlueprintReadWrite, Category=Projection, meta=(DisplayName = "Field of View", UIMin = "5.0", UIMax = "170", ClampMin = "0.001", ClampMax = "360.0", editcondition = "ProjectionType==0"))
 	float FOVAngle;
 
 	/** The desired width (in world units) of the orthographic view (ignored in Perspective mode) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Projection)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Projection, meta = (editcondition = "ProjectionType==1"))
 	float OrthoWidth;
 
-	/** Output render target of the scene capture that can be read in materals. */
+	/** Automatically determine a min/max Near/Far clip plane position depending on OrthoWidth value */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Projection, meta = (editcondition = "ProjectionType==1"))
+	bool bAutoCalculateOrthoPlanes;
+
+	/** Manually adjusts the planes of this camera, maintaining the distance between them. Positive moves out to the farplane, negative towards the near plane */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Projection, meta = (editcondition = "ProjectionType==1 && bAutoCalculateOrthoPlanes"))
+	float AutoPlaneShift;
+
+	/** Adjusts the near/far planes and the view origin of the current camera automatically to avoid clipping and light artefacting*/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Projection, meta = (editcondition = "ProjectionType==1"))
+	bool bUpdateOrthoPlanes;
+
+	/** If UpdateOrthoPlanes is enabled, this setting will use the cameras current height to compensate the distance to the general view (as a pseudo distance to view target when one isn't present) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Projection, meta = (editcondition = "ProjectionType==1 && bUpdateOrthoPlanes"))
+	bool bUseCameraHeightAsViewTarget;
+
+	/** Output render target of the scene capture that can be read in materials. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=SceneCapture)
-	class UTextureRenderTarget2D* TextureTarget;
+	TObjectPtr<class UTextureRenderTarget2D> TextureTarget;
 
 	/** When enabled, the scene capture will composite into the render target instead of overwriting its contents. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=SceneCapture)
@@ -49,7 +65,7 @@ public:
 	UPROPERTY(interp, Category=PostProcessVolume, BlueprintReadWrite, meta=(UIMin = "0.0", UIMax = "1.0"))
 	float PostProcessBlendWeight;
 
-	UPROPERTY(EditAnywhere, Category = Projection, meta = (InlineEditConditionToggle))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Projection, meta = (InlineEditConditionToggle))
 	uint32 bOverride_CustomNearClippingPlane : 1;
 
 	/** 
@@ -66,7 +82,23 @@ public:
 	UPROPERTY(BlueprintReadWrite, AdvancedDisplay, Category = Projection)
 	FMatrix CustomProjectionMatrix;
 
-	/** 
+	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "5.4 - bUseFauxOrthoViewPos has been deprecated alongside updates to Orthographic camera fixes"))
+	bool bUseFauxOrthoViewPos = false;
+
+	/** Render the scene in n frames (i.e TileCount) - Ignored in Perspective mode, works only in Orthographic mode when CaptureSource uses SceneColor (not FinalColor)
+	* If CaptureSource uses FinalColor, tiling will be ignored and a Warning message will be logged	*/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = Projection, meta = (editcondition = "ProjectionType==1"))
+	bool bEnableOrthographicTiling = false;
+
+	/** Number of X tiles to render. Ignored in Perspective mode, works only in Orthographic mode */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = Projection, meta = (ClampMin = "1", ClampMax = "64", editcondition = "ProjectionType==1 && bEnableOrthographicTiling"))
+	int32 NumXTiles = 4;
+
+	/** Number of Y tiles to render. Ignored in Perspective mode, works only in Orthographic mode */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = Projection, meta = (ClampMin = "1", ClampMax = "64", editcondition = "ProjectionType==1 && bEnableOrthographicTiling"))
+	int32 NumYTiles = 4;
+
+	/**
 	 * Enables a clip plane while rendering the scene capture which is useful for portals.  
 	 * The global clip plane must be enabled in the renderer project settings for this to work.
 	 */
@@ -81,6 +113,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category=SceneCapture)
 	FVector ClipPlaneNormal;
 	
+	/** Render scene capture as additional render passes of the main renderer rather than as an independent renderer. Can only apply to scene depth and device depth modes. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = SceneCapture, meta = (EditCondition = "CaptureSource == ESceneCaptureSource::SCS_SceneDepth || CaptureSource == ESceneCaptureSource::SCS_DeviceDepth"))
+	bool bRenderInMainRenderer = false;
+
 	/** 
 	 * True if we did a camera cut this frame. Automatically reset to false at every capture.
 	 * This flag affects various things in the renderer (such as whether to use the occlusion queries from last frame, and motion blur).
@@ -89,47 +125,46 @@ public:
 	UPROPERTY(Transient, BlueprintReadWrite, Category = SceneCapture)
 	uint32 bCameraCutThisFrame : 1;
 
-	/** Treat unrendered opaque pixels as fully translucent. This is important for effects such as exponential weight fog, so it does not get applied on unrendered opaque pixels. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = SceneCapture)
+	/** Whether to only render exponential height fog on opaque pixels which were rendered by the scene capture. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = SceneCapture, meta = (DisplayName = "Fog only on rendered pixels"))
 	uint32 bConsiderUnrenderedOpaquePixelAsFullyTranslucent : 1;
-
-	/** 
-	 * Scene captures render an extra flip pass for LDR color on GLES so that the final output is oriented correctly.
-	 * This check disabled the extra flip pass, improving performance, but causes the capture to be flipped vertically.
-	 * (Does not affect scene captures on other non-GLES renderers or with non-LDR output)
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = SceneCapture, meta = (DisplayName = "Disable Flip Copy GLES"))
-	bool bDisableFlipCopyGLES;
 
 	/** Array of scene view extensions specifically to apply to this scene capture */
 	TArray< TWeakPtr<ISceneViewExtension, ESPMode::ThreadSafe> > SceneViewExtensions;
 
+	/** Which tile to render of the orthographic view (ignored in Perspective mode) */
+	int32 TileID = 0;
+
 	//~ Begin UActorComponent Interface
-	virtual void OnComponentDestroyed(bool bDestroyingHierarchy) override;
-	virtual void OnRegister() override;
-	virtual void SendRenderTransform_Concurrent() override;
+	ENGINE_API virtual void OnComponentDestroyed(bool bDestroyingHierarchy) override;
+	ENGINE_API virtual void OnRegister() override;
+	ENGINE_API virtual void SendRenderTransform_Concurrent() override;
 	virtual bool RequiresGameThreadEndOfFrameUpdates() const override
 	{
 		// this method could probably be removed allowing them to run on any thread, but it isn't worth the trouble
 		return true;
 	}
-	virtual void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction *ThisTickFunction) override;
+	ENGINE_API virtual void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction *ThisTickFunction) override;
+
+	/** Reset Orthographic tiling counter */
+	ENGINE_API void ResetOrthographicTilingCounter();
+
 	//~ End UActorComponent Interface
 
 	//~ Begin UObject Interface
 #if WITH_EDITOR
-	virtual bool CanEditChange(const FProperty* InProperty) const override;
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	ENGINE_API virtual bool CanEditChange(const FProperty* InProperty) const override;
+	ENGINE_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif // WITH_EDITOR
 
-	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
-	virtual void Serialize(FArchive& Ar);
+	static ENGINE_API void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
+	ENGINE_API virtual void Serialize(FArchive& Ar);
 
 	//~ End UObject Interface
 
-	void SetCameraView(const FMinimalViewInfo& DesiredView);
+	ENGINE_API void SetCameraView(const FMinimalViewInfo& DesiredView);
 
-	virtual void GetCameraView(float DeltaTime, FMinimalViewInfo& OutDesiredView);
+	ENGINE_API virtual void GetCameraView(float DeltaTime, FMinimalViewInfo& OutDesiredView);
 
 	/** Adds an Blendable (implements IBlendableInterface) to the array of Blendables (if it doesn't exist) and update the weight */
 	UFUNCTION(BlueprintCallable, Category="Rendering")
@@ -139,8 +174,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rendering")
 	void RemoveBlendable(TScriptInterface<IBlendableInterface> InBlendableObject) { PostProcessSettings.RemoveBlendable(InBlendableObject); }
 
-	/** Render the scene to the texture the next time the main view is rendered. */
-	void CaptureSceneDeferred();
+	/**
+	 * Render the scene to the texture the next time the main view is rendered.
+	 * If r.SceneCapture.CullByDetailMode is set, nothing will happen if DetailMode is higher than r.DetailMode.
+	 */
+	ENGINE_API void CaptureSceneDeferred();
 
 	// For backwards compatibility
 	void UpdateContent() { CaptureSceneDeferred(); }
@@ -148,16 +186,26 @@ public:
 	/** 
 	 * Render the scene to the texture target immediately.  
 	 * This should not be used if bCaptureEveryFrame is enabled, or the scene capture will render redundantly. 
+	 * If r.SceneCapture.CullByDetailMode is set, nothing will happen if DetailMode is higher than r.DetailMode.
 	 */
 	UFUNCTION(BlueprintCallable,Category = "Rendering|SceneCapture")
-	void CaptureScene();
+	ENGINE_API void CaptureScene();
 
-	void UpdateSceneCaptureContents(FSceneInterface* Scene) override;
+	ENGINE_API void UpdateSceneCaptureContents(FSceneInterface* Scene) override;
+
+	/* Return if orthographic tiling rendering is enabled or not */
+	ENGINE_API bool GetEnableOrthographicTiling() const;
+
+	/* Return number of X tiles to render (to be used when orthographic tiling rendering is enabled) */
+	ENGINE_API int32 GetNumXTiles() const;
+
+	/* Return number of Y tiles to render (to be used when orthographic tiling rendering is enabled) */
+	ENGINE_API int32 GetNumYTiles() const;
 
 #if WITH_EDITORONLY_DATA
-	void UpdateDrawFrustum();
+	ENGINE_API void UpdateDrawFrustum();
 
 	/** The frustum component used to show visually where the camera field of view is */
-	class UDrawFrustumComponent* DrawFrustum;
+	TObjectPtr<class UDrawFrustumComponent> DrawFrustum;
 #endif
 };

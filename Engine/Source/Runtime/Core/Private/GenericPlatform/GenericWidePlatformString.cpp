@@ -1,12 +1,18 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "GenericPlatform/GenericWidePlatformString.h"
+
+#if PLATFORM_USE_GENERIC_STRING_IMPLEMENTATION
+
 #include "HAL/UnrealMemory.h"
-#include "Templates/UnrealTemplate.h"
 #include "Logging/LogCategory.h"
 #include "Logging/LogMacros.h"
+#include "Templates/UnrealTemplate.h"
 
-#if PLATFORM_TCHAR_IS_CHAR16
+#if WITH_LOW_LEVEL_TESTS
+#include "TestHarness.h"
+#include <catch2/generators/catch_generators.hpp>
+#endif
 
 DEFINE_LOG_CATEGORY_STATIC(LogStandardPlatformString, Log, All);
 
@@ -79,6 +85,12 @@ WIDECHAR* FGenericWidePlatformString::Strcat(WIDECHAR* Dest, SIZE_T DestCount, c
 
 int32 FGenericWidePlatformString::Strtoi( const WIDECHAR* Start, WIDECHAR** End, int32 Base )
 {
+#if PLATFORM_TCHAR_IS_4_BYTES || PLATFORM_TCHAR_IS_UTF8CHAR
+	unimplemented();
+#else
+	static_assert(sizeof(TCHAR) == 2, "TCHAR is expected to be 16-bit");
+#endif
+
 	if (End == nullptr)
 	{
 		return Strtoi(TCHAR_TO_UTF8(Start), nullptr, Base);
@@ -102,6 +114,12 @@ int32 FGenericWidePlatformString::Strtoi( const WIDECHAR* Start, WIDECHAR** End,
 
 int64 FGenericWidePlatformString::Strtoi64( const WIDECHAR* Start, WIDECHAR** End, int32 Base )
 {
+#if PLATFORM_TCHAR_IS_4_BYTES || PLATFORM_TCHAR_IS_UTF8CHAR
+	unimplemented();
+#else
+	static_assert(sizeof(TCHAR) == 2, "TCHAR is expected to be 16-bit");
+#endif
+
 	if (End == nullptr)
 	{
 		return Strtoi64(TCHAR_TO_UTF8(Start), nullptr, Base);
@@ -208,8 +226,8 @@ int iswspace(wint_t wc)
 #endif
 
 
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
-static const int OUTPUT_SIZE = 256;
+#if WITH_LOW_LEVEL_TESTS
+constexpr int OUTPUT_SIZE = 256;
 int32 TestGetVarArgs(WIDECHAR* OutputString, const WIDECHAR* Format, ...)
 {
 	va_list ArgPtr;
@@ -219,38 +237,56 @@ int32 TestGetVarArgs(WIDECHAR* OutputString, const WIDECHAR* Format, ...)
 	return Result;
 }
 
-void RunGetVarArgsTests()
+TEST_CASE("Core::PlatformString::GetVarArgs", "[Core][String][Smoke]")
 {
 	WIDECHAR OutputString[OUTPUT_SIZE];
 
 	TestGetVarArgs(OutputString, TEXT("Test A|%-20s|%20s|%10.2f|%-10.2f|"), TEXT("LEFT"), TEXT("RIGHT"), 33.333333, 66.666666);
-	checkf(FString(OutputString) == FString(TEXT("Test A|LEFT                |               RIGHT|     33.33|66.67     |")), OutputString);
+	CHECK_MESSAGE(OutputString, FString(OutputString) == FString(TEXT("Test A|LEFT                |               RIGHT|     33.33|66.67     |")));
 
 	TestGetVarArgs(OutputString, TEXT("Test B|Percents:%%%%%%%d|"), 3);
-	checkf(FString(OutputString) == FString(TEXT("Test B|Percents:%%%3|")), OutputString);
+	CHECK_MESSAGE(OutputString, FString(OutputString) == FString(TEXT("Test B|Percents:%%%3|")));
 
 	TestGetVarArgs(OutputString, TEXT("Test C|%d|%i|%X|%x|%u|"), 12345, 54321, 0x123AbC, 15, 99);
-	checkf(FString(OutputString) == FString(TEXT("Test C|12345|54321|123ABC|f|99|")), OutputString);
+	CHECK_MESSAGE(OutputString, FString(OutputString) == FString(TEXT("Test C|12345|54321|123ABC|f|99|")));
 
 	TestGetVarArgs(OutputString, TEXT("Test D|%p|"), 0x12345);
-	checkf(FString(OutputString) == FString(TEXT("Test D|0x12345|")), OutputString);
+#ifdef _MSC_VER
+	// MSVC's standard library formats pointers differently
+	CHECK_MESSAGE(OutputString, FString(OutputString) == FString(TEXT("Test D|0000000000012345|")));
+#else
+	// Pointer format (which we get from snprintf) varies from platform to platform.
+	// Call it to make sure it puts the output in the proper place, but don't test for the exact format
+//	CHECK_MESSAGE(OutputString, FString(OutputString) == FString(TEXT("Test D|0x12345|")));
+	{
+		FString OutputStringStr(OutputString);
+		CHECK_MESSAGE(OutputString, OutputStringStr.StartsWith(TEXT("Test D|"))
+			&& OutputStringStr.EndsWith(TEXT("|")) && OutputStringStr.Len() < TEXTVIEW("Test D||").Len() + 20);
+	}
+#endif
 
 	TestGetVarArgs(OutputString, TEXT("Test E|%" INT64_FMT "|"), int64(12345678912345LL));
-	checkf(FString(OutputString) == FString(TEXT("Test E|12345678912345|")), OutputString);
+	CHECK_MESSAGE(OutputString, FString(OutputString) == FString(TEXT("Test E|12345678912345|")));
 
 	TestGetVarArgs(OutputString, TEXT("Test F|%f|%e|%g|"), 123.456, 123.456, 123.456);
-	checkf(FString(OutputString) == FString(TEXT("Test F|123.456000|1.234560e+02|123.456|")), OutputString);
+	CHECK_MESSAGE(OutputString, FString(OutputString) == FString(TEXT("Test F|123.456000|1.234560e+02|123.456|")));
 
 	TestGetVarArgs(OutputString, TEXT("Test G|%" UPTRINT_X_FMT"|"), UPTRINT(49374));
-	checkf(FString(OutputString) == FString(TEXT("Test G|C0DE|")), OutputString);
+	CHECK_MESSAGE(OutputString, FString(OutputString) == FString(TEXT("Test G|C0DE|")));
 
 	TestGetVarArgs(OutputString, TEXT("Test H|%" UPTRINT_x_FMT "|"), UPTRINT(49374));
-	checkf(FString(OutputString) == FString(TEXT("Test H|c0de|")), OutputString);
+	CHECK_MESSAGE(OutputString, FString(OutputString) == FString(TEXT("Test H|c0de|")));
 
 	TestGetVarArgs(OutputString, TEXT("Test I|%" UINT64_FMT "|"), MAX_uint64);
-	checkf(FString(OutputString) == FString(TEXT("Test I|18446744073709551615|")), OutputString);
+	CHECK_MESSAGE(OutputString, FString(OutputString) == FString(TEXT("Test I|18446744073709551615|")));
+
+	TestGetVarArgs(OutputString, TEXT("Test J|%*c|"), 10, 'J');
+	CHECK_MESSAGE(OutputString, FString(OutputString) == FString(TEXT("Test J|         J|")));
+
+	TestGetVarArgs(OutputString, TEXT("Test K|%-5c|"), 'K');
+	CHECK_MESSAGE(OutputString, FString(OutputString) == FString(TEXT("Test K|K    |")));
 }
-#endif
+#endif // WITH_LOW_LEVEL_TESTS
 
 namespace
 {
@@ -375,13 +411,10 @@ namespace
 
 int32 FGenericWidePlatformString::GetVarArgs( WIDECHAR* Dest, SIZE_T DestSize, const WIDECHAR*& Fmt, va_list ArgPtr )
 {
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
-	static bool bTested = false;
-	if(!bTested)
-	{
-		bTested = true;
-		RunGetVarArgsTests();
-	}
+#if PLATFORM_TCHAR_IS_4_BYTES || PLATFORM_TCHAR_IS_UTF8CHAR
+	unimplemented();
+#else
+	static_assert(sizeof(TCHAR) == 2, "TCHAR is expected to be 16-bit");
 #endif
 
 	if (Fmt == nullptr)
@@ -409,22 +442,14 @@ int32 FGenericWidePlatformString::GetVarArgs( WIDECHAR* Dest, SIZE_T DestSize, c
 
 		const TCHAR *Percent = Src;
 		int FieldLen = 0;
+		bool bVariablePrecision = false;
 		int PrecisionLen = -1;
 
 		Src++; // skip the '%' char...
 
-		while (*Src == ' ')
-		{
-			if (!DestIter.Write(' '))
-			{
-				return -1;
-			}
-			Src++;
-		}
-
 		// Skip modifier flags that don't need additional processing;
 		// they still get passed to snprintf() below based on the conversion.
-		if (*Src == '+')
+		while (*Src == '+' || *Src == '#' || *Src == TEXT(' ') || *Src == TEXT('0'))
 		{
 			Src++;
 		}
@@ -454,6 +479,7 @@ int32 FGenericWidePlatformString::GetVarArgs( WIDECHAR* Dest, SIZE_T DestSize, c
 			const TCHAR *Cur = Src + 1;
 			if (*Cur == '*')
 			{
+				bVariablePrecision = true;
 				PrecisionLen = va_arg(ArgPtr, int32);
 				Cur++;
 			}
@@ -499,7 +525,17 @@ int32 FGenericWidePlatformString::GetVarArgs( WIDECHAR* Dest, SIZE_T DestSize, c
 			{
 				TCHAR Val = (TCHAR) va_arg(ArgPtr, int);
 				Src++;
-				if (!DestIter.Write(Val))
+				bool bSuccess = true;
+				if (FieldLen > 1)
+				{
+					bSuccess = !!DestIter.Write(TCHAR(' '), FieldLen - 1);
+				}
+				bSuccess = bSuccess && !!DestIter.Write(Val);
+				if (FieldLen < -1)
+				{
+					bSuccess = bSuccess && !!DestIter.Write(TCHAR(' '), FPlatformMath::Abs(FieldLen + 1));
+				}
+				if (!bSuccess)
 				{
 					return -1;
 				}
@@ -542,7 +578,7 @@ int32 FGenericWidePlatformString::GetVarArgs( WIDECHAR* Dest, SIZE_T DestSize, c
 				FmtBuf[CpyIdx] = 0;
 
 				int RetCnt = snprintf(AnsiNum, sizeof(AnsiNum), FmtBuf, Val);
-				if (!DestIter.Write(AnsiNum, RetCnt))
+				if (RetCnt < 0 || !DestIter.Write(AnsiNum, RetCnt))
 				{
 					return -1;
 				}
@@ -591,7 +627,7 @@ int32 FGenericWidePlatformString::GetVarArgs( WIDECHAR* Dest, SIZE_T DestSize, c
 				FmtBuf[CpyIdx] = 0;
 
 				int RetCnt = snprintf(AnsiNum, sizeof(AnsiNum), FmtBuf, Val);
-				if (!DestIter.Write(AnsiNum, RetCnt))
+				if (RetCnt < 0 || !DestIter.Write(AnsiNum, RetCnt))
 				{
 					return -1;
 				}
@@ -616,7 +652,7 @@ int32 FGenericWidePlatformString::GetVarArgs( WIDECHAR* Dest, SIZE_T DestSize, c
 				FmtBuf[CpyIdx] = 0;
 
 				int RetCnt = snprintf(AnsiNum, sizeof(AnsiNum), FmtBuf, Val);
-				if (!DestIter.Write(AnsiNum, RetCnt))
+				if (RetCnt < 0 || !DestIter.Write(AnsiNum, RetCnt))
 				{
 					return -1;
 				}
@@ -637,7 +673,7 @@ int32 FGenericWidePlatformString::GetVarArgs( WIDECHAR* Dest, SIZE_T DestSize, c
 				}
 
 				// treat %ld as %d. Also shorts for %h will be promoted to ints. This path also handles %li, %lu, %lx and %lX.
-				if ((Src[0] == 'l' && CharIsIntegerFormatSpecifier(Src[1])) || Src[0] == 'h')
+				if ((Src[0] == 'l' || Src[0] == 'h') && CharIsIntegerFormatSpecifier(Src[1]))
 				{
 					Src+=2;
 					long int Val = va_arg(ArgPtr, long int);
@@ -655,7 +691,7 @@ int32 FGenericWidePlatformString::GetVarArgs( WIDECHAR* Dest, SIZE_T DestSize, c
 					FmtBuf[CpyIdx] = 0;
 
 					int RetCnt = snprintf(AnsiNum, sizeof(AnsiNum), FmtBuf, Val);
-					if (!DestIter.Write(AnsiNum, RetCnt))
+					if (RetCnt < 0 || !DestIter.Write(AnsiNum, RetCnt))
 					{
 						return -1;
 					}
@@ -680,7 +716,7 @@ int32 FGenericWidePlatformString::GetVarArgs( WIDECHAR* Dest, SIZE_T DestSize, c
 					FmtBuf[CpyIdx] = 0;
 
 					int RetCnt = snprintf(AnsiNum, sizeof(AnsiNum), FmtBuf, Val);
-					if (!DestIter.Write(AnsiNum, RetCnt))
+					if (RetCnt < 0 || !DestIter.Write(AnsiNum, RetCnt))
 					{
 						return -1;
 					}
@@ -695,7 +731,38 @@ int32 FGenericWidePlatformString::GetVarArgs( WIDECHAR* Dest, SIZE_T DestSize, c
 					break;
 				}
 
-				if (Src[0] == 'l')
+				// Deal with half-half formats - %hhd, %hhi, %hhu, %hhx and %hhX.
+				if (Src[0] == 'h')
+				{
+					if (Src[1] != 'h' || !CharIsIntegerFormatSpecifier(Src[2]))
+					{
+						printf("Unknown percent [%lc%lc%lc] in FGenericWidePlatformString::GetVarArgs() [%s]\n.", Src[0], Src[1], Src[2], TCHAR_TO_ANSI(Fmt));
+						Src++;  // skip it, I guess.
+						break;
+					}
+					Src += 3;
+					int Val = va_arg(ArgPtr, int);
+					ANSICHAR AnsiNum[8];
+					ANSICHAR FmtBuf[30];
+
+					// Yes, this is lame.
+					int CpyIdx = 0;
+					while (Percent < Src && CpyIdx < UE_ARRAY_COUNT(FmtBuf))
+					{
+						FmtBuf[CpyIdx] = (ANSICHAR)*Percent;
+						Percent++;
+						CpyIdx++;
+					}
+					FmtBuf[CpyIdx] = 0;
+
+					int RetCnt = snprintf(AnsiNum, sizeof(AnsiNum), FmtBuf, Val);
+					if (RetCnt < 0 || !DestIter.Write(AnsiNum, RetCnt))
+					{
+						return -1;
+					}
+					break;
+				}
+				else if (Src[0] == 'l')
 				{
 					if (Src[1] != 'l' || !CharIsIntegerFormatSpecifier(Src[2]))
 					{
@@ -757,7 +824,7 @@ int32 FGenericWidePlatformString::GetVarArgs( WIDECHAR* Dest, SIZE_T DestSize, c
 				FmtBuf[CpyIdx] = 0;
 
 				int RetCnt = snprintf(AnsiNum, sizeof(AnsiNum), FmtBuf, Val);
-				if (!DestIter.Write(AnsiNum, RetCnt))
+				if (RetCnt < 0 || !DestIter.Write(AnsiNum, RetCnt))
 				{
 					return -1;
 				}
@@ -783,14 +850,22 @@ int32 FGenericWidePlatformString::GetVarArgs( WIDECHAR* Dest, SIZE_T DestSize, c
 				}
 				FmtBuf[CpyIdx] = 0;
 
-				int RetCnt = snprintf(AnsiNum, sizeof (AnsiNum), FmtBuf, Val);
+				int RetCnt;
+				if (bVariablePrecision)
+				{
+					RetCnt = snprintf(AnsiNum, sizeof (AnsiNum), FmtBuf, PrecisionLen, Val);
+				}
+				else
+				{
+					RetCnt = snprintf(AnsiNum, sizeof (AnsiNum), FmtBuf, Val);
+				}
 				if (RetCnt >= UE_ARRAY_COUNT(AnsiNum))
 				{
 					// We should print what we have written into AnsiNum but ensure we null terminate before printing
 					AnsiNum[UE_ARRAY_COUNT(AnsiNum) - 1] = '\0';
 					checkf(0, TEXT("Attempting to read past the size our buffer. Buffer Size: %d Size to read: %d. Current contents: '%s'\n"), UE_ARRAY_COUNT(AnsiNum), RetCnt, UTF8_TO_TCHAR(AnsiNum));
 				}
-				if (!DestIter.Write(AnsiNum, RetCnt))
+				if (RetCnt < 0 || !DestIter.Write(AnsiNum, RetCnt))
 				{
 					return -1;
 				}
@@ -817,7 +892,7 @@ int32 FGenericWidePlatformString::GetVarArgs( WIDECHAR* Dest, SIZE_T DestSize, c
 			case 'S':
 			{
 				// The %S format represents a string which is the opposite of %s - wide if TCHAR is narrow, or narrow if TCHAR is wide
-				using OtherCharType = TChooseClass<TIsSame<TCHAR, ANSICHAR>::Value, WIDECHAR, ANSICHAR>::Result;
+				using OtherCharType = std::conditional_t<std::is_same_v<TCHAR, ANSICHAR>, WIDECHAR, ANSICHAR>;
 
 				ProcessStringArg<OtherCharType>(DestIter, Src, FieldLen, PrecisionLen, ArgPtr);
 				if (!DestIter)
@@ -838,4 +913,4 @@ int32 FGenericWidePlatformString::GetVarArgs( WIDECHAR* Dest, SIZE_T DestSize, c
 	return Result;
 }
 
-#endif
+#endif // PLATFORM_USE_GENERIC_STRING_IMPLEMENTATION

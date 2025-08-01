@@ -1,11 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Particles/WorldPSCPool.h"
-#include "HAL/IConsoleManager.h"
 #include "Engine/World.h"
 #include "GameFramework/WorldSettings.h"
+#include "Particles/Emitter.h"
 #include "Particles/ParticleSystemComponent.h"
 #include "ParticleHelper.h"
+#include "Particles/ParticleSystem.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(WorldPSCPool)
 
 static float GParticleSystemPoolKillUnusedTime = 180.0f;
 static FAutoConsoleVariableRef ParticleSystemPoolKillUnusedTime(
@@ -59,9 +62,9 @@ UParticleSystemComponent* FPSCPool::Acquire(UWorld* World, UParticleSystem* Temp
 	FPSCPoolElem RetElem;
 	if (FreeElements.Num())
 	{
-		RetElem = FreeElements.Pop(false);
+		RetElem = FreeElements.Pop(EAllowShrinking::No);
 		check(RetElem.PSC->Template == Template);
-		check(!RetElem.PSC->IsPendingKill());
+		check(IsValid(RetElem.PSC));
 
 		//Reset visibility in case the component was reclaimed by the pool while invisible.
 		RetElem.PSC->SetVisibility(true);
@@ -182,7 +185,7 @@ void FPSCPool::KillUnusedComponents(float KillTime, UParticleSystem* Template)
 				PSC->DestroyComponent();
 			}
 
-			FreeElements.RemoveAtSwap(i, 1, false);
+			FreeElements.RemoveAtSwap(i, 1, EAllowShrinking::No);
 		}
 		else
 		{
@@ -221,7 +224,7 @@ FWorldPSCPool::~FWorldPSCPool()
 
 void FWorldPSCPool::Cleanup(UWorld* World)
 {
-	for (TPair<UParticleSystem*, FPSCPool>& Pool : WorldParticleSystemPools)
+	for (auto& Pool : WorldParticleSystemPools)
 	{
 		Pool.Value.Cleanup();
 	}
@@ -299,7 +302,7 @@ void FWorldPSCPool::ReclaimWorldParticleSystem(UParticleSystemComponent* PSC)
 	check(IsInGameThread());
 	
 	//If this component has been already destroyed we don't add it back to the pool. Just warn so users can fixup.
-	if (PSC->IsPendingKill())
+	if (!IsValid(PSC))
 	{
 		UE_LOG(LogParticles, Log, TEXT("Pooled PSC has been destroyed! Possibly via a DestroyComponent() call. You should not destroy components set to auto destroy manually. \nJust deactivate them and allow them to destroy themselves or be reclaimed by the pool if pooling is enabled. | PSC: %p |\t System: %s"), PSC, *PSC->Template->GetFullName());
 		return;
@@ -313,7 +316,7 @@ void FWorldPSCPool::ReclaimWorldParticleSystem(UParticleSystemComponent* PSC)
 		if (CurrentTime - LastParticleSytemPoolCleanTime > GParticleSystemPoolingCleanTime)
 		{
 			LastParticleSytemPoolCleanTime = CurrentTime;
-			for (TPair<UParticleSystem*, FPSCPool>& Pair : WorldParticleSystemPools)
+			for (auto& Pair : WorldParticleSystemPools)
 			{
 				Pair.Value.KillUnusedComponents(CurrentTime - GParticleSystemPoolKillUnusedTime, PSC->Template);
 			}
@@ -341,7 +344,7 @@ void FWorldPSCPool::Dump()
 	FString DumpStr;
 
 	uint32 TotalMemUsage = 0;
-	for (TPair<UParticleSystem*, FPSCPool>& Pair : WorldParticleSystemPools)
+	for (auto& Pair : WorldParticleSystemPools)
 	{
 		UParticleSystem* System = Pair.Key;
 		FPSCPool& Pool = Pair.Value;		
@@ -397,3 +400,4 @@ FAutoConsoleCommandWithWorld DumpPSCPoolInfoCommand(
 	TEXT("Dump Particle System Pooling Info"),
 	FConsoleCommandWithWorldDelegate::CreateStatic(&DumpPooledWorldParticleSystemInfo)
 );
+

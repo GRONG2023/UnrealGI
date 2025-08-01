@@ -17,7 +17,6 @@ struct FHLODProxyMesh
 	FHLODProxyMesh();
 
 #if WITH_EDITOR
-	FHLODProxyMesh(const FHLODProxyMesh& Other);
 	FHLODProxyMesh(UStaticMesh* InStaticMesh, const FName& InKey);
 
 	FHLODProxyMesh(ALODActor* InLODActor, UStaticMesh* InStaticMesh, const FName& InKey);
@@ -41,7 +40,7 @@ private:
 
 	/** The mesh used to display this proxy */
 	UPROPERTY(VisibleAnywhere, Category = "Proxy Mesh")
-	UStaticMesh* StaticMesh;
+	TObjectPtr<UStaticMesh> StaticMesh;
 
 	/** The key generated from an ALODActor. If this differs from that generated from the ALODActor, then the mesh needs regenerating. */
 	UPROPERTY(VisibleAnywhere, Category = "Proxy Mesh")

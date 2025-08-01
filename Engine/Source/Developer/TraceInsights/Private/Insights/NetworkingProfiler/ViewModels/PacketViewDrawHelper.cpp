@@ -4,21 +4,23 @@
 
 #include "Framework/Application/SlateApplication.h"
 #include "Rendering/DrawElements.h"
-#include "TraceServices/AnalysisService.h"
 
 // Insights
 #include "Insights/Common/PaintUtils.h"
 #include "Insights/InsightsStyle.h"
 #include "Insights/NetworkingProfiler/ViewModels/PacketViewport.h"
+#include "Insights/NetworkingProfiler/ViewModels/PacketContentViewDrawHelper.h"
 #include "Insights/ViewModels/DrawHelpers.h"
 
 #include <limits>
+
+#define INSIGHTS_USE_LEGACY_BORDER 0
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // FNetworkPacketAggregatedSample
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void FNetworkPacketAggregatedSample::AddPacket(const int32 PacketIndex, const Trace::FNetProfilerPacket& Packet)
+void FNetworkPacketAggregatedSample::AddPacket(const int32 PacketIndex, const TraceServices::FNetProfilerPacket& Packet)
 {
 	NumPackets++;
 
@@ -40,21 +42,22 @@ void FNetworkPacketAggregatedSample::AddPacket(const int32 PacketIndex, const Tr
 		LargestPacket.TotalSizeInBytes = Packet.TotalPacketSizeInBytes;
 		LargestPacket.TimeStamp = TimeStamp;
 		LargestPacket.Status = Packet.DeliveryStatus;
+		LargestPacket.ConnectionState = Packet.ConnectionState;
 	}
 
 	switch (AggregatedStatus)
 	{
-	case Trace::ENetProfilerDeliveryStatus::Unknown:
+	case TraceServices::ENetProfilerDeliveryStatus::Unknown:
 		AggregatedStatus = Packet.DeliveryStatus;
 		break;
 
-	case Trace::ENetProfilerDeliveryStatus::Dropped:
+	case TraceServices::ENetProfilerDeliveryStatus::Dropped:
 		break;
 
-	case Trace::ENetProfilerDeliveryStatus::Delivered:
-		if (Packet.DeliveryStatus == Trace::ENetProfilerDeliveryStatus::Dropped)
+	case TraceServices::ENetProfilerDeliveryStatus::Delivered:
+		if (Packet.DeliveryStatus == TraceServices::ENetProfilerDeliveryStatus::Dropped)
 		{
-			AggregatedStatus = Trace::ENetProfilerDeliveryStatus::Dropped;
+			AggregatedStatus = TraceServices::ENetProfilerDeliveryStatus::Dropped;
 		}
 		break;
 	}
@@ -81,7 +84,7 @@ FNetworkPacketSeriesBuilder::FNetworkPacketSeriesBuilder(FNetworkPacketSeries& I
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-FNetworkPacketAggregatedSample* FNetworkPacketSeriesBuilder::AddPacket(const int32 PacketIndex, const Trace::FNetProfilerPacket& Packet)
+FNetworkPacketAggregatedSample* FNetworkPacketSeriesBuilder::AddPacket(const int32 PacketIndex, const TraceServices::FNetProfilerPacket& Packet)
 {
 	NumAddedPackets++;
 
@@ -97,6 +100,11 @@ FNetworkPacketAggregatedSample* FNetworkPacketSeriesBuilder::AddPacket(const int
 	return nullptr;
 }
 
+void FNetworkPacketSeriesBuilder::SetHighlightEventTypeIndex(int32 EventTypeIndex)
+{
+	Series.HighlightEventTypeIndex = EventTypeIndex;
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // FPacketViewDrawHelper
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -108,7 +116,7 @@ FPacketViewDrawHelper::FPacketViewDrawHelper(const FDrawContext& InDrawContext, 
 	//, EventBorderBrush(FInsightsStyle::Get().GetBrush("EventBorder"))
 	, HoveredEventBorderBrush(FInsightsStyle::Get().GetBrush("HoveredEventBorder"))
 	, SelectedEventBorderBrush(FInsightsStyle::Get().GetBrush("SelectedEventBorder"))
-	, SelectionFont(FCoreStyle::GetDefaultFontStyle("Regular", 8))
+	, SelectionFont(FAppStyle::Get().GetFontStyle("SmallFont"))
 	, NumPackets(0)
 	, NumDrawSamples(0)
 {
@@ -133,18 +141,18 @@ void FPacketViewDrawHelper::DrawBackground() const
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-FLinearColor FPacketViewDrawHelper::GetColorByStatus(Trace::ENetProfilerDeliveryStatus Status)
+FLinearColor FPacketViewDrawHelper::GetColorByStatus(TraceServices::ENetProfilerDeliveryStatus Status)
 {
 	constexpr float Alpha = 1.0f;
 	switch (Status)
 	{
-	case Trace::ENetProfilerDeliveryStatus::Unknown:
+	case TraceServices::ENetProfilerDeliveryStatus::Unknown:
 		return FLinearColor(0.25f, 0.25f, 0.25f, Alpha);
 
-	case Trace::ENetProfilerDeliveryStatus::Delivered:
+	case TraceServices::ENetProfilerDeliveryStatus::Delivered:
 		return FLinearColor(0.5f, 1.0f, 0.5f, Alpha);
 
-	case Trace::ENetProfilerDeliveryStatus::Dropped:
+	case TraceServices::ENetProfilerDeliveryStatus::Dropped:
 		return FLinearColor(1.0f, 0.5f, 0.5f, Alpha);
 
 	default:
@@ -171,6 +179,8 @@ void FPacketViewDrawHelper::DrawCached(const FNetworkPacketSeries& Series) const
 	const float ViewHeight = FMath::RoundToFloat(Viewport.GetHeight());
 	const float BaselineY = FMath::RoundToFloat(ViewportY.GetOffsetForValue(0.0));
 
+	const FLinearColor ColorFilterMatch = FPacketContentViewDrawHelper::GetColorByType(Series.HighlightEventTypeIndex);
+
 	for (int32 SampleIndex = 0; SampleIndex < NumSamples; SampleIndex++)
 	{
 		const FNetworkPacketAggregatedSample& Sample = Series.Samples[SampleIndex];
@@ -181,10 +191,14 @@ void FPacketViewDrawHelper::DrawCached(const FNetworkPacketSeries& Series) const
 
 		NumDrawSamples++;
 
-		const float X = SampleIndex * SampleW;
+		const float X = static_cast<float>(SampleIndex) * SampleW;
 
 		//const float ValueY = FMath::RoundToFloat(ViewportY.GetOffsetForValue(static_cast<double>(Sample.LargestPacket.ContentSizeInBits)));
 		const float ValueY = FMath::RoundToFloat(ViewportY.GetOffsetForValue(static_cast<double>(Sample.LargestPacket.TotalSizeInBytes * 8)));
+
+		const float FilterMatchContentValueY = FMath::RoundToFloat(ViewportY.GetOffsetForValue(static_cast<double>(Sample.FilterMatchHighlightSizeInBits)));
+		const float FilterMatchContentH = FilterMatchContentValueY - BaselineY;
+		const float FilterMatchContentY = ViewHeight - FilterMatchContentH;
 
 		const float H = ValueY - BaselineY;
 		const float Y = ViewHeight - H;
@@ -200,6 +214,11 @@ void FPacketViewDrawHelper::DrawCached(const FNetworkPacketSeries& Series) const
 		{
 			DrawContext.DrawBox(X + 1.0f, Y + 1.0f, SampleW - 2.0f, H - 2.0f, WhiteBrush, ColorFill);
 
+			if (Sample.FilterMatchHighlightSizeInBits > 0U)
+			{
+				DrawContext.DrawBox(X + 1.0f, FilterMatchContentY + 1.0f, SampleW - 2.0f, FilterMatchContentH - 2.0f, WhiteBrush, ColorFilterMatch);
+			}
+
 			// Draw border.
 			DrawContext.DrawBox(X, Y, 1.0, H, WhiteBrush, ColorBorder);
 			DrawContext.DrawBox(X + SampleW - 1.0f, Y, 1.0, H, WhiteBrush, ColorBorder);
@@ -209,6 +228,12 @@ void FPacketViewDrawHelper::DrawCached(const FNetworkPacketSeries& Series) const
 		else
 		{
 			DrawContext.DrawBox(X, Y, SampleW, H, WhiteBrush, ColorBorder);
+
+			if (Sample.FilterMatchHighlightSizeInBits > 0U)
+			{
+				DrawContext.DrawBox(X, FilterMatchContentY, SampleW, FilterMatchContentH, WhiteBrush, ColorFilterMatch);
+			}
+
 		}
 	}
 
@@ -223,7 +248,7 @@ void FPacketViewDrawHelper::DrawSampleHighlight(const FNetworkPacketAggregatedSa
 	const int32 PacketsPerSample = Viewport.GetNumPacketsPerSample();
 	const int32 FirstPacketIndex = Viewport.GetFirstPacketIndex();
 	const int32 SampleIndex = (Sample.LargestPacket.Index - FirstPacketIndex) / PacketsPerSample;
-	const float X = SampleIndex * SampleW;
+	const float X = static_cast<float>(SampleIndex) * SampleW;
 
 	const FAxisViewportDouble& ViewportY = Viewport.GetVerticalAxisViewport();
 
@@ -237,41 +262,57 @@ void FPacketViewDrawHelper::DrawSampleHighlight(const FNetworkPacketAggregatedSa
 	const float H = ValueY - BaselineY;
 	const float Y = ViewHeight - H;
 
+#if INSIGHTS_USE_LEGACY_BORDER
+	constexpr float BorderOffset = 1.0f;
+#else
+	constexpr float BorderOffset = 2.0f;
+#endif
+
 	if (Mode == EHighlightMode::Hovered)
 	{
 		const FLinearColor Color(1.0f, 1.0f, 0.0f, 1.0f); // yellow
 
 		// Draw border around the hovered box.
-		DrawContext.DrawBox(X - 1.0f, Y - 1.0f, SampleW + 2.0f, H + 2.0f, HoveredEventBorderBrush, Color);
+#if INSIGHTS_USE_LEGACY_BORDER
+		DrawContext.DrawBox(X - BorderOffset, Y - BorderOffset, SampleW + 2 * BorderOffset, H + 2 * BorderOffset, HoveredEventBorderBrush, Color);
+#else
+		FSlateRoundedBoxBrush Brush(FLinearColor(0.0f, 0.0f, 0.0f, 0.0f), 2.0f, Color, 2.0f);
+		DrawContext.DrawBox(X - BorderOffset, Y - BorderOffset, SampleW + 2 * BorderOffset, H + 2 * BorderOffset, &Brush, FLinearColor(0.0f, 0.0f, 0.0f, 0.0f));
+#endif
 	}
 	else // EHighlightMode::Selected or EHighlightMode::SelectedAndHovered
 	{
 		// Animate color from white (if selected and hovered) or yellow (if only selected) to black, using a squared sine function.
 		const double Time = static_cast<double>(FPlatformTime::Cycles64()) * FPlatformTime::GetSecondsPerCycle64();
-		float S = FMath::Sin(2.0 * Time);
-		S = S * S; // squared, to ensure only positive [0 - 1] values
-		const float Blue = (Mode == EHighlightMode::SelectedAndHovered) ? 0.0f : S;
-		const FLinearColor Color(S, S, Blue, 1.0f);
+		float Hue = static_cast<float>(FMath::Sin(2.0 * Time));
+		Hue = Hue * Hue; // squared, to ensure only positive [0 - 1] values
+		const float Blue = (Mode == EHighlightMode::SelectedAndHovered) ? 0.0f : Hue;
+		const FLinearColor Color(Hue, Hue, Blue, 1.0f);
 
 		// Draw border around the selected box.
-		DrawContext.DrawBox(X - 1.0f, Y - 1.0f, SampleW + 2.0f, H + 2.0f, SelectedEventBorderBrush, Color);
+#if INSIGHTS_USE_LEGACY_BORDER
+		DrawContext.DrawBox(X - BorderOffset, Y - BorderOffset, SampleW + 2 * BorderOffset, H + 2 * BorderOffset, SelectedEventBorderBrush, Color);
+#else
+		FSlateRoundedBoxBrush Brush(FLinearColor(0.0f, 0.0f, 0.0f, 0.0f), 2.0f, Color, 2.0f);
+		DrawContext.DrawBox(X - BorderOffset, Y - BorderOffset, SampleW + 2 * BorderOffset, H + 2 * BorderOffset, &Brush, FLinearColor(0.0f, 0.0f, 0.0f, 0.0f));
+#endif
 	}
 	DrawContext.LayerId++;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void FPacketViewDrawHelper::DrawSelection(int32 StartPacketIndex, int32 EndPacketIndex) const
+void FPacketViewDrawHelper::DrawSelection(int32 StartPacketIndex, int32 EndPacketIndex, double SelectionTimeSpan) const
 {
 	const float SampleW = Viewport.GetSampleWidth();
 	const int32 PacketsPerSample = Viewport.GetNumPacketsPerSample();
 	const int32 FirstPacketIndex = Viewport.GetFirstPacketIndex();
 
 	const int32 StartSampleIndex = (StartPacketIndex - FirstPacketIndex) / PacketsPerSample;
-	const float X1 = FMath::Max(-2.0f, StartSampleIndex * SampleW);
+	const float X1 = FMath::Max(-2.0f, static_cast<float>(StartSampleIndex) * SampleW);
 
 	const int32 EndSampleIndex = (EndPacketIndex - FirstPacketIndex) / PacketsPerSample;
-	const float X2 = FMath::Min(Viewport.GetWidth() + 2.0f, EndSampleIndex * SampleW);
+	const float X2 = FMath::Min(Viewport.GetWidth() + 2.0f, static_cast<float>(EndSampleIndex) * SampleW);
 
 	const FAxisViewportDouble& ViewportY = Viewport.GetVerticalAxisViewport();
 
@@ -281,9 +322,9 @@ void FPacketViewDrawHelper::DrawSelection(int32 StartPacketIndex, int32 EndPacke
 
 	//// Animate color from white (if selected and hovered) or yellow (if only selected) to black, using a squared sine function.
 	//const double Time = static_cast<double>(FPlatformTime::Cycles64()) * FPlatformTime::GetSecondsPerCycle64();
-	//float S = FMath::Sin(2.0 * Time);
-	//S = S * S; // squared, to ensure only positive [0 - 1] values
-	//const FLinearColor Color(S, S, S, 1.0f);
+	//float Hue = static_cast<float>(FMath::Sin(2.0 * Time));
+	//Hue = Hue * Hue; // squared, to ensure only positive [0 - 1] values
+	//const FLinearColor Color(Hue, Hue, Hue, 1.0f);
 	//
 	//// Draw border around the selected box.
 	//DrawContext.DrawBox(X1 - 1.0f, Y - 1.0f, X2 - X1 + 2.0f, H + 2.0f, SelectedEventBorderBrush, Color);
@@ -297,10 +338,12 @@ void FPacketViewDrawHelper::DrawSelection(int32 StartPacketIndex, int32 EndPacke
 
 		if (X1 <= MaxX && X2 >= MinX)
 		{
-			const FString Text = FString::Printf(TEXT("%d packets"), PacketCount);
+			const FString Text = FString::Printf(TEXT("%d packets (%.3f s)"), PacketCount, (float)SelectionTimeSpan);
 			FDrawHelpers::DrawSelection(DrawContext, MinX, MaxX, X1, X2, Y, H, 30.0f, Text, WhiteBrush, SelectionFont);
 		}
 	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+
+#undef INSIGHTS_USE_LEGACY_BORDER

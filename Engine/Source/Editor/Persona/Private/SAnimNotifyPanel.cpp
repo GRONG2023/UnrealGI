@@ -25,14 +25,14 @@
 #include "Animation/EditorNotifyObject.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "ScopedTransaction.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetSelection.h"
 #include "Widgets/Input/STextEntryPopup.h"
 #include "Widgets/Layout/SExpandableArea.h"
 #include "BlueprintActionDatabase.h"
 #include "Animation/AnimNotifies/AnimNotifyState.h"
 #include "Animation/AnimNotifies/AnimNotify.h"
-#include "Animation/BlendSpaceBase.h"
+#include "Animation/BlendSpace.h"
 #include "TabSpawners.h"
 #include "Widgets/Text/SInlineEditableTextBlock.h"
 #include "HAL/PlatformApplicationMisc.h"
@@ -46,8 +46,14 @@
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "IAnimationEditor.h"
 #include "IAnimationSequenceBrowser.h"
-#include "AnimTimelineTrack_NotifiesPanel.h"
-
+#include "AnimTimeline/AnimTimelineTrack_NotifiesPanel.h"
+#include "PersonaUtils.h"
+#include "AnimAssetFindReplace.h"
+#include "AnimAssetFindReplaceSyncMarkers.h"
+#include "AnimAssetFindReplaceNotifies.h"
+#include "ToolMenus.h"
+#include "ToolMenuMisc.h"
+#include "AnimNotifyPanelContextMenuContext.h"
 
 // AnimNotify Drawing
 const float NotifyHeightOffset = 0.f;
@@ -308,7 +314,7 @@ struct FNotifyNodeInterface : public INodeObjectInterface
 		uint8* PropertyData = Seq->FindNotifyPropertyData(Index, ArrayProperty);
 		if (PropertyData && ArrayProperty)
 		{
-			ArrayProperty->Inner->ExportTextItem(StrValue, PropertyData, PropertyData, Seq, PPF_Copy);
+			ArrayProperty->Inner->ExportTextItem_Direct(StrValue, PropertyData, PropertyData, Seq, PPF_Copy);
 		}
 	}
 
@@ -418,7 +424,7 @@ struct FSyncMarkerNodeInterface : public INodeObjectInterface
 			uint8* PropertyData = Seq->FindSyncMarkerPropertyData(Index, ArrayProperty);
 			if (PropertyData && ArrayProperty)
 			{
-				ArrayProperty->Inner->ExportTextItem(StrValue, PropertyData, PropertyData, Seq, PPF_Copy);
+				ArrayProperty->Inner->ExportTextItem_Direct(StrValue, PropertyData, PropertyData, Seq, PPF_Copy);
 			}
 		}
 	}
@@ -461,6 +467,7 @@ public:
 		, _AnimNotify(nullptr)
 		, _AnimSyncMarker(nullptr)
 		, _OnNodeDragStarted()
+		, _OnNotifyStateHandleBeingDragged()
 		, _OnUpdatePanel()
 		, _PanTrackRequest()
 		, _OnSelectionChanged()
@@ -472,6 +479,7 @@ public:
 	SLATE_ARGUMENT( FAnimNotifyEvent *, AnimNotify )
 	SLATE_ARGUMENT( FAnimSyncMarker*, AnimSyncMarker)
 	SLATE_EVENT( FOnNotifyNodeDragStarted, OnNodeDragStarted )
+	SLATE_EVENT( FOnNotifyStateHandleBeingDragged, OnNotifyStateHandleBeingDragged)
 	SLATE_EVENT( FOnUpdatePanel, OnUpdatePanel )
 	SLATE_EVENT( FPanTrackRequest, PanTrackRequest )
 	SLATE_EVENT( FOnTrackSelectionChanged, OnSelectionChanged )
@@ -610,6 +618,9 @@ private:
 	/** Delegate that is called when the user initiates dragging */
 	FOnNotifyNodeDragStarted	OnNodeDragStarted;
 
+	/** Delegate that is called when a notify state handle is being dragged */
+	FOnNotifyStateHandleBeingDragged	OnNotifyStateHandleBeingDragged;
+
 	/** Delegate to pan the track, needed if the markers are dragged out of the track */
 	FPanTrackRequest			PanTrackRequest;
 
@@ -662,7 +673,7 @@ void SAnimNotifyPair::Construct(const FArguments& InArgs)
 
 	float ScaleMult = 1.0f;
 	FVector2D NodeSize = NodePtr->ComputeDesiredSize(ScaleMult);
-	Visibility = EVisibility::SelfHitTestInvisible;
+	SetVisibility(EVisibility::SelfHitTestInvisible);
 
 	this->ChildSlot
 		[
@@ -686,7 +697,7 @@ void SAnimNotifyPair::Construct(const FArguments& InArgs)
 
 float SAnimNotifyPair::GetWidgetPaddingLeft()
 {
-	return NodePtr->GetWidgetPosition().X - PairedWidget->GetDesiredSize().X;
+	return static_cast<float>(NodePtr->GetWidgetPosition().X - PairedWidget->GetDesiredSize().X);
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -710,12 +721,14 @@ public:
 		, _OnGetScrubValue()
 		, _OnGetDraggedNodePos()
 		, _OnNodeDragStarted()
+		, _OnNotifyStateHandleBeingDragged()
 		, _OnRequestTrackPan()
 		, _OnRequestOffsetRefresh()
 		, _OnDeleteNotify()
 		, _OnGetIsAnimNotifySelectionValidForReplacement()
 		, _OnReplaceSelectedWithNotify()
 		, _OnReplaceSelectedWithBlueprintNotify()
+		, _OnReplaceSelectedWithSyncMarker()
 		, _OnDeselectAllNotifies()
 		, _OnCopyNodes()
 		, _OnPasteNodes()
@@ -741,12 +754,14 @@ public:
 		SLATE_EVENT( FOnGetScrubValue, OnGetScrubValue )
 		SLATE_EVENT( FOnGetDraggedNodePos, OnGetDraggedNodePos )
 		SLATE_EVENT( FOnNotifyNodesDragStarted, OnNodeDragStarted )
+		SLATE_EVENT( FOnNotifyStateHandleBeingDragged, OnNotifyStateHandleBeingDragged)
 		SLATE_EVENT( FPanTrackRequest, OnRequestTrackPan )
 		SLATE_EVENT( FRefreshOffsetsRequest, OnRequestOffsetRefresh )
 		SLATE_EVENT( FDeleteNotify, OnDeleteNotify )
 		SLATE_EVENT( FOnGetIsAnimNotifySelectionValidForReplacement, OnGetIsAnimNotifySelectionValidForReplacement)
 		SLATE_EVENT( FReplaceWithNotify, OnReplaceSelectedWithNotify )
 		SLATE_EVENT( FReplaceWithBlueprintNotify, OnReplaceSelectedWithBlueprintNotify)
+		SLATE_EVENT( FReplaceWithSyncMarker, OnReplaceSelectedWithSyncMarker)
 		SLATE_EVENT( FDeselectAllNotifies, OnDeselectAllNotifies)
 		SLATE_EVENT( FCopyNodes, OnCopyNodes )
 		SLATE_EVENT(FPasteNodes, OnPasteNodes)
@@ -832,7 +847,7 @@ public:
 	void PasteSingleSyncMarker(FString& MarkerString, float PasteTime);
 
 	// Uses the given track space rect and marquee information to refresh selection information
-	void RefreshMarqueeSelectedNodes(FSlateRect& Rect, FNotifyMarqueeOperation& Marquee);
+	void RefreshMarqueeSelectedNodes(const FSlateRect& Rect, FNotifyMarqueeOperation& Marquee);
 
 	// Create new notifies
 	FAnimNotifyEvent& CreateNewBlueprintNotify(FString NewNotifyName, FString BlueprintPath, float StartTime);
@@ -851,16 +866,15 @@ public:
 protected:
 
 	// Build up a "New Notify..." menu
-	template<typename NotifyTypeClass>
-	void MakeNewNotifyPicker(FMenuBuilder& MenuBuilder, bool bIsReplaceWithMenu = false);
 	void FillNewNotifyMenu(FMenuBuilder& MenuBuilderbool, bool bIsReplaceWithMenu = false);
 	void FillNewNotifyStateMenu(FMenuBuilder& MenuBuilder, bool bIsReplaceWithMenu  = false);
-	void FillNewSyncMarkerMenu(FMenuBuilder& MenuBuilder);
+	void FillNewSyncMarkerMenu(FMenuBuilder& MenuBuilder, bool bIsReplaceWithMenu = false);
+	void OnAnimNotifyClassPicked(UClass* NotifyClass, bool bIsReplaceWithMenu = false);
 
 	// New notify functions
 	void CreateNewBlueprintNotifyAtCursor(FString NewNotifyName, FString BlueprintPath);
 	void CreateNewNotifyAtCursor(FString NewNotifyName, UClass* NotifyClass);
-	void CreateNewSyncMarkerAtCursor(FString NewSyncMarkerName, UClass* NotifyClass);
+	void CreateNewSyncMarkerAtCursor(FString NewSyncMarkerName);
 	void OnNewNotifyClicked();
 	void OnNewSyncMarkerClicked();
 	void AddNewNotify(const FText& NewNotifyName, ETextCommit::Type CommitInfo);
@@ -873,6 +887,7 @@ protected:
 	// "Replace with... " commands
 	void ReplaceSelectedWithBlueprintNotify(FString NewNotifyName, FString BlueprintPath);
 	void ReplaceSelectedWithNotify(FString NewNotifyName, UClass* NotifyClass);
+	void ReplaceSelectedWithSyncMarker(FString NewSyncMarkerName);
 	bool IsValidToPlace(UClass* NotifyClass) const;
 
 	// Whether we have one node selected
@@ -898,8 +913,8 @@ protected:
 	/** Opens the supplied blueprint in an editor */
 	void OnOpenNotifySource(UBlueprint* InSourceBlueprint) const;
 
-	/** Filters the asset browser by the selected notify */
-	void OnFilterSkeletonNotify(FName InName);
+	/** Filters the asset browser by the selected notify/sync marker */
+	void OnFindReferences(FName InName, bool bInIsSyncMarker);
 
 	/**
 	 * Selects a node on the track. Supports multi selection
@@ -927,6 +942,9 @@ protected:
 	int32 GetHitNotifyNode(const FGeometry& MyGeometry, const FVector2D& Position);
 
 	TSharedPtr<SWidget> SummonContextMenu(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent);
+
+	UToolMenu* CreateContextMenuContent(FName BaseMenuName);
+
 	virtual FVector2D ComputeDesiredSize(float) const override;
 	virtual FReply OnMouseButtonUp(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
 
@@ -956,16 +974,16 @@ private:
 	// Returns the padding needed to render the notify in the correct track position
 	FMargin GetNotifyTrackPadding(int32 NotifyIndex) const
 	{
-		float LeftMargin = NotifyPairs[NotifyIndex]->GetWidgetPaddingLeft();
-		float RightMargin = CachedGeometry.GetLocalSize().X - NotifyNodes[NotifyIndex]->GetWidgetPosition().X - NotifyNodes[NotifyIndex]->GetSize().X;
+		const float LeftMargin = NotifyPairs[NotifyIndex]->GetWidgetPaddingLeft();
+		const float RightMargin = static_cast<float>(CachedGeometry.GetLocalSize().X - NotifyNodes[NotifyIndex]->GetWidgetPosition().X - NotifyNodes[NotifyIndex]->GetSize().X);
 		return FMargin(LeftMargin, 0, RightMargin, 0);
 	}
 
 	// Returns the padding needed to render the notify in the correct track position
 	FMargin GetSyncMarkerTrackPadding(int32 SyncMarkerIndex) const
 	{
-		float LeftMargin = NotifyNodes[SyncMarkerIndex]->GetWidgetPosition().X;
-		float RightMargin = CachedGeometry.GetLocalSize().X - NotifyNodes[SyncMarkerIndex]->GetWidgetPosition().X - NotifyNodes[SyncMarkerIndex]->GetSize().X;
+		const float LeftMargin = static_cast<float>(NotifyNodes[SyncMarkerIndex]->GetWidgetPosition().X);
+		const float RightMargin = static_cast<float>(CachedGeometry.GetLocalSize().X - NotifyNodes[SyncMarkerIndex]->GetWidgetPosition().X - NotifyNodes[SyncMarkerIndex]->GetSize().X);
 		return FMargin(LeftMargin, 0, RightMargin, 0);
 	}
 
@@ -1002,6 +1020,7 @@ protected:
 	FOnGetScrubValue						OnGetScrubValue;
 	FOnGetDraggedNodePos					OnGetDraggedNodePos;
 	FOnNotifyNodesDragStarted				OnNodeDragStarted;
+	FOnNotifyStateHandleBeingDragged		OnNotifyStateHandleBeingDragged;
 	FPanTrackRequest						OnRequestTrackPan;
 	FDeselectAllNotifies					OnDeselectAllNotifies;
 	FCopyNodes							OnCopyNodes;
@@ -1019,6 +1038,7 @@ protected:
 	FOnGetIsAnimNotifySelectionValidForReplacement OnGetIsAnimNotifySelectionValidforReplacement;
 	FReplaceWithNotify						OnReplaceSelectedWithNotify;
 	FReplaceWithBlueprintNotify				OnReplaceSelectedWithBlueprintNotify;
+	FReplaceWithSyncMarker					OnReplaceSelectedWithSyncMarker;
 
 	FOnInvokeTab							OnInvokeTab;
 
@@ -1086,6 +1106,7 @@ public:
 	SLATE_EVENT( FOnGetNativeNotifyClasses, OnGetNotifyNativeClasses )
 	SLATE_EVENT( FOnGetNativeNotifyClasses, OnGetNotifyStateNativeClasses )
 	SLATE_EVENT( FOnNotifyNodesDragStarted, OnNodeDragStarted )
+	SLATE_EVENT( FOnNotifyStateHandleBeingDragged, OnNotifyStateHandleBeingDragged)
 	SLATE_EVENT( FRefreshOffsetsRequest, OnRequestRefreshOffsets )
 	SLATE_EVENT( FDeleteNotify, OnDeleteNotify )
 	SLATE_EVENT( FDeselectAllNotifies, OnDeselectAllNotifies)
@@ -1188,16 +1209,16 @@ public:
 		// Tracks the movement amount to apply to the selection due to a snap.
 		float SnapMovement = 0.0f;
 		// Clamp the selection into the track
-		float SelectionBeginLocalPositionX = TrackGeom.AbsoluteToLocal(SelectionBeginPosition).X;
-		const float ClampedEnd = FMath::Clamp(SelectionBeginLocalPositionX + NodeGroupSize.X, LocalTrackMin, LocalTrackMax);
+		float SelectionBeginLocalPositionX = static_cast<float>(TrackGeom.AbsoluteToLocal(SelectionBeginPosition).X);
+		const float ClampedEnd = FMath::Clamp(SelectionBeginLocalPositionX + static_cast<float>(NodeGroupSize.X), LocalTrackMin, LocalTrackMax);
 		const float ClampedBegin = FMath::Clamp(SelectionBeginLocalPositionX, LocalTrackMin, LocalTrackMax);
 		if(ClampedBegin > SelectionBeginLocalPositionX)
 		{
 			SelectionBeginLocalPositionX = ClampedBegin;
 		}
-		else if(ClampedEnd < SelectionBeginLocalPositionX + NodeGroupSize.X)
+		else if(ClampedEnd < SelectionBeginLocalPositionX + static_cast<float>(NodeGroupSize.X))
 		{
-			SelectionBeginLocalPositionX = ClampedEnd - NodeGroupSize.X;
+			SelectionBeginLocalPositionX = ClampedEnd - static_cast<float>(NodeGroupSize.X);
 		}
 
 		SelectionBeginPosition.X = TrackGeom.LocalToAbsolute(FVector2D(SelectionBeginLocalPositionX, 0.0f)).X;
@@ -1218,20 +1239,21 @@ public:
 			// Look for a snap on the first scrub handle
 			FVector2D TrackNodePos = TrackGeom.AbsoluteToLocal(EventPosition);
 			const FVector2D OriginalNodePosition = TrackNodePos;
-			float SequenceEnd = TrackScaleInfo.InputToLocalX(Sequence->SequenceLength);
+			const float SequenceStart = TrackScaleInfo.InputToLocalX(0.f);
+			const float SequenceEnd = TrackScaleInfo.InputToLocalX(Sequence->GetPlayLength());
 
 			// Always clamp the Y to the current track
 			SelectionBeginPosition.Y = SelectionPositionClampInfo->TrackPos - 1.0f;
 
-			float SnapX = GetSnapPosition(NodeClamp, TrackNodePos.X, bSnapped);
+			float SnapX = GetSnapPosition(NodeClamp, static_cast<float>(TrackNodePos.X), bSnapped);
 			if (FAnimNotifyEvent* CurrentEvent = CurrentNode->NodeObjectInterface->GetNotifyEvent())
 			{
 				if (bSnapped)
 				{
 					EAnimEventTriggerOffsets::Type Offset = EAnimEventTriggerOffsets::NoOffset;
-					if (SnapX == 0.0f || SnapX == SequenceEnd)
+					if (SnapX == SequenceStart || SnapX == SequenceEnd)
 					{
-						Offset = SnapX > 0.0f ? EAnimEventTriggerOffsets::OffsetBefore : EAnimEventTriggerOffsets::OffsetAfter;
+						Offset = SnapX > SequenceStart ? EAnimEventTriggerOffsets::OffsetBefore : EAnimEventTriggerOffsets::OffsetAfter;
 					}
 					else
 					{
@@ -1243,7 +1265,7 @@ public:
 
 					if (SnapMovement == 0.0f)
 					{
-						SnapMovement = SnapX - TrackNodePos.X;
+						SnapMovement = SnapX - static_cast<float>(TrackNodePos.X);
 						TrackNodePos.X = SnapX;
 						SnapTime = TrackScaleInfo.LocalXToInput(SnapX);
 						SnappedNode = CurrentNode;
@@ -1260,8 +1282,8 @@ public:
 					// If we didn't snap the beginning of the node, attempt to snap the end
 					if (!bSnapped)
 					{
-						FVector2D TrackNodeEndPos = TrackNodePos + CurrentNode->GetDurationSize();
-						SnapX = GetSnapPosition(*SelectionPositionClampInfo, TrackNodeEndPos.X, bSnapped);
+						const FVector2D TrackNodeEndPos = TrackNodePos + CurrentNode->GetDurationSize();
+						SnapX = GetSnapPosition(*SelectionPositionClampInfo, static_cast<float>(TrackNodeEndPos.X), bSnapped);
 
 						// Only attempt to snap if the node will fit on the track
 						if (SnapX >= CurrentNode->GetDurationSize())
@@ -1280,7 +1302,7 @@ public:
 
 							if (SnapMovement == 0.0f)
 							{
-								SnapMovement = SnapX - TrackNodeEndPos.X;
+								SnapMovement = SnapX - static_cast<float>(TrackNodeEndPos.X);
 								SnapTime = TrackScaleInfo.LocalXToInput(SnapX) - CurrentEvent->GetDuration();
 								CurrentNode->SetLastSnappedTime(SnapTime);
 								SnappedNode = CurrentNode;
@@ -1298,25 +1320,27 @@ public:
 
 		SelectionBeginPosition.X += SnapMovement;
 
-		CurrentDragXPosition = TrackGeom.AbsoluteToLocal(FVector2D(SelectionBeginPosition.X,0.0f)).X;
+		CurrentDragXPosition = static_cast<float>(TrackGeom.AbsoluteToLocal(FVector2D(SelectionBeginPosition.X,0.0f)).X);
 
 		CursorDecoratorWindow->MoveWindowTo(TrackGeom.LocalToAbsolute(TrackGeom.AbsoluteToLocal(SelectionBeginPosition) - SelectedNodes[0]->GetNotifyPositionOffset()));
 		NodeGroupPosition = SelectionBeginPosition;
 
 		//scroll view
-		float LocalMouseXPos = TrackGeom.AbsoluteToLocal(DragDropEvent.GetScreenSpacePosition()).X;
-		float LocalViewportMin = 0.0f;
-		float LocalViewportMax = TrackGeom.GetLocalSize().X;
+		const float LocalMouseXPos = static_cast<float>(TrackGeom.AbsoluteToLocal(DragDropEvent.GetScreenSpacePosition()).X);
+		constexpr float LocalViewportMin = 0.0f;
+		const float LocalViewportMax = static_cast<float>(TrackGeom.GetLocalSize().X);
 		if(LocalMouseXPos < LocalViewportMin && LocalViewportMin > LocalTrackMin - 10.0f)
 		{
-			float ScreenDelta = FMath::Max(LocalMouseXPos - LocalViewportMin, -10.0f);
-			RequestTrackPan.Execute(ScreenDelta, FVector2D(LocalTrackWidth, 1.f));
+			const float ScreenDelta = FMath::Max(LocalMouseXPos - LocalViewportMin, -10.0f);
+			RequestTrackPan.Execute(static_cast<int32>(ScreenDelta), FVector2D(LocalTrackWidth, 1.f));
 		}
 		else if(LocalMouseXPos > LocalViewportMax && LocalViewportMax < LocalTrackMax + 10.0f)
 		{
-			float ScreenDelta =  FMath::Max(LocalMouseXPos - LocalViewportMax, 10.0f);
-			RequestTrackPan.Execute(ScreenDelta, FVector2D(LocalTrackWidth, 1.f));
+			const float ScreenDelta =  FMath::Max(LocalMouseXPos - LocalViewportMax, 10.0f);
+			RequestTrackPan.Execute(static_cast<int32>(ScreenDelta), FVector2D(LocalTrackWidth, 1.f));
 		}
+
+		OnNodesBeingDragged.ExecuteIfBound(SelectedNodes, DragDropEvent, CurrentDragXPosition, TrackScaleInfo.LocalXToInput(CurrentDragXPosition));
 	}
 
 	float GetSnapPosition(const FTrackClampInfo& ClampInfo, float WidgetSpaceNotifyPosition, bool& bOutSnapped)
@@ -1331,7 +1355,7 @@ public:
 		SnapPosition = ScaleInfo.InputToLocalX(SnapPosition);
 
 		float WidgetSpaceStartPosition = ScaleInfo.InputToLocalX(0.0f);
-		float WidgetSpaceEndPosition = ScaleInfo.InputToLocalX(Sequence->SequenceLength);
+		float WidgetSpaceEndPosition = ScaleInfo.InputToLocalX(Sequence->GetPlayLength());
 
 		if(!bOutSnapped)
 		{
@@ -1356,10 +1380,10 @@ public:
 	FTrackClampInfo& GetTrackClampInfo(const FVector2D NodePos)
 	{
 		int32 ClampInfoIndex = 0;
-		int32 SmallestNodeTrackDist = FMath::Abs(ClampInfos[0].TrackSnapTestPos - NodePos.Y);
+		int32 SmallestNodeTrackDist = FMath::Abs(ClampInfos[0].TrackSnapTestPos - static_cast<int32>(NodePos.Y));
 		for(int32 i = 0; i < ClampInfos.Num(); ++i)
 		{
-			int32 Dist = FMath::Abs(ClampInfos[i].TrackSnapTestPos - NodePos.Y);
+			const int32 Dist = FMath::Abs(ClampInfos[i].TrackSnapTestPos - static_cast<int32>(NodePos.Y));
 			if(Dist < SmallestNodeTrackDist)
 			{
 				SmallestNodeTrackDist = Dist;
@@ -1387,6 +1411,7 @@ public:
 	int32								TrackSpan;				// Number of tracks that the selection spans
 	FOnUpdatePanel						OnUpdatePanel;			// Delegate to redraw the notify panel
 	FOnSnapPosition						OnSnapPosition;			// Delegate used to snap times
+	FOnNotifyNodesBeingDragged			OnNodesBeingDragged;	// Delegate to notify panel when the mouse was moved during the DragDropOp
 
 	static TSharedRef<FNotifyDragDropOp> New(
 		TArray<TSharedPtr<SAnimNotifyNode>>			NotifyNodes, 
@@ -1399,13 +1424,15 @@ public:
 		float&										CurrentDragXPosition, 
 		FPanTrackRequest&							RequestTrackPanDelegate, 
 		FOnSnapPosition&							OnSnapPosition,
-		FOnUpdatePanel&								UpdatePanel
+		FOnUpdatePanel&								UpdatePanel,
+		FOnNotifyNodesBeingDragged&					OnNodesBeingDragged
 		)
 	{
 		TSharedRef<FNotifyDragDropOp> Operation = MakeShareable(new FNotifyDragDropOp(CurrentDragXPosition));
 		Operation->Sequence = InSequence;
 		Operation->RequestTrackPan = RequestTrackPanDelegate;
 		Operation->OnUpdatePanel = UpdatePanel;
+		Operation->OnNodesBeingDragged = OnNodesBeingDragged;
 
 		Operation->NodeGroupPosition = SelectionScreenPosition;
 		Operation->NodeGroupSize = SelectionSize;
@@ -1435,7 +1462,7 @@ public:
 			Node->ClearLastSnappedTime();
 			Operation->NodeTimeOffsets.Add(NotifyTime - BeginTime);
 			Operation->NodeTimes.Add(NotifyTime);
-			Operation->NodeXOffsets.Add(Node->GetNotifyPositionOffset().X);
+			Operation->NodeXOffsets.Add(static_cast<float>(Node->GetNotifyPositionOffset().X));
 
 			// Calculate the time length of the selection. Because it is possible to have states
 			// with arbitrary durations we need to search all of the nodes and find the furthest
@@ -1450,8 +1477,8 @@ public:
 			FTrackClampInfo Info;
 			Info.NotifyTrack = NotifyTracks[i];
 			const FGeometry& CachedGeometry = Info.NotifyTrack->GetCachedGeometry();
-			Info.TrackPos = CachedGeometry.AbsolutePosition.Y;
-			Info.TrackSnapTestPos = Info.TrackPos + (CachedGeometry.Size.Y / 2);
+			Info.TrackPos = static_cast<int32>(CachedGeometry.AbsolutePosition.Y);
+			Info.TrackSnapTestPos = Info.TrackPos + static_cast<int32>(CachedGeometry.Size.Y / 2);
 			Operation->ClampInfos.Add(Info);
 		}
 
@@ -1511,6 +1538,7 @@ void SAnimNotifyNode::Construct(const FArguments& InArgs)
 	NodeObjectInterface->CacheName();
 
 	OnNodeDragStarted = InArgs._OnNodeDragStarted;
+	OnNotifyStateHandleBeingDragged = InArgs._OnNotifyStateHandleBeingDragged;
 	PanTrackRequest = InArgs._PanTrackRequest;
 	OnSelectionChanged = InArgs._OnSelectionChanged;
 	OnUpdatePanel = InArgs._OnUpdatePanel;
@@ -1538,7 +1566,7 @@ void SAnimNotifyNode::Construct(const FArguments& InArgs)
 
 FReply SAnimNotifyNode::OnDragDetected( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent )
 {
-	FVector2D ScreenNodePosition = MyGeometry.AbsolutePosition;
+	FVector2D ScreenNodePosition = FVector2D(MyGeometry.AbsolutePosition);
 	
 	// Whether the drag has hit a duration marker
 	bool bDragOnMarker = false;
@@ -1608,7 +1636,8 @@ bool SAnimNotifyNode::HitTest(const FGeometry& AllottedGeometry, FVector2D Mouse
 	FVector2D Position = GetWidgetPosition();
 	FVector2D Size = GetSize();
 
-	return MouseLocalPose >= Position && MouseLocalPose <= (Position + Size);
+	return MouseLocalPose.ComponentwiseAllGreaterOrEqual(Position)
+		&& MouseLocalPose.ComponentwiseAllLessOrEqual(Position + Size);
 }
 
 ENotifyStateHandleHit::Type SAnimNotifyNode::DurationHandleHitTest(const FVector2D& CursorTrackPosition) const
@@ -1619,15 +1648,16 @@ ENotifyStateHandleHit::Type SAnimNotifyNode::DurationHandleHitTest(const FVector
 	if(NotifyDurationSizeX > 0.0f)
 	{
 		// Test for mouse inside duration box with handles included
-		float ScrubHandleHalfWidth = ScrubHandleSize.X / 2.0f;
+		const double ScrubHandleHalfWidth = ScrubHandleSize.X / 2.0f;
 
 		// Position and size of the notify node including the scrub handles
-		FVector2D NotifyNodePosition(NotifyScrubHandleCentre - ScrubHandleHalfWidth, 0.0f);
-		FVector2D NotifyNodeSize(NotifyDurationSizeX + ScrubHandleHalfWidth * 2.0f, NotifyHeight);
+		const FVector2D NotifyNodePosition(NotifyScrubHandleCentre - ScrubHandleHalfWidth, 0.0);
+		const FVector2D NotifyNodeSize(NotifyDurationSizeX + ScrubHandleHalfWidth * 2.0, NotifyHeight);
 
-		FVector2D MouseRelativePosition(CursorTrackPosition - GetWidgetPosition());
+		const FVector2D MouseRelativePosition(CursorTrackPosition - GetWidgetPosition());
 
-		if(MouseRelativePosition > NotifyNodePosition && MouseRelativePosition < (NotifyNodePosition + NotifyNodeSize))
+		if(MouseRelativePosition.ComponentwiseAllGreaterThan(NotifyNodePosition) &&
+			MouseRelativePosition.ComponentwiseAllLessThan(NotifyNodePosition + NotifyNodeSize))
 		{
 			// Definitely inside the duration box, need to see which handle we hit if any
 			if(MouseRelativePosition.X <= (NotifyNodePosition.X + ScrubHandleSize.X))
@@ -1658,22 +1688,21 @@ void SAnimNotifyNode::UpdateSizeAndPosition(const FGeometry& AllottedGeometry)
 
 	const TSharedRef< FSlateFontMeasure > FontMeasureService = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
 	TextSize = FontMeasureService->Measure( GetNotifyText(), Font );
-	LabelWidth = TextSize.X + (TextBorderSize.X * 2.f) + (ScrubHandleSize.X / 2.f);
+	LabelWidth = static_cast<float>(TextSize.X + (TextBorderSize.X * 2.0) + (ScrubHandleSize.X / 2.0));
 
-	bool bDrawBranchingPoint = NodeObjectInterface->IsBranchingPoint();
+	const bool bDrawBranchingPoint = NodeObjectInterface->IsBranchingPoint();
 	BranchingPointIconSize = FVector2D(TextSize.Y, TextSize.Y);
 	if (bDrawBranchingPoint)
 	{
-		LabelWidth += BranchingPointIconSize.X + TextBorderSize.X * 2.f;
+		LabelWidth += static_cast<float>(BranchingPointIconSize.X + TextBorderSize.X) * 2.f;
 	}
 
 	//Calculate scrub handle box size (the notional box around the scrub handle and the alignment marker)
-	float NotifyHandleBoxWidth = FMath::Max(ScrubHandleSize.X, AlignmentMarkerSize.X * 2);
+	const float NotifyHandleBoxWidth = static_cast<float>(FMath::Max(ScrubHandleSize.X, AlignmentMarkerSize.X * 2));
 
 	// Work out where we will have to draw the tool tip
-	FVector2D Size = GetSize();
-	float LeftEdgeToNotify = NotifyTimePositionX;
-	float RightEdgeToNotify = AllottedGeometry.Size.X - NotifyTimePositionX;
+	const float LeftEdgeToNotify = NotifyTimePositionX;
+	const float RightEdgeToNotify = static_cast<float>(AllottedGeometry.Size.X) - NotifyTimePositionX;
 	bDrawTooltipToRight = NotifyDurationSizeX > 0.0f || ((RightEdgeToNotify > LabelWidth) || (RightEdgeToNotify > LeftEdgeToNotify));
 
 	// Calculate widget width/position based on where we are drawing the tool tip
@@ -1683,7 +1712,7 @@ void SAnimNotifyNode::UpdateSizeAndPosition(const FGeometry& AllottedGeometry)
 	
 	if(EndMarkerNodeOverlay.IsValid())
 	{
-		FVector2D OverlaySize = EndMarkerNodeOverlay->GetDesiredSize();
+		const FVector2D OverlaySize = EndMarkerNodeOverlay->GetDesiredSize();
 		WidgetSize.X += OverlaySize.X;
 	}
 
@@ -1726,16 +1755,16 @@ int32 SAnimNotifyNode::OnPaint(const FPaintArgs& Args, const FGeometry& Allotted
 	{
 		FVector2D MarkerSize = EndMarkerNodeOverlay->GetDesiredSize();
 		FVector2D MarkerOffset(NotifyDurationSizeX + MarkerSize.X * 0.5f + 5.0f, (NotifyHeight - MarkerSize.Y) * 0.5f);
-		EndMarkerNodeOverlay->Paint(Args.WithNewParent(this), AllottedGeometry.MakeChild(MarkerOffset, MarkerSize, 1.0f), MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
+		EndMarkerNodeOverlay->Paint(Args.WithNewParent(this), AllottedGeometry.MakeChild(MarkerSize, FSlateLayoutTransform(MarkerOffset)), MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
 	}
 
-	const FSlateBrush* StyleInfo = FEditorStyle::GetBrush( TEXT("SpecialEditableTextImageNormal") );
+	const FSlateBrush* StyleInfo = FAppStyle::GetBrush( TEXT("SpecialEditableTextImageNormal") );
 
 	FText Text = GetNotifyText();
 	FLinearColor NodeColor = SAnimNotifyNode::GetNotifyColor();
-	FLinearColor BoxColor = bSelected ? FEditorStyle::GetSlateColor("SelectionColor").GetSpecifiedColor() : SAnimNotifyNode::GetNotifyColor();
+	FLinearColor BoxColor = bSelected ? FAppStyle::GetSlateColor("SelectionColor").GetSpecifiedColor() : SAnimNotifyNode::GetNotifyColor();
 
-	float HalfScrubHandleWidth = ScrubHandleSize.X / 2.0f;
+	const float HalfScrubHandleWidth = static_cast<float>(ScrubHandleSize.X) / 2.0f;
 
 	// Show duration of AnimNotifyState
 	if( NotifyDurationSizeX > 0.f )
@@ -1745,21 +1774,21 @@ int32 SAnimNotifyNode::OnPaint(const FPaintArgs& Args, const FGeometry& Allotted
 		FSlateDrawElement::MakeBox( 
 			OutDrawElements,
 			LayerId, 
-			AllottedGeometry.ToPaintGeometry(DurationBoxPosition, DurationBoxSize), 
+			AllottedGeometry.ToPaintGeometry(DurationBoxSize, FSlateLayoutTransform(DurationBoxPosition)), 
 			StyleInfo,
 			ESlateDrawEffect::None,
 			BoxColor);
 
-		DrawScrubHandle(DurationBoxPosition.X + DurationBoxSize.X, OutDrawElements, ScrubHandleID, AllottedGeometry, MyCullingRect, NodeColor);
+		DrawScrubHandle(static_cast<float>(DurationBoxPosition.X + DurationBoxSize.X), OutDrawElements, ScrubHandleID, AllottedGeometry, MyCullingRect, NodeColor);
 		
 		// Render offsets if necessary
 		if(AnimNotifyEvent && AnimNotifyEvent->EndTriggerTimeOffset != 0.f) //Do we have an offset to render?
 		{
-			float EndTime = AnimNotifyEvent->GetTime() + AnimNotifyEvent->GetDuration();
-			if(EndTime != Sequence->SequenceLength) //Don't render offset when we are at the end of the sequence, doesnt help the user
+			const float EndTime = AnimNotifyEvent->GetTime() + AnimNotifyEvent->GetDuration();
+			if(EndTime != Sequence->GetPlayLength()) //Don't render offset when we are at the end of the sequence, doesnt help the user
 			{
 				// ScrubHandle
-				float HandleCentre = NotifyDurationSizeX + (ScrubHandleSize.X - 2.0f);
+				const float HandleCentre = NotifyDurationSizeX + (static_cast<float>(ScrubHandleSize.X) - 2.0f);
 				DrawHandleOffset(AnimNotifyEvent->EndTriggerTimeOffset, HandleCentre, OutDrawElements, MarkerLayer, AllottedGeometry, MyCullingRect, NodeColor);
 			}
 		}
@@ -1779,7 +1808,7 @@ int32 SAnimNotifyNode::OnPaint(const FPaintArgs& Args, const FGeometry& Allotted
 		FSlateDrawElement::MakeBox( 
 			OutDrawElements,
 			LayerId, 
-			AllottedGeometry.ToPaintGeometry(LabelPosition, LabelSize), 
+			AllottedGeometry.ToPaintGeometry(LabelSize, FSlateLayoutTransform(LabelPosition)),
 			StyleInfo,
 			ESlateDrawEffect::None,
 			BoxColor);
@@ -1801,7 +1830,7 @@ int32 SAnimNotifyNode::OnPaint(const FPaintArgs& Args, const FGeometry& Allotted
 		TextPosition.X += BranchingPointIconSize.X;
 	}
 
-	FPaintGeometry TextGeometry = AllottedGeometry.ToPaintGeometry(TextPosition, DrawTextSize);
+	FPaintGeometry TextGeometry = AllottedGeometry.ToPaintGeometry(DrawTextSize, FSlateLayoutTransform(TextPosition));
 	OutDrawElements.PushClip(FSlateClippingZone(TextGeometry));
 
 	FSlateDrawElement::MakeText( 
@@ -1827,8 +1856,8 @@ int32 SAnimNotifyNode::OnPaint(const FPaintArgs& Args, const FGeometry& Allotted
 		FSlateDrawElement::MakeBox(
 			OutDrawElements,
 			BranchPointLayerID,
-			AllottedGeometry.ToPaintGeometry(BranchPointIconPos, BranchingPointIconSize),
-			FEditorStyle::GetBrush(TEXT("AnimNotifyEditor.BranchingPoint")),
+			AllottedGeometry.ToPaintGeometry(BranchingPointIconSize, FSlateLayoutTransform(BranchPointIconPos)),
+			FAppStyle::GetBrush(TEXT("AnimNotifyEditor.BranchingPoint")),
 			ESlateDrawEffect::None,
 			FLinearColor::White
 			);
@@ -1839,7 +1868,7 @@ int32 SAnimNotifyNode::OnPaint(const FPaintArgs& Args, const FGeometry& Allotted
 	if(AnimNotifyEvent && AnimNotifyEvent->TriggerTimeOffset != 0.f) //Do we have an offset to render?
 	{
 		float NotifyTime = AnimNotifyEvent->GetTime();
-		if(NotifyTime != 0.f && NotifyTime != Sequence->SequenceLength) //Don't render offset when we are at the start/end of the sequence, doesn't help the user
+		if(NotifyTime != 0.f && NotifyTime != Sequence->GetPlayLength()) //Don't render offset when we are at the start/end of the sequence, doesn't help the user
 		{
 			float HandleCentre = NotifyScrubHandleCentre;
 			float &Offset = AnimNotifyEvent->TriggerTimeOffset;
@@ -1865,10 +1894,10 @@ FReply SAnimNotifyNode::OnMouseMove( const FGeometry& MyGeometry, const FPointer
 	
 	FTrackScaleInfo ScaleInfo(ViewInputMin.Get(), ViewInputMax.Get(), 0, 0, CachedAllotedGeometrySize);
 	
-	float XPositionInTrack = MyGeometry.AbsolutePosition.X - CachedTrackGeometry.AbsolutePosition.X;
-	float TrackScreenSpaceXPosition = MyGeometry.AbsolutePosition.X - XPositionInTrack;
-	float TrackScreenSpaceOrigin = CachedTrackGeometry.LocalToAbsolute(FVector2D(ScaleInfo.InputToLocalX(0.0f), 0.0f)).X;
-	float TrackScreenSpaceLimit = CachedTrackGeometry.LocalToAbsolute(FVector2D(ScaleInfo.InputToLocalX(Sequence->GetPlayLength()), 0.0f)).X;
+	const float XPositionInTrack = MyGeometry.AbsolutePosition.X - CachedTrackGeometry.AbsolutePosition.X;
+	const float TrackScreenSpaceXPosition = MyGeometry.AbsolutePosition.X - XPositionInTrack;
+	const float TrackScreenSpaceOrigin = static_cast<float>(CachedTrackGeometry.LocalToAbsolute(FVector2D(ScaleInfo.InputToLocalX(0.0f), 0.0f)).X);
+	const float TrackScreenSpaceLimit = static_cast<float>(CachedTrackGeometry.LocalToAbsolute(FVector2D(ScaleInfo.InputToLocalX(Sequence->GetPlayLength()), 0.0f)).X);
 
 	if(CurrentDragHandle == ENotifyStateHandleHit::Start)
 	{
@@ -1877,8 +1906,8 @@ FReply SAnimNotifyNode::OnMouseMove( const FGeometry& MyGeometry, const FPointer
 
 		if(MouseEvent.GetScreenSpacePosition().X >= TrackScreenSpaceXPosition && MouseEvent.GetScreenSpacePosition().X <= TrackScreenSpaceXPosition + CachedAllotedGeometrySize.X)
 		{
-			float NewDisplayTime = ScaleInfo.LocalXToInput((MouseEvent.GetScreenSpacePosition() - MyGeometry.AbsolutePosition + XPositionInTrack).X);
-			float NewDuration = NodeObjectInterface->GetDuration() + OldDisplayTime - NewDisplayTime;
+			float NewDisplayTime = ScaleInfo.LocalXToInput((FVector2f(MouseEvent.GetScreenSpacePosition()) - MyGeometry.AbsolutePosition + XPositionInTrack).X);	// LWC_TODO: Precision loss
+			const float NewDuration = NodeObjectInterface->GetDuration() + OldDisplayTime - NewDisplayTime;
 
 			// Check to make sure the duration is not less than the minimum allowed
 			if(NewDuration < MinimumStateDuration)
@@ -1897,7 +1926,7 @@ FReply SAnimNotifyNode::OnMouseMove( const FGeometry& MyGeometry, const FPointer
 			ScaleInfo.ViewMinInput = ViewInputMin.Get();
 			ScaleInfo.ViewMaxInput = ViewInputMax.Get();
 
-			float NewDisplayTime = ScaleInfo.LocalXToInput((MouseEvent.GetScreenSpacePosition() - MyGeometry.AbsolutePosition + XPositionInTrack).X);
+			float NewDisplayTime = ScaleInfo.LocalXToInput((FVector2f(MouseEvent.GetScreenSpacePosition()) - MyGeometry.AbsolutePosition + XPositionInTrack).X);	// LWC_TODO: Precision loss
 			NodeObjectInterface->SetTime(FMath::Max(0.0f, NewDisplayTime));
 			NodeObjectInterface->SetDuration(NodeObjectInterface->GetDuration() + OldDisplayTime - NodeObjectInterface->GetTime());
 
@@ -1932,12 +1961,14 @@ FReply SAnimNotifyNode::OnMouseMove( const FGeometry& MyGeometry, const FPointer
 				AnimNotifyEvent->TriggerTimeOffset = GetTriggerTimeOffsetForType(EAnimEventTriggerOffsets::NoOffset);
 			}
 		}
+
+		OnNotifyStateHandleBeingDragged.ExecuteIfBound(SharedThis(this), MouseEvent, CurrentDragHandle, NodeObjectInterface->GetTime());
 	}
 	else
 	{
 		if(MouseEvent.GetScreenSpacePosition().X >= TrackScreenSpaceXPosition && MouseEvent.GetScreenSpacePosition().X <= TrackScreenSpaceXPosition + CachedAllotedGeometrySize.X)
 		{
-			float NewDuration = ScaleInfo.LocalXToInput((MouseEvent.GetScreenSpacePosition() - MyGeometry.AbsolutePosition + XPositionInTrack).X) - NodeObjectInterface->GetTime();
+			float NewDuration = ScaleInfo.LocalXToInput((FVector2f(MouseEvent.GetScreenSpacePosition()) - MyGeometry.AbsolutePosition + XPositionInTrack).X) - NodeObjectInterface->GetTime();	// LWC_TODO: Precision loss
 
 			NodeObjectInterface->SetDuration(FMath::Max(NewDuration, MinimumStateDuration));
 		}
@@ -1949,7 +1980,7 @@ FReply SAnimNotifyNode::OnMouseMove( const FGeometry& MyGeometry, const FPointer
 			ScaleInfo.ViewMinInput = ViewInputMin.Get();
 			ScaleInfo.ViewMaxInput = ViewInputMax.Get();
 
-			float NewDuration = ScaleInfo.LocalXToInput((MouseEvent.GetScreenSpacePosition() - MyGeometry.AbsolutePosition + XPositionInTrack).X) - NodeObjectInterface->GetTime();
+			float NewDuration = ScaleInfo.LocalXToInput((FVector2f(MouseEvent.GetScreenSpacePosition()) - MyGeometry.AbsolutePosition + XPositionInTrack).X) - NodeObjectInterface->GetTime();	// LWC_TODO: Precision loss
 			NodeObjectInterface->SetDuration(FMath::Max(NewDuration, MinimumStateDuration));
 		}
 
@@ -1977,6 +2008,8 @@ FReply SAnimNotifyNode::OnMouseMove( const FGeometry& MyGeometry, const FPointer
 				AnimNotifyEvent->EndTriggerTimeOffset = GetTriggerTimeOffsetForType(EAnimEventTriggerOffsets::NoOffset);
 			}
 		}
+
+		OnNotifyStateHandleBeingDragged.ExecuteIfBound(SharedThis(this), MouseEvent, CurrentDragHandle, (NodeObjectInterface->GetTime() + NodeObjectInterface->GetDuration()));
 	}
 
 	return FReply::Handled();
@@ -2039,15 +2072,15 @@ float SAnimNotifyNode::HandleOverflowPan( const FVector2D &ScreenCursorPos, floa
 	if(ScreenCursorPos.X < TrackScreenSpaceXPosition && TrackScreenSpaceXPosition > TrackScreenSpaceMin - 10.0f)
 	{
 		// Overflow left edge
-		Overflow = FMath::Min(ScreenCursorPos.X - TrackScreenSpaceXPosition, -10.0f);
+		Overflow = FMath::Min(static_cast<float>(ScreenCursorPos.X) - TrackScreenSpaceXPosition, -10.0f);
 	}
 	else if(ScreenCursorPos.X > CachedAllotedGeometrySize.X && (TrackScreenSpaceXPosition + CachedAllotedGeometrySize.X) < TrackScreenSpaceMax + 10.0f)
 	{
 		// Overflow right edge
-		Overflow = FMath::Max(ScreenCursorPos.X - (TrackScreenSpaceXPosition + CachedAllotedGeometrySize.X), 10.0f);
+		Overflow = FMath::Max(static_cast<float>(ScreenCursorPos.X) - (TrackScreenSpaceXPosition + static_cast<float>(CachedAllotedGeometrySize.X)), 10.0f);
 	}
 
-	PanTrackRequest.ExecuteIfBound(Overflow, CachedAllotedGeometrySize);
+	PanTrackRequest.ExecuteIfBound(static_cast<int32>(Overflow), CachedAllotedGeometrySize);
 
 	return Overflow;
 }
@@ -2058,8 +2091,8 @@ void SAnimNotifyNode::DrawScrubHandle( float ScrubHandleCentre, FSlateWindowElem
 	FSlateDrawElement::MakeBox( 
 		OutDrawElements,
 		ScrubHandleID, 
-		AllottedGeometry.ToPaintGeometry(ScrubHandlePosition, ScrubHandleSize), 
-		FEditorStyle::GetBrush( TEXT( "Sequencer.KeyDiamond" ) ),
+		AllottedGeometry.ToPaintGeometry(ScrubHandleSize, FSlateLayoutTransform(ScrubHandlePosition)), 
+		FAppStyle::GetBrush( TEXT( "Sequencer.KeyDiamond" ) ),
 		ESlateDrawEffect::None,
 		NodeColour
 		);
@@ -2067,10 +2100,10 @@ void SAnimNotifyNode::DrawScrubHandle( float ScrubHandleCentre, FSlateWindowElem
 	FSlateDrawElement::MakeBox( 
 		OutDrawElements,
 		ScrubHandleID, 
-		AllottedGeometry.ToPaintGeometry(ScrubHandlePosition, ScrubHandleSize), 
-		FEditorStyle::GetBrush( TEXT( "Sequencer.KeyDiamondBorder" ) ),
+		AllottedGeometry.ToPaintGeometry(ScrubHandleSize, FSlateLayoutTransform(ScrubHandlePosition)), 
+		FAppStyle::GetBrush( TEXT( "Sequencer.KeyDiamondBorder" ) ),
 		ESlateDrawEffect::None,
-		bSelected ? FEditorStyle::GetSlateColor("SelectionColor").GetSpecifiedColor() : FLinearColor::Black
+		bSelected ? FAppStyle::GetSlateColor("SelectionColor").GetSpecifiedColor() : FLinearColor::Black
 		);
 }
 
@@ -2092,8 +2125,8 @@ void SAnimNotifyNode::DrawHandleOffset( const float& Offset, const float& Handle
 	FSlateDrawElement::MakeBox( 
 		OutDrawElements,
 		MarkerLayer, 
-		AllottedGeometry.ToPaintGeometry(MarkerPosition, MarkerSize), 
-		FEditorStyle::GetBrush( TEXT( "Sequencer.Timeline.NotifyAlignmentMarker" ) ),
+		AllottedGeometry.ToPaintGeometry(MarkerSize, FSlateLayoutTransform(MarkerPosition)), 
+		FAppStyle::GetBrush( TEXT( "Sequencer.Timeline.NotifyAlignmentMarker" ) ),
 		ESlateDrawEffect::None,
 		NodeColor
 		);
@@ -2101,7 +2134,7 @@ void SAnimNotifyNode::DrawHandleOffset( const float& Offset, const float& Handle
 
 void SAnimNotifyNode::Tick( const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime )
 {
-	ScreenPosition = AllottedGeometry.AbsolutePosition;
+	ScreenPosition = FVector2D(AllottedGeometry.AbsolutePosition);
 }
 
 void SAnimNotifyNode::OnFocusLost(const FFocusEvent& InFocusEvent)
@@ -2129,11 +2162,11 @@ FCursorReply SAnimNotifyNode::OnCursorQuery(const FGeometry& MyGeometry, const F
 	// Show resize cursor if the cursor is hoverring over either of the scrub handles of a notify state node
 	if(IsHovered() && GetDurationSize() > 0.0f)
 	{
-		FVector2D RelMouseLocation = MyGeometry.AbsoluteToLocal(CursorEvent.GetScreenSpacePosition());
+		const FVector2D RelMouseLocation = MyGeometry.AbsoluteToLocal(CursorEvent.GetScreenSpacePosition());
 
-		const float HandleHalfWidth = ScrubHandleSize.X / 2.0f;
-		const float DistFromFirstHandle = FMath::Abs(RelMouseLocation.X - NotifyScrubHandleCentre);
-		const float DistFromSecondHandle = FMath::Abs(RelMouseLocation.X - (NotifyScrubHandleCentre + NotifyDurationSizeX));
+		const float HandleHalfWidth = static_cast<float>(ScrubHandleSize.X / 2.0);
+		const float DistFromFirstHandle = FMath::Abs(static_cast<float>(RelMouseLocation.X) - NotifyScrubHandleCentre);
+		const float DistFromSecondHandle = FMath::Abs(static_cast<float>(RelMouseLocation.X) - (NotifyScrubHandleCentre + NotifyDurationSizeX));
 
 		if(DistFromFirstHandle < HandleHalfWidth || DistFromSecondHandle < HandleHalfWidth || CurrentDragHandle != ENotifyStateHandleHit::None)
 		{
@@ -2149,7 +2182,7 @@ FCursorReply SAnimNotifyNode::OnCursorQuery(const FGeometry& MyGeometry, const F
 void SAnimNotifyTrack::Construct(const FArguments& InArgs)
 {
 	SetClipping(EWidgetClipping::ClipToBounds);
-
+	
 	WeakCommandList = InArgs._CommandList;
 	Sequence = InArgs._Sequence;
 	ViewInputMin = InArgs._ViewInputMin;
@@ -2166,6 +2199,7 @@ void SAnimNotifyTrack::Construct(const FArguments& InArgs)
 	OnGetScrubValue = InArgs._OnGetScrubValue;
 	OnGetDraggedNodePos = InArgs._OnGetDraggedNodePos;
 	OnNodeDragStarted = InArgs._OnNodeDragStarted;
+	OnNotifyStateHandleBeingDragged = InArgs._OnNotifyStateHandleBeingDragged;
 	TrackColor = InArgs._TrackColor;
 	OnSnapPosition = InArgs._OnSnapPosition;
 	OnRequestTrackPan = InArgs._OnRequestTrackPan;
@@ -2174,6 +2208,7 @@ void SAnimNotifyTrack::Construct(const FArguments& InArgs)
 	OnGetIsAnimNotifySelectionValidforReplacement = InArgs._OnGetIsAnimNotifySelectionValidForReplacement;
 	OnReplaceSelectedWithNotify = InArgs._OnReplaceSelectedWithNotify;
 	OnReplaceSelectedWithBlueprintNotify = InArgs._OnReplaceSelectedWithBlueprintNotify;
+	OnReplaceSelectedWithSyncMarker = InArgs._OnReplaceSelectedWithSyncMarker;
 	OnDeselectAllNotifies = InArgs._OnDeselectAllNotifies;
 	OnCopyNodes = InArgs._OnCopyNodes;
 	OnPasteNodes = InArgs._OnPasteNodes;
@@ -2185,11 +2220,11 @@ void SAnimNotifyTrack::Construct(const FArguments& InArgs)
 	[
 			SAssignNew( TrackArea, SBorder )
 			.Visibility(EVisibility::SelfHitTestInvisible)
-			.BorderImage( FEditorStyle::GetBrush("NoBorder") )
+			.BorderImage( FAppStyle::GetBrush("NoBorder") )
 			.Padding( FMargin(0.f, 0.f) )
 	];
-
 	Update();
+
 }
 
 FVector2D SAnimNotifyTrack::ComputeDesiredSize( float ) const
@@ -2202,7 +2237,7 @@ FVector2D SAnimNotifyTrack::ComputeDesiredSize( float ) const
 
 int32 SAnimNotifyTrack::OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const
 {
-	const FSlateBrush* StyleInfo = FEditorStyle::GetBrush( TEXT( "Persona.NotifyEditor.NotifyTrackBackground" ) );
+	const FSlateBrush* StyleInfo = FAppStyle::GetBrush( TEXT( "Persona.NotifyEditor.NotifyTrackBackground" ) );
 	FLinearColor Color = TrackColor.Get();
 
 	FPaintGeometry MyGeometry = AllottedGeometry.ToPaintGeometry();
@@ -2267,7 +2302,7 @@ int32 SAnimNotifyTrack::OnPaint(const FPaintArgs& Args, const FGeometry& Allotte
 
 FCursorReply SAnimNotifyTrack::OnCursorQuery(const FGeometry& MyGeometry, const FPointerEvent& CursorEvent) const
 {
-	if (ViewInputMin.Get() > 0.f || ViewInputMax.Get() < Sequence->SequenceLength)
+	if (ViewInputMin.Get() > 0.f || ViewInputMax.Get() < Sequence->GetPlayLength())
 	{
 		return FCursorReply::Cursor(EMouseCursor::GrabHand);
 	}
@@ -2275,90 +2310,36 @@ FCursorReply SAnimNotifyTrack::OnCursorQuery(const FGeometry& MyGeometry, const 
 	return FCursorReply::Unhandled();
 }
 
-template<typename NotifyTypeClass>
-void SAnimNotifyTrack::MakeNewNotifyPicker(FMenuBuilder& MenuBuilder, bool bIsReplaceWithMenu /* = false */)
+void SAnimNotifyTrack::OnAnimNotifyClassPicked(UClass* NotifyClass, bool bIsReplaceWithMenu /* = false */)
 {
-	FText TypeName = NotifyTypeClass::StaticClass() == UAnimNotify::StaticClass() ? LOCTEXT("AnimNotifyName", "anim notify") : LOCTEXT("AnimNotifyStateName", "anim notify state");
-	FText SectionHeaderFormat = bIsReplaceWithMenu ? LOCTEXT("ReplaceWithAnExistingAnimNotify", "Replace with an existing {0}") : LOCTEXT("AddsAnExistingAnimNotify", "Add an existing {0}");
+	FSlateApplication::Get().DismissAllMenus();
 
-	class FNotifyStateClassFilter : public IClassViewerFilter
+	if (bIsReplaceWithMenu)
 	{
-	public:
-		FNotifyStateClassFilter(UAnimSequenceBase* InSequence)
-			: Sequence(InSequence)
-		{}
+		ReplaceSelectedWithNotify(MakeBlueprintNotifyName(NotifyClass->GetName()), NotifyClass);
+	}
+	else
+	{
+		CreateNewNotifyAtCursor(MakeBlueprintNotifyName(NotifyClass->GetName()), NotifyClass);
+	}
+}
 
-		bool IsClassAllowed(const FClassViewerInitializationOptions& InInitOptions, const UClass* InClass, TSharedRef< FClassViewerFilterFuncs > InFilterFuncs) override
-		{
-			const bool bChildOfObjectClass = InClass->IsChildOf(NotifyTypeClass::StaticClass());
-			const bool bMatchesFlags = !InClass->HasAnyClassFlags(CLASS_Hidden | CLASS_HideDropDown | CLASS_Deprecated | CLASS_Abstract);
-			return bChildOfObjectClass && bMatchesFlags && CastChecked<NotifyTypeClass>(InClass->ClassDefaultObject)->CanBePlaced(Sequence);
-		}
-
-		virtual bool IsUnloadedClassAllowed(const FClassViewerInitializationOptions& InInitOptions, const TSharedRef< const IUnloadedBlueprintData > InUnloadedClassData, TSharedRef< FClassViewerFilterFuncs > InFilterFuncs) override
-		{
-			const bool bChildOfObjectClass = InUnloadedClassData->IsChildOf(NotifyTypeClass::StaticClass());
-			const bool bMatchesFlags = !InUnloadedClassData->HasAnyClassFlags(CLASS_Hidden | CLASS_HideDropDown | CLASS_Deprecated | CLASS_Abstract);
-			bool bValidToPlace = false;
-			if(bChildOfObjectClass)
-			{
-				if (const UClass* NativeBaseClass = InUnloadedClassData->GetNativeParent())
-				{
-					bValidToPlace = CastChecked<NotifyTypeClass>(NativeBaseClass->ClassDefaultObject)->CanBePlaced(Sequence);
-				}
-			}
-
-			return bChildOfObjectClass && bMatchesFlags && bValidToPlace;
-		}
-
-		/** Sequence referenced by outer panel */
-		UAnimSequenceBase* Sequence;
-	};
-
+void SAnimNotifyTrack::FillNewNotifyStateMenu(FMenuBuilder& MenuBuilder, bool bIsReplaceWithMenu /* = false */)
+{
 	// MenuBuilder always has a search widget added to it by default, hence if larger then 1 then something else has been added to it
 	if (MenuBuilder.GetMultiBox()->GetBlocks().Num() > 1)
 	{
 		MenuBuilder.AddMenuSeparator();
 	}
 
-	FClassViewerInitializationOptions InitOptions;
-	InitOptions.Mode = EClassViewerMode::ClassPicker;
-	InitOptions.bShowObjectRootClass = false;
-	InitOptions.bShowUnloadedBlueprints = true;
-	InitOptions.bShowNoneOption = false;
-	InitOptions.bEnableClassDynamicLoading = true;
-	InitOptions.bExpandRootNodes = true;
-	InitOptions.NameTypeToDisplay = EClassViewerNameTypeToDisplay::DisplayName;
-	InitOptions.ClassFilter = MakeShared<FNotifyStateClassFilter>(Sequence);
-	InitOptions.bShowBackgroundBorder = false;
-
-	FClassViewerModule& ClassViewerModule = FModuleManager::LoadModuleChecked<FClassViewerModule>("ClassViewer");
-	MenuBuilder.AddWidget(
+	TSharedRef<SWidget> Widget = 
 		SNew(SBox)
-		.MinDesiredWidth(300.0f)
-		.MaxDesiredHeight(400.0f)
-		[
-			ClassViewerModule.CreateClassViewer(InitOptions,
-				FOnClassPicked::CreateLambda([this, bIsReplaceWithMenu](UClass* InClass)
-				{
-					FSlateApplication::Get().DismissAllMenus();
-					if(bIsReplaceWithMenu)
-					{
-						ReplaceSelectedWithNotify(MakeBlueprintNotifyName(InClass->GetName()), InClass);
-					}
-					else
-					{
-						CreateNewNotifyAtCursor(MakeBlueprintNotifyName(InClass->GetName()), InClass);
-					}
-				}
-			))
-		],
-		FText(), true, false);
-}
-
-void SAnimNotifyTrack::FillNewNotifyStateMenu(FMenuBuilder& MenuBuilder, bool bIsReplaceWithMenu /* = false */)
-{
-	MakeNewNotifyPicker<UAnimNotifyState>(MenuBuilder, bIsReplaceWithMenu);
+		.WidthOverride(300.0f)
+		.HeightOverride(300.0f)
+		[	
+			PersonaUtils::MakeAnimNotifyStatePicker(Sequence, FOnClassPicked::CreateRaw(this, &SAnimNotifyTrack::OnAnimNotifyClassPicked, bIsReplaceWithMenu))
+		];
+	MenuBuilder.AddWidget(Widget, FText(), true, false);
 }
 
 void SAnimNotifyTrack::FillNewNotifyMenu(FMenuBuilder& MenuBuilder, bool bIsReplaceWithMenu /* = false */)
@@ -2367,93 +2348,110 @@ void SAnimNotifyTrack::FillNewNotifyMenu(FMenuBuilder& MenuBuilder, bool bIsRepl
 	USkeleton* SeqSkeleton = Sequence->GetSkeleton();
 	if (SeqSkeleton)
 	{
-		MenuBuilder.BeginSection("AnimNotifySkeletonSubMenu", LOCTEXT("NewNotifySubMenu_Skeleton", "Skeleton Notifies"));
+		MenuBuilder.BeginSection("AnimNotifySubMenu", LOCTEXT("NewNotifySubMenu", "Notifies"));
 		{
 			if (!bIsReplaceWithMenu)
 			{
 				FUIAction UIAction;
 				UIAction.ExecuteAction.BindSP(
 					this, &SAnimNotifyTrack::OnNewNotifyClicked);
-				MenuBuilder.AddMenuEntry(LOCTEXT("NewNotify", "New Notify..."), LOCTEXT("NewNotifyToolTip", "Create a new animation notify on the skeleton"), FSlateIcon(), UIAction);
+				MenuBuilder.AddMenuEntry(LOCTEXT("NewNotify", "New Notify..."), LOCTEXT("NewNotifyToolTip", "Create a new animation notify"), FSlateIcon(), UIAction);
 			}
 
-			MenuBuilder.AddSubMenu(
-				LOCTEXT("NewNotifySubMenu_Skeleton", "Skeleton Notifies"),
-				LOCTEXT("NewNotifySubMenu_Skeleton_Tooltip", "Choose from custom notifies on the skeleton"),
-				FNewMenuDelegate::CreateLambda([this, SeqSkeleton, bIsReplaceWithMenu](FMenuBuilder& InSubMenuBuilder)
-				{
-					ISkeletonEditorModule& SkeletonEditorModule = FModuleManager::LoadModuleChecked<ISkeletonEditorModule>("SkeletonEditor");
-					TSharedRef<IEditableSkeleton> EditableSkeleton = SkeletonEditorModule.CreateEditableSkeleton(SeqSkeleton);
+			ISkeletonEditorModule& SkeletonEditorModule = FModuleManager::LoadModuleChecked<ISkeletonEditorModule>("SkeletonEditor");
+			TSharedRef<IEditableSkeleton> EditableSkeleton = SkeletonEditorModule.CreateEditableSkeleton(SeqSkeleton);
 
-					InSubMenuBuilder.AddWidget(
-						SNew(SBox)
-						.MinDesiredWidth(300.0f)
-						.MaxDesiredHeight(400.0f)
-						[
-							SNew(SSkeletonAnimNotifies, EditableSkeleton)
-							.IsPicker(true)
-							.OnItemSelected_Lambda([this, bIsReplaceWithMenu](const FName& InNotifyName)
-							{
-								FSlateApplication::Get().DismissAllMenus();
+			MenuBuilder.AddWidget(
+				SNew(SBox)
+				.WidthOverride(300.0f)
+				.HeightOverride(250.0f)
+				[
+					SNew(SSkeletonAnimNotifies)
+					.IsPicker(true)
+					.ShowSyncMarkers(false)
+					.ShowNotifies(true)
+					.ShowCompatibleSkeletonAssets(true)
+					.ShowOtherAssets(true)
+					.EditableSkeleton(EditableSkeleton)
+					.OnItemSelected_Lambda([this, bIsReplaceWithMenu](const FName& InNotifyName)
+					{
+						FSlateApplication::Get().DismissAllMenus();
 
-								if (!bIsReplaceWithMenu)
-								{
-									CreateNewNotifyAtCursor(InNotifyName.ToString(), nullptr);
-								}
-								else
-								{
-									ReplaceSelectedWithNotify(InNotifyName.ToString(), nullptr);
-								}
-							})
-						],
-						FText(), true, false
-					);
-				}));
+						if (!bIsReplaceWithMenu)
+						{
+							CreateNewNotifyAtCursor(InNotifyName.ToString(), nullptr);
+						}
+						else
+						{
+							ReplaceSelectedWithNotify(InNotifyName.ToString(), nullptr);
+						}
+					})
+				],
+				FText(), true, false);
 		}
 		MenuBuilder.EndSection();
 	}
 
-	// Add a notify picker
-	MakeNewNotifyPicker<UAnimNotify>(MenuBuilder, bIsReplaceWithMenu);
+	MenuBuilder.BeginSection("AnimNotifyNotifySubMenu", LOCTEXT("NewNotifySubMenu_Notifies", "Notifies"));
+	{
+		// Add a notify picker
+		TSharedRef<SWidget> Widget = 
+			SNew(SBox)
+			.WidthOverride(300.0f)
+			.HeightOverride(250.0f)
+			[
+				PersonaUtils::MakeAnimNotifyPicker(Sequence, FOnClassPicked::CreateRaw(this, &SAnimNotifyTrack::OnAnimNotifyClassPicked, bIsReplaceWithMenu))
+			];
+		MenuBuilder.AddWidget(Widget, FText(), true, false);
+	}
+	MenuBuilder.EndSection();
 }
 
-void SAnimNotifyTrack::FillNewSyncMarkerMenu(FMenuBuilder& MenuBuilder)
+void SAnimNotifyTrack::FillNewSyncMarkerMenu(FMenuBuilder& MenuBuilder, bool bIsReplaceWithMenu /* = false */)
 {
 	USkeleton* SeqSkeleton = Sequence->GetSkeleton();
 	if (SeqSkeleton)
 	{
-		MenuBuilder.BeginSection("AnimSyncMarkerSubMenu", LOCTEXT("NewSyncMarkerSubMenu_Skeleton", "Sync Markers"));
+		MenuBuilder.BeginSection("AnimSyncMarkerSubMenu", LOCTEXT("NewSyncMarkerSubMenu", "Sync Markers"));
 		{
 			FUIAction UIAction;
-			UIAction.ExecuteAction.BindSP(
-				this, &SAnimNotifyTrack::OnNewSyncMarkerClicked);
-			MenuBuilder.AddMenuEntry(LOCTEXT("NewSyncMarker", "New Sync Marker..."), LOCTEXT("NewSyncMarkerToolTip", "Create a new animation sync marker"), FSlateIcon(), UIAction);
-
-			MenuBuilder.AddSubMenu(
-				LOCTEXT("NewSyncMarkerSubMenu_Existing", "Existing Sync Markers"),
-				LOCTEXT("NewSyncMarkerSubMenu_Existing_Tooltip", "Choose from existing sync marker names on the skeleton"),
-				FNewMenuDelegate::CreateLambda([this, SeqSkeleton](FMenuBuilder& InSubMenuBuilder)
+			if (!bIsReplaceWithMenu)
 			{
-				ISkeletonEditorModule& SkeletonEditorModule = FModuleManager::LoadModuleChecked<ISkeletonEditorModule>("SkeletonEditor");
-				TSharedRef<IEditableSkeleton> EditableSkeleton = SkeletonEditorModule.CreateEditableSkeleton(SeqSkeleton);
+				UIAction.ExecuteAction.BindSP(
+					this, &SAnimNotifyTrack::OnNewSyncMarkerClicked);
+				MenuBuilder.AddMenuEntry(LOCTEXT("NewSyncMarker", "New Sync Marker..."), LOCTEXT("NewSyncMarkerToolTip", "Create a new animation sync marker"), FSlateIcon(), UIAction);
+			}
 
-				InSubMenuBuilder.AddWidget(
-					SNew(SBox)
-					.MinDesiredWidth(300.0f)
-					.MaxDesiredHeight(400.0f)
-					[
-						SNew(SSkeletonAnimNotifies, EditableSkeleton)
-						.IsSyncMarker(true)
-						.OnItemSelected_Lambda([this](const FName& InNotifyName)
+			ISkeletonEditorModule& SkeletonEditorModule = FModuleManager::LoadModuleChecked<ISkeletonEditorModule>("SkeletonEditor");
+			TSharedRef<IEditableSkeleton> EditableSkeleton = SkeletonEditorModule.CreateEditableSkeleton(SeqSkeleton);
+
+			MenuBuilder.AddWidget(
+				SNew(SBox)
+				.WidthOverride(300.0f)
+				.HeightOverride(250.0f)
+				[
+					SNew(SSkeletonAnimNotifies)
+					.IsPicker(true)
+					.ShowSyncMarkers(true)
+					.ShowNotifies(false)
+					.ShowCompatibleSkeletonAssets(true)
+					.ShowOtherAssets(true)
+					.EditableSkeleton(EditableSkeleton)
+					.OnItemSelected_Lambda([this, bIsReplaceWithMenu](const FName& InNotifyName)
+					{
+						FSlateApplication::Get().DismissAllMenus();
+
+						if (!bIsReplaceWithMenu)
 						{
-							FSlateApplication::Get().DismissAllMenus();
-
-							CreateNewSyncMarkerAtCursor(InNotifyName.ToString(), nullptr);
-						})
-					],
-					FText(), true, false
-					);
-			}));
+							CreateNewSyncMarkerAtCursor(InNotifyName.ToString());
+						}
+						else
+						{
+							ReplaceSelectedWithSyncMarker(InNotifyName.ToString());
+						}
+					})
+				],
+				FText(), true, false);
 		}
 		MenuBuilder.EndSection();
 	}
@@ -2484,11 +2482,16 @@ FAnimNotifyEvent& SAnimNotifyTrack::CreateNewNotify(FString NewNotifyName, UClas
 		NewEvent.NotifyStateClass = Cast<UAnimNotifyState>(AnimNotifyClass);
 		NewEvent.Notify = Cast<UAnimNotify>(AnimNotifyClass);
 
-		// Set default duration to 1 frame for AnimNotifyState.
 		if( NewEvent.NotifyStateClass )
 		{
+			// Set default duration to 1 frame for AnimNotifyState.
 			NewEvent.SetDuration(1 / 30.f);
 			NewEvent.EndLink.Link(Sequence, NewEvent.EndLink.GetTime());
+			NewEvent.TriggerWeightThreshold = NewEvent.NotifyStateClass->GetDefaultTriggerWeightThreshold();
+		}
+		else if ( NewEvent.Notify )
+		{
+			NewEvent.TriggerWeightThreshold = NewEvent.Notify->GetDefaultTriggerWeightThreshold();
 		}
 	}
 	else
@@ -2515,7 +2518,7 @@ FAnimNotifyEvent& SAnimNotifyTrack::CreateNewNotify(FString NewNotifyName, UClas
 				if( Asset )
 				{
 					uint8* Offset = (*PropIt)->ContainerPtrToValuePtr<uint8>(NewEvent.Notify);
-					(*PropIt)->ImportText( *Asset->GetAsset()->GetPathName(), Offset, 0, NewEvent.Notify );
+					(*PropIt)->ImportText_Direct( *Asset->GetAsset()->GetPathName(), Offset, NewEvent.Notify, 0 );
 					break;
 				}
 			}
@@ -2549,7 +2552,7 @@ void SAnimNotifyTrack::CreateNewNotifyAtCursor(FString NewNotifyName, UClass* No
 	OnUpdatePanel.ExecuteIfBound();
 }
 
-void SAnimNotifyTrack::CreateNewSyncMarkerAtCursor(FString NewSyncMarkerName, UClass* NotifyClass)
+void SAnimNotifyTrack::CreateNewSyncMarkerAtCursor(FString NewSyncMarkerName)
 {
 	UAnimSequence* Seq = CastChecked<UAnimSequence>(Sequence);
 
@@ -2566,7 +2569,7 @@ void SAnimNotifyTrack::CreateNewSyncMarkerAtCursor(FString NewSyncMarkerName, UC
 	Seq->MarkPackageDirty();
 	OnUpdatePanel.ExecuteIfBound();
 
-	UBlendSpaceBase::UpdateBlendSpacesUsingAnimSequence(Seq);
+	UBlendSpace::UpdateBlendSpacesUsingAnimSequence(Seq);
 }
 
 void SAnimNotifyTrack::ReplaceSelectedWithBlueprintNotify(FString NewNotifyName, FString BlueprintPath)
@@ -2577,6 +2580,11 @@ void SAnimNotifyTrack::ReplaceSelectedWithBlueprintNotify(FString NewNotifyName,
 void SAnimNotifyTrack::ReplaceSelectedWithNotify(FString NewNotifyName, UClass* NotifyClass)
 {
 	OnReplaceSelectedWithNotify.ExecuteIfBound(NewNotifyName, NotifyClass);
+}
+
+void SAnimNotifyTrack::ReplaceSelectedWithSyncMarker(FString NewNotifyName)
+{
+	OnReplaceSelectedWithSyncMarker.ExecuteIfBound(NewNotifyName);
 }
 
 bool SAnimNotifyTrack::IsValidToPlace(UClass* NotifyClass) const
@@ -2617,6 +2625,7 @@ FReply SAnimNotifyTrack::OnMouseButtonUp( const FGeometry& MyGeometry, const FPo
 	if ( bRightMouseButton )
 	{
 		TSharedPtr<SWidget> WidgetToFocus;
+
 		WidgetToFocus = SummonContextMenu(MyGeometry, MouseEvent);
 
 		return (WidgetToFocus.IsValid())
@@ -2756,33 +2765,76 @@ void SAnimNotifyTrack::SelectNodesByGuid(const TSet<FGuid>& InGuids, bool bUpdat
 
 TSharedPtr<SWidget> SAnimNotifyTrack::SummonContextMenu(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
 {
+	UToolMenus* ToolMenus = UToolMenus::Get();
+	if (!ToolMenus)
+	{
+		return SNullWidget::NullWidget;
+	}
+
+	UAnimNotifyPanelContextMenuContext* MenuContext = NewObject<UAnimNotifyPanelContextMenuContext>();
+
 	FVector2D CursorPos = MouseEvent.GetScreenSpacePosition();
-	int32 NodeIndex = GetHitNotifyNode(MyGeometry, MyGeometry.AbsoluteToLocal(CursorPos));
 	LastClickedTime = CalculateTime(MyGeometry, MouseEvent.GetScreenSpacePosition());
 
-	const bool bCloseWindowAfterMenuSelection = true;
-	FMenuBuilder MenuBuilder( bCloseWindowAfterMenuSelection, WeakCommandList.Pin() );
-	FUIAction NewAction;
+	MenuContext->NodeIndex = GetHitNotifyNode(MyGeometry, MyGeometry.AbsoluteToLocal(CursorPos));
+	MenuContext->NotifyTrack = SharedThis(this);
+	MenuContext->NodeObject = MenuContext->NodeIndex != INDEX_NONE ? NotifyNodes[MenuContext->NodeIndex]->NodeObjectInterface : nullptr;
+	MenuContext->NotifyEvent = MenuContext->NodeObject ? MenuContext->NodeObject->GetNotifyEvent() : nullptr;
+	MenuContext->NotifyIndex = MenuContext->NotifyEvent ? AnimNotifies.IndexOfByKey(MenuContext->NotifyEvent) : INDEX_NONE;
+	MenuContext->MouseEvent = MouseEvent; 
 
-	INodeObjectInterface* NodeObject = NodeIndex != INDEX_NONE ? NotifyNodes[NodeIndex]->NodeObjectInterface : nullptr;
-	FAnimNotifyEvent* NotifyEvent = NodeObject ? NodeObject->GetNotifyEvent(): nullptr;
-	int32 NotifyIndex = NotifyEvent ? AnimNotifies.IndexOfByKey(NotifyEvent) : INDEX_NONE;
-
-	MenuBuilder.BeginSection("AnimNotify", LOCTEXT("NotifyHeading", "Notify") );
+	static const FName BaseMenuName("Persona.AnimNotifyTrackContextMenu");
+	if (!ToolMenus->IsMenuRegistered(BaseMenuName))
 	{
-		if (NodeObject)
-		{
-			if (!NotifyNodes[NodeIndex]->bSelected)
-			{
-				SelectTrackObjectNode(NodeIndex, MouseEvent.IsControlDown());
-			}
+		CreateContextMenuContent(BaseMenuName);
+	}
 
-			if(IsSingleNodeSelected())
+	FToolMenuContext ToolMenuContext(MenuContext);
+	if (WeakCommandList.IsValid())
+	{
+		ToolMenuContext.AppendCommandList(WeakCommandList.Pin());
+	}
+
+	TSharedPtr<SWidget> MenuWidget = ToolMenus->GenerateWidget(BaseMenuName, ToolMenuContext);
+
+	if (MenuWidget.IsValid())
+	{
+		const FVector2D MouseCursorLocation = FSlateApplication::Get().GetCursorPos();
+
+		FSlateApplication::Get().PushMenu(
+			SharedThis(this),
+			FWidgetPath(),
+			MenuWidget.ToSharedRef(),
+			MouseCursorLocation,
+			FPopupTransitionEffect(FPopupTransitionEffect::ContextMenu)
+		);
+	}
+	return TSharedPtr<SWidget>();
+}
+
+UToolMenu* SAnimNotifyTrack::CreateContextMenuContent(FName BaseMenuName)
+{
+	UToolMenus* ToolMenus = UToolMenus::Get();
+	UToolMenu* Menu = ToolMenus->RegisterMenu(BaseMenuName);
+
+	Menu->AddDynamicSection(NAME_None, FNewToolMenuDelegate::CreateLambda([](UToolMenu* InMenu)
+		{
+			FToolMenuSection& Section = InMenu->AddSection("AnimNotify", LOCTEXT("NotifyHeading", "Notify"));
+			UAnimNotifyPanelContextMenuContext* MenuContext = InMenu->FindContext<UAnimNotifyPanelContextMenuContext>();
+			TSharedPtr< SAnimNotifyTrack> SourceTrack = MenuContext->NotifyTrack.Pin();
+			if (MenuContext->NodeObject)
 			{
-				// Add item to directly set notify time
-				TSharedRef<SWidget> TimeWidget = 
-					SNew( SBox )
-					.HAlign( HAlign_Right )
+				if (!SourceTrack->NotifyNodes[MenuContext->NodeIndex]->bSelected)
+				{
+					SourceTrack->SelectTrackObjectNode(MenuContext->NodeIndex, MenuContext->MouseEvent.IsControlDown());
+				}
+
+				if (SourceTrack->IsSingleNodeSelected())
+				{
+					// Add item to directly set notify time
+					TSharedRef<SWidget> TimeWidget =
+					SNew(SBox)
+					.HAlign(HAlign_Right)
 					.ToolTipText(LOCTEXT("SetTimeToolTip", "Set the time of this notify directly"))
 					[
 						SNew(SBox)
@@ -2790,42 +2842,48 @@ TSharedPtr<SWidget> SAnimNotifyTrack::SummonContextMenu(const FGeometry& MyGeome
 						.WidthOverride(100.0f)
 						[
 							SNew(SNumericEntryBox<float>)
-							.Font(FEditorStyle::GetFontStyle(TEXT("MenuItem.Font")))
+							.Font(FAppStyle::GetFontStyle(TEXT("MenuItem.Font")))
 							.MinValue(0.0f)
-							.MaxValue(Sequence->SequenceLength)
-							.Value(NodeObject->GetTime())
+							.MaxValue(SourceTrack->Sequence->GetPlayLength())
+							.Value(MenuContext->NodeObject->GetTime())
 							.AllowSpin(false)
-							.OnValueCommitted_Lambda([this, NodeIndex](float InValue, ETextCommit::Type InCommitType)
-							{
-								if (InCommitType == ETextCommit::OnEnter && NotifyNodes.IsValidIndex(NodeIndex))
+							.OnValueCommitted_Lambda([SourceTrack, MenuContext](float InValue, ETextCommit::Type InCommitType)
 								{
-									INodeObjectInterface* LocalNodeObject = NotifyNodes[NodeIndex]->NodeObjectInterface;
-
-									float NewTime = FMath::Clamp(InValue, 0.0f, Sequence->SequenceLength - LocalNodeObject->GetDuration());
-									LocalNodeObject->SetTime(NewTime);
-
-									if (FAnimNotifyEvent* Event = LocalNodeObject->GetNotifyEvent())
+									if (InCommitType == ETextCommit::OnEnter && SourceTrack->NotifyNodes.IsValidIndex(MenuContext->NodeIndex))
 									{
-										Event->RefreshTriggerOffset(Sequence->CalculateOffsetForNotify(Event->GetTime()));
-										if (Event->GetDuration() > 0.0f)
-										{
-											Event->RefreshEndTriggerOffset(Sequence->CalculateOffsetForNotify(Event->GetTime() + Event->GetDuration()));
-										}
-									}
-									OnUpdatePanel.ExecuteIfBound();
+										const FScopedTransaction Transaction(LOCTEXT("SetNotifyTimeTransaction", "Set Anim Notify trigger time"));
+										SourceTrack->Sequence->Modify();
 
-									FSlateApplication::Get().DismissAllMenus();
-								}
-							})
+										INodeObjectInterface* LocalNodeObject = SourceTrack->NotifyNodes[MenuContext->NodeIndex]->NodeObjectInterface;
+
+										float NewTime = FMath::Clamp(InValue, 0.0f, SourceTrack->Sequence->GetPlayLength() - LocalNodeObject->GetDuration());
+										LocalNodeObject->SetTime(NewTime);
+
+										if (FAnimNotifyEvent* Event = LocalNodeObject->GetNotifyEvent())
+										{
+											Event->RefreshTriggerOffset(SourceTrack->Sequence->CalculateOffsetForNotify(Event->GetTime()));
+											if (Event->GetDuration() > 0.0f)
+											{
+												Event->RefreshEndTriggerOffset(SourceTrack->Sequence->CalculateOffsetForNotify(Event->GetTime() + Event->GetDuration()));
+											}
+										}
+										SourceTrack->OnUpdatePanel.ExecuteIfBound();
+
+										FSlateApplication::Get().DismissAllMenus();
+									}
+								})
 						]
 					];
 
-				MenuBuilder.AddWidget(TimeWidget, LOCTEXT("TimeMenuText", "Notify Begin Time"));
+					Section.AddEntry(
+						FToolMenuEntry::InitWidget(TEXT("AnimNotifyContextMenuTimeWidget"), TimeWidget, FText::FromString("Notify Begin Time"), true, false)
+					);
 
-				// Add item to directly set notify frame
-				TSharedRef<SWidget> FrameWidget = 
-					SNew( SBox )
-					.HAlign( HAlign_Right )
+
+					// Add item to directly set notify frame
+					TSharedRef<SWidget> FrameWidget =
+					SNew(SBox)
+					.HAlign(HAlign_Right)
 					.ToolTipText(LOCTEXT("SetFrameToolTip", "Set the frame of this notify directly"))
 					[
 						SNew(SBox)
@@ -2833,44 +2891,49 @@ TSharedPtr<SWidget> SAnimNotifyTrack::SummonContextMenu(const FGeometry& MyGeome
 						.WidthOverride(100.0f)
 						[
 							SNew(SNumericEntryBox<int32>)
-							.Font(FEditorStyle::GetFontStyle(TEXT("MenuItem.Font")))
+							.Font(FAppStyle::GetFontStyle(TEXT("MenuItem.Font")))
 							.MinValue(0)
-							.MaxValue(Sequence->GetNumberOfFrames())
-							.Value(Sequence->GetFrameAtTime(NodeObject->GetTime()))
-							.AllowSpin(false)						
-							.OnValueCommitted_Lambda([this, NodeIndex](int32 InValue, ETextCommit::Type InCommitType)
-							{
-								if (InCommitType == ETextCommit::OnEnter && NotifyNodes.IsValidIndex(NodeIndex))
+							.MaxValue(SourceTrack->Sequence->GetNumberOfSampledKeys())
+							.Value(SourceTrack->Sequence->GetFrameAtTime(MenuContext->NodeObject->GetTime()))
+							.AllowSpin(false)
+							.OnValueCommitted_Lambda([SourceTrack, MenuContext](int32 InValue, ETextCommit::Type InCommitType)
 								{
-									INodeObjectInterface* LocalNodeObject = NotifyNodes[NodeIndex]->NodeObjectInterface;
-
-									float NewTime = FMath::Clamp(Sequence->GetTimeAtFrame(InValue), 0.0f, Sequence->SequenceLength - LocalNodeObject->GetDuration());
-									LocalNodeObject->SetTime(NewTime);
-
-									if (FAnimNotifyEvent* Event = LocalNodeObject->GetNotifyEvent())
+									if (InCommitType == ETextCommit::OnEnter && SourceTrack->NotifyNodes.IsValidIndex(MenuContext->NodeIndex))
 									{
-										Event->RefreshTriggerOffset(Sequence->CalculateOffsetForNotify(Event->GetTime()));
-										if (Event->GetDuration() > 0.0f)
-										{
-											Event->RefreshEndTriggerOffset(Sequence->CalculateOffsetForNotify(Event->GetTime() + Event->GetDuration()));
-										}
-									}
-									OnUpdatePanel.ExecuteIfBound();
+										const FScopedTransaction Transaction(LOCTEXT("SetNotifyFrameTransaction", "Set Anim Notify trigger frame index"));
+										SourceTrack->Sequence->Modify();
 
-									FSlateApplication::Get().DismissAllMenus();
-								}
-							})
+										INodeObjectInterface* LocalNodeObject = SourceTrack->NotifyNodes[MenuContext->NodeIndex]->NodeObjectInterface;
+
+										float NewTime = FMath::Clamp(SourceTrack->Sequence->GetTimeAtFrame(InValue), 0.0f, SourceTrack->Sequence->GetPlayLength() - LocalNodeObject->GetDuration());
+										LocalNodeObject->SetTime(NewTime);
+
+										if (FAnimNotifyEvent* Event = LocalNodeObject->GetNotifyEvent())
+										{
+											Event->RefreshTriggerOffset(SourceTrack->Sequence->CalculateOffsetForNotify(Event->GetTime()));
+											if (Event->GetDuration() > 0.0f)
+											{
+												Event->RefreshEndTriggerOffset(SourceTrack->Sequence->CalculateOffsetForNotify(Event->GetTime() + Event->GetDuration()));
+											}
+										}
+										SourceTrack->OnUpdatePanel.ExecuteIfBound();
+
+										FSlateApplication::Get().DismissAllMenus();
+									}
+								})
 						]
 					];
+					Section.AddEntry(
+						FToolMenuEntry::InitWidget(TEXT("AnimNotifyContextMenuFrameWidget"), FrameWidget, FText::FromString("Notify Frame"), true, false)
+					);
 
-				MenuBuilder.AddWidget(FrameWidget, LOCTEXT("FrameMenuText", "Notify Frame"));
 
-				if (NotifyEvent)
-				{
-					// add menu to get threshold weight for triggering this notify
-					TSharedRef<SWidget> ThresholdWeightWidget = 
-						SNew( SBox )
-						.HAlign( HAlign_Right )
+					if (MenuContext->NotifyEvent)
+					{
+						// add menu to get threshold weight for triggering this notify
+						TSharedRef<SWidget> ThresholdWeightWidget =
+						SNew(SBox)
+						.HAlign(HAlign_Right)
 						.ToolTipText(LOCTEXT("MinTriggerWeightToolTip", "The minimum weight to trigger this notify"))
 						[
 							SNew(SBox)
@@ -2878,32 +2941,38 @@ TSharedPtr<SWidget> SAnimNotifyTrack::SummonContextMenu(const FGeometry& MyGeome
 							.WidthOverride(100.0f)
 							[
 								SNew(SNumericEntryBox<float>)
-								.Font(FEditorStyle::GetFontStyle(TEXT("MenuItem.Font")))
+								.Font(FAppStyle::GetFontStyle(TEXT("MenuItem.Font")))
 								.MinValue(0.0f)
 								.MaxValue(1.0f)
-								.Value(NotifyEvent->TriggerWeightThreshold)
-								.AllowSpin(false)						
-								.OnValueCommitted_Lambda([this, NotifyIndex](float InValue, ETextCommit::Type InCommitType)
-								{
-									if ( InCommitType == ETextCommit::OnEnter && AnimNotifies.IsValidIndex(NotifyIndex) )
+								.Value(MenuContext->NotifyEvent->TriggerWeightThreshold)
+								.AllowSpin(false)
+								.OnValueCommitted_Lambda([SourceTrack, MenuContext](float InValue, ETextCommit::Type InCommitType)
 									{
-										float NewWeight = FMath::Max(InValue, ZERO_ANIMWEIGHT_THRESH);
-										AnimNotifies[NotifyIndex]->TriggerWeightThreshold = NewWeight;
+										if (InCommitType == ETextCommit::OnEnter && SourceTrack->AnimNotifies.IsValidIndex(MenuContext->NotifyIndex))
+										{
+											const FScopedTransaction Transaction(LOCTEXT("SetNotifyWeightTransaction", "Set Anim Notify trigger weight"));
+											SourceTrack->Sequence->Modify();
 
-										FSlateApplication::Get().DismissAllMenus();
-									}
-								})
+											float NewWeight = FMath::Max(InValue, ZERO_ANIMWEIGHT_THRESH);
+											SourceTrack->AnimNotifies[MenuContext->NotifyIndex]->TriggerWeightThreshold = NewWeight;
+
+											FSlateApplication::Get().DismissAllMenus();
+										}
+									})
 							]
 						];
 
-					MenuBuilder.AddWidget(ThresholdWeightWidget, LOCTEXT("MinTriggerWeight", "Min Trigger Weight"));
+						Section.AddEntry(
+							FToolMenuEntry::InitWidget(TEXT("AnimNotifyContextMenuTriggerWeightWidget"), ThresholdWeightWidget, FText::FromString("Min Trigger Weight"), true, false)
+						);
 
-					// Add menu for changing duration if this is an AnimNotifyState
-					if (NotifyEvent->NotifyStateClass)
-					{
-						TSharedRef<SWidget> NotifyStateDurationWidget = 
-							SNew( SBox )
-							.HAlign( HAlign_Right )
+
+						// Add menu for changing duration if this is an AnimNotifyState
+						if (MenuContext->NotifyEvent->NotifyStateClass)
+						{
+							TSharedRef<SWidget> NotifyStateDurationWidget =
+							SNew(SBox)
+							.HAlign(HAlign_Right)
 							.ToolTipText(LOCTEXT("SetAnimStateDuration_ToolTip", "The duration of this Anim Notify State"))
 							[
 								SNew(SBox)
@@ -2911,36 +2980,41 @@ TSharedPtr<SWidget> SAnimNotifyTrack::SummonContextMenu(const FGeometry& MyGeome
 								.WidthOverride(100.0f)
 								[
 									SNew(SNumericEntryBox<float>)
-									.Font(FEditorStyle::GetFontStyle(TEXT("MenuItem.Font")))
+									.Font(FAppStyle::GetFontStyle(TEXT("MenuItem.Font")))
 									.MinValue(SAnimNotifyNode::MinimumStateDuration)
 									.MinSliderValue(SAnimNotifyNode::MinimumStateDuration)
 									.MaxSliderValue(100.0f)
-									.Value(NotifyEvent->GetDuration())
-									.AllowSpin(false)						
-									.OnValueCommitted_Lambda([this, NotifyIndex](float InValue, ETextCommit::Type InCommitType)
-									{
-										if ( InCommitType == ETextCommit::OnEnter && AnimNotifies.IsValidIndex(NotifyIndex) )
+									.Value(MenuContext->NotifyEvent->GetDuration())
+									.AllowSpin(false)
+									.OnValueCommitted_Lambda([SourceTrack, MenuContext](float InValue, ETextCommit::Type InCommitType)
 										{
-											float NewDuration = FMath::Max(InValue, SAnimNotifyNode::MinimumStateDuration);
-											float MaxDuration = Sequence->SequenceLength - AnimNotifies[NotifyIndex]->GetTime();
-											NewDuration = FMath::Min(NewDuration, MaxDuration);
-											AnimNotifies[NotifyIndex]->SetDuration(NewDuration);
+											if (InCommitType == ETextCommit::OnEnter && SourceTrack->AnimNotifies.IsValidIndex(MenuContext->NotifyIndex))
+											{
+												const FScopedTransaction Transaction(LOCTEXT("SetNotifyDurationSecondsTransaction", "Set Anim Notify State duration in seconds"));
+												SourceTrack->Sequence->Modify();
 
-											// If we have a delegate bound to refresh the offsets, call it.
-											// This is used by the montage editor to keep the offsets up to date.
-											OnRequestRefreshOffsets.ExecuteIfBound();
+												float NewDuration = FMath::Max(InValue, SAnimNotifyNode::MinimumStateDuration);
+												float MaxDuration = SourceTrack->Sequence->GetPlayLength() - SourceTrack->AnimNotifies[MenuContext->NotifyIndex]->GetTime();
+												NewDuration = FMath::Min(NewDuration, MaxDuration);
+												SourceTrack->AnimNotifies[MenuContext->NotifyIndex]->SetDuration(NewDuration);
 
-											FSlateApplication::Get().DismissAllMenus();
-										}
-									})
+												// If we have a delegate bound to refresh the offsets, call it.
+												// This is used by the montage editor to keep the offsets up to date.
+												SourceTrack->OnRequestRefreshOffsets.ExecuteIfBound();
+
+												FSlateApplication::Get().DismissAllMenus();
+											}
+										})
 								]
 							];
 
-						MenuBuilder.AddWidget(NotifyStateDurationWidget, LOCTEXT("SetAnimStateDuration", "Anim Notify State Duration"));
+							Section.AddEntry(
+								FToolMenuEntry::InitWidget(TEXT("AnimNotifyContextStateDurationWidget"), NotifyStateDurationWidget, FText::FromString("Anim Notify State Duration"), true, false)
+							);
 
-						TSharedRef<SWidget> NotifyStateDurationFramesWidget = 
-							SNew( SBox )
-							.HAlign( HAlign_Right )
+							TSharedRef<SWidget> NotifyStateDurationFramesWidget =
+							SNew(SBox)
+							.HAlign(HAlign_Right)
 							.ToolTipText(LOCTEXT("SetAnimStateDurationFrames_ToolTip", "The duration of this Anim Notify State in frames"))
 							[
 								SNew(SBox)
@@ -2948,178 +3022,231 @@ TSharedPtr<SWidget> SAnimNotifyTrack::SummonContextMenu(const FGeometry& MyGeome
 								.WidthOverride(100.0f)
 								[
 									SNew(SNumericEntryBox<int32>)
-									.Font(FEditorStyle::GetFontStyle(TEXT("MenuItem.Font")))
+									.Font(FAppStyle::GetFontStyle(TEXT("MenuItem.Font")))
 									.MinValue(1)
 									.MinSliderValue(1)
-									.MaxSliderValue(Sequence->GetNumberOfFrames())
-									.Value(Sequence->GetFrameAtTime(NotifyEvent->GetDuration()))
-									.AllowSpin(false)						
-									.OnValueCommitted_Lambda([this, NotifyIndex](int32 InValue, ETextCommit::Type InCommitType)
-									{
-										if ( InCommitType == ETextCommit::OnEnter && AnimNotifies.IsValidIndex(NotifyIndex) )
+									.MaxSliderValue(SourceTrack->Sequence->GetNumberOfSampledKeys())
+									.Value(SourceTrack->Sequence->GetFrameAtTime(MenuContext->NotifyEvent->GetDuration()))
+									.AllowSpin(false)
+									.OnValueCommitted_Lambda([SourceTrack, MenuContext](int32 InValue, ETextCommit::Type InCommitType)
 										{
-											float NewDuration = FMath::Max(Sequence->GetTimeAtFrame(InValue), SAnimNotifyNode::MinimumStateDuration);
-											float MaxDuration = Sequence->SequenceLength - AnimNotifies[NotifyIndex]->GetTime();
-											NewDuration = FMath::Min(NewDuration, MaxDuration);
-											AnimNotifies[NotifyIndex]->SetDuration(NewDuration);
+											if (InCommitType == ETextCommit::OnEnter && SourceTrack->AnimNotifies.IsValidIndex(MenuContext->NotifyIndex))
+											{
+												const FScopedTransaction Transaction(LOCTEXT("SetNotifyDurationFramesTransaction", "Set Anim Notify State duration in frames"));
+												SourceTrack->Sequence->Modify();
 
-											// If we have a delegate bound to refresh the offsets, call it.
-											// This is used by the montage editor to keep the offsets up to date.
-											OnRequestRefreshOffsets.ExecuteIfBound();
+												float NewDuration = FMath::Max(SourceTrack->Sequence->GetTimeAtFrame(InValue), SAnimNotifyNode::MinimumStateDuration);
+												float MaxDuration = SourceTrack->Sequence->GetPlayLength() - SourceTrack->AnimNotifies[MenuContext->NotifyIndex]->GetTime();
+												NewDuration = FMath::Min(NewDuration, MaxDuration);
+												SourceTrack->AnimNotifies[MenuContext->NotifyIndex]->SetDuration(NewDuration);
 
-											FSlateApplication::Get().DismissAllMenus();
-										}
-									})
+												// If we have a delegate bound to refresh the offsets, call it.
+												// This is used by the montage editor to keep the offsets up to date.
+												SourceTrack->OnRequestRefreshOffsets.ExecuteIfBound();
+
+												FSlateApplication::Get().DismissAllMenus();
+											}
+										})
 								]
 							];
 
-						MenuBuilder.AddWidget(NotifyStateDurationFramesWidget, LOCTEXT("SetAnimStateDurationFrames", "Anim Notify State Frames"));
+							Section.AddEntry(
+								FToolMenuEntry::InitWidget(TEXT("AnimNotifyContextMenuStateFramesWidget"), NotifyStateDurationFramesWidget, FText::FromString("Anim Notify State Frames"), true, false)
+							);
+
+						}
+
 					}
 				}
+
 			}
-		}
-		else
-		{
-			MenuBuilder.AddSubMenu(
-				NSLOCTEXT("NewNotifySubMenu", "NewNotifySubMenuAddNotify", "Add Notify..."),
-				NSLOCTEXT("NewNotifySubMenu", "NewNotifySubMenuAddNotifyToolTip", "Add AnimNotifyEvent"),
-				FNewMenuDelegate::CreateRaw( this, &SAnimNotifyTrack::FillNewNotifyMenu, false ) );
-
-			MenuBuilder.AddSubMenu(
-				NSLOCTEXT("NewNotifySubMenu", "NewNotifySubMenuAddNotifyState", "Add Notify State..."),
-				NSLOCTEXT("NewNotifySubMenu", "NewNotifySubMenuAddNotifyStateToolTip","Add AnimNotifyState"),
-				FNewMenuDelegate::CreateRaw( this, &SAnimNotifyTrack::FillNewNotifyStateMenu, false ) );
-
-			if (Sequence->IsA(UAnimSequence::StaticClass()))
+			else
 			{
-				MenuBuilder.AddSubMenu(
-					NSLOCTEXT("NewSyncMarkerSubMenu", "NewSyncMarkerSubMenuAddNotifyState", "Add Sync Marker..."),
-					NSLOCTEXT("NewSyncMarkerSubMenu", "NewSyncMarkerSubMenuAddNotifyStateToolTip", "Create a new animation sync marker"),
-					FNewMenuDelegate::CreateRaw(this, &SAnimNotifyTrack::FillNewSyncMarkerMenu));
-			}
+				Section.AddSubMenu(TEXT("AddNotify"),
+					NSLOCTEXT("NewNotifySubMenu", "NewNotifySubMenuAddNotify", "Add Notify..."),
+					NSLOCTEXT("NewNotifySubMenu", "NewNotifySubMenuAddNotifyToolTip", "Add AnimNotifyEvent"),
+					FNewMenuDelegate::CreateRaw(SourceTrack.Get(), &SAnimNotifyTrack::FillNewNotifyMenu, false),
+					false,
+					FSlateIcon());
 
-			MenuBuilder.AddMenuEntry(
-				NSLOCTEXT("NewNotifySubMenu", "ManageNotifies", "Manage Notifies..."),
-				NSLOCTEXT("NewNotifySubMenu", "ManageNotifiesToolTip", "Opens the Manage Notifies window"),
-				FSlateIcon(),
-				FUIAction( FExecuteAction::CreateSP( this, &SAnimNotifyTrack::OnManageNotifies ) ) );
-		}
-	}
-	MenuBuilder.EndSection(); //AnimNotify
+				Section.AddSubMenu(TEXT("AddNotifyState"),
+					NSLOCTEXT("NewNotifySubMenu", "NewNotifySubMenuAddNotifyState", "Add Notify State..."),
+					NSLOCTEXT("NewNotifySubMenu", "NewNotifySubMenuAddNotifyStateToolTip", "Add AnimNotifyState"),
+					FNewMenuDelegate::CreateRaw(SourceTrack.Get(), &SAnimNotifyTrack::FillNewNotifyStateMenu, false),
+					false,
+					FSlateIcon());
 
-	NewAction.CanExecuteAction = 0;
 
-	MenuBuilder.BeginSection("AnimEdit", LOCTEXT("NotifyEditHeading", "Edit") );
-	{
-		if ( NodeObject )
-		{
-			// copy notify menu item
-			MenuBuilder.AddMenuEntry(FAnimNotifyPanelCommands::Get().CopyNotifies);
-
-			// allow it to delete
-			MenuBuilder.AddMenuEntry(FAnimNotifyPanelCommands::Get().DeleteNotify);
-
-			if (NotifyEvent)
-			{
-				// For the "Replace With..." menu, make sure the current AnimNotify selection is valid for replacement
-				if (OnGetIsAnimNotifySelectionValidforReplacement.IsBound() && OnGetIsAnimNotifySelectionValidforReplacement.Execute())
+				if (SourceTrack->Sequence->IsA(UAnimSequence::StaticClass()))
 				{
-					// If this is an AnimNotifyState (has duration) allow it to be replaced with other AnimNotifyStates
-					if (NotifyEvent->NotifyStateClass)
-					{
-						MenuBuilder.AddSubMenu(
-							NSLOCTEXT("NewNotifySubMenu", "NewNotifySubMenuReplaceWithNotifyState", "Replace with Notify State..."),
-							NSLOCTEXT("NewNotifySubMenu", "NewNotifySubMenuReplaceWithNotifyStateToolTip", "Replace with AnimNotifyState"),
-							FNewMenuDelegate::CreateRaw(this, &SAnimNotifyTrack::FillNewNotifyStateMenu, true));
-					}
-					// If this is a regular AnimNotify (no duration) allow it to be replaced with other AnimNotifies
-					else
-					{
-						MenuBuilder.AddSubMenu(
-							NSLOCTEXT("NewNotifySubMenu", "NewNotifySubMenuReplaceWithNotify", "Replace with Notify..."),
-							NSLOCTEXT("NewNotifySubMenu", "NewNotifySubMenuReplaceWithNotifyToolTip", "Replace with AnimNotifyEvent"),
-							FNewMenuDelegate::CreateRaw(this, &SAnimNotifyTrack::FillNewNotifyMenu, true));
-					}
+					Section.AddSubMenu(TEXT("AddSyncMarker"),
+						NSLOCTEXT("NewSyncMarkerSubMenu", "NewSyncMarkerSubMenuAddNotifyState", "Add Sync Marker..."),
+						NSLOCTEXT("NewSyncMarkerSubMenu", "NewSyncMarkerSubMenuAddNotifyStateToolTip", "Create a new animation sync marker"),
+						FNewMenuDelegate::CreateRaw(SourceTrack.Get(), &SAnimNotifyTrack::FillNewSyncMarkerMenu, false),
+						false,
+						FSlateIcon());
 				}
-			}
-		}
-		else
-		{
-			FString PropertyString;
-			const TCHAR* Buffer;
-			float OriginalTime;
-			float OriginalLength;
-			int32 TrackSpan;
 
-			//Check whether can we show menu item to paste anim notify event
-			if( ReadNotifyPasteHeader(PropertyString, Buffer, OriginalTime, OriginalLength,TrackSpan) )
+				Section.AddMenuEntry(TEXT("ManageNotifies"),
+					NSLOCTEXT("NewNotifySubMenu", "ManageNotifies", "Manage Notifies..."),
+					NSLOCTEXT("NewNotifySubMenu", "ManageNotifiesToolTip", "Opens the Manage Notifies window"),
+					FSlateIcon(),
+					FUIAction(FExecuteAction::CreateSP(SourceTrack.Get(), &SAnimNotifyTrack::OnManageNotifies)));
+			}
+
+			FToolMenuSection& EditSection = InMenu->AddSection("AnimEdit", LOCTEXT("NotifyEditHeading", "Edit"));
+			if (MenuContext->NodeObject)
 			{
-				// paste notify menu item
-				if (IsSingleNodeInClipboard())
+				// copy notify menu item
+				EditSection.AddMenuEntry(FAnimNotifyPanelCommands::Get().CopyNotifies);
+
+				// allow it to delete
+				EditSection.AddMenuEntry(FAnimNotifyPanelCommands::Get().DeleteNotify);
+
+				if (MenuContext->NotifyEvent)
 				{
-					MenuBuilder.AddMenuEntry(FAnimNotifyPanelCommands::Get().PasteNotifies);
+					// For the "Replace With..." menu, make sure the current AnimNotify selection is valid for replacement
+					if (SourceTrack->OnGetIsAnimNotifySelectionValidforReplacement.IsBound() && SourceTrack->OnGetIsAnimNotifySelectionValidforReplacement.Execute())
+					{
+						// If this is an AnimNotifyState (has duration) allow it to be replaced with other AnimNotifyStates
+						if (MenuContext->NotifyEvent->NotifyStateClass)
+						{
+							EditSection.AddSubMenu(TEXT("ReplaceWithNotifyState"),
+								NSLOCTEXT("NewNotifySubMenu", "NewNotifySubMenuReplaceWithNotifyState", "Replace with Notify State..."),
+								NSLOCTEXT("NewNotifySubMenu", "NewNotifySubMenuReplaceWithNotifyStateToolTip", "Replace with AnimNotifyState"),
+								FNewMenuDelegate::CreateRaw(SourceTrack.Get(), &SAnimNotifyTrack::FillNewNotifyStateMenu, true),
+								false,
+								FSlateIcon());
+						}
+						// If this is a regular AnimNotify (no duration) allow it to be replaced with other AnimNotifies
+						else
+						{
+							EditSection.AddSubMenu(TEXT("ReplaceWithNotify"),
+								NSLOCTEXT("NewNotifySubMenu", "NewNotifySubMenuReplaceWithNotify", "Replace with Notify..."),
+								NSLOCTEXT("NewNotifySubMenu", "NewNotifySubMenuReplaceWithNotifyToolTip", "Replace with AnimNotifyEvent"),
+								FNewMenuDelegate::CreateRaw(SourceTrack.Get(), &SAnimNotifyTrack::FillNewNotifyMenu, true),
+								false,
+								FSlateIcon()
+							);
+						}
+					}
 				}
 				else
 				{
-					NewAction.ExecuteAction.BindRaw(
-						this, &SAnimNotifyTrack::OnPasteNotifyClicked, ENotifyPasteMode::MousePosition, ENotifyPasteMultipleMode::Relative);
-
-					MenuBuilder.AddMenuEntry(LOCTEXT("PasteMultRel", "Paste Multiple Relative"), LOCTEXT("PasteMultRelToolTip", "Paste multiple notifies beginning at the mouse cursor, maintaining the same relative spacing as the source."), FSlateIcon(), NewAction);
-
-					MenuBuilder.AddMenuEntry(FAnimNotifyPanelCommands::Get().PasteNotifies, NAME_None, LOCTEXT("PasteMultAbs", "Paste Multiple Absolute"), LOCTEXT("PasteMultAbsToolTip", "Paste multiple notifies beginning at the mouse cursor, maintaining absolute spacing."));
+					if (MenuContext->NodeObject->GetType() == ENodeObjectTypes::SYNC_MARKER)
+					{
+						EditSection.AddSubMenu(TEXT("ReplaceSyncMarkers"),
+							NSLOCTEXT("NewNotifySubMenu", "NewNotifySubMenuReplaceWithSyncMarker", "Replace Sync Marker(s)..."),
+							NSLOCTEXT("NewNotifySubMenu", "NewNotifySubMenuReplaceWithSyncMarkerToolTip", "Replace the selected sync markers"),
+							FNewMenuDelegate::CreateRaw(SourceTrack.Get(), &SAnimNotifyTrack::FillNewSyncMarkerMenu, true),
+							false,
+							FSlateIcon()
+						);
+					}
 				}
-
-				if(OriginalTime < Sequence->SequenceLength)
-				{
-					NewAction.ExecuteAction.BindRaw(
-						this, &SAnimNotifyTrack::OnPasteNotifyClicked, ENotifyPasteMode::OriginalTime, ENotifyPasteMultipleMode::Absolute);
-
-					FText DisplayText = FText::Format( LOCTEXT("PasteAtOriginalTime", "Paste at original time ({0})"), FText::AsNumber( OriginalTime) );
-					MenuBuilder.AddMenuEntry(DisplayText, LOCTEXT("PasteAtOriginalTimeToolTip", "Paste animation notify event at the time it was set to when it was copied"), FSlateIcon(), NewAction);
-				}
-				
 			}
-		}
-	}
-	MenuBuilder.EndSection(); //AnimEdit
-
-	if (NotifyEvent)
-	{
-		UObject* NotifyObject = NotifyEvent->Notify;
-		NotifyObject = NotifyObject ? NotifyObject : NotifyEvent->NotifyStateClass;
-
-		MenuBuilder.BeginSection("ViewSource", LOCTEXT("NotifyViewHeading", "View"));
-
-		if (NotifyObject)
-		{
-			if (Cast<UBlueprintGeneratedClass>(NotifyObject->GetClass()))
+			else
 			{
-				if (UBlueprint * Blueprint = Cast<UBlueprint>(NotifyObject->GetClass()->ClassGeneratedBy))
+				FString PropertyString;
+				const TCHAR* Buffer;
+				float OriginalTime;
+				float OriginalLength;
+				int32 TrackSpan;
+				FUIAction NewAction;
+				//Check whether can we show menu item to paste anim notify event
+				if (ReadNotifyPasteHeader(PropertyString, Buffer, OriginalTime, OriginalLength, TrackSpan))
 				{
-					NewAction.ExecuteAction.BindRaw(
-						this, &SAnimNotifyTrack::OnOpenNotifySource, Blueprint);
-					MenuBuilder.AddMenuEntry(LOCTEXT("OpenNotifyBlueprint", "Open Notify Blueprint"), LOCTEXT("OpenNotifyBlueprintTooltip", "Opens the source blueprint for this notify"), FSlateIcon(), NewAction);
+					// paste notify menu item
+					if (SourceTrack->IsSingleNodeInClipboard())
+					{
+						EditSection.AddMenuEntry(FAnimNotifyPanelCommands::Get().PasteNotifies);
+					}
+					else
+					{
+						NewAction.ExecuteAction.BindRaw(
+							SourceTrack.Get(), &SAnimNotifyTrack::OnPasteNotifyClicked, ENotifyPasteMode::MousePosition, ENotifyPasteMultipleMode::Relative);
+
+						EditSection.AddMenuEntry(TEXT("PasteMultipleRelative"),
+							LOCTEXT("PasteMultRel", "Paste Multiple Relative"), 
+							LOCTEXT("PasteMultRelToolTip", "Paste multiple notifies beginning at the mouse cursor, maintaining the same relative spacing as the source."),
+							FSlateIcon(),
+							NewAction);
+
+						EditSection.AddMenuEntry(FAnimNotifyPanelCommands::Get().PasteNotifies,
+							LOCTEXT("PasteMultAbs", "Paste Multiple Absolute"),
+							LOCTEXT("PasteMultAbsToolTip", "Paste multiple notifies beginning at the mouse cursor, maintaining absolute spacing."));
+					}
+
+					if (OriginalTime < SourceTrack->Sequence->GetPlayLength())
+					{
+						NewAction.ExecuteAction.BindRaw(
+							SourceTrack.Get(), &SAnimNotifyTrack::OnPasteNotifyClicked, ENotifyPasteMode::OriginalTime, ENotifyPasteMultipleMode::Absolute);
+
+						FText DisplayText = FText::Format(LOCTEXT("PasteAtOriginalTime", "Paste at original time ({0})"), FText::AsNumber(OriginalTime));
+
+						EditSection.AddMenuEntry(TEXT("Paste at Original Time"),
+							DisplayText,
+							LOCTEXT("PasteAtOriginalTimeToolTip", "Paste animation notify event at the time it was set to when it was copied"),
+							FSlateIcon(), 
+							NewAction);
+					}
+
 				}
 			}
-		}
-		else
-		{
-			// skeleton notify
-			NewAction.ExecuteAction.BindRaw(
-				this, &SAnimNotifyTrack::OnFilterSkeletonNotify, NotifyEvent->NotifyName);
-			MenuBuilder.AddMenuEntry(LOCTEXT("FindNotifyReferences", "Find References"), LOCTEXT("FindNotifyReferencesTooltip", "Find all references to this skeleton notify in the asset browser"), FSlateIcon(), NewAction);
-		}
 
-		MenuBuilder.EndSection(); //ViewSource
-	}
+			FToolMenuSection& ViewSection = InMenu->AddSection("AnimView", LOCTEXT("NotifyViewHeading", "View"));
+			if (MenuContext->NotifyEvent)
+			{
+				UObject* NotifyObject = MenuContext->NotifyEvent->Notify;
+				NotifyObject = NotifyObject ? NotifyObject : ToRawPtr(MenuContext->NotifyEvent->NotifyStateClass);
+				FUIAction NewAction;
+				
+				if (NotifyObject)
+				{
+					if (Cast<UBlueprintGeneratedClass>(NotifyObject->GetClass()))
+					{
+						if (UBlueprint* Blueprint = Cast<UBlueprint>(NotifyObject->GetClass()->ClassGeneratedBy))
+						{
+							NewAction.ExecuteAction.BindRaw(
+								SourceTrack.Get(), &SAnimNotifyTrack::OnOpenNotifySource, Blueprint);
+							ViewSection.AddMenuEntry(TEXT("OpenNotifyBlueprint"),
+								LOCTEXT("OpenNotifyBlueprint", "Open Notify Blueprint"),
+								LOCTEXT("OpenNotifyBlueprintTooltip", "Opens the source blueprint for this notify"),
+								FSlateIcon(),
+								NewAction);
+						}
+					}
+				}
+				else
+				{
+					// skeleton notify
+					NewAction.ExecuteAction.BindRaw(
+						SourceTrack.Get(), &SAnimNotifyTrack::OnFindReferences, MenuContext->NodeObject->GetName(), true);
+					ViewSection.AddMenuEntry(TEXT("FindReferences"),
+						LOCTEXT("FindNotifyReferences", "Find/Replace References..."),
+						LOCTEXT("FindNotifyReferencesTooltip",
+							"Find, replace and remove references to this  notify in the find/replace tab"),
+						FSlateIcon(), 
+						NewAction);
+				}
+			}
+			else if (MenuContext->NodeObject && MenuContext->NodeObject->GetType() == ENodeObjectTypes::SYNC_MARKER)
+			{
+				FUIAction NewAction;
+				NewAction.ExecuteAction.BindRaw(
+					SourceTrack.Get(), &SAnimNotifyTrack::OnFindReferences, MenuContext->NodeObject->GetName(), true);
+				
+				ViewSection.AddMenuEntry(TEXT("FindSyncReferences"),
+					LOCTEXT("FindSyncMarkerReferences", "Find/Replace References..."),
+					LOCTEXT("FindSyncMarkerReferencesTooltip", "Find, replace and remove references to this sync marker in the find/replace tab"),
+					FSlateIcon(),
+					NewAction);
 
-	FWidgetPath WidgetPath = MouseEvent.GetEventPath() != nullptr ? *MouseEvent.GetEventPath() : FWidgetPath();
-
-	// Display the newly built menu
-	FSlateApplication::Get().PushMenu(SharedThis(this), WidgetPath, MenuBuilder.MakeWidget(), CursorPos, FPopupTransitionEffect(FPopupTransitionEffect::ContextMenu));
-
-	return TSharedPtr<SWidget>();
+			}
+		}));
+	return Menu; 
 }
+
 
 bool SAnimNotifyTrack::CanPasteAnimNotify() const
 {
@@ -3147,15 +3274,17 @@ void SAnimNotifyTrack::OnOpenNotifySource(UBlueprint* InSourceBlueprint) const
 	GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->OpenEditorForAsset(InSourceBlueprint);
 }
 
-void SAnimNotifyTrack::OnFilterSkeletonNotify(FName InName)
+void SAnimNotifyTrack::OnFindReferences(FName InName, bool bInIsSyncMarker)
 {
-	// Open asset browser first
-	OnInvokeTab.ExecuteIfBound(FPersonaTabs::AssetBrowserID);
-
 	IAssetEditorInstance* AssetEditor = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->FindEditorForAsset(Sequence, true);
 	check(AssetEditor->GetEditorName() == TEXT("AnimationEditor"));
-	IAnimationEditor* AnimationEditor = static_cast<IAnimationEditor*>(AssetEditor);
-	AnimationEditor->GetAssetBrowser()->FilterBySkeletonNotify(InName);
+	if (TSharedPtr<SDockTab> Tab = AssetEditor->GetAssociatedTabManager()->TryInvokeTab(FPersonaTabs::FindReplaceID))
+	{
+		TSharedRef<IAnimAssetFindReplace> FindReplaceWidget = StaticCastSharedRef<IAnimAssetFindReplace>(Tab->GetContent());
+		FindReplaceWidget->SetCurrentProcessor(bInIsSyncMarker ? UAnimAssetFindReplaceSyncMarkers::StaticClass() : UAnimAssetFindReplaceNotifies::StaticClass());
+		UAnimAssetFindReplaceProcessor_StringBase* Processor = Cast<UAnimAssetFindReplaceProcessor_StringBase>(FindReplaceWidget->GetCurrentProcessor());
+		Processor->SetFindString(InName.ToString());
+	}
 }
 
 bool SAnimNotifyTrack::IsSingleNodeSelected()
@@ -3219,20 +3348,16 @@ void SAnimNotifyTrack::OnNewSyncMarkerClicked()
 
 void SAnimNotifyTrack::AddNewNotify(const FText& NewNotifyName, ETextCommit::Type CommitInfo)
 {
-	USkeleton* SeqSkeleton = Sequence->GetSkeleton();
-	if ((CommitInfo == ETextCommit::OnEnter) && SeqSkeleton)
+	if (CommitInfo == ETextCommit::OnEnter)
 	{
 		const FScopedTransaction Transaction( LOCTEXT("AddNewNotifyEvent", "Add New Anim Notify") );
 		FName NewName = FName( *NewNotifyName.ToString() );
 
-		ISkeletonEditorModule& SkeletonEditorModule = FModuleManager::LoadModuleChecked<ISkeletonEditorModule>("SkeletonEditor");
-		TSharedRef<IEditableSkeleton> EditableSkeleton = SkeletonEditorModule.CreateEditableSkeleton(SeqSkeleton);
-
-		EditableSkeleton->AddNotify(NewName);
-
-		FBlueprintActionDatabase::Get().RefreshAssetActions(SeqSkeleton);
-
 		CreateNewNotifyAtCursor(NewNotifyName.ToString(), (UClass*)nullptr);
+
+		FBlueprintActionDatabase& ActionDatabase = FBlueprintActionDatabase::Get();
+		ActionDatabase.ClearAssetActions(UAnimBlueprint::StaticClass());
+		ActionDatabase.RefreshClassActions(UAnimBlueprint::StaticClass());
 	}
 
 	FSlateApplication::Get().DismissAllMenus();
@@ -3240,21 +3365,11 @@ void SAnimNotifyTrack::AddNewNotify(const FText& NewNotifyName, ETextCommit::Typ
 
 void SAnimNotifyTrack::AddNewSyncMarker(const FText& NewNotifyName, ETextCommit::Type CommitInfo) 
 {
-	USkeleton* SeqSkeleton = Sequence->GetSkeleton();
-	if ((CommitInfo == ETextCommit::OnEnter) && SeqSkeleton)
+	if (CommitInfo == ETextCommit::OnEnter)
 	{
 		const FScopedTransaction Transaction(LOCTEXT("AddNewSyncMarker", "Add New Sync Marker"));
 
-		FName NewName = FName(*NewNotifyName.ToString());
-
-		ISkeletonEditorModule& SkeletonEditorModule = FModuleManager::LoadModuleChecked<ISkeletonEditorModule>("SkeletonEditor");
-		TSharedRef<IEditableSkeleton> EditableSkeleton = SkeletonEditorModule.CreateEditableSkeleton(SeqSkeleton);
-
-		EditableSkeleton->AddSyncMarker(NewName);
-
-		FBlueprintActionDatabase::Get().RefreshAssetActions(SeqSkeleton);
-
-		CreateNewSyncMarkerAtCursor(NewNotifyName.ToString(), (UClass*)nullptr);
+		CreateNewSyncMarkerAtCursor(NewNotifyName.ToString());
 	}
 
 	FSlateApplication::Get().DismissAllMenus();
@@ -3342,6 +3457,7 @@ void SAnimNotifyTrack::Update()
 				.Sequence(Sequence)
 				.AnimNotify(Event)
 				.OnNodeDragStarted(this, &SAnimNotifyTrack::OnNotifyNodeDragStarted, NotifyIndex)
+				.OnNotifyStateHandleBeingDragged(OnNotifyStateHandleBeingDragged)
 				.OnUpdatePanel(OnUpdatePanel)
 				.PanTrackRequest(OnRequestTrackPan)
 				.ViewInputMin(ViewInputMin)
@@ -3420,8 +3536,8 @@ FReply SAnimNotifyTrack::OnNotifyNodeDragStarted(TSharedRef<SAnimNotifyNode> Not
 	// Sort our nodes so we're acessing them in time order
 	SelectedNodeIndices.Sort([this](const int32& A, const int32& B)
 	{
-		float TimeA = NotifyNodes[A]->NodeObjectInterface->GetTime();
-		float TimeB = NotifyNodes[B]->NodeObjectInterface->GetTime();
+		const double TimeA = NotifyNodes[A]->NodeObjectInterface->GetTime();
+		const double TimeB = NotifyNodes[B]->NodeObjectInterface->GetTime();
 		return TimeA < TimeB;
 	});
 
@@ -3429,12 +3545,10 @@ FReply SAnimNotifyTrack::OnNotifyNodeDragStarted(TSharedRef<SAnimNotifyNode> Not
 	if (!bDragOnMarker)
 	{
 		TArray<TSharedPtr<SAnimNotifyNode>> NodesToDrag;
-		const float FirstNodeX = NotifyNodes[SelectedNodeIndices[0]]->GetWidgetPosition().X;
-
-		TSharedRef<SOverlay> DragBox = SNew(SOverlay);
+		const TSharedRef<SOverlay> DragBox = SNew(SOverlay);
 		for (auto Iter = SelectedNodeIndices.CreateIterator(); Iter; ++Iter)
 		{
-			TSharedPtr<SAnimNotifyNode> Node = NotifyNodes[*Iter];
+			const TSharedPtr<SAnimNotifyNode> Node = NotifyNodes[*Iter];
 			NodesToDrag.Add(Node);
 		}
 
@@ -3482,7 +3596,7 @@ float SAnimNotifyTrack::CalculateTime(const FGeometry& MyGeometry, FVector2D Nod
 		NodePos = MyGeometry.AbsoluteToLocal(NodePos);
 	}
 	FTrackScaleInfo ScaleInfo(ViewInputMin.Get(), ViewInputMax.Get(), 0, 0, MyGeometry.Size);
-	return FMath::Clamp<float>(ScaleInfo.LocalXToInput(NodePos.X), 0.f, Sequence->SequenceLength);
+	return FMath::Clamp<float>(ScaleInfo.LocalXToInput(static_cast<float>(NodePos.X)), 0.f, Sequence->GetPlayLength());
 }
 
 FReply SAnimNotifyTrack::OnDrop(const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent)
@@ -3496,12 +3610,12 @@ void SAnimNotifyTrack::HandleNodeDrop(TSharedPtr<SAnimNotifyNode> Node, float Of
 
 	if (Node->NodeObjectInterface->GetType() == ENodeObjectTypes::SYNC_MARKER)
 	{
-		UBlendSpaceBase::UpdateBlendSpacesUsingAnimSequence(Sequence);
+		UBlendSpace::UpdateBlendSpacesUsingAnimSequence(Sequence);
 	}
 
-	float LocalX = GetCachedGeometry().AbsoluteToLocal(Node->GetScreenPosition() + Offset).X;
-	float SnapTime = Node->GetLastSnappedTime();
-	float Time = SnapTime != -1.0f ? SnapTime : GetCachedScaleInfo().LocalXToInput(LocalX);
+	const float LocalX = static_cast<float>(GetCachedGeometry().AbsoluteToLocal(Node->GetScreenPosition() + Offset).X);
+	const float SnapTime = Node->GetLastSnappedTime();
+	const float Time = SnapTime != -1.0f ? SnapTime : GetCachedScaleInfo().LocalXToInput(LocalX);
 	Node->NodeObjectInterface->HandleDrop(Sequence, Time, TrackIndex);
 }
 
@@ -3512,14 +3626,12 @@ void SAnimNotifyTrack::DisconnectSelectedNodesForDrag(TArray<TSharedPtr<SAnimNot
 		return;
 	}
 
-	const float FirstNodeX = NotifyNodes[SelectedNodeIndices[0]]->GetWidgetPosition().X;
-
 	for(auto Iter = SelectedNodeIndices.CreateIterator(); Iter; ++Iter)
 	{
-		TSharedPtr<SAnimNotifyNode> Node = NotifyNodes[*Iter];
+		const TSharedPtr<SAnimNotifyNode> Node = NotifyNodes[*Iter];
 		if (Node->NodeObjectInterface->GetNotifyEvent())
 		{
-			TSharedPtr<SAnimNotifyPair> Pair = NotifyPairs[*Iter];
+			const TSharedPtr<SAnimNotifyPair> Pair = NotifyPairs[*Iter];
 			NodeSlots->RemoveSlot(Pair->AsShared());
 		}
 		else
@@ -3566,14 +3678,14 @@ void SAnimNotifyTrack::PasteSingleNotify(FString& NotifyString, float PasteTime)
 
 	if(PropertyData && ArrayProperty)
 	{
-		ArrayProperty->Inner->ImportText(*NotifyString, PropertyData, PPF_Copy, NULL);
+		ArrayProperty->Inner->ImportText_Direct(*NotifyString, PropertyData, NULL, PPF_Copy);
 
 		FAnimNotifyEvent& NewNotify = Sequence->Notifies[NewIdx];
 
 		// We have to link to the montage / sequence again, we need a correct time set and we could be pasting to a new montage / sequence
 		int32 NewSlotIndex = 0;
 		float NewNotifyTime = PasteTime != 1.0f ? PasteTime : NewNotify.GetTime();
-		NewNotifyTime = FMath::Clamp(NewNotifyTime, 0.0f, Sequence->SequenceLength);
+		NewNotifyTime = FMath::Clamp(NewNotifyTime, 0.0f, Sequence->GetPlayLength());
 
 		if(UAnimMontage* Montage = Cast<UAnimMontage>(Sequence))
 		{
@@ -3605,7 +3717,15 @@ void SAnimNotifyTrack::PasteSingleNotify(FString& NotifyString, float PasteTime)
 			NewNotify.NotifyStateClass = NewNotifyStateObject;
 			bValidNotify = NewNotifyStateObject->CanBePlaced(Sequence);
 			// Clamp duration into the sequence
-			NewNotify.SetDuration(FMath::Clamp(NewNotify.GetDuration(), 1 / 30.0f, Sequence->SequenceLength - NewNotify.GetTime()));
+			if (UAnimMontage* Montage = Cast<UAnimMontage>(Sequence))
+			{
+				NewNotify.SetDuration(FMath::Clamp(NewNotify.Duration, 1 / 30.0f, Montage->CalculateSequenceLength() - NewNotify.GetTime()));
+
+			}
+			else
+			{
+				NewNotify.SetDuration(FMath::Clamp(NewNotify.Duration, 1 / 30.0f, Sequence->GetPlayLength() - NewNotify.GetTime()));
+			}
 			NewNotify.EndTriggerTimeOffset = GetTriggerTimeOffsetForType(Sequence->CalculateOffsetForNotify(NewNotify.GetTime() + NewNotify.GetDuration()));
 			NewNotify.EndLink.Link(Sequence, NewNotify.EndLink.GetTime());
 		}
@@ -3642,7 +3762,7 @@ void SAnimNotifyTrack::PasteSingleSyncMarker(FString& MarkerString, float PasteT
 
 		if (PropertyData && ArrayProperty)
 		{
-			ArrayProperty->Inner->ImportText(*MarkerString, PropertyData, PPF_Copy, NULL);
+			ArrayProperty->Inner->ImportText_Direct(*MarkerString, PropertyData, NULL, PPF_Copy);
 
 			FAnimSyncMarker& SyncMarker = AnimSeq->AuthoredSyncMarkers[NewIdx];
 
@@ -3652,7 +3772,7 @@ void SAnimNotifyTrack::PasteSingleSyncMarker(FString& MarkerString, float PasteT
 			}
 
 			// Make sure the notify is within the track area
-			SyncMarker.Time = FMath::Clamp(SyncMarker.Time, 0.0f, Sequence->SequenceLength);
+			SyncMarker.Time = FMath::Clamp(SyncMarker.Time, 0.0f, Sequence->GetPlayLength());
 			SyncMarker.TrackIndex = TrackIndex;
 
 			SyncMarker.Guid = FGuid::NewGuid();
@@ -3663,7 +3783,7 @@ void SAnimNotifyTrack::PasteSingleSyncMarker(FString& MarkerString, float PasteT
 			AnimSeq->AuthoredSyncMarkers.RemoveAt(NewIdx);
 		}
 
-		UBlendSpaceBase::UpdateBlendSpacesUsingAnimSequence(Sequence);
+		UBlendSpace::UpdateBlendSpacesUsingAnimSequence(Sequence);
 
 		OnDeselectAllNotifies.ExecuteIfBound();
 		Sequence->PostEditChange();
@@ -3683,7 +3803,7 @@ void SAnimNotifyTrack::AppendSelectedNodeWidgetsToArray(TArray<TSharedPtr<SAnimN
 	}
 }
 
-void SAnimNotifyTrack::RefreshMarqueeSelectedNodes(FSlateRect& Rect, FNotifyMarqueeOperation& Marquee)
+void SAnimNotifyTrack::RefreshMarqueeSelectedNodes(const FSlateRect& Rect, FNotifyMarqueeOperation& Marquee)
 {
 	if(Marquee.Operation != FNotifyMarqueeOperation::Replace)
 	{
@@ -3808,6 +3928,7 @@ void SNotifyEdTrack::Construct(const FArguments& InArgs)
 				.OnGetScrubValue(InArgs._OnGetScrubValue)
 				.OnGetDraggedNodePos(InArgs._OnGetDraggedNodePos)
 				.OnNodeDragStarted(InArgs._OnNodeDragStarted)
+				.OnNotifyStateHandleBeingDragged(InArgs._OnNotifyStateHandleBeingDragged)
 				.OnSnapPosition(InArgs._OnSnapPosition)
 				.TrackColor(Track.TrackColor)
 				.OnRequestTrackPan(FPanTrackRequest::CreateSP(PanelRef, &SAnimNotifyPanel::PanInputViewRange))
@@ -3816,6 +3937,7 @@ void SNotifyEdTrack::Construct(const FArguments& InArgs)
 				.OnGetIsAnimNotifySelectionValidForReplacement(PanelRef, &SAnimNotifyPanel::IsNotifySelectionValidForReplacement)
 				.OnReplaceSelectedWithNotify(PanelRef, &SAnimNotifyPanel::OnReplaceSelectedWithNotify)
 				.OnReplaceSelectedWithBlueprintNotify(PanelRef, &SAnimNotifyPanel::OnReplaceSelectedWithNotifyBlueprint)
+				.OnReplaceSelectedWithSyncMarker(PanelRef, &SAnimNotifyPanel::OnReplaceSelectedWithSyncMarker)
 				.OnDeselectAllNotifies(InArgs._OnDeselectAllNotifies)
 				.OnCopyNodes(InArgs._OnCopyNodes)
 				.OnPasteNodes(InArgs._OnPasteNodes)
@@ -3856,23 +3978,26 @@ void SAnimNotifyPanel::Construct(const FArguments& InArgs, const TSharedRef<FAni
 		.OnSetInputViewRange(InArgs._OnSetInputViewRange));
 
 	WeakModel = InModel;
-	WeakCommandList = InModel->GetCommandList();
 	Sequence = InArgs._Sequence;
 	OnInvokeTab = InArgs._OnInvokeTab;
 	OnNotifiesChanged = InArgs._OnNotifiesChanged;
 	OnSnapPosition = InArgs._OnSnapPosition;
+	OnNotifyStateHandleBeingDragged = InArgs._OnNotifyStateHandleBeingDragged;
+	OnNotifyNodesBeingDragged = InArgs._OnNotifyNodesBeingDragged;
 	bIsSelecting = false;
 	bIsUpdating = false;
+	bUpdateRequested = false;
+	bRefreshRequested = false;
 
 	InModel->OnHandleObjectsSelected().AddSP(this, &SAnimNotifyPanel::HandleObjectsSelected);
 
 	FAnimNotifyPanelCommands::Register();
 	BindCommands();
 
-	Sequence->RegisterOnNotifyChanged(UAnimSequenceBase::FOnNotifyChanged::CreateSP(this, &SAnimNotifyPanel::RefreshNotifyTracks ));
+	Sequence->RegisterOnNotifyChanged(UAnimSequenceBase::FOnNotifyChanged::CreateSP(this, &SAnimNotifyPanel::RequestRefresh ));
 
-	InModel->GetEditableSkeleton()->RegisterOnNotifiesChanged(FSimpleDelegate::CreateSP(this, &SAnimNotifyPanel::RefreshNotifyTracks));
-	InModel->OnTracksChanged().Add(FSimpleDelegate::CreateSP(this, &SAnimNotifyPanel::RefreshNotifyTracks));
+	InModel->GetEditableSkeleton()->RegisterOnNotifiesChanged(FSimpleDelegate::CreateSP(this, &SAnimNotifyPanel::RequestRefresh));
+	InModel->OnTracksChanged().Add(FSimpleDelegate::CreateSP(this, &SAnimNotifyPanel::RequestRefresh));
 
 	if(GEditor)
 	{
@@ -3891,7 +4016,7 @@ void SAnimNotifyPanel::Construct(const FArguments& InArgs, const TSharedRef<FAni
 		SAssignNew(PanelArea, SBorder)
 		.Visibility(EVisibility::SelfHitTestInvisible)
 		.AddMetaData<FTagMetaData>(TEXT("AnimNotify.Notify"))
-		.BorderImage(FEditorStyle::GetBrush("NoBorder"))
+		.BorderImage(FAppStyle::GetBrush("NoBorder"))
 		.Padding(0.0f)
 		.ColorAndOpacity(FLinearColor::White)
 	];
@@ -3906,7 +4031,7 @@ void SAnimNotifyPanel::Construct(const FArguments& InArgs, const TSharedRef<FAni
 	PopulateNotifyBlueprintClasses(NotifyClassNames);
 	PopulateNotifyBlueprintClasses(NotifyStateClassNames);
 
-	Update();
+	RequestUpdate();
 }
 
 SAnimNotifyPanel::~SAnimNotifyPanel()
@@ -3972,7 +4097,7 @@ FReply SAnimNotifyPanel::InsertTrack(int32 TrackIndexToInsert)
 	Sequence->PostEditChange();
 	Sequence->MarkPackageDirty();
 
-	Update();
+	RequestUpdate();
 
 	return FReply::Handled();
 }
@@ -3986,7 +4111,7 @@ FReply SAnimNotifyPanel::AddTrack()
 	Sequence->AnimNotifyTracks.Add(NewItem);
 	Sequence->MarkPackageDirty();
 
-	Update();
+	RequestUpdate();
 
 	return FReply::Handled();
 }
@@ -4019,7 +4144,7 @@ FReply SAnimNotifyPanel::DeleteTrack(int32 TrackIndexToDelete)
 			Sequence->AnimNotifyTracks.RemoveAt(TrackIndexToDelete);
 			Sequence->PostEditChange();
 			Sequence->MarkPackageDirty();
-			Update();
+			RequestUpdate();
 		}
 	}
 	return FReply::Handled();
@@ -4062,6 +4187,16 @@ void SAnimNotifyPanel::Update()
 
 		OnNotifiesChanged.ExecuteIfBound();
 	}
+}
+
+void SAnimNotifyPanel::RequestUpdate()
+{
+	bUpdateRequested = true;
+}
+
+void SAnimNotifyPanel::RequestRefresh()
+{
+	bRefreshRequested = true;
 }
 
 // Helper to save/restore selection state when widgets are recreated
@@ -4135,13 +4270,14 @@ void SAnimNotifyPanel::RefreshNotifyTracks()
 				.ViewInputMax(ViewInputMax)
 				.OnGetScrubValue(OnGetScrubValue)
 				.OnGetDraggedNodePos(this, &SAnimNotifyPanel::CalculateDraggedNodePos)
-				.OnUpdatePanel(this, &SAnimNotifyPanel::Update)
+				.OnUpdatePanel(this, &SAnimNotifyPanel::RequestUpdate)
 				.OnGetNotifyBlueprintData(this, &SAnimNotifyPanel::OnGetNotifyBlueprintData, &NotifyClassNames)
 				.OnGetNotifyStateBlueprintData(this, &SAnimNotifyPanel::OnGetNotifyBlueprintData, &NotifyStateClassNames)
 				.OnGetNotifyNativeClasses(this, &SAnimNotifyPanel::OnGetNativeNotifyData, UAnimNotify::StaticClass(), &NotifyClassNames)
 				.OnGetNotifyStateNativeClasses(this, &SAnimNotifyPanel::OnGetNativeNotifyData, UAnimNotifyState::StaticClass(), &NotifyStateClassNames)
 				.OnSelectionChanged(this, &SAnimNotifyPanel::OnTrackSelectionChanged)
 				.OnNodeDragStarted(this, &SAnimNotifyPanel::OnNotifyNodeDragStarted)
+				.OnNotifyStateHandleBeingDragged(OnNotifyStateHandleBeingDragged)
 				.OnSnapPosition(OnSnapPosition)
 				.OnRequestRefreshOffsets(OnRequestRefreshOffsets)
 				.OnDeleteNotify(this, &SAnimNotifyPanel::DeleteSelectedNodeObjects)
@@ -4171,7 +4307,7 @@ FReply SAnimNotifyPanel::OnNotifyNodeDragStarted(TArray<TSharedPtr<SAnimNotifyNo
 {
 	TSharedRef<SOverlay> NodeDragDecoratorOverlay = SNew(SOverlay);
 	TSharedRef<SBorder> NodeDragDecorator = SNew(SBorder)
-	.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+	.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 	[
 		NodeDragDecoratorOverlay
 	];
@@ -4193,23 +4329,28 @@ FReply SAnimNotifyPanel::OnNotifyNodeDragStarted(TArray<TSharedPtr<SAnimNotifyNo
 		OverlayBounds += FBox2D(NodePosition, NodePosition + FVector2D(NodeDuration, 0.0f));
 	}
 
-	FVector2D OverlayOrigin = OverlayBounds.Min;
-	FVector2D OverlayExtents = OverlayBounds.GetSize();
+	const FVector2D OverlayOrigin = OverlayBounds.Min;
+	const FVector2D OverlayExtents = OverlayBounds.GetSize();
 
-	for(TSharedPtr<SAnimNotifyNode> Node : Nodes)
+	for(const TSharedPtr<SAnimNotifyNode>& Node : Nodes)
 	{
-		FVector2D OffsetFromFirst(Node->GetScreenPosition() - OverlayOrigin);
+		const FVector2D OffsetFromFirst(Node->GetScreenPosition() - OverlayOrigin);
 
 		NodeDragDecoratorOverlay->AddSlot()
-			.Padding(FMargin(OffsetFromFirst.X, OffsetFromFirst.Y, 0.0f, 0.0f))
+			.Padding(FMargin(static_cast<float>(OffsetFromFirst.X), static_cast<float>(OffsetFromFirst.Y), 0.0f, 0.0f))
 			[
 				Node->AsShared()
 			];
 	}
 
 	FPanTrackRequest PanRequestDelegate = FPanTrackRequest::CreateSP(this, &SAnimNotifyPanel::PanInputViewRange);
-	FOnUpdatePanel UpdateDelegate = FOnUpdatePanel::CreateSP(this, &SAnimNotifyPanel::Update);
-	return FReply::Handled().BeginDragDrop(FNotifyDragDropOp::New(Nodes, NodeDragDecorator, NotifyAnimTracks, Sequence, ScreenCursorPos, OverlayOrigin, OverlayExtents, CurrentDragXPosition, PanRequestDelegate, OnSnapPosition, UpdateDelegate));
+	FOnUpdatePanel UpdateDelegate = FOnUpdatePanel::CreateSP(this, &SAnimNotifyPanel::RequestUpdate);
+	return FReply::Handled().BeginDragDrop(FNotifyDragDropOp::New(Nodes, NodeDragDecorator, NotifyAnimTracks, Sequence, ScreenCursorPos, OverlayOrigin, OverlayExtents, CurrentDragXPosition, PanRequestDelegate, OnSnapPosition, UpdateDelegate, OnNotifyNodesBeingDragged));
+}
+
+float SAnimNotifyPanel::GetSequenceLength() const
+{
+	return Sequence->GetPlayLength();
 }
 
 void SAnimNotifyPanel::PostUndo( bool bSuccess )
@@ -4265,7 +4406,7 @@ void SAnimNotifyPanel::DeleteSelectedNodeObjects()
 
 		if (bContainsSyncMarkers)
 		{
-			UBlendSpaceBase::UpdateBlendSpacesUsingAnimSequence(Sequence);
+			UBlendSpace::UpdateBlendSpacesUsingAnimSequence(Sequence);
 		}
 	}
 
@@ -4273,19 +4414,15 @@ void SAnimNotifyPanel::DeleteSelectedNodeObjects()
 	TArray<UObject*> Objects;
 	OnSelectionChanged.ExecuteIfBound(Objects);
 
-	Update();
+	RequestUpdate();
 }
 
-void SAnimNotifyPanel::SetSequence(class UAnimSequenceBase *	InSequence)
+void SAnimNotifyPanel::SetSequence(class UAnimSequenceBase*	InSequence)
 {
 	if (InSequence != Sequence)
 	{
 		Sequence = InSequence;
-		// @todo anim : this is kinda hack to make sure it has 1 track is alive
-		// we can do this whenever import or asset is created, but it's more places to handle than here
-		// the function name in that case will need to change
-		Sequence->InitializeNotifyTrack();
-		Update();
+		RequestUpdate();
 	}
 }
 
@@ -4371,7 +4508,7 @@ void SAnimNotifyPanel::CopySelectedNodesToClipboard() const
 		int32 TrackSpan = MaxTrack - MinTrack + 1;
 
 		StrValue += FString::Printf(TEXT("OriginalTime=%f,"), MinTime);
-		StrValue += FString::Printf(TEXT("OriginalLength=%f,"), Sequence->SequenceLength);
+		StrValue += FString::Printf(TEXT("OriginalLength=%f,"), Sequence->GetPlayLength());
 		StrValue += FString::Printf(TEXT("TrackSpan=%d"), TrackSpan);
 
 		for(const INodeObjectInterface* NodeObject : SelectedNodes)
@@ -4461,6 +4598,7 @@ void SAnimNotifyPanel::OnReplaceSelectedWithNotify(FString NewNotifyName, UClass
 
 			FColor OldColor = OldEvent->NotifyColor;
 			UAnimNotify* OldEventPayload = OldEvent->Notify;
+			UAnimNotifyState* OldEventStatePayload = OldEvent->NotifyStateClass;
 
 			// Delete old one before creating new one to avoid potential array re-allocation when array temporarily increases by 1 in size
 			NodeObject->Delete(Sequence);
@@ -4483,6 +4621,13 @@ void SAnimNotifyPanel::OnReplaceSelectedWithNotify(FString NewNotifyName, UClass
 			// For Anim Notify States, handle the end time and link
 			if (NewEvent.NotifyStateClass != nullptr)
 			{
+				if (OldEventStatePayload != nullptr)
+				{
+					UEngine::FCopyPropertiesForUnrelatedObjectsParams CopyParams;
+					CopyParams.bNotifyObjectReplacement = true;
+					UEngine::CopyPropertiesForUnrelatedObjects(OldEventStatePayload, NewEvent.NotifyStateClass, CopyParams);
+				}
+
 				NewEvent.SetDuration(Length);
 				NewEvent.EndTriggerTimeOffset = EndTriggerTimeOffset;
 				NewEvent.EndLink.ChangeSlotIndex(EndSlotIndex);
@@ -4503,13 +4648,57 @@ void SAnimNotifyPanel::OnReplaceSelectedWithNotify(FString NewNotifyName, UClass
 	Sequence->PostEditChange();
 	Sequence->MarkPackageDirty();
 
-	Update();
+	RequestUpdate();
 }
 
 void SAnimNotifyPanel::OnReplaceSelectedWithNotifyBlueprint(FString NewBlueprintNotifyName, FString NewBlueprintNotifyClass)
 {
 	TSubclassOf<UObject> BlueprintClass = SAnimNotifyTrack::GetBlueprintClassFromPath(NewBlueprintNotifyClass);
 	OnReplaceSelectedWithNotify(NewBlueprintNotifyName, BlueprintClass);
+}
+
+void SAnimNotifyPanel::OnReplaceSelectedWithSyncMarker(FString NewSyncMarkerName)
+{
+	if (UAnimSequence* Seq = Cast<UAnimSequence>(Sequence))
+	{
+		TArray<INodeObjectInterface*> SelectedNodes;
+		for (TSharedPtr<SAnimNotifyTrack> Track : NotifyAnimTracks)
+		{
+			Track->AppendSelectionToArray(SelectedNodes);
+		}
+
+		// Sort these since order is important for deletion
+		SelectedNodes.Sort();
+
+		const FScopedTransaction Transaction(LOCTEXT("ReplaceSyncMarker", "Replace Sync Marker"));
+		Seq->Modify(true);
+
+		for (INodeObjectInterface* NodeObject : SelectedNodes)
+		{
+			if (NodeObject->GetType() == ENodeObjectTypes::SYNC_MARKER)
+			{
+				float Time = NodeObject->GetTime();
+				int32 TrackIndex = NodeObject->GetTrackIndex();
+
+				NodeObject->Delete(Seq);
+
+				FAnimSyncMarker& SyncMarker = Seq->AuthoredSyncMarkers.AddDefaulted_GetRef();
+				SyncMarker.MarkerName = FName(*NewSyncMarkerName);
+				SyncMarker.TrackIndex = TrackIndex;
+				SyncMarker.Time = Time;
+				SyncMarker.Guid = FGuid::NewGuid();
+			}
+		}
+
+		// clear selection  
+		TArray<UObject*> Objects;
+		OnSelectionChanged.ExecuteIfBound(Objects);
+
+		Seq->PostEditChange();
+		Seq->MarkPackageDirty();
+
+		RequestUpdate();
+	}
 }
 
 void SAnimNotifyPanel::OnPasteNodes(SAnimNotifyTrack* RequestTrack, float ClickTime, ENotifyPasteMode::Type PasteMode, ENotifyPasteMultipleMode::Type MultiplePasteType)
@@ -4570,13 +4759,14 @@ void SAnimNotifyPanel::OnPasteNodes(SAnimNotifyTrack* RequestTrack, float ClickT
 				AddTrack();
 				--TracksToAdd;
 			}
+			RefreshNotifyTracks(); 
 			NumTracks = NotifyAnimTracks.Num();
 		}
 
 		// Scaling for relative paste
 		if(MultiplePasteType == ENotifyPasteMultipleMode::Relative)
 		{
-			ScaleMultiplier = Sequence->SequenceLength / OrigLength;
+			ScaleMultiplier = Sequence->GetPlayLength() / OrigLength;
 		}
 
 		// Process each line of the paste buffer and spawn notifies
@@ -4603,18 +4793,21 @@ void SAnimNotifyPanel::OnPasteNodes(SAnimNotifyTrack* RequestTrack, float ClickT
 				float TimeOffset = OrigTime - OrigBeginTime;
 				float TimeToPaste = ClickTime + TimeOffset * ScaleMultiplier;
 
-				TSharedPtr<SAnimNotifyTrack> TrackToUse = NotifyAnimTracks[PasteIdx + TrackOffset];
-				if (NodeObjectType == ENodeObjectTypes::NOTIFY)
+				if (PasteIdx + TrackOffset < NotifyAnimTracks.Num())
 				{
-					TrackToUse->PasteSingleNotify(NotifyExportString, TimeToPaste);
-				}
-				else if (NodeObjectType == ENodeObjectTypes::SYNC_MARKER)
-				{
-					TrackToUse->PasteSingleSyncMarker(NotifyExportString, TimeToPaste);
-				}
-				else
-				{
-					check(false); //Unknown value in paste
+					TSharedPtr<SAnimNotifyTrack> TrackToUse = NotifyAnimTracks[PasteIdx + TrackOffset];
+					if (NodeObjectType == ENodeObjectTypes::NOTIFY)
+					{
+						TrackToUse->PasteSingleNotify(NotifyExportString, TimeToPaste);
+					}
+					else if (NodeObjectType == ENodeObjectTypes::SYNC_MARKER)
+					{
+						TrackToUse->PasteSingleSyncMarker(NotifyExportString, TimeToPaste);
+					}
+					else
+					{
+						check(false); //Unknown value in paste
+					}
 				}
 			}
 		}
@@ -4630,15 +4823,18 @@ void SAnimNotifyPanel::OnPropertyChanged(UObject* ChangedObject, FPropertyChange
 		return;
 	}
 
+	const FName PropertyName = PropertyEvent.GetPropertyName();
+	
 	// Don't process if it's an interactive change; wait till we receive the final event.
-	if(PropertyEvent.ChangeType != EPropertyChangeType::Interactive)
+	// Skip notify color as otherwise we will end up refreshing the details panel before any edits are applied (e.g. with the tab key)
+	if(PropertyEvent.ChangeType != EPropertyChangeType::Interactive && PropertyName != GET_MEMBER_NAME_CHECKED(UAnimNotify, NotifyColor) && PropertyName != GET_MEMBER_NAME_CHECKED(UAnimNotifyState, NotifyColor))
 	{
 		for(FAnimNotifyEvent& Event : Sequence->Notifies)
 		{
 			if(Event.Notify == ChangedObject || Event.NotifyStateClass == ChangedObject)
 			{
 				// If we've changed a notify present in the sequence, refresh our tracks.
-				Update();
+				RequestUpdate();
 			}
 		}
 	}
@@ -4646,9 +4842,12 @@ void SAnimNotifyPanel::OnPropertyChanged(UObject* ChangedObject, FPropertyChange
 
 void SAnimNotifyPanel::BindCommands()
 {
-	TSharedRef<FUICommandList> CommandList = GetCommandList();
-	const FAnimNotifyPanelCommands& Commands = FAnimNotifyPanelCommands::Get();
+	// This should not be called twice on the same instance
+	check(!CommandList.IsValid());
+	CommandList = MakeShareable(new FUICommandList);
 
+	const FAnimNotifyPanelCommands& Commands = FAnimNotifyPanelCommands::Get();
+	
 	CommandList->MapAction(
 		Commands.DeleteNotify,
 		FExecuteAction::CreateSP(this, &SAnimNotifyPanel::OnDeletePressed));
@@ -4664,7 +4863,7 @@ void SAnimNotifyPanel::BindCommands()
 
 FReply SAnimNotifyPanel::OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)
 {
-	if(GetCommandList()->ProcessCommandBindings(InKeyEvent))
+	if(CommandList.IsValid() && CommandList->ProcessCommandBindings(InKeyEvent))
 	{
 		return FReply::Handled();
 	}
@@ -4740,19 +4939,36 @@ int32 SAnimNotifyPanel::OnPaint(const FPaintArgs& Args, const FGeometry& Allotte
 		FSlateDrawElement::MakeBox(
 			OutDrawElements,
 			LayerId++,
-			AllottedGeometry.ToPaintGeometry(Marquee.Rect.GetUpperLeft(), Marquee.Rect.GetSize()),
-			FEditorStyle::GetBrush(TEXT("MarqueeSelection"))
+			AllottedGeometry.ToPaintGeometry(Marquee.Rect.GetSize(), FSlateLayoutTransform(Marquee.Rect.GetUpperLeft())),
+			FAppStyle::GetBrush(TEXT("MarqueeSelection"))
 			);
 	}
 
 	return LayerId;
 }
 
+void SAnimNotifyPanel::Tick( const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime )
+{
+	if(bUpdateRequested)
+	{
+		Update();
+		bUpdateRequested = false;
+		bRefreshRequested = false;
+	}
+	if(bRefreshRequested)
+	{
+		RefreshNotifyTracks();
+		bRefreshRequested = false;
+	}
+}
+
 void SAnimNotifyPanel::RefreshMarqueeSelectedNodes(const FGeometry& PanelGeo)
 {
 	if(Marquee.IsValid())
 	{
-		FSlateRect MarqueeRect = Marquee.Rect.ToSlateRect();
+		const FSlateRect MarqueeRect = Marquee.Rect.ToSlateRect();
+		const FVector2D MarqueeTopLeftAbsolute = PanelGeo.LocalToAbsolute(MarqueeRect.GetTopLeft());
+
 		for(TSharedPtr<SAnimNotifyTrack> Track : NotifyAnimTracks)
 		{
 			if(Marquee.Operation == FNotifyMarqueeOperation::Replace || Marquee.OriginalSelection.Num() == 0)
@@ -4762,12 +4978,8 @@ void SAnimNotifyPanel::RefreshMarqueeSelectedNodes(const FGeometry& PanelGeo)
 
 			const FGeometry& TrackGeo = Track->GetCachedGeometry();
 
-			FSlateRect TrackClip = TrackGeo.GetLayoutBoundingRect();
-			FSlateRect PanelClip = PanelGeo.GetLayoutBoundingRect();
-			FVector2D PanelSpaceOrigin = TrackClip.GetTopLeft() - PanelClip.GetTopLeft();
-			FVector2D TrackSpaceOrigin = MarqueeRect.GetTopLeft() - PanelSpaceOrigin;
-			FSlateRect MarqueeTrackSpace(TrackSpaceOrigin, TrackSpaceOrigin + MarqueeRect.GetSize());
-
+			// Transform the Marquee Rect to Track Space
+			const FSlateRect MarqueeTrackSpace = FSlateRect::FromPointAndExtent(TrackGeo.AbsoluteToLocal(MarqueeTopLeftAbsolute), MarqueeRect.GetSize());
 			Track->RefreshMarqueeSelectedNodes(MarqueeTrackSpace, Marquee);
 		}
 	}
@@ -4809,7 +5021,7 @@ void SAnimNotifyPanel::OnGetNotifyBlueprintData(TArray<FAssetData>& OutNotifyDat
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 
 	// Collect a full list of assets with the specified class
-	AssetRegistryModule.Get().GetAssetsByClass(UBlueprint::StaticClass()->GetFName(), AssetDataList);
+	AssetRegistryModule.Get().GetAssetsByClass(UBlueprint::StaticClass()->GetClassPathName(), AssetDataList);
 
 
 	int32 BeginClassCount = InOutAllowedClassNames->Num();
@@ -4885,7 +5097,7 @@ void SAnimNotifyPanel::OnGetNativeNotifyData(TArray<UClass*>& OutClasses, UClass
 		{
 			OutClasses.Add(Class);
 			// Form class name to search later
-			FString ClassName = FString::Printf(TEXT("%s'%s'"), *Class->GetClass()->GetName(), *Class->GetPathName());
+			FString ClassName = FObjectPropertyBase::GetExportPath(Class);
 			OutAllowedBlueprintClassNames->AddUnique(ClassName);
 		}
 	}
@@ -4912,21 +5124,21 @@ void SAnimNotifyPanel::OnNotifyObjectChanged(UObject* EditorBaseObj, bool bRebui
 
 void SAnimNotifyPanel::OnNotifyTrackScrolled(float InScrollOffsetFraction)
 {
-	float Ratio = (ViewInputMax.Get() - ViewInputMin.Get()) / Sequence->SequenceLength;
+	float Ratio = (ViewInputMax.Get() - ViewInputMin.Get()) / Sequence->GetPlayLength();
 	float MaxOffset = (Ratio < 1.0f) ? 1.0f - Ratio : 0.0f;
 	InScrollOffsetFraction = FMath::Clamp(InScrollOffsetFraction, 0.0f, MaxOffset);
 
 	// Calculate new view ranges
-	float NewMin = InScrollOffsetFraction * Sequence->SequenceLength;
-	float NewMax = (InScrollOffsetFraction + Ratio) * Sequence->SequenceLength;
+	float NewMin = InScrollOffsetFraction * Sequence->GetPlayLength();
+	float NewMax = (InScrollOffsetFraction + Ratio) * Sequence->GetPlayLength();
 	
 	InputViewRangeChanged(NewMin, NewMax);
 }
 
 void SAnimNotifyPanel::InputViewRangeChanged(float ViewMin, float ViewMax)
 {
-	float Ratio = (ViewMax - ViewMin) / Sequence->SequenceLength;
-	float OffsetFraction = ViewMin / Sequence->SequenceLength;
+	float Ratio = (ViewMax - ViewMin) / Sequence->GetPlayLength();
+	float OffsetFraction = ViewMin / Sequence->GetPlayLength();
 	if(NotifyTrackScrollBar.IsValid())
 	{
 		NotifyTrackScrollBar->SetState(OffsetFraction, Ratio);

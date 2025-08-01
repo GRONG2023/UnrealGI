@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "MaterialTypes.h"
 #include "Materials/MaterialExpressionRuntimeVirtualTextureSample.h"
 #include "MaterialExpressionRuntimeVirtualTextureSampleParameter.generated.h"
 
@@ -23,21 +24,14 @@ class UMaterialExpressionRuntimeVirtualTextureSampleParameter : public UMaterial
 	UPROPERTY(EditAnywhere, Category = MaterialParameter)
 	FName Group;
 
-#if WITH_EDITORONLY_DATA
 	/** Controls where the this parameter is displayed in a material instance parameter list. The lower the number the higher up in the parameter list. */
 	UPROPERTY(EditAnywhere, Category = MaterialParameter)
 	int32 SortPriority = 32;
-#endif
 
 #if WITH_EDITOR
 	/** If this is the named parameter from this material expression, then set its value. */
-	bool SetParameterValue(FName InParameterName, URuntimeVirtualTexture* InValue);
+	bool SetParameterValue(FName InParameterName, URuntimeVirtualTexture* InValue, EMaterialExpressionSetParameterValueFlags Flags = EMaterialExpressionSetParameterValueFlags::None);
 #endif
-
-	/** Return whether this is the named parameter from this material expression, and if it is then return its value. */
-	bool IsNamedParameter(const FHashedMaterialParameterInfo& ParameterInfo, URuntimeVirtualTexture*& OutValue) const;
-	/** Adds to arrays of parameter info and id with the values used by this material expression. */
-	void GetAllParameterInfo(TArray<FMaterialParameterInfo> &OutParameterInfo, TArray<FGuid> &OutParameterIds, const FMaterialParameterInfo& InBaseParameterInfo) const;
 
 	//~ Begin UMaterialExpression Interface
 #if WITH_EDITOR
@@ -50,7 +44,32 @@ class UMaterialExpressionRuntimeVirtualTextureSampleParameter : public UMaterial
 	virtual void ValidateParameterName(const bool bAllowDuplicateName) override;
 	virtual void GetCaption(TArray<FString>& OutCaptions) const override;
 	virtual bool MatchesSearchQuery(const TCHAR* SearchQuery) override;
-	virtual void SetValueToMatchingExpression(UMaterialExpression* OtherExpression) override;
+	virtual bool GetParameterValue(FMaterialParameterMetadata& OutMeta) const override
+	{
+		OutMeta.Value = VirtualTexture;
+		OutMeta.Description = Desc;
+		OutMeta.ExpressionGuid = ExpressionGUID;
+		OutMeta.Group = Group;
+		OutMeta.SortPriority = SortPriority;
+		OutMeta.AssetPath = GetAssetPathName();
+		return true;
+	}
+	virtual bool SetParameterValue(const FName& Name, const FMaterialParameterMetadata& Meta, EMaterialExpressionSetParameterValueFlags Flags) override
+	{
+		if (Meta.Value.Type == EMaterialParameterType::RuntimeVirtualTexture)
+		{
+			if (SetParameterValue(Name, Meta.Value.RuntimeVirtualTexture, Flags))
+			{
+				if (EnumHasAnyFlags(Flags, EMaterialExpressionSetParameterValueFlags::AssignGroupAndSortPriority))
+				{
+					Group = Meta.Group;
+					SortPriority = Meta.SortPriority;
+				}
+				return true;
+			}
+		}
+		return false;
+	}
 #endif
 	virtual FGuid& GetParameterExpressionId() override { return ExpressionGUID; }
 	//~ End UMaterialExpression Interface

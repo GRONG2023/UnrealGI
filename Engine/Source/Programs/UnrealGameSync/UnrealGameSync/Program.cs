@@ -2,268 +2,499 @@
 
 using System;
 using System.Collections.Generic;
-using System.Data.SqlClient;
-using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
-using System.Net;
 using System.Reflection;
-using System.Runtime.InteropServices;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using EpicGames.Core;
+using EpicGames.Horde;
+using EpicGames.OIDC;
+using EpicGames.Perforce;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Sentry;
+using Sentry.Infrastructure;
 
 namespace UnrealGameSync
 {
-	static class Program
+	/// <summary>
+	/// Delegate used to create a telemetry sink
+	/// </summary>
+	/// <param name="userName">The default Perforce user name</param>
+	/// <param name="sessionId">Unique identifier for this session</param>
+	/// <param name="logger">Log writer</param>
+	/// <returns>New telemetry sink instance</returns>
+	public delegate ITelemetrySink CreateTelemetrySinkDelegate(string userName, string sessionId, ILogger logger);
+
+	static partial class Program
 	{
-		public static string SyncVersion = null;
+		/// <summary>
+		/// Delegate used to create a new telemetry sink
+		/// </summary>
+		static CreateTelemetrySinkDelegate CreateTelemetrySink { get; } = (userName, sessionId, log) => new NullTelemetrySink();
+
+		public static string GetVersionString()
+		{
+			AssemblyInformationalVersionAttribute? version = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>();
+			return version?.InformationalVersion ?? "Unknown";
+		}
+
+		public static string? SyncVersion = null;
+
+		public static void CaptureException(Exception exception)
+		{
+			if (DeploymentSettings.Instance.SentryDsn != null)
+			{
+				SentrySdk.CaptureException(exception);
+			}
+		}
 
 		[STAThread]
-		static void Main(string[] Args)
+		static void Main(string[] args)
 		{
-			bool bFirstInstance;
-			using (Mutex InstanceMutex = new Mutex(true, "UnrealGameSyncRunning", out bFirstInstance))
+			if (DeploymentSettings.Instance.SentryDsn != null)
 			{
-				if (bFirstInstance)
-				{
-					Application.EnableVisualStyles();
-					Application.SetCompatibleTextRenderingDefault(false);
-				}
+				SentryOptions sentryOptions = new SentryOptions();
+				sentryOptions.Dsn = DeploymentSettings.Instance.SentryDsn;
+				sentryOptions.StackTraceMode = StackTraceMode.Enhanced;
+				sentryOptions.AttachStacktrace = true;
+				sentryOptions.TracesSampleRate = 1.0;
+				sentryOptions.SendDefaultPii = true;
+				sentryOptions.Debug = true;
+				sentryOptions.AutoSessionTracking = true;
+				sentryOptions.DetectStartupTime = StartupTimeDetectionMode.Best;
+				sentryOptions.ReportAssembliesMode = ReportAssembliesMode.InformationalVersion;
+				sentryOptions.DiagnosticLogger = new TraceDiagnosticLogger(SentryLevel.Debug);
+				SentrySdk.Init(sentryOptions);
 
-				using (EventWaitHandle ActivateEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "ActivateUnrealGameSync"))
+				Application.ThreadException += Application_ThreadException_Sentry;
+				AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException_Sentry;
+				TaskScheduler.UnobservedTaskException += Application_UnobservedException_Sentry;
+			}
+
+			try
+			{
+				RealMain(args);
+			}
+			catch (Exception ex)
+			{
+				CaptureException(ex);
+			}
+		}
+
+		static void RealMain(string[] args)
+		{
+			bool firstInstance;
+			using (Mutex instanceMutex = new Mutex(true, "UnrealGameSyncRunning", out firstInstance))
+			{
+				Application.EnableVisualStyles();
+				Application.SetCompatibleTextRenderingDefault(false);
+				Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+
+				// Don't auto install (or - more importantly- auto *un-install*) the winforms sync context. We want to be able to access it from the
+				// constructor of our ApplicationContext, which will be after the temporary install/uninstall prompted by spawning the settings dialog.
+				WindowsFormsSynchronizationContext.AutoInstall = false;
+
+				using WindowsFormsSynchronizationContext synchronizationContext = new WindowsFormsSynchronizationContext();
+				SynchronizationContext.SetSynchronizationContext(synchronizationContext);
+
+				using (EventWaitHandle activateEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "ActivateUnrealGameSync"))
 				{
-					// handle any url passed in, possibly exiting
-					if (UriHandler.ProcessCommandLine(Args, bFirstInstance, ActivateEvent))
+					bool runUpdateCheck = ShouldRunAutoUpdate(args);
+
+					// Check for a newer version of the application
+					if (runUpdateCheck && Launcher.SyncAndRunLatest(instanceMutex, args) != LauncherResult.Continue)
 					{
 						return;
 					}
 
-					if (bFirstInstance)
+					// Handle any url passed in, possibly exiting
+					if (UriHandler.ProcessCommandLine(args, firstInstance, activateEvent))
 					{
-						InnerMain(InstanceMutex, ActivateEvent, Args);
+						return;
+					}
+
+					// Handle any .uartifact downloads
+					if (ArtifactDownload.ProcessCommandLine(args))
+					{
+						return;
+					}
+
+					// Launch the application proper
+					if (firstInstance)
+					{
+						InnerMain(instanceMutex, activateEvent, args, runUpdateCheck);
 					}
 					else
 					{
-						ActivateEvent.Set();
+						activateEvent.Set();
 					}
 				}
 			}
 		}
 
-		static void InnerMain(Mutex InstanceMutex, EventWaitHandle ActivateEvent, string[] Args)
+		static void InnerMain(Mutex instanceMutex, EventWaitHandle activateEvent, string[] args, bool runUpdateCheck)
 		{
-			string ServerAndPort = null;
-			string UserName = null;
-			string BaseUpdatePath = null;
-			Utility.ReadGlobalPerforceSettings(ref ServerAndPort, ref UserName, ref BaseUpdatePath);
+			LauncherSettings launcherSettings = new LauncherSettings();
+			launcherSettings.Read();
 
-			List<string> RemainingArgs = new List<string>(Args);
+			List<string> remainingArgs = new List<string>(args);
 
-			string UpdateSpawn;
-			ParseArgument(RemainingArgs, "-updatespawn=", out UpdateSpawn);
+			string? updateSpawn;
+			ParseArgument(remainingArgs, "-updatespawn=", out updateSpawn);
 
-			string UpdatePath;
-			ParseArgument(RemainingArgs, "-updatepath=", out UpdatePath);
+			string? updatePath;
+			ParseArgument(remainingArgs, "-updatepath=", out updatePath);
 
-			bool bRestoreState;
-			ParseOption(RemainingArgs, "-restorestate", out bRestoreState);
+			bool restoreState;
+			ParseOption(remainingArgs, "-restorestate", out restoreState);
 
-			bool bUnstable;
-			ParseOption(RemainingArgs, "-unstable", out bUnstable);
+			bool unstable;
+			ParseOption(remainingArgs, "-unstable", out unstable);
+			bool preview;
+			ParseOption(remainingArgs, "-preview", out preview);
+			preview |= unstable;
 
-            string ProjectFileName;
-            ParseArgument(RemainingArgs, "-project=", out ProjectFileName);
+			string? projectFileName;
+			ParseArgument(remainingArgs, "-project=", out projectFileName);
 
-			string Uri;
-			ParseArgument(RemainingArgs, "-uri=", out Uri);
+			string? uri;
+			ParseArgument(remainingArgs, "-uri=", out uri);
 
-			string UpdateConfigFile = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "AutoUpdate.ini");
-			MergeUpdateSettings(UpdateConfigFile, ref UpdatePath, ref UpdateSpawn);
+			FileReference updateConfigFile = FileReference.Combine(new FileReference(Assembly.GetExecutingAssembly().Location).Directory, "AutoUpdate.ini");
+			MergeUpdateSettings(updateConfigFile, ref updatePath, ref updateSpawn);
 
-			string SyncVersionFile = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "SyncVersion.txt");
-			if(File.Exists(SyncVersionFile))
+			// Set the current working directory to the update directory to prevent child-process file handles from disrupting auto-updates
+			if (updateSpawn != null)
+			{
+				if (File.Exists(updateSpawn))
+				{
+					Directory.SetCurrentDirectory(Path.GetDirectoryName(updateSpawn)!);
+				}
+				else
+				{
+					updateSpawn = null;
+				}
+			}
+
+			string syncVersionFile = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location!)!, "SyncVersion.txt");
+			if (File.Exists(syncVersionFile))
 			{
 				try
 				{
-					SyncVersion = File.ReadAllText(SyncVersionFile).Trim();
+					SyncVersion = File.ReadAllText(syncVersionFile).Trim();
 				}
-				catch(Exception)
+				catch (Exception)
 				{
 					SyncVersion = null;
 				}
 			}
 
-			string DataFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UnrealGameSync");
-			Directory.CreateDirectory(DataFolder);
+			ArtifactDownload.RegisterFileAssociations(updateSpawn ?? GetCurrentExecutable());
 
-			// Enable TLS 1.1 and 1.2. TLS 1.0 is now deprecated and not allowed by default in NET Core servers.
-			ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls11 | SecurityProtocolType.Tls12;
+			DirectoryReference dataFolder = DirectoryReference.Combine(DirectoryReference.GetSpecialFolder(Environment.SpecialFolder.LocalApplicationData)!, "UnrealGameSync");
+			DirectoryReference.CreateDirectory(dataFolder);
 
-			// Create the log file
-			using (TimestampLogWriter Log = new TimestampLogWriter(new BoundedLogWriter(Path.Combine(DataFolder, "UnrealGameSync.log"))))
+			// Create a new logger
+			using (ILoggerProvider loggerProvider = Logging.CreateLoggerProvider(FileReference.Combine(dataFolder, "UnrealGameSync.log")))
 			{
-				Log.WriteLine("Application version: {0}", Assembly.GetExecutingAssembly().GetName().Version);
-				Log.WriteLine("Started at {0}", DateTime.Now.ToString());
+				ServiceCollection services = new ServiceCollection();
+				services.AddLogging(builder => builder.AddProvider(loggerProvider));
+				services.AddSingleton<IAsyncDisposer, AsyncDisposer>();
+				services.AddSingleton(sp => TokenStoreFactory.CreateTokenStore());
+				services.AddSingleton<OidcTokenManager>();
 
-				string SessionId = Guid.NewGuid().ToString();
-				Log.WriteLine("SessionId: {0}", SessionId);
-
-				if (ServerAndPort == null || UserName == null)
+				if (launcherSettings.HordeServer != null)
 				{
-					Log.WriteLine("Missing server settings; finding defaults.");
-					GetDefaultServerSettings(ref ServerAndPort, ref UserName, Log);
-					Utility.SaveGlobalPerforceSettings(ServerAndPort, UserName, BaseUpdatePath);
+					services.AddHorde(options =>
+					{
+						options.ServerUrl = new Uri(launcherSettings.HordeServer);
+						options.AllowAuthPrompt = false;
+					});
 				}
 
-				using (BoundedLogWriter TelemetryLog = new BoundedLogWriter(Path.Combine(DataFolder, "Telemetry.log")))
+				ServiceProvider serviceProvider = services.BuildServiceProvider();
+				try
 				{
-					TelemetryLog.WriteLine("Creating telemetry sink for session {0}", SessionId);
+					ILoggerFactory loggerFactory = serviceProvider.GetRequiredService<ILoggerFactory>();
 
-					ITelemetrySink PrevTelemetrySink = Telemetry.ActiveSink;
-					using (ITelemetrySink TelemetrySink = DeploymentSettings.CreateTelemetrySink(UserName, SessionId, TelemetryLog))
+					ILogger logger = loggerFactory.CreateLogger("Startup");
+					logger.LogInformation("Application version: {Version}", Assembly.GetExecutingAssembly().GetName().Version);
+					logger.LogInformation("Started at {Time}", DateTime.Now.ToString());
+
+					Utility.TraceException += ex => TraceException(ex, logger);
+
+					string sessionId = Guid.NewGuid().ToString();
+					logger.LogInformation("SessionId: {SessionId}", sessionId);
+
+					if (launcherSettings.PerforceServerAndPort == null || launcherSettings.PerforceUserName == null)
 					{
-						Telemetry.ActiveSink = TelemetrySink;
+						logger.LogInformation("Missing server settings; finding defaults.");
+						launcherSettings.PerforceServerAndPort ??= DeploymentSettings.Instance.DefaultPerforceServer ?? PerforceSettings.Default.ServerAndPort;
+						launcherSettings.PerforceUserName ??= PerforceSettings.Default.UserName;
+						launcherSettings.Save();
+					}
 
-						Telemetry.SendEvent("Startup", new { User = Environment.UserName, Machine = Environment.MachineName });
+					ILogger telemetryLogger = loggerProvider.CreateLogger("Telemetry");
+					telemetryLogger.LogInformation("Creating telemetry sink for session {SessionId}", sessionId);
 
-						AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
-
-						PerforceConnection DefaultConnection = new PerforceConnection(UserName, null, ServerAndPort);
-						using (UpdateMonitor UpdateMonitor = new UpdateMonitor(DefaultConnection, UpdatePath))
+					using (ITelemetrySink telemetrySink = CreateTelemetrySink(launcherSettings.PerforceUserName, sessionId, telemetryLogger))
+					{
+						ITelemetrySink? prevTelemetrySink = UgsTelemetry.ActiveSink;
+						try
 						{
-							ProgramApplicationContext Context = new ProgramApplicationContext(DefaultConnection, UpdateMonitor, DeploymentSettings.ApiUrl, DataFolder, ActivateEvent, bRestoreState, UpdateSpawn, ProjectFileName, bUnstable, Log, Uri);
-							Application.Run(Context);
+							UgsTelemetry.ActiveSink = telemetrySink;
 
-							if (UpdateMonitor.IsUpdateAvailable && UpdateSpawn != null)
+							UgsTelemetry.SendEvent("Startup", new { User = Environment.UserName, Machine = System.Net.Dns.GetHostName() });
+
+							AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
+
+							IPerforceSettings defaultSettings = new PerforceSettings(launcherSettings.PerforceServerAndPort, launcherSettings.PerforceUserName) { PreferNativeClient = true };
+
+							ProtocolHandlerUtils.InstallQuiet(logger);
+
+							UpdateMonitor updateMonitor = CreateUpdateMonitor(launcherSettings, defaultSettings, updatePath, runUpdateCheck, serviceProvider);
+							try
 							{
-								InstanceMutex.Close();
-								bool bLaunchUnstable = UpdateMonitor.RelaunchUnstable ?? bUnstable;
-								Utility.SpawnProcess(UpdateSpawn, "-restorestate" + (bLaunchUnstable ? " -unstable" : ""));
+								using ProgramApplicationContext context = new ProgramApplicationContext(defaultSettings, updateMonitor, DeploymentSettings.Instance.ApiUrl, dataFolder, activateEvent, restoreState, updateSpawn, projectFileName, preview, serviceProvider, uri);
+								Application.Run(context);
+
+								if (updateMonitor.IsUpdateAvailable)
+								{
+									instanceMutex.Close();
+									Utility.SpawnProcess(updateSpawn ?? GetCurrentExecutable(), "-restorestate" + (updateMonitor.OpenSettings ? " -settings" : ""));
+								}
+							}
+							finally
+							{
+								AsyncDispose(updateMonitor);
 							}
 						}
+						catch (Exception ex)
+						{
+							UgsTelemetry.SendEvent("Crash", new { Exception = ex.ToString() });
+							throw;
+						}
+						finally
+						{
+							UgsTelemetry.ActiveSink = prevTelemetrySink;
+						}
 					}
-					Telemetry.ActiveSink = PrevTelemetrySink;
+				}
+				finally
+				{
+					AsyncDispose(serviceProvider);
 				}
 			}
 		}
 
-		public static void GetDefaultServerSettings(ref string ServerAndPort, ref string UserName, TextWriter Log)
+		static void AsyncDispose(IAsyncDisposable disposable)
 		{
-			// Read the P4PORT setting for the server, if necessary. Change to the project folder if set, so we can respect the contents of any P4CONFIG file.
-			if(ServerAndPort == null)
-			{
-				PerforceConnection Perforce = new PerforceConnection(UserName, null, null);
-
-				string NewServerAndPort;
-				if (Perforce.GetSetting("P4PORT", out NewServerAndPort, Log))
-				{
-					ServerAndPort = NewServerAndPort;
-				}
-				else
-				{
-					ServerAndPort = PerforceConnection.DefaultServerAndPort;
-				}
-			}
-
-			// Update the server and username from the reported server info if it's not set
-			if(UserName == null)
-			{
-				PerforceConnection Perforce = new PerforceConnection(UserName, null, ServerAndPort);
-
-				PerforceInfoRecord PerforceInfo;
-				if(Perforce.Info(out PerforceInfo, Log) && !String.IsNullOrEmpty(PerforceInfo.UserName))
-				{
-					UserName = PerforceInfo.UserName;
-				}
-				else
-				{
-					UserName = Environment.UserName;
-				}
-			}
+			// Force the dispose to run on a task without a synchronization context, so we don't have to worry about waiting for it on the Winforms thread.
+			Task task = Task.Run(async () => await disposable.DisposeAsync());
+			task.GetAwaiter().GetResult();
 		}
 
-		private static void CurrentDomain_UnhandledException(object Sender, UnhandledExceptionEventArgs Args)
+		public static string GetCurrentExecutable()
 		{
-			Exception Ex = Args.ExceptionObject as Exception;
-			if(Ex != null)
+			string originalExecutable = Assembly.GetEntryAssembly()!.Location;
+			if (Path.GetExtension(originalExecutable).Equals(".dll", StringComparison.OrdinalIgnoreCase))
 			{
-				StringBuilder ExceptionTrace = new StringBuilder(Ex.ToString());
-				for(Exception InnerEx = Ex.InnerException; InnerEx != null; InnerEx = InnerEx.InnerException)
+				string newExecutable = Path.ChangeExtension(originalExecutable, ".exe");
+				if (File.Exists(newExecutable))
 				{
-					ExceptionTrace.Append("\nInner Exception:\n");
-					ExceptionTrace.Append(InnerEx.ToString());
+					return newExecutable;
 				}
-				Telemetry.SendEvent("Crash", new { Exception = Ex });
+			}
+			return originalExecutable;
+		}
+
+		static bool ShouldRunAutoUpdate(string[] args)
+		{
+#if WITH_AUTOUPDATE
+			return !args.Contains("-NoUpdateCheck", StringComparer.OrdinalIgnoreCase);
+#else
+			return args.Contains("-UpdateCheck", StringComparer.OrdinalIgnoreCase) || args.Contains("-Settings", StringComparer.OrdinalIgnoreCase);
+#endif
+		}
+
+		private static UpdateMonitor CreateUpdateMonitor(LauncherSettings launcherSettings, IPerforceSettings defaultSettings, string? updatePath, bool runUpdateCheck, IServiceProvider serviceProvider)
+		{
+			if (!runUpdateCheck)
+			{
+				return new NullUpdateMonitor();
+			}
+			else if (launcherSettings.UpdateSource == LauncherUpdateSource.Horde)
+			{
+				return new HordeUpdateMonitor(SyncVersion ?? String.Empty, serviceProvider);
+			}
+			else
+			{
+				return new PerforceUpdateMonitor(defaultSettings, updatePath, serviceProvider);
 			}
 		}
 
-		static void MergeUpdateSettings(string UpdateConfigFile, ref string UpdatePath, ref string UpdateSpawn)
+		private static void TraceException(Exception ex, ILogger logger)
+		{
+			if (DeploymentSettings.Instance.SentryDsn != null)
+			{
+				SentrySdk.CaptureException(ex);
+			}
+			logger.LogError(ex, "Trace exception: {Ex}", ex.ToString());
+		}
+
+		private static void CurrentDomain_UnhandledException(object sender, UnhandledExceptionEventArgs args)
+		{
+			Exception? ex = args.ExceptionObject as Exception;
+			if (ex != null)
+			{
+				UgsTelemetry.SendEvent("Crash", new { Exception = ex.ToString() });
+			}
+		}
+
+		private static void CurrentDomain_UnhandledException_Sentry(object sender, UnhandledExceptionEventArgs args)
+		{
+			Exception? ex = args.ExceptionObject as Exception;
+			if (ex != null)
+			{
+				SentrySdk.CaptureException(ex);
+			}
+		}
+
+		private static void Application_ThreadException_Sentry(object sender, ThreadExceptionEventArgs e)
+		{
+			SentrySdk.CaptureException(e.Exception);
+
+			using ThreadExceptionDialog dialog = new ThreadExceptionDialog(e.Exception);
+			dialog.ShowDialog();
+		}
+
+		private static void Application_UnobservedException_Sentry(object? sender, UnobservedTaskExceptionEventArgs args)
+		{
+			Exception? innerException = args.Exception?.InnerException;
+			if (innerException != null)
+			{
+				SentrySdk.CaptureException(innerException, s => s.SetTag("Unobserved", "1"));
+			}
+		}
+
+		static void MergeUpdateSettings(FileReference updateConfigFile, ref string? updatePath, ref string? updateSpawn)
 		{
 			try
 			{
-				ConfigFile UpdateConfig = new ConfigFile();
-				if(File.Exists(UpdateConfigFile))
+				ConfigFile updateConfig = new ConfigFile();
+				if (FileReference.Exists(updateConfigFile))
 				{
-					UpdateConfig.Load(UpdateConfigFile);
+					updateConfig.Load(updateConfigFile);
 				}
 
-				if(UpdatePath == null)
+				if (updatePath == null)
 				{
-					UpdatePath = UpdateConfig.GetValue("Update.Path", null);
+					updatePath = updateConfig.GetValue("Update.Path", null);
 				}
 				else
 				{
-					UpdateConfig.SetValue("Update.Path", UpdatePath);
+					updateConfig.SetValue("Update.Path", updatePath);
 				}
 
-				if(UpdateSpawn == null)
+				if (updateSpawn == null)
 				{
-					UpdateSpawn = UpdateConfig.GetValue("Update.Spawn", null);
+					updateSpawn = updateConfig.GetValue("Update.Spawn", null);
 				}
 				else
 				{
-					UpdateConfig.SetValue("Update.Spawn", UpdateSpawn);
+					updateConfig.SetValue("Update.Spawn", updateSpawn);
 				}
 
-				UpdateConfig.Save(UpdateConfigFile);
+				updateConfig.Save(updateConfigFile);
 			}
-			catch(Exception)
+			catch (Exception)
 			{
 			}
 		}
 
-		static bool ParseOption(List<string> RemainingArgs, string Option, out bool Value)
+		static bool ParseOption(List<string> remainingArgs, string option, out bool value)
 		{
-			for(int Idx = 0; Idx < RemainingArgs.Count; Idx++)
+			for (int idx = 0; idx < remainingArgs.Count; idx++)
 			{
-				if(RemainingArgs[Idx].Equals(Option, StringComparison.InvariantCultureIgnoreCase))
+				if (remainingArgs[idx].Equals(option, StringComparison.OrdinalIgnoreCase))
 				{
-					Value = true;
-					RemainingArgs.RemoveAt(Idx);
+					value = true;
+					remainingArgs.RemoveAt(idx);
 					return true;
 				}
 			}
 
-			Value = false;
+			value = false;
 			return false;
 		}
 
-		static bool ParseArgument(List<string> RemainingArgs, string Prefix, out string Value)
+		static bool ParseArgument(List<string> remainingArgs, string prefix, [NotNullWhen(true)] out string? value)
 		{
-			for(int Idx = 0; Idx < RemainingArgs.Count; Idx++)
+			for (int idx = 0; idx < remainingArgs.Count; idx++)
 			{
-				if(RemainingArgs[Idx].StartsWith(Prefix, StringComparison.InvariantCultureIgnoreCase))
+				if (remainingArgs[idx].StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
 				{
-					Value = RemainingArgs[Idx].Substring(Prefix.Length);
-					RemainingArgs.RemoveAt(Idx);
+					value = remainingArgs[idx].Substring(prefix.Length);
+					remainingArgs.RemoveAt(idx);
 					return true;
 				}
 			}
 
-			Value = null;
+			value = null;
 			return false;
+		}
+
+		public static IEnumerable<string> GetPerforcePaths()
+		{
+			string? pathList = Environment.GetEnvironmentVariable("PATH");
+			if (!String.IsNullOrEmpty(pathList))
+			{
+				foreach (string pathEntry in pathList.Split(Path.PathSeparator))
+				{
+					string? perforcePath = null;
+					try
+					{
+						string testPerforcePath = Path.Combine(pathEntry, "p4.exe");
+						if (File.Exists(testPerforcePath))
+						{
+							perforcePath = testPerforcePath;
+						}
+					}
+					catch
+					{
+					}
+
+					if (perforcePath != null)
+					{
+						yield return perforcePath;
+					}
+				}
+			}
+		}
+
+		public static void SpawnP4Vc(string arguments)
+		{
+			string executable = "p4vc.exe";
+
+			foreach (string perforcePath in GetPerforcePaths())
+			{
+				string? perforceDir = Path.GetDirectoryName(perforcePath);
+				if (perforceDir != null && File.Exists(Path.Combine(perforceDir, "p4vc.bat")) && !File.Exists(Path.Combine(perforceDir, "p4vc.exe")))
+				{
+					executable = Path.Combine(perforceDir, "p4v.exe");
+					arguments = "-p4vc " + arguments;
+					break;
+				}
+			}
+
+			if (!Utility.SpawnHiddenProcess(executable, arguments))
+			{
+				MessageBox.Show("Unable to spawn p4vc. Check you have P4V installed.");
+			}
 		}
 	}
 }

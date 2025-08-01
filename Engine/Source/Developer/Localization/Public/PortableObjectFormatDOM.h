@@ -2,8 +2,17 @@
 
 #pragma once 
 
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "HAL/Platform.h"
+#include "Internationalization/CulturePointer.h"
 #include "Internationalization/LocKeyFuncs.h"
+#include "Misc/CString.h"
+#include "Templates/SharedPointer.h"
+
+class FText;
 
 /**
 * Class for handling language codes used in the Portable Object format.
@@ -337,7 +346,7 @@ public:
 	bool FromString( const FString& InStr, FText* OutErrorMsg = nullptr );
 
 	/** Creates a header entry based on the project and language info. */
-	void CreateNewHeader();
+	void CreateNewHeader( const FString& InCopyrightNotice = FString() );
 
 	/**
 	 * Sets a header entry value.

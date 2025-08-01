@@ -2,12 +2,31 @@
 
 #include "BundlePrereqCombinedStatusHelper.h"
 #include "Containers/Ticker.h"
-#include "InstallBundleManagerPrivatePCH.h"
+#include "InstallBundleManagerPrivate.h"
+#include "InstallBundleUtils.h"
 #include "Stats/Stats.h"
+#include "Algo/Transform.h"
 
-FInstallBundleCombinedProgressTracker::FInstallBundleCombinedProgressTracker()
+const TCHAR* LexToString(FInstallBundleCombinedProgressTracker::ECombinedBundleStatus Status)
 {
-	SetupDelegates();
+	static const TCHAR* Strings[] =
+	{
+		TEXT("Unknown"),
+		TEXT("Initializing"),
+		TEXT("Updating"),
+		TEXT("Finishing"),
+		TEXT("Finished"),
+		TEXT("Count")
+	};
+
+	static_assert(InstallBundleUtil::CastToUnderlying(FInstallBundleCombinedProgressTracker::ECombinedBundleStatus::Count) == UE_ARRAY_COUNT(Strings) - 1, "");
+	return Strings[InstallBundleUtil::CastToUnderlying(Status)];
+}
+
+FInstallBundleCombinedProgressTracker::FInstallBundleCombinedProgressTracker(bool bAutoTick /*= true*/, TUniqueFunction<void(const FCombinedProgress&)> InOnTick /*= nullptr*/)
+	: OnTick(MoveTemp(InOnTick))
+{
+	SetupDelegates(bAutoTick);
 }
 
 FInstallBundleCombinedProgressTracker::~FInstallBundleCombinedProgressTracker()
@@ -37,7 +56,7 @@ FInstallBundleCombinedProgressTracker& FInstallBundleCombinedProgressTracker::op
 		InstallBundleManager = Other.InstallBundleManager;
 		
 		//Don't copy TickHandle as we want to setup our own here
-		SetupDelegates();
+		SetupDelegates(Other.TickHandle.IsValid());
 	}
 	
 	return *this;
@@ -48,7 +67,7 @@ FInstallBundleCombinedProgressTracker& FInstallBundleCombinedProgressTracker::op
 	if (this != &Other)
 	{
 		//Just copy small data
-		CurrentCombinedProgress = Other.CurrentCombinedProgress;		
+		CurrentCombinedProgress = Other.CurrentCombinedProgress;
 		InstallBundleManager = Other.InstallBundleManager;
 
 		//Move bigger data
@@ -60,19 +79,22 @@ FInstallBundleCombinedProgressTracker& FInstallBundleCombinedProgressTracker::op
 		Other.CleanUpDelegates();
 	
 		//Don't copy TickHandle as we want to setup our own here
-		SetupDelegates();
+		SetupDelegates(Other.TickHandle.IsValid());
 	}
 	
 	return *this;
 }
 
-void FInstallBundleCombinedProgressTracker::SetupDelegates()
+void FInstallBundleCombinedProgressTracker::SetupDelegates(bool bAutoTick)
 {
 	CleanUpDelegates();
 	
 	IInstallBundleManager::InstallBundleCompleteDelegate.AddRaw(this, &FInstallBundleCombinedProgressTracker::OnBundleInstallComplete);
 	IInstallBundleManager::PausedBundleDelegate.AddRaw(this, &FInstallBundleCombinedProgressTracker::OnBundleInstallPauseChanged);
-	TickHandle = FTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FInstallBundleCombinedProgressTracker::Tick));
+	if (bAutoTick)
+	{
+		TickHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FInstallBundleCombinedProgressTracker::Tick));
+	}
 }
 
 void FInstallBundleCombinedProgressTracker::CleanUpDelegates()
@@ -81,7 +103,7 @@ void FInstallBundleCombinedProgressTracker::CleanUpDelegates()
 	IInstallBundleManager::PausedBundleDelegate.RemoveAll(this);
 	if (TickHandle.IsValid())
 	{
-		FTicker::GetCoreTicker().RemoveTicker(TickHandle);
+		FTSTicker::GetCoreTicker().RemoveTicker(TickHandle);
 		TickHandle.Reset();
 	}
 }
@@ -91,7 +113,26 @@ void FInstallBundleCombinedProgressTracker::SetBundlesToTrackFromContentState(co
 	RequiredBundleNames.Empty();
 	CachedBundleWeights.Empty();
 	BundleStatusCache.Empty();
-	
+
+	//Go through all bundles until we hit a non-zero weight bundle. 
+	//This is to help catch instances where we pass in all zero weight bundles to track and need
+	//to thus calculate their weight dynamically based on everything having even weight
+	bool bAreAllBundlesZeroWeight = true;
+	for (const TPair<FName, FInstallBundleContentState>& IndividualBundlePair : BundleContentState.IndividualBundleStates)
+	{
+		const FInstallBundleContentState& BundleState = IndividualBundlePair.Value;
+		if (BundleState.Weight <= SMALL_NUMBER)
+		{
+			continue;
+		}
+		else
+		{
+			bAreAllBundlesZeroWeight = false;
+			break;
+		}
+	}
+		
+
 	bool bBundleNeedsUpdate = false;
 	float TotalWeight = 0.0f;
 	for (const FName& Bundle : BundlesToTrack)
@@ -99,6 +140,12 @@ void FInstallBundleCombinedProgressTracker::SetBundlesToTrackFromContentState(co
 		const FInstallBundleContentState* BundleState = BundleContentState.IndividualBundleStates.Find(Bundle);
 		if (ensureAlwaysMsgf(BundleState, TEXT("Trying to track unknown bundle %s"), *Bundle.ToString()))
 		{
+			//Filter out any bundles with effectively 0 weight (unless all bundles are 0 weight)
+			if (!bAreAllBundlesZeroWeight && (BundleState->Weight <= SMALL_NUMBER))
+			{
+				continue;
+			}
+
 			//Track if we need any kind of bundle updates
 			if (BundleState->State == EInstallBundleInstallState::NotInstalled || BundleState->State == EInstallBundleInstallState::NeedsUpdate)
 			{
@@ -107,13 +154,16 @@ void FInstallBundleCombinedProgressTracker::SetBundlesToTrackFromContentState(co
 
 			//Save required bundles and their weights
 			RequiredBundleNames.Add(Bundle);
-			CachedBundleWeights.FindOrAdd(Bundle) = BundleState->Weight;
+
+			//If all bundles are zero weight, just treat this weight as 1 so everything ends up with 1 weight and is evenly distributed
+			CachedBundleWeights.FindOrAdd(Bundle) = bAreAllBundlesZeroWeight ? 1.0f : BundleState->Weight;
+
 			TotalWeight += BundleState->Weight;
 		}
 	}
 
 	CurrentCombinedProgress.bBundleRequiresUpdate = bBundleNeedsUpdate;
-	
+
 	if (TotalWeight > 0.0f)
 	{
 		for (TPair<FName, float>& BundleWeightPair : CachedBundleWeights)
@@ -128,7 +178,7 @@ void FInstallBundleCombinedProgressTracker::SetBundlesToTrackFromContentState(co
 		CurrentCombinedProgress.ProgressPercent = 1.0f;
 		CurrentCombinedProgress.CombinedStatus = ECombinedBundleStatus::Finished;
 	}
-	
+
 	//Go ahead and calculate initial values from the Bundle Cache
 	UpdateBundleCache();
 }
@@ -172,9 +222,12 @@ void FInstallBundleCombinedProgressTracker::UpdateCombinedStatus()
 	//if we don't yet have a bundle status cache entry for a particular requirement
 	//then we can't yet tell what work is required on that bundle yet. We need to go ahead and make sure we don't
 	//show a status like "Installed" before we know what state that bundle is in. Make sure we show at LEAST
-	//updating in that case, so start with Downloading since that is the first Updating case
+	//updating in that case, so start with Downloading since that is the first Updating case.
+	//However if all bundle progress is finished, don't just sit showing 100% and Updating when we could potentially
+	//be showing Finishing progress
 	if ((BundleStatusCache.Num() < RequiredBundleNames.Num())
-		&& (BundleStatusCache.Num() > 0))
+		&& (BundleStatusCache.Num() > 0)
+		&& (CurrentCombinedProgress.ProgressPercent < 1.0f))
 	{
 		EarliestBundleState = EInstallBundleStatus::Updating;
 	}
@@ -270,6 +323,11 @@ bool FInstallBundleCombinedProgressTracker::Tick(float dt)
 	UpdateBundleCache();
 	UpdateCombinedStatus();
 	
+	if (OnTick)
+	{
+		OnTick(CurrentCombinedProgress);
+	}
+
 	//just always keep ticking
 	return true;
 }

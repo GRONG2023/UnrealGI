@@ -45,6 +45,18 @@ public:
 	virtual void NewPage( const FText& Title ) = 0;
 
 	/** 
+	* Sets the current page to the one specified by the title.
+	* @param	Title	the title of the page to switch to
+	*/
+	virtual void SetCurrentPage( const FText& Title ) = 0;
+
+	/** 
+	* Sets the current page to the one specified by the title.
+	* @param	InOldPageIndex	the index of the page to switch to. This page will move to index 0.
+	*/
+	virtual void SetCurrentPage( const uint32 InOldPageIndex ) = 0;
+
+	/** 
 	 * Notify the user if there are any messages on the current page for this log.
 	 * If there are no messages present, this call does nothing.
 	 * @param	Message			The message to display in the notification.

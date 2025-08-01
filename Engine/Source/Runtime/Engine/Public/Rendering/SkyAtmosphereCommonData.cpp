@@ -7,6 +7,7 @@
 #include "SkyAtmosphereCommonData.h"
 
 #include "Components/SkyAtmosphereComponent.h"
+#include "ColorSpace.h"
 
 //PRAGMA_DISABLE_OPTIMIZATION
 
@@ -42,19 +43,65 @@ FAtmosphereSetup::FAtmosphereSetup(const USkyAtmosphereComponent& SkyAtmosphereC
 	BottomRadiusKm = SkyAtmosphereComponent.BottomRadius;
 	TopRadiusKm = SkyAtmosphereComponent.BottomRadius + FMath::Max(0.1f, SkyAtmosphereComponent.AtmosphereHeight);
 	GroundAlbedo = FLinearColor(SkyAtmosphereComponent.GroundAlbedo);
-	MultiScatteringFactor = FMath::Clamp(SkyAtmosphereComponent.MultiScatteringFactor, 0.0f, 2.0f);
+	MultiScatteringFactor = FMath::Clamp(SkyAtmosphereComponent.MultiScatteringFactor, 0.0f, 100.0f);
 
-	RayleighDensityExpScale = -1.0f / SkyAtmosphereComponent.RayleighExponentialDistribution;
-	RayleighScattering = (SkyAtmosphereComponent.RayleighScattering * SkyAtmosphereComponent.RayleighScatteringScale).GetClamped(0.0f, 1e38f);
+	auto ConvertCoefficientsFromSRGBToWorkingColorSpace = [](FLinearColor CoeffSRGB)
+	{
+		using namespace UE::Color;
 
-	MieScattering = (SkyAtmosphereComponent.MieScattering * SkyAtmosphereComponent.MieScatteringScale).GetClamped(0.0f, 1e38f);
-	MieAbsorption = (SkyAtmosphereComponent.MieAbsorption * SkyAtmosphereComponent.MieAbsorptionScale).GetClamped(0.0f, 1e38f);
-	MieExtinction = MieScattering + MieAbsorption;
-	MiePhaseG = SkyAtmosphereComponent.MieAnisotropy;
-	MieDensityExpScale = -1.0f / SkyAtmosphereComponent.MieExponentialDistribution;
+		const FColorSpace& WorkingColorSpace = FColorSpace::GetWorking();
+		if (WorkingColorSpace.IsSRGB())
+		{
+			return CoeffSRGB;
+		}
+		else
+		{
+			// Compute the transmittance color from the coefficients.
+			FLinearColor Transmittance = FLinearColor(
+				FMath::Exp(-CoeffSRGB.R),
+				FMath::Exp(-CoeffSRGB.G),
+				FMath::Exp(-CoeffSRGB.B));
 
-	AbsorptionExtinction = (SkyAtmosphereComponent.OtherAbsorption * SkyAtmosphereComponent.OtherAbsorptionScale).GetClamped(0.0f, 1e38f);
-	TentToCoefficients(SkyAtmosphereComponent.OtherTentDistribution, AbsorptionDensity0LayerWidth, AbsorptionDensity0LinearTerm, AbsorptionDensity1LinearTerm, AbsorptionDensity0ConstantTerm, AbsorptionDensity1ConstantTerm);
+			// Convert transmittance color from sRGB to working color space.
+			Transmittance = FColorSpaceTransform::GetSRGBToWorkingColorSpace().Apply(Transmittance);
+
+			// New we have a transmittance in working color space, convert it back to coefficients for this working color space.
+			return FLinearColor(
+				-FMath::Loge(FMath::Max(0.00001, Transmittance.R)),
+				-FMath::Loge(FMath::Max(0.00001, Transmittance.G)),
+				-FMath::Loge(FMath::Max(0.00001, Transmittance.B)));
+		}
+	};
+
+	// Rayleigh scattering
+	{
+		RayleighScattering = (SkyAtmosphereComponent.RayleighScattering * SkyAtmosphereComponent.RayleighScatteringScale).GetClamped(0.0f, 1e38f);
+		RayleighScattering = ConvertCoefficientsFromSRGBToWorkingColorSpace(RayleighScattering);
+
+		RayleighDensityExpScale = -1.0f / SkyAtmosphereComponent.RayleighExponentialDistribution;
+	}
+
+	// Mie scattering
+	{
+
+		MieScattering = (SkyAtmosphereComponent.MieScattering * SkyAtmosphereComponent.MieScatteringScale).GetClamped(0.0f, 1e38f);
+		MieScattering = ConvertCoefficientsFromSRGBToWorkingColorSpace(MieScattering);
+
+		MieAbsorption = (SkyAtmosphereComponent.MieAbsorption * SkyAtmosphereComponent.MieAbsorptionScale).GetClamped(0.0f, 1e38f);
+		MieAbsorption = ConvertCoefficientsFromSRGBToWorkingColorSpace(MieAbsorption);
+
+		MieExtinction = MieScattering + MieAbsorption;
+		MiePhaseG = SkyAtmosphereComponent.MieAnisotropy;
+		MieDensityExpScale = -1.0f / SkyAtmosphereComponent.MieExponentialDistribution;
+	}
+
+	// Ozone
+	{
+		AbsorptionExtinction = (SkyAtmosphereComponent.OtherAbsorption * SkyAtmosphereComponent.OtherAbsorptionScale).GetClamped(0.0f, 1e38f);
+		AbsorptionExtinction = ConvertCoefficientsFromSRGBToWorkingColorSpace(AbsorptionExtinction);
+
+		TentToCoefficients(SkyAtmosphereComponent.OtherTentDistribution, AbsorptionDensity0LayerWidth, AbsorptionDensity0LinearTerm, AbsorptionDensity1LinearTerm, AbsorptionDensity0ConstantTerm, AbsorptionDensity1ConstantTerm);
+	}
 
 	TransmittanceMinLightElevationAngle = SkyAtmosphereComponent.TransmittanceMinLightElevationAngle;
 
@@ -63,7 +110,7 @@ FAtmosphereSetup::FAtmosphereSetup(const USkyAtmosphereComponent& SkyAtmosphereC
 
 void FAtmosphereSetup::ApplyWorldOffset(const FVector& InOffset)
 {
-	PlanetCenterKm += InOffset * FAtmosphereSetup::CmToSkyUnit;
+	PlanetCenterKm += InOffset * double(FAtmosphereSetup::CmToSkyUnit);
 }
 
 void FAtmosphereSetup::UpdateTransform(const FTransform& ComponentTransform, uint8 TranformMode)
@@ -74,10 +121,10 @@ void FAtmosphereSetup::UpdateTransform(const FTransform& ComponentTransform, uin
 		PlanetCenterKm = FVector(0.0f, 0.0f, -BottomRadiusKm);
 		break;
 	case ESkyAtmosphereTransformMode::PlanetTopAtComponentTransform:
-		PlanetCenterKm = FVector(0.0f, 0.0f, -BottomRadiusKm) + ComponentTransform.GetTranslation() * FAtmosphereSetup::CmToSkyUnit;
+		PlanetCenterKm = FVector(0.0f, 0.0f, -BottomRadiusKm) + ComponentTransform.GetTranslation() * double(FAtmosphereSetup::CmToSkyUnit);
 		break;
 	case ESkyAtmosphereTransformMode::PlanetCenterAtComponentTransform:
-		PlanetCenterKm = ComponentTransform.GetTranslation() * FAtmosphereSetup::CmToSkyUnit;
+		PlanetCenterKm = ComponentTransform.GetTranslation() * double(FAtmosphereSetup::CmToSkyUnit);
 		break;
 	default:
 		check(false);
@@ -89,14 +136,14 @@ FLinearColor FAtmosphereSetup::GetTransmittanceAtGroundLevel(const FVector& SunD
 	// The following code is from SkyAtmosphere.usf and has been converted to lambda functions. 
 	// It compute transmittance from the origin towards a sun direction. 
 
-	auto RayIntersectSphere = [&](FVector RayOrigin, FVector RayDirection, FVector SphereOrigin, float SphereRadius)
+	auto RayIntersectSphere = [&](FVector3f RayOrigin, FVector3f RayDirection, FVector3f SphereOrigin, float SphereRadius)
 	{
-		FVector LocalPosition = RayOrigin - SphereOrigin;
-		float LocalPositionSqr = FVector::DotProduct(LocalPosition, LocalPosition);
+		FVector3f LocalPosition = RayOrigin - SphereOrigin;
+		float LocalPositionSqr = FVector3f::DotProduct(LocalPosition, LocalPosition);
 
-		FVector QuadraticCoef;
-		QuadraticCoef.X = FVector::DotProduct(RayDirection, RayDirection);
-		QuadraticCoef.Y = 2.0f * FVector::DotProduct(RayDirection, LocalPosition);
+		FVector3f QuadraticCoef;
+		QuadraticCoef.X = FVector3f::DotProduct(RayDirection, RayDirection);
+		QuadraticCoef.Y = 2.0f * FVector3f::DotProduct(RayDirection, LocalPosition);
 		QuadraticCoef.Z = LocalPositionSqr - SphereRadius * SphereRadius;
 
 		float Discriminant = QuadraticCoef.Y * QuadraticCoef.Y - 4.0f * QuadraticCoef.X * QuadraticCoef.Z;
@@ -113,7 +160,7 @@ FLinearColor FAtmosphereSetup::GetTransmittanceAtGroundLevel(const FVector& SunD
 	};
 
 	// Nearest intersection of ray r,mu with sphere boundary
-	auto raySphereIntersectNearest = [&](FVector RayOrigin, FVector RayDirection, FVector SphereOrigin, float SphereRadius)
+	auto raySphereIntersectNearest = [&](FVector3f RayOrigin, FVector3f RayDirection, FVector3f SphereOrigin, float SphereRadius)
 	{
 		FVector2D sol = RayIntersectSphere(RayOrigin, RayDirection, SphereOrigin, SphereRadius);
 		const float sol0 = sol.X;
@@ -133,21 +180,21 @@ FLinearColor FAtmosphereSetup::GetTransmittanceAtGroundLevel(const FVector& SunD
 		return FMath::Max(0.0f, FMath::Min(sol0, sol1));
 	};
 
-	auto OpticalDepth = [&](FVector RayOrigin, FVector RayDirection)
+	auto OpticalDepth = [&](FVector3f RayOrigin, FVector3f RayDirection)
 	{
-		float TMax = raySphereIntersectNearest(RayOrigin, RayDirection, FVector(0.0f, 0.0f, 0.0f), TopRadiusKm);
+		float TMax = raySphereIntersectNearest(RayOrigin, RayDirection, FVector3f(0.0f, 0.0f, 0.0f), TopRadiusKm);
 
 		FLinearColor OpticalDepthRGB = FLinearColor(ForceInitToZero);
-		FVector VectorZero = FVector(ForceInitToZero);
+		FVector3f VectorZero = FVector3f(ForceInitToZero);
 		if (TMax > 0.0f)
 		{
 			const float SampleCount = 15.0f;
-			const float SampleStep = 1.0f / 15.0f;
+			const float SampleStep = 1.0f / SampleCount;
 			const float SampleLength = SampleStep * TMax;
 			for (float SampleT = 0.0f; SampleT < 1.0f; SampleT += SampleStep)
 			{
-				FVector Pos = RayOrigin + RayDirection * (TMax * SampleT);
-				const float viewHeight = (FVector::Distance(Pos, VectorZero) - BottomRadiusKm);
+				FVector3f Pos = RayOrigin + RayDirection * (TMax * SampleT);
+				const float viewHeight = (FVector3f::Distance(Pos, VectorZero) - BottomRadiusKm);
 
 				const float densityMie = FMath::Max(0.0f, FMath::Exp(MieDensityExpScale * viewHeight));
 				const float densityRay = FMath::Max(0.0f, FMath::Exp(RayleighDensityExpScale * viewHeight));
@@ -165,16 +212,17 @@ FLinearColor FAtmosphereSetup::GetTransmittanceAtGroundLevel(const FVector& SunD
 	};
 
 	// Assuming camera is along Z on (0,0,earthRadius + 500m)
-	const FVector WorldPos = FVector(0.0f, 0.0f, BottomRadiusKm + 0.5);
+	const FVector3f WorldPos = FVector3f(0.0f, 0.0f, BottomRadiusKm + 0.5);
 	FVector2D AzimuthElevation = FMath::GetAzimuthAndElevation(SunDirection, FVector::ForwardVector, FVector::LeftVector, FVector::UpVector); // TODO: make it work over the entire virtual planet with a local basis
 	AzimuthElevation.Y = FMath::Max(FMath::DegreesToRadians(TransmittanceMinLightElevationAngle), AzimuthElevation.Y);
-	const FVector WorldDir = FVector(FMath::Cos(AzimuthElevation.Y), 0.0f, FMath::Sin(AzimuthElevation.Y)); // no need to take azimuth into account as transmittance is symmetrical around zenith axis.
+	const FVector3f WorldDir = FVector3f(FMath::Cos(AzimuthElevation.Y), 0.0f, FMath::Sin(AzimuthElevation.Y)); // no need to take azimuth into account as transmittance is symmetrical around zenith axis.
 	FLinearColor OpticalDepthRGB = OpticalDepth(WorldPos, WorldDir);
 	return FLinearColor(FMath::Exp(-OpticalDepthRGB.R), FMath::Exp(-OpticalDepthRGB.G), FMath::Exp(-OpticalDepthRGB.B));
 }
 
-void FAtmosphereSetup::ComputeViewData(const FVector& WorldCameraOrigin, const FVector& ViewForward, const FVector& ViewRight,
-	FVector& SkyWorldCameraOrigin, FVector4& SkyPlanetCenterAndViewHeight, FMatrix& SkyViewLutReferential) const
+void FAtmosphereSetup::ComputeViewData(
+	const FVector& WorldCameraOrigin, const FVector& PreViewTranslation, const FVector3f& ViewForward, const FVector3f& ViewRight,
+	FVector3f& SkyCameraTranslatedWorldOriginTranslatedWorld, FVector4f& SkyPlanetTranslatedWorldCenterAndViewHeight, FMatrix44f& SkyViewLutReferential) const
 {
 	// The constants below should match the one in SkyAtmosphereCommon.ush
 	// Always force to be 5 meters above the ground/sea level (to always see the sky and not be under the virtual planet occluding ray tracing) and lower for small planet radius
@@ -183,24 +231,29 @@ void FAtmosphereSetup::ComputeViewData(const FVector& WorldCameraOrigin, const F
 	const float Offset = PlanetRadiusOffset * SkyUnitToCm;
 	const float BottomRadiusWorld = BottomRadiusKm * SkyUnitToCm;
 	const FVector PlanetCenterWorld = PlanetCenterKm * SkyUnitToCm;
-	const FVector PlanetCenterToCameraWorld = WorldCameraOrigin - PlanetCenterWorld;
-	const float DistanceToPlanetCenterWorld = PlanetCenterToCameraWorld.Size();
+	const FVector PlanetCenterTranslatedWorld = PlanetCenterWorld + PreViewTranslation;
+	const FVector WorldCameraOriginTranslatedWorld = WorldCameraOrigin + PreViewTranslation;
+	const FVector PlanetCenterToCameraTranslatedWorld = WorldCameraOriginTranslatedWorld - PlanetCenterTranslatedWorld;
+	const float DistanceToPlanetCenterTranslatedWorld = PlanetCenterToCameraTranslatedWorld.Size();
 
 	// If the camera is below the planet surface, we snap it back onto the surface.
 	// This is to make sure the sky is always visible even if the camera is inside the virtual planet.
-	SkyWorldCameraOrigin = DistanceToPlanetCenterWorld < (BottomRadiusWorld + Offset) ? PlanetCenterWorld + (BottomRadiusWorld + Offset) * (PlanetCenterToCameraWorld / DistanceToPlanetCenterWorld) : WorldCameraOrigin;
-	SkyPlanetCenterAndViewHeight = FVector4(PlanetCenterWorld, (SkyWorldCameraOrigin - PlanetCenterWorld).Size());
+	SkyCameraTranslatedWorldOriginTranslatedWorld = FVector3f(
+						DistanceToPlanetCenterTranslatedWorld < (BottomRadiusWorld + Offset) ?
+						PlanetCenterTranslatedWorld + (BottomRadiusWorld + Offset) * (PlanetCenterToCameraTranslatedWorld / DistanceToPlanetCenterTranslatedWorld) :
+						WorldCameraOriginTranslatedWorld);
+	SkyPlanetTranslatedWorldCenterAndViewHeight = FVector4f((FVector3f)PlanetCenterTranslatedWorld, ((FVector)SkyCameraTranslatedWorldOriginTranslatedWorld - PlanetCenterTranslatedWorld).Size());
 
 	// Now compute the referential for the SkyView LUT
-	FVector PlanetCenterToWorldCameraPos = (SkyWorldCameraOrigin - PlanetCenterWorld) * CmToSkyUnit;
-	FVector Up = PlanetCenterToWorldCameraPos;
+	FVector PlanetCenterToWorldCameraPos = ((FVector)SkyCameraTranslatedWorldOriginTranslatedWorld - PlanetCenterTranslatedWorld) * CmToSkyUnit;
+	FVector3f Up = (FVector3f)PlanetCenterToWorldCameraPos;
 	Up.Normalize();
-	FVector	Forward = ViewForward;		// This can make texel visible when the camera is rotating. Use constant world direction instead?
-	//FVector	Left = normalize(cross(Forward, Up)); 
-	FVector	Left; 
-	Left = FVector::CrossProduct(Forward, Up);
+	FVector3f Forward = ViewForward;		// This can make texel visible when the camera is rotating. Use constant world direction instead?
+	//FVector3f	Left = normalize(cross(Forward, Up)); 
+	FVector3f	Left;
+	Left = FVector3f::CrossProduct(Forward, Up);
 	Left.Normalize();
-	const float DotMainDir = FMath::Abs(FVector::DotProduct(Up, Forward));
+	const float DotMainDir = FMath::Abs(FVector3f::DotProduct(Up, Forward));
 	if (DotMainDir > 0.999f)
 	{
 		// When it becomes hard to generate a referential, generate it procedurally.
@@ -208,8 +261,8 @@ void FAtmosphereSetup::ComputeViewData(const FVector& WorldCameraOrigin, const F
 		const float Sign = Up.Z >= 0.0f ? 1.0f : -1.0f;
 		const float a = -1.0f / (Sign + Up.Z);
 		const float b = Up.X * Up.Y * a;
-		Forward = FVector( 1 + Sign * a * FMath::Pow(Up.X, 2.0f), Sign * b, -Sign * Up.X );
-		Left = FVector(b,  Sign + a * FMath::Pow(Up.Y, 2.0f), -Up.Y );
+		Forward = FVector3f( 1 + Sign * a * FMath::Pow(Up.X, 2.0f), Sign * b, -Sign * Up.X );
+		Left = FVector3f(b,  Sign + a * FMath::Pow(Up.Y, 2.0f), -Up.Y );
 
 		SkyViewLutReferential.SetColumn(0, Forward);
 		SkyViewLutReferential.SetColumn(1, Left);
@@ -219,7 +272,7 @@ void FAtmosphereSetup::ComputeViewData(const FVector& WorldCameraOrigin, const F
 	else
 	{
 		// This is better as it should be more stable with respect to camera forward.
-		Forward = FVector::CrossProduct(Up, Left);
+		Forward = FVector3f::CrossProduct(Up, Left);
 		Forward.Normalize();
 		SkyViewLutReferential.SetColumn(0, Forward);
 		SkyViewLutReferential.SetColumn(1, Left);

@@ -30,7 +30,6 @@ namespace UnrealBuildTool.Rules
 
             PrivateIncludePathModuleNames.AddRange(
                 new string[] {
-                    "Messaging",
                     "MessagingRpc",
                     "PortalServices",
                 }
@@ -38,7 +37,6 @@ namespace UnrealBuildTool.Rules
 
 			PrivateIncludePaths.AddRange(
 				new string[] {
-					"Runtime/Portal/Proxies/Private",
 					"Runtime/Portal/Proxies/Private/Account",
 					"Runtime/Portal/Proxies/Private/Application",
 					"Runtime/Portal/Proxies/Private/Package",

@@ -7,18 +7,27 @@
 #include "Templates/PointerIsConvertibleFromTo.h"
 #include "Templates/UniquePtr.h"
 
-namespace UE4StrongObjectPtr_Private
+namespace UEStrongObjectPtr_Private
 {
-	class FInternalReferenceCollector : public FGCObject
+	struct FInternalReferenceCollectorReferencerNameProvider
+	{
+		static FString GetReferencerName()
+		{
+			return TEXT("UEStrongObjectPtr_Private::TInternalReferenceCollector");
+		}
+	};
+
+	template <typename ReferencerNameProvider = FInternalReferenceCollectorReferencerNameProvider>
+	class TInternalReferenceCollector : public FGCObject
 	{
 	public:
-		explicit FInternalReferenceCollector(const volatile UObject* InObject)
+		explicit TInternalReferenceCollector(const UObject* InObject)
 			: Object(InObject)
 		{
-			check(IsInGameThread());
+			checkf(IsInGameThread(), TEXT("TStrongObjectPtr can only be created on the game thread otherwise it may introduce threading issues with Grbage Collector"));
 		}
 
-		virtual ~FInternalReferenceCollector()
+		virtual ~TInternalReferenceCollector()
 		{
 			check(IsInGameThread() || IsInGarbageCollectorThread());
 		}
@@ -34,7 +43,7 @@ namespace UE4StrongObjectPtr_Private
 			return (UObjectType*)Object;
 		}
 
-		FORCEINLINE void Set(const volatile UObject* InObject)
+		FORCEINLINE void Set(const UObject* InObject)
 		{
 			Object = InObject;
 		}
@@ -47,11 +56,11 @@ namespace UE4StrongObjectPtr_Private
 
 		virtual FString GetReferencerName() const override
 		{
-			return "UE4StrongObjectPtr_Private::FInternalReferenceCollector";
+			return ReferencerNameProvider::GetReferencerName();
 		}
 
 	private:
-		const volatile UObject* Object;
+		TObjectPtr<const UObject> Object;
 	};
 }
 
@@ -59,10 +68,12 @@ namespace UE4StrongObjectPtr_Private
  * Specific implementation of FGCObject that prevents a single UObject-based pointer from being GC'd while this guard is in scope.
  * @note This is the "full-fat" version of FGCObjectScopeGuard which uses a heap-allocated FGCObject so *can* safely be used with containers that treat types as trivially relocatable.
  */
-template <typename ObjectType>
+template <typename ObjectType, typename ReferencerNameProvider = UEStrongObjectPtr_Private::FInternalReferenceCollectorReferencerNameProvider>
 class TStrongObjectPtr
 {
 public:
+	using ElementType = ObjectType;
+	
 	TStrongObjectPtr(TStrongObjectPtr&& InOther) = default;
 	TStrongObjectPtr& operator=(TStrongObjectPtr&& InOther) = default;
 	~TStrongObjectPtr() = default;
@@ -85,9 +96,10 @@ public:
 
 	template <
 		typename OtherObjectType,
+		typename OtherReferencerNameProvider,
 		typename = decltype(ImplicitConv<ObjectType*>((OtherObjectType*)nullptr))
 	>
-	FORCEINLINE_DEBUGGABLE TStrongObjectPtr(const TStrongObjectPtr<OtherObjectType>& InOther)
+	FORCEINLINE_DEBUGGABLE TStrongObjectPtr(const TStrongObjectPtr<OtherObjectType, OtherReferencerNameProvider>& InOther)
 	{
 		Reset(InOther.Get());
 	}
@@ -100,9 +112,10 @@ public:
 
 	template <
 		typename OtherObjectType,
+		typename OtherReferencerNameProvider,
 		typename = decltype(ImplicitConv<ObjectType*>((OtherObjectType*)nullptr))
 	>
-	FORCEINLINE_DEBUGGABLE TStrongObjectPtr& operator=(const TStrongObjectPtr<OtherObjectType>& InOther)
+	FORCEINLINE_DEBUGGABLE TStrongObjectPtr& operator=(const TStrongObjectPtr<OtherObjectType, OtherReferencerNameProvider>& InOther)
 	{
 		Reset(InOther.Get());
 		return *this;
@@ -133,19 +146,30 @@ public:
 	FORCEINLINE_DEBUGGABLE ObjectType* Get() const
 	{
 		return ReferenceCollector
-			? ReferenceCollector->GetAs<ObjectType>()
+			? ReferenceCollector->template GetAs<ObjectType>()
 			: nullptr;
 	}
 
 	FORCEINLINE_DEBUGGABLE void Reset(ObjectType* InNewObject = nullptr)
 	{
-		if (ReferenceCollector)
+		if (InNewObject)
 		{
-			ReferenceCollector->Set(InNewObject);
+			if (ReferenceCollector)
+			{
+				// Update the referenced object
+				ReferenceCollector->Set(InNewObject);
+			}
+			else
+			{
+				// Lazily create the ReferenceCollector to allow TStrongObjectPtr to be used during static initialization
+				ReferenceCollector = MakeUnique< UEStrongObjectPtr_Private::TInternalReferenceCollector<ReferencerNameProvider> >(InNewObject);
+			}
 		}
-		else if (InNewObject)
+		else
 		{
-			ReferenceCollector = MakeUnique<UE4StrongObjectPtr_Private::FInternalReferenceCollector>(InNewObject);
+			// Destroy the ReferenceCollector immediately to allow TStrongObjectPtr to be manually cleared prior to 
+			// static deinitialization, as not all platforms use the main thread as their game thread
+			ReferenceCollector.Reset();
 		}
 	}
 
@@ -155,17 +179,18 @@ public:
 	}
 
 private:
-	TUniquePtr<UE4StrongObjectPtr_Private::FInternalReferenceCollector> ReferenceCollector;
+	TUniquePtr< UEStrongObjectPtr_Private::TInternalReferenceCollector<ReferencerNameProvider> > ReferenceCollector;
+
+	template <typename RHSObjectType, typename RHSReferencerNameProvider>
+	friend FORCEINLINE bool operator==(const TStrongObjectPtr<ObjectType, ReferencerNameProvider>& InLHS, const TStrongObjectPtr<RHSObjectType, RHSReferencerNameProvider>& InRHS)
+	{
+		return InLHS.Get() == InRHS.Get();
+	}
+
+	template <typename RHSObjectType, typename RHSReferencerNameProvider>
+	friend FORCEINLINE bool operator!=(const TStrongObjectPtr<ObjectType, ReferencerNameProvider>& InLHS, const TStrongObjectPtr<RHSObjectType, RHSReferencerNameProvider>& InRHS)
+	{
+		return InLHS.Get() != InRHS.Get();
+	}
+
 };
-
-template <typename LHSObjectType, typename RHSObjectType>
-FORCEINLINE bool operator==(const TStrongObjectPtr<LHSObjectType>& InLHS, const TStrongObjectPtr<RHSObjectType>& InRHS)
-{
-	return InLHS.Get() == InRHS.Get();
-}
-
-template <typename LHSObjectType, typename RHSObjectType>
-FORCEINLINE bool operator!=(const TStrongObjectPtr<LHSObjectType>& InLHS, const TStrongObjectPtr<RHSObjectType>& InRHS)
-{
-	return InLHS.Get() != InRHS.Get();
-}

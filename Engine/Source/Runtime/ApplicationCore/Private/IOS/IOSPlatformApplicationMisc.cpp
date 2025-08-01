@@ -25,7 +25,7 @@ static TAutoConsoleVariable<int32> CVarPhysicalScreenDensity(
 
 EAppReturnType::Type MessageBoxExtImpl( EAppMsgType::Type MsgType, const TCHAR* Text, const TCHAR* Caption )
 {
-#if PLATFORM_TVOS
+#if PLATFORM_TVOS || PLATFORM_VISIONOS
 	return FGenericPlatformMisc::MessageBoxExt(MsgType, Text, Caption);
 #else
 	NSString* CocoaText = (NSString*)FPlatformString::TCHARToCFString(Text);
@@ -89,7 +89,7 @@ EAppReturnType::Type MessageBoxExtImpl( EAppMsgType::Type MsgType, const TCHAR* 
 
 	while (AppDelegate.AlertResponse == -1)
 	{
-		FPlatformProcess::Sleep(.1);
+		FPlatformProcess::Sleep(0.1f);
 	}
 
 	EAppReturnType::Type Result = (EAppReturnType::Type)AppDelegate.AlertResponse;
@@ -284,18 +284,30 @@ EScreenPhysicalAccuracy FIOSPlatformApplicationMisc::ComputePhysicalScreenDensit
 
 	// If it hasn't been set, assume that the density is a multiple of the 
 	// native Content Scaling Factor.  Won't be exact, but should be close enough.
-	const float NativeScale =[[UIScreen mainScreen] scale];
-	ScreenDensity = 163 * NativeScale;
+#if PLATFORM_VISIONOS
+	const double NativeScale = 1.0;
+#else
+	const double NativeScale =[[UIScreen mainScreen] scale];
+#endif
+	ScreenDensity = FMath::TruncToInt(163 * NativeScale);
 
 	// look up the current scale factor
 	UIView* View = [IOSAppDelegate GetDelegate].IOSView;
-	const float ContentScaleFactor = View.contentScaleFactor;
+	const double ContentScaleFactor = View.contentScaleFactor;
 
 	if ( ContentScaleFactor != 0 )
 	{
-		ScreenDensity = ScreenDensity * ( ContentScaleFactor / NativeScale );
+		ScreenDensity = FMath::TruncToInt(ScreenDensity * (ContentScaleFactor / NativeScale));
 	}
 
 	return EScreenPhysicalAccuracy::Approximation;
 }
 
+bool FIOSPlatformApplicationMisc::RequiresVirtualKeyboard()
+{
+#if !PLATFORM_TVOS
+    return PLATFORM_HAS_TOUCH_MAIN_SCREEN;
+#else
+    return true;
+#endif
+}

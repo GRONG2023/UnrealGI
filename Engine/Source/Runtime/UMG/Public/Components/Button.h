@@ -27,42 +27,45 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnButtonHoverEvent);
  * * Single Child
  * * Clickable
  */
-UCLASS()
-class UMG_API UButton : public UContentWidget
+UCLASS(MinimalAPI)
+class UButton : public UContentWidget
 {
 	GENERATED_UCLASS_BODY()
 
 public:
-	/** The template style asset, used to seed the mutable instance of the style. */
-	UPROPERTY()
-	USlateWidgetStyleAsset* Style_DEPRECATED;
-
+	UE_DEPRECATED(5.2, "Direct access to WidgetStyle is deprecated. Please use the getter and setter.")
 	/** The button style used at runtime */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Appearance", meta=( DisplayName="Style" ))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter = "GetStyle", Setter = "SetStyle", BlueprintSetter = "SetStyle", Category = "Appearance", meta = (DisplayName = "Style"))
 	FButtonStyle WidgetStyle;
 	
+	UE_DEPRECATED(5.2, "Direct access to ColorAndOpacity is deprecated. Please use the getter and setter.")
 	/** The color multiplier for the button content */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Appearance", meta=( sRGB="true" ))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, BlueprintSetter = "SetColorAndOpacity" , Category="Appearance", meta=( sRGB="true" ))
 	FLinearColor ColorAndOpacity;
 	
+	UE_DEPRECATED(5.2, "Direct access to BackgroundColor is deprecated. Please use the getter and setter.")
 	/** The color multiplier for the button background */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Appearance", meta=( sRGB="true" ))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, BlueprintSetter = "SetBackgroundColor", Category="Appearance", meta=( sRGB="true" ))
 	FLinearColor BackgroundColor;
 
+	UE_DEPRECATED(5.2, "Direct access to ClickMethod is deprecated. Please use the getter and setter.")
 	/** The type of mouse action required by the user to trigger the buttons 'Click' */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Interaction", AdvancedDisplay)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, BlueprintSetter = "SetClickMethod", Category="Interaction", AdvancedDisplay)
 	TEnumAsByte<EButtonClickMethod::Type> ClickMethod;
 
+	UE_DEPRECATED(5.2, "Direct access to TouchMethod is deprecated. Please use the getter and setter.")
 	/** The type of touch action required by the user to trigger the buttons 'Click' */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Interaction", AdvancedDisplay)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, BlueprintSetter = "SetTouchMethod", Category="Interaction", AdvancedDisplay)
 	TEnumAsByte<EButtonTouchMethod::Type> TouchMethod;
 
+	UE_DEPRECATED(5.2, "Direct access to PressMethod is deprecated. Please use the getter and setter.")
 	/** The type of keyboard/gamepad button press action required by the user to trigger the buttons 'Click' */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Interaction", AdvancedDisplay)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, BlueprintSetter = "SetPressMethod", Category="Interaction", AdvancedDisplay)
 	TEnumAsByte<EButtonPressMethod::Type> PressMethod;
 
+	UE_DEPRECATED(5.2, "Direct access to IsFocusable is deprecated. Please use the getter.")
 	/** Sometimes a button should only be mouse-clickable and never keyboard focusable. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Interaction")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Getter, Category="Interaction")
 	bool IsFocusable;
 
 public:
@@ -89,15 +92,21 @@ public:
 	
 	/** Sets the color multiplier for the button background */
 	UFUNCTION(BlueprintCallable, Category="Button|Appearance")
-	void SetStyle(const FButtonStyle& InStyle);
+	UMG_API void SetStyle(const FButtonStyle& InStyle);
+
+	UMG_API const FButtonStyle& GetStyle() const;
 
 	/** Sets the color multiplier for the button content */
 	UFUNCTION(BlueprintCallable, Category="Button|Appearance")
-	void SetColorAndOpacity(FLinearColor InColorAndOpacity);
+	UMG_API void SetColorAndOpacity(FLinearColor InColorAndOpacity);
+
+	UMG_API FLinearColor GetColorAndOpacity() const;
 
 	/** Sets the color multiplier for the button background */
 	UFUNCTION(BlueprintCallable, Category="Button|Appearance")
-	void SetBackgroundColor(FLinearColor InBackgroundColor);
+	UMG_API void SetBackgroundColor(FLinearColor InBackgroundColor);
+
+	UMG_API FLinearColor GetBackgroundColor() const;
 
 	/**
 	 * Returns true if the user is actively pressing the button.  Do not use this for detecting 'Clicks', use the OnClicked event instead.
@@ -105,61 +114,71 @@ public:
 	 * @return true if the user is actively pressing the button otherwise false.
 	 */
 	UFUNCTION(BlueprintCallable, Category="Button")
-	bool IsPressed() const;
+	UMG_API bool IsPressed() const;
 
 	UFUNCTION(BlueprintCallable, Category="Button")
-	void SetClickMethod(EButtonClickMethod::Type InClickMethod);
+	UMG_API void SetClickMethod(EButtonClickMethod::Type InClickMethod);
+
+	UMG_API EButtonClickMethod::Type GetClickMethod() const;
 
 	UFUNCTION(BlueprintCallable, Category="Button")
-	void SetTouchMethod(EButtonTouchMethod::Type InTouchMethod);
+	UMG_API void SetTouchMethod(EButtonTouchMethod::Type InTouchMethod);
+
+	UMG_API EButtonTouchMethod::Type GetTouchMethod() const;
 
 	UFUNCTION(BlueprintCallable, Category="Button")
-	void SetPressMethod(EButtonPressMethod::Type InPressMethod);
+	UMG_API void SetPressMethod(EButtonPressMethod::Type InPressMethod);
+
+	UMG_API EButtonPressMethod::Type GetPressMethod() const;
+
+	UMG_API bool GetIsFocusable() const;
 
 public:
 
 	//~ Begin UWidget Interface
-	virtual void SynchronizeProperties() override;
+	UMG_API virtual void SynchronizeProperties() override;
 	//~ End UWidget Interface
 
 	//~ Begin UVisual Interface
-	virtual void ReleaseSlateResources(bool bReleaseChildren) override;
+	UMG_API virtual void ReleaseSlateResources(bool bReleaseChildren) override;
 	//~ End UVisual Interface
 
 	//~ Begin UObject Interface
-	virtual void PostLoad() override;
+	UMG_API virtual void PostLoad() override;
 	//~ End UObject Interface
 
 #if WITH_EDITOR
-	virtual const FText GetPaletteCategory() override;
+	UMG_API virtual const FText GetPaletteCategory() override;
 #endif
 
 protected:
 
 	// UPanelWidget
-	virtual UClass* GetSlotClass() const override;
-	virtual void OnSlotAdded(UPanelSlot* Slot) override;
-	virtual void OnSlotRemoved(UPanelSlot* Slot) override;
+	UMG_API virtual UClass* GetSlotClass() const override;
+	UMG_API virtual void OnSlotAdded(UPanelSlot* Slot) override;
+	UMG_API virtual void OnSlotRemoved(UPanelSlot* Slot) override;
 	// End UPanelWidget
 
 protected:
 	/** Handle the actual click event from slate and forward it on */
-	FReply SlateHandleClicked();
-	void SlateHandlePressed();
-	void SlateHandleReleased();
-	void SlateHandleHovered();
-	void SlateHandleUnhovered();
+	UMG_API FReply SlateHandleClicked();
+	UMG_API void SlateHandlePressed();
+	UMG_API void SlateHandleReleased();
+	UMG_API void SlateHandleHovered();
+	UMG_API void SlateHandleUnhovered();
 
+	// Initialize IsFocusable in the constructor before the SWidget is constructed.
+	UMG_API void InitIsFocusable(bool InIsFocusable);
 protected:
 	//~ Begin UWidget Interface
-	virtual TSharedRef<SWidget> RebuildWidget() override;
+	UMG_API virtual TSharedRef<SWidget> RebuildWidget() override;
 #if WITH_EDITOR
 	virtual TSharedRef<SWidget> RebuildDesignWidget(TSharedRef<SWidget> Content) override { return Content; }
 #endif
 	//~ End UWidget Interface
 
 #if WITH_ACCESSIBILITY
-	virtual TSharedPtr<SWidget> GetAccessibleWidget() const override;
+	UMG_API virtual TSharedPtr<SWidget> GetAccessibleWidget() const override;
 #endif
 
 protected:

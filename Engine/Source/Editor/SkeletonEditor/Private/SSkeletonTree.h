@@ -12,7 +12,7 @@
 #include "Widgets/SWidget.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "EditableSkeleton.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Engine/SkeletalMeshSocket.h"
 #include "ISkeletonTree.h"
 #include "Widgets/Views/STableViewBase.h"
@@ -37,16 +37,18 @@ class IPersonaPreviewScene;
 class SBlendProfilePicker;
 class SComboButton;
 class UBlendProfile;
+class UToolMenu;
 struct FNotificationInfo;
 class IPinnedCommandList;
 class FPackageReloadedEvent;
 enum class EPackageReloadPhase : uint8;
+enum class EBlendProfileMode : uint8;
 
 //////////////////////////////////////////////////////////////////////////
 // SSkeletonTree
 
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
-class SSkeletonTree : public ISkeletonTree, public FEditorUndoClient, public FGCObject
+class SSkeletonTree : public ISkeletonTree, public FSelfRegisteringEditorUndoClient
 {
 public:
 	SLATE_BEGIN_ARGS( SSkeletonTree )
@@ -80,16 +82,6 @@ public:
 	virtual void SelectItemsBy(TFunctionRef<bool(const TSharedRef<ISkeletonTreeItem>&, bool&)> Predicate) const override;
 	virtual void DuplicateAndSelectSocket(const FSelectedSocketInfo& SocketInfoToDuplicate, const FName& NewParentBoneName = FName()) override;
 
-	virtual void RegisterOnObjectSelected(const FOnObjectSelected& Delegate) override
-	{
-		OnObjectSelectedMulticast.Add(Delegate);
-	}
-
-	virtual void UnregisterOnObjectSelected(SWidget* Widget) override
-	{
-		OnObjectSelectedMulticast.RemoveAll(Widget);
-	}
-
 	virtual FDelegateHandle RegisterOnSelectionChanged(const FOnSkeletonTreeSelectionChanged& Delegate) override
 	{
 		return OnSelectionChangedMulticast.Add(Delegate);
@@ -105,12 +97,9 @@ public:
 	virtual TSharedPtr<SWidget> GetSearchWidget() const override { return NameFilterBox; }
 	virtual TSharedPtr<IPinnedCommandList> GetPinnedCommandList() const override { return PinnedCommands; }
 
-	/** FEditorUndoClient interface */
+	/** FSelfRegisteringEditorUndoClient interface */
 	virtual void PostUndo(bool bSuccess) override;
 	virtual void PostRedo(bool bSuccess) override;
-
-	/** FGCObject interface */
-	virtual void AddReferencedObjects( FReferenceCollector& Collector ) override;
 
 	/** Creates the tree control and then populates */
 	void CreateTreeColumns();
@@ -163,6 +152,9 @@ public:
 	/** Update preview scene and tree after a socket duplication */
 	void PostDuplicateSocket(UObject* InAttachedObject, const FName& InSocketName);
 
+	/** Update tree after a socket changes parent */
+	void PostSetSocketParent();
+
 private:
 	/** Binds the commands in FSkeletonTreeCommands to functions in this class */
 	void BindCommands();
@@ -176,8 +168,17 @@ private:
 	/** Called to display context menu when right clicking on the widget */
 	TSharedPtr< SWidget > CreateContextMenu();
 
+	/** Called to display the add new menu */
+	TSharedRef< SWidget > CreateNewMenuWidget();
+
+	/** Called to create the add new menu */
+	void RegisterNewMenu();
+
 	/** Called to display the filter menu */
-	TSharedRef< SWidget > CreateFilterMenu();
+	TSharedRef< SWidget > CreateFilterMenuWidget();
+
+	/** Called to create the filter menu */
+	void RegisterFilterMenu();
 
 	/** Function to copy selected bone name to the clipboard */
 	void OnCopyBoneNames();
@@ -216,7 +217,7 @@ private:
 	void OnPromoteSocket();
 
 	/** Create sub menu to allow users to pick a target bone for the new space switching bone(s) */
-	void FillVirtualBoneSubmenu(FMenuBuilder& MenuBuilder, TArray<TSharedPtr<class ISkeletonTreeItem>> SourceBones);
+	static TSharedRef<class SBoneTreeMenu> CreateVirtualBoneMenu(SSkeletonTree* InSkeletonTree);
 
 	/** Handler for user picking a target bone */
 	void OnVirtualTargetBonePicked(FName TargetBoneName, TArray<TSharedPtr<class ISkeletonTreeItem>> SourceBones);
@@ -269,6 +270,12 @@ private:
 	/**  Handler for when we change the "Show Retargeting Options" check box */
 	void OnChangeShowingAdvancedOptions();
 
+	/** Handler for "Show Debug Visualization Options" check box IsChecked functionality */
+	bool IsShowingDebugVisualizationOptions() const;
+
+	/**  Handler for when we change the "Show Debug Visualization Options" check box */
+	void OnChangeShowingDebugVisualizationOptions();
+
 	/** This replicates the socket filter to the previewcomponent so that the viewport can use the same settings */
 	void SetPreviewComponentSocketFilter() const;
 
@@ -302,6 +309,9 @@ private:
 	/** Handle focusing the camera on the current selection */
 	void HandleFocusCamera();
 
+	/** Handle framing the selected item in the tree */
+	void HandleFrameSelection();
+
 	/** Handle filtering the tree  */
 	ESkeletonTreeFilterResult HandleFilterSkeletonTreeItem(const FSkeletonTreeFilterArgs& InArgs, const TSharedPtr<class ISkeletonTreeItem>& InItem);
 
@@ -323,6 +333,25 @@ private:
 	/** Handle package reloading (might be our skeleton) */
 	void HandlePackageReloaded(const EPackageReloadPhase InPackageReloadPhase, FPackageReloadedEvent* InPackageReloadedEvent);
 
+	/** Creates a new Blend Profile */
+	void OnCreateBlendProfile(const EBlendProfileMode InMode);
+
+	/** Removes the active Blend Profile */
+	void OnDeleteCurrentBlendProfile();
+
+	/** Removes the active Blend Profile */
+	void OnRenameBlendProfile();
+
+	/** Register Blend Profile Menu */
+	void RegisterBlendProfileMenu();
+
+	/** Create Blend Profile Menu */
+	static void CreateBlendProfileMenu(UToolMenu* InMenu);
+
+	TSharedRef<SWidget> GetBlendProfileColumnMenuContent();
+
+	void ExpandTreeOnSelection(TSharedPtr<ISkeletonTreeItem> RowToExpand, bool bForce = false);
+
 private:
 	/** Pointer back to the skeleton tree that owns us */
 	TWeakPtr<FEditableSkeleton> EditableSkeleton;
@@ -335,6 +364,9 @@ private:
 
 	/** The blend profile picker displaying the selected profile */
 	TSharedPtr<SBlendProfilePicker> BlendProfilePicker;
+
+	/** Blend Profile Header Label.  Also used to name new blend profiles */
+	TSharedPtr<SInlineEditableTextBlock> BlendProfileHeader;
 
 	/** Widget user to hold the skeleton tree */
 	TSharedPtr<SOverlay> TreeHolder;
@@ -360,13 +392,17 @@ private:
 	/** Commands that are bound to delegates*/
 	TSharedPtr<FUICommandList_Pinnable> UICommandList;
 
+	/** Current type of blend profile no create. We shouldn't need to hold state for this, but blend profile creation is tied to its header text committed*/
+	EBlendProfileMode NewBlendProfileMode;
+
+	/** Whether we are creating or renaming a BlendProfile, so the EditBox know what to do */
+	bool bIsCreateNewBlendProfile = false;
+
 	/** Current type of bones to show */
 	EBoneFilter BoneFilter;
 
 	/** Current type of sockets to show */
 	ESocketFilter SocketFilter;
-
-	bool bShowingAdvancedOptions;
 
 	/** Points to an item that is being requested to be renamed */
 	TSharedPtr<ISkeletonTreeItem> DeferredRenameRequest;
@@ -377,9 +413,6 @@ private:
 	/** Delegate for when an item is selected */
 	FOnSkeletonTreeSelectionChangedMulticast OnSelectionChangedMulticast;
 
-	UE_DEPRECATED(4.17, "Please use OnSelectionChangedMulticast")
-	FOnObjectSelectedMulticast OnObjectSelectedMulticast;
-
 	/** Selection recursion guard flag */
 	bool bSelecting;
 
@@ -389,20 +422,23 @@ private:
 	/** Add virtual bones to the skeleton tree */
 	void AddVirtualBones(const TArray<FVirtualBone>& VirtualBones);
 
+	/** Checks if the named profile is the currently selected/active one */
+	bool IsBlendProfileSelected(FName ProfileName) const;
+
 	/** The builder we use to construct the tree */
 	TSharedPtr<class ISkeletonTreeBuilder> Builder;
 
 	/** Compiled filter search terms. */
 	TSharedPtr<class FTextFilterExpressionEvaluator> TextFilterPtr;
 
-	/** Proxy object used to display and edit bone transforms in details panels. Note this is only kept for backwards compatibility (used with OnObjectSelectedMulticast) */
-	class UBoneProxy* BoneProxy;
-
 	/** Whether to allow operations that modify the mesh */
 	bool bAllowMeshOperations;
 
 	/** Whether to allow operations that modify the mesh */
 	bool bAllowSkeletonOperations;
+
+	/** Whether to show the filter option to allow filtering of debug draw elements in the viewport. */
+	bool bShowDebugVisualizationOptions;
 
 	/** Extenders for menus */
 	TSharedPtr<FExtender> Extenders;

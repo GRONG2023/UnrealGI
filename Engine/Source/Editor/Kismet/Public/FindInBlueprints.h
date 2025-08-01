@@ -2,26 +2,54 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "SlateFwd.h"
-#include "Misc/Guid.h"
+#include "Delegates/Delegate.h"
 #include "EdGraph/EdGraphPin.h"
-#include "Layout/Visibility.h"
-#include "Styling/SlateColor.h"
-#include "Input/Reply.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/SCompoundWidget.h"
-#include "Textures/SlateIcon.h"
-#include "Widgets/Views/STableViewBase.h"
-#include "Widgets/Views/STableRow.h"
-#include "Widgets/Views/STreeView.h"
 #include "EdGraph/EdGraphSchema.h"
 #include "FindInBlueprintManager.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Layout/Visibility.h"
+#include "Math/Color.h"
+#include "Misc/Guid.h"
+#include "Misc/Optional.h"
+#include "SlateFwd.h"
+#include "Styling/SlateColor.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UnrealTemplate.h"
+#include "Textures/SlateIcon.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/SWidget.h"
+#include "Widgets/Views/STableRow.h"
+#include "Widgets/Views/STableViewBase.h"
+#include "Widgets/Views/STreeView.h"
 
 class FBlueprintEditor;
 class FImaginaryFiBData;
+class FJsonValue;
 class FUICommandList;
+class ITableRow;
+class SDockTab;
+class SVerticalBox;
+class SWidget;
+class UBlueprint;
+class UClass;
+class UObject;
+struct FGeometry;
+struct FKeyEvent;
+struct FSlateBrush;
 
 typedef STreeView<FSearchResult>  STreeViewType;
 
@@ -46,6 +74,12 @@ namespace FindInBlueprintsHelpers
 			return Text.ToString() == InObject.Text.ToString() || Text.BuildSourceString() == InObject.Text.BuildSourceString();
 		}
 	};
+
+	/** Utility function to find the ancestor class or interface from which a function is inherited. */
+	KISMET_API UClass* GetFunctionOriginClass(const UFunction* Function);
+
+	/** Constructs a search term for a function using Find-in-Blueprints search syntax */
+	KISMET_API bool ConstructSearchTermFromFunction(const UFunction* Function, FString& SearchTerm);
 
 	static uint32 GetTypeHash(const FindInBlueprintsHelpers::FSimpleFTextKeyStorage& InObject)
 	{
@@ -215,7 +249,8 @@ enum class EFiBCacheBarWidget
 	CacheAllUnindexedButton,
 	CurrentAssetNameText,
 	UnresponsiveEditorWarningText,
-	ShowCacheFailuresButton
+	ShowCacheFailuresButton,
+	ShowCacheStatusText
 };
 
 // Search bar widgets.
@@ -226,8 +261,20 @@ enum class EFiBSearchBarWidget
 	ProgressBar,
 };
 
+// Whether the Find-in-Blueprints window allows the user to load and resave all assets with out-of-date Blueprint search metadata
+UENUM()
+enum class EFiBIndexAllPermission
+{
+	// Users may not automatically load all Blueprints with out-of-date search metadata
+	None,
+	// Users may automatically load all Blueprints with out-of-date search metadata, but not resave
+	LoadOnly,
+	// Users may automatically checkout, load and resave all Blueprints with out-of-date search metadata
+	CheckoutAndResave
+};
+
 /*Widget for searching for (functions/events) across all blueprints or just a single blueprint */
-class SFindInBlueprints: public SCompoundWidget
+class KISMET_API SFindInBlueprints: public SCompoundWidget
 {
 public:
 	SLATE_BEGIN_ARGS( SFindInBlueprints )
@@ -305,12 +352,6 @@ private:
 	/*Called when user changes commits text to the search box */
 	void OnSearchTextCommitted(const FText& Text, ETextCommit::Type CommitType);
 
-	/** Called when the find mode checkbox is hit */
-	void OnFindModeChanged(ECheckBoxState CheckState);
-
-	/** Called to check what the find mode is for the checkbox */
-	ECheckBoxState OnGetFindModeChecked() const;
-
 	/* Get the children of a row */
 	void OnGetChildren( FSearchResult InItem, TArray< FSearchResult >& OutChildren );
 
@@ -341,8 +382,14 @@ private:
 	/** Callback to return the current asset name during a cache operation */
 	FText GetCacheBarCurrentAssetName() const;
 
+	/** Whether user is allowed to initiate loading and indexing all blueprints with out-of-date metadata */
+	bool CanCacheAllUnindexedBlueprints() const;
+
 	/** Callback to cache all unindexed Blueprints */
 	FReply OnCacheAllUnindexedBlueprints();
+
+	/** Callback to export a list of all blueprints that need reindexing */
+	FReply OnExportUnindexedAssetList();
 
 	/** Callback to cache all Blueprints according to the given options */
 	FReply OnCacheAllBlueprints(const FFindInBlueprintCachingOptions& InOptions);
@@ -364,9 +411,6 @@ private:
 
 	/** Returns TRUE if Blueprint caching is in progress */
 	bool IsCacheInProgress() const;
-
-	/** Returns the color of the cache bar */
-	FSlateColor GetCacheBarColor() const;
 
 	/** Returns the BG image used for the cache bar */
 	const FSlateBrush* GetCacheBarImage() const;
@@ -441,8 +485,8 @@ private:
 	/** Tab hosting this widget. May be invalid. */
 	TWeakPtr<SDockTab> HostTab;
 
-	/** Last cached asset name (used during continuous cache operations). */
-	mutable FName LastCachedAssetName;
+	/** Last cached asset path (used during continuous cache operations). */
+	mutable FSoftObjectPath LastCachedAssetPath;
 
 	/** Should we search within the current blueprint only (rather than all blueprints) */
 	bool bIsInFindWithinBlueprintMode;

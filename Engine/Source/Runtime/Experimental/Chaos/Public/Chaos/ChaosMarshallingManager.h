@@ -19,7 +19,7 @@ class FPullPhysicsData;
 struct FDirtyProxy
 {
 	IPhysicsProxyBase* Proxy;
-	FParticleDirtyData ParticleData;
+	FDirtyChaosProperties PropertyData;
 	TArray<int32> ShapeDataIndices;
 
 	FDirtyProxy(IPhysicsProxyBase* InProxy)
@@ -39,12 +39,17 @@ struct FDirtyProxy
 
 	void Clear(FDirtyPropertiesManager& Manager,int32 DataIdx,FShapeDirtyData* ShapesData)
 	{
-		ParticleData.Clear(Manager,DataIdx);
+		PropertyData.Clear(Manager,DataIdx);
 		for(int32 ShapeDataIdx : ShapeDataIndices)
 		{
 			ShapesData[ShapeDataIdx].Clear(Manager,ShapeDataIdx);
 		}
 	}
+};
+
+struct FDirtyProxiesBucket
+{
+	TArray<FDirtyProxy> ProxiesData;
 };
 
 class FDirtySet
@@ -54,100 +59,153 @@ public:
 	{
 		if(Base->GetDirtyIdx() == INDEX_NONE)
 		{
-			const int32 Idx = ProxiesData.Num();
+			FDirtyProxiesBucket& Bucket = DirtyProxyBuckets[(uint32)Base->GetType()];
+			++DirtyProxyBucketInfo.Num[(uint32)Base->GetType()];
+			++DirtyProxyBucketInfo.TotalNum;
+
+			const int32 Idx = Bucket.ProxiesData.Num();
 			Base->SetDirtyIdx(Idx);
-			ProxiesData.Add(Base);
+			Bucket.ProxiesData.Add(Base);
 		}
 	}
 
 	// Batch proxy insertion, does not check DirtyIdx.
+	// Assumes proxies are the same type
 	template< typename TProxiesArray>
 	void AddMultipleUnsafe(TProxiesArray& ProxiesArray)
 	{
-		int32 Idx = ProxiesData.Num();
-		ProxiesData.Append(ProxiesArray);
-
-		for(IPhysicsProxyBase* Proxy : ProxiesArray)
+		if(ProxiesArray.Num())
 		{
-			Proxy->SetDirtyIdx(Idx++);
+			FDirtyProxiesBucket& Bucket = DirtyProxyBuckets[(uint32)ProxiesArray[0]->GetType()];
+			int32 Idx = Bucket.ProxiesData.Num();
+			Bucket.ProxiesData.Append(ProxiesArray);
+
+			for (IPhysicsProxyBase* Proxy : ProxiesArray)
+			{
+				Proxy->SetDirtyIdx(Idx++);
+				ensure(ProxiesArray[0]->GetType() == Proxy->GetType());
+			}
+
+			DirtyProxyBucketInfo.Num[(uint32)ProxiesArray[0]->GetType()] += ProxiesArray.Num();
+			DirtyProxyBucketInfo.TotalNum += ProxiesArray.Num();
 		}
+		
 	}
 
-
+	// Forcefully removes the proxy from being dirty.
 	void Remove(IPhysicsProxyBase* Base)
 	{
 		const int32 Idx = Base->GetDirtyIdx();
 		if(Idx != INDEX_NONE)
 		{
-			if(Idx == ProxiesData.Num() - 1)
+			FDirtyProxiesBucket& Bucket = DirtyProxyBuckets[(uint32)Base->GetType()];
+			if(Idx == Bucket.ProxiesData.Num() - 1)
 			{
 				//last element so just pop
-				ProxiesData.Pop(/*bAllowShrinking=*/false);
-			} else
+				Bucket.ProxiesData.Pop(EAllowShrinking::No);
+				--DirtyProxyBucketInfo.Num[(uint32)Base->GetType()];
+				--DirtyProxyBucketInfo.TotalNum;
+			}
+			else if(Bucket.ProxiesData.IsValidIndex(Idx))
 			{
 				//update other proxy's idx
-				ProxiesData.RemoveAtSwap(Idx);
-				ProxiesData[Idx].SetDirtyIdx(Idx);
+				Bucket.ProxiesData.RemoveAtSwap(Idx);
+				Bucket.ProxiesData[Idx].SetDirtyIdx(Idx);
+				--DirtyProxyBucketInfo.Num[(uint32)Base->GetType()];
+				--DirtyProxyBucketInfo.TotalNum;
 			}
 
 			Base->ResetDirtyIdx();
 		}
 	}
 
+	// Only does the removal if no shapes are dirty.
+	void RemoveIfNoShapesAreDirty(IPhysicsProxyBase* Base)
+	{
+		const int32 Idx = Base->GetDirtyIdx();
+		if (Idx != INDEX_NONE)
+		{
+			FDirtyProxiesBucket& Bucket = DirtyProxyBuckets[(uint32)Base->GetType()];
+			if (Bucket.ProxiesData.IsValidIndex(Idx))
+			{
+				FDirtyProxy& ProxyData = Bucket.ProxiesData[Idx];
+				if (ProxyData.ShapeDataIndices.IsEmpty())
+				{
+					Remove(Base);
+				}
+			}
+		}
+	}
+
 	void Reset()
 	{
-		ProxiesData.Reset();
+		for(FDirtyProxiesBucket& Bucket : DirtyProxyBuckets)
+		{
+			Bucket.ProxiesData.Reset();
+		}
+		
+		DirtyProxyBucketInfo.Reset();
 		ShapesData.Reset();
 	}
 
-	int32 NumDirtyProxies() const { return ProxiesData.Num(); }
+	const FDirtyProxiesBucketInfo& GetDirtyProxyBucketInfo() const { return DirtyProxyBucketInfo; }
 	int32 NumDirtyShapes() const { return ShapesData.Num(); }
 
 	FShapeDirtyData* GetShapesDirtyData(){ return ShapesData.GetData(); }
-	FDirtyProxy& GetDirtyProxyAt(int32 Idx) { return ProxiesData[Idx]; }
+	FDirtyProxy& GetDirtyProxyAt(EPhysicsProxyType ProxyType, int32 Idx) { return DirtyProxyBuckets[(uint32)ProxyType].ProxiesData[Idx]; }
 
 	template <typename Lambda>
 	void ParallelForEachProxy(const Lambda& Func)
 	{
-		::ParallelFor(ProxiesData.Num(),[this,&Func](int32 Idx)
+		::ParallelFor( TEXT("Chaos.PF"),DirtyProxyBucketInfo.TotalNum,1, [this,&Func](int32 Idx)
 		{
-			Func(Idx,ProxiesData[Idx]);
+			int32 BucketIdx, InnerIdx;
+			DirtyProxyBucketInfo.GetBucketIdx(Idx, BucketIdx, InnerIdx);
+			Func(InnerIdx, DirtyProxyBuckets[BucketIdx].ProxiesData[InnerIdx]);
 		});
 	}
 
 	template <typename Lambda>
 	void ParallelForEachProxy(const Lambda& Func) const
 	{
-		::ParallelFor(ProxiesData.Num(),[this,&Func](int32 Idx)
+		::ParallelFor(DirtyProxyBucketInfo.TotalNum,[this,&Func](int32 Idx)
 		{
-			Func(Idx,ProxiesData[Idx]);
+			int32 BucketIdx, InnerIdx;
+			DirtyProxyBucketInfo.GetBucketIdx(Idx, BucketIdx, InnerIdx);
+			Func(InnerIdx, DirtyProxyBuckets[BucketIdx].ProxiesData[InnerIdx]);
 		});
 	}
 
 	template <typename Lambda>
 	void ForEachProxy(const Lambda& Func)
 	{
-		int32 Idx = 0;
-		for(FDirtyProxy& Dirty : ProxiesData)
+		for(int32 BucketIdx = 0; BucketIdx < (uint32)EPhysicsProxyType::Count; ++BucketIdx)
 		{
-			Func(Idx++,Dirty);
+			int32 Idx = 0;
+			for (FDirtyProxy& Dirty : DirtyProxyBuckets[BucketIdx].ProxiesData)
+			{
+				Func(Idx++, Dirty);
+			}
 		}
 	}
 
 	template <typename Lambda>
 	void ForEachProxy(const Lambda& Func) const
 	{
-		int32 Idx = 0;
-		for(const FDirtyProxy& Dirty : ProxiesData)
+		for (int32 BucketIdx = 0; BucketIdx < (uint32)EPhysicsProxyType::Count; ++BucketIdx)
 		{
-			Func(Idx++,Dirty);
+			int32 Idx = 0;
+			for (const FDirtyProxy& Dirty : DirtyProxyBuckets[BucketIdx].ProxiesData)
+			{
+				Func(Idx++, Dirty);
+			}
 		}
 	}
 
 	void AddShape(IPhysicsProxyBase* Proxy,int32 ShapeIdx)
 	{
 		Add(Proxy);
-		FDirtyProxy& Dirty = ProxiesData[Proxy->GetDirtyIdx()];
+		FDirtyProxy& Dirty = DirtyProxyBuckets[(uint32)Proxy->GetType()].ProxiesData[(uint32)Proxy->GetDirtyIdx()];
 		for(int32 NewShapeIdx = Dirty.ShapeDataIndices.Num(); NewShapeIdx <= ShapeIdx; ++NewShapeIdx)
 		{
 			const int32 ShapeDataIdx = ShapesData.Add(FShapeDirtyData(NewShapeIdx));
@@ -158,7 +216,7 @@ public:
 	void SetNumDirtyShapes(IPhysicsProxyBase* Proxy,int32 NumShapes)
 	{
 		Add(Proxy);
-		FDirtyProxy& Dirty = ProxiesData[Proxy->GetDirtyIdx()];
+		FDirtyProxy& Dirty = DirtyProxyBuckets[(uint32)Proxy->GetType()].ProxiesData[Proxy->GetDirtyIdx()];
 
 		if(NumShapes < Dirty.ShapeDataIndices.Num())
 		{
@@ -174,7 +232,8 @@ public:
 	}
 
 private:
-	TArray<FDirtyProxy> ProxiesData;
+	FDirtyProxiesBucketInfo DirtyProxyBucketInfo;
+	FDirtyProxiesBucket DirtyProxyBuckets[(uint32)EPhysicsProxyType::Count];
 	TArray<FShapeDirtyData> ShapesData;
 };
 
@@ -190,6 +249,7 @@ struct FPushPhysicsData
 	int32 InternalStep;		//The solver step this data will be associated with
 	int32 IntervalStep;		//The step we are currently at for this simulation interval. If not sub-stepping both step and num steps are 1: step is [0, IntervalNumSteps-1]
 	int32 IntervalNumSteps;	//The total number of steps associated with this simulation interval
+	bool bSolverSubstepped;
 
 	TArray<ISimCallbackObject*> SimCallbackObjectsToAdd;	//callback object registered at this specific time
 	TArray<ISimCallbackObject*> SimCallbackObjectsToRemove;	//callback object removed at this specific time
@@ -203,11 +263,11 @@ struct FPushPhysicsData
 
 /** Manages data that gets marshaled from GT to PT using a timestamp
 */
-class CHAOS_API FChaosMarshallingManager
+class FChaosMarshallingManager
 {
 public:
-	FChaosMarshallingManager();
-	~FChaosMarshallingManager();
+	CHAOS_API FChaosMarshallingManager();
+	CHAOS_API ~FChaosMarshallingManager();
 
 	/** Grabs the producer data to write into. Should only be called by external thread */
 	FPushPhysicsData* GetProducerData_External()
@@ -236,25 +296,28 @@ public:
 		GetProducerData_External()->SimCallbackInputs.Add(FSimCallbackInputAndObject{ SimCallbackObject, InputData });
 	}
 	/** Step forward using the external delta time. Should only be called by external thread */
-	void Step_External(FReal ExternalDT, const int32 NumSteps = 1);
+	CHAOS_API void Step_External(FReal ExternalDT, const int32 NumSteps = 1, bool bSolverSubstepped = false);
 
 	/** Step the internal time forward if possible*/
-	FPushPhysicsData* StepInternalTime_External();
+	CHAOS_API FPushPhysicsData* StepInternalTime_External();
 
 	/** Frees the push data back into the pool. Internal thread should call this when finished processing data*/
-	void FreeData_Internal(FPushPhysicsData* PushData);
+	CHAOS_API void FreeData_Internal(FPushPhysicsData* PushData);
 
 	/** May record data to history, or may free immediately depending on rewind needs. Either way you should assume data is gone after calling this */
-	void FreeDataToHistory_Internal(FPushPhysicsData* PushData);
+	CHAOS_API void FreeDataToHistory_Internal(FPushPhysicsData* PushData);
 
 	/** Frees the pull data back into the pool. External thread should call this when finished processing data*/
-	void FreePullData_External(FPullPhysicsData* PullData);
+	CHAOS_API void FreePullData_External(FPullPhysicsData* PullData);
 
 	/** Returns the timestamp associated with inputs enqueued. */
 	int32 GetExternalTimestamp_External() const { return ExternalTimestamp_External; }
 
 	/** Returns the amount of external time pushed so far. Any external commands or events should be associated with this time */
 	FReal GetExternalTime_External() const { return ExternalTime_External; }
+
+	/** Returns the internal step that the current PushData will be associated with once it is marshalled over*/
+	int32 GetInternalStep_External() const { return InternalStep_External; }
 
 	/** Used to delay marshalled data. This is mainly used for testing at the moment */
 	void SetTickDelay_External(int32 InDelay) { Delay = InDelay; }
@@ -263,7 +326,7 @@ public:
 	FPullPhysicsData* GetCurrentPullData_Internal() { return CurPullData; }
 
 	/** Hands pull data off to external thread */
-	void FinalizePullData_Internal(int32 LatestExternalTimestampConsumed, float SimStartTime, float DeltaTime);
+	CHAOS_API void FinalizePullData_Internal(int32 LatestExternalTimestampConsumed, FReal SimStartTime, FReal DeltaTime);
 
 	/** Pops and returns the earliest pull data available. nullptr means results are not ready or no work is pending */
 	FPullPhysicsData* PopPullData_External()
@@ -273,10 +336,13 @@ public:
 		return Result;
 	}
 
-	void SetHistoryLength_Internal(int32 InHistoryLength);
+	CHAOS_API void SetHistoryLength_Internal(int32 InHistoryLength);
 
 	/** Returns the history buffer of the latest NumFrames. The history that comes before these frames is discarded*/
-	TArray<FPushPhysicsData*> StealHistory_Internal(int32 NumFrames);
+	CHAOS_API TArray<FPushPhysicsData*> StealHistory_Internal(int32 NumFrames);
+
+	/** Return the size of the history queue */
+	int32 GetNumHistory_Internal() const {return HistoryQueue_Internal.Num();}
 		
 private:
 	FReal ExternalTime_External;	//the global time external thread is currently at
@@ -301,7 +367,7 @@ private:
 
 	int32 HistoryLength;	//how long to keep push data for
 
-	void PrepareExternalQueue_External();
-	void PreparePullData();
+	CHAOS_API void PrepareExternalQueue_External();
+	CHAOS_API void PreparePullData();
 };
 }; // namespace Chaos

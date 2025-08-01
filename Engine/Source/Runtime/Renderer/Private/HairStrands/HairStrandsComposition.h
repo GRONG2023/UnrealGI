@@ -6,20 +6,22 @@
 
 #pragma once
 
-#include "RenderGraph.h"
-#include "Renderer/Private/SceneRendering.h"
+#include "Containers/ContainersFwd.h"
+#include "RenderGraphFwd.h"
+
+class FViewInfo;
 
 void RenderHairComposition(
 	FRDGBuilder& GraphBuilder,
 	const FViewInfo& View,
-	int32 ViewIndex,
-	const struct FHairStrandsRenderingData* HairDatas,
 	FRDGTextureRef SceneColorTexture,
-	FRDGTextureRef SceneDepthTexture);
+	FRDGTextureRef SceneDepthTexture, 
+	FRDGTextureRef VelocityTexture);
 
 void RenderHairComposition(
 	FRDGBuilder& GraphBuilder, 
 	const TArray<FViewInfo>& Views,
-	const struct FHairStrandsRenderingData* HairDatas,
 	FRDGTextureRef SceneColorTexture,
-	FRDGTextureRef SceneDepthTexture);
+	FRDGTextureRef SceneDepthTexture,
+	FRDGTextureRef VelocityTexture,
+	struct FTranslucencyPassResourcesMap& TranslucencyResourceMap);

@@ -1,15 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "DetailLayoutBuilderImpl.h"
-#include "ObjectPropertyNode.h"
+#include "CategoryPropertyNode.h"
 #include "DetailCategoryBuilderImpl.h"
-#include "PropertyHandleImpl.h"
-#include "PropertyEditorHelpers.h"
-#include "StructurePropertyNode.h"
 #include "DetailMultiTopLevelObjectRootNode.h"
-#include "ObjectEditorUtils.h"
 #include "DetailPropertyRow.h"
 #include "IPropertyGenerationUtilities.h"
+#include "ObjectEditorUtils.h"
+#include "ObjectPropertyNode.h"
+#include "PropertyEditorHelpers.h"
+#include "PropertyHandleImpl.h"
+#include "StructurePropertyNode.h"
 
 FDetailLayoutBuilderImpl::FDetailLayoutBuilderImpl(TSharedPtr<FComplexPropertyNode>& InRootNode, FClassToPropertyMap& InPropertyMap, const TSharedRef<IPropertyUtilities>& InPropertyUtilities, const TSharedRef<IPropertyGenerationUtilities>& InPropertyGenerationUtilities, const TSharedPtr< IDetailsViewPrivate >& InDetailsView, bool bIsExternal)
 	: RootNode( InRootNode )
@@ -25,13 +26,7 @@ FDetailLayoutBuilderImpl::FDetailLayoutBuilderImpl(TSharedPtr<FComplexPropertyNo
 
 FDetailLayoutBuilderImpl::~FDetailLayoutBuilderImpl()
 {
-	if (GetDetailsView())
-	{
-		for (TSharedPtr<FComplexPropertyNode> ExternalRootPropertyNode : ExternalRootPropertyNodes)
-		{
-			GetDetailsView()->SaveExpandedItems(ExternalRootPropertyNode.ToSharedRef());
-		}
-	}
+	ClearExternalRootPropertyNodes();
 }
 
 IDetailCategoryBuilder& FDetailLayoutBuilderImpl::EditCategory(FName CategoryName, const FText& NewLocalizedDisplayName, ECategoryPriority::Type CategoryType)
@@ -43,11 +38,16 @@ IDetailCategoryBuilder& FDetailLayoutBuilderImpl::EditCategory(FName CategoryNam
 	{
 		static const FText GeneralString = NSLOCTEXT("DetailLayoutBuilderImpl", "General", "General");
 		static const FName GeneralName = TEXT("General");
-
+	
 		CategoryName = GeneralName;
 		LocalizedDisplayName = GeneralString;
 	}
 
+	return EditCategoryAllowNone(CategoryName, LocalizedDisplayName, CategoryType);
+}
+
+IDetailCategoryBuilder& FDetailLayoutBuilderImpl::EditCategoryAllowNone(FName CategoryName, const FText& NewLocalizedDisplayName, ECategoryPriority::Type CategoryType)
+{
 	TSharedPtr<FDetailCategoryImpl> CategoryImpl;
 	// If the default category map had a category by the provided name, remove it from the map as it is now customized
 	if (!DefaultCategoryMap.RemoveAndCopyValue(CategoryName, CategoryImpl))
@@ -74,14 +74,14 @@ IDetailCategoryBuilder& FDetailLayoutBuilderImpl::EditCategory(FName CategoryNam
 		const int32 SortOrder = CategoryType * 1000 + (CustomCategoryMap.Num() - 1);
 		CategoryImpl->SetSortOrder( SortOrder );
 	}
-	CategoryImpl->SetDisplayName(CategoryName, LocalizedDisplayName);
+	CategoryImpl->SetDisplayName(CategoryName, NewLocalizedDisplayName);
 
 	return *CategoryImpl;
 }
 
 void FDetailLayoutBuilderImpl::GetCategoryNames(TArray<FName>& OutCategoryNames) const
 {
-	OutCategoryNames.Reserve(DefaultCategoryMap.Num() + CustomCategoryMap.Num());
+	OutCategoryNames.Reserve(OutCategoryNames.Num() + DefaultCategoryMap.Num() + CustomCategoryMap.Num());
 
 	TArray<FName> TempCategoryNames;
 	DefaultCategoryMap.GenerateKeyArray(TempCategoryNames);
@@ -139,6 +139,7 @@ TSharedPtr<IPropertyHandle> FDetailLayoutBuilderImpl::AddObjectPropertyData(TCon
 
 		if (TSharedPtr<FPropertyNode> PropertyNode = RootPropertyNode->GenerateSingleChild(PropertyName))
 		{
+			// This is useless as PropertyNode should already be in the child nodes
 			RootPropertyNode->AddChildNode(PropertyNode);
 			PropertyNode->RebuildChildren();
 			Handle = GetPropertyHandle(PropertyNode);
@@ -175,6 +176,10 @@ TSharedPtr<IPropertyHandle> FDetailLayoutBuilderImpl::AddStructurePropertyData(c
 					FClassInstanceToPropertyMap& ClassInstanceToPropertyMap = PropertyMap.FindOrAdd(PropertyNode->GetProperty()->GetOwnerStruct()->GetFName());
 					FPropertyNodeMap& PropertyNodeMap = ClassInstanceToPropertyMap.FindOrAdd(NAME_None);
 					PropertyNodeMap.Add(PropertyName, PropertyNode);
+
+					RootPropertyNode->AddChildNode(PropertyNode);
+					PropertyNode->RebuildChildren();
+					Handle = GetPropertyHandle(PropertyNode);
 					break;
 				}
 			}
@@ -208,11 +213,52 @@ IDetailPropertyRow* FDetailLayoutBuilderImpl::EditDefaultProperty(TSharedPtr<IPr
 				}
 			}
 		}
-
 	}
-
 	return nullptr;
 }
+
+IDetailPropertyRow* FDetailLayoutBuilderImpl::EditPropertyFromRoot(TSharedPtr<IPropertyHandle> InPropertyHandle)
+{
+	for (const TSharedRef<FDetailTreeNode>& RootTreeNode : AllRootTreeNodes)
+	{
+		FDetailNodeList ChildNodes;
+		RootTreeNode->GetChildren(ChildNodes, true/*bIgnoreVisibility*/);
+		for (const TSharedRef<FDetailTreeNode>& ChildNode : ChildNodes)
+		{
+			if (TSharedPtr<IDetailPropertyRow> PropertyRow = ChildNode->GetRow())
+			{
+				if (PropertyRow->GetPropertyHandle() == InPropertyHandle)
+				{
+					return PropertyRow.Get();
+				}
+			}
+		}
+	}
+	return nullptr;
+}
+
+bool FDetailLayoutBuilderImpl::DoesCategoryHaveGeneratedChildren(FName CategoryName)
+{
+	FDetailNodeList Children;
+
+	FDetailCategoryImpl* Category = nullptr;
+	for (const TSharedRef<FDetailTreeNode>& RootTreeNode : AllRootTreeNodes)
+	{
+		if (RootTreeNode->GetNodeType() == EDetailNodeType::Category && 
+			CategoryName == RootTreeNode->GetNodeName())
+		{
+			Category = (FDetailCategoryImpl*)&RootTreeNode.Get();
+		}
+	}
+
+	if (Category)
+	{
+		Category->GetGeneratedChildren(Children, /*bIgnoreVisibility*/true, /*bIgnoreAdvancedDropdown*/false);
+	}
+
+	return Children.Num() > 0;
+}
+
 
 TSharedRef<IPropertyHandle> FDetailLayoutBuilderImpl::GetProperty( const FName PropertyPath, const UStruct* ClassOutermost, FName InInstanceName ) const
 {	
@@ -260,19 +306,27 @@ void FDetailLayoutBuilderImpl::ForceRefreshDetails()
 	PropertyDetailsUtilities.Pin()->ForceRefresh();
 }
 
-FDetailCategoryImpl& FDetailLayoutBuilderImpl::DefaultCategory( FName CategoryName )
+FDetailCategoryImpl& FDetailLayoutBuilderImpl::DefaultCategory(FName CategoryName)
 {
-	TSharedPtr<FDetailCategoryImpl>& CategoryImpl = DefaultCategoryMap.FindOrAdd( CategoryName );
-
-	if( !CategoryImpl.IsValid() )
+	for (const TSharedRef<FDetailTreeNode>& RootTreeNode : AllRootTreeNodes)
 	{
-		CategoryImpl = MakeShareable( new FDetailCategoryImpl( CategoryName, SharedThis(this) ) );
+		if (RootTreeNode->GetNodeType() == EDetailNodeType::Category && 
+			CategoryName == RootTreeNode->GetNodeName())
+		{
+			return (FDetailCategoryImpl&) RootTreeNode.Get();
+		}
+	}
+
+	TSharedPtr<FDetailCategoryImpl>& CategoryImpl = DefaultCategoryMap.FindOrAdd(CategoryName);
+	if (!CategoryImpl.IsValid())
+	{
+		CategoryImpl = MakeShareable(new FDetailCategoryImpl(CategoryName, SharedThis(this)));
 
 		// We want categories within a type to display in the order they were added but sorting is unstable so we make unique numbers 
-		uint32 SortOrder = (uint32)ECategoryPriority::Default * 1000 + (DefaultCategoryMap.Num() - 1);
-		CategoryImpl->SetSortOrder( SortOrder );
+		uint32 SortOrder = (uint32) ECategoryPriority::Default * 1000 + (DefaultCategoryMap.Num() - 1);
+		CategoryImpl->SetSortOrder(SortOrder);
 
-		CategoryImpl->SetDisplayName( CategoryName, FText::GetEmpty() );
+		CategoryImpl->SetDisplayName(CategoryName, FText::GetEmpty());
 	}
 
 	return *CategoryImpl;
@@ -330,18 +384,97 @@ void FDetailLayoutBuilderImpl::GenerateDetailLayout()
 	TArray<TSharedRef<FDetailCategoryImpl>> SimpleCategories;
 	TArray<TSharedRef<FDetailCategoryImpl>> AdvancedOnlyCategories;
 
-	SubCategoryMap.Empty();
-	for (FCategoryMap::TIterator It(DefaultCategoryMap); It; ++It)
+	// Remove all subcategories
 	{
-		// Remove all subcategories
-		TSharedPtr<FDetailCategoryImpl> DetailCategory = It.Value();
-		// Note: Sub-categories are added later
-		int32 Index = INDEX_NONE;
-		if (DetailCategory->GetCategoryName().ToString().FindChar(FPropertyNodeConstants::CategoryDelimiterChar, Index))
+		const TSharedRef<FDetailLayoutBuilderImpl> This = SharedThis(this);
+
+		// The map of Default Categories added after removing Sub categories
+		// Only used when there is no support for sub-categories
+		FCategoryMap DefaultCategoryMapToAppend;
+
+		// Store the Default Category Map Num as it will be decreasing as sub category entries are removed
+		const int32 DefaultCategoryMapCount = DefaultCategoryMap.Num();
+
+		FName ParentStructPropertyName = NAME_None;
+		bool bSupportsSubCategory = false;
+
+		if (TSharedPtr<FComplexPropertyNode> RootNodePtr = RootNode.Pin())
 		{
-			SubCategoryMap.Add(It.Key(), DetailCategory);
+			if (FStructProperty* const ParentStructProperty = CastField<FStructProperty>(RootNodePtr->GetProperty()))
+			{
+				ParentStructPropertyName = ParentStructProperty->GetFName();
+			}
+
+			// Currently only Object Nodes with Show Categories support Sub-categories
+			bSupportsSubCategory = RootNodePtr->AsObjectNode() && RootNodePtr->HasNodeFlags(EPropertyNodeFlags::ShowCategories);
+		}
+
+		SubCategoryMap.Empty();
+
+		for (FCategoryMap::TIterator It(DefaultCategoryMap); It; ++It)
+		{
+			TSharedPtr<FDetailCategoryImpl> DetailCategory = It.Value();
+
+			int32 Index = INDEX_NONE;
+			const FString CategoryNameStr = DetailCategory->GetCategoryName().ToString();
+			if (!CategoryNameStr.FindChar(FPropertyNodeConstants::CategoryDelimiterChar, Index))
+			{
+				// No category delimiter found
+				continue;
+			}
+
+			// Note: Sub-categories are added later if supported
+			if (bSupportsSubCategory)
+			{
+				SubCategoryMap.Add(It.Key(), DetailCategory);
+			}
+			// When Sub category isn't supported, generate properties and move them to parent category
+			else
+			{
+				const FName ParentCategoryName = *CategoryNameStr.Left(Index);
+
+				TSharedPtr<FDetailCategoryImpl>* const ExistingParentDetailCategory = DefaultCategoryMap.Find(ParentCategoryName);
+
+				TSharedPtr<FDetailCategoryImpl>& ParentDetailCategory = ExistingParentDetailCategory
+					? *ExistingParentDetailCategory
+					: DefaultCategoryMapToAppend.FindOrAdd(ParentCategoryName);
+
+				if (!ParentDetailCategory.IsValid())
+				{
+					ParentDetailCategory = MakeShared<FDetailCategoryImpl>(ParentCategoryName, This);
+					ParentDetailCategory->SetSortOrder(DetailCategory->GetSortOrder());
+					ParentDetailCategory->SetDisplayName(ParentCategoryName, FText::GetEmpty());
+				}
+
+				// Move the Property Nodes from the sub-category to the parent category
+				// To do this, generate a layout for the sub category here as they're unsupported and won't have an opportunity to do it later
+				FDetailNodeList ChildNodes;
+				DetailCategory->GenerateLayout();
+				DetailCategory->GetGeneratedChildren(ChildNodes, /*bIgnoreVisibility*/true, /*bIgnoreAdvancedDropdown*/true);
+
+				for (const TSharedRef<FDetailTreeNode>& ChildNode : ChildNodes)
+				{
+					TSharedPtr<FPropertyNode> PropertyNode = ChildNode->GetPropertyNode();
+					if (!PropertyNode.IsValid())
+					{
+						continue;
+					}
+
+					// If there is no outer object then the class is the object root and there is only one instance
+					FName InstanceName = ParentStructPropertyName;
+					FPropertyNode* const ParentNode = PropertyNode->GetParentNode();
+					if (ParentNode && ParentNode->GetProperty())
+					{
+						InstanceName = ParentNode->GetProperty()->GetFName();
+					}
+					ParentDetailCategory->AddPropertyNode(PropertyNode.ToSharedRef(), InstanceName);
+				}
+			}
+
 			It.RemoveCurrent();
 		}
+
+		DefaultCategoryMap.Append(MoveTemp(DefaultCategoryMapToAppend));
 	}
 
 	// Build default categories
@@ -355,7 +488,7 @@ void FDetailLayoutBuilderImpl::GenerateDetailLayout()
 	}
 
 	// Customizations can add more categories while customizing so just keep doing this until the maps are empty
-	while(CustomCategoryMap.Num() > 0)
+	while (CustomCategoryMap.Num() > 0)
 	{
 		FCategoryMap CustomCategoryMapCopy = CustomCategoryMap;
 
@@ -419,14 +552,17 @@ void FDetailLayoutBuilderImpl::GenerateDetailLayout()
 	}
 
 	TSharedPtr<FComplexPropertyNode> RootNodePinned = RootNode.Pin();
-	if(DetailsView && DetailsView->GetRootObjectCustomization() && RootNodePinned->GetInstancesNum())
+	if (DetailsView && DetailsView->GetRootObjectCustomization() && RootNodePinned->GetInstancesNum() && !bLayoutForExternalRoot)
 	{
 		FObjectPropertyNode* ObjectNode = RootNodePinned->AsObjectNode();
 
 		TSharedPtr<IDetailRootObjectCustomization> RootObjectCustomization = DetailsView->GetRootObjectCustomization();
 
 		// there are multiple objects in the details panel.  Separate each one with a unique object name node to differentiate them
-		AllRootTreeNodes.Add(MakeShared<FDetailMultiTopLevelObjectRootNode>(CategoryNodes, RootObjectCustomization, DetailsView, ObjectNode));
+		TSharedRef<FDetailMultiTopLevelObjectRootNode> NewRootNode = MakeShared<FDetailMultiTopLevelObjectRootNode>(RootObjectCustomization, DetailsView, ObjectNode);
+		NewRootNode->SetChildren(CategoryNodes);
+
+		AllRootTreeNodes.Add(NewRootNode);
 	}
 	else
 	{
@@ -683,6 +819,19 @@ void FDetailLayoutBuilderImpl::RemoveExternalRootPropertyNode(TSharedRef<FComple
 	}
 }
 
+void FDetailLayoutBuilderImpl::ClearExternalRootPropertyNodes()
+{
+	if (GetDetailsView())
+	{
+		for (const TSharedPtr<FComplexPropertyNode>& ExternalRootPropertyNode : ExternalRootPropertyNodes)
+		{
+			GetDetailsView()->SaveExpandedItems(ExternalRootPropertyNode.ToSharedRef());
+		}
+	}
+
+	ExternalRootPropertyNodes.Empty();
+}
+
 FDelegateHandle FDetailLayoutBuilderImpl::AddNodeVisibilityChangedHandler(FSimpleMulticastDelegate::FDelegate InOnNodeVisibilityChanged)
 {
 	return OnNodeVisibilityChanged.Add(InOnNodeVisibilityChanged);
@@ -712,6 +861,14 @@ FCustomPropertyTypeLayoutMap FDetailLayoutBuilderImpl::GetInstancedPropertyTypeL
 	return TypeLayoutMap;
 }
 
+void FDetailLayoutBuilderImpl::RefreshNodeVisbility()
+{
+	for(TSet<FDetailTreeNode*>::TIterator It = TickableNodes.CreateIterator(); It; ++It)
+	{
+		(*It)->RefreshVisibility();
+	}
+}
+
 TSharedPtr<FAssetThumbnailPool> FDetailLayoutBuilderImpl::GetThumbnailPool() const
 {
 	return PropertyDetailsUtilities.Pin()->GetThumbnailPool();
@@ -719,23 +876,24 @@ TSharedPtr<FAssetThumbnailPool> FDetailLayoutBuilderImpl::GetThumbnailPool() con
 
 bool FDetailLayoutBuilderImpl::IsPropertyVisible( TSharedRef<IPropertyHandle> PropertyHandle ) const
 {
-	if( PropertyHandle->IsValidHandle() )
+	if (PropertyHandle->IsValidHandle() && DetailsView != nullptr)
 	{
-		TArray<UObject*> OuterObjects;
-		PropertyHandle->GetOuterObjects(OuterObjects);
-		
-		TArray<TWeakObjectPtr<UObject>> Objects;
-		for (auto OuterObject : OuterObjects)
+		TSharedPtr<FPropertyNode> PropertyNode = StaticCastSharedRef<FPropertyHandleBase>(PropertyHandle)->GetPropertyNode();
+		const FCategoryPropertyNode* CategoryNode = PropertyNode.IsValid() ? PropertyNode->AsCategoryNode() : nullptr;
+		if (CategoryNode != nullptr)
 		{
-			Objects.Add(OuterObject);
+			// this is a subcategory
+			FName CategoryName = CategoryNode->GetCategoryName();
+			return DetailsView->IsCustomRowVisible(FName(), CategoryName);
 		}
-
-		FPropertyAndParent PropertyAndParent(PropertyHandle, Objects);
-
-		return IsPropertyVisible(PropertyAndParent);
+		else if (PropertyHandle->GetProperty() != nullptr)
+		{
+			FPropertyAndParent PropertyAndParent(PropertyHandle);
+			return DetailsView->IsPropertyVisible(PropertyAndParent);
+		}
 	}
-	
-	return false;
+
+	return true;
 }
 
 bool FDetailLayoutBuilderImpl::IsPropertyVisible( const struct FPropertyAndParent& PropertyAndParent ) const
@@ -823,7 +981,7 @@ void FDetailLayoutBuilderImpl::GetStructsBeingCustomized( TArray< TSharedPtr<FSt
 				FStructurePropertyNode* StructureNode = ParentComplexProperty ? ParentComplexProperty->AsStructureNode() : nullptr;
 				if(StructureNode)
 				{
-					OutStructs.Add(StructureNode->GetStructData());
+					StructureNode->GetAllStructureData(OutStructs);
 				}
 			}
 		}
@@ -831,11 +989,11 @@ void FDetailLayoutBuilderImpl::GetStructsBeingCustomized( TArray< TSharedPtr<FSt
 
 	if(RootStructNode)
 	{
-		OutStructs.Add(RootStructNode->GetStructData());
+		RootStructNode->GetAllStructureData(OutStructs);
 	}
 }
 
-const TSharedRef< IPropertyUtilities > FDetailLayoutBuilderImpl::GetPropertyUtilities() const
+TSharedRef< IPropertyUtilities > FDetailLayoutBuilderImpl::GetPropertyUtilities() const
 {
 	return PropertyDetailsUtilities.Pin().ToSharedRef();
 }
@@ -865,7 +1023,21 @@ void FDetailLayoutBuilderImpl::Tick( float DeltaTime )
 {
 	for( auto It = TickableNodes.CreateIterator(); It; ++It )
 	{
-		(*It)->Tick( DeltaTime );
+		FDetailTreeNode* Node = *It;
+
+		// Skip ticking tree nodes which point to destroyed property nodes.
+		// This can happen when because the update order is this:
+		//	- update property nodes, calling DestroyTree(), and creating new nodes
+		//	- update layout builders (but old ones might still be referenced by the tree view) 
+		//  - tick layout builders, which includes the stale builders
+		//  - refresh tree view, which finally gets rid of the stale builders
+		TSharedPtr<FPropertyNode> PropertyNode = Node->GetPropertyNode();
+		if (PropertyNode.IsValid() && PropertyNode->IsDestroyed())
+		{
+			continue;
+		}
+		
+		Node->Tick( DeltaTime );
 	}
 }
 
@@ -914,4 +1086,42 @@ void FDetailLayoutBuilderImpl::RegisterInstancedCustomPropertyTypeLayout(FName P
 void FDetailLayoutBuilderImpl::SortCategories(const FOnCategorySortOrderFunction& InSortFunction)
 {
 	CategorySortOrderFunctions.Add(InSortFunction);
+}
+
+void FDetailLayoutBuilderImpl::SetPropertyGenerationAllowListPaths(const TSet<FString>& InPropertyGenerationAllowListPaths)
+{
+	PropertyGenerationAllowListPaths = InPropertyGenerationAllowListPaths;
+}
+
+bool FDetailLayoutBuilderImpl::IsPropertyPathAllowed(const FString& InPath) const
+{
+	if (PropertyGenerationAllowListPaths.IsEmpty())
+	{
+		return true;
+	}
+
+	for (const FString& PropertyName : PropertyGenerationAllowListPaths)
+	{
+		if (InPath.StartsWith(PropertyName) || PropertyName.StartsWith(InPath))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool FDetailLayoutBuilderImpl::AddEmptyCategoryIfNeeded(TSharedPtr<FComplexPropertyNode> Node)
+{
+	const bool bHasNoValidCategories = DefaultCategoryMap.IsEmpty();
+	const bool bHasValidDisplayManager = DetailsView && DetailsView->GetDisplayManager().IsValid();
+	const bool bHasValidPropertyNode = Node.IsValid();
+	
+	if ( bHasNoValidCategories &&
+		 bHasValidDisplayManager &&
+		 bHasValidPropertyNode )
+	{
+ 		return DetailsView->GetDisplayManager()->AddEmptyCategoryToDetailLayoutIfNeeded(Node.ToSharedRef(), SharedThis(this));
+	}
+	return false;
 }

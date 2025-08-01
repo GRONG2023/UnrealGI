@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "PackageAutoSaver.h"
+
+#include "UObject/ObjectSaveContext.h"
 #include "UObject/Package.h"
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
@@ -12,13 +14,14 @@
 #include "Policies/PrettyJsonPrintPolicy.h"
 #include "Serialization/JsonSerializer.h"
 #include "Framework/Application/SlateApplication.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Editor/UnrealEdEngine.h"
 #include "Settings/EditorLoadingSavingSettings.h"
 #include "EditorModeManager.h"
 #include "EditorModes.h"
 #include "UnrealEdMisc.h"
 #include "FileHelpers.h"
+#include "InterchangeManager.h"
 #include "UnrealEdGlobals.h"
 #include "PackageRestore.h"
 #include "Framework/Notifications/NotificationManager.h"
@@ -28,7 +31,9 @@
 #include "EditorLevelUtils.h"
 #include "IVREditorModule.h"
 #include "LevelEditorViewport.h"
-#include "Animation/AnimCompressionDerivedDataPublic.h"
+#include "AssetCompilingManager.h"
+#include "AssetDefinition.h"
+#include "AssetDefinitionRegistry.h"
 
 namespace PackageAutoSaverJson
 {
@@ -40,11 +45,12 @@ namespace PackageAutoSaverJson
 	typedef TJsonReader<CharType> FJsonReader;
 	typedef TJsonReaderFactory<CharType> FJsonReaderFactory;
 
-	static const FString TagRestoreEnabled	= TEXT("RestoreEnabled");
-	static const FString TagPackages		= TEXT("Packages");
-	static const FString TagPackagePathName = TEXT("PackagePathName");
-	static const FString TagAutoSavePath	= TEXT("AutoSavePath");
-	static const FString RestoreFilename	= TEXT("PackageRestoreData.json");
+	static const FString TagRestoreEnabled	 = TEXT("RestoreEnabled");
+	static const FString TagPackages		 = TEXT("Packages");
+	static const FString TagPackagePathName  = TEXT("PackagePathName");
+	static const FString TagPackageAssetName = TEXT("PackageAssetName");
+	static const FString TagAutoSavePath	 = TEXT("AutoSavePath");
+	static const FString RestoreFilename	 = TEXT("PackageRestoreData.json");
 
 	/**
 	 * @param bEnsurePath True to ensure that the directory for the restore file exists
@@ -58,7 +64,7 @@ namespace PackageAutoSaverJson
 	 *
 	 * @return The packages that have auto-saves that they can be restored from
 	 */
-	TMap<FString, FString> LoadRestoreFile();
+	TMap<FString, TPair<FString, FString>> LoadRestoreFile();
 
 	/**
 	 * Save the file on disk that's used to restore auto-saved packages in the event of a crash
@@ -66,11 +72,17 @@ namespace PackageAutoSaverJson
 	 * @param bRestoreEnabled	Is the restore enabled, or is it disabled because we've shut-down cleanly, or are running under the debugger?
 	 * @param DirtyPackages		Packages that may have auto-saves that they could be restored from
 	 */
-	void SaveRestoreFile(const bool bRestoreEnabled, const TMap< TWeakObjectPtr<UPackage>, FString >& DirtyPackages);
+	void SaveRestoreFile(const bool bRestoreEnabled, const TMap< TWeakObjectPtr<UPackage>, FString, FDefaultSetAllocator, TWeakObjectPtrMapKeyFuncs<TWeakObjectPtr<UPackage>, FString> >& DirtyPackages);
 
 	/** @return whether the auto-save restore should be enabled (you can force this to true when testing with a debugger attached) */
 	bool IsRestoreEnabled()
 	{
+		// Restore is disabled unless using the BackupAndRestore auto-save method
+		if (GetDefault<UEditorLoadingSavingSettings>()->AutoSaveMethod != EAutoSaveMethod::BackupAndRestore)
+		{
+			return false;
+		}
+
 		// Note: Restore is disabled when running under the debugger, as programmers
 		// like to just kill applications and we don't want this to count as a crash
 		return !FPlatformMisc::IsDebuggerPresent();
@@ -98,14 +110,18 @@ FPackageAutoSaver::FPackageAutoSaver()
 	UPackage::PackageMarkedDirtyEvent.AddRaw(this, &FPackageAutoSaver::OnMarkPackageDirty);
 
 	// Register for the package modified callback to catch packages that have been saved
-	UPackage::PackageSavedEvent.AddRaw(this, &FPackageAutoSaver::OnPackageSaved);
+	UPackage::PackageSavedWithContextEvent.AddRaw(this, &FPackageAutoSaver::OnPackageSaved);
+
+	// Register to detect when an Undo/Redo changes the dirty state of a package
+	FEditorDelegates::PostUndoRedo.AddRaw(this, &FPackageAutoSaver::OnUndoRedo);
 }
 
 FPackageAutoSaver::~FPackageAutoSaver()
 {
 	UPackage::PackageDirtyStateChangedEvent.RemoveAll(this);
 	UPackage::PackageMarkedDirtyEvent.RemoveAll(this);
-	UPackage::PackageSavedEvent.RemoveAll(this);
+	UPackage::PackageSavedWithContextEvent.RemoveAll(this);
+	FEditorDelegates::PostUndoRedo.RemoveAll(this);
 }
 
 void FPackageAutoSaver::UpdateAutoSaveCount(const float DeltaSeconds)
@@ -122,12 +138,6 @@ void FPackageAutoSaver::UpdateAutoSaveCount(const float DeltaSeconds)
 	else
 	{
 		AutoSaveCount += DeltaSeconds;
-	}
-
-	// Update the restore information too, if needed
-	if (bNeedRestoreFileUpdate)
-	{
-		UpdateRestoreFile(PackageAutoSaverJson::IsRestoreEnabled());
 	}
 }
 
@@ -153,6 +163,54 @@ void FPackageAutoSaver::AttemptAutoSave()
 	const UEditorLoadingSavingSettings* LoadingSavingSettings = GetDefault<UEditorLoadingSavingSettings>();
 	FUnrealEdMisc& UnrealEdMisc = FUnrealEdMisc::Get();
 
+	// Re-sync if needed
+	if (bSyncWithDirtyPackageList)
+	{
+		bSyncWithDirtyPackageList = false;
+		PackagesPendingUpdate.Reset();
+
+		DirtyMapsForAutoSave.Reset();
+		DirtyContentForAutoSave.Reset();
+
+		// The the list of dirty packages tracked by the engine (considered source of truth)
+		TArray<UPackage*> DirtyPackages;
+		FEditorFileUtils::GetDirtyPackages(DirtyPackages);
+		for (UPackage* Pkg : DirtyPackages)
+		{
+			UpdateDirtyListsForPackage(Pkg);
+		}
+
+		// Remove any clean package from the user-restore list
+		for (auto It = DirtyPackagesForUserSave.CreateIterator(); It; ++It)
+		{
+			UPackage* Pkg = It->Key.Get();
+			if (!Pkg || !Pkg->IsDirty() || (PackagesToIgnoreIfEmpty.Contains(Pkg->GetFName()) && UPackage::IsEmptyPackage(Pkg)))
+			{
+				bNeedRestoreFileUpdate = true;
+				It.RemoveCurrent();
+			}
+		}
+	}
+
+	// Process any packages that are pending an update
+	if (PackagesPendingUpdate.Num() > 0)
+	{
+		for (const TWeakObjectPtr<UPackage>& WeakPkg : PackagesPendingUpdate)
+		{
+			if (UPackage* Pkg = WeakPkg.Get())
+			{
+				UpdateDirtyListsForPackage(Pkg);
+			}
+		}
+		PackagesPendingUpdate.Reset();
+	}
+
+	// Update the restore information too, if needed
+	if (bNeedRestoreFileUpdate)
+	{
+		UpdateRestoreFile(PackageAutoSaverJson::IsRestoreEnabled());
+	}
+
 	// Don't auto-save if disabled or if it is not yet time to auto-save.
 	const bool bTimeToAutosave = (LoadingSavingSettings->bAutoSaveEnable && AutoSaveCount >= LoadingSavingSettings->AutoSaveTimeMinutes * 60.0f);
 	bool bAutosaveHandled = false;
@@ -177,44 +235,131 @@ void FPackageAutoSaver::AttemptAutoSave()
 			FScopedSlowTask SlowTask(100.f, NSLOCTEXT("AutoSaveNotify", "PerformingAutoSave_Caption", "Auto-saving out of date packages..."));
 			SlowTask.MakeDialog();
 
-			bAutosaveHandled = true;
-
-			bIsAutoSaving = true;
-			UnrealEdMisc.SetAutosaveState(FUnrealEdMisc::EAutosaveState::Saving);
-
 			GUnrealEd->SaveConfig();
+
+			bAutosaveHandled = true;
 
 			// Make sure the auto-save directory exists before attempting to write the file
 			const FString AutoSaveDir = AutoSaveUtils::GetAutoSaveDir();
 			IFileManager::Get().MakeDirectory(*AutoSaveDir, true);
 
+			const int32 AutoSaveMaxBackups = LoadingSavingSettings->AutoSaveMaxBackups > 0 ? LoadingSavingSettings->AutoSaveMaxBackups : 10;
 			// Auto-save maps and/or content packages based on user settings.
-			const int32 NewAutoSaveIndex = (AutoSaveIndex + 1) % 10;
+			const int32 NewAutoSaveIndex = (AutoSaveIndex + 1) % AutoSaveMaxBackups;
 
-			bool bLevelSaved = false;
-			auto MapsSaveResults = EAutosaveContentPackagesResult::NothingToDo;
-			auto AssetsSaveResults = EAutosaveContentPackagesResult::NothingToDo;
+			EAutosaveContentPackagesResult::Type MapsSaveResults = EAutosaveContentPackagesResult::NothingToDo;
+			EAutosaveContentPackagesResult::Type AssetsSaveResults = EAutosaveContentPackagesResult::NothingToDo;
 
-			SlowTask.EnterProgressFrame(50);
-
-			if (LoadingSavingSettings->bAutoSaveMaps)
+			if (LoadingSavingSettings->AutoSaveMethod == EAutoSaveMethod::BackupAndRestore)
 			{
-				MapsSaveResults = FEditorFileUtils::AutosaveMapEx(AutoSaveDir, NewAutoSaveIndex, false, DirtyMapsForAutoSave);
-				if (MapsSaveResults == EAutosaveContentPackagesResult::Success)
+				bIsAutoSaving = true;
+
+				SlowTask.EnterProgressFrame(50);
+
+				if (LoadingSavingSettings->bAutoSaveMaps)
 				{
-					DirtyMapsForAutoSave.Empty();
+					MapsSaveResults = FEditorFileUtils::AutosaveMapEx(AutoSaveDir, NewAutoSaveIndex, false, DirtyMapsForAutoSave);
+					if (MapsSaveResults == EAutosaveContentPackagesResult::Success)
+					{
+						DirtyMapsForAutoSave.Empty();
+					}
+				}
+
+				SlowTask.EnterProgressFrame(50);
+
+				if (LoadingSavingSettings->bAutoSaveContent)
+				{
+					AssetsSaveResults = FEditorFileUtils::AutosaveContentPackagesEx(AutoSaveDir, NewAutoSaveIndex, false, DirtyContentForAutoSave);
+					if (AssetsSaveResults == EAutosaveContentPackagesResult::Success)
+					{
+						DirtyContentForAutoSave.Empty();
+					}
 				}
 			}
-
-			SlowTask.EnterProgressFrame(50);
-
-			if (LoadingSavingSettings->bAutoSaveContent && UnrealEdMisc.GetAutosaveState() != FUnrealEdMisc::EAutosaveState::Cancelled)
+			else if (LoadingSavingSettings->AutoSaveMethod == EAutoSaveMethod::BackupAndOverwrite)
 			{
-				AssetsSaveResults = FEditorFileUtils::AutosaveContentPackagesEx(AutoSaveDir, NewAutoSaveIndex, false, DirtyContentForAutoSave);
-				if (AssetsSaveResults == EAutosaveContentPackagesResult::Success)
+				// Make a backup copy of any packages we may be about to overwrite
 				{
-					DirtyContentForAutoSave.Empty();
+					auto BackupExistingPackages = [&AutoSaveDir, NewAutoSaveIndex](const TSet<TWeakObjectPtr<UPackage>, TWeakObjectPtrSetKeyFuncs<TWeakObjectPtr<UPackage>>>& PackagesToBackup)
+					{
+						FString PackageFilename;
+						for (const TWeakObjectPtr<UPackage>& PackageToBackup : PackagesToBackup)
+						{
+							if (UPackage* Pkg = PackageToBackup.Get())
+							{
+								PackageFilename.Reset();
+								if (FPackageName::DoesPackageExist(PackageToBackup->GetPathName(), &PackageFilename))
+								{
+									const FString PackageAutoSaveFilename = FEditorFileUtils::GetAutoSaveFilename(Pkg, AutoSaveDir, NewAutoSaveIndex, FPaths::GetExtension(PackageFilename, /*bIncludeDot*/true));
+									IFileManager::Get().Copy(*PackageAutoSaveFilename, *PackageFilename, /*bReplace*/true);
+								}
+							}
+						}
+					};
+				
+					if (LoadingSavingSettings->bAutoSaveMaps)
+					{
+						BackupExistingPackages(DirtyMapsForAutoSave);
+					}
+					if (LoadingSavingSettings->bAutoSaveContent)
+					{
+						BackupExistingPackages(DirtyContentForAutoSave);
+					}
 				}
+
+				// Build the complete list of packages to save
+				TArray<UPackage*> PackagesToSave;
+				{
+					auto AppendPackagesToSave = [&PackagesToSave](const TSet<TWeakObjectPtr<UPackage>, TWeakObjectPtrSetKeyFuncs<TWeakObjectPtr<UPackage>>>& PotentialPackagesToSave)
+					{
+						FNameBuilder PkgName;
+						for (const TWeakObjectPtr<UPackage>& PotentialPackageToSave : PotentialPackagesToSave)
+						{
+							if (UPackage* Pkg = PotentialPackageToSave.Get())
+							{
+								PkgName.Reset();
+								Pkg->GetFName().AppendString(PkgName);
+
+								// Skip packages in read-only roots (like /Temp)
+								if (FPackageName::IsValidLongPackageName(PkgName.ToView(), /*bIncludeReadOnlyRoots*/false))
+								{
+									PackagesToSave.Add(Pkg);
+								}
+							}
+						}
+					};
+
+					if (LoadingSavingSettings->bAutoSaveMaps)
+					{
+						AppendPackagesToSave(DirtyMapsForAutoSave);
+					}
+					if (LoadingSavingSettings->bAutoSaveContent)
+					{
+						AppendPackagesToSave(DirtyContentForAutoSave);
+					}
+				}
+
+				if (PackagesToSave.Num() > 0)
+				{
+					// Note: The in-place save does a regular save of dirty packages, so it doesn't set the bIsAutoSaving flag since it functions like a user-initiated save
+					const bool bSuccess = UEditorLoadingAndSavingUtils::SavePackages(PackagesToSave, false);
+
+					// Note: We don't update DirtyMapsForAutoSave/DirtyContentForAutoSave manually post-save, as any packages that were actually saved will have been removed from the list via the save callback
+					if (bSuccess)
+					{
+						MapsSaveResults = EAutosaveContentPackagesResult::Success;
+						AssetsSaveResults = EAutosaveContentPackagesResult::Success;
+					}
+					else
+					{
+						MapsSaveResults = EAutosaveContentPackagesResult::Failure;
+						AssetsSaveResults = EAutosaveContentPackagesResult::Failure;
+					}
+				}
+			}
+			else
+			{
+				checkf(false, TEXT("Unknown AutoSaveMethod!"));
 			}
 
 			const bool bNothingToDo = (MapsSaveResults == EAutosaveContentPackagesResult::NothingToDo && AssetsSaveResults == EAutosaveContentPackagesResult::NothingToDo);
@@ -240,13 +385,7 @@ void FPackageAutoSaver::AttemptAutoSave()
 			ResetAutoSaveTimer();
 			bDelayingDueToFailedSave = false;
 
-			if (UnrealEdMisc.GetAutosaveState() == FUnrealEdMisc::EAutosaveState::Cancelled)
-			{
-				UE_LOG(PackageAutoSaver, Warning, TEXT("Autosave was cancelled."));
-			}
-
 			bIsAutoSaving = false;
-			UnrealEdMisc.SetAutosaveState(FUnrealEdMisc::EAutosaveState::Inactive);
 		}
 		else
 		{
@@ -289,8 +428,8 @@ void FPackageAutoSaver::UpdateRestoreFile(const bool bRestoreEnabled)
 
 bool FPackageAutoSaver::HasPackagesToRestore() const
 {
-	// Don't offer to restore packages during automation testing; the dlg is modal and blocks
-	return !GIsAutomationTesting && PackagesThatCanBeRestored.Num() > 0;
+	// Don't offer to restore packages during automation testing or when unattended; the dlg is modal and blocks
+	return !GIsAutomationTesting && !FApp::IsUnattended() && PackagesThatCanBeRestored.Num() > 0;
 }
 
 void FPackageAutoSaver::OfferToRestorePackages()
@@ -315,36 +454,43 @@ void FPackageAutoSaver::OfferToRestorePackages()
 
 void FPackageAutoSaver::OnPackagesDeleted(const TArray<UPackage*>& DeletedPackages)
 {
-	ClearStalePointers();
-
-	for(UPackage* DeletedPackage : DeletedPackages)
+	for (UPackage* DeletedPackage : DeletedPackages)
 	{
+		PackagesPendingUpdate.Remove(DeletedPackage);
+		PackagesToIgnoreIfEmpty.Add(DeletedPackage->GetFName());
+
+		// We remove the package immediately as it may not survive to the next tick if queued for update via PackagesPendingUpdate
 		DirtyMapsForAutoSave.Remove(DeletedPackage);
 		DirtyContentForAutoSave.Remove(DeletedPackage);
-		DirtyPackagesForUserSave.Remove(DeletedPackage);
+		if (DirtyPackagesForUserSave.Remove(DeletedPackage) > 0)
+		{
+			bNeedRestoreFileUpdate = true;
+		}
 	}
-	bNeedRestoreFileUpdate = true;
 }
 
 void FPackageAutoSaver::OnPackageDirtyStateUpdated(UPackage* Pkg)
 {
-	UpdateDirtyListsForPackage(Pkg);
+	if (!IsAutoSaving())
+	{
+		PackagesPendingUpdate.Add(Pkg);
+	}
 }
 
 void FPackageAutoSaver::OnMarkPackageDirty(UPackage* Pkg, bool bWasDirty)
 {
-	UpdateDirtyListsForPackage(Pkg);
+	if (!IsAutoSaving())
+	{
+		PackagesPendingUpdate.Add(Pkg);
+	}
 }
 
-void FPackageAutoSaver::OnPackageSaved(const FString& Filename, UObject* Obj)
+void FPackageAutoSaver::OnPackageSaved(const FString& Filename, UPackage* Pkg, FObjectPostSaveContext ObjectSaveContext)
 {
-	UPackage* const Pkg = Cast<UPackage>(Obj);
-
 	// If this has come from an auto-save, update the last known filename in the user dirty list so that we can offer is up as a restore file later
-	if(IsAutoSaving())
+	if (IsAutoSaving())
 	{
-		FString* const AutoSaveFilename = DirtyPackagesForUserSave.Find(Pkg);
-		if(AutoSaveFilename)
+		if (FString* const AutoSaveFilename = DirtyPackagesForUserSave.Find(Pkg))
 		{
 			// Make the filename relative to the auto-save directory
 			// Note: MakePathRelativeTo modifies in-place, hence the copy of Filename
@@ -353,9 +499,32 @@ void FPackageAutoSaver::OnPackageSaved(const FString& Filename, UObject* Obj)
 			FPaths::MakePathRelativeTo(RelativeFilename, *AutoSaveDir);
 
 			(*AutoSaveFilename) = RelativeFilename;
+			bNeedRestoreFileUpdate = true;
 		}
 	}
-	UpdateDirtyListsForPackage(Pkg);
+	else
+	{
+		// If the package was previously deleted, then it's certainly back after being saved!
+		PackagesToIgnoreIfEmpty.Remove(Pkg->GetFName());
+
+		// Remove the saved package from the user-restore list when this was a full save
+		if (DirtyPackagesForUserSave.Remove(Pkg) > 0)
+		{
+			bNeedRestoreFileUpdate = true;
+		}
+	}
+
+	// Always remove a saved package from the auto-save lists
+	DirtyMapsForAutoSave.Remove(Pkg);
+	DirtyContentForAutoSave.Remove(Pkg);
+
+	// Discard any pending update since the save has already handled it
+	PackagesPendingUpdate.Remove(Pkg);
+}
+
+void FPackageAutoSaver::OnUndoRedo()
+{
+	bSyncWithDirtyPackageList = true;
 }
 
 void FPackageAutoSaver::UpdateDirtyListsForPackage(UPackage* Pkg)
@@ -363,69 +532,43 @@ void FPackageAutoSaver::UpdateDirtyListsForPackage(UPackage* Pkg)
 	const UPackage* TransientPackage = GetTransientPackage();
 
 	// Don't auto-save the transient package or packages with the transient flag.
-	if ( Pkg == TransientPackage || Pkg->HasAnyFlags(RF_Transient) || Pkg->HasAnyPackageFlags(PKG_InMemoryOnly) )
+	if ( Pkg == TransientPackage || Pkg->HasAnyFlags(RF_Transient) || Pkg->HasAnyPackageFlags(PKG_CompiledIn) )
+	{
+		return;
+	}
+
+	// Should this package be ignored because it was previously deleted and is still empty?
+	if (PackagesToIgnoreIfEmpty.Contains(Pkg->GetFName()) && UPackage::IsEmptyPackage(Pkg))
 	{
 		return;
 	}
 
 	if ( Pkg->IsDirty() )
 	{
-		// Always add the package to the user list
-		DirtyPackagesForUserSave.FindOrAdd(Pkg);
-
-		// Only add the package to the auto-save list if we're not auto-saving
-		// Note: Packages get dirtied again after they're auto-saved, so this would add them back again, which we don't want
-		if ( !IsAutoSaving() )
+		// Add the package to the user-restore list
+		if (!DirtyPackagesForUserSave.Contains(Pkg))
 		{
-			auto FindAssetInPackage = [](UPackage* InPackage)
-			{
-				UObject* Asset = nullptr;
-				ForEachObjectWithPackage(InPackage, [&Asset](UObject* Object)
-					{
-						if (Object->IsAsset())
-						{
-							ensure(Asset == nullptr);
-							Asset = Object;
-							return false;
-						}
-						return true;
-					}, false);
-				return Asset;
-			};
-			UObject* Asset = FindAssetInPackage(Pkg);
+			DirtyPackagesForUserSave.Add(Pkg);
+			bNeedRestoreFileUpdate = true;
+		}
 
-			// Get the set of all reference worlds.
-			FWorldContext& EditorContext = GEditor->GetEditorWorldContext();
-
-			bool bPackageIsMap = false;
-			EditorLevelUtils::ForEachWorlds(EditorContext.World(), [&bPackageIsMap, Pkg](UWorld* World)
-			{
-				UPackage* Package = CastChecked<UPackage>(World->GetOuter());
-				bPackageIsMap = Package == Pkg;
-				return !bPackageIsMap;
-			}, true);
-
-			bool bForMapAutosave = Asset && Asset->GetTypedOuter<UWorld>()/** This handles external packages. */;
-
-			// Add package into the appropriate list (map or content)
-			if (bPackageIsMap || bForMapAutosave)
-			{
-				DirtyMapsForAutoSave.Add(Pkg);
-			}
-			else
-			{
-				DirtyContentForAutoSave.Add(Pkg);
-			}
+		// Add package into the appropriate list (map or content)
+		if (UWorld::IsWorldOrWorldExternalPackage(Pkg))
+		{
+			DirtyMapsForAutoSave.Add(Pkg);
+		}
+		else
+		{
+			DirtyContentForAutoSave.Add(Pkg);
 		}
 	}
 	else
 	{
-		// Always remove the package from the auto-save list
+		// Always remove a clean package from the auto-save and user-restore lists
 		DirtyMapsForAutoSave.Remove(Pkg);
 		DirtyContentForAutoSave.Remove(Pkg);
-		if (!IsAutoSaving())
+		if (DirtyPackagesForUserSave.Remove(Pkg) > 0)
 		{
-			DirtyPackagesForUserSave.Remove(Pkg);
 			bNeedRestoreFileUpdate = true;
 		}
 	}
@@ -444,15 +587,15 @@ bool FPackageAutoSaver::CanAutoSave() const
 	const bool bDidInteractRecently = (FApp::GetCurrentTime() - LastInteractionTime) < InteractionDelay;
 	const bool bAutosaveEnabled	= LoadingSavingSettings->bAutoSaveEnable && bPackagesNeedAutoSave;
 	const bool bSlowTask = GIsSlowTask;
-	const bool bInterpEditMode = GLevelEditorModeTools().IsModeActive(FBuiltinEditorModes::EM_InterpEdit);
 	const bool bPlayWorldValid = GUnrealEd->PlayWorld != nullptr;
 	const bool bAnyMenusVisible	= FSlateApplication::Get().AnyMenusVisible();
 	const bool bAutomationTesting = GIsAutomationTesting;
 	const bool bIsInteracting = FSlateApplication::Get().HasAnyMouseCaptor() || FSlateApplication::Get().IsDragDropping() || GUnrealEd->IsUserInteracting() || (bDidInteractRecently && !bAutoSaveNotificationLaunched && !bDelayingDueToFailedSave);
 	const bool bHasGameOrProjectLoaded = FApp::HasProjectName();
 	const bool bAreShadersCompiling = GShaderCompilingManager->IsCompiling();
+	const bool bAreAssetsCompiling = FAssetCompilingManager::Get().GetNumRemainingAssets() > 0;
 	const bool bIsVREditorActive = IVREditorModule::Get().IsVREditorEnabled();	// @todo vreditor: Eventually we should support this while in VR (modal VR progress, with sufficient early warning)
-	const bool bAreAnimationsCompressing = GAsyncCompressedAnimationsTracker ? GAsyncCompressedAnimationsTracker->GetNumRemainingJobs() > 0 : false;
+	const bool bIsInterchangeActive = UInterchangeManager::GetInterchangeManager().IsInterchangeActive();
 
 	bool bIsSequencerPlaying = false;
 	for (FLevelEditorViewportClient* LevelVC : GEditor->GetLevelViewportClients())
@@ -467,7 +610,20 @@ bool FPackageAutoSaver::CanAutoSave() const
 	// query any active editor modes and allow them to prevent autosave
 	const bool bActiveModesAllowAutoSave = GLevelEditorModeTools().CanAutoSave();
 
-	return (bAutosaveEnabled && !bSlowTask && !bInterpEditMode && !bPlayWorldValid && !bAnyMenusVisible && !bAutomationTesting && !bIsInteracting && !GIsDemoMode && bHasGameOrProjectLoaded && !bAreShadersCompiling && !bAreAnimationsCompressing && !bIsVREditorActive && !bIsSequencerPlaying && bActiveModesAllowAutoSave);
+	return (bAutosaveEnabled
+		&& !bSlowTask
+		&& !bPlayWorldValid
+		&& !bAnyMenusVisible
+		&& !bAutomationTesting
+		&& !bIsInteracting
+		&& !GIsDemoMode
+		&& bHasGameOrProjectLoaded
+		&& !bAreShadersCompiling
+		&& !bAreAssetsCompiling
+		&& !bIsVREditorActive
+		&& !bIsSequencerPlaying
+		&& !bIsInterchangeActive
+		&& bActiveModesAllowAutoSave);
 }
 
 bool FPackageAutoSaver::DoPackagesNeedAutoSave() const
@@ -535,8 +691,7 @@ void FPackageAutoSaver::UpdateAutoSaveNotification()
 
 	if (UserAllowsAutosave && // The user has set to allow auto-save in preferences
 		TimeInSecondsUntilAutosave < LoadingSavingSettings->AutoSaveWarningInSeconds && 
-		!InGame && // we want to hide auto-save if we are simulating/playing
-		!GLevelEditorModeTools().IsModeActive(FBuiltinEditorModes::EM_InterpEdit) // we want to hide auto-save if we are in matinee 
+		!InGame // we want to hide auto-save if we are simulating/playing
 		)
 	{		
 		if (!bAutoSaveNotificationLaunched && !bDelayingDueToFailedSave)
@@ -558,7 +713,7 @@ void FPackageAutoSaver::UpdateAutoSaveNotification()
 				static FText AutoSaveSaveButtonToolTipText		= NSLOCTEXT("AutoSaveNotify", "AutoSaveSaveToolTip", "Force Autosave");
 
 				FNotificationInfo Info( GetAutoSaveNotificationText(TimeInSecondsUntilAutosave) );
-				Info.Image = FEditorStyle::GetBrush("MainFrame.AutoSaveImage");
+				Info.Image = FAppStyle::Get().GetBrush("Icons.Save");
 
 				// Add the buttons with text, tooltip and callback
 				Info.ButtonDetails.Add(FNotificationButtonInfo(AutoSaveCancelButtonText, AutoSaveCancelButtonToolTipText, FSimpleDelegate::CreateRaw(this, &FPackageAutoSaver::OnAutoSaveCancel)));
@@ -588,7 +743,7 @@ void FPackageAutoSaver::UpdateAutoSaveNotification()
 			}
 			else // defer until the user finishes using pop-up menus or the notification will dismiss them...
 			{
-				ForceMinimumTimeTillAutoSave(LoadingSavingSettings->AutoSaveWarningInSeconds);
+				ForceMinimumTimeTillAutoSave(static_cast<float>(LoadingSavingSettings->AutoSaveWarningInSeconds));
 			}
 		}
 		else
@@ -677,33 +832,31 @@ void FPackageAutoSaver::OnAutoSaveCancel()
 
 void FPackageAutoSaver::ClearStalePointers()
 {
-	auto DirtyPackagesForUserSaveTmp = DirtyPackagesForUserSave;
-	for(auto It = DirtyPackagesForUserSaveTmp.CreateConstIterator(); It; ++It)
+	for(auto It = DirtyPackagesForUserSave.CreateIterator(); It; ++It)
 	{
 		const TWeakObjectPtr<UPackage>& Package = It->Key;
 		if(!Package.IsValid())
 		{
-			DirtyPackagesForUserSave.Remove(Package);
+			bNeedRestoreFileUpdate = true;
+			It.RemoveCurrent();
 		}
 	}
 
-	auto DirtyMapsForAutoSaveTmp = DirtyMapsForAutoSave;
-	for(auto It = DirtyMapsForAutoSaveTmp.CreateConstIterator(); It; ++It)
+	for(auto It = DirtyMapsForAutoSave.CreateIterator(); It; ++It)
 	{
 		const TWeakObjectPtr<UPackage>& Package = *It;
 		if(!Package.IsValid())
 		{
-			DirtyMapsForAutoSave.Remove(Package);
+			It.RemoveCurrent();
 		}
 	}
 
-	auto DirtyContentForAutoSaveTmp = DirtyContentForAutoSave;
-	for (auto It = DirtyContentForAutoSaveTmp.CreateConstIterator(); It; ++It)
+	for (auto It = DirtyContentForAutoSave.CreateIterator(); It; ++It)
 	{
 		const TWeakObjectPtr<UPackage>& Package = *It;
 		if (!Package.IsValid())
 		{
-			DirtyContentForAutoSave.Remove(Package);
+			It.RemoveCurrent();
 		}
 	}
 }
@@ -726,9 +879,9 @@ FString PackageAutoSaverJson::GetRestoreFilename(const bool bEnsurePath)
 	return Filename;
 }
 
-TMap<FString, FString> PackageAutoSaverJson::LoadRestoreFile()
+TMap<FString, TPair<FString, FString>> PackageAutoSaverJson::LoadRestoreFile()
 {
-	TMap<FString, FString> PackagesThatCanBeRestored;
+	TMap<FString, TPair<FString, FString>> PackagesThatCanBeRestored;
 
 	const FString Filename = GetRestoreFilename(false);
 	FArchive* const FileAr = IFileManager::Get().CreateFileReader(*Filename);
@@ -759,13 +912,17 @@ TMap<FString, FString> PackageAutoSaverJson::LoadRestoreFile()
 
 		const FString PackagePathName = EntryObject->GetStringField(TagPackagePathName);
 		const FString AutoSavePath = EntryObject->GetStringField(TagAutoSavePath);
-		PackagesThatCanBeRestored.Add(PackagePathName, AutoSavePath);
+
+		FString PackageAssetName;
+		EntryObject->TryGetStringField(TagPackageAssetName, PackageAssetName);
+
+		PackagesThatCanBeRestored.Add(PackagePathName, TPair<FString, FString>(PackageAssetName, AutoSavePath));
 	}
 
 	return PackagesThatCanBeRestored;
 }
 
-void PackageAutoSaverJson::SaveRestoreFile(const bool bRestoreEnabled, const TMap< TWeakObjectPtr<UPackage>, FString >& DirtyPackages)
+void PackageAutoSaverJson::SaveRestoreFile(const bool bRestoreEnabled, const TMap< TWeakObjectPtr<UPackage>, FString, FDefaultSetAllocator, TWeakObjectPtrMapKeyFuncs<TWeakObjectPtr<UPackage>, FString> >& DirtyPackages)
 {
 	TSharedPtr<FJsonObject> RootObject = MakeShareable(new FJsonObject);
 
@@ -788,9 +945,22 @@ void PackageAutoSaverJson::SaveRestoreFile(const bool bRestoreEnabled, const TMa
 			if(PackagePtr && !AutoSavePath.IsEmpty())
 			{
 				const FString& PackagePathName = PackagePtr->GetPathName();
-
 				TSharedPtr<FJsonObject> EntryObject = MakeShareable(new FJsonObject);
 				EntryObject->SetStringField(TagPackagePathName, PackagePathName);
+
+				if (UObject* PackageAsset = PackagePtr->FindAssetInPackage())
+				{
+					if (UAssetDefinitionRegistry* AssetDefinitionRegistry = UAssetDefinitionRegistry::Get())
+					{
+						const UAssetDefinition* AssetDefinition = AssetDefinitionRegistry->GetAssetDefinitionForClass(PackageAsset->GetClass());
+						if (AssetDefinition)
+						{
+							const FString PackagAssetName = AssetDefinition->GetObjectDisplayNameText(PackageAsset).ToString();
+							EntryObject->SetStringField(TagPackageAssetName, PackagAssetName);
+						}
+					}					
+				}				
+				
 				EntryObject->SetStringField(TagAutoSavePath, AutoSavePath);
 
 				TSharedPtr<FJsonValue> EntryValue = MakeShareable(new FJsonValueObject(EntryObject));

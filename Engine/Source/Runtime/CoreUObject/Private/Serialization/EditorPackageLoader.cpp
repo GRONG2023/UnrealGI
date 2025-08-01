@@ -6,6 +6,7 @@
 #include "Serialization/AsyncLoading2.h"
 #include "UObject/UObjectThreadContext.h"
 #include "Misc/PackageName.h"
+#include "IO/IoDispatcher.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogEditorPackageLoader, Log, All);
 
@@ -15,18 +16,28 @@ class FEditorPackageLoader final
 	: public IAsyncPackageLoader
 {
 public:
-	FEditorPackageLoader(FIoDispatcher& InIoDispatcher, IEDLBootNotificationManager& InEDLBootNotificationManager)
+	FEditorPackageLoader(FIoDispatcher& InIoDispatcher)
 	{
-		CookedPackageLoader.Reset(MakeAsyncPackageLoader2(InIoDispatcher));
-		UncookedPackageLoader.Reset(new FAsyncLoadingThread(/** ThreadIndex = */ 0, InEDLBootNotificationManager));
+		UncookedPackageLoader.Reset(new FAsyncLoadingThread(/** ThreadIndex = */ 0));
+		CookedPackageLoader.Reset(MakeAsyncPackageLoader2(InIoDispatcher, UncookedPackageLoader.Get()));
+		UncookedPackageLoader->SetIoStorePackageLoader(CookedPackageLoader.Get());
 	}
 
 	virtual ~FEditorPackageLoader () { }
 
+	virtual ELoaderType GetLoaderType() const override
+	{
+		return ELoaderType::EditorPackageLoader;
+	}
+
 	virtual void InitializeLoading() override
 	{
-		UE_LOG(LogEditorPackageLoader, Log, TEXT("Initializing EDL loader for cooked packages in editor"));
-		CookedPackageLoader->InitializeLoading();
+		if (FIoDispatcher::Get().DoesChunkExist(CreateIoChunkId(0, 0, EIoChunkType::ScriptObjects)))
+		{
+			UE_LOG(LogEditorPackageLoader, Log, TEXT("Initializing Zen loader for cooked packages in editor startup"));
+			CookedPackageLoader->InitializeLoading();
+			bHasInitializedCookedPackageLoader = true;
+		}
 		UncookedPackageLoader->InitializeLoading();
 	}
 
@@ -38,37 +49,63 @@ public:
 
 	virtual void StartThread() override
 	{
+		if (!bHasInitializedCookedPackageLoader)
+		{
+			UE_LOG(LogEditorPackageLoader, Log, TEXT("Initializing Zen loader for cooked packages in editor after startup"));
+			CookedPackageLoader->InitializeLoading();
+			bHasInitializedCookedPackageLoader = true;
+		}
 		CookedPackageLoader->StartThread();
 		UncookedPackageLoader->StartThread();
 	}
 
-	virtual int32 LoadPackage(
-			const FString& InPackageName,
-			const FGuid* InGuid,
-			const TCHAR* InPackageToLoadFrom,
-			FLoadPackageAsyncDelegate InCompletionDelegate,
-			EPackageFlags InPackageFlags,
-			int32 InPIEInstanceID,
-			int32 InPackagePriority,
-			const FLinkerInstancingContext* InstancingContext) override
+	virtual bool ShouldAlwaysLoadPackageAsync(const FPackagePath& InPackagePath) override
 	{
-		const TCHAR* PackageName = InPackageToLoadFrom ? InPackageToLoadFrom : *InPackageName;
-
 		// Use the old loader if an uncooked package exists on disk
-		const bool bDoesUncookedPackageExist = FPackageName::DoesPackageExist(InPackageName, nullptr, nullptr, true) && !DoesPackageExistInIoStore(FName(*InPackageName));
-		if (bDoesUncookedPackageExist)
+		const bool bDoesUncookedPackageExist = FPackageName::DoesPackageExistEx(InPackagePath, FPackageName::EPackageLocationFilter::FileSystem) != FPackageName::EPackageLocationFilter::None;
+		return !bDoesUncookedPackageExist;
+	}
+
+	virtual int32 LoadPackage(const FPackagePath& PackagePath, FLoadPackageAsyncOptionalParams OptionalParams) override
+	{
+		if (OptionalParams.ProgressDelegate.IsValid())
 		{
-			UE_LOG(LogEditorPackageLoader, Verbose, TEXT("Loading uncooked package '%s' from filesystem"), PackageName);
-			return UncookedPackageLoader->LoadPackage(InPackageName, InGuid, InPackageToLoadFrom, InCompletionDelegate, InPackageFlags, InPIEInstanceID, InPackagePriority, InstancingContext);
+			UE_LOG(LogStreaming, Warning, TEXT("Progress delegate is only supported for zenloader. A CompletionDelegate should be used instead for this loader."));
+		}
+
+		FLoadPackageAsyncDelegate CompletionDelegate;
+		if (OptionalParams.CompletionDelegate.IsValid())
+		{
+			CompletionDelegate = MoveTemp(*OptionalParams.CompletionDelegate.Get());
+		}
+		return LoadPackage(PackagePath, OptionalParams.CustomPackageName, MoveTemp(CompletionDelegate), OptionalParams.PackageFlags, OptionalParams.PIEInstanceID, OptionalParams.PackagePriority, OptionalParams.InstancingContext, OptionalParams.LoadFlags);
+	}
+
+	virtual int32 LoadPackage(
+		const FPackagePath& PackagePath,
+		FName CustomPackageName,
+		FLoadPackageAsyncDelegate InCompletionDelegate,
+		EPackageFlags InPackageFlags,
+		int32 InPIEInstanceID,
+		int32 InPackagePriority,
+		const FLinkerInstancingContext* InInstancingContext,
+		uint32 InLoadFlags) override
+	{
+		// Use the old loader if an uncooked package exists on disk
+		if (!bHasInitializedCookedPackageLoader ||
+			FPackageName::DoesPackageExistEx(PackagePath, FPackageName::EPackageLocationFilter::FileSystem) != FPackageName::EPackageLocationFilter::None)
+		{
+			UE_LOG(LogEditorPackageLoader, Verbose, TEXT("Loading uncooked package '%s' from filesystem"), *PackagePath.GetDebugName());
+			return UncookedPackageLoader->LoadPackage(PackagePath, CustomPackageName, InCompletionDelegate, InPackageFlags, InPIEInstanceID, InPackagePriority, InInstancingContext, InLoadFlags);
 		}
 		else
 		{
-			UE_LOG(LogEditorPackageLoader, Verbose, TEXT("Loading cooked package '%s' from I/O Store"), PackageName);
-			return CookedPackageLoader->LoadPackage(InPackageName, InGuid, InPackageToLoadFrom, InCompletionDelegate, InPackageFlags, InPIEInstanceID, InPackagePriority, InstancingContext);
+			UE_LOG(LogEditorPackageLoader, Verbose, TEXT("Loading cooked package '%s' from I/O Store"), *PackagePath.GetDebugName());
+			return CookedPackageLoader->LoadPackage(PackagePath, CustomPackageName, InCompletionDelegate, InPackageFlags, InPIEInstanceID, InPackagePriority, InInstancingContext, InLoadFlags);
 		}
 	}
 
-	virtual EAsyncPackageState::Type ProcessLoading(bool bUseTimeLimit, bool bUseFullTimeLimit, float TimeLimit) override
+	virtual EAsyncPackageState::Type ProcessLoading(bool bUseTimeLimit, bool bUseFullTimeLimit, double TimeLimit) override
 	{
 		EAsyncPackageState::Type CookedLoadingState = CookedPackageLoader->ProcessLoading(bUseTimeLimit, bUseFullTimeLimit, TimeLimit);
 		EAsyncPackageState::Type UncookedLoadingState = UncookedPackageLoader->ProcessLoading(bUseTimeLimit, bUseFullTimeLimit, TimeLimit);
@@ -78,7 +115,7 @@ public:
 			: EAsyncPackageState::TimeOut;
 	}
 
-	virtual EAsyncPackageState::Type ProcessLoadingUntilComplete(TFunctionRef<bool()> CompletionPredicate, float TimeLimit) override
+	virtual EAsyncPackageState::Type ProcessLoadingUntilComplete(TFunctionRef<bool()> CompletionPredicate, double TimeLimit) override
 	{
 		const EAsyncPackageState::Type LoadingState = CookedPackageLoader->ProcessLoadingUntilComplete(CompletionPredicate, TimeLimit);
 		if (LoadingState != EAsyncPackageState::Complete)
@@ -113,10 +150,10 @@ public:
 		UncookedPackageLoader->ResumeLoading();
 	}
 
-	virtual void FlushLoading(int32 PackageId) override
+	virtual void FlushLoading(TConstArrayView<int32> RequestIds) override
 	{
-		CookedPackageLoader->FlushLoading(PackageId);
-		UncookedPackageLoader->FlushLoading(PackageId);
+		CookedPackageLoader->FlushLoading(RequestIds);
+		UncookedPackageLoader->FlushLoading(RequestIds);
 	}
 
 	virtual int32 GetNumQueuedPackages() override
@@ -142,12 +179,12 @@ public:
 
 	virtual bool IsAsyncLoadingSuspended() override
 	{
-		return CookedPackageLoader->IsAsyncLoadingSuspended() | UncookedPackageLoader->IsAsyncLoadingSuspended();
+		return CookedPackageLoader->IsAsyncLoadingSuspended() || UncookedPackageLoader->IsAsyncLoadingSuspended();
 	}
 
 	virtual bool IsInAsyncLoadThread() override
 	{
-		return CookedPackageLoader->IsInAsyncLoadThread() | UncookedPackageLoader->IsInAsyncLoadThread();
+		return CookedPackageLoader->IsInAsyncLoadThread() || UncookedPackageLoader->IsInAsyncLoadThread();
 	}
 
 	virtual bool IsMultithreaded() override
@@ -158,25 +195,12 @@ public:
 
 	virtual bool IsAsyncLoadingPackages() override
 	{
-		const bool bIsAsyncLoadingCookedPackages = CookedPackageLoader->IsAsyncLoadingPackages();
-		const bool bIsAsyncLoadingUncookedPackages = UncookedPackageLoader->IsAsyncLoadingPackages();
-
-		return bIsAsyncLoadingCookedPackages | bIsAsyncLoadingUncookedPackages;
+		return CookedPackageLoader->IsAsyncLoadingPackages() || UncookedPackageLoader->IsAsyncLoadingPackages();
 	}
 
 	virtual void NotifyConstructedDuringAsyncLoading(UObject* Object, bool bSubObject) override
 	{
-		FUObjectThreadContext& ThreadContext = FUObjectThreadContext::Get();
-
-		if (ThreadContext.AsyncPackageLoader == CookedPackageLoader.Get())
-		{
-			CookedPackageLoader->NotifyConstructedDuringAsyncLoading(Object, bSubObject);
-		}
-		else
-		{
-			check(ThreadContext.AsyncPackageLoader == UncookedPackageLoader.Get());
-			UncookedPackageLoader->NotifyConstructedDuringAsyncLoading(Object, bSubObject);
-		}
+		checkf(false, TEXT("This is never called"));
 	}
 
 	virtual void NotifyUnreachableObjects(const TArrayView<FUObjectItem*>& UnreachableObjects) override
@@ -185,19 +209,46 @@ public:
 		CookedPackageLoader->NotifyUnreachableObjects(UnreachableObjects);
 	}
 
-	virtual void FireCompletedCompiledInImport(void* AsyncPackage, FPackageIndex Import) override
+	virtual void NotifyRegistrationEvent(
+		const TCHAR* PackageName,
+		const TCHAR* Name,
+		ENotifyRegistrationType NotifyRegistrationType,
+		ENotifyRegistrationPhase NotifyRegistrationPhase,
+		UObject* (*InRegister)(),
+		bool InbDynamic,
+		UObject* FinishedObject) override
 	{
-		// Only used in the old EDL loader which is not enabled in editor builds
+		if (UncookedPackageLoader)
+		{
+			UncookedPackageLoader->NotifyRegistrationEvent(PackageName, Name, NotifyRegistrationType, NotifyRegistrationPhase, InRegister, InbDynamic, FinishedObject);
+		}
+		if (CookedPackageLoader)
+		{
+			CookedPackageLoader->NotifyRegistrationEvent(PackageName, Name, NotifyRegistrationType, NotifyRegistrationPhase, InRegister, InbDynamic, FinishedObject);
+		}
+	}
+
+	virtual void NotifyRegistrationComplete() override
+	{
+		if (UncookedPackageLoader)
+		{
+			UncookedPackageLoader->NotifyRegistrationComplete();
+		}
+		if (CookedPackageLoader)
+		{
+			CookedPackageLoader->NotifyRegistrationComplete();
+		}
 	}
 
 private:
 	TUniquePtr<IAsyncPackageLoader> CookedPackageLoader;
-	TUniquePtr<IAsyncPackageLoader> UncookedPackageLoader;
+	TUniquePtr<FAsyncLoadingThread> UncookedPackageLoader;
+	bool bHasInitializedCookedPackageLoader = false;
 };
 
-TUniquePtr<IAsyncPackageLoader> MakeEditorPackageLoader(FIoDispatcher& InIoDispatcher, IEDLBootNotificationManager& InEDLBootNotificationManager)
+TUniquePtr<IAsyncPackageLoader> MakeEditorPackageLoader(FIoDispatcher& InIoDispatcher)
 {
-	return TUniquePtr<IAsyncPackageLoader>(new FEditorPackageLoader(InIoDispatcher, InEDLBootNotificationManager));
+	return TUniquePtr<IAsyncPackageLoader>(new FEditorPackageLoader(InIoDispatcher));
 }
 
 #endif // WITH_IOSTORE_IN_EDITOR

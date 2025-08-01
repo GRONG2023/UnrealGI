@@ -6,6 +6,7 @@
 
 #include "Misc/MessageDialog.h"
 #include "HAL/FileManager.h"
+#include "IDetailsView.h"
 #include "Misc/App.h"
 #include "SlateOptMacros.h"
 #include "Widgets/Layout/SSeparator.h"
@@ -18,18 +19,19 @@
 #include "Widgets/Layout/SScrollBox.h"
 
 #include "Framework/Docking/TabManager.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 
 #include "ToolMenus.h"
 
 #include "Editor.h"
 
-#include "IAssetRegistry.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 
 #include "Serialization/StaticMemoryReader.h"
 #include "Widgets/Colors/SColorBlock.h"
 #include "Framework/Commands/UICommandDragDropOp.h"
+#include "PropertyEditorModule.h"
 
 #define LOCTEXT_NAMESPACE "EditToolMenuDialog"
 
@@ -89,17 +91,17 @@ private:
 	{
 		if (IsVisible())
 		{
-			static const FName NAME_VisibleHoveredBrush("MultiBox.VisibleHighlightIcon16x");
-			static const FName NAME_VisibleNotHoveredBrush("MultiBox.VisibleIcon16x");
-			return IsHovered() ? FEditorStyle::GetBrush(NAME_VisibleHoveredBrush) :
-				FEditorStyle::GetBrush(NAME_VisibleNotHoveredBrush);
+			static const FName NAME_VisibleHoveredBrush("Level.VisibleHighlightIcon16x");
+			static const FName NAME_VisibleNotHoveredBrush("Level.VisibleIcon16x");
+			return IsHovered() ? FAppStyle::GetBrush(NAME_VisibleHoveredBrush) :
+				FAppStyle::GetBrush(NAME_VisibleNotHoveredBrush);
 		}
 		else
 		{
-			static const FName NAME_NotVisibleHoveredBrush("MultiBox.NotVisibleHighlightIcon16x");
-			static const FName NAME_NotVisibleNotHoveredBrush("MultiBox.NotVisibleIcon16x");
-			return IsHovered() ? FEditorStyle::GetBrush(NAME_NotVisibleHoveredBrush) :
-				FEditorStyle::GetBrush(NAME_NotVisibleNotHoveredBrush);
+			static const FName NAME_NotVisibleHoveredBrush("Level.NotVisibleHighlightIcon16x");
+			static const FName NAME_NotVisibleNotHoveredBrush("Level.NotVisibleIcon16x");
+			return IsHovered() ? FAppStyle::GetBrush(NAME_NotVisibleHoveredBrush) :
+				FAppStyle::GetBrush(NAME_NotVisibleNotHoveredBrush);
 		}
 	}
 
@@ -178,7 +180,7 @@ class SMultiBlockDragHandle : public SCompoundWidget
 
 		if (bIsDropDestination)
 		{
-			const FSlateBrush* DropIndicatorBrush = FEditorStyle::GetBrush(bInsertAfter ? "MultiBox.DragBelow" : "MultiBox.DragAbove");
+			const FSlateBrush* DropIndicatorBrush = FAppStyle::GetBrush(bInsertAfter ? "MultiBox.DragBelow" : "MultiBox.DragAbove");
 
 			FSlateDrawElement::MakeBox
 			(
@@ -266,7 +268,7 @@ FReply SMultiBlockDragHandle::OnDragDetected( const FGeometry& MyGeometry, const
 {
 	TSharedPtr<SWidget> CustomDecorator;
 
-	TSharedRef<SWidget> BlockWidget = Block->MakeWidget(BaseWidget.Pin().ToSharedRef(), EMultiBlockLocation::None, false)->AsWidget();
+	TSharedRef<SWidget> BlockWidget = Block->MakeWidget(BaseWidget.Pin().ToSharedRef(), EMultiBlockLocation::None, false, nullptr)->AsWidget();
 
 	if (Block->IsSeparator())
 	{
@@ -334,7 +336,7 @@ FReply SMultiBlockDragHandle::OnDragDetected( const FGeometry& MyGeometry, const
 			Block->IsPartOfHeading(),
 			NAME_None, 
 			CustomDecorator,
-			MyGeometry.AbsolutePosition-MouseEvent.GetScreenSpacePosition()
+		FVector2D(MyGeometry.AbsolutePosition)-MouseEvent.GetScreenSpacePosition()
 		);
 
 	NewOp->SetOnDropNotification( FSimpleDelegate::CreateSP( BaseWidget.Pin().ToSharedRef(), &SMultiBoxWidget::OnDropExternal ) );
@@ -576,7 +578,7 @@ void SEditToolMenuDialog::BuildWidget()
 		ChildSlot
 		[
 			SNew(STextBlock)
-			.TextStyle(FEditorStyle::Get(), "LargeText")
+			.TextStyle(FAppStyle::Get(), "LargeText")
 			.Text(LOCTEXT("Unavailable", "Unavailable"))
 		];
 
@@ -674,7 +676,7 @@ void SEditToolMenuDialog::BuildWidget()
 	[
 		SNew(SBorder)
 		.Padding(20)
-		.BorderImage( FEditorStyle::GetBrush("Docking.Tab.Normal") )
+		.BorderImage( FAppStyle::GetBrush("Docking.Tab.ContentAreaBrush") )
 		[
 			SNew(SVerticalBox)
 
@@ -684,7 +686,7 @@ void SEditToolMenuDialog::BuildWidget()
 			.Padding(0)
 			[
 				SNew(STextBlock)
-				.TextStyle(FEditorStyle::Get(), "LargeText")
+				.TextStyle(FAppStyle::Get(), "LargeText")
 				.Text(FText::FromName(ToolMenu->MenuName))
 			]
 
@@ -768,8 +770,8 @@ void SEditToolMenuDialog::OnMenuNamesSelectionChanged(TSharedPtr<FName> InEntry,
 	}
 	
 	FToolMenuContext NewMenuContext = SourceMenu->Context;
-	NewMenuContext.bIsEditing = true;
-		
+	NewMenuContext.SetIsEditing(true);
+	
 	TArray<const UToolMenu*> SubMenuChain = SourceMenu->GetSubMenuChain();
 	if (!SourceMenu->SubMenuParent)
 	{
@@ -894,8 +896,7 @@ FReply SEditToolMenuDialog::HandleResetClicked()
 
 FReply SEditToolMenuDialog::HandleResetAllClicked()
 {
-	FText Title = LOCTEXT("ResetAllQuestion_Question", "Question");
-	if (FMessageDialog::Open(EAppMsgType::YesNo, EAppReturnType::No, LOCTEXT("ResetAllQuestion", "Remove all menu customizations for all menus?"), &Title) == EAppReturnType::Yes)
+	if (FMessageDialog::Open(EAppMsgType::YesNo, EAppReturnType::No, LOCTEXT("ResetAllQuestion", "Remove all menu customizations for all menus?"), LOCTEXT("ResetAllQuestion_Question", "Question")) == EAppReturnType::Yes)
 	{
 		UToolMenus::Get()->RemoveAllCustomizations();
 		OriginalSettings.Reset();

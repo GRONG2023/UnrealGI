@@ -2,7 +2,7 @@
 
 #include "GameplayDebugger/GameplayDebuggerCategory_AI.h"
 
-#if WITH_GAMEPLAY_DEBUGGER
+#if WITH_GAMEPLAY_DEBUGGER_MENU
 
 #include "GameFramework/Pawn.h"
 #include "ShowFlags.h"
@@ -12,6 +12,7 @@
 #include "GameFramework/PlayerController.h"
 #include "Engine/Engine.h"
 #include "EngineGlobals.h"
+#include "Navigation/PathFollowingComponent.h"
 #include "NavMesh/RecastNavMesh.h"
 #include "Engine/Canvas.h"
 #include "AIController.h"
@@ -44,7 +45,7 @@ FGameplayDebuggerCategory_AI::FGameplayDebuggerCategory_AI()
 {
 	bShowOnlyWithDebugActor = false;
 	RawLastPath = nullptr;
-	LastPathUpdateTime = 0.0f;
+	LastPathUpdateTime = 0.;
 
 	SetDataPackReplication<FRepData>(&DataPack);
 	PathDataPackId = SetDataPackReplication<FRepDataPath>(&PathDataPack, EGameplayDebuggerDataPack::ResetOnActorChange);
@@ -117,7 +118,12 @@ static FString DescribeTaskHelper(const UGameplayTask& TaskOb)
 		*TaskOb.GetName(),
 		TaskOb.GetInstanceName() != NAME_None ? *FString::Printf(TEXT(" {yellow}[%s]"), *TaskOb.GetInstanceName().ToString()) : TEXT(""),
 		TaskOb.IsActive() ? TEXT("green") : TEXT("orange"),
-		*TaskOb.GetTaskStateName(), TaskOb.GetPriority(),
+#if ENABLE_VISUAL_LOG 
+		*TaskOb.GetTaskStateName(),
+#else
+		TEXT("UnknownTaskStateName"),
+#endif
+		TaskOb.GetPriority(),
 		*GetNameSafe(OwnerOb),
 		TaskOb.GetRequiredResources().IsEmpty() ? TEXT("None") : *TaskOb.GetRequiredResources().GetDebugDescription());
 }
@@ -133,7 +139,7 @@ void FGameplayDebuggerCategory_AI::CollectData(APlayerController* OwnerPC, AActo
 	DataPack.bHasController = (MyController != nullptr);
 	if (MyController)
 	{
-		if (MyController->IsPendingKill() == false)
+		if (IsValid(MyController))
 		{
 			DataPack.ControllerName = MyController->GetName();
 		}
@@ -147,7 +153,7 @@ void FGameplayDebuggerCategory_AI::CollectData(APlayerController* OwnerPC, AActo
 		DataPack.ControllerName = TEXT("No Controller");
 	}
 
-	if (MyPawn && !MyPawn->IsPendingKill())
+	if (MyPawn && IsValidChecked(MyPawn))
 	{
 		UCharacterMovementComponent* CharMovementComp = MyChar ? MyChar->GetCharacterMovement() : nullptr;
 		if (CharMovementComp)
@@ -266,6 +272,7 @@ void FGameplayDebuggerCategory_AI::CollectPathData(AAIController* DebugAI)
 			{
 				LastPathUpdateTime = CurrentPath->GetLastUpdateTime();
 
+#if WITH_RECAST
 				const FNavMeshPath* NavMeshPath = CurrentPath->CastPath<FNavMeshPath>();
 				const ARecastNavMesh* NavData = Cast<const ARecastNavMesh>(CurrentPath->GetNavigationDataUsed());
 				if (NavMeshPath && NavData)
@@ -276,11 +283,12 @@ void FGameplayDebuggerCategory_AI::CollectPathData(AAIController* DebugAI)
 						NavData->GetPolyVerts(NavMeshPath->PathCorridor[Idx], PolyData.Points);
 						
 						const uint32 AreaId = NavData->GetPolyAreaID(NavMeshPath->PathCorridor[Idx]);
-						PolyData.Color = NavData->GetAreaIDColor(AreaId);
+						PolyData.Color = NavData->GetAreaIDColor(IntCastChecked<uint8>(AreaId));
 
 						PathDataPack.PathCorridor.Add(PolyData);
 					}
 				}
+#endif // WITH_RECAST
 
 				for (int32 Idx = 0; Idx < CurrentPath->GetPathPoints().Num(); Idx++)
 				{
@@ -301,13 +309,13 @@ void FGameplayDebuggerCategory_AI::OnDataPackReplicated(int32 DataPackId)
 
 void FGameplayDebuggerCategory_AI::DrawData(APlayerController* OwnerPC, FGameplayDebuggerCanvasContext& CanvasContext)
 {
-	UWorld* MyWorld = OwnerPC->GetWorld();
+	UWorld* MyWorld = CanvasContext.GetWorld();
 	AActor* SelectedActor = FindLocalDebugActor();
 
 	const bool bReducedMode = IsSimulateInEditor();
 	bShowCategoryName = !bReducedMode || DataPack.bHasController;
 
-	if (FGameplayDebuggerCategoryTweakables::bDrawOverheadIcons)
+	if (FGameplayDebuggerCategoryTweakables::bDrawOverheadIcons && OwnerPC)
 	{
 		DrawPawnIcons(MyWorld, SelectedActor, OwnerPC->GetPawn(), CanvasContext);
 	}
@@ -330,7 +338,27 @@ void FGameplayDebuggerCategory_AI::DrawData(APlayerController* OwnerPC, FGamepla
 
 	if (DataPack.bIsUsingCharacter)
 	{
-		CanvasContext.Printf(TEXT("Movement Mode: {yellow}%s{white}, Base: {yellow}%s"), *DataPack.MovementModeInfo, *DataPack.MovementBaseInfo);
+		const bool bIsStandalone = IsCategoryLocal() && IsCategoryAuth();
+		CanvasContext.Printf(TEXT("%sMovement Mode: {yellow}%s{white}, Base: {yellow}%s")
+			, bIsStandalone ? TEXT("") : TEXT("(Server) ")
+			, *DataPack.MovementModeInfo, *DataPack.MovementBaseInfo);
+		
+		if (IsCategoryLocal() && !IsCategoryAuth())
+		{
+			const ACharacter* MyChar = Cast<ACharacter>(SelectedActor);
+			// In principle data collection should take place in CollectData, but we don't call that on clients for this category
+			// and we do want to display client-side data here as well, so we bend the rules a bit and gather and display data instantly here
+			if (const UCharacterMovementComponent* CharMovementComp = MyChar ? MyChar->GetCharacterMovement() : nullptr)
+			{
+				const UPrimitiveComponent* FloorComponent = MyChar->GetMovementBase();
+				const AActor* FloorActor = FloorComponent ? FloorComponent->GetOwner() : nullptr;
+				const FString ClientMovementBaseInfo = FloorComponent ? FString::Printf(TEXT("%s.%s"), *GetNameSafe(FloorActor), *FloorComponent->GetName()) : FString(TEXT("None"));
+				const FString ClientMovementModeInfo = CharMovementComp->GetMovementName();
+
+				CanvasContext.Printf(TEXT("(Client) Movement Mode: {yellow}%s{white}, Base: {yellow}%s"), *ClientMovementModeInfo, *ClientMovementBaseInfo);
+			}
+		}
+		
 		CanvasContext.Printf(TEXT("NavData: {yellow}%s{white}, Path following: {yellow}%s"), *DataPack.NavDataInfo, *DataPack.PathFollowingInfo);
 	}
 
@@ -398,13 +426,13 @@ FDebugRenderSceneProxy* FGameplayDebuggerCategory_AI::CreateDebugSceneProxy(cons
 			if (Poly.Points.Num() > 2)
 			{
 				FDebugRenderSceneProxy::FMesh PolyMesh;
-				PolyMesh.Vertices.Add(FDynamicMeshVertex(Poly.Points[0]));
+				PolyMesh.Vertices.Add(FDynamicMeshVertex((FVector3f)Poly.Points[0]));
 				PolyMesh.Color = Poly.Color;
 
 				for (int32 VertIdx = 2; VertIdx < Poly.Points.Num(); VertIdx++)
 				{
-					PolyMesh.Vertices.Add(FDynamicMeshVertex(Poly.Points[VertIdx - 1]));
-					PolyMesh.Vertices.Add(FDynamicMeshVertex(Poly.Points[VertIdx]));
+					PolyMesh.Vertices.Add(FDynamicMeshVertex((FVector3f)Poly.Points[VertIdx - 1]));
+					PolyMesh.Vertices.Add(FDynamicMeshVertex((FVector3f)Poly.Points[VertIdx]));
 
 					PolyMesh.Indices.Add(0);
 					PolyMesh.Indices.Add(PolyMesh.Vertices.Num() - 2);
@@ -482,7 +510,7 @@ void FGameplayDebuggerCategory_AI::DrawOverheadInfo(AActor& DebugActor, FGamepla
 
 		float SizeX = 0.0f, SizeY = 0.0f;
 		OverheadContext.MeasureString(ActorDesc, SizeX, SizeY);
-		OverheadContext.PrintAt(ScreenLoc.X - (SizeX * 0.5f), ScreenLoc.Y - (SizeY * 1.2f), ActorDesc);
+		OverheadContext.PrintAt(static_cast<float>(ScreenLoc.X - (SizeX * 0.5f)), static_cast<float>(ScreenLoc.Y - (SizeY * 1.2f)), ActorDesc);
 	}
 }
 
@@ -506,11 +534,11 @@ void FGameplayDebuggerCategory_AI::DrawPawnIcons(UWorld* World, AActor* DebugAct
 					const FVector2D ScreenLoc = CanvasContext.ProjectLocation(IconLocation);
 					const float IconSize = (DebugActor == ItPawn) ? 32.0f : 16.0f;
 
-					CanvasContext.DrawIcon(FColor::White, CanvasIcon, ScreenLoc.X, ScreenLoc.Y - IconSize, IconSize / CanvasIcon.Texture->GetSurfaceWidth());
+					CanvasContext.DrawIcon(FColor::White, CanvasIcon, static_cast<float>(ScreenLoc.X), static_cast<float>(ScreenLoc.Y - IconSize), IconSize / CanvasIcon.Texture->GetSurfaceWidth());
 				}
 			}
 		}
 	}
 }
 
-#endif // WITH_GAMEPLAY_DEBUGGER
+#endif // WITH_GAMEPLAY_DEBUGGER_MENU

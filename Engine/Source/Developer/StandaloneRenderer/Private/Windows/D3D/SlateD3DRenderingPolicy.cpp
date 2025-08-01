@@ -233,9 +233,7 @@ void FSlateD3D11RenderingPolicy::BuildRenderingBuffers( FSlateBatchData& InBatch
 			if( NumVertices*sizeof(FSlateVertex) > VertexBuffer.GetBufferSize() )
 			{
 				uint32 NumBytesNeeded = NumVertices*sizeof(FSlateVertex);
-				// increase by a static size.
-				// @todo make this better
-				VertexBuffer.ResizeBuffer( NumBytesNeeded + 200*sizeof(FSlateVertex) );
+				VertexBuffer.ResizeBuffer( NumBytesNeeded + (NumVertices / 4) * sizeof(FSlateVertex) );
 			}
 		}
 
@@ -246,9 +244,7 @@ void FSlateD3D11RenderingPolicy::BuildRenderingBuffers( FSlateBatchData& InBatch
 			// resize if needed
 			if( NumIndices > IndexBuffer.GetMaxNumIndices() )
 			{
-				// increase by a static size.
-				// @todo make this better
-				IndexBuffer.ResizeBuffer( NumIndices + 100 );
+				IndexBuffer.ResizeBuffer( NumIndices + (NumIndices / 4) );
 			}
 		}
 
@@ -332,11 +328,11 @@ void FSlateD3D11RenderingPolicy::DrawElements(const FMatrix& ViewProjectionMatri
 
 		if (EnumHasAllFlags(DrawFlags, ESlateBatchDrawFlag::NoGamma))
 		{
-			PixelShader->SetGammaValues(FVector2D(1.0f, 1.0f));
+			PixelShader->SetGammaValues(FVector2f(1.0f, 1.0f));
 		}
 		else
 		{
-			PixelShader->SetGammaValues(FVector2D(1, 1 / 2.2f));
+			PixelShader->SetGammaValues(FVector2f(1, 1 / 2.2f));
 		}
 
 		const FSlateClippingState* ClippingState = RenderBatch.GetClippingState();
@@ -395,7 +391,7 @@ void FSlateD3D11RenderingPolicy::DrawElements(const FMatrix& ViewProjectionMatri
 			PixelShader->SetTexture( ((FSlateD3DTexture*)WhiteTexture)->GetTypedResource(), BilinearSamplerState_Clamp );
 		}
 
-		PixelShader->SetShaderParams( ShaderParams.PixelParams );
+		PixelShader->SetShaderParams(ShaderParams);
 		PixelShader->SetDrawEffects( DrawEffects );
 
 		PixelShader->BindParameters();

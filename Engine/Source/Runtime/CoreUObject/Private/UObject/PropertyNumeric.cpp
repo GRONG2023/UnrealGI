@@ -1,10 +1,5 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Class.h"
-#include "UObject/Package.h"
-#include "Templates/Casts.h"
 #include "UObject/UnrealType.h"
 
 IMPLEMENT_FIELD(FNumericProperty)
@@ -17,6 +12,12 @@ IMPLEMENT_FIELD(FUInt32Property)
 IMPLEMENT_FIELD(FUInt64Property)
 IMPLEMENT_FIELD(FFloatProperty)
 IMPLEMENT_FIELD(FDoubleProperty)
+IMPLEMENT_FIELD(FLargeWorldCoordinatesRealProperty)
+
+FNumericProperty::FNumericProperty(FFieldVariant InOwner, const UECodeGen_Private::FPropertyParamsBaseWithOffset& Prop, EPropertyFlags AdditionalPropertyFlags /*= CPF_None*/)
+	: FProperty(InOwner, Prop, AdditionalPropertyFlags)
+{
+}
 
 int64 FNumericProperty::ReadEnumAsInt64(FStructuredArchive::FSlot Slot, UStruct* DefaultsStruct, const FPropertyTag& Tag)
 {
@@ -24,15 +25,18 @@ int64 FNumericProperty::ReadEnumAsInt64(FStructuredArchive::FSlot Slot, UStruct*
 	FName EnumName;
 	Slot << EnumName;
 
-	UEnum* Enum = FindUField<UEnum>(dynamic_cast<UClass*>(DefaultsStruct) ? static_cast<UClass*>(DefaultsStruct) : DefaultsStruct->GetTypedOuter<UClass>(), Tag.EnumName);
+	FName EnumTypeName = Tag.GetType().GetParameterName(0);
+
+	UEnum* Enum = FindUField<UEnum>(dynamic_cast<UClass*>(DefaultsStruct) ? static_cast<UClass*>(DefaultsStruct) : DefaultsStruct->GetTypedOuter<UClass>(), EnumTypeName);
 	if (!Enum)
 	{
-		Enum = FindObject<UEnum>(ANY_PACKAGE, *Tag.EnumName.ToString());
+		// Enums (at least native) are stored as short names (for now) so find the Tag enum by name
+		Enum = FindFirstObject<UEnum>(*WriteToString<128>(EnumTypeName), EFindFirstObjectOptions::NativeFirst);
 	}
 
 	if (!Enum)
 	{
-		UE_LOG(LogClass, Warning, TEXT("Failed to find enum '%s' when converting property '%s' during property loading - setting to 0"), *Tag.EnumName.ToString(), *Tag.Name.ToString());
+		UE_LOG(LogClass, Warning, TEXT("Failed to find enum '%s' when converting property '%s' during property loading - setting to 0"), *EnumTypeName.ToString(), *Tag.Name.ToString());
 		return 0;
 	}
 
@@ -58,7 +62,7 @@ int64 FNumericProperty::ReadEnumAsInt64(FStructuredArchive::FSlot Slot, UStruct*
 	return Result;
 };
 
-const TCHAR* FNumericProperty::ImportText_Internal( const TCHAR* Buffer, void* Data, int32 PortFlags, UObject* Parent, FOutputDevice* ErrorText ) const
+const TCHAR* FNumericProperty::ImportText_Internal( const TCHAR* Buffer, void* ContainerOrPropertyPtr, EPropertyPointerType PropertyPointerType, UObject* Parent, int32 PortFlags, FOutputDevice* ErrorText ) const
 {
 	if ( Buffer != NULL )
 	{
@@ -70,7 +74,14 @@ const TCHAR* FNumericProperty::ImportText_Internal( const TCHAR* Buffer, void* D
 				int64 EnumValue = UEnum::ParseEnum(Buffer);
 				if (EnumValue != INDEX_NONE)
 				{
-					SetIntPropertyValue(Data, EnumValue);
+					if (PropertyPointerType == EPropertyPointerType::Container && HasSetter())
+					{
+						SetValue_InContainer(ContainerOrPropertyPtr, &EnumValue);
+					}
+					else
+					{
+						SetIntPropertyValue(PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType), EnumValue);
+					}
 					return Buffer;
 				}
 				else
@@ -121,14 +132,28 @@ const TCHAR* FNumericProperty::ImportText_Internal( const TCHAR* Buffer, void* D
 				Buffer++;
 			}
 		}
-		SetNumericPropertyValueFromString(Data, Start);
+		if (PropertyPointerType == EPropertyPointerType::Container && HasSetter())
+		{
+			SetNumericPropertyValueFromString_InContainer(ContainerOrPropertyPtr, Start);
+		}
+		else
+		{
+			SetNumericPropertyValueFromString(PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType), Start);
+		}
 	}
 	return Buffer;
 }
 
-void FNumericProperty::ExportTextItem( FString& ValueStr, const void* PropertyValue, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
+void FNumericProperty::ExportText_Internal( FString& ValueStr, const void* PropertyValueOrContainer, EPropertyPointerType PropertyPointerType, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
 {
-	ValueStr += GetNumericPropertyValueToString(PropertyValue);
+	if (PropertyPointerType == EPropertyPointerType::Container && HasGetter())
+	{
+		ValueStr += GetNumericPropertyValueToString_InContainer(PropertyValueOrContainer);
+	}
+	else
+	{
+		ValueStr += GetNumericPropertyValueToString(PointerToValuePtr(PropertyValueOrContainer, PropertyPointerType));
+	}
 }
 
 bool FNumericProperty::IsFloatingPoint() const
@@ -186,13 +211,21 @@ void FNumericProperty::SetNumericPropertyValueFromString(void* Data, TCHAR const
 {
 	check(0);
 }
-
+void FNumericProperty::SetNumericPropertyValueFromString_InContainer(void* Container, TCHAR const* Value) const
+{
+	check(0);
+}
 /** 
 	* Gets the value of a signed integral property type
 	* @param Data - pointer to property data to get
 	* @return Data as a signed int
 **/
 int64 FNumericProperty::GetSignedIntPropertyValue(void const* Data) const
+{
+	check(0);
+	return 0;
+}
+int64 FNumericProperty::GetSignedIntPropertyValue_InContainer(void const* Container) const
 {
 	check(0);
 	return 0;
@@ -204,6 +237,11 @@ int64 FNumericProperty::GetSignedIntPropertyValue(void const* Data) const
 	* @return Data as an unsigned int
 **/
 uint64 FNumericProperty::GetUnsignedIntPropertyValue(void const* Data) const
+{
+	check(0);
+	return 0;
+}
+uint64 FNumericProperty::GetUnsignedIntPropertyValue_InContainer(void const* Data) const
 {
 	check(0);
 	return 0;
@@ -230,4 +268,56 @@ FString FNumericProperty::GetNumericPropertyValueToString(void const* Data) cons
 {
 	check(0);
 	return FString();
+}
+
+FString FNumericProperty::GetNumericPropertyValueToString_InContainer(void const* Container) const
+{
+	check(0);
+	return FString();
+}
+
+
+FInt8Property::FInt8Property(FFieldVariant InOwner, const UECodeGen_Private::FInt8PropertyParams& Prop)
+	: TProperty_Numeric(InOwner, (const UECodeGen_Private::FPropertyParamsBaseWithOffset&)Prop)
+{
+}
+
+FInt16Property::FInt16Property(FFieldVariant InOwner, const UECodeGen_Private::FInt16PropertyParams& Prop)
+	: TProperty_Numeric(InOwner, (const UECodeGen_Private::FPropertyParamsBaseWithOffset&)Prop)
+{
+}
+
+FIntProperty::FIntProperty(FFieldVariant InOwner, const UECodeGen_Private::FIntPropertyParams& Prop)
+	: TProperty_Numeric(InOwner, (const UECodeGen_Private::FPropertyParamsBaseWithOffset&)Prop)
+{
+}
+
+FInt64Property::FInt64Property(FFieldVariant InOwner, const UECodeGen_Private::FInt64PropertyParams& Prop)
+	: TProperty_Numeric(InOwner, (const UECodeGen_Private::FPropertyParamsBaseWithOffset&)Prop)
+{
+}
+
+FUInt16Property::FUInt16Property(FFieldVariant InOwner, const UECodeGen_Private::FUInt16PropertyParams& Prop)
+	: TProperty_Numeric(InOwner, (const UECodeGen_Private::FPropertyParamsBaseWithOffset&)Prop)
+{
+}
+
+FUInt32Property::FUInt32Property(FFieldVariant InOwner, const UECodeGen_Private::FUInt32PropertyParams& Prop)
+	: TProperty_Numeric(InOwner, (const UECodeGen_Private::FPropertyParamsBaseWithOffset&)Prop)
+{
+}
+
+FUInt64Property::FUInt64Property(FFieldVariant InOwner, const UECodeGen_Private::FUInt64PropertyParams& Prop)
+	: TProperty_Numeric(InOwner, (const UECodeGen_Private::FPropertyParamsBaseWithOffset&)Prop)
+{
+}
+
+FFloatProperty::FFloatProperty(FFieldVariant InOwner, const UECodeGen_Private::FFloatPropertyParams& Prop)
+	: TProperty_Numeric(InOwner, (const UECodeGen_Private::FPropertyParamsBaseWithOffset&)Prop)
+{
+}
+
+FDoubleProperty::FDoubleProperty(FFieldVariant InOwner, const UECodeGen_Private::FDoublePropertyParams& Prop)
+	: TProperty_Numeric(InOwner, (const UECodeGen_Private::FPropertyParamsBaseWithOffset&)Prop)
+{
 }

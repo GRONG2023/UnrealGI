@@ -11,6 +11,7 @@ public class MaterialUtilities : ModuleRules
 			new string [] {
 				"Core",
 				"CoreUObject",
+				"EditorFramework",
 				"Engine",
 				"RenderCore",
                 "Renderer",
@@ -30,13 +31,13 @@ public class MaterialUtilities : ModuleRules
         PublicDependencyModuleNames.AddRange(
 			new string [] {
                  "MeshDescription",
-				 "StaticMeshDescription"
+				 "StaticMeshDescription",
+				 "GeometryCore"
 			}
 		);      
 
         PrivateIncludePathModuleNames.AddRange(
             new string[] {
-                "Landscape",
                 "MeshMergeUtilities",
             }
         );

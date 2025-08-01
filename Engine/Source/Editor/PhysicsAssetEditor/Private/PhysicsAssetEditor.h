@@ -5,10 +5,11 @@
 #include "CoreMinimal.h"
 #include "Stats/Stats.h"
 #include "Widgets/SWidget.h"
+#include "Widgets/Notifications/SNotificationList.h"
 #include "UObject/GCObject.h"
 #include "Textures/SlateIcon.h"
 #include "Editor/UnrealEdTypes.h"
-#include "UnrealWidget.h"
+#include "UnrealWidgetFwd.h"
 #include "Widgets/Views/STableViewBase.h"
 #include "Widgets/Views/STableRow.h"
 #include "Widgets/Views/STreeView.h"
@@ -16,16 +17,16 @@
 #include "EditorUndoClient.h"
 #include "Toolkits/IToolkitHost.h"
 #include "IPhysicsAssetEditor.h"
-#include "Editor/PhysicsAssetEditor/Private/PhysicsAssetEditorSharedData.h"
+#include "PhysicsAssetEditorSharedData.h"
 #include "BodySetupEnums.h"
 #include "Containers/ArrayView.h"
 #include "GraphEditor.h"
 
+class IDetailLayoutBuilder;
 struct FAssetData;
 class FPhysicsAssetEditorTreeInfo;
 class IDetailsView;
 class SComboButton;
-class SDockableTab;
 class SPhysicsAssetEditorPreviewViewport;
 class UAnimationAsset;
 class UAnimSequence;
@@ -89,12 +90,14 @@ public:
 	TSharedRef<ISkeletonTree> BuildMenuWidgetNewConstraintForBody(FMenuBuilder& InMenuBuilder, int32 InSourceBodyIndex, SGraphEditor::FActionMenuClosed InOnActionMenuClosed = SGraphEditor::FActionMenuClosed());
 	void BuildMenuWidgetBone(FMenuBuilder& InMenuBuilder);
 	TSharedRef<SWidget> BuildStaticMeshAssetPicker();
+	void AddAdvancedMenuWidget(FMenuBuilder& InMenuBuilder);
 
 	/** IToolkit interface */
 	virtual FName GetToolkitFName() const override;
 	virtual FText GetBaseToolkitName() const override;
 	virtual FString GetWorldCentricTabPrefix() const override;
 	virtual FLinearColor GetWorldCentricTabColorScale() const override;
+	virtual void InitToolMenuContext(FToolMenuContext& MenuContext) override;
 
 	/** @return the documentation location for this editor */
 	virtual FString GetDocumentationLink() const override
@@ -104,9 +107,14 @@ public:
 
 	/** IHasPersonaToolkit interface */
 	virtual TSharedRef<IPersonaToolkit> GetPersonaToolkit() const override { return PersonaToolkit.ToSharedRef(); }
+	virtual void OnClose() override;
 
 	/** FGCObject interface */
 	virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FPhysicsAssetEditor");
+	}
 
 	//~ Begin FTickableEditorObject Interface
 	virtual void Tick(float DeltaTime) override;
@@ -166,6 +174,9 @@ private:
 
 	/** Builds the toolbar widget for the PhysicsAsset editor */
 	void ExtendToolbar();
+
+	/** Extends the viewport menus for the PhysicsAsset editor*/
+	void ExtendViewportMenus();
 	
 	/**	Binds our UI commands to delegates */
 	void BindCommands();
@@ -183,10 +194,7 @@ private:
 	bool ShouldFilterAssetBasedOnSkeleton(const FAssetData& AssetData);
 
 	/** Constraint editing helper methods */
-	void SnapConstraintToBone(const FPhysicsAssetEditorSharedData::FSelection* Constraint)
-	{
-		SharedData->SnapConstraintToBone(Constraint->Index);
-	}
+	void SnapConstraintToBone(const FPhysicsAssetEditorSharedData::FSelection* Constraint);
 
 	void CreateOrConvertConstraint(EPhysicsAssetEditorConstraintType ConstraintType);
 	
@@ -198,9 +206,20 @@ private:
 	/** Toolbar/menu command methods */
 	bool HasSelectedBodyAndIsNotSimulation() const;
 	bool HasOneSelectedBodyAndIsNotSimulation() const;
+	bool HasMoreThanOneSelectedBodyAndIsNotSimulation() const;
+	bool HasSelectedBodyOrConstraintAndIsNotSimulation() const;
 	bool CanEditConstraintProperties() const;
 	bool HasSelectedConstraintAndIsNotSimulation() const;
 	void OnChangeDefaultMesh(USkeletalMesh* OldPreviewMesh, USkeletalMesh* NewPreviewMesh);
+	void OnCopyBodies();
+	bool IsCopyBodies() const;
+	bool CanCopyBodies() const;
+	void OnPasteBodies();
+	bool CanPasteBodies() const;
+	void OnCopyShapes();
+	bool CanCopyShapes() const;
+	void OnPasteShapes();
+	bool CanPasteShapes() const;
 	void OnCopyProperties();
 	bool IsCopyProperties() const;
 	bool CanCopyProperties() const;
@@ -211,18 +230,22 @@ private:
 	void OnToggleSimulation(bool bInSelected);
 	void OnToggleSimulationNoGravity();
 	bool IsNoGravitySimulationEnabled() const;
+	void OnToggleSimulationFloorCollision();
+	bool IsSimulationFloorCollisionEnabled() const;
 	void SetupSelectedSimulation();
 	bool IsFullSimulation() const;
 	bool IsSelectedSimulation() const;
 	bool IsToggleSimulation() const;
-	void OnMeshRenderingMode(EPhysicsAssetEditorRenderMode Mode, bool bSimulation);
-	bool IsMeshRenderingMode(EPhysicsAssetEditorRenderMode Mode, bool bSimulation) const;
-	void OnCollisionRenderingMode(EPhysicsAssetEditorRenderMode Mode, bool bSimulation);
-	bool IsCollisionRenderingMode(EPhysicsAssetEditorRenderMode Mode, bool bSimulation) const;
+	void OnMeshRenderingMode(EPhysicsAssetEditorMeshViewMode Mode, bool bSimulation);
+	bool IsMeshRenderingMode(EPhysicsAssetEditorMeshViewMode Mode, bool bSimulation) const;
+	void OnCollisionRenderingMode(EPhysicsAssetEditorCollisionViewMode Mode, bool bSimulation);
+	bool IsCollisionRenderingMode(EPhysicsAssetEditorCollisionViewMode Mode, bool bSimulation) const;
 	void OnConstraintRenderingMode(EPhysicsAssetEditorConstraintViewMode Mode, bool bSimulation);
 	bool IsConstraintRenderingMode(EPhysicsAssetEditorConstraintViewMode Mode, bool bSimulation) const;
 	void ToggleDrawConstraintsAsPoints();
 	bool IsDrawingConstraintsAsPoints() const;
+	void ToggleDrawViolatedLimits();
+	bool IsDrawingViolatedLimits() const;
 	void ToggleRenderOnlySelectedConstraints();
 	bool IsRenderingOnlySelectedConstraints() const;
 	void ToggleRenderOnlySelectedSolid();
@@ -254,7 +277,8 @@ private:
 	void OnDuplicatePrimitive();
 	bool CanDuplicatePrimitive() const;
 	void OnResetConstraint();
-	void OnSnapConstraint();
+	void OnConstrainChildBodiesToParentBody();
+	void OnSnapConstraint(const EConstraintTransformComponentFlags ComponentFlags);
 	void OnConvertToBallAndSocket();
 	void OnConvertToHinge();
 	void OnConvertToPrismatic();
@@ -282,12 +306,14 @@ private:
 	void OnSelectKinematicBodies();
 	void OnSelectSimulatedBodies();
 	void OnSelectBodies(EPhysicsType PhysicsType = EPhysicsType::PhysType_Simulated);
+	void OnSelectShapes(const ECollisionEnabled::Type CollisionEnabled);
 	void OnSelectAllConstraints();
-	void OnToggleSelectionType();
+	void OnToggleSelectionType(bool bIgnoreUserConstraints);
 	void OnToggleShowSelected();
 	void OnShowSelected();
 	void OnHideSelected();
 	void OnToggleShowOnlyColliding();
+	void OnToggleShowOnlyConstrained();
 	void OnToggleShowOnlySelected();
 	void OnShowAll();
 	void OnHideAll();
@@ -298,6 +324,9 @@ private:
 
 	/** Handle initial preview scene setup */
 	void HandlePreviewSceneCreated(const TSharedRef<IPersonaPreviewScene>& InPersonaPreviewScene);
+
+	/** Handle customization of Preview Scene Settings details */
+	void HandleOnPreviewSceneSettingsCustomized(IDetailLayoutBuilder& DetailBuilder) const;
 
 	/** Build context menu for tree items */
 	void HandleExtendContextMenu(FMenuBuilder& InMenuBuilder);
@@ -310,12 +339,15 @@ private:
 	void HandleToggleShowSimulatedBodies();
 	void HandleToggleShowKinematicBodies();
 	void HandleToggleShowConstraints();
+	void HandleToggleShowConstraintsOnParentBodies();
 	void HandleToggleShowPrimitives();
 	ECheckBoxState GetShowBodiesChecked() const;
 	ECheckBoxState GetShowSimulatedBodiesChecked() const;
 	ECheckBoxState GetShowKinematicBodiesChecked() const;
 	ECheckBoxState GetShowConstraintsChecked() const;
+	ECheckBoxState GetShowConstraintsOnParentBodiesChecked() const;
 	ECheckBoxState GetShowPrimitivesChecked() const;
+	bool IsShowConstraintsChecked() const;
 
 	/** Customize the filter label */
 	void HandleGetFilterLabel(TArray<FText>& InOutItems) const;
@@ -325,6 +357,9 @@ private:
 
 	/** Invalidate convex meshes and recreate the physics state. Performed on property changes (etc) */
 	void RecreatePhysicsState();
+
+	/** show a notification message **/
+	void ShowNotificationMessage(const FText& Message, const SNotificationItem::ECompletionState CompletionState);
 
 private:
 	/** Physics asset properties tab */

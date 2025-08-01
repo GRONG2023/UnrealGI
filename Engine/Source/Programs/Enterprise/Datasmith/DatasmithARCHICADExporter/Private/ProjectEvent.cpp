@@ -18,11 +18,12 @@ FAssValueName::SAssValueName TAssEnumName< API_NotifyEventID >::AssEnumName[] = 
 	ValueName(APINotify_Close),
 	ValueName(APINotify_Quit),
 	ValueName(APINotify_TempSave),
+#if AC_VERSION < 27
 	ValueName(APINotify_ConvertUnId),
 	ValueName(APINotify_ConvertGuid),
 	ValueName(APINotify_ConvertLinkId),
 	ValueName(APINotify_ConvertDrwGuid),
-
+#endif
 	ValueName(APINotify_SendChanges),
 	ValueName(APINotify_ReceiveChanges),
 
@@ -37,8 +38,10 @@ FAssValueName::SAssValueName TAssEnumName< API_NotifyEventID >::AssEnumName[] = 
 
 	ValueName(APINotify_SideviewCreated),
 	ValueName(APINotify_SideviewRebuilt),
+#if AC_VERSION < 26
 	ValueName(APINotify_PropertyDefinitionChanged),
 	ValueName(APINotify_ClassificationItemChanged),
+#endif
 	ValueName(APINotify_PropertyVisibilityChanged),
 	ValueName(APINotify_ClassificationVisibilityChanged),
 

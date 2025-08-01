@@ -1,5 +1,8 @@
-// Copyright 2011-2019 Molecular Matters GmbH, all rights reserved.
+// Copyright 2011-2020 Molecular Matters GmbH, all rights reserved.
 
+// BEGIN EPIC MOD
+//#include PCH_INCLUDE
+// END EPIC MOD
 #include "LC_CommandMap.h"
 #include "LC_DuplexPipe.h"
 
@@ -61,6 +64,10 @@ CommandMap::CommandMap(void)
 	RegisterDefaultAction<commands::HandleException>(m_actions);
 	RegisterDefaultAction<commands::HandleExceptionFinished>(m_actions);
 
+	RegisterDefaultAction<commands::ApplySettingBool>(m_actions);
+	RegisterDefaultAction<commands::ApplySettingInt>(m_actions);
+	RegisterDefaultAction<commands::ApplySettingString>(m_actions);
+
 	// BEGIN EPIC MOD - Adding ShowConsole command
 	RegisterDefaultAction<commands::ShowConsole>(m_actions);
 	// END EPIC MOD
@@ -77,9 +84,13 @@ CommandMap::CommandMap(void)
 	RegisterDefaultAction<commands::SetBuildArguments>(m_actions);
 	// END EPIC MOD
 
-	RegisterDefaultAction<commands::ApplySettingBool>(m_actions);
-	RegisterDefaultAction<commands::ApplySettingInt>(m_actions);
-	RegisterDefaultAction<commands::ApplySettingString>(m_actions);
+	// BEGIN EPIC MOD
+	RegisterDefaultAction<commands::PreCompile>(m_actions);
+	RegisterDefaultAction<commands::PostCompile>(m_actions);
+	RegisterDefaultAction<commands::TriggerReload>(m_actions);
+	RegisterDefaultAction<commands::SetReinstancingFlow>(m_actions);
+	RegisterDefaultAction<commands::DisableCompileFinishNotification>(m_actions);
+	// END EPIC MOD
 }
 
 

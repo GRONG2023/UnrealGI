@@ -2,15 +2,17 @@
 
 #include "PostProcess/PostProcessVisualizeBuffer.h"
 #include "HighResScreenshot.h"
-#include "PostProcessMaterial.h"
-#include "PostProcessDownsample.h"
+#include "PostProcess/PostProcessMaterial.h"
+#include "PostProcess/PostProcessDownsample.h"
 #include "ImagePixelData.h"
 #include "ImageWriteStream.h"
 #include "ImageWriteTask.h"
 #include "ImageWriteQueue.h"
 #include "HighResScreenshot.h"
 #include "BufferVisualizationData.h"
+#include "SceneRendering.h"
 #include "UnrealEngine.h"
+#include "PathTracing.h"
 
 class FVisualizeBufferPS : public FGlobalShader
 {
@@ -25,37 +27,9 @@ public:
 		SHADER_PARAMETER(FLinearColor, SelectionColor)
 		RENDER_TARGET_BINDING_SLOTS()
 	END_SHADER_PARAMETER_STRUCT()
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::ES3_1);
-	}
 };
 
 IMPLEMENT_GLOBAL_SHADER(FVisualizeBufferPS, "/Engine/Private/PostProcessVisualizeBuffer.usf", "MainPS", SF_Pixel);
-
-struct FVisualizeBufferTile
-{
-	// The input texture to visualize.
-	FScreenPassTexture Input;
-
-	// The label of the tile shown on the visualizer.
-	FString Label;
-
-	// Whether the tile is shown as selected.
-	bool bSelected = false;
-};
-
-struct FVisualizeBufferInputs
-{
-	FScreenPassRenderTarget OverrideOutput;
-
-	// The scene color input to propagate.
-	FScreenPassTexture SceneColor;
-
-	// The array of tiles to render onto the scene color texture.
-	TArrayView<const FVisualizeBufferTile> Tiles;
-};
 
 FScreenPassTexture AddVisualizeBufferPass(FRDGBuilder& GraphBuilder, const FViewInfo& View, const FVisualizeBufferInputs& Inputs)
 {
@@ -138,10 +112,13 @@ FScreenPassTexture AddVisualizeBufferPass(FRDGBuilder& GraphBuilder, const FView
 
 	AddDrawCanvasPass(GraphBuilder, RDG_EVENT_NAME("Labels"), View, Output, [LocalTileLabels = MoveTemp(TileLabels)](FCanvas& Canvas)
 	{
+		Canvas.SetBaseTransform(FMatrix(FScaleMatrix(Canvas.GetDPIScale()) * Canvas.CalcBaseTransform2D(Canvas.GetViewRect().Width(), Canvas.GetViewRect().Height())));
+
 		const FLinearColor LabelColor(1, 1, 0);
 		for (const FTileLabel& TileLabel : LocalTileLabels)
 		{
-			Canvas.DrawShadowedString(TileLabel.Location.X, TileLabel.Location.Y, *TileLabel.Label, GetStatsFont(), LabelColor);
+			const float DPIScale = Canvas.GetDPIScale();
+			Canvas.DrawShadowedString(TileLabel.Location.X / DPIScale, TileLabel.Location.Y / DPIScale, *TileLabel.Label, GetStatsFont(), LabelColor);
 		}
 	});
 
@@ -180,6 +157,8 @@ TUniquePtr<FImagePixelData> ReadbackPixelData(FRHICommandListImmediate& RHICmdLi
 	SourceRect.Min.X *= MSAAXSamples;
 	SourceRect.Max.X *= MSAAXSamples;
 
+	// todo: SourceRect is not clipped to Texture bounds
+
 	switch (Texture->GetFormat())
 	{
 	case PF_FloatRGBA:
@@ -194,6 +173,7 @@ TUniquePtr<FImagePixelData> ReadbackPixelData(FRHICommandListImmediate& RHICmdLi
 	}
 
 	case PF_A32B32G32R32F:
+	case PF_A2B10G10R10:
 	{
 		FReadSurfaceDataFlags ReadDataFlags(RCM_MinMax);
 		ReadDataFlags.SetLinearToGamma(false);
@@ -250,12 +230,19 @@ void AddDumpToFilePass(FRDGBuilder& GraphBuilder, FScreenPassTexture Input, cons
 
 	if (GIsHighResScreenshot && HighResScreenshotConfig.CaptureRegion.Area())
 	{
+		// todo: CaptureRegion is not clipped to Texture bounds
 		Input.ViewRect = HighResScreenshotConfig.CaptureRegion;
 	}
 
 	AddReadbackTexturePass(GraphBuilder, RDG_EVENT_NAME("DumpToFile(%s)", Input.Texture->Name), Input.Texture,
 		[&HighResScreenshotConfig, Input, Filename](FRHICommandListImmediate& RHICmdList)
 	{
+		// this is where HighResShot bDumpBufferVisualizationTargets are written to EXRs
+
+		// @todo Oodle alternative : use the exact same pixelformat that this buffer would have in the renderer
+		//	 use the DDS writer which can output arbitrary pixel formats
+		//	 do no format conversions so we dump the exact same bits the game renderer would see
+
 		TUniquePtr<FImagePixelData> PixelData = ReadbackPixelData(RHICmdList, Input.Texture->GetRHI(), Input.ViewRect);
 
 		if (!PixelData.IsValid())
@@ -271,29 +258,28 @@ void AddDumpToFilePass(FRDGBuilder& GraphBuilder, FScreenPassTexture Input, cons
 
 		if (ImageTask->PixelData->GetType() == EImagePixelType::Color)
 		{
-			// Always write full alpha
-			ImageTask->PixelPreProcessors.Add(TAsyncAlphaWrite<FColor>(255));
+			// Always write opaque alpha
+			ImageTask->AddPreProcessorToSetAlphaOpaque();
 
-			if (ImageTask->Format == EImageFormat::EXR)
-			{
-				// Write FColors with a gamma curve. This replicates behavior that previously existed in ExrImageWrapper.cpp (see following overloads) that assumed
-				// any 8 bit output format needed linearizing, but this is not a safe assumption to make at such a low level:
-				// void ExtractAndConvertChannel(const uint8*Src, uint32 SrcChannels, uint32 x, uint32 y, float* ChannelOUT)
-				// void ExtractAndConvertChannel(const uint8*Src, uint32 SrcChannels, uint32 x, uint32 y, FFloat16* ChannelOUT)
-				ImageTask->PixelPreProcessors.Add(TAsyncGammaCorrect<FColor>(2.2f));
-			}
+			// ImageTask->PixelData should be sRGB
+			//  it will gamma correct automatically if written to EXR
+		}
+		else if(ImageTask->Format == EImageFormat::PNG)
+		{
+			// PNGs can't have 0 alpha or RGB data is destroyed.
+			ImageTask->AddPreProcessorToSetAlphaOpaque();
 		}
 
 		HighResScreenshotConfig.ImageWriteQueue->Enqueue(MoveTemp(ImageTask));
 	});
 }
 
-void AddDumpToColorArrayPass(FRDGBuilder& GraphBuilder, FScreenPassTexture Input, TArray<FColor>* OutputColorArray)
+void AddDumpToColorArrayPass(FRDGBuilder& GraphBuilder, FScreenPassTexture Input, TArray<FColor>* OutputColorArray, FIntPoint* OutputExtents)
 {
 	check(Input.IsValid());
 	check(OutputColorArray);
 	AddReadbackTexturePass(GraphBuilder, RDG_EVENT_NAME("DumpToPipe(%s)", Input.Texture->Name), Input.Texture,
-		[Input, OutputColorArray](FRHICommandListImmediate& RHICmdList)
+		[Input, OutputColorArray, OutputExtents](FRHICommandListImmediate& RHICmdList)
 	{
 		// By design, we want the whole surface, not the view rectangle, as this code is used for generating a screenshot
 		// mask surface that needs to match the corresponding screenshot color surface.  The scene may render as a viewport
@@ -305,6 +291,7 @@ void AddDumpToColorArrayPass(FRDGBuilder& GraphBuilder, FScreenPassTexture Input
 		WholeSurfaceRect.Max = Input.Texture->Desc.Extent;
 
 		RHICmdList.ReadSurfaceData(Input.Texture->GetRHI(), WholeSurfaceRect, *OutputColorArray, FReadSurfaceDataFlags());
+		*OutputExtents = Input.Texture->Desc.Extent;
 	});
 }
 
@@ -360,11 +347,29 @@ FScreenPassTexture AddVisualizeGBufferOverviewPass(
 		RDG_EVENT_SCOPE(GraphBuilder, "%s", *MaterialName);
 
 		FPostProcessMaterialInputs PostProcessMaterialInputs;
-		PostProcessMaterialInputs.SetInput(EPostProcessMaterialInput::SceneColor, Inputs.SceneColor);
-		PostProcessMaterialInputs.SetInput(EPostProcessMaterialInput::SeparateTranslucency, Inputs.SeparateTranslucency);
-		PostProcessMaterialInputs.SetInput(EPostProcessMaterialInput::PreTonemapHDRColor, Inputs.SceneColorBeforeTonemap);
-		PostProcessMaterialInputs.SetInput(EPostProcessMaterialInput::PostTonemapHDRColor, Inputs.SceneColorAfterTonemap);
-		PostProcessMaterialInputs.SetInput(EPostProcessMaterialInput::Velocity, Inputs.Velocity);
+		PostProcessMaterialInputs.SetInput(GraphBuilder, EPostProcessMaterialInput::SceneColor, Inputs.SceneColor);
+		PostProcessMaterialInputs.SetInput(GraphBuilder, EPostProcessMaterialInput::SeparateTranslucency, Inputs.SeparateTranslucency);
+		PostProcessMaterialInputs.SetInput(GraphBuilder, EPostProcessMaterialInput::PreTonemapHDRColor, Inputs.SceneColorBeforeTonemap);
+		PostProcessMaterialInputs.SetInput(GraphBuilder, EPostProcessMaterialInput::PostTonemapHDRColor, Inputs.SceneColorAfterTonemap);
+		PostProcessMaterialInputs.SetInput(GraphBuilder, EPostProcessMaterialInput::Velocity, Inputs.Velocity);
+
+		if (View.Family->EngineShowFlags.PathTracing && Inputs.PathTracingResources->bPostProcessEnabled)
+		{
+			const FPathTracingResources& PathTracingResources = *Inputs.PathTracingResources;
+			
+			FIntRect ViewRect = Inputs.SceneColor.ViewRect;
+			PostProcessMaterialInputs.SetPathTracingInput(
+				EPathTracingPostProcessMaterialInput::DenoisedRadiance, FScreenPassTexture(PathTracingResources.DenoisedRadiance, ViewRect));
+			PostProcessMaterialInputs.SetPathTracingInput(
+				EPathTracingPostProcessMaterialInput::Albedo, FScreenPassTexture(PathTracingResources.Albedo, ViewRect));
+			PostProcessMaterialInputs.SetPathTracingInput(
+				EPathTracingPostProcessMaterialInput::Normal, FScreenPassTexture(PathTracingResources.Normal, ViewRect));
+			PostProcessMaterialInputs.SetPathTracingInput(
+				EPathTracingPostProcessMaterialInput::Variance, FScreenPassTexture(PathTracingResources.Variance, ViewRect));
+			PostProcessMaterialInputs.SetPathTracingInput(
+				EPathTracingPostProcessMaterialInput::Radiance, FScreenPassTexture(PathTracingResources.Radiance, ViewRect));
+		}
+
 		PostProcessMaterialInputs.SceneTextures = Inputs.SceneTextures;
 		PostProcessMaterialInputs.OutputFormat = OutputFormat;
 
@@ -391,6 +396,7 @@ FScreenPassTexture AddVisualizeGBufferOverviewPass(
 				MaterialFilename = BaseFilename + TEXT("_") + MaterialName;
 			}
 
+			// always makes a .png filename even when bCaptureHDR was set, which will actually save an EXR
 			MaterialFilename.Append(TEXT(".png"));
 
 			AddDumpToFilePass(GraphBuilder, Output, MaterialFilename);
@@ -400,14 +406,14 @@ FScreenPassTexture AddVisualizeGBufferOverviewPass(
 		{
 			FDownsamplePassInputs DownsampleInputs;
 			DownsampleInputs.Name = TEXT("MaterialHalfSize");
-			DownsampleInputs.SceneColor = Output;
+			DownsampleInputs.SceneColor = FScreenPassTextureSlice::CreateFromScreenPassTexture(GraphBuilder, Output);
 			DownsampleInputs.Flags = EDownsampleFlags::ForceRaster;
 			DownsampleInputs.Quality = EDownsampleQuality::Low;
 
 			FScreenPassTexture HalfSize = AddDownsamplePass(GraphBuilder, View, DownsampleInputs);
 
 			DownsampleInputs.Name = TEXT("MaterialQuarterSize");
-			DownsampleInputs.SceneColor = HalfSize;
+			DownsampleInputs.SceneColor = FScreenPassTextureSlice::CreateFromScreenPassTexture(GraphBuilder, HalfSize);
 
 			FVisualizeBufferTile Tile;
 			Tile.Input = AddDownsamplePass(GraphBuilder, View, DownsampleInputs);

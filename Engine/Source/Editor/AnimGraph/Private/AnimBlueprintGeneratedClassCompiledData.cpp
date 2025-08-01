@@ -51,16 +51,6 @@ TArray<FAnimNotifyEvent>& FAnimBlueprintGeneratedClassCompiledData::GetAnimNotif
 	return Class->AnimNotifies;
 }
 
-TArray<FExposedValueHandler>& FAnimBlueprintGeneratedClassCompiledData::GetExposedValueHandlers() const
-{
-	return Class->EvaluateGraphExposedInputs;
-}
-
-FPropertyAccessLibrary& FAnimBlueprintGeneratedClassCompiledData::GetPropertyAccessLibrary() const
-{
-	return Class->PropertyAccessLibrary;
-}
-
 FAnimBlueprintDebugData& FAnimBlueprintGeneratedClassCompiledData::GetAnimBlueprintDebugData() const
 {
 	return Class->AnimBlueprintDebugData;
@@ -69,4 +59,9 @@ FAnimBlueprintDebugData& FAnimBlueprintGeneratedClassCompiledData::GetAnimBluepr
 TMap<FName, FGraphAssetPlayerInformation>& FAnimBlueprintGeneratedClassCompiledData::GetGraphAssetPlayerInformation() const
 {
 	return Class->GraphAssetPlayerInformation;
+}
+
+UBlendSpace* FAnimBlueprintGeneratedClassCompiledData::AddBlendSpace(UBlendSpace* InSourceBlendSpace)
+{
+	return nullptr;
 }

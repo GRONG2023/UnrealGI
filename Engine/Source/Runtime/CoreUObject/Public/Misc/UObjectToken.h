@@ -2,9 +2,15 @@
 
 #pragma once
 
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "UObject/WeakObjectPtr.h"
+#include "Delegates/Delegate.h"
+#include "Internationalization/Text.h"
 #include "Logging/TokenizedMessage.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/WeakObjectPtr.h"
+
+class UObject;
 
 /**
  * A Message Log token that links to an object, with default behavior to link to the object
@@ -38,14 +44,14 @@ public:
 	}
 
 	/** Get the delegate for default token activation */
-	COREUOBJECT_API static FOnMessageTokenActivated& DefaultOnMessageTokenActivated()
+	static FOnMessageTokenActivated& DefaultOnMessageTokenActivated()
 	{
 		return DefaultMessageTokenActivated;
 	}
 
 	/** Get the delegate for displaying the object name */
 	DECLARE_DELEGATE_RetVal_TwoParams(FText, FOnGetDisplayName, const UObject*, bool);
-	COREUOBJECT_API static FOnGetDisplayName& DefaultOnGetObjectDisplayName()
+	static FOnGetDisplayName& DefaultOnGetObjectDisplayName()
 	{
 		return DefaultGetObjectDisplayName;
 	}

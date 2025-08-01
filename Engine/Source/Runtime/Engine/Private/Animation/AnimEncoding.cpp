@@ -5,12 +5,8 @@
 =============================================================================*/ 
 
 #include "AnimEncoding.h"
-#include "Serialization/MemoryWriter.h"
-#include "Serialization/MemoryReader.h"
-#include "AnimationCompression.h"
 
 // known codecs
-#include "AnimEncoding_ConstantKeyLerp.h"
 #include "AnimEncoding_VariableKeyLerp.h"
 #include "AnimEncoding_PerTrackCompression.h"
 
@@ -184,10 +180,6 @@ void PadMemoryReader(FMemoryReader* MemoryReader, uint8*& TrackData, const int32
  * @param	CompressedData		The compressed animation data being operated on.
  * @param	MemoryReader		The MemoryReader object to read from.
  */
-//@todo.VC10: Apparent VC10 compiler bug here causes an access violation in optimized builds
-#ifdef _MSC_VER
-	PRAGMA_DISABLE_OPTIMIZATION
-#endif
 void AnimEncodingLegacyBase::ByteSwapIn(
 	FUECompressedAnimData& CompressedData,
 	FMemoryReader& MemoryReader)
@@ -247,11 +239,6 @@ void AnimEncodingLegacyBase::ByteSwapIn(
 		}
 	}
 }
-
-#ifdef _MSC_VER
-PRAGMA_ENABLE_OPTIMIZATION
-#endif
-
 
 /**
  * Handles Byte-swapping outgoing animation data to an array of BYTEs
@@ -362,7 +349,7 @@ void AnimationFormat_GetStats(
 	int32& NumScaleTracksWithOneKey)
 {
 	OverheadSize = CompressedData.CompressedTrackOffsets.Num() * sizeof(int32);
-	const size_t KeyFrameLookupSize = (CompressedData.CompressedNumberOfFrames > 0xFF) ? sizeof(uint16) : sizeof(uint8);
+	const size_t KeyFrameLookupSize = (CompressedData.CompressedNumberOfKeys > 0xFF) ? sizeof(uint16) : sizeof(uint8);
 
 	if (CompressedData.KeyEncodingFormat != AKF_PerTrackCompression)
 	{

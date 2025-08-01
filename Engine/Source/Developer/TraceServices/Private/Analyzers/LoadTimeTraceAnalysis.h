@@ -7,39 +7,40 @@
 #include "AnalysisServicePrivate.h"
 #include "Model/LoadTimeProfilerPrivate.h"
 
-namespace Trace
+namespace TraceServices
 {
-	struct FClassInfo;
-}
 
-inline bool operator!=(const Trace::FLoadTimeProfilerCpuEvent& Lhs, const Trace::FLoadTimeProfilerCpuEvent& Rhs)
+struct FClassInfo;
+
+inline bool operator!=(const FLoadTimeProfilerCpuEvent& Lhs, const FLoadTimeProfilerCpuEvent& Rhs)
 {
 	return Lhs.Package != Rhs.Package ||
 		Lhs.Export != Rhs.Export ||
 		Lhs.EventType != Rhs.EventType;
 }
 
-class FAsyncLoadingTraceAnalyzer : public Trace::IAnalyzer
+class FAsyncLoadingTraceAnalyzer : public UE::Trace::IAnalyzer
 {
 public:
-	FAsyncLoadingTraceAnalyzer(Trace::IAnalysisSession& Session, Trace::FLoadTimeProfilerProvider& LoadTimeProfilerProvider);
+	FAsyncLoadingTraceAnalyzer(IAnalysisSession& Session, FLoadTimeProfilerProvider& LoadTimeProfilerProvider);
 	virtual ~FAsyncLoadingTraceAnalyzer();
 
 	virtual void OnAnalysisBegin(const FOnAnalysisContext& Context) override;
+	virtual void OnAnalysisEnd() override;
 	virtual bool OnEvent(uint16 RouteId, EStyle Style, const FOnEventContext& Context) override;
-	
+
 private:
 	struct FRequestState;
 	struct FAsyncPackageState;
+	struct FLinkerLoadState;
 
 	struct FRequestGroupState
 	{
 		FString Name;
 		TArray<FRequestState*> Requests;
-		Trace::FLoadRequest* LoadRequest = nullptr;
+		FLoadRequest* LoadRequest = nullptr;
 		uint64 LatestEndCycle = 0;
 		uint64 ActiveRequestsCount = 0;
-		bool bIsClosed = false;
 	};
 
 	struct FRequestState
@@ -53,16 +54,23 @@ private:
 
 	struct FAsyncPackageState
 	{
-		Trace::FPackageInfo* PackageInfo = nullptr;
+		FPackageInfo* PackageInfo = nullptr;
 		FRequestState* Request = nullptr;
-		uint64 LoadHandle = uint64(-1);
-		uint64 LoadStartCycle = 0;
-		uint64 LoadEndCycle = 0;
+		FLinkerLoadState* Linker = nullptr;
+		TSet<FAsyncPackageState*> ImportedAsyncPackages;
+		TSet<FAsyncPackageState*> ImportedByAsyncPackages;
+	};
+
+	struct FLinkerLoadState
+	{
+		FPackageInfo* PackageInfo = nullptr;
+		FAsyncPackageState* AsyncPackage = nullptr;
+		bool bHasFakeAsyncPackageState = false;
 	};
 
 	struct FScopeStackEntry
 	{
-		Trace::FLoadTimeProfilerCpuEvent Event;
+		FLoadTimeProfilerCpuEvent Event;
 		bool EnteredEvent;
 	};
 
@@ -70,20 +78,22 @@ private:
 	{
 		FScopeStackEntry CpuScopeStack[256];
 		uint64 CpuScopeStackDepth = 0;
-		Trace::FLoadTimeProfilerCpuEvent CurrentEvent;
+		int64 PostLoadScopeDepth = 0;
+		FLoadTimeProfilerCpuEvent CurrentEvent;
 		TArray<TSharedPtr<FRequestGroupState>> RequestGroupStack;
-		
-		Trace::FLoadTimeProfilerProvider::CpuTimelineInternal* CpuTimeline;
 
-		void EnterExportScope(double Time, const Trace::FPackageExportInfo* ExportInfo, Trace::ELoadTimeProfilerObjectEventType EventType);
-		void LeaveExportScope(double Time);
-		Trace::ELoadTimeProfilerObjectEventType GetCurrentExportScopeEventType();
-		Trace::FPackageExportInfo* GetCurrentExportScope();
+		FLoadTimeProfilerProvider::CpuTimelineInternal* CpuTimeline;
+
+		void EnterScope(double Time, const FPackageInfo* PackageInfo);
+		void EnterScope(double Time, const FPackageExportInfo* ExportInfo, ELoadTimeProfilerObjectEventType EventType);
+		void LeaveScope(double Time);
+		ELoadTimeProfilerObjectEventType GetCurrentScopeEventType();
+		FPackageExportInfo* GetCurrentExportScope();
 	};
 
 	void PackageRequestAssociation(const FOnEventContext& Context, FAsyncPackageState* AsyncPackageState, FRequestState* RequestState);
 	FThreadState& GetThreadState(uint32 ThreadId);
-	const Trace::FClassInfo* GetClassInfo(uint64 ClassPtr) const;
+	const FClassInfo* GetClassInfo(uint64 ClassPtr) const;
 
 	enum : uint16
 	{
@@ -91,22 +101,27 @@ private:
 		RouteId_SuspendAsyncLoading,
 		RouteId_ResumeAsyncLoading,
 		RouteId_NewAsyncPackage,
-		RouteId_BeginLoadAsyncPackage,
-		RouteId_EndLoadAsyncPackage,
 		RouteId_DestroyAsyncPackage,
+		RouteId_NewLinker,
+		RouteId_DestroyLinker,
 		RouteId_BeginRequest,
 		RouteId_EndRequest,
 		RouteId_BeginRequestGroup,
 		RouteId_EndRequestGroup,
 		RouteId_PackageSummary,
 		RouteId_AsyncPackageRequestAssociation,
+		RouteId_AsyncPackageLinkerAssociation,
 		RouteId_AsyncPackageImportDependency,
+		RouteId_BeginProcessSummary,
+		RouteId_EndProcessSummary,
 		RouteId_BeginCreateExport,
 		RouteId_EndCreateExport,
 		RouteId_BeginSerializeExport,
 		RouteId_EndSerializeExport,
-		RouteId_BeginPostLoadExport,
-		RouteId_EndPostLoadExport,
+		RouteId_BeginPostLoad,
+		RouteId_EndPostLoad,
+		RouteId_BeginPostLoadObject,
+		RouteId_EndPostLoadObject,
 		RouteId_ClassInfo,
 		RouteId_BatchIssued,
 		RouteId_BatchResolved,
@@ -114,7 +129,8 @@ private:
 		// Backwards compatibility
 		RouteId_BeginObjectScope,
 		RouteId_EndObjectScope,
-		RouteId_AsyncPackageLinkerAssociation,
+		RouteId_BeginPostLoadExport,
+		RouteId_EndPostLoadExport,
 	};
 
 	enum
@@ -124,8 +140,8 @@ private:
 	TCHAR FormatBuffer[FormatBufferSize];
 	TCHAR TempBuffer[FormatBufferSize];
 
-	Trace::IAnalysisSession& Session;
-	Trace::FLoadTimeProfilerProvider& LoadTimeProfilerProvider;
+	IAnalysisSession& Session;
+	FLoadTimeProfilerProvider& LoadTimeProfilerProvider;
 
 	template<typename ValueType>
 	struct FPointerMapKeyFuncs
@@ -156,12 +172,16 @@ private:
 	using TPointerMap = TMap<uint64, ValueType, FDefaultSetAllocator, FPointerMapKeyFuncs<ValueType>>;
 
 	TPointerMap<FAsyncPackageState*> ActiveAsyncPackagesMap;
-	TPointerMap<Trace::FPackageExportInfo*> ExportsMap;
+	TPointerMap<FLinkerLoadState*> ActiveLinkersMap;
+	TPointerMap<FPackageExportInfo*> ExportsMap;
 	TMap<uint64, FRequestState*> ActiveRequestsMap;
+	TArray<FRequestState*> FakeRequestsStack;
 	TPointerMap<uint64> ActiveBatchesMap;
 	TMap<uint32, FThreadState*> ThreadStatesMap;
-	TPointerMap<const Trace::FClassInfo*> ClassInfosMap;
-
-	// Backwards compatibility
-	TPointerMap<FAsyncPackageState*> LinkerToAsyncPackageMap;
+	TPointerMap<const FClassInfo*> ClassInfosMap;
+	FPackageInfo* UnknownPackageInfo = nullptr;
+	uint64 ErrorCount = 0;
+	uint64 WarningCount = 0;
 };
+
+} // namespace TraceServices

@@ -6,13 +6,6 @@ public class MovieSceneTracks : ModuleRules
 {
 	public MovieSceneTracks(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateIncludePaths.AddRange(new string[]
-			{ 
-				"Runtime/MovieSceneTracks/Private",
-				"Runtime/MovieSceneTracks/Private/Sections",
-				"Runtime/MovieSceneTracks/Private/Tracks",
-			});
-
 		PublicDependencyModuleNames.AddRange(new string[]
 			{
 				"Core",
@@ -21,6 +14,9 @@ public class MovieSceneTracks : ModuleRules
 				"MovieScene",
 				"TimeManagement",
 				"AnimationCore",
+				"AudioExtensions",
+				"Constraints",
+
 			});
 
 		PrivateDependencyModuleNames.AddRange(new string[]
@@ -38,6 +34,9 @@ public class MovieSceneTracks : ModuleRules
 				});
 			PrivateDependencyModuleNames.AddRange(new string[]
 				{
+					"AnimationBlueprintLibrary",
+					"DataLayerEditor",
+					"EditorFramework",
 					"UnrealEd"
 				});
 		}

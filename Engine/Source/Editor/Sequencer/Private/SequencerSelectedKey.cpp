@@ -1,31 +1,81 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SequencerSelectedKey.h"
-#include "Modules/ModuleManager.h"
-#include "IKeyArea.h"
+
 #include "Channels/MovieSceneChannel.h"
-#include "ISequencerChannelInterface.h"
+#include "Containers/Map.h"
+#include "IKeyArea.h"
+#include "MVVM/ViewModels/ChannelModel.h"
+#include "MVVM/Selection/Selection.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/FrameNumber.h"
+
+void FSequencerSelectedKey::AppendKeySelection(TSet<FSequencerSelectedKey>& OutSelectedKeys, const UE::Sequencer::FKeySelection& InKeySelection)
+{
+	using namespace UE::Sequencer;
+
+	for (FKeyHandle Key : InKeySelection)
+	{
+		TSharedPtr<FChannelModel> Channel = InKeySelection.GetModelForKey(Key);
+		UMovieSceneSection*       Section = Channel ? Channel->GetSection() : nullptr;
+		if (Channel && Section)
+		{
+			OutSelectedKeys.Emplace(FSequencerSelectedKey(*Section, Channel, Key));
+		}
+	}
+}
+
+FSelectedKeysByChannel::FSelectedKeysByChannel(const UE::Sequencer::FKeySelection& KeySelection)
+{
+	using namespace UE::Sequencer;
+
+	TMap<const IKeyArea*, int32> KeyAreaToChannelIndex;
+
+	int32 Index = 0;
+	for (FKeyHandle Key : KeySelection)
+	{
+		TSharedPtr<FChannelModel> Channel = KeySelection.GetModelForKey(Key);
+
+		if (Channel)
+		{
+			const int32* ChannelArrayIndex = KeyAreaToChannelIndex.Find(Channel->GetKeyArea().Get());
+			if (!ChannelArrayIndex)
+			{
+				int32 NewIndex = SelectedChannels.Add(FSelectedChannelInfo(Channel->GetKeyArea()->GetChannel(), Channel->GetSection()));
+				ChannelArrayIndex = &KeyAreaToChannelIndex.Add(Channel->GetKeyArea().Get(), NewIndex);
+			}
+
+			FSelectedChannelInfo& ThisChannelInfo = SelectedChannels[*ChannelArrayIndex];
+			ThisChannelInfo.KeyHandles.Add(Key);
+			ThisChannelInfo.OriginalIndices.Add(Index);
+
+			++Index;
+		}
+	}
+}
 
 FSelectedKeysByChannel::FSelectedKeysByChannel(TArrayView<const FSequencerSelectedKey> InSelectedKeys)
 {
+	using namespace UE::Sequencer;
+
 	TMap<const IKeyArea*, int32> KeyAreaToChannelIndex;
 
 	for (int32 Index = 0; Index < InSelectedKeys.Num(); ++Index)
 	{
 		FSequencerSelectedKey Key = InSelectedKeys[Index];
-		const IKeyArea* KeyArea = Key.KeyArea.Get();
+		TSharedPtr<FChannelModel> Channel = Key.WeakChannel.Pin();
 
-		if (KeyArea && Key.KeyHandle.IsSet())
+		if (Channel && Key.IsValid())
 		{
-			const int32* ChannelArrayIndex = KeyAreaToChannelIndex.Find(KeyArea);
+			const int32* ChannelArrayIndex = KeyAreaToChannelIndex.Find(Channel->GetKeyArea().Get());
 			if (!ChannelArrayIndex)
 			{
-				int32 NewIndex = SelectedChannels.Add(FSelectedChannelInfo(Key.KeyArea->GetChannel(), Key.KeyArea->GetOwningSection()));
-				ChannelArrayIndex = &KeyAreaToChannelIndex.Add(KeyArea, NewIndex);
+				int32 NewIndex = SelectedChannels.Add(FSelectedChannelInfo(Channel->GetKeyArea()->GetChannel(), Channel->GetSection()));
+				ChannelArrayIndex = &KeyAreaToChannelIndex.Add(Channel->GetKeyArea().Get(), NewIndex);
 			}
 
 			FSelectedChannelInfo& ThisChannelInfo = SelectedChannels[*ChannelArrayIndex];
-			ThisChannelInfo.KeyHandles.Add(Key.KeyHandle.GetValue());
+			ThisChannelInfo.KeyHandles.Add(Key.KeyHandle);
 			ThisChannelInfo.OriginalIndices.Add(Index);
 		}
 	}
@@ -78,6 +128,14 @@ void SetKeyTimes(TArrayView<const FSequencerSelectedKey> InSelectedKeys, TArrayV
 			for (int32 Index : ChannelInfo.OriginalIndices)
 			{
 				KeyTimesScratch.Add(InTimes[Index]);
+
+				if (UMovieSceneSection* Section = ChannelInfo.OwningSection)
+				{
+					if (!Section->GetRange().Contains(InTimes[Index]))
+					{
+						Section->ExpandToFrame(InTimes[Index]);
+					}
+				}
 			}
 
 			Channel->SetKeyTimes(ChannelInfo.KeyHandles, KeyTimesScratch);

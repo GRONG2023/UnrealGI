@@ -1,9 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BehaviorTree/Tasks/BTTask_PlayAnimation.h"
+#include "Engine/World.h"
 #include "VisualLogger/VisualLogger.h"
 #include "AIController.h"
 #include "GameFramework/Character.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BTTask_PlayAnimation)
 
 //----------------------------------------------------------------------//
 // UBTTask_PlayAnimation
@@ -50,7 +53,7 @@ EBTNodeResult::Type UBTTask_PlayAnimation::ExecuteTask(UBehaviorTreeComponent& O
 			CachedSkelMesh = SkelMesh;
 
 			SkelMesh->PlayAnimation(AnimationToPlay, bLooping);
-			const float FinishDelay = AnimationToPlay->GetMaxCurrentTime();
+			const float FinishDelay = AnimationToPlay->GetPlayLength();
 
 			if (bNonBlocking == false && FinishDelay > 0)
 			{
@@ -120,3 +123,4 @@ FName UBTTask_PlayAnimation::GetNodeIconName() const
 }
 
 #endif	// WITH_EDITOR
+

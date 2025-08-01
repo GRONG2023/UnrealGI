@@ -4,27 +4,24 @@ using UnrealBuildTool;
 
 public class StringTableEditor : ModuleRules
 {
-    public StringTableEditor(ReadOnlyTargetRules Target)
-         : base(Target)
-    {
-        PrivateDependencyModuleNames.AddRange(
-            new string[] {
-                "Core",
-                "CoreUObject",
-                "Engine",
-                "InputCore",
-                "Slate",
-                "SlateCore",
-                "EditorStyle",
-                "DesktopPlatform",
-                "UnrealEd",
-            });
+	public StringTableEditor(ReadOnlyTargetRules Target)
+		 : base(Target)
+	{
+		PrivateDependencyModuleNames.AddRange(
+			new string[] {
+				"AssetDefinition",
+				"Core",
+				"CoreUObject",
+				"Engine",
+				"InputCore",
+				"Slate",
+				"SlateCore",
+				"DesktopPlatform",
+				"EditorFramework",
+				"UnrealEd",
+				"AssetTools",
+			});
 
-        PrivateIncludePathModuleNames.AddRange(
-            new string[] {
-                "AssetTools"
-            });
-
-        DynamicallyLoadedModuleNames.Add("WorkspaceMenuStructure");
-    }
+		DynamicallyLoadedModuleNames.Add("WorkspaceMenuStructure");
+	}
 }

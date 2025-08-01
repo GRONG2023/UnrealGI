@@ -51,7 +51,7 @@ namespace BuildPatchServices
 	 * @param RequestId     The id that was returned by RequestFile(..).
 	 * @param BytesSoFar    The number of bytes received so far.
 	 */
-	DECLARE_DELEGATE_TwoParams(FDownloadProgressDelegate, int32 /* RequestId */, int32 /* BytesSoFar */);
+	DECLARE_DELEGATE_TwoParams(FDownloadProgressDelegate, int32 /* RequestId */, uint64 /* BytesSoFar */);
 
 	/**
 	 * Delegate called for download complete.
@@ -82,6 +82,12 @@ namespace BuildPatchServices
 		 * @param RequestId             The id that was returned by the call to RequestFile which should be canceled.
 		 */
 		virtual void RequestCancel(int32 RequestId) = 0;
+
+		/**
+		 *  Requests the abandoning of a requested file (cancelling without calling complete/progress handlers)
+		 * @param RequestId             The id that was returned by the call to RequestFile which should be canceled.
+		 */
+		virtual void RequestAbandon(int32 RequestId) = 0;
 	};
 
 	/**
@@ -92,14 +98,13 @@ namespace BuildPatchServices
 	public:
 		/**
 		 * Instantiates an instance of an IDownloadService, using the HTTP module, and platform file API.
-		 * @param Ticker                The ticker which can be used to register a Tick function on.
 		 * @param HttpManager           The HTTP manager interface for making HTTP(s) requests.
 		 * @param FileSystem            The file system interface for network and disk file loading.
 		 * @param DownloadServiceStat   The class to receive statistics and event information.
 		 * @param InstallerAnalytics    The analytics implementation for tracking HTTP requests.
 		 * @return the new IDownloadService instance created.
 		 */
-		static IDownloadService* Create(FTicker& Ticker, IHttpManager* HttpManager, IFileSystem* FileSystem, IDownloadServiceStat* DownloadServiceStat, IInstallerAnalytics* InstallerAnalytics);
+		static IDownloadService* Create(IHttpManager* HttpManager, IFileSystem* FileSystem, IDownloadServiceStat* DownloadServiceStat, IInstallerAnalytics* InstallerAnalytics);
 	};
 
 	/**
@@ -140,7 +145,7 @@ namespace BuildPatchServices
 		 * @param RequestId             The id for the request.
 		 * @param BytesReceived         The bytes received so far.
 		 */
-		virtual void OnDownloadProgress(int32 RequestId, int32 BytesReceived) = 0;
+		virtual void OnDownloadProgress(int32 RequestId, uint64 BytesReceived) = 0;
 
 		/**
 		 * Called for each request completion.

@@ -25,8 +25,11 @@ namespace ESplitterResizeMode
 {
 	enum Type
 	{
+		/** Resize the selected slot. If space is needed, then resize the next resizable slot. */
 		FixedPosition,
+		/** Resize the selected slot. If space is needed, then resize the last resizable slot. */
 		FixedSize,
+		/** Resize the selected slot by redistributing the available space with the following resizable slots. */
 		Fill,
 	};
 }
@@ -36,7 +39,7 @@ class FLayoutGeometry;
  * SSplitter divides its allotted area into N segments, where N is the number of children it has.
  * It allows the users to resize the children along the splitters axis: that is, horizontally or vertically.
  */
-class SLATE_API SSplitter : public SPanel
+class SSplitter : public SPanel
 {
 
 public:
@@ -57,42 +60,111 @@ public:
 	DECLARE_DELEGATE_RetVal_OneParam(FVector2D, FOnGetMaxSlotSize, int32);
 
 public:
-	class FSlot : public TSlotBase<FSlot>
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	class SLATE_API FSlot : public TSlotBase<FSlot>
 	{
 	public:		
 		FSlot()
 			: TSlotBase<FSlot>()
 			, SizingRule( FractionOfParent )
 			, SizeValue( 1 )
+			, MinSizeValue( 0 )
 		{
 		}
 
-		FSlot& Value( const TAttribute<float>& InValue )
+		SLATE_SLOT_BEGIN_ARGS(FSlot, TSlotBase<FSlot>)
+			/** The size rule used by the slot. */
+			SLATE_ATTRIBUTE(ESizeRule, SizeRule)
+			/** When the RuleSize is set to FractionOfParent, the size of the slot is the Value percentage of its parent size. */
+			SLATE_ATTRIBUTE(float, Value)
+			/** Minimum slot size when resizing. */
+			SLATE_ATTRIBUTE(float, MinSize)
+			/** Can the slot be resize by the user. */
+			SLATE_ARGUMENT(TOptional<bool>, Resizable)
+			/** Callback when the slot is resized. */
+			SLATE_EVENT(FOnSlotResized, OnSlotResized)
+		SLATE_SLOT_END_ARGS()
+
+		void Construct(const FChildren& SlotOwner, FSlotArguments&& InArgs);
+
+		/** When the RuleSize is set to FractionOfParent, the size of the slot is the Value percentage of its parent size. */
+		void SetSizeValue( TAttribute<float> InValue )
 		{
-			SizeValue = InValue;
-			return *this;
+			SizeValue = MoveTemp(InValue);
+		}
+		float GetSizeValue() const
+		{
+			return SizeValue.Get();
+		}
+
+		/**
+		 * Can the slot be resize by the user.
+		 * @see CanBeResized()
+		 */
+		void SetResizable(bool bInIsResizable)
+		{
+			bIsResizable = bInIsResizable;
+		}
+		bool IsResizable() const
+		{
+			return bIsResizable.Get(false);
+		}
+
+		/** Minimum slot size when resizing. */
+		void SetMinSize(float InMinSize)
+		{
+			MinSizeValue = InMinSize;
+		}
+		float GetMinSize() const
+		{
+			return MinSizeValue.Get(0.f);
 		}
 		
-		FSlot& OnSlotResized( const FOnSlotResized& InHandler )
+		/**
+		 * Callback when the slot is resized.
+		 * @see CanBeResized()
+		 */
+		FOnSlotResized& OnSlotResized()
 		{
-			OnSlotResized_Handler = InHandler;
-			return *this;
+			return OnSlotResized_Handler;
+		}
+		const FOnSlotResized& OnSlotResized() const
+		{
+			return OnSlotResized_Handler;
 		}
 
-		FSlot& SizeRule( const TAttribute<ESizeRule>& InSizeRule ) 
+		/** The size rule used by the slot. */
+		void SetSizingRule( TAttribute<ESizeRule> InSizeRule ) 
 		{
-			SizingRule = InSizeRule;
-			return *this;
+			SizingRule = MoveTemp(InSizeRule);
+		}
+		ESizeRule GetSizingRule() const
+		{
+			return SizingRule.Get();
 		}
 
+	public:
+		/** A slot can be resize if bIsResizable and the SizeRule is a FractionOfParent or the OnSlotResized delegate is set. */
+		bool CanBeResized() const;
+
+	public:
+		UE_DEPRECATED(5.0, "Direct access to SizingRule is now deprecated. Use the getter.")
 		TAttribute<ESizeRule> SizingRule;
+		UE_DEPRECATED(5.0, "Direct access to SizeValue is now deprecated. Use the getter.")
 		TAttribute<float> SizeValue;
+		UE_DEPRECATED(5.0, "Direct access to MinSizeValue is now deprecated. Use the getter.")
+		TAttribute<float> MinSizeValue;
+		UE_DEPRECATED(5.0, "Direct access to OnSlotResized_Handler is now deprecated. Use the getter.")
 		FOnSlotResized OnSlotResized_Handler;
+		UE_DEPRECATED(5.0, "Direct access to bIsResizable is now deprecated. Use the getter.")
+		TOptional<bool> bIsResizable;
 	};
+	SLATE_API PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
-	/** @return a new SSplitter::FSlot() */
-	static FSlot& Slot();
+	/** @return Add a new FSlot() */
+	static FSlot::FSlotArguments Slot();
 	
+	using FScopedWidgetSlotArguments = TPanelChildren<FSlot>::FScopedWidgetSlotArguments;
 	/**
 	 * Add a slot to the splitter at the specified index
 	 * Sample usage:
@@ -103,8 +175,9 @@ public:
 	 *
 	 * @return the new slot.
 	 */
-	FSlot& AddSlot( int32 AtIndex = INDEX_NONE );
+	SLATE_API FScopedWidgetSlotArguments AddSlot( int32 AtIndex = INDEX_NONE );
 
+	DECLARE_DELEGATE_OneParam(FOnHandleHovered, int32);
 
 	SLATE_BEGIN_ARGS(SSplitter)
 		: _Style( &FCoreStyle::Get().GetWidgetStyle<FSplitterStyle>("Splitter") )
@@ -117,7 +190,7 @@ public:
 		{
 		}
 
-		SLATE_SUPPORTS_SLOT(FSlot)
+		SLATE_SLOT_ARGUMENT(FSlot, Slots)
 
 		/** Style used to draw this splitter */
 		SLATE_STYLE_ARGUMENT( FSplitterStyle, Style )
@@ -132,20 +205,24 @@ public:
 
 		SLATE_ARGUMENT( float, MinimumSlotHeight )
 
+		SLATE_ATTRIBUTE( int32, HighlightedHandleIndex )
+
+		SLATE_EVENT( FOnHandleHovered, OnHandleHovered )
+
 		SLATE_EVENT( FSimpleDelegate, OnSplitterFinishedResizing )
 		
-		SLATE_EVENT(FOnGetMaxSlotSize, OnGetMaxSlotSize)
+		SLATE_EVENT( FOnGetMaxSlotSize, OnGetMaxSlotSize )
 
 	SLATE_END_ARGS()
 
-	SSplitter();
+	SLATE_API SSplitter();
 
 	/**
 	 * Construct this widget
 	 *
 	 * @param	InArgs	The declaration data for this widget
 	 */
-	void Construct( const FArguments& InArgs );
+	SLATE_API void Construct( const FArguments& InArgs );
 
 public:
 
@@ -156,7 +233,7 @@ public:
 	 *
 	 * @return Slot at the index specified by SlotIndex
 	 */
-	SSplitter::FSlot& SlotAt( int32 SlotIndex );
+	SLATE_API SSplitter::FSlot& SlotAt( int32 SlotIndex );
 
 
 	/**
@@ -164,21 +241,21 @@ public:
 	 *
 	 * @param IndexToRemove     Remove the slot and child at this index.
 	 */
-	void RemoveAt( int32 IndexToRemove );
+	SLATE_API void RemoveAt( int32 IndexToRemove );
 
 public:
 
-	virtual void OnArrangeChildren( const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren ) const override;
+	SLATE_API virtual void OnArrangeChildren( const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren ) const override;
 
 
-	virtual int32 OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const override;
+	SLATE_API virtual int32 OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const override;
 
 
 	/**
 	 * A Panel's desired size in the space required to arrange of its children on the screen while respecting all of
 	 * the children's desired sizes and any layout-related options specified by the user. See StackPanel for an example.
 	 */
-	virtual FVector2D ComputeDesiredSize(float) const override;
+	SLATE_API virtual FVector2D ComputeDesiredSize(float) const override;
 
 	/**
 	 * All widgets must provide a way to access their children in a layout-agnostic way.
@@ -187,7 +264,7 @@ public:
 	 * provides layout information about the child it stores. In that case
 	 * GetChildren should simply return the TPanelChildren<Slot>. See StackPanel for an example.
 	 */
-	virtual FChildren* GetChildren() override;
+	SLATE_API virtual FChildren* GetChildren() override;
 
 	/**
 	 * The system calls this method to notify the widget that a mouse button was pressed within it. This event is bubbled.
@@ -197,7 +274,7 @@ public:
 	 *
 	 * @return Whether the event was handled along with possible requests for the system to take action.
 	 */
-	virtual FReply OnMouseButtonDown( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
+	SLATE_API virtual FReply OnMouseButtonDown( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
 	
 	/**
 	 * The system calls this method to notify the widget that a mouse button was release within it. This event is bubbled.
@@ -207,36 +284,35 @@ public:
 	 *
 	 * @return Whether the event was handled along with possible requests for the system to take action.
 	 */
-	virtual FReply OnMouseButtonUp( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
+	SLATE_API virtual FReply OnMouseButtonUp( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
 
-	virtual FReply OnMouseButtonDoubleClick(const FGeometry& InMyGeometry, const FPointerEvent& InMouseEvent) override;
+	SLATE_API virtual FReply OnMouseButtonDoubleClick(const FGeometry& InMyGeometry, const FPointerEvent& InMouseEvent) override;
 	
-	virtual FReply OnMouseMove( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
+	SLATE_API virtual FReply OnMouseMove( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
 
-	virtual void OnMouseLeave( const FPointerEvent& MouseEvent ) override;
+	SLATE_API virtual void OnMouseLeave( const FPointerEvent& MouseEvent ) override;
 
 	/**
 	 * The system asks each widget under the mouse to provide a cursor. This event is bubbled.
 	 * 
 	 * @return FCursorReply::Unhandled() if the event is not handled; return FCursorReply::Cursor() otherwise.
 	 */
-	virtual FCursorReply OnCursorQuery( const FGeometry& MyGeometry, const FPointerEvent& CursorEvent ) const override;
+	SLATE_API virtual FCursorReply OnCursorQuery( const FGeometry& MyGeometry, const FPointerEvent& CursorEvent ) const override;
 
 	/**
 	 * Change the orientation of the splitter
 	 *
 	 * @param NewOrientation  Should the splitter be horizontal or vertical
 	 */
-	void SetOrientation( EOrientation NewOrientation );
+	SLATE_API void SetOrientation( EOrientation NewOrientation );
 
 	/**
 	 * @return the current orientation of the splitter.
 	 */
-	EOrientation GetOrientation() const;	
-
+	SLATE_API EOrientation GetOrientation() const;
 
 private:
-	TArray<FLayoutGeometry> ArrangeChildrenForLayout( const FGeometry& AllottedGeometry ) const;
+	SLATE_API TArray<FLayoutGeometry> ArrangeChildrenForLayout( const FGeometry& AllottedGeometry ) const;
 
 protected:
 
@@ -245,16 +321,16 @@ protected:
 	 *
 	 * @return INDEX_NONE if no such child can be found.
 	 */
-	static int32 FindResizeableSlotBeforeHandle( int32 DraggedHandle, const TPanelChildren<FSlot>& Children );
+	static SLATE_API int32 FindResizeableSlotBeforeHandle( int32 DraggedHandle, const TPanelChildren<FSlot>& Children );
 
 	/**
 	 * Given the index of the dragged handle and the children, find a child below/right_of the dragged handle that can be resized
 	 *
 	 * @return Children.Num() if no such child can be found.
 	 */
-	static int32 FindResizeableSlotAfterHandle( int32 DraggedHandle, const TPanelChildren<FSlot>& Children );
+	static SLATE_API int32 FindResizeableSlotAfterHandle( int32 DraggedHandle, const TPanelChildren<FSlot>& Children );
 
-	static void FindAllResizeableSlotsAfterHandle( int32 DraggedHandle, const TPanelChildren<FSlot>& Children, TArray< int32 >& OutSlotIndicies );
+	static SLATE_API void FindAllResizeableSlotsAfterHandle( int32 DraggedHandle, const TPanelChildren<FSlot>& Children, TArray<int32, FConcurrentLinearArrayAllocator>& OutSlotIndicies );
 
 	/**
 	 * Resizes the children based on user input. The template parameter Orientation corresponds to the splitter being horizontal or vertical.
@@ -264,16 +340,16 @@ protected:
 	 * @param Children         A reference to this splitter's children array; we will modify the children's layout values.
 	 * @param ChildGeometries  The arranged children; we need their sizes and positions so that we can perform a resizing.
 	 */
-	void HandleResizingByMousePosition(EOrientation Orientation, const float PhysicalSplitterHandleSize, const ESplitterResizeMode::Type ResizeMode, int32 DraggedHandle, const FVector2D& LocalMousePos, TPanelChildren<FSlot>& Children, const TArray<FLayoutGeometry>& ChildGeometries );
-	void HandleResizingDelta(EOrientation Orientation, const float PhysicalSplitterHandleSize, const ESplitterResizeMode::Type ResizeMode, int32 DraggedHandle, float Delta, TPanelChildren<FSlot>& Children, const TArray<FLayoutGeometry>& ChildGeometries);
-	void HandleResizingBySize(EOrientation Orientation, const float PhysicalSplitterHandleSize, const ESplitterResizeMode::Type ResizeMode, int32 DraggedHandle, const FVector2D& DesiredSize, TPanelChildren<FSlot>& Children, const TArray<FLayoutGeometry>& ChildGeometries);
+	SLATE_API void HandleResizingByMousePosition(EOrientation Orientation, const float PhysicalSplitterHandleSize, const ESplitterResizeMode::Type ResizeMode, int32 DraggedHandle, const FVector2D& LocalMousePos, TPanelChildren<FSlot>& Children, const TArray<FLayoutGeometry>& ChildGeometries );
+	SLATE_API void HandleResizingDelta(EOrientation Orientation, const float PhysicalSplitterHandleSize, const ESplitterResizeMode::Type ResizeMode, int32 DraggedHandle, float Delta, TPanelChildren<FSlot>& Children, const TArray<FLayoutGeometry>& ChildGeometries);
+	SLATE_API void HandleResizingBySize(EOrientation Orientation, const float PhysicalSplitterHandleSize, const ESplitterResizeMode::Type ResizeMode, int32 DraggedHandle, const FVector2D& DesiredSize, TPanelChildren<FSlot>& Children, const TArray<FLayoutGeometry>& ChildGeometries);
 
 	/**
 	 * @param ProposedSize  A size that a child would like to be
 	 *
 	 * @return A size that is clamped against the minimum size allowed for children.
 	 */
-	float ClampChild( float ProposedSize );
+	SLATE_API float ClampChild(const FSlot& ChildSlot, float ProposedSize) const;
 
 	/**
 	 * Given a mouse position within the splitter, figure out which resize handle we are hovering (if any).
@@ -290,12 +366,15 @@ protected:
 	TPanelChildren< FSlot > Children;
 
 	int32 HoveredHandleIndex;
+	TSlateAttribute<int32, EInvalidateWidgetReason::Paint> HighlightedHandleIndex;
 	bool bIsResizing;
 	EOrientation Orientation;
 	ESplitterResizeMode::Type ResizeMode;
 
 	FSimpleDelegate OnSplitterFinishedResizing;
 	FOnGetMaxSlotSize OnGetMaxSlotSize;
+	FOnHandleHovered OnHandleHovered;
+
 	/** The user is not allowed to make any of the splitter's children smaller than this. */
 	float MinSplitterChildLength;
 
@@ -306,132 +385,147 @@ protected:
 	const FSplitterStyle* Style;
 };
 
+enum class EResizingAxis : uint8
+{
+	None = 0x00,
+	LeftRightMask = 0x01,
+	UpDownMask = 0x10,
+	CrossMask = UpDownMask | LeftRightMask
+};
+ENUM_CLASS_FLAGS(EResizingAxis);
+
 /**
  * SSplitter2x2													
  * A splitter which has exactly 4 children and allows simultaneous		
  * of all children along an axis as well as resizing all children
  * by dragging the center of the splitter.
  */
-class SLATE_API SSplitter2x2 : public SPanel
+class SSplitter2x2 : public SPanel
 {
-public:
+private:
 	class FSlot : public TSlotBase<FSlot>
 	{
 	public:	
-		/** Default Constructor.  Initially each slot takes up a quarter of the entire space */
-		FSlot()
-			: TSlotBase<FSlot>( SNullWidget::NullWidget )
-			, PercentageAttribute( FVector2D(0.5, 0.5) )
-		{
-		}
-
-		/** Copy Constructor */
-		FSlot( const TSharedRef<SWidget>& InWidget )
-			: TSlotBase<FSlot>( InWidget )
-			, PercentageAttribute( FVector2D(0.5, 0.5) )
-		{
-		}
+		SLATE_SLOT_BEGIN_ARGS(FSlot, TSlotBase<FSlot>)
+			SLATE_ATTRIBUTE(FVector2D, Percentage)
+		SLATE_SLOT_END_ARGS()
 
 		/**
 		 * Sets the percentage attribute
 		 *
 		 * @param Value The new percentage value
 		 */
-		FSlot& SetPercentage( const FVector2D& Value )
+		void SetPercentage( const FVector2D& Value )
 		{
 			PercentageAttribute.Set( Value );
-			return *this;
 		}
-	public:
+
+		FVector2D GetPercentage() const
+		{
+			return PercentageAttribute.Get();
+		}
+
+		SLATE_API FSlot(const TSharedRef<SWidget>& InWidget);
+
+		SLATE_API void Construct(const FChildren& SlotOwner, FSlotArguments&& InArg);
+
+	private:
 		/** The percentage of the alloted space of the splitter that this slot requires */
 		TAttribute<FVector2D> PercentageAttribute;
 	};
 
-	SLATE_BEGIN_ARGS( SSplitter2x2 ){}
+	SLATE_BEGIN_ARGS( SSplitter2x2 )
+		: _Style(&FCoreStyle::Get().GetWidgetStyle<FSplitterStyle>("Splitter"))
+		{
+		}
+		/** Style used to draw this splitter */
+		SLATE_STYLE_ARGUMENT(FSplitterStyle, Style)
 		SLATE_NAMED_SLOT( FArguments, TopLeft )
 		SLATE_NAMED_SLOT( FArguments, BottomLeft )
 		SLATE_NAMED_SLOT( FArguments, TopRight )
 		SLATE_NAMED_SLOT( FArguments, BottomRight )
 	SLATE_END_ARGS()
 
-	SSplitter2x2();
+	SLATE_API SSplitter2x2();
 
-	void Construct( const FArguments& InArgs );
+	SLATE_API void Construct( const FArguments& InArgs );
 
 	/**
 	 * Returns the widget displayed in the splitter top left area
 	 *
 	 * @return	Top left widget
 	 */
-	TSharedRef< SWidget > GetTopLeftContent();
+	SLATE_API TSharedRef< SWidget > GetTopLeftContent();
 
 	/**
 	 * Returns the widget displayed in the splitter bottom left area
 	 *
 	 * @return	Bottom left widget
 	 */
-	TSharedRef< SWidget > GetBottomLeftContent();
+	SLATE_API TSharedRef< SWidget > GetBottomLeftContent();
 
 	/**
 	 * Returns the widget displayed in the splitter top right area
 	 *
 	 * @return	Top right widget
 	 */
-	TSharedRef< SWidget > GetTopRightContent();
+	SLATE_API TSharedRef< SWidget > GetTopRightContent();
 
 	/**
 	 * Returns the widget displayed in the splitter bottom right area
 	 *
 	 * @return	Bottom right widget
 	 */
-	TSharedRef< SWidget > GetBottomRightContent();
+	SLATE_API TSharedRef< SWidget > GetBottomRightContent();
 
 	/**
 	 * Sets the widget to be displayed in the splitter top left area
 	 *
 	 * @param	TopLeftContent	The top left widget
 	 */
-	void SetTopLeftContent( TSharedRef< SWidget > TopLeftContent );
+	SLATE_API void SetTopLeftContent( TSharedRef< SWidget > TopLeftContent );
 
 	/**
 	 * Sets the widget to be displayed in the splitter bottom left area
 	 *
 	 * @param	BottomLeftContent	The bottom left widget
 	 */
-	void SetBottomLeftContent( TSharedRef< SWidget > BottomLeftContent );
+	SLATE_API void SetBottomLeftContent( TSharedRef< SWidget > BottomLeftContent );
 
 	/**
 	 * Sets the widget to be displayed in the splitter top right area
 	 *
 	 * @param	TopRightContent	The top right widget
 	 */
-	void SetTopRightContent( TSharedRef< SWidget > TopRightContent );
+	SLATE_API void SetTopRightContent( TSharedRef< SWidget > TopRightContent );
 
 	/**
 	 * Sets the widget to be displayed in the splitter bottom right area
 	 *
 	 * @param	BottomRightContent	The bottom right widget
 	 */
-	void SetBottomRightContent( TSharedRef< SWidget > BottomRightContent );
+	SLATE_API void SetBottomRightContent( TSharedRef< SWidget > BottomRightContent );
 
 	/** Returns an array of size percentages for the children in this order: TopLeft, BottomLeft, TopRight, BottomRight */
-	void GetSplitterPercentages( TArray< FVector2D >& OutPercentages ) const;
+	SLATE_API void GetSplitterPercentages( TArray< FVector2D >& OutPercentages ) const;
 	
 	/** Sets the size percentages for the children in this order: TopLeft, BottomLeft, TopRight, BottomRight */
-	void SetSplitterPercentages( const TArray< FVector2D >& InPercentages );
+	SLATE_API void SetSplitterPercentages( TArrayView< FVector2D > InPercentages );
 
 
 private:
 
 	TArray<FLayoutGeometry> ArrangeChildrenForLayout( const FGeometry& AllottedGeometry ) const;
 
-	virtual void OnArrangeChildren( const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren ) const override;
+	SLATE_API virtual void OnArrangeChildren( const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren ) const override;
+
+	SLATE_API virtual int32 OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override;
 
 	/**
 	 * A Panel's desired size in the space required to arrange of its children on the screen while respecting all of
 	 * the children's desired sizes and any layout-related options specified by the user. See StackPanel for an example.
 	 */
-	virtual FVector2D ComputeDesiredSize(float) const override;
+	SLATE_API virtual FVector2D ComputeDesiredSize(float) const override;
 
 	/**
 	 * All widgets must provide a way to access their children in a layout-agnostic way.
@@ -440,7 +534,7 @@ private:
 	 * provides layout information about the child it stores. In that case
 	 * GetChildren should simply return the TPanelChildren<Slot>. See StackPanel for an example.
 	 */
-	virtual FChildren* GetChildren() override;
+	SLATE_API virtual FChildren* GetChildren() override;
 
 	/**
 	 * The system calls this method to notify the widget that a mouse button was pressed within it. This event is bubbled.
@@ -450,7 +544,7 @@ private:
 	 *
 	 * @return Whether the event was handled along with possible requests for the system to take action.
 	 */
- 	virtual FReply OnMouseButtonDown( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
+ 	SLATE_API virtual FReply OnMouseButtonDown( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
 	
 	/**
 	 * The system calls this method to notify the widget that a mouse button was release within it. This event is bubbled.
@@ -460,7 +554,7 @@ private:
 	 *
 	 * @return Whether the event was handled along with possible requests for the system to take action.
 	 */
- 	virtual FReply OnMouseButtonUp( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
+ 	SLATE_API virtual FReply OnMouseButtonUp( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
 
 	/**
 	 * The system calls this method to notify the widget that a mouse moved within it. This event is bubbled.
@@ -470,12 +564,12 @@ private:
 	 *
 	 * @return Whether the event was handled along with possible requests for the system to take action.
 	 */
-	virtual FReply OnMouseMove( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
+	SLATE_API virtual FReply OnMouseMove( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
 
 	/**
 	 * @return The cursor that should be visible
 	 */
-	virtual FCursorReply OnCursorQuery( const FGeometry& MyGeometry, const FPointerEvent& CursorEvent ) const override;
+	SLATE_API virtual FCursorReply OnCursorQuery( const FGeometry& MyGeometry, const FPointerEvent& CursorEvent ) const override;
 
 	/**
 	 * Calculates the axis being resized
@@ -483,7 +577,7 @@ private:
 	 * @param MyGeometry	The geometry of this widget
 	 * @param LocalMousePos	The local space current mouse position
 	 */
-	int32 CalculateResizingAxis( const FGeometry& MyGeometry, const FVector2D& LocalMousePos ) const;
+	EResizingAxis CalculateResizingAxis( const FGeometry& MyGeometry, const FVector2D& LocalMousePos ) const;
 
 	/**
 	 * Resizes all children based on a user moving the splitter handles
@@ -499,8 +593,10 @@ private:
 	/** The children of the splitter. There can only be four */
 	TPanelChildren<FSlot> Children;
 
+	const FSplitterStyle* Style = nullptr;
+
 	/** The axis currently being resized or INDEX_NONE if no resizing */
-	int32 ResizingAxis;
+	EResizingAxis ResizingAxisMask;
 
 	/** true if a splitter axis is currently being resized. */
 	bool bIsResizing;

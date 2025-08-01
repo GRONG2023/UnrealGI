@@ -6,31 +6,32 @@
 
 struct FCompactPose;
 struct FBlendedCurve;
-struct FStackCustomAttributes;
 struct FPoseContext;
 struct FSlotEvaluationPose;
 
+namespace UE { namespace Anim { struct FStackAttributeContainer; } }
+
 /** Structure used for passing around animation pose related data throughout the Animation Runtime */
-struct ENGINE_API FAnimationPoseData
+struct FAnimationPoseData
 {
-	FAnimationPoseData(FPoseContext& InPoseContext);
-	FAnimationPoseData(FSlotEvaluationPose& InSlotPoseContext);
-	FAnimationPoseData(FCompactPose& InPose, FBlendedCurve& InCurve, FStackCustomAttributes& InAttributes);
+	ENGINE_API FAnimationPoseData(FPoseContext& InPoseContext);
+	ENGINE_API FAnimationPoseData(FSlotEvaluationPose& InSlotPoseContext);
+	ENGINE_API FAnimationPoseData(FCompactPose& InPose, FBlendedCurve& InCurve, UE::Anim::FStackAttributeContainer& InAttributes);
 	
 	/** No default constructor, or assignment */
 	FAnimationPoseData() = delete;
 	FAnimationPoseData& operator=(FAnimationPoseData&& Other) = delete;
 
 	/** Getters for the wrapped structures */
-	const FCompactPose& GetPose() const;
-	FCompactPose& GetPose();
-	const FBlendedCurve& GetCurve() const;
-	FBlendedCurve& GetCurve();
-	const FStackCustomAttributes& GetAttributes() const;
-	FStackCustomAttributes& GetAttributes();
+	ENGINE_API const FCompactPose& GetPose() const;
+	ENGINE_API FCompactPose& GetPose();
+	ENGINE_API const FBlendedCurve& GetCurve() const;
+	ENGINE_API FBlendedCurve& GetCurve();
+	ENGINE_API const UE::Anim::FStackAttributeContainer& GetAttributes() const;
+	ENGINE_API UE::Anim::FStackAttributeContainer& GetAttributes();
 
 protected:
 	FCompactPose& Pose;
 	FBlendedCurve& Curve;
-	FStackCustomAttributes& Attributes;
+	UE::Anim::FStackAttributeContainer& Attributes;
 };

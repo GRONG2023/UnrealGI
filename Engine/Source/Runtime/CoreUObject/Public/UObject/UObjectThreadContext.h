@@ -6,17 +6,31 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/ContainerAllocationPolicies.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
 #include "CoreMinimal.h"
-#include "HAL/ThreadSingleton.h"
+#include "CoreTypes.h"
+#include "HAL/PlatformCrt.h"
 #include "HAL/ThreadSafeCounter.h"
+#include "HAL/ThreadSingleton.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Misc/AssertionMacros.h"
 #include "Templates/RefCounting.h"
+#include "Templates/UnrealTemplate.h"
+#include "Trace/Detail/Channel.h"
+#include "UObject/PropertyPathName.h"
 
-class FObjectInitializer;
-struct FUObjectSerializeContext;
 class FLinkerLoad;
+class FName;
+class FObjectInitializer;
 class IAsyncPackageLoader;
+class UObject;
+struct FUObjectSerializeContext;
 
-DECLARE_LOG_CATEGORY_EXTERN(LogUObjectThreadContext, Log, All);
+COREUOBJECT_API DECLARE_LOG_CATEGORY_EXTERN(LogUObjectThreadContext, Log, All);
 
 class COREUOBJECT_API FUObjectThreadContext : public TThreadSingleton<FUObjectThreadContext>
 {
@@ -35,7 +49,7 @@ public:
 	*/
 	void PopInitializer()
 	{
-		InitializerStack.Pop(/*bAllowShrinking=*/ false);
+		InitializerStack.Pop(EAllowShrinking::No);
 	}
 
 	/**
@@ -62,27 +76,29 @@ public:
 	*/
 	FObjectInitializer& TopInitializerChecked()
 	{
-		FObjectInitializer* ObjectInitializerPtr = TopInitializer();
-		UE_CLOG(!ObjectInitializerPtr, LogUObjectThreadContext, Fatal, TEXT("Tried to get the current ObjectInitializer, but none is set. Please use NewObject to construct new UObject-derived classes."));
-		return *ObjectInitializerPtr;
+		if (FObjectInitializer* ObjectInitializerPtr = TopInitializer())
+		{
+			return *ObjectInitializerPtr;
+		}
+		return ReportNull();
 	}
 
 	/** true when we are routing ConditionalPostLoad/PostLoad to objects										*/
 	bool IsRoutingPostLoad;
-	/** The object we are routing PostLoad from the Async Loading code for */
-	UObject* CurrentlyPostLoadedObjectByALT;
 	/** true when FLinkerManager deletes linkers */
 	bool IsDeletingLinkers;
+	/* Global int to track how many nested loads we're doing by triggering an async load and immediately flushing that request. */
+	int32 SyncLoadUsingAsyncLoaderCount;
 	/* Global flag so that FObjectFinders know if they are called from inside the UObject constructors or not. */
 	int32 IsInConstructor;
 	/* Object that is currently being constructed with ObjectInitializer */
 	UObject* ConstructedObject;
+	/** The object we are routing PostLoad from the Async Loading code for */
+	UObject* CurrentlyPostLoadedObjectByALT;
 	/** Async Package currently processing objects */
 	void* AsyncPackage;
-#if WITH_IOSTORE_IN_EDITOR
 	/** Async package loader currently processing objects */
 	IAsyncPackageLoader* AsyncPackageLoader;
-#endif
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 	/** Stack to ensure that PostInitProperties is routed through Super:: calls. **/
@@ -102,22 +118,25 @@ public:
 	}
 
 private:
+	/** Report that the current ObjectInitializer is null. */
+	FObjectInitializer& ReportNull();
+
 	/** Current serialization context */
 	TRefCountPtr<FUObjectSerializeContext> SerializeContext;
 };
 
 /** Structure that holds the current serialization state of UObjects */
-struct COREUOBJECT_API FUObjectSerializeContext
+struct FUObjectSerializeContext
 {
 	friend class FUObjectThreadContext;
 
 private:
 
 	/** Constructor */
-	FUObjectSerializeContext();
+	COREUOBJECT_API FUObjectSerializeContext();
 
 	/** Destructor */
-	~FUObjectSerializeContext();
+	COREUOBJECT_API ~FUObjectSerializeContext();
 
 	/** Reference count of this context */
 	int32 RefCount;
@@ -149,10 +168,22 @@ public:
 	int32 SerializedExportIndex;
 	/** Points to the most recently used Linker for serialization by CreateExport() */
 	FLinkerLoad* SerializedExportLinker;
+	/** Path to the property currently being serialized */
+	UE_INTERNAL UE::FPropertyPathName SerializedPropertyPath;
+	/** True when SerializedPropertyPath is being tracked during serialization. */
+	UE_INTERNAL bool bTrackSerializedPropertyPath;
+	/** True when unknown properties will be serialized to or from a property bag for the serialized object. */
+	UE_INTERNAL bool bSerializeUnknownProperty;
+	/** True when the SerializedObject properties are being impersonated. */
+	UE_INTERNAL bool bImpersonateProperties;
+
+	/** event called after each tagged property is deserialized */
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnTaggedPropertySerialized, const FUObjectSerializeContext&)
+	UE_INTERNAL FOnTaggedPropertySerialized OnTaggedPropertySerialize;
 
 	/** Adds a new loaded object */
-	void AddLoadedObject(UObject* InObject);
-	void AddUniqueLoadedObjects(const TArray<UObject*>& InObjects);
+	COREUOBJECT_API void AddLoadedObject(UObject* InObject);
+	COREUOBJECT_API void AddUniqueLoadedObjects(const TArray<UObject*>& InObjects);
 
 	/** Checks if object loading has started */
 	bool HasStartedLoading() const
@@ -164,8 +195,8 @@ public:
 		return ObjBeginLoadCount;
 	}
 
-	int32 IncrementBeginLoadCount();
-	int32 DecrementBeginLoadCount();
+	COREUOBJECT_API int32 IncrementBeginLoadCount();
+	COREUOBJECT_API int32 DecrementBeginLoadCount();
 
 	int32 IncrementImportCount()
 	{
@@ -195,7 +226,7 @@ public:
 		return !!ObjectsLoaded.Num();
 	}
 
-	bool PRIVATE_PatchNewObjectIntoExport(UObject* OldObject, UObject* NewObject);
+	COREUOBJECT_API bool PRIVATE_PatchNewObjectIntoExport(UObject* OldObject, UObject* NewObject);
 
 	/** This is only meant to be used by FAsyncPackage for performance reasons. The ObjectsLoaded array should not be manipulated directly! */
 	TArray<UObject*>& PRIVATE_GetObjectsLoadedInternalUseOnly()
@@ -235,13 +266,13 @@ public:
 	}
 
 	/** Attaches a linker to this context */
-	void AttachLinker(FLinkerLoad* InLinker);
+	COREUOBJECT_API void AttachLinker(FLinkerLoad* InLinker);
 	
 	/** Detaches a linker from this context */
-	void DetachLinker(FLinkerLoad* InLinker);
+	COREUOBJECT_API void DetachLinker(FLinkerLoad* InLinker);
 
 	/** Detaches all linkers from this context */
-	void DetachFromLinkers();
+	COREUOBJECT_API void DetachFromLinkers();
 
 	//~ TRefCountPtr interface
 	int32 AddRef()

@@ -8,18 +8,31 @@ namespace UnrealBuildTool.Rules
 		public DatasmithMaxBase(ReadOnlyTargetRules Target)
 			: base(Target)
 		{
+
 			bUseRTTI = true;
+
+			// To avoid clashes with Max SDK
+			// todo: separate Slate code from 3ds max to a module
+			bUseUnity = false; 
+
+
+			PublicDefinitions.Add("NEW_DIRECTLINK_PLUGIN=1");
 
 			PrivateDependencyModuleNames.AddRange(
 				new string[]
 				{
-					"Core",
 					"DatasmithExporter",
-					"Projects",
+					"DatasmithExporterUI",
+
+					"UdpMessaging", // required for DirectLink networking
+					"UEOpenExr",
+
+					"Slate",
+					"SlateCore",
 				}
 			);
 
-			PrivateIncludePaths.AddRange( new string[] { "Runtime/Launch/Public", "Runtime/Launch/Private", ModuleDirectory } );
+			PrivateIncludePathModuleNames.Add("Launch");
 
 			// Max SDK setup
 			{
@@ -67,6 +80,8 @@ namespace UnrealBuildTool.Rules
 			{
 				PrivateIncludePaths.Add(ItooInterfaceLocation);
 			}
+
+			PrivateIncludePaths.Add(ModuleDirectory);
 		}
 
 		public abstract string GetMaxVersion();

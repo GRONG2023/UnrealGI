@@ -4,7 +4,10 @@
 #pragma once
 
 #include "CoreTypes.h"
-#include "Templates/IsSigned.h"
+#include "HAL/UnrealMemory.h"
+#include "Math/UnrealMathUtility.h"
+
+#include <type_traits>
 
 /*-----------------------------------------------------------------------------
 	Binary Heap, used to index another data structure.
@@ -16,22 +19,28 @@ template< typename KeyType, typename IndexType = uint32 >
 class FBinaryHeap
 {
 public:
-	static_assert(!TIsSigned<IndexType>::Value, "FBinaryHeap only supports signed index types");
+	static_assert(std::is_unsigned_v<IndexType>, "FBinaryHeap only supports unsigned index types");
 
 				FBinaryHeap();
 				FBinaryHeap( uint32 InHeapSize, uint32 InIndexSize );
 				~FBinaryHeap();
 
+				FBinaryHeap(const FBinaryHeap&) = delete;
+				void operator =(const FBinaryHeap&) = delete;
+				FBinaryHeap(FBinaryHeap&& Other);
+
 	void		Clear();
 	void		Free();
 	void		Resize( uint32 NewHeapSize, uint32 NewIndexSize );
 
+	bool		IsEmpty() const			{ return HeapNum == 0; }
 	uint32		Num() const				{ return HeapNum; }
 	uint32		GetHeapSize() const		{ return HeapSize; }
 	uint32		GetIndexSize() const	{ return IndexSize; }
 
 	bool		IsPresent( IndexType Index ) const;
 	KeyType		GetKey( IndexType Index ) const;
+	IndexType	Peek( IndexType Index ) const;
 
 	IndexType	Top() const;
 	void		Pop();
@@ -47,6 +56,11 @@ protected:
 	void		UpHeap( IndexType HeapIndex );
 	void		DownHeap( IndexType HeapIndex );
 
+	/**
+	 * Reset internal variables to a cleared state, does not free data.
+	 */
+	void		ResetInternal();
+
 	uint32		HeapNum;
 	uint32		HeapSize;
 	uint32		IndexSize;
@@ -59,13 +73,9 @@ protected:
 
 template< typename KeyType, typename IndexType >
 FORCEINLINE FBinaryHeap< KeyType, IndexType >::FBinaryHeap()
-	: HeapNum(0)
-	, HeapSize(0)
-	, IndexSize(0)
-	, Heap( nullptr )
-	, Keys( nullptr )
-	, HeapIndexes( nullptr )
-{}
+{
+	ResetInternal();
+}
 
 template< typename KeyType, typename IndexType >
 FORCEINLINE FBinaryHeap< KeyType, IndexType >::FBinaryHeap( uint32 InHeapSize, uint32 InIndexSize )
@@ -78,6 +88,20 @@ FORCEINLINE FBinaryHeap< KeyType, IndexType >::FBinaryHeap( uint32 InHeapSize, u
 	HeapIndexes = new IndexType[ IndexSize ];
 
 	FMemory::Memset( HeapIndexes, 0xff, IndexSize * sizeof( IndexType ) );
+}
+
+template< typename KeyType, typename IndexType >
+FORCEINLINE FBinaryHeap< KeyType, IndexType >::FBinaryHeap(FBinaryHeap< KeyType, IndexType >&& Other)
+{
+	HeapNum = Other.HeapNum;
+	HeapSize = Other.HeapSize;
+	IndexSize = Other.IndexSize;
+
+	Heap = Other.Heap;
+	Keys = Other.Keys;
+	HeapIndexes = Other.HeapIndexes;
+
+	Other.ResetInternal();
 }
 
 template< typename KeyType, typename IndexType >
@@ -96,17 +120,11 @@ FORCEINLINE void FBinaryHeap< KeyType, IndexType >::Clear()
 template< typename KeyType, typename IndexType >
 FORCEINLINE void FBinaryHeap< KeyType, IndexType >::Free()
 {
-	HeapNum = 0;
-	HeapSize = 0;
-	IndexSize = 0;
-	
 	delete[] Heap;
 	delete[] Keys;
 	delete[] HeapIndexes;
 
-	Heap = nullptr;
-	Keys = nullptr;
-	HeapIndexes = nullptr;
+	ResetInternal();
 }
 
 template< typename KeyType, typename IndexType >
@@ -211,6 +229,13 @@ FORCEINLINE KeyType FBinaryHeap< KeyType, IndexType >::GetKey( IndexType Index )
 {
 	checkSlow( IsPresent( Index ) );
 	return Keys[ Index ];
+}
+
+template< typename KeyType, typename IndexType >
+FORCEINLINE IndexType FBinaryHeap< KeyType, IndexType >::Peek(IndexType Index) const
+{
+	checkSlow(Index < HeapNum);
+	return Heap[Index];
 }
 
 template< typename KeyType, typename IndexType >
@@ -365,3 +390,18 @@ void FBinaryHeap< KeyType, IndexType >::DownHeap( IndexType HeapIndex )
 		HeapIndexes[ Heap[i] ] = i;
 	}
 }
+
+template< typename KeyType, typename IndexType >
+FORCEINLINE void FBinaryHeap< KeyType, IndexType >::ResetInternal()
+{
+	HeapNum = 0;
+	HeapSize = 0;
+	IndexSize = 0;
+	Heap = nullptr;
+	Keys = nullptr;
+	HeapIndexes = nullptr;
+}
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
+#include "Templates/IsSigned.h"
+#endif

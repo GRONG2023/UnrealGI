@@ -1,13 +1,25 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SAssetDiscoveryIndicator.h"
-#include "Widgets/SBoxPanel.h"
+
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "Delegates/Delegate.h"
+#include "Fonts/SlateFontInfo.h"
+#include "Framework/Text/TextLayout.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Children.h"
+#include "Layout/Geometry.h"
+#include "Modules/ModuleManager.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Types/SlateEnums.h"
 #include "Widgets/Layout/SBorder.h"
-#include "Widgets/Notifications/SProgressBar.h"
-#include "Widgets/Text/STextBlock.h"
 #include "Widgets/Layout/SBox.h"
-#include "EditorStyleSet.h"
-#include "AssetRegistryModule.h"
+#include "Widgets/Notifications/SProgressBar.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
 
 #define LOCTEXT_NAMESPACE "AssetDiscoveryIndicator"
 
@@ -21,9 +33,13 @@ SAssetDiscoveryIndicator::~SAssetDiscoveryIndicator()
 {
 	if ( FModuleManager::Get().IsModuleLoaded(TEXT("AssetRegistry")) )
 	{
-		FAssetRegistryModule& AssetRegistryModule = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-		AssetRegistryModule.Get().OnFileLoadProgressUpdated().RemoveAll( this );
-		AssetRegistryModule.Get().OnFilesLoaded().RemoveAll( this );
+		// The engine might be shutting down so we need to use TryGet and handle null
+		IAssetRegistry* AssetRegistry = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).TryGet();
+		if (AssetRegistry) 
+		{
+			AssetRegistry->OnFileLoadProgressUpdated().RemoveAll(this);
+			AssetRegistry->OnFilesLoaded().RemoveAll(this);
+		}
 	}
 }
 
@@ -72,7 +88,7 @@ void SAssetDiscoveryIndicator::Construct( const FArguments& InArgs )
 		.HAlign(HAlign_Center)
 		[
 			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("Menu.Background"))
+			.BorderImage(FAppStyle::GetBrush("Menu.Background"))
 			.BorderBackgroundColor(this, &SAssetDiscoveryIndicator::GetBorderBackgroundColor)
 			.ColorAndOpacity(this, &SAssetDiscoveryIndicator::GetIndicatorColorAndOpacity)
 			.DesiredSizeScale(this, &SAssetDiscoveryIndicator::GetIndicatorDesiredSizeScale)
@@ -92,7 +108,7 @@ void SAssetDiscoveryIndicator::Construct( const FArguments& InArgs )
 					.AutoHeight()
 					[
 						SNew(STextBlock)
-						.Font(FEditorStyle::GetFontStyle("AssetDiscoveryIndicator.MainStatusFont"))
+						.Font(FAppStyle::GetFontStyle("AssetDiscoveryIndicator.MainStatusFont"))
 						.Text(this, &SAssetDiscoveryIndicator::GetMainStatusText)
 						.WrapTextAt(this, &SAssetDiscoveryIndicator::GetStatusTextWrapWidth)
 						.Justification(ETextJustify::Center)
@@ -106,7 +122,7 @@ void SAssetDiscoveryIndicator::Construct( const FArguments& InArgs )
 						.Visibility(this, &SAssetDiscoveryIndicator::GetSubStatusTextVisibility)
 						[
 							SNew(STextBlock)
-							.Font(FEditorStyle::GetFontStyle("AssetDiscoveryIndicator.SubStatusFont"))
+							.Font(FAppStyle::GetFontStyle("AssetDiscoveryIndicator.SubStatusFont"))
 							.Text(this, &SAssetDiscoveryIndicator::GetSubStatusText)
 							.WrapTextAt(this, &SAssetDiscoveryIndicator::GetStatusTextWrapWidth)
 							.Justification(ETextJustify::Center)
@@ -140,6 +156,13 @@ void SAssetDiscoveryIndicator::OnAssetRegistryFileLoadProgress(const IAssetRegis
 	{
 		// Marquee while we're discovering asset files as we can't yet show an accurate percentage
 		Progress = TOptional<float>();
+
+		// Once we have discovered enough assets, show a preview of the progress bar so it doesn't jump from 0 to 50%
+		if (ProgressUpdateData.NumAssetsProcessedByAssetRegistry > 10000 && ProgressUpdateData.NumTotalAssets > 0)
+		{
+			Progress = ProgressUpdateData.NumAssetsProcessedByAssetRegistry / (float)ProgressUpdateData.NumTotalAssets;
+		}
+
 		MainStatusText = LOCTEXT("DiscoveringAssetFiles", "Discovering Asset Files");
 		SubStatusText = FText::Format(LOCTEXT("XFilesFoundFmt", "{0} files found"), FText::AsNumber(ProgressUpdateData.NumTotalAssets));
 	}

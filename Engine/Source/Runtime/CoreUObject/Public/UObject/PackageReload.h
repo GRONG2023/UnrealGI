@@ -2,14 +2,24 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/Array.h"
 #include "Containers/ArrayView.h"
+#include "Containers/Map.h"
+#include "Containers/SparseArray.h"
+#include "CoreMinimal.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Templates/PointerIsConvertibleFromTo.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/UObjectGlobals.h"
 #include "UObject/WeakObjectPtr.h"
 #include "UObject/WeakObjectPtrTemplates.h"
 
 class IAssetRegistryInterface;
+class UPackage;
 
 /** Data needed by ReloadPackages */
 struct FReloadPackageData
@@ -59,7 +69,7 @@ public:
 	FPackageReloadedEvent(const UPackage* InOldPackage, const UPackage* InNewPackage, TMap<UObject*, UObject*> InRepointedObjects)
 		: OldPackage(InOldPackage)
 		, NewPackage(InNewPackage)
-		, RepointedObjects(MoveTemp(InRepointedObjects))
+		, RepointedObjects(ObjectPtrWrap(MoveTemp(InRepointedObjects)))
 		, ObjectReferencers()
 	{
 	}
@@ -85,7 +95,7 @@ public:
 	 */
 	FORCEINLINE const TMap<UObject*, UObject*>& GetRepointedObjects() const
 	{
-		return RepointedObjects;
+		return ObjectPtrDecay(RepointedObjects);
 	}
 
 	/**
@@ -145,7 +155,7 @@ private:
 
 	const UPackage* OldPackage;
 	const UPackage* NewPackage;
-	TMap<UObject*, UObject*> RepointedObjects;
+	TMap<TObjectPtr<UObject>, TObjectPtr<UObject>> RepointedObjects;
 	TArray<TWeakObjectPtr<UObject>> ObjectReferencers;
 };
 

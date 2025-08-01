@@ -1,8 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "InGamePerformanceTracker.h"
-#include "HAL/IConsoleManager.h"
 #include "Engine/World.h"
+#include "HAL/IConsoleManager.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogInGamePerformanceTracker, Log, All);
 
@@ -80,7 +80,6 @@ void FInGamePerformanceTracker::ExitTimedSection()
 FInGameScopedCycleCounter::FInGameScopedCycleCounter(class UWorld* InWorld, EInGamePerfTrackers Tracker, EInGamePerfTrackerThreads TrackerThread, bool bEnabled)
 : FInGameCycleCounter(InWorld && bEnabled && InWorld->PerfTrackers ? &InWorld->PerfTrackers->GetInGamePerformanceTracker(Tracker, TrackerThread) : nullptr)
 {
-	check(!InWorld || InWorld->PerfTrackers);//UE-38057 - Crash potentially caused by dereferencing null here. Though this shouldn't be possible.
 	Begin();
 }
 

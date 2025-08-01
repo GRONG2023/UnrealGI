@@ -6,19 +6,14 @@ namespace UnrealBuildTool.Rules
 	{
         public Merge(ReadOnlyTargetRules Target) : base(Target)
 		{
-			PrivateIncludePaths.AddRange(
-				new string[] {
-					"Developer/Merge/Private",
-				}
-			);
-
 			PrivateDependencyModuleNames.AddRange(
 				new string[]
 				{
 				    "AssetTools",
 					"Core",
 				    "CoreUObject",
-				    "EditorStyle",
+					"EditorFramework",
+				    
 				    "Engine", // needed so that we can clone blueprints...
 				    "GraphEditor",
 				    "InputCore",

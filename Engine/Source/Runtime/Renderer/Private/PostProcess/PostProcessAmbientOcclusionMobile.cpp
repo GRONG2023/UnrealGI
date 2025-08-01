@@ -6,21 +6,24 @@
 
 #include "PostProcess/PostProcessAmbientOcclusionMobile.h"
 #include "CompositionLighting/PostProcessAmbientOcclusion.h"
+#include "DataDrivenShaderPlatformInfo.h"
 #include "ShaderParameterStruct.h"
 #include "SceneRendering.h"
 #include "RenderTargetPool.h"
-#include "SceneRenderTargets.h"
+#include "PostProcess/SceneFilterRendering.h"
+#include "PostProcess/SceneRenderTargets.h"
 #include "SystemTextures.h"
 #include "ScreenPass.h"
 #include "ScenePrivate.h"
 #include "SceneTextureParameters.h"
 #include "SceneRenderTargetParameters.h"
 #include "ClearQuad.h"
+#include "PixelShaderUtils.h"
 
 static TAutoConsoleVariable<int32> CVarMobileAmbientOcclusion(
 	TEXT("r.Mobile.AmbientOcclusion"),
 	0,
-	TEXT("Causion: An extra sampler will be occupied in mobile base pass pixel shader after enable the mobile ambient occlusion.\n")
+	TEXT("Caution: An extra sampler will be occupied in mobile base pass pixel shader after enable the mobile ambient occlusion.\n")
 	TEXT("0: Disable Ambient Occlusion on mobile platform. [default]\n")
 	TEXT("1: Enable Ambient Occlusion on mobile platform.\n"),
 	ECVF_ReadOnly | ECVF_RenderThreadSafe
@@ -68,18 +71,21 @@ static TAutoConsoleVariable<int32> CVarMobileAmbientOcclusionDepthBoundsTest(
 	TEXT("Whether to use depth bounds test to cull distant pixels during AO pass. This option is only valid when pixel shader path is used"),
 	ECVF_RenderThreadSafe);
 
+static TAutoConsoleVariable<int32> CVarMobileSSAOHalfResolution(
+	TEXT("r.Mobile.SSAOHalfResolution"),
+	0,
+	TEXT("Whether to calculate SSAO at half resolution.\n")
+	TEXT("0: Disabled.\n")
+	TEXT("1: Half Resolution with bilinear upsample\n")
+	TEXT("2: Half Resolution with 4 tap bilateral upsample\n")
+	TEXT("3: Half Resolution with 9 tap bilateral upsample\n"),
+	ECVF_RenderThreadSafe);
+
 // --------------------------------------------------------------------------------------------------------------------
 DECLARE_GPU_STAT_NAMED(MobileSSAO, TEXT("SSAO"));
 
 
 // --------------------------------------------------------------------------------------------------------------------
-
-FAmbientOcclusionMobileOutputs GAmbientOcclusionMobileOutputs;
-
-bool IsMobileAmbientOcclusionEnabled(EShaderPlatform ShaderPlatform)
-{
-	return UseMobileAmbientOcclusion(ShaderPlatform) && IsMobileHDR();
-}
 
 bool IsUsingMobileAmbientOcclusion(EShaderPlatform ShaderPlatform)
 {
@@ -101,12 +107,12 @@ public:
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
-		SHADER_PARAMETER_EX(FVector4, ViewRectMin, EShaderPrecisionModifier::Half)
-		SHADER_PARAMETER_EX(FVector4, DepthBufferSizeAndInvSize, EShaderPrecisionModifier::Half)
-		SHADER_PARAMETER_EX(FVector4, BufferSizeAndInvSize, EShaderPrecisionModifier::Half)
-		SHADER_PARAMETER_EX(FVector4, ViewSizeAndInvSize, EShaderPrecisionModifier::Half)
-		SHADER_PARAMETER(FVector4, FadeRadiusMulAdd_FadeDistance_AttenFactor)
-		SHADER_PARAMETER(FVector4, WorldRadiusAdj_SinDeltaAngle_CosDeltaAngle_Thickness)
+		SHADER_PARAMETER_EX(FVector4f, ViewRectMin, EShaderPrecisionModifier::Half)
+		SHADER_PARAMETER_EX(FVector4f, DepthBufferSizeAndInvSize, EShaderPrecisionModifier::Half)
+		SHADER_PARAMETER_EX(FVector4f, BufferSizeAndInvSize, EShaderPrecisionModifier::Half)
+		SHADER_PARAMETER_EX(FVector4f, ViewSizeAndInvSize, EShaderPrecisionModifier::Half)
+		SHADER_PARAMETER(FVector4f, FadeRadiusMulAdd_FadeDistance_AttenFactor)
+		SHADER_PARAMETER(FVector4f, WorldRadiusAdj_SinDeltaAngle_CosDeltaAngle_Thickness)
 
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneDepthTexture)
 		SHADER_PARAMETER_SAMPLER(SamplerState, SceneDepthSampler)
@@ -141,7 +147,7 @@ public:
 		return PermutationVector;
 	}
 
-	static void SetupShaderParameters(FParameters& ShaderParameters, FRDGBuilder& GraphBuilder, const FViewInfo& View, const FIntRect& ViewRect, const FIntPoint& DepthBufferSize, const FIntPoint& BufferSize, const FVector4& FallOffStartEndScaleBias, const FVector4& WorldRadiusAdjSinCosDeltaAngleThickness, FRDGTextureRef SceneDepthTexture)
+	static void SetupShaderParameters(FParameters& ShaderParameters, FRDGBuilder& GraphBuilder, const FViewInfo& View, const FIntRect& ViewRect, const FIntPoint& DepthBufferSize, const FIntPoint& BufferSize, const FVector4f& FallOffStartEndScaleBias, const FVector4f& WorldRadiusAdjSinCosDeltaAngleThickness, FRDGTextureRef SceneDepthTexture)
 	{
 		const FFinalPostProcessSettings& Settings = View.FinalPostProcessSettings;
 
@@ -149,11 +155,11 @@ public:
 		float InvFadeRadius = 1.0f / FadeRadius;
 
 		ShaderParameters.View = View.ViewUniformBuffer;
-		ShaderParameters.ViewRectMin = FVector4(ViewRect.Min.X, ViewRect.Min.Y, 0.0f, 0.0f);
-		ShaderParameters.DepthBufferSizeAndInvSize = FVector4(DepthBufferSize.X, DepthBufferSize.Y, 1.0f / DepthBufferSize.X, 1.0f / DepthBufferSize.Y);
-		ShaderParameters.BufferSizeAndInvSize = FVector4(BufferSize.X, BufferSize.Y, 1.0f / BufferSize.X, 1.0f / BufferSize.Y);
-		ShaderParameters.ViewSizeAndInvSize = FVector4(ViewRect.Width(), ViewRect.Height(), 1.0f / ViewRect.Width(), 1.0f / ViewRect.Height());
-		ShaderParameters.FadeRadiusMulAdd_FadeDistance_AttenFactor = FVector4(InvFadeRadius, -(Settings.AmbientOcclusionFadeDistance - FadeRadius) * InvFadeRadius, Settings.AmbientOcclusionFadeDistance, 2.0f / (FallOffStartEndScaleBias.Y * FallOffStartEndScaleBias.Y));
+		ShaderParameters.ViewRectMin = FVector4f(ViewRect.Min.X, ViewRect.Min.Y, 0.0f, 0.0f);
+		ShaderParameters.DepthBufferSizeAndInvSize = FVector4f(DepthBufferSize.X, DepthBufferSize.Y, 1.0f / DepthBufferSize.X, 1.0f / DepthBufferSize.Y);
+		ShaderParameters.BufferSizeAndInvSize = FVector4f(BufferSize.X, BufferSize.Y, 1.0f / BufferSize.X, 1.0f / BufferSize.Y);
+		ShaderParameters.ViewSizeAndInvSize = FVector4f(ViewRect.Width(), ViewRect.Height(), 1.0f / ViewRect.Width(), 1.0f / ViewRect.Height());
+		ShaderParameters.FadeRadiusMulAdd_FadeDistance_AttenFactor = FVector4f(InvFadeRadius, -(Settings.AmbientOcclusionFadeDistance - FadeRadius) * InvFadeRadius, Settings.AmbientOcclusionFadeDistance, 2.0f / (FallOffStartEndScaleBias.Y * FallOffStartEndScaleBias.Y));
 		ShaderParameters.WorldRadiusAdj_SinDeltaAngle_CosDeltaAngle_Thickness = WorldRadiusAdjSinCosDeltaAngleThickness;
 
 		ShaderParameters.SceneDepthTexture = SceneDepthTexture;
@@ -161,8 +167,8 @@ public:
 
 		if (GSystemTextures.GTAOPreIntegrated.IsValid())
 		{
-			ShaderParameters.GTAOPreIntegrated2D = GSystemTextures.GTAOPreIntegrated->GetRenderTargetItem().ShaderResourceTexture;
-			ShaderParameters.GTAOPreIntegrated3D = GSystemTextures.GTAOPreIntegrated->GetRenderTargetItem().ShaderResourceTexture;
+			ShaderParameters.GTAOPreIntegrated2D = GSystemTextures.GTAOPreIntegrated->GetRHI();
+			ShaderParameters.GTAOPreIntegrated3D = GSystemTextures.GTAOPreIntegrated->GetRHI();
 			ShaderParameters.GTAOPreIntegratedSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 		}
 	}
@@ -191,7 +197,7 @@ public:
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_INCLUDE(FGTAOMobile_HorizonSearchIntegral::FParameters, Common)
-		SHADER_PARAMETER_EX(FVector4, Power_Intensity_ScreenPixelsToSearch, EShaderPrecisionModifier::Half)
+		SHADER_PARAMETER_EX(FVector4f, Power_Intensity_ScreenPixelsToSearch, EShaderPrecisionModifier::Half)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<half4>, OutTexture)
 	END_SHADER_PARAMETER_STRUCT()
 
@@ -284,10 +290,10 @@ class FGTAOMobile_SpatialFilter : public FGlobalShader
 public:
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-		SHADER_PARAMETER_EX(FVector4, ViewRectMin, EShaderPrecisionModifier::Half)
-		SHADER_PARAMETER_EX(FVector4, BufferSizeAndInvSize, EShaderPrecisionModifier::Half)
-		SHADER_PARAMETER_EX(FVector4, ViewSizeAndInvSize, EShaderPrecisionModifier::Half)
-		SHADER_PARAMETER_EX(FVector4, Power_Intensity_ScreenPixelsToSearch, EShaderPrecisionModifier::Half)
+		SHADER_PARAMETER_EX(FVector4f, ViewRectMin, EShaderPrecisionModifier::Half)
+		SHADER_PARAMETER_EX(FVector4f, BufferSizeAndInvSize, EShaderPrecisionModifier::Half)
+		SHADER_PARAMETER_EX(FVector4f, ViewSizeAndInvSize, EShaderPrecisionModifier::Half)
+		SHADER_PARAMETER_EX(FVector4f, Power_Intensity_ScreenPixelsToSearch, EShaderPrecisionModifier::Half)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, AOInputTexture)
 		SHADER_PARAMETER_SAMPLER(SamplerState, AOInputSampler)
 	END_SHADER_PARAMETER_STRUCT()
@@ -308,10 +314,10 @@ public:
 	{
 		const FFinalPostProcessSettings& Settings = View.FinalPostProcessSettings;
 
-		ShaderParameters.ViewRectMin = FVector4(ViewRect.Min.X, ViewRect.Min.Y, 0.0f, 0.0f);
-		ShaderParameters.BufferSizeAndInvSize = FVector4(BufferSize.X, BufferSize.Y, 1.0f / BufferSize.X, 1.0f / BufferSize.Y);
-		ShaderParameters.ViewSizeAndInvSize = FVector4(ViewRect.Width(), ViewRect.Height(), 1.0f / ViewRect.Width(), 1.0f / ViewRect.Height());
-		ShaderParameters.Power_Intensity_ScreenPixelsToSearch = FVector4(Settings.AmbientOcclusionPower * 0.5f, Settings.AmbientOcclusionIntensity, 0.0f, 0.0f);
+		ShaderParameters.ViewRectMin = FVector4f(ViewRect.Min.X, ViewRect.Min.Y, 0.0f, 0.0f);
+		ShaderParameters.BufferSizeAndInvSize = FVector4f(BufferSize.X, BufferSize.Y, 1.0f / BufferSize.X, 1.0f / BufferSize.Y);
+		ShaderParameters.ViewSizeAndInvSize = FVector4f(ViewRect.Width(), ViewRect.Height(), 1.0f / ViewRect.Width(), 1.0f / ViewRect.Height());
+		ShaderParameters.Power_Intensity_ScreenPixelsToSearch = FVector4f(Settings.AmbientOcclusionPower * 0.5f, Settings.AmbientOcclusionIntensity, 0.0f, 0.0f);
 
 		ShaderParameters.AOInputTexture = HorizonSearchIntegralTexture;
 		ShaderParameters.AOInputSampler = TStaticSamplerState<SF_Point, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
@@ -430,31 +436,27 @@ public:
 
 IMPLEMENT_GLOBAL_SHADER(FGTAOMobile_SpatialFilterPS, "/Engine/Private/PostProcessAmbientOcclusionMobile.usf", "GTAOSpatialFilterPS", SF_Pixel);
 
-// --------------------------------------------------------------------------------------------------------------------
-void FMobileSceneRenderer::InitAmbientOcclusionOutputs(FRHICommandListImmediate& RHICmdList, const TRefCountPtr<IPooledRenderTarget>& SceneDepthZ)
+FRDGTextureRef CreateMobileScreenSpaceAOTexture(FRDGBuilder& GraphBuilder, const FSceneTexturesConfig& Config)
 {
-	FPooledRenderTargetDesc SceneDepthZDesc = SceneDepthZ->GetDesc();
-
-	const FIntPoint& BufferSize = SceneDepthZDesc.Extent;
-
 	bool bGTAO = (CVarMobileAmbientOcclusionTechnique.GetValueOnRenderThread() == 0);
 	const uint32 DownsampleFactor = bGTAO ? 2 : 1;
 
-	FIntPoint Extent = FIntPoint::DivideAndRoundUp(BufferSize, DownsampleFactor);
+	const FIntPoint Extent = FIntPoint::DivideAndRoundUp(Config.Extent, DownsampleFactor);
 
-	const bool bUsePixelShader = bGTAO ? CVarMobileAmbientOcclusionShaderType.GetValueOnRenderThread() == 2 : true;
+	EPixelFormat Format = PF_G8;
 
-	if (!GAmbientOcclusionMobileOutputs.IsValid() || GAmbientOcclusionMobileOutputs.AmbientOcclusionTexture->GetDesc().Extent != Extent || (bUsePixelShader && GAmbientOcclusionMobileOutputs.AmbientOcclusionTexture->GetDesc().Format != PF_G8) || (!bUsePixelShader && GAmbientOcclusionMobileOutputs.AmbientOcclusionTexture->GetDesc().Format != PF_R8G8B8A8))
+	// G8 isn't supported as UAV on Android OpenGLES, fall back to RGBA8 for compute shader usage.
+	if (bGTAO
+		&& IsOpenGLPlatform(Config.ShaderPlatform)
+		&& ((GetMaxWorkGroupInvocations() >= 1024 && CVarMobileAmbientOcclusionShaderType.GetValueOnRenderThread() == 0) || CVarMobileAmbientOcclusionShaderType.GetValueOnRenderThread() == 1)
+		)
 	{
-		GAmbientOcclusionMobileOutputs.AmbientOcclusionTexture.SafeRelease();
-
-		GRenderTargetPool.FindFreeElement(RHICmdList, FPooledRenderTargetDesc::Create2DDesc(Extent, bUsePixelShader ? PF_G8 : PF_R8G8B8A8, FClearValueBinding::Black, TexCreate_None, TexCreate_ShaderResource | TexCreate_RenderTargetable | TexCreate_UAV, false, 1, false), GAmbientOcclusionMobileOutputs.AmbientOcclusionTexture, TEXT("AmbientOcclusionTexture"));
+		Format = PF_R8G8B8A8;
 	}
-}
 
-void FMobileSceneRenderer::ReleaseAmbientOcclusionOutputs()
-{
-	GAmbientOcclusionMobileOutputs.Release();
+	return GraphBuilder.CreateTexture(
+		FRDGTextureDesc::Create2D(Extent, Format, FClearValueBinding::Black, TexCreate_ShaderResource | TexCreate_RenderTargetable | TexCreate_UAV),
+		TEXT("ScreenSpaceAO"));
 }
 
 static void RenderGTAO(FRDGBuilder& GraphBuilder, FRDGTextureRef SceneDepthTexture, FRDGTextureRef AmbientOcclusionTexture, const TArray<FViewInfo>& Views)
@@ -471,7 +473,7 @@ static void RenderGTAO(FRDGBuilder& GraphBuilder, FRDGTextureRef SceneDepthTextu
 	FRDGTextureUAVRef AmbientOcclusionTextureUAV = GraphBuilder.CreateUAV(AmbientOcclusionTexture);
 
 	const FIntPoint& DepthBufferSize = SceneDepthTexture->Desc.Extent;
-	const FIntPoint& BufferSize = GAmbientOcclusionMobileOutputs.AmbientOcclusionTexture->GetDesc().Extent;
+	const FIntPoint& BufferSize = AmbientOcclusionTexture->Desc.Extent;
 
 	float FallOffEnd = GTAOFalloffEndCVar ? GTAOFalloffEndCVar->GetValueOnRenderThread() : 200.0f;
 	float FallOffStartRatio = GTAOFalloffStartRatioCVar ? FMath::Clamp(GTAOFalloffStartRatioCVar->GetValueOnRenderThread(), 0.0f, 0.999f) : 0.5f;
@@ -482,7 +484,7 @@ static void RenderGTAO(FRDGBuilder& GraphBuilder, FRDGTextureRef SceneDepthTextu
 	float FallOffScale = 1.0f / (FallOffEndSq - FallOffStartSq);
 	float FallOffBias = -FallOffStartSq * FallOffScale;
 
-	FVector4 FallOffStartEndScaleBias(FallOffStart, FallOffEnd, FallOffScale, FallOffBias);
+	FVector4f FallOffStartEndScaleBias(FallOffStart, FallOffEnd, FallOffScale, FallOffBias);
 
 	float ThicknessBlend = GTAOThicknessBlendCVar ? GTAOThicknessBlendCVar->GetValueOnRenderThread() : 0.5f;
 	ThicknessBlend = FMath::Clamp(1.0f - (ThicknessBlend*ThicknessBlend), 0.0f, 0.99f);
@@ -503,14 +505,14 @@ static void RenderGTAO(FRDGBuilder& GraphBuilder, FRDGTextureRef SceneDepthTextu
 
 		const FIntRect& ViewRect = FIntRect::DivideAndRoundUp(View.ViewRect, DownsampleFactor);
 
-		FVector4 WorldRadiusAdjSinCosDeltaAngleThickness(FallOffStartEndScaleBias.Y * DepthBufferSize.Y * View.ViewMatrices.GetProjectionMatrix().M[0][0], SinDeltaAngle, CosDeltaAngle, ThicknessBlend);
+		FVector4f WorldRadiusAdjSinCosDeltaAngleThickness(FallOffStartEndScaleBias.Y * DepthBufferSize.Y * View.ViewMatrices.GetProjectionMatrix().M[0][0], SinDeltaAngle, CosDeltaAngle, ThicknessBlend);
 
 		if (GetMaxWorkGroupInvocations() >= 1024 && CVarMobileAmbientOcclusionShaderType.GetValueOnRenderThread() == 0)
 		{
 			FGTAOMobile_HorizonSearchIntegralSpatialFilterCS::FParameters* HorizonSearchIntegralSpatialFilterParameters = GraphBuilder.AllocParameters<FGTAOMobile_HorizonSearchIntegralSpatialFilterCS::FParameters>();
 			FGTAOMobile_HorizonSearchIntegral::SetupShaderParameters(HorizonSearchIntegralSpatialFilterParameters->Common, GraphBuilder, View, ViewRect, DepthBufferSize, BufferSize, FallOffStartEndScaleBias, WorldRadiusAdjSinCosDeltaAngleThickness, SceneDepthTexture);
 			
-			HorizonSearchIntegralSpatialFilterParameters->Power_Intensity_ScreenPixelsToSearch = FVector4(Settings.AmbientOcclusionPower * 0.5f, Settings.AmbientOcclusionIntensity, 0.0f, 0.0f);
+			HorizonSearchIntegralSpatialFilterParameters->Power_Intensity_ScreenPixelsToSearch = FVector4f(Settings.AmbientOcclusionPower * 0.5f, Settings.AmbientOcclusionIntensity, 0.0f, 0.0f);
 
 			HorizonSearchIntegralSpatialFilterParameters->OutTexture = AmbientOcclusionTextureUAV;
 
@@ -520,6 +522,7 @@ static void RenderGTAO(FRDGBuilder& GraphBuilder, FRDGTextureRef SceneDepthTextu
 			FComputeShaderUtils::AddPass(
 				GraphBuilder,
 				RDG_EVENT_NAME("AmbientOcclusion_HorizonSearchIntegralSpatialFilter %dx%d (CS)", ViewRect.Width(), ViewRect.Height()),
+				ERDGPassFlags::Compute | ERDGPassFlags::NeverCull,
 				ComputeShader,
 				HorizonSearchIntegralSpatialFilterParameters,
 				FComputeShaderUtils::GetGroupCount(ViewRect.Size(), FGTAOMobile_HorizonSearchIntegralSpatialFilterCS::TexelsPerThreadGroup));
@@ -528,7 +531,7 @@ static void RenderGTAO(FRDGBuilder& GraphBuilder, FRDGTextureRef SceneDepthTextu
 		{
 			TShaderMapRef<FScreenPassVS> VertexShader(View.ShaderMap);
 
-			FScreenPassRenderTarget HorizonSearchIntegralRT(HorizonSearchIntegralTexture, ViewRect, ERenderTargetLoadAction::EClear);
+			FScreenPassRenderTarget HorizonSearchIntegralRT(HorizonSearchIntegralTexture, ViewRect, ViewIndex > 0 ? ERenderTargetLoadAction::ELoad : ERenderTargetLoadAction::EClear);
 
 			FGTAOMobile_HorizonSearchIntegralPS::FParameters* HorizonSearchIntegralParameters = GraphBuilder.AllocParameters<FGTAOMobile_HorizonSearchIntegralPS::FParameters>();
 			FGTAOMobile_HorizonSearchIntegral::SetupShaderParameters(HorizonSearchIntegralParameters->Common, GraphBuilder, View, ViewRect, DepthBufferSize, BufferSize, FallOffStartEndScaleBias, WorldRadiusAdjSinCosDeltaAngleThickness, SceneDepthTexture);
@@ -543,7 +546,7 @@ static void RenderGTAO(FRDGBuilder& GraphBuilder, FRDGTextureRef SceneDepthTextu
 			GraphBuilder.AddPass(
 				RDG_EVENT_NAME("AmbientOcclusion_HorizonSearchIntegral %dx%d (PS)", ViewRect.Width(), ViewRect.Height()),
 				HorizonSearchIntegralParameters,
-				ERDGPassFlags::Raster,
+				ERDGPassFlags::Raster | ERDGPassFlags::NeverCull,
 				[VertexShader, HorizonSearchIntegralShader, HorizonSearchIntegralParameters, ViewRect, BufferSize](FRHICommandList& RHICmdList)
 			{
 				RHICmdList.SetViewport(ViewRect.Min.X, ViewRect.Min.Y, 0.0f, ViewRect.Max.X, ViewRect.Max.Y, 1.0f);
@@ -560,7 +563,7 @@ static void RenderGTAO(FRDGBuilder& GraphBuilder, FRDGTextureRef SceneDepthTextu
 				GraphicsPSOInit.BoundShaderState.PixelShaderRHI = HorizonSearchIntegralShader.GetPixelShader();
 				GraphicsPSOInit.PrimitiveType = PT_TriangleList;
 
-				SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit);
+				SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
 
 				SetShaderParameters(RHICmdList, HorizonSearchIntegralShader, HorizonSearchIntegralShader.GetPixelShader(), *HorizonSearchIntegralParameters);
 
@@ -576,7 +579,7 @@ static void RenderGTAO(FRDGBuilder& GraphBuilder, FRDGTextureRef SceneDepthTextu
 					EDRF_UseTriangleOptimization);
 			});
 
-			FScreenPassRenderTarget AmbientOcclusionRT(AmbientOcclusionTexture, ViewRect, ERenderTargetLoadAction::EClear);
+			FScreenPassRenderTarget AmbientOcclusionRT(AmbientOcclusionTexture, ViewRect, ViewIndex > 0 ? ERenderTargetLoadAction::ELoad : ERenderTargetLoadAction::EClear);
 
 			FGTAOMobile_SpatialFilterPS::FParameters* SpatialFilterParameters = GraphBuilder.AllocParameters<FGTAOMobile_SpatialFilterPS::FParameters>();
 			FGTAOMobile_SpatialFilter::SetupShaderParameters(SpatialFilterParameters->Common, View, ViewRect, BufferSize, HorizonSearchIntegralTexture);
@@ -589,7 +592,7 @@ static void RenderGTAO(FRDGBuilder& GraphBuilder, FRDGTextureRef SceneDepthTextu
 			GraphBuilder.AddPass(
 				RDG_EVENT_NAME("AmbientOcclusion_SpatialFilter %dx%d (PS)", ViewRect.Width(), ViewRect.Height()),
 				SpatialFilterParameters,
-				ERDGPassFlags::Raster,
+				ERDGPassFlags::Raster | ERDGPassFlags::NeverCull,
 				[VertexShader, SpatialFilterShader, SpatialFilterParameters, ViewRect, BufferSize](FRHICommandList& RHICmdList)
 			{
 				RHICmdList.SetViewport(ViewRect.Min.X, ViewRect.Min.Y, 0.0f, ViewRect.Max.X, ViewRect.Max.Y, 1.0f);
@@ -606,7 +609,7 @@ static void RenderGTAO(FRDGBuilder& GraphBuilder, FRDGTextureRef SceneDepthTextu
 				GraphicsPSOInit.BoundShaderState.PixelShaderRHI = SpatialFilterShader.GetPixelShader();
 				GraphicsPSOInit.PrimitiveType = PT_TriangleList;
 
-				SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit);
+				SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
 
 				SetShaderParameters(RHICmdList, SpatialFilterShader, SpatialFilterShader.GetPixelShader(), *SpatialFilterParameters);
 
@@ -635,6 +638,7 @@ static void RenderGTAO(FRDGBuilder& GraphBuilder, FRDGTextureRef SceneDepthTextu
 			FComputeShaderUtils::AddPass(
 				GraphBuilder,
 				RDG_EVENT_NAME("AmbientOcclusion_HorizonSearchIntegral %dx%d (CS)", ViewRect.Width(), ViewRect.Height()),
+				ERDGPassFlags::Compute | ERDGPassFlags::NeverCull,
 				HorizonSearchIntegralShader,
 				HorizonSearchIntegralParameters,
 				FComputeShaderUtils::GetGroupCount(ViewRect.Size(), FGTAOMobile_HorizonSearchIntegralCS::TexelsPerThreadGroup));
@@ -648,9 +652,15 @@ static void RenderGTAO(FRDGBuilder& GraphBuilder, FRDGTextureRef SceneDepthTextu
 			FComputeShaderUtils::AddPass(
 				GraphBuilder,
 				RDG_EVENT_NAME("AmbientOcclusion_SpatialFilter %dx%d (CS)", ViewRect.Width(), ViewRect.Height()),
+				ERDGPassFlags::Compute | ERDGPassFlags::NeverCull,
 				SpatialFilterShader,
 				SpatialFilterParameters,
 				FComputeShaderUtils::GetGroupCount(ViewRect.Size(), FGTAOMobile_SpatialFilterCS::TexelsPerThreadGroup));
+		}
+
+		if (View.ViewState && !View.bStatePrevViewInfoIsReadOnly)
+		{
+			GraphBuilder.QueueTextureExtraction(AmbientOcclusionTexture, &View.ViewState->PrevFrameViewInfo.MobileAmbientOcclusion);
 		}
 	}
 }
@@ -658,7 +668,7 @@ static void RenderGTAO(FRDGBuilder& GraphBuilder, FRDGTextureRef SceneDepthTextu
 // --------------------------------------------------------------------------------------------------------------------
 struct FMobileSSAOCommonParameters
 {
-	TUniformBufferRef<FMobileSceneTextureUniformParameters> SceneTexturesUniformBufferRHI;
+	TRDGUniformBufferRef<FMobileSceneTextureUniformParameters> SceneTexturesUniformBufferRDG;
 	FScreenPassTextureViewport SceneTexturesViewport;
 
 	FScreenPassTexture HZBInput;
@@ -668,23 +678,24 @@ struct FMobileSSAOCommonParameters
 static const uint32 kMobileSSAOParametersArraySize = 5; 
 
 BEGIN_SHADER_PARAMETER_STRUCT(FMobileSSAOShaderParameters, )
-	SHADER_PARAMETER_ARRAY(FVector4, ScreenSpaceAOParams, [kMobileSSAOParametersArraySize])
+	SHADER_PARAMETER_ARRAY(FVector4f, ScreenSpaceAOParams, [kMobileSSAOParametersArraySize])
 
 	SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, AOViewport)
 	SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, AOSceneViewport)
 END_SHADER_PARAMETER_STRUCT();
 
 
-BEGIN_SHADER_PARAMETER_STRUCT(FMobileAmbientOcclusionParameters, )
+BEGIN_SHADER_PARAMETER_STRUCT(FMobileAmbientOcclusionParameters, RENDERER_API)
 	SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
-	SHADER_PARAMETER_STRUCT_REF(FMobileSceneTextureUniformParameters, SceneTextures)
+	SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FMobileSceneTextureUniformParameters, SceneTextures)
 
 	SHADER_PARAMETER_STRUCT_INCLUDE(FHZBParameters, HZBParameters)
 	SHADER_PARAMETER_STRUCT_INCLUDE(FMobileSSAOShaderParameters, SSAOParameters)
 
 	SHADER_PARAMETER_SAMPLER(SamplerState, SSAO_Sampler)
 
-	SHADER_PARAMETER(FVector2D, SSAO_DownsampledAOInverseSize)
+	SHADER_PARAMETER(FVector2f, SSAO_DownsampledAOInverseSize)
+	SHADER_PARAMETER(FVector2f, SSAO_SvPositionScaleBias)
 
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, RandomNormalTexture)
 	SHADER_PARAMETER_SAMPLER(SamplerState, RandomNormalTextureSampler)
@@ -697,8 +708,8 @@ public:
 	SHADER_USE_PARAMETER_STRUCT(FMobileAmbientOcclusionPS, FGlobalShader);
 
 	class FShaderQualityDim : SHADER_PERMUTATION_INT("SHADER_QUALITY", 5);
-
-	using FPermutationDomain = TShaderPermutationDomain<FShaderQualityDim>;
+	class FOutputDepth : SHADER_PERMUTATION_BOOL("OUTPUT_DEPTH");
+	using FPermutationDomain = TShaderPermutationDomain<FShaderQualityDim, FOutputDepth>;
 
 	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
 	{
@@ -714,24 +725,52 @@ public:
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_INCLUDE(FMobileAmbientOcclusionParameters, SharedParameters)
-
 		RENDER_TARGET_BINDING_SLOTS()
-		END_GLOBAL_SHADER_PARAMETER_STRUCT();
+	END_SHADER_PARAMETER_STRUCT();
 };
 IMPLEMENT_GLOBAL_SHADER(FMobileAmbientOcclusionPS, "/Engine/Private/PostProcessAmbientOcclusionMobile.usf", "MainPS", SF_Pixel);
+
+class FMobileAmbientOcclusionUpsamplePS : public FGlobalShader
+{
+	DECLARE_GLOBAL_SHADER(FMobileAmbientOcclusionUpsamplePS);
+	SHADER_USE_PARAMETER_STRUCT(FMobileAmbientOcclusionUpsamplePS, FGlobalShader);
+
+	class FUpsampleQualityDim : SHADER_PERMUTATION_INT("UPSAMPLE_QUALITY", 3);
+	using FPermutationDomain = TShaderPermutationDomain <FUpsampleQualityDim>;
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FMobileSceneTextureUniformParameters, SceneTextures)
+		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, AOTexture)
+		SHADER_PARAMETER_SAMPLER(SamplerState, AOSampler)
+		RENDER_TARGET_BINDING_SLOTS()
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsMobileAmbientOcclusionEnabled(Parameters.Platform);
+	}
+
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		OutEnvironment.SetDefine(TEXT("UPSAMPLE_PASS"), 1);
+	
+	}
+};
+IMPLEMENT_GLOBAL_SHADER(FMobileAmbientOcclusionUpsamplePS, "/Engine/Private/PostProcessAmbientOcclusionMobile.usf", "AmbientOcclusionUpsamplePS", SF_Pixel);
 
 // --------------------------------------------------------------------------------------------------------------------
 static FMobileSSAOCommonParameters GetMobileSSAOCommonParameters(
 	FRDGBuilder& GraphBuilder,
 	const FViewInfo& View,
 	FRDGTextureRef SceneDepthTexture,
-	TUniformBufferRef<FMobileSceneTextureUniformParameters> SceneTexturesUniformBufferRHI)
+	TRDGUniformBufferRef<FMobileSceneTextureUniformParameters> SceneTexturesUniformBufferRDG)
 {
 	FMobileSSAOCommonParameters CommonParameters;
-	CommonParameters.SceneTexturesUniformBufferRHI = SceneTexturesUniformBufferRHI;
+	CommonParameters.SceneTexturesUniformBufferRDG = SceneTexturesUniformBufferRDG;
 	CommonParameters.SceneTexturesViewport = FScreenPassTextureViewport(SceneDepthTexture, View.ViewRect);
 
-	CommonParameters.HZBInput = FScreenPassTexture(GraphBuilder.RegisterExternalTexture(View.HZB, TEXT("HZBInput")));
+	CommonParameters.HZBInput = FScreenPassTexture(View.HZB);
 	CommonParameters.SceneDepth = FScreenPassTexture(SceneDepthTexture);
 	return CommonParameters;
 }
@@ -744,7 +783,7 @@ static FMobileSSAOShaderParameters GetMobileSSAOShaderParameters(
 {
 	const FFinalPostProcessSettings& Settings = View.FinalPostProcessSettings;
 
-	FIntPoint RandomizationSize = GSystemTextures.SSAORandomization->GetDesc().Extent;
+	FIntPoint RandomizationSize = GSystemTextures.SSAORandomization->GetDesc().Extent * InputViewport.Extent / OutputViewport.Extent;
 	FVector2D ViewportUVToRandomUV(InputViewport.Extent.X / (float)RandomizationSize.X, InputViewport.Extent.Y / (float)RandomizationSize.Y);
 
 	// e.g. 4 means the input texture is 4x smaller than the buffer size
@@ -763,9 +802,9 @@ static FMobileSSAOShaderParameters GetMobileSSAOShaderParameters(
 	}
 
 	// /4 is an adjustment for usage with multiple mips
-	float f = FMath::Log2(ScaleToFullRes);
+	float f = FMath::Log2(float(ScaleToFullRes));
 	float g = pow(Settings.AmbientOcclusionMipScale, f);
-	AORadiusInShader *= pow(Settings.AmbientOcclusionMipScale, FMath::Log2(ScaleToFullRes)) / 4.0f;
+	AORadiusInShader *= pow(Settings.AmbientOcclusionMipScale, FMath::Log2(float(ScaleToFullRes))) / 4.0f;
 
 	float Ratio = View.UnscaledViewRect.Width() / (float)View.UnscaledViewRect.Height();
 		
@@ -790,11 +829,11 @@ static FMobileSSAOShaderParameters GetMobileSSAOShaderParameters(
 	FMobileSSAOShaderParameters Result{};
 
 	// /1000 to be able to define the value in that distance
-	Result.ScreenSpaceAOParams[0] = FVector4(Settings.AmbientOcclusionPower, Settings.AmbientOcclusionBias / 1000.0f, InvAmbientOcclusionDistance, Settings.AmbientOcclusionIntensity);
-	Result.ScreenSpaceAOParams[1] = FVector4(ViewportUVToRandomUV.X, ViewportUVToRandomUV.Y, AORadiusInShader, Ratio);
-	Result.ScreenSpaceAOParams[2] = FVector4(ScaleToFullRes, Settings.AmbientOcclusionMipThreshold / ScaleToFullRes, ScaleRadiusInWorldSpace, Settings.AmbientOcclusionMipBlend);
-	Result.ScreenSpaceAOParams[3] = FVector4(TemporalOffset.X, TemporalOffset.Y, StaticFraction, InvTanHalfFov);
-	Result.ScreenSpaceAOParams[4] = FVector4(InvFadeRadius, -(Settings.AmbientOcclusionFadeDistance - FadeRadius) * InvFadeRadius, HzbStepMipLevelFactorValue, Settings.AmbientOcclusionFadeDistance);
+	Result.ScreenSpaceAOParams[0] = FVector4f(Settings.AmbientOcclusionPower, Settings.AmbientOcclusionBias / 1000.0f, InvAmbientOcclusionDistance, Settings.AmbientOcclusionIntensity);
+	Result.ScreenSpaceAOParams[1] = FVector4f(ViewportUVToRandomUV.X, ViewportUVToRandomUV.Y, AORadiusInShader, Ratio);
+	Result.ScreenSpaceAOParams[2] = FVector4f(ScaleToFullRes, Settings.AmbientOcclusionMipThreshold / ScaleToFullRes, ScaleRadiusInWorldSpace, Settings.AmbientOcclusionMipBlend);
+	Result.ScreenSpaceAOParams[3] = FVector4f(TemporalOffset.X, TemporalOffset.Y, StaticFraction, InvTanHalfFov);
+	Result.ScreenSpaceAOParams[4] = FVector4f(InvFadeRadius, -(Settings.AmbientOcclusionFadeDistance - FadeRadius) * InvFadeRadius, HzbStepMipLevelFactorValue, Settings.AmbientOcclusionFadeDistance);
 
 	Result.AOViewport = GetScreenPassTextureViewportParameters(OutputViewport);
 	Result.AOSceneViewport = GetScreenPassTextureViewportParameters(SceneViewport);
@@ -806,32 +845,30 @@ static void AddMobileAmbientOcclusionPass(
 	FRDGBuilder& GraphBuilder,
 	const FViewInfo& View,
 	const FMobileSSAOCommonParameters& CommonParameters,
+	bool bHalfResolution,
+	bool bOutputDepth,
 	FScreenPassRenderTarget Output)
 {
-	RDG_GPU_STAT_SCOPE(GraphBuilder, MobileSSAO);
-
 	check(Output.IsValid());
 
 	const FScreenPassTextureViewport InputViewport = CommonParameters.SceneTexturesViewport;
-	const FScreenPassTextureViewport OutputViewport(Output);
-	const uint32 ScaleToFullRes = CommonParameters.SceneTexturesViewport.Extent.X / InputViewport.Extent.X;
+	const FScreenPassTextureViewport OutputViewport = GetDownscaledViewport(CommonParameters.SceneTexturesViewport, bHalfResolution ? 2 : 1);
 	
 	const bool bDepthBoundsTestEnabled =
 		CVarMobileAmbientOcclusionDepthBoundsTest.GetValueOnRenderThread()
-		&& ScaleToFullRes == 1
+		&& !bHalfResolution
 		&& GSupportsDepthBoundsTest
 		&& CommonParameters.SceneDepth.IsValid()
 		&& CommonParameters.SceneDepth.Texture->Desc.NumSamples == 1;
 
 	float DepthFar = 0.0f;
-
 	FDepthStencilBinding DepthStencilBinding(CommonParameters.SceneDepth.Texture, ERenderTargetLoadAction::ELoad, ERenderTargetLoadAction::ELoad, FExclusiveDepthStencil::DepthRead_StencilWrite);
 
 	if (bDepthBoundsTestEnabled)
 	{
 		const FFinalPostProcessSettings& Settings = View.FinalPostProcessSettings;
 		const FMatrix& ProjectionMatrix = View.ViewMatrices.GetProjectionMatrix();
-		const FVector4 Far = ProjectionMatrix.TransformFVector4(FVector4(0, 0, Settings.AmbientOcclusionFadeDistance));
+		const FVector4f Far = (FVector4f)ProjectionMatrix.TransformFVector4(FVector4(0, 0, Settings.AmbientOcclusionFadeDistance));
 		DepthFar = FMath::Min(1.0f, Far.Z / Far.W);
 
 		static_assert(bool(ERHIZBuffer::IsInverted), "Inverted depth buffer is assumed when setting depth bounds test for AO.");
@@ -874,11 +911,12 @@ static void AddMobileAmbientOcclusionPass(
 
 	FMobileAmbientOcclusionParameters SharedParameters;
 	SharedParameters.View = View.ViewUniformBuffer;
-	SharedParameters.SceneTextures = CommonParameters.SceneTexturesUniformBufferRHI;
+	SharedParameters.SceneTextures = CommonParameters.SceneTexturesUniformBufferRDG;
 	SharedParameters.HZBParameters = GetHZBParameters(View, CommonParameters.HZBInput, CommonParameters.SceneTexturesViewport.Extent, EAOTechnique::SSAO);
 	SharedParameters.SSAOParameters = GetMobileSSAOShaderParameters(View, InputViewport, OutputViewport, CommonParameters.SceneTexturesViewport);
-
 	SharedParameters.SSAO_Sampler = TStaticSamplerState<SF_Point, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+	SharedParameters.SSAO_SvPositionScaleBias = bHalfResolution ? FVector2f(2, -0.5) : FVector2f(1, 0);
+	SharedParameters.SSAO_DownsampledAOInverseSize = bHalfResolution ? FVector2f(1, 1) / FVector2f(OutputViewport.Extent) : FVector2f(1, 1);
 	SharedParameters.RandomNormalTexture = GraphBuilder.RegisterExternalTexture(GSystemTextures.SSAORandomization, TEXT("SSAORandomization"));
 	SharedParameters.RandomNormalTextureSampler = TStaticSamplerState<SF_Point, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
 
@@ -896,6 +934,7 @@ static void AddMobileAmbientOcclusionPass(
 	const int32 MobileAmbientOcclusionQuality = FMath::Min(CVarMobileAmbientOcclusionQuality.GetValueOnRenderThread(), 3) - 1; 
 	FMobileAmbientOcclusionPS::FPermutationDomain PermutationVector;
 	PermutationVector.Set<FMobileAmbientOcclusionPS::FShaderQualityDim>(MobileAmbientOcclusionQuality);
+	PermutationVector.Set<FMobileAmbientOcclusionPS::FOutputDepth>(bOutputDepth);
 
 	TShaderMapRef<FMobileAmbientOcclusionPS> PixelShader(View.ShaderMap, PermutationVector);
 	TShaderMapRef<FScreenPassVS> VertexShader(View.ShaderMap);
@@ -928,7 +967,7 @@ static void AddMobileAmbientOcclusionPass(
 			GraphicsPSOInit.PrimitiveType = PT_TriangleList;
 			GraphicsPSOInit.bDepthBounds = bDepthBoundsTestEnabled;
 
-			SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit);
+			SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
 
 			SetShaderParameters(RHICmdList, PixelShader, PixelShader.GetPixelShader(), *PassParameters);
 
@@ -944,7 +983,7 @@ static void AddMobileAmbientOcclusionPass(
 				OutputSize,
 				InputSize,
 				VertexShader,
-				View.StereoPass,
+				View.StereoViewIndex,
 				false,
 				EDRF_UseTriangleOptimization);
 
@@ -955,42 +994,165 @@ static void AddMobileAmbientOcclusionPass(
 		});	
 }
 
+static void AddMobileAmbientOcclusionUpsamplePass(
+	FRDGBuilder& GraphBuilder,
+	const FViewInfo& View,
+	const FMobileSSAOCommonParameters& CommonParameters,
+	int32 UpsampleQuality,
+	FRDGTextureRef SourceTexture,
+	FScreenPassRenderTarget Output)
+{
+	const bool bDepthBoundsTestEnabled =
+		CVarMobileAmbientOcclusionDepthBoundsTest.GetValueOnRenderThread()
+		&& GSupportsDepthBoundsTest
+		&& CommonParameters.SceneDepth.IsValid()
+		&& CommonParameters.SceneDepth.Texture->Desc.NumSamples == 1;
+
+	const FScreenPassTextureViewport OutputViewport = CommonParameters.SceneTexturesViewport;
+
+	float DepthFar = 0.0f;
+	FDepthStencilBinding DepthStencilBinding(CommonParameters.SceneDepth.Texture, ERenderTargetLoadAction::ELoad, ERenderTargetLoadAction::ELoad, FExclusiveDepthStencil::DepthRead_StencilWrite);
+
+	if (bDepthBoundsTestEnabled)
+	{
+		const FFinalPostProcessSettings& Settings = View.FinalPostProcessSettings;
+		const FMatrix& ProjectionMatrix = View.ViewMatrices.GetProjectionMatrix();
+		const FVector4f Far = (FVector4f)ProjectionMatrix.TransformFVector4(FVector4(0, 0, Settings.AmbientOcclusionFadeDistance));
+		DepthFar = FMath::Min(1.0f, Far.Z / Far.W);
+
+		static_assert(bool(ERHIZBuffer::IsInverted), "Inverted depth buffer is assumed when setting depth bounds test for AO.");
+
+		FRenderTargetParameters* ClearParameters = GraphBuilder.AllocParameters<FRenderTargetParameters>();
+		ClearParameters->RenderTargets[0] = Output.GetRenderTargetBinding();
+		ClearParameters->RenderTargets.DepthStencil = DepthStencilBinding;
+
+		GraphBuilder.AddPass(
+			RDG_EVENT_NAME("DepthBounds ClearQuad(%s)", Output.Texture->Name),
+			ClearParameters,
+			ERDGPassFlags::Raster,
+			[OutputViewport, DepthFar](FRHICommandListImmediate& RHICmdList)
+			{
+				RHICmdList.SetViewport(OutputViewport.Rect.Min.X, OutputViewport.Rect.Min.Y, 0.0f, OutputViewport.Rect.Max.X, OutputViewport.Rect.Max.Y, 1.0f);
+
+				// We must clear all pixels that won't be touched by AO shader.
+				FClearQuadCallbacks Callbacks;
+				Callbacks.PSOModifier = [](FGraphicsPipelineStateInitializer& PSOInitializer)
+				{
+					PSOInitializer.bDepthBounds = true;
+				};
+				Callbacks.PreClear = [DepthFar](FRHICommandList& InRHICmdList)
+				{
+					// This is done by rendering a clear quad over a depth range from AmbientOcclusionFadeDistance to far plane.
+					InRHICmdList.SetDepthBounds(0, DepthFar);	// NOTE: Inverted depth
+				};
+				Callbacks.PostClear = [DepthFar](FRHICommandList& InRHICmdList)
+				{
+					// Set depth bounds test to cover everything from near plane to AmbientOcclusionFadeDistance and run AO pixel shader.
+					InRHICmdList.SetDepthBounds(DepthFar, 1.0f);
+				};
+
+				DrawClearQuad(RHICmdList, FLinearColor::White, Callbacks);
+			});
+
+		// Make sure the following pass doesn't clear or ignore the data
+		Output.LoadAction = ERenderTargetLoadAction::ELoad;
+	}
+
+	FMobileAmbientOcclusionUpsamplePS::FParameters* PassParameters = GraphBuilder.AllocParameters<FMobileAmbientOcclusionUpsamplePS::FParameters>();
+	PassParameters->RenderTargets[0] = Output.GetRenderTargetBinding();
+	if (bDepthBoundsTestEnabled)
+	{
+		PassParameters->RenderTargets.DepthStencil = DepthStencilBinding;
+	}
+
+	PassParameters->View = GetShaderBinding(View.ViewUniformBuffer);
+	PassParameters->SceneTextures = CommonParameters.SceneTexturesUniformBufferRDG;
+	PassParameters->AOTexture = SourceTexture;
+	PassParameters->AOSampler = TStaticSamplerState<SF_Bilinear>::GetRHI();
+
+	typename FMobileAmbientOcclusionUpsamplePS::FPermutationDomain PermutationVector;
+	PermutationVector.Set<typename FMobileAmbientOcclusionUpsamplePS::FUpsampleQualityDim>(UpsampleQuality);
+	TShaderMapRef<FMobileAmbientOcclusionUpsamplePS> PixelShader(View.ShaderMap, PermutationVector);
+
+	TShaderMapRef<FScreenPassVS> VertexShader(View.ShaderMap);
+
+	ClearUnusedGraphResources(PixelShader, PassParameters);
+
+	GraphBuilder.AddPass(
+		RDG_EVENT_NAME("UpsamplePS Quality %d", UpsampleQuality),
+		PassParameters,
+		ERDGPassFlags::Raster,
+		[PassParameters, &View, OutputViewport, VertexShader, PixelShader, bDepthBoundsTestEnabled, DepthFar](FRHICommandList& RHICmdList)
+		{
+			RHICmdList.SetViewport(OutputViewport.Rect.Min.X, OutputViewport.Rect.Min.Y, 0.0f, OutputViewport.Rect.Max.X, OutputViewport.Rect.Max.Y, 1.0f);
+
+			FGraphicsPipelineStateInitializer GraphicsPSOInit;
+			FPixelShaderUtils::InitFullscreenPipelineState(RHICmdList, View.ShaderMap, PixelShader, GraphicsPSOInit);
+			GraphicsPSOInit.bDepthBounds = bDepthBoundsTestEnabled;
+
+			SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
+			SetShaderParameters(RHICmdList, PixelShader, PixelShader.GetPixelShader(), *PassParameters);
+
+			if (bDepthBoundsTestEnabled)
+			{
+				RHICmdList.SetDepthBounds(DepthFar, 1.0f);
+			}
+
+			FPixelShaderUtils::DrawFullscreenTriangle(RHICmdList);
+			
+			if (bDepthBoundsTestEnabled)
+			{
+				RHICmdList.SetDepthBounds(0.0f, 1.0f);
+			}
+		});
+}
+
 static void RenderSSAO(FRDGBuilder& GraphBuilder, FRDGTextureRef SceneDepthTexture, FRDGTextureRef AmbientOcclusionTexture, const TArray<FViewInfo>& Views)
 {
-	
-	TUniformBufferRef<FMobileSceneTextureUniformParameters> SceneTexturesUniformBufferRHI = CreateMobileSceneTextureUniformBuffer(GraphBuilder.RHICmdList, EMobileSceneTextureSetupMode::SceneColor);
-	
-	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
+	RDG_EVENT_SCOPE(GraphBuilder, "MobileSSAO");
+	RDG_GPU_STAT_SCOPE(GraphBuilder, MobileSSAO);
+
+	const int32 HalfResolutionSetting = CVarMobileSSAOHalfResolution.GetValueOnRenderThread();
+	const bool bHalfResolution = HalfResolutionSetting > 0;
+	const int32 UpsampleQuality = FMath::Clamp(HalfResolutionSetting - 1, 0, 2);
+	const bool bBilateralUpsample = UpsampleQuality > 0;
+
+	FRDGTextureRef HalfResolutionTexture = nullptr;
+	if (bHalfResolution)
 	{
-		const FViewInfo& View = Views[ViewIndex];
-		FMobileSSAOCommonParameters Parameters = GetMobileSSAOCommonParameters(GraphBuilder, View, SceneDepthTexture, SceneTexturesUniformBufferRHI);
+		// Bilateral requires 32bit format for AO + depth.
+		const EPixelFormat Format = bBilateralUpsample ? PF_R8G8B8A8 : AmbientOcclusionTexture->Desc.Format;
+		const FIntPoint Extent = GetDownscaledExtent(AmbientOcclusionTexture->Desc.Extent, 2);
+		HalfResolutionTexture = GraphBuilder.CreateTexture(
+			FRDGTextureDesc::Create2D(Extent, Format, FClearValueBinding::None, TexCreate_ShaderResource | TexCreate_RenderTargetable),
+			TEXT("HalfResolutionScreenSpaceAO"));
+	}
+
+	TRDGUniformBufferRef<FMobileSceneTextureUniformParameters> SceneTexturesUniformBufferRDG = CreateMobileSceneTextureUniformBuffer(
+		GraphBuilder, GetViewFamilyInfo(Views).GetSceneTexturesChecked(), EMobileSceneTextureSetupMode::SceneDepth);
+
+	for (FViewInfo const& View : Views)
+	{
+		FMobileSSAOCommonParameters Parameters = GetMobileSSAOCommonParameters(GraphBuilder, View, SceneDepthTexture, SceneTexturesUniformBufferRDG);
 		FScreenPassRenderTarget FinalTarget = FScreenPassRenderTarget(AmbientOcclusionTexture, View.ViewRect, ERenderTargetLoadAction::ENoAction);
 
-		AddMobileAmbientOcclusionPass
-		(
-			GraphBuilder,
-			View,
-			Parameters,
-			FinalTarget
-		);
+		if (HalfResolutionTexture != nullptr)
+		{
+			FScreenPassRenderTarget HalfResolutionTarget = FScreenPassRenderTarget(HalfResolutionTexture, View.ViewRect, ERenderTargetLoadAction::ENoAction);
+			AddMobileAmbientOcclusionPass(GraphBuilder,	View, Parameters, bHalfResolution, bBilateralUpsample, HalfResolutionTarget);
+			AddMobileAmbientOcclusionUpsamplePass(GraphBuilder, View, Parameters, UpsampleQuality, HalfResolutionTexture, FinalTarget);
+		}
+		else
+		{
+			AddMobileAmbientOcclusionPass(GraphBuilder, View, Parameters, bHalfResolution, bBilateralUpsample, FinalTarget);
+		}
 	}
 }
 
 // --------------------------------------------------------------------------------------------------------------------
-void FMobileSceneRenderer::RenderAmbientOcclusion(FRHICommandListImmediate& RHICmdList, const TRefCountPtr<IPooledRenderTarget>& SceneDepthZ)
+void FMobileSceneRenderer::RenderAmbientOcclusion(FRDGBuilder& GraphBuilder, FRDGTextureRef SceneDepthTexture, FRDGTextureRef AmbientOcclusionTexture)
 {
-	checkSlow(GAmbientOcclusionMobileOutputs.IsValid() && SceneDepthZ.IsValid());
-
 	const int32 Technique = CVarMobileAmbientOcclusionTechnique.GetValueOnRenderThread();
-
-	SCOPED_DRAW_EVENT(RHICmdList, AmbientOcclusion);
-
-	FMemMark Mark(FMemStack::Get());
-	FRDGBuilder GraphBuilder(RHICmdList);
-
-	FRDGTextureRef SceneDepthTexture = GraphBuilder.RegisterExternalTexture(SceneDepthZ, TEXT("SceneDepthTexture"));
-	FRDGTextureRef AmbientOcclusionTexture = GraphBuilder.RegisterExternalTexture(GAmbientOcclusionMobileOutputs.AmbientOcclusionTexture, TEXT("AmbientOcclusionTexture"));
-
 	switch (Technique)
 	{
 	case 0:
@@ -1000,6 +1162,4 @@ void FMobileSceneRenderer::RenderAmbientOcclusion(FRHICommandListImmediate& RHIC
 		RenderSSAO(GraphBuilder, SceneDepthTexture, AmbientOcclusionTexture, Views);
 		break;
 	}
-
-	GraphBuilder.Execute();
 }

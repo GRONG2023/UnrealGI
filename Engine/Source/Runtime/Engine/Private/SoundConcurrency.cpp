@@ -2,15 +2,11 @@
 
 #include "Sound/SoundConcurrency.h"
 
-#include "ActiveSound.h"
-#include "AudioDefines.h"
 #include "AudioDevice.h"
-#include "AudioVirtualLoop.h"
-#include "Components/AudioComponent.h"
-#include "DSP/VolumeFader.h"
-#include "HAL/IConsoleManager.h"
-#include "Sound/SoundBase.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SoundConcurrency)
+
+DEFINE_LOG_CATEGORY(LogAudioConcurrency);
 
 static float ConcurrencyMinVolumeScaleCVar = 1.e-3f;
 FAutoConsoleVariableRef CVarConcurrencyMinVolumeScale(
@@ -34,7 +30,7 @@ namespace SoundConcurrency
 		{
 			if (const USoundBase* Sound = ActiveSound.GetSound())
 			{
-				UE_LOG(LogAudio, Verbose,
+				UE_LOG(LogAudioConcurrency, Verbose,
 					TEXT("Sound '%s' concurrency generation '%i' target volume update: %.3f to %.3f."),
 					*Sound->GetName(),
 					SoundData.Generation,
@@ -120,7 +116,7 @@ float FConcurrencySoundData::GetLerpTime() const
 
 float FConcurrencySoundData::GetVolume(bool bInDecibels) const
 {
-	const float Alpha = FMath::Clamp(Elapsed / FMath::Max(LerpTime, SMALL_NUMBER), 0.0f, 1.0f);
+	const float Alpha = FMath::Clamp(Elapsed / FMath::Max(LerpTime, UE_SMALL_NUMBER), 0.0f, 1.0f);
 	const float VolumeDb = FMath::Lerp(DbStartVolume, DbTargetVolume, Alpha);
 
 	if (bInDecibels)
@@ -164,6 +160,7 @@ FConcurrencyGroup::FConcurrencyGroup(FConcurrencyGroupID InGroupID, const FConcu
 	: GroupID(InGroupID)
 	, ObjectID(ConcurrencyHandle.ObjectID)
 	, Settings(ConcurrencyHandle.Settings)
+	, LastTimePlayed(FPlatformTime::ToSeconds64(FPlatformTime::Cycles64()))
 {
 }
 
@@ -179,7 +176,7 @@ void FConcurrencyGroup::AddActiveSound(FActiveSound& ActiveSound)
 
 	if (ActiveSound.ConcurrencyGroupData.Contains(GroupID))
 	{
-		UE_LOG(LogAudio, Fatal, TEXT("Attempting to add active sound '%s' to concurrency group multiple times."), *ActiveSound.GetOwnerName());
+		UE_LOG(LogAudioConcurrency, Fatal, TEXT("Attempting to add active sound '%s' to concurrency group multiple times."), *ActiveSound.GetOwnerName());
 		return;
 	}
 
@@ -259,7 +256,7 @@ void FConcurrencyGroup::UpdateGeneration(FActiveSound* NewActiveSound)
 					B.AudioDevice->GetDistanceSquaredToNearestListener(B.LastLocation, DistSqB);
 
 					// If sounds share the same distance, newer sounds will be sorted first to avoid volume ping-ponging 
-					if (FMath::IsNearlyEqual(DistSqA, DistSqB, KINDA_SMALL_NUMBER))
+					if (FMath::IsNearlyEqual(DistSqA, DistSqB, UE_KINDA_SMALL_NUMBER))
 					{
 						return A.GetPlayOrder() < B.GetPlayOrder();
 					}
@@ -285,7 +282,7 @@ void FConcurrencyGroup::UpdateGeneration(FActiveSound* NewActiveSound)
 					const float BPriority = GetPriority(B);
 
 					// If sounds share the same priority, newer sounds will be sorted last to avoid volume ping-ponging 
-					if (FMath::IsNearlyEqual(APriority, BPriority, KINDA_SMALL_NUMBER))
+					if (FMath::IsNearlyEqual(APriority, BPriority, UE_KINDA_SMALL_NUMBER))
 					{
 						return A.GetPlayOrder() < B.GetPlayOrder();
 					}
@@ -348,7 +345,7 @@ void FConcurrencyGroup::CullSoundsDueToMaxConcurrency()
 				case EMaxConcurrentResolutionRule::StopQuietest:
 				{
 					// If sounds share the same volume, newer sounds will be sorted first to avoid loop realization ping-ponging 
-					if (FMath::IsNearlyEqual(A.VolumeConcurrency, B.VolumeConcurrency, KINDA_SMALL_NUMBER))
+					if (FMath::IsNearlyEqual(A.VolumeConcurrency, B.VolumeConcurrency, UE_KINDA_SMALL_NUMBER))
 					{
 						return A.GetPlayOrder() > B.GetPlayOrder();
 					}
@@ -374,7 +371,7 @@ void FConcurrencyGroup::CullSoundsDueToMaxConcurrency()
 					const float APriority = GetPriority(A);
 					const float BPriority = GetPriority(B);
 
-					if (!FMath::IsNearlyEqual(APriority, BPriority, KINDA_SMALL_NUMBER))
+					if (!FMath::IsNearlyEqual(APriority, BPriority, UE_KINDA_SMALL_NUMBER))
 					{
 						return APriority < BPriority;
 					}
@@ -417,6 +414,20 @@ void FConcurrencyGroup::CullSoundsDueToMaxConcurrency()
 	}
 }
 
+bool FConcurrencyGroup::CanPlaySoundNow(float InCurrentTime) const
+{
+	if (Settings.RetriggerTime > 0.0f)
+	{
+		const float DeltaTime = InCurrentTime - LastTimePlayed;
+		if (DeltaTime < Settings.RetriggerTime)
+		{
+			UE_LOG(LogAudioConcurrency, VeryVerbose, TEXT("Rejected Sound for Group ID (%d) with DeltaTime: %.2f"), GroupID, DeltaTime);
+			return false;
+		}
+	}
+	return true;
+}
+
 FSoundConcurrencyManager::FSoundConcurrencyManager(class FAudioDevice* InAudioDevice)
 	: AudioDevice(InAudioDevice)
 {
@@ -434,12 +445,6 @@ void FSoundConcurrencyManager::CreateNewGroupsFromHandles(
 {
 	for (const FConcurrencyHandle& ConcurrencyHandle : ConcurrencyHandles)
 	{
-		// Add an entry to the map if it hasn't already been added
-		if (!LastTimePlayedMap.Contains(ConcurrencyHandle.ObjectID))
-		{
-			LastTimePlayedMap.Add(ConcurrencyHandle.ObjectID, FPlatformTime::ToSeconds64(FPlatformTime::Cycles64()));
-		}
-	
 		switch (ConcurrencyHandle.GetMode(NewActiveSound))
 		{
 			case EConcurrencyMode::Group:
@@ -552,39 +557,27 @@ FConcurrencyGroup& FSoundConcurrencyManager::CreateNewConcurrencyGroup(const FCo
 	return *ConcurrencyGroups.FindRef(GroupID);
 }
 
-bool FSoundConcurrencyManager::IsRateLimited(const FConcurrencyHandle& InHandle)
-{
-	const float* LastTimePlayed = LastTimePlayedMap.Find(InHandle.ObjectID);
-	const float CurrentTime = FPlatformTime::ToSeconds64(FPlatformTime::Cycles64());
-
-	if (LastTimePlayed)
-	{
-		const float DeltaTime = CurrentTime - *LastTimePlayed;
-
-		if (*LastTimePlayed > 0.0f && InHandle.Settings.RetriggerTime > 0.0f && DeltaTime < InHandle.Settings.RetriggerTime)
-		{
-			// Retrieve the current game time
-			UE_LOG(LogAudio, VeryVerbose, TEXT("Rejected Sound for Group ID (%d) with DeltaTime: %.2f"), InHandle.ObjectID, DeltaTime);
-			return true;
-		}
-
-		LastTimePlayedMap.Add(InHandle.ObjectID, CurrentTime);
-	}
-
-	return false;
-}
-
 FConcurrencyGroup* FSoundConcurrencyManager::CanPlaySound(const FActiveSound& NewActiveSound, const FConcurrencyGroupID GroupID, TArray<FActiveSound*>& OutSoundsToEvict, bool bIsRetriggering)
 {
 	check(GroupID != 0);
 	FConcurrencyGroup* ConcurrencyGroup = ConcurrencyGroups.FindRef(GroupID);
 	if (!ConcurrencyGroup)
 	{
-		UE_LOG(LogAudio, Warning, TEXT("Attempting to add active sound '%s' (owner '%s') to invalid concurrency group."),
+		UE_LOG(LogAudioConcurrency, Warning, TEXT("Attempting to add active sound '%s' (owner '%s') to invalid concurrency group."),
 			NewActiveSound.GetSound() ? *NewActiveSound.GetSound()->GetFullName() : TEXT("Unset"),
 			*NewActiveSound.GetOwnerName());
 		return nullptr;
 	}
+
+	// Check for rate limiting behavior
+ 	const float CurrentTime = FPlatformTime::ToSeconds64(FPlatformTime::Cycles64());
+	if (!ConcurrencyGroup->CanPlaySoundNow(CurrentTime))
+	{
+		return nullptr;
+	}
+
+	// If we have successfully played a sound, then we update the last time a sound played here
+	ConcurrencyGroup->SetLastTimePlayed(CurrentTime);
 
 	// Some settings don't support immediate eviction, they cull once we instantiate the sound.  This
 	// is because it is not possible to evaluate sound volumes/priorities/etc *before* they play.
@@ -732,12 +725,6 @@ FActiveSound* FSoundConcurrencyManager::EvaluateConcurrency(const FActiveSound& 
 
 	for (const FConcurrencyHandle& ConcurrencyHandle : ConcurrencyHandles)
 	{
-		// If this concurrency handle has been rate limited, early exit
-		if (IsRateLimited(ConcurrencyHandle))
-		{
-			return nullptr;
-		}
-
 		switch (ConcurrencyHandle.GetMode(NewActiveSound))
 		{
 			case EConcurrencyMode::Group:
@@ -891,6 +878,11 @@ FActiveSound* FSoundConcurrencyManager::CreateAndEvictActiveSounds(const FActive
 			continue;
 		}
 
+		if (SoundToEvict->GetSound())
+		{
+			UE_LOG(LogAudioConcurrency, VeryVerbose, TEXT("Evicting Sound %s due to concurrency"), *(SoundToEvict->GetSound()->GetName()));
+		}
+
 		StopDueToVoiceStealing(*SoundToEvict);
 	}
 
@@ -908,7 +900,7 @@ void FSoundConcurrencyManager::RemoveActiveSound(FActiveSound& ActiveSound)
 		FConcurrencyGroup* ConcurrencyGroup = ConcurrencyGroups.FindRef(ConcurrencyGroupID);
 		if (!ConcurrencyGroup)
 		{
-			UE_LOG(LogAudio, Error, TEXT("Attempting to remove stopped sound '%s' from inactive concurrency group."),
+			UE_LOG(LogAudioConcurrency, Error, TEXT("Attempting to remove stopped sound '%s' from inactive concurrency group."),
 				ActiveSound.GetSound() ? *ActiveSound.GetSound()->GetName(): TEXT("Unset"));
 			continue;
 		}
@@ -916,7 +908,9 @@ void FSoundConcurrencyManager::RemoveActiveSound(FActiveSound& ActiveSound)
 		check(!ConcurrencyGroup->IsEmpty());
 		ConcurrencyGroup->RemoveActiveSound(ActiveSound);
 
-		if (ConcurrencyGroup->IsEmpty())
+		// Don't delete the concurrency group state if there is a retrigger time set. This is so that 
+		// state can persist past the last sound playing in the group
+		if (ConcurrencyGroup->IsEmpty() && ConcurrencyGroup->GetSettings().RetriggerTime <= 0.0f)
 		{
 			// Get the object ID prior to removing from groups collection to avoid reading
 			// from the object after its destroyed.
@@ -992,7 +986,7 @@ void FSoundConcurrencyManager::StopDueToVoiceStealing(FActiveSound& ActiveSound)
 		ActiveSound.ClearAudioComponent();
 		if (USoundBase* Sound = ActiveSound.GetSound())
 		{
-			UE_LOG(LogAudio, Verbose, TEXT("Playing ActiveSound %s Virtualizing: Sound's voice stollen due to concurrency group maximum met."), *Sound->GetName());
+			UE_LOG(LogAudioConcurrency, Verbose, TEXT("Playing ActiveSound %s Virtualizing: Sound's voice stollen due to concurrency group maximum met."), *Sound->GetName());
 		}
 		ActiveSound.AudioDevice->AddVirtualLoop(VirtualLoop);
 	}
@@ -1025,3 +1019,4 @@ void FSoundConcurrencyManager::UpdateSoundsToCull()
 		ConcurrenyGroupEntry.Value->CullSoundsDueToMaxConcurrency();
 	}
 }
+

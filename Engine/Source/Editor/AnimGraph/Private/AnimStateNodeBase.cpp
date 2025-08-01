@@ -7,11 +7,13 @@
 #include "AnimStateNodeBase.h"
 #include "UObject/FrameworkObjectVersion.h"
 #include "Animation/AnimBlueprint.h"
+#include "Animation/AnimClassInterface.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "AnimationStateMachineGraph.h"
 #include "AnimationStateMachineSchema.h"
 #include "Kismet2/Kismet2NameValidators.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "AnimStateTransitionNode.h"
 /////////////////////////////////////////////////////
 // FAnimStateNodeNameValidator
 
@@ -33,6 +35,25 @@ public:
 				Names.Add(Node->GetStateName());
 			}
 		}
+
+		// Include the name of animation layers
+		UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraphChecked(StateMachine);
+		
+		if (Blueprint)
+		{
+			UClass* TargetClass = *Blueprint->SkeletonGeneratedClass;
+			if (TargetClass)
+			{
+				IAnimClassInterface* AnimClassInterface = IAnimClassInterface::GetFromClass(TargetClass);
+				for (const FAnimBlueprintFunction& AnimBlueprintFunction : AnimClassInterface->GetAnimBlueprintFunctions())
+				{
+					if (AnimBlueprintFunction.Name != UEdGraphSchema_K2::GN_AnimGraph)
+					{
+						Names.Add(AnimBlueprintFunction.Name.ToString());
+					}
+				}
+			}
+		}
 	}
 };
 
@@ -48,31 +69,36 @@ void UAnimStateNodeBase::PostPasteNode()
 {
 	Super::PostPasteNode();
 
-	if (UEdGraph* BoundGraph = GetBoundGraph())
+	for(UEdGraph* SubGraph : GetSubGraphs())
 	{
-		// Add the new graph as a child of our parent graph
-		UEdGraph* ParentGraph = GetGraph();
-
-		if(ParentGraph->SubGraphs.Find(BoundGraph) == INDEX_NONE)
+		if(SubGraph)
 		{
-			ParentGraph->SubGraphs.Add(BoundGraph);
+			// Add the new graph as a child of our parent graph
+			UEdGraph* ParentGraph = GetGraph();
+
+			if(ParentGraph->SubGraphs.Find(SubGraph) == INDEX_NONE)
+			{
+				ParentGraph->SubGraphs.Add(SubGraph);
+			}
+
+			//@TODO: CONDUIT: Merge conflict - May no longer be necessary due to other changes?
+	//		FBlueprintEditorUtils::RenameGraphWithSuggestion(SubGraph, NameValidator, GetDesiredNewNodeName());
+			//@ENDTODO
+
+			// Restore transactional flag that is lost during copy/paste process
+			SubGraph->SetFlags(RF_Transactional);
+
+			UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraphChecked(ParentGraph);
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 		}
-
-		//@TODO: CONDUIT: Merge conflict - May no longer be necessary due to other changes?
-//		FBlueprintEditorUtils::RenameGraphWithSuggestion(BoundGraph, NameValidator, GetDesiredNewNodeName());
-		//@ENDTODO
-
-		// Restore transactional flag that is lost during copy/paste process
-		BoundGraph->SetFlags(RF_Transactional);
-
-		UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraphChecked(ParentGraph);
-		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 	}
 }
 
 UObject* UAnimStateNodeBase::GetJumpTargetForDoubleClick() const
 {
-	return GetBoundGraph();
+	TArray<UEdGraph*> SubGraphs = GetSubGraphs();
+	check(SubGraphs.Num() > 0);
+	return SubGraphs[0];
 }
 
 bool UAnimStateNodeBase::CanJumpToDefinition() const
@@ -95,7 +121,9 @@ bool UAnimStateNodeBase::CanCreateUnderSpecifiedSchema(const UEdGraphSchema* Sch
 
 void UAnimStateNodeBase::OnRenameNode(const FString& NewName)
 {
-	FBlueprintEditorUtils::RenameGraph(GetBoundGraph(), NewName);
+	TArray<UEdGraph*> SubGraphs = GetSubGraphs();
+	check(SubGraphs.Num() > 0);
+	FBlueprintEditorUtils::RenameGraph(SubGraphs[0], NewName);
 }
 
 TSharedPtr<class INameValidatorInterface> UAnimStateNodeBase::MakeNameValidator() const
@@ -136,6 +164,48 @@ void UAnimStateNodeBase::PostLoad()
 		{
 			UE_LOG(LogAnimation, Log, TEXT("Fixed %d non-transactional pins in %s"), BrokenPinCount, *GetName());
 		}
+	}
+}
+
+void UAnimStateNodeBase::GetTransitionList(TArray<UAnimStateTransitionNode*>& OutTransitions, bool bWantSortedList /*= false*/) const
+{
+	// Normal transitions
+	for (int32 LinkIndex = 0; LinkIndex < Pins[1]->LinkedTo.Num(); ++LinkIndex)
+	{
+		UEdGraphNode* TargetNode = Pins[1]->LinkedTo[LinkIndex]->GetOwningNode();
+		if (UAnimStateTransitionNode* Transition = Cast<UAnimStateTransitionNode>(TargetNode))
+		{
+			OutTransitions.Add(Transition);
+		}
+	}
+
+	// Bidirectional transitions where we are the 'backwards' link.
+	// Conduits and other states types that don't support bidirectional transitions should hide it from the details panel.
+	for (int32 LinkIndex = 0; LinkIndex < Pins[0]->LinkedTo.Num(); ++LinkIndex)
+	{
+		UEdGraphNode* TargetNode = Pins[0]->LinkedTo[LinkIndex]->GetOwningNode();
+		if (UAnimStateTransitionNode* Transition = Cast<UAnimStateTransitionNode>(TargetNode))
+		{
+			// Anim state nodes that don't support bidirectional transitions should hide this property in FAnimTransitionNodeDetails::CustomizeDetails
+			if (Transition->Bidirectional)
+			{
+				OutTransitions.Add(Transition);
+			}
+		}
+	}
+
+	// Sort the transitions by priority order, lower numbers are higher priority
+	if (bWantSortedList)
+	{
+		struct FCompareTransitionsByPriority
+		{
+			FORCEINLINE bool operator()(const UAnimStateTransitionNode& A, const UAnimStateTransitionNode& B) const
+			{
+				return A.PriorityOrder < B.PriorityOrder;
+			}
+		};
+
+		OutTransitions.Sort(FCompareTransitionsByPriority());
 	}
 }
 

@@ -2,15 +2,22 @@
 
 #pragma once
 
-#include "UObject/Interface.h"
+#include "Misc/FrameTime.h"
 #include "MovieSceneTimeController.h"
+#include "UObject/Interface.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/SoftObjectPath.h"
+#include "UObject/UObjectGlobals.h"
 #include "UObject/WeakObjectPtrTemplates.h"
+
 #include "IMovieSceneCustomClockSource.generated.h"
 
+class UObject;
+struct FFrame;
 struct FQualifiedFrameTime;
 
-UINTERFACE()
-class MOVIESCENE_API UMovieSceneCustomClockSource : public UInterface
+UINTERFACE(MinimalAPI)
+class UMovieSceneCustomClockSource : public UInterface
 {
 	GENERATED_BODY()
 };
@@ -37,16 +44,16 @@ public:
 	virtual FFrameTime OnRequestCurrentTime(const FQualifiedFrameTime& InCurrentTime, float InPlayRate) { return 0; }
 };
 
-struct MOVIESCENE_API FMovieSceneTimeController_Custom : FMovieSceneTimeController
+struct FMovieSceneTimeController_Custom : FMovieSceneTimeController
 {
-	explicit FMovieSceneTimeController_Custom(const FSoftObjectPath& InObjectPath, TWeakObjectPtr<> PlaybackContext);
+	MOVIESCENE_API explicit FMovieSceneTimeController_Custom(const FSoftObjectPath& InObjectPath, TWeakObjectPtr<> PlaybackContext);
 
 private:
 
-	virtual void OnTick(float DeltaSeconds, float InPlayRate) override final;
-	virtual void OnStartPlaying(const FQualifiedFrameTime& InStartTime) override final;
-	virtual void OnStopPlaying(const FQualifiedFrameTime& InStopTime) override final;
-	virtual FFrameTime OnRequestCurrentTime(const FQualifiedFrameTime& InCurrentTime, float InPlayRate) override final;
+	MOVIESCENE_API virtual void OnTick(float DeltaSeconds, float InPlayRate) override final;
+	MOVIESCENE_API virtual void OnStartPlaying(const FQualifiedFrameTime& InStartTime) override final;
+	MOVIESCENE_API virtual void OnStopPlaying(const FQualifiedFrameTime& InStopTime) override final;
+	MOVIESCENE_API virtual FFrameTime OnRequestCurrentTime(const FQualifiedFrameTime& InCurrentTime, float InPlayRate) override final;
 
 private:
 

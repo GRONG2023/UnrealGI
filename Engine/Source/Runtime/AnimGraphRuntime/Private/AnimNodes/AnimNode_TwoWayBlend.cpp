@@ -2,7 +2,10 @@
 
 #include "AnimNodes/AnimNode_TwoWayBlend.h"
 #include "Animation/AnimInstanceProxy.h"
+#include "Animation/AnimStats.h"
 #include "AnimationRuntime.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNode_TwoWayBlend)
 
 /////////////////////////////////////////////////////
 // FAnimNode_TwoWayBlend
@@ -63,7 +66,7 @@ void FAnimNode_TwoWayBlend::Update_AnyThread(const FAnimationUpdateContext& Cont
 	{
 		if (bNewAIsRelevant && !bAIsRelevant)
 		{
-			FAnimationInitializeContext ReinitializeContext(Context.AnimInstanceProxy);
+			FAnimationInitializeContext ReinitializeContext(Context.AnimInstanceProxy, Context.SharedContext);
 
 			// reinitialize
 			A.Initialize(ReinitializeContext);
@@ -71,7 +74,7 @@ void FAnimNode_TwoWayBlend::Update_AnyThread(const FAnimationUpdateContext& Cont
 
 		if (bNewBIsRelevant && !bBIsRelevant)
 		{
-			FAnimationInitializeContext ReinitializeContext(Context.AnimInstanceProxy);
+			FAnimationInitializeContext ReinitializeContext(Context.AnimInstanceProxy, Context.SharedContext);
 
 			// reinitialize
 			B.Initialize(ReinitializeContext);
@@ -91,6 +94,11 @@ void FAnimNode_TwoWayBlend::Update_AnyThread(const FAnimationUpdateContext& Cont
 		}
 		else
 		{
+			if (bAlwaysUpdateChildren)
+			{
+				A.Update(Context.FractionalWeight(FAnimWeight::GetSmallestRelevantWeight()));
+			}
+
 			// Take all of B
 			B.Update(Context);
 		}
@@ -99,6 +107,11 @@ void FAnimNode_TwoWayBlend::Update_AnyThread(const FAnimationUpdateContext& Cont
 	{
 		// Take all of A
 		A.Update(Context);
+
+		if (bAlwaysUpdateChildren)
+		{
+			B.Update(Context.FractionalWeight(FAnimWeight::GetSmallestRelevantWeight()));
+		}
 	}
 
 	TRACE_ANIM_NODE_VALUE(Context, TEXT("Alpha"), InternalBlendAlpha);
@@ -107,6 +120,8 @@ void FAnimNode_TwoWayBlend::Update_AnyThread(const FAnimationUpdateContext& Cont
 void FAnimNode_TwoWayBlend::Evaluate_AnyThread(FPoseContext& Output)
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_ANIMNODE(Evaluate_AnyThread)
+	ANIM_MT_SCOPE_CYCLE_COUNTER_VERBOSE(TwoWayBlend, !IsInGameThread());
+
 	if (bBIsRelevant)
 	{
 		if (bAIsRelevant)
@@ -144,3 +159,4 @@ void FAnimNode_TwoWayBlend::GatherDebugData(FNodeDebugData& DebugData)
 	A.GatherDebugData(DebugData.BranchFlow(1.f - InternalBlendAlpha));
 	B.GatherDebugData(DebugData.BranchFlow(InternalBlendAlpha));
 }
+

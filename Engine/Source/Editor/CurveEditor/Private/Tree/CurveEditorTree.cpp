@@ -1,15 +1,18 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Tree/CurveEditorTree.h"
-#include "Tree/ICurveEditorTreeItem.h"
-#include "Tree/CurveEditorTreeFilter.h"
-#include "CurveEditor.h"
 
 #include "Containers/SortedMap.h"
-#include "Algo/AnyOf.h"
-#include "Algo/AllOf.h"
-
-class FCurveModel;
+#include "Containers/SparseArray.h"
+#include "CurveEditor.h"
+#include "CurveModel.h"
+#include "Misc/AssertionMacros.h"
+#include "Templates/Less.h"
+#include "Templates/Tuple.h"
+#include "Templates/UniquePtr.h"
+#include "Templates/UnrealTemplate.h"
+#include "Tree/CurveEditorTreeFilter.h"
+#include "Tree/ICurveEditorTreeItem.h"
 
 TArrayView<const FCurveModelID> FCurveEditorTreeItem::GetOrCreateCurves(FCurveEditor* CurveEditor)
 {
@@ -60,7 +63,7 @@ void FCurveEditorTreeItem::DestroyUnpinnedCurves(FCurveEditor* CurveEditor)
 		if (!CurveEditor->IsCurvePinned(Curves[Index]))
 		{
 			CurveEditor->RemoveCurve(Curves[Index]);
-			Curves.RemoveAtSwap(Index, 1, false);
+			Curves.RemoveAtSwap(Index, 1, EAllowShrinking::No);
 		}
 	}
 }
@@ -133,6 +136,7 @@ FScopedCurveEditorTreeEventGuard::~FScopedCurveEditorTreeEventGuard()
 FCurveEditorTree::FCurveEditorTree()
 {
 	NextTreeItemID.Value = 1;
+	bIsDoingDirectSelection = false;
 }
 
 FCurveEditorTreeItem& FCurveEditorTree::GetItem(FCurveEditorTreeItemID ItemID)
@@ -250,9 +254,9 @@ void FCurveEditorTree::ToggleExpansionState(bool bRecursive)
 	ToggleExpansionStateDelegate.Broadcast(bRecursive);
 }
 
-bool FCurveEditorTree::PerformFilterPass(TArrayView<const FCurveEditorTreeFilter* const> FilterPtrs, TArrayView<const FCurveEditorTreeItemID> ItemsToFilter, ECurveEditorTreeFilterState InheritedState)
+ECurveEditorTreeFilterState FCurveEditorTree::PerformFilterPass(TArrayView<const FCurveEditorTreeFilter* const> FilterPtrs, TArrayView<const FCurveEditorTreeItemID> ItemsToFilter, ECurveEditorTreeFilterState InheritedState)
 {
-	bool bAnyMatched = false;
+	ECurveEditorTreeFilterState ReturnedParentState = ECurveEditorTreeFilterState::NoMatch;
 
 	for (FCurveEditorTreeItemID ItemID : ItemsToFilter)
 	{
@@ -264,35 +268,45 @@ bool FCurveEditorTree::PerformFilterPass(TArrayView<const FCurveEditorTreeFilter
 
 		const FCurveEditorTreeItem& TreeItem = GetItem(ItemID);
 
-		ECurveEditorTreeFilterState FilterState         = InheritedState;
+		ECurveEditorTreeFilterState FilterState = InheritedState;
 		ECurveEditorTreeFilterState ChildInheritedState = InheritedState;
 
 		TSharedPtr<ICurveEditorTreeItem> TreeItemImpl = TreeItem.GetItem();
 		if (TreeItemImpl)
 		{
-			const bool bMatchesFilter = Algo::AnyOf(FilterPtrs, [TreeItemImpl](const FCurveEditorTreeFilter* Filter){ return TreeItemImpl->PassesFilter(Filter); });
-			if (bMatchesFilter)
+			for (const FCurveEditorTreeFilter* Filter : FilterPtrs)
 			{
-				bAnyMatched = true;
-				FilterState = ECurveEditorTreeFilterState::Match;
-				ChildInheritedState = ECurveEditorTreeFilterState::ImplicitChild;
+				const bool bMatchesFilter = TreeItemImpl->PassesFilter(Filter);
+				if (bMatchesFilter)
+				{
+					ReturnedParentState |= ECurveEditorTreeFilterState::ImplicitParent;
+					FilterState |= ECurveEditorTreeFilterState::Match;
+					ChildInheritedState |= ECurveEditorTreeFilterState::ImplicitChild;
+
+					if (Filter->ShouldExpandOnMatch())
+					{
+						ReturnedParentState |= ECurveEditorTreeFilterState::Expand;
+
+						// Once an item is matched AND set to expand there's no other flags that could be 
+						// discernibly applied, therefore we can early out and skip needlessly testing other filters
+						break;
+					}
+					// Else, we have to keep iterating incase one of the other filters is set to expand
+				}
 			}
 		}
 
 		// Run the filter on all child nodes
-		const bool bMatchedChildren = PerformFilterPass(FilterPtrs, TreeItem.GetChildren(), ChildInheritedState);
+		ECurveEditorTreeFilterState AppliedStateFromChild = PerformFilterPass(FilterPtrs, TreeItem.GetChildren(), ChildInheritedState);
+		ReturnedParentState |= AppliedStateFromChild;
 
-		// If we matched children we become an implicit parent if not already matched
-		if (bMatchedChildren && FilterState != ECurveEditorTreeFilterState::Match)
-		{
-			bAnyMatched = true;
-			FilterState = ECurveEditorTreeFilterState::ImplicitParent;
-		}
+		// If we matched children we become an implicit parent
+		FilterState |= AppliedStateFromChild;
 
 		FilterStates.SetFilterState(ItemID, FilterState);
 	}
 
-	return bAnyMatched;
+	return ReturnedParentState;
 }
 
 void FCurveEditorTree::RunFilters()
@@ -313,7 +327,7 @@ void FCurveEditorTree::RunFilters()
 			if (!Filter)
 			{
 				// Remove invalid filters
-				WeakFilters.RemoveAtSwap(Index, 1, false);
+				WeakFilters.RemoveAtSwap(Index, 1, EAllowShrinking::No);
 			}
 			else
 			{
@@ -423,7 +437,7 @@ void FCurveEditorTree::SortTreeItems(FSortedCurveEditorTreeItems& TreeItemIDsToS
 	// If there is more than one item, sort the items and then repopulate the ChildIDs from the sorted list of items.
 	if (TreeItemIDsToSort.bRequiresSort && TreeItemsToSort.Num() > 1)
 	{
-		TreeItemsToSort.Sort([=](const FCurveEditorTreeItem& ItemA, const FCurveEditorTreeItem& ItemB) { return SortPredicate.Execute(ItemA.GetItem().Get(), ItemB.GetItem().Get()); });
+		TreeItemsToSort.Sort([this](const FCurveEditorTreeItem& ItemA, const FCurveEditorTreeItem& ItemB) { return SortPredicate.Execute(ItemA.GetItem().Get(), ItemB.GetItem().Get()); });
 		for (int32 i = 0; i < TreeItemsToSort.Num(); ++i)
 		{
 			TreeItemIDsToSort.ChildIDs[i] = TreeItemsToSort[i]->GetID();
@@ -444,6 +458,7 @@ void FCurveEditorTree::SortTreeItems(FSortedCurveEditorTreeItems& TreeItemIDsToS
 void FCurveEditorTree::SetDirectSelection(TArray<FCurveEditorTreeItemID>&& TreeItems, FCurveEditor* InCurveEditor)
 {
 	FScopedCurveEditorTreeEventGuard EventGuard(this);
+	TGuardValue<bool> Guard(bIsDoingDirectSelection, true);
 
 	TMap<FCurveEditorTreeItemID, ECurveEditorTreeSelectionState> PreviousSelection = MoveTemp(Selection);
 	Selection.Reset();
@@ -471,13 +486,13 @@ void FCurveEditorTree::SetDirectSelection(TArray<FCurveEditorTreeItemID>&& TreeI
 
 		for (FCurveEditorTreeItemID ChildID : TreeItem->GetChildren())
 		{
-			if (FilterStates.Get(ChildID) != ECurveEditorTreeFilterState::NoMatch)
+			if ((FilterStates.Get(ChildID) & ECurveEditorTreeFilterState::MatchBitMask) != ECurveEditorTreeFilterState::NoMatch)
 			{
 				TreeItems.Add(ChildID);
 			}
 		}
 	}
-
+	InCurveEditor->ResetMinMaxes();
 	for (TTuple<FCurveEditorTreeItemID, ECurveEditorTreeSelectionState> OldItem : PreviousSelection)
 	{
 		const ECurveEditorTreeSelectionState* NewState = Selection.Find(OldItem.Key);
@@ -526,6 +541,57 @@ void FCurveEditorTree::RemoveFromSelection(TArrayView<const FCurveEditorTreeItem
 	if (bAnyRemoved)
 	{
 		++Events.OnSelectionChanged.SerialNumber;
+	}
+}
+
+ void  FCurveEditorTree::RecreateModelsFromExistingSelection(FCurveEditor* CurveEditor)
+{
+	// Ensure the new selection has valid curve models
+	for (TTuple<FCurveEditorTreeItemID, ECurveEditorTreeSelectionState> NewItem : Selection)
+	{
+		if (NewItem.Value != ECurveEditorTreeSelectionState::None)
+		{
+			GetItem(NewItem.Key).DestroyCurves(CurveEditor);
+			GetItem(NewItem.Key).GetOrCreateCurves(CurveEditor);
+		}
+	}
+}
+
+ TArray<FCurveEditorTreeItemID> FCurveEditorTree::GetCachedExpandedItems() const
+ {
+	 TArray<FCurveEditorTreeItemID> ExpandedItems;
+	 for (const TPair<FCurveEditorTreeItemID, FCurveEditorTreeItem>& Item : Items)
+	 {
+		 const TOptional<FString> PathName = Item.Value.GetUniquePathName();
+		 if (PathName.IsSet())
+		 {
+			 int32 Hash = GetTypeHash(PathName.GetValue());
+			 if (CachedExpandedItems.Contains(Hash))
+			 {
+				 ExpandedItems.Add(Item.Key);
+			 }
+		 }
+	 }
+	 return ExpandedItems;
+ }
+
+void FCurveEditorTree::SetItemExpansion(FCurveEditorTreeItemID InTreeItemID, bool bInExpansion)
+{
+	if (FCurveEditorTreeItem* TreeItem = FindItem(InTreeItemID))
+	{
+		TOptional<FString> OptString = TreeItem->GetUniquePathName();
+		if (OptString.IsSet())
+		{
+			int32 Hash = GetTypeHash(OptString.GetValue());
+			if (bInExpansion)
+			{
+				CachedExpandedItems.Add(Hash);
+			}
+			else
+			{
+				CachedExpandedItems.Remove(Hash);
+			}
+		}
 	}
 }
 

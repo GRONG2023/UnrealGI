@@ -12,6 +12,7 @@
 #include "Misc/Parse.h"
 #include "Containers/Map.h"
 #include "Misc/CoreMisc.h"
+#include "Misc/CoreDelegates.h"
 #include "Misc/CommandLine.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/OutputDeviceHelper.h"
@@ -132,11 +133,11 @@ class FLogSuppressionImplementation: public FLogSuppressionInterface, private FS
 		Cmds.ParseIntoArray(SubCmds, TEXT(","), true);
 		for (int32 Index = 0; Index < SubCmds.Num(); Index++)
 		{
-			static constexpr TCHAR LogString[] = TEXT("Log ");
+			static const auto& LogString = TEXT("Log ");
 			FString Command = SubCmds[Index].TrimStart();
 			if (Command.StartsWith(LogString))
 			{
-				Command.RightInline(Command.Len() - (UE_ARRAY_COUNT(LogString) - 1), false);
+				Command.RightInline(Command.Len() - (UE_ARRAY_COUNT(LogString) - 1), EAllowShrinking::No);
 			}
 			TArray<FString> CommandParts;
 			Command.ParseIntoArrayWS(CommandParts);
@@ -178,6 +179,8 @@ class FLogSuppressionImplementation: public FLogSuppressionInterface, private FS
 					CategoryVerbosities.Add(It.Value());
 				}					
 			}
+
+			const uint8 OriginalVerbosityLevel = Value & ELogVerbosity::VerbosityMask;
 			if (CommandParts.Num() == 1)
 			{
 				// only possibility is the reset and toggle command which is meaningless at boot
@@ -223,15 +226,12 @@ class FLogSuppressionImplementation: public FLogSuppressionInterface, private FS
 			}
 			else
 			{
-
 				// now we have the current value, lets change it!
 				for (int32 PartIndex = 1; PartIndex < CommandParts.Num(); PartIndex++)
 				{
 					FName CmdToken = FName(*CommandParts[PartIndex]);
 					static FName NAME_Verbose(TEXT("Verbose"));
 					static FName NAME_VeryVerbose(TEXT("VeryVerbose"));
-					static FName NAME_All(TEXT("All"));
-					static FName NAME_Default(TEXT("Default"));
 					static FName NAME_On(TEXT("On"));
 					static FName NAME_Off(TEXT("Off"));
 					static FName NAME_Break(TEXT("Break"));
@@ -335,10 +335,17 @@ class FLogSuppressionImplementation: public FLogSuppressionInterface, private FS
 					}
 				}
 				// store off the last non-zero one for toggle
-				if (Value & ELogVerbosity::VerbosityMask)
+				const uint8 VerbosityLevel = Value & ELogVerbosity::VerbosityMask;
+				if (VerbosityLevel)
 				{
 					// currently on, store this in the pending and clear it
-					ToggleAssociations.Add(Category, Value & ELogVerbosity::VerbosityMask);
+					ToggleAssociations.Add(Category, VerbosityLevel);
+
+					// Tattle on configs & other paths that raise the level after boot so we can quickly rule out code defaults for log spam
+					if ((OriginalVerbosityLevel < ELogVerbosity::Verbose) && (VerbosityLevel >= ELogVerbosity::Verbose))
+					{
+						UE_LOG(LogHAL, Log, TEXT("Log category %s verbosity has been raised to %s."), *Category.ToString(), ToString(static_cast<ELogVerbosity::Type>(VerbosityLevel)));
+					}
 				}
 			}
 		}
@@ -476,6 +483,14 @@ class FLogSuppressionImplementation: public FLogSuppressionInterface, private FS
 		}
 	}
 
+	void OnConfigSectionsChanged(const FString& IniFilename, const TSet<FString>& SectionNames)
+	{
+		if (IniFilename == GEngineIni && SectionNames.Contains(TEXT("Core.Log")))
+		{
+			ProcessConfigAndCommandLine();
+		}
+	}
+
 	virtual void ProcessConfigAndCommandLine()
 	{
 		ReverseAssociations.Reserve(PendingAssociations.Num());
@@ -486,10 +501,10 @@ class FLogSuppressionImplementation: public FLogSuppressionInterface, private FS
 		PendingAssociations.Empty();
 
 		// first we do the config values
-		FConfigSection* RefTypes = GConfig->GetSectionPrivate(TEXT("Core.Log"), false, true, GEngineIni);
+		const FConfigSection* RefTypes = GConfig->GetSection(TEXT("Core.Log"), false, GEngineIni);
 		if (RefTypes != NULL)
 		{
-			for( FConfigSectionMap::TIterator It(*RefTypes); It; ++It )
+			for( FConfigSectionMap::TConstIterator It(*RefTypes); It; ++It )
 			{
 				ProcessCmdString(It.Key().ToString() + TEXT(" ") + It.Value().GetValue(), true);
 			}
@@ -518,10 +533,10 @@ class FLogSuppressionImplementation: public FLogSuppressionInterface, private FS
 				{
 					break;
 				}
-				CmdLineEnv.MidInline(Index + LogCmds.Len(), MAX_int32, false);
+				CmdLineEnv.MidInline(Index + LogCmds.Len(), MAX_int32, EAllowShrinking::No);
 			}
 			// now strip off the environment arg part
-			CmdLine.MidInline(0, IndexOfEnv, false);
+			CmdLine.MidInline(0, IndexOfEnv, EAllowShrinking::No);
 		}
 		while (1)
 		{
@@ -538,7 +553,7 @@ class FLogSuppressionImplementation: public FLogSuppressionInterface, private FS
 			{
 				break;
 			}
-			CmdLine.MidInline(Index + LogCmds.Len(), MAX_int32, false);
+			CmdLine.MidInline(Index + LogCmds.Len(), MAX_int32, EAllowShrinking::No);
 		}
 #endif // !UE_BUILD_SHIPPING
 
@@ -548,11 +563,26 @@ class FLogSuppressionImplementation: public FLogSuppressionInterface, private FS
 			SetupSuppress(It.Value(), It.Key());
 		}
 
+		if (!bInitialized)
+		{
+			FCoreDelegates::TSOnConfigSectionsChanged().AddLambda([this](const FString& IniFilename, const TSet<FString>& SectionNames)
+			{
+				if (auto* LogSuppressionImplementation = static_cast<FLogSuppressionImplementation*>(FLogSuppressionInterface::TryGet()))
+				{
+					LogSuppressionImplementation->OnConfigSectionsChanged(IniFilename, SectionNames);
+				}
+				else
+				{
+					FCoreDelegates::TSOnConfigSectionsChanged().RemoveAll(this);
+				}
+			});
+		}
+
 		bInitialized = true;
 	}
 
 	/** Console commands, see embeded usage statement **/
-	virtual bool Exec( UWorld* Inworld, const TCHAR* Cmd, FOutputDevice& Ar )
+	virtual bool Exec_Runtime( UWorld* Inworld, const TCHAR* Cmd, FOutputDevice& Ar )
 	{
 		if(FParse::Command(&Cmd,TEXT("LOG")))
 		{

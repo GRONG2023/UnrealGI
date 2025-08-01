@@ -11,7 +11,6 @@
 #include "Templates/TypeHash.h"
 #include "Features/IModularFeatures.h"
 #include "GameFramework/WorldSettings.h"
-#include "XRMotionControllerBase.h"
 #include "Engine/Engine.h" // for GEngine->XRSystem
 
 DEFINE_LOG_CATEGORY_STATIC(LogMotionDelayBuffer, Log, All);
@@ -279,7 +278,7 @@ static bool MotionDelayService_Impl::SampleDevicePose(const FMotionDelayTarget::
 		}
 	}
 
-	if (TargetSource.SourceId == FXRMotionControllerBase::HMDSourceId)
+	if (TargetSource.SourceId == IMotionController::HMDSourceId)
 	{
 		IXRTrackingSystem* TrackingSys = GEngine->XRSystem.Get();
 		if (TrackingSys)
@@ -423,7 +422,7 @@ static void MotionDelayClient_Impl::CalulateDelayTransform(uint32 DesiredDelay, 
 		FTransform TransformA = MakeTransform(SampleAIndex);
 		FTransform TransformB = MakeTransform(SampleBIndex);
 
-		const float BlendAlpha = (CurrentTime - SampleA.TimeStamp - DelaySeconds) / (SampleB.TimeStamp - SampleA.TimeStamp);
+		const float BlendAlpha = (float)((CurrentTime - SampleA.TimeStamp - DelaySeconds) / (SampleB.TimeStamp - SampleA.TimeStamp));
 		TransformOut.Blend(TransformA, TransformB, BlendAlpha);
 	}
 }
@@ -492,7 +491,7 @@ void FMotionDelayClient::BeginRenderViewFamily(FSceneViewFamily& ViewFamily)
 }
 
 //------------------------------------------------------------------------------
-void FMotionDelayClient::PostRenderViewFamily_RenderThread(FRHICommandListImmediate& /*RHICmdList*/, FSceneViewFamily& ViewFamily)
+void FMotionDelayClient::PostRenderViewFamily_RenderThread(FRDGBuilder& GraphBuilder, FSceneViewFamily& ViewFamily)
 {
 	if (MotionDelayService_Impl::PostRenderCleanupId_RenderThread != ViewFamily.FrameNumber)
 	{
@@ -520,7 +519,7 @@ void FMotionDelayClient::Apply_RenderThread(FSceneInterface* Scene)
 {
 	for (const FTargetTransform& Transform : TargetTransforms_RenderThread)
 	{
-		Transform.DelayTarget->LateUpdate.Apply_RenderThread(Scene, -1, Transform.RestoreTransform, Transform.DelayTransform);
+		Transform.DelayTarget->LateUpdate.Apply_RenderThread(Scene, Transform.RestoreTransform, Transform.DelayTransform);
 	}
 }
 
@@ -529,7 +528,7 @@ void FMotionDelayClient::Restore_RenderThread(FSceneInterface* Scene)
 {
 	for (const FTargetTransform& Transform : TargetTransforms_RenderThread)
 	{
-		Transform.DelayTarget->LateUpdate.Apply_RenderThread(Scene, -1, Transform.DelayTransform, Transform.RestoreTransform);
+		Transform.DelayTarget->LateUpdate.Apply_RenderThread(Scene, Transform.DelayTransform, Transform.RestoreTransform);
 	}
 }
 

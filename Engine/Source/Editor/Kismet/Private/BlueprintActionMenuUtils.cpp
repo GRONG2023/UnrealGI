@@ -1,35 +1,66 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BlueprintActionMenuUtils.h"
+
+#include "AssetRegistry/AssetData.h"
+#include "BlueprintActionFilter.h"
 #include "BlueprintActionMenuBuilder.h"
-#include "Engine/Blueprint.h"
-#include "Modules/ModuleManager.h"
+#include "BlueprintActionMenuItem.h"
+#include "BlueprintDragDropMenuItem.h"
+#include "BlueprintEditor.h"
+#include "BlueprintEditorSettings.h"
+#include "BlueprintNodeBinder.h"
+#include "BlueprintNodeSpawner.h"
+#include "BlueprintPaletteFavorites.h"
+#include "ComponentAssetBroker.h"
 #include "Components/ActorComponent.h"
-#include "GameFramework/Actor.h"
-#include "EdGraph/EdGraph.h"
-#include "Editor/EditorPerProjectUserSettings.h"
-#include "Engine/LevelScriptActor.h"
-#include "Engine/Selection.h"
-#include "Kismet2/KismetEditorUtilities.h"
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "ContentBrowserModule.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphSchema.h"
 #include "EdGraphSchema_K2.h"
-#include "K2Node.h"
 #include "EdGraphSchema_K2_Actions.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Editor/EditorPerProjectUserSettings.h"
+#include "Engine/Blueprint.h"
+#include "Engine/LevelScriptActor.h"
+#include "GameFramework/Actor.h"
+#include "HAL/PlatformCrt.h"
+#include "IContentBrowserSingleton.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "K2Node.h"
 #include "K2Node_ActorBoundEvent.h"
-#include "K2Node_CallFunction.h"
 #include "K2Node_AddComponent.h"
+#include "K2Node_CallFunction.h"
 #include "K2Node_ComponentBoundEvent.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
-#include "BlueprintActionMenuItem.h"
-#include "Editor.h"
-#include "BlueprintDragDropMenuItem.h"
-#include "BlueprintNodeSpawner.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "BlueprintPaletteFavorites.h"
-#include "BlueprintEditorSettings.h"
-#include "IContentBrowserSingleton.h"
-#include "ContentBrowserModule.h"
-#include "ComponentAssetBroker.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Misc/AssertionMacros.h"
+#include "Modules/ModuleManager.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "Selection.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "UObject/Class.h"
+#include "UObject/Field.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/Script.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+
+class UEdGraph;
 
 #define LOCTEXT_NAMESPACE "BlueprintActionMenuUtils"
 
@@ -284,7 +315,7 @@ static FBlueprintActionFilter BlueprintActionMenuUtilsImpl::MakeCallOnMemberFilt
 	CallOnMemberFilter.Context = MainMenuFilter.Context;
 	CallOnMemberFilter.PermittedNodeTypes.Add(UK2Node_CallFunction::StaticClass());
 	CallOnMemberFilter.AddRejectionTest(FBlueprintActionFilter::FRejectionTestDelegate::CreateStatic(IsUnBoundSpawner));
-
+	
 	const UBlueprintEditorSettings* BlueprintSettings = GetDefault<UBlueprintEditorSettings>();
 	// instead of looking for "ExposeFunctionCategories" on component properties,
 	// we just expose functions for all components, but we still need to check
@@ -391,6 +422,7 @@ static void BlueprintActionMenuUtilsImpl::AddFavoritesSection(FBlueprintActionFi
 	if (BlueprintSettings->bShowContextualFavorites)
 	{
 		FBlueprintActionFilter FavoritesFilter = MainMenuFilter;
+
 		FavoritesFilter.AddRejectionTest(FBlueprintActionFilter::FRejectionTestDelegate::CreateStatic(IsNonFavoritedAction));
 		
 		uint32 SectionFlags = 0x00;
@@ -413,9 +445,11 @@ static void BlueprintActionMenuUtilsImpl::AddFavoritesSection(FBlueprintActionFi
 //------------------------------------------------------------------------------
 void FBlueprintActionMenuUtils::MakePaletteMenu(FBlueprintActionContext const& Context, UClass* FilterClass, FBlueprintActionMenuBuilder& MenuOut)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FBlueprintActionMenuUtils::MakePaletteMenu);
+
 	MenuOut.Empty();
 	
-	uint32 FilterFlags = 0x00;
+	FBlueprintActionFilter::EFlags FilterFlags = FBlueprintActionFilter::BPFILTER_NoFlags;
 	if (FilterClass != nullptr)
 	{
 		// make sure we exclude global and static library actions
@@ -443,16 +477,28 @@ void FBlueprintActionMenuUtils::MakePaletteMenu(FBlueprintActionContext const& C
 //------------------------------------------------------------------------------
 void FBlueprintActionMenuUtils::MakeContextMenu(FBlueprintActionContext const& Context, bool bIsContextSensitive, uint32 ClassTargetMask, FBlueprintActionMenuBuilder& MenuOut)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FBlueprintActionMenuUtils::MakeContextMenu);
+
 	using namespace BlueprintActionMenuUtilsImpl;
 
 	//--------------------------------------
 	// Composing Filters
 	//--------------------------------------
 
-	uint32 FilterFlags = 0x00;
+	FBlueprintActionFilter::EFlags FilterFlags = FBlueprintActionFilter::BPFILTER_NoFlags;
 	if ( bIsContextSensitive && ((ClassTargetMask & EContextTargetFlags::TARGET_BlueprintLibraries) == 0) )
 	{
 		FilterFlags |= FBlueprintActionFilter::BPFILTER_RejectGlobalFields;
+	}
+
+	if ( bIsContextSensitive && ((ClassTargetMask & EContextTargetFlags::TARGET_NonImportedTypes) == 0) )
+	{
+		FilterFlags |= FBlueprintActionFilter::BPFILTER_RejectNonImportedFields;
+	}
+
+	if(bIsContextSensitive)
+	{
+		FilterFlags |= FBlueprintActionFilter::BPFILTER_RejectIncompatibleThreadSafety;
 	}
 
 	FBlueprintActionFilter MainMenuFilter(FilterFlags);
@@ -474,6 +520,15 @@ void FBlueprintActionMenuUtils::MakeContextMenu(FBlueprintActionContext const& C
 	LevelActorsFilter.Context = Context;
 	// only want bound actions for this menu section
 	LevelActorsFilter.AddRejectionTest(FBlueprintActionFilter::FRejectionTestDelegate::CreateStatic(IsUnBoundSpawner));
+
+	// Build asset reference filter
+	FAssetReferenceFilterContext AssetReferenceFilterContext;
+	for (UBlueprint* Blueprint : Context.Blueprints)
+	{
+		AssetReferenceFilterContext.ReferencingAssets.Add(FAssetData(Blueprint));
+	}
+
+	MainMenuFilter.AssetReferenceFilter = GEditor->MakeAssetReferenceFilter(AssetReferenceFilterContext);
 
 	const UBlueprintEditorSettings* BlueprintSettings = GetDefault<UBlueprintEditorSettings>();
 	bool bCanOperateOnLevelActors = bIsContextSensitive && (Context.Pins.Num() == 0);
@@ -618,26 +673,32 @@ void FBlueprintActionMenuUtils::MakeContextMenu(FBlueprintActionContext const& C
 	AddComponentFilter.PermittedNodeTypes.Add(UK2Node_AddComponent::StaticClass());
 	AddComponentFilter.AddRejectionTest(FBlueprintActionFilter::FRejectionTestDelegate::CreateStatic(IsUnBoundSpawner));
 
-
-	FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser");
-	TArray<FAssetData> SelectedAssets;
-	ContentBrowserModule.Get().GetSelectedAssets(SelectedAssets);
-
-	for (FAssetData& Asset : SelectedAssets)
+	if (BlueprintSettings->bIncludeActionsForSelectedAssetsInContextMenu)
 	{
-		UClass* AssetClass = Asset.GetClass();
-		// filter here (rather than in FBlueprintActionFilter) so we only load
-		// assets that we can use
-		if ((AssetClass == nullptr) || (FComponentAssetBrokerage::GetPrimaryComponentForAsset(AssetClass) == nullptr))
-		{
-			continue;
-		}
+		FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser");
+		TArray<FAssetData> SelectedAssets;
+		ContentBrowserModule.Get().GetSelectedAssets(SelectedAssets);
 
-		// @TODO: loading assets here may be slow (but we need a UObject to 
-		//        properly bind to), consider adding a editor option that will 
-		//        only offer then if the asset is already loaded
-		UObject* AssetObj = Asset.GetAsset();
-		AddComponentFilter.Context.SelectedObjects.Add(AssetObj);
+		if (SelectedAssets.Num() <= 1 || !BlueprintSettings->bLimitAssetActionBindingToSingleSelectionOnly)
+		{
+			for (FAssetData& Asset : SelectedAssets)
+			{
+				UClass* AssetClass = Asset.GetClass();
+				// filter here (rather than in FBlueprintActionFilter) so we only load
+				// assets that we can use
+				if ((AssetClass == nullptr) || (FComponentAssetBrokerage::GetPrimaryComponentForAsset(AssetClass) == nullptr))
+				{
+					continue;
+				}
+
+				// loading assets here may be slow (but we need a UObject to properly bind to)
+				if (Asset.IsAssetLoaded() || BlueprintSettings->bLoadSelectedAssetsForContextMenuActionBinding)
+				{
+					UObject* AssetObj = Asset.GetAsset();
+					AddComponentFilter.Context.SelectedObjects.Add(AssetObj);
+				}
+			}
+		}
 	}
 
 	//--------------------------------------
@@ -713,6 +774,8 @@ void FBlueprintActionMenuUtils::MakeContextMenu(FBlueprintActionContext const& C
 //------------------------------------------------------------------------------
 void FBlueprintActionMenuUtils::MakeFavoritesMenu(FBlueprintActionContext const& Context, FBlueprintActionMenuBuilder& MenuOut)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FBlueprintActionMenuUtils::MakeFavoritesMenu);
+
 	MenuOut.Empty();
 
 	FBlueprintActionFilter MenuFilter;

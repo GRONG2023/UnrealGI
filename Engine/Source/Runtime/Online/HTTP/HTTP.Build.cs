@@ -1,10 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 using UnrealBuildTool;
-using Tools.DotNETCommon;
 
 public class HTTP : ModuleRules
 {
+	// Currently there is a random event loop crash when shutdown HTTP manager on PC
+	protected virtual bool bPlatformEventLoopEnabledByDefault { get { return !Target.Platform.IsInGroup(UnrealPlatformGroup.Windows); } }
+
 	protected virtual bool bPlatformSupportsWinHttp
 	{
 		get
@@ -17,12 +19,20 @@ public class HTTP : ModuleRules
 	{
 		get
 		{
-			return Target.Platform.IsInGroup(UnrealPlatformGroup.Windows) ||
+			return (Target.Platform.IsInGroup(UnrealPlatformGroup.Windows) && !Target.WindowsPlatform.bUseXCurl) ||
 				Target.IsInPlatformGroup(UnrealPlatformGroup.Unix) ||
-				Target.IsInPlatformGroup(UnrealPlatformGroup.Android) ||
-				Target.Platform == UnrealTargetPlatform.Switch;
+				Target.IsInPlatformGroup(UnrealPlatformGroup.Android);
 		}
 	}
+	protected virtual bool bPlatformSupportsXCurl { get { return Target.Platform.IsInGroup(UnrealPlatformGroup.Windows) && Target.WindowsPlatform.bUseXCurl; } }
+	protected virtual bool bPlatformSupportsCurlMultiSocket { get { return !bPlatformSupportsXCurl; } }
+
+	protected virtual bool bPlatformSupportsCurlMultiPoll { get { return true; } }
+
+	protected virtual bool bPlatformSupportsCurlMultiWait { get { return false; } }
+	protected virtual bool bPlatformSupportsCurlQuickExit { get { return !bPlatformSupportsXCurl; } }
+
+	private bool bPlatformSupportsCurl { get { return bPlatformSupportsLibCurl || bPlatformSupportsXCurl; } }
 
 	protected virtual bool bPlatformRequiresOpenSSL
 	{
@@ -38,43 +48,50 @@ public class HTTP : ModuleRules
 	{
 		PublicDefinitions.Add("HTTP_PACKAGE=1");
 
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				"Runtime/Online/HTTP/Private",
-			}
-			);
-
 		PublicDependencyModuleNames.AddRange(
 			new string[] {
-				"Core"
+				"Core",
 			}
 			);
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
-				"SSL",
+				"EventLoop",
 			}
 			);
 
-		if (bPlatformSupportsLibCurl)
+		if (bPlatformSupportsCurl)
 		{
-			AddEngineThirdPartyPrivateStaticDependencies(Target, "libcurl");
 			PrivateDependencyModuleNames.AddRange(
 				new string[] {
 					"Sockets",
 				}
 			);
 
-			PublicDefinitions.Add("CURL_ENABLE_DEBUG_CALLBACK=1");
-			if (Target.Configuration != UnrealTargetConfiguration.Shipping)
+			if (bPlatformSupportsXCurl)
 			{
-				PublicDefinitions.Add("CURL_ENABLE_NO_TIMEOUTS_OPTION=1");
+				PublicDependencyModuleNames.Add("XCurl");
+			}
+			else if (bPlatformSupportsLibCurl)
+			{
+				AddEngineThirdPartyPrivateStaticDependencies(Target, "libcurl");
+
+				PublicDefinitions.Add("CURL_ENABLE_DEBUG_CALLBACK=1");
+				if (Target.Configuration != UnrealTargetConfiguration.Shipping)
+				{
+					PublicDefinitions.Add("CURL_ENABLE_NO_TIMEOUTS_OPTION=1");
+				}
 			}
 		}
-		else
-		{
-			PublicDefinitions.Add("WITH_LIBCURL=0");
-		}
+
+		PrivateDefinitions.Add("UE_HTTP_EVENT_LOOP_ENABLE_CHANCE_BY_DEFAULT=" + (bPlatformEventLoopEnabledByDefault ? "100" : "0"));
+		PrivateDefinitions.Add("WITH_CURL_LIBCURL =" + (bPlatformSupportsLibCurl ? "1" : "0"));
+		PublicDefinitions.Add("WITH_CURL_XCURL=" + (bPlatformSupportsXCurl ? "1" : "0"));
+		PrivateDefinitions.Add("WITH_CURL_MULTIPOLL=" + (bPlatformSupportsCurlMultiPoll ? "1" : "0"));
+		PrivateDefinitions.Add("WITH_CURL_MULTIWAIT=" + (bPlatformSupportsCurlMultiWait ? "1" : "0"));
+		PrivateDefinitions.Add("WITH_CURL_MULTISOCKET=" + (bPlatformSupportsCurlMultiSocket ? "1" : "0"));
+		PrivateDefinitions.Add("WITH_CURL_QUICKEXIT=" + (bPlatformSupportsCurlQuickExit ? "1" : "0"));
+		PrivateDefinitions.Add("WITH_CURL= " + ((bPlatformSupportsLibCurl || bPlatformSupportsXCurl) ? "1" : "0"));
 
 		// Use Curl over WinHttp on platforms that support it (until WinHttp client security is in a good place at the least)
 		if (bPlatformSupportsWinHttp)
@@ -89,10 +106,15 @@ public class HTTP : ModuleRules
 
 		if (bPlatformRequiresOpenSSL)
 		{
+			PrivateDependencyModuleNames.Add("SSL");
 			AddEngineThirdPartyPrivateStaticDependencies(Target, "OpenSSL");
 		}
+		else
+		{
+			PrivateDefinitions.Add("WITH_SSL=0");
+		}
 
-		if (Target.Platform == UnrealTargetPlatform.IOS || Target.Platform == UnrealTargetPlatform.TVOS || Target.Platform == UnrealTargetPlatform.Mac)
+		if (Target.Platform.IsInGroup(UnrealPlatformGroup.Apple))
 		{
 			PublicFrameworks.Add("Security");
 		}

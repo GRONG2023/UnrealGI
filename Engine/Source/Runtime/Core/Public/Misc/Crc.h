@@ -3,25 +3,36 @@
 #pragma once
 
 #include "CoreTypes.h"
+#include "HAL/PlatformString.h"
 #include "Misc/AssertionMacros.h"
-#include "Misc/Char.h"
 #include "Misc/CString.h"
+#include "Misc/Char.h"
+#include "Templates/EnableIf.h"
+#include "Templates/UnrealTypeTraits.h"
+#include "Traits/IsCharType.h"
 
+template <typename... Types>
+struct TTuple;
 
 /** 
  * CRC hash generation for different types of input data
  **/
-struct CORE_API FCrc
+struct FCrc
 {
 	/** lookup table with precalculated CRC values - slicing by 8 implementation */
-	static uint32 CRCTablesSB8[8][256];
+	static CORE_API uint32 CRCTablesSB8[8][256];
 
 	/** initializes the CRC lookup table. Must be called before any of the
 		CRC functions are used. */
-	static void Init();
+	static CORE_API void Init();
 
 	/** generates CRC hash of the memory area */
-	static uint32 MemCrc32( const void* Data, int32 Length, uint32 CRC=0 );
+	typedef uint32 (*MemCrc32Functor)( const void* Data, int32 Length, uint32 CRC );
+	static CORE_API MemCrc32Functor MemCrc32Func;
+	static FORCEINLINE uint32 MemCrc32(const void* Data, int32 Length, uint32 CRC = 0)
+	{
+		return MemCrc32Func(Data, Length, CRC);
+	}
 
 	/** generates CRC hash of the element */
 	template <typename T>
@@ -75,9 +86,9 @@ struct CORE_API FCrc
 	 */
 
 	/** lookup table with precalculated CRC values */
-	static uint32 CRCTable_DEPRECATED[256];
+	static CORE_API uint32 CRCTable_DEPRECATED[256];
 	/** lookup table with precalculated CRC values - slicing by 8 implementation */
-	static uint32 CRCTablesSB8_DEPRECATED[8][256];
+	static CORE_API uint32 CRCTablesSB8_DEPRECATED[8][256];
 
 	/** String CRC. */
 	template <typename CharType>
@@ -122,7 +133,7 @@ struct CORE_API FCrc
 	template <typename CharType> static inline uint32 Strihash_DEPRECATED( const int32 DataLen, const CharType* Data );
 
 	/** generates CRC hash of the memory area */
-	static uint32 MemCrc_DEPRECATED( const void* Data, int32 Length, uint32 CRC=0 );
+	static CORE_API uint32 MemCrc_DEPRECATED( const void* Data, int32 Length, uint32 CRC=0 );
 };
 
 template <>
@@ -192,3 +203,126 @@ inline uint32 FCrc::Strihash_DEPRECATED(const int32 DataLen, const WIDECHAR* Dat
 	}
 	return Hash;
 }
+
+template <>
+inline uint32 FCrc::Strihash_DEPRECATED(const UTF8CHAR* Data)
+{
+	// We can't utilize StringConv.h here due to circular includes, so do the conversion manually
+
+	int32 Len          = FPlatformString::Strlen(Data);
+	int32 ConvertedLen = FPlatformString::ConvertedLength<WIDECHAR>(Data, Len);
+
+	WIDECHAR* Temp = new WIDECHAR[ConvertedLen];
+
+	WIDECHAR* TempEnd = FPlatformString::Convert(Temp, ConvertedLen, Data, Len);
+	checkf(TempEnd!=nullptr, TEXT("String conversion unsuccessful"));
+
+	// This doesn't work for strings containing characters outside the BMP, but
+	// then neither does the WIDECHAR overload.
+	uint32 Result = FCrc::Strihash_DEPRECATED(ConvertedLen, Temp);
+
+	delete [] Temp;
+
+	return Result;
+}
+
+template <>
+inline uint32 FCrc::Strihash_DEPRECATED(const int32 DataLen, const UTF8CHAR* Data)
+{
+	// We can't utilize StringConv.h here due to circular includes, so do the conversion manually
+
+	int32 ConvertedLen = FPlatformString::ConvertedLength<WIDECHAR>(Data, DataLen);
+
+	WIDECHAR* Temp = new WIDECHAR[ConvertedLen];
+
+	WIDECHAR* TempEnd = FPlatformString::Convert(Temp, ConvertedLen, Data, DataLen);
+	checkf(TempEnd!=nullptr, TEXT("String conversion unsuccessful"));
+
+	// This doesn't work for strings containing characters outside the BMP, but
+	// then neither does the WIDECHAR overload.
+	uint32 Result = FCrc::Strihash_DEPRECATED(ConvertedLen, Temp);
+
+	delete [] Temp;
+
+	return Result;
+}
+
+/**
+ * Gets a non-owning TCHAR pointer from a string type.
+ *
+ * Can be used generically to get a const TCHAR*, when it is not known if the argument is a TCHAR* or an FString:
+ *
+ * template <typename T>
+ * void LogValue(const T& Val)
+ * {
+ *     Logf(TEXT("Value: %s"), ToCStr(LexToString(Val)));
+ * }
+ */
+FORCEINLINE const TCHAR* ToCStr(const TCHAR* Ptr)
+{
+	return Ptr;
+}
+
+/**
+ * An implementation of KeyFuncs for sets which hashes string pointers by FCrc::Strihash_DEPRECATED.
+ */
+template <typename InKeyType, bool bInAllowDuplicateKeys = false>
+struct TStringPointerSetKeyFuncs_DEPRECATED
+{
+	static_assert(TIsCharType<std::remove_pointer_t<decltype(ToCStr(std::declval<InKeyType>()))>>::Value, "TStringPointerSetKeyFuncs_DEPRECATED should only be used with keys which character types");
+
+	using KeyType         = InKeyType;
+	using KeyInitType     = typename TTypeTraits<InKeyType>::ConstPointerType;
+	using ElementInitType = typename TCallTraits<InKeyType>::ParamType;
+
+	static constexpr bool bAllowDuplicateKeys = bInAllowDuplicateKeys;
+
+	static FORCEINLINE KeyInitType GetSetKey(ElementInitType Element)
+	{
+		return Element;
+	}
+
+	template <typename ComparableKey>
+	static FORCEINLINE bool Matches(KeyInitType A, const ComparableKey& B)
+	{
+		return A == B;
+	}
+
+	template <typename ComparableKey = KeyInitType>
+	static FORCEINLINE uint32 GetKeyHash(ComparableKey Key)
+	{
+		return FCrc::Strihash_DEPRECATED(ToCStr(Key));
+	}
+};
+
+/**
+ * An implementation of KeyFuncs for maps which hashes string pointers by FCrc::Strihash_DEPRECATED.
+ */
+template <typename InKeyType, typename InValueType, bool bInAllowDuplicateKeys = false>
+struct TStringPointerMapKeyFuncs_DEPRECATED
+{
+	static_assert(TIsCharType<std::remove_pointer_t<decltype(ToCStr(std::declval<InKeyType>()))>>::Value, "TStringPointerMapKeyFuncs_DEPRECATED should only be used with keys which character types");
+
+	using KeyType         = InKeyType;
+	using KeyInitType     = typename TTypeTraits<InKeyType>::ConstPointerType;
+	using ElementInitType = const TTuple<typename TTypeTraits<InKeyType>::ConstInitType, typename TTypeTraits<InValueType>::ConstInitType>&;
+
+	static constexpr bool bAllowDuplicateKeys = bInAllowDuplicateKeys;
+
+	static FORCEINLINE KeyInitType GetSetKey(ElementInitType Element)
+	{
+		return Element.Key;
+	}
+
+	template <typename ComparableKey>
+	static FORCEINLINE bool Matches(KeyInitType A, const ComparableKey& B)
+	{
+		return A == B;
+	}
+
+	template <typename ComparableKey = KeyInitType>
+	static FORCEINLINE uint32 GetKeyHash(ComparableKey Key)
+	{
+		return FCrc::Strihash_DEPRECATED(ToCStr(Key));
+	}
+};

@@ -15,6 +15,7 @@ namespace Gauntlet
 		public string Project;
 		public string GameMap;
 		private Dictionary<string, object> Params;
+		private HashSet<string> NonOptionParams;
 
 		// Give external people read-only access
 		public IReadOnlyDictionary<string, object> Arguments {  get { return Params;  } }
@@ -31,6 +32,7 @@ namespace Gauntlet
 			GameMap = string.Empty;
 			AdditionalExplicitCommandLineArgs = string.Empty;
 			Params = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+			NonOptionParams = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 		}
 
 		// copy constructor
@@ -40,6 +42,7 @@ namespace Gauntlet
 			GameMap = InCopy.GameMap;
 			AdditionalExplicitCommandLineArgs = InCopy.AdditionalExplicitCommandLineArgs;
 			Params = new Dictionary<string, object>(InCopy.Params);
+			NonOptionParams = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 		}
 
 		/// <summary>
@@ -50,7 +53,7 @@ namespace Gauntlet
 		public void AddRawCommandline(string InRawCommandline, bool bOverrideExistingValues = true)
 		{
 			// turn Name(p1,etc) into a collection of Name|(p1,etc) groups
-			MatchCollection Matches = Regex.Matches(InRawCommandline, "-(?<option>\\-?[\\w\\d.:\\[\\]\\/\\\\]+)(=(?<value>(\"([^\"]*)\")|(\\S+)))?");
+			MatchCollection Matches = Regex.Matches(InRawCommandline, "-(?<option>\\-?[\\w\\d.:!\\[\\]\\/\\\\\\-]+)(=(?<value>(\"([^\"]*)\")|(\\S+)))?");
 
 			foreach (Match M in Matches)
 			{
@@ -69,6 +72,18 @@ namespace Gauntlet
 			}
 		}
 
+		/// <summary>
+		/// Breaks down a raw commandline and adds it to the commandline dictionary.
+		/// Will override current set values in the dictionary when conflicts arise.
+		/// </summary>
+		/// <param name="InRawCommandline"></param>
+		public void CombineCommandLines(GauntletCommandLine InCommandline, bool bOverrideExistingValues = true)
+		{
+			foreach (string Key in InCommandline.Params.Keys)
+			{
+				Add(Key, InCommandline.Params[Key]);
+			}
+		}
 		/// <summary>
 		/// Add a new value to the commandline, returning false if the value already exists on the commandline and would be set
 		/// to something other than what is passed in. Execcmds passed in here will still append to an existing value.
@@ -107,8 +122,13 @@ namespace Gauntlet
 		/// </summary>
 		/// <param name="ParamName"></param>
 		/// <param name="ParamVal"></param>
-		public void Add(string ParamName, object ParamVal = null)
+		public void Add(string ParamName, object ParamVal = null, bool IsNonOption = false)
 		{
+			if (IsNonOption)
+			{
+				NonOptionParams.Add(ParamName);
+			}
+
 			if (Params.ContainsKey(ParamName))
 			{
 				if (ParamName.ToLower() == "execcmds" && ParamVal != null)
@@ -193,9 +213,59 @@ namespace Gauntlet
 			return Params[ParamName];
 		}
 
+		/// <summary>
+		/// Get a collection of all sub paremeters
+		/// Useful for group arguments like ExecCmds
+		/// </summary>
+		/// <param name="GroupName"></param>
+		/// <param name="SubParamDelimeter">Which separator to use when distinguishing the group's sub parameters</param>
+		/// <param name="SubValueDelimeter">Which separator to use when splitting the sub parameter from the corresponding value</param>
+		/// <returns>A dictionary containing the group's sub parameters of parameter values</returns>
+		public Dictionary<string, string> GetGroupParamValues(string GroupName, string SubParamDelimeter = ",", string SubValueDelimeter = " ")
+		{
+			Dictionary<string, string> Group = new Dictionary<string, string>();
+
+			string FullArgument = GetParamValue(GroupName).ToString();
+			string[] SubParams = FullArgument.Split(SubParamDelimeter);
+			foreach (string SubParam in SubParams)
+			{
+				int Index = SubParam.IndexOf(SubValueDelimeter);
+
+				if (Index < 1)
+				{
+					// No value, this is just a boolean param
+					Group.Add(SubParam, string.Empty);
+				}
+				else
+				{
+					Group.Add(SubParam.Substring(0, Index), SubParam.Substring(Index + 1));
+				}
+			}
+
+			return Group;
+		}
+
+		/// <summary>
+		/// Checks if a parameter is present
+		/// </summary>
+		/// <param name="ParamName">The name of the parameter</param>
+		/// <returns>True if the parameter has already been added</returns>
 		public bool HasParam(string ParamName)
 		{
 			return (Params != null && Params.ContainsKey(ParamName));
+		}
+
+		/// <summary>
+		/// Checks if a parameter group has a subparameter
+		/// </summary>
+		/// <param name="GroupName">The name of the param group, like "ExecCmds"</param>
+		/// <param name="SubParamName">A component of the group, like "sg.TextureQuality"</param>
+		/// <param name="SubParamDelimeter">Which separator to use when distinguishing the group's sub parameters</param>
+		/// <param name="SubValueDelimeter">Which separator to use when splitting the sub parameter from the corresponding value</param>
+		/// <returns>True if a group parameter exists and contains a matching sub parameter</returns>
+		public bool HasGroupParam(string GroupName, string SubParamName, string SubParamDelimeter = ",", string SubValueDelimeter = " ")
+		{
+			return HasParam(GroupName) && GetGroupParamValues(GroupName, SubParamDelimeter, SubValueDelimeter).ContainsKey(SubParamName);
 		}
 
 		/// <summary>
@@ -204,6 +274,7 @@ namespace Gauntlet
 		public void ClearCommandLine()
 		{
 			Params.Clear();
+			AdditionalExplicitCommandLineArgs = string.Empty;
 		}
 
 		/// <summary>
@@ -220,13 +291,13 @@ namespace Gauntlet
 				string CurrentArgument;
 				if (Params[Key] != null && !string.IsNullOrWhiteSpace(Params[Key].ToString()))
 				{
-					CurrentArgument = string.Format("-{0}={1}", Key,
+					CurrentArgument = string.Format("{0}{1}={2}", NonOptionParams.Contains(Key) ? "" : "-", Key,
 						(Params[Key].ToString().Contains(' ') && !Params[Key].ToString().Contains('\"'))
 						? string.Format("\"{0}\"", Params[Key]) : Params[Key]);
 				}
 				else
 				{
-					CurrentArgument = string.Format("-{0}", Key);
+					CurrentArgument = string.Format("{0}{1}", NonOptionParams.Contains(Key) ? "" : "-", Key);
 				}
 				FinalCommandline = string.Format("{0} {1} ", FinalCommandline, CurrentArgument);
 			}
@@ -271,7 +342,8 @@ namespace Gauntlet
 		Demos,
 		Profiling,
 		Saved,
-		Platform
+		Platform,
+		PersistentDownloadDir
 	}
 
 	/// <summary>
@@ -291,9 +363,9 @@ namespace Gauntlet
 	/// <summary>
 	/// This class represents a process-role in a test and defines the type, command line,
 	/// and controllers that are needed.
-	/// 
+	///
 	/// TODO - can this be removed and UnrealSessionRole used directly?
-	/// 
+	///
 	/// </summary>
 	public class UnrealTestRole
 	{
@@ -311,12 +383,25 @@ namespace Gauntlet
 			ExplicitClientCommandLine = string.Empty;
 			Controllers = new List<string>();
 			FilesToCopy = new List<UnrealFileToCopy>();
+			RoleConfigurations = new List<IUnrealRoleConfiguration>();
 			AdditionalArtifactDirectories = new List<EIntendedBaseCopyDirectory>();
 			RoleType = ERoleModifier.None;
+			InstallOnly = false;
+			DeferredLaunch = false;
 			CommandLineParams = new GauntletCommandLine();
 		}
 
 		public ERoleModifier RoleType { get; set; }
+
+		/// <summary>
+		/// Whether this role should be responsible only for installing the build and not monitoring a process.
+		/// </summary>
+		public bool InstallOnly { get; set; }
+
+		/// <summary>
+		/// Whether this role will launched by the test node at a later time, typically during TickTest(). By default, all roles are launched immediately.
+		/// </summary>
+		public bool DeferredLaunch { get; set; }
 
 		/// <summary>
 		/// Type of process this role represents
@@ -354,7 +439,6 @@ namespace Gauntlet
 			}
 		}
 
-
 		/// <summary>
 		/// Dictionary of commandline arguments that are turned into a commandline at the end.
 		/// For flags, leave the value set to null. Created and then passed through to the Session Role's Commandline Object
@@ -366,6 +450,11 @@ namespace Gauntlet
 		/// Controllers for this role
 		/// </summary>
 		public List<string> Controllers { get; set; }
+
+		/// <summary>
+		/// Collection of modular configurations applied to this role
+		/// </summary>
+		public List<IUnrealRoleConfiguration> RoleConfigurations { get; set; }
 
 		/// <summary>
 		/// Explicit command line for this role. If this is set no other
@@ -506,7 +595,7 @@ namespace Gauntlet
 		protected bool Windowed { get; set; }
 
 		/// <summary>
-		/// Which window mode to use for the PC or Mac client. Only Windowed and Fullscreen are fully supported.
+		/// Which window mode to use for the PC or Mac or Linux client. Only Windowed and Fullscreen are fully supported.
 		/// </summary>
 		/// 
 		[AutoParam(EWindowMode.Windowed)]
@@ -526,16 +615,16 @@ namespace Gauntlet
 		public float MaxDuration { get; set; }
 
 		/// <summary>
+		/// Max number of retries in case of critical failure
+		/// </summary>
+		[AutoParam(3)]
+		public int MaxRetries { get; set; }
+
+		/// <summary>
 		/// Produce test artifacts for Horde build system
 		/// </summary>
 		[AutoParam]
-		public bool WriteTestResultsForHorde = true;
-
-		/// <summary>
-		/// Key to store Horde Test Data
-		/// </summary>
-		[AutoParam]
-		public string HordeTestDataKey = "TestPassSummary";
+		public bool WriteTestResultsForHorde = false;
 
 		/// <summary>
 		/// Path to store test data for Horde build system
@@ -544,10 +633,34 @@ namespace Gauntlet
 		public string HordeTestDataPath = "";
 
 		/// <summary>
+		/// Key to store Horde Test Data
+		/// </summary>
+		[AutoParam]
+		public string HordeTestDataKey = "";
+
+		/// <summary>
 		/// Path to store test artifacts for Horde build system
 		/// </summary>
 		[AutoParam]
 		public string HordeArtifactPath = "";
+
+		/// <summary>
+		/// PreFlight change id
+		/// </summary>
+		[AutoParam]
+		public string PreFlightChange = "";
+
+		/// <summary>
+		/// Telemetry Database config to use
+		/// </summary>
+		[AutoParam]
+		public string PublishTelemetryTo = "";
+
+		/// <summary>
+		/// Path to Database config file
+		/// </summary>
+		[AutoParam]
+		public string DatabaseConfigPath = "";
 
 		/// <summary>
 		/// What the test result should be treated as if we reach max duration.
@@ -594,12 +707,30 @@ namespace Gauntlet
 		[AutoParam]
 		public int ForceVerticalRes = 0;
 
+		/// <summary>
+		/// Consider the package as CookedEditor
+		/// </summary>
+		[AutoParam(false)]
+		public bool CookedEditor { get; set; }
+
+		/// <summary>
+		/// Enforce Verbose logging for a list of loggers
+		/// </summary>
+		[AutoParam]
+		public string VerboseLogCategories { get; set; }
+
 		// Member variables 
 
 		/// <summary>
 		/// A map of role types to test roles
 		/// </summary>
 		public Dictionary<UnrealTargetRole, List<UnrealTestRole>> RequiredRoles { get; private set; }
+
+		/// <summary>
+		/// Log channels that should be treated as events for this test. Warnings & Errors in these
+		/// channels will be promoted to test warnings and errors. For LogFoo return "Foo".
+		/// </summary>
+		public List<string> LogCategoriesForEvents { get; protected set; } = new List<string>();
 
 		/// <summary>
 		/// Base constructor
@@ -638,12 +769,26 @@ namespace Gauntlet
 		/// <returns></returns>
 		public UnrealTestRole RequireRole(UnrealTargetRole InRole)
 		{
+			if(InRole.IsEditor())
+			{
+				return GetEditorRole();
+			}
 			return RequireRoles(InRole, 1).First();
 		}
 
 		public UnrealTestRole RequireRole(UnrealTargetRole InRole, UnrealTargetPlatform PlatformOverride)
 		{
+			if (InRole.IsEditor())
+			{
+				InRole = CookedEditor ? UnrealTargetRole.CookedEditor : UnrealTargetRole.Editor;
+			}
 			return RequireRoles(InRole, PlatformOverride, 1).First();
+		}
+
+		public UnrealTestRole GetEditorRole()
+		{
+			UnrealTargetRole EditorRole = CookedEditor ? UnrealTargetRole.CookedEditor : UnrealTargetRole.Editor;
+			return RequireRoles(EditorRole, 1).First();
 		}
 
 		/// <summary>
@@ -655,6 +800,14 @@ namespace Gauntlet
 		public IEnumerable<UnrealTestRole> RequireRoles(UnrealTargetRole InRole, int Count)
 		{
 			return RequireRoles(InRole, null, Count);
+		}
+
+		/// <summary>
+		/// Clears all roles from this config. 
+		/// </summary>
+		public void ClearRoles()
+		{
+			RequiredRoles.Clear();
 		}
 
 		public IEnumerable<UnrealTestRole> RequireRoles(UnrealTargetRole InRole, UnrealTargetPlatform? PlatformOverride, int Count, ERoleModifier roleType = ERoleModifier.None)
@@ -680,14 +833,6 @@ namespace Gauntlet
 		}
 
 		/// <summary>
-		/// Clears all roles from this config. 
-		/// </summary>
-		public void ClearRoles()
-		{
-			RequiredRoles.Clear();
-		}
-
-		/// <summary>
 		/// Returns the number of roles of the specified type that exist for this test
 		/// </summary>
 		/// <param name="Role"></param>
@@ -702,6 +847,53 @@ namespace Gauntlet
 			}
 
 			return Roles;
+		}
+
+		/// <summary>
+		/// Return the list of required roles for the target role
+		/// </summary>
+		/// <param name="InRole"></param>
+		/// <returns></returns>
+		public IEnumerable<UnrealTestRole> GetRequiredRoles(UnrealTargetRole InRole)
+		{
+			if (RequiredRoles.ContainsKey(InRole))
+			{
+				return RequiredRoles[InRole];
+			}
+			return new List<UnrealTestRole>();
+		}
+
+		/// <summary>
+		/// Return the main required role to execute the test.
+		/// </summary>
+		/// <returns></returns>
+		public UnrealTestRole GetMainRequiredRole()
+		{
+			var PriorityList = new UnrealTargetRole[] {
+				UnrealTargetRole.Client,
+				UnrealTargetRole.EditorGame,
+				UnrealTargetRole.Server,
+				UnrealTargetRole.EditorServer,
+				UnrealTargetRole.Editor,
+				UnrealTargetRole.CookedEditor
+			};
+			foreach (UnrealTargetRole TargetRole in PriorityList)
+			{
+				IEnumerable<UnrealTestRole> Roles = GetRequiredRoles(TargetRole);
+				if (Roles.Any())
+				{
+					return Roles.First();
+				}
+			}
+
+			if (RequiredRoles.Any())
+			{
+				var RoleEnumerator = RequiredRoles.Values.GetEnumerator();
+				RoleEnumerator.MoveNext();
+				return RoleEnumerator.Current.First();
+			}
+
+			return new UnrealTestRole(UnrealTargetRole.Unknown, null);
 		}
 
 		/// <summary>
@@ -726,7 +918,7 @@ namespace Gauntlet
 			}
 			else if (AppConfig.ProcessType.IsClient())
 			{
-				if (AppConfig.Platform == UnrealTargetPlatform.Win64 || AppConfig.Platform == UnrealTargetPlatform.Mac)
+				if (AppConfig.Platform == UnrealTargetPlatform.Win64 || AppConfig.Platform == UnrealTargetPlatform.Mac || AppConfig.Platform == UnrealTargetPlatform.Linux)
 				{
 					if (!IgnoreDefaultResolutionAndWindowMode)
 					{
@@ -759,18 +951,37 @@ namespace Gauntlet
 				}
 			}
 
-			// use -log on servers so we get a window..
-			if (AppConfig.ProcessType.IsServer())
+			if (AppConfig.Platform == UnrealTargetPlatform.Linux)
+			{
+				// due to an issue with dotnet being extremely pedantic we have to drop our locks on files so we can read from the log file
+				// https://github.com/dotnet/runtime/issues/34126
+				AppConfig.CommandLine += " -noexclusivelockonwrite";
+				AppConfig.CommandLine += " -RemoveInvalidKeys";
+			}
+
+			// use -log on user machine so we get a window..
+			if (!AutomationTool.Automation.IsBuildMachine)
 			{
 				AppConfig.CommandLine += " -log";
 			}
 
 			if (Attended == false)
 			{
-				AppConfig.CommandLine += " -unattended";
+				AppConfig.CommandLine += " -unattended -nosplash";
+
+				// if we are unattended but still may need access to Vulkan passing renderoffscreen to allow not depending on
+				// the X11/Wayland display server to be around and use a dummy/offscreen rendering mode
+				//
+				// As well as disable sound as there are no audio devices when running through horde
+				//
+				// Disable cef as it seems to want to talk to an X11 server so unlikely its even working
+				if (AppConfig.Platform == UnrealTargetPlatform.Linux)
+				{
+					AppConfig.CommandLine += " -renderoffscreen";
+				}
 			}
 
-			AppConfig.CommandLine += " -stdout -AllowStdOutLogVerbosity";
+			AppConfig.CommandLine += " -stdout -FullStdOutLogOutput";
 
 			float HeartbeatPeriod = Globals.Params.ParseValue("HeartbeatPeriod", HeartbeatOptions.HeartbeatPeriod);
 			if (HeartbeatPeriod > 0)
@@ -788,7 +999,12 @@ namespace Gauntlet
 					AppConfig.CommandLineParams.GameMap = MapChoice;
 				}
 			}
-		}			
+
+			if (CommandUtils.IsBuildMachine)
+			{
+				AppConfig.CommandLineParams.AddUnique("BUILDMACHINE");
+			}
+		}
 	}
 
 }

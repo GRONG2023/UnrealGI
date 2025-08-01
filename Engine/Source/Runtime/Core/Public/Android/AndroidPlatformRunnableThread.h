@@ -8,6 +8,7 @@
 
 #include "Runtime/Core/Private/HAL/PThreadRunnableThread.h"
 #include "Android/AndroidPlatformMisc.h"
+#include "AndroidPlatform.h"
 
 /**
 * Android implementation of the pthread functions
@@ -63,7 +64,7 @@ private:
 			}
 		}
 
-		FAndroidMisc::SetThreadName(TCHAR_TO_ANSI(*SizeLimitedThreadName));
+		FPlatformProcess::SetThreadName(*SizeLimitedThreadName);
 	}
 
 	/**
@@ -81,4 +82,9 @@ private:
 
 		return InStackSize;
 	}
+
+#if ANDROID_USE_NICE_VALUE_THREADPRIORITY
+	int32 ErrorLogLimit = 5;
+	virtual void SetThreadPriority(pthread_t InThread, EThreadPriority NewPriority) override;
+#endif
 };

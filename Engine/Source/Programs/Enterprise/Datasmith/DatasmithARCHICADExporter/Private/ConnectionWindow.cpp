@@ -8,18 +8,10 @@
 #include "Utils/ShellOpenDocument.h"
 #include "Utils/TaskCalledFromEventLoop.h"
 
-DISABLE_SDK_WARNINGS_START
-
-#include "DGDialog.hpp"
-#include "DGModule.hpp"
-#include "DGFileDlg.hpp"
-
 #undef TicksPerSecond
 
 #include "DirectLinkEndpoint.h"
 #include "DatasmithDirectLink.h"
-
-DISABLE_SDK_WARNINGS_END
 
 BEGIN_NAMESPACE_UE_AC
 
@@ -73,7 +65,7 @@ inline bool operator==(const DirectLink::FRawInfo::FStreamInfo& InStreamInfo1,
 {
 	return InStreamInfo1.StreamId == InStreamInfo2.StreamId && InStreamInfo1.Source == InStreamInfo2.Source &&
 		   InStreamInfo1.Destination == InStreamInfo2.Destination &&
-		   InStreamInfo1.bIsActive == InStreamInfo2.bIsActive &&
+		   InStreamInfo1.ConnectionState == InStreamInfo2.ConnectionState &&
 		   InStreamInfo1.CommunicationStatus == InStreamInfo2.CommunicationStatus;
 }
 
@@ -279,7 +271,7 @@ class FConnectionDialog : public DG::Palette,
 			FString ThisText;
 			for (const DirectLink::FRawInfo::FStreamInfo& StreamInfo : CurrentStatus.StreamsInfo)
 			{
-				if (StreamInfo.bIsActive)
+				if (StreamInfo.ConnectionState == DirectLink::EStreamConnectionState::Active)
 				{
 					const DirectLink::FRawInfo::FDataPointId** SourceDataPointId = SourcesMap.Find(StreamInfo.Source);
 					const FDestination* DestinationDataPointId = DestinationsMap.Find(StreamInfo.Destination);
@@ -360,6 +352,7 @@ class FConnectionDialog : public DG::Palette,
 				{
 					UE_AC_TraceF("FConnectionDialog::ButtonClicked - New cache folder is \"%s\"\n", CachePath.ToUtf8());
 					FSyncDatabase::SetCachePath(CachePath);
+					UpdateCacheDirectoryText();
 				}
 				else
 				{
@@ -373,6 +366,18 @@ class FConnectionDialog : public DG::Palette,
 			UE_AC::ShellOpenDocument(FSyncDatabase::GetCachePath().ToUtf8());
 		}
 	}
+	
+	void UpdateCacheDirectoryText()
+	{
+		CacheFolderText.SetText(GetGSName(kName_CacheDirectory) + FSyncDatabase::GetCachePath());
+	}
+
+#if PLATFORM_MAC & AC_VERSION > 25
+	virtual void ItemMouseExited(const DG::ItemMouseMoveEvent& /*ev*/) override {}
+	virtual void ItemMouseEntered(const DG::ItemMouseMoveEvent& /*ev*/) override {}
+	virtual short SpecMouseExited(const DG::ItemMouseMoveEvent& /*ev*/) override { return 0; }
+	virtual short SpecMouseEntered(const DG::ItemMouseMoveEvent& /*ev*/) override { return 0; }
+#endif
 };
 
 FConnectionDialog::FConnectionDialog()
@@ -417,20 +422,20 @@ FConnectionDialog::FConnectionDialog()
         {
             return 0;
         }
-        GS::Ref<GS::Object> Object(ConnectionsListBox.GetItemObjectData(EventArgs.listItem));
-        if (Object == GS::null)
+        const GS::Object* Object = ConnectionsListBox.GetItemObjectData(EventArgs.listItem);
+        if (Object == nullptr)
         {
             UE_AC_DebugF("ConnectionsListBox.onToolTipRequested - Object is null\n");
             return 0;
         }
-        EventArgs.toolTipText += static_cast<FToolTipText&>(*Object).ToolTipText;
+        EventArgs.toolTipText += static_cast<const FToolTipText&>(*Object).ToolTipText;
         return 1;
     };
 #endif
 	Attach(*this);
 	AttachToAllItems(*this);
 
-	CacheFolderText.SetText(GetGSName(kName_CacheDirectory) + FSyncDatabase::GetCachePath());
+	UpdateCacheDirectoryText();
 
 	bool SendForInactiveApp = false;
 	EnableIdleEvent(SendForInactiveApp);

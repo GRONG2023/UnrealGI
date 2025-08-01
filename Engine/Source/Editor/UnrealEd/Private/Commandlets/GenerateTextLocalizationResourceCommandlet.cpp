@@ -1,11 +1,25 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Commandlets/GenerateTextLocalizationResourceCommandlet.h"
-#include "HAL/FileManager.h"
-#include "Misc/Paths.h"
+
+#include "Commandlets/Commandlet.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Internationalization/CulturePointer.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Internationalization/TextKey.h"
 #include "Internationalization/TextLocalizationResource.h"
+#include "LocTextHelper.h"
+#include "LocalizedAssetUtil.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Misc/Paths.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/Tuple.h"
 #include "TextLocalizationResourceGenerator.h"
-#include "Templates/UniquePtr.h"
+#include "Trace/Detail/Channel.h"
+#include "UObject/NameTypes.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogGenerateTextLocalizationResourceCommandlet, Log, All);
 
@@ -141,6 +155,7 @@ int32 UGenerateTextLocalizationResourceCommandlet::Main(const FString& Params)
 
 	// Load the manifest and all archives
 	FLocTextHelper LocTextHelper(SourcePath, ManifestName, ArchiveName, NativeCultureName, CulturesToGenerate, GatherManifestHelper->GetLocFileNotifies(), GatherManifestHelper->GetPlatformSplitMode());
+	LocTextHelper.SetCopyrightNotice(GatherManifestHelper->GetCopyrightNotice());
 	{
 		FText LoadError;
 		if (!LocTextHelper.LoadAll(ELocTextHelperLoadFlags::LoadOrCreate, &LoadError))

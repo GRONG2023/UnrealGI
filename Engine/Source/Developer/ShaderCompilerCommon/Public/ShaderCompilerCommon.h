@@ -3,10 +3,20 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "UniformBuffer.h"
 #include "ShaderCore.h"
 #include "ShaderCompilerCore.h"
 #include "CrossCompilerDefinitions.h"
+#include "ShaderConductorContext.h"
+#include "Templates/Function.h"
+#include "Interfaces/IShaderFormat.h"
+
+class FShaderParameterParser;
+class FShaderSource;
+
+namespace UE::ShaderCompilerCommon
+{
+	static constexpr const TCHAR* kUniformBufferConstantBufferPrefix = TEXT("UniformBufferConstants_");
+}
 
 /**
  * This function looks for resources specified in ResourceTableMap in the 
@@ -16,15 +26,26 @@
  * Returns false if there's any internal error.
  */
 extern SHADERCOMPILERCOMMON_API bool BuildResourceTableMapping(
-		const TMap<FString,FResourceTableEntry>& ResourceTableMap,
-		const TMap<FString,uint32>& ResourceTableLayoutHashes,
+		const FShaderResourceTableMap& ResourceTableMap,
+		const TMap<FString,FUniformBufferEntry>& UniformBufferMap,
 		TBitArray<>& UsedUniformBufferSlots,
 		FShaderParameterMap& ParameterMap,
 		FShaderCompilerResourceTable& OutSRT
 	);
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+UE_DEPRECATED(5.3, "No longer supported; use version of function that accepts a FShaderResourceTableMap instead")
+extern SHADERCOMPILERCOMMON_API bool BuildResourceTableMapping(
+		const TMap<FString,FResourceTableEntry>& ResourceTableMap,
+		const TMap<FString,FUniformBufferEntry>& UniformBufferMap,
+		TBitArray<>& UsedUniformBufferSlots,
+		FShaderParameterMap& ParameterMap,
+		FShaderCompilerResourceTable& OutSRT
+	);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
 /** Culls global uniform buffer entries from the parameter map. */
-extern SHADERCOMPILERCOMMON_API void CullGlobalUniformBuffers(const TMap<FString, FString>& ResourceTableLayoutSlots, FShaderParameterMap& ParameterMap);
+extern SHADERCOMPILERCOMMON_API void CullGlobalUniformBuffers(const TMap<FString, FUniformBufferEntry>& UniformBufferMap, FShaderParameterMap& ParameterMap);
 
 /**
  * Builds a token stream out of the resource map. The resource map is one
@@ -42,81 +63,393 @@ extern SHADERCOMPILERCOMMON_API void BuildResourceTableTokenStream(
 // Finds the number of used uniform buffers in a resource map
 extern SHADERCOMPILERCOMMON_API int16 GetNumUniformBuffersUsed(const FShaderCompilerResourceTable& InSRT);
 
-
-/** Validates and moves all the shader loose data parameter defined in the root scope of the shader into the root uniform buffer. */
-class SHADERCOMPILERCOMMON_API FShaderParameterParser
+namespace UE::ShaderCompilerCommon
 {
-public:
-	bool ParseAndMoveShaderParametersToRootConstantBuffer(
-		const FShaderCompilerInput& CompilerInput,
-		FShaderCompilerOutput& CompilerOutput,
-		FString& PreprocessedShaderSource,
-		const TCHAR* ConstantBufferType);
+	extern SHADERCOMPILERCOMMON_API bool ExecuteShaderPreprocessingSteps(
+		FShaderPreprocessOutput& PreprocessOutput,
+		const FShaderCompilerInput& Input,
+		const FShaderCompilerEnvironment& Environment,
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS		// FShaderCompilerDefinitions will be made internal in the future, marked deprecated until then
+		const FShaderCompilerDefinitions& AdditionalDefines = FShaderCompilerDefinitions()
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+		);
 
-	void ValidateShaderParameterTypes(
-		const FShaderCompilerInput& CompilerInput,
-		FShaderCompilerOutput& CompilerOutput) const;
+	extern SHADERCOMPILERCOMMON_API FStringView          RemoveConstantBufferPrefix(FStringView InName);
+	extern SHADERCOMPILERCOMMON_API FString              RemoveConstantBufferPrefix(const FString& InName);
 
-private:
-	struct FParsedShaderParameter
+	extern SHADERCOMPILERCOMMON_API bool                 ValidatePackedResourceCounts(FShaderCompilerOutput& Output, const FShaderCodePackedResourceCounts& PackedResourceCounts);
+
+	extern SHADERCOMPILERCOMMON_API void ParseRayTracingEntryPoint(const FString& Input, FString& OutMain, FString& OutAnyHit, FString& OutIntersection);
+
+	/*
+	* Parses ray tracing shader entry point specification string in one of the following formats:
+	* 1) Verbatim single entry point name, e.g. "MainRGS"
+	* 2) Complex entry point for ray tracing hit group shaders:
+	*      a) "closesthit=MainCHS"
+	*      b) "closesthit=MainCHS anyhit=MainAHS"
+	*      c) "closesthit=MainCHS anyhit=MainAHS intersection=MainIS"
+	*      d) "closesthit=MainCHS intersection=MainIS"
+	*    NOTE: closesthit attribute must always be provided for complex hit group entry points
+	*/
+	extern SHADERCOMPILERCOMMON_API void ParseRayTracingEntryPoint(const FStringView& Input, FStringView& OutMain, FStringView& OutAnyHit, FStringView& OutIntersection);
+
+	/**
+	* Rewrites a fully preprocessed shader source code, removing any functions or structs that are not reachable from a given entry point or list of symbols.
+	* This is a high-level wrapper for UE::ShaderMinifier that should be used in all shader compiler back-ends for consistency.
+	* Any errors encountered during parsing or minification are added to OutErrors.
+	* InOutPreprocessedShaderSource is replaced with the rewritten code on success and is kept intact on failure.
+	*/
+	extern SHADERCOMPILERCOMMON_API bool RemoveDeadCode(FShaderSource& InOutPreprocessedShaderSource, const FString& EntryPoint, TArray<FShaderCompilerError>& OutErrors);
+	extern SHADERCOMPILERCOMMON_API bool RemoveDeadCode(FShaderSource& InOutPreprocessedShaderSource, const FString& EntryPoint, TConstArrayView<FStringView> RequiredSymbols, TArray<FShaderCompilerError>& OutErrors);
+	extern SHADERCOMPILERCOMMON_API bool RemoveDeadCode(FShaderSource& InOutPreprocessedShaderSource, TConstArrayView<FStringView> RequiredSymbols, TArray<FShaderCompilerError>& OutErrors);
+	
+	UE_DEPRECATED(5.4, "Use overload of RemoveDeadCode accepting FShaderSource")
+	inline bool RemoveDeadCode(FString& InOutPreprocessedShaderSource, const FString& EntryPoint, TArray<FShaderCompilerError>& OutErrors) { return false; }
+	UE_DEPRECATED(5.4, "Use overload of RemoveDeadCode accepting FShaderSource")
+	inline bool RemoveDeadCode(FString& InOutPreprocessedShaderSource, const FString& EntryPoint, TConstArrayView<FStringView> RequiredSymbols, TArray<FShaderCompilerError>& OutErrors) { return false; }
+	UE_DEPRECATED(5.4, "Use overload of RemoveDeadCode accepting FShaderSource")
+	inline bool RemoveDeadCode(FString& InOutPreprocessedShaderSource, TConstArrayView<FStringView> RequiredSymbols, TArray<FShaderCompilerError>& OutErrors) { return false; }
+
+	struct FDebugShaderDataOptions
 	{
-		FString Type;
-		int32 PragamLineoffset;
-		int32 LineOffset;
-
-		bool IsFound() const
+		struct FAdditionalOutput
 		{
-			return !Type.IsEmpty();
-		}
+			const TCHAR* BaseFileName;
+			const TCHAR* Data;
+		};
+		
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		// Explicitly-defaulted ctors are needed temporarily due to deprecation of the HlslCCFlags field.
+		// These can be removed once the deprecation window for said field ends.
+		FDebugShaderDataOptions() = default;
+		FDebugShaderDataOptions(FDebugShaderDataOptions&&) = default;
+		FDebugShaderDataOptions(const FDebugShaderDataOptions&) = default;
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+		
+		UE_DEPRECATED(5.4, "HlslCCFlags field is no longer used in debug output; please remove any usage.")
+		uint32 HlslCCFlags = 0;
+		const TCHAR* OverrideBaseFilename = nullptr;
+		const TCHAR* FilenamePrefix = nullptr;
+		TFunction<FString()> AppendPreSource{};
+		TFunction<FString()> AppendPostSource{};
+		TArray<FAdditionalOutput> AdditionalOutputs;
+		union
+		{
+			bool bSourceOnly = false; // if true, will only output source .usf as directed and skip all other debug data artifacts
+			UE_DEPRECATED(5.3, "bSkipDirectCompileTxt is deprecated, use bSourceOnly flag instead")
+			bool bSkipDirectCompileTxt;
+		};
+
+		SHADERCOMPILERCOMMON_API FString GetDebugShaderPath(const FShaderCompilerInput& Input) const;
 	};
 
-	void ExtractFileAndLine(int32 PragamLineoffset, int32 LineOffset, FString& OutFile, FString& OutLine) const;
+	/*
+	 * Dumps common debug information (preprocessed .usf as constructed by GetDebugShaderContents, and a directcompile.txt file 
+	 * containing the commandline for launching ShaderCompileWorker manually) for the given shader compile input
+	 * and preprocessed source according to the options provided.
+	 * @param	Input The input of the compilation job
+	 * @param	PreprocessedSource The unmodified preprocessed source (used as input to the compilation)
+	 * @param	Options Options which can change behaviour of the debug dump; see above.
+	 */
+	extern SHADERCOMPILERCOMMON_API void DumpDebugShaderData(const FShaderCompilerInput& Input, const FString& PreprocessedSource, const FDebugShaderDataOptions& Options = FDebugShaderDataOptions());
 
-	FString OriginalParsedShader;
+	/*
+	 * Dumps extended debug information; including all outputs from DumpDebugShaderData as well as the following:
+	 *		- OutputHash.txt file containing the SHA hash of the shader job output
+	 *		- Diagnostics.txt file containing all errors/warnings encountered for the job
+	 *		  (if EShaderDebugInfoFlags::Diagnostics is set on Input.DebugInfoFlags)
+	 *		- InputHash.txt file containing the hash used as the key to the shader job cache
+	 *		  (if EShaderDebugInfoFlags::InputHash is set on Input.DebugInfoFlags and specified InputHash is non-empty)
+	 *		- any outputs specified on the AdditionalOutputs array in the Options struct
+	 * This is intended to be used by shader formats implementing the independent preprocessing API.
+	 */
+	extern SHADERCOMPILERCOMMON_API void DumpExtendedDebugShaderData(
+		const FShaderCompilerInput& Input,
+		const FShaderPreprocessOutput& PreprocessOutput,
+		const FShaderCompilerOutput& Output,
+		const UE::ShaderCompilerCommon::FDebugShaderDataOptions& Options = FDebugShaderDataOptions());
 
-	TMap<FString, FParsedShaderParameter> ParsedParameters;
+	extern SHADERCOMPILERCOMMON_API void SerializeEnvironmentFromBase64(FShaderCompilerEnvironment& Env, const FString& DebugUSF);
+	extern SHADERCOMPILERCOMMON_API FString SerializeEnvironmentToBase64(const FShaderCompilerEnvironment& Env);
+
+	/*
+	 * Constructs the modified preprocessed source that would be dumped to a .usf file via DumpDebugShaderData, including the following additions:
+	 * - resource table debug information
+	 * - commandlines for running ShaderCompileWorker in DirectCompile mode (one which re-runs the preprocessor and one which bypasses it)
+	 * - a comment containing the FShaderCompilerInput DebugDescription
+	 * - any additions performed by the AppendPreSource/AppendPostSource TFunctions
+	 * @param	Input The input of the compilation job
+	 * @param	PreprocessedSource The unmodified preprocessed source (used as input to the compilation)
+	 * @param	Options Options which can change behaviour of the debug dump; see above.
+	 */
+	extern SHADERCOMPILERCOMMON_API FString GetDebugShaderContents(const FShaderCompilerInput& Input, FStringView PreprocessedSource, const FDebugShaderDataOptions& Options = FDebugShaderDataOptions());
+	
+	UE_DEPRECATED(5.4, "Use overload of GetDebugShaderContents accepting an FStringView")
+	inline FString GetDebugShaderContents(const FShaderCompilerInput& Input, const FString& PreprocessedSource, const FDebugShaderDataOptions& Options = FDebugShaderDataOptions())
+	{
+		return FString();
+	}
+
+	class FBaseShaderFormat : public IShaderFormat
+	{
+	public:
+		virtual SHADERCOMPILERCOMMON_API bool PreprocessShader(
+			const FShaderCompilerInput& Input,
+			const FShaderCompilerEnvironment& Environment,
+			FShaderPreprocessOutput& PreprocessOutput) const override;
+
+		virtual SHADERCOMPILERCOMMON_API void OutputDebugData(
+			const FShaderCompilerInput& Input,
+			const FShaderPreprocessOutput& PreprocessOutput,
+			const FShaderCompilerOutput& Output) const override;
+	};
+}
+
+extern SHADERCOMPILERCOMMON_API void HandleReflectedGlobalConstantBufferMember(
+	const FString& MemberName,
+	uint32 ConstantBufferIndex,
+	int32 ReflectionOffset,
+	int32 ReflectionSize,
+	FShaderCompilerOutput& CompilerOutput
+);
+
+extern SHADERCOMPILERCOMMON_API void HandleReflectedUniformBufferConstantBufferMember(
+	int32 UniformBufferSlot,
+	const FString& MemberName,
+	int32 ReflectionOffset,
+	int32 ReflectionSize,
+	FShaderCompilerOutput& CompilerOutput
+);
+
+extern SHADERCOMPILERCOMMON_API void HandleReflectedRootConstantBufferMember(
+	const FShaderCompilerInput& Input,
+	const FShaderParameterParser& ShaderParameterParser,
+	const FString& MemberName,
+	int32 ReflectionOffset,
+	int32 ReflectionSize,
+	FShaderCompilerOutput& CompilerOutput
+);
+
+extern SHADERCOMPILERCOMMON_API void HandleReflectedRootConstantBuffer(
+	int32 ConstantBufferSize,
+	FShaderCompilerOutput& CompilerOutput
+);
+
+extern SHADERCOMPILERCOMMON_API void HandleReflectedUniformBuffer(
+	const FString& UniformBufferName,
+	int32 ReflectionSlot,
+	int32 BaseIndex,
+	int32 BufferSize,
+	FShaderCompilerOutput& CompilerOutput
+);
+
+inline void HandleReflectedUniformBuffer(const FString& UniformBufferName, int32 ReflectionSlot, int32 BufferSize, FShaderCompilerOutput& CompilerOutput)
+{
+	HandleReflectedUniformBuffer(UniformBufferName, ReflectionSlot, 0, BufferSize, CompilerOutput);
+}
+
+inline void HandleReflectedUniformBuffer(const FString& UniformBufferName, int32 ReflectionSlot, FShaderCompilerOutput& CompilerOutput)
+{
+	HandleReflectedUniformBuffer(UniformBufferName, ReflectionSlot, 0, CompilerOutput);
+}
+
+extern SHADERCOMPILERCOMMON_API void HandleReflectedShaderResource(
+	const FString& ResourceName,
+	int32 BindOffset,
+	int32 ReflectionSlot,
+	int32 BindCount,
+	FShaderCompilerOutput& CompilerOutput
+);
+
+extern SHADERCOMPILERCOMMON_API void UpdateStructuredBufferStride(
+	const FShaderCompilerInput& Input,
+	const FString& ResourceName,
+	uint16 BindPoint,
+	uint16 Stride,
+	FShaderCompilerOutput& CompilerOutput
+);
+
+extern SHADERCOMPILERCOMMON_API void AddShaderValidationSRVType(
+	uint16 BindPoint,
+	EShaderCodeResourceBindingType TypeDecl,
+	FShaderCompilerOutput& CompilerOutput);
+
+extern SHADERCOMPILERCOMMON_API void AddShaderValidationUAVType(
+	uint16 BindPoint,
+	EShaderCodeResourceBindingType TypeDecl,
+	FShaderCompilerOutput& CompilerOutput);
+
+extern SHADERCOMPILERCOMMON_API void AddShaderValidationUBSize(
+	uint16 BindPoint,
+	uint32_t Size,
+	FShaderCompilerOutput& CompilerOutput);
+
+inline void HandleReflectedShaderResource(const FString& ResourceName, int32 ReflectionSlot, int32 BindCount, FShaderCompilerOutput& CompilerOutput)
+{
+	HandleReflectedShaderResource(ResourceName, 0, ReflectionSlot, BindCount, CompilerOutput);
+}
+
+inline void HandleReflectedShaderResource(const FString& ResourceName, int32 ReflectionSlot, FShaderCompilerOutput& CompilerOutput)
+{
+	HandleReflectedShaderResource(ResourceName, ReflectionSlot, 1, CompilerOutput);
+}
+
+extern SHADERCOMPILERCOMMON_API void HandleReflectedShaderUAV(
+	const FString& UAVName,
+	int32 BindOffset,
+	int32 ReflectionSlot,
+	int32 BindCount,
+	FShaderCompilerOutput& CompilerOutput
+);
+
+inline void HandleReflectedShaderUAV(const FString& UAVName, int32 ReflectionSlot, int32 BindCount, FShaderCompilerOutput& CompilerOutput)
+{
+	HandleReflectedShaderUAV(UAVName, 0, ReflectionSlot, BindCount, CompilerOutput);
+}
+
+inline void HandleReflectedShaderUAV(const FString& UAVName, int32 ReflectionSlot, FShaderCompilerOutput& CompilerOutput)
+{
+	HandleReflectedShaderUAV(UAVName, ReflectionSlot, 1, CompilerOutput);
+}
+
+extern SHADERCOMPILERCOMMON_API void HandleReflectedShaderSampler(
+	const FString& SamplerName,
+	int32 BindOffset,
+	int32 ReflectionSlot,
+	int32 BindCount,
+	FShaderCompilerOutput& CompilerOutput
+);
+
+inline void HandleReflectedShaderSampler(const FString& SamplerName, int32 ReflectionSlot, int32 BindCount, FShaderCompilerOutput& CompilerOutput)
+{
+	HandleReflectedShaderSampler(SamplerName, 0, ReflectionSlot, BindCount, CompilerOutput);
+}
+
+inline void HandleReflectedShaderSampler(const FString& SamplerName, int32 ReflectionSlot, FShaderCompilerOutput& CompilerOutput)
+{
+	HandleReflectedShaderSampler(SamplerName, ReflectionSlot, 1, CompilerOutput);
+}
+
+/** Adds a note to CompilerOutput.Error about where the shader parameter structure is on C++ side. */
+extern SHADERCOMPILERCOMMON_API void AddNoteToDisplayShaderParameterStructureOnCppSide(
+	const FShaderParametersMetadata* ParametersStructure,
+	FShaderCompilerOutput& CompilerOutput);
+
+/** Adds an error to CompilerOutput.Error about a shader parameters that could not be bound. */
+extern SHADERCOMPILERCOMMON_API void AddUnboundShaderParameterError(
+	const FShaderCompilerInput& CompilerInput,
+	const FShaderParameterParser& ShaderParameterParser,
+	const FString& ParameterBindingName,
+	FShaderCompilerOutput& CompilerOutput);
+
+// Convert generated UniformBuffer code and references into something the shader compilers can use.
+extern SHADERCOMPILERCOMMON_API void CleanupUniformBufferCode(const FShaderCompilerEnvironment& Environment, FShaderSource& PreprocessedShaderSource);
+
+UE_DEPRECATED(5.4, "RemoveUniformBuffersFromSource was renamed CleanupUniformBufferCode")
+inline void RemoveUniformBuffersFromSource(const FShaderCompilerEnvironment& Environment, FString& PreprocessedShaderSource) {}
+
+template <typename CharType>
+const CharType* FindMatchingBlock(const CharType* OpeningCharPtr, char OpenChar, char CloseChar)
+{
+	const CharType* SearchPtr = OpeningCharPtr;
+	int32 Depth = 0;
+
+	while (*SearchPtr)
+	{
+		if (*SearchPtr == OpenChar)
+		{
+			Depth++;
+		}
+		else if (*SearchPtr == CloseChar)
+		{
+			if (Depth == 0)
+			{
+				return SearchPtr;
+			}
+
+			Depth--;
+		}
+		SearchPtr++;
+	}
+
+	return nullptr;
+}
+
+template <typename CharType>
+const CharType* FindMatchingClosingBrace(const CharType* OpeningCharPtr) { return FindMatchingBlock<CharType>(OpeningCharPtr, '{', '}'); };
+
+extern SHADERCOMPILERCOMMON_API const TCHAR* ParseHLSLSymbolName(const TCHAR* SearchString, FString& SymboName);
+extern SHADERCOMPILERCOMMON_API void ParseHLSLTypeName(const TCHAR* SearchString, const TCHAR*& TypeNameStartPtr, const TCHAR*& TypeNameEndPtr);
+extern SHADERCOMPILERCOMMON_API FStringView FindNextHLSLDefinitionOfType(FStringView Typename, FStringView StartPos);
+
+UE_DEPRECATED(5.4, "TEXT macro processing is now handled in PreprocessShader --  TransformStringIntoCharacterArray is a no-op")
+inline void TransformStringIntoCharacterArray(FString& PreprocessedShaderSource, TArray<FShaderDiagnosticData>* OutDiagnosticDatas = nullptr) {}
+
+// Structure to hold forward declarations for a specific scope/namespace chain for the HlslParser
+struct FScopedDeclarations
+{
+	FScopedDeclarations(TConstArrayView<FStringView> InScope, TConstArrayView<FStringView> InSymbols)
+		: Scope(InScope)
+		, Symbols(InSymbols)
+	{
+	}
+	TConstArrayView<FStringView> Scope;
+	TConstArrayView<FStringView> Symbols;
 };
 
-// The cross compiler doesn't yet support struct initializers needed to construct static structs for uniform buffers
-// Replace all uniform buffer struct member references (View.WorldToClip) with a flattened name that removes the struct dependency (View_WorldToClip)
-extern SHADERCOMPILERCOMMON_API void RemoveUniformBuffersFromSource(const FShaderCompilerEnvironment& Environment, FString& PreprocessedShaderSource);
+extern SHADERCOMPILERCOMMON_API bool RemoveUnusedOutputs(
+	FString& InOutSourceCode,
+	TConstArrayView<FStringView> InUsedOutputs,
+	TConstArrayView<FStringView> InExceptions,
+	TConstArrayView<FScopedDeclarations> InScopedDeclarations,
+	FString& InOutEntryPoint,
+	TArray<FString>& OutErrors
+);
+
 extern SHADERCOMPILERCOMMON_API bool RemoveUnusedOutputs(FString& InOutSourceCode, const TArray<FString>& InUsedOutputs, const TArray<FString>& InExceptions, FString& InOutEntryPoint, TArray<FString>& OutErrors);
+
+extern SHADERCOMPILERCOMMON_API bool RemoveUnusedInputs(
+	FString& InOutSourceCode,
+	TConstArrayView<FStringView> InUsedInputs,
+	TConstArrayView<FScopedDeclarations> InScopedDeclarations,
+	FString& InOutEntryPoint,
+	TArray<FString>& OutErrors
+);
 
 extern SHADERCOMPILERCOMMON_API bool RemoveUnusedInputs(FString& InOutSourceCode, const TArray<FString>& InUsedInputs, FString& InOutEntryPoint, TArray<FString>& OutErrors);
 
+// Shader input/output parameter storage classes. Naming adopted from SPIR-V nomenclature.
+enum class EShaderParameterStorageClass
+{
+	Input,
+	Output,
+};
+
+// Returns the semantic names of all individual entry point parameters (i.e. all structure fields are inlined)
+extern SHADERCOMPILERCOMMON_API bool FindEntryPointParameters(
+	const FString& InSourceCode,
+	const FString& InEntryPoint,
+	EShaderParameterStorageClass ParameterStorageClass,
+	TArray<FString>& OutParameterSemantics,
+	TArray<FString>& OutErrors
+);
+
 extern SHADERCOMPILERCOMMON_API bool ConvertFromFP32ToFP16(FString& InOutSourceCode, TArray<FString>& OutErrors);
-
-/**
-* Fall back to using the View uniform buffer directly for platforms that don't support instanced stereo.
-* @param ShaderSource - Preprocessed shader source
-*/
-extern SHADERCOMPILERCOMMON_API void StripInstancedStereo(FString& ShaderSource);
-
-extern SHADERCOMPILERCOMMON_API FString CreateShaderCompilerWorkerDirectCommandLine(const FShaderCompilerInput& Input, uint32 CCFlags = 0);
 
 enum class EShaderConductorTarget
 {
 	Dxil,
 	Spirv,
 };
- extern SHADERCOMPILERCOMMON_API void WriteShaderConductorCommandLine(const FShaderCompilerInput& Input, const FString& SourceFilename, EShaderConductorTarget Target);
-
- // Gets the string that DumpDebugUSF writes out
-extern SHADERCOMPILERCOMMON_API FString GetDumpDebugUSFContents(const FShaderCompilerInput& Input, const FString& Source, uint32 HlslCCFlags);
-
-// Utility functions shared amongst all backends to write out a dumped USF
-extern SHADERCOMPILERCOMMON_API void DumpDebugUSF(const FShaderCompilerInput& Input, const ANSICHAR* Source, uint32 HlslCCFlags = 0, const TCHAR* OverrideBaseFilename = nullptr);
-extern SHADERCOMPILERCOMMON_API void DumpDebugUSF(const FShaderCompilerInput& Input, const FString& Source, uint32 HlslCCFlags = 0, const TCHAR* OverrideBaseFilename = nullptr);
+extern SHADERCOMPILERCOMMON_API void WriteShaderConductorCommandLine(const FShaderCompilerInput& Input, const FString& SourceFilename, EShaderConductorTarget Target);
 
 extern SHADERCOMPILERCOMMON_API void DumpDebugShaderText(const FShaderCompilerInput& Input, const FString& InSource, const FString& FileExtension);
-extern SHADERCOMPILERCOMMON_API void DumpDebugShaderText(const FShaderCompilerInput& Input, ANSICHAR* InSource, int32 InSourceLength, const FString& FileExtension);
+extern SHADERCOMPILERCOMMON_API void DumpDebugShaderText(const FShaderCompilerInput& Input, ANSICHAR* InSource, int32 InSourceLength, const FString& FileExtension); 
+extern SHADERCOMPILERCOMMON_API void DumpDebugShaderText(const FShaderCompilerInput& Input, ANSICHAR* InSource, int32 InSourceLength, const FString& FileName, const FString& FileExtension);
 extern SHADERCOMPILERCOMMON_API void DumpDebugShaderBinary(const FShaderCompilerInput& Input, void* InData, int32 InDataByteSize, const FString& FileExtension);
-
-UE_DEPRECATED(4.26, "SourceLength is no longer needed.")
-inline void DumpDebugUSF(const FShaderCompilerInput& Input, const ANSICHAR* Source, int32 SourceLength, uint32 HlslCCFlags = 0, const TCHAR* OverrideBaseFilename = nullptr)
-{
-	DumpDebugUSF(Input, Source, HlslCCFlags, OverrideBaseFilename);
-}
+extern SHADERCOMPILERCOMMON_API void DumpDebugShaderBinary(const FShaderCompilerInput& Input, void* InData, int32 InDataByteSize, const FString& FileName, const FString& FileExtension);
+extern SHADERCOMPILERCOMMON_API void DumpDebugShaderDisassembledSpirv(const FShaderCompilerInput& Input, void* InData, int32 InDataByteSize, const FString& FileExtension);
+extern SHADERCOMPILERCOMMON_API void DumpDebugShaderDisassembledDxil(const FShaderCompilerInput& Input, void* InData, int32 InDataByteSize, const FString& FileExtension);
 
 // calls 'Mali Offline Compiler' to compile the glsl source code and extract the generated instruction count
 extern SHADERCOMPILERCOMMON_API void CompileOfflineMali(const FShaderCompilerInput &Input, FShaderCompilerOutput& ShaderOutput, const ANSICHAR* ShaderSource, const int32 SourceSize, bool bVulkanSpirV, const ANSICHAR* VulkanSpirVEntryPoint = nullptr);
@@ -124,7 +457,9 @@ extern SHADERCOMPILERCOMMON_API void CompileOfflineMali(const FShaderCompilerInp
 // Cross compiler support/common functionality
 namespace CrossCompiler
 {
+	UE_DEPRECATED(5.4, "CreateResourceTableFromEnvironment is no longer used; serializing environment for SCW directcompile mode now uses a base64-encoded string containing all environment compilation dependencies.")
 	extern SHADERCOMPILERCOMMON_API FString CreateResourceTableFromEnvironment(const FShaderCompilerEnvironment& Environment);
+	UE_DEPRECATED(5.4, "CreateEnvironmentFromResourceTable is no longer used; serializing environment for SCW directcompile mode now uses a base64-encoded string containing all environment compilation dependencies.")
 	extern SHADERCOMPILERCOMMON_API void CreateEnvironmentFromResourceTable(const FString& String, FShaderCompilerEnvironment& OutEnvironment);
 
 	extern SHADERCOMPILERCOMMON_API void ParseHlslccError(TArray<FShaderCompilerError>& OutErrors, const FString& InLine, bool bUseAbsolutePaths = false);
@@ -205,6 +540,12 @@ namespace CrossCompiler
 			int32 Count;
 		};
 
+		struct FAccelerationStructure
+		{
+			FString Name;
+			int32 Offset = 0;
+		};
+
 		FString Name;
 		TArray<FInOut> Inputs;
 		TArray<FInOut> Outputs;
@@ -217,6 +558,7 @@ namespace CrossCompiler
 		TArray<FSampler> Samplers;
 		TArray<FUAV> UAVs;
 		TArray<FAttribute> SamplerStates;
+		TArray<FAccelerationStructure> AccelerationStructures;
 		uint32 NumThreads[3];
 
 		static bool ReadInOut(const ANSICHAR*& ShaderSource, TArray<FInOut>& OutAttributes);
@@ -381,134 +723,4 @@ namespace CrossCompiler
 		return false;
 	}
 
-	/** Wrapper structure to pass options descriptor to ShaderConductor. This is mapped to <struct ShaderConductor::Compiler::Options>. */
-	struct SHADERCOMPILERCOMMON_API FShaderConductorOptions
-	{
-		/** Removes unused global variables and resources. This can only be used in the HLSL rewrite pass, i.e. 'RewriteHlslSource'. */
-		bool bRemoveUnusedGlobals = false;
-
-		/** Experimental: Decide how a matrix get packed. */
-		bool bPackMatricesInRowMajor = false;
-
-		/** Enable 16-bit types, such as half, uint16_t. Requires shader model 6.2+. */
-		bool bEnable16bitTypes = false;
-
-		/** Embed debug info into the binary. */
-		bool bEnableDebugInfo = false;
-
-		/** Force to turn off optimizations. Ignore optimizationLevel below. */
-		bool bDisableOptimizations = false;
-
-		/** Enable a pass that converts floating point MUL+ADD pairs into FMAs to avoid re-association. */
-		bool bEnableFMAPass = false;
-
-		/** Cross compile global variables as push constants (for Vulkan backend). */
-		bool bGlobalsAsPushConstants = false;
-
-		/** Target shader profile. By default HCT_FeatureLevelSM5. */
-		EHlslCompileTarget TargetProfile = HCT_FeatureLevelSM5;
-	};
-
-	/** Target high level languages for ShaderConductor output. */
-	enum class EShaderConductorLanguage
-	{
-		Glsl,
-		Essl,
-		Metal_macOS,
-		Metal_iOS,
-	};
-
-	/** Shader conductor output target descriptor. */
-	struct SHADERCOMPILERCOMMON_API FShaderConductorTarget
-	{
-		/** Target shader semantics, e.g. "macOS" or "iOS" for Metal GPU semantics. */
-		EShaderConductorLanguage Language = EShaderConductorLanguage::Glsl;
-
-		/**
-		Target shader version.
-		Valid values for Metal family: 20100, 20000, 10200, 10100, 10000.
-		Valid values for GLSL family: 310, 320, 330, 430.
-		*/
-		int32 Version = 0;
-
-		/** Cross compilation flags. This is used for high-level cross compilation (such as Metal output) that is send over to SPIRV-Cross, e.g. { "invariant_float_math", "1" }. */
-		FShaderCompilerDefinitions CompileFlags;
-
-		/** Optional callback to rename certain variable types. */
-		TFunction<bool(const FAnsiStringView& VariableName, const FAnsiStringView& TypeName, FString& OutRenamedTypeName)> VariableTypeRenameCallback;
-	};
-
-	/** Wrapper class to handle interface between UE and ShaderConductor. Use to compile HLSL shaders to SPIR-V or high-level languages such as Metal. */
-	class SHADERCOMPILERCOMMON_API FShaderConductorContext
-	{
-	public:
-		/** Initializes the context with internal buffers used for the conversion of input and option descriptors between UE and ShaderConductor. */
-		FShaderConductorContext();
-
-		/** Release the internal buffers. */
-		~FShaderConductorContext();
-
-		/** Move constructor to take ownership of internal buffers from 'Rhs'. */
-		FShaderConductorContext(FShaderConductorContext&& Rhs);
-
-		/** Move operator to take ownership of internal buffers from 'Rhs'. */
-		FShaderConductorContext& operator = (FShaderConductorContext&& Rhs);
-
-		FShaderConductorContext(const FShaderConductorContext&) = delete;
-		FShaderConductorContext& operator = (const FShaderConductorContext&) = delete;
-
-		/** Loads the shader source and converts the input descriptor to a format suitable for ShaderConductor. If 'Definitions' is null, the previously loaded definitions are not modified. */
-		bool LoadSource(const FString& ShaderSource, const FString& Filename, const FString& EntryPoint, EHlslShaderFrequency ShaderStage, const FShaderCompilerDefinitions* Definitions = nullptr);
-		bool LoadSource(const ANSICHAR* ShaderSource, const ANSICHAR* Filename, const ANSICHAR* EntryPoint, EHlslShaderFrequency ShaderStage, const FShaderCompilerDefinitions* Definitions = nullptr);
-
-		/** Rewrites the specified HLSL shader source code. This allows to reduce the HLSL code by removing unused global resources for instance.
-		This will update the internally loaded source (see 'LoadSource'), so the output parameter 'OutSource' is optional. */
-		bool RewriteHlsl(const FShaderConductorOptions& Options, FString* OutSource = nullptr);
-
-		/** Compiles the specified HLSL shader source code to SPIR-V. */
-		bool CompileHlslToSpirv(const FShaderConductorOptions& Options, TArray<uint32>& OutSpirv);
-
-		/** Compiles the specified SPIR-V shader binary code to high level source code (Metal or GLSL). */
-		bool CompileSpirvToSource(const FShaderConductorOptions& Options, const FShaderConductorTarget& Target, const void* InSpirv, uint32 InSpirvByteSize, FString& OutSource);
-
-		/** Compiles the specified SPIR-V shader binary code to high level source code (Metal or GLSL) stored as null terminated ANSI string. */
-		bool CompileSpirvToSourceAnsi(const FShaderConductorOptions& Options, const FShaderConductorTarget& Target, const void* InSpirv, uint32 InSpirvByteSize, TArray<ANSICHAR>& OutSource);
-
-		/** Compiles the specified SPIR-V shader binary code to high level source code (Metal or GLSL) stored as byte buffer (without null terminator as it comes from ShaderConductor). */
-		bool CompileSpirvToSourceBuffer(const FShaderConductorOptions& Options, const FShaderConductorTarget& Target, const void* InSpirv, uint32 InSpirvByteSize, const TFunction<void(const void* Data, uint32 Size)>& OutputCallback);
-
-		/** Flushes the list of current compile errors and moves the ownership to the caller. */
-		void FlushErrors(TArray<FShaderCompilerError>& OutErrors);
-
-		/** Returns a pointer to a null terminated ANSI string of the internal loaded sources, or null if no source has been loaded yet. This is automatically updated when RewriteHlsl() is called. */
-		const ANSICHAR* GetSourceString() const;
-
-		/** Returns a length of the internal loaded sources (excluding the null terminator). This is automatically updated when RewriteHlsl() is called. */
-		int32 GetSourceLength() const;
-
-		/** Returns the list of current compile errors. */
-		inline const TArray<FShaderCompilerError>& GetErrors() const
-		{
-			return Errors;
-		}
-
-	public:
-		/** Convert array of error string lines into array of <FShaderCompilerError>. */
-		static void ConvertCompileErrors(TArray<FString>&& ErrorStringLines, TArray<FShaderCompilerError>& OutErrors);
-
-		/** Returns whether the specified variable name denotes an intermediate output variable.
-		This is only true for a special identifiers generated by DXC to communicate patch constant data in the Hull Shader. */
-		static bool IsIntermediateSpirvOutputVariable(const ANSICHAR* SpirvVariableName);
-
-	public:
-		struct FShaderConductorIntermediates; // Pimpl idiom
-
-	private:
-		TArray<FShaderCompilerError> Errors;
-		FShaderConductorIntermediates* Intermediates; // Pimpl idiom
-	};
-
 }
-
-// Error code for SCW to help track down crashes
-extern SHADERCOMPILERCOMMON_API ESCWErrorCode GSCWErrorCode;

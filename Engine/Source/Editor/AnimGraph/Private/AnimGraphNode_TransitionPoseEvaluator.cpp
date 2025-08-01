@@ -8,6 +8,7 @@
 #include "IDetailPropertyRow.h"
 #include "DetailCategoryBuilder.h"
 #include "DetailLayoutBuilder.h"
+#include "Animation/AnimAttributes.h"
 
 /////////////////////////////////////////////////////
 // UAnimGraphNode_TransitionPoseEvaluator
@@ -49,9 +50,9 @@ void UAnimGraphNode_TransitionPoseEvaluator::ValidateAnimNodeDuringCompilation(c
 	Super::ValidateAnimNodeDuringCompilation(ForSkeleton, MessageLog);
 }
 
-FString UAnimGraphNode_TransitionPoseEvaluator::GetNodeCategory() const 
+FText UAnimGraphNode_TransitionPoseEvaluator::GetMenuCategory() const
 {
-	return TEXT("Transition");
+	return LOCTEXT("InputPoseEvaluatorCategory", "Animation|State Machines");
 }
 
 bool UAnimGraphNode_TransitionPoseEvaluator::CanUserDeleteNode() const
@@ -97,6 +98,12 @@ EVisibility UAnimGraphNode_TransitionPoseEvaluator::GetCacheFramesVisibility(IDe
 	}
 
 	return EVisibility::Hidden;
+}
+
+void UAnimGraphNode_TransitionPoseEvaluator::GetOutputLinkAttributes(FNodeAttributeArray& OutAttributes) const
+{
+	OutAttributes.Add(UE::Anim::FAttributes::Curves);
+	OutAttributes.Add(UE::Anim::FAttributes::Attributes);
 }
 
 #undef LOCTEXT_NAMESPACE

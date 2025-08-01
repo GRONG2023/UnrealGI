@@ -56,6 +56,10 @@ public:
 			Collector.AddReferencedObject(JSBridge);
 		}
 	}
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FDefaultWebBrowserAdapter");
+	}
 
 private:
 
@@ -78,7 +82,7 @@ private:
 	const FString ConnectScriptText;
 	const FString DisconnectScriptText;
 
-	UObject* JSBridge;
+	TObjectPtr<UObject> JSBridge;
 
 	const bool bIsPermanent;
 

@@ -1,8 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Serialization/BitWriter.h"
-#include "Logging/LogMacros.h"
+
 #include "CoreGlobals.h"
+#include "HAL/IConsoleManager.h"
+#include "HAL/UnrealMemory.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Serialization/Archive.h"
+#include "Trace/Detail/Channel.h"
+
+/** CVar specifying the maximum serialization size for strings sent/received by the netcode */
+extern CORE_API TAutoConsoleVariable<int32> CVarMaxNetStringSize;
 
 PRAGMA_DISABLE_UNSAFE_TYPECAST_WARNINGS
 
@@ -127,7 +136,7 @@ void FBitWriter::SerializeInt(uint32& Value, uint32 ValueMax)
 
 	if (WriteValue >= ValueMax)
 	{
-		const TCHAR Msg[] = TEXT("FBitWriter::SerializeInt(): Value out of bounds (Value: %u, ValueMax: %u)");
+		constexpr static const auto& Msg = TEXT("FBitWriter::SerializeInt(): Value out of bounds (Value: %u, ValueMax: %u)");
 
 		UE_LOG(LogSerialization, Error, Msg, WriteValue, ValueMax);
 		ensureMsgf(false, Msg, WriteValue, ValueMax);
@@ -307,4 +316,4 @@ void FBitWriterMark::Copy( FBitWriter& Writer, TArray<uint8> &Buffer )
 	}
 }
 
-PRAGMA_ENABLE_UNSAFE_TYPECAST_WARNINGS
+PRAGMA_RESTORE_UNSAFE_TYPECAST_WARNINGS

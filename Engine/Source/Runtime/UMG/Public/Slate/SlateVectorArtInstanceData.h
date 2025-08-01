@@ -3,19 +3,23 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector2D.h"
+#include "Math/Vector4.h"
+#include "Misc/AssertionMacros.h"
 
-struct UMG_API FSlateVectorArtInstanceData
+struct FSlateVectorArtInstanceData
 {
 public:
 	const FVector4& GetData() const { return Data; }
 	FVector4& GetData() { return Data; }
 
-	void SetPositionFixedPoint16(FVector2D Position);
-	void SetScaleFixedPoint16(float Scale);
+	UMG_API void SetPositionFixedPoint16(FVector2D Position);
+	UMG_API void SetScaleFixedPoint16(float Scale);
 
-	void SetPosition(FVector2D Position);
-	void SetScale(float Scale);
-	void SetBaseAddress(float Address);
+	UMG_API void SetPosition(FVector2D Position);
+	UMG_API void SetScale(float Scale);
+	UMG_API void SetBaseAddress(float Address);
 
 	template<int32 Component, int32 ByteIndex>
 	void PackFloatIntoByte(float InValue)
@@ -46,5 +50,6 @@ public:
 	}
 
 protected:
+	// LWC_TODO: should this and GetData() use FVector4f?
 	FVector4 Data;
 };

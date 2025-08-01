@@ -196,7 +196,21 @@ namespace Audio
 		}
 	}
 
-	void FMixerSourceVoice::SetChannelMap(const uint32 NumInputChannels, const Audio::AlignedFloatBuffer& InChannelMap, const bool bInIs3D, const bool bInIsCenterChannelOnly)
+	void FMixerSourceVoice::SetModulationRouting(FSoundModulationDefaultRoutingSettings& RoutingSettings)
+	{
+		AUDIO_MIXER_CHECK_GAME_THREAD(MixerDevice);
+
+		SourceManager->SetModulationRouting(SourceId, RoutingSettings);
+	}
+
+	void FMixerSourceVoice::SetSourceBufferListener(FSharedISourceBufferListenerPtr& InSourceBufferListener, bool InShouldSourceBufferListenerZeroBuffer)
+	{
+		AUDIO_MIXER_CHECK_GAME_THREAD(MixerDevice);
+
+		SourceManager->SetSourceBufferListener(SourceId, InSourceBufferListener, InShouldSourceBufferListenerZeroBuffer);
+	}
+
+	void FMixerSourceVoice::SetChannelMap(const uint32 NumInputChannels, const Audio::FAlignedFloatBuffer& InChannelMap, const bool bInIs3D, const bool bInIsCenterChannelOnly)
 	{
 		AUDIO_MIXER_CHECK_GAME_THREAD(MixerDevice);
 
@@ -239,6 +253,21 @@ namespace Audio
 
 		bIsPaused = false;
 		SourceManager->StopFade(SourceId, NumFrames);
+	}
+
+	int32 FMixerSourceVoice::GetSourceId() const
+	{
+		return SourceId;
+	}
+
+	float FMixerSourceVoice::GetDistanceAttenuation() const
+	{
+		return DistanceAttenuation;
+	}
+
+	float FMixerSourceVoice::GetDistance() const
+	{
+		return Distance;
 	}
 
 	void FMixerSourceVoice::Pause()
@@ -304,7 +333,16 @@ namespace Audio
 		return SourceManager->GetEnvelopeValue(SourceId);
 	}
 
-	void FMixerSourceVoice::MixOutputBuffers(int32 InNumOutputChannels, const float SendLevel, EMixerSourceSubmixSendStage InSubmixSendStage, AlignedFloatBuffer& OutWetBuffer) const
+#if ENABLE_AUDIO_DEBUG
+	double FMixerSourceVoice::GetCPUCoreUtilization() const
+	{
+		AUDIO_MIXER_CHECK_GAME_THREAD(MixerDevice);
+
+		return SourceManager->GetCPUCoreUtilization(SourceId);
+	}
+#endif // ENABLE_AUDIO_DEBUG
+
+	void FMixerSourceVoice::MixOutputBuffers(int32 InNumOutputChannels, const float SendLevel, EMixerSourceSubmixSendStage InSubmixSendStage, FAlignedFloatBuffer& OutWetBuffer) const
 	{
 		AUDIO_MIXER_CHECK_AUDIO_PLAT_THREAD(MixerDevice);
 
@@ -330,7 +368,7 @@ namespace Audio
 		return SourceManager->GetListenerRotation(SourceId);
 	}
 
-	void FMixerSourceVoice::SetSubmixSendInfo(FMixerSubmixWeakPtr Submix, const float SendLevel)
+	void FMixerSourceVoice::SetSubmixSendInfo(FMixerSubmixWeakPtr Submix, const float SendLevel, const EMixerSourceSubmixSendStage SendStage/* = EMixerSourceSubmixSendStage::PostDistanceAttenuation*/)
 	{
 		AUDIO_MIXER_CHECK_GAME_THREAD(MixerDevice);
 
@@ -345,12 +383,15 @@ namespace Audio
 				NewSubmixSend.Submix = Submix;
 				NewSubmixSend.SendLevel = SendLevel;
 				NewSubmixSend.bIsMainSend = false;
+				NewSubmixSend.SubmixSendStage = SendStage;
+
 				SubmixSends.Add(SubmixPtr->GetId(), NewSubmixSend);
 				SourceManager->SetSubmixSendInfo(SourceId, NewSubmixSend);
 			}
-			else if (!FMath::IsNearlyEqual(SubmixSend->SendLevel, SendLevel))
+			else if (!FMath::IsNearlyEqual(SubmixSend->SendLevel, SendLevel) || SubmixSend->SubmixSendStage != SendStage)
 			{
 				SubmixSend->SendLevel = SendLevel;
+				SubmixSend->SubmixSendStage = SendStage;
 				SourceManager->SetSubmixSendInfo(SourceId, *SubmixSend);
 			}
 		}

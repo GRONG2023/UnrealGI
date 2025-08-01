@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Interfaces/IPluginManager.h"
 
 class FViewport;
@@ -19,6 +19,43 @@ namespace AssetViewUtils
 	/** Opens the asset editor for the specified assets */
 	ASSETTOOLS_API bool OpenEditorForAsset(const TArray<UObject*>& Assets);
 
+	struct FLoadAssetsSettings
+	{
+		// Prompt the user with the number of unloaded assets before continuing to load
+		bool bAlwaysPromptBeforeLoading = false;
+		// Show a notification to the user that some assets failed to load
+		bool bShowFailureNotification = true;
+		// Follow redirectors and return the target assets.
+		// We usually don't want to follow redirects when loading objects for the Content Browser.  It would
+		// allow a user to interact with a ghost/unverified asset as if it were still alive.
+		bool bFollowRedirectors = false;
+		// Allow the user to cancel the load operation
+		bool bAllowCancel = false;
+		// Advanced setting: allow loading of world partition map packages.
+		bool bLoadWorldPartitionMaps = false;
+		// Advanced setting: load all external objects/actors with e.g. world partition map packages.
+		bool bLoadAllExternalObjects = false;
+	};
+
+	enum class ELoadAssetsResult : uint8
+	{
+		Success,    // The user didn't cancel and all requested assets were successfully loaded
+		Cancelled,  // The user cancelled the load operation
+		SomeFailed, // Some or all of the assets failed to load
+	};
+
+	/**
+	 * Makes sure the specified assets are loaded into memory, with displayed progress and optional cancellation for the user.
+	 * Prefer the overload taking FAssetData if possible.
+	 *
+	 * @param Assets The assets to load
+	 * @param LoadedObjects The returned list of objects that were already loaded or loaded by this method.
+	 * @return enum specifying whether the load was successful, cancelled or if some or all assets failed to load
+	 */
+	ASSETTOOLS_API ELoadAssetsResult LoadAssetsIfNeeded(TConstArrayView<FAssetData> Assets, TArray<UObject*>& LoadedObjects, const FLoadAssetsSettings& InSettings);
+	ASSETTOOLS_API ELoadAssetsResult LoadAssetsIfNeeded(TConstArrayView<FString> ObjectPaths, TArray<UObject*>& LoadedObjects, const FLoadAssetsSettings& InSettings);
+	ASSETTOOLS_API ELoadAssetsResult LoadAssetsIfNeeded(TConstArrayView<FSoftObjectPath> ObjectPaths, TArray<UObject*>& LoadedObjects, const FLoadAssetsSettings& InSettings);
+
 	/**
 	  * Makes sure the specified assets are loaded into memory.
 	  * 
@@ -26,6 +63,7 @@ namespace AssetViewUtils
 	  * @param LoadedObjects The returned list of objects that were already loaded or loaded by this method.
 	  * @return false if user canceled after being warned about loading very many packages.
 	  */
+	UE_DEPRECATED(5.5, "Use LoadAssetsIfNeeded taking struct FLoadAssetsSettings instead.")
 	ASSETTOOLS_API bool LoadAssetsIfNeeded(const TArray<FString>& ObjectPaths, TArray<UObject*>& LoadedObjects, bool bAllowedToPromptToLoadAssets = true, bool bLoadRedirects = false);
 
 	/**
@@ -115,21 +153,19 @@ namespace AssetViewUtils
 	ASSETTOOLS_API bool AssetHasCustomThumbnail( const FAssetData& AssetData );
 
 	/** Returns true if the passed-in path is a project folder */
-	ASSETTOOLS_API bool IsProjectFolder(const FString& InPath, const bool bIncludePlugins = false);
+	ASSETTOOLS_API bool IsProjectFolder(const FStringView InPath, const bool bIncludePlugins = false);
 
 	/** Returns true if the passed-in path is a engine folder */
-	ASSETTOOLS_API bool IsEngineFolder(const FString& InPath, const bool bIncludePlugins = false);
+	ASSETTOOLS_API bool IsEngineFolder(const FStringView InPath, const bool bIncludePlugins = false);
 
 	/** Returns true if the passed-in path is a developers folder */
-	ASSETTOOLS_API bool IsDevelopersFolder( const FString& InPath );
+	ASSETTOOLS_API bool IsDevelopersFolder( const FStringView InPath );
 
 	/** Returns true if the passed-in path is a plugin folder, optionally reporting where the plugin was loaded from */
-	ASSETTOOLS_API bool IsPluginFolder(const FString& InPath, EPluginLoadedFrom* OutPluginSource = nullptr);
-
-	/** Returns true if the passed-in path is a plugin folder, optionally reporting where the plugin was loaded from.
-	 *  Pass in a prefiltered list of plugins to consider -- more efficient when called many times.
-	 */
-	ASSETTOOLS_API bool IsPluginFolder(const FString& InPath, const TArray<TSharedRef<IPlugin>>& InPlugins, EPluginLoadedFrom* OutPluginSource = nullptr);
+	ASSETTOOLS_API bool IsPluginFolder(const FStringView InPath, EPluginLoadedFrom* OutPluginSource = nullptr);
+	
+	/** If the passed-in path is a plugin folder, then return its associated plugin */
+	ASSETTOOLS_API TSharedPtr<IPlugin> GetPluginForFolder(const FStringView InPath);
 
 	/** Get all the objects in a list of asset data */
 	ASSETTOOLS_API void GetObjectsInAssetData(const TArray<FAssetData>& AssetList, TArray<UObject*>& OutDroppedObjects);
@@ -146,7 +182,16 @@ namespace AssetViewUtils
 	 * @param FolderPath - The path to the folder
 	 * @return The color the folder should appear as, will be NULL if not customized
 	 */
+	UE_DEPRECATED(5.0, "LoadColor deprecated, please use GetPathColor")
 	ASSETTOOLS_API const TSharedPtr<FLinearColor> LoadColor(const FString& FolderPath);
+
+	/**
+	 * Returns the color of this path from the config
+	 *
+	 * @param FolderPath - The path to the folder
+	 * @return The color the folder should appear as, will be invalid if not customized
+	 */
+	ASSETTOOLS_API TOptional<FLinearColor> GetPathColor(const FString& FolderPath);
 
 	/**
 	 * Saves the color of the path to the config
@@ -155,7 +200,16 @@ namespace AssetViewUtils
 	 * @param FolderColor - The color the folder should appear as
 	 * @param bForceAdd - If true, force the color to be added for the path
 	 */
+	UE_DEPRECATED(5.0, "SaveColor deprecated, please use SetPathColor")
 	ASSETTOOLS_API void SaveColor(const FString& FolderPath, const TSharedPtr<FLinearColor>& FolderColor, bool bForceAdd = false);
+
+	/**
+	 * Saves the color of the path to the config
+	 *
+	 * @param FolderPath - The path to the folder
+	 * @param FolderColor - The color the folder should appear as
+	 */
+	ASSETTOOLS_API void SetPathColor(const FString& FolderPath, TOptional<FLinearColor> FolderColor);
 
 	/**
 	 * Checks to see if any folder has a custom color, optionally outputs them to a list
@@ -177,20 +231,36 @@ namespace AssetViewUtils
 	/** Returns true if the specified folder name in the specified path is available for folder creation */
 	ASSETTOOLS_API bool IsValidFolderPathForCreate(const FString& FolderPath, const FString& NewFolderName, FText& OutErrorMessage);
 
+	/** Returns the relative path, from the workspace root, of the package */
+	ASSETTOOLS_API FString GetPackagePathWithinRoot(const FString& PackageName);
+
 	/** Returns the length of the computed cooked package name and path whether it's run on a build machine or locally */
-	ASSETTOOLS_API int32 GetPackageLengthForCooking(const FString& PackageName, bool IsInternalBuild);
+	ASSETTOOLS_API int32 GetPackageLengthForCooking(const FString& PackageName, bool bIsInternalBuild);
 
 	/** Checks to see whether the path is within the size restrictions for cooking */
 	ASSETTOOLS_API bool IsValidPackageForCooking(const FString& PackageName, FText& OutErrorMessage);
 
+	/** Gets the maximum path length for an asset package file. Changes behavior based on whether the editor experimental setting for long paths is enabled. */
+	ASSETTOOLS_API int32 GetMaxAssetPathLen();
+
 	/** Gets the maximum path length for a cooked file. Changes behavior based on whether the editor experimental setting for long paths is enabled. */
 	ASSETTOOLS_API int32 GetMaxCookPathLen();
 
-	/** Syncs the specified packages from source control, other than any level assets which are currently being edited */
-	ASSETTOOLS_API void SyncPackagesFromSourceControl(const TArray<FString>& PackageNames);
+	/** Syncs the specified packages from source control. */
+	UE_DEPRECATED(5.3, "The bIsSyncLatestOperation parameter is deprecated. Use SyncLatestFromSourceControl instead.")
+	ASSETTOOLS_API void SyncPackagesFromSourceControl(const TArray<FString>& PackageNames, bool bIsSyncLatestOperation);
 
-	/** Syncs the content from the specified paths from source control, other than any level assets which are currently being edited */
-	ASSETTOOLS_API void SyncPathsFromSourceControl(const TArray<FString>& ContentPaths);
+	/** Syncs the specified packages from source control. */
+	ASSETTOOLS_API bool SyncPackagesFromSourceControl(const TArray<FString>& PackageNames);
+
+	/** Syncs the specified paths from source control. */
+	ASSETTOOLS_API bool SyncPathsFromSourceControl(const TArray<FString>& Paths);
+
+	/** Syncs a specific revision from source control. */
+	ASSETTOOLS_API bool SyncRevisionFromSourceControl(const FString& Revision);
+
+	/** Syncs latest from source control. */
+	ASSETTOOLS_API bool SyncLatestFromSourceControl();
 
 	/** Show an error notification toast if the given error message is not empty */
 	ASSETTOOLS_API void ShowErrorNotifcation(const FText& InErrorMsg);
@@ -203,4 +273,16 @@ namespace AssetViewUtils
 	using FMovedContentFolder = TTuple<FString /*OldPath*/, FString /*NewPath*/>;
 	DECLARE_MULTICAST_DELEGATE_OneParam(FOnFolderPathChanged, TArrayView<const FMovedContentFolder> /*ChangedPaths*/);
 	ASSETTOOLS_API FOnFolderPathChanged& OnFolderPathChanged();
+
+	/** Called when a sync from AssetViewUtils starts */
+	DECLARE_MULTICAST_DELEGATE(FOnSyncStart);
+	ASSETTOOLS_API FOnSyncStart& OnSyncStart();
+
+	/** 
+	 * Called when a sync from AssetViewUtils finishes
+	 * If Files is non-nullptr, those are the files affected by the sync.
+	 * If Files is nullptr, assume any file might have been changed by the sync.
+	 */
+	DECLARE_MULTICAST_DELEGATE_TwoParams(FOnSyncFinish, bool /*bSucceeded*/, const TArray<FString>* /*Files*/);
+	ASSETTOOLS_API FOnSyncFinish& OnSyncFinish();
 }

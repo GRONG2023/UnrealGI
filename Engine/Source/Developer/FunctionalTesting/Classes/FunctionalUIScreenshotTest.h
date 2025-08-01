@@ -30,24 +30,40 @@ class AFunctionalUIScreenshotTest : public AScreenshotFunctionalTestBase
 public:
 	AFunctionalUIScreenshotTest(const FObjectInitializer& ObjectInitializer);
 
+public:
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
 protected:
 	virtual void PrepareTest() override;
 
 	virtual void OnScreenshotTakenAndCompared() override;
 
 	virtual void RequestScreenshot() override;
-	
-protected:
 
+	virtual bool IsReady_Implementation() override;
+
+	virtual void Tick(float DeltaSeconds) override;
+
+protected:
 	UPROPERTY(EditAnywhere, Category = "UI")
 	TSubclassOf<UUserWidget> WidgetClass;
 
 	UPROPERTY()
-	UUserWidget* SpawnedWidget;
+	TObjectPtr<UUserWidget> SpawnedWidget;
 
 	UPROPERTY(EditAnywhere, Category = "UI")
 	EWidgetTestAppearLocation WidgetLocation;
 
 	UPROPERTY(Transient, DuplicateTransient)
-	UTextureRenderTarget2D* ScreenshotRT;
+	TObjectPtr<UTextureRenderTarget2D> ScreenshotRT;
+
+	UPROPERTY(EditAnywhere, Category = "UI")
+	bool bHideDebugCanvas;
+
+private:
+	TOptional<bool> PreviousDebugCanvasVisible;
+	int32 NumTickPassed;
+	bool bWasPreviouslyUsingFixedDeltaTime;
+	double PreviousFixedDeltaTime;
+	const double TestFixedDeltaTime = 1 / 60.0;
 };

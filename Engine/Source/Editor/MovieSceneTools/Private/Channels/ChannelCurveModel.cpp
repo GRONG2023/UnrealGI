@@ -1,22 +1,36 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Channels/ChannelCurveModel.h"
-#include "Math/Vector2D.h"
-#include "HAL/PlatformMath.h"
+
+#include "Algo/BinarySearch.h"
+#include "Channels/MovieSceneChannelData.h"
+#include "Channels/MovieSceneChannelProxy.h"
 #include "Channels/MovieSceneFloatChannel.h"
 #include "Channels/MovieSceneIntegerChannel.h"
-#include "MovieSceneSection.h"
-#include "MovieScene.h"
-#include "CurveDrawInfo.h"
+#include "Containers/UnrealString.h"
 #include "CurveDataAbstraction.h"
-#include "CurveEditor.h"
+#include "CurveDrawInfo.h"
 #include "CurveEditorScreenSpace.h"
-#include "CurveEditorSnapMetrics.h"
-#include "EditorStyleSet.h"
-#include "BuiltInChannelEditors.h"
-#include "SequencerChannelTraits.h"
+#include "Curves/RealCurve.h"
+#include "Delegates/Delegate.h"
+#include "HAL/PlatformCrt.h"
 #include "ISequencer.h"
-#include "Channels/MovieSceneChannelProxy.h"
+#include "Math/NumericLimits.h"
+#include "Math/UnrealMathUtility.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/FrameNumber.h"
+#include "Misc/FrameRate.h"
+#include "Misc/FrameTime.h"
+#include "Misc/Optional.h"
+#include "MovieScene.h"
+#include "MovieSceneSection.h"
+#include "Styling/AppStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Templates/UnrealTemplate.h"
+
+class UObject;
+struct FMovieSceneChannelMetaData;
 
 template <class ChannelType, class ChannelValue, class KeyType>
 FChannelCurveModel<ChannelType, ChannelValue, KeyType>::FChannelCurveModel(TMovieSceneChannelHandle<ChannelType> InChannel, UMovieSceneSection* OwningSection, TWeakPtr<ISequencer> InWeakSequencer)
@@ -24,6 +38,7 @@ FChannelCurveModel<ChannelType, ChannelValue, KeyType>::FChannelCurveModel(TMovi
 	ChannelHandle = InChannel;
 	WeakSection = OwningSection;
 	WeakSequencer = InWeakSequencer;
+	LastSignature = OwningSection->GetSignature();
 
 	if (FMovieSceneChannelProxy* ChannelProxy = InChannel.GetChannelProxy())
 	{
@@ -55,6 +70,7 @@ void FChannelCurveModel<ChannelType, ChannelValue, KeyType>::Modify()
 	{
 		Section->Modify();
 	}
+	LastSignature.Invalidate();
 }
 
 
@@ -82,17 +98,56 @@ void FChannelCurveModel<ChannelType, ChannelValue, KeyType>::DrawCurve(const FCu
 		const int32 StartingIndex = Algo::UpperBound(Times, StartFrame);
 		const int32 EndingIndex = Algo::LowerBound(Times, EndFrame);
 
-		TOptional<double> PreviousValue;
-		for (int32 KeyIndex = StartingIndex; KeyIndex < EndingIndex; ++KeyIndex)
+		// Add the lower bound of the visible space
+		const bool bValidRange = StartingIndex < EndingIndex;
+		//if we aren't just doing the default constant then we need to sample
+		const bool PreNotConstant = (Channel->PreInfinityExtrap != RCCE_None && Channel->PreInfinityExtrap != RCCE_Constant);
+		const bool PostNotConstant = (Channel->PostInfinityExtrap != RCCE_None && Channel->PostInfinityExtrap != RCCE_Constant);
+		if (bValidRange && (PreNotConstant || PostNotConstant))
 		{
-			double Value = GetKeyValue(Values, KeyIndex);
-			if (PreviousValue.IsSet() && PreviousValue.GetValue() != Value)
+			const FFrameRate DisplayResolution = Section->GetTypedOuter<UMovieScene>()->GetDisplayRate();
+			const FFrameNumber StartTimeInDisplay = FFrameRate::TransformTime(FFrameTime(StartFrame), TickResolution, DisplayResolution).FloorToFrame();
+			const FFrameNumber EndTimeInDisplay = FFrameRate::TransformTime(FFrameTime(EndFrame), TickResolution, DisplayResolution).CeilToFrame();
+
+			double Value = 0.0;
+			TOptional<double> PreviousValue;
+			for (FFrameNumber DisplayFrameNumber = StartTimeInDisplay; DisplayFrameNumber <= EndTimeInDisplay; ++DisplayFrameNumber)
 			{
-				OutInterpolatingPoints.Add(MakeTuple(Times[KeyIndex] / TickResolution, PreviousValue.GetValue()));
+				FFrameNumber TickFrameNumber = FFrameRate::TransformTime(FFrameTime(DisplayFrameNumber), DisplayResolution, TickResolution).FrameNumber;
+				Evaluate(TickFrameNumber / TickResolution, Value);
+				if (PreviousValue.IsSet() && PreviousValue.GetValue() != Value)
+				{
+					OutInterpolatingPoints.Add(MakeTuple(TickFrameNumber / TickResolution, PreviousValue.GetValue()));
+				}
+				OutInterpolatingPoints.Add(MakeTuple(TickFrameNumber / TickResolution, Value));
+				PreviousValue = Value;
+			}
+		}
+		else
+		{
+			if (bValidRange)
+			{
+				OutInterpolatingPoints.Add(MakeTuple(StartFrame / TickResolution, GetKeyValue(Values, StartingIndex)));
 			}
 
-			OutInterpolatingPoints.Add(MakeTuple(Times[KeyIndex] / TickResolution, Value));
-			PreviousValue = Value;
+			TOptional<double> PreviousValue;
+			for (int32 KeyIndex = StartingIndex; KeyIndex < EndingIndex; ++KeyIndex)
+			{
+				double Value = GetKeyValue(Values, KeyIndex);
+				if (PreviousValue.IsSet() && PreviousValue.GetValue() != Value)
+				{
+					OutInterpolatingPoints.Add(MakeTuple(Times[KeyIndex] / TickResolution, PreviousValue.GetValue()));
+				}
+
+				OutInterpolatingPoints.Add(MakeTuple(Times[KeyIndex] / TickResolution, Value));
+				PreviousValue = Value;
+			}
+
+			// Add the upper bound of the visible space
+			if (bValidRange)
+			{
+				OutInterpolatingPoints.Add(MakeTuple(EndFrame / TickResolution, GetKeyValue(Values, EndingIndex - 1)));
+			}
 		}
 	}
 }
@@ -130,7 +185,7 @@ void FChannelCurveModel<ChannelType, ChannelValue, KeyType>::GetKeys(const FCurv
 template <class ChannelType, class ChannelValue, class KeyType>
 void FChannelCurveModel<ChannelType, ChannelValue, KeyType>::GetKeyDrawInfo(ECurvePointType PointType, const FKeyHandle InKeyHandle, FKeyDrawInfo& OutDrawInfo) const
 {
-	OutDrawInfo.Brush = FEditorStyle::Get().GetBrush("Sequencer.KeyDiamond");
+	OutDrawInfo.Brush = FAppStyle::Get().GetBrush("Sequencer.KeyDiamond");
 	OutDrawInfo.ScreenSize = FVector2D(10, 10);
 }
 
@@ -187,6 +242,11 @@ void FChannelCurveModel<ChannelType, ChannelValue, KeyType>::SetKeyPositions(TAr
 			}
 		}
 		Channel->PostEditChange();
+		if(WeakSequencer.IsValid())
+		{ 
+			const FMovieSceneChannelMetaData* MetaData = ChannelHandle.GetMetaData();
+			WeakSequencer.Pin()->OnChannelChanged().Broadcast(MetaData, Section);
+		}
 		CurveModifiedDelegate.Broadcast();
 	}
 }
@@ -335,12 +395,15 @@ void FChannelCurveModel<ChannelType, ChannelValue, KeyType>::AddKeys(TArrayView<
 		TArray<FKeyHandle> NewKeyHandles;
 		NewKeyHandles.SetNumUninitialized(InKeyPositions.Num());
 
+		FFrameNumber MinFrame = TNumericLimits<FFrameNumber>::Max();
+		FFrameNumber MaxFrame = TNumericLimits<FFrameNumber>::Min();
 		for (int32 Index = 0; Index < InKeyPositions.Num(); ++Index)
 		{
 			FKeyPosition Position = InKeyPositions[Index];
 
 			FFrameNumber Time = (Position.InputValue * TickResolution).RoundToFrame();
-			Section->ExpandToFrame(Time);
+			MinFrame = FMath::Min(MinFrame, Time);
+			MaxFrame = FMath::Max(MaxFrame, Time);
 
 			ChannelValue Value = (ChannelValue)(Position.OutputValue);
 
@@ -356,10 +419,21 @@ void FChannelCurveModel<ChannelType, ChannelValue, KeyType>::AddKeys(TArrayView<
 			}
 		}
 
+		if (InKeyPositions.Num() > 0)
+		{
+			Section->ExpandToFrame(MinFrame);
+			Section->ExpandToFrame(MaxFrame);
+		}
+
 		// We reuse SetKeyAttributes here as there is complex logic determining which parts of the attributes are valid to set.
 		// For now we need to duplicate the new key handle array due to API mismatch. This will auto calculate tangents if needed.
 		SetKeyAttributes(NewKeyHandles, InKeyAttributes);
 		Channel->PostEditChange();
+		if (WeakSequencer.IsValid())
+		{
+			const FMovieSceneChannelMetaData* MetaData = ChannelHandle.GetMetaData();
+			WeakSequencer.Pin()->OnChannelChanged().Broadcast(MetaData, Section);
+		}
 		CurveModifiedDelegate.Broadcast();
 	}
 }
@@ -384,6 +458,11 @@ void FChannelCurveModel<ChannelType, ChannelValue, KeyType>::RemoveKeys(TArrayVi
 			}
 		}
 		Channel->PostEditChange();
+		if (WeakSequencer.IsValid())
+		{
+			const FMovieSceneChannelMetaData* MetaData = ChannelHandle.GetMetaData();
+			WeakSequencer.Pin()->OnChannelChanged().Broadcast(MetaData, Section);
+		}
 		CurveModifiedDelegate.Broadcast();
 	}
 }
@@ -411,7 +490,29 @@ void FChannelCurveModel<ChannelType, ChannelValue, KeyType>::FixupCurve()
 	}
 }
 
+
+template <class ChannelType, class ChannelValue, class KeyType>
+void FChannelCurveModel<ChannelType, ChannelValue, KeyType>::GetCurveColorObjectAndName(UObject** OutObject, FString& OutName) const
+{
+	if (UMovieSceneSection* Section = WeakSection.Get())
+	{
+		*OutObject = Section->GetImplicitObjectOwner();
+
+		if (const FMovieSceneChannelMetaData* MetaData = ChannelHandle.GetMetaData())
+		{
+			OutName = FString::Printf(TEXT( "%s.%s" ), *MetaData->Group.ToString(), *MetaData->DisplayText.ToString());
+			return;
+		}
+		OutName = GetIntentionName();
+		return;
+	}
+	// Just call base if it doesn't work
+	FCurveModel::GetCurveColorObjectAndName(OutObject, OutName);
+}
+
+
 // Explicit template instantiation
+template class FChannelCurveModel<FMovieSceneDoubleChannel, FMovieSceneDoubleValue, double>;
 template class FChannelCurveModel<FMovieSceneFloatChannel, FMovieSceneFloatValue, float>;
 template class FChannelCurveModel<FMovieSceneIntegerChannel, int32, int32>;
 template class FChannelCurveModel<FMovieSceneBoolChannel, bool, bool>;

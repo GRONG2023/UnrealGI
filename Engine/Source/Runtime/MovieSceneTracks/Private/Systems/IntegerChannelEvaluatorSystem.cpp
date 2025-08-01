@@ -8,6 +8,8 @@
 #include "Channels/MovieSceneIntegerChannel.h"
 #include "Math/NumericLimits.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(IntegerChannelEvaluatorSystem)
+
 DECLARE_CYCLE_STAT(TEXT("MovieScene: Evaluate integer channels"), MovieSceneEval_EvaluateIntegerChannelTask, STATGROUP_MovieSceneECS);
 
 namespace UE
@@ -19,7 +21,7 @@ namespace MovieScene
 // Do we need to optimize for this case using something like the code below, while pessimizing the common (non-multi-bind) codepath??
 struct FEvaluateIntegerChannels
 {
-	void ForEachEntity(FSourceIntegerChannel IntegerChannel, FFrameTime FrameTime, int32& OutResult)
+	static void ForEachEntity(FSourceIntegerChannel IntegerChannel, FFrameTime FrameTime, int32& OutResult)
 	{
 		if (!IntegerChannel.Source->Evaluate(FrameTime, OutResult))
 		{
@@ -38,8 +40,11 @@ UIntegerChannelEvaluatorSystem::UIntegerChannelEvaluatorSystem(const FObjectInit
 {
 	using namespace UE::MovieScene;
 
+	SystemCategories = EEntitySystemCategory::ChannelEvaluators;
+
 	const FBuiltInComponentTypes* BuiltInComponents = FBuiltInComponentTypes::Get();
 	RelevantComponent = BuiltInComponents->IntegerChannel;
+	Phase = ESystemPhase::Scheduling;
 
 	if (HasAnyFlags(RF_ClassDefaultObject))
 	{
@@ -47,6 +52,22 @@ UIntegerChannelEvaluatorSystem::UIntegerChannelEvaluatorSystem(const FObjectInit
 
 		DefineImplicitPrerequisite(UMovieSceneEvalTimeSystem::StaticClass(), GetClass());
 	}
+}
+
+void UIntegerChannelEvaluatorSystem::OnSchedulePersistentTasks(UE::MovieScene::IEntitySystemScheduler* TaskScheduler)
+{
+	using namespace UE::MovieScene;
+
+	const FBuiltInComponentTypes* BuiltInComponents = FBuiltInComponentTypes::Get();
+
+	// Evaluate integer channels per instance and write the evaluated value into the output
+	FEntityTaskBuilder()
+	.Read(BuiltInComponents->IntegerChannel)
+	.Read(BuiltInComponents->EvalTime)
+	.Write(BuiltInComponents->IntegerResult)
+	.FilterNone({ BuiltInComponents->Tags.Ignored })
+	.SetStat(GET_STATID(MovieSceneEval_EvaluateIntegerChannelTask))
+	.Fork_PerEntity<FEvaluateIntegerChannels>(&Linker->EntityManager, TaskScheduler);
 }
 
 void UIntegerChannelEvaluatorSystem::OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents)
@@ -64,4 +85,5 @@ void UIntegerChannelEvaluatorSystem::OnRun(FSystemTaskPrerequisites& InPrerequis
 	.SetStat(GET_STATID(MovieSceneEval_EvaluateIntegerChannelTask))
 	.Dispatch_PerEntity<FEvaluateIntegerChannels>(&Linker->EntityManager, InPrerequisites, &Subsequents);
 }
+
 

@@ -3,16 +3,25 @@
 #include "MaterialList.h"
 #include "DetailLayoutBuilder.h"
 #include "Editor.h"
+#include "Engine/Texture2D.h"
 #include "IDetailChildrenBuilder.h"
 #include "PropertyCustomizationHelpers.h"
+#include "PropertyEditorModule.h"
 #include "PropertyHandle.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Modules/ModuleManager.h"
+#include "Styling/SlateIconFinder.h"
+#include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SComboButton.h"
 #include "Widgets/Input/SHyperlink.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Text/STextBlock.h"
 
+
 #define LOCTEXT_NAMESPACE "PropertyCustomizationHelpers"
+
+/** Definition of extra widgets delegate for bottom material value field. */
+FMaterialList::FOnAddMaterialItemViewExtraBottomWidget FMaterialList::OnAddMaterialItemViewExtraBottomWidget;
 
 /**
  * Builds up a list of unique materials while creating some information about the materials
@@ -29,11 +38,11 @@ public:
 	 * @param Material		The material being used
 	 * @param bCanBeReplced	Whether or not the material can be replaced by a user
 	 */
-	virtual void AddMaterial( uint32 SlotIndex, UMaterialInterface* Material, bool bCanBeReplaced ) override
+	virtual void AddMaterial( uint32 SlotIndex, UMaterialInterface* Material, bool bCanBeReplaced, UActorComponent* InCurrentComponent, FName SlotName ) override
 	{
 		int32 NumMaterials = MaterialSlots.Num();
 
-		FMaterialListItem MaterialItem( Material, SlotIndex, bCanBeReplaced ); 
+		FMaterialListItem MaterialItem( Material, SlotIndex, bCanBeReplaced, InCurrentComponent, SlotName ); 
 		if( !UniqueMaterials.Contains( MaterialItem ) ) 
 		{
 			MaterialSlots.Add( MaterialItem );
@@ -93,275 +102,386 @@ private:
 	TArray<uint32> MaterialCount;
 };
 
-/**
- * A view of a single item in an FMaterialList
- */
-class FMaterialItemView : public TSharedFromThis<FMaterialItemView>
+
+TSharedRef<FMaterialItemView> FMaterialItemView::Create(
+	const FMaterialListItem& Material, 
+	FOnMaterialChanged InOnMaterialChanged,
+	FOnGenerateWidgetsForMaterial InOnGenerateNameWidgetsForMaterial, 
+	FOnGenerateWidgetsForMaterial InOnGenerateWidgetsForMaterial, 
+	FOnResetMaterialToDefaultClicked InOnResetToDefaultClicked,
+	int32 InMultipleMaterialCount,
+	bool bShowUsedTextures)
 {
-public:
-	/**
-	 * Creates a new instance of this class
-	 *
-	 * @param Material				The material to view
-	 * @param InOnMaterialChanged	Delegate for when the material changes
-	 */
-	static TSharedRef<FMaterialItemView> Create(
-		const FMaterialListItem& Material, 
-		FOnMaterialChanged InOnMaterialChanged,
-		FOnGenerateWidgetsForMaterial InOnGenerateNameWidgetsForMaterial, 
-		FOnGenerateWidgetsForMaterial InOnGenerateWidgetsForMaterial, 
-		FOnResetMaterialToDefaultClicked InOnResetToDefaultClicked,
-		int32 InMultipleMaterialCount,
-		bool bShowUsedTextures,
-		bool bDisplayCompactSize)
+	// FMaterialItemView has private constructor that is why we need to use MakeShareable 
+	return MakeShareable( new FMaterialItemView( Material, InOnMaterialChanged, InOnGenerateNameWidgetsForMaterial, InOnGenerateWidgetsForMaterial, InOnResetToDefaultClicked, InMultipleMaterialCount, bShowUsedTextures) );
+}
+
+TSharedRef<SWidget> FMaterialItemView::CreateNameContent()
+{
+	FFormatNamedArguments Arguments;
+	Arguments.Add(TEXT("ElementIndex"), MaterialItem.SlotIndex);
+
+	return 
+		SNew(SVerticalBox)
+		+SVerticalBox::Slot()
+		.VAlign(VAlign_Center)
+		[
+			SNew( STextBlock )
+			.Font( IDetailLayoutBuilder::GetDetailFont() )
+			.Text( FText::Format(LOCTEXT("ElementIndex", "Element {ElementIndex}"), Arguments ) )
+			.OverflowPolicy(ETextOverflowPolicy::Ellipsis)
+		]
+		+SVerticalBox::Slot()
+		.Padding(0.0f,4.0f)
+		.AutoHeight()
+		[
+			OnGenerateCustomNameWidgets.IsBound() ? OnGenerateCustomNameWidgets.Execute( MaterialItem.Material.Get(), MaterialItem.SlotIndex ) : StaticCastSharedRef<SWidget>( SNullWidget::NullWidget )
+		];
+}
+
+FString FMaterialItemView::OnGetObjectPath() const
+{
+	return MaterialItem.Material->GetPathName();
+}
+
+namespace ValueExtender
+{
+	template <typename TContainer, typename TDelegate>
+	TSharedRef<SWidget> MakeWidget(TDelegate& InDelegate, const TSharedRef<FMaterialItemView>& InMaterialItemView, IDetailLayoutBuilder& InDetailBuilder, UActorComponent* InCurrentComponent)
 	{
-		return MakeShareable( new FMaterialItemView( Material, InOnMaterialChanged, InOnGenerateNameWidgetsForMaterial, InOnGenerateWidgetsForMaterial, InOnResetToDefaultClicked, InMultipleMaterialCount, bShowUsedTextures, bDisplayCompactSize) );
-	}
+		TSharedPtr<TContainer> WidgetContainer = SNew(TContainer);
+		TArray<TSharedPtr<SWidget>> Widgets;
 
-	TSharedRef<SWidget> CreateNameContent()
-	{
-		FFormatNamedArguments Arguments;
-		Arguments.Add(TEXT("ElementIndex"), MaterialItem.SlotIndex);
+		// Execute all delegates and loop through all results widgets
+		InDelegate.Broadcast(InMaterialItemView, InCurrentComponent, InDetailBuilder, Widgets);
 
-		return 
-			SNew(SVerticalBox)
-			+SVerticalBox::Slot()
-			.VAlign(VAlign_Center)
-			[
-				SNew( STextBlock )
-				.Font( IDetailLayoutBuilder::GetDetailFont() )
-				.Text( FText::Format(LOCTEXT("ElementIndex", "Element {ElementIndex}"), Arguments ) )
-			]
-			+SVerticalBox::Slot()
-			.Padding(0.0f,4.0f)
-			.AutoHeight()
-			[
-				OnGenerateCustomNameWidgets.IsBound() ? OnGenerateCustomNameWidgets.Execute( MaterialItem.Material.Get(), MaterialItem.SlotIndex ) : StaticCastSharedRef<SWidget>( SNullWidget::NullWidget )
-			];
-	}
-
-	TSharedRef<SWidget> CreateValueContent( const TSharedPtr<FAssetThumbnailPool>& ThumbnailPool, const TArray<FAssetData>& OwnerAssetDataArray)
-	{
-		FIntPoint ThumbnailSize(64, 64);
-
-		FResetToDefaultOverride ResetToDefaultOverride = FResetToDefaultOverride::Create(
-			FIsResetToDefaultVisible::CreateSP(this, &FMaterialItemView::GetReplaceVisibility),
-			FResetToDefaultHandler::CreateSP(this, &FMaterialItemView::OnResetToBaseClicked)
-		);
-
-		return
-			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot()
-			[
-				SNew(SVerticalBox)
-				+SVerticalBox::Slot()
+		for (TSharedPtr<SWidget> Widget : Widgets)
+		{
+			WidgetContainer->AddSlot()
 				.AutoHeight()
-				.Padding( 0.0f )
-				.VAlign(VAlign_Center)
-				.HAlign(HAlign_Fill)
+			[
+				Widget.ToSharedRef()
+			];
+		}
+
+		return WidgetContainer.ToSharedRef();
+	}
+};
+
+TSharedRef<SWidget> FMaterialItemView::CreateValueContent(IDetailLayoutBuilder& InDetailBuilder, const TArray<FAssetData>& OwnerAssetDataArray, UActorComponent* InActorComponent)
+{	
+	// Always consider the InActorComponent's asset location (BP, Level, etc.) as part of the OwnerAssetArray
+	TArray<FAssetData> AssetDataArray = OwnerAssetDataArray;
+	if (InActorComponent)
+	{
+		AssetDataArray.Add((FAssetData)InActorComponent->GetOuter());
+	}
+
+	return
+		SNew(SVerticalBox)
+		+SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding( 0.0f )
+		.VAlign(VAlign_Center)
+		.HAlign(HAlign_Fill)
+		[
+			SNew(SHorizontalBox)
+			+SHorizontalBox::Slot()
+			.FillWidth(1.f)
+			[
+				SNew(SObjectPropertyEntryBox)
+				.ObjectPath(this, &FMaterialItemView::OnGetObjectPath)
+				.AllowClear(false)
+				.AllowedClass(UMaterialInterface::StaticClass())
+				.OnObjectChanged(this, &FMaterialItemView::OnSetObject)
+				.ThumbnailPool(InDetailBuilder.GetThumbnailPool())
+				.DisplayCompactSize(true)
+				.OwnerAssetDataArray(AssetDataArray)
+				.CustomContentSlot()
 				[
-					SNew(SHorizontalBox)
-					+SHorizontalBox::Slot()
-					.FillWidth(1.0f)
+					SNew( SBox )
+					.HAlign(HAlign_Left)
+					.VAlign(VAlign_Center)
 					[
-						SNew( SObjectPropertyEntryBox )
-						.ObjectPath(this, &FMaterialItemView::OnGetObjectPath)
-						.AllowedClass(UMaterialInterface::StaticClass())
-						.OnObjectChanged(this, &FMaterialItemView::OnSetObject)
-						.ThumbnailPool(ThumbnailPool)
-						.DisplayCompactSize(bDisplayCompactSize)
-						.CustomResetToDefault(ResetToDefaultOverride)
-						.OwnerAssetDataArray(OwnerAssetDataArray)
-						.CustomContentSlot()
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot()
+						.VAlign(VAlign_Center)
+						.Padding(0.0f, 0.0f, 3.0f, 0.0f)
+						.AutoWidth()
 						[
-							SNew( SBox )
-							.HAlign(HAlign_Left)
+							// Add a button to browse to any nanite override material
+							MakeBrowseNaniteOverrideMaterialButton()
+						]
+						+SHorizontalBox::Slot()
+						.VAlign(VAlign_Center)
+						.Padding(0.0f, 0.0f, 3.0f, 0.0f)
+						.AutoWidth()
+						[
+							// Add a menu for displaying all textures 
+							SNew(SComboButton)
+							.OnGetMenuContent(this, &FMaterialItemView::OnGetTexturesMenuForMaterial)
+							.ComboButtonStyle(FAppStyle::Get(), "SimpleComboButtonWithIcon")
 							.VAlign(VAlign_Center)
+							.IsEnabled( this, &FMaterialItemView::IsTexturesMenuEnabled )
+							.Visibility(bShowUsedTextures ? EVisibility::Visible : EVisibility::Hidden)
+							.ToolTipText(this, &FMaterialItemView::GetTexturesMenuToolTipText)
+							.ButtonContent()
 							[
-								SNew(SHorizontalBox)
-								+SHorizontalBox::Slot()
-								.VAlign(VAlign_Center)
-								.Padding(0.0f, 0.0f, 3.0f, 0.0f)
-								.AutoWidth()
-								[
-									// Add a menu for displaying all textures 
-									SNew( SComboButton )
-									.OnGetMenuContent( this, &FMaterialItemView::OnGetTexturesMenuForMaterial )
-									.VAlign(VAlign_Center)
-									.ContentPadding(2)
-									.IsEnabled( this, &FMaterialItemView::IsTexturesMenuEnabled )
-									.Visibility( bShowUsedTextures ? EVisibility::Visible : EVisibility::Hidden )
-									.ButtonContent()
-									[
-										SNew( STextBlock )
-										.Font( IDetailLayoutBuilder::GetDetailFont() )
-										.ToolTipText( LOCTEXT("ViewTexturesToolTip", "View the textures used by this material" ) )
-										.Text( LOCTEXT("ViewTextures","Textures") )
-									]
-								]
-								+SHorizontalBox::Slot()
-								.Padding(3.0f, 0.0f)
-								.FillWidth(1.0f)
-								[
-									OnGenerateCustomMaterialWidgets.IsBound() && bDisplayCompactSize ? OnGenerateCustomMaterialWidgets.Execute(MaterialItem.Material.Get(), MaterialItem.SlotIndex) : StaticCastSharedRef<SWidget>(SNullWidget::NullWidget)
-								]
+								SNew(SImage)
+								.Image(FSlateIconFinder::FindIconBrushForClass(UTexture2D::StaticClass()))
+								.ColorAndOpacity(FSlateColor::UseForeground())
 							]
+						]
+						+SHorizontalBox::Slot()
+						.Padding(3.0f, 0.0f)
+						.FillWidth(1.f)
+						[
+							OnGenerateCustomMaterialWidgets.IsBound() ? OnGenerateCustomMaterialWidgets.Execute(MaterialItem.Material.Get(), MaterialItem.SlotIndex) : SNullWidget::NullWidget
 						]
 					]
 				]
-				+SVerticalBox::Slot()
-				.AutoHeight()
-				.Padding(2)
-				.VAlign( VAlign_Center )
-				[
-					OnGenerateCustomMaterialWidgets.IsBound() && !bDisplayCompactSize ? OnGenerateCustomMaterialWidgets.Execute( MaterialItem.Material.Get(), MaterialItem.SlotIndex ) : StaticCastSharedRef<SWidget>( SNullWidget::NullWidget )
-				]
-			];
+			]
+			+SHorizontalBox::Slot()
+			.AutoWidth()
+			[
+				GetGlobalRowExtensionWidget(InDetailBuilder, InActorComponent).ToSharedRef()
+			]
+		]
+		+SVerticalBox::Slot()
+		.AutoHeight()
+		[
+			ValueExtender::MakeWidget<SVerticalBox>(FMaterialList::OnAddMaterialItemViewExtraBottomWidget, SharedThis(this), InDetailBuilder, InActorComponent)
+		];
+}
+
+bool FMaterialItemView::GetResetToBaseVisibility() const
+{
+	// Only show the reset to base button if the current material can be replaced
+	return OnMaterialChanged.IsBound() && MaterialItem.bCanBeReplaced;
+}
+
+
+void FMaterialItemView::OnResetToBaseClicked()
+{
+	// Only allow reset to base if the current material can be replaced
+	if( MaterialItem.Material.IsValid() && MaterialItem.bCanBeReplaced )
+	{
+		bool bReplaceAll = false;
+		ReplaceMaterial( nullptr, bReplaceAll );
+		OnResetToDefaultClicked.ExecuteIfBound( MaterialItem.Material.Get(), MaterialItem.SlotIndex );
+	}
+}
+
+FMaterialItemView::FMaterialItemView(	const FMaterialListItem& InMaterial, 
+					FOnMaterialChanged& InOnMaterialChanged, 
+					FOnGenerateWidgetsForMaterial& InOnGenerateNameWidgets, 
+					FOnGenerateWidgetsForMaterial& InOnGenerateMaterialWidgets, 
+					FOnResetMaterialToDefaultClicked& InOnResetToDefaultClicked,
+					int32 InMultipleMaterialCount,
+					bool bInShowUsedTextures)
+					
+	: MaterialItem( InMaterial )
+	, OnMaterialChanged( InOnMaterialChanged )
+	, OnGenerateCustomNameWidgets( InOnGenerateNameWidgets )
+	, OnGenerateCustomMaterialWidgets( InOnGenerateMaterialWidgets )
+	, OnResetToDefaultClicked( InOnResetToDefaultClicked )
+	, MultipleMaterialCount( InMultipleMaterialCount )
+	, bShowUsedTextures( bInShowUsedTextures )
+{
+
+}
+
+void FMaterialItemView::ReplaceMaterial( UMaterialInterface* NewMaterial, bool bReplaceAll )
+{
+	UMaterialInterface* PrevMaterial = NULL;
+	if( MaterialItem.Material.IsValid() )
+	{
+		PrevMaterial = MaterialItem.Material.Get();
 	}
 
-private:
-
-	FMaterialItemView(	const FMaterialListItem& InMaterial, 
-						FOnMaterialChanged& InOnMaterialChanged, 
-						FOnGenerateWidgetsForMaterial& InOnGenerateNameWidgets, 
-						FOnGenerateWidgetsForMaterial& InOnGenerateMaterialWidgets, 
-						FOnResetMaterialToDefaultClicked& InOnResetToDefaultClicked,
-						int32 InMultipleMaterialCount,
-						bool bInShowUsedTextures,
-						bool bInDisplayCompactSize)
-						
-		: MaterialItem( InMaterial )
-		, OnMaterialChanged( InOnMaterialChanged )
-		, OnGenerateCustomNameWidgets( InOnGenerateNameWidgets )
-		, OnGenerateCustomMaterialWidgets( InOnGenerateMaterialWidgets )
-		, OnResetToDefaultClicked( InOnResetToDefaultClicked )
-		, MultipleMaterialCount( InMultipleMaterialCount )
-		, bShowUsedTextures( bInShowUsedTextures )
-		, bDisplayCompactSize(bInDisplayCompactSize)
+	if( NewMaterial != PrevMaterial )
 	{
-
+		// Replace the material
+		OnMaterialChanged.ExecuteIfBound( NewMaterial, PrevMaterial, MaterialItem.SlotIndex, bReplaceAll );
 	}
+}
 
-	void ReplaceMaterial( UMaterialInterface* NewMaterial, bool bReplaceAll = false )
-	{
-		UMaterialInterface* PrevMaterial = NULL;
-		if( MaterialItem.Material.IsValid() )
+void FMaterialItemView::OnSetObject( const FAssetData& AssetData )
+{
+	const bool bReplaceAll = false;
+
+	UMaterialInterface* NewMaterial = Cast<UMaterialInterface>(AssetData.GetAsset());
+	ReplaceMaterial( NewMaterial, bReplaceAll );
+}
+
+TSharedRef<SWidget> FMaterialItemView::MakeBrowseNaniteOverrideMaterialButton() const
+{
+	TSharedRef<SWidget> Widget =
+		SNew(SBox)
+		.HAlign(HAlign_Center)
+		.VAlign(VAlign_Center)
+		.WidthOverride(22.0f)
+		.HeightOverride(22.0f)
+		.ToolTipText(LOCTEXT("BrowseToNaniteOverride_Tip", "Browse to the Nanite Override Material in Content Browser"))
+		[
+			SNew(SButton)
+			.ButtonStyle(FAppStyle::Get(), "SimpleButton")
+			.ContentPadding(0.0f)
+			.IsFocusable(false)
+			.OnClicked(FOnClicked::CreateLambda([WeakMaterial = MaterialItem.Material]()
+				{
+					UMaterialInterface* Material = WeakMaterial.Get();
+					UMaterialInterface* NaniteOverrideMaterial = Material != nullptr ? Material->GetNaniteOverride() : nullptr;
+					if (GEditor && NaniteOverrideMaterial != nullptr)
+					{
+						TArray<UObject*> Objects;
+						Objects.Add(NaniteOverrideMaterial);
+						GEditor->SyncBrowserToObjects(Objects);
+					}
+					return FReply::Handled();
+				}))
+			[ 
+				SNew(SImage)
+				.Image(FAppStyle::Get().GetBrush("Icons.BrowseContent")) //todo: UE-168435 Get custom icon for this.
+				.ColorAndOpacity(FSlateColor::UseForeground())
+			]
+		];
+
+	Widget->SetVisibility(TAttribute<EVisibility>::CreateLambda([WeakMaterial = MaterialItem.Material]()
 		{
-			PrevMaterial = MaterialItem.Material.Get();
-		}
+			UMaterialInterface* Material = WeakMaterial.Get();
+			return Material != nullptr && Material->GetNaniteOverride() != nullptr ? EVisibility::Visible : EVisibility::Collapsed;
+		}));
 
-		if( NewMaterial != PrevMaterial )
+	return Widget;
+}
+
+
+bool FMaterialItemView::IsTexturesMenuEnabled() const
+{
+	if (UMaterialInterface* Material = MaterialItem.Material.Get())
+	{
+		// Don't enable the menu unless there are textures, otherwise, the user might want to think the button is broken while really, it just has nothing to display
+		TArray<UTexture*> Textures;
+		Material->GetUsedTextures(Textures, EMaterialQualityLevel::Num, false, ERHIFeatureLevel::Num, true);
+		return !Textures.IsEmpty();
+	}
+	return false;
+}
+
+FText FMaterialItemView::GetTexturesMenuToolTipText() const
+{
+	if (UMaterialInterface* Material = MaterialItem.Material.Get())
+	{
+		// Don't enable the menu unless there are textures, otherwise, the user might want to think the button is broken while really, it just has nothing to display
+		TArray<UTexture*> Textures;
+		Material->GetUsedTextures(Textures, EMaterialQualityLevel::Num, false, ERHIFeatureLevel::Num, true);
+
+		FFormatNamedArguments Arguments;
+		Arguments.Add(TEXT("MaterialName"), FText::AsCultureInvariant(Material->GetName()));
+		if (Textures.IsEmpty())
 		{
-			// Replace the material
-			OnMaterialChanged.ExecuteIfBound( NewMaterial, PrevMaterial, MaterialItem.SlotIndex, bReplaceAll );
+			return LOCTEXT("GetTexturesMenuToolTipText_NoTexture", "Find the material's textures in the content browser (no texture)");
 		}
-	}
-
-	void OnSetObject( const FAssetData& AssetData )
-	{
-		const bool bReplaceAll = false;
-
-		UMaterialInterface* NewMaterial = Cast<UMaterialInterface>(AssetData.GetAsset());
-		ReplaceMaterial( NewMaterial, bReplaceAll );
-	}
-
-	FString OnGetObjectPath() const
-	{
-		return MaterialItem.Material->GetPathName();
-	}
-
-	/**
-	 * @return Whether or not the textures menu is enabled
-	 */
-	bool IsTexturesMenuEnabled() const
-	{
-		return MaterialItem.Material.Get() != NULL;
-	}
-
-	TSharedRef<SWidget> OnGetTexturesMenuForMaterial()
-	{
-		FMenuBuilder MenuBuilder( true, NULL );
-
-		if( MaterialItem.Material.IsValid() )
+		else
 		{
-			UMaterialInterface* Material = MaterialItem.Material.Get();
-
-			TArray< UTexture* > Textures;
-			Material->GetUsedTextures(Textures, EMaterialQualityLevel::Num, false, ERHIFeatureLevel::Num, true);
-
-			// Add a menu item for each texture.  Clicking on the texture will display it in the content browser
-			// UObject for delegate compatibility
-			for( UObject* Texture : Textures )
-			{
-				FUIAction Action( FExecuteAction::CreateSP( this, &FMaterialItemView::GoToAssetInContentBrowser, MakeWeakObjectPtr(Texture) ) );
-
-				MenuBuilder.AddMenuEntry( FText::FromString( Texture->GetName() ), LOCTEXT( "BrowseTexture_ToolTip", "Find this texture in the content browser" ), FSlateIcon(), Action );
-			}
+			return FText::Format(LOCTEXT("GetTexturesMenuToolTipText_MaterialName", "Find {MaterialName}'s textures in the content browser"), Arguments);
 		}
-
-		return MenuBuilder.MakeWidget();
 	}
 
-	/**
-	 * Finds the asset in the content browser
-	 */
-	void GoToAssetInContentBrowser( TWeakObjectPtr<UObject> Object )
+	return LOCTEXT("GetTexturesMenuToolTipText_Default", "Find the material's textures in the content browser");
+}
+
+TSharedRef<SWidget> FMaterialItemView::OnGetTexturesMenuForMaterial()
+{
+	FMenuBuilder MenuBuilder( true, NULL );
+
+	if( MaterialItem.Material.IsValid() )
 	{
-		if( Object.IsValid() )
+		UMaterialInterface* Material = MaterialItem.Material.Get();
+
+		TArray< UTexture* > Textures;
+		Material->GetUsedTextures(Textures, EMaterialQualityLevel::Num, false, ERHIFeatureLevel::Num, true);
+
+		// Add a menu item for each texture.  Clicking on the texture will display it in the content browser
+		// UObject for delegate compatibility
+		for( UObject* Texture : Textures )
 		{
-			TArray< UObject* > Objects;
-			Objects.Add( Object.Get() );
-			GEditor->SyncBrowserToObjects( Objects );
+			FUIAction Action( FExecuteAction::CreateSP( this, &FMaterialItemView::GoToAssetInContentBrowser, MakeWeakObjectPtr(Texture) ) );
+
+			MenuBuilder.AddMenuEntry( FText::FromString( Texture->GetName() ), LOCTEXT( "BrowseTexture_ToolTip", "Find this texture in the content browser" ), FSlateIcon(), Action );
 		}
 	}
 
-	/**
-	 * Called to get the visibility of the replace button
-	 */
-	bool GetReplaceVisibility(TSharedPtr<IPropertyHandle> PropertyHandle) const
+	return MenuBuilder.MakeWidget();
+}
+
+
+void FMaterialItemView::GoToAssetInContentBrowser( TWeakObjectPtr<UObject> Object )
+{
+	if( Object.IsValid() )
 	{
-		// Only show the replace button if the current material can be replaced
-		if (OnMaterialChanged.IsBound() && MaterialItem.bCanBeReplaced)
-		{
-			return true;
-		}
-
-		return false;
+		TArray< UObject* > Objects;
+		Objects.Add( Object.Get() );
+		GEditor->SyncBrowserToObjects( Objects );
 	}
+}
 
-	/**
-	 * Called when reset to base is clicked
-	 */
-	void OnResetToBaseClicked(TSharedPtr<IPropertyHandle> PropertyHandle)
+
+FOnGenerateGlobalRowExtensionArgs FMaterialItemView::GetGlobalRowExtensionArgs(IDetailLayoutBuilder& InDetailBuilder, UActorComponent* InCurrentComponent) const
+{
+	FOnGenerateGlobalRowExtensionArgs OnGenerateGlobalRowExtensionArgs;
+
+	USceneComponent* SceneComponent = Cast<USceneComponent>(InCurrentComponent);
+	if (!SceneComponent)
 	{
-		// Only allow reset to base if the current material can be replaced
-		if( MaterialItem.Material.IsValid() && MaterialItem.bCanBeReplaced )
-		{
-			bool bReplaceAll = false;
-			ReplaceMaterial( NULL, bReplaceAll );
-			OnResetToDefaultClicked.ExecuteIfBound( MaterialItem.Material.Get(), MaterialItem.SlotIndex );
-		}
+		return OnGenerateGlobalRowExtensionArgs;
 	}
 
-private:
-	FMaterialListItem MaterialItem;
-	FOnMaterialChanged OnMaterialChanged;
-	FOnGenerateWidgetsForMaterial OnGenerateCustomNameWidgets;
-	FOnGenerateWidgetsForMaterial OnGenerateCustomMaterialWidgets;
-	FOnResetMaterialToDefaultClicked OnResetToDefaultClicked;
-	int32 MultipleMaterialCount;
-	bool bShowUsedTextures;
-	bool bDisplayCompactSize;
-};
+	TSharedPtr<IPropertyHandle> PropertyHandle;
+	UObject* OwnerObject = nullptr;
+	FString PropertyPath;
+	FProperty* MaterialProperty = nullptr;
+	if (SceneComponent->GetMaterialPropertyPath(MaterialItem.SlotIndex, OwnerObject, PropertyPath, MaterialProperty))
+	{
+		OnGenerateGlobalRowExtensionArgs.OwnerObject = OwnerObject;
+		OnGenerateGlobalRowExtensionArgs.PropertyPath = PropertyPath;
+		OnGenerateGlobalRowExtensionArgs.Property = MaterialProperty;
+	}
+
+	return OnGenerateGlobalRowExtensionArgs;
+}
 
 
-FMaterialList::FMaterialList(IDetailLayoutBuilder& InDetailLayoutBuilder, FMaterialListDelegates& InMaterialListDelegates, const TArray<FAssetData>& InOwnerAssetDataArray, bool bInAllowCollapse, bool bInShowUsedTextures, bool bInDisplayCompactSize)
+TSharedPtr<SWidget> FMaterialItemView::GetGlobalRowExtensionWidget(IDetailLayoutBuilder& InDetailBuilder, UActorComponent* InCurrentComponent) const
+{
+	FSlimHorizontalToolBarBuilder ToolbarBuilder(TSharedPtr<FUICommandList>(), FMultiBoxCustomization::None);
+	FPropertyEditorModule& PropertyEditorModule = FModuleManager::Get().GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
+
+	// Add Extension buttons to Row Generator
+	TArray<FPropertyRowExtensionButton> ExtensionButtons;
+
+	// Add custom property extensions
+	FOnGenerateGlobalRowExtensionArgs RowExtensionArgs = GetGlobalRowExtensionArgs(InDetailBuilder, InCurrentComponent);
+	PropertyEditorModule.GetGlobalRowExtensionDelegate().Broadcast(RowExtensionArgs, ExtensionButtons);
+
+	// Build extension toolbar 
+	ToolbarBuilder.SetLabelVisibility(EVisibility::Collapsed);
+	ToolbarBuilder.SetStyle(&FAppStyle::Get(), "DetailsView.ExtensionToolBar");
+	for (const FPropertyRowExtensionButton& Extension : ExtensionButtons)
+	{
+		ToolbarBuilder.AddToolBarButton(Extension.UIAction, NAME_None, Extension.Label, Extension.ToolTip, Extension.Icon);
+	}
+		
+	return ToolbarBuilder.MakeWidget();
+}
+
+FMaterialList::FMaterialList(IDetailLayoutBuilder& InDetailLayoutBuilder, FMaterialListDelegates& InMaterialListDelegates, const TArray<FAssetData>& InOwnerAssetDataArray, bool bInAllowCollapse, bool bInShowUsedTextures)
 	: MaterialListDelegates( InMaterialListDelegates )
 	, DetailLayoutBuilder( InDetailLayoutBuilder )
 	, MaterialListBuilder( new FMaterialListBuilder )
 	, bAllowCollpase(bInAllowCollapse)
 	, bShowUsedTextures(bInShowUsedTextures)
-	, bDisplayCompactSize(bInDisplayCompactSize)
 	, OwnerAssetDataArray(InOwnerAssetDataArray)
 {
 }
@@ -440,6 +560,12 @@ void FMaterialList::GenerateHeaderRowContent( FDetailWidgetRow& NodeRow )
 	NodeRow.CopyAction(FUIAction(FExecuteAction::CreateSP(this, &FMaterialList::OnCopyMaterialList), FCanExecuteAction::CreateSP(this, &FMaterialList::OnCanCopyMaterialList)));
 	NodeRow.PasteAction(FUIAction(FExecuteAction::CreateSP(this, &FMaterialList::OnPasteMaterialList)));
 
+	if (const TSharedPtr<FOnPasteFromText> OnPasteFromTextDelegate = NodeRow.OnPasteFromTextDelegate.Pin();
+		OnPasteFromTextDelegate.IsValid())
+	{
+		OnPasteFromTextDelegate->AddSP(this, &FMaterialList::OnPasteMaterialListFromText);
+	}
+
 	if (bAllowCollpase)
 	{
 		NodeRow.NameContent()
@@ -457,6 +583,7 @@ void FMaterialList::GenerateChildContent( IDetailChildrenBuilder& ChildrenBuilde
 	DisplayedMaterials.Empty();
 	if( MaterialListBuilder->GetNumMaterials() > 0 )
 	{
+		const FName RowTagName = "Material";
 		DisplayedMaterials = MaterialListBuilder->MaterialSlots;
 
 		MaterialListBuilder->Sort();
@@ -486,6 +613,7 @@ void FMaterialList::GenerateChildContent( IDetailChildrenBuilder& ChildrenBuilde
 					FFormatNamedArguments Arguments;
 					Arguments.Add(TEXT("ElementSlot"), CurrentSlot);
 					ChildRow
+					.RowTag(RowTagName)
 					.ValueContent()
 					.MaxDesiredWidth(0.0f)// No Max Width
 					[
@@ -493,7 +621,7 @@ void FMaterialList::GenerateChildContent( IDetailChildrenBuilder& ChildrenBuilde
 							.HAlign( HAlign_Center )
 							[
 								SNew( SHyperlink )
-									.TextStyle( FEditorStyle::Get(), "MaterialList.HyperlinkStyle" )
+									.TextStyle( FAppStyle::Get(), "MaterialList.HyperlinkStyle" )
 									.Text( FText::Format(LOCTEXT("HideAllMaterialLinkText", "Hide All Materials on Element {ElementSlot}"), Arguments ) )
 									.OnNavigate( this, &FMaterialList::OnHideMaterialsForElement, CurrentSlot )
 							]
@@ -506,8 +634,9 @@ void FMaterialList::GenerateChildContent( IDetailChildrenBuilder& ChildrenBuilde
 					bDisplayAllMaterialsInSlot = false;
 
 					FDetailWidgetRow& ChildRow = ChildrenBuilder.AddCustomRow( FText::GetEmpty() );
+					ChildRow.RowTag(RowTagName);
 
-					AddMaterialItem( ChildRow, CurrentSlot, FMaterialListItem( NULL, CurrentSlot, true ), !bDisplayAllMaterialsInSlot );
+					AddMaterialItem( ChildRow, CurrentSlot, FMaterialListItem( NULL, CurrentSlot, true ), !bDisplayAllMaterialsInSlot, Material.CurrentComponent.Get() );
 				}
 				else
 				{
@@ -520,8 +649,9 @@ void FMaterialList::GenerateChildContent( IDetailChildrenBuilder& ChildrenBuilde
 			if( bDisplayAllMaterialsInSlot )
 			{
 				FDetailWidgetRow& ChildRow = ChildrenBuilder.AddCustomRow( Material.Material.IsValid()? FText::FromString(Material.Material->GetName()) : FText::GetEmpty() );
+				ChildRow.RowTag(RowTagName);
 
-				AddMaterialItem( ChildRow, CurrentSlot, Material, !bDisplayAllMaterialsInSlot );
+				AddMaterialItem( ChildRow, CurrentSlot, Material, !bDisplayAllMaterialsInSlot, Material.CurrentComponent.Get() );
 			}
 		}
 	}
@@ -568,6 +698,21 @@ void FMaterialList::OnPasteMaterialList()
 	}
 }
 
+void FMaterialList::OnPasteMaterialListFromText(
+	const FString& InTag,
+	const FString& InText,
+	const TOptional<FGuid>& InOperationId)
+{
+	if (const TSharedPtr<FOnPasteFromText> OnPasteFromTextDelegate = MaterialListDelegates.OnPasteFromText.Pin();
+		OnPasteFromTextDelegate.IsValid())
+	{
+		if (OnPasteFromTextDelegate->IsBound())
+		{
+			OnPasteFromTextDelegate->Broadcast(InTag, InText, InOperationId);
+		}
+	}
+}
+
 bool FMaterialList::OnCanCopyMaterialItem(int32 CurrentSlot) const
 {
 	if (MaterialListDelegates.OnCanCopyMaterialItem.IsBound())
@@ -594,11 +739,11 @@ void FMaterialList::OnPasteMaterialItem(int32 CurrentSlot)
 	}
 }
 			
-void FMaterialList::AddMaterialItem( FDetailWidgetRow& Row, int32 CurrentSlot, const FMaterialListItem& Item, bool bDisplayLink )
+void FMaterialList::AddMaterialItem( FDetailWidgetRow& Row, int32 CurrentSlot, const FMaterialListItem& Item, bool bDisplayLink, UActorComponent* InActorComponent)
 {
 	uint32 NumMaterials = MaterialListBuilder->GetNumMaterialsInSlot(CurrentSlot);
 
-	TSharedRef<FMaterialItemView> NewView = FMaterialItemView::Create( Item, MaterialListDelegates.OnMaterialChanged, MaterialListDelegates.OnGenerateCustomNameWidgets, MaterialListDelegates.OnGenerateCustomMaterialWidgets, MaterialListDelegates.OnResetMaterialToDefaultClicked, NumMaterials, bShowUsedTextures, bDisplayCompactSize);
+	TSharedRef<FMaterialItemView> NewView = FMaterialItemView::Create( Item, MaterialListDelegates.OnMaterialChanged, MaterialListDelegates.OnGenerateCustomNameWidgets, MaterialListDelegates.OnGenerateCustomMaterialWidgets, MaterialListDelegates.OnResetMaterialToDefaultClicked, NumMaterials, bShowUsedTextures);
 
 	TSharedPtr<SWidget> RightSideContent;
 	if( bDisplayLink )
@@ -612,7 +757,7 @@ void FMaterialList::AddMaterialItem( FDetailWidgetRow& Row, int32 CurrentSlot, c
 				.VAlign(VAlign_Top)
 				[
 					SNew( SHyperlink )
-					.TextStyle( FEditorStyle::Get(), "MaterialList.HyperlinkStyle" )
+					.TextStyle( FAppStyle::Get(), "MaterialList.HyperlinkStyle" )
 					.Text( FText::Format(LOCTEXT("DisplayAllMaterialLinkText", "Display {NumMaterials} materials"), Arguments) )
 					.ToolTipText( LOCTEXT("DisplayAllMaterialLink_ToolTip","Display all materials. Drag and drop a material here to replace all materials.") )
 					.OnNavigate( this, &FMaterialList::OnDisplayMaterialsForElement, CurrentSlot )
@@ -620,9 +765,16 @@ void FMaterialList::AddMaterialItem( FDetailWidgetRow& Row, int32 CurrentSlot, c
 	}
 	else
 	{
-		RightSideContent = NewView->CreateValueContent( DetailLayoutBuilder.GetThumbnailPool(), OwnerAssetDataArray );
+		RightSideContent = NewView->CreateValueContent( DetailLayoutBuilder, OwnerAssetDataArray, InActorComponent );
 		ViewedMaterials.Add( NewView );
 	}
+
+	FResetToDefaultOverride ResetToDefaultOverride = FResetToDefaultOverride::Create(
+		TAttribute<bool>(NewView, &FMaterialItemView::GetResetToBaseVisibility),
+		FSimpleDelegate::CreateSP(NewView, &FMaterialItemView::OnResetToBaseClicked)
+	);
+
+	Row.OverrideResetToDefault(ResetToDefaultOverride);
 
 	Row.CopyAction(FUIAction(FExecuteAction::CreateSP(this, &FMaterialList::OnCopyMaterialItem, Item.SlotIndex), FCanExecuteAction::CreateSP(this, &FMaterialList::OnCanCopyMaterialItem, Item.SlotIndex)));
 	Row.PasteAction(FUIAction(FExecuteAction::CreateSP(this, &FMaterialList::OnPasteMaterialItem, Item.SlotIndex)));
@@ -637,6 +789,17 @@ void FMaterialList::AddMaterialItem( FDetailWidgetRow& Row, int32 CurrentSlot, c
 	[
 		RightSideContent.ToSharedRef()
 	];
+
+	if(USceneComponent* SceneComponent = Cast<USceneComponent>(InActorComponent))
+	{
+		UObject* OwnerObject = nullptr;
+		FString PropertyPath;
+		FProperty* MaterialProperty = nullptr;
+		if (SceneComponent->GetMaterialPropertyPath(Item.SlotIndex, OwnerObject, PropertyPath, MaterialProperty))
+		{
+			Row.IsEnabled(SceneComponent->CanEditChange(MaterialProperty));
+		}		
+	}
 }
 
 #undef LOCTEXT_NAMESPACE

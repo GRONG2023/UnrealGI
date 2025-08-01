@@ -111,8 +111,8 @@ TCHAR* FGenericPlatformTime::StrTime( TCHAR* Dest, SIZE_T DestSize )
 
 const TCHAR* FGenericPlatformTime::StrTimestamp()
 {
-	static TCHAR Result[1024];
-	*Result = 0;
+	static thread_local TCHAR Result[1024];
+	*Result = TEXT('\0');
 	StrDate( Result, UE_ARRAY_COUNT(Result) );
 	FCString::Strcat( Result, TEXT(" ") );
 	StrTime( Result + FCString::Strlen(Result), UE_ARRAY_COUNT(Result) - FCString::Strlen(Result) );
@@ -126,9 +126,15 @@ const TCHAR* FGenericPlatformTime::StrTimestamp()
  */
 FString FGenericPlatformTime::PrettyTime( double Seconds )
 {
-	if ( Seconds < 1.0 )
+	if (Seconds < 0.001)
 	{
-		return FString::Printf( TEXT("%d ms"), FMath::TruncToInt((float)(Seconds*1000)) );
+		return FString::Printf( TEXT("%d us"), FMath::TruncToInt((float)(Seconds*1000000)) );
+	}
+	else if ( Seconds < 1.0 )
+	{
+		int32 Ms = FMath::TruncToInt((float)(Seconds * 1000));
+		int32 Us = FMath::TruncToInt((float)(Seconds * 1000000)) - Ms*1000;
+		return FString::Printf( TEXT("%d.%03d ms"), Ms, Us );
 	}
 	else if ( Seconds < 10.0 )
 	{
@@ -186,8 +192,8 @@ struct FCPUTimeDump
 			FParse::Value(*Args[0], TEXT("delay="), Delay);
 		}
 
-		FTicker::GetCoreTicker().RemoveTicker( GetCPUTimeDelegateHandle );
-		FTicker::GetCoreTicker().RemoveTicker( CPUTimeDumpDelegateHandle );
+		FTSTicker::GetCoreTicker().RemoveTicker( GetCPUTimeDelegateHandle );
+		FTSTicker::GetCoreTicker().RemoveTicker( CPUTimeDumpDelegateHandle );
 		GetCPUTimeDelegateHandle .Reset();
 		CPUTimeDumpDelegateHandle.Reset();
 
@@ -200,8 +206,8 @@ struct FCPUTimeDump
 			Delay = FMath::Clamp( Delay, 10, 300 );
 			UE_LOG(LogGenericPlatformTime, Log, TEXT("Delay set to %i second(s), started printing the CPU usage"), Delay);
 
-			GetCPUTimeDelegateHandle   = FTicker::GetCoreTicker().AddTicker( GetCPUTimeDelegate );
-			CPUTimeDumpDelegateHandle  = FTicker::GetCoreTicker().AddTicker( CPUTimeDumpDelegate, (float)Delay );
+			GetCPUTimeDelegateHandle   = FTSTicker::GetCoreTicker().AddTicker( GetCPUTimeDelegate );
+			CPUTimeDumpDelegateHandle  = FTSTicker::GetCoreTicker().AddTicker( CPUTimeDumpDelegate, (float)Delay );
 		}
 	}
 
@@ -244,17 +250,17 @@ protected:
 	FTickerDelegate CPUTimeDumpDelegate;
 
 	/** Handle for the added GetCPUTimeDelegate delegate. */
-	FDelegateHandle GetCPUTimeDelegateHandle;
+	FTSTicker::FDelegateHandle GetCPUTimeDelegateHandle;
 
 	/** Handle for the added CPUTimeDumpDelegate delegate. */
-	FDelegateHandle CPUTimeDumpDelegateHandle;
+	FTSTicker::FDelegateHandle CPUTimeDumpDelegateHandle;
 };
 
 static FAutoConsoleCommand CPUTimeDumpCommand
 (
 	TEXT("CPUTime.Dump"),
-	TEXT("Usage -Delay=[NumSeconds=30]\n")
-	TEXT("If Delay==0, disables printing the CPU usage to the log\n")
-	TEXT("If Delay>0, starts printing the average CPU usage from the last n frames, clamps between 10 and 300"),
+	TEXT("Usage -Delay=[NumSeconds=30]\n"
+	     "If Delay==0, disables printing the CPU usage to the log\n"
+	     "If Delay>0, starts printing the average CPU usage from the last n frames, clamps between 10 and 300"),
 	FConsoleCommandWithArgsDelegate::CreateRaw( &FCPUTimeDump::Get(), &FCPUTimeDump::ExecuteCommand )
 );

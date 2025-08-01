@@ -2,8 +2,7 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-
+#include "MeshTypes.h"
 
 /**
  * This defines the container used to hold mesh elements.
@@ -170,7 +169,7 @@ public:
 	{
 		return Container.Num() > 0 ?
 			ElementIDType( typename TSparseArray<ElementType>::TConstIterator( Container ).GetIndex() ) :
-			ElementIDType::Invalid;
+			INDEX_NONE;
 	}
 
 	/** Returns whether the given ID is valid or not */
@@ -220,7 +219,7 @@ public:
 
 			FORCEINLINE ElementIDType operator*() const
 			{
-				return Iterator ? ElementIDType( Iterator.GetIndex() ) : ElementIDType::Invalid;
+				return Iterator ? ElementIDType( Iterator.GetIndex() ) : INDEX_NONE;
 			}
 
 			friend FORCEINLINE bool operator==( const TConstIterator& Lhs, const TConstIterator& Rhs )

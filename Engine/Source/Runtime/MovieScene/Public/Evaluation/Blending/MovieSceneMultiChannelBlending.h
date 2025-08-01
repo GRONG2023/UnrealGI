@@ -151,7 +151,7 @@ namespace MovieScene
 	template<typename T, typename SourceData, uint8 N>
 	void MultiChannelFromData(SourceData InSourceData, TMultiChannelValue<T, N>& OutChannelData)
 	{
-		static_assert(TIsSame<T, void>::Value, "MultiChannelFromData must be implemented to blend SourceData with multi-channel data.");
+		static_assert(std::is_same_v<T, void>, "MultiChannelFromData must be implemented to blend SourceData with multi-channel data.");
 	}
 
 	/**
@@ -161,7 +161,7 @@ namespace MovieScene
 	template<typename T, typename SourceData, uint8 N>
 	void ResolveChannelsToData(const TMultiChannelValue<T, N>& OutChannelData, SourceData& OutData)
 	{
-		static_assert(TIsSame<T, void>::Value, "ResolveChannelsToData must be implemented to blend SourceData with multi-channel data.");
+		static_assert(std::is_same_v<T, void>, "ResolveChannelsToData must be implemented to blend SourceData with multi-channel data.");
 	}
 
 	/** Working data type used to blend multi-channel values */
@@ -307,7 +307,10 @@ namespace MovieScene
 	}
 	inline void MultiChannelFromData(const FEulerTransform& In, 	TMultiChannelValue<float, 9>& Out)
 	{
-		Out = { In.Location.X, In.Location.Y, In.Location.Z, In.Rotation.Roll, In.Rotation.Pitch, In.Rotation.Yaw, In.Scale.X, In.Scale.Y, In.Scale.Z };
+		FVector Translation = In.Location;
+		FVector Scale = In.Scale;
+		FRotator3d Rotation = FRotator3d(In.Rotation);
+		Out = { Translation.X, Translation.Y, Translation.Z, Rotation.Roll, Rotation.Pitch, Rotation.Yaw, Scale.X, Scale.Y, Scale.Z };
 	}
 	inline void MultiChannelFromData(const FLinearColor& In, TMultiChannelValue<float, 4>& Out)
 	{

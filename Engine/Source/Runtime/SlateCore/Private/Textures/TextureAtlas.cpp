@@ -1,15 +1,19 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Textures/TextureAtlas.h"
+#include "Experimental/ConcurrentLinearAllocator.h"
 #include "Stats/Stats.h"
 #include "Textures/SlateShaderResource.h"
 #include "Textures/SlateTextureData.h"
-#include "HAL/LowLevelMemTracker.h"
+#include "Trace/SlateMemoryTags.h"
 #include "Misc/MemStack.h"
+
+#include <limits>
 
 DEFINE_STAT(STAT_SlateTextureGPUMemory);
 DEFINE_STAT(STAT_SlateTextureDataMemory);
 DECLARE_MEMORY_STAT(TEXT("Texture Atlas Memory (CPU)"), STAT_SlateTextureAtlasMemory, STATGROUP_SlateMemory);
+
 
 ESlateTextureAtlasThreadId GetCurrentSlateTextureAtlasThreadId()
 {
@@ -28,6 +32,21 @@ ESlateTextureAtlasThreadId GetCurrentSlateTextureAtlasThreadId()
 	return ESlateTextureAtlasThreadId::Unknown;
 }
 
+uint32 GetSlateFontAtlasContentBytesPerPixel(ESlateFontAtlasContentType InContentType)
+{
+	switch (InContentType)
+	{
+		case ESlateFontAtlasContentType::Alpha:
+			return 1;
+		case ESlateFontAtlasContentType::Color:
+		case ESlateFontAtlasContentType::Msdf:
+			return 4;
+		default:
+			checkNoEntry();
+			return 0;
+	}
+}
+
 /* FSlateTextureAtlas helper class
  *****************************************************************************/
 
@@ -42,40 +61,32 @@ FSlateTextureAtlas::~FSlateTextureAtlas()
 
 void FSlateTextureAtlas::EmptyAtlasData()
 {
-	FMemMark Mark(FMemStack::Get());
-
 	// Remove all nodes
-	TArray<FAtlasedTextureSlot*, TMemStackAllocator<>> DeleteSlots;
+	for (FAtlasedTextureSlot* AtlasEmptySlots : AtlasEmptySlotsMap)
+	{
+		for (FAtlasedTextureSlot::TIterator SlotIt(AtlasEmptySlots); SlotIt;)
+		{
+			FAtlasedTextureSlot& CurSlot = *SlotIt;
+			SlotIt.Next();
+			delete &CurSlot;
+		}
+	}
+	AtlasEmptySlotsMap.Reset();
 
-	for (FAtlasedTextureSlot::TIterator SlotIt(AtlasUsedSlots); SlotIt; SlotIt.Next())
+	for (FAtlasedTextureSlot::TIterator SlotIt(AtlasUsedSlots); SlotIt;)
 	{
 		FAtlasedTextureSlot& CurSlot = *SlotIt;
-		DeleteSlots.Add(&CurSlot);
+		SlotIt.Next();
+		delete &CurSlot;
 	}
+	AtlasUsedSlots = nullptr;
 
-	for (FAtlasedTextureSlot::TIterator SlotIt(AtlasEmptySlots); SlotIt; SlotIt.Next())
-	{
-		FAtlasedTextureSlot& CurSlot = *SlotIt;
-		DeleteSlots.Add(&CurSlot);
-	}
-
-	AtlasUsedSlots = NULL;
-	AtlasEmptySlots = NULL;
-
-	for (FAtlasedTextureSlot* CurSlot : DeleteSlots)
-	{
-		delete CurSlot;
-	}
-
-	DeleteSlots.Empty();
-
-
-	STAT(uint32 MemoryBefore = AtlasData.GetAllocatedSize());
+	STAT(SIZE_T MemoryBefore = AtlasData.GetAllocatedSize());
 
 	// Clear all raw data
 	AtlasData.Empty();
 
-	STAT(uint32 MemoryAfter = AtlasData.GetAllocatedSize());
+	STAT(SIZE_T MemoryAfter = AtlasData.GetAllocatedSize());
 	DEC_MEMORY_STAT_BY(STAT_SlateTextureAtlasMemory, MemoryBefore-MemoryAfter);
 }
 
@@ -112,13 +123,13 @@ void FSlateTextureAtlas::MarkTextureDirty()
 
 void FSlateTextureAtlas::InitAtlasData()
 {
-	LLM_SCOPE(ELLMTag::UI);
+	LLM_SCOPE_BYTAG(UI_Texture);
 
-	check(AtlasEmptySlots == NULL && AtlasData.Num() == 0);
+	check(AtlasEmptySlotsMap.IsEmpty() && AtlasData.Num() == 0);
 
-	FAtlasedTextureSlot* RootSlot = new FAtlasedTextureSlot(0, 0, AtlasWidth, AtlasHeight, GetPaddingAmount());
-
-	RootSlot->LinkHead(AtlasEmptySlots);
+	const int32 MapSlotCount = GetFreeSlotSearchIndex(AtlasWidth, AtlasHeight) + 1;
+	AtlasEmptySlotsMap.SetNumZeroed(MapSlotCount);
+	AddFreeSlot(0, 0, AtlasWidth, AtlasHeight);
 
 	AtlasData.Reserve(AtlasWidth * AtlasHeight * BytesPerPixel);
 	AtlasData.AddZeroed(AtlasWidth * AtlasHeight * BytesPerPixel);
@@ -253,13 +264,15 @@ const FAtlasedTextureSlot* FSlateTextureAtlas::GetSlotAtPosition(FIntPoint InPos
 	{
 		FAtlasedTextureSlot& CurSlot = *SlotIt;
 
-		FSlateRect CurSlotRect(FVector2D(CurSlot.X, CurSlot.Y), FVector2D(CurSlot.X + CurSlot.Width, CurSlot.Y + CurSlot.Height));
-
-		if (CurSlotRect.ContainsPoint(InPosition))
+		checkSlow(CurSlot.X <= (uint32)std::numeric_limits<int32>::max());
+		checkSlow(CurSlot.Y <= (uint32)std::numeric_limits<int32>::max());
+		checkSlow(CurSlot.X + CurSlot.Width <= (uint32)std::numeric_limits<int32>::max());
+		checkSlow(CurSlot.Y + CurSlot.Height <= (uint32)std::numeric_limits<int32>::max());
+		FIntRect CurSlotRect(FIntPoint((int32)CurSlot.X, (int32)CurSlot.Y), FIntPoint((int32)(CurSlot.X + CurSlot.Width), (int32)(CurSlot.Y + CurSlot.Height)));
+		if (CurSlotRect.Contains(InPosition))
 		{
 			return &CurSlot;
 		}
-
 	}
 
 	return nullptr;
@@ -268,95 +281,157 @@ const FAtlasedTextureSlot* FSlateTextureAtlas::GetSlotAtPosition(FIntPoint InPos
 
 const FAtlasedTextureSlot* FSlateTextureAtlas::FindSlotForTexture(uint32 InWidth, uint32 InHeight)
 {
-	FAtlasedTextureSlot* ReturnVal = NULL;
-
 	// Account for padding on both sides
-	const uint32 Padding = GetPaddingAmount();
+	const uint8 Padding = GetPaddingAmount();
 	const uint32 TotalPadding = Padding * 2;
 	const uint32 PaddedWidth = InWidth + TotalPadding;
 	const uint32 PaddedHeight = InHeight + TotalPadding;
-
-	// Previously, slots were stored as a binary tree - this has been replaced with a linked-list of slots on the edge of the tree
-	// (slots on the edge of the tree represent empty slots); this iterates empty slots in same order as a binary depth-first-search,
-	// except much faster.
-	for (FAtlasedTextureSlot::TIterator SlotIt(AtlasEmptySlots); SlotIt; SlotIt++)
+	const int32 StartSearchIndex = GetFreeSlotSearchIndex(PaddedWidth, PaddedHeight);
+	for (int32 SlotsIndex = StartSearchIndex; SlotsIndex < AtlasEmptySlotsMap.Num(); ++SlotsIndex)
 	{
-		FAtlasedTextureSlot& CurSlot = *SlotIt;
-
-		if (PaddedWidth <= CurSlot.Width && PaddedHeight <= CurSlot.Height)
+		FAtlasedTextureSlot* const AtlasEmptySlots = AtlasEmptySlotsMap[SlotsIndex];
+		for (FAtlasedTextureSlot::TIterator SlotIt(AtlasEmptySlots); SlotIt; SlotIt++)
 		{
-			ReturnVal = &CurSlot;
-			break;
+			FAtlasedTextureSlot& CurSlot = *SlotIt;
+			if (PaddedWidth <= CurSlot.Width && PaddedHeight <= CurSlot.Height)
+			{
+				// The width and height of the new child node(s)
+				const uint32 RemainingWidth = CurSlot.Width - PaddedWidth;
+				const uint32 RemainingHeight = CurSlot.Height - PaddedHeight;
+
+				// New slots must have a minimum width/height, to avoid excessive slots i.e. excessive memory usage and iteration.
+				// No glyphs seem to use slots this small, and cutting these slots out improves performance/memory-usage a fair bit
+				const uint32 MinSlotDim = 2;
+
+				// Split the remaining area around this slot into two children.
+				if (RemainingHeight >= MinSlotDim || RemainingWidth >= MinSlotDim)
+				{
+					if (RemainingHeight <= RemainingWidth)
+					{
+						// Split vertically
+						// - - - - - - - - -
+						// |       |       |
+						// |  Slot |       |
+						// |       |       |
+						// | - - - | Right |
+						// |       |       |
+						// |  Left |       |
+						// |       |       |
+						// - - - - - - - - -
+						AddFreeSlot(CurSlot.X + PaddedWidth, CurSlot.Y, RemainingWidth, CurSlot.Height);
+						if (RemainingHeight >= MinSlotDim)
+						{
+							AddFreeSlot(CurSlot.X, CurSlot.Y + PaddedHeight, PaddedWidth, RemainingHeight);
+						}
+					}
+					else
+					{
+						// Split horizontally
+						// - - - - - - - - -
+						// |       |       |
+						// |  Slot | Left  |
+						// |       |       |
+						// | - - - - - - - |
+						// |               |
+						// |     Right     |
+						// |               |
+						// - - - - - - - - -
+						AddFreeSlot(CurSlot.X, CurSlot.Y + PaddedHeight, CurSlot.Width, RemainingHeight);
+						if (RemainingWidth >= MinSlotDim)
+						{
+							AddFreeSlot(CurSlot.X + PaddedWidth, CurSlot.Y, RemainingWidth, PaddedHeight);
+						}
+					}
+				}
+
+				// Shrink and moved to used slot list
+				CurSlot.Width = PaddedWidth;
+				CurSlot.Height = PaddedHeight;
+				CurSlot.Unlink();
+				CurSlot.LinkHead(AtlasUsedSlots);
+				return &CurSlot;
+			}
 		}
 	}
 
+	return nullptr;
+}
 
-	if (ReturnVal != NULL)
+int32 FSlateTextureAtlas::GetFreeSlotSearchIndex(uint32 InWidth, uint32 InHeight)
+{
+	// Currently only bucketing by width, but leaving this open to be extended
+	return FMath::CeilLogTwo(InWidth);
+}
+
+void FSlateTextureAtlas::AddFreeSlot(uint32 InX, uint32 InY, uint32 InWidth, uint32 InHeight)
+{
+	FAtlasedTextureSlot* NewSlot = new FAtlasedTextureSlot(InX, InY, InWidth, InHeight, GetPaddingAmount());
+	const uint32 SlotIndex = GetFreeSlotSearchIndex(InWidth, InHeight);
+	NewSlot->LinkHead(AtlasEmptySlotsMap[SlotIndex]);
+} //-V773
+
+FSlateFlushableAtlasCache::FSlateFlushableAtlasCache(const FAtlasFlushParams* InFlushParams)
+	: FlushParams(InFlushParams)
+{
+	check(FlushParams);
+
+	CurrentMaxGrayscaleAtlasPagesBeforeFlushRequest = FlushParams->InitialMaxAtlasPagesBeforeFlushRequest;
+	CurrentMaxColorAtlasPagesBeforeFlushRequest = FlushParams->InitialMaxAtlasPagesBeforeFlushRequest;
+	CurrentMaxMsdfAtlasPagesBeforeFlushRequest = FlushParams->InitialMaxAtlasPagesBeforeFlushRequest;
+	CurrentMaxNonAtlasedTexturesBeforeFlushRequest = FlushParams->InitialMaxNonAtlasPagesBeforeFlushRequest;
+}
+
+void FSlateFlushableAtlasCache::ResetFlushCounters()
+{
+	CurrentMaxGrayscaleAtlasPagesBeforeFlushRequest = FlushParams->InitialMaxAtlasPagesBeforeFlushRequest;
+	CurrentMaxColorAtlasPagesBeforeFlushRequest = FlushParams->InitialMaxAtlasPagesBeforeFlushRequest;
+	CurrentMaxMsdfAtlasPagesBeforeFlushRequest = FlushParams->InitialMaxAtlasPagesBeforeFlushRequest;
+	CurrentMaxNonAtlasedTexturesBeforeFlushRequest = FlushParams->InitialMaxNonAtlasPagesBeforeFlushRequest;
+	FrameCounterLastFlushRequest = GFrameCounter;
+}
+
+void FSlateFlushableAtlasCache::UpdateFlushCounters(int32 NumGrayscale, int32 NumColor, int32 NumMsdf, int32 NumNonAtlased)
+{
+	bool bFlushRequested = false;
+	bFlushRequested |= UpdateInternal(NumGrayscale, CurrentMaxGrayscaleAtlasPagesBeforeFlushRequest, FlushParams->InitialMaxAtlasPagesBeforeFlushRequest, FlushParams->GrowAtlasFrameWindow);
+	bFlushRequested |= UpdateInternal(NumColor, CurrentMaxColorAtlasPagesBeforeFlushRequest, FlushParams->InitialMaxAtlasPagesBeforeFlushRequest, FlushParams->GrowAtlasFrameWindow);
+	bFlushRequested |= UpdateInternal(NumMsdf, CurrentMaxMsdfAtlasPagesBeforeFlushRequest, FlushParams->InitialMaxAtlasPagesBeforeFlushRequest, FlushParams->GrowAtlasFrameWindow);
+	bFlushRequested |= UpdateInternal(NumNonAtlased, CurrentMaxNonAtlasedTexturesBeforeFlushRequest, FlushParams->InitialMaxNonAtlasPagesBeforeFlushRequest, FlushParams->GrowNonAtlasFrameWindow);
+
+	if (bFlushRequested)
 	{
-		// The width and height of the new child node
-		const uint32 RemainingWidth =  FMath::Max<int32>(0, ReturnVal->Width - PaddedWidth);
-		const uint32 RemainingHeight = FMath::Max<int32>(0, ReturnVal->Height - PaddedHeight);
+		ResetFlushCounters();
+	}
+}
 
-		// New slots must have a minimum width/height, to avoid excessive slots i.e. excessive memory usage and iteration.
-		// No glyphs seem to use slots this small, and cutting these slots out improves performance/memory-usage a fair bit
-		const uint32 MinSlotDim = 2;
+bool FSlateFlushableAtlasCache::UpdateInternal(int32 CurrentNum, int32& MaxNum, int32 InitialMax, int32 FrameWindowNum)
+{
+	const uint64 LastFlushRequestFrameDelta = GFrameCounter - FrameCounterLastFlushRequest;
 
-		// Split the remaining area around this slot into two children.
-		if (RemainingHeight >= MinSlotDim || RemainingWidth >= MinSlotDim)
+	if (CurrentNum > MaxNum)
+	{
+		// The InitialMaxNonAtlasedTexturesBeforeFlushRequest may have changed since last flush,
+		// so double check that we're below the current max or initial, if we're under it,
+		// update the current to the initial.
+		if (CurrentNum <= InitialMax)
 		{
-			FAtlasedTextureSlot* LeftSlot = NULL;
-			FAtlasedTextureSlot* RightSlot = NULL;
-
-			if (RemainingHeight <= RemainingWidth)
-			{
-				// Split vertically
-				// - - - - - - - - -
-				// |       |       |
-				// |  Slot |       |
-				// |       |       |
-				// | - - - | Right |
-				// |       |       |
-				// |  Left |       |
-				// |       |       |
-				// - - - - - - - - -
-				LeftSlot = new FAtlasedTextureSlot(ReturnVal->X, ReturnVal->Y + PaddedHeight, PaddedWidth, RemainingHeight, Padding);
-				RightSlot = new FAtlasedTextureSlot(ReturnVal->X + PaddedWidth, ReturnVal->Y, RemainingWidth, ReturnVal->Height, Padding);
-			}
-			else
-			{
-				// Split horizontally
-				// - - - - - - - - -
-				// |       |       |
-				// |  Slot | Left  |
-				// |       |       |
-				// | - - - - - - - |
-				// |               |
-				// |     Right     |
-				// |               |
-				// - - - - - - - - -
-				LeftSlot = new FAtlasedTextureSlot(ReturnVal->X + PaddedWidth, ReturnVal->Y, RemainingWidth, PaddedHeight, Padding);
-				RightSlot = new FAtlasedTextureSlot(ReturnVal->X, ReturnVal->Y + PaddedHeight, ReturnVal->Width, RemainingHeight, Padding);
-			}
-
-			// Replace the old slot within AtlasEmptySlots, with the new Left and Right slot, then add the old slot to AtlasUsedSlots
-			LeftSlot->LinkReplace(ReturnVal);
-			RightSlot->LinkAfter(LeftSlot);
-
-			ReturnVal->LinkHead(AtlasUsedSlots);
+			MaxNum = InitialMax;
+		}
+		// If we grew back up to this number of non-atlased textures within the same or next frame of the previous flush request, then we likely legitimately have 
+		// a lot of data cached. We should update CurrentMaxNonAtlasedTexturesBeforeFlushRequest to give us a bit more flexibility before the next flush request
+		else if (LastFlushRequestFrameDelta <= FrameWindowNum)
+		{
+			MaxNum = CurrentNum;
+			UE_LOG(LogSlate, Warning, TEXT("Setting the threshold to trigger a flush to %d non-atlased textures as there is a lot of font data being cached."), CurrentNum);
 		}
 		else
 		{
-			// Remove the old slot from AtlasEmptySlots, into AtlasUsedSlots
-			ReturnVal->Unlink();
-			ReturnVal->LinkHead(AtlasUsedSlots);
+			// We've grown beyond our current stable limit - try and request a flush
+			RequestFlushCache(FString::Printf(TEXT("Large atlases out of space; %d/%d Textures; frames since last flush: %llu"), CurrentNum, MaxNum, LastFlushRequestFrameDelta));
+			
+			return true;
 		}
-
-
-		// Shrink the slot to the remaining area.
-		ReturnVal->Width = PaddedWidth;
-		ReturnVal->Height = PaddedHeight;
 	}
 
-	return ReturnVal;
+	return false;
 }
-

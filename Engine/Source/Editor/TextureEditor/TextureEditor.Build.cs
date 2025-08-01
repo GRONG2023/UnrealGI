@@ -13,39 +13,30 @@ public class TextureEditor : ModuleRules
 			}
 		);
 
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				"Editor/TextureEditor/Private",
-				"Editor/TextureEditor/Private/Menus",
-				"Editor/TextureEditor/Private/Models",
-				"Editor/TextureEditor/Private/Widgets",
-			}
-		);
-
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
 				"Settings",
-				"UnrealEd",
-                "PropertyEditor"
 			}
 		);
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
-                "AppFramework",
 				"Core",
 				"CoreUObject",
+                "ImageCore",
                 "InputCore",
 				"Engine",
 				"RenderCore",
 				"RHI",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
+				"EditorFramework",
 				"UnrealEd",
                 "PropertyEditor",
-				"MediaUtils",
-				"MediaAssets"
+				"EditorWidgets",
+				"MediaAssets",
+				"DerivedDataCache",
+				"DeveloperToolSettings"
 			}
 		);
 	}

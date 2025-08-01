@@ -16,11 +16,15 @@ class UHapticFeedbackEffect_SoundWave : public UHapticFeedbackEffect_Base
 	GENERATED_UCLASS_BODY()
 
 	UPROPERTY(EditAnywhere, Category = "HapticFeedbackEffect_SoundWave")
-	USoundWave *SoundWave;
+	TObjectPtr<USoundWave> SoundWave;
+
+	/** If true on a vr controller the left and right stereo channels would be applied to the left and right controller, respectively. */
+	UPROPERTY(EditAnywhere, Category = "HapticFeedbackEffect_SoundWave")
+	bool bUseStereo;
 
 	~UHapticFeedbackEffect_SoundWave();
 
-	void Initialize() override;
+	void Initialize(FHapticFeedbackBuffer& HapticBuffer) override;
 
 	void GetValues(const float EvalTime, FHapticFeedbackValues& Values) override;
 
@@ -28,7 +32,9 @@ class UHapticFeedbackEffect_SoundWave : public UHapticFeedbackEffect_Base
 
 private:
 	void PrepareSoundWaveBuffer();
+	void PrepareSoundWaveMonoBuffer(uint8* PCMData, int32 RawPCMDataSize);
+	void PrepareSoundWaveStereoBuffer(uint8* PCMData, int32 RawPCMDataSize);
 	bool bPrepared;
 
-	FHapticFeedbackBuffer HapticBuffer;
+	TArray<uint8> RawData;
 };

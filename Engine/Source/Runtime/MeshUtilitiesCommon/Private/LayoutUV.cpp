@@ -16,9 +16,9 @@ DEFINE_LOG_CATEGORY_STATIC(LogLayoutUV, Log, All);
 
 #define CHART_JOINING	1
 
-#define NEW_UVS_ARE_SAME THRESH_POINTS_ARE_SAME
-#define LEGACY_UVS_ARE_SAME (1.0f / 1024.0f)
-#define UVLAYOUT_THRESH_UVS_ARE_SAME (GetUVEqualityThreshold())
+#define NEW_UVS_ARE_SAME				UE_THRESH_POINTS_ARE_SAME
+#define LEGACY_UVS_ARE_SAME				UE_THRESH_UVS_ARE_SAME
+#define UVLAYOUT_THRESH_UVS_ARE_SAME	(GetUVEqualityThreshold())
 
 TAtomic<uint64> FLayoutUV::FindBestPackingCount(0);
 TAtomic<uint64> FLayoutUV::FindBestPackingCycles(0);
@@ -36,7 +36,7 @@ struct FLayoutUV::FChartFinder
 {
 	FChartFinder(IMeshView& InMeshView, ELightmapUVVersion InLayoutVersion);
 
-	int32 FindCharts( const FOverlappingCorners& OverlappingCorners, TArray< FVector2D >& TexCoords, TArray< uint32 >& SortedTris, TArray< FMeshChart >& Charts );
+	int32 FindCharts( const FOverlappingCorners& OverlappingCorners, TArray< FVector2f >& TexCoords, TArray< uint32 >& SortedTris, TArray< FMeshChart >& Charts );
 
 private:
 	bool PositionsMatch( uint32 a, uint32 b ) const;
@@ -60,13 +60,13 @@ struct FLayoutUV::FChartPacker
 {
 	FChartPacker(IMeshView& InMeshView, ELightmapUVVersion InLayoutVersion, uint32 TextureResolution);
 
-	bool FindBestPacking(const TArray< FVector2D >& TexCoords, const TArray< uint32 >& SortedTris, TArray< FMeshChart >& AllCharts);
+	bool FindBestPacking(const TArray< FVector2f >& TexCoords, const TArray< uint32 >& SortedTris, TArray< FMeshChart >& AllCharts);
 
 private:
 	void ScaleCharts( TArray< FMeshChart >& Charts, float UVScale );
-	bool PackCharts( TArray< FMeshChart >& Charts, float UVScale, const TArray< FVector2D >& TexCoords, const TArray< uint32 >& SortedTris, float& OutEfficiency, TAtomic<bool>& bAbort, bool bTrace);
+	bool PackCharts( TArray< FMeshChart >& Charts, float UVScale, const TArray< FVector2f >& TexCoords, const TArray< uint32 >& SortedTris, float& OutEfficiency, TAtomic<bool>& bAbort, bool bTrace);
 	void OrientChart( FMeshChart& Chart, int32 Orientation );
-	void RasterizeChart( const FMeshChart& Chart, const TArray< FVector2D >& TexCoords, const TArray< uint32 >& SortedTris, uint32 RectW, uint32 RectH, FAllocator2D& OutChartRaster );
+	void RasterizeChart( const FMeshChart& Chart, const TArray< FVector2f >& TexCoords, const TArray< uint32 >& SortedTris, uint32 RectW, uint32 RectH, FAllocator2D& OutChartRaster );
 
 private:
 	IMeshView& MeshView;
@@ -96,7 +96,7 @@ FLayoutUV::FChartFinder::FChartFinder(IMeshView& InMeshView, ELightmapUVVersion 
 	, NextMeshChartId( 0 )
 {}
 
-int32 FLayoutUV::FChartFinder::FindCharts( const FOverlappingCorners& OverlappingCorners, TArray< FVector2D >& TexCoords, TArray< uint32 >& SortedTris, TArray< FMeshChart >& Charts )
+int32 FLayoutUV::FChartFinder::FindCharts( const FOverlappingCorners& OverlappingCorners, TArray< FVector2f >& TexCoords, TArray< uint32 >& SortedTris, TArray< FMeshChart >& Charts )
 {
 	double Begin = FPlatformTime::Seconds();
 
@@ -152,8 +152,8 @@ int32 FLayoutUV::FChartFinder::FindCharts( const FOverlappingCorners& Overlappin
 						else if( NormalsMatch( i, j ) && NormalsMatch( ie, je ) )
 						{
 							// Chart edge
-							FVector2D EdgeUVi = TexCoords[ie] - TexCoords[i];
-							FVector2D EdgeUVj = TexCoords[je] - TexCoords[j];
+							FVector2f EdgeUVi = TexCoords[ie] - TexCoords[i];
+							FVector2f EdgeUVj = TexCoords[je] - TexCoords[j];
 							
 							// Would these edges match if the charts were translated
 							bool bTranslatedUVMatch = ( EdgeUVi - EdgeUVj ).IsNearlyZero(UVLAYOUT_THRESH_UVS_ARE_SAME);
@@ -235,10 +235,12 @@ int32 FLayoutUV::FChartFinder::FindCharts( const FOverlappingCorners& Overlappin
 		FMeshChart& Chart = Charts[i];
 		Chart.Id = NextMeshChartId++;
 
-		Chart.MinUV = FVector2D( FLT_MAX, FLT_MAX );
-		Chart.MaxUV = FVector2D( -FLT_MAX, -FLT_MAX );
+		Chart.MinUV = FVector2f( FLT_MAX, FLT_MAX );
+		Chart.MaxUV = FVector2f( -FLT_MAX, -FLT_MAX );
 		Chart.UVArea = 0.0f;
-		Chart.WorldScale = FVector2D::ZeroVector;
+		Chart.WorldScale = FVector2f::ZeroVector;
+		Chart.UVLengthSum = 0.0f;
+		Chart.WorldLengthSum = 0.0f;
 		FMemory::Memset( Chart.Join, 0xff );
 
 		Chart.FirstTri = Tri;
@@ -249,8 +251,8 @@ int32 FLayoutUV::FChartFinder::FindCharts( const FOverlappingCorners& Overlappin
 		for( ; Tri < NumTris && DisjointSet[ SortedTris[ Tri ] ] == ChartID; Tri++ )
 		{
 			// Calculate chart bounds
-			FVector		Positions[3];
-			FVector2D	UVs[3];
+			FVector3f	Positions[3];
+			FVector2f	UVs[3];
 			for( int k = 0; k < 3; k++ )
 			{
 				uint32 Index = 3 * SortedTris[ Tri ] + k;
@@ -264,38 +266,62 @@ int32 FLayoutUV::FChartFinder::FindCharts( const FOverlappingCorners& Overlappin
 				Chart.MaxUV.Y = FMath::Max( Chart.MaxUV.Y, UVs[k].Y );
 			}
 
-			FVector Edge1 = Positions[1] - Positions[0];
-			FVector Edge2 = Positions[2] - Positions[0];
-			float Area = 0.5f * ( Edge1 ^ Edge2 ).Size();
+			FVector3f Edge1 = Positions[1] - Positions[0];
+			FVector3f Edge2 = Positions[2] - Positions[0];
+			FVector3f Edge3 = Positions[2] - Positions[1];
 
-			FVector2D EdgeUV1 = UVs[1] - UVs[0];
-			FVector2D EdgeUV2 = UVs[2] - UVs[0];
-			float UVArea = 0.5f * FMath::Abs( EdgeUV1.X * EdgeUV2.Y - EdgeUV1.Y * EdgeUV2.X );
+			FVector2f EdgeUV1 = UVs[1] - UVs[0];
+			FVector2f EdgeUV2 = UVs[2] - UVs[0];
+			FVector2f EdgeUV3 = UVs[2] - UVs[1];
 
-			FVector2D UVLength;
-			UVLength.X = ( EdgeUV2.Y * Edge1 - EdgeUV1.Y * Edge2 ).Size();
-			UVLength.Y = (-EdgeUV2.X * Edge1 + EdgeUV1.X * Edge2 ).Size();
-			
-			Chart.WorldScale += UVLength;
+			float UVArea = 0.5f * FMath::Abs(EdgeUV1.X * EdgeUV2.Y - EdgeUV1.Y * EdgeUV2.X);
 			Chart.UVArea += UVArea;
+
+			if (LayoutVersion >= ELightmapUVVersion::ScaleByEdgesLength)
+			{
+				float WorldLength = Edge1.Length() + Edge2.Length() + Edge3.Length();
+				float UVLength = EdgeUV1.Length() + EdgeUV2.Length() + EdgeUV3.Length();
+
+				Chart.UVLengthSum += UVLength;
+				Chart.WorldLengthSum += WorldLength;
+			}
+			else
+			{
+				FVector2f UVLength;
+				UVLength.X = (EdgeUV2.Y * Edge1 - EdgeUV1.Y * Edge2).Size();
+				UVLength.Y = (-EdgeUV2.X * Edge1 + EdgeUV1.X * Edge2).Size();
+
+				Chart.WorldScale += UVLength;
+			}
 		}
-		
+
 		Chart.LastTri = Tri;
 
 #if !CHART_JOINING
-		if (LayoutVersion >= ELightmapUVVersion::SmallChartPacking)
+		if (LayoutVersion >= ELightmapUVVersion::ScaleByEdgesLength)
 		{
-			Chart.WorldScale /= FMath::Max(Chart.UVArea, 1e-8f);
+			if (Chart.UVLengthSum < UE_SMALL_NUMBER)
+			{
+				Chart.WorldScale = FVector2f(1.0f);
+			}
+			else
+			{
+				Chart.WorldScale = FVector2f(Chart.WorldLengthSum / Chart.UVLengthSum);
+			}
+		}
+		else if (LayoutVersion >= ELightmapUVVersion::SmallChartPacking)
+		{
+			Chart.WorldScale /= FMath::Max(Chart.UVArea, UE_SMALL_NUMBER);
 		}
 		else
 		{
-			if (Chart.UVArea > 1e-4f)
+			if (Chart.UVArea > UE_KINDA_SMALL_NUMBER)
 			{
 				Chart.WorldScale /= Chart.UVArea;
 			}
 			else
 			{
-				Chart.WorldScale = FVector2D::ZeroVector;
+				Chart.WorldScale = FVector2f::ZeroVector;
 			}
 		}		
 #endif
@@ -334,21 +360,20 @@ int32 FLayoutUV::FChartFinder::FindCharts( const FOverlappingCorners& Overlappin
 					int32 ChartI = i;
 					int32 ChartJ = DisjointSetToChartMap[ DisjointSet[ TriJ ] ];
 
-					FVector2D UV0i = TexCoords[ V0i ];
-					FVector2D UV1i = TexCoords[ V1i ];
-					FVector2D UV0j = TexCoords[ V0j ];
-					FVector2D UV1j = TexCoords[ V1j ];
+					FVector2f UV0i = TexCoords[ V0i ];
+					FVector2f UV1i = TexCoords[ V1i ];
+					FVector2f UV0j = TexCoords[ V0j ];
+					FVector2f UV1j = TexCoords[ V1j ];
 
-					FVector2D EdgeUVi = UV1i - UV0i;
-					FVector2D EdgeUVj = UV1j - UV0j;
+					FVector2f EdgeUVi = UV1i - UV0i;
+					FVector2f EdgeUVj = UV1j - UV0j;
 
 					bool bMirrored = TriangleUVArea( TriI ) * TriangleUVArea( TriJ ) < 0.0f;
 					
-					FVector2D EdgeOffset0 = UV0i - UV1j;
-					FVector2D EdgeOffset1 = UV1i - UV0j;
-					checkSlow( ( EdgeOffset0 - EdgeOffset1 ).IsNearlyZero(UVLAYOUT_THRESH_UVS_ARE_SAME) );
+					FVector2f EdgeOffset0 = UV0i - UV1j;
+					FVector2f EdgeOffset1 = UV1i - UV0j;
 
-					FVector2D Translation = EdgeOffset0;
+					FVector2f Translation = EdgeOffset0;
 
 					FMeshChart& ChartA = Charts[ ChartI ];
 					FMeshChart& ChartB = Charts[ ChartJ ];
@@ -382,18 +407,18 @@ int32 FLayoutUV::FChartFinder::FindCharts( const FOverlappingCorners& Overlappin
 							continue;
 						}
 
-						FVector2D CenterA = 0.5f * ( ChartA.MinUV + ChartA.MaxUV );
-						FVector2D CenterB = 0.5f * ( ChartB.MinUV + ChartB.MaxUV );
+						FVector2f CenterA = 0.5f * ( ChartA.MinUV + ChartA.MaxUV );
+						FVector2f CenterB = 0.5f * ( ChartB.MinUV + ChartB.MaxUV );
 
-						FVector2D ExtentA = 0.5f * ( ChartA.MaxUV - ChartA.MinUV );
-						FVector2D ExtentB = 0.5f * ( ChartB.MaxUV - ChartB.MinUV );
+						FVector2f ExtentA = 0.5f * ( ChartA.MaxUV - ChartA.MinUV );
+						FVector2f ExtentB = 0.5f * ( ChartB.MaxUV - ChartB.MinUV );
 
 						// FIXME mirrored
 						CenterB += Translation;
 
-						FVector2D CenterDiff = CenterA - CenterB;
-						FVector2D ExtentDiff = ExtentA - ExtentB;
-						FVector2D Separation = ExtentA + ExtentB + CenterDiff * ( Sign ? 1.0f : -1.0f );
+						FVector2f CenterDiff = CenterA - CenterB;
+						FVector2f ExtentDiff = ExtentA - ExtentB;
+						FVector2f Separation = ExtentA + ExtentB + CenterDiff * ( Sign ? 1.0f : -1.0f );
 
 						bool bCenterMatch = FMath::Abs( CenterDiff[ Axis ^ 1 ] ) < UVLAYOUT_THRESH_UVS_ARE_SAME;
 						bool bExtentMatch = FMath::Abs( ExtentDiff[ Axis ^ 1 ] ) < UVLAYOUT_THRESH_UVS_ARE_SAME;
@@ -542,7 +567,7 @@ int32 FLayoutUV::FChartFinder::FindCharts( const FOverlappingCorners& Overlappin
 
 					check( ChartB.FirstTri != ChartB.LastTri );
 
-					FVector2D Translation = ChartA.MinUV - ChartB.MinUV;
+					FVector2f Translation = ChartA.MinUV - ChartB.MinUV;
 					Translation[ Axis ] += ChartA.MaxUV[ Axis ] - ChartA.MinUV[ Axis ];
 
 					for( uint32 Tri = ChartB.FirstTri; Tri < ChartB.LastTri; Tri++ )
@@ -562,11 +587,15 @@ int32 FLayoutUV::FChartFinder::FindCharts( const FOverlappingCorners& Overlappin
 						// Fixing joined chart MaxUV value to properly inflate non-joined axis extent
 						ChartA.MaxUV[ Axis ^ 1 ] = FMath::Max( ChartA.MaxUV[ Axis ^ 1 ], ChartA.MinUV[ Axis ^ 1 ] + ( ChartB.MaxUV[ Axis ^ 1 ] - ChartB.MinUV[ Axis ^ 1 ] ) );
 					}
+					ChartA.UVLengthSum += ChartB.UVLengthSum;
+					ChartA.WorldLengthSum += ChartB.WorldLengthSum;
 					ChartA.WorldScale += ChartB.WorldScale;
 					ChartA.UVArea += ChartB.UVArea;
 
 					ChartB.FirstTri = 0;
 					ChartB.LastTri = 0;
+					ChartB.UVLengthSum = 0.0f;
+					ChartB.WorldLengthSum = 0.0f;
 					ChartB.UVArea = 0.0f;
 
 					DisconnectChart( Charts, ChartB, Side ^ 2 );
@@ -609,19 +638,31 @@ int32 FLayoutUV::FChartFinder::FindCharts( const FOverlappingCorners& Overlappin
 	{
 		FMeshChart& Chart = Charts[i];
 
+		if (LayoutVersion >= ELightmapUVVersion::ScaleByEdgesLength)
+		{					
+			if (Chart.UVLengthSum < UE_SMALL_NUMBER)
+			{
+				Chart.WorldScale = FVector2f(1.0f);
+			}
+			else
+			{
+				Chart.WorldScale = FVector2f(Chart.WorldLengthSum / Chart.UVLengthSum);
+			}
+		}
+		else
 		if (LayoutVersion >= ELightmapUVVersion::SmallChartPacking)
 		{
-			Chart.WorldScale /= FMath::Max(Chart.UVArea, 1e-8f);
+			Chart.WorldScale /= FMath::Max(Chart.UVArea, UE_SMALL_NUMBER);
 		}
 		else
 		{
-			if (Chart.UVArea > 1e-4f)
+			if (Chart.UVArea > UE_KINDA_SMALL_NUMBER)
 			{
 				Chart.WorldScale /= Chart.UVArea;
 			}
 			else
 			{
-				Chart.WorldScale = FVector2D::ZeroVector;
+				Chart.WorldScale = FVector2f::ZeroVector;
 			}
 		}
 	}
@@ -642,7 +683,7 @@ static TAutoConsoleVariable<FString> CVarLayoutUVTracePackingForInputHash(
 	ECVF_Default);
 #endif
 
-bool FLayoutUV::FChartPacker::FindBestPacking(const TArray< FVector2D >& TexCoords, const TArray< uint32 >& SortedTris, TArray< FMeshChart >& Charts)
+bool FLayoutUV::FChartPacker::FindBestPacking(const TArray< FVector2f >& TexCoords, const TArray< uint32 >& SortedTris, TArray< FMeshChart >& Charts)
 {
 	if( (uint32)Charts.Num() > TextureResolution * TextureResolution )
 	{
@@ -667,10 +708,10 @@ bool FLayoutUV::FChartPacker::FindBestPacking(const TArray< FVector2D >& TexCoor
 	// Cleanup uninitialized values to get a stable input hash
 	for (FMeshChart& Chart : Charts)
 	{
-		Chart.PackingBias   = FVector2D::ZeroVector;
-		Chart.PackingScaleU = FVector2D::ZeroVector;
-		Chart.PackingScaleV = FVector2D::ZeroVector;
-		Chart.UVScale       = FVector2D::ZeroVector;
+		Chart.PackingBias   = FVector2f::ZeroVector;
+		Chart.PackingScaleU = FVector2f::ZeroVector;
+		Chart.PackingScaleV = FVector2f::ZeroVector;
+		Chart.UVScale       = FVector2f::ZeroVector;
 	}
 
 	FString InputHash = FMD5::HashBytes((uint8*)Charts.GetData(), Charts.Num() * Charts.GetTypeSize());
@@ -843,7 +884,7 @@ bool FLayoutUV::FChartPacker::FindBestPacking(const TArray< FVector2D >& TexCoor
 	FString OutputHash = FMD5::HashBytes((uint8*)Charts.GetData(), Charts.Num() * Charts.GetTypeSize());
 
 	// Increase verbosity level to use this for packing results validation when modifying code
-	UE_LOG(LogLayoutUV, Verbose, TEXT("FindBestPacking (Input Data MD5: %s, Output Data MD5: %s, LayoutVersion: %d, Efficiency: %0.2f %%)"), *InputHash, *OutputHash, LayoutVersion, LastEfficiency*100);
+	UE_LOG(LogLayoutUV, Verbose, TEXT("FindBestPacking (Input Data MD5: %s, Output Data MD5: %s, LayoutVersion: %d, Efficiency: %0.2f %%)"), *InputHash, *OutputHash, int(LayoutVersion), LastEfficiency*100);
 
 	static TAtomic<uint64> Count(0);
 	static TAtomic<uint64> TotalCycles(0);
@@ -896,8 +937,8 @@ void FLayoutUV::FChartPacker::ScaleCharts( TArray< FMeshChart >& Charts, float U
 		{
 			FMeshChart& Chart = Charts[ChartIndex];
 
-			FVector2D ChartSize	= Chart.MaxUV - Chart.MinUV;
-			FVector2D ChartSizeScaled = ChartSize * Chart.UVScale * UniformScale;
+			FVector2f ChartSize	= Chart.MaxUV - Chart.MinUV;
+			FVector2f ChartSizeScaled = ChartSize * Chart.UVScale * UniformScale;
 
 			const float MaxChartEdge = TextureResolution - 1.0f;
 			const float LongestChartEdge = FMath::Max( ChartSizeScaled.X, ChartSizeScaled.Y );
@@ -1005,8 +1046,8 @@ void FLayoutUV::FChartPacker::ScaleCharts( TArray< FMeshChart >& Charts, float U
 		FORCEINLINE bool operator()( const FMeshChart& A, const FMeshChart& B ) const
 		{
 			// Rect area
-			FVector2D ChartRectA = ( A.MaxUV - A.MinUV ) * A.UVScale;
-			FVector2D ChartRectB = ( B.MaxUV - B.MinUV ) * B.UVScale;
+			FVector2f ChartRectA = ( A.MaxUV - A.MinUV ) * A.UVScale;
+			FVector2f ChartRectB = ( B.MaxUV - B.MinUV ) * B.UVScale;
 			return ChartRectA.X * ChartRectA.Y > ChartRectB.X * ChartRectB.Y;
 		}
 	};
@@ -1020,7 +1061,7 @@ inline uint32 GetTypeHash(const FMD5Hash& Hash)
 	return HashAsInt32[0] ^ HashAsInt32[1] ^ HashAsInt32[2] ^ HashAsInt32[3];
 }
 
-bool FLayoutUV::FChartPacker::PackCharts(TArray< FMeshChart >& Charts, float UVScale, const TArray< FVector2D >& TexCoords, const TArray< uint32 >& SortedTris, float& OutEfficiency, TAtomic<bool>& bAbort, bool bTrace)
+bool FLayoutUV::FChartPacker::PackCharts(TArray< FMeshChart >& Charts, float UVScale, const TArray< FVector2f >& TexCoords, const TArray< uint32 >& SortedTris, float& OutEfficiency, TAtomic<bool>& bAbort, bool bTrace)
 {
 	ScaleCharts( Charts, UVScale );
 	TRACE_CPUPROFILER_EVENT_SCOPE(FChartPacker::PackCharts)
@@ -1044,7 +1085,7 @@ bool FLayoutUV::FChartPacker::PackCharts(TArray< FMeshChart >& Charts, float UVS
 	// the same texture space. This helps counteract the slowdown
 	// induced by having more parts to place in the grid and is
 	// particularly useful for foliage.
-	TMap<FMD5Hash, FVector2D> BestStartPos;
+	TMap<FMD5Hash, FVector2f> BestStartPos;
 
 	// Reduce Insights CPU tracing to once per batch
 	const int32 BatchSize = 1024;
@@ -1086,7 +1127,7 @@ bool FLayoutUV::FChartPacker::PackCharts(TArray< FMeshChart >& Charts, float UVS
 
 				OrientChart( Chart, Orientation);
 			
-				FVector2D ChartSize = Chart.MaxUV - Chart.MinUV;
+				FVector2f ChartSize = Chart.MaxUV - Chart.MinUV;
 				ChartSize = ChartSize.X * Chart.PackingScaleU + ChartSize.Y * Chart.PackingScaleV;
 
 				// Only need half pixel dilate for rects
@@ -1161,7 +1202,7 @@ bool FLayoutUV::FChartPacker::PackCharts(TArray< FMeshChart >& Charts, float UVS
 						else
 						{
 							FMD5Hash RasterMD5 = ChartRaster.GetRasterMD5();
-							FVector2D* StartPos = BestStartPos.Find(RasterMD5);
+							FVector2f* StartPos = BestStartPos.Find(RasterMD5);
 
 							if (StartPos)
 							{
@@ -1174,7 +1215,7 @@ bool FLayoutUV::FChartPacker::PackCharts(TArray< FMeshChart >& Charts, float UVS
 							if (bFound)
 							{
 								// Store only the best possible position in the hash table so we can start from there for other identical charts
-								BestStartPos.Add(RasterMD5, FVector2D(RasterRect.X, RasterRect.Y));
+								BestStartPos.Add(RasterMD5, FVector2f(RasterRect.X, RasterRect.Y));
 
 								// Since the older version stops searching at Width - Rect.W instead of using the raster size,
 								// it means a perfect rasterized square of 2,2 won't fit a 2,2 hole at the end of a row if Rect.W = 3.
@@ -1277,50 +1318,50 @@ void FLayoutUV::FChartPacker::OrientChart( FMeshChart& Chart, int32 Orientation 
 	{
 	case 0:
 		// 0 degrees
-		Chart.PackingScaleU = FVector2D( Chart.UVScale.X, 0 );
-		Chart.PackingScaleV = FVector2D( 0, Chart.UVScale.Y );
+		Chart.PackingScaleU = FVector2f( Chart.UVScale.X, 0 );
+		Chart.PackingScaleV = FVector2f( 0, Chart.UVScale.Y );
 		Chart.PackingBias = -Chart.MinUV.X * Chart.PackingScaleU - Chart.MinUV.Y * Chart.PackingScaleV + 0.5f;
 		break;
 	case 1:
 		// 0 degrees, flip x
-		Chart.PackingScaleU = FVector2D( -Chart.UVScale.X, 0 );
-		Chart.PackingScaleV = FVector2D( 0, Chart.UVScale.Y );
+		Chart.PackingScaleU = FVector2f( -Chart.UVScale.X, 0 );
+		Chart.PackingScaleV = FVector2f( 0, Chart.UVScale.Y );
 		Chart.PackingBias = -Chart.MaxUV.X * Chart.PackingScaleU - Chart.MinUV.Y * Chart.PackingScaleV + 0.5f;
 		break;
 	case 2:
 		// 90 degrees
-		Chart.PackingScaleU = FVector2D( 0, -Chart.UVScale.X );
-		Chart.PackingScaleV = FVector2D( Chart.UVScale.Y, 0 );
+		Chart.PackingScaleU = FVector2f( 0, -Chart.UVScale.X );
+		Chart.PackingScaleV = FVector2f( Chart.UVScale.Y, 0 );
 		Chart.PackingBias = -Chart.MaxUV.X * Chart.PackingScaleU - Chart.MinUV.Y * Chart.PackingScaleV + 0.5f;
 		break;
 	case 3:
 		// 90 degrees, flip x
-		Chart.PackingScaleU = FVector2D( 0, Chart.UVScale.X );
-		Chart.PackingScaleV = FVector2D( Chart.UVScale.Y, 0 );
+		Chart.PackingScaleU = FVector2f( 0, Chart.UVScale.X );
+		Chart.PackingScaleV = FVector2f( Chart.UVScale.Y, 0 );
 		Chart.PackingBias = -Chart.MinUV.X * Chart.PackingScaleU - Chart.MinUV.Y * Chart.PackingScaleV + 0.5f;
 		break;
 	case 4:
 		// 180 degrees
-		Chart.PackingScaleU = FVector2D( -Chart.UVScale.X, 0 );
-		Chart.PackingScaleV = FVector2D( 0, -Chart.UVScale.Y );
+		Chart.PackingScaleU = FVector2f( -Chart.UVScale.X, 0 );
+		Chart.PackingScaleV = FVector2f( 0, -Chart.UVScale.Y );
 		Chart.PackingBias = -Chart.MaxUV.X * Chart.PackingScaleU - Chart.MaxUV.Y * Chart.PackingScaleV + 0.5f;
 		break;
 	case 5:
 		// 180 degrees, flip x
-		Chart.PackingScaleU = FVector2D( Chart.UVScale.X, 0 );
-		Chart.PackingScaleV = FVector2D( 0, -Chart.UVScale.Y );
+		Chart.PackingScaleU = FVector2f( Chart.UVScale.X, 0 );
+		Chart.PackingScaleV = FVector2f( 0, -Chart.UVScale.Y );
 		Chart.PackingBias = -Chart.MinUV.X * Chart.PackingScaleU - Chart.MaxUV.Y * Chart.PackingScaleV + 0.5f;
 		break;
 	case 6:
 		// 270 degrees
-		Chart.PackingScaleU = FVector2D( 0, Chart.UVScale.X );
-		Chart.PackingScaleV = FVector2D( -Chart.UVScale.Y, 0 );
+		Chart.PackingScaleU = FVector2f( 0, Chart.UVScale.X );
+		Chart.PackingScaleV = FVector2f( -Chart.UVScale.Y, 0 );
 		Chart.PackingBias = -Chart.MinUV.X * Chart.PackingScaleU - Chart.MaxUV.Y * Chart.PackingScaleV + 0.5f;
 		break;
 	case 7:
 		// 270 degrees, flip x
-		Chart.PackingScaleU = FVector2D( 0, -Chart.UVScale.X );
-		Chart.PackingScaleV = FVector2D( -Chart.UVScale.Y, 0 );
+		Chart.PackingScaleU = FVector2f( 0, -Chart.UVScale.X );
+		Chart.PackingScaleV = FVector2f( -Chart.UVScale.Y, 0 );
 		Chart.PackingBias = -Chart.MaxUV.X * Chart.PackingScaleU - Chart.MaxUV.Y * Chart.PackingScaleV + 0.5f;
 		break;
 	}
@@ -1330,12 +1371,12 @@ void FLayoutUV::FChartPacker::OrientChart( FMeshChart& Chart, int32 Orientation 
 // Dilate in 28.4 fixed point. Half pixel dilation is conservative rasterization.
 // Dilation same as Minkowski sum of triangle and square.
 template< int32 Dilate >
-void RasterizeTriangle( FAllocator2D& Shader, const FVector2D Points[3], int32 ScissorWidth, int32 ScissorHeight )
+void RasterizeTriangle( FAllocator2D& Shader, const FVector2f Points[3], int32 ScissorWidth, int32 ScissorHeight )
 {
-	const FVector2D HalfPixel( 0.5f, 0.5f );
-	FVector2D p0 = Points[0] - HalfPixel;
-	FVector2D p1 = Points[1] - HalfPixel;
-	FVector2D p2 = Points[2] - HalfPixel;
+	const FVector2f HalfPixel( 0.5f, 0.5f );
+	FVector2f p0 = Points[0] - HalfPixel;
+	FVector2f p1 = Points[1] - HalfPixel;
+	FVector2f p2 = Points[2] - HalfPixel;
 
 	// Correct winding
 	float Facing = ( p0.X - p1.X ) * ( p2.Y - p0.Y ) - ( p0.Y - p1.Y ) * ( p2.X - p0.X );
@@ -1407,7 +1448,7 @@ void RasterizeTriangle( FAllocator2D& Shader, const FVector2D Points[3], int32 S
 	}
 }
 
-void FLayoutUV::FChartPacker::RasterizeChart( const FMeshChart& Chart, const TArray< FVector2D >& TexCoords, const TArray< uint32 >& SortedTris, uint32 RectW, uint32 RectH, FAllocator2D& OutChartRaster )
+void FLayoutUV::FChartPacker::RasterizeChart( const FMeshChart& Chart, const TArray< FVector2f >& TexCoords, const TArray< uint32 >& SortedTris, uint32 RectW, uint32 RectH, FAllocator2D& OutChartRaster )
 {
 	// Bilinear footprint is -1 to 1 pixels. If packed geometrically, only a half pixel dilation
 	// would be needed to guarantee all charts were at least 1 pixel away, safe for bilinear filtering.
@@ -1418,10 +1459,10 @@ void FLayoutUV::FChartPacker::RasterizeChart( const FMeshChart& Chart, const TAr
 
 	for( uint32 Tri = Chart.FirstTri; Tri < Chart.LastTri; Tri++ )
 	{
-		FVector2D Points[3];
+		FVector2f Points[3];
 		for ( int k = 0; k < 3; k++ )
 		{
-			const FVector2D& UV = TexCoords[ 3 * SortedTris[ Tri ] + k ];
+			const FVector2f& UV = TexCoords[ 3 * SortedTris[ Tri ] + k ];
 			Points[k] = UV.X * Chart.PackingScaleU + UV.Y * Chart.PackingScaleV + Chart.PackingBias;
 		}
 
@@ -1468,8 +1509,8 @@ void FLayoutUV::CommitPackedUVs()
 			for( int k = 0; k < 3; k++ )
 			{
 				uint32 Index = 3 * MeshSortedTris[ Tri ] + k;
-				const FVector2D& UV = MeshTexCoords[ Index ];
-				FVector2D TransformedUV = UV.X * Chart.PackingScaleU + UV.Y * Chart.PackingScaleV + Chart.PackingBias;
+				const FVector2f& UV = MeshTexCoords[ Index ];
+				FVector2f TransformedUV = UV.X * Chart.PackingScaleU + UV.Y * Chart.PackingScaleV + Chart.PackingBias;
 				MeshView.SetOutputTexcoord(Index, TransformedUV);
 			}
 		}
@@ -1499,14 +1540,14 @@ inline bool FLayoutUV::FChartFinder::VertsMatch( uint32 a, uint32 b ) const
 // Signed UV area
 inline float FLayoutUV::FChartFinder::TriangleUVArea( uint32 Tri ) const
 {
-	FVector2D UVs[3];
+	FVector2f UVs[3];
 	for( int k = 0; k < 3; k++ )
 	{
 		UVs[k] = MeshView.GetInputTexcoord(3 * Tri + k);
 	}
 
-	FVector2D EdgeUV1 = UVs[1] - UVs[0];
-	FVector2D EdgeUV2 = UVs[2] - UVs[0];
+	FVector2f EdgeUV1 = UVs[1] - UVs[0];
+	FVector2f EdgeUV2 = UVs[2] - UVs[0];
 	return 0.5f * ( EdgeUV1.X * EdgeUV2.Y - EdgeUV1.Y * EdgeUV2.X );
 }
 

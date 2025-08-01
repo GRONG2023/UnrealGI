@@ -6,18 +6,20 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "Misc/Guid.h"
-#include "UObject/WeakObjectPtr.h"
-#include "Misc/PackageName.h"
 #include "Commandlets/Commandlet.h"
-#include "Templates/UniquePtr.h"
 #include "IPlatformFileSandboxWrapper.h"
+#include "Misc/Guid.h"
+#include "Misc/PackageName.h"
+#include "Templates/UniquePtr.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/WeakObjectPtr.h"
+
 #include "CookCommandlet.generated.h"
 
 class FSandboxPlatformFile;
 class ITargetPlatform;
+class UCookOnTheFlyServer;
+enum class ECookByTheBookOptions;
 
 UCLASS(config=Editor)
 class UCookCommandlet
@@ -25,26 +27,29 @@ class UCookCommandlet
 {
 	GENERATED_UCLASS_BODY()
 
+protected:
 	/** List of asset types that will force GC after loading them during cook */
-	UPROPERTY(config)
+	UE_DEPRECATED(5.2, "No longer used")
 	TArray<FString> FullGCAssetClassNames;
 
 	/** If true, iterative cooking is being done */
 	bool bIterativeCooking;
 	/** Prototype cook-on-the-fly server */
 	bool bCookOnTheFly; 
+	/** Is using fast cook */
+	bool bFastCook;
 	/** Cook everything */
 	bool bCookAll;
 	/** Skip saving any packages in Engine/Content/Editor* UNLESS TARGET HAS EDITORONLY DATA (in which case it will save those anyway) */
 	bool bSkipEditorContent;
 	/** Save all cooked packages without versions. These are then assumed to be current version on load. This is dangerous but results in smaller patch sizes. */
 	bool bUnversioned;
+	/** Produce editor optional package output when cooking. */
+	bool bCookEditorOptional;
 	/** Generate manifests for building streaming install packages */
 	bool bGenerateStreamingInstallManifests;
 	/** Error if we access engine content (useful for dlc) */
 	bool bErrorOnEngineContentUse;
-	/** Use historical serialization system for generating package dependencies (use for historical reasons only this method has been depricated, only affects cooked manifests) */
-	bool bUseSerializationForGeneratingPackageDependencies;
 	/** Only cook packages specified on commandline options (for debugging)*/
 	bool bCookSinglePackage;
 	/** Modification to bCookSinglePackage - cook transitive hard references in addition to the packages on the commandline */
@@ -53,8 +58,8 @@ class UCookCommandlet
 	bool bVerboseCookerWarnings;
 	/** only clean up objects which are not in use by the cooker when we gc (false will enable full gc) */
 	bool bPartialGC;
-	/** Do not cook any shaders.  Shader maps will be empty */
-	bool bNoShaderCooking;
+	/** Ignore ini settings out of date. */
+	bool bIgnoreIniSettingsOutOfDate;
 	/** All commandline tokens */
 	TArray<FString> Tokens;
 	/** All commandline switches */
@@ -77,8 +82,10 @@ class UCookCommandlet
 	/** Cooks for specified targets */
 	bool CookByTheBook(const TArray<ITargetPlatform*>& Platforms);
 
-	/**	Process deferred commands */
-	void ProcessDeferredCommands();
+	bool CookAsCookWorker();
+
+	/** Collect garbage if the cooker's TickResults requested it */
+	void ConditionalCollectGarbage(uint32 TickResults, UCookOnTheFlyServer& COTFS);
 
 public:
 
@@ -88,4 +95,9 @@ public:
 	
 	//~ End UCommandlet Interface
 
+private:
+	void RunCookByTheBookList(UCookOnTheFlyServer* CookOnTheFlyServer, void* StartupOptionsAsVoid,
+		ECookByTheBookOptions CookOptions);
+	void RunCookByTheBookCook(UCookOnTheFlyServer* CookOnTheFlyServer, void* StartupOptionsAsVoid,
+		ECookByTheBookOptions CookOptions);
 };

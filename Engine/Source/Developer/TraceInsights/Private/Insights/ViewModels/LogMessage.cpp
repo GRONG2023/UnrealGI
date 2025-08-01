@@ -4,49 +4,37 @@
 
 #include "Misc/OutputDeviceHelper.h"
 #include "Misc/ScopeLock.h"
-#include "TraceServices/AnalysisService.h"
+#include "TraceServices/Model/Log.h"
 
 // Insights
 #include "Insights/Common/TimeUtils.h"
+#include "Insights/Log.h"
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // FLogMessageRecord
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-FLogMessageRecord::FLogMessageRecord()
-	: Index(0)
-	, Time(0)
-	, Verbosity(ELogVerbosity::Type::NoLogging)
-	, Category()
-	, Message()
-	, File()
-	, Line(0)
-{
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-FLogMessageRecord::FLogMessageRecord(const Trace::FLogMessage& TraceLogMessage)
-	: Index(static_cast<int32>(TraceLogMessage.Index))
-	, Time(TraceLogMessage.Time)
-	, Verbosity(TraceLogMessage.Verbosity)
+FLogMessageRecord::FLogMessageRecord(const TraceServices::FLogMessageInfo& TraceLogMessage)
+	: Time(TraceLogMessage.Time)
 	//, Category(FText::FromString(TraceLogMessage.Category))
 	//, Message(FText::FromString(TraceLogMessage.Message))
 	, File(FText::FromString(TraceLogMessage.File))
 	, Line(TraceLogMessage.Line)
+	, Index(static_cast<uint32>(TraceLogMessage.Index))
+	, Verbosity(TraceLogMessage.Verbosity)
 {
 	// Strip the "Log" prefix.
 	FString CategoryStr(TraceLogMessage.Category->Name);
 	if (CategoryStr.StartsWith(TEXT("Log")))
 	{
-		CategoryStr.RightChopInline(3, false);
+		CategoryStr.RightChopInline(3, EAllowShrinking::No);
 	}
-	Category = FText::FromString(CategoryStr);
+	Category = FText::FromString(MoveTemp(CategoryStr));
 
 	// Strip the trailing whitespaces (ex. some messages ends with "\n" and we do not want the LogView rows to have an unnecessary increased height).
 	FString MessageStr(TraceLogMessage.Message);
 	MessageStr.TrimEndInline();
-	Message = FText::FromString(MessageStr);
+	Message = FText::FromString(MoveTemp(MessageStr));
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -68,27 +56,6 @@ FText FLogMessageRecord::GetTimeAsText() const
 FText FLogMessageRecord::GetVerbosityAsText() const
 {
 	return FText::FromString(FString(ToString(Verbosity)));
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-FText FLogMessageRecord::GetCategoryAsText() const
-{
-	return Category;
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-FText FLogMessageRecord::GetMessageAsText() const
-{
-	return Message;
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-FText FLogMessageRecord::GetFileAsText() const
-{
-	return File;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -119,7 +86,7 @@ FLogMessageCache::FLogMessageCache()
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void FLogMessageCache::SetSession(TSharedPtr<const Trace::IAnalysisSession> InSession)
+void FLogMessageCache::SetSession(TSharedPtr<const TraceServices::IAnalysisSession> InSession)
 {
 	if (Session != InSession)
 	{
@@ -156,10 +123,11 @@ FLogMessageRecord& FLogMessageCache::Get(uint64 Index)
 
 	if (Session.IsValid())
 	{
-		Trace::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
-		const Trace::ILogProvider& LogProvider = Trace::ReadLogProvider(*Session.Get());
-		LogProvider.ReadMessage(Index, [this, Index](const Trace::FLogMessage& Message)
+		TraceServices::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
+		const TraceServices::ILogProvider& LogProvider = TraceServices::ReadLogProvider(*Session.Get());
+		LogProvider.ReadMessage(Index, [this, Index](const TraceServices::FLogMessageInfo& Message)
 		{
+			LLM_SCOPE_BYTAG(Insights);
 			FScopeLock Lock(&CriticalSection);
 			FLogMessageRecord Entry(Message);
 			Map.Add(Index, MoveTemp(Entry));
@@ -185,9 +153,9 @@ TSharedPtr<FLogMessageRecord> FLogMessageCache::GetUncached(uint64 Index) const
 
 	if (Session.IsValid())
 	{
-		Trace::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
-		const Trace::ILogProvider& LogProvider = Trace::ReadLogProvider(*Session.Get());
-		LogProvider.ReadMessage(Index, [&EntryPtr](const Trace::FLogMessage& Message)
+		TraceServices::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
+		const TraceServices::ILogProvider& LogProvider = TraceServices::ReadLogProvider(*Session.Get());
+		LogProvider.ReadMessage(Index, [&EntryPtr](const TraceServices::FLogMessageInfo& Message)
 		{
 			EntryPtr = MakeShared<FLogMessageRecord>(Message);
 		});

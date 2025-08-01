@@ -10,10 +10,25 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
 #include "CommonAnimTypes.h"
+#include "Containers/UnrealString.h"
+#include "CoreMinimal.h"
+#include "CoreTypes.h"
 #include "EulerTransform.h"
+#include "Math/Quat.h"
+#include "Math/Rotator.h"
+#include "Math/Transform.h"
+#include "Math/TransformVectorized.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector.h"
+#include "Misc/AssertionMacros.h"
+#include "Serialization/Archive.h"
+#include "Serialization/StructuredArchiveAdapters.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UnrealNames.h"
+
 #include "Constraint.generated.h"
 
 struct FMultiTransformBlendHelper;
@@ -24,7 +39,7 @@ struct FMultiTransformBlendHelper;
  * This is used to filter per axis for constraint options
  */
 USTRUCT(BlueprintType)
-struct ANIMATIONCORE_API FFilterOptionPerAxis
+struct FFilterOptionPerAxis
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -43,48 +58,48 @@ struct ANIMATIONCORE_API FFilterOptionPerAxis
 		, bZ(true)
 	{}
 
-	void FilterVector(FVector& Input, float ResetValue = 0.f) const
+	void FilterVector(FVector& Input, const FVector& ResetValue = FVector::ZeroVector) const
 	{
 		if (!bX)
 		{
-			Input.X = ResetValue;
+			Input.X = ResetValue.X;
 		}
 
 		if (!bY)
 		{
-			Input.Y = ResetValue;
+			Input.Y = ResetValue.Y;
 		}
 
 		if (!bZ)
 		{
-			Input.Z = ResetValue;
+			Input.Z = ResetValue.Z;
 		}
 	}
 
-	void FilterQuat(FQuat& Input) const
+	void FilterQuat(FQuat& Input, const FQuat& ResetValue = FQuat::Identity) const
 	{
 		FRotator Rotator = Input.Rotator();
 
-		FilterRotator(Rotator);
+		FilterRotator(Rotator, ResetValue.Rotator());
 
 		Input = Rotator.Quaternion();
 	}
 
-	void FilterRotator(FRotator& Input) const
+	void FilterRotator(FRotator& Input, const FRotator& ResetValue = FRotator::ZeroRotator) const
 	{
 		if (!bX)
 		{
-			Input.Roll = 0.f;
+			Input.Roll = ResetValue.Roll;
 		}
 
 		if (!bY)
 		{
-			Input.Pitch = 0.f;
+			Input.Pitch = ResetValue.Pitch;
 		}
 
 		if (!bZ)
 		{
-			Input.Yaw = 0.f;
+			Input.Yaw = ResetValue.Yaw;
 		}
 	}
 
@@ -102,11 +117,17 @@ struct ANIMATIONCORE_API FFilterOptionPerAxis
 		// if none of them is set, it's not valid
 		return bX || bY || bZ;
 	}
+	
+	bool HasNoEffect() const
+	{
+		// if all of them are set the filter won't affect anything
+		return bX && bY && bZ;
+	}
 };
 
 /** A filter for a whole transform */
 USTRUCT(BlueprintType)
-struct ANIMATIONCORE_API FTransformFilter
+struct FTransformFilter
 {
 	GENERATED_BODY()
 
@@ -130,7 +151,7 @@ struct ANIMATIONCORE_API FTransformFilter
 		Input.SetRotation(Rotation);
 
 		FVector Scale3D = Input.GetScale3D();
-		ScaleFilter.FilterVector(Scale3D, 1.f);
+		ScaleFilter.FilterVector(Scale3D, FVector::OneVector);
 		Input.SetScale3D(Scale3D);
 	}
 
@@ -145,14 +166,14 @@ struct ANIMATIONCORE_API FTransformFilter
 		Input.Rotation = Rotation;
 
 		FVector Scale = Input.Scale;
-		ScaleFilter.FilterVector(Scale, 1.f);
+		ScaleFilter.FilterVector(Scale, FVector::OneVector);
 		Input.Scale = Scale;
 	}
 };
 
 /** A description of how to apply a simple transform constraint */
 USTRUCT(BlueprintType)
-struct ANIMATIONCORE_API FConstraintDescription
+struct FConstraintDescription
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -207,7 +228,7 @@ struct ANIMATIONCORE_API FConstraintDescription
  * Used by Constraint for saving the offset, and recovering the offset
  */
 USTRUCT()
-struct ANIMATIONCORE_API FConstraintOffset
+struct FConstraintOffset
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -231,9 +252,9 @@ struct ANIMATIONCORE_API FConstraintOffset
 	{}
 
 	/* Apply the Inverse offset */
-	void ApplyInverseOffset(const FTransform& InTarget, FTransform& OutSource) const;
+	ANIMATIONCORE_API void ApplyInverseOffset(const FTransform& InTarget, FTransform& OutSource) const;
 	/* Save the Inverse offset */
-	void SaveInverseOffset(const FTransform& Source, const FTransform& Target, const FConstraintDescription& Operator);
+	ANIMATIONCORE_API void SaveInverseOffset(const FTransform& Source, const FTransform& Target, const FConstraintDescription& Operator);
 	/** Clear the offset */
 	void Reset()
 	{
@@ -255,7 +276,7 @@ struct ANIMATIONCORE_API FConstraintOffset
 };
 
 USTRUCT(BlueprintType)
-struct ANIMATIONCORE_API FTransformConstraint
+struct FTransformConstraint
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -300,7 +321,7 @@ struct ANIMATIONCORE_API FTransformConstraint
 /// new changes of constraints
 
 /** Constraint Types*/
-UENUM()
+UENUM(BlueprintType)
 enum class EConstraintType : uint8
 {
 	/** Transform Constraint */
@@ -378,18 +399,19 @@ struct TStructOpsTypeTraits<FConstraintDescriptionEx> : public TStructOpsTypeTra
 };
 
 /** Transform Constraint Types*/
-UENUM()
+UENUM(Blueprintable)
 enum class ETransformConstraintType : uint8
 {
 	Translation,
 	Rotation,
 	Scale, 
-	Parent
+	Parent,
+	LookAt
 };
 
 /** A description of how to apply a simple transform constraint */
 USTRUCT()
-struct ANIMATIONCORE_API FTransformConstraintDescription : public FConstraintDescriptionEx
+struct FTransformConstraintDescription : public FConstraintDescriptionEx
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -400,7 +422,7 @@ struct ANIMATIONCORE_API FTransformConstraintDescription : public FConstraintDes
 		:TransformType (InType)
 	{}
 	
-	virtual void AccumulateConstraintTransform(const FTransform& TargetTransform, const FTransform& CurrentTransform, const FTransform& CurrentParentTransform, float Weight, FMultiTransformBlendHelper& BlendHelperInLocalSpace) const override;
+	ANIMATIONCORE_API virtual void AccumulateConstraintTransform(const FTransform& TargetTransform, const FTransform& CurrentTransform, const FTransform& CurrentParentTransform, float Weight, FMultiTransformBlendHelper& BlendHelperInLocalSpace) const override;
 	virtual bool DoesAffectRotation() const override { return TransformType == ETransformConstraintType::Rotation; }
 	virtual bool DoesAffectTranslation() const override { return TransformType == ETransformConstraintType::Translation; }
 	virtual bool DoesAffectScale() const override { return TransformType == ETransformConstraintType::Scale; }
@@ -434,7 +456,7 @@ struct ANIMATIONCORE_API FTransformConstraintDescription : public FConstraintDes
 
 /** A description of how to apply aim constraint */
 USTRUCT()
-struct ANIMATIONCORE_API FAimConstraintDescription : public FConstraintDescriptionEx
+struct FAimConstraintDescription : public FConstraintDescriptionEx
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -455,7 +477,7 @@ struct ANIMATIONCORE_API FAimConstraintDescription : public FConstraintDescripti
 	{
 	}
 
-	virtual void AccumulateConstraintTransform(const FTransform& TargetTransform, const FTransform& CurrentTransform, const FTransform& CurrentParentTransform, float Weight, FMultiTransformBlendHelper& BlendHelperInLocalSpace) const override;
+	ANIMATIONCORE_API virtual void AccumulateConstraintTransform(const FTransform& TargetTransform, const FTransform& CurrentTransform, const FTransform& CurrentParentTransform, float Weight, FMultiTransformBlendHelper& BlendHelperInLocalSpace) const override;
 	virtual bool DoesAffectRotation() const override { return true; }
 	virtual FString GetDisplayString() const override
 	{
@@ -656,7 +678,7 @@ public:
  * You can have as many of these per node
  */
 USTRUCT()
-struct ANIMATIONCORE_API FConstraintData
+struct FConstraintData
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -706,12 +728,12 @@ struct ANIMATIONCORE_API FConstraintData
 		return Ar;
 	}
 
-	void ApplyInverseOffset(const FTransform& InTarget, FTransform& OutSource, const FTransform& InBaseTransform) const;
-	void SaveInverseOffset(const FTransform& Source, const FTransform& Target, const FTransform& InBaseTransform);
+	ANIMATIONCORE_API void ApplyInverseOffset(const FTransform& InTarget, FTransform& OutSource, const FTransform& InBaseTransform) const;
+	ANIMATIONCORE_API void SaveInverseOffset(const FTransform& Source, const FTransform& Target, const FTransform& InBaseTransform);
 	void ResetOffset()
 	{
 		Offset = FTransform::Identity;
 	}
 
-	void ApplyConstraintTransform(const FTransform& TargetTransform, const FTransform& InCurrentTransform, const FTransform& CurrentParentTransform, FMultiTransformBlendHelper& BlendHelperInLocalSpace) const;
+	ANIMATIONCORE_API void ApplyConstraintTransform(const FTransform& TargetTransform, const FTransform& InCurrentTransform, const FTransform& CurrentParentTransform, FMultiTransformBlendHelper& BlendHelperInLocalSpace) const;
 };

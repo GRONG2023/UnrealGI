@@ -1,8 +1,19 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "CurveEditorHelpers.h"
+
+#include "CurveEditorScreenSpace.h"
 #include "Fonts/FontMeasure.h"
-#include "Slate/Public/Framework/Application/SlateApplication.h"
+#include "Fonts/SlateFontInfo.h"
+#include "Framework/Application/SlateApplication.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Text.h"
+#include "Math/UnrealMathSSE.h"
+#include "Rendering/SlateRenderer.h"
+#include "Styling/CoreStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UnrealTemplate.h"
 
 
 namespace CurveEditor
@@ -22,8 +33,8 @@ FVector2D ComputeScreenSpaceTangentOffset(const FCurveEditorScreenSpace& CurveSp
 
 void TangentAndWeightFromOffset(const FCurveEditorScreenSpace& CurveSpace, const FVector2D& TangentOffset, float& OutTangent, float& OutWeight)
 {
-	float X = CurveSpace.ScreenToSeconds(TangentOffset.X) - CurveSpace.ScreenToSeconds(0);
-	float Y = CurveSpace.ScreenToValue(TangentOffset.Y) - CurveSpace.ScreenToValue(0);
+	double X = CurveSpace.ScreenToSeconds(TangentOffset.X) - CurveSpace.ScreenToSeconds(0);
+	double Y = CurveSpace.ScreenToValue(TangentOffset.Y) - CurveSpace.ScreenToValue(0);
 
 	OutTangent = Y / X;
 	OutWeight = FMath::Sqrt(X*X + Y*Y);
@@ -38,9 +49,9 @@ FVector2D GetVectorFromSlopeAndLength(float Slope, float Length)
 
 void ConstructYGridLines(const FCurveEditorScreenSpace& ViewSpace, uint8 InMinorDivisions, TArray<float>& OutMajorGridLines, TArray<float>& OutMinorGridLines, FText GridLineLabelFormatY, TArray<FText>* OutMajorGridLabels)
 {
-	const float GridPixelSpacing = ViewSpace.GetPhysicalHeight() / 5.f;
+	const double GridPixelSpacing = ViewSpace.GetPhysicalHeight() / 5.0;
 
-	const float Order = FMath::Pow(10.f, FMath::FloorToInt(FMath::LogX(10.f, GridPixelSpacing / ViewSpace.PixelsPerOutput())));
+	const double Order = FMath::Pow(10.0, FMath::FloorToInt(FMath::LogX(10.0, GridPixelSpacing / ViewSpace.PixelsPerOutput())));
 
 	static const int32 DesirableBases[]  = { 2, 5 };
 	static const int32 NumDesirableBases = UE_ARRAY_COUNT(DesirableBases);
@@ -55,7 +66,7 @@ void ConstructYGridLines(const FCurveEditorScreenSpace& ViewSpace, uint8 InMinor
 		}
 	}
 
-	double MajorGridStep = FMath::Pow(Base, FMath::FloorToFloat(FMath::LogX(Base, Scale))) * Order;
+	double MajorGridStep = FMath::Pow(static_cast<float>(Base), FMath::FloorToFloat(FMath::LogX(static_cast<float>(Base), static_cast<float>(Scale)))) * Order;
 
 	const double FirstMajorLine = FMath::FloorToDouble(ViewSpace.GetOutputMin() / MajorGridStep) * MajorGridStep;
 	const double LastMajorLine = FMath::CeilToDouble(ViewSpace.GetOutputMax() / MajorGridStep) * MajorGridStep;

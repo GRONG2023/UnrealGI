@@ -15,6 +15,7 @@
 #include "PhysicsAssetEditor.h"
 #include "PhysicsAssetEditorHitProxies.h"
 #include "PhysicsAssetEditorPhysicsHandleComponent.h"
+#include "PhysicsAssetRenderUtils.h"
 #include "DrawDebugHelpers.h"
 #include "SEditorViewport.h"
 #include "IPersonaToolkit.h"
@@ -26,12 +27,13 @@
 
 FName FPhysicsAssetEditorEditMode::ModeName("PhysicsAssetEditor");
 
+static const FName InputChordName_EditConstraintChildTransform = FName("InputChordName_EditConstraintChildTransform");
+
 FPhysicsAssetEditorEditMode::FPhysicsAssetEditorEditMode()
 	: MinPrimSize(0.5f)
 	, PhysicsAssetEditor_TranslateSpeed(0.25f)
 	, PhysicsAssetEditor_RotateSpeed(1.0f * (PI / 180.0f))
 	, PhysicsAssetEditor_LightRotSpeed(0.22f)
-	, SimGrabCheckDistance(500.0f)
 	, SimHoldDistanceChangeDelta(20.0f)
 	, SimMinHoldDistance(10.0f)
 	, SimGrabMoveSpeed(1.0f)
@@ -79,6 +81,14 @@ bool FPhysicsAssetEditorEditMode::GetCameraTarget(FSphere& OutTarget) const
 		else if (SelectedObject.PrimitiveType == EAggCollisionShape::TaperedCapsule)
 		{
 			Bounds += AggGeom.TaperedCapsuleElems[SelectedObject.PrimitiveIndex].CalcAABB(BoneTM, Scale);
+		}
+		else if (SelectedObject.PrimitiveType == EAggCollisionShape::LevelSet)
+		{
+			Bounds += AggGeom.LevelSetElems[SelectedObject.PrimitiveIndex].CalcAABB(BoneTM, BoneTM.GetScale3D());
+		}
+		else if (SelectedObject.PrimitiveType == EAggCollisionShape::SkinnedLevelSet)
+		{
+			Bounds += AggGeom.SkinnedLevelSetElems[SelectedObject.PrimitiveIndex].CalcAABB(BoneTM, BoneTM.GetScale3D());
 		}
 
 		bHandled = true;
@@ -346,16 +356,16 @@ bool FPhysicsAssetEditorEditMode::InputDelta(FEditorViewportClient* InViewportCl
 
 				SelectedObject.WidgetTM = SharedData->EditorSkelComp->GetPrimitiveTransform(BoneTM, SelectedObject.Index, SelectedObject.PrimitiveType, SelectedObject.PrimitiveIndex, BoneScale);
 
-				if(InViewportClient->GetWidgetMode() == FWidget::WM_Translate || InViewportClient->GetWidgetMode() == FWidget::WM_Rotate)
+				if(InViewportClient->GetWidgetMode() == UE::Widget::WM_Translate || InViewportClient->GetWidgetMode() == UE::Widget::WM_Rotate)
 				{
-					if (InViewportClient->GetWidgetMode() == FWidget::WM_Translate)
+					if (InViewportClient->GetWidgetMode() == UE::Widget::WM_Translate)
 					{
 						FVector DragToUse = GetLocalTranslation(InViewportClient, InDrag, SelectedObject.WidgetTM);
 						FVector Dir = SelectedObject.WidgetTM.InverseTransformVector(DragToUse.GetSafeNormal());
 						FVector DragVec = Dir * DragToUse.Size() / BoneScale;
 						SelectedObject.ManipulateTM.AddToTranslation(DragVec);
 					}
-					else if (InViewportClient->GetWidgetMode() == FWidget::WM_Rotate)
+					else if (InViewportClient->GetWidgetMode() == UE::Widget::WM_Rotate)
 					{
 						FRotator RotatorToUse = GetLocalRotation(InViewportClient, InRot, SelectedObject.WidgetTM);
 
@@ -396,8 +406,13 @@ bool FPhysicsAssetEditorEditMode::InputDelta(FEditorViewportClient* InViewportCl
 						AggGeom->TaperedCapsuleElems[SelectedObject.PrimitiveIndex].SetTransform(SelectedObject.ManipulateTM * AggGeom->TaperedCapsuleElems[SelectedObject.PrimitiveIndex].GetTransform());
 						SelectedObject.ManipulateTM.SetIdentity();
 					}
+					else if (SelectedObject.PrimitiveType == EAggCollisionShape::LevelSet)
+					{
+						AggGeom->LevelSetElems[SelectedObject.PrimitiveIndex].SetTransform(SelectedObject.ManipulateTM * AggGeom->LevelSetElems[SelectedObject.PrimitiveIndex].GetTransform());
+						SelectedObject.ManipulateTM.SetIdentity();
+					}
 				}
-				else if (InViewportClient->GetWidgetMode() == FWidget::WM_Scale)
+				else if (InViewportClient->GetWidgetMode() == UE::Widget::WM_Scale)
 				{
 					ModifyPrimitiveSize(SelectedObject.Index, SelectedObject.PrimitiveType, SelectedObject.PrimitiveIndex, InScale);
 				}
@@ -417,16 +432,16 @@ bool FPhysicsAssetEditorEditMode::InputDelta(FEditorViewportClient* InViewportCl
 			if (SharedData->bManipulating)
 			{
 				float BoneScale = 1.f;
-				SelectedObject.WidgetTM = SharedData->GetConstraintMatrix(SelectedObject.Index, EConstraintFrame::Frame2, 1.f);
+				SelectedObject.WidgetTM = SharedData->GetConstraintMatrix(SelectedObject.Index, GetConstraintFrameForWidget(), 1.f);
 
-				if (InViewportClient->GetWidgetMode() == FWidget::WM_Translate)
+				if (InViewportClient->GetWidgetMode() == UE::Widget::WM_Translate)
 				{
 					FVector DragToUse = GetLocalTranslation(InViewportClient, InDrag, SelectedObject.WidgetTM);
 					FVector Dir = SelectedObject.WidgetTM.InverseTransformVector(DragToUse.GetSafeNormal());
 					FVector DragVec = Dir * DragToUse.Size() / BoneScale;
 					SelectedObject.ManipulateTM.AddToTranslation(DragVec);
 				}
-				else if (InViewportClient->GetWidgetMode() == FWidget::WM_Rotate)
+				else if (InViewportClient->GetWidgetMode() == UE::Widget::WM_Rotate)
 				{
 					FRotator RotatorToUse = GetLocalRotation(InViewportClient, InRot, SelectedObject.WidgetTM);
 
@@ -443,23 +458,32 @@ bool FPhysicsAssetEditorEditMode::InputDelta(FEditorViewportClient* InViewportCl
 					SelectedObject.ManipulateTM = FTransform(Result);
 				}
 
-				UPhysicsConstraintTemplate* ConstraintSetup = SharedData->PhysicsAsset->ConstraintSetup[SelectedObject.Index];
-
-				ConstraintSetup->DefaultInstance.SetRefFrame(EConstraintFrame::Frame2, SelectedObject.ManipulateTM * StartManParentConTM[i]);
-
-				// Alt + Move will split frames and rotate or move them separately
-				bool bMultiFrame = !InViewportClient->IsAltPressed();
-
-				if (bMultiFrame)
+				// Apply manipulations to Child or Parent or both transforms according to the constraint's view port manipulation flags.
 				{
-					SharedData->SetConstraintRelTM(&SelectedObject, StartManRelConTM[i]);
-				}
-				else
-				{
-					ConstraintSetup->DefaultInstance.SetRefFrame(EConstraintFrame::Frame1, FTransform(StartManChildConTM[i]));
-				}
+					UPhysicsConstraintTemplate* ConstraintSetup = SharedData->PhysicsAsset->ConstraintSetup[SelectedObject.Index];
+					FPhysicsAssetRenderSettings* const RenderSettings = SharedData->GetRenderSettings();
 
-				bHandled = true;
+					if (RenderSettings && !EnumHasAnyFlags(RenderSettings->ConstraintViewportManipulationFlags, EConstraintTransformComponentFlags::AllChild))
+					{
+						// Rotate or move the parent transform only.
+						ConstraintSetup->DefaultInstance.SetRefFrame(EConstraintFrame::Frame2, SelectedObject.ManipulateTM * StartManParentConTM[i]);
+						ConstraintSetup->DefaultInstance.SetRefFrame(EConstraintFrame::Frame1, FTransform(StartManChildConTM[i]));
+					}
+					else if (RenderSettings && !EnumHasAnyFlags(RenderSettings->ConstraintViewportManipulationFlags, EConstraintTransformComponentFlags::AllParent))
+					{
+						// Rotate or move the child transform only.
+						ConstraintSetup->DefaultInstance.SetRefFrame(EConstraintFrame::Frame1, SelectedObject.ManipulateTM * StartManChildConTM[i]);
+						ConstraintSetup->DefaultInstance.SetRefFrame(EConstraintFrame::Frame2, FTransform(StartManParentConTM[i]));
+					}
+					else
+					{
+						// Rotate or move both the parent and child transform.
+						ConstraintSetup->DefaultInstance.SetRefFrame(EConstraintFrame::Frame2, SelectedObject.ManipulateTM * StartManParentConTM[i]);
+						SharedData->SetConstraintRelTM(&SelectedObject, StartManRelConTM[i]);
+					}
+
+					bHandled = true;
+				}
 			}
 		}
 	}
@@ -499,17 +523,32 @@ void FPhysicsAssetEditorEditMode::Tick(FEditorViewportClient* ViewportClient, fl
 
 		SharedData->PhysicalAnimationComponent->ApplyPhysicalAnimationProfileBelow(NAME_None, SharedData->PhysicsAsset->CurrentPhysicalAnimationProfileName, /*Include Self=*/true, /*Clear Not Found=*/true);
 	}
+
+	// Update the constraint view port manipulation flags from state of the modifier keys. These flags determine which parts of the constraint transform (Parent, child or both) should be modified when a view port widget is manipulated.
+	if (FPhysicsAssetRenderSettings* const RenderSettings = SharedData->GetRenderSettings())
+	{
+		RenderSettings->ConstraintViewportManipulationFlags = EConstraintTransformComponentFlags::All;
+
+		if (ViewportClient->IsPrioritizedInputChordPressed(InputChordName_EditConstraintChildTransform)) // Rotate or move the child transform only.
+		{
+			EnumRemoveFlags(RenderSettings->ConstraintViewportManipulationFlags, EConstraintTransformComponentFlags::AllParent); // Remove Parent Frame flags.
+		}
+		else if (ViewportClient->IsAltPressed()) // Rotate or move the parent transform only.
+		{
+			EnumRemoveFlags(RenderSettings->ConstraintViewportManipulationFlags, EConstraintTransformComponentFlags::AllChild); // Remove Child Frame flags.
+		}	
+	}
 }
 
 void FPhysicsAssetEditorEditMode::Render(const FSceneView* View, FViewport* Viewport, FPrimitiveDrawInterface* PDI)
 {
-	EPhysicsAssetEditorRenderMode MeshViewMode = SharedData->GetCurrentMeshViewMode(SharedData->bRunningSimulation);
+	EPhysicsAssetEditorMeshViewMode MeshViewMode = SharedData->GetCurrentMeshViewMode(SharedData->bRunningSimulation);
 
-	if (MeshViewMode != EPhysicsAssetEditorRenderMode::None)
+	if (MeshViewMode != EPhysicsAssetEditorMeshViewMode::None)
 	{
 		SharedData->EditorSkelComp->SetVisibility(true);
 
-		if (MeshViewMode == EPhysicsAssetEditorRenderMode::Wireframe)
+		if (MeshViewMode == EPhysicsAssetEditorMeshViewMode::Wireframe)
 		{
 			SharedData->EditorSkelComp->SetForceWireframe(true);
 		}
@@ -548,13 +587,13 @@ void FPhysicsAssetEditorEditMode::DrawHUD(FEditorViewportClient* ViewportClient,
 	}
 	else if(SharedData->GetSelectedConstraint() != nullptr)
 	{
-		if (ViewportClient->GetWidgetMode() == FWidget::WM_Translate)
+		if (ViewportClient->GetWidgetMode() == UE::Widget::WM_Translate)
 		{
-			TextItem.Text = LOCTEXT("SingleMove", "Hold ALT to move a single reference frame");
+			TextItem.Text = LOCTEXT("SingleMove", "Hold ALT to move parent reference frame, SHIFT + ALT to move child reference frame");
 		}
-		else if (ViewportClient->GetWidgetMode() == FWidget::WM_Rotate)
+		else if (ViewportClient->GetWidgetMode() == UE::Widget::WM_Rotate)
 		{
-			TextItem.Text = LOCTEXT("SingleRotate", "Hold ALT to rotate single reference frame");
+			TextItem.Text = LOCTEXT("SingleRotate", "Hold ALT to rotate parent reference frame, SHIFT + ALT to rotate child reference frame");
 		}
 	}
 
@@ -574,7 +613,7 @@ void FPhysicsAssetEditorEditMode::DrawHUD(FEditorViewportClient* ViewportClient,
 	int32 HalfY = Viewport->GetSizeXY().Y / 2;
 
 	// If showing center-of-mass, and physics is started up..
-	if (SharedData->bShowCOM)
+	if (SharedData->GetShowCom())
 	{
 		// iterate over each bone
 		for (int32 i = 0; i <SharedData->EditorSkelComp->Bodies.Num(); ++i)
@@ -615,14 +654,29 @@ bool FPhysicsAssetEditorEditMode::UsesTransformWidget() const
 	return ShouldDrawWidget();
 }
 
-bool FPhysicsAssetEditorEditMode::UsesTransformWidget(FWidget::EWidgetMode CheckMode) const
+bool FPhysicsAssetEditorEditMode::UsesTransformWidget(UE::Widget::EWidgetMode CheckMode) const
 {
-	if (SharedData->GetSelectedConstraint() && CheckMode == FWidget::WM_Scale)
+	if (SharedData->GetSelectedConstraint() && CheckMode == UE::Widget::WM_Scale)
 	{
 		return false;
 	}
 
-	return ShouldDrawWidget() && (CheckMode == FWidget::WM_Scale || CheckMode == FWidget::WM_Translate || CheckMode == FWidget::WM_Rotate);
+	return ShouldDrawWidget() && (CheckMode == UE::Widget::WM_Scale || CheckMode == UE::Widget::WM_Translate || CheckMode == UE::Widget::WM_Rotate || CheckMode == UE::Widget::WM_None);
+}
+
+EConstraintFrame::Type FPhysicsAssetEditorEditMode::GetConstraintFrameForWidget() const
+{
+	FPhysicsAssetRenderSettings* const RenderSettings = SharedData->GetRenderSettings();
+
+	// Draw widget in the constraint's parent relative frame by default and in the child frame if the user is exclusively editing the child frame.
+	EConstraintFrame::Type ConstraintFrame = EConstraintFrame::Frame2;
+
+	if (RenderSettings && !EnumHasAnyFlags(RenderSettings->ConstraintViewportManipulationFlags, EConstraintTransformComponentFlags::AllParent))
+	{
+		ConstraintFrame = EConstraintFrame::Frame1;
+	}
+
+	return ConstraintFrame;
 }
 
 bool FPhysicsAssetEditorEditMode::GetCustomDrawingCoordinateSystem(FMatrix& InMatrix, void* InData)
@@ -642,7 +696,7 @@ bool FPhysicsAssetEditorEditMode::GetCustomDrawingCoordinateSystem(FMatrix& InMa
 	}
 	else if (SharedData->GetSelectedConstraint())
 	{
-		InMatrix = SharedData->GetConstraintMatrix(SharedData->GetSelectedConstraint()->Index, EConstraintFrame::Frame2, 1.f).ToMatrixNoScale().RemoveTranslation();
+		InMatrix = SharedData->GetConstraintMatrix(SharedData->GetSelectedConstraint()->Index, GetConstraintFrameForWidget(), 1.f).ToMatrixNoScale().RemoveTranslation();
 		return true;
 	}
 
@@ -671,7 +725,7 @@ FVector FPhysicsAssetEditorEditMode::GetWidgetLocation() const
 	}
 	else if (SharedData->GetSelectedConstraint())
 	{
-		return SharedData->GetConstraintMatrix(SharedData->GetSelectedConstraint()->Index, EConstraintFrame::Frame2, 1.f).GetTranslation();
+		return SharedData->GetConstraintMatrix(SharedData->GetSelectedConstraint()->Index, GetConstraintFrameForWidget(), 1.f).GetTranslation();
 	}
 
 	return FVector::ZeroVector;
@@ -764,6 +818,20 @@ bool FPhysicsAssetEditorEditMode::HandleClick(FEditorViewportClient* InViewportC
 	return false;
 }
 
+bool FPhysicsAssetEditorEditMode::ReceivedFocus(FEditorViewportClient* ViewportClient, FViewport* Viewport)
+{
+	ViewportClient->RegisterPrioritizedInputChord(FPrioritizedInputChord(1, InputChordName_EditConstraintChildTransform, EModifierKey::Shift | EModifierKey::Alt));
+
+	return IPersonaEditMode::ReceivedFocus(ViewportClient, Viewport);
+}
+
+bool FPhysicsAssetEditorEditMode::LostFocus(FEditorViewportClient* ViewportClient, FViewport* Viewport)
+{
+	ViewportClient->UnregisterPrioritizedInputChord(InputChordName_EditConstraintChildTransform);
+
+	return IPersonaEditMode::LostFocus(ViewportClient, Viewport);
+}
+
 /** Helper function to open a viewport context menu */
 static void OpenContextMenu(const TSharedRef<FPhysicsAssetEditor>& PhysicsAssetEditor, FEditorViewportClient* InViewportClient, TFunctionRef<void(FMenuBuilder&)> InBuildMenu)
 {
@@ -819,6 +887,8 @@ void FPhysicsAssetEditorEditMode::OpenSelectionMenu(FEditorViewportClient* InVie
 
 bool FPhysicsAssetEditorEditMode::SimMousePress(FEditorViewportClient* InViewportClient, FKey Key)
 {
+	bool bHandled = false;
+
 	FViewport* Viewport = InViewportClient->Viewport;
 
 	bool bCtrlDown = Viewport->KeyState(EKeys::LeftControl) || Viewport->KeyState(EKeys::RightControl);
@@ -829,7 +899,7 @@ bool FPhysicsAssetEditorEditMode::SimMousePress(FEditorViewportClient* InViewpor
 
 	const FViewportClick Click(View, InViewportClient, EKeys::Invalid, IE_Released, Viewport->GetMouseX(), Viewport->GetMouseY());
 	FHitResult Result(1.f);
-	bool bHit = SharedData->EditorSkelComp->LineTraceComponent(Result, Click.GetOrigin(), Click.GetOrigin() + Click.GetDirection() * SimGrabCheckDistance, FCollisionQueryParams(NAME_None, true));
+	bool bHit = SharedData->EditorSkelComp->LineTraceComponent(Result, Click.GetOrigin(), Click.GetOrigin() + Click.GetDirection() * SharedData->EditorOptions->InteractionDistance, FCollisionQueryParams(NAME_None, true));
 
 	SharedData->LastClickPos = Click.GetClickPos();
 	SharedData->LastClickOrigin = Click.GetOrigin();
@@ -870,7 +940,7 @@ bool FPhysicsAssetEditorEditMode::SimMousePress(FEditorViewportClient* InViewpor
 
 				FMatrix	InvViewMatrix = View->ViewMatrices.GetInvViewMatrix();
 
-				SimGrabMinPush = SimMinHoldDistance - (Result.Time * SimGrabCheckDistance);
+				SimGrabMinPush = SimMinHoldDistance - (Result.Time * SharedData->EditorOptions->InteractionDistance);
 
 				SimGrabLocation = Result.Location;
 				SimGrabX = InvViewMatrix.GetUnitAxis(EAxis::X);
@@ -882,13 +952,12 @@ bool FPhysicsAssetEditorEditMode::SimMousePress(FEditorViewportClient* InViewpor
 			{
 				SharedData->EditorSkelComp->AddImpulseAtLocation(Click.GetDirection() * SharedData->EditorOptions->PokeStrength, Result.Location, BoneName);
 			}
+
+			bHandled = true;
 		}
 	}
 
-	// @todo(ccaulfield): really this should return false if we don't have Ctrl or Shift help down. This would allow the mouse-fly
-	// behaviour to work even when clicking on a space occupied by a body. However we don't want to change this until we have a way
-	// to enable/disable the fly and orbit camera behaviours.
-	return bHit;
+	return bHandled;
 }
 
 void FPhysicsAssetEditorEditMode::SimMouseMove(FEditorViewportClient* InViewportClient, float DeltaX, float DeltaY)
@@ -1008,6 +1077,11 @@ void FPhysicsAssetEditorEditMode::ModifyPrimitiveSize(int32 BodyIndex, EAggColli
 	{
 		check(AggGeom->TaperedCapsuleElems.IsValidIndex(PrimIndex));
 		AggGeom->TaperedCapsuleElems[PrimIndex].ScaleElem(DeltaSize, MinPrimSize);
+	}
+	else if (PrimType == EAggCollisionShape::LevelSet)
+	{
+		check(AggGeom->LevelSetElems.IsValidIndex(PrimIndex));
+		AggGeom->LevelSetElems[PrimIndex].ScaleElem(DeltaSize, MinPrimSize);
 	}
 }
 

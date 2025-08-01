@@ -2,10 +2,11 @@
 
 
 #include "SAnimSegmentsPanel.h"
+#include "Animation/Skeleton.h"
 #include "Misc/MessageDialog.h"
 #include "Modules/ModuleManager.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Animation/AnimSequenceBase.h"
 #include "Animation/AnimSequence.h"
 
@@ -35,13 +36,15 @@ void SAnimSegmentsPanel::Construct(const FArguments& InArgs)
 	ViewInputMin = InArgs._ViewInputMin;
 	ViewInputMax = InArgs._ViewInputMax;
 
-	OnAnimSegmentNodeClickedDelegate	= InArgs._OnAnimSegmentNodeClicked;
-	OnPreAnimUpdateDelegate				= InArgs._OnPreAnimUpdate;
-	OnPostAnimUpdateDelegate			= InArgs._OnPostAnimUpdate;
-	OnAnimSegmentRemovedDelegate		= InArgs._OnAnimSegmentRemoved;
-	OnAnimReplaceMapping				= InArgs._OnAnimReplaceMapping;
-	OnDiffFromParentAsset				= InArgs._OnDiffFromParentAsset;
-	OnGetNodeColor						= InArgs._OnGetNodeColor;
+	OnAnimSegmentNodeClickedDelegate		= InArgs._OnAnimSegmentNodeClicked;
+	OnAnimSegmentNodeDoubleClickedDelegate	= InArgs._OnAnimSegmentNodeDoubleClicked;
+	OnPreAnimUpdateDelegate					= InArgs._OnPreAnimUpdate;
+	OnPostAnimUpdateDelegate				= InArgs._OnPostAnimUpdate;
+	OnAnimSegmentRemovedDelegate			= InArgs._OnAnimSegmentRemoved;
+	OnAnimReplaceMapping					= InArgs._OnAnimReplaceMapping;
+	OnDiffFromParentAsset					= InArgs._OnDiffFromParentAsset;
+	OnGetNodeColor							= InArgs._OnGetNodeColor;
+	OnIsAnimAssetValid						= InArgs._OnIsAnimAssetValid;
 
 	bChildAnimMontage = InArgs._bChildAnimMontage;
 
@@ -55,7 +58,7 @@ void SAnimSegmentsPanel::Construct(const FArguments& InArgs)
 	// Animation Segment tracks
 	TArray<TSharedPtr<STrackNode>> AnimNodes;
 
-	FLinearColor SelectedColor = FEditorStyle::GetSlateColor("SelectionColor").GetSpecifiedColor();
+	FLinearColor SelectedColor = FAppStyle::GetSlateColor("SelectionColor").GetSpecifiedColor();
 
 	TSharedPtr<SVerticalBox> AnimSegmentTracks;
 
@@ -82,6 +85,7 @@ void SAnimSegmentsPanel::Construct(const FArguments& InArgs)
 					.TrackNumDiscreteValues(InArgs._TrackNumDiscreteValues)
 					.OnTrackRightClickContextMenu(InArgs._OnTrackRightClickContextMenu)
 					.OnTrackDragDrop(this, &SAnimSegmentsPanel::OnTrackDragDrop)
+					.OnAssetDragDrop(this, &SAnimSegmentsPanel::OnAssetDragDrop)
 				];
 		}
 		else
@@ -104,6 +108,7 @@ void SAnimSegmentsPanel::Construct(const FArguments& InArgs)
 					.TrackNumDiscreteValues(InArgs._TrackNumDiscreteValues)
 					.OnTrackRightClickContextMenu(InArgs._OnTrackRightClickContextMenu)
 					.OnTrackDragDrop(this, &SAnimSegmentsPanel::OnTrackDragDrop)
+					.OnAssetDragDrop(this, &SAnimSegmentsPanel::OnAssetDragDrop)
 				];
 		}
 
@@ -146,6 +151,7 @@ void SAnimSegmentsPanel::Construct(const FArguments& InArgs)
 				.OnTrackNodeDropped(this, &SAnimSegmentsPanel::OnSegmentDropped, SegmentIdx)
 				.OnNodeRightClickContextMenu(this, &SAnimSegmentsPanel::SummonSegmentNodeContextMenu, SegmentIdx)
 				.OnTrackNodeClicked(this, &SAnimSegmentsPanel::OnAnimSegmentNodeClicked, SegmentIdx)
+				.OnTrackNodeDoubleClicked(this, &SAnimSegmentsPanel::OnAnimSegmentNodeDoubleClicked, SegmentIdx)
 				.NodeSelectionSet(InArgs._NodeSelectionSet)
 			);
 		}
@@ -203,8 +209,7 @@ FString	SAnimSegmentsPanel::GetAnimSegmentName(int32 AnimSegmentIndex) const
 	if (ValidIndex(AnimSegmentIndex))
 	{
 		FString TitleLabel;
-		UAnimSequenceBase* AnimReference = AnimTrack->AnimSegments[AnimSegmentIndex].AnimReference;
-		if(AnimReference)
+		if(const UAnimSequenceBase* AnimReference = AnimTrack->AnimSegments[AnimSegmentIndex].GetAnimReference())
 		{
 			FString AssetName = AnimReference->GetName();
 			if (AnimTrack->AnimSegments[AnimSegmentIndex].IsValid() == false)
@@ -231,8 +236,7 @@ FText SAnimSegmentsPanel::GetAnimSegmentDetailedInfo(int32 AnimSegmentIndex) con
 	if (ValidIndex(AnimSegmentIndex))
 	{
 		FAnimSegment& AnimSegment = AnimTrack->AnimSegments[AnimSegmentIndex];
-		UAnimSequenceBase * Anim = AnimSegment.AnimReference;
-		if ( Anim != NULL )
+		if (const UAnimSequenceBase* AnimReference = AnimTrack->AnimSegments[AnimSegmentIndex].GetAnimReference())
 		{
 			static const FNumberFormattingOptions FormatOptions = FNumberFormattingOptions()
 				.SetMinimumFractionalDigits(2)
@@ -240,11 +244,12 @@ FText SAnimSegmentsPanel::GetAnimSegmentDetailedInfo(int32 AnimSegmentIndex) con
 
 			if (AnimTrack->AnimSegments[AnimSegmentIndex].IsValid())
 			{
-				return FText::Format(LOCTEXT("AnimSegmentPanel_GetAnimSegmentDetailedInfoFmt", "{0} {1}"), FText::FromString(Anim->GetName()), FText::AsNumber(AnimSegment.GetLength(), &FormatOptions));
+				return FText::Format(LOCTEXT("AnimSegmentPanel_GetAnimSegmentDetailedInfoFmt", "{0} {1} {2}"), FText::FromString(AnimReference->GetName()), FText::AsNumber(AnimSegment.GetLength(), &FormatOptions), 
+					AnimTrack->AnimSegments[AnimSegmentIndex].IsPlayLengthOutOfDate() ? LOCTEXT("AnimSegmentPanel_GetAnimSegmentDetailedInfoFmt_Warning_PlayTimeIncorrect", "(segment length does not match animation play length)") : FText::FromString(FString()));
 			}
 			else
 			{
-				return FText::Format(LOCTEXT("AnimSegmentPanel_GetAnimSegmentDetailedInfoFmt_Error_RecursiveReference", "{0} {1} - ERROR: Recursive Reference Found"), FText::FromString(Anim->GetName()), FText::AsNumber(AnimSegment.GetLength(), &FormatOptions));  
+				return FText::Format(LOCTEXT("AnimSegmentPanel_GetAnimSegmentDetailedInfoFmt_Error_RecursiveReference", "{0} {1} - ERROR: Recursive Reference Found"), FText::FromString(AnimReference->GetName()), FText::AsNumber(AnimSegment.GetLength(), &FormatOptions));  
 			}
 			
 		}
@@ -318,11 +323,8 @@ void SAnimSegmentsPanel::AddAnimSegment( UAnimSequenceBase* NewSequenceBase, flo
 	OnPreAnimUpdateDelegate.ExecuteIfBound();
 
 	FAnimSegment NewSegment;
-	NewSegment.AnimReference = NewSequenceBase;
-	NewSegment.AnimStartTime = 0.f;
-	NewSegment.AnimEndTime = NewSequenceBase->SequenceLength;
-	NewSegment.AnimPlayRate = 1.f;
-	NewSegment.LoopingCount = 1;
+	NewSegment.SetAnimReference(NewSequenceBase, true);
+
 	NewSegment.StartPos = NewStartPos;
 
 	AnimTrack->AnimSegments.Add(NewSegment);
@@ -334,7 +336,7 @@ void SAnimSegmentsPanel::ReplaceAnimSegment(int32 AnimSegmentIndex, UAnimSequenc
 	const FScopedTransaction Transaction(LOCTEXT("AnimSegmentPanel_ReplaceSegment", "Replace Segment"));
 	if (AnimTrack->AnimSegments.IsValidIndex(AnimSegmentIndex))
 	{
-		UAnimSequenceBase* OldSequenceBase = AnimTrack->AnimSegments[AnimSegmentIndex].AnimReference;
+		UAnimSequenceBase* OldSequenceBase = AnimTrack->AnimSegments[AnimSegmentIndex].GetAnimReference();
 		if (OldSequenceBase != NewSequenceBase)
 		{
 			OnPreAnimUpdateDelegate.ExecuteIfBound();
@@ -362,14 +364,19 @@ void SAnimSegmentsPanel::ReplaceAnimSegment(UAnimSequenceBase* NewSequenceBase, 
 	ReplaceAnimSegment(SegmentIdx, NewSequenceBase);
 }
 
-bool SAnimSegmentsPanel::IsValidToAdd(UAnimSequenceBase* NewSequenceBase) const
+bool SAnimSegmentsPanel::IsValidToAdd(UAnimSequenceBase* NewSequenceBase, FText* OutReason /*= nullptr*/) const
 {
-	if (AnimTrack == NULL || NewSequenceBase == NULL)
+	if (AnimTrack == nullptr || NewSequenceBase == nullptr)
 	{
 		return false;
 	}
 
-	return (AnimTrack->IsValidToAdd(NewSequenceBase));
+	if (!AnimTrack->IsValidToAdd(NewSequenceBase, OutReason) || (OnIsAnimAssetValid.IsBound() && !OnIsAnimAssetValid.Execute(NewSequenceBase, OutReason)))
+    {
+        return false;
+    } 
+
+	return true;
 }
 
 void SAnimSegmentsPanel::RemoveAnimSegment(int32 AnimSegmentIndex)
@@ -395,8 +402,7 @@ void SAnimSegmentsPanel::OpenAsset(int32 AnimSegmentIndex)
 {
 	if (ValidIndex(AnimSegmentIndex))
 	{
-		UAnimSequenceBase* Asset = AnimTrack->AnimSegments[AnimSegmentIndex].AnimReference;
-		if (Asset)
+		if (UAnimSequenceBase* Asset = AnimTrack->AnimSegments[AnimSegmentIndex].GetAnimReference())
 		{
 			GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->OpenEditorForAsset(Asset);
 		}
@@ -407,28 +413,27 @@ void SAnimSegmentsPanel::FillSubMenu(FMenuBuilder& MenuBuilder, int32 AnimSegmen
 {
 	if (ValidIndex(AnimSegmentIndex))
 	{
-		UAnimSequenceBase* OldSequenceBase = AnimTrack->AnimSegments[AnimSegmentIndex].AnimReference;
+		UAnimSequenceBase* OldSequenceBase = AnimTrack->AnimSegments[AnimSegmentIndex].GetAnimReference();
 
 		if (ensureAlways(OldSequenceBase))
 		{
 			FAssetPickerConfig AssetPickerConfig;
 
 			/** The asset picker will only show skeletons */
-			AssetPickerConfig.Filter.ClassNames.Add(*OldSequenceBase->GetClass()->GetName());
+			AssetPickerConfig.Filter.ClassPaths.Add(OldSequenceBase->GetClass()->GetClassPathName());
 			AssetPickerConfig.Filter.bRecursiveClasses = false;
 			AssetPickerConfig.bAllowNullSelection = false;
 
-			USkeleton* Skeleton = OldSequenceBase->GetSkeleton();
-			AssetPickerConfig.Filter.TagsAndValues.Add(TEXT("Skeleton"), FAssetData(Skeleton).GetExportTextName());
-
 			// only do this for anim sequence because we don't know additive or not otherwise from asset registry
+			TEnumAsByte<EAdditiveAnimationType> AdditiveType;
 			bool bFilterAdditive = OldSequenceBase->GetClass() == UAnimSequence::StaticClass();
-			if (bFilterAdditive)
+			if(bFilterAdditive)
 			{
-				// we do just check additiveanimtype, not IsValidAdditive because we only check asset registry string, we just assume this only checks additive anim type
-				// in order to check IsValidAdditive, we have to load all animations, which is too slow
-				AssetPickerConfig.OnShouldFilterAsset = FOnShouldFilterAsset::CreateRaw(this, &SAnimSegmentsPanel::ShouldFilter, CastChecked<UAnimSequence>(OldSequenceBase)->AdditiveAnimType);
+				AdditiveType = CastChecked<UAnimSequence>(OldSequenceBase)->AdditiveAnimType;
 			}
+
+			AssetPickerConfig.OnShouldFilterAsset = FOnShouldFilterAsset::CreateRaw(this, &SAnimSegmentsPanel::ShouldFilter, OldSequenceBase->GetSkeleton(), bFilterAdditive, AdditiveType);
+
 			/** The delegate that fires when an asset was selected */
 			AssetPickerConfig.OnAssetSelected = FOnAssetSelected::CreateRaw(this, &SAnimSegmentsPanel::ReplaceAnimSegment, AnimSegmentIndex);
 
@@ -450,12 +455,20 @@ void SAnimSegmentsPanel::FillSubMenu(FMenuBuilder& MenuBuilder, int32 AnimSegmen
 	}
 }
 
-bool SAnimSegmentsPanel::ShouldFilter(const FAssetData& DataToDisplay, TEnumAsByte<EAdditiveAnimationType> InAdditiveType)
+bool SAnimSegmentsPanel::ShouldFilter(const FAssetData& DataToDisplay, USkeleton* InSkeleton, bool bInFilterAdditive, TEnumAsByte<EAdditiveAnimationType> InAdditiveType)
 {
-	UEnum* AdditiveTypeEnum = StaticEnum<EAdditiveAnimationType>();
-	const FString EnumString = DataToDisplay.GetTagValueRef<FString>(GET_MEMBER_NAME_CHECKED(UAnimSequence, AdditiveAnimType));
-	EAdditiveAnimationType AdditiveType = (!EnumString.IsEmpty() ? (EAdditiveAnimationType)AdditiveTypeEnum->GetValueByName(*EnumString) : AAT_None);
-	return (AdditiveType != InAdditiveType);
+	bool bFilter = false;
+	if(bInFilterAdditive)
+	{
+		UEnum* AdditiveTypeEnum = StaticEnum<EAdditiveAnimationType>();
+		const FString EnumString = DataToDisplay.GetTagValueRef<FString>(GET_MEMBER_NAME_CHECKED(UAnimSequence, AdditiveAnimType));
+		EAdditiveAnimationType AdditiveType = (!EnumString.IsEmpty() ? (EAdditiveAnimationType)AdditiveTypeEnum->GetValueByName(*EnumString) : AAT_None);
+		bFilter |= (AdditiveType != InAdditiveType);
+	}
+
+	bFilter |= InSkeleton->ShouldFilterAsset(DataToDisplay);
+
+	return bFilter;
 }
 
 void SAnimSegmentsPanel::OnTrackDragDrop( TSharedPtr<FDragDropOperation> DragDropOp, float DataPos )
@@ -465,29 +478,83 @@ void SAnimSegmentsPanel::OnTrackDragDrop( TSharedPtr<FDragDropOperation> DragDro
 		TSharedPtr<FAssetDragDropOp> AssetOp = StaticCastSharedPtr<FAssetDragDropOp>(DragDropOp);
 		if (AssetOp->HasAssets())
 		{
-			UAnimSequenceBase* DroppedSequence = FAssetData::GetFirstAsset<UAnimSequenceBase>(AssetOp->GetAssets());
-			if (IsValidToAdd(DroppedSequence))
+			bool bFailedToAdd = false; 
+		
+			if(bChildAnimMontage)
 			{
-				if (bChildAnimMontage)
+				UAnimSequenceBase* DroppedSequence = FAssetData::GetFirstAsset<UAnimSequenceBase>(AssetOp->GetAssets());
+				if (IsValidToAdd(DroppedSequence))
 				{
 					ReplaceAnimSegment(DroppedSequence, DataPos);
 				}
 				else
 				{
-					AddAnimSegment(DroppedSequence, DataPos);
+					bFailedToAdd = true;
 				}
 			}
 			else
 			{
-				FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("FailedToAdd", "Make sure the target animation is valid. Check to make sure if it's same additive type if additive."));
+				const FScopedTransaction Transaction( LOCTEXT("AnimSegmentPanel_AddSegments", "Add Segments") );
+			
+				for(const FAssetData& DroppedAssetData : AssetOp->GetAssets())
+				{
+					UAnimSequenceBase* DroppedSequence = Cast<UAnimSequenceBase>(DroppedAssetData.GetAsset());
+					if (IsValidToAdd(DroppedSequence))
+					{
+						AddAnimSegment(DroppedSequence, DataPos);
+					}
+					else
+					{
+						bFailedToAdd = true;
+					}
+				}
 			}
 		}
 	}
 }
 
+bool SAnimSegmentsPanel::OnAssetDragDrop(TSharedPtr<FAssetDragDropOp> AssetDragDropOp)
+{
+	if (AssetDragDropOp.IsValid())
+	{
+		if (AssetDragDropOp->HasAssets())
+		{			
+			for(const FAssetData& DroppedAssetData : AssetDragDropOp->GetAssets())
+			{
+				FText FailureReason;
+				UAnimSequenceBase* DroppedSequence = Cast<UAnimSequenceBase>(DroppedAssetData.GetAsset());
+
+				bool bInvalidAsset = false;
+				if (!IsValidToAdd(DroppedSequence, &FailureReason))
+				{
+					AssetDragDropOp->SetToolTip(FailureReason, FAppStyle::GetBrush(TEXT("Graph.ConnectorFeedback.Error")));
+					return false;
+				}
+			}
+			
+			AssetDragDropOp->SetToolTip(FText(), FAppStyle::GetBrush(TEXT("Graph.ConnectorFeedback.OK")));
+			return true;
+		}
+	}
+
+	return false;
+}
+
 void SAnimSegmentsPanel::OnAnimSegmentNodeClicked(int32 SegmentIdx)
 {
 	OnAnimSegmentNodeClickedDelegate.ExecuteIfBound(SegmentIdx);
+}
+
+void SAnimSegmentsPanel::OnAnimSegmentNodeDoubleClicked(int32 SegmentIdx)
+{
+	if (OnAnimSegmentNodeDoubleClickedDelegate.IsBound())
+	{
+		OnAnimSegmentNodeDoubleClickedDelegate.ExecuteIfBound(SegmentIdx);
+	}
+	else
+	{
+		OpenAsset(SegmentIdx);
+	}
 }
 
 void SAnimSegmentsPanel::RemoveSelectedAnimSegments()

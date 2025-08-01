@@ -23,7 +23,7 @@
 #define TickRequesterId FName("StropheMessages")
 
 FXmppMessagesStrophe::FXmppMessagesStrophe(FXmppConnectionStrophe& InConnectionManager)
-	: FTickerObjectBase(0.0f, FBackgroundableTicker::GetCoreTicker())
+	: FTSTickerObjectBase(0.0f, FTSBackgroundableTicker::GetCoreTicker())
 	, ConnectionManager(InConnectionManager)
 {
 }
@@ -188,7 +188,7 @@ bool FXmppMessagesStrophe::SendMessage(const FXmppUserJid& RecipientId, const FS
 {
 	FString SerializedPayload;
 	auto JsonWriter = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&SerializedPayload);
-	check(FJsonSerializer::Serialize(Payload, JsonWriter));
+	verify(FJsonSerializer::Serialize(Payload, JsonWriter));
 
 	return SendMessage(RecipientId, Type, SerializedPayload, true);
 }

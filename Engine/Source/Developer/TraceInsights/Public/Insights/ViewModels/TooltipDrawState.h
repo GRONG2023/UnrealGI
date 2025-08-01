@@ -55,11 +55,11 @@ public:
 	void Reset();
 
 	void ResetContent();
-	void AddTitle(const FString& Title);
-	void AddTitle(const FString& Title, const FLinearColor& Color);
-	void AddNameValueTextLine(const FString& Name, const FString& Value);
-	void AddTextLine(const FString& Text, const FLinearColor& Color);
-	void AddTextLine(const float X, const float Y, const FString& Text, const FLinearColor& Color);
+	void AddTitle(FStringView Title);
+	void AddTitle(FStringView Title, const FLinearColor& Color);
+	void AddNameValueTextLine(FStringView Name, FStringView Value);
+	void AddTextLine(FStringView Text, const FLinearColor& Color);
+	void AddTextLine(const float X, const float Y, FStringView Text, const FLinearColor& Color);
 	void UpdateLayout(); // updates ValueOffsetX and DesiredSize
 
 	const FLinearColor& GetBackgroundColor() const { return BackgroundColor; }
@@ -82,6 +82,11 @@ public:
 
 	void Draw(const FDrawContext& DrawContext) const;
 
+	void SetFontScale(float InFontScale) { FontScale = InFontScale; }
+	float GetFontScale() const { return FontScale; }
+
+	void SetImage(TSharedPtr<FSlateBrush> InImageBrush) { ImageBrush = InImageBrush; }
+
 private:
 	const FSlateBrush* WhiteBrush;
 	const FSlateFontInfo Font;
@@ -99,7 +104,10 @@ private:
 	float Opacity;
 	float DesiredOpacity;
 
+	float FontScale;
+
 	TArray<FDrawTextInfo> Texts;
+	TSharedPtr<FSlateBrush> ImageBrush;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SoundFieldRendering.h"
+#include "Engine/Engine.h"
 #include "HAL/IConsoleManager.h"
 #include "DSP/Dsp.h"
 #include "AudioMixer.h"
@@ -81,7 +82,7 @@ FSoundFieldDecoder::FSoundFieldDecoder()
 	TargetSpeakerGains = FoaVirtualSpeakerWordLockedGains;
 }
 
-void FSoundFieldDecoder::DecodeAudioDirectlyToDeviceOutputPositions(const FAmbisonicsSoundfieldBuffer& InputData, const FSoundfieldSpeakerPositionalData& OutputPositions, Audio::AlignedFloatBuffer& OutputData)
+void FSoundFieldDecoder::DecodeAudioDirectlyToDeviceOutputPositions(const FAmbisonicsSoundfieldBuffer& InputData, const FSoundfieldSpeakerPositionalData& OutputPositions, Audio::FAlignedFloatBuffer& OutputData)
 {
 	if (InputData.NumChannels == 0 || InputData.AudioBuffer.Num() == 0)
 	{
@@ -279,7 +280,7 @@ void FSoundFieldDecoder::EvenOrderDecodeLoop(const int32 NumFrames, const int32 
 
 
 // this will probably be the use case for 5.1, prioritize optimizations here
-void FSoundFieldDecoder::DecodeAudioToSevenOneAndDownmixToDevice(const FAmbisonicsSoundfieldBuffer& InputData, const FSoundfieldSpeakerPositionalData& OutputPositions, Audio::AlignedFloatBuffer& OutputData)
+void FSoundFieldDecoder::DecodeAudioToSevenOneAndDownmixToDevice(const FAmbisonicsSoundfieldBuffer& InputData, const FSoundfieldSpeakerPositionalData& OutputPositions, Audio::FAlignedFloatBuffer& OutputData)
 {
 	if (InputData.NumChannels == 0 || InputData.AudioBuffer.Num() == 0)
 	{
@@ -384,7 +385,7 @@ void FSoundFieldDecoder::DecodeAudioToSevenOneAndDownmixToDevice(const FAmbisoni
 	else // Interpolated decode
 	{
 		SpeakerGainLerper.Init(CurrentSpeakerGains, TargetSpeakerGains, NumFrames);
-		const Audio::AlignedFloatBuffer& SpeakerGainLerpDeltas = SpeakerGainLerper.GetDeltaBuffer();
+		const Audio::FAlignedFloatBuffer& SpeakerGainLerpDeltas = SpeakerGainLerper.GetDeltaBuffer();
 		const float* RESTRICT SpeakerGainLerpDeltasPtr = SpeakerGainLerpDeltas.GetData();
 		VectorRegister CurrSpeakerGainDelta = VectorRegister();
 
@@ -640,21 +641,17 @@ TArray<Audio::FChannelPositionInfo>* FSoundFieldDecoder::GetDefaultChannelPositi
 	if (GEngine)
 	{
 		FAudioDevice* AudioDevice = GEngine->GetMainAudioDeviceRaw();
-		if (AudioDevice->IsAudioMixerEnabled())
+		Audio::FMixerDevice* MixerDevice = static_cast<Audio::FMixerDevice*>(AudioDevice);
+		if (MixerDevice)
 		{
-			// downcast.
-			Audio::FMixerDevice* MixerDevice = static_cast<Audio::FMixerDevice*>(AudioDevice);
-			if (MixerDevice)
-			{
-				return MixerDevice->GetDefaultPositionMap(InNumChannels);
-			}
+			return MixerDevice->GetDefaultPositionMap(InNumChannels);
 		}
 	}
 
 	return nullptr;
 }
 
-void FSoundFieldDecoder::FoaRotationInPlace(Audio::AlignedFloatBuffer& InOutBuffer, const float XRotDegrees, const float YRotDegrees, const float ZRotDegrees)
+void FSoundFieldDecoder::FoaRotationInPlace(Audio::FAlignedFloatBuffer& InOutBuffer, const float XRotDegrees, const float YRotDegrees, const float ZRotDegrees)
 {
 	const int32 NumSamples = InOutBuffer.Num();
 	const int32 NumFrames = NumSamples / 4; // FOA
@@ -702,7 +699,7 @@ FSoundFieldEncoder::FSoundFieldEncoder()
 {
 }
 
-void FSoundFieldEncoder::EncodeAudioDirectlyFromOutputPositions(const Audio::AlignedFloatBuffer& InputData, const FSoundfieldSpeakerPositionalData& InputPositions, const FAmbisonicsSoundfieldSettings& Settings, FAmbisonicsSoundfieldBuffer& OutputData)
+void FSoundFieldEncoder::EncodeAudioDirectlyFromOutputPositions(const Audio::FAlignedFloatBuffer& InputData, const FSoundfieldSpeakerPositionalData& InputPositions, const FAmbisonicsSoundfieldSettings& Settings, FAmbisonicsSoundfieldBuffer& OutputData)
 {
 	constexpr const float DEG_2_RAD = PI / 180.0f;
 

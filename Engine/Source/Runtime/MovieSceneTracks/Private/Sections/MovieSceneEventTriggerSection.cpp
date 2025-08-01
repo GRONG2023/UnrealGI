@@ -11,6 +11,8 @@
 #include "EntitySystem/MovieSceneInstanceRegistry.h"
 #include "EntitySystem/MovieSceneEntitySystemLinker.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneEventTriggerSection)
+
 
 UMovieSceneEventTriggerSection::UMovieSceneEventTriggerSection(const FObjectInitializer& ObjInit)
 	: Super(ObjInit)
@@ -82,7 +84,7 @@ void UMovieSceneEventTriggerSection::ImportEntityImpl(UMovieSceneEntitySystemLin
 		Events[EventIndex].Ptrs,
 		Params.GetObjectBindingID(),
 		ThisInstance.GetSequenceID(),
-		Times[EventIndex] * Context.GetSequenceToRootTransform()
+		Times[EventIndex] * Context.GetSequenceToRootSequenceTransform()
 	};
 
 	EventSystem->AddEvent(ThisInstance.GetRootInstanceHandle(), TriggerData);
@@ -107,3 +109,4 @@ bool UMovieSceneEventTriggerSection::PopulateEvaluationFieldImpl(const TRange<FF
 
 	return true;
 }
+

@@ -5,10 +5,14 @@
 =============================================================================*/
 
 #include "UObject/UObjectArray.h"
+#include "HAL/IConsoleManager.h"
+#include "HAL/LowLevelMemStats.h"
 #include "Misc/ScopeLock.h"
+#include "ProfilingDebugging/AssetMetadataTrace.h"
 #include "UObject/UObjectAllocator.h"
 #include "UObject/Class.h"
 #include "UObject/UObjectIterator.h"
+#include "UObject/ReachabilityAnalysisState.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogUObjectArray, Log, All);
 
@@ -17,8 +21,8 @@ FUObjectClusterContainer GUObjectClusters;
 #if STATS || ENABLE_STATNAMEDEVENTS_UOBJECT
 void FUObjectItem::CreateStatID() const
 {
-	// @todo can we put this in a header?
-//		SCOPE_CYCLE_COUNTER(STAT_CreateStatID);
+	LLM_SCOPE_BYNAME(TEXT("Debug/CreateStatID"));
+	QUICK_SCOPE_CYCLE_COUNTER(CreateStatId);
 
 	FString LongName;
 	LongName.Reserve(255);
@@ -43,7 +47,7 @@ void FUObjectItem::CreateStatID() const
 	for (int32 i = ClassChain.Num() - 1; i >= 0; i--)
 	{
 		Target = ClassChain[i];
-		const FNameEntry* NameEntry = Target->GetFName().GetDisplayNameEntry();
+		const FNameEntry* NameEntry = Target->GetFNameForStatID().GetDisplayNameEntry();
 		if (bFirstEntry)
 		{
 			NameEntry->AppendNameToPathString(LongName);
@@ -81,8 +85,8 @@ FUObjectArray::FUObjectArray()
 : ObjFirstGCIndex(0)
 , ObjLastNonGCIndex(INDEX_NONE)
 , MaxObjectsNotConsideredByGC(0)
-, OpenForDisregardForGC(!HACK_HEADER_GENERATOR)
-, MasterSerialNumber(START_SERIAL_NUMBER)
+, OpenForDisregardForGC(true)
+, PrimarySerialNumber(START_SERIAL_NUMBER)
 {
 	GCoreObjectArrayForDebugVisualizers = &GUObjectArray.ObjObjects;
 }
@@ -178,6 +182,17 @@ void FUObjectArray::CloseDisregardForGC()
 
 void FUObjectArray::DisableDisregardForGC()
 {
+	if (!GExitPurge && (ObjFirstGCIndex > 0 || DisregardForGCEnabled()))
+	{
+		void OnDisregardForGCSetDisabled(int32 NumObjects);
+		// If disregard for GC was already closed then ObjFirstGCIndex is the number of objects we need to scan, otherwise disregard for GC is still open and we need to scan all objects
+		int32 NumDisregardForGCObjects = ObjFirstGCIndex > 0 ? ObjFirstGCIndex : GetObjectArrayNum();
+		if (NumDisregardForGCObjects > 0)
+		{
+			OnDisregardForGCSetDisabled(NumDisregardForGCObjects);
+		}
+	}
+
 	MaxObjectsNotConsideredByGC = 0;
 	ObjFirstGCIndex = 0;
 	if (IsOpenForDisregardForGC())
@@ -186,15 +201,25 @@ void FUObjectArray::DisableDisregardForGC()
 	}
 }
 
-void FUObjectArray::AllocateUObjectIndex(UObjectBase* Object, bool bMergingThreads /*= false*/)
+void FUObjectArray::AllocateUObjectIndex(UObjectBase* Object, EInternalObjectFlags InitialFlags, int32 AlreadyAllocatedIndex, int32 SerialNumber)
 {
+	LLM_SCOPE(ELLMTag::UObject);
+	// Clear asset scopes
+	LLM_SCOPE_DYNAMIC_STAT_OBJECTPATH_FNAME(FName{NAME_Default}, ELLMTagSet::Assets);
+	LLM_SCOPE_DYNAMIC_STAT_OBJECTPATH_FNAME(FName{NAME_Default}, ELLMTagSet::AssetClasses);
+	UE_TRACE_METADATA_SCOPE_ASSET_FNAME(NAME_None, NAME_None, NAME_None);
+
 	int32 Index = INDEX_NONE;
-	check(Object->InternalIndex == INDEX_NONE || bMergingThreads);
+	check(Object->InternalIndex == INDEX_NONE);
 
 	LockInternalArray();
 
+	if (AlreadyAllocatedIndex >= 0)
+	{
+		Index = AlreadyAllocatedIndex;
+	}
 	// Special non- garbage collectable range.
-	if (OpenForDisregardForGC && DisregardForGCEnabled())
+	else if (OpenForDisregardForGC && DisregardForGCEnabled())
 	{
 		Index = ++ObjLastNonGCIndex;
 		// Check if we're not out of bounds, unless there hasn't been any gc objects yet
@@ -213,10 +238,8 @@ void FUObjectArray::AllocateUObjectIndex(UObjectBase* Object, bool bMergingThrea
 		if (ObjAvailableList.Num() > 0)
 		{
 			Index = ObjAvailableList.Pop();
-#if UE_GC_TRACK_OBJ_AVAILABLE
-			const int32 AvailableCount = ObjAvailableCount.Decrement();
+			const int32 AvailableCount = ObjAvailableList.Num();
 			checkSlow(AvailableCount >= 0);
-#endif
 		}
 		else
 		{
@@ -229,11 +252,22 @@ void FUObjectArray::AllocateUObjectIndex(UObjectBase* Object, bool bMergingThrea
 	// Add to global table.
 	FUObjectItem* ObjectItem = IndexToObject(Index);
 	UE_CLOG(ObjectItem->Object != nullptr, LogUObjectArray, Fatal, TEXT("Attempting to add %s at index %d but another object (0x%016llx) exists at that index!"), *Object->GetFName().ToString(), Index, (int64)(PTRINT)ObjectItem->Object);
-	ObjectItem->ResetSerialNumberAndFlags();
+	ObjectItem->Object = Object;
 	// At this point all not-compiled-in objects are not fully constructed yet and this is the earliest we can mark them as such
-	ObjectItem->SetFlags(EInternalObjectFlags::PendingConstruction);
-	ObjectItem->Object = Object;		
+	ObjectItem->Flags = (int32)EInternalObjectFlags::PendingConstruction;
+	if (!(IsOpenForDisregardForGC() & GUObjectArray.DisregardForGCEnabled())) //-V792
+	{
+		ObjectItem->Flags |= (int32)UE::GC::GReachableObjectFlag;
+	}
+	ObjectItem->ClusterRootIndex = 0;
+	ObjectItem->SerialNumber = SerialNumber;
 	Object->InternalIndex = Index;
+
+	// This needs to happen after the InternalIndex is set because setting root flags may result in the object being added to UE::GC::Priate::GRoots array 
+	if (InitialFlags != EInternalObjectFlags::None)
+	{
+		ObjectItem->ThisThreadAtomicallySetFlag(InitialFlags);
+	}
 
 	UnlockInternalArray();
 
@@ -283,6 +317,8 @@ void FUObjectArray::RemoveObjectFromDeleteListeners(UObjectBase* Object)
  */
 void FUObjectArray::FreeUObjectIndex(UObjectBase* Object)
 {
+	LLM_SCOPE(ELLMTag::UObject);
+
 	// This should only be happening on the game thread (GC runs only on game thread when it's freeing objects)
 	check(IsInGameThread() || IsInGarbageCollectorThread());
 
@@ -291,17 +327,23 @@ void FUObjectArray::FreeUObjectIndex(UObjectBase* Object)
 	int32 Index = Object->InternalIndex;
 	FUObjectItem* ObjectItem = IndexToObject(Index);
 	UE_CLOG(ObjectItem->Object != Object, LogUObjectArray, Fatal, TEXT("Removing object (0x%016llx) at index %d but the index points to a different object (0x%016llx)!"), (int64)(PTRINT)Object, Index, (int64)(PTRINT)ObjectItem->Object);
+
+	// Clear root flags to remove this object's index from UE::GC::Private::GRoots array 
+	if ((ObjectItem->Flags & (int32)EInternalObjectFlags_RootFlags) != 0)
+	{
+		ObjectItem->ThisThreadAtomicallyClearedFlag(EInternalObjectFlags_RootFlags);
+	}
+
 	ObjectItem->Object = nullptr;
-	ObjectItem->ResetSerialNumberAndFlags();
+	ObjectItem->Flags = 0;
+	ObjectItem->ClusterRootIndex = 0;
+	ObjectItem->SerialNumber = 0;
 
 	// You cannot safely recycle indicies in the non-GC range
 	// No point in filling this list when doing exit purge. Nothing should be allocated afterwards anyway.
-	if (Index > ObjLastNonGCIndex && !GExitPurge)  
+	if (Index > ObjLastNonGCIndex && !GExitPurge && bShouldRecycleObjectIndices)
 	{
 		ObjAvailableList.Add(Index);
-#if UE_GC_TRACK_OBJ_AVAILABLE
-		ObjAvailableCount.Increment();
-#endif
 	}
 }
 
@@ -398,14 +440,17 @@ int32 FUObjectArray::AllocateSerialNumber(int32 Index)
 	int32 SerialNumber = *SerialNumberPtr;
 	if (!SerialNumber)
 	{
-		SerialNumber = MasterSerialNumber.Increment();
-		UE_CLOG(SerialNumber <= START_SERIAL_NUMBER, LogUObjectArray, Fatal, TEXT("UObject serial numbers overflowed (trying to allocate serial number %d)."), SerialNumber);
-		int32 ValueWas = FPlatformAtomics::InterlockedCompareExchange((int32*)SerialNumberPtr, SerialNumber, 0);
-		if (ValueWas != 0)
-		{
-			// someone else go it first, use their value
-			SerialNumber = ValueWas;
-		}
+		// Open around PrimarySerialNumber as if we fail/abort a transaction we dont need to undo this, simply allow it to grow for the next use
+		UE_AUTORTFM_OPEN({
+			SerialNumber = PrimarySerialNumber.Increment();
+			UE_CLOG(SerialNumber <= START_SERIAL_NUMBER, LogUObjectArray, Fatal, TEXT("UObject serial numbers overflowed (trying to allocate serial number %d)."), SerialNumber);
+			int32 ValueWas = FPlatformAtomics::InterlockedCompareExchange((int32*)SerialNumberPtr, SerialNumber, 0);
+			if (ValueWas != 0)
+			{
+				// someone else go it first, use their value
+				SerialNumber = ValueWas;
+			}
+		});
 	}
 	checkSlow(SerialNumber > START_SERIAL_NUMBER);
 	return SerialNumber;
@@ -435,4 +480,98 @@ void FUObjectArray::ShutdownUObjectArray()
 		}
 		UE_CLOG(UObjectCreateListeners.Num(), LogUObjectArray, Fatal, TEXT("All UObject delete listeners should be unregistered when shutting down the UObject array"));
 	}
+}
+
+void FUObjectArray::DumpUObjectCountsToLog() const
+{
+	UE_LOG(LogUObjectArray, Display, TEXT("Dumping allocated UObject counts to log:"));
+	struct FClassEntry
+	{
+		UClass* Class = nullptr;
+		int32 NumInstances = 0;
+	};
+	int32 NumClasses = 0;
+	int32 NumUObjects = 0;
+	for (int32 ObjectIndex = 0; ObjectIndex < GetObjectArrayNum(); ++ObjectIndex)
+	{
+		const FUObjectItem& ObjectItem = GetObjectItemArrayUnsafe()[ObjectIndex];
+		UObject* Object = (UObject*)ObjectItem.Object;
+		if (Object && Object->IsA(UClass::StaticClass()))
+		{
+			NumClasses++;
+		}
+	}
+
+	TMap<UClass*, FClassEntry> ClassCountMap;
+	ClassCountMap.Reserve(NumClasses);
+
+	for (int32 ObjectIndex = 0; ObjectIndex < GetObjectArrayNum(); ++ObjectIndex)
+	{
+		const FUObjectItem& ObjectItem = GetObjectItemArrayUnsafe()[ObjectIndex];
+		if (ObjectItem.Object)
+		{
+			UObject* Object = (UObject*)ObjectItem.Object;
+			UClass* ObjectClass = Object->GetClass();
+			FClassEntry& ClassEntry = ClassCountMap.FindOrAdd(ObjectClass);
+			ClassEntry.Class = ObjectClass;
+			ClassEntry.NumInstances++;
+			NumUObjects++;
+		}
+	}
+
+	TArray<FClassEntry> ClassArray;
+	ClassCountMap.GenerateValueArray(ClassArray);
+
+	ClassArray.Sort([](const FClassEntry& A, const FClassEntry& B) { return A.NumInstances > B.NumInstances; });
+
+	const int32 MinInstanceNum = 10; // Don't print classes with fewer than the specified number of instances
+	const double MaxPrintedInstancePercent = 0.95; // Finish printing when the specified percent of instances has already been printed
+	int32 NumClassesSkipped = 0;
+	int32 NumInstancesSkipped = 0;
+	int32 NumInstancesPrinted = 0;
+	double PercentOfInstancesPrinted = 0.0;
+
+	for (const FClassEntry& ClassEntry : ClassArray)
+	{		
+		if (ClassEntry.NumInstances > MinInstanceNum && PercentOfInstancesPrinted <= MaxPrintedInstancePercent)
+		{
+			UE_LOG(LogUObjectArray, Display, TEXT("%8d instances of %s"), ClassEntry.NumInstances, *ClassEntry.Class->GetPathName());
+			NumInstancesPrinted += ClassEntry.NumInstances;
+			PercentOfInstancesPrinted = (double)NumInstancesPrinted / NumUObjects;
+		}
+		else
+		{
+			NumClassesSkipped++;
+			NumInstancesSkipped += ClassEntry.NumInstances;
+		}
+	}
+	if (NumInstancesSkipped > 0)
+	{
+		if (PercentOfInstancesPrinted > MaxPrintedInstancePercent)
+		{
+			UE_LOG(LogUObjectArray, Display, TEXT("%8d instances in the remaining %.3f%% of instances of %d classes"), NumInstancesSkipped, (1.0f - PercentOfInstancesPrinted) * 100.0f, NumClassesSkipped);
+		}
+		else
+		{
+			UE_LOG(LogUObjectArray, Display, TEXT("%8d instances of %d classes with less than %d instances per class"), NumInstancesSkipped, NumClassesSkipped, MinInstanceNum);
+		}
+	}
+	UE_LOG(LogUObjectArray, Display, TEXT("%d total UObjects (%d classes)"), NumUObjects, NumClasses);
+}
+
+static int32 GVarDumpObjectCountsToLogWhenMaxObjectLimitExceeded = 0;
+static FAutoConsoleVariableRef CDumpObjectCountsToLogWhenMaxObjectLimitExceeded(
+	TEXT("gc.DumpObjectCountsToLogWhenMaxObjectLimitExceeded"),
+	GVarDumpObjectCountsToLogWhenMaxObjectLimitExceeded,
+	TEXT("If not 0 dumps UObject counts to log when maximum object count limit has been reached."),
+	ECVF_Default
+);
+
+void UE::UObjectArrayPrivate::FailMaxUObjectCountExceeded(const int32 MaxUObjects, const int32 NewUObjectCount)
+{
+	if (GVarDumpObjectCountsToLogWhenMaxObjectLimitExceeded)
+	{
+		GUObjectArray.DumpUObjectCountsToLog();
+	}
+	UE_LOG(LogUObjectArray, Fatal, TEXT("Maximum number of UObjects (%d) exceeded when trying to add %d object(s), make sure you update MaxObjectsInGame/MaxObjectsInEditor/MaxObjectsInProgram in project settings."), MaxUObjects, NewUObjectCount);
 }

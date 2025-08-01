@@ -2,21 +2,25 @@
 
 #pragma once
 
+#include "Containers/UnrealString.h"
 #include "CoreTypes.h"
-#include "Misc/FrameNumber.h"
-#include "Misc/FrameTime.h"
+#include "Math/NumericLimits.h"
 #include "Math/Range.h"
 #include "Math/RangeBound.h"
+#include "Math/UnrealMathUtility.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/FrameNumber.h"
+#include "Misc/FrameTime.h"
 
-struct FFrameRate;
 class UMovieScene;
+struct FFrameRate;
 
 namespace UE
 {
 namespace MovieScene
 {
 
-class MOVIESCENE_API TimeHelpers
+class TimeHelpers
 {
 public:
 
@@ -24,7 +28,7 @@ public:
  * Migrate the frame times of the movie scene from the source frame rate to the destination frame rate
  */
 
-static void MigrateFrameTimes(FFrameRate SourceRate, FFrameRate DestinationRate, UMovieScene* MovieScene);
+static MOVIESCENE_API void MigrateFrameTimes(FFrameRate SourceRate, FFrameRate DestinationRate, UMovieScene* MovieScene, bool bApplyRecursively = false);
 
 };
 
@@ -86,6 +90,30 @@ inline FFrameNumber DiscreteExclusiveUpper(const TRange<FFrameNumber>& InRange)
 inline TRange<FFrameNumber> MakeDiscreteRange(FFrameNumber MinInclusive, FFrameNumber MaxExclusive)
 {
 	return TRange<FFrameNumber>(TRangeBound<FFrameNumber>::Inclusive(MinInclusive), TRangeBound<FFrameNumber>::Exclusive(MaxExclusive));
+}
+
+
+/**
+ * Make a new range that includes both the lower and upper bounds of the given range.
+ */
+inline TRange<FFrameNumber> MakeHullRange(const TRange<FFrameNumber>& InRange)
+{
+	return TRange<FFrameNumber>(
+			InRange.HasLowerBound() ? TRangeBound<FFrameNumber>::Inclusive(InRange.GetLowerBoundValue()) : TRangeBound<FFrameNumber>::Open(),
+			InRange.HasUpperBound() ? TRangeBound<FFrameNumber>::Inclusive(InRange.GetUpperBoundValue()) : TRangeBound<FFrameNumber>::Open());
+}
+
+
+/**
+ * Make a new range that includes both the given minimum and maximum.
+ *
+ * @param MinInclusive The minimum value for the inclusive lower bound
+ * @param MaxInclusive The maximum value for the inclusive lower bound
+ * @return A new range.
+ */
+inline TRange<FFrameNumber> MakeHullRange(FFrameNumber MinInclusive, FFrameNumber MaxInclusive)
+{
+	return TRange<FFrameNumber>(TRangeBound<FFrameNumber>::Inclusive(MinInclusive), TRangeBound<FFrameNumber>::Inclusive(MaxInclusive));
 }
 
 

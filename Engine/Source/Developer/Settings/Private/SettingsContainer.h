@@ -6,6 +6,7 @@
 #include "ISettingsContainer.h"
 #include "SettingsCategory.h"
 
+class IReload;
 class SWidget;
 
 /**
@@ -61,6 +62,15 @@ public:
 	 */
 	void RemoveSection( const FName& CategoryName, const FName& SectionName );
 
+#if WITH_RELOAD
+	/**
+	 * Invoked when reinstancing is complete.  Allows for settings objects to update their settings object pointers.
+	 * 
+	 * @param Reload The active reload
+	 */
+	void ReinstancingComplete(IReload* Reload);
+#endif
+
 public:
 
 	// ISettingsContainer interface
@@ -104,6 +114,9 @@ public:
 		return SectionRemovedDelegate;
 	}
 
+	virtual void SetCategorySortPriority(FName CategoryName, float Priority) override;
+	virtual void ResetCategorySortPriority(FName CategoryName) override;
+
 private:
 
 	/** Holds the collection of setting categories. */
@@ -120,6 +133,9 @@ private:
 
 	/** Holds the container's name. */
 	FName Name;
+
+	/** Category sort priorities */
+	TMap<FName, float> CategorySortPriorities;
 
 private:
 

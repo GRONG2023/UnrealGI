@@ -2,8 +2,12 @@
 
 #pragma once
 
+// HEADER_UNIT_SKIP - Included by rc files and break if I include proper files
+
 #include "../HAL/PreprocessorHelpers.h"
 
+// When passed to pragma message will result in clickable warning in VS
+#define WARNING_LOCATION(Line) __FILE__ "(" PREPROCESSOR_TO_STRING(Line) ")"
 
 // This file is included in some resource files, which issue a warning:
 //
@@ -14,7 +18,6 @@
 // rest of code out for resource compilation.
 #ifndef RC_INVOKED
 
-#define LOCALIZED_SEEKFREE_SUFFIX	TEXT("_LOC")
 #define PLAYWORLD_PACKAGE_PREFIX TEXT("UEDPIE")
 
 #ifndef WITH_EDITORONLY_DATA
@@ -28,13 +31,39 @@
 /** This controls if metadata for compiled in classes is unpacked and setup at boot time. Meta data is not normally used except by the editor. **/
 #define WITH_METADATA (WITH_EDITORONLY_DATA && WITH_EDITOR)
 
-// Set up optimization control macros, now that we have both the build settings and the platform macros
-#define PRAGMA_DISABLE_OPTIMIZATION		PRAGMA_DISABLE_OPTIMIZATION_ACTUAL
-#if UE_BUILD_DEBUG
-	#define PRAGMA_ENABLE_OPTIMIZATION  PRAGMA_DISABLE_OPTIMIZATION_ACTUAL
-#else
-	#define PRAGMA_ENABLE_OPTIMIZATION  PRAGMA_ENABLE_OPTIMIZATION_ACTUAL
+// Option to check for UE_DISABLE_OPTIMIZATION being submitted
+#ifndef UE_CHECK_DISABLE_OPTIMIZATION
+#define UE_CHECK_DISABLE_OPTIMIZATION 0
 #endif
+
+// Set up optimization control macros, now that we have both the build settings and the platform macros
+
+// Defines for submitting optimizations off
+#define UE_DISABLE_OPTIMIZATION_SHIP  PRAGMA_DISABLE_OPTIMIZATION_ACTUAL
+
+//in debug keep optimizations off for the enable macro otherwise code following enable will be optimized
+#if UE_BUILD_DEBUG
+	#define UE_ENABLE_OPTIMIZATION_SHIP  PRAGMA_DISABLE_OPTIMIZATION_ACTUAL
+#else
+	#define UE_ENABLE_OPTIMIZATION_SHIP  PRAGMA_ENABLE_OPTIMIZATION_ACTUAL
+#endif
+
+// if running on a build machine assert on the dev optimizations macros to validate that code is not being submitted with optimizations off
+#if UE_CHECK_DISABLE_OPTIMIZATION
+	#define UE_DISABLE_OPTIMIZATION static_assert(false, "Error UE_DISABLE_OPTIMIZATION submitted. Use UE_DISABLE_OPTIMIZATION_SHIP to submit with optimizations off.");
+	#define UE_ENABLE_OPTIMIZATION static_assert(false, "Error UE_ENABLE_OPTIMIZATION submitted. Use UE_ENABLE_OPTIMIZATION_SHIP to submit with optimizations off.");
+#else
+	#define UE_DISABLE_OPTIMIZATION  UE_DISABLE_OPTIMIZATION_SHIP
+	#define UE_ENABLE_OPTIMIZATION  UE_ENABLE_OPTIMIZATION_SHIP
+#endif
+
+#define PRAGMA_DISABLE_OPTIMIZATION \
+	UE_DEPRECATED_MACRO(5.2, "PRAGMA_DISABLE_OPTIMIZATION has been deprecated. Use UE_DISABLE_OPTIMIZATION for temporary development or UE_DISABLE_OPTIMIZATION_SHIP to submit") \
+	UE_DISABLE_OPTIMIZATION_SHIP
+
+#define PRAGMA_ENABLE_OPTIMIZATION  \
+	UE_DEPRECATED_MACRO(5.2, "PRAGMA_ENABLE_OPTIMIZATION has been deprecated. Use UE_ENABLE_OPTIMIZATION for temporary development or UE_ENABLE_OPTIMIZATION_SHIP to submit") \
+	UE_ENABLE_OPTIMIZATION_SHIP
 
 #if UE_BUILD_DEBUG
 	#define FORCEINLINE_DEBUGGABLE FORCEINLINE_DEBUGGABLE_ACTUAL
@@ -112,25 +141,18 @@ enum EForceInit
 enum ENoInit {NoInit};
 enum EInPlace {InPlace};
 
-// Handle type to stably track users on a specific platform
-typedef int32 FPlatformUserId;
-const FPlatformUserId PLATFORMUSERID_NONE = INDEX_NONE;
 #endif // RC_INVOKED
-
-
-
-// When passed to pragma message will result in clickable warning in VS
-#define WARNING_LOCATION(Line) __FILE__ "(" PREPROCESSOR_TO_STRING(Line) ")"
 
 // Push and pop macro definitions
 #ifdef __clang__
-	#define PUSH_MACRO(name) _Pragma(PREPROCESSOR_TO_STRING(push_macro(PREPROCESSOR_TO_STRING(name))))
-	#define POP_MACRO(name) _Pragma(PREPROCESSOR_TO_STRING(pop_macro(PREPROCESSOR_TO_STRING(name))))
+	#define UE_PUSH_MACRO(name) _Pragma(PREPROCESSOR_TO_STRING(push_macro(name)))
+	#define UE_POP_MACRO(name) _Pragma(PREPROCESSOR_TO_STRING(pop_macro(name)))
 #else
-	#define PUSH_MACRO(name) __pragma(push_macro(PREPROCESSOR_TO_STRING(name)))
-	#define POP_MACRO(name) __pragma(pop_macro(PREPROCESSOR_TO_STRING(name)))
+	#define UE_PUSH_MACRO(name) __pragma(push_macro(name))
+	#define UE_POP_MACRO(name) __pragma(pop_macro(name))
 #endif
-
+#define PUSH_MACRO(name) UE_DEPRECATED_MACRO(5.0, "PUSH_MACRO is deprecated. Use UE_PUSH_MACRO and pass the macro name as a string.") UE_PUSH_MACRO(PREPROCESSOR_TO_STRING(name))
+#define POP_MACRO(name) UE_DEPRECATED_MACRO(5.0, "POP_MACRO is deprecated. Use UE_POP_MACRO and pass the macro name as a string.") UE_POP_MACRO(PREPROCESSOR_TO_STRING(name))
 
 #ifdef __COUNTER__
 	// Created a variable with a unique name
@@ -140,6 +162,9 @@ const FPlatformUserId PLATFORMUSERID_NONE = INDEX_NONE;
 	// Less reliable than the __COUNTER__ version.
 	#define ANONYMOUS_VARIABLE( Name ) PREPROCESSOR_JOIN(Name, __LINE__)
 #endif
+
+/** Thread-safe call once helper for void functions, similar to std::call_once without the std::once_flag */
+#define UE_CALL_ONCE(Func, ...) static int32 ANONYMOUS_VARIABLE(ThreadSafeOnce) = ((Func)(__VA_ARGS__), 1)
 
 /**
  * Macro for marking up deprecated code, functions and types.
@@ -154,18 +179,18 @@ const FPlatformUserId PLATFORMUSERID_NONE = INDEX_NONE;
  *
  * Sample usage (note the slightly different syntax for classes and structures):
  *
- *		UE_DEPRECATED(4.xx, "Message")
+ *		UE_DEPRECATED(5.xx, "Message")
  *		void MyFunction();
  *
- *		UE_DEPRECATED(4.xx, "Message")
+ *		UE_DEPRECATED(5.xx, "Message")
  *		typedef FThing MyType;
  *
- *		using MyAlias UE_DEPRECATED(4.xx, "Message") = FThing;
+ *		using MyAlias UE_DEPRECATED(5.xx, "Message") = FThing;
  *
- *		UE_DEPRECATED(4.xx, "Message")
+ *		UE_DEPRECATED(5.xx, "Message")
  *		int32 MyVariable;
  *
- *		namespace UE_DEPRECATED(4.xx, "Message") MyNamespace
+ *		namespace UE_DEPRECATED(5.xx, "Message") MyNamespace
  *		{
  *		}
  *
@@ -174,27 +199,27 @@ const FPlatformUserId PLATFORMUSERID_NONE = INDEX_NONE;
  *		deprecated, then declare the type with the visibility macro.  Note that macros like
  *		USTRUCT must immediately precede the the type declaration, not the forward declaration.
  *
- *		struct UE_DEPRECATED(4.xx, "Message") FMyStruct;
+ *		struct UE_DEPRECATED(5.xx, "Message") FMyStruct;
  *		USTRUCT()
  *		struct MODULE_API FMyStruct
  *		{
  *		};
  *
- *		class UE_DEPRECATED(4.xx, "Message") FMyClass;
+ *		class UE_DEPRECATED(5.xx, "Message") FMyClass;
  *		class MODULE_API FMyClass
  *		{
  *		};
  *
- *		enum class UE_DEPRECATED(4.xx, "Message") EMyEnumeration
+ *		enum class UE_DEPRECATED(5.xx, "Message") EMyEnumeration
  *		{
  *			Zero = 0,
- *			One UE_DEPRECATED(4.xx, "Message") = 1,
+ *			One UE_DEPRECATED(5.xx, "Message") = 1,
  *			Two = 2
  *		};
  *
  *		Unfortunately, VC++ will complain about using member functions and fields from deprecated
  *		class/structs even for class/struct implementation e.g.:
- *		class UE_DEPRECATED(4.xx, "") DeprecatedClass
+ *		class UE_DEPRECATED(5.xx, "") DeprecatedClass
  *		{
  *		public:
  *			DeprecatedClass() {}
@@ -217,7 +242,7 @@ const FPlatformUserId PLATFORMUSERID_NONE = INDEX_NONE;
  *			float MyFloat;
  *		};
  *
- *		class UE_DEPRECATED(4.xx, "") DeprecatedClass : DeprecatedClass_Base_DEPRECATED
+ *		class UE_DEPRECATED(5.xx, "") DeprecatedClass : DeprecatedClass_Base_DEPRECATED
  *		{
  *		public:
  *			DeprecatedClass() {}
@@ -228,13 +253,45 @@ const FPlatformUserId PLATFORMUSERID_NONE = INDEX_NONE;
  *			}
  *		};
  *
+ *		template <typename T>
+ *		class UE_DEPRECATED(5.xx, "") DeprecatedClassTemplate
+ *		{
+ *		};
+ *
+ *		template <typename T>
+ *		UE_DEPRECATED(5.xx, "")
+ *		void DeprecatedFunctionTemplate()
+ *		{
+ *		}
+ *
  * @param VERSION The release number in which the feature was marked deprecated.
  * @param MESSAGE A message containing upgrade notes.
  */
+
+#if defined (__INTELLISENSE__)
+#define UE_DEPRECATED(Version, Message)
+#else
 #define UE_DEPRECATED(Version, Message) [[deprecated(Message " Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.")]]
+#endif
 
 #ifndef UE_DEPRECATED_FORGAME
 	#define UE_DEPRECATED_FORGAME(...)
+#endif
+
+#if UE_VALIDATE_INTERNAL_API
+	#define UE_INTERNAL [[deprecated("Please remove usage of this internal API before upgrading to the next release, otherwise your project will no longer compile.")]]
+#else
+	#define UE_INTERNAL
+#endif
+
+/*
+ * Macro that can be defined in the target file to strip deprecated properties in objects across the engine that check against this define.
+ * Can be used by project that have migrated away from using deprecated functions and data members to potentially gain back some memory and perf.
+ * @note This is a define that engine developer may use when deprecating properties to allow additional memory savings when a project is compliant with deprecation notice.
+ * It doesn't indicate that all deprecated properties will be stripped.
+ */
+#ifndef UE_STRIP_DEPRECATED_PROPERTIES
+	#define UE_STRIP_DEPRECATED_PROPERTIES 0
 #endif
 
 template <bool bIsDeprecated>
@@ -252,6 +309,17 @@ struct TStaticDeprecateExpression
 		static constexpr int condition(TStaticDeprecateExpression<false>) { return 1; } \
 	}; \
 	enum class PREPROCESSOR_JOIN(EDeprecationMsg_, __LINE__) { Value = PREPROCESSOR_JOIN(FDeprecationMsg_, __LINE__)::condition(TStaticDeprecateExpression<!!(bExpression)>()) }
+
+/**
+ * Can be used in the same contexts as static_assert but gives a warning rather than an error
+ */
+#define UE_STATIC_ASSERT_WARN(bExpression, Message) \
+	struct PREPROCESSOR_JOIN(FStaticWarningMsg_, __LINE__) { \
+		[[deprecated(Message)]] \
+		static constexpr int condition(TStaticDeprecateExpression<true>) { return 1; } \
+		static constexpr int condition(TStaticDeprecateExpression<false>) { return 1; } \
+	}; \
+	enum class PREPROCESSOR_JOIN(EStaticWarningMsg_, __LINE__) { Value = PREPROCESSOR_JOIN(FStaticWarningMsg_, __LINE__)::condition(TStaticDeprecateExpression<!(bExpression)>()) }
 
 // These defines are used to mark a difference between two pointers as expected to fit into the specified range
 // while still leaving something searchable if the surrounding code is updated to work with a 64 bit count/range
@@ -277,3 +345,157 @@ struct TStaticDeprecateExpression
 	TypeName& operator=(const TypeName&) = delete; \
 	TypeName& operator=(TypeName&&) = delete;
 
+
+/** 
+ * Handle that defines a local user on this platform.
+ * This used to be just a typedef int32 that was used interchangeably as ControllerId and LocalUserIndex.
+ * Moving forward these will be allocated by the platform application layer.
+ */
+struct FPlatformUserId
+{
+	/** Sees if this is a valid user */
+	FORCEINLINE bool IsValid() const
+	{
+		return InternalId != INDEX_NONE;
+	}
+
+	/** Returns the internal id for debugging/etc */
+	FORCEINLINE int32 GetInternalId() const
+	{
+		return InternalId;
+	}
+
+	/** Explicit function to create from an internal id */
+	FORCEINLINE static FPlatformUserId CreateFromInternalId(int32 InInternalId)
+	{
+		FPlatformUserId IdToReturn;
+		IdToReturn.InternalId = InInternalId;
+		return IdToReturn;
+	}
+
+	FORCEINLINE bool operator==(const FPlatformUserId& Other) const
+	{
+		return InternalId == Other.InternalId;
+	}
+
+	FORCEINLINE bool operator!=(const FPlatformUserId& Other) const
+	{
+		return InternalId != Other.InternalId;
+	}
+
+	FORCEINLINE friend uint32 GetTypeHash(const FPlatformUserId& UserId)
+	{
+		return UserId.InternalId;
+	}
+
+	// This should be deprecated when the online code uniformly handles FPlatformUserId */
+	// UE_DEPRECATED(5.x, "Implicit conversion to user index is deprecated, use FPlatformMisc::GetUserIndexForPlatformUser")
+	FORCEINLINE constexpr operator int32() const { return InternalId; }
+
+private:
+	/** Raw id, will be allocated by application layer */
+	int32 InternalId = INDEX_NONE;
+};
+
+/** Static invalid platform user */
+inline constexpr FPlatformUserId PLATFORMUSERID_NONE;
+
+/**
+ * Represents a single input device such as a gamepad, keyboard, or mouse.
+ *
+ * Has a globally unique identifier that is assigned by the IPlatformInputDeviceMapper
+ */
+struct FInputDeviceId
+{
+	/** Explicit function to create from an internal id */
+	FORCEINLINE static FInputDeviceId CreateFromInternalId(int32 InInternalId)
+	{
+		FInputDeviceId IdToReturn;
+		IdToReturn.InternalId = InInternalId;
+		return IdToReturn;
+	}
+	
+	FORCEINLINE int32 GetId() const
+	{
+		return InternalId;
+	}
+
+	/** Sees if this is a valid input device */
+	FORCEINLINE bool IsValid() const
+	{
+		return InternalId >= 0;
+	}
+
+	FORCEINLINE bool operator==(const FInputDeviceId& Other) const
+	{
+		return InternalId == Other.InternalId;
+	}
+
+	FORCEINLINE bool operator!=(const FInputDeviceId& Other) const
+	{
+		return InternalId != Other.InternalId;
+	}
+	
+	FORCEINLINE bool operator<(const FInputDeviceId& Other) const
+	{
+		return InternalId < Other.InternalId;
+	}
+
+	FORCEINLINE bool operator<=(const FInputDeviceId& Other) const
+	{
+		return InternalId <= Other.InternalId;
+	}
+
+	FORCEINLINE bool operator>(const FInputDeviceId& Other) const
+	{
+		return InternalId > Other.InternalId;
+	}
+
+	FORCEINLINE bool operator>=(const FInputDeviceId& Other) const
+	{
+		return InternalId >= Other.InternalId;
+	}
+
+	FORCEINLINE friend uint32 GetTypeHash(const FInputDeviceId& InputId)
+	{
+		return InputId.InternalId;
+	}
+	
+private:
+	
+	/**
+	 * Raw id, will be allocated by application layer
+	 * 
+	 * @see IPlatformInputDeviceMapper::AllocateNewInputDeviceId
+	 */
+	int32 InternalId = INDEX_NONE;
+};
+
+/** Static invalid input device. */
+inline constexpr FInputDeviceId INPUTDEVICEID_NONE;
+
+/** Represents the connection status of a given FInputDeviceId */
+enum class EInputDeviceConnectionState : uint8
+{
+	/** This is not a valid input device */
+	Invalid,
+
+	/** It is not known if this device is connected or not */
+	Unknown,
+
+	/** Device is definitely connected */
+	Disconnected,
+
+	/** Definitely connected and powered on */
+	Connected
+};
+
+/** Data about an input device's current state */
+struct FPlatformInputDeviceState
+{
+	/** The platform user that this input device belongs to */
+	FPlatformUserId OwningPlatformUser = PLATFORMUSERID_NONE;
+
+	/** The connection state of this input device */
+	EInputDeviceConnectionState ConnectionState = EInputDeviceConnectionState::Invalid;
+};

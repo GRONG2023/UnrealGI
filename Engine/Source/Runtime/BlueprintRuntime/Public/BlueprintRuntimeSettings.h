@@ -2,9 +2,15 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
+#include "UObject/NameTypes.h"
 #include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "BlueprintRuntimeSettings.generated.h"
 
 class Error;
@@ -29,7 +35,7 @@ struct FBlueprintWarningSettings
 	FText WarningDescription;
 
 	UPROPERTY()
-	EBlueprintWarningBehavior WarningBehavior;
+	EBlueprintWarningBehavior WarningBehavior = EBlueprintWarningBehavior::Warn;
 };
 
 /**

@@ -52,7 +52,7 @@ void FSessionInstanceInfo::UpdateFromMessage(const FSessionServicePong& Message,
 
 	if (MessageEndpoint.IsValid() && (ApplicationAddress != Context->GetSender()))
 	{
-		MessageEndpoint->Send(new FSessionServiceLogSubscribe(), Context->GetSender());
+		MessageEndpoint->Send(FMessageEndpoint::MakeMessage<FSessionServiceLogSubscribe>(), Context->GetSender());
 	}
 
 	Authorized = Message.Authorized;
@@ -73,7 +73,7 @@ void FSessionInstanceInfo::ExecuteCommand(const FString& CommandString)
 {
 	if (MessageEndpoint.IsValid() && EngineAddress.IsValid())
 	{
-		MessageEndpoint->Send(new FEngineServiceExecuteCommand(CommandString, FPlatformProcess::UserName(false)), EngineAddress);
+		MessageEndpoint->Send(FMessageEndpoint::MakeMessage<FEngineServiceExecuteCommand>(CommandString, FPlatformProcess::UserName(false)), EngineAddress);
 	}
 }
 
@@ -82,7 +82,7 @@ void FSessionInstanceInfo::Terminate()
 {
 	if (MessageEndpoint.IsValid() && EngineAddress.IsValid())
 	{
-		MessageEndpoint->Send(new FEngineServiceTerminate(FPlatformProcess::UserName(false)), EngineAddress);
+		MessageEndpoint->Send(FMessageEndpoint::MakeMessage<FEngineServiceTerminate>(FPlatformProcess::UserName(false)), EngineAddress);
 	}
 }
 

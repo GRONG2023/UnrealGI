@@ -4,13 +4,23 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "Framework/Commands/InputChord.h"
 #include "EdGraph/EdGraphSchema.h"
 #include "Framework/Commands/Commands.h"
-#include "EditorStyleSet.h"
+#include "Framework/Commands/InputChord.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Internationalization.h"
+#include "Styling/AppStyle.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
 
+class FUICommandInfo;
+class UClass;
 class UEdGraph;
+struct FEdGraphSchemaAction;
+struct FInputChord;
 
 /**
  * Unreal material editor actions
@@ -23,7 +33,7 @@ public:
 	(
 		"MaterialEditor", // Context name for fast lookup
 		NSLOCTEXT("Contexts", "MaterialEditor", "Material Editor"), // Localized context name for displaying
-		NAME_None, FEditorStyle::GetStyleSetName()
+		NAME_None, FAppStyle::GetAppStyleSetName()
 	)
 	{
 	}
@@ -114,6 +124,12 @@ public:
 	/** Converts selected objects to parameters */
 	TSharedPtr< FUICommandInfo > ConvertObjects;
 
+	/** Convert the selected parameters from 'float' to 'double' */
+	TSharedPtr< FUICommandInfo > PromoteToDouble;
+
+	/** Convert the selected parameters from 'double' to 'float' */
+	TSharedPtr< FUICommandInfo > PromoteToFloat;
+
 	/** Converts selected texture type into another */
 	TSharedPtr< FUICommandInfo > ConvertToTextureObjects;
 	TSharedPtr< FUICommandInfo > ConvertToTextureSamples;
@@ -174,8 +190,23 @@ public:
 	/** Create component mask node */
 	TSharedPtr< FUICommandInfo > CreateComponentMaskNode;
 
-	/** Create component mask node */
+	/** Promote pin to parameter */
 	TSharedPtr< FUICommandInfo > PromoteToParameter;
+	
+	/** Reset pin to default value */
+	TSharedPtr< FUICommandInfo > ResetToDefault;
+
+	/** Create slab node */
+	TSharedPtr< FUICommandInfo > CreateSlabNode;
+
+	/** Create horizontal mix node */
+	TSharedPtr< FUICommandInfo > CreateHorizontalMixNode;
+
+	/** Create vertical layer node */
+	TSharedPtr< FUICommandInfo > CreateVerticalLayerNode;
+
+	/** Create weight node */
+	TSharedPtr< FUICommandInfo > CreateWeightNode;
 
 	TSharedPtr< FUICommandInfo > QualityLevel_All;
 	TSharedPtr< FUICommandInfo > QualityLevel_Epic;
@@ -184,8 +215,9 @@ public:
 	TSharedPtr< FUICommandInfo > QualityLevel_Low;
 
 	TSharedPtr< FUICommandInfo > FeatureLevel_All;
-	TSharedPtr< FUICommandInfo > FeatureLevel_ES31;
+	TSharedPtr< FUICommandInfo > FeatureLevel_Mobile;
 	TSharedPtr< FUICommandInfo > FeatureLevel_SM5;
+	TSharedPtr< FUICommandInfo > FeatureLevel_SM6;
 
 	/**
 	 * Initialize commands
@@ -232,7 +264,7 @@ class FMaterialEditorSpawnNodeCommands : public TCommands<FMaterialEditorSpawnNo
 public:
 	/** Constructor */
 	FMaterialEditorSpawnNodeCommands()
-		: TCommands<FMaterialEditorSpawnNodeCommands>( TEXT("MaterialEditorSpawnNodes"), NSLOCTEXT("Contexts", "MaterialEditor_SpawnNodes", "Material Editor - Spawn Nodes"), NAME_None, FEditorStyle::GetStyleSetName() )
+		: TCommands<FMaterialEditorSpawnNodeCommands>( TEXT("MaterialEditorSpawnNodes"), NSLOCTEXT("Contexts", "MaterialEditor_SpawnNodes", "Material Editor - Spawn Nodes"), NAME_None, FAppStyle::GetAppStyleSetName() )
 	{
 	}	
 

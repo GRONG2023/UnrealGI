@@ -2,9 +2,9 @@
 
 #include "Curl/CurlHttpManager.h"
 
-#if WITH_LIBCURL
+#if WITH_CURL
 
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "HAL/FileManager.h"
 #include "Misc/CommandLine.h"
 #include "Misc/ConfigCacheIni.h"
@@ -14,8 +14,12 @@
 #include "Misc/Fork.h"
 
 #include "Curl/CurlHttpThread.h"
+#include "Curl/CurlMultiPollEventLoopHttpThread.h"
+#include "Curl/CurlMultiWaitEventLoopHttpThread.h"
+#include "Curl/CurlSocketEventLoopHttpThread.h"
 #include "Curl/CurlHttp.h"
 #include "Misc/OutputDeviceRedirector.h"
+#include "HAL/IConsoleManager.h"
 #include "HttpModule.h"
 
 #if WITH_SSL
@@ -33,8 +37,12 @@
 #define DISABLE_UNVERIFIED_CERTIFICATE_LOADING 0
 #endif
 
+extern TAutoConsoleVariable<int32> CVarHttpEventLoopEnableChance;
+
 CURLM* FCurlHttpManager::GMultiHandle = nullptr;
+#if !WITH_CURL_XCURL
 CURLSH* FCurlHttpManager::GShareHandle = nullptr;
+#endif
 
 FCurlHttpManager::FCurlRequestOptions FCurlHttpManager::CurlRequestOptions;
 
@@ -196,6 +204,18 @@ void FCurlHttpManager::InitCurl()
 			}
 		}
 
+		int32 MaxConnects = 0;
+		if (GConfig->GetInt(TEXT("HTTP.Curl"), TEXT("MaxConnects"), MaxConnects, GEngineIni) && MaxConnects >= 0)
+		{
+			const CURLMcode SetOptResult = curl_multi_setopt(GMultiHandle, CURLMOPT_MAXCONNECTS, static_cast<long>(MaxConnects));
+			if (SetOptResult != CURLM_OK)
+			{
+				UE_LOG(LogInit, Warning, TEXT("Failed to set libcurl max connects options (%d), error %d ('%s')"),
+					MaxConnects, static_cast<int32>(SetOptResult), StringCast<TCHAR>(curl_multi_strerror(SetOptResult)).Get());
+			}
+		}
+
+#if !WITH_CURL_XCURL
 		GShareHandle = curl_share_init();
 		if (NULL != GShareHandle)
 		{
@@ -207,6 +227,7 @@ void FCurlHttpManager::InitCurl()
 		{
 			UE_LOG(LogInit, Fatal, TEXT("Could not initialize libcurl share handle!"));
 		}
+#endif
 	}
 	else
 	{
@@ -214,6 +235,12 @@ void FCurlHttpManager::InitCurl()
 	}
 
 	// Init curl request options
+	bool bForbidReuse = false;
+	if (GConfig->GetBool(TEXT("HTTP.Curl"), TEXT("bForbidReuse"), bForbidReuse, GEngineIni))
+	{
+		CurlRequestOptions.bDontReuseConnections = bForbidReuse;
+	}
+	// If set on the command line for debugging this overrides the setting from the .ini file.
 	if (FParse::Param(FCommandLine::Get(), TEXT("noreuseconn")))
 	{
 		CurlRequestOptions.bDontReuseConnections = true;
@@ -316,17 +343,19 @@ void FCurlHttpManager::FCurlRequestOptions::Log()
 
 void FCurlHttpManager::ShutdownCurl()
 {
+#if !WITH_CURL_XCURL
 	if (GShareHandle != nullptr)
 	{
 		CURLSHcode ShareCleanupCode = curl_share_cleanup(GShareHandle);
-		ensureMsgf(ShareCleanupCode == CURLSHE_OK, TEXT("CurlShareCleanup failed. ReturnValue=[%d]"), static_cast<int32>(ShareCleanupCode));
+		UE_CLOG(ShareCleanupCode != CURLSHE_OK, LogHttp, Warning, TEXT("curl_share_cleanup failed. ReturnValue=[%d]"), static_cast<int32>(ShareCleanupCode));
 		GShareHandle = nullptr;
 	}
+#endif
 
 	if (GMultiHandle != nullptr)
 	{
 		CURLMcode MutliCleanupCode = curl_multi_cleanup(GMultiHandle);
-		ensureMsgf(MutliCleanupCode == CURLM_OK, TEXT("CurlMultiCleanup failed. ReturnValue=[%d]"), static_cast<int32>(MutliCleanupCode));
+		UE_CLOG(MutliCleanupCode != CURLM_OK, LogHttp, Warning, TEXT("curl_multi_cleanup failed. ReturnValue=[%d]"), static_cast<int32>(MutliCleanupCode));
 		GMultiHandle = nullptr;
 	}
 
@@ -416,8 +445,31 @@ void FCurlHttpManager::UpdateConfigs()
 	}
 }
 
-FHttpThread* FCurlHttpManager::CreateHttpThread()
+FHttpThreadBase* FCurlHttpManager::CreateHttpThread()
 {
+	bool bUseEventLoop = (FMath::RandRange(0, 99) < CVarHttpEventLoopEnableChance.GetValueOnGameThread());
+
+	// Also support to change it through runtime args.
+	// Can't set cvar CVarHttpEventLoopEnableChance through runtime args or .ini files because http module initialized too early
+	FParse::Bool(FCommandLine::Get(), TEXT("useeventloop="), bUseEventLoop);
+
+	if (bUseEventLoop)
+	{
+#if WITH_CURL_MULTIPOLL
+		UE_LOG(LogInit, Log, TEXT("CreateHttpThread using FCurlMultiPollEventLoopHttpThread"));
+		return new FCurlMultiPollEventLoopHttpThread();
+
+#elif WITH_CURL_MULTISOCKET
+		UE_LOG(LogInit, Log, TEXT("CreateHttpThread using FCurlSocketEventLoopHttpThread"));
+		return new FCurlSocketEventLoopHttpThread();
+
+#elif WITH_CURL_MULTIWAIT
+		UE_LOG(LogInit, Log, TEXT("CreateHttpThread using FCurlMultiWaitEventLoopHttpThread"));
+		return new FCurlMultiWaitEventLoopHttpThread();
+#endif
+	}
+
+	UE_LOG(LogInit, Log, TEXT("CreateHttpThread using FCurlHttpThread"));
 	return new FCurlHttpThread();
 }
 
@@ -425,4 +477,4 @@ bool FCurlHttpManager::SupportsDynamicProxy() const
 {
 	return true;
 }
-#endif //WITH_LIBCURL
+#endif //WITH_CURL

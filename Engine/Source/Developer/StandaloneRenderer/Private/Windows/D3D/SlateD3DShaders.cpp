@@ -8,8 +8,19 @@
 #include "Misc/FileHelper.h"
 #include "Misc/App.h"
 
-// @return pointer to the D3DCompile function
-static pD3DCompile GetD3DCompileFunc()
+#define DEFINE_GUID_FOR_CURRENT_COMPILER(name, l, w1, w2, b1, b2, b3, b4, b5, b6, b7, b8) \
+	static const GUID name = { l, w1, w2, { b1, b2,  b3,  b4,  b5,  b6,  b7,  b8 } }
+
+DEFINE_GUID_FOR_CURRENT_COMPILER(IID_ID3D11ShaderReflectionForCurrentCompiler, 0x8d536ca1, 0x0cca, 0x4956, 0xa8, 0x37, 0x78, 0x69, 0x63, 0x75, 0x55, 0x84);
+
+typedef HRESULT(WINAPI* pD3DReflect)
+(__in_bcount(SrcDataSize) LPCVOID pSrcData,
+	__in SIZE_T  SrcDataSize,
+	__in  REFIID pInterface,
+	__out void** ppReflector);
+
+
+static HMODULE GetCompilerModule()
 {
 	// Override default compiler path to newer dll
 	FString CompilerPath = FPaths::EngineDir();
@@ -26,19 +37,49 @@ static pD3DCompile GetD3DCompileFunc()
 		CompilerDLL = LoadLibrary(*CompilerPath);
 	}
 
+	if (CompilerDLL == NULL)
+	{
+		// load the system one as the last resort
+		CompilerDLL = LoadLibrary(TEXT("d3dcompiler_47.dll"));
+	}
+
+	if (CompilerDLL == NULL)
+	{
+		LogSlateD3DRendererFailure(FString::Printf(TEXT("Critical error. Compiler DLL %s could not be found, and loading the system one failed"), *CompilerPath), E_FAIL);
+	}
+	return CompilerDLL;
+}
+
+// @return pointer to the D3DCompile function
+static pD3DCompile GetD3DCompileFunc()
+{
+	static HMODULE CompilerDLL = GetCompilerModule();
+
 	if (CompilerDLL)
 	{
 		return (pD3DCompile)(void*)GetProcAddress(CompilerDLL, "D3DCompile");
 	}
 
-	// D3D SDK we compiled with (usually D3DCompiler_43.dll from windows folder)
-	return &D3DCompile;
+	return nullptr;
 }
+
+// @return pointer to the D3DCompile function
+static pD3DReflect GetD3DReflectFunc()
+{
+	static HMODULE CompilerDLL = GetCompilerModule();
+	if (CompilerDLL)
+	{
+		return (pD3DReflect)(void*)GetProcAddress(CompilerDLL, "D3DReflect");
+	}
+
+	return nullptr;
+}
+
 
 class StandaloneD3DIncluder final : public ID3DInclude
 {
 	public:
-		virtual ~StandaloneD3DIncluder() 
+		~StandaloneD3DIncluder() 
 		{
 		}
 
@@ -76,12 +117,17 @@ static bool CompileShader( const FString& Filename, const FString& EntryPoint, c
 {
 	uint32 ShaderFlags = D3DCOMPILE_ENABLE_STRICTNESS;
 #if UE_BUILD_DEBUG
-	ShaderFlags |= D3D10_SHADER_DEBUG;
+	ShaderFlags |= D3DCOMPILE_DEBUG;
 #else
 	ShaderFlags |= D3DCOMPILE_OPTIMIZATION_LEVEL3;
 #endif
 
 	pD3DCompile D3DCompilerFunc = GetD3DCompileFunc();
+	if (D3DCompilerFunc == nullptr)
+	{
+		GEncounteredCriticalD3DDeviceError = true;
+		return false;
+	}
 
 	StandaloneD3DIncluder Includer;
 
@@ -168,6 +214,7 @@ void FSlateD3DVS::Create( const FString& Filename, const FString& EntryPoint, co
 		{
 			LogSlateD3DRendererFailure(TEXT("FSlateD3DVS::Create() - ID3D11Device::CreateVertexShader"), Hr);
 			GEncounteredCriticalD3DDeviceError = true;
+			return;
 		}
 
 		Hr = GD3DDevice->CreateInputLayout(VertexLayout, VertexLayoutCount, Blob->GetBufferPointer(), Blob->GetBufferSize(), InputLayout.GetInitReference());
@@ -175,14 +222,23 @@ void FSlateD3DVS::Create( const FString& Filename, const FString& EntryPoint, co
 		{
 			LogSlateD3DRendererFailure(TEXT("FSlateD3DVS::Create() - ID3D11Device::CreateInputLayout"), Hr);
 			GEncounteredCriticalD3DDeviceError = true;
+			return;
+		}
+
+		pD3DReflect D3DReflectFunc = GetD3DReflectFunc();
+		if (D3DReflectFunc == nullptr)
+		{
+			GEncounteredCriticalD3DDeviceError = true;
+			return;
 		}
 
 		TRefCountPtr<ID3D11ShaderReflection> Reflector;
-		Hr = D3DReflect(Blob->GetBufferPointer(), Blob->GetBufferSize(), IID_ID3D11ShaderReflection, (void**)Reflector.GetInitReference());
+		Hr = D3DReflectFunc(Blob->GetBufferPointer(), Blob->GetBufferSize(), IID_ID3D11ShaderReflectionForCurrentCompiler, (void**)Reflector.GetInitReference());
 		if (FAILED(Hr))
 		{
 			LogSlateD3DRendererFailure(TEXT("FSlateD3DVS::Create() - D3DReflect"), Hr);
 			GEncounteredCriticalD3DDeviceError = true;
+			return;
 		}
 
 		GetShaderBindings(Reflector, ShaderBindings);
@@ -232,61 +288,6 @@ void FSlateD3DVS::BindParameters()
 		delete[] ConstantBuffers;
 	}	
 }
-void FSlateD3DGeometryShader::Create( const FString& Filename, const FString& EntryPoint, const FString& ShaderModel )
-{
-	TRefCountPtr<ID3DBlob> Blob;
-	if(CompileShader( Filename, EntryPoint, ShaderModel, Blob))
-	{
-		HRESULT Hr = GD3DDevice->CreateGeometryShader(Blob->GetBufferPointer(), Blob->GetBufferSize(), NULL, GeometryShader.GetInitReference());
-		if (FAILED(Hr))
-		{
-			LogSlateD3DRendererFailure(TEXT("FSlateD3DGeometryShader::Create() - ID3D11Device::CreateGeometryShader"), Hr);
-			GEncounteredCriticalD3DDeviceError = true;
-			return;
-		}
-
-
-		TRefCountPtr<ID3D11ShaderReflection> Reflector;
-		Hr = D3DReflect(Blob->GetBufferPointer(), Blob->GetBufferSize(), IID_ID3D11ShaderReflection, (void**)Reflector.GetInitReference());
-		if (FAILED(Hr))
-		{
-			LogSlateD3DRendererFailure(TEXT("FSlateD3DGeometryShader::Create() - D3DReflect"), Hr);
-			GEncounteredCriticalD3DDeviceError = true;
-			return;
-		}
-
-		GetShaderBindings(Reflector, ShaderBindings);
-	}
-	else
-	{
-		GEncounteredCriticalD3DDeviceError = true;
-	}
-}
-
-
-void FSlateD3DGeometryShader::BindShader()
-{
-	GD3DDeviceContext->GSSetShader( GeometryShader, NULL, 0 );
-}
-
-void FSlateD3DGeometryShader::BindParameters()
-{
-	UpdateParameters();
-
-	if( ShaderBindings.ConstantBuffers.Num() )
-	{
-		const uint32 BufferCount = ShaderBindings.ConstantBuffers.Num();
-		ID3D11Buffer** const ConstantBuffers = new ID3D11Buffer*[ BufferCount ];
-		for( uint32 I = 0; I < BufferCount; ++I )
-		{
-			ConstantBuffers[I] = ShaderBindings.ConstantBuffers[I]->GetParameter().GetReference();
-		}
-
-		GD3DDeviceContext->GSSetConstantBuffers(0, ShaderBindings.ConstantBuffers.Num(), ConstantBuffers);
-
-		delete[] ConstantBuffers;
-	}	
-}
 
 void FSlateD3DPS::Create( const FString& Filename, const FString& EntryPoint, const FString& ShaderModel )
 {
@@ -301,8 +302,15 @@ void FSlateD3DPS::Create( const FString& Filename, const FString& EntryPoint, co
 			return;
 		}
 
+		pD3DReflect D3DReflectFunc = GetD3DReflectFunc();
+		if (D3DReflectFunc == nullptr)
+		{
+			GEncounteredCriticalD3DDeviceError = true;
+			return;
+		}
+
 		TRefCountPtr<ID3D11ShaderReflection> Reflector;
-		Hr = D3DReflect(Blob->GetBufferPointer(), Blob->GetBufferSize(), IID_ID3D11ShaderReflection, (void**)Reflector.GetInitReference());
+		Hr = D3DReflectFunc(Blob->GetBufferPointer(), Blob->GetBufferSize(), IID_ID3D11ShaderReflectionForCurrentCompiler, (void**)Reflector.GetInitReference());
 		if (FAILED(Hr))
 		{
 			LogSlateD3DRendererFailure(TEXT("FSlateD3DPS::Create() - D3DReflect"), Hr);
@@ -386,6 +394,7 @@ FSlateDefaultVS::FSlateDefaultVS()
 		{ "TEXCOORD",	1, DXGI_FORMAT_R32G32_FLOAT,		0, D3D11_APPEND_ALIGNED_ELEMENT,	D3D11_INPUT_PER_VERTEX_DATA,	0 },
 		{ "POSITION",	0, DXGI_FORMAT_R32G32_FLOAT,		0, D3D11_APPEND_ALIGNED_ELEMENT,	D3D11_INPUT_PER_VERTEX_DATA,	0 },
 		{ "COLOR",		0, DXGI_FORMAT_B8G8R8A8_UNORM,		0, D3D11_APPEND_ALIGNED_ELEMENT,	D3D11_INPUT_PER_VERTEX_DATA,	0 },
+		{ "COLOR",		1, DXGI_FORMAT_B8G8R8A8_UNORM,		0, D3D11_APPEND_ALIGNED_ELEMENT,	D3D11_INPUT_PER_VERTEX_DATA,	0 },
 	};
 
 	Create( FString::Printf( TEXT("%s/StandaloneRenderer/D3D/SlateDefaultVertexShader.hlsl"), FPlatformProcess::ShaderDir() ), TEXT("Main"), TEXT("vs_4_0"), Layout, UE_ARRAY_COUNT(Layout) );
@@ -393,12 +402,12 @@ FSlateDefaultVS::FSlateDefaultVS()
 
 void FSlateDefaultVS::SetViewProjection( const FMatrix& ViewProjectionMatrix )
 {
-	ConstantBuffer.GetBufferData().ViewProjection = ViewProjectionMatrix;
+	ConstantBuffer.GetBufferData().ViewProjection = (FMatrix44f)ViewProjectionMatrix;	// LWC_TODO: Precision loss
 }
 
 void FSlateDefaultVS::SetShaderParams( const FVector4& InShaderParams )
 {
-	ConstantBuffer.GetBufferData().VertexShaderParams = InShaderParams;
+	ConstantBuffer.GetBufferData().VertexShaderParams = FVector4f(InShaderParams);		// LWC_TODO: Precision loss
 }
 
 void FSlateDefaultVS::UpdateParameters()
@@ -421,7 +430,7 @@ FSlateDefaultPS::FSlateDefaultPS()
 	PerFrameConstants.Create();
 	PerElementConstants.Create();
 
-	PerFrameConstants.GetBufferData().GammaValues = FVector2D(1, 1 / 2.2f);
+	PerFrameConstants.GetBufferData().GammaValues = FVector2f(1, 1 / 2.2f);
 
 	PerFrameCBufferParam->SetParameter(PerFrameConstants.GetResource());
 
@@ -444,12 +453,13 @@ void FSlateDefaultPS::SetDrawEffects( ESlateDrawEffect InDrawEffects )
 	PerElementConstants.GetBufferData().DisableEffect = (uint32)(InDrawEffects & ESlateDrawEffect::DisabledEffect);
 }
 
-void FSlateDefaultPS::SetShaderParams( const FVector4& InShaderParams )
+void FSlateDefaultPS::SetShaderParams(const FShaderParams& InShaderParams)
 {
-	PerElementConstants.GetBufferData().ShaderParams = InShaderParams;
+	PerElementConstants.GetBufferData().ShaderParams = InShaderParams.PixelParams;
+	PerElementConstants.GetBufferData().ShaderParams2 = InShaderParams.PixelParams2;
 }
 
-void FSlateDefaultPS::SetGammaValues(const FVector2D& InGammaValues)
+void FSlateDefaultPS::SetGammaValues(const FVector2f& InGammaValues)
 {
 	PerFrameConstants.GetBufferData().GammaValues = InGammaValues;
 }

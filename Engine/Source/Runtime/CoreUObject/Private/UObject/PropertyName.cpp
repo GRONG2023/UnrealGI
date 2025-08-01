@@ -11,16 +11,23 @@
 -----------------------------------------------------------------------------*/
 IMPLEMENT_FIELD(FNameProperty)
 
-void FNameProperty::ExportTextItem( FString& ValueStr, const void* PropertyValue, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
+FNameProperty::FNameProperty(FFieldVariant InOwner, const UECodeGen_Private::FNamePropertyParams& Prop)
+	: FNameProperty_Super(InOwner, (const UECodeGen_Private::FPropertyParamsBaseWithOffset&)Prop)
 {
-	FName Temp = *(FName*)PropertyValue;
-	if (0 != (PortFlags & PPF_ExportCpp))
+}
+
+void FNameProperty::ExportText_Internal( FString& ValueStr, const void* PropertyValueOrContainer, EPropertyPointerType PropertyPointerType, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
+{
+	FName Temp;
+	if (PropertyPointerType == EPropertyPointerType::Container && HasGetter())
 	{
-		ValueStr += (Temp == NAME_None) 
-			? TEXT("FName()") 
-			: FString::Printf(TEXT("FName(TEXT(\"%s\"))"), *(Temp.ToString().ReplaceCharWithEscapedChar()));
+		GetValue_InContainer(PropertyValueOrContainer, &Temp);
 	}
-	else if( !(PortFlags & PPF_Delimited) )
+	else
+	{
+		Temp = *(FName*)PointerToValuePtr(PropertyValueOrContainer, PropertyPointerType);
+	}
+	if( !(PortFlags & PPF_Delimited) )
 	{
 		ValueStr += Temp.ToString();
 	}
@@ -33,11 +40,12 @@ void FNameProperty::ExportTextItem( FString& ValueStr, const void* PropertyValue
 		ValueStr += TEXT("\"\"");
 	}
 }
-const TCHAR* FNameProperty::ImportText_Internal( const TCHAR* Buffer, void* Data, int32 PortFlags, UObject* Parent, FOutputDevice* ErrorText ) const
+const TCHAR* FNameProperty::ImportText_Internal( const TCHAR* Buffer, void* ContainerOrPropertyPtr, EPropertyPointerType PropertyPointerType, UObject* Parent, int32 PortFlags, FOutputDevice* ErrorText ) const
 {
+	FName ImportedName;
 	if (!(PortFlags & PPF_Delimited))
 	{
-		*(FName*)Data = FName(Buffer);
+		ImportedName = FName(Buffer);		
 
 		// in order to indicate that the value was successfully imported, advance the buffer past the last character that was imported
 		Buffer += FCString::Strlen(Buffer);
@@ -47,14 +55,25 @@ const TCHAR* FNameProperty::ImportText_Internal( const TCHAR* Buffer, void* Data
 		TStringBuilder<256> Token;
 		Buffer = FPropertyHelpers::ReadToken(Buffer, /* out */ Token, true);
 		if (!Buffer)
-			return NULL;
+		{
+			return nullptr;
+		}
 
-		*(FName*)Data = FName(Token);
+		ImportedName = FName(Token);
 	}
+	if (PropertyPointerType == EPropertyPointerType::Container && HasSetter())
+	{
+		SetValue_InContainer(ContainerOrPropertyPtr, ImportedName);
+	}
+	else
+	{
+		*(FName*)PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType) = ImportedName;
+	}
+
 	return Buffer;
 }
 
-EConvertFromTypeResult FNameProperty::ConvertFromType(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct)
+EConvertFromTypeResult FNameProperty::ConvertFromType(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct, const uint8* Defaults)
 {
 	if (Tag.Type == NAME_StrProperty)
 	{

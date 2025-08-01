@@ -10,6 +10,14 @@
 
 class UTexture;
 
+namespace UE
+{
+namespace Shader
+{
+struct FTextureValue;
+}
+}
+
 UCLASS(collapsecategories, hidecategories=Object, MinimalAPI)
 class UMaterialExpressionFontSample : public UMaterialExpression
 {
@@ -17,7 +25,7 @@ class UMaterialExpressionFontSample : public UMaterialExpression
 
 	/** font resource that will be sampled */
 	UPROPERTY(EditAnywhere, Category=MaterialExpressionFontSample)
-	class UFont* Font;
+	TObjectPtr<class UFont> Font;
 
 	/** allow access to the various font pages */
 	UPROPERTY(EditAnywhere, Category=MaterialExpressionFontSample)
@@ -31,6 +39,7 @@ class UMaterialExpressionFontSample : public UMaterialExpression
 	virtual bool MatchesSearchQuery(const TCHAR* SearchQuery) override;
 	virtual int32 GetWidth() const override;
 	virtual int32 GetLabelPadding() override { return 8; }
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
 #endif
 
 	/** 

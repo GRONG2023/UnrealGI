@@ -4,6 +4,8 @@
 
 #include "CoreMinimal.h"
 #include "Misc/Attribute.h"
+#include "LandscapeEditorDetailCustomization_Base.h"
+#include "LandscapeEdMode.h"
 #include "Layout/Visibility.h"
 #include "Layout/Margin.h"
 #include "Styling/SlateColor.h"
@@ -12,19 +14,19 @@
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SWidget.h"
 #include "Widgets/Layout/SBorder.h"
-#include "Editor/LandscapeEditor/Private/LandscapeEdMode.h"
 #include "IDetailCustomNodeBuilder.h"
 #include "IDetailCustomization.h"
 #include "AssetThumbnail.h"
 #include "Framework/SlateDelegates.h"
-#include "Editor/LandscapeEditor/Private/LandscapeEditorDetailCustomization_Base.h"
 
 class FDetailWidgetRow;
 class IDetailChildrenBuilder;
 class IDetailLayoutBuilder;
 class SDragAndDropVerticalBox;
+class SInlineEditableTextBlock;
 class ALandscapeBlueprintBrushBase;
 class ULandscapeLayerInfoObject;
+class FMenuBuilder;
 
 /**
  * Slate widgets customizer for the layers list in the Landscape Editor
@@ -71,7 +73,7 @@ protected:
 	TOptional<SDragAndDropVerticalBox::EItemDropZone> HandleCanAcceptDrop(const FDragDropEvent& DragDropEvent, SDragAndDropVerticalBox::EItemDropZone DropZone, SVerticalBox::FSlot* Slot);
 	FReply HandleAcceptDrop(FDragDropEvent const& DragDropEvent, SDragAndDropVerticalBox::EItemDropZone DropZone, int32 SlotIndex, SVerticalBox::FSlot* Slot);
 
-	bool IsLayerSelected(int32 LayerIndex);
+	bool IsLayerSelected(int32 LayerIndex) const;
 	void OnLayerSelectionChanged(int32 LayerIndex);
 	TSharedPtr<SWidget> OnLayerContextMenuOpening(int32 InLayerIndex);
 	void CreateLayer();
@@ -88,6 +90,7 @@ protected:
 	void OnEndNameTextEdit();
 	void SetLayerName(const FText& InText, ETextCommit::Type InCommitType, int32 InLayerIndex);
 	FText GetLayerText(int32 InLayerIndex) const;
+	FSlateColor GetLayerTextColor(int32 InLayerIndex) const;
 	void SetLandscapeSplinesReservedLayer(int32 InLayerIndex);
 	FText GetLayerDisplayName(int32 InLayerIndex) const;
 	bool IsLayerEditionEnabled(int32 InLayerIndex) const;

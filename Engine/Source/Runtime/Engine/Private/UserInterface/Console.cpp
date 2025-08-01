@@ -5,18 +5,17 @@
 =============================================================================*/
 
 #include "Engine/Console.h"
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "Engine/GameInstance.h"
+#include "Engine/GameViewportClient.h"
 #include "Misc/Paths.h"
-#include "GenericPlatform/GenericApplication.h"
+#include "Modules/ModuleManager.h"
 #include "UObject/UnrealType.h"
 #include "Misc/PackageName.h"
 #include "UObject/ConstructorHelpers.h"
-#include "EngineGlobals.h"
-#include "ShowFlags.h"
-#include "Input/Events.h"
 #include "Engine/Engine.h"
-#include "CanvasItem.h"
 #include "Engine/Canvas.h"
-#include "UObject/UObjectHash.h"
 #include "UObject/UObjectIterator.h"
 #include "GameFramework/PlayerController.h"
 #include "Engine/Texture2D.h"
@@ -29,9 +28,9 @@
 #include "Stats/StatsData.h"
 #include "Misc/TextFilter.h"
 #include "HAL/PlatformApplicationMisc.h"
-#include "ProfilingDebugging/CsvProfiler.h"
-#include "Engine/AssetManager.h"
-#include "IO/IoDispatcher.h"
+#include "TextureResource.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(Console)
 
 static const uint32 MAX_AUTOCOMPLETION_LINES = 20;
 
@@ -59,6 +58,12 @@ static TAutoConsoleVariable<int32> CVarConsoleYPos(
 	TEXT("Console Y offset from bottom border \n"),
 	ECVF_Default);
 
+static TAutoConsoleVariable<bool> CVarConsoleLegacySearch(
+	TEXT("console.searchmode.legacy"),
+	false,
+	TEXT("Use the legacy search behaviour for console commands \n"),
+	ECVF_Default);
+
 
 namespace ConsoleDefs
 {
@@ -78,7 +83,7 @@ class FConsoleVariableAutoCompleteVisitor
 public:
 	// @param Name must not be 0
 	// @param CVar must not be 0
-	static void OnConsoleVariable(const TCHAR* Name, IConsoleObject* CVar, TArray<struct FAutoCompleteCommand>& Sink)
+	static void OnConsoleVariable(const TCHAR* Name, IConsoleObject* CVar, TArray<struct FAutoCompleteCommand>* Sink)
 	{
 #if DISABLE_CHEAT_CVARS
 		if (CVar->TestFlags(ECVF_Cheat))
@@ -94,8 +99,8 @@ public:
 		const UConsoleSettings* ConsoleSettings = GetDefault<UConsoleSettings>();
 
 		// can be optimized
-		int32 NewIdx = Sink.AddDefaulted();
-		FAutoCompleteCommand& Cmd = Sink[NewIdx];
+		int32 NewIdx = Sink->AddDefaulted();
+		FAutoCompleteCommand& Cmd = (*Sink)[NewIdx];
 		Cmd.Command = Name;
 
 		if (ConsoleSettings->bDisplayHelpInAutoComplete)
@@ -217,9 +222,9 @@ void UConsole::BuildRuntimeAutoCompleteList(bool bForce)
 	// console variables
 	{
 		IConsoleManager::Get().ForEachConsoleObjectThatStartsWith(
-			FConsoleObjectVisitor::CreateStatic< TArray<struct FAutoCompleteCommand>& >(
+			FConsoleObjectVisitor::CreateStatic(
 				&FConsoleVariableAutoCompleteVisitor::OnConsoleVariable,
-				AutoCompleteList));
+				&AutoCompleteList));
 	}
 
 	// iterate through script exec functions and append to the list
@@ -279,41 +284,34 @@ void UConsole::BuildRuntimeAutoCompleteList(bool bForce)
 	{
 		auto FindPackagesInDirectory = [](TArray<FString>& OutPackages, const FString& InPath)
 		{
-			// Can't search packages using the filesystem when I/O dispatcher is enabled
-			if (FIoDispatcher::IsInitialized())
+			FString PackagePath;
+			if (FPackageName::TryConvertFilenameToLongPackageName(InPath, PackagePath))
 			{
-				FString PackagePath;
-				if (FPackageName::TryConvertFilenameToLongPackageName(InPath, PackagePath))
+				if (FAssetRegistryModule* AssetRegistryModule = FModuleManager::LoadModulePtr<FAssetRegistryModule>(TEXT("AssetRegistry")))
 				{
-					if (FAssetRegistryModule* AssetRegistryModule = FModuleManager::LoadModulePtr<FAssetRegistryModule>(TEXT("AssetRegistry")))
-					{
-						TArray<FAssetData> Assets;
-						AssetRegistryModule->Get().GetAssetsByPath(FName(*PackagePath), Assets, true);
+					TArray<FAssetData> Assets;
+					AssetRegistryModule->Get().GetAssetsByPath(FName(*PackagePath), Assets, true);
 
-						for (const FAssetData& Asset : Assets)
+					for (const FAssetData& Asset : Assets)
+					{
+						if (!!(Asset.PackageFlags & PKG_ContainsMap) && Asset.IsUAsset())
 						{
-							if (!!(Asset.PackageFlags & PKG_ContainsMap) && Asset.IsUAsset())
-							{
-								OutPackages.Emplace(Asset.AssetName.ToString());
-							}
+							OutPackages.AddUnique(Asset.AssetName.ToString());
 						}
 					}
 				}
 			}
-			else
+			TArray<FString> Filenames;
+			FPackageName::FindPackagesInDirectory(Filenames, InPath);
+
+			for (const FString& Filename : Filenames)
 			{
-				TArray<FString> Filenames;
-				FPackageName::FindPackagesInDirectory(Filenames, InPath);
+				const int32 NameStartIdx = Filename.Find(TEXT("/"), ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+				const int32 ExtIdx = Filename.Find(*FPackageName::GetMapPackageExtension(), ESearchCase::IgnoreCase, ESearchDir::FromEnd);
 
-				for (const FString& Filename : Filenames)
+				if (NameStartIdx != INDEX_NONE && ExtIdx != INDEX_NONE)
 				{
-					const int32 NameStartIdx = Filename.Find(TEXT("/"), ESearchCase::IgnoreCase, ESearchDir::FromEnd);
-					const int32 ExtIdx = Filename.Find(*FPackageName::GetMapPackageExtension(), ESearchCase::IgnoreCase, ESearchDir::FromEnd);
-
-					if (NameStartIdx != INDEX_NONE && ExtIdx != INDEX_NONE)
-					{
-						OutPackages.Emplace(Filename.Mid(NameStartIdx + 1, ExtIdx - NameStartIdx - 1));
-					}
+					OutPackages.AddUnique(Filename.Mid(NameStartIdx + 1, ExtIdx - NameStartIdx - 1));
 				}
 			}
 		};
@@ -443,6 +441,14 @@ void UConsole::BuildRuntimeAutoCompleteList(bool bForce)
 					FoundNodeIdx = NodeIdx;
 					Node = NodeList[FoundNodeIdx];
 					NodeList[FoundNodeIdx]->AutoCompleteListIndices.Add(ListIdx);
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+					// Disable array slack tracking for Console system related allocations.  This needs to be called any time a reallocation occurs,
+					// which in practical terms means any "Add" (although it's cheap if there wasn't a recent reallocation, a couple memory reads).
+					// The auto-complete code (triggered when bringing up a console window to issue the slack report command) generates over a million
+					// allocations, with over 10 MB cumulative slack memory, which ends up at the top of any slack report, and is debug related code
+					// that we don't care about tracking.  If anyone wants to look at it for some reason, just remove these lines.
+					NodeList[FoundNodeIdx]->AutoCompleteListIndices.GetAllocatorInstance().DisableSlackTracking();
+#endif
 					break;
 				}
 			}
@@ -451,6 +457,10 @@ void UConsole::BuildRuntimeAutoCompleteList(bool bForce)
 				FAutoCompleteNode* NewNode = new FAutoCompleteNode(Char);
 				NewNode->AutoCompleteListIndices.Add(ListIdx);
 				Node->ChildNodes.Add(NewNode);
+#if UE_ENABLE_ARRAY_SLACK_TRACKING
+				NewNode->AutoCompleteListIndices.GetAllocatorInstance().DisableSlackTracking();
+				Node->ChildNodes.GetAllocatorInstance().DisableSlackTracking();
+#endif
 				Node = NewNode;
 			}
 		}
@@ -479,18 +489,79 @@ void UConsole::UpdateCompleteIndices()
 		BuildRuntimeAutoCompleteList(true);
 	}
 
-	// see if we should do a full search instead of normal autocomplete
-	static FString Space(" ");
-	static FString QuestionMark("?");
-	FString Left, Right;
-	if (TypedStr.Split(Space, &Left, &Right) ? Left.Equals(QuestionMark) : TypedStr.Equals(QuestionMark))
-	{
-		static FCheatTextFilter Filter(FCheatTextFilter::FItemToStringArray::CreateStatic(&CommandToStringArray));
-		Filter.SetRawFilterText(FText::FromString(Right));
+	AutoComplete.Empty();
+	AutoCompleteIndex = 0;
+	AutoCompleteCursor = 0;
 
-		AutoCompleteIndex = 0;
-		AutoCompleteCursor = 0;
-		AutoComplete.Reset();
+	if (CVarConsoleLegacySearch.GetValueOnAnyThread())
+	{
+		// use the old autocomplete behaviour
+		FAutoCompleteNode* Node = &AutoCompleteTree;
+		FString LowerTypedStr = TypedStr.ToLower();
+		int32 EndIdx = -1;
+		for (int32 Idx = 0; Idx < TypedStr.Len(); Idx++)
+		{
+			int32 Char = LowerTypedStr[Idx];
+			bool bFoundMatch = false;
+			int32 BranchCnt = 0;
+			for (int32 CharIdx = 0; CharIdx < Node->ChildNodes.Num(); CharIdx++)
+			{
+				BranchCnt += Node->ChildNodes[CharIdx]->ChildNodes.Num();
+				if (Node->ChildNodes[CharIdx]->IndexChar == Char)
+				{
+					bFoundMatch = true;
+					Node = Node->ChildNodes[CharIdx];
+					break;
+				}
+			}
+			if (!bFoundMatch)
+			{
+				if (!bAutoCompleteLocked && BranchCnt > 0)
+				{
+					// we're off the grid!
+					return;
+				}
+				else
+				{
+					if (Idx < TypedStr.Len())
+					{
+						// if the first non-matching character is a space we might be adding parameters, stay on the last node we found so users can see the parameter info
+						if (TypedStr[Idx] == TCHAR(' '))
+						{
+							EndIdx = Idx;
+							break;
+						}
+						// there is more text behind the auto completed text, we don't need auto completion
+						return;
+					}
+					else
+					{
+						break;
+					}
+				}
+			}
+		}
+		if (Node != &AutoCompleteTree)
+		{
+			const TArray<int32>& Leaf = Node->AutoCompleteListIndices;
+
+			for (uint32 i = 0, Num = (uint32)Leaf.Num(); i < Num; ++i)
+			{
+				// if we're adding parameters we want to make sure that we only display exact matches
+				// ie Typing "Foo 5" should still show info for "Foo" but not for "FooBar"
+				if (EndIdx < 0 || AutoCompleteList[Leaf[i]].Command.Len() == EndIdx)
+				{
+					AutoComplete.Add(AutoCompleteList[Leaf[i]]);
+				}
+			}
+			AutoComplete.Sort();
+		}
+	}
+	else if (!TypedStr.IsEmpty())
+	{
+		// search for any substring, not just the prefix
+		static FCheatTextFilter Filter(FCheatTextFilter::FItemToStringArray::CreateStatic(&CommandToStringArray));
+		Filter.SetRawFilterText(FText::FromString(TypedStr));
 
 		for (const FAutoCompleteCommand& Command : AutoCompleteList)
 		{
@@ -501,72 +572,7 @@ void UConsole::UpdateCompleteIndices()
 		}
 
 		AutoComplete.Sort();
-		return;
-	}
-
-	AutoCompleteIndex = 0;
-	AutoCompleteCursor = 0;
-	AutoComplete.Empty();
-	FAutoCompleteNode* Node = &AutoCompleteTree;
-	FString LowerTypedStr = TypedStr.ToLower();
-	int32 EndIdx = -1;
-	for (int32 Idx = 0; Idx < TypedStr.Len(); Idx++)
-	{
-		int32 Char = LowerTypedStr[Idx];
-		bool bFoundMatch = false;
-		int32 BranchCnt = 0;
-		for (int32 CharIdx = 0; CharIdx < Node->ChildNodes.Num(); CharIdx++)
-		{
-			BranchCnt += Node->ChildNodes[CharIdx]->ChildNodes.Num();
-			if (Node->ChildNodes[CharIdx]->IndexChar == Char)
-			{
-				bFoundMatch = true;
-				Node = Node->ChildNodes[CharIdx];
-				break;
-			}
-		}
-		if (!bFoundMatch)
-		{
-			if (!bAutoCompleteLocked && BranchCnt > 0)
-			{
-				// we're off the grid!
-				return;
-			}
-			else
-			{
-				if (Idx < TypedStr.Len())
-				{
-					// if the first non-matching character is a space we might be adding parameters, stay on the last node we found so users can see the parameter info
-					if (TypedStr[Idx] == TCHAR(' '))
-					{
-						EndIdx = Idx;
-						break;
-					}
-					// there is more text behind the auto completed text, we don't need auto completion
-					return;
-				}
-				else
-				{
-					break;
-				}
-			}
-		}
-	}
-	if (Node != &AutoCompleteTree)
-	{
-		const TArray<int32>& Leaf = Node->AutoCompleteListIndices;
-
-		for (uint32 i = 0, Num = (uint32)Leaf.Num(); i < Num; ++i)
-		{
-			// if we're adding parameters we want to make sure that we only display exact matches
-			// ie Typing "Foo 5" should still show info for "Foo" but not for "FooBar"
-			if (EndIdx < 0 || AutoCompleteList[Leaf[i]].Command.Len() == EndIdx)
-			{
-				AutoComplete.Add(AutoCompleteList[Leaf[i]]);
-			}
-		}
-		AutoComplete.Sort();
-	}
+	}	
 }
 
 void UConsole::SetAutoCompleteFromHistory()
@@ -599,7 +605,6 @@ void UConsole::SetCursorPos(int32 Position)
 
 void UConsole::ConsoleCommand(const FString& Command)
 {
-	CSV_EVENT_GLOBAL(TEXT("Cmd: %s"), *Command);
 	// insert into history buffer
 	{
 		HistoryBuffer.Remove(Command);
@@ -790,7 +795,7 @@ void UConsole::AppendInputText(const FString& Text)
 	while (TextMod.Len() > 0)
 	{
 		int32 Character = **TextMod.Left(1);
-		TextMod.MidInline(1, MAX_int32, false);
+		TextMod.MidInline(1, MAX_int32, EAllowShrinking::No);
 
 		if (Character >= 0x20 && Character < 0x100)
 		{
@@ -805,7 +810,15 @@ void UConsole::AppendInputText(const FString& Text)
 	UpdatePrecompletedInputLine();
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 bool UConsole::InputChar_Typing(int32 ControllerId, const FString& Unicode)
+{
+	FInputDeviceId DeviceId = FInputDeviceId::CreateFromInternalId(ControllerId);
+	return InputChar_Typing(DeviceId, Unicode);
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+bool UConsole::InputChar_Typing(FInputDeviceId DeviceId, const FString& Unicode)
 {
 	if (bCaptureKeyInput)
 	{
@@ -817,7 +830,7 @@ bool UConsole::InputChar_Typing(int32 ControllerId, const FString& Unicode)
 	return true;
 }
 
-bool UConsole::InputKey_InputLine(int32 ControllerId, FKey Key, EInputEvent Event, float AmountDepressed, bool bGamepad)
+bool UConsole::InputKey_InputLine(FInputDeviceId DeviceId, FKey Key, EInputEvent Event, float AmountDepressed, bool bGamepad)
 {
 	if (Event == IE_Pressed)
 	{
@@ -903,6 +916,23 @@ bool UConsole::InputKey_InputLine(int32 ControllerId, FKey Key, EInputEvent Even
 				// wrap around
 				AutoCompleteIndex = AutoCompleteCursor = 0;
 			}
+		}
+	};
+
+	auto FindWordBreak = [](const FString& Str, uint32 StartPos, ESearchDir::Type Direction)
+	{
+		// find the nearest '.' or ' '
+		int32 SpacePos = Str.Find(TEXT(" "), ESearchCase::CaseSensitive, Direction, StartPos);
+		int32 PeriodPos = Str.Find(TEXT("."), ESearchCase::CaseSensitive, Direction, StartPos);
+		if (Direction == ESearchDir::FromEnd)
+		{
+			return FMath::Max(SpacePos, PeriodPos);
+		}
+		else
+		{ 
+			int32 Result = SpacePos < 0 ? PeriodPos : (PeriodPos < 0 ? SpacePos : FMath::Min(SpacePos, PeriodPos));
+			Result = Result == INDEX_NONE ? Str.Len() : Result;
+			return Result;
 		}
 	};
 
@@ -1058,11 +1088,23 @@ bool UConsole::InputKey_InputLine(int32 ControllerId, FKey Key, EInputEvent Even
 		{
 			if (TypedStrPos > 0)
 			{
-				SetInputText(FString::Printf(TEXT("%s%s"), *TypedStr.Left(TypedStrPos - 1), *TypedStr.Right(TypedStr.Len() - TypedStrPos)));
-				SetCursorPos(TypedStrPos - 1);
+				int32 NewPos;
+				if (bCtrl)
+				{
+					NewPos = FMath::Max(0, FindWordBreak(TypedStr, TypedStrPos, ESearchDir::FromEnd));
+				}
+				else
+				{
+					NewPos = TypedStrPos - 1;
+				}
+
+				SetInputText(FString::Printf(TEXT("%s%s"), *TypedStr.Left(NewPos), *TypedStr.Right(TypedStr.Len() - TypedStrPos)));
+				SetCursorPos(NewPos);
+
 				// unlock auto-complete (@todo - track the lock position so we don't bother unlocking under bogus cases)
 				bAutoCompleteLocked = false;
 			}
+			bCaptureKeyInput = true;
 
 			return true;
 		}
@@ -1070,44 +1112,46 @@ bool UConsole::InputKey_InputLine(int32 ControllerId, FKey Key, EInputEvent Even
 		{
 			if (TypedStrPos < TypedStr.Len())
 			{
-				SetInputText(FString::Printf(TEXT("%s%s"), *TypedStr.Left(TypedStrPos), *TypedStr.Right(TypedStr.Len() - TypedStrPos - 1)));
+				int32 RightStart;
+				if (bCtrl)
+				{
+					RightStart = FindWordBreak(TypedStr, TypedStrPos + 1, ESearchDir::FromStart);
+				}
+				else
+				{
+					RightStart = TypedStrPos + 1;
+				}
+
+				SetInputText(FString::Printf(TEXT("%s%s"), *TypedStr.Left(TypedStrPos), *TypedStr.Right(TypedStr.Len() - RightStart)));
 			}
 			return true;
 		}
 		else if (Key == EKeys::Left)
 		{
+			int32 NewPos;
 			if (bCtrl)
 			{
-				// find the nearest '.' or ' '
-				int32 NewPos = FMath::Max(TypedStr.Find(TEXT("."), ESearchCase::CaseSensitive, ESearchDir::FromEnd, TypedStrPos), TypedStr.Find(TEXT(" "), ESearchCase::CaseSensitive, ESearchDir::FromEnd, TypedStrPos));
-				SetCursorPos(FMath::Max(0, NewPos));
+				NewPos = FMath::Min(FindWordBreak(TypedStr, FMath::Max(0, TypedStrPos - 1), ESearchDir::FromEnd) + 1, TypedStr.Len());
 			}
 			else
 			{
-				SetCursorPos(FMath::Max(0, TypedStrPos - 1));
+				NewPos = FMath::Max(0, TypedStrPos - 1);
 			}
+			SetCursorPos(NewPos);
 			return true;
 		}
 		else if (Key == EKeys::Right)
 		{
+			int32 NewPos;
 			if (bCtrl)
 			{
-				// find the nearest '.' or ' '
-				int32 SpacePos = TypedStr.Find(TEXT(" "));
-				int32 PeriodPos = TypedStr.Find(TEXT("."));
-				// pick the closest valid index
-				int32 NewPos = SpacePos < 0 ? PeriodPos : (PeriodPos < 0 ? SpacePos : FMath::Min(SpacePos, PeriodPos));
-				// jump to end if nothing in between
-				if (NewPos == INDEX_NONE)
-				{
-					NewPos = TypedStr.Len();
-				}
-				SetCursorPos(FMath::Min(TypedStr.Len(), FMath::Max(TypedStrPos, NewPos)));
+				NewPos = FindWordBreak(TypedStr, FMath::Min(TypedStrPos + 1, TypedStr.Len()), ESearchDir::FromStart);
 			}
 			else
 			{
-				SetCursorPos(FMath::Min(TypedStr.Len(), TypedStrPos + 1));
+				NewPos = FMath::Min(TypedStr.Len(), TypedStrPos + 1);
 			}
+			SetCursorPos(NewPos);
 			return true;
 		}
 		else if (Key == EKeys::Home)
@@ -1200,8 +1244,15 @@ void UConsole::EndState_Typing(FName NextStateName)
 	bAutoCompleteLocked = false;
 }
 
-
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 bool UConsole::InputChar_Open(int32 ControllerId, const FString& Unicode)
+{
+	FInputDeviceId DeviceId = FInputDeviceId::CreateFromInternalId(ControllerId);
+	return InputChar_Open(DeviceId, Unicode);
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+bool UConsole::InputChar_Open(FInputDeviceId DeviceId, const FString& Unicode)
 {
 	if (bCaptureKeyInput)
 	{
@@ -1213,8 +1264,15 @@ bool UConsole::InputChar_Open(int32 ControllerId, const FString& Unicode)
 	return true;
 }
 
-
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 bool UConsole::InputKey_Open(int32 ControllerId, FKey Key, EInputEvent Event, float AmountDepressed, bool bGamepad)
+{
+	FInputDeviceId DeviceId = FInputDeviceId::CreateFromInternalId(ControllerId);
+	return InputKey_Open(DeviceId, Key, Event, AmountDepressed, bGamepad);
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+bool UConsole::InputKey_Open(FInputDeviceId DeviceId, FKey Key, EInputEvent Event, float AmountDepressed, bool bGamepad)
 {
 	if (Key == EKeys::PageUp || Key == EKeys::MouseScrollUp)
 	{
@@ -1280,7 +1338,7 @@ void UConsole::PostRender_Console_Open(UCanvas* Canvas)
 	// Background
 	FLinearColor BackgroundColor = ConsoleDefs::AutocompleteBackgroundColor.ReinterpretAsLinear();
 	BackgroundColor.A = ConsoleSettings->BackgroundOpacityPercentage / 100.0f;
-	FCanvasTileItem ConsoleTile(FVector2D(LeftPos, 0.0f), DefaultTexture_Black->Resource, FVector2D(ClipX, Height + TopPos - yl), FVector2D(0.0f, 0.0f), FVector2D(1.0f, 1.0f), BackgroundColor);
+	FCanvasTileItem ConsoleTile(FVector2D(LeftPos, 0.0f), DefaultTexture_Black->GetResource(), FVector2D(ClipX, Height + TopPos - yl), FVector2D(0.0f, 0.0f), FVector2D(1.0f, 1.0f), BackgroundColor);
 
 	// Preserve alpha to allow single-pass composite
 	ConsoleTile.BlendMode = SE_BLEND_AlphaBlend;
@@ -1352,22 +1410,38 @@ void UConsole::EndState_Open(FName NextStateName)
 {
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 bool UConsole::InputChar(int32 ControllerId, const FString& Unicode)
+{
+	FInputDeviceId DeviceId = FInputDeviceId::CreateFromInternalId(ControllerId);
+	return InputChar(DeviceId, Unicode);
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+bool UConsole::InputChar(FInputDeviceId DeviceId, const FString& Unicode)
 {
 	if (ConsoleState == NAME_Typing)
 	{
-		return InputChar_Typing(ControllerId, Unicode);
+		return InputChar_Typing(DeviceId, Unicode);
 	}
 	if (ConsoleState == NAME_Open)
 	{
-		return InputChar_Open(ControllerId, Unicode);
+		return InputChar_Open(DeviceId, Unicode);
 	}
 	return bCaptureKeyInput;
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 bool UConsole::InputKey(int32 ControllerId, FKey Key, EInputEvent Event, float AmountDepressed, bool bGamepad)
 {
-	bool bWasConsumed = InputKey_InputLine(ControllerId, Key, Event, AmountDepressed, bGamepad);
+	FInputDeviceId DeviceId = FInputDeviceId::CreateFromInternalId(ControllerId);
+	return InputKey(DeviceId, Key, Event, AmountDepressed, bGamepad);
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+bool UConsole::InputKey(FInputDeviceId DeviceId, FKey Key, EInputEvent Event, float AmountDepressed, bool bGamepad)
+{
+	bool bWasConsumed = InputKey_InputLine(DeviceId, Key, Event, AmountDepressed, bGamepad);
 
 	if (!bWasConsumed)
 	{
@@ -1378,7 +1452,7 @@ bool UConsole::InputKey(int32 ControllerId, FKey Key, EInputEvent Event, float A
 		}
 		if (ConsoleState == NAME_Open)
 		{
-			bWasConsumed = InputKey_Open(ControllerId, Key, Event, AmountDepressed, bGamepad);
+			bWasConsumed = InputKey_Open(DeviceId, Key, Event, AmountDepressed, bGamepad);
 			// if the console is open we don't want any other one to consume the input
 			return true;
 		}
@@ -1430,7 +1504,7 @@ void UConsole::PostRender_InputLine(UCanvas* Canvas, FIntPoint UserInputLinePos)
 	// Background
 	FLinearColor BackgroundColor = ConsoleDefs::AutocompleteBackgroundColor.ReinterpretAsLinear();
 	BackgroundColor.A = ConsoleSettings->BackgroundOpacityPercentage / 100.0f;
-	FCanvasTileItem ConsoleTile(FVector2D(UserInputLinePos.X, UserInputLinePos.Y - 6 - yl), DefaultTexture_Black->Resource, FVector2D(ClipX, yl + 6), FVector2D(0.0f, 0.0f), FVector2D(1.0f, 1.0f), BackgroundColor);
+	FCanvasTileItem ConsoleTile(FVector2D(UserInputLinePos.X, UserInputLinePos.Y - 6 - yl), DefaultTexture_Black->GetResource(), FVector2D(ClipX, yl + 6), FVector2D(0.0f, 0.0f), FVector2D(1.0f, 1.0f), BackgroundColor);
 
 	// Preserve alpha to allow single-pass composite
 	ConsoleTile.BlendMode = SE_BLEND_AlphaBlend;
@@ -1439,7 +1513,7 @@ void UConsole::PostRender_InputLine(UCanvas* Canvas, FIntPoint UserInputLinePos)
 
 	// Separator line
 	ConsoleTile.SetColor(ConsoleDefs::BorderColor);
-	ConsoleTile.Texture = DefaultTexture_White->Resource;
+	ConsoleTile.Texture = DefaultTexture_White->GetResource();
 	ConsoleTile.Size = FVector2D(ClipX, 2.0f);
 	Canvas->DrawItem(ConsoleTile);
 
@@ -1476,7 +1550,7 @@ void UConsole::PostRender_InputLine(UCanvas* Canvas, FIntPoint UserInputLinePos)
 		FLinearColor AutoCompleteBackgroundColor = ConsoleDefs::AutocompleteBackgroundColor;
 		AutoCompleteBackgroundColor.A = ConsoleSettings->BackgroundOpacityPercentage / 100.0f;
 		ConsoleTile.SetColor(AutoCompleteBackgroundColor);
-		ConsoleTile.Texture = DefaultTexture_White->Resource;
+		ConsoleTile.Texture = DefaultTexture_White->GetResource();
 
 		// wasteful memory allocations but when typing in a console command this is fine
 		TArray<const FAutoCompleteCommand*> AutoCompleteElements;
@@ -1724,3 +1798,4 @@ void UConsole::Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const cl
 		}
 	}
 }
+

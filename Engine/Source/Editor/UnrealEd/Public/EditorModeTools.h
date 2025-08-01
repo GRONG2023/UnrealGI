@@ -2,9 +2,13 @@
 
 #pragma once
 
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "InputCoreTypes.h"
 #include "Engine/EngineBaseTypes.h"
+#include "InputCoreTypes.h"
+#include "Math/Box.h"
+#include "Math/Rotator.h"
+#include "Math/UnrealMathSSE.h"
 
 class FCanvas;
 class FEditorViewportClient;
@@ -43,11 +47,11 @@ enum EModeTools : int8
 /**
  * Base class for all editor mode tools.
  */
-class UNREALED_API FModeTool
+class FModeTool
 {
 public:
-	FModeTool();
-	virtual ~FModeTool();
+	UNREALED_API FModeTool();
+	UNREALED_API virtual ~FModeTool();
 
 	/** Returns the name that gets reported to the editor. */
 	virtual FString GetName() const		{ return TEXT("Default"); }
@@ -101,8 +105,8 @@ public:
 		return false;
 	}
 
-	virtual void Render(const FSceneView* View,FViewport* Viewport,FPrimitiveDrawInterface* PDI);
-	virtual void DrawHUD(FEditorViewportClient* ViewportClient,FViewport* Viewport,const FSceneView* View,FCanvas* Canvas);
+	UNREALED_API virtual void Render(const FSceneView* View,FViewport* Viewport,FPrimitiveDrawInterface* PDI);
+	UNREALED_API virtual void DrawHUD(FEditorViewportClient* ViewportClient,FViewport* Viewport,const FSceneView* View,FCanvas* Canvas);
 
 	//@{
 	virtual bool StartModify()	{ return 0; }

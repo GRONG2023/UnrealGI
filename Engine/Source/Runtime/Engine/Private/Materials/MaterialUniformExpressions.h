@@ -64,9 +64,17 @@ public:
 	virtual bool IsConstant() const { return false; }
 	virtual bool IsIdentical(const FMaterialUniformExpression* OtherExpression) const { return false; }
 
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const;
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const;
 
 	virtual void GetNumberValue(const struct FMaterialRenderContext& Context, FLinearColor& OutValue) const;
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const { return TArrayView<const FMaterialUniformExpression*>(); }
+
+	/** Offset of this uniform, within the shader's uniform buffer array */
+	int32 UniformOffset = INDEX_NONE;
+
+	/** Index of this uniform in the material translator's list of unique expressions */
+	int32 UniformIndex = INDEX_NONE;
 };
 
 /**
@@ -80,6 +88,7 @@ public:
 	FMaterialUniformExpressionTexture();
 	FMaterialUniformExpressionTexture(int32 InTextureIndex, EMaterialSamplerType InSamplerType, ESamplerSourceMode InSamplerSource, bool InVirtualTexture);
 	FMaterialUniformExpressionTexture(int32 InTextureIndex, int16 InTextureLayerIndex, int16 InPageTableLayerIndex, EMaterialSamplerType InSamplerType);
+	FMaterialUniformExpressionTexture(int32 InTextureIndex, EMaterialSamplerType InSamplerType);
 
 	//~ Begin FMaterialUniformExpression Interface.
 	virtual class FMaterialUniformExpressionTexture* GetTextureUniformExpression() { return this; }
@@ -190,10 +199,20 @@ public:
 		return OtherConstant->ValueType == ValueType && OtherConstant->Value == Value;
 	}
 
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::Constant);
-		OutData.Write(Value);
+		UE::Shader::FValue ConstantValue(Value);
+		switch (ValueType)
+		{
+		case MCT_Float:
+		case MCT_Float1: ConstantValue.Type = UE::Shader::EValueType::Float1; break;
+		case MCT_Float2: ConstantValue.Type = UE::Shader::EValueType::Float2; break;
+		case MCT_Float3: ConstantValue.Type = UE::Shader::EValueType::Float3; break;
+		case MCT_Float4: ConstantValue.Type = UE::Shader::EValueType::Float4; break;
+		default: checkNoEntry(); break;
+		}
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Constant);
+		OutData.Write(ConstantValue);
 	}
 
 	virtual void GetNumberValue(const FMaterialRenderContext& Context, FLinearColor& OutValue) const override
@@ -208,13 +227,54 @@ private:
 
 /**
  */
-class FMaterialUniformExpressionVectorParameter: public FMaterialUniformExpression
+class FMaterialUniformExpressionGenericConstant : public FMaterialUniformExpression
 {
-	DECLARE_MATERIALUNIFORMEXPRESSION_TYPE(FMaterialUniformExpressionVectorParameter);
+	DECLARE_MATERIALUNIFORMEXPRESSION_TYPE(FMaterialUniformExpressionGenericConstant);
+public:
+	FMaterialUniformExpressionGenericConstant() {}
+	FMaterialUniformExpressionGenericConstant(const UE::Shader::FValue& InValue) :
+		Value(InValue)
+	{}
+
+	// FMaterialUniformExpression interface.
+	virtual bool IsConstant() const
+	{
+		return true;
+	}
+	virtual bool IsIdentical(const FMaterialUniformExpression* OtherExpression) const
+	{
+		if (GetType() != OtherExpression->GetType())
+		{
+			return false;
+		}
+		FMaterialUniformExpressionGenericConstant* OtherConstant = (FMaterialUniformExpressionGenericConstant*)OtherExpression;
+		return OtherConstant->Value == Value;
+	}
+
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
+	{
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Constant);
+		OutData.Write(Value);
+	}
+
+	virtual void GetNumberValue(const FMaterialRenderContext& Context, FLinearColor& OutValue) const override
+	{
+		OutValue = Value.AsLinearColor();
+	}
+
+private:
+	UE::Shader::FValue Value;
+};
+
+/**
+ */
+class FMaterialUniformExpressionNumericParameter : public FMaterialUniformExpression
+{
+	DECLARE_MATERIALUNIFORMEXPRESSION_TYPE(FMaterialUniformExpressionNumericParameter);
 public:
 
-	FMaterialUniformExpressionVectorParameter() {}
-	FMaterialUniformExpressionVectorParameter(const FMaterialParameterInfo& InParameterInfo, int32 InParameterIndex)
+	FMaterialUniformExpressionNumericParameter() {}
+	FMaterialUniformExpressionNumericParameter(const FMaterialParameterInfo& InParameterInfo, int32 InParameterIndex)
 		: ParameterInfo(InParameterInfo)
 		, ParameterIndex(InParameterIndex)
 	{
@@ -222,9 +282,9 @@ public:
 	}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::VectorParameter);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Parameter);
 		OutData.Write((uint16)ParameterIndex);
 	}
 
@@ -249,10 +309,9 @@ public:
 		{
 			return false;
 		}
-		FMaterialUniformExpressionVectorParameter* OtherParameter = (FMaterialUniformExpressionVectorParameter*)OtherExpression;
+		FMaterialUniformExpressionNumericParameter* OtherParameter = (FMaterialUniformExpressionNumericParameter*)OtherExpression;
 		return ParameterInfo == OtherParameter->ParameterInfo && ParameterIndex == OtherParameter->ParameterIndex;
 	}
-
 private:
 	FHashedMaterialParameterInfo ParameterInfo;
 	int32 ParameterIndex;
@@ -260,23 +319,23 @@ private:
 
 /**
  */
-class FMaterialUniformExpressionScalarParameter: public FMaterialUniformExpression
+class FMaterialUniformExpressionStaticBoolParameter : public FMaterialUniformExpression
 {
-	DECLARE_MATERIALUNIFORMEXPRESSION_TYPE(FMaterialUniformExpressionScalarParameter);
+	DECLARE_MATERIALUNIFORMEXPRESSION_TYPE(FMaterialUniformExpressionStaticBoolParameter);
 public:
 
-	FMaterialUniformExpressionScalarParameter() {}
-	FMaterialUniformExpressionScalarParameter(const FMaterialParameterInfo& InParameterInfo, int32 InParameterIndex)
-		: ParameterInfo(InParameterInfo)
-		, ParameterIndex(InParameterIndex)
+	FMaterialUniformExpressionStaticBoolParameter() {}
+	FMaterialUniformExpressionStaticBoolParameter(const FMaterialParameterInfo& InParameterInfo, uint32 InParameterIndex)
+		: ParameterIndex(InParameterIndex)
+		, ParameterInfo(InParameterInfo)
 	{
 		check(InParameterIndex >= 0 && InParameterIndex <= 0xffff);
 	}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::ScalarParameter);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Parameter);
 		OutData.Write((uint16)ParameterIndex);
 	}
 
@@ -301,13 +360,12 @@ public:
 		{
 			return false;
 		}
-		FMaterialUniformExpressionScalarParameter* OtherParameter = (FMaterialUniformExpressionScalarParameter*)OtherExpression;
+		FMaterialUniformExpressionStaticBoolParameter* OtherParameter = (FMaterialUniformExpressionStaticBoolParameter*)OtherExpression;
 		return ParameterInfo == OtherParameter->ParameterInfo && ParameterIndex == OtherParameter->ParameterIndex;
 	}
-
 private:
+	uint32 ParameterIndex;
 	FHashedMaterialParameterInfo ParameterInfo;
-	int32 ParameterIndex;
 };
 
 /** @return The texture that was associated with the given index when the given material had its uniform expressions/HLSL code generated. */
@@ -315,7 +373,7 @@ template<typename TextureType>
 static TextureType* GetIndexedTexture(const FMaterial& Material, int32 TextureIndex)
 {
 	UObject* IndexedTexture = nullptr;
-	const TArrayView<UObject* const> ReferencedTextures = Material.GetReferencedTextures();
+	const TArrayView<const TObjectPtr<UObject>> ReferencedTextures = Material.GetReferencedTextures();
 	if (ReferencedTextures.IsValidIndex(TextureIndex))
 	{
 		IndexedTexture = ReferencedTextures[TextureIndex];
@@ -353,6 +411,11 @@ public:
 
 	FMaterialUniformExpressionTextureParameter(const FMaterialParameterInfo& InParameterInfo, int32 InTextureIndex, int32 InTextureLayerIndex, int32 InPageTableLayerIndex, EMaterialSamplerType InSamplerType)
 		: Super(InTextureIndex, InTextureLayerIndex, InPageTableLayerIndex, InSamplerType)
+		, ParameterInfo(InParameterInfo)
+	{}
+
+	FMaterialUniformExpressionTextureParameter(const FMaterialParameterInfo& InParameterInfo, int32 InTextureIndex, EMaterialSamplerType InSamplerType)
+		: Super(InTextureIndex, InSamplerType)
 		, ParameterInfo(InParameterInfo)
 	{}
 
@@ -452,10 +515,10 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		X->WriteNumberOpcodes(OutData);
-		OutData.WriteOpcode(bIsCosine ? EMaterialPreshaderOpcode::Cos : EMaterialPreshaderOpcode::Sin);
+		OutData.WriteOpcode(bIsCosine ? UE::Shader::EPreshaderOpcode::Cos : UE::Shader::EPreshaderOpcode::Sin);
 	}
 	virtual bool IsConstant() const
 	{
@@ -469,6 +532,11 @@ public:
 		}
 		FMaterialUniformExpressionSine* OtherSine = (FMaterialUniformExpressionSine*)OtherExpression;
 		return X->IsIdentical(OtherSine->X) && bIsCosine == OtherSine->bIsCosine;
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&X, 1);
 	}
 
 private:
@@ -510,7 +578,7 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		X->WriteNumberOpcodes(OutData);
 		if (Op == TMO_Atan2)
@@ -519,13 +587,13 @@ public:
 		}
 		switch (Op)
 		{
-		case TMO_Sin: OutData.WriteOpcode(EMaterialPreshaderOpcode::Sin); break;
-		case TMO_Cos: OutData.WriteOpcode(EMaterialPreshaderOpcode::Cos); break;
-		case TMO_Tan: OutData.WriteOpcode(EMaterialPreshaderOpcode::Tan); break;
-		case TMO_Asin: OutData.WriteOpcode(EMaterialPreshaderOpcode::Asin); break;
-		case TMO_Acos: OutData.WriteOpcode(EMaterialPreshaderOpcode::Acos); break;
-		case TMO_Atan: OutData.WriteOpcode(EMaterialPreshaderOpcode::Atan); break;
-		case TMO_Atan2: OutData.WriteOpcode(EMaterialPreshaderOpcode::Atan2); break;
+		case TMO_Sin: OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Sin); break;
+		case TMO_Cos: OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Cos); break;
+		case TMO_Tan: OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Tan); break;
+		case TMO_Asin: OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Asin); break;
+		case TMO_Acos: OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Acos); break;
+		case TMO_Atan: OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Atan); break;
+		case TMO_Atan2: OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Atan2); break;
 		default: checkNoEntry(); break;
 		}
 	}
@@ -542,6 +610,11 @@ public:
 		}
 		FMaterialUniformExpressionTrigMath* OtherTrig = (FMaterialUniformExpressionTrigMath*)OtherExpression;
 		return X->IsIdentical(OtherTrig->X) && Y->IsIdentical(OtherTrig->Y) && Op == OtherTrig->Op;
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&X, 2);
 	}
 
 private:
@@ -563,10 +636,10 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		X->WriteNumberOpcodes(OutData);
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::Sqrt);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Sqrt);
 	}
 	virtual bool IsConstant() const
 	{
@@ -580,6 +653,52 @@ public:
 		}
 		FMaterialUniformExpressionSquareRoot* OtherSqrt = (FMaterialUniformExpressionSquareRoot*)OtherExpression;
 		return X->IsIdentical(OtherSqrt->X);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&X, 1);
+	}
+
+private:
+	TRefCountPtr<FMaterialUniformExpression> X;
+};
+
+/**
+ */
+class FMaterialUniformExpressionRcp : public FMaterialUniformExpression
+{
+	DECLARE_MATERIALUNIFORMEXPRESSION_TYPE(FMaterialUniformExpressionRcp);
+public:
+
+	FMaterialUniformExpressionRcp() {}
+	FMaterialUniformExpressionRcp(FMaterialUniformExpression* InX) :
+		X(InX)
+	{}
+
+	// FMaterialUniformExpression interface.
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
+	{
+		X->WriteNumberOpcodes(OutData);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Rcp);
+	}
+	virtual bool IsConstant() const
+	{
+		return X->IsConstant();
+	}
+	virtual bool IsIdentical(const FMaterialUniformExpression* OtherExpression) const
+	{
+		if (GetType() != OtherExpression->GetType())
+		{
+			return false;
+		}
+		FMaterialUniformExpressionRcp* OtherRcp = (FMaterialUniformExpressionRcp*)OtherExpression;
+		return X->IsIdentical(OtherRcp->X);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&X, 1);
 	}
 
 private:
@@ -600,10 +719,10 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		X->WriteNumberOpcodes(OutData);
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::Length).Write((uint8)ValueType);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Length);
 	}
 	virtual bool IsConstant() const
 	{
@@ -619,9 +738,183 @@ public:
 		return X->IsIdentical(OtherSqrt->X) && ValueType == OtherSqrt->ValueType;
 	}
 
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&X, 1);
+	}
+
 private:
 	TRefCountPtr<FMaterialUniformExpression> X;
 	uint32 ValueType;
+};
+
+/**
+ */
+class FMaterialUniformExpressionNormalize : public FMaterialUniformExpression
+{
+	DECLARE_MATERIALUNIFORMEXPRESSION_TYPE(FMaterialUniformExpressionNormalize);
+public:
+
+	FMaterialUniformExpressionNormalize() {}
+	FMaterialUniformExpressionNormalize(FMaterialUniformExpression* InX) : X(InX)
+	{}
+
+	// FMaterialUniformExpression interface.
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
+	{
+		X->WriteNumberOpcodes(OutData);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Normalize);
+	}
+	virtual bool IsConstant() const
+	{
+		return X->IsConstant();
+	}
+	virtual bool IsIdentical(const FMaterialUniformExpression* OtherExpression) const
+	{
+		if (GetType() != OtherExpression->GetType())
+		{
+			return false;
+		}
+		FMaterialUniformExpressionNormalize* OtherSqrt = (FMaterialUniformExpressionNormalize*)OtherExpression;
+		return X->IsIdentical(OtherSqrt->X);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&X, 1);
+	}
+
+private:
+	TRefCountPtr<FMaterialUniformExpression> X;
+};
+
+/**
+ */
+class FMaterialUniformExpressionExponential : public FMaterialUniformExpression
+{
+	DECLARE_MATERIALUNIFORMEXPRESSION_TYPE(FMaterialUniformExpressionExponential);
+public:
+
+	FMaterialUniformExpressionExponential()
+	{}
+	FMaterialUniformExpressionExponential(FMaterialUniformExpression* InX) :
+		X(InX)
+	{}
+
+	// FMaterialUniformExpression interface.
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
+	{
+		X->WriteNumberOpcodes(OutData);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Exp);
+	}
+	bool IsConstant() const override
+	{
+		return X->IsConstant();
+	}
+	bool IsIdentical(const FMaterialUniformExpression* OtherExpression) const override
+	{
+		if(GetType() != OtherExpression->GetType())
+		{
+			return false;
+		}
+
+		const FMaterialUniformExpressionExponential* OtherExp = static_cast<const FMaterialUniformExpressionExponential*>(OtherExpression);
+		return X->IsIdentical(OtherExp->X);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&X, 1);
+	}
+
+private:
+	TRefCountPtr<FMaterialUniformExpression> X;
+};
+
+/**
+ */
+class FMaterialUniformExpressionExponential2 : public FMaterialUniformExpression
+{
+	DECLARE_MATERIALUNIFORMEXPRESSION_TYPE(FMaterialUniformExpressionExponential2);
+public:
+
+	FMaterialUniformExpressionExponential2()
+	{}
+	FMaterialUniformExpressionExponential2(FMaterialUniformExpression* InX) :
+		X(InX)
+	{}
+
+	// FMaterialUniformExpression interface.
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
+	{
+		X->WriteNumberOpcodes(OutData);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Exp2);
+	}
+	bool IsConstant() const override
+	{
+		return X->IsConstant();
+	}
+	bool IsIdentical(const FMaterialUniformExpression* OtherExpression) const override
+	{
+		if(GetType() != OtherExpression->GetType())
+		{
+			return false;
+		}
+
+		const FMaterialUniformExpressionExponential2* OtherExp2= static_cast<const FMaterialUniformExpressionExponential2*>(OtherExpression);
+		return X->IsIdentical(OtherExp2->X);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&X, 1);
+	}
+
+private:
+	TRefCountPtr<FMaterialUniformExpression> X;
+};
+
+/**
+ */
+class FMaterialUniformExpressionLogarithm : public FMaterialUniformExpression
+{
+	DECLARE_MATERIALUNIFORMEXPRESSION_TYPE(FMaterialUniformExpressionLogarithm);
+public:
+
+	FMaterialUniformExpressionLogarithm()
+	{}
+	FMaterialUniformExpressionLogarithm(FMaterialUniformExpression* InX) :
+		X(InX)
+	{}
+
+	// FMaterialUniformExpression interface.
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
+	{
+		X->WriteNumberOpcodes(OutData);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Log);
+	}
+	bool IsConstant() const override
+	{
+		return X->IsConstant();
+	}
+	bool IsIdentical(const FMaterialUniformExpression* OtherExpression) const override
+	{
+		if(GetType() != OtherExpression->GetType())
+		{
+			return false;
+		}
+
+		const FMaterialUniformExpressionLogarithm* OtherLog = static_cast<const FMaterialUniformExpressionLogarithm*>(OtherExpression);
+		return X->IsIdentical(OtherLog->X);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&X, 1);
+	}
+
+private:
+	TRefCountPtr<FMaterialUniformExpression> X;
 };
 
 /**
@@ -637,10 +930,10 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		X->WriteNumberOpcodes(OutData);
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::Log2);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Log2);
 	}
 	bool IsConstant() const override
 	{
@@ -655,6 +948,11 @@ public:
 
 		auto OtherLog = static_cast<const FMaterialUniformExpressionLogarithm2 *>(OtherExpression);
 		return X->IsIdentical(OtherLog->X);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&X, 1);
 	}
 
 private:
@@ -674,10 +972,10 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		X->WriteNumberOpcodes(OutData);
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::Log10);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Log10);
 	}
 	bool IsConstant() const override
 	{
@@ -692,6 +990,11 @@ public:
 
 		auto OtherLog = static_cast<const FMaterialUniformExpressionLogarithm10*>(OtherExpression);
 		return X->IsIdentical(OtherLog->X);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&X, 1);
 	}
 
 private:
@@ -724,19 +1027,19 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		A->WriteNumberOpcodes(OutData);
 		B->WriteNumberOpcodes(OutData);
 
 		switch (Op)
 		{
-		case FMO_Add: OutData.WriteOpcode(EMaterialPreshaderOpcode::Add); break;
-		case FMO_Sub: OutData.WriteOpcode(EMaterialPreshaderOpcode::Sub); break;
-		case FMO_Mul: OutData.WriteOpcode(EMaterialPreshaderOpcode::Mul); break;
-		case FMO_Div: OutData.WriteOpcode(EMaterialPreshaderOpcode::Div); break;
-		case FMO_Dot: OutData.WriteOpcode(EMaterialPreshaderOpcode::Dot).Write((uint8)ValueType); break;
-		case FMO_Cross: OutData.WriteOpcode(EMaterialPreshaderOpcode::Cross).Write((uint8)ValueType); break;
+		case FMO_Add: OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Add); break;
+		case FMO_Sub: OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Sub); break;
+		case FMO_Mul: OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Mul); break;
+		case FMO_Div: OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Div); break;
+		case FMO_Dot: OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Dot); break;
+		case FMO_Cross: OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Cross); break;
 		default: checkNoEntry(); break;
 		}
 	}
@@ -753,6 +1056,11 @@ public:
 		}
 		FMaterialUniformExpressionFoldedMath* OtherMath = (FMaterialUniformExpressionFoldedMath*)OtherExpression;
 		return A->IsIdentical(OtherMath->A) && B->IsIdentical(OtherMath->B) && Op == OtherMath->Op && ValueType == OtherMath->ValueType;
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&A, 2);
 	}
 
 private:
@@ -776,10 +1084,10 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		X->WriteNumberOpcodes(OutData);
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::Fractional);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Fractional);
 	}
 	virtual bool IsConstant() const
 	{
@@ -793,6 +1101,11 @@ public:
 		}
 		FMaterialUniformExpressionPeriodic* OtherPeriodic = (FMaterialUniformExpressionPeriodic*)OtherExpression;
 		return X->IsIdentical(OtherPeriodic->X);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&X, 1);
 	}
 
 private:
@@ -814,11 +1127,11 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		A->WriteNumberOpcodes(OutData);
 		B->WriteNumberOpcodes(OutData);
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::AppendVector).Write((uint8)NumComponentsA);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::AppendVector);// .Write((uint8)NumComponentsA);
 	}
 	virtual bool IsConstant() const
 	{
@@ -832,6 +1145,11 @@ public:
 		}
 		FMaterialUniformExpressionAppendVector* OtherAppend = (FMaterialUniformExpressionAppendVector*)OtherExpression;
 		return A->IsIdentical(OtherAppend->A) && B->IsIdentical(OtherAppend->B) && NumComponentsA == OtherAppend->NumComponentsA;
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&A, 2);
 	}
 
 private:
@@ -854,11 +1172,11 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		A->WriteNumberOpcodes(OutData);
 		B->WriteNumberOpcodes(OutData);
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::Min);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Min);
 	}
 	virtual bool IsConstant() const
 	{
@@ -872,6 +1190,11 @@ public:
 		}
 		FMaterialUniformExpressionMin* OtherMin = (FMaterialUniformExpressionMin*)OtherExpression;
 		return A->IsIdentical(OtherMin->A) && B->IsIdentical(OtherMin->B);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&A, 2);
 	}
 
 private:
@@ -893,11 +1216,11 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		A->WriteNumberOpcodes(OutData);
 		B->WriteNumberOpcodes(OutData);
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::Max);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Max);
 	}
 	virtual bool IsConstant() const
 	{
@@ -911,6 +1234,11 @@ public:
 		}
 		FMaterialUniformExpressionMax* OtherMax = (FMaterialUniformExpressionMax*)OtherExpression;
 		return A->IsIdentical(OtherMax->A) && B->IsIdentical(OtherMax->B);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&A, 2);
 	}
 
 private:
@@ -933,12 +1261,12 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		Input->WriteNumberOpcodes(OutData);
 		Min->WriteNumberOpcodes(OutData);
 		Max->WriteNumberOpcodes(OutData);
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::Clamp);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Clamp);
 	}
 	virtual bool IsConstant() const
 	{
@@ -952,6 +1280,11 @@ public:
 		}
 		FMaterialUniformExpressionClamp* OtherClamp = (FMaterialUniformExpressionClamp*)OtherExpression;
 		return Input->IsIdentical(OtherClamp->Input) && Min->IsIdentical(OtherClamp->Min) && Max->IsIdentical(OtherClamp->Max);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&Input, 3);
 	}
 
 private:
@@ -973,10 +1306,10 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		Input->WriteNumberOpcodes(OutData);
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::Saturate);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Saturate);
 	}
 	virtual bool IsConstant() const
 	{
@@ -990,6 +1323,11 @@ public:
 		}
 		FMaterialUniformExpressionSaturate* OtherClamp = (FMaterialUniformExpressionSaturate*)OtherExpression;
 		return Input->IsIdentical(OtherClamp->Input);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&Input, 1);
 	}
 
 private:
@@ -1036,10 +1374,10 @@ public:
 	}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		X->WriteNumberOpcodes(OutData);
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::ComponentSwizzle).Write((uint8)NumElements).Write((uint8)IndexR).Write((uint8)IndexG).Write((uint8)IndexB).Write((uint8)IndexA);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::ComponentSwizzle).Write((uint8)NumElements).Write((uint8)IndexR).Write((uint8)IndexG).Write((uint8)IndexB).Write((uint8)IndexA);
 	}
 	virtual bool IsConstant() const
 	{
@@ -1058,6 +1396,11 @@ public:
 			IndexG == OtherSwizzle->IndexG &&
 			IndexB == OtherSwizzle->IndexB &&
 			IndexA == OtherSwizzle->IndexA;
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&X, 1);
 	}
 
 private:
@@ -1082,10 +1425,10 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		X->WriteNumberOpcodes(OutData);
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::Floor);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Floor);
 	}
 	virtual bool IsConstant() const
 	{
@@ -1099,6 +1442,11 @@ public:
 		}
 		FMaterialUniformExpressionFloor* OtherFloor = (FMaterialUniformExpressionFloor*)OtherExpression;
 		return X->IsIdentical(OtherFloor->X);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&X, 1);
 	}
 
 private:
@@ -1118,10 +1466,10 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		X->WriteNumberOpcodes(OutData);
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::Ceil);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Ceil);
 	}
 	virtual bool IsConstant() const
 	{
@@ -1135,6 +1483,11 @@ public:
 		}
 		FMaterialUniformExpressionCeil* OtherCeil = (FMaterialUniformExpressionCeil*)OtherExpression;
 		return X->IsIdentical(OtherCeil->X);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&X, 1);
 	}
 
 private:
@@ -1154,10 +1507,10 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		X->WriteNumberOpcodes(OutData);
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::Round);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Round);
 	}
 	virtual bool IsConstant() const
 	{
@@ -1171,6 +1524,11 @@ public:
 		}
 		FMaterialUniformExpressionRound* OtherRound = (FMaterialUniformExpressionRound*)OtherExpression;
 		return X->IsIdentical(OtherRound->X);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&X, 1);
 	}
 
 private:
@@ -1190,10 +1548,10 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		X->WriteNumberOpcodes(OutData);
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::Trunc);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Trunc);
 	}
 	virtual bool IsConstant() const
 	{
@@ -1207,6 +1565,11 @@ public:
 		}
 		FMaterialUniformExpressionTruncate* OtherTrunc = (FMaterialUniformExpressionTruncate*)OtherExpression;
 		return X->IsIdentical(OtherTrunc->X);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&X, 1);
 	}
 
 private:
@@ -1226,10 +1589,10 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		X->WriteNumberOpcodes(OutData);
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::Sign);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Sign);
 	}
 	virtual bool IsConstant() const
 	{
@@ -1243,6 +1606,11 @@ public:
 		}
 		FMaterialUniformExpressionSign* OtherSign = (FMaterialUniformExpressionSign*)OtherExpression;
 		return X->IsIdentical(OtherSign->X);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&X, 1);
 	}
 
 private:
@@ -1262,10 +1630,10 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		X->WriteNumberOpcodes(OutData);
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::Frac);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Frac);
 	}
 	virtual bool IsConstant() const
 	{
@@ -1279,6 +1647,11 @@ public:
 		}
 		FMaterialUniformExpressionFrac* OtherFrac = (FMaterialUniformExpressionFrac*)OtherExpression;
 		return X->IsIdentical(OtherFrac->X);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&X, 1);
 	}
 
 private:
@@ -1299,11 +1672,11 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		A->WriteNumberOpcodes(OutData);
 		B->WriteNumberOpcodes(OutData);
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::Fmod);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Fmod);
 	}
 	virtual bool IsConstant() const
 	{
@@ -1317,6 +1690,11 @@ public:
 		}
 		FMaterialUniformExpressionFmod* OtherMax = (FMaterialUniformExpressionFmod*)OtherExpression;
 		return A->IsIdentical(OtherMax->A) && B->IsIdentical(OtherMax->B);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&A, 2);
 	}
 
 private:
@@ -1338,10 +1716,10 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		X->WriteNumberOpcodes(OutData);
-		OutData.WriteOpcode(EMaterialPreshaderOpcode::Abs);
+		OutData.WriteOpcode(UE::Shader::EPreshaderOpcode::Abs);
 	}
 	virtual bool IsConstant() const
 	{
@@ -1355,6 +1733,11 @@ public:
 		}
 		FMaterialUniformExpressionAbs* OtherAbs = (FMaterialUniformExpressionAbs*)OtherExpression;
 		return X->IsIdentical(OtherAbs->X);
+	}
+
+	virtual TArrayView<const FMaterialUniformExpression*> GetChildren() const override
+	{
+		return TArrayView<const FMaterialUniformExpression*>((const FMaterialUniformExpression**)&X, 1);
 	}
 
 private:
@@ -1375,16 +1758,16 @@ public:
 	{}
 
 	// FMaterialUniformExpression interface.
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override
 	{
 		FMaterialTextureParameterInfo TextureParameter;
 		TextureExpression->GetTextureParameterInfo(TextureParameter);
 
-		EMaterialPreshaderOpcode Op = EMaterialPreshaderOpcode::Nop;
+		UE::Shader::EPreshaderOpcode Op = UE::Shader::EPreshaderOpcode::Nop;
 		switch (TextureProperty)
 		{
-		case TMTM_TextureSize: Op = EMaterialPreshaderOpcode::TextureSize; break;
-		case TMTM_TexelSize: Op = EMaterialPreshaderOpcode::TexelSize; break;
+		case TMTM_TextureSize: Op = UE::Shader::EPreshaderOpcode::TextureSize; break;
+		case TMTM_TexelSize: Op = UE::Shader::EPreshaderOpcode::TexelSize; break;
 		default: checkNoEntry(); break;
 		}
 		OutData.WriteOpcode(Op).Write(TextureParameter.ParameterInfo).Write((int32)TextureParameter.TextureIndex);
@@ -1425,7 +1808,7 @@ public:
 	FMaterialUniformExpressionExternalTextureCoordinateScaleRotation(int32 InSourceTextureIndex, TOptional<FName> InParameterName) : FMaterialUniformExpressionExternalTextureBase(InSourceTextureIndex), ParameterName(InParameterName) {}
 
 	virtual bool IsIdentical(const FMaterialUniformExpression* OtherExpression) const override;
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override;
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override;
 
 protected:
 	typedef FMaterialUniformExpressionExternalTextureBase Super;
@@ -1447,7 +1830,7 @@ public:
 	FMaterialUniformExpressionExternalTextureCoordinateOffset(int32 InSourceTextureIndex, TOptional<FName> InParameterName) : FMaterialUniformExpressionExternalTextureBase(InSourceTextureIndex), ParameterName(InParameterName) {}
 
 	virtual bool IsIdentical(const FMaterialUniformExpression* OtherExpression) const override;
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override;
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override;
 
 protected:
 	typedef FMaterialUniformExpressionExternalTextureBase Super;
@@ -1473,7 +1856,38 @@ public:
 	//~ Begin FMaterialUniformExpression Interface.
 	virtual bool IsConstant() const override { return false; }
 	virtual bool IsIdentical(const FMaterialUniformExpression* OtherExpression) const override;
-	virtual void WriteNumberOpcodes(FMaterialPreshaderData& OutData) const override;
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override;
+	//~ End FMaterialUniformExpression Interface.
+
+protected:
+	/** Is this expression using a material instance parameter. */
+	bool bParameter;
+	/** Contains the parameter info used if bParameter is true. */
+	FHashedMaterialParameterInfo ParameterInfo;
+	/** Index of the associated URuntimeVirtualTexture in the material texture references used if bParameter is false. */
+	int32 TextureIndex;
+	/** Index of the uniform vector to fetch from the URuntimeVirtualTexture. */
+	int32 VectorIndex;
+};
+
+/**
+ * A uniform expression to retrieve one of the vector uniform parameters stored in a USparseVolumeTexture
+ */
+class FMaterialUniformExpressionSparseVolumeTextureUniform : public FMaterialUniformExpression
+{
+	DECLARE_MATERIALUNIFORMEXPRESSION_TYPE(FMaterialUniformExpressionSparseVolumeTextureUniform);
+
+public:
+	FMaterialUniformExpressionSparseVolumeTextureUniform();
+	/** Construct with the index of the texture reference and the vector index that we want to retrieve. */
+	FMaterialUniformExpressionSparseVolumeTextureUniform(int32 InTextureIndex, int32 InVectorIndex);
+	/** Construct with a URuntimeVirtualTexture parameter and the vector index that we want to retrieve. */
+	FMaterialUniformExpressionSparseVolumeTextureUniform(const FMaterialParameterInfo& InParameterInfo, int32 InTextureIndex, int32 InVectorIndex);
+
+	//~ Begin FMaterialUniformExpression Interface.
+	virtual bool IsConstant() const override { return false; }
+	virtual bool IsIdentical(const FMaterialUniformExpression* OtherExpression) const override;
+	virtual void WriteNumberOpcodes(UE::Shader::FPreshaderData& OutData) const override;
 	//~ End FMaterialUniformExpression Interface.
 
 protected:

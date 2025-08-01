@@ -1,7 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AnimNodes/AnimNode_RotateRootBone.h"
+#include "Animation/AnimStats.h"
 #include "Animation/AnimTrace.h"
+#include "Animation/AnimRootMotionProvider.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNode_RotateRootBone)
 
 /////////////////////////////////////////////////////
 // FAnimNode_RotateRootBone
@@ -39,6 +43,8 @@ void FAnimNode_RotateRootBone::Update_AnyThread(const FAnimationUpdateContext& C
 void FAnimNode_RotateRootBone::Evaluate_AnyThread(FPoseContext& Output)
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_ANIMNODE(Evaluate_AnyThread)
+	ANIM_MT_SCOPE_CYCLE_COUNTER_VERBOSE(RotateRootBone, !IsInGameThread());
+
 	// Evaluate the input
 	BasePose.Evaluate(Output);
 
@@ -59,6 +65,21 @@ void FAnimNode_RotateRootBone::Evaluate_AnyThread(FPoseContext& Output)
 		FCompactPoseBoneIndex RootBoneIndex(0);
 		Output.Pose[RootBoneIndex].SetRotation(Output.Pose[RootBoneIndex].GetRotation() * MeshSpaceDeltaQuat);
 		Output.Pose[RootBoneIndex].NormalizeRotation();
+
+		if (bRotateRootMotionAttribute)
+		{
+			// Rotate our root motion attribute by the same rotation we apply to the root
+			const UE::Anim::IAnimRootMotionProvider* RootMotionProvider = UE::Anim::IAnimRootMotionProvider::Get();
+			if (RootMotionProvider && RootMotionProvider->HasRootMotion(Output.CustomAttributes))
+			{
+				FTransform RootMotionTransformDelta;
+				if (RootMotionProvider->ExtractRootMotion(Output.CustomAttributes, RootMotionTransformDelta))
+				{
+					RootMotionTransformDelta.SetTranslation(MeshSpaceDeltaQuat.RotateVector(RootMotionTransformDelta.GetTranslation()));
+					RootMotionProvider->OverrideRootMotion(RootMotionTransformDelta, Output.CustomAttributes);
+				}
+			}
+		}
 	}
 }
 
@@ -78,7 +99,9 @@ FAnimNode_RotateRootBone::FAnimNode_RotateRootBone()
 	: Pitch(0.0f)
 	, Yaw(0.0f)
 	, MeshToComponent(FRotator::ZeroRotator)
+	, bRotateRootMotionAttribute(false)
 	, ActualPitch(0.f)
 	, ActualYaw(0.f)
 {
 }
+

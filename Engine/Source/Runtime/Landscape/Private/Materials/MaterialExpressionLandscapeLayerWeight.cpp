@@ -6,6 +6,9 @@
 #include "EngineGlobals.h"
 #include "MaterialCompiler.h"
 #include "Materials/Material.h"
+#include "LandscapeUtils.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MaterialExpressionLandscapeLayerWeight)
 
 #define LOCTEXT_NAMESPACE "Landscape"
 
@@ -28,8 +31,6 @@ UMaterialExpressionLandscapeLayerWeight::UMaterialExpressionLandscapeLayerWeight
 	};
 	static FConstructorStatics ConstructorStatics;
 
-	bIsParameterExpression = true;
-
 #if WITH_EDITORONLY_DATA
 	MenuCategories.Add(ConstructorStatics.NAME_Landscape);
 #endif
@@ -38,18 +39,11 @@ UMaterialExpressionLandscapeLayerWeight::UMaterialExpressionLandscapeLayerWeight
 	ConstBase = FVector(0.f, 0.f, 0.f);
 }
 
-
-FGuid& UMaterialExpressionLandscapeLayerWeight::GetParameterExpressionId()
-{
-	return ExpressionGUID;
-}
-
-
 void UMaterialExpressionLandscapeLayerWeight::PostLoad()
 {
 	Super::PostLoad();
 
-	if (GetLinkerUE4Version() < VER_UE4_FIXUP_TERRAIN_LAYER_NODES)
+	if (GetLinkerUEVersion() < VER_UE4_FIXUP_TERRAIN_LAYER_NODES)
 	{
 		UpdateParameterGuid(true, true);
 	}
@@ -58,11 +52,6 @@ void UMaterialExpressionLandscapeLayerWeight::PostLoad()
 #if WITH_EDITOR
 bool UMaterialExpressionLandscapeLayerWeight::IsResultMaterialAttributes(int32 OutputIndex)
 {
-	if (ContainsInputLoop())
-	{
-		// If there is a loop anywhere in this expression's inputs then we can't risk checking them
-		return false;
-	}
 	bool bLayerIsMaterialAttributes = Layer.Expression != nullptr && Layer.Expression->IsResultMaterialAttributes(Layer.OutputIndex);
 	bool bBaseIsMaterialAttributes = Base.Expression != nullptr && Base.Expression->IsResultMaterialAttributes(Base.OutputIndex);
 	return bLayerIsMaterialAttributes || bBaseIsMaterialAttributes;
@@ -70,8 +59,11 @@ bool UMaterialExpressionLandscapeLayerWeight::IsResultMaterialAttributes(int32 O
 
 int32 UMaterialExpressionLandscapeLayerWeight::Compile(class FMaterialCompiler* Compiler, int32 OutputIndex)
 {
-	const int32 BaseCode = Base.Expression ? Base.Compile(Compiler) : Compiler->Constant3(ConstBase.X, ConstBase.Y, ConstBase.Z);
-	const int32 WeightCode = Compiler->StaticTerrainLayerWeight(ParameterName, Compiler->Constant(PreviewWeight));
+	const bool bTextureArrayEnabled = UE::Landscape::UseWeightmapTextureArray(Compiler->GetShaderPlatform());
+	const int32 BaseCode = Base.Expression
+		                       ? Base.Compile(Compiler)
+		                       : Compiler->Constant3(static_cast<float>(ConstBase.X), static_cast<float>(ConstBase.Y), static_cast<float>(ConstBase.Z));
+	const int32 WeightCode = Compiler->StaticTerrainLayerWeight(ParameterName, Compiler->Constant(PreviewWeight), bTextureArrayEnabled);
 
 	int32 ReturnCode = INDEX_NONE;
 	if (WeightCode == INDEX_NONE)
@@ -100,10 +92,26 @@ UObject* UMaterialExpressionLandscapeLayerWeight::GetReferencedTexture() const
 	return GEngine->WeightMapPlaceholderTexture;
 }
 
+UMaterialExpression::ReferencedTextureArray UMaterialExpressionLandscapeLayerWeight::GetReferencedTextures() const
+{
+	return { GEngine->WeightMapPlaceholderTexture, GEngine->WeightMapArrayPlaceholderTexture };
+}
+
 #if WITH_EDITOR
+FString UMaterialExpressionLandscapeLayerWeight::GetEditableName() const
+{
+	return ParameterName.ToString();
+}
+
+void UMaterialExpressionLandscapeLayerWeight::SetEditableName(const FString& NewName)
+{
+	ParameterName = *NewName;
+}
+
 void UMaterialExpressionLandscapeLayerWeight::GetCaption(TArray<FString>& OutCaptions) const
 {
-	OutCaptions.Add(FString::Printf(TEXT("Layer '%s'"), *ParameterName.ToString()));
+	OutCaptions.Add(TEXT("Landscape Layer Weight"));
+	OutCaptions.Add(FString::Printf(TEXT("'%s'"), *ParameterName.ToString()));
 }
 
 bool UMaterialExpressionLandscapeLayerWeight::MatchesSearchQuery(const TCHAR* SearchQuery)
@@ -121,18 +129,11 @@ bool UMaterialExpressionLandscapeLayerWeight::MatchesSearchQuery(const TCHAR* Se
 	return Super::MatchesSearchQuery(SearchQuery);
 }
 
+void UMaterialExpressionLandscapeLayerWeight::GetLandscapeLayerNames(TArray<FName>& OutLayers) const
+{
+	OutLayers.AddUnique(ParameterName);
+}
 #endif // WITH_EDITOR
 
-void UMaterialExpressionLandscapeLayerWeight::GetAllParameterInfo(TArray<FMaterialParameterInfo> &OutParameterInfo, TArray<FGuid> &OutParameterIds, const FMaterialParameterInfo& InBaseParameterInfo) const
-{
-	int32 CurrentSize = OutParameterInfo.Num();
-	FMaterialParameterInfo NewParameter(ParameterName, InBaseParameterInfo.Association, InBaseParameterInfo.Index);
-	OutParameterInfo.AddUnique(NewParameter);
-
-	if (CurrentSize != OutParameterInfo.Num())
-	{
-		OutParameterIds.Add(ExpressionGUID);
-	}
-}
-
 #undef LOCTEXT_NAMESPACE
+

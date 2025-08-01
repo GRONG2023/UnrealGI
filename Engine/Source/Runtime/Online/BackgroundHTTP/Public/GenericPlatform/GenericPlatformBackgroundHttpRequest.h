@@ -2,27 +2,30 @@
 
 #pragma once
 
+#include "BackgroundHttpRequestImpl.h"
+#include "Containers/UnrealString.h"
+#include "HAL/Platform.h"
 #include "Interfaces/IBackgroundHttpRequest.h"
 #include "Interfaces/IHttpRequest.h"
-
-#include "BackgroundHttpRequestImpl.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UniquePtr.h"
 
 
 /**
  * Contains implementation of some common functions that don't vary between implementation
  */
-class BACKGROUNDHTTP_API FGenericPlatformBackgroundHttpRequest 
+class FGenericPlatformBackgroundHttpRequest 
 	: public FBackgroundHttpRequestImpl
 {
 public:
 
-	FGenericPlatformBackgroundHttpRequest();
-	virtual ~FGenericPlatformBackgroundHttpRequest();
+	BACKGROUNDHTTP_API FGenericPlatformBackgroundHttpRequest();
+	BACKGROUNDHTTP_API virtual ~FGenericPlatformBackgroundHttpRequest();
 
 	//IHttpBackgroundHttpRequest
-	virtual bool HandleDelayedProcess() override;
-	virtual void CompleteWithExistingResponseData(FBackgroundHttpResponsePtr BackgroundResponse) override;
-	virtual void CancelRequest() override;
+	BACKGROUNDHTTP_API virtual bool HandleDelayedProcess() override;
+	BACKGROUNDHTTP_API virtual void CompleteWithExistingResponseData(FBackgroundHttpResponsePtr BackgroundResponse) override;
+	BACKGROUNDHTTP_API virtual void CancelRequest() override;
 
 protected:
 	//In the default implementation we actually use HTTPRequests instead of HttpBackgroundRequests.
@@ -40,7 +43,7 @@ protected:
 	private:
 		
 		bool HasRetriesRemaining() const;
-		void UpdateHttpProgress(FHttpRequestPtr UnderlyingHttpRequest, int32 BytesSent, int32 BytesReceived);
+		void UpdateHttpProgress(FHttpRequestPtr UnderlyingHttpRequest, uint64 BytesSent, uint64 BytesReceived);
 
 		void CleanUpHttpRequest();
 
@@ -64,7 +67,7 @@ protected:
 		int32 MaxRetries;
 
 		//How many bytes we had last time we sent progress updates
-		int32 LastProgressUpdateBytes;
+		uint64 LastProgressUpdateBytes;
 	};
 
 	TUniquePtr<FGenericPlatformBackgroundHttpWrapper> RequestWrapper;

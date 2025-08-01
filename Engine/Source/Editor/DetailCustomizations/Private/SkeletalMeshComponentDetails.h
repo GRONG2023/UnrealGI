@@ -2,16 +2,26 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Layout/Visibility.h"
-#include "Widgets/SWidget.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "IDetailCustomization.h"
+#include "Internationalization/Text.h"
+#include "Layout/Visibility.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
-struct FAssetData;
+class FDelegateHandle;
 class IDetailLayoutBuilder;
 class IPropertyHandle;
 class SComboButton;
+class SWidget;
+class UClass;
+class UObject;
+class USkeleton;
+struct FAssetData;
 
 class DETAILCUSTOMIZATIONS_API FSkeletalMeshComponentDetails : public IDetailCustomization
 {
@@ -35,9 +45,11 @@ private:
 	EVisibility VisibilityForAnimationMode(EAnimationMode::Type AnimationMode) const;
 
 	/** Helper wrapper functions for VisibilityForAnimationMode */
-	EVisibility VisibilityForBlueprintMode() const { return VisibilityForAnimationMode(EAnimationMode::AnimationBlueprint); }
+	EVisibility VisibilityForBlueprintMode() const;
 	EVisibility VisibilityForSingleAnimMode() const { return VisibilityForAnimationMode(EAnimationMode::AnimationSingleNode); }
 	bool AnimPickerIsEnabled() const;
+
+	EVisibility VisibilityForAnimModeProperty() const;
 
 	/** Handler for filtering animation assets in the UI picker when asset mode is selected */
 	bool OnShouldFilterAnimAsset(const FAssetData& AssetData);
@@ -98,6 +110,9 @@ private:
 
 	/** Full name of the currently selected skeleton to use for filtering animation assets */
 	FString SelectedSkeletonName;
+
+	/** The skeleton that we grab the name from for filtering. */
+	USkeleton* Skeleton;
 
 	/** Current enabled state of the animation asset picker in the details panel */
 	bool bAnimPickerEnabled;

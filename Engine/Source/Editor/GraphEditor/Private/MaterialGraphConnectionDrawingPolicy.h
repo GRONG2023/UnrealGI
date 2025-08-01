@@ -2,11 +2,16 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
 #include "ConnectionDrawingPolicy.h"
+#include "Containers/Map.h"
+#include "EdGraph/EdGraphNode.h"
+#include "HAL/Platform.h"
+#include "Math/Vector2D.h"
 
+class FSlateRect;
 class FSlateWindowElementList;
 class UEdGraph;
+class UEdGraphPin;
 class UMaterialGraph;
 class UMaterialGraphSchema;
 
@@ -30,7 +35,12 @@ protected:
 public:
 	FMaterialGraphConnectionDrawingPolicy(int32 InBackLayerID, int32 InFrontLayerID, float ZoomFactor, const FSlateRect& InClippingRect, FSlateWindowElementList& InDrawElements, UEdGraph* InGraphObj);
 
+	virtual TSharedPtr<IToolTip> GetConnectionToolTip(const SGraphPanel& GraphPanel, const FGraphSplineOverlapResult& OverlapData) const override;
+	
 	// FConnectionDrawingPolicy interface
 	virtual void DetermineWiringStyle(UEdGraphPin* OutputPin, UEdGraphPin* InputPin, /*inout*/ FConnectionParams& Params) override;
 	// End of FConnectionDrawingPolicy interface
+
+private:
+	FText GetNodePinInfo(const TSharedPtr<SGraphPin>& PinWidget) const;
 };

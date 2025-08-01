@@ -9,14 +9,14 @@ public class UnrealVersionSelectorTarget : TargetRules
 	{
 		Type = TargetType.Program;
 		LinkType = TargetLinkType.Monolithic;
+		IncludeOrderVersion = EngineIncludeOrderVersion.Latest;
 		LaunchModuleName = "UnrealVersionSelector";
 		
 		bBuildDeveloperTools = false;
-		bUseMallocProfiler = false;
 
 		bool bUsingSlate = (Target.Platform == UnrealTargetPlatform.Linux);
 
-		if (bUsingSlate)
+		if (bUsingSlate && bBuildEditor)
 		{
 			ExtraModuleNames.Add("EditorStyle");
 		}

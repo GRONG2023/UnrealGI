@@ -2,7 +2,9 @@
 
 #pragma once
 
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "CoreMinimal.h"
+#endif //UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "UObject/ObjectMacros.h"
 #include "UObject/Object.h"
 #include "UObject/Class.h"
@@ -62,11 +64,13 @@ struct FTableRowBase
 /**
  * Imported spreadsheet table.
  */
-UCLASS(MinimalAPI, BlueprintType, AutoExpandCategories = "DataTable,ImportOptions")
+UCLASS(MinimalAPI, BlueprintType, AutoExpandCategories = "DataTable,ImportOptions", Meta = (LoadBehavior = "LazyOnDemand"))
 class UDataTable
 	: public UObject
 {
 	GENERATED_UCLASS_BODY()
+
+	virtual ~UDataTable() {};
 
 	DECLARE_MULTICAST_DELEGATE(FOnDataTableChanged);
 	DECLARE_MULTICAST_DELEGATE(FOnDataTableImport);
@@ -78,7 +82,7 @@ class UDataTable
 
 	/** Structure to use for each row of the table, must inherit from FTableRowBase */
 	UPROPERTY(VisibleAnywhere, Category=DataTable, meta=(DisplayThumbnail="false"))
-	UScriptStruct*			RowStruct;
+	TObjectPtr<UScriptStruct>			RowStruct;
 
 protected:
 	/** Map of name of row to row data structure. */
@@ -89,6 +93,9 @@ protected:
 
 	/** Called to add rows to the data table */
 	ENGINE_API virtual void AddRowInternal(FName RowName, uint8* RowDataPtr);
+
+	/** Deletes the row memory */
+	ENGINE_API virtual void RemoveRowInternal(FName RowName);
 public:
 
 	virtual const TMap<FName, uint8*>& GetRowMap() const { return RowMap; }
@@ -117,6 +124,7 @@ public:
 	
 #if WITH_EDITOR
 	ENGINE_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	ENGINE_API virtual void PostLoadAssetRegistryTags(const FAssetData& InAssetData, TArray<FAssetRegistryTag>& OutTagsAndValuesToUpdate) const override;
 #endif // WITH_EDITOR
 
 	//~ Begin UObject Interface.
@@ -128,7 +136,11 @@ public:
 	virtual bool NeedsLoadForClient() const override { return bStripFromClientBuilds ? false : Super::NeedsLoadForClient(); }
 	virtual bool NeedsLoadForEditorGame() const override { return bStripFromClientBuilds ? false : Super::NeedsLoadForEditorGame(); }
 #if WITH_EDITORONLY_DATA
+	UE_DEPRECATED(5.1, "Class names are now represented by path names. Please use GetRowStructPathName.")
 	ENGINE_API FName GetRowStructName() const;
+	ENGINE_API FTopLevelAssetPath GetRowStructPathName() const;
+	ENGINE_API virtual void GetAssetRegistryTags(FAssetRegistryTagsContext Context) const override;
+	UE_DEPRECATED(5.4, "Implement the version that takes FAssetRegistryTagsContext instead.")
 	ENGINE_API virtual void GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const override;
 	ENGINE_API virtual void PostInitProperties() override;
 	ENGINE_API virtual void PostLoad() override;
@@ -136,7 +148,7 @@ public:
 
 	/** The file this data table was imported from, may be empty */
 	UPROPERTY(VisibleAnywhere, Instanced, Category=ImportSource)
-	class UAssetImportData* AssetImportData;
+	TObjectPtr<class UAssetImportData> AssetImportData;
 
 	/** The filename imported to create this object. Relative to this object's package, BaseDir() or absolute */
 	UPROPERTY()
@@ -144,7 +156,11 @@ public:
 
 	/** The name of the RowStruct we were using when we were last saved */
 	UPROPERTY()
-	FName RowStructName;
+	FName RowStructName_DEPRECATED;
+
+	/** The name of the RowStruct we were using when we were last saved */
+	UPROPERTY()
+	FTopLevelAssetPath RowStructPathName;
 
 protected:
 	/** When RowStruct is being modified, row data is stored serialized with tags */
@@ -152,7 +168,7 @@ protected:
 	TArray<uint8> RowsSerializedWithTags;
 
 	UPROPERTY(Transient)
-	TSet<UObject*> TemporarilyReferencedObjects;
+	TSet<TObjectPtr<UObject>> TemporarilyReferencedObjects;
 #endif	// WITH_EDITORONLY_DATA
 
 private:
@@ -317,15 +333,15 @@ public:
 
 	/** Output entire contents of table as JSON */
 	template<typename CharType = TCHAR>
-	ENGINE_API bool WriteTableAsJSON(const TSharedRef< TJsonWriter<CharType, TPrettyJsonPrintPolicy<CharType> > >& JsonWriter, const EDataTableExportFlags InDTExportFlags = EDataTableExportFlags::None) const;
+	bool WriteTableAsJSON(const TSharedRef< TJsonWriter<CharType, TPrettyJsonPrintPolicy<CharType> > >& JsonWriter, const EDataTableExportFlags InDTExportFlags = EDataTableExportFlags::None) const;
 
 	/** Output entire contents of table as a JSON Object*/
 	template<typename CharType = TCHAR>
-	ENGINE_API bool WriteTableAsJSONObject(const TSharedRef< TJsonWriter<CharType, TPrettyJsonPrintPolicy<CharType> > >& JsonWriter, const EDataTableExportFlags InDTExportFlags = EDataTableExportFlags::None) const;
+	bool WriteTableAsJSONObject(const TSharedRef< TJsonWriter<CharType, TPrettyJsonPrintPolicy<CharType> > >& JsonWriter, const EDataTableExportFlags InDTExportFlags = EDataTableExportFlags::None) const;
 
 	/** Output the fields from a particular row (use RowMap to get RowData) to an existing JsonWriter */
 	template<typename CharType = TCHAR>
-	ENGINE_API bool WriteRowAsJSON(const TSharedRef< TJsonWriter<CharType, TPrettyJsonPrintPolicy<CharType> > >& JsonWriter, const void* RowData, const EDataTableExportFlags InDTExportFlags = EDataTableExportFlags::None) const;
+	bool WriteRowAsJSON(const TSharedRef< TJsonWriter<CharType, TPrettyJsonPrintPolicy<CharType> > >& JsonWriter, const void* RowData, const EDataTableExportFlags InDTExportFlags = EDataTableExportFlags::None) const;
 
 	/** Copies all the import options from another table, this does not copy row dawta */
 	ENGINE_API bool CopyImportOptions(UDataTable* SourceTable);
@@ -352,6 +368,12 @@ public:
 	 *	@return	Set of problems encountered while processing input
 	 */
 	ENGINE_API TArray<FString> CreateTableFromOtherTable(const UDataTable* InTable);
+
+	/**
+	 *	Create table from a raw data map with a given script struct
+	 *	@return	Set of problems encountered while processing input
+	 */
+	ENGINE_API TArray<FString> CreateTableFromRawData(TMap<FName, const uint8*>& DataMap, UScriptStruct* InRowStruct);
 
 #if WITH_EDITOR
 	/** Get an array of all the column titles, using the friendly display name from the property */
@@ -397,7 +419,7 @@ protected:
 
 /** Handle to a particular row in a table*/
 USTRUCT(BlueprintType)
-struct ENGINE_API FDataTableRowHandle
+struct FDataTableRowHandle
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -410,7 +432,7 @@ struct ENGINE_API FDataTableRowHandle
 
 	/** Pointer to table we want a row from */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=DataTableRowHandle)
-	const UDataTable*	DataTable;
+	TObjectPtr<const UDataTable>	DataTable;
 
 	/** Name of row in the table that we want */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=DataTableRowHandle)
@@ -454,9 +476,9 @@ struct ENGINE_API FDataTableRowHandle
 		return FString::Printf(TEXT("Table: %s, Row: %s"), bUseFullPath ? *DataTable->GetPathName() : *DataTable->GetName(), *RowName.ToString());
 	}
 
-	bool operator==(FDataTableRowHandle const& Other) const;
-	bool operator!=(FDataTableRowHandle const& Other) const;
-	void PostSerialize(const FArchive& Ar);
+	ENGINE_API bool operator==(FDataTableRowHandle const& Other) const;
+	ENGINE_API bool operator!=(FDataTableRowHandle const& Other) const;
+	ENGINE_API void PostSerialize(const FArchive& Ar);
 };
 
 template<>
@@ -470,13 +492,13 @@ struct TStructOpsTypeTraits< FDataTableRowHandle > : public TStructOpsTypeTraits
 
 /** Handle to a particular set of rows in a table */
 USTRUCT(BlueprintType)
-struct ENGINE_API FDataTableCategoryHandle
+struct FDataTableCategoryHandle
 {
 	GENERATED_USTRUCT_BODY()
 
 	/** Pointer to table we want a row from */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=DataTableCategoryHandle)
-	const class UDataTable*	DataTable = nullptr;
+	TObjectPtr<const class UDataTable>	DataTable = nullptr;
 
 	/** Name of column in the table that we want */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=DataTableCategoryHandle)
@@ -527,7 +549,7 @@ struct ENGINE_API FDataTableCategoryHandle
 		// check each row to see if the value in the Property element is the one we're looking for (RowContents). If it is, add the row to OutRows
 		uint8* RowContentsAsBinary = (uint8*)FMemory_Alloca(Property->GetSize());
 		Property->InitializeValue(RowContentsAsBinary);
-		if (Property->ImportText(*RowContents.ToString(), RowContentsAsBinary, PPF_None, nullptr) == nullptr)
+		if (Property->ImportText_Direct(*RowContents.ToString(), RowContentsAsBinary, nullptr, PPF_None) == nullptr)
 		{
 			Property->DestroyValue(RowContentsAsBinary);
 			return;
@@ -547,8 +569,8 @@ struct ENGINE_API FDataTableCategoryHandle
 		return;
 	}
 
-	bool operator==(FDataTableCategoryHandle const& Other) const;
-	bool operator!=(FDataTableCategoryHandle const& Other) const;
+	ENGINE_API bool operator==(FDataTableCategoryHandle const& Other) const;
+	ENGINE_API bool operator!=(FDataTableCategoryHandle const& Other) const;
 };
 
 

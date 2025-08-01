@@ -1,8 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AutoReimport/AutoReimportUtilities.h"
-#include "EditorFramework/AssetImportData.h"
+
 #include "AutoReimport/AssetSourceFilenameCache.h"
+#include "EditorFramework/AssetImportData.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Misc/Optional.h"
+#include "UObject/AssetRegistryTagsContext.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+
+struct FAssetData;
 
 DEFINE_LOG_CATEGORY(LogAutoReimportManager);
 
@@ -22,12 +31,13 @@ namespace Utils
 
 	void ExtractSourceFilePaths(UObject* Object, TArray<FString>& OutSourceFiles)
 	{
-		TArray<UObject::FAssetRegistryTag> TagList;
+		FAssetRegistryTagsContextData TagList(Object, EAssetRegistryTagsCaller::Uncategorized);
 		Object->GetAssetRegistryTags(TagList);
 
 		const FName TagName = UObject::SourceFileTagName();
-		for (const auto& Tag : TagList)
+		for (const TPair<FName, UObject::FAssetRegistryTag>& Pair : TagList.Tags)
 		{
+			const UObject::FAssetRegistryTag& Tag = Pair.Value;
 			if (Tag.Name == TagName)
 			{
 				int32 PreviousNum = OutSourceFiles.Num();

@@ -15,11 +15,14 @@ struct HMovieSceneSkeletalAnimationRootHitProxy;
 
 struct FSelectedRootData
 {
-	FSelectedRootData(UMovieSceneSkeletalAnimationSection* InSection, USkeletalMeshComponent* InComp) :
-		SelectedSection(InSection), SelectedMeshComp(InComp) {};
+	FSelectedRootData(UMovieSceneSkeletalAnimationSection* InSection, USkeletalMeshComponent* InComp);
+	bool operator == (const FSelectedRootData& InData) const { return (InData.SelectedSection == SelectedSection && InData.SelectedMeshComp == SelectedMeshComp); }
+	void CalcTransform(const FFrameTime& Frametime, FTransform& OutTransform, FTransform& OutParentTransform);
+
 	TWeakObjectPtr<UMovieSceneSkeletalAnimationSection> SelectedSection;
 	TWeakObjectPtr<USkeletalMeshComponent> SelectedMeshComp;
 };
+
 class FSkeletalAnimationTrackEditMode : public FEdMode
 {
 public:
@@ -41,9 +44,12 @@ public:
 	virtual void SelectNone() override;
 	virtual bool InputDelta(FEditorViewportClient* InViewportClient, FViewport* InViewport, FVector& InDrag, FRotator& InRot, FVector& InScale) override;
 	virtual bool UsesTransformWidget() const override;
-	virtual bool UsesTransformWidget(FWidget::EWidgetMode CheckMode) const;
+	virtual bool UsesTransformWidget(UE::Widget::EWidgetMode CheckMode) const;
 	virtual FVector GetWidgetLocation() const override;
 	virtual bool ShouldDrawWidget() const override;
+	virtual bool GetPivotForOrbit(FVector& OutPivot) const override;
+	virtual bool GetCustomDrawingCoordinateSystem(FMatrix& OutMatrix, void* InData) override;
+	virtual bool GetCustomInputCoordinateSystem(FMatrix& OutMatrix, void* InData) override;
 	virtual bool IsCompatibleWith(FEditorModeID OtherModeID) const override;
 	
 	//GCObject 
@@ -57,9 +63,9 @@ public:
 protected:
 
 	bool IsSomethingSelected() const;
-
-	bool IsRootSelected(UMovieSceneSkeletalAnimationSection* Section);
-
+	bool GetTransformAtFirstSectionStart(FTransform& OutWorld, FTransform& OutParent) const;
+	bool IsRootSelected(UMovieSceneSkeletalAnimationSection* Section) const;
+	
 protected:
 	/** Interrogator that is an gc object */
 	UE::MovieScene::FSystemInterrogator InterrogationLinker;
@@ -78,6 +84,6 @@ protected:
 
 	/** Cached location of root transform*/
 	FTransform RootTransform;
-
+	
 };
 

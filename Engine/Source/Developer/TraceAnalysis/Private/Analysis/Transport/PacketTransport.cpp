@@ -3,20 +3,25 @@
 #include "PacketTransport.h"
 #include "HAL/UnrealMemory.h"
 
+#include "TraceAnalysisDebug.h"
+
 #include <initializer_list>
 
-namespace Trace
-{
-
 ////////////////////////////////////////////////////////////////////////////////
-namespace Private
-{
+namespace UE {
+namespace Trace {
+namespace Private {
 
 TRACELOG_API int32 Decode(const void*, int32, void*, int32);
 
 } // namespace Private
+} // namespace Trace
+} // namespace UE
 
 
+
+namespace UE {
+namespace Trace {
 
 ////////////////////////////////////////////////////////////////////////////////
 struct FPacketTransport::FPacketNode
@@ -38,7 +43,7 @@ FPacketTransport::~FPacketTransport()
 		for (FPacketNode* Node = Root; Node != nullptr;)
 		{
 			FPacketNode* Next = Node->Next;
-			delete[] Node;
+			FMemory::Free(Node);
 			Node = Next;
 		}
 	}
@@ -51,6 +56,12 @@ void FPacketTransport::Advance(uint32 BlockSize)
 	{
 		ActiveList->Cursor += BlockSize;
 	}
+}
+
+////////////////////////////////////////////////////////////////////////////////
+bool FPacketTransport::IsEmpty() const
+{
+	return (ActiveList == nullptr) || (ActiveList->Cursor + 1 > ActiveList->Size);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -150,7 +161,7 @@ bool FPacketTransport::GetNextBatch()
 			};
 			auto* PacketEncoded = (FPacketEncoded*)PacketBase;
 
-			Node->Size = Private::Decode(
+			Node->Size = (uint16)UE::Trace::Private::Decode(
 				PacketEncoded->Data,
 				int32(PacketEncoded->PacketSize - sizeof(FPacketEncoded)),
 				Node->Data,
@@ -174,4 +185,26 @@ bool FPacketTransport::GetNextBatch()
 	return true;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+void FPacketTransport::DebugBegin()
+{
+#if UE_TRACE_ANALYSIS_DEBUG
+	UE_TRACE_ANALYSIS_DEBUG_LOG("FPacketTransport::DebugBegin()");
+#endif // UE_TRACE_ANALYSIS_DEBUG
+}
+
+////////////////////////////////////////////////////////////////////////////////
+void FPacketTransport::DebugEnd()
+{
+#if UE_TRACE_ANALYSIS_DEBUG
+	if (!IsEmpty())
+	{
+		UE_TRACE_ANALYSIS_DEBUG_LOG("Error: FPacketTransport is not empty!");
+	}
+	UE_TRACE_ANALYSIS_DEBUG_LOG("FPacketTransport::DebugEnd()");
+#endif // UE_TRACE_ANALYSIS_DEBUG
+}
+
+////////////////////////////////////////////////////////////////////////////////
 } // namespace Trace
+} // namespace UE

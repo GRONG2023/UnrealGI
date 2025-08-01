@@ -29,6 +29,7 @@ enum class ESubmixEffectDynamicsProcessorType : uint8
 	Limiter,
 	Expander,
 	Gate,
+	UpwardsCompressor,
 	Count UMETA(Hidden)
 };
 
@@ -65,8 +66,78 @@ enum class ESubmixEffectDynamicsKeySource : uint8
 	Count UMETA(Hidden)
 };
 
+class FKeySource
+{
+	ESubmixEffectDynamicsKeySource Type = ESubmixEffectDynamicsKeySource::Default;
+	int32 NumChannels = 0;
+	uint32 ObjectId = INDEX_NONE;
+
+	mutable FCriticalSection MutateSourceCritSection;
+
+public:
+	Audio::FPatchOutputStrongPtr Patch;
+
+	void Reset()
+	{
+		Patch.Reset();
+
+		{
+			const FScopeLock ScopeLock(&MutateSourceCritSection);
+			NumChannels = 0;
+			ObjectId = INDEX_NONE;
+			Type = ESubmixEffectDynamicsKeySource::Default;
+		}
+	}
+
+	uint32 GetObjectId() const
+	{
+		const FScopeLock ScopeLock(&MutateSourceCritSection);
+		return ObjectId;
+	}
+
+	int32 GetNumChannels() const
+	{
+		const FScopeLock ScopeLock(&MutateSourceCritSection);
+		return NumChannels;
+	}
+
+	ESubmixEffectDynamicsKeySource GetType() const
+	{
+		const FScopeLock ScopeLock(&MutateSourceCritSection);
+		return Type;
+	}
+
+	void SetNumChannels(const int32 InNumChannels)
+	{
+		const FScopeLock ScopeLock(&MutateSourceCritSection);
+		NumChannels = InNumChannels;
+	}
+
+	void Update(ESubmixEffectDynamicsKeySource InType, uint32 InObjectId, int32 InNumChannels = 0)
+	{
+		bool bResetPatch = false;
+
+		{
+			const FScopeLock ScopeLock(&MutateSourceCritSection);
+			if (Type != InType || ObjectId != InObjectId || NumChannels != InNumChannels)
+			{
+				Type = InType;
+				ObjectId = InObjectId;
+				NumChannels = InNumChannels;
+
+				bResetPatch = true;
+			}
+		}
+
+		if (bResetPatch)
+		{
+			Patch.Reset();
+		}
+	}
+};
+
 USTRUCT(BlueprintType)
-struct AUDIOMIXER_API FSubmixEffectDynamicProcessorFilterSettings
+struct FSubmixEffectDynamicProcessorFilterSettings
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -92,7 +163,7 @@ struct AUDIOMIXER_API FSubmixEffectDynamicProcessorFilterSettings
 
 // Submix dynamics processor settings
 USTRUCT(BlueprintType)
-struct AUDIOMIXER_API FSubmixEffectDynamicsProcessorSettings
+struct FSubmixEffectDynamicsProcessorSettings
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -102,7 +173,7 @@ struct AUDIOMIXER_API FSubmixEffectDynamicsProcessorSettings
 
 	// Mode of peak detection used on input key signal
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Dynamics, meta = (EditCondition = "!bBypass"))
-	ESubmixEffectDynamicsPeakMode PeakMode = ESubmixEffectDynamicsPeakMode::RootMeanSquared;
+	ESubmixEffectDynamicsPeakMode PeakMode = ESubmixEffectDynamicsPeakMode::Peak;
 
 	// Mode of peak detection if key signal is multi-channel
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Dynamics, meta = (EditCondition = "!bBypass"))
@@ -118,7 +189,7 @@ struct AUDIOMIXER_API FSubmixEffectDynamicsProcessorSettings
 
 	// The dynamics processor ratio used for compression/expansion
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Dynamics, meta = (
-		EditCondition = "!bBypass && DynamicsProcessorType == ESubmixEffectDynamicsProcessorType::Compressor || DynamicsProcessorType == ESubmixEffectDynamicsProcessorType::Expander",
+		EditCondition = "!bBypass && DynamicsProcessorType == ESubmixEffectDynamicsProcessorType::Compressor || DynamicsProcessorType == ESubmixEffectDynamicsProcessorType::Expander ||  DynamicsProcessorType == ESubmixEffectDynamicsProcessorType::UpwardsCompressor",
 		ClampMin = "1.0", ClampMax = "20.0", UIMin = "1.0", UIMax = "20.0"))
 	float Ratio = 1.5f;
 
@@ -143,11 +214,11 @@ struct AUDIOMIXER_API FSubmixEffectDynamicsProcessorSettings
 
 	// If set, uses output of provided audio bus as modulator of input signal for dynamics processor (Uses input signal as default modulator)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Sidechain, meta = (EditCondition = "!bBypass && KeySource == ESubmixEffectDynamicsKeySource::AudioBus", EditConditionHides))
-	UAudioBus* ExternalAudioBus = nullptr;
+	TObjectPtr<UAudioBus> ExternalAudioBus = nullptr;
 
 	// If set, uses output of provided submix as modulator of input signal for dynamics processor (Uses input signal as default modulator)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Sidechain, meta = (EditCondition = "!bBypass && KeySource == ESubmixEffectDynamicsKeySource::Submix", EditConditionHides))
-	USoundSubmix* ExternalSubmix = nullptr;
+	TObjectPtr<USoundSubmix> ExternalSubmix = nullptr;
 
 	UPROPERTY()
 	uint8 bChannelLinked_DEPRECATED : 1;
@@ -195,116 +266,43 @@ struct AUDIOMIXER_API FSubmixEffectDynamicsProcessorSettings
 };
 
 
-class AUDIOMIXER_API FSubmixEffectDynamicsProcessor : public FSoundEffectSubmix
+class FSubmixEffectDynamicsProcessor : public FSoundEffectSubmix
 {
 public:
-	FSubmixEffectDynamicsProcessor();
+	AUDIOMIXER_API FSubmixEffectDynamicsProcessor();
 
-	virtual ~FSubmixEffectDynamicsProcessor();
+	AUDIOMIXER_API virtual ~FSubmixEffectDynamicsProcessor();
 
 	// Gets the effect's deviceId that owns it
-	Audio::FDeviceId GetDeviceId() const;
+	AUDIOMIXER_API Audio::FDeviceId GetDeviceId() const;
 
 	// Called on an audio effect at initialization on audio thread before audio processing begins.
-	virtual void Init(const FSoundEffectSubmixInitData& InInitData) override;
+	AUDIOMIXER_API virtual void Init(const FSoundEffectSubmixInitData& InInitData) override;
 
 	// Process the input block of audio. Called on audio render thread.
-	virtual void OnProcessAudio(const FSoundEffectSubmixInputData& InData, FSoundEffectSubmixOutputData& OutData) override;
+	AUDIOMIXER_API virtual void OnProcessAudio(const FSoundEffectSubmixInputData& InData, FSoundEffectSubmixOutputData& OutData) override;
 
 	// Called when an audio effect preset is changed
-	virtual void OnPresetChanged() override;
+	AUDIOMIXER_API virtual void OnPresetChanged() override;
 
 
 protected:
-	Audio::FMixerDevice* GetMixerDevice();
+	AUDIOMIXER_API Audio::FMixerDevice* GetMixerDevice();
 
-	void ResetKey();
-	void UpdateKeyFromSettings(const FSubmixEffectDynamicsProcessorSettings& InSettings);
-	bool UpdateKeySourcePatch();
+	AUDIOMIXER_API void ResetKey();
+	AUDIOMIXER_API void UpdateKeyFromSettings(const FSubmixEffectDynamicsProcessorSettings& InSettings);
+	AUDIOMIXER_API bool UpdateKeySourcePatch();
 
-	void OnDeviceCreated(Audio::FDeviceId InDeviceId);
-	void OnDeviceDestroyed(Audio::FDeviceId InDeviceId);
+	AUDIOMIXER_API void OnDeviceCreated(Audio::FDeviceId InDeviceId);
+	AUDIOMIXER_API void OnDeviceDestroyed(Audio::FDeviceId InDeviceId);
 	
-	Audio::AlignedFloatBuffer AudioExternal;
-
-	TArray<float> AudioKeyFrame;
-	TArray<float> AudioInputFrame;
+	Audio::FAlignedFloatBuffer AudioExternal;
 
 	Audio::FDeviceId DeviceId = INDEX_NONE;
 
 	bool bBypass = false;
 
 private:
-	class FKeySource
-	{
-		ESubmixEffectDynamicsKeySource Type = ESubmixEffectDynamicsKeySource::Default;
-		int32 NumChannels = 0;
-		uint32 ObjectId = INDEX_NONE;
-
-		mutable FCriticalSection MutateSourceCritSection;
-
-	public:
-		Audio::FPatchOutputStrongPtr Patch;
-
-		void Reset()
-		{
-			Patch.Reset();
-
-			{
-				const FScopeLock ScopeLock(&MutateSourceCritSection);
-				NumChannels = 0;
-				ObjectId = INDEX_NONE;
-				Type = ESubmixEffectDynamicsKeySource::Default;
-			}
-		}
-
-		uint32 GetObjectId() const
-		{
-			const FScopeLock ScopeLock(&MutateSourceCritSection);
-			return ObjectId;
-		}
-
-		int32 GetNumChannels() const
-		{
-			const FScopeLock ScopeLock(&MutateSourceCritSection);
-			return NumChannels;
-		}
-
-		ESubmixEffectDynamicsKeySource GetType() const
-		{
-			const FScopeLock ScopeLock(&MutateSourceCritSection);
-			return Type;
-		}
-
-		void SetNumChannels(const int32 InNumChannels)
-		{
-			const FScopeLock ScopeLock(&MutateSourceCritSection);
-			NumChannels = InNumChannels;
-		}
-
-		void Update(ESubmixEffectDynamicsKeySource InType, uint32 InObjectId, int32 InNumChannels = 0)
-		{
-			bool bResetPatch = false;
-
-			{
-				const FScopeLock ScopeLock(&MutateSourceCritSection);
-				if (Type != InType || ObjectId != InObjectId || NumChannels != InNumChannels)
-				{
-					Type = InType;
-					ObjectId = InObjectId;
-					NumChannels = InNumChannels;
-
-					bResetPatch = true;
-				}
-			}
-
-			if (bResetPatch)
-			{
-				Patch.Reset();
-			}
-		}
-	};
-
 	FKeySource KeySource;
 	Audio::FDynamicsProcessor DynamicsProcessor;
 
@@ -314,37 +312,37 @@ private:
 	friend class USubmixEffectDynamicsProcessorPreset;
 };
 
-UCLASS(ClassGroup = AudioSourceEffect, meta = (BlueprintSpawnableComponent))
-class AUDIOMIXER_API USubmixEffectDynamicsProcessorPreset : public USoundEffectSubmixPreset
+UCLASS(ClassGroup = AudioSourceEffect, meta = (BlueprintSpawnableComponent), MinimalAPI)
+class USubmixEffectDynamicsProcessorPreset : public USoundEffectSubmixPreset
 {
 	GENERATED_BODY()
 
 public:
 	EFFECT_PRESET_METHODS(SubmixEffectDynamicsProcessor)
 
-	virtual void OnInit() override;
+	AUDIOMIXER_API virtual void OnInit() override;
 
-	virtual void Serialize(FStructuredArchive::FRecord Record) override;
+	AUDIOMIXER_API virtual void Serialize(FStructuredArchive::FRecord Record) override;
 
 #if WITH_EDITOR
-	virtual void PostEditChangeChainProperty(struct FPropertyChangedChainEvent& InChainEvent) override;
+	AUDIOMIXER_API virtual void PostEditChangeChainProperty(struct FPropertyChangedChainEvent& InChainEvent) override;
 #endif // WITH_EDITOR
 
 	UFUNCTION(BlueprintCallable, Category = "Audio|Effects")
-	void ResetKey();
+	AUDIOMIXER_API void ResetKey();
 
 	// Sets the source key input as the provided AudioBus' output.  If no object is provided, key is set
 	// to effect's input.
 	UFUNCTION(BlueprintCallable, Category = "Audio|Effects")
-	void SetAudioBus(UAudioBus* AudioBus);
+	AUDIOMIXER_API void SetAudioBus(UAudioBus* AudioBus);
 
 	// Sets the source key input as the provided Submix's output.  If no object is provided, key is set
 	// to effect's input.
 	UFUNCTION(BlueprintCallable, Category = "Audio|Effects")
-	void SetExternalSubmix(USoundSubmix* Submix);
+	AUDIOMIXER_API void SetExternalSubmix(USoundSubmix* Submix);
 
 	UFUNCTION(BlueprintCallable, Category = "Audio|Effects")
-	void SetSettings(const FSubmixEffectDynamicsProcessorSettings& Settings);
+	AUDIOMIXER_API void SetSettings(const FSubmixEffectDynamicsProcessorSettings& Settings);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = SubmixEffectPreset, meta = (ShowOnlyInnerProperties))
 	FSubmixEffectDynamicsProcessorSettings Settings;

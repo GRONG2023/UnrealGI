@@ -2,16 +2,26 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/WeakObjectPtr.h"
-#include "Layout/Visibility.h"
 #include "Animation/SlateSprings.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "EditorWidgetsModule.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
+#include "Layout/Visibility.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateEnums.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 
 class FPaintArgs;
+class FSlateRect;
 class FSlateWindowElementList;
-class SEditableTextBox;
+class FWidgetStyle;
+class SInlineEditableTextBlock;
+class UObject;
+namespace UE::EditorWidgets { class FObjectNameEditSinkRegistry; }
+struct FGeometry;
 
 /** Widget wraps an editable text box for viewing the names of objects or editing the labels of actors */
 class SObjectNameEditableTextBox : public IObjectNameEditableTextBox
@@ -20,6 +30,8 @@ public:
 	SLATE_BEGIN_ARGS(SObjectNameEditableTextBox){}
 
 		SLATE_ARGUMENT(TArray<TWeakObjectPtr<UObject>>, Objects)
+
+		SLATE_ARGUMENT(TWeakPtr<UE::EditorWidgets::FObjectNameEditSinkRegistry>, Registry)
 
 	SLATE_END_ARGS()
 
@@ -49,23 +61,14 @@ private:
 	/** Getter for the ToolTipText attribute of the editable text inside this widget */
 	FText GetNameTooltipText() const;
 
-	/** Getter for the HintText attribute of the editable text inside this widget */
-	FText GetNameHintText() const;
-
 	/** Getter for the OnTextCommitted event of the editable text inside this widget */
 	void OnNameTextCommitted(const FText& NewText, ETextCommit::Type InTextCommit);
 
 	/** Getter for the IsReadOnly attribute of the editable text inside this widget */
-	bool CanEditNameText() const;
+	bool IsReadOnly() const;
 
-	/** Getter for the SelectAllTextWhenFocused attribute of the editable text inside this widget */
-	bool CannotEditNameText() const { return !CanEditNameText(); }
-
-	/** Callback to verify a text change */
-	void OnTextChanged( const FText& InLabel );
-
-	/** Helper class the get the object name or the actor label if an object is an actor */
-	static FString GetObjectDisplayName(TWeakObjectPtr<UObject> Object);
+	/** Helper function to access name registry and retrieve display name */
+	FText GetObjectDisplayName(TWeakObjectPtr<UObject> Object) const;
 
 	/** The list of objects whose names are edited by the widget */
 	TArray<TWeakObjectPtr<UObject>> Objects;
@@ -101,7 +104,10 @@ private:
 	double LastCommittedTime;
 
 	/** The text box used to edit object names */ 
-	TSharedPtr< SEditableTextBox > TextBox;
+	TSharedPtr< SInlineEditableTextBlock > TextBox;
+
+	/** The registry for object names */
+	TWeakPtr<UE::EditorWidgets::FObjectNameEditSinkRegistry> ObjectNameEditSinkRegistry;
 
 	// Temp flag to trigger a highlight spring update in the passive tick (because that's where the geometry is)
 	bool bUpdateHighlightSpring;

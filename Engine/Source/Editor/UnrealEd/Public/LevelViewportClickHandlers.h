@@ -5,12 +5,14 @@
 #include "CoreMinimal.h"
 #include "UObject/UObjectGlobals.h"
 #include "HitProxies.h"
+#include "UObject/ObjectPtr.h"
 
 class AActor;
 class ABrush;
 class FLevelEditorViewportClient;
 class UModel;
 class USceneComponent;
+struct FTypedElementHandle;
 struct FViewportClick;
 struct HActor;
 struct HGeomEdgeProxy;
@@ -24,8 +26,8 @@ struct HLevelSocketProxy : public HHitProxy
 {
 	DECLARE_HIT_PROXY();
 
-	AActor* Actor;
-	USceneComponent* SceneComponent;
+	TObjectPtr<AActor> Actor;
+	TObjectPtr<USceneComponent> SceneComponent;
 	FName SocketName;
 
 	HLevelSocketProxy(AActor* InActor, USceneComponent* InSceneComponent, FName InSocketName)
@@ -44,6 +46,8 @@ struct HLevelSocketProxy : public HHitProxy
 namespace LevelViewportClickHandlers
 {
 	bool ClickViewport(FLevelEditorViewportClient* ViewportClient, const FViewportClick& Click);
+
+	bool ClickElement(FLevelEditorViewportClient* ViewportClient, const FTypedElementHandle& HitElement, const FViewportClick& Click);
 
 	bool UNREALED_API ClickActor(FLevelEditorViewportClient* ViewportClient,AActor* Actor,const FViewportClick& Click,bool bAllowSelectionChange);
 

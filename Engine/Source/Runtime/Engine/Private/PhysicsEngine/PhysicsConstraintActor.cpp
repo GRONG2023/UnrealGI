@@ -1,10 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "PhysicsEngine/PhysicsConstraintActor.h"
-#include "UObject/ConstructorHelpers.h"
+#include "Async/TaskGraphInterfaces.h"
 #include "Engine/Texture2D.h"
+#include "UObject/ConstructorHelpers.h"
 #include "PhysicsEngine/PhysicsConstraintComponent.h"
 #include "PhysicsEngine/ConstraintUtils.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PhysicsConstraintActor)
 
 APhysicsConstraintActor::APhysicsConstraintActor(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -32,7 +35,7 @@ void APhysicsConstraintActor::PostLoad()
 	Super::PostLoad();
 
 	// Copy 'actors to constrain' into component
-	if (GetLinkerUE4Version() < VER_UE4_ALL_PROPS_TO_CONSTRAINTINSTANCE && ConstraintComp != NULL)
+	if (GetLinkerUEVersion() < VER_UE4_ALL_PROPS_TO_CONSTRAINTINSTANCE && ConstraintComp != NULL)
 	{
 		ConstraintComp->ConstraintActor1 = ConstraintActor1_DEPRECATED;
 		ConstraintComp->ConstraintActor2 = ConstraintActor2_DEPRECATED;
@@ -66,4 +69,5 @@ void APhysicsConstraintActor::LoadedFromAnotherClass( const FName& OldClassName 
 	ConstraintComp->UpdateSpriteTexture();
 }
 #endif // WITH_EDITOR
+
 

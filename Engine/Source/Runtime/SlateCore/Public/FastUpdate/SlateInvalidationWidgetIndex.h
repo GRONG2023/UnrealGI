@@ -2,7 +2,9 @@
 
 #pragma once
 
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "HAL/Platform.h"
 
 class SWidget;
 
@@ -16,6 +18,7 @@ public:
 	static const FSlateInvalidationWidgetIndex Invalid;
 	bool operator== (FSlateInvalidationWidgetIndex Other) const { return ArrayIndex == Other.ArrayIndex && ElementIndex == Other.ElementIndex; }
 	bool operator!= (FSlateInvalidationWidgetIndex Other) const { return ArrayIndex != Other.ArrayIndex || ElementIndex != Other.ElementIndex; }
+	FString ToString() const { return FString::Printf(TEXT("{%d, %d}"), ArrayIndex, ElementIndex); }
 	
 private:
 	using IndexType = uint16;

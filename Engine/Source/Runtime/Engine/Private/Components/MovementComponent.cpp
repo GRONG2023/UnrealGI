@@ -2,14 +2,14 @@
 
 
 #include "GameFramework/MovementComponent.h"
-#include "CollisionQueryParams.h"
 #include "Engine/World.h"
 #include "Components/PrimitiveComponent.h"
 #include "GameFramework/PhysicsVolume.h"
 #include "Logging/MessageLog.h"
 #include "PhysicsEngine/PhysicsSettings.h"
-#include "UObject/UObjectHash.h"
 #include "UObject/UObjectIterator.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovementComponent)
 
 #define LOCTEXT_NAMESPACE "MovementComponent"
 DEFINE_LOG_CATEGORY_STATIC(LogMovement, Log, All);
@@ -56,7 +56,7 @@ void UMovementComponent::SetUpdatedComponent(USceneComponent* NewUpdatedComponen
 		if (bAutoRegisterPhysicsVolumeUpdates)
 		{
 			UpdatedComponent->SetShouldUpdatePhysicsVolume(false);
-			if (!UpdatedComponent->IsPendingKill())
+			if (IsValid(UpdatedComponent))
 			{
 				UpdatedComponent->SetPhysicsVolume(NULL, true);
 			}
@@ -146,7 +146,11 @@ void UMovementComponent::OnRegister()
 	}
 
 	const UWorld* MyWorld = GetWorld();
-	if (MyWorld && MyWorld->IsGameWorld())
+	if (MyWorld && (MyWorld->IsGameWorld()
+#if WITH_EDITOR
+	|| MyWorld->bForceUseMovementComponentInNonGameWorld
+#endif
+	))
 	{
 		PlaneConstraintNormal = PlaneConstraintNormal.GetSafeNormal();
 
@@ -200,7 +204,7 @@ void UMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	// Don't hang on to stale references to a destroyed UpdatedComponent.
-	if (UpdatedComponent != NULL && UpdatedComponent->IsPendingKill())
+	if (UpdatedComponent != NULL && !IsValid(UpdatedComponent))
 	{
 		SetUpdatedComponent(NULL);
 	}
@@ -541,7 +545,7 @@ namespace MovementComponentCVars
 // Typically we want to depenetrate regardless of direction, so we can get all the way out of penetration quickly.
 // Our rules for "moving with depenetration normal" only get us so far out of the object. We'd prefer to pop out by the full MTD amount.
 // Depenetration moves (in ResolvePenetration) then ignore blocking overlaps to be able to move out by the MTD amount.
-static int32 MoveIgnoreFirstBlockingOverlap = 0;
+int32 MoveIgnoreFirstBlockingOverlap = 0;
 static FAutoConsoleVariableRef CVarMoveIgnoreFirstBlockingOverlap(
 	TEXT("p.MoveIgnoreFirstBlockingOverlap"),
 	MoveIgnoreFirstBlockingOverlap,
@@ -586,14 +590,14 @@ bool UMovementComponent::SafeMoveUpdatedComponent(const FVector& Delta, const FQ
 
 namespace MovementComponentCVars
 {
-static float PenetrationPullbackDistance = 0.125f;
+float PenetrationPullbackDistance = 0.125f;
 static FAutoConsoleVariableRef CVarPenetrationPullbackDistance(TEXT("p.PenetrationPullbackDistance"),
 	PenetrationPullbackDistance,
 	TEXT("Pull out from penetration of an object by this extra distance.\n")
 	TEXT("Distance added to penetration fix-ups."),
 	ECVF_Default);
 
-static float PenetrationOverlapCheckInflation = 0.100f;
+float PenetrationOverlapCheckInflation = 0.100f;
 static FAutoConsoleVariableRef CVarPenetrationOverlapCheckInflation(TEXT("p.PenetrationOverlapCheckInflation"),
 	PenetrationOverlapCheckInflation,
 	TEXT("Inflation added to object when checking if a location is free of blocking collision.\n")
@@ -635,7 +639,7 @@ bool UMovementComponent::ResolvePenetrationImpl(const FVector& ProposedAdjustmen
 			   *ActorOwner->GetName(),
 			   *UpdatedComponent->GetName(),
 			   *UpdatedComponent->GetComponentLocation().ToString(),
-			   *GetNameSafe(Hit.GetActor()),
+			   *Hit.GetHitObjectHandle().GetName(),
 			   *GetNameSafe(Hit.GetComponent()),
 			   Hit.Component.IsValid() ? *Hit.GetComponent()->GetComponentLocation().ToString() : TEXT("<unknown>"),
 			   Hit.PenetrationDepth,
@@ -795,7 +799,7 @@ void UMovementComponent::TwoWallAdjust(FVector& OutDelta, const FHitResult& Hit,
 		{
 			Delta = FVector::ZeroVector;
 		}
-		else if ( FMath::Abs((HitNormal | OldHitNormal) - 1.f) < KINDA_SMALL_NUMBER )
+		else if ( FMath::Abs((HitNormal | OldHitNormal) - 1.f) < UE_KINDA_SMALL_NUMBER )
 		{
 			// we hit the same wall again even after adjusting to move along it the first time
 			// nudge away from it (this can happen due to precision issues)
@@ -816,34 +820,5 @@ void UMovementComponent::AddRadialImpulse(const FVector& Origin, float Radius, f
 	// Default implementation does nothing
 }
 
-// TODO: Deprecated, remove.
-float UMovementComponent::GetMaxSpeedModifier() const
-{
-	return 1.0f;
-}
-
-// TODO: Deprecated, remove.
-float UMovementComponent::K2_GetMaxSpeedModifier() const
-{
-	// Allow calling old deprecated function to maintain old behavior until it is removed.
-	PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	return GetMaxSpeedModifier();
-	PRAGMA_ENABLE_DEPRECATION_WARNINGS
-}
-
-// TODO: Deprecated, remove.
-float UMovementComponent::GetModifiedMaxSpeed() const
-{
-	return GetMaxSpeed();
-}
-
-// TODO: Deprecated, remove.
-float UMovementComponent::K2_GetModifiedMaxSpeed() const
-{
-	// Allow calling old deprecated function to maintain old behavior until it is removed.
-	PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	return GetModifiedMaxSpeed();
-	PRAGMA_ENABLE_DEPRECATION_WARNINGS
-}
-
 #undef LOCTEXT_NAMESPACE
+

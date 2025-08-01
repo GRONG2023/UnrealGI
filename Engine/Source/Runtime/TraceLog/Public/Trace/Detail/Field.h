@@ -9,31 +9,45 @@
 #include "Atomic.h"
 #include "Protocol.h"
 #include "Templates/UnrealTemplate.h"
+#include "Trace/Trace.h"
 #include "Writer.inl"
 
+/* Statically sized fields (e.g. UE_TRACE_EVENT_FIELD(float[4], Colours)) are
+ * not supported as yet. No call for them. The following define is used to track
+ * where and partially how to implement them */
+#define STATICALLY_SIZED_ARRAY_FIELDS_SUPPORT 0
+
+namespace UE {
 namespace Trace {
-namespace Private {
+
+namespace Private
+{
 
 ////////////////////////////////////////////////////////////////////////////////
 UE_TRACE_API void Field_WriteAuxData(uint32, const uint8*, int32);
 UE_TRACE_API void Field_WriteStringAnsi(uint32, const ANSICHAR*, int32);
-UE_TRACE_API void Field_WriteStringAnsi(uint32, const TCHAR*, int32);
-UE_TRACE_API void Field_WriteStringWide(uint32, const TCHAR*, int32);
+UE_TRACE_API void Field_WriteStringAnsi(uint32, const WIDECHAR*, int32);
+UE_TRACE_API void Field_WriteStringWide(uint32, const WIDECHAR*, int32);
+
+class FEventNode;
 
 } // namespace Private
 
 ////////////////////////////////////////////////////////////////////////////////
+enum DisabledField {};
+
 template <typename Type> struct TFieldType;
 
+template <> struct TFieldType<DisabledField>{ enum { Tid = 0,						Size = 0 }; };
 template <> struct TFieldType<bool>			{ enum { Tid = int(EFieldType::Bool),	Size = sizeof(bool) }; };
 template <> struct TFieldType<int8>			{ enum { Tid = int(EFieldType::Int8),	Size = sizeof(int8) }; };
 template <> struct TFieldType<int16>		{ enum { Tid = int(EFieldType::Int16),	Size = sizeof(int16) }; };
 template <> struct TFieldType<int32>		{ enum { Tid = int(EFieldType::Int32),	Size = sizeof(int32) }; };
 template <> struct TFieldType<int64>		{ enum { Tid = int(EFieldType::Int64),	Size = sizeof(int64) }; };
-template <> struct TFieldType<uint8>		{ enum { Tid = int(EFieldType::Int8),	Size = sizeof(uint8) }; };
-template <> struct TFieldType<uint16>		{ enum { Tid = int(EFieldType::Int16),	Size = sizeof(uint16) }; };
-template <> struct TFieldType<uint32>		{ enum { Tid = int(EFieldType::Int32),	Size = sizeof(uint32) }; };
-template <> struct TFieldType<uint64>		{ enum { Tid = int(EFieldType::Int64),	Size = sizeof(uint64) }; };
+template <> struct TFieldType<uint8>		{ enum { Tid = int(EFieldType::Uint8),	Size = sizeof(uint8) }; };
+template <> struct TFieldType<uint16>		{ enum { Tid = int(EFieldType::Uint16),	Size = sizeof(uint16) }; };
+template <> struct TFieldType<uint32>		{ enum { Tid = int(EFieldType::Uint32),	Size = sizeof(uint32) }; };
+template <> struct TFieldType<uint64>		{ enum { Tid = int(EFieldType::Uint64),	Size = sizeof(uint64) }; };
 template <> struct TFieldType<float>		{ enum { Tid = int(EFieldType::Float32),Size = sizeof(float) }; };
 template <> struct TFieldType<double>		{ enum { Tid = int(EFieldType::Float64),Size = sizeof(double) }; };
 template <class T> struct TFieldType<T*>	{ enum { Tid = int(EFieldType::Pointer),Size = sizeof(void*) }; };
@@ -48,7 +62,7 @@ struct TFieldType<T[]>
 	};
 };
 
-#if 0
+#if STATICALLY_SIZED_ARRAY_FIELDS_SUPPORT
 template <typename T, int N>
 struct TFieldType<T[N]>
 {
@@ -58,10 +72,10 @@ struct TFieldType<T[N]>
 		Size = sizeof(T[N]),
 	};
 };
-#endif // 0
+#endif // STATICALLY_SIZED_ARRAY_FIELDS_SUPPORT
 
-template <> struct TFieldType<Trace::AnsiString> { enum { Tid  = int(EFieldType::AnsiString), Size = 0, }; };
-template <> struct TFieldType<Trace::WideString> { enum { Tid  = int(EFieldType::WideString), Size = 0, }; };
+template <> struct TFieldType<AnsiString> { enum { Tid  = int(EFieldType::AnsiString), Size = 0, }; };
+template <> struct TFieldType<WideString> { enum { Tid  = int(EFieldType::WideString), Size = 0, }; };
 
 
 
@@ -83,12 +97,13 @@ struct FLiteralName
 ////////////////////////////////////////////////////////////////////////////////
 struct FFieldDesc
 {
-	FFieldDesc(const FLiteralName& Name, uint8 Type, uint16 Offset, uint16 Size)
+	FFieldDesc(const FLiteralName& Name, uint8 Type, uint16 Offset, uint16 Size, uint32 ReferencedUid = 0)
 	: Name(Name.Ptr)
 	, ValueOffset(Offset)
 	, ValueSize(Size)
 	, NameSize(Name.Length)
 	, TypeInfo(Type)
+	, Reference(ReferencedUid)
 	{
 	}
 
@@ -97,6 +112,7 @@ struct FFieldDesc
 	uint16			ValueSize;
 	uint8			NameSize;
 	uint8			TypeInfo;
+	uint32			Reference;
 };
 
 
@@ -106,8 +122,10 @@ template <int InIndex, int InOffset, typename Type> struct TField;
 
 enum class EIndexPack
 {
-	FieldCountMask	= 0xff,
-	MaybeHasAux		= 0x100,
+	NumFieldsMax	= 1 << FAuxHeader::FieldBits,
+	NumFieldsShift	= 8,
+	NumFieldsMask	= (1 << NumFieldsShift) - 1,
+	AuxFieldCounter	= 1 << NumFieldsShift,
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -119,7 +137,7 @@ enum class EIndexPack
 			Tid		= TFieldType<Type>::Tid, \
 			Size	= TFieldType<Type>::Size, \
 		}; \
-		static_assert((Index & int(EIndexPack::FieldCountMask)) <= 127, "Trace events may only have up to a maximum of 127 fields"); \
+		static_assert((Index & int(EIndexPack::NumFieldsMask)) < int(EIndexPack::NumFieldsMax), "Trace events may only have up to EIndexPack::NumFieldsMax fields"); \
 	private: \
 		FFieldDesc FieldDesc; \
 	public: \
@@ -132,83 +150,41 @@ enum class EIndexPack
 template <int InIndex, int InOffset, typename Type>
 struct TField<InIndex, InOffset, Type[]>
 {
-	TRACE_PRIVATE_FIELD(InIndex|int(EIndexPack::MaybeHasAux), InOffset, Type[]);
-
-	static void Set(uint8*, Type const* Data, int32 Count)
-	{
-		if (Count > 0)
-		{
-			int32 Size = (Count * sizeof(Type)) & (FAuxHeader::SizeLimit - 1) & ~(sizeof(Type) - 1);
-			Private::Field_WriteAuxData(Index, (const uint8*)Data, Size);
-		}
-	}
+	TRACE_PRIVATE_FIELD(InIndex + int(EIndexPack::AuxFieldCounter), InOffset, Type[]);
 };
 
-#if 0
+#if STATICALLY_SIZED_ARRAY_FIELDS_SUPPORT
 ////////////////////////////////////////////////////////////////////////////////
 template <int InIndex, int InOffset, typename Type, int Count>
 struct TField<InIndex, InOffset, Type[Count]>
 {
 	TRACE_PRIVATE_FIELD(InIndex, InOffset, Type[Count]);
-
-	static void Set(uint8*, Type const* Data, int Count)
-	{
-	}
 };
-#endif
+#endif // STATICALLY_SIZED_ARRAY_FIELDS_SUPPORT
 
 ////////////////////////////////////////////////////////////////////////////////
 template <int InIndex, int InOffset>
-struct TField<InIndex, InOffset, Trace::AnsiString>
+struct TField<InIndex, InOffset, AnsiString>
 {
-	TRACE_PRIVATE_FIELD(InIndex|int(EIndexPack::MaybeHasAux), InOffset, Trace::AnsiString);
-
-	FORCENOINLINE static void Set(uint8*, const TCHAR* String, int32 Length=-1)
-	{
-		if (Length < 0)
-		{
-			Length = 0;
-			if (String)
-			{
-				for (const TCHAR* c = String; *c; ++c, ++Length);
-			}
-		}
-
-		Private::Field_WriteStringAnsi(Index, String, Length);
-	}
-
-	FORCENOINLINE static void Set(uint8*, const ANSICHAR* String, int32 Length=-1)
-	{
-		if (Length < 0)
-		{
-			Length = String ? int32(strlen(String)) : 0;
-		}
-
-		if (Length)
-		{
-			Private::Field_WriteStringAnsi(Index, String, Length);
-		}
-	}
+	TRACE_PRIVATE_FIELD(InIndex + int(EIndexPack::AuxFieldCounter), InOffset, AnsiString);
 };
 
 ////////////////////////////////////////////////////////////////////////////////
 template <int InIndex, int InOffset>
-struct TField<InIndex, InOffset, Trace::WideString>
+struct TField<InIndex, InOffset, WideString>
 {
-	TRACE_PRIVATE_FIELD(InIndex|int(EIndexPack::MaybeHasAux), InOffset, Trace::WideString);
+	TRACE_PRIVATE_FIELD(InIndex + int(EIndexPack::AuxFieldCounter), InOffset, WideString);
+};
 
-	FORCENOINLINE static void Set(uint8*, const TCHAR* String, int32 Length=-1)
+////////////////////////////////////////////////////////////////////////////////
+template <int InIndex, int InOffset, typename DefinitionType>
+struct TField<InIndex, InOffset, TEventRef<DefinitionType>>
+{
+	TRACE_PRIVATE_FIELD(InIndex, InOffset, DefinitionType);
+public:
+	TField(const FLiteralName& Name, uint32 ReferencedUid)
+		: FieldDesc(Name, Tid, Offset, Size, ReferencedUid)
 	{
-		if (Length < 0)
-		{
-			Length = 0;
-			for (const TCHAR* c = String; *c; ++c, ++Length);
-		}
-
-		if (Length)
-		{
-			Private::Field_WriteStringWide(Index, String, Length);
-		}
 	}
 };
 
@@ -217,11 +193,6 @@ template <int InIndex, int InOffset, typename Type>
 struct TField
 {
 	TRACE_PRIVATE_FIELD(InIndex, InOffset, Type);
-
-	static void Set(uint8* Dest, const Type& __restrict Value)
-	{
-		::memcpy(Dest + Offset, &Value, Size);
-	}
 };
 
 #undef TRACE_PRIVATE_FIELD
@@ -231,35 +202,18 @@ struct TField
 ////////////////////////////////////////////////////////////////////////////////
 // Used to terminate the field list and determine an event's size.
 enum EventProps {};
-template <int InFieldCount, int InSize>
-struct TField<InFieldCount, InSize, EventProps>
+template <int InNumFields, int InSize>
+struct TField<InNumFields, InSize, EventProps>
 {
 	enum : uint16
 	{
-		FieldCount	= (InFieldCount & int(EIndexPack::FieldCountMask)),
-		Size		= InSize,
-		MaybeHasAux	= !!(InFieldCount & int(EIndexPack::MaybeHasAux)),
+		NumFields		= InNumFields & int(EIndexPack::NumFieldsMask),
+		Size			= InSize,
+		NumAuxFields	= (InNumFields >> int(EIndexPack::NumFieldsShift)) & int(EIndexPack::NumFieldsMask),
 	};
 };
 
-////////////////////////////////////////////////////////////////////////////////
-// Access to additional data that can be included along with a logged event.
-enum Attachment {};
-template <int InOffset>
-struct TField<0, InOffset, Attachment>
-{
-	template <typename LambdaType>
-	static void Set(uint8* Dest, LambdaType&& Lambda)
-	{
-		Lambda(Dest + InOffset);
-	}
-
-	static void Set(uint8* Dest, const void* Data, uint32 Size)
-	{
-		::memcpy(Dest + InOffset, Data, Size);
-	}
-};
-
 } // namespace Trace
+} // namespace UE
 
 #endif // UE_TRACE_ENABLED

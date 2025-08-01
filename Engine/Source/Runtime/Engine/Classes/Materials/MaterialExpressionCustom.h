@@ -6,13 +6,14 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "MaterialExpressionIO.h"
+#include "MaterialValueType.h"
 #include "Materials/MaterialExpression.h"
 #include "MaterialExpressionCustom.generated.h"
 
 struct FPropertyChangedEvent;
 
 UENUM()
-enum ECustomMaterialOutputType
+enum ECustomMaterialOutputType : int
 {
 	CMOT_Float1,
 	CMOT_Float2,
@@ -84,6 +85,9 @@ class UMaterialExpressionCustom : public UMaterialExpression
 	UPROPERTY(EditAnywhere, Category=MaterialExpressionCustom)
 	TArray<FString> IncludeFilePaths;
 
+	UPROPERTY(VisibleAnywhere, Category=MaterialExpressionCustom)
+	bool ShowCode;
+
 	//~ Begin UObject Interface.
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
@@ -96,12 +100,15 @@ class UMaterialExpressionCustom : public UMaterialExpression
 #if WITH_EDITOR
 	virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
 	virtual void GetCaption(TArray<FString>& OutCaptions) const override;
-	virtual const TArray<FExpressionInput*> GetInputs() override;
+	virtual FText GetCreationName() const override { return FText::FromString(TEXT("Custom")); }
+	virtual TArrayView<FExpressionInput*> GetInputsView() override;
 	virtual FExpressionInput* GetInput(int32 InputIndex) override;
 	virtual FName GetInputName(int32 InputIndex) const override;
 	virtual uint32 GetInputType(int32 InputIndex) override {return MCT_Unknown;}
 	virtual uint32 GetOutputType(int32 OutputIndex) override;
 	virtual bool IsResultMaterialAttributes(int32 OutputIndex) override;
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
+	virtual void GetIncludeFilePaths(TSet<FString>& OutIncludeFilePaths) const override;
 #endif // WITH_EDITOR
 	//~ End UMaterialExpression Interface
 };

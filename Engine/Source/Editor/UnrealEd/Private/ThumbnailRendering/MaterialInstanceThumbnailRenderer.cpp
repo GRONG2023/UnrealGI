@@ -87,24 +87,31 @@ void UMaterialInstanceThumbnailRenderer::Draw(UObject* Object, int32 X, int32 Y,
 
 			ThumbnailScene->SetMaterialInterface(MatInst);
 			FSceneViewFamilyContext ViewFamily( FSceneViewFamily::ConstructionValues( RenderTarget, ThumbnailScene->GetScene(), FEngineShowFlags(ESFIM_Game) )
-				.SetWorldTimes(FApp::GetCurrentTime() - GStartTime, FApp::GetDeltaTime(), FApp::GetCurrentTime() - GStartTime)
+				.SetTime(UThumbnailRenderer::GetTime())
 				.SetAdditionalViewFamily(bAdditionalViewFamily));
-
 
 			ViewFamily.EngineShowFlags.DisableAdvancedFeatures();
 			ViewFamily.EngineShowFlags.SetSeparateTranslucency(ThumbnailScene->ShouldSetSeparateTranslucency(MatInst));
 			ViewFamily.EngineShowFlags.MotionBlur = 0;
 			ViewFamily.EngineShowFlags.AntiAliasing = 0;
-			ThumbnailScene->GetView(&ViewFamily, X, Y, Width, Height);
 
-			if (ViewFamily.Views.Num() > 0)
-			{
-				RenderViewFamily(Canvas, &ViewFamily);
-			}
+			RenderViewFamily(Canvas, &ViewFamily, ThumbnailScene->CreateView(&ViewFamily, X, Y, Width, Height));
 
 			ThumbnailScene->SetMaterialInterface(nullptr);
 		}
 	}
+}
+
+bool UMaterialInstanceThumbnailRenderer::CanVisualizeAsset(UObject* Object)
+{
+	if (UMaterialInterface* MatInst = Cast<UMaterialInterface>(Object))
+	{
+		if (MatInst->IsCompiling())
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 void UMaterialInstanceThumbnailRenderer::BeginDestroy()

@@ -10,6 +10,7 @@
 #include "Evaluation/MovieSceneEvaluationOperand.h"
 #include "Evaluation/Blending/BlendableToken.h"
 #include "IMovieScenePlayer.h"
+#include "Evaluation/PreAnimatedState/MovieScenePreAnimatedCaptureSource.h"
 
 struct FMovieSceneInterrogationData;
 struct FMovieSceneContext;
@@ -24,7 +25,7 @@ template<typename T> struct TMovieSceneBlendingActuator;
 template<typename T> FMovieSceneAnimTypeID GetBlendingDataType()
 {
 	// Always assert on instantiation
-	static_assert(TIsSame<T, void>::Value, "GetBlendingDataType must be specialized for a type in order to use it with an accumulator.");
+	static_assert(std::is_same_v<T, void>, "GetBlendingDataType must be specialized for a type in order to use it with an accumulator.");
 	return FMovieSceneAnimTypeID::Unique();
 }
 
@@ -50,7 +51,7 @@ public:
 	/**
 	 * Implemented by typed stacks to compute the final blended value for its data, and apply that result to the specified object
 	 *
-	 * @param InObject			The object to apply the result to. Nullptr for master track data.
+	 * @param InObject			The object to apply the result to. Nullptr for root track data.
 	 * @param Accumulator 		The accumulator that was used to gather and consolidate the blendable tokens
 	 * @param ActuatorTypeID	A unique identifier to the actuator that should be used to apply the result to the object
 	 * @param Context			Root-level movie scene evaluation context for the current frame
@@ -115,7 +116,7 @@ public:
 	/**
 	 * Implemented by typed stacks to compute the final blended value for its data, and apply that result to the specified object
 	 *
-	 * @param InObject			The object to apply the result to. Nullptr for master track data.
+	 * @param InObject			The object to apply the result to. Nullptr for root track data.
 	 * @param Accumulator 		The accumulator that was used to gather and consolidate the blendable tokens
 	 * @param ActuatorTypeID	A unique identifier to the actuator that should be used to apply the result to the object
 	 * @param Context			Root-level movie scene evaluation context for the current frame

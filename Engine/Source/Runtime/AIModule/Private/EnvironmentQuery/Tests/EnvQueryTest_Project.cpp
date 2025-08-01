@@ -2,10 +2,13 @@
 
 #include "EnvironmentQuery/Tests/EnvQueryTest_Project.h"
 #include "AI/Navigation/NavigationTypes.h"
+#include "NavFilters/NavigationQueryFilter.h"
 #include "NavigationData.h"
 #include "EnvironmentQuery/Items/EnvQueryItemType_VectorBase.h"
 #include "EnvironmentQuery/Items/EnvQueryItemType_Point.h"
 #include "EnvironmentQuery/EnvQueryTraceHelpers.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(EnvQueryTest_Project)
 
 UEnvQueryTest_Project::UEnvQueryTest_Project(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
@@ -61,19 +64,34 @@ void UEnvQueryTest_Project::RunTest(FEnvQueryInstance& QueryInstance) const
 			NavData->BatchProjectPoints(Workload, ProjectionExtent, NavigationFilter);
 
 			int32 Idx = 0;
-			for (FEnvQueryInstance::ItemIterator It(this, QueryInstance); It; ++It, Idx++)
+			if (ProjectionData.PostProjectionVerticalOffset == 0.f)
 			{
-				const bool bProjected = Workload[Idx].bResult;
-				if (bProjected && ItemTypeCDO)
+				for (FEnvQueryInstance::ItemIterator It(this, QueryInstance); It; ++It, Idx++)
 				{
-					ItemTypeCDO->SetItemNavLocation(It.GetItemData(), Workload[Idx].OutLocation);
+					const bool bProjected = Workload[Idx].bResult;
+					if (bProjected && ItemTypeCDO)
+					{
+						ItemTypeCDO->SetItemNavLocation(It.GetItemData(), Workload[Idx].OutLocation);
+					}
+					It.SetScore(TestPurpose, FilterType, bProjected, bWantsProjected);
 				}
-
-				It.SetScore(TestPurpose, FilterType, bProjected, bWantsProjected);
+			}
+			else
+			{
+				const FVector PostProjectionVerticalOffset(0.f, 0.f, ProjectionData.PostProjectionVerticalOffset);
+				for (FEnvQueryInstance::ItemIterator It(this, QueryInstance); It; ++It, Idx++)
+				{
+					const bool bProjected = Workload[Idx].bResult;
+					if (bProjected && ItemTypeCDO)
+					{
+						ItemTypeCDO->SetItemNavLocation(It.GetItemData(), FNavLocation(Workload[Idx].OutLocation.Location + PostProjectionVerticalOffset, Workload[Idx].OutLocation.NodeRef));
+					}
+					It.SetScore(TestPurpose, FilterType, bProjected, bWantsProjected);
+				}
 			}
 		}
 	}
-	else if (ProjectionData.TraceMode == EEnvQueryTrace::Geometry)
+	else if (ProjectionData.TraceMode == EEnvQueryTrace::GeometryByChannel || ProjectionData.TraceMode == EEnvQueryTrace::GeometryByProfile)
 	{
 		TArray<FNavLocation> Workload;
 		TArray<uint8> TraceHits;
@@ -108,3 +126,4 @@ FText UEnvQueryTest_Project::GetDescriptionDetails() const
 {
 	return DescribeBoolTestParams(TEXT("projected"));
 }
+

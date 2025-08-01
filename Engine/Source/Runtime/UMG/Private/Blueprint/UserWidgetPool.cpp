@@ -2,6 +2,8 @@
 
 #include "Blueprint/UserWidgetPool.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(UserWidgetPool)
+
 FUserWidgetPool::FUserWidgetPool(UWidget& InOwningWidget)
 	: OwningWidget(&InOwningWidget)
 {}
@@ -14,6 +16,11 @@ FUserWidgetPool::~FUserWidgetPool()
 void FUserWidgetPool::SetWorld(UWorld* InOwningWorld)
 {
 	OwningWorld = InOwningWorld;
+}
+
+void FUserWidgetPool::SetDefaultPlayerController(APlayerController* InDefaultPlayerController)
+{
+	DefaultPlayerController = InDefaultPlayerController;
 }
 
 void FUserWidgetPool::RebuildWidgets()
@@ -86,3 +93,4 @@ void FUserWidgetPool::ReleaseAllSlateResources()
 {
 	CachedSlateByWidgetObject.Reset();
 }
+

@@ -4,12 +4,12 @@
 #include "Serialization/Csv/CsvParser.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Widgets/Input/SComboButton.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
-#include "RHIDefinitions.h"
+#include "DataDrivenShaderPlatformInfo.h"
 #include "RHIShaderFormatDefinitions.inl"
-#include "ShaderCookerStatsPage.h"
+#include "StatsPages/ShaderCookerStatsPage.h"
 #include "CoreGlobals.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/App.h"
@@ -118,39 +118,27 @@ public:
 void FShaderCookerStats::Initialize(uint32 Index)
 {
 	TArray<FString> PlatformNames;
-	for (int32 Platform = 0; Platform < SP_NumPlatforms; ++Platform)
-	{
-		// ShaderPlatformToShaderFormatName asserts if it's passed a deprecated value, so we'll filter out the removed platforms here.
-		PRAGMA_DISABLE_DEPRECATION_WARNINGS
-		switch (Platform)
-		{
-			case SP_OPENGL_SM4_REMOVED:
-			case SP_PS4_REMOVED:
-			case SP_OPENGL_PCES2_REMOVED:
-			case SP_XBOXONE_D3D12_REMOVED:
-			case SP_PCD3D_SM4_REMOVED:
-			case SP_OPENGL_SM5_REMOVED:
-			case SP_PCD3D_ES2_REMOVED:
-			case SP_OPENGL_ES2_ANDROID_REMOVED:
-			case SP_OPENGL_ES2_WEBGL_REMOVED:
-			case SP_OPENGL_ES2_IOS_REMOVED:
-			case SP_OPENGL_ES31_EXT_REMOVED:
-			case SP_VULKAN_SM4_REMOVED:
-			case SP_METAL_MACES2_REMOVED:
-			case SP_SWITCH_REMOVED:
-			case SP_SWITCH_FORWARD_REMOVED:
-				continue;
-		}
-		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	PlatformNames.Reserve(SP_NumPlatforms);
 
-		FString FormatName = ShaderPlatformToShaderFormatName((EShaderPlatform)Platform).ToString();
-		if (FormatName.Len() > 0)
+	for (int32 PlatformIndex = 0; PlatformIndex < SP_NumPlatforms; ++PlatformIndex)
+	{
+		const EShaderPlatform Platform = static_cast<EShaderPlatform>(PlatformIndex);
+
+		const FName ShaderFormatName = FDataDrivenShaderPlatformInfo::IsValid(Platform)
+			? FDataDrivenShaderPlatformInfo::GetShaderFormat(Platform) : NAME_None;
+
+		if (ShaderFormatName != NAME_None)
 		{
+			FString FormatName = ShaderFormatName.ToString();
 			if (FormatName.StartsWith(TEXT("SF_")))
 			{
-				FormatName.MidInline(3, MAX_int32, false);
+				FormatName.MidInline(3, MAX_int32, EAllowShrinking::No);
 			}
 			PlatformNames.Add(MoveTemp(FormatName));
+		}
+		else
+		{
+			PlatformNames.Add(TEXT("unknown"));
 		}
 	}
 	FShaderCookerStatsSet& Set = StatSets[Index];
@@ -351,7 +339,7 @@ TSharedPtr<SWidget> FShaderCookerStatsPage::GetCustomWidget(TWeakPtr<IStatsViewe
 			.HAlign(HAlign_Fill)
 			[
 				SAssignNew(PlatformComboButton, SComboButton)
-				.ContentPadding(3)
+				.ContentPadding(3.f)
 				.OnGetMenuContent(this, &FShaderCookerStatsPage::OnGetPlatformButtonMenuContent, InParentStatsViewer)
 				.ButtonContent()
 				[

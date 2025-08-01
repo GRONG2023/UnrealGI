@@ -7,7 +7,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Stats/Stats.h"
+#include "Stats/Stats2.h"
 
 /** Skeletal stats */
 DECLARE_CYCLE_STAT_EXTERN(TEXT("SkinnedMeshComp Tick"), STAT_SkinnedMeshCompTick, STATGROUP_Anim, );
@@ -35,6 +35,7 @@ DECLARE_CYCLE_STAT_EXTERN(TEXT("UpdateAnimation"), STAT_UpdateAnimation, STATGRO
 DECLARE_CYCLE_STAT_EXTERN(TEXT("PostUpdateAnimation"), STAT_PostUpdateAnimation, STATGROUP_Anim, );
 DECLARE_CYCLE_STAT_EXTERN(TEXT("BlueprintUpdateAnimation"), STAT_BlueprintUpdateAnimation, STATGROUP_Anim, );
 DECLARE_CYCLE_STAT_EXTERN(TEXT("NativeUpdateAnimation"), STAT_NativeUpdateAnimation, STATGROUP_Anim, );
+DECLARE_CYCLE_STAT_EXTERN(TEXT("NativeThreadSafeUpdateAnimation"), STAT_NativeThreadSafeUpdateAnimation, STATGROUP_Anim, );
 DECLARE_CYCLE_STAT_EXTERN(TEXT("BlueprintPostEvaluateAnimation"), STAT_BlueprintPostEvaluateAnimation, STATGROUP_Anim, );
 DECLARE_CYCLE_STAT_EXTERN(TEXT("MontageAdvance"), STAT_Montage_Advance, STATGROUP_Anim, );
 DECLARE_CYCLE_STAT_EXTERN(TEXT("MontageUpdateWeight"), STAT_Montage_UpdateWeight, STATGROUP_Anim, );
@@ -43,6 +44,13 @@ DECLARE_CYCLE_STAT_EXTERN(TEXT("UpdateCurvesToEvaluationContext"), STAT_UpdateCu
 DECLARE_CYCLE_STAT_EXTERN(TEXT("UpdateCurvesPostEvaluation"), STAT_UpdateCurvesPostEvaluation, STATGROUP_Anim, );
 DECLARE_CYCLE_STAT_EXTERN(TEXT("TickAssetPlayerInstances"), STAT_TickAssetPlayerInstances, STATGROUP_Anim, );
 DECLARE_CYCLE_STAT_EXTERN(TEXT("TickAssetPlayerInstance"), STAT_TickAssetPlayerInstance, STATGROUP_Anim, );
+
+#if STATS
+	// Set to 1 for verbose anim node profiling
+	#define ANIMNODE_STATS_VERBOSE 0
+#else
+	#define ANIMNODE_STATS_VERBOSE 0
+#endif 
 
 #define DO_ANIMSTAT_PROCESSING(StatName) DECLARE_CYCLE_STAT_EXTERN(TEXT(#StatName), STAT_ ## StatName, STATGROUP_Anim, ENGINE_API)
 #include "Animation/AnimMTStats.h"
@@ -56,6 +64,12 @@ DECLARE_CYCLE_STAT_EXTERN(TEXT("TickAssetPlayerInstance"), STAT_TickAssetPlayerI
 #define ANIM_MT_SCOPE_CYCLE_COUNTER(StatName, bIsMultithreaded) \
 	TStatId CycleCountID_##StatName = (bIsMultithreaded ? GET_STATID(STAT_ ## StatName ## _WorkerThread) : GET_STATID(STAT_ ## StatName)); \
 	FScopeCycleCounter CycleCount_##StatName(CycleCountID_##StatName);
+	#if ANIMNODE_STATS_VERBOSE
+		#define ANIM_MT_SCOPE_CYCLE_COUNTER_VERBOSE(StateName, bIsMultithreaded) ANIM_MT_SCOPE_CYCLE_COUNTER(StateName, bIsMultithreaded)
+	#else
+		#define ANIM_MT_SCOPE_CYCLE_COUNTER_VERBOSE(StateName, bIsMultithreaded)
+	#endif
 #else
 	#define ANIM_MT_SCOPE_CYCLE_COUNTER(StatName, bIsMultithreaded)
+	#define ANIM_MT_SCOPE_CYCLE_COUNTER_VERBOSE(StateName, bIsMultithreaded)
 #endif

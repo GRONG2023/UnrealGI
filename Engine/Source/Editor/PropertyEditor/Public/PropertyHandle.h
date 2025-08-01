@@ -9,22 +9,27 @@
 #include "UObject/PropertyPortFlags.h"
 
 struct FAssetData;
+class FPropertyRestriction;
+class FResetToDefaultOverride;
 class IPropertyHandleArray;
 class IPropertyHandleMap;
 class IPropertyHandleSet;
+class IPropertyHandleOptional;
+class IPropertyHandleStruct;
+class IStructureDataProvider;
 
 namespace EPropertyValueSetFlags
 {
 	typedef uint32 Type;
 
 	/** Normal way to call set value (make a transaction, call posteditchange) */
-	const Type DefaultFlags = 0;
+	inline const Type DefaultFlags = 0;
 	/** No transaction will be created when setting this value (no undo/redo) */
-	const Type NotTransactable = 1 << 0;
+	inline const Type NotTransactable = 1 << 0;
 	/** When PostEditChange is called mark the change as interactive (e.g, user is spinning a value in a spin box) */
-	const Type InteractiveChange = 1 << 1;
+	inline const Type InteractiveChange = 1 << 1;
 	/** If the property being imported to is an instanced object, create a new object rather than simply setting the value literally */
-	const Type InstanceObjects = 1 << 2;
+	inline const Type InstanceObjects = 1 << 2;
 
 };
 
@@ -41,6 +46,11 @@ public:
 	 * @return Whether or not the handle points to a valid property node. This can be true but GetProperty may still return null
 	 */
 	virtual bool IsValidHandle() const = 0;
+
+	/**
+	 * @return Whether or not the handle points to the same property node. Will return true if both point to an invalid node.
+	 */
+	virtual bool IsSamePropertyNode(TSharedPtr<IPropertyHandle> OtherHandle) const = 0;
 	
 	/**
 	 * @return Whether or not the property is edit const (can't be changed)
@@ -61,6 +71,26 @@ public:
 	 * Gets the property being edited
 	 */
 	virtual FProperty* GetProperty() const = 0;
+
+	/**
+	 * Helper to fetch a PropertyPath 
+	 */
+	virtual FStringView GetPropertyPath() const = 0;
+
+	/**
+	 * Helper to fetch a PropertyPath 
+	 */
+	virtual TSharedPtr<FPropertyPath> CreateFPropertyPath() const = 0;
+
+	/**
+	 * Helper to fetch the ArrayIndex
+	 */
+	virtual int32 GetArrayIndex() const = 0;
+
+	/**
+	 * Indicates that children of this node should be rebuilt next tick.  Some topology changes will require this
+	 */
+	virtual void RequestRebuildChildren() = 0;
 
 	/**
 	 * Gets the property we should use to read meta-data
@@ -106,6 +136,14 @@ public:
 	 * @return the float value stored in the metadata.
 	 */
 	virtual float GetFloatMetaData(const FName& Key) const = 0;
+
+	/**
+	 * Find the metadata value associated with the key and return double
+	 *
+	 * @param Key The key to lookup in the metadata
+	 * @return the double value stored in the metadata.
+	 */
+	virtual double GetDoubleMetaData(const FName& Key) const = 0;
 
 	/**
 	 * Find the metadata value associated with the key and return UClass*
@@ -218,11 +256,25 @@ public:
 	virtual void SetOnPropertyValueChanged( const FSimpleDelegate& InOnPropertyValueChanged ) = 0;
 	
 	/**
+	 * Sets a delegate to call when the value of the property is changed including the property changed event as parameter
+	 * 
+	 * @param InOnPropertyValueChanged The delegate to call. Needs to be of type void with a const FPropertyChangedEvent& parameter
+	 */
+	virtual void SetOnPropertyValueChangedWithData( const TDelegate<void(const FPropertyChangedEvent&)>& InOnPropertyValueChanged ) = 0;
+
+	/**
 	 * Sets a delegate to call when the value of the property of a child is changed
 	 * 
 	 * @param InOnChildPropertyValueChanged	The delegate to call
 	 */
 	virtual void SetOnChildPropertyValueChanged( const FSimpleDelegate& InOnChildPropertyValueChanged ) = 0;
+	
+	/**
+	 * Sets a delegate to call when the value of the property of a child is changed including the property changed event as parameter
+	 * 
+	 * @param InOnPropertyValueChanged The delegate to call. Needs to be of type void with a const FPropertyChangedEvent& parameter
+	 */
+	virtual void SetOnChildPropertyValueChangedWithData( const TDelegate<void(const FPropertyChangedEvent&)>& InOnPropertyValueChanged ) = 0;
 
 	/**
 	 * Sets a delegate to call when the value of the property is about to be changed
@@ -320,7 +372,7 @@ public:
 	 * Called to manually notify root objects that this property has changed
 	 * This does not need to be called when SetValue functions are used since it will be called automatically
 	 */
-	virtual void NotifyPostChange( EPropertyChangeType::Type ChangeType = EPropertyChangeType::Unspecified ) = 0;
+	virtual void NotifyPostChange(EPropertyChangeType::Type ChangeType) = 0;
 
 	/**
 	 * Called to manually notify root objects that this property has finished changing
@@ -391,7 +443,8 @@ public:
 	virtual TSharedPtr<IPropertyHandle> GetChildHandle( uint32 Index ) const = 0;
 	
 	/**
-	 * @return a handle to the parent array if this handle is an array element
+	 * @return a handle to the parent property 
+	 * This parent handle may not contain a valid FProperty if the parent is the uobject.
 	 */
 	virtual TSharedPtr<IPropertyHandle> GetParentHandle() const = 0;
 
@@ -416,6 +469,20 @@ public:
 	 * @param OuterObjects	An array that will be populated with the outer objects 
 	 */
 	virtual void GetOuterObjects( TArray<UObject*>& OuterObjects ) const = 0;
+
+	/**
+	 * Get the structures that contain this property 
+	 *
+	 * @param OutStructs	An array that will be populated with the outer structures 
+	 */
+	virtual void GetOuterStructs( TArray<TSharedPtr<FStructOnScope>>& OutStructs ) const = 0;
+
+	/**
+	 * Get the shared base class of the objects that contain this property.
+	 *
+	 * @return The shared base class of the outer objects, or null if none are selected.
+	 */
+	virtual const UClass* GetOuterBaseClass() const = 0;
 
 	/**
 	 * Set the outer objects for this property
@@ -455,17 +522,27 @@ public:
 	 *
 	 * @return the handle as an array if it is an array (static or dynamic)
 	 */
-	virtual TSharedPtr<class IPropertyHandleArray> AsArray() = 0;
+	virtual TSharedPtr<IPropertyHandleArray> AsArray() = 0;
 
 	/**
 	 * @return This handle as a set if possible
 	 */
-	virtual TSharedPtr<class IPropertyHandleSet> AsSet() = 0;
+	virtual TSharedPtr<IPropertyHandleSet> AsSet() = 0;
 
 	/**
 	 * @return This handle as a map if possible
 	 */
-	virtual TSharedPtr<class IPropertyHandleMap> AsMap() = 0;
+	virtual TSharedPtr<IPropertyHandleMap> AsMap() = 0;
+
+	/**
+	 * @return This handle as an optional if possible
+	 */
+	virtual TSharedPtr<IPropertyHandleOptional> AsOptional() = 0;
+
+	/**
+	 * @return This handle as struct if possible
+	 */
+	virtual TSharedPtr<IPropertyHandleStruct> AsStruct() = 0;
 
 	/**
 	 * @return The display name of the property
@@ -513,6 +590,11 @@ public:
 	virtual void ClearResetToDefaultCustomized() = 0;
 
 	/**
+	* @return true if the property is mark as a favorite
+	*/
+	virtual bool IsFavorite() const = 0;
+
+	/**
 	 * @return True if this property's UI is customized                                                              
 	 */
 	virtual bool IsCustomized() const = 0;
@@ -538,14 +620,34 @@ public:
 	 * @param bDisplayThumbnail			Whether or not to display the thumbnail for the property (if any)
 	 * @return the name widget for this property
 	 */
-	virtual TSharedRef<SWidget> CreatePropertyNameWidget( const FText& NameOverride = FText::GetEmpty(), const FText& ToolTipOverride = FText::GetEmpty(), bool bDisplayResetToDefault = false, bool bDisplayText = true, bool bDisplayThumbnail = true ) const = 0;
+	UE_DEPRECATED(5.0, "CreatePropertyNameWidget no longer supports bDisplayResetToDefault, bDisplayText or bDisplayThumbnail.")
+	virtual TSharedRef<SWidget> CreatePropertyNameWidget( const FText& NameOverride, const FText& ToolTipOverride, bool bDisplayResetToDefault, bool bDisplayText = true, bool bDisplayThumbnail = true ) const = 0;
 
 	/**
+	 * Creates a name widget for this property
+	 * @param NameOverride				The name override to use instead of the property name
+	 * @param ToolTipOverride			The tooltip override to use instead of the property name
+	 */
+	virtual TSharedRef<SWidget> CreatePropertyNameWidget(const FText& NameOverride = FText::GetEmpty(), const FText& ToolTipOverride = FText::GetEmpty()) const = 0;
+	
+	/**
 	 * Creates a value widget for this property
-
+	 * 
+	 * @param bDisplayDefaultPropertyButtons	If the value widget should include the property buttons.
+	 *
 	 * @return the value widget for this property
 	 */
 	virtual TSharedRef<SWidget> CreatePropertyValueWidget( bool bDisplayDefaultPropertyButtons = true ) const = 0;
+
+	/**
+	 * Creates a value widget for this property using customization, if available.
+	 * Note that this is only the value widget for the header/main row for properties with child rows (ie: structs)
+	 * 
+	 * @param DetailsView						The details view to create the value widget for. Used to retrieve per details view customizations.
+	 * 
+	 * @return the value widget for this property
+	 */
+	virtual TSharedRef<SWidget> CreatePropertyValueWidgetWithCustomization( const IDetailsView* DetailsView ) = 0;
 
 	/**
 	 * Creates the default buttons which appear next to value widgets.  This is useful when creating customizations
@@ -564,7 +666,7 @@ public:
 	 * Adds a restriction to the possible values for this property.
 	 * @param Restriction	The restriction being added to this property.
 	 */
-	virtual void AddRestriction( TSharedRef<const class FPropertyRestriction> Restriction ) = 0;
+	virtual void AddRestriction( TSharedRef<const FPropertyRestriction> Restriction ) = 0;
 
 	/**
 	* Tests if a value is restricted for this property
@@ -632,6 +734,7 @@ public:
 	 * @return An array of interfaces to the properties that were added
 	 */
 	virtual TArray<TSharedPtr<IPropertyHandle>> AddChildStructure( TSharedRef<FStructOnScope> ChildStructure ) = 0;
+	virtual TArray<TSharedPtr<IPropertyHandle>> AddChildStructure( TSharedRef<IStructureDataProvider> ChildStructure ) = 0;
 
 	/**
 	 * Returns whether or not the property can be set to default
@@ -643,7 +746,7 @@ public:
 	/**
 	 * Sets an override for this property's reset to default behavior
 	 */
-	virtual void ExecuteCustomResetToDefault(const class FResetToDefaultOverride& OnCustomResetToDefault) = 0;
+	virtual void ExecuteCustomResetToDefault(const FResetToDefaultOverride& OnCustomResetToDefault) = 0;
 
 	/**
 	 * Gets the category FName that a property is in at the default location defined by the class the property is in
@@ -656,6 +759,8 @@ public:
 	* It does not handle the property being moved to another category during customization
 	*/
 	virtual FText GetDefaultCategoryText() const = 0;
+
+	virtual bool IsCategoryHandle() const = 0;
 };
 
 /**
@@ -708,7 +813,7 @@ public:
 	virtual FPropertyAccess::Result GetNumElements( uint32& OutNumItems ) const = 0;
 
 	/**
-	 * @return a handle to the element at the specified index                                                              
+	 * @return a handle to the element at the specified index
 	 */
 	virtual TSharedRef<IPropertyHandle> GetElement( int32 Index ) const = 0;
 
@@ -720,9 +825,14 @@ public:
 
 
 	/**
-	 * Sets a delegate to call when the number of elements changes                                                  
+	 * Sets a delegate to call when the number of elements changes
 	 */
-	virtual void SetOnNumElementsChanged( FSimpleDelegate& InOnNumElementsChanged ) = 0;
+	virtual FDelegateHandle SetOnNumElementsChanged( const FSimpleDelegate& InOnNumElementsChanged ) = 0;
+
+	/**
+	 * Unregisters a delegate that is called when the number of elements changes
+	 */
+	virtual void UnregisterOnNumElementsChanged(FDelegateHandle Handle) = 0;
 };
 
 /**
@@ -762,9 +872,20 @@ public:
 	virtual FPropertyAccess::Result GetNumElements(uint32& OutNumElements) = 0;
 
 	/**
+	 * @return a handle to the element at the specified index
+	 */
+	virtual TSharedRef<IPropertyHandle> GetElement(int32 Index) const = 0;
+
+
+	/**
 	 * Sets a delegate to call when the number of elements changes
 	 */
-	virtual void SetOnNumElementsChanged(FSimpleDelegate& InOnNumElementsChanged) = 0;
+	virtual FDelegateHandle SetOnNumElementsChanged(const FSimpleDelegate& InOnNumElementsChanged) = 0;
+
+	/**
+	 * Unregisters a delegate that is called when the number of elements changes
+	 */
+	virtual void UnregisterOnNumElementsChanged(FDelegateHandle Handle) = 0;
 };
 
 /**
@@ -804,7 +925,56 @@ public:
 	virtual FPropertyAccess::Result GetNumElements(uint32& OutNumElements) = 0;
 
 	/**
+	 * @return a handle to the element at the specified index
+	 */
+	virtual TSharedRef<IPropertyHandle> GetElement(int32 Index) const = 0;
+
+	/**
 	 * Sets a delegate to call when the number of elements changes
 	 */
-	virtual void SetOnNumElementsChanged(FSimpleDelegate& InOnNumElementsChanged) = 0;
+	virtual FDelegateHandle SetOnNumElementsChanged(const FSimpleDelegate& InOnNumElementsChanged) = 0;
+	
+	/**
+	 * Unregisters a delegate that is called when the number of elements changes
+	 */
+	virtual void UnregisterOnNumElementsChanged(FDelegateHandle Handle) = 0;
+};
+
+/**
+ * A handle to a property which allows you to access a Struct's Data
+ */
+class IPropertyHandleStruct
+{
+public:
+	virtual ~IPropertyHandleStruct() {}
+
+	virtual TSharedPtr<FStructOnScope> GetStructData() const = 0;
+};
+
+/**
+ * A handle to an optional property which allows you to manipulate the optional
+ */
+class IPropertyHandleOptional
+{
+public:
+	virtual ~IPropertyHandleOptional() {}
+
+	/**
+	 * Get the item
+	 * @param OutValue	The value of the optional if it is set.
+	 */
+	virtual FPropertyAccess::Result GetOptionalValue(FProperty*& OutValue) = 0;
+
+	/**
+	 * Set the item
+	 * @param NewValue	The value to set the optional to. Pass in nullptr to default-initialize the value.
+	 * @return			Whether or not this was successful
+	 */
+	virtual FPropertyAccess::Result SetOptionalValue(FProperty* NewValue) = 0;
+
+	/**
+	 * Clear the item
+	 * @return Whether or not this was successful
+	 */
+	virtual FPropertyAccess::Result ClearOptionalValue() = 0;
 };

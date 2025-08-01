@@ -1,27 +1,29 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Tests/AutomationCommon.h"
-#include "Misc/Paths.h"
+#include "AssetCompilingManager.h"
+#include "Engine/World.h"
 #include "Misc/EngineVersion.h"
-#include "EngineGlobals.h"
-#include "Widgets/SWidget.h"
 #include "Engine/GameViewportClient.h"
 #include "Engine/Engine.h"
+#include "HAL/PlatformFile.h"
 #include "HardwareInfo.h"
-#include "UObject/UObjectHash.h"
-#include "UObject/UObjectIterator.h"
+#include "Misc/App.h"
 #include "UObject/Package.h"
 #include "Kismet/GameplayStatics.h"
 #include "ContentStreaming.h"
-#include "Widgets/SWindow.h"
 #include "Framework/Application/SlateApplication.h"
+#include "RenderingThread.h"
 #include "ShaderCompiler.h"
 #include "GameFramework/GameStateBase.h"
 #include "Scalability.h"
-#include "Matinee/MatineeActor.h"
 #include "StereoRendering.h"
 #include "Misc/PackageName.h"
+#include "Tests/AutomationTestSettings.h"
+#include "GameMapsSettings.h"
 #include "IRenderCaptureProvider.h"
+#include "Modules/ModuleManager.h"
+#include "Algo/Accumulate.h"
 
 #if WITH_AUTOMATION_TESTS
 
@@ -38,12 +40,14 @@ static TAutoConsoleVariable<int32> CVarAutomationAllowFrameTraceCapture(
 
 //declare static variable
 FOnEditorAutomationMapLoad AutomationCommon::OnEditorAutomationMapLoad;
+#endif
 
 ///////////////////////////////////////////////////////////////////////
 // Common Latent commands
 
 namespace AutomationCommon
 {
+#if WITH_AUTOMATION_TESTS
 	FString GetRenderDetailsString()
 	{
 		FString HardwareDetailsString;
@@ -81,16 +85,14 @@ namespace AutomationCommon
 		if ( HardwareDetailsString.Len() > 0 )
 		{
 			//Get rid of the leading "_"
-			HardwareDetailsString.RightChopInline(1, false);
+			HardwareDetailsString.RightChopInline(1, EAllowShrinking::No);
 		}
 
 		return HardwareDetailsString;
 	}
 
-#if WITH_AUTOMATION_TESTS
-
 	/** Gets a path used for automation testing (PNG sent to the AutomationTest folder) */
-	FString GetScreenshotName(const FString& TestName)
+	FString GetScreenshotPath(const FString& TestName)
 	{
 		FString PathName = TestName / FPlatformProperties::IniPlatformName();
 		PathName = PathName + TEXT("/") + GetRenderDetailsString();
@@ -135,6 +137,8 @@ namespace AutomationCommon
 		Data.ViewDistanceQuality = QualityLevels.ViewDistanceQuality;
 		Data.AntiAliasingQuality = QualityLevels.AntiAliasingQuality;
 		Data.ShadowQuality = QualityLevels.ShadowQuality;
+		Data.GlobalIlluminationQuality = QualityLevels.GlobalIlluminationQuality;
+		Data.ReflectionQuality = QualityLevels.ReflectionQuality;
 		Data.PostProcessQuality = QualityLevels.PostProcessQuality;
 		Data.TextureQuality = QualityLevels.TextureQuality;
 		Data.EffectsQuality = QualityLevels.EffectsQuality;
@@ -147,7 +151,7 @@ namespace AutomationCommon
 		// Device's native resolution (we want to use a hardware dump of the frontbuffer at the native resolution so we compare what we actually output rather than what we think we rendered)
 
 		const FString MapAndTest = MapOrContext + TEXT("/") + Data.ScreenShotName;
-		Data.ScreenshotName = GetScreenshotName(MapAndTest);
+		Data.ScreenshotPath = GetScreenshotPath(MapAndTest);
 
 		return Data;
 	}
@@ -156,12 +160,13 @@ namespace AutomationCommon
 	{
 		TArray<uint8> FrameTrace;
 
-		bool bDisableFrameTraceCapture = FParse::Param(FCommandLine::Get(), TEXT("DisableFrameTraceCapture"));
-		if (!bDisableFrameTraceCapture && CVarAutomationAllowFrameTraceCapture.GetValueOnGameThread() != 0 && IRenderCaptureProvider::IsAvailable())
+		if (CVarAutomationAllowFrameTraceCapture.GetValueOnGameThread() != 0
+			&& IRenderCaptureProvider::IsAvailable()
+			&& FModuleManager::Get().IsModuleLoaded("RenderDocPlugin"))
 		{
 			const FString MapAndTest = MapOrContext / FPaths::MakeValidFileName(TestName, TEXT('_'));
-			FString ScreenshotName = GetScreenshotName(MapAndTest);
-			FString TempCaptureFilePath = FPaths::ChangeExtension(FPaths::ConvertRelativePathToFull(FPaths::AutomationDir() / TEXT("Incoming/") / ScreenshotName), TEXT(".rdc"));
+			FString ScreenshotPath = GetScreenshotPath(MapAndTest);
+			FString TempCaptureFilePath = FPaths::ChangeExtension(FPaths::ConvertRelativePathToFull(FPaths::AutomationDir() / TEXT("Incoming/") / ScreenshotPath), TEXT(".rdc"));
 
 			UE_LOG(LogEngineAutomationTests, Log, TEXT("Taking Frame Trace: %s"), *TempCaptureFilePath);
 
@@ -189,7 +194,133 @@ namespace AutomationCommon
 
 		return FrameTrace;
 	}
-#endif
+
+	SWidget* FindWidgetByTag(const FName Tag)
+	{
+		const FTagMetaData UniqueMetaData(Tag);
+		// Get a list of all the current slate windows
+		TArray<TSharedRef<SWindow>> Windows;
+		FSlateApplication::Get().GetAllVisibleWindowsOrdered(/*OUT*/Windows);
+
+		TArray<SWidget*> Stack;
+		for (const TSharedRef<SWindow>& Window : Windows)
+		{
+			Stack.Push(&Window.Get());
+		}
+
+		while (Stack.Num() > 0)
+		{
+			SWidget* Widget = Stack.Pop();
+			const int32 NumChildren = Widget->GetChildren()->Num();
+			for (int32 ChildIndex = 0; ChildIndex < NumChildren; ChildIndex++)
+			{
+				SWidget& ChildWidget = Widget->GetChildren()->GetChildAt(ChildIndex).Get();
+				const TArray<TSharedRef<FTagMetaData>> AllMetaData = ChildWidget.GetAllMetaData<FTagMetaData>();
+				for (int32 MetaDataIndex = 0; MetaDataIndex < AllMetaData.Num(); ++MetaDataIndex)
+				{
+					TSharedRef<FTagMetaData> MetaData = AllMetaData[MetaDataIndex];
+					if (MetaData->Tag == UniqueMetaData.Tag)
+					{
+						// Done! found the widget
+						return &ChildWidget;
+					}
+				}
+
+				// If we got here we didn't match the widget so push this child on the stack.
+				Stack.Push(&ChildWidget);
+			}
+
+		}
+
+		return nullptr;
+	}
+
+	class FAutomationImageComparisonRequest : public IAutomationLatentCommand
+	{
+	public:
+		FAutomationImageComparisonRequest(const FString& InImageName, const FString& InContext, int32 InWidth, int32 InHeight, const TArray<FColor>& InImageData, const FAutomationComparisonToleranceAmount& InTolerance, const FString& InNotes)
+			: ImageData(InImageData), Initiate(false), TaskCompleted(false)
+		{
+			FString Context = InContext;
+			FString TestName = TEXT("");
+			
+			if (FAutomationTestBase* CurrentTest = FAutomationTestFramework::Get().GetCurrentTest())
+			{
+				TestName = CurrentTest->GetTestFullName();
+				if (Context.IsEmpty()) 
+				{
+					if (!CurrentTest->GetTestContext().IsEmpty()) 
+					{
+						Context = CurrentTest->GetTestContext();
+					}
+					else
+					{
+						Context = CurrentTest->GetTestFullName();
+					}
+				}
+			}
+
+			ComparisonParameters = BuildScreenshotData(Context, TestName, InImageName, InWidth, InHeight);
+
+			// Copy the relevant data into the metadata for the screenshot.
+			ComparisonParameters.bHasComparisonRules = true;
+			ComparisonParameters.ToleranceRed = InTolerance.Red;
+			ComparisonParameters.ToleranceGreen = InTolerance.Green;
+			ComparisonParameters.ToleranceBlue = InTolerance.Blue;
+			ComparisonParameters.ToleranceAlpha = InTolerance.Alpha;
+			ComparisonParameters.ToleranceMinBrightness = InTolerance.MinBrightness;
+			ComparisonParameters.ToleranceMaxBrightness = InTolerance.MaxBrightness;
+			ComparisonParameters.bIgnoreAntiAliasing = true;
+			ComparisonParameters.bIgnoreColors = false;
+			ComparisonParameters.MaximumLocalError = 0.10f;
+			ComparisonParameters.MaximumGlobalError = 0.02f;
+
+			// Record any user notes that were made to accompany this shot.
+			ComparisonParameters.Notes = InNotes;
+		}
+
+		virtual ~FAutomationImageComparisonRequest()
+		{
+			FAutomationTestFramework::Get().OnScreenshotCompared.RemoveAll(this);
+		}
+
+		void OnComparisonComplete(const FAutomationScreenshotCompareResults& CompareResults)
+		{
+			FAutomationTestFramework::Get().OnScreenshotCompared.RemoveAll(this);
+
+			if (FAutomationTestBase* CurrentTest = FAutomationTestFramework::Get().GetCurrentTest())
+			{
+				CurrentTest->AddEvent(CompareResults.ToAutomationEvent());
+			}
+
+			TaskCompleted = true;
+		}
+
+		bool IsTaskCompleted()
+		{
+			return TaskCompleted;
+		}
+
+		bool Update() override
+		{
+			if (!Initiate)
+			{
+				FAutomationTestFramework::Get().OnScreenshotCaptured().ExecuteIfBound(ImageData, ComparisonParameters);
+
+				UE_LOG(LogEditorAutomationTests, Log, TEXT("Requesting image %s to be compared."), *ComparisonParameters.ScreenshotPath);
+
+				FAutomationTestFramework::Get().OnScreenshotCompared.AddRaw(this, &FAutomationImageComparisonRequest::OnComparisonComplete);
+				Initiate = true;
+			}
+			return IsTaskCompleted();
+		}
+
+	private:
+		FAutomationScreenshotData ComparisonParameters;
+		const TArray<FColor> ImageData;
+		bool Initiate;
+		bool TaskCompleted;
+	};
 
 	/** These save a PNG and get sent over the network */
 	static void SaveWindowAsScreenshot(TSharedRef<SWindow> Window, const FString& ScreenshotName)
@@ -203,7 +334,7 @@ namespace AutomationCommon
 			FAutomationScreenshotData Data;
 			Data.Width = OutImageSize.X;
 			Data.Height = OutImageSize.Y;
-			Data.ScreenshotName = ScreenshotName;
+			Data.ScreenshotPath = ScreenshotName;
 			FAutomationTestFramework::Get().OnScreenshotCaptured().ExecuteIfBound(OutImageData, Data);
 		}
 	}
@@ -225,16 +356,51 @@ namespace AutomationCommon
 
 		return TestWorld;
 	}
+#endif
+
+	UGameViewportClient* GetAnyGameViewportClient()
+	{
+		if (GEngine->GameViewport)
+		{
+			return GEngine->GameViewport;
+		}
+		// Then Game viewport is attached to another world context than the main Engine one. (ie: PIE Net mode set to As Client)
+		const TIndirectArray<FWorldContext>& WorldContexts = GEngine->GetWorldContexts();
+		for (const FWorldContext& Context : WorldContexts)
+		{
+			if ((Context.WorldType == EWorldType::PIE) && Context.World() != nullptr && Context.GameViewport != nullptr)
+			{
+				return Context.GameViewport;
+			}
+		}
+
+		return nullptr;
+	}
+	
+	FString GetWorldContext(UWorld* InWorld)
+	{
+		FString Result = InWorld->GetName();
+
+		// Rely on the package loading path to avoid FName case inconsistencies with individual level names.
+		if (UPackage* Package = InWorld->GetPackage())
+		{
+			Result = FPaths::GetBaseFilename(Package->GetLoadedPath().GetPackageName());
+			checkf(FCString::Stricmp(*InWorld->GetName(), *Result) == 0, TEXT("Unexpected inconsistency between world and package path: expected \"%s\" got \"%s\""), *InWorld->GetName(), *Result);
+		}
+
+		return Result;
+	}
 }
 
-bool AutomationOpenMap(const FString& MapName)
+#if WITH_AUTOMATION_TESTS
+bool AutomationOpenMap(const FString& MapName, bool bForceReload)
 {
 	bool bCanProceed = true;
 	FString OutString = TEXT("");
 #if WITH_EDITOR
 	if (GIsEditor && AutomationCommon::OnEditorAutomationMapLoad.IsBound())
 	{
-		AutomationCommon::OnEditorAutomationMapLoad.Broadcast(MapName, &OutString);
+		AutomationCommon::OnEditorAutomationMapLoad.Broadcast(MapName, bForceReload, &OutString);
 	}
 	else
 #endif
@@ -245,12 +411,12 @@ bool AutomationOpenMap(const FString& MapName)
 		FString ShortMapName = FPackageName::GetShortName(MapName);
 		FString ShortWorldMapName = FPackageName::GetShortName(TestWorld->GetMapName());
 
-		if (TestWorld->GetOutermost()->PIEInstanceID != INDEX_NONE)
+		if (TestWorld->GetOutermost()->GetPIEInstanceID() != INDEX_NONE)
 		{
-			FString PIEPrefix = FString::Printf(PLAYWORLD_PACKAGE_PREFIX TEXT("_%d_"), TestWorld->GetOutermost()->PIEInstanceID);
+			FString PIEPrefix = FString::Printf(PLAYWORLD_PACKAGE_PREFIX TEXT("_%d_"), TestWorld->GetOutermost()->GetPIEInstanceID());
 			ShortWorldMapName.ReplaceInline(*PIEPrefix, TEXT(""));
 		}
-		if (ShortMapName != ShortWorldMapName)
+		if (ShortMapName != ShortWorldMapName || bForceReload)
 		{
 			FString OpenCommand = FString::Printf(TEXT("Open %s"), *MapName);
 			GEngine->Exec(TestWorld, *OpenCommand);
@@ -315,7 +481,7 @@ bool FExitGameCommand::Update()
 
 bool FRequestExitCommand::Update()
 {
-	FPlatformMisc::RequestExit(true);
+	FPlatformMisc::RequestExit(true, TEXT("FRequestExitCommand"));
 	return true;
 }
 
@@ -344,7 +510,10 @@ bool FWaitForSpecifiedMapToLoadCommand::Update()
 		AGameStateBase* GameState = TestWorld->GetGameState();
 		if (GameState && GameState->HasMatchStarted())
 		{
+			// remove any paths or extensions to match the name of the world
 			FString ShortMapName = FPackageName::GetShortName(MapName);
+			ShortMapName = FPaths::GetBaseFilename(ShortMapName);
+
 			// Handle both ways the user may have specified this
 			if (TestWorld->GetName() == ShortMapName)
 			{
@@ -356,33 +525,224 @@ bool FWaitForSpecifiedMapToLoadCommand::Update()
 	return false;
 }
 
+/** Adds an easy way to average some value over discrete updates.  */
+template <typename T>
+struct TWaitForFrameRateRollingAverage
+{
+	static_assert(TIsArithmetic<T>::Value, "Unsupported type for computing a rolling average...");
+
+	TArray<T> Buffer;
+	int32 BufferOffset = 0;
+
+	void SetNum(int32 NewSize)
+	{
+		// at least 1
+		Buffer.SetNum(FMath::Max(NewSize, 1));
+		BufferOffset = BufferOffset % Buffer.Num();
+	}
+
+	void Reset()
+	{
+		BufferOffset = 0;
+	}
+
+	void Add(const T Value)
+	{
+		Buffer[BufferOffset] = Value;
+		BufferOffset = (BufferOffset + 1) % Buffer.Num();
+	}
+
+	const T Average() const
+	{
+		const int32 Num = Buffer.Num();
+		return Num > 0 ? Algo::Accumulate(Buffer, 0) / Num : 0;
+	}
+};
+
+FWaitForInteractiveFrameRate::FWaitForInteractiveFrameRate(float InDesiredFrameRate, float InDuration, float InMaxWaitTime)
+	: DesiredFrameRate(InDesiredFrameRate)
+	, Duration(InDuration)
+	, MaxWaitTime(InMaxWaitTime)
+	, StartTimeOfWait(0)
+	, StartTimeOfAcceptableFrameRate(0)
+	, LastTickTime(0)
+	, BufferIndex(0)
+{
+	UAutomationTestSettings const* AutomationTestSettings = GetDefault<UAutomationTestSettings>();
+
+	if (DesiredFrameRate == 0)
+	{
+		DesiredFrameRate = AutomationTestSettings->DefaultInteractiveFramerate;
+	}
+
+	if (Duration == 0)
+	{
+		Duration = AutomationTestSettings->DefaultInteractiveFramerateDuration;
+	}
+
+	if (MaxWaitTime == 0)
+	{
+		MaxWaitTime = AutomationTestSettings->DefaultInteractiveFramerateWaitTime;
+	}
+}
+
+void FWaitForInteractiveFrameRate::AddTickRateSample(const double Value)
+{
+	if (RollingTickRateBuffer.Num() == kSampleCount)
+	{
+		RollingTickRateBuffer[BufferIndex] = Value;
+		BufferIndex = (BufferIndex + 1) % RollingTickRateBuffer.Num();
+	}
+	else
+	{
+		RollingTickRateBuffer.Add(Value);
+	}
+}
+
+double FWaitForInteractiveFrameRate::CurrentAverageTickRate() const
+{
+	const int32 Num = RollingTickRateBuffer.Num();	
+	return Num > 0 ? (Algo::Accumulate(RollingTickRateBuffer, 0.0) / Num) : 0.0;
+}
+
+bool FWaitForInteractiveFrameRate::Update()
+{
+	const double kReportInterval = 30;
+	const double TimeNow = FPlatformTime::Seconds();
+
+	if (FApp::CanEverRender() == false)
+	{
+		UE_LOG(LogEngineAutomationLatentCommand, Log, TEXT("FWaitForInteractiveFrameRate: FApp::CanEverRender() == false. Passing wait immediately."));
+		return true;
+	}
+
+	if (StartTimeOfWait == 0)
+	{
+		UE_LOG(LogEngineAutomationLatentCommand, Log, TEXT("FWaitForInteractiveFrameRate: Starting wait for framerate of >= %.f FPS"), DesiredFrameRate);
+		StartTimeOfWait = TimeNow;
+		LastReportTime = TimeNow;
+		LastTickTime = TimeNow;
+	}
+
+	const double TickDelta = TimeNow - LastTickTime;
+
+	// We tick at 60hz to try and hold a few seconds of data vs lots of high frequency ticks from a small window
+	if (TickDelta < (1 / kTickRate))
+	{
+		return false;
+	}
+
+	LastTickTime = TimeNow;
+
+	// Add fps sample but cap at 60 Hz. We don't want really high framerate periods to cause crappy ones to be ignored
+	AddTickRateSample(TickDelta);
+
+	const double AvgTickRate = CurrentAverageTickRate();
+
+	const double AverageFrameRate = AvgTickRate > 0 ? (1.f / AvgTickRate) : 0;
+	bool AtDesiredFramerate = AverageFrameRate >= DesiredFrameRate;
+
+	const double TimeAtFrameRate = AtDesiredFramerate ? (TimeNow - StartTimeOfAcceptableFrameRate) : 0;
+	const double ElapsedWaitTime = TimeNow - StartTimeOfWait;
+
+	// uncomment this for per-second reporting of current and average FPS
+	/*
+	const double CurrentFrameRate = 1.f / TickDelta;
+
+	static int LastSecond = 0;
+
+	if (ElapsedWaitTime > LastSecond)
+	{
+		UE_LOG(LogEngineAutomationLatentCommand, Display, TEXT("FWaitForInteractiveFrameRate: After %.f secs Current: %.02f, Average: %.02f, Desired: %.02f"), ElapsedWaitTime, CurrentFrameRate, AverageFrameRate, DesiredFrameRate);
+		LastSecond = FMath::CeilToInt(ElapsedWaitTime);
+	}
+	*/
+
+	if (!AtDesiredFramerate)
+	{
+		if (StartTimeOfAcceptableFrameRate > 0)
+		{
+			const double FailedTimeAtFrameRate = (TimeNow - StartTimeOfAcceptableFrameRate);
+
+			UE_LOG(LogEngineAutomationLatentCommand, Display, TEXT("FWaitForInteractiveFrameRate: Dropped below minimal framerate of %.f after %.02f secs. Now %.02f FPS "), 
+				DesiredFrameRate, FailedTimeAtFrameRate, AverageFrameRate);
+		}
+		StartTimeOfAcceptableFrameRate = 0;		
+	}
+	else
+	{
+		if (StartTimeOfAcceptableFrameRate == 0)
+		{
+			StartTimeOfAcceptableFrameRate = TimeNow;
+		}
+		else
+		{
+			if (TimeAtFrameRate >= Duration)
+			{
+				UE_LOG(LogEngineAutomationLatentCommand, Log, TEXT("FWaitForInteractiveFrameRate: Hit %.02f FPS for %.f seconds after %.f seconds of waiting"), AverageFrameRate, TimeAtFrameRate, ElapsedWaitTime);
+				return true;
+			}
+		}
+	}
+
+	if (ElapsedWaitTime >= MaxWaitTime)
+	{
+		FString Msg = FString::Printf(TEXT("FWaitForInteractiveFrameRate: Game did not reach %.02f FPS within %.02f seconds. Current FPS=%.f. Giving up."), DesiredFrameRate, MaxWaitTime, AverageFrameRate);
+		UE_LOG(LogEngineAutomationLatentCommand, Display, TEXT("%s"), *Msg);
+
+		if (FAutomationTestBase* CurrentTest = FAutomationTestFramework::Get().GetCurrentTest())
+		{
+			CurrentTest->AddError(Msg);
+		}
+
+		return true;
+	}
+
+	if (TimeNow - LastReportTime >= kReportInterval)
+	{
+		if (AtDesiredFramerate)
+		{
+			UE_LOG(LogEngineAutomationLatentCommand, Display, TEXT("FWaitForInteractiveFrameRate: Waited %.f seconds. Will timeout in %.f. Current FPS=%.f for %.02f secs"), 
+				ElapsedWaitTime, MaxWaitTime- ElapsedWaitTime, AverageFrameRate, TimeAtFrameRate);
+		}
+		else
+		{
+			UE_LOG(LogEngineAutomationLatentCommand, Display, TEXT("FWaitForInteractiveFrameRate: Waited %.f seconds. Will timeout in %.f. Current FPS=%.f "), 
+				ElapsedWaitTime, MaxWaitTime - ElapsedWaitTime, AverageFrameRate);
+
+		}
+		LastReportTime = TimeNow;
+	}
+
+	return false;
+}
+
+bool FWaitForNextEngineFrameCommand::Update()
+{
+	if (LastFrame == 0)
+	{
+		LastFrame = GFrameCounter;
+	}
+
+	return LastFrame != GFrameCounter;
+}
+
+FWaitForEngineFramesCommand::FWaitForEngineFramesCommand(int32 InFramesToWait)
+{
+	// Assert that InFramesToWait is at least 1
+	check(InFramesToWait > 0);
+	FramesToWait = InFramesToWait;
+}
+
+bool FWaitForEngineFramesCommand::Update()
+{
+	FrameCounter += 1;
+	return FrameCounter == FramesToWait;
+}
+
 ///////////////////////////////////////////////////////////////////////
 // Common Latent commands which are used across test type. I.e. Engine, Network, etc...
 
-
-bool FPlayMatineeLatentCommand::Update()
-{
-	if (MatineeActor)
-	{
-		UE_LOG(LogEngineAutomationLatentCommand, Log, TEXT("Triggering the matinee named: '%s'"), *MatineeActor->GetName())
-
-		//force this matinee to not be looping so it doesn't infinitely loop
-		MatineeActor->bLooping = false;
-		MatineeActor->Play();
-	}
-	return true;
-}
-
-
-bool FWaitForMatineeToCompleteLatentCommand::Update()
-{
-	bool bTestComplete = true;
-	if (MatineeActor)
-	{
-		bTestComplete = !MatineeActor->bIsPlaying;
-	}
-	return bTestComplete;
-}
 
 
 bool FExecStringLatentCommand::Update()
@@ -432,58 +792,6 @@ bool FStreamAllResourcesLatentCommand::Update()
 	return true;
 }
 
-bool FEnqueuePerformanceCaptureCommands::Update()
-{
-	//for every matinee actor in the level
-	for (TObjectIterator<AMatineeActor> It; It; ++It)
-	{
-		AMatineeActor* MatineeActor = *It;
-		if (MatineeActor && MatineeActor->GetName().Contains(TEXT("Automation")))
-		{
-			//add latent action to execute this matinee
-			ADD_LATENT_AUTOMATION_COMMAND(FPlayMatineeLatentCommand(MatineeActor));
-
-			//add action to wait until matinee is complete
-			ADD_LATENT_AUTOMATION_COMMAND(FWaitForMatineeToCompleteLatentCommand(MatineeActor));
-		}
-	}
-
-	return true;
-}
-
-
-bool FMatineePerformanceCaptureCommand::Update()
-{
-	//for every matinee actor in the level
-	for (TObjectIterator<AMatineeActor> It; It; ++It)
-	{
-		AMatineeActor* MatineeActor = *It;
-		FString MatineeFOOName = MatineeActor->GetName();
-		if (MatineeActor->GetName().Equals(MatineeName, ESearchCase::IgnoreCase))
-		{
-
-
-			//add latent action to execute this matinee
-			ADD_LATENT_AUTOMATION_COMMAND(FPlayMatineeLatentCommand(MatineeActor));
-
-			//Run the Stat FPS Chart command
-			ADD_LATENT_AUTOMATION_COMMAND(FExecWorldStringLatentCommand(TEXT("StartFPSChart")));
-
-			//add action to wait until matinee is complete
-			ADD_LATENT_AUTOMATION_COMMAND(FWaitForMatineeToCompleteLatentCommand(MatineeActor));
-
-			//Stop the Stat FPS Chart command
-			ADD_LATENT_AUTOMATION_COMMAND(FExecWorldStringLatentCommand(TEXT("StopFPSChart")));
-		}
-		else
-		{
-			UE_LOG(LogEngineAutomationLatentCommand, Log, TEXT("'%s' is not the matinee name that is being searched for."), *MatineeActor->GetName())
-		}
-	}
-
-	return true;
-
-}
 
 
 bool FExecWorldStringLatentCommand::Update()
@@ -502,12 +810,202 @@ bool FExecWorldStringLatentCommand::Update()
 */
 bool FWaitForShadersToFinishCompilingInGame::Update()
 {
-	if (GShaderCompilingManager)
+#if WITH_EDITOR
+	static double TimeShadersFinishedCompiling = 0;
+	static double LastReportTime = FPlatformTime::Seconds();
+	static bool DidCompileSomething = false;
+	const double TimeToWaitForJobsToStart = 2.0;
+
+	bool ShadersCompiling = GShaderCompilingManager && GShaderCompilingManager->IsCompiling();
+	bool AssetsCompiling = FAssetCompilingManager::Get().GetNumRemainingAssets() > 0;
+	
+	double TimeNow = FPlatformTime::Seconds();
+
+	if (ShadersCompiling || AssetsCompiling)
 	{
-		UE_LOG(LogEditorAutomationTests, Log, TEXT("Waiting for %i shaders to finish."), GShaderCompilingManager->GetNumRemainingJobs());
-		GShaderCompilingManager->FinishAllCompilation();
-		UE_LOG(LogEditorAutomationTests, Log, TEXT("Done waiting for shaders to finish."));
+		if (TimeNow - LastReportTime > 5.0)
+		{
+			LastReportTime = TimeNow;
+
+			if (ShadersCompiling)
+			{
+				UE_LOG(LogEditorAutomationTests, Log, TEXT("Waiting for %i shaders to finish."), GShaderCompilingManager->GetNumRemainingJobs() + GShaderCompilingManager->GetNumPendingJobs());
+			}
+
+			if (AssetsCompiling)
+			{
+				UE_LOG(LogEditorAutomationTests, Log, TEXT("Waiting for %i assets to finish."), FAssetCompilingManager::Get().GetNumRemainingAssets());
+			}
+		}
+
+		TimeShadersFinishedCompiling = 0;
+		DidCompileSomething = true;
+
+		return false;
 	}
+
+	// Current jobs are done, but things may still come in on subsequent frames..
+	if (TimeShadersFinishedCompiling == 0)
+	{
+		TimeShadersFinishedCompiling = FPlatformTime::Seconds();
+	}
+
+	if (FPlatformTime::Seconds() - TimeShadersFinishedCompiling < TimeToWaitForJobsToStart)
+	{
+		return false;
+	}
+
+	// may not be necessary, but just double-check everything is finished and ready
+	GShaderCompilingManager->FinishAllCompilation();
+	FAssetCompilingManager::Get().FinishAllCompilation();
+
+	if (DidCompileSomething)
+	{
+		UE_LOG(LogEditorAutomationTests, Log, TEXT("Done waiting for shaders to finish."));
+		DidCompileSomething = false;
+	}
+#endif
+
 	return true;
 }
+
+void RequestImageComparison(const FString& InImageName, int32 InWidth, int32 InHeight, const TArray<FColor>& InImageData, EAutomationComparisonToleranceLevel InTolerance, const FString& InContext, const FString& InNotes)
+{
+#if WITH_AUTOMATION_TESTS
+	FAutomationComparisonToleranceAmount ToleranceAmount = FAutomationComparisonToleranceAmount::FromToleranceLevel(InTolerance);
+	ADD_LATENT_AUTOMATION_COMMAND(AutomationCommon::FAutomationImageComparisonRequest(InImageName, InContext, InWidth, InHeight, InImageData, ToleranceAmount, InNotes));
+#endif
+}
+
+
+/**
+ * Write a string to editor automation tests log
+ */
+DEFINE_ENGINE_LATENT_AUTOMATION_COMMAND_ONE_PARAMETER(FEngineAutomationLogCommand, FString, LogText);
+
+bool FEngineAutomationLogCommand::Update()
+{
+	UE_LOG(LogEngineAutomationTests, Log, TEXT("%s"), *LogText);
+	return true;
+}
+
+/**
+ * Generic Pie Test for projects.
+ * By default this test will PIE the lit of MapsToPIETest from automation settings. if that is empty it will PIE the default editor and game (if they're different)
+ * maps.
+ *
+ * If the editor session was started with a map on the command line then that's the only map that will be PIE'd. This allows project to set up tests that PIE
+ * a list of maps from an external source.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FProjectMapsCycleTest, "Project.Maps.Cycle", EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
+
+/**
+ * Execute the loading of one map to verify PIE works
+ *
+ * @param Parameters - Unused for this test
+ * @return	TRUE if the test was successful, FALSE otherwise
+ */
+bool FProjectMapsCycleTest::RunTest(const FString& Parameters)
+{
+	UAutomationTestSettings const* AutomationTestSettings = GetDefault<UAutomationTestSettings>();
+	check(AutomationTestSettings);
+
+	// todo , move to automation settings
+	int CycleCount = 2;
+	TArray<FString> CycleMaps;
+
+	FString ParsedMapName;
+
+	if (FParse::Value(FCommandLine::Get(), TEXT("map="), ParsedMapName))
+	{
+		TArray<FString> MapList;
+
+		ParsedMapName.ParseIntoArray(MapList, TEXT("+"), true);
+
+		for (const FString& Map : MapList)
+		{
+			FString ActualName = Map;
+			// If the specified package exists
+			if (FPackageName::SearchForPackageOnDisk(Map, NULL, &ActualName) &&
+				// and it's a valid map file
+				FPaths::GetExtension(ActualName, /*bIncludeDot=*/true) == FPackageName::GetMapPackageExtension())
+			{
+				CycleMaps.Add(ActualName);
+				UE_LOG(LogEngineAutomationTests, Display, TEXT("Found Map %s on command line. Cycle Test will be use this map"), *ActualName);
+			}
+			else
+			{
+				UE_LOG(LogEngineAutomationTests, Fatal, TEXT("Cound not find package for Map '%s' specified on command line."), *ActualName);
+			}
+		}
+	}
+
+	FParse::Value(FCommandLine::Get(), TEXT("map.cycles="), CycleCount);
+
+	// If there was no command line map then default to the project settings
+	if (CycleMaps.Num() == 0)
+	{
+		// If the project has maps configured for PIE then use those
+	#if 0
+		if (AutomationTestSettings->MapsToPIETest.Num())
+		{
+			for (const FString& Map : AutomationTestSettings->MapsToPIETest)
+			{
+				CycleMaps.Add(Map);
+			}
+		}
+		else
+	#endif
+		{
+			
+			UGameMapsSettings const* MapSettings = GetDefault<UGameMapsSettings>();
+
+			if (MapSettings->GetGameDefaultMap().Len())
+			{
+				FString StartupMap = MapSettings->GetGameDefaultMap();
+				// Else pick the editor startup and game startup maps (if they are different).
+				UE_LOG(LogEngineAutomationTests, Display, TEXT("No MapsToCycle specified in DefaultEngine.ini [/Script/Engine.AutomationTestSettings]. Using GameStartup Map %s"), *StartupMap);
+				CycleMaps.Add(StartupMap);
+			}
+		}
+	}
+
+	// Uh-oh
+	if (CycleMaps.Num() == 0)
+	{
+		UE_LOG(LogEngineAutomationTests, Fatal, TEXT("No automation or default maps are configured for cycling!"));
+	}
+
+	for (int i = 1; i <= CycleCount; i++)
+	{
+		AddCommand(new FEngineAutomationLogCommand(FString::Printf(TEXT("Starting Project.Maps Cycle (%d/%d)"), i, CycleCount)));
+		for (const FString& Map : CycleMaps)
+		{
+			FString MapPackageName = FPackageName::ObjectPathToPackageName(Map);
+
+			if (!FPackageName::IsValidObjectPath(MapPackageName))
+			{
+				if (!FPackageName::SearchForPackageOnDisk(MapPackageName, NULL, &MapPackageName))
+				{
+					UE_LOG(LogEditorAutomationTests, Error, TEXT("Couldn't resolve map for PIE test from %s to valid package name!"), *MapPackageName);
+					continue;
+				}
+			}
+
+			AddCommand(new FEngineAutomationLogCommand(FString::Printf(TEXT("LoadMap-Begin: %s"), *MapPackageName)));
+			AddCommand(new FLoadGameMapCommand(Map));
+			AddCommand(new FEngineAutomationLogCommand(FString::Printf(TEXT("LoadMap-End: %s"), *MapPackageName)));
+			AddCommand(new FEngineAutomationLogCommand(FString::Printf(TEXT("MapWait-Begin: %s"), *MapPackageName)));
+			AddCommand(new FWaitForShadersToFinishCompilingInGame());
+			AddCommand(new FWaitForSpecifiedMapToLoadCommand(MapPackageName)); 
+			AddCommand(new FWaitLatentCommand(AutomationTestSettings->PIETestDuration));
+			AddCommand(new FEngineAutomationLogCommand(FString::Printf(TEXT("MapWait-End: %s"), *Map)));
+
+		}
+		AddCommand(new FEngineAutomationLogCommand(FString::Printf(TEXT("Ended Project.Maps Cycle (%d/%d)"), i, CycleCount)));
+	}
+
+	return true;
+}
+
 #endif //WITH_DEV_AUTOMATION_TESTS

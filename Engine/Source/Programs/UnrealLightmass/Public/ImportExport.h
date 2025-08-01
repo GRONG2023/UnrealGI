@@ -75,17 +75,17 @@ namespace Lightmass
 	 * This must be done whenever modifying code that changes how each data type is exported!
 	 */
 
-	static const int32 LM_TEXTUREMAPPING_VERSION		= 1;
-	static const int32 LM_VOLUMESAMPLES_VERSION			= 1;
-	static const int32 LM_VOLUMETRICLIGHTMAP_VERSION		= 3;
-	static const int32 LM_PRECOMPUTEDVISIBILITY_VERSION	= 1;
-	static const int32 LM_VOLUMEDEBUGOUTPUT_VERSION		= 1;
-	static const int32 LM_DOMINANTSHADOW_VERSION		= 1;
-	static const int32 LM_MESHAREALIGHTDATA_VERSION		= 1;
-	static const int32 LM_DEBUGOUTPUT_VERSION			= 1;
-	static const int32 LM_SCENE_VERSION					= 1;
-	static const int32 LM_STATICMESH_VERSION			= 1;
-	static const int32 LM_MATERIAL_VERSION				= 1;
+	static const int32 LM_TEXTUREMAPPING_VERSION		= 2;
+	static const int32 LM_VOLUMESAMPLES_VERSION			= 2;
+	static const int32 LM_VOLUMETRICLIGHTMAP_VERSION		= 4;
+	static const int32 LM_PRECOMPUTEDVISIBILITY_VERSION	= 2;
+	static const int32 LM_VOLUMEDEBUGOUTPUT_VERSION		= 2;
+	static const int32 LM_DOMINANTSHADOW_VERSION		= 2;
+	static const int32 LM_MESHAREALIGHTDATA_VERSION		= 2;
+	static const int32 LM_DEBUGOUTPUT_VERSION			= 2;
+	static const int32 LM_SCENE_VERSION					= 2;
+	static const int32 LM_STATICMESH_VERSION			= 2;
+	static const int32 LM_MATERIAL_VERSION				= 2;
 
 
 	/** Alert source object type identifiers... */
@@ -288,7 +288,7 @@ namespace Lightmass
 	{
 	public:
 		/** World space position and radius. */
-		FVector4 PositionAndRadius;
+		FVector4f PositionAndRadius;
 
 		/** SH coefficients used with high quality lightmaps. */
 		float HighQualityCoefficients[LM_NUM_SH_COEFFICIENTS][3];
@@ -296,7 +296,7 @@ namespace Lightmass
 		/** SH coefficients used with low quality lightmaps. */
 		float LowQualityCoefficients[LM_NUM_SH_COEFFICIENTS][3];
 
-		FVector SkyBentNormal;
+		FVector3f SkyBentNormal;
 
 		/** Shadow factor for the stationary directional light. */
 		float DirectionalLightShadowing;
@@ -321,7 +321,7 @@ namespace Lightmass
 	{
 	public:
 		/** Transform from world space to the coordinate space that FStaticShadowDepthMapSampleData's are stored in. */
-		FMatrix WorldToLight;
+		FMatrix44f WorldToLight;
 		/** Dimensions of the generated shadow map. */
 		int32 ShadowMapSizeX;
 		int32 ShadowMapSizeY;
@@ -335,8 +335,8 @@ namespace Lightmass
 	{
 	public:
 		FGuid LevelGuid;
-		FVector4 Position;
-		FVector4 Direction;
+		FVector4f Position;
+		FVector4f Direction;
 		float Radius;
 		float ConeAngle;
 		FColor Color;
@@ -351,13 +351,13 @@ namespace Lightmass
 
 	struct FDebugStaticLightingRay
 	{
-		FVector4 Start;
-		FVector4 End;
+		FVector4f Start;
+		FVector4f End;
 		bool bHit;
 		bool bPositive;
 
 		FDebugStaticLightingRay() {}
-		FDebugStaticLightingRay(const FVector4& InStart, const FVector4& InEnd, bool bInHit, bool bInPositive = false) :
+		FDebugStaticLightingRay(const FVector4f& InStart, const FVector4f& InEnd, bool bInHit, bool bInPositive = false) :
 			Start(InStart),
 			End(InEnd),
 			bHit(bInHit),
@@ -367,8 +367,8 @@ namespace Lightmass
 
 	struct FDebugStaticLightingVertex
 	{
-		FVector4 VertexNormal;
-		FVector4 VertexPosition;
+		FVector4f VertexNormal;
+		FVector4f VertexPosition;
 	};
 
 	struct FDebugLightingCacheRecord
@@ -388,15 +388,15 @@ namespace Lightmass
 	struct FDebugPhoton
 	{
 		int32 Id;
-		FVector4 Position;
-		FVector4 Direction;
-		FVector4 Normal;
+		FVector4f Position;
+		FVector4f Direction;
+		FVector4f Normal;
 
 		FDebugPhoton() :
 			Id(-1)
 		{}
 
-		FDebugPhoton(int32 InId, const FVector4& InPosition, const FVector4& InDirection, const FVector4& InNormal) :
+		FDebugPhoton(int32 InId, const FVector4f& InPosition, const FVector4f& InDirection, const FVector4f& InNormal) :
 			Id(InId),
 			Position(InPosition),
 			Direction(InDirection),
@@ -406,10 +406,10 @@ namespace Lightmass
 
 	struct FDebugOctreeNode
 	{
-		FVector4 Center;
-		FVector4 Extent;
+		FVector4f Center;
+		FVector4f Extent;
 
-		FDebugOctreeNode(const FVector4& InCenter, const FVector4& InExtent) :
+		FDebugOctreeNode(const FVector4f& InCenter, const FVector4f& InExtent) :
 			Center(InCenter),
 			Extent(InExtent)
 		{}
@@ -454,7 +454,7 @@ namespace Lightmass
 		/** Direct photon that was found during direct lighting. */
 		FDebugPhoton GatheredDirectPhoton;
 		/** Positions of the selected texel's corners */
-		FVector4 TexelCorners[NumTexelCorners];
+		FVector4f TexelCorners[NumTexelCorners];
 		/** Whether each of the selected texel's corners were valid */
 		bool bCornerValid[NumTexelCorners];
 		/** World space radius of the selected sample */
@@ -473,10 +473,10 @@ namespace Lightmass
 
 	struct FDebugVolumeLightingSample
 	{
-		FVector4 PositionAndRadius;
+		FVector4f PositionAndRadius;
 		FLinearColor AverageIncidentRadiance;
 
-		FDebugVolumeLightingSample(const FVector4& InPositionAndRadius, const FLinearColor& InAverageIncidentRadiance) :
+		FDebugVolumeLightingSample(const FVector4f& InPositionAndRadius, const FLinearColor& InAverageIncidentRadiance) :
 			PositionAndRadius(InPositionAndRadius),
 			AverageIncidentRadiance(InAverageIncidentRadiance)
 		{}
@@ -501,26 +501,32 @@ namespace Lightmass
 	 *
 	 * @param Guid Unique ID of the channel
 	 * @param Version Version of the data inside
+	 * @param LMExecutableHash Hash of UnrealLightmass executable, to avoid stale cache content from a different build
 	 * @param Extension Type of the data
 	 *
 	 * @return Standard channel name
-	 */
+	*/
+	FORCEINLINE FString CreateChannelNameWithLMExecutableHash(const FGuid& Guid, const int32 Version, const FSHAHash& LMExecutableHash, const FString& Extension)
+	{
+		return FString::Printf(TEXT("v%d.%08X%08X%08X%08X.%s.%s"), Version, Guid.A, Guid.B, Guid.C, Guid.D, *LMExecutableHash.ToString(), *Extension);
+	}
 	FORCEINLINE FString CreateChannelName(const FGuid& Guid, const int32 Version, const FString& Extension)
 	{
 		return FString::Printf(TEXT("v%d.%08X%08X%08X%08X.%s"), Version, Guid.A, Guid.B, Guid.C, Guid.D, *Extension);
 	}
 
 	/**
-	 * Creates a standardized channel name based a FSA Hash, version and type
+	 * Creates a standardized channel name based a FSA Hash, version and type. Used for exporting materials
 	 *
 	 * @param Hash Unique ID of the channel
 	 * @param Version Version of the data inside
+	 * @param LMExecutableHash Hash of UnrealLightmass executable, to avoid stale cache content from a different build
 	 * @param Extension Type of the data
 	 *
 	 * @return Standard channel name
 	 */
-	FORCEINLINE FString CreateChannelName(const FSHAHash& Hash, const int32 Version, const FString& Extension)
+	FORCEINLINE FString CreateChannelNameWithLMExecutableHash(const FSHAHash& Hash, const int32 Version, const FSHAHash& LMExecutableHash, const FString& Extension)
 	{
-		return FString::Printf(TEXT("v%d.%s.%s"), Version, *Hash.ToString(), *Extension);
+		return FString::Printf(TEXT("v%d.%s.%s.%s"), Version, *Hash.ToString(), *LMExecutableHash.ToString(), *Extension);
 	}
 } // namespace Lightmass

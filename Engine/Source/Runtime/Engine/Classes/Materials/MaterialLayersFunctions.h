@@ -3,164 +3,18 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "AssetData.h"
+#include "MaterialTypes.h"
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "AssetRegistry/AssetData.h"
+#endif
+
 #include "MaterialLayersFunctions.generated.h"
 
 #define LOCTEXT_NAMESPACE "MaterialLayersFunctions"
 
 class FArchive;
-
-
-UENUM()
-enum EMaterialParameterAssociation
-{
-	LayerParameter,
-	BlendParameter,
-	GlobalParameter,
-};
-
-USTRUCT(BlueprintType)
-struct ENGINE_API FMaterialParameterInfo
-{
-	GENERATED_USTRUCT_BODY()
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=ParameterInfo)
-	FName Name;
-
-	/** Whether this is a global parameter, or part of a layer or blend */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=ParameterInfo)
-	TEnumAsByte<EMaterialParameterAssociation> Association;
-
-	/** Layer or blend index this parameter is part of. INDEX_NONE for global parameters. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=ParameterInfo)
-	int32 Index;
-
-	FMaterialParameterInfo(const TCHAR* InName, EMaterialParameterAssociation InAssociation = EMaterialParameterAssociation::GlobalParameter, int32 InIndex = INDEX_NONE)
-		: Name(InName)
-		, Association(InAssociation)
-		, Index(InIndex)
-	{
-	}
-	FMaterialParameterInfo(FName InName = FName(), EMaterialParameterAssociation InAssociation = EMaterialParameterAssociation::GlobalParameter, int32 InIndex = INDEX_NONE)
-	: Name(InName)
-	, Association(InAssociation)
-	, Index(InIndex)
-	{
-	}
-
-	explicit FMaterialParameterInfo(const struct FMemoryImageMaterialParameterInfo& Rhs);
-
-	FString ToString() const
-	{
-		return *Name.ToString() + FString::FromInt(Association) + FString::FromInt(Index);
-	}
-
-	friend FArchive& operator<<(FArchive& Ar, FMaterialParameterInfo& Ref)
-	{
-		Ar << Ref.Name << Ref.Association << Ref.Index;
-		return Ar;
-	}
-};
-
-struct FMemoryImageMaterialParameterInfo
-{
-	DECLARE_TYPE_LAYOUT(FMemoryImageMaterialParameterInfo, NonVirtual);
-public:
-	FMemoryImageMaterialParameterInfo(const TCHAR* InName, EMaterialParameterAssociation InAssociation = EMaterialParameterAssociation::GlobalParameter, int32 InIndex = INDEX_NONE)
-		: Name(NameToScriptName(FName(InName)))
-		, Index(InIndex)
-		, Association(InAssociation)
-	{}
-
-	FMemoryImageMaterialParameterInfo(const FName& InName, EMaterialParameterAssociation InAssociation = EMaterialParameterAssociation::GlobalParameter, int32 InIndex = INDEX_NONE)
-		: Name(NameToScriptName(InName))
-		, Index(InIndex)
-		, Association(InAssociation)
-	{}
-
-	FMemoryImageMaterialParameterInfo(const FScriptName& InName = FScriptName(), EMaterialParameterAssociation InAssociation = EMaterialParameterAssociation::GlobalParameter, int32 InIndex = INDEX_NONE)
-		: Name(InName)
-		, Index(InIndex)
-		, Association(InAssociation)
-	{}
-
-	FMemoryImageMaterialParameterInfo(const FMaterialParameterInfo& Rhs)
-		: Name(NameToScriptName(Rhs.Name))
-		, Index(Rhs.Index)
-		, Association(Rhs.Association)
-	{}
-
-	FMemoryImageMaterialParameterInfo(const FMemoryImageMaterialParameterInfo& Rhs) = default;
-
-	FORCEINLINE FName GetName() const { return ScriptNameToName(Name); }
-
-	friend FArchive& operator<<(FArchive& Ar, FMemoryImageMaterialParameterInfo& Ref)
-	{
-		FName RefName = ScriptNameToName(Ref.Name);
-		Ar << RefName << Ref.Association << Ref.Index;
-		Ref.Name = NameToScriptName(RefName);
-		return Ar;
-	}
-
-	LAYOUT_FIELD(FScriptName, Name);
-	LAYOUT_FIELD(int32, Index);
-	LAYOUT_FIELD(TEnumAsByte<EMaterialParameterAssociation>, Association);
-};
-
-FORCEINLINE FMaterialParameterInfo::FMaterialParameterInfo(const struct FMemoryImageMaterialParameterInfo& Rhs)
-	: Name(ScriptNameToName(Rhs.Name))
-	, Association(Rhs.Association)
-	, Index(Rhs.Index)
-{
-}
-
-FORCEINLINE bool operator==(const FMaterialParameterInfo& Lhs, const FMaterialParameterInfo& Rhs)
-{
-	return Lhs.Name.IsEqual(Rhs.Name) && Lhs.Association == Rhs.Association && Lhs.Index == Rhs.Index;
-}
-
-FORCEINLINE bool operator!=(const FMaterialParameterInfo& Lhs, const FMaterialParameterInfo& Rhs)
-{
-	return !operator==(Lhs, Rhs);
-}
-
-FORCEINLINE bool operator==(const FMemoryImageMaterialParameterInfo& Lhs, const FMemoryImageMaterialParameterInfo& Rhs)
-{
-	return Lhs.Name == Rhs.Name && Lhs.Association == Rhs.Association && Lhs.Index == Rhs.Index;
-}
-
-FORCEINLINE bool operator!=(const FMemoryImageMaterialParameterInfo& Lhs, const FMemoryImageMaterialParameterInfo& Rhs)
-{
-	return !operator==(Lhs, Rhs);
-}
-
-FORCEINLINE bool operator==(const FMaterialParameterInfo& Lhs, const FMemoryImageMaterialParameterInfo& Rhs)
-{
-	return Lhs.Name == Rhs.Name && Lhs.Index == Rhs.Index && Lhs.Association == Rhs.Association;
-}
-
-FORCEINLINE bool operator!=(const FMaterialParameterInfo& Lhs, const FMemoryImageMaterialParameterInfo& Rhs)
-{
-	return !operator==(Lhs, Rhs);
-}
-
-FORCEINLINE bool operator==(const FMemoryImageMaterialParameterInfo& Lhs, const FMaterialParameterInfo& Rhs)
-{
-	return Lhs.Name == Rhs.Name && Lhs.Index == Rhs.Index && Lhs.Association == Rhs.Association;
-}
-
-FORCEINLINE bool operator!=(const FMemoryImageMaterialParameterInfo& Lhs, const FMaterialParameterInfo& Rhs)
-{
-	return !operator==(Lhs, Rhs);
-}
-
-FORCEINLINE uint32 GetTypeHash(const FMemoryImageMaterialParameterInfo& Value)
-{
-	return HashCombine(HashCombine(GetTypeHash(Value.Name), Value.Index), (uint32)Value.Association);
-}
-
-// Backwards compat
-using FHashedMaterialParameterInfo = FMemoryImageMaterialParameterInfo;
+struct FMaterialLayersFunctions;
 
 UENUM()
 enum class EMaterialLayerLinkState : uint8
@@ -171,70 +25,40 @@ enum class EMaterialLayerLinkState : uint8
 	NotFromParent, // Layer was created locally in this material, not in parent
 };
 
-USTRUCT()
-struct ENGINE_API FMaterialLayersFunctions
+/** Serializable ID structure for FMaterialLayersFunctions which allows us to deterministically recompile shaders*/
+struct FMaterialLayersFunctionsID
 {
-	GENERATED_USTRUCT_BODY()
+	TArray<FGuid> LayerIDs;
+	TArray<FGuid> BlendIDs;
+	TArray<bool> LayerStates;
 
-	/** Serializable ID structure for FMaterialLayersFunctions which allows us to deterministically recompile shaders*/
-	struct ID
+	#if WITH_EDITOR
+	bool operator==(const FMaterialLayersFunctionsID& Reference) const;
+	inline bool operator!=(const FMaterialLayersFunctionsID& Reference) const { return !operator==(Reference); }
+
+	void SerializeForDDC(FArchive& Ar);
+
+	friend FMaterialLayersFunctionsID& operator<<(FArchive& Ar, FMaterialLayersFunctionsID& Ref)
 	{
-		TArray<FGuid> LayerIDs;
-		TArray<FGuid> BlendIDs;
-		TArray<bool> LayerStates;
-
-		bool operator==(const ID& Reference) const;
-
-		void SerializeForDDC(FArchive& Ar);
-
-		void UpdateHash(FSHA1& HashState) const;
-
-		//TODO: Investigate whether this is really required given it is only used by FMaterialShaderMapId AND that one also uses UpdateHash
-		void AppendKeyString(FString& KeyString) const;
-	};
-
-	static const FGuid BackgroundGuid;
-		
-	FMaterialLayersFunctions()
-	{
-		// Default to a non-blended "background" layer
-		Layers.AddDefaulted();
-		LayerStates.Add(true);
-#if WITH_EDITOR
-		FText LayerName = FText(LOCTEXT("Background", "Background"));
-		LayerNames.Add(LayerName);
-		RestrictToLayerRelatives.Add(false);
-		// Use a consistent Guid for the background layer
-		// Default constructor assigning different guids will break FStructUtils::AttemptToFindUninitializedScriptStructMembers
-		LayerGuids.Add(BackgroundGuid);
-		LayerLinkStates.Add(EMaterialLayerLinkState::NotFromParent);
-#endif
+		Ref.SerializeForDDC(Ar);
+		return Ref;
 	}
 
-	void Empty()
-	{
-		Layers.Empty();
-		Blends.Empty();
-		LayerStates.Empty();
-#if WITH_EDITOR
-		LayerNames.Empty();
-		RestrictToLayerRelatives.Empty();
-		RestrictToBlendRelatives.Empty();
-		LayerGuids.Empty();
-		LayerLinkStates.Empty();
-#endif
-	}
+	void UpdateHash(FSHA1& HashState) const;
 
-	UPROPERTY(EditAnywhere, Category=MaterialLayers)
-	TArray<class UMaterialFunctionInterface*> Layers;
+	//TODO: Investigate whether this is really required given it is only used by FMaterialShaderMapId AND that one also uses UpdateHash
+	void AppendKeyString(FString& KeyString) const;
+	#endif
+};
 
-	UPROPERTY(EditAnywhere, Category=MaterialLayers)
-	TArray<class UMaterialFunctionInterface*> Blends;
+USTRUCT()
+struct FMaterialLayersFunctionsEditorOnlyData
+{
+	GENERATED_BODY()
 
 	UPROPERTY(EditAnywhere, Category = MaterialLayers)
 	TArray<bool> LayerStates;
 
-#if WITH_EDITORONLY_DATA
 	UPROPERTY(EditAnywhere, Category = MaterialLayers)
 	TArray<FText> LayerNames;
 
@@ -260,80 +84,274 @@ struct ENGINE_API FMaterialLayersFunctions
 	 */
 	UPROPERTY(EditAnywhere, Category = MaterialLayers)
 	TArray<FGuid> DeletedParentLayerGuids;
+
+#if WITH_EDITORONLY_DATA
+	FORCEINLINE bool operator==(const FMaterialLayersFunctionsEditorOnlyData& Other) const
+	{
+		if (LayerStates != Other.LayerStates ||
+			LayerLinkStates != Other.LayerLinkStates ||
+			DeletedParentLayerGuids != Other.DeletedParentLayerGuids)
+		{
+			return false;
+		}
+		return true;
+	}
+
+	FORCEINLINE bool operator!=(const FMaterialLayersFunctionsEditorOnlyData& Other) const
+	{
+		return !operator==(Other);
+	}
 #endif // WITH_EDITORONLY_DATA
 
-	UPROPERTY()
-	FString KeyString_DEPRECATED;
+#if WITH_EDITOR
+	void Empty()
+	{
+		LayerStates.Empty();
+		LayerNames.Empty();
+		RestrictToLayerRelatives.Empty();
+		RestrictToBlendRelatives.Empty();
+		LayerGuids.Empty();
+		LayerLinkStates.Empty();
+	}
 
-	int32 AppendBlendedLayer();
+	void LinkAllLayersToParent();
+#endif // WITH_EDITOR
+};
 
-	int32 AddLayerCopy(const FMaterialLayersFunctions& Source, int32 SourceLayerIndex, EMaterialLayerLinkState LinkState);
+USTRUCT()
+struct FMaterialLayersFunctionsRuntimeData
+{
+	GENERATED_BODY()
 
-	void InsertLayerCopy(const FMaterialLayersFunctions& Source, int32 SourceLayerIndex, EMaterialLayerLinkState LinkState, int32 LayerIndex);
+	UPROPERTY(EditAnywhere, Category = MaterialLayers)
+	TArray<TObjectPtr<class UMaterialFunctionInterface>> Layers;
 
-	void RemoveBlendedLayerAt(int32 Index);
+	UPROPERTY(EditAnywhere, Category = MaterialLayers)
+	TArray<TObjectPtr<class UMaterialFunctionInterface>> Blends;
 
-	void MoveBlendedLayer(int32 SrcLayerIndex, int32 DstLayerIndex);
+	FMaterialLayersFunctionsRuntimeData() = default;
+	FMaterialLayersFunctionsRuntimeData(const FMaterialLayersFunctionsRuntimeData& Rhs)
+		: Layers(Rhs.Layers)
+		, Blends(Rhs.Blends)
+	{}
+
+	FMaterialLayersFunctionsRuntimeData(const FMaterialLayersFunctions& Rhs) = delete;
+
+	FMaterialLayersFunctionsRuntimeData& operator=(const FMaterialLayersFunctionsRuntimeData& Rhs)
+	{
+		Layers = Rhs.Layers;
+		Blends = Rhs.Blends;
+		return *this;
+	}
+
+	FMaterialLayersFunctionsRuntimeData& operator=(const FMaterialLayersFunctions& Rhs) = delete;
+
+	ENGINE_API ~FMaterialLayersFunctionsRuntimeData();
+
+	void Empty()
+	{
+		Layers.Empty();
+		Blends.Empty();
+	}
+
+	FORCEINLINE bool operator==(const FMaterialLayersFunctionsRuntimeData& Other) const
+	{
+		if (Layers != Other.Layers || Blends != Other.Blends)
+		{
+			return false;
+		}
+		return true;
+	}
+
+	FORCEINLINE bool operator!=(const FMaterialLayersFunctionsRuntimeData& Other) const
+	{
+		return !operator==(Other);
+	}
+
+	bool SerializeFromMismatchedTag(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot);
 
 #if WITH_EDITOR
-	void UnlinkLayerFromParent(int32 Index);
-	bool IsLayerLinkedToParent(int32 Index) const;
-	void RelinkLayersToParent();
-	bool HasAnyUnlinkedLayers() const;
+	const FMaterialLayersFunctionsID GetID(const FMaterialLayersFunctionsEditorOnlyData& EditorOnly) const;
 #endif // WITH_EDITOR
+
+#if WITH_EDITORONLY_DATA
+private:
+	/** FMaterialLayersFunctionsRuntimeData can be deserialized from an FMaterialLayersFunctions property, will store the editor-only portion here */
+	TUniquePtr<FMaterialLayersFunctionsEditorOnlyData> LegacySerializedEditorOnlyData;
+
+	friend struct FStaticParameterSet;
+#endif // WITH_EDITORONLY_DATA
+};
+
+template<>
+struct TStructOpsTypeTraits<FMaterialLayersFunctionsRuntimeData> : TStructOpsTypeTraitsBase2<FMaterialLayersFunctionsRuntimeData>
+{
+	enum { WithStructuredSerializeFromMismatchedTag = true };
+};
+
+USTRUCT()
+struct FMaterialLayersFunctions : public FMaterialLayersFunctionsRuntimeData
+{
+	GENERATED_USTRUCT_BODY()
+
+#if WITH_EDITOR
+	using ID = FMaterialLayersFunctionsID;
+#endif // WITH_EDITOR
+
+	static ENGINE_API const FGuid BackgroundGuid;
+
+	FMaterialLayersFunctions() = default;
+	FMaterialLayersFunctions(const FMaterialLayersFunctionsRuntimeData&) = delete;
+
+	FMaterialLayersFunctionsRuntimeData& GetRuntime() { return *this; }
+	const FMaterialLayersFunctionsRuntimeData& GetRuntime() const { return *this; }
+
+	UPROPERTY(EditAnywhere, Category = MaterialLayers)
+	FMaterialLayersFunctionsEditorOnlyData EditorOnly;
+
+	void Empty()
+	{
+		FMaterialLayersFunctionsRuntimeData::Empty();
+#if WITH_EDITOR
+		EditorOnly.Empty();
+#endif
+	}
+
+	inline bool IsEmpty() const { return Layers.Num() == 0; }
+
+#if WITH_EDITOR
+	void AddDefaultBackgroundLayer()
+	{
+		// Default to a non-blended "background" layer
+		Layers.AddDefaulted();
+		EditorOnly.LayerStates.Add(true);
+		FText LayerName = FText(LOCTEXT("Background", "Background"));
+		EditorOnly.LayerNames.Add(LayerName);
+		EditorOnly.RestrictToLayerRelatives.Add(false);
+		// Use a consistent Guid for the background layer
+		// Default constructor assigning different guids will break FStructUtils::AttemptToFindUninitializedScriptStructMembers
+		EditorOnly.LayerGuids.Add(BackgroundGuid);
+		EditorOnly.LayerLinkStates.Add(EMaterialLayerLinkState::NotFromParent);
+	}
+
+	ENGINE_API int32 AppendBlendedLayer();
+
+	ENGINE_API int32 AddLayerCopy(const FMaterialLayersFunctionsRuntimeData& Source,
+		const FMaterialLayersFunctionsEditorOnlyData& SourceEditorOnly,
+		int32 SourceLayerIndex,
+		bool bVisible,
+		EMaterialLayerLinkState LinkState);
+
+	int32 AddLayerCopy(const FMaterialLayersFunctions& Source,
+		int32 SourceLayerIndex,
+		bool bVisible,
+		EMaterialLayerLinkState LinkState)
+	{
+		return AddLayerCopy(Source, Source.EditorOnly, SourceLayerIndex, bVisible, LinkState);
+	}
+
+	ENGINE_API void InsertLayerCopy(const FMaterialLayersFunctionsRuntimeData& Source,
+		const FMaterialLayersFunctionsEditorOnlyData& SourceEditorOnly,
+		int32 SourceLayerIndex,
+		EMaterialLayerLinkState LinkState,
+		int32 LayerIndex);
+
+	void InsertLayerCopy(const FMaterialLayersFunctions& Source,
+		int32 SourceLayerIndex,
+		EMaterialLayerLinkState LinkState,
+		int32 LayerIndex)
+	{
+		return InsertLayerCopy(Source, Source.EditorOnly, SourceLayerIndex, LinkState, LayerIndex);
+	}
+
+	ENGINE_API void RemoveBlendedLayerAt(int32 Index);
+
+	ENGINE_API void MoveBlendedLayer(int32 SrcLayerIndex, int32 DstLayerIndex);
+
+	const ID GetID() const { return FMaterialLayersFunctionsRuntimeData::GetID(EditorOnly); }
+
+	/** Gets a string representation of the ID */
+	ENGINE_API FString GetStaticPermutationString() const;
+
+	ENGINE_API void UnlinkLayerFromParent(int32 Index);
+	ENGINE_API bool IsLayerLinkedToParent(int32 Index) const;
+	ENGINE_API void RelinkLayersToParent();
+	ENGINE_API bool HasAnyUnlinkedLayers() const;
 
 	void ToggleBlendedLayerVisibility(int32 Index)
 	{
-		check(LayerStates.IsValidIndex(Index));
-		LayerStates[Index] = !LayerStates[Index];
+		check(EditorOnly.LayerStates.IsValidIndex(Index));
+		EditorOnly.LayerStates[Index] = !EditorOnly.LayerStates[Index];
 	}
 
 	void SetBlendedLayerVisibility(int32 Index, bool InNewVisibility)
 	{
-		check(LayerStates.IsValidIndex(Index));
-		LayerStates[Index] = InNewVisibility;
+		check(EditorOnly.LayerStates.IsValidIndex(Index));
+		EditorOnly.LayerStates[Index] = InNewVisibility;
 	}
 
 	bool GetLayerVisibility(int32 Index) const
 	{
-		check(LayerStates.IsValidIndex(Index));
-		return LayerStates[Index];
+		check(EditorOnly.LayerStates.IsValidIndex(Index));
+		return EditorOnly.LayerStates[Index];
 	}
 
-#if WITH_EDITORONLY_DATA
 	FText GetLayerName(int32 Counter) const
 	{
 		FText LayerName = FText::Format(LOCTEXT("LayerPrefix", "Layer {0}"), Counter);
-		if (LayerNames.IsValidIndex(Counter))
+		if (EditorOnly.LayerNames.IsValidIndex(Counter))
 		{
-			LayerName = LayerNames[Counter];
+			LayerName = EditorOnly.LayerNames[Counter];
 		}
 		return LayerName;
 	}
 
-	void LinkAllLayersToParent();
+	void LinkAllLayersToParent()
+	{
+		EditorOnly.LinkAllLayersToParent();
+	}
 
-	bool ResolveParent(const FMaterialLayersFunctions& Parent, TArray<int32>& OutRemapLayerIndices);
+	static ENGINE_API bool MatchesParent(const FMaterialLayersFunctionsRuntimeData& Runtime,
+		const FMaterialLayersFunctionsEditorOnlyData& EditorOnly,
+		const FMaterialLayersFunctionsRuntimeData& ParentRuntime,
+		const FMaterialLayersFunctionsEditorOnlyData& ParentEditorOnly);
 
-#endif // WITH_EDITORONLY_DATA
+	bool MatchesParent(const FMaterialLayersFunctions& Parent) const
+	{
+		return MatchesParent(GetRuntime(), EditorOnly, Parent.GetRuntime(), Parent.EditorOnly);
+	}
 
-	const ID GetID() const;
+	static ENGINE_API bool ResolveParent(const FMaterialLayersFunctionsRuntimeData& ParentRuntime,
+		const FMaterialLayersFunctionsEditorOnlyData& ParentEditorOnly,
+		FMaterialLayersFunctionsRuntimeData& Runtime,
+		FMaterialLayersFunctionsEditorOnlyData& EditorOnly,
+		TArray<int32>& OutRemapLayerIndices);
 
-	/** Lists referenced function packages in a string, intended for use as a static permutation identifier. */
-	FString GetStaticPermutationString() const;
+	bool ResolveParent(const FMaterialLayersFunctions& Parent, TArray<int32>& OutRemapLayerIndices)
+	{
+		return FMaterialLayersFunctions::ResolveParent(Parent.GetRuntime(), Parent.EditorOnly, GetRuntime(), EditorOnly, OutRemapLayerIndices);
+	}
 
-	void SerializeForDDC(FArchive& Ar);
+	static ENGINE_API void Validate(const FMaterialLayersFunctionsRuntimeData& Runtime, const FMaterialLayersFunctionsEditorOnlyData& EditorOnly);
 
-	void PostSerialize(const FArchive& Ar);
+	void Validate()
+	{
+		Validate(GetRuntime(), EditorOnly);
+	}
+
+	ENGINE_API void SerializeLegacy(FArchive& Ar);
+#endif // WITH_EDITOR
+
+	ENGINE_API void PostSerialize(const FArchive& Ar);
 
 	FORCEINLINE bool operator==(const FMaterialLayersFunctions& Other) const
 	{
-		if (Layers != Other.Layers || Blends != Other.Blends || LayerStates != Other.LayerStates)
+		if (!FMaterialLayersFunctionsRuntimeData::operator==(Other))
 		{
 			return false;
 		}
 #if WITH_EDITORONLY_DATA
-		if (LayerLinkStates != Other.LayerLinkStates || DeletedParentLayerGuids != Other.DeletedParentLayerGuids)
+		if (EditorOnly != Other.EditorOnly)
 		{
 			return false;
 		}
@@ -345,6 +363,35 @@ struct ENGINE_API FMaterialLayersFunctions
 	{
 		return !operator==(Other);
 	}
+
+private:
+	UPROPERTY()
+	TArray<bool> LayerStates_DEPRECATED;
+
+	UPROPERTY()
+	TArray<FText> LayerNames_DEPRECATED;
+
+	UPROPERTY()
+	TArray<bool> RestrictToLayerRelatives_DEPRECATED;
+
+	UPROPERTY()
+	TArray<bool> RestrictToBlendRelatives_DEPRECATED;
+
+	UPROPERTY()
+	TArray<FGuid> LayerGuids_DEPRECATED;
+
+	UPROPERTY()
+	TArray<EMaterialLayerLinkState> LayerLinkStates_DEPRECATED;
+
+	UPROPERTY()
+	TArray<FGuid> DeletedParentLayerGuids_DEPRECATED;
+
+
+	// Don't allowing comparing a full FMaterialLayersFunctions against partial RuntimeData
+	friend bool operator==(const FMaterialLayersFunctions&, const FMaterialLayersFunctionsRuntimeData&) = delete;
+	friend bool operator==(const FMaterialLayersFunctionsRuntimeData&, const FMaterialLayersFunctions&) = delete;
+	friend bool operator!=(const FMaterialLayersFunctions&, const FMaterialLayersFunctionsRuntimeData&) = delete;
+	friend bool operator!=(const FMaterialLayersFunctionsRuntimeData&, const FMaterialLayersFunctions&) = delete;
 };
 
 template<>

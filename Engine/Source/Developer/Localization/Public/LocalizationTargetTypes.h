@@ -2,12 +2,22 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Object.h"
+#include "CoreTypes.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Text.h"
+#include "Misc/AssertionMacros.h"
 #include "Misc/Guid.h"
-#include "Engine/EngineTypes.h"
 #include "PortableObjectPipeline.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/SoftObjectPath.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "LocalizationTargetTypes.generated.h"
 
 struct FPropertyChangedEvent;
@@ -179,7 +189,7 @@ struct FGatherTextFromPackagesConfiguration
 	TArray<FName> Collections;
 
 	/* Classes that should be excluded from gathering. */
-	UPROPERTY(config, EditAnywhere, Category = "Filter", meta=(MetaClass="Object", AllowAbstract="True"))
+	UPROPERTY(config, EditAnywhere, Category = "Filter", meta=(MetaClass="/Script/CoreUObject.Object", AllowAbstract="True"))
 	TArray<FSoftClassPath> ExcludeClasses;
 
 	/* Should classes derived from those in the exclude classes list also be excluded from gathering? */
@@ -270,6 +280,22 @@ struct FGatherTextFromMetaDataConfiguration
 	/* Specifications for how to gather text from specific metadata keys. */
 	UPROPERTY(config, EditAnywhere, Category = "MetaData")
 	TArray<FMetaDataKeyGatherSpecification> KeySpecifications;
+
+	/** List of field types (eg, Property, Function, ScriptStruct, Enum, etc) that should be included in the gather, or empty to include everything. */
+	UPROPERTY(config, EditAnywhere, Category = "MetaData")
+	TArray<FString> FieldTypesToInclude;
+
+	/** List of field types (eg, Property, Function, ScriptStruct, Enum, etc) the should be excluded from the gather. */
+	UPROPERTY(config, EditAnywhere, Category = "MetaData")
+	TArray<FString> FieldTypesToExclude;
+
+	/** List of field owner types (eg, MyClass, MyStruct, etc) that should have fields within them included in the gather, or empty to include everything. */
+	UPROPERTY(config, EditAnywhere, Category = "MetaData")
+	TArray<FString> FieldOwnerTypesToInclude;
+
+	/** List of field owner types (eg, MyClass, MyStruct, etc) that should have fields within them excluded from the gather. */
+	UPROPERTY(config, EditAnywhere, Category = "MetaData")
+	TArray<FString> FieldOwnerTypesToExclude;
 
 	/* If enabled, data that is specified as editor-only may be processed for gathering. */
 	UPROPERTY(config, EditAnywhere, Category = "Filter")
@@ -496,7 +522,7 @@ class LOCALIZATION_API ULocalizationTargetSet : public UObject
 
 public:
 	UPROPERTY(EditAnywhere, Category = "Targets")
-	TArray<ULocalizationTarget*> TargetObjects;
+	TArray<TObjectPtr<ULocalizationTarget>> TargetObjects;
 
 public:
 #if WITH_EDITOR

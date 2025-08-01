@@ -10,18 +10,18 @@
 #include "Sound/SoundWave.h"
 #include "AudioAnalyzerNRT.generated.h"
 
-DECLARE_MULTICAST_DELEGATE( FAnalyzeAudioDelegate );
+
 
 /** UAudioAnalyzerNRTSettings
  *
  * UAudioAnalyzerNRTSettings provides a way to store and reuse existing analyzer settings
- * across multipler analyzers. This class provides the interface and functionality to 
+ * across multiple analyzers. This class provides the interface and functionality to 
  * automatically trigger reanalysis of audio across all analyzers associated with this 
- * settingwhen when a UPROPERTY in this setting object is edited.
+ * setting when when a UPROPERTY in this setting object is edited.
  *
  */
-UCLASS(Abstract, EditInlineNew, BlueprintType)
-class AUDIOANALYZER_API UAudioAnalyzerNRTSettings : public UAudioAnalyzerAsset
+UCLASS(Abstract, EditInlineNew, BlueprintType, MinimalAPI)
+class UAudioAnalyzerNRTSettings : public UAudioAnalyzerAssetBase
 {
 	GENERATED_BODY()
 
@@ -37,13 +37,13 @@ class AUDIOANALYZER_API UAudioAnalyzerNRTSettings : public UAudioAnalyzerAsset
 		 *
 		 * This determines whether to trigger analysis by calling ShouldEventTriggerAnalysis(...)
 		 */
-		void PostEditChangeProperty (struct FPropertyChangedEvent & PropertyChangedEvent) override;
+		AUDIOANALYZER_API void PostEditChangeProperty (struct FPropertyChangedEvent & PropertyChangedEvent) override;
 
 		/** 
 		 * This returns true when the PropertyChangeEvent is due to update a setting property. 
 		 * Override this method in order to customize this behavior.
 		 */
-		virtual bool ShouldEventTriggerAnalysis(struct FPropertyChangedEvent & PropertyChangeEvent);
+		AUDIOANALYZER_API virtual bool ShouldEventTriggerAnalysis(struct FPropertyChangedEvent & PropertyChangeEvent);
 #endif
 
 };
@@ -59,8 +59,8 @@ class AUDIOANALYZER_API UAudioAnalyzerNRTSettings : public UAudioAnalyzerAsset
  * To support blueprint access, subclasses can implement UFUNCTIONs to expose the data
  * returned by GetResult().
  */
-UCLASS(Abstract, EditInlineNew, BlueprintType)
-class AUDIOANALYZER_API UAudioAnalyzerNRT : public UAudioAnalyzerAsset
+UCLASS(Abstract, EditInlineNew, BlueprintType, MinimalAPI)
+class UAudioAnalyzerNRT : public UAudioAnalyzerAssetBase
 {
 	GENERATED_BODY()
 
@@ -77,8 +77,8 @@ class AUDIOANALYZER_API UAudioAnalyzerNRT : public UAudioAnalyzerAsset
 		/**
 		 * The USoundWave which is analyzed.
 		 */
-		UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=AudioAnalyzer)
-		USoundWave* Sound;
+		UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=AudioAnalyzer, meta=(DisallowedClasses="/Script/MetasoundEngine.MetaSoundSource, /Script/Engine.SoundSourceBus"))
+		TObjectPtr<USoundWave> Sound;
 
 		/** The duration of the analyzed audio in seconds. */
 		UPROPERTY(BlueprintReadOnly, Category=AudioAnalyzer)
@@ -120,26 +120,26 @@ class AUDIOANALYZER_API UAudioAnalyzerNRT : public UAudioAnalyzerAsset
 		 * Implementations can override this method to create settings objects
 		 * specific for their analyzer. 
 		 */
-		virtual TUniquePtr<Audio::IAnalyzerNRTSettings> GetSettings(const float InSampleRate, const int32 InNumChannels) const;
+		AUDIOANALYZER_API virtual TUniquePtr<Audio::IAnalyzerNRTSettings> GetSettings(const float InSampleRate, const int32 InNumChannels) const;
 
 		/**
 		 * Performs serialization of results.
 		 */
-		virtual void Serialize(FArchive& Ar) override;
+		AUDIOANALYZER_API virtual void Serialize(FArchive& Ar) override;
 
 #if WITH_EDITOR
 
-		void SetResult(FResultSharedPtr NewResult);
+		AUDIOANALYZER_API void SetResult(FResultSharedPtr NewResult);
 
 		/** This will only store the result if the passed InResultId matches the CurrentResultId. */
-		void SetResultIfLatest(FResultSharedPtr NewResult, FResultId InResultId);
+		AUDIOANALYZER_API void SetResultIfLatest(FResultSharedPtr NewResult, FResultId InResultId);
 
 		/**
 		 * Called before a UPROPERTY of this class is edited. This checks to see
 		 * if the UPROPERTY is a UAudioAnalyzerNRTSettings. If so, the previous settings' 
 		 * AnalyzeAudioDelegate will be unbound from this object's AnalyzeAudio()
 		 */
-		void PreEditChange(FProperty* PropertyAboutToChange) override;
+		AUDIOANALYZER_API void PreEditChange(FProperty* PropertyAboutToChange) override;
 
 		/**
 		 * Called when a UPROPERTY of this class is edited. Triggering 
@@ -148,16 +148,16 @@ class AUDIOANALYZER_API UAudioAnalyzerNRT : public UAudioAnalyzerAsset
 		 *
 		 * This determines whether to trigger analysis by calling ShouldEventTriggerAnalysis(...)
 		 */
-		void PostEditChangeProperty (struct FPropertyChangedEvent & PropertyChangedEvent) override;
+		AUDIOANALYZER_API void PostEditChangeProperty (struct FPropertyChangedEvent & PropertyChangedEvent) override;
 
 		/**
 		 * Returns true when the PropertyChangeEvent is due to update SoundWave or Settings.
 		 */
-		virtual bool ShouldEventTriggerAnalysis(struct FPropertyChangedEvent & PropertyChangeEvent);
+		AUDIOANALYZER_API virtual bool ShouldEventTriggerAnalysis(struct FPropertyChangedEvent & PropertyChangeEvent);
 
 		/** Performs the analaysis of the audio */
 		UFUNCTION()
-		void AnalyzeAudio();
+		AUDIOANALYZER_API void AnalyzeAudio();
 #endif
 
 
@@ -166,19 +166,19 @@ class AUDIOANALYZER_API UAudioAnalyzerNRT : public UAudioAnalyzerAsset
 #if WITH_EDITOR
 
 		/** This sets the AnalyzeAudio callback to the delegate in settings. */
-		void SetSettingsDelegate(UAudioAnalyzerNRTSettings* InSettings);
+		AUDIOANALYZER_API void SetSettingsDelegate(UAudioAnalyzerNRTSettings* InSettings);
 
 		/** This removes the existing delegate handle from the current settings object */
-		void RemoveSettingsDelegate(UAudioAnalyzerNRTSettings* InSettings);
+		AUDIOANALYZER_API void RemoveSettingsDelegate(UAudioAnalyzerNRTSettings* InSettings);
 #endif 
 
 		/* Subclasses must override this method in order to inform this object which AnalyzerNRTFactory to use for analysis */
-		virtual FName GetAnalyzerNRTFactoryName() const PURE_VIRTUAL(UAudioAnalyzerNRT::GetAnalyzerNRTFactoryName, return FName(););
+		AUDIOANALYZER_API virtual FName GetAnalyzerNRTFactoryName() const PURE_VIRTUAL(UAudioAnalyzerNRT::GetAnalyzerNRTFactoryName, return FName(););
 
 	private:
 
 		// Returns UAudioAnalyzerNRTSettings* if property points to a valid UAudioAnalyzerNRTSettings, otherwise returns nullptr.
-		UAudioAnalyzerNRTSettings* GetSettingsFromProperty(FProperty* Property);
+		AUDIOANALYZER_API UAudioAnalyzerNRTSettings* GetSettingsFromProperty(FProperty* Property);
 
 		TSharedPtr<Audio::IAnalyzerNRTResult, ESPMode::ThreadSafe> Result;
 

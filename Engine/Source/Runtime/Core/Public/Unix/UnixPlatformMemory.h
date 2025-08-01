@@ -8,8 +8,11 @@
 
 #include "CoreTypes.h"
 #include "GenericPlatform/GenericPlatformMemory.h"
+#include "HAL/PlatformCrt.h"
 
 #include <malloc.h>
+
+class FString;
 
 #ifndef COMPILE_FORK_PAGE_PROTECTOR
 	#define COMPILE_FORK_PAGE_PROTECTOR 0
@@ -42,7 +45,7 @@ struct FExtendedPlatformMemoryStats
 /**
 * Unix implementation of the memory OS functions
 **/
-struct CORE_API FUnixPlatformMemory : public FGenericPlatformMemory
+struct FUnixPlatformMemory : public FGenericPlatformMemory
 {
 	/**
 	 * Unix representation of a shared memory region
@@ -71,14 +74,16 @@ struct CORE_API FUnixPlatformMemory : public FGenericPlatformMemory
 	};
 
 	//~ Begin FGenericPlatformMemory Interface
-	static void Init();
-	static class FMalloc* BaseAllocator();
-	static FPlatformMemoryStats GetStats();
-	static FExtendedPlatformMemoryStats GetExtendedStats();
-	static const FPlatformMemoryConstants& GetConstants();
-	static bool PageProtect(void* const Ptr, const SIZE_T Size, const bool bCanRead, const bool bCanWrite);
-	static void* BinnedAllocFromOS(SIZE_T Size);
-	static void BinnedFreeToOS(void* Ptr, SIZE_T Size);
+	static CORE_API void Init();
+	static CORE_API class FMalloc* BaseAllocator();
+	static CORE_API FPlatformMemoryStats GetStats();
+	static CORE_API FExtendedPlatformMemoryStats GetExtendedStats();
+	static CORE_API const FPlatformMemoryConstants& GetConstants();
+	static CORE_API bool PageProtect(void* const Ptr, const SIZE_T Size, const bool bCanRead, const bool bCanWrite);
+	static CORE_API void* BinnedAllocFromOS(SIZE_T Size);
+	static CORE_API void BinnedFreeToOS(void* Ptr, SIZE_T Size);
+
+	static CORE_API bool GetForkedPageAllocationInfo(TArray<FForkedPageAllocation>& OutPageAllocationInfos);
 
 	class FPlatformVirtualMemoryBlock : public FBasicVirtualMemoryBlock
 	{
@@ -95,9 +100,9 @@ struct CORE_API FUnixPlatformMemory : public FGenericPlatformMemory
 		FPlatformVirtualMemoryBlock(const FPlatformVirtualMemoryBlock& Other) = default;
 		FPlatformVirtualMemoryBlock& operator=(const FPlatformVirtualMemoryBlock& Other) = default;
 
-		void Commit(size_t InOffset, size_t InSize);
-		void Decommit(size_t InOffset, size_t InSize);
-		void FreeVirtual();
+		CORE_API void Commit(size_t InOffset, size_t InSize);
+		CORE_API void Decommit(size_t InOffset, size_t InSize);
+		CORE_API void FreeVirtual();
 
 		FORCEINLINE void CommitByPtr(void *InPtr, size_t InSize)
 		{
@@ -124,18 +129,18 @@ struct CORE_API FUnixPlatformMemory : public FGenericPlatformMemory
 			return VMSizeDivVirtualSizeAlignment * GetVirtualSizeAlignment();
 		}
 
-		static FPlatformVirtualMemoryBlock AllocateVirtual(size_t Size, size_t InAlignment = FPlatformVirtualMemoryBlock::GetVirtualSizeAlignment());
-		static size_t GetCommitAlignment();
-		static size_t GetVirtualSizeAlignment();
+		static CORE_API FPlatformVirtualMemoryBlock AllocateVirtual(size_t Size, size_t InAlignment = FPlatformVirtualMemoryBlock::GetVirtualSizeAlignment());
+		static CORE_API size_t GetCommitAlignment();
+		static CORE_API size_t GetVirtualSizeAlignment();
 	};
 
-	static FSharedMemoryRegion * MapNamedSharedMemoryRegion(const FString& InName, bool bCreate, uint32 AccessMode, SIZE_T Size);
-	static bool UnmapNamedSharedMemoryRegion(FSharedMemoryRegion * MemoryRegion);
-	static bool GetLLMAllocFunctions(void*(*&OutAllocFunction)(size_t), void(*&OutFreeFunction)(void*, size_t), int32& OutAlignment);
-	static CA_NO_RETURN void OnOutOfMemory(uint64 Size, uint32 Alignment);
+	static CORE_API FSharedMemoryRegion * MapNamedSharedMemoryRegion(const FString& InName, bool bCreate, uint32 AccessMode, SIZE_T Size);
+	static CORE_API bool UnmapNamedSharedMemoryRegion(FSharedMemoryRegion * MemoryRegion);
+	static CORE_API bool GetLLMAllocFunctions(void*(*&OutAllocFunction)(size_t), void(*&OutFreeFunction)(void*, size_t), int32& OutAlignment);
+	[[noreturn]] static CORE_API void OnOutOfMemory(uint64 Size, uint32 Alignment);
 	//~ End FGenericPlatformMemory Interface
 
-	static bool HasForkPageProtectorEnabled();
+	static CORE_API bool HasForkPageProtectorEnabled();
 };
 
 typedef FUnixPlatformMemory FPlatformMemory;

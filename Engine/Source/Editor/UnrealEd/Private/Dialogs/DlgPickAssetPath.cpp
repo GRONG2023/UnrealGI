@@ -9,10 +9,11 @@
 #include "Widgets/Layout/SUniformGridPanel.h"
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Input/SButton.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Editor.h"
 #include "IContentBrowserSingleton.h"
 #include "ContentBrowserModule.h"
+#include "SPrimaryButton.h"
 
 #define LOCTEXT_NAMESPACE "DlgPickAssetPath"
 
@@ -43,20 +44,20 @@ void SDlgPickAssetPath::Construct(const FArguments& InArgs)
 			.Padding(2,2,2,4)
 			[
 				SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 				[
 					SNew(SVerticalBox)
 
 					+ SVerticalBox::Slot()
 					.FillHeight(1)
-					.Padding(3)
+					.Padding(3.0f)
 					[
 						ContentBrowserModule.Get().CreatePathPicker(PathPickerConfig)
 					]
 
 					+ SVerticalBox::Slot()
 					.AutoHeight()
-					.Padding(3)
+					.Padding(3.0f)
 					[
 						SNew(SHorizontalBox)
 
@@ -84,25 +85,24 @@ void SDlgPickAssetPath::Construct(const FArguments& InArgs)
 			.AutoHeight()
 			.HAlign(HAlign_Right)
 			.VAlign(VAlign_Bottom)
+			.Padding(8.f, 16.f)
 			[
 				SNew(SUniformGridPanel)
-				.SlotPadding(FEditorStyle::GetMargin("StandardDialog.SlotPadding"))
-				.MinDesiredSlotWidth(FEditorStyle::GetFloat("StandardDialog.MinDesiredSlotWidth"))
-				.MinDesiredSlotHeight(FEditorStyle::GetFloat("StandardDialog.MinDesiredSlotHeight"))
+				.MinDesiredSlotWidth(FAppStyle::GetFloat("StandardDialog.MinDesiredSlotWidth"))
+				.MinDesiredSlotHeight(FAppStyle::GetFloat("StandardDialog.MinDesiredSlotHeight"))
+				.SlotPadding(FAppStyle::GetMargin("StandardDialog.SlotPadding"))
+
 				+SUniformGridPanel::Slot(0,0)
 				[
-					SNew(SButton)
-					.Text(LOCTEXT("OK", "OK"))
-					.HAlign(HAlign_Center)
-					.ContentPadding(FEditorStyle::GetMargin("StandardDialog.ContentPadding"))
+					SNew(SPrimaryButton)
+					.Text(LOCTEXT("Save", "Save"))
 					.OnClicked(this, &SDlgPickAssetPath::OnButtonClick, EAppReturnType::Ok)
 				]
 				+SUniformGridPanel::Slot(1,0)
 				[
 					SNew(SButton)
 					.Text(LOCTEXT("Cancel", "Cancel"))
-					.HAlign(HAlign_Center)
-					.ContentPadding(FEditorStyle::GetMargin("StandardDialog.ContentPadding"))
+					.ContentPadding(FAppStyle::GetMargin("StandardDialog.ContentPadding"))
 					.OnClicked(this, &SDlgPickAssetPath::OnButtonClick, EAppReturnType::Cancel)
 				]
 			]

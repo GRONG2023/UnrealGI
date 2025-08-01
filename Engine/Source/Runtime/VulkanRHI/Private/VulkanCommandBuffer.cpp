@@ -47,6 +47,7 @@ static FAutoConsoleVariableRef CVarVulkanPreventOverlapWithUpload(
 #define CMD_BUFFER_TIME_TO_WAIT_BEFORE_DELETING		10
 
 const uint32 GNumberOfFramesBeforeDeletingDescriptorPool = 300;
+extern int32 GVulkanAutoCorrectUnknownLayouts;
 
 FVulkanCmdBuffer::FVulkanCmdBuffer(FVulkanDevice* InDevice, FVulkanCommandBufferPool* InCommandBufferPool, bool bInIsUploadOnly)
 	: CurrentStencilRef(0)
@@ -66,8 +67,9 @@ FVulkanCmdBuffer::FVulkanCmdBuffer(FVulkanDevice* InDevice, FVulkanCommandBuffer
 	, CommandBufferPool(InCommandBufferPool)
 	, Timing(nullptr)
 	, LastValidTiming(0)
+	, LayoutManager(InDevice->SupportsParallelRendering() && !GVulkanAutoCorrectUnknownLayouts,
+		&InCommandBufferPool->GetMgr().GetCommandListContext()->GetQueue()->GetLayoutManager())
 {
-
 	{
 		FScopeLock ScopeLock(CommandBufferPool->GetCS());
 		AllocMemory();
@@ -80,8 +82,8 @@ void FVulkanCmdBuffer::AllocMemory()
 {
 	// Assumes we are inside a lock for the pool
 	check(State == EState::NotAllocated);
-	FMemory::Memzero(CurrentViewport);
-	FMemory::Memzero(CurrentScissor);
+	CurrentViewports.Empty();
+	CurrentScissors.Empty();
 
 	VkCommandBufferAllocateInfo CreateCmdBufInfo;
 	ZeroVulkanStruct(CreateCmdBufInfo, VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO);
@@ -175,7 +177,7 @@ void FVulkanCmdBuffer::EndRenderPass()
 
 void FVulkanCmdBuffer::BeginRenderPass(const FVulkanRenderTargetLayout& Layout, FVulkanRenderPass* RenderPass, FVulkanFramebuffer* Framebuffer, const VkClearValue* AttachmentClearValues)
 {
-	if(bIsUniformBufferBarrierAdded)
+	if (bIsUniformBufferBarrierAdded)
 	{
 		EndUniformUpdateBarrier();
 	}
@@ -185,10 +187,7 @@ void FVulkanCmdBuffer::BeginRenderPass(const FVulkanRenderTargetLayout& Layout, 
 	ZeroVulkanStruct(Info, VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO);
 	Info.renderPass = RenderPass->GetHandle();
 	Info.framebuffer = Framebuffer->GetHandle();
-	Info.renderArea.offset.x = 0;
-	Info.renderArea.offset.y = 0;
-	Info.renderArea.extent.width = Framebuffer->GetWidth();
-	Info.renderArea.extent.height = Framebuffer->GetHeight();
+	Info.renderArea = Framebuffer->GetRenderArea();
 	Info.clearValueCount = Layout.GetNumUsedClearValues();
 	Info.pClearValues = AttachmentClearValues;
 
@@ -204,12 +203,23 @@ void FVulkanCmdBuffer::BeginRenderPass(const FVulkanRenderTargetLayout& Layout, 
 		Info.pNext = &RPTransformBeginInfoQCOM;
 	}
 #endif
-	VulkanRHI::vkCmdBeginRenderPass(CommandBufferHandle, &Info, VK_SUBPASS_CONTENTS_INLINE);
+
+	if (Device->GetOptionalExtensions().HasKHRRenderPass2)
+	{
+		VkSubpassBeginInfo SubpassInfo;
+		ZeroVulkanStruct(SubpassInfo, VK_STRUCTURE_TYPE_SUBPASS_BEGIN_INFO);
+		SubpassInfo.contents = VK_SUBPASS_CONTENTS_INLINE;
+		VulkanRHI::vkCmdBeginRenderPass2KHR(CommandBufferHandle, &Info, &SubpassInfo);
+	}
+	else
+	{
+		VulkanRHI::vkCmdBeginRenderPass(CommandBufferHandle, &Info, VK_SUBPASS_CONTENTS_INLINE);
+	}
 
 	State = EState::IsInsideRenderPass;
 
 	// Acquire a descriptor pool set on a first render pass
-	if (!UseVulkanDescriptorCache() && CurrentDescriptorPoolSetContainer == nullptr)
+	if (CurrentDescriptorPoolSetContainer == nullptr)
 	{
 		AcquirePoolSetContainer();
 	}
@@ -242,15 +252,18 @@ void FVulkanCmdBuffer::End()
 
 	for (PendingQuery& Query : PendingTimestampQueries)
 	{
-		uint64 Index = Query.Index;
-		VkBuffer BufferHandle = Query.BufferHandle;
-		VkQueryPool PoolHandle = Query.PoolHandle;
-		VkQueryResultFlags BlockingFlags = Query.bBlocking ?  VK_QUERY_RESULT_WAIT_BIT : VK_QUERY_RESULT_WITH_AVAILABILITY_BIT;
-		uint32 Width = (Query.bBlocking ? 1 : 2);
-		uint32 Stride = sizeof(uint64) * Width;
+		const uint64 Index = Query.Index;
+		const VkBuffer BufferHandle = Query.BufferHandle;
+		const VkQueryPool PoolHandle = Query.PoolHandle;
+		const VkQueryResultFlags BlockingFlags = Query.bBlocking ?  VK_QUERY_RESULT_WAIT_BIT : VK_QUERY_RESULT_WITH_AVAILABILITY_BIT;
+		const uint32 Width = (Query.bBlocking ? 1 : 2);
+		const uint32 Stride = sizeof(uint64) * Width;
 
 		VulkanRHI::vkCmdCopyQueryPoolResults(GetHandle(), PoolHandle, Index, Query.Count, BufferHandle, Stride * Index, Stride, VK_QUERY_RESULT_64_BIT | BlockingFlags);
-		VulkanRHI::vkCmdResetQueryPool(GetHandle(), PoolHandle, Index, Query.Count);
+		if (Query.bBlocking)
+		{
+			VulkanRHI::vkCmdResetQueryPool(GetHandle(), PoolHandle, Index, Query.Count);
+		}
 	}
 
 	PendingTimestampQueries.Reset();
@@ -269,18 +282,24 @@ inline void FVulkanCmdBuffer::InitializeTimings(FVulkanCommandListContext* InCon
 
 			// Upload cb's can be submitted multiple times in a single frame, so we use an expanded pool to catch timings
 			// Any overflow will wrap
-			uint32 PoolSize = bIsUploadOnly ? 256 : 32;
+			const uint32 PoolSize = bIsUploadOnly ? 256 : 32;
 			Timing->Initialize(PoolSize);
 		}
 	}
 }
 
-void FVulkanCmdBuffer::AddWaitSemaphore(VkPipelineStageFlags InWaitFlags, VulkanRHI::FSemaphore* InWaitSemaphore)
+void FVulkanCmdBuffer::AddWaitSemaphore(VkPipelineStageFlags InWaitFlags, TArrayView<VulkanRHI::FSemaphore*> InWaitSemaphores)
 {
-	WaitFlags.Add(InWaitFlags);
-	InWaitSemaphore->AddRef();
-	check(!WaitSemaphores.Contains(InWaitSemaphore));
-	WaitSemaphores.Add(InWaitSemaphore);
+	WaitFlags.Reserve(WaitFlags.Num() + InWaitSemaphores.Num());
+
+	for (VulkanRHI::FSemaphore* Sema : InWaitSemaphores)
+	{
+		WaitFlags.Add(InWaitFlags);
+		Sema->AddRef();
+		check(!WaitSemaphores.Contains(Sema));
+	}
+
+	WaitSemaphores.Append(InWaitSemaphores);
 }
 
 void FVulkanCmdBuffer::Begin()
@@ -314,12 +333,19 @@ void FVulkanCmdBuffer::Begin()
 	}
 	check(!CurrentDescriptorPoolSetContainer);
 
+	if (!bIsUploadOnly && Device->SupportsBindless())
+	{
+		FVulkanBindlessDescriptorManager* BindlessDescriptorManager = Device->GetBindlessDescriptorManager();
+		FVulkanQueue* Queue = GetOwner()->GetMgr().GetQueue();
+		const VkPipelineStageFlags SupportedStages = Queue->GetSupportedStageBits();
+		BindlessDescriptorManager->BindDescriptorBuffers(CommandBufferHandle, SupportedStages);
+	}
+
 	bNeedsDynamicStateSet = true;
 }
 
 void FVulkanCmdBuffer::AcquirePoolSetContainer()
 {
-	check(!UseVulkanDescriptorCache())
 	check(!CurrentDescriptorPoolSetContainer);
 	CurrentDescriptorPoolSetContainer = &Device->GetDescriptorPoolsManager().AcquirePoolSetContainer();
 	ensure(TypedDescriptorPoolSets.Num() == 0);
@@ -327,7 +353,6 @@ void FVulkanCmdBuffer::AcquirePoolSetContainer()
 
 bool FVulkanCmdBuffer::AcquirePoolSetAndDescriptorsIfNeeded(const class FVulkanDescriptorSetsLayout& Layout, bool bNeedDescriptors, VkDescriptorSet* OutDescriptors)
 {
-	check(!UseVulkanDescriptorCache())
 	//#todo-rco: This only happens when we call draws outside a render pass...
 	if (!CurrentDescriptorPoolSetContainer)
 	{
@@ -369,8 +394,8 @@ void FVulkanCmdBuffer::RefreshFenceStatus()
 			}
 			SubmittedWaitSemaphores.Reset();
 
-			FMemory::Memzero(CurrentViewport);
-			FMemory::Memzero(CurrentScissor);
+			CurrentViewports.Empty();
+			CurrentScissors.Empty();
 			CurrentStencilRef = 0;
 #if VULKAN_REUSE_FENCES
 			Fence->GetOwner()->ResetFence(Fence);
@@ -381,7 +406,7 @@ void FVulkanCmdBuffer::RefreshFenceStatus()
 #endif
 			++FenceSignaledCounter;
 
-			if (!UseVulkanDescriptorCache() && CurrentDescriptorPoolSetContainer)
+			if (CurrentDescriptorPoolSetContainer)
 			{
 				//#todo-rco: Reset here?
 				TypedDescriptorPoolSets.Reset();
@@ -458,6 +483,10 @@ FVulkanCommandBufferManager::FVulkanCommandBufferManager(FVulkanDevice* InDevice
 	}
 
 	ActiveCmdBuffer = Pool.Create(false);
+}
+
+void FVulkanCommandBufferManager::Init(FVulkanCommandListContext* InContext)
+{
 	ActiveCmdBuffer->InitializeTimings(InContext);
 	ActiveCmdBuffer->Begin();
 }
@@ -576,8 +605,7 @@ void FVulkanCommandBufferManager::SubmitActiveCmdBuffer(TArrayView<VulkanRHI::FS
 	check(!UploadCmdBuffer);
 	check(ActiveCmdBuffer);
 
-	FMemMark Mark(FMemStack::Get());
-	TArray<VkSemaphore, TMemStackAllocator<>> SemaphoreHandles;
+	TArray<VkSemaphore, FConcurrentLinearArrayAllocator> SemaphoreHandles;
 	SemaphoreHandles.Reserve(SignalSemaphores.Num() + 1);
 	for (VulkanRHI::FSemaphore* Semaphore : SignalSemaphores)
 	{
@@ -801,25 +829,34 @@ struct FRHICommandFreeUnusedCmdBuffers final : public FRHICommand<FRHICommandFre
 {
 	FVulkanCommandBufferPool* Pool;
 	FVulkanQueue* Queue;
+	bool bTrimMemory;
 
-	FRHICommandFreeUnusedCmdBuffers(FVulkanCommandBufferPool* InPool, FVulkanQueue* InQueue)
+	FRHICommandFreeUnusedCmdBuffers(FVulkanCommandBufferPool* InPool, FVulkanQueue* InQueue, bool bInTrimMemory)
 		: Pool(InPool)
 		, Queue(InQueue)
+		, bTrimMemory(bInTrimMemory)
 	{
 	}
 
 	void Execute(FRHICommandListBase& CmdList)
 	{
-		Pool->FreeUnusedCmdBuffers(Queue);
+		Pool->FreeUnusedCmdBuffers(Queue, bTrimMemory);
 	}
 };
 #endif
 
 
-void FVulkanCommandBufferPool::FreeUnusedCmdBuffers(FVulkanQueue* InQueue)
+void FVulkanCommandBufferPool::FreeUnusedCmdBuffers(FVulkanQueue* InQueue, bool bTrimMemory)
 {
 #if VULKAN_DELETE_STALE_CMDBUFFERS
 	FScopeLock ScopeLock(&CS);
+	
+	if (bTrimMemory)
+	{
+		VulkanRHI::vkTrimCommandPool(Device->GetInstanceHandle(), Handle, 0);
+		return;
+	}
+
 	const double CurrentTime = FPlatformTime::Seconds();
 
 	// In case Queue stores pointer to a cmdbuffer, do not delete it
@@ -840,25 +877,25 @@ void FVulkanCommandBufferPool::FreeUnusedCmdBuffers(FVulkanQueue* InQueue)
 			DeferredDeletionQueue.OnCmdBufferDeleted(CmdBuffer);
 
 			CmdBuffer->FreeMemory();
-			CmdBuffers.RemoveAtSwap(Index, 1, false);
+			CmdBuffers.RemoveAtSwap(Index, 1, EAllowShrinking::No);
 			FreeCmdBuffers.Add(CmdBuffer);
 		}
 	}
 #endif
 }
 
-void FVulkanCommandBufferManager::FreeUnusedCmdBuffers()
+void FVulkanCommandBufferManager::FreeUnusedCmdBuffers(bool bTrimMemory)
 {
 #if VULKAN_DELETE_STALE_CMDBUFFERS
 	FRHICommandList& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
 	if (!IsInRenderingThread() || (RHICmdList.Bypass() || !IsRunningRHIInSeparateThread()))
 	{
-		Pool.FreeUnusedCmdBuffers(Queue);
+		Pool.FreeUnusedCmdBuffers(Queue, bTrimMemory);
 	}
 	else
 	{
 		check(IsInRenderingThread());
-		ALLOC_COMMAND_CL(RHICmdList, FRHICommandFreeUnusedCmdBuffers)(&Pool, Queue);
+		ALLOC_COMMAND_CL(RHICmdList, FRHICommandFreeUnusedCmdBuffers)(&Pool, Queue, bTrimMemory);
 	}
 #endif
 }

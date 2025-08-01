@@ -5,6 +5,7 @@
 PRAGMA_DISABLE_UNSAFE_TYPECAST_WARNINGS
 
 #if PLATFORM_64BITS && PLATFORM_HAS_FPlatformVirtualMemoryBlock
+#include "Algo/Sort.h"
 #include "Logging/LogMacros.h"
 #include "Templates/Function.h"
 #include "GenericPlatform/GenericPlatformProcess.h"
@@ -12,6 +13,8 @@ PRAGMA_DISABLE_UNSAFE_TYPECAST_WARNINGS
 #include "HAL/IConsoleManager.h"
 #include "HAL/MemoryMisc.h"
 #include "HAL/PlatformMisc.h"
+
+#include <limits>
 
 struct FMallocBinnedArena::FPoolInfoSmall
 {
@@ -570,18 +573,19 @@ void FMallocBinnedArena::InitMallocBinned()
 		if (Size > ArenaParams.BasePageSize)
 		{
 			check(Size % 4096 == 0); // calculations are done assume 4k is the smallest page size we will ever see
-			SizeTable.Emplace(Size, ArenaParams.AllocationGranularity, Size / 4096, ArenaParams.BasePageSize, ArenaParams.MinimumAlignment);
+			check(Size / 4096 <= std::numeric_limits<uint8>::max())		// Make sure we don't try to allocate more pages than fits in our counter.
+			SizeTable.Emplace(Size, ArenaParams.AllocationGranularity, (uint8)(Size / 4096), ArenaParams.BasePageSize, ArenaParams.MinimumAlignment);
 		}
 		else
 		{
 			// it is difficult to test what would actually make a good bucket size here, wouldn't want a prime number, 33 for example because that would take 33 pages a slab
-			SizeTable.Emplace(Size, ArenaParams.AllocationGranularity, 1, ArenaParams.BasePageSize, ArenaParams.MinimumAlignment);
+			SizeTable.Emplace(Size, ArenaParams.AllocationGranularity, (uint8)1, ArenaParams.BasePageSize, ArenaParams.MinimumAlignment);
 		}
 		ArenaParams.PoolCount++;
 	}
 	if (ArenaParams.AdditionalBlockSizes.Num())
 	{
-		Sort(&SizeTable[0], SizeTable.Num());
+		Algo::Sort(SizeTable);
 	}
 	check(ArenaParams.PoolCount == SizeTable.Num());
 	check(SizeTable.Num() < 256);
@@ -1147,11 +1151,11 @@ void FMallocBinnedArena::SetupTLSCachesOnCurrentThread()
 	{
 		return;
 	}
-	if (!BinnedArenaTlsSlot)
+	if (!FPlatformTLS::IsValidTlsSlot(BinnedArenaTlsSlot))
 	{
 		BinnedArenaTlsSlot = FPlatformTLS::AllocTlsSlot();
 	}
-	check(BinnedArenaTlsSlot);
+	check(FPlatformTLS::IsValidTlsSlot(BinnedArenaTlsSlot));
 	FPerThreadFreeBlockLists::SetTLS(*this);
 }
 
@@ -1227,7 +1231,7 @@ FMallocBinnedArena::FBundleNode* FMallocBinnedArena::FFreeBlockList::PopBundles(
 void FMallocBinnedArena::FPerThreadFreeBlockLists::SetTLS(FMallocBinnedArena& Allocator)
 {
 	uint32 BinnedArenaTlsSlot = Allocator.BinnedArenaTlsSlot;
-	check(BinnedArenaTlsSlot);
+	check(FPlatformTLS::IsValidTlsSlot(BinnedArenaTlsSlot));
 	FPerThreadFreeBlockLists* ThreadSingleton = (FPerThreadFreeBlockLists*)FPlatformTLS::GetTlsValue(BinnedArenaTlsSlot);
 	if (!ThreadSingleton)
 	{
@@ -1243,7 +1247,7 @@ void FMallocBinnedArena::FPerThreadFreeBlockLists::SetTLS(FMallocBinnedArena& Al
 int64 FMallocBinnedArena::FPerThreadFreeBlockLists::ClearTLS(FMallocBinnedArena& Allocator)
 {
 	uint32 BinnedArenaTlsSlot = Allocator.BinnedArenaTlsSlot;
-	check(BinnedArenaTlsSlot);
+	check(FPlatformTLS::IsValidTlsSlot(BinnedArenaTlsSlot));
 	int64 Result = 0;
 	FPerThreadFreeBlockLists* ThreadSingleton = (FPerThreadFreeBlockLists*)FPlatformTLS::GetTlsValue(BinnedArenaTlsSlot);
 	if (ThreadSingleton)
@@ -1353,4 +1357,4 @@ void FMallocBinnedArena::DumpAllocatorStats(class FOutputDevice& Ar)
 }
 #endif
 
-PRAGMA_ENABLE_UNSAFE_TYPECAST_WARNINGS
+PRAGMA_RESTORE_UNSAFE_TYPECAST_WARNINGS

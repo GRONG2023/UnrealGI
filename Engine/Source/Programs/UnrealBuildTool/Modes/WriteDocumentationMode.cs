@@ -1,11 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
 
 namespace UnrealBuildTool
 {
@@ -35,32 +32,32 @@ namespace UnrealBuildTool
 		/// The HTML file to write to
 		/// </summary>
 		[CommandLine(Required = true)]
-		FileReference OutputFile = null;
+		FileReference OutputFile = null!;
 
 		/// <summary>
 		/// Entry point for this command
 		/// </summary>
 		/// <returns></returns>
-		public override int Execute(CommandLineArguments Arguments)
+		public override Task<int> ExecuteAsync(CommandLineArguments Arguments, ILogger Logger)
 		{
 			Arguments.ApplyTo(this);
 			Arguments.CheckAllArgumentsUsed();
 
-			switch(Type)
+			switch (Type)
 			{
 				case DocumentationType.BuildConfiguration:
-					XmlConfig.WriteDocumentation(OutputFile);
+					XmlConfig.WriteDocumentation(OutputFile, Logger);
 					break;
 				case DocumentationType.ModuleRules:
-					RulesDocumentation.WriteDocumentation(typeof(ModuleRules), OutputFile);
+					RulesDocumentation.WriteDocumentation(typeof(ModuleRules), OutputFile, Logger);
 					break;
 				case DocumentationType.TargetRules:
-					RulesDocumentation.WriteDocumentation(typeof(TargetRules), OutputFile);
+					RulesDocumentation.WriteDocumentation(typeof(TargetRules), OutputFile, Logger);
 					break;
 				default:
 					throw new BuildException("Invalid documentation type: {0}", Type);
 			}
-			return 0;
+			return Task.FromResult(0);
 		}
 	}
 }

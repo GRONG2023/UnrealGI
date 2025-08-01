@@ -2,19 +2,18 @@
 
 #include "Components/BillboardComponent.h"
 #include "UObject/ConstructorHelpers.h"
-#include "EngineGlobals.h"
 #include "PrimitiveViewRelevance.h"
 #include "PrimitiveSceneProxy.h"
 #include "Components/LightComponent.h"
 #include "Engine/CollisionProfile.h"
-#include "UObject/UObjectHash.h"
 #include "UObject/UObjectIterator.h"
 #include "Engine/Texture2D.h"
 #include "SceneManagement.h"
 #include "Engine/Light.h"
 #include "Engine/Engine.h"
-#include "Engine/LevelStreaming.h"
-#include "LevelUtils.h"
+#include "TextureResource.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BillboardComponent)
 
 namespace BillboardConstants
 {
@@ -59,24 +58,22 @@ public:
 		bWillEverBeLit = false;
 
 		// Calculate the scale factor for the sprite.
-		float Scale = InComponent->GetComponentTransform().GetMaximumAxisScale();
+		Scale = InComponent->GetComponentTransform().GetMaximumAxisScale() * SpriteScale * 0.25f;
+
+		OpacityMaskRefVal = InComponent->OpacityMaskRefVal;
 
 		if(InComponent->Sprite)
 		{
 			Texture = InComponent->Sprite;
 
-			const float TextureWidth = FMath::Max<int32>((int32)Texture->GetSurfaceWidth() >> Texture->GetCachedLODBias(), 1);
-			const float TextureHeight = FMath::Max<int32>((int32)Texture->GetSurfaceHeight() >> Texture->GetCachedLODBias(), 1);
 			// Set UL and VL to the size of the texture if they are set to 0.0, otherwise use the given value
-			UL = InComponent->UL == 0.0f ? TextureWidth : InComponent->UL;
-			VL = InComponent->VL == 0.0f ? TextureHeight : InComponent->VL;
-			SizeX = Scale * UL * SpriteScale * 0.25f;
-			SizeY = Scale * VL * SpriteScale * 0.25f;
+			ComponentUL = InComponent->UL;
+			ComponentVL = InComponent->VL;
 		}
 		else
 		{
 			Texture = NULL;
-			SizeX = SizeY = UL = VL = 0;
+			ComponentUL = ComponentVL = 0;
 		}
 
 		if (AActor* Owner = InComponent->GetOwner())
@@ -100,24 +97,10 @@ public:
 
 			//save off override states
 #if WITH_EDITORONLY_DATA
-			bIsActorLocked = Owner->bLockLocation;
+			bIsActorLocked = InComponent->bShowLockedLocation && Owner->IsLockLocation();
 #else // WITH_EDITORONLY_DATA
 			bIsActorLocked = false;
 #endif // WITH_EDITORONLY_DATA
-
-			// Level colorization
-			ULevel* Level = Owner->GetLevel();
-			if (ULevelStreaming* LevelStreaming = FLevelUtils::FindStreamingLevel(Level))
-			{
-				// Selection takes priority over level coloration.
-				SetLevelColor(LevelStreaming->LevelColor);
-			}
-		}
-
-		FColor NewPropertyColor;
-		if (GEngine->GetPropertyColorationColor( (UObject*)InComponent, NewPropertyColor ))
-		{
-			SetPropertyColor(NewPropertyColor);
 		}
 	}
 
@@ -127,9 +110,12 @@ public:
 	{
 		QUICK_SCOPE_CYCLE_COUNTER( STAT_SpriteSceneProxy_GetDynamicMeshElements );
 
-		FTexture* TextureResource = Texture ? Texture->Resource : nullptr;
+		const FTexture* TextureResource = Texture ? Texture->GetResource() : nullptr;
 		if (TextureResource)
 		{
+			const float UL = ComponentUL == 0.0f ? TextureResource->GetSizeX() : ComponentUL;
+			const float VL = ComponentVL == 0.0f ? TextureResource->GetSizeY() : ComponentVL;
+
 			for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
 			{
 				if (VisibilityMap & (1 << ViewIndex))
@@ -137,8 +123,8 @@ public:
 					const FSceneView* View = Views[ViewIndex];
 
 					// Calculate the view-dependent scaling factor.
-					float ViewedSizeX = SizeX;
-					float ViewedSizeY = SizeY;
+					float ViewedSizeX = Scale * UL;
+					float ViewedSizeY = Scale * VL;
 
 					if (bIsScreenSizeScaled && (View->ViewMatrices.GetProjectionMatrix().M[3][3] != 1.0f))
 					{
@@ -188,11 +174,11 @@ public:
 					{
 						ColorToUse = FColor::Red;
 					}
-					FLinearColor LevelColorToUse = IsSelected() ? ColorToUse : (FLinearColor)GetLevelColor();
-					FLinearColor PropertyColorToUse = GetPropertyColor();
+					FLinearColor PrimitiveColorToUse = IsSelected() ? ColorToUse : (FLinearColor)GetPrimitiveColor();
 
-					const FLinearColor& SpriteColor = View->Family->EngineShowFlags.LevelColoration ? LevelColorToUse :
-						( (View->Family->EngineShowFlags.PropertyColoration) ? PropertyColorToUse : ColorToUse );
+					ColorToUse.A = 1.0f;
+
+					const FLinearColor& SpriteColor = View->Family->EngineShowFlags.ActorColoration ? PrimitiveColorToUse : ColorToUse;
 
 					Collector.GetPDI(ViewIndex)->DrawSprite(
 						Origin,
@@ -201,7 +187,9 @@ public:
 						TextureResource,
 						SpriteColor,
 						GetDepthPriorityGroup(View),
-						U,UL,V,VL
+						U,UL,V,VL,
+						SE_BLEND_Masked,
+						OpacityMaskRefVal
 						);
 				}
 			}
@@ -236,7 +224,7 @@ public:
 		Result.bEditorPrimitiveRelevance = UseEditorCompositing(View);
 		return Result;
 	}
-	virtual void OnTransformChanged() override
+	virtual void OnTransformChanged(FRHICommandListBase& RHICmdList) override
 	{
 		Origin = GetLocalToWorld().GetOrigin();
 	}
@@ -246,14 +234,14 @@ public:
 
 private:
 	FVector Origin;
-	float SizeX;
-	float SizeY;
 	const float ScreenSize;
 	const UTexture2D* Texture;
+	float Scale;
 	const float U;
-	float UL;
+	float ComponentUL;
 	const float V;
-	float VL;
+	float ComponentVL;
+	float OpacityMaskRefVal;
 	FLinearColor Color;
 	const uint32 bIsScreenSizeScaled : 1;
 	uint32 bIsActorLocked : 1;
@@ -295,6 +283,7 @@ UBillboardComponent::UBillboardComponent(const FObjectInitializer& ObjectInitial
 	V = 0;
 	UL = 0;
 	VL = 0;
+	OpacityMaskRefVal = .5f;
 	bHiddenInGame = true;
 	SetGenerateOverlapEvents(false);
 	bUseEditorCompositing = true;
@@ -325,12 +314,17 @@ FBoxSphereBounds UBillboardComponent::CalcBounds(const FTransform& LocalToWorld)
 	return FBoxSphereBounds(LocalToWorld.GetLocation(),FVector(NewScale,NewScale,NewScale),FMath::Sqrt(3.0f * FMath::Square(NewScale)));
 }
 
+bool UBillboardComponent::IsShown(const FEngineShowFlags& ShowFlags) const
+{
+	return ShowFlags.BillboardSprites;
+}
+
 #if WITH_EDITOR
-bool UBillboardComponent::ComponentIsTouchingSelectionBox(const FBox& InSelBBox, const FEngineShowFlags& ShowFlags, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const
+bool UBillboardComponent::ComponentIsTouchingSelectionBox(const FBox& InSelBBox, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const
 {
 	AActor* Actor = GetOwner();
 
-	if (!bConsiderOnlyBSP && ShowFlags.BillboardSprites && Sprite != nullptr && Actor != nullptr)
+	if (!bConsiderOnlyBSP && Sprite != nullptr && Actor != nullptr)
 	{
 		const float Scale = GetComponentTransform().GetMaximumAxisScale();
 
@@ -352,11 +346,11 @@ bool UBillboardComponent::ComponentIsTouchingSelectionBox(const FBox& InSelBBox,
 	return false;
 }
 
-bool UBillboardComponent::ComponentIsTouchingSelectionFrustum(const FConvexVolume& InFrustum, const FEngineShowFlags& ShowFlags, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const
+bool UBillboardComponent::ComponentIsTouchingSelectionFrustum(const FConvexVolume& InFrustum, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const
 {
 	AActor* Actor = GetOwner();
 
-	if (!bConsiderOnlyBSP && ShowFlags.BillboardSprites && Sprite != nullptr && Actor != nullptr)
+	if (!bConsiderOnlyBSP && Sprite != nullptr && Actor != nullptr)
 	{
 		const float Scale = GetComponentTransform().GetMaximumAxisScale();
 		const float MaxExtent = FMath::Max(Sprite->GetSizeX(), Sprite->GetSizeY());
@@ -397,6 +391,12 @@ void UBillboardComponent::SetSpriteAndUV(UTexture2D* NewSprite, int32 NewU, int3
 	SetSprite(NewSprite);
 }
 
+void UBillboardComponent::SetOpacityMaskRefVal(float RefVal)
+{
+	OpacityMaskRefVal = RefVal;
+	MarkRenderStateDirty();
+}
+
 #if WITH_EDITORONLY_DATA
 void UBillboardComponent::SetEditorScale(float InEditorScale)
 {
@@ -407,3 +407,4 @@ void UBillboardComponent::SetEditorScale(float InEditorScale)
 	}
 }
 #endif
+

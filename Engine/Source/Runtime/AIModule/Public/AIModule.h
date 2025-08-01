@@ -6,7 +6,7 @@
 #include "Modules/ModuleManager.h"
 #include "AI/AISystemBase.h"
 #if WITH_EDITOR
-#include "Developer/AssetTools/Public/AssetTypeCategories.h"
+#include "AssetTypeCategories.h"
 #endif // WITH_EDITOR
 
 /**
@@ -39,6 +39,7 @@ public:
 	}
 
 #if WITH_EDITOR
+	UE_DEPRECATED(5.3, "Should use a UAssetDefinitionDefault and return EAssetCategoryPaths::AI instead.")
 	virtual EAssetTypeCategories::Type GetAIAssetCategoryBit() const = 0;
 #endif // WITH_EDITOR
 };

@@ -2,12 +2,11 @@
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.IO;
 using System.Diagnostics;
+using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 
 namespace UnrealBuildTool
 {
@@ -32,49 +31,32 @@ namespace UnrealBuildTool
 	/// </summary>
 	public abstract class BuildHostPlatform
 	{
-		private static BuildHostPlatform CurrentPlatform;
-		private static bool bIsMac = File.Exists("/System/Library/CoreServices/SystemVersion.plist");
-
-		/// <summary>
-		/// Returns the name of platform UBT is running on. Internal use only. If you need access this this enum, use BuildHostPlatform.Current.Platform */
-		/// </summary>
-		private static UnrealTargetPlatform GetRuntimePlatform()
-		{
-			PlatformID Platform = Environment.OSVersion.Platform;
-			switch (Platform)
-			{
-				case PlatformID.Win32NT:
-					return UnrealTargetPlatform.Win64;
-				case PlatformID.Unix:
-					return bIsMac ? UnrealTargetPlatform.Mac : UnrealTargetPlatform.Linux;
-				case PlatformID.MacOSX:
-					return UnrealTargetPlatform.Mac;
-				default:
-					throw new BuildException("Unhandled runtime platform " + Platform);
-			}
-		}
+		private static BuildHostPlatform? CurrentPlatform;
 
 		/// <summary>
 		/// Host platform singleton.
 		/// </summary>
-		static public BuildHostPlatform Current
+		public static BuildHostPlatform Current
 		{
 			get
 			{
 				if (CurrentPlatform == null)
 				{
-					UnrealTargetPlatform RuntimePlatform = GetRuntimePlatform();
-					if (RuntimePlatform == UnrealTargetPlatform.Win64)
+					if (RuntimePlatform.IsWindows)
 					{
 						CurrentPlatform = new WindowsBuildHostPlatform();
 					}
-					else if (RuntimePlatform == UnrealTargetPlatform.Mac)
+					else if (RuntimePlatform.IsMac)
 					{
 						CurrentPlatform = new MacBuildHostPlatform();
 					}
-					else if (RuntimePlatform == UnrealTargetPlatform.Linux)
+					else if (RuntimePlatform.IsLinux)
 					{
 						CurrentPlatform = new LinuxBuildHostPlatform();
+					}
+					else
+					{
+						throw new NotImplementedException();
 					}
 				}
 				return CurrentPlatform;
@@ -84,17 +66,22 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// Gets the current host platform type.
 		/// </summary>
-		abstract public UnrealTargetPlatform Platform { get; }
+		public abstract UnrealTargetPlatform Platform { get; }
 
 		/// <summary>
 		/// Gets the path to the shell for this platform
 		/// </summary>
-		abstract public FileReference Shell { get; }
+		public abstract FileReference Shell { get; }
 
 		/// <summary>
 		/// The type of shell returned by the Shell parameter
 		/// </summary>
-		abstract public ShellType ShellType { get; }
+		public abstract ShellType ShellType { get; }
+
+		/// <summary>
+		/// The executable binary suffix for this platform
+		/// </summary>
+		public abstract string BinarySuffix { get; }
 
 		/// <summary>
 		/// Class that holds information about a running process
@@ -137,7 +124,7 @@ namespace UnrealBuildTool
 			{
 				PID = Proc.Id;
 				Name = Proc.ProcessName;
-				Filename = Path.GetFullPath(Proc.MainModule.FileName);
+				Filename = Proc.MainModule?.FileName != null ? Path.GetFullPath(Proc.MainModule.FileName) : String.Empty;
 			}
 
 			/// <summary>
@@ -177,7 +164,7 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="Name">Name of the process to get information for.</param>
 		/// <returns></returns>
-		public virtual ProcessInfo GetProcessByName(string Name)
+		public virtual ProcessInfo? GetProcessByName(string Name)
 		{
 			ProcessInfo[] AllProcess = GetProcesses();
 			foreach (ProcessInfo Info in AllProcess)
@@ -225,12 +212,24 @@ namespace UnrealBuildTool
 				{
 					foreach (ProcessModule Module in Proc.Modules.Cast<System.Diagnostics.ProcessModule>())
 					{
-						Modules.Add(Path.GetFullPath(Module.FileName));
+						if (Module.FileName != null)
+						{
+							Modules.Add(Path.GetFullPath(Module.FileName));
+						}
 					}
 				}
 			}
 			catch { }
 			return Modules.ToArray();
+		}
+
+		/// <summary>
+		/// Determines if the UBT process is running through WINE
+		/// </summary>
+		/// <returns>Sequence of project file formats</returns>
+		public virtual bool IsRunningOnWine()
+		{
+			return false;
 		}
 
 		/// <summary>
@@ -242,67 +241,67 @@ namespace UnrealBuildTool
 
 	class WindowsBuildHostPlatform : BuildHostPlatform
 	{
-		public override UnrealTargetPlatform Platform
-		{
-			get { return UnrealTargetPlatform.Win64; }
-		}
+		public override UnrealTargetPlatform Platform => UnrealTargetPlatform.Win64;
 
-		public override FileReference Shell
-		{
-			get { return new FileReference(Environment.GetEnvironmentVariable("COMSPEC")); }
-		}
+		public override FileReference Shell => new FileReference(Environment.GetEnvironmentVariable("COMSPEC")!);
 
-		public override ShellType ShellType
+		public override ShellType ShellType => ShellType.Cmd;
+
+		public override string BinarySuffix => ".exe";
+
+		[DllImport("kernel32.dll", CharSet = CharSet.Auto)]
+		private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+		[DllImport("kernel32.dll", CharSet = CharSet.Auto)]
+		private static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
+
+		public override bool IsRunningOnWine()
 		{
-			get { return ShellType.Cmd; }
+			IntPtr NtdllHandle = GetModuleHandle("ntdll.dll");
+			return NtdllHandle.ToInt64() != 0 && GetProcAddress(NtdllHandle, "wine_get_version").ToInt64() != 0;
 		}
 
 		internal override IEnumerable<ProjectFileFormat> GetDefaultProjectFileFormats()
 		{
 			yield return ProjectFileFormat.VisualStudio;
+#if __VPROJECT_AVAILABLE__
+			yield return ProjectFileFormat.VProject;
+#endif
 		}
 	}
 
 	class MacBuildHostPlatform : BuildHostPlatform
 	{
-		public override UnrealTargetPlatform Platform
-		{
-			get { return UnrealTargetPlatform.Mac; }
-		}
+		public override UnrealTargetPlatform Platform => UnrealTargetPlatform.Mac;
 
-		public override FileReference Shell
-		{
-			get { return new FileReference("/bin/sh"); }
-		}
+		public override FileReference Shell => new FileReference("/bin/sh");
 
-		public override ShellType ShellType
-		{
-			get { return ShellType.Sh; }
-		}
+		public override ShellType ShellType => ShellType.Sh;
+
+		public override string BinarySuffix => String.Empty;
 
 		/// <summary>
-		/// Currently Mono returns incomplete process names in Process.GetProcesses() so we need to parse 'ps' output.
+		/// (needs confirmation) Currently returns incomplete process names in Process.GetProcesses() so we need to parse 'ps' output.
 		/// </summary>
 		/// <returns></returns>
 		public override ProcessInfo[] GetProcesses()
 		{
 			List<ProcessInfo> Result = new List<ProcessInfo>();
 
+			string TempFile = Path.Combine("/var/tmp", Path.GetTempFileName());
 			ProcessStartInfo StartInfo = new ProcessStartInfo();
-			StartInfo.FileName = "ps";
-			StartInfo.Arguments = "-eaw -o pid,comm";
+			StartInfo.FileName = "/bin/sh";
+			StartInfo.Arguments = "-c \"ps -eaw -o pid,comm > " + TempFile + "\"";
 			StartInfo.CreateNoWindow = true;
-			StartInfo.UseShellExecute = false;
-			StartInfo.RedirectStandardOutput = true;
 
 			Process Proc = new Process();
 			Proc.StartInfo = StartInfo;
 			try
 			{
 				Proc.Start();
-				for (string Line = Proc.StandardOutput.ReadLine(); Line != null; Line = Proc.StandardOutput.ReadLine())
+				foreach (string FileLine in File.ReadAllLines(TempFile))
 				{
-					Line = Line.Trim();
+					string Line = FileLine.Trim();
 					int PIDEnd = Line.IndexOf(' ');
 					string PIDString = Line.Substring(0, PIDEnd);
 					if (PIDString != "PID")
@@ -321,6 +320,7 @@ namespace UnrealBuildTool
 						catch { }
 					}
 				}
+				File.Delete(TempFile);
 				Proc.WaitForExit();
 			}
 			catch { }
@@ -328,7 +328,7 @@ namespace UnrealBuildTool
 		}
 
 		/// <summary>
-		/// Currently Mono returns incomplete list of modules for Process.Modules so we need to parse vmmap output.
+		/// (needs confirmation) Currently returns incomplete list of modules for Process.Modules so we need to parse vmmap output.
 		/// </summary>
 		/// <param name="PID"></param>
 		/// <param name="Filename"></param>
@@ -363,7 +363,7 @@ namespace UnrealBuildTool
 		}
 		private void ProcessVMMapOutput(Process Proc, HashSet<string> Modules)
 		{
-			for (string Line = Proc.StandardOutput.ReadLine(); Line != null; Line = Proc.StandardOutput.ReadLine())
+			for (string? Line = Proc.StandardOutput.ReadLine(); Line != null; Line = Proc.StandardOutput.ReadLine())
 			{
 				Line = Line.Trim();
 				if (Line.EndsWith(".dylib"))
@@ -383,29 +383,26 @@ namespace UnrealBuildTool
 		internal override IEnumerable<ProjectFileFormat> GetDefaultProjectFileFormats()
 		{
 			yield return ProjectFileFormat.XCode;
+			yield return ProjectFileFormat.VisualStudioMac;
+#if __VPROJECT_AVAILABLE__
+			yield return ProjectFileFormat.VProject;
+#endif
 		}
 	}
 
 	class LinuxBuildHostPlatform : BuildHostPlatform
 	{
-		public override UnrealTargetPlatform Platform
-		{
-			get { return UnrealTargetPlatform.Linux; }
-		}
+		public override UnrealTargetPlatform Platform => UnrealTargetPlatform.Linux;
 
-		public override FileReference Shell
-		{
-			get { return new FileReference("/bin/sh"); }
-		}
+		public override FileReference Shell => new FileReference("/bin/sh");
 
-		public override ShellType ShellType
-		{
-			get { return ShellType.Sh; }
-		}
+		public override ShellType ShellType => ShellType.Sh;
+
+		public override string BinarySuffix => String.Empty;
 
 		/// <summary>
-		/// Currently Mono returns incomplete process names in Process.GetProcesses() so we need to use /proc
-		/// (also, Mono locks up during process traversal sometimes, trying to open /dev/snd/pcm*)
+		/// (needs confirmation) Currently returns incomplete process names in Process.GetProcesses() so we need to use /proc
+		/// (also, locks up during process traversal sometimes, trying to open /dev/snd/pcm*)
 		/// </summary>
 		/// <returns></returns>
 		public override ProcessInfo[] GetProcesses()
@@ -415,8 +412,8 @@ namespace UnrealBuildTool
 		}
 
 		/// <summary>
-		/// Currently Mono returns incomplete list of modules for Process.Modules so we need to parse /proc/PID/maps.
-		/// (also, Mono locks up during process traversal sometimes, trying to open /dev/snd/pcm*)
+		/// (needs confirmation) Currently returns incomplete list of modules for Process.Modules so we need to parse /proc/PID/maps.
+		/// (also, locks up during process traversal sometimes, trying to open /dev/snd/pcm*)
 		/// </summary>
 		/// <param name="PID"></param>
 		/// <param name="Filename"></param>
@@ -431,10 +428,9 @@ namespace UnrealBuildTool
 		{
 			yield return ProjectFileFormat.Make;
 			yield return ProjectFileFormat.VisualStudioCode;
-			yield return ProjectFileFormat.KDevelop;
-			yield return ProjectFileFormat.QMake;
-			yield return ProjectFileFormat.CMake;
-			yield return ProjectFileFormat.CodeLite;
+#if __VPROJECT_AVAILABLE__
+			yield return ProjectFileFormat.VProject;
+#endif
 		}
 	}
 }

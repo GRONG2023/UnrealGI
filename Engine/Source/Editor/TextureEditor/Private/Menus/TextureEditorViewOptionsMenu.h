@@ -20,38 +20,26 @@ public:
 	 *
 	 * @param MenuBuilder The builder for the menu that owns this menu.
 	 */
-	static void MakeMenu( FMenuBuilder& MenuBuilder, bool bIsVolumeTexture )
+	static void MakeMenu(FMenuBuilder& MenuBuilder)
 	{
-		// color channel options
-		MenuBuilder.BeginSection("ChannelSection", LOCTEXT("ChannelsSectionHeader", "Color Channels"));
-		{
-			MenuBuilder.AddMenuEntry(FTextureEditorCommands::Get().RedChannel);
-			MenuBuilder.AddMenuEntry(FTextureEditorCommands::Get().GreenChannel);
-			MenuBuilder.AddMenuEntry(FTextureEditorCommands::Get().BlueChannel);
-			MenuBuilder.AddMenuEntry(FTextureEditorCommands::Get().AlphaChannel);
-			MenuBuilder.AddMenuEntry(FTextureEditorCommands::Get().Desaturation);
-		}
-		MenuBuilder.EndSection();
-
 		// view port options
 		MenuBuilder.BeginSection("ViewportSection", LOCTEXT("ViewportSectionHeader", "Viewport Options"));
 		{
+			MenuBuilder.AddMenuEntry(FTextureEditorCommands::Get().Desaturation);
+
 			MenuBuilder.AddSubMenu(
 				LOCTEXT("Background", "Background"),
 				LOCTEXT("BackgroundTooltip", "Set the viewport's background"),
 				FNewMenuDelegate::CreateStatic(&FTextureEditorViewOptionsMenu::GenerateBackgroundMenuContent)
 			);
 
-			if (bIsVolumeTexture)
-			{
-				MenuBuilder.AddSubMenu(
-					LOCTEXT("ViewMode", "View Mode"),
-					LOCTEXT("ViewModeTooltip", "Set the view mode"),
-					FNewMenuDelegate::CreateStatic(&FTextureEditorViewOptionsMenu::GenerateVolumeDisplayModeMenuContent)
-				);
-			}
-
 			MenuBuilder.AddMenuEntry(FTextureEditorCommands::Get().TextureBorder);
+
+			MenuBuilder.AddSubMenu(
+				LOCTEXT("Sampling", "Sampling Mode"),
+				LOCTEXT("SamplingTooltip", "Set the texture sampling mode"),
+				FNewMenuDelegate::CreateStatic(&FTextureEditorViewOptionsMenu::GenerateSamplingMenuContent)
+			);
 		}
 		MenuBuilder.EndSection();
 
@@ -74,14 +62,14 @@ protected:
 	}
 
 	/**
-	 * Creates the 'Display Mode' sub-menu.
+	 * Creates the 'Sampling Mode' sub-menu.
 	 *
 	 * @param MenuBuilder The builder for the menu that owns this menu.
 	 */
-	static void GenerateVolumeDisplayModeMenuContent( FMenuBuilder& MenuBuilder )
+	static void GenerateSamplingMenuContent(FMenuBuilder& MenuBuilder)
 	{
-		MenuBuilder.AddMenuEntry(FTextureEditorCommands::Get().DepthSlices);
-		MenuBuilder.AddMenuEntry(FTextureEditorCommands::Get().TraceIntoVolume);
+		MenuBuilder.AddMenuEntry(FTextureEditorCommands::Get().DefaultSampling);
+		MenuBuilder.AddMenuEntry(FTextureEditorCommands::Get().PointSampling);
 	}
 };
 

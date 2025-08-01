@@ -6,29 +6,20 @@ public class TextureFormatETC2 : ModuleRules
 {
 	public TextureFormatETC2(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateIncludePathModuleNames.AddRange(
-			new string[] {
-				"TargetPlatform",
-				"TextureCompressor",
-				"Engine"
-			}
-			);
-
-		PrivateDependencyModuleNames.AddRange(
-			new string[] {
-				"Core",
-				"ImageCore",
-				"ImageWrapper"
-			}
-			);
-
-		if (Target.Platform == UnrealTargetPlatform.Win64)
+		PrivateIncludePathModuleNames.AddRange(new string[]
 		{
-			AddEngineThirdPartyPrivateStaticDependencies(Target, "QualcommTextureConverter");
-		}
-		else
+			"DerivedDataCache",
+			"TextureCompressor",
+			"TextureFormat",
+		});
+
+		PrivateDependencyModuleNames.AddRange(new string[]
 		{
-			AddEngineThirdPartyPrivateStaticDependencies(Target, "QualcommTextureConverter");
-		}
+			"Core",
+			"ImageCore",
+			"TextureBuild",
+		});
+
+		AddEngineThirdPartyPrivateStaticDependencies(Target, "etc2comp");
 	}
 }

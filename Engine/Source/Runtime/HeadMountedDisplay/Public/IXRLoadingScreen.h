@@ -13,7 +13,7 @@
  *
  * To reduce duplicated code, implementations should use the FXRLoadingScreenBase of FDefaultXRLoadingScreen instead of implementing this interface directly.
  */
-class HEADMOUNTEDDISPLAY_API  IXRLoadingScreen 
+class  IXRLoadingScreen 
 {
 public:
 
@@ -83,8 +83,13 @@ public:
 	virtual bool IsShown() const = 0;
 
 	/**
+	 * Returns whether a loading movie is playing or not.
+	 */
+	virtual bool IsPlayingLoadingMovie() const = 0;
+
+	/**
 	 * Internal utility method for implementing backwards compatibility with IStereoLayers::Show/HideSplashScreen.
 	 * Should be called from implementations overriding IStereoLayer::UpdateSplashScreen()
 	 */
-	static void ShowLoadingScreen_Compat(bool bShow, FTexture2DRHIRef Texture, const FVector& Offset, const FVector2D& Scale);
+	static HEADMOUNTEDDISPLAY_API void ShowLoadingScreen_Compat(bool bShow, FTexture2DRHIRef Texture, const FVector& Offset, const FVector2D& Scale);
 };

@@ -4,12 +4,13 @@
 #include "Styling/SlateStyleRegistry.h"
 #include "Styling/SlateTypes.h"
 #include "Styling/CoreStyle.h"
-#include "EditorStyleSet.h"
+#include "Styling/StarshipCoreStyle.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateStyleMacros.h"
 
-#define IMAGE_BRUSH( RelativePath, ... ) FSlateImageBrush( FPaths::EngineContentDir() / "Editor/Slate"/ RelativePath + TEXT(".png"), __VA_ARGS__ )
-#define BOX_BRUSH( RelativePath, ... ) FSlateBoxBrush( FPaths::EngineContentDir() / "Editor/Slate"/ RelativePath + TEXT(".png"), __VA_ARGS__ )
-#define BORDER_BRUSH( RelativePath, ... ) FSlateBorderBrush( FPaths::EngineContentDir() / "Editor/Slate"/ RelativePath + TEXT(".png"), __VA_ARGS__ )
-#define DEFAULT_FONT(...) FCoreStyle::GetDefaultFontStyle(__VA_ARGS__)
+// This is to fix the issue that SlateStyleMacros like IMAGE_BRUSH look for RootToContentDir but StyleSet->RootToContentDir is how this style is set up
+#define RootToContentDir Style.RootToContentDir
+#define RootToCoreContentDir Style.RootToCoreContentDir
 
 TSharedPtr< FSlateStyleSet > FLogVisualizerStyle::StyleInstance = nullptr;
 
@@ -37,11 +38,11 @@ FName FLogVisualizerStyle::GetStyleSetName()
 
 TSharedRef< FSlateStyleSet > FLogVisualizerStyle::Create()
 {
-	const FVector2D Icon8x8(8.0f, 8.0f);
-	const FVector2D Icon16x16(16.0f, 16.0f);
-	const FVector2D Icon20x20(20.0f, 20.0f);
-	const FVector2D Icon40x40(40.0f, 40.0f);
-	const FVector2D Icon48x48(48.0f, 48.0f);
+	const FVector2f Icon8x8(8.0f, 8.0f);
+	const FVector2f Icon16x16(16.0f, 16.0f);
+	const FVector2f Icon20x20(20.0f, 20.0f);
+	const FVector2f Icon40x40(40.0f, 40.0f);
+	const FVector2f Icon48x48(48.0f, 48.0f);
 
 	TSharedRef<FSlateStyleSet> StyleRef = MakeShareable(new FSlateStyleSet(FLogVisualizerStyle::GetStyleSetName()));
 	StyleRef->SetContentRoot(FPaths::EngineContentDir() / TEXT("Editor/Slate"));
@@ -52,7 +53,7 @@ TSharedRef< FSlateStyleSet > FLogVisualizerStyle::Create()
 	const FTextBlockStyle NormalText = FTextBlockStyle()
 		.SetFont(DEFAULT_FONT("Regular", 9))
 		.SetColorAndOpacity(FSlateColor::UseForeground())
-		.SetShadowOffset(FVector2D::ZeroVector)
+		.SetShadowOffset(FVector2f::ZeroVector)
 		.SetShadowColorAndOpacity(FLinearColor::Black)
 		.SetHighlightColor(FLinearColor(0.02f, 0.3f, 0.0f))
 		.SetHighlightShape(BOX_BRUSH("Common/TextBlockHighlightShape", FMargin(3.f / 8.f)));
@@ -63,16 +64,16 @@ TSharedRef< FSlateStyleSet > FLogVisualizerStyle::Create()
 	Style.Set("TextLogs.Text", LogsText);
 
 	{
-		Style.Set("LogVisualizerApp.TabIcon", new IMAGE_BRUSH("Icons/icon_tab_DebugTools_40x", Icon16x16));
+		Style.Set("LogVisualizerApp.TabIcon", new IMAGE_BRUSH_SVG("Starship/Common/VisualLogger", Icon16x16));
 		
 		Style.Set("LogVisualizer.LogBar.Background", new BOX_BRUSH("Common/ProgressBar_Background", FMargin(5.f / 12.f)));
-		Style.Set("LogVisualizer.LogBar.Selected", new BOX_BRUSH("Common/TaskGraph_Selected", FMargin(5.f / 12.f)));
-		Style.Set("LogVisualizer.LogBar.EntryDefault", new BOX_BRUSH("Common/TaskGraph_Mono", FMargin(5.f / 12.f)));
+		Style.Set("LogVisualizer.LogBar.Selected", new CORE_BOX_BRUSH("Common/ProfileVisualizer_Selected", FMargin(5.f / 12.f)));
+		Style.Set("LogVisualizer.LogBar.EntryDefault", new CORE_BOX_BRUSH("Common/ProfileVisualizer_Mono", FMargin(5.f / 12.f)));
 		Style.Set("LogVisualizer.LogBar.TimeMark", new BOX_BRUSH("Icons/LV_BarMark", FMargin(5.f / 12.f)));
 
-		//Style.Set("ToolPanel.GroupBorder", FEditorStyle::Get().GetBrush("ToolPanel.GroupBorder"));
+		//Style.Set("ToolPanel.GroupBorder", FAppStyle::Get().GetBrush("ToolPanel.GroupBorder"));
 		Style.Set("ToolPanel.GroupBorder", new BOX_BRUSH("Common/GroupBorder", FMargin(4.0f / 16.0f)));
-		//Style.Set("NoBorder", FEditorStyle::Get().GetBrush("NoBorder"));
+		//Style.Set("NoBorder", FAppStyle::Get().GetBrush("NoBorder"));
 		Style.Set("NoBorder", new FSlateNoResource());
 		Style.Set("ToolBar.Button.Normal", new FSlateNoResource());
 		Style.Set("ToolBar.Button.Hovered", new BOX_BRUSH("Common/RoundedSelection_16x", 4.0f / 16.0f, FLinearColor(0.728f, 0.364f, 0.003f)));
@@ -103,9 +104,9 @@ TSharedRef< FSlateStyleSet > FLogVisualizerStyle::Create()
 
 		Style.Set("TableView.DarkRow", FTableRowStyle(NormalTableRowStyle)
 			.SetEvenRowBackgroundBrush(IMAGE_BRUSH("Common/Selection", Icon8x8, FLinearColor(1.0f, 1.0f, 1.0f, 0.1f)))
-			.SetEvenRowBackgroundHoveredBrush(IMAGE_BRUSH("PropertyView/DetailCategoryMiddle_Hovered", FVector2D(16, 16)))
+			.SetEvenRowBackgroundHoveredBrush(IMAGE_BRUSH("PropertyView/DetailCategoryMiddle_Hovered", FVector2f(16.f, 16.f)))
 			.SetOddRowBackgroundBrush(IMAGE_BRUSH("Common/Selection", Icon8x8, FLinearColor(1.0f, 1.0f, 1.0f, 0.1f)))
-			.SetOddRowBackgroundHoveredBrush(IMAGE_BRUSH("PropertyView/DetailCategoryMiddle_Hovered", FVector2D(16, 16)))
+			.SetOddRowBackgroundHoveredBrush(IMAGE_BRUSH("PropertyView/DetailCategoryMiddle_Hovered", FVector2f(16.f, 16.f)))
 			.SetSelectorFocusedBrush(BORDER_BRUSH("Common/Selector", FMargin(4.f / 16.f), SelectorColor))
 			.SetActiveBrush(IMAGE_BRUSH("Common/Selection", Icon8x8, SelectionColor))
 			.SetActiveHoveredBrush(IMAGE_BRUSH("Common/Selection", Icon8x8, SelectionColor))
@@ -118,7 +119,7 @@ TSharedRef< FSlateStyleSet > FLogVisualizerStyle::Create()
 	Style.Set("GenericFilters.TextStyle", FTextBlockStyle(NormalText)
 		.SetFont(DEFAULT_FONT("Bold", 9))
 		.SetColorAndOpacity(FLinearColor(1.0f, 1.0f, 1.0f, 0.9f))
-		.SetShadowOffset(FVector2D(1, 1))
+		.SetShadowOffset(FVector2f(1.f, 1.f))
 		.SetShadowColorAndOpacity(FLinearColor(0, 0, 0, 0.9f)));
 
 	// Toolbar
@@ -150,25 +151,22 @@ TSharedRef< FSlateStyleSet > FLogVisualizerStyle::Create()
 
 	// Filters
 	{
-		Style.Set("Filters.FilterIcon", new IMAGE_BRUSH("Icons/Profiler/Profiler_Filter_Events_16x", Icon16x16));
-		Style.Set("Filters.Style", FEditorStyle::Get().GetWidgetStyle<FComboButtonStyle>("ToolbarComboButton"));
+		Style.Set("Filters.FilterIcon", new CORE_IMAGE_BRUSH("Icons/Profiler/Profiler_Filter_Events_16x", Icon16x16));
+		Style.Set("Filters.Style", FAppStyle::Get().GetWidgetStyle<FComboButtonStyle>("ToolbarComboButton"));
 		Style.Set("ContentBrowser.FilterButtonBorder", new BOX_BRUSH("Common/RoundedSelection_16x", FMargin(4.0f / 16.0f)));
-		//FSlateBrush *FilterButtonBorder = FEditorStyle::Get().GetBrush("ToolbarComboButton");
+		//FSlateBrush *FilterButtonBorder = FAppStyle::Get().GetBrush("ToolbarComboButton");
 		//Style.Set("ContentBrowser.FilterButtonBorder", FilterButtonBorder);
 		
-		//Style.Set("ContentBrowser.FilterButton", FEditorStyle::Get().GetWidgetStyle<FCheckBoxStyle>("ContentBrowser.FilterButton"));
+		//Style.Set("ContentBrowser.FilterButton", FAppStyle::Get().GetWidgetStyle<FCheckBoxStyle>("ContentBrowser.FilterButton"));
 		const FCheckBoxStyle ContentBrowserFilterButtonCheckBoxStyle = FCheckBoxStyle()
-			.SetUncheckedImage(IMAGE_BRUSH("ContentBrowser/FilterUnchecked", FVector2D(10.0f, 14.0f)))
-			.SetUncheckedHoveredImage(IMAGE_BRUSH("ContentBrowser/FilterUnchecked", FVector2D(10.0f, 14.0f), FLinearColor(0.5f, 0.5f, 0.5f, 1.0f)))
-			.SetUncheckedPressedImage(IMAGE_BRUSH("ContentBrowser/FilterUnchecked", FVector2D(10.0f, 14.0f), FLinearColor(0.5f, 0.5f, 0.5f, 1.0f)))
-			.SetCheckedImage(IMAGE_BRUSH("ContentBrowser/FilterChecked", FVector2D(10.0f, 14.0f)))
-			.SetCheckedHoveredImage(IMAGE_BRUSH("ContentBrowser/FilterChecked", FVector2D(10.0f, 14.0f), FLinearColor(0.5f, 0.5f, 0.5f, 1.0f)))
-			.SetCheckedPressedImage(IMAGE_BRUSH("ContentBrowser/FilterChecked", FVector2D(10.0f, 14.0f), FLinearColor(0.5f, 0.5f, 0.5f, 1.0f)));
+			.SetUncheckedImage(IMAGE_BRUSH("ContentBrowser/FilterUnchecked", FVector2f(10.0f, 14.0f)))
+			.SetUncheckedHoveredImage(IMAGE_BRUSH("ContentBrowser/FilterUnchecked", FVector2f(10.0f, 14.0f), FLinearColor(0.5f, 0.5f, 0.5f, 1.0f)))
+			.SetUncheckedPressedImage(IMAGE_BRUSH("ContentBrowser/FilterUnchecked", FVector2f(10.0f, 14.0f), FLinearColor(0.5f, 0.5f, 0.5f, 1.0f)))
+			.SetCheckedImage(IMAGE_BRUSH("ContentBrowser/FilterChecked", FVector2f(10.0f, 14.0f)))
+			.SetCheckedHoveredImage(IMAGE_BRUSH("ContentBrowser/FilterChecked", FVector2f(10.0f, 14.0f), FLinearColor(0.5f, 0.5f, 0.5f, 1.0f)))
+			.SetCheckedPressedImage(IMAGE_BRUSH("ContentBrowser/FilterChecked", FVector2f(10.0f, 14.0f), FLinearColor(0.5f, 0.5f, 0.5f, 1.0f)));
 		/* ... and add the new style */
 		Style.Set("ContentBrowser.FilterButton", ContentBrowserFilterButtonCheckBoxStyle);
-
-		Style.Set("ContentBrowser.FilterNameFont", DEFAULT_FONT("Regular", 9));
-		//Style.Set("ContentBrowser.FilterNameFont", FEditorStyle::Get().GetFontStyle("ContentBrowser.FilterNameFont"));
 	}
 
 	//Sequencer
@@ -183,7 +181,7 @@ TSharedRef< FSlateStyleSet > FLogVisualizerStyle::Create()
 
 	// Default text styles
 	{
-		Style.Set("RichText.Background", new BOX_BRUSH("Common/FlatColorSquare", FVector2D(1.0f, 1.0f), FMargin(0), FLinearColor(FColor(0xffeff3f3))));
+		Style.Set("RichText.Background", new BOX_BRUSH("Common/FlatColorSquare", FVector2f(1.0f, 1.0f), FMargin(0), FLinearColor(FColor(0xffeff3f3))));
 
 		Style.Set("RichText.RoundedBackground", new BOX_BRUSH("Common/RoundedSelection_16x", 4.0f / 16.0f, FLinearColor(FColor(0xffeff3f3))));
 
@@ -233,8 +231,8 @@ TSharedRef< FSlateStyleSet > FLogVisualizerStyle::Create()
 
 		//Tagline
 		{
-			Style.Set("RichText.Tagline.Background", new BOX_BRUSH("Common/FlatColorSquare", FVector2D(1.0f, 1.0f), FMargin(1), FLinearColor(FColor(0xffdbe4e4))));
-			Style.Set("RichText.Tagline.DarkBackground", new BOX_BRUSH("Common/FlatColorSquare", FVector2D(1.0f, 1.0f), FMargin(1), FLinearColor(0.55423, 0.60548, 0.60548)));
+			Style.Set("RichText.Tagline.Background", new BOX_BRUSH("Common/FlatColorSquare", FVector2f(1.0f, 1.0f), FMargin(1), FLinearColor(FColor(0xffdbe4e4))));
+			Style.Set("RichText.Tagline.DarkBackground", new BOX_BRUSH("Common/FlatColorSquare", FVector2f(1.0f, 1.0f), FMargin(1), FLinearColor(0.55423, 0.60548, 0.60548)));
 			Style.Set("RichText.Tagline.Text", FTextBlockStyle(NormalText)
 				.SetFont(DEFAULT_FONT("Bold", 24))
 				.SetColorAndOpacity(FLinearColor(FColor(0xff2c3e50)))

@@ -11,6 +11,7 @@ public class MeshMergeUtilities : ModuleRules
 			new string [] {
 				"Core",
 				"CoreUObject",
+				"EditorFramework",
 				"Engine",
 				"RenderCore",
                 "Renderer",
@@ -21,7 +22,6 @@ public class MeshMergeUtilities : ModuleRules
                 "SlateCore",
                 "Slate",
                 "StaticMeshEditor",
-                "SkeletalMeshEditor",
                 "MaterialBaking",
                 "MeshUtilitiesCommon",
 				"ToolMenus",
@@ -38,20 +38,15 @@ public class MeshMergeUtilities : ModuleRules
 
         PublicIncludePathModuleNames.AddRange(
           new string[] {
-               "HierarchicalLODUtilities",
-               "MeshUtilities",
                "MeshReductionInterface",
           }
         );
-
-        PrivateIncludePathModuleNames.AddRange(
-            new string[] {
-                "HierarchicalLODUtilities",
-                "MeshUtilities",
-                "MeshReductionInterface",
-                "MaterialBaking",
-            }
-       );
+		
+		PrivateIncludePathModuleNames.AddRange(
+			new string [] {
+				"HierarchicalLODUtilities"
+			}
+		);
 
         DynamicallyLoadedModuleNames.AddRange(
             new string[] {

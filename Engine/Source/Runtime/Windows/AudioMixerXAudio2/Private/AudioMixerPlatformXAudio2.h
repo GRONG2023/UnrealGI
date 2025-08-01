@@ -11,6 +11,8 @@
 #endif
 #include "Windows/HideWindowsPlatformTypes.h"
 
+#include "Async/Future.h"
+
 #if PLATFORM_WINDOWS
 #pragma comment(lib,"xaudio2_9redist.lib")
 #endif
@@ -38,7 +40,7 @@ namespace Audio
 	{
 	public:
 		FXAudio2VoiceCallback() {}
-		virtual ~FXAudio2VoiceCallback() {}
+		~FXAudio2VoiceCallback() {}
 
 	private:
 		void STDCALL OnVoiceProcessingPassStart(UINT32 BytesRequired) {}
@@ -61,45 +63,57 @@ namespace Audio
 		~FMixerPlatformXAudio2();
 
 		//~ Begin IAudioMixerPlatformInterface
-		virtual EAudioMixerPlatformApi::Type GetPlatformApi() const override { return EAudioMixerPlatformApi::XAudio2; }
+		virtual FString GetPlatformApi() const override { return TEXT("XAudio2"); }
 		virtual bool InitializeHardware() override;
 		virtual bool CheckAudioDeviceChange() override;
 		virtual bool TeardownHardware() override;
 		virtual bool IsInitialized() const override;
 		virtual bool GetNumOutputDevices(uint32& OutNumOutputDevices) override;
 		virtual bool GetOutputDeviceInfo(const uint32 InDeviceIndex, FAudioPlatformDeviceInfo& OutInfo) override;
+		virtual FString GetCurrentDeviceName() const override;
 		virtual bool GetDefaultOutputDeviceIndex(uint32& OutDefaultDeviceIndex) const override;
 		virtual bool OpenAudioStream(const FAudioMixerOpenStreamParams& Params) override;
 		virtual bool CloseAudioStream() override;
 		virtual bool StartAudioStream() override;
 		virtual bool StopAudioStream() override;
 		virtual bool MoveAudioStreamToNewAudioDevice(const FString& InNewDeviceId) override;
+		virtual bool RequestDeviceSwap(const FString& DeviceID, bool bInForce, const TCHAR* InReason) override;
 		virtual void ResumePlaybackOnNewDevice() override;
 		virtual FAudioPlatformDeviceInfo GetPlatformDeviceInfo() const override;
 		virtual void SubmitBuffer(const uint8* Buffer) override;
-		virtual FName GetRuntimeFormat(USoundWave* InSoundWave) override;
-		virtual bool HasCompressedAudioInfoClass(USoundWave* InSoundWave) override;
-		virtual bool SupportsRealtimeDecompression() const override { return true; }
 		virtual bool DisablePCMAudioCaching() const override;
-		virtual ICompressedAudioInfo* CreateCompressedAudioInfo(USoundWave* InSoundWave) override;
 		virtual FString GetDefaultDeviceName() override;
 		virtual FAudioPlatformSettings GetPlatformSettings() const override;
 		virtual void OnHardwareUpdate() override;
+		virtual IAudioPlatformDeviceInfoCache* GetDeviceInfoCache() const override;
 		//~ End IAudioMixerPlatformInterface
 
-		//~ Begin IAudioMixerDeviceChangedLister
+		//~ Begin IAudioMixerDeviceChangedListener
 		virtual void RegisterDeviceChangedListener() override;
 		virtual void UnregisterDeviceChangedListener() override;
 		virtual void OnDefaultCaptureDeviceChanged(const EAudioDeviceRole InAudioDeviceRole, const FString& DeviceId) override;
 		virtual void OnDefaultRenderDeviceChanged(const EAudioDeviceRole InAudioDeviceRole, const FString& DeviceId) override;
-		virtual void OnDeviceAdded(const FString& DeviceId) override;
-		virtual void OnDeviceRemoved(const FString& DeviceId) override;
-		virtual void OnDeviceStateChanged(const FString& DeviceId, const EAudioDeviceState InState) override;
-		virtual FString GetDeviceId() const override;
-		//~ End IAudioMixerDeviceChangedLister
+		virtual void OnDeviceAdded(const FString& DeviceId, bool bIsRenderDevice) override;
+		virtual void OnDeviceRemoved(const FString& DeviceId, bool bIsRenderDevice) override;
+		virtual void OnDeviceStateChanged(const FString& DeviceId, const EAudioDeviceState InState, bool bIsRenderDevice) override;
+		virtual void OnSessionDisconnect(Audio::IAudioMixerDeviceChangedListener::EDisconnectReason InReason) override;
+		virtual FString GetDeviceId() const override;		
+		//~ End IAudioMixerDeviceChangedListener
 
 	private:
-
+	
+		struct FXAudio2AsyncCreateResult
+		{
+			IXAudio2* XAudio2System = nullptr;
+			IXAudio2MasteringVoice* OutputAudioStreamMasteringVoice = nullptr;
+			IXAudio2SourceVoice* OutputAudioStreamSourceVoice = nullptr;
+			FAudioPlatformDeviceInfo DeviceInfo;
+			FString SwapReason;
+			float SuccessfullDurationMs = 0.f;
+		};
+		TFuture<FXAudio2AsyncCreateResult> ActiveDeviceSwap;
+		bool CheckThreadedDeviceSwap();
+	
 		bool AllowDeviceSwap();
 
 		// Used to teardown and reinitialize XAudio2.
@@ -130,6 +144,7 @@ namespace Audio
 		FString OriginalAudioDeviceId;
 		FString NewAudioDeviceId;
 		double LastDeviceSwapTime;
+		FString DeviceSwapReason;
 
 		// When we are running the null device,
 		// we check whether a new audio device was connected every second or so.
@@ -137,10 +152,11 @@ namespace Audio
 
 		bool FirstBufferSubmitted{false};
 
+		TUniquePtr<IAudioPlatformDeviceInfoCache> DeviceInfoCache;
+
 		uint32 bIsInitialized : 1;
 		uint32 bIsDeviceOpen : 1;
 		uint32 bIsSuspended : 1;
 	};
-
 }
 

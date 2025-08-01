@@ -1,12 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "VisualLoggerCameraController.h"
+#include "Components/InputComponent.h"
 #include "Engine/World.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/WorldSettings.h"
 #include "GameFramework/PlayerInput.h"
 #include "Engine/Player.h"
 #include "VisualLoggerHUD.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(VisualLoggerCameraController)
 
 
 //----------------------------------------------------------------------//
@@ -63,8 +66,8 @@ void AVisualLoggerCameraController::PostInitializeComponents()
 	MyHUD = GetWorld()->SpawnActor<AVisualLoggerHUD>(SpawnInfo);
 
 	/** TO DO: somehow this two configuration settings are set to zero for this controller, have to fix it later */
-	InputYawScale=2.5;
-	InputPitchScale=-1.75;
+	InputYawScale_DEPRECATED = 2.5f;
+	InputPitchScale_DEPRECATED = -1.75f;
 }
 
 
@@ -151,6 +154,7 @@ void AVisualLoggerCameraController::Select(FHitResult const& Hit)
 	if (SelectedActor != PickedActor)
 	{
 		PickedActor = SelectedActor;
-		OnActorSelected.ExecuteIfBound(SelectedActor);
+		OnActorSelected.ExecuteIfBound(SelectedActor.Get());
 	}
 }
+

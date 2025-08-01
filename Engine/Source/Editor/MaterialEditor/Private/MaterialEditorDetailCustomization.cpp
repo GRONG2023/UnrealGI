@@ -10,10 +10,15 @@
 #include "DetailLayoutBuilder.h"
 #include "DetailWidgetRow.h"
 #include "DetailCategoryBuilder.h"
+#include "Materials/MaterialFunction.h"
 #include "Materials/MaterialExpressionScalarParameter.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
+#include "Materials/MaterialExpressionComposite.h"
+#include "Materials/MaterialExpressionPinBase.h"
+#include "Materials/MaterialExpressionTextureSampleParameter.h"
 #include "MaterialLayersFunctionsCustomization.h"
 #include "PropertyEditorModule.h"
+#include "PropertyRestriction.h"
 #include "MaterialEditor/MaterialEditorPreviewParameters.h"
 #include "Widgets/Input/SButton.h"
 #include "MaterialEditor/MaterialEditorInstanceConstant.h"
@@ -38,9 +43,33 @@
 #include "Engine/Texture.h"
 #include "Materials/MaterialExpressionCurveAtlasRowParameter.h"
 #include "Curves/CurveLinearColorAtlas.h"
-
+#include "RenderUtils.h"
+#include "MaterialShared.h"
 
 #define LOCTEXT_NAMESPACE "MaterialEditor"
+
+// Update the blend mode names based on what is supported in legacy mode or Substrate mode
+UEnum* GetBlendModeEnum()
+{
+	UEnum* BlendModeEnum = StaticEnum<EBlendMode>();
+	if (Substrate::IsSubstrateEnabled())
+	{
+		// BLEND_Translucent & BLEND_TranslucentGreyTransmittance are mapped onto the same enum index
+		BlendModeEnum->SetMetaData(TEXT("DisplayName"), TEXT("TranslucentGreyTransmittance"), BLEND_Translucent);
+
+		// BLEND_Modulate & BLEND_ColoredTransmittanceOnly are mapped onto the same enum index
+		BlendModeEnum->SetMetaData(TEXT("DisplayName"), TEXT("ColoredTransmittanceOnly"), BLEND_Modulate);
+
+		// BLEND_TranslucentColoredTransmittance is only supported in Substrate mode
+		BlendModeEnum->SetMetaData(TEXT("DisplayName"), TEXT("TranslucentColoredTransmittance"), BLEND_TranslucentColoredTransmittance);
+	}
+	else
+	{
+		// BLEND_TranslucentColoredTransmittance is not supported in legacy mode
+		BlendModeEnum->SetMetaData(TEXT("Hidden"), TEXT("True"), BLEND_TranslucentColoredTransmittance);
+	}
+	return BlendModeEnum;
+}
 
 TSharedRef<IDetailCustomization> FMaterialExpressionParameterDetails::MakeInstance(FOnCollectParameterGroups InCollectGroupsDelegate)
 {
@@ -297,7 +326,7 @@ void FMaterialExpressionParameterDetails::CustomizeDetails( IDetailLayoutBuilder
 							[
 								SNew(STextBlock)
 								.Text(FText::FromName(TextureParameter->ParameterName))
-								.Font(FEditorStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont")))
+								.Font(FAppStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont")))
 							]
 						];
 
@@ -324,7 +353,7 @@ void FMaterialExpressionParameterDetails::CustomizeDetails( IDetailLayoutBuilder
 								[
 									SNew(STextBlock)
 									.Text(FText::FromName(Red))
-									.Font(FEditorStyle::GetFontStyle(TEXT("PropertyWindow.BoldFont")))
+									.Font(FAppStyle::GetFontStyle(TEXT("PropertyWindow.BoldFont")))
 								]
 								+ SHorizontalBox::Slot()
 								.HAlign(HAlign_Left)
@@ -332,7 +361,7 @@ void FMaterialExpressionParameterDetails::CustomizeDetails( IDetailLayoutBuilder
 								[
 									SNew(STextBlock)
 									.Text(TextureParameter->ChannelNames.R)
-									.Font(FEditorStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont")))
+									.Font(FAppStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont")))
 								]
 							];
 					}
@@ -347,7 +376,7 @@ void FMaterialExpressionParameterDetails::CustomizeDetails( IDetailLayoutBuilder
 								[
 									SNew(STextBlock)
 									.Text(FText::FromName(Green))
-									.Font(FEditorStyle::GetFontStyle(TEXT("PropertyWindow.BoldFont")))
+									.Font(FAppStyle::GetFontStyle(TEXT("PropertyWindow.BoldFont")))
 								]
 								+ SHorizontalBox::Slot()
 								.HAlign(HAlign_Left)
@@ -355,7 +384,7 @@ void FMaterialExpressionParameterDetails::CustomizeDetails( IDetailLayoutBuilder
 								[
 									SNew(STextBlock)
 									.Text(TextureParameter->ChannelNames.G)
-									.Font(FEditorStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont")))
+									.Font(FAppStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont")))
 								]
 							];
 					}
@@ -370,7 +399,7 @@ void FMaterialExpressionParameterDetails::CustomizeDetails( IDetailLayoutBuilder
 								[
 									SNew(STextBlock)
 									.Text(FText::FromName(Blue))
-									.Font(FEditorStyle::GetFontStyle(TEXT("PropertyWindow.BoldFont")))
+									.Font(FAppStyle::GetFontStyle(TEXT("PropertyWindow.BoldFont")))
 								]
 								+ SHorizontalBox::Slot()
 								.HAlign(HAlign_Left)
@@ -378,7 +407,7 @@ void FMaterialExpressionParameterDetails::CustomizeDetails( IDetailLayoutBuilder
 								[
 									SNew(STextBlock)
 									.Text(TextureParameter->ChannelNames.B)
-									.Font(FEditorStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont")))
+									.Font(FAppStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont")))
 								]
 							];
 					}
@@ -393,7 +422,7 @@ void FMaterialExpressionParameterDetails::CustomizeDetails( IDetailLayoutBuilder
 								[
 									SNew(STextBlock)
 									.Text(FText::FromName(Alpha))
-									.Font(FEditorStyle::GetFontStyle(TEXT("PropertyWindow.BoldFont")))
+									.Font(FAppStyle::GetFontStyle(TEXT("PropertyWindow.BoldFont")))
 								]
 								+ SHorizontalBox::Slot()
 								.HAlign(HAlign_Left)
@@ -401,7 +430,7 @@ void FMaterialExpressionParameterDetails::CustomizeDetails( IDetailLayoutBuilder
 								[
 									SNew(STextBlock)
 									.Text(TextureParameter->ChannelNames.A)
-									.Font(FEditorStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont")))
+									.Font(FAppStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont")))
 								]
 							];
 					}
@@ -595,7 +624,15 @@ bool FMaterialExpressionCollectionParameterDetails::IsParameterNameComboEnabled(
 	if (CollectionPropertyHandle->IsValidHandle())
 	{
 		UObject* CollectionObject = nullptr;
-		verify(CollectionPropertyHandle->GetValue(CollectionObject) == FPropertyAccess::Success);
+		FPropertyAccess::Result Result = CollectionPropertyHandle->GetValue(CollectionObject);
+
+		// No name combo enabled if multiple parameter collection nodes are selected.
+		if (Result == FPropertyAccess::MultipleValues)
+		{
+			return false;
+		}
+
+		verify(Result == FPropertyAccess::Success);
 		Collection = Cast<UMaterialParameterCollection>(CollectionObject);
 	}
 
@@ -680,7 +717,15 @@ void FMaterialExpressionCollectionParameterDetails::PopulateParameters()
 	if (CollectionPropertyHandle->IsValidHandle())
 	{
 		UObject* CollectionObject = nullptr;
-		verify(CollectionPropertyHandle->GetValue(CollectionObject) == FPropertyAccess::Success);
+		FPropertyAccess::Result Result = CollectionPropertyHandle->GetValue(CollectionObject);
+
+		// Return an empty set of parameters if multiple paramter collection nodes are selected.
+		if (Result == FPropertyAccess::MultipleValues)
+		{
+			return;
+		}
+
+		verify(Result == FPropertyAccess::Success);
 		Collection = Cast<UMaterialParameterCollection>(CollectionObject);
 	}
 
@@ -734,11 +779,14 @@ TSharedRef<class IDetailCustomization> FMaterialDetailCustomization::MakeInstanc
 
 void FMaterialDetailCustomization::CustomizeDetails( IDetailLayoutBuilder& DetailLayout )
 {
+	static const auto CVarMaterialEnableNewHLSLGenerator = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.MaterialEnableNewHLSLGenerator"));
+
 	TArray<TWeakObjectPtr<UObject> > Objects;
 	DetailLayout.GetObjectsBeingCustomized( Objects );
 
 	bool bUIMaterial = true;
 	bool bIsShadingModelFromMaterialExpression = false;
+	bool bIsAlphaHoldout = false;
 	for( TWeakObjectPtr<UObject>& Object : Objects )
 	{
 		UMaterial* Material = Cast<UMaterial>( Object.Get() );
@@ -748,6 +796,8 @@ void FMaterialDetailCustomization::CustomizeDetails( IDetailLayoutBuilder& Detai
 
 			// If any Object has its shading model from material expression
 			bIsShadingModelFromMaterialExpression |= Material->IsShadingModelFromMaterialExpression();
+			
+			bIsAlphaHoldout |= Material->BlendMode == BLEND_AlphaHoldout;
 		}
 		else
 		{
@@ -773,10 +823,42 @@ void FMaterialDetailCustomization::CustomizeDetails( IDetailLayoutBuilder& Detai
 				if(		PropertyName != GET_MEMBER_NAME_CHECKED(UMaterial, MaterialDomain) 
 					&&	PropertyName != GET_MEMBER_NAME_CHECKED(UMaterial, BlendMode) 
 					&&	PropertyName != GET_MEMBER_NAME_CHECKED(UMaterial, OpacityMaskClipValue) 
-					&& 	PropertyName != GET_MEMBER_NAME_CHECKED(UMaterial, NumCustomizedUVs) )
+					&& 	PropertyName != GET_MEMBER_NAME_CHECKED(UMaterial, NumCustomizedUVs)
+					&&	PropertyName != GET_MEMBER_NAME_CHECKED(UMaterial, bEnableNewHLSLGenerator))
 				{
 					DetailLayout.HideProperty( PropertyHandle );
 				}
+			}
+
+			if (!Substrate::IsSubstrateEnabled())
+			{
+				if (PropertyName == GET_MEMBER_NAME_CHECKED(UMaterial, bIsThinSurface))
+				{
+					DetailLayout.HideProperty(PropertyHandle);
+				}
+			}
+
+			// Patch blend mode displayed names
+			if (PropertyName == GET_MEMBER_NAME_CHECKED(UMaterial, BlendMode))
+			{
+				FByteProperty* BlendModeProperty = (FByteProperty*)Property;
+				BlendModeProperty->Enum = GetBlendModeEnum();
+
+				PropertyHandle->SetOnPropertyValueChanged(FSimpleDelegate::CreateLambda([&DetailLayout]()
+					{
+						// Refresh to update translucency pass restrictions below
+						DetailLayout.ForceRefreshDetails();
+					}));
+			}
+
+			if (PropertyName == GET_MEMBER_NAME_CHECKED(UMaterial, bEnableExecWire) && !AllowMaterialControlFlow())
+			{
+				DetailLayout.HideProperty(PropertyHandle);
+			}
+
+			if (PropertyName == GET_MEMBER_NAME_CHECKED(UMaterial, bEnableNewHLSLGenerator) && !CVarMaterialEnableNewHLSLGenerator->GetValueOnAnyThread())
+			{
+				DetailLayout.HideProperty(PropertyHandle);
 			}
 
 #if WITH_EDITORONLY_DATA
@@ -788,6 +870,36 @@ void FMaterialDetailCustomization::CustomizeDetails( IDetailLayoutBuilder& Detai
 #endif
 		}
 	}
+
+	// Translucency category
+	{
+		IDetailCategoryBuilder& TranslucencyCategory = DetailLayout.EditCategory(TEXT("Translucency"));
+
+		TArray<TSharedRef<IPropertyHandle>> AdvancedProperties;
+		TranslucencyCategory.GetDefaultProperties(AdvancedProperties, false, true);
+
+		for (TSharedRef<IPropertyHandle>& PropertyHandle : AdvancedProperties)
+		{
+			FProperty* Property = PropertyHandle->GetProperty();
+			FName PropertyName = Property->GetFName();
+
+			if (PropertyName == GET_MEMBER_NAME_CHECKED(UMaterial, TranslucencyPass))
+			{
+				if (bIsAlphaHoldout)
+				{
+					static FText RestrictReason = NSLOCTEXT("PropertyEditor", "TranslucencyPassRestriction", "Seperate translucency pass should not be used with Alpha Holdout blend mode.");
+					TSharedPtr<FPropertyRestriction> EnumRestriction = MakeShared<FPropertyRestriction>(RestrictReason);
+
+					FByteProperty* TranslucencyPassProperty = (FByteProperty*)Property;
+					EnumRestriction->AddDisabledValue(TranslucencyPassProperty->Enum->GetNameStringByValue(static_cast<int64>(MTP_AfterDOF)));
+					EnumRestriction->AddDisabledValue(TranslucencyPassProperty->Enum->GetNameStringByValue(static_cast<int64>(MTP_AfterMotionBlur)));
+
+					PropertyHandle->AddRestriction(EnumRestriction.ToSharedRef());
+				}
+			}
+		}
+	}
+
 
 	if( bUIMaterial )
 	{
@@ -813,10 +925,44 @@ void FMaterialDetailCustomization::CustomizeDetails( IDetailLayoutBuilder& Detai
 				FProperty* Property = PropertyHandle->GetProperty();
 				FName PropertyName = Property->GetFName();
 
-				if (PropertyName != GET_MEMBER_NAME_CHECKED(UMaterial, bUseFullPrecision)) 
+				if (PropertyName != GET_MEMBER_NAME_CHECKED(UMaterial, FloatPrecisionMode))
 				{
 					DetailLayout.HideProperty(PropertyHandle);
 				}
+			}
+		}
+	}
+}
+
+TSharedRef<class IDetailCustomization> FMaterialFunctionDetailCustomization::MakeInstance()
+{
+	return MakeShareable(new FMaterialFunctionDetailCustomization);
+}
+
+void FMaterialFunctionDetailCustomization::CustomizeDetails(IDetailLayoutBuilder& DetailLayout)
+{
+	static const auto CVarMaterialEnableNewHLSLGenerator = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.MaterialEnableNewHLSLGenerator"));
+
+	// MaterialFunction category
+	{
+		IDetailCategoryBuilder& MaterialCategory = DetailLayout.EditCategory(TEXT("MaterialFunction"));
+
+		TArray<TSharedRef<IPropertyHandle>> AllProperties;
+		MaterialCategory.GetDefaultProperties(AllProperties);
+
+		for (TSharedRef<IPropertyHandle>& PropertyHandle : AllProperties)
+		{
+			FProperty* Property = PropertyHandle->GetProperty();
+			FName PropertyName = Property->GetFName();
+
+			if (PropertyName == GET_MEMBER_NAME_CHECKED(UMaterialFunction, bEnableExecWire) && !AllowMaterialControlFlow())
+			{
+				DetailLayout.HideProperty(PropertyHandle);
+			}
+
+			if (PropertyName == GET_MEMBER_NAME_CHECKED(UMaterialFunction, bEnableNewHLSLGenerator) && !CVarMaterialEnableNewHLSLGenerator->GetValueOnAnyThread())
+			{
+				DetailLayout.HideProperty(PropertyHandle);
 			}
 		}
 	}
@@ -844,6 +990,46 @@ void FMaterialExpressionLayersParameterDetails::CustomizeDetails(IDetailLayoutBu
 	TSharedRef<FMaterialLayersFunctionsCustomization> MaterialLayersFunctionsCustomization = MakeShareable(new FMaterialLayersFunctionsCustomization(GroupPropertyHandle, &DetailLayout));
 	Category.AddCustomBuilder(MaterialLayersFunctionsCustomization);
 	
+}
+
+TSharedRef<class IDetailCustomization> FMaterialExpressionCompositeDetails::MakeInstance()
+{
+	return MakeShareable(new FMaterialExpressionCompositeDetails());
+}
+
+void FMaterialExpressionCompositeDetails::CustomizeDetails(IDetailLayoutBuilder& DetailLayout)
+{
+	FName DefaultCategory = NAME_None;
+	IDetailCategoryBuilder& Category = DetailLayout.EditCategory(DefaultCategory);
+	Category.AddProperty("SubgraphName");
+
+	const FName MaterialExpressionCategory = TEXT("MaterialExpression");
+	IDetailCategoryBuilder& ExpressionCategory = DetailLayout.EditCategory(MaterialExpressionCategory);
+
+	TArray< TWeakObjectPtr<UObject> > Objects;
+	DetailLayout.GetObjectsBeingCustomized(Objects);
+	
+	for (const auto& WeakObjectPtr : Objects)
+	{
+		UObject* Object = WeakObjectPtr.Get();
+
+		UMaterialExpressionComposite* Composite = Cast<UMaterialExpressionComposite>(Object);
+
+		if (Composite)
+		{
+			if (IDetailPropertyRow* PinBaseRow = ExpressionCategory.AddExternalObjectProperty({Composite->InputExpressions}, GET_MEMBER_NAME_CHECKED(UMaterialExpressionPinBase, ReroutePins)))
+			{
+				PinBaseRow->DisplayName(LOCTEXT("InputPinsComposite", "Input Pins"));
+				PinBaseRow->Visibility(EVisibility::Visible);
+			}
+
+			if (IDetailPropertyRow* PinBaseRow = ExpressionCategory.AddExternalObjectProperty({Composite->OutputExpressions }, GET_MEMBER_NAME_CHECKED(UMaterialExpressionPinBase, ReroutePins)))
+			{
+				PinBaseRow->DisplayName(LOCTEXT("OutPinsComposite", "Output Pins"));
+				PinBaseRow->Visibility(EVisibility::Visible);
+			}
+		}
+	}
 }
 
 #undef LOCTEXT_NAMESPACE

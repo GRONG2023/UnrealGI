@@ -1,16 +1,18 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "MovieSceneToolsProjectSettingsCustomization.h"
-#include "MovieSceneToolsProjectSettings.h"
 
-#include "PropertyHandle.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
 #include "DetailLayoutBuilder.h"
-
-//#include "Editor/PropertyEditor/Public/IDetailsView.h"
-//#include "IDetailCustomization.h"
-//#include "DetailLayoutBuilder.h"
-//#include "PropertyHandle.h"
-
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
+#include "Misc/AssertionMacros.h"
+#include "MovieSceneFwd.h"
+#include "MovieSceneToolsProjectSettings.h"
+#include "PropertyHandle.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UObjectGlobals.h"
 
 TSharedRef<IDetailCustomization> FMovieSceneToolsProjectSettingsCustomization::MakeInstance()
 {
@@ -29,14 +31,11 @@ void FMovieSceneToolsProjectSettingsCustomization::OnTakeSeparatorUpdated()
 
 	FString TakeSeparator = ProjectSettings->TakeSeparator;
 
-	// Make sure the take separator is a valid single character
+	// Make sure the take separator is a valid character
 	FText OutErrorMessage;
 	if (!FName(*TakeSeparator).IsValidXName(INVALID_OBJECTNAME_CHARACTERS INVALID_LONGPACKAGE_CHARACTERS, &OutErrorMessage))
 	{
+		UE_LOG(LogMovieScene, Warning, TEXT("Invalid separator: %s"), *OutErrorMessage.ToString());
 		ProjectSettings->TakeSeparator = TEXT("_");
-	}
-	else if (ProjectSettings->TakeSeparator.Len() > 1)
-	{
-		ProjectSettings->TakeSeparator.LeftChopInline(ProjectSettings->TakeSeparator.Len()-1);
 	}
 }

@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "InputCoreTypes.h"
-#include "UnrealWidget.h"
+#include "UnrealWidgetFwd.h"
 
 class FCanvas;
 class FDragTool;
@@ -16,92 +16,92 @@ struct FInputEventState;
 /**
  * Keeps track of mouse movement deltas in the viewports.
  */
-class UNREALED_API FMouseDeltaTracker
+class FMouseDeltaTracker
 {
 public:
 
-	FMouseDeltaTracker();
-	~FMouseDeltaTracker();
+	UNREALED_API FMouseDeltaTracker();
+	UNREALED_API ~FMouseDeltaTracker();
 
 	/**
 	 * Begin tracking at the specified location for the specified viewport.
 	 */
-	void StartTracking(FEditorViewportClient* InViewportClient, const int32 InX, const int32 InY, const FInputEventState& InInputState, bool bNudge = false, bool bResetDragToolState = true);
+	UNREALED_API void StartTracking(FEditorViewportClient* InViewportClient, const int32 InX, const int32 InY, const FInputEventState& InInputState, bool bNudge = false, bool bResetDragToolState = true);
 
 	/**
 	 * Called when a mouse button has been released.  If there are no other
 	 * mouse buttons being held down, the internal information is reset.
 	 */
-	bool EndTracking(FEditorViewportClient* InViewportClient);
+	UNREALED_API bool EndTracking(FEditorViewportClient* InViewportClient);
 
 	/**
 	 * Adds delta movement into the tracker.
 	 */
-	void AddDelta(FEditorViewportClient* InViewportClient, FKey InKey, const int32 InDelta, bool InNudge);
+	UNREALED_API void AddDelta(FEditorViewportClient* InViewportClient, FKey InKey, const int32 InDelta, bool InNudge);
 
 	/**
 	* Returns the current delta.
 	*/
-	const FVector GetDelta() const;
+	UNREALED_API const FVector GetDelta() const;
 
 	/**
 	 * Returns the current snapped delta.
 	 */
-	const FVector GetDeltaSnapped() const;
+	UNREALED_API const FVector GetDeltaSnapped() const;
 
 	/**
 	* Returns the absolute delta since dragging started.
 	*/
-	const FVector GetAbsoluteDelta() const;
+	UNREALED_API const FVector GetAbsoluteDelta() const;
 
 	/**
 	* Returns the absolute snapped delta since dragging started. 
 	*/
-	const FVector GetAbsoluteDeltaSnapped() const;
+	UNREALED_API const FVector GetAbsoluteDeltaSnapped() const;
 
 	/**
 	 * Returns the screen space delta since dragging started.
 	 */
-	const FVector GetScreenDelta() const;
+	UNREALED_API const FVector GetScreenDelta() const;
 
 	/**
 	 * Returns the raw mouse delta in pixels since dragging started.
 	 */
-	const FVector GetRawDelta() const;
+	UNREALED_API const FVector GetRawDelta() const;
 
 	/**
 	 * Returns the unsnapped start position of the current mouse drag. (This will be zero if there is no drag in progress)
 	 */
-	const FVector GetDragStartPos() const;
+	UNREALED_API const FVector GetDragStartPos() const;
 
 	/**
 	 * Returns if the user used a modifier to drag a selected item. (Rather than using a widget handle)
 	 */
-	const bool GetUsedDragModifier() const;
+	UNREALED_API const bool GetUsedDragModifier() const;
 
 	/**
 	 * Resets the UsedDragModifier flag
 	 */
-	void ResetUsedDragModifier();
+	UNREALED_API void ResetUsedDragModifier();
 
 	/**
 	 * Converts the delta movement to drag/rotation/scale based on the viewport type or widget axis.
 	 */
-	void ConvertMovementDeltaToDragRot(FSceneView* InView, FEditorViewportClient* InViewportClient, FVector& InDragDelta, FVector& OutDrag, FRotator& OutRotation, FVector& OutScale) const;
+	UNREALED_API void ConvertMovementDeltaToDragRot(FSceneView* InView, FEditorViewportClient* InViewportClient, FVector& InDragDelta, FVector& OutDrag, FRotator& OutRotation, FVector& OutScale) const;
 	/**
 	 * Absolute Translation conversion from mouse position on the screen to widget axis movement/rotation.
 	 */
-	void AbsoluteTranslationConvertMouseToDragRot(FSceneView* InView, FEditorViewportClient* InViewportClient, FVector& OutDrag, FRotator& OutRotation, FVector& OutScale ) const;
+	UNREALED_API void AbsoluteTranslationConvertMouseToDragRot(FSceneView* InView, FEditorViewportClient* InViewportClient, FVector& OutDrag, FRotator& OutRotation, FVector& OutScale ) const;
 
 	/**
 	 * Subtracts the specified value from End and EndSnapped.
 	 */
-	void ReduceBy(const FVector& In);
+	UNREALED_API void ReduceBy(const FVector& In);
 
 	/**
 	 * @return		true if a drag tool is being used by the tracker, false otherwise.
 	 */
-	bool UsingDragTool() const;
+	UNREALED_API bool UsingDragTool() const;
 
 	/**
 	 * @return True if any mouse movement has happened since tracking started
@@ -111,7 +111,7 @@ public:
 	/**
 	 * Marks that something caused the equivalent of mouse dragging, but with other means (keyboard short cut, mouse wheel).  Allows suppression of context menus with flight camera, etc
 	 */
-	void SetExternalMovement (void)			{ bExternalMovement = true;};
+	void SetExternalMovement (bool InExternalMovement = true)			{ bExternalMovement = InExternalMovement;};
 	/**
 	 * @return		true if something caused external movement of the mouse (keyboard, mouse wheel)
 	 */
@@ -120,22 +120,22 @@ public:
 	/**
 	 * Renders the drag tool.  Does nothing if no drag tool exists.
 	 */
-	void Render3DDragTool(const FSceneView* View, FPrimitiveDrawInterface* PDI);
+	UNREALED_API void Render3DDragTool(const FSceneView* View, FPrimitiveDrawInterface* PDI);
 
 	/**
 	 * Renders the drag tool.  Does nothing if no drag tool exists.
 	 */
-	void RenderDragTool(const FSceneView* View, FCanvas* Canvas);
+	UNREALED_API void RenderDragTool(const FSceneView* View, FCanvas* Canvas);
 
 	/** 
 	 * @return 		the widget mode last time this tracker object started tracking
 	 */
-	FWidget::EWidgetMode GetTrackingWidgetMode() const { return TrackingWidgetMode; }
+	UE::Widget::EWidgetMode GetTrackingWidgetMode() const { return TrackingWidgetMode; }
 private:
 	/**
 	 * Starts using a drag tool if needed
 	 */
-	void ConditionalBeginUsingDragTool( FEditorViewportClient* InViewportClient );
+	UNREALED_API void ConditionalBeginUsingDragTool( FEditorViewportClient* InViewportClient );
 private:
 	/** The unsnapped start position of the current mouse drag. */
 	FVector Start;
@@ -178,14 +178,14 @@ private:
 	bool bIsDeletingDragTool;
 
 	/** Stores the widget mode active when the tracker begins tracking to help stop it change mid-track */
-	FWidget::EWidgetMode TrackingWidgetMode;
+	UE::Widget::EWidgetMode TrackingWidgetMode;
 
 	/**
 	 * Sets the current axis of the widget for the specified viewport.
 	 *
 	 * @param	InViewportClient		The viewport whose widget axis is to be set.
 	 */
-	void DetermineCurrentAxis(FEditorViewportClient* InViewportClient);
+	UNREALED_API void DetermineCurrentAxis(FEditorViewportClient* InViewportClient);
 
 };
 

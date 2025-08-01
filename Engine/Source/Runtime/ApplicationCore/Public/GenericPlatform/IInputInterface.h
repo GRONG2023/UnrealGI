@@ -10,8 +10,8 @@
 
 // General identifiers for potential force feedback channels. These will be mapped according to the
 // platform specific implementation.
-// For example, the PS4 only listens to the XXX_LARGE channels and ignores the rest, while the XBox One could
-// map the XXX_LARGE to the handle motors and XXX_SMALL to the trigger motors. And iOS can map LEFT_SMALL to
+// For example, Platform A only listens to the XXX_LARGE channels and ignores the rest, while Platform B could
+// map the XXX_LARGE to the handle motors and XXX_SMALL to the trigger motors. And others can map LEFT_SMALL to
 // its single motor.
 enum class FForceFeedbackChannelType
 {
@@ -39,13 +39,15 @@ struct FForceFeedbackValues
 
 struct FHapticFeedbackBuffer
 {
-	TArray<uint8> RawData;
+	const uint8* RawData;
 	uint32 CurrentPtr;
 	int BufferLength;
 	int SamplesSent;
 	bool bFinishedPlaying;
 	int SamplingRate;
 	float ScaleFactor;
+	bool bUseStereo;
+	uint32 CurrentSampleIndex[2];
 
 	FHapticFeedbackBuffer()
 		: CurrentPtr(0)
@@ -53,6 +55,8 @@ struct FHapticFeedbackBuffer
 		, SamplesSent(0)
 		, bFinishedPlaying(false)
 		, SamplingRate(0)
+		, bUseStereo(false)
+		, CurrentSampleIndex{}
 	{
 	}
 
@@ -85,6 +89,20 @@ struct FHapticFeedbackValues
 	}
 };
 
+/**
+ * Represents input device triggers that are available
+ *
+ * NOTE: Make sure to keep this type in sync with the reflected version in NoExportTypes.h!
+ */
+enum class EInputDeviceTriggerMask : uint8
+{
+	None		= 0x00,
+	Left		= 0x01,
+	Right		= 0x02,
+	All			= Left | Right
+};
+ENUM_CLASS_FLAGS(EInputDeviceTriggerMask)
+
 struct FInputDeviceProperty
 {
 	FInputDeviceProperty(FName InName)
@@ -94,6 +112,102 @@ struct FInputDeviceProperty
 	FName Name;
 };
 
+/** A generic light color property for input devices that have lights on them */
+struct FInputDeviceLightColorProperty : public FInputDeviceProperty
+{
+	FInputDeviceLightColorProperty()
+		: FInputDeviceProperty(PropertyName())
+	{}
+
+	FInputDeviceLightColorProperty(bool bInEnable, FColor InColor)
+		: FInputDeviceProperty(PropertyName())
+		, bEnable(bInEnable)
+		, Color(InColor)
+	{}
+
+	static FName PropertyName() { return FName("InputDeviceLightColor"); }
+
+	/** If the light should be enabled or not. */
+	bool bEnable = true;
+	
+	/** The color to set the light */
+	FColor Color = FColor::White;
+}; 
+
+/** Base class for device properties that affect Triggers */
+struct FInputDeviceTriggerProperty : public FInputDeviceProperty
+{
+	FInputDeviceTriggerProperty(FName InName)
+		: FInputDeviceProperty(InName)
+	{}
+
+	/** Which trigger this property should effect */
+	EInputDeviceTriggerMask AffectedTriggers = EInputDeviceTriggerMask::None;
+};
+
+/** This property can be used to reset the state of a given trigger. */
+struct FInputDeviceTriggerResetProperty : public FInputDeviceTriggerProperty
+{
+	FInputDeviceTriggerResetProperty()
+		: FInputDeviceTriggerProperty(PropertyName())
+	{
+		AffectedTriggers = EInputDeviceTriggerMask::All;
+	}
+
+	static FName PropertyName() { return FName("InputDeviceTriggerResetProperty"); }
+};
+
+/** Trigger resistance that is applied at a single position with the given strength. */
+struct FInputDeviceTriggerFeedbackProperty : public FInputDeviceTriggerProperty
+{
+	FInputDeviceTriggerFeedbackProperty()
+		: FInputDeviceTriggerProperty(PropertyName())
+	{}
+
+	static FName PropertyName() { return FName("InputDeviceTriggerFeedback"); }
+
+	int32 Position = 0;
+
+	int32 Strengh = 0;
+};
+
+/** A generic trigger effect that allows analog triggers to have a resistance curve between two points (Start and End) */
+struct FInputDeviceTriggerResistanceProperty : public FInputDeviceTriggerProperty
+{
+	FInputDeviceTriggerResistanceProperty()
+		: FInputDeviceTriggerProperty(PropertyName())
+	{}
+
+	static FName PropertyName() { return FName("InputDeviceTriggerResistance"); }
+
+	/** The position that the trigger should start providing resistance */
+	int32 StartPosition = 0;
+
+	/** How strong the resistance is */
+	int32 StartStrengh = 0;
+
+	/** The position that the trigger should start providing resistance */
+	int32 EndPosition = 0;
+
+	/** How strong the resistance is */
+	int32 EndStrengh = 0;
+};
+
+/** A generic input device property that sets vibration on triggers */
+struct FInputDeviceTriggerVibrationProperty : public FInputDeviceTriggerProperty
+{
+	FInputDeviceTriggerVibrationProperty()
+		: FInputDeviceTriggerProperty(PropertyName())
+	{}
+
+	static FName PropertyName() { return FName("InputDeviceTriggerVibration"); }
+
+	int32 TriggerPosition = 0;
+
+	int32 VibrationFrequency = 0;
+
+	int32 VibrationAmplitude = 0;
+};
 
 /**
  * Interface for the input interface.

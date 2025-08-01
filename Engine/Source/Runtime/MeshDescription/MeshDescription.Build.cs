@@ -6,9 +6,6 @@ namespace UnrealBuildTool.Rules
 	{
 		public MeshDescription(ReadOnlyTargetRules Target) : base(Target)
 		{
-            PrivateIncludePaths.Add("Runtime/MeshDescription/Private");
-            PublicIncludePaths.Add("Runtime/MeshDescription/Public");
-
 			PublicDependencyModuleNames.AddRange(
 				new string[]
 				{
@@ -16,6 +13,11 @@ namespace UnrealBuildTool.Rules
 					"CoreUObject"
 				}
 			);
+
+			if (Target.bBuildWithEditorOnlyData)
+			{
+				PrivateDependencyModuleNames.Add("DerivedDataCache");
+			}
 		}
 	}
 }

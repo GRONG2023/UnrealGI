@@ -2,15 +2,27 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
 #include "Misc/Guid.h"
+#include "Templates/EnableIf.h"
+#include "Templates/IsPointer.h"
+#include "Templates/SharedPointer.h"
 #include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+
 #include "WebJSFunction.generated.h"
 
 class FWebJSScripting;
+class UObject;
+class UStruct;
 
-struct WEBBROWSER_API FWebJSParam
+struct FWebJSParam
 {
 
 	struct IStructWrapper
@@ -96,9 +108,9 @@ struct WEBBROWSER_API FWebJSParam
 			MapValue->Add(Pair.Key.ToString(), FWebJSParam(Pair.Value));
 		}
 	}
-	FWebJSParam(const FWebJSParam& Other);
-	FWebJSParam(FWebJSParam&& Other);
-	~FWebJSParam();
+	WEBBROWSER_API FWebJSParam(const FWebJSParam& Other);
+	WEBBROWSER_API FWebJSParam(FWebJSParam&& Other);
+	WEBBROWSER_API ~FWebJSParam();
 
 	enum { PTYPE_NULL, PTYPE_BOOL, PTYPE_INT, PTYPE_DOUBLE, PTYPE_STRING, PTYPE_OBJECT, PTYPE_STRUCT, PTYPE_ARRAY, PTYPE_MAP } Tag;
 	union
@@ -119,7 +131,7 @@ class FWebJSScripting;
 
 /** Base class for JS callback objects. */
 USTRUCT()
-struct WEBBROWSER_API FWebJSCallbackBase
+struct FWebJSCallbackBase
 {
 	GENERATED_USTRUCT_BODY()
 	FWebJSCallbackBase()
@@ -137,7 +149,7 @@ protected:
 		, CallbackId(InCallbackId)
 	{}
 
-	void Invoke(int32 ArgCount, FWebJSParam Arguments[], bool bIsError = false) const;
+	WEBBROWSER_API void Invoke(int32 ArgCount, FWebJSParam Arguments[], bool bIsError = false) const;
 
 private:
 
@@ -152,7 +164,7 @@ private:
  * FWebJSFunction objects can also be added to delegates and events using the Bind/AddLambda method.
  */
 USTRUCT()
-struct WEBBROWSER_API FWebJSFunction
+struct FWebJSFunction
 	: public FWebJSCallbackBase
 {
 	GENERATED_USTRUCT_BODY()
@@ -182,7 +194,7 @@ struct WEBBROWSER_API FWebJSFunction
  *  Note that the remote object will become invalid as soon as a result has been delivered, so you can only call either Success or Failure once.
  */
 USTRUCT()
-struct WEBBROWSER_API FWebJSResponse
+struct FWebJSResponse
 	: public FWebJSCallbackBase
 {
 	GENERATED_USTRUCT_BODY()

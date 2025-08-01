@@ -16,7 +16,10 @@ public:
 	virtual ~FVirtualTextureLevelRedirector();
 
 	//~ Begin IVirtualTexture Interface.
+	virtual bool IsPageStreamed(uint8 vLevel, uint32 vAddress) const override;
+
 	virtual FVTRequestPageResult RequestPageData(
+		FRHICommandList& RHICmdList,
 		const FVirtualTextureProducerHandle& ProducerHandle,
 		uint8 LayerMask,
 		uint8 vLevel,
@@ -25,7 +28,7 @@ public:
 	) override;
 
 	virtual IVirtualTextureFinalizer* ProducePageData(
-		FRHICommandListImmediate& RHICmdList,
+		FRHICommandList& RHICmdList,
 		ERHIFeatureLevel::Type FeatureLevel,
 		EVTProducePageFlags Flags,
 		const FVirtualTextureProducerHandle& ProducerHandle,
@@ -35,6 +38,16 @@ public:
 		uint64 RequestHandle,
 		const FVTProduceTargetLayer* TargetLayers
 	) override;
+
+	virtual void GatherProducePageDataTasks(
+		FVirtualTextureProducerHandle const& ProducerHandle, 
+		FGraphEventArray& InOutTasks
+	) const override;
+
+	virtual void GatherProducePageDataTasks(
+		uint64 RequestHandle, 
+		FGraphEventArray& InOutTasks
+	) const override;
 	//~ End IVirtualTexture Interface.
 
 private:

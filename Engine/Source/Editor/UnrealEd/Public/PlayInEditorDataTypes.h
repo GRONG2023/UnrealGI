@@ -59,10 +59,6 @@ struct FPieLoginStruct
 	/** World context handle for this login */
 	FName WorldContextHandle;
 
-	/** Setting index for window positioning */
-	UE_DEPRECATED(4.25, "This is now done automatically via PlayInEditorSessionInfo")
-	int32 SettingsIndex;
-
 	/** X location for window positioning */
 	int32 NextX;
 	/** Y location for window positioning */
@@ -76,18 +72,15 @@ struct FPieLoginStruct
 	/** Which index is the instance of this Play in Editor session that will be created. */
 	int32 PIEInstanceIndex;
 
-	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	FPieLoginStruct(const FPieLoginStruct& InOther)
 	{
 		WorldContextHandle = InOther.WorldContextHandle;
-		SettingsIndex = InOther.SettingsIndex;
 		NextX = InOther.NextX;
 		NextY = InOther.NextY;
 		PIEStartTime = InOther.PIEStartTime;
 		GameInstancePIEParameters = InOther.GameInstancePIEParameters;
 		PIEInstanceIndex = InOther.PIEInstanceIndex;
 	}
-	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	FPieLoginStruct()
 		: WorldContextHandle(NAME_None)
@@ -96,24 +89,7 @@ struct FPieLoginStruct
 		, PIEStartTime(0)
 		, PIEInstanceIndex(-1)
 	{
-		PRAGMA_DISABLE_DEPRECATION_WARNINGS
-		SettingsIndex = 0;
-		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
-};
-
-
-/** Overrides you can pass when starting PIE to temporarily suppress the user's options for dedicated server, number of clients..etc. */
-struct UE_DEPRECATED(4.25, "Specify overrides by customizing the ULevelEditorPlaySettings in your PlaySessionRequest instead.") FPlayInEditorOverrides
-{
-	FPlayInEditorOverrides()
-		: bDedicatedServer()
-		, NumberOfClients()
-	{
-	}
-
-	TOptional<bool> bDedicatedServer;
-	TOptional<int32> NumberOfClients;
 };
 
 enum class EPlaySessionDestinationType : uint8
@@ -155,6 +131,7 @@ public:
 		: SessionDestination(EPlaySessionDestinationType::InProcess)
 		, WorldType(EPlaySessionWorldType::PlayInEditor)
 		, EditorPlaySettings(nullptr)
+		, bAllowOnlineSubsystem(true)
 	{
 	}
 
@@ -164,6 +141,10 @@ public:
 		FString DeviceId;
 		/** The name of the Device selected in the Launch drop-down to launch on. */
 		FString DeviceName;
+		/** If True, a remote play session will attempt to update the flash/software on the target device if it's out of date */
+		bool bUpdateDeviceFlash = false;
+		/** If True, the launch device is a Simulator */
+		bool bIsSimulator = false;
 	};
 
 	/** Where should the session be launched? May be local or remote. */
@@ -176,7 +157,7 @@ public:
 	TOptional<EPlaySessionPreviewType> SessionPreviewTypeOverride;
 
 	/** A ULevelEditorPlaySettings instance that the session should be started with. nullptr means use the CDO. */
-	ULevelEditorPlaySettings* EditorPlaySettings;
+	TObjectPtr<ULevelEditorPlaySettings> EditorPlaySettings;
 
 	/** If this is set the Play session will start from this location instead of using the GameMode to find a Player Spawn. */
 	TOptional<FVector> StartLocation;
@@ -215,6 +196,9 @@ public:
 
 	/** Override which map is loaded for the Play session. This overrides both offline & servers (server only can be overridden in ULevelEditorPlaySettings) */
 	FString GlobalMapOverride;
+	
+	/** If false, then PIE won't try to ask the Online Subsystem/"Use Online Logins" feature if it should authenticate the PIE sessions. */
+	bool bAllowOnlineSubsystem;
 
 	bool HasPlayWorldPlacement() const
 	{
@@ -241,6 +225,7 @@ public:
 		, bUsingOnlinePlatform(false)
 		, bAnyBlueprintErrors(false)
 		, bServerWasLaunched(false)
+		, bLateJoinRequested(false)
 	{
 	}
 
@@ -286,6 +271,9 @@ public:
 
 	/** Have we launched a server for this PIE session yet? */
 	bool bServerWasLaunched;
+
+	/** If true, a late join client will be added on the next tick. */
+	bool bLateJoinRequested;
 
 	/** Transient information about window sizes/positions. This gets loaded from settings at start and saved at end. */
 	TArray<FWindowSizeAndPos> CachedWindowInfo;

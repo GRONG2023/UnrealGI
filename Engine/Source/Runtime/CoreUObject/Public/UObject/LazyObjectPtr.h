@@ -6,17 +6,26 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/UnrealString.h"
+#include "CoreGlobals.h"
+#include "HAL/Platform.h"
 #include "HAL/ThreadSafeCounter.h"
-#include "UObject/Object.h"
 #include "Misc/Guid.h"
+#include "Serialization/Archive.h"
+#include "Serialization/StructuredArchive.h"
 #include "Templates/Casts.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Object.h"
 #include "UObject/PersistentObjectPtr.h"
 
+template <typename T> struct TIsPODType;
+template <typename T> struct TIsWeakPointerType;
+
 /**
- * Wrapper structure for a GUID that uniquely identifies a UObject
+ * Wrapper structure for a GUID that uniquely identifies registered UObjects.
+ * The actual GUID is stored in an object annotation that is updated when a new reference is made.
  */
-struct COREUOBJECT_API FUniqueObjectGuid
+struct FUniqueObjectGuid
 {
 	FUniqueObjectGuid()
 	{}
@@ -32,23 +41,23 @@ struct COREUOBJECT_API FUniqueObjectGuid
 	}
 
 	/** Construct from an existing object */
-	explicit FUniqueObjectGuid(const class UObject* InObject);
+	COREUOBJECT_API explicit FUniqueObjectGuid(const class UObject* InObject);
 
 	/** Converts into a string */
-	FString ToString() const;
+	COREUOBJECT_API FString ToString() const;
 
 	/** Converts from a string */
-	void FromString(const FString& From);
+	COREUOBJECT_API void FromString(const FString& From);
 
 	/** Fixes up this UniqueObjectID to add or remove the PIE prefix depending on what is currently active */
-	FUniqueObjectGuid FixupForPIE(int32 PlayInEditorID = GPlayInEditorID) const;
+	COREUOBJECT_API FUniqueObjectGuid FixupForPIE(int32 PlayInEditorID = GPlayInEditorID) const;
 
 	/**
 	 * Attempts to find a currently loaded object that matches this object ID
 	 *
 	 * @return Found UObject, or nullptr if not currently loaded
 	 */
-	class UObject *ResolveObject() const;
+	COREUOBJECT_API class UObject *ResolveObject() const;
 
 	/** Test if this can ever point to a live UObject */
 	FORCEINLINE bool IsValid() const
@@ -94,35 +103,35 @@ struct COREUOBJECT_API FUniqueObjectGuid
 		Slot << ObjectGuid.Guid;
 	}
 
-	/** Code needed by FLazyPtr internals */
+	UE_DEPRECATED(5.4, "The current object tag is no longer used by TSoftObjectPtr, you can remove all calls")
 	static int32 GetCurrentTag()
 	{
-		return CurrentAnnotationTag.GetValue();
+		return 0;
 	}
+	UE_DEPRECATED(5.4, "The current object tag is no longer used by TSoftObjectPtr, you can remove all calls")
 	static int32 InvalidateTag()
 	{
-		return CurrentAnnotationTag.Increment();
+		return 0;
 	}
 
-	static FUniqueObjectGuid GetOrCreateIDForObject(const class UObject *Object);
+	static COREUOBJECT_API FUniqueObjectGuid GetOrCreateIDForObject(const class UObject *Object);
 
 private:
 	/** Guid representing the object, should be unique */
 	FGuid Guid;
-
-	/** Global counter that determines when we need to re-search for GUIDs because more objects have been loaded **/
-	static FThreadSafeCounter CurrentAnnotationTag;
 };
 
 template<> struct TIsPODType<FUniqueObjectGuid> { enum { Value = true }; };
 
 /**
  * FLazyObjectPtr is a type of weak pointer to a UObject that uses a GUID created at save time.
+ * Objects will only have consistent GUIDs if they are referenced by a lazy pointer and then saved.
  * It will change back and forth between being valid or pending as the referenced object loads or unloads.
  * It has no impact on if the object is garbage collected or not.
  * It can't be directly used across a network.
  *
- * This is useful for cross level references or places where you need to point to an object whose name changes often.
+ * NOTE: Because this only stores a GUID, it does not know how to load the destination object and does not work with Play In Editor.
+ * This will be deprecated in a future engine version and new features should use FSoftObjectPtr instead.
  */
 struct FLazyObjectPtr : public TPersistentObjectPtr<FUniqueObjectGuid>
 {
@@ -149,6 +158,12 @@ public:
 	{
 		TPersistentObjectPtr<FUniqueObjectGuid>::operator=(InObjectID);
 	}
+
+	/** Fixes up this FLazyObjectPtr to target the right UID as set in PIEGuidMap, this only works for directly serialized pointers */
+	FORCEINLINE void FixupForPIE(int32 PIEInstance)
+	{
+		*this = GetUniqueID().FixupForPIE(PIEInstance);
+	}
 	
 	/** Called by UObject::Serialize so that we can save / load the Guid possibly associated with an object */
 	COREUOBJECT_API static void PossiblySerializeObjectGuid(UObject* Object, FStructuredArchive::FRecord Record);
@@ -161,12 +176,15 @@ template <> struct TIsPODType<FLazyObjectPtr> { enum { Value = TIsPODType<TPersi
 template <> struct TIsWeakPointerType<FLazyObjectPtr> { enum { Value = TIsWeakPointerType<TPersistentObjectPtr<FUniqueObjectGuid> >::Value }; };
 
 /**
- * TLazyObjectPtr is templatized version of the generic FLazyObjectPtr
+ * TLazyObjectPtr is the templatized version of the generic FLazyObjectPtr.
+ * NOTE: This will be deprecated in a future engine version and new features should use TSoftObjectPtr instead.
  */
 template<class T=UObject>
 struct TLazyObjectPtr : private FLazyObjectPtr
 {
 public:
+	using ElementType = T;
+	
 	TLazyObjectPtr() = default;
 
 	TLazyObjectPtr(TLazyObjectPtr<T>&&) = default;
@@ -297,38 +315,69 @@ public:
 	}
 
 	/** Hash function. */
-	FORCEINLINE friend uint32 GetTypeHash(const TLazyObjectPtr<T>& LazyObjectPtr)
+	FORCEINLINE uint32 GetLazyObjecPtrTypeHash() const
 	{
-		return GetTypeHash(static_cast<const FLazyObjectPtr&>(LazyObjectPtr));
+		return GetTypeHash(static_cast<const FLazyObjectPtr&>(*this));
 	}
 
-	friend FArchive& operator<<(FArchive& Ar, TLazyObjectPtr<T>& LazyObjectPtr)
+	FORCEINLINE void SerializePtr(FArchive& Ar)
 	{
-		Ar << static_cast<FLazyObjectPtr&>(LazyObjectPtr);
-		return Ar;
+		Ar << static_cast<FLazyObjectPtr&>(*this);
+	}
+
+	/** Compare with another TLazyObjectPtr of related type */
+	template<typename U, typename = decltype((T*)nullptr == (U*)nullptr)>
+	FORCEINLINE bool operator==(const TLazyObjectPtr<U>& Rhs) const
+	{
+		return (const FLazyObjectPtr&)*this == (const FLazyObjectPtr&)Rhs;
+	}
+	template<typename U, typename = decltype((T*)nullptr != (U*)nullptr)>
+	FORCEINLINE bool operator!=(const TLazyObjectPtr<U>& Rhs) const
+	{
+		return (const FLazyObjectPtr&)*this != (const FLazyObjectPtr&)Rhs;
+	}
+
+	/** Compare for equality with a raw pointer **/
+	template<typename U, typename = decltype((T*)nullptr == (U*)nullptr)>
+	FORCEINLINE bool operator==(const U* Rhs) const
+	{
+		return Get() == Rhs;
+	}
+
+	/** Compare to null */
+	FORCEINLINE bool operator==(TYPE_OF_NULLPTR) const
+	{
+		return !IsValid();
+	}
+	/** Compare for inequality with a raw pointer	**/
+	template<typename U, typename = decltype((T*)nullptr != (U*)nullptr)>
+	FORCEINLINE bool operator!=(const U* Rhs) const
+	{
+		return Get() != Rhs;
+	}
+
+	/** Compare for inequality with null **/
+	FORCEINLINE bool operator!=(TYPE_OF_NULLPTR) const
+	{
+		return IsValid();
 	}
 };
 
-// The reason these aren't inside the class (above) is because Visual Studio 2012-2013 crashes when compiling them :D
-
-/** Compare with another TLazyObjectPtr of related type */
-template<typename T, typename U, typename = decltype((T*)nullptr == (U*)nullptr)>
-FORCEINLINE bool operator==(const TLazyObjectPtr<T>& Lhs, const TLazyObjectPtr<U>& Rhs)
+/** Hash function. */
+template<typename T>
+FORCEINLINE uint32 GetTypeHash(const TLazyObjectPtr<T>& LazyObjectPtr)
 {
-	return (const FLazyObjectPtr&)Lhs == (const FLazyObjectPtr&)Rhs;
+	return LazyObjectPtr.GetLazyObjecPtrTypeHash();
 }
-template<typename T, typename U, typename = decltype((T*)nullptr != (U*)nullptr)>
-FORCEINLINE bool operator!=(const TLazyObjectPtr<T>& Lhs, const TLazyObjectPtr<U>& Rhs)
+
+template<typename T>
+FArchive& operator<<(FArchive& Ar, TLazyObjectPtr<T>& LazyObjectPtr)
 {
-	return (const FLazyObjectPtr&)Lhs != (const FLazyObjectPtr&)Rhs;
+	LazyObjectPtr.SerializePtr(Ar);
+	return Ar;
 }
 
 /** Compare for equality with a raw pointer **/
-template<typename T, typename U, typename = decltype((T*)nullptr == (U*)nullptr)>
-FORCEINLINE bool operator==(const TLazyObjectPtr<T>& Lhs, const U* Rhs)
-{
-	return Lhs.Get() == Rhs;
-}
 template<typename T, typename U, typename = decltype((T*)nullptr == (U*)nullptr)>
 FORCEINLINE bool operator==(const U* Lhs, const TLazyObjectPtr<T>& Rhs)
 {
@@ -337,22 +386,12 @@ FORCEINLINE bool operator==(const U* Lhs, const TLazyObjectPtr<T>& Rhs)
 
 /** Compare to null */
 template<typename T>
-FORCEINLINE bool operator==(const TLazyObjectPtr<T>& Lhs, TYPE_OF_NULLPTR)
-{
-	return !Lhs.IsValid();
-}
-template<typename T>
 FORCEINLINE bool operator==(TYPE_OF_NULLPTR, const TLazyObjectPtr<T>& Rhs)
 {
 	return !Rhs.IsValid();
 }
 
 /** Compare for inequality with a raw pointer	**/
-template<typename T, typename U, typename = decltype((T*)nullptr != (U*)nullptr)>
-FORCEINLINE bool operator!=(const TLazyObjectPtr<T>& Lhs, const U* Rhs)
-{
-	return Lhs.Get() != Rhs;
-}
 template<typename T, typename U, typename = decltype((T*)nullptr != (U*)nullptr)>
 FORCEINLINE bool operator!=(const U* Lhs, const TLazyObjectPtr<T>& Rhs)
 {
@@ -361,11 +400,6 @@ FORCEINLINE bool operator!=(const U* Lhs, const TLazyObjectPtr<T>& Rhs)
 
 /** Compare for inequality with null **/
 template<typename T>
-FORCEINLINE bool operator!=(const TLazyObjectPtr<T>& Lhs, TYPE_OF_NULLPTR)
-{
-	return Lhs.IsValid();
-}
-template<typename T>
 FORCEINLINE bool operator!=(TYPE_OF_NULLPTR, const TLazyObjectPtr<T>& Rhs)
 {
 	return Rhs.IsValid();
@@ -373,3 +407,7 @@ FORCEINLINE bool operator!=(TYPE_OF_NULLPTR, const TLazyObjectPtr<T>& Rhs)
 
 template<class T> struct TIsPODType<TLazyObjectPtr<T> > { enum { Value = TIsPODType<FLazyObjectPtr>::Value }; };
 template<class T> struct TIsWeakPointerType<TLazyObjectPtr<T> > { enum { Value = TIsWeakPointerType<FLazyObjectPtr>::Value }; };
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
+#endif

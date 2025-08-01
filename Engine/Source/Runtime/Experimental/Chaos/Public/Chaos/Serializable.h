@@ -20,13 +20,18 @@ public:
 	template<ESPMode TESPMode>
 	explicit TSerializablePtr(const TSharedPtr<T, TESPMode>& Shared) : Ptr(Shared.Get()) {}
 	
+	explicit TSerializablePtr(const TRefCountPtr<T>& RefCount) : Ptr(RefCount.GetReference()) {}
+	
 	const T* operator->() const { return Ptr; }
 	const T* Get() const { return Ptr; }
+	const T* GetReference() const { return Ptr; }
 	const T& operator*() const { return *Ptr; }
 	void Reset() { Ptr = nullptr; }
 	bool operator!() const { return Ptr == nullptr; }
 	bool operator==(const TSerializablePtr<T>& Serializable) const { return Ptr == Serializable.Ptr; }
+	bool operator!=(const TSerializablePtr<T>& Serializable) const { return Ptr != Serializable.Ptr; }
 	operator bool() const { return Ptr != nullptr; }
+	bool IsValid() const { return Ptr != nullptr; }
 
 	template <typename R>
 	operator TSerializablePtr<R>() const
@@ -79,6 +84,12 @@ template<typename T, ESPMode TESPMode>
 TSerializablePtr<T> MakeSerializable(const TSharedPtr<T, TESPMode>& Shared)
 {
 	return TSerializablePtr<T>(Shared);
+}
+	
+template<typename T>
+TSerializablePtr<T> MakeSerializable(const TRefCountPtr<T>& RefCount)
+{
+	return TSerializablePtr<T>(RefCount);
 }
 
 //This is only available for types that are guaranteed to be serializable. This is done by having a factory that returns unique pointers for example

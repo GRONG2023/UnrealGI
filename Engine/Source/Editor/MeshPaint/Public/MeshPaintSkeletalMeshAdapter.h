@@ -33,7 +33,7 @@ public:
 	virtual bool Initialize() override;
 	virtual void OnAdded() override;
 	virtual void OnRemoved() override;
-	virtual bool IsValid() const override { return SkeletalMeshComponent && ReferencedSkeletalMesh && SkeletalMeshComponent->SkeletalMesh == ReferencedSkeletalMesh; }
+	virtual bool IsValid() const override { return SkeletalMeshComponent && ReferencedSkeletalMesh && SkeletalMeshComponent->GetSkeletalMeshAsset() == ReferencedSkeletalMesh; }
 	virtual bool SupportsTexturePaint() const override { return true; }
 	virtual bool SupportsVertexPaint() const override { return SkeletalMeshComponent != nullptr; }
 	virtual bool LineTraceComponent(struct FHitResult& OutHit, const FVector Start, const FVector End, const struct FCollisionQueryParams& Params) const override;
@@ -61,9 +61,9 @@ protected:
 	FDelegateHandle SkeletalMeshChangedHandle;	
 
 	/** Skeletal mesh component represented by this adapter */
-	USkeletalMeshComponent* SkeletalMeshComponent;
+	TObjectPtr<USkeletalMeshComponent> SkeletalMeshComponent;
 	/** Skeletal mesh currently set to the Skeletal Mesh Component */
-	USkeletalMesh* ReferencedSkeletalMesh;
+	TObjectPtr<USkeletalMesh> ReferencedSkeletalMesh;
 	/** Skeletal Mesh resource retrieved from the Skeletal Mesh */
 	FSkeletalMeshRenderData* MeshResource;
 
@@ -88,15 +88,15 @@ protected:
 				, CachedCollisionType(InCachedCollisionType)
 			{}
 
-			USkeletalMeshComponent* SkeletalMeshComponent;
+			TObjectPtr<USkeletalMeshComponent> SkeletalMeshComponent;
 			ECollisionEnabled::Type CachedCollisionType;
 		};
 
 		TArray<FReferencersInfo> Referencers;
-		UBodySetup* RestoreBodySetup;
+		TObjectPtr<UBodySetup> RestoreBodySetup;
 	};
 
-	typedef TMap<USkeletalMesh*, FSkeletalMeshReferencers> FMeshToComponentMap;
+	typedef TMap<TObjectPtr<USkeletalMesh>, FSkeletalMeshReferencers> FMeshToComponentMap;
 	static FMeshToComponentMap MeshToComponentMap;
 };
 

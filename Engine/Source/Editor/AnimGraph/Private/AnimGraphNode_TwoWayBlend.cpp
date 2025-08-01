@@ -15,9 +15,9 @@ UAnimGraphNode_TwoWayBlend::UAnimGraphNode_TwoWayBlend(const FObjectInitializer&
 {
 }
 
-FString UAnimGraphNode_TwoWayBlend::GetNodeCategory() const
+FText UAnimGraphNode_TwoWayBlend::GetMenuCategory() const
 {
-	return TEXT("Blends");
+	return LOCTEXT("TwoWayBlendCategory", "Animation|Blends");
 }
 
 FLinearColor UAnimGraphNode_TwoWayBlend::GetNodeTitleColor() const
@@ -32,7 +32,7 @@ FText UAnimGraphNode_TwoWayBlend::GetTooltipText() const
 
 FText UAnimGraphNode_TwoWayBlend::GetNodeTitle(ENodeTitleType::Type TitleType) const
 {
-	return LOCTEXT("Blend", "Blend");
+	return LOCTEXT("TwoWayBlend", "Two Way Blend");
 }
 
 void UAnimGraphNode_TwoWayBlend::CustomizePinData(UEdGraphPin* Pin, FName SourcePropertyName, int32 ArrayIndex) const
@@ -100,6 +100,7 @@ void UAnimGraphNode_TwoWayBlend::PostEditChangeProperty(struct FPropertyChangedE
 				if (BlendNode.AlphaInputType != EAnimAlphaInputType::Float)
 				{
 					Pin->BreakAllPinLinks();
+					RemoveBindings(Pin->PinName);
 				}
 			}
 			else if (Pin->PinName == GET_MEMBER_NAME_STRING_CHECKED(FAnimNode_TwoWayBlend, bAlphaBoolEnabled))
@@ -107,6 +108,7 @@ void UAnimGraphNode_TwoWayBlend::PostEditChangeProperty(struct FPropertyChangedE
 				if (BlendNode.AlphaInputType != EAnimAlphaInputType::Bool)
 				{
 					Pin->BreakAllPinLinks();
+					RemoveBindings(Pin->PinName);
 				}
 			}
 			else if (Pin->PinName == GET_MEMBER_NAME_STRING_CHECKED(FAnimNode_TwoWayBlend, AlphaCurveName))
@@ -114,6 +116,7 @@ void UAnimGraphNode_TwoWayBlend::PostEditChangeProperty(struct FPropertyChangedE
 				if (BlendNode.AlphaInputType != EAnimAlphaInputType::Curve)
 				{
 					Pin->BreakAllPinLinks();
+					RemoveBindings(Pin->PinName);
 				}
 			}
 		}

@@ -6,6 +6,7 @@ public class AndroidTargetPlatform : ModuleRules
 {
 	public AndroidTargetPlatform(ReadOnlyTargetRules Target) : base(Target)
 	{
+		UnsafeTypeCastWarningLevel = WarningLevel.Error;
 		BinariesSubFolder = "Android";
 
         PrivateDependencyModuleNames.AddRange(
@@ -20,14 +21,6 @@ public class AndroidTargetPlatform : ModuleRules
             }
 		);
 
-		PublicIncludePaths.AddRange(
-			new string[]
-			{
-				"Runtime/Core/Public/Android"
-			}
-		);
-
-
         if (Target.bCompileAgainstEngine)
 		{
 			PrivateDependencyModuleNames.Add("Engine");
@@ -35,11 +28,5 @@ public class AndroidTargetPlatform : ModuleRules
         }
 
         PublicDefinitions.Add("WITH_OGGVORBIS=1");
-
-		PrivateIncludePaths.AddRange(
-			new string[]
-			{
-            }
-        );
 	}
 }

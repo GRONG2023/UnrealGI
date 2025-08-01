@@ -8,11 +8,14 @@
 #include "MovieScene.h"
 #include "MovieSceneTimeHelpers.h"
 #include "UObject/ReleaseObjectVersion.h"
+#include "UObject/FortniteMainBranchObjectVersion.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneSequenceHierarchy)
 
 FMovieSceneSubSequenceData::FMovieSceneSubSequenceData()
 	: Sequence(nullptr)
 	, HierarchicalBias(0)
-	, bHasHierarchicalEasing(false)
+	, AccumulatedFlags(EMovieSceneSubSectionFlags::None)
 {}
 
 FMovieSceneSubSequenceData::FMovieSceneSubSequenceData(const UMovieSceneSubSection& InSubSection)
@@ -24,7 +27,7 @@ FMovieSceneSubSequenceData::FMovieSceneSubSequenceData(const UMovieSceneSubSecti
 	, ParentFirstLoopStartFrameOffset(InSubSection.Parameters.FirstLoopStartFrameOffset)
 	, bCanLoop(InSubSection.Parameters.bCanLoop)
 	, HierarchicalBias(InSubSection.Parameters.HierarchicalBias)
-	, bHasHierarchicalEasing(false)
+	, AccumulatedFlags(InSubSection.Parameters.Flags)
 #if WITH_EDITORONLY_DATA
 	, SectionPath(*InSubSection.GetPathNameInMovieScene())
 #endif
@@ -49,9 +52,9 @@ FMovieSceneSubSequenceData::FMovieSceneSubSequenceData(const UMovieSceneSubSecti
 	// being truly the full transform.
 	OuterToInnerTransform = RootToSequenceTransform = InSubSection.OuterToInnerTransform();
 
-	if (!InSubSection.Parameters.bCanLoop)
+	if (!InSubSection.Parameters.bCanLoop || FMath::IsNearlyZero(RootToSequenceTransform.GetTimeScale()))
 	{
-		PlayRange.Value = SubSectionRange * RootToSequenceTransform.LinearTransform;
+		PlayRange.Value = RootToSequenceTransform.TransformRangeUnwarped(SubSectionRange);
 		UnwarpedPlayRange.Value = PlayRange.Value;
 	}
 	else
@@ -66,18 +69,15 @@ FMovieSceneSubSequenceData::FMovieSceneSubSequenceData(const UMovieSceneSubSecti
 	}
 
 	// Make sure pre/postroll *ranges* are in the inner sequence's time space. Pre/PostRollFrames are in the outer sequence space.
+
 	if (InSubSection.GetPreRollFrames() > 0)
 	{
-		PreRollRange = UE::MovieScene::MakeDiscreteRangeFromUpper( TRangeBound<FFrameNumber>::FlipInclusion(SubSectionRange.GetLowerBound()), InSubSection.GetPreRollFrames() ) * RootToSequenceTransform.LinearTransform;
+		PreRollRange = RootToSequenceTransform.TransformRangeUnwarped(UE::MovieScene::MakeDiscreteRangeFromUpper(TRangeBound<FFrameNumber>::FlipInclusion(SubSectionRange.GetLowerBound()), InSubSection.GetPreRollFrames()));
 	}
 	if (InSubSection.GetPostRollFrames() > 0)
 	{
-		PostRollRange = UE::MovieScene::MakeDiscreteRangeFromLower( TRangeBound<FFrameNumber>::FlipInclusion(SubSectionRange.GetUpperBound()), InSubSection.GetPostRollFrames() ) * RootToSequenceTransform.LinearTransform;
+		PostRollRange = RootToSequenceTransform.TransformRangeUnwarped(UE::MovieScene::MakeDiscreteRangeFromLower(TRangeBound<FFrameNumber>::FlipInclusion(SubSectionRange.GetUpperBound()), InSubSection.GetPostRollFrames()));
 	}
-
-	const bool bHasSubSectionEaseIn  = (InSubSection.Easing.GetEaseInDuration() > 0);
-	const bool bHasSubSectionEaseOut = (InSubSection.Easing.GetEaseOutDuration() > 0);
-	bHasHierarchicalEasing = (bHasSubSectionEaseIn || bHasSubSectionEaseOut);
 }
 
 UMovieSceneSequence* FMovieSceneSubSequenceData::GetSequence() const
@@ -86,6 +86,12 @@ UMovieSceneSequence* FMovieSceneSubSequenceData::GetSequence() const
 	if (!ResolvedSequence)
 	{
 		ResolvedSequence = Cast<UMovieSceneSequence>(Sequence.ResolveObject());
+
+		if (!ResolvedSequence)
+		{
+			ResolvedSequence = Cast<UMovieSceneSequence>(Sequence.TryLoad());
+		}
+
 		CachedSequence = ResolvedSequence;
 	}
 	return ResolvedSequence;
@@ -190,10 +196,12 @@ void FMovieSceneSequenceHierarchy::AddRange(const TRange<FFrameNumber>& RootSpac
 FArchive& operator<<(FArchive& Ar, FMovieSceneSubSequenceTreeEntry& InOutEntry)
 {
 	Ar.UsingCustomVersion(FReleaseObjectVersion::GUID);
+	Ar.UsingCustomVersion(FFortniteMainBranchObjectVersion::GUID);
 
 	Ar << InOutEntry.SequenceID << InOutEntry.Flags;
 
-	if (Ar.CustomVer(FReleaseObjectVersion::GUID) >= FReleaseObjectVersion::AddedSubSequenceEntryWarpCounter)
+	if (Ar.CustomVer(FReleaseObjectVersion::GUID) >= FReleaseObjectVersion::AddedSubSequenceEntryWarpCounter ||
+		Ar.CustomVer(FFortniteMainBranchObjectVersion::GUID) >= FFortniteMainBranchObjectVersion::AddedSubSequenceEntryWarpCounter)
 	{
 		FMovieSceneWarpCounter::StaticStruct()->SerializeTaggedProperties(
 				Ar, (uint8*)&InOutEntry.RootToSequenceWarpCounter, FMovieSceneWarpCounter::StaticStruct(), nullptr);
@@ -235,10 +243,9 @@ void FMovieSceneSequenceHierarchy::LogHierarchy() const
 
 			FString Indent;
 			Indent.Append(TEXT(" "), CurDepth * 2);
-			UE_LOG(LogMovieScene, Log, TEXT("%s%s Loop=%s HEasing=%s HBias=%d UnwarpedRange=%s Transform=%s"), 
+			UE_LOG(LogMovieScene, Log, TEXT("%s%s Loop=%s HBias=%d UnwarpedRange=%s Transform=%s"), 
 					*Indent, *CurData->GetSequence()->GetName(),
 					*LexToString(CurData->bCanLoop),
-					*LexToString(CurData->bHasHierarchicalEasing),
 					CurData->HierarchicalBias,
 					*LexToString(CurData->UnwarpedPlayRange.Value),
 					*LexToString(CurData->RootToSequenceTransform));
@@ -271,4 +278,5 @@ void FMovieSceneSequenceHierarchy::LogSubSequenceTree() const
 	Formatter.LogTree();
 }
 #endif
+
 

@@ -2,8 +2,12 @@
 
 #include "Animation/AnimNotifies/AnimNotifyState_TimedParticleEffect.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Particles/ParticleSystem.h"
 #include "Particles/ParticleSystemComponent.h"
 #include "Kismet/GameplayStatics.h"
+#include "UObject/UnrealType.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNotifyState_TimedParticleEffect)
 
 UAnimNotifyState_TimedParticleEffect::UAnimNotifyState_TimedParticleEffect(const FObjectInitializer& ObjectInitializer)
 : Super(ObjectInitializer)
@@ -15,22 +19,45 @@ UAnimNotifyState_TimedParticleEffect::UAnimNotifyState_TimedParticleEffect(const
 
 void UAnimNotifyState_TimedParticleEffect::NotifyBegin(USkeletalMeshComponent * MeshComp, class UAnimSequenceBase * Animation, float TotalDuration)
 {
+
+}
+
+
+void UAnimNotifyState_TimedParticleEffect::NotifyBegin(USkeletalMeshComponent * MeshComp, class UAnimSequenceBase * Animation, float TotalDuration, const FAnimNotifyEventReference& EventReference)
+{
+	// ensure deprecated path is called because a call to Super is not made
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	NotifyBegin(MeshComp, Animation, TotalDuration);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	// Only spawn if we've got valid params
 	if(ValidateParameters(MeshComp))
 	{
 		UParticleSystemComponent* NewComponent = UGameplayStatics::SpawnEmitterAttached(PSTemplate, MeshComp, SocketName, LocationOffset, RotationOffset, EAttachLocation::KeepRelativeOffset, !bDestroyAtEnd);
 	}
-
-	Received_NotifyBegin(MeshComp, Animation, TotalDuration);
+	Received_NotifyBegin(MeshComp, Animation, TotalDuration, EventReference);
 }
 
 void UAnimNotifyState_TimedParticleEffect::NotifyTick(USkeletalMeshComponent * MeshComp, class UAnimSequenceBase * Animation, float FrameDeltaTime)
 {
-	Received_NotifyTick(MeshComp, Animation, FrameDeltaTime);
+}
+
+void UAnimNotifyState_TimedParticleEffect::NotifyTick(USkeletalMeshComponent * MeshComp, class UAnimSequenceBase * Animation, float FrameDeltaTime, const FAnimNotifyEventReference& EventReference)
+{
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	NotifyTick(MeshComp, Animation, FrameDeltaTime);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	Received_NotifyTick(MeshComp, Animation, FrameDeltaTime, EventReference);
 }
 
 void UAnimNotifyState_TimedParticleEffect::NotifyEnd(USkeletalMeshComponent * MeshComp, class UAnimSequenceBase * Animation)
 {
+}
+
+void UAnimNotifyState_TimedParticleEffect::NotifyEnd(USkeletalMeshComponent * MeshComp, class UAnimSequenceBase * Animation, const FAnimNotifyEventReference& EventReference)
+{
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	NotifyEnd(MeshComp, Animation);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	TArray<USceneComponent*> Children;
 	MeshComp->GetChildrenComponents(false, Children);
 
@@ -73,7 +100,7 @@ void UAnimNotifyState_TimedParticleEffect::NotifyEnd(USkeletalMeshComponent * Me
 		}
 	}
 
-	Received_NotifyEnd(MeshComp, Animation);
+	Received_NotifyEnd(MeshComp, Animation, EventReference);
 }
 
 bool UAnimNotifyState_TimedParticleEffect::ValidateParameters(USkeletalMeshComponent* MeshComp)
@@ -105,6 +132,8 @@ FString UAnimNotifyState_TimedParticleEffect::GetNotifyName_Implementation() con
 #if WITH_EDITOR
 void UAnimNotifyState_TimedParticleEffect::PreEditChange(FProperty* PropertyAboutToChange)
 {
+	Super::PreEditChange(PropertyAboutToChange);
+
 	if(PropertyAboutToChange)
 	{
 		if(PropertyAboutToChange->GetName() == GET_MEMBER_NAME_STRING_CHECKED(UAnimNotifyState_TimedParticleEffect, PSTemplate) && PSTemplate != NULL)
@@ -119,3 +148,4 @@ void UAnimNotifyState_TimedParticleEffect::PreEditChange(FProperty* PropertyAbou
 	}
 }
 #endif
+

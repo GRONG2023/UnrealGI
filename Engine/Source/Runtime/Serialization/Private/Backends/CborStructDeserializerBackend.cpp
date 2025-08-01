@@ -1,14 +1,18 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Backends/CborStructDeserializerBackend.h"
+
 #include "Backends/StructDeserializerBackendUtilities.h"
+#include "StructSerializationUtilities.h"
 #include "UObject/Class.h"
-#include "UObject/UnrealType.h"
 #include "UObject/EnumProperty.h"
 #include "UObject/TextProperty.h"
+#include "UObject/UnrealType.h"
 
-FCborStructDeserializerBackend::FCborStructDeserializerBackend(FArchive& Archive, ECborEndianness CborDataEndianness)
+
+FCborStructDeserializerBackend::FCborStructDeserializerBackend(FArchive& Archive, ECborEndianness CborDataEndianness, bool bInIsLWCCompatibilityMode)
 	: CborReader(&Archive, CborDataEndianness)
+	, bIsLWCCompatibilityMode(bInIsLWCCompatibilityMode)
 {}
 
 FCborStructDeserializerBackend::~FCborStructDeserializerBackend() = default;
@@ -199,7 +203,7 @@ bool FCborStructDeserializerBackend::ReadProperty(FProperty* Property, FProperty
 				return false;
 			}
 
-			int32 Value = ByteProperty->Enum->GetValueByName(*StringValue);
+			int64 Value = ByteProperty->Enum->GetValueByName(*StringValue);
 			if (Value == INDEX_NONE)
 			{
 				return false;
@@ -232,7 +236,7 @@ bool FCborStructDeserializerBackend::ReadProperty(FProperty* Property, FProperty
 
 		if (FSoftClassProperty* SoftClassProperty = CastField<FSoftClassProperty>(Property))
 		{
-			return StructDeserializerBackendUtilities::SetPropertyValue(SoftClassProperty, Outer, Data, ArrayIndex, FSoftObjectPtr(LoadObject<UClass>(nullptr, *StringValue, nullptr, LOAD_NoWarn)));
+			return StructDeserializerBackendUtilities::SetPropertyValue(SoftClassProperty, Outer, Data, ArrayIndex, FSoftObjectPtr(FSoftObjectPath(StringValue)));
 		}
 
 		if (FObjectProperty* ObjectProperty = CastField<FObjectProperty>(Property))
@@ -304,10 +308,21 @@ bool FCborStructDeserializerBackend::ReadProperty(FProperty* Property, FProperty
 			return StructDeserializerBackendUtilities::ClearPropertyValue(Property, Outer, Data, ArrayIndex);
 			// Float
 		case ECborCode::Value_4Bytes:
-			if (FFloatProperty* FloatProperty = CastField<FFloatProperty>(Property))
+
+			if (bIsLWCCompatibilityMode == true && StructSerializationUtilities::IsLWCType(Property->GetOwnerStruct()))
+			{
+				FDoubleProperty* DoubleProperty = CastField<FDoubleProperty>(Property);
+				if (ensureMsgf(DoubleProperty, TEXT("Float field %s with value '%f' from LWC struct type '%s' was expected to be a DoubleProperty but was of type %s (%s)"), *Property->GetFName().ToString(), LastContext.AsFloat(), *Property->GetOwnerStruct()->GetName(), * Property->GetClass()->GetName(), *GetDebugString()))
+				{
+					const double DoubleValue = LastContext.AsFloat();
+					return StructDeserializerBackendUtilities::SetPropertyValue(DoubleProperty, Outer, Data, ArrayIndex, DoubleValue);
+				}
+			}
+			else if(FFloatProperty* FloatProperty = CastField<FFloatProperty>(Property))
 			{
 				return StructDeserializerBackendUtilities::SetPropertyValue(FloatProperty, Outer, Data, ArrayIndex, LastContext.AsFloat());
 			}
+			
 			UE_LOG(LogSerialization, Verbose, TEXT("Float field %s with value '%f' is not supported in FProperty type %s (%s)"), *Property->GetFName().ToString(), LastContext.AsFloat(), *Property->GetClass()->GetName(), *GetDebugString());
 			return false;
 			// Double
@@ -319,7 +334,7 @@ bool FCborStructDeserializerBackend::ReadProperty(FProperty* Property, FProperty
 			UE_LOG(LogSerialization, Verbose, TEXT("Double field %s with value '%f' is not supported in FProperty type %s (%s)"), *Property->GetFName().ToString(), LastContext.AsDouble(), *Property->GetClass()->GetName(), *GetDebugString());
 			return false;
 		default:
-			UE_LOG(LogSerialization, Verbose, TEXT("Unsupported primitive type for %s in FProperty type %s (%s)"), *Property->GetFName().ToString(), LastContext.AsDouble(), *Property->GetClass()->GetName(), *GetDebugString());
+			UE_LOG(LogSerialization, Verbose, TEXT("Unsupported primitive type for %s with value '%f' in FProperty type %s (%s)"), *Property->GetFName().ToString(), LastContext.AsDouble(), *Property->GetClass()->GetName(), *GetDebugString());
 			return false;
 		}
 	}

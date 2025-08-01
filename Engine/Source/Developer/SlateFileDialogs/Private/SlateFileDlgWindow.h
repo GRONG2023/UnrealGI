@@ -15,6 +15,7 @@
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/SBoxPanel.h"
 #include "SlateOptMacros.h"
+#include "Widgets/Input/SComboBox.h" 
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Views/STableViewBase.h"
@@ -73,13 +74,18 @@ public:
 	FSlateFileDlgWindow(FSlateFileDialogsStyle *InStyleSet);
 
 	bool OpenFileDialog(const void* ParentWindowHandle, const FString& DialogTitle, const FString& DefaultPath,
-		const FString& DefaultFile, const FString& FileTypes, uint32 Flags, TArray<FString>& OutFilenames, int32& OutFilterIndex);
+		const FString& DefaultFile, const FString& FileTypes, uint32 Flags, TArray<FString>& OutFilenames, int32& OutFilterIndex,
+		int32 DefaultFilterIndex = 0);
 
 	bool OpenFileDialog(const void* ParentWindowHandle, const FString& DialogTitle, const FString& DefaultPath,
 		const FString& DefaultFile, const FString& FileTypes, uint32 Flags, TArray<FString>& OutFilenames);
 
 	bool OpenDirectoryDialog(const void* ParentWindowHandle, const FString& DialogTitle, const FString& DefaultPath,
 		FString& OutFoldername);
+
+	bool SaveFileDialog(const void* ParentWindowHandle, const FString& DialogTitle, const FString& DefaultPath,
+		const FString& DefaultFile, const FString& FileTypes, uint32 Flags, TArray<FString>& OutFilenames, int32& OutFilterIndex,
+		int32 DefaultFilterIndex = 0);
 
 	bool SaveFileDialog(const void* ParentWindowHandle, const FString& DialogTitle, const FString& DefaultPath,
 		const FString& DefaultFile, const FString& FileTypes, uint32 Flags, TArray<FString>& OutFilenames);
@@ -90,7 +96,7 @@ private:
 
 	FSlateFileDialogsStyle* StyleSet;
 
-	void TrimStartDirectory(FString &Path);
+	void TrimFilenameFromPath(FString &Path);
 };
 
 
@@ -147,6 +153,7 @@ public:
 	FSlateFileDlgWindow::EResult GetResponse() { return UserResponse; }
 	void SetOutNames(TArray<FString>* Ptr) { OutNames = Ptr; }
 	void SetOutFilterIndex(int32* InOutFilterIndex) { OutFilterIndex = InOutFilterIndex; }
+	void SetDefaultFilterIndex(int32 DefaultFilterIndex) { FilterIndex = DefaultFilterIndex; }
 	void SetDefaultFile(FString DefaultFile);
 
 private:	
@@ -188,12 +195,16 @@ private:
 	/** @return true if the extension filter contains a wildcard or not */
 	bool IsWildcardExtension(const FString& Extension);
 
+	/** @return ptr to directory if only one directory and zero files are selected, else nullptr */
+	TSharedPtr<FFileEntry> GetSoloDirectorySelected() const;
+
 	TArray< FDirNode > DirectoryNodesArray;
 	TArray<TSharedPtr<FFileEntry>> FoldersArray;
 	TArray<TSharedPtr<FFileEntry>> FilesArray;
 	TArray<TSharedPtr<FFileEntry>> LineItemArray;	
 
-	TSharedPtr<STextComboBox> FilterCombo;
+	TSharedPtr<SComboBox<TSharedPtr<FString>>> FilterCombo;
+	TSharedPtr<STextBlock> FilterComboBoxTitleBlock;
 	TSharedPtr<SHorizontalBox> FilterHBox;
 	TSharedPtr<SInlineEditableTextBlock> SaveFilenameEditBox;
 	TSharedPtr<SInlineEditableTextBlock> NewDirectoryEditBox;

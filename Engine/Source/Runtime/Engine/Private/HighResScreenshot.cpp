@@ -1,10 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #include "HighResScreenshot.h"
-#include "HAL/FileManager.h"
-#include "Misc/Paths.h"
-#include "HAL/IConsoleManager.h"
+#include "Engine/Engine.h"
+#include "Engine/World.h"
+#include "ImageWriteTask.h"
 #include "Modules/ModuleManager.h"
-#include "UnrealClient.h"
 #include "Materials/Material.h"
 #include "Slate/SceneViewport.h"
 #include "ImageWriteQueue.h"
@@ -16,6 +15,21 @@ static TAutoConsoleVariable<int32> CVarSaveEXRCompressionQuality(
 	TEXT(" 0: no compression\n")
 	TEXT(" 1: default compression which can be slow (default)"),
 	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<FString> CVarHighResScreenshotCmd(
+	TEXT("r.HighResScreenshot.AdditionalCmds"), TEXT(""),
+	TEXT("Additional command to execute when a high res screenshot is requested."),
+	ECVF_Default);
+
+static void RunHighResScreenshotAdditionalCommands()
+{
+	FString Cmds = CVarHighResScreenshotCmd.GetValueOnGameThread();
+
+	if (!Cmds.IsEmpty())
+	{
+		GEngine->Exec(GWorld, *Cmds);
+	}
+}
 
 DEFINE_LOG_CATEGORY(LogHighResScreenshot);
 
@@ -121,27 +135,50 @@ bool FHighResScreenshotConfig::ParseConsoleCommand(const FString& InCmd, FOutput
 		}
 
 		GIsHighResScreenshot = true;
-
+		RunHighResScreenshotAdditionalCommands();
 		return true;
 	}
 
 	return false;
 }
 
-bool FHighResScreenshotConfig::MergeMaskIntoAlpha(TArray<FColor>& InBitmap)
+template<class FColorType, typename TChannelType>
+bool MergeMaskIntoAlphaInternal(TArray<FColorType>& InBitmap, const FIntRect& ViewRect, bool bMaskEnabled, TChannelType AlphaMultipler)
 {
 	bool bWritten = false;
 
 	TArray<FColor>* MaskArray = FScreenshotRequest::GetHighresScreenshotMaskColorArray();
-	bool bMaskMatches = !bMaskEnabled || (MaskArray->Num() == InBitmap.Num());
+	const FIntPoint& MaskExtents = FScreenshotRequest::GetHighresScreenshotMaskExtents();
+
+	bool bMaskMatches = !bMaskEnabled || (InBitmap.Num() == MaskArray->Num()) || (InBitmap.Num() == ViewRect.Area() && ViewRect.Max.X <= MaskExtents.X && ViewRect.Max.Y <= MaskExtents.Y);
 	ensureMsgf(bMaskMatches, TEXT("Highres screenshot MaskArray doesn't match screenshot size.  Skipping Masking. MaskSize: %i, ScreenshotSize: %i"), MaskArray->Num(), InBitmap.Num());
 	if (bMaskEnabled && bMaskMatches)
 	{
 		// If this is a high resolution screenshot and we are using the masking feature,
 		// Get the results of the mask rendering pass and insert into the alpha channel of the screenshot.
-		for (int32 i = 0; i < InBitmap.Num(); ++i)
+		if (InBitmap.Num() == MaskArray->Num())
 		{
-			InBitmap[i].A = (*MaskArray)[i].R;
+			// Exact match, copy verbatim
+			for (int32 i = 0; i < InBitmap.Num(); ++i)
+			{
+				InBitmap[i].A = TChannelType((*MaskArray)[i].R) * AlphaMultipler;
+			}
+		}
+		else
+		{
+			// Need to pull a rectangle out of the mask array
+			int32 RectOffsetX = ViewRect.Min.X;
+			int32 RectOffsetY = ViewRect.Min.Y;
+			int32 OutputOffset = 0;
+			int32 MaskStride = MaskExtents.X;
+
+			for (int32 j = ViewRect.Min.Y; j < ViewRect.Max.Y; j++)
+			{
+				for (int32 i = ViewRect.Min.X; i < ViewRect.Max.X; i++, OutputOffset++)
+				{
+					InBitmap[OutputOffset].A = TChannelType((*MaskArray)[j * MaskStride + i].R) * AlphaMultipler;
+				}
+			}
 		}
 		bWritten = true;
 	}
@@ -150,11 +187,21 @@ bool FHighResScreenshotConfig::MergeMaskIntoAlpha(TArray<FColor>& InBitmap)
 		// Ensure that all pixels' alpha is set to 255
 		for (auto& Color : InBitmap)
 		{
-			Color.A = 255;
+			Color.A = TChannelType(255) * AlphaMultipler;
 		}
 	}
 
 	return bWritten;
+}
+
+bool FHighResScreenshotConfig::MergeMaskIntoAlpha(TArray<FColor>& InBitmap, const FIntRect& ViewRect)
+{
+	return MergeMaskIntoAlphaInternal<FColor, uint8>(InBitmap, ViewRect, bMaskEnabled, 1);
+}
+
+bool FHighResScreenshotConfig::MergeMaskIntoAlpha(TArray<FLinearColor>& InBitmap, const FIntRect& ViewRect)
+{
+	return MergeMaskIntoAlphaInternal<FLinearColor, float>(InBitmap, ViewRect, bMaskEnabled, 1.0f / 255.0f);
 }
 
 void FHighResScreenshotConfig::SetHDRCapture(bool bCaptureHDRIN)
@@ -183,6 +230,7 @@ bool FHighResScreenshotConfig::SetResolution(uint32 ResolutionX, uint32 Resoluti
 	GScreenshotResolutionX = (ResolutionX * ResolutionScale);
 	GScreenshotResolutionY = (ResolutionY * ResolutionScale);
 	GIsHighResScreenshot = true;
+	RunHighResScreenshotAdditionalCommands();
 
 	return true;
 }

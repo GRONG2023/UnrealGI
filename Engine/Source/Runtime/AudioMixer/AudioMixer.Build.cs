@@ -11,25 +11,18 @@ namespace UnrealBuildTool.Rules
 
 			PublicIncludePathModuleNames.Add("Engine");
 
-			PrivateIncludePaths.AddRange(
-				new string[]
-				{
-					"Runtime/AudioMixer/Private",
-				}
-			);
-
 			PublicDependencyModuleNames.AddRange(
 				new string[]
 				{
 					"Core",
-					"CoreUObject"
+					"CoreUObject",
+					"AudioLinkEngine",
 				}
 			);
 
 			PrivateDependencyModuleNames.AddRange(
 				new string[]
 				{
-					"CoreUObject",
 					"Engine",
 					"NonRealtimeAudioRenderer",
 					"AudioMixerCore",
@@ -37,6 +30,9 @@ namespace UnrealBuildTool.Rules
 					"AudioPlatformConfiguration",
 					"SoundFieldRendering",
 					"AudioExtensions",
+					"AudioLinkCore",
+					"HeadMountedDisplay",
+					"TraceLog"
 				}
 			);
 

@@ -2,12 +2,13 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
 #include "AssetThumbnail.h"
+#include "DetailsDisplayManager.h"
 #include "DetailTreeNode.h"
-#include "PropertyNode.h"
 #include "IDetailsView.h"
+#include "PropertyNode.h"
 
+class FDetailsNameWidgetOverrideCustomization;
 class FEditConditionParser;
 class FNotifyHook;
 class IDetailPropertyExtensionHandler;
@@ -46,6 +47,9 @@ public:
 	 */
 	virtual TSharedPtr<IPropertyUtilities> GetPropertyUtilities() = 0;
 
+	/** Request the details view to be refreshed (new widgets generated) with the current set of objects on the next Tick */
+	virtual void RequestForceRefresh() = 0;
+
 	/** Causes the details view to be refreshed (new widgets generated) with the current set of objects */
 	virtual void ForceRefresh() = 0;
 
@@ -81,19 +85,24 @@ public:
 	virtual bool IsPropertyReadOnly( const struct FPropertyAndParent& PropertyAndParent ) const = 0;
 
 	/**
-	 * @return Whether the IsCustomRowVisible check is pertinent, i.e. always return true no matter the specified row and parent names.
-	 */
-	virtual bool IsCustomRowVisibilityFiltered() const = 0;
-
-	/**
 	 * @return Whether a custom row with the specified name and parent name is visible.
 	 */
 	virtual bool IsCustomRowVisible(FName InRowName, FName InParentName) const = 0;
 
 	/**
+	 * @return Whether a custom row with the specified name and parent name is read-only.
+	 */
+	virtual bool IsCustomRowReadOnly(FName InRowName, FName InParentName) const = 0;
+
+	/**
 	 * @return The thumbnail pool that should be used for thumbnails being rendered in this view
 	 */
 	virtual TSharedPtr<class FAssetThumbnailPool> GetThumbnailPool() const = 0;
+
+	/**
+	 * @return The set of custom class viewer filters to use for class properties in this view
+	 */
+	virtual const TArray<TSharedRef<class IClassViewerFilter>>& GetClassViewerFilters() const = 0;
 
 	/**
 	 * Creates the color picker window for this property view.
@@ -140,5 +149,70 @@ public:
 	*/
 	virtual void RestoreExpandedItems(TSharedRef<FPropertyNode> StartNode) = 0;
 
-	virtual TSharedPtr<FEditConditionParser> GetEditConditionParser() const = 0;
+	/**
+	* Mark node as animating, useful if animating during behaviors that trigger widget reconstruction.
+	* @param InNode				The slate property node to animate.
+	* @param InAnimationDuration	The animation duration in seconds.
+	* @param InAnimationBatchId	(Optional) A batch id to enable simultaneous (and performant) animation of multiple rows.
+	*/
+	virtual void MarkNodeAnimating(TSharedPtr<FPropertyNode> InNode, float InAnimationDuration, TOptional<FGuid> InAnimationBatchId = {}) = 0;
+
+	/** @return true if node is animating */
+	virtual bool IsNodeAnimating(TSharedPtr<FPropertyNode> InNode) = 0;
+
+	/** Column width accessibility */
+	virtual class FDetailColumnSizeData& GetColumnSizeData() = 0;
+
+	/** Does this details view allow favoriting? */
+	virtual bool IsFavoritingEnabled() const = 0;
+
+	/** Is the given group a favorite? */
+	virtual bool IsGroupFavorite(FStringView GroupPath) const = 0;
+
+	/** Set the given group's favorite status. */
+	virtual void SetGroupFavorite(FStringView GroupPath, bool IsFavorite) = 0;
+
+	/** Is the given custom builder a favorite? */
+	virtual bool IsCustomBuilderFavorite(FStringView Path) const = 0;
+
+	/** Set the given group's favorite status. */
+	virtual void SetCustomBuilderFavorite(FStringView GroupPath, bool IsFavorite) = 0;
+	
+	/** Retrieve a list of top-most detail tree nodes. */
+	virtual void GetHeadNodes(TArray<TWeakPtr<FDetailTreeNode>>& OutNodes) {}
+
+
+	/**
+	* Gets the @code FDetailsViewStyleKey& @endcode which provides a Key to the current style for a Details View
+	*/
+	virtual const FDetailsViewStyleKey& GetStyleKey() override
+	{
+		return FDetailsViewStyleKeys::Default(); 
+	}
+	
+	/**
+	* Updates @code FDetailsViewStyleKey& StyleKey @endcode for the current @code IDetailsViewPrivate @endcode state
+	*/
+	virtual void UpdateStyleKey() override
+	{
+	}
+	
+	/**
+	* Returns a bool indicating whether the given @code FDetailsViewStyleKey @endcode is the default Details View Style 
+	*/
+	virtual bool IsDefaultStyle() const override
+	{
+		return true;
+	}
+
+	/**
+	 * Returns a @code TSharedPtr @endcode to the @code FDetailsDisplayManager @endcode for this
+	 * details view
+	 */
+	virtual TSharedPtr<FDetailsDisplayManager> GetDisplayManager() = 0;
+
+	virtual TSharedPtr<FDetailsNameWidgetOverrideCustomization> GetDetailsNameWidgetOverrideCustomization()
+	{
+		return nullptr;
+	}
 };

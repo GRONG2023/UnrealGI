@@ -3,6 +3,9 @@
 #include "Kismet/KismetArrayLibrary.h"
 #include "GameFramework/Actor.h"
 #include "Blueprint/BlueprintSupport.h"
+#include "Math/RandomStream.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(KismetArrayLibrary)
 
 DEFINE_LOG_CATEGORY_STATIC(LogArray, Warning, All);
 
@@ -18,6 +21,43 @@ const FName RemoveOutOfBoundsWarning = FName("RemoveOutOfBoundsWarning");
 const FName ResizeArrayNegativeWarning = FName("ResizeArrayNegativeWarning");
 const FName SwapElementsInArrayWarning = FName("SwapElementsInArrayWarning");
 const FName RandomAccessToEmptyArrayWarning = FName("RandomAccessToEmptyArrayWarning");
+
+const FName UKismetArrayLibrary::ReachedMaximumContainerSizeWarning = FName("ReachedMaximumContainerSizeWarning");
+
+namespace UE::KismetArray::Private
+{
+	template<class T, typename InLessThanFunc = TLess<T>, typename InGreaterThanFunc = TGreater<T>>
+	void SortHelper(
+		TArray<T>& InArray,
+		bool bStableSort,
+		EArraySortOrder SortOrder,
+		InLessThanFunc&& LessThanFunc = {},
+		InGreaterThanFunc&& GreaterThanFunc = {})
+	{
+		if (!bStableSort)
+		{
+			if (SortOrder == EArraySortOrder::Ascending)
+			{
+				InArray.Sort(Forward<InLessThanFunc>(LessThanFunc));
+			}
+			else
+			{
+				InArray.Sort(Forward<InGreaterThanFunc>(GreaterThanFunc));
+			}
+		}
+		else
+		{
+			if (SortOrder == EArraySortOrder::Ascending)
+			{
+				InArray.StableSort(Forward<InLessThanFunc>(LessThanFunc));
+			}
+			else
+			{
+				InArray.StableSort(Forward<InGreaterThanFunc>(GreaterThanFunc));
+			}
+		}
+	}
+}
 
 UKismetArrayLibrary::UKismetArrayLibrary(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -64,6 +104,12 @@ UKismetArrayLibrary::UKismetArrayLibrary(const FObjectInitializer& ObjectInitial
 			LOCTEXT("RandomAccessToEmptyArrayWarning", "Random access to empty array")
 		)
 	);
+	FBlueprintSupport::RegisterBlueprintWarning(
+		FBlueprintWarningDeclaration(
+			ReachedMaximumContainerSizeWarning,
+			LOCTEXT("ReachedMaximumContainerSizeWarning", "Container has reached maximum size")
+		)
+	);
 }
 
 void UKismetArrayLibrary::FilterArray(const TArray<AActor*>& TargetArray, TSubclassOf<class AActor> FilterClass, TArray<AActor*>& FilteredArray)
@@ -79,16 +125,63 @@ void UKismetArrayLibrary::FilterArray(const TArray<AActor*>& TargetArray, TSubcl
 	}
 }
 
+void UKismetArrayLibrary::SortStringArray(TArray<FString>& TargetArray, bool bStableSort, EArraySortOrder SortOrder)
+{
+	UE::KismetArray::Private::SortHelper(TargetArray, bStableSort, SortOrder);
+}
+
+void UKismetArrayLibrary::SortNameArray(TArray<FName>& TargetArray, bool bStableSort, bool bLexicalSort, EArraySortOrder SortOrder)
+{
+	const auto LessThan = [bLexicalSort](const FName& A, const FName& B)
+	{
+		return bLexicalSort ? FNameLexicalLess{}(A, B) : FNameFastLess{}(A, B);
+	};
+
+	const auto GreaterThan = [bLexicalSort](const FName& A, const FName& B)
+	{
+		return bLexicalSort ? FNameLexicalLess{}(B, A) : FNameFastLess{}(B, A);
+	};
+
+	UE::KismetArray::Private::SortHelper(TargetArray, bStableSort, SortOrder, LessThan, GreaterThan);
+}
+
+void UKismetArrayLibrary::SortByteArray(TArray<uint8>& TargetArray, bool bStableSort, EArraySortOrder SortOrder)
+{
+	UE::KismetArray::Private::SortHelper(TargetArray, bStableSort, SortOrder);
+}
+
+void UKismetArrayLibrary::SortIntArray(TArray<int32>& TargetArray, bool bStableSort, EArraySortOrder SortOrder)
+{
+	UE::KismetArray::Private::SortHelper(TargetArray, bStableSort, SortOrder);
+}
+
+void UKismetArrayLibrary::SortInt64Array(TArray<int64>& TargetArray, bool bStableSort, EArraySortOrder SortOrder)
+{
+	UE::KismetArray::Private::SortHelper(TargetArray, bStableSort, SortOrder);
+}
+
+void UKismetArrayLibrary::SortFloatArray(TArray<double>& TargetArray, bool bStableSort, EArraySortOrder SortOrder)
+{
+	UE::KismetArray::Private::SortHelper(TargetArray, bStableSort, SortOrder);
+}
+
 int32 UKismetArrayLibrary::GenericArray_Add(void* TargetArray, const FArrayProperty* ArrayProp, const void* NewItem)
 {
 	int32 NewIndex = INDEX_NONE;
 	if( TargetArray )
 	{
 		FScriptArrayHelper ArrayHelper(ArrayProp, TargetArray);
-		FProperty* InnerProp = ArrayProp->Inner;
+		if (ArrayHelper.Num() < MaxSupportedArraySize)
+		{
+			FProperty* InnerProp = ArrayProp->Inner;
 
-		NewIndex = ArrayHelper.AddValue();
-		InnerProp->CopySingleValueToScriptVM(ArrayHelper.GetRawPtr(NewIndex), NewItem);
+			NewIndex = ArrayHelper.AddValue();
+			InnerProp->CopySingleValueToScriptVM(ArrayHelper.GetRawPtr(NewIndex), NewItem);
+		}
+		else
+		{
+			FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Attempted add to array '%s' beyond the maximum supported capacity!"), *ArrayProp->GetName()), ELogVerbosity::Warning, ReachedMaximumContainerSizeWarning);
+		}
 	}
 	return NewIndex;
 }
@@ -103,8 +196,15 @@ int32 UKismetArrayLibrary::GenericArray_AddUnique(void* TargetArray, const FArra
 
 		if (GenericArray_Find(TargetArray, ArrayProp, NewItem) == INDEX_NONE)
 		{
-			NewIndex = ArrayHelper.AddValue();
-			InnerProp->CopySingleValueToScriptVM(ArrayHelper.GetRawPtr(NewIndex), NewItem);
+			if (ArrayHelper.Num() < MaxSupportedArraySize)
+			{
+				NewIndex = ArrayHelper.AddValue();
+				InnerProp->CopySingleValueToScriptVM(ArrayHelper.GetRawPtr(NewIndex), NewItem);
+			}
+			else
+			{
+				FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Attempted add to array '%s' beyond the maximum supported capacity!"), *ArrayProp->GetName()), ELogVerbosity::Warning, ReachedMaximumContainerSizeWarning);
+			}
 		}
 	}
 	return NewIndex;
@@ -153,10 +253,24 @@ void UKismetArrayLibrary::GenericArray_Append(void* TargetArray, const FArrayPro
 		{
 			FProperty* InnerProp = TargetArrayProp->Inner;
 
-			int32 StartIdx = TargetArrayHelper.AddValues(SourceArrayHelper.Num());
-			for(int32 x = 0; x < SourceArrayHelper.Num(); ++x, ++StartIdx)
+			// Determine the maximum index value that we can store, and compute the difference between that and the index of the
+			// last element in the target array. If the difference is smaller than the size of the source array, then we'll only
+			// add that number of values (i.e. until we reach the maximum supported size). Otherwise, we append the full source array.
+			const int32 MaxIdx = MaxSupportedArraySize - 1;
+			const int32 AddNum = FMath::Min(SourceArrayHelper.Num(), MaxIdx - GetLastIndex(TargetArrayHelper));
+			if (AddNum > 0)
 			{
-				InnerProp->CopySingleValueToScriptVM(TargetArrayHelper.GetRawPtr(StartIdx), SourceArrayHelper.GetRawPtr(x));
+				int32 StartIdx = TargetArrayHelper.AddValues(AddNum);
+				for (int32 x = 0; x < AddNum; ++x, ++StartIdx)
+				{
+					InnerProp->CopySingleValueToScriptVM(TargetArrayHelper.GetRawPtr(StartIdx), SourceArrayHelper.GetRawPtr(x));
+				}
+			}
+
+			// Warn if we didn't add all the values from the source array (due to having reached our maximum supported size).
+			if (AddNum < SourceArrayHelper.Num())
+			{
+				FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Attempted append to array '%s' beyond the maximum supported capacity!"), *TargetArrayProp->GetName()), ELogVerbosity::Warning, ReachedMaximumContainerSizeWarning);
 			}
 		}
 	}
@@ -236,6 +350,23 @@ void UKismetArrayLibrary::GenericArray_Shuffle(void* TargetArray, const FArrayPr
 	}
 }
 
+void UKismetArrayLibrary::GenericArray_ShuffleFromStream(void* TargetArray, const FArrayProperty* ArrayProp, FRandomStream* RandomStream)
+{
+	if (TargetArray && RandomStream)
+	{
+		FScriptArrayHelper ArrayHelper(ArrayProp, TargetArray);
+		int32 LastIndex = ArrayHelper.Num() - 1;
+		for (int32 i = 0; i <= LastIndex; ++i)
+		{
+			const int32 Index = RandomStream->RandRange(i, LastIndex);
+			if (i != Index)
+			{
+				ArrayHelper.SwapValues(i, Index);
+			}
+		}
+	}
+}
+
 void UKismetArrayLibrary::GenericArray_Clear(void* TargetArray, const FArrayProperty* ArrayProp)
 {
 	if( TargetArray )
@@ -287,6 +418,30 @@ int32 UKismetArrayLibrary::GenericArray_Length(const void* TargetArray, const FA
 	return 0;
 }
 
+bool UKismetArrayLibrary::GenericArray_IsEmpty(const void* TargetArray, const FArrayProperty* ArrayProp)
+{
+	if( TargetArray )
+	{
+		FScriptArrayHelper ArrayHelper(ArrayProp, TargetArray);
+
+		return ArrayHelper.Num() == 0;
+	}
+	
+	return true;
+}
+
+bool UKismetArrayLibrary::GenericArray_IsNotEmpty(const void* TargetArray, const FArrayProperty* ArrayProp)
+{
+	if( TargetArray )
+	{
+		FScriptArrayHelper ArrayHelper(ArrayProp, TargetArray);
+
+		return ArrayHelper.Num() > 0;
+	}
+
+	return false;
+}
+
 int32 UKismetArrayLibrary::GenericArray_LastIndex(const void* TargetArray, const FArrayProperty* ArrayProp)
 {
 	if( TargetArray )
@@ -333,7 +488,7 @@ void UKismetArrayLibrary::GenericArray_Set(void* TargetArray, const FArrayProper
 		FProperty* InnerProp = ArrayProp->Inner;
 
 		// Expand the array, if desired
-		if (!ArrayHelper.IsValidIndex(Index) && bSizeToFit && (Index >= 0))
+		if (!ArrayHelper.IsValidIndex(Index) && bSizeToFit && (Index >= 0) && (Index < MaxSupportedArraySize))
 		{
 			ArrayHelper.ExpandForIndex(Index);
 		}
@@ -341,6 +496,10 @@ void UKismetArrayLibrary::GenericArray_Set(void* TargetArray, const FArrayProper
 		if (ArrayHelper.IsValidIndex(Index))
 		{
 			InnerProp->CopySingleValueToScriptVM(ArrayHelper.GetRawPtr(Index), NewItem);
+		}
+		else if (Index >= MaxSupportedArraySize)
+		{
+			FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Attempted to set an index on array %s beyond its maximum supported capacity!"), *ArrayProp->GetName()), ELogVerbosity::Warning, ReachedMaximumContainerSizeWarning);
 		}
 		else
 		{
@@ -549,6 +708,20 @@ int32 UKismetArrayLibrary::Array_Length(const TArray<int32>& TargetArray)
 	return 0;
 }
 
+bool UKismetArrayLibrary::Array_IsEmpty(const TArray<int32>& TargetArray)
+{
+	// We should never hit these!  They're stubs to avoid NoExport on the class.  Call the Generic* equivalent instead
+	check(0);
+	return true;
+}
+
+bool UKismetArrayLibrary::Array_IsNotEmpty(const TArray<int32>& TargetArray)
+{
+	// We should never hit these!  They're stubs to avoid NoExport on the class.  Call the Generic* equivalent instead
+	check(0);
+	return false;
+}
+
 int32 UKismetArrayLibrary::Array_LastIndex(const TArray<int32>& TargetArray)
 {
 	// We should never hit these!  They're stubs to avoid NoExport on the class.  Call the Generic* equivalent instead
@@ -608,3 +781,4 @@ void UKismetArrayLibrary::Array_RandomFromStream(const TArray<int32>& TargetArra
 
 
 #undef LOCTEXT_NAMESPACE
+

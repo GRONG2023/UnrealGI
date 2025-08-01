@@ -5,10 +5,20 @@
 #include "CoreMinimal.h"
 #include "Insights/IUnrealInsightsModule.h"
 #include "Framework/Docking/TabManager.h"
+#include "Trace/StoreService.h"
 
+namespace UE
+{
 namespace Trace
 {
+#if WITH_TRACE_STORE
 	class FStoreService;
+#endif
+}
+}
+
+namespace TraceServices
+{
 	class IAnalysisService;
 	class IModuleService;
 }
@@ -33,15 +43,17 @@ public:
 
 	virtual void CreateDefaultStore() override;
 
-	virtual Trace::FStoreClient* GetStoreClient() override;
-	virtual bool ConnectToStore(const TCHAR* InStoreHost, uint32 InStorePort) override;
+	FString GetDefaultStoreDir();
 
-	virtual void CreateSessionBrowser(bool bAllowDebugTools, bool bSingleProcess) override;
-	virtual void CreateSessionViewer(bool bAllowDebugTools) override;
+	virtual UE::Trace::FStoreClient* GetStoreClient() override;
+	virtual bool ConnectToStore(const TCHAR* InStoreHost, uint32 InStorePort=0) override;
 
-	virtual TSharedPtr<const Trace::IAnalysisSession> GetAnalysisSession() const override;
+	virtual void CreateSessionBrowser(const FCreateSessionBrowserParams& Params) override;
+	virtual void CreateSessionViewer(bool bAllowDebugTools = false) override;
+
+	virtual TSharedPtr<const TraceServices::IAnalysisSession> GetAnalysisSession() const override;
 	virtual void StartAnalysisForTrace(uint32 InTraceId, bool InAutoQuit = false) override;
-	virtual void StartAnalysisForLastLiveSession() override;
+	virtual void StartAnalysisForLastLiveSession(float InRetryTime = 1.0f) override;
 	virtual void StartAnalysisForTraceFile(const TCHAR* InTraceFile, bool InAutoQuit = false) override;
 
 	virtual void ShutdownUserInterface() override;
@@ -56,7 +68,7 @@ public:
 
 	virtual const FInsightsMajorTabConfig& FindMajorTabConfig(const FName& InMajorTabId) const override;
 
-	const FOnRegisterMajorTabExtensions* FindMajorTabLayoutExtension(const FName& InMajorTabId) const;
+	FOnRegisterMajorTabExtensions* FindMajorTabLayoutExtension(const FName& InMajorTabId);
 
 	/** Retrieve ini path for saving persistent layout data. */
 	static const FString& GetUnrealInsightsLayoutIni();
@@ -64,9 +76,10 @@ public:
 	/** Set the ini path for saving persistent layout data. */
 	virtual void SetUnrealInsightsLayoutIni(const FString& InIniPath) override;
 
-	virtual void ScheduleCommand(const FString& InCmd) override;
-
 	virtual void InitializeTesting(bool InInitAutomationModules, bool InAutoQuit) override;
+	virtual void ScheduleCommand(const FString& InCmd) override;
+	virtual void RunAutomationTest(const FString& InCmd) override;
+	virtual bool Exec(const TCHAR* Cmd, FOutputDevice& Ar) override;
 
 protected:
 	void InitTraceStore();
@@ -80,19 +93,31 @@ protected:
 	/** Callback called when a major tab is closed. */
 	void OnTabBeingClosed(TSharedRef<SDockTab> TabBeingClosed);
 
-	/** Start Page */
-	TSharedRef<SDockTab> SpawnStartPageTab(const FSpawnTabArgs& Args);
+	/** Trace Store */
+	TSharedRef<SDockTab> SpawnTraceStoreTab(const FSpawnTabArgs& Args);
+
+	/** Connection */
+	TSharedRef<SDockTab> SpawnConnectionTab(const FSpawnTabArgs& Args);
+
+	/** Launcher */
+	TSharedRef<SDockTab> SpawnLauncherTab(const FSpawnTabArgs& Args);
 
 	/** Session Info */
 	TSharedRef<SDockTab> SpawnSessionInfoTab(const FSpawnTabArgs& Args);
 
 	void OnWindowClosedEvent(const TSharedRef<SWindow>&);
 
-protected:
-	TUniquePtr<Trace::FStoreService> StoreService;
+	void UpdateAppTitle();
 
-	TSharedPtr<Trace::IAnalysisService> TraceAnalysisService;
-	TSharedPtr<Trace::IModuleService> TraceModuleService;
+	void HandleCodeAccessorOpenFileFailed(const FString& Filename);
+
+protected:
+#if WITH_TRACE_STORE
+	TUniquePtr<UE::Trace::FStoreService> StoreService;
+#endif
+
+	TSharedPtr<TraceServices::IAnalysisService> TraceAnalysisService;
+	TSharedPtr<TraceServices::IModuleService> TraceModuleService;
 
 	TMap<FName, FInsightsMajorTabConfig> TabConfigs;
 	TMap<FName, FOnRegisterMajorTabExtensions> MajorTabExtensionDelegates;

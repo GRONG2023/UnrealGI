@@ -4,34 +4,25 @@
 #include "BehaviorTree/BlackboardComponent.h"
 #include "MockAI_BT.h"
 
-UTestBTTask_LatentWithFlags::UTestBTTask_LatentWithFlags(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
-{
-	NodeName = "LatentTest";
-	LogIndexExecuteStart = 0;
-	LogIndexExecuteFinish = 0;
-	LogIndexAbortStart = 0;
-	LogIndexAbortFinish = 0;
-	ExecuteTicks = 2;
-	AbortTicks = 2;
-	KeyNameExecute = TEXT("Bool1");
-	KeyNameAbort = TEXT("Bool2");
-	LogResult = EBTNodeResult::Succeeded;
+#include UE_INLINE_GENERATED_CPP_BY_NAME(TestBTTask_LatentWithFlags)
 
-	bNotifyTick = true;
+UTestBTTask_LatentWithFlags::UTestBTTask_LatentWithFlags()
+{
+	INIT_TASK_NODE_NOTIFY_FLAGS();
 }
 
 EBTNodeResult::Type UTestBTTask_LatentWithFlags::ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
 {
-	FBTLatentTaskMemory* MyMemory = (FBTLatentTaskMemory*)NodeMemory;
-	MyMemory->FlagFrameIdx = ExecuteTicks + FAITestHelpers::FramesCounter();
-	MyMemory->EndFrameIdx = MyMemory->FlagFrameIdx + ExecuteTicks;
+	FBTLatentTaskMemory* MyMemory = CastInstanceNodeMemory<FBTLatentTaskMemory>(NodeMemory);
+	MyMemory->FlagFrameIdx = ExecuteHalfTicks + FAITestHelpers::FramesCounter();
+	MyMemory->EndFrameIdx = MyMemory->FlagFrameIdx + ExecuteHalfTicks;
 	MyMemory->bFlagSet = false;
 	MyMemory->bIsAborting = false;
 
 	LogExecution(OwnerComp, LogIndexExecuteStart);
-	if (ExecuteTicks == 0)
+	if (ExecuteHalfTicks == 0)
 	{
-		OwnerComp.GetBlackboardComponent()->SetValueAsBool(KeyNameExecute, true);
+		ChangeFlag(OwnerComp, KeyNameExecute);
 		MyMemory->bFlagSet = true;
 
 		LogExecution(OwnerComp, LogIndexExecuteFinish);
@@ -43,16 +34,16 @@ EBTNodeResult::Type UTestBTTask_LatentWithFlags::ExecuteTask(UBehaviorTreeCompon
 
 EBTNodeResult::Type UTestBTTask_LatentWithFlags::AbortTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
 {
-	FBTLatentTaskMemory* MyMemory = (FBTLatentTaskMemory*)NodeMemory;
-	MyMemory->FlagFrameIdx = AbortTicks + FAITestHelpers::FramesCounter();
-	MyMemory->EndFrameIdx = MyMemory->FlagFrameIdx + AbortTicks;
+	FBTLatentTaskMemory* MyMemory = CastInstanceNodeMemory<FBTLatentTaskMemory>(NodeMemory);
+	MyMemory->FlagFrameIdx = AbortHalfTicks + FAITestHelpers::FramesCounter();
+	MyMemory->EndFrameIdx = MyMemory->FlagFrameIdx + AbortHalfTicks;
 	MyMemory->bFlagSet = false;
 	MyMemory->bIsAborting = true;
 
 	LogExecution(OwnerComp, LogIndexAbortStart);
-	if (AbortTicks == 0)
+	if (AbortHalfTicks == 0)
 	{
-		OwnerComp.GetBlackboardComponent()->SetValueAsBool(KeyNameAbort, true);
+		ChangeFlag(OwnerComp, KeyNameAbort);
 		MyMemory->bFlagSet = true;
 
 		LogExecution(OwnerComp, LogIndexAbortFinish);
@@ -64,14 +55,14 @@ EBTNodeResult::Type UTestBTTask_LatentWithFlags::AbortTask(UBehaviorTreeComponen
 
 void UTestBTTask_LatentWithFlags::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds)
 {
-	FBTLatentTaskMemory* MyMemory = (FBTLatentTaskMemory*)NodeMemory;
+	FBTLatentTaskMemory* MyMemory = CastInstanceNodeMemory<FBTLatentTaskMemory>(NodeMemory);
+
+	LogExecution(OwnerComp, MyMemory->bIsAborting ? LogIndexAborting : LogIndexExecuting);
 
 	if (!MyMemory->bFlagSet && FAITestHelpers::FramesCounter() >= MyMemory->FlagFrameIdx)
 	{
 		MyMemory->bFlagSet = true;
-		OwnerComp.GetBlackboardComponent()->SetValueAsBool(
-			MyMemory->bIsAborting ? KeyNameAbort : KeyNameExecute,
-			true);
+		ChangeFlag(OwnerComp, MyMemory->bIsAborting ? KeyNameAbort : KeyNameExecute);
 	}
 
 	if (FAITestHelpers::FramesCounter() >= MyMemory->EndFrameIdx)
@@ -86,12 +77,35 @@ void UTestBTTask_LatentWithFlags::TickTask(UBehaviorTreeComponent& OwnerComp, ui
 			LogExecution(OwnerComp, LogIndexExecuteFinish);
 			FinishLatentTask(OwnerComp, LogResult);
 		}
-	}	
+	}
+}
+
+void UTestBTTask_LatentWithFlags::ChangeFlag(UBehaviorTreeComponent& OwnerComp, FName FlagToChange) const
+{
+	switch(ChangeFlagBehavior)
+	{
+		case EBTTestChangeFlagBehavior::Set:
+			OwnerComp.GetBlackboardComponent()->SetValueAsBool(FlagToChange, true);
+			break;
+		case EBTTestChangeFlagBehavior::Toggle:
+			OwnerComp.GetBlackboardComponent()->SetValueAsBool(FlagToChange, !OwnerComp.GetBlackboardComponent()->GetValueAsBool(FlagToChange));
+			break;
+	}
 }
 
 uint16 UTestBTTask_LatentWithFlags::GetInstanceMemorySize() const
 {
 	return sizeof(FBTLatentTaskMemory);
+}
+
+void UTestBTTask_LatentWithFlags::InitializeMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryInit::Type InitType) const
+{
+	InitializeNodeMemory<FBTLatentTaskMemory>(NodeMemory, InitType);
+}
+
+void UTestBTTask_LatentWithFlags::CleanupMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryClear::Type CleanupType) const
+{
+	CleanupNodeMemory<FBTLatentTaskMemory>(NodeMemory, CleanupType);
 }
 
 void UTestBTTask_LatentWithFlags::LogExecution(UBehaviorTreeComponent& OwnerComp, int32 LogNumber)

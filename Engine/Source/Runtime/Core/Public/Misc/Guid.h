@@ -2,17 +2,28 @@
 
 #pragma once
 
+#include "Containers/StringFwd.h"
+#include "Containers/UnrealString.h"
 #include "CoreTypes.h"
+#include "HAL/PreprocessorHelpers.h"
+#include "Hash/CityHash.h"
 #include "Misc/AssertionMacros.h"
 #include "Misc/Crc.h"
-#include "Containers/UnrealString.h"
-#include "Serialization/StructuredArchive.h"
+#include "Serialization/Archive.h"
 #include "Serialization/MemoryLayout.h"
-#include "Hash/CityHash.h"
+#include "Serialization/StructuredArchive.h"
 
 class FArchive;
+class FMemoryImageWriter;
+class FMemoryUnfreezeContent;
 class FOutputDevice;
+class FPointerTableBase;
+class FSHA1;
 class UObject;
+struct FBlake3Hash;
+template <typename CharType> class TStringBuilderBase;
+template <typename T> struct TCanBulkSerialize;
+template <typename T> struct TIsPODType;
 
 
 /**
@@ -28,11 +39,25 @@ enum class EGuidFormats
 	Digits,
 
 	/**
+	 * 32 digits in lowercase
+	 *
+	 * For example: "0123abc456def789abcd123ef4a5b6c7"
+	 */
+	 DigitsLower,
+
+	/**
 	 * 32 digits separated by hyphens.
 	 *
 	 * For example: 00000000-0000-0000-0000-000000000000
 	 */
 	DigitsWithHyphens,
+
+	/**
+	 * 32 digits separated by hyphens, in lowercase as described by RFC 4122.
+	 *
+	 * For example: bd048ce3-358b-46c5-8cee-627c719418f8
+	 */
+	DigitsWithHyphensLower,
 
 	/**
 	 * 32 digits separated by hyphens and enclosed in braces.
@@ -85,7 +110,7 @@ struct FGuid
 public:
 
 	/** Default constructor. */
-	FGuid()
+	constexpr FGuid()
 		: A(0)
 		, B(0)
 		, C(0)
@@ -100,7 +125,7 @@ public:
 	 * @param InC The third component.
 	 * @param InD The fourth component.
 	 */
-	explicit FGuid(uint32 InA, uint32 InB, uint32 InC, uint32 InD)
+	explicit constexpr FGuid(uint32 InA, uint32 InB, uint32 InC, uint32 InD)
 		: A(InA), B(InB), C(InC), D(InD)
 	{ }
 
@@ -291,20 +316,29 @@ public:
 	/**
 	 * Converts this GUID to its string representation.
 	 *
+	 * @param Format The string format to use.
 	 * @return The string representation.
 	 */
-	FString ToString() const
+	FString ToString(EGuidFormats Format = EGuidFormats::Digits) const
 	{
-		return ToString(EGuidFormats::Digits);
+		FString Out;
+		AppendString(Out, Format);
+		return Out;
 	}
 
 	/**
 	 * Converts this GUID to its string representation using the specified format.
 	 *
 	 * @param Format The string format to use.
-	 * @return The string representation.
 	 */
-	CORE_API FString ToString(EGuidFormats Format) const;
+	CORE_API void AppendString(FString& Out, EGuidFormats Format = EGuidFormats::Digits) const;
+
+	/**
+	 * Appends this GUID to the string builder using the specified format.
+	 */
+	CORE_API void AppendString(FAnsiStringBuilderBase& Builder, EGuidFormats Format = EGuidFormats::DigitsWithHyphensLower) const;
+	CORE_API void AppendString(FUtf8StringBuilderBase& Builder, EGuidFormats Format = EGuidFormats::DigitsWithHyphensLower) const;
+	CORE_API void AppendString(FWideStringBuilderBase& Builder, EGuidFormats Format = EGuidFormats::DigitsWithHyphensLower) const;
 
 public:
 
@@ -327,6 +361,22 @@ public:
 	 * @return A new GUID.
 	 */
 	static CORE_API FGuid NewGuid();
+	/**
+	 * Create a guid by hashing the given path; this guid will be deterministic when called in multiple cook processes
+	 * and will thus avoid cook indeterminism caused by FGuid::NewGuid. ObjectPath and Seed must be deterministic.
+	 */
+	static CORE_API FGuid NewDeterministicGuid(FStringView ObjectPath, uint64 Seed = 0);
+	/**
+	 * Create a guid from a calculated Blake3 Hash
+	 */
+	static CORE_API FGuid NewGuidFromHash(const FBlake3Hash& Hash);
+
+	/**
+	 * Returns a GUID which is a combinationof the two provided ones.
+	 *
+	 * @return The combined GUID.
+	 */
+	static CORE_API FGuid Combine(const FGuid& GuidA, const FGuid& GuidB);
 
 	/**
 	 * Converts a string to a GUID.
@@ -368,3 +418,10 @@ template<> struct TCanBulkSerialize<FGuid> { enum { Value = true }; };
 DECLARE_INTRINSIC_TYPE_LAYOUT(FGuid);
 
 template <> struct TIsPODType<FGuid> { enum { Value = true }; };
+
+template <typename CharType>
+inline TStringBuilderBase<CharType>& operator<<(TStringBuilderBase<CharType>& Builder, const FGuid& Value)
+{
+	Value.AppendString(Builder);
+	return Builder;
+}

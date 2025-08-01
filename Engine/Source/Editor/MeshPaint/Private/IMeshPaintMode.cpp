@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "IMeshPaintMode.h"
+
 #include "SceneView.h"
 #include "EditorViewportClient.h"
 #include "Modules/ModuleManager.h"
@@ -12,14 +13,12 @@
 #include "EditorModeManager.h"
 #include "Toolkits/ToolkitManager.h"
 
-#include "VREditorMode.h"
-#include "IVREditorModule.h"
-
 #include "AssetToolsModule.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "EditorSupportDelegates.h"
 
 #include "MeshPaintHelpers.h"
+#include "UObject/ObjectSaveContext.h"
 
 //Slate dependencies
 #include "LevelEditor.h"
@@ -27,16 +26,11 @@
 
 #include "MeshPaintAdapterFactory.h"
 
-#include "ViewportWorldInteraction.h"
-#include "ViewportInteractableInterface.h"
-#include "VREditorInteractor.h"
-#include "EditorWorldExtension.h"
-
 #include "Components/PrimitiveComponent.h"
 
 #include "IMeshPainter.h"
 #include "MeshPaintSettings.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 
 #define LOCTEXT_NAMESPACE "IMeshPaint_Mode"
 
@@ -44,8 +38,7 @@ DEFINE_LOG_CATEGORY_STATIC(LogMeshPaintEdMode, Log, All);
 
 /** Constructor */
 IMeshPaintEdMode::IMeshPaintEdMode() 
-	: FEdMode(),
-	  PaintingWithInteractorInVR( nullptr )
+	: FEdMode()
 {
 	GEditor->OnEditorClose().AddRaw(this, &IMeshPaintEdMode::OnResetViewMode);
 }
@@ -77,11 +70,11 @@ void IMeshPaintEdMode::Enter()
 	bWasSelectionLockedOnStart = GEdSelectionLock;	
 
 	// Catch when objects are replaced when a construction script is rerun
-	GEditor->OnObjectsReplaced().AddSP(this, &IMeshPaintEdMode::OnObjectsReplaced);
+	FCoreUObjectDelegates::OnObjectsReplaced.AddSP(this, &IMeshPaintEdMode::OnObjectsReplaced);
 
 	// Hook into pre/post world save, so that the original collision volumes can be temporarily reinstated
-	FEditorDelegates::PreSaveWorld.AddSP(this, &IMeshPaintEdMode::OnPreSaveWorld);
-	FEditorDelegates::PostSaveWorld.AddSP(this, &IMeshPaintEdMode::OnPostSaveWorld);
+	FEditorDelegates::PreSaveWorldWithContext.AddSP(this, &IMeshPaintEdMode::OnPreSaveWorld);
+	FEditorDelegates::PostSaveWorldWithContext.AddSP(this, &IMeshPaintEdMode::OnPostSaveWorld);
 
 	// Catch assets if they are about to be (re)imported
 	GEditor->GetEditorSubsystem<UImportSubsystem>()->OnAssetPostImport.AddSP(this, &IMeshPaintEdMode::OnPostImportAsset);
@@ -93,7 +86,7 @@ void IMeshPaintEdMode::Enter()
 	// Initialize adapter globals
 	FMeshPaintAdapterFactory::InitializeAdapterGlobals();
 
-	SelectionChangedHandle = USelection::SelectionChangedEvent.AddLambda([=](UObject* Object) { MeshPainter->Refresh();  });
+	SelectionChangedHandle = USelection::SelectionChangedEvent.AddLambda([this](UObject* Object) { MeshPainter->Refresh();  });
 
 	if (UsesToolkits() && !Toolkit.IsValid())
 	{
@@ -105,21 +98,6 @@ void IMeshPaintEdMode::Enter()
 	// be darkened slightly.  This just makes it easier to paint on selected objects without the
 	// highlight effect distorting the appearance.
 	GEngine->OverrideSelectedMaterialColor( FLinearColor::Black );
-
-	UEditorWorldExtensionCollection* ExtensionCollection = GEditor->GetEditorWorldExtensionsManager()->GetEditorWorldExtensions(GetWorld());
-	if (ExtensionCollection != nullptr)
-	{
-		// Register to find out about VR input events
-		UViewportWorldInteraction* ViewportWorldInteraction = Cast<UViewportWorldInteraction>(ExtensionCollection->FindExtension(UViewportWorldInteraction::StaticClass()));
-		if (ViewportWorldInteraction != nullptr)
-		{
-			ViewportWorldInteraction->OnViewportInteractionInputAction().RemoveAll(this);
-			ViewportWorldInteraction->OnViewportInteractionInputAction().AddRaw(this, &IMeshPaintEdMode::OnVRAction);
-
-			// Hide the VR transform gizmo while we're in mesh paint mode.  It sort of gets in the way of painting.
-			ViewportWorldInteraction->SetTransformGizmoVisible(false);
-		}
-	}
 
 	if (UsesToolkits())
 	{
@@ -144,20 +122,6 @@ void IMeshPaintEdMode::Exit()
 		MeshPainter->UnregisterCommands(Toolkit->GetToolkitCommands());
 	}
 
-	UEditorWorldExtensionCollection* ExtensionCollection = GEditor->GetEditorWorldExtensionsManager()->GetEditorWorldExtensions(GetWorld());
-	if (ExtensionCollection != nullptr)
-	{
-		UViewportWorldInteraction* ViewportWorldInteraction = Cast<UViewportWorldInteraction>(ExtensionCollection->FindExtension(UViewportWorldInteraction::StaticClass()));
-		if (ViewportWorldInteraction != nullptr)
-		{
-			// Restore the transform gizmo visibility
-			ViewportWorldInteraction->SetTransformGizmoVisible(true);
-
-			// Unregister from event handlers
-			ViewportWorldInteraction->OnViewportInteractionInputAction().RemoveAll(this);
-		}
-	}
-
 	// The user can manipulate the editor selection lock flag in paint mode so we make sure to restore it here
 	GEdSelectionLock = bWasSelectionLockedOnStart;
 	
@@ -177,9 +141,9 @@ void IMeshPaintEdMode::Exit()
 	AssetRegistryModule.Get().OnAssetRemoved().RemoveAll(this);
 	FReimportManager::Instance()->OnPostReimport().RemoveAll(this);
 	GEditor->GetEditorSubsystem<UImportSubsystem>()->OnAssetPostImport.RemoveAll(this);
-	FEditorDelegates::PreSaveWorld.RemoveAll(this);
-	FEditorDelegates::PostSaveWorld.RemoveAll(this);
-	GEditor->OnObjectsReplaced().RemoveAll(this);
+	FEditorDelegates::PreSaveWorldWithContext.RemoveAll(this);
+	FEditorDelegates::PostSaveWorldWithContext.RemoveAll(this);
+	FCoreUObjectDelegates::OnObjectsReplaced.RemoveAll(this);
 	USelection::SelectionChangedEvent.Remove(SelectionChangedHandle);
 
 	// Call parent implementation
@@ -226,7 +190,6 @@ bool IMeshPaintEdMode::EndTracking(FEditorViewportClient* InViewportClient, FVie
 	if (MeshPainter->IsPainting())
 	{
 		MeshPainter->FinishPainting();
-		PaintingWithInteractorInVR = nullptr;
 	}
 
 	return true;
@@ -260,7 +223,7 @@ bool IMeshPaintEdMode::InputKey( FEditorViewportClient* InViewportClient, FViewp
 		{
 			bHandled = true;
 			MeshPainter->FinishPainting();
-			PaintingWithInteractorInVR = nullptr;
+			InViewportClient->bLockFlightCamera = false;
 		}
 		else if( !MeshPainter->IsPainting() && bUserWantsPaint && !InViewportClient->IsMovingCamera())
 		{	
@@ -333,12 +296,12 @@ bool IMeshPaintEdMode::InputKey( FEditorViewportClient* InViewportClient, FViewp
 	return bHandled;
 }
 
-void IMeshPaintEdMode::OnPreSaveWorld(uint32 SaveFlags, UWorld* World)
+void IMeshPaintEdMode::OnPreSaveWorld(UWorld* World, FObjectPreSaveContext ObjectSaveContext)
 {
 	MeshPainter->Refresh();
 }
 
-void IMeshPaintEdMode::OnPostSaveWorld(uint32 SaveFlags, UWorld* World, bool bSuccess)
+void IMeshPaintEdMode::OnPostSaveWorld(UWorld* World, FObjectPostSaveContext ObjectSaveContext)
 {
 	MeshPainter->Refresh();
 }
@@ -392,40 +355,24 @@ void IMeshPaintEdMode::Render( const FSceneView* View, FViewport* Viewport, FPri
 	MeshPainter->Render(View, Viewport, PDI);
 
 	// Flow painting
-	if (MeshPainter->IsPainting())
+	if (MeshPainter->IsPainting() && MeshPainter->GetBrushSettings()->bEnableFlow)
 	{
-		/** If we are currently painting with a VR interactor, apply paint for the current vr interactor state/position */
-		if (PaintingWithInteractorInVR != nullptr)
-		{
-			UVREditorInteractor* VREditorInteractor = Cast<UVREditorInteractor>(PaintingWithInteractorInVR);
-			FVector LaserPointerStart, LaserPointerEnd;
-			if (VREditorInteractor->GetLaserPointer( /* Out */ LaserPointerStart, /* Out */ LaserPointerEnd))
-			{
-				const FVector LaserPointerDirection = (LaserPointerEnd - LaserPointerStart).GetSafeNormal();
-				UVREditorMode* VREditorMode = Cast<UVREditorMode>(GEditor->GetEditorWorldExtensionsManager()->GetEditorWorldExtensions(GetWorld())->FindExtension(UVREditorMode::StaticClass()));
-				MeshPainter->PaintVR(Viewport, VREditorMode->GetHeadTransform().GetLocation(), LaserPointerStart, LaserPointerDirection, VREditorInteractor);
-			}
-		}
-		else if (MeshPainter->GetBrushSettings()->bEnableFlow)
-		{
-			// Make sure the cursor is visible OR we're flood filling.  No point drawing a paint cue when there's no cursor.
-			if (Viewport->IsCursorVisible())
-			{				
-				// Grab the mouse cursor position
-				FIntPoint MousePosition;
-				Viewport->GetMousePos(MousePosition);
+		// Make sure the cursor is visible OR we're flood filling.  No point drawing a paint cue when there's no cursor.
+		if (Viewport->IsCursorVisible())
+		{				
+			// Grab the mouse cursor position
+			FIntPoint MousePosition;
+			Viewport->GetMousePos(MousePosition);
 
-				// Is the mouse currently over the viewport? or flood filling
-				if ((MousePosition.X >= 0 && MousePosition.Y >= 0 && MousePosition.X < (int32)Viewport->GetSizeXY().X && MousePosition.Y < (int32)Viewport->GetSizeXY().Y))
-				{
-					// Compute a world space ray from the screen space mouse coordinates
-					FViewportCursorLocation MouseViewportRay(View, static_cast<FEditorViewportClient*>(Viewport->GetClient()), MousePosition.X, MousePosition.Y);
-					MeshPainter->Paint(Viewport, View->ViewMatrices.GetViewOrigin(), MouseViewportRay.GetOrigin(), MouseViewportRay.GetDirection());
-				}
+			// Is the mouse currently over the viewport? or flood filling
+			if ((MousePosition.X >= 0 && MousePosition.Y >= 0 && MousePosition.X < (int32)Viewport->GetSizeXY().X && MousePosition.Y < (int32)Viewport->GetSizeXY().Y))
+			{
+				// Compute a world space ray from the screen space mouse coordinates
+				FViewportCursorLocation MouseViewportRay(View, static_cast<FEditorViewportClient*>(Viewport->GetClient()), MousePosition.X, MousePosition.Y);
+				MeshPainter->Paint(Viewport, View->ViewMatrices.GetViewOrigin(), MouseViewportRay.GetOrigin(), MouseViewportRay.GetDirection());
 			}
 		}
 	}
-
 }
 
 /** FEdMode: Handling SelectActor */
@@ -466,87 +413,6 @@ bool IMeshPaintEdMode::ProcessEditDelete()
 {
 	MeshPainter->Refresh();
 	return false;
-}
-
-void IMeshPaintEdMode::OnVRAction( class FEditorViewportClient& ViewportClient, UViewportInteractor* Interactor, 
-	const FViewportActionKeyInput& Action, bool& bOutIsInputCaptured, bool& bWasHandled )
-{
-	UVREditorMode* VREditorMode = Cast<UVREditorMode>(GEditor->GetEditorWorldExtensionsManager()->GetEditorWorldExtensions(GetWorld())->FindExtension(UVREditorMode::StaticClass()));
-	UVREditorInteractor* VREditorInteractor = Cast<UVREditorInteractor>(Interactor);
-	if (VREditorMode != nullptr && VREditorMode->IsActive() && VREditorInteractor != nullptr && VREditorInteractor->GetDraggingMode() == EViewportInteractionDraggingMode::Nothing)
-	{
-		if (Action.ActionType == ViewportWorldActionTypes::SelectAndMove)
-		{
-			if (!MeshPainter->IsPainting() && Action.Event == IE_Pressed && !VREditorInteractor->IsHoveringOverPriorityType())
-			{
-				// Check to see that we're clicking on a selected object.  You can only paint on selected things.  Otherwise,
-				// we'll fall through to the normal interaction code which might cause the object to become selected.
-				bool bIsClickingOnSelectedObject = false;
-				{
-					FHitResult HitResult = VREditorInteractor->GetHitResultFromLaserPointer();
-					if( HitResult.Actor.IsValid() )
-					{
-						UViewportWorldInteraction& WorldInteraction = VREditorMode->GetWorldInteraction();
-						
-						if( WorldInteraction.IsInteractableComponent( HitResult.GetComponent() ) )
-						{
-							AActor* Actor = HitResult.Actor.Get();
-
-							// Make sure we're not hovering over some other viewport interactable, such as a dockable window selection bar or close button
-							IViewportInteractableInterface* ActorInteractable = Cast<IViewportInteractableInterface>( Actor );
-							if( ActorInteractable == nullptr )
-							{
-								if( Actor != WorldInteraction.GetTransformGizmoActor() )  // Don't change any actor selection state if the user clicked on a gizmo
-								{
-									if( Actor->IsSelected() )
-									{
-										bIsClickingOnSelectedObject = true;
-									}
-								}
-							}
-						}
-					}
-				}
-
-				if( bIsClickingOnSelectedObject )
-				{
-					bWasHandled = true;
-					bOutIsInputCaptured = true;
-
-					// Go ahead and paint immediately
-					FVector LaserPointerStart, LaserPointerEnd;
-					if( Interactor->GetLaserPointer( /* Out */ LaserPointerStart, /* Out */ LaserPointerEnd ) )
-					{
-						const FVector LaserPointerDirection = ( LaserPointerEnd - LaserPointerStart ).GetSafeNormal();
-
-						/** Apply painting using the current state/position of the VR interactor */
-						const bool bAnyPaintableActorsUnderCursor = MeshPainter->PaintVR( ViewportClient.Viewport, VREditorMode->GetHeadTransform().GetLocation(), LaserPointerStart, LaserPointerDirection, VREditorInteractor);
-						if (bAnyPaintableActorsUnderCursor)
-						{
-							PaintingWithInteractorInVR = VREditorInteractor;
-							ViewportClient.bLockFlightCamera = true;
-						}
-					}
-				}
-			}
-			// Stop current tracking if the user is no longer painting
-			else if( MeshPainter->IsPainting() && Action.Event == IE_Released && PaintingWithInteractorInVR && PaintingWithInteractorInVR == Interactor )
-			{
-				MeshPainter->FinishPainting();
-				ViewportClient.bLockFlightCamera = false;
-				PaintingWithInteractorInVR = nullptr;
-
-				bWasHandled = true;
-				bOutIsInputCaptured = false;
-			}
-
-			else if (MeshPainter->IsPainting())
-			{
-				// A different hand might be painting, so absorb the input
-				bOutIsInputCaptured = bWasHandled = (Action.Event == IE_Released ? false : true);
-			}
-		}
-	}
 }
 
 #undef LOCTEXT_NAMESPACE

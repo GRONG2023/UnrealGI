@@ -2,25 +2,50 @@
 
 #pragma once
 
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SCompoundWidget.h"
-
+#include "Containers/ArrayView.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "CurveDataAbstraction.h"
 #include "CurveDrawInfo.h"
 #include "CurveEditor.h"
 #include "CurveEditorTypes.h"
+#include "Curves/RealCurve.h"
+#include "Curves/RichCurve.h"
+#include "HAL/Platform.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Layout/Geometry.h"
+#include "Layout/Visibility.h"
+#include "Math/Axis.h"
+#include "Math/Color.h"
+#include "Misc/Attribute.h"
+#include "Misc/Optional.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/SubclassOf.h"
+#include "Templates/UniquePtr.h"
 #include "Textures/SlateIcon.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
 
-struct FCurveEditorEditObjectContainer;
-
+class FCurveEditor;
+class FExtender;
+class FTabManager;
+class FUICommandList;
 class IDetailsView;
 class IGraphEditorView;
 class ITimeSliderController;
-class SScrollBox;
+class SCurveEditorToolProperties;
 class SCurveEditorView;
 class SCurveEditorViewContainer;
-class SCurveEditorToolProperties;
-class FTabManager;
+class SCurveEditorFilterPanel;
+class SCurveKeyDetailPanel;
+class SScrollBox;
+class SWidget;
 class UCurveEditorFilterBase;
+struct FCurveEditorDelayedDrag;
+struct FCurveEditorEditObjectContainer;
+struct FCurveEditorToolID;
+struct FKeyEvent;
 
 /**
  * Curve editor widget that reflects the state of an FCurveEditor
@@ -29,8 +54,6 @@ class CURVEEDITOR_API SCurveEditorPanel : public SCompoundWidget
 {
 	SLATE_BEGIN_ARGS(SCurveEditorPanel)
 		: _GridLineTint(FLinearColor(0.1f, 0.1f, 0.1f, 1.f))
-		, _TreeSplitterWidth(0.3f)
-		, _ContentSplitterWidth(0.7f)
 		, _MinimumViewPanelHeight(300.0f)
 	{}
 
@@ -48,12 +71,6 @@ class CURVEEDITOR_API SCurveEditorPanel : public SCompoundWidget
 
 		/** Widget slot for the tree content */
 		SLATE_NAMED_SLOT(FArguments, TreeContent)
-
-		/** The width of the splitter slot for the tree */
-		SLATE_ARGUMENT(float, TreeSplitterWidth)
-
-		/** The width of the splitter slot for the main content */
-		SLATE_ARGUMENT(float, ContentSplitterWidth)
 
 		/** The minimum height for the panel which contains the curve editor views. */
 		SLATE_ARGUMENT(float, MinimumViewPanelHeight)
@@ -82,6 +99,22 @@ class CURVEEDITOR_API SCurveEditorPanel : public SCompoundWidget
 	TSharedPtr<class SCurveKeyDetailPanel> GetKeyDetailsView() const
 	{
 		return KeyDetailsView;
+	}
+
+	/**
+	 * Access the filter panel
+	 */
+	TSharedPtr<class SCurveEditorFilterPanel> GetFilterPanel() const
+	{
+		return FilterPanel;
+	}
+
+	/**
+	 * Access the tool properties panel
+	 */
+	TSharedPtr<class SCurveEditorToolProperties> GetToolPropertiesPanel() const
+	{
+		return ToolPropertiesPanel;
 	}
 
 	void AddView(TSharedRef<SCurveEditorView> ViewToAdd);
@@ -116,9 +149,9 @@ class CURVEEDITOR_API SCurveEditorPanel : public SCompoundWidget
 	 * @param InCurveID The identifier of the curve to find views for
 	 * @return An iterator to all the views that this cuvrve is displayed within.
 	 */
-	TMultiMap<FCurveModelID, TSharedRef<SCurveEditorView>>::TConstKeyIterator FindViews(FCurveModelID InCurveID)
+	TMultiMap<FCurveModelID, TSharedRef<SCurveEditorView>>::TConstKeyIterator FindViews(TRetainedRef<FCurveModelID> InCurveID)
 	{
-		return CurveViews.CreateConstKeyIterator(InCurveID);
+		return CurveViews.CreateConstKeyIterator(InCurveID.Get());
 	}
 
 	/**
@@ -131,6 +164,13 @@ class CURVEEDITOR_API SCurveEditorPanel : public SCompoundWidget
 
 	/** Undo occurred, invalidate or update internal structures */
 	void PostUndo();
+
+	/** Reset Stored Min/Max's*/
+	void ResetMinMaxes();
+
+	/** Delegate for when the chosen filter class has changed */
+	FSimpleDelegate OnFilterClassChanged;
+	void FilterClassChanged();
 
 private:
 	// SWidget Interface
@@ -159,6 +199,7 @@ private:
 	EVisibility GetSplitterVisibility() const;
 
 	/*~ Event bindings */
+	void UpdateTime();
 	void UpdateEditBox();
 	void UpdateCommonCurveInfo();
 
@@ -239,6 +280,17 @@ private:
 	/** Get a reference to the curve editor this panel represents. */
 	TSharedPtr<FCurveEditor> GetCurveEditor() const { return CurveEditor; }
 
+	float GetColumnFillCoefficient(int32 ColumnIndex) const
+	{
+		ensure(ColumnIndex == 0 || ColumnIndex == 1);
+		return ColumnFillCoefficients[ColumnIndex];
+	}
+
+	/** Called when a column fill percentage is changed by a splitter slot. */
+	void OnColumnFillCoefficientChanged(float FillCoefficient, int32 ColumnIndex);
+
+	void OnSplitterFinishedResizing();
+	
 private:
 
 	/**
@@ -283,6 +335,9 @@ private:
 	/** Edit panel */
 	TSharedPtr<SCurveKeyDetailPanel> KeyDetailsView;
 
+	/* Filter panel */
+	TSharedPtr<SCurveEditorFilterPanel> FilterPanel;
+
 	/** Tool options panel */
 	TSharedPtr<SCurveEditorToolProperties> ToolPropertiesPanel;
 
@@ -309,6 +364,10 @@ private:
 	/** Reconstructs the properties widget on tool switch */
 	void OnCurveEditorToolChanged(FCurveEditorToolID InToolId);
 
+	/** Last Output Min and Max values for the views*/
+	double LastOutputMin = DBL_MAX;
+	double LastOutputMax = DBL_MIN;
+
 	/** The last set View Mode for this UI. */
 	ECurveEditorViewID DefaultViewID;
 
@@ -330,6 +389,11 @@ private:
 
 	/** A copy of the View Geometry used to represent the View portion of the Curve Editor. */
 	FGeometry CachedViewGeometry;
+
+	/** The fill coefficients of each column in the grid. */
+	float ColumnFillCoefficients[2];
+
+	TSharedPtr<class SSplitter> TreeViewSplitter;
 
 	/** Container of objects that are being used to edit keys on the curve editor */
 	TUniquePtr<FCurveEditorEditObjectContainer> EditObjects;

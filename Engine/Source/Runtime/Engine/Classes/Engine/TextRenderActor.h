@@ -23,20 +23,20 @@ class ATextRenderActor : public AActor
 private:
 	/** Component to render a text in 3d with a font */
 	UPROPERTY(Category = TextRenderActor, VisibleAnywhere, BlueprintReadOnly, meta = (ExposeFunctionCategories = "Rendering|Components|TextRender", AllowPrivateAccess = "true"))
-	class UTextRenderComponent* TextRender;
+	TObjectPtr<class UTextRenderComponent> TextRender;
 
 #if WITH_EDITORONLY_DATA
 	// Reference to the billboard component
 	UPROPERTY()
-	UBillboardComponent* SpriteComponent;
+	TObjectPtr<UBillboardComponent> SpriteComponent;
 #endif
 
 public:
 	/** Returns TextRender subobject **/
-	ENGINE_API class UTextRenderComponent* GetTextRender() const { return TextRender; }
+	class UTextRenderComponent* GetTextRender() const { return TextRender; }
 #if WITH_EDITORONLY_DATA
 	/** Returns SpriteComponent subobject **/
-	ENGINE_API UBillboardComponent* GetSpriteComponent() const { return SpriteComponent; }
+	UBillboardComponent* GetSpriteComponent() const { return SpriteComponent; }
 #endif
 };
 

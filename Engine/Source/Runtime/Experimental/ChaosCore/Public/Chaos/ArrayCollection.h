@@ -13,7 +13,25 @@ public:
 	    : MSize(0) {}
 	TArrayCollection(const TArrayCollection& Other) = delete;
 	TArrayCollection(TArrayCollection&& Other) = delete;
-	virtual ~TArrayCollection() {}
+	virtual ~TArrayCollection() 
+	{
+		// Null out to find dangling pointers
+		for (int32 Index = 0; Index < MArrays.Num(); Index++)
+		{
+			MArrays[Index] = nullptr;
+		}
+	}
+
+	void ShrinkArrays(const float MaxSlackFraction, const int32 MinSlack)
+	{
+		for (int32 Index = 0; Index < MArrays.Num(); Index++)
+		{
+			if (MArrays[Index] != nullptr)
+			{
+				MArrays[Index]->ApplyShrinkPolicy(MaxSlackFraction, MinSlack);
+			}
+		}
+	}
 
 	int32 AddArray(TArrayCollectionArrayBase* Array)
 	{
@@ -38,6 +56,11 @@ public:
 		{
 			MArrays[Idx] = nullptr;
 		}
+	}
+
+	void RemoveAt(int32 Index, int32 Count)
+	{
+		RemoveAtHelper(Index, Count);
 	}
 
 	uint32 Size() const 

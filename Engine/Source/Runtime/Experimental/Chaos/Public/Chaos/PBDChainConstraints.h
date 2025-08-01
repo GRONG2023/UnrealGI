@@ -1,6 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
+// HEADER_UNIT_SKIP - This file does not compile anymore (Base ctor needs to be called)
+
+#include "Chaos/Evolution/IndexedConstraintContainer.h"
 #include "Chaos/PBDParticles.h"
 #include "Chaos/Framework/Parallel.h"
 #include "Chaos/PBDConstraintContainer.h"
@@ -9,7 +12,7 @@
 
 namespace Chaos
 {
-class FPBDChainConstraints : public FPBDConstraintContainer
+class FPBDChainConstraints : public FPBDIndexedConstraintContainer
 {
 public:
 	FPBDChainConstraints(const FDynamicParticles& InParticles, TArray<TArray<int32>>&& Constraints, const FReal Coefficient = (FReal)1.)

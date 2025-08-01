@@ -1,9 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "GameFramework/FloatingPawnMovement.h"
+#include "Engine/HitResult.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/Controller.h"
 #include "GameFramework/WorldSettings.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(FloatingPawnMovement)
 
 UFloatingPawnMovement::UFloatingPawnMovement(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -84,7 +87,7 @@ void UFloatingPawnMovement::TickComponent(float DeltaTime, enum ELevelTick TickT
 bool UFloatingPawnMovement::LimitWorldBounds()
 {
 	AWorldSettings* WorldSettings = PawnOwner ? PawnOwner->GetWorldSettings() : NULL;
-	if (!WorldSettings || !WorldSettings->bEnableWorldBoundsChecks || !UpdatedComponent)
+	if (!WorldSettings || !WorldSettings->AreWorldBoundsChecksEnabled() || !UpdatedComponent)
 	{
 		return false;
 	}
@@ -92,7 +95,7 @@ bool UFloatingPawnMovement::LimitWorldBounds()
 	const FVector CurrentLocation = UpdatedComponent->GetComponentLocation();
 	if ( CurrentLocation.Z < WorldSettings->KillZ )
 	{
-		Velocity.Z = FMath::Min(GetMaxSpeed(), WorldSettings->KillZ - CurrentLocation.Z + 2.0f);
+		Velocity.Z = FMath::Min<FVector::FReal>(GetMaxSpeed(), WorldSettings->KillZ - CurrentLocation.Z + 2.0f);
 		return true;
 	}
 
@@ -147,3 +150,4 @@ bool UFloatingPawnMovement::ResolvePenetrationImpl(const FVector& Adjustment, co
 	bPositionCorrected |= Super::ResolvePenetrationImpl(Adjustment, Hit, NewRotationQuat);
 	return bPositionCorrected;
 }
+

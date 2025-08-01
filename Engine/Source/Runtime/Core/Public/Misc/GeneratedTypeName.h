@@ -20,7 +20,7 @@
 
 #if !UE_BUILD_DOCS
 
-namespace UE4TypeName_Private
+namespace UETypeName_Private
 {
 	// Class representing a substring of another string
 	struct FSubstr
@@ -105,16 +105,16 @@ namespace UE4TypeName_Private
  * Caveats:
  * - The strings are compiler-dependent and thus non-portable, and so shouldn't be saved or relied upon as a form of identity, e.g. the example above returns "class FString" on MSVC.
  * - Default template parameters are also handled differently by different compilers, sometimes ignored, sometimes not.
- * - Only the concrete type is known to the compiler, aliases are ignored, e.g. GetTypeName<TCHAR>() typically returns "wchar_t".
+ * - Only the concrete type is known to the compiler, aliases are ignored, e.g. GetGeneratedTypeName<TCHAR>() typically returns "wchar_t".
  */
 template <typename T>
 inline const TCHAR* GetGeneratedTypeName()
 {
-	static constexpr auto Result = UE4TypeName_Private::TypeSubstrToCharArray<T>(TMakeIntegerSequence<uint32, UE4TypeName_Private::GetTypeSubstr<T>().Len()>());
+	static constexpr auto Result = UETypeName_Private::TypeSubstrToCharArray<T>(TMakeIntegerSequence<uint32, UETypeName_Private::GetTypeSubstr<T>().Len()>());
 	return Result.Array;
 }
 
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && !defined(__clang__)
 	#pragma warning(pop)
 #endif
 

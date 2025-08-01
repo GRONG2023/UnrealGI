@@ -3,311 +3,248 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
+using UnrealBuildBase;
+using UnrealBuildTool.Artifacts;
 
 namespace UnrealBuildTool
 {
+
 	/// <summary>
-	/// This executor is similar to LocalExecutor, but uses p/invoke on Windows to ensure that child processes are started at a lower priority and are terminated when the parent process terminates.
+	/// This executor uses async Tasks to process the action graph
 	/// </summary>
 	class ParallelExecutor : ActionExecutor
 	{
-		[DebuggerDisplay("{Inner}")]
-		class BuildAction
-		{
-			public int SortIndex;
-			public Action Inner;
-
-			public HashSet<BuildAction> Dependencies = new HashSet<BuildAction>();
-			public int MissingDependencyCount;
-
-			public HashSet<BuildAction> Dependants = new HashSet<BuildAction>();
-			public int TotalDependantCount;
-
-			public List<string> LogLines = new List<string>();
-			public int ExitCode = -1;
-		}
-
 		/// <summary>
 		/// Maximum processor count for local execution. 
 		/// </summary>
 		[XmlConfigFile]
-		int MaxProcessorCount = int.MaxValue;
+		[Obsolete("ParallelExecutor.MaxProcessorCount is deprecated. Please update xml to use BuildConfiguration.MaxParallelActions")]
+#pragma warning disable 0169
+		private static int MaxProcessorCount;
+#pragma warning restore 0169
 
 		/// <summary>
 		/// Processor count multiplier for local execution. Can be below 1 to reserve CPU for other tasks.
+		/// When using the local executor (not XGE), run a single action on each CPU core. Note that you can set this to a larger value
+		/// to get slightly faster build times in many cases, but your computer's responsiveness during compiling may be much worse.
+		/// This value is ignored if the CPU does not support hyper-threading.
 		/// </summary>
 		[XmlConfigFile]
-		double ProcessorCountMultiplier = 1.0;
+		private static double ProcessorCountMultiplier = 1.0;
+
+		/// <summary>
+		/// Free memory per action in bytes, used to limit the number of parallel actions if the machine is memory starved.
+		/// Set to 0 to disable free memory checking.
+		/// </summary>
+		[XmlConfigFile]
+		private static double MemoryPerActionBytes = 1.5 * 1024 * 1024 * 1024;
+
+		/// <summary>
+		/// The priority to set for spawned processes.
+		/// Valid Settings: Idle, BelowNormal, Normal, AboveNormal, High
+		/// Default: BelowNormal or Normal for an Asymmetrical processor as BelowNormal can cause scheduling issues.
+		/// </summary>
+		[XmlConfigFile]
+		protected static ProcessPriorityClass ProcessPriority = Utils.IsAsymmetricalProcessor() ? ProcessPriorityClass.Normal : ProcessPriorityClass.BelowNormal;
 
 		/// <summary>
 		/// When enabled, will stop compiling targets after a compile error occurs.
 		/// </summary>
 		[XmlConfigFile]
-		bool bStopCompilationAfterErrors = false;
+		private static bool bStopCompilationAfterErrors = false;
+
+		/// <summary>
+		/// Whether to show compilation times along with worst offenders or not.
+		/// </summary>
+		[XmlConfigFile]
+		private static bool bShowCompilationTimes = Unreal.IsBuildMachine();
+
+		/// <summary>
+		/// Whether to show compilation times for each executed action
+		/// </summary>
+		[XmlConfigFile]
+		private static bool bShowPerActionCompilationTimes = Unreal.IsBuildMachine();
+
+		/// <summary>
+		/// Whether to log command lines for actions being executed
+		/// </summary>
+		[XmlConfigFile]
+		private static bool bLogActionCommandLines = false;
+
+		/// <summary>
+		/// Add target names for each action executed
+		/// </summary>
+		[XmlConfigFile]
+		private static bool bPrintActionTargetNames = false;
+
+		/// <summary>
+		/// Whether to take into account the Action's weight when determining to do more work or not.
+		/// </summary>
+		[XmlConfigFile]
+		protected static bool bUseActionWeights = false;
+
+		/// <summary>
+		/// Whether to show CPU utilization after the work is complete.
+		/// </summary>
+		[XmlConfigFile]
+		protected static bool bShowCPUUtilization = Unreal.IsBuildMachine();
+
+		/// <summary>
+		/// Collapse non-error output lines
+		/// </summary>
+		private bool bCompactOutput = false;
 
 		/// <summary>
 		/// How many processes that will be executed in parallel
 		/// </summary>
-		int NumParallelProcesses;
+		public int NumParallelProcesses { get; private set; }
+
+		private static readonly char[] LineEndingSplit = new char[] { '\n', '\r' };
+
+		public static int GetDefaultNumParallelProcesses(int MaxLocalActions, bool bAllCores, ILogger Logger)
+		{
+			double MemoryPerActionBytesComputed = Math.Max(MemoryPerActionBytes, MemoryPerActionBytesOverride);
+			if (MemoryPerActionBytesComputed > MemoryPerActionBytes)
+			{
+				Logger.LogInformation("Overriding MemoryPerAction with target-defined value of {Memory} bytes", MemoryPerActionBytesComputed / 1024 / 1024 / 1024);
+			}
+
+			return Utils.GetMaxActionsToExecuteInParallel(MaxLocalActions, bAllCores ? 1.0f : ProcessorCountMultiplier, bAllCores, Convert.ToInt64(MemoryPerActionBytesComputed));
+		}
 
 		/// <summary>
 		/// Constructor
 		/// </summary>
 		/// <param name="MaxLocalActions">How many actions to execute in parallel</param>
-		public ParallelExecutor(int MaxLocalActions)
+		/// <param name="bAllCores">Consider logical cores when determining how many total cpu cores are available</param>
+		/// <param name="bCompactOutput">Should output be written in a compact fashion</param>
+		/// <param name="Logger">Logger for output</param>
+		public ParallelExecutor(int MaxLocalActions, bool bAllCores, bool bCompactOutput, ILogger Logger)
+			: base(Logger)
 		{
 			XmlConfig.ApplyTo(this);
 
-			// if specified this caps how many processors we can use
-			if (MaxLocalActions > 0)
-			{
-				NumParallelProcesses = MaxLocalActions;
-			}
-			else
-			{
-				// Figure out how many processors to use
-				NumParallelProcesses = Math.Min((int)(Environment.ProcessorCount * ProcessorCountMultiplier), MaxProcessorCount);
-			}
+			// Figure out how many processors to use
+			NumParallelProcesses = GetDefaultNumParallelProcesses(MaxLocalActions, bAllCores, Logger);
+
+			this.bCompactOutput = bCompactOutput;
 		}
 
 		/// <summary>
 		/// Returns the name of this executor
 		/// </summary>
-		public override string Name
-		{
-			get { return "Parallel"; }
-		}
+		public override string Name => "Parallel";
 
 		/// <summary>
-		/// Checks whether the parallel executor can be used
+		/// Checks whether the task executor can be used
 		/// </summary>
-		/// <returns>True if the parallel executor can be used</returns>
+		/// <returns>True if the task executor can be used</returns>
 		public static bool IsAvailable()
 		{
-			return Environment.OSVersion.Platform == PlatformID.Win32NT;
+			return true;
 		}
 
 		/// <summary>
-		/// Executes the specified actions locally.
+		/// Create an action queue
 		/// </summary>
-		/// <returns>True if all the tasks successfully executed, or false if any of them failed.</returns>
-		public override bool ExecuteActions(List<Action> InputActions, bool bLogDetailedActionStats)
+		/// <param name="actionsToExecute">Actions to be executed</param>
+		/// <param name="actionArtifactCache">Artifact cache</param>
+		/// <param name="logger">Logging interface</param>
+		/// <returns>Action queue</returns>
+		public ImmediateActionQueue CreateActionQueue(IEnumerable<LinkedAction> actionsToExecute, IActionArtifactCache? actionArtifactCache, ILogger logger)
 		{
-			Log.TraceInformation("Building {0} {1} with {2} {3}...", InputActions.Count, (InputActions.Count == 1) ? "action" : "actions", NumParallelProcesses, (NumParallelProcesses == 1)? "process" : "processes");
-
-			// Create actions with all our internal metadata
-			List<BuildAction> Actions = new List<BuildAction>();
-			for(int Idx = 0; Idx < InputActions.Count; Idx++)
+			return new(actionsToExecute, actionArtifactCache, NumParallelProcesses, "Compiling C++ source code...", x => WriteToolOutput(x), () => FlushToolOutput(), logger)
 			{
-				BuildAction Action = new BuildAction();
-				Action.SortIndex = Idx;
-				Action.Inner = InputActions[Idx];
+				ShowCompilationTimes = bShowCompilationTimes,
+				ShowCPUUtilization = bShowCPUUtilization,
+				PrintActionTargetNames = bPrintActionTargetNames,
+				LogActionCommandLines = bLogActionCommandLines,
+				ShowPerActionCompilationTimes = bShowPerActionCompilationTimes,
+				CompactOutput = bCompactOutput,
+				StopCompilationAfterErrors = bStopCompilationAfterErrors,
+			};
+		}
 
-				if (!Action.Inner.StatusDescription.EndsWith(".ispc"))
-				{
-					Action.SortIndex += 10000;
-				}
-
-				Actions.Add(Action);
+		/// <inheritdoc/>
+		public override async Task<bool> ExecuteActionsAsync(IEnumerable<LinkedAction> ActionsToExecute, ILogger Logger, IActionArtifactCache? actionArtifactCache)
+		{
+			if (!ActionsToExecute.Any())
+			{
+				return true;
 			}
 
-			// Build a map of items to their producing actions
-			Dictionary<FileItem, BuildAction> FileToProducingAction = new Dictionary<FileItem, BuildAction>();
-			foreach(BuildAction Action in Actions)
+			// The "useAutomaticQueue" should always be true unless manual queue is being tested
+			bool useAutomaticQueue = true;
+			if (useAutomaticQueue)
 			{
-				foreach(FileItem ProducedItem in Action.Inner.ProducedItems)
-				{
-					FileToProducingAction[ProducedItem] = Action;
-				}
+				using ImmediateActionQueue queue = CreateActionQueue(ActionsToExecute, actionArtifactCache, Logger);
+				int actionLimit = Math.Min(NumParallelProcesses, queue.TotalActions);
+				queue.CreateAutomaticRunner(action => RunAction(queue, action), bUseActionWeights, actionLimit, NumParallelProcesses);
+				queue.Start();
+				queue.StartManyActions();
+				return await queue.RunTillDone();
 			}
-
-			// Update all the actions with all their dependencies
-			foreach(BuildAction Action in Actions)
+			else
 			{
-				foreach(FileItem PrerequisiteItem in Action.Inner.PrerequisiteItems)
-				{
-					BuildAction Dependency;
-					if(FileToProducingAction.TryGetValue(PrerequisiteItem, out Dependency))
-					{
-						Action.Dependencies.Add(Dependency);
-						Dependency.Dependants.Add(Action);
-					}
-				}
-			}
-
-			// Figure out the recursive dependency count
-			HashSet<BuildAction> VisitedActions = new HashSet<BuildAction>();
-			foreach(BuildAction Action in Actions)
-			{
-				Action.MissingDependencyCount = Action.Dependencies.Count;
-				RecursiveIncDependents(Action, VisitedActions);
-			}
-
-			// Create the list of things to process
-			List<BuildAction> QueuedActions = new List<BuildAction>();
-			foreach(BuildAction Action in Actions)
-			{
-				if(Action.MissingDependencyCount == 0)
-				{
-					QueuedActions.Add(Action);
-				}
-			}
-
-			// Execute the actions
-			using (LogIndentScope Indent = new LogIndentScope("  "))
-			{
-				// Create a job object for all the child processes
-				bool bResult = true;
-				Dictionary<BuildAction, Thread> ExecutingActions = new Dictionary<BuildAction,Thread>();
-				List<BuildAction> CompletedActions = new List<BuildAction>();
-
-				using(ManagedProcessGroup ProcessGroup = new ManagedProcessGroup())
-				{
-					using(AutoResetEvent CompletedEvent = new AutoResetEvent(false))
-					{
-						int NumCompletedActions = 0;
-						using (ProgressWriter ProgressWriter = new ProgressWriter("Compiling C++ source code...", false))
-						{
-							while(QueuedActions.Count > 0 || ExecutingActions.Count > 0)
-							{
-								// Sort the actions by the number of things dependent on them
-								QueuedActions.Sort((A, B) => (A.TotalDependantCount == B.TotalDependantCount)? (B.SortIndex - A.SortIndex) : (B.TotalDependantCount - A.TotalDependantCount));
-
-								// Create threads up to the maximum number of actions
-								while(ExecutingActions.Count < NumParallelProcesses && QueuedActions.Count > 0)
-								{
-									BuildAction Action = QueuedActions[QueuedActions.Count - 1];
-									QueuedActions.RemoveAt(QueuedActions.Count - 1);
-
-									Thread ExecutingThread = new Thread(() => { ExecuteAction(ProcessGroup, Action, CompletedActions, CompletedEvent); });
-									ExecutingThread.Name = String.Format("Build:{0}", Action.Inner.StatusDescription);
-									ExecutingThread.Start();
-
-									ExecutingActions.Add(Action, ExecutingThread);
-								}
-
-								// Wait for something to finish
-								CompletedEvent.WaitOne();
-
-								// Wait for something to finish and flush it to the log
-								lock(CompletedActions)
-								{
-									foreach(BuildAction CompletedAction in CompletedActions)
-									{
-										// Join the thread
-										Thread CompletedThread = ExecutingActions[CompletedAction];
-										CompletedThread.Join();
-										ExecutingActions.Remove(CompletedAction);
-
-										// Update the progress
-										NumCompletedActions++;
-										ProgressWriter.Write(NumCompletedActions, InputActions.Count);
-
-										// Write it to the log
-										if(CompletedAction.LogLines.Count > 0)
-										{
-											Log.TraceInformation("[{0}/{1}] {2}", NumCompletedActions, InputActions.Count, CompletedAction.LogLines[0]);
-											for(int LineIdx = 1; LineIdx < CompletedAction.LogLines.Count; LineIdx++)
-											{
-												Log.TraceInformation("{0}", CompletedAction.LogLines[LineIdx]);
-											}
-										}
-
-										// Check the exit code
-										if(CompletedAction.ExitCode == 0)
-										{
-											// Mark all the dependents as done
-											foreach(BuildAction DependantAction in CompletedAction.Dependants)
-											{
-												if(--DependantAction.MissingDependencyCount == 0)
-												{
-													QueuedActions.Add(DependantAction);
-												}
-											}
-										}
-										else
-										{
-											// Update the exit code if it's not already set
-											if(bResult && CompletedAction.ExitCode != 0)
-											{
-												bResult = false;
-											}
-										}
-									}
-									CompletedActions.Clear();
-								}
-
-								// If we've already got a non-zero exit code, clear out the list of queued actions so nothing else will run
-								if(!bResult && bStopCompilationAfterErrors)
-								{
-									QueuedActions.Clear();
-								}
-							}
-						}
-					}
-				}
-
-				return bResult;
+				using ImmediateActionQueue queue = CreateActionQueue(ActionsToExecute, actionArtifactCache, Logger);
+				int actionLimit = Math.Min(NumParallelProcesses, queue.TotalActions);
+				ImmediateActionQueueRunner runner = queue.CreateManualRunner(action => RunAction(queue, action), bUseActionWeights, actionLimit, actionLimit);
+				queue.Start();
+				using Timer timer = new((_) => queue.StartManyActions(runner), null, 0, 500);
+				queue.StartManyActions();
+				return await queue.RunTillDone();
 			}
 		}
+
+		private static Func<Task>? RunAction(ImmediateActionQueue queue, LinkedAction action)
+		{
+			return async () =>
+			{
+				ExecuteResults results = await RunAction(action, queue.ProcessGroup, queue.CancellationToken);
+				queue.OnActionCompleted(action, results.ExitCode == 0, results);
+			};
+		}
+
+		protected static async Task<ExecuteResults> RunAction(LinkedAction Action, ManagedProcessGroup ProcessGroup, CancellationToken CancellationToken, string? AdditionalDescription = null)
+		{
+			CancellationToken.ThrowIfCancellationRequested();
+
+			using ManagedProcess Process = new ManagedProcess(ProcessGroup, Action.CommandPath.FullName, Action.CommandArguments, Action.WorkingDirectory.FullName, null, null, ProcessPriority);
+
+			using MemoryStream StdOutStream = new MemoryStream();
+			await Process.CopyToAsync(StdOutStream, CancellationToken);
+
+			CancellationToken.ThrowIfCancellationRequested();
+
+			await Process.WaitForExitAsync(CancellationToken);
+
+			List<string> LogLines = Console.OutputEncoding.GetString(StdOutStream.GetBuffer(), 0, Convert.ToInt32(StdOutStream.Length)).Split(LineEndingSplit, StringSplitOptions.RemoveEmptyEntries).ToList();
+			int ExitCode = Process.ExitCode;
+			TimeSpan ProcessorTime = Process.TotalProcessorTime;
+			TimeSpan ExecutionTime = Process.ExitTime - Process.StartTime;
+			return new ExecuteResults(LogLines, ExitCode, ExecutionTime, ProcessorTime, AdditionalDescription);
+		}
+	}
+
+	/// <summary>
+	/// Publicly visible static class that allows external access to the parallel executor config
+	/// </summary>
+	public static class ParallelExecutorConfiguration
+	{
+		/// <summary>
+		/// Maximum number of processes that should be used for execution
+		/// </summary>
+		public static int GetMaxParallelProcesses(ILogger Logger) => ParallelExecutor.GetDefaultNumParallelProcesses(0, false, Logger);
 
 		/// <summary>
-		/// Execute an individual action
+		/// Maximum number of processes that should be used for execution
 		/// </summary>
-		/// <param name="ProcessGroup">The process group</param>
-		/// <param name="Action">The action to execute</param>
-		/// <param name="CompletedActions">On completion, the list to add the completed action to</param>
-		/// <param name="CompletedEvent">Event to set once an event is complete</param>
-		static void ExecuteAction(ManagedProcessGroup ProcessGroup, BuildAction Action, List<BuildAction> CompletedActions, AutoResetEvent CompletedEvent)
-		{
-			if (Action.Inner.bShouldOutputStatusDescription && !String.IsNullOrEmpty(Action.Inner.StatusDescription))
-			{
-				Action.LogLines.Add(Action.Inner.StatusDescription);
-			}
-
-			try
-			{
-				using (ManagedProcess Process = new ManagedProcess(ProcessGroup, Action.Inner.CommandPath.FullName, Action.Inner.CommandArguments, Action.Inner.WorkingDirectory.FullName, null, null, ProcessPriorityClass.BelowNormal))
-				{
-					Action.LogLines.AddRange(Process.ReadAllLines());
-					Action.ExitCode = Process.ExitCode;
-				}
-			}
-			catch(Exception Ex)
-			{
-				Log.WriteException(Ex, null);
-				Action.ExitCode = 1;
-			}
-
-			lock(CompletedActions)
-			{
-				CompletedActions.Add(Action);
-			}
-
-			CompletedEvent.Set();
-		}
-
-		/// <summary>
-		/// Increment the number of dependants of an action, recursively
-		/// </summary>
-		/// <param name="Action">The action to update</param>
-		/// <param name="VisitedActions">Set of visited actions</param>
-		private static void RecursiveIncDependents(BuildAction Action, HashSet<BuildAction> VisitedActions)
-		{
-			foreach(BuildAction Dependency in Action.Dependants)
-			{
-				if(!VisitedActions.Contains(Action))
-				{
-					VisitedActions.Add(Action);
-					Dependency.TotalDependantCount++;
-					RecursiveIncDependents(Dependency, VisitedActions);
-				}
-			}
-		}
+		public static int GetMaxParallelProcesses(int MaxLocalActions, bool bAllCores, ILogger Logger) => ParallelExecutor.GetDefaultNumParallelProcesses(MaxLocalActions, bAllCores, Logger);
 	}
 }

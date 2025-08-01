@@ -2,36 +2,64 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Misc/Attribute.h"
-#include "Misc/Guid.h"
-#include "Layout/Visibility.h"
-#include "Layout/SlateRect.h"
-#include "Layout/Geometry.h"
-#include "Input/CursorReply.h"
-#include "Input/Reply.h"
-#include "Styling/SlateColor.h"
-#include "Layout/ArrangedWidget.h"
-#include "Layout/Margin.h"
 #include "Animation/CurveSequence.h"
-#include "SlotBase.h"
-#include "Layout/Children.h"
-#include "Widgets/SPanel.h"
-#include "Styling/CoreStyle.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "CoreMinimal.h"
+#include "DiffResults.h"
 #include "Framework/Commands/InputChord.h"
 #include "GraphEditor.h"
+#include "HAL/PlatformCrt.h"
+#include "Input/CursorReply.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
 #include "Layout/ArrangedChildren.h"
-#include "Types/PaintArgs.h"
-#include "EditorStyleSet.h"
+#include "Layout/ArrangedWidget.h"
+#include "Layout/BasicLayoutWidgetSlot.h"
+#include "Layout/Children.h"
+#include "Layout/ChildrenBase.h"
+#include "Layout/Geometry.h"
 #include "Layout/LayoutUtils.h"
+#include "Layout/Margin.h"
+#include "Layout/SlateRect.h"
+#include "Layout/Visibility.h"
 #include "MarqueeOperation.h"
+#include "Math/Color.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector2D.h"
+#include "Misc/Attribute.h"
+#include "Misc/Guid.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/CoreStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/SlateColor.h"
+#include "Templates/SharedPointer.h"
 #include "Templates/UniquePtr.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/PaintArgs.h"
+#include "Types/SlateEnums.h"
+#include "Types/WidgetMouseEventsDelegate.h"
 #include "UObject/GCObject.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SPanel.h"
+#include "Widgets/SWidget.h"
 
 class FActiveTimerHandle;
+class FReferenceCollector;
 class FScopedTransaction;
 class FSlateWindowElementList;
+class FWidgetStyle;
+class UObject;
+struct FCaptureLostEvent;
+struct FDiffSingleResult;
+struct FFocusEvent;
+struct FKeyEvent;
 struct FMarqueeOperation;
+struct FPointerEvent;
+struct FSlateBrush;
 struct Rect;
 
 //@TODO: Too generic of a name to expose at this scope
@@ -190,7 +218,7 @@ struct FZoomLevelsContainer
 
 struct GRAPHEDITOR_API FGraphSelectionManager : public FGCObject
 {
-	FGraphPanelSelectionSet SelectedNodes;
+	TSet<TObjectPtr<class UObject>> SelectedNodes;
 
 	/** Invoked when the selected graph nodes have changed. */
 	SGraphEditor::FOnSelectionChanged OnSelectionChanged;
@@ -231,6 +259,10 @@ public:
 	void ClickedOnNode(SelectedItemType Node, const FPointerEvent& MouseEvent);
 
 	void AddReferencedObjects(FReferenceCollector& Collector) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FGraphSelectionManager");
+	}
 };
 
 /**
@@ -271,48 +303,56 @@ public:
 	public:
 
 		/** A slot that support alignment of content and padding and z-order */
-		class FNodeSlot : public TSlotBase<FNodeSlot>
+		class GRAPHEDITOR_API FNodeSlot : public TSlotBase<FNodeSlot>, public TAlignmentWidgetSlotMixin<FNodeSlot>
 		{
 		public:
+			friend SNode;
+
 			FNodeSlot()
-				: TSlotBase<FNodeSlot>()
-				, HAlignment(HAlign_Fill)
-				, VAlignment(VAlign_Fill)
-				, SlotPadding(0.0f)
-				, Offset( FVector2D::ZeroVector )
-				, AllowScale( true )
+				: FNodeSlot(ENodeZone::TopLeft)
 			{ }
 
-			FNodeSlot& HAlign( EHorizontalAlignment InHAlignment )
-			{
-				HAlignment = InHAlignment;
-				return *this;
-			}
+			FNodeSlot(ENodeZone::Type InZone)
+				: TSlotBase<FNodeSlot>()
+				, TAlignmentWidgetSlotMixin<FNodeSlot>(HAlign_Fill, VAlign_Fill)
+				, Zone(InZone)
+				, SlotPadding(0.0f)
+				, Offset(FVector2D::ZeroVector)
+				, AllowScale(true)
+			{ }
 
-			FNodeSlot& VAlign( EVerticalAlignment InVAlignment )
-			{
-				VAlignment = InVAlignment;
-				return *this;
-			}
+			SLATE_SLOT_BEGIN_ARGS_OneMixin(FNodeSlot, TSlotBase<FNodeSlot>, TAlignmentWidgetSlotMixin<FNodeSlot>)
+				SLATE_ATTRIBUTE(FMargin, Padding)
+				SLATE_ATTRIBUTE(FVector2D, SlotOffset)
+				SLATE_ATTRIBUTE(FVector2D, SlotSize)
+				SLATE_ATTRIBUTE(bool, AllowScaling)
+			SLATE_SLOT_END_ARGS()
 
+			void Construct(const FChildren& SlotOwner, FSlotArguments&& InArgs);
+
+		public:
+			UE_DEPRECATED(5.0, "Padding is now deprecated. Use the FSlotArgument or the SetPadding function.")
 			FNodeSlot& Padding( const TAttribute<FMargin> InPadding )
 			{
 				SlotPadding = InPadding;
 				return *this;
 			}
 
+			UE_DEPRECATED(5.0, "SlotOffset is now deprecated. Use the FSlotArgument or the SetSlotOffset function.")
 			FNodeSlot& SlotOffset( const TAttribute<FVector2D> InOffset )
 			{
 				Offset = InOffset;
 				return *this;
 			}
 
+			UE_DEPRECATED(5.0, "SlotSize is now deprecated. Use the FSlotArgument or the SetSlotSize function.")
 			FNodeSlot& SlotSize( const TAttribute<FVector2D> InSize )
 			{
 				Size = InSize;
 				return *this;
 			}
 
+			UE_DEPRECATED(5.0, "AllowScaling is now deprecated. Use the FSlotArgument or the SetAllowScalingfunction.")
 			FNodeSlot& AllowScaling( const TAttribute<bool> InAllowScale )
 			{
 				AllowScale = InAllowScale;
@@ -320,11 +360,54 @@ public:
 			}
 
 		public:
+			ENodeZone::Type GetZoneType() const
+			{
+				return Zone;
+			}
 
+			void SetPadding(TAttribute<FMargin> InPadding)
+			{
+				SlotPadding = MoveTemp(InPadding);
+			}
+
+			FMargin GetPadding() const
+			{
+				return SlotPadding.Get();
+			}
+
+			void SetSlotOffset(TAttribute<FVector2D> InOffset)
+			{
+				Offset = MoveTemp(InOffset);
+			}
+
+			FVector2D GetSlotOffset() const
+			{
+				return Offset.Get();
+			}
+
+			void SetSlotSize(TAttribute<FVector2D> InSize)
+			{
+				Size = MoveTemp(InSize);
+			}
+
+			FVector2D GetSlotSize() const
+			{
+				return Size.Get();
+			}
+
+			void SetAllowScaling(TAttribute<bool> InAllowScaling)
+			{
+				AllowScale = MoveTemp(InAllowScaling);
+			}
+
+			bool GetAllowScaling() const
+			{
+				return AllowScale.Get();
+			}
+
+		private:
 			/** The child widget contained in this slot. */
 			ENodeZone::Type Zone;
-			EHorizontalAlignment HAlignment;
-			EVerticalAlignment VAlignment;
 			TAttribute<FMargin> SlotPadding;
 			TAttribute<FVector2D> Offset;
 			TAttribute<FVector2D> Size;
@@ -433,22 +516,23 @@ public:
 		}
 		// End of SPanel Interface
 
-		FNodeSlot& GetOrAddSlot( const ENodeZone::Type SlotId )
+
+		using FScopedWidgetSlotArguments = TPanelChildren<FNodeSlot>::FScopedWidgetSlotArguments;
+		FScopedWidgetSlotArguments GetOrAddSlot( const ENodeZone::Type SlotId )
 		{
 			// Return existing
+			int32 InsertIndex = INDEX_NONE;
 			for( int32 ChildIndex = 0; ChildIndex < Children.Num(); ++ChildIndex )
 			{
 				if( Children[ ChildIndex ].Zone == SlotId )
 				{
-					return Children[ ChildIndex ];
+					Children.RemoveAt(ChildIndex);
+					InsertIndex = ChildIndex;
 				}
 			}
-			// Add Zone
-			FNodeSlot& NewSlot = *new FNodeSlot();
-			NewSlot.Zone = SlotId;
-			Children.Add( &NewSlot );
 
-			return NewSlot;
+			// Add new
+			return FScopedWidgetSlotArguments{ MakeUnique<FNodeSlot>(SlotId), Children, InsertIndex };
 		}
 
 		FNodeSlot* GetSlot( const ENodeZone::Type SlotId )
@@ -508,7 +592,23 @@ public:
 		/** @return The brush to use for drawing the shadow for this node */
 		virtual const FSlateBrush* GetShadowBrush(bool bSelected) const
 		{
-			return bSelected ? FEditorStyle::GetBrush(TEXT("Graph.Node.ShadowSelected")) : FEditorStyle::GetBrush(TEXT("Graph.Node.Shadow"));
+			return bSelected ? FAppStyle::GetBrush(TEXT("Graph.Node.ShadowSelected")) : FAppStyle::GetBrush(TEXT("Graph.Node.Shadow"));
+		}
+
+		struct DiffHighlightInfo
+		{
+			const FSlateBrush* Brush;
+			const FLinearColor Tint;
+		};
+		
+		/** @return Collection of brushes layered to outline node with the DiffResult color */
+		TArray<SNodePanel::SNode::DiffHighlightInfo> GetDiffHighlights(const FDiffSingleResult& DiffResult) const;
+
+		/** used by GetDiffHighlights to generate outlines for diffed nodes */
+		virtual void GetDiffHighlightBrushes(const FSlateBrush*& BackgroundOut, const FSlateBrush*& ForegroundOut) const
+		{
+			BackgroundOut = FAppStyle::GetBrush(TEXT("Graph.Node.DiffHighlight"));
+			ForegroundOut = FAppStyle::GetBrush(TEXT("Graph.Node.DiffHighlightShading"));
 		}
 
 		/** Populate the brushes array with any overlay brushes to render */
@@ -580,7 +680,7 @@ public:
 	protected:
 		SNode()
 		: BorderImage( FCoreStyle::Get().GetBrush( "NoBorder" ) )
-		, BorderBackgroundColor( FEditorStyle::GetColor("Graph.ForegroundColor"))
+		, BorderBackgroundColor( FAppStyle::GetColor("Graph.ForegroundColor"))
 		, DesiredSizeScale(FVector2D(1,1))
 		, Children(this)
 		{
@@ -665,6 +765,14 @@ public:
 	/** @return the view offset in graph space */
 	FVector2D GetViewOffset() const;
 
+	/** 
+	 * when a panel is scrolling/zooming to a target, this can be called to get it's destination
+	 * @param TopLeft top left corner of the destination
+	 * @param BottomRight bottom right corner of the destination
+	 * @return true if there's a scrolling/zooming target and false if there is no destination
+	 */
+	bool GetZoomTargetRect(FVector2D& TopLeft, FVector2D& BottomRight) const;
+
 	/** @return the current view bookmark ID */
 	const FGuid& GetViewBookmarkId() const { return CurrentBookmarkGuid; }
 
@@ -675,7 +783,7 @@ public:
 	void RestoreViewSettings(const FVector2D& InViewOffset, float InZoomAmount, const FGuid& InBookmarkGuid = FGuid());
 
 	/** Get the grid snap size */
-	static float GetSnapGridSize();
+	static uint32 GetSnapGridSize();
 
 	/** 
 	 * Zooms out to fit either all nodes or only the selected ones.
@@ -695,6 +803,9 @@ public:
 
 	/** If it is focusing on a particular object */
 	bool HasDeferredObjectFocus() const;
+
+	/** Query whether this graph is about to start panning/zooming towards a destination */
+	bool HasDeferredZoomDestination() const;
 
 	/** Commit transactions for any node movements */
 	void FinalizeNodeMovements();
@@ -756,7 +867,7 @@ protected:
 	 * @param CurrentSelection     The selection before the marquee operation.
 	 * @param OutNewSelection      The selection resulting from Marquee being applied to CurrentSelection.
 	 */
-	static void ApplyMarqueeSelection(const FMarqueeOperation& InMarquee, const FGraphPanelSelectionSet& CurrentSelection, FGraphPanelSelectionSet& OutNewSelection);
+	static void ApplyMarqueeSelection(const FMarqueeOperation& InMarquee, const FGraphPanelSelectionSet& CurrentSelection, TSet<TObjectPtr<UObject>>& OutNewSelection);
 
 	/**
 	 * On the next tick, centers and selects the widget associated with the object if it exists
@@ -849,7 +960,21 @@ protected:
 
 	// Cancels any active zoom-to-fit action
 	void CancelZoomToFit();
+
+public:
+	
+	// Sets the zoom levels container
+	template<typename T>
+	void SetZoomLevelsContainer()
+	{
+		ZoomLevels = MakeUnique<T>();
+		OldZoomAmount = ZoomLevels->GetZoomAmount(ZoomLevel);
+		ZoomLevel = PreviousZoomLevel = ZoomLevels->GetNearestZoomLevel(OldZoomAmount);
+		PostChangedZoom();
+	}
+	
 protected:
+	
 	// The interface for mapping ZoomLevel values to actual node scaling values
 	TUniquePtr<FZoomLevelsContainer> ZoomLevels;
 
@@ -970,6 +1095,9 @@ protected:
 	
 	/** Node positions pre-drag, used to limit transaction creation on drag */
 	TMap<TWeakPtr<SNode>, FVector2D> OriginalNodePositions;
+
+	/** Called when the user left clicks on a node without dragging */
+	SGraphEditor::FOnNodeSingleClicked OnNodeSingleClicked;
 
 private:
 	/** Active timer that handles deferred zooming until the target zoom is reached */

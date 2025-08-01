@@ -2,8 +2,11 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/Array.h"
 #include "Containers/ContainersFwd.h"
+#include "CoreMinimal.h"
+#include "HAL/Platform.h"
+#include "Logging/LogMacros.h"
 
 APPLICATIONCORE_API DECLARE_LOG_CATEGORY_EXTERN(LogSynthBenchmark, Log, All);
 
@@ -221,7 +224,7 @@ struct FHardwareSurveyResults
 /**
 * Generic implementation for most platforms, these tend to be unused and unimplemented
 **/
-struct APPLICATIONCORE_API FGenericPlatformSurvey
+struct FGenericPlatformSurvey
 {
 	/**
 	 * Attempt to get hardware survey results now.

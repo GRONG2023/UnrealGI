@@ -1,9 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "SWidgetReflectorToolTipWidget.h"
+#include "Widgets/SWidgetReflectorToolTipWidget.h"
 
 #include "Layout/Geometry.h"
 #include "Styling/CoreStyle.h"
+#include "Types/SlateAttributeMetaData.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SGridPanel.h"
@@ -68,6 +69,7 @@ void SReflectorToolTipWidget::Construct( const FArguments& InArgs )
 			++SlotCount;
 		};
 
+		BuildLabelAndValue(LOCTEXT("SourceName", "Source"), { this, &SReflectorToolTipWidget::GetWidgetsSourceName });
 		BuildLabelAndValue(LOCTEXT("DesiredSize", "Desired Size"), { this, &SReflectorToolTipWidget::GetWidgetsDesiredSize });
 		BuildLabelAndValue(LOCTEXT("ActualSize", "Actual Size"), { this, &SReflectorToolTipWidget::GetWidgetActualSize });
 		BuildLabelAndValue(LOCTEXT("SizeInfo", "Size Info"), { this, &SReflectorToolTipWidget::GetSizeInfo });
@@ -75,12 +77,20 @@ void SReflectorToolTipWidget::Construct( const FArguments& InArgs )
 		BuildLabelAndValue(LOCTEXT("NeedsTick", "Needs Tick"), { this, &SReflectorToolTipWidget::GetNeedsTick });
 		BuildLabelAndValue(LOCTEXT("IsVolatile", "Is Volatile"), { this, &SReflectorToolTipWidget::GetIsVolatile });
 		BuildLabelAndValue(LOCTEXT("IsVolatileIndirectly", "Is Volatile Indirectly"), { this, &SReflectorToolTipWidget::GetIsVolatileIndirectly });
-		BuildLabelAndValue(LOCTEXT("HasActiveTimers", "Has Active Timers"), { this, &SReflectorToolTipWidget::GetHasActiveTimers });
-
 		if (bIsInsideInvalidationRoot)
 		{
 			BuildLabelAndValue(LOCTEXT("IsVisible", "Is Visible"), { this, &SReflectorToolTipWidget::GetIsVisible });
 			BuildLabelAndValue(LOCTEXT("IsVisibleInherited", "Is Visible Inherited"), { this, &SReflectorToolTipWidget::GetIsVisibleInherited });
+		}
+		BuildLabelAndValue(LOCTEXT("HasActiveTimers", "Has Active Timer"), { this, &SReflectorToolTipWidget::GetHasActiveTimers });
+		if (WidgetInfo->GetNodeType() == EWidgetReflectorNodeType::Live)
+		{
+			BuildLabelAndValue(LOCTEXT("HasRegisteredAttribute", "Attributes"), { this, &SReflectorToolTipWidget::GetLiveAttributeName });
+		}
+		else
+		{
+			BuildLabelAndValue(LOCTEXT("HasRegisteredAttribute", "Attributes"), { this, &SReflectorToolTipWidget::GetAttributeCount });
+			BuildLabelAndValue(LOCTEXT("HasCollapsedAttribute", "Affect Visibility Attributes"), { this, &SReflectorToolTipWidget::GetCollapsedAttributeCount });
 		}
 	}
 
@@ -115,6 +125,29 @@ void SReflectorToolTipWidget::Construct( const FArguments& InArgs )
 			GridPanel
 		];
 	}
+}
+
+FText SReflectorToolTipWidget::GetLiveAttributeName() const
+{
+	if (TSharedPtr<SWidget> Widget = WidgetInfo->GetLiveWidget())
+	{
+		if (FSlateAttributeMetaData* AttributeMetaData = FSlateAttributeMetaData::FindMetaData(*Widget.Get()))
+		{
+			TArray<FName> AttributeNames = AttributeMetaData->GetAttributeNames(*Widget.Get());
+			TArray<FText> AttributeNamesAsText;
+			AttributeNamesAsText.Reserve(AttributeNames.Num());
+			for (FName AttributeName : AttributeNames)
+			{
+				AttributeNamesAsText.Add(FText::FromName(AttributeName));
+			}
+			return FText::FormatOrdered(LOCTEXT("LiveAttributeNames", "{0} ({1} affect widget visibility) \n  {2}")
+				, AttributeMetaData->GetRegisteredAttributeCount()
+				, AttributeMetaData->GetRegisteredAffectVisibilityAttributeCount()
+				, FText::Join(LOCTEXT("LiveAttributeNamesDelimiter", "\n  "), AttributeNamesAsText));
+		}
+	}
+
+	return FText::GetEmpty();
 }
 
 #undef LOCTEXT_NAMESPACE

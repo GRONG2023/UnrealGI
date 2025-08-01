@@ -1,14 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "ScreenComparisonModel.h"
+#include "Models/ScreenComparisonModel.h"
 #include "ISourceControlModule.h"
 #include "ISourceControlOperation.h"
 #include "SourceControlOperations.h"
 #include "SourceControlHelpers.h"
 #include "ISourceControlProvider.h"
 #include "Misc/Paths.h"
-
-DEFINE_LOG_CATEGORY_STATIC(LogScreenshotComparison, Log, All);
 
 FScreenComparisonModel::FScreenComparisonModel(const FComparisonReport& InReport)
 	: Report(InReport)
@@ -22,11 +20,13 @@ FScreenComparisonModel::FScreenComparisonModel(const FComparisonReport& InReport
 		that is where a blessed image should be checked in to.
 	*/
 
-	FString SourceImage = FPaths::Combine(Report.GetReportPath(), Report.GetComparisonResult().ReportIncomingFilePath);
+	FString SourceImage = FPaths::Combine(Report.GetReportRootDirectory(), Report.GetComparisonResult().ReportIncomingFilePath);
 	FString OutputImage = FPaths::Combine(FPaths::ProjectDir(), Report.GetComparisonResult().IdealApprovedFolderPath, FPaths::GetCleanFilename(Report.GetComparisonResult().IncomingFilePath));
 
 	FileImports.Add(FFileMapping(OutputImage, SourceImage));
 	FileImports.Add(FFileMapping(FPaths::ChangeExtension(OutputImage, TEXT("json")), FPaths::ChangeExtension(SourceImage, TEXT("json"))));
+
+	TryLoadMetadata();
 }
 
 bool FScreenComparisonModel::IsComplete() const
@@ -46,31 +46,53 @@ void FScreenComparisonModel::Complete(bool bWasSuccessful)
 	OnComplete.Broadcast();
 }
 
-TOptional<FAutomationScreenshotMetadata> FScreenComparisonModel::GetMetadata()
+void FScreenComparisonModel::TryLoadMetadata()
 {
-	// Load it.
-	if ( !Metadata.IsSet() )
+	if (!Metadata.IsSet())
 	{
 		const FImageComparisonResult& Comparison = Report.GetComparisonResult();
 
-		FString IncomingImage = Report.GetReportPath() / Comparison.ReportIncomingFilePath;
+		FString IncomingImage = Report.GetReportRootDirectory() / Comparison.ReportIncomingFilePath;
 		FString IncomingMetadata = FPaths::ChangeExtension(IncomingImage, TEXT("json"));
 
-		if ( !IncomingMetadata.IsEmpty() )
+		if (!IncomingMetadata.IsEmpty())
 		{
 			FString Json;
-			if ( FFileHelper::LoadFileToString(Json, *IncomingMetadata) )
+			if (FFileHelper::LoadFileToString(Json, *IncomingMetadata))
 			{
 				FAutomationScreenshotMetadata LoadedMetadata;
-				if ( FJsonObjectConverter::JsonObjectStringToUStruct(Json, &LoadedMetadata, 0, 0) )
+				if (FJsonObjectConverter::JsonObjectStringToUStruct(Json, &LoadedMetadata, 0, 0))
 				{
 					Metadata = LoadedMetadata;
 				}
 			}
 		}
 	}
+}
+
+TOptional<FAutomationScreenshotMetadata> FScreenComparisonModel::GetMetadata()
+{
+	// Load it just in case.
+	TryLoadMetadata();
 
 	return Metadata;
+}
+
+FString FScreenComparisonModel::GetName()
+{
+	if (Name.IsEmpty())
+	{
+		auto LoadedMetadata = GetMetadata();
+		if (LoadedMetadata.IsSet())
+		{
+			FString VariantSuffix = LoadedMetadata->VariantName.Len() > 0 ? FString::Printf(TEXT(".%s"), *LoadedMetadata->VariantName) : TEXT("");
+			FString NameString = FString::Printf(TEXT("%s.%s%s"), *LoadedMetadata->Context, *LoadedMetadata->ScreenShotName, *VariantSuffix);
+
+			Name = NameString;
+		}
+	}
+
+	return Name;
 }
 
 bool FScreenComparisonModel::AddNew()

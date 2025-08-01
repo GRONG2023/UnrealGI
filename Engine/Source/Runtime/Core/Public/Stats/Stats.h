@@ -3,7 +3,12 @@
 #pragma once
 
 #include "CoreTypes.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "Math/Color.h"
+#endif
+#if ENABLE_STATNAMEDEVENTS
+#include "Math/Color.h"
+#endif
 #include "UObject/NameTypes.h"
 #include "Delegates/Delegate.h"
 #include "HAL/PlatformTime.h"
@@ -17,6 +22,7 @@
  */
 
 struct TStatId;
+enum class EStatFlags : uint8;
 
 // used by the profiler
 enum EStatType
@@ -58,10 +64,14 @@ public:
 	 * Pushes the specified stat onto the hierarchy for this thread. Starts
 	 * the timing of the cycles used
 	 */
-	FORCEINLINE_STATS FScopeCycleCounter( TStatId StatId, bool bAlways = false )
+	FORCEINLINE_STATS FScopeCycleCounter( TStatId StatId, EStatFlags StatFlags, bool bAlways = false)
 	{
-		Start( StatId, bAlways );
+		Start( StatId, StatFlags, bAlways);
 	}
+
+	FORCEINLINE_STATS FScopeCycleCounter(TStatId StatId, bool bAlways = false)
+		: FScopeCycleCounter(StatId, EStatFlags::None, bAlways)
+	{}
 
 	/**
 	 * Updates the stat with the time spent
@@ -73,13 +83,25 @@ public:
 
 };
 
+FORCEINLINE void StatsPrimaryEnableAdd(int32 Value = 1)
+{
+	FThreadStats::PrimaryEnableAdd(Value);
+}
+FORCEINLINE void StatsPrimaryEnableSubtract(int32 Value = 1)
+{
+	FThreadStats::PrimaryEnableSubtract(Value);
+}
+
+UE_DEPRECATED(5.1, "Use StatsPrimaryEnableAdd instead")
 FORCEINLINE void StatsMasterEnableAdd(int32 Value = 1)
 {
-	FThreadStats::MasterEnableAdd(Value);
+	StatsPrimaryEnableAdd(Value);
 }
+
+UE_DEPRECATED(5.1, "Use StatsPrimaryEnableSubtract instead")
 FORCEINLINE void StatsMasterEnableSubtract(int32 Value = 1)
 {
-	FThreadStats::MasterEnableSubtract(Value);
+	StatsPrimaryEnableSubtract(Value);
 }
 
 #else	//STATS
@@ -114,10 +136,20 @@ struct TStatId
 	{
 		return StatString != nullptr;
 	}
+
+	FORCEINLINE bool operator==(TStatId Other) const
+	{
+		return StatString == Other.StatString;
+	}
+
+	FORCEINLINE bool operator!=(TStatId Other) const
+	{
+		return StatString != Other.StatString;
+	}
 };
 
 #if USE_LIGHTWEIGHT_STATS_FOR_HITCH_DETECTION && USE_HITCH_DETECTION
-extern CORE_API bool GHitchDetected;
+extern CORE_API TSAN_ATOMIC(bool) GHitchDetected;
 
 class FLightweightStatScope
 {
@@ -144,7 +176,7 @@ public:
 class FScopeCycleCounter
 {
 public:
-	FORCEINLINE FScopeCycleCounter(TStatId InStatId, bool bAlways = false)
+	FORCEINLINE FScopeCycleCounter(TStatId InStatId, EStatFlags StatFlags, bool bAlways = false)
 		: 
 #if USE_LIGHTWEIGHT_STATS_FOR_HITCH_DETECTION && USE_HITCH_DETECTION
 		StatScope(InStatId.StatString),
@@ -157,6 +189,11 @@ public:
 			bPop = true;
 			FPlatformMisc::BeginNamedEvent(FColor(0), InStatId.StatString);
 		}
+	}
+
+	FORCEINLINE FScopeCycleCounter(TStatId InStatId, bool bAlways = false)
+		: FScopeCycleCounter(InStatId, EStatFlags::None, bAlways)
+	{
 	}
 
 	FORCEINLINE ~FScopeCycleCounter()
@@ -179,16 +216,19 @@ struct TStatId {};
 class FScopeCycleCounter
 {
 public:
+	FORCEINLINE_STATS FScopeCycleCounter(TStatId, EStatFlags, bool bAlways = false)
+	{
+	}
 	FORCEINLINE_STATS FScopeCycleCounter(TStatId, bool bAlways = false)
 	{
 	}
 };
 #endif
 
-FORCEINLINE void StatsMasterEnableAdd(int32 Value = 1)
+FORCEINLINE void StatsPrimaryEnableAdd(int32 Value = 1)
 {
 }
-FORCEINLINE void StatsMasterEnableSubtract(int32 Value = 1)
+FORCEINLINE void StatsPrimaryEnableSubtract(int32 Value = 1)
 {
 }
 
@@ -202,18 +242,25 @@ FORCEINLINE void StatsMasterEnableSubtract(int32 Value = 1)
 #define ANSI_TO_PROFILING(x) TEXT(x)
 #endif
 
+#define SCOPE_CYCLE_COUNTER_TO_TRACE(StatString, StatName, Condition) \
+	TRACE_CPUPROFILER_EVENT_DECLARE(PREPROCESSOR_JOIN(PREPROCESSOR_JOIN(__Decl_, StatName), __LINE__)); \
+	TRACE_CPUPROFILER_EVENT_SCOPE_USE(PREPROCESSOR_JOIN(PREPROCESSOR_JOIN(__Decl_, StatName), __LINE__), StatString, PREPROCESSOR_JOIN(PREPROCESSOR_JOIN(__Scope_, StatName), __LINE__), Condition && GCycleStatsShouldEmitNamedEvents);
 
 #define DECLARE_SCOPE_CYCLE_COUNTER(CounterName,Stat,GroupId) \
-	FScopeCycleCounter StatNamedEventsScope_##Stat(TStatId(ANSI_TO_PROFILING(#Stat)));
+	FScopeCycleCounter StatNamedEventsScope_##Stat(TStatId(ANSI_TO_PROFILING(#Stat))); \
+	SCOPE_CYCLE_COUNTER_TO_TRACE(CounterName, Stat, true);
 
 #define QUICK_SCOPE_CYCLE_COUNTER(Stat) \
-	FScopeCycleCounter StatNamedEventsScope_##Stat(TStatId(ANSI_TO_PROFILING(#Stat)));
+	FScopeCycleCounter StatNamedEventsScope_##Stat(TStatId(ANSI_TO_PROFILING(#Stat))); \
+	SCOPE_CYCLE_COUNTER_TO_TRACE(#Stat, Stat, true);
 
 #define SCOPE_CYCLE_COUNTER(Stat) \
-	FScopeCycleCounter StatNamedEventsScope_##Stat(TStatId(ANSI_TO_PROFILING(#Stat)));
+	FScopeCycleCounter StatNamedEventsScope_##Stat(TStatId(ANSI_TO_PROFILING(#Stat))); \
+	SCOPE_CYCLE_COUNTER_TO_TRACE(#Stat, Stat, true);
 
 #define CONDITIONAL_SCOPE_CYCLE_COUNTER(Stat,bCondition) \
-	FScopeCycleCounter StatNamedEventsScope_##Stat(bCondition ? ANSI_TO_PROFILING(#Stat) : nullptr);
+	FScopeCycleCounter StatNamedEventsScope_##Stat(bCondition ? ANSI_TO_PROFILING(#Stat) : nullptr); \
+	SCOPE_CYCLE_COUNTER_TO_TRACE(#Stat, Stat, bCondition);
 
 #define RETURN_QUICK_DECLARE_CYCLE_STAT(StatId,GroupId) return TStatId(ANSI_TO_PROFILING(#StatId));
 
@@ -221,7 +268,7 @@ FORCEINLINE void StatsMasterEnableSubtract(int32 Value = 1)
 
 
 #elif USE_LIGHTWEIGHT_STATS_FOR_HITCH_DETECTION && USE_HITCH_DETECTION
-extern CORE_API bool GHitchDetected;
+extern CORE_API TSAN_ATOMIC(bool) GHitchDetected;
 
 class FLightweightStatScope
 {
@@ -273,6 +320,7 @@ public:
 #define DEFINE_STAT(Stat)
 #define QUICK_USE_CYCLE_STAT(StatId,GroupId) TStatId()
 #define DECLARE_CYCLE_STAT(CounterName,StatId,GroupId)
+#define DECLARE_CYCLE_STAT_WITH_FLAGS(CounterName,StatId,GroupId,StatFlags)
 #define DECLARE_FLOAT_COUNTER_STAT(CounterName,StatId,GroupId)
 #define DECLARE_DWORD_COUNTER_STAT(CounterName,StatId,GroupId)
 #define DECLARE_FLOAT_ACCUMULATOR_STAT(CounterName,StatId,GroupId)
@@ -282,6 +330,7 @@ public:
 #define DECLARE_MEMORY_STAT(CounterName,StatId,GroupId)
 #define DECLARE_MEMORY_STAT_POOL(CounterName,StatId,GroupId,Pool)
 #define DECLARE_CYCLE_STAT_EXTERN(CounterName,StatId,GroupId, API)
+#define DECLARE_CYCLE_STAT_WITH_FLAGS_EXTERN(CounterName,StatId,GroupId,StatFlags, API)
 #define DECLARE_FLOAT_COUNTER_STAT_EXTERN(CounterName,StatId,GroupId, API)
 #define DECLARE_DWORD_COUNTER_STAT_EXTERN(CounterName,StatId,GroupId, API)
 #define DECLARE_FLOAT_ACCUMULATOR_STAT_EXTERN(CounterName,StatId,GroupId, API)
@@ -293,6 +342,7 @@ public:
 
 #define DECLARE_STATS_GROUP(GroupDesc,GroupId,GroupCat)
 #define DECLARE_STATS_GROUP_VERBOSE(GroupDesc,GroupId,GroupCat)
+#define DECLARE_STATS_GROUP_SORTBYNAME(GroupDesc,GroupId,GroupCat)
 #define DECLARE_STATS_GROUP_MAYBE_COMPILED_OUT(GroupDesc,GroupId,GroupCat,CompileIn)
 
 #define SET_CYCLE_COUNTER(Stat,Cycles)
@@ -350,9 +400,9 @@ struct FDynamicStats
 	{
 #if	STATS
 		return CreateStatIdInternal<TStatGroup>( FName( *StatNameOrDescription ), EStatDataType::ST_int64, true);
-#endif // STATS
-
+#else
 		return TStatId();
+#endif // STATS
 	}
 
 	template< typename TStatGroup >
@@ -360,9 +410,9 @@ struct FDynamicStats
 	{
 #if	STATS
 		return CreateStatIdInternal<TStatGroup>(FName(*StatNameOrDescription), EStatDataType::ST_int64, false, !bIsAccumulator);
-#endif // STATS
-
+#else
 		return TStatId();
+#endif // STATS
 	}
 
 	template< typename TStatGroup >
@@ -370,8 +420,9 @@ struct FDynamicStats
 	{
 #if	STATS
 		return CreateStatIdInternal<TStatGroup>(FName(*StatNameOrDescription), EStatDataType::ST_double, false, !bIsAccumulator);
-#endif // STATS
+#else
 		return TStatId();
+#endif // STATS
 	}
 
 	template< typename TStatGroup >
@@ -379,8 +430,9 @@ struct FDynamicStats
 	{
 #if	STATS
 		return CreateStatIdInternal<TStatGroup>(StatNameOrDescription, EStatDataType::ST_int64, IsTimer);
-#endif // STATS
+#else
 		return TStatId();
+#endif // STATS
 	}
 
 	template< typename TStatGroup >
@@ -388,9 +440,9 @@ struct FDynamicStats
 	{
 #if	STATS
 		return CreateMemoryStatId<TStatGroup>(FName(*StatNameOrDescription), MemRegion);
-#endif // STATS
-
+#else
 		return TStatId();
+#endif // STATS
 	}
 
 	template< typename TStatGroup >
@@ -410,9 +462,9 @@ struct FDynamicStats
 			false, EStatDataType::ST_int64, *StatNameOrDescription.ToString(), false, false, MemRegion);
 
 		return StatID;
-#endif // STATS
-
+#else
 		return TStatId();
+#endif // STATS
 	}
 
 #if	STATS

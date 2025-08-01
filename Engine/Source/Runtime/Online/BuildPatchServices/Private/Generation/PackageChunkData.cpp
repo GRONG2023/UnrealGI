@@ -130,12 +130,11 @@ namespace BuildPatchServices
 		const FPackageChunksConfiguration Configuration;
 
 		// Dependencies.
-		FTicker& CoreTicker;
+		FTSTicker& CoreTicker;
 		FDownloadCompleteDelegate DownloadCompleteDelegate;
 		FDownloadProgressDelegate DownloadProgressDelegate;
 
 		// Process control.
-		TArray<FMessageHandler*> MessageHandlers;
 		bool bManifestsProcessed;
 		FThreadSafeBool bShouldRun;
 		FThreadSafeBool bSuccess;
@@ -183,7 +182,7 @@ namespace BuildPatchServices
 
 	FPackageChunks::FPackageChunks(const FPackageChunksConfiguration& InConfiguration)
 		: Configuration(InConfiguration)
-		, CoreTicker(FTicker::GetCoreTicker())
+		, CoreTicker(FTSTicker::GetCoreTicker())
 		, DownloadCompleteDelegate(FDownloadCompleteDelegate::CreateRaw(this, &FPackageChunks::HandleDownloadComplete))
 		, DownloadProgressDelegate()
 		, bManifestsProcessed(false)
@@ -205,7 +204,7 @@ namespace BuildPatchServices
 		, ChunkDataSizeProvider(FChunkDataSizeProviderFactory::Create())
 		, InstallerAnalytics(FInstallerAnalyticsFactory::Create(nullptr))
 		, DownloadServiceStatistics(FDownloadServiceStatisticsFactory::Create(DownloadSpeedRecorder.Get(), ChunkDataSizeProvider.Get(), InstallerAnalytics.Get()))
-		, DownloadService(FDownloadServiceFactory::Create(CoreTicker, HttpManager.Get(), FileSystem.Get(), DownloadServiceStatistics.Get(), InstallerAnalytics.Get()))
+		, DownloadService(FDownloadServiceFactory::Create(HttpManager.Get(), FileSystem.Get(), DownloadServiceStatistics.Get(), InstallerAnalytics.Get()))
 		, FileOperationTracker(FFileOperationTrackerFactory::Create(CoreTicker))
 	{
 		// Make sure the cloud chunk source gets the abort signal if an error occurred.
@@ -250,10 +249,10 @@ namespace BuildPatchServices
 
 			// Application tick.
 			FTaskGraphInterface::Get().ProcessThreadUntilIdle(ENamedThreads::GameThread);
-			FTicker::GetCoreTicker().Tick(DeltaTime);
+			FTSTicker::GetCoreTicker().Tick(DeltaTime);
 
 			// Message pump.
-			MessagePump->PumpMessages(MessageHandlers);
+			MessagePump->PumpMessages();
 
 			// Flush any threaded logging.
 			GLog->FlushThreadedLogs();
@@ -328,7 +327,7 @@ namespace BuildPatchServices
 				FOptimisedDeltaDependencies OptimisedDeltaDependencies;
 				OptimisedDeltaDependencies.DownloadService = DownloadService.Get();
 				OptimisedDeltaDependencies.OnComplete = MakeOptimiseCompleteDelegate(&FPackageChunks::HandleManifestSelection);
-				OptimisedDelta.Reset(FOptimisedDeltaFactory::Create(OptimisedDeltaConfiguration, OptimisedDeltaDependencies));
+				OptimisedDelta.Reset(FOptimisedDeltaFactory::Create(OptimisedDeltaConfiguration, MoveTemp(OptimisedDeltaDependencies)));
 			}
 		}
 	}

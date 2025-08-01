@@ -51,13 +51,13 @@ public:
 };
 
 /** Cache of shaped text */
-class SLATE_API FShapedTextCache
+class FShapedTextCache
 {
 public:
 	/** Create a new shaped text cache */
 	static FShapedTextCacheRef Create(const TSharedRef<FSlateFontCache>& InFontCache)
 	{
-		return MakeShared<FShapedTextCache>(InFontCache);
+		return MakeShared<FShapedTextCache>(FPrivateToken{}, InFontCache);
 	}
 
 	/**
@@ -67,7 +67,7 @@ public:
 	 *
 	 * @return The shaped text instance, or null if it wasn't found or was stale
 	 */
-	FShapedGlyphSequencePtr FindShapedText(const FCachedShapedTextKey& InKey) const;
+	SLATE_API FShapedGlyphSequencePtr FindShapedText(const FCachedShapedTextKey& InKey) const;
 
 	/**
 	 * Add the given shaped text instance to the cache, or generate a new instance and add that based on the parameters provided
@@ -79,9 +79,9 @@ public:
 	 *
 	 * @return The shaped text instance
 	 */
-	FShapedGlyphSequenceRef AddShapedText(const FCachedShapedTextKey& InKey, const TCHAR* InText);
-	FShapedGlyphSequenceRef AddShapedText(const FCachedShapedTextKey& InKey, const TCHAR* InText, const TextBiDi::ETextDirection InTextDirection);
-	FShapedGlyphSequenceRef AddShapedText(const FCachedShapedTextKey& InKey, FShapedGlyphSequenceRef InShapedText);
+	SLATE_API FShapedGlyphSequenceRef AddShapedText(const FCachedShapedTextKey& InKey, const TCHAR* InText);
+	SLATE_API FShapedGlyphSequenceRef AddShapedText(const FCachedShapedTextKey& InKey, const TCHAR* InText, const TextBiDi::ETextDirection InTextDirection);
+	SLATE_API FShapedGlyphSequenceRef AddShapedText(const FCachedShapedTextKey& InKey, FShapedGlyphSequenceRef InShapedText);
 
 	/**
 	 * Try and find an existing shaped text instance, or add a new entry to the cache if one cannot be found
@@ -92,13 +92,21 @@ public:
 	 *
 	 * @return The shaped text instance
 	 */
-	FShapedGlyphSequenceRef FindOrAddShapedText(const FCachedShapedTextKey& InKey, const TCHAR* InText);
-	FShapedGlyphSequenceRef FindOrAddShapedText(const FCachedShapedTextKey& InKey, const TCHAR* InText, const TextBiDi::ETextDirection InTextDirection);
+	SLATE_API FShapedGlyphSequenceRef FindOrAddShapedText(const FCachedShapedTextKey& InKey, const TCHAR* InText);
+	SLATE_API FShapedGlyphSequenceRef FindOrAddShapedText(const FCachedShapedTextKey& InKey, const TCHAR* InText, const TextBiDi::ETextDirection InTextDirection);
+
+	/**
+	 * Try and find an existing overflow shaped text instance, or add a new entry to the cache if one cannot be found.
+	 * The overflow sequence is used to replace characters that are clipped.
+	 *
+	 * @return The shaped text instance
+	 */
+	SLATE_API FShapedGlyphSequenceRef FindOrAddOverflowEllipsisText(const float InScale, const FShapedTextContext& InTextContext, const FSlateFontInfo& InFontInfo);
 
 	/**
 	 * Clear this cache
 	 */
-	void Clear();
+	SLATE_API void Clear();
 
 	/**
 	 * Get the font cache used by this instance
@@ -109,14 +117,17 @@ public:
 	}
 
 private:
-	friend class SharedPointerInternals::TIntrusiveReferenceController<FShapedTextCache>;
+	// Private token only allows members or friends to call MakeShared
+	struct FPrivateToken { explicit FPrivateToken() = default; };
 
+public:
 	/** Constructor */
-	FShapedTextCache(const TSharedRef<FSlateFontCache>& InFontCache)
+	FShapedTextCache(FPrivateToken, const TSharedRef<FSlateFontCache>& InFontCache)
 		: FontCachePtr(InFontCache)
 	{
 	}
 
+private:
 	/** Font cache to use when shaping text */
 	TWeakPtr<FSlateFontCache> FontCachePtr;
 

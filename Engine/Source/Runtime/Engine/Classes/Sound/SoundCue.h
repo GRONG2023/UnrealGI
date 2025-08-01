@@ -2,6 +2,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "IAudioParameterTransmitter.h"
 #include "UObject/ObjectMacros.h"
 #include "Templates/SubclassOf.h"
 #include "Sound/SoundAttenuation.h"
@@ -23,6 +24,7 @@ class UEdGraph;
 
 class USoundCue;
 class USoundNode;
+class USoundNodeAttenuation;
 struct FActiveSound;
 struct FSoundParseParameters;
 
@@ -84,17 +86,13 @@ public:
 /**
  * The behavior of audio playback is defined within Sound Cues.
  */
-UCLASS(hidecategories=object, BlueprintType)
-class ENGINE_API USoundCue : public USoundBase
+UCLASS(hidecategories=object, BlueprintType, meta= (LoadBehavior = "LazyOnDemand"), MinimalAPI)
+class USoundCue : public USoundBase
 {
 	GENERATED_UCLASS_BODY()
 
-	/* Makes this sound cue automatically load any sound waves it can play into the cache when it is loaded. */
-	UPROPERTY(EditAnywhere, Category = Memory)
-	uint32 bPrimeOnLoad : 1;
-
-	UPROPERTY()
-	USoundNode* FirstNode;
+	UPROPERTY(BlueprintReadOnly, Category = Sound)
+	TObjectPtr<USoundNode> FirstNode;
 
 	/* Base volume multiplier */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Sound, AssetRegistrySearchable)
@@ -110,10 +108,10 @@ class ENGINE_API USoundCue : public USoundBase
 
 #if WITH_EDITORONLY_DATA
 	UPROPERTY()
-	TArray<USoundNode*> AllNodes;
+	TArray<TObjectPtr<USoundNode>> AllNodes;
 
 	UPROPERTY()
-	UEdGraph* SoundCueGraph;
+	TObjectPtr<UEdGraph> SoundCueGraph;
 #endif
 
 protected:
@@ -125,6 +123,11 @@ private:
 	float MaxAudibleDistance;
 
 public:
+
+	/* Makes this sound cue automatically load any sound waves it can play into the cache when it is loaded. */
+	UPROPERTY(EditAnywhere, Category = Memory)
+	uint8 bPrimeOnLoad : 1;
+
 	/* Indicates whether attenuation should use the Attenuation Overrides or the Attenuation Settings asset */
 	UPROPERTY(EditAnywhere, Category = Attenuation)
 	uint8 bOverrideAttenuation : 1;
@@ -134,9 +137,7 @@ public:
 	uint8 bExcludeFromRandomNodeBranchCulling : 1;
 
 private:
-	UPROPERTY()
-	int32 CookedQualityIndex = INDEX_NONE;
-	
+
 	/** Whether a sound has play when silent enabled (i.e. for a sound cue, if any sound wave player has it enabled). */
 	UPROPERTY()
 	uint8 bHasPlayWhenSilent : 1;
@@ -147,36 +148,41 @@ private:
 	uint8 bShouldApplyInteriorVolumesCached : 1;
 	uint8 bIsRetainingAudio : 1;
 
+	UPROPERTY()
+	int32 CookedQualityIndex = INDEX_NONE;
+
 public:
 
 	//~ Begin UObject Interface.
-	virtual FString GetDesc() override;
+	ENGINE_API virtual FString GetDesc() override;
 #if WITH_EDITOR
-	virtual void PostInitProperties() override;
-	virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
-	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
+	ENGINE_API virtual void PostInitProperties() override;
+	ENGINE_API virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
+	static ENGINE_API void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
 #endif
-	virtual void PostLoad() override;
-	virtual void Serialize(FStructuredArchive::FRecord Record) override;
-	virtual bool CanBeClusterRoot() const override;
-	virtual bool CanBeInCluster() const override;
-	virtual void BeginDestroy() override;
+	ENGINE_API virtual void PostLoad() override;
+	ENGINE_API virtual void Serialize(FStructuredArchive::FRecord Record) override;
+	ENGINE_API virtual bool CanBeClusterRoot() const override;
+	ENGINE_API virtual bool CanBeInCluster() const override;
+	ENGINE_API virtual void BeginDestroy() override;
 	//~ End UObject Interface.
 
 	//~ Begin USoundBase Interface.
-	virtual bool IsPlayable() const override;
-	virtual bool IsPlayWhenSilent() const override;
-	virtual bool ShouldApplyInteriorVolumes() override;
-	virtual void Parse( class FAudioDevice* AudioDevice, const UPTRINT NodeWaveInstanceHash, FActiveSound& ActiveSound, const FSoundParseParameters& ParseParams, TArray<FWaveInstance*>& WaveInstances ) override;
-	virtual float GetVolumeMultiplier() override;
-	virtual float GetPitchMultiplier() override;
-	virtual float GetMaxDistance() const override;
-	virtual float GetDuration() override;
-	virtual const FSoundAttenuationSettings* GetAttenuationSettingsToApply() const override;
-	virtual float GetSubtitlePriority() const override;
-	virtual bool GetSoundWavesWithCookedAnalysisData(TArray<USoundWave*>& OutSoundWaves) override;
-	virtual bool HasCookedFFTData() const override;
-	virtual bool HasCookedAmplitudeEnvelopeData() const override;
+	ENGINE_API virtual bool IsPlayable() const override;
+	ENGINE_API virtual bool IsPlayWhenSilent() const override;
+	ENGINE_API virtual bool ShouldApplyInteriorVolumes() override;
+	ENGINE_API virtual void Parse( class FAudioDevice* AudioDevice, const UPTRINT NodeWaveInstanceHash, FActiveSound& ActiveSound, const FSoundParseParameters& ParseParams, TArray<FWaveInstance*>& WaveInstances ) override;
+	ENGINE_API virtual float GetVolumeMultiplier() override;
+	ENGINE_API virtual float GetPitchMultiplier() override;
+	ENGINE_API virtual float GetMaxDistance() const override;
+	ENGINE_API virtual float GetDuration() const override;
+	ENGINE_API virtual const FSoundAttenuationSettings* GetAttenuationSettingsToApply() const override;
+	ENGINE_API virtual float GetSubtitlePriority() const override;
+	ENGINE_API virtual bool GetSoundWavesWithCookedAnalysisData(TArray<USoundWave*>& OutSoundWaves) override;
+	ENGINE_API virtual bool HasCookedFFTData() const override;
+	ENGINE_API virtual bool HasCookedAmplitudeEnvelopeData() const override;
+	ENGINE_API virtual TSharedPtr<Audio::IParameterTransmitter> CreateParameterTransmitter(Audio::FParameterTransmitterInitParams&& InParams) const override;
+	virtual bool IsAttenuationSettingsEditable() const override { return !bOverrideAttenuation; }
 	//~ End USoundBase Interface.
 
 	/** Construct and initialize a node within this Cue */
@@ -197,12 +203,12 @@ public:
 	 *
 	 *	@return		Sum of the size of waves referenced by this cue for the given platform.
 	 */
-	virtual int32 GetResourceSizeForFormat(FName Format);
+	ENGINE_API virtual int32 GetResourceSizeForFormat(FName Format);
 
 	/**
 	 * Recursively finds all Nodes in the Tree
 	 */
-	void RecursiveFindAllNodes( USoundNode* Node, TArray<USoundNode*>& OutNodes );
+	ENGINE_API void RecursiveFindAllNodes( USoundNode* Node, TArray<USoundNode*>& OutNodes );
 
 	/**
 	 * Recursively finds sound nodes of type T
@@ -247,12 +253,11 @@ public:
 		}
 	}
 
-
 	/** Find the path through the sound cue to a node identified by its hash */
-	bool FindPathToNode(const UPTRINT NodeHashToFind, TArray<USoundNode*>& OutPath) const;
+	ENGINE_API bool FindPathToNode(const UPTRINT NodeHashToFind, TArray<USoundNode*>& OutPath) const;
 
 	/** Call when the audio quality has been changed */
-	static void StaticAudioQualityChanged(int32 NewQualityLevel);
+	static ENGINE_API void StaticAudioQualityChanged(int32 NewQualityLevel);
 
 	FORCEINLINE static int32 GetCachedQualityLevel() { return CachedQualityLevel; }
 	
@@ -260,77 +265,104 @@ public:
 	int32 GetCookedQualityIndex() const { return CookedQualityIndex; }
 
 	/** Call to cache any values which need to be computed from the sound cue graph. e.g. MaxDistance, Duration, etc. */
-	void CacheAggregateValues();
+	ENGINE_API void CacheAggregateValues();
 
 	/** Call this when stream caching is enabled to prime all SoundWave assets referenced by this Sound Cue. */
-	void PrimeSoundCue();
+	ENGINE_API void PrimeSoundCue();
 
 	/** Call this when stream caching is enabled to retain all soundwave assets referenced by this sound cue. */
-	void RetainSoundCue();
-	void ReleaseRetainedAudio();
+	ENGINE_API void RetainSoundCue();
+	ENGINE_API void ReleaseRetainedAudio();
 
 	/** Call this when stream caching is enabled to update sound waves of loading behavior they are inheriting via SoundCue */
-	void CacheLoadingBehavior(ESoundWaveLoadingBehavior InBehavior);
+	ENGINE_API void CacheLoadingBehavior(ESoundWaveLoadingBehavior InBehavior);
 
 protected:
-	bool RecursiveFindPathToNode(USoundNode* CurrentNode, const UPTRINT CurrentHash, const UPTRINT NodeHashToFind, TArray<USoundNode*>& OutPath) const;
+	ENGINE_API bool RecursiveFindPathToNode(USoundNode* CurrentNode, const UPTRINT CurrentHash, const UPTRINT NodeHashToFind, TArray<USoundNode*>& OutPath) const;
 
 private:
-	void AudioQualityChanged();
-	void OnPostEngineInit();
-	void EvaluateNodes(bool bAddToRoot);
+	ENGINE_API void AudioQualityChanged();
+	ENGINE_API void OnPostEngineInit();
+	ENGINE_API void EvaluateNodes(bool bAddToRoot);
 
-	float FindMaxDistanceInternal() const;
+	ENGINE_API float FindMaxDistanceInternal() const;
 
 	FDelegateHandle OnPostEngineInitHandle;
-	static int32 CachedQualityLevel;
+	static ENGINE_API int32 CachedQualityLevel;
 
 public:
 
 	// This is used to cache the quality level if it has not been cached yet.
-	static void CacheQualityLevel();
+	static ENGINE_API void CacheQualityLevel();
+
+	ENGINE_API void RecursiveFindAttenuation(USoundNode* Node, TArray<USoundNodeAttenuation*> &OutNodes);
+	ENGINE_API void RecursiveFindAttenuation(const USoundNode* Node, TArray<const USoundNodeAttenuation*>& OutNodes) const;
 
 	/**
-	 * Instantiate certain functions to work around a linker issue
+	 * For SoundCues, use this instead of GetAttenuationSettingsToApply() -> Evaluate
+	 * 
+	 * In cases where a SoundCue has multiple Attenuation nodes within it, 
+	 * this function evaluates them all and returns the maximum value
+	 * 
+	 * @return float representing the max evaluated attenuation curve value based on distance from Origin to Location (will be 1.0 if no attenuation is set)
 	 */
-	void RecursiveFindAttenuation( USoundNode* Node, TArray<class USoundNodeAttenuation*> &OutNodes );
+	ENGINE_API float EvaluateMaxAttenuation(const FTransform& Origin, FVector Location, float DistanceScale = 1.f) const;
 
 #if WITH_EDITOR
 	/** Create the basic sound graph */
-	void CreateGraph();
+	ENGINE_API void CreateGraph();
 
 	/** Clears all nodes from the graph (for old editor's buffer soundcue) */
-	void ClearGraph();
+	ENGINE_API void ClearGraph();
 
 	/** Set up EdGraph parts of a SoundNode */
-	void SetupSoundNode(USoundNode* InSoundNode, bool bSelectNewNode = true);
+	ENGINE_API void SetupSoundNode(USoundNode* InSoundNode, bool bSelectNewNode = true);
 
 	/** Use the SoundCue's children to link EdGraph Nodes together */
-	void LinkGraphNodesFromSoundNodes();
+	ENGINE_API void LinkGraphNodesFromSoundNodes();
 
 	/** Use the EdGraph representation to compile the SoundCue */
-	void CompileSoundNodesFromGraphNodes();
+	ENGINE_API void CompileSoundNodesFromGraphNodes();
 
 	/** Get the EdGraph of SoundNodes */
-	UEdGraph* GetGraph();
+	ENGINE_API UEdGraph* GetGraph();
 
 	/** Resets all graph data and nodes */
-	void ResetGraph();
+	ENGINE_API void ResetGraph();
 
 	/** Sets the sound cue graph editor implementation.* */
-	static void SetSoundCueAudioEditor(TSharedPtr<ISoundCueAudioEditor> InSoundCueGraphEditor);
+	static ENGINE_API void SetSoundCueAudioEditor(TSharedPtr<ISoundCueAudioEditor> InSoundCueGraphEditor);
 
 	/** Gets the sound cue graph editor implementation. */
-	static TSharedPtr<ISoundCueAudioEditor> GetSoundCueAudioEditor();
+	static ENGINE_API TSharedPtr<ISoundCueAudioEditor> GetSoundCueAudioEditor();
 
 private:
 
 	/** Recursively sets the branch culling exclusion on random nodes in this sound cue. */
-	void RecursivelySetExcludeBranchCulling(USoundNode* CurrentNode);
+	ENGINE_API void RecursivelySetExcludeBranchCulling(USoundNode* CurrentNode);
 
 	/** Ptr to interface to sound cue editor operations. */
-	static TSharedPtr<ISoundCueAudioEditor> SoundCueAudioEditor;
+	static ENGINE_API TSharedPtr<ISoundCueAudioEditor> SoundCueAudioEditor;
 
 	FCriticalSection EditorOnlyCs;
 #endif // WITH_EDITOR
+};
+
+class FSoundCueParameterTransmitter : public Audio::FParameterTransmitterBase
+{
+public:
+	FSoundCueParameterTransmitter(Audio::FParameterTransmitterInitParams&& InParams)
+		: Audio::FParameterTransmitterBase(MoveTemp(InParams.DefaultParams))
+	{
+	}
+
+	virtual ~FSoundCueParameterTransmitter() = default;
+
+	ENGINE_API TArray<const TObjectPtr<UObject>*> GetReferencedObjects() const override;
+
+	ENGINE_API virtual bool SetParameters(TArray<FAudioParameter>&& InParameters) override;
+
+	TArray<FAudioParameter> ParamsToSet;
+
+	TMap<UPTRINT, TSharedPtr<Audio::IParameterTransmitter>> Transmitters;
 };

@@ -20,7 +20,7 @@ class UToolMenu;
  * Enumerates label anchor modes.
  */
 UENUM()
-enum ELabelAnchorMode
+enum ELabelAnchorMode : int
 {
 	LabelAnchorMode_TopLeft UMETA(DisplayName="Top Left"),
 	LabelAnchorMode_TopCenter UMETA(DisplayName="Top Center"),
@@ -35,7 +35,7 @@ enum ELabelAnchorMode
 
 
 UENUM()
-enum ELaunchModeType
+enum ELaunchModeType : int
 {
 	/** Runs the map on a specified device. */
 	LaunchMode_OnDevice,
@@ -43,7 +43,7 @@ enum ELaunchModeType
 
 
 UENUM()
-enum EPlayModeLocations
+enum EPlayModeLocations : int
 {
 	/** Spawns the player at the current camera location. */
 	PlayLocation_CurrentCameraLocation,
@@ -54,7 +54,7 @@ enum EPlayModeLocations
 
 
 UENUM()
-enum EPlayModeType
+enum EPlayModeType : int
 {
 	/** Runs from within the editor. */
 	PlayMode_InViewPort = 0,
@@ -80,13 +80,16 @@ enum EPlayModeType
 	/** Simulates in viewport without possessing the player. */
 	PlayMode_Simulate,
 
+	/** Runs the last launched device (from Platforms menu) */
+	PlayMode_QuickLaunch,
+
 	/** The number of different Play Modes. */
 	PlayMode_Count,
 };
 
 
 UENUM()
-enum EPlayNetMode
+enum EPlayNetMode : int
 {
 	/** A standalone game will be started. This will not create a dedicated server, nor automatically connect to one. A server can be launched by enabling bLaunchSeparateServer if you need to test offline -> server connection flow for your game. */
 	PIE_Standalone UMETA(DisplayName="Play Standalone"),
@@ -101,7 +104,7 @@ enum EPlayNetMode
  * Determines whether to build the executable when launching on device. Note the equivalence between these settings and EProjectPackagingBuild.
  */
 UENUM()
-enum EPlayOnBuildMode
+enum EPlayOnBuildMode : int
 {
 	/** Always build. */
 	PlayOnBuild_Always UMETA(DisplayName="Always"),
@@ -118,7 +121,7 @@ enum EPlayOnBuildMode
 
 /* Configuration to use when launching on device. */
 UENUM()
-enum EPlayOnLaunchConfiguration
+enum EPlayOnLaunchConfiguration : int
 {
 	/** Launch on device with the same build configuration as the editor. */
 	LaunchConfig_Default UMETA(DisplayName = "Same as Editor"),
@@ -192,8 +195,8 @@ public:
 	void PostInitProperties();
 };
 
-UCLASS()
-class UNREALED_API UCommonResolutionMenuContext
+UCLASS(MinimalAPI)
+class UCommonResolutionMenuContext
 	: public UToolMenuContextBase
 {
 	GENERATED_BODY()
@@ -206,8 +209,8 @@ public:
 /**
  * Implements the Editor's play settings.
  */
-UCLASS(config=EditorPerProjectUserSettings)
-class UNREALED_API ULevelEditorPlaySettings
+UCLASS(config=EditorPerProjectUserSettings, MinimalAPI)
+class ULevelEditorPlaySettings
 	: public UObject
 {
 	GENERATED_UCLASS_BODY()
@@ -244,6 +247,14 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = PlayInEditor, meta = (ToolTip = "Whether or not the editor is minimized on VR PIE"))
 	bool ShouldMinimizeEditorOnVRPIE;
 
+	/** Should we minimize the editor when non-VR PIE is clicked (default = false) */
+	UPROPERTY(config, EditAnywhere, Category = PlayInEditor, meta = (ToolTip = "Whether or not the editor is minimized on non-VR PIE"))
+	bool bShouldMinimizeEditorOnNonVRPIE;
+
+	/** Whether we should emulate stereo (helps checking VR rendering issues). */
+	UPROPERTY(config, EditAnywhere, Category = PlayInStandaloneGame)
+	bool bEmulateStereo;
+
 	/** Whether to automatically recompile blueprints on PIE */
 	UPROPERTY(config, EditAnywhere, Category=PlayInEditor, meta=(ToolTip="Automatically recompile blueprints used by the current level when initiating a Play In Editor session"))
 	bool AutoRecompileBlueprints;
@@ -251,6 +262,10 @@ public:
 	/** Whether to play sounds during PIE */
 	UPROPERTY(config, EditAnywhere, Category=PlayInEditor, meta=(ToolTip="Whether to play sounds when in a Play In Editor session"))
 	bool EnableGameSound;
+
+	/** Whether to automatically solo audio in first PIE client. */
+	UPROPERTY(config, EditAnywhere, Category = PlayInEditor, meta = (ToolTip="Whether to automatically solo audio in first PIE client", EditCondition="EnableGameSound", DisplayName = "Solo Audio in First PIE Client"))
+	bool SoloAudioInFirstPIEClient;
 
 	/** Whether to play a sound when entering and exiting PIE */
 	UPROPERTY(config, EditAnywhere, AdvancedDisplay, Category = PlayInEditor, meta = (DisplayName = "Enable PIE Enter and Exit Sounds"))
@@ -270,6 +285,10 @@ public:
 
 	UPROPERTY(config, EditAnywhere, Category = PlayInEditor, meta = (DisplayName="Stream Sub-Levels during Play in Editor", ToolTip="Prefer to stream sub-levels from the disk instead of duplicating editor sub-levels"))
 	uint32 bPreferToStreamLevelsInPIE:1;
+
+	/** Should warnings and errors in the Output Log during "Play in Editor" be promoted to the message log? */
+	UPROPERTY(EditAnywhere, config, Category = PlayInEditor)
+	bool bPromoteOutputLogWarningsDuringPIE;
 
 public:
 	/** The width of the new view port window in pixels (0 = use the desktop's screen resolution). */
@@ -304,10 +323,6 @@ public:
 	UPROPERTY(config, EditAnywhere, Category=PlayInStandaloneGame)
 	FString AdditionalLaunchParameters;
 
-	/** Extra parameters to be included as part of the command line for a mobile-on-PC standalone game. */
-	UPROPERTY(config, EditAnywhere, Category=PlayInStandaloneGame)
-	FString AdditionalLaunchParametersForMobile;
-
 public:
 
 	/** Whether to build the game before launching on device. */
@@ -325,10 +340,6 @@ public:
 	/** Whether to automatically recompile dirty Blueprints before launching */
 	UPROPERTY(config, EditAnywhere, Category=PlayOnDevice)
 	bool bAutoCompileBlueprintsOnLaunch;
-
-	/** A programmatically defined custom PIE window to use */
-	UE_DEPRECATED(4.25, "This variable is no longer read. Specify the Custom Window in the FRequestPlaySessionParams instead during PIE request.")
-	TWeakPtr<SWindow> CustomPIEWindow;
 	
 	/**
 	* This is a rarely used option that will launch a separate server (possibly hidden in-process depending on RunUnderOneProcess) 
@@ -345,18 +356,17 @@ private:
 	UPROPERTY(config, EditAnywhere, Category="Multiplayer Options")
 	TEnumAsByte<EPlayNetMode> PlayNetMode;
 
-	/** Spawn multiple player windows in a single instance of UE4. This will load much faster, but has potential to have more issues.  */
+	/** Spawn multiple player windows in a single instance of UE. This will load much faster, but has potential to have more issues.  */
 	UPROPERTY(config, EditAnywhere, Category="Multiplayer Options")
 	bool RunUnderOneProcess;
-
-	/** If checked, a separate dedicated server will be launched. Otherwise the first player will act as a listen server that all other players connect to. */
-	UE_DEPRECATED(4.25, "This variable is no longer read. Use PlayNetMode = EPlayNetMode::PIE_Client and bLaunchSeparateServer instead.")
-	UPROPERTY(config)
-	bool PlayNetDedicated;
 
 	/** The number of client windows to open. The first one to open will respect the Play In Editor "Modes" option (PIE, PINW), additional clients respect the RunUnderOneProcess setting. */
 	UPROPERTY(config, EditAnywhere, Category="Multiplayer Options|Client", meta=(ClampMin = "1", UIMin = "1", UIMax = "64"))
 	int32 PlayNumberOfClients;
+
+	/** In multiplayer PIE which client will be the 'primary'. (default = 0, the first client)*/
+	UPROPERTY(config, EditAnywhere, Category = "Multiplayer Options|Client", meta = (ClampMin = "-1", UIMin = "-1", UIMax = "64", ToolTip = "In multiplayer PIE which client will be the 'primary'. Considered most important and given a larger client window, access to unique hardware like a VirtualReality HMD, etc. Intended to help test issues that affect the second, etc client.  0 is the first client. If the setting is >= than the number of clients the last will be primary. -1 will result in no primary.  Note that this is an index only of PIE instance windows, in netmode 'Play as Client' pie instance zero is a windowless dedicated server, so setting 0 here would make the fist pie window the primary which would be PIEInstance 1, rather than 0 as in other netmodes.", DisplayName = "Primary PIE Client Index"))
+	int PrimaryPIEClientIndex = 0;
 
 	/** What port used by the server for simple networking */
 	UPROPERTY(config, EditAnywhere, Category = "Multiplayer Options|Server", meta=(ClampMin="1", UIMin="1", ClampMax="65535", EditCondition = "PlayNetMode != EPlayNetMode::PIE_Standalone || bLaunchSeparateServer"))
@@ -365,15 +375,6 @@ private:
 	/** Width to use when spawning additional windows. */
 	UPROPERTY(config, EditAnywhere, Category="Multiplayer Options|Client", meta=(ClampMin=0))
 	int32 ClientWindowWidth;
-	
-	/**
-	 * When running multiple players or a dedicated server the client need to connect to the server, this option sets how they connect
-	 *
-	 * If this is checked, the clients will automatically connect to the launched server, if false they will launch into the map and wait
-	 */
-	UE_DEPRECATED(4.25, "This variable is no longer read. Use PlayNetMode = EPlayNetMode::PIE_Standalone instead to prevent auto-connection.")
-	UPROPERTY(config)
-	bool AutoConnectToServer;
 
 	/**
 	 * When running multiple player windows in a single process, this option determines how the game pad input gets routed.
@@ -407,25 +408,28 @@ private:
 	UPROPERTY(config, EditAnywhere, Category="Multiplayer Options|Server", meta=(EditCondition = "PlayNetMode != EPlayNetMode::PIE_Standalone || bLaunchSeparateServer"))
 	FString AdditionalServerGameOptions;
 
-	/** Additional command line options that will be passed to standalone game instances, for example -debug */
-	UE_DEPRECATED(4.25, "This variable is no longer read. Use AdditionalServerLaunchParmeters instead to pass specific flags to externally launched servers.")
-	UPROPERTY(config)
-	FString AdditionalLaunchOptions;
-
 	/** Controls the default value of the show flag ServerDrawDebug */
-	UPROPERTY(config, EditAnywhere, Category = MultiplayerOptions)
+	UPROPERTY(config, EditAnywhere, Category = "Multiplayer Options")
 	bool bShowServerDebugDrawingByDefault;
 
 	/** How strongly debug drawing originating from the server will be biased towards the tint color */
-	UPROPERTY(config, EditAnywhere, Category=MultiplayerOptions, meta=(ClampMin=0, ClampMax=1, UIMin=0, UIMax=1))
+	UPROPERTY(config, EditAnywhere, Category="Multiplayer Options", meta=(ClampMin=0, ClampMax=1, UIMin=0, UIMax=1))
 	float ServerDebugDrawingColorTintStrength;
 
 	/** Debug drawing originating from the server will be biased towards this color */
-	UPROPERTY(config, EditAnywhere, Category=MultiplayerOptions)
+	UPROPERTY(config, EditAnywhere, Category="Multiplayer Options")
 	FLinearColor ServerDebugDrawingColorTint;
 
+	/** 
+	* When True each PIE process is launched with "-HMDSimulator" argument.  
+	* The usefullness of this will vary by XR platform.  
+	* The PIE instances may get special -HMDSimulator behavior from an XR plugin, they may successfully make connections to the HMD hardware, their attempt to connect to hardware may be rejected by the runtime.
+	*/
+	UPROPERTY(config, EditAnywhere, Category = "Multiplayer Options", meta = (EditCondition = "!RunUnderOneProcess"))
+	bool bOneHeadsetEachProcess;
+
 private:
-	void PushDebugDrawingSettings();
+	UNREALED_API void PushDebugDrawingSettings();
 
 public:
 	bool ShowServerDebugDrawingByDefault() const
@@ -471,34 +475,21 @@ public:
 	bool IsRunUnderOneProcessActive() const { return true; }
 	bool GetRunUnderOneProcess( bool &OutRunUnderOneProcess ) const { OutRunUnderOneProcess = RunUnderOneProcess; return IsRunUnderOneProcessActive(); }
 	
-	PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	UE_DEPRECATED(4.25, "Read bLaunchSeparateServer directly instead.")
-	void SetPlayNetDedicated(const bool InPlayNetDedicated) { PlayNetDedicated = InPlayNetDedicated; }
-	UE_DEPRECATED(4.25, "Read bLaunchSeparateServer directly instead.")
-	bool IsPlayNetDedicatedActive() const { return (RunUnderOneProcess ? true : PlayNetMode == PIE_Client); }
-	UE_DEPRECATED(4.25, "Read bLaunchSeparateServer directly instead.")
-	bool GetPlayNetDedicated(bool &OutPlayNetDedicated) const { OutPlayNetDedicated = PlayNetDedicated; return IsPlayNetDedicatedActive(); }
-	
 	void SetPlayNumberOfClients( const int32 InPlayNumberOfClients ) { PlayNumberOfClients = InPlayNumberOfClients; }
 	bool IsPlayNumberOfClientsActive() const { return true; }
 	bool GetPlayNumberOfClients( int32 &OutPlayNumberOfClients ) const { OutPlayNumberOfClients = PlayNumberOfClients; return IsPlayNumberOfClientsActive(); }
+
+	int GetPrimaryPIEClientIndex() const { return PrimaryPIEClientIndex; }
 
 	void SetServerPort(const uint16 InServerPort) { ServerPort = InServerPort; }
 	bool IsServerPortActive() const { return (PlayNetMode != PIE_Standalone) || RunUnderOneProcess; }
 	bool GetServerPort(uint16 &OutServerPort) const { OutServerPort = ServerPort; return IsServerPortActive(); }
 	
-	UE_DEPRECATED(4.25, "This feature has been removed. Set PlayNetMode == EPlayNetMode::PIE_Standalone instead.")
-	bool IsAutoConnectToServerActive() const { return PlayNumberOfClients > 1 || PlayNetDedicated; }
-	UE_DEPRECATED(4.25, "This feature has been removed. Set PlayNetMode == EPlayNetMode::PIE_Standalone instead.")
-	bool GetAutoConnectToServer(bool &OutAutoConnectToServer) const { OutAutoConnectToServer = AutoConnectToServer; return IsAutoConnectToServerActive(); }
-	UE_DEPRECATED(4.25, "This feature has been removed. Set PlayNetMode == EPlayNetMode::PIE_Standalone instead.")
-	EVisibility GetAutoConnectToServerVisibility() const { return (RunUnderOneProcess ? EVisibility::Visible : EVisibility::Hidden); }
-	
 	bool IsRouteGamepadToSecondWindowActive() const { return PlayNumberOfClients > 1; }
 	bool GetRouteGamepadToSecondWindow( bool &OutRouteGamepadToSecondWindow ) const { OutRouteGamepadToSecondWindow = RouteGamepadToSecondWindow; return IsRouteGamepadToSecondWindowActive(); }
 	EVisibility GetRouteGamepadToSecondWindowVisibility() const { return (RunUnderOneProcess ? EVisibility::Visible : EVisibility::Hidden); }
 
-	EVisibility GetNetworkEmulationVisibility() const { return (PlayNumberOfClients > 1 || PlayNetDedicated) ? EVisibility::Visible : EVisibility::Hidden; }
+	EVisibility GetNetworkEmulationVisibility() const { return (PlayNumberOfClients > 1) ? EVisibility::Visible : EVisibility::Hidden; }
 
 	bool IsServerMapNameOverrideActive() const { return false /*(PlayNetMode == PIE_StandaloneWithServer)*/; }
 	bool GetServerMapNameOverride( FString& OutStandaloneServerMapName ) const { OutStandaloneServerMapName = ServerMapNameOverride; return IsServerMapNameOverrideActive(); }
@@ -506,14 +497,6 @@ public:
 
 	bool IsAdditionalServerGameOptionsActive() const { return (PlayNetMode != PIE_Standalone) || RunUnderOneProcess; }
 	bool GetAdditionalServerGameOptions( FString &OutAdditionalServerGameOptions ) const { OutAdditionalServerGameOptions = AdditionalServerGameOptions; return IsAdditionalServerGameOptionsActive(); }
-
-	UE_DEPRECATED(4.25, "Read AdditionalServerLaunchParmeters for a non-zero length instead.")
-	bool IsAdditionalLaunchOptionsActive() const { return true; }
-	UE_DEPRECATED(4.25, "Read AdditionalServerLaunchParmeters directly instead.")
-	bool GetAdditionalLaunchOptions(FString &OutAdditionalLaunchOptions) const { OutAdditionalLaunchOptions = AdditionalLaunchOptions; return IsAdditionalLaunchOptionsActive(); }
-	UE_DEPRECATED(4.25, "Read AdditionalServerLaunchParmeters for a non-zero length instead.")
-	EVisibility GetAdditionalLaunchOptionsVisibility() const { return (RunUnderOneProcess ? EVisibility::Hidden : EVisibility::Visible); }
-	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	void SetClientWindowSize( const FIntPoint InClientWindowSize ) { ClientWindowWidth = InClientWindowSize.X; ClientWindowHeight = InClientWindowSize.Y; }
 	bool IsClientWindowSizeActive() const { return PlayNumberOfClients > 1; }
@@ -537,6 +520,8 @@ public:
 			return FApp::GetBuildConfiguration();
 		}
 	}
+
+	bool IsOneHeadsetEachProcess() const { return bOneHeadsetEachProcess; }
 
 public:
 
@@ -608,27 +593,27 @@ public:
 	TArray<FVector2D> CustomUnsafeZoneDimensions;
 
 	// UObject interface
-	virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
-	virtual void PostInitProperties() override;
-	virtual bool CanEditChange(const FProperty* InProperty) const override;
+	UNREALED_API virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
+	UNREALED_API virtual void PostInitProperties() override;
+	UNREALED_API virtual bool CanEditChange(const FProperty* InProperty) const override;
 	// End of UObject interface
 
 #if WITH_EDITOR
 	// Recalculates and broadcasts safe zone size changes based on device to emulate and r.DebugSafeZone.TitleRatio values.
-	void UpdateCustomSafeZones();
+	UNREALED_API void UpdateCustomSafeZones();
 #endif
 
-	FMargin CalculateCustomUnsafeZones(TArray<FVector2D>& CustomSafeZoneStarts, TArray<FVector2D>& CustomSafeZoneDimensions, FString& DeviceType, FVector2D PreviewSize);
-	FMargin FlipCustomUnsafeZones(TArray<FVector2D>& CustomSafeZoneStarts, TArray<FVector2D>& CustomSafeZoneDimensions, FString& DeviceType, FVector2D PreviewSize);
-	void RescaleForMobilePreview(const class UDeviceProfile* DeviceProfile, int32 &PreviewWidth, int32 &PreviewHeight, float &ScaleFactor);
+	UNREALED_API FMargin CalculateCustomUnsafeZones(TArray<FVector2D>& CustomSafeZoneStarts, TArray<FVector2D>& CustomSafeZoneDimensions, FString& DeviceType, FVector2D PreviewSize);
+	UNREALED_API FMargin FlipCustomUnsafeZones(TArray<FVector2D>& CustomSafeZoneStarts, TArray<FVector2D>& CustomSafeZoneDimensions, FString& DeviceType, FVector2D PreviewSize);
+	UNREALED_API void RescaleForMobilePreview(const class UDeviceProfile* DeviceProfile, int32 &PreviewWidth, int32 &PreviewHeight, float &ScaleFactor);
 
 	/**
      * Creates a widget for the resolution picker.
      *
      * @return The widget.
      */
-	void RegisterCommonResolutionsMenu();
-	static FName GetCommonResolutionsMenuName();
+	UNREALED_API void RegisterCommonResolutionsMenu();
+	static UNREALED_API FName GetCommonResolutionsMenuName();
 
 protected:
 	/**
@@ -638,5 +623,5 @@ protected:
 	 * @param Resolutions The collection of screen resolutions to add.
 	 * @param SectionName The name of the section to add.
 	 */
-	static void AddScreenResolutionSection( UToolMenu* InToolMenu, const TArray<FPlayScreenResolution>* Resolutions, const FString SectionName );
+	static UNREALED_API void AddScreenResolutionSection( UToolMenu* InToolMenu, const TArray<FPlayScreenResolution>* Resolutions, const FString SectionName );
 };

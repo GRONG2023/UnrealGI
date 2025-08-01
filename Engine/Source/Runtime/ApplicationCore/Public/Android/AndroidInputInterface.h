@@ -2,19 +2,11 @@
 #pragma once
 #include "GenericPlatform/GenericApplicationMessageHandler.h"
 
-#if PLATFORM_LUMIN
-
-// @todo Lumin: include the Lumin input  - this file is not a "standard" platform include, so there is not one place to override it
-#include "Lumin/LuminInputInterface.h"
-
-#else	 
-
 #include <android/input.h>
 #include <android/keycodes.h>
 #include <android/api-level.h>
 #include "GenericPlatform/ICursor.h"
 #include "GenericPlatform/IInputInterface.h"
-#include "GenericPlatform/IForceFeedbackSystem.h"
 #include "Math/Vector.h"
 #include "Math/Vector2D.h"
 #include "Math/Color.h"
@@ -91,7 +83,7 @@ enum TouchType
 
 enum MappingState
 {
-	Unassigned,
+	Unassigned = 0,
 	ToValidate,
 	Valid
 };
@@ -109,7 +101,8 @@ enum ButtonRemapType
 	Normal,
 	XBox,
 	PS4,
-	PS5
+	PS5,
+	PS5New
 };
 
 struct FAndroidInputDeviceInfo {
@@ -119,6 +112,7 @@ struct FAndroidInputDeviceInfo {
 	int32 ControllerId;
 	FString Name;
 	FString Descriptor;
+	int32 FeedbackMotorCount;
 };
 
 struct FAndroidGamepadDeviceMapping
@@ -156,6 +150,9 @@ struct FAndroidGamepadDeviceMapping
 
 	// Right stick on RX/RY
 	bool bRightStickRXRY;
+
+	// Map RX and RY to LTAnalog and RTAnalog
+	bool bMapRXRYToTriggers;
 };
 
 struct TouchInput
@@ -191,6 +188,14 @@ struct FAndroidControllerData
 	float RTAnalog;
 };
 
+struct FAndroidControllerVibeState
+{
+	FForceFeedbackValues VibeValues;
+	int32 LeftIntensity;
+	int32 RightIntensity;
+	double LastVibeUpdateTime;
+};
+
 enum FAndroidMessageType
 {
 	MessageType_KeyDown,
@@ -219,7 +224,7 @@ struct FDeferredAndroidMessage
 /**
  * Interface class for Android input devices                 
  */
-class FAndroidInputInterface : public IForceFeedbackSystem
+class FAndroidInputInterface : public IInputInterface
 {
 public:
 
@@ -260,7 +265,7 @@ public:
 	static void QueueMotionData(const FVector& Tilt, const FVector& RotationRate, const FVector& Gravity, const FVector& Acceleration);
 
 	/**
-	* IForceFeedbackSystem implementation
+	* Force Feedback implementation
 	*/
 	virtual void SetForceFeedbackChannelValue(int32 ControllerId, FForceFeedbackChannelType ChannelType, float Value) override;
 	virtual void SetForceFeedbackChannelValues(int32 ControllerId, const FForceFeedbackValues &values) override;
@@ -294,8 +299,11 @@ private:
 	/** Find controller index corresponding to validated deviceId (returns -1 if not found) */
 	static int32 FindExistingDevice(int32 deviceId);
 
-	/** Push Vibration changes to the controllers */
+	/** Push Vibration changes to the main device */
 	void UpdateVibeMotors();
+
+	/** Push Vibration changes to the controller */
+	void UpdateControllerVibeMotors(int32 ControllerId);
 
 	struct MotionData
 	{
@@ -330,7 +338,7 @@ private:
 	static TArray<TouchInput> TouchInputStack;
 
 	/** Vibration settings */
-	static bool VibeIsOn;
+	static int32 CurrentVibeIntensity;
 	// Maximum time vibration will be triggered without an update
 	static int32 MaxVibeTime;
 	static double LastVibeUpdateTime;
@@ -349,6 +357,7 @@ private:
 
 	static FAndroidControllerData OldControllerData[MAX_NUM_CONTROLLERS];
 	static FAndroidControllerData NewControllerData[MAX_NUM_CONTROLLERS];
+	static FAndroidControllerVibeState ControllerVibeState[MAX_NUM_CONTROLLERS];
 
 	static FGamepadKeyNames::Type ButtonMapping[MAX_NUM_CONTROLLER_BUTTONS];
 
@@ -368,5 +377,3 @@ private:
 	/** List of input devices implemented in external modules. */
 	TArray<TSharedPtr<class IInputDevice>> ExternalInputDevices;
 };
-
-#endif

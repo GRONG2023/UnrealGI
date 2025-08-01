@@ -59,10 +59,16 @@ namespace RegistryKeyExistsCustomAction
 		{
 			var tools2020 = CheckSolidworksInstalledSub(session, "SOLIDWORKS 2020", "SOLIDWORKS2020INSTALLED");
 			var tools2021 = CheckSolidworksInstalledSub(session, "SOLIDWORKS 2021", "SOLIDWORKS2021INSTALLED");
-			if (!string.IsNullOrEmpty(tools2021))
-				session["SOLIDWORKSTOOLSPATH"] = tools2021;
-			else if (!string.IsNullOrEmpty(tools2020))
-				session["SOLIDWORKSTOOLSPATH"] = tools2020;
+			var tools2022 = CheckSolidworksInstalledSub(session, "SOLIDWORKS 2022", "SOLIDWORKS2022INSTALLED");
+			var tools2023 = CheckSolidworksInstalledSub(session, "SOLIDWORKS 2023", "SOLIDWORKS2023INSTALLED");
+			var tools2024 = CheckSolidworksInstalledSub(session, "SOLIDWORKS 2024", "SOLIDWORKS2024INSTALLED");
+			// SOLIDWORKSTOOLSPATH is unused(not installing solidworkstools.dll anymore)
+			// if (!string.IsNullOrEmpty(tools2022))
+			// 	session["SOLIDWORKSTOOLSPATH"] = tools2022;
+			// else if (!string.IsNullOrEmpty(tools2021))
+			// 	session["SOLIDWORKSTOOLSPATH"] = tools2021;
+			// else if (!string.IsNullOrEmpty(tools2020))
+			// 	session["SOLIDWORKSTOOLSPATH"] = tools2020;
 
 			return ActionResult.Success;
 		}

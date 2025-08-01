@@ -4,8 +4,9 @@
 
 #include "CoreMinimal.h"
 #include "AI/Navigation/NavigationTypes.h"
+#include "EngineDefines.h"
 
-class ENGINE_API FNavDataGenerator : public TSharedFromThis<FNavDataGenerator, ESPMode::ThreadSafe>
+class FNavDataGenerator : public TSharedFromThis<FNavDataGenerator, ESPMode::ThreadSafe>
 {
 public:
 	virtual ~FNavDataGenerator() {}
@@ -31,10 +32,6 @@ public:
 	/** Asks generator to update navigation affected by DirtyAreas */
 	virtual void RebuildDirtyAreas(const TArray<FNavigationDirtyArea>& DirtyAreas) {}
 
-	/** determines whether this generator is performing navigation building actions at the moment*/
-	UE_DEPRECATED(4.26, "This function is deprecated. Please use IsBuildInProgressCheckDirty")
-	virtual bool IsBuildInProgress(bool bCheckDirtyToo = false) const { return IsBuildInProgressCheckDirty(); }
-
 	/** determines whether this generator is performing navigation building actions at the moment, dirty areas are also checked */
 	virtual bool IsBuildInProgressCheckDirty() const { return false; }
 
@@ -53,12 +50,8 @@ public:
 	//----------------------------------------------------------------------//
 	virtual uint32 LogMemUsed() const { return 0; }
 
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#if ENABLE_VISUAL_LOG
 	virtual void ExportNavigationData(const FString& FileName) const {}
 	virtual void GrabDebugSnapshot(struct FVisualLogEntry* Snapshot, const FBox& BoundingBox, const FName& CategoryName, ELogVerbosity::Type Verbosity) const {}
-
-	UE_DEPRECATED(4.19, "This version of GrabDebugSnapshot has been deprecated. Please use the other version of the function.")
-	virtual void GrabDebugSnapshot(struct FVisualLogEntry* Snapshot, const FBox& BoundingBox, const struct FLogCategoryBase& Category, ELogVerbosity::Type Verbosity) const {}
 #endif
-
 };

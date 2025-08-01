@@ -10,15 +10,15 @@
 #include "Misc/ScopedSlowTask.h"
 #include "Animation/AnimTypes.h"
 #include "Components/SkeletalMeshComponent.h"
-#include "Matinee/InterpData.h"
-#include "Matinee/InterpTrackAnimControl.h"
+#include "Engine/SkeletalMesh.h"
+#include "Engine/SkinnedAssetCommon.h"
 #include "Animation/AnimSequence.h"
 #include "Editor/EditorPerProjectUserSettings.h"
-#include "Matinee/MatineeActor.h"
 #include "Animation/SkeletalMeshActor.h"
 #include "FbxExporter.h"
 #include "Exporters/FbxExportOption.h"
-#include "Animation/CustomAttributesRuntime.h"
+#include "Animation/AttributesRuntime.h"
+#include "Animation/BuiltInAttributeTypes.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogFbxAnimationExport, Log, All);
 
@@ -27,13 +27,13 @@ namespace UnFbx
 
 	bool FFbxExporter::SetupAnimStack(const UAnimSequence* AnimSeq)
 	{
-		if (AnimSeq->SequenceLength == 0.f)
+		if (AnimSeq->GetPlayLength() == 0.f)
 		{
 			// something is wrong
 			return false;
 		}
 
-		const float FrameRate = FMath::TruncToFloat(((AnimSeq->GetRawNumberOfFrames() - 1) / AnimSeq->SequenceLength) + 0.5f);
+		const double FrameRate = AnimSeq->GetDataModel()->GetFrameRate().AsDecimal();
 		//Configure the scene time line
 		{
 			FbxGlobalSettings& SceneGlobalSettings = Scene->GetGlobalSettings();
@@ -54,7 +54,7 @@ namespace UnFbx
 		// set time correctly
 		FbxTime ExportedStartTime, ExportedStopTime;
 		ExportedStartTime.SetSecondDouble(0.f);
-		ExportedStopTime.SetSecondDouble(AnimSeq->SequenceLength);
+		ExportedStopTime.SetSecondDouble(AnimSeq->GetDataModel()->GetFrameRate().AsSeconds(AnimSeq->GetDataModel()->GetNumberOfFrames()));
 
 		FbxTimeSpan ExportedTimeSpan;
 		ExportedTimeSpan.Set(ExportedStartTime, ExportedStopTime);
@@ -72,6 +72,14 @@ void FFbxExporter::ExportAnimSequenceToFbx(const UAnimSequence* AnimSeq,
 									 float AnimPlayRate,
 									 float StartTime)
 {
+	ExportAnimSequenceToFbx(AnimSeq, SkelMesh, BoneNodes, InAnimLayer,
+		AnimSeq->GetDataModel()->GetFrameRate().AsFrameTime(AnimStartOffset),
+		AnimSeq->GetDataModel()->GetFrameRate().AsFrameTime(AnimSeq->GetPlayLength() - AnimEndOffset),
+		AnimPlayRate, StartTime);
+}
+
+void FFbxExporter::ExportAnimSequenceToFbx(const UAnimSequence* AnimSeq, const USkeletalMesh* SkelMesh, TArray<FbxNode*>& BoneNodes, FbxAnimLayer* InAnimLayer, FFrameTime StartFrameTime, FFrameTime EndFrameTime, float FrameRateScale, float StartTime)
+{
 	// stack allocator for extracting curve
 	FMemMark Mark(FMemStack::Get());
 
@@ -84,50 +92,40 @@ void FFbxExporter::ExportAnimSequenceToFbx(const UAnimSequence* AnimSeq,
 	}
 
 	//Prepare root anim curves data to be exported
-	TArray<FName> AnimCurveNames;
 	TMap<FName, FbxAnimCurve*> CustomCurveMap;
 	if (BoneNodes.Num() > 0)
 	{
-		const FSmartNameMapping* AnimCurveMapping = Skeleton->GetSmartNameContainer(USkeleton::AnimCurveMappingName);
-		
-		if (AnimCurveMapping)
+		const UFbxExportOption* ExportOptions = GetExportOptions();
+		const bool bExportMorphTargetCurvesInMesh = ExportOptions && ExportOptions->bExportPreviewMesh && ExportOptions->bExportMorphTargets;
+
+		Skeleton->ForEachCurveMetaData([&CustomCurveMap, &BoneNodes, InAnimLayer, bExportMorphTargetCurvesInMesh](const FName& InCurveName, const FCurveMetaData& InMetaData)
 		{
-			AnimCurveMapping->FillNameArray(AnimCurveNames);
-
-			const UFbxExportOption* ExportOptions = GetExportOptions();
-			const bool bExportMorphTargetCurvesInMesh = ExportOptions && ExportOptions->bExportPreviewMesh && ExportOptions->bExportMorphTargets;
-
-			for (auto AnimCurveName : AnimCurveNames)
+			//Only export the custom curve if it is not used in a MorphTarget that will be exported latter on.
+			if(!(bExportMorphTargetCurvesInMesh && InMetaData.Type.bMorphtarget))
 			{
-				const FCurveMetaData* CurveMetaData = AnimCurveMapping->GetCurveMetaData(AnimCurveName);
-
-				//Only export the custom curve if it is not used in a MorphTarget that will be exported latter on.
-				if(!(bExportMorphTargetCurvesInMesh && CurveMetaData && CurveMetaData->Type.bMorphtarget))
-				{
-					FbxProperty AnimCurveFbxProp = FbxProperty::Create(BoneNodes[0], FbxDoubleDT, TCHAR_TO_ANSI(*AnimCurveName.ToString()));
-					AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eAnimatable, true);
-					AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eUserDefined, true);
-					FbxAnimCurve* AnimFbxCurve = AnimCurveFbxProp.GetCurve(InAnimLayer, true);
-					CustomCurveMap.Add(AnimCurveName, AnimFbxCurve);
-				}
+				FbxProperty AnimCurveFbxProp = FbxProperty::Create(BoneNodes[0], FbxDoubleDT, TCHAR_TO_ANSI(*InCurveName.ToString()));
+				AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eAnimatable, true);
+				AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eUserDefined, true);
+				FbxAnimCurve* AnimFbxCurve = AnimCurveFbxProp.GetCurve(InAnimLayer, true);
+				CustomCurveMap.Add(InCurveName, AnimFbxCurve);
 			}
-		}
+		});
 	}
 
-	ExportCustomAnimCurvesToFbx(CustomCurveMap, AnimSeq, AnimStartOffset, AnimEndOffset, AnimPlayRate, StartTime);
+	ExportCustomAnimCurvesToFbx(CustomCurveMap, AnimSeq, StartFrameTime, EndFrameTime, FrameRateScale, StartTime);
 
-	TArray<FCustomAttribute> CustomAttributes;
+	TArray<const FAnimatedBoneAttribute*> CustomAttributes;
 
 	// Add the animation data to the bone nodes
 	for(int32 BoneIndex = 0; BoneIndex < BoneNodes.Num(); ++BoneIndex)
 	{
 		FbxNode* CurrentBoneNode = BoneNodes[BoneIndex];
-		int32 BoneTreeIndex = Skeleton->GetSkeletonBoneIndexFromMeshBoneIndex(SkelMesh, BoneIndex);
-		int32 BoneTrackIndex = Skeleton->GetRawAnimationTrackIndex(BoneTreeIndex, AnimSeq);
-		FName BoneName = Skeleton->GetReferenceSkeleton().GetBoneName(BoneTreeIndex);
-		
+		const int32 BoneTreeIndex = Skeleton->GetSkeletonBoneIndexFromMeshBoneIndex(SkelMesh, BoneIndex);
+		const FName BoneName = Skeleton->GetReferenceSkeleton().GetBoneName(BoneTreeIndex);
+		const IAnimationDataModel* DataModel = AnimSeq->GetDataModel();
+
 		CustomAttributes.Reset();
-		AnimSeq->GetCustomAttributesForBone(BoneName, CustomAttributes);
+		DataModel->GetAttributesForBone(BoneName, CustomAttributes);
 
 		TArray<TPair<int32, FbxAnimCurve*>> FloatCustomAttributeIndices;
 		TArray<TPair<int32, FbxAnimCurve*>> IntCustomAttributeIndices;
@@ -135,45 +133,48 @@ void FFbxExporter::ExportAnimSequenceToFbx(const UAnimSequence* AnimSeq,
 		// Setup custom attribute properties and curves
 		for (int32 AttributeIndex = 0; AttributeIndex < CustomAttributes.Num(); ++AttributeIndex)
 		{
-			const FCustomAttribute& Attribute = CustomAttributes[AttributeIndex];
-			const FName& AttributeName = Attribute.Name;
-
-			const EVariantTypes VariantType = static_cast<EVariantTypes>(Attribute.VariantType);
-
-			if (VariantType == EVariantTypes::Int32)
+			if (const FAnimatedBoneAttribute* AttributePtr = CustomAttributes[AttributeIndex])
 			{
-				FbxProperty AnimCurveFbxProp = FbxProperty::Create(CurrentBoneNode, FbxIntDT, TCHAR_TO_UTF8(*AttributeName.ToString()));
-				AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eAnimatable, true);
-				AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eUserDefined, true);
+				const FAnimatedBoneAttribute& Attribute = *AttributePtr;
 
-				FbxAnimCurve* AnimFbxCurve = AnimCurveFbxProp.GetCurve(InAnimLayer, true);
-				AnimFbxCurve->KeyModifyBegin();
-				IntCustomAttributeIndices.Emplace(AttributeIndex, AnimFbxCurve);
-			}
-			else if (VariantType == EVariantTypes::Float)
-			{
-				FbxProperty AnimCurveFbxProp = FbxProperty::Create(CurrentBoneNode, FbxFloatDT, TCHAR_TO_UTF8(*AttributeName.ToString()));
-				AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eAnimatable, true);
-				AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eUserDefined, true);
+				const FName& AttributeName = Attribute.Identifier.GetName();
+				const UScriptStruct* AttributeType = Attribute.Identifier.GetType();
 
-				FbxAnimCurve* AnimFbxCurve = AnimCurveFbxProp.GetCurve(InAnimLayer, true);
-				AnimFbxCurve->KeyModifyBegin();
-				FloatCustomAttributeIndices.Emplace(AttributeIndex, AnimFbxCurve);
-			}
-			else if (VariantType == EVariantTypes::String)
-			{
-				FbxProperty AnimCurveFbxProp = FbxProperty::Create(CurrentBoneNode, FbxStringDT, TCHAR_TO_UTF8(*AttributeName.ToString()));
-				AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eUserDefined, true);
+				if (AttributeType == FIntegerAnimationAttribute::StaticStruct())
+				{
+					FbxProperty AnimCurveFbxProp = FbxProperty::Create(CurrentBoneNode, FbxIntDT, TCHAR_TO_UTF8(*AttributeName.ToString()));
+					AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eAnimatable, true);
+					AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eUserDefined, true);
 
-				// String attributes can't be keyed, simply set a normal value.
-				FString AttributeValue;
-				FCustomAttributesRuntime::GetAttributeValue(Attribute, 0.f, AttributeValue);
-				FbxString FbxValueString(TCHAR_TO_UTF8(*AttributeValue));
-				AnimCurveFbxProp.Set(FbxValueString);
-			}
-			else
-			{
-				ensureMsgf(false, TEXT("Trying to export unsupported custom attribte (float, int32 and FString are currently supported)"));
+					FbxAnimCurve* AnimFbxCurve = AnimCurveFbxProp.GetCurve(InAnimLayer, true);
+					AnimFbxCurve->KeyModifyBegin();
+					IntCustomAttributeIndices.Emplace(AttributeIndex, AnimFbxCurve);
+				}
+				else if (AttributeType == FFloatAnimationAttribute::StaticStruct())
+				{
+					FbxProperty AnimCurveFbxProp = FbxProperty::Create(CurrentBoneNode, FbxFloatDT, TCHAR_TO_UTF8(*AttributeName.ToString()));
+					AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eAnimatable, true);
+					AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eUserDefined, true);
+
+					FbxAnimCurve* AnimFbxCurve = AnimCurveFbxProp.GetCurve(InAnimLayer, true);
+					AnimFbxCurve->KeyModifyBegin();
+					FloatCustomAttributeIndices.Emplace(AttributeIndex, AnimFbxCurve);
+				}
+				else if (AttributeType == FStringAnimationAttribute::StaticStruct())
+				{
+					FbxProperty AnimCurveFbxProp = FbxProperty::Create(CurrentBoneNode, FbxStringDT, TCHAR_TO_UTF8(*AttributeName.ToString()));
+					AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eUserDefined, true);
+
+					// String attributes can't be keyed, simply set a normal value.
+					FStringAnimationAttribute EvaluatedAttribute = Attribute.Curve.Evaluate<FStringAnimationAttribute>(0.f);
+
+					FbxString FbxValueString(TCHAR_TO_UTF8(*EvaluatedAttribute.Value));
+					AnimCurveFbxProp.Set(FbxValueString);
+				}
+				else
+				{
+					ensureMsgf(false, TEXT("Trying to export unsupported custom attribte (float, int32 and FString are currently supported)"));
+				}
 			}
 		}
 
@@ -194,7 +195,7 @@ void FFbxExporter::ExportAnimSequenceToFbx(const UAnimSequence* AnimSeq,
 		Curves[7] = CurrentBoneNode->LclScaling.GetCurve(InAnimLayer, FBXSDK_CURVENODE_COMPONENT_Y, true);
 		Curves[8] = CurrentBoneNode->LclScaling.GetCurve(InAnimLayer, FBXSDK_CURVENODE_COMPONENT_Z, true);
 
-		if(BoneTrackIndex == INDEX_NONE)
+		if(!DataModel->IsValidBoneTrackName(BoneName))
 		{
 			// If this sequence does not have a track for the current bone, then skip it
 			continue;
@@ -205,24 +206,24 @@ void FFbxExporter::ExportAnimSequenceToFbx(const UAnimSequence* AnimSeq,
 			Curve->KeyModifyBegin();
 		}
 
-		auto ExportLambda = [&](float AnimTime, FbxTime ExportTime, bool bLastKey) {
-			FTransform BoneAtom;
-			AnimSeq->GetBoneTransform(BoneAtom, BoneTrackIndex, AnimTime, true);
-			FbxAMatrix FbxMatrix = Converter.ConvertMatrix(BoneAtom.ToMatrixWithScale());
+		auto ExportLambda = [this, DataModel, BoneName, AnimSeq, &FloatCustomAttributeIndices, &IntCustomAttributeIndices, &Curves, &CustomAttributes](double AnimTime, FbxTime ExportTime, bool bLastKey)
+		{
+			const FTransform BoneAtom = DataModel->EvaluateBoneTrackTransform(BoneName, DataModel->GetFrameRate().AsFrameTime(AnimTime), AnimSeq->Interpolation);
+			const FbxAMatrix FbxMatrix = Converter.ConvertMatrix(BoneAtom.ToMatrixWithScale());
 			
-			FbxVector4 Translation = FbxMatrix.GetT();
-			FbxVector4 Rotation = FbxMatrix.GetR();
-			FbxVector4 Scale = FbxMatrix.GetS();
-			FbxVector4 Vectors[3] = { Translation, Rotation, Scale };
+			const FbxVector4 Translation = FbxMatrix.GetT();
+			const FbxVector4 Rotation = FbxMatrix.GetR();
+			const FbxVector4 Scale = FbxMatrix.GetS();
+			const FbxVector4 Vectors[3] = { Translation, Rotation, Scale };
 
 			// Loop over each curve and channel to set correct values
 			for (uint32 CurveIndex = 0; CurveIndex < 3; ++CurveIndex)
 			{
 				for (uint32 ChannelIndex = 0; ChannelIndex < 3; ++ChannelIndex)
 				{
-					uint32 OffsetCurveIndex = (CurveIndex * 3) + ChannelIndex;
+					const uint32 OffsetCurveIndex = (CurveIndex * 3) + ChannelIndex;
 
-					int32 lKeyIndex = Curves[OffsetCurveIndex]->KeyAdd(ExportTime);
+					const int32 lKeyIndex = Curves[OffsetCurveIndex]->KeyAdd(ExportTime);
 					Curves[OffsetCurveIndex]->KeySetValue(lKeyIndex, Vectors[CurveIndex][ChannelIndex]);
 					Curves[OffsetCurveIndex]->KeySetInterpolation(lKeyIndex, bLastKey ? FbxAnimCurveDef::eInterpolationConstant : FbxAnimCurveDef::eInterpolationCubic);
 
@@ -233,24 +234,33 @@ void FFbxExporter::ExportAnimSequenceToFbx(const UAnimSequence* AnimSeq,
 				}
 			}
 
-			for (TPair<int32, FbxAnimCurve*>& CurrentAttributeCurve : FloatCustomAttributeIndices)
+			for (const TPair<int32, FbxAnimCurve*>& CurrentAttributeCurve : FloatCustomAttributeIndices)
 			{
-				float AttributeValue = 0.f;
-				FCustomAttributesRuntime::GetAttributeValue(CustomAttributes[CurrentAttributeCurve.Key], AnimTime, AttributeValue);
-				int32 KeyIndex = CurrentAttributeCurve.Value->KeyAdd(ExportTime);
-				CurrentAttributeCurve.Value->KeySetValue(KeyIndex, AttributeValue);
+				if (const FAnimatedBoneAttribute* AttributePtr = CustomAttributes[CurrentAttributeCurve.Key])
+				{
+					ensure(AttributePtr->Identifier.GetType() == FFloatAnimationAttribute::StaticStruct());
+
+					const FFloatAnimationAttribute EvaluatedAttribute = AttributePtr->Curve.Evaluate<FFloatAnimationAttribute>(AnimTime);
+					const int32 KeyIndex = CurrentAttributeCurve.Value->KeyAdd(ExportTime);
+					CurrentAttributeCurve.Value->KeySetValue(KeyIndex, EvaluatedAttribute.Value);
+
+				}
 			}
 
-			for (TPair<int32, FbxAnimCurve*>& CurrentAttributeCurve : IntCustomAttributeIndices)
+			for (const TPair<int32, FbxAnimCurve*>& CurrentAttributeCurve : IntCustomAttributeIndices)
 			{
-				int32 AttributeValue = 0;
-				FCustomAttributesRuntime::GetAttributeValue(CustomAttributes[CurrentAttributeCurve.Key], AnimTime, AttributeValue);
-				int32 KeyIndex = CurrentAttributeCurve.Value->KeyAdd(ExportTime);
-				CurrentAttributeCurve.Value->KeySetValue(KeyIndex, static_cast<float>(AttributeValue));
+				if (const FAnimatedBoneAttribute* AttributePtr = CustomAttributes[CurrentAttributeCurve.Key])
+				{
+					ensure(AttributePtr->Identifier.GetType() == FIntegerAnimationAttribute::StaticStruct());
+
+					const FIntegerAnimationAttribute EvaluatedAttribute = AttributePtr->Curve.Evaluate<FIntegerAnimationAttribute>(AnimTime);
+					const int32 KeyIndex = CurrentAttributeCurve.Value->KeyAdd(ExportTime);
+					CurrentAttributeCurve.Value->KeySetValue(KeyIndex, static_cast<float>(EvaluatedAttribute.Value));
+				}
 			}
 		};
 
-		IterateInsideAnimSequence(AnimSeq, AnimStartOffset, AnimEndOffset, AnimPlayRate, StartTime, ExportLambda);
+		IterateInsideAnimSequence(AnimSeq, StartFrameTime, EndFrameTime, FrameRateScale, StartTime, ExportLambda);
 
 		for (FbxAnimCurve* Curve : Curves)
 		{
@@ -273,27 +283,22 @@ void FFbxExporter::ExportAnimSequenceToFbx(const UAnimSequence* AnimSeq,
 void FFbxExporter::ExportCustomAnimCurvesToFbx(const TMap<FName, FbxAnimCurve*>& CustomCurves, const UAnimSequence* AnimSeq, 
 	float AnimStartOffset, float AnimEndOffset, float AnimPlayRate, float StartTime, float ValueScale)
 {
+	ExportCustomAnimCurvesToFbx(CustomCurves, AnimSeq,
+		AnimSeq->GetDataModel()->GetFrameRate().AsFrameTime(AnimStartOffset),
+		AnimSeq->GetDataModel()->GetFrameRate().AsFrameTime(AnimSeq->GetPlayLength() - AnimEndOffset),
+		AnimPlayRate, StartTime, ValueScale);
+}
+	
+void FFbxExporter::ExportCustomAnimCurvesToFbx(const TMap<FName, FbxAnimCurve*>& CustomCurves, const UAnimSequence* AnimSeq,
+	FFrameTime AnimStartOffset, FFrameTime AnimEndOffset, float FrameRateScale, float StartTime, float ValueScale /*= 1.f*/)
+{
 	// stack allocator for extracting curve
 	FMemMark Mark(FMemStack::Get());
-	const USkeleton* Skeleton = AnimSeq->GetSkeleton();
-	const FSmartNameMapping* SmartNameMapping = Skeleton ? Skeleton->GetSmartNameContainer(USkeleton::AnimCurveMappingName) : nullptr;
 
-	if (!Skeleton || !SmartNameMapping || !SetupAnimStack(AnimSeq))
+	if (!SetupAnimStack(AnimSeq))
 	{
 		//Something is wrong.
 		return;
-	}
-
-	TArray<SmartName::UID_Type> AnimCurveUIDs;
-	{
-		//We need to recreate the UIDs array manually so that we keep the empty entries otherwise the BlendedCurve won't have the correct mapping.
-		TArray<FName> UID_ToNameArray;
-		SmartNameMapping->FillUIDToNameArray(UID_ToNameArray);
-		AnimCurveUIDs.Reserve(UID_ToNameArray.Num());
-		for (int32 NameIndex = 0; NameIndex < UID_ToNameArray.Num(); ++NameIndex)
-		{
-			AnimCurveUIDs.Add(NameIndex);
-		}
 	}
 
 	for (auto CustomCurve : CustomCurves)
@@ -303,25 +308,18 @@ void FFbxExporter::ExportCustomAnimCurvesToFbx(const TMap<FName, FbxAnimCurve*>&
 	
 	auto ExportLambda = [&](float AnimTime, FbxTime ExportTime, bool bLastKey) {
 		FBlendedCurve BlendedCurve;
-		BlendedCurve.InitFrom(&AnimCurveUIDs);
 		AnimSeq->EvaluateCurveData(BlendedCurve, AnimTime, true);
-		if (BlendedCurve.IsValid())
+		
+		//Loop over the custom curves and add the actual keys
+		for (auto CustomCurve : CustomCurves)
 		{
-			//Loop over the custom curves and add the actual keys
-			for (auto CustomCurve : CustomCurves)
-			{
-				SmartName::UID_Type NameUID = Skeleton->GetUIDByName(USkeleton::AnimCurveMappingName, CustomCurve.Key);
-				if (NameUID != SmartName::MaxUID)
-				{
-					float CurveValueAtTime = BlendedCurve.Get(NameUID) * ValueScale;
-					int32 KeyIndex = CustomCurve.Value->KeyAdd(ExportTime);
-					CustomCurve.Value->KeySetValue(KeyIndex, CurveValueAtTime);
-				}
-			}
+			float CurveValueAtTime = BlendedCurve.Get(CustomCurve.Key) * ValueScale;
+			int32 KeyIndex = CustomCurve.Value->KeyAdd(ExportTime);
+			CustomCurve.Value->KeySetValue(KeyIndex, CurveValueAtTime);
 		}
 	};
 
-	IterateInsideAnimSequence(AnimSeq, AnimStartOffset, AnimEndOffset, AnimPlayRate, StartTime, ExportLambda);
+	IterateInsideAnimSequence(AnimSeq, AnimStartOffset, AnimEndOffset, FrameRateScale, StartTime, ExportLambda);
 
 	for (auto CustomCurve : CustomCurves)
 	{
@@ -331,11 +329,21 @@ void FFbxExporter::ExportCustomAnimCurvesToFbx(const TMap<FName, FbxAnimCurve*>&
 
 void FFbxExporter::IterateInsideAnimSequence(const UAnimSequence* AnimSeq, float AnimStartOffset, float AnimEndOffset, float AnimPlayRate, float StartTime, TFunctionRef<void(float, FbxTime, bool)> IterationLambda)
 {
-	float AnimTime = AnimStartOffset;
-	float AnimEndTime = (AnimSeq->SequenceLength - AnimEndOffset);
-	// Subtracts 1 because NumFrames includes an initial pose for 0.0 second
-	double TimePerKey = (AnimSeq->SequenceLength / (AnimSeq->GetRawNumberOfFrames() - 1));
-	const float AnimTimeIncrement = TimePerKey * AnimPlayRate;
+	IterateInsideAnimSequence(AnimSeq,
+		AnimSeq->GetDataModel()->GetFrameRate().AsFrameTime(AnimStartOffset),
+		AnimSeq->GetDataModel()->GetFrameRate().AsFrameTime(AnimSeq->GetPlayLength() - AnimEndOffset),
+		AnimPlayRate,
+		AnimPlayRate,
+		[IterationLambda](double T, FbxTime FT, bool B) -> void
+		{
+			IterationLambda((float)T, FT, B);
+		});
+}
+
+void FFbxExporter::IterateInsideAnimSequence(const UAnimSequence* AnimSeq, FFrameTime StartFrameTime, FFrameTime EndFrameTime, float FrameRateScale, float StartTime, TFunctionRef<void(double, FbxTime, bool)> IterationLambda)
+{
+	const double TimePerKey = AnimSeq->GetDataModel()->GetFrameRate().AsInterval();
+	const double AnimTimeIncrement = TimePerKey * FrameRateScale;
 	uint32 AnimFrameIndex = 0;
 
 	FbxTime ExportTime;
@@ -346,15 +354,16 @@ void FFbxExporter::IterateInsideAnimSequence(const UAnimSequence* AnimSeq, float
 
 	// Step through each frame and add custom curve data
 	bool bLastKey = false;
+	FFrameTime FrameTime = StartFrameTime;
+	const FFrameRate& FrameRate = AnimSeq->GetDataModel()->GetFrameRate();
 	while (!bLastKey)
 	{
-		bLastKey = (AnimTime + KINDA_SMALL_NUMBER) > AnimEndTime;
-
-		IterationLambda(AnimTime, ExportTime, bLastKey);
+		bLastKey = FrameTime > EndFrameTime;
+		IterationLambda(FrameRate.AsSeconds(FrameTime), ExportTime, bLastKey);
 
 		ExportTime += ExportTimeIncrement;
 		AnimFrameIndex++;
-		AnimTime = AnimStartOffset + ((float)AnimFrameIndex * AnimTimeIncrement);
+		FrameTime += FFrameTime::FromDecimal(FrameRateScale);
 	}
 }
 
@@ -409,9 +418,9 @@ void FFbxExporter::CorrectAnimTrackInterpolation( TArray<FbxNode*>& BoneNodes, F
 
 FbxNode* FFbxExporter::ExportAnimSequence( const UAnimSequence* AnimSeq, const USkeletalMesh* SkelMesh, bool bExportSkelMesh, const TCHAR* MeshName, FbxNode* ActorRootNode, const TArray<UMaterialInterface*>* OverrideMaterials /*= nullptr*/ )
 {
-	if( Scene == NULL || AnimSeq == NULL || SkelMesh == NULL )
+	if( Scene == nullptr || AnimSeq == nullptr || SkelMesh == nullptr )
 	{
- 		return NULL;
+ 		return nullptr;
 	}
 
 
@@ -437,10 +446,14 @@ FbxNode* FFbxExporter::ExportAnimSequence( const UAnimSequence* AnimSeq, const U
 			SkelMesh,
 			BoneNodes,
 			AnimLayer,
-			0.f,		// AnimStartOffset
-			0.f,		// AnimEndOffset
-			1.f,		// AnimPlayRate
-			0.f);		// StartTime
+			// Start frame to export
+			FFrameTime(0),
+			// Final frame to export
+			FFrameTime(AnimSeq->GetDataModel()->GetNumberOfFrames()),
+			// Frame rate scale
+			1.f,
+			// FBX StartTime
+			0.f);
 
 		CorrectAnimTrackInterpolation(BoneNodes, AnimLayer);
 	}
@@ -517,6 +530,8 @@ FbxNode* FFbxExporter::ExportAnimSequence( const UAnimSequence* AnimSeq, const U
 		{
 			TmpNodeNoTransform->RemoveChild(MeshRootNode);
 			RootNode->AddChild(MeshRootNode);
+			//Export the preview mesh metadata
+			ExportObjectMetadata(SkelMesh, MeshRootNode);
 		}
 	}
 	
@@ -533,103 +548,11 @@ FbxNode* FFbxExporter::ExportAnimSequence( const UAnimSequence* AnimSeq, const U
 }
 
 
-void FFbxExporter::ExportAnimSequencesAsSingle( USkeletalMesh* SkelMesh, const ASkeletalMeshActor* SkelMeshActor, const FString& ExportName, const TArray<UAnimSequence*>& AnimSeqList, const TArray<struct FAnimControlTrackKey>& TrackKeys )
-{
-	if (Scene == NULL || SkelMesh == NULL || AnimSeqList.Num() == 0 || AnimSeqList.Num() != TrackKeys.Num()) return;
-
-	FbxNode* BaseNode = FbxNode::Create(Scene, Converter.ConvertToFbxString(ExportName));
-	Scene->GetRootNode()->AddChild(BaseNode);
-
-	if( SkelMeshActor )
-	{
-		// Set the default position of the actor on the transforms
-		// The Unreal transformation is different from FBX's Z-up: invert the Y-axis for translations and the Y/Z angle values in rotations.
-		BaseNode->LclTranslation.Set(Converter.ConvertToFbxPos(SkelMeshActor->GetActorLocation()));
-		BaseNode->LclRotation.Set(Converter.ConvertToFbxRot(SkelMeshActor->GetActorRotation().Euler()));
-		BaseNode->LclScaling.Set(Converter.ConvertToFbxScale(SkelMeshActor->GetRootComponent()->GetRelativeScale3D()));
-
-	}
-
-	// Create the Skeleton
-	TArray<FbxNode*> BoneNodes;
-	FbxNode* SkeletonRootNode = CreateSkeleton(SkelMesh, BoneNodes);
-	BaseNode->AddChild(SkeletonRootNode);
-
-	bool bAnyObjectMissingSourceData = false;
-	float ExportStartTime = 0.f;
-	for(int32 AnimSeqIndex = 0; AnimSeqIndex < AnimSeqList.Num(); ++AnimSeqIndex)
-	{
-		const UAnimSequence* AnimSeq = AnimSeqList[AnimSeqIndex];
-		const FAnimControlTrackKey& TrackKey = TrackKeys[AnimSeqIndex];
-
-		// Shift the anim sequences so the first one is at time zero in the FBX file
-		const float CurrentStartTime = TrackKey.StartTime - ExportStartTime;
-
-		ExportAnimSequenceToFbx(AnimSeq,
-			SkelMesh,
-			BoneNodes,
-			AnimLayer,
-			TrackKey.AnimStartOffset,
-			TrackKey.AnimEndOffset,
-			TrackKey.AnimPlayRate,
-			CurrentStartTime);
-	}
-
-	CorrectAnimTrackInterpolation(BoneNodes, AnimLayer);
-
-	if (bAnyObjectMissingSourceData)
-	{
-		FMessageDialog::Open( EAppMsgType::Ok, NSLOCTEXT("UnrealEd", "Exporter_Error_SourceDataUnavailable", "No source data available for some objects.  See the log for details.") );
-	}
-
-}
-
-
-
-/**
- * Exports all the animation sequences part of a single Group in a Matinee sequence
- * as a single animation in the FBX document.  The animation is created by sampling the
- * sequence at DEFAULT_SAMPLERATE updates/second and extracting the resulting bone transforms from the given
- * skeletal mesh
- */
-void FFbxExporter::ExportMatineeGroup(class AMatineeActor* MatineeActor, USkeletalMeshComponent* SkeletalMeshComponent)
-{
-	if (Scene == NULL || MatineeActor == NULL || SkeletalMeshComponent == NULL || MatineeActor->MatineeData->InterpLength == 0)
-	{
-		return;
-	}
-
-	FbxString NodeName("MatineeSequence");
-
-	FbxNode* BaseNode = FbxNode::Create(Scene, NodeName);
-	Scene->GetRootNode()->AddChild(BaseNode);
-
-	AActor* Owner = SkeletalMeshComponent->GetOwner();
-	if(Owner && Owner->GetRootComponent())
-	{
-		// Set the default position of the actor on the transforms
-		// The UE3 transformation is different from FBX's Z-up: invert the Y-axis for translations and the Y/Z angle values in rotations.
-		BaseNode->LclTranslation.Set(Converter.ConvertToFbxPos(Owner->GetActorLocation()));
-		BaseNode->LclRotation.Set(Converter.ConvertToFbxRot(Owner->GetActorRotation().Euler()));
-		BaseNode->LclScaling.Set(Converter.ConvertToFbxScale(Owner->GetRootComponent()->GetRelativeScale3D()));
-	}
-	// Create the Skeleton
-	TArray<FbxNode*> BoneNodes;
-	FbxNode* SkeletonRootNode = CreateSkeleton(SkeletalMeshComponent->SkeletalMesh, BoneNodes);
-	FbxSkeletonRoots.Add(SkeletalMeshComponent, SkeletonRootNode);
-	BaseNode->AddChild(SkeletonRootNode);
-
-	static const float SamplingRate = 1.f / DEFAULT_SAMPLERATE;
-
-	FMatineeAnimTrackAdapter AnimTrackAdapter(MatineeActor);
-	ExportAnimTrack(AnimTrackAdapter, Owner, SkeletalMeshComponent, SamplingRate);
-}
-
-void FFbxExporter::ExportAnimTrack(IAnimTrackAdapter& AnimTrackAdapter, AActor* Actor, USkeletalMeshComponent* InSkeletalMeshComponent, float SamplingRate)
+void FFbxExporter::ExportAnimTrack(IAnimTrackAdapter& AnimTrackAdapter, AActor* Actor, USkeletalMeshComponent* InSkeletalMeshComponent, double SamplingRate)
 {
 	// show a status update every 1 second worth of samples
-	const float UpdateFrequency = 1.0f;
-	float NextUpdateTime = UpdateFrequency;
+	const double UpdateFrequency = 1.0;
+	double NextUpdateTime = UpdateFrequency;
 
 	// find root and find the bone array
 	TArray<FbxNode*> BoneNodes;
@@ -650,21 +573,21 @@ void FFbxExporter::ExportAnimTrack(IAnimTrackAdapter& AnimTrackAdapter, AActor* 
 		}
 	}
 	
-	TArray<FCustomAttribute> CustomAttributes;
+	TArray<const FAnimatedBoneAttribute*> CustomAttributes;
 	
 	FTransform InitialInvParentTransform;
 
 	int32 LocalStartFrame = AnimTrackAdapter.GetLocalStartFrame();
 	int32 StartFrame = AnimTrackAdapter.GetStartFrame();
 	int32 AnimationLength = AnimTrackAdapter.GetLength();
-	float FrameRate = AnimTrackAdapter.GetFrameRate();
+	double FrameRate = AnimTrackAdapter.GetFrameRate();
 
 	TArray<USkeletalMeshComponent*> SkeletalMeshComponents;
 	Actor->GetComponents(SkeletalMeshComponents);
 
-	const float TickRate = 1.0f/FrameRate;
+	const double TickRate = 1.0/FrameRate;
 
-	FScopedSlowTask SlowTask(AnimationLength, NSLOCTEXT("UnrealEd", "ExportAnimationProgress", "Exporting Animation"));
+	FScopedSlowTask SlowTask(AnimationLength + 1, NSLOCTEXT("UnrealEd", "ExportAnimationProgress", "Exporting Animation"));
 	SlowTask.MakeDialog(true);
 
 	for (int32 FrameCount = 0; FrameCount <= AnimationLength; ++FrameCount)
@@ -672,9 +595,9 @@ void FFbxExporter::ExportAnimTrack(IAnimTrackAdapter& AnimTrackAdapter, AActor* 
 		SlowTask.EnterProgressFrame();
 		
 		int32 LocalFrame = LocalStartFrame + FrameCount;
-		float SampleTime = (StartFrame + FrameCount) / FrameRate;
+		double SampleTime = (StartFrame + FrameCount) / FrameRate;
 
-		// This will call UpdateSkelPose on the skeletal mesh component to move bones based on animations in the matinee group
+		// This will call UpdateSkelPose on the skeletal mesh component to move bones based on animations in the sequence
 		AnimTrackAdapter.UpdateAnimation(LocalFrame);
 
 		if (FrameCount == 0)
@@ -698,7 +621,7 @@ void FFbxExporter::ExportAnimTrack(IAnimTrackAdapter& AnimTrackAdapter, AActor* 
 					SkeletalMeshComponent->TickAnimation(TickRate, false);
 
 					SkeletalMeshComponent->RefreshBoneTransforms();
-					SkeletalMeshComponent->RefreshSlaveComponents();
+					SkeletalMeshComponent->RefreshFollowerComponents();
 					SkeletalMeshComponent->UpdateComponentToWorld();
 					SkeletalMeshComponent->FinalizeBoneTransform();
 					SkeletalMeshComponent->MarkRenderTransformDirty();
@@ -719,10 +642,10 @@ void FFbxExporter::ExportAnimTrack(IAnimTrackAdapter& AnimTrackAdapter, AActor* 
 
 		NextUpdateTime -= SamplingRate;
 
-		if( NextUpdateTime <= 0.0f )
+		if( NextUpdateTime <= 0.0 )
 		{
 			NextUpdateTime = UpdateFrequency;
-			GWarn->StatusUpdate( FMath::RoundToInt( SampleTime ), FMath::RoundToInt(AnimationLength), NSLOCTEXT("FbxExporter", "ExportingToFbxStatus", "Exporting to FBX") );
+			GWarn->StatusUpdate( FMath::RoundToInt( SampleTime ), AnimationLength, NSLOCTEXT("FbxExporter", "ExportingToFbxStatus", "Exporting to FBX") );
 		}
 
 		TArray<FTransform> LocalBoneTransforms = InSkeletalMeshComponent->GetBoneSpaceTransforms();
@@ -735,11 +658,17 @@ void FFbxExporter::ExportAnimTrack(IAnimTrackAdapter& AnimTrackAdapter, AActor* 
 		// Add the animation data to the bone nodes
 		for(int32 BoneIndex = 0; BoneIndex < BoneNodes.Num(); ++BoneIndex)
 		{
-			FName BoneName = InSkeletalMeshComponent->SkeletalMesh->GetRefSkeleton().GetBoneName(BoneIndex);
+			if (!InSkeletalMeshComponent->GetSkeletalMeshAsset()->GetRefSkeleton().IsValidIndex(BoneIndex))
+			{
+				UE_LOG(LogFbxAnimationExport, Warning, TEXT("Invalid BoneIndex %d, did the skeleton change? (animating the skeleton is not currently supported)"), BoneIndex);
+				continue;
+			}
+
+			FName BoneName = InSkeletalMeshComponent->GetSkeletalMeshAsset()->GetRefSkeleton().GetBoneName(BoneIndex);
 			FbxNode* CurrentBoneNode = BoneNodes[BoneIndex];
 
 			// Create the AnimCurves
-			FbxAnimCurve* Curves[6];
+			FbxAnimCurve* Curves[9];
 			Curves[0] = CurrentBoneNode->LclTranslation.GetCurve(AnimLayer, FBXSDK_CURVENODE_COMPONENT_X, true);
 			Curves[1] = CurrentBoneNode->LclTranslation.GetCurve(AnimLayer, FBXSDK_CURVENODE_COMPONENT_Y, true);
 			Curves[2] = CurrentBoneNode->LclTranslation.GetCurve(AnimLayer, FBXSDK_CURVENODE_COMPONENT_Z, true);
@@ -748,7 +677,11 @@ void FFbxExporter::ExportAnimTrack(IAnimTrackAdapter& AnimTrackAdapter, AActor* 
 			Curves[4] = CurrentBoneNode->LclRotation.GetCurve(AnimLayer, FBXSDK_CURVENODE_COMPONENT_Y, true);
 			Curves[5] = CurrentBoneNode->LclRotation.GetCurve(AnimLayer, FBXSDK_CURVENODE_COMPONENT_Z, true);
 
-			for(int32 i = 0; i < 6; ++i)
+			Curves[6] = CurrentBoneNode->LclScaling.GetCurve(AnimLayer, FBXSDK_CURVENODE_COMPONENT_X, true);
+			Curves[7] = CurrentBoneNode->LclScaling.GetCurve(AnimLayer, FBXSDK_CURVENODE_COMPONENT_Y, true);
+			Curves[8] = CurrentBoneNode->LclScaling.GetCurve(AnimLayer, FBXSDK_CURVENODE_COMPONENT_Z, true);
+
+			for(int32 i = 0; i < 9; ++i)
 			{
 				Curves[i]->KeyModifyBegin();
 			}
@@ -762,10 +695,11 @@ void FFbxExporter::ExportAnimTrack(IAnimTrackAdapter& AnimTrackAdapter, AActor* 
 
 			FbxVector4 Translation = Converter.ConvertToFbxPos(BoneTransform.GetLocation());
 			FbxVector4 Rotation = Converter.ConvertToFbxRot(BoneTransform.GetRotation().Euler());
+			FbxVector4 Scale = Converter.ConvertToFbxScale(BoneTransform.GetScale3D());
 
 			int32 lKeyIndex;
 
-			for(int32 i = 0, j=3; i < 3; ++i, ++j)
+			for(int32 i = 0, j=3, k=6; i < 3; ++i, ++j, ++k)
 			{
 				lKeyIndex = Curves[i]->KeyAdd(ExportTime);
 				Curves[i]->KeySetValue(lKeyIndex, Translation[i]);
@@ -774,9 +708,13 @@ void FFbxExporter::ExportAnimTrack(IAnimTrackAdapter& AnimTrackAdapter, AActor* 
 				lKeyIndex = Curves[j]->KeyAdd(ExportTime);
 				Curves[j]->KeySetValue(lKeyIndex, Rotation[i]);
 				Curves[j]->KeySetInterpolation(lKeyIndex, FbxAnimCurveDef::eInterpolationCubic);
+
+				lKeyIndex = Curves[k]->KeyAdd(ExportTime);
+				Curves[k]->KeySetValue(lKeyIndex, Scale[i]);
+				Curves[k]->KeySetInterpolation(lKeyIndex, FbxAnimCurveDef::eInterpolationCubic);
 			}
 
-			for(int32 i = 0; i < 6; ++i)
+			for(int32 i = 0; i < 9; ++i)
 			{
 				Curves[i]->KeyModifyEnd();
 			}
@@ -788,7 +726,7 @@ void FFbxExporter::ExportAnimTrack(IAnimTrackAdapter& AnimTrackAdapter, AActor* 
 			}
 
 			CustomAttributes.Reset();
-			AnimSeq->GetCustomAttributesForBone(BoneName, CustomAttributes);
+			AnimSeq->GetDataModel()->GetAttributesForBone(BoneName, CustomAttributes);
 
 			TArray<TPair<int32, FbxAnimCurve*>> FloatCustomAttributeIndices;
 			TArray<TPair<int32, FbxAnimCurve*>> IntCustomAttributeIndices;
@@ -796,61 +734,71 @@ void FFbxExporter::ExportAnimTrack(IAnimTrackAdapter& AnimTrackAdapter, AActor* 
 			// Setup custom attribute properties and curves
 			for (int32 AttributeIndex = 0; AttributeIndex < CustomAttributes.Num(); ++AttributeIndex)
 			{
-				const FCustomAttribute& Attribute = CustomAttributes[AttributeIndex];
-				const FName& AttributeName = Attribute.Name;
-
-				const EVariantTypes VariantType = static_cast<EVariantTypes>(Attribute.VariantType);
-
-				if (VariantType == EVariantTypes::Int32)
+				const FAnimatedBoneAttribute* AttributePtr = CustomAttributes[AttributeIndex];
+				if (AttributePtr)
 				{
-					FbxProperty AnimCurveFbxProp = FbxProperty::Create(CurrentBoneNode, FbxIntDT, TCHAR_TO_UTF8(*AttributeName.ToString()));
-					AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eAnimatable, true);
-					AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eUserDefined, true);
+					const FAnimatedBoneAttribute& Attribute = *AttributePtr;
 
-					FbxAnimCurve* AnimFbxCurve = AnimCurveFbxProp.GetCurve(AnimLayer, true);
-					AnimFbxCurve->KeyModifyBegin();
-					IntCustomAttributeIndices.Emplace(AttributeIndex, AnimFbxCurve);
-				}
-				else if (VariantType == EVariantTypes::Float)
-				{
-					FbxProperty AnimCurveFbxProp = FbxProperty::Create(CurrentBoneNode, FbxFloatDT, TCHAR_TO_UTF8(*AttributeName.ToString()));
-					AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eAnimatable, true);
-					AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eUserDefined, true);
+					const FName& AttributeName = Attribute.Identifier.GetName();
+					const UScriptStruct* AttributeType = Attribute.Identifier.GetType();
 
-					FbxAnimCurve* AnimFbxCurve = AnimCurveFbxProp.GetCurve(AnimLayer, true);
-					AnimFbxCurve->KeyModifyBegin();
-					FloatCustomAttributeIndices.Emplace(AttributeIndex, AnimFbxCurve);
-				}
-				else if (VariantType == EVariantTypes::String)
-				{
-					FbxProperty AnimCurveFbxProp = FbxProperty::Create(CurrentBoneNode, FbxStringDT, TCHAR_TO_UTF8(*AttributeName.ToString()));
-					AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eUserDefined, true);
+					if (AttributeType == FIntegerAnimationAttribute::StaticStruct())
+					{
+						FbxProperty AnimCurveFbxProp = FbxProperty::Create(CurrentBoneNode, FbxIntDT, TCHAR_TO_UTF8(*AttributeName.ToString()));
+						AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eAnimatable, true);
+						AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eUserDefined, true);
 
-					// String attributes can't be keyed, simply set a normal value.
-					FString AttributeValue;
-					FCustomAttributesRuntime::GetAttributeValue(Attribute, 0.f, AttributeValue);
-					FbxString FbxValueString(TCHAR_TO_UTF8(*AttributeValue));
-					AnimCurveFbxProp.Set(FbxValueString);
-				}
-				else
-				{
-					ensureMsgf(false, TEXT("Trying to export unsupported custom attribte (float, int32 and FString are currently supported)"));
-				}
+						FbxAnimCurve* AnimFbxCurve = AnimCurveFbxProp.GetCurve(AnimLayer, true);
+						AnimFbxCurve->KeyModifyBegin();
+						IntCustomAttributeIndices.Emplace(AttributeIndex, AnimFbxCurve);
+					}
+					else if (AttributeType == FFloatAnimationAttribute::StaticStruct())
+					{
+						FbxProperty AnimCurveFbxProp = FbxProperty::Create(CurrentBoneNode, FbxFloatDT, TCHAR_TO_UTF8(*AttributeName.ToString()));
+						AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eAnimatable, true);
+						AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eUserDefined, true);
 
-				for (TPair<int32, FbxAnimCurve*>& CurrentAttributeCurve : FloatCustomAttributeIndices)
-				{
-					float AttributeValue = 0.f;
-					FCustomAttributesRuntime::GetAttributeValue(CustomAttributes[CurrentAttributeCurve.Key], AnimTime, AttributeValue);
-					int32 KeyIndex = CurrentAttributeCurve.Value->KeyAdd(ExportTime);
-					CurrentAttributeCurve.Value->KeySetValue(KeyIndex, AttributeValue);
-				}
+						FbxAnimCurve* AnimFbxCurve = AnimCurveFbxProp.GetCurve(AnimLayer, true);
+						AnimFbxCurve->KeyModifyBegin();
+						FloatCustomAttributeIndices.Emplace(AttributeIndex, AnimFbxCurve);
+					}
+					else if (AttributeType == FStringAnimationAttribute::StaticStruct())
+					{
+						FbxProperty AnimCurveFbxProp = FbxProperty::Create(CurrentBoneNode, FbxStringDT, TCHAR_TO_UTF8(*AttributeName.ToString()));
+						AnimCurveFbxProp.ModifyFlag(FbxPropertyFlags::eUserDefined, true);
 
-				for (TPair<int32, FbxAnimCurve*>& CurrentAttributeCurve : IntCustomAttributeIndices)
-				{
-					int32 AttributeValue = 0;
-					FCustomAttributesRuntime::GetAttributeValue(CustomAttributes[CurrentAttributeCurve.Key], AnimTime, AttributeValue);
-					int32 KeyIndex = CurrentAttributeCurve.Value->KeyAdd(ExportTime);
-					CurrentAttributeCurve.Value->KeySetValue(KeyIndex, static_cast<float>(AttributeValue));
+						// String attributes can't be keyed, simply set a normal value.
+						FStringAnimationAttribute EvaluatedAttribute = Attribute.Curve.Evaluate<FStringAnimationAttribute>(0.f);
+
+						FbxString FbxValueString(TCHAR_TO_UTF8(*EvaluatedAttribute.Value));
+						AnimCurveFbxProp.Set(FbxValueString);
+					}
+					else
+					{
+						ensureMsgf(false, TEXT("Trying to export unsupported custom attribte (float, int32 and FString are currently supported)"));
+					}
+
+					for (TPair<int32, FbxAnimCurve*>& CurrentAttributeCurve : FloatCustomAttributeIndices)
+					{
+						const FAnimatedBoneAttribute* FloatAttributePtr = CustomAttributes[CurrentAttributeCurve.Key];
+						ensure(FloatAttributePtr->Identifier.GetType() == FFloatAnimationAttribute::StaticStruct());
+
+						FFloatAnimationAttribute EvaluatedAttribute = FloatAttributePtr->Curve.Evaluate<FFloatAnimationAttribute>(AnimTime);
+
+						int32 KeyIndex = CurrentAttributeCurve.Value->KeyAdd(ExportTime);
+						CurrentAttributeCurve.Value->KeySetValue(KeyIndex, EvaluatedAttribute.Value);
+					}
+
+					for (TPair<int32, FbxAnimCurve*>& CurrentAttributeCurve : IntCustomAttributeIndices)
+					{
+						const FAnimatedBoneAttribute* IntAttributePtr = CustomAttributes[CurrentAttributeCurve.Key];
+						ensure(IntAttributePtr->Identifier.GetType() == FIntegerAnimationAttribute::StaticStruct());
+
+						FIntegerAnimationAttribute EvaluatedAttribute = IntAttributePtr->Curve.Evaluate< FIntegerAnimationAttribute>(AnimTime);
+
+						int32 KeyIndex = CurrentAttributeCurve.Value->KeyAdd(ExportTime);
+						CurrentAttributeCurve.Value->KeySetValue(KeyIndex, static_cast<float>(EvaluatedAttribute.Value));
+					}
 				}
 			}
 

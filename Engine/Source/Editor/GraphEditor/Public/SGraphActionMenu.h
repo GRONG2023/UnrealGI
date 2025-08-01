@@ -2,24 +2,53 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "SlateFwd.h"
-#include "Misc/Attribute.h"
+#include "CoreTypes.h"
+#include "Delegates/Delegate.h"
+#include "Framework/SlateDelegates.h"
+#include "HAL/PlatformCrt.h"
 #include "Input/Reply.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Internationalization/Text.h"
+#include "Misc/Attribute.h"
+#include "Misc/Optional.h"
+#include "SlateFwd.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/SlateConstants.h"
+#include "Types/SlateEnums.h"
 #include "UObject/GCObject.h"
-#include "Widgets/SWidget.h"
+#include "UObject/NameTypes.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
+#include "Widgets/SWidget.h"
 #include "Widgets/Views/SExpanderArrow.h"
-#include "Widgets/Views/STableViewBase.h"
 #include "Widgets/Views/STableRow.h"
+#include "Widgets/Views/STableViewBase.h"
 #include "Widgets/Views/STreeView.h"
-#include "EdGraph/EdGraphSchema.h"
 
+class FReferenceCollector;
+class ITableRow;
 class IToolTip;
 class SEditableTextBox;
+class SPanel;
+class SSearchBox;
+class SWidget;
+class UEdGraph;
+class UEdGraphPin;
 struct FCreateWidgetForActionData;
+struct FGeometry;
 struct FGraphActionNode;
+struct FKeyEvent;
+struct FPointerEvent;
+struct FEdGraphSchemaAction;
+struct FGraphActionListBuilderBase;
 
 /** Delegate for hooking up an inline editable text block to be notified that a rename is requested. */
 DECLARE_DELEGATE( FOnRenameRequestActionNode );
@@ -113,6 +142,8 @@ public:
 	DECLARE_DELEGATE_RetVal( FText, FGetFilterText);
 	/** Delegate to check if an action matches a specified name (used for renaming items etc.) */
 	DECLARE_DELEGATE_RetVal_TwoParams( bool, FOnActionMatchesName, FEdGraphSchemaAction*, const FName& );
+	/** Delegate that can be used to create and/or get a custom action list. */
+	DECLARE_DELEGATE_RetVal(TSharedRef<FGraphActionListBuilderBase>, FOnGetActionList);
 
 	SLATE_BEGIN_ARGS(SGraphActionMenu)
 		: _AutoExpandActionMenu(false)
@@ -120,7 +151,10 @@ public:
 		, _SortItemsRecursively(true)
 		, _ShowFilterTextBox(true)
 		, _UseSectionStyling(false)
+		, _bAllowPreselectedItemActivation(false)
+		, _DefaultRowExpanderBaseIndentLevel(0)
 		, _GraphObj(nullptr)
+		, _bAutomaticallySelectSingleAction(false)
 		{ }
 
 		SLATE_EVENT( FOnActionSelected, OnActionSelected )
@@ -130,6 +164,7 @@ public:
 		SLATE_EVENT( FOnContextMenuOpening, OnContextMenuOpening )
 		SLATE_EVENT( FOnCreateWidgetForAction, OnCreateWidgetForAction )
 		SLATE_EVENT( FOnCreateCustomRowExpander, OnCreateCustomRowExpander )
+		SLATE_EVENT( FOnGetActionList, OnGetActionList )
 		SLATE_EVENT( FOnCollectAllActions, OnCollectAllActions )
 		SLATE_EVENT( FOnCollectStaticSections, OnCollectStaticSections )
 		SLATE_EVENT( FOnCategoryTextCommitted, OnCategoryTextCommitted )
@@ -144,8 +179,11 @@ public:
 		SLATE_ARGUMENT( bool, SortItemsRecursively )
 		SLATE_ARGUMENT( bool, ShowFilterTextBox )
 		SLATE_ARGUMENT( bool, UseSectionStyling )
+		SLATE_ARGUMENT( bool, bAllowPreselectedItemActivation )
+		SLATE_ARGUMENT( int32, DefaultRowExpanderBaseIndentLevel )
 		SLATE_ARGUMENT( TArray<UEdGraphPin*>, DraggedFromPins )
 		SLATE_ARGUMENT( UEdGraph*, GraphObj )
+		SLATE_ARGUMENT( bool, bAutomaticallySelectSingleAction )
 
 	SLATE_END_ARGS()
 
@@ -175,7 +213,7 @@ protected:
 	TSharedPtr<SSearchBox> FilterTextBox;
 
 	/** List of all actions we can browser */
-	FGraphActionListBuilderBase AllActions;
+	TSharedPtr<FGraphActionListBuilderBase> AllActions;
 
 	/** Flattened list of all actions passing the filter */
 	TArray< TSharedPtr<FGraphActionNode> > FilteredActionNodes; 
@@ -183,6 +221,10 @@ protected:
 	/** Root of filtered actions tree */
 	TSharedPtr<FGraphActionNode> FilteredRootAction;
 
+	/** Stored score for our current selection, so that we can quickly maintain selection when building the list asynchronously */
+	float SelectedSuggestionScore;
+	/** Stored index in the AllActions list builder that we think is the best fit */
+	int32 SelectedSuggestionSourceIndex;
 	/** Used to track selected action for keyboard interaction */
 	int32 SelectedSuggestion;
 	/** Allows us to set selection (via keyboard) without triggering action */
@@ -197,6 +239,12 @@ protected:
 	bool bSortItemsRecursively;
 	/** Should the rows and sections be styled like the details panel? */
 	bool bUseSectionStyling;
+	/** Whether we allow pre-selected items to be activated with a left-click */
+	bool bAllowPreselectedItemActivation;
+	/** Whether to automatically proceed with an action if it's the only one in the list. */
+	bool bAutomaticallySelectSingleAction;
+	/** The BaseIndentLevel of the default-created row expander. Not used with OnCreateCustomRowExpander. */
+	int32 DefaultRowExpanderBaseIndentLevel;
 	
 	/** Delegate to call when action is selected */
 	FOnActionSelected OnActionSelected;
@@ -210,6 +258,8 @@ protected:
 	FOnCreateWidgetForAction OnCreateWidgetForAction;
 	/** Delegate to call for creating a custom "expander" widget for indenting a menu row with */
 	FOnCreateCustomRowExpander OnCreateCustomRowExpander;
+	/** Delegate to call to get a custom action list */
+	FOnGetActionList OnGetActionList;
 	/** Delegate to call to collect all actions */
 	FOnCollectAllActions OnCollectAllActions;
 	/** Delegate to call to collect all always visible sections */
@@ -272,6 +322,8 @@ public:
 	/* Handler for mouse button going down */
 	bool OnMouseButtonDownEvent( TWeakPtr<FEdGraphSchemaAction> InAction );
 
+	/** Updates the displayed list starting from IdxStart, useful for async building the display list of actions */
+	void UpdateForNewActions(int32 IdxStart);
 	/** Regenerated filtered results (FilteredRootAction and FilteredActionNodes) based on filter text  */ 
 	void GenerateFilteredItems(bool bPreserveExpansion);
 
@@ -332,7 +384,15 @@ protected:
 	void OnItemScrolledIntoView( TSharedPtr<FGraphActionNode> InActionNode, const TSharedPtr<ITableRow>& InWidget );
 	/** Callback for expanding tree items recursively */
 	void OnSetExpansionRecursive(TSharedPtr<FGraphActionNode> InTreeNode, bool bInIsItemExpanded);
-
+	/** Helper function for adding and scoring actions from our builder */
+	struct FScoreResults
+	{
+		int32 BestMatchIndex;
+		float BestMatchScore;
+	};
+	FScoreResults ScoreAndAddActions(int32 StartingIndex = INDEX_NONE);
+	/** Helper function to update the active selection after updating the displayed tree */
+	void UpdateActiveSelection(FScoreResults ForResults);
 private:
 	/** The pins that have been dragged off of to prompt the creation of this action menu. */
 	TArray<UEdGraphPin*> DraggedFromPins;

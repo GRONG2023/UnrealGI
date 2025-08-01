@@ -2,18 +2,35 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "Delegates/Delegate.h"
 #include "IMotionController.h"
-#include "RHI.h"
-#include "RHIResources.h"
 #include "InputCoreTypes.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Math/IntRect.h"
+#include "Math/Quat.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector.h"
+#include "Math/Vector2D.h"
+#include "Misc/Guid.h"
+#include "RHI.h"
+#include "RHIResources.h"
+#include "Trace/Detail/Channel.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "HeadMountedDisplayTypes.generated.h"
 
+class FRHICommandListImmediate;
+class UObject;
 struct FFilterVertex;
+struct FFrame;
 
-class HEADMOUNTEDDISPLAY_API FHMDViewMesh
+class FHMDViewMesh
 {
 public:
 
@@ -23,18 +40,18 @@ public:
 		MT_VisibleArea
 	};
 
-	FHMDViewMesh();
-	~FHMDViewMesh();
+	HEADMOUNTEDDISPLAY_API FHMDViewMesh();
+	HEADMOUNTEDDISPLAY_API ~FHMDViewMesh();
 
 	bool IsValid() const
 	{
 		return NumTriangles > 0;
 	}
 
-	void BuildMesh(const FVector2D Positions[], uint32 VertexCount, EHMDMeshType MeshType);
+	HEADMOUNTEDDISPLAY_API void BuildMesh(const FVector2D Positions[], uint32 VertexCount, EHMDMeshType MeshType);
 
-	FVertexBufferRHIRef VertexBufferRHI;
-	FIndexBufferRHIRef IndexBufferRHI;
+	FBufferRHIRef VertexBufferRHI;
+	FBufferRHIRef IndexBufferRHI;
 
 	unsigned  NumVertices;
 	unsigned  NumIndices;
@@ -47,7 +64,7 @@ HEADMOUNTEDDISPLAY_API DECLARE_LOG_CATEGORY_EXTERN(LogLoadingSplash, Log, All);
 UENUM()
 namespace EOrientPositionSelector
 {
-	enum Type
+	enum Type : int
 	{
 		Orientation UMETA(DisplayName = "Orientation"),
 		Position UMETA(DisplayName = "Position"),
@@ -56,16 +73,18 @@ namespace EOrientPositionSelector
 }
 
 /**
-* For HMDs that support it, this specifies whether the origin of the tracking universe will be at the floor, or at the user's eye height
+* Specifies the type of tracking space origin we should use.  Be aware that not all devices support all Tracking Origin types. https://registry.khronos.org/OpenXR/specs/1.0/html/xrspec.html#reference-spaces
 */
 UENUM()
 namespace EHMDTrackingOrigin
 {
-	enum Type
+	enum Type : int
 	{
-		Floor UMETA(DisplayName = "Floor Level"),
-		Eye UMETA(DisplayName = "Eye Level"),
-		Stage UMETA(DisplayName = "Stage (Centered Around Play Area)")
+		View UMETA(ToolTip = "Previously sometimes used Eye space to query for the view transform, this space is fixed to the HMD, meaning that as the hmd moves this space moves relative to other spaces. This isn't used as a tracking origin.")
+		, LocalFloor UMETA(ToolTip = "For standing stationary experiences. Typically centered around HMDs initial position either at app startup or device startup, with Z 0 set to match the floor as in the Stage Space. Falls back to local.")
+		, Local UMETA(ToolTip = "For seated experiences. Always Supported. Typically centered around the HMDs initial position either at app startup or device startup.  Useful for seated experiences. Previously called Eye Space.  ")
+		, Stage UMETA(ToolTip = "For walking-around experiences.  The origin will be at floor level and typically within a defined play areas who's bounds will be available. Falls back to local.")
+		, CustomOpenXR UMETA(ToolTip = "Custom OpenXR tracking space of some kind. You cannot set this space explictly, it is automatically used by some platform plugin extensions.")
 	};
 }
 
@@ -75,7 +94,7 @@ namespace EHMDTrackingOrigin
 UENUM()
 namespace EHMDWornState
 {
-	enum Type
+	enum Type : int
 	{
 		Unknown UMETA(DisplayName = "Unknown"),
 		Worn UMETA(DisplayName = "Worn"),
@@ -90,7 +109,7 @@ namespace EHMDWornState
 UENUM(BlueprintType)
 namespace EXRDeviceConnectionResult
 {
-	enum Type
+	enum Type : int
 	{
 		NoTrackingSystem,
 		FeatureNotSupported,
@@ -106,7 +125,7 @@ namespace EXRDeviceConnectionResult
 UENUM(BlueprintType)
 namespace EXRSystemFlags
 {
-	enum Type
+	enum Type : int
 	{
 		NoFlags       = 0x00 UMETA(Hidden),
 		IsAR          = 0x01,
@@ -195,12 +214,12 @@ struct FSpectatorScreenModeTexturePlusEyeLayout
 
 	FIntRect GetScaledEyeRect(int SizeX, int SizeY) const
 	{
-		return FIntRect(EyeRectMin.X * SizeX, EyeRectMin.Y * SizeY, EyeRectMax.X * SizeX, EyeRectMax.Y * SizeY);
+		return FIntRect(FIntRect::IntType(EyeRectMin.X * SizeX), FIntRect::IntType(EyeRectMin.Y * SizeY), FIntRect::IntType(EyeRectMax.X * SizeX), FIntRect::IntType(EyeRectMax.Y * SizeY));
 	}
 
 	FIntRect GetScaledTextureRect(int SizeX, int SizeY) const
 	{
-		return FIntRect(TextureRectMin.X * SizeX, TextureRectMin.Y * SizeY, TextureRectMax.X * SizeX, TextureRectMax.Y * SizeY);
+		return FIntRect(FIntRect::IntType(TextureRectMin.X * SizeX), FIntRect::IntType(TextureRectMin.Y * SizeY), FIntRect::IntType(TextureRectMax.X * SizeX), FIntRect::IntType(TextureRectMax.Y * SizeY));
 	}
 
 	FVector2D EyeRectMin;
@@ -212,8 +231,6 @@ struct FSpectatorScreenModeTexturePlusEyeLayout
 	bool bClearBlack;
 };
 
-DECLARE_DELEGATE_FiveParams(FSpectatorScreenRenderDelegate, FRHICommandListImmediate& /* RHICmdList */, FTexture2DRHIRef /* TargetTexture */, FTexture2DRHIRef /* EyeTexture */, FTexture2DRHIRef /* OtherTexture */, FVector2D /* WindowSize */);
-
 UENUM(BlueprintType)
 enum class EXRTrackedDeviceType : uint8
 {
@@ -223,6 +240,8 @@ enum class EXRTrackedDeviceType : uint8
 	Controller,
 	/** Represents a static tracking reference device, such as a Lighthouse or tracking camera */
 	TrackingReference,
+	/** Represents trackers, such as a Vive tracker */
+	Tracker,
 	/** Misc. device types, for future expansion */
 	Other,
 	/** DeviceId is invalid */
@@ -270,8 +289,8 @@ enum class EHandKeypoint : uint8
 
 const int32 EHandKeypointCount = static_cast<int32>(EHandKeypoint::LittleTip) + 1;
 
-UCLASS()
-class HEADMOUNTEDDISPLAY_API UHandKeypointConversion : public UBlueprintFunctionLibrary
+UCLASS(MinimalAPI)
+class UHandKeypointConversion : public UBlueprintFunctionLibrary
 {
 	GENERATED_BODY()
 
@@ -294,7 +313,7 @@ enum class EXRVisualType : uint8
 };
 
 USTRUCT(BlueprintType)
-struct HEADMOUNTEDDISPLAY_API FXRHMDData
+struct FXRHMDData
 {
 	GENERATED_USTRUCT_BODY();
 
@@ -315,7 +334,7 @@ struct HEADMOUNTEDDISPLAY_API FXRHMDData
 };
 
 USTRUCT(BlueprintType)
-struct HEADMOUNTEDDISPLAY_API FXRMotionControllerData
+struct FXRMotionControllerData
 {
 	GENERATED_USTRUCT_BODY();
 
@@ -333,22 +352,35 @@ struct HEADMOUNTEDDISPLAY_API FXRMotionControllerData
 
 	UPROPERTY(BlueprintReadOnly, Category = "XR")
 	ETrackingStatus TrackingStatus = ETrackingStatus::NotTracked;
-	
+
+	// Vector representing an object being held in the player's hand
 	UPROPERTY(BlueprintReadOnly, Category = "XR")
 	FVector GripPosition = FVector(0.0f);
+	// Quaternion representing an object being held in the player's hand
 	UPROPERTY(BlueprintReadOnly, Category = "XR")
 	FQuat GripRotation = FQuat(EForceInit::ForceInitToZero);
 
-	//for hand controllers, provides a more steady vector based on the elbow
+	// For handheld controllers, gives a vector for pointing at objects
 	UPROPERTY(BlueprintReadOnly, Category = "XR")
-	FVector AimPosition = FVector(0.0f);;
+	FVector AimPosition = FVector(0.0f);
+	// For handheld controllers, gives a quaternion for pointing at objects
 	UPROPERTY(BlueprintReadOnly, Category = "XR")
 	FQuat AimRotation = FQuat(EForceInit::ForceInitToZero);
 
+	// For handheld controllers, gives a vector for representing the hand
 	UPROPERTY(BlueprintReadOnly, Category = "XR")
-	TArray<struct FVector> HandKeyPositions;
+	FVector PalmPosition = FVector(0.0f);
+	// For handheld controllers, gives a quaternion for representing the hand
 	UPROPERTY(BlueprintReadOnly, Category = "XR")
-	TArray<struct FQuat> HandKeyRotations;
+	FQuat PalmRotation = FQuat(EForceInit::ForceInitToZero);
+
+	// The indices of this array are the values of EHandKeypoint (Palm, Wrist, ThumbMetacarpal, etc).
+	UPROPERTY(BlueprintReadOnly, Category = "XR")
+	TArray<FVector> HandKeyPositions;
+	// The indices of this array are the values of EHandKeypoint (Palm, Wrist, ThumbMetacarpal, etc).
+	UPROPERTY(BlueprintReadOnly, Category = "XR")
+	TArray<FQuat> HandKeyRotations;
+	// The indices of this array are the values of EHandKeypoint (Palm, Wrist, ThumbMetacarpal, etc).
 	UPROPERTY(BlueprintReadOnly, Category = "XR")
 	TArray<float> HandKeyRadii;
 

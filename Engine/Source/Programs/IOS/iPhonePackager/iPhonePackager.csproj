@@ -78,6 +78,7 @@
     <Reference Include="SysadminsLV.Asn1Parser, Version=1.2.1.0, Culture=neutral, processorArchitecture=MSIL">
       <SpecificVersion>False</SpecificVersion>
       <HintPath>..\..\..\..\Binaries\ThirdParty\IOS\SysadminsLV.Asn1Parser.dll</HintPath>
+      <Private>False</Private>
     </Reference>
     <Reference Include="System" />
     <Reference Include="System.Core">
@@ -97,7 +98,7 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="..\..\DotNETCommon\MetaData.cs">
+    <Compile Include="..\..\Shared\MetaData.cs">
       <Link>Properties\MetaData.cs</Link>
     </Compile>
     <Compile Include="CodeSigning.cs" />
@@ -224,16 +225,6 @@
     <Content Include="IPhonePackagerIcon.ico" />
     <Content Include="Resources\YellowCheck.png" />
     <None Include="Resources\GreyCheck.png" />
-  </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\..\DotNETCommon\DotNETUtilities\DotNETUtilities.csproj">
-      <Project>{5d7d66e8-8c76-4af9-b3ec-2ef03421d730}</Project>
-      <Name>DotNETUtilities</Name>
-    </ProjectReference>
-    <ProjectReference Include="..\DeploymentInterface\DeploymentInterface.csproj">
-      <Project>{B7C89A17-1CB7-42D7-B879-43297538C193}</Project>
-      <Name>DeploymentInterface</Name>
-    </ProjectReference>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <!-- To modify your build process, add your task inside one of the targets below and uncomment it. 

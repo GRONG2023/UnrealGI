@@ -31,7 +31,7 @@ DECLARE_DELEGATE_OneParam( FOnTimelineLinearColorStatic, FLinearColor );
 
 /** Whether or not the timeline should be finished after the specified length, or the last keyframe in the tracks */
 UENUM()
-enum ETimelineLengthMode
+enum ETimelineLengthMode : int
 {
 	TL_TimelineLength,
 	TL_LastKeyFrame
@@ -41,7 +41,7 @@ enum ETimelineLengthMode
 UENUM(BlueprintType)
 namespace ETimelineDirection
 {
-	enum Type
+	enum Type : int
 	{
 		Forward,
 		Backward,
@@ -78,7 +78,7 @@ struct FTimelineVectorTrack
 
 	/** Vector curve to be evaluated */
 	UPROPERTY()
-	class UCurveVector* VectorCurve;
+	TObjectPtr<class UCurveVector> VectorCurve;
 
 	/** Function that the output from ValueCurve will be passed to */
 	UPROPERTY()
@@ -115,7 +115,7 @@ struct FTimelineFloatTrack
 
 	/** Float curve to be evaluated */
 	UPROPERTY()
-	class UCurveFloat* FloatCurve;
+	TObjectPtr<class UCurveFloat> FloatCurve;
 
 	/** Function that the output from ValueCurve will be passed to */
 	UPROPERTY()
@@ -153,7 +153,7 @@ struct FTimelineLinearColorTrack
 
 	/** Float curve to be evaluated */
 	UPROPERTY()
-	class UCurveLinearColor* LinearColorCurve;
+	TObjectPtr<class UCurveLinearColor> LinearColorCurve;
 
 	/** Function that the output from ValueCurve will be passed to */
 	UPROPERTY()
@@ -316,6 +316,9 @@ public:
 	/** Get length of the timeline */
 	ENGINE_API float GetTimelineLength() const;
 
+	/** Get length of the timeline divided by the play rate */
+	ENGINE_API float GetScaledTimelineLength() const;
+
 	/** Sets the timeline length mode */
 	ENGINE_API void SetTimelineLengthMode(ETimelineLengthMode NewMode);
 
@@ -392,7 +395,7 @@ private:
 	/** The actual timeline structure */
 	UPROPERTY(ReplicatedUsing=OnRep_Timeline)
 	FTimeline	TheTimeline;
-
+	
 	/** True if global time dilation should be ignored by this timeline, false otherwise. */
 	UPROPERTY()
 	uint32 bIgnoreTimeDilation : 1;
@@ -462,6 +465,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Components|Timeline")
 	ENGINE_API float GetTimelineLength() const;
 
+	/** Get length of the timeline divided by the play rate */
+	UFUNCTION(BlueprintCallable, Category="Components|Timeline")
+	ENGINE_API float GetScaledTimelineLength() const;
+
 	/** Set length of the timeline */
 	UFUNCTION(BlueprintCallable, Category="Components|Timeline")
 	ENGINE_API void SetTimelineLength(float NewLength);
@@ -491,7 +498,7 @@ public:
 	ENGINE_API void SetLinearColorCurve(UCurveLinearColor* NewLinearColorCurve, FName LinearColorTrackName);
 
 	UFUNCTION()
-	void OnRep_Timeline();
+	void OnRep_Timeline(FTimeline& OldTimeline);
 
 	//~ Begin ActorComponent Interface.
 	virtual void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction *ThisTickFunction) override;
@@ -517,24 +524,33 @@ public:
 	static ETimelineSigType GetTimelineSignatureForFunction(const UFunction* InFunc);
 
 	/** Add a callback event to the timeline */
+	UFUNCTION(BlueprintCallable, Category = "Components|Timeline")
 	ENGINE_API void AddEvent(float Time, FOnTimelineEvent EventFunc);
 	
 	/** Add a vector interpolation to the timeline */
+	UFUNCTION(BlueprintCallable, Category = "Components|Timeline")
 	ENGINE_API void AddInterpVector(UCurveVector* VectorCurve, FOnTimelineVector InterpFunc, FName PropertyName = NAME_None, FName TrackName = NAME_None);
+	ENGINE_API void AddInterpVector(UCurveVector* VectorCurve, FOnTimelineVectorStatic InterpFunc);
 	
 	/** Add a float interpolation to the timeline */
+	UFUNCTION(BlueprintCallable, Category = "Components|Timeline")
 	ENGINE_API void AddInterpFloat(UCurveFloat* FloatCurve, FOnTimelineFloat InterpFunc, FName PropertyName = NAME_None, FName TrackName = NAME_None);
+	ENGINE_API void AddInterpFloat(UCurveFloat* FloatCurve, FOnTimelineFloatStatic InterpFunc);
 
 	/** Add a linear color interpolation to the timeline */
+	UFUNCTION(BlueprintCallable, Category = "Components|Timeline")
 	ENGINE_API void AddInterpLinearColor(UCurveLinearColor* LinearColorCurve, FOnTimelineLinearColor InterpFunc, FName PropertyName = NAME_None, FName TrackName = NAME_None);
+	ENGINE_API void AddInterpLinearColor(UCurveLinearColor* LinearColorCurve, FOnTimelineLinearColorStatic InterpFunc);
 
 	/** Optionally provide an object to automatically update properties on */
 	ENGINE_API void SetPropertySetObject(UObject* NewPropertySetObject);
 
 	/** Set the delegate to call after each timeline tick */
+	UFUNCTION(BlueprintCallable, Category = "Components|Timeline")
 	ENGINE_API void SetTimelinePostUpdateFunc(FOnTimelineEvent NewTimelinePostUpdateFunc);
 
 	/** Set the delegate to call when timeline is finished */
+	UFUNCTION(BlueprintCallable, Category = "Components|Timeline")
 	ENGINE_API void SetTimelineFinishedFunc(FOnTimelineEvent NewTimelineFinishedFunc);
 	/** Set the static delegate to call when timeline is finished */
 	ENGINE_API void SetTimelineFinishedFunc(FOnTimelineEventStatic NewTimelineFinishedFunc);
@@ -545,6 +561,3 @@ public:
 	/** Get all curves used by the Timeline */
 	ENGINE_API void GetAllCurves(TSet<class UCurveBase*>& InOutCurves) const;
 };
-
-
-

@@ -110,6 +110,10 @@ bool FProjectDescriptor::Read(const FJsonObject& Object, const FString& PathToPr
 	Object.TryGetBoolField(TEXT("Enterprise"), bIsEnterpriseProject);
 	Object.TryGetBoolField(TEXT("DisableEnginePluginsByDefault"), bDisableEnginePluginsByDefault);
 
+#if WITH_EDITOR
+	ModuleNamesCache.Reset();
+#endif
+
 	// Read the modules
 	if(!FModuleDescriptor::ReadArray(Object, TEXT("Modules"), Modules, OutFailReason))
 	{
@@ -144,7 +148,11 @@ bool FProjectDescriptor::Read(const FJsonObject& Object, const FString& PathToPr
 		if (FPlatformProperties::RequiresCookedData() && AdditionalPluginDirectoriesValue->Num() > 0)
 		{
 			AdditionalPluginDirectories.Empty();
-			FString RemappedDir = FPaths::ProjectDir() + TEXT("../RemappedPlugins/");
+			FString RemappedDir = FPaths::ProjectDir() / TEXT("../RemappedPlugins/");
+			if (FPaths::IsRelative(RemappedDir))
+			{
+				RemappedDir = IFileManager::Get().ConvertToAbsolutePathForExternalAppForWrite(*RemappedDir);
+			}
 			AddPluginDirectory(RemappedDir);
 		}
 	}
@@ -184,23 +192,30 @@ bool FProjectDescriptor::Read(const FJsonObject& Object, const FString& PathToPr
 	}
 
 	// check if the project has directories for extended platforms, and assume support if it does
-	TArray<FString> ExtendedPlatforms;
-	IFileManager::Get().IterateDirectory(*(FPaths::Combine(PathToProject, TEXT("Platforms"))), [&ExtendedPlatforms](const TCHAR* InFilenameOrDirectory, const bool bInIsDirectory) -> bool
+	// however, if there were no platforms already listed, then all platforms are supported, and we don't
+	// want to add a platform or two here, because then _only_ those platforms will be supported
+	// (empty TargetPlatforms array means _all_ platforms are supported)
+	if (TargetPlatforms.Num() > 0)
 	{
-		if (bInIsDirectory)
+		TArray<FString> ExtendedPlatforms;
+		IFileManager::Get().IterateDirectory(*(FPaths::Combine(PathToProject, TEXT("Platforms"))), [&ExtendedPlatforms](const TCHAR* InFilenameOrDirectory, const bool bInIsDirectory) -> bool
 		{
-			FString LastDirectory = FPaths::GetBaseFilename(FString(InFilenameOrDirectory));
-			ExtendedPlatforms.Emplace(LastDirectory);
-		}
-		return true;
-	});
+			if (bInIsDirectory)
+			{
+				FString LastDirectory = FPaths::GetBaseFilename(FString(InFilenameOrDirectory));
+				ExtendedPlatforms.Emplace(LastDirectory);
+			}
+			return true;
+		});
 
-	const TMap<FString, FDataDrivenPlatformInfoRegistry::FPlatformInfo>& AllPlatformInfos = FDataDrivenPlatformInfoRegistry::GetAllPlatformInfos();
-	for (const FString& ExtendedPlatform : ExtendedPlatforms)
-	{
-		if (AllPlatformInfos.Contains(ExtendedPlatform))
+		const TMap<FName, FDataDrivenPlatformInfo>& AllPlatformInfos = FDataDrivenPlatformInfoRegistry::GetAllPlatformInfos();
+		for (const FString& ExtendedPlatform : ExtendedPlatforms)
 		{
-			TargetPlatforms.AddUnique(*ExtendedPlatform);
+			FName PlatformName(*ExtendedPlatform);
+			if (AllPlatformInfos.Contains(PlatformName))
+			{
+				TargetPlatforms.AddUnique(PlatformName);
+			}
 		}
 	}
 
@@ -339,9 +354,17 @@ const FString FProjectDescriptor::MakePathRelativeToProject(const FString& Dir, 
 
 bool FProjectDescriptor::AddPluginDirectory(const FString& Dir)
 {
-	checkf(!FPaths::IsRelative(Dir), TEXT("%s is not an absolute path"), *Dir);
-	check(!Dir.StartsWith(IFileManager::Get().ConvertToAbsolutePathForExternalAppForWrite(*FPaths::ProjectPluginsDir())));
-	check(!Dir.StartsWith(IFileManager::Get().ConvertToAbsolutePathForExternalAppForWrite(*FPaths::EnginePluginsDir())));
+#if WITH_EDITOR
+	if (!ensureMsgf(!FPaths::IsRelative(Dir), TEXT("Cannot add plugin directory: %s is not an absolute path"), *Dir))
+	{
+		return false;
+	}
+#endif
+	if (Dir.StartsWith(IFileManager::Get().ConvertToAbsolutePathForExternalAppForWrite(*FPaths::ProjectPluginsDir())) ||
+		Dir.StartsWith(IFileManager::Get().ConvertToAbsolutePathForExternalAppForWrite(*FPaths::EnginePluginsDir())))
+	{
+		return false;
+	}
 
 	if (!AdditionalPluginDirectories.Contains(Dir))
 	{
@@ -353,15 +376,24 @@ bool FProjectDescriptor::AddPluginDirectory(const FString& Dir)
 
 bool FProjectDescriptor::RemovePluginDirectory(const FString& Dir)
 {
-	checkf(!FPaths::IsRelative(Dir), TEXT("%s is not an absolute path"), *Dir);
+	if (!ensureMsgf(!FPaths::IsRelative(Dir), TEXT("Cannot remove plugin directory: %s is not an absolute path"), *Dir))
+	{
+		return false;
+	}
 	return AdditionalPluginDirectories.RemoveSingle(Dir) > 0;
 }
 
 bool FProjectDescriptor::AddRootDirectory(const FString& Dir)
 {
-	checkf(!FPaths::IsRelative(Dir), TEXT("%s is not an absolute path"), *Dir);
-	check(!Dir.StartsWith(IFileManager::Get().ConvertToAbsolutePathForExternalAppForWrite(*FPaths::EngineDir())));
-	check(!Dir.StartsWith(IFileManager::Get().ConvertToAbsolutePathForExternalAppForWrite(*FPaths::ProjectDir())));
+	if (!ensureMsgf(!FPaths::IsRelative(Dir), TEXT("Cannot add root directory: %s is not an absolute path"), *Dir))
+	{
+		return false;
+	}
+	if (Dir.StartsWith(IFileManager::Get().ConvertToAbsolutePathForExternalAppForWrite(*FPaths::EngineDir())) ||
+		Dir.StartsWith(IFileManager::Get().ConvertToAbsolutePathForExternalAppForWrite(*FPaths::ProjectDir())))
+	{
+		return false;
+	}
 
 	if (!AdditionalRootDirectories.Contains(Dir))
 	{
@@ -373,8 +405,28 @@ bool FProjectDescriptor::AddRootDirectory(const FString& Dir)
 
 bool FProjectDescriptor::RemoveRootDirectory(const FString& Dir)
 {
-	checkf(!FPaths::IsRelative(Dir), TEXT("%s is not an absolute path"), *Dir);
+	if (!ensureMsgf(!FPaths::IsRelative(Dir), TEXT("Cannot remove root directory: %s is not an absolute path"), *Dir))
+	{
+		return false;
+	}
 	return AdditionalRootDirectories.RemoveSingle(Dir) > 0;
 }
+
+#if WITH_EDITOR
+bool FProjectDescriptor::HasModule(FName ModuleName) const
+{
+	if (ModuleNamesCache.Num() != Modules.Num())
+	{
+		ModuleNamesCache.Reset();
+		ModuleNamesCache.Reserve(Modules.Num());
+		for (const FModuleDescriptor& Module : Modules)
+		{
+			ModuleNamesCache.Add(Module.Name);
+		}
+		ensure(ModuleNamesCache.Num() == Modules.Num());
+	}
+	return ModuleNamesCache.Contains(ModuleName);
+}
+#endif //if WITH_EDITOR
 
 #undef LOCTEXT_NAMESPACE

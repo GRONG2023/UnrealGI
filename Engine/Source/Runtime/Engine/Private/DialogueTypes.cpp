@@ -1,8 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Sound/DialogueTypes.h"
-#include "Misc/Guid.h"
 #include "Sound/DialogueVoice.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(DialogueTypes)
+
 bool operator==(const FDialogueContext& LHS, const FDialogueContext& RHS)
 {
 	return	LHS.Speaker == RHS.Speaker &&
@@ -56,3 +58,4 @@ FDialogueWaveParameter::FDialogueWaveParameter()
 {
 
 }
+

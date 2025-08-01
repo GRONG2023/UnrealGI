@@ -4,24 +4,27 @@
 #include "Layout/LayoutUtils.h"
 
 SUniformGridPanel::SUniformGridPanel()
-: Children(this)
+	: Children(this)
+	, SlotPadding(*this, FMargin(0.0f))
+	, MinDesiredSlotWidth(*this, 0.f)
+	, MinDesiredSlotHeight(*this, 0.f)
 {
+}
+
+SUniformGridPanel::FSlot::FSlotArguments SUniformGridPanel::Slot(int32 Column, int32 Row)
+{
+	return FSlot::FSlotArguments(MakeUnique<FSlot>(Column, Row));
 }
 
 void SUniformGridPanel::Construct( const FArguments& InArgs )
 {
-	SlotPadding = InArgs._SlotPadding;
+	SlotPadding.Assign(*this, InArgs._SlotPadding);
 	NumColumns = 0;
 	NumRows = 0;
-	MinDesiredSlotWidth = InArgs._MinDesiredSlotWidth.Get();
-	MinDesiredSlotHeight = InArgs._MinDesiredSlotHeight.Get();
+	MinDesiredSlotWidth.Assign(*this, InArgs._MinDesiredSlotWidth);
+	MinDesiredSlotHeight.Assign(*this, InArgs._MinDesiredSlotHeight);
 
-	Children.Reserve( InArgs.Slots.Num() );
-	for (int32 ChildIndex=0; ChildIndex < InArgs.Slots.Num(); ChildIndex++)
-	{
-		FSlot* ChildSlot = InArgs.Slots[ChildIndex];
-		Children.Add( ChildSlot );
-	}
+	Children.AddSlots(MoveTemp(const_cast<TArray<FSlot::FSlotArguments>&>(InArgs._Slots)));
 }
 
 void SUniformGridPanel::OnArrangeChildren( const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren ) const
@@ -43,7 +46,7 @@ void SUniformGridPanel::OnArrangeChildren( const FGeometry& AllottedGeometry, FA
 
 				ArrangedChildren.AddWidget(ChildVisibility,
 					AllottedGeometry.MakeChild(Child.GetWidget(),
-					FVector2D(CellSize.X*Child.Column + XAxisResult.Offset, CellSize.Y*Child.Row + YAxisResult.Offset),
+					FVector2D(CellSize.X*Child.GetColumn() + XAxisResult.Offset, CellSize.Y*Child.GetRow() + YAxisResult.Offset),
 					FVector2D(XAxisResult.Size, YAxisResult.Size)
 					));
 			}
@@ -70,8 +73,8 @@ FVector2D SUniformGridPanel::ComputeDesiredSize( float ) const
 		if (Child.GetWidget()->GetVisibility() != EVisibility::Collapsed)
 		{
 			// A single cell at (N,M) means our grid size is (N+1, M+1)
-			NumColumns = FMath::Max(Child.Column + 1, NumColumns);
-			NumRows = FMath::Max(Child.Row + 1, NumRows);
+			NumColumns = FMath::Max(Child.GetColumn() + 1, NumColumns);
+			NumRows = FMath::Max(Child.GetRow() + 1, NumRows);
 
 			FVector2D ChildDesiredSize = Child.GetWidget()->GetDesiredSize() + SlotPaddingDesiredSize;
 
@@ -93,40 +96,27 @@ FChildren* SUniformGridPanel::GetChildren()
 
 void SUniformGridPanel::SetSlotPadding(TAttribute<FMargin> InSlotPadding)
 {
-	SlotPadding = InSlotPadding;
+	SlotPadding.Assign(*this, MoveTemp(InSlotPadding));
 }
 
 void SUniformGridPanel::SetMinDesiredSlotWidth(TAttribute<float> InMinDesiredSlotWidth)
 {
-	MinDesiredSlotWidth = InMinDesiredSlotWidth;
+	MinDesiredSlotWidth.Assign(*this, MoveTemp(InMinDesiredSlotWidth));
 }
 
 void SUniformGridPanel::SetMinDesiredSlotHeight(TAttribute<float> InMinDesiredSlotHeight)
 {
-	MinDesiredSlotHeight = InMinDesiredSlotHeight;
+	MinDesiredSlotHeight.Assign(*this, MoveTemp(InMinDesiredSlotHeight));
 }
 
-SUniformGridPanel::FSlot& SUniformGridPanel::AddSlot( int32 Column, int32 Row )
+SUniformGridPanel::FScopedWidgetSlotArguments SUniformGridPanel::AddSlot( int32 Column, int32 Row )
 {
-	FSlot& NewSlot = *(new FSlot( Column, Row ));
-
-	Children.Add( &NewSlot );
-
-	return NewSlot;
+	return FScopedWidgetSlotArguments{ MakeUnique<FSlot>(Column, Row), Children, INDEX_NONE };
 }
 
 bool SUniformGridPanel::RemoveSlot( const TSharedRef<SWidget>& SlotWidget )
 {
-	for (int32 SlotIdx = 0; SlotIdx < Children.Num(); ++SlotIdx)
-	{
-		if ( SlotWidget == Children[SlotIdx].GetWidget() )
-		{
-			Children.RemoveAt(SlotIdx);
-			return true;
-		}
-	}
-	
-	return false;
+	return Children.Remove(SlotWidget) != INDEX_NONE;
 }
 
 void SUniformGridPanel::ClearChildren()

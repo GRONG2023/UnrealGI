@@ -6,7 +6,6 @@
 
 #pragma once
 
-
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/Object.h"
@@ -15,20 +14,16 @@
 /**
  * Implements content browser settings.  These are global not per-project
  */
-UCLASS(config=EditorSettings)
-class UNREALED_API UContentBrowserSettings : public UObject
+UCLASS(config=EditorSettings, MinimalAPI)
+class UContentBrowserSettings : public UObject
 {
-	GENERATED_UCLASS_BODY()
+	GENERATED_BODY()
 
 public:
 
 	/** The number of objects to load at once in the Content Browser before displaying a warning about loading many assets */
 	UPROPERTY(EditAnywhere, config, Category=ContentBrowser, meta=(DisplayName = "Assets to Load at Once Before Warning", ClampMin = "1"))
 	int32 NumObjectsToLoadBeforeWarning;
-
-	/** Whether the Content Browser should open the Sources Panel by default */
-	UPROPERTY(EditAnywhere, config, Category = ContentBrowser)
-	bool bOpenSourcesPanelByDefault;
 
 	/** Whether to render thumbnails for loaded assets in real-time in the Content Browser */
 	UPROPERTY(config)
@@ -48,19 +43,23 @@ public:
 
 	/** Whether to group root folders under a common folder in the path view */
 	UPROPERTY(config)
-	bool ShowAllFolder = false;
+	bool bShowAllFolder = true;
 
 	/** Whether to organize folders in the content browser */
 	UPROPERTY(config)
-	bool OrganizeFolders = false;
+	bool bOrganizeFolders = true;
+
+	/** Whether to append 'Content' text to displayed folder names */
+	UPROPERTY(EditAnywhere, config, Category = ContentBrowser)
+	bool bDisplayContentFolderSuffix = true;
+
+	/** Whether display friendly name as plugin folder names */
+	UPROPERTY(EditAnywhere, config, Category = ContentBrowser)
+	bool bDisplayFriendlyNameForPluginFolders = true;
 
 	/** The number of objects to keep in the Content Browser Recently Opened filter */
-	UPROPERTY(EditAnywhere, config, Category = ContentBrowser, meta = (DisplayName = "Number of Assets to Keep in the Recently Opened Filter", ClampMin = "1", ClampMax = "30"))
-	int32 NumObjectsInRecentList;
-
-	/** Whether the Content Browser should open the Sources Panel by default */
-	UPROPERTY(EditAnywhere, config, Category = ContentBrowser)
-	bool bShowFullCollectionNameInToolTip;
+	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "The filter now always keeps track of your last 30 recent assets"))
+	int32 NumObjectsInRecentList_DEPRECATED;
 
 	/** Enables the rendering of Material Instance thumbnail previews */
 	UPROPERTY(EditAnywhere, config, Category = ContentBrowser)
@@ -69,27 +68,27 @@ public:
 public:
 
 	/** Sets whether we are allowed to display the engine folder or not, optional flag for setting override instead */
-	void SetDisplayEngineFolder( bool bInDisplayEngineFolder, bool bOverride = false )
-	{ 
-		bOverride ? OverrideDisplayEngineFolder = bInDisplayEngineFolder : DisplayEngineFolder = bInDisplayEngineFolder;
+	void SetDisplayEngineFolder( bool bInDisplayEngineFolder )
+	{
+		DisplayEngineFolder = bInDisplayEngineFolder;
 	}
 
 	/** Gets whether we are allowed to display the engine folder or not, optional flag ignoring the override */
-	bool GetDisplayEngineFolder( bool bExcludeOverride = false ) const
-	{ 
-		return ( ( bExcludeOverride ? false : OverrideDisplayEngineFolder ) || DisplayEngineFolder );
+	bool GetDisplayEngineFolder() const
+	{
+		return DisplayEngineFolder;
 	}
 
 	/** Sets whether we are allowed to display the developers folder or not, optional flag for setting override instead */
-	void SetDisplayDevelopersFolder( bool bInDisplayDevelopersFolder, bool bOverride = false )
-	{ 
-		bOverride ? OverrideDisplayDevelopersFolder = bInDisplayDevelopersFolder : DisplayDevelopersFolder = bInDisplayDevelopersFolder;
+	void SetDisplayDevelopersFolder( bool bInDisplayDevelopersFolder )
+	{
+		DisplayDevelopersFolder = bInDisplayDevelopersFolder;
 	}
 
 	/** Gets whether we are allowed to display the developers folder or not, optional flag ignoring the override */
-	bool GetDisplayDevelopersFolder( bool bExcludeOverride = false ) const
-	{ 
-		return ( ( bExcludeOverride ? false : OverrideDisplayDevelopersFolder ) || DisplayDevelopersFolder );
+	bool GetDisplayDevelopersFolder() const
+	{
+		return DisplayDevelopersFolder;
 	}
 
 	/** Sets whether we are allowed to display the L10N folder (contains localized assets) or not */
@@ -104,16 +103,16 @@ public:
 		return DisplayL10NFolder;
 	}
 
-	/** Sets whether we are allowed to display the plugin folders or not, optional flag for setting override instead */
-	void SetDisplayPluginFolders( bool bInDisplayPluginFolders, bool bOverride = false )
-	{ 
-		bOverride ? OverrideDisplayPluginFolders = bInDisplayPluginFolders : DisplayPluginFolders = bInDisplayPluginFolders;
+	/** Sets whether we are allowed to display the plugin folders or not */
+	void SetDisplayPluginFolders( bool bInDisplayPluginFolders )
+	{
+		DisplayPluginFolders = bInDisplayPluginFolders;
 	}
 
-	/** Gets whether we are allowed to display the plugin folders or not, optional flag ignoring the override */
-	bool GetDisplayPluginFolders( bool bExcludeOverride = false ) const
-	{ 
-		return ( ( bExcludeOverride ? false : OverrideDisplayPluginFolders ) || DisplayPluginFolders );
+	/** Gets whether we are allowed to display the plugin folders or not */
+	bool GetDisplayPluginFolders() const
+	{
+		return DisplayPluginFolders;
 	}
 
 	/** Sets whether we are allowed to display favorite folders or not */
@@ -200,16 +199,13 @@ protected:
 
 	// UObject overrides
 
-	virtual void PostEditChangeProperty( struct FPropertyChangedEvent& PropertyChangedEvent ) override;
+	UNREALED_API virtual void PostEditChangeProperty( struct FPropertyChangedEvent& PropertyChangedEvent ) override;
 
 private:
 
 	/** Whether to display the engine folder in the assets view of the content browser. */
 	UPROPERTY(config)
 	bool DisplayEngineFolder;
-
-	/** If true, overrides the DisplayEngine setting */
-	bool OverrideDisplayEngineFolder;
 
 	/** Whether to display the developers folder in the path view of the content browser */
 	UPROPERTY(config)
@@ -218,21 +214,14 @@ private:
 	UPROPERTY(config)
 	bool DisplayL10NFolder;
 
-	/** If true, overrides the DisplayDev setting */
-	bool OverrideDisplayDevelopersFolder;
-
 	/** List of plugin folders to display in the content browser. */
 	UPROPERTY(config)
 	bool DisplayPluginFolders;
 
-	/** Temporary override for the DisplayPluginFolders setting */
-	bool OverrideDisplayPluginFolders;
-
 	UPROPERTY(config)
 	bool DisplayFavorites;
 
-	UPROPERTY(config)
-	bool DockCollections;
+	bool DockCollections = true;
 
 	UPROPERTY(config)
 	bool DisplayCppFolders;
@@ -247,5 +236,5 @@ private:
 	bool IncludeCollectionNames;
 
 	// Holds an event delegate that is executed when a setting has changed.
-	static FSettingChangedEvent SettingChangedEvent;
+	static UNREALED_API FSettingChangedEvent SettingChangedEvent;
 };

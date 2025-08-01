@@ -58,7 +58,7 @@ struct FMacPlatformProperties
 		
 		if (HAS_EDITOR_DATA)
 		{
-			return "Mac";
+			return "MacEditor";
 		}
 
 		if (IS_CLIENT_ONLY)
@@ -66,7 +66,7 @@ struct FMacPlatformProperties
 			return "MacClient";
 		}
 
-		return "MacNoEditor";
+		return "Mac";
 	}
 
 	static FORCEINLINE bool RequiresCookedData( )
@@ -123,11 +123,6 @@ struct FMacPlatformProperties
 		return 1.0f;
 	}
 	
-	static FORCEINLINE bool SupportsTessellation()
-	{
-		return true;
-	}
-
 	static FORCEINLINE bool SupportsAudioStreaming()
 	{
 		return !IsServerOnly();
@@ -145,5 +140,5 @@ struct FMacPlatformProperties
 };
 
 #ifdef PROPERTY_HEADER_SHOULD_DEFINE_TYPE
-typedef FMacPlatformProperties<WITH_EDITORONLY_DATA, UE_SERVER, !WITH_SERVER_CODE> FPlatformProperties;
+typedef FMacPlatformProperties<WITH_EDITORONLY_DATA, UE_SERVER, !WITH_SERVER_CODE && !WITH_EDITOR> FPlatformProperties;
 #endif

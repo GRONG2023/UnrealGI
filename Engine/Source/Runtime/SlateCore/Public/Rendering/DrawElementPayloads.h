@@ -2,60 +2,45 @@
 
 #pragma once
 
+#include "DrawElementTextOverflowArgs.h"
+#include "Fonts/FontCache.h"
+#include "Fonts/ShapedTextFwd.h"
 #include "SlateRenderBatch.h"
+#include "Styling/SlateBrush.h"
+#include "Types/SlateVector2.h"
 
-struct FSlateGradientStop
-{
-	FVector2D Position;
-	FLinearColor Color;
+#include "Rendering/RenderingCommon.h"
+#include "Rendering/DrawElementTypes.h"
 
-	/**
-	 * Construct a Gradient Stop from a Position and a Color.
-	 * @param InPosition - The position in widget space for this stop. Both X and Y are used for a single-axis gradient.
-						  A two stop gradient should go from (0,0), to (Width,Height).
-	 * @param InColor	- The color to lerp towards at this stop.
-	 */
-	FSlateGradientStop(const FVector2D& InPosition, const FLinearColor& InColor)
-		: Position(InPosition)
-		, Color(InColor)
-	{
+//////////////////////////////////////////////////////////////////////////
+// Deprecated payloads
+//////////////////////////////////////////////////////////////////////////
 
-	}
-};
-template <> struct TIsPODType<FSlateGradientStop> { enum { Value = true }; };
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 
-
-struct FSlateDataPayload
+struct UE_DEPRECATED(5.3, "Draw Element Payloads are no longer used, instead use the equivalent FSlateDrawElement subclass") FSlateDataPayload
 {
 	virtual ~FSlateDataPayload() {}
 	virtual void AddReferencedObjects(FReferenceCollector& Collector) {}
 };
 
-struct FSlateTintableElement
-{
-	FLinearColor Tint;
-
-	FORCEINLINE void SetTint(const FLinearColor& InTint) { Tint = InTint; }
-	FORCEINLINE FLinearColor GetTint() const { return Tint; }
-};
-
-struct FSlateBoxPayload : public FSlateDataPayload, public FSlateTintableElement
+struct UE_DEPRECATED(5.3, "Draw Element Payloads are no longer used, instead use the equivalent FSlateDrawElement subclass") FSlateBoxPayload : public FSlateDataPayload, public FSlateTintableElement
 {
 	FMargin Margin;
-	FBox2D UVRegion;
+	FBox2f UVRegion;
 	const FSlateShaderResourceProxy* ResourceProxy;
 	ESlateBrushTileType::Type Tiling;
 	ESlateBrushMirrorType::Type Mirroring;
 	ESlateBrushDrawType::Type DrawType;
 
 	const FMargin& GetBrushMargin() const { return Margin; }
-	const FBox2D& GetBrushUVRegion() const { return UVRegion; }
+	const FBox2f& GetBrushUVRegion() const { return UVRegion; }
 	ESlateBrushTileType::Type GetBrushTiling() const { return Tiling; }
 	ESlateBrushMirrorType::Type GetBrushMirroring() const { return Mirroring; }
 	ESlateBrushDrawType::Type GetBrushDrawType() const { return DrawType; }
 	const FSlateShaderResourceProxy* GetResourceProxy() const { return ResourceProxy; }
 
-	void SetBrush(const FSlateBrush* InBrush)
+	void SetBrush(const FSlateBrush* InBrush, UE::Slate::FDeprecateVector2DParameter LocalSize, float DrawScale)
 	{
 		check(InBrush);
 		ensureMsgf(InBrush->GetDrawType() != ESlateBrushDrawType::NoDrawType, TEXT("This should have been filtered out earlier in the Make... call."));
@@ -66,7 +51,7 @@ struct FSlateBoxPayload : public FSlateDataPayload, public FSlateTintableElement
 		Tiling = InBrush->GetTiling();
 		Mirroring = InBrush->GetMirroring();
 		DrawType = InBrush->GetDrawType();
-		FSlateResourceHandle Handle = InBrush->GetRenderingResource();
+		const FSlateResourceHandle& Handle = InBrush->GetRenderingResource(LocalSize, DrawScale);
 		if (Handle.IsValid())
 		{
 			ResourceProxy = Handle.GetResourceProxy();
@@ -82,7 +67,21 @@ struct FSlateBoxPayload : public FSlateDataPayload, public FSlateTintableElement
 	}
 };
 
-struct FSlateTextPayload : public FSlateDataPayload, public FSlateTintableElement
+struct UE_DEPRECATED(5.3, "Draw Element Payloads are no longer used, instead use the equivalent FSlateDrawElement subclass") FSlateRoundedBoxPayload : public FSlateBoxPayload
+{
+	FLinearColor OutlineColor;
+	FVector4f Radius;
+	float OutlineWeight;
+
+	FORCEINLINE void SetRadius(FVector4f InRadius) { Radius = InRadius; }
+	FORCEINLINE FVector4f GetRadius() const { return Radius; }
+
+	FORCEINLINE void SetOutline(const FLinearColor& InOutlineColor, float InOutlineWeight) { OutlineColor = InOutlineColor; OutlineWeight = InOutlineWeight; }
+	FORCEINLINE FLinearColor GetOutlineColor() const { return OutlineColor; }
+	FORCEINLINE float GetOutlineWeight() const { return OutlineWeight; }
+};
+
+struct UE_DEPRECATED(5.3, "Draw Element Payloads are no longer used, instead use the equivalent FSlateDrawElement subclass") FSlateTextPayload : public FSlateDataPayload, public FSlateTintableElement
 {
 	// The font to use when rendering
 	FSlateFontInfo FontInfo;
@@ -118,13 +117,14 @@ struct FSlateTextPayload : public FSlateDataPayload, public FSlateTintableElemen
 	}
 };
 
-
-struct FSlateShapedTextPayload : public FSlateDataPayload, public FSlateTintableElement
+struct UE_DEPRECATED(5.3, "Draw Element Payloads are no longer used, instead use the equivalent FSlateDrawElement subclass") FSlateShapedTextPayload : public FSlateDataPayload, public FSlateTintableElement
 {
 	// Shaped text data
 	FShapedGlyphSequencePtr ShapedGlyphSequence;
 
 	FLinearColor OutlineTint;
+
+	FTextOverflowArgs OverflowArgs;
 
 	const FShapedGlyphSequencePtr& GetShapedGlyphSequence() const { return ShapedGlyphSequence; }
 	FLinearColor GetOutlineTint() const { return OutlineTint; }
@@ -135,28 +135,41 @@ struct FSlateShapedTextPayload : public FSlateDataPayload, public FSlateTintable
 		OutlineTint = InOutlineTint;
 	}
 
+	void SetOverflowArgs(const FTextOverflowArgs& InArgs)
+	{
+		OverflowArgs = InArgs;
+		check(InArgs.OverflowDirection == ETextOverflowDirection::NoOverflow || InArgs.OverflowTextPtr.IsValid());
+	}
+
 	virtual void AddReferencedObjects(FReferenceCollector& Collector)
 	{
 		if (ShapedGlyphSequence.IsValid())
 		{
 			const_cast<FShapedGlyphSequence*>(ShapedGlyphSequence.Get())->AddReferencedObjects(Collector);
 		}
+
+		if (OverflowArgs.OverflowTextPtr.IsValid())
+		{
+			const_cast<FShapedGlyphSequence*>(OverflowArgs.OverflowTextPtr.Get())->AddReferencedObjects(Collector);
+		}
 	}
 };
 
-struct FSlateGradientPayload : public FSlateDataPayload
+struct UE_DEPRECATED(5.3, "Draw Element Payloads are no longer used, instead use the equivalent FSlateDrawElement subclass") FSlateGradientPayload : public FSlateDataPayload
 {
 	TArray<FSlateGradientStop> GradientStops;
 	EOrientation GradientType;
+	FVector4f CornerRadius;
 
-	void SetGradient(const TArray<FSlateGradientStop>& InGradientStops, EOrientation InGradientType)
+	void SetGradient(TArray<FSlateGradientStop> InGradientStops, EOrientation InGradientType, FVector4f InCornerRadius)
 	{
-		GradientStops = InGradientStops;
+		GradientStops = MoveTemp(InGradientStops);
 		GradientType = InGradientType;
+		CornerRadius = InCornerRadius;
 	}
 };
 
-struct FSlateSplinePayload : public FSlateDataPayload, public FSlateTintableElement
+struct UE_DEPRECATED(5.3, "Draw Element Payloads are no longer used, instead use the equivalent FSlateDrawElement subclass") FSlateSplinePayload : public FSlateDataPayload, public FSlateTintableElement
 {
 	TArray<FSlateGradientStop> GradientStops;
 	// Bezier Spline Data points. E.g.
@@ -166,10 +179,10 @@ struct FSlateSplinePayload : public FSlateDataPayload, public FSlateTintableElem
 	//     P0 *             * P3            P0 *   \   * P3
 	//                                              \ /
 	//                                               + P2	
-	FVector2D P0;
-	FVector2D P1;
-	FVector2D P2;
-	FVector2D P3;
+	FVector2f P0;
+	FVector2f P1;
+	FVector2f P2;
+	FVector2f P3;
 
 	float Thickness;
 
@@ -177,7 +190,7 @@ struct FSlateSplinePayload : public FSlateDataPayload, public FSlateTintableElem
 	void SetThickness(float InThickness) { Thickness = InThickness; }
 	float GetThickness() const { return Thickness; }
 
-	void SetCubicBezier(const FVector2D& InP0, const FVector2D& InP1, const FVector2D& InP2, const FVector2D& InP3, float InThickness, const FLinearColor& InTint)
+	void SetCubicBezier(const UE::Slate::FDeprecateVector2DParameter InP0, const UE::Slate::FDeprecateVector2DParameter InP1, const UE::Slate::FDeprecateVector2DParameter InP2, const UE::Slate::FDeprecateVector2DParameter InP3, float InThickness, const FLinearColor InTint)
 	{
 		Tint = InTint;
 		P0 = InP0;
@@ -187,7 +200,7 @@ struct FSlateSplinePayload : public FSlateDataPayload, public FSlateTintableElem
 		Thickness = InThickness;
 	}
 
-	void SetHermiteSpline(const FVector2D& InStart, const FVector2D& InStartDir, const FVector2D& InEnd, const FVector2D& InEndDir, float InThickness, const FLinearColor& InTint)
+	void SetHermiteSpline(const UE::Slate::FDeprecateVector2DParameter InStart, const UE::Slate::FDeprecateVector2DParameter InStartDir, const UE::Slate::FDeprecateVector2DParameter InEnd, const UE::Slate::FDeprecateVector2DParameter InEndDir, float InThickness, const FLinearColor InTint)
 	{
 		Tint = InTint;
 		P0 = InStart;
@@ -197,28 +210,28 @@ struct FSlateSplinePayload : public FSlateDataPayload, public FSlateTintableElem
 		Thickness = InThickness;
 	}
 
-	void SetGradientHermiteSpline(const FVector2D& InStart, const FVector2D& InStartDir, const FVector2D& InEnd, const FVector2D& InEndDir, float InThickness, const TArray<FSlateGradientStop>& InGradientStops)
+	void SetGradientHermiteSpline(const UE::Slate::FDeprecateVector2DParameter InStart, const UE::Slate::FDeprecateVector2DParameter InStartDir, const UE::Slate::FDeprecateVector2DParameter InEnd, const UE::Slate::FDeprecateVector2DParameter InEndDir, float InThickness, TArray<FSlateGradientStop> InGradientStops)
 	{
 		P0 = InStart;
 		P1 = InStart + InStartDir / 3.0f;
 		P2 = InEnd - InEndDir / 3.0f;
 		P3 = InEnd;
 		Thickness = InThickness;
-		GradientStops = InGradientStops;
+		GradientStops = MoveTemp(InGradientStops);
 	}
 };
 
 
-struct FSlateLinePayload : public FSlateDataPayload, public FSlateTintableElement
-{ 
-	TArray<FVector2D> Points;
+struct UE_DEPRECATED(5.3, "Draw Element Payloads are no longer used, instead use the equivalent FSlateDrawElement subclass") FSlateLinePayload : public FSlateDataPayload, public FSlateTintableElement
+{
+	TArray<FVector2f> Points;
 	TArray<FLinearColor> PointColors;
 	float Thickness;
 
 	bool bAntialias;
 
 	bool IsAntialiased() const { return bAntialias; }
-	const TArray<FVector2D>& GetPoints() const { return Points; }
+	const TArray<FVector2f>& GetPoints() const { return Points; }
 	const TArray<FLinearColor>& GetPointColors() const { return PointColors; }
 	float GetThickness() const { return Thickness; }
 
@@ -227,18 +240,42 @@ struct FSlateLinePayload : public FSlateDataPayload, public FSlateTintableElemen
 		Thickness = InThickness;
 	}
 
+#if UE_ENABLE_SLATE_VECTOR_DEPRECATION_MECHANISMS
 	void SetLines(const TArray<FVector2D>& InPoints, bool bInAntialias, const TArray<FLinearColor>* InPointColors = nullptr)
 	{
-		bAntialias = bInAntialias;
-		Points = InPoints;
+		TArray<FVector2f> NewPoints;
+		NewPoints.Reserve(InPoints.Num());
+		for (FVector2D Vect : InPoints)
+		{
+			NewPoints.Add(UE::Slate::CastToVector2f(Vect));
+		}
 		if (InPointColors)
 		{
-			PointColors = *InPointColors;
+			SetLines(MoveTemp(NewPoints), bInAntialias, *InPointColors);
 		}
+		else
+		{
+			SetLines(MoveTemp(NewPoints), bInAntialias);
+		}
+	}
+#endif
+
+	void SetLines(TArray<FVector2f> InPoints, bool bInAntialias)
+	{
+		bAntialias = bInAntialias;
+		Points = MoveTemp(InPoints);
+		PointColors.Reset();
+	}
+
+	void SetLines(TArray<FVector2f> InPoints, bool bInAntialias, TArray<FLinearColor> InPointColors)
+	{
+		bAntialias = bInAntialias;
+		Points = MoveTemp(InPoints);
+		PointColors = MoveTemp(InPointColors);
 	}
 };
 
-struct FSlateViewportPayload : public FSlateDataPayload, public FSlateTintableElement
+struct UE_DEPRECATED(5.3, "Draw Element Payloads are no longer used, instead use the equivalent FSlateDrawElement subclass") FSlateViewportPayload : public FSlateDataPayload, public FSlateTintableElement
 {
 	FSlateShaderResource* RenderTargetResource;
 	uint8 bAllowViewportScaling : 1;
@@ -255,7 +292,7 @@ struct FSlateViewportPayload : public FSlateDataPayload, public FSlateTintableEl
 	}
 };
 
-struct FSlateCustomDrawerPayload : public FSlateDataPayload
+struct UE_DEPRECATED(5.3, "Draw Element Payloads are no longer used, instead use the equivalent FSlateDrawElement subclass") FSlateCustomDrawerPayload : public FSlateDataPayload
 {
 	// Custom drawer data
 	TWeakPtr<ICustomSlateElement, ESPMode::ThreadSafe> CustomDrawer;
@@ -266,7 +303,7 @@ struct FSlateCustomDrawerPayload : public FSlateDataPayload
 	}
 };
 
-struct FSlateLayerPayload : public FSlateDataPayload
+struct UE_DEPRECATED(5.3, "Draw Element Payloads are no longer used, instead use the equivalent FSlateDrawElement subclass") FSlateLayerPayload : public FSlateDataPayload
 {
 	class FSlateDrawLayerHandle* LayerHandle;
 
@@ -278,14 +315,14 @@ struct FSlateLayerPayload : public FSlateDataPayload
 
 };
 
-struct FSlateCachedBufferPayload : public FSlateDataPayload
+struct UE_DEPRECATED(5.3, "Draw Element Payloads are no longer used, instead use the equivalent FSlateDrawElement subclass") FSlateCachedBufferPayload : public FSlateDataPayload
 {
 	// Cached render data
 	class FSlateRenderDataHandle* CachedRenderData;
-	FVector2D CachedRenderDataOffset;
+	FVector2f CachedRenderDataOffset;
 
 	// Cached Buffers
-	void SetCachedBuffer(FSlateRenderDataHandle* InRenderDataHandle, const FVector2D& Offset)
+	void SetCachedBuffer(FSlateRenderDataHandle* InRenderDataHandle, const UE::Slate::FDeprecateVector2DParameter Offset)
 	{
 		check(InRenderDataHandle);
 
@@ -294,7 +331,7 @@ struct FSlateCachedBufferPayload : public FSlateDataPayload
 	}
 };
 
-struct FSlateCustomVertsPayload : public FSlateDataPayload
+struct UE_DEPRECATED(5.3, "Draw Element Payloads are no longer used, instead use the equivalent FSlateDrawElement subclass") FSlateCustomVertsPayload : public FSlateDataPayload
 {
 	const FSlateShaderResourceProxy* ResourceProxy;
 
@@ -306,12 +343,12 @@ struct FSlateCustomVertsPayload : public FSlateDataPayload
 	uint32 InstanceOffset;
 	uint32 NumInstances;
 
-	void SetCustomVerts(const FSlateShaderResourceProxy* InRenderProxy, const TArray<FSlateVertex>& InVerts, const TArray<SlateIndex>& InIndices, ISlateUpdatableInstanceBufferRenderProxy* InInstanceData, uint32 InInstanceOffset, uint32 InNumInstances)
+	void SetCustomVerts(const FSlateShaderResourceProxy* InRenderProxy, TArray<FSlateVertex> InVerts, TArray<SlateIndex> InIndices, ISlateUpdatableInstanceBufferRenderProxy* InInstanceData, uint32 InInstanceOffset, uint32 InNumInstances)
 	{
 		ResourceProxy = InRenderProxy;
 
-		Vertices = InVerts;
-		Indices = InIndices;
+		Vertices = MoveTemp(InVerts);
+		Indices = MoveTemp(InIndices);
 
 		InstanceData = InInstanceData;
 		InstanceOffset = InInstanceOffset;
@@ -319,9 +356,12 @@ struct FSlateCustomVertsPayload : public FSlateDataPayload
 	}
 };
 
-struct FSlatePostProcessPayload : public FSlateDataPayload
+struct UE_DEPRECATED(5.3, "Draw Element Payloads are no longer used, instead use the equivalent FSlateDrawElement subclass") FSlatePostProcessPayload : public FSlateDataPayload
 {
 	// Post Process Data
-	FVector4 PostProcessData;
+	FVector4f PostProcessData;
+	FVector4f CornerRadius;
 	int32 DownsampleAmount;
 };
+
+PRAGMA_ENABLE_DEPRECATION_WARNINGS

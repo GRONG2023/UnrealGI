@@ -5,10 +5,10 @@
 #include "CoreMinimal.h"
 #include "Framework/Docking/TabManager.h"
 
-struct SLATE_API FLayoutSaveRestore
+struct FLayoutSaveRestore
 {
 	/** Gets the ini section label for the additional layout configs */
-	static const FString& GetAdditionalLayoutConfigIni();
+	static SLATE_API const FString& GetAdditionalLayoutConfigIni();
 
 	/**
 	 * Write the layout out into a named config file.
@@ -16,7 +16,7 @@ struct SLATE_API FLayoutSaveRestore
 	 * @param InConfigFileName file to be saved to.
 	 * @param InLayoutToSave the layout to save.
 	 */
-	static void SaveToConfig(const FString& InConfigFileName, const TSharedRef<FTabManager::FLayout>& InLayoutToSave );
+	static SLATE_API void SaveToConfig(const FString& InConfigFileName, const TSharedRef<FTabManager::FLayout>& InLayoutToSave );
 
 	/**
 	 * Given a named DefaultLayout, return any saved version of it from the given ini file, otherwise return the default, also default to open tabs based on bool.
@@ -32,9 +32,9 @@ struct SLATE_API FLayoutSaveRestore
 	 *
 	 * @return Loaded layout or the default.
 	 */
-	static TSharedRef<FTabManager::FLayout> LoadFromConfig(const FString& InConfigFileName, const TSharedRef<FTabManager::FLayout>& InDefaultLayout,
+	static SLATE_API TSharedRef<FTabManager::FLayout> LoadFromConfig(const FString& InConfigFileName, const TSharedRef<FTabManager::FLayout>& InDefaultLayout,
 		const EOutputCanBeNullptr InPrimaryAreaOutputCanBeNullptr = EOutputCanBeNullptr::Never);
-	static TSharedRef<FTabManager::FLayout> LoadFromConfig(const FString& InConfigFileName, const TSharedRef<FTabManager::FLayout>& InDefaultLayout,
+	static SLATE_API TSharedRef<FTabManager::FLayout> LoadFromConfig(const FString& InConfigFileName, const TSharedRef<FTabManager::FLayout>& InDefaultLayout,
 		const EOutputCanBeNullptr InPrimaryAreaOutputCanBeNullptr, TArray<FString>& OutRemovedOlderLayoutVersions);
 
 	/**
@@ -46,7 +46,7 @@ struct SLATE_API FLayoutSaveRestore
 	 * @param InSectionName the section name where to save the value.
 	 * @param InSectionValue the value to save.
 	 */
-	static void SaveSectionToConfig(const FString& InConfigFileName, const FString& InSectionName, const FText& InSectionValue);
+	static SLATE_API void SaveSectionToConfig(const FString& InConfigFileName, const FString& InSectionName, const FText& InSectionValue);
 
 	/**
 	 * Read the desired FText value from the desired section of a named config file.
@@ -58,7 +58,7 @@ struct SLATE_API FLayoutSaveRestore
 	 *
 	 * @return Loaded FText associated for that section.
 	 */
-	static FText LoadSectionFromConfig(const FString& InConfigFileName, const FString& InSectionName);
+	static SLATE_API FText LoadSectionFromConfig(const FString& InConfigFileName, const FString& InSectionName);
 
 	/**
 	 * Migrates the layout configuration from one config file to another.
@@ -66,27 +66,24 @@ struct SLATE_API FLayoutSaveRestore
 	 * @param OldConfigFileName The name of the old configuration file.
 	 * @param NewConfigFileName The name of the new configuration file.
 	 */
-	static void MigrateConfig( const FString& OldConfigFileName, const FString& NewConfigFileName );
+	static SLATE_API void MigrateConfig(const FString& OldConfigFileName, const FString& NewConfigFileName);
+
+	/** 
+	 * Duplicate the layout config from one file to another.
+	 * @param SourceConfigFileName The name of the source configuration file.
+	 * @param TargetConfigFileName The name of the target configuration file.
+	 */
+	static SLATE_API bool DuplicateConfig(const FString& SourceConfigFileName, const FString& TargetConfigFileName);
 
 	/**
 	 * It checks whether a file is a valid layout config file.
 	 * @param InConfigFileName file to be read.
+	 * @param bAllowFallback Whether a config should be considered valid if EditorLayoutsSectionName is missing but DefaultEditorLayoutsSectionName is found
 	 * @return Whether the file is a valid layout config file.
 	 */
-	static bool IsValidConfig(const FString& InConfigFileName);
+	static SLATE_API bool IsValidConfig(const FString& InConfigFileName, bool bAllowFallback = true);
 
 private:
-	/**
-	 * Make a Json string friendly for writing out to UE .ini config files.
-	 * The opposite of GetLayoutStringFromIni.
-	 */
-	static FString PrepareLayoutStringForIni(const FString& LayoutString);
-
-	/**
-	 * Convert from UE .ini Json string to a vanilla Json string.
-	 * The opposite of PrepareLayoutStringForIni.
-	 */
-	static FString GetLayoutStringFromIni(const FString& LayoutString);
 
 	/**
 	 * Auxiliary function for both public versions of LoadFromConfig

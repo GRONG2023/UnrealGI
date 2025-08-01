@@ -2,11 +2,30 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "InputCoreTypes.h"
 #include "Components/ActorComponent.h"
-#include "HitProxies.h"
+#include "Containers/Array.h"
 #include "ConvexVolume.h"
+#include "CoreMinimal.h"
+#include "CoreTypes.h"
+#include "Engine/EngineBaseTypes.h"
+#include "GameFramework/Actor.h"
+#include "GenericPlatform/ICursor.h"
+#include "HitProxies.h"
+#include "InputCoreTypes.h"
+#include "Math/Box.h"
+#include "Math/MathFwd.h"
+#include "Math/Matrix.h"
+#include "Math/Rotator.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Elements/Framework/EngineElementsLibrary.h"
+#include "Elements/Framework/TypedElementHandle.h"
+
 #include "ComponentVisualizer.generated.h"
 
 class AActor;
@@ -30,6 +49,11 @@ struct HComponentVisProxy : public HHitProxy
 	virtual EMouseCursor::Type GetMouseCursor() override
 	{
 		return EMouseCursor::Crosshairs;
+	}
+
+	virtual FTypedElementHandle GetElementHandle() const override
+	{
+		return UEngineElementsLibrary::AcquireEditorComponentElementHandle(Component.Get());
 	}
 
 	TWeakObjectPtr<const UActorComponent> Component;
@@ -76,7 +100,7 @@ public:
  * Describes a chain of properties from the parent actor of a given component, to the component itself.
  */
 USTRUCT()
-struct UNREALED_API FComponentPropertyPath
+struct FComponentPropertyPath
 {
 public:
 	 GENERATED_USTRUCT_BODY()
@@ -96,10 +120,10 @@ public:
 	AActor* GetParentOwningActor() const { return ParentOwningActor.Get(); }
 
 	/** Gets a pointer to the component, or nullptr if it is not valid */
-	UActorComponent* GetComponent() const;
+	UNREALED_API UActorComponent* GetComponent() const;
 
 	/** Determines whether the property path is valid or not */
-	bool IsValid() const;
+	UNREALED_API bool IsValid() const;
 
 	bool operator ==(const FComponentPropertyPath& InRHS) const
 	{
@@ -114,7 +138,7 @@ public:
 private:
 
 	/** Sets the component referred to by the object */
-	void Set(const UActorComponent* Component);
+	UNREALED_API void Set(const UActorComponent* Component);
 
 	UPROPERTY()
 	TWeakObjectPtr<AActor> ParentOwningActor;
@@ -129,7 +153,7 @@ private:
 
 
 /** Base class for a component visualizer, that draw editor information for a particular component class */
-class UNREALED_API FComponentVisualizer : public TSharedFromThis<FComponentVisualizer>
+class FComponentVisualizer : public TSharedFromThis<FComponentVisualizer>
 {
 public:
 	FComponentVisualizer() {}
@@ -137,6 +161,11 @@ public:
 
 	/** */
 	virtual void OnRegister() {}
+	/** Only show this visualizer if the actor is selected */
+	UE_DEPRECATED(5.4, "This function is unused and will be removed in a future version. Component visualizers are only shown for the active selection. Use bDebugDraw on the specific component, or the editor setting to control drawing of subcomponents for selected actors.")
+	virtual bool ShowWhenSelected() { return true; }
+	/** Show this visualizer if the component is directly is selected */
+	virtual bool ShouldShowForSelectedSubcomponents(const UActorComponent* Component) { return true; }
 	/** Draw visualization for the supplied component */
 	virtual void DrawVisualization(const UActorComponent* Component, const FSceneView* View, FPrimitiveDrawInterface* PDI) {}
 	/** Draw HUD on viewport for the supplied component */
@@ -150,7 +179,7 @@ public:
 	/** */
 	virtual bool GetCustomInputCoordinateSystem(const FEditorViewportClient* ViewportClient, FMatrix& OutMatrix) const { return false; }
 	/** */
-	virtual bool HandleInputDelta(FEditorViewportClient* ViewportClient, FViewport* Viewport, FVector& DeltaTranslate, FRotator& DeltalRotate, FVector& DeltaScale) { return false; }
+	virtual bool HandleInputDelta(FEditorViewportClient* ViewportClient, FViewport* Viewport, FVector& DeltaTranslate, FRotator& DeltaRotate, FVector& DeltaScale) { return false; }
 	/** */
 	virtual bool HandleInputKey(FEditorViewportClient* ViewportClient,FViewport* Viewport,FKey Key,EInputEvent Event) { return false; }
 	/** Handle click modified by Alt, Ctrl and/or Shift. The input HitProxy may not be on this component. */
@@ -163,6 +192,10 @@ public:
 	virtual bool HasFocusOnSelectionBoundingBox(FBox& OutBoundingBox) { return false; }
 	/** Pass snap input to active visualizer */
 	virtual bool HandleSnapTo(const bool bInAlign, const bool bInUseLineTrace, const bool bInUseBounds, const bool bInUsePivot, AActor* InDestination) { return false;  }
+	/** Gets called when the mouse tracking has started (dragging behavior) */
+	virtual void TrackingStarted(FEditorViewportClient* InViewportClient) {}
+	/** Gets called when the mouse tracking has stopped (dragging behavior) */
+	virtual void TrackingStopped(FEditorViewportClient* InViewportClient, bool bInDidMove) {}
 	/** Get currently edited component, this is needed to reset the active visualizer after undo/redo */
 	virtual UActorComponent* GetEditedComponent() const { return nullptr;  }
 
@@ -176,17 +209,17 @@ public:
 
 	/** Find the name of the property that points to this component */
 	UE_DEPRECATED(4.24, "Please use the FComponentPropertyPath class to build property name paths for components.")
-	static FPropertyNameAndIndex GetComponentPropertyName(const UActorComponent* Component);
+	static UNREALED_API FPropertyNameAndIndex GetComponentPropertyName(const UActorComponent* Component);
 
 	/** Get a component pointer from the property name */
 	UE_DEPRECATED(4.24, "Please use the FComponentPropertyPath::GetComponent() to retrieve a component pointer from a property name path.")
-	static UActorComponent* GetComponentFromPropertyName(const AActor* CompOwner, const FPropertyNameAndIndex& Property);
+	static UNREALED_API UActorComponent* GetComponentFromPropertyName(const AActor* CompOwner, const FPropertyNameAndIndex& Property);
 
 	/** Notify that a component property has been modified */
-	static void NotifyPropertyModified(UActorComponent* Component, FProperty* Property, EPropertyChangeType::Type PropertyChangeType = EPropertyChangeType::Unspecified);
+	static UNREALED_API void NotifyPropertyModified(UActorComponent* Component, FProperty* Property, EPropertyChangeType::Type PropertyChangeType = EPropertyChangeType::Unspecified);
 
 	/** Notify that many component properties have been modified */
-	static void NotifyPropertiesModified(UActorComponent* Component, const TArray<FProperty*>& Properties, EPropertyChangeType::Type PropertyChangeType = EPropertyChangeType::Unspecified);
+	static UNREALED_API void NotifyPropertiesModified(UActorComponent* Component, const TArray<FProperty*>& Properties, EPropertyChangeType::Type PropertyChangeType = EPropertyChangeType::Unspecified);
 };
 
 struct FCachedComponentVisualizer

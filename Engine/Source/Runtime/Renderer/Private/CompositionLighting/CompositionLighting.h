@@ -8,9 +8,9 @@
 
 #include "CoreMinimal.h"
 #include "SceneRendering.h"
-#include "PostProcessDeferredDecals.h"
-
-class FPersistentUniformBuffers;
+#include "CompositionLighting/PostProcessDeferredDecals.h"
+#include "CompositionLighting/PostProcessAmbientOcclusion.h"
+#include "DecalRenderingShared.h"
 
 /**
  * The center for all screen space processing activities (e.g. G-buffer manipulation, lighting).
@@ -18,37 +18,51 @@ class FPersistentUniformBuffers;
 class FCompositionLighting
 {
 public:
-	void Reset();
+	FCompositionLighting(TArrayView<const FViewInfo> InViews, const FSceneTextures& InSceneTextures, TUniqueFunction<bool(int32)> RequestSSAOFunction);
 
-	void ProcessBeforeBasePass(
-		FRDGBuilder& GraphBuilder,
-		FPersistentUniformBuffers& UniformBuffers,
-		const FViewInfo& View,
-		TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBuffer,
-		bool bDBuffer,
-		uint32 SSAOLevels);
+	void ProcessAfterOcclusion(FRDGBuilder& GraphBuilder);
 
-	void ProcessAfterBasePass(
-		FRDGBuilder& GraphBuilder,
-		FPersistentUniformBuffers& UniformBuffers,
-		const FViewInfo& View,
-		TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBuffer);
+	void ProcessBeforeBasePass(FRDGBuilder& GraphBuilder, FDBufferTextures& DBufferTextures, FInstanceCullingManager& InstanceCullingManager);
 
-	// only call if LPV is enabled
-	void ProcessLpvIndirect(FRHICommandListImmediate& RHICmdList, FViewInfo& View);
+	enum class EProcessAfterBasePassMode
+	{
+		OnlyBeforeLightingDecals,
+		SkipBeforeLightingDecals,
+		All
+	};
 
-	bool CanProcessAsyncSSAO(const TArray<FViewInfo>& Views);
-
-	void ProcessAsyncSSAO(
-		FRDGBuilder& GraphBuilder,
-		const TArray<FViewInfo>& Views,
-		TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBuffer);
+	void ProcessAfterBasePass(FRDGBuilder& GraphBuilder, FInstanceCullingManager& InstanceCullingManager, EProcessAfterBasePassMode Mode);
 
 private:
-	FDeferredDecalPassTextures DecalPassTextures;
+	void TryInit();
+
+	const TArrayView<const FViewInfo> Views;
+	const FSceneViewFamily& ViewFamily;
+	const FSceneTextures& SceneTextures;
+
+	const bool bEnableDBuffer;
+	const bool bEnableDecals;
+
+	enum class ESSAOLocation
+	{
+		None,
+		BeforeBasePass,
+		AfterBasePass
+	};
+
+	struct FAOConfig
+	{
+		uint32 Levels = 0;
+		EGTAOType GTAOType = EGTAOType::EOff;
+		ESSAOLocation SSAOLocation = ESSAOLocation::None;
+		bool bSSAOAsync = false;
+		bool bRequested = false;
+	};
+
+	TArray<FAOConfig, TInlineAllocator<8>> ViewAOConfigs;
+	TArray<FTransientDecalRenderDataList, TInlineAllocator<8>> VisibleDecals;
+	FRDGTextureRef HorizonsTexture = nullptr;
+	bool bInitialized = false;
 };
 
-/** The global used for deferred lighting. */
-extern FCompositionLighting GCompositionLighting;
-
-extern bool ShouldRenderScreenSpaceAmbientOcclusion(const FViewInfo& View);
+extern bool ShouldRenderScreenSpaceAmbientOcclusion(const FViewInfo& View, bool bLumenWantsSSAO);

@@ -2,25 +2,25 @@
 
 #pragma once
 
+#include "CoreTypes.h"
+#include "Delegates/IDelegateInstance.h"
 #include "Ticker.h"
 
 /**
- * This works the same as the core FTicker, but on supported mobile platforms 
+ * This works the same as the core FTSTicker, but on supported mobile platforms
  * it continues ticking while the app is running in the background.
  */
-class FBackgroundableTicker
-	: public FTicker
+class FTSBackgroundableTicker
+	: public FTSTicker
 {
 public:
+	static CORE_API FTSBackgroundableTicker& GetCoreTicker();
 
-	CORE_API static FBackgroundableTicker& GetCoreTicker();
-
-	CORE_API FBackgroundableTicker();
-	CORE_API ~FBackgroundableTicker();
+	CORE_API FTSBackgroundableTicker();
+	CORE_API ~FTSBackgroundableTicker();
 
 private:
-	
 	FDelegateHandle CoreTickerHandle;
-	FDelegateHandle BackgroundTickerHandle;
+	::FDelegateHandle BackgroundTickerHandle;
 	bool bWasBackgrounded = false;
 };

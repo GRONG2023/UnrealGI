@@ -3,6 +3,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
+
+#if STATS
+
 #include "Misc/Paths.h"
 #include "Layout/SlateRect.h"
 #include "Layout/Geometry.h"
@@ -92,10 +95,10 @@ class SProfilerThreadView
 			, DrawEffects( InDrawEffects )
 			, FontMeasureService( FSlateApplication::Get().GetRenderer()->GetFontMeasureService() )
 			, SummaryFont8( FCoreStyle::GetDefaultFontStyle("Regular", 8) )
-			, SummaryFont8Height( FontMeasureService->Measure( TEXT( "!" ), SummaryFont8 ).Y )
+			, SummaryFont8Height( static_cast<float>(FontMeasureService->Measure( TEXT( "!" ), SummaryFont8 ).Y) )
 		{}
 
-		const FVector2D& Size2D() const
+		FVector2f Size2D() const
 		{
 			return AllottedGeometry.GetLocalSize();
 		}
@@ -316,3 +319,5 @@ protected:
 	/** Cursor type. */
 	EThreadViewCursor::Type CursorType;
 };
+
+#endif // STATS

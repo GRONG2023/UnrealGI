@@ -1,55 +1,82 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "FoliageEditUtility.h"
-#include "FoliageType.h"
-#include "InstancedFoliage.h"
-#include "LevelUtils.h"
-#include "Widgets/Notifications/SNotificationList.h"
-#include "Framework/Notifications/NotificationManager.h"
-#include "InstancedFoliageActor.h"
-#include "ScopedTransaction.h"
+
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
 #include "Dialogs/DlgPickAssetPath.h"
-#include "AssetRegistryModule.h"
-#include "FoliageEdMode.h"
-#include "FileHelpers.h"
 #include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Engine/Level.h"
+#include "Engine/World.h"
+#include "EngineUtils.h"
+#include "FileHelpers.h"
+#include "FoliageType.h"
+#include "Framework/Notifications/NotificationManager.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMisc.h"
+#include "InstancedFoliage.h"
+#include "InstancedFoliageActor.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "LevelUtils.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/PackageName.h"
+#include "ScopedTransaction.h"
+#include "Serialization/Archive.h"
+#include "Templates/Casts.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/Tuple.h"
+#include "Templates/UniqueObj.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/Package.h"
+#include "UObject/UObjectGlobals.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Notifications/SNotificationList.h"
+#include "IContentBrowserSingleton.h"
+#include "ContentBrowserModule.h"
 
 #define LOCTEXT_NAMESPACE "FoliageEdMode"
 
-UFoliageType* FFoliageEditUtility::SaveFoliageTypeObject(UFoliageType* InFoliageType)
+UFoliageType* FFoliageEditUtility::SaveFoliageTypeObject(UFoliageType* InFoliageType, bool bInPlaceholderAsset)
 {
 	UFoliageType* TypeToSave = nullptr;
 
 	if (!InFoliageType->IsAsset())
 	{
 		FString PackageName;
+		FString AssetName = InFoliageType->GetDefaultNewAssetName();
 		UObject* FoliageSource = InFoliageType->GetSource();
 		if (FoliageSource)
 		{
+			// Avoid using source name if this is a placeholder asset which is going to be replaced 
+			if (!bInPlaceholderAsset)
+			{
+				AssetName = FoliageSource->GetName() + TEXT("_FoliageType");
+			}
+
 			// Build default settings asset name and path
-			PackageName = FPackageName::GetLongPackagePath(FoliageSource->GetOutermost()->GetName()) + TEXT("/") + FoliageSource->GetName() + TEXT("_FoliageType");
+			PackageName = FPackageName::GetLongPackagePath(FoliageSource->GetOutermost()->GetName()) + TEXT("/") + AssetName;
 		}
 
-		TSharedRef<SDlgPickAssetPath> SaveFoliageTypeDialog =
-			SNew(SDlgPickAssetPath)
-			.Title(LOCTEXT("SaveFoliageTypeDialogTitle", "Choose Location for Foliage Type Asset"))
-			.DefaultAssetPath(FText::FromString(PackageName));
+		FSaveAssetDialogConfig SaveAssetDialogConfig;
+		SaveAssetDialogConfig.DialogTitleOverride = LOCTEXT("SaveAssetDialogTitle", "Save Asset As");
+		SaveAssetDialogConfig.DefaultPath = FPaths::GetPath(PackageName);
+		SaveAssetDialogConfig.DefaultAssetName = AssetName;
+		SaveAssetDialogConfig.ExistingAssetPolicy = ESaveAssetDialogExistingAssetPolicy::Disallow;
 
-		if (SaveFoliageTypeDialog->ShowModal() != EAppReturnType::Cancel)
+		FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser");
+		FString SaveObjectPath = ContentBrowserModule.Get().CreateModalSaveAssetDialog(SaveAssetDialogConfig);
+		if(!SaveObjectPath.IsEmpty())
 		{
-			PackageName = SaveFoliageTypeDialog->GetFullAssetPath().ToString();
-			UPackage* Package = CreatePackage( *PackageName);
-
-			// We should not save a copy of this duplicate into the transaction buffer as it's an asset
-			InFoliageType->ClearFlags(RF_Transactional);
-			TypeToSave = Cast<UFoliageType>(StaticDuplicateObject(InFoliageType, Package, *FPackageName::GetLongPackageAssetName(PackageName)));
-			InFoliageType->SetFlags(RF_Transactional);
-
-			TypeToSave->SetFlags(RF_Standalone | RF_Public | RF_Transactional);
-			TypeToSave->Modify();
-
-			// Notify the asset registry
-			FAssetRegistryModule::AssetCreated(TypeToSave);
+			FSoftObjectPath SoftObjectPath(SaveObjectPath);
+			TypeToSave = DuplicateFoliageTypeToNewPackage(SoftObjectPath.GetLongPackageName(), InFoliageType);
 		}
 	}
 	else
@@ -75,46 +102,57 @@ UFoliageType* FFoliageEditUtility::SaveFoliageTypeObject(UFoliageType* InFoliage
 	return TypeToSave;
 }
 
+UFoliageType* FFoliageEditUtility::DuplicateFoliageTypeToNewPackage(const FString& InPackageName, UFoliageType* InFoliageType)
+{
+	UPackage* Package = CreatePackage(*InPackageName);
+	UFoliageType* TypeToSave = nullptr;
+
+	// We should not save a copy of this duplicate into the transaction buffer as it's an asset. Save and restore Transactional flag
+	EObjectFlags Transactional = InFoliageType->HasAnyFlags(RF_Transactional) ? RF_Transactional : RF_NoFlags;
+	
+	InFoliageType->ClearFlags(Transactional);
+	TypeToSave = Cast<UFoliageType>(StaticDuplicateObject(InFoliageType, Package, *FPackageName::GetLongPackageAssetName(InPackageName)));
+	InFoliageType->SetFlags(Transactional);
+
+	TypeToSave->SetFlags(RF_Standalone | RF_Public | Transactional);
+	TypeToSave->Modify();
+
+	// Notify the asset registry
+	FAssetRegistryModule::AssetCreated(TypeToSave);
+	
+	return TypeToSave;
+}
+
 void FFoliageEditUtility::ReplaceFoliageTypeObject(UWorld* InWorld, UFoliageType* OldType, UFoliageType* NewType)
 {
 	FScopedTransaction Transaction(NSLOCTEXT("UnrealEd", "FoliageMode_ReplaceSettingsObject", "Foliage Editing: Replace Settings Object"));
 
-	// Collect set of all available foliage types
-	ULevel* CurrentLevel = InWorld->GetCurrentLevel();
-	const int32 NumLevels = InWorld->GetNumLevels();
-
-	for (int32 LevelIdx = 0; LevelIdx < NumLevels; ++LevelIdx)
+	for (TActorIterator<AInstancedFoliageActor> It(InWorld); It; ++It)
 	{
-		ULevel* Level = InWorld->GetLevel(LevelIdx);
-		if (Level && Level->bIsVisible)
+		AInstancedFoliageActor* IFA = *It;
+		IFA->Modify();
+		TUniqueObj<FFoliageInfo> OldInfo;
+		if (IFA->RemoveFoliageInfoAndCopyValue(OldType, OldInfo))
 		{
-			AInstancedFoliageActor* IFA = AInstancedFoliageActor::GetInstancedFoliageActorForLevel(Level);
-			if (IFA)
+			// Old component needs to go
+			if (OldInfo->IsInitialized())
 			{
-				IFA->Modify();
-				TUniqueObj<FFoliageInfo> OldInfo;
-				IFA->FoliageInfos.RemoveAndCopyValue(OldType, OldInfo);
+				OldInfo->Uninitialize();
+			}
 
-				// Old component needs to go
-				if (OldInfo->IsInitialized())
-				{
-					OldInfo->Uninitialize();
-				}
-				
-				// Append instances if new foliage type is already exists in this actor
-				// Otherwise just replace key entry for instances
-				TUniqueObj<FFoliageInfo>* NewInfo = IFA->FoliageInfos.Find(NewType);
-				if (NewInfo)
-				{
-					(*NewInfo)->Instances.Append(OldInfo->Instances);
-					(*NewInfo)->ReallocateClusters(IFA, NewType);
-				}
-				else
-				{
-					// Make sure if type changes we have proper implementation
-					TUniqueObj<FFoliageInfo>& NewFoliageInfo = IFA->FoliageInfos.Add(NewType, MoveTemp(OldInfo));
-					NewFoliageInfo->ReallocateClusters(IFA, NewType);
-				}
+			// Append instances if new foliage type is already exists in this actor
+			// Otherwise just replace key entry for instances
+			FFoliageInfo* NewInfo = IFA->FindInfo(NewType);
+			if (NewInfo)
+			{
+				NewInfo->Instances.Append(OldInfo->Instances);
+				NewInfo->ReallocateClusters(NewType);
+			}
+			else
+			{
+				// Make sure if type changes we have proper implementation
+				TUniqueObj<FFoliageInfo>& NewFoliageInfo = IFA->AddFoliageInfo(NewType, MoveTemp(OldInfo));
+				NewFoliageInfo->ReallocateClusters(NewType);
 			}
 		}
 	}
@@ -188,7 +226,7 @@ void FFoliageEditUtility::MoveActorFoliageInstancesToLevel(ULevel* InTargetLevel
 					{
 						// Restore previous selection for move operation
 						FFoliageInfo* MeshInfo = IFA->FindInfo(NewFoliageType);
-						MeshInfo->SelectInstances(IFA, true, PreviousSelectionArray);
+						MeshInfo->SelectInstances(true, PreviousSelectionArray);
 					}
 				}
 			}

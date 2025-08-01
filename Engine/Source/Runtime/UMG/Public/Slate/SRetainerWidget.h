@@ -36,10 +36,10 @@ DECLARE_MULTICAST_DELEGATE( FOnRetainedModeChanged );
  * frequency of the main game render.  It also has the side benefit of allow materials
  * to be applied to the render target after drawing the widgets to apply a simple post process.
  */
-class UMG_API SRetainerWidget : public SCompoundWidget,  public FSlateInvalidationRoot
+class SRetainerWidget : public SCompoundWidget,  public FSlateInvalidationRoot
 {
 public:
-	static int32 Shared_MaxRetainerWorkPerFrame;
+	static UMG_API int32 Shared_MaxRetainerWorkPerFrame;
 
 public:
 	SLATE_BEGIN_ARGS(SRetainerWidget)
@@ -49,92 +49,99 @@ public:
 		_PhaseCount = 1;
 		_RenderOnPhase = true;
 		_RenderOnInvalidation = false;
-		_RenderWithLocalTransform = true;
 	}
 	SLATE_DEFAULT_SLOT(FArguments, Content)
 		SLATE_ARGUMENT(bool, RenderOnPhase)
 		SLATE_ARGUMENT(bool, RenderOnInvalidation)
-		SLATE_ARGUMENT(bool, RenderWithLocalTransform)
+		SLATE_ARGUMENT_DEPRECATED(bool, RenderWithLocalTransform, 5.4, "This argument has no effect anymore, because bugs from each render path (with RenderWithLocalTransform set to true or false) have been fixed, making it no longer necessary.")
 		SLATE_ARGUMENT(int32, Phase)
 		SLATE_ARGUMENT(int32, PhaseCount)
 		SLATE_ARGUMENT(FName, StatId)
-	SLATE_END_ARGS()
+#if WITH_EDITOR
+		SLATE_ARGUMENT(bool, bWarnOnInvalidSize)
+#endif
+		SLATE_END_ARGS()
 
-	SRetainerWidget();
-	~SRetainerWidget();
+	UMG_API SRetainerWidget();
+	UMG_API ~SRetainerWidget();
 
 	/** Constructor */
-	void Construct(const FArguments& Args);
+	UMG_API void Construct(const FArguments& Args);
 
-	void SetRenderingPhase(int32 Phase, int32 PhaseCount);
+	UMG_API void SetRenderingPhase(int32 Phase, int32 PhaseCount);
 
 	/** Requests that the retainer redraw the hosted content next time it's painted. */
-	void RequestRender();
+	UMG_API void RequestRender();
 
-	void SetRetainedRendering(bool bRetainRendering);
+#if WITH_EDITOR
+	UMG_API void SetIsDesignTime(bool bInIsDesignTime);
+	UMG_API void SetShowEffectsInDesigner(bool bInShowEffectsInDesigner);
+#endif
 
-	void SetContent(const TSharedRef< SWidget >& InContent);
+	UMG_API void SetRetainedRendering(bool bRetainRendering);
 
-	UMaterialInstanceDynamic* GetEffectMaterial() const;
+	UMG_API void SetContent(const TSharedRef< SWidget >& InContent);
 
-	void SetEffectMaterial(UMaterialInterface* EffectMaterial);
+	UMG_API UMaterialInstanceDynamic* GetEffectMaterial() const;
 
-	void SetTextureParameter(FName TextureParameter);
+	UMG_API void SetEffectMaterial(UMaterialInterface* EffectMaterial);
 
-	/** SWidget interface */
-	virtual FChildren* GetChildren() override;
-	virtual FChildren* GetAllChildren() override;
+	UMG_API void SetTextureParameter(FName TextureParameter);
 
-	/** FInvalidationRoot interface */
-	virtual bool PaintRetainedContent(const FSlateInvalidationContext& Context, const FGeometry& AllottedGeometry);
+	//~ SWidget interface
+	UMG_API virtual FChildren* GetChildren() override;
+#if WITH_SLATE_DEBUGGING
+	UMG_API virtual FChildren* Debug_GetChildrenForReflector() override;
+#endif
 
-	void SetWorld(UWorld* World);
+	UMG_API void SetWorld(UWorld* World);
 
 protected:
 	/** SCompoundWidget interface */
-	virtual int32 OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override;
-	virtual FVector2D ComputeDesiredSize(float Scale) const override;
+	UMG_API virtual int32 OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override;
+	UMG_API virtual FVector2D ComputeDesiredSize(float Scale) const override;
 	virtual bool Advanced_IsInvalidationRoot() const { return bEnableRetainedRendering; }
 	virtual const FSlateInvalidationRoot* Advanced_AsInvalidationRoot() const override { return bEnableRetainedRendering ? this : nullptr; }
-	virtual bool CustomPrepass(float LayoutScaleMultiplier) override;
+	UMG_API virtual bool CustomPrepass(float LayoutScaleMultiplier) override;
 
 	//~ Begin FSlateInvalidationRoot interface
-	virtual TSharedRef<SWidget> GetRootWidget() override;
-	virtual int32 PaintSlowPath(const FSlateInvalidationContext& Context) override;
+	UMG_API virtual TSharedRef<SWidget> GetRootWidget() override;
+	UMG_API virtual int32 PaintSlowPath(const FSlateInvalidationContext& Context) override;
 
 	enum class EPaintRetainedContentResult
 	{
 		NotPainted,
 		Painted,
 		Queued,
-		InvalidSize,
+		TextureSizeTooBig,
+		TextureSizeZero,
 	};
-	EPaintRetainedContentResult PaintRetainedContentImpl(const FSlateInvalidationContext& Context, const FGeometry& AllottedGeometry);
+	UMG_API EPaintRetainedContentResult PaintRetainedContentImpl(const FSlateInvalidationContext& Context, const FGeometry& AllottedGeometry, int32 LayerId);
 	//~ End FSlateInvalidationRoot interface
 
-	void RefreshRenderingMode();
-	bool ShouldBeRenderingOffscreen() const;
-	bool IsAnythingVisibleToRender() const;
-	void OnRetainerModeChanged();
-	void OnRootInvalidated();
+	UMG_API void RefreshRenderingMode();
+	UMG_API bool ShouldBeRenderingOffscreen() const;
+	UMG_API bool IsAnythingVisibleToRender() const;
+	UMG_API void OnRetainerModeChanged();
+	UMG_API void OnRootInvalidated();
 
 private:
-	void OnGlobalInvalidationToggled(bool bGlobalInvalidationEnabled);
+	UMG_API void OnGlobalInvalidationToggled(bool bGlobalInvalidationEnabled);
 #if !UE_BUILD_SHIPPING
-	static void OnRetainerModeCVarChanged( IConsoleVariable* CVar );
-	static FOnRetainedModeChanged OnRetainerModeChangedDelegate;
+	static UMG_API void OnRetainerModeCVarChanged( IConsoleVariable* CVar );
+	static UMG_API FOnRetainedModeChanged OnRetainerModeChangedDelegate;
 #endif
-	FSimpleSlot EmptyChildSlot;
 
 	mutable FSlateBrush SurfaceBrush;
 
-	FVector2D PreviousRenderSize;
+	FIntPoint PreviousRenderSize;
 	FGeometry PreviousAllottedGeometry;
-	FVector2D PreviousClipRectSize;
+	FIntPoint PreviousClipRectSize;
 	TOptional<FSlateClippingState> PreviousClippingState;
-	FLinearColor PreviousColorAndOpacity;
+	FColor PreviousColorAndOpacity;
+	int32 LastIncomingLayerId;
 
-	void UpdateWidgetRenderer();
+	UMG_API void UpdateWidgetRenderer();
 
 	TSharedPtr<SWidget> MyWidget;
 	TSharedRef<SVirtualWindow> VirtualWindow;
@@ -146,7 +153,17 @@ private:
 
 	bool bEnableRetainedRenderingDesire;
 	bool bEnableRetainedRendering;
-	bool bEnableRenderWithLocalTransform;
+
+#if WITH_EDITOR
+	/** True if widget is used in design time */
+	bool bIsDesignTime;
+
+	/** True if we should retain rendering in designer */
+	bool bShowEffectsInDesigner;
+
+	/** True if we should warn when the requested size for the retainer is 0 or too large */
+	bool bWarnOnInvalidSize;
+#endif
 
 	bool RenderOnPhase;
 	bool RenderOnInvalidation;
@@ -167,6 +184,6 @@ private:
 
 	FName DynamicEffectTextureParameter;
 
-	static TArray<SRetainerWidget*, TInlineAllocator<3>> Shared_WaitingToRender;
-	static TFrameValue<int32> Shared_RetainerWorkThisFrame;
+	static UMG_API TArray<SRetainerWidget*, TInlineAllocator<3>> Shared_WaitingToRender;
+	static UMG_API TFrameValue<int32> Shared_RetainerWorkThisFrame;
 };

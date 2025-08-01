@@ -2,14 +2,15 @@
 
 /*=============================================================================
 	InterpFilter.h
-=============================================================================*/ 
+=============================================================================*/
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "Engine/EngineTypes.h"
 
-struct FFIRFilter
+//======================================================================================================================
+struct UE_DEPRECATED(5.0, "FFIRFilter is no longer used or supported") FFIRFilter
 {
 public:
 	FFIRFilter()
@@ -25,13 +26,13 @@ public:
 	{
 		if ( WindowLen > 0 )
 		{
-			FilterWindow.AddZeroed(WindowLen);
+			FilterData.AddZeroed(WindowLen);
 			Coefficients.AddZeroed(WindowLen);
 			CurrentStack = 0;
 		}
 		else
 		{
-			FilterWindow.Reset();
+			FilterData.Reset();
 			Coefficients.Reset();
 			CurrentStack = 0;		
 		}
@@ -39,13 +40,13 @@ public:
 
 	void CalculateCoefficient(EFilterInterpolationType InterpolationType);
 	float GetFilteredData(float Input);
-	bool IsValid() const { return FilterWindow.Num() > 0; }
+	bool IsValid() const { return FilterData.Num() > 0; }
 	float				LastOutput;
 private:
 
 	// CurrentStack is latest till CurrentStack + 1 is oldest
 	// note that this works in reverse order with Coefficient
-	TArray<float>		FilterWindow;
+	TArray<float>		FilterData;
 	// n-1 is latest till 0 is oldest
 	TArray<float>		Coefficients;
 	int32					CurrentStack;
@@ -60,7 +61,7 @@ private:
 	float CalculateFilteredOutput() const;
 };
 
-
+//======================================================================================================================
 struct FFilterData
 {
 	float Input;
@@ -69,80 +70,118 @@ struct FFilterData
 	FFilterData()
 	{
 	}
-	void CheckValidation(float CurrentTime, float ValidationWindow)
+
+	FFilterData(const float InInput, const float InTime)
+		: Input(InInput)
+		, Time(InTime)
 	{
-		if ( Diff(CurrentTime) > ValidationWindow )
+	}
+
+	void EnsureTimeIsValid(const float CurrentTime, const float ValidationWindow)
+	{
+		if (Diff(CurrentTime) > ValidationWindow)
 		{
 			Time = 0.f;
 		}
 	}
 
-	bool IsValid()
+	bool IsValid() const
 	{
 		return (Time > 0.f);
 	}
 
-	float Diff(float InTime)
+	float Diff(const float InTime) const
 	{
 		return (InTime - Time);
 	}
 
-	void SetInput(float InData, float InTime)
+	void SetInput(const float InData, const float InTime)
 	{
 		Input = InData;
 		Time = InTime;
 	}
 };
 
-struct ENGINE_API FFIRFilterTimeBased
+//======================================================================================================================
+struct FFIRFilterTimeBased
 {
 public:
 	FFIRFilterTimeBased()
 	{
 	}
 
-	FFIRFilterTimeBased(float Duration, EFilterInterpolationType InInterpolationType)
+	FFIRFilterTimeBased(float InWindowDuration, EFilterInterpolationType InInterpolationType, float InDampingRatio,
+	                    float InMin, float InMax, float InMaxSpeed, bool bInClamp)
 	{
-		Initialize(Duration, InInterpolationType);
+		Initialize(InWindowDuration, InInterpolationType, InDampingRatio, InMin, InMax, InMaxSpeed, bInClamp);
 	}
 
-	void Initialize(float WindowDuration, EFilterInterpolationType BlendType)
+	void Initialize(float InWindowDuration, EFilterInterpolationType InInterpolationType, float InDampingRatio,
+	                float InMinValue, float InMaxValue, float InMaxSpeed, bool bInClamp)
 	{
-		FilterWindow.Empty(10);
-		FilterWindow.AddZeroed(10);
-		InterpolationType = BlendType;
-		NumValidFilter = 0;
+		InterpolationType = InInterpolationType;
+		FilterData.Empty();
 		CurrentStackIndex = 0;
-		TimeDuration = WindowDuration;
+		WindowDuration = InWindowDuration;
+		DampingRatio = InDampingRatio;
+		MinValue = InMinValue;
+		MaxValue = InMaxValue;
+		MaxSpeed = InMaxSpeed;
+		bClamp = bInClamp;
 		CurrentTime = 0.f;
 		LastOutput = 0.f;
 	}
 
-	float GetFilteredData(float Input, float DeltaTime);
-	bool IsValid() const { return TimeDuration > 0.f; }
-	float				LastOutput;
-
-	void SetWindowDuration(float WindowDuration)
+	// These parameters can be modified at runtime without needing to re-initialize
+	void SetParams(float InDampingRatio, float InMinValue, float InMaxValue, float InMaxSpeed, bool bInClamp)
 	{
-		TimeDuration = WindowDuration;
+		DampingRatio = InDampingRatio;
+		MinValue = InMinValue;
+		MaxValue = InMaxValue;
+		MaxSpeed = InMaxSpeed;
+		bClamp = bInClamp;
+	}
+
+	// This adds Input to the stack representing an update of DeltaTime, and returns the new filtered value. 
+	ENGINE_API float UpdateAndGetFilteredData(float Input, float DeltaTime);
+
+	// Wraps the internal state by steps of Range so that it is as close as possible to Input
+	ENGINE_API void WrapToValue(float Input, float Range);
+
+	// Sets internal state to the specified value
+	ENGINE_API void SetToValue(float Input);
+
+	// Filter is considered valid if the WindowDuration is > 0
+	bool IsValid() const { return WindowDuration > 0.f; }
+
+	void SetWindowDuration(float InWindowDuration)
+	{
+		WindowDuration = InWindowDuration;
 	}
 
 #if WITH_EDITOR
-	bool NeedsUpdate(const EFilterInterpolationType InType, const float InTime)
+	bool NeedsUpdate(const EFilterInterpolationType InType, const float InWindowDuration)
 	{
-		return InterpolationType != InType || TimeDuration != InTime;
+		return InterpolationType != InType || WindowDuration != InWindowDuration;
 	}
 #endif // WITH_EDITOR
-private:
-	EFilterInterpolationType	InterpolationType;
-	int32						CurrentStackIndex;
-	float						TimeDuration;
-	int32						NumValidFilter;
-	float						CurrentTime;
-	TArray<FFilterData>			FilterWindow;
 
-	float GetInterpolationCoefficient (FFilterData & Data);
-	float CalculateFilteredOutput();
-	int32 GetSafeCurrentStackIndex();
-	void RefreshValidFilters();
+	float LastOutput;
+
+private:
+	EFilterInterpolationType InterpolationType;
+	int32 CurrentStackIndex;
+	float WindowDuration;
+	float DampingRatio;
+	float MinValue;
+	float MaxValue;
+	float MaxSpeed;
+	bool  bClamp;
+	float CurrentTime;
+	TArray<FFilterData> FilterData;
+
+	ENGINE_API float GetInterpolationCoefficient(const FFilterData& Data) const;
+	ENGINE_API float CalculateFilteredOutput();
+	ENGINE_API int32 GetSafeCurrentStackIndex();
+	ENGINE_API void RefreshValidFilters();
 };

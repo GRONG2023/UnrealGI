@@ -6,6 +6,7 @@
 #include "Misc/Guid.h"
 #include "Stats/StatsMisc.h"
 #include "HAL/RunnableThread.h"
+#include "HAL/PlatformMemory.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "GenericPlatform/GenericApplication.h"
 
@@ -39,7 +40,9 @@ IMPLEMENT_APPLICATION(TestPAL, "TestPAL");
 #define ARG_STRINGS_ALLOCATION_TEST			"stringsallocation"
 #define ARG_CREATEGUID_TEST					"createguid"
 #define ARG_THREADSTACK_TEST				"threadstack"
+#define ARG_EXEC_PROCESS_TEST				"exec-process"
 #define ARG_FORK_TEST						"fork"
+#define ARG_CMDLINE_PARSE_TEST				"cmdline"
 
 namespace TestPAL
 {
@@ -92,7 +95,7 @@ int32 ProcRunAsParent(const TCHAR* CommandLine)
 	GEngineLoop.PreInit(CommandLine);
 	UE_LOG(LogTestPAL, Display, TEXT("Running proc test as parent."));
 
-	// Run slave instance continuously
+	// Run child instance continuously
 	int NumChildrenToSpawn = 255, MaxAtOnce = 5;
 	FParent Parent(NumChildrenToSpawn, MaxAtOnce);
 
@@ -262,6 +265,15 @@ int32 ThreadSingletonTest(const TCHAR* CommandLine)
 	return 0;
 }
 
+#if PLATFORM_LINUX
+
+static float ToMB(uint64 Value)
+{
+	return Value * (1.0 / (1024.0 * 1024.0));
+}
+
+#endif // PLATFORM_LINUX
+
 /**
  * Sysinfo test
  */
@@ -301,6 +313,15 @@ int32 SysInfoTest(const TCHAR* CommandLine)
 
 	FPlatformMemory::DumpStats(*GLog);
 
+#if PLATFORM_LINUX
+	FExtendedPlatformMemoryStats StatsEx = FUnixPlatformMemory::GetExtendedStats();
+
+	UE_LOG(LogTestPAL, Display, TEXT("Shared_Clean:%.2f MB, Shared_Dirty:%.2f MB"),
+		ToMB(StatsEx.Shared_Clean), ToMB(StatsEx.Shared_Dirty));
+	UE_LOG(LogTestPAL, Display, TEXT("Private_Clean:%.2fMB Private_Dirty:%.2fMB"),
+		ToMB(StatsEx.Private_Clean), ToMB(StatsEx.Private_Dirty));
+#endif // PLATFORM_LINUX
+
 	FEngineLoop::AppPreExit();
 	FEngineLoop::AppExit();
 	return 0;
@@ -324,6 +345,10 @@ int32 CrashTest(const TCHAR* CommandLine)
 	else if (FParse::Param(CommandLine, TEXT("check")))
 	{
 		checkf(false, TEXT("  checkf!"));
+	}
+	else if (FParse::Param(CommandLine, TEXT("ensure")))
+	{
+		ensureMsgf(false, TEXT("  ensureMsgf!"));
 	}
 	else if (FParse::Param(CommandLine, TEXT("unaligned")))
 	{
@@ -687,7 +712,7 @@ int32 StringsAllocationTest(const TCHAR* CommandLine)
 	const int32 NumOfStrings = 1000000;
 	const TCHAR* SampleText = TEXT("Lorem ipsum dolor sit amet");
 
-	FString* Strings[NumOfStrings];
+	FString** Strings = new FString*[NumOfStrings];
 
 	UE_LOG(LogTestPAL, Display, TEXT("Allocating %u strings '%s'"), NumOfStrings, SampleText);
 
@@ -705,6 +730,7 @@ int32 StringsAllocationTest(const TCHAR* CommandLine)
 	{
 		delete Strings[i];
 	}
+	delete [] Strings;
 
 	// GMalloc = OldGMalloc;
 	FEngineLoop::AppExit();
@@ -1413,6 +1439,7 @@ namespace
 		}
 	}
 
+	PRAGMA_DISABLE_UNREACHABLE_CODE_WARNINGS
 	void FORCENOINLINE LabelGoto()
 	{
 		goto end;
@@ -1425,6 +1452,7 @@ namespace
 end:
 		ensure(false);
 	}
+	PRAGMA_RESTORE_UNREACHABLE_CODE_WARNINGS
 
 	void FORCEINLINE inline_three_ensures()
 	{
@@ -1615,6 +1643,101 @@ int32 ForkTest(const TCHAR* CommandLine)
 	return 0;
 }
 
+/** 
+ * Launch the external tool as a process and wait for it to complete
+ *
+ * Set executable and parameters via something like:
+ *
+ *  ./Engine/Binaries/Linux/TestPAL exec-process exe=/bin/ls params=/tmp
+ *
+ */
+int32 ExecProcessTest(const TCHAR *CommandLine)
+{
+	FString Exe;
+	FString Params;
+
+	FPlatformMisc::SetCrashHandler(NULL);
+	FPlatformMisc::SetGracefulTerminationHandler();
+
+	GEngineLoop.PreInit(CommandLine);
+
+	if (!FParse::Value(CommandLine, TEXT("exe="), Exe))
+	{
+		Exe = TEXT("nonexistent-exe");
+	}
+	if (!FParse::Value(CommandLine, TEXT("params="), Params))
+	{
+		Params = TEXT("");
+	}
+
+	UE_LOG(LogTestPAL, Display, TEXT("  Exe:'%s' Parameters:'%s'"), *Exe, *Params);
+
+	int32 ReturnCode;
+	FString OutStdOut;
+	FString OutStdErr;
+	bool Ret = FPlatformProcess::ExecProcess(*Exe, *Params, &ReturnCode, &OutStdOut, &OutStdErr);
+
+	UE_LOG(LogTestPAL, Display, TEXT("ExecProcess returns %d"), Ret);
+	UE_LOG(LogTestPAL, Display, TEXT("  ReturnCode:%d"), ReturnCode);
+	UE_LOG(LogTestPAL, Display, TEXT("  StdOut:%s"), *OutStdOut);
+	UE_LOG(LogTestPAL, Display, TEXT("  StdErr:%s"), *OutStdErr);
+
+	FEngineLoop::AppPreExit();
+	FEngineLoop::AppExit();
+
+	return 0;
+}
+
+int32 CmdlineParseTest(const TCHAR *CommandLine)
+{
+	int32 NotOk = 0;	// zero when everything has passed so far
+	FPlatformMisc::SetCrashHandler(NULL);
+	FPlatformMisc::SetGracefulTerminationHandler();
+
+	GEngineLoop.PreInit(CommandLine);
+	
+	void* ReadPipe = nullptr;
+	void* WritePipe = nullptr;
+	verify(FPlatformProcess::CreatePipe(ReadPipe, WritePipe));
+
+	uint32 ProcessID;
+
+	// key is the command line to test, value is the expected parse result when run through 'echo'
+	TArray<TTuple<FString, FString>> tests = 
+	{ 
+		{ TEXT("foo"), TEXT("foo") },
+		{ TEXT("\"foo bar\""), TEXT("foo bar") },
+		{ TEXT("\"\"foo bar\"\""), TEXT("\"foo bar\"") },
+		{ TEXT("\"foo"), TEXT("") },
+		{ TEXT("\"\"foo"), TEXT("") },
+		{ TEXT("-logpath=\"path with space\""), TEXT("-logpath=path with space") },
+		{ TEXT("-logpath=\"\"double quoted path with space\"\""), TEXT("-logpath=\"double quoted path with space\"") },
+		{ TEXT("bar \"\"foo blarg"), TEXT("bar") },
+	};
+
+	for(int i=0;i<tests.Num();i++)
+	{
+		FProcHandle ProcessHandle = FPlatformProcess::CreateProc(TEXT("/usr/bin/echo"), *tests[i].Key, false, false, false, &ProcessID, 0, nullptr, WritePipe);
+		while (FPlatformProcess::IsProcRunning(ProcessHandle));
+		FString Result = FPlatformProcess::ReadPipe(ReadPipe).TrimEnd();
+		NotOk = Result.Compare(*tests[i].Value);
+		if(NotOk)
+		{
+			UE_LOG(LogTestPAL, Display, TEXT("CmdLine test failed: '%s' != '%s'\n"), *Result, *tests[i].Value);
+			break;
+		}
+	}
+	
+	FPlatformProcess::ClosePipe(ReadPipe, WritePipe);
+
+	UE_LOG(LogTestPAL, Display, TEXT("Parse command line test %s"), (NotOk)?TEXT("failed!"):TEXT("succeeded!"));
+
+	FEngineLoop::AppPreExit();
+	FEngineLoop::AppExit();
+
+	return NotOk;
+}
+
 /**
  * Selects and runs one of test cases.
  *
@@ -1704,10 +1827,20 @@ int32 MultiplexedMain(int32 ArgC, char* ArgV[])
 		{
 			return ThreadTraceTest(*TestPAL::CommandLine);
 		}
+		else if (!FCStringAnsi::Strcmp(ArgV[IdxArg], ARG_EXEC_PROCESS_TEST))
+		{
+			return ExecProcessTest(*TestPAL::CommandLine);
+		}
 		else if (!FCStringAnsi::Strcmp(ArgV[IdxArg], ARG_FORK_TEST))
 		{
 			return ForkTest(*TestPAL::CommandLine);
 		}
+#if PLATFORM_LINUX
+		else if (!FCStringAnsi::Strcmp(ArgV[IdxArg], ARG_CMDLINE_PARSE_TEST))
+		{
+			return CmdlineParseTest(*TestPAL::CommandLine);
+		}
+#endif
 	}
 
 	FPlatformMisc::SetCrashHandler(NULL);
@@ -1736,10 +1869,12 @@ int32 MultiplexedMain(int32 ArgC, char* ArgV[])
 	UE_LOG(LogTestPAL, Warning, TEXT("  %s: test string allocations."), UTF8_TO_TCHAR(ARG_STRINGS_ALLOCATION_TEST));
 	UE_LOG(LogTestPAL, Warning, TEXT("  %s: test CreateGuid."), UTF8_TO_TCHAR(ARG_CREATEGUID_TEST));
 	UE_LOG(LogTestPAL, Warning, TEXT("  %s: test ThreadWalkStackAndDump and CaptureThreadBackTrace."), UTF8_TO_TCHAR(ARG_THREADSTACK_TEST));
+	UE_LOG(LogTestPAL, Warning, TEXT("  %s: test ExecProcess. Possible options: [-exe=executable] [-params=parameters]"), UTF8_TO_TCHAR(ARG_EXEC_PROCESS_TEST));
 
 	if (PLATFORM_LINUX)
 	{
 		UE_LOG(LogTestPAL, Warning, TEXT("  %s: test WaitAndFork"), UTF8_TO_TCHAR(ARG_FORK_TEST));
+		UE_LOG(LogTestPAL, Warning, TEXT("  %s: test CmdlineParse"), UTF8_TO_TCHAR(ARG_CMDLINE_PARSE_TEST));
 	}
 
 	UE_LOG(LogTestPAL, Warning, TEXT(""));

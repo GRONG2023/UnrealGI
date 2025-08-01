@@ -2,10 +2,16 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "Templates/RefCounting.h"
-#include "VideoCommon.h"
 #include "CudaModule.h"
+#include "HAL/Platform.h"
+#include "HAL/ThreadSafeCounter.h"
+#include "Templates/Function.h"
+#include "Templates/RefCounting.h"
+#include "Templates/SharedPointer.h"
+#include "VideoCommon.h"
+
 
 #if PLATFORM_DESKTOP && !PLATFORM_APPLE
 #include "vulkan/vulkan_core.h"
@@ -28,7 +34,7 @@ namespace AVEncoder
 	class FVideoEncoderInputFrame;
 
 #if PLATFORM_DESKTOP && !PLATFORM_APPLE
-	struct FVulkanDataStruct
+	struct UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") FVulkanDataStruct
 	{
 		VkInstance VulkanInstance;
 		VkPhysicalDevice VulkanPhysicalDevice;
@@ -36,35 +42,38 @@ namespace AVEncoder
 	};
 #endif
 
-	class AVENCODER_API FVideoEncoderInput
+	class UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") FVideoEncoderInput
 	{
 	public:
 		// --- construct video encoder input based on expected input frame format
-		static TSharedPtr<FVideoEncoderInput> CreateDummy(uint32 InWidth, uint32 InHeight, bool isResizable = false);
-		static TSharedPtr<FVideoEncoderInput> CreateForYUV420P(uint32 InWidth, uint32 InHeight, bool isResizable = false);
+		static AVENCODER_API TSharedPtr<FVideoEncoderInput> CreateDummy(bool isResizable = false);
+		static AVENCODER_API TSharedPtr<FVideoEncoderInput> CreateForYUV420P(uint32 InWidth, uint32 InHeight, bool isResizable = false);
 
 		// create input for an encoder that encodes a D3D11 texture 
-		static TSharedPtr<FVideoEncoderInput> CreateForD3D11(void* InApplicationD3D11Device, uint32 InWidth, uint32 InHeight, bool IsResizable = false, bool IsShared = false);
+		static AVENCODER_API TSharedPtr<FVideoEncoderInput> CreateForD3D11(void* InApplicationD3D11Device, bool IsResizable = false, bool IsShared = false);
 
 		// create input for an encoder that encodes a D3D12 texture
-		static TSharedPtr<FVideoEncoderInput> CreateForD3D12(void* InApplicationD3D12Device, uint32 InWidth, uint32 InHeight, bool IsResizable = false, bool IsShared = false);
+		static AVENCODER_API TSharedPtr<FVideoEncoderInput> CreateForD3D12(void* InApplicationD3D12Device, bool IsResizable = false, bool IsShared = false);
 
 		// create input for an encoder that encodes a CUarray
-		static TSharedPtr<FVideoEncoderInput> CreateForCUDA(void* InApplicationCudaContext, uint32 InWidth, uint32 InHeight, bool IsResizable = false);
+		static AVENCODER_API TSharedPtr<FVideoEncoderInput> CreateForCUDA(void* InApplicationCudaContext, bool IsResizable = false);
 
 		// create input for an encoder that encodes a VkImage
-		static TSharedPtr<FVideoEncoderInput> CreateForVulkan(void* InApplicationVulkanData, uint32 InWidth, uint32 InHeight, bool IsResizable = false);
+		static AVENCODER_API TSharedPtr<FVideoEncoderInput> CreateForVulkan(void* InApplicationVulkanData, bool IsResizable = false);
 
 		// --- properties
-		virtual void SetResolution(uint32 InWidth, uint32 InHeight);
-		virtual void SetMaxNumBuffers(uint32 InMaxNumBuffers);
+		AVENCODER_API virtual void SetMaxNumBuffers(uint32 InMaxNumBuffers);
 
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		EVideoFrameFormat GetFrameFormat() const { return FrameFormat; }
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 		// --- available encoders
 
 		// get a list of supported video encoders
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		virtual const TArray<FVideoEncoderInfo>& GetAvailableEncoders() = 0;
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 		// --- create encoders
 
@@ -82,7 +91,7 @@ namespace AVEncoder
 		// --- encoder input frames - managed by this object
 
 		// obtain a video frame that can be used as a buffer for input to a video encoder
-		virtual FVideoEncoderInputFrame* ObtainInputFrame() = 0;
+		virtual TSharedPtr<FVideoEncoderInputFrame> ObtainInputFrame() = 0;
 
 		// release (free) an input frame and make it available for future use
 		virtual void ReleaseInputFrame(FVideoEncoderInputFrame* InFrame) = 0;
@@ -107,9 +116,10 @@ namespace AVEncoder
 		FVideoEncoderInput(const FVideoEncoderInput&) = delete;
 		FVideoEncoderInput& operator=(const FVideoEncoderInput&) = delete;
 
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		EVideoFrameFormat				FrameFormat = EVideoFrameFormat::Undefined;
-		uint32 Width;
-		uint32 Height;
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
 		uint32 MaxNumBuffers = 3;
 		uint32 NumBuffers = 0;
 
@@ -120,7 +130,7 @@ namespace AVEncoder
 
 
 	// TODO this should go elsewhere and be made cross platform
-	class AVENCODER_API FVideoEncoderInputFrame
+	class UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") FVideoEncoderInputFrame
 	{
 	public:
 		// Obtain (increase reference count) of this input frame
@@ -144,17 +154,21 @@ namespace AVEncoder
 		int64 GetTimestampRTP() const { return TimestampRTP; }
 
 		// current format of frame
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		EVideoFrameFormat GetFormat() const { return Format; }
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		// width of frame buffer
+		void SetWidth(uint32 InWidth) { Width = InWidth; }
 		uint32 GetWidth() const { return Width; }
 		// height of frame buffer
+		void SetHeight(uint32 InHeight) { Height = InHeight; }
 		uint32 GetHeight() const { return Height; }
 
 		TFunction<void()> OnTextureEncode;
 
 		// --- YUV420P
 
-		struct FYUV420P
+		struct UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") FYUV420P
 		{
 			const uint8*		Data[3] = { nullptr, nullptr, nullptr };
 			uint32				StrideY = 0;
@@ -162,7 +176,7 @@ namespace AVEncoder
 			uint32				StrideV = 0;
 		};
 
-		void AllocateYUV420P();
+		AVENCODER_API void AllocateYUV420P();
 		const FYUV420P& GetYUV420P() const 
 		{	
 			return YUV420P; 
@@ -170,12 +184,12 @@ namespace AVEncoder
 		
 		FYUV420P& GetYUV420P() { return YUV420P; }
 
-		void SetYUV420P(const uint8* InDataY, const uint8* InDataU, const uint8* InDataV, uint32 InStrideY, uint32 InStrideU, uint32 InStrideV);
+		AVENCODER_API void SetYUV420P(const uint8* InDataY, const uint8* InDataU, const uint8* InDataV, uint32 InStrideY, uint32 InStrideU, uint32 InStrideV);
 
 #if PLATFORM_WINDOWS
 		// --- D3D11
 
-		struct FD3D11
+		struct UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") FD3D11
 		{
 			ID3D11Texture2D*	Texture = nullptr;
 			ID3D11Device*		EncoderDevice = nullptr;
@@ -189,11 +203,11 @@ namespace AVEncoder
 		// the callback type used to create a registered encoder
 		using FReleaseD3D11TextureCallback = TFunction<void(ID3D11Texture2D*)>;
 
-		void SetTexture(ID3D11Texture2D* InTexture, FReleaseD3D11TextureCallback InOnReleaseD3D11Texture);
+		AVENCODER_API void SetTexture(ID3D11Texture2D* InTexture, FReleaseD3D11TextureCallback InOnReleaseD3D11Texture);
 
 		// --- D3D12
 
-		struct FD3D12
+		struct UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") FD3D12
 		{
 			ID3D12Resource*		Texture = nullptr;
 			ID3D12Device*		EncoderDevice = nullptr;
@@ -206,15 +220,28 @@ namespace AVEncoder
 		// the callback type used to create a registered encoder
 		using FReleaseD3D12TextureCallback = TFunction<void(ID3D12Resource*)>;
 
-		void SetTexture(ID3D12Resource* InTexture, FReleaseD3D12TextureCallback InOnReleaseD3D11Texture);
+		AVENCODER_API void SetTexture(ID3D12Resource* InTexture, FReleaseD3D12TextureCallback InOnReleaseD3D11Texture);
 
 #endif // PLATFORM_WINDOWS
 
-		// --- CUDA
-		struct FCUDA
+		enum class UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") EUnderlyingRHI
 		{
-			CUarray		EncoderTexture = nullptr;
-			CUcontext   EncoderDevice = nullptr;
+			Undefined,
+			D3D11,
+			D3D12,
+			Vulkan
+		};
+
+		// --- CUDA
+		struct UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") FCUDA
+		{
+			CUarray			EncoderTexture = nullptr;
+			CUcontext   	EncoderDevice = nullptr;
+			void*			SharedHandle = nullptr;
+
+			PRAGMA_DISABLE_DEPRECATION_WARNINGS
+			EUnderlyingRHI	UnderlyingRHI = EUnderlyingRHI::Undefined;
+			PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		};
 
 		const FCUDA& GetCUDA() const { return CUDA; }
@@ -223,11 +250,11 @@ namespace AVEncoder
 		// the callback type used to create a registered encoder
 		using FReleaseCUDATextureCallback = TFunction<void(CUarray)>;
 
-		void SetTexture(CUarray InTexture, FReleaseCUDATextureCallback InOnReleaseTexture);
+		AVENCODER_API void SetTexture(CUarray InTexture, EUnderlyingRHI UnderlyingRHI, void* SharedHandle, FReleaseCUDATextureCallback InOnReleaseTexture);
 
 #if PLATFORM_DESKTOP && !PLATFORM_APPLE
 		// --- Vulkan
-		struct FVulkan
+		struct UE_DEPRECATED(5.4, "AVEncoder has been deprecated. Please use the AVCodecs plugin family instead.") FVulkan
 		{
 			VkImage				EncoderTexture = VK_NULL_HANDLE;
 			VkDeviceMemory		EncoderDeviceMemory;
@@ -244,24 +271,28 @@ namespace AVEncoder
 		using FReleaseVulkanSurfaceCallback = TFunction<void(void*)>;
 		mutable FReleaseVulkanSurfaceCallback OnReleaseVulkanSurface;
 
-		void SetTexture(VkImage InTexture, FReleaseVulkanTextureCallback InOnReleaseTexture);
-		void SetTexture(VkImage InTexture, VkDeviceMemory InTextureDeviceMemory, uint64 InTextureSize, FReleaseVulkanTextureCallback InOnReleaseTexture);
+		AVENCODER_API void SetTexture(VkImage InTexture, FReleaseVulkanTextureCallback InOnReleaseTexture);
+		AVENCODER_API void SetTexture(VkImage InTexture, VkDeviceMemory InTextureDeviceMemory, uint64 InTextureSize, FReleaseVulkanTextureCallback InOnReleaseTexture);
 #endif
 
+		AVENCODER_API virtual ~FVideoEncoderInputFrame();
 	protected:
-		FVideoEncoderInputFrame();
-		explicit FVideoEncoderInputFrame(const FVideoEncoderInputFrame& CloneFrom);
-		virtual ~FVideoEncoderInputFrame();
+		AVENCODER_API FVideoEncoderInputFrame();
+		AVENCODER_API explicit FVideoEncoderInputFrame(const FVideoEncoderInputFrame& CloneFrom);
+		
 
 		uint32									FrameID;
 		int64									TimestampUs;
 		int64									TimestampRTP;
 		mutable FThreadSafeCounter				NumReferences;
-		EVideoFrameFormat						Format;
 		uint32									Width;
 		uint32									Height;
 		FYUV420P								YUV420P;
 		bool									bFreeYUV420PData;
+
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		EVideoFrameFormat						Format;
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 #if PLATFORM_WINDOWS
 		FD3D11									D3D11;

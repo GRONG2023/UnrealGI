@@ -7,6 +7,7 @@
 #include "GeometryCollection/TransformCollection.h"
 
 class FGeometryCollection;
+class FGeometryDynamicCollection;
 
 namespace GeometryCollectionAlgo
 {
@@ -133,12 +134,17 @@ namespace GeometryCollectionAlgo
 	*  Global Matrices of the specified index.
 	*/
 	FTransform CHAOS_API GlobalMatrix(const TManagedArray<FTransform>& RelativeTransforms, const TManagedArray<int32>& Parents, int32 Index);
+	FTransform CHAOS_API GlobalMatrix(const TManagedArray<FTransform3f>& RelativeTransforms, const TManagedArray<int32>& Parents, int32 Index);
+	FTransform CHAOS_API GlobalMatrix(TArrayView<const FTransform> RelativeTransforms, TArrayView<const int32> Parents, int32 Index);
+	FTransform CHAOS_API GlobalMatrix(TArrayView<const FTransform3f> RelativeTransforms, TArrayView<const int32> Parents, int32 Index);
+	FTransform3f CHAOS_API GlobalMatrix3f(const TManagedArray<FTransform3f>& RelativeTransforms, const TManagedArray<int32>& Parents, int32 Index);
 
 
 	/*
 	*  Global Matrices of the collection based on list of indices
 	*/
 	void CHAOS_API GlobalMatrices(const TManagedArray<FTransform>& RelativeTransforms, const TManagedArray<int32>& Parents, const TArray<int32>& Indices, TArray<FTransform>& Transforms);
+	void CHAOS_API GlobalMatrices(const TManagedArray<FTransform3f>& RelativeTransforms, const TManagedArray<int32>& Parents, const TArray<int32>& Indices, TArray<FTransform3f>& Transforms);
 
 	/*
 	 *  Recursively traverse from a root node down
@@ -149,7 +155,10 @@ namespace GeometryCollectionAlgo
 	*  Global Matrices of the collection, transforms will be resized to fit
 	*/
 	template<typename MatrixType>
-	void CHAOS_API GlobalMatrices(const TManagedArray<FTransform>& RelativeTransforms, const TManagedArray<int32>& Parents, TArray<MatrixType>& Transforms);
+	void CHAOS_API GlobalMatrices(const TManagedArray<FTransform>& RelativeTransforms, const TManagedArray<int32>& Parents, const TManagedArray<FTransform>& UniformScale, TArray<MatrixType>& Transforms);
+
+	template<typename MatrixType, typename TransformType>
+	void CHAOS_API GlobalMatrices(const TManagedArray<TransformType>& RelativeTransforms, const TManagedArray<int32>& Parents, TArray<MatrixType>& Transforms);
 
 	/*
 	*  Gets pairs of elements whose bounding boxes overlap.
@@ -176,7 +185,7 @@ namespace GeometryCollectionAlgo
 
 	void
 	CHAOS_API
-	TriangulateBoundaries(FGeometryCollection* GeometryCollection, const TArray<TArray<TArray<int32>>> &BoundaryVertexIndices, bool bWoundClockwise = true, float MinTriangleAreaSq = 1e-4);
+	TriangulateBoundaries(FGeometryCollection* GeometryCollection, const TArray<TArray<TArray<int32>>> &BoundaryVertexIndices, bool bWoundClockwise = true, float MinTriangleAreaSq = 1e-4f);
 
 	void
 	CHAOS_API
@@ -188,7 +197,7 @@ namespace GeometryCollectionAlgo
 	 */
 	void
 	CHAOS_API
-	ResizeGeometries(FGeometryCollection* GeometryCollection, const TArray<int32>& FaceCounts, const TArray<int32>& VertexCounts);
+	ResizeGeometries(FGeometryCollection* GeometryCollection, const TArray<int32>& FaceCounts, const TArray<int32>& VertexCounts, bool bDoValidation = true);
 
 	void
 	CHAOS_API
@@ -196,7 +205,7 @@ namespace GeometryCollectionAlgo
 
 	void
 	CHAOS_API
-	DeleteCoincidentVertices(FGeometryCollection* GeometryCollection, float Tolerance = 1e-2);
+	DeleteCoincidentVertices(FGeometryCollection* GeometryCollection, float Tolerance = 1e-2f);
 
 	void
 	CHAOS_API
@@ -204,7 +213,7 @@ namespace GeometryCollectionAlgo
 
 	void
 	CHAOS_API
-	DeleteZeroAreaFaces(FGeometryCollection* GeometryCollection, float Tolerance = 1e-4);
+	DeleteZeroAreaFaces(FGeometryCollection* GeometryCollection, float Tolerance = 1e-4f);
 
 	void
 	CHAOS_API
@@ -272,11 +281,22 @@ namespace GeometryCollectionAlgo
 	CHAOS_API
 	HasValidGeometryReferences(const FGeometryCollection* GeometryCollection);
 
+
 	/*
 	* Computes the order of transform indices so that children in a tree always appear before their parents. Handles forests
 	*/
 	TArray<int32>
 	CHAOS_API
-	ComputeRecursiveOrder(const FGeometryCollection& Collection);
+	ComputeRecursiveOrder(const FManagedArrayCollection& Collection);
+
+
+	// For internal use only 
+	namespace Private
+	{
+		void CHAOS_API GlobalMatrices(const FGeometryDynamicCollection& DynamicCollection, TArray<FTransform>& Transforms);
+		void CHAOS_API GlobalMatrices(const FGeometryDynamicCollection& DynamicCollection, TArray<FTransform3f>& Transforms);
+		void CHAOS_API GlobalMatrices(const FGeometryDynamicCollection& DynamicCollection, const TArray<int32>& Indices, TArray<FTransform>& OutGlobalTransforms);
+		FTransform CHAOS_API GlobalMatrix(const FGeometryDynamicCollection& DynamicCollection, int32 Index);
+	}
 
 }

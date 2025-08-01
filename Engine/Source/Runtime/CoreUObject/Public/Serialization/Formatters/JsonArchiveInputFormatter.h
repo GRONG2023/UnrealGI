@@ -2,81 +2,100 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "HAL/Platform.h"
 #include "Serialization/StructuredArchiveFormatter.h"
+#include "Serialization/StructuredArchiveNameHelpers.h"
+#include "Templates/Function.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/ObjectResource.h"
 
+class FArchive;
 class FJsonObject;
 class FJsonValue;
+class FName;
+class FPackageIndex;
+class FText;
+class UObject;
+struct FLazyObjectPtr;
+struct FObjectPtr;
+struct FSoftObjectPath;
+struct FSoftObjectPtr;
+struct FWeakObjectPtr;
 
 #if WITH_TEXT_ARCHIVE_SUPPORT
 
-class COREUOBJECT_API FJsonArchiveInputFormatter final : public FStructuredArchiveFormatter
+class FJsonArchiveInputFormatter final : public FStructuredArchiveFormatter
 {
 public:
-	FJsonArchiveInputFormatter(FArchive& InInner, TFunction<UObject* (const FString&)> InResolveObjectName = nullptr);
-	virtual ~FJsonArchiveInputFormatter();
+	// Noncopyable
+	FJsonArchiveInputFormatter(FJsonArchiveInputFormatter&&) = delete;
+	FJsonArchiveInputFormatter(const FJsonArchiveInputFormatter&) = delete;
+	FJsonArchiveInputFormatter& operator=(FJsonArchiveInputFormatter&&) = delete;
+	FJsonArchiveInputFormatter& operator=(const FJsonArchiveInputFormatter&) = delete;
 
-	virtual FArchive& GetUnderlyingArchive() override;
-	virtual FStructuredArchiveFormatter* CreateSubtreeReader() override;
+	COREUOBJECT_API explicit FJsonArchiveInputFormatter(FArchive& InInner, TFunction<UObject* (const FPackageIndex)> InResolveObject = nullptr);
+	COREUOBJECT_API virtual ~FJsonArchiveInputFormatter();
 
-	virtual bool HasDocumentTree() const override;
+	COREUOBJECT_API virtual FArchive& GetUnderlyingArchive() override;
+	COREUOBJECT_API virtual FStructuredArchiveFormatter* CreateSubtreeReader() override;
 
-	virtual void EnterRecord() override;
-	virtual void EnterRecord_TextOnly(TArray<FString>& OutFieldNames) override;
-	virtual void LeaveRecord() override;
-	virtual void EnterField(FArchiveFieldName Name) override;
-	virtual void EnterField_TextOnly(FArchiveFieldName Name, EArchiveValueType& OutType) override;
-	virtual void LeaveField() override;
-	virtual bool TryEnterField(FArchiveFieldName Name, bool bEnterWhenSaving) override;
+	COREUOBJECT_API virtual bool HasDocumentTree() const override;
 
-	virtual void EnterArray(int32& NumElements) override;
-	virtual void LeaveArray() override;
-	virtual void EnterArrayElement() override;
-	virtual void EnterArrayElement_TextOnly(EArchiveValueType& OutType) override;
-	virtual void LeaveArrayElement() override;
+	COREUOBJECT_API virtual void EnterRecord() override;
+	COREUOBJECT_API virtual void LeaveRecord() override;
+	COREUOBJECT_API virtual void EnterField(FArchiveFieldName Name) override;
+	COREUOBJECT_API virtual void LeaveField() override;
+	COREUOBJECT_API virtual bool TryEnterField(FArchiveFieldName Name, bool bEnterWhenSaving) override;
 
-	virtual void EnterStream() override;
-	virtual void EnterStream_TextOnly(int32& NumElements) override;
-	virtual void LeaveStream() override;
-	virtual void EnterStreamElement() override;
-	virtual void EnterStreamElement_TextOnly(EArchiveValueType& OutType) override;
-	virtual void LeaveStreamElement() override;
+	COREUOBJECT_API virtual void EnterArray(int32& NumElements) override;
+	COREUOBJECT_API virtual void LeaveArray() override;
+	COREUOBJECT_API virtual void EnterArrayElement() override;
+	COREUOBJECT_API virtual void LeaveArrayElement() override;
 
-	virtual void EnterMap(int32& NumElements) override;
-	virtual void LeaveMap() override;
-	virtual void EnterMapElement(FString& Name) override;
-	virtual void EnterMapElement_TextOnly(FString& OutName, EArchiveValueType& OutType) override;
-	virtual void LeaveMapElement() override;
+	COREUOBJECT_API virtual void EnterStream() override;
+	COREUOBJECT_API virtual void LeaveStream() override;
+	COREUOBJECT_API virtual void EnterStreamElement() override;
+	COREUOBJECT_API virtual void LeaveStreamElement() override;
 
-	virtual void EnterAttributedValue() override;
-	virtual void EnterAttribute(FArchiveFieldName AttributeName) override;
-	virtual void EnterAttributedValueValue() override;
-	virtual void LeaveAttribute() override;
-	virtual void LeaveAttributedValue() override;
-	virtual bool TryEnterAttribute(FArchiveFieldName AttributeName, bool bEnterWhenSavin) override;
-	virtual bool TryEnterAttributedValueValue() override;
+	COREUOBJECT_API virtual void EnterMap(int32& NumElements) override;
+	COREUOBJECT_API virtual void LeaveMap() override;
+	COREUOBJECT_API virtual void EnterMapElement(FString& Name) override;
+	COREUOBJECT_API virtual void LeaveMapElement() override;
 
-	virtual void Serialize(uint8& Value) override;
-	virtual void Serialize(uint16& Value) override;
-	virtual void Serialize(uint32& Value) override;
-	virtual void Serialize(uint64& Value) override;
-	virtual void Serialize(int8& Value) override;
-	virtual void Serialize(int16& Value) override;
-	virtual void Serialize(int32& Value) override;
-	virtual void Serialize(int64& Value) override;
-	virtual void Serialize(float& Value) override;
-	virtual void Serialize(double& Value) override;
-	virtual void Serialize(bool& Value) override;
-	virtual void Serialize(FString& Value) override;
-	virtual void Serialize(FName& Value) override;
-	virtual void Serialize(UObject*& Value) override;
-	virtual void Serialize(FText& Value) override;
-	virtual void Serialize(FWeakObjectPtr& Value) override;
-	virtual void Serialize(FSoftObjectPtr& Value) override;
-	virtual void Serialize(FSoftObjectPath& Value) override;
-	virtual void Serialize(FLazyObjectPtr& Value) override;
-	virtual void Serialize(TArray<uint8>& Value) override;
-	virtual void Serialize(void* Data, uint64 DataSize) override;
+	COREUOBJECT_API virtual void EnterAttributedValue() override;
+	COREUOBJECT_API virtual void EnterAttribute(FArchiveFieldName AttributeName) override;
+	COREUOBJECT_API virtual void EnterAttributedValueValue() override;
+	COREUOBJECT_API virtual void LeaveAttribute() override;
+	COREUOBJECT_API virtual void LeaveAttributedValue() override;
+	COREUOBJECT_API virtual bool TryEnterAttribute(FArchiveFieldName AttributeName, bool bEnterWhenSavin) override;
+	COREUOBJECT_API virtual bool TryEnterAttributedValueValue() override;
+
+	COREUOBJECT_API virtual void Serialize(uint8& Value) override;
+	COREUOBJECT_API virtual void Serialize(uint16& Value) override;
+	COREUOBJECT_API virtual void Serialize(uint32& Value) override;
+	COREUOBJECT_API virtual void Serialize(uint64& Value) override;
+	COREUOBJECT_API virtual void Serialize(int8& Value) override;
+	COREUOBJECT_API virtual void Serialize(int16& Value) override;
+	COREUOBJECT_API virtual void Serialize(int32& Value) override;
+	COREUOBJECT_API virtual void Serialize(int64& Value) override;
+	COREUOBJECT_API virtual void Serialize(float& Value) override;
+	COREUOBJECT_API virtual void Serialize(double& Value) override;
+	COREUOBJECT_API virtual void Serialize(bool& Value) override;
+	COREUOBJECT_API virtual void Serialize(FString& Value) override;
+	COREUOBJECT_API virtual void Serialize(FName& Value) override;
+	COREUOBJECT_API virtual void Serialize(UObject*& Value) override;
+	COREUOBJECT_API virtual void Serialize(FText& Value) override;
+	COREUOBJECT_API virtual void Serialize(FWeakObjectPtr& Value) override;
+	COREUOBJECT_API virtual void Serialize(FSoftObjectPtr& Value) override;
+	COREUOBJECT_API virtual void Serialize(FSoftObjectPath& Value) override;
+	COREUOBJECT_API virtual void Serialize(FLazyObjectPtr& Value) override;
+	COREUOBJECT_API virtual void Serialize(FObjectPtr& Value) override;
+	COREUOBJECT_API virtual void Serialize(TArray<uint8>& Value) override;
+	COREUOBJECT_API virtual void Serialize(void* Data, uint64 DataSize) override;
 
 private:
 	FArchive& Inner;
@@ -94,7 +113,7 @@ private:
 		int64 ValueCountOnCreation;	// For debugging purposes, so we can ensure all values have been consumed
 	};
 
-	TFunction<UObject* (const FString&)> ResolveObjectName;
+	TFunction<UObject* (const FPackageIndex)> ResolveObject;
 	TArray<FObjectRecord> ObjectStack;
 	TArray<TSharedPtr<FJsonValue>> ValueStack;
 	TArray<TMap<FString, TSharedPtr<FJsonValue>>::TIterator> MapIteratorStack;

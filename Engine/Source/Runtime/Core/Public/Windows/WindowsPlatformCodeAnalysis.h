@@ -4,7 +4,7 @@
 
 
 // Code analysis features
-#if defined( _PREFAST_ ) || defined( PVS_STUDIO )
+#if defined( _PREFAST_ ) || defined( PVS_STUDIO ) || defined(__clang_analyzer__)
 	#define USING_CODE_ANALYSIS 1
 #else
 	#define USING_CODE_ANALYSIS 0
@@ -34,6 +34,8 @@
 //
 
 #if USING_CODE_ANALYSIS
+
+#if !defined(__clang_analyzer__)
 
 	// Input argument
 	// Example:  void SetValue( CA_IN bool bReadable );
@@ -101,7 +103,7 @@
 	#pragma warning(disable : 6240) // warning C6240 : (<expression> && <non-zero constant>) always evaluates to the result of <expression>. Did you intend to use the bitwise-and operator?
 
 	//PVS-Studio settings:
-	//-V::505,542,581,591,601,668,677,686,688,690,703,704,711,719,720,728,730,735,751,1002,1008
+	//-V::505,542,581,601,623,668,677,690,704,719,720,730,735,751,758,780,781,1002,1008,1055,1062,1100
 	//-V:TRYCOMPRESSION:519,547
 	//-V:check(:501,547,560,605
 	//-V:checkf(:510
@@ -168,8 +170,6 @@
 	//-V:FT_LOAD_TARGET_NORMAL:616
 	//-V:OPENGL_PERFORMANCE_DATA_INVALID:564
 	//-V:HLSLCC_VersionMajor:616
-	//-V:UWorld:623
-	//-V:TextureRHI:623
 	//-V:bIgnoreFieldReferences:519
 	//-V:CachedQueryInstance:519
 	//-V:MeshContext:519
@@ -189,7 +189,7 @@
 	//-V:DataStripped:581
 	//-V:FromInt:601
 	//-V:UE_CLOG(:501,560
-	//-V:UE_LOG(:501, 560
+	//-V:UE_LOG(:501,510,560
 	//-V:UGL_REQUIRED_VOID:501
 	//-V:AnimScriptInstance:595
 	//-V:Driver:595
@@ -229,5 +229,87 @@
 	//-V:Linker:678
 	//-V:self:678
 	//-V:AccumulateParentID:678
-	//-V:Resource:623
+	//-V:FindChar:679
+
+	// The following classes retain a reference to data supplied in the constructor by the derived class which can not yet be initialized.
+	//-V:FMemoryWriter(:1050
+	//-V:FObjectWriter(:1050
+	//-V:FDurationTimer(:1050
+	//-V:FScopedDurationTimer(:1050
+	//-V:FQueryFastData(:1050
+
+	// Exclude all generated protobuf files
+	//V_EXCLUDE_PATH *.pb.cc
+
+	// warning V530: The return value of function 'HashCombine' is required to be utilized.
+	//-V::530
+
+	// warning V630: Instantiation of TRingBuffer < FString >: The 'Malloc' function is used to allocate memory for an array of objects which are classes containing constructors and destructors.
+	//-V::630
+
+	// warning V1043: A global object variable 'GSmallNumber' is declared in the header. Multiple copies of it will be created in all translation units that include this header file.
+	//-V::1043
+
+	// warning V1051: Consider checking for misprints. It's possible that the 'LayerInfo' should be checked here.
+	//-V::1051
+
+	// V016: User annotation was not applied to a virtual function. To force the annotation, use the 'enable_on_virtual' flag.
+	//-V::016
+
+	// Disabling because incorrectly flagging all TStaticArrays
+	// V557: Array overrun is possible
+	//-V::557
+
+	// Disabling because too many virtuals currently in use in constructors/destructors, need to revist
+	// V1053: Calling the 'foo' virtual function in the constructor/destructor may lead to unexpected result at runtime.
+	//-V::1053
+
+#else // defined(__clang_analyzer__)
+
+// A fake function marked with noreturn that acts as a marker for CA_ASSUME to ensure the
+// static analyzer doesn't take an analysis path that is assumed not to be navigable.
+__declspec(dllimport, noreturn) void CA_AssumeNoReturn();
+
+// Input argument
+// Example:  void SetValue( CA_IN bool bReadable );
+#define CA_IN
+
+// Output argument
+// Example:  void FillValue( CA_OUT bool& bWriteable );
+#define CA_OUT
+
+// Specifies that a function parameter may only be read from, never written.
+// NOTE: CA_READ_ONLY is inferred automatically if your parameter is has a const qualifier.
+// Example:  void SetValue( CA_READ_ONLY bool bReadable );
+#define CA_READ_ONLY
+
+// Specifies that a function parameter may only be written to, never read.
+// Example:  void FillValue( CA_WRITE_ONLY bool& bWriteable );
+#define CA_WRITE_ONLY
+
+// Incoming pointer parameter must not be NULL and must point to a valid location in memory.
+// Place before a function parameter's type name.
+// Example:  void SetPointer( CA_VALID_POINTER void* Pointer );
+#define CA_VALID_POINTER
+
+// Caller must check the return value.  Place before the return value in a function declaration.
+// Example:  CA_CHECK_RETVAL int32 GetNumber();
+#define CA_CHECK_RETVAL
+
+// Function is expected to never return
+#define CA_NO_RETURN __declspec(noreturn)
+
+// Suppresses a warning for a single occurrence.  Should be used only for code analysis warnings on Windows platform!
+#define CA_SUPPRESS( WarningNumber )
+
+// Tells the code analysis engine to assume the statement to be true.  Useful for suppressing false positive warnings.
+#define CA_ASSUME( Expr )  (__builtin_expect(!bool(Expr), 0) ? CA_AssumeNoReturn() : (void)0)
+
+// Does a simple 'if (Condition)', but disables warnings about using constants in the condition.  Helps with some macro expansions.
+#define CA_CONSTANT_IF(Condition) if (Condition)
+
+
+#endif
+
+
 #endif

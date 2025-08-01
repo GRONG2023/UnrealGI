@@ -14,7 +14,7 @@
 
 // Currently we support at most 2 views for each planar reflection, one view per stereo pass
 // Must match FPlanarReflectionUniformParameters.
-const int32 GMaxPlanarReflectionViews = 2;
+inline const int32 GMaxPlanarReflectionViews = 2;
 
 class UPlanarReflectionComponent;
 
@@ -26,12 +26,7 @@ public:
 		Size(InSize)
 	{}
 
-	virtual const FTexture2DRHIRef& GetRenderTargetTexture() const 
-	{
-		return (const FTexture2DRHIRef&)TextureRHI;
-	}
-
-	virtual void InitDynamicRHI()
+	virtual void InitRHI(FRHICommandListBase&)
 	{
 		// Create the sampler state RHI resource.
 		FSamplerStateInitializerRHI SamplerStateInitializer
@@ -43,22 +38,15 @@ public:
 		);
 		SamplerStateRHI = GetOrCreateSamplerState(SamplerStateInitializer);
 
-		FTexture2DRHIRef Texture2DRHI;
-		FRHIResourceCreateInfo CreateInfo = { FClearValueBinding(FLinearColor::Black) };
+		const FRHITextureCreateDesc Desc =
+			FRHITextureCreateDesc::Create2D(TEXT("FPlanarReflectionRenderTarget"))
+			.SetExtent(GetSizeXY())
+			.SetFormat(PF_FloatRGBA)
+			.SetClearValue(FClearValueBinding::Black)
+			.SetFlags(ETextureCreateFlags::RenderTargetable | ETextureCreateFlags::ShaderResource)
+			.SetInitialState(ERHIAccess::SRVMask);
 
-		RHICreateTargetableShaderResource2D(
-			GetSizeX(), 
-			GetSizeY(), 
-			PF_FloatRGBA,
-			1,
-			TexCreate_None,
-			TexCreate_RenderTargetable,
-			false,
-			CreateInfo,
-			RenderTargetTextureRHI,
-			Texture2DRHI
-			);
-		TextureRHI = (FTextureRHIRef&)Texture2DRHI;
+		RenderTargetTextureRHI = TextureRHI = RHICreateTexture(Desc);
 	}
 
 	virtual FIntPoint GetSizeXY() const { return Size; }
@@ -83,7 +71,7 @@ public:
 		return ActiveGPUMask;
 	}
 
-	// Changes the GPUMask used when updating the reflection capture in AFR.
+	// Changes the GPUMask used when updating the reflection capture with multi-GPU.
 	void SetActiveGPUMask(FRHIGPUMask InGPUMask)
 	{
 		check(IsInRenderingThread());
@@ -92,7 +80,7 @@ public:
 
 private:
 
-	FRHIGPUMask ActiveGPUMask; // In AFR we need to change which GPUs are rendered to every frame.
+	FRHIGPUMask ActiveGPUMask; // GPU mask copied from parent render target for multi-GPU
 	FIntPoint Size;
 };
 
@@ -115,12 +103,12 @@ public:
 		WorldBounds = LocalBounds.TransformBy(NewTransform);
 
 		const FVector XAxis = NewTransform.TransformVector(FVector(1, 0, 0));
-		const float XAxisLength = XAxis.Size();
-		PlanarReflectionXAxis = FVector4(XAxis / FMath::Max(XAxisLength, DELTA), XAxisLength * MeshExtent);
+		const FVector::FReal XAxisLength = XAxis.Size();
+		PlanarReflectionXAxis = FVector4(XAxis / FMath::Max(XAxisLength, UE_DELTA), XAxisLength * MeshExtent);
 
 		const FVector YAxis = NewTransform.TransformVector(FVector(0, 1, 0));
-		const float YAxisLength = YAxis.Size();
-		PlanarReflectionYAxis = FVector4(YAxis / FMath::Max(YAxisLength, DELTA), YAxisLength * MeshExtent);
+		const FVector::FReal YAxisLength = YAxis.Size();
+		PlanarReflectionYAxis = FVector4(YAxis / FMath::Max(YAxisLength, UE_DELTA), YAxisLength * MeshExtent);
 
 		const FMirrorMatrix MirrorMatrix(ReflectionPlane);
 		// Using TransposeAdjoint instead of full inverse because we only care about transforming normals

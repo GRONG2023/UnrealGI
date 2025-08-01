@@ -2,10 +2,14 @@
 
 #pragma once
 
-#include "TraceServices/Model/AnalysisSession.h"
+#include "HAL/Platform.h"
+#include "Containers/Array.h"
 #include "Containers/UnrealString.h"
+#include "TraceServices/Model/AnalysisSession.h"
+#include "UObject/NameTypes.h"
 
-namespace Trace {
+namespace TraceServices
+{
 
 struct FChannelEntry
 {
@@ -20,9 +24,12 @@ class IChannelProvider
 {
 public:
 	virtual ~IChannelProvider() = default;
-	virtual uint64	GetChannelCount() const = 0;
+	virtual uint64 GetChannelCount() const = 0;
 	virtual const TArray<FChannelEntry>& GetChannels() const = 0;
 	virtual FDateTime GetTimeStamp() const = 0;
 };
 
-} // namespace Trace
+TRACESERVICES_API FName GetChannelProviderName();
+TRACESERVICES_API const IChannelProvider* ReadChannelProvider(const IAnalysisSession& Session);
+
+} // namespace TraceServices

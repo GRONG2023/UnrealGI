@@ -1,33 +1,43 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Kismet/KismetRenderingLibrary.h"
+#include "Camera/CameraTypes.h"
 #include "HAL/FileManager.h"
+#include "Components/SkinnedMeshComponent.h"
+#include "Materials/MaterialInterface.h"
+#include "Engine/World.h"
 #include "Misc/Paths.h"
+#include "Misc/PackageName.h"
 #include "Serialization/BufferArchive.h"
-#include "EngineGlobals.h"
+#include "RHIContext.h"
+#include "RHIUtilities.h"
 #include "RenderingThread.h"
+#include "RenderCaptureInterface.h"
 #include "Engine/Engine.h"
-#include "CanvasTypes.h"
 #include "Engine/Canvas.h"
-#include "Misc/App.h"
 #include "TextureResource.h"
-#include "SceneUtils.h"
 #include "Logging/MessageLog.h"
+#include "Engine/GameViewportClient.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/TextureRenderTarget2DArray.h"
+#include "Engine/TextureRenderTargetCube.h"
 #include "Engine/TextureRenderTargetVolume.h"
 #include "ImageUtils.h"
-#include "OneColorShader.h"
-#include "PipelineStateCache.h"
 #include "ClearQuad.h"
 #include "Engine/Texture2D.h"
-#include "RHI.h"
+#include "Engine/Texture2DArray.h"
+#include "Engine/TextureCube.h"
+#include "Engine/VolumeTexture.h"
+#include "UObject/Package.h"
+#include "EngineModule.h"
+#include "SceneInterface.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(KismetRenderingLibrary)
 
 #if WITH_EDITOR
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
-#include "IContentBrowserSingleton.h"
 #include "PackageTools.h"
 #endif
 
@@ -46,7 +56,7 @@ void UKismetRenderingLibrary::ClearRenderTarget2D(UObject* WorldContextObject, U
 	UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
 
 	if (TextureRenderTarget
-		&& TextureRenderTarget->Resource
+		&& TextureRenderTarget->GetResource()
 		&& World)
 	{
 		FTextureRenderTargetResource* RenderTargetResource = TextureRenderTarget->GameThread_GetRenderTargetResource();
@@ -54,7 +64,7 @@ void UKismetRenderingLibrary::ClearRenderTarget2D(UObject* WorldContextObject, U
 			[RenderTargetResource, ClearColor](FRHICommandList& RHICmdList)
 		{
 			FRHIRenderPassInfo RPInfo(RenderTargetResource->GetRenderTargetTexture(), ERenderTargetActions::DontLoad_Store);
-			TransitionRenderPassTargets(RHICmdList, RPInfo);
+			RHICmdList.Transition(FRHITransitionInfo(RenderTargetResource->GetRenderTargetTexture(), ERHIAccess::Unknown, ERHIAccess::RTV));
 			RHICmdList.BeginRenderPass(RPInfo, TEXT("ClearRT"));
 			DrawClearQuad(RHICmdList, ClearColor);
 			RHICmdList.EndRenderPass();
@@ -64,7 +74,7 @@ void UKismetRenderingLibrary::ClearRenderTarget2D(UObject* WorldContextObject, U
 	}
 }
 
-UTextureRenderTarget2D* UKismetRenderingLibrary::CreateRenderTarget2D(UObject* WorldContextObject, int32 Width, int32 Height, ETextureRenderTargetFormat Format, FLinearColor ClearColor, bool bAutoGenerateMipMaps)
+UTextureRenderTarget2D* UKismetRenderingLibrary::CreateRenderTarget2D(UObject* WorldContextObject, int32 Width, int32 Height, ETextureRenderTargetFormat Format, FLinearColor ClearColor, bool bAutoGenerateMipMaps, bool bSupportUAVs)
 {
 	UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
 
@@ -75,6 +85,7 @@ UTextureRenderTarget2D* UKismetRenderingLibrary::CreateRenderTarget2D(UObject* W
 		NewRenderTarget2D->RenderTargetFormat = Format;
 		NewRenderTarget2D->ClearColor = ClearColor;
 		NewRenderTarget2D->bAutoGenerateMips = bAutoGenerateMipMaps;
+		NewRenderTarget2D->bCanCreateUAV = bSupportUAVs;
 		NewRenderTarget2D->InitAutoFormat(Width, Height);	
 		NewRenderTarget2D->UpdateResourceImmediate(true);
 
@@ -84,7 +95,7 @@ UTextureRenderTarget2D* UKismetRenderingLibrary::CreateRenderTarget2D(UObject* W
 	return nullptr;
 }
 
-UTextureRenderTarget2DArray* UKismetRenderingLibrary::CreateRenderTarget2DArray(UObject* WorldContextObject, int32 Width, int32 Height, int32 Slices, ETextureRenderTargetFormat Format, FLinearColor ClearColor, bool bAutoGenerateMipMaps)
+UTextureRenderTarget2DArray* UKismetRenderingLibrary::CreateRenderTarget2DArray(UObject* WorldContextObject, int32 Width, int32 Height, int32 Slices, ETextureRenderTargetFormat Format, FLinearColor ClearColor, bool bAutoGenerateMipMaps, bool bSupportUAVs)
 {
 	UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
 
@@ -93,6 +104,7 @@ UTextureRenderTarget2DArray* UKismetRenderingLibrary::CreateRenderTarget2DArray(
 		UTextureRenderTarget2DArray* NewRenderTarget = NewObject<UTextureRenderTarget2DArray>(WorldContextObject);
 		check(NewRenderTarget);
 		NewRenderTarget->ClearColor = ClearColor;
+		NewRenderTarget->bCanCreateUAV = bSupportUAVs;
 		NewRenderTarget->Init(Width, Height, Slices, GetPixelFormatFromRenderTargetFormat(Format));
 		NewRenderTarget->UpdateResourceImmediate(true);
 		return NewRenderTarget;
@@ -101,7 +113,7 @@ UTextureRenderTarget2DArray* UKismetRenderingLibrary::CreateRenderTarget2DArray(
 	return nullptr;
 }
 
-UTextureRenderTargetVolume* UKismetRenderingLibrary::CreateRenderTargetVolume(UObject* WorldContextObject, int32 Width, int32 Height, int32 Depth, ETextureRenderTargetFormat Format, FLinearColor ClearColor, bool bAutoGenerateMipMaps)
+UTextureRenderTargetVolume* UKismetRenderingLibrary::CreateRenderTargetVolume(UObject* WorldContextObject, int32 Width, int32 Height, int32 Depth, ETextureRenderTargetFormat Format, FLinearColor ClearColor, bool bAutoGenerateMipMaps, bool bSupportUAVs)
 {
 	UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
 
@@ -110,6 +122,7 @@ UTextureRenderTargetVolume* UKismetRenderingLibrary::CreateRenderTargetVolume(UO
 		UTextureRenderTargetVolume* NewRenderTarget = NewObject<UTextureRenderTargetVolume>(WorldContextObject);
 		check(NewRenderTarget);
 		NewRenderTarget->ClearColor = ClearColor;
+		NewRenderTarget->bCanCreateUAV = bSupportUAVs;
 		NewRenderTarget->Init(Width, Height, Depth, GetPixelFormatFromRenderTargetFormat(Format));
 		NewRenderTarget->UpdateResourceImmediate(true);
 		return NewRenderTarget;
@@ -129,8 +142,28 @@ void UKismetRenderingLibrary::ReleaseRenderTarget2D(UTextureRenderTarget2D* Text
 	TextureRenderTarget->ReleaseResource();
 }
 
+void UKismetRenderingLibrary::ResizeRenderTarget2D(UTextureRenderTarget2D* TextureRenderTarget, int32 Width, int32 Height)
+{
+	if (!TextureRenderTarget)
+	{
+		return;
+	}
+
+	// Resize function silently fails if either dimension isn't positive, so check for that here so we can warn the caller
+	if ((Width > 0) && (Height > 0))
+	{
+		TextureRenderTarget->ResizeTarget(Width, Height);
+	}
+	else
+	{
+		FMessageLog("Blueprint").Warning(LOCTEXT("ResizeRenderTarget2D_InvalidDimensions", "ResizeRenderTarget2D: Dimensions must be positive."));
+	}
+}
+
 void UKismetRenderingLibrary::DrawMaterialToRenderTarget(UObject* WorldContextObject, UTextureRenderTarget2D* TextureRenderTarget, UMaterialInterface* Material)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(DrawMaterialToRenderTarget);
+
 	if (!FApp::CanEverRender())
 	{
 		// Returning early to avoid warnings about missing resources that are expected when CanEverRender is false.
@@ -151,12 +184,15 @@ void UKismetRenderingLibrary::DrawMaterialToRenderTarget(UObject* WorldContextOb
 	{
 		FMessageLog("Blueprint").Warning(FText::Format(LOCTEXT("DrawMaterialToRenderTarget_InvalidTextureRenderTarget", "DrawMaterialToRenderTarget[{0}]: TextureRenderTarget must be non-null."), FText::FromString(GetPathNameSafe(WorldContextObject))));
 	}
-	else if (!TextureRenderTarget->Resource)
+	else if (!TextureRenderTarget->GetResource())
 	{
 		FMessageLog("Blueprint").Warning(FText::Format(LOCTEXT("DrawMaterialToRenderTarget_ReleasedTextureRenderTarget", "DrawMaterialToRenderTarget[{0}]: render target has been released."), FText::FromString(GetPathNameSafe(WorldContextObject))));
 	}
 	else
 	{
+		// This is a user-facing function, so we'd rather make sure that shaders are ready by the time we render, in order to ensure we don't draw with a fallback material :
+		Material->EnsureIsComplete();
+
 		World->FlushDeferredParameterCollectionInstanceUpdates();
 
 		FTextureRenderTargetResource* RenderTargetResource = TextureRenderTarget->GameThread_GetRenderTargetResource();
@@ -167,40 +203,33 @@ void UKismetRenderingLibrary::DrawMaterialToRenderTarget(UObject* WorldContextOb
 			RenderTargetResource, 
 			nullptr, 
 			World,
-			World->FeatureLevel);
+			World->GetFeatureLevel());
 
 		Canvas->Init(TextureRenderTarget->SizeX, TextureRenderTarget->SizeY, nullptr, &RenderCanvas);
-		Canvas->Update();
 
-		FDrawEvent* DrawMaterialToTargetEvent = new FDrawEvent();
+		{
+			SCOPED_DRAW_EVENTF_GAMETHREAD(DrawMaterialToRenderTarget, *TextureRenderTarget->GetFName().ToString());
 
-		FName RTName = TextureRenderTarget->GetFName();
-		ENQUEUE_RENDER_COMMAND(BeginDrawEventCommand)(
-			[RTName, DrawMaterialToTargetEvent, RenderTargetResource](FRHICommandListImmediate& RHICmdList)
-			{
-				RenderTargetResource->FlushDeferredResourceUpdate(RHICmdList);
+			ENQUEUE_RENDER_COMMAND(FlushDeferredResourceUpdateCommand)(
+				[RenderTargetResource](FRHICommandListImmediate& RHICmdList)
+				{
+					RenderTargetResource->FlushDeferredResourceUpdate(RHICmdList);
+				});
 
-				BEGIN_DRAW_EVENTF(
-					RHICmdList, 
-					DrawCanvasToTarget, 
-					(*DrawMaterialToTargetEvent), 
-					*RTName.ToString());
-			});
+			Canvas->K2_DrawMaterial(Material, FVector2D(0, 0), FVector2D(TextureRenderTarget->SizeX, TextureRenderTarget->SizeY), FVector2D(0, 0));
 
-		Canvas->K2_DrawMaterial(Material, FVector2D(0, 0), FVector2D(TextureRenderTarget->SizeX, TextureRenderTarget->SizeY), FVector2D(0, 0));
+			RenderCanvas.Flush_GameThread();
+			Canvas->Canvas = nullptr;
 
-		RenderCanvas.Flush_GameThread();
-		Canvas->Canvas = NULL;
+			//UpdateResourceImmediate must be called here to ensure mips are generated.
+			TextureRenderTarget->UpdateResourceImmediate(false);
 
-		//UpdateResourceImmediate must be called here to ensure mips are generated.
-		TextureRenderTarget->UpdateResourceImmediate(false);
-		ENQUEUE_RENDER_COMMAND(CanvasRenderTargetResolveCommand)(
-			[DrawMaterialToTargetEvent](FRHICommandList& RHICmdList)
-			{
-				STOP_DRAW_EVENT((*DrawMaterialToTargetEvent));
-				delete DrawMaterialToTargetEvent;
-			}
-		);
+			ENQUEUE_RENDER_COMMAND(ResetSceneTextureExtentHistory)(
+				[RenderTargetResource](FRHICommandListImmediate& RHICmdList)
+				{
+					RenderTargetResource->ResetSceneTextureExtentsHistory();
+				});
+		}
 	}
 }
 
@@ -215,7 +244,7 @@ void UKismetRenderingLibrary::ExportRenderTarget(UObject* WorldContextObject, UT
 	{
 		FMessageLog("Blueprint").Warning(FText::Format(LOCTEXT("ExportRenderTarget_InvalidTextureRenderTarget", "ExportRenderTarget[{0}]: TextureRenderTarget must be non-null."), FText::FromString(GetPathNameSafe(WorldContextObject))));
 	}
-	else if (!TextureRenderTarget->Resource)
+	else if (!TextureRenderTarget->GetResource())
 	{
 		FMessageLog("Blueprint").Warning(FText::Format(LOCTEXT("ExportRenderTarget_ReleasedTextureRenderTarget", "ExportRenderTarget[{0}]: render target has been released."), FText::FromString(GetPathNameSafe(WorldContextObject))));
 	}
@@ -276,7 +305,8 @@ EPixelFormat ReadRenderTargetHelper(
 	int32 X,
 	int32 Y,
 	int32 Width,
-	int32 Height)
+	int32 Height,
+	bool bNormalize = true)
 {
 	EPixelFormat OutFormat = PF_Unknown;
 
@@ -299,7 +329,8 @@ EPixelFormat ReadRenderTargetHelper(
 	Height = Height - FMath::Max(Y + Height - TextureRenderTarget->SizeY, 0);
 
 	FIntRect SampleRect(X, Y, X + Width, Y + Height);
-	FReadSurfaceDataFlags ReadSurfaceDataFlags;
+
+	FReadSurfaceDataFlags ReadSurfaceDataFlags = bNormalize ? FReadSurfaceDataFlags() : FReadSurfaceDataFlags(RCM_MinMax);
 
 	FRenderTarget* RenderTarget = TextureRenderTarget->GameThread_GetRenderTargetResource();
 	OutFormat = TextureRenderTarget->GetFormat();
@@ -309,17 +340,23 @@ EPixelFormat ReadRenderTargetHelper(
 	switch (OutFormat)
 	{
 	case PF_B8G8R8A8:
-		OutLDRValues.SetNumUninitialized(NumPixelsToRead);
-		if (!RenderTarget->ReadPixelsPtr(OutLDRValues.GetData(), ReadSurfaceDataFlags, SampleRect))
+		if (!RenderTarget->ReadPixels(OutLDRValues, ReadSurfaceDataFlags, SampleRect))
 		{
 			OutFormat = PF_Unknown;
 		}
+		else
+		{
+			check(OutLDRValues.Num() == NumPixelsToRead);
+		}
 		break;
 	case PF_FloatRGBA:
-		OutHDRValues.SetNumUninitialized(NumPixelsToRead);
-		if (!RenderTarget->ReadLinearColorPixelsPtr(OutHDRValues.GetData(), ReadSurfaceDataFlags, SampleRect))
+		if (!RenderTarget->ReadLinearColorPixels(OutHDRValues, ReadSurfaceDataFlags, SampleRect))
 		{
 			OutFormat = PF_Unknown;
+		}
+		else
+		{
+			check(OutHDRValues.Num() == NumPixelsToRead);
 		}
 		break;
 	default:
@@ -364,12 +401,44 @@ FColor UKismetRenderingLibrary::ReadRenderTargetPixel(UObject* WorldContextObjec
 	}
 }
 
-FLinearColor UKismetRenderingLibrary::ReadRenderTargetRawPixel(UObject * WorldContextObject, UTextureRenderTarget2D * TextureRenderTarget, int32 X, int32 Y)
+bool UKismetRenderingLibrary::ReadRenderTarget(UObject* WorldContextObject, UTextureRenderTarget2D* TextureRenderTarget, TArray<FColor>& OutSamples, bool bNormalize)
+{
+	if (WorldContextObject != nullptr && TextureRenderTarget != nullptr)
+	{
+		const int32 NumSamples = TextureRenderTarget->SizeX * TextureRenderTarget->SizeY;
+
+		OutSamples.Reset(NumSamples);
+
+		TArray<FLinearColor> LinearSamples;
+		LinearSamples.Reserve(NumSamples);
+
+		switch (ReadRenderTargetHelper(OutSamples, LinearSamples, WorldContextObject, TextureRenderTarget, 0, 0, TextureRenderTarget->SizeX, TextureRenderTarget->SizeY, bNormalize))
+		{
+		case PF_B8G8R8A8:
+			check(OutSamples.Num() == NumSamples && LinearSamples.Num() == 0);
+			return true;
+		case PF_FloatRGBA:
+			check(OutSamples.Num() == 0 && LinearSamples.Num() == NumSamples);
+			for (int32 SampleIndex = 0; SampleIndex < NumSamples; ++SampleIndex)
+			{
+				OutSamples.Add(LinearSamples[SampleIndex].ToFColor(true));
+			}
+			return true;
+		case PF_Unknown:
+		default:
+			return false;
+		}
+	}
+
+	return false;
+}
+
+FLinearColor UKismetRenderingLibrary::ReadRenderTargetRawPixel(UObject * WorldContextObject, UTextureRenderTarget2D * TextureRenderTarget, int32 X, int32 Y, bool bNormalize)
 {
 	TArray<FColor> Samples;
 	TArray<FLinearColor> LinearSamples;
 
-	switch (ReadRenderTargetHelper(Samples, LinearSamples, WorldContextObject, TextureRenderTarget, X, Y, 1, 1))
+	switch (ReadRenderTargetHelper(Samples, LinearSamples, WorldContextObject, TextureRenderTarget, X, Y, 1, 1, bNormalize))
 	{
 	case PF_B8G8R8A8:
 		check(Samples.Num() == 1 && LinearSamples.Num() == 0);
@@ -383,7 +452,34 @@ FLinearColor UKismetRenderingLibrary::ReadRenderTargetRawPixel(UObject * WorldCo
 	}
 }
 
-FLinearColor UKismetRenderingLibrary::ReadRenderTargetRawUV(UObject * WorldContextObject, UTextureRenderTarget2D * TextureRenderTarget, float U, float V)
+ENGINE_API TArray<FLinearColor> UKismetRenderingLibrary::ReadRenderTargetRawPixelArea(UObject* WorldContextObject, UTextureRenderTarget2D* TextureRenderTarget, int32 MinX, int32 MinY, int32 MaxX, int32 MaxY, bool bNormalize /*= true*/)
+{
+	TArray<FColor> Samples;
+	TArray<FLinearColor> LinearSamples;
+
+	switch (ReadRenderTargetHelper(Samples, LinearSamples, WorldContextObject, TextureRenderTarget, MinX, MinY, MaxX, MaxY, bNormalize))
+	{
+	case PF_B8G8R8A8:
+		check(Samples.Num() > 0 && LinearSamples.Num() == 0);
+		LinearSamples.SetNum(Samples.Num());
+		for (int Idx = 0; Idx < Samples.Num(); Idx++)
+		{
+			LinearSamples[Idx] = FLinearColor(float(Samples[Idx].R), float(Samples[Idx].G), float(Samples[Idx].B), float(Samples[Idx].A));
+		}
+		return LinearSamples;
+
+	case PF_FloatRGBA:
+		check(Samples.Num() == 0 && LinearSamples.Num() > 0);
+		return LinearSamples;
+
+	case PF_Unknown:
+
+	default:
+		return TArray<FLinearColor>();
+	}
+}
+
+FLinearColor UKismetRenderingLibrary::ReadRenderTargetRawUV(UObject * WorldContextObject, UTextureRenderTarget2D * TextureRenderTarget, float U, float V, bool bNormalize)
 {
 	if (!TextureRenderTarget)
 	{
@@ -395,45 +491,115 @@ FLinearColor UKismetRenderingLibrary::ReadRenderTargetRawUV(UObject * WorldConte
 	int32 XPos = U * (float)TextureRenderTarget->SizeX;
 	int32 YPos = V * (float)TextureRenderTarget->SizeY;
 
-	return ReadRenderTargetRawPixel(WorldContextObject, TextureRenderTarget, XPos, YPos);
+	return ReadRenderTargetRawPixel(WorldContextObject, TextureRenderTarget, XPos, YPos, bNormalize);
 }
 
-/*
-
-void UKismetRenderingLibrary::CreateTexture2DFromRenderTarget(UObject* WorldContextObject, UTextureRenderTarget2D* RenderTarget, const FString &TextureAssetName)
+bool UKismetRenderingLibrary::ReadRenderTargetRaw(UObject* WorldContextObject, UTextureRenderTarget2D* TextureRenderTarget, TArray<FLinearColor>& OutLinearSamples, bool bNormalize)
 {
-	if (RenderTarget && Texture)
+	if (WorldContextObject != nullptr && TextureRenderTarget != nullptr)
 	{
+		const int32 NumSamples = TextureRenderTarget->SizeX * TextureRenderTarget->SizeY;
 
-		//FImageUtils::CreateTexture2D
+		OutLinearSamples.Reset(NumSamples);
+		TArray<FColor> Samples;
+		Samples.Reserve(NumSamples);
 
-		UTexture2D* NewTexture = RenderTarget->ConstructTexture2D(Texture->GetOuter(), Texture->GetName(), RenderTarget->GetMaskedFlags(), CTF_Default, NULL);
-
-		check(NewTexture == Texture);
-		NewTexture->UpdateResource();
+		switch (ReadRenderTargetHelper(Samples, OutLinearSamples, WorldContextObject, TextureRenderTarget, 0, 0, TextureRenderTarget->SizeX, TextureRenderTarget->SizeY, bNormalize))
+		{
+		case PF_B8G8R8A8:
+			check(Samples.Num() == NumSamples && OutLinearSamples.Num() == 0);
+			for (int32 SampleIndex = 0; SampleIndex < NumSamples; ++SampleIndex)
+			{
+				OutLinearSamples.Add(FLinearColor(float(Samples[SampleIndex].R), float(Samples[SampleIndex].G), float(Samples[SampleIndex].B), float(Samples[SampleIndex].A)));
+			}
+			return true;
+		case PF_FloatRGBA:
+			check(Samples.Num() == 0 && OutLinearSamples.Num() == NumSamples);
+			return true;
+		case PF_Unknown:
+		default:
+			return false;
+		}
 	}
-	else if (!RenderTarget)
+
+	return false;
+}
+
+ENGINE_API TArray<FLinearColor> UKismetRenderingLibrary::ReadRenderTargetRawUVArea(UObject* WorldContextObject, UTextureRenderTarget2D* TextureRenderTarget, FBox2D Area, bool bNormalize /*= true*/)
+{
+
+	if (!TextureRenderTarget)
 	{
-		FMessageLog("Blueprint").Warning(LOCTEXT("ConvertRenderTargetToTexture2D_InvalidRenderTarget", "ExportRenderTarget: RenderTarget must be non-null."));
-	}
-	else if (!Texture)
-	{
-		FMessageLog("Blueprint").Warning(LOCTEXT("ConvertRenderTargetToTexture2D_InvalidTexture", "ExportRenderTarget: Texture must be non-null."));
+		return TArray<FLinearColor>();
 	}
 
-}*/
+	int32 MinX = FMath::Clamp(Area.Min.X, 0.f, 1.f) * (float)TextureRenderTarget->SizeX;
+	int32 MinY = FMath::Clamp(Area.Min.Y, 0.f, 1.f) * (float)TextureRenderTarget->SizeY;
+	int32 MaxX = FMath::Clamp(Area.Max.X, 0.f, 1.f) * (float)TextureRenderTarget->SizeX;
+	int32 MaxY = FMath::Clamp(Area.Max.Y, 0.f, 1.f) * (float)TextureRenderTarget->SizeY;
 
-UTexture2D* UKismetRenderingLibrary::RenderTargetCreateStaticTexture2DEditorOnly(UTextureRenderTarget2D* RenderTarget, FString InName, enum TextureCompressionSettings CompressionSettings, enum TextureMipGenSettings MipSettings)
+	return ReadRenderTargetRawPixelArea(WorldContextObject, TextureRenderTarget, MinX, MinY, MaxX, MaxY, bNormalize);
+}
+
+namespace UE::Kismet::RenderingLibrary
+{
+void ConvertRenderTargetToTextureEditorOnly(UObject* WorldContextObject, UTextureRenderTarget* InRenderTarget, UTexture* InTexture)
 {
 #if WITH_EDITOR
-	if (!RenderTarget)
+	if (InRenderTarget == nullptr)
 	{
-		FMessageLog("Blueprint").Warning(LOCTEXT("RenderTargetCreateStaticTexture2D_InvalidRenderTarget", "RenderTargetCreateStaticTexture2DEditorOnly: RenderTarget must be non-null."));
+		FMessageLog("Blueprint").Warning(FText::Format(LOCTEXT("ConvertRenderTargetToTexture_InvalidRenderTarget", "ConvertRenderTargetToTextureEditorOnly[{0}]: RenderTarget must be non-null."), FText::FromString(GetPathNameSafe(WorldContextObject))));
+		return;
+	}
+	
+	if (InRenderTarget->GetResource() == nullptr)
+	{
+		FMessageLog("Blueprint").Warning(FText::Format(LOCTEXT("ConvertRenderTargetToTexture_ReleasedTextureRenderTarget", "ConvertRenderTargetToTextureEditorOnly[{0}]: render target has been released."), FText::FromString(GetPathNameSafe(WorldContextObject))));
+		return;
+	}
+	
+	if (InTexture == nullptr)
+	{
+		FMessageLog("Blueprint").Warning(FText::Format(LOCTEXT("ConvertRenderTargetToTexture_InvalidTexture", "ConvertRenderTargetToTextureEditorOnly[{0}]: Texture must be non-null."), FText::FromString(GetPathNameSafe(WorldContextObject))));
+		return;
+	}
+
+	// We don't want to create a new texture here, we already have one.  We want to preserve any configuration
+	// by a developer and just update the minimal pixel data and format data.
+	FText ErrorMessage;
+	if (!InRenderTarget->CanConvertToTexture(&ErrorMessage))
+	{
+		FMessageLog("Blueprint").Warning(ErrorMessage);
+		return;
+	}
+
+	if (!InRenderTarget->UpdateTexture(InTexture, /*InFlags = */CTF_Default, /*InAlphaOverride = */nullptr, /*InOnTextureChangingDelegate = */[](UTexture*){}, &ErrorMessage))
+	{
+		FMessageLog("Blueprint").Warning(ErrorMessage);
+		return;
+	}
+
+	InTexture->Modify();
+	InTexture->MarkPackageDirty();
+	InTexture->PostEditChange();
+	InTexture->UpdateResource();
+
+#else // WITH_EDITOR
+	FMessageLog("Blueprint").Error(LOCTEXT("ConvertRenderTargetToTexture_CannotCallAtRuntime", "ConvertRenderTarget: Can't convert render target to texture at run time. "));
+#endif // !WITH_EDITOR
+}
+
+UTexture* RenderTargetCreateStaticTextureEditorOnly(UTextureRenderTarget* InRenderTarget, FString InName, TextureCompressionSettings InCompressionSettings, TextureMipGenSettings InMipSettings)
+{
+#if WITH_EDITOR
+	if (InRenderTarget == nullptr)
+	{
+		FMessageLog("Blueprint").Warning(LOCTEXT("RenderTargetCreateStaticTexture_InvalidRenderTarget", "RenderTargetCreateStaticTextureEditorOnly: RenderTarget must be non-null."));
 		return nullptr;
 	}
-	else if (!RenderTarget->Resource)
+	else if (InRenderTarget->GetResource() == nullptr)
 	{
-		FMessageLog("Blueprint").Warning(LOCTEXT("RenderTargetCreateStaticTexture2D_ReleasedRenderTarget", "RenderTargetCreateStaticTexture2DEditorOnly: RenderTarget has been released."));
+		FMessageLog("Blueprint").Warning(LOCTEXT("RenderTargetCreateStaticTexture_ReleasedRenderTarget", "RenderTargetCreateStaticTextureEditorOnly: RenderTarget has been released."));
 		return nullptr;
 	}
 	else
@@ -443,81 +609,90 @@ UTexture2D* UKismetRenderingLibrary::RenderTargetCreateStaticTexture2DEditorOnly
 		IAssetTools& AssetTools = FModuleManager::Get().LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
 
 		//Use asset name only if directories are specified, otherwise full path
-		if (!InName.Contains(TEXT("/")))
+		if (!InName.StartsWith(TEXT("/")))
 		{
-			FString AssetName = RenderTarget->GetOutermost()->GetName();
+			FString AssetName = InRenderTarget->GetOutermost()->GetName();
 			const FString SanitizedBasePackageName = UPackageTools::SanitizePackageName(AssetName);
 			const FString PackagePath = FPackageName::GetLongPackagePath(SanitizedBasePackageName) + TEXT("/");
 			AssetTools.CreateUniqueAssetName(PackagePath, InName, PackageName, Name);
 		}
 		else
 		{
-			InName.RemoveFromStart(TEXT("/"));
-			InName.RemoveFromStart(TEXT("Content/"));
-			InName.StartsWith(TEXT("Game/")) == true ? InName.InsertAt(0, TEXT("/")) : InName.InsertAt(0, TEXT("/Game/"));
 			AssetTools.CreateUniqueAssetName(InName, TEXT(""), PackageName, Name);
 		}
 
 		UObject* NewObj = nullptr;
 
-		// create a static 2d texture
-		NewObj = RenderTarget->ConstructTexture2D(CreatePackage( *PackageName), Name, RenderTarget->GetMaskedFlags() | RF_Public | RF_Standalone, CTF_Default | CTF_AllowMips, NULL);
-		UTexture2D* NewTex = Cast<UTexture2D>(NewObj);
+		// create a static texture
+		FText ErrorMessage;
+		NewObj = InRenderTarget->ConstructTexture(CreatePackage(*PackageName), Name, InRenderTarget->GetMaskedFlags() | RF_Public | RF_Standalone, 
+			static_cast<EConstructTextureFlags>(CTF_Default | CTF_AllowMips | CTF_SkipPostEdit), /*InAlphaOverride = */nullptr, &ErrorMessage);
 
-		if (NewTex != nullptr)
+		UTexture* NewTex = Cast<UTexture>(NewObj);
+		if (NewTex == nullptr)
 		{
-			// package needs saving
-			NewObj->MarkPackageDirty();
-
-			// Notify the asset registry
-			FAssetRegistryModule::AssetCreated(NewObj);
-
-			// Update Compression and Mip settings
-			NewTex->CompressionSettings = CompressionSettings;
-			NewTex->MipGenSettings = MipSettings;
-			NewTex->PostEditChange();
-
-			return NewTex;
+			FMessageLog("Blueprint").Warning(ErrorMessage);
+			return nullptr;
 		}
-		FMessageLog("Blueprint").Warning(LOCTEXT("RenderTargetCreateStaticTexture2D_FailedToCreateTexture", "RenderTargetCreateStaticTexture2DEditorOnly: Failed to create a new texture."));
+
+		// package needs saving
+		NewObj->MarkPackageDirty();
+
+		// Update Compression and Mip settings
+		NewTex->CompressionSettings = InCompressionSettings;
+		NewTex->MipGenSettings = InMipSettings;
+		NewTex->PostEditChange();
+
+		// Notify the asset registry
+		FAssetRegistryModule::AssetCreated(NewObj);
+
+		return NewTex;
 	}
-#else
-	FMessageLog("Blueprint").Error(LOCTEXT("Texture2D's cannot be created at runtime.", "RenderTargetCreateStaticTexture2DEditorOnly: Can't create Texture2D at run time. "));
-#endif
+#else // WITH_EDITOR
+	FMessageLog("Blueprint").Error(LOCTEXT("RenderTargetCreateStaticTexture_CannotCallAtRuntime", "RenderTargetCreateStaticTextureEditorOnly: Can't create texture at run time. "));
+#endif // !WITH_EDITOR
 	return nullptr;
 }
+} // namespace UE::Kismet::RenderingLibrary
 
-
-void UKismetRenderingLibrary::ConvertRenderTargetToTexture2DEditorOnly( UObject* WorldContextObject, UTextureRenderTarget2D* RenderTarget, UTexture2D* Texture )
+UTexture2D* UKismetRenderingLibrary::RenderTargetCreateStaticTexture2DEditorOnly(UTextureRenderTarget2D* RenderTarget, FString InName, enum TextureCompressionSettings CompressionSettings, enum TextureMipGenSettings MipSettings)
 {
-#if WITH_EDITOR
-	if (!RenderTarget)
-	{
-		FMessageLog("Blueprint").Warning(FText::Format(LOCTEXT("ConvertRenderTargetToTexture2D_InvalidRenderTarget", "ConvertRenderTargetToTexture2DEditorOnly[{0}]: RenderTarget must be non-null."), FText::FromString(GetPathNameSafe(WorldContextObject))));
-	}
-	else if (!RenderTarget->Resource)
-	{
-		FMessageLog("Blueprint").Warning(FText::Format(LOCTEXT("ConvertRenderTargetToTexture2D_ReleasedTextureRenderTarget", "ConvertRenderTargetToTexture2DEditorOnly[{0}]: render target has been released."), FText::FromString(GetPathNameSafe(WorldContextObject))));
-	}
-	else if (!Texture)
-	{
-		FMessageLog("Blueprint").Warning(FText::Format(LOCTEXT("ConvertRenderTargetToTexture2D_InvalidTexture", "ConvertRenderTargetToTexture2DEditorOnly[{0}]: Texture must be non-null."), FText::FromString(GetPathNameSafe(WorldContextObject))));
-	}
-	else
-	{
-		UTexture2D* NewTexture = RenderTarget->ConstructTexture2D(Texture->GetOuter(), Texture->GetName(), RenderTarget->GetMaskedFlags() | RF_Public | RF_Standalone, CTF_Default, NULL);
+	return Cast<UTexture2D>(UE::Kismet::RenderingLibrary::RenderTargetCreateStaticTextureEditorOnly(RenderTarget, InName, CompressionSettings, MipSettings));
+}
 
-		check(NewTexture == Texture);
+UTexture2DArray* UKismetRenderingLibrary::RenderTargetCreateStaticTexture2DArrayEditorOnly(UTextureRenderTarget2DArray* RenderTarget, FString InName, enum TextureCompressionSettings CompressionSettings, enum TextureMipGenSettings MipSettings)
+{
+	return Cast<UTexture2DArray>(UE::Kismet::RenderingLibrary::RenderTargetCreateStaticTextureEditorOnly(RenderTarget, InName, CompressionSettings, MipSettings));
+}
 
-		NewTexture->Modify();
-		NewTexture->MarkPackageDirty();
-		NewTexture->PostEditChange();
-		NewTexture->UpdateResource();
-	}
-#else
-	FMessageLog("Blueprint").Error(LOCTEXT("Convert to render target can't be used at run time.", "ConvertRenderTarget: Can't convert render target to texture2d at run time. "));
-#endif
+UTextureCube* UKismetRenderingLibrary::RenderTargetCreateStaticTextureCubeEditorOnly(UTextureRenderTargetCube* RenderTarget, FString InName, enum TextureCompressionSettings CompressionSettings, enum TextureMipGenSettings MipSettings)
+{
+	return Cast<UTextureCube>(UE::Kismet::RenderingLibrary::RenderTargetCreateStaticTextureEditorOnly(RenderTarget, InName, CompressionSettings, MipSettings));
+}
 
+UVolumeTexture* UKismetRenderingLibrary::RenderTargetCreateStaticVolumeTextureEditorOnly(UTextureRenderTargetVolume* RenderTarget, FString InName, enum TextureCompressionSettings CompressionSettings, enum TextureMipGenSettings MipSettings)
+{
+	return Cast<UVolumeTexture>(UE::Kismet::RenderingLibrary::RenderTargetCreateStaticTextureEditorOnly(RenderTarget, InName, CompressionSettings, MipSettings));
+}
+
+void UKismetRenderingLibrary::ConvertRenderTargetToTexture2DEditorOnly(UObject* WorldContextObject, UTextureRenderTarget2D* RenderTarget, UTexture2D* Texture)
+{
+	UE::Kismet::RenderingLibrary::ConvertRenderTargetToTextureEditorOnly(WorldContextObject, RenderTarget, Texture);
+}
+
+void UKismetRenderingLibrary::ConvertRenderTargetToTexture2DArrayEditorOnly(UObject* WorldContextObject, UTextureRenderTarget2DArray* RenderTarget, UTexture2DArray* Texture)
+{
+	UE::Kismet::RenderingLibrary::ConvertRenderTargetToTextureEditorOnly(WorldContextObject, RenderTarget, Texture);
+}
+
+void UKismetRenderingLibrary::ConvertRenderTargetToTextureCubeEditorOnly(UObject* WorldContextObject, UTextureRenderTargetCube* RenderTarget, UTextureCube* Texture)
+{
+	UE::Kismet::RenderingLibrary::ConvertRenderTargetToTextureEditorOnly(WorldContextObject, RenderTarget, Texture);
+}
+
+void UKismetRenderingLibrary::ConvertRenderTargetToTextureVolumeEditorOnly(UObject* WorldContextObject, UTextureRenderTargetVolume* RenderTarget, UVolumeTexture* Texture)
+{
+	UE::Kismet::RenderingLibrary::ConvertRenderTargetToTextureEditorOnly(WorldContextObject, RenderTarget, Texture);
 }
 
 void UKismetRenderingLibrary::ExportTexture2D(UObject* WorldContextObject, UTexture2D* Texture, const FString& FilePath, const FString& FileName)
@@ -574,7 +749,7 @@ UTexture2D* UKismetRenderingLibrary::ImportBufferAsTexture2D(UObject* WorldConte
 
 void UKismetRenderingLibrary::BeginDrawCanvasToRenderTarget(UObject* WorldContextObject, UTextureRenderTarget2D* TextureRenderTarget, UCanvas*& Canvas, FVector2D& Size, FDrawToRenderTargetContext& Context)
 {
-	Canvas = NULL;
+	Canvas = nullptr;
 	Size = FVector2D(0, 0);
 	Context = FDrawToRenderTargetContext();
 	
@@ -594,7 +769,7 @@ void UKismetRenderingLibrary::BeginDrawCanvasToRenderTarget(UObject* WorldContex
 	{
 		FMessageLog("Blueprint").Warning(FText::Format(LOCTEXT("BeginDrawCanvasToRenderTarget_InvalidTextureRenderTarget", "BeginDrawCanvasToRenderTarget[{0}]: TextureRenderTarget must be non-null."), FText::FromString(GetPathNameSafe(WorldContextObject))));
 	}
-	else if (!TextureRenderTarget->Resource)
+	else if (!TextureRenderTarget->GetResource())
 	{
 		FMessageLog("Blueprint").Warning(FText::Format(LOCTEXT("BeginDrawCanvasToRenderTarget_ReleasedTextureRenderTarget", "BeginDrawCanvasToRenderTarget[{0}]: render target has been released."), FText::FromString(GetPathNameSafe(WorldContextObject))));
 	}
@@ -613,26 +788,20 @@ void UKismetRenderingLibrary::BeginDrawCanvasToRenderTarget(UObject* WorldContex
 			RenderTargetResource,
 			nullptr, 
 			World,
-			World->FeatureLevel, 
+			World->GetFeatureLevel(),
 			// Draw immediately so that interleaved SetVectorParameter (etc) function calls work as expected
 			FCanvas::CDM_ImmediateDrawing);
 		Canvas->Init(TextureRenderTarget->SizeX, TextureRenderTarget->SizeY, nullptr, NewCanvas);
-		Canvas->Update();
 
+#if  WANTS_DRAW_MESH_EVENTS
 		Context.DrawEvent = new FDrawEvent();
+		BEGIN_DRAW_EVENTF_GAMETHREAD(DrawCanvasToTarget, (*Context.DrawEvent), *TextureRenderTarget->GetFName().ToString())
+#endif // WANTS_DRAW_MESH_EVENTS
 
-		FName RTName = TextureRenderTarget->GetFName();
-		FDrawEvent* DrawEvent = Context.DrawEvent;
-		ENQUEUE_RENDER_COMMAND(BeginDrawEventCommand)(
-			[RTName, DrawEvent, RenderTargetResource](FRHICommandListImmediate& RHICmdList)
+		ENQUEUE_RENDER_COMMAND(FlushDeferredResourceUpdateCommand)(
+			[RenderTargetResource](FRHICommandListImmediate& RHICmdList)
 			{
 				RenderTargetResource->FlushDeferredResourceUpdate(RHICmdList);
-
-				BEGIN_DRAW_EVENTF(
-					RHICmdList, 
-					DrawCanvasToTarget, 
-					(*DrawEvent), 
-					*RTName.ToString());
 			});
 	}
 }
@@ -661,15 +830,23 @@ void UKismetRenderingLibrary::EndDrawCanvasToRenderTarget(UObject* WorldContextO
 		if (Context.RenderTarget)
 		{
 			FTextureRenderTargetResource* RenderTargetResource = Context.RenderTarget->GameThread_GetRenderTargetResource();
-			FDrawEvent* DrawEvent = Context.DrawEvent;
+
 			ENQUEUE_RENDER_COMMAND(CanvasRenderTargetResolveCommand)(
-				[RenderTargetResource, DrawEvent](FRHICommandList& RHICmdList)
+				[RenderTargetResource](FRHICommandListImmediate& RHICmdList)
 				{
-					RHICmdList.CopyToResolveTarget(RenderTargetResource->GetRenderTargetTexture(), RenderTargetResource->TextureRHI, FResolveParams());
-					STOP_DRAW_EVENT((*DrawEvent));
-					delete DrawEvent;
+					// Note: If multisampled, it should have already been resolved by ~FCanvasRenderThreadScope()
+					if (!RenderTargetResource->GetRenderTargetTexture()->GetDesc().IsMultisample())
+					{
+						TransitionAndCopyTexture(RHICmdList, RenderTargetResource->GetRenderTargetTexture(), RenderTargetResource->TextureRHI, {});
+					}
 				}
 			);
+
+#if WANTS_DRAW_MESH_EVENTS
+			STOP_DRAW_EVENT_GAMETHREAD(*Context.DrawEvent);
+			delete Context.DrawEvent;
+#endif // WANTS_DRAW_MESH_EVENTS
+
 
 			// Remove references to the context now that we've resolved it, to avoid a crash when EndDrawCanvasToRenderTarget is called multiple times with the same context
 			// const cast required, as BP will treat Context as an output without the const
@@ -730,7 +907,7 @@ void UKismetRenderingLibrary::SetCastInsetShadowForAllAttachments(UPrimitiveComp
 		// Walk down the tree updating
 		while (ProcessStack.Num() > 0)
 		{
-			USceneComponent* Current = ProcessStack.Pop(/*bAllowShrinking=*/ false);
+			USceneComponent* Current = ProcessStack.Pop(EAllowShrinking::No);
 			UPrimitiveComponent* CurrentPrimitive = Cast<UPrimitiveComponent>(Current);
 
 			if (CurrentPrimitive && CurrentPrimitive->ShouldComponentAddToScene())
@@ -753,4 +930,35 @@ void UKismetRenderingLibrary::SetCastInsetShadowForAllAttachments(UPrimitiveComp
 		FMessageLog("Blueprint").Warning(LOCTEXT("SetCastInsetShadowForAllAttachments_InvalidPrimitiveComponent", "SetCastInsetShadowForAllAttachments: PrimitiveComponent must be non-null."));
 	}
 }
+
+ENGINE_API FMatrix UKismetRenderingLibrary::CalculateProjectionMatrix(const FMinimalViewInfo& MinimalViewInfo)
+{
+	return MinimalViewInfo.CalculateProjectionMatrix();
+}
+
+ENGINE_API void UKismetRenderingLibrary::EnablePathTracing(bool bEnablePathTracer)
+{
+	if (GEngine != nullptr && GEngine->GameViewport != nullptr)
+	{
+		FEngineShowFlags* EngineShowFlags = GEngine->GameViewport->GetEngineShowFlags();
+		if (EngineShowFlags != nullptr)
+		{
+			EngineShowFlags->SetPathTracing(bEnablePathTracer);
+		}
+	}
+}
+
+ENGINE_API void UKismetRenderingLibrary::RefreshPathTracingOutput()
+{
+	if (GEngine != nullptr && GEngine->GameViewport != nullptr)
+	{
+		UWorld* World = GEngine->GameViewport->GetWorld();
+		if (World != nullptr && World->Scene != nullptr)
+		{
+			World->Scene->InvalidatePathTracedOutput();
+		}
+	}
+}
+
 #undef LOCTEXT_NAMESPACE
+

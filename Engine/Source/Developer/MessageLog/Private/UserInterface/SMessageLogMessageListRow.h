@@ -15,12 +15,12 @@
 
 #if WITH_EDITOR
 	#include "IDocumentation.h"
-	#include "IIntroTutorials.h"
+	#include "Interfaces/IMainFrameModule.h"
 #endif
 
 #define LOCTEXT_NAMESPACE "SMessageLogMessageListRow"
 
-class MESSAGELOG_API SMessageLogMessageListRow
+class SMessageLogMessageListRow
 	: public STableRow<TSharedPtr<FTokenizedMessage>>
 {
 public:
@@ -74,7 +74,12 @@ private:
 
 	EVisibility GetActionLinkVisibility(TSharedRef<FActionToken> ActionToken) const
 	{
-		return ActionToken->CanExecuteAction() ? EVisibility::Visible : EVisibility::Collapsed;
+		return ActionToken->IsValidAction() ? EVisibility::Visible : EVisibility::Collapsed;
+	}
+
+	bool GetActionLinkEnable(TSharedRef<FActionToken> ActionToken) const
+	{
+		return ActionToken->CanExecuteAction();
 	}
 
 	void HandleActionHyperlinkNavigate( TSharedRef<FActionToken> ActionToken )
@@ -103,7 +108,8 @@ private:
 
 	void HandleTutorialHyperlinkNavigate( FString TutorialAssetName )
 	{
-		IIntroTutorials::Get().LaunchTutorial(TutorialAssetName);
+		IMainFrameModule& MainFrameModule = FModuleManager::GetModuleChecked<IMainFrameModule>(TEXT("MainFrame"));
+		MainFrameModule.BroadcastMainFrameRequestResource("Tutorial", TutorialAssetName);
 	}
 #endif
 

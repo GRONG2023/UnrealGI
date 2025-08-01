@@ -2,50 +2,42 @@
 
 #pragma once
 
-#include "Containers/SortedMap.h"
+#include "Containers/Array.h"
+#include "Containers/ContainerAllocationPolicies.h"
 #include "Containers/Set.h"
-#include "EntitySystem/MovieSceneEntitySystem.h"
+#include "Containers/SortedMap.h"
 #include "EntitySystem/EntityAllocationIterator.h"
+#include "EntitySystem/MovieSceneEntitySystem.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
 
 #include "FloatChannelEvaluatorSystem.generated.h"
 
-namespace UE
+namespace UE::MovieScene
 {
-namespace MovieScene
-{
-
 	struct FSourceFloatChannel;
-	struct FSourceFloatChannelFlags;
-
-} // namespace MovieScene
-} // namespace UE
+	namespace Interpolation
+	{
+		struct FCachedInterpolation;
+	}
+}
 
 /**
- * System that is responsible for evaluating float channels.
+ * System that is responsible for evaluating double channels.
  */
-UCLASS()
-class MOVIESCENETRACKS_API UFloatChannelEvaluatorSystem : public UMovieSceneEntitySystem
+UCLASS(MinimalAPI)
+class UFloatChannelEvaluatorSystem : public UMovieSceneEntitySystem
 {
 public:
 
 
 	GENERATED_BODY()
 
-	UFloatChannelEvaluatorSystem(const FObjectInitializer& ObjInit);
+	MOVIESCENETRACKS_API UFloatChannelEvaluatorSystem(const FObjectInitializer& ObjInit);
 
-	virtual void OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents) override;
-	virtual bool IsRelevantImpl(UMovieSceneEntitySystemLinker* InLinker) const override;
+	MOVIESCENETRACKS_API virtual void OnSchedulePersistentTasks(UE::MovieScene::IEntitySystemScheduler* TaskScheduler) override;
+	MOVIESCENETRACKS_API virtual void OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents) override;
+	MOVIESCENETRACKS_API virtual bool IsRelevantImpl(UMovieSceneEntitySystemLinker* InLinker) const override;
 
-	static void RegisterChannelType(TComponentTypeID<UE::MovieScene::FSourceFloatChannel> SourceChannelType, TComponentTypeID<UE::MovieScene::FSourceFloatChannelFlags> ChannelFlagsType, TComponentTypeID<float> ResultType);
-
-private:
-
-	struct FChannelType
-	{
-		TComponentTypeID<UE::MovieScene::FSourceFloatChannel> ChannelType;
-		TComponentTypeID<UE::MovieScene::FSourceFloatChannelFlags> ChannelFlagsType;
-		TComponentTypeID<float> ResultType;
-	};
-
-	static TArray<FChannelType, TInlineAllocator<16>> StaticChannelTypes;
+	static MOVIESCENETRACKS_API void RegisterChannelType(TComponentTypeID<UE::MovieScene::FSourceFloatChannel> SourceChannelType, TComponentTypeID<UE::MovieScene::Interpolation::FCachedInterpolation> CachedInterpolationType, TComponentTypeID<double> ResultType);
 };

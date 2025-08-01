@@ -5,17 +5,18 @@
 =============================================================================*/
 
 #include "Components/SceneCaptureComponent.h"
-#include "Misc/ScopeLock.h"
-#include "UObject/RenderingObjectVersion.h"
+#include "Camera/CameraTypes.h"
 #include "UObject/EditorObjectVersion.h"
+#include "UObject/FortniteMainBranchObjectVersion.h"
+#include "UObject/UE5ReleaseStreamObjectVersion.h"
+#include "SceneInterface.h"
 #include "UObject/ConstructorHelpers.h"
-#include "GameFramework/Actor.h"
-#include "RenderingThread.h"
 #include "Components/StaticMeshComponent.h"
 #include "Materials/Material.h"
 #include "Components/BillboardComponent.h"
 #include "Engine/CollisionProfile.h"
 #include "Engine/Texture2D.h"
+#include "Engine/World.h"
 #include "SceneManagement.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/SceneCapture.h"
@@ -29,14 +30,50 @@
 #include "PlanarReflectionSceneProxy.h"
 #include "Components/BoxComponent.h"
 #include "Logging/MessageLog.h"
-#include "Engine/BlueprintGeneratedClass.h"
-#include "Engine/SimpleConstructionScript.h"
+#if WITH_EDITOR
+#include "Misc/UObjectToken.h"
+#include "Misc/MapErrors.h"
+#endif
 #include "Engine/SCS_Node.h"
 #include "Engine/TextureRenderTarget2D.h"
+#include "UnrealEngine.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SceneCaptureComponent)
 
 #define LOCTEXT_NAMESPACE "SceneCaptureComponent"
 
 static TMultiMap<TWeakObjectPtr<UWorld>, TWeakObjectPtr<USceneCaptureComponent> > SceneCapturesToUpdateMap;
+static FCriticalSection SceneCapturesToUpdateMapCS;
+
+static TAutoConsoleVariable<bool> CVarSCOverrideOrthographicTilingValues(
+	TEXT("r.SceneCapture.OverrideOrthographicTilingValues"),
+	false,
+	TEXT("Override defined orthographic values from SceneCaptureComponent2D - Ignored in Perspective mode."),
+	ECVF_Scalability);
+
+static TAutoConsoleVariable<bool> CVarSCEnableOrthographicTiling(
+	TEXT("r.SceneCapture.EnableOrthographicTiling"),
+	false,
+	TEXT("Render the scene in n frames (i.e TileCount) - Ignored in Perspective mode, works only in Orthographic mode and when r.SceneCapture.OverrideOrthographicTilingValues is on."),
+	ECVF_Scalability);
+
+static TAutoConsoleVariable<int32> CVarSCOrthographicNumXTiles(
+	TEXT("r.SceneCapture.OrthographicNumXTiles"),
+	4,
+	TEXT("Number of X tiles to render. Ignored in Perspective mode, works only in Orthographic mode and when r.SceneCapture.OverrideOrthographicTilingValues is on."),
+	ECVF_Scalability);
+
+static TAutoConsoleVariable<int32> CVarSCOrthographicNumYTiles(
+	TEXT("r.SceneCapture.OrthographicNumYTiles"),
+	4,
+	TEXT("Number of Y tiles to render. Ignored in Perspective mode, works only in Orthographic mode and when r.SceneCapture.OverrideOrthographicTilingValues is on."),
+	ECVF_Scalability);
+
+static TAutoConsoleVariable<bool> CVarSCCullByDetailMode(
+	TEXT("r.SceneCapture.CullByDetailMode"),
+	1,
+	TEXT("Whether to prevent scene capture updates according to the current detail mode"),
+	ECVF_Scalability);
 
 ASceneCapture::ASceneCapture(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -55,29 +92,29 @@ void ASceneCapture::PostLoad()
 		if (IsTemplate())
 		{
 			if (UBlueprintGeneratedClass* BPClass = Cast<UBlueprintGeneratedClass>(GetClass()))
-{
+			{
 				for (USCS_Node* RootNode : BPClass->SimpleConstructionScript->GetRootNodes())
-{
+				{
 					static const FName OldMeshName(TEXT("CamMesh0"));
 					static const FName OldFrustumName(TEXT("DrawFrust0"));
 					static const FName NewRootName(TEXT("SceneComponent"));
 					if (RootNode->ParentComponentOrVariableName == OldMeshName || RootNode->ParentComponentOrVariableName == OldFrustumName)
-	{
+					{
 						RootNode->ParentComponentOrVariableName = NewRootName;
 					}
 				}
-	}
-}
+			}
+		}
 
 		PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		if (MeshComp_DEPRECATED)
 		{
 			MeshComp_DEPRECATED->SetStaticMesh(nullptr);
-			}
-		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		}
-#endif
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
+#endif
+}
 
 void ASceneCapture::Serialize(FArchive& Ar)
 {
@@ -143,13 +180,73 @@ USceneCaptureComponent::USceneCaptureComponent(const FObjectInitializer& ObjectI
 	ShowFlags.SetHMDDistortion(0);
 	ShowFlags.SetOnScreenDebug(0);
 
-    CaptureStereoPass = EStereoscopicPass::eSSP_FULL;
+	if (!IsTemplate())
+	{
+		if (HasAnyFlags(RF_NeedPostLoad) || GetOuter()->HasAnyFlags(RF_NeedPostLoad))
+		{
+			// Delegate registration is not thread-safe, so we postpone it on PostLoad when coming from loading which could be on another thread
+		}
+		else
+		{
+			RegisterDelegates();
+		}
+}
+}
+
+void USceneCaptureComponent::RegisterDelegates()
+{
+	ensureMsgf(IsInGameThread(), TEXT("Potential race condition in USceneCaptureComponent registering to a delegate from non game-thread"));
+	FCoreUObjectDelegates::GetPreGarbageCollectDelegate().AddUObject(this, &USceneCaptureComponent::ReleaseGarbageReferences);
+}
+
+void USceneCaptureComponent::UnregisterDelegates()
+{
+	ensureMsgf(IsInGameThread(), TEXT("Potential race condition in USceneCaptureComponent unregistering to a delegate from non game-thread"));
+	FCoreUObjectDelegates::GetPreGarbageCollectDelegate().RemoveAll(this);
+}
+
+void USceneCaptureComponent::PostLoad()
+{
+	Super::PostLoad();
+
+	if (!IsTemplate())
+	{
+		RegisterDelegates();
+	}
+}
+
+void USceneCaptureComponent::BeginDestroy()
+{
+	Super::BeginDestroy();
+
+	if (!IsTemplate())
+	{
+		UnregisterDelegates();
+	}
+}
+
+// Because HiddenActors and ShowOnlyActors are serialized they are not easily refactored into weak pointers.
+// Before GC runs, release pointers to any actors that have been explicitly marked garbage.
+void USceneCaptureComponent::ReleaseGarbageReferences()
+{
+	// We only want to remove resolved actors that are explicitly marked as garbage, not unresolved pointers.
+	auto Predicate = [](TObjectPtr<AActor> Ptr)
+	{
+		if (AActor* Actor = Ptr.Get())
+		{
+			return Actor->HasAnyInternalFlags(EInternalObjectFlags::Garbage);
+		}
+		return false;
+	};
+	HiddenActors.RemoveAll(Predicate);
+	ShowOnlyActors.RemoveAll(Predicate);
 }
 
 void USceneCaptureComponent::OnRegister()
 {
 #if WITH_EDITORONLY_DATA
-	if (AActor* MyOwner = GetOwner())
+	AActor* MyOwner = GetOwner();
+	if ((MyOwner != nullptr) && !IsRunningCommandlet())
 	{
 		if (ProxyMeshComponent == nullptr)
 		{
@@ -289,12 +386,19 @@ FSceneViewStateInterface* USceneCaptureComponent::GetViewState(int32 ViewIndex)
 	while (ViewIndex >= ViewStates.Num())
 	{
 		ViewStates.Add(new FSceneViewStateReference());
+
+		// Cube map view states can share an origin, saving memory and performance
+		if ((ViewIndex > 0) && IsCube())
+		{
+			ViewStates.Last().ShareOrigin(&ViewStates[0]);
+		}
 	}
 
 	FSceneViewStateInterface* ViewStateInterface = ViewStates[ViewIndex].GetReference();
 	if ((bCaptureEveryFrame || bAlwaysPersistRenderingState) && ViewStateInterface == NULL)
 	{
-		ViewStates[ViewIndex].Allocate();
+		const ERHIFeatureLevel::Type FeatureLevel = GetScene() ? GetScene()->GetFeatureLevel() : GMaxRHIFeatureLevel;
+		ViewStates[ViewIndex].Allocate(FeatureLevel);
 		ViewStateInterface = ViewStates[ViewIndex].GetReference();
 	}
 	else if (!bCaptureEveryFrame && ViewStateInterface && !bAlwaysPersistRenderingState)
@@ -377,6 +481,7 @@ void USceneCaptureComponent::Serialize(FArchive& Ar)
 
 void USceneCaptureComponent::UpdateDeferredCaptures(FSceneInterface* Scene)
 {
+	FScopeLock ScopeLock(&SceneCapturesToUpdateMapCS);
 	UWorld* World = Scene->GetWorld();
 	if (!World || SceneCapturesToUpdateMap.Num() == 0)
 	{
@@ -414,12 +519,30 @@ void USceneCaptureComponent::UpdateDeferredCaptures(FSceneInterface* Scene)
 
 void USceneCaptureComponent::OnUnregister()
 {
+	// Make sure this component isn't still in the update map before we fully unregister
+	{
+		FScopeLock ScopeLock(&SceneCapturesToUpdateMapCS);
+		SceneCapturesToUpdateMap.Remove(GetWorld(), this);
+	}
 	for (int32 ViewIndex = 0; ViewIndex < ViewStates.Num(); ViewIndex++)
 	{
 		ViewStates[ViewIndex].Destroy();
 	}
 
+	// Manually destroy the view state array here.  To account for the possibility of "FSceneViewStateReference::ShareOrigin" being used,
+	// where later view states reference the first item in the array, we delete the later items first.
+	if (ViewStates.Num() > 1)
+	{
+		ViewStates.RemoveAt(1, ViewStates.Num() - 1);
+	}
+	ViewStates.Empty();
+
 	Super::OnUnregister();
+}
+
+bool USceneCaptureComponent::IsCulledByDetailMode() const
+{
+	return CVarSCCullByDetailMode.GetValueOnAnyThread() && DetailMode > GetCachedScalabilityCVars().DetailMode;
 }
 
 // -----------------------------------------------
@@ -429,7 +552,13 @@ USceneCaptureComponent2D::USceneCaptureComponent2D(const FObjectInitializer& Obj
 	: Super(ObjectInitializer)
 {
 	FOVAngle = 90.0f;
-	OrthoWidth = 512;
+
+	OrthoWidth = DEFAULT_ORTHOWIDTH;
+	bAutoCalculateOrthoPlanes = true;
+	AutoPlaneShift = 0.0f;
+	bUpdateOrthoPlanes = false;
+	bUseCameraHeightAsViewTarget = false;
+
 	bUseCustomProjectionMatrix = false;
 	bAutoActivate = true;
 	PrimaryComponentTick.bCanEverTick = true;
@@ -441,13 +570,13 @@ USceneCaptureComponent2D::USceneCaptureComponent2D(const FObjectInitializer& Obj
 
 	// default to full blend weight..
 	PostProcessBlendWeight = 1.0f;
-	CaptureStereoPass = EStereoscopicPass::eSSP_FULL;
 	CustomProjectionMatrix.SetIdentity();
 	ClipPlaneNormal = FVector(0, 0, 1);
 	bCameraCutThisFrame = false;
 	bConsiderUnrenderedOpaquePixelAsFullyTranslucent = false;
-	bDisableFlipCopyGLES = false;
 	
+	TileID = 0;
+
 	// Legacy initialization.
 	{
 		// previous behavior was to capture 2d scene captures before cube scene captures.
@@ -472,7 +601,8 @@ void USceneCaptureComponent2D::OnRegister()
 	Super::OnRegister();
 
 #if WITH_EDITORONLY_DATA
-	if (AActor* MyOwner = GetOwner())
+	AActor* MyOwner = GetOwner();
+	if ((MyOwner != nullptr) && !IsRunningCommandlet())
 	{
 		if (DrawFrustum == nullptr)
 		{
@@ -491,6 +621,7 @@ void USceneCaptureComponent2D::OnRegister()
 	// Without updating here this component would not work in a blueprint construction script which recreates the component after each move in the editor
 	if (bCaptureOnMovement)
 	{
+		TileID = 0;
 		CaptureSceneDeferred();
 	}
 #endif
@@ -510,10 +641,33 @@ void USceneCaptureComponent2D::TickComponent(float DeltaTime, enum ELevelTick Ti
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	if (bCaptureEveryFrame)
+	const int32 NumTiles = GetNumXTiles() * GetNumYTiles();
+	check(NumTiles >= 0);
+
+	if (bCaptureEveryFrame || (GetEnableOrthographicTiling() && TileID < NumTiles))
 	{
 		CaptureSceneDeferred();
 	}
+
+	if (!GetEnableOrthographicTiling())
+	{
+		return;
+	}
+
+	if (bCaptureEveryFrame)
+	{
+		TileID++;
+		TileID %= NumTiles;
+	} 
+	else if (TileID < NumTiles)
+	{
+		TileID++;
+	}
+}
+
+void USceneCaptureComponent2D::ResetOrthographicTilingCounter()
+{
+	TileID = 0;
 }
 
 void USceneCaptureComponent2D::SetCameraView(const FMinimalViewInfo& DesiredView)
@@ -536,17 +690,28 @@ void USceneCaptureComponent2D::GetCameraView(float DeltaTime, FMinimalViewInfo& 
 	OutMinimalViewInfo.bConstrainAspectRatio = false;
 	OutMinimalViewInfo.ProjectionMode = ProjectionType;
 	OutMinimalViewInfo.OrthoWidth = OrthoWidth;
+	OutMinimalViewInfo.bAutoCalculateOrthoPlanes = bAutoCalculateOrthoPlanes;
+	OutMinimalViewInfo.AutoPlaneShift = AutoPlaneShift;
+	OutMinimalViewInfo.bUpdateOrthoPlanes = bUpdateOrthoPlanes;
+	OutMinimalViewInfo.bUseCameraHeightAsViewTarget = bUseCameraHeightAsViewTarget;
+
+	if (bAutoCalculateOrthoPlanes)
+	{
+		if(const AActor* ViewTarget = GetOwner())
+		{
+			OutMinimalViewInfo.SetCameraToViewTarget(ViewTarget->GetActorLocation());
+		}
+	}
 }
 
 void USceneCaptureComponent2D::CaptureSceneDeferred()
 {
 	UWorld* World = GetWorld();
-	if (World && World->Scene && IsVisible())
+	if (World && World->Scene && IsVisible() && !IsCulledByDetailMode())
 	{
 		// Defer until after updates finish
 		// Needs some CS because of parallel updates.
-		static FCriticalSection CriticalSection;
-		FScopeLock ScopeLock(&CriticalSection);
+		FScopeLock ScopeLock(&SceneCapturesToUpdateMapCS);
 		SceneCapturesToUpdateMap.AddUnique(World, this);
 	}	
 }
@@ -554,12 +719,12 @@ void USceneCaptureComponent2D::CaptureSceneDeferred()
 void USceneCaptureComponent2D::CaptureScene()
 {
 	UWorld* World = GetWorld();
-	if (World && World->Scene && IsVisible())
+	if (World && World->Scene && IsVisible() && !IsCulledByDetailMode())
 	{
 		// We must push any deferred render state recreations before causing any rendering to happen, to make sure that deleted resource references are updated
 		World->SendAllEndOfFrameUpdates();
 		UpdateSceneCaptureContents(World->Scene);
-	}	
+	}
 
 	if (bCaptureEveryFrame)
 	{
@@ -658,11 +823,6 @@ bool USceneCaptureComponent2D::CanEditChange(const FProperty* InProperty) const
 		{
 			return bUseCustomProjectionMatrix;
 		}
-
-		if (PropertyName == GET_MEMBER_NAME_STRING_CHECKED(USceneCaptureComponent2D, bDisableFlipCopyGLES))
-		{
-			return CaptureSource == SCS_FinalColorLDR;
-		}
 	}
 
 	return Super::CanEditChange(InProperty);
@@ -673,6 +833,7 @@ void USceneCaptureComponent2D::PostEditChangeProperty(FPropertyChangedEvent& Pro
 	// AActor::PostEditChange will ForceUpdateComponents()
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 
+	TileID = 0;
 	CaptureSceneDeferred();
 
 	UpdateDrawFrustum();
@@ -681,6 +842,18 @@ void USceneCaptureComponent2D::PostEditChangeProperty(FPropertyChangedEvent& Pro
 
 void USceneCaptureComponent2D::Serialize(FArchive& Ar)
 {
+	Ar.UsingCustomVersion(FFortniteMainBranchObjectVersion::GUID);
+	if (Ar.CustomVer(FFortniteMainBranchObjectVersion::GUID) < FFortniteMainBranchObjectVersion::OrthographicCameraDefaultSettings)
+	{
+		OrthoWidth = 512.0f;
+	}
+
+	Ar.UsingCustomVersion(FUE5ReleaseStreamObjectVersion::GUID);
+	if (Ar.CustomVer(FUE5ReleaseStreamObjectVersion::GUID) < FUE5ReleaseStreamObjectVersion::OrthographicAutoNearFarPlane)
+	{
+		bAutoCalculateOrthoPlanes = false;
+	}
+
 	Super::Serialize(Ar);
 
 	if (Ar.IsLoading())
@@ -694,6 +867,16 @@ void USceneCaptureComponent2D::Serialize(FArchive& Ar)
 			ShowFlags.TemporalAA = false;
 			ShowFlags.MotionBlur = false;
 		}
+
+#if WITH_EDITOR
+		if (Ar.CustomVer(FFortniteMainBranchObjectVersion::GUID) < FFortniteMainBranchObjectVersion::OrthographicCameraDefaultSettings && bUseFauxOrthoViewPos)
+		{
+			FMessageLog("MapCheck").Info()
+				->AddToken(FUObjectToken::Create(this))
+				->AddToken(FTextToken::Create(LOCTEXT("MapCheck_Message_UseFauxOrthoViewPosDeprecation", "bUseFauxOrthoViewPos is true but has been deprecated. The setting should be set to false unless any custom usage of this flag is not affected.")))
+				->AddToken(FMapErrorToken::Create(FMapErrors::UseFauxOrthoViewPosDeprecation_Warning));
+		}
+#endif
 	}
 }
 
@@ -702,6 +885,37 @@ void USceneCaptureComponent2D::UpdateSceneCaptureContents(FSceneInterface* Scene
 	Scene->UpdateSceneCaptureContents(this);
 }
 
+bool USceneCaptureComponent2D::GetEnableOrthographicTiling() const
+{
+	if (!CVarSCOverrideOrthographicTilingValues->GetBool())
+	{
+		return bEnableOrthographicTiling;
+	}
+
+	return CVarSCEnableOrthographicTiling->GetBool();
+}
+
+int32 USceneCaptureComponent2D::GetNumXTiles() const
+{
+	if (!CVarSCOverrideOrthographicTilingValues->GetBool())
+	{
+		return NumXTiles;
+	}
+	
+	int32 NumXTilesLocal = CVarSCOrthographicNumXTiles->GetInt();
+	return FMath::Clamp(NumXTilesLocal, 1, 64);
+}
+
+int32 USceneCaptureComponent2D::GetNumYTiles() const
+{
+	if (!CVarSCOverrideOrthographicTilingValues->GetBool())
+	{
+		return NumYTiles;
+	}
+
+	int32 NumYTilesLocal = CVarSCOrthographicNumYTiles->GetInt();
+	return FMath::Clamp(NumYTilesLocal, 1, 64);
+}
 
 // -----------------------------------------------
 
@@ -920,9 +1134,11 @@ void UPlanarReflectionComponent::PostEditChangeProperty(FPropertyChangedEvent& P
 
 	for (int32 ViewIndex = 0; ViewIndex < ViewStates.Num(); ViewIndex++)
 	{
+		const ERHIFeatureLevel::Type FeatureLevel = GetScene() ? GetScene()->GetFeatureLevel() : GMaxRHIFeatureLevel;
+
 		// Recreate the view state to reset temporal history so that property changes can be seen immediately
 		ViewStates[ViewIndex].Destroy();
-		ViewStates[ViewIndex].Allocate();
+		ViewStates[ViewIndex].Allocate(FeatureLevel);
 	}
 
 	if (ProxyMeshComponent)
@@ -980,7 +1196,6 @@ USceneCaptureComponentCube::USceneCaptureComponentCube(const FObjectInitializer&
 	PrimaryComponentTick.TickGroup = TG_DuringPhysics;
 	PrimaryComponentTick.bAllowTickOnDedicatedServer = false;
 	bTickInEditor = true;
-	IPD = 6.2f;
 	bCaptureRotation = false;
 
 #if WITH_EDITORONLY_DATA
@@ -999,7 +1214,8 @@ void USceneCaptureComponentCube::OnRegister()
 	Super::OnRegister();
 
 #if WITH_EDITORONLY_DATA
-	if (AActor* MyOwner = GetOwner())
+	AActor* MyOwner = GetOwner();
+	if ((MyOwner != nullptr) && !IsRunningCommandlet())
 	{
 		if (DrawFrustum == nullptr)
 		{
@@ -1091,20 +1307,19 @@ void USceneCaptureComponentCube::UpdateDrawFrustum()
 void USceneCaptureComponentCube::CaptureSceneDeferred()
 {
 	UWorld* World = GetWorld();
-	if (World && World->Scene && IsVisible())
+	if (World && World->Scene && IsVisible() && !IsCulledByDetailMode())
 	{
 		// Defer until after updates finish
 		// Needs some CS because of parallel updates.
-		static FCriticalSection CriticalSection;
-		FScopeLock ScopeLock(&CriticalSection);
-		SceneCapturesToUpdateMap.AddUnique( World, this );
+		FScopeLock ScopeLock(&SceneCapturesToUpdateMapCS);
+		SceneCapturesToUpdateMap.AddUnique(World, this);
 	}	
 }
 
 void USceneCaptureComponentCube::CaptureScene()
 {
 	UWorld* World = GetWorld();
-	if (World && World->Scene && IsVisible())
+	if (World && World->Scene && IsVisible() && !IsCulledByDetailMode())
 	{
 		// We must push any deferred render state recreations before causing any rendering to happen, to make sure that deleted resource references are updated
 		World->SendAllEndOfFrameUpdates();

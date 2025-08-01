@@ -7,6 +7,7 @@
 #include "Textures/SlateShaderResource.h"
 #include "Textures/SlateTextureData.h"
 #include "Textures/TextureAtlas.h"
+#include "Types/SlateVector2.h"
 
 /**
  * Represents a new texture that has been loaded but no resource created for it
@@ -39,7 +40,7 @@ struct FCompareFNewTextureInfoByTextureSize
 /** 
  * Base texture manager class used by a Slate renderer to manage texture resources
  */
-class SLATECORE_API FSlateShaderResourceManager
+class FSlateShaderResourceManager
 {
 public:
 	FSlateShaderResourceManager() {};
@@ -52,7 +53,7 @@ public:
 	/** 
 	 * Returns a texture associated with the passed in name.  Should return nullptr if not found 
 	 */
-	virtual FSlateShaderResourceProxy* GetShaderResource( const FSlateBrush& InBrush ) = 0;
+	virtual FSlateShaderResourceProxy* GetShaderResource(const FSlateBrush& Brush, FVector2f LocalSize, float DrawScale) = 0;
 
 	/**
 	 * Creates a handle to a Slate resource
@@ -61,10 +62,12 @@ public:
 	 * It is expensive to create a resource so do not do it in time sensitive areas
 	 *
 	 * @param	Brush		The brush to get a rendering resource handle 
+	 * @param	LocalSize	The unscaled size of the draw element using this brush.  This size is used to rescale vector graphics only
+	 * @param	DrawScale	The scale of the draw element using this brush.  This scale is used to rescale vector graphics only
 	 * @return	The created resource handle.  
 	 */
-	virtual FSlateResourceHandle GetResourceHandle( const FSlateBrush& InBrush );
-
+	SLATECORE_API virtual FSlateResourceHandle GetResourceHandle(const FSlateBrush& Brush, FVector2f LocalSize, float DrawScale);
+	SLATECORE_API virtual FSlateResourceHandle GetResourceHandle(const FSlateBrush& Brush);
 
 	virtual FSlateShaderResource* GetFontShaderResource( int32 InTextureAtlasIndex, FSlateShaderResource* FontTextureAtlas, const class UObject* FontMaterial ) { return FontTextureAtlas; }
 
@@ -102,7 +105,7 @@ protected:
 #endif
 private:
 	// Non-copyable
-	FSlateShaderResourceManager(const FSlateShaderResourceManager&);
-	FSlateShaderResourceManager& operator=(const FSlateShaderResourceManager&);
+	SLATECORE_API FSlateShaderResourceManager(const FSlateShaderResourceManager&);
+	SLATECORE_API FSlateShaderResourceManager& operator=(const FSlateShaderResourceManager&);
 
 };

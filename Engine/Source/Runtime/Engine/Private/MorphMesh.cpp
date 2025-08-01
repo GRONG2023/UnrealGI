@@ -4,15 +4,10 @@
 	MorphMesh.cpp: Unreal morph target mesh and blending implementation.
 =============================================================================*/
 
-#include "CoreMinimal.h"
-#include "ProfilingDebugging/ResourceSize.h"
 #include "EngineUtils.h"
-#include "Animation/MorphTarget.h"
 #include "Engine/SkeletalMesh.h"
-#include "HAL/LowLevelMemTracker.h"
 #include "Rendering/SkeletalMeshModel.h"
-#include "Rendering/SkeletalMeshLODModel.h"
-#include "UObject/EditorObjectVersion.h"
+#include "Serialization/MemoryArchive.h"
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -30,23 +25,51 @@ void UMorphTarget::Serialize( FArchive& Ar )
 	Ar.UsingCustomVersion(FEditorObjectVersion::GUID);
 
 	FStripDataFlags StripFlags( Ar );
-	if( !StripFlags.IsDataStrippedForServer() )
+	if( !StripFlags.IsAudioVisualDataStripped() )
 	{
 		Ar << MorphLODModels;
 	}
 }
 
-
-void UMorphTarget::GetResourceSizeEx(FResourceSizeEx& CumulativeResourceSize)
+#if WITH_EDITORONLY_DATA
+void UMorphTarget::DeclareCustomVersions(FArchive& Ar, const UClass* SpecificSubclass)
 {
-	Super::GetResourceSizeEx(CumulativeResourceSize);
+	Super::DeclareCustomVersions(Ar, SpecificSubclass);
+	FMorphTargetLODModel MorphLODModel;
+	Ar << MorphLODModel;
+}
+#endif
 
-	for (const auto& LODModel : MorphLODModels)
+namespace
+{
+	void SerializeMorphLODModels(FMemoryArchive& Ar, TArray<FMorphTargetLODModel>& MorphLODModels)
 	{
-		LODModel.GetResourceSizeEx(CumulativeResourceSize);
+		int32 MorphLODModelNumber = 0;
+		if (Ar.IsLoading())
+		{
+			Ar << MorphLODModelNumber;
+			MorphLODModels.Empty(MorphLODModelNumber);
+			MorphLODModels.AddDefaulted(MorphLODModelNumber);
+		}
+		else
+		{
+			MorphLODModelNumber = MorphLODModels.Num();
+			Ar << MorphLODModelNumber;
+		}
+
+		for (int32 MorphIndex = 0; MorphIndex < MorphLODModelNumber; ++MorphIndex)
+		{
+			Ar << MorphLODModels[MorphIndex];
+		}
 	}
 }
 
+void UMorphTarget::SerializeMemoryArchive(FMemoryArchive & Ar)
+{
+	FName MorphTargetName = GetFName();
+	Ar << MorphTargetName;
+	SerializeMorphLODModels(Ar, MorphLODModels);
+}
 
 void UMorphTarget::PostLoad()
 {
@@ -91,7 +114,29 @@ void UMorphTarget::PostLoad()
 #endif //#if WITH_EDITOR
 }
 
-void FMorphTargetLODModel::GetResourceSizeEx(FResourceSizeEx& CumulativeResourceSize) const
+#if WITH_EDITOR
+
+void FFinishBuildMorphTargetData::LoadFromMemoryArchive(FMemoryArchive & Ar)
 {
-	CumulativeResourceSize.AddUnknownMemoryBytes(Vertices.GetAllocatedSize() + sizeof(int32));
+	check(Ar.IsLoading());
+	
+	if (!ensureMsgf(!bApplyMorphTargetsData, TEXT("Error in FFinishBuildMorphTargetData::LoadFromMemoryArchive. The compilation context morph targets data was already set.")))
+	{
+		MorphLODModelsPerTargetName.Empty();
+		bApplyMorphTargetsData = false;
+	}
+	bApplyMorphTargetsData = true;
+	
+	int32 MorphTargetNumber = 0;
+	Ar << MorphTargetNumber;
+	MorphLODModelsPerTargetName.Reserve(MorphTargetNumber);
+	for (int32 MorphTargetIndex = 0; MorphTargetIndex < MorphTargetNumber; ++MorphTargetIndex)
+	{
+		FName MorphTargetName = NAME_None;
+		Ar << MorphTargetName;
+		TArray<FMorphTargetLODModel>&MorphLODModels = MorphLODModelsPerTargetName.FindOrAdd(MorphTargetName);
+		SerializeMorphLODModels(Ar, MorphLODModels);
+	}
 }
+
+#endif // WITH_EDITOR

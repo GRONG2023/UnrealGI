@@ -31,8 +31,9 @@ public:
 	FCriticalSection& GetLock() { return CriticalSection; }
 
 	uint32 GetNumPages() const { return NumPages; }
-	uint32 GetNumLockedPages() const { return GetNumPages() - FreeHeap.Num(); }
+	uint32 GetNumLockedPages() const { return GetNumPages() - FreeHeap.Num() - NumReservedPages; }
 	uint32 GetNumMappedPages() const { return NumPagesMapped; }
+	uint32 GetNumAllocatedPages() const { return NumPagesAllocated; }
 
 	/**
 	 * Reset the page pool. This can be used to flush any caches. Mainly useful for debug and testing purposes.
@@ -48,12 +49,12 @@ public:
 	 * Unmap/remove any pages that were allocated by the given producer and are inside the TextureRegion.
 	 * Outputs the locked pages that can't be unmapped to the OutLocked array.
 	 */
-	void EvictPages(FVirtualTextureSystem* System, FVirtualTextureProducerHandle const& ProducerHandle, FVTProducerDescription const& Desc, FIntRect const& TextureRegion, uint32 MaxLevel, TArray<union FVirtualTextureLocalTile>& OutLocked);
+	void EvictPages(FVirtualTextureSystem* System, FVirtualTextureProducerHandle const& ProducerHandle, FVTProducerDescription const& Desc, FIntRect const& TextureRegion, uint32 MaxLevelToEvict, uint32 MinFrameToKeepMapped, TArray<union FVirtualTextureLocalTile>& OutDirtyMapped);
 
 	/**
 	* Unmap all pages from the given address range in a space. Pages will remain resident in the pool, but no longer by mapped to any page table.
 	*/
-	void UnmapPages(FVirtualTextureSystem* System, uint8 SpaceID, uint32 vAddress, uint32 WidthInTiles, uint32 HeightInTiles);
+	void UnmapAllPagesForSpace(FVirtualTextureSystem* System, uint8 SpaceID, uint32 vAddress, uint32 Width, uint32 Height, uint32 MaxLevel);
 
 	/**
 	* Remap physical pages from one producer to another.
@@ -73,7 +74,7 @@ public:
 	/**
 	 * Check if there are any free pages available at the moment.
 	 */
-	bool		AnyFreeAvailable( uint32 Frame ) const;
+	bool		AnyFreeAvailable( uint32 Frame, uint32 FreeThreshold ) const;
 
 	/**
 	 * Find physical address of the page allocated for the given VT address, or ~0 if not allocated
@@ -130,9 +131,14 @@ public:
 	uint32		GetNumVisiblePages(uint32 Frame) const;
 
 	/**
+	 * Returns a map between producer handle and number of tiles that the producer uses in the pool.
+	 */
+	void		CollectProducerCounts(TMap<uint32, uint32>& OutProducerCountMap) const;
+
+	/**
 	* Map the physical address to a specific virtual address.
 	*/
-	void		MapPage(FVirtualTextureSpace* Space, FVirtualTexturePhysicalSpace* PhysicalSpace, uint8 PageTableLayerIndex, uint8 vLogSize, uint32 vAddress, uint8 vLevel, uint16 pAddress);
+	void		MapPage(FVirtualTextureSpace* Space, FVirtualTexturePhysicalSpace* PhysicalSpace, uint8 PageTableLayerIndex, uint8 MaxLevel, uint8 vLogSize, uint32 vAddress, uint8 Local_vLevel, uint16 pAddress);
 
 private:
 	// Allocate 24 bits to store next/prev indices, pack layer index into 8 bits
@@ -140,18 +146,14 @@ private:
 
 	struct FPageMapping
 	{
-		union
-		{
-			uint32 PackedValues;
-			struct
-			{
-				uint32 vAddress : 24;
-				uint32 vLogSize : 4;
-				uint32 SpaceID : 4;
-			};
-		};
-	
-		uint32 NextIndex;
+		uint32 vAddress : 24;
+		uint32 vLogSize : 4;
+		uint32 SpaceID : 4;
+
+		uint32 NextIndex : 24;
+		uint32 MaxLevel : 4;
+		uint32 Pad : 4;
+
 		uint32 PrevIndex : 24;
 		uint32 PageTableLayerIndex : 8;
 	};
@@ -228,6 +230,7 @@ private:
 	FBinaryHeap<uint32, uint16> FreeHeap;
 
 	FHashTable PageHash;
+	FHashTable ProducerToPageIndex;
 	TArray<FPageEntry> Pages;
 
 	// Holds linked lists of mappings for each  physical page in the pool
@@ -238,4 +241,7 @@ private:
 
 	uint32 NumPages;
 	uint32 NumPagesMapped;
+	uint32 NumPagesAllocated;
+
+	static const uint32 NumReservedPages;
 };

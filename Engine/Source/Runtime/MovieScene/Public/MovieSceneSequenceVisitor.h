@@ -2,15 +2,16 @@
 
 #pragma once
 #include "Evaluation/MovieSceneSequenceTransform.h"
-#include "MovieSceneSequenceID.h"
+#include "HAL/Platform.h"
+#include "Math/Range.h"
 #include "Misc/FrameNumber.h"
+#include "MovieSceneSequenceID.h"
 
-struct FGuid;
-struct FMovieSceneBinding;
-
-class UMovieSceneTrack;
 class UMovieSceneSection;
 class UMovieSceneSequence;
+class UMovieSceneTrack;
+struct FGuid;
+struct FMovieSceneBinding;
 
 /*
 * Implements a visitor pattern to allow external code to easily iterate through a sequence hierarchy,
@@ -36,7 +37,7 @@ class UMovieSceneSequence;
 *					}
 *	
 *					UMovieSceneCameraCutSection* CameraCutSection = CastChecked<UMovieSceneCameraCutSection>(Section);
-*					TRange<FFrameNumber> RootCameraRange = TRange<FFrameNumber>::Intersection(LocalSpace.RootClampRange, CameraCutSection->GetRange() * LocalSpace.RootToSequenceTransform.InverseLinearOnly());
+*					TRange<FFrameNumber> RootCameraRange = TRange<FFrameNumber>::Intersection(LocalSpace.RootClampRange, CameraCutSection->GetRange() * LocalSpace.RootToSequenceTransform.InverseNoLooping());
 *					if (!RootCameraRange.IsEmpty())
 *					{
 *						CameraCutTree.Add(RootCameraRange, MakeTuple(CameraCutSection, LocalSpace.SequenceID, LocalSpace.HierarchicalBias));
@@ -48,7 +49,7 @@ class UMovieSceneSequence;
 *	};
 *	
 *	UE::MovieScene::FSequenceVisitParams Params;
-*	Params.bVisitMasterTracks = true;
+*	Params.bVisitRootTracks = true;
 *	Params.bVisitSubSequences = true;
 *	FCameraCutVisitor CameraCutVisitor;
 *	
@@ -62,9 +63,9 @@ namespace UE
 namespace MovieScene
 {
 
-struct MOVIESCENE_API FSubSequenceSpace
+struct FSubSequenceSpace
 {
-	FSubSequenceSpace();
+	MOVIESCENE_API FSubSequenceSpace();
 
 	/** Transform from the root time-space to the current sequence's time-space */
 	FMovieSceneSequenceTransform RootToSequenceTransform;
@@ -78,7 +79,7 @@ struct MOVIESCENE_API FSubSequenceSpace
 	int16 HierarchicalBias;
 };
 
-struct MOVIESCENE_API ISequenceVisitor
+struct ISequenceVisitor
 {
 	virtual ~ISequenceVisitor() {}
 
@@ -94,7 +95,7 @@ struct MOVIESCENE_API ISequenceVisitor
 struct FSequenceVisitParams
 {
 	FSequenceVisitParams()
-		: bVisitMasterTracks(false)
+		: bVisitRootTracks(false)
 		, bVisitObjectBindings(false)
 		, bVisitTracks(false)
 		, bVisitSections(false)
@@ -108,7 +109,7 @@ struct FSequenceVisitParams
 		return bVisitTracks || bVisitSections;
 	}
 
-	bool bVisitMasterTracks;
+	bool bVisitRootTracks;
 	bool bVisitObjectBindings;
 	bool bVisitTracks;
 	bool bVisitSections;

@@ -11,20 +11,21 @@
 #include "Widgets/Layout/SScrollBorder.h"
 #include "Widgets/Views/SListView.h"
 #include "Framework/Docking/TabManager.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Widgets/Docking/SDockTab.h"
 
 #include "EngineGlobals.h"
 #include "Editor.h"
 
 #include "LevelEditor.h"
-#include "Editor/WorkspaceMenuStructure/Public/WorkspaceMenuStructure.h"
-#include "Editor/WorkspaceMenuStructure/Public/WorkspaceMenuStructureModule.h"
+#include "WorkspaceMenuStructure.h"
+#include "WorkspaceMenuStructureModule.h"
 
 #if PLATFORM_MAC
 #include "Mac/MacApplication.h"
 #endif
 #include "Subsystems/AssetEditorSubsystem.h"
+#include "ThumbnailRendering/ThumbnailManager.h"
 
 #define LOCTEXT_NAMESPACE "SGlobalTabSwitchingDialog"
 
@@ -109,8 +110,8 @@ public:
 			.Padding(4.0f, 4.0f)
 			[
 				SNew(SBox)
-				.WidthOverride(ThumbnailSize)
-				.HeightOverride(ThumbnailSize)
+				.WidthOverride(static_cast<float>(ThumbnailSize))
+				.HeightOverride(static_cast<float>(ThumbnailSize))
 				[
 					Thumbnail->MakeThumbnailWidget(ThumbnailConfig)
 				]
@@ -121,7 +122,7 @@ public:
 			.Padding(8.0f, 0.0f, 8.0f, 0.0f)
 			[
 				SNew(STextBlock)
-				.TextStyle(FEditorStyle::Get(), "ControlTabMenu.AssetNameStyle")
+				.TextStyle(FAppStyle::Get(), "ControlTabMenu.AssetNameStyle")
 				.Text(AssetText)
 			];
 	}
@@ -261,7 +262,7 @@ void SGlobalTabSwitchingDialog::OnMainTabListSelectionChanged(FTabListItemPtr In
 	{
 		FTabListItemPtr SelectedItem = SelectedItems[0];
 
-		NewTopContents = SelectedItem->CreateWidget(AssetThumbnailPool);
+		NewTopContents = SelectedItem->CreateWidget(UThumbnailManager::Get().GetSharedThumbnailPool());
 
 		NewBottomContents =
 			SNew(SHorizontalBox)
@@ -269,7 +270,7 @@ void SGlobalTabSwitchingDialog::OnMainTabListSelectionChanged(FTabListItemPtr In
 			.AutoWidth()
 			[
 				SNew(SButton)
-				.ButtonStyle(FEditorStyle::Get(), "HoverOnlyHyperlinkButton")
+				.ButtonStyle(FAppStyle::Get(), "HoverOnlyHyperlinkButton")
 				.VAlign(VAlign_Center)
 				.HAlign(HAlign_Center)
 				.OnClicked(this, &SGlobalTabSwitchingDialog::OnBrowseToSelectedAsset)
@@ -281,7 +282,7 @@ void SGlobalTabSwitchingDialog::OnMainTabListSelectionChanged(FTabListItemPtr In
 					.VAlign(VAlign_Center)
 					[
 						SNew(SImage)
-						.Image(FEditorStyle::GetBrush("PropertyWindow.Button_Browse"))
+						.Image(FAppStyle::GetBrush("Icons.Search"))
 					]
 					+SHorizontalBox::Slot()
 					.AutoWidth()
@@ -289,7 +290,7 @@ void SGlobalTabSwitchingDialog::OnMainTabListSelectionChanged(FTabListItemPtr In
 					.Padding(FMargin(4.0f, 0.0f, 0.0f, 0.0f))
 					[
 						SNew(STextBlock)
-						.TextStyle(FEditorStyle::Get(), "ControlTabMenu.AssetPathStyle")
+						.TextStyle(FAppStyle::Get(), "ControlTabMenu.AssetPathStyle")
 						.Text(SelectedItem->GetPathString())
 					]
 				]
@@ -304,32 +305,13 @@ void SGlobalTabSwitchingDialog::OnMainTabListSelectionChanged(FTabListItemPtr In
 			.HAlign(HAlign_Right)
 			[
 				SNew(STextBlock)
-				.TextStyle(FEditorStyle::Get(), "ControlTabMenu.AssetTypeStyle")
+				.TextStyle(FAppStyle::Get(), "ControlTabMenu.AssetTypeStyle")
 				.Text(SelectedItem->GetTypeString())
 			];
-
-		// Create the list of the tool tabs in the current active tab
-		TSharedPtr<FTabManager> SelectedAssetTabManager = SelectedItem->GetAssociatedTabManager();
-		if (SelectedAssetTabManager.IsValid())
-		{
-			FMenuBuilder ToolTabMenuBuilder(/*bShouldCloseAfterSelection=*/ true, /*CommandList=*/ nullptr);
-			ToolTabMenuBuilder.GetMultiBox()->SetStyle(&FEditorStyle::Get(), "ToolBar");
-			
-			// Local editor tabs
-			SelectedAssetTabManager->PopulateLocalTabSpawnerMenu(ToolTabMenuBuilder);
-			
-			// General tabs
-			const IWorkspaceMenuStructure& MenuStructure = WorkspaceMenu::GetMenuStructure();
-			SelectedAssetTabManager->PopulateTabSpawnerMenu(ToolTabMenuBuilder, MenuStructure.GetStructureRoot());
-
-			// Turn the builder into a widget
-			NewToolTabsContent = ToolTabMenuBuilder.MakeWidget();
-		}
 	}
 
 	NewTabItemToActivateDisplayBox->SetContent(NewTopContents);
 	NewTabItemToActivatePathBox->SetContent(NewBottomContents);
-	ToolTabsListBox->SetContent(NewToolTabsContent);
 }
 
 void SGlobalTabSwitchingDialog::OnMainTabListItemClicked(FTabListItemPtr InItem)
@@ -387,8 +369,6 @@ void SGlobalTabSwitchingDialog::Construct(const FArguments& InArgs, FVector2D In
 
 	TriggerChord = InTriggerChord;
 
-	AssetThumbnailPool = MakeShareable(new FAssetThumbnailPool(128));
-
 	// Populate the list with open asset editors
 	TArray<UObject*> OpenAssetList = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->GetAllEditedAssets();
 	for (UObject* OpenAsset : OpenAssetList)
@@ -417,10 +397,6 @@ void SGlobalTabSwitchingDialog::Construct(const FArguments& InArgs, FVector2D In
 		.HeightOverride(40.0f)
 		.VAlign(VAlign_Center);
 
-	ToolTabsListBox =
-		SNew(SBox)
-		.Padding(FMargin(0.0f, 0.0f, 15.0f, 0.0f));
-
 	MainTabsListWidget = SNew(STabListWidget)
 		.ItemHeight(64)
 		.ListItemsSource(&MainTabsListDataSource)
@@ -429,26 +405,12 @@ void SGlobalTabSwitchingDialog::Construct(const FArguments& InArgs, FVector2D In
 		.OnMouseButtonClick(this, &SGlobalTabSwitchingDialog::OnMainTabListItemClicked)
 		.SelectionMode(ESelectionMode::Single);
 
-	TSharedRef<SWidget> ToolTabList = SNew(SVerticalBox)
-		+SVerticalBox::Slot()
-		.AutoHeight()
-		[
-			SNew(STextBlock)
-			.TextStyle(FEditorStyle::Get(), "ControlTabMenu.HeadingStyle")
-			.Text(LOCTEXT("ChangeToolsHeading", "Tool Windows"))
-		]
-		+SVerticalBox::Slot()
-		.FillHeight(1.0f)
-		[
-			ToolTabsListBox.ToSharedRef()
-		];
-
 	TSharedRef<SWidget> DocumentTabList = SNew(SVerticalBox)
 		+SVerticalBox::Slot()
 		.AutoHeight()
 		[
 			SNew(STextBlock)
-			.TextStyle(FEditorStyle::Get(), "ControlTabMenu.HeadingStyle")
+			.TextStyle(FAppStyle::Get(), "ControlTabMenu.HeadingStyle")
 			.Text(LOCTEXT("OpenAssetsHeading", "Active Files"))
 		]
 		+SVerticalBox::Slot()
@@ -463,12 +425,12 @@ void SGlobalTabSwitchingDialog::Construct(const FArguments& InArgs, FVector2D In
 	ChildSlot
 	[
 		SNew(SBorder)
-		.BorderImage(FEditorStyle::Get().GetBrush("ControlTabMenu.Background"))
+		.BorderImage(FAppStyle::Get().GetBrush("ControlTabMenu.Background"))
 		.ForegroundColor(FCoreStyle::Get().GetSlateColor("DefaultForeground"))
 		[
 			SNew(SBox)
-			.WidthOverride(InSize.X)
-			.HeightOverride(InSize.Y)
+			.WidthOverride(static_cast<float>(InSize.X))
+			.HeightOverride(static_cast<float>(InSize.Y))
 			.Padding(FMargin(12.0f, 12.0f, 12.0f, 0.0f))
 			[
 				SNew(SVerticalBox)
@@ -478,22 +440,10 @@ void SGlobalTabSwitchingDialog::Construct(const FArguments& InArgs, FVector2D In
 					NewTabItemToActivateDisplayBox.ToSharedRef()
 				]
 				+SVerticalBox::Slot()
+				.Padding(12.f, 24.f)
 				.FillHeight(1.0f)
 				[
-					SNew(SHorizontalBox)
-					+SHorizontalBox::Slot()
-					.FillWidth(0.4f)
-					.Padding(FMargin(0.0f, 0.0f, 0.0f, 0.0f))
-					[
-						ToolTabList
-					]
-
-					+SHorizontalBox::Slot()
-					.FillWidth(1.0f)
-					[
 						DocumentTabList
-					]
-
 				]
 				+SVerticalBox::Slot()
 				.AutoHeight()
@@ -551,7 +501,7 @@ FReply SGlobalTabSwitchingDialog::OnPreviewKeyDown(const FGeometry& MyGeometry, 
 
 TSharedRef<ITableRow> SGlobalTabSwitchingDialog::OnGenerateTabSwitchListItemWidget(FTabListItemPtr InItem, const TSharedRef<STableViewBase>& OwnerTable)
 {
-	return SNew(STableRow<FTabListItemPtr>, OwnerTable)[InItem->CreateWidget(AssetThumbnailPool)];
+	return SNew(STableRow<FTabListItemPtr>, OwnerTable)[InItem->CreateWidget(UThumbnailManager::Get().GetSharedThumbnailPool())];
 }
 
 //////////////////////////////////////////////////////////////////////////

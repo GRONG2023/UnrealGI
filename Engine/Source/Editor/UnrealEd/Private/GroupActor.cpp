@@ -3,15 +3,18 @@
 #include "Editor/GroupActor.h"
 #include "Misc/MessageDialog.h"
 #include "Editor/UnrealEdEngine.h"
-#include "Components/BillboardComponent.h"
 #include "Engine/Selection.h"
 #include "EditorModeManager.h"
 #include "EditorModes.h"
 #include "UnrealEdGlobals.h"
+#include "SceneInterface.h"
+#include "SceneView.h"
 #include "ScopedTransaction.h"
 #include "LevelEditorViewport.h"
 #include "Layers/LayersSubsystem.h"
 #include "ActorGroupingUtils.h"
+#include "Elements/Framework/EngineElementsLibrary.h"
+#include "Elements/Framework/TypedElementSelectionSet.h"
 
 const FLinearColor BOXCOLOR_LOCKEDGROUPS( 0.0f, 1.0f, 0.0f );
 const FLinearColor BOXCOLOR_UNLOCKEDGROUPS( 1.0f, 0.0f, 0.0f );
@@ -38,6 +41,8 @@ void AGroupActor::PostActorCreated()
 
 void AGroupActor::PostLoad()
 {
+	GetLevel()->ConditionalPostLoad();
+
 	if( !GetWorld()->IsPlayInEditor() && !IsRunningCommandlet() && GIsEditor )
 	{
 		// Cache group on de-serialization
@@ -73,7 +78,7 @@ void AGroupActor::PostEditUndo()
 {
 	Super::PostEditUndo();
 
-	if (IsPendingKill())
+	if (!IsValid(this))
 	{
 		GetWorld()->ActiveGroupActors.RemoveSwap(this);
 	}
@@ -99,150 +104,97 @@ bool AGroupActor::IsSelected() const
 	return (IsLocked() && HasSelectedActors()) || Super::IsSelected();
 }
 
-
-bool ActorHasParentInGroup(const TArray<class AActor*> &GroupActors, const AActor* Actor)
+void AGroupActor::ForEachActorInGroup(TFunctionRef<void(AActor*, AGroupActor*)> InCallback)
 {
-	check(Actor);
-	// Check that we've not got a parent attachment within the group.
-	USceneComponent *Curr = Actor->GetRootComponent();
-	for(int32 OtherIndex=0; OtherIndex<GroupActors.Num(); ++OtherIndex)
+	for (AActor* Actor : GroupActors)
 	{
-		const AActor* OtherActor = GroupActors[OtherIndex];
-		if( OtherActor != NULL && OtherActor != Actor )
+		if (Actor)
 		{
-			USceneComponent *Other = OtherActor->GetRootComponent();
-			if( Curr->IsAttachedTo( Other ) )
+			InCallback(Actor, this);
+		}
+	}
+	for (AGroupActor* SubGroup : SubGroups)
+	{
+		if (SubGroup)
+		{
+			SubGroup->ForEachActorInGroup(InCallback);
+		}
+	}
+	InCallback(this, this);
+}
+
+namespace GroupActorHelpers
+{
+
+bool ActorHasParentInGroup(const AActor* Actor, const AGroupActor* GroupActor)
+{
+	check(Actor && GroupActor);
+	// Check that we've not got a parent attachment within the group.
+	if (USceneComponent* RootComponent = Actor->GetRootComponent())
+	{
+		for (const AActor* OtherActor : GroupActor->GroupActors)
+		{
+			if (OtherActor && OtherActor != Actor)
 			{
-				// We do have parent so don't apply the delta - our parent object will apply it instead.
-				return true;
+				USceneComponent* OtherRootComponent = OtherActor->GetRootComponent();
+				if (OtherRootComponent && RootComponent->IsAttachedTo(OtherRootComponent))
+				{
+					// We do have parent so don't apply the delta - our parent object will apply it instead.
+					return true;
+				}
 			}
 		}
 	}
 	return false;
 }
 
-bool ActorHasParentInSelection(const AActor* Actor)
+bool ActorHasParentInSelection(const AActor* Actor, FTypedElementListConstRef SelectionSet)
 {
 	check(Actor);
-	bool bHasParentInSelection = false;
-	AActor* ParentActor = Actor->GetAttachParentActor();
-	while (ParentActor != NULL && !bHasParentInSelection)
+	for (const AActor* ParentActor = Actor->GetAttachParentActor(); ParentActor; ParentActor = ParentActor->GetAttachParentActor())
 	{
-		if (ParentActor->IsSelected())
+		FTypedElementHandle ParentActorElementHandle = UEngineElementsLibrary::AcquireEditorActorElementHandle(ParentActor, /*bAllowCreate*/false);
+		if (ParentActorElementHandle && SelectionSet->Contains(ParentActorElementHandle))
 		{
-			bHasParentInSelection = true;
+			return true;
 		}
-		ParentActor = ParentActor->GetAttachParentActor();
 	}
-	return bHasParentInSelection;
+	return false;
 }
 
-void AGroupActor::GroupApplyDelta(FLevelEditorViewportClient* Viewport, const FVector& InDrag, const FRotator& InRot, const FVector& InScale )
+} // namespace GroupActorHelpers
+
+void AGroupActor::ForEachMovableActorInGroup(const UTypedElementSelectionSet* InSelectionSet, TFunctionRef<void(AActor*, AGroupActor*)> InCallback)
 {
-	check(Viewport);
-	for(int32 ActorIndex=0; ActorIndex<GroupActors.Num(); ++ActorIndex)
+	const UTypedElementSelectionSet* SelectionSet = InSelectionSet ? InSelectionSet : GEditor->GetSelectedActors()->GetElementSelectionSet();
+	for (AActor* Actor : GroupActors)
 	{
-		if( GroupActors[ActorIndex] != NULL )
+		if (Actor)
 		{
 			// Check that we've not got a parent attachment within the group/selection
-			const bool bCanApplyDelta = !ActorHasParentInGroup(GroupActors, GroupActors[ActorIndex]) && !ActorHasParentInSelection(GroupActors[ActorIndex]);
-			if(bCanApplyDelta)
+			const bool bCanApplyDelta = !GroupActorHelpers::ActorHasParentInGroup(Actor, this) && !GroupActorHelpers::ActorHasParentInSelection(Actor, SelectionSet->GetElementList());
+			if (bCanApplyDelta)
 			{
-				Viewport->ApplyDeltaToActor(GroupActors[ActorIndex], InDrag, InRot, InScale);
+				InCallback(Actor, this);
 			}
 		}
 	}
-	for(int32 SubGroupIndex=0; SubGroupIndex<SubGroups.Num(); ++SubGroupIndex)
+	for (AGroupActor* SubGroup : SubGroups)
 	{
-		if( SubGroups[SubGroupIndex] != NULL )
+		if (SubGroup)
 		{
-			SubGroups[SubGroupIndex]->GroupApplyDelta(Viewport, InDrag, InRot, InScale);
+			SubGroup->ForEachMovableActorInGroup(SelectionSet, InCallback);
 		}
 	}
-	Viewport->ApplyDeltaToActor(this, InDrag, InRot, InScale);
+	InCallback(this, this);
 }
 
 void AGroupActor::GroupApplyDelta(const FVector& InDrag, const FRotator& InRot, const FVector& InScale )
 {
-	for(int32 ActorIndex=0; ActorIndex<GroupActors.Num(); ++ActorIndex)
+	ForEachMovableActorInGroup(nullptr, [&InDrag, &InRot, &InScale](AActor* InGroupedActor, AGroupActor* InGroupActor)
 	{
-		if (GroupActors[ActorIndex] != NULL)
-		{
-			// Check that we've not got a parent attachment within the group/selection
-			const bool bCanApplyDelta = !ActorHasParentInGroup(GroupActors, GroupActors[ActorIndex]) && !ActorHasParentInSelection(GroupActors[ActorIndex]);
-			if(bCanApplyDelta)
-			{
-				GEditor->ApplyDeltaToActor(GroupActors[ActorIndex], true, &InDrag, &InRot, &InScale);
-			}
-		}
-	}
-	for(int32 SubGroupIndex=0; SubGroupIndex<SubGroups.Num(); ++SubGroupIndex)
-	{
-		if( SubGroups[SubGroupIndex] != NULL )
-		{
-			SubGroups[SubGroupIndex]->GroupApplyDelta(InDrag, InRot, InScale);
-		}
-	}
-	GEditor->ApplyDeltaToActor(this, true, &InDrag, &InRot, &InScale);
-}
-
-bool AGroupActor::Modify(bool bAlwaysMarkDirty/*=true*/)
-{
-	bool bSavedToTransactionBuffer = false;
-	for(int32 ActorIndex=0; ActorIndex<GroupActors.Num(); ++ActorIndex)
-	{
-		if( GroupActors[ActorIndex] != NULL )
-		{
-			bSavedToTransactionBuffer = GroupActors[ActorIndex]->Modify(bAlwaysMarkDirty) || bSavedToTransactionBuffer;
-		}
-	}
-	for(int32 SubGroupIndex=0; SubGroupIndex<SubGroups.Num(); ++SubGroupIndex)
-	{
-		if( SubGroups[SubGroupIndex] != NULL )
-		{
-			bSavedToTransactionBuffer = SubGroups[SubGroupIndex]->Modify(bAlwaysMarkDirty) || bSavedToTransactionBuffer;
-		}
-	}
-	bSavedToTransactionBuffer = Super::Modify(bAlwaysMarkDirty) || bSavedToTransactionBuffer;
-	return  bSavedToTransactionBuffer;
-}
-
-void AGroupActor::InvalidateLightingCacheDetailed(bool bTranslationOnly)
-{
-	for(int32 ActorIndex=0; ActorIndex<GroupActors.Num(); ++ActorIndex)
-	{
-		if( GroupActors[ActorIndex] != NULL )
-		{
-			GroupActors[ActorIndex]->InvalidateLightingCacheDetailed(bTranslationOnly);
-		}
-	}
-	for(int32 SubGroupIndex=0; SubGroupIndex<SubGroups.Num(); ++SubGroupIndex)
-	{
-		if( SubGroups[SubGroupIndex] != NULL )
-		{
-			SubGroups[SubGroupIndex]->InvalidateLightingCacheDetailed(bTranslationOnly);
-		}
-	}
-	Super::InvalidateLightingCacheDetailed(bTranslationOnly);
-}
-
-void AGroupActor::PostEditMove(bool bFinished)
-{
-	for(int32 ActorIndex=0; ActorIndex<GroupActors.Num(); ++ActorIndex)
-	{
-		if( GroupActors[ActorIndex] != NULL )
-		{
-			GroupActors[ActorIndex]->PostEditMove(bFinished);
-		}
-	}
-	for(int32 SubGroupIndex=0; SubGroupIndex<SubGroups.Num(); ++SubGroupIndex)
-	{
-		if( SubGroups[SubGroupIndex] != NULL )
-		{
-			SubGroups[SubGroupIndex]->PostEditMove(bFinished);
-		}
-	}
-	Super::PostEditMove(bFinished);
+		GEditor->ApplyDeltaToActor(InGroupActor, true, &InDrag, &InRot, &InScale);
+	});
 }
 
 void AGroupActor::SetIsTemporarilyHiddenInEditor( bool bIsHidden )
@@ -266,6 +218,62 @@ void AGroupActor::SetIsTemporarilyHiddenInEditor( bool bIsHidden )
 	}
 }
 
+void AGroupActor::GetActorBounds(bool bOnlyCollidingComponents, FVector& Origin, FVector& BoxExtent, bool bIncludeFromChildActors) const
+{
+	FBox Bounds = GetComponentsBoundingBox(!bOnlyCollidingComponents);;
+
+	for(int32 ActorIndex=0; ActorIndex<GroupActors.Num(); ++ActorIndex)
+	{
+		if( GroupActors[ActorIndex] != NULL )
+		{
+			FVector ActorOrigin;
+			FVector ActorBoxExtent;
+			GroupActors[ActorIndex]->GetActorBounds(bOnlyCollidingComponents, ActorOrigin, ActorBoxExtent, bIncludeFromChildActors);
+
+			Bounds += FBox(ActorOrigin - ActorBoxExtent, ActorOrigin + ActorBoxExtent);
+		}
+	}
+
+	for(int32 SubGroupIndex=0; SubGroupIndex<SubGroups.Num(); ++SubGroupIndex)
+	{
+		if( SubGroups[SubGroupIndex] != NULL )
+		{
+			FVector SubGroupOrigin;
+			FVector SubGroupBoxExtent;
+			SubGroups[SubGroupIndex]->GetActorBounds(bOnlyCollidingComponents, SubGroupOrigin, SubGroupBoxExtent, bIncludeFromChildActors);
+
+			Bounds += FBox(SubGroupOrigin - SubGroupBoxExtent, SubGroupOrigin + SubGroupBoxExtent);
+		}
+	}
+
+	// To keep consistency with the other GetBounds functions, transform our result into an origin / extent formatting
+	Bounds.GetCenterAndExtents(Origin, BoxExtent);
+}
+
+#if WITH_EDITOR
+FBox AGroupActor::GetStreamingBounds() const
+{
+	FBox StreamingBounds = Super::GetStreamingBounds();
+
+	for (AActor* Actor : GroupActors)
+	{
+		if (Actor)
+		{
+			StreamingBounds += Actor->GetStreamingBounds();
+		}
+	}
+
+	for (AGroupActor* SubGroupActor : SubGroups)
+	{
+		if (SubGroupActor)
+		{
+			StreamingBounds += SubGroupActor->GetStreamingBounds();
+		}
+	}
+
+	return StreamingBounds;
+}
+#endif
 
 void GetBoundingVectorsForGroup(AGroupActor* GroupActor, FViewport* Viewport, FVector& OutVectorMin, FVector& OutVectorMax)
 {
@@ -300,27 +308,16 @@ void GetBoundingVectorsForGroup(AGroupActor* GroupActor, FViewport* Viewport, FV
 
 			if(!bActorHiddenForViewport)
 			{
-				FBox ActorBox;
-
-				// First check to see if we're dealing with a sprite, otherwise just use the normal bounding box
-				UBillboardComponent* SpriteComponent = Actor->FindComponentByClass<UBillboardComponent>();
-				if(SpriteComponent != NULL)
-				{
-					ActorBox = SpriteComponent->Bounds.GetBox();
-				}
-				else
-				{
-					ActorBox = Actor->GetComponentsBoundingBox( true );
-				}
+				FBox ActorBox = Actor->GetComponentsBoundingBox( true );
 
 				// MinVector
-				OutVectorMin.X = FMath::Min<float>( ActorBox.Min.X, OutVectorMin.X );
-				OutVectorMin.Y = FMath::Min<float>( ActorBox.Min.Y, OutVectorMin.Y );
-				OutVectorMin.Z = FMath::Min<float>( ActorBox.Min.Z, OutVectorMin.Z );
+				OutVectorMin.X = FMath::Min<FVector::FReal>( ActorBox.Min.X, OutVectorMin.X );
+				OutVectorMin.Y = FMath::Min<FVector::FReal>( ActorBox.Min.Y, OutVectorMin.Y );
+				OutVectorMin.Z = FMath::Min<FVector::FReal>( ActorBox.Min.Z, OutVectorMin.Z );
 				// MaxVector
-				OutVectorMax.X = FMath::Max<float>( ActorBox.Max.X, OutVectorMax.X );
-				OutVectorMax.Y = FMath::Max<float>( ActorBox.Max.Y, OutVectorMax.Y );
-				OutVectorMax.Z = FMath::Max<float>( ActorBox.Max.Z, OutVectorMax.Z );
+				OutVectorMax.X = FMath::Max<FVector::FReal>( ActorBox.Max.X, OutVectorMax.X );
+				OutVectorMax.Y = FMath::Max<FVector::FReal>( ActorBox.Max.Y, OutVectorMax.Y );
+				OutVectorMax.Z = FMath::Max<FVector::FReal>( ActorBox.Max.Z, OutVectorMax.Z );
 			}
 		}
 	}	
@@ -554,8 +551,8 @@ void AGroupActor::AddSelectedActorsToSelectedGroup()
 			}
 		}
 
-		AGroupActor* SelectedGroup = Cast<AGroupActor>(EditorWorld->ActiveGroupActors[SelectedGroupIndex]);
-		if( SelectedGroupIndex != -1 && SelectedGroup != NULL )
+		AGroupActor* SelectedGroup = SelectedGroupIndex != -1 ? Cast<AGroupActor>(EditorWorld->ActiveGroupActors[SelectedGroupIndex]) : nullptr;
+		if( SelectedGroup != nullptr )
 		{
 			ULevel* GroupLevel = SelectedGroup->GetLevel();
 
@@ -594,6 +591,7 @@ void AGroupActor::AddSelectedActorsToSelectedGroup()
 					}
 
 					SelectedGroup->CenterGroupLocation();
+					SelectedGroup->SetActorRotation(ActorsToAdd.Last()->GetActorRotation());
 				}
 			}
 			else
@@ -688,17 +686,13 @@ void AGroupActor::UnlockSelectedGroups()
 
 void AGroupActor::ToggleGroupMode()
 {
-	// Group mode can only be toggled when not in InterpEdit mode
-	if( !GLevelEditorModeTools().IsModeActive(FBuiltinEditorModes::EM_InterpEdit) )
-	{
-		UActorGroupingUtils::SetGroupingActive(!UActorGroupingUtils::IsGroupingActive());
+	UActorGroupingUtils::SetGroupingActive(!UActorGroupingUtils::IsGroupingActive());
 
-		// Update group selection in the editor to reflect the toggle
-		SelectGroupsInSelection();
-		GEditor->RedrawAllViewports();
+	// Update group selection in the editor to reflect the toggle
+	SelectGroupsInSelection();
+	GEditor->RedrawAllViewports();
 
-		GEditor->SaveConfig();
-	}
+	GEditor->SaveConfig();
 }
 
 
@@ -826,6 +820,7 @@ void AGroupActor::PostRemove()
 				FScopedRefreshAllBrowsers LevelRefreshAllBrowsers;
 
 				// Destroy group and clear references.
+				GEditor->SelectActor( this, /*bSelected=*/ false, /*bNotify=*/ false );
 				ULayersSubsystem* LayersSubsystem = GEditor->GetEditorSubsystem<ULayersSubsystem>();
 				LayersSubsystem->DisassociateActorFromLayers( this );
 				MyWorld->EditorDestroyActor( this, false );			
@@ -991,5 +986,68 @@ int32 AGroupActor::GetActorNum() const
 	return GroupActors.Num();
 }
 
+namespace UE::Editor::GroupActorUtil
+{
+	TArray<AGroupActor*> GetSelectedGroupActors(TArray<TObjectPtr<AActor>> ActiveGroupActors)
+	{
+		TArray<AGroupActor*> Result;
+		for (const TObjectPtr<AActor>& Actor : ActiveGroupActors)
+		{
+			if (AGroupActor* SelectedGroup = Cast<AGroupActor>(Actor))
+			{
+				if (SelectedGroup->IsSelected())
+				{
+					Result.Add(SelectedGroup);
+				}
+			}
+		}
+		return Result;
+	}
+}
 
+bool AGroupActor::SelectedGroupNeedsFixup()
+{
+	if (UWorld* EditorWorld = GEditor->GetEditorWorldContext().World())
+	{
+		TArray<AGroupActor*> SelectedGroupActors = UE::Editor::GroupActorUtil::GetSelectedGroupActors(EditorWorld->ActiveGroupActors);
+		if (!SelectedGroupActors.IsEmpty())
+		{
+			//check if there's at least 1 GroupActor contains a nullptr within it's list of Actors
+			return SelectedGroupActors.ContainsByPredicate([](const AGroupActor* SelectedGroupActor)
+				{
+					if (SelectedGroupActor)
+					{
+						return SelectedGroupActor->GroupActors.ContainsByPredicate([](const TObjectPtr<class AActor> Actor) { return Actor == nullptr; });
+					}
+					return false;
+				});
+		}
+	}
+	return false;
+} // namespace UE::Editor::GroupActorUtil
 
+void AGroupActor::FixupGroupActor()
+{
+	if (UWorld* EditorWorld = GEditor->GetEditorWorldContext().World())
+	{
+		TArray<AGroupActor*> SelectedGroupActors = UE::Editor::GroupActorUtil::GetSelectedGroupActors(EditorWorld->ActiveGroupActors);
+		if (!SelectedGroupActors.IsEmpty())
+		{
+			for (AGroupActor* SelectedGroupActor : SelectedGroupActors)
+			{
+				if (SelectedGroupActor && SelectedGroupActor->GroupActors.ContainsByPredicate([](const TObjectPtr<class AActor> Actor) { return Actor == nullptr; }))
+				{
+					//remove all nullptr entries in the GroupActors array.
+					SelectedGroupActor->Modify();
+					SelectedGroupActor->GroupActors.RemoveAll([](const TObjectPtr<class AActor> Actor) { return Actor == nullptr; });
+					SelectedGroupActor->GroupActors.Shrink();
+
+					if (SelectedGroupActor->GroupActors.IsEmpty())
+					{
+						SelectedGroupActor->PostRemove();
+					}
+				}
+			}
+		}
+	}
+}

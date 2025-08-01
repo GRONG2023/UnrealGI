@@ -15,10 +15,10 @@
 #include "LocalVertexFactory.h"
 
 BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FGeometryCacheVertexFactoryUniformBufferParameters, ENGINE_API)
-	SHADER_PARAMETER(FVector, MeshOrigin)
-	SHADER_PARAMETER(FVector, MeshExtension)
-	SHADER_PARAMETER(FVector, MotionBlurDataOrigin)
-	SHADER_PARAMETER(FVector, MotionBlurDataExtension)
+	SHADER_PARAMETER(FVector3f, MeshOrigin)
+	SHADER_PARAMETER(FVector3f, MeshExtension)
+	SHADER_PARAMETER(FVector3f, MotionBlurDataOrigin)
+	SHADER_PARAMETER(FVector3f, MotionBlurDataExtension)
 	SHADER_PARAMETER(float, MotionBlurPositionScale)
 END_GLOBAL_SHADER_PARAMETER_STRUCT()
 
@@ -44,12 +44,12 @@ struct FGeometryCacheVertexFactoryUserData
 	const FVertexBuffer* MotionBlurDataBuffer;
 
 	// Gpu vertex decompression parameters
-	FVector MeshOrigin;
-	FVector MeshExtension;
+	FVector3f MeshOrigin;
+	FVector3f MeshExtension;
 
 	// Motion blur parameters
-	FVector MotionBlurDataOrigin;
-	FVector MotionBlurDataExtension;
+	FVector3f MotionBlurDataOrigin;
+	FVector3f MotionBlurDataExtension;
 	float MotionBlurPositionScale;
 
 	FGeometryCacheVertexFactoryUniformBufferParametersRef UniformBuffer;
@@ -70,9 +70,9 @@ class FGeometryCacheVertexFactoryShaderParameters;
  * Vertex factory for geometry caches. Allows specifying explicit motion blur data as
  * previous frames or motion vectors.
  */
-class ENGINE_API FGeometryCacheVertexVertexFactory : public FVertexFactory
+class FGeometryCacheVertexVertexFactory : public FVertexFactory
 {
-	DECLARE_VERTEX_FACTORY_TYPE(FGeometryCacheVertexVertexFactory);
+	DECLARE_VERTEX_FACTORY_TYPE_API(FGeometryCacheVertexVertexFactory, ENGINE_API);
 
 	typedef FVertexFactory Super;
 
@@ -99,22 +99,30 @@ public:
 		FVertexStreamComponent MotionBlurDataComponent;
 	};
 
-	static bool SupportsTessellationShaders() { return true; }
-
-	static void ModifyCompilationEnvironment(const FVertexFactoryShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
-	static bool ShouldCompilePermutation(const FVertexFactoryShaderPermutationParameters& Parameters);
+	static ENGINE_API void ModifyCompilationEnvironment(const FVertexFactoryShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+	static ENGINE_API bool ShouldCompilePermutation(const FVertexFactoryShaderPermutationParameters& Parameters);
 
 	/**
 	* An implementation of the interface used by TSynchronizedResource to update the resource with new data from the game thread.
 	*/
-	void SetData(const FDataType& InData);
+	UE_DEPRECATED(5.4, "SetData requires an RHI command list.")
+	ENGINE_API void SetData(const FDataType& InData);
 
-	void CreateManualVertexFetchUniformBuffer(
+	ENGINE_API void SetData(FRHICommandListBase& RHICmdList, const FDataType& InData);
+
+	UE_DEPRECATED(5.3, "CreateManualVertexFetchUniformBuffer requires a command list.")
+	ENGINE_API void CreateManualVertexFetchUniformBuffer(
 		const FVertexBuffer* PoistionBuffer,
 		const FVertexBuffer* MotionBlurBuffer,
 		FGeometryCacheVertexFactoryUserData& OutUserData) const;
 
-	virtual void InitRHI() override;
+	ENGINE_API void CreateManualVertexFetchUniformBuffer(
+		FRHICommandListBase& RHICmdList,
+		const FVertexBuffer* PoistionBuffer,
+		const FVertexBuffer* MotionBlurBuffer,
+		FGeometryCacheVertexFactoryUserData& OutUserData) const;
+
+	ENGINE_API virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 
 	friend FGeometryCacheVertexFactoryShaderParameters;
 	

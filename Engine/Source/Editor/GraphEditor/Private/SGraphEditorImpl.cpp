@@ -1,29 +1,69 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SGraphEditorImpl.h"
-#include "GraphEditAction.h"
+
+#include "Containers/EnumAsByte.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "EdGraph/EdGraph.h"
-#include "Modules/ModuleManager.h"
-#include "Widgets/SBoxPanel.h"
-#include "Framework/Application/SlateApplication.h"
-#include "Widgets/Layout/SBorder.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Framework/MultiBox/MultiBoxExtender.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "ToolMenus.h"
-#include "EditorStyleSet.h"
 #include "Editor.h"
-#include "GraphEditorModule.h"
-#include "SGraphPanel.h"
+#include "Editor/EditorEngine.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandInfo.h"
+#include "Framework/Commands/UICommandList.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Framework/MultiBox/MultiBoxExtender.h"
+#include "GenericPlatform/GenericApplication.h"
+#include "GraphEditAction.h"
 #include "GraphEditorActions.h"
-#include "ScopedTransaction.h"
-#include "SGraphEditorActionMenu.h"
-#include "Widgets/Notifications/SNotificationList.h"
-#include "Widgets/Input/SMultiLineEditableTextBox.h"
+#include "GraphEditorModule.h"
 #include "GraphEditorSettings.h"
-#include "Toolkits/AssetEditorToolkitMenuContext.h"
+#include "Input/Events.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Layout/SlateRect.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/CString.h"
+#include "Modules/ModuleManager.h"
+#include "SGraphEditorActionMenu.h"
+#include "SGraphPanel.h"
+#include "SNodePanel.h"
+#include "ScopedTransaction.h"
+#include "SlateGlobals.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/CoreStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Textures/SlateIcon.h"
+#include "ToolMenu.h"
+#include "ToolMenuContext.h"
+#include "ToolMenuDelegates.h"
+#include "ToolMenuEntry.h"
+#include "ToolMenuMisc.h"
+#include "ToolMenuSection.h"
+#include "ToolMenus.h"
 #include "Toolkits/AssetEditorToolkit.h"
-#include "EdGraphSchema_K2.h"
+#include "Toolkits/AssetEditorToolkitMenuContext.h"
+#include "UObject/Class.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/Input/SMultiLineEditableTextBox.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Notifications/SNotificationList.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/SNullWidget.h"
+#include "Widgets/SWidget.h"
+#include "Widgets/Text/STextBlock.h"
+
+class FActiveTimerHandle;
+struct FGeometry;
+struct FSlateBrush;
 
 #define LOCTEXT_NAMESPACE "GraphEditorModule"
 
@@ -138,37 +178,15 @@ FReply SGraphEditorImpl::OnKeyDown( const FGeometry& MyGeometry, const FKeyEvent
 
 void SGraphEditorImpl::NotifyGraphChanged()
 {
-	FEdGraphEditAction DefaultAction;
-	OnGraphChanged(DefaultAction);
+	GetCurrentGraph()->NotifyGraphChanged();
 }
 
 void SGraphEditorImpl::OnGraphChanged(const FEdGraphEditAction& InAction)
 {
-	if ( !bIsActiveTimerRegistered )
+	const bool bWasAddAction = (InAction.Action & GRAPHACTION_AddNode) != 0;
+	if (bWasAddAction)
 	{
-		const UEdGraphSchema* Schema = EdGraphObj->GetSchema();
-		const bool bSchemaRequiresFullRefresh = Schema->ShouldAlwaysPurgeOnModification();
-
-		const bool bWasAddAction = (InAction.Action & GRAPHACTION_AddNode) != 0;
-		const bool bWasSelectAction = (InAction.Action & GRAPHACTION_SelectNode) != 0;
-		const bool bWasRemoveAction = (InAction.Action & GRAPHACTION_RemoveNode) != 0;
-
-		// If we did a 'default action' (or some other action not handled by SGraphPanel::OnGraphChanged
-		// or if we're using a schema that always needs a full refresh, then purge the current nodes
-		// and queue an update:
-		if (bSchemaRequiresFullRefresh || 
-			(!bWasAddAction && !bWasSelectAction && !bWasRemoveAction) )
-		{
-			GraphPanel->PurgeVisualRepresentation();
-			// Trigger the refresh
-			bIsActiveTimerRegistered = true;
-			RegisterActiveTimer(0.f, FWidgetActiveTimerDelegate::CreateSP(this, &SGraphEditorImpl::TriggerRefresh));
-		}
-
-		if (bWasAddAction)
-		{
-			NumNodesAddedSinceLastPointerPosition++;
-		}
+		NumNodesAddedSinceLastPointerPosition++;
 	}
 }
 
@@ -269,8 +287,8 @@ void SGraphEditorImpl::GetPinContextMenuActionsForSchema(UToolMenu* InMenu) cons
 				UGraphNodeContextMenuContext* NodeContext = InToolMenu->FindContext<UGraphNodeContextMenuContext>();
 				if (NodeContext && NodeContext->Pin)
 				{
-					FText SingleDescFormat = LOCTEXT("BreakDesc", "Break link to {NodeTitle}");
-					FText MultiDescFormat = LOCTEXT("BreakDescMulti", "Break link to {NodeTitle} ({NumberOfNodes})");
+					FText SingleDescFormat = LOCTEXT("BreakDesc", "Break Link to {NodeTitle}");
+					FText MultiDescFormat = LOCTEXT("BreakDescMulti", "Break Link to {NodeTitle} ({NumberOfNodes})");
 
 					TMap< FString, uint32 > LinkTitleCount;
 					for (UEdGraphPin* TargetPin : NodeContext->Pin->LinkedTo)
@@ -289,6 +307,22 @@ void SGraphEditorImpl::GetPinContextMenuActionsForSchema(UToolMenu* InMenu) cons
 			}),
 			BreakLinksMenuVisibility,
 			EUserInterfaceActionType::Button);
+
+		// Break This Link
+		{
+			FToolUIAction BreakThisLinkAction;
+			BreakThisLinkAction.ExecuteAction = FToolMenuExecuteAction::CreateSP(this, &SGraphEditorImpl::ExecuteBreakPinLinks);
+			BreakThisLinkAction.IsActionVisibleDelegate = FToolMenuIsActionButtonVisible::CreateSP(this, &SGraphEditorImpl::IsBreakThisLinkVisible);
+
+			TSharedPtr<FUICommandInfo> BreakThisLinkCommand = FGraphEditorCommands::Get().BreakThisLink;
+			Section.AddMenuEntry(
+				BreakThisLinkCommand->GetCommandName(),
+				BreakThisLinkCommand->GetLabel(),
+				BreakThisLinkCommand->GetDescription(),
+				BreakThisLinkCommand->GetIcon(),
+				BreakThisLinkAction
+			);
+		}
 	}
 
 	FToolUIAction PinActionSubMenuVisibiliity;
@@ -297,7 +331,7 @@ void SGraphEditorImpl::GetPinContextMenuActionsForSchema(UToolMenu* InMenu) cons
 	// Jump to specific connections
 	{
 		Section.AddSubMenu("JumpToConnection",
-			LOCTEXT("JumpToConnection", "Jump To Connection..."),
+			LOCTEXT("JumpToConnection", "Jump to Connection..."),
 			LOCTEXT("JumpToSpecificConnection", "Jump to specific connection..."),
 			FNewToolMenuDelegate::CreateLambda([this, GetMenuEntryForPin](UToolMenu* InToolMenu)
 			{
@@ -356,7 +390,7 @@ void SGraphEditorImpl::GetPinContextMenuActionsForSchema(UToolMenu* InMenu) cons
 
 				// Add individual pin connections
 				FText SingleDescFormat = LOCTEXT("StraightenDesc", "Straighten Connection to {NodeTitle}");
-				FText MultiDescFormat = LOCTEXT("StraightenDescMulti", "Straigten Connection to {NodeTitle} ({NumberOfNodes})");
+				FText MultiDescFormat = LOCTEXT("StraightenDescMulti", "Straighten Connection to {NodeTitle} ({NumberOfNodes})");
 				TMap< FString, uint32 > LinkTitleCount;
 				for (UEdGraphPin* TargetPin : NodeContext->Pin->LinkedTo)
 				{
@@ -400,7 +434,18 @@ bool SGraphEditorImpl::IsBreakPinLinksVisible(const FToolMenuContext& InContext)
 	UGraphNodeContextMenuContext* NodeContext = InContext.FindContext<UGraphNodeContextMenuContext>();
 	if (NodeContext && NodeContext->Pin)
 	{
-		return !NodeContext->bIsDebugging && (NodeContext->Pin->LinkedTo.Num() > 0);
+		return !NodeContext->bIsDebugging && (NodeContext->Pin->LinkedTo.Num() > 1);
+	}
+
+	return false;
+}
+
+bool SGraphEditorImpl::IsBreakThisLinkVisible(const FToolMenuContext& InContext) const
+{
+	UGraphNodeContextMenuContext* NodeContext = InContext.FindContext<UGraphNodeContextMenuContext>();
+	if (NodeContext && NodeContext->Pin)
+	{
+		return !NodeContext->bIsDebugging && (NodeContext->Pin->LinkedTo.Num() == 1);
 	}
 
 	return false;
@@ -585,7 +630,6 @@ void SGraphEditorImpl::Construct( const FArguments& InArgs )
 	OnNavigateHistoryForward = InArgs._OnNavigateHistoryForward;
 	OnNodeSpawnedByKeymap = InArgs._GraphEvents.OnNodeSpawnedByKeymap;
 
-	bIsActiveTimerRegistered = false;
 	NumNodesAddedSinceLastPointerPosition = 0;
 
 	// Make sure that the editor knows about what kinds
@@ -643,6 +687,12 @@ void SGraphEditorImpl::Construct( const FArguments& InArgs )
 			FText OverrideText = Appearance.Get().ReadOnlyText;
 			return !OverrideText.IsEmpty() ? OverrideText : DefaultText;
 		}
+
+		static FText GetWarningText(TAttribute<FGraphAppearanceInfo> Appearance, FText DefaultText)
+		{
+			FText OverrideText = Appearance.Get().WarningText;
+			return !OverrideText.IsEmpty() ? OverrideText : DefaultText;
+		}
 	};
 	
 	FText DefaultPIENotify(LOCTEXT("GraphSimulatingText", "SIMULATING"));
@@ -654,6 +704,11 @@ void SGraphEditorImpl::Construct( const FArguments& InArgs )
 	TAttribute<FText> ReadOnlyText = Appearance.IsBound() ?
 		TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateStatic(&Local::GetReadOnlyText, Appearance, DefaultReadOnlyText)) :
 		TAttribute<FText>(DefaultReadOnlyText);
+
+	FText DefaultWarningText(LOCTEXT("GraphWarningText", ""));
+	TAttribute<FText> WarningText = Appearance.IsBound() ?
+		TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateStatic(&Local::GetWarningText, Appearance, DefaultWarningText)) :
+		TAttribute<FText>(DefaultWarningText);
 
 	TSharedPtr<SOverlay> OverlayWidget;
 
@@ -667,7 +722,8 @@ void SGraphEditorImpl::Construct( const FArguments& InArgs )
 		[
 			SAssignNew(GraphPanel, SGraphPanel)
 			.GraphObj( EdGraphObj )
-			.GraphObjToDiff( InArgs._GraphToDiff)
+			.DiffResults( InArgs._DiffResults)
+			.FocusedDiffResult( InArgs._FocusedDiffResult)
 			.OnGetContextMenuFor( this, &SGraphEditorImpl::GraphEd_OnGetContextMenuFor )
 			.OnSelectionChanged( InArgs._GraphEvents.OnSelectionChanged )
 			.OnNodeDoubleClicked( InArgs._GraphEvents.OnNodeDoubleClicked )
@@ -681,6 +737,9 @@ void SGraphEditorImpl::Construct( const FArguments& InArgs )
 			//.OnUpdateGraphPanel( this, &SGraphEditorImpl::GraphEd_OnPanelUpdated )
 			.OnDisallowedPinConnection( InArgs._GraphEvents.OnDisallowedPinConnection )
 			.ShowGraphStateOverlay(InArgs._ShowGraphStateOverlay)
+			.OnDoubleClicked(InArgs._GraphEvents.OnDoubleClicked)
+			.OnMouseButtonDown(InArgs._GraphEvents.OnMouseButtonDown)
+		    .OnNodeSingleClicked(InArgs._GraphEvents.OnNodeSingleClicked)
 		]
 
 		// Indicator of current zoom level
@@ -690,7 +749,7 @@ void SGraphEditorImpl::Construct( const FArguments& InArgs )
 		.HAlign(HAlign_Right)
 		[
 			SNew(STextBlock)
-			.TextStyle( FEditorStyle::Get(), "Graph.ZoomText" )
+			.TextStyle( FAppStyle::Get(), "Graph.ZoomText" )
 			.Text( this, &SGraphEditorImpl::GetZoomText )
 			.ColorAndOpacity( this, &SGraphEditorImpl::GetZoomTextColorAndOpacity )
 		]
@@ -712,17 +771,29 @@ void SGraphEditorImpl::Construct( const FArguments& InArgs )
 			[
 				SNew(SBorder)
 				.Padding(FMargin(10.f, 4.f))
-				.BorderImage(FEditorStyle::GetBrush(TEXT("Graph.InstructionBackground")))
+				.BorderImage(FAppStyle::GetBrush(TEXT("Graph.InstructionBackground")))
 				.BorderBackgroundColor(this, &SGraphEditorImpl::InstructionBorderColor)
 				.HAlign(HAlign_Center)
 				.ColorAndOpacity(this, &SGraphEditorImpl::InstructionTextTint)
 				.Visibility(this, &SGraphEditorImpl::InstructionTextVisibility)
 				[
 					SNew(STextBlock)
-					.TextStyle(FEditorStyle::Get(), "Graph.InstructionText")
+					.TextStyle(FAppStyle::Get(), "Graph.InstructionText")
 					.Text(this, &SGraphEditorImpl::GetInstructionText)
 				]
 			]			
+		]
+
+		// Bottom-left corner text for Substrate
+		+SOverlay::Slot()
+		.Padding(10)
+		.VAlign(VAlign_Bottom)
+		.HAlign(HAlign_Left)
+		[
+			SNew(STextBlock)
+			.Visibility(EVisibility::Visible)
+			.TextStyle(FAppStyle::Get(), "Graph.WarningText")
+			.Text(WarningText)
 		]
 
 		// Bottom-right corner text indicating the type of tool
@@ -733,7 +804,7 @@ void SGraphEditorImpl::Construct( const FArguments& InArgs )
 		[
 			SNew(STextBlock)
 			.Visibility( EVisibility::HitTestInvisible )
-			.TextStyle( FEditorStyle::Get(), "Graph.CornerText" )
+			.TextStyle( FAppStyle::Get(), "Graph.CornerText" )
 			.Text(Appearance.Get().CornerText)
 		]
 
@@ -745,7 +816,7 @@ void SGraphEditorImpl::Construct( const FArguments& InArgs )
 		[
 			SNew(STextBlock)
 			.Visibility(this, &SGraphEditorImpl::PIENotification)
-			.TextStyle( FEditorStyle::Get(), "Graph.SimulatingText" )
+			.TextStyle( FAppStyle::Get(), "Graph.SimulatingText" )
 			.Text( PIENotifyText )
 		]
 
@@ -757,7 +828,7 @@ void SGraphEditorImpl::Construct( const FArguments& InArgs )
 		[
 			SNew(STextBlock)
 			.Visibility(this, &SGraphEditorImpl::ReadOnlyVisibility)
-			.TextStyle(FEditorStyle::Get(), "Graph.CornerText")
+			.TextStyle(FAppStyle::Get(), "Graph.CornerText")
 			.Text(ReadOnlyText)
 		]
 
@@ -788,6 +859,10 @@ EVisibility SGraphEditorImpl::PIENotification( ) const
 	
 SGraphEditorImpl::~SGraphEditorImpl()
 {
+	if (FocusEditorTimer.IsValid())
+	{
+		UnRegisterActiveTimer(FocusEditorTimer.Pin().ToSharedRef());
+	}
 }
 
 void SGraphEditorImpl::Tick( const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime )
@@ -807,14 +882,6 @@ void SGraphEditorImpl::Tick( const FGeometry& AllottedGeometry, const double InC
 			FocusLockedEditorHere();
 		}
 	}
-}
-
-EActiveTimerReturnType SGraphEditorImpl::TriggerRefresh( double InCurrentTime, float InDeltaTime )
-{
-	GraphPanel->Update();
-
-	bIsActiveTimerRegistered = false;
-	return EActiveTimerReturnType::Stop;
 }
 
 void SGraphEditorImpl::OnClosedActionMenu()
@@ -895,7 +962,7 @@ void SGraphEditorImpl::AddContextMenuCommentSection(UToolMenu* InMenu)
 					FToolMenuSection& Section = InMenu->AddSection("GraphNodeComment", LOCTEXT("NodeCommentMenuHeader", "Node Comment"));
 					Section.AddEntry(FToolMenuEntry::InitWidget("NodeCommentBox", NodeCommentBox, FText::GetEmpty()));
 				}
-				TWeakObjectPtr<UEdGraphNode> SelectedNodeWeakPtr = MakeWeakObjectPtr(const_cast<UEdGraphNode*>(Context->Node));
+				TWeakObjectPtr<UEdGraphNode> SelectedNodeWeakPtr = MakeWeakObjectPtr(const_cast<UEdGraphNode*>(ToRawPtr(Context->Node)));
 
 				FText NodeCommentText;
 				if (UEdGraphNode* SelectedNode = SelectedNodeWeakPtr.Get())
@@ -909,6 +976,8 @@ void SGraphEditorImpl::AddContextMenuCommentSection(UToolMenu* InMenu)
 				NodeCommentBox->AddSlot()
 					.VAlign(VAlign_Center)
 					.FillWidth(1.0f)
+					.MaxWidth(250.0f)
+					.Padding(FMargin(10.0f, 0.0f))
 					[
 						SNew(SMultiLineEditableTextBox)
 						.Text(NodeCommentText)
@@ -916,6 +985,7 @@ void SGraphEditorImpl::AddContextMenuCommentSection(UToolMenu* InMenu)
 						.OnTextCommitted_Static(&Local::OnNodeCommentTextCommitted, SelectedNodeWeakPtr)
 						.SelectAllTextWhenFocused(true)
 						.RevertTextOnEscape(true)
+						.AutoWrapText(true)						
 						.ModiferKeyForNewLine(EModifierKey::Control)
 					];
 			}
@@ -943,7 +1013,7 @@ void SGraphEditorImpl::AddContextMenuCommentSection(UToolMenu* InMenu)
 					LOCTEXT("MultiCommentDesc", "Create Comment from Selection"),
 					LOCTEXT("CommentToolTip", "Create a resizable comment box around selection."),
 					FSlateIcon(),
-					FExecuteAction::CreateStatic(SCommentUtility::CreateComment, GraphSchema, const_cast<UEdGraph*>(Context->Graph)
+					FExecuteAction::CreateStatic(SCommentUtility::CreateComment, GraphSchema, const_cast<UEdGraph*>(ToRawPtr(Context->Graph))
 				));
 			}
 		}
@@ -1060,7 +1130,7 @@ void SGraphEditorImpl::RegisterContextMenu(const UEdGraphSchema* Schema, FToolMe
 		Menu->AddDynamicSection("EdGraphSchemaPinActions", FNewToolMenuDelegate::CreateLambda([](UToolMenu* InMenu)
 			{
 				UGraphNodeContextMenuContext* NodeContext = InMenu->FindContext<UGraphNodeContextMenuContext>();
-				if (NodeContext && NodeContext->Graph)
+				if (NodeContext && NodeContext->Graph && NodeContext->Pin)
 				{
 					if (TSharedPtr<SGraphEditorImpl> GraphEditor = StaticCastSharedPtr<SGraphEditorImpl>(FindGraphEditorForGraph(NodeContext->Graph)))
 					{
@@ -1167,6 +1237,11 @@ FActionMenuContent SGraphEditorImpl::GraphEd_OnGetContextMenuFor(const FGraphCon
 				UAssetEditorToolkitMenuContext* ToolkitMenuContext = NewObject<UAssetEditorToolkitMenuContext>();
 				ToolkitMenuContext->Toolkit = AssetEditorToolkit;
 				Context.AddObject(ToolkitMenuContext);
+
+				if (TSharedPtr<FAssetEditorToolkit> SharedToolKit = AssetEditorToolkit.Pin())
+				{
+					SharedToolKit->InitToolMenuContext(Context);
+				}
 
 				// Need to additionally pass through the asset toolkit to hook up those commands?
 
@@ -1381,20 +1456,63 @@ void SGraphEditorImpl::AddNotification( FNotificationInfo& Info, bool bSuccess )
 	}
 }
 
-void SGraphEditorImpl::FocusLockedEditorHere()
+EActiveTimerReturnType SGraphEditorImpl::HandleFocusEditorDeferred(double InCurrentTime, float InDeltaTime)
 {
+	
+	// If GraphPanel is going to pan to a target but hasn't yet, wait until it does so we don't miss it
+	if (GraphPanel->HasDeferredZoomDestination())
+	{
+		return EActiveTimerReturnType::Continue;
+	}
+	
 	for( int i = 0; i < LockedGraphs.Num(); ++i )
 	{
 		TSharedPtr<SGraphEditor> LockedGraph = LockedGraphs[i].Pin();
 		if (LockedGraph != TSharedPtr<SGraphEditor>())
 		{
-			LockedGraph->SetViewLocation(GraphPanel->GetViewOffset(), GraphPanel->GetZoomAmount());
+			// If the locked graph is going to pan to a target but hasn't yet, wait until it does so we don't miss it
+			if (LockedGraph->GetGraphPanel()->HasDeferredZoomDestination())
+			{
+				return EActiveTimerReturnType::Continue;
+			}
+
+			FVector2D TopLeft, BottomRight;
+
+			// If the locked graph was instructed to pan to a destination, let it ignore the lock to reach that destination.
+			// this way we can support diffs of moved nodes.
+			if (LockedGraph->GetGraphPanel()->GetZoomTargetRect(TopLeft, BottomRight))
+			{
+				continue;
+			}
+			
+			// Send the locked graph to the same place as this graph
+			if (GraphPanel->GetZoomTargetRect(TopLeft, BottomRight))
+			{
+				LockedGraph->GetGraphPanel()->JumpToRect(TopLeft, BottomRight);
+			}
+			else
+			{
+				LockedGraph->SetViewLocation(GraphPanel->GetViewOffset(), GraphPanel->GetZoomAmount());
+			}
 		}
 		else
 		{
 			LockedGraphs.RemoveAtSwap(i--);
 		}
 	}
+	return EActiveTimerReturnType::Stop;
+}
+
+void SGraphEditorImpl::FocusLockedEditorHere()
+{
+	if (!FocusEditorTimer.IsValid())
+	{
+		FocusEditorTimer = RegisterActiveTimer(
+		0.f,
+		FWidgetActiveTimerDelegate::CreateSP(this, &SGraphEditorImpl::HandleFocusEditorDeferred)
+		);
+	}
+	
 }
 
 void SGraphEditorImpl::SetPinVisibility( SGraphEditor::EPinVisibility InVisibility ) 
@@ -1529,7 +1647,7 @@ void SGraphEditorImpl::OnStraightenConnections()
 }
 
 /** Distribute the specified array of node data evenly */
-void DistributeNodes(TArray<FAlignmentData>& InData)
+void DistributeNodes(TArray<FAlignmentData>& InData, bool bIsHorizontal)
 {
 	// Sort the data
 	InData.Sort([](const FAlignmentData& A, const FAlignmentData& B) {
@@ -1549,14 +1667,50 @@ void DistributeNodes(TArray<FAlignmentData>& InData)
 	float TargetPosition = InData[0].GetTarget() + PaddingAmount;
 
 	// Now set all the properties on the target
-	for (int32 Index = 1; Index < InData.Num() - 1; ++Index)
+	if (InData.Num() > 1)
 	{
-		FAlignmentData& Entry = InData[Index];
+		UEdGraph* Graph = InData[0].Node->GetGraph();
+		if (Graph)
+		{
+			const UEdGraphSchema* Schema = Graph->GetSchema();
 
-		Entry.Node->Modify();
-		Entry.TargetProperty = TargetPosition;
+			// similar to FAlignmentHelper::Align(), first try using GraphSchema to move the nodes if applicable
+			if (Schema)
+			{
+				for (int32 Index = 1; Index < InData.Num() - 1; ++Index)
+				{
+					FAlignmentData& Entry = InData[Index];
 
-		TargetPosition = Entry.GetTarget() + PaddingAmount;
+					FVector2D Target2DPosition(Entry.Node->NodePosX, Entry.Node->NodePosY);
+ 
+					if (bIsHorizontal)
+					{
+						Target2DPosition.X = TargetPosition;
+					}
+					else
+					{ 
+						Target2DPosition.Y = TargetPosition;
+					}
+
+					Schema->SetNodePosition(Entry.Node, Target2DPosition);
+
+					TargetPosition = Entry.GetTarget() + PaddingAmount;
+				} 
+
+				return;
+			}
+		}
+
+		// fall back to the old approach if there isn't a schema
+		for (int32 Index = 1; Index < InData.Num() - 1; ++Index)
+		{
+			FAlignmentData& Entry = InData[Index];
+
+			Entry.Node->Modify();
+			Entry.TargetProperty = TargetPosition;
+
+			TargetPosition = Entry.GetTarget() + PaddingAmount;
+		}
 	}
 }
 
@@ -1574,7 +1728,7 @@ void SGraphEditorImpl::OnDistributeNodesH()
 	if (AlignData.Num() > 2)
 	{
 		const FScopedTransaction Transaction(FGraphEditorCommands::Get().DistributeNodesHorizontally->GetLabel());
-		DistributeNodes(AlignData);
+		DistributeNodes(AlignData, true);
 	}
 }
 
@@ -1592,7 +1746,7 @@ void SGraphEditorImpl::OnDistributeNodesV()
 	if (AlignData.Num() > 2)
 	{
 		const FScopedTransaction Transaction(FGraphEditorCommands::Get().DistributeNodesVertically->GetLabel());
-		DistributeNodes(AlignData);
+		DistributeNodes(AlignData, false);
 	}
 }
 
@@ -1605,6 +1759,11 @@ UEdGraphNode* SGraphEditorImpl::GetSingleSelectedNode() const
 {
 	const FGraphPanelSelectionSet SelectedNodes = GetSelectedNodes();
 	return (SelectedNodes.Num() == 1) ? Cast<UEdGraphNode>(*SelectedNodes.CreateConstIterator()) : nullptr;
+}
+
+SGraphPanel* SGraphEditorImpl::GetGraphPanel() const
+{
+	return GraphPanel.Get();
 }
 
 /////////////////////////////////////////////////////

@@ -11,7 +11,7 @@ namespace Chaos
 	 * be used to pass a tunable fraction of the world-space movement
 	 * on to the bodies.
 	 */
-	class CHAOS_API FSimulationSpace
+	class FSimulationSpace
 	{
 	public:
 		FSimulationSpace()
@@ -35,18 +35,19 @@ namespace Chaos
 	 * should get passed into the simulation.
 	 * If all the Alpha values are set to 1, the simulation
 	 * should be the same as a world-space simulation.
-	 * Usually you would only change MasterAlpha, but it
+	 * Usually you would only change Alpha, but it
 	 * is also possible to manipulate the elements of the
 	 * phantom forces (like centrifugal force) if you know
 	 * what you are doing.
 	 *
 	 * https://en.wikipedia.org/wiki/Rotating_reference_frame
 	 */
-	class CHAOS_API FSimulationSpaceSettings
+	class FSimulationSpaceSettings
 	{
 	public:
 		FSimulationSpaceSettings()
 			: MasterAlpha(0)
+			, Alpha(0)
 			, LinearAccelerationAlpha(1)
 			, CoriolisAlpha(1)
 			, CentrifugalAlpha(1)
@@ -58,8 +59,16 @@ namespace Chaos
 		{
 		}
 
-		// Global multipler on the effects of simulation space movement
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		FSimulationSpaceSettings(const FSimulationSpaceSettings&) = default;
+		FSimulationSpaceSettings& operator=(const FSimulationSpaceSettings&) = default;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+		UE_DEPRECATED(5.1, "MasterAlpha is deprecated - please use Alpha")
 		FReal MasterAlpha;
+
+		// Global multipler on the effects of simulation space movement
+		FReal Alpha;
 
 		// How much of the simulation frame's linear acceleration to pass onto the particles
 		FReal LinearAccelerationAlpha;

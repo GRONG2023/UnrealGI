@@ -1,6 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Physics/SimpleSuspension.h"
+#include "Chaos/Real.h"
+
+
+// Some calculations are expected to exceed the engine's SMALL_NUMBER threshold
+static double SUSPENSION_SMALL_NUMBER = 1.e-10;
+
+// Tolerance for using single axis calculations
+static double SUSPENSION_ALIGNMENT_TOLERANCE = 0.1;
 
 void FSimpleSuspension::Setup(const FSimpleSuspensionParams& InSuspensionParams)
 {
@@ -36,8 +44,38 @@ void FSimpleSuspension::Update(const FTransform& LocalToWorld, const FVector& Li
 	FSimpleSuspensionHelpers::ComputeSuspensionForces(LinearVelocity, AngularVelocityRad, SuspensionState, SuspensionParams.SpringParams, SuspensionState);
 }
 
-bool FSimpleSuspensionHelpers::ComputeSprungMasses(const TArray<FVector>& MassSpringPositions, const float TotalMass, TArray<float>& OutSprungMasses)
+bool FSimpleSuspensionHelpers::ComputeSingleAxisLambda(const FVector::FReal AxisDot, const FVector::FReal SumAxis, const uint32 Count, TArray<FVector::FReal, TFixedAllocator<2>>& Lambdas, FString* ErrMsg)
 {
+	using Chaos::FReal;
+
+	//compute determinant
+	const FReal DetLL = AxisDot * Count - SumAxis * SumAxis;
+	if (!ErrCheck(!FMath::IsNearlyZero(DetLL, SUSPENSION_SMALL_NUMBER),
+		TEXT("Spring configuration is invalid! Please make sure no two springs are at the same location."), ErrMsg))
+	{
+		return false;
+	}
+
+	const FReal LambdaB0 = Lambdas[0];
+	const FReal LambdaB1 = Lambdas[1];
+
+	//Compute the inverse matrix
+	const FReal DetLLInv = 1.f / DetLL;
+	const FReal InvLL00 = Count * DetLLInv;
+	const FReal InvLL01 = -SumAxis * DetLLInv;
+	const FReal InvLL10 = -SumAxis * DetLLInv;
+	const FReal InvLL11 = AxisDot * DetLLInv;
+
+	//compute Lagrange Multipliers - The third lambda value will always be zero in the 1D case.
+	Lambdas[0] = InvLL00 * LambdaB0 + InvLL01 * LambdaB1;
+	Lambdas[1] = InvLL10 * LambdaB0 + InvLL11 * LambdaB1;
+
+	return true;
+}
+
+bool FSimpleSuspensionHelpers::ComputeSprungMasses(const TArray<FVector>& MassSpringPositions, const float TotalMass, TArray<float>& OutSprungMasses, FString* ErrMsg)
+{
+	using Chaos::FReal;
 	/*
 
 	For a body which is supported by a collection of parallel springs,
@@ -57,12 +95,12 @@ bool FSimpleSuspensionHelpers::ComputeSprungMasses(const TArray<FVector>& MassSp
 	OutSprungMasses.Reserve(Count);
 
 	// Check essential values
-	if (!ensureMsgf(Count > 0, TEXT("Must have at least one spring to compute sprung masses.")))
+	if (!ErrCheck(Count > 0, TEXT("Must have at least one spring to compute sprung masses."), ErrMsg))
 	{
 		return false;
 	}
 
-	if (!ensureMsgf(TotalMass > SMALL_NUMBER, TEXT("Total mass must be greater than zero to compute sprung masses.")))
+	if (!ErrCheck(TotalMass > UE_SMALL_NUMBER, TEXT("Total mass must be greater than zero to compute sprung masses."), ErrMsg))
 	{
 		return false;
 	}
@@ -97,29 +135,29 @@ bool FSimpleSuspensionHelpers::ComputeSprungMasses(const TArray<FVector>& MassSp
 
 		*/
 
-		const float AX = MassSpringPositions[0].X;
-		const float AY = MassSpringPositions[0].Y;
-		const float DiffX = MassSpringPositions[1].X - AX;
-		const float DiffY = MassSpringPositions[1].Y - AY;
+		const FReal AX = MassSpringPositions[0].X;
+		const FReal AY = MassSpringPositions[0].Y;
+		const FReal DiffX = MassSpringPositions[1].X - AX;
+		const FReal DiffY = MassSpringPositions[1].Y - AY;
 
 		// If the springs are close together, just divide the mass in 2.
-		const float DistSquared = (DiffX * DiffX) + (DiffY * DiffY);
-		const float Dist = FMath::Sqrt(DistSquared);
-		if (Dist <= SMALL_NUMBER)
+		const FReal DistSquared = (DiffX * DiffX) + (DiffY * DiffY);
+		const FReal Dist = FMath::Sqrt(DistSquared);
+		if (Dist <= UE_SMALL_NUMBER)
 		{
 			OutSprungMasses[0] = OutSprungMasses[1] = TotalMass * .5f;
 			return true;
 		}
 
 		// The springs are far enough apart, compute the distribution
-		const float DistInv = 1.f / Dist;
-		const float DirX = DiffX * DistInv;
-		const float DirY = DiffY * DistInv;
-		const float DirDotA = (DirX * AX) + (DirY * AY);
+		const FReal DistInv = 1.f / Dist;
+		const FReal DirX = DiffX * DistInv;
+		const FReal DirY = DiffY * DistInv;
+		const FReal DirDotA = (DirX * AX) + (DirY * AY);
 		OutSprungMasses[0] = -TotalMass * DirDotA * DistInv;
 		OutSprungMasses[1] = TotalMass - OutSprungMasses[0];
-		if (ensureMsgf(OutSprungMasses[0] >= 0.f, TEXT("Spring configuration is invalid! Please make sure the center of mass is located between the springs.")) &&
-			ensureMsgf(OutSprungMasses[1] >= 0.f, TEXT("Spring configuration is invalid! Please make sure the center of mass is located between the springs.")))
+		if (ErrCheck(OutSprungMasses[0] >= 0.f, TEXT("Spring configuration is invalid! Please make sure the center of mass is located between the springs."), ErrMsg) &&
+			ErrCheck(OutSprungMasses[1] >= 0.f, TEXT("Spring configuration is invalid! Please make sure the center of mass is located between the springs."), ErrMsg))
 		{
 			return true;
 		}
@@ -160,7 +198,7 @@ bool FSimpleSuspensionHelpers::ComputeSprungMasses(const TArray<FVector>& MassSp
 	N+3 equations and N+3 unknowns.
 
 	[  0   0   0   x0  x1  x2  ... ] [ lambda0 ] = [ m x_c ]
-	[  0   0   0   y0  y1  y2  ... ] [ lambda1 ]   [ m z_c ]
+	[  0   0   0   y0  y1  y2  ... ] [ lambda1 ]   [ m y_c ]
 	[  0   0   0   1   1   1   ... ] [ lambda2 ]   [ m     ]
 	[  x0  y0  1   2   0   0   ... ] [ m0      ]   [ 2 m_u ]
 	[  x1  y1  1   0   2   0       ] [ m1      ]   [ 2 m_u ]
@@ -178,7 +216,7 @@ bool FSimpleSuspensionHelpers::ComputeSprungMasses(const TArray<FVector>& MassSp
 	[  L   2 I ] [ m_vec      ]   [ v ]
 
 	where Lt = Transpose(L), lambda_vec = { lambda0, lambda1, lambda2 },
-	m_vec = { m0, m1, m2, ... }, u = m { x_c, z_c, 1 }, and v = 2 m_u { 1, 1, 1, ...}.
+	m_vec = { m0, m1, m2, ... }, u = m { x_c, y_c, 1 }, and v = 2 m_u { 1, 1, 1, ...}.
 
 	This system can be solved for lambda_vec and subsequently m_vec, which is our solution vector.
 
@@ -191,70 +229,112 @@ bool FSimpleSuspensionHelpers::ComputeSprungMasses(const TArray<FVector>& MassSp
 	*/
 
 	// Cache values we'll need later, and clear out the results array
-	const float CountN = (float)Count;
-	const float CountInverse = 1.f / CountN;
-	const float AverageMass = TotalMass * CountInverse;
-	float SumX = 0.f;
-	float SumY = 0.f;
-	float XDotX = 0.f;
-	float YDotY = 0.f;
-	float XDotY = 0.f;
-	float B0 = 0.f;
-	float B1 = 0.f;
-	float B2 = 0.f;
+	const FReal CountN = (FReal)Count;
+	const FReal CountInverse = 1.f / CountN;
+	const FReal AverageMass = TotalMass * CountInverse;
+	FReal SumX = 0.f;
+	FReal SumY = 0.f;
+	FReal XDotX = 0.f;
+	FReal YDotY = 0.f;
+	FReal XDotY = 0.f;
+	FReal B0 = 0.f;
+	FReal B1 = 0.f;
+	FReal B2 = 0.f;
+	bool bAlignedX = true;
+	bool bAlignedY = true;
+
 	for (uint32 Index = 0; Index < Count; ++Index)
 	{
-		const float X = MassSpringPositions[Index].X;
-		const float Y = MassSpringPositions[Index].Y;
+		const FReal X = MassSpringPositions[Index].X;
+		const FReal Y = MassSpringPositions[Index].Y;
 		SumX += X;
 		SumY += Y;
 		XDotX += X * X;
 		YDotY += Y * Y;
 		XDotY += X * Y;
+
+		bAlignedX &= FMath::IsNearlyEqual(MassSpringPositions[Index].X, MassSpringPositions[0].X, SUSPENSION_ALIGNMENT_TOLERANCE);
+		bAlignedY &= FMath::IsNearlyEqual(MassSpringPositions[Index].Y, MassSpringPositions[0].Y, SUSPENSION_ALIGNMENT_TOLERANCE);
 	}
 
-	// Compute determinant of system matrix, in prep for inversion
-	const float DetLL
-		= (XDotX * YDotY * Count)
-		+ (2.f * XDotY * SumX * SumY)
-		- (YDotY * SumX * SumX)
-		- (XDotX * SumY * SumY)
-		- (XDotY * Count);
+	//calculate the lambdas - we approximate the center of mass as zero for each axis
+	FReal Lambda0 = 0.0f;
+	FReal Lambda1 = 0.0f;
+	FReal Lambda2 = 0.0f;
 
-	// Make sure the matrix is invertible!
-	if (!ensureMsgf(DetLL > SMALL_NUMBER || DetLL < -SMALL_NUMBER, TEXT("Spring configuration is invalid! Please make sure no two springs are at the same location.")))
+	const FReal LambdaB0 = 2.f * AverageMass * SumX;
+	const FReal LambdaB1 = 2.f * AverageMass * SumY;
+	const FReal LambdaB2 = (2.f * AverageMass * CountN) - (2.f * TotalMass);
+
+	//if one axis is aligned, we actually lose a constraint/equation and we need to adjust our calculation
+	if (bAlignedY)
 	{
-		return false;
+		TArray<Chaos::FReal, TFixedAllocator<2>> Lambdas;
+		Lambdas.Add(LambdaB0);
+		Lambdas.Add(LambdaB2);
+
+		ComputeSingleAxisLambda(XDotX, SumX, Count, Lambdas);
+
+		Lambda0 = Lambdas[0];
+		Lambda2 = Lambdas[1];
 	}
 
-	// Compute the elements of the inverse matrix
-	const float DetLLInv = 1.f / DetLL;
-	const float InvLL00 = ((Count * YDotY) - (SumY * SumY)) * DetLLInv;
-	const float InvLL01 = ((SumX * SumY) - (Count * XDotY)) * DetLLInv;
-	const float InvLL02 = ((SumY * XDotY) - (SumX * YDotY)) * DetLLInv;
-	const float InvLL10 = InvLL01; // Symmetry!
-	const float InvLL11 = ((Count * XDotX) - (SumX * SumX)) * DetLLInv;
-	const float InvLL12 = ((SumX * XDotY) - (SumY * XDotX)) * DetLLInv; // = InvLL21. Symmetry!
-	const float InvLL20 = InvLL02; // Symmetry!
-	const float InvLL21 = InvLL12; // Symmetry!
-	const float InvLL22 = ((XDotX * YDotY) - (XDotY * XDotY)) * DetLLInv;
+	else if (bAlignedX)
+	{
+		TArray<Chaos::FReal, TFixedAllocator<2>> Lambdas;
+		Lambdas.Add(LambdaB1);
+		Lambdas.Add(LambdaB2);
 
-	// Compute the Lagrange multipliers
-	const float LambdaB0 = 2.f * AverageMass * SumX;
-	const float LambdaB1 = 2.f * AverageMass * SumY;
-	const float LambdaB2 = (2.f * AverageMass * CountN) - (2.f * TotalMass);
-	const float Lambda0 = (InvLL00 * LambdaB0) + (InvLL01 * LambdaB1) + (InvLL02 * LambdaB2);
-	const float Lambda1 = (InvLL10 * LambdaB0) + (InvLL11 * LambdaB1) + (InvLL12 * LambdaB2);
-	const float Lambda2 = (InvLL20 * LambdaB0) + (InvLL21 * LambdaB1) + (InvLL22 * LambdaB2);
+		ComputeSingleAxisLambda(YDotY, SumY, Count, Lambdas);
+
+		Lambda1 = Lambdas[0];
+		Lambda2 = Lambdas[1];
+	}
+
+	//2D constraint calculation
+	else
+	{
+		// Compute determinant of system matrix, in prep for inversion
+		const FReal DetLL
+			= (XDotX * YDotY * Count)
+			+ (2.f * XDotY * SumX * SumY)
+			- (YDotY * SumX * SumX)
+			- (XDotX * SumY * SumY)
+			- (XDotY * XDotY * Count);
+
+		// Make sure the matrix is invertible!
+		if (!ErrCheck(!FMath::IsNearlyZero(DetLL, SUSPENSION_SMALL_NUMBER),
+			TEXT("Spring configuration is invalid! Please make sure no two springs are at the same location."), ErrMsg))
+		{
+			return false;
+		}
+
+		// Compute the elements of the inverse matrix
+		const FReal DetLLInv = 1.f / DetLL;
+		const FReal InvLL00 = ((Count * YDotY) - (SumY * SumY)) * DetLLInv;
+		const FReal InvLL01 = ((SumX * SumY) - (Count * XDotY)) * DetLLInv;
+		const FReal InvLL02 = ((SumY * XDotY) - (SumX * YDotY)) * DetLLInv;
+		const FReal InvLL10 = InvLL01; // Symmetry!
+		const FReal InvLL11 = ((Count * XDotX) - (SumX * SumX)) * DetLLInv;
+		const FReal InvLL12 = ((SumX * XDotY) - (SumY * XDotX)) * DetLLInv; // = InvLL21. Symmetry!
+		const FReal InvLL20 = InvLL02; // Symmetry!
+		const FReal InvLL21 = InvLL12; // Symmetry!
+		const FReal InvLL22 = ((XDotX * YDotY) - (XDotY * XDotY)) * DetLLInv;
+
+		// Compute the Lagrange multipliers
+		Lambda0 = (InvLL00 * LambdaB0) + (InvLL01 * LambdaB1) + (InvLL02 * LambdaB2);
+		Lambda1 = (InvLL10 * LambdaB0) + (InvLL11 * LambdaB1) + (InvLL12 * LambdaB2);
+		Lambda2 = (InvLL20 * LambdaB0) + (InvLL21 * LambdaB1) + (InvLL22 * LambdaB2);		
+	}
 
 	// Compute the masses
 	for (uint32 Index = 0; Index < Count; ++Index)
 	{
-		const float X = MassSpringPositions[Index].X;
-		const float Y = MassSpringPositions[Index].Y;
-		const float LLambda = (X * Lambda0) + (Y * Lambda1) + Lambda2;
+		const FReal X = MassSpringPositions[Index].X;
+		const FReal Y = MassSpringPositions[Index].Y;
+		const FReal LLambda = (X * Lambda0) + (Y * Lambda1) + Lambda2;
 		OutSprungMasses[Index] = AverageMass - (0.5f * LLambda);
-		if (!ensureMsgf(OutSprungMasses[Index] >= 0.f, TEXT("Spring configuration is invalid! Please make sure the center of mass is located inside the area covered by the springs.")))
+		if (!ErrCheck(OutSprungMasses[Index] >= 0.f, TEXT("Spring configuration is invalid! Please make sure the center of mass is located inside the area covered by the springs."), ErrMsg))
 		{
 			return false;
 		}
@@ -263,7 +343,7 @@ bool FSimpleSuspensionHelpers::ComputeSprungMasses(const TArray<FVector>& MassSp
 	return true;
 }
 
-bool FSimpleSuspensionHelpers::ComputeSprungMasses(const TArray<FVector>& LocalSpringPositions, const FVector& LocalCenterOfMass, const float TotalMass, TArray<float>& OutSprungMasses)
+bool FSimpleSuspensionHelpers::ComputeSprungMasses(const TArray<FVector>& LocalSpringPositions, const FVector& LocalCenterOfMass, const float TotalMass, TArray<float>& OutSprungMasses, FString* ErrMsg)
 {
 	// Compute support origin's in center of mass space
 	const int32 SpringCount = LocalSpringPositions.Num();
@@ -275,15 +355,15 @@ bool FSimpleSuspensionHelpers::ComputeSprungMasses(const TArray<FVector>& LocalS
 	}
 
 	// Do the calculation
-	return ComputeSprungMasses(MassSpringPositions, TotalMass, OutSprungMasses);
+	return ComputeSprungMasses(MassSpringPositions, TotalMass, OutSprungMasses, ErrMsg);
 }
 
 void FSimpleSuspensionHelpers::ComputeSpringNaturalFrequencyAndDampingRatio(const float SprungMass, const float SpringStiffness, const float SpringDamping, float& OutNaturalFrequency, float& OutDampingRatio)
 {
-	const float NaturalFrequency = SprungMass > SMALL_NUMBER ? SpringStiffness / SprungMass : 0.f;
+	const float NaturalFrequency = SprungMass > UE_SMALL_NUMBER ? SpringStiffness / SprungMass : 0.f;
 	const float CriticalDamping = ComputeSpringCriticalDamping(SprungMass, OutNaturalFrequency);
 	OutNaturalFrequency = NaturalFrequency;
-	OutDampingRatio = CriticalDamping > SMALL_NUMBER ? SpringDamping / CriticalDamping : 1.f;
+	OutDampingRatio = CriticalDamping > UE_SMALL_NUMBER ? SpringDamping / CriticalDamping : 1.f;
 }
 
 float FSimpleSuspensionHelpers::ComputeSpringStiffness(const float SprungMass, const float NaturalFrequency)
@@ -304,7 +384,7 @@ float FSimpleSuspensionHelpers::ComputeSpringCriticalDamping(const float SprungM
 float FSimpleSuspensionHelpers::ComputeSpringRestLength(const float SprungMass, const float NaturalFrequency, const float SuspendedLength, const float Gravity)
 {
 	const float SpringStiffness = ComputeSpringStiffness(SprungMass, NaturalFrequency);
-	if (SpringStiffness > SMALL_NUMBER)
+	if (SpringStiffness > UE_SMALL_NUMBER)
 	{
 		// "Suspended Displacement" is the amount by which a spring this stiff will
 		// be compressed by the force of gravity when it's resting
@@ -407,7 +487,7 @@ void FSimpleSuspensionHelpers::ComputeSuspensionDisplacements(const FSimpleSuspe
 float FSimpleSuspensionHelpers::ComputeSpringForce(const float SpringStiffness, const float SpringDamping, const float SpringDisplacement, const float SpringVelocity)
 {
 	const float StiffnessForce = SpringDisplacement * SpringStiffness;
-	const float DampingForce = SpringDisplacement > SMALL_NUMBER ? SpringVelocity * SpringDamping : 0.f;
+	const float DampingForce = SpringDisplacement > UE_SMALL_NUMBER ? SpringVelocity * SpringDamping : 0.f;
 	return StiffnessForce + DampingForce;
 }
 
@@ -453,7 +533,7 @@ void FSimpleSuspensionHelpers::IntegrateSpring(const float DeltaTime, const floa
 	//       didn't bother to verify yet...
 	//
 	const float Denominator = SprungMass + (DeltaTime * (SpringParams.Damping + (SpringParams.Stiffness * DeltaTime)));
-	if (Denominator > SMALL_NUMBER)
+	if (Denominator > UE_SMALL_NUMBER)
 	{
 		// We do each of these integrations implicitly. We do them separately
 		// before assigning return values to allow for inline integration
@@ -485,4 +565,10 @@ void FSimpleSuspensionHelpers::IntegrateSprings(const float DeltaTime, const TAr
 	{
 		IntegrateSpring(DeltaTime, SpringDisplacements[Index], SpringVelocities[Index], SuspensionParams[Index], SprungMasses[Index], OutNewSpringDisplacements[Index], OutNewSpringVelocities[Index]);
 	}
+}
+
+bool FSimpleSuspensionHelpers::ErrCheck(const bool bCondition, const FString& Message, FString* ErrMsg)
+{
+	if (ErrMsg != nullptr && !bCondition) { *ErrMsg = Message; }
+	return bCondition;
 }

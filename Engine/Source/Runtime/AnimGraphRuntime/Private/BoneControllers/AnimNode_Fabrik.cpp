@@ -5,7 +5,10 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "DrawDebugHelpers.h"
 #include "Animation/AnimInstanceProxy.h"
+#include "Animation/AnimStats.h"
 #include "FABRIK.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNode_Fabrik)
 
 /////////////////////////////////////////////////////
 // AnimNode_Fabrik
@@ -50,6 +53,8 @@ FTransform FAnimNode_Fabrik::GetTargetTransform(const FTransform& InComponentTra
 void FAnimNode_Fabrik::EvaluateSkeletalControl_AnyThread(FComponentSpacePoseContext& Output, TArray<FBoneTransform>& OutBoneTransforms)
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_ANIMNODE(EvaluateSkeletalControl_AnyThread)
+	ANIM_MT_SCOPE_CYCLE_COUNTER_VERBOSE(Fabrik, !IsInGameThread());
+
 	const FBoneContainer& BoneContainer = Output.Pose.GetPose().GetBoneContainer();
 
 	// Update EffectorLocation if it is based off a bone position
@@ -77,7 +82,7 @@ void FAnimNode_Fabrik::EvaluateSkeletalControl_AnyThread(FComponentSpacePoseCont
 	}
 
 	// Maximum length of skeleton segment at full extension
-	float MaximumReach = 0;
+	double MaximumReach = 0;
 
 	// Gather transforms
 	int32 const NumTransforms = BoneIndices.Num();
@@ -107,7 +112,7 @@ void FAnimNode_Fabrik::EvaluateSkeletalControl_AnyThread(FComponentSpacePoseCont
 		OutBoneTransforms[TransformIndex] = FBoneTransform(BoneIndex, BoneCSTransform);
 
 		// Calculate the combined length of this segment of skeleton
-		float const BoneLength = FVector::Dist(BoneCSPosition, OutBoneTransforms[TransformIndex-1].Transform.GetLocation());
+		double const BoneLength = FVector::Dist(BoneCSPosition, OutBoneTransforms[TransformIndex-1].Transform.GetLocation());
 
 		if (!FMath::IsNearlyZero(BoneLength))
 		{
@@ -156,7 +161,7 @@ void FAnimNode_Fabrik::EvaluateSkeletalControl_AnyThread(FComponentSpacePoseCont
 
 			// Calculate axis of rotation from pre-translation vector to post-translation vector
 			FVector const RotationAxis = FVector::CrossProduct(OldDir, NewDir).GetSafeNormal();
-			float const RotationAngle = FMath::Acos(FVector::DotProduct(OldDir, NewDir));
+			double const RotationAngle = FMath::Acos(FVector::DotProduct(OldDir, NewDir));
 			FQuat const DeltaRotation = FQuat(RotationAxis, RotationAngle);
 			// We're going to multiply it, in order to not have to re-normalize the final quaternion, it has to be a unit quaternion.
 			checkSlow(DeltaRotation.IsNormalized());
@@ -245,3 +250,4 @@ void FAnimNode_Fabrik::Initialize_AnyThread(const FAnimationInitializeContext& C
 	Super::Initialize_AnyThread(Context);
 	EffectorTarget.Initialize(Context.AnimInstanceProxy);
 }
+

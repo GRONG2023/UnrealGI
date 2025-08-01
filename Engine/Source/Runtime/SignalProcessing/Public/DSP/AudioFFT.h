@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Misc/CoreMiscDefines.h"
 #include "DSP/BufferVectorOperations.h"
 #include "DSP/Dsp.h"
 #include "DSP/FFTAlgorithm.h"
@@ -42,9 +43,11 @@ namespace Audio
 	/**
 	 * Class used to generate, contain and apply a DSP window of a given type.
 	 */
-	class SIGNALPROCESSING_API FWindow
+	class FWindow
 	{
 	public:
+		FWindow() = delete;
+
 		/**
 		 * Constructor. Allocates buffer and generates window inside of it.
 		 * @param InType: The type of window that should be generated.
@@ -54,128 +57,111 @@ namespace Audio
 		 *                     Generally, set this to false if using this window with an STFT, but use true
 		 *                     if this window will be used on an entire, self-contained signal.
 		 */
-		FWindow(EWindowType InType, int32 InNumFrames, int32 InNumChannels, bool bIsPeriodic)
-			: WindowType(InType)
-			, NumSamples(InNumFrames * InNumChannels)
-		{
-			checkf(NumSamples % 4 == 0, TEXT("For performance reasons, this window's length should be a multiple of 4."));
-			Generate(InNumFrames, InNumChannels, bIsPeriodic);
-		}
-
-		// Destructor. Releases memory used for window.
-		~FWindow()
-		{
-		}
+		SIGNALPROCESSING_API FWindow(EWindowType InType, int32 InNumFrames, int32 InNumChannels, bool bIsPeriodic);
 
 		// Apply this window to InBuffer, which is expected to be an interleaved buffer with the same amount of frames
 		// and channels this window was constructed with.
-		void ApplyToBuffer(float* InBuffer)
-		{
-			if (WindowType == EWindowType::None)
-			{
-				return;
-			}
+		SIGNALPROCESSING_API void ApplyToBuffer(float* InBuffer);
 
-			check(IsAligned<float*>(InBuffer, 4));
-			MultiplyBuffersInPlace(WindowBuffer.GetData(), InBuffer, NumSamples);
-		}
-
-		EWindowType GetWindowType() const
-		{
-			return WindowType;
-		}
+		SIGNALPROCESSING_API EWindowType GetWindowType() const;
 
 	private:
 		EWindowType WindowType;
-		AlignedFloatBuffer WindowBuffer;
+		FAlignedFloatBuffer WindowBuffer;
 		int32 NumSamples;
 
-		// Purposefully hidden constructor.
-		FWindow();
-
 		// Generate the window. Called on constructor.
-		void Generate(int32 NumFrames, int32 NumChannels, bool bIsPeriodic)
-		{
-			if (WindowType == EWindowType::None)
-			{
-				return;
-			}
-
-			WindowBuffer.Reset();
-			WindowBuffer.AddZeroed(NumSamples);
-
-			switch (WindowType)
-			{
-			case EWindowType::Hann:
-			{
-				GenerateHannWindow(WindowBuffer.GetData(), NumFrames, NumChannels, bIsPeriodic);
-				break;
-			}
-			case EWindowType::Hamming:
-			{
-				GenerateHammingWindow(WindowBuffer.GetData(), NumFrames, NumChannels, bIsPeriodic);
-				break;
-			}
-			case EWindowType::Blackman:
-			{
-				GenerateBlackmanWindow(WindowBuffer.GetData(), NumFrames, NumChannels, bIsPeriodic);
-				break;
-			}
-			default:
-			{
-				checkf(false, TEXT("Unknown window type!"));
-				break;
-			}
-			}
-		}
+		SIGNALPROCESSING_API void Generate(int32 NumFrames, int32 NumChannels, bool bIsPeriodic);
 	};
 
-	struct FFTTimeDomainData
+	struct FFTTimeDomainData_DEPRECATED
 	{
 		float* Buffer; // Pointer to a single channel of floats.
 		int32 NumSamples; // Number of samples in InBuffer divided by the number of channels. must be a power of 2.
 	};
 
-	struct FFTFreqDomainData
+	/** AudioFFT Deprecation
+	 *
+	 * The AudioFFT is deprecated in favor of optimized software implementations 
+	 * and hardware implementations. The FFT implemenented in "PerformFFT(...)" 
+	 * has poor CPU performance as it computes the FFT radix weights each time
+	 * "PerformFFT(...)" is executed. 
+	 *
+	 * Better optimized and hardward FFT implementations can be accessed through the 
+	 * FFFTFactory class in FFTAlgorithm.h. That class will attempt to return the 
+	 * best FFT algorithm implementation available for the given FFFTSettings.
+	 */
+
+	struct UE_DEPRECATED(5.1, "Use IFFTAlgorithm and TArray for time domain data") FFTTimeDomainData;
+	struct FFTTimeDomainData : FFTTimeDomainData_DEPRECATED 
+	{
+		FFTTimeDomainData() = default;
+
+		FFTTimeDomainData(float* InBuffer, int32 InNumSamples)
+		{
+			Buffer = InBuffer;
+			NumSamples = InNumSamples;
+		}
+	};
+
+	struct FFTFreqDomainData_DEPRECATED
 	{
 		// arrays in which real and imaginary values will be populated.
 		float* OutReal; // Should point to an already allocated array of floats that is FFTInputParams::NumSamples long.
 		float* OutImag; // Should point to an already allocated array of floats that is FFTInputParams::NumSamples long.
 	};
 
+	struct UE_DEPRECATED(5.1, "Use IFFTAlgorithm and TArray for time freq domain data") FFTFreqDomainData;
+	struct FFTFreqDomainData : FFTFreqDomainData_DEPRECATED 
+	{
+		FFTFreqDomainData() = default;
+
+		FFTFreqDomainData(float* Real, float* Imag)
+		{
+			OutReal = Real;
+			OutImag = Imag;
+		}
+	};
+
 	// Performs a one-time FFT on a float buffer. Does not support complex signals.
 	// This function assumes that, if you desire a window for your FFT, that window was already
 	// applied to FFTInputParams.InBuffer.
-	SIGNALPROCESSING_API void PerformFFT(const FFTTimeDomainData& InputParams, FFTFreqDomainData& OutputParams);
-	SIGNALPROCESSING_API void PerformIFFT(FFTFreqDomainData& InputParams, FFTTimeDomainData& OutputParams);
+
+ 	UE_DEPRECATED(5.1, "Use FVectorFFTRealToComplex or FFFTFactory instead.")
+	SIGNALPROCESSING_API void PerformFFT(const FFTTimeDomainData_DEPRECATED& InputParams, FFTFreqDomainData_DEPRECATED& OutputParams);
+
+ 	UE_DEPRECATED(5.1, "Use FVectorFFTRealToComplex or FFFTFactory instead.")
+	SIGNALPROCESSING_API void PerformIFFT(FFTFreqDomainData_DEPRECATED& InputParams, FFTTimeDomainData_DEPRECATED& OutputParams);
 
 
 	// FFT Algorithm factory for this FFT implementation
-	class SIGNALPROCESSING_API FAudioFFTAlgorithmFactory : public IFFTAlgorithmFactory
+	class UE_DEPRECATED(5.1, "Use FVectorFFTFactory instead.") FAudioFFTAlgorithmFactory;
+	class FAudioFFTAlgorithmFactory : public IFFTAlgorithmFactory
 	{
 		public:
-			virtual ~FAudioFFTAlgorithmFactory();
+			SIGNALPROCESSING_API virtual ~FAudioFFTAlgorithmFactory();
 
 			// Name of this fft algorithm factory. 
-			virtual FName GetFactoryName() const override;
+			SIGNALPROCESSING_API virtual FName GetFactoryName() const override;
 
 			// If true, this implementation uses hardware acceleration.
-			virtual bool IsHardwareAccelerated() const override;
+			SIGNALPROCESSING_API virtual bool IsHardwareAccelerated() const override;
 
 			// If true, this implementation requires input and output arrays to be 128 bit aligned.
-			virtual bool Expects128BitAlignedArrays() const override;
+			SIGNALPROCESSING_API virtual bool Expects128BitAlignedArrays() const override;
 
 			// Returns true if the input settings are supported by this factory.
-			virtual bool AreFFTSettingsSupported(const FFFTSettings& InSettings) const override;
+			SIGNALPROCESSING_API virtual bool AreFFTSettingsSupported(const FFFTSettings& InSettings) const override;
 
 			// Create a new FFT algorithm.
-			virtual TUniquePtr<IFFTAlgorithm> NewFFTAlgorithm(const FFFTSettings& InSettings) override;
+			SIGNALPROCESSING_API virtual TUniquePtr<IFFTAlgorithm> NewFFTAlgorithm(const FFFTSettings& InSettings) override;
 	};
 
 	struct FrequencyBuffer
+ 	
 	{
-		AlignedFloatBuffer Real;
-		AlignedFloatBuffer Imag;
+		FAlignedFloatBuffer Real;
+		FAlignedFloatBuffer Imag;
 
 		void InitZeroed(int32 Num)
 		{
@@ -204,35 +190,42 @@ namespace Audio
 	// Performs an acyclic FFT correlation on FirstBuffer and Second buffer and stores the output in OutCorrelation.
 	// If bCyclic is false, This function may zero pad FirstBuffer and Second Buffer as needed.
 	// If bCyclic is true, FirstBuffer and SecondBuffer should have the same length, and that length should be a power of two.
-	SIGNALPROCESSING_API void CrossCorrelate(AlignedFloatBuffer& FirstBuffer, AlignedFloatBuffer& SecondBuffer, AlignedFloatBuffer& OutCorrelation, bool bZeroPad = true);
-	SIGNALPROCESSING_API void CrossCorrelate(AlignedFloatBuffer& FirstBuffer, AlignedFloatBuffer& SecondBuffer, FrequencyBuffer& OutCorrelation, bool bZeroPad = true);
+	UE_DEPRECATED(5.1, "Cross correlate is no longer supported.")
+	SIGNALPROCESSING_API void CrossCorrelate(FAlignedFloatBuffer& FirstBuffer, FAlignedFloatBuffer& SecondBuffer, FAlignedFloatBuffer& OutCorrelation, bool bZeroPad = true);
+	UE_DEPRECATED(5.1, "Cross correlate is no longer supported.")
+	SIGNALPROCESSING_API void CrossCorrelate(FAlignedFloatBuffer& FirstBuffer, FAlignedFloatBuffer& SecondBuffer, FrequencyBuffer& OutCorrelation, bool bZeroPad = true);
+	UE_DEPRECATED(5.1, "Cross correlate is no longer supported.")
 	SIGNALPROCESSING_API void CrossCorrelate(const float* FirstBuffer, const float* SecondBuffer, int32 NumSamples, int32 FFTSize, float* OutCorrelation, int32 OutCorrelationSamples);
+	UE_DEPRECATED(5.1, "Cross correlate is no longer supported.")
 	SIGNALPROCESSING_API void CrossCorrelate(const float* FirstBuffer, const float* SecondBuffer, int32 NumSamples, int32 FFTSize, FrequencyBuffer& OutCorrelation);
 
 	// These variations do not allocate any additional memory during the function, provided that the FrequencyBuffers are already allocated.
+	UE_DEPRECATED(5.1, "Cross correlate is no longer supported.")
 	SIGNALPROCESSING_API void CrossCorrelate(const float* FirstBuffer, const float* SecondBuffer, int32 NumSamples, int32 FFTSize, FrequencyBuffer& FirstBufferFrequencies, FrequencyBuffer& SecondBufferFrequencies, FrequencyBuffer& OutCorrelation);
+	UE_DEPRECATED(5.1, "Cross correlate is no longer supported.")
 	SIGNALPROCESSING_API void CrossCorrelate(FrequencyBuffer& FirstBufferFrequencies, FrequencyBuffer& SecondBufferFrequencies, int32 NumSamples, FrequencyBuffer& OutCorrelation);
 
-	class SIGNALPROCESSING_API FFFTConvolver
+	// Deprecated in 5.1
+	class FFFTConvolver_DEPRECATED
 	{
 	public:
-		FFFTConvolver();
+		SIGNALPROCESSING_API FFFTConvolver_DEPRECATED();
 
 		/*
 		 * Applies the convolver's internal window to InputAudio. Until SetWindow is called, ProcessAudio will not affect InputAudio.
 		 * InputAudio must be a power of two.
 		 */
-		void ProcessAudio(float* InputAudio, int32 NumSamples);
+		SIGNALPROCESSING_API void ProcessAudio(float* InputAudio, int32 NumSamples);
 
 		/**
 		 * Resets the filter window. NOT thread safe to call during ProcessAudio.
 		 * This function can be called with a time domain impulse response, or precomputed frequency values. 
 		 * FilterSize must be a power of two.
 		 */ 
-		void SetFilter(const float* InFilterReal, const float* InFilterImag, int32 FilterSize, int32 FFTSize);
-		void SetFilter(const FrequencyBuffer& InFilterFrequencies, int32 FilterSize);
-		void SetFilter(const float* TimeDomainBuffer, int32 FilterSize);
-		void SetFilter(const AlignedFloatBuffer& TimeDomainBuffer);
+		SIGNALPROCESSING_API void SetFilter(const float* InFilterReal, const float* InFilterImag, int32 FilterSize, int32 FFTSize);
+		SIGNALPROCESSING_API void SetFilter(const FrequencyBuffer& InFilterFrequencies, int32 FilterSize);
+		SIGNALPROCESSING_API void SetFilter(const float* TimeDomainBuffer, int32 FilterSize);
+		SIGNALPROCESSING_API void SetFilter(const FAlignedFloatBuffer& TimeDomainBuffer);
 
 	private:
 		void ConvolveBlock(float* InputAudio, int32 NumSamples);
@@ -244,8 +237,12 @@ namespace Audio
 		int32 BlockSize;
 
 
-		AlignedFloatBuffer TimeDomainInputBuffer;
-		AlignedFloatBuffer COLABuffer;
+		FAlignedFloatBuffer TimeDomainInputBuffer;
+		FAlignedFloatBuffer COLABuffer;
+	};
+
+	class UE_DEPRECATED(5.1, "Use FConvolutionFactory or UniformPartitionConvolutionFactory.") FFFTConvolver : public FFFTConvolver_DEPRECATED
+	{
 	};
 
 	// Computes the power spectrum from FFTFreqDomainData. Applies a 1/(FFTSize^2) scaling to the output to 
@@ -255,7 +252,8 @@ namespace Audio
 	// InFrequencyData is the input frequency domain data. Generally this is created by calling PerformFFT(...)
 	// FFTSize is the number of samples used when originally calculating the FFT
 	// OutBuffer is an aligned buffer which will contain spectrum data. It will constain (FFTSize / 2 + 1) elements.
-	SIGNALPROCESSING_API void ComputePowerSpectrum(const FFTFreqDomainData& InFrequencyData, int32 FFTSize, AlignedFloatBuffer& OutBuffer);
+	UE_DEPRECATED(5.1, "Use equivalent methods in FloatArrayMath.h")
+	SIGNALPROCESSING_API void ComputePowerSpectrum(const FFTFreqDomainData_DEPRECATED& InFrequencyData, int32 FFTSize, FAlignedFloatBuffer& OutBuffer);
 
 	// Computes the magnitude spectrum from FFTFreqDomainData. Applies a 1/FFTSize scaling to the output to 
 	// maintain equal energy between original time domain data and output spectrum.  Only the first 
@@ -264,7 +262,8 @@ namespace Audio
 	// InFrequencyData is the input frequency domain data. Generally this is created by calling PerformFFT(...)
 	// FFTSize is the number of samples used when originally calculating the FFT
 	// OutBuffer is an aligned buffer which will contain spectrum data. It will constain (FFTSize / 2 + 1) elements.
-	SIGNALPROCESSING_API void ComputeMagnitudeSpectrum(const FFTFreqDomainData& InFrequencyData, int32 FFTSize, AlignedFloatBuffer& OutBuffer);
+	UE_DEPRECATED(5.1, "Use equivalent methods in FloatArrayMath.h")
+	SIGNALPROCESSING_API void ComputeMagnitudeSpectrum(const FFTFreqDomainData_DEPRECATED& InFrequencyData, int32 FFTSize, FAlignedFloatBuffer& OutBuffer);
 	
 	// Computes the spectrum from FFTFreqDomainData. Applies a scaling to the output to maintain equal 
 	// energy between original time domain data and output spectrum.  Only the first (FFTSize / 2 + 1)
@@ -274,5 +273,17 @@ namespace Audio
 	// InFrequencyData is the input frequency domain data. Generally this is created by calling PerformFFT(...)
 	// FFTSize is the number of samples used when originally calculating the FFT
 	// OutBuffer is an aligned buffer which will contain spectrum data. It will constain (FFTSize / 2 + 1) elements.
-	SIGNALPROCESSING_API void ComputeSpectrum(ESpectrumType InSpectrumType, const FFTFreqDomainData& InFrequencyData, int32 FFTSize, AlignedFloatBuffer& OutBuffer);
+	UE_DEPRECATED(5.1, "Use equivalent methods in FloatArrayMath.h")
+	SIGNALPROCESSING_API void ComputeSpectrum(ESpectrumType InSpectrumType, const FFTFreqDomainData_DEPRECATED& InFrequencyData, int32 FFTSize, FAlignedFloatBuffer& OutBuffer);
+
+	// Return the ceiling of the log2 of InNum
+	SIGNALPROCESSING_API int32 CeilLog2(int32 InNum);
+
+	// Return the scaling factor needed to apply to a power spectrum given a current
+	// and target FFT scaling. 
+	SIGNALPROCESSING_API float GetPowerSpectrumScaling(int32 FFTSize, EFFTScaling InCurrentScaling, EFFTScaling InTargetScaling);
+
+	// Scale the power spectrum to remove any scaling introduced by the FFT algorithm
+	// implementation.
+	SIGNALPROCESSING_API void ScalePowerSpectrumInPlace(int32 FFTSize, EFFTScaling InCurrentScaling, EFFTScaling InTargetScaling, TArrayView<float> InPowerSpectrum);
 }

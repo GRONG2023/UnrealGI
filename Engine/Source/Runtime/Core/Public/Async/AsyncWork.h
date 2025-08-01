@@ -13,9 +13,10 @@
 #include "Stats/Stats.h"
 #include "HAL/Event.h"
 #include "HAL/PlatformProcess.h"
-#include "HAL/LowLevelMemTracker.h"
+#include "Async/InheritedContext.h"
 #include "Misc/IQueuedWork.h"
 #include "Misc/QueuedThreadPool.h"
+#include "Async/Fundamental/Scheduler.h"
 
 /**
 	FAutoDeleteAsyncTask - template task for jobs that delete themselves when complete
@@ -56,21 +57,19 @@
 
 **/
 template<typename TTask>
-class FAutoDeleteAsyncTask
-	: private IQueuedWork
+class FAutoDeleteAsyncTask : 
+	private UE::FInheritedContextBase, 
+	private IQueuedWork
 {
 	/** User job embedded in this task */
 	TTask Task;
-	/** optional LLM tag */
-	LLM(const UE::LLMPrivate::FTagData* InheritedLLMTag);
 
 	/* Generic start function, not called directly
 	 * @param bForceSynchronous if true, this job will be started synchronously, now, on this thread
 	 **/
-	void Start(bool bForceSynchronous, FQueuedThreadPool* InQueuedPool)
+	void Start(bool bForceSynchronous, FQueuedThreadPool* InQueuedPool, EQueuedWorkPriority InPriority = EQueuedWorkPriority::Normal)
 	{
-		LLM(InheritedLLMTag = FLowLevelMemTracker::bIsDisabled ? nullptr : FLowLevelMemTracker::Get().GetActiveTagData(ELLMTracker::Default));
-
+		CaptureInheritedContext();
 		FPlatformMisc::MemoryBarrier();
 		FQueuedThreadPool* QueuedPool = InQueuedPool;
 		if (bForceSynchronous)
@@ -79,7 +78,7 @@ class FAutoDeleteAsyncTask
 		}
 		if (QueuedPool)
 		{
-			QueuedPool->AddQueuedWork(this);
+			QueuedPool->AddQueuedWork(this, InPriority);
 		}
 		else
 		{
@@ -93,7 +92,7 @@ class FAutoDeleteAsyncTask
 	 **/
 	void DoWork()
 	{
-		LLM_SCOPE(InheritedLLMTag);
+		UE::FInheritedContextScope InheritedContextScope = RestoreInheritedContext();
 		FScopeCycleCounter Scope(Task.GetStatId(), true);
 
 		Task.DoWork();
@@ -137,15 +136,15 @@ public:
 	**/
 	void StartSynchronousTask()
 	{
-		Start(true, GThreadPool);
+		Start(true, nullptr);
 	}
 
 	/** 
 	* Run this task on the lo priority thread pool. It is not safe to use this object after this call.
 	**/
-	void StartBackgroundTask(FQueuedThreadPool* InQueuedPool = GThreadPool)
+	void StartBackgroundTask(FQueuedThreadPool* InQueuedPool = GThreadPool, EQueuedWorkPriority InPriority = EQueuedWorkPriority::Normal)
 	{
-		Start(false, InQueuedPool);
+		Start(false, InQueuedPool, InPriority);
 	}
 };
 
@@ -203,20 +202,27 @@ public:
 		delete Task;
 	}
 **/
-template<typename TTask>
-class FAsyncTask
-	: private IQueuedWork
+
+class FAsyncTaskBase
+	: private UE::FInheritedContextBase
+	, private IQueuedWork
 {
-	/** User job embedded in this task */ 
-	TTask Task;
 	/** Thread safe counter that indicates WORK completion, no necessarily finalization of the job */
 	FThreadSafeCounter	WorkNotFinishedCounter;
 	/** If we aren't doing the work synchronously, this will hold the completion event */
-	FEvent*				DoneEvent;
+	FEvent*				DoneEvent = nullptr;
 	/** Pool we are queued into, maintained by the calling thread */
-	FQueuedThreadPool*	QueuedPool;
-	/** optional LLM tag */
-	LLM(const UE::LLMPrivate::FTagData* InheritedLLMTag);
+	FQueuedThreadPool*	QueuedPool = nullptr;
+	/** Current priority */
+	EQueuedWorkPriority Priority = EQueuedWorkPriority::Normal;
+	/** Current flags */
+	EQueuedWorkFlags Flags = EQueuedWorkFlags::None;
+	/** Approximation of the peak memory (in bytes) this task could require during it's execution. */
+	int64 RequiredMemory = -1;
+	/** Text to identify the Task; used for debug/log purposes only. */
+	const TCHAR * DebugName = nullptr;
+	/** StatId used for FScopeCycleCounter */
+	TStatId StatId;
 
 	/* Internal function to destroy the completion event
 	**/
@@ -226,19 +232,30 @@ class FAsyncTask
 		DoneEvent = nullptr;
 	}
 
+	EQueuedWorkFlags GetQueuedWorkFlags() const final
+	{
+		return Flags;
+	}
+
 	/* Generic start function, not called directly
 		* @param bForceSynchronous if true, this job will be started synchronously, now, on this thread
 	**/
-	void Start(bool bForceSynchronous, FQueuedThreadPool* InQueuedPool)
+	void Start(bool bForceSynchronous, FQueuedThreadPool* InQueuedPool, EQueuedWorkPriority InQueuedWorkPriority, EQueuedWorkFlags InQueuedWorkFlags, int64 InRequiredMemory, const TCHAR * InDebugName)
 	{
-		FScopeCycleCounter Scope( Task.GetStatId(), true );
+		CaptureInheritedContext();
+
+		FScopeCycleCounter Scope(StatId, true);
 		DECLARE_SCOPE_CYCLE_COUNTER( TEXT( "FAsyncTask::Start" ), STAT_FAsyncTask_Start, STATGROUP_ThreadPoolAsyncTasks );
-		LLM(InheritedLLMTag = FLowLevelMemTracker::bIsDisabled ? nullptr : FLowLevelMemTracker::Get().GetActiveTagData(ELLMTracker::Default));
+		// default arg has InRequiredMemory == -1
+		RequiredMemory = InRequiredMemory;
+		DebugName = InDebugName;
 
 		FPlatformMisc::MemoryBarrier();
 		CheckIdle();  // can't start a job twice without it being completed first
 		WorkNotFinishedCounter.Increment();
 		QueuedPool = InQueuedPool;
+		Priority = InQueuedWorkPriority;
+		Flags = InQueuedWorkFlags;
 		if (bForceSynchronous)
 		{
 			QueuedPool = 0;
@@ -250,7 +267,7 @@ class FAsyncTask
 				DoneEvent = FPlatformProcess::GetSynchEventFromPool(true);
 			}
 			DoneEvent->Reset();
-			QueuedPool->AddQueuedWork(this);
+			QueuedPool->AddQueuedWork(this, InQueuedWorkPriority);
 		}
 		else 
 		{
@@ -264,11 +281,11 @@ class FAsyncTask
 	* Tells the user job to do the work, sometimes called synchronously, sometimes from the thread pool. Calls the event tracker.
 	**/
 	void DoWork()
-	{	
-		LLM_SCOPE(InheritedLLMTag);
-		FScopeCycleCounter Scope(Task.GetStatId(), true); 
+	{
+		UE::FInheritedContextScope InheritedContextScope = RestoreInheritedContext();
+		FScopeCycleCounter Scope(StatId, true);
 
-		Task.DoWork();		
+		DoTaskWork();
 		check(WorkNotFinishedCounter.GetValue() == 1);
 		WorkNotFinishedCounter.Decrement();
 	}
@@ -281,7 +298,7 @@ class FAsyncTask
 		check(QueuedPool);
 		if (DoneEvent)
 		{
-			FScopeCycleCounter Scope( Task.GetStatId(), true );
+			FScopeCycleCounter Scope(StatId, true);
 			DECLARE_SCOPE_CYCLE_COUNTER( TEXT( "FAsyncTask::FinishThreadedWork" ), STAT_FAsyncTask_FinishThreadedWork, STATGROUP_ThreadPoolAsyncTasks );		
 			DoneEvent->Trigger();
 		}
@@ -290,7 +307,7 @@ class FAsyncTask
 	/** 
 	* Performs the work, this is only called from a pool thread.
 	**/
-	virtual void DoThreadedWork() override
+	void DoThreadedWork() final
 	{
 		DoWork();
 		FinishThreadedWork();
@@ -300,11 +317,10 @@ class FAsyncTask
 	 * Always called from the thread pool. Called if the task is removed from queue before it has started which might happen at exit.
 	 * If the user job can abandon, we do that, otherwise we force the work to be done now (doing nothing would not be safe).
 	 */
-	virtual void Abandon(void) override
+	void Abandon() final
 	{
-		if (Task.CanAbandon())
+		if (TryAbandonTask())
 		{
-			Task.Abandon();
 			check(WorkNotFinishedCounter.GetValue() == 1);
 			WorkNotFinishedCounter.Decrement();
 		}
@@ -313,6 +329,38 @@ class FAsyncTask
 			DoWork();
 		}
 		FinishThreadedWork();
+	}
+
+	/**
+	* Internal call to synchronize completion between threads, never called from a pool thread
+	* @param bIsLatencySensitive specifies if waiting for the task should return as soon as possible even if this delays other tasks
+	**/
+	void SyncCompletion(bool bIsLatencySensitive)
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(FAsyncTask::SyncCompletion);
+
+		FPlatformMisc::MemoryBarrier();
+		if (QueuedPool)
+		{
+			FScopeCycleCounter Scope(StatId);
+			DECLARE_SCOPE_CYCLE_COUNTER(TEXT("FAsyncTask::SyncCompletion"), STAT_FAsyncTask_SyncCompletion, STATGROUP_ThreadPoolAsyncTasks);
+
+			if (LowLevelTasks::FScheduler::Get().IsWorkerThread() && !bIsLatencySensitive)
+			{
+				LowLevelTasks::BusyWaitUntil([this]() { return IsWorkDone(); });
+			}
+
+			check(DoneEvent); // if it is not done yet, we must have an event
+			DoneEvent->Wait();
+			QueuedPool = 0;
+		}
+		CheckIdle();
+	}
+
+protected:
+	void Init(TStatId InStatId)
+	{
+		StatId = InStatId;
 	}
 
 	/** 
@@ -324,99 +372,59 @@ class FAsyncTask
 		check(!QueuedPool);
 	}
 
-	/** 
-	* Internal call to synchronize completion between threads, never called from a pool thread
-	**/
-	void SyncCompletion()
-	{
-		FPlatformMisc::MemoryBarrier();
-		if (QueuedPool)
-		{
-			FScopeCycleCounter Scope( Task.GetStatId() );
-			DECLARE_SCOPE_CYCLE_COUNTER( TEXT( "FAsyncTask::SyncCompletion" ), STAT_FAsyncTask_SyncCompletion, STATGROUP_ThreadPoolAsyncTasks );
-
-			check(DoneEvent); // if it is not done yet, we must have an event
-			DoneEvent->Wait();
-			QueuedPool = 0;
-		}
-		CheckIdle();
-	}
+	/** Perform task's work */
+	virtual void DoTaskWork() = 0;
 
 	/** 
-	* Internal call to initialize internal variables
+	* Abandon task if possible, returns true on success, false otherwise.
 	**/
-	void Init()
-	{
-		DoneEvent = 0;
-		QueuedPool = 0;
-	}
+	virtual bool TryAbandonTask() = 0;
 
 public:
-	FAsyncTask()
-		: Task()
-	{
-		// This constructor shouldn't be necessary as the forwarding constructor should handle it, but
-		// we are getting VC internal compiler errors on CIS when creating arrays of FAsyncTask.
-
-		Init();
-	}
-
-	/** Forwarding constructor. */
-	template <typename Arg0Type, typename... ArgTypes>
-	FAsyncTask(Arg0Type&& Arg0, ArgTypes&&... Args)
-		: Task(Forward<Arg0Type>(Arg0), Forward<ArgTypes>(Args)...)
-	{
-		Init();
-	}
-
 	/** Destructor, not legal when a task is in process */
-	~FAsyncTask()
+	virtual ~FAsyncTaskBase()
 	{
 		// destroying an unfinished task is a bug
 		CheckIdle();
 		DestroyEvent();
 	}
 
-	/* Retrieve embedded user job, not legal to call while a job is in process
-	* @return reference to embedded user job 
-	**/
-	TTask &GetTask()
+	/**
+	 * Returns an approximation of the peak memory (in bytes) this task could require during it's execution.
+	 **/
+	int64 GetRequiredMemory() const final
 	{
-		CheckIdle();  // can't modify a job without it being completed first
-		return Task;
+		return RequiredMemory;
 	}
-
-	/* Retrieve embedded user job, not legal to call while a job is in process
-	* @return reference to embedded user job 
-	**/
-	const TTask &GetTask() const
+	
+	const TCHAR * GetDebugName() const final
 	{
-		CheckIdle();  // could be safe, but I won't allow it anyway because the data could be changed while it is being read
-		return Task;
+		return DebugName;
 	}
 
 	/** 
 	* Run this task on this thread
 	* @param bDoNow if true then do the job now instead of at EnsureCompletion
 	**/
-	void StartSynchronousTask()
+	void StartSynchronousTask(EQueuedWorkPriority InQueuedWorkPriority = EQueuedWorkPriority::Normal, EQueuedWorkFlags InQueuedWorkFlags = EQueuedWorkFlags::None, int64 InRequiredMemory = -1, const TCHAR * InDebugName = nullptr)
 	{
-		Start(true, GThreadPool);
+		Start(true, GThreadPool, InQueuedWorkPriority, InQueuedWorkFlags, InRequiredMemory, InDebugName);
 	}
 
 	/** 
 	* Queue this task for processing by the background thread pool
 	**/
-	void StartBackgroundTask(FQueuedThreadPool* InQueuedPool = GThreadPool)
+	void StartBackgroundTask(FQueuedThreadPool* InQueuedPool = GThreadPool, EQueuedWorkPriority InQueuedWorkPriority = EQueuedWorkPriority::Normal, EQueuedWorkFlags InQueuedWorkFlags = EQueuedWorkFlags::None, int64 InRequiredMemory = -1, const TCHAR * InDebugName = nullptr)
 	{
-		Start(false, InQueuedPool);
+		Start(false, InQueuedPool, InQueuedWorkPriority, InQueuedWorkFlags, InRequiredMemory, InDebugName);
 	}
 
 	/** 
 	* Wait until the job is complete
 	* @param bDoWorkOnThisThreadIfNotStarted if true and the work has not been started, retract the async task and do it now on this thread
+	* @param specifies if waiting for the task should return as soon as possible even if this delays other tasks
 	**/
-	void EnsureCompletion(bool bDoWorkOnThisThreadIfNotStarted = true)
+	void EnsureCompletion(bool bDoWorkOnThisThreadIfNotStarted = true, bool bIsLatencySensitive = false)
 	{
 		bool DoSyncCompletion = true;
 		if (bDoWorkOnThisThreadIfNotStarted)
@@ -439,9 +447,29 @@ public:
 		}
 		if (DoSyncCompletion)
 		{
-			SyncCompletion();
+			SyncCompletion(bIsLatencySensitive);
 		}
 		CheckIdle(); // Must have had bDoWorkOnThisThreadIfNotStarted == false and needed it to be true for a synchronous job
+	}
+	
+	/**
+	* If not already being processed, will be rescheduled on given thread pool and priority.
+	* @return true if the reschedule was successful, false if was already being processed.
+	**/
+	bool Reschedule(FQueuedThreadPool* InQueuedPool = GThreadPool, EQueuedWorkPriority InQueuedWorkPriority = EQueuedWorkPriority::Normal)
+	{
+		if (QueuedPool)
+		{
+			if (QueuedPool->RetractQueuedWork(this))
+			{
+				QueuedPool = InQueuedPool;
+				Priority = InQueuedWorkPriority;
+				QueuedPool->AddQueuedWork(this, InQueuedWorkPriority);
+				
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -467,16 +495,20 @@ public:
 
 	/**
 	* Wait until the job is complete, up to a time limit
-	* @param TimeLimitSeconds Must be positive, if you want to wait forever or poll, use a different call.
+	* @param TimeLimitSeconds Must be positive, otherwise polls -- same as calling IsDone()
 	* @return true if the task is completed
 	**/
 	bool WaitCompletionWithTimeout(float TimeLimitSeconds)
 	{
-		check(TimeLimitSeconds > 0.0f)
+		if (TimeLimitSeconds <= 0.0f)
+		{
+			return IsDone();
+		}
+
 		FPlatformMisc::MemoryBarrier();
 		if (QueuedPool)
 		{
-			FScopeCycleCounter Scope(Task.GetStatId());
+			FScopeCycleCounter Scope(StatId);
 			DECLARE_SCOPE_CYCLE_COUNTER(TEXT("FAsyncTask::SyncCompletion"), STAT_FAsyncTask_SyncCompletion, STATGROUP_ThreadPoolAsyncTasks);
 
 			uint32 Ms = uint32(TimeLimitSeconds * 1000.0f) + 1;
@@ -504,7 +536,7 @@ public:
 		{
 			return false;
 		}
-		SyncCompletion();
+		SyncCompletion(/*bIsLatencySensitive = */false);
 		return true;
 	}
 
@@ -527,6 +559,75 @@ public:
 	bool IsIdle() const
 	{
 		return WorkNotFinishedCounter.GetValue() == 0 && QueuedPool == 0;
+	}
+
+	bool SetPriority(EQueuedWorkPriority QueuedWorkPriority)
+	{
+		return Reschedule(QueuedPool, QueuedWorkPriority);
+	}
+
+	EQueuedWorkPriority GetPriority() const
+	{
+		return Priority;
+	}
+};
+
+template<typename TTask>
+class FAsyncTask
+	: public FAsyncTaskBase
+{
+	/** User job embedded in this task */ 
+	TTask Task;
+
+public:
+	FAsyncTask()
+		: Task()
+	{
+		// Cache the StatId to remain backward compatible with TTask that declare GetStatId as non-const.
+		Init(Task.GetStatId());
+	}
+
+	/** Forwarding constructor. */
+	template <typename Arg0Type, typename... ArgTypes>
+	FAsyncTask(Arg0Type&& Arg0, ArgTypes&&... Args)
+		: Task(Forward<Arg0Type>(Arg0), Forward<ArgTypes>(Args)...)
+	{
+		// Cache the StatId to remain backward compatible with TTask that declare GetStatId as non-const.
+		Init(Task.GetStatId());
+	}
+
+	/* Retrieve embedded user job, not legal to call while a job is in process
+	* @return reference to embedded user job
+	**/
+	TTask& GetTask()
+	{
+		CheckIdle();  // can't modify a job without it being completed first
+		return Task;
+	}
+
+	/* Retrieve embedded user job, not legal to call while a job is in process
+	* @return reference to embedded user job
+	**/
+	const TTask& GetTask() const
+	{
+		CheckIdle();  // could be safe, but I won't allow it anyway because the data could be changed while it is being read
+		return Task;
+	}
+
+	bool TryAbandonTask() final
+	{
+		if (Task.CanAbandon())
+		{
+			Task.Abandon();
+			return true;
+		}
+
+		return false;
+	}
+
+	void DoTaskWork() final
+	{
+		Task.DoWork();
 	}
 };
 

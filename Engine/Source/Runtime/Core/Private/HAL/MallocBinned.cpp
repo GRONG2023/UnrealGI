@@ -169,7 +169,7 @@ struct FMallocBinned::Private
 #if USE_OS_SMALL_BLOCK_ALLOC
 #if USE_OS_SMALL_BLOCK_GRAB_MEMORY_FROM_OS
 	enum { SMALL_BLOCK_MAX_TOTAL_POOL_SIZE = 0x20000000 };
-	enum { SMALL_BLOCK_GRAB_ALLOC_ALIGN = 16 };
+	enum { SMALL_BLOCK_GRAB_ALLOC_ALIGN = DEFAULT_BINNED_ALLOCATOR_ALIGNMENT };
 	enum { SMALL_BLOCK_GRAB_MAX_ALLOC_SIZE = 256 };
 	enum { SMALL_BLOCK_GRAB_MIN_ALLOC_SIZE = SMALL_BLOCK_GRAB_ALLOC_ALIGN };
 	
@@ -613,7 +613,7 @@ struct FMallocBinned::Private
 		UPTRINT OsBytes = Align(Bytes, PageSize);
 
 		checkSlow(Blocks >= 1);
-		checkSlow(Blocks * Table->BlockSize <= Bytes && PoolSize >= Bytes);
+		checkSlow(PoolSize >= Bytes);
 		
 		FFreeMem* Free = nullptr;
 		SIZE_T ActualPoolSize; //TODO: use this to reduce waste?
@@ -628,7 +628,7 @@ struct FMallocBinned::Private
 			Free = (FFreeMem*)OSAlloc(Allocator, OsBytes, ActualPoolSize);
 		}
 		
-		checkSlow(!((UPTRINT)Free & (PageSize - 1)));
+        checkSlow(IsAligned(Free, PageSize));
 		if( !Free )
 		{
 			OutOfMemory(OsBytes);
@@ -766,7 +766,7 @@ struct FMallocBinned::Private
 		else
 		{
 			// Free an OS allocation.
-			checkSlow(!((UPTRINT)Ptr & (Allocator.PageSize - 1)));
+			checkSlow(IsAligned(Ptr, Allocator.PageSize));
 			SIZE_T OsBytes = Pool->GetOsBytes(Allocator.PageSize, Allocator.BinnedOSTableIndex);
 
 			BINNED_ADD_STATCOUNTER(Allocator.UsedCurrent,  -(int64)Pool->GetBytes());
@@ -884,7 +884,9 @@ struct FMallocBinned::Private
 	static FORCEINLINE void SmallOSFree(FMallocBinned& Allocator, void* Ptr, SIZE_T Size)
 	{
 #if PLATFORM_IOS
+		LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelFree(ELLMTracker::Platform, Ptr));
 		::free(Ptr);
+		Allocator.bNanoMallocAvailable = true;
 #else
 		FPlatformMemory::BinnedFreeToOS(Ptr, Size);
 #endif
@@ -963,6 +965,7 @@ struct FMallocBinned::Private
 		{
 			UE_LOG(LogTemp, Warning, TEXT("malloc failure allocating %d, error code: %d"), NewSize, errno);
 		}
+		LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelAlloc(ELLMTracker::Platform, Ptr, NewSize));
 		return Ptr;
 #else
 		(void)OutActualSize;
@@ -1156,6 +1159,7 @@ FMallocBinned::FMallocBinned(uint32 InPageSize, uint64 AddressLimit)
 #if USE_OS_SMALL_BLOCK_ALLOC
 	
 	FPlatformMemory::NanoMallocInit();
+	bNanoMallocAvailable = FPlatformMemory::IsNanoMallocAvailable();
 	
 #if USE_OS_SMALL_BLOCK_GRAB_MEMORY_FROM_OS
 
@@ -1285,20 +1289,21 @@ void* FMallocBinned::Malloc(SIZE_T Size, uint32 Alignment)
 #ifdef USE_COARSE_GRAIN_LOCKS
 	FScopeLock ScopedLock(&AccessGuard);
 #endif
+    
+    ensure(Alignment <= PageSize);
 
 	Private::FlushPendingFrees(*this);
 
-	Alignment = FMath::Max<uint32>(Alignment, Private::DEFAULT_BINNED_ALLOCATOR_ALIGNMENT);
-	Size = Align(Size, Alignment);
 	MEM_TIME(MemTime -= FPlatformTime::Seconds());
 	
 	BINNED_INCREMENT_STATCOUNTER(CurrentAllocs);
 	BINNED_INCREMENT_STATCOUNTER(TotalAllocs);
 	
+	Size = FMath::Max(Size, (SIZE_T)1);
 	FFreeMem* Free = nullptr;
 	bool bUsePools = true;
 #if USE_OS_SMALL_BLOCK_ALLOC && !USE_OS_SMALL_BLOCK_GRAB_MEMORY_FROM_OS
-	if (FPlatformMemory::IsNanoMallocAvailable() && Size <= Private::SMALL_BLOCK_POOL_SIZE)
+	if (bNanoMallocAvailable && (Size <= Private::SMALL_BLOCK_POOL_SIZE) && (Alignment <= Private::DEFAULT_BINNED_ALLOCATOR_ALIGNMENT))
 	{
 		//Make sure we have initialized our hash buckets even if we are using the NANO_MALLOC grabber, as otherwise we can end
 		//up making bad assumptions and trying to grab invalid data during a Realloc of this data.
@@ -1308,32 +1313,33 @@ void* FMallocBinned::Malloc(SIZE_T Size, uint32 Alignment)
 		}
 
 		bUsePools = false;
-		UPTRINT AlignedSize = Align(Size, Alignment);
 		SIZE_T ActualPoolSize; //TODO: use this to reduce waste?
-		Free = (FFreeMem*)Private::SmallOSAlloc(*this, AlignedSize, ActualPoolSize);
+		Free = (FFreeMem*)Private::SmallOSAlloc(*this, Size, ActualPoolSize);
 		check(FPlatformMemory::PtrIsOSMalloc(Free));
 		
 		if(!FPlatformMemory::PtrIsFromNanoMalloc(Free))
 		{
 			// This means we've overflowed the nano zone's internal buckets, which are fixed
 			// So we need to fall back to UE's allocator
-			Private::SmallOSFree(*this, Free, AlignedSize);
+			Private::SmallOSFree(*this, Free, Size);
 			bUsePools = true;
 			Free = nullptr;
+			bNanoMallocAvailable = false;
 		}
 	}
 #endif
 	if (bUsePools)
 	{
-		if( Size < BinnedSizeLimit)
+		Alignment = FMath::Max<uint32>(Alignment, Private::DEFAULT_BINNED_ALLOCATOR_ALIGNMENT);
+		const uint32 PAGE_ALIGNMENT = 4096;
+
+		if( (Size < BinnedSizeLimit) && (Alignment == Private::DEFAULT_BINNED_ALLOCATOR_ALIGNMENT) )
 		{
 			// Allocate from pool.
 			FPoolTable* Table = MemSizeToPoolTable[Size];
 #ifdef USE_FINE_GRAIN_LOCKS
 			FScopeLock TableLock(&Table->CriticalSection);
 #endif
-			checkSlow(Size <= Table->BlockSize);
-
 			Private::TrackStats(Table, (uint32)Size);
 
 			FPoolInfo* Pool = Table->FirstPool;
@@ -1345,7 +1351,7 @@ void* FMallocBinned::Malloc(SIZE_T Size, uint32 Alignment)
 			Free = Private::AllocateBlockFromPool(*this, Table, Pool, Alignment);
 		}
 		else if ( ((Size >= BinnedSizeLimit && Size <= PagePoolTable[0].BlockSize) ||
-				   (Size > PageSize && Size <= PagePoolTable[1].BlockSize)))
+				   (Size > PageSize && Size <= PagePoolTable[1].BlockSize)) && (Alignment <= PAGE_ALIGNMENT))
 		{
 			// Bucket in a pool of 3*PageSize or 6*PageSize
 			uint32 BinType = Size < PageSize ? 0 : 1;
@@ -1354,8 +1360,6 @@ void* FMallocBinned::Malloc(SIZE_T Size, uint32 Alignment)
 #ifdef USE_FINE_GRAIN_LOCKS
 			FScopeLock TableLock(&Table->CriticalSection);
 #endif
-			checkSlow(Size <= Table->BlockSize);
-
 			Private::TrackStats(Table, (uint32)Size);
 
 			FPoolInfo* Pool = Table->FirstPool;
@@ -1418,11 +1422,7 @@ void* FMallocBinned::Malloc(SIZE_T Size, uint32 Alignment)
 void* FMallocBinned::Realloc( void* Ptr, SIZE_T NewSize, uint32 Alignment )
 {
 	Alignment = FMath::Max<uint32>(Alignment, Private::DEFAULT_BINNED_ALLOCATOR_ALIGNMENT);
-	const uint32 NewSizeUnmodified = NewSize;
-	if (NewSize)
-	{
-		NewSize = Align(NewSize, Alignment);
-	}
+    ensure(Alignment <= PageSize);
 	MEM_TIME(MemTime -= FPlatformTime::Seconds());
 	UPTRINT BasePtr;
 	void* NewPtr = Ptr;
@@ -1431,17 +1431,26 @@ void* FMallocBinned::Realloc( void* Ptr, SIZE_T NewSize, uint32 Alignment )
 #if USE_OS_SMALL_BLOCK_ALLOC && !USE_OS_SMALL_BLOCK_GRAB_MEMORY_FROM_OS
 		if(FPlatformMemory::PtrIsOSMalloc(Ptr))
 		{
-			NewPtr = ::realloc(Ptr, NewSize);
-			
-			if(!FPlatformMemory::PtrIsFromNanoMalloc(NewPtr))
-			{
-				// We've overflowed the nano region
-				// Fall back to UE's allocator
-				Ptr = NewPtr;
-				NewPtr = Malloc(NewSizeUnmodified, Alignment);
-				FMemory::Memcpy(NewPtr, Ptr, NewSize);
-				Private::SmallOSFree(*this, Ptr, NewSize);
-			}
+            bool bFallback = true;
+            const SIZE_T OldSize = malloc_size(Ptr);
+            if ((NewSize <= Private::SMALL_BLOCK_POOL_SIZE) && (Alignment <= Private::DEFAULT_BINNED_ALLOCATOR_ALIGNMENT))
+            {
+                LLM_PLATFORM_SCOPE(ELLMTag::FMalloc);
+				LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelFree(ELLMTracker::Platform, Ptr));
+                NewPtr = ::realloc(Ptr, NewSize);
+				LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelAlloc(ELLMTracker::Platform, NewPtr, NewSize));
+                bFallback = !FPlatformMemory::PtrIsFromNanoMalloc(NewPtr);
+            }
+
+            if (bFallback)
+            {
+                // We've overflowed the nano region
+                // Fall back to UE's allocator
+                Ptr = NewPtr;
+                NewPtr = Malloc(NewSize, Alignment);
+                FMemory::Memcpy(NewPtr, Ptr, OldSize);
+                Private::SmallOSFree(*this, Ptr, OldSize);
+            }
 		}
 		else
 #endif
@@ -1452,16 +1461,12 @@ void* FMallocBinned::Realloc( void* Ptr, SIZE_T NewSize, uint32 Alignment )
 			{
 				// Allocated from pool, so grow or shrink if necessary.
 				check(Pool->TableIndex > 0); // it isn't possible to allocate a size of 0, Malloc will increase the size to DEFAULT_BINNED_ALLOCATOR_ALIGNMENT
-				if (NewSizeUnmodified > MemSizeToPoolTable[Pool->TableIndex]->BlockSize || NewSizeUnmodified <= MemSizeToPoolTable[Pool->TableIndex - 1]->BlockSize)
+				if (NewSize > MemSizeToPoolTable[Pool->TableIndex]->BlockSize || NewSize <= MemSizeToPoolTable[Pool->TableIndex - 1]->BlockSize
+					|| !IsAligned(Ptr, Alignment))		// If reallocation requires a pointer to have a different alignment than the original we need to allocate new mem and copy old over
 				{
-					NewPtr = Malloc(NewSizeUnmodified, Alignment);
-					FMemory::Memcpy(NewPtr, Ptr, FMath::Min<SIZE_T>(NewSizeUnmodified, MemSizeToPoolTable[Pool->TableIndex]->BlockSize));
+					NewPtr = Malloc(NewSize, Alignment);
+					FMemory::Memcpy(NewPtr, Ptr, FMath::Min<SIZE_T>(NewSize, MemSizeToPoolTable[Pool->TableIndex]->BlockSize));
 					Free( Ptr );
-				}
-				else if (((UPTRINT)Ptr & (UPTRINT)(Alignment - 1)) != 0)
-				{
-					NewPtr = Align(Ptr, Alignment);
-					FMemory::Memmove(NewPtr, Ptr, NewSize);
 				}
 			}
 			else
@@ -1470,8 +1475,8 @@ void* FMallocBinned::Realloc( void* Ptr, SIZE_T NewSize, uint32 Alignment )
 				if( NewSize > Pool->GetOsBytes(PageSize, BinnedOSTableIndex) || NewSize * 3 < Pool->GetOsBytes(PageSize, BinnedOSTableIndex) * 2 )
 				{
 					// Grow or shrink.
-					NewPtr = Malloc(NewSizeUnmodified, Alignment);
-					FMemory::Memcpy(NewPtr, Ptr, FMath::Min<SIZE_T>(NewSizeUnmodified, Pool->GetBytes()));
+					NewPtr = Malloc(NewSize, Alignment);
+					FMemory::Memcpy(NewPtr, Ptr, FMath::Min<SIZE_T>(NewSize, Pool->GetBytes()));
 					Free( Ptr );
 				}
 				else
@@ -1486,14 +1491,14 @@ void* FMallocBinned::Realloc( void* Ptr, SIZE_T NewSize, uint32 Alignment )
 					BINNED_ADD_STATCOUNTER(UsedCurrent, UsedChange);
 					BINNED_PEAK_STATCOUNTER(UsedPeak, UsedCurrent);
 					BINNED_ADD_STATCOUNTER(WasteCurrent, (Pool->GetBytes() - NewSize));
-					Pool->SetAllocationSizes(NewSizeUnmodified, Pool->GetOsBytes(PageSize, BinnedOSTableIndex), BinnedOSTableIndex, BinnedOSTableIndex);
+					Pool->SetAllocationSizes(NewSize, Pool->GetOsBytes(PageSize, BinnedOSTableIndex), BinnedOSTableIndex, BinnedOSTableIndex);
 				}
 			}
 		}
 	}
 	else if( Ptr == nullptr )
 	{
-		NewPtr = Malloc(NewSizeUnmodified, Alignment);
+		NewPtr = Malloc(NewSize, Alignment);
 	}
 	else
 	{
@@ -1528,7 +1533,7 @@ bool FMallocBinned::GetAllocationSize(void *Original, SIZE_T &SizeOut)
 #if USE_OS_SMALL_BLOCK_ALLOC && !USE_OS_SMALL_BLOCK_GRAB_MEMORY_FROM_OS
 	if(FPlatformMemory::PtrIsOSMalloc(Original))
 	{
-		SizeOut = Private::SMALL_BLOCK_POOL_SIZE;
+		SizeOut = malloc_size(Original);
 		return true;
 	}
 #endif
@@ -1560,7 +1565,7 @@ bool FMallocBinned::GetAllocationSize(void *Original, SIZE_T &SizeOut)
 SIZE_T FMallocBinned::QuantizeSize(SIZE_T Size, uint32 Alignment)
 {
 	Alignment = FMath::Max<uint32>(Alignment, Private::DEFAULT_BINNED_ALLOCATOR_ALIGNMENT);
-	Size = Align(Size, Alignment);
+    ensure(Alignment <= PageSize);
 
 	SIZE_T Result;
 #if USE_OS_SMALL_BLOCK_ALLOC && !USE_OS_SMALL_BLOCK_GRAB_MEMORY_FROM_OS
@@ -1810,4 +1815,4 @@ const TCHAR* FMallocBinned::GetDescriptiveName()
 	return TEXT("binned");
 }
 
-PRAGMA_ENABLE_UNSAFE_TYPECAST_WARNINGS
+PRAGMA_RESTORE_UNSAFE_TYPECAST_WARNINGS

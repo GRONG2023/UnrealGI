@@ -1,8 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "GenericPlatform/GenericPlatformMisc.h"
+#include "HAL/IConsoleManager.h"
 #include "Misc/AssertionMacros.h"
-#include "HAL/PlatformFilemanager.h"
+#include "Misc/CoreDelegates.h"
+#include "HAL/PlatformFileManager.h"
 #include "HAL/CriticalSection.h"
 #include "Misc/ScopeRWLock.h"
 #include "Math/UnrealMathUtility.h"
@@ -14,6 +16,7 @@
 #include "Misc/Parse.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Paths.h"
+#include "Misc/PathViews.h"
 #include "Misc/FileHelper.h"
 #include "Internationalization/Text.h"
 #include "Internationalization/Internationalization.h"
@@ -22,6 +25,7 @@
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/App.h"
 #include "GenericPlatform/GenericPlatformChunkInstall.h"
+#include "GenericPlatform/GenericPlatformHostCommunication.h"
 #include "HAL/FileManagerGeneric.h"
 #include "Misc/VarargsHelper.h"
 #include "Misc/SecureHash.h"
@@ -33,9 +37,11 @@
 #include "Templates/Function.h"
 #include "Modules/ModuleManager.h"
 #include "Misc/LazySingleton.h"
-
+#include <atomic>
 #include "Misc/UProjectInfo.h"
 #include "Internationalization/Culture.h"
+#include "ProfilingDebugging/CsvProfiler.h"
+#include "Misc/CoreDelegates.h"
 
 #if UE_ENABLE_ICU
 	THIRD_PARTY_INCLUDES_START
@@ -43,10 +49,215 @@
 	THIRD_PARTY_INCLUDES_END
 #endif
 
+#if !defined(PLATFORM_PROJECT_DIR_RELATIVE_TO_EXECUTABLE)
+	#define PLATFORM_PROJECT_DIR_RELATIVE_TO_EXECUTABLE PLATFORM_DESKTOP
+#endif
+
 DEFINE_LOG_CATEGORY_STATIC(LogGenericPlatformMisc, Log, All);
 
+
+#if (CSV_PROFILER && !UE_BUILD_SHIPPING)
+bool GTrackCsvNamedEvents = false;
+static FAutoConsoleVariableRef CVarTrackCsvNamedEvents(
+	TEXT("r.TrackCsvNamedEvents"),
+	GTrackCsvNamedEvents,
+	TEXT("Whether to record named events in the csv profiler"),
+	ECVF_Default
+);
+static std::atomic<uint32> GNamedEventMarkers(0L);
+#endif
+
+
+#define LOG_NAMED_EVENTS 0
+#if LOG_NAMED_EVENTS
+struct FNameEventEntry
+{
+	FNameEventEntry()
+		: FrameCount(0)
+		, MaxFrameCount(0)
+		, Total(0) {}
+
+	uint64 FrameCount;
+	uint64 MaxFrameCount;
+	uint64 Total;
+};
+
+struct FLogNameEventStats
+{
+	enum class EOutputSort : uint8
+	{
+		SORTTYPE_Spike,
+		SORTTYPE_Average,
+		SORTTYPE_Total,
+	};
+
+	FLogNameEventStats()
+	{
+		MaxOutput = 100;
+		SortingType = EOutputSort::SORTTYPE_Spike;
+		StartFrame = 0;
+	}
+
+	void Init()
+	{
+		GConfig->GetArray(TEXT("SystemSettings"), TEXT("LogNamedEventFilters"), NamedEventExclusions, GEngineIni);
+	}
+
+	void Dump()
+	{
+		FScopeLock Lock(&NamedEventsCriticalSection);
+
+		int32 LogCount = (MaxOutput < 0) ? NamedEventsMap.Num() : MaxOutput;
+		float CurrentFrameCount = (float)GFrameCounter;
+		
+		UE_LOG(LogGenericPlatformMisc, Log, TEXT("*********Log Named Events *********"));
+		UE_LOG(LogGenericPlatformMisc, Log, TEXT("******* Top %i NamedEvents"), LogCount);
+		
+		if (SortingType == EOutputSort::SORTTYPE_Total)
+		{
+			NamedEventsMap.ValueSort([&](const FNameEventEntry& A, const FNameEventEntry& B) { return A.Total > B.Total; });
+		}
+		else if (SortingType == EOutputSort::SORTTYPE_Average)
+		{
+			NamedEventsMap.ValueSort([&](const FNameEventEntry& A, const FNameEventEntry& B) { return (float)A.Total / (CurrentFrameCount - (float)StartFrame) > (float)B.Total / (CurrentFrameCount - (float)StartFrame); });
+		}
+		else 
+		{
+			NamedEventsMap.ValueSort([&](const FNameEventEntry& A, const FNameEventEntry& B) { return A.MaxFrameCount > B.MaxFrameCount; });
+		}
+
+		uint64 Total = 0;
+		int32 Index = 0;
+
+		for (const TPair<FName, FNameEventEntry>& Pair : NamedEventsMap)
+		{
+			if (Index <= LogCount)
+			{
+				UE_LOG(LogGenericPlatformMisc, Log, TEXT("%s : Max: %lu Total: %lu Avg: %f"), *(Pair.Key.ToString()), Pair.Value.MaxFrameCount, Pair.Value.Total, (float)Pair.Value.Total / (CurrentFrameCount - (float)StartFrame));
+			}
+			Total += Pair.Value.Total;
+			Index++;
+		}
+		UE_LOG(LogGenericPlatformMisc, Log, TEXT("***********************************"));
+		UE_LOG(LogGenericPlatformMisc, Log, TEXT("Total Unique NamedEvents: %i"), NamedEventsMap.Num());
+		UE_LOG(LogGenericPlatformMisc, Log, TEXT("Average NamedEvents per frame: %f"), (float)Total / (CurrentFrameCount - (float)StartFrame));
+		UE_LOG(LogGenericPlatformMisc, Log, TEXT("*********Log Named Events *********"));
+	}
+
+	void Reset()
+	{
+		FScopeLock Lock(&NamedEventsCriticalSection);
+		NamedEventsMap.Empty();
+		StartFrame = GFrameCounter;
+	}
+
+	void ParseSortType(const FString& Arg)
+	{
+		if (Arg.Equals(TEXT("Avg"), ESearchCase::IgnoreCase))
+		{
+			SortingType = EOutputSort::SORTTYPE_Average;
+		}
+		else if (Arg.Equals(TEXT("Spike"), ESearchCase::IgnoreCase))
+		{
+			SortingType = EOutputSort::SORTTYPE_Spike;
+		}
+		else if(Arg.Equals(TEXT("Total"), ESearchCase::IgnoreCase))
+		{
+			SortingType = EOutputSort::SORTTYPE_Total;
+		}
+		else
+		{
+			UE_LOG(LogGenericPlatformMisc, Log, TEXT("LogNamadEvent: Bad Sort argument. Option: Avg, Spike or Total"));
+		}
+	}
+
+	void LogEntry(const FString& Text)
+	{
+		// check for exclusion markers that we dont want to track each frames 
+	    // Ex: Frame 1, Frame 2, Frame 3
+		// You can specify +LogNamedEventFilters="Frame *" in the DefaultEngine.ini to exlude them 
+		for (FString& Exclusion : NamedEventExclusions)
+		{
+			if (Text.MatchesWildcard(Exclusion))
+			{
+				return;
+			}
+		}
+		FScopeLock Lock(&NamedEventsCriticalSection);
+		FNameEventEntry& StatNameEvent = NamedEventsMap.FindOrAdd(FName(Text));
+		StatNameEvent.FrameCount++;
+	}
+
+	void BeginFrame()
+	{
+		uint64 FrameCount = 0;
+		FScopeLock Lock(&NamedEventsCriticalSection);
+		for (TPair<FName, FNameEventEntry>& Pair : NamedEventsMap)
+		{
+			FNameEventEntry& Data = Pair.Value;
+			if (Data.FrameCount > Data.MaxFrameCount)
+			{
+				Data.MaxFrameCount = Data.FrameCount;
+			}
+			Data.Total += Data.FrameCount;
+			Data.FrameCount = 0;
+		}
+	}
+
+	int32 MaxOutput;
+	uint64 StartFrame;
+	EOutputSort SortingType;
+
+	TMap<FName, FNameEventEntry> NamedEventsMap;
+	TArray<FString> NamedEventExclusions;
+	FCriticalSection NamedEventsCriticalSection;
+};
+static FLogNameEventStats LogNameEventStats;
+
+static FAutoConsoleCommand GLogNamedEventsCmd(
+	TEXT("LogNamedEvents"),
+	TEXT("Log named events Commands. LogNamedEvents Dump, Reset, Sort [Avg|Spike|Total], MaxOutput [int value]"),
+		FConsoleCommandWithArgsDelegate::CreateStatic([](const TArray<FString>& Args)
+		{
+			bool bDumpNamedEvent = false;
+
+			if (Args.Num() >= 1)
+			{
+				if (Args[0].Compare(FString(TEXT("Reset")), ESearchCase::IgnoreCase) == 0)
+				{
+					LogNameEventStats.StartFrame = GFrameCounter;
+					LogNameEventStats.Reset();
+				}
+				else if (Args[0].Compare(FString(TEXT("Dump")), ESearchCase::IgnoreCase) == 0)
+				{
+					LogNameEventStats.Dump();
+				}
+				else if (Args[0].Compare(FString(TEXT("Sort")), ESearchCase::IgnoreCase) == 0)
+				{
+					if (Args.Num() == 2)
+					{
+						LogNameEventStats.ParseSortType(Args[1]);
+					}
+				}
+				else if (Args[0].Compare(FString(TEXT("MaxOutput")), ESearchCase::IgnoreCase) == 0)
+				{
+					if (Args.Num() == 2)
+					{
+						LogNameEventStats.MaxOutput = FCString::Atoi(*Args[1]);
+					}
+				}
+				else
+				{
+					UE_LOG(LogGenericPlatformMisc, Log, TEXT("LogNamadEvent: Bad argument. Option: Reset, Dump, Sort [Avg,Sort,Total] or MaxOutput [int]"));
+				}
+			}
+		}
+	)
+);
+#endif//LOG_NAMED_EVENTS
+
 /** Holds an override path if a program has special needs */
-FString OverrideProjectDir;
+static FString GOverrideProjectDir;
 
 /** Hooks for moving ClipboardCopy and ClipboardPaste into FPlatformApplicationMisc */
 CORE_API void (*ClipboardCopyShim)(const TCHAR* Text) = nullptr;
@@ -236,6 +447,39 @@ FString FSHA256Signature::ToString() const
 	return LocalHashStr;
 }
 
+const TCHAR* LexToString(ENetworkConnectionStatus EnumVal)
+{
+	switch (EnumVal)
+	{
+	case ENetworkConnectionStatus::Unknown:		return TEXT("Unknown");
+	case ENetworkConnectionStatus::Disabled:	return TEXT("Disabled");
+	case ENetworkConnectionStatus::Local:		return TEXT("Local");
+	case ENetworkConnectionStatus::Connected:	return TEXT("Connected");
+	}
+
+	checkNoEntry();
+	return TEXT("Unknown");
+}
+
+ENetworkConnectionStatus FGenericPlatformMisc::GetNetworkConnectionStatus()
+{
+	return CurrentNetworkConnectionStatus;
+}
+
+void FGenericPlatformMisc::SetNetworkConnectionStatus(ENetworkConnectionStatus NewNetworkConnectionStatus)
+{
+	const ENetworkConnectionStatus OldNetworkConnectionStatus = CurrentNetworkConnectionStatus;
+
+	if (OldNetworkConnectionStatus != NewNetworkConnectionStatus)
+	{
+		CurrentNetworkConnectionStatus = NewNetworkConnectionStatus;
+
+		QUICK_SCOPE_CYCLE_COUNTER(STAT_FGenericPlatformMisc_SetNetworkConnectionStatus);
+
+		FCoreDelegates::OnNetworkConnectionStatusChanged.Broadcast(OldNetworkConnectionStatus, NewNetworkConnectionStatus);
+	}
+}
+
 /* ENetworkConnectionType interface
  *****************************************************************************/
 
@@ -276,6 +520,10 @@ FString FSHA256Signature::ToString() const
 	bool FGenericPlatformMisc::bShouldPromptForRemoteDebugging = false;
 	bool FGenericPlatformMisc::bPromptForRemoteDebugOnEnsure = false;
 #endif	//#if !UE_BUILD_SHIPPING
+
+EDeviceScreenOrientation FGenericPlatformMisc::AllowedDeviceOrientation = EDeviceScreenOrientation::Unknown;
+
+ENetworkConnectionStatus FGenericPlatformMisc::CurrentNetworkConnectionStatus = ENetworkConnectionStatus::Connected;
 
 struct FGenericPlatformMisc::FStaticData
 {
@@ -369,6 +617,28 @@ void FGenericPlatformMisc::SubmitErrorReport( const TCHAR* InErrorHist, EErrorRe
 	}
 }
 
+EProcessDiagnosticFlags FGenericPlatformMisc::GetProcessDiagnostics()
+{
+	static EProcessDiagnosticFlags FoundDiagnostics = []() -> EProcessDiagnosticFlags
+	{
+		EProcessDiagnosticFlags Result = EProcessDiagnosticFlags::None;
+		const TCHAR* CommandLine = FCommandLine::Get();
+
+		if (FCString::Stristr(CommandLine, TEXT("-ansimalloc")))
+		{
+			Result |= EProcessDiagnosticFlags::AnsiMalloc;
+		}
+
+		if (FCString::Stristr(CommandLine, TEXT("-stompmalloc")))
+		{
+			Result |= EProcessDiagnosticFlags::StompMalloc;
+		}
+
+		return Result;
+	}();
+
+	return FoundDiagnostics;
+}
 
 FString FGenericPlatformMisc::GetCPUVendor()
 {
@@ -464,50 +734,66 @@ void FGenericPlatformMisc::RaiseException(uint32 ExceptionCode)
 	/** This is the last place to gather memory stats before exception. */
 	FGenericCrashContext::SetMemoryStats(FPlatformMemory::GetStats());
 
-#if HACK_HEADER_GENERATOR && !PLATFORM_EXCEPTIONS_DISABLED
-	// We want Unreal Header Tool to throw an exception but in normal runtime code 
-	// we don't support exception handling
-	throw(ExceptionCode);
-#else	
 	*((uint32*)3) = ExceptionCode;
+}
+
+template<typename CharType>
+void FGenericPlatformMisc::StatNamedEvent(const CharType* Text)
+{
+#if (CSV_PROFILER && !UE_BUILD_SHIPPING)
+	if (GTrackCsvNamedEvents)
+	{
+		++GNamedEventMarkers;
+	}
+#endif
+#if LOG_NAMED_EVENTS
+	FString NamedEvent(Text);
+	LogNameEventStats.LogEntry(NamedEvent);
+#endif
+}
+
+template CORE_API void FGenericPlatformMisc::StatNamedEvent<ANSICHAR>(const ANSICHAR* Text);
+template CORE_API void FGenericPlatformMisc::StatNamedEvent<TCHAR>(const TCHAR* Text);
+
+void FGenericPlatformMisc::TickStatNamedEvents()
+{
+#if (CSV_PROFILER && !UE_BUILD_SHIPPING)
+	if (GTrackCsvNamedEvents)
+	{
+		int32 NamedEventCount = GNamedEventMarkers.exchange(0);
+		CSV_CUSTOM_STAT_GLOBAL(NamedEventMarkers, NamedEventCount, ECsvCustomStatOp::Set);
+	}
+#endif
+#if LOG_NAMED_EVENTS
+	LogNameEventStats.BeginFrame();
+#endif 
+}
+
+void FGenericPlatformMisc::LogNameEventStatsInit()
+{
+#if LOG_NAMED_EVENTS
+	LogNameEventStats.Init();
 #endif
 }
 
 void FGenericPlatformMisc::BeginNamedEvent(const struct FColor& Color, const ANSICHAR* Text)
 {
 #if UE_EXTERNAL_PROFILING_ENABLED
-	//If there's an external profiler attached, trigger its scoped event.
-	FExternalProfiler* CurrentProfiler = FActiveExternalProfilerBase::GetActiveProfiler();
-	if (CurrentProfiler != NULL)
-	{
-		CurrentProfiler->StartScopedEvent(ANSI_TO_TCHAR(Text));
-	}
+	FExternalProfilerTrace::StartScopedEvent(Color, Text);
 #endif
 }
 
 void FGenericPlatformMisc::BeginNamedEvent(const struct FColor& Color, const TCHAR* Text)
 {
 #if UE_EXTERNAL_PROFILING_ENABLED
-	//If there's an external profiler attached, trigger its scoped event.
-	FExternalProfiler* CurrentProfiler = FActiveExternalProfilerBase::GetActiveProfiler();
-
-	if (CurrentProfiler != NULL)
-	{
-		CurrentProfiler->StartScopedEvent(Text);
-	}
+	FExternalProfilerTrace::StartScopedEvent(Color, Text);
 #endif
 }
 
 void FGenericPlatformMisc::EndNamedEvent()
 {
 #if UE_EXTERNAL_PROFILING_ENABLED
-	//If there's an external profiler attached, trigger its scoped event.
-	FExternalProfiler* CurrentProfiler = FActiveExternalProfilerBase::GetActiveProfiler();
-
-	if (CurrentProfiler != NULL)
-	{
-		CurrentProfiler->EndScopedEvent();
-	}
+	FExternalProfilerTrace::EndScopedEvent();
 #endif
 }
 
@@ -535,13 +821,8 @@ bool FGenericPlatformMisc::SetStoredValue(const FString& InStoreId, const FStrin
 		
 	FConfigFile ConfigFile;
 	ConfigFile.Read(ConfigPath);
-
-	FConfigSection& Section = ConfigFile.FindOrAdd(InSectionName);
-
-	FConfigValue& KeyValue = Section.FindOrAdd(*InKeyName);
-	KeyValue = FConfigValue(InValue);
-
-	ConfigFile.Dirty = true;
+	// update one entry
+	ConfigFile.SetString(*InSectionName, *InKeyName, *InValue);
 	return ConfigFile.Write(ConfigPath);
 }
 
@@ -557,18 +838,7 @@ bool FGenericPlatformMisc::GetStoredValue(const FString& InStoreId, const FStrin
 	FConfigFile ConfigFile;
 	ConfigFile.Read(ConfigPath);
 
-	const FConfigSection* const Section = ConfigFile.Find(InSectionName);
-	if(Section)
-	{
-		const FConfigValue* const KeyValue = Section->Find(*InKeyName);
-		if(KeyValue)
-		{
-			OutValue = KeyValue->GetValue();
-			return true;
-		}
-	}
-
-	return false;
+	return ConfigFile.GetString(*InSectionName, *InKeyName, OutValue);
 }
 
 bool FGenericPlatformMisc::DeleteStoredValue(const FString& InStoreId, const FString& InSectionName, const FString& InKeyName)
@@ -583,13 +853,9 @@ bool FGenericPlatformMisc::DeleteStoredValue(const FString& InStoreId, const FSt
 	FConfigFile ConfigFile;
 	ConfigFile.Read(ConfigPath);
 
-	FConfigSection* const Section = ConfigFile.Find(InSectionName);
-	if (Section)
+	if (ConfigFile.RemoveKeyFromSection(*InSectionName, *InKeyName))
 	{
-		int32 RemovedNum = Section->Remove(*InKeyName);
-
-		ConfigFile.Dirty = true;
-		return ConfigFile.Write(ConfigPath) && RemovedNum == 1;
+		return ConfigFile.Write(ConfigPath);
 	}
 
 	return false;
@@ -627,6 +893,16 @@ void FGenericPlatformMisc::LowLevelOutputDebugStringf(const TCHAR *Fmt, ... )
 	);
 }
 
+bool FGenericPlatformMisc::IsLowLevelOutputDebugStringStructured()
+{
+	if (!FCommandLine::IsInitialized())
+	{
+		return false;
+	}
+	static bool bJsonDebugOutput = FParse::Param(FCommandLine::Get(), TEXT("JsonDebugOutput"));
+	return bJsonDebugOutput;
+}
+
 void FGenericPlatformMisc::SetUTF8Output()
 {
 	// assume that UTF-8 is possible by default anyway
@@ -648,9 +924,10 @@ bool FGenericPlatformMisc::HasSeparateChannelForDebugOutput()
 	return true;
 }
 
-void FGenericPlatformMisc::RequestExit( bool Force )
+void FGenericPlatformMisc::RequestExit( bool Force, const TCHAR* CallSite)
 {
-	UE_LOG(LogGenericPlatformMisc, Log,  TEXT("FPlatformMisc::RequestExit(%i)"), Force );
+	UE_LOG(LogGenericPlatformMisc, Log,  TEXT("FPlatformMisc::RequestExit(%i, %s)"), Force,
+		CallSite ? CallSite : TEXT("<NoCallSiteInfo>"));
 	if( Force )
 	{
 		// Force immediate exit.
@@ -665,18 +942,24 @@ void FGenericPlatformMisc::RequestExit( bool Force )
 	}
 }
 
+bool FGenericPlatformMisc::RestartApplicationWithCmdLine(const char* CmdLine)
+{
+	UE_LOG(LogInit, Display, TEXT("Restart application (with cmdnline) is not supported or implemented in current platform"));
+	return false;
+}
+
 bool FGenericPlatformMisc::RestartApplication()
 {
 	UE_LOG(LogInit, Display, TEXT("Restart application is not supported or implemented in current platform"));
 	return false;
 }
 
-void FGenericPlatformMisc::RequestExitWithStatus(bool Force, uint8 ReturnCode)
+void FGenericPlatformMisc::RequestExitWithStatus(bool Force, uint8 ReturnCode, const TCHAR* CallSite)
 {
 	// Generic implementation will ignore the return code - this may be important, so warn.
 	UE_LOG(LogGenericPlatformMisc, Warning, TEXT("FPlatformMisc::RequestExitWithStatus(%i, %d) - return code will be ignored by the generic implementation."), Force, ReturnCode);
 
-	return FPlatformMisc::RequestExit(Force);
+	return FPlatformMisc::RequestExit(Force, CallSite);
 }
 
 const TCHAR* FGenericPlatformMisc::GetSystemErrorMessage(TCHAR* OutBuffer, int32 BufferCount, int32 Error)
@@ -688,44 +971,34 @@ const TCHAR* FGenericPlatformMisc::GetSystemErrorMessage(TCHAR* OutBuffer, int32
 	return OutBuffer;
 }
 
-void FGenericPlatformMisc::ClipboardCopy(const TCHAR* Str)
-{
-	if(ClipboardCopyShim == nullptr)
-	{
-		UE_LOG(LogGenericPlatformMisc, Warning, TEXT("ClipboardCopyShim() is not bound; ignoring."));
-	}
-	else
-	{
-		ClipboardCopyShim(Str);
-	}
-}
-
-void FGenericPlatformMisc:: ClipboardPaste(class FString& Dest)
-{
-	if(ClipboardPasteShim == nullptr)
-	{
-		UE_LOG(LogGenericPlatformMisc, Warning, TEXT("ClipboardPasteShim() is not bound; ignoring."));
-	}
-	else
-	{
-		ClipboardPasteShim(Dest);
-	}
-}
-
 void FGenericPlatformMisc::CreateGuid(FGuid& Guid)
 {
 	QUICK_SCOPE_CYCLE_COUNTER(STAT_FGenericPlatformMisc_CreateGuid);
+	
+	// this is a pretty terrible Guid maker that has way less than 128 bits of randomness
+	// luckily this is not used, as every platform has an override
+	//   do not use this!
+	// all the timing used for "randomness" can easily be the same on two threads
+	// you wind up with 15 bits of randomness from the stdlib rand() call
+	//   the atomic IncrementCounter is crucial to ensure simultaneous calls to CreateGuid
+	//	 on different threads don't produce the same Guid here
 
-	static uint16 IncrementCounter = 0; 
+	// note the first calls to this are in static initializers, people use it to init globals
 
+	static std::atomic<uint32> IncrementCounter = 0; 
 	static FDateTime InitialDateTime;
 	static uint64 InitialCycleCounter;
 
 	FDateTime EstimatedCurrentDateTime;
 
-	if (IncrementCounter == 0)
+	uint32 SequentialBits = IncrementCounter.fetch_add(1);
+
+	if (SequentialBits == 0) // not a thread-safe init, but our first call is not threaded, so okay
 	{
 		// Hack: First Guid can be created prior to FPlatformTime::InitTiming(), so do it here.
+		//	InitTiming is done in static init in CoreGlobals.cpp
+		//	but CreateGuid is also used in static initializers, so we may come first
+		//  this can result in InitTiming being called twice which is not entirely benign
 		FPlatformTime::InitTiming();
 
 		// uses FPlatformTime::SystemTime()
@@ -741,10 +1014,16 @@ void FGenericPlatformMisc::CreateGuid(FGuid& Guid)
 		EstimatedCurrentDateTime = InitialDateTime + ElapsedTime;
 	}
 
-	uint32 SequentialBits = static_cast<uint32>(IncrementCounter++); // Add sequential bits to ensure sequentially generated guids are unique even if Cycles is wrong
-	uint32 RandBits = FMath::Rand() & 0xFFFF; // Add randomness to improve uniqueness across machines
+	uint32 RandBits = FMath::Rand();
+	
+	// bit rotate 16 : 
+	SequentialBits = ( SequentialBits << 16 ) | ( SequentialBits >> 16 );
 
-	Guid = FGuid(RandBits | (SequentialBits << 16), EstimatedCurrentDateTime.GetTicks() >> 32, EstimatedCurrentDateTime.GetTicks() & 0xffffffff, FPlatformTime::Cycles());
+	Guid = FGuid(RandBits ^ SequentialBits, EstimatedCurrentDateTime.GetTicks() >> 32, EstimatedCurrentDateTime.GetTicks() & 0xffffffff, FPlatformTime::Cycles());
+
+	// note: all the platform Guid makers do this but we do not :
+	//	Result[1] = (Result[1] & 0xffff0fff) | 0x00004000; // version 4
+	//	Result[2] = (Result[2] & 0x3fffffff) | 0x80000000; // variant 1
 }
 
 const TCHAR* LexToString( EAppReturnType::Type Value )
@@ -774,10 +1053,9 @@ const TCHAR* LexToString( EAppReturnType::Type Value )
 
 EAppReturnType::Type FGenericPlatformMisc::MessageBoxExt( EAppMsgType::Type MsgType, const TCHAR* Text, const TCHAR* Caption )
 {
-	if (GWarn)
-	{
-		UE_LOG(LogGenericPlatformMisc, Warning, TEXT("MessageBox: %s : %s"), Caption, Text);
-	}
+	// a message box typically conveys important information, so try to make sure at least one message reaches the user
+	UE_LOG(LogGenericPlatformMisc, Warning, TEXT("MessageBox: %s : %s"), Caption, Text);
+	FPlatformMisc::LowLevelOutputDebugStringf(TEXT("MessageBox: %s : %s\n"), Caption, Text);
 
 	switch(MsgType)
 	{
@@ -810,7 +1088,7 @@ const TCHAR* FGenericPlatformMisc::RootDir()
 		int32 chopPos = TempPath.Find(TEXT("/Engine"), ESearchCase::IgnoreCase, ESearchDir::FromEnd);
 		if (chopPos != INDEX_NONE)
 		{
-			TempPath.LeftInline(chopPos + 1, false);
+			TempPath.LeftInline(chopPos + 1, EAllowShrinking::No);
 		}
 		else
 		{
@@ -819,7 +1097,7 @@ const TCHAR* FGenericPlatformMisc::RootDir()
 			// if the path ends in a separator, remove it
 			if (TempPath.Right(1) == TEXT("/"))
 			{
-				TempPath.LeftChopInline(1, false);
+				TempPath.LeftChopInline(1, EAllowShrinking::No);
 			}
 
 			// keep going until we've removed Binaries
@@ -830,7 +1108,7 @@ const TCHAR* FGenericPlatformMisc::RootDir()
 #endif
 			if (pos != INDEX_NONE)
 			{
-				TempPath.LeftInline(pos + 1, false);
+				TempPath.LeftInline(pos + 1, EAllowShrinking::No);
 			}
 			else
 			{
@@ -843,7 +1121,7 @@ const TCHAR* FGenericPlatformMisc::RootDir()
 				{
 					while (TempPath.Len() && TempPath.Right(1) != TEXT("/"))
 					{
-						TempPath.LeftChopInline(1, false);
+						TempPath.LeftChopInline(1, EAllowShrinking::No);
 					}
 				}
 			}
@@ -950,6 +1228,12 @@ IPlatformChunkInstall* FGenericPlatformMisc::GetPlatformChunkInstall()
 	return &Singleton;
 }
 
+IPlatformHostCommunication& FGenericPlatformMisc::GetPlatformHostCommunication()
+{
+	static FPlatformHostCommunicationAutoInit<FGenericPlatformHostCommunication> Singleton;
+	return Singleton;
+}
+
 void GenericPlatformMisc_GetProjectFilePathProjectDir(FString& OutGameDir)
 {
 	// Here we derive the game path from the project file location.
@@ -985,7 +1269,7 @@ const TCHAR* FGenericPlatformMisc::ProjectDir()
 	if (ProjectDir.Len() == 0)
 	{
 		ProjectDir.Reserve(FPlatformMisc::GetMaxPathLength());
-		ProjectDir = OverrideProjectDir;
+		ProjectDir = GOverrideProjectDir;
 	}
 
 	if (ProjectDir.Len() == 0)
@@ -995,6 +1279,12 @@ const TCHAR* FGenericPlatformMisc::ProjectDir()
 		{
 			// monolithic, game-agnostic executables, the ini is in Engine/Config/Platform
 			ProjectDir = FString::Printf(TEXT("../../../Engine/Programs/%s/"), FApp::GetProjectName());
+
+			// however, if it was staged, that directory won't exist, so look in the normal staged location
+			if (!FPlatformFileManager::Get().GetPlatformFile().DirectoryExists(*ProjectDir))
+			{
+				ProjectDir = FString::Printf(TEXT("../../../%s/"), FApp::GetProjectName());
+			}
 		}
 		else
 		{
@@ -1031,7 +1321,7 @@ const TCHAR* FGenericPlatformMisc::ProjectDir()
 				}
 				else
 				{
-#if !PLATFORM_DESKTOP
+#if !PLATFORM_PROJECT_DIR_RELATIVE_TO_EXECUTABLE
 					ProjectDir = FString::Printf(TEXT("../../../%s/"), FApp::GetProjectName());
 #else
 					// This assumes the game executable is in <GAME>/Binaries/<PLATFORM>
@@ -1079,6 +1369,55 @@ const TCHAR* FGenericPlatformMisc::ProjectDir()
 	return *ProjectDir;
 }
 
+bool FGenericPlatformMisc::GetEngineAndProjectAbsoluteDirsFromExecutable(FString& OutProjectDir, FString& OutEngineDir)
+{
+	IPlatformFile& PlatformFile = IPlatformFile::GetPlatformPhysical();
+
+	FString ExecutableDir = FPaths::GetPath(FPlatformProcess::ExecutablePath());
+	FPaths::NormalizeFilename(ExecutableDir);
+
+	FString AbsoluteEngineDir = FPaths::Combine(ExecutableDir, TEXT("../.."));
+	FPaths::CollapseRelativeDirectories(AbsoluteEngineDir);
+	FString EngineBinariesDir = AbsoluteEngineDir / TEXT("Binaries");
+	if (!PlatformFile.DirectoryExists(*EngineBinariesDir))
+	{
+		return false;
+	}
+
+	OutEngineDir = AbsoluteEngineDir;
+
+
+	// First try the most common placement of projects
+	FString AbsoluteProjectDir = FPaths::Combine(ExecutableDir, TEXT("../../.."), FApp::GetProjectName());
+	FPaths::CollapseRelativeDirectories(AbsoluteProjectDir);
+
+	FString ProjectBinariesDir = AbsoluteProjectDir / TEXT("Binaries");
+	if (PlatformFile.DirectoryExists(*ProjectBinariesDir))
+	{
+		OutProjectDir = AbsoluteProjectDir;
+		return true;
+	}
+
+	// The game binaries folder was *not* found
+	// 
+	FPlatformMisc::LowLevelOutputDebugStringf(TEXT("Failed to find game directory: %s\n"), *ProjectBinariesDir);
+
+	FString RootDir = AbsoluteEngineDir / TEXT("..");
+	FPaths::CollapseRelativeDirectories(RootDir);
+
+	// Use the uprojectdirs
+	FUProjectDictionary Dict(RootDir);
+	FString GameProjectFile = Dict.GetProjectPathForGame(FApp::GetProjectName());
+	if (GameProjectFile.IsEmpty())
+	{
+		return false;
+	}
+	
+	OutProjectDir = FPaths::GetPath(GameProjectFile);
+
+	return true;
+}
+
 FString FGenericPlatformMisc::CloudDir()
 {
 	return FPaths::ProjectSavedDir() + TEXT("Cloud/");
@@ -1093,6 +1432,11 @@ const TCHAR* FGenericPlatformMisc::GamePersistentDownloadDir()
 		GamePersistentDownloadDir = FPaths::ProjectSavedDir() / TEXT("PersistentDownloadDir");
 	}
 	return *GamePersistentDownloadDir;
+}
+
+const TCHAR* FGenericPlatformMisc::GameTemporaryDownloadDir()
+{
+	return nullptr;
 }
 
 const TCHAR* FGenericPlatformMisc::GeneratedConfigDir()
@@ -1111,19 +1455,52 @@ const TCHAR* FGenericPlatformMisc::GetUBTTarget()
 	return TEXT(PREPROCESSOR_TO_STRING(UBT_COMPILED_TARGET));
 }
 
-/** The name of the UBT target that the current executable was built from. Defaults to the UE4 default target for this type to make content only projects work, 
-	but will be overridden by the primary game module if it exists */
-TCHAR GUBTTargetName[128] = TEXT("UE4" PREPROCESSOR_TO_STRING(UBT_COMPILED_TARGET));
+using FUBTTargetNameArrayType = TCHAR[128];
+
+#if PLATFORM_TCHAR_IS_UTF8CHAR
+
+	// We can't initialize a sized UTF8CHAR static array with a UTF8TEXT until we have char8_t in C++20,
+	// so we use a constructor to copy the value in.
+	static FUBTTargetNameArrayType& GetStaticUBTTargetName()
+	{
+		static struct FInitializer
+		{
+			FInitializer()
+			{
+				/** The name of the UBT target that the current executable was built from. Defaults to the UE default target for this type to make content only projects work,
+					but will be overridden by the primary game module if it exists */
+				FCString::Strcpy(UBTTargetName, TEXT("Unreal" PREPROCESSOR_TO_STRING(UBT_COMPILED_TARGET)));
+			}
+
+			TCHAR UBTTargetName[128];
+		} Initializer;
+
+		return Initializer.UBTTargetName;
+	}
+
+#else
+
+	static FUBTTargetNameArrayType& GetStaticUBTTargetName()
+	{
+		/** The name of the UBT target that the current executable was built from. Defaults to the UE default target for this type to make content only projects work,
+			but will be overridden by the primary game module if it exists */
+		static FUBTTargetNameArrayType GUBTTargetName = TEXT("Unreal" PREPROCESSOR_TO_STRING(UBT_COMPILED_TARGET));
+
+		return GUBTTargetName;
+	}
+
+#endif
 
 void FGenericPlatformMisc::SetUBTTargetName(const TCHAR* InTargetName)
 {
-	check(FCString::Strlen(InTargetName) < (UE_ARRAY_COUNT(GUBTTargetName) - 1));
-	FCString::Strcpy(GUBTTargetName, InTargetName);
+	FUBTTargetNameArrayType& UBTTargetName = GetStaticUBTTargetName();
+	check(FCString::Strlen(InTargetName) < (UE_ARRAY_COUNT(UBTTargetName) - 1));
+	FCString::Strcpy(UBTTargetName, InTargetName);
 }
 
 const TCHAR* FGenericPlatformMisc::GetUBTTargetName()
 {
-	return GUBTTargetName;
+	return GetStaticUBTTargetName();
 }
 
 const TCHAR* FGenericPlatformMisc::GetDefaultDeviceProfileName()
@@ -1138,7 +1515,7 @@ float FGenericPlatformMisc::GetDeviceTemperatureLevel()
 
 void FGenericPlatformMisc::SetOverrideProjectDir(const FString& InOverrideDir)
 {
-	OverrideProjectDir = InOverrideDir;
+	GOverrideProjectDir = InOverrideDir;
 }
 
 bool FGenericPlatformMisc::UseRenderThread()
@@ -1186,15 +1563,81 @@ bool FGenericPlatformMisc::AllowThreadHeartBeat()
 	return bHeartbeat;
 }
 
+int32 FGenericPlatformMisc::NumberOfCores()
+{
+	return 1;
+}
+
 int32 FGenericPlatformMisc::NumberOfCoresIncludingHyperthreads()
 {
 	return FPlatformMisc::NumberOfCores();
 }
 
+void FGenericPlatformMisc::GetConfiguredCoreLimits(int32 PlatformNumPhysicalCores, int32 PlatformNumLogicalCores,
+	bool& bOutFullyInitialized, int32& OutPhysicalCoreLimit, int32& OutLogicalCoreLimit,
+	bool& bOutSetPhysicalCountToLogicalCount)
+{
+	// If CommandLine is not yet initialized, silently return default values. Callers will need to handle calling again.
+	if (!FCommandLine::IsInitialized())
+	{
+		bOutFullyInitialized = false;
+		OutPhysicalCoreLimit = 0;
+		OutLogicalCoreLimit = 0;
+		bOutSetPhysicalCountToLogicalCount = false;
+		return;
+	}
+
+	int32 PhysicalCoreLimit = 0;
+	int32 LogicalCoreLimit = 0;
+	int32 LegacyCoreLimit = 0;
+	bool bSetPhysicalCountToLogicalCount = false;
+
+	const TCHAR* CommandLine = FCommandLine::Get();
+	FParse::Value(CommandLine, TEXT("-physicalcorelimit="), PhysicalCoreLimit); // DEPRECATION_WARNING: physicalcorelimit is experimental and may be changed in a future release without deprecation
+	FParse::Value(CommandLine, TEXT("-corelimit="), LegacyCoreLimit);
+	bSetPhysicalCountToLogicalCount = FParse::Param(CommandLine, TEXT("usehyperthreading"));
+	if (bSetPhysicalCountToLogicalCount)
+	{
+		LogicalCoreLimit = PhysicalCoreLimit;
+	}
+	else
+	{
+		LogicalCoreLimit = PlatformNumPhysicalCores > 0 ?
+			(PhysicalCoreLimit * PlatformNumLogicalCores) / PlatformNumPhysicalCores :
+			PhysicalCoreLimit;
+	}
+	if (LegacyCoreLimit > 0)
+	{
+		PhysicalCoreLimit = PhysicalCoreLimit == 0 ? LegacyCoreLimit : FMath::Min(PhysicalCoreLimit, LegacyCoreLimit);
+		LogicalCoreLimit = LogicalCoreLimit == 0 ? LegacyCoreLimit : FMath::Min(LogicalCoreLimit, LegacyCoreLimit);
+	}
+
+	bOutFullyInitialized = true;
+	OutPhysicalCoreLimit = PhysicalCoreLimit;
+	OutLogicalCoreLimit = LogicalCoreLimit;
+	bOutSetPhysicalCountToLogicalCount = bSetPhysicalCountToLogicalCount;
+}
+
+FProcessorGroupDesc InternalGetProcessorGroupDesc()
+{
+	FProcessorGroupDesc Desc;
+	Desc.NumProcessorGroups = 1;
+	memset(Desc.ThreadAffinities, 0xFF, sizeof(Desc.ThreadAffinities));
+	return Desc;
+}
+
+const FProcessorGroupDesc& FGenericPlatformMisc::GetProcessorGroupDesc()
+{
+	static FProcessorGroupDesc Desc = InternalGetProcessorGroupDesc();
+	return Desc;
+}
+
 int32 FGenericPlatformMisc::NumberOfWorkerThreadsToSpawn()
 {
 	static int32 MaxGameThreads = 4;
-	static int32 MaxThreads = 16;
+
+	extern CORE_API int32 GUseNewTaskBackend;
+	int32 MaxThreads = GUseNewTaskBackend ? INT32_MAX : 16;
 
 	int32 NumberOfCores = FPlatformMisc::NumberOfCores();
 	int32 MaxWorkerThreadsWanted = (IsRunningGame() || IsRunningDedicatedServer() || IsRunningClientOnly()) ? MaxGameThreads : MaxThreads;
@@ -1211,6 +1654,17 @@ void FGenericPlatformMisc::GetValidTargetPlatforms(class TArray<class FString>& 
 {
 	// by default, just return the running PlatformName as the only TargetPlatform we support
 	TargetPlatformNames.Add(FPlatformProperties::PlatformName());
+}
+
+FPlatformUserId FGenericPlatformMisc::GetPlatformUserForUserIndex(int32 LocalUserIndex)
+{
+	// These currently map 1:1 but that could change with the input system rework
+	return FPlatformUserId::CreateFromInternalId(LocalUserIndex);
+}
+
+int32 FGenericPlatformMisc::GetUserIndexForPlatformUser(FPlatformUserId PlatformUser)
+{
+	return PlatformUser.GetInternalId();
 }
 
 TArray<uint8> FGenericPlatformMisc::GetSystemFontBytes()
@@ -1322,7 +1776,17 @@ EDeviceScreenOrientation FGenericPlatformMisc::GetDeviceOrientation()
 
 void FGenericPlatformMisc::SetDeviceOrientation(EDeviceScreenOrientation NewDeviceOrientation)
 {
-	// not implemented by default
+	SetAllowedDeviceOrientation(NewDeviceOrientation);
+}
+
+EDeviceScreenOrientation FGenericPlatformMisc::GetAllowedDeviceOrientation()
+{
+	return AllowedDeviceOrientation;
+}
+
+void FGenericPlatformMisc::SetAllowedDeviceOrientation(EDeviceScreenOrientation NewAllowedDeviceOrientation)
+{
+	AllowedDeviceOrientation = NewAllowedDeviceOrientation;
 }
 
 int32 FGenericPlatformMisc::GetDeviceVolume()
@@ -1352,6 +1816,14 @@ FGuid FGenericPlatformMisc::GetMachineId()
 	return MachineId;
 }
 
+FString FGenericPlatformMisc::GetDeviceTag()
+	{
+		FString DeviceTag = TEXT("");
+		FParse::Value( FCommandLine::Get(), TEXT("DeviceTag="), DeviceTag );
+
+		return DeviceTag;
+	}
+
 FString FGenericPlatformMisc::GetLoginId()
 {
 	PRAGMA_DISABLE_DEPRECATION_WARNINGS
@@ -1371,12 +1843,6 @@ FString FGenericPlatformMisc::GetEpicAccountId()
 	FString AccountId;
 	FPlatformMisc::GetStoredValue( TEXT( "Epic Games" ), TEXT( "Unreal Engine/Identifiers" ), TEXT( "AccountId" ), AccountId );
 	return AccountId;
-}
-
-bool FGenericPlatformMisc::SetEpicAccountId( const FString& AccountId )
-{
-	checkf(false, TEXT("FPlatformMisc::SetEpicAccountId should not be called"));
-	return false;
 }
 
 EConvertibleLaptopMode FGenericPlatformMisc::GetConvertibleLaptopMode()
@@ -1464,6 +1930,7 @@ TArray<FCustomChunk> FGenericPlatformMisc::GetAllLanguageChunks()
 
 TArray<FCustomChunk> FGenericPlatformMisc::GetCustomChunksByType(ECustomChunkType DesiredChunkType)
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	if (DesiredChunkType == ECustomChunkType::OnDemandChunk)
 	{
 		return GetAllOnDemandChunks();
@@ -1472,6 +1939,7 @@ TArray<FCustomChunk> FGenericPlatformMisc::GetCustomChunksByType(ECustomChunkTyp
 	{
 		return GetAllLanguageChunks();
 	}
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 FString FGenericPlatformMisc::LoadTextFileFromPlatformPackage(const FString& RelativePath)
@@ -1523,29 +1991,27 @@ void FGenericPlatformMisc::ParseChunkIdPakchunkIndexMapping(TArray<FString> Chun
 	}
 }
 
-int32 FGenericPlatformMisc::GetPakchunkIndexFromPakFile(const FString& InFilename)
+int32 FGenericPlatformMisc::GetPakchunkIndexFromPakFile(FStringView InFilename)
 {
-	FString ChunkIdentifier(TEXT("pakchunk"));
-	FString BaseFilename = FPaths::GetBaseFilename(InFilename);
+	FStringView ChunkIdentifier(TEXTVIEW("pakchunk"));
+	FStringView BaseFilename = FPathViews::GetBaseFilename(InFilename);
 	int32 ChunkNumber = INDEX_NONE;
 
 	if (BaseFilename.StartsWith(ChunkIdentifier))
 	{
-		int32 StartOfNumber = ChunkIdentifier.Len();
+		const int32 StartOfNumber = ChunkIdentifier.Len();
 		int32 DigitCount = 0;
-		if (FChar::IsDigit(BaseFilename[StartOfNumber]))
+		
+		while ((DigitCount + StartOfNumber) < BaseFilename.Len() && FChar::IsDigit(BaseFilename[StartOfNumber + DigitCount]))
 		{
-			while ((DigitCount + StartOfNumber) < BaseFilename.Len() && FChar::IsDigit(BaseFilename[StartOfNumber + DigitCount]))
-			{
-				DigitCount++;
-			}
+			DigitCount++;
+		}
 
-			if ((StartOfNumber + DigitCount) < BaseFilename.Len())
-			{
-				FString ChunkNumberString = BaseFilename.Mid(StartOfNumber, DigitCount);
-				check(ChunkNumberString.IsNumeric());
-				TTypeFromString<int32>::FromString(ChunkNumber, *ChunkNumberString);
-			}
+		if (DigitCount > 0 && (StartOfNumber + DigitCount) < BaseFilename.Len())
+		{
+			// FromString can't take a view
+			TStringBuilder<16> ChunkNumberString = WriteToString<16>(BaseFilename.Mid(StartOfNumber, DigitCount));
+			TTypeFromString<int32>::FromString(ChunkNumber, *ChunkNumberString);
 		}
 	}
 
@@ -1554,5 +2020,49 @@ int32 FGenericPlatformMisc::GetPakchunkIndexFromPakFile(const FString& InFilenam
 
 bool FGenericPlatformMisc::IsPGOEnabled()
 {
-	return PLATFORM_COMPILER_OPTIMIZATION_PG;
+	return PLATFORM_COMPILER_OPTIMIZATION_PG != 0;
+}
+
+bool FGenericPlatformMisc::IsPGICapableBinary()
+{
+	return PLATFORM_COMPILER_OPTIMIZATION_PG_PROFILING != 0;
+}
+
+
+bool FGenericPlatformMisc::IsPGIActive()
+{
+	// by default, assume it enabled from the start in PGI binaries (as is the usual behavior). If a platform provides a way
+	// to enable/disable PG data collection runtime, it can override this.
+	return FPlatformMisc::IsPGICapableBinary();
+}
+
+int FGenericPlatformMisc::GetMobilePropagateAlphaSetting()
+{
+	static int PropagateAlpha = -1;
+	if (PropagateAlpha < 0)
+	{
+		GConfig->GetInt(TEXT("/Script/Engine.RendererSettings"), TEXT("r.Mobile.PropagateAlpha"), PropagateAlpha, GEngineIni);
+	}
+	return PropagateAlpha;
+}
+
+void FGenericPlatformMisc::ShowConsoleWindow()
+{
+#if !UE_BUILD_SHIPPING
+	UE_LOG(LogGenericPlatformMisc, Log, TEXT("Show console is not supported or implemented in current platform"));
+#endif
+}
+
+FDelegateHandle FGenericPlatformMisc::AddNetworkListener(FCoreDelegates::FOnNetworkConnectionChanged::FDelegate&& InNewDelegate)
+{
+	UE_LOG(LogGenericPlatformMisc, Warning, TEXT("FGenericPlatformMisc::AddNetworkListener not implemented for this platform"));
+
+	return FDelegateHandle();
+}
+
+bool FGenericPlatformMisc::RemoveNetworkListener(FDelegateHandle Handle)
+{
+	UE_LOG(LogGenericPlatformMisc, Warning, TEXT("FGenericPlatformMisc::RemoveNetworkListener not implemented for this platform"));
+
+	return false;
 }

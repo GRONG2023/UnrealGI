@@ -38,7 +38,7 @@ struct FEditorParameterGroup
 	TEnumAsByte<EMaterialParameterAssociation> GroupAssociation= EMaterialParameterAssociation::LayerParameter;
 
 	UPROPERTY(EditAnywhere, editfixedsize, Instanced, Category=EditorParameterGroup)
-	TArray<class UDEditorParameterValue*> Parameters;
+	TArray<TObjectPtr<class UDEditorParameterValue>> Parameters;
 
 	UPROPERTY()
 	int32 GroupSortPriority=0;
@@ -98,7 +98,7 @@ struct FEditorTextureParameterValue : public FEditorParameterValue
 	GENERATED_USTRUCT_BODY()
 
 	UPROPERTY(EditAnywhere, Category=EditorTextureParameterValue)
-	class UTexture* ParameterValue;
+	TObjectPtr<class UTexture> ParameterValue;
 
 	FEditorTextureParameterValue()
 		: ParameterValue(NULL)
@@ -112,7 +112,7 @@ struct FEditorFontParameterValue : public FEditorParameterValue
 	GENERATED_USTRUCT_BODY()
 
 	UPROPERTY(EditAnywhere, Category=EditorFontParameterValue)
-	class UFont* FontValue;
+	TObjectPtr<class UFont> FontValue;
 
 	UPROPERTY(EditAnywhere, Category=EditorFontParameterValue)
 	int32 FontPage;
@@ -130,7 +130,7 @@ struct FEditorMaterialLayersParameterValue : public FEditorParameterValue
 	GENERATED_USTRUCT_BODY()
 
 	UPROPERTY(EditAnywhere, Category=EditorLayersParameterValue)
-	class UMaterialFunctionInterface* FunctionValue;
+	TObjectPtr<class UMaterialFunctionInterface> FunctionValue;
 
 	FEditorMaterialLayersParameterValue()
 		: FunctionValue(NULL)
@@ -217,18 +217,18 @@ struct FEditorStaticComponentMaskParameterValue : public FEditorParameterValue
 	}
 };
 
-UCLASS(hidecategories=Object, collapsecategories)
-class UNREALED_API UMaterialEditorInstanceConstant : public UObject
+UCLASS(hidecategories=Object, collapsecategories, MinimalAPI)
+class UMaterialEditorInstanceConstant : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
 	/** Physical material to use for this graphics material. Used for sounds, effects etc.*/
 	UPROPERTY(EditAnywhere, Category=MaterialEditorInstanceConstant)
-	class UPhysicalMaterial* PhysMaterial;
+	TObjectPtr<class UPhysicalMaterial> PhysMaterial;
 
 	// since the Parent may point across levels and the property editor needs to import this text, it must be marked lazy so it doesn't set itself to NULL in FindImportedObject
 	UPROPERTY(EditAnywhere, Category=MaterialEditorInstanceConstant, meta=(DisplayThumbnail="true"))
-	class UMaterialInterface* Parent;
+	TObjectPtr<class UMaterialInterface> Parent;
 
 	UPROPERTY(EditAnywhere, editfixedsize, Category=MaterialEditorInstanceConstant)
 	TArray<struct FEditorParameterGroup> ParameterGroups;
@@ -239,7 +239,7 @@ class UNREALED_API UMaterialEditorInstanceConstant : public UObject
 
 	/** SubsurfaceProfile, for Screen Space Subsurface Scattering */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Material, meta = (DisplayName = "Subsurface Profile"))
-	class USubsurfaceProfile* SubsurfaceProfile;
+	TObjectPtr<class USubsurfaceProfile> SubsurfaceProfile;
 
 	/** Defines if SubsurfaceProfile from tis instance is used or it uses the parent one. */
 	UPROPERTY(EditAnywhere, Category = MaterialEditorInstanceConstant)
@@ -258,10 +258,10 @@ class UNREALED_API UMaterialEditorInstanceConstant : public UObject
 	FMaterialInstanceBasePropertyOverrides BasePropertyOverrides;
 
 	UPROPERTY()
-	class UMaterialInstanceConstant* SourceInstance;
+	TObjectPtr<class UMaterialInstanceConstant> SourceInstance;
 
 	UPROPERTY()
-	class UMaterialFunctionInstance* SourceFunction;	
+	TObjectPtr<class UMaterialFunctionInstance> SourceFunction;	
 
 	UPROPERTY(transient, duplicatetransient)
 	TArray<FMaterialParameterInfo> VisibleExpressions;
@@ -274,70 +274,74 @@ class UNREALED_API UMaterialEditorInstanceConstant : public UObject
 	UPROPERTY(EditAnywhere, Category=MaterialEditorInstanceConstant)
 	uint32 bUseOldStyleMICEditorGroups:1;
 
+	/** When set we will use the override from NaniteOverrideMaterial. Otherwise we inherit any override on the parent. */
+	UPROPERTY(EditAnywhere, Category = MaterialEditorInstanceConstant, meta = (InlineEditConditionToggle))
+	uint32 bNaniteOverride : 1;
+
+	/** An override material which will be used instead of this one when rendering with nanite. */
+	UPROPERTY(EditAnywhere, Category = MaterialEditorInstanceConstant, meta = (editcondition = "bNaniteOverride"))
+	TObjectPtr<UMaterialInterface> NaniteOverrideMaterial;
+
 	//~ Begin UObject Interface.
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	UNREALED_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #if WITH_EDITOR
-	virtual void PostEditUndo() override;
+	UNREALED_API virtual void PostEditUndo() override;
 #endif
 	//~ End UObject Interface.
 
 	/** Regenerates the parameter arrays. */
-	void RegenerateArrays();
+	UNREALED_API void RegenerateArrays();
 #if WITH_EDITOR
 	/** Sets back to zero the overrides for any parameters copied out of the layer stack */
-	void CleanParameterStack(int32 Index, EMaterialParameterAssociation MaterialType);
+	UNREALED_API void CleanParameterStack(int32 Index, EMaterialParameterAssociation MaterialType);
 	/** Copies the overrides for any parameters copied out of the layer stack from the layer or blend */
-	void ResetOverrides(int32 Index, EMaterialParameterAssociation MaterialType);
+	UNREALED_API void ResetOverrides(int32 Index, EMaterialParameterAssociation MaterialType);
 #endif
 	/** Copies the parameter array values back to the source instance. */
-	void CopyToSourceInstance(const bool bForceStaticPermutationUpdate = false);
+	UNREALED_API void CopyToSourceInstance(const bool bForceStaticPermutationUpdate = false);
 
-	void ApplySourceFunctionChanges();
-
-	/** Builds a FStaticParameterSet for the source UMaterialInstance to store.  The built set has only parameters overridden by this instance. */
-	void BuildStaticParametersForSourceInstance(FStaticParameterSet& OutStaticParameters);
+	UNREALED_API void ApplySourceFunctionChanges();
 
 	/** 
 	 * Sets the source instance for this object and regenerates arrays. 
 	 *
 	 * @param MaterialInterface		Instance to use as the source for this material editor instance.
 	 */
-	void SetSourceInstance(UMaterialInstanceConstant* MaterialInterface);
+	UNREALED_API void SetSourceInstance(UMaterialInstanceConstant* MaterialInterface);
 
-	void CopyBasePropertiesFromParent();
+	UNREALED_API void CopyBasePropertiesFromParent();
 
-	void SetSourceFunction(UMaterialFunctionInstance* MaterialFunction);
+	UNREALED_API void SetSourceFunction(UMaterialFunctionInstance* MaterialFunction);
 
 	/** 
 	 * Update the source instance parent to match this
 	 */
-	void UpdateSourceInstanceParent();
+	UNREALED_API void UpdateSourceInstanceParent();
 
 	/** 
 	 *  Returns group for parameter. Creates one if needed. 
 	 *
 	 * @param ParameterGroup		Name to be looked for.
 	 */
-	FEditorParameterGroup & GetParameterGroup(FName& ParameterGroup);
+	UNREALED_API FEditorParameterGroup & GetParameterGroup(FName& ParameterGroup);
 	/** 
 	 *  Creates/adds value to group retrieved from parent material . 
 	 *
-	 * @param ParentMaterial		Name of material to search for groups.
 	 * @param ParameterValue		Current data to be grouped
-	 * @param OptionalGroupName		Optional Group Name that be used directly instead of resolving it from the material
+	 * @param GroupName				Name of the group
 	 */
-	void AssignParameterToGroup(UMaterial* ParentMaterial, UDEditorParameterValue* ParameterValue, const FName* OptionalGroupName = nullptr);
+	UNREALED_API void AssignParameterToGroup(UDEditorParameterValue* ParameterValue, const FName& GroupName);
 
-	static FName GlobalGroupPrefix;
+	static UNREALED_API FName GlobalGroupPrefix;
 
 	TWeakPtr<class IDetailsView> DetailsView;
 
 #if WITH_EDITORONLY_DATA
 	UPROPERTY()
-	TArray<class UMaterialInstanceConstant*> StoredLayerPreviews;
+	TArray<TObjectPtr<class UMaterialInstanceConstant>> StoredLayerPreviews;
 
 	UPROPERTY()
-	TArray<class UMaterialInstanceConstant*> StoredBlendPreviews;
+	TArray<TObjectPtr<class UMaterialInstanceConstant>> StoredBlendPreviews;
 #endif
 
 	/** Whether or not we should show only overridden properties*/

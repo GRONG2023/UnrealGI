@@ -2,6 +2,7 @@
 
 #include "Blueprint/WidgetBlueprintLibrary.h"
 #include "Materials/MaterialInterface.h"
+#include "Slate/SGameLayerManager.h"
 #include "UObject/UObjectHash.h"
 #include "UObject/UObjectIterator.h"
 #include "UObject/Package.h"
@@ -9,10 +10,12 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Fonts/SlateFontInfo.h"
 #include "Engine/Font.h"
+#include "Engine/GameViewportClient.h"
 #include "Brushes/SlateNoResource.h"
 #include "Rendering/DrawElements.h"
 #include "Styling/SlateTypes.h"
 #include "Styling/CoreStyle.h"
+#include "Styling/UMGCoreStyle.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Slate/UMGDragDropOp.h"
 #include "Slate/SlateBrushAsset.h"
@@ -21,6 +24,8 @@
 #include "Engine/Engine.h"
 #include "Engine/GameEngine.h"
 #include "Widgets/Layout/SWindowTitleBarArea.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(WidgetBlueprintLibrary)
 
 //For PIE error messages
 
@@ -75,12 +80,7 @@ UDragDropOperation* UWidgetBlueprintLibrary::CreateDragDropOperation(TSubclassOf
 	return DragDropOperation;
 }
 
-void UWidgetBlueprintLibrary::SetInputMode_UIOnly(APlayerController* Target, UWidget* InWidgetToFocus, bool bLockMouseToViewport)
-{
-	SetInputMode_UIOnlyEx(Target, InWidgetToFocus, bLockMouseToViewport ? EMouseLockMode::LockOnCapture : EMouseLockMode::DoNotLock);
-}
-
-void UWidgetBlueprintLibrary::SetInputMode_UIOnlyEx(APlayerController* PlayerController, UWidget* InWidgetToFocus, EMouseLockMode InMouseLockMode)
+void UWidgetBlueprintLibrary::SetInputMode_UIOnlyEx(APlayerController* PlayerController, UWidget* InWidgetToFocus, EMouseLockMode InMouseLockMode, const bool bFlushInput /* = false */)
 {
 	if (PlayerController != nullptr)
 	{
@@ -92,6 +92,11 @@ void UWidgetBlueprintLibrary::SetInputMode_UIOnlyEx(APlayerController* PlayerCon
 			InputMode.SetWidgetToFocus(InWidgetToFocus->TakeWidget());
 		}
 		PlayerController->SetInputMode(InputMode);
+
+		if (bFlushInput)
+		{
+			PlayerController->FlushPressedKeys();
+		}
 	}
 	#if WITH_EDITOR 
 	else
@@ -101,12 +106,7 @@ void UWidgetBlueprintLibrary::SetInputMode_UIOnlyEx(APlayerController* PlayerCon
 	#endif // WITH_EDITOR
 }
 
-void UWidgetBlueprintLibrary::SetInputMode_GameAndUI(APlayerController* Target, UWidget* InWidgetToFocus, bool bLockMouseToViewport, bool bHideCursorDuringCapture)
-{
-	SetInputMode_GameAndUIEx(Target, InWidgetToFocus, bLockMouseToViewport ? EMouseLockMode::LockOnCapture : EMouseLockMode::DoNotLock, bHideCursorDuringCapture);
-}
-
-void UWidgetBlueprintLibrary::SetInputMode_GameAndUIEx(APlayerController* PlayerController, UWidget* InWidgetToFocus, EMouseLockMode InMouseLockMode, bool bHideCursorDuringCapture)
+void UWidgetBlueprintLibrary::SetInputMode_GameAndUIEx(APlayerController* PlayerController, UWidget* InWidgetToFocus, EMouseLockMode InMouseLockMode, bool bHideCursorDuringCapture, const bool bFlushInput /* = false */)
 {
 	if (PlayerController != nullptr)
 	{
@@ -119,6 +119,11 @@ void UWidgetBlueprintLibrary::SetInputMode_GameAndUIEx(APlayerController* Player
 			InputMode.SetWidgetToFocus(InWidgetToFocus->TakeWidget());
 		}
 		PlayerController->SetInputMode(InputMode);
+
+		if (bFlushInput)
+		{
+			PlayerController->FlushPressedKeys();
+		}
 	}
 	#if WITH_EDITOR 
 	else
@@ -129,12 +134,17 @@ void UWidgetBlueprintLibrary::SetInputMode_GameAndUIEx(APlayerController* Player
 	
 }
 
-void UWidgetBlueprintLibrary::SetInputMode_GameOnly(APlayerController* PlayerController)
+void UWidgetBlueprintLibrary::SetInputMode_GameOnly(APlayerController* PlayerController, const bool bFlushInput /* = false */)
 {
 	if (PlayerController != nullptr)
 	{
 		FInputModeGameOnly InputMode;
 		PlayerController->SetInputMode(InputMode);
+		
+		if (bFlushInput)
+		{
+			PlayerController->FlushPressedKeys();
+		}
 	}
 	#if WITH_EDITOR 
 	else
@@ -158,41 +168,86 @@ void UWidgetBlueprintLibrary::DrawBox(FPaintContext& Context, FVector2D Position
 		FSlateDrawElement::MakeBox(
 			Context.OutDrawElements,
 			Context.MaxLayer,
-			Context.AllottedGeometry.ToPaintGeometry(Position, Size),
+			Context.AllottedGeometry.ToPaintGeometry(Size, FSlateLayoutTransform(Position)),
 			&Brush->Brush,
 			ESlateDrawEffect::None,
 			Tint);
 	}
 }
 
+void UWidgetBlueprintLibrary::DrawSpline(FPaintContext& Context, FVector2D Start, FVector2D StartDir, FVector2D End, FVector2D EndDir, FLinearColor Tint, float Thickness)
+{
+	Context.MaxLayer++;
+
+	FSlateDrawElement::MakeSpline(
+		Context.OutDrawElements,
+		Context.MaxLayer,
+		Context.AllottedGeometry.ToPaintGeometry(),
+		Start,
+		StartDir,
+		End,
+		EndDir,
+		Thickness,
+		ESlateDrawEffect::None,
+		Tint);
+}
+
 void UWidgetBlueprintLibrary::DrawLine(FPaintContext& Context, FVector2D PositionA, FVector2D PositionB, FLinearColor Tint, bool bAntiAlias, float Thickness)
 {
 	Context.MaxLayer++;
 
-	TArray<FVector2D> Points;
-	Points.Add(PositionA);
-	Points.Add(PositionB);
+	TArray<FVector2f> Points;
+	Points.Add(UE::Slate::CastToVector2f(PositionA));
+	Points.Add(UE::Slate::CastToVector2f(PositionB));
 
-	FSlateDrawElement::MakeLines(
-		Context.OutDrawElements,
-		Context.MaxLayer,
-		Context.AllottedGeometry.ToPaintGeometry(),
-		Points,
-		ESlateDrawEffect::None,
-		Tint,
-		bAntiAlias,
-		Thickness);
+	if ((PositionA - PositionB).SquaredLength() > KINDA_SMALL_NUMBER)
+	{
+		FSlateDrawElement::MakeLines(
+			Context.OutDrawElements,
+			Context.MaxLayer,
+			Context.AllottedGeometry.ToPaintGeometry(),
+			Points,
+			ESlateDrawEffect::None,
+			Tint,
+			bAntiAlias,
+			Thickness);
+	}
 }
 
 void UWidgetBlueprintLibrary::DrawLines(FPaintContext& Context, const TArray<FVector2D>& Points, FLinearColor Tint, bool bAntiAlias, float Thickness)
 {
+	if (Points.Num() < 2)
+	{
+		return;
+	}
+
+	// We need to trim points that might be overlapping. We convert to Float at the same time
+	TArray<FVector2f> ValidatedPoints;
+	ValidatedPoints.Reserve(Points.Num());
+	ValidatedPoints.Push(UE::Slate::CastToVector2f(Points[0]));
+	FVector2D LastPoint = Points[0];
+	for (int32 Index = 1; Index < Points.Num(); Index++)
+	{
+		FVector2D CurrentPoint = Points[Index];
+		// If a the distance between two point is very small, do not add it.
+		if ((CurrentPoint - LastPoint).SquaredLength() > KINDA_SMALL_NUMBER)
+		{
+			ValidatedPoints.Push(UE::Slate::CastToVector2f(Points[Index]));
+			LastPoint = CurrentPoint;
+		}
+	}
+	if (ValidatedPoints.Num() < 2)
+	{
+		return;
+	}
+
 	Context.MaxLayer++;
 
 	FSlateDrawElement::MakeLines(
 		Context.OutDrawElements,
 		Context.MaxLayer,
 		Context.AllottedGeometry.ToPaintGeometry(),
-		Points,
+		MoveTemp(ValidatedPoints),
 		ESlateDrawEffect::None,
 		Tint,
 		bAntiAlias,
@@ -204,7 +259,7 @@ void UWidgetBlueprintLibrary::DrawText(FPaintContext& Context, const FString& In
 	Context.MaxLayer++;
 
 	//TODO UMG Create a font asset usable as a UFont or as a slate font asset.
-	FSlateFontInfo FontInfo = FCoreStyle::Get().GetWidgetStyle<FTextBlockStyle>("NormalText").Font;
+	FSlateFontInfo FontInfo = FUMGCoreStyle::Get().GetWidgetStyle<FTextBlockStyle>("NormalText").Font;
 	
 	FSlateDrawElement::MakeText(
 		Context.OutDrawElements,
@@ -216,7 +271,7 @@ void UWidgetBlueprintLibrary::DrawText(FPaintContext& Context, const FString& In
 		Tint);
 }
 
-void UWidgetBlueprintLibrary::DrawTextFormatted(FPaintContext& Context, const FText& Text, FVector2D Position, UFont* Font, int32 FontSize, FName FontTypeFace, FLinearColor Tint)
+void UWidgetBlueprintLibrary::DrawTextFormatted(FPaintContext& Context, const FText& Text, FVector2D Position, UFont* Font, float FontSize, FName FontTypeFace, FLinearColor Tint)
 {
 	if ( Font )
 	{
@@ -691,3 +746,4 @@ void UWidgetBlueprintLibrary::SetWindowTitleBarCloseButtonActive(bool bActive)
 }
 
 #undef LOCTEXT_NAMESPACE
+

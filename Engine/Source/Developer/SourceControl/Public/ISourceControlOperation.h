@@ -3,25 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-
-
-/** Accumulated error and info messages for a source control operation.  */
-struct FSourceControlResultInfo
-{
-	/** Append any messages from another FSourceControlResultInfo, ensuring to keep any already accumulated info. */
-	void Append(const FSourceControlResultInfo& InResultInfo)
-	{
-		InfoMessages.Append(InResultInfo.InfoMessages);
-		ErrorMessages.Append(InResultInfo.ErrorMessages);
-	}
-
-	/** Info and/or warning message storage */
-	TArray<FText> InfoMessages;
-
-	/** Potential error message storage */
-	TArray<FText> ErrorMessages;
-};
-
+#include "SourceControlResultInfo.h"
 
 class ISourceControlOperation : public TSharedFromThis<ISourceControlOperation, ESPMode::ThreadSafe>
 {
@@ -60,6 +42,12 @@ public:
 		// Implemented in subclasses
 	}
 
+	/** Add tag. */
+	virtual void AddTag(const FString& InTag)
+	{
+		// Implemented in subclasses
+	}
+
 	/**
 	 * Append any info or error messages that may have accumulated during the operation prior
 	 * to returning a result, ensuring to keep any already accumulated info.
@@ -69,13 +57,22 @@ public:
 		// Implemented in subclasses
 	}
 
-	/** Factory method for easier operation creation */
-	template<typename Type>
-	static TSharedRef<Type, ESPMode::ThreadSafe> Create()
+	/**
+	 * This will return true if the operation can be safely called from a background thread.
+	 * Currently it is assumed to only the operation 'FDownloadFile' will return true at least
+	 * until the API is made thread safe.
+	 */
+	virtual bool CanBeCalledFromBackgroundThreads() const
 	{
-		return MakeShareable( new Type() );
+		return false;
 	}
 
+	/** Factory method for easier operation creation */
+	template<typename Type, typename... TArgs>
+	static TSharedRef<Type, ESPMode::ThreadSafe> Create(TArgs&&... Args)
+	{
+		return MakeShareable( new Type(Forward<TArgs>(Args)...));
+	}
 };
 
 typedef TSharedRef<class ISourceControlOperation, ESPMode::ThreadSafe> FSourceControlOperationRef;

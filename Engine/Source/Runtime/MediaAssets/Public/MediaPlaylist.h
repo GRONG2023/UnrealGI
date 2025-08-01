@@ -2,19 +2,26 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "HAL/Platform.h"
 #include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
 #include "UObject/ScriptMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "MediaPlaylist.generated.h"
 
 class UMediaSource;
+struct FFrame;
 
 /**
  * Implements a media play list.
  */
-UCLASS(BlueprintType, hidecategories=(Object))
-class MEDIAASSETS_API UMediaPlaylist
+UCLASS(BlueprintType, hidecategories=(Object), MinimalAPI)
+class UMediaPlaylist
 	: public UObject
 {
 	GENERATED_BODY()
@@ -29,7 +36,7 @@ public:
 	 * @see AddFile, AddUrl, Insert, RemoveAll, Remove, Replace
 	 */
 	UFUNCTION(BlueprintCallable, Category="Media|MediaPlaylist")
-	bool Add(UMediaSource* MediaSource);
+	MEDIAASSETS_API bool Add(UMediaSource* MediaSource);
 
 	/**
 	 * Add a media file path to the play list.
@@ -39,7 +46,7 @@ public:
 	 * @see Add, AddUrl, Insert, RemoveAll, Remove, Replace
 	 */
 	UFUNCTION(BlueprintCallable, Category="Media|MediaPlaylist")
-	bool AddFile(const FString& FilePath);
+	MEDIAASSETS_API bool AddFile(const FString& FilePath);
 
 	/**
 	 * Add a media URL to the play list.
@@ -49,7 +56,7 @@ public:
 	 * @see Add, AddFile, Insert, RemoveAll, Remove, Replace
 	 */
 	UFUNCTION(BlueprintCallable, Category="Media|MediaPlaylist")
-	bool AddUrl(const FString& Url);
+	MEDIAASSETS_API bool AddUrl(const FString& Url);
 
 	/**
 	 * Get the media source at the specified index.
@@ -59,7 +66,7 @@ public:
 	 * @see GetNext, GetRandom
 	 */
 	UFUNCTION(BlueprintCallable, Category="Media|MediaPlaylist")
-	UMediaSource* Get(int32 Index);
+	MEDIAASSETS_API UMediaSource* Get(int32 Index);
 
 	/**
 	 * Get the next media source in the play list.
@@ -69,7 +76,7 @@ public:
 	 * @see , GetPrevious, GetRandom
 	 */
 	UFUNCTION(BlueprintCallable, Category="Media|MediaPlaylist")
-	UMediaSource* GetNext(int32& InOutIndex);
+	MEDIAASSETS_API UMediaSource* GetNext(int32& InOutIndex);
 
 	/**
 	 * Get the previous media source in the play list.
@@ -79,7 +86,7 @@ public:
 	 * @see , GetNext, GetRandom
 	 */
 	UFUNCTION(BlueprintCallable, Category="Media|MediaPlaylist")
-	UMediaSource* GetPrevious(int32& InOutIndex);
+	MEDIAASSETS_API UMediaSource* GetPrevious(int32& InOutIndex);
 
 	/**
 	 * Get a random media source in the play list.
@@ -89,7 +96,7 @@ public:
 	 * @see Get, GetNext, GetPrevious
 	 */
 	UFUNCTION(BlueprintCallable, Category="Media|MediaPlaylist")
-	UMediaSource* GetRandom(int32& OutIndex);
+	MEDIAASSETS_API UMediaSource* GetRandom(int32& OutIndex);
 
 	/**
 	 * Insert a media source into the play list at the given position.
@@ -99,7 +106,7 @@ public:
 	 * @see Add, Remove, RemoveAll, Replace
 	 */
 	UFUNCTION(BlueprintCallable, Category="Media|MediaPlaylist")
-	void Insert(UMediaSource* MediaSource, int32 Index);
+	MEDIAASSETS_API void Insert(UMediaSource* MediaSource, int32 Index);
 
 	/**
 	 * Get the number of media sources in the play list.
@@ -120,7 +127,7 @@ public:
 	 * @see Add, Insert, Remove, Replace
 	 */
 	UFUNCTION(BlueprintCallable, Category="Media|MediaPlaylist")
-	bool Remove(UMediaSource* MediaSource);
+	MEDIAASSETS_API bool Remove(UMediaSource* MediaSource);
 
 	/**
 	 * Remove the media source at the specified position.
@@ -130,7 +137,7 @@ public:
 	 * @see Add, Insert, RemoveAll, Replace
 	 */
 	UFUNCTION(BlueprintCallable, Category="Media|MediaPlaylist")
-	bool RemoveAt(int32 Index);
+	MEDIAASSETS_API bool RemoveAt(int32 Index);
 
 	/**
 	 * Replace the media source at the specified position.
@@ -141,13 +148,13 @@ public:
 	 * @see Add, Insert, RemoveAll, RemoveAt
 	 */
 	UFUNCTION(BlueprintCallable, Category="Media|MediaPlaylist")
-	bool Replace(int32 Index, UMediaSource* Replacement);
+	MEDIAASSETS_API bool Replace(int32 Index, UMediaSource* Replacement);
 
 protected:
 
 	/** List of media sources to play. */
 	UPROPERTY(EditAnywhere, Category=Playlist)
-	TArray<UMediaSource*> Items;
+	TArray<TObjectPtr<UMediaSource>> Items;
 
 	virtual bool CanBeInCluster() const override { return false; }
 };

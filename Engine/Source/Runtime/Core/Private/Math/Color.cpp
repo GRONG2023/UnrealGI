@@ -8,6 +8,7 @@
 #include "Math/Vector.h"
 #include "Math/Vector4.h"
 #include "Math/Float16Color.h"
+#include "Math/RandomStream.h"
 
 // Common colors.
 const FLinearColor FLinearColor::White(1.f,1.f,1.f);
@@ -34,51 +35,37 @@ const FColor FColor::Turquoise(26, 188, 156);
 const FColor FColor::Silver(189, 195, 199);
 const FColor FColor::Emerald(46, 204, 113);
 
-/**
-* Helper used by FColor -> FLinearColor conversion. We don't use a lookup table as unlike pow, multiplication is fast.
-*/
-static const float OneOver255 = 1.0f / 255.0f;
-
-//	FColor->FLinearColor conversion.
-FLinearColor::FLinearColor(const FColor& Color)
-{
-	R = sRGBToLinearTable[Color.R];
-	G = sRGBToLinearTable[Color.G];
-	B =	sRGBToLinearTable[Color.B];
-	A =	float(Color.A) * OneOver255;
-}
-
-FLinearColor::FLinearColor(const FVector& Vector) :
+FLinearColor::FLinearColor(const FVector3f& Vector) :
 	R(Vector.X),
 	G(Vector.Y),
 	B(Vector.Z),
 	A(1.0f)
 {}
 
-FLinearColor::FLinearColor(const FVector4& Vector) :
+FLinearColor::FLinearColor(const FVector3d& Vector) :
+	R((float)Vector.X),
+	G((float)Vector.Y),
+	B((float)Vector.Z),
+	A(1.0f)
+{}
+
+FLinearColor::FLinearColor(const FVector4f& Vector) :
 	R(Vector.X),
 	G(Vector.Y),
 	B(Vector.Z),
 	A(Vector.W)
 {}
 
+FLinearColor::FLinearColor(const FVector4d& Vector) :
+	R((float)Vector.X),
+	G((float)Vector.Y),
+	B((float)Vector.Z),
+	A((float)Vector.W)
+{}
+
 FLinearColor::FLinearColor(const FFloat16Color& C)
 {
-	R = C.R.GetFloat();
-	G = C.G.GetFloat();
-	B =	C.B.GetFloat();
-	A =	C.A.GetFloat();
-}
-
-FLinearColor FLinearColor::FromSRGBColor(const FColor& Color)
-{
-	FLinearColor LinearColor;
-	LinearColor.R = sRGBToLinearTable[Color.R];
-	LinearColor.G = sRGBToLinearTable[Color.G];
-	LinearColor.B =	sRGBToLinearTable[Color.B];
-	LinearColor.A =	float(Color.A) * OneOver255;
-
-	return LinearColor;
+	*this = C.GetFloats();
 }
 
 FLinearColor FLinearColor::FromPow22Color(const FColor& Color)
@@ -87,80 +74,212 @@ FLinearColor FLinearColor::FromPow22Color(const FColor& Color)
 	LinearColor.R = Pow22OneOver255Table[Color.R];
 	LinearColor.G = Pow22OneOver255Table[Color.G];
 	LinearColor.B =	Pow22OneOver255Table[Color.B];
-	LinearColor.A =	float(Color.A) * OneOver255;
+	LinearColor.A =	float(Color.A) * (1.0f / 255.0f);
 
 	return LinearColor;
 }
 
-// Convert from float to RGBE as outlined in Gregory Ward's Real Pixels article, Graphics Gems II, page 80.
+/**
+ * Converts from a linear float color to RGBE as outlined in Gregory Ward's Real Pixels article, Graphics Gems II, page 80.
+ * Implementation details in https://cbloomrants.blogspot.com/2020/06/widespread-error-in-radiance-hdr-rgbe.html
+ */ 
 FColor FLinearColor::ToRGBE() const
 {
 	const float	Primary = FMath::Max3( R, G, B );
-	FColor	Color;
 
 	if( Primary < 1E-32f )
 	{
-		Color = FColor(0,0,0,0);
+		return FColor(0,0,0,0);
 	}
 	else
 	{
-		int32 Exponent;
-		const float Scale = (float)frexp(Primary, &Exponent) / Primary * 255.f;
+		// RGBE HDR can not store negative floats
+		// Unreal passes negative floats here
+		// just clamp them to zero :
+		const float NonNegativeR = FMath::Max(R,0.f);
+		const float NonNegativeG = FMath::Max(G,0.f);
+		const float NonNegativeB = FMath::Max(B,0.f);
 
-		Color.R		= (uint8)FMath::Clamp(FMath::TruncToInt(R * Scale), 0, 255);
-		Color.G		= (uint8)FMath::Clamp(FMath::TruncToInt(G * Scale), 0, 255);
-		Color.B		= (uint8)FMath::Clamp(FMath::TruncToInt(B * Scale), 0, 255);
-		Color.A		= (uint8)(FMath::Clamp(Exponent,-128,127) + 128);
+		// The following replaces a call to frexpf, because frexpf would have a warning for an unused return value.
+		// Additionally, this usage of logbf assumes FLT_RADIX == 2
+		int32 Exponent = 1 + (int32)logbf(Primary);
+		const float Scale = ldexpf(1.f, -Exponent + 8);
+		
+		FColor	Color;
+		// no clamp needed, should always fit in uint8 :
+		Color.R = IntCastChecked<uint8>( (int)(NonNegativeR * Scale) );
+		Color.G = IntCastChecked<uint8>( (int)(NonNegativeG * Scale) );
+		Color.B = IntCastChecked<uint8>( (int)(NonNegativeB * Scale) );
+		Color.A = IntCastChecked<uint8>( Exponent + 128 );
+		return Color;
 	}
-
-	return Color;
 }
 
+
+// fast Linear to SRGB uint8 conversion
+// https://gist.github.com/rygorous/2203834
+//
+// round-trips exactly
+// quantization bucket boundaries vary by max of 0.11%
+// biggest difference at i = 1
+// thresholds[i] = 0.000456
+// c_linear_float_srgb_thresholds[i] = 0.000455
+
+typedef union
+{
+    uint32 u;
+    float f;
+} stbir__FP32;
+
+static const uint32 stb_fp32_to_srgb8_tab4[104] = {
+    0x0073000d, 0x007a000d, 0x0080000d, 0x0087000d, 0x008d000d, 0x0094000d, 0x009a000d, 0x00a1000d,
+    0x00a7001a, 0x00b4001a, 0x00c1001a, 0x00ce001a, 0x00da001a, 0x00e7001a, 0x00f4001a, 0x0101001a,
+    0x010e0033, 0x01280033, 0x01410033, 0x015b0033, 0x01750033, 0x018f0033, 0x01a80033, 0x01c20033,
+    0x01dc0067, 0x020f0067, 0x02430067, 0x02760067, 0x02aa0067, 0x02dd0067, 0x03110067, 0x03440067,
+    0x037800ce, 0x03df00ce, 0x044600ce, 0x04ad00ce, 0x051400ce, 0x057b00c5, 0x05dd00bc, 0x063b00b5,
+    0x06970158, 0x07420142, 0x07e30130, 0x087b0120, 0x090b0112, 0x09940106, 0x0a1700fc, 0x0a9500f2,
+    0x0b0f01cb, 0x0bf401ae, 0x0ccb0195, 0x0d950180, 0x0e56016e, 0x0f0d015e, 0x0fbc0150, 0x10630143,
+    0x11070264, 0x1238023e, 0x1357021d, 0x14660201, 0x156601e9, 0x165a01d3, 0x174401c0, 0x182401af,
+    0x18fe0331, 0x1a9602fe, 0x1c1502d2, 0x1d7e02ad, 0x1ed4028d, 0x201a0270, 0x21520256, 0x227d0240,
+    0x239f0443, 0x25c003fe, 0x27bf03c4, 0x29a10392, 0x2b6a0367, 0x2d1d0341, 0x2ebe031f, 0x304d0300,
+    0x31d105b0, 0x34a80555, 0x37520507, 0x39d504c5, 0x3c37048b, 0x3e7c0458, 0x40a8042a, 0x42bd0401,
+    0x44c20798, 0x488e071e, 0x4c1c06b6, 0x4f76065d, 0x52a50610, 0x55ac05cc, 0x5892058f, 0x5b590559,
+    0x5e0c0a23, 0x631c0980, 0x67db08f6, 0x6c55087f, 0x70940818, 0x74a007bd, 0x787d076c, 0x7c330723,
+};
+ 
+static uint8 stbir__linear_to_srgb_uchar_fast(float in)
+{
+    static const stbir__FP32 almostone = { 0x3f7fffff }; // 1-eps
+    static const stbir__FP32 minval = { (127-13) << 23 };
+    uint32 tab,bias,scale,t;
+    stbir__FP32 f;
+ 
+    // Clamp to [2^(-13), 1-eps]; these two values map to 0 and 1, respectively.
+    // The tests are carefully written so that NaNs map to 0, same as in the reference
+    // implementation.
+    if (!(in > minval.f)) // written this way to catch NaNs
+        in = minval.f;
+    if (in > almostone.f)
+        in = almostone.f;
+ 
+    // Do the table lookup and unpack bias, scale
+    f.f = in;
+    tab = stb_fp32_to_srgb8_tab4[(f.u - minval.u) >> 20];
+    bias = (tab >> 16) << 9;
+    scale = tab & 0xffff;
+ 
+    // Grab next-highest mantissa bits and perform linear interpolation
+    t = (f.u >> 12) & 0xff;
+    return (uint8) ((bias + scale*t) >> 16);
+}
+
+#if PLATFORM_CPU_X86_FAMILY && PLATFORM_ENABLE_VECTORINTRINSICS
+
+static FColor ConvertLinearToSRGBSSE2(const FLinearColor& InColor)
+{
+	const VectorRegister4Float InRGBA = VectorLoad(&InColor.Component(0));
+
+	// Clamp to [2^(-13), 1-eps]; these two values map to 0 and 1, respectively.
+	// This clamping logic is carefully written so that NaNs map to 0.
+	//
+	// We do this clamping on all four color channels, even though we later handle
+	// A differently; this does not change the results for A: 2^(-13) rounds to 0 in
+	// U8, and 1-eps rounds to 255 in U8, so these are OK endpoints to use.
+	const VectorRegister4Float AlmostOne = VectorCastIntToFloat(VectorIntSet1(0x3f7fffff)); // 1-eps
+	const VectorRegister4Int MinValInt = VectorIntSet1((127 - 13) << 23);
+	const VectorRegister4Float MinValFlt = VectorCastIntToFloat(MinValInt);
+
+	const VectorRegister4Float InClamped = VectorMin(VectorMax(InRGBA, MinValFlt), AlmostOne);
+
+	// Set up for the table lookup
+	// This computes a 3-vector of table indices. The above clamping
+	// ensures that the values in question are in [0,13*8-1]=[0,103].
+	const VectorRegister4Int TabIndexVec = _mm_srli_epi32(_mm_sub_epi32(_mm_castps_si128(InClamped), MinValInt), 20);
+
+	// Do the 4 table lookups with regular loads. We can use PEXTRW (SSE2)
+	// to grab the 3 indices from lanes 1-3, lane 0 we can just get via MOVD.
+	// The latter gives us a full 32 bits, not 16 like the other ones, but given
+	// our value range either works.
+	const VectorRegister4Int TabValR = _mm_cvtsi32_si128(stb_fp32_to_srgb8_tab4[(uint32)_mm_cvtsi128_si32(TabIndexVec)]);
+	const VectorRegister4Int TabValG = _mm_cvtsi32_si128(stb_fp32_to_srgb8_tab4[(uint32)_mm_extract_epi16(TabIndexVec, 2)]);
+	const VectorRegister4Int TabValB = _mm_cvtsi32_si128(stb_fp32_to_srgb8_tab4[(uint32)_mm_extract_epi16(TabIndexVec, 4)]);
+
+	// Merge the four values we just loaded back into a 3-vector (gather complete!)
+	const VectorRegister4Int TabValRG = _mm_unpacklo_epi32(TabValR, TabValG);
+	const VectorRegister4Int TabValsRGB = _mm_unpacklo_epi64(TabValRG, TabValB); // This leaves A=0, which suits us
+
+	// Grab the mantissa bits into the low 16 bits of each 32b lane, and set up 512 in the high
+	// 16 bits of each 32b lane, which is how the bias values in the table are meant to be scaled.
+	//
+	// We grab mantissa bits [12,19] for the lerp.
+	const VectorRegister4Int MantissaLerpFactor = _mm_and_si128(_mm_srli_epi32(_mm_castps_si128(InClamped), 12), _mm_set1_epi32(0xff));
+	const VectorRegister4Int FinalMultiplier = _mm_or_si128(MantissaLerpFactor, _mm_set1_epi32(512 << 16));
+
+	// In the table:
+	//    (bias>>9) was stored in the high 16 bits
+	//    scale was stored in the low 16 bits
+	//    t = (mantissa >> 12) & 0xff
+	//
+	// then we want ((bias + scale*t) >> 16).
+	// Except for the final shift, that's a single PMADDWD:
+	const VectorRegister4Int InterpolatedRGB = _mm_srli_epi32(_mm_madd_epi16(TabValsRGB, FinalMultiplier), 16);
+
+	// Finally, A gets done directly, via (int)(A * 255.f + 0.5f)
+	// We zero out the non-A channels by multiplying by 0; our clamping earlier
+	// took care of NaNs/infinites, so this is fine
+	const VectorRegister4Float ScaledBiasedA = _mm_add_ps(_mm_mul_ps(InClamped, _mm_setr_ps(0.f, 0.f, 0.f, 255.f)), _mm_set1_ps(0.5f));
+	const VectorRegister4Int FinalA  = _mm_cvttps_epi32(ScaledBiasedA);
+
+	// Merge A into the result, reorder to BGRA, then pack down to bytes and store!
+	// InterpolatedRGB has lane 3=0, and ComputedA has the first three lanes zero,
+	// so we can just OR them together.
+	const VectorRegister4Int FinalRGBA = _mm_or_si128(InterpolatedRGB, FinalA);
+	const VectorRegister4Int FinalBGRA = _mm_shuffle_epi32(FinalRGBA, _MM_SHUFFLE(3, 0, 1, 2));
+
+	const VectorRegister4Int Packed16 = _mm_packs_epi32(FinalBGRA, FinalBGRA);
+	const VectorRegister4Int Packed8 = _mm_packus_epi16(Packed16, Packed16);
+
+	return FColor((uint32)_mm_cvtsi128_si32(Packed8));
+}
+
+#endif
 
 /** Quantizes the linear color and returns the result as a FColor with optional sRGB conversion and quality as goal. */
-FColor FLinearColor::ToFColor(const bool bSRGB) const
+FColor FLinearColor::ToFColorSRGB() const
 {
-	float FloatR = FMath::Clamp(R, 0.0f, 1.0f);
-	float FloatG = FMath::Clamp(G, 0.0f, 1.0f);
-	float FloatB = FMath::Clamp(B, 0.0f, 1.0f);
-	float FloatA = FMath::Clamp(A, 0.0f, 1.0f);
+	// The convention used here in all channels is that NaNs
+	// convert to 0, as do negative values, and out-of-range
+	// positive values convert to 255.
 
-	if(bSRGB)
+#if PLATFORM_CPU_X86_FAMILY && PLATFORM_ENABLE_VECTORINTRINSICS
+	return ConvertLinearToSRGBSSE2(*this);
+#else
+	return FColor(
+		stbir__linear_to_srgb_uchar_fast(R),
+		stbir__linear_to_srgb_uchar_fast(G),
+		stbir__linear_to_srgb_uchar_fast(B),
+		(uint8)(0.5f + Clamp01NansTo0(A)*255.f)
+	);
+#endif
+}
+
+/**
+ * Convert multiple FLinearColors to sRGB FColor; array version of FLinearColor::ToFColorSRGB.
+ * 
+ * @param	InLinearColors	Pointer to one or more FLinearColors to convert.
+ * @param	OutColorsSRGB	Pointer to one or more FColors that receive the results.
+ * @param	InCount			Number of colors to convert.
+ */
+void ConvertFLinearColorsToFColorSRGB(const FLinearColor* InLinearColors, FColor* OutColorsSRGB, int64 InCount)
+{
+	// This function exists because calling FLinearColor::ToFColorSRGB()
+	// from another module is not cheap. However, we're in the same module
+	// as the definition here, so inlining works fine, and we can just
+	// implement this as the straightforward loop.
+	for (int64 Index = 0; Index < InCount; ++Index)
 	{
-		FloatR = FloatR <= 0.0031308f ? FloatR * 12.92f : FMath::Pow( FloatR, 1.0f / 2.4f ) * 1.055f - 0.055f;
-		FloatG = FloatG <= 0.0031308f ? FloatG * 12.92f : FMath::Pow( FloatG, 1.0f / 2.4f ) * 1.055f - 0.055f;
-		FloatB = FloatB <= 0.0031308f ? FloatB * 12.92f : FMath::Pow( FloatB, 1.0f / 2.4f ) * 1.055f - 0.055f;
+		OutColorsSRGB[Index] = InLinearColors[Index].ToFColorSRGB();
 	}
-
-	FColor Result;
-
-	Result.A = (uint8)FMath::FloorToInt(FloatA * 255.999f);
-	Result.R = (uint8)FMath::FloorToInt(FloatR * 255.999f);
-	Result.G = (uint8)FMath::FloorToInt(FloatG * 255.999f);
-	Result.B = (uint8)FMath::FloorToInt(FloatB * 255.999f);
-
-	return Result;
-}
-
-
-FColor FLinearColor::Quantize() const
-{
-	return FColor(
-		(uint8)FMath::Clamp<int32>(FMath::TruncToInt(R*255.f),0,255),
-		(uint8)FMath::Clamp<int32>(FMath::TruncToInt(G*255.f),0,255),
-		(uint8)FMath::Clamp<int32>(FMath::TruncToInt(B*255.f),0,255),
-		(uint8)FMath::Clamp<int32>(FMath::TruncToInt(A*255.f),0,255)
-		);
-}
-
-FColor FLinearColor::QuantizeRound() const
-{
-	return FColor(
-		(uint8)FMath::Clamp<int32>(FMath::RoundToInt(R*255.f),0,255),
-		(uint8)FMath::Clamp<int32>(FMath::RoundToInt(G*255.f),0,255),
-		(uint8)FMath::Clamp<int32>(FMath::RoundToInt(B*255.f),0,255),
-		(uint8)FMath::Clamp<int32>(FMath::RoundToInt(A*255.f),0,255)
-		);
 }
 
 /**
@@ -171,7 +290,7 @@ FColor FLinearColor::QuantizeRound() const
  */
 FLinearColor FLinearColor::Desaturate( float Desaturation ) const
 {
-	float Lum = ComputeLuminance();
+	float Lum = GetLuminance();
 	return FMath::Lerp( *this, FLinearColor( Lum, Lum, Lum, 0 ), Desaturation );
 }
 
@@ -215,7 +334,10 @@ FColor FColor::FromHex( const FString& HexString )
 	return FColor(ForceInitToZero);
 }
 
-// Convert from RGBE to float as outlined in Gregory Ward's Real Pixels article, Graphics Gems II, page 80.
+/**
+ * Converts from RGBE to a linear float color as outlined in Gregory Ward's Real Pixels article, Graphics Gems II, page 80.
+ * Implementation details in https://cbloomrants.blogspot.com/2020/06/widespread-error-in-radiance-hdr-rgbe.html
+ */ 
 FLinearColor FColor::FromRGBE() const
 {
 	if (A == 0)
@@ -224,8 +346,14 @@ FLinearColor FColor::FromRGBE() const
 	}
 	else
 	{
-		const float Scale = (float)ldexp( 1 / 255.0f, A - 128 );
-		return FLinearColor( R * Scale, G * Scale, B * Scale, 1.0f );
+		// the extra 8 here does the /256
+		const float Scale = ldexpf(1.f, A - (128 + 8));
+		// bias by 0.5 so [0,255] input shifts to [0.5,255.5] making it centered after /256
+		return FLinearColor( 
+			(R + 0.5f) * Scale, 
+			(G + 0.5f) * Scale, 
+			(B + 0.5f) * Scale, 
+			1.0f );
 	}
 }
 
@@ -237,9 +365,9 @@ FLinearColor FLinearColor::FGetHSV( uint8 H, uint8 S, uint8 V )
 	float Brightness = V * 1.4f / 255.f;
 	Brightness *= 0.7f/(0.01f + FMath::Sqrt(Brightness));
 	Brightness  = FMath::Clamp(Brightness,0.f,1.f);
-	const FVector Hue = (H<86) ? FVector((85-H)/85.f,(H-0)/85.f,0) : (H<171) ? FVector(0,(170-H)/85.f,(H-85)/85.f) : FVector((H-170)/85.f,0,(255-H)/84.f);
-	const FVector ColorVector = (Hue + S/255.f * (FVector(1,1,1) - Hue)) * Brightness;
-	return FLinearColor(ColorVector.X,ColorVector.Y,ColorVector.Z,1);
+	const FVector3f Hue = (H<86) ? FVector3f((85-H)/85.f,(H-0)/85.f,0) : (H<171) ? FVector3f(0,(170-H)/85.f,(H-85)/85.f) : FVector3f((H-170)/85.f,0,(255-H)/84.f);
+	const FVector3f ColorVector = (Hue + S/255.f * (FVector3f(1,1,1) - Hue)) * Brightness;
+	return FLinearColor(ColorVector.X, ColorVector.Y, ColorVector.Z,1);
 }
 
 /**
@@ -383,7 +511,43 @@ FLinearColor FLinearColor::MakeFromColorTemperature( float Temp )
 	float G = -0.9692660f * X +  1.8760108f * Y +  0.0415560f * Z;
 	float B =  0.0556434f * X + -0.2040259f * Y +  1.0572252f * Z;
 
+	// The XYZ to RGB transform can result in negative values, so we need to clamp here.
+	return FLinearColor(FMath::Max(0.0f, R), FMath::Max(0.0f, G), FMath::Max(0.0f, B));
+}
+
+FLinearColor FLinearColor::MakeRandomSeededColor(int32 Seed)
+{
+	FRandomStream RandomStream(Seed);
+
+	float R = RandomStream.GetFraction();
+	float G = RandomStream.GetFraction();
+	float B = RandomStream.GetFraction();
+
 	return FLinearColor(R,G,B);
+}
+
+FString FLinearColor::ToString() const
+{
+	return FString::Printf(TEXT("(R=%f,G=%f,B=%f,A=%f)"), R, G, B, A);
+}
+
+bool FLinearColor::InitFromString(const FString& InSourceString)
+{
+	R = G = B = 0.f;
+	A = 1.f;
+
+	// The initialization is only successful if the R, G, and B values can all be parsed from the string
+	const bool bSuccessful = FParse::Value(*InSourceString, TEXT("R="), R) && FParse::Value(*InSourceString, TEXT("G="), G) && FParse::Value(*InSourceString, TEXT("B="), B);
+
+	// Alpha is optional, so don't factor in its presence (or lack thereof) in determining initialization success
+	FParse::Value(*InSourceString, TEXT("A="), A);
+
+	return bSuccessful;
+}
+
+FColor FColor::MakeRandomSeededColor(int32 Seed)
+{
+	return FLinearColor::MakeRandomSeededColor( Seed ).ToFColor( true );
 }
 
 FColor FColor::MakeFromColorTemperature( float Temp )
@@ -401,9 +565,33 @@ FColor FColor::MakeRedToGreenColorFromScalar(float Scalar)
 	return FColor(R, G, B);
 }
 
+FString FColor::ToHex() const
+{
+	return FString::Printf(TEXT("%02X%02X%02X%02X"), R, G, B, A);
+}
+
+FString FColor::ToString() const
+{
+	return FString::Printf(TEXT("(R=%i,G=%i,B=%i,A=%i)"), R, G, B, A);
+}
+
+bool FColor::InitFromString(const FString& InSourceString)
+{
+	R = G = B = 0;
+	A = 255;
+
+	// The initialization is only successful if the R, G, and B values can all be parsed from the string
+	const bool bSuccessful = FParse::Value(*InSourceString, TEXT("R="), R) && FParse::Value(*InSourceString, TEXT("G="), G) && FParse::Value(*InSourceString, TEXT("B="), B);
+
+	// Alpha is optional, so don't factor in its presence (or lack thereof) in determining initialization success
+	FParse::Value(*InSourceString, TEXT("A="), A);
+
+	return bSuccessful;
+}
+
 void ComputeAndFixedColorAndIntensity(const FLinearColor& InLinearColor,FColor& OutColor,float& OutIntensity)
 {
-	float MaxComponent = FMath::Max(DELTA,FMath::Max(InLinearColor.R,FMath::Max(InLinearColor.G,InLinearColor.B)));
+	float MaxComponent = FMath::Max(UE_DELTA,FMath::Max(InLinearColor.R,FMath::Max(InLinearColor.G,InLinearColor.B)));
 	OutColor = ( InLinearColor / MaxComponent ).ToFColor(true);
 	OutIntensity = MaxComponent;
 }

@@ -16,6 +16,7 @@
 #include "EdGraph/EdGraph.h"
 #endif // WITH_EDITOR
 #include "SoundWaveLoadingBehavior.h"
+#include "PerPlatformProperties.h"
 
 #include "SoundClass.generated.h"
 
@@ -66,8 +67,9 @@ struct FSoundClassProperties
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = General)
 	float LowPassFilterFrequency;
 
-	/** Distance scale to apply to sounds that play with this sound class.
-	  * Sounds will have their attenuation distance scaled by this amount.
+	/** Scales the distance measurement used by the audio engine when determining distance-based attenuation. 
+	  * E.g., a sound 1000 units away with an AttenuationDistanceScale of .5 will be attenuated
+	  * as if it is 500 units away from the listener.
 	  * Allows adjusting attenuation settings dynamically. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = General)
 	float AttenuationDistanceScale;
@@ -129,13 +131,19 @@ struct FSoundClassProperties
 	TEnumAsByte<EAudioOutputTarget::Type> OutputTarget;
 
 	/** Specifies how and when compressed audio data is loaded for asset if stream caching is enabled. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Loading, meta = (DisplayName = "Loading Behavior Override"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Loading, meta = (DisplayName = "Loading Behavior Override"), AssetRegistrySearchable)
 	ESoundWaveLoadingBehavior LoadingBehavior;
+
+#if WITH_EDITORONLY_DATA
+   	/** How much audio to add to First Audio Chunk (in seconds) */
+	UPROPERTY(EditAnywhere, Category = Loading, meta = (UIMin = 0, UIMax = 10, EditCondition = "LoadingBehavior == ESoundWaveLoadingBehavior::RetainOnLoad || LoadingBehavior == ESoundWaveLoadingBehavior::PrimeOnLoad"), DisplayName="Size of First Audio Chunk (seconds)")
+   	FPerPlatformFloat SizeOfFirstAudioChunkInSeconds = 0.0f;
+#endif //WITH_EDITORONLY_DATA
 
 	/** Default output submix of referencing sounds. If unset, falls back to the 'Master Submix' as set in the 'Audio' category of Project Settings. 
 	  * (Unavailable if legacy 'Output to Master EQ Submix' is set) */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Submix, meta = (EditCondition = "!bApplyEffects"))
-	USoundSubmix* DefaultSubmix;
+	TObjectPtr<USoundSubmix> DefaultSubmix;
 
 	FSoundClassProperties();
 };
@@ -162,7 +170,7 @@ struct FPassiveSoundMixModifier
 
 	/** The SoundMix to activate */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=PassiveSoundMixModifier)
-	class USoundMix* SoundMix;
+	TObjectPtr<class USoundMix> SoundMix;
 
 	/** Minimum volume level required to activate SoundMix. Below this value the SoundMix will not be active. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=PassiveSoundMixModifier)
@@ -196,8 +204,8 @@ public:
 #endif
 
 
-UCLASS(config = Engine, hidecategories = Object, editinlinenew, BlueprintType)
-class ENGINE_API USoundClass : public UObject
+UCLASS(config = Engine, hidecategories = Object, editinlinenew, BlueprintType, MinimalAPI)
+class USoundClass : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
@@ -207,30 +215,30 @@ public:
 	FSoundClassProperties Properties;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = General)
-	TArray<USoundClass*> ChildClasses;
+	TArray<TObjectPtr<USoundClass>> ChildClasses;
 
 	/** SoundMix Modifiers to activate automatically when a sound of this class is playing. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = General)
 	TArray<FPassiveSoundMixModifier> PassiveSoundMixModifiers;
 
 	UPROPERTY(BlueprintReadOnly, Category = General)
-	USoundClass* ParentClass;
+	TObjectPtr<USoundClass> ParentClass;
 
 #if WITH_EDITORONLY_DATA
 	/** EdGraph based representation of the SoundClass */
-	class UEdGraph* SoundClassGraph;
+	TObjectPtr<class UEdGraph> SoundClassGraph;
 #endif // WITH_EDITORONLY_DATA
 
 protected:
 
 	//~ Begin UObject Interface.
-	virtual void Serialize( FArchive& Ar ) override;
-	virtual FString GetDesc( void ) override;
-	virtual void BeginDestroy() override;
-	virtual void PostLoad() override;
+	ENGINE_API virtual void Serialize( FArchive& Ar ) override;
+	ENGINE_API virtual FString GetDesc( void ) override;
+	ENGINE_API virtual void BeginDestroy() override;
+	ENGINE_API virtual void PostLoad() override;
 #if WITH_EDITOR
-	virtual void PreEditChange(FProperty* PropertyAboutToChange) override;
-	virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
+	ENGINE_API virtual void PreEditChange(FProperty* PropertyAboutToChange) override;
+	ENGINE_API virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
 	//~ End UObject Interface.
 
@@ -238,21 +246,21 @@ public:
 	/** 
 	 * Get the parameters for the sound mix.
 	 */
-	void Interpolate( float InterpValue, FSoundClassProperties& Current, const FSoundClassProperties& Start, const FSoundClassProperties& End );
+	ENGINE_API void Interpolate( float InterpValue, FSoundClassProperties& Current, const FSoundClassProperties& Start, const FSoundClassProperties& End );
 
 	// Sound Class Editor functionality
 #if WITH_EDITOR
 	/** 
 	 * @return true if the child sound class exists in the tree 
 	 */
-	bool RecurseCheckChild( USoundClass* ChildSoundClass );
+	ENGINE_API bool RecurseCheckChild( USoundClass* ChildSoundClass );
 
 	/**
 	 * Set the parent class of this SoundClass, removing it as a child from its previous owner
 	 *
 	 * @param	InParentClass	The New Parent Class of this
 	 */
-	void SetParentClass( USoundClass* InParentClass );
+	ENGINE_API void SetParentClass( USoundClass* InParentClass );
 
 	/**
 	 * Add Referenced objects
@@ -260,20 +268,20 @@ public:
 	 * @param	InThis SoundClass we are adding references from.
 	 * @param	Collector Reference Collector
 	 */
-	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
+	static ENGINE_API void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
 
 	/**
 	 * Refresh all EdGraph representations of SoundClasses
 	 *
 	 * @param	bIgnoreThis	Whether to ignore this SoundClass if it's already up to date
 	 */
-	void RefreshAllGraphs(bool bIgnoreThis);
+	ENGINE_API void RefreshAllGraphs(bool bIgnoreThis);
 
 	/** Sets the sound cue graph editor implementation. */
-	static void SetSoundClassAudioEditor(TSharedPtr<ISoundClassAudioEditor> InSoundClassAudioEditor);
+	static ENGINE_API void SetSoundClassAudioEditor(TSharedPtr<ISoundClassAudioEditor> InSoundClassAudioEditor);
 
 	/** Gets the sound cue graph editor implementation. */
-	static TSharedPtr<ISoundClassAudioEditor> GetSoundClassAudioEditor();
+	static ENGINE_API TSharedPtr<ISoundClassAudioEditor> GetSoundClassAudioEditor();
 
 private:
 

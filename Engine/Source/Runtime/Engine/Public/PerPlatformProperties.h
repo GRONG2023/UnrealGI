@@ -6,72 +6,161 @@ PerPlatformProperties.h: Property types that can be overridden on a per-platform
 
 #pragma once
 
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "Engine/Engine.h"
+#endif
 #include "Serialization/Archive.h"
 #include "RHIDefinitions.h"
 #include "Containers/Map.h"
 #include "Algo/Find.h"
 #include "Serialization/MemoryLayout.h"
-
-#if WITH_EDITORONLY_DATA && WITH_EDITOR
-#include "Engine/Engine.h"
-#endif
+#include "Misc/DataDrivenPlatformInfoRegistry.h"
+#include "Misc/FrameRate.h"
 
 #include "PerPlatformProperties.generated.h"
+
+/** Helper function to avoid including Engine.h in this header */
+#if WITH_EDITORONLY_DATA && WITH_EDITOR
+ENGINE_API bool GEngine_GetPreviewPlatformName(FName& PlatformName);
+#endif
+
+namespace PerPlatformProperty::Private
+{
+	template<typename MapType>
+	struct TGetKeyType
+	{
+		using Type = typename TTupleElement<0, typename MapType::ElementType>::Type;
+	};
+
+	template<typename NameType>
+	struct FNameFuncs;
+
+	template<>
+	struct FNameFuncs<FName>
+	{
+		static FName NameToKey(FName Name) { return Name; }
+
+		template<typename ValueType>
+		static void SerializePerPlatformMap(FArchive& Ar, TMap<FName, ValueType>& Map)
+		{
+			Ar << Map;
+		}
+
+		template<typename ValueType>
+		static void SerializePerPlatformMap(FArchive& UnderlyingArchive, FStructuredArchive::FRecord& Record, TMap<FName, ValueType>& Map)
+		{
+			Record << SA_VALUE(TEXT("PerPlatform"), Map);
+		}
+	};
+
+	template<>
+	struct FNameFuncs<FMemoryImageName>
+	{
+		static FMemoryImageName NameToKey(FName Name) { return FMemoryImageName(Name); }
+
+		template<typename ValueType>
+		static void SerializePerPlatformMap(FArchive& Ar, TMemoryImageMap<FMemoryImageName, ValueType>& Map)
+		{
+			if( Ar.IsLoading())
+			{
+				TMemoryImageMap<FName, ValueType> TempMap;
+				Ar << TempMap;
+				Map.Reset();
+				for( TPair<FName, ValueType>& Pair : TempMap)
+				{
+					Map.Add(FMemoryImageName(Pair.Key), Pair.Value);
+				}
+			}
+			else
+			{
+				TMemoryImageMap<FName, ValueType> TempMap;
+				for (TPair<FMemoryImageName, ValueType>& Pair : Map)
+				{
+					TempMap.Add(FName(Pair.Key), Pair.Value);
+				}
+				Ar << TempMap;
+			}
+		}
+
+		template<typename ValueType>
+		static void SerializePerPlatformMap(FArchive& UnderlyingArchive, FStructuredArchive::FRecord& Record, TMemoryImageMap<FMemoryImageName, ValueType>& Map)
+		{
+			if (UnderlyingArchive.IsLoading())
+			{
+				TMemoryImageMap<FName, ValueType> TempMap;
+
+				Record << SA_VALUE(TEXT("PerPlatform"), TempMap);
+				Map.Reset();
+				for (TPair<FName, ValueType>& Pair : TempMap)
+				{
+					Map.Add(FMemoryImageName(Pair.Key), Pair.Value);
+				}
+			}
+			else
+			{
+				TMemoryImageMap<FName, ValueType> TempMap;
+				for (TPair<FMemoryImageName, ValueType>& Pair : Map)
+				{
+					TempMap.Add(FName(Pair.Key), Pair.Value);
+				}
+				Record << SA_VALUE(TEXT("PerPlatform"), TempMap);
+			}
+		}
+	};
+
+	template<typename MapType>
+	using KeyFuncs = FNameFuncs<typename TGetKeyType<MapType>::Type>;
+}
 
 /** TPerPlatformProperty - template parent class for per-platform properties 
  *  Implements Serialize function to replace value at cook time, and 
  *  backwards-compatible loading code for properties converted from simple types.
  */
 template<typename _StructType, typename _ValueType, EName _BasePropertyName>
-struct ENGINE_API TPerPlatformProperty
+struct TPerPlatformProperty
 {
 	typedef _ValueType ValueType;
+	typedef _StructType StructType;
 
 #if WITH_EDITOR
-	/* Return the value */
-	_ValueType GetValueForPlatformIdentifiers(FName PlatformGroupName, FName VanillaPlatformName = NAME_None) const
+	/** Get the value for the given platform (using standard "ini" name, so Windows, not Win64 or WindowsClient), which can be used to lookup the group */
+	_ValueType GetValueForPlatform(FName PlatformName) const
 	{
 		const _StructType* This = StaticCast<const _StructType*>(this);
-		
-		const _ValueType* ValuePtr = [This, VanillaPlatformName, PlatformGroupName]() -> const _ValueType*
+
+		using MapType = decltype(This->PerPlatform);
+		using KeyFuncs = typename PerPlatformProperty::Private::KeyFuncs<MapType>;
+
+		const _ValueType* Ptr = This->PerPlatform.Find(KeyFuncs::NameToKey(PlatformName));
+
+		if (Ptr == nullptr)
 		{
-			const _ValueType* Ptr = nullptr;
-			if (VanillaPlatformName != NAME_None)
+			const FDataDrivenPlatformInfo& Info = FDataDrivenPlatformInfoRegistry::GetPlatformInfo(PlatformName);
+			if (Info.PlatformGroupName != NAME_None)
 			{
-				TArray<FName> Keys;
-				This->PerPlatform.GetKeys(Keys);
-				const FName* MatchedName = Keys.FindByPredicate([VanillaPlatformName](FName& Name)
-				{
-					return VanillaPlatformName.ToString().Contains(Name.ToString());
-				});
-				Ptr = MatchedName ? This->PerPlatform.Find(*MatchedName) : nullptr;
-			}			
-			if (Ptr == nullptr && PlatformGroupName != NAME_None)
-			{				
-				Ptr = This->PerPlatform.Find(PlatformGroupName);
+				Ptr = This->PerPlatform.Find(KeyFuncs::NameToKey(Info.PlatformGroupName));
 			}
-			return Ptr;			
-		}();
+		}
 
-		return ValuePtr != nullptr ? *ValuePtr : This->Default;
+		return Ptr ? *Ptr : This->Default;
 	}
-
-	UE_DEPRECATED(4.22, "GetValueForPlatformGroup renamed GetValueForPlatformIdentifiers")
-	_ValueType GetValueForPlatformGroup(FName PlatformGroupName) const
-	{
-		return GetValueForPlatformIdentifiers(PlatformGroupName);
-	}
-
 #endif
 
+	_ValueType GetDefault() const
+	{
+		const _StructType* This = StaticCast<const _StructType*>(this);
+		return This->Default;
+	}
+	
 	_ValueType GetValue() const
 	{
 #if WITH_EDITORONLY_DATA && WITH_EDITOR
-		FName PlatformGroupName, VanillaPlatformName;
+		FName PlatformName;
 		// Lookup the override preview platform info, if any
-		if (GEngine && GEngine->GetPreviewPlatformName(PlatformGroupName, VanillaPlatformName))
+		// @todo this doesn't set PlatformName, just a group, but GetValueForPlatform() will technically work being given a Group name instead of a platform name, so we just use it
+		if (GEngine_GetPreviewPlatformName(PlatformName))
 		{
-			return GetValueForPlatformIdentifiers(PlatformGroupName, VanillaPlatformName);
+			return GetValueForPlatform(PlatformName);
 		}
 		else		
 #endif
@@ -79,29 +168,6 @@ struct ENGINE_API TPerPlatformProperty
 			const _StructType* This = StaticCast<const _StructType*>(this);
 			return This->Default;
 		}
-	}
-
-	UE_DEPRECATED(4.26, "GetValueForFeatureLevel is not needed for platform previewing and GetValue() should be used instead.")
-	_ValueType GetValueForFeatureLevel(ERHIFeatureLevel::Type FeatureLevel) const
-	{
-#if WITH_EDITORONLY_DATA
-		FName PlatformGroupName;
-		switch (FeatureLevel)
-		{
-		    case ERHIFeatureLevel::ES3_1:
-		    {
-			    PlatformGroupName = NAME_Mobile;
-			    break;
-		    }
-		    default:
-			    PlatformGroupName = NAME_None;
-			    break;
-		}
-		return GetValueForPlatformIdentifiers(PlatformGroupName);
-#else
-		const _StructType* This = StaticCast<const _StructType*>(this);
-		return This->Default;
-#endif
 	}
 
 	/* Load old properties that have been converted to FPerPlatformX */
@@ -141,15 +207,15 @@ ENGINE_API void operator<<(FStructuredArchive::FSlot Slot, TPerPlatformProperty<
 struct FFreezablePerPlatformInt;
 
 /** FPerPlatformInt - int32 property with per-platform overrides */
-USTRUCT()
-struct ENGINE_API FPerPlatformInt
+USTRUCT(BlueprintType)
+struct FPerPlatformInt
 #if CPP
 :	public TPerPlatformProperty<FPerPlatformInt, int32, NAME_IntProperty>
 #endif
 {
 	GENERATED_USTRUCT_BODY()
 
-	UPROPERTY(EditAnywhere, Category = PerPlatform)
+	UPROPERTY(BlueprintReadOnly, EditAnywhere, Category = PerPlatform)
 	int32 Default;
 
 #if WITH_EDITORONLY_DATA
@@ -167,14 +233,14 @@ struct ENGINE_API FPerPlatformInt
 	{
 	}
 
-	FString ToString() const;
+	ENGINE_API FString ToString() const;
 
-	FPerPlatformInt(const FFreezablePerPlatformInt& Other);
+	ENGINE_API FPerPlatformInt(const FFreezablePerPlatformInt& Other);
 
 };
 
 USTRUCT()
-struct ENGINE_API FFreezablePerPlatformInt
+struct FFreezablePerPlatformInt
 #if CPP
 	: public TPerPlatformProperty<FFreezablePerPlatformInt, int32, NAME_IntProperty>
 #endif
@@ -184,7 +250,8 @@ struct ENGINE_API FFreezablePerPlatformInt
 	GENERATED_USTRUCT_BODY()
 
 public:
-	using FPerPlatformMap = TMemoryImageMap<FName, int32>;
+	using KeyType = FMemoryImageName;
+	using FPerPlatformMap = TMemoryImageMap<FMemoryImageName, int32>;
 
 	LAYOUT_FIELD(int32, Default);
 	LAYOUT_FIELD_EDITORONLY(FPerPlatformMap, PerPlatform);
@@ -193,20 +260,28 @@ public:
 	FFreezablePerPlatformInt(int32 InDefaultValue) : Default(InDefaultValue) {}
 	FFreezablePerPlatformInt(const FPerPlatformInt& Other)
 		: Default(Other.Default)
+	{
 #if WITH_EDITORONLY_DATA
-		, PerPlatform(Other.PerPlatform)
+		for (const TPair<FName, int32>& Pair : Other.PerPlatform)
+		{
+			PerPlatform.Add(FMemoryImageName(Pair.Key), Pair.Value);
+		}
 #endif
-	{}
+	}
 
-	FString ToString() const;
+	ENGINE_API FString ToString() const;
 };
 
 inline FPerPlatformInt::FPerPlatformInt(const FFreezablePerPlatformInt& Other)
 	: Default(Other.Default)
+{
 #if WITH_EDITORONLY_DATA
-	, PerPlatform(Other.PerPlatform)
+	for (const TPair<FMemoryImageName, int32>& Pair : Other.PerPlatform)
+	{
+		PerPlatform.Add(FName(Pair.Key), Pair.Value);
+	}
 #endif
-{}
+}
 
 extern template ENGINE_API FArchive& operator<<(FArchive&, TPerPlatformProperty<FPerPlatformInt, int32, NAME_IntProperty>&);
 extern template ENGINE_API void operator<<(FStructuredArchive::FSlot Slot, TPerPlatformProperty<FPerPlatformInt, int32, NAME_IntProperty>&);
@@ -220,20 +295,21 @@ struct TStructOpsTypeTraits<FPerPlatformInt>
 		WithSerializeFromMismatchedTag = true,
 		WithSerializer = true
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
 
 struct FFreezablePerPlatformFloat;
 
 /** FPerPlatformFloat - float property with per-platform overrides */
-USTRUCT(meta = (CanFlattenStruct))
-struct ENGINE_API FPerPlatformFloat
+USTRUCT(BlueprintType, meta = (CanFlattenStruct))
+struct FPerPlatformFloat
 #if CPP
 :	public TPerPlatformProperty<FPerPlatformFloat, float, NAME_FloatProperty>
 #endif
 {
 	GENERATED_USTRUCT_BODY()
 
-	UPROPERTY(EditAnywhere, Category = PerPlatform)
+	UPROPERTY(BlueprintReadOnly, EditAnywhere, Category = PerPlatform)
 	float Default;
 
 #if WITH_EDITORONLY_DATA
@@ -251,18 +327,18 @@ struct ENGINE_API FPerPlatformFloat
 	{
 	}
 
-	FPerPlatformFloat(const FFreezablePerPlatformFloat& Other);
+	ENGINE_API FPerPlatformFloat(const FFreezablePerPlatformFloat& Other);
 };
 extern template ENGINE_API FArchive& operator<<(FArchive&, TPerPlatformProperty<FPerPlatformFloat, float, NAME_FloatProperty>&);
 
-struct ENGINE_API FFreezablePerPlatformFloat
+struct FFreezablePerPlatformFloat
 #if CPP
 	: public TPerPlatformProperty<FFreezablePerPlatformFloat, float, NAME_FloatProperty>
 #endif
 {
 	DECLARE_TYPE_LAYOUT(FFreezablePerPlatformFloat, NonVirtual);
 public:
-	using FPerPlatformMap = TMemoryImageMap<FName, float>;
+	using FPerPlatformMap = TMemoryImageMap<FMemoryImageName, float>;
 	
 	LAYOUT_FIELD(float, Default);
 	LAYOUT_FIELD_EDITORONLY(FPerPlatformMap, PerPlatform);
@@ -271,18 +347,26 @@ public:
 	FFreezablePerPlatformFloat(float InDefaultValue) : Default(InDefaultValue) {}
 	FFreezablePerPlatformFloat(const FPerPlatformFloat& Other)
 		: Default(Other.Default)
+	{
 #if WITH_EDITORONLY_DATA
-		, PerPlatform(Other.PerPlatform)
+		for (const TPair<FName, float>& Pair : Other.PerPlatform)
+		{
+			PerPlatform.Add(FMemoryImageName(Pair.Key), Pair.Value);
+		}
 #endif
-	{}
+}
 };
 
 inline FPerPlatformFloat::FPerPlatformFloat(const FFreezablePerPlatformFloat& Other)
 	: Default(Other.Default)
+{
 #if WITH_EDITORONLY_DATA
-	, PerPlatform(Other.PerPlatform)
+	for (const TPair<FMemoryImageName, float>& Pair : Other.PerPlatform)
+	{
+		PerPlatform.Add(FName(Pair.Key), Pair.Value);
+	}
 #endif
-{}
+}
 
 template<>
 struct TStructOpsTypeTraits<FPerPlatformFloat>
@@ -293,11 +377,12 @@ struct TStructOpsTypeTraits<FPerPlatformFloat>
 		WithSerializeFromMismatchedTag = true,
 		WithSerializer = true
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
 
 /** FPerPlatformBool - bool property with per-platform overrides */
 USTRUCT()
-struct ENGINE_API FPerPlatformBool
+struct FPerPlatformBool
 #if CPP
 :	public TPerPlatformProperty<FPerPlatformBool, bool, NAME_BoolProperty>
 #endif
@@ -333,4 +418,62 @@ struct TStructOpsTypeTraits<FPerPlatformBool>
 		WithSerializeFromMismatchedTag = true,
 		WithSerializer = true
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
+};
+
+/** FPerPlatformFrameRate - FFrameRate property with per-platform overrides */
+USTRUCT(BlueprintType)
+struct FPerPlatformFrameRate
+#if CPP
+:	public TPerPlatformProperty<FPerPlatformFrameRate, FFrameRate, NAME_FrameRate>
+#endif
+{
+	GENERATED_USTRUCT_BODY()
+
+	UPROPERTY(EditAnywhere, Category = PerPlatform)
+	FFrameRate Default;
+
+#if WITH_EDITORONLY_DATA
+	UPROPERTY(EditAnywhere, Category = PerPlatform)
+	TMap<FName, FFrameRate> PerPlatform;
+#endif
+
+	FPerPlatformFrameRate()
+	:	Default(30, 1)
+	{
+	}
+
+	FPerPlatformFrameRate(FFrameRate InDefaultValue)
+	:	Default(InDefaultValue)
+	{
+	}
+	
+	bool SerializeFromMismatchedTag(const FPropertyTag& Tag, FArchive& Ar)
+	{
+		if(const UStruct* FrameRateStruct = FindObject<UStruct>(FTopLevelAssetPath("/Script/CoreUObject.FrameRate")))
+		{
+			FFrameRate Value;
+			Ar << Value.Denominator;
+			Ar << Value.Numerator;
+			Default = Value;
+
+			return true;
+		}
+		
+		return false;
+	}
+};
+
+extern template ENGINE_API FArchive& operator<<(FArchive&, TPerPlatformProperty<FPerPlatformFrameRate, FFrameRate, NAME_FrameRate>&);
+
+template<>
+struct TStructOpsTypeTraits<FPerPlatformFrameRate>
+	: public TStructOpsTypeTraitsBase2<FPerPlatformFrameRate>
+{
+	enum
+	{
+		WithSerializeFromMismatchedTag = false,
+		WithSerializer = true
+	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };

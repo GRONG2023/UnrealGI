@@ -4,16 +4,16 @@
 #include "EntitySystem/TrackInstance/MovieSceneTrackInstance.h"
 #include "EntitySystem/MovieSceneBoundObjectInstantiator.h"
 #include "EntitySystem/MovieSceneBoundSceneComponentInstantiator.h"
-#include "EntitySystem/MovieSceneMasterInstantiatorSystem.h"
+#include "EntitySystem/MovieSceneRootInstantiatorSystem.h"
 #include "EntitySystem/MovieSceneEntitySystemTask.h"
 #include "EntitySystem/MovieSceneEntityManager.h"
 #include "EntitySystem/BuiltInComponentTypes.h"
 #include "EntitySystem/MovieSceneInstanceRegistry.h"
 #include "EntitySystem/MovieSceneEntitySystemLinker.h"
 #include "EntitySystem/MovieSceneEntityFactoryTemplates.h"
-#include "Evaluation/PreAnimatedState/MovieScenePreAnimatedStateExtension.h"
-#include "Evaluation/PreAnimatedState/MovieScenePreAnimatedCaptureSources.h"
 #include "MovieSceneSection.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneTrackInstanceSystem)
 
 DECLARE_CYCLE_STAT(TEXT("Generic Track Instances"), MovieSceneEval_GenericTrackInstances, STATGROUP_MovieSceneECS);
 DECLARE_CYCLE_STAT(TEXT("Generic Track Instances Task"), MovieSceneEval_GenericTrackInstanceTask, STATGROUP_MovieSceneECS);
@@ -76,7 +76,7 @@ UMovieSceneTrackInstanceInstantiator::UMovieSceneTrackInstanceInstantiator(const
 
 	if (HasAnyFlags(RF_ClassDefaultObject))
 	{
-		DefineImplicitPrerequisite(UMovieSceneMasterInstantiatorSystem::StaticClass(), GetClass());
+		DefineImplicitPrerequisite(UMovieSceneRootInstantiatorSystem::StaticClass(), GetClass());
 		DefineComponentConsumer(GetClass(), FBuiltInComponentTypes::Get()->BoundObject);
 	}
 }
@@ -108,7 +108,7 @@ void UMovieSceneTrackInstanceInstantiator::AddReferencedObjects(UObject* InThis,
 		Collector.AddReferencedObject(Entry.TrackInstance, This);
 	}
 
-	for (TTuple<UObject*, int32>& Pair : This->BoundObjectToInstances)
+	for (auto& Pair : This->BoundObjectToInstances)
 	{
 		Collector.AddReferencedObject(Pair.Key, This);
 	}
@@ -198,20 +198,33 @@ void UMovieSceneTrackInstanceInstantiator::OnRun(FSystemTaskPrerequisites& InPre
 		return;
 	}
 
-	FPreAnimatedStateExtension*              PreAnimatedStateExtension = Linker->FindExtension<FPreAnimatedStateExtension>();
-	FPreAnimatedTrackInstanceCaptureSources* TrackInstanceMetaData     = PreAnimatedStateExtension ? PreAnimatedStateExtension->GetTrackInstanceMetaData() : nullptr;
-
 	// Gather all the inputs for any invalidated output indices
 	TSortedMap<int32, TArray<FMovieSceneTrackInstanceInput> > NewInputs;
 	{
-		auto ReLinkInputs = [this, &NewInputs](FInstanceHandle SourceInstance, FTrackInstanceInputComponent InputComponent)
+		auto ReLinkInputs = [this, &NewInputs, BuiltInComponents](FEntityAllocationIteratorItem Item, const FInstanceHandle* SourceInstances, const FTrackInstanceInputComponent* InputComponents)
 		{
-			if (this->InvalidatedOutputs.IsValidIndex(InputComponent.OutputIndex) && this->InvalidatedOutputs[InputComponent.OutputIndex] == true)
+			const int32 Num = Item.GetAllocation()->Num();
+
+			// If the input does not have the NeedsLink tag, it has already been processed, so doesn't need removing and re-adding
+			const bool bInputHasBeenProcessed = !Item.GetAllocationType().Contains(BuiltInComponents->Tags.NeedsLink);
+			
+			for (int32 Index = 0; Index < Num; ++Index)
 			{
-				NewInputs.FindOrAdd(InputComponent.OutputIndex).Add(FMovieSceneTrackInstanceInput{ InputComponent.Section, SourceInstance });
+				const int32 OutputIndex = InputComponents[Index].OutputIndex;
+
+				FMovieSceneTrackInstanceInput NewInput{ InputComponents[Index].Section, SourceInstances[Index], bInputHasBeenProcessed };
+				if (this->InvalidatedOutputs.IsValidIndex(OutputIndex) && this->InvalidatedOutputs[OutputIndex] == true)
+				{
+					NewInputs.FindOrAdd(OutputIndex).Add(NewInput);
+				}
 			}
+			
 		};
-		FEntityTaskBuilder().Read(BuiltInComponents->InstanceHandle).Read(BuiltInComponents->TrackInstanceInput).FilterNone({ BuiltInComponents->Tags.NeedsUnlink }).Iterate_PerEntity(&Linker->EntityManager, ReLinkInputs);
+		FEntityTaskBuilder()
+		.Read(BuiltInComponents->InstanceHandle)
+		.Read(BuiltInComponents->TrackInstanceInput)
+		.FilterNone({ BuiltInComponents->Tags.NeedsUnlink })
+		.Iterate_PerAllocation(&Linker->EntityManager, ReLinkInputs);
 	}
 
 	// Update the inputs for each of the invalidated indices
@@ -236,11 +249,6 @@ void UMovieSceneTrackInstanceInstantiator::OnRun(FSystemTaskPrerequisites& InPre
 		FMovieSceneTrackInstanceEntry& Entry = TrackInstances[DestroyIndex];
 		Entry.TrackInstance->Destroy();
 
-		if (TrackInstanceMetaData)
-		{
-			TrackInstanceMetaData->StopTrackingCaptureSource(Entry.TrackInstance);
-		}
-
 		// Remove the entry from our LUTs
 		BoundObjectToInstances.Remove(Entry.BoundObject, DestroyIndex);
 		TrackInstances.RemoveAt(DestroyIndex);
@@ -252,6 +260,7 @@ void UMovieSceneTrackInstanceInstantiator::OnRun(FSystemTaskPrerequisites& InPre
 UMovieSceneTrackInstanceSystem::UMovieSceneTrackInstanceSystem(const FObjectInitializer& ObjInit)
 	: Super(ObjInit)
 {
+	Phase = UE::MovieScene::ESystemPhase::Scheduling;
 	RelevantComponent = UE::MovieScene::FBuiltInComponentTypes::Get()->TrackInstance;
 }
 
@@ -261,24 +270,42 @@ void UMovieSceneTrackInstanceSystem::OnLink()
 	Linker->SystemGraph.AddReference(this, Instantiator);
 }
 
+void UMovieSceneTrackInstanceSystem::OnSchedulePersistentTasks(UE::MovieScene::IEntitySystemScheduler* TaskScheduler)
+{
+	using namespace UE::MovieScene;
+	if (this->Instantiator->GetTrackInstances().Num() != 0)
+	{
+		TaskScheduler->AddMemberFunctionTask(FTaskParams(TEXT("Evaluate Track Instances")).ForceGameThread(), this, &UMovieSceneTrackInstanceSystem::EvaluateAllInstances);
+	}
+}
+
 void UMovieSceneTrackInstanceSystem::OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents)
 {
+	using namespace UE::MovieScene;
+
 	SCOPE_CYCLE_COUNTER(MovieSceneEval_GenericTrackInstances)
 
 	if (this->Instantiator->GetTrackInstances().Num() != 0)
 	{
-		auto Run = [this]
+		if (Linker->EntityManager.GetThreadingModel() == EEntityThreadingModel::NoThreading)
 		{
-			for (const FMovieSceneTrackInstanceEntry& Entry : this->Instantiator->GetTrackInstances())
-			{
-				if (ensure(Entry.TrackInstance))
-				{
-					Entry.TrackInstance->Animate();
-				}
-			}
-		};
+			this->EvaluateAllInstances();
+		}
+		else
+		{
+			FGraphEventRef Task = FFunctionGraphTask::CreateAndDispatchWhenReady([this]{ this->EvaluateAllInstances(); }, GET_STATID(MovieSceneEval_GenericTrackInstanceTask), InPrerequisites.All(), Linker->EntityManager.GetGatherThread());
+			Subsequents.AddRootTask(Task);
+		}
+	}
+}
 
-		FGraphEventRef Task = FFunctionGraphTask::CreateAndDispatchWhenReady(MoveTemp(Run), GET_STATID(MovieSceneEval_GenericTrackInstanceTask), InPrerequisites.All(), Linker->EntityManager.GetGatherThread());
-		Subsequents.AddMasterTask(Task);
+void UMovieSceneTrackInstanceSystem::EvaluateAllInstances()
+{
+	for (const FMovieSceneTrackInstanceEntry& Entry : this->Instantiator->GetTrackInstances())
+	{
+		if (ensure(Entry.TrackInstance))
+		{
+			Entry.TrackInstance->Animate();
+		}
 	}
 }

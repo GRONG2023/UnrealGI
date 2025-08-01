@@ -5,7 +5,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Text.RegularExpressions;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 using AutomationTool;
 using UnrealBuildTool;
 
@@ -19,9 +19,12 @@ namespace AutomationUtils.Automation
 			public List<string> Tags { get; set; }
 			public List<string> Dependencies { get; set; }
 			public List<string> FileRegex { get; set; }
+			public List<string> Files { get; set; }
 			public bool bFoundParent { get; set; }
 			public bool bContainsShaderLibrary { get; set; }
 			public int Order { get; set; }
+			public bool	UseChunkDBs { get; set; }
+			public bool UseDetailedInstallSizes { get; set; } // default is true
 			public string ExecFileName { get; set; } // TODO: We never used this.  Clean this up.
 		}
 
@@ -93,6 +96,17 @@ namespace AutomationUtils.Automation
 					}
 				}
 				{
+					List<string> Files;
+					if (BundleConfig.GetArray(SectionName, "Files", out Files))
+					{
+						Bundle.Files = Files;
+					}
+					else
+					{
+						Bundle.Files = new List<string>();
+					}
+				}
+				{
 					bool bContainsShaderLibrary;
 					if (BundleConfig.GetBool(SectionName, "ContainsShaderLibrary", out bContainsShaderLibrary))
 					{
@@ -104,6 +118,29 @@ namespace AutomationUtils.Automation
 					}
 				}
 
+				{
+					bool bUseChunkDBs;
+					if (!BundleConfig.GetBool(SectionName, "UseChunkDBs", out bUseChunkDBs))
+					{
+						Bundle.UseChunkDBs = false;
+					}
+					else
+					{
+						Bundle.UseChunkDBs = bUseChunkDBs;
+					}
+					{
+						bool bUseDetailedInstallSizes;
+						if (!BundleConfig.GetBool(SectionName, "UseDetailedInstallSizes", out bUseDetailedInstallSizes))
+						{
+							Bundle.UseDetailedInstallSizes = true; // default to true
+						}
+						else
+						{
+							Bundle.UseDetailedInstallSizes = bUseDetailedInstallSizes;
+						}
+					}
+
+				}
 				GetPlatformSettings(Bundle, BundleConfig, BundleDefinitionPrefix + Bundle.Name);
 
 				Results.Add(Bundle);
@@ -116,12 +153,19 @@ namespace AutomationUtils.Automation
 		public static TPlatformBundleSettings MatchBundleSettings<TPlatformBundleSettings>(
 			string FileName, IReadOnlyDictionary<string, TPlatformBundleSettings> InstallBundles) where TPlatformBundleSettings : BundleSettings
 		{
-			// Try to find a matching chunk regex
+			// Try to find a matching chunk regex or exact filename
 			foreach (var Bundle in InstallBundles.Values)
 			{
 				foreach (string RegexString in Bundle.FileRegex)
 				{
 					if (Regex.Match(FileName, RegexString, RegexOptions.IgnoreCase).Success)
+					{
+						return Bundle;
+					}
+				}
+				foreach(string FileString in Bundle.Files)
+				{
+					if (FileString.Equals(FileName, StringComparison.OrdinalIgnoreCase))
 					{
 						return Bundle;
 					}

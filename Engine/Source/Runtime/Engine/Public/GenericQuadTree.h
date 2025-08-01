@@ -38,7 +38,8 @@ public:
 
 	void Serialize(FArchive& Ar);
 
-	TreeType& operator=(const TreeType& Other);
+	TQuadTree(const TQuadTree&);
+	TQuadTree& operator=(const TQuadTree& Other);
 
 	~TQuadTree();
 
@@ -96,7 +97,7 @@ private:
 	TArray<FNode> Nodes;
 
 	/** The sub-trees of this tree */
-	TreeType* SubTrees[4];
+	TreeType* SubTrees[4] = {nullptr};
 
 	/** AABB of the tree */
 	FBox2D TreeBox;
@@ -112,7 +113,13 @@ private:
 };
 
 template <typename ElementType, int32 NodeCapacity /*= 4*/>
-typename TQuadTree<ElementType, NodeCapacity>::TreeType& TQuadTree<ElementType, NodeCapacity>::operator=(const TreeType& Other)
+TQuadTree<ElementType, NodeCapacity>::TQuadTree(const TQuadTree& Other)
+{
+	Other.Duplicate(*this);
+}
+
+template <typename ElementType, int32 NodeCapacity /*= 4*/>
+TQuadTree<ElementType, NodeCapacity>& TQuadTree<ElementType, NodeCapacity>::operator=(const TQuadTree& Other)
 {
 	Other.Duplicate(*this);
 	return *this;
@@ -232,11 +239,13 @@ void TQuadTree<ElementType, NodeCapacity>::Split()
 template <typename ElementType, int32 NodeCapacity>
 void TQuadTree<ElementType, NodeCapacity>::Insert(const ElementType& Element, const FBox2D& Box, const TCHAR* DebugContext)
 {
+#if !UE_BUILD_SHIPPING
 	if (!Box.Intersect(TreeBox))
 	{
 		// Elements shouldn't be added outside the bounds of the top-level quad
 		UE_LOG(LogQuadTree, Warning, TEXT("[%s] Adding element (%s) that is outside the bounds of the quadtree root (%s). Consider resizing."), DebugContext ? DebugContext : TEXT("Unknown Source"), *Box.ToString(), *TreeBox.ToString());
 	}
+#endif // !UE_BUILD_SHIPPING
 
 	InsertElementRecursive(Element, Box, DebugContext);
 }
@@ -300,7 +309,7 @@ bool TQuadTree<ElementType, NodeCapacity>::RemoveNodeForElement(const ElementTyp
 
 	if (ElementIdx != INDEX_NONE)
 	{
-		Nodes.RemoveAtSwap(ElementIdx, 1, false);
+		Nodes.RemoveAtSwap(ElementIdx, 1, EAllowShrinking::No);
 		return true;
 	}
 

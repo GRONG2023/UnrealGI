@@ -1,31 +1,83 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SCSEditorViewportClient.h"
-#include "Components/StaticMeshComponent.h"
-#include "Materials/Material.h"
+
+#include "BlueprintEditor.h"
 #include "CanvasItem.h"
+#include "CanvasTypes.h"
+#include "ComponentVisualizer.h"
+#include "ComponentVisualizerManager.h"
+#include "Components/ActorComponent.h"
+#include "Components/ChildActorComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
+#include "Components/PrimitiveComponent.h"
+#include "Components/SceneComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "CoreGlobals.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
 #include "Editor/EditorPerProjectUserSettings.h"
-#include "Settings/LevelEditorViewportSettings.h"
 #include "Editor/UnrealEdEngine.h"
+#include "EditorComponents.h"
+#include "Engine/Blueprint.h"
+#include "Engine/Engine.h"
+#include "Engine/EngineTypes.h"
+#include "Engine/SimpleConstructionScript.h"
+#include "Engine/StaticMesh.h"
+#include "Engine/World.h"
+#include "EngineDefines.h"
+#include "EngineUtils.h"
+#include "GameFramework/Actor.h"
+#include "HitProxies.h"
+#include "ISCSEditorCustomization.h"
+#include "Internationalization/Text.h"
+#include "Kismet2/ComponentEditorUtils.h"
+#include "Logging/LogMacros.h"
+#include "Materials/Material.h"
+#include "Math/Color.h"
+#include "Math/IntPoint.h"
+#include "Math/Plane.h"
+#include "Math/QuatRotationTranslationMatrix.h"
+#include "Math/Transform.h"
+#include "Math/Vector.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "ObjectTools.h"
+#include "PhysicsEngine/ConstraintInstance.h"
+#include "PhysicsEngine/PhysicsConstraintComponent.h"
+#include "PreviewScene.h"
+#include "SEditorViewport.h"
+#include "SSCSEditorViewport.h"
+#include "SSubobjectEditor.h"
+#include "SceneManagement.h"
+#include "SceneView.h"
+#include "ScopedTransaction.h"
+#include "Settings/LevelEditorViewportSettings.h"
+#include "ShowFlags.h"
+#include "StaticMeshResources.h"
+#include "SubobjectData.h"
+#include "SubobjectDataSubsystem.h"
+#include "Templates/Casts.h"
+#include "Templates/UnrealTemplate.h"
 #include "ThumbnailRendering/SceneThumbnailInfo.h"
 #include "ThumbnailRendering/ThumbnailManager.h"
-#include "Engine/StaticMesh.h"
-#include "Components/InstancedStaticMeshComponent.h"
-#include "Kismet2/ComponentEditorUtils.h"
-#include "EngineUtils.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/Package.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UObjectHash.h"
+#include "UnrealClient.h"
 #include "UnrealEdGlobals.h"
-#include "SEditorViewport.h"
-#include "EngineGlobals.h"
-#include "Editor.h"
-#include "SSCSEditor.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "SKismetInspector.h"
-#include "ScopedTransaction.h"
-#include "ISCSEditorCustomization.h"
-#include "CanvasTypes.h"
-#include "Engine/TextureCube.h"
-#include "SSCSEditorViewport.h"
-#include "PhysicsEngine/PhysicsConstraintComponent.h"
+#include "UnrealWidget.h"
+#include "Widgets/SWidget.h"
+
+struct FSubobjectDataHandle;
 
 DEFINE_LOG_CATEGORY_STATIC(LogSCSEditorViewport, Log, All);
 
@@ -34,10 +86,10 @@ namespace
 	/** Automatic translation applied to the camera in the default editor viewport logic when orbit mode is enabled. */
 	const float AutoViewportOrbitCameraTranslate = 256.0f;
 
-	void DrawAngles(FCanvas* Canvas, int32 XPos, int32 YPos, EAxisList::Type ManipAxis, FWidget::EWidgetMode MoveMode, const FRotator& Rotation, const FVector& Translation)
+	void DrawAngles(FCanvas* Canvas, int32 XPos, int32 YPos, EAxisList::Type ManipAxis, UE::Widget::EWidgetMode MoveMode, const FRotator& Rotation, const FVector& Translation)
 	{
 		FString OutputString(TEXT(""));
-		if(MoveMode == FWidget::WM_Rotate && Rotation.IsZero() == false)
+		if(MoveMode == UE::Widget::WM_Rotate && Rotation.IsZero() == false)
 		{
 			//Only one value moves at a time
 			const FVector EulerAngles = Rotation.Euler();
@@ -54,7 +106,7 @@ namespace
 				OutputString += FString::Printf(TEXT("Yaw: %0.2f"), EulerAngles.Z);
 			}
 		}
-		else if(MoveMode == FWidget::WM_Translate && Translation.IsZero() == false)
+		else if(MoveMode == UE::Widget::WM_Translate && Translation.IsZero() == false)
 		{
 			//Only one value moves at a time
 			if(ManipAxis == EAxisList::X)
@@ -79,13 +131,14 @@ namespace
 	}
 
 	// Determine whether or not the given node has a parent node that is not the root node, is movable and is selected
-	bool IsMovableParentNodeSelected(const FSCSEditorTreeNodePtrType& NodePtr, const TArray<FSCSEditorTreeNodePtrType>& SelectedNodes)
+	bool IsMovableParentNodeSelected(const FSubobjectEditorTreeNodePtrType& NodePtr, const TArray<FSubobjectEditorTreeNodePtrType>& SelectedNodes)
 	{
 		if(NodePtr.IsValid())
 		{
 			// Check for a valid parent node
-			FSCSEditorTreeNodePtrType ParentNodePtr = NodePtr->GetParent();
-			if(ParentNodePtr.IsValid() && !ParentNodePtr->IsRootComponent())
+			FSubobjectEditorTreeNodePtrType ParentNodePtr = NodePtr->GetParent();
+			const FSubobjectData* ParentData = ParentNodePtr.IsValid()  ? ParentNodePtr->GetDataSource() : nullptr;
+			if(ParentData && !ParentData->IsRootComponent())
 			{
 				if(SelectedNodes.Contains(ParentNodePtr))
 				{
@@ -115,7 +168,7 @@ FSCSEditorViewportClient::FSCSEditorViewportClient(TWeakPtr<FBlueprintEditor>& I
 	, ScopedTransaction(NULL)
 	, bIsSimulateEnabled(false)
 {
-	WidgetMode = FWidget::WM_Translate;
+	WidgetMode = UE::Widget::WM_Translate;
 	WidgetCoordSystem = COORD_Local;
 	EngineShowFlags.DisableAdvancedFeatures();
 
@@ -149,7 +202,7 @@ FSCSEditorViewportClient::FSCSEditorViewportClient(TWeakPtr<FBlueprintEditor>& I
 	PreviewScene->AddComponent(EditorFloorComp, FTransform::Identity);
 
 	// Turn off so that actors added to the world do not have a lifespan (so they will not auto-destroy themselves).
-	PreviewScene->GetWorld()->bBegunPlay = false;
+	PreviewScene->GetWorld()->SetBegunPlay(false);
 
 	PreviewScene->SetSkyCubemap(GUnrealEd->GetThumbnailManager()->AmbientCubemap);
 }
@@ -165,7 +218,7 @@ void FSCSEditorViewportClient::Tick(float DeltaSeconds)
 	FEditorViewportClient::Tick(DeltaSeconds);
 
 	// Register the selection override delegate for the preview actor's components
-	TSharedPtr<SSCSEditor> SCSEditor = BlueprintEditorPtr.Pin()->GetSCSEditor();
+	TSharedPtr<SSubobjectEditor> SubobjectEditor = BlueprintEditorPtr.Pin()->GetSubobjectEditor();
 	AActor* PreviewActor = GetPreviewActor();
 	if (PreviewActor != nullptr)
 	{
@@ -175,7 +228,7 @@ void FSCSEditorViewportClient::Tick(float DeltaSeconds)
 			{
 				if (!PrimComponent->SelectionOverrideDelegate.IsBound())
 				{
-					SCSEditor->SetSelectionOverride(PrimComponent);
+					SubobjectEditor->SetSelectionOverride(PrimComponent);
 				}
 			}
 		}
@@ -214,15 +267,14 @@ void FSCSEditorViewportClient::Draw(const FSceneView* View, FPrimitiveDrawInterf
 	AActor* PreviewActor = GetPreviewActor();
 	if(PreviewActor)
 	{
-		if(GUnrealEd != NULL)
+		if(GUnrealEd != nullptr)
 		{
-			TArray<FSCSEditorTreeNodePtrType> SelectedNodes = BlueprintEditorPtr.Pin()->GetSelectedSCSEditorTreeNodes();
-			for (int32 SelectionIndex = 0; SelectionIndex < SelectedNodes.Num(); ++SelectionIndex)
+			TArray<FSubobjectEditorTreeNodePtrType> SelectedNodes = BlueprintEditorPtr.Pin()->GetSelectedSubobjectEditorTreeNodes();
+			for(FSubobjectEditorTreeNodePtrType SelectedNode : SelectedNodes)
 			{
-				FSCSEditorTreeNodePtrType SelectedNode = SelectedNodes[SelectionIndex];
-
-				UActorComponent* Comp = SelectedNode->FindComponentInstanceInActor(PreviewActor);
-				if(Comp != NULL && Comp->IsRegistered())
+				const FSubobjectData* Data = SelectedNode->GetDataSource();
+				const UActorComponent* Comp = Data ? Data->FindComponentInstanceInActor(PreviewActor) : nullptr;
+				if(Comp != nullptr && Comp->IsRegistered())
 				{
 					// Try and find a visualizer
 					TSharedPtr<FComponentVisualizer> Visualizer = GUnrealEd->FindComponentVisualizer(Comp->GetClass());
@@ -241,15 +293,15 @@ void FSCSEditorViewportClient::DrawCanvas( FViewport& InViewport, FSceneView& Vi
 	AActor* PreviewActor = GetPreviewActor();
 	if(PreviewActor)
 	{
-		if (GUnrealEd != NULL)
+		if (GUnrealEd != nullptr)
 		{
-			TArray<FSCSEditorTreeNodePtrType> SelectedNodes = BlueprintEditorPtr.Pin()->GetSelectedSCSEditorTreeNodes();
-			for (int32 SelectionIndex = 0; SelectionIndex < SelectedNodes.Num(); ++SelectionIndex)
+			TArray<FSubobjectEditorTreeNodePtrType> SelectedNodes = BlueprintEditorPtr.Pin()->GetSelectedSubobjectEditorTreeNodes();
+			for(FSubobjectEditorTreeNodePtrType SelectedNode : SelectedNodes)
 			{
-				FSCSEditorTreeNodePtrType SelectedNode = SelectedNodes[SelectionIndex];
-
-				UActorComponent* Comp = SelectedNode->FindComponentInstanceInActor(PreviewActor);
-				if (Comp != NULL && Comp->IsRegistered())
+				const FSubobjectData* Data = SelectedNode->GetDataSource();
+				const UActorComponent* Comp = Data ? Data->FindComponentInstanceInActor(PreviewActor) : nullptr;
+								
+				if (Comp != nullptr && Comp->IsRegistered())
 				{
 					// Try and find a visualizer
 					TSharedPtr<FComponentVisualizer> Visualizer = GUnrealEd->FindComponentVisualizer(Comp->GetClass());
@@ -263,21 +315,23 @@ void FSCSEditorViewportClient::DrawCanvas( FViewport& InViewport, FSceneView& Vi
 
 		TGuardValue<bool> AutoRestore(GAllowActorScriptExecutionInEditor, true);
 
-		const int32 HalfX = 0.5f * Viewport->GetSizeXY().X;
-		const int32 HalfY = 0.5f * Viewport->GetSizeXY().Y;
+		const int32 HalfX = Viewport->GetSizeXY().X / 2;
+		const int32 HalfY = Viewport->GetSizeXY().Y / 2;
 
-		TArray<TSharedPtr<FSCSEditorTreeNode>> SelectedNodes = BlueprintEditorPtr.Pin()->GetSelectedSCSEditorTreeNodes();
+		TArray<FSubobjectEditorTreeNodePtrType> SelectedNodes = BlueprintEditorPtr.Pin()->GetSelectedSubobjectEditorTreeNodes();
+
 		if(bIsManipulating && SelectedNodes.Num() > 0)
 		{
-			USceneComponent* SceneComp = Cast<USceneComponent>(SelectedNodes[0]->FindComponentInstanceInActor(PreviewActor));
+			const FSubobjectData* Data = SelectedNodes[0]->GetDataSource();
+			const USceneComponent* SceneComp = Data ? Cast<USceneComponent>(Data->FindComponentInstanceInActor(PreviewActor)) : nullptr;
 			if(SceneComp)
 			{
 				const FVector WidgetLocation = GetWidgetLocation();
 				const FPlane Proj = View.Project(WidgetLocation);
 				if(Proj.W > 0.0f)
 				{
-					const int32 XPos = HalfX + (HalfX * Proj.X);
-					const int32 YPos = HalfY + (HalfY * (Proj.Y * -1));
+					const int32 XPos = static_cast<int32>(HalfX + (HalfX * Proj.X));
+					const int32 YPos = static_cast<int32>(HalfY + (HalfY * Proj.Y * -1.0));
 					DrawAngles(&Canvas, XPos, YPos, GetCurrentWidgetAxis(), GetWidgetMode(), GetWidgetCoordSystem().Rotator(), WidgetLocation);
 				}
 			}
@@ -285,13 +339,13 @@ void FSCSEditorViewportClient::DrawCanvas( FViewport& InViewport, FSceneView& Vi
 	}
 }
 
-bool FSCSEditorViewportClient::InputKey(FViewport* InViewport, int32 ControllerId, FKey Key, EInputEvent Event, float AmountDepressed, bool bGamepad)
+bool FSCSEditorViewportClient::InputKey(const FInputKeyEventArgs& EventArgs)
 {
-	bool bHandled = GUnrealEd->ComponentVisManager.HandleInputKey(this, InViewport, Key, Event);;
+	bool bHandled = GUnrealEd->ComponentVisManager.HandleInputKey(this, EventArgs.Viewport, EventArgs.Key, EventArgs.Event);
 
-	if( !bHandled )
+	if(!bHandled)
 	{
-		bHandled = FEditorViewportClient::InputKey(InViewport, ControllerId, Key, Event, AmountDepressed, bGamepad);
+		bHandled = FEditorViewportClient::InputKey(EventArgs);
 	}
 
 	return bHandled;
@@ -307,7 +361,7 @@ void FSCSEditorViewportClient::ProcessClick(class FSceneView& View, class HHitPr
 		{
 			HInstancedStaticMeshInstance* InstancedStaticMeshInstanceProxy = ((HInstancedStaticMeshInstance*)HitProxy);
 
-			TSharedPtr<ISCSEditorCustomization> Customization = BlueprintEditorPtr.Pin()->CustomizeSCSEditor(InstancedStaticMeshInstanceProxy->Component);
+			TSharedPtr<ISCSEditorCustomization> Customization = BlueprintEditorPtr.Pin()->CustomizeSubobjectEditor(InstancedStaticMeshInstanceProxy->Component);
 			if (Customization.IsValid() && Customization->HandleViewportClick(AsShared(), View, HitProxy, Key, Event, HitX, HitY))
 			{
 				Invalidate();
@@ -349,17 +403,21 @@ void FSCSEditorViewportClient::ProcessClick(class FSceneView& View, class HHitPr
 			Viewport->InvalidateHitProxy();
 			return;
 		}
+		else if(GUnrealEd->ComponentVisManager.HandleClick(this, HitProxy, Click))
+		{
+			// Component Vis Manager handled this click, no need to do anything
+		}
 		else if (HitProxy->IsA(HActor::StaticGetType()))
 		{
 			HActor* ActorProxy = (HActor*)HitProxy;
 			AActor* PreviewActor = GetPreviewActor();
 			if (ActorProxy && ActorProxy->Actor && ActorProxy->PrimComponent)
 			{
-				USceneComponent* SelectedCompInstance = nullptr;
+				const USceneComponent* SelectedCompInstance = nullptr;
 
 				if (ActorProxy->Actor == PreviewActor)
 				{
-					UPrimitiveComponent* TestComponent = const_cast<UPrimitiveComponent*>(ActorProxy->PrimComponent);
+					const UPrimitiveComponent* TestComponent = ActorProxy->PrimComponent;
 					if (ActorProxy->Actor->GetComponents().Contains(TestComponent))
 					{
 						SelectedCompInstance = TestComponent;
@@ -381,14 +439,14 @@ void FSCSEditorViewportClient::ProcessClick(class FSceneView& View, class HHitPr
 
 				if (SelectedCompInstance)
 				{
-					TSharedPtr<ISCSEditorCustomization> Customization = BlueprintEditorPtr.Pin()->CustomizeSCSEditor(SelectedCompInstance);
+					TSharedPtr<ISCSEditorCustomization> Customization = BlueprintEditorPtr.Pin()->CustomizeSubobjectEditor(SelectedCompInstance);
 					if (!(Customization.IsValid() && Customization->HandleViewportClick(AsShared(), View, HitProxy, Key, Event, HitX, HitY)))
 					{
 						const bool bIsCtrlKeyDown = Viewport->KeyState(EKeys::LeftControl) || Viewport->KeyState(EKeys::RightControl);
 						if (BlueprintEditorPtr.IsValid())
 						{
 							// Note: This will find and select any node associated with the component instance that's attached to the proxy (including visualizers)
-							BlueprintEditorPtr.Pin()->FindAndSelectSCSEditorTreeNode(SelectedCompInstance, bIsCtrlKeyDown);
+							BlueprintEditorPtr.Pin()->FindAndSelectSubobjectEditorTreeNode(SelectedCompInstance, bIsCtrlKeyDown);
 						}
 					}
 				}
@@ -398,9 +456,17 @@ void FSCSEditorViewportClient::ProcessClick(class FSceneView& View, class HHitPr
 			return;
 		}
 	}
-	
-	GUnrealEd->ComponentVisManager.HandleClick(this, HitProxy, Click);
 }
+
+struct FTemplateComponentMoved
+{
+	int32 SelectedNodeIndex;
+	USceneComponent* SceneComp;
+	USceneComponent* SelectedTemplate;
+	FVector OldRelativeLocation;
+	FRotator OldRelativeRotation;
+	FVector OldRelativeScale3D;
+};
 
 bool FSCSEditorViewportClient::InputWidgetDelta( FViewport* InViewport, EAxisList::Type CurrentAxis, FVector& Drag, FRotator& Rot, FVector& Scale )
 {
@@ -412,7 +478,7 @@ bool FSCSEditorViewportClient::InputWidgetDelta( FViewport* InViewport, EAxisLis
 		TSharedPtr<FBlueprintEditor> BlueprintEditor = BlueprintEditorPtr.Pin();
 		if (PreviewActor && BlueprintEditor.IsValid())
 		{
-			TArray<FSCSEditorTreeNodePtrType> SelectedNodes = BlueprintEditor->GetSelectedSCSEditorTreeNodes();
+			TArray<FSubobjectEditorTreeNodePtrType> SelectedNodes = BlueprintEditorPtr.Pin()->GetSelectedSubobjectEditorTreeNodes();
 			if(SelectedNodes.Num() > 0)
 			{
 				FVector ModifiedScale = Scale;
@@ -429,12 +495,22 @@ bool FSCSEditorViewportClient::InputWidgetDelta( FViewport* InViewport, EAxisLis
 				{
 					ModifiedScale = FVector::ZeroVector;
 				}
+				
+				// RerunConstructionScripts only needs to be called once, after all selected components have been moved (it's potentially quite 
+				// expensive).  After that, some post-move work needs to happen per component, so we keep track of the components that were moved.
+				bool bNeedsRerunConstructionScripts = false;
 
-				for (const FSCSEditorTreeNodePtrType& SelectedNodePtr : SelectedNodes)
+				TArray<FTemplateComponentMoved> TemplateComponentsMoved;
+				TArray<UActorComponent*> ActorComponentsMoved;
+				TemplateComponentsMoved.Reserve(SelectedNodes.Num());
+
+				for (int32 SelectedNodeIndex = 0; SelectedNodeIndex < SelectedNodes.Num(); SelectedNodeIndex++)
 				{
+					const FSubobjectEditorTreeNodePtrType& SelectedNodePtr = SelectedNodes[SelectedNodeIndex];
+					const FSubobjectData* Data = SelectedNodePtr->GetDataSource();
 					// Don't allow editing of a root node, inherited SCS node or child node that also has a movable (non-root) parent node selected
 					const bool bCanEdit = GUnrealEd->ComponentVisManager.IsActive() ||
-						(!SelectedNodePtr->IsRootComponent() && !IsMovableParentNodeSelected(SelectedNodePtr, SelectedNodes));
+						(Data && !Data->IsRootComponent() && !IsMovableParentNodeSelected(SelectedNodePtr, SelectedNodes));
 
 					if(bCanEdit)
 					{
@@ -444,10 +520,11 @@ bool FSCSEditorViewportClient::InputWidgetDelta( FViewport* InViewport, EAxisLis
 							Invalidate();
 							return true;
 						}
-						
-						USceneComponent* SceneComp = Cast<USceneComponent>(SelectedNodePtr->FindComponentInstanceInActor(PreviewActor));
-						USceneComponent* SelectedTemplate = Cast<USceneComponent>(SelectedNodePtr->GetOrCreateEditableComponentTemplate(BlueprintEditor->GetBlueprintObj()));
-						if(SceneComp != NULL && SelectedTemplate != NULL)
+
+						// #TODO_BH Clean up const casts
+						USceneComponent* SceneComp = const_cast<USceneComponent*>(Cast<USceneComponent>(Data->FindComponentInstanceInActor(PreviewActor)));
+						USceneComponent* SelectedTemplate = const_cast<USceneComponent*>(Cast<USceneComponent>(Data->GetObjectForBlueprint(BlueprintEditor->GetBlueprintObj())));
+						if(SceneComp && SelectedTemplate)
 						{
 							// Cache the current default values for propagation
 							FVector OldRelativeLocation = SelectedTemplate->GetRelativeLocation();
@@ -457,7 +534,7 @@ bool FSCSEditorViewportClient::InputWidgetDelta( FViewport* InViewport, EAxisLis
 							// Adjust the deltas as necessary
 							FComponentEditorUtils::AdjustComponentDelta(SceneComp, Drag, Rot);
 
-							TSharedPtr<ISCSEditorCustomization> Customization = BlueprintEditor->CustomizeSCSEditor(SceneComp);
+							TSharedPtr<ISCSEditorCustomization> Customization = BlueprintEditor->CustomizeSubobjectEditor(SceneComp);
 							if(Customization.IsValid() && Customization->HandleViewportDrag(SceneComp, SelectedTemplate, Drag, Rot, ModifiedScale, GetWidgetLocation()))
 							{
 								// Handled by SCS Editor customization
@@ -476,58 +553,151 @@ bool FSCSEditorViewportClient::InputWidgetDelta( FViewport* InViewport, EAxisLis
 							}
 
 							UBlueprint* PreviewBlueprint = UBlueprint::GetBlueprintFromClass(PreviewActor->GetClass());
-							if(PreviewBlueprint != NULL)
+							if(PreviewBlueprint != nullptr)
 							{
 								// Like PostEditMove(), but we only need to re-run construction scripts
 								if(PreviewBlueprint && PreviewBlueprint->bRunConstructionScriptOnDrag)
 								{
-									PreviewActor->RerunConstructionScripts();
+									bNeedsRerunConstructionScripts = true;
 								}
 
-								SceneComp->PostEditComponentMove(true); // @TODO HACK passing 'finished' every frame...
+								FTemplateComponentMoved& ComponentMoved = TemplateComponentsMoved[TemplateComponentsMoved.AddUninitialized()];
+								ComponentMoved.SelectedNodeIndex = SelectedNodeIndex;
+								ComponentMoved.SceneComp = SceneComp;
+								ComponentMoved.SelectedTemplate = SelectedTemplate;
+								ComponentMoved.OldRelativeLocation = OldRelativeLocation;
+								ComponentMoved.OldRelativeRotation = OldRelativeRotation;
+								ComponentMoved.OldRelativeScale3D = OldRelativeScale3D;
 
-								// If a constraint, copy back updated constraint frames to template
-								UPhysicsConstraintComponent* ConstraintComp = Cast<UPhysicsConstraintComponent>(SceneComp);
-								UPhysicsConstraintComponent* TemplateComp = Cast<UPhysicsConstraintComponent>(SelectedTemplate);
-								if(ConstraintComp && TemplateComp)
+								// Track static meshes for bulk re-registration
+								UStaticMeshComponent* StaticMeshComponent = Cast<UStaticMeshComponent>(SceneComp);
+								if (StaticMeshComponent)
 								{
-									TemplateComp->ConstraintInstance.CopyConstraintGeometryFrom(&ConstraintComp->ConstraintInstance);
-								}
-
-								// Iterate over all the active archetype instances and propagate the change(s) to the matching component instance
-								TArray<UObject*> ArchetypeInstances;
-								if(SelectedTemplate->HasAnyFlags(RF_ArchetypeObject))
-								{
-									SelectedTemplate->GetArchetypeInstances(ArchetypeInstances);
-									for(int32 InstanceIndex = 0; InstanceIndex < ArchetypeInstances.Num(); ++InstanceIndex)
-									{
-										SceneComp = Cast<USceneComponent>(ArchetypeInstances[InstanceIndex]);
-										if(SceneComp != nullptr)
-										{
-											FComponentEditorUtils::ApplyDefaultValueChange(SceneComp, SceneComp->GetRelativeLocation_DirectMutable(), OldRelativeLocation, SelectedTemplate->GetRelativeLocation());
-											FComponentEditorUtils::ApplyDefaultValueChange(SceneComp, SceneComp->GetRelativeRotation_DirectMutable(), OldRelativeRotation, SelectedTemplate->GetRelativeRotation());
-											FComponentEditorUtils::ApplyDefaultValueChange(SceneComp, SceneComp->GetRelativeScale3D_DirectMutable(),  OldRelativeScale3D,  SelectedTemplate->GetRelativeScale3D());
-										}
-									}
-								}
-								else if(UObject* Outer = SelectedTemplate->GetOuter())
-								{
-									Outer->GetArchetypeInstances(ArchetypeInstances);
-									for(int32 InstanceIndex = 0; InstanceIndex < ArchetypeInstances.Num(); ++InstanceIndex)
-									{
-										SceneComp = static_cast<USceneComponent*>(FindObjectWithOuter(ArchetypeInstances[InstanceIndex], SelectedTemplate->GetClass(), SelectedTemplate->GetFName()));
-										if(SceneComp)
-										{
-											FComponentEditorUtils::ApplyDefaultValueChange(SceneComp, SceneComp->GetRelativeLocation_DirectMutable(), OldRelativeLocation, SelectedTemplate->GetRelativeLocation());
-											FComponentEditorUtils::ApplyDefaultValueChange(SceneComp, SceneComp->GetRelativeRotation_DirectMutable(), OldRelativeRotation, SelectedTemplate->GetRelativeRotation());
-											FComponentEditorUtils::ApplyDefaultValueChange(SceneComp, SceneComp->GetRelativeScale3D_DirectMutable(), OldRelativeScale3D, SelectedTemplate->GetRelativeScale3D());
-										}
-									}
+									ActorComponentsMoved.Add(StaticMeshComponent);
 								}
 							}
 						}
 					}
 				}
+
+				{
+					// This bulk re-register context forces Add/RemovePrimitive and debug physics update commands to be sent to the
+					// render thread in batches, significantly improving performance.
+					FStaticMeshComponentBulkReregisterContext ReregisterContext(GetScene(), ActorComponentsMoved);
+
+					// Get the SCS if present
+					UBlueprintGeneratedClass* PreviewBlueprint = Cast<UBlueprintGeneratedClass>(PreviewActor->GetClass());
+					USimpleConstructionScript* SCS = nullptr;
+					if (PreviewBlueprint && PreviewBlueprint->SimpleConstructionScript)
+					{
+						SCS = PreviewBlueprint->SimpleConstructionScript;
+
+						// Tell the reregister context about the simple construction script, which allows the SCS to batch render commands
+						// for newly created components generated during construction.
+						ReregisterContext.AddSimpleConstructionScript(SCS);
+
+						// Optimize calls to GetArchetypeInstances by generating the SCS node map for the blueprint class.
+						SCS->CreateNameToSCSNodeMap();
+					}
+
+					if (bNeedsRerunConstructionScripts)
+					{
+						PreviewActor->RerunConstructionScripts();
+
+						// The construction scripts will have recreated the selected components, and the ones in the TemplateComponentsMoved
+						// array now point to the deleted version.  Update to the newly created version.
+						for (FTemplateComponentMoved& Moved : TemplateComponentsMoved)
+						{
+							const FSubobjectEditorTreeNodePtrType& SelectedNodePtr = SelectedNodes[Moved.SelectedNodeIndex];
+							const FSubobjectData* Data = SelectedNodePtr->GetDataSource();
+
+							Moved.SceneComp = const_cast<USceneComponent*>(Cast<USceneComponent>(Data->FindComponentInstanceInActor(PreviewActor)));
+						}
+					}
+
+					// Array corresponds to TemplateComponentsMoved, with objects we need to search for archetypes
+					TArray<UObject*> ArchetypeSearchObjects;
+					ArchetypeSearchObjects.Reserve(TemplateComponentsMoved.Num());
+
+					for (FTemplateComponentMoved& Moved : TemplateComponentsMoved)
+					{
+						Moved.SceneComp->PostEditComponentMove(true); // @TODO HACK passing 'finished' every frame...
+
+						// If a constraint, copy back updated constraint frames to template
+						UPhysicsConstraintComponent* ConstraintComp = Cast<UPhysicsConstraintComponent>(Moved.SceneComp);
+						UPhysicsConstraintComponent* TemplateComp = Cast<UPhysicsConstraintComponent>(Moved.SelectedTemplate);
+						if (ConstraintComp && TemplateComp)
+						{
+							TemplateComp->ConstraintInstance.CopyConstraintGeometryFrom(&ConstraintComp->ConstraintInstance);
+						}
+
+						// Add to the list of objects we need to search for archetypes
+						if (Moved.SelectedTemplate->HasAnyFlags(RF_ArchetypeObject))
+						{
+							// Searching the item itself
+							ArchetypeSearchObjects.Add(Moved.SelectedTemplate);
+						}
+						else if (UObject* Outer = Moved.SelectedTemplate->GetOuter())
+						{
+							// Searching the outer
+							ArchetypeSearchObjects.Add(Outer);
+						}
+						else
+						{
+							// Searching nothing -- place a dummy item to preserve array ordering
+							ArchetypeSearchObjects.Add(nullptr);
+						}
+					}
+
+					// Get the list of active archetype instances for each moved object, in bulk for efficiency
+					TArray<TArray<UObject*>> ArchetypeInstancesList;
+					ObjectTools::BatchGetArchetypeInstances(ArchetypeSearchObjects, ArchetypeInstancesList);
+
+					// Propagate the change(s) to the matching component instance
+					for (int32 ObjectIndex = 0; ObjectIndex < TemplateComponentsMoved.Num(); ObjectIndex++)
+					{
+						// Did the search find any instances?
+						TArray<UObject*>& ArchetypeInstances = ArchetypeInstancesList[ObjectIndex];
+						if (ArchetypeInstances.Num())
+						{
+							FTemplateComponentMoved& Moved = TemplateComponentsMoved[ObjectIndex];
+							if (Moved.SelectedTemplate->HasAnyFlags(RF_ArchetypeObject))
+							{
+								// Object itself was archetype
+								for (int32 InstanceIndex = 0; InstanceIndex < ArchetypeInstances.Num(); ++InstanceIndex)
+								{
+									USceneComponent* SceneComp = Cast<USceneComponent>(ArchetypeInstances[InstanceIndex]);
+									if (SceneComp != nullptr)
+									{
+										FComponentEditorUtils::ApplyDefaultValueChange(SceneComp, SceneComp->GetRelativeLocation_DirectMutable(), Moved.OldRelativeLocation, Moved.SelectedTemplate->GetRelativeLocation());
+										FComponentEditorUtils::ApplyDefaultValueChange(SceneComp, SceneComp->GetRelativeRotation_DirectMutable(), Moved.OldRelativeRotation, Moved.SelectedTemplate->GetRelativeRotation());
+										FComponentEditorUtils::ApplyDefaultValueChange(SceneComp, SceneComp->GetRelativeScale3D_DirectMutable(), Moved.OldRelativeScale3D, Moved.SelectedTemplate->GetRelativeScale3D());
+									}
+								}
+							}
+							else
+							{
+								// Outer was archetype
+								for (int32 InstanceIndex = 0; InstanceIndex < ArchetypeInstances.Num(); ++InstanceIndex)
+								{
+									USceneComponent* SceneComp = static_cast<USceneComponent*>(FindObjectWithOuter(ArchetypeInstances[InstanceIndex], Moved.SelectedTemplate->GetClass(), Moved.SelectedTemplate->GetFName()));
+									if (SceneComp)
+									{
+										FComponentEditorUtils::ApplyDefaultValueChange(SceneComp, SceneComp->GetRelativeLocation_DirectMutable(), Moved.OldRelativeLocation, Moved.SelectedTemplate->GetRelativeLocation());
+										FComponentEditorUtils::ApplyDefaultValueChange(SceneComp, SceneComp->GetRelativeRotation_DirectMutable(), Moved.OldRelativeRotation, Moved.SelectedTemplate->GetRelativeRotation());
+										FComponentEditorUtils::ApplyDefaultValueChange(SceneComp, SceneComp->GetRelativeScale3D_DirectMutable(), Moved.OldRelativeScale3D, Moved.SelectedTemplate->GetRelativeScale3D());
+									}
+								}
+							}
+						}
+					}
+
+					if (SCS)
+					{
+						SCS->RemoveNameToSCSNodeMap();
+					}
+				}
+
 				GUnrealEd->RedrawLevelEditingViewports();
 			}
 		}
@@ -542,18 +712,47 @@ void FSCSEditorViewportClient::TrackingStarted( const struct FInputEventState& I
 {
 	if( !bIsManipulating && bIsDraggingWidget )
 	{
-		// Suspend component modification during each delta step to avoid recording unnecessary overhead into the transaction buffer
-		GEditor->DisableDeltaModification(true);
-
-		// Begin transaction
-		BeginTransaction( NSLOCTEXT("UnrealEd", "ModifyComponents", "Modify Component(s)") );
-		bIsManipulating = true;
+		HandleBeginTransform();
 	}
 }
 
 void FSCSEditorViewportClient::TrackingStopped() 
 {
 	if( bIsManipulating )
+	{
+		HandleEndTransform();
+	}
+}
+
+bool FSCSEditorViewportClient::BeginTransform(const FGizmoState& InState)
+{
+	return HandleBeginTransform();
+}
+
+bool FSCSEditorViewportClient::EndTransform(const FGizmoState& InState)
+{
+	return HandleEndTransform();
+}
+
+bool FSCSEditorViewportClient::HandleBeginTransform()
+{
+	if (!bIsManipulating)
+	{
+		// Suspend component modification during each delta step to avoid recording unnecessary overhead into the transaction buffer
+		GEditor->DisableDeltaModification(true);
+
+		// Begin transaction
+		BeginTransaction( NSLOCTEXT("UnrealEd", "ModifyComponents", "Modify Component(s)") );
+		bIsManipulating = true;
+		return true;
+	}
+	
+	return false;
+}
+
+bool FSCSEditorViewportClient::HandleEndTransform()
+{
+	if (bIsManipulating)
 	{
 		// Re-run construction scripts if we haven't done so yet (so that the components in the preview actor can update their transforms)
 		AActor* PreviewActor = GetPreviewActor();
@@ -572,24 +771,29 @@ void FSCSEditorViewportClient::TrackingStopped()
 
 		// Restore component delta modification
 		GEditor->DisableDeltaModification(false);
+
+		return true;
 	}
+
+	return false;
 }
 
-FWidget::EWidgetMode FSCSEditorViewportClient::GetWidgetMode() const
+UE::Widget::EWidgetMode FSCSEditorViewportClient::GetWidgetMode() const
 {
 	// Default to not drawing the widget
-	FWidget::EWidgetMode ReturnWidgetMode = FWidget::WM_None;
+	UE::Widget::EWidgetMode ReturnWidgetMode = UE::Widget::WM_None;
 
 	AActor* PreviewActor = GetPreviewActor();
 	if(!bIsSimulateEnabled && PreviewActor)
 	{
 		const TSharedPtr<FBlueprintEditor> BluePrintEditor = BlueprintEditorPtr.Pin();
-		if ( BluePrintEditor.IsValid() )
+		if (BluePrintEditor.IsValid())
 		{
-			TArray<FSCSEditorTreeNodePtrType> SelectedNodes = BluePrintEditor->GetSelectedSCSEditorTreeNodes();
-			if (BluePrintEditor->GetSCSEditor()->GetActorNode().IsValid())
+			TArray<FSubobjectEditorTreeNodePtrType> SelectedNodes = BlueprintEditorPtr.Pin()->GetSelectedSubobjectEditorTreeNodes();
+
+			if (BluePrintEditor->GetSubobjectEditor()->GetSceneRootNode().IsValid())
 			{
-				const TArray<FSCSEditorTreeNodePtrType>& RootNodes = BluePrintEditor->GetSCSEditor()->GetActorNode()->GetComponentNodes();
+				TArray<FSubobjectEditorTreeNodePtrType> RootNodes = BluePrintEditor->GetSubobjectEditor()->GetRootNodes();
 
 				if (GUnrealEd->ComponentVisManager.IsActive() &&
 					GUnrealEd->ComponentVisManager.IsVisualizingArchetype())
@@ -601,19 +805,26 @@ FWidget::EWidgetMode FSCSEditorViewportClient::GetWidgetMode() const
 				{
 					// if the selected nodes array is empty, or only contains entries from the
 					// root nodes array, or isn't visible in the preview actor, then don't display a transform widget
-					for (int32 CurrentNodeIndex = 0; CurrentNodeIndex < SelectedNodes.Num(); CurrentNodeIndex++)
+					for(FSubobjectEditorTreeNodePtrType CurrentNodePtr : SelectedNodes)
 					{
-						FSCSEditorTreeNodePtrType CurrentNodePtr = SelectedNodes[CurrentNodeIndex];
-						if ((CurrentNodePtr.IsValid() &&
-							((!RootNodes.Contains(CurrentNodePtr) && !CurrentNodePtr->IsRootComponent()) ||
-							(CurrentNodePtr->GetObject<UInstancedStaticMeshComponent>() && // show widget if we are editing individual instances even if it is the root component
-								CastChecked<UInstancedStaticMeshComponent>(CurrentNodePtr->FindComponentInstanceInActor(GetPreviewActor()))->SelectedInstances.Contains(true))) &&
-							CurrentNodePtr->CanEdit() &&
-							CurrentNodePtr->FindComponentInstanceInActor(PreviewActor)))
+						if (CurrentNodePtr.IsValid())
 						{
-							// a non-NULL, non-root item is selected, draw the widget
-							ReturnWidgetMode = WidgetMode;
-							break;
+							FSubobjectData* Data = CurrentNodePtr->GetDataSource();
+							if (Data && Data->CanEdit())
+							{
+								const bool bIsNotRootComponent = !RootNodes.Contains(CurrentNodePtr) && !Data->IsRootComponent();
+								const bool bIsISM = 
+									Data->GetObject<UInstancedStaticMeshComponent>() && 
+									CastChecked<UInstancedStaticMeshComponent>(Data->FindComponentInstanceInActor(GetPreviewActor()))->SelectedInstances.Contains(true);
+								const bool bHasInstanceInActor = Data->FindComponentInstanceInActor(PreviewActor) != nullptr;
+
+								if ((bIsNotRootComponent || bIsISM) && bHasInstanceInActor)
+								{
+									// a non-NULL, non-root item is selected, draw the widget
+									ReturnWidgetMode = WidgetMode;
+									break;
+								}
+							}
 						}
 					}
 				}
@@ -625,7 +836,7 @@ FWidget::EWidgetMode FSCSEditorViewportClient::GetWidgetMode() const
 }
 
 
-void FSCSEditorViewportClient::SetWidgetMode( FWidget::EWidgetMode NewMode )
+void FSCSEditorViewportClient::SetWidgetMode( UE::Widget::EWidgetMode NewMode )
 {
 	WidgetMode = NewMode;
 }
@@ -649,16 +860,18 @@ FVector FSCSEditorViewportClient::GetWidgetLocation() const
 	AActor* PreviewActor = GetPreviewActor();
 	if(PreviewActor)
 	{
-		TArray<FSCSEditorTreeNodePtrType> SelectedNodes = BlueprintEditorPtr.Pin()->GetSelectedSCSEditorTreeNodes();
+		TArray<FSubobjectEditorTreeNodePtrType> SelectedNodes = BlueprintEditorPtr.Pin()->GetSelectedSubobjectEditorTreeNodes();
 		if(SelectedNodes.Num() > 0)
 		{
 			// Use the last selected item for the widget location
-			USceneComponent* SceneComp = Cast<USceneComponent>(SelectedNodes.Last().Get()->FindComponentInstanceInActor(PreviewActor));
-			if( SceneComp )
+			const FSubobjectData* Data = SelectedNodes[0]->GetDataSource();
+
+			const USceneComponent* SceneComp = Data ? Cast<USceneComponent>(Data->FindComponentInstanceInActor(PreviewActor)) : nullptr;
+			if(SceneComp)
 			{
-				TSharedPtr<ISCSEditorCustomization> Customization = BlueprintEditorPtr.Pin()->CustomizeSCSEditor(SceneComp);
+				TSharedPtr<ISCSEditorCustomization> Customization = BlueprintEditorPtr.Pin()->CustomizeSubobjectEditor(SceneComp);
 				FVector CustomLocation;
-				if(Customization.IsValid() && Customization->HandleGetWidgetLocation(SceneComp, CustomLocation))
+				if(Customization.IsValid() && Customization->HandleGetWidgetLocation(const_cast<USceneComponent*>(SceneComp), CustomLocation))
 				{
 					Location = CustomLocation;
 				}
@@ -689,14 +902,15 @@ FMatrix FSCSEditorViewportClient::GetWidgetCoordSystem() const
 		TSharedPtr<FBlueprintEditor> BlueprintEditor = BlueprintEditorPtr.Pin();
 		if (PreviewActor && BlueprintEditor.IsValid())
 		{
-			TArray<FSCSEditorTreeNodePtrType> SelectedNodes = BlueprintEditor->GetSelectedSCSEditorTreeNodes();
+			TArray<FSubobjectEditorTreeNodePtrType> SelectedNodes = BlueprintEditorPtr.Pin()->GetSelectedSubobjectEditorTreeNodes();
 			if(SelectedNodes.Num() > 0)
 			{
-				const FSCSEditorTreeNodePtrType SelectedNode = SelectedNodes.Last();
-				USceneComponent* SceneComp = SelectedNode.IsValid() ? Cast<USceneComponent>(SelectedNode->FindComponentInstanceInActor(PreviewActor)) : NULL;
-				if( SceneComp )
+				const FSubobjectEditorTreeNodePtrType SelectedNode = SelectedNodes.Last();
+				const FSubobjectData* Data = SelectedNode->GetDataSource();
+				const USceneComponent* SceneComp = Data ? Cast<USceneComponent>(Data->FindComponentInstanceInActor(PreviewActor)) : nullptr;
+				if(SceneComp)
 				{
-					TSharedPtr<ISCSEditorCustomization> Customization = BlueprintEditor->CustomizeSCSEditor(SceneComp);
+					TSharedPtr<ISCSEditorCustomization> Customization = BlueprintEditor->CustomizeSubobjectEditor(SceneComp);
 					FMatrix CustomTransform;
 					if(Customization.IsValid() && Customization->HandleGetWidgetTransform(SceneComp, CustomTransform))
 					{
@@ -766,15 +980,15 @@ void FSCSEditorViewportClient::ResetCamera()
 	}
 
 	// Clamp zoom to the actor's bounding sphere radius
-	float OrbitZoom = ThumbnailInfo->OrbitZoom;
-	if (PreviewActorBounds.SphereRadius + OrbitZoom < 0)
+	double OrbitZoom = ThumbnailInfo->OrbitZoom;
+	if (PreviewActorBounds.SphereRadius + OrbitZoom < 0.0)
 	{
 		OrbitZoom = -PreviewActorBounds.SphereRadius;
 	}
 
 	ToggleOrbitCamera(true);
 	{
-		float TargetDistance = PreviewActorBounds.SphereRadius;
+		double TargetDistance = PreviewActorBounds.SphereRadius;
 		if(TargetDistance <= 0.0f)
 		{
 			TargetDistance = AutoViewportOrbitCameraTranslate;
@@ -807,19 +1021,20 @@ void FSCSEditorViewportClient::FocusViewportToSelection()
 	AActor* PreviewActor = GetPreviewActor();
 	if(PreviewActor)
 	{
-		TArray<FSCSEditorTreeNodePtrType> SelectedNodes = BlueprintEditorPtr.Pin()->GetSelectedSCSEditorTreeNodes();
+		TArray<FSubobjectEditorTreeNodePtrType> SelectedNodes = BlueprintEditorPtr.Pin()->GetSelectedSubobjectEditorTreeNodes();
 		if(SelectedNodes.Num() > 0)
 		{
+			const FSubobjectData* Data = SelectedNodes[0]->GetDataSource();
 			// Use the last selected item for the widget location
-			USceneComponent* SceneComp = Cast<USceneComponent>(SelectedNodes.Last()->FindComponentInstanceInActor(PreviewActor));
-			if( SceneComp )
+			const USceneComponent* SceneComp = Data ? Cast<USceneComponent>(Data->FindComponentInstanceInActor(PreviewActor)) : nullptr;
+			if(SceneComp)
 			{
-				FocusViewportOnBox( SceneComp->Bounds.GetBox() );
+				FocusViewportOnBox(SceneComp->Bounds.GetBox());
 			}
 		}
 		else
 		{
-			FocusViewportOnBox( PreviewActor->GetComponentsBoundingBox( true ) );
+			FocusViewportOnBox(PreviewActor->GetComponentsBoundingBox(true));
 		}
 	}
 }
@@ -835,16 +1050,16 @@ void FSCSEditorViewportClient::ToggleIsSimulateEnabled()
 	BlueprintEditorPtr.Pin()->DestroyPreview();
 
 	bIsSimulateEnabled = !bIsSimulateEnabled;
-	PreviewScene->GetWorld()->bBegunPlay = bIsSimulateEnabled;
+	PreviewScene->GetWorld()->SetBegunPlay(bIsSimulateEnabled);
 	PreviewScene->GetWorld()->bShouldSimulatePhysics = bIsSimulateEnabled;
 
-	TSharedPtr<SWidget> SCSEditor = BlueprintEditorPtr.Pin()->GetSCSEditor();
+	TSharedPtr<SWidget> SubobjectEditor = BlueprintEditorPtr.Pin()->GetSubobjectEditor();
 	TSharedRef<SWidget> Inspector = BlueprintEditorPtr.Pin()->GetInspector();
 
 	// When simulate is enabled, we don't want to allow the user to modify the components
 	BlueprintEditorPtr.Pin()->UpdatePreviewActor(BlueprintEditorPtr.Pin()->GetBlueprintObj(), true);
 
-	SCSEditor->SetEnabled(!bIsSimulateEnabled);
+	SubobjectEditor->SetEnabled(!bIsSimulateEnabled);
 	Inspector->SetEnabled(!bIsSimulateEnabled);
 
 	if(!IsRealtime())
@@ -899,42 +1114,13 @@ void FSCSEditorViewportClient::BeginTransaction(const FText& Description)
 	//UE_LOG(LogSCSEditorViewport, Log, TEXT("FSCSEditorViewportClient::BeginTransaction() pre: %s %08x"), SessionName, *((uint32*)&ScopedTransaction));
 
 	if(!ScopedTransaction)
+	
 	{
-		ScopedTransaction = new FScopedTransaction(Description);
-
-		TSharedPtr<FBlueprintEditor> BlueprintEditor = BlueprintEditorPtr.Pin();
-		if (BlueprintEditor.IsValid())
+		if(USubobjectDataSubsystem* System = USubobjectDataSubsystem::Get())
 		{
-			UBlueprint* PreviewBlueprint = BlueprintEditor->GetBlueprintObj();
-			if (PreviewBlueprint != nullptr)
-			{
-				FBlueprintEditorUtils::MarkBlueprintAsModified(PreviewBlueprint);
-			}
-
-			TArray<FSCSEditorTreeNodePtrType> SelectedNodes = BlueprintEditor->GetSelectedSCSEditorTreeNodes();
-			for (const FSCSEditorTreeNodePtrType& Node : SelectedNodes)
-			{
-				if(Node.IsValid())
-				{
-					if(USCS_Node* SCS_Node = Node->GetSCSNode())
-					{
-						USimpleConstructionScript* SCS = SCS_Node->GetSCS();
-						UBlueprint* Blueprint = SCS ? SCS->GetBlueprint() : nullptr;
-						if (Blueprint == PreviewBlueprint)
-						{
-							SCS_Node->Modify();
-						}
-					}
-
-					// Modify template, any instances will be reconstructed as part of PostUndo:
-					UActorComponent* ComponentTemplate = Node->GetOrCreateEditableComponentTemplate(PreviewBlueprint);
-					if (ComponentTemplate != nullptr)
-					{
-						ComponentTemplate->SetFlags(RF_Transactional);
-						ComponentTemplate->Modify();
-					}
-				}
-			}
+			TArray<FSubobjectDataHandle> SelectedNodes = BlueprintEditorPtr.Pin()->GetSubobjectEditor()->GetSelectedHandles();
+			TSharedPtr<FBlueprintEditor> BlueprintEditor = BlueprintEditorPtr.Pin();
+			ScopedTransaction = System->BeginTransaction(SelectedNodes, Description, BlueprintEditor.IsValid() ? BlueprintEditor->GetBlueprintObj() : nullptr);
 		}
 	}
 
@@ -948,7 +1134,7 @@ void FSCSEditorViewportClient::EndTransaction()
 	if(ScopedTransaction)
 	{
 		delete ScopedTransaction;
-		ScopedTransaction = NULL;
+		ScopedTransaction = nullptr;
 	}
 }
 
@@ -959,7 +1145,7 @@ void FSCSEditorViewportClient::RefreshPreviewBounds()
 	if(PreviewActor)
 	{
 		// Compute actor bounds as the sum of its visible parts
-		PreviewActorBounds = FBoxSphereBounds(ForceInitToZero);
+		FBoxSphereBounds::Builder BoundsBuilder;
 		for (UActorComponent* Component : PreviewActor->GetComponents())
 		{
 			// Aggregate primitive components that either have collision enabled or are otherwise visible components in-game
@@ -967,9 +1153,10 @@ void FSCSEditorViewportClient::RefreshPreviewBounds()
 			{
 				if (PrimComp->IsRegistered() && (!PrimComp->bHiddenInGame || PrimComp->IsCollisionEnabled()) && PrimComp->Bounds.SphereRadius < HALF_WORLD_MAX)
 				{
-					PreviewActorBounds = PreviewActorBounds + PrimComp->Bounds;
+					BoundsBuilder += PrimComp->Bounds;
 				}
 			}
 		}
+		PreviewActorBounds = BoundsBuilder;
 	}
 }

@@ -8,6 +8,8 @@
 
 #include "GameFramework/Actor.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneDeferredComponentMovementSystem)
+
 namespace UE
 {
 namespace MovieScene
@@ -45,7 +47,7 @@ UMovieSceneDeferredComponentMovementSystem::UMovieSceneDeferredComponentMovement
 {
 	using namespace UE::MovieScene;
 
-	Phase = ESystemPhase::Instantiation | ESystemPhase::Evaluation | ESystemPhase::Finalization;
+	Phase = ESystemPhase::Instantiation | ESystemPhase::Scheduling | ESystemPhase::Finalization;
 
 	if (HasAnyFlags(RF_ClassDefaultObject))
 	{
@@ -63,6 +65,17 @@ UMovieSceneDeferredComponentMovementSystem::UMovieSceneDeferredComponentMovement
 
 void UMovieSceneDeferredComponentMovementSystem::BeginDestroy()
 {
+	EnsureMovementsFlushed();
+	Super::BeginDestroy();
+}
+
+void UMovieSceneDeferredComponentMovementSystem::OnUnlink()
+{
+	EnsureMovementsFlushed();
+}
+
+void UMovieSceneDeferredComponentMovementSystem::EnsureMovementsFlushed()
+{
 	if (!ensureMsgf(ScopedUpdates.Num() == 0, TEXT("System being destroyed while scoped updates still exist - ApplyMovementUpdates should always have been called at the end of the frame")))
 	{
 		// Ensure that destruction happens in reverse order
@@ -73,8 +86,6 @@ void UMovieSceneDeferredComponentMovementSystem::BeginDestroy()
 
 		ScopedUpdates.Empty();
 	}
-
-	Super::BeginDestroy();
 }
 
 void UMovieSceneDeferredComponentMovementSystem::DeferMovementUpdates(USceneComponent* InComponent)
@@ -98,6 +109,36 @@ bool UMovieSceneDeferredComponentMovementSystem::IsRelevantImpl(UMovieSceneEntit
 	FMovieSceneTracksComponentTypes* Components = FMovieSceneTracksComponentTypes::Get();
 	return InLinker->EntityManager.ContainsComponent(Components->ComponentTransform.PropertyTag) ||
 		InLinker->EntityManager.ContainsComponent(Components->AttachParent);
+}
+
+void UMovieSceneDeferredComponentMovementSystem::OnSchedulePersistentTasks(UE::MovieScene::IEntitySystemScheduler* TaskScheduler)
+{
+	using namespace UE::MovieScene;
+
+	FBuiltInComponentTypes*          BuiltInComponents = FBuiltInComponentTypes::Get();
+	FMovieSceneTracksComponentTypes* Components        = FMovieSceneTracksComponentTypes::Get();
+
+	FTaskParams TaskParams = FTaskParams(TEXT("Defer Movement")).ForceGameThread();
+	TaskParams.bForcePropagateDownstream = true;
+
+	struct FCacheDeferredUpdates
+	{
+		UMovieSceneDeferredComponentMovementSystem* System;
+
+		void ForEachEntity(UObject* BoundObject) const
+		{
+			if (USceneComponent* SceneComponent = Cast<USceneComponent>(BoundObject))
+			{
+				System->DeferMovementUpdates(SceneComponent);
+			}
+		}
+	};
+
+	FEntityTaskBuilder()
+	.Read(BuiltInComponents->BoundObject)
+	.FilterAny({ Components->ComponentTransform.PropertyTag })
+	.SetParams(TaskParams)
+	.Schedule_PerEntity<FCacheDeferredUpdates>(&Linker->EntityManager, TaskScheduler, this);
 }
 
 void UMovieSceneDeferredComponentMovementSystem::OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents)
@@ -128,6 +169,7 @@ void UMovieSceneDeferredComponentMovementSystem::OnRun(FSystemTaskPrerequisites&
 	}
 	else if (CurrentPhase == ESystemPhase::Evaluation)
 	{
+		// Legacy back compat
 		FEntityTaskBuilder()
 		.Read(BuiltInComponents->BoundObject)
 		.FilterAny({ Components->ComponentTransform.PropertyTag })
@@ -206,3 +248,4 @@ void UMovieSceneDeferredComponentMovementSystem::OutputDeferredMovements()
 
 #endif
 }
+

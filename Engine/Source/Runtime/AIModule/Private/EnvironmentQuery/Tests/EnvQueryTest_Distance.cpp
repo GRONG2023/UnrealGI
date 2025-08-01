@@ -4,28 +4,34 @@
 #include "EnvironmentQuery/Items/EnvQueryItemType_VectorBase.h"
 #include "EnvironmentQuery/Contexts/EnvQueryContext_Querier.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(EnvQueryTest_Distance)
+
 #define ENVQUERYTEST_DISTANCE_NAN_DETECTION 1
 
 namespace
 {
 	FORCEINLINE float CalcDistance3D(const FVector& PosA, const FVector& PosB)
 	{
-		return (PosB - PosA).Size();
+		// Static cast this to a float, for EQS scoring purposes float precision is OK.
+		return static_cast<float>(FVector::Distance(PosA, PosB));
 	}
 
 	FORCEINLINE float CalcDistance2D(const FVector& PosA, const FVector& PosB)
 	{
-		return (PosB - PosA).Size2D();
+		// Static cast this to a float, for EQS scoring purposes float precision is OK.
+		return static_cast<float>(FVector::Dist2D(PosA, PosB));
 	}
 
 	FORCEINLINE float CalcDistanceZ(const FVector& PosA, const FVector& PosB)
 	{
-		return PosB.Z - PosA.Z;
+		// Static cast this to a float, for EQS scoring purposes float precision is OK.
+		return static_cast<float>(PosB.Z - PosA.Z);
 	}
 
 	FORCEINLINE float CalcDistanceAbsoluteZ(const FVector& PosA, const FVector& PosB)
 	{
-		return FMath::Abs(PosB.Z - PosA.Z);
+		// Static cast this to a float, for EQS scoring purposes float precision is OK.
+		return static_cast<float>(FMath::Abs(PosB.Z - PosA.Z));
 	}
 
 	FORCEINLINE void CheckItemLocationForNaN(const FVector& ItemLocation, UObject* QueryOwner, int32 Index, uint8 TestMode)
@@ -77,10 +83,10 @@ void UEnvQueryTest_Distance::RunTest(FEnvQueryInstance& QueryInstance) const
 			for (FEnvQueryInstance::ItemIterator It(this, QueryInstance); It; ++It)
 			{
 				const FVector ItemLocation = GetItemLocation(QueryInstance, It.GetIndex());
-				CheckItemLocationForNaN(ItemLocation, QueryOwner, It.GetIndex(), TestMode);
+				CheckItemLocationForNaN(ItemLocation, QueryOwner, It.GetIndex(), TestMode.GetIntValue());
 				for (int32 ContextIndex = 0; ContextIndex < ContextLocations.Num(); ContextIndex++)
 				{
-					CheckContextLocationForNaN(ContextLocations[ContextIndex], QueryOwner, ContextIndex, TestMode);
+					CheckContextLocationForNaN(ContextLocations[ContextIndex], QueryOwner, ContextIndex, TestMode.GetIntValue());
 					const float Distance = CalcDistance3D(ItemLocation, ContextLocations[ContextIndex]);
 					It.SetScore(TestPurpose, FilterType, Distance, MinThresholdValue, MaxThresholdValue);
 				}
@@ -91,10 +97,10 @@ void UEnvQueryTest_Distance::RunTest(FEnvQueryInstance& QueryInstance) const
 			for (FEnvQueryInstance::ItemIterator It(this, QueryInstance); It; ++It)
 			{
 				const FVector ItemLocation = GetItemLocation(QueryInstance, It.GetIndex());
-				CheckItemLocationForNaN(ItemLocation, QueryOwner, It.GetIndex(), TestMode);
+				CheckItemLocationForNaN(ItemLocation, QueryOwner, It.GetIndex(), TestMode.GetIntValue());
 				for (int32 ContextIndex = 0; ContextIndex < ContextLocations.Num(); ContextIndex++)
 				{
-					CheckContextLocationForNaN(ContextLocations[ContextIndex], QueryOwner, ContextIndex, TestMode);
+					CheckContextLocationForNaN(ContextLocations[ContextIndex], QueryOwner, ContextIndex, TestMode.GetIntValue());
 					const float Distance = CalcDistance2D(ItemLocation, ContextLocations[ContextIndex]);
 					It.SetScore(TestPurpose, FilterType, Distance, MinThresholdValue, MaxThresholdValue);
 				}
@@ -105,10 +111,10 @@ void UEnvQueryTest_Distance::RunTest(FEnvQueryInstance& QueryInstance) const
 			for (FEnvQueryInstance::ItemIterator It(this, QueryInstance); It; ++It)
 			{
 				const FVector ItemLocation = GetItemLocation(QueryInstance, It.GetIndex());
-				CheckItemLocationForNaN(ItemLocation, QueryOwner, It.GetIndex(), TestMode);
+				CheckItemLocationForNaN(ItemLocation, QueryOwner, It.GetIndex(), TestMode.GetIntValue());
 				for (int32 ContextIndex = 0; ContextIndex < ContextLocations.Num(); ContextIndex++)
 				{
-					CheckContextLocationForNaN(ContextLocations[ContextIndex], QueryOwner, ContextIndex, TestMode);
+					CheckContextLocationForNaN(ContextLocations[ContextIndex], QueryOwner, ContextIndex, TestMode.GetIntValue());
 					const float Distance = CalcDistanceZ(ItemLocation, ContextLocations[ContextIndex]);
 					It.SetScore(TestPurpose, FilterType, Distance, MinThresholdValue, MaxThresholdValue);
 				}
@@ -119,10 +125,10 @@ void UEnvQueryTest_Distance::RunTest(FEnvQueryInstance& QueryInstance) const
 			for (FEnvQueryInstance::ItemIterator It(this, QueryInstance); It; ++It)
 			{
 				const FVector ItemLocation = GetItemLocation(QueryInstance, It.GetIndex());
-				CheckItemLocationForNaN(ItemLocation, QueryOwner, It.GetIndex(), TestMode);
+				CheckItemLocationForNaN(ItemLocation, QueryOwner, It.GetIndex(), TestMode.GetIntValue());
 				for (int32 ContextIndex = 0; ContextIndex < ContextLocations.Num(); ContextIndex++)
 				{
-					CheckContextLocationForNaN(ContextLocations[ContextIndex], QueryOwner, ContextIndex, TestMode);
+					CheckContextLocationForNaN(ContextLocations[ContextIndex], QueryOwner, ContextIndex, TestMode.GetIntValue());
 					const float Distance = CalcDistanceAbsoluteZ(ItemLocation, ContextLocations[ContextIndex]);
 					It.SetScore(TestPurpose, FilterType, Distance, MinThresholdValue, MaxThresholdValue);
 				}
@@ -165,3 +171,4 @@ FText UEnvQueryTest_Distance::GetDescriptionDetails() const
 {
 	return DescribeFloatTestParams();
 }
+

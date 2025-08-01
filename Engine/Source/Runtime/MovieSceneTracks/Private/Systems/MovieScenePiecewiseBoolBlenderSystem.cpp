@@ -5,6 +5,8 @@
 #include "EntitySystem/MovieSceneEntitySystemTask.h"
 #include "EntitySystem/MovieSceneEntitySystemLinker.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieScenePiecewiseBoolBlenderSystem)
+
 namespace UE
 {
 namespace MovieScene
@@ -42,10 +44,23 @@ struct TSimpleBlendResultTraits<bool>
 UMovieScenePiecewiseBoolBlenderSystem::UMovieScenePiecewiseBoolBlenderSystem(const FObjectInitializer& ObjInit)
 	: Super(ObjInit)
 {
+	using namespace UE::MovieScene;
+
+	Phase = ESystemPhase::Scheduling;
+	
 	Impl.Setup(
 			this, 
 			UE::MovieScene::FBuiltInComponentTypes::Get()->BoolResult,
 			nullptr);
+}
+
+void UMovieScenePiecewiseBoolBlenderSystem::OnSchedulePersistentTasks(UE::MovieScene::IEntitySystemScheduler* TaskScheduler)
+{
+	using namespace UE::MovieScene;
+
+	CompactBlendChannels();
+
+	Impl.Schedule(Linker, AllocatedBlendChannels, TaskScheduler);
 }
 
 void UMovieScenePiecewiseBoolBlenderSystem::OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents)
@@ -56,4 +71,5 @@ void UMovieScenePiecewiseBoolBlenderSystem::OnRun(FSystemTaskPrerequisites& InPr
 
 	Impl.Run(Linker, AllocatedBlendChannels, InPrerequisites, Subsequents);
 }
+
 

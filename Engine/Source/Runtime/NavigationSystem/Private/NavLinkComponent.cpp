@@ -3,10 +3,13 @@
 #include "NavLinkComponent.h"
 #include "NavLinkRenderingProxy.h"
 #include "AI/NavigationSystemHelpers.h"
+#include "AI/Navigation/NavigationRelevantData.h"
 #include "NavigationSystemTypes.h"
 #include "NavAreas/NavArea_Default.h"
 #include "Engine/CollisionProfile.h"
 #include "NavLinkTrivial.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(NavLinkComponent)
 
 
 UNavLinkComponent::UNavLinkComponent(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
@@ -110,3 +113,4 @@ UNavLinkTrivial::UNavLinkTrivial(const FObjectInitializer& ObjectInitializer)
 {
 	FNavigationLink& Link = Links[Links.Add(FNavigationLink(FVector(0, 100, 0), FVector(0, -100, 0)))];
 }
+

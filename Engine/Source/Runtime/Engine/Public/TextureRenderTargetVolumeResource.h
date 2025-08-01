@@ -36,7 +36,7 @@ public:
 	 * Resources that need to initialize after a D3D device reset must implement this function.
 	 * This is only called by the rendering thread.
 	 */
-	virtual void InitDynamicRHI() override;
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 
 	/**
 	 * Releases the dynamic RHI resource and/or RHI render target resources used by this resource.
@@ -44,29 +44,17 @@ public:
 	 * Resources that need to release before a D3D device reset must implement this function.
 	 * This is only called by the rendering thread.
 	 */
-	virtual void ReleaseDynamicRHI() override;
+	virtual void ReleaseRHI() override;
 
 	// FRenderTarget interface.
 
-	/**
-	 * @return width of the target
-	 */
+	// FTexture interface :
 	virtual uint32 GetSizeX() const override;
-
-	/**
-	 * @return height of the target
-	 */
 	virtual uint32 GetSizeY() const override;
+	virtual uint32 GetSizeZ() const override;
 
-	/**
-	 * @return dimensions of the target
-	 */
+	// FRenderTarget interface:	
 	virtual FIntPoint GetSizeXY() const override;
-
-	/**
-	 * @return TextureRHI for rendering
-	 */
-	FTexture3DRHIRef GetTextureRHI() { return TextureVolumeRHI; }
 
 	/**
 	 * @return UnorderedAccessView for rendering
@@ -80,6 +68,12 @@ public:
 	*/
 	float GetDisplayGamma() const override;
 
+	virtual bool ReadPixels(TArray<FColor>& OutImageData, FReadSurfaceDataFlags InFlags = FReadSurfaceDataFlags(RCM_UNorm, CubeFace_MAX), FIntRect InSrcRect = FIntRect(0, 0, 0, 0)) override;
+
+	virtual bool ReadFloat16Pixels(TArray<FFloat16Color>& OutImageData, FReadSurfaceDataFlags InFlags = FReadSurfaceDataFlags(RCM_UNorm, CubeFace_MAX), FIntRect InSrcRect = FIntRect(0, 0, 0, 0)) override;
+
+	virtual bool ReadLinearColorPixels(TArray<FLinearColor>& OutImageData, FReadSurfaceDataFlags InFlags = FReadSurfaceDataFlags(RCM_UNorm, CubeFace_MAX), FIntRect InSrcRect = FIntRect(0, 0, 0, 0)) override;
+
 	/**
 	* Copy the texels of a single depth slice of the volume into an array.
 	* @param OutImageData - float16 values will be stored in this array.
@@ -87,6 +81,7 @@ public:
 	* @param InRect - Rectangle of texels to copy.
 	* @return true if the read succeeded.
 	*/
+	UE_DEPRECATED(5.4, "Use FRenderTarget's ReadPixels, which is functionally equivalent")
 	ENGINE_API bool ReadPixels(TArray<FColor>& OutImageData, int32 InDepthSlice, FIntRect InRect = FIntRect(0, 0, 0, 0));
 
 	/**
@@ -96,6 +91,7 @@ public:
 	* @param InRect - Rectangle of texels to copy.
 	* @return true if the read succeeded.
 	*/
+	UE_DEPRECATED(5.4, "Use FRenderTarget's ReadFloat16Pixels, which is functionally equivalent")
 	ENGINE_API bool ReadPixels(TArray<FFloat16Color>& OutImageData, int32 InDepthSlice, FIntRect InRect = FIntRect(0, 0, 0, 0));
 
 protected:
@@ -110,10 +106,11 @@ private:
 	/** The UTextureRenderTargetVolume which this resource represents. */
 	const class UTextureRenderTargetVolume* Owner;
 
-	/** Represents the current render target (from one of the slices)*/
-	FTexture3DRHIRef RenderTargetVolumeRHI;
-	/** Texture resource used for rendering with and resolving to */
-	FTexture3DRHIRef TextureVolumeRHI;
+	UE_DEPRECATED(5.1, "RenderTargetVolumeRHI has been deprecated. Use RenderTargetTextureRHI instead.")
+	FTextureRHIRef RenderTargetVolumeRHI;
+	UE_DEPRECATED(5.1, "TextureVolumeRHI has been deprecated. Use TextureRHI instead.")
+	FTextureRHIRef TextureVolumeRHI;
+
 	/** Optional Unordered Access View for the resource, automatically created if bCanCreateUAV is true */
 	FUnorderedAccessViewRHIRef UnorderedAccessViewRHI;
 };

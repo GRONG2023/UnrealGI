@@ -32,6 +32,10 @@ public:
 	~FPhysicsManipulationEdMode();
 
 	virtual void AddReferencedObjects( FReferenceCollector& Collector ) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FPhysicsManipulationEdMode");
+	}
 
 	virtual void Enter() override;
 	virtual void Exit() override;
@@ -44,7 +48,7 @@ public:
 	virtual bool UsesTransformWidget() const override	{ return true; };
 
 private:
-	class UPhysicsHandleComponent* HandleComp;
+	TObjectPtr<class UPhysicsHandleComponent> HandleComp;
 
 	FVector HandleTargetLocation;
 	FRotator HandleTargetRotation;

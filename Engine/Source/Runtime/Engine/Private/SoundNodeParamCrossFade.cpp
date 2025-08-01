@@ -3,6 +3,9 @@
 
 #include "Sound/SoundNodeParamCrossFade.h"
 #include "ActiveSound.h"
+#include "IAudioParameterTransmitter.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SoundNodeParamCrossFade)
 
 /*-----------------------------------------------------------------------------
 	USoundNodeParamCrossFade implementation.
@@ -13,10 +16,9 @@ USoundNodeParamCrossFade::USoundNodeParamCrossFade(const FObjectInitializer& Obj
 
 float USoundNodeParamCrossFade::GetCurrentDistance(FAudioDevice* AudioDevice, FActiveSound& ActiveSound, const FSoundParseParameters& ParseParams) const
 {
-	float ParamValue = 0.0f;
-	
-	ActiveSound.GetFloatParameter(ParamName, ParamValue);
-	return ParamValue;
+	FAudioParameter ParamValue;
+	ActiveSound.GetTransmitter()->GetParameter(ParamName, ParamValue);
+	return ParamValue.FloatParam;
 }
 
 bool USoundNodeParamCrossFade::AllowCrossfading(FActiveSound& ActiveSound) const
@@ -38,3 +40,4 @@ float USoundNodeParamCrossFade::GetMaxDistance() const
 	}
 	return MaxDistance;
 }
+

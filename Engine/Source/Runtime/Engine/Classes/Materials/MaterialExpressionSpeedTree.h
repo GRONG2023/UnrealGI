@@ -8,7 +8,7 @@
 #include "MaterialExpressionSpeedTree.generated.h"
 
 UENUM()
-enum ESpeedTreeGeometryType
+enum ESpeedTreeGeometryType : int
 {
 	STG_Branch		UMETA(DisplayName="Branch"),
 	STG_Frond		UMETA(DisplayName="Frond"),
@@ -18,7 +18,7 @@ enum ESpeedTreeGeometryType
 };
 
 UENUM()
-enum ESpeedTreeWindType
+enum ESpeedTreeWindType : int
 {
 	STW_None		UMETA(DisplayName="None"),
 	STW_Fastest		UMETA(DisplayName="Fastest"),
@@ -30,7 +30,7 @@ enum ESpeedTreeWindType
 };
 
 UENUM()
-enum ESpeedTreeLODType
+enum ESpeedTreeLODType : int
 {
 	STLOD_Pop		UMETA(DisplayName="Pop"),
 	STLOD_Smooth	UMETA(DisplayName="Smooth")
@@ -80,6 +80,7 @@ class UMaterialExpressionSpeedTree : public UMaterialExpression
 #if WITH_EDITOR
 	virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
 	virtual void GetCaption(TArray<FString>& OutCaptions) const override;
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
 #endif
 	//~ End UMaterialExpression Interface
 };

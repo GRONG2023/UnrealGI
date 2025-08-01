@@ -10,16 +10,16 @@ public class PackagesDialog : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
+				"ApplicationCore",
 				"Core", 
 				"CoreUObject", 
-				"Engine", 
                 "InputCore",
 				"Slate", 
 				"SlateCore",
-                "EditorStyle",
 				"UnrealEd",
 				"SourceControl",
-				"AssetRegistry"
+				"AssetRegistry",
+				"ToolWidgets",
 			}
 		);
 

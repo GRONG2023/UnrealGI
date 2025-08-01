@@ -5,22 +5,28 @@
 =============================================================================*/
 
 #include "GameFramework/Character.h"
+#include "Animation/AnimMontage.h"
+#include "Engine/World.h"
 #include "GameFramework/DamageType.h"
 #include "GameFramework/Controller.h"
-#include "Components/SkinnedMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/ArrowComponent.h"
 #include "Engine/CollisionProfile.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "Net/Core/PropertyConditions/PropertyConditions.h"
 #include "Net/UnrealNetwork.h"
 #include "DisplayDebugHelpers.h"
 #include "Engine/Canvas.h"
 #include "Animation/AnimInstance.h"
+#include "Engine/DamageEvents.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(Character)
 
 DEFINE_LOG_CATEGORY_STATIC(LogCharacter, Log, All);
 
 DECLARE_CYCLE_STAT(TEXT("Char OnNetUpdateSimulatedPosition"), STAT_CharacterOnNetUpdateSimulatedPosition, STATGROUP_Character);
+
 
 FName ACharacter::MeshComponentName(TEXT("CharacterMesh0"));
 FName ACharacter::CharacterMovementComponentName(TEXT("CharMoveComp"));
@@ -78,6 +84,7 @@ ACharacter::ACharacter(const FObjectInitializer& ObjectInitializer)
 		ArrowComponent->SpriteInfo.DisplayName = ConstructorStatics.NAME_Characters;
 		ArrowComponent->SetupAttachment(CapsuleComponent);
 		ArrowComponent->bIsScreenSizeScaled = true;
+		ArrowComponent->SetSimulatePhysics(false);
 	}
 #endif // WITH_EDITORONLY_DATA
 
@@ -85,8 +92,9 @@ ACharacter::ACharacter(const FObjectInitializer& ObjectInitializer)
 	if (CharacterMovement)
 	{
 		CharacterMovement->UpdatedComponent = CapsuleComponent;
-		CrouchedEyeHeight = CharacterMovement->CrouchedHalfHeight * 0.80f;
 	}
+
+	RecalculateCrouchedEyeHeight();
 
 	Mesh = CreateOptionalDefaultSubobject<USkeletalMeshComponent>(ACharacter::MeshComponentName);
 	if (Mesh)
@@ -106,6 +114,7 @@ ACharacter::ACharacter(const FObjectInitializer& ObjectInitializer)
 	}
 
 	BaseRotationOffset = FQuat::Identity;
+	ReplicatedGravityDirection = UCharacterMovementComponent::DefaultGravityDirection;
 }
 
 void ACharacter::PostInitializeComponents()
@@ -114,7 +123,7 @@ void ACharacter::PostInitializeComponents()
 
 	Super::PostInitializeComponents();
 
-	if (!IsPendingKill())
+	if (IsValid(this))
 	{
 		if (Mesh)
 		{
@@ -140,6 +149,18 @@ void ACharacter::PostInitializeComponents()
 			}
 		}
 	}
+}
+
+void ACharacter::PostLoad()
+{
+	Super::PostLoad();
+
+#if WITH_EDITORONLY_DATA
+	if (ArrowComponent)
+	{
+		ArrowComponent->SetSimulatePhysics(false);
+	}
+#endif // WITH_EDITORONLY_DATA
 }
 
 void ACharacter::BeginPlay()
@@ -261,24 +282,26 @@ bool ACharacter::CanJump() const
 
 bool ACharacter::CanJumpInternal_Implementation() const
 {
-	// Ensure the character isn't currently crouched.
-	bool bCanJump = !bIsCrouched;
+	return !bIsCrouched && JumpIsAllowedInternal();
+}
 
+bool ACharacter::JumpIsAllowedInternal() const
+{
 	// Ensure that the CharacterMovement state is valid
-	bCanJump &= CharacterMovement->CanAttemptJump();
+	bool bJumpIsAllowed = CharacterMovement->CanAttemptJump();
 
-	if (bCanJump)
+	if (bJumpIsAllowed)
 	{
 		// Ensure JumpHoldTime and JumpCount are valid.
 		if (!bWasJumping || GetJumpMaxHoldTime() <= 0.0f)
 		{
 			if (JumpCurrentCount == 0 && CharacterMovement->IsFalling())
 			{
-				bCanJump = JumpCurrentCount + 1 < JumpMaxCount;
+				bJumpIsAllowed = JumpCurrentCount + 1 < JumpMaxCount;
 			}
 			else
 			{
-				bCanJump = JumpCurrentCount < JumpMaxCount;
+				bJumpIsAllowed = JumpCurrentCount < JumpMaxCount;
 			}
 		}
 		else
@@ -287,12 +310,12 @@ bool ACharacter::CanJumpInternal_Implementation() const
 			// A) The jump limit hasn't been met OR
 			// B) The jump limit has been met AND we were already jumping
 			const bool bJumpKeyHeld = (bPressedJump && JumpKeyHoldTime < GetJumpMaxHoldTime());
-			bCanJump = bJumpKeyHeld &&
-						((JumpCurrentCount < JumpMaxCount) || (bWasJumping && JumpCurrentCount == JumpMaxCount));
+			bJumpIsAllowed = bJumpKeyHeld &&
+				((JumpCurrentCount < JumpMaxCount) || (bWasJumping && JumpCurrentCount == JumpMaxCount));
 		}
 	}
 
-	return bCanJump;
+	return bJumpIsAllowed;
 }
 
 void ACharacter::ResetJumpState()
@@ -444,6 +467,16 @@ void ACharacter::OnStartCrouch( float HeightAdjust, float ScaledHeightAdjust )
 	K2_OnStartCrouch(HeightAdjust, ScaledHeightAdjust);
 }
 
+void ACharacter::RecalculateCrouchedEyeHeight()
+{
+	if (CharacterMovement != nullptr)
+	{
+		constexpr float EyeHeightRatio = 0.8f;	// how high the character's eyes are, relative to the crouched height
+
+		CrouchedEyeHeight = CharacterMovement->GetCrouchedHalfHeight() * EyeHeightRatio;
+	}
+}
+
 void ACharacter::ApplyDamageMomentum(float DamageTaken, FDamageEvent const& DamageEvent, APawn* PawnInstigator, AActor* DamageCauser)
 {
 	UDamageType const* const DmgTypeCDO = DamageEvent.DamageTypeClass->GetDefaultObject<UDamageType>();
@@ -461,7 +494,7 @@ void ACharacter::ApplyDamageMomentum(float DamageTaken, FDamageEvent const& Dama
 		// limit Z momentum added if already going up faster than jump (to avoid blowing character way up into the sky)
 		{
 			FVector MassScaledImpulse = Impulse;
-			if(!bMassIndependentImpulse && CharacterMovement->Mass > SMALL_NUMBER)
+			if(!bMassIndependentImpulse && CharacterMovement->Mass > UE_SMALL_NUMBER)
 			{
 				MassScaledImpulse = MassScaledImpulse / CharacterMovement->Mass;
 			}
@@ -625,35 +658,27 @@ namespace MovementBaseUtility
 	{
 		if (MovementBase)
 		{
+			bool bGotTransformOfIntendedBone = true;
+
 			if (BoneName != NAME_None)
 			{
-				bool bFoundBone = false;
-				if (MovementBase)
+				// Check if this socket or bone exists (DoesSocketExist checks for either, as does requesting the transform).
+				if (MovementBase->DoesSocketExist(BoneName))
 				{
-					// Check if this socket or bone exists (DoesSocketExist checks for either, as does requesting the transform).
-					if (MovementBase->DoesSocketExist(BoneName))
-					{
-						MovementBase->GetSocketWorldLocationAndRotation(BoneName, OutLocation, OutQuat);
-						bFoundBone = true;
-					}
-					else
-					{
-						UE_LOG(LogCharacter, Warning, TEXT("GetMovementBaseTransform(): Invalid bone or socket '%s' for PrimitiveComponent base %s"), *BoneName.ToString(), *GetPathNameSafe(MovementBase));
-					}
+					MovementBase->GetSocketWorldLocationAndRotation(BoneName, OutLocation, OutQuat);
+					return true;
 				}
-
-				if (!bFoundBone)
+				else
 				{
-					OutLocation = MovementBase->GetComponentLocation();
-					OutQuat = MovementBase->GetComponentQuat();
+					UE_LOG(LogCharacter, Warning, TEXT("GetMovementBaseTransform(): Invalid bone or socket '%s' for PrimitiveComponent base %s. Falling back to base's root transform."), *BoneName.ToString(), *GetPathNameSafe(MovementBase));
+					bGotTransformOfIntendedBone = false;
 				}
-				return bFoundBone;
 			}
 
-			// No bone supplied
+			// No bone supplied (or it was invalid)
 			OutLocation = MovementBase->GetComponentLocation();
 			OutQuat = MovementBase->GetComponentQuat();
-			return true;
+			return bGotTransformOfIntendedBone;
 		}
 
 		// nullptr MovementBase
@@ -661,6 +686,43 @@ namespace MovementBaseUtility
 		OutQuat = FQuat::Identity;
 		return false;
 	}
+
+	bool TransformLocationToWorld(const UPrimitiveComponent* MovementBase, const FName BoneName, const FVector& LocalLocation, FVector& OutLocationWorldSpace)
+	{
+		FVector OutLocation;
+		FQuat OutQuat;
+		const bool bResult = GetMovementBaseTransform(MovementBase, BoneName, OutLocation, OutQuat);
+		OutLocationWorldSpace = FTransform(OutQuat, OutLocation).TransformPositionNoScale(LocalLocation);
+		return bResult;
+	}
+
+	bool TransformLocationToLocal(const UPrimitiveComponent* MovementBase, const FName BoneName, const FVector& WorldSpaceLocation, FVector& OutLocalLocation)
+	{
+		FVector OutLocation;
+		FQuat OutQuat;
+		const bool bResult = GetMovementBaseTransform(MovementBase, BoneName, OutLocation, OutQuat);
+		OutLocalLocation = FTransform(OutQuat, OutLocation).InverseTransformPositionNoScale(WorldSpaceLocation);
+		return bResult;
+	}
+
+	bool TransformDirectionToWorld(const UPrimitiveComponent* MovementBase, const FName BoneName, const FVector& LocalDirection, FVector& OutDirectionWorldSpace)
+	{
+		FVector IgnoredLocation;
+		FQuat OutQuat;
+		const bool bResult = GetMovementBaseTransform(MovementBase, BoneName, IgnoredLocation, OutQuat);
+		OutDirectionWorldSpace = OutQuat.RotateVector(LocalDirection);
+		return bResult;
+	}
+
+	bool TransformDirectionToLocal(const UPrimitiveComponent* MovementBase, const FName BoneName, const FVector& WorldSpaceDirection, FVector& OutLocalDirection)
+	{
+		FVector IgnoredLocation;
+		FQuat OutQuat;
+		const bool bResult = GetMovementBaseTransform(MovementBase, BoneName, IgnoredLocation, OutQuat);
+		OutLocalDirection = OutQuat.UnrotateVector(WorldSpaceDirection);
+		return bResult;
+	}
+
 }
 
 
@@ -699,6 +761,11 @@ void ACharacter::SetBase( UPrimitiveComponent* NewBaseComponent, const FName InB
 		UPrimitiveComponent* OldBase = BasedMovement.MovementBase;
 		BasedMovement.MovementBase = NewBaseComponent;
 		BasedMovement.BoneName = BoneName;
+		if (bBaseChanged)
+		{
+			// Increment base ID.
+			BasedMovement.BaseID++;
+		}
 
 		if (CharacterMovement)
 		{
@@ -737,7 +804,7 @@ void ACharacter::SetBase( UPrimitiveComponent* NewBaseComponent, const FName InB
 			const ENetRole LocalRole = GetLocalRole();
 			if (LocalRole == ROLE_Authority || LocalRole == ROLE_AutonomousProxy)
 			{
-				BasedMovement.bServerHasBaseComponent = (BasedMovement.MovementBase != nullptr); // Also set on proxies for nicer debugging.
+				BasedMovement.bServerHasBaseComponent = (BasedMovement.MovementBase != nullptr); // Also set on autonomous proxies for nicer debugging.
 				UE_LOG(LogCharacter, Verbose, TEXT("Setting base on %s for '%s' to '%s'"), LocalRole == ROLE_Authority ? TEXT("Server") : TEXT("AutoProxy"), *GetName(), *GetFullNameSafe(NewBaseComponent));
 			}
 			else
@@ -747,7 +814,7 @@ void ACharacter::SetBase( UPrimitiveComponent* NewBaseComponent, const FName InB
 
 		}
 
-		// Notify this actor of his new floor.
+		// Notify this actor of its new floor.
 		if ( bNotifyPawn )
 		{
 			BaseChange();
@@ -762,6 +829,35 @@ void ACharacter::SaveRelativeBasedMovement(const FVector& NewRelativeLocation, c
 	BasedMovement.Location = NewRelativeLocation;
 	BasedMovement.Rotation = NewRotation;
 	BasedMovement.bRelativeRotation = bRelativeRotation;
+}
+
+FVector ACharacter::GetGravityDirection() const
+{
+	FVector GravityDirection = UCharacterMovementComponent::DefaultGravityDirection;
+	const UCharacterMovementComponent* const MovementComponent = GetCharacterMovement();
+	if (MovementComponent)
+	{
+		GravityDirection = MovementComponent->GetGravityDirection();
+	}
+
+	return GravityDirection;
+}
+
+FQuat ACharacter::GetGravityTransform() const
+{
+	FQuat GravityTransform = FQuat::Identity;
+	const UCharacterMovementComponent* const MovementComponent = GetCharacterMovement();
+	if (MovementComponent)
+	{
+		GravityTransform = MovementComponent->GetWorldToGravityTransform();
+	}
+
+	return GravityTransform;
+}
+
+FVector ACharacter::GetReplicatedGravityDirection() const
+{
+	return ReplicatedGravityDirection;
 }
 
 FVector ACharacter::GetNavAgentLocation() const
@@ -982,7 +1078,7 @@ void ACharacter::OnMovementModeChanged(EMovementMode PrevMovementMode, uint8 Pre
 
 /** Don't process landed notification if updating client position by replaying moves. 
  * Allow event to be called if Pawn was initially falling (before starting to replay moves), 
- * and this is going to cause him to land. . */
+ * and this is going to cause it to land. . */
 bool ACharacter::ShouldNotifyLanded(const FHitResult& Hit)
 {
 	if (bClientUpdating && !bClientWasFalling)
@@ -1074,6 +1170,7 @@ static uint8 SavedMovementMode;
 void ACharacter::PreNetReceive()
 {
 	SavedMovementMode = ReplicatedMovementMode;
+	PreNetReceivedGravityDirection = ReplicatedGravityDirection;
 	Super::PreNetReceive();
 }
 
@@ -1081,8 +1178,9 @@ void ACharacter::PostNetReceive()
 {
 	if (GetLocalRole() == ROLE_SimulatedProxy)
 	{
+		CharacterMovement->bNetworkGravityDirectionChanged = !PreNetReceivedGravityDirection.Equals(ReplicatedGravityDirection);
 		CharacterMovement->bNetworkMovementModeChanged |= ((SavedMovementMode != ReplicatedMovementMode) || (CharacterMovement->PackNetworkMovementMode() != ReplicatedMovementMode));
-		CharacterMovement->bNetworkUpdateReceived |= CharacterMovement->bNetworkMovementModeChanged || CharacterMovement->bJustTeleported;
+		CharacterMovement->bNetworkUpdateReceived |= CharacterMovement->bNetworkMovementModeChanged || CharacterMovement->bJustTeleported || CharacterMovement->bNetworkGravityDirectionChanged;
 	}
 
 	Super::PostNetReceive();
@@ -1090,6 +1188,12 @@ void ACharacter::PostNetReceive()
 
 void ACharacter::OnRep_ReplicatedBasedMovement()
 {	
+	// Following the same pattern in AActor::OnRep_ReplicatedMovement() just in case...
+	if (!IsReplicatingMovement())
+	{
+		return;
+	}
+
 	if (GetLocalRole() != ROLE_SimulatedProxy)
 	{
 		return;
@@ -1120,7 +1224,8 @@ void ACharacter::OnRep_ReplicatedBasedMovement()
 		const FVector OldLocation = GetActorLocation();
 		const FQuat OldRotation = GetActorQuat();
 		MovementBaseUtility::GetMovementBaseTransform(ReplicatedBasedMovement.MovementBase, ReplicatedBasedMovement.BoneName, CharacterMovement->OldBaseLocation, CharacterMovement->OldBaseQuat);
-		const FVector NewLocation = CharacterMovement->OldBaseLocation + ReplicatedBasedMovement.Location;
+		const FTransform BaseTransform(CharacterMovement->OldBaseQuat, CharacterMovement->OldBaseLocation);
+		const FVector NewLocation = BaseTransform.TransformPositionNoScale(ReplicatedBasedMovement.Location);
 		FRotator NewRotation;
 
 		if (ReplicatedBasedMovement.HasRelativeRotation())
@@ -1150,11 +1255,6 @@ void ACharacter::OnRep_ReplicatedBasedMovement()
 
 void ACharacter::OnRep_ReplicatedMovement()
 {
-	if (CharacterMovement && (CharacterMovement->NetworkSmoothingMode == ENetworkSmoothingMode::Replay))
-	{
-		return;
-	}
-
 	// Skip standard position correction if we are playing root motion, OnRep_RootMotion will handle it.
 	if (!IsPlayingNetworkedRootMotionMontage()) // animation root motion
 	{
@@ -1178,7 +1278,8 @@ FAnimMontageInstance * ACharacter::GetRootMotionAnimMontageInstance() const
 
 void ACharacter::OnRep_RootMotion()
 {
-	if (CharacterMovement && (CharacterMovement->NetworkSmoothingMode == ENetworkSmoothingMode::Replay))
+	// Following the same pattern in AActor::OnRep_ReplicatedMovement() just in case...
+	if (!IsReplicatingMovement())
 	{
 		return;
 	}
@@ -1228,7 +1329,7 @@ void ACharacter::SimulatedRootMotionPositionFixup(float DeltaSeconds)
 				const float ServerPosition = RootMotionRepMove.RootMotion.Position;
 				const float ClientPosition = ClientMontageInstance->GetPosition();
 				const float DeltaPosition = (ClientPosition - ServerPosition);
-				if( FMath::Abs(DeltaPosition) > KINDA_SMALL_NUMBER )
+				if( FMath::Abs(DeltaPosition) > UE_KINDA_SMALL_NUMBER )
 				{
 					// Find Root Motion delta move to get back to where we were on the client.
 					const FTransform LocalRootMotionTransform = ClientMontageInstance->Montage->ExtractRootMotionFromTrackRange(ServerPosition, ClientPosition);
@@ -1287,9 +1388,11 @@ bool ACharacter::CanUseRootMotionRepMove(const FSimulatedRootMotionReplicatedMov
 	if( GetWorld()->TimeSince(RootMotionRepMove.Time) <= 0.5f )
 	{
 		// Make sure montage being played matched between client and server.
-		if( RootMotionRepMove.RootMotion.AnimMontage && (RootMotionRepMove.RootMotion.AnimMontage == ClientMontageInstance.Montage) )
+		UAnimSequenceBase* ClientAnimation = ClientMontageInstance.Montage && ClientMontageInstance.Montage->IsDynamicMontage() ? ClientMontageInstance.Montage->GetFirstAnimReference() : ClientMontageInstance.Montage;
+		if (RootMotionRepMove.RootMotion.Animation && RootMotionRepMove.RootMotion.Animation == ClientAnimation)
 		{
-			UAnimMontage * AnimMontage = ClientMontageInstance.Montage;
+			UAnimMontage* AnimMontage = ClientMontageInstance.Montage;
+
 			const float ServerPosition = RootMotionRepMove.RootMotion.Position;
 			const float ClientPosition = ClientMontageInstance.GetPosition();
 			const float DeltaPosition = (ClientPosition - ServerPosition);
@@ -1330,8 +1433,9 @@ bool ACharacter::RestoreReplicatedMove(const FSimulatedRootMotionReplicatedMove&
 			FVector BaseLocation;
 			FQuat BaseRotation;
 			MovementBaseUtility::GetMovementBaseTransform(ServerBase, ServerBaseBoneName, BaseLocation, BaseRotation);
-
-			const FVector ServerLocation = BaseLocation + RootMotionRepMove.RootMotion.Location;
+			const FTransform BaseTransform(BaseRotation, BaseLocation);
+			
+			const FVector ServerLocation = BaseTransform.TransformPositionNoScale(RootMotionRepMove.RootMotion.Location);
 			FRotator ServerRotation;
 			if (RootMotionRepMove.RootMotion.bRelativeRotation)
 			{
@@ -1414,7 +1518,7 @@ void ACharacter::PreReplication( IRepChangedPropertyTracker & ChangedPropertyTra
 {
 	Super::PreReplication( ChangedPropertyTracker );
 
-	if (CharacterMovement->CurrentRootMotion.HasActiveRootMotionSources() || IsPlayingNetworkedRootMotionMontage())
+	if (IsReplicatingMovement() && (CharacterMovement->CurrentRootMotion.HasActiveRootMotionSources() || IsPlayingNetworkedRootMotionMontage()))
 	{
 		const FAnimMontageInstance* RootMotionMontageInstance = GetRootMotionAnimMontageInstance();
 
@@ -1428,43 +1532,53 @@ void ACharacter::PreReplication( IRepChangedPropertyTracker & ChangedPropertyTra
 		RepRootMotion.MovementBaseBoneName = BasedMovement.BoneName;
 		if (RootMotionMontageInstance)
 		{
-			RepRootMotion.AnimMontage		= RootMotionMontageInstance->Montage;
+			RepRootMotion.Animation = RootMotionMontageInstance->Montage->IsDynamicMontage() ? RootMotionMontageInstance->Montage->GetFirstAnimReference() : RootMotionMontageInstance->Montage;
 			RepRootMotion.Position			= RootMotionMontageInstance->GetPosition();
 		}
 		else
 		{
-			RepRootMotion.AnimMontage = nullptr;
+			RepRootMotion.Animation = nullptr;
 		}
 
 		RepRootMotion.AuthoritativeRootMotion = CharacterMovement->CurrentRootMotion;
 		RepRootMotion.Acceleration = CharacterMovement->GetCurrentAcceleration();
 		RepRootMotion.LinearVelocity = CharacterMovement->Velocity;
 
-		DOREPLIFETIME_ACTIVE_OVERRIDE( ACharacter, RepRootMotion, true );
+		DOREPLIFETIME_ACTIVE_OVERRIDE_FAST( ACharacter, RepRootMotion, true );
 	}
 	else
 	{
+		const bool bWasRootMotionPreviouslyActive = RepRootMotion.bIsActive;
 		RepRootMotion.Clear();
 
-		DOREPLIFETIME_ACTIVE_OVERRIDE( ACharacter, RepRootMotion, false );
+		// Replicate RepRootMotion one last time when root motion ends, so that clients see the change.
+		// Then deactivate subsequent property comparisons and replication updates until root motion starts again.
+		DOREPLIFETIME_ACTIVE_OVERRIDE_FAST( ACharacter, RepRootMotion, bWasRootMotionPreviouslyActive );
 	}
 
 	bProxyIsJumpForceApplied = (JumpForceTimeRemaining > 0.0f);
-	ReplicatedMovementMode = CharacterMovement->PackNetworkMovementMode();	
-	ReplicatedBasedMovement = BasedMovement;
+	ReplicatedMovementMode = CharacterMovement->PackNetworkMovementMode();
+	ReplicatedGravityDirection = CharacterMovement->GetGravityDirection();
 
-	// Optimization: only update and replicate these values if they are actually going to be used.
-	if (BasedMovement.HasRelativeLocation())
+	if(IsReplicatingMovement())
 	{
-		// When velocity becomes zero, force replication so the position is updated to match the server (it may have moved due to simulation on the client).
-		ReplicatedBasedMovement.bServerHasVelocity = !CharacterMovement->Velocity.IsZero();
+		ReplicatedBasedMovement = BasedMovement;
 
-		// Make sure absolute rotations are updated in case rotation occurred after the base info was saved.
-		if (!BasedMovement.HasRelativeRotation())
+		// Optimization: only update and replicate these values if they are actually going to be used.
+		if (BasedMovement.HasRelativeLocation())
 		{
-			ReplicatedBasedMovement.Rotation = GetActorRotation();
+			// When velocity becomes zero, force replication so the position is updated to match the server (it may have moved due to simulation on the client).
+			ReplicatedBasedMovement.bServerHasVelocity = !CharacterMovement->Velocity.IsZero();
+
+			// Make sure absolute rotations are updated in case rotation occurred after the base info was saved.
+			if (!BasedMovement.HasRelativeRotation())
+			{
+				ReplicatedBasedMovement.Rotation = GetActorRotation();
+			}
 		}
 	}
+
+	DOREPLIFETIME_ACTIVE_OVERRIDE_FAST(ACharacter, ReplicatedBasedMovement, IsReplicatingMovement());
 
 	// Save bandwidth by not replicating this value unless it is necessary, since it changes every update.
 	if ((CharacterMovement->NetworkSmoothingMode == ENetworkSmoothingMode::Linear) || CharacterMovement->bNetworkAlwaysReplicateTransformUpdateTimestamp)
@@ -1475,6 +1589,13 @@ void ACharacter::PreReplication( IRepChangedPropertyTracker & ChangedPropertyTra
 	{
 		ReplicatedServerLastTransformUpdateTimeStamp = 0.f;
 	}
+}
+
+void ACharacter::GetReplicatedCustomConditionState(FCustomPropertyConditionState& OutActiveState) const
+{
+	Super::GetReplicatedCustomConditionState(OutActiveState);
+
+	DOREPCUSTOMCONDITION_ACTIVE_FAST(ACharacter, RepRootMotion, CharacterMovement->CurrentRootMotion.HasActiveRootMotionSources() || IsPlayingNetworkedRootMotionMontage());
 }
 
 void ACharacter::PreReplicationForReplay(IRepChangedPropertyTracker& ChangedPropertyTracker)
@@ -1509,6 +1630,7 @@ void ACharacter::GetLifetimeReplicatedProps( TArray< FLifetimeProperty > & OutLi
 	DOREPLIFETIME_CONDITION( ACharacter, bIsCrouched,						COND_SimulatedOnly );
 	DOREPLIFETIME_CONDITION( ACharacter, bProxyIsJumpForceApplied,			COND_SimulatedOnly );
 	DOREPLIFETIME_CONDITION( ACharacter, AnimRootMotionTranslationScale,	COND_SimulatedOnly );
+	DOREPLIFETIME_CONDITION( ACharacter, ReplicatedGravityDirection,		COND_SimulatedOnly );
 	DOREPLIFETIME_CONDITION( ACharacter, ReplayLastTransformUpdateTimeStamp, COND_ReplayOnly );
 }
 
@@ -1752,4 +1874,49 @@ void ACharacter::ClientAdjustRootMotionPosition_Implementation(float TimeStamp, 
 void ACharacter::ClientAdjustRootMotionSourcePosition_Implementation(float TimeStamp, FRootMotionSourceGroup ServerRootMotion, bool bHasAnimRootMotion, float ServerMontageTrackPosition, FVector ServerLoc, FVector_NetQuantizeNormal ServerRotation, float ServerVelZ, UPrimitiveComponent* ServerBase, FName ServerBoneName, bool bHasBase, bool bBaseRelativePosition, uint8 ServerMovementMode)
 {
 	GetCharacterMovement()->ClientAdjustRootMotionSourcePosition_Implementation(TimeStamp, ServerRootMotion, bHasAnimRootMotion, ServerMontageTrackPosition, ServerLoc, ServerRotation, ServerVelZ, ServerBase, ServerBoneName, bHasBase, bBaseRelativePosition, ServerMovementMode);
+}
+
+void ACharacter::FillAsyncInput(FCharacterAsyncInput& Input) const
+{
+	Input.JumpMaxHoldTime = GetJumpMaxHoldTime();
+	Input.JumpMaxCount = JumpMaxCount;
+	Input.LocalRole = ENetRole::ROLE_Authority;//CharacterOwner->GetLocalRole(); Override as we aren't currently replicating to server. TODO NetRole
+	Input.RemoteRole = GetRemoteRole();
+	Input.bIsLocallyControlled = true;// CharacterOwner->IsLocallyControlled(); TODO NetRole
+	Input.bIsPlayingNetworkedRootMontage = IsPlayingNetworkedRootMotionMontage();
+	Input.bUseControllerRotationPitch = bUseControllerRotationPitch;
+	Input.bUseControllerRotationYaw = bUseControllerRotationYaw;
+	Input.bUseControllerRotationRoll = bUseControllerRotationRoll;
+	Input.ControllerDesiredRotation = Controller->GetDesiredRotation();
+}
+
+void ACharacter::InitializeAsyncOutput(FCharacterAsyncOutput& Output) const
+{
+	Output.Rotation = GetActorRotation();
+	Output.JumpCurrentCountPreJump = JumpCurrentCountPreJump;
+	Output.JumpCurrentCount = JumpCurrentCount;
+	Output.JumpForceTimeRemaining = JumpForceTimeRemaining;
+	Output.bWasJumping = bWasJumping;
+	Output.bPressedJump = bPressedJump;
+	Output.JumpKeyHoldTime = JumpKeyHoldTime;
+	Output.bClearJumpInput = false;
+}
+
+void ACharacter::ApplyAsyncOutput(const FCharacterAsyncOutput& Output)
+{
+	JumpCurrentCountPreJump = Output.JumpCurrentCountPreJump;
+	JumpCurrentCount = Output.JumpCurrentCount;
+	JumpForceTimeRemaining = Output.JumpForceTimeRemaining;
+	bWasJumping = Output.bWasJumping;
+	JumpKeyHoldTime = Output.JumpKeyHoldTime;
+
+	if (Output.bClearJumpInput)
+	{
+		bPressedJump = false;
+	}
+}
+
+UAnimMontage* FRepRootMotionMontage::GetAnimMontage() const
+{
+	return Cast<UAnimMontage>(Animation);
 }

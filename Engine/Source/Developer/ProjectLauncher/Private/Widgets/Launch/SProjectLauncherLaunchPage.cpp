@@ -1,8 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "SProjectLauncherLaunchPage.h"
+#include "Widgets/Launch/SProjectLauncherLaunchPage.h"
 
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Framework/Commands/UIAction.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "SlateOptMacros.h"
@@ -95,8 +95,8 @@ void SProjectLauncherLaunchPage::Construct(const FArguments& InArgs, const TShar
 			.Padding(0.0f, 8.0f, 0.0f, 0.0f)
 			[
 				SNew(SBorder)
-					.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
-					.Padding(8.0)
+					.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+					.Padding(8.0f)
 					.Visibility(this, &SProjectLauncherLaunchPage::HandleValidationErrorIconVisibility, ELauncherProfileValidationErrors::CustomRolesNotSupportedYet)
 					[
 						SNew(SHorizontalBox)
@@ -105,7 +105,7 @@ void SProjectLauncherLaunchPage::Construct(const FArguments& InArgs, const TShar
 							.AutoWidth()
 							[
 								SNew(SImage)
-									.Image(FEditorStyle::GetBrush(TEXT("Icons.Error")))
+									.Image(FAppStyle::GetBrush(TEXT("Icons.Error")))
 							]
 
 						+ SHorizontalBox::Slot()
@@ -126,7 +126,7 @@ void SProjectLauncherLaunchPage::Construct(const FArguments& InArgs, const TShar
 				SNew(SExpandableArea)
 					.AreaTitle(LOCTEXT("DefaultRoleAreaTitle", "Default Role"))
 					.InitiallyCollapsed(false)
-					.Padding(8.0)
+					.Padding(8.0f)
 					.Visibility(this, &SProjectLauncherLaunchPage::HandleLaunchSettingsVisibility)
 					.BodyContent()
 					[

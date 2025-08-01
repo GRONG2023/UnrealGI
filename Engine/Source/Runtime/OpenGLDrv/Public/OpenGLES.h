@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include "HAL/Platform.h"
+
 #if !PLATFORM_DESKTOP // need this to fix compile issues with Win configuration.
 
 #define OPENGL_ES	1
@@ -94,6 +96,12 @@ typedef GLfloat GLdouble;
 #ifndef GL_TEXTURE_RECTANGLE
 #define GL_TEXTURE_RECTANGLE	0x84F5
 #endif
+#ifndef GL_MAX_TEXTURE_BUFFER_SIZE
+#define GL_MAX_TEXTURE_BUFFER_SIZE 0x8C2B
+#endif
+#ifndef GL_DEPTH_CLAMP
+#define GL_DEPTH_CLAMP 0x864F
+#endif
 
 /** For the shader stage bits that don't exist just use 0 */
 #define GL_GEOMETRY_SHADER_BIT				0x00000000
@@ -113,6 +121,9 @@ typedef GLfloat GLdouble;
 #define GL_DEBUG_SEVERITY_LOW_ARB GL_DEBUG_SEVERITY_LOW_KHR
 #define GL_DEBUG_SEVERITY_NOTIFICATION GL_DEBUG_SEVERITY_NOTIFICATION_KHR
 #endif
+
+// FIXME: include gl32.h
+typedef void (GL_APIENTRYP PFNGLFRAMEBUFFERTEXTUREPROC) (GLenum target, GLenum attachment, GLuint texture, GLint level);
 
 namespace GLFuncPointers
 {
@@ -145,7 +156,7 @@ namespace GLFuncPointers
 	// ES 3.2
 	extern PFNGLTEXBUFFEREXTPROC				glTexBufferEXT;
 	extern PFNGLTEXBUFFERRANGEEXTPROC			glTexBufferRangeEXT;
-	extern PFNGLCOPYIMAGESUBDATAEXTPROC			glCopyImageSubDataEXT;
+	extern PFNGLCOPYIMAGESUBDATAEXTPROC			glCopyImageSubData;
 	extern PFNGLENABLEIEXTPROC					glEnableiEXT;
 	extern PFNGLDISABLEIEXTPROC					glDisableiEXT;
 	extern PFNGLBLENDEQUATIONIEXTPROC			glBlendEquationiEXT;
@@ -153,6 +164,7 @@ namespace GLFuncPointers
 	extern PFNGLBLENDFUNCIEXTPROC				glBlendFunciEXT;
 	extern PFNGLBLENDFUNCSEPARATEIEXTPROC		glBlendFuncSeparateiEXT;
 	extern PFNGLCOLORMASKIEXTPROC				glColorMaskiEXT;
+	extern PFNGLFRAMEBUFFERTEXTUREPROC			glFramebufferTexture;
 
 	// Mobile multi-view
 	extern PFNGLFRAMEBUFFERTEXTUREMULTIVIEWOVRPROC glFramebufferTextureMultiviewOVR;
@@ -188,7 +200,6 @@ struct FOpenGLES : public FOpenGLBase
 	static FORCEINLINE bool SupportsDepthStencilRead() { return false; }
 	static FORCEINLINE bool SupportsFloatReadSurface() { return SupportsColorBufferHalfFloat(); }
 	static FORCEINLINE bool SupportsWideMRT() { return true; }
-	static FORCEINLINE bool SupportsMultisampledTextures() { return false; }
 	static FORCEINLINE bool SupportsPolygonMode() { return false; }
 	static FORCEINLINE bool SupportsTexture3D() { return true; }
 	static FORCEINLINE bool SupportsMobileMultiView() { return bSupportsMobileMultiView; }
@@ -196,13 +207,15 @@ struct FOpenGLES : public FOpenGLBase
 	static FORCEINLINE bool SupportsTextureLODBias() { return false; }
 	static FORCEINLINE bool SupportsTextureCompare() { return false; }
 	static FORCEINLINE bool SupportsDrawIndexOffset() { return false; }
-	static FORCEINLINE bool SupportsResourceView() { return glTexBufferEXT != nullptr; }
 	static FORCEINLINE bool SupportsDiscardFrameBuffer() { return true; }
 	static FORCEINLINE bool SupportsIndexedExtensions() { return false; }
 	static FORCEINLINE bool SupportsColorBufferFloat() { return bSupportsColorBufferFloat; }
 	static FORCEINLINE bool SupportsColorBufferHalfFloat() { return bSupportsColorBufferHalfFloat; }
 	static FORCEINLINE bool SupportsShaderFramebufferFetch() { return bSupportsShaderFramebufferFetch; }
+	static FORCEINLINE bool SupportsShaderMRTFramebufferFetch() { return bSupportsShaderMRTFramebufferFetch; }
+	static FORCEINLINE bool SupportsShaderFramebufferFetchProgrammableBlending() { return bSupportsShaderFramebufferFetchProgrammableBlending; }
 	static FORCEINLINE bool SupportsShaderDepthStencilFetch() { return bSupportsShaderDepthStencilFetch; }
+	static FORCEINLINE bool SupportsPixelLocalStorage() { return bSupportsPixelLocalStorage; }
 	static FORCEINLINE bool SupportsMultisampledRenderToTexture() { return bSupportsMultisampledRenderToTexture; }
 	static FORCEINLINE bool SupportsVertexArrayBGRA() { return false; }
 	static FORCEINLINE bool SupportsBGRA8888() { return bSupportsBGRA8888; }
@@ -212,13 +225,14 @@ struct FOpenGLES : public FOpenGLBase
 	static FORCEINLINE GLenum GetShadowDepthFormat() { return GL_DEPTH_COMPONENT16; }
 	static FORCEINLINE bool SupportsFramebufferSRGBEnable() { return false; }
 	static FORCEINLINE bool SupportsRGB10A2() { return bSupportsRGB10A2; }
-	static FORCEINLINE bool SupportsComputeShaders() { return true; }
 	static FORCEINLINE bool SupportsDrawIndirect() { return true; }
 	static FORCEINLINE bool SupportsBufferStorage() { return bSupportsBufferStorage; }
+	static FORCEINLINE bool SupportsDepthClamp() { return bSupportsDepthClamp; }
 	
 
 	static FORCEINLINE bool HasBinaryProgramRetrievalFailed() { return bBinaryProgramRetrievalFailed; }
 	static FORCEINLINE bool RequiresDisabledEarlyFragmentTests() { return bRequiresDisabledEarlyFragmentTests; }
+	static FORCEINLINE bool RequiresReadOnlyBuffersWorkaround() { return bRequiresReadOnlyBuffersWorkaround; }
 	static FORCEINLINE bool RequiresARMShaderFramebufferFetchDepthStencilUndef() { return bRequiresARMShaderFramebufferFetchDepthStencilUndef; }
 
 	// Adreno doesn't support HALF_FLOAT
@@ -303,7 +317,7 @@ struct FOpenGLES : public FOpenGLBase
 			Access = GL_MAP_READ_BIT;
 			break;
 		case EResourceLockMode::RLM_ReadOnlyPersistent:
-			Access = (GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);;
+			Access = (GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);
 			break;
 		case EResourceLockMode::RLM_WriteOnly:
 			Access = (GL_MAP_INVALIDATE_BUFFER_BIT | GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT);
@@ -367,8 +381,19 @@ struct FOpenGLES : public FOpenGLBase
 
 	static FORCEINLINE void CopyImageSubData(GLuint SrcName, GLenum SrcTarget, GLint SrcLevel, GLint SrcX, GLint SrcY, GLint SrcZ, GLuint DstName, GLenum DstTarget, GLint DstLevel, GLint DstX, GLint DstY, GLint DstZ, GLsizei Width, GLsizei Height, GLsizei Depth)
 	{
-		check(bSupportsCopyImage);
-		glCopyImageSubDataEXT(SrcName, SrcTarget, SrcLevel, SrcX, SrcY, SrcZ, DstName, DstTarget, DstLevel, DstX, DstY, DstZ, Width, Height, Depth);
+		glCopyImageSubData(SrcName, SrcTarget, SrcLevel, SrcX, SrcY, SrcZ, DstName, DstTarget, DstLevel, DstX, DstY, DstZ, Width, Height, Depth);
+	}
+
+	static FORCEINLINE bool TexStorage2DMultisample(GLenum Target, GLsizei Samples, GLint InternalFormat, GLsizei Width, GLsizei Height, GLboolean FixedSampleLocations)
+	{
+		glTexStorage2DMultisample(Target, Samples, InternalFormat, Width, Height, FixedSampleLocations);
+		return true;
+	}
+
+	static FORCEINLINE void RenderbufferStorageMultisample(GLenum Target, GLsizei Samples, GLint InternalFormat, GLsizei Width, GLsizei Height)
+	{
+		check(glRenderbufferStorageMultisampleEXT);
+		glRenderbufferStorageMultisampleEXT(Target, Samples, InternalFormat, Width, Height);
 	}
 
 	static FORCEINLINE void ClearBufferfv(GLenum Buffer, GLint DrawBufferIndex, const GLfloat* Value)
@@ -478,7 +503,7 @@ struct FOpenGLES : public FOpenGLBase
 		glUniform4uiv(Location, Count, Value);
 	}
 
-	static FORCEINLINE bool SupportsProgramBinary() { return true; }
+	static FORCEINLINE bool SupportsProgramBinary() { return bSupportsProgramBinary; }
 
 	static FORCEINLINE void GetProgramBinary(GLuint Program, GLsizei BufSize, GLsizei* Length, GLenum* BinaryFormat, void* Binary)
 	{
@@ -620,12 +645,14 @@ struct FOpenGLES : public FOpenGLBase
 
 	static FORCEINLINE void FramebufferTexture(GLenum Target, GLenum Attachment, GLuint Texture, GLint Level)
 	{
-		check(0);
+		// ES 3.2
+		glFramebufferTexture(Target, Attachment, Texture, Level);
 	}
 
 	static FORCEINLINE void FramebufferTexture3D(GLenum Target, GLenum Attachment, GLenum TexTarget, GLuint Texture, GLint Level, GLint ZOffset)
 	{
-		check(0);
+		// glFramebufferTexture3D is not supported on GLES
+		glFramebufferTextureLayer(Target, Attachment, Texture, Level, ZOffset);
 	}
 
 	static FORCEINLINE void FramebufferTextureLayer(GLenum Target, GLenum Attachment, GLuint Texture, GLint Level, GLint Layer)
@@ -645,12 +672,30 @@ struct FOpenGLES : public FOpenGLBase
 		VERIFY_GL(FramebufferTexture_2D);
 	}
 
+	static FORCEINLINE void FramebufferTexture2DMultisample(GLenum Target, GLenum Attachment, GLenum TexTarget, GLuint Texture, GLint Level, GLint NumSamples)
+	{
+		check(glFramebufferTexture2DMultisampleEXT != nullptr);
+		glFramebufferTexture2DMultisampleEXT(Target, Attachment, TexTarget, Texture, Level, NumSamples);
+	}
+
+	static FORCEINLINE void FramebufferTextureMultiviewOVR(GLenum Target, GLenum Attachment, GLuint Texture, GLint Level, GLint BaseViewIndex, GLsizei NumViews)
+	{
+		check(glFramebufferTextureMultiviewOVR);
+		glFramebufferTextureMultiviewOVR(Target, Attachment, Texture, Level, BaseViewIndex, NumViews);
+	}
+	
+	static FORCEINLINE void FramebufferTextureMultisampleMultiviewOVR(GLenum Target, GLenum Attachment, GLuint Texture, GLint Level, GLsizei NumSamples, GLint BaseViewIndex, GLsizei NumViews)
+	{
+		check(glFramebufferTextureMultisampleMultiviewOVR);
+		glFramebufferTextureMultisampleMultiviewOVR(Target, Attachment, Texture, Level, NumSamples, BaseViewIndex, NumViews);
+	}
+
 	static FORCEINLINE void BlitFramebuffer(GLint SrcX0, GLint SrcY0, GLint SrcX1, GLint SrcY1, GLint DstX0, GLint DstY0, GLint DstX1, GLint DstY1, GLbitfield Mask, GLenum Filter)
 	{
 		glBlitFramebuffer(SrcX0, SrcY0, SrcX1, SrcY1, DstX0, DstY0, DstX1, DstY1, Mask, Filter);
 	}
 
-	static FORCEINLINE bool TexStorage2D(GLenum Target, GLint Levels, GLint InternalFormat, GLsizei Width, GLsizei Height, GLenum Format, GLenum Type, uint32 Flags)
+	static FORCEINLINE bool TexStorage2D(GLenum Target, GLint Levels, GLint InternalFormat, GLsizei Width, GLsizei Height, GLenum Format, GLenum Type, ETextureCreateFlags Flags)
 	{
 		glTexStorage2D(Target, Levels, InternalFormat, Width, Height);
 		VERIFY_GL(glTexStorage2D);
@@ -774,11 +819,18 @@ protected:
 	/** GL_EXT_shader_framebuffer_fetch */
 	static bool bSupportsShaderFramebufferFetch;
 
+	/** GL_EXT_shader_framebuffer_fetch (MRT's) */
+	static bool bSupportsShaderMRTFramebufferFetch;
+
+
 	/** GL_ARM_shader_framebuffer_fetch_depth_stencil */
 	static bool bSupportsShaderDepthStencilFetch;
 
 	/** GL_EXT_MULTISAMPLED_RENDER_TO_TEXTURE */
 	static bool bSupportsMultisampledRenderToTexture;
+
+	/** workaround for GL_EXT_shader_pixel_local_storage */
+	static bool bSupportsPixelLocalStorage;
 
 	/** GL_FRAGMENT_SHADER, GL_LOW_FLOAT */
 	static int ShaderLowPrecision;
@@ -808,8 +860,14 @@ public:
 	/* Some Mali devices do not work correctly with early_fragment_test enabled */
 	static bool bRequiresDisabledEarlyFragmentTests;
 		
+	/* This is a workaround for a Mali bug where read-only buffers do not work when passed to functions*/
+	static bool bRequiresReadOnlyBuffersWorkaround;
+
 	/* This is to avoid a bug in Adreno drivers that define GL_ARM_shader_framebuffer_fetch_depth_stencil even when device does not support this extension  */
 	static bool bRequiresARMShaderFramebufferFetchDepthStencilUndef;
+
+	/** Framebuffer fetch can be used to do programmable blending without running into driver issues */
+	static bool bSupportsShaderFramebufferFetchProgrammableBlending;
 
 	/** GL_OES_vertex_type_10_10_10_2 */
 	static bool bSupportsRGB10A2;
@@ -819,6 +877,9 @@ public:
 
 	/** GL_EXT_buffer_storage */
 	static bool bSupportsBufferStorage;
+
+	/** GL_EXT_depth_clamp */
+	static bool bSupportsDepthClamp;
 
 	enum class EFeatureLevelSupport : uint8
 	{
@@ -837,7 +898,6 @@ public:
 	/** Whether device supports mobile multi-view */
 	static bool bSupportsMobileMultiView;
 
-	static GLint MaxComputeTextureImageUnits;
 	static GLint MaxComputeUniformComponents;
 
 	static GLint MaxCombinedUAVUnits;

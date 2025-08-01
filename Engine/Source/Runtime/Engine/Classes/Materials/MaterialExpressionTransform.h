@@ -10,7 +10,7 @@
 #include "MaterialExpressionTransform.generated.h"
 
 UENUM()
-enum EMaterialVectorCoordTransformSource
+enum EMaterialVectorCoordTransformSource : int
 {
 	/** Tangent space (relative to the surface) */
 	TRANSFORMSOURCE_Tangent UMETA(DisplayName="Tangent Space"),
@@ -27,14 +27,17 @@ enum EMaterialVectorCoordTransformSource
 	/** Camera space */
 	TRANSFORMSOURCE_Camera  UMETA(DisplayName="Camera Space"),
 
-	/** Particle space */
-	TRANSFORMSOURCE_ParticleWorld  UMETA(DisplayName = "Mesh particle space"),
+	/** Particle space, deprecated value will be removed in a future release use instance space. */
+	TRANSFORMSOURCE_ParticleWorld  UMETA(Hidden, DisplayName = "Mesh particle space"),
+
+	/** Instance space (used to provide per instance transform, i.e. for Instanced Static Mesh / Particles). */
+	TRANSFORMSOURCE_Instance UMETA(DisplayName = "Instance & Particle Space"),
 
 	TRANSFORMSOURCE_MAX,
 };
 
 UENUM()
-enum EMaterialVectorCoordTransform
+enum EMaterialVectorCoordTransform : int
 {
 	/** Tangent space (relative to the surface) */
 	TRANSFORM_Tangent UMETA(DisplayName="Tangent Space"),
@@ -51,8 +54,11 @@ enum EMaterialVectorCoordTransform
 	/** Camera space */
 	TRANSFORM_Camera  UMETA(DisplayName="Camera Space"),
 
-	/** Particle space */
-	TRANSFORM_ParticleWorld UMETA(DisplayName = "Mesh particle space"),
+	/** Particle space, deprecated value will be removed in a future release use instance space. */
+	TRANSFORM_ParticleWorld UMETA(Hidden, DisplayName = "Mesh particle space"),
+
+	/** Instance space (used to provide per instance transform, i.e. for Instanced Static Mesh / Particles). */
+	TRANSFORM_Instance UMETA(DisplayName = "Instance & Particle Space"),
 
 	TRANSFORM_MAX,
 };
@@ -67,15 +73,16 @@ class UMaterialExpressionTransform : public UMaterialExpression
 	FExpressionInput Input;
 
 	/** Source coordinate space of the FVector */
-	UPROPERTY(EditAnywhere, Category=MaterialExpressionTransform, meta=(DisplayName = "Source"))
+	UPROPERTY(EditAnywhere, Category=MaterialExpressionTransform, meta=(DisplayName = "Source", ShowAsInputPin = "Advanced"))
 	TEnumAsByte<enum EMaterialVectorCoordTransformSource> TransformSourceType;
 
 	/** Destination coordinate space of the FVector */
-	UPROPERTY(EditAnywhere, Category=MaterialExpressionTransform, meta=(DisplayName = "Destination"))
+	UPROPERTY(EditAnywhere, Category=MaterialExpressionTransform, meta=(DisplayName = "Destination", ShowAsInputPin = "Advanced"))
 	TEnumAsByte<enum EMaterialVectorCoordTransform> TransformType;
 
 	//~ Begin UMaterialExpression Interface
 #if WITH_EDITOR
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
 	virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
 	virtual void GetCaption(TArray<FString>& OutCaptions) const override;
 #endif

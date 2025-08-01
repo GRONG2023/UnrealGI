@@ -7,6 +7,7 @@
 #include "Widgets/SWidget.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/SBoxPanel.h"
+#include "Widgets/Layout/SScrollBox.h"
 #include "Framework/MultiBox/MultiBoxExtender.h"
 #include "Framework/Docking/WorkspaceItem.h"
 #include "Framework/Docking/TabManager.h"
@@ -21,6 +22,8 @@
 #include "LocalizationDashboardSettings.h"
 #include "SSettingsEditorCheckoutNotice.h"
 #include "ToolMenus.h"
+#include "WorkspaceMenuStructureModule.h"
+#include "WorkspaceMenuStructure.h"
 
 #define LOCTEXT_NAMESPACE "LocalizationDashboard"
 
@@ -69,13 +72,21 @@ void SLocalizationDashboard::Construct(const FArguments& InArgs, const TSharedPt
 			.Label(LOCTEXT("TargetsTabLabel", "Targets"));
 
 		TSharedRef<SVerticalBox> VBox = SNew(SVerticalBox);
-		DockTab->SetContent(VBox);
+		TSharedRef<SScrollBox> ScrollBox = SNew(SScrollBox)
+			+ SScrollBox::Slot()
+			[
+				VBox
+			];
+
+		DockTab->SetContent(ScrollBox);
 
 		FPropertyEditorModule& PropertyModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
 
 		// Settings Details View
 		{
-			FDetailsViewArgs DetailsViewArgs(false, false, false, FDetailsViewArgs::ENameAreaSettings::HideNameArea, false, nullptr, false, NAME_None);
+			FDetailsViewArgs DetailsViewArgs;
+			DetailsViewArgs.bAllowSearch = false; 
+			DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
 			TSharedRef<IDetailsView> DetailsView = PropertyModule.CreateDetailView(DetailsViewArgs);
 			DetailsView->SetIsPropertyEditingEnabledDelegate(FIsPropertyEditingEnabled::CreateSP(this, &SLocalizationDashboard::CanMakeEdits));
 			DetailsView->SetObject(GetMutableDefault<ULocalizationDashboardSettings>(), true);
@@ -89,7 +100,9 @@ void SLocalizationDashboard::Construct(const FArguments& InArgs, const TSharedPt
 
 		// Game Targets Details View
 		{
-			FDetailsViewArgs DetailsViewArgs(false, false, false, FDetailsViewArgs::ENameAreaSettings::HideNameArea, false, nullptr, false, NAME_None);
+			FDetailsViewArgs DetailsViewArgs;
+			DetailsViewArgs.bAllowSearch = false; 
+			DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
 			TSharedRef<IDetailsView> DetailsView = PropertyModule.CreateDetailView(DetailsViewArgs);
 			DetailsView->SetIsPropertyEditingEnabledDelegate(FIsPropertyEditingEnabled::CreateSP(this, &SLocalizationDashboard::CanMakeEdits));
 			DetailsView->SetObject(ULocalizationSettings::GetGameTargetSet(), true);
@@ -103,7 +116,9 @@ void SLocalizationDashboard::Construct(const FArguments& InArgs, const TSharedPt
 
 		// Engine Targets Details View
 		{
-			FDetailsViewArgs DetailsViewArgs(false, false, false, FDetailsViewArgs::ENameAreaSettings::HideNameArea, false, nullptr, false, NAME_None);
+			FDetailsViewArgs DetailsViewArgs;
+			DetailsViewArgs.bAllowSearch = false; 
+			DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
 			TSharedRef<IDetailsView> DetailsView = PropertyModule.CreateDetailView(DetailsViewArgs);
 			DetailsView->SetIsPropertyEditingEnabledDelegate(FIsPropertyEditingEnabled::CreateSP(this, &SLocalizationDashboard::CanMakeEdits));
 			DetailsView->SetObject(ULocalizationSettings::GetEngineTargetSet(), true);
@@ -118,63 +133,64 @@ void SLocalizationDashboard::Construct(const FArguments& InArgs, const TSharedPt
 		return DockTab;
 	};
 	const TSharedRef<FWorkspaceItem> TargetSetsWorkspaceMenuCategory = TabManager->AddLocalWorkspaceMenuCategory(LOCTEXT("LocalizationDashboardWorkspaceMenuCategory", "Localization Dashboard"));
+
 	FTabSpawnerEntry& TargetsTabSpawnerEntry = TabManager->RegisterTabSpawner(TargetsDetailsTabName, FOnSpawnTab::CreateLambda(CreateTargetsTab))
 		.SetDisplayName(LOCTEXT("TargetsDetailTabSpawner", "Targets"));
+
 	TargetSetsWorkspaceMenuCategory->AddItem(TargetsTabSpawnerEntry.AsShared());
 
-	TSharedRef<FTabManager::FLayout> Layout = FTabManager::NewLayout("LocalizationDashboard_Experimental_V5")
+	TSharedRef<FTabManager::FLayout> Layout = FTabManager::NewLayout("LocalizationDashboard_v5")
 		->AddArea
 		(
-		FTabManager::NewPrimaryArea()
-		->SetOrientation(Orient_Horizontal)
-		->Split
-		(
-		FTabManager::NewStack()
-		->SetSizeCoefficient(1.0f)
-		->SetHideTabWell(true)
-		->AddTab(TargetsDetailsTabName, ETabState::OpenedTab)
-		)
-		->Split
-		(
-		FTabManager::NewStack()
-		->SetSizeCoefficient(2.0f)
-		->SetHideTabWell(false)
-		->AddTab(DocumentsTabName, ETabState::ClosedTab)
-		)
+			FTabManager::NewPrimaryArea()
+			->SetOrientation(Orient_Horizontal)
+			->Split
+			(
+				FTabManager::NewStack()
+				->SetSizeCoefficient(1.0f)
+				->SetHideTabWell(true)
+				->AddTab(TargetsDetailsTabName, ETabState::OpenedTab)
+			)
+			->Split
+			(
+				FTabManager::NewStack()
+				->SetSizeCoefficient(2.0f)
+				->SetHideTabWell(false)
+				->AddTab(DocumentsTabName, ETabState::ClosedTab)
+			)
 		);
 
 	Layout = FLayoutSaveRestore::LoadFromConfig(GEditorLayoutIni, Layout);
 
 	FToolMenuContext ToolMenuContext;
-	IMainFrameModule& MainFrameModule = FModuleManager::LoadModuleChecked<IMainFrameModule>( "MainFrame" );
-	const TSharedRef<SWidget> MenuWidget = MainFrameModule.MakeMainMenu( TabManager, "LocalizationDashboard.MainMenu", ToolMenuContext );
+	IMainFrameModule& MainFrameModule = FModuleManager::LoadModuleChecked<IMainFrameModule>("MainFrame");
+
+	TabManager->SetAllowWindowMenuBar(true);
+
+	UToolMenus::Get()->RegisterMenu("LocalizationDashboard.MainMenu", "MainFrame.NomadMainMenu");
 
 	FString ConfigFilePath;
 	ConfigFilePath = GetDefault<ULocalizationSettings>()->GetDefaultConfigFilename();
 	ConfigFilePath = FPaths::ConvertRelativePathToFull(ConfigFilePath);
 
 	ChildSlot
+	[
+		SNew(SVerticalBox)
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0.0f, 8.0f)
 		[
-			SNew(SVerticalBox)
-			+SVerticalBox::Slot()
-			.AutoHeight()
-			[
-				MenuWidget
-			]
-			+SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(0.0f, 8.0f)
-			[
-				SAssignNew(SettingsEditorCheckoutNotice, SSettingsEditorCheckoutNotice)
-				.ConfigFilePath(ConfigFilePath)
-			]
-			+SVerticalBox::Slot()
-			.FillHeight(1.0f)
-			[
-				TabManager->RestoreFrom(Layout, OwningWindow).ToSharedRef()
-			]
-		];
+			SAssignNew(SettingsEditorCheckoutNotice, SSettingsEditorCheckoutNotice)
+			.ConfigFilePath(ConfigFilePath)
+		]
+		+ SVerticalBox::Slot()
+		.FillHeight(1.0f)
+		[
+			TabManager->RestoreFrom(Layout, OwningWindow).ToSharedRef()
+		]
+	];
 
+	MainFrameModule.MakeMainMenu(TabManager, "LocalizationDashboard.MainMenu", ToolMenuContext);
 
 	// Open the first game target if present
 	if (ULocalizationTargetSet* GameTargetSet = ULocalizationSettings::GetGameTargetSet())
@@ -283,8 +299,11 @@ void FLocalizationDashboard::RegisterTabSpawner()
 		return DockTab;
 	};
 
-	FGlobalTabmanager::Get()->RegisterTabSpawner(TabName, FOnSpawnTab::CreateLambda( MoveTemp(SpawnMainTab) ) )
-		.SetDisplayName(LOCTEXT("MainTabTitle", "Localization Dashboard"));
+	FGlobalTabmanager::Get()->RegisterNomadTabSpawner(TabName, FOnSpawnTab::CreateLambda(MoveTemp(SpawnMainTab)))
+		.SetDisplayName(LOCTEXT("MainTabTitle", "Localization Dashboard"))
+		.SetTooltipText(LOCTEXT("LocalizationDashboardToolTip", "Open the Localization Dashboard for this Project."))
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "LocalizationDashboard.MenuIcon"))
+		.SetGroup(WorkspaceMenu::GetMenuStructure().GetToolsCategory());
 }
 
 void FLocalizationDashboard::UnregisterTabSpawner()

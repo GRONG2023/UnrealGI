@@ -5,6 +5,9 @@
 #include "TraceServices/Containers/Allocators.h"
 #include "Containers/Array.h"
 
+namespace TraceServices
+{
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 //
 // The TVariablePagedArrayPage allocates items in fixed size pages. Each page allocates space for
@@ -40,7 +43,7 @@
 //
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-// For debuging the TVariablePagedArray implementation.
+// For debugging the TVariablePagedArray implementation.
 #define DEBUG_VARIABLE_PAGED_ARRAY 0
 
 #if DEBUG_VARIABLE_PAGED_ARRAY
@@ -341,7 +344,7 @@ public:
 	typedef TVariablePagedArrayPageGroup<InItemType> PageGroupType;
 	typedef TVariablePagedArrayIterator<InItemType> TIterator;
 
-	TVariablePagedArray(Trace::ILinearAllocator& InAllocator, uint64 InPageSize)
+	TVariablePagedArray(ILinearAllocator& InAllocator, uint64 InPageSize)
 		: Allocator(InAllocator)
 		, Pages()
 		, FirstPage(nullptr)
@@ -499,7 +502,7 @@ public:
 		if (ItemIndex == 0)
 		{
 			// No need to split the page. Just add a new one in front of it.
-			LeftPage = &Pages.InsertDefaulted_GetRef(LeftPageIndex);
+			LeftPage = &Pages.InsertDefaulted_GetRef(static_cast<uint32>(LeftPageIndex));
 			RightPage = LeftPage + 1;
 
 			LeftPage->Items = reinterpret_cast<ItemType*>(Allocator.Allocate(PageSize * sizeof(ItemType)));
@@ -511,7 +514,7 @@ public:
 		else
 		{
 			// Add another page after current one.
-			RightPage = &Pages.InsertDefaulted_GetRef(LeftPageIndex + 1);
+			RightPage = &Pages.InsertDefaulted_GetRef(static_cast<uint32>(LeftPageIndex) + 1);
 			LeftPage = RightPage - 1;
 
 			RightPage->Items = reinterpret_cast<ItemType*>(Allocator.Allocate(PageSize * sizeof(ItemType)));
@@ -529,7 +532,7 @@ public:
 		OnInsertedItem(PageGroupIndex);
 
 		// Split the page group.
-		PageGroupType* RightPageGroup = &PageGroups.InsertDefaulted_GetRef(PageGroupIndex + 1);
+		PageGroupType* RightPageGroup = &PageGroups.InsertDefaulted_GetRef(static_cast<uint32>(PageGroupIndex) + 1);
 		FirstPageGroup = PageGroups.GetData();
 		LastPageGroup = PageGroups.GetData() + PageGroups.Num() - 1;
 		PageGroupType* LeftPageGroup = RightPageGroup - 1;
@@ -653,15 +656,15 @@ private:
 
 	ItemType& PushBackItemInPageGroup(const uint64 PageGroupIndex)
 	{
-		PageGroupType& PageGroup = PageGroups[PageGroupIndex];
+		PageGroupType& PageGroup = PageGroups[static_cast<uint32>(PageGroupIndex)];
 		uint64 PageIndex = PageGroup.FirstPageIndex + PageGroup.PageCount - 1;
-		PageType* Page = &Pages[PageIndex];
+		PageType* Page = &Pages[static_cast<uint32>(PageIndex)];
 
 		if (Page->ItemOffset + Page->ItemCount == PageSize) // if page is full
 		{
 			// Add a new page.
 			++PageIndex;
-			Page = &Pages.InsertDefaulted_GetRef(PageIndex);
+			Page = &Pages.InsertDefaulted_GetRef(static_cast<uint32>(PageIndex));
 			Page->Items = reinterpret_cast<ItemType*>(Allocator.Allocate(PageSize * sizeof(ItemType)));
 			OnInsertedPage(PageGroupIndex);
 		}
@@ -773,7 +776,7 @@ private:
 	template<typename ItemType>
 	friend class TVariablePagedArrayIterator;
 
-	Trace::ILinearAllocator& Allocator;
+	ILinearAllocator& Allocator;
 
 	TArray<PageType> Pages;
 	PageType* FirstPage;
@@ -789,3 +792,5 @@ private:
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+
+} // namespace TraceServices

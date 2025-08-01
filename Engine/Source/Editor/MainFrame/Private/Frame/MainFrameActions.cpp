@@ -18,41 +18,45 @@
 #include "CreditsScreen.h"
 #include "DesktopPlatformModule.h"
 #include "ISourceControlModule.h"
+#include "ISourceControlWindowsModule.h"
 #include "GameProjectGenerationModule.h"
 #include "Toolkits/GlobalEditorCommonCommands.h"
 #include "Logging/TokenizedMessage.h"
 #include "Logging/MessageLog.h"
 #include "SourceCodeNavigation.h"
-#include "SourceControlWindows.h"
 #include "ISettingsModule.h"
 #include "Interfaces/IProjectManager.h"
 #include "Interfaces/ITargetPlatform.h"
 #include "Interfaces/ITargetPlatformManagerModule.h"
 #include "PlatformInfo.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Settings/EditorExperimentalSettings.h"
 #include "CookerSettings.h"
 #include "UnrealEdMisc.h"
+#include "Editor/UnrealEdEngine.h"
+#include "Editor/Transactor.h"
+#include "Preferences/UnrealEdOptions.h"
+#include "UnrealEdGlobals.h"
 #include "FileHelpers.h"
 #include "EditorAnalytics.h"
 #include "LevelEditor.h"
 #include "Interfaces/IProjectTargetPlatformEditorModule.h"
-#include "InstalledPlatformInfo.h"
 #include "Misc/ConfigCacheIni.h"
 #include "MainFrameModule.h"
 #include "Widgets/Docking/SDockTab.h"
-#include "Widgets/Notifications/SNotificationList.h"
 #include "Framework/Commands/GenericCommands.h"
 #include "Dialogs/SOutputLogDialog.h"
+#include "Dialogs/Dialogs.h"
 #include "IUATHelperModule.h"
 #include "Menus/LayoutsMenu.h"
 #include "TargetReceipt.h"
+#include "IDocumentation.h"
 
 #include "Settings/EditorSettings.h"
 #include "AnalyticsEventAttribute.h"
 #include "Kismet2/DebuggerCommands.h"
 #include "GameMapsSettings.h"
-#include "DerivedDataCacheInterface.h"
+#include "SourceControlWindows.h"
 
 #define LOCTEXT_NAMESPACE "MainFrameActions"
 
@@ -73,7 +77,7 @@ FMainFrameCommands::FMainFrameCommands()
 		TEXT("MainFrame"), // Context name for fast lookup
 		LOCTEXT( "MainFrame", "Main Frame" ), // Localized context name for displaying
 		NAME_None,	 // No parent context
-		FEditorStyle::GetStyleSetName() ), // Icon Style Set
+		FAppStyle::GetAppStyleSetName() ), // Icon Style Set
 	  ToggleFullscreenConsoleCommand(
 		TEXT( "MainFrame.ToggleFullscreen" ),
 		TEXT( "Toggles the editor between \"full screen\" mode and \"normal\" mode.  In full screen mode, the task bar and window title area are hidden." ),
@@ -98,14 +102,23 @@ void FMainFrameCommands::RegisterCommands()
 	UI_COMMAND( SaveAll, "Save All", "Saves all unsaved levels and assets to disk", EUserInterfaceActionType::Button, FInputChord( EModifierKey::Control | EModifierKey::Shift, EKeys::S ) );
 	ActionList->MapAction( SaveAll, FExecuteAction::CreateStatic( &FMainFrameActionCallbacks::SaveAll ), FCanExecuteAction::CreateStatic( &FMainFrameActionCallbacks::CanSaveWorld ) );
 
-	UI_COMMAND( ChooseFilesToSave, "Choose Files to Save...", "Opens a dialog with save options for content and levels", EUserInterfaceActionType::Button, FInputChord() );
+	UI_COMMAND( ChooseFilesToSave, "Choose Files to Save...", "Opens a dialog with save options for content and levels", EUserInterfaceActionType::Button, FInputChord( EModifierKey::Control | EModifierKey::Alt | EModifierKey::Shift, EKeys::S ) );
 	ActionList->MapAction( ChooseFilesToSave, FExecuteAction::CreateStatic( &FMainFrameActionCallbacks::ChoosePackagesToSave ), FCanExecuteAction::CreateStatic( &FMainFrameActionCallbacks::CanSaveWorld ) );
 
-	UI_COMMAND( ChooseFilesToCheckIn, "Submit to Source Control...", "Opens a dialog with check in options for content and levels", EUserInterfaceActionType::Button, FInputChord() );
-	ActionList->MapAction( ChooseFilesToCheckIn, FExecuteAction::CreateStatic( &FMainFrameActionCallbacks::ChoosePackagesToCheckIn ), FCanExecuteAction::CreateStatic( &FMainFrameActionCallbacks::CanChoosePackagesToCheckIn ) );
+	UI_COMMAND( ViewChangelists, "View Changes", "Opens a dialog displaying current changes.", EUserInterfaceActionType::Button, FInputChord() );
+	ActionList->MapAction(ViewChangelists, FExecuteAction::CreateStatic( &FMainFrameActionCallbacks::ViewChangelists ), FCanExecuteAction::CreateStatic( &FMainFrameActionCallbacks::CanViewChangelists ) );
 
-	UI_COMMAND( ConnectToSourceControl, "Connect To Source Control...", "Connect to source control to allow source control operations to be performed on content and levels.", EUserInterfaceActionType::Button, FInputChord() );
+	UI_COMMAND( SubmitContent, "Submit Content", "Opens a dialog with check in options for content and levels.", EUserInterfaceActionType::Button, FInputChord() );
+	ActionList->MapAction( SubmitContent, FExecuteAction::CreateLambda([]() { FSourceControlWindows::ChoosePackagesToCheckIn(); }), FCanExecuteAction::CreateStatic(&FSourceControlWindows::CanChoosePackagesToCheckIn ), FGetActionCheckState(), FIsActionButtonVisible::CreateStatic(FSourceControlWindows::ShouldChoosePackagesToCheckBeVisible) );
+
+	UI_COMMAND( SyncContent, "Sync Content", "Saves all unsaved levels and assets to disk and then downloads the latest versions from revision control.", EUserInterfaceActionType::Button, FInputChord() );
+	ActionList->MapAction(SyncContent, FExecuteAction::CreateLambda([]() { FSourceControlWindows::SyncLatest(); }), FCanExecuteAction::CreateStatic( &FSourceControlWindows::CanSyncLatest ) );
+
+	UI_COMMAND( ConnectToSourceControl, "Connect to Revision Control...", "Connect to a revision control system for tracking changes to your content and levels.", EUserInterfaceActionType::Button, FInputChord() );
 	ActionList->MapAction( ConnectToSourceControl, FExecuteAction::CreateStatic( &FMainFrameActionCallbacks::ConnectToSourceControl ), DefaultExecuteAction );
+
+	UI_COMMAND( ChangeSourceControlSettings, "Change Revision Control Settings...", "Opens a dialog to change revision control settings.", EUserInterfaceActionType::Button, FInputChord() );
+	ActionList->MapAction( ChangeSourceControlSettings, FExecuteAction::CreateStatic(&FMainFrameActionCallbacks::ConnectToSourceControl), DefaultExecuteAction);
 
 	UI_COMMAND( NewProject, "New Project...", "Opens a dialog to create a new game project", EUserInterfaceActionType::Button, FInputChord() );
 	ActionList->MapAction( NewProject, FExecuteAction::CreateStatic( &FMainFrameActionCallbacks::NewProject, false, true), DefaultExecuteAction );
@@ -113,20 +126,17 @@ void FMainFrameCommands::RegisterCommands()
 	UI_COMMAND( OpenProject, "Open Project...", "Opens a dialog to choose a game project to open", EUserInterfaceActionType::Button, FInputChord() );
 	ActionList->MapAction( OpenProject, FExecuteAction::CreateStatic( &FMainFrameActionCallbacks::NewProject, true, false), DefaultExecuteAction );
 
-	UI_COMMAND( AddCodeToProject, "New C++ Class...", "Adds C++ code to the project. The code can only be compiled if you have an appropriate C++ compiler installed.", EUserInterfaceActionType::Button, FInputChord() );
-	ActionList->MapAction( AddCodeToProject, FExecuteAction::CreateStatic( &FMainFrameActionCallbacks::AddCodeToProject ));
+	UI_COMMAND(AddCodeToProject, "New C++ Class...", "Adds C++ code to the project. The code can only be compiled if you have an appropriate C++ compiler installed.", EUserInterfaceActionType::Button, FInputChord());
+	ActionList->MapAction(AddCodeToProject, FExecuteAction::CreateStatic(&FMainFrameActionCallbacks::AddCodeToProject), FCanExecuteAction::CreateStatic(&FMainFrameActionCallbacks::CanAddCodeToProject), FGetActionCheckState(), FIsActionButtonVisible::CreateStatic(&FMainFrameActionCallbacks::IsAddCodeToProjectVisible));
 
-	UI_COMMAND( RefreshCodeProject, "Refresh code project", "Refreshes your C++ code project.", EUserInterfaceActionType::Button, FInputChord() );
-	ActionList->MapAction( RefreshCodeProject, FExecuteAction::CreateStatic( &FMainFrameActionCallbacks::RefreshCodeProject ), FCanExecuteAction::CreateStatic( &FMainFrameActionCallbacks::IsCodeProject ) );
+	UI_COMMAND(RefreshCodeProject, "Refresh code project", "Refreshes your C++ code project.", EUserInterfaceActionType::Button, FInputChord());
+	ActionList->MapAction(RefreshCodeProject, FExecuteAction::CreateStatic(&FMainFrameActionCallbacks::RefreshCodeProject), FCanExecuteAction::CreateStatic(&FMainFrameActionCallbacks::CanRefreshCodeProject), FGetActionCheckState(), FIsActionButtonVisible::CreateStatic(&FMainFrameActionCallbacks::IsRefreshCodeProjectVisible));
 
-	UI_COMMAND( OpenIDE, "Open IDE", "Opens your C++ code in an integrated development environment.", EUserInterfaceActionType::Button, FInputChord() );
-	ActionList->MapAction( OpenIDE, FExecuteAction::CreateStatic( &FMainFrameActionCallbacks::OpenIDE ), FCanExecuteAction::CreateStatic( &FMainFrameActionCallbacks::IsCodeProject ), FGetActionCheckState(), FIsActionButtonVisible::CreateStatic( &FMainFrameActionCallbacks::CanOpenIDE ) );
+	UI_COMMAND(OpenIDE, "Open IDE", "Opens your C++ code in an integrated development environment.", EUserInterfaceActionType::Button, FInputChord());
+	ActionList->MapAction(OpenIDE, FExecuteAction::CreateStatic(&FMainFrameActionCallbacks::OpenIDE), FCanExecuteAction::CreateStatic(&FMainFrameActionCallbacks::CanOpenIDE), FGetActionCheckState(), FIsActionButtonVisible::CreateStatic(&FMainFrameActionCallbacks::IsOpenIDEVisible));
 
-	UI_COMMAND( ZipUpProject, "Zip Up Project", "Zips up the project into a zip file.", EUserInterfaceActionType::Button, FInputChord() );
+	UI_COMMAND( ZipUpProject, "Zip Project", "Zips the project into a zip file.", EUserInterfaceActionType::Button, FInputChord() );
 	ActionList->MapAction(ZipUpProject, FExecuteAction::CreateStatic( &FMainFrameActionCallbacks::ZipUpProject ), DefaultExecuteAction);
-
-	UI_COMMAND( PackagingSettings, "Packaging Settings...", "Opens the settings for project packaging", EUserInterfaceActionType::Button, FInputChord() );
-	ActionList->MapAction( PackagingSettings, FExecuteAction::CreateStatic( &FMainFrameActionCallbacks::PackagingSettings ), DefaultExecuteAction );
 
 	//UI_COMMAND( LocalizeProject, "Localize Project...", "Opens the dashboard for managing project localization data.", EUserInterfaceActionType::Button, FInputChord() );
 	//ActionList->MapAction( LocalizeProject, FExecuteAction::CreateStatic( &FMainFrameActionCallbacks::LocalizeProject ), DefaultExecuteAction );
@@ -174,35 +184,50 @@ void FMainFrameCommands::RegisterCommands()
 												FCanExecuteAction(),
 												FIsActionChecked::CreateStatic( &FMainFrameActionCallbacks::OpenSlateApp_IsChecked, FName("SessionFrontend" ) ) );
 
-	UI_COMMAND(VisitOnlineLearning, "Online Learning...", "Learn Unreal Engine for free with easy-to-follow video courses and guided learning paths.", EUserInterfaceActionType::Button, FInputChord());
+	UI_COMMAND(OpenMarketplace, "Open Marketplace", "Opens the Marketplace", EUserInterfaceActionType::Button, FInputChord());
+	ActionList->MapAction(OpenMarketplace, FExecuteAction::CreateStatic(&FMainFrameActionCallbacks::OpenMarketplace));
+
+	UI_COMMAND(DocumentationHome, "Documentation Home", "Authoritative, in-depth technical resources for using Unreal Engine", EUserInterfaceActionType::Button, FInputChord());
+	ActionList->MapAction(DocumentationHome, FExecuteAction::CreateStatic(&FMainFrameActionCallbacks::DocumentationHome));
+
+	UI_COMMAND(BrowseAPIReference, "C++ API Reference", "Classes, functions, and other elements that make up the C++ API", EUserInterfaceActionType::Button, FInputChord());
+	ActionList->MapAction(BrowseAPIReference, FExecuteAction::CreateStatic(&FMainFrameActionCallbacks::BrowseAPIReference));
+
+	UI_COMMAND(BrowseCVars, "Console Variables", "Reference companion for console variables and commands", EUserInterfaceActionType::Button, FInputChord());
+	ActionList->MapAction(BrowseCVars, FExecuteAction::CreateStatic(&FMainFrameActionCallbacks::BrowseCVars));
+
+	UI_COMMAND(VisitCommunityHome, "Dev Community", "Join the worldwide community of Unreal developers and explore all the resources it has to offer", EUserInterfaceActionType::Button, FInputChord());
+	ActionList->MapAction(VisitCommunityHome, FExecuteAction::CreateStatic(&FMainFrameActionCallbacks::VisitCommunityHome));
+
+	UI_COMMAND(VisitOnlineLearning, "Learning Library", "Learn Unreal Engine for free with easy-to-follow video courses and guided learning paths", EUserInterfaceActionType::Button, FInputChord());
 	ActionList->MapAction(VisitOnlineLearning, FExecuteAction::CreateStatic(&FMainFrameActionCallbacks::VisitOnlineLearning));
 
-	UI_COMMAND(VisitForums, "Forums...", "Go to the Unreal Engine forums to view announcements and engage in discussions with other developers.", EUserInterfaceActionType::Button, FInputChord());
+	UI_COMMAND(VisitForums, "Forums", "View announcements and engage in discussions with other developers", EUserInterfaceActionType::Button, FInputChord());
 	ActionList->MapAction(VisitForums, FExecuteAction::CreateStatic(&FMainFrameActionCallbacks::VisitForums));
 
-	UI_COMMAND(ReportABug, "Report a Bug...", "Found a bug?  Go here to fill out a bug report", EUserInterfaceActionType::Button, FInputChord());
+	UI_COMMAND(VisitSearchForAnswersPage, "Q&A", "Search for answers, ask questions, and share your knowledge with other developers", EUserInterfaceActionType::Button, FInputChord());
+	ActionList->MapAction(VisitSearchForAnswersPage, FExecuteAction::CreateStatic(&FMainFrameActionCallbacks::VisitSearchForAnswersPage));
+
+	UI_COMMAND(VisitCommunitySnippets, "Snippets", "Access and share ready-to-use code blocks and scripts", EUserInterfaceActionType::Button, FInputChord());
+	ActionList->MapAction(VisitCommunitySnippets, FExecuteAction::CreateStatic(&FMainFrameActionCallbacks::VisitCommunitySnippets));
+
+	UI_COMMAND(VisitSupportWebSite, "Support", "Options for personalized technical support", EUserInterfaceActionType::Button, FInputChord());
+	ActionList->MapAction(VisitSupportWebSite, FExecuteAction::CreateStatic(&FMainFrameActionCallbacks::VisitSupportWebSite));
+
+	UI_COMMAND(ReportABug, "Report a Bug", "Found a bug? Let us know about it", EUserInterfaceActionType::Button, FInputChord());
 	ActionList->MapAction(ReportABug, FExecuteAction::CreateStatic(&FMainFrameActionCallbacks::ReportABug));
 
-	UI_COMMAND(OpenIssueTracker, "Issue Tracker", "Go here to view the Unreal Engine bug tracking website", EUserInterfaceActionType::Button, FInputChord());
+	UI_COMMAND(OpenIssueTracker, "Issue Tracker", "Check the current status of public bugs and other issues", EUserInterfaceActionType::Button, FInputChord());
 	ActionList->MapAction(OpenIssueTracker, FExecuteAction::CreateStatic(&FMainFrameActionCallbacks::OpenIssueTracker));
 
-	UI_COMMAND( VisitAskAQuestionPage, "Ask a Question...", "Have a question?  Go here to ask about anything and everything related to Unreal.", EUserInterfaceActionType::Button, FInputChord() );
-	ActionList->MapAction( VisitAskAQuestionPage, FExecuteAction::CreateStatic( &FMainFrameActionCallbacks::VisitAskAQuestionPage ) );
-
-	UI_COMMAND( VisitSearchForAnswersPage, "Answer Hub...", "Go to the AnswerHub to ask questions, search existing answers, and share your knowledge with other UE4 developers.", EUserInterfaceActionType::Button, FInputChord() );
-	ActionList->MapAction( VisitSearchForAnswersPage, FExecuteAction::CreateStatic( &FMainFrameActionCallbacks::VisitSearchForAnswersPage ) );
-
-	UI_COMMAND( VisitSupportWebSite, "Support...", "Navigates to the Unreal Engine Support web site's main page.", EUserInterfaceActionType::Button, FInputChord() );
-	ActionList->MapAction( VisitSupportWebSite, FExecuteAction::CreateStatic( &FMainFrameActionCallbacks::VisitSupportWebSite ) );
-
-	UI_COMMAND( VisitEpicGamesDotCom, "Visit UnrealEngine.com...", "Navigates to UnrealEngine.com where you can learn more about Unreal Technology.", EUserInterfaceActionType::Button, FInputChord() );
-	ActionList->MapAction( VisitEpicGamesDotCom, FExecuteAction::CreateStatic( &FMainFrameActionCallbacks::VisitEpicGamesDotCom ) );
-
-	UI_COMMAND( AboutUnrealEd, "About Editor...", "Displays application credits and copyright information", EUserInterfaceActionType::Button, FInputChord() );
+	UI_COMMAND( AboutUnrealEd, "About Unreal Editor", "Version and copyright information", EUserInterfaceActionType::Button, FInputChord() );
 	ActionList->MapAction( AboutUnrealEd, FExecuteAction::CreateStatic( &FMainFrameActionCallbacks::AboutUnrealEd_Execute ) );
 
-	UI_COMMAND( CreditsUnrealEd, "Credits", "Displays application credits", EUserInterfaceActionType::Button, FInputChord() );
+	UI_COMMAND( CreditsUnrealEd, "Credits", "Contributors to this version of Unreal Engine", EUserInterfaceActionType::Button, FInputChord() );
 	ActionList->MapAction( CreditsUnrealEd, FExecuteAction::CreateStatic(&FMainFrameActionCallbacks::CreditsUnrealEd_Execute) );
+
+	UI_COMMAND(VisitEpicGamesDotCom, "Visit UnrealEngine.com", "Learn more about Unreal technology", EUserInterfaceActionType::Button, FInputChord());
+	ActionList->MapAction(VisitEpicGamesDotCom, FExecuteAction::CreateStatic(&FMainFrameActionCallbacks::VisitEpicGamesDotCom));
 
 	// Layout commands
 	UI_COMMAND(ImportLayout, "Import Layout...", "Import a custom layout (or set of layouts) from a different directory and load it into your current instance of the Unreal Editor UI", EUserInterfaceActionType::Button, FInputChord());
@@ -268,23 +293,27 @@ void FMainFrameActionCallbacks::ChoosePackagesToSave()
 	const bool bClosingEditor = false;
 	const bool bNotifyNoPackagesSaved = true;
 	const bool bCanBeDeclined = false;
-	FEditorFileUtils::SaveDirtyPackages( bPromptUserToSave, bSaveMapPackages, bSaveContentPackages, bFastSave, bNotifyNoPackagesSaved, bCanBeDeclined );
+
+	// Skip because user will be prompted to select the packages to save, so we don't want the parent package save actually saving an unselected external package
+	const bool bSkipExternalObjectSave = true;
+		
+	FEditorFileUtils::SaveDirtyPackages( bPromptUserToSave, bSaveMapPackages, bSaveContentPackages, bFastSave, bNotifyNoPackagesSaved, bCanBeDeclined, nullptr, FEditorFileUtils::FShouldIgnorePackage::Default, bSkipExternalObjectSave);
 }
 
-void FMainFrameActionCallbacks::ChoosePackagesToCheckIn()
+void FMainFrameActionCallbacks::ViewChangelists()
 {
-	FSourceControlWindows::ChoosePackagesToCheckIn();
+	ISourceControlWindowsModule::Get().ShowChangelistsTab();
 }
 
-bool FMainFrameActionCallbacks::CanChoosePackagesToCheckIn()
+bool FMainFrameActionCallbacks::CanViewChangelists()
 {
-	return FSourceControlWindows::CanChoosePackagesToCheckIn();
+	return ISourceControlWindowsModule::Get().CanShowChangelistsTab();
 }
 
 void FMainFrameActionCallbacks::ConnectToSourceControl()
 {
 	ELoginWindowMode::Type Mode = !FSlateApplication::Get().GetActiveModalWindow().IsValid() ? ELoginWindowMode::Modeless : ELoginWindowMode::Modal;
-	ISourceControlModule::Get().ShowLoginDialog(FSourceControlLoginClosed(), Mode);
+	ISourceControlModule::Get().ShowLoginDialog(FSourceControlLoginClosed(), Mode, EOnLoginWindowStartup::PreserveProvider);
 }
 
 bool FMainFrameActionCallbacks::CanSaveWorld()
@@ -303,14 +332,17 @@ void FMainFrameActionCallbacks::SaveAll()
 	FEditorFileUtils::SaveDirtyPackages( bPromptUserToSave, bSaveMapPackages, bSaveContentPackages, bFastSave, bNotifyNoPackagesSaved, bCanBeDeclined );
 }
 
-TArray<FString> FMainFrameActionCallbacks::ProjectNames;
+TArray<FRecentProjectFile> FMainFrameActionCallbacks::RecentProjects;
 
 void FMainFrameActionCallbacks::CacheProjectNames()
 {
-	ProjectNames.Empty();
-
 	// The switch project menu is filled with recently opened project files
-	ProjectNames = GetDefault<UEditorSettings>()->RecentlyOpenedProjectFiles;
+	RecentProjects = GetDefault<UEditorSettings>()->RecentlyOpenedProjectFiles;
+}
+
+void FMainFrameActionCallbacks::OpenMarketplace()
+{
+	FUnrealEdMisc::Get().OpenMarketplace();
 }
 
 void FMainFrameActionCallbacks::NewProject( bool bAllowProjectOpening, bool bAllowProjectCreate )
@@ -359,513 +391,14 @@ void FMainFrameActionCallbacks::AddCodeToProject()
 	FGameProjectGenerationModule::Get().OpenAddCodeToProjectDialog();
 }
 
-/**
- * Gets compilation flags for UAT for this system.
- */
-const TCHAR* GetUATCompilationFlags()
+bool FMainFrameActionCallbacks::CanAddCodeToProject()
 {
-	// We never want to compile editor targets when invoking UAT in this context.
-	// If we are installed or don't have a compiler, we must assume we have a precompiled UAT.
-	return TEXT("-nocompileeditor");
+	return IsCPPAllowed();
 }
 
-FString GetCookingOptionalParams()
+bool FMainFrameActionCallbacks::IsAddCodeToProjectVisible()
 {
-	FString OptionalParams;
-	const UProjectPackagingSettings* const PackagingSettings = GetDefault<UProjectPackagingSettings>();
-	
-	if (PackagingSettings->bSkipEditorContent)
-	{
-		OptionalParams += TEXT(" -SkipCookingEditorContent");
-	}
-
-	if (FDerivedDataCacheInterface* DDC = GetDerivedDataCache())
-	{
-		OptionalParams += FString::Printf(TEXT(" -ddc=%s"), DDC->GetGraphName());
-	}
-
-	return OptionalParams;
-}
-
-
-void FMainFrameActionCallbacks::CookContent(const FName InPlatformInfoName)
-{
-	const PlatformInfo::FPlatformInfo* const PlatformInfo = PlatformInfo::FindPlatformInfo(InPlatformInfoName);
-	check(PlatformInfo);
-
-	if (FInstalledPlatformInfo::Get().IsPlatformMissingRequiredFile(PlatformInfo->BinaryFolderName))
-	{
-		if (!FInstalledPlatformInfo::OpenInstallerOptions())
-		{
-			FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("MissingPlatformFilesCook", "Missing required files to cook for this platform."));
-		}
-		return;
-	}
-
-	FString OptionalParams;
-
-	if (!FModuleManager::LoadModuleChecked<IProjectTargetPlatformEditorModule>("ProjectTargetPlatformEditor").ShowUnsupportedTargetWarning(PlatformInfo->VanillaPlatformName))
-	{
-		return;
-	}
-
-	if (PlatformInfo->SDKStatus == PlatformInfo::EPlatformSDKStatus::NotInstalled)
-	{
-		IMainFrameModule& MainFrameModule = FModuleManager::GetModuleChecked<IMainFrameModule>(TEXT("MainFrame"));
-		MainFrameModule.BroadcastMainFrameSDKNotInstalled(PlatformInfo->TargetPlatformName.ToString(), PlatformInfo->SDKTutorial);
-		return;
-	}
-
-	// Append any extra UAT flags specified for this platform flavor
-	if (!PlatformInfo->UATCommandLine.IsEmpty())
-	{
-		OptionalParams += TEXT(" ");
-		OptionalParams += PlatformInfo->UATCommandLine;
-	}
-	else
-	{
-		OptionalParams += TEXT(" -targetplatform=");
-		OptionalParams += *PlatformInfo->TargetPlatformName.ToString();
-	}
-
-	OptionalParams += GetCookingOptionalParams();
-
-	UCookerSettings const* CookerSettings = GetDefault<UCookerSettings>();
-	if (CookerSettings->bIterativeCookingForFileCookContent)
-	{
-		OptionalParams += TEXT(" -iterate");
-	}
-
-	FString ProjectPath = FPaths::IsProjectFilePathSet() ? FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath()) : FPaths::RootDir() / FApp::GetProjectName() / FApp::GetProjectName() + TEXT(".uproject");
-	FString CommandLine = FString::Printf(TEXT("-ScriptsForProject=\"%s\" BuildCookRun %s%s -nop4 -project=\"%s\" -cook -skipstage -ue4exe=\"%s\" %s -utf8output"),
-		*ProjectPath,
-		GetUATCompilationFlags(),
-		FApp::IsEngineInstalled() ? TEXT(" -installed") : TEXT(""),
-		*ProjectPath,
-		*FUnrealEdMisc::Get().GetExecutableForCommandlets(),
-		*OptionalParams
-	);
-	
-	IUATHelperModule::Get().CreateUatTask(CommandLine, PlatformInfo->DisplayName, LOCTEXT("CookingContentTaskName", "Cooking content"), LOCTEXT("CookingTaskName", "Cooking"), FEditorStyle::GetBrush(TEXT("MainFrame.CookContent")));
-}
-
-bool FMainFrameActionCallbacks::CookContentCanExecute( const FName PlatformInfoName )
-{
-	return true;
-}
-
-void FMainFrameActionCallbacks::PackageBuildConfiguration( EProjectPackagingBuildConfigurations BuildConfiguration )
-{
-	UProjectPackagingSettings* PackagingSettings = Cast<UProjectPackagingSettings>(UProjectPackagingSettings::StaticClass()->GetDefaultObject());
-	PackagingSettings->BuildConfiguration = BuildConfiguration;
-}
-
-bool FMainFrameActionCallbacks::CanPackageBuildConfiguration( EProjectPackagingBuildConfigurations BuildConfiguration )
-{
-	return true;
-}
-
-bool FMainFrameActionCallbacks::PackageBuildConfigurationIsChecked( EProjectPackagingBuildConfigurations BuildConfiguration )
-{
-	return (GetDefault<UProjectPackagingSettings>()->BuildConfiguration == BuildConfiguration);
-}
-
-void FMainFrameActionCallbacks::PackageBuildTarget( FString TargetName )
-{
-	UProjectPackagingSettings* PackagingSettings = GetMutableDefault<UProjectPackagingSettings>();
-	PackagingSettings->BuildTarget = TargetName;
-}
-
-bool FMainFrameActionCallbacks::PackageBuildTargetIsChecked( FString TargetName )
-{
-	const FTargetInfo* Target = GetDefault<UProjectPackagingSettings>()->GetBuildTargetInfo();
-	return (Target != nullptr && Target->Name == TargetName);
-}
-
-void FMainFrameActionCallbacks::PackageProject( const FName InPlatformInfoName )
-{
-	GUnrealEd->CancelPlayingViaLauncher();
-	SaveAll();
-
-	// does the project have any code?
-	FGameProjectGenerationModule& GameProjectModule = FModuleManager::LoadModuleChecked<FGameProjectGenerationModule>(TEXT("GameProjectGeneration"));
-	bool bProjectHasCode = GameProjectModule.Get().ProjectHasCodeFiles();
-	
-	const PlatformInfo::FPlatformInfo* const PlatformInfo = PlatformInfo::FindPlatformInfo(InPlatformInfoName);
-	check(PlatformInfo);
-
-	if (FInstalledPlatformInfo::Get().IsPlatformMissingRequiredFile(PlatformInfo->BinaryFolderName))
-	{
-		if (!FInstalledPlatformInfo::OpenInstallerOptions())
-		{
-			FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("MissingPlatformFilesPackage", "Missing required files to package this platform."));
-		}
-		return;
-	}
-
-	if (UGameMapsSettings::GetGameDefaultMap().IsEmpty())
-	{
-		FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("MissingGameDefaultMap", "No Game Default Map specified in Project Settings > Maps & Modes."));
-		return;
-	}
-
-	if (PlatformInfo->SDKStatus == PlatformInfo::EPlatformSDKStatus::NotInstalled || (bProjectHasCode && PlatformInfo->bUsesHostCompiler && !FSourceCodeNavigation::IsCompilerAvailable()))
-	{
-		IMainFrameModule& MainFrameModule = FModuleManager::GetModuleChecked<IMainFrameModule>(TEXT("MainFrame"));
-		MainFrameModule.BroadcastMainFrameSDKNotInstalled(PlatformInfo->TargetPlatformName.ToString(), PlatformInfo->SDKTutorial);
-		TArray<FAnalyticsEventAttribute> ParamArray;
-		ParamArray.Add(FAnalyticsEventAttribute(TEXT("Time"), 0.0));
-		FEditorAnalytics::ReportEvent(TEXT("Editor.Package.Failed"), PlatformInfo->TargetPlatformName.ToString(), bProjectHasCode, EAnalyticsErrorCodes::SDKNotFound, ParamArray);
-		return;
-	}
-
-	UProjectPackagingSettings* PackagingSettings = Cast<UProjectPackagingSettings>(UProjectPackagingSettings::StaticClass()->GetDefaultObject());
-	const UProjectPackagingSettings::FConfigurationInfo& ConfigurationInfo = UProjectPackagingSettings::ConfigurationInfo[PackagingSettings->BuildConfiguration];
-	bool bAssetNativizationEnabled = (PackagingSettings->BlueprintNativizationMethod != EProjectPackagingBlueprintNativizationMethod::Disabled);
-
-	const ITargetPlatform* const Platform = GetTargetPlatformManager()->FindTargetPlatform(PlatformInfo->TargetPlatformName.ToString());
-	{
-		if (Platform)
-		{
-			FString NotInstalledTutorialLink;
-			FString DocumentationLink;
-			FText CustomizedLogMessage;
-
-			int32 Result = Platform->CheckRequirements(bProjectHasCode, ConfigurationInfo.Configuration, bAssetNativizationEnabled, NotInstalledTutorialLink, DocumentationLink, CustomizedLogMessage);
-
-			// report to analytics
-			FEditorAnalytics::ReportBuildRequirementsFailure(TEXT("Editor.Package.Failed"), PlatformInfo->TargetPlatformName.ToString(), bProjectHasCode, Result);
-
-			// report to main frame
-			bool UnrecoverableError = false;
-
-			// report to message log
-			if ((Result & ETargetPlatformReadyStatus::SDKNotFound) != 0)
-			{
-				AddMessageLog(
-					LOCTEXT("SdkNotFoundMessage", "Software Development Kit (SDK) not found."),
-					CustomizedLogMessage.IsEmpty() ? FText::Format(LOCTEXT("SdkNotFoundMessageDetail", "Please install the SDK for the {0} target platform!"), Platform->DisplayName()) : CustomizedLogMessage,
-					NotInstalledTutorialLink,
-					DocumentationLink
-				);
-				UnrecoverableError = true;
-			}
-
-			if ((Result & ETargetPlatformReadyStatus::LicenseNotAccepted) != 0)
-			{
-				AddMessageLog(
-					LOCTEXT("LicenseNotAcceptedMessage", "License not accepted."),
-					CustomizedLogMessage.IsEmpty() ? LOCTEXT("LicenseNotAcceptedMessageDetail", "License must be accepted in project settings to deploy your app to the device.") : CustomizedLogMessage,
-					NotInstalledTutorialLink,
-					DocumentationLink
-				);
-
-				UnrecoverableError = true;
-			}
-
-			if ((Result & ETargetPlatformReadyStatus::ProvisionNotFound) != 0)
-			{
-				AddMessageLog(
-					LOCTEXT("ProvisionNotFoundMessage", "Provision not found."),
-					CustomizedLogMessage.IsEmpty() ? LOCTEXT("ProvisionNotFoundMessageDetail", "A provision is required for deploying your app to the device.") : CustomizedLogMessage,
-					NotInstalledTutorialLink,
-					DocumentationLink
-				);
-				UnrecoverableError = true;
-			}
-
-			if ((Result & ETargetPlatformReadyStatus::SigningKeyNotFound) != 0)
-			{
-				AddMessageLog(
-					LOCTEXT("SigningKeyNotFoundMessage", "Signing key not found."),
-					CustomizedLogMessage.IsEmpty() ? LOCTEXT("SigningKeyNotFoundMessageDetail", "The app could not be digitally signed, because the signing key is not configured.") : CustomizedLogMessage,
-					NotInstalledTutorialLink,
-					DocumentationLink
-				);
-				UnrecoverableError = true;
-			}
-
-			if ((Result & ETargetPlatformReadyStatus::ManifestNotFound) != 0)
-			{
-				AddMessageLog(
-					LOCTEXT("ManifestNotFound", "Manifest not found."),
-					CustomizedLogMessage.IsEmpty() ? LOCTEXT("ManifestNotFoundMessageDetail", "The generated application manifest could not be found.") : CustomizedLogMessage,
-					NotInstalledTutorialLink,
-					DocumentationLink
-				);
-				UnrecoverableError = true;
-			}
-
-			if ((Result & ETargetPlatformReadyStatus::RemoveServerNameEmpty) != 0
-					&& (bProjectHasCode || (Result & ETargetPlatformReadyStatus::CodeBuildRequired)
-						|| (!FApp::GetEngineIsPromotedBuild() && !FApp::IsEngineInstalled())))
-			{
-				AddMessageLog(
-					LOCTEXT("RemoveServerNameNotFound", "Remote compiling requires a server name. "),
-					CustomizedLogMessage.IsEmpty() ? LOCTEXT("RemoveServerNameNotFoundDetail", "Please specify one in the Remote Server Name settings field.") : CustomizedLogMessage,
-					NotInstalledTutorialLink,
-					DocumentationLink
-				);
-				UnrecoverableError = true;
-			}
-
-			if ((Result & ETargetPlatformReadyStatus::CodeUnsupported) != 0)
-			{
-				FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("NotSupported_SelectedPlatform", "Sorry, packaging a code-based project for the selected platform is currently not supported. This feature may be available in a future release."));
-				UnrecoverableError = true;
-			}
-			else if ((Result & ETargetPlatformReadyStatus::PluginsUnsupported) != 0)
-			{
-				FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("NotSupported_ThirdPartyPlugins", "Sorry, packaging a project with third-party plugins is currently not supported for the selected platform. This feature may be available in a future release."));
-				UnrecoverableError = true;
-			}
-
-			if (UnrecoverableError)
-			{
-				return;
-			}
-		}
-	}
-
-	if (!FModuleManager::LoadModuleChecked<IProjectTargetPlatformEditorModule>("ProjectTargetPlatformEditor").ShowUnsupportedTargetWarning(PlatformInfo->VanillaPlatformName))
-	{
-		return;
-	}
-
-	// let the user pick a target directory
-	if (PackagingSettings->StagingDirectory.Path.IsEmpty())
-	{
-		PackagingSettings->StagingDirectory.Path = FPaths::ProjectDir();
-	}
-
-	FString OutFolderName;
-
-	void* ParentWindowWindowHandle = nullptr;
-	IMainFrameModule& MainFrameModule = FModuleManager::LoadModuleChecked<IMainFrameModule>(TEXT("MainFrame"));
-	const TSharedPtr<SWindow>& MainFrameParentWindow = MainFrameModule.GetParentWindow();
-	if ( MainFrameParentWindow.IsValid() && MainFrameParentWindow->GetNativeWindow().IsValid() )
-	{
-		ParentWindowWindowHandle = MainFrameParentWindow->GetNativeWindow()->GetOSWindowHandle();
-	}
-	
-	if (!FDesktopPlatformModule::Get()->OpenDirectoryDialog(ParentWindowWindowHandle, LOCTEXT("PackageDirectoryDialogTitle", "Package project...").ToString(), PackagingSettings->StagingDirectory.Path, OutFolderName))
-	{
-		return;
-	}
-
-	PackagingSettings->StagingDirectory.Path = OutFolderName;
-	PackagingSettings->SaveConfig();
-
-	// create the packager process
-	FString OptionalParams;
-	
-	if (PackagingSettings->FullRebuild)
-	{
-		OptionalParams += TEXT(" -clean");
-	}
-
-	if ( PackagingSettings->bCompressed )
-	{
-		OptionalParams += TEXT(" -compressed");
-	}
-
-	OptionalParams += GetCookingOptionalParams();
-
-	if (PackagingSettings->bUseIoStore)
-	{
-		OptionalParams += TEXT(" -iostore");
-
-		// Pak file(s) must be used when using container file(s)
-		PackagingSettings->UsePakFile = true;
-	}
-
-	if (PackagingSettings->UsePakFile)
-	{
-		OptionalParams += TEXT(" -pak");
-	}
-
-	if (PackagingSettings->bUseIoStore)
-	{
-		OptionalParams += TEXT(" -iostore");
-	}
-
-	if (PackagingSettings->bMakeBinaryConfig)
-	{
-		OptionalParams += TEXT(" -makebinaryconfig");
-	}
-
-	if (PackagingSettings->IncludePrerequisites)
-	{
-		OptionalParams += TEXT(" -prereqs");
-	}
-
-	if (!PackagingSettings->ApplocalPrerequisitesDirectory.Path.IsEmpty())
-	{
-		OptionalParams += FString::Printf(TEXT(" -applocaldirectory=\"%s\""), *(PackagingSettings->ApplocalPrerequisitesDirectory.Path));
-	}
-	else if (PackagingSettings->IncludeAppLocalPrerequisites)
-	{
-		OptionalParams += TEXT(" -applocaldirectory=\"$(EngineDir)/Binaries/ThirdParty/AppLocalDependencies\"");
-	}
-
-	if (PackagingSettings->ForDistribution)
-	{
-		OptionalParams += TEXT(" -distribution");
-	}
-
-	if (!PackagingSettings->IncludeDebugFiles)
-	{
-		OptionalParams += TEXT(" -nodebuginfo");
-	}
-
-	if (PackagingSettings->bGenerateChunks)
-	{
-		OptionalParams += TEXT(" -manifests");
-	}
-
-	bool bTargetPlatformCanUseCrashReporter = PlatformInfo->bTargetPlatformCanUseCrashReporter;
-	if (bTargetPlatformCanUseCrashReporter && PlatformInfo->TargetPlatformName == FName("WindowsNoEditor") && PlatformInfo->PlatformFlavor == TEXT("Win32"))
-	{
-		FString MinumumSupportedWindowsOS;
-		GConfig->GetString(TEXT("/Script/WindowsTargetPlatform.WindowsTargetSettings"), TEXT("MinimumOSVersion"), MinumumSupportedWindowsOS, GEngineIni);
-		if (MinumumSupportedWindowsOS == TEXT("MSOS_XP"))
-		{
-			OptionalParams += TEXT(" -SpecifiedArchitecture=_xp");
-			bTargetPlatformCanUseCrashReporter = false;
-		}
-	}
-
-	// Append any extra UAT flags specified for this platform flavor
-	if (!PlatformInfo->UATCommandLine.IsEmpty())
-	{
-		OptionalParams += TEXT(" ");
-		OptionalParams += PlatformInfo->UATCommandLine;
-	}
-	else
-	{
-		OptionalParams += TEXT(" -targetplatform=");
-		OptionalParams += *PlatformInfo->TargetPlatformName.ToString();
-	}
-
-	// Get the target to build
-	const FTargetInfo* Target = PackagingSettings->GetBuildTargetInfo();
-
-	// Only build if the user elects to do so
-	bool bBuild = false;
-	if(PackagingSettings->Build == EProjectPackagingBuild::Always)
-	{
-		bBuild = true;
-	}
-	else if(PackagingSettings->Build == EProjectPackagingBuild::Never)
-	{
-		bBuild = false;
-	}
-	else if(PackagingSettings->Build == EProjectPackagingBuild::IfProjectHasCode)
-	{
-		bBuild = true;
-		if (FApp::GetEngineIsPromotedBuild() && !bAssetNativizationEnabled)
-		{
-			FString BaseDir;
-
-			// Get the target name
-			FString TargetName;
-			if (Target == nullptr)
-			{
-				TargetName = TEXT("UE4Game");
-			}
-			else
-			{
-				TargetName = Target->Name;
-			}
-
-			// Get the directory containing the receipt for this target, depending on whether the project needs to be built or not
-			FString ProjectDir = FPaths::GetPath(FPaths::GetProjectFilePath());
-			if (Target != nullptr && FPaths::IsUnderDirectory(Target->Path, ProjectDir))
-			{
-				UE_LOG(LogMainFrame, Log, TEXT("Selected target: %s"), *Target->Name);
-				BaseDir = ProjectDir;
-			}
-			else
-			{
-				FText Reason;
-				if (Platform->RequiresTempTarget(bProjectHasCode, ConfigurationInfo.Configuration, false, Reason))
-				{
-					UE_LOG(LogMainFrame, Log, TEXT("Project requires temp target (%s)"), *Reason.ToString());
-					BaseDir = ProjectDir;
-				}
-				else
-				{
-					UE_LOG(LogMainFrame, Log, TEXT("Project does not require temp target"));
-					BaseDir = FPaths::EngineDir();
-				}
-			}
-
-			// Check if the receipt is for a matching promoted target
-			FString PlatformName = Platform->GetPlatformInfo().UBTTargetId.ToString();
-
-			extern LAUNCHERSERVICES_API bool HasPromotedTarget(const TCHAR* BaseDir, const TCHAR* TargetName, const TCHAR* Platform, EBuildConfiguration Configuration, const TCHAR* Architecture);
-			if (HasPromotedTarget(*BaseDir, *TargetName, *PlatformName, ConfigurationInfo.Configuration, nullptr))
-			{
-				bBuild = false;
-			}
-		}
-	}
-	else if(PackagingSettings->Build == EProjectPackagingBuild::IfEditorWasBuiltLocally)
-	{
-		bBuild = !FApp::GetEngineIsPromotedBuild();
-	}
-	if(bBuild)
-	{
-		OptionalParams += TEXT(" -build");
-	}
-
-	// Whether to include the crash reporter.
-	if (PackagingSettings->IncludeCrashReporter && bTargetPlatformCanUseCrashReporter)
-	{
-		OptionalParams += TEXT( " -CrashReporter" );
-	}
-
-	if (PackagingSettings->bBuildHttpChunkInstallData)
-	{
-		OptionalParams += FString::Printf(TEXT(" -manifests -createchunkinstall -chunkinstalldirectory=\"%s\" -chunkinstallversion=%s"), *(PackagingSettings->HttpChunkInstallDataDirectory.Path), *(PackagingSettings->HttpChunkInstallDataVersion));
-	}
-
-	int32 NumCookers = GetDefault<UEditorExperimentalSettings>()->MultiProcessCooking;
-	if (NumCookers > 0 )
-	{
-		OptionalParams += FString::Printf(TEXT(" -NumCookersToSpawn=%d"), NumCookers); 
-	}
-
-	if (Target == nullptr)
-	{
-		OptionalParams += FString::Printf(TEXT(" -clientconfig=%s"), LexToString(ConfigurationInfo.Configuration));
-	}
-	else if(Target->Type == EBuildTargetType::Server)
-	{
-		OptionalParams += FString::Printf(TEXT(" -target=%s -serverconfig=%s"), *Target->Name, LexToString(ConfigurationInfo.Configuration));
-	}
-	else
-	{
-		OptionalParams += FString::Printf(TEXT(" -target=%s -clientconfig=%s"), *Target->Name, LexToString(ConfigurationInfo.Configuration));
-	}
-
-	FString ProjectPath = FPaths::IsProjectFilePathSet() ? FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath()) : FPaths::RootDir() / FApp::GetProjectName() / FApp::GetProjectName() + TEXT(".uproject");
-	FString CommandLine = FString::Printf(TEXT("-ScriptsForProject=\"%s\" BuildCookRun %s%s -nop4 -project=\"%s\" -cook -stage -archive -archivedirectory=\"%s\" -package -ue4exe=\"%s\" %s -utf8output"),
-		*ProjectPath,
-		GetUATCompilationFlags(),
-		FApp::IsEngineInstalled() ? TEXT(" -installed") : TEXT(""),
-		*ProjectPath,
-		*PackagingSettings->StagingDirectory.Path,
-		*FUnrealEdMisc::Get().GetExecutableForCommandlets(),
-		*OptionalParams
-	);
-
-	IUATHelperModule::Get().CreateUatTask( CommandLine, PlatformInfo->DisplayName, LOCTEXT("PackagingProjectTaskName", "Packaging project"), LOCTEXT("PackagingTaskName", "Packaging"), FEditorStyle::GetBrush(TEXT("MainFrame.PackageProject")) );
-}
-
-bool FMainFrameActionCallbacks::PackageProjectCanExecute( const FName PlatformInfoName )
-{
-	return true;
+	return IsCPPAllowed();
 }
 
 void FMainFrameActionCallbacks::RefreshCodeProject()
@@ -881,6 +414,16 @@ void FMainFrameActionCallbacks::RefreshCodeProject()
 	{
 		SOutputLogDialog::Open(LOCTEXT("RefreshProject", "Refresh Project"), FailReason, FailLog, FText::GetEmpty());
 	}
+}
+
+bool FMainFrameActionCallbacks::CanRefreshCodeProject()
+{
+	return IsCPPAllowed() && IsCodeProject();
+}
+
+bool FMainFrameActionCallbacks::IsRefreshCodeProjectVisible()
+{
+	return IsCPPAllowed();
 }
 
 bool FMainFrameActionCallbacks::IsCodeProject()
@@ -908,28 +451,28 @@ void FMainFrameActionCallbacks::OpenIDE()
 
 bool FMainFrameActionCallbacks::CanOpenIDE()
 {
-	return FSourceCodeNavigation::DoesModuleSolutionExist();
+	return IsCPPAllowed() && IsCodeProject();
+}
+
+bool FMainFrameActionCallbacks::IsOpenIDEVisible()
+{
+	return IsCPPAllowed() && FSourceCodeNavigation::DoesModuleSolutionExist();
+}
+
+bool FMainFrameActionCallbacks::IsCPPAllowed()
+{
+	return ensure(GUnrealEd) && GUnrealEd->GetUnrealEdOptions()->IsCPPAllowed();
 }
 
 void FMainFrameActionCallbacks::ZipUpProject()
 {
-#if PLATFORM_WINDOWS
-	FText PlatformName = LOCTEXT("PlatformName_Windows", "Windows");
-#elif PLATFORM_MAC
-	FText PlatformName = LOCTEXT("PlatformName_Mac", "Mac");
-#elif PLATFORM_LINUX
-	FText PlatformName = LOCTEXT("PlatformName_Linux", "Linux");
-#else
-	FText PlatformName = LOCTEXT("PlatformName_Other", "Other OS");
-#endif
-
 	bool bOpened = false;
 	TArray<FString> SaveFilenames;
 	IDesktopPlatform* DesktopPlatform = FDesktopPlatformModule::Get();
 	if (DesktopPlatform != NULL)
 	{
 		bOpened = DesktopPlatform->SaveFileDialog(
-			NULL,
+			FSlateApplication::Get().FindBestParentWindowHandleForDialogs(nullptr),
 			NSLOCTEXT("UnrealEd", "ZipUpProject", "Zip file location").ToString(),
 			FPaths::ProjectDir(),
 			FApp::GetProjectName(),
@@ -946,35 +489,25 @@ void FMainFrameActionCallbacks::ZipUpProject()
 			FString FinalFileName = FPaths::ConvertRelativePathToFull(FileName);
 			FString ProjectPath = FPaths::IsProjectFilePathSet() ? FPaths::ConvertRelativePathToFull(FPaths::ProjectDir()) : FPaths::RootDir() / FApp::GetProjectName();
 
-			FString CommandLine = FString::Printf(TEXT("ZipProjectUp %s -project=\"%s\" -install=\"%s\""), GetUATCompilationFlags(), *ProjectPath, *FinalFileName);
+			FString CommandLine = FString::Printf(TEXT("ZipProjectUp -nocompileeditor -project=\"%s\" -install=\"%s\""), *ProjectPath, *FinalFileName);
 
-			IUATHelperModule::Get().CreateUatTask( CommandLine, PlatformName, LOCTEXT("ZipTaskName", "Zipping Up Project"),
-				LOCTEXT("ZipTaskShortName", "Zip Project Task"), FEditorStyle::GetBrush(TEXT("MainFrame.CookContent")), IUATHelperModule::UatTaskResultCallack(), FPaths::GetPath(FinalFileName));
+			IUATHelperModule::Get().CreateUatTask( CommandLine, GetTargetPlatformManager()->GetRunningTargetPlatform()->DisplayName(), LOCTEXT("ZipTaskName", "Zipping Up Project"),
+				LOCTEXT("ZipTaskShortName", "Zip Project Task"), FAppStyle::GetBrush(TEXT("MainFrame.CookContent")), nullptr, IUATHelperModule::UatTaskResultCallack(), FPaths::GetPath(FinalFileName));
 		}
 	}
 }
 
-void FMainFrameActionCallbacks::PackagingSettings()
+void FMainFrameActionCallbacks::SwitchProjectByIndex(int32 ProjectIndex)
 {
-	FModuleManager::LoadModuleChecked<ISettingsModule>("Settings").ShowViewer("Project", "Project", "Packaging");
-}
-
-//void FMainFrameActionCallbacks::LocalizeProject()
-//{
-//	FModuleManager::LoadModuleChecked<ILocalizationDashboardModule>("LocalizationDashboard").Show();
-//}
-
-void FMainFrameActionCallbacks::SwitchProjectByIndex( int32 ProjectIndex )
-{
-	FUnrealEdMisc::Get().SwitchProject( ProjectNames[ ProjectIndex ] );
+	FUnrealEdMisc::Get().SwitchProject(RecentProjects[ProjectIndex].ProjectName);
 }
 
 void FMainFrameActionCallbacks::SwitchProject(const FString& GameOrProjectFileName)
 {
-	FUnrealEdMisc::Get().SwitchProject( GameOrProjectFileName );
+	FUnrealEdMisc::Get().SwitchProject(GameOrProjectFileName);
 }
 
-void FMainFrameActionCallbacks::OpenBackupDirectory( FString BackupFile )
+void FMainFrameActionCallbacks::OpenBackupDirectory(FString BackupFile)
 {
 	FPlatformProcess::LaunchFileInDefaultExternalApplication(*FPaths::GetPath(FPaths::ConvertRelativePathToFull(BackupFile)));
 }
@@ -1015,12 +548,12 @@ bool FMainFrameActionCallbacks::FullScreen_IsChecked()
 
 bool FMainFrameActionCallbacks::CanSwitchToProject( int32 InProjectIndex )
 {
-	if (FApp::HasProjectName() && ProjectNames[InProjectIndex].StartsWith(FApp::GetProjectName()))
+	if (FApp::HasProjectName() && RecentProjects[InProjectIndex].ProjectName.StartsWith(FApp::GetProjectName()))
 	{
 		return false;
 	}
 
-	if ( FPaths::IsProjectFilePathSet() && ProjectNames[ InProjectIndex ] == FPaths::GetProjectFilePath() )
+	if (FPaths::IsProjectFilePathSet() && RecentProjects[InProjectIndex].ProjectName == FPaths::GetProjectFilePath())
 	{
 		return false;
 	}
@@ -1096,16 +629,6 @@ void FMainFrameActionCallbacks::OpenIssueTracker()
 	}
 }
 
-void FMainFrameActionCallbacks::VisitAskAQuestionPage()
-{
-	FString AskAQuestionURL;
-	if(FUnrealEdMisc::Get().GetURL( TEXT("AskAQuestionURL"), AskAQuestionURL, true ))
-	{
-		FPlatformProcess::LaunchURL( *AskAQuestionURL, NULL, NULL );
-	}
-}
-
-
 void FMainFrameActionCallbacks::VisitSearchForAnswersPage()
 {
 	FString SearchForAnswersURL;
@@ -1114,7 +637,6 @@ void FMainFrameActionCallbacks::VisitSearchForAnswersPage()
 		FPlatformProcess::LaunchURL( *SearchForAnswersURL, NULL, NULL );
 	}
 }
-
 
 void FMainFrameActionCallbacks::VisitSupportWebSite()
 {
@@ -1125,7 +647,6 @@ void FMainFrameActionCallbacks::VisitSupportWebSite()
 	}
 }
 
-
 void FMainFrameActionCallbacks::VisitEpicGamesDotCom()
 {
 	FString EpicGamesURL;
@@ -1135,10 +656,34 @@ void FMainFrameActionCallbacks::VisitEpicGamesDotCom()
 	}
 }
 
+void FMainFrameActionCallbacks::DocumentationHome()
+{
+	IDocumentation::Get()->OpenHome(FDocumentationSourceInfo(TEXT("help_menu")));
+}
+
 void FMainFrameActionCallbacks::VisitOnlineLearning()
 {
 	FString URL;
 	if (FUnrealEdMisc::Get().GetURL(TEXT("OnlineLearningURL"), URL))
+	{
+		FPlatformProcess::LaunchURL(*URL, NULL, NULL);
+	}
+}
+
+void FMainFrameActionCallbacks::BrowseAPIReference()
+{
+	IDocumentation::Get()->OpenAPIHome(FDocumentationSourceInfo(TEXT("help_menu")));
+}
+
+void FMainFrameActionCallbacks::BrowseCVars()
+{
+	GEditor->Exec(GEditor->GetEditorWorldContext().World(), TEXT("help"));
+}
+
+void FMainFrameActionCallbacks::VisitCommunityHome()
+{
+	FString URL;
+	if (FUnrealEdMisc::Get().GetURL(TEXT("CommunityHomeURL"), URL))
 	{
 		FPlatformProcess::LaunchURL(*URL, NULL, NULL);
 	}
@@ -1153,6 +698,15 @@ void FMainFrameActionCallbacks::VisitForums()
 	}
 }
 
+void FMainFrameActionCallbacks::VisitCommunitySnippets()
+{
+	FString URL;
+	if (FUnrealEdMisc::Get().GetURL(TEXT("SnippetsURL"), URL))
+	{
+		FPlatformProcess::LaunchURL(*URL, NULL, NULL);
+	}
+}
+
 void FMainFrameActionCallbacks::AboutUnrealEd_Execute()
 {
 	const FText AboutWindowTitle = LOCTEXT( "AboutUnrealEditor", "About Unreal Editor" );
@@ -1160,7 +714,7 @@ void FMainFrameActionCallbacks::AboutUnrealEd_Execute()
 	TSharedPtr<SWindow> AboutWindow = 
 		SNew(SWindow)
 		.Title( AboutWindowTitle )
-		.ClientSize(FVector2D(600.f, 200.f))
+		.ClientSize(FVector2D(720.f, 538.f))
 		.SupportsMaximize(false) .SupportsMinimize(false)
 		.SizingRule( ESizingRule::FixedSize )
 		[

@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 using AutomationTool;
+using EpicGames.BuildGraph;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -8,10 +9,14 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Xml;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 using UnrealBuildTool;
+using UnrealBuildBase;
+using Microsoft.Extensions.Logging;
 
-namespace BuildGraph.Tasks
+using static AutomationTool.CommandUtils;
+
+namespace AutomationTool.Tasks
 {
 	/// <summary>
 	/// Parameters for the log task
@@ -41,7 +46,7 @@ namespace BuildGraph.Tasks
 	/// Print a message (and other optional diagnostic information) to the output log.
 	/// </summary>
 	[TaskElement("Log", typeof(LogTaskParameters))]
-	public class LogTask : CustomTask
+	public class LogTask : BgTaskImpl
 	{
 		/// <summary>
 		/// Parameters for the task
@@ -63,30 +68,32 @@ namespace BuildGraph.Tasks
 		/// <param name="Job">Information about the current job</param>
 		/// <param name="BuildProducts">Set of build products produced by this node.</param>
 		/// <param name="TagNameToFileSet">Mapping from tag names to the set of files they include</param>
-		public override void Execute(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
+		public override Task ExecuteAsync(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
 		{
 			// Print the message
 			if(!String.IsNullOrEmpty(Parameters.Message))
 			{
-				CommandUtils.LogInformation(Parameters.Message);
+				Logger.LogInformation("{Text}", Parameters.Message);
 			}
 
 			// Print the contents of the given tag, if specified
 			if(!String.IsNullOrEmpty(Parameters.Files))
 			{
-				HashSet<FileReference> Files = ResolveFilespec(CommandUtils.RootDirectory, Parameters.Files, TagNameToFileSet);
+				HashSet<FileReference> Files = ResolveFilespec(Unreal.RootDirectory, Parameters.Files, TagNameToFileSet);
 				foreach(FileReference File in Files.OrderBy(x => x.FullName))
 				{
-					CommandUtils.LogInformation("  {0}", File.FullName);
+					Logger.LogInformation("  {Arg0}", File.FullName);
 					if(Parameters.IncludeContents)
 					{
 						foreach(string Line in System.IO.File.ReadAllLines(File.FullName))
 						{
-							CommandUtils.LogInformation("    {0}", Line);
+							Logger.LogInformation("    {Line}", Line);
 						}
 					}
 				}
 			}
+
+			return Task.CompletedTask;
 		}
 
 		/// <summary>

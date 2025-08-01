@@ -2,48 +2,91 @@
 
 #pragma once
 
-#include "CoreTypes.h"
-#include "Misc/Exec.h"
 #include "Containers/Array.h"
-#include "Containers/UnrealString.h"
+#include "Containers/ContainerAllocationPolicies.h"
 #include "Containers/Map.h"
-#include "Templates/Function.h"
-#include "Math/IntPoint.h"
-#include "UObject/NameTypes.h"
+#include "Containers/UnrealString.h"
 #include "CoreGlobals.h"
+#include "CoreTypes.h"
+#include "HAL/PlatformProperties.h"
 #include "HAL/ThreadSingleton.h"
+#include "Logging/LogVerbosity.h"
+#include "Math/IntPoint.h"
+#include "Misc/Build.h"
+#include "Misc/Exec.h"
+#include "Templates/Function.h"
+#include "UObject/NameTypes.h"
+
+class FOutputDevice;
+class UWorld;
 
 /**
  * Exec handler that registers itself and is being routed via StaticExec.
  * Note: Not intended for use with UObjects!
  */
-class CORE_API FSelfRegisteringExec : public FExec
+class FSelfRegisteringExec : public FExec
 {
 public:
 	/** Constructor, registering this instance. */
-	FSelfRegisteringExec();
+	CORE_API FSelfRegisteringExec();
 	/** Destructor, unregistering this instance. */
-	virtual ~FSelfRegisteringExec();
+	CORE_API virtual ~FSelfRegisteringExec();
 
 	/** Routes a command to the self-registered execs. */
-	static bool StaticExec( UWorld* Inworld, const TCHAR* Cmd, FOutputDevice& Ar );
+	static CORE_API bool StaticExec( UWorld* Inworld, const TCHAR* Cmd, FOutputDevice& Ar );
 };
 
 /** Registers a static Exec function using FSelfRegisteringExec. */
-class CORE_API FStaticSelfRegisteringExec : public FSelfRegisteringExec
+class FStaticSelfRegisteringExec : public FSelfRegisteringExec
 {
 public:
 
 	/** Initialization constructor. */
-	FStaticSelfRegisteringExec(bool (*InStaticExecFunc)(UWorld* Inworld, const TCHAR* Cmd,FOutputDevice& Ar));
+	CORE_API FStaticSelfRegisteringExec(bool (*InStaticExecFunc)(UWorld* Inworld, const TCHAR* Cmd,FOutputDevice& Ar));
 
 	//~ Begin Exec Interface
-	virtual bool Exec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar );
+#if UE_ALLOW_EXEC_COMMANDS
+	CORE_API virtual bool Exec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar ) override;
+#endif
 	//~ End Exec Interface
 
 private:
 
 	bool (*StaticExecFunc)(UWorld* Inworld, const TCHAR* Cmd,FOutputDevice& Ar);
+};
+
+/** Registers a static Exec_Dev function using FSelfRegisteringExec. */
+class FStaticSelfRegisteringExec_Dev: public FSelfRegisteringExec
+{
+public:
+
+	/** Initialization constructor. */
+	CORE_API explicit FStaticSelfRegisteringExec_Dev(bool (*InStaticExecFunc)(UWorld* Inworld, const TCHAR* Cmd, FOutputDevice& Ar));
+
+	//~ Begin Exec Interface
+	CORE_API virtual bool Exec_Dev(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar) override;
+	//~ End Exec Interface
+
+private:
+
+	bool (*StaticExecFunc)(UWorld* Inworld, const TCHAR* Cmd,FOutputDevice& Ar);
+};
+
+/** Registers a static Exec_Editor function using FSelfRegisteringExec. */
+class FStaticSelfRegisteringExec_Editor: public FSelfRegisteringExec
+{
+public:
+
+	/** Initialization constructor. */
+	CORE_API explicit FStaticSelfRegisteringExec_Editor(bool (*InStaticExecFunc)(UWorld* Inworld, const TCHAR* Cmd, FOutputDevice& Ar));
+
+	//~ Begin Exec Interface
+	CORE_API virtual bool Exec_Editor(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar) override;
+	//~ End Exec Interface
+
+private:
+
+	bool (*StaticExecFunc)(UWorld* Inworld, const TCHAR* Cmd, FOutputDevice& Ar);
 };
 
 // Interface for returning a context string.
@@ -55,21 +98,24 @@ public:
 };
 
 
-struct CORE_API FMaintenance
+struct FMaintenance
 {
 	/** deletes log files older than a number of days specified in the Engine ini file */
-	static void DeleteOldLogs();
+	static CORE_API void DeleteOldLogs();
 };
 
 /*-----------------------------------------------------------------------------
 	Module singletons.
 -----------------------------------------------------------------------------*/
 
-/** Return the DDC interface, if it is available, otherwise return NULL **/
+/** Returns the derived data cache interface if it is available, otherwise null. */
 CORE_API class FDerivedDataCacheInterface* GetDerivedDataCache();
 
-/** Return the DDC interface, fatal error if it is not available. **/
+/** Returns the derived data cache interface, or fatal error if it is not available. */
 CORE_API class FDerivedDataCacheInterface& GetDerivedDataCacheRef();
+
+/** Returns the derived data cache interface if it is available and initialized, otherwise null. */
+CORE_API class FDerivedDataCacheInterface* TryGetDerivedDataCache();
 
 /**
  * Return the Target Platform Manager interface, if it is available, otherwise return nullptr.
@@ -82,13 +128,20 @@ CORE_API class ITargetPlatformManagerModule* GetTargetPlatformManager(bool bFail
 /** Return the Target Platform Manager interface, fatal error if it is not available. **/
 CORE_API class ITargetPlatformManagerModule& GetTargetPlatformManagerRef();
 
+/**
+ * Return true if we are currently in a commandlet is targeting platforms with AV requirements (ie not a server) 
+ * or we are not targetingother platforms, and the current platform needs to render (CanEverRender())
+ */
+CORE_API bool WillNeedAudioVisualData();
+
 /*-----------------------------------------------------------------------------
 	Runtime.
 -----------------------------------------------------------------------------*/
 
 /**
- * Check to see if this executable is running as dedicated server
- * Editor can run as dedicated with -server
+ * Check to see if this executable was launched as a dedicated server process and should not load client only data.
+ * An editor build can be launched with -server to set this to true, but it will be false during single process PlayInEditor mode.
+ * This function should not be used for gameplay or networking purposes, check for NM_DedicatedServer instead.
  */
 FORCEINLINE bool IsRunningDedicatedServer()
 {
@@ -111,9 +164,10 @@ FORCEINLINE bool IsRunningDedicatedServer()
 }
 
 /**
- * Check to see if this executable is running as "the game"
- * - contains all net code (WITH_SERVER_CODE=1)
- * Editor can run as a game with -game
+ * Check to see if this executable was launched as a game (not editor or dedicated server) process. 
+ * This is true for both client only and client/server packaged games, call IsRunningClientOnly to differentiate.
+ * An editor build can be launched with -game to set this to true, but it will be false during single process PlayInEditor mode.
+ * This function should not be used for gameplay or networking purposes, check the NetMode instead.
  */
 FORCEINLINE bool IsRunningGame()
 {
@@ -136,9 +190,10 @@ FORCEINLINE bool IsRunningGame()
 }
 
 /**
- * Check to see if this executable is running as "the client"
- * - removes all net code (WITH_SERVER_CODE=0)
- * Editor can run as a game with -clientonly
+ * Check to see if this executable was launched as a client only game process that should not load server data.
+ * This will be true for packaged builds with a Client target type which will define WITH_SERVER_CODE=0.
+ * An editor build can be launched with -clientonly to set this to true, but it will be false during single process PlayInEditor mode.
+ * This function should not be used for gameplay or networking purposes, check for NM_Client instead.
  */
 FORCEINLINE bool IsRunningClientOnly()
 {
@@ -158,7 +213,7 @@ FORCEINLINE bool IsRunningClientOnly()
 /**
  * Helper for obtaining the default Url configuration
  */
-struct CORE_API FUrlConfig
+struct FUrlConfig
 {
 	FString DefaultProtocol;
 	FString DefaultName;
@@ -170,23 +225,23 @@ struct CORE_API FUrlConfig
 	/**
 	 * Initialize with defaults from ini
 	 */
-	void Init();
+	CORE_API void Init();
 
 	/**
 	 * Reset state
 	 */
-	void Reset();
+	CORE_API void Reset();
 };
 
 bool CORE_API StringHasBadDashes(const TCHAR* Str);
 
 /** Helper structure for boolean values in config */
-struct CORE_API FBoolConfigValueHelper
+struct FBoolConfigValueHelper
 {
 private:
 	bool bValue;
 public:
-	FBoolConfigValueHelper(const TCHAR* Section, const TCHAR* Key, const FString& Filename = GEditorIni);
+	CORE_API FBoolConfigValueHelper(const TCHAR* Section, const TCHAR* Key, const FString& Filename = GEditorIni);
 
 	operator bool() const
 	{
@@ -251,10 +306,24 @@ private:
 /** 
  * Scoped struct used to push and pop a script exception handler
  */
-struct CORE_API FScopedScriptExceptionHandler
+struct FScopedScriptExceptionHandler
 {
-	explicit FScopedScriptExceptionHandler(const FScriptExceptionHandlerFunc& InFunc);
-	~FScopedScriptExceptionHandler();
+	CORE_API explicit FScopedScriptExceptionHandler(const FScriptExceptionHandlerFunc& InFunc);
+	CORE_API ~FScopedScriptExceptionHandler();
+};
+
+/**
+ * Enables named events when profiling.
+ * Increments/decrements GCycleStatsShouldEmitNamedEvents based on bIsProfiling.
+ * Functionality is controlled by stats.AutoEnableNamedEventsWhenProfiling.
+ */
+class FAutoNamedEventsToggler
+{
+public:
+	CORE_API void Update(bool bIsProfiling);
+
+private:
+	bool bSetNamedEventsEnabled = false;
 };
 
 /** 
@@ -262,7 +331,7 @@ struct CORE_API FScopedScriptExceptionHandler
  * If this is true, it will create a FBlueprintContextTracker (previously FBlueprintExceptionTracker) which is defined in Script.h
  */
 #ifndef DO_BLUEPRINT_GUARD
-	#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+	#if (!(UE_BUILD_SHIPPING || UE_BUILD_TEST) || WITH_EDITOR)
 		#define DO_BLUEPRINT_GUARD 1
 	#else
 		#define DO_BLUEPRINT_GUARD 0

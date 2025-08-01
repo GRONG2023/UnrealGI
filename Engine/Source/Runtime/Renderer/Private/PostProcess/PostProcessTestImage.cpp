@@ -3,7 +3,8 @@
 #include "PostProcess/PostProcessTestImage.h"
 #include "PostProcess/PostProcessCombineLUTs.h"
 #include "CanvasTypes.h"
-#include "RenderTargetTemp.h"
+#include "DataDrivenShaderPlatformInfo.h"
+#include "SceneRendering.h"
 #include "UnrealEngine.h"
 
 class FTestImagePS : public FGlobalShader
@@ -42,7 +43,7 @@ void AddTestImagePass(FRDGBuilder& GraphBuilder, const FViewInfo& View, FScreenP
 	PassParameters->Output = GetScreenPassTextureViewportParameters(Viewport);
 	PassParameters->ColorRemap = GetColorRemapParameters();
 	PassParameters->FrameNumber = ViewFamily.FrameNumber;
-	PassParameters->FrameTime = ViewFamily.CurrentRealTime;
+	PassParameters->FrameTime = ViewFamily.Time.GetRealTimeSeconds();
 	PassParameters->RenderTargets[0] = FRenderTargetBinding(OutputTexture, ERenderTargetLoadAction::EClear);
 
 	TShaderMapRef<FTestImagePS> PixelShader(View.ShaderMap);

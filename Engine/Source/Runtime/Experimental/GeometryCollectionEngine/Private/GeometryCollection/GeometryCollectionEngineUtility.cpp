@@ -28,7 +28,7 @@ void GeometryCollectionEngineUtility::PrintDetailedStatistics(const FGeometryCol
 	int32 NumGeometries = GeometryCollection->NumElements(FGeometryCollection::GeometryGroup);
 	int32 NumBreakings = GeometryCollection->NumElements(FGeometryCollection::BreakingGroup);
 
-	const TManagedArray<FVector>& VertexArray = GeometryCollection->Vertex;
+	const TManagedArray<FVector3f>& VertexArray = GeometryCollection->Vertex;
 	const TManagedArray<int32>& BoneMapArray = GeometryCollection->BoneMap;
 
 	TArray<FTransform> GlobalTransformArray;
@@ -38,7 +38,7 @@ void GeometryCollectionEngineUtility::PrintDetailedStatistics(const FGeometryCol
 	for (int32 IdxVertex = 0; IdxVertex < NumVertices; ++IdxVertex)
 	{
 		FTransform GlobalTransform = GlobalTransformArray[BoneMapArray[IdxVertex]];
-		FVector VertexInWorld = GlobalTransform.TransformPosition(VertexArray[IdxVertex]);
+		FVector VertexInWorld = GlobalTransform.TransformPosition((FVector)VertexArray[IdxVertex]);
 
 		BoundingBox += VertexInWorld;
 	}
@@ -324,10 +324,11 @@ void GeometryCollectionEngineUtility::ComputeNormals(FGeometryCollection* Geomet
 
 	// Create index and uvs in flat arrays per face vertex
 	TArray<uint32> TmpIndices;
-	TArray<FVector2D> TmpUV;
+	TArray<FVector2f> TmpUV;
 
 	TManagedArray<FIntVector>& Indices = GeometryCollection->Indices;
-	TManagedArray<FVector2D>& UV = GeometryCollection->UV;
+	const int32 UVChannelIndex = 0;
+	const TManagedArray<FVector2f>& UV0 = *GeometryCollection->FindUVLayer(UVChannelIndex);
 	for (int i = 0; i < NumIndices; ++i)
 	{
 		FIntVector CurrTri = Indices[i];
@@ -336,24 +337,24 @@ void GeometryCollectionEngineUtility::ComputeNormals(FGeometryCollection* Geomet
 		TmpIndices.Add(CurrTri.Y);
 		TmpIndices.Add(CurrTri.Z);
 
-		TmpUV.Add(UV[CurrTri.X]);
-		TmpUV.Add(UV[CurrTri.Y]);
-		TmpUV.Add(UV[CurrTri.Z]);
+		TmpUV.Add(UV0[CurrTri.X]);
+		TmpUV.Add(UV0[CurrTri.Y]);
+		TmpUV.Add(UV0[CurrTri.Z]);
 	}
 
 	// Make a copy of the vertex array
 	// #todo(dmp): can we avoid copying?
-	TArray<FVector> Vertex((GeometryCollection->Vertex).GetData(), NumVertices);
+	TArray<FVector3f> Vertex((GeometryCollection->Vertex).GetData(), NumVertices);
 
 	// Compute new tangents and normals
-	TArray<FVector> TmpTangentU;
-	TArray<FVector> TmpTangentV;
-	TArray<FVector> TmpNormal;
+	TArray<FVector3f> TmpTangentU;
+	TArray<FVector3f> TmpTangentV;
+	TArray<FVector3f> TmpNormal;
 
 	// #todo(dmp): Create our own implementation to avoid all the copying
 	MeshUtilities.CalculateNormals(Vertex, TmpIndices, TmpUV, SmoothingGroup, TangentOptions, TmpNormal);
 
-	TManagedArray<FVector>& Normals = GeometryCollection->Normal;
+	TManagedArray<FVector3f>& Normals = GeometryCollection->Normal;
 
 	// Reset Normals
 	for (int i = 0; i < NumVertices; ++i)
@@ -381,10 +382,11 @@ void GeometryCollectionEngineUtility::ComputeTangents(FGeometryCollection* Geome
 
 	// Create index and uvs in flat arrays per face vertex
 	TArray<uint32> TmpIndices;
-	TArray<FVector2D> TmpUV;
+	TArray<FVector2f> TmpUV;
 
 	TManagedArray<FIntVector>& Indices = GeometryCollection->Indices;
-	TManagedArray<FVector2D>& UV = GeometryCollection->UV;
+	const int32 UVChannelIndex = 0;
+	TManagedArray<FVector2f>& UV0 = *GeometryCollection->FindUVLayer(UVChannelIndex);
 	for (int i = 0; i < NumIndices; ++i)
 	{
 		FIntVector CurrTri = Indices[i];
@@ -393,33 +395,33 @@ void GeometryCollectionEngineUtility::ComputeTangents(FGeometryCollection* Geome
 		TmpIndices.Add(CurrTri.Y);
 		TmpIndices.Add(CurrTri.Z);
 
-		TmpUV.Add(UV[CurrTri.X]);
-		TmpUV.Add(UV[CurrTri.Y]);
-		TmpUV.Add(UV[CurrTri.Z]);
+		TmpUV.Add(UV0[CurrTri.X]);
+		TmpUV.Add(UV0[CurrTri.Y]);
+		TmpUV.Add(UV0[CurrTri.Z]);
 	}
 
 	// Make a copy of the vertex array
 	// #todo(dmp): can we avoid copying?
-	TArray<FVector> Vertex((GeometryCollection->Vertex).GetData(), NumVertices);
+	TArray<FVector3f> Vertex((GeometryCollection->Vertex).GetData(), NumVertices);
 
 	// Compute new tangents and normals
-	TArray<FVector> TmpTangentU;
-	TArray<FVector> TmpTangentV;
-	TArray<FVector> TmpNormal;
+	TArray<FVector3f> TmpTangentU;
+	TArray<FVector3f> TmpTangentV;
+	TArray<FVector3f> TmpNormal;
 
 	// #todo(dmp): Create our own implementation to avoid all the copying
 	MeshUtilities.CalculateTangents(Vertex, TmpIndices, TmpUV, SmoothingGroup, TangentOptions, TmpTangentU, TmpTangentV, TmpNormal);
 
 	// we only use the tangents along with the original normals
-	TManagedArray<FVector>& TangentU = GeometryCollection->TangentU;
-	TManagedArray<FVector>& TangentV = GeometryCollection->TangentV;
+	TManagedArray<FVector3f>& TangentU = GeometryCollection->TangentU;
+	TManagedArray<FVector3f>& TangentV = GeometryCollection->TangentV;
 
 	// Reset  tangents
 	for (int i = 0; i < NumVertices; ++i)
 	{
-		TangentU[i] = FVector(0, 0, 0);
-		TangentV[i] = FVector(0, 0, 0);
-		// Normal[i] = FVector(0, 0, 0);
+		TangentU[i] = FVector3f(0, 0, 0);
+		TangentV[i] = FVector3f(0, 0, 0);
+		// Normal[i] = FVector3f(0, 0, 0);
 	}
 
 	// Sum all face vertex tangents to the smaller vertex array

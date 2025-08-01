@@ -12,7 +12,8 @@
 #include "Delegates/Delegate.h"
 #include "Framework/Application/SWindowTitleBar.h"
 #include "Framework/Application/SlateApplication.h"
-#include "Hal/Platform.h"
+#include "HAL/FileManager.h"
+#include "HAL/Platform.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/ScopeLock.h"
 #include "Styling/CoreStyle.h"
@@ -32,9 +33,9 @@ namespace DirectLinkUIUtils
 		return FPaths::Combine( FPaths::GeneratedConfigDir(), TEXT("DirectLinkExporter") ).Append( TEXT(".ini") );;
 	}
 
-	FString GetConfigCacheDirectorySectionAndValue()
+	FString GetConfigCacheDirectorySectionAndValue( bool bInDefaultCacheDir )
 	{
-		return TEXT("DLCacheFolder");
+		return bInDefaultCacheDir ? TEXT("DLDefaultCacheFolder") : TEXT("DLCacheFolder");
 	}
 
 	EHorizontalAlignment GetWindowTitleAlignement()
@@ -58,16 +59,54 @@ namespace DirectLinkUIUtils
 	}
 }
 
+FVector2D FDirectLinkUI::StreamWindowDefaultSize = FVector2D(640, 480);
+
 FDirectLinkUI::FDirectLinkUI()
+	: StreamWindowSize(StreamWindowDefaultSize)
 {
-	FString ConfigPath = DirectLinkUIUtils::GetConfigPath();
-	FString DirectLinkCacheSectionAndValue = DirectLinkUIUtils::GetConfigCacheDirectorySectionAndValue();
+	const FString ConfigPath = DirectLinkUIUtils::GetConfigPath();
+	const FString DirectLinkCacheSectionAndValue = DirectLinkUIUtils::GetConfigCacheDirectorySectionAndValue( false );
+	const FString DirectLinkDefaultCacheSectionAndValue = DirectLinkUIUtils::GetConfigCacheDirectorySectionAndValue( true );
 
 	FScopeLock Lock( &CriticalSectionCacheDirectory );
-	if ( !GConfig->GetString( *DirectLinkCacheSectionAndValue, *DirectLinkCacheSectionAndValue, DirectLinkCacheDirectory, ConfigPath ) )
+
+	// Verify and get default cache directory
+	GConfig->GetString(*DirectLinkDefaultCacheSectionAndValue, *DirectLinkDefaultCacheSectionAndValue, DefaultDirectLinkCacheDirectory, ConfigPath);
+
+	if (DefaultDirectLinkCacheDirectory.IsEmpty() || !FPaths::DirectoryExists(DefaultDirectLinkCacheDirectory))
 	{
-		DirectLinkCacheDirectory = FPaths::Combine( FPlatformProcess::UserTempDir(), TEXT("DLExporter") );
+		if (DefaultDirectLinkCacheDirectory.IsEmpty() || !IFileManager::Get().MakeDirectory(*DefaultDirectLinkCacheDirectory, true))
+		{
+			DefaultDirectLinkCacheDirectory = FPaths::Combine(FPlatformProcess::UserTempDir(), TEXT("DLExporter"));
+			if (!FPaths::DirectoryExists(DefaultDirectLinkCacheDirectory))
+			{
+				ensure(IFileManager::Get().MakeDirectory(*DefaultDirectLinkCacheDirectory, true));
+			}
+		}
+
 	}
+
+	GConfig->SetString(*DirectLinkDefaultCacheSectionAndValue, *DirectLinkDefaultCacheSectionAndValue, *DefaultDirectLinkCacheDirectory, ConfigPath);
+
+	// Verify and get current cache directory
+	GConfig->GetString(*DirectLinkCacheSectionAndValue, *DirectLinkCacheSectionAndValue, DirectLinkCacheDirectory, ConfigPath);
+
+	if (DirectLinkCacheDirectory.IsEmpty() || !FPaths::DirectoryExists(DirectLinkCacheDirectory))
+	{
+		if (DirectLinkCacheDirectory.IsEmpty() || !IFileManager::Get().MakeDirectory(*DirectLinkCacheDirectory, true))
+		{
+			DirectLinkCacheDirectory = DefaultDirectLinkCacheDirectory;
+		}
+
+	}
+
+	GConfig->SetString(*DirectLinkCacheSectionAndValue, *DirectLinkCacheSectionAndValue, *DirectLinkCacheDirectory, ConfigPath);
+}
+
+void FDirectLinkUI::SetStreamWindowCenter( int InCenterX, int InCenterY )
+{
+	StreamWindowCenterSet = true;
+	StreamWindowPosition = FVector2D(InCenterX, InCenterY) - (StreamWindowSize / 2);
 }
 
 void FDirectLinkUI::OpenDirectLinkStreamWindow()
@@ -88,15 +127,22 @@ void FDirectLinkUI::OpenDirectLinkStreamWindow()
 		}
 		else
 		{
+			EAutoCenter AutoCenterValue = StreamWindowClosedBefore ? (EAutoCenter::None) : (StreamWindowCenterSet ? EAutoCenter::None : EAutoCenter::PrimaryWorkArea);
+
 			// This window setup might be an issue on mac where users often expect os borders on their window
 			TSharedRef<SWindow> Window = SNew( SWindow )
 				.CreateTitleBar( false )
-				.ClientSize( FVector2D( 640, 480 ) )
-				.AutoCenter( EAutoCenter::PrimaryWorkArea )
+				.ClientSize( StreamWindowDefaultSize )
+				.AutoCenter( AutoCenterValue )
 				.SizingRule( ESizingRule::UserSized )
 				.FocusWhenFirstShown( true )
 				.Title( LOCTEXT("DirectlinkStreamManagerWindowTitle", "Datasmith Direct Link Connection Status") );
 
+			if ( AutoCenterValue == EAutoCenter::None )
+			{
+				Window->ReshapeWindow( StreamWindowPosition, StreamWindowSize );
+			}
+			
 			TSharedRef<SWindowTitleBar> WindowTitleBar = SNew( SWindowTitleBar, Window, nullptr, DirectLinkUIUtils::GetWindowTitleAlignement() )
 				.Visibility( EVisibility::Visible )
 				.ShowAppIcon( false );
@@ -121,10 +167,11 @@ void FDirectLinkUI::OpenDirectLinkStreamWindow()
 							.DefaultCacheDirectory( DirectLinkCacheDirectory )
 							// The slate application should always be close before this module.
 							.OnCacheDirectoryChanged_Raw( this, &FDirectLinkUI::OnCacheDirectoryChanged )
+							.OnCacheDirectoryReset_Raw( this, &FDirectLinkUI::OnCacheDirectoryReset )
 						]
 					]
 				);
-
+			Window->SetOnWindowClosed( FOnWindowClosed::CreateRaw(this, &FDirectLinkUI::WindowClosed) );
 			DirectLinkWindow = Window;
 			FSlateApplication::Get().AddWindow( Window, true );
 			Window->HACK_ForceToFront();
@@ -136,6 +183,14 @@ void FDirectLinkUI::OpenDirectLinkStreamWindow()
 #else
 	RunOnUIThread.Execute();
 #endif
+}
+
+void FDirectLinkUI::WindowClosed( const TSharedRef<SWindow>& WindowArg )
+{
+	StreamWindowClosedBefore = true;
+
+	StreamWindowSize = WindowArg->GetSizeInScreen();
+	StreamWindowPosition = WindowArg->GetPositionInScreen();
 }
 
 const TCHAR* FDirectLinkUI::GetDirectLinkCacheDirectory()
@@ -159,11 +214,29 @@ void FDirectLinkUI::OnCacheDirectoryChanged(const FString& InNewCacheDirectory)
 		DirectLinkCacheDirectory = InNewCacheDirectory;
 	}
 
+	SaveCacheDirectory( InNewCacheDirectory, false );
+
+}
+
+FString FDirectLinkUI::OnCacheDirectoryReset()
+{
+	{
+		FScopeLock ReadLock( &CriticalSectionCacheDirectory );
+		DirectLinkCacheDirectory = DefaultDirectLinkCacheDirectory;
+	}
+
+	SaveCacheDirectory( DefaultDirectLinkCacheDirectory, false );
+
+	return DefaultDirectLinkCacheDirectory;
+}
+
+void FDirectLinkUI::SaveCacheDirectory( const FString& InCacheDir, bool bInDefaultCacheDir )
+{
 	FString ConfigPath = DirectLinkUIUtils::GetConfigPath();
-	FString DirectLinkCacheSectionAndValue = DirectLinkUIUtils::GetConfigCacheDirectorySectionAndValue();
+	FString DirectLinkCacheSectionAndValue = DirectLinkUIUtils::GetConfigCacheDirectorySectionAndValue( bInDefaultCacheDir );
 
 	// Save to config file
-	GConfig->SetString( *DirectLinkCacheSectionAndValue, *DirectLinkCacheSectionAndValue, *InNewCacheDirectory, ConfigPath );
+	GConfig->SetString( *DirectLinkCacheSectionAndValue, *DirectLinkCacheSectionAndValue, *InCacheDir, ConfigPath );
 }
 
 #undef LOCTEXT_NAMESPACE

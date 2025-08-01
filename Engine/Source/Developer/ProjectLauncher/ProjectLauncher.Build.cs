@@ -10,13 +10,13 @@ public class ProjectLauncher : ModuleRules
 			new string[] {
 				"Core",
 				"CoreUObject",
-				"TargetPlatform",
+				"LauncherServices",
 			}
 		);
 
 		PublicIncludePathModuleNames.AddRange(
 			new string[] {
-				"LauncherServices",
+				"TargetPlatform",
 			}
 		);
 
@@ -27,35 +27,16 @@ public class ProjectLauncher : ModuleRules
                 "InputCore",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
+                
                 "WorkspaceMenuStructure",
+				"ToolWidgets",
 			}
 		);
 
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
-				"SessionServices",
 				"TargetDeviceServices",
 			}
-		);
-
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				"Developer/ProjectLauncher/Private",
-				"Developer/ProjectLauncher/Private/Models",
-				"Developer/ProjectLauncher/Private/Widgets",
-                "Developer/ProjectLauncher/Private/Widgets/Archive",
-                "Developer/ProjectLauncher/Private/Widgets/Build",
-				"Developer/ProjectLauncher/Private/Widgets/Cook",
-				"Developer/ProjectLauncher/Private/Widgets/Deploy",
-				"Developer/ProjectLauncher/Private/Widgets/Launch",
-				"Developer/ProjectLauncher/Private/Widgets/Package",
-                "Developer/ProjectLauncher/Private/Widgets/Profile",
-                "Developer/ProjectLauncher/Private/Widgets/Progress",
-                "Developer/ProjectLauncher/Private/Widgets/Project",
-                "Developer/ProjectLauncher/Private/Widgets/Settings",
-                "Developer/ProjectLauncher/Private/Widgets/Shared",
-            }
 		);
 	}
 }

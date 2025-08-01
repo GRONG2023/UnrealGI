@@ -15,11 +15,15 @@ namespace FileLockInfo
 		{
 			try
 			{
-				using (ManagementObjectSearcher searcher = new ManagementObjectSearcher("SELECT CommandLine FROM Win32_Process WHERE ProcessId = " + process.Id))
-				using (ManagementObjectCollection objects = searcher.Get())
+				if (OperatingSystem.IsWindows())
 				{
-					return objects.Cast<ManagementBaseObject>().SingleOrDefault()?["CommandLine"]?.ToString();
+					using (ManagementObjectSearcher searcher = new ManagementObjectSearcher("SELECT CommandLine FROM Win32_Process WHERE ProcessId = " + process.Id))
+					using (ManagementObjectCollection objects = searcher.Get())
+					{
+						return objects.Cast<ManagementBaseObject>().SingleOrDefault()?["CommandLine"]?.ToString();
+					}
 				}
+				return string.Format("<error retrieving commandline: non-windows platform>");
 			}
 			catch (Exception Ex)
 			{
@@ -38,6 +42,12 @@ namespace FileLockInfo
 		/// </remarks>
 		public static List<Process> GetProcessesLockingFile(string path)
 		{
+			string[] resources = { path }; // Just checking on one resource.
+			return GetProcessesLockingFiles(resources);
+		}
+
+		public static List<Process> GetProcessesLockingFiles(string[] FilePaths)
+		{
 			uint handle;
 			string key = Guid.NewGuid().ToString();
 			int res = RmStartSession(out handle, 0, key);
@@ -49,9 +59,7 @@ namespace FileLockInfo
 				const int MORE_DATA = 234;
 				uint pnProcInfoNeeded, pnProcInfo = 0, lpdwRebootReasons = RmRebootReasonNone;
 
-				string[] resources = { path }; // Just checking on one resource.
-
-				res = RmRegisterResources(handle, (uint)resources.Length, resources, 0, null, 0, null);
+				res = RmRegisterResources(handle, (uint)FilePaths.Length, FilePaths, 0, null, 0, null);
 
 				if (res != 0) throw new Exception("Could not register resource.");
 

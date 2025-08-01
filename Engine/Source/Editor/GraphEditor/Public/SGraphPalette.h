@@ -3,12 +3,30 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
 #include "Input/Reply.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/SCompoundWidget.h"
+#include "Internationalization/Text.h"
+#include "Misc/Attribute.h"
+#include "Misc/CoreMiscDefines.h"
 #include "SGraphActionMenu.h"
+#include "Styling/SlateColor.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateEnums.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/SWidget.h"
+
+class FDragDropEvent;
+class SInlineEditableTextBlock;
+class SWidget;
+struct FEdGraphSchemaAction;
+struct FGeometry;
+struct FGraphActionListBuilderBase;
+struct FPointerEvent;
+struct FSlateBrush;
+struct FSlateFontInfo;
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -42,8 +60,14 @@ protected:
 	/** Create an icon type widget */
 	TSharedRef<SWidget> CreateIconWidget(const FText& IconToolTip, const FSlateBrush* IconBrush, const FSlateColor& IconColor);
 
+	UE_DEPRECATED(5.0, "CreateTextSlotWidget that takes a font parameter is deprecated")
+	virtual TSharedRef<SWidget> CreateTextSlotWidget(const FSlateFontInfo& NameFont, FCreateWidgetForActionData* const InCreateData, TAttribute<bool> bIsReadOnly)
+	{
+		return CreateTextSlotWidget(InCreateData, bIsReadOnly);
+	}
+
 	/* Create the text widget */
-	virtual TSharedRef<SWidget> CreateTextSlotWidget( const FSlateFontInfo& NameFont, FCreateWidgetForActionData* const InCreateData, TAttribute<bool> bIsReadOnly );
+	virtual TSharedRef<SWidget> CreateTextSlotWidget( FCreateWidgetForActionData* const InCreateData, TAttribute<bool> bIsReadOnly );
 
 	/** Callback when rename text is being verified on text changed */
 	virtual bool OnNameTextVerifyChanged(const FText& InNewText, FText& OutErrorMessage);

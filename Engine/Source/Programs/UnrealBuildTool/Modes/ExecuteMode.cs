@@ -1,14 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-using System;
 using System.Collections.Generic;
-using System.Diagnostics;
-using System.IO;
-using System.Linq;
-using System.Text;
-using System.Threading;
 using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
+using OpenTracing.Util;
 
 namespace UnrealBuildTool
 {
@@ -22,14 +18,15 @@ namespace UnrealBuildTool
 		/// Whether we should just export the outdated actions list
 		/// </summary>
 		[CommandLine("-Actions=", Required = true)]
-		public FileReference ActionsFile = null;
+		public FileReference? ActionsFile = null;
 
 		/// <summary>
 		/// Main entry point
 		/// </summary>
 		/// <param name="Arguments">Command-line arguments</param>
 		/// <returns>One of the values of ECompilationResult</returns>
-		public override int Execute(CommandLineArguments Arguments)
+		/// <param name="Logger"></param>
+		public override async Task<int> ExecuteAsync(CommandLineArguments Arguments, ILogger Logger)
 		{
 			Arguments.ApplyTo(this);
 
@@ -42,22 +39,23 @@ namespace UnrealBuildTool
 			Arguments.ApplyTo(BuildConfiguration);
 
 			// Read the actions file
-			List<Action> Actions;
-			using(Timeline.ScopeEvent("ActionGraph.ReadActions()"))
+			List<LinkedAction> Actions;
+			using (GlobalTracer.Instance.BuildSpan("ActionGraph.ReadActions()").StartActive())
 			{
-				Actions = ActionGraph.ImportJson(ActionsFile);
+				Actions = ActionGraph.ImportJson(ActionsFile!).ConvertAll(x => new LinkedAction(x, null));
 			}
 
 			// Link the action graph
-			using(Timeline.ScopeEvent("ActionGraph.Link()"))
+			using (GlobalTracer.Instance.BuildSpan("ActionGraph.Link()").StartActive())
 			{
-				ActionGraph.Link(Actions);
+				ActionGraph.Link(Actions, Logger);
 			}
 
 			// Execute the actions
-			using (Timeline.ScopeEvent("ActionGraph.ExecuteActions()"))
+			using (GlobalTracer.Instance.BuildSpan("ActionGraph.ExecuteActions()").StartActive())
 			{
-				ActionGraph.ExecuteActions(BuildConfiguration, Actions);
+				List<TargetDescriptor> TargetDescriptors = TargetDescriptor.ParseCommandLine(Arguments, BuildConfiguration, Logger);
+				await ActionGraph.ExecuteActionsAsync(BuildConfiguration, Actions, TargetDescriptors, Logger);
 			}
 
 			return 0;

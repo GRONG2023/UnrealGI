@@ -1,11 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Animation/AnimBlueprint.h"
+#include "Animation/AnimInstance.h"
 #include "UObject/FrameworkObjectVersion.h"
 #include "Animation/AnimBlueprintGeneratedClass.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimBlueprint)
+
 #if WITH_EDITOR
-#include "Settings/EditorExperimentalSettings.h"
-#include "Modules/ModuleManager.h"
+#include "IAnimationBlueprintEditorModule.h"
+#include "Settings/AnimBlueprintSettings.h"
 #endif
 #if WITH_EDITORONLY_DATA
 #include "AnimationEditorUtils.h"
@@ -18,13 +22,18 @@ UAnimBlueprint::UAnimBlueprint(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
 	bUseMultiThreadedAnimationUpdate = true;
-
+#if WITH_EDITORONLY_DATA
+	bRefreshExtensions = true;
+#endif
+	
 #if WITH_EDITOR
 	if(!HasAnyFlags(RF_ClassDefaultObject))
 	{
 		// Ensure that we are able to compile this anim BP by loading the compiler's module
 		FModuleManager::Get().LoadModuleChecked("AnimGraph");
 	}
+
+	DefaultBindingClass = FindObject<UClass>(nullptr, TEXT("/Script/AnimGraph.AnimGraphNodeBinding_Base"));
 #endif
 }
 
@@ -84,11 +93,9 @@ int32 UAnimBlueprint::FindOrAddGroup(FName GroupName)
 	}
 }
 
-
-/** Returns the most base anim blueprint for a given blueprint (if it is inherited from another anim blueprint, returning null if only native / non-anim BP classes are it's parent) */
 UAnimBlueprint* UAnimBlueprint::FindRootAnimBlueprint(const UAnimBlueprint* DerivedBlueprint)
 {
-	UAnimBlueprint* ParentBP = NULL;
+	UAnimBlueprint* ParentBP = nullptr;
 
 	// Determine if there is an anim blueprint in the ancestry of this class
 	for (UClass* ParentClass = DerivedBlueprint->ParentClass; ParentClass && (UObject::StaticClass() != ParentClass); ParentClass = ParentClass->GetSuperClass())
@@ -97,6 +104,19 @@ UAnimBlueprint* UAnimBlueprint::FindRootAnimBlueprint(const UAnimBlueprint* Deri
 		{
 			ParentBP = TestBP;
 		}
+	}
+
+	return ParentBP;
+}
+
+UAnimBlueprint* UAnimBlueprint::GetParentAnimBlueprint(const UAnimBlueprint* DerivedBlueprint)
+{
+	UAnimBlueprint* ParentBP = nullptr;
+	UClass* ParentClass = DerivedBlueprint->ParentClass;
+
+	if (UAnimBlueprint* TestBP = Cast<UAnimBlueprint>(ParentClass->ClassGeneratedBy))
+	{
+		ParentBP = TestBP;
 	}
 
 	return ParentBP;
@@ -176,16 +196,9 @@ void UAnimBlueprint::PostLoad()
 		});
 	}
 #endif
-
-#if WITH_EDITORONLY_DATA
-	if(GetLinkerCustomVersion(FFrameworkObjectVersion::GUID) < FFrameworkObjectVersion::AnimBlueprintSubgraphFix)
-	{
-		AnimationEditorUtils::RegenerateSubGraphArrays(this);
-	}
-#endif
 }
 
-bool UAnimBlueprint::CanRecompileWhilePlayingInEditor() const
+bool UAnimBlueprint::CanAlwaysRecompileWhilePlayingInEditor() const
 {
 	return true;
 }
@@ -202,20 +215,108 @@ bool UAnimBlueprint::FindDiffs(const UBlueprint* OtherBlueprint, FDiffResults& R
 	return true;
 }
 
+void UAnimBlueprint::SetObjectBeingDebugged(UObject* NewObject)
+{
+	// Look for any linked instances and set them up too if they are not already open in an editor
+	AnimationEditorUtils::SetupDebugLinkedAnimInstances(this, NewObject);
+
+	Super::SetObjectBeingDebugged(NewObject);
+}
+
+bool UAnimBlueprint::SupportsEventGraphs() const
+{
+	return GetDefault<UAnimBlueprintSettings>()->bAllowEventGraphs;
+}
+
+bool UAnimBlueprint::SupportsAnimLayers() const
+{
+	return true;
+}
+
+bool UAnimBlueprint::SupportsDelegates() const
+{
+	return GetDefault<UAnimBlueprintSettings>()->bAllowDelegates;
+}
+
+bool UAnimBlueprint::SupportsMacros() const
+{
+	return GetDefault<UAnimBlueprintSettings>()->bAllowMacros;
+}
+
+bool UAnimBlueprint::SupportsInputEvents() const
+{
+	// Animation blueprints don't really support input events. You used to be able to place
+	// the input event nodes in the anim graphs and they would just not work, causing an ensure.
+	// To keep backwards compatibility we will allow users to enable them in case
+	// their project somehow relies on it in some custom node extension, but
+	// for new projects it should not be allowed. 
+	if (GetDefault<UAnimBlueprintSettings>()->bSupportInputEventsForBackwardsCompatibility)
+	{
+		return Super::SupportsInputEvents();
+	}
+	
+	return false;	
+}
+
+bool UAnimBlueprint::AllowFunctionOverride(const UFunction* const InFunction) const
+{
+	check(InFunction);
+
+	if (!GetDefault<UAnimBlueprintSettings>()->bRestrictBaseFunctionOverrides)
+	{
+		return true;
+	}
+
+	UClass* OwnerClass = InFunction->GetOwnerClass();
+	if (OwnerClass == UAnimInstance::StaticClass())
+	{
+		return GetDefault<UAnimBlueprintSettings>()->BaseFunctionOverrideAllowList.Contains(InFunction->GetFName());
+	}
+	else
+	{
+		return true;
+	}
+}
+
+void UAnimBlueprint::PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+
+	const FName PropertyName = (PropertyChangedEvent.Property != NULL) ? PropertyChangedEvent.Property->GetFName() : NAME_None;
+
+	// Make sure we add / remove linked anim layer sharing blueprint extension
+	if (PropertyName == GET_MEMBER_NAME_CHECKED(UAnimBlueprint, bEnableLinkedAnimLayerInstanceSharing))
+	{
+		bRefreshExtensions = true;
+	}
+}
+
+void UAnimBlueprint::GetTypeActions(FBlueprintActionDatabaseRegistrar& ActionRegistrar) const
+{
+	Super::GetTypeActions(ActionRegistrar);
+
+	const IAnimationBlueprintEditorModule& AnimationBlueprintEditorModule = FModuleManager::LoadModuleChecked<IAnimationBlueprintEditorModule>(TEXT("AnimationBlueprintEditor"));
+	AnimationBlueprintEditorModule.GetTypeActions(ActionRegistrar);
+}
+
+void UAnimBlueprint::GetInstanceActions(FBlueprintActionDatabaseRegistrar& ActionRegistrar) const
+{
+	Super::GetInstanceActions(ActionRegistrar);
+
+	const IAnimationBlueprintEditorModule& AnimationBlueprintEditorModule = FModuleManager::LoadModuleChecked<IAnimationBlueprintEditorModule>(TEXT("AnimationBlueprintEditor"));
+	AnimationBlueprintEditorModule.GetInstanceActions(this, ActionRegistrar);
+}
+
 #endif
 
 USkeletalMesh* UAnimBlueprint::GetPreviewMesh(bool bFindIfNotSet/*=false*/)
 {
 #if WITH_EDITORONLY_DATA
-	USkeletalMesh* PreviewMesh = PreviewSkeletalMesh.LoadSynchronous();
-	// if somehow skeleton changes, just nullify it. 
-	if (PreviewMesh && PreviewMesh->GetSkeleton() != TargetSkeleton)
+	if (!PreviewSkeletalMesh.IsValid())
 	{
-		PreviewMesh = nullptr;
-		SetPreviewMesh(nullptr);
+		PreviewSkeletalMesh.LoadSynchronous();
 	}
-
-	return PreviewMesh;
+	return PreviewSkeletalMesh.Get();
 #else
 	return nullptr;
 #endif
@@ -326,3 +427,39 @@ FAnimBlueprintDebugData* UAnimBlueprint::GetDebugData() const
 	return nullptr;
 #endif // WITH_EDITORONLY_DATA
 }
+
+#if WITH_EDITORONLY_DATA
+bool UAnimBlueprint::IsCompatible(const UAnimBlueprint* InAnimBlueprint) const
+{
+	if(InAnimBlueprint->bIsTemplate)
+	{
+		// Directionality here, templates are compatible with all anim BPs, but not necessarily vice versa
+		return true;
+	}
+	
+	if(InAnimBlueprint->BlueprintType == BPTYPE_Interface)
+	{
+		// Interfaces dont bother with skeleton checks - assume compatibility is driven by the interface machinery
+		return true;
+	}
+
+	return (TargetSkeleton != nullptr && TargetSkeleton->IsCompatibleForEditor(InAnimBlueprint->TargetSkeleton));
+}
+
+bool UAnimBlueprint::IsCompatibleByAssetString(const FString& InSkeletonAsset, bool bInIsTemplate, bool bInIsInterface) const
+{
+	if(bInIsTemplate)
+	{
+		// Directionality here, templates are compatible with all anim BPs, but not necessarily vice versa
+		return true;
+	}
+	
+	if(bInIsInterface)
+	{
+		// Interfaces dont bother with skeleton checks - assume compatibility is driven by the interface machinery
+		return true;
+	}
+
+	return (TargetSkeleton != nullptr && TargetSkeleton->IsCompatibleForEditor(InSkeletonAsset));
+}
+#endif

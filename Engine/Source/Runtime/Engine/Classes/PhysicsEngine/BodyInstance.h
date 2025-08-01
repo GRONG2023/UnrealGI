@@ -8,7 +8,10 @@
 #include "Engine/EngineTypes.h"
 #include "CollisionQueryParams.h"
 #include "EngineDefines.h"
+#include "GameFramework/PlayerController.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "PhysxUserData.h"
+#endif
 #include "Physics/PhysicsInterfaceCore.h"
 #include "Physics/PhysicsInterfaceTypes.h"
 #include "PhysicsPublic.h"
@@ -24,6 +27,7 @@ struct FCollisionNotifyInfo;
 struct FCollisionShape;
 struct FConstraintInstance;
 struct FPropertyChangedEvent;
+struct FRigidBodyState;
 struct FShapeData;
 class UPrimitiveComponent;
 
@@ -34,7 +38,7 @@ ENGINE_API int32 FillInlineShapeArray_AssumesLocked(PhysicsInterfaceTypes::FInli
 UENUM(BlueprintType)
 namespace EDOFMode
 {
-	enum Type
+	enum Type : int
 	{
 		/*Inherits the degrees of freedom from the project settings.*/
 		Default,
@@ -53,14 +57,19 @@ namespace EDOFMode
 	};
 }
 
-struct FBodyInstnace;
+struct FBodyInstance;
 
-#define USE_BODYINSTANCE_DEBUG_NAMES ((WITH_EDITORONLY_DATA || UE_BUILD_DEBUG || LOOKING_FOR_PERF_ISSUES || CHAOS_CHECKED) && !(UE_BUILD_SHIPPING || UE_BUILD_TEST) && !NO_LOGGING)
+#ifndef CHAOS_DEBUG_NAME
+#define CHAOS_DEBUG_NAME 0
+#endif
+
+#define USE_BODYINSTANCE_DEBUG_NAMES (!NO_LOGGING && CHAOS_DEBUG_NAME)
 
 /** Helper struct to specify spawn behavior */
 struct FInitBodySpawnParams
 {
 	ENGINE_API FInitBodySpawnParams(const UPrimitiveComponent* PrimComp);
+	ENGINE_API FInitBodySpawnParams(bool bInStaticPhysics, bool bInPhysicsTypeDeterminesSimulation);
 
 	/** Whether the created physics actor will be static */
 	bool bStaticPhysics;
@@ -92,7 +101,7 @@ struct FInitBodiesHelperBase
 	FPhysicsAggregateHandle Aggregate;
 
 #if USE_BODYINSTANCE_DEBUG_NAMES
-	FString DebugName;
+	TSharedPtr<FString, ESPMode::ThreadSafe> DebugName;
 	TSharedPtr<TArray<ANSICHAR>> PhysXName; // Get rid of ANSICHAR in physics
 #endif
 
@@ -142,7 +151,7 @@ struct FInitBodiesHelperWithData : public FInitBodiesHelperBase
 {
 	FInitBodiesHelperWithData() { check(false); }
 	FInitBodiesHelperWithData(TArray<FBodyInstance*>&& InBodies, TArray<FTransform>&& InTransforms, class UBodySetup* InBodySetup, class UPrimitiveComponent* InPrimitiveComp, FPhysScene* InRBScene, const FInitBodySpawnParams& InSpawnParams, FPhysicsAggregateHandle InAggregate)
-	: FInitBodiesHelperBase(OwnedBodies, OwnedTransforms, InBodySetup, InPrimitiveComp, InRBScene, InSpawnParams, InAggregate), OwnedBodies(MoveTemp(InBodies)), OwnedTransforms(MoveTemp(InTransforms))
+	: FInitBodiesHelperBase(OwnedBodies, OwnedTransforms, InBodySetup, InPrimitiveComp, InRBScene, InSpawnParams, InAggregate), OwnedBodies(MoveTemp(InBodies)), OwnedTransforms(MoveTemp(InTransforms)) //-V1050
 	{
 		//Compute all the needed constants
 		bStatic = bCompileStatic || SpawnParams.bStaticPhysics;
@@ -154,13 +163,13 @@ struct FInitBodiesHelperWithData : public FInitBodiesHelperBase
 	}
 
 	FInitBodiesHelperWithData(const FInitBodiesHelperWithData& InHelper)
-	: FInitBodiesHelperBase(OwnedBodies, OwnedTransforms, InHelper.BodySetup, InHelper.PrimitiveComp, InHelper.PhysScene, InHelper.SpawnParams, InHelper.Aggregate), OwnedBodies(InHelper.OwnedBodies), OwnedTransforms(InHelper.OwnedTransforms)
+	: FInitBodiesHelperBase(OwnedBodies, OwnedTransforms, InHelper.BodySetup, InHelper.PrimitiveComp, InHelper.PhysScene, InHelper.SpawnParams, InHelper.Aggregate), OwnedBodies(InHelper.OwnedBodies), OwnedTransforms(InHelper.OwnedTransforms) //-V1050
 	{
 		ensure(false);
 	}
 
 	FInitBodiesHelperWithData(FInitBodiesHelperWithData&& InHelper)
-	: FInitBodiesHelperBase(OwnedBodies, OwnedTransforms, InHelper.BodySetup, InHelper.PrimitiveComp, InHelper.PhysScene, InHelper.SpawnParams, InHelper.Aggregate), OwnedBodies(MoveTemp(InHelper.OwnedBodies)), OwnedTransforms(MoveTemp(InHelper.OwnedTransforms))
+	: FInitBodiesHelperBase(OwnedBodies, OwnedTransforms, InHelper.BodySetup, InHelper.PrimitiveComp, InHelper.PhysScene, InHelper.SpawnParams, InHelper.Aggregate), OwnedBodies(MoveTemp(InHelper.OwnedBodies)), OwnedTransforms(MoveTemp(InHelper.OwnedTransforms)) //-V1050
 	{
 		//Compute all the needed constants
 		bStatic = bCompileStatic || SpawnParams.bStaticPhysics;
@@ -179,32 +188,32 @@ struct FInitBodiesHelperWithData : public FInitBodiesHelperBase
 };
 
 USTRUCT()
-struct ENGINE_API FCollisionResponse
+struct FCollisionResponse
 {
 	GENERATED_USTRUCT_BODY()
 
-	FCollisionResponse();
-	FCollisionResponse(ECollisionResponse DefaultResponse);
+	ENGINE_API FCollisionResponse();
+	ENGINE_API FCollisionResponse(ECollisionResponse DefaultResponse);
 
 	/** Set the response of a particular channel in the structure. */
-	bool SetResponse(ECollisionChannel Channel, ECollisionResponse NewResponse);
+	ENGINE_API bool SetResponse(ECollisionChannel Channel, ECollisionResponse NewResponse);
 
 	/** Set all channels to the specified response */
-	bool SetAllChannels(ECollisionResponse NewResponse);
+	ENGINE_API bool SetAllChannels(ECollisionResponse NewResponse);
 
 	/** Replace the channels matching the old response with the new response */
-	bool ReplaceChannels(ECollisionResponse OldResponse, ECollisionResponse NewResponse);
+	ENGINE_API bool ReplaceChannels(ECollisionResponse OldResponse, ECollisionResponse NewResponse);
 
 	/** Returns the response set on the specified channel */
 	FORCEINLINE_DEBUGGABLE ECollisionResponse GetResponse(ECollisionChannel Channel) const { return ResponseToChannels.GetResponse(Channel); }
 	const FCollisionResponseContainer& GetResponseContainer() const { return ResponseToChannels; }
 
 	/** Set all channels from ChannelResponse Array **/
-	bool SetCollisionResponseContainer(const FCollisionResponseContainer& InResponseToChannels);
-	void SetResponsesArray(const TArray<FResponseChannel>& InChannelResponses);
-	void UpdateResponseContainerFromArray();
+	ENGINE_API bool SetCollisionResponseContainer(const FCollisionResponseContainer& InResponseToChannels);
+	ENGINE_API void SetResponsesArray(const TArray<FResponseChannel>& InChannelResponses);
+	ENGINE_API void UpdateResponseContainerFromArray();
 
-	bool operator==(const FCollisionResponse& Other) const;
+	ENGINE_API bool operator==(const FCollisionResponse& Other) const;
 	bool operator!=(const FCollisionResponse& Other) const
 	{
 		return !(*this == Other);
@@ -218,9 +227,9 @@ private:
 	 *	During runtime, important data is ResponseToChannel
 	 *	That is the data we care during runtime. But that data won't be saved.
 	 */
-	bool RemoveReponseFromArray(ECollisionChannel Channel);
-	bool AddReponseToArray(ECollisionChannel Channel, ECollisionResponse Response);
-	void UpdateArrayFromResponseContainer();
+	ENGINE_API bool RemoveReponseFromArray(ECollisionChannel Channel);
+	ENGINE_API bool AddReponseToArray(ECollisionChannel Channel, ECollisionResponse Response);
+	ENGINE_API void UpdateArrayFromResponseContainer();
 #endif
 
 	/** Types of objects that this physics objects will collide with. */
@@ -244,9 +253,26 @@ enum class BodyInstanceSceneState : uint8
 	Removed
 };
 
+namespace Chaos
+{
+	class FRigidBodyHandle_Internal;
+}
+
+USTRUCT(BlueprintType)
+struct FBodyInstanceAsyncPhysicsTickHandle
+{
+	GENERATED_BODY()
+	FPhysicsActorHandle Proxy = nullptr;
+
+	ENGINE_API Chaos::FRigidBodyHandle_Internal* operator->();
+
+	ENGINE_API bool IsValid() const;
+	operator bool() const { return IsValid(); }
+};
+
 /** Container for a physics representation of an object */
 USTRUCT(BlueprintType)
-struct ENGINE_API FBodyInstance : public FBodyInstanceCore
+struct FBodyInstance : public FBodyInstanceCore
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -301,12 +327,16 @@ public:
 	UPROPERTY(EditAnywhere, Category = Physics, meta = (DisplayName = "Mode"))
 	TEnumAsByte<EDOFMode::Type> DOFMode;
 
-public:
-
 	/** If true Continuous Collision Detection (CCD) will be used for this component */
 	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadOnly, Category = Collision)
 	uint8 bUseCCD : 1;
 
+private:
+	/** [EXPERIMENTAL] If true Motion-Aware Collision Detection (MACD) will be used for this component */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = Collision)
+	uint8 bUseMACD : 1;
+
+public:
 	/** If true ignore analytic collisions and treat objects as a general implicit surface */
 	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadOnly, Category = Collision)
 	uint8 bIgnoreAnalyticCollisions : 1;
@@ -317,6 +347,13 @@ public:
 
 	/**	Enable contact modification. Assumes custom contact modification has been provided (see FPhysXContactModifyCallback) */
 	uint8 bContactModification : 1;
+
+	/**
+	 * Remove unnecessary edge collisions to allow smooth sliding over surfaces composed of multiple actors/components.
+	 * This is fairly expensive and should only be enabled on hero objects. 
+	 */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadOnly, Category = Collision)
+	uint8 bSmoothEdgeCollisions : 1;
 
 	/////////
 	// SIM SETTINGS
@@ -370,7 +407,7 @@ public:
 
 protected:
 
-	/** [PhysX Only] Whether this body instance has its own custom MaxDepenetrationVelocity*/
+	/** Whether this body instance has its own custom MaxDepenetrationVelocity*/
 	UPROPERTY(EditAnywhere, Category = Physics, meta=(InlineEditConditionToggle))
 	uint8 bOverrideMaxDepenetrationVelocity : 1;
 
@@ -389,6 +426,44 @@ protected:
 
 	/** Whether we are pending a collision profile setup */
 	uint8 bPendingCollisionProfileSetup : 1;
+
+	/** 
+	 * @brief Enable automatic inertia conditioning to stabilize constraints.
+	 * 
+	 * Inertia conitioning increases inertia when an object is long and thin and also when it has joints that are outside the
+	 * collision shapes of the body. Increasing the inertia reduces the amount of rotation applied at joints which helps stabilize
+	 * joint chains, especially when bodies are small. In principle you can get the same behaviour by setting the InertiaTensorScale
+	 * appropriately, but this takes some of the guesswork out of it.
+	 * 
+	 * @note This only changes the inertia used in the low-level solver. That inertia is not visible to the BodyInstance
+	 * which will still report the inertia calculated from the mass, shapes, and InertiaTensorScale.
+	 * 
+	 * @note When enabled, the effective inertia depends on the joints attached to the body so the inertia will change when
+	 * joints are added or removed (automatically - no user action required).
+	 */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadWrite, Category = Physics)
+	uint8 bInertiaConditioning : 1;
+
+	/** If set to true, this body will treat bodies that do not have the flag set as having infinite mass */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadWrite, Category = Physics)
+	uint8 bOneWayInteraction : 1;
+
+public:
+	/** Set the desired delta time for the body. **/
+	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadOnly, Category = Physics)
+	uint8 bOverrideSolverAsyncDeltaTime : 1;
+
+	/** Override value for physics solver async delta time.  With multiple actors specifying this, the solver will use the smallest delta time **/
+	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadOnly, Category = Physics, meta = (editcondition = "bOverrideSolverAsyncDeltaTime"))
+	float SolverAsyncDeltaTime;
+
+	float GetSolverAsyncDeltaTime() const { return SolverAsyncDeltaTime; }
+	bool IsSolverAsyncDeltaTimeSet() const { return bOverrideSolverAsyncDeltaTime && SolverAsyncDeltaTime > 0.0; }
+
+	void SetSolverAsyncDeltaTime(const float NewSolverAsyncDeltaTime);
+
+private:
+	void UpdateSolverAsyncDeltaTime();
 
 public:
 	/** Current scale of physics - used to know when and how physics must be rescaled to match current transform of OwnerComponent. */
@@ -425,20 +500,26 @@ private:
 	struct FCollisionResponse CollisionResponses;
 
 protected:
-	/** [PhysX Only] The maximum velocity used to depenetrate this object*/
+	/** 
+	 * The maximum velocity used to depenetrate this object from others when spawned or teleported with initial overlaps (does not affect overlaps as a result of normal movement).
+	 * A value of zero will allow objects that are spawned overlapping to go to sleep without moving rather than pop out of each other. E.g., use zero if you spawn dynamic rocks 
+	 * partially embedded in the ground and want them to be interactive but not pop out of the ground when touched.
+	 * A negative value is equivalent to bOverrideMaxDepenetrationVelocity = false, meaning use the project setting.
+	 * This overrides the CollisionInitialOverlapDepenetrationVelocity project setting on a per-body basis (and not the MaxDepenetrationVelocity solver setting that will be deprecated).
+	*/
 	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadOnly, Category = Physics, meta = (editcondition = "bOverrideMaxDepenetrationVelocity", ClampMin = "0.0", UIMin = "0.0"))
 	float MaxDepenetrationVelocity;
 
 	/**Mass of the body in KG. By default we compute this based on physical material and mass scale.
 	*@see bOverrideMass to set this directly */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Physics, meta = (editcondition = "bOverrideMass", ClampMin = "0.001", UIMin = "0.001", DisplayName = "MassInKg"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Physics, meta = (editcondition = "bOverrideMass", ClampMin = "0.001", UIMin = "0.001", DisplayName = "Mass (kg)"))
 	float MassInKgOverride;
 
 	/** The body setup holding the default body instance and its collision profile. */
 	TWeakObjectPtr<UBodySetup> ExternalCollisionProfileBodySetup;
 
 	/** Update the substepping interpolation flag */
-	void UpdateInterpolateWhenSubStepping();
+	ENGINE_API void UpdateInterpolateWhenSubStepping();
 
 public:
 
@@ -449,9 +530,9 @@ public:
 	float GetMassOverride() const { return MassInKgOverride; }
 
 	/** Sets the mass override */
-	void SetMassOverride(float MassInKG, bool bNewOverrideMass = true);
+	ENGINE_API void SetMassOverride(float MassInKG, bool bNewOverrideMass = true);
 
-	bool GetRigidBodyState(FRigidBodyState& OutState);
+	ENGINE_API bool GetRigidBodyState(FRigidBodyState& OutState);
 
 	/** 'Drag' force added to reduce linear movement */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Physics)
@@ -470,7 +551,7 @@ public:
 	FVector COMNudge;
 
 	/** Per-instance scaling of mass */
-	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadWrite, Category = Physics)
+	UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadWrite, Category = Physics, meta = (ClampMin = "0.001", UIMin = "0.001"))
 	float MassScale;
 
 	/** Per-instance scaling of inertia (bigger number means  it'll be harder to rotate) */
@@ -479,18 +560,18 @@ public:
 
 public:
 	/** Use the collision profile found in the given BodySetup's default BodyInstance */
-	void UseExternalCollisionProfile(UBodySetup* InExternalCollisionProfileBodySetup);
+	ENGINE_API void UseExternalCollisionProfile(UBodySetup* InExternalCollisionProfileBodySetup);
 
-	void ClearExternalCollisionProfile();
+	ENGINE_API void ClearExternalCollisionProfile();
 
 	/** [Physx Only] Locks physical movement along axis. */
-	void SetDOFLock(EDOFMode::Type NewDOFMode);
+	ENGINE_API void SetDOFLock(EDOFMode::Type NewDOFMode);
 
 	/** [Physx Only] */
-	FVector GetLockedAxis() const;
-	void CreateDOFLock();
+	ENGINE_API FVector GetLockedAxis() const;
+	ENGINE_API void CreateDOFLock();
 
-	static EDOFMode::Type ResolveDOFMode(EDOFMode::Type DOFMode);
+	static ENGINE_API EDOFMode::Type ResolveDOFMode(EDOFMode::Type DOFMode);
 
 	/** [Physx Only] Constraint used to allow for easy DOF setup per bodyinstance */
 	FConstraintInstance* DOFConstraint;
@@ -509,7 +590,7 @@ protected:
 
 	/**	Allows you to override the PhysicalMaterial to use for simple collision on this body. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Collision)
-	class UPhysicalMaterial* PhysMaterialOverride;
+	TObjectPtr<class UPhysicalMaterial> PhysMaterialOverride;
 
 public:
 	/** The maximum angular velocity for this instance [degrees/s]*/
@@ -532,14 +613,16 @@ public:
 
 public:
 
-	UBodySetup* GetBodySetup() const;
+	ENGINE_API UBodySetup* GetBodySetup() const;
 	
-	FPhysicsActorHandle& GetPhysicsActorHandle();
-	const FPhysicsActorHandle& GetPhysicsActorHandle() const;
-	const FPhysicsActorHandle& GetActorReferenceWithWelding() const;
+	ENGINE_API FPhysicsActorHandle& GetPhysicsActorHandle();
+	ENGINE_API const FPhysicsActorHandle& GetPhysicsActorHandle() const;
+	ENGINE_API const FPhysicsActorHandle& GetActorReferenceWithWelding() const;
 
 	// Internal physics representation of our body instance
 	FPhysicsActorHandle ActorHandle;
+
+	FBodyInstanceAsyncPhysicsTickHandle GetBodyInstanceAsyncPhysicsTickHandle() const { return FBodyInstanceAsyncPhysicsTickHandle{ ActorHandle }; }
 
 #if USE_BODYINSTANCE_DEBUG_NAMES
 	TSharedPtr<TArray<ANSICHAR>> CharDebugName;
@@ -549,7 +632,8 @@ public:
 	TWeakObjectPtr<class UPrimitiveComponent> OwnerComponent;
 
 	/** Constructor **/
-	FBodyInstance();
+	ENGINE_API FBodyInstance();
+	ENGINE_API ~FBodyInstance();
 
 	/**  
 	 * Update profile data if required
@@ -558,7 +642,7 @@ public:
 	 *								(for backward compatibility)
 	 * 
 	 **/
-	void LoadProfileData(bool bVerifyProfile);
+	ENGINE_API void LoadProfileData(bool bVerifyProfile);
 
 	void InitBody(UBodySetup* Setup, const FTransform& Transform, UPrimitiveComponent* PrimComp, FPhysScene* InRBScene)
 	{
@@ -574,14 +658,14 @@ public:
 	*	@param SpawnParams The parameters for determining certain spawn behavior
 	*	@param InAggregate An aggregate to place the body into
 	*/
-	void InitBody(UBodySetup* Setup, const FTransform& Transform, UPrimitiveComponent* PrimComp, FPhysScene* InRBScene, const FInitBodySpawnParams& SpawnParams);
+	ENGINE_API void InitBody(UBodySetup* Setup, const FTransform& Transform, UPrimitiveComponent* PrimComp, FPhysScene* InRBScene, const FInitBodySpawnParams& SpawnParams);
 
 	/** Validate a body transform, outputting debug info
 	 *	@param Transform Transform to debug
 	 *	@param DebugName Name of the instance for logging
 	 *	@param Setup Body setup for this instance
 	 */
-	static bool ValidateTransform(const FTransform &Transform, const FString& DebugName, const UBodySetup* Setup);
+	static ENGINE_API bool ValidateTransform(const FTransform &Transform, const FString& DebugName, const UBodySetup* Setup);
 
 	/** Standalone path to batch initialize large amounts of static bodies, which will be deferred till the next scene update for fast scene addition.
 	 *	@param Bodies
@@ -590,51 +674,51 @@ public:
 	 *	@param PrimitiveComp
 	 *	@param InRBScene
 	 */
-	static void InitStaticBodies(const TArray<FBodyInstance*>& Bodies, const TArray<FTransform>& Transforms, UBodySetup* BodySetup, class UPrimitiveComponent* PrimitiveComp, FPhysScene* InRBScene);
+	static ENGINE_API void InitStaticBodies(const TArray<FBodyInstance*>& Bodies, const TArray<FTransform>& Transforms, UBodySetup* BodySetup, class UPrimitiveComponent* PrimitiveComp, FPhysScene* InRBScene);
 
 
 	/** Get the scene that owns this body. */
-	FPhysScene* GetPhysicsScene();
-	const FPhysScene* GetPhysicsScene() const;
+	ENGINE_API FPhysScene* GetPhysicsScene();
+	ENGINE_API const FPhysScene* GetPhysicsScene() const;
 
 	/** Initialise dynamic properties for this instance when using physics - this must be done after scene addition.
 	 *  Note: This function is not thread safe. Make sure to obtain the appropriate physics scene locks before calling this function
 	 */
-	void InitDynamicProperties_AssumesLocked();
+	ENGINE_API void InitDynamicProperties_AssumesLocked();
 
 	/** Build the sim and query filter data (for simple and complex shapes) based on the settings of this BodyInstance (and its associated BodySetup)  */
-	void BuildBodyFilterData(FBodyCollisionFilterData& OutFilterData, const int32 ShapeIndex = INDEX_NONE) const;
+	ENGINE_API void BuildBodyFilterData(FBodyCollisionFilterData& OutFilterData, const int32 ShapeIndex = INDEX_NONE) const;
 
 	/** Build the flags to control which types of collision (sim and query) shapes owned by this BodyInstance should have. */
-	static void BuildBodyCollisionFlags(FBodyCollisionFlags& OutFlags, ECollisionEnabled::Type UseCollisionEnabled, bool bUseComplexAsSimple);
+	static ENGINE_API void BuildBodyCollisionFlags(FBodyCollisionFlags& OutFlags, ECollisionEnabled::Type UseCollisionEnabled, bool bUseComplexAsSimple);
 
 	/** 
 	 *	Utility to get all the shapes from a FBodyInstance 
 	 *	NOTE: This function is not thread safe. You must hold the physics scene lock while calling it and reading/writing from the shapes
 	 */
-	int32 GetAllShapes_AssumesLocked(TArray<FPhysicsShapeHandle>& OutShapes) const;
+	ENGINE_API int32 GetAllShapes_AssumesLocked(TArray<FPhysicsShapeHandle>& OutShapes) const;
 
 	/**
 	 * Terminates the body, releasing resources
 	 * @param bNeverDeferRelease In some cases orphaned actors can have their internal release deferred. If this isn't desired this flag will override that behavior
 	 */
-	void TermBody(bool bNeverDeferRelease = false);
+	ENGINE_API void TermBody(bool bNeverDeferRelease = false);
 
 	/** 
 	 * Takes two body instances and welds them together to create a single simulated rigid body. Returns true if success.
 	 */
-	bool Weld(FBodyInstance* Body, const FTransform& RelativeTM);
+	ENGINE_API bool Weld(FBodyInstance* Body, const FTransform& RelativeTM);
 
 	/** 
 	 * Takes a welded body and unwelds it. This function does not create the new body, it only removes the old one */
-	void UnWeld(FBodyInstance* Body);
+	ENGINE_API void UnWeld(FBodyInstance* Body);
 
 	/** Finds all children that are technically welded to us (for example kinematics are welded but not as far as physx is concerned) and apply the actual physics engine weld on them*/
-	void ApplyWeldOnChildren();
+	ENGINE_API void ApplyWeldOnChildren();
 
 	/**
 	 * After adding/removing shapes call this function to update mass distribution etc... */
-	void PostShapeChange();
+	ENGINE_API void PostShapeChange();
 
 	/**
 	 * Update Body Scale
@@ -642,10 +726,10 @@ public:
 	 * @param	bForceUpdate	Will refresh shape dimensions from BodySetup, even if scale has not changed.
 	 * @return true if succeed
 	 */
-	bool UpdateBodyScale(const FVector& InScale3D, bool bForceUpdate = false);
+	ENGINE_API bool UpdateBodyScale(const FVector& InScale3D, bool bForceUpdate = false);
 
 	/** Dynamically update the vertices of per-poly collision for this body. */
-	void UpdateTriMeshVertices(const TArray<FVector> & NewPositions);
+	ENGINE_API void UpdateTriMeshVertices(const TArray<FVector> & NewPositions);
 
 	/** Returns the center of mass of this body (in world space) */
 	FVector GetCOMPosition() const
@@ -654,128 +738,189 @@ public:
 	}
 
 	/** Returns the mass coordinate system to world space transform (position is world center of mass, rotation is world inertia orientation) */
-	FTransform GetMassSpaceToWorldSpace() const;
+	ENGINE_API FTransform GetMassSpaceToWorldSpace() const;
 
 	/** Returns the mass coordinate system to local space transform (position is local center of mass, rotation should be identity) */
-	FTransform GetMassSpaceLocal() const;
+	ENGINE_API FTransform GetMassSpaceLocal() const;
 
 	/** TODO: this only works at runtime when the physics state has been created. Any changes that result in recomputing mass properties will not properly remember this */
-	void SetMassSpaceLocal(const FTransform& NewMassSpaceLocalTM);
+	ENGINE_API void SetMassSpaceLocal(const FTransform& NewMassSpaceLocalTM);
 
 	/** Draws the center of mass as a wire star */
-	void DrawCOMPosition(class FPrimitiveDrawInterface* PDI, float COMRenderSize, const FColor& COMRenderColor);
+	ENGINE_API void DrawCOMPosition(class FPrimitiveDrawInterface* PDI, float COMRenderSize, const FColor& COMRenderColor);
 
 	/** Utility for copying properties from one BodyInstance to another. */
-	void CopyBodyInstancePropertiesFrom(const FBodyInstance* FromInst);
+	ENGINE_API void CopyBodyInstancePropertiesFrom(const FBodyInstance* FromInst);
 
 	/** Utility for copying only the runtime instanced properties from one BodyInstance to another. */
-	void CopyRuntimeBodyInstancePropertiesFrom(const FBodyInstance* FromInst);
+	ENGINE_API void CopyRuntimeBodyInstancePropertiesFrom(const FBodyInstance* FromInst);
 
 	/** Find the correct PhysicalMaterial for simple geometry on this body */
-	UPhysicalMaterial* GetSimplePhysicalMaterial() const;
+	ENGINE_API UPhysicalMaterial* GetSimplePhysicalMaterial() const;
 
 	/** Find the correct PhysicalMaterial for simple geometry on a given body and owner. This is really for internal use during serialization */
-	static UPhysicalMaterial* GetSimplePhysicalMaterial(const FBodyInstance* BodyInstance, TWeakObjectPtr<UPrimitiveComponent> Owner, TWeakObjectPtr<UBodySetup> BodySetupPtr);
+	static ENGINE_API UPhysicalMaterial* GetSimplePhysicalMaterial(const FBodyInstance* BodyInstance, TWeakObjectPtr<UPrimitiveComponent> Owner, TWeakObjectPtr<UBodySetup> BodySetupPtr);
 
 	/** Get the complex PhysicalMaterials array for this body */
-	TArray<UPhysicalMaterial*> GetComplexPhysicalMaterials() const;
+	ENGINE_API TArray<UPhysicalMaterial*> GetComplexPhysicalMaterials() const;
 
 	/** Get the complex PhysicalMaterials and PhysicalMaterialMasks array for this body */
-	TArray<UPhysicalMaterial*> GetComplexPhysicalMaterials(TArray<FPhysicalMaterialMaskParams>& OutPhysMaterialMasks) const;
+	ENGINE_API TArray<UPhysicalMaterial*> GetComplexPhysicalMaterials(TArray<FPhysicalMaterialMaskParams>& OutPhysMaterialMasks) const;
 
 	/** Get the complex PhysicalMaterials for this body */
-	void GetComplexPhysicalMaterials(TArray<UPhysicalMaterial*> &OutPhysMaterials) const;
+	ENGINE_API void GetComplexPhysicalMaterials(TArray<UPhysicalMaterial*> &OutPhysMaterials) const;
 
 	/** Get the complex PhysicalMaterials and PhysicalMaterialMasks for this body */
-	void GetComplexPhysicalMaterials(TArray<UPhysicalMaterial*> &OutPhysMaterials, TArray<FPhysicalMaterialMaskParams>& OutPhysMaterialMasks) const;
+	ENGINE_API void GetComplexPhysicalMaterials(TArray<UPhysicalMaterial*> &OutPhysMaterials, TArray<FPhysicalMaterialMaskParams>& OutPhysMaterialMasks) const;
 
 	/** Find the correct PhysicalMaterial and PhysicalMaterialMasks for complex geometry on a given body and owner. This is really for internal use during serialization */
-	static void GetComplexPhysicalMaterials(const FBodyInstance* BodyInstance, TWeakObjectPtr<UPrimitiveComponent> Owner, TArray<UPhysicalMaterial*>& OutPhysMaterials, TArray<FPhysicalMaterialMaskParams>* OutPhysMaterialMasks = nullptr);
+	static ENGINE_API void GetComplexPhysicalMaterials(const FBodyInstance* BodyInstance, TWeakObjectPtr<UPrimitiveComponent> Owner, TArray<UPhysicalMaterial*>& OutPhysMaterials, TArray<FPhysicalMaterialMaskParams>* OutPhysMaterialMasks = nullptr);
 
 	/** Returns the slope override struct for this instance. If we don't have our own custom setting, it will return the setting from the body setup. */
-	const struct FWalkableSlopeOverride& GetWalkableSlopeOverride() const;
+	ENGINE_API const struct FWalkableSlopeOverride& GetWalkableSlopeOverride() const;
 
 	/** Sets a custom slope override struct for this instance. Implicitly sets bOverrideWalkableSlopeOnInstance to true. */
-	void SetWalkableSlopeOverride(const FWalkableSlopeOverride& NewOverride, bool bNewOverideSetting = true);
+	ENGINE_API void SetWalkableSlopeOverride(const FWalkableSlopeOverride& NewOverride, bool bNewOverideSetting = true);
 
 	/** Gets bOverrideWalkableSlopeOnInstance */
-	bool GetOverrideWalkableSlopeOnInstance() const;
+	ENGINE_API bool GetOverrideWalkableSlopeOnInstance() const;
 
 	/** Returns true if the body is not static */
-	bool IsDynamic() const;
+	ENGINE_API bool IsDynamic() const;
 
 	/** Returns true if the body is non kinematic*/
-	bool IsNonKinematic() const;
+	ENGINE_API bool IsNonKinematic() const;
 
 	/** Returns the body's mass */
-	float GetBodyMass() const;
+	ENGINE_API float GetBodyMass() const;
 	/** Return bounds of physics representation */
-	FBox GetBodyBounds() const;
+	ENGINE_API FBox GetBodyBounds() const;
 	/** Return the body's inertia tensor. This is returned in local mass space */
-	FVector GetBodyInertiaTensor() const;
+	ENGINE_API FVector GetBodyInertiaTensor() const;
 
+	/** Whether inertia conditioning is enabled. @see bInertiaConditioning */
+	bool IsInertiaConditioningEnabled() { return bInertiaConditioning; }
 
-	/** Set this body to be fixed (kinematic) or not. */
-	void SetInstanceSimulatePhysics(bool bSimulate, bool bMaintainPhysicsBlending=false);
+	/** Enable or disable inertia conditionin.  @see bInertiaConditioning */
+	ENGINE_API void SetInertiaConditioningEnabled(bool bEnabled);
+
+	/** Apply async physics command onto the body instance*/
+	ENGINE_API void ApplyAsyncPhysicsCommand(FAsyncPhysicsTimestamp TimeStamp, const bool bIsInternal, APlayerController* PlayerController, const TFunction<void()>& Command);
+
+	/** 
+	 * Set this body to either simulate or to be fixed/kinematic. 
+	 * 
+	 * @param bMaintainPhysicsBlending If true then the physics blend weight will not be adjusted. If false then 
+	 *        it will get set to 0 or 1 depending on bSimulate.
+	 * @param bPreserveExistingAttachments If true then any existing attachment between the owning component and 
+	 *        its parent will be preserved, even when switching to simulate (most likely useful for skeletal meshes
+	 *        that are parented to a moveable component). If false then the owning component will be detached 
+	 *        from its parent if this is the root body and it is being set to simulate.
+	 */
+	ENGINE_API void SetInstanceSimulatePhysics(bool bSimulate, bool bMaintainPhysicsBlending=false, bool bPreserveExistingAttachment = false);
 	/** Makes sure the current kinematic state matches the simulate flag */
-	void UpdateInstanceSimulatePhysics();
+	ENGINE_API void UpdateInstanceSimulatePhysics();
 	/** Returns true if this body is simulating, false if it is fixed (kinematic) */
-	bool IsInstanceSimulatingPhysics() const;
+	ENGINE_API bool IsInstanceSimulatingPhysics() const;
 	/** Returns whether this body is awake */
-	bool IsInstanceAwake() const;
+	ENGINE_API bool IsInstanceAwake() const;
 	/** Wake this body */
-	void WakeInstance();
+	ENGINE_API void WakeInstance();
 	/** Force this body to sleep */
-	void PutInstanceToSleep();
+	ENGINE_API void PutInstanceToSleep();
 	/** Gets the multiplier to the threshold where the body will go to sleep automatically. */
-	float GetSleepThresholdMultiplier() const;
+	ENGINE_API float GetSleepThresholdMultiplier() const;
 	/** Add custom forces and torques on the body. The callback will be called more than once, if substepping enabled, for every substep.  */
-	void AddCustomPhysics(FCalculateCustomPhysics& CalculateCustomPhysics);
+	ENGINE_API void AddCustomPhysics(FCalculateCustomPhysics& CalculateCustomPhysics);
 	/** Add a force to this body */
-	void AddForce(const FVector& Force, bool bAllowSubstepping = true, bool bAccelChange = false);
+	ENGINE_API void AddForce(const FVector& Force, bool bAllowSubstepping = true, bool bAccelChange = false, const FAsyncPhysicsTimestamp TimeStamp = FAsyncPhysicsTimestamp(), APlayerController* PlayerController = nullptr);
 	/** Add a force at a particular position (world space when bIsLocalForce = false, body space otherwise) */
-	void AddForceAtPosition(const FVector& Force, const FVector& Position, bool bAllowSubstepping = true, bool bIsLocalForce = false);
+	ENGINE_API void AddForceAtPosition(const FVector& Force, const FVector& Position, bool bAllowSubstepping = true, bool bIsLocalForce = false, const FAsyncPhysicsTimestamp TimeStamp = FAsyncPhysicsTimestamp(), APlayerController* PlayerController = nullptr);
 	/** Clear accumulated forces on this body */
-	void ClearForces(bool bAllowSubstepping = true);
+	ENGINE_API void ClearForces(bool bAllowSubstepping = true);
 
 	/** If set to true, this body will treat bodies that do not have the flag set as having infinite mass */
-	void SetOneWayInteraction(bool InOneWayInteraction = true);
+	ENGINE_API void SetOneWayInteraction(bool InOneWayInteraction = true);
 
 	/** Add a torque to this body */
-	void AddTorqueInRadians(const FVector& Torque, bool bAllowSubstepping = true, bool bAccelChange = false);
+	ENGINE_API void AddTorqueInRadians(const FVector& Torque, bool bAllowSubstepping = true, bool bAccelChange = false, const FAsyncPhysicsTimestamp TimeStamp = FAsyncPhysicsTimestamp(), APlayerController* PlayerController = nullptr);
 	/** Clear accumulated torques on this body */
-	void ClearTorques(bool bAllowSubstepping = true);
+	ENGINE_API void ClearTorques(bool bAllowSubstepping = true);
 
 	/** Add a rotational impulse to this body */
-	void AddAngularImpulseInRadians(const FVector& Impulse, bool bVelChange);
+	ENGINE_API void AddAngularImpulseInRadians(const FVector& Impulse, bool bVelChange, const FAsyncPhysicsTimestamp TimeStamp = FAsyncPhysicsTimestamp(), APlayerController* PlayerController = nullptr);
 
 	/** Add an impulse to this body */
-	void AddImpulse(const FVector& Impulse, bool bVelChange);
+	ENGINE_API void AddImpulse(const FVector& Impulse, bool bVelChange, const FAsyncPhysicsTimestamp TimeStamp = FAsyncPhysicsTimestamp(), APlayerController* PlayerController = nullptr);
+	
 	/** Add an impulse to this body and a particular world position */
-	void AddImpulseAtPosition(const FVector& Impulse, const FVector& Position);
+	ENGINE_API void AddImpulseAtPosition(const FVector& Impulse, const FVector& Position, const FAsyncPhysicsTimestamp TimeStamp = FAsyncPhysicsTimestamp(), APlayerController* PlayerController = nullptr);
+
+	/** Add a velocity change impulse to this body and a particular world position */
+	ENGINE_API void AddVelocityChangeImpulseAtLocation(const FVector& Impulse, const FVector& Position, const FAsyncPhysicsTimestamp TimeStamp = FAsyncPhysicsTimestamp(), APlayerController* PlayerController = nullptr);
+
 	/** Set the linear velocity of this body */
-	void SetLinearVelocity(const FVector& NewVel, bool bAddToCurrent, bool bAutoWake = true);
+	ENGINE_API void SetLinearVelocity(const FVector& NewVel, bool bAddToCurrent, bool bAutoWake = true);
 
 	/** Set the angular velocity of this body */
-	void SetAngularVelocityInRadians(const FVector& NewAngVel, bool bAddToCurrent, bool bAutoWake = true);
+	ENGINE_API void SetAngularVelocityInRadians(const FVector& NewAngVel, bool bAddToCurrent, bool bAutoWake = true);
 
 	/** Set the maximum angular velocity of this body */
-	void SetMaxAngularVelocityInRadians(float NewMaxAngVel, bool bAddToCurrent, bool bUpdateOverrideMaxAngularVelocity = true);
+	ENGINE_API void SetMaxAngularVelocityInRadians(float NewMaxAngVel, bool bAddToCurrent, bool bUpdateOverrideMaxAngularVelocity = true);
 
 	/** Get the maximum angular velocity of this body */
-	float GetMaxAngularVelocityInRadians() const;
+	ENGINE_API float GetMaxAngularVelocityInRadians() const;
 
-	/** Set the maximum depenetration velocity the physics simulation will introduce */
-	void SetMaxDepenetrationVelocity(float MaxVelocity);
+	/** Are we overriding the MaxDepenetrationVelocity. See SetMaxDepenetrationVelocity */
+	ENGINE_API bool GetOverrideMaxDepenetrationVelocity() const { return bOverrideMaxDepenetrationVelocity; }
+
+	/** Enable/Disable override of MaxDepenetrationVelocity */
+	ENGINE_API void SetOverrideMaxDepenetrationVelocity(bool bInEnabled);
+
+	/**
+	 * Set the maximum velocity used to depenetrate this object from others when spawned with initial overlaps or teleports (does not affect overlaps as a result of normal movement).
+	 * A value of zero will allow objects that are spawned overlapping to go to sleep as they are rather than pop out of each other.
+	 * Note: implicitly calls SetOverrideMaxDepenetrationVelocity(true)
+	 * Note: MaxDepenetration overrides the CollisionInitialOverlapDepenetrationVelocity project setting (and not the MaxDepenetrationVelocity solver setting that will be deprecated)
+	*/
+	ENGINE_API void SetMaxDepenetrationVelocity(float MaxVelocity);
+
+	/** The maximum velocity at which initally-overlapping bodies will separate. Does not affect normal contact resolution. */
+	ENGINE_API float GetMaxDepenetrationVelocity() const { return MaxDepenetrationVelocity; }
+
 	/** Set whether we should get a notification about physics collisions */
-	void SetInstanceNotifyRBCollision(bool bNewNotifyCollision);
+	ENGINE_API void SetInstanceNotifyRBCollision(bool bNewNotifyCollision);
 	/** Enables/disables whether this body is affected by gravity. */
-	void SetEnableGravity(bool bGravityEnabled);
+	ENGINE_API void SetEnableGravity(bool bGravityEnabled);
+	/** Enables/disables whether this body, when kinematic, is updated from the simulation rather than when setting the kinematic target. */
+	ENGINE_API void SetUpdateKinematicFromSimulation(bool bUpdateKinematicFromSimulation);
 	/** Enables/disables contact modification */
-	void SetContactModification(bool bNewContactModification);
+	ENGINE_API void SetContactModification(bool bNewContactModification);
+	/** Enables/disabled smoothed edge collisions */
+	ENGINE_API void SetSmoothEdgeCollisionsEnabled(bool bNewSmoothEdgeCollisions);
 
-	/** Enable/disable Continuous Collidion Detection feature */
-	void SetUseCCD(bool bInUseCCD);
+	/** Enable/disable Continuous Collision Detection feature */
+	ENGINE_API void SetUseCCD(bool bInUseCCD);
+
+	/** 
+	 * [EXPERIMENTAL] Enable/disable Motion-Aware Collision Detection feature. MACD attempts to take the movement of the
+	 * body into account during collisions detection to reduce the chance of objects passing through each other at moderate
+	 * speeds without the need for CCD. CCD is still required reliable collision between high-speed objects.
+	 */
+	ENGINE_API void SetUseMACD(bool bInUseMACD);
+
+	/** [EXPERIMENTAL] Whether Motion-Aware Collision Detection is enabled */
+	bool GetUseMACD() const { return bUseMACD != 0; }
+
+	/** Disable/Re-Enable this body in the solver,  when disable, the body won't be part of the simulation ( regardless if it's dynamic or kinematic ) and no collision will occur 
+	* this can be used for performance control situation for example
+	*/
+	ENGINE_API void SetPhysicsDisabled(bool bSetDisabled);
+
+	ENGINE_API bool IsPhysicsDisabled() const;
+
+	/** Get the EPhysicsReplicationMode from the owning actor. It's recommended to get the parameter directly from the Actor if possible. */
+	ENGINE_API EPhysicsReplicationMode GetPhysicsReplicationMode() const;
 
 private:
 
@@ -826,93 +971,99 @@ private:
 
 public:
 	/** Executes the OnCalculateCustomProjection delegate if bound. */
-	void ExecuteOnCalculateCustomProjection(FTransform& WorldTM) const;
+	ENGINE_API void ExecuteOnCalculateCustomProjection(FTransform& WorldTM) const;
 
 	/** Returns reference to the OnCalculateCustomProjection delegate. Will allocate delegate struct if not already created. */
-	FCalculateCustomProjection& OnCalculateCustomProjection();
+	ENGINE_API FCalculateCustomProjection& OnCalculateCustomProjection();
 
 	/** Returns reference to the OnRecalculatedMassProperties delegate. Will allocate delegate struct if not already created. */
-	FRecalculatedMassProperties& OnRecalculatedMassProperties();
+	ENGINE_API FRecalculatedMassProperties& OnRecalculatedMassProperties();
 
 	/** See if this body is valid. */
-	bool IsValidBodyInstance() const;
+	ENGINE_API bool IsValidBodyInstance() const;
 
 	/** Get current transform in world space from physics body. */
-	FTransform GetUnrealWorldTransform(bool bWithProjection = true, bool bForceGlobalPose = false) const;
+	ENGINE_API FTransform GetUnrealWorldTransform(bool bWithProjection = true, bool bForceGlobalPose = false) const;
 
 	/** Get current transform in world space from physics body. */
-	FTransform GetUnrealWorldTransform_AssumesLocked(bool bWithProjection = true, bool bForceGlobalPose = false) const;
+	ENGINE_API FTransform GetUnrealWorldTransform_AssumesLocked(bool bWithProjection = true, bool bForceGlobalPose = false) const;
+
+	/** Get the kinematic target transform in world space from physics body. Will only be relevant/useful if the body is kinematic */
+	ENGINE_API FTransform GetKinematicTarget() const;
+
+	/** Get the kinematic target transform in world space from physics body. Will only be relevant/useful if the body is kinematic */
+	ENGINE_API FTransform GetKinematicTarget_AssumesLocked() const;
 
 	/**
 	 *	Move the physics body to a new pose.
 	 *	@param	bTeleport	If true, no velocity is inferred on the kinematic body from this movement, but it moves right away.
 	 */
-	void SetBodyTransform(const FTransform& NewTransform, ETeleportType Teleport, bool bAutoWake = true);
+	ENGINE_API void SetBodyTransform(const FTransform& NewTransform, ETeleportType Teleport, bool bAutoWake = true);
 
 	/** Get current velocity in world space from physics body. */
-	FVector GetUnrealWorldVelocity() const;
+	ENGINE_API FVector GetUnrealWorldVelocity() const;
 
 	/** Get current velocity in world space from physics body. */
-	FVector GetUnrealWorldVelocity_AssumesLocked() const;
+	ENGINE_API FVector GetUnrealWorldVelocity_AssumesLocked() const;
 
 	/** Get current angular velocity in world space from physics body. */
-	FVector GetUnrealWorldAngularVelocityInRadians() const;
+	ENGINE_API FVector GetUnrealWorldAngularVelocityInRadians() const;
 
 	/** Get current angular velocity in world space from physics body. */
-	FVector GetUnrealWorldAngularVelocityInRadians_AssumesLocked() const;
+	ENGINE_API FVector GetUnrealWorldAngularVelocityInRadians_AssumesLocked() const;
 
 	/** Get current velocity of a point on this physics body, in world space. Point is specified in world space. */
-	FVector GetUnrealWorldVelocityAtPoint(const FVector& Point) const;
+	ENGINE_API FVector GetUnrealWorldVelocityAtPoint(const FVector& Point) const;
 
 	/** Get current velocity of a point on this physics body, in world space. Point is specified in world space. */
-	FVector GetUnrealWorldVelocityAtPoint_AssumesLocked(const FVector& Point) const;
+	ENGINE_API FVector GetUnrealWorldVelocityAtPoint_AssumesLocked(const FVector& Point) const;
 
 	/** Set physical material override for this body */
-	void SetPhysMaterialOverride(class UPhysicalMaterial* NewPhysMaterial);
+	ENGINE_API void SetPhysMaterialOverride(class UPhysicalMaterial* NewPhysMaterial);
 
 	/** Set a new contact report force threhold.  Threshold < 0 disables this feature. */
-	void SetContactReportForceThreshold(float Threshold);
+	ENGINE_API void SetContactReportForceThreshold(float Threshold);
 
 	/** Set the collision response of this body to a particular channel */
-	bool SetResponseToChannel(ECollisionChannel Channel, ECollisionResponse NewResponse);
+	ENGINE_API bool SetResponseToChannel(ECollisionChannel Channel, ECollisionResponse NewResponse);
 
 	/** Get the collision response of this body to a particular channel */
 	FORCEINLINE_DEBUGGABLE ECollisionResponse GetResponseToChannel(ECollisionChannel Channel) const { return CollisionResponses.GetResponse(Channel); }
 
 	/** Set the response of this body to all channels */
-	bool SetResponseToAllChannels(ECollisionResponse NewResponse);
+	ENGINE_API bool SetResponseToAllChannels(ECollisionResponse NewResponse);
 
 	/** Replace the channels on this body matching the old response with the new response */
-	bool ReplaceResponseToChannels(ECollisionResponse OldResponse, ECollisionResponse NewResponse);
+	ENGINE_API bool ReplaceResponseToChannels(ECollisionResponse OldResponse, ECollisionResponse NewResponse);
 
 	/** Set the response of this body to the supplied settings */
-	bool SetResponseToChannels(const FCollisionResponseContainer& NewResponses);
+	ENGINE_API bool SetResponseToChannels(const FCollisionResponseContainer& NewResponses);
 
 	/** Set the response of a specific shape on this body to the supplied settings */
-	bool SetShapeResponseToChannels(const int32 ShapeIndex, const FCollisionResponseContainer& NewResponses);
+	ENGINE_API bool SetShapeResponseToChannels(const int32 ShapeIndex, const FCollisionResponseContainer& NewResponses);
 
 	/** Get Collision ResponseToChannels container for this component **/
 	FORCEINLINE_DEBUGGABLE const FCollisionResponseContainer& GetResponseToChannels() const { return CollisionResponses.GetResponseContainer(); }
 
 	/** Get Collision ResponseToChannels container for a specific shape in this component **/
-	const FCollisionResponseContainer& GetShapeResponseToChannels(const int32 ShapeIndex) const;
-	const FCollisionResponseContainer& GetShapeResponseToChannels(const int32 ShapeIndex, const FCollisionResponseContainer& DefaultResponseContainer) const;
+	ENGINE_API const FCollisionResponseContainer& GetShapeResponseToChannels(const int32 ShapeIndex) const;
+	ENGINE_API const FCollisionResponseContainer& GetShapeResponseToChannels(const int32 ShapeIndex, const FCollisionResponseContainer& DefaultResponseContainer) const;
 
 	/** Set the movement channel of this body to the one supplied */
-	void SetObjectType(ECollisionChannel Channel);
+	ENGINE_API void SetObjectType(ECollisionChannel Channel);
 
 	/** Get the movement channel of this body **/
 	FORCEINLINE_DEBUGGABLE ECollisionChannel GetObjectType() const { return ObjectType; }
 
 	/** Controls what kind of collision is enabled for this body and allows optional disable physics rebuild */
-	void SetCollisionEnabled(ECollisionEnabled::Type NewType, bool bUpdatePhysicsFilterData = true);
+	ENGINE_API void SetCollisionEnabled(ECollisionEnabled::Type NewType, bool bUpdatePhysicsFilterData = true);
 
 	/** Controls what kind of collision is enabled for a particular shape */
-	void SetShapeCollisionEnabled(const int32 ShapeIndex, ECollisionEnabled::Type NewType, bool bUpdatePhysicsFilterData = true);
+	ENGINE_API void SetShapeCollisionEnabled(const int32 ShapeIndex, ECollisionEnabled::Type NewType, bool bUpdatePhysicsFilterData = true);
 
 private:
 
-	ECollisionEnabled::Type GetCollisionEnabled_CheckOwner() const;
+	ENGINE_API ECollisionEnabled::Type GetCollisionEnabled_CheckOwner() const;
 
 public:
 	/** Get the current type of collision enabled */
@@ -922,7 +1073,7 @@ public:
 	}
 
 	/** Get the current type of collision enabled for a particular shape */
-	ECollisionEnabled::Type GetShapeCollisionEnabled(const int32 ShapeIndex) const;
+	ENGINE_API ECollisionEnabled::Type GetShapeCollisionEnabled(const int32 ShapeIndex) const;
 
 	/**  
 	 * Set Collision Profile Name (deferred)
@@ -931,7 +1082,7 @@ public:
 	 * or the collision profile is accessed.
 	 * @param InCollisionProfileName : New Profile Name
 	 */
-	void SetCollisionProfileNameDeferred(FName InCollisionProfileName);
+	ENGINE_API void SetCollisionProfileNameDeferred(FName InCollisionProfileName);
 
 	/**  
 	 * Set Collision Profile Name
@@ -940,30 +1091,30 @@ public:
 	 * 
 	 * @param InCollisionProfileName : New Profile Name
 	 */
-	void SetCollisionProfileName(FName InCollisionProfileName);
+	ENGINE_API void SetCollisionProfileName(FName InCollisionProfileName);
 
 	/** Updates the mask filter. */
-	void SetMaskFilter(FMaskFilter InMaskFilter);
+	ENGINE_API void SetMaskFilter(FMaskFilter InMaskFilter);
 
 	/** Return the ignore mask filter. */
 	FORCEINLINE FMaskFilter GetMaskFilter() const { return MaskFilter; }
 	/** Returns the collision profile name that will be used. */
-	FName GetCollisionProfileName() const;
+	ENGINE_API FName GetCollisionProfileName() const;
 
 	/** return true if it uses Collision Profile System. False otherwise*/
-	bool DoesUseCollisionProfile() const;
+	ENGINE_API bool DoesUseCollisionProfile() const;
 
 	/** Modify the mass scale of this body */
-	void SetMassScale(float InMassScale=1.f);
+	ENGINE_API void SetMassScale(float InMassScale=1.f);
 
 	/** Update instance's mass properties (mass, inertia and center-of-mass offset) based on MassScale, InstanceMassScale and COMNudge. */
-	void UpdateMassProperties();
+	ENGINE_API void UpdateMassProperties();
 
 	/** Update instance's linear and angular damping */
-	void UpdateDampingProperties();
+	ENGINE_API void UpdateDampingProperties();
 
 	/** Update the instance's material properties (friction, restitution) */
-	void UpdatePhysicalMaterials();
+	ENGINE_API void UpdatePhysicalMaterials();
 
 	/** 
 	 *  Apply a material directly to the passed in shape. Note this function is very advanced and requires knowledge of shape sharing as well as threading. Note: assumes the appropriate locks have been obtained
@@ -971,18 +1122,18 @@ public:
 	 *  @param  SimplePhysMat			The material to use if a simple shape is provided (or complex materials are empty)
 	 *  @param  ComplexPhysMats			The array of materials to apply if a complex shape is provided
 	 */
-	static void ApplyMaterialToShape_AssumesLocked(const FPhysicsShapeHandle& InShape, UPhysicalMaterial* SimplePhysMat, const TArrayView<UPhysicalMaterial*>& ComplexPhysMats, const TArrayView<FPhysicalMaterialMaskParams>* ComplexPhysMatMasks = nullptr);
+	static ENGINE_API void ApplyMaterialToShape_AssumesLocked(const FPhysicsShapeHandle& InShape, UPhysicalMaterial* SimplePhysMat, const TArrayView<UPhysicalMaterial*>& ComplexPhysMats, const TArrayView<FPhysicalMaterialMaskParams>* ComplexPhysMatMasks = nullptr);
 
 	/** Note: This function is not thread safe. Make sure you obtain the appropriate physics scene lock before calling it*/
-	void ApplyMaterialToInstanceShapes_AssumesLocked(UPhysicalMaterial* SimplePhysMat, TArray<UPhysicalMaterial*>& ComplexPhysMats, const TArrayView<FPhysicalMaterialMaskParams>& ComplexPhysMatMasks);
+	ENGINE_API void ApplyMaterialToInstanceShapes_AssumesLocked(UPhysicalMaterial* SimplePhysMat, TArray<UPhysicalMaterial*>& ComplexPhysMats, const TArrayView<FPhysicalMaterialMaskParams>& ComplexPhysMatMasks);
 
 	/** Update the instances collision filtering data */ 
-	void UpdatePhysicsFilterData();
+	ENGINE_API void UpdatePhysicsFilterData();
 
 	friend FArchive& operator<<(FArchive& Ar,FBodyInstance& BodyInst);
 
 	/** Get the name for this body, for use in debugging */
-	FString GetBodyDebugName() const;
+	ENGINE_API FString GetBodyDebugName() const;
 
 	/** 
 	 *  Trace a ray against just this bodyinstance
@@ -993,7 +1144,7 @@ public:
 	 *  @param bReturnPhysicalMaterial	Fill in the PhysMaterial field of OutHit
 	 *  @return true if a hit is found
 	 */
-	bool LineTrace(struct FHitResult& OutHit, const FVector& Start, const FVector& End, bool bTraceComplex, bool bReturnPhysicalMaterial = false) const;
+	ENGINE_API bool LineTrace(struct FHitResult& OutHit, const FVector& Start, const FVector& End, bool bTraceComplex, bool bReturnPhysicalMaterial = false) const;
 
 	/** 
 	 *  Trace a shape against just this bodyinstance
@@ -1005,7 +1156,7 @@ public:
 	 *	@param	bTraceComplex		Should we trace against complex or simple collision of this body
 	 *  @return true if a hit is found
 	 */
-	bool Sweep(struct FHitResult& OutHit, const FVector& Start, const FVector& End, const FQuat& ShapeWorldRotation, const FCollisionShape& Shape, bool bTraceComplex) const;
+	ENGINE_API bool Sweep(struct FHitResult& OutHit, const FVector& Start, const FVector& End, const FQuat& ShapeWorldRotation, const FCollisionShape& Shape, bool bTraceComplex) const;
 
 	/**
 	 *  Test if the bodyinstance overlaps with the specified shape at the specified position/rotation
@@ -1014,9 +1165,10 @@ public:
 	 *  @param  Rotation		Rotation to apply to the shape before testing
 	 *	@param	CollisionShape	Shape to test against
 	 *  @param  OutMTD			The minimum translation direction needed to push the shape out of this BodyInstance. (Optional)
+	 *  @param  TraceComplex    Trace against complex or simple geometry (Defaults simple)
 	 *  @return true if the geometry associated with this body instance overlaps the query shape at the specified location/rotation
 	 */
-	bool OverlapTest(const FVector& Position, const FQuat& Rotation, const struct FCollisionShape& CollisionShape, FMTDResult* OutMTD = nullptr) const;
+	ENGINE_API bool OverlapTest(const FVector& Position, const FQuat& Rotation, const struct FCollisionShape& CollisionShape, FMTDResult* OutMTD = nullptr, bool bTraceComplex = false) const;
 
 	/**
 	 *  Test if the bodyinstance overlaps with the specified shape at the specified position/rotation
@@ -1026,9 +1178,10 @@ public:
 	 *  @param  Rotation		Rotation to apply to the shape before testing
 	 *	@param	CollisionShape	Shape to test against
 	 *  @param  OutMTD			The minimum translation direction needed to push the shape out of this BodyInstance. (Optional)
+	 * 	@param  TraceComplex    Trace against complex or simple geometry  (Defaults simple)
 	 *  @return true if the geometry associated with this body instance overlaps the query shape at the specified location/rotation
 	 */
-	bool OverlapTest_AssumesLocked(const FVector& Position, const FQuat& Rotation, const struct FCollisionShape& CollisionShape, FMTDResult* OutMTD = nullptr) const;
+	ENGINE_API bool OverlapTest_AssumesLocked(const FVector& Position, const FQuat& Rotation, const struct FCollisionShape& CollisionShape, FMTDResult* OutMTD = nullptr, bool bTraceComplex = false) const;
 
 	/**
 	 *  Test if the bodyinstance overlaps with the specified body instances
@@ -1036,10 +1189,11 @@ public:
 	 *  @param  Position		Position to place our shapes at before testing (shapes of this BodyInstance)
 	 *  @param  Rotation		Rotation to apply to our shapes before testing (shapes of this BodyInstance)
 	 *  @param  Bodies			The bodies we are testing for overlap with. These bodies will be in world space already
+	 *  @param  TraceComplex    Trace against complex or simple geometry (Defaults simple)
 	 *  @return true if any of the bodies passed in overlap with this
 	 */
-	bool OverlapTestForBodies(const FVector& Position, const FQuat& Rotation, const TArray<FBodyInstance*>& Bodies) const;
-	bool OverlapTestForBody(const FVector& Position, const FQuat& Rotation, FBodyInstance* Body) const;
+	ENGINE_API bool OverlapTestForBodies(const FVector& Position, const FQuat& Rotation, const TArray<FBodyInstance*>& Bodies, bool bTraceComplex = false) const;
+	ENGINE_API bool OverlapTestForBody(const FVector& Position, const FQuat& Rotation, FBodyInstance* Body, bool bTraceComplex = false) const;
 
 	/**
 	 *  Determines the set of components that this body instance would overlap with at the supplied location/rotation
@@ -1055,8 +1209,8 @@ public:
 	 *	@param	ObjectQueryParams	List of object types it's looking for. When this enters, we do object query with component shape
 	 *  @return TRUE if OutOverlaps contains any blocking results
 	 */
-	bool OverlapMulti(TArray<struct FOverlapResult>& InOutOverlaps, const class UWorld* World, const FTransform* pWorldToComponent, const FVector& Pos, const FQuat& Rot,    ECollisionChannel TestChannel, const struct FComponentQueryParams& Params, const struct FCollisionResponseParams& ResponseParams, const FCollisionObjectQueryParams& ObjectQueryParams = FCollisionObjectQueryParams::DefaultObjectQueryParam) const;
-	bool OverlapMulti(TArray<struct FOverlapResult>& InOutOverlaps, const class UWorld* World, const FTransform* pWorldToComponent, const FVector& Pos, const FRotator& Rot, ECollisionChannel TestChannel, const struct FComponentQueryParams& Params, const struct FCollisionResponseParams& ResponseParams, const FCollisionObjectQueryParams& ObjectQueryParams = FCollisionObjectQueryParams::DefaultObjectQueryParam) const;
+	ENGINE_API bool OverlapMulti(TArray<struct FOverlapResult>& InOutOverlaps, const class UWorld* World, const FTransform* pWorldToComponent, const FVector& Pos, const FQuat& Rot,    ECollisionChannel TestChannel, const struct FComponentQueryParams& Params, const struct FCollisionResponseParams& ResponseParams, const FCollisionObjectQueryParams& ObjectQueryParams = FCollisionObjectQueryParams::DefaultObjectQueryParam) const;
+	ENGINE_API bool OverlapMulti(TArray<struct FOverlapResult>& InOutOverlaps, const class UWorld* World, const FTransform* pWorldToComponent, const FVector& Pos, const FRotator& Rot, ECollisionChannel TestChannel, const struct FComponentQueryParams& Params, const struct FCollisionResponseParams& ResponseParams, const FCollisionObjectQueryParams& ObjectQueryParams = FCollisionObjectQueryParams::DefaultObjectQueryParam) const;
 
 	/**
 	 * Add an impulse to this bodyinstance, radiating out from the specified position.
@@ -1067,7 +1221,7 @@ public:
 	 * @param Falloff		Allows you to control the strength of the impulse as a function of distance from Origin.
 	 * @param bVelChange	If true, the Strength is taken as a change in velocity instead of an impulse (ie. mass will have no effect).
 	 */
-	void AddRadialImpulseToBody(const FVector& Origin, float Radius, float Strength, uint8 Falloff, bool bVelChange = false);
+	ENGINE_API void AddRadialImpulseToBody(const FVector& Origin, float Radius, float Strength, uint8 Falloff, bool bVelChange = false);
 
 	/**
 	 *	Add a force to this bodyinstance, originating from the supplied world-space location.
@@ -1079,7 +1233,7 @@ public:
 	 *  @param bAccelChange If true, Strength is taken as a change in acceleration instead of a physical force (i.e. mass will have no effect).
 	 *  @param bAllowSubstepping Whether we should sub-step this radial force. You should only turn this off if you're calling it from a sub-step callback, otherwise there will be energy loss
 	 */
-	void AddRadialForceToBody(const FVector& Origin, float Radius, float Strength, uint8 Falloff, bool bAccelChange = false, bool bAllowSubstepping = true);
+	ENGINE_API void AddRadialForceToBody(const FVector& Origin, float Radius, float Strength, uint8 Falloff, bool bAccelChange = false, bool bAllowSubstepping = true);
 
 	/**
 	 * Get distance to the body surface if available
@@ -1092,7 +1246,7 @@ public:
 	 * @param OutPointOnBody	Point on the surface of body closest to Point
 	 * @return true if a distance to the body was found and OutDistanceSquared has been populated
 	 */
-	bool GetSquaredDistanceToBody(const FVector& Point, float& OutDistanceSquared, FVector& OutPointOnBody) const;
+	ENGINE_API bool GetSquaredDistanceToBody(const FVector& Point, float& OutDistanceSquared, FVector& OutPointOnBody) const;
 
 	/**
 	* Get the square of the distance to the body surface if available
@@ -1102,31 +1256,31 @@ public:
 	* @param Point				Point in world space
 	* @param OutPointOnBody	Point on the surface of body closest to Point
 	*/
-	float GetDistanceToBody(const FVector& Point, FVector& OutPointOnBody) const;
+	ENGINE_API float GetDistanceToBody(const FVector& Point, FVector& OutPointOnBody) const;
 
 	/** 
 	 * Returns memory used by resources allocated for this body instance ( ex. physics resources )
 	 **/
-	void GetBodyInstanceResourceSizeEx(FResourceSizeEx& CumulativeResourceSize) const;
+	ENGINE_API void GetBodyInstanceResourceSizeEx(FResourceSizeEx& CumulativeResourceSize) const;
 
 	/**
 	 * UObject notification by OwningComponent
 	 */
-	void FixupData(class UObject* Loader);
+	ENGINE_API void FixupData(class UObject* Loader);
 
 	const FCollisionResponse& GetCollisionResponse() const { return CollisionResponses; }
 
 	/** Applies a deferred collision profile */
-	void ApplyDeferredCollisionProfileName();
+	ENGINE_API void ApplyDeferredCollisionProfileName();
 
 	/** Returns the original owning body instance. This is needed for welding */
-	const FBodyInstance* GetOriginalBodyInstance(const FPhysicsShapeHandle& InShape) const;
+	ENGINE_API const FBodyInstance* GetOriginalBodyInstance(const FPhysicsShapeHandle& InShape) const;
 
 	/** Returns the relative transform between root body and welded instance owned by the shape.*/
-	const FTransform& GetRelativeBodyTransform(const FPhysicsShapeHandle& InShape) const;
+	ENGINE_API const FTransform& GetRelativeBodyTransform(const FPhysicsShapeHandle& InShape) const;
 
 	/** Check if the shape is owned by this body instance */
-	bool IsShapeBoundToBody(const FPhysicsShapeHandle& Shape) const;
+	ENGINE_API bool IsShapeBoundToBody(const FPhysicsShapeHandle& Shape) const;
 
 public:
 	// #PHYS2 Rename, not just for physx now.
@@ -1143,27 +1297,30 @@ public:
 		FTransform RelativeTM;
 	};
 
-	const TMap<FPhysicsShapeHandle, FWeldInfo>* GetCurrentWeldInfo() const;
+	ENGINE_API const TMap<FPhysicsShapeHandle, FWeldInfo>* GetCurrentWeldInfo() const;
 
 private:
+
+	ENGINE_API void UpdateOneWayInteraction();
+	ENGINE_API void UpdateMaxDepenetrationVelocity();
 
 	/**
 	 * Invalidate Collision Profile Name
 	 * This gets called when it invalidates the reason of Profile Name
 	 * for example, they would like to re-define CollisionEnabled or ObjectType or ResponseChannels
 	 */
-	void InvalidateCollisionProfileName();
+	ENGINE_API void InvalidateCollisionProfileName();
 
 	/** Moves welded bodies within a rigid body (updates their shapes) */
-	void SetWeldedBodyTransform(FBodyInstance* TheirBody, const FTransform& NewTransform);
+	ENGINE_API void SetWeldedBodyTransform(FBodyInstance* TheirBody, const FTransform& NewTransform);
 		
 	/**
 	 * Return true if the collision profile name is valid
 	 */
-	static bool IsValidCollisionProfileName(FName InCollisionProfileName);
+	static ENGINE_API bool IsValidCollisionProfileName(FName InCollisionProfileName);
 
 	template<typename AllocatorType>
-	bool OverlapTestForBodiesImpl(const FVector& Position, const FQuat& Rotation, const TArray<FBodyInstance*, AllocatorType>& Bodies) const;
+	bool OverlapTestForBodiesImpl(const FVector& Position, const FQuat& Rotation, const TArray<FBodyInstance*, AllocatorType>& Bodies, bool bTraceComplex = false) const;
 
 	friend class UPhysicsAsset;
 	friend class UCollisionProfile;
@@ -1177,7 +1334,7 @@ private:
 
 private:
 
-	void UpdateDebugRendering();
+	ENGINE_API void UpdateDebugRendering();
 
 	/** Used to map between shapes and welded bodies. We do not create entries if the owning body instance is root*/
 	TSharedPtr<TMap<FPhysicsShapeHandle, FWeldInfo>> ShapeToBodiesMap;
@@ -1219,16 +1376,16 @@ FORCEINLINE_DEBUGGABLE bool FBodyInstance::OverlapMulti(TArray<struct FOverlapRe
 
 /// @endcond
 
-FORCEINLINE_DEBUGGABLE bool FBodyInstance::OverlapTestForBodies(const FVector& Position, const FQuat& Rotation, const TArray<FBodyInstance*>& Bodies) const
+FORCEINLINE_DEBUGGABLE bool FBodyInstance::OverlapTestForBodies(const FVector& Position, const FQuat& Rotation, const TArray<FBodyInstance*>& Bodies, bool bTraceComplex) const
 {
-	return OverlapTestForBodiesImpl(Position, Rotation, Bodies);
+	return OverlapTestForBodiesImpl(Position, Rotation, Bodies, bTraceComplex);
 }
 
-FORCEINLINE_DEBUGGABLE bool FBodyInstance::OverlapTestForBody(const FVector& Position, const FQuat& Rotation, FBodyInstance* Body) const
+FORCEINLINE_DEBUGGABLE bool FBodyInstance::OverlapTestForBody(const FVector& Position, const FQuat& Rotation, FBodyInstance* Body, bool bTraceComplex) const
 {
 	TArray<FBodyInstance*, TInlineAllocator<1>> InlineArray;
 	InlineArray.Add(Body);
-	return OverlapTestForBodiesImpl(Position, Rotation, InlineArray);
+	return OverlapTestForBodiesImpl(Position, Rotation, InlineArray, bTraceComplex);
 }
 
 FORCEINLINE_DEBUGGABLE bool FBodyInstance::IsInstanceSimulatingPhysics() const
@@ -1236,5 +1393,5 @@ FORCEINLINE_DEBUGGABLE bool FBodyInstance::IsInstanceSimulatingPhysics() const
 	return ShouldInstanceSimulatingPhysics() && IsValidBodyInstance();
 }
 
-extern template ENGINE_API bool FBodyInstance::OverlapTestForBodiesImpl(const FVector& Position, const FQuat& Rotation, const TArray<FBodyInstance*>& Bodies) const;
-extern template ENGINE_API bool FBodyInstance::OverlapTestForBodiesImpl(const FVector& Position, const FQuat& Rotation, const TArray<FBodyInstance*, TInlineAllocator<1>>& Bodies) const;
+extern template ENGINE_API bool FBodyInstance::OverlapTestForBodiesImpl(const FVector& Position, const FQuat& Rotation, const TArray<FBodyInstance*>& Bodies, bool bTraceComplex) const;
+extern template ENGINE_API bool FBodyInstance::OverlapTestForBodiesImpl(const FVector& Position, const FQuat& Rotation, const TArray<FBodyInstance*, TInlineAllocator<1>>& Bodies, bool bTraceComplex) const;

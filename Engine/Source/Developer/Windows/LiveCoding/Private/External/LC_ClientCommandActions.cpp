@@ -1,5 +1,8 @@
-// Copyright 2011-2019 Molecular Matters GmbH, all rights reserved.
+// Copyright 2011-2020 Molecular Matters GmbH, all rights reserved.
 
+// BEGIN EPIC MOD
+//#include PCH_INCLUDE
+// END EPIC MOD
 #include "LC_ClientCommandActions.h"
 #include "LC_ClientUserCommandThread.h"
 #include "LC_DuplexPipe.h"
@@ -7,10 +10,8 @@
 #include "LC_Executable.h"
 #include "LC_Event.h"
 #include "LC_Process.h"
+// BEGIN EPIC MOD
 #include "LC_Logging.h"
-
-// BEGIN EPIC MOD - Support for object reinstancing. We need to call a global post-patch handler, rather than just getting individual callbacks for modified modules.
-extern bool GHasLoadedPatch;
 // END EPIC MOD
 
 bool actions::RegisterProcessFinished::Execute(const CommandType* command, const DuplexPipe* pipe, void* context, const void*, size_t)
@@ -90,16 +91,6 @@ bool actions::CallHooks::Execute(const CommandType* command, const DuplexPipe* p
 		case hook::Type::COMPILE_ERROR_MESSAGE:
 			hook::CallHooksInRange<hook::CompileErrorMessageFunction>(command->rangeBegin, command->rangeEnd, static_cast<const wchar_t*>(payload));
 			break;
-
-		// BEGIN EPIC MOD - Add the ability for pre and post compile notifications
-		case hook::Type::PRECOMPILE:
-			hook::CallHooksInRange<hook::PrecompileFunction>(command->rangeBegin, command->rangeEnd);
-			break;
-
-		case hook::Type::POSTCOMPILE:
-			hook::CallHooksInRange<hook::PostcompileFunction>(command->rangeBegin, command->rangeEnd);
-			break;
-		// END EPIC MOD
 	}
 
 	pipe->SendAck();
@@ -108,20 +99,33 @@ bool actions::CallHooks::Execute(const CommandType* command, const DuplexPipe* p
 }
 
 
-// BEGIN EPIC MOD - Support for UE4 debug visualizers
+// BEGIN EPIC MOD - Support for UE debug visualizers
 extern uint8** GNameBlocksDebug;
 
 class FChunkedFixedUObjectArray;
 extern FChunkedFixedUObjectArray*& GObjectArrayForDebugVisualizers;
 // END EPIC MOD
 
+// BEGIN EPIC MOD - Support for object reinstancing. We need to call a global post-patch handler, rather than just getting individual callbacks for modified modules.
+extern void LiveCodingBeginPatch();
+// END EPIC MOD
+
+// BEGIN EPIC MOD - Notification that compilation has finished
+extern void LiveCodingEndCompile();
+// END EPIC MOD
+
+// BEGIN EPIC MOD
+extern void LiveCodingPreCompile();
+extern void LiveCodingPostCompile(commands::PostCompileResult postCompileResult);
+extern void LiveCodingTriggerReload();
+// END EPIC MOD
 
 bool actions::LoadPatch::Execute(const CommandType* command, const DuplexPipe* pipe, void*, const void*, size_t)
 {
 	// load library into this process
 	HMODULE module = ::LoadLibraryW(command->path);
 
-	// BEGIN EPIC MOD - Support for UE4 debug visualizers
+	// BEGIN EPIC MOD - Support for UE debug visualizers
 	if (module != nullptr)
 	{
 		typedef void InitNatvisHelpersFunc(uint8** NameTable, FChunkedFixedUObjectArray* ObjectArray);
@@ -134,7 +138,7 @@ bool actions::LoadPatch::Execute(const CommandType* command, const DuplexPipe* p
 	}
 	// END EPIC MOD
 	// BEGIN EPIC MOD - Support for object reinstancing. We need to call a global post-patch handler, rather than just getting individual callbacks for modified modules.
-	GHasLoadedPatch = true;
+	LiveCodingBeginPatch();
 	// END EPIC MOD
 
 	pipe->SendAck();
@@ -167,22 +171,20 @@ bool actions::CallEntryPoint::Execute(const CommandType* command, const DuplexPi
 
 bool actions::LogOutput::Execute(const CommandType*, const DuplexPipe* pipe, void*, const void* payload, size_t)
 {
-	logging::LogNoFormat<logging::Channel::USER>(static_cast<const wchar_t*>(payload));
+	// BEGIN EPIC MOD
+	Logging::LogNoFormat<Logging::Channel::USER>(static_cast<const wchar_t*>(payload));
+	// END EPIC MOD
 	pipe->SendAck();
 
 	return true;
 }
-
-// BEGIN EPIC MOD - Notification that compilation has finished
-extern bool GIsCompileActive;
-// END EPIC MOD
 
 bool actions::CompilationFinished::Execute(const CommandType*, const DuplexPipe* pipe, void*, const void*, size_t)
 {
 	pipe->SendAck();
 
 	// BEGIN EPIC MOD - Notification that compilation has finished
-	GIsCompileActive = false;
+	LiveCodingEndCompile();
 	// END EPIC MOD
 
 	// don't continue execution
@@ -203,3 +205,34 @@ bool actions::HandleExceptionFinished::Execute(const CommandType* command, const
 	// don't continue execution
 	return false;
 }
+
+
+// BEGIN EPIC MOD
+bool actions::PreCompile::Execute(const CommandType*, const DuplexPipe* pipe, void*, const void*, size_t)
+{
+	LiveCodingPreCompile();
+	pipe->SendAck();
+
+	return true;
+}
+
+
+bool actions::PostCompile::Execute(const CommandType* command, const DuplexPipe* pipe, void*, const void*, size_t)
+{
+	LiveCodingPostCompile(command->postCompileResult);
+	pipe->SendAck();
+
+	return true;
+}
+
+
+bool actions::TriggerReload::Execute(const CommandType*, const DuplexPipe* pipe, void*, const void*, size_t)
+{
+	LiveCodingTriggerReload();
+	syncPoint::Leave();
+	syncPoint::Enter();
+	pipe->SendAck();
+
+	return true;
+}
+// END EPIC MOD

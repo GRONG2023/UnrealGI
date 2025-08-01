@@ -4,16 +4,18 @@
 #include "GameplayTask.h"
 #include "Modules/ModuleManager.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(GameplayTaskResource)
+
 #if WITH_GAMEPLAYTASK_DEBUG
 TArray<FString> UGameplayTaskResource::ResourceDescriptions;
 #endif // WITH_GAMEPLAYTASK_DEBUG
 
-#if WITH_HOT_RELOAD
+#if WITH_RELOAD
 namespace
 {
 	TMap<FName, int8> ClassNameToIDMap;
 }
-#endif // WITH_HOT_RELOAD
+#endif // WITH_RELOAD
 
 UGameplayTaskResource::UGameplayTaskResource(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -29,8 +31,8 @@ void UGameplayTaskResource::PostInitProperties()
 
 	if (HasAnyFlags(RF_ClassDefaultObject) && (GetClass()->HasAnyClassFlags(CLASS_Abstract) == false))
 	{
-#if WITH_HOT_RELOAD
-		if (GIsHotReload)
+#if WITH_RELOAD
+		if (IsReloadActive())
 		{
 			if ((bManuallySetID == false || ManualResourceID == INDEX_NONE))
 			{
@@ -43,7 +45,7 @@ void UGameplayTaskResource::PostInitProperties()
 			}
 		}
 		else
-#endif // WITH_HOT_RELOAD
+#endif // WITH_RELOAD
 		{
 			if (bManuallySetID == false || ManualResourceID == INDEX_NONE)
 			{
@@ -56,9 +58,9 @@ void UGameplayTaskResource::PostInitProperties()
 			ResourceDescriptions[DebugId] = GenerateDebugDescription();
 #endif // WITH_GAMEPLAYTASK_DEBUG
 
-#if WITH_HOT_RELOAD
+#if WITH_RELOAD
 			ClassNameToIDMap.Add(GetFName(), DebugId);
-#endif // WITH_HOT_RELOAD
+#endif // WITH_RELOAD
 		}
 	}
 }
@@ -69,7 +71,7 @@ void UGameplayTaskResource::UpdateAutoResourceID()
 
 	if (AutoResourceID == INDEX_NONE)
 	{
-		AutoResourceID = NextAutoResID++;
+		AutoResourceID = static_cast<int8>(NextAutoResID++);
 		if (AutoResourceID >= FGameplayResourceSet::MaxResources)
 		{
 			UE_LOG(LogGameplayTasks, Error, TEXT("AutoResourceID out of bounds (probably too much GameplayTaskResource classes, consider manually assigning values if you can split all classes into non-overlapping sets"));
@@ -115,3 +117,4 @@ FString UGameplayTaskResource::GenerateDebugDescription() const
 
 }
 #endif // WITH_GAMEPLAYTASK_DEBUG
+

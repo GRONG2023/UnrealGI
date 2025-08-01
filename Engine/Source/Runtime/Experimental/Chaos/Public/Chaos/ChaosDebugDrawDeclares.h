@@ -4,11 +4,8 @@
 #include "Chaos/Core.h"
 #include "Chaos/Declares.h"
 #include "Chaos/GeometryParticlesfwd.h"
+#include "Chaos/Island/IslandManagerFwd.h"
 #include "Misc/Build.h"
-
-#ifndef CHAOS_DEBUG_DRAW
-#define CHAOS_DEBUG_DRAW !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
-#endif
 
 namespace Chaos
 {
@@ -20,11 +17,11 @@ namespace Chaos
 
 	class FPBDConstraintColor;
 
-	class FPBDConstraintGraph;
-
 	class FPBDJointConstraintHandle;
 
 	class FPBDJointConstraints;
 
 	class FSimulationSpace;
+
+	class FCharacterGroundConstraintContainer;
 }

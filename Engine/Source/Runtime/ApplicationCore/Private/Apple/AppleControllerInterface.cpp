@@ -2,6 +2,8 @@
 
 #include "AppleControllerInterface.h"
 #include "HAL/PlatformTime.h"
+#include "Misc/ScopeLock.h"
+#include "GenericPlatform/GenericPlatformInputDeviceMapper.h"
 
 DEFINE_LOG_CATEGORY(LogAppleController);
 
@@ -18,31 +20,38 @@ FAppleControllerInterface::FAppleControllerInterface( const TSharedRef< FGeneric
 {
 	if(!IS_PROGRAM)
 	{
-		NSNotificationCenter* notificationCenter = [NSNotificationCenter defaultCenter];
-		NSOperationQueue* currentQueue = [NSOperationQueue currentQueue];
-
-		[notificationCenter addObserverForName:GCControllerDidDisconnectNotification object:nil queue:currentQueue usingBlock:^(NSNotification* Notification)
+		// Clear array and setup unset player index values
+		FMemory::Memzero(Controllers, sizeof(Controllers));
+		for (int32 ControllerIndex = 0; ControllerIndex < UE_ARRAY_COUNT(Controllers); ControllerIndex++)
 		{
-			HandleDisconnect(Notification.object);
+			FUserController& UserController = Controllers[ControllerIndex];
+			UserController.PlayerIndex = PlayerIndex::PlayerUnset;
+		}
+		
+		for (GCController* Cont in [GCController controllers])
+		{
+			HandleConnection(Cont);
+		}
+		
+		NSNotificationCenter* notificationCenter = [NSNotificationCenter defaultCenter];
+		
+		// Not in an operation queue, [NSOperationQueue currentQueue] will return nil on macOS and iOS
+		// Notification callback will always be on the app main thread - defer events for Unreal Engine update thread
+
+		[notificationCenter addObserverForName:GCControllerDidDisconnectNotification object:nil queue:nil usingBlock:^(NSNotification* Notification)
+		{
+			SignalEvent(EAppleControllerEventType::Disconnect, Notification.object);
 		}];
 
-		[notificationCenter addObserverForName:GCControllerDidConnectNotification object:nil queue:currentQueue usingBlock:^(NSNotification* Notification)
+		[notificationCenter addObserverForName:GCControllerDidConnectNotification object:nil queue:nil usingBlock:^(NSNotification* Notification)
 		{
-			HandleConnection(Notification.object);
-            SetCurrentController(Notification.object);
+			SignalEvent(EAppleControllerEventType::Connect, Notification.object);
 		}];
 
 		dispatch_async(dispatch_get_main_queue(), ^
 		{
 		   [GCController startWirelessControllerDiscoveryWithCompletionHandler:^{ }];
 		});
-		
-		FMemory::Memzero(Controllers, sizeof(Controllers));
-		
-		for (GCController* Cont in [GCController controllers])
-		{
-			HandleConnection(Cont);
-		}
 	}
 }
 
@@ -51,9 +60,46 @@ void FAppleControllerInterface::SetMessageHandler( const TSharedRef< FGenericApp
 	MessageHandler = InMessageHandler;
 }
 
+void FAppleControllerInterface::SignalEvent(EAppleControllerEventType InEventType, GCController* InController)
+{
+	FScopeLock Lock(&DeferredEventCS);
+	DeferredEvents.Add(FDeferredAppleControllerEvent(InEventType, InController));
+}
+
 void FAppleControllerInterface::Tick( float DeltaTime )
 {
-	// NOP
+	FScopeLock Lock(&DeferredEventCS);
+	
+	for(uint32_t Index = 0;Index < DeferredEvents.Num();++Index)
+	{
+		FDeferredAppleControllerEvent& Event = DeferredEvents[Index];
+		switch(Event.EventType)
+		{
+			case EAppleControllerEventType::Connect:
+			{
+				HandleConnection(Event.Controller);
+				break;
+			}
+			case EAppleControllerEventType::Disconnect:
+			{
+				HandleDisconnect(Event.Controller);
+				break;
+			}
+			case EAppleControllerEventType::BecomeCurrent:
+			{
+				SetCurrentController(Event.Controller);
+				break;
+			}
+			case EAppleControllerEventType::Invalid:
+			default:
+			{
+				// NOP
+				break;
+			}
+		}
+	}
+	
+	DeferredEvents.Empty();
 }
 
 void FAppleControllerInterface::SetControllerType(uint32 ControllerIndex)
@@ -68,6 +114,11 @@ void FAppleControllerInterface::SetControllerType(uint32 ControllerIndex)
     {
         Controllers[ControllerIndex].ControllerType = ControllerType::XboxGamepad;
     }
+    else if ([Controller.productCategory isEqualToString:@"DualSense"])
+    {
+        Controllers[ControllerIndex].ControllerType = ControllerType::DualSenseGamepad;
+    }
+
     else if (Controller.extendedGamepad != nil)
     {
         Controllers[ControllerIndex].ControllerType = ControllerType::ExtendedGamepad;
@@ -86,29 +137,28 @@ void FAppleControllerInterface::SetControllerType(uint32 ControllerIndex)
 void FAppleControllerInterface::SetCurrentController(GCController* Controller)
 {
     int32 ControllerIndex = 0;
+    PlayerIndex PreviousIndex = PlayerIndex::PlayerUnset;
 
     for (ControllerIndex = 0; ControllerIndex < UE_ARRAY_COUNT(Controllers); ControllerIndex++)
     {
         if (Controllers[ControllerIndex].Controller == Controller)
         {
-            break;
-        }
-    }
-    if (ControllerIndex == UE_ARRAY_COUNT(Controllers))
-    {
-        HandleConnection(Controller);
-    }
-
-
-    for (ControllerIndex = 0; ControllerIndex < UE_ARRAY_COUNT(Controllers); ControllerIndex++)
-    {
-        if (Controllers[ControllerIndex].Controller == Controller)
-        {
+            if (Controllers[ControllerIndex].PlayerIndex == PlayerIndex::PlayerOne)
+            {
+                // Already set as CurrentController
+                return;
+            }
+            PreviousIndex = Controllers[ControllerIndex].PlayerIndex;
             Controllers[ControllerIndex].PlayerIndex = PlayerIndex::PlayerOne;
         }
-        else if (Controllers[ControllerIndex].PlayerIndex == PlayerIndex::PlayerOne)
+    }
+    
+    for (ControllerIndex = 0; ControllerIndex < UE_ARRAY_COUNT(Controllers); ControllerIndex++)
+    {
+        if (Controllers[ControllerIndex].PlayerIndex == PlayerIndex::PlayerOne && Controllers[ControllerIndex].Controller != Controller)
         {
-            Controllers[ControllerIndex].PlayerIndex = PlayerIndex::PlayerUnset;
+            // The old PlayerOne, should swap place with the new PlayerOne
+            Controllers[ControllerIndex].PlayerIndex = PreviousIndex;
         }
     }
 }
@@ -134,17 +184,25 @@ void FAppleControllerInterface::HandleConnection(GCController* Controller)
         }
         
         Controllers[ControllerIndex].PlayerIndex = (PlayerIndex)ControllerIndex;
-        Controllers[ControllerIndex].Controller = Controller;
+        Controllers[ControllerIndex].Controller = [Controller retain];
         SetControllerType(ControllerIndex);
         
-		// Deprecated but buttonMenu behavior is unreliable in iOS/tvOS 14.0.1
-        Controllers[ControllerIndex].bPauseWasPressed = false;
-        Controller.controllerPausedHandler = ^(GCController* Cont)
-        {
-            Controllers[ControllerIndex].bPauseWasPressed = true;
-        };
+        // Deprecated but buttonMenu behavior is unreliable since iOS/tvOS 14
+		Controllers[ControllerIndex].bPauseWasPressed = false;
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		Controller.controllerPausedHandler = ^(GCController* Cont)
+		{
+			Controllers[ControllerIndex].bPauseWasPressed = true;
+		};
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
         
         bFoundSlot = true;
+        
+        IPlatformInputDeviceMapper& DeviceMapper = IPlatformInputDeviceMapper::Get();
+        FPlatformUserId UserId = FGenericPlatformMisc::GetPlatformUserForUserIndex(Controllers[ControllerIndex].PlayerIndex);
+        FInputDeviceId DeviceId = INPUTDEVICEID_NONE;
+        DeviceMapper.RemapControllerIdToPlatformUserAndDevice(Controllers[ControllerIndex].PlayerIndex, OUT UserId, OUT DeviceId);
+        DeviceMapper.Internal_MapInputDeviceToUser(DeviceId, UserId, EInputDeviceConnectionState::Connected);
         
         UE_LOG(LogAppleController, Log, TEXT("New %s controller inserted, assigned to playerIndex %d"),
                Controllers[ControllerIndex].ControllerType == ControllerType::ExtendedGamepad ||
@@ -166,93 +224,101 @@ void FAppleControllerInterface::HandleDisconnect(GCController* Controller)
 	
     for (int32 ControllerIndex = 0; ControllerIndex < UE_ARRAY_COUNT(Controllers); ControllerIndex++)
     {
-        if (Controllers[ControllerIndex].Controller == Controller)
+		FUserController& UserController = Controllers[ControllerIndex];
+        if (UserController.Controller == Controller)
         {
-            FMemory::Memzero(&Controllers[ControllerIndex], sizeof(Controllers[ControllerIndex]));
-            UE_LOG(LogAppleController, Log, TEXT("Controller for playerIndex %d was removed"), Controllers[ControllerIndex].PlayerIndex);
-            return;
+			// Player index of unset(-1) would indicate that it has become unset even though it is now trying to disconnect
+			// This can occur on iOS when bGameSupportsMultipleActiveControllers is false
+			UE_LOG(LogAppleController, Log, TEXT("Controller for playerIndex %d, controller Index %d removed"), UserController.PlayerIndex, ControllerIndex);
             
+            IPlatformInputDeviceMapper& DeviceMapper = IPlatformInputDeviceMapper::Get();
+            FPlatformUserId UserId = FGenericPlatformMisc::GetPlatformUserForUserIndex(UserController.PlayerIndex);
+            FInputDeviceId DeviceId = INPUTDEVICEID_NONE;
+            DeviceMapper.RemapControllerIdToPlatformUserAndDevice(UserController.PlayerIndex, OUT UserId, OUT DeviceId);
+            DeviceMapper.Internal_MapInputDeviceToUser(DeviceId, UserId, EInputDeviceConnectionState::Disconnected);
+			
+			[UserController.Controller release];
+			[UserController.PreviousExtendedGamepad release];
+			
+            FMemory::Memzero(&UserController, sizeof(Controllers[ControllerIndex]));
+            UserController.PlayerIndex = PlayerIndex::PlayerUnset;
+            
+            return;
         }
     }
 }
 
 void FAppleControllerInterface::SendControllerEvents()
 {
-    @autoreleasepool
-    {
-		for(int32 i = 0; i < UE_ARRAY_COUNT(Controllers); ++i)
+	@autoreleasepool{
+    for(int32 i = 0; i < UE_ARRAY_COUNT(Controllers); ++i)
+ 	{
+		FUserController& Controller = Controllers[i];
+		
+		// make sure the connection handler has run on this
+		if (Controller.PlayerIndex == PlayerIndex::PlayerUnset)
 		{
-			GCController* Cont = Controllers[i].Controller;
-			
-			GCExtendedGamepad* ExtendedGamepad = nil;
-
-			if (@available(iOS 13, tvOS 13, *))
-			{
-				ExtendedGamepad = [Cont capture].extendedGamepad;
-			}
-			else
-			{
-				ExtendedGamepad = [Cont.extendedGamepad saveSnapshot];
-			}
-
-			GCMotion* Motion = Cont.motion;
-			
-			// make sure the connection handler has run on this guy
-			if (Controllers[i].PlayerIndex == PlayerIndex::PlayerUnset)
-			{
-				continue;
-			}
-
-			FUserController& Controller = Controllers[i];
-			
-			if (Controller.bPauseWasPressed)
-			{
-				MessageHandler->OnControllerButtonPressed(FGamepadKeyNames::SpecialRight, Controllers[i].PlayerIndex, false);
-				MessageHandler->OnControllerButtonReleased(FGamepadKeyNames::SpecialRight, Controllers[i].PlayerIndex, false);
-
-				Controller.bPauseWasPressed = false;
-			}
-			
-			if (ExtendedGamepad != nil)
-			{
-				const GCExtendedGamepad* PreviousExtendedGamepad = Controller.PreviousExtendedGamepad;
-
-				HandleButtonGamepad(FGamepadKeyNames::FaceButtonBottom, i);
-				HandleButtonGamepad(FGamepadKeyNames::FaceButtonLeft, i);
-				HandleButtonGamepad(FGamepadKeyNames::FaceButtonRight, i);
-				HandleButtonGamepad(FGamepadKeyNames::FaceButtonTop, i);
-				HandleButtonGamepad(FGamepadKeyNames::LeftShoulder, i);
-				HandleButtonGamepad(FGamepadKeyNames::RightShoulder, i);
-				HandleButtonGamepad(FGamepadKeyNames::LeftTriggerThreshold, i);
-				HandleButtonGamepad(FGamepadKeyNames::RightTriggerThreshold, i);
-				HandleButtonGamepad(FGamepadKeyNames::DPadUp, i);
-				HandleButtonGamepad(FGamepadKeyNames::DPadDown, i);
-				HandleButtonGamepad(FGamepadKeyNames::DPadRight, i);
-				HandleButtonGamepad(FGamepadKeyNames::DPadLeft, i);
-				HandleButtonGamepad(FGamepadKeyNames::SpecialRight, i);
-				HandleButtonGamepad(FGamepadKeyNames::SpecialLeft, i);
-				
-				HandleAnalogGamepad(FGamepadKeyNames::LeftAnalogX, i);
-				HandleAnalogGamepad(FGamepadKeyNames::LeftAnalogY, i);
-				HandleAnalogGamepad(FGamepadKeyNames::RightAnalogX, i);
-				HandleAnalogGamepad(FGamepadKeyNames::RightAnalogY, i);
-				HandleAnalogGamepad(FGamepadKeyNames::RightTriggerAnalog, i);
-				HandleAnalogGamepad(FGamepadKeyNames::LeftTriggerAnalog, i);
-
-
-				HandleVirtualButtonGamepad(FGamepadKeyNames::LeftStickRight, FGamepadKeyNames::LeftStickLeft, i);
-				HandleVirtualButtonGamepad(FGamepadKeyNames::LeftStickDown, FGamepadKeyNames::LeftStickUp, i);
-				HandleVirtualButtonGamepad(FGamepadKeyNames::RightStickLeft, FGamepadKeyNames::RightStickRight, i);
-				HandleVirtualButtonGamepad(FGamepadKeyNames::RightStickDown, FGamepadKeyNames::RightStickUp, i);
-				HandleButtonGamepad(FGamepadKeyNames::LeftThumb, i);
-				HandleButtonGamepad(FGamepadKeyNames::RightThumb, i);
-
-				[Controller.PreviousExtendedGamepad release];
-				Controller.PreviousExtendedGamepad = ExtendedGamepad;
-				[Controller.PreviousExtendedGamepad retain];
-			}
+            continue;
 		}
-    } // @autoreleasepool
+		
+		GCController* ControllerImpl = Controller.Controller;
+		
+		IPlatformInputDeviceMapper& DeviceMapper = IPlatformInputDeviceMapper::Get();
+		FPlatformUserId UserId = FGenericPlatformMisc::GetPlatformUserForUserIndex(Controller.PlayerIndex);
+		FInputDeviceId DeviceId = DeviceMapper.GetPrimaryInputDeviceForUser(UserId);
+		
+        GCExtendedGamepad* ExtendedGamepad = [ControllerImpl capture].extendedGamepad;
+		GCMotion* Motion = ControllerImpl.motion;
+		
+		// Workaround for unreliable buttonMenu behavior since iOS/tvOS 14
+		if (Controller.bPauseWasPressed)
+        {
+            MessageHandler->OnControllerButtonPressed(FGamepadKeyNames::SpecialRight, UserId, DeviceId, false);
+            MessageHandler->OnControllerButtonReleased(FGamepadKeyNames::SpecialRight, UserId, DeviceId, false);
+
+            Controller.bPauseWasPressed = false;
+        }
+        
+		if (ExtendedGamepad != nil)
+		{
+            const GCExtendedGamepad* PreviousExtendedGamepad = Controller.PreviousExtendedGamepad;
+
+            HandleButtonGamepad(FGamepadKeyNames::FaceButtonBottom, i);
+            HandleButtonGamepad(FGamepadKeyNames::FaceButtonLeft, i);
+            HandleButtonGamepad(FGamepadKeyNames::FaceButtonRight, i);
+            HandleButtonGamepad(FGamepadKeyNames::FaceButtonTop, i);
+            HandleButtonGamepad(FGamepadKeyNames::LeftShoulder, i);
+            HandleButtonGamepad(FGamepadKeyNames::RightShoulder, i);
+            HandleButtonGamepad(FGamepadKeyNames::LeftTriggerThreshold, i);
+            HandleButtonGamepad(FGamepadKeyNames::RightTriggerThreshold, i);
+            HandleButtonGamepad(FGamepadKeyNames::DPadUp, i);
+            HandleButtonGamepad(FGamepadKeyNames::DPadDown, i);
+            HandleButtonGamepad(FGamepadKeyNames::DPadRight, i);
+            HandleButtonGamepad(FGamepadKeyNames::DPadLeft, i);
+            HandleButtonGamepad(FGamepadKeyNames::SpecialRight, i);
+            HandleButtonGamepad(FGamepadKeyNames::SpecialLeft, i);
+            
+            HandleAnalogGamepad(FGamepadKeyNames::LeftAnalogX, i);
+            HandleAnalogGamepad(FGamepadKeyNames::LeftAnalogY, i);
+            HandleAnalogGamepad(FGamepadKeyNames::RightAnalogX, i);
+            HandleAnalogGamepad(FGamepadKeyNames::RightAnalogY, i);
+            HandleAnalogGamepad(FGamepadKeyNames::RightTriggerAnalog, i);
+            HandleAnalogGamepad(FGamepadKeyNames::LeftTriggerAnalog, i);
+
+
+            HandleVirtualButtonGamepad(FGamepadKeyNames::LeftStickRight, FGamepadKeyNames::LeftStickLeft, i);
+            HandleVirtualButtonGamepad(FGamepadKeyNames::LeftStickDown, FGamepadKeyNames::LeftStickUp, i);
+            HandleVirtualButtonGamepad(FGamepadKeyNames::RightStickLeft, FGamepadKeyNames::RightStickRight, i);
+            HandleVirtualButtonGamepad(FGamepadKeyNames::RightStickDown, FGamepadKeyNames::RightStickUp, i);
+            HandleButtonGamepad(FGamepadKeyNames::LeftThumb, i);
+            HandleButtonGamepad(FGamepadKeyNames::RightThumb, i);
+
+            [Controller.PreviousExtendedGamepad release];
+            Controller.PreviousExtendedGamepad = ExtendedGamepad;
+            [Controller.PreviousExtendedGamepad retain];
+		}
+	}
+	} //@autoreleasepool
 }
 
 bool FAppleControllerInterface::IsControllerAssignedToGamepad(int32 ControllerId) const
@@ -307,15 +373,19 @@ void FAppleControllerInterface::HandleInputInternal(const FGamepadKeyNames::Type
 {
     const double CurrentTime = FPlatformTime::Seconds();
     const float InitialRepeatDelay = 0.2f;
-    const float RepeatDelay = 0.1;
+    const float RepeatDelay = 0.1f;
     GCController* Cont = Controllers[ControllerIndex].Controller;
+    
+	IPlatformInputDeviceMapper& DeviceMapper = IPlatformInputDeviceMapper::Get();
+	FPlatformUserId UserId = FGenericPlatformMisc::GetPlatformUserForUserIndex(Controllers[ControllerIndex].PlayerIndex);
+    FInputDeviceId DeviceId = DeviceMapper.GetPrimaryInputDeviceForUser(UserId);
 
     if (bWasPressed != bIsPressed)
     {
 #if APPLE_CONTROLLER_DEBUG
         NSLog(@"%@ button %s on controller %d", bIsPressed ? @"Pressed" : @"Released", TCHAR_TO_ANSI(*UEButton.ToString()), Controllers[ControllerIndex].PlayerIndex);
 #endif
-        bIsPressed ? MessageHandler->OnControllerButtonPressed(UEButton, Controllers[ControllerIndex].PlayerIndex, false) : MessageHandler->OnControllerButtonReleased(UEButton, Controllers[ControllerIndex].PlayerIndex, false);
+        bIsPressed ? MessageHandler->OnControllerButtonPressed(UEButton, UserId, DeviceId, false) : MessageHandler->OnControllerButtonReleased(UEButton,UserId, DeviceId, false);
         NextKeyRepeatTime.FindOrAdd(UEButton) = CurrentTime + InitialRepeatDelay;
     }
     else if(bIsPressed)
@@ -323,7 +393,7 @@ void FAppleControllerInterface::HandleInputInternal(const FGamepadKeyNames::Type
         double* NextRepeatTime = NextKeyRepeatTime.Find(UEButton);
         if(NextRepeatTime && *NextRepeatTime <= CurrentTime)
         {
-            MessageHandler->OnControllerButtonPressed(UEButton, Controllers[ControllerIndex].PlayerIndex, true);
+            MessageHandler->OnControllerButtonPressed(UEButton, UserId, DeviceId, true);
             *NextRepeatTime = CurrentTime + RepeatDelay;
         }
     }
@@ -340,7 +410,7 @@ void FAppleControllerInterface::HandleVirtualButtonGamepad(const FGamepadKeyName
     GCExtendedGamepad *ExtendedPreviousGamepad = Controllers[ControllerIndex].PreviousExtendedGamepad;;
 
     // Send controller events any time we are passed the given input threshold similarly to PC/Console (see: XInputInterface.cpp)
-    const float RepeatDeadzone = 0.24;
+    const float RepeatDeadzone = 0.24f;
     
     bool bWasNegativePressed = false;
     bool bNegativePressed = false;
@@ -413,6 +483,7 @@ bIsPressed = Gamepad.GCButton.pressed; \
         case ControllerType::ExtendedGamepad:
         case ControllerType::DualShockGamepad:
         case ControllerType::XboxGamepad:
+        case ControllerType::DualSenseGamepad:
             
             ExtendedGamepad = Cont.extendedGamepad;
             ExtendedPreviousGamepad = Controllers[ControllerIndex].PreviousExtendedGamepad;
@@ -455,8 +526,12 @@ void FAppleControllerInterface::HandleAnalogGamepad(const FGamepadKeyNames::Type
 {
     GCController* Cont = Controllers[ControllerIndex].Controller;
     
+    IPlatformInputDeviceMapper& DeviceMapper = IPlatformInputDeviceMapper::Get();
+	FPlatformUserId UserId = FGenericPlatformMisc::GetPlatformUserForUserIndex(Controllers[ControllerIndex].PlayerIndex);
+    FInputDeviceId DeviceId = DeviceMapper.GetPrimaryInputDeviceForUser(UserId);
+    
     // Send controller events any time we are passed the given input threshold similarly to PC/Console (see: XInputInterface.cpp)
-    const float RepeatDeadzone = 0.24;
+    const float RepeatDeadzone = 0.24f;
     bool bWasPositivePressed = false;
     bool bPositivePressed = false;
     bool bWasNegativePressed = false;
@@ -474,6 +549,7 @@ void FAppleControllerInterface::HandleAnalogGamepad(const FGamepadKeyNames::Type
         case ControllerType::ExtendedGamepad:
         case ControllerType::DualShockGamepad:
         case ControllerType::XboxGamepad:
+        case ControllerType::DualSenseGamepad:
             
             if (UEAxis == FGamepadKeyNames::LeftAnalogX){if ((ExtendedPreviousGamepad != nil && ExtendedGamepad.leftThumbstick.xAxis.value != ExtendedPreviousGamepad.leftThumbstick.xAxis.value) ||
                                                              (ExtendedGamepad.leftThumbstick.xAxis.value < -RepeatDeadzone || ExtendedGamepad.leftThumbstick.xAxis.value > RepeatDeadzone)){axisValue = ExtendedGamepad.leftThumbstick.xAxis.value;}}
@@ -500,5 +576,5 @@ void FAppleControllerInterface::HandleAnalogGamepad(const FGamepadKeyNames::Type
 #if APPLE_CONTROLLER_DEBUG
     NSLog(@"Axis %s is %f", TCHAR_TO_ANSI(*UEAxis.ToString()), axisValue);
 #endif
-    MessageHandler->OnControllerAnalog(UEAxis, Controllers[ControllerIndex].PlayerIndex, axisValue);
+    MessageHandler->OnControllerAnalog(UEAxis, UserId, DeviceId, axisValue);
 }

@@ -1,15 +1,36 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "PixelInspectorDetailsCustomization.h"
-#include "PixelInspectorView.h"
-#include "Modules/ModuleManager.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Colors/SColorBlock.h"
-#include "PropertyHandle.h"
+
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "DetailCategoryBuilder.h"
 #include "DetailLayoutBuilder.h"
 #include "DetailWidgetRow.h"
-#include "DetailCategoryBuilder.h"
+#include "Engine/EngineTypes.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Math/IntPoint.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Modules/ModuleManager.h"
 #include "PixelInspectorModule.h"
+#include "PixelInspectorView.h"
+#include "SlotBase.h"
+#include "Templates/Casts.h"
+#include "Types/SlateEnums.h"
+#include "UObject/WeakObjectPtr.h"
+#include "Widgets/Colors/SColorBlock.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
+
+class IPropertyHandle;
+class UObject;
+struct FGeometry;
+struct FPointerEvent;
 
 #define LOCTEXT_NAMESPACE "PixelInspector"
 
@@ -29,12 +50,6 @@ TSharedRef<SHorizontalBox> FPixelInspectorDetailsCustomization::GetGridColorCont
 	TSharedRef<SHorizontalBox> HorizontalMainGrid = SNew(SHorizontalBox);
 	for (int32 ColumnIndex = 0; ColumnIndex < FinalColorContextGridSize; ++ColumnIndex)
 	{
-		SBoxPanel::FSlot &HorizontalSlot = HorizontalMainGrid->AddSlot()
-			.AutoWidth()
-			.Padding(2.0f, 2.0f)
-			.VAlign(VAlign_Center)
-			.HAlign(HAlign_Center);
-
 		TSharedRef<SVerticalBox> VerticalColumn = SNew(SVerticalBox);
 		for (int32 RowIndex = 0; RowIndex < FinalColorContextGridSize; ++RowIndex)
 		{
@@ -47,7 +62,14 @@ TSharedRef<SHorizontalBox> FPixelInspectorDetailsCustomization::GetGridColorCont
 					CreateColorCell(RowIndex, ColumnIndex, PixelInspectorView->FinalColorContext[ColumnIndex + RowIndex*FinalColorContextGridSize])
 				];
 		}
-		HorizontalSlot[VerticalColumn];
+		HorizontalMainGrid->AddSlot()
+			.AutoWidth()
+			.Padding(2.0f, 2.0f)
+			.VAlign(VAlign_Center)
+			.HAlign(HAlign_Center)
+			[
+				VerticalColumn
+			];
 	}
 	return HorizontalMainGrid;
 }
@@ -91,8 +113,7 @@ TSharedRef<SColorBlock> FPixelInspectorDetailsCustomization::CreateColorCell(int
 	int32 SquareSize = FMath::FloorToInt(80.0f / (float)FinalColorContextGridSize);
 	return SNew(SColorBlock)
 		.Color(CellColor)
-		.ShowBackgroundForAlpha(false)
-		.IgnoreAlpha(true)
+		.AlphaDisplayMode(EColorBlockAlphaDisplayMode::Ignore)
 		.Size(FVector2D(SquareSize, SquareSize))
 		.OnMouseButtonDown(this, &FPixelInspectorDetailsCustomization::HandleColorCellMouseButtonDown, RowIndex, ColumnIndex);
 }

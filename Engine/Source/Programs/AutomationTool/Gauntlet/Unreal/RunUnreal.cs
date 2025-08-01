@@ -4,16 +4,13 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
 using AutomationTool;
 using AutomationTool.DeviceReservation;
 using UnrealBuildTool;
-using Gauntlet;
 using System.IO;
-using Newtonsoft.Json;
-using System.Reflection;
-using System.Text.RegularExpressions;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using UnrealBuildBase;
+using Microsoft.Extensions.Logging;
 
 namespace Gauntlet
 {
@@ -29,9 +26,44 @@ namespace Gauntlet
 	/// For a full list of options see UnrealTestContextOption
 	/// 
 	/// </summary>
+	[Help("Run Unreal tests using Gauntlet")]
+	[ParamHelp("Tests", "List of gauntlet tests to run", Required = true, MultiSelectSeparator = ",")]
+	[ParamHelp("ExecCmds", "List commands to execute", MultiSelectSeparator = "+")]
+	[ParamHelp("Build", "Reference to the build that is being tested")]
+	[ParamHelp("Configuration", "Configuration to perform tests on", Choices = new string[] { "Debug", "DebugGame", "Development", "Test", "Shipping"})]
+	[ParamHelp("Platform", "Platforms to perform tests on and their params")]
+	[ParamHelp("Packaged", "Run packaged build instead of staged", ParamType = typeof(bool))]
+	[ParamHelp("Dev", "Run in Dev mode", ParamType = typeof(bool))]
+	[ParamHelp("p4", "Enable p4v support", ParamType = typeof(bool))]
+	[ParamHelp("MaxDuration", "Maximum duration for test in sections", ParamType = typeof(int), DefaultValue = 3600)]
+	[ParamHelp("NoTimeout", "No maximum timeout", ParamType = typeof(bool))]
+	[ParamHelp("TestIterations", "Number of iterations to repeat this test", ParamType = typeof(int), DefaultValue = 1)]
+	[ParamHelp("CookedEditor", "Restricts usage of uncooked editor role", ParamType = typeof(bool))]
+	[ParamHelp("Device", "List of devices to use for tests", Action = ParamHelpAttribute.ParamAction.Append)]
+	[ParamHelp("NumClients", "Number of clients to run test with", ParamType = typeof(int), DefaultValue = 1)]
+	[ParamHelp("Server", "Run test with server", ParamType = typeof(bool))]
+	[ParamHelp("NullRHI", "Null Rendering Hardware Interface (run headless)", ParamType = typeof(bool))]
+	[ParamHelp("Windowed", "Run in Windowed mode", ParamType = typeof(bool))]
+	[ParamHelp("ResX", "Horizontal resolution", ParamType = typeof(int), DefaultValue = 1920)]
+	[ParamHelp("ResY", "Vertical resolution", ParamType = typeof(int), DefaultValue = 1080)]
+	[ParamHelp("Unattended", "Run in Unattended mode", ParamType = typeof(bool))]
+	[ParamHelp("Reboot", "Reboot device before starting test", ParamType = typeof(bool))]
+	[ParamHelp("SkipDeploy", "Skip deployment of build packages to devices", ParamType = typeof(bool))]
+	[ParamHelp("Log", "Output Logs", ParamType = typeof(bool))]
+	[ParamHelp("LogDir", "Location to store log files. Defaults to TempDir/Logs")]
+	[ParamHelp("Timestamp", "Print timestamp prefix to Log lines", ParamType = typeof(bool))]
+	[ParamHelp("TempDir", "Location to store temporary files. Defaults to GauntletTemp")]
+	[ParamHelp("Verbose", "Verbose logging", ParamType = typeof(bool))]
+	[ParamHelp("VeryVerbose", "Very Verbose logging", ParamType = typeof(bool))]
+	[ParamHelp("HeartbeatPeriod", "Gauntlet heartbeat period", ParamType = typeof(float))]
+	[ParamHelp("Args", "Extra arguments to pass role(s)")]
+	[ParamHelp("ClientArgs", "Extra arguments passed to client role(s)")]
+	[ParamHelp("ServerArgs", "Extra arguments passed to server role(s)")]
+	[ParamHelp("EditorArgs", "Extra arguments passed to editor role(s)")]
+	[ParamHelp("Namespaces", "Comma-separated list of namespaces to check for tests.", MultiSelectSeparator = ",")]
+	[ParamHelp("AdditionalArgs", "Any additional arguments to pass directly to the Gauntlet command line", IsArgument = true)]
 	public class RunUnreal : BuildCommand
 	{
-
 		/// <summary>
 		/// Test node to create if none were specified
 		/// </summary>
@@ -56,7 +88,7 @@ namespace Gauntlet
 				throw new AutomationException("No project specified. Use -project=ShooterGame etc");
 			}
 
-			ContextOptions.Namespaces = "Gauntlet.UnrealTest,UE4Game";
+			ContextOptions.Namespaces = "Gauntlet.UnrealTest,UnrealGame,UnrealEditor";
 			ContextOptions.UsesSharedBuildType = true;
 
 			return RunTests(ContextOptions);
@@ -67,7 +99,7 @@ namespace Gauntlet
 		/// </summary>
 		/// <param name="Context"></param>
 		/// <returns></returns>
-		public ExitCode RunTests(UnrealTestOptions ContextOptions)
+		public virtual ExitCode RunTests(UnrealTestOptions ContextOptions)
 		{
 			if (ContextOptions.Verbose)
 			{
@@ -97,7 +129,7 @@ namespace Gauntlet
 
 			if (string.IsNullOrEmpty(ContextOptions.Build))
 			{
-				throw new AutomationException("No builds specified. Use -builds=p:\\path\\to\\build");
+				throw new AutomationException("No build specified. Use -build=p:\\path\\to\\build");
 			}
 
 			if (typeof(UnrealBuildSource).IsAssignableFrom(ContextOptions.BuildSourceType) == false)
@@ -126,9 +158,9 @@ namespace Gauntlet
 			UnrealTargetPlatform DefaultPlatform = BuildHostPlatform.Current.Platform;
 			UnrealTargetConfiguration DefaultConfiguration = UnrealTargetConfiguration.Development;
 
-			DirectoryReference UnrealPath = new DirectoryReference(Environment.CurrentDirectory);
-					
-			// todo, pass this in as a BuildSource and remove the COntextOption params specific to finding builds
+			DirectoryReference UnrealPath = new DirectoryReference(!string.IsNullOrEmpty(ContextOptions.EditorDir) ? ContextOptions.EditorDir : Environment.CurrentDirectory);
+
+			// todo, pass this in as a BuildSource and remove the ContextOption params specific to finding builds
 			UnrealBuildSource BuildInfo = (UnrealBuildSource)Activator.CreateInstance(ContextOptions.BuildSourceType, new object[] { ContextOptions.Project, ContextOptions.ProjectPath, UnrealPath, ContextOptions.UsesSharedBuildType, ContextOptions.Build, ContextOptions.SearchPaths });
 
 			// Setup accounts
@@ -138,8 +170,6 @@ namespace Gauntlet
 
 			bool InitializedDevices = false;
 
-			HashSet<UnrealTargetPlatform> UsedPlatforms = new HashSet<UnrealTargetPlatform>();
-			
 			// for all platforms we want to test...
 			foreach (ArgumentWithParams PlatformWithParams in ContextOptions.PlatformList)
 			{
@@ -149,6 +179,8 @@ namespace Gauntlet
 				Params CombinedParams = new Params(ContextOptions.Params.AllArguments.Concat(PlatformWithParams.AllArguments).ToArray());
 
 				UnrealTargetPlatform PlatformType = UnrealTargetPlatform.Parse(PlatformString);
+
+				SetupPlatformConfigurationProfiles(PlatformType, ContextOptions);
 
 				if (!InitializedDevices)
 				{
@@ -167,7 +199,7 @@ namespace Gauntlet
 					Role.Platform = DefaultPlatform;
 					Role.Configuration = DefaultConfiguration;
 
-					// globally, what was requested (e.g -platform=PS4 -configuration=Shipping)
+					// globally, what was requested (e.g -platform=Win64 -configuration=Shipping)
 					UnrealTargetPlatform RequestedPlatform = PlatformType;
 					UnrealTargetConfiguration RequestedConfiguration = ContextOptions.Configuration;
 
@@ -187,13 +219,10 @@ namespace Gauntlet
 					}
 
 					// look for-args= and then -clientargs= and -editorargs etc
-					Role.ExtraArgs = Globals.Params.ParseValue("Args", "");
-					string ExtraRoleArgs = Globals.Params.ParseValue(Type.ToString() + "Args", "");
-
-					if (!string.IsNullOrEmpty(ExtraRoleArgs))
-					{
-						Role.ExtraArgs += ExtraRoleArgs;
-					}
+					List<string> ArgsParams = Globals.Params.ParseValues("Args", false /* bCommaSeparated */);
+					List<string> RoleArgsParams = Globals.Params.ParseValues(Type.ToString() + "Args", false /* bCommaSeparated */);
+					ArgsParams.AddRange(RoleArgsParams);
+					Role.ExtraArgs = string.Join(' ', ArgsParams);
 
 					// look for -clientexeccmds=, -editorexeccmds= etc, these are separate from clientargs for sanity
 					string ExecCmds = Globals.Params.ParseValue("ExecCmds", "");
@@ -256,12 +285,18 @@ namespace Gauntlet
 							}
 						}
 					}
+					else if (Type.IsEditor())
+					{
+						Role.Configuration = RequestedConfiguration;
+						if (Role.Configuration > UnrealTargetConfiguration.Development)
+						{
+							Role.Configuration = UnrealTargetConfiguration.Development;
+						}
+					}
 
 					Gauntlet.Log.Verbose("Mapped Role {0} to RoleContext {1}", Type, Role);
 
 					RoleContexts[Type] = Role;
-
-					UsedPlatforms.Add(Role.Platform);
 				}
 
 				UnrealTestContext Context = new UnrealTestContext(BuildInfo, RoleContexts, ContextOptions);
@@ -276,32 +311,17 @@ namespace Gauntlet
 			// dispose now, not during shutdown gc, because this runs commands...
 			DevicePool.Instance.Dispose();
 
-			DoCleanup(UsedPlatforms);
+			// Generate Horde summary for CIS test (maybe want to use a delegate here)
+			Horde.GenerateSummary();
 
 			return AllTestsPassed ? ExitCode.Success : ExitCode.Error_TestFailure;
 		}
 
-		void DoCleanup(IEnumerable<UnrealTargetPlatform> UsedPlatforms)
-		{
-			if (!Globals.Params.ParseParam("removedevices"))
-			{
-				return;
-			}
-
-			if (UsedPlatforms.Contains(UnrealTargetPlatform.PS4))
-			{
-				String DevKitUtilPath = Path.Combine(Environment.CurrentDirectory, "Engine/Platforms/PS4/Binaries/DotNET/PS4DevKitUtil.exe");
-				Gauntlet.Log.Verbose("PS4DevkitUtil executing 'removeall'");
-				IProcessResult BootResult = CommandUtils.Run(DevKitUtilPath, "removeall");
-			}
-		}
-
-
 		bool ExecuteTests(UnrealTestOptions Options, IEnumerable<ITestNode> TestList)
 		{
 			// Create the test executor
-			var Executor = new TextExecutor();
-			
+			var Executor = new TestExecutor(ToString());
+
 			try
 			{
 				bool Result = Executor.ExecuteTests(Options, TestList);
@@ -323,7 +343,7 @@ namespace Gauntlet
 
 				if (ParseParam("clean"))
 				{
-					LogInformation("Deleting temp dir {0}", Options.TempDir);
+					Logger.LogInformation("Deleting temp dir {Arg0}", Options.TempDir);
 					DirectoryInfo Di = new DirectoryInfo(Options.TempDir);
 					if (Di.Exists)
 					{
@@ -364,9 +384,9 @@ namespace Gauntlet
 					continue;
 				}
 
-				if (Blacklist.Instance.IsTestBlacklisted(Test.TestName, UnrealPlatform, TestContext.BuildInfo.Branch))
+				if (Denylist.Instance.IsTestDenylisted(Test.TestName, UnrealPlatform, TestContext.BuildInfo.Branch))
 				{
-					Gauntlet.Log.Info("Test {0} is currently blacklisted on {1} in branch {2}", Test.TestName, UnrealPlatform, TestContext.BuildInfo.Branch);
+					Gauntlet.Log.Info("Test {0} is currently denylisted on {1} in branch {2}", Test.TestName, UnrealPlatform, TestContext.BuildInfo.Branch);
 					continue;
 				}
 
@@ -386,7 +406,7 @@ namespace Gauntlet
 				List<string> ModelArgs = CombinedParams.ParseValues("PerfModel", false);
 				string Model = ModelArgs.Count > 0 ? ModelArgs.Last() : string.Empty;
 
-				TestContext.Constraint = new UnrealTargetConstraint(UnrealPlatform, PerfSpec, Model);
+				TestContext.Constraint = new UnrealDeviceTargetConstraint(UnrealPlatform, PerfSpec, Model);
 
 				// parse worker job id
 				List<string> WorkerJobIDArgs = CombinedParams.ParseValues("WorkerJobID", false);
@@ -432,11 +452,11 @@ namespace Gauntlet
 
 		protected void SetupDevices(UnrealTargetPlatform DefaultPlatform, UnrealTestOptions Options)
 		{
-
 			Reservation.ReservationDetails = Options.JobDetails;
 
 			DevicePool.Instance.SetLocalOptions(Options.TempDir, Options.Parallel > 1, Options.DeviceURL);
-			DevicePool.Instance.AddLocalDevices(10);
+			DevicePool.Instance.AddLocalDevices(Options.MaxLocalDevices);
+			DevicePool.Instance.AddVirtualDevices(Options.MaxVirtualDevices);
 
 			foreach (var DeviceWithParams in Options.DeviceList)
 			{
@@ -453,6 +473,15 @@ namespace Gauntlet
 
 				DevicePool.Instance.AddDevices(Platform, DeviceWithParams.Argument);
 			}
+		}
+
+		protected void SetupPlatformConfigurationProfiles(UnrealTargetPlatform PlatformType, UnrealTestOptions Options)
+		{
+			string EngineDeviceConfigDir = Path.Combine(Globals.UnrealRootDir, "Engine", "Build", "DeviceConfigProfiles");
+			string ProjectDeviceConfigDir = Path.Combine(Options.ProjectPath.Directory.FullName, "Build", "DeviceConfigProfiles");
+
+			DeviceConfigurationCache.Instance.DiscoverConfigurationProfiles(PlatformType, "Engine", EngineDeviceConfigDir);
+			DeviceConfigurationCache.Instance.DiscoverConfigurationProfiles(PlatformType, Options.Project, ProjectDeviceConfigDir);
 		}
 	}
 }

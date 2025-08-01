@@ -1,9 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Animation/AnimNotifies/AnimNotify.h"
+
+#include "Animation/AnimNotifyQueue.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Animation/AnimSequenceBase.h"
+#include "UObject/ObjectSaveContext.h"
 #include "UObject/Package.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNotify)
 
 /////////////////////////////////////////////////////
 // UAnimNotify
@@ -15,6 +20,7 @@ UAnimNotify::UAnimNotify(const FObjectInitializer& ObjectInitializer)
 
 #if WITH_EDITORONLY_DATA
 	NotifyColor = FColor(255, 200, 200, 255);
+	bShouldFireInEditor = true;
 #endif // WITH_EDITORONLY_DATA
 
 	bIsNativeBranchingPoint = false;
@@ -22,15 +28,23 @@ UAnimNotify::UAnimNotify(const FObjectInitializer& ObjectInitializer)
 
 void UAnimNotify::Notify(class USkeletalMeshComponent* MeshComp, class UAnimSequenceBase* Animation)
 {
+}
+
+void UAnimNotify::Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation, const FAnimNotifyEventReference& EventReference)
+{
 	USkeletalMeshComponent* PrevContext = MeshContext;
 	MeshContext = MeshComp;
-	Received_Notify(MeshComp, Animation);
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	Notify(MeshComp, Animation);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	Received_Notify(MeshComp, Animation, EventReference);
 	MeshContext = PrevContext;
 }
 
 void UAnimNotify::BranchingPointNotify(FBranchingPointNotifyPayload& BranchingPointPayload)
 {
-	Notify(BranchingPointPayload.SkelMeshComponent, BranchingPointPayload.SequenceAsset);
+	const FAnimNotifyEventReference EventReference;
+	Notify(BranchingPointPayload.SkelMeshComponent, BranchingPointPayload.SequenceAsset, EventReference);
 }
 
 class UWorld* UAnimNotify::GetWorld() const
@@ -42,23 +56,29 @@ class UWorld* UAnimNotify::GetWorld() const
 
 FString UAnimNotify::GetNotifyName_Implementation() const
 {
-	UObject* ClassGeneratedBy = GetClass()->ClassGeneratedBy;
 	FString NotifyName;
 
-	if(ClassGeneratedBy)
+#if WITH_EDITORONLY_DATA
+	if (UObject* ClassGeneratedBy = GetClass()->ClassGeneratedBy)
 	{
 		// GeneratedBy will be valid for blueprint types and gives a clean name without a suffix
 		NotifyName = ClassGeneratedBy->GetName();
 	}
 	else
+#endif
 	{
 		// Native notify classes are clean without a suffix otherwise
 		NotifyName = GetClass()->GetName();
 	}
 
-	NotifyName = NotifyName.Replace(TEXT("AnimNotify_"), TEXT(""), ESearchCase::CaseSensitive);
+	NotifyName.ReplaceInline(TEXT("AnimNotify_"), TEXT(""), ESearchCase::CaseSensitive);
 	
 	return NotifyName;
+}
+
+float UAnimNotify::GetDefaultTriggerWeightThreshold_Implementation() const
+{
+	return ZERO_ANIMWEIGHT_THRESH;
 }
 
 /// @endcond
@@ -77,10 +97,17 @@ void UAnimNotify::PostLoad()
 
 void UAnimNotify::PreSave(const class ITargetPlatform* TargetPlatform)
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+	Super::PreSave(TargetPlatform);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void UAnimNotify::PreSave(FObjectPreSaveContext ObjectSaveContext)
+{
 #if WITH_EDITOR
 	ValidateAssociatedAssets();
 #endif
-	Super::PreSave(TargetPlatform);
+	Super::PreSave(ObjectSaveContext);
 }
 
 UObject* UAnimNotify::GetContainingAsset() const
@@ -92,3 +119,4 @@ UObject* UAnimNotify::GetContainingAsset() const
 	}
 	return ContainingAsset;
 }
+

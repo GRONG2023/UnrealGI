@@ -6,7 +6,6 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
 #include "UObject/UObjectArray.h"
 #include "Misc/ScopeLock.h"
 #include "Misc/ScopeRWLock.h"
@@ -80,16 +79,23 @@ private:
 	void AddAnnotationInternal(const UObjectBase* Object, T&& Annotation)
 	{
 		check(Object);
-		FScopeLock AnnotationMapLock(&AnnotationMapCritical);
-		AnnotationCacheKey = Object;
-		AnnotationCacheValue = Forward<T>(Annotation);
-		if (AnnotationCacheValue.IsDefault())
+		TAnnotation LocalAnnotation = Forward<T>(Annotation);
+		if (LocalAnnotation.IsDefault())
 		{
 			RemoveAnnotation(Object); // adding the default annotation is the same as removing an annotation
 		}
 		else
 		{
-			if (AnnotationMap.Num() == 0)
+			bool bWasEmpty = false;
+			{
+				FScopeLock AnnotationMapLock(&AnnotationMapCritical);
+				AnnotationCacheKey = Object;
+				AnnotationCacheValue = MoveTemp(LocalAnnotation);
+				bWasEmpty = (AnnotationMap.Num() == 0);
+				AnnotationMap.Add(AnnotationCacheKey, AnnotationCacheValue);
+			}
+
+			if (bWasEmpty)
 			{
 				// we are adding the first one, so if we are auto removing or verifying removal, register now
 #if (UE_BUILD_SHIPPING || UE_BUILD_TEST)
@@ -99,7 +105,6 @@ private:
 					GUObjectArray.AddUObjectDeleteListener(this);
 				}
 			}
-			AnnotationMap.Add(AnnotationCacheKey, AnnotationCacheValue);
 		}
 	}
 
@@ -128,13 +133,20 @@ public:
 	TAnnotation GetAndRemoveAnnotation(const UObjectBase *Object)
 	{		
 		check(Object);
-		FScopeLock AnnotationMapLock(&AnnotationMapCritical);
-		AnnotationCacheKey = Object;
-		AnnotationCacheValue = TAnnotation();
-		const bool bHadElements = (AnnotationMap.Num() > 0);
+		bool bHadElements = false;
+		bool bIsNowEmpty = false;
+
+		// Avoid holding the lock while we call GUObjectArray.RemoveUObjectDeleteListener as it could deadlock
 		TAnnotation Result;
-		AnnotationMap.RemoveAndCopyValue(AnnotationCacheKey, Result);
-		if (bHadElements && AnnotationMap.Num() == 0)
+		{
+			FScopeLock AnnotationMapLock(&AnnotationMapCritical);
+			AnnotationCacheKey = Object;
+			AnnotationCacheValue = TAnnotation();
+			bHadElements = (AnnotationMap.Num() > 0);
+			AnnotationMap.RemoveAndCopyValue(AnnotationCacheKey, Result);
+			bIsNowEmpty = (AnnotationMap.Num() == 0);
+		}
+		if (bHadElements && bIsNowEmpty)
 		{
 			// we are removing the last one, so if we are auto removing or verifying removal, unregister now
 #if (UE_BUILD_SHIPPING || UE_BUILD_TEST)
@@ -154,12 +166,18 @@ public:
 	void RemoveAnnotation(const UObjectBase *Object)
 	{
 		check(Object);
-		FScopeLock AnnotationMapLock(&AnnotationMapCritical);
-		AnnotationCacheKey = Object;
-		AnnotationCacheValue = TAnnotation();
-		const bool bHadElements = (AnnotationMap.Num() > 0);
-		AnnotationMap.Remove(AnnotationCacheKey);
-		if (bHadElements && AnnotationMap.Num() == 0)
+		bool bHadElements = false;
+		bool bIsNowEmpty = false;
+		// Avoid holding the lock while we call GUObjectArray.RemoveUObjectDeleteListener as it could deadlock
+		{
+			FScopeLock AnnotationMapLock(&AnnotationMapCritical);
+			AnnotationCacheKey = Object;
+			AnnotationCacheValue = TAnnotation();
+			bHadElements = (AnnotationMap.Num() > 0);
+			AnnotationMap.Remove(AnnotationCacheKey);
+			bIsNowEmpty = (AnnotationMap.Num() == 0);
+		}
+		if (bHadElements && bIsNowEmpty)
 		{
 			// we are removing the last one, so if we are auto removing or verifying removal, unregister now
 #if (UE_BUILD_SHIPPING || UE_BUILD_TEST)
@@ -176,11 +194,16 @@ public:
 	 */
 	void RemoveAllAnnotations()
 	{
-		FScopeLock AnnotationMapLock(&AnnotationMapCritical);
-		AnnotationCacheKey = NULL;
-		AnnotationCacheValue = TAnnotation();
-		const bool bHadElements = (AnnotationMap.Num() > 0);
-		AnnotationMap.Empty();
+		bool bHadElements = false;
+
+		// Avoid holding the lock while we call GUObjectArray.RemoveUObjectDeleteListener as it could deadlock
+		{
+			FScopeLock AnnotationMapLock(&AnnotationMapCritical);
+			AnnotationCacheKey = nullptr;
+			AnnotationCacheValue = TAnnotation();
+			bHadElements = (AnnotationMap.Num() > 0);
+			AnnotationMap.Empty();
+		}
 		if (bHadElements)
 		{
 			// we are removing the last one, so if we are auto removing or verifying removal, unregister now
@@ -435,7 +458,7 @@ template <> struct TIsPODType<FBoolAnnotation> { enum { Value = true }; };
 * FUObjectAnnotationSparseBool is a specialization of FUObjectAnnotationSparse for bools, slow, temporary, editor only, external 
 * or other low priority bools about UObjects.
 *
-* @todo UE4 this should probably be reimplemented from scratch as a TSet instead of essentially a map to a value that is always true anyway.
+* @todo UE this should probably be reimplemented from scratch as a TSet instead of essentially a map to a value that is always true anyway.
 **/
 class FUObjectAnnotationSparseBool : private FUObjectAnnotationSparse<FBoolAnnotation,true>
 {
@@ -522,7 +545,7 @@ class FUObjectAnnotationChunked : public FUObjectArray::FUObjectDeleteListener
 	};
 
 
-	/** Master table to chunks of pointers **/
+	/** Primary table to chunks of pointers **/
 	TArray<TAnnotationChunk> Chunks;
 	/** Number of elements we currently have **/
 	int32 NumAnnotations;
@@ -568,10 +591,12 @@ class FUObjectAnnotationChunked : public FUObjectArray::FUObjectDeleteListener
 			CurrentAllocatedMemory += NumAnnotationsPerChunk * sizeof(TAnnotation);
 			MaxAllocatedMemory = FMath::Max(CurrentAllocatedMemory, MaxAllocatedMemory);
 		}
-		check(Chunk.Items[WithinChunkIndex].IsDefault());
-		Chunk.Num++;
-		check(Chunk.Num <= NumAnnotationsPerChunk);
-		NumAnnotations++;
+		if (Chunk.Items[WithinChunkIndex].IsDefault())
+		{
+			Chunk.Num++;
+			check(Chunk.Num <= NumAnnotationsPerChunk);
+			NumAnnotations++;
+		}
 
 		return Chunk.Items[WithinChunkIndex];
 	}
@@ -584,26 +609,35 @@ class FUObjectAnnotationChunked : public FUObjectArray::FUObjectDeleteListener
 		const int32 ChunkIndex = Index / NumAnnotationsPerChunk;
 		const int32 WithinChunkIndex = Index % NumAnnotationsPerChunk;
 
-		TAnnotationChunk& Chunk = Chunks[ChunkIndex];
-		if (Chunk.Items != nullptr)
+		if (ChunkIndex >= Chunks.Num())
 		{
-			if (!Chunk.Items[WithinChunkIndex].IsDefault())
-			{
-				Chunk.Items[WithinChunkIndex] = TAnnotation();
-				Chunk.Num--;
-				check(Chunk.Num >= 0);
-				if (Chunk.Num == 0)
-				{
-					delete[] Chunk.Items;
-					Chunk.Items = nullptr;
-					const uint32 ChunkMemory = NumAnnotationsPerChunk * sizeof(TAnnotation);
-					check(CurrentAllocatedMemory >= ChunkMemory);
-					CurrentAllocatedMemory -= ChunkMemory;
-				}
-				NumAnnotations--;
-			}
-			check(NumAnnotations >= 0);
+			return;
 		}
+
+		TAnnotationChunk& Chunk = Chunks[ChunkIndex];
+		if (!Chunk.Items)
+		{
+			return;
+		}
+
+		if (Chunk.Items[WithinChunkIndex].IsDefault())
+		{
+			return;
+		}
+
+		Chunk.Items[WithinChunkIndex] = TAnnotation();
+		Chunk.Num--;
+		check(Chunk.Num >= 0);
+		if (Chunk.Num == 0)
+		{
+			delete[] Chunk.Items;
+			Chunk.Items = nullptr;
+			const uint32 ChunkMemory = NumAnnotationsPerChunk * sizeof(TAnnotation);
+			check(CurrentAllocatedMemory >= ChunkMemory);
+			CurrentAllocatedMemory -= ChunkMemory;
+		}
+		NumAnnotations--;
+		check(NumAnnotations >= 0);
 	}
 
 	/**
@@ -794,20 +828,27 @@ public:
 	FORCEINLINE TAnnotation GetAnnotation(int32 Index)
 	{
 		check(Index >= 0);
-		FRWScopeLock AnnotationArrayLock(AnnotationArrayCritical, SLT_ReadOnly);
 
-		const int32 ChunkIndex = Index / NumAnnotationsPerChunk;
-		if (ChunkIndex < Chunks.Num())
+		TAnnotation Result = TAnnotation();
+
+		UE_AUTORTFM_OPEN(
 		{
-			const int32 WithinChunkIndex = Index % NumAnnotationsPerChunk;
+			FRWScopeLock AnnotationArrayLock(AnnotationArrayCritical, SLT_ReadOnly);
 
-			TAnnotationChunk& Chunk = Chunks[ChunkIndex];
-			if (Chunk.Items != nullptr)
+			const int32 ChunkIndex = Index / NumAnnotationsPerChunk;
+			if (ChunkIndex < Chunks.Num())
 			{
-				return Chunk.Items[WithinChunkIndex];
+				const int32 WithinChunkIndex = Index % NumAnnotationsPerChunk;
+
+				TAnnotationChunk& Chunk = Chunks[ChunkIndex];
+				if (Chunk.Items != nullptr)
+				{
+					Result = Chunk.Items[WithinChunkIndex];
+				}
 			}
-		}
-		return TAnnotation();
+		});
+
+		return Result;
 	}
 
 	/**
@@ -825,6 +866,17 @@ public:
 	* Thread safe, but you know, someone might have added more elements before this even returns
 	* @return	the maximum number of elements in the array
 	**/
+	FORCEINLINE int32 GetMaxAnnotations() const TSAN_SAFE
+	{
+		return MaxAnnotations;
+	}
+
+	/**
+	* Return the number max capacity of the array
+	* Thread safe, but you know, someone might have added more elements before this even returns
+	* @return	the maximum number of elements in the array
+	**/
+	UE_DEPRECATED(5.3, "Use GetMaxAnnotations instead")
 	FORCEINLINE int32 GetMaxAnnottations() const TSAN_SAFE
 	{
 		return MaxAnnotations;
@@ -1309,8 +1361,6 @@ private:
 
 };
 
-
-
-// Definition is in UObjectGlobals.cpp
-extern COREUOBJECT_API FUObjectAnnotationSparseBool GSelectedObjectAnnotation;
-
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
+#endif

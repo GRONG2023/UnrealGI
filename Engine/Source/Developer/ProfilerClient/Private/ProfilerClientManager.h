@@ -12,6 +12,7 @@
 #include "IMessageBus.h"
 #include "MessageEndpoint.h"
 #include "Stats/StatsFile.h"
+#include "Tasks/Pipe.h"
 
 class FNewStatsReader;
 class FProfilerClientManager;
@@ -269,7 +270,7 @@ private:
 	FTickerDelegate TickDelegate;
 
 	/** Handle to the registered TickDelegate. */
-	FDelegateHandle TickDelegateHandle;
+	FTSTicker::FDelegateHandle TickDelegateHandle;
 
 	/** Amount of time between connection retries */
 	float RetryTime;
@@ -281,11 +282,17 @@ private:
 	FTickerDelegate MessageDelegate;
 
 	/** Handle to the registered MessageDelegate. */
-	FDelegateHandle MessageDelegateHandle;
+	FTSTicker::FDelegateHandle MessageDelegateHandle;
 
 	/** Handle to the registered OnShutdown for Message Bus. */
 	FDelegateHandle OnShutdownMessageBusDelegateHandle;
 
 	/** Holds the last time a ping was made to instances */
 	FDateTime LastPingTime;
+
+	/** Async task pipe for processing the incoming profiler service data */
+	static UE::Tasks::FPipe AsyncTaskPipe;
+
+	/** Whether we are doing a data preview */
+	bool bIsLivePreview;
 };

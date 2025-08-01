@@ -4,6 +4,7 @@
 #include "Animation/PoseAsset.h"
 #include "AnimNodes/AnimNode_PoseHandler.h"
 #include "Kismet2/CompilerResultsLog.h"
+#include "IAnimBlueprintNodeOverrideAssetsContext.h"
 
 UAnimGraphNode_PoseHandler::UAnimGraphNode_PoseHandler(const FObjectInitializer& ObjectInitializer)
 	:Super(ObjectInitializer)
@@ -13,31 +14,9 @@ UAnimGraphNode_PoseHandler::UAnimGraphNode_PoseHandler(const FObjectInitializer&
 
 void UAnimGraphNode_PoseHandler::ValidateAnimNodeDuringCompilation(USkeleton* ForSkeleton, FCompilerResultsLog& MessageLog)
 {
-	UPoseAsset* PoseAssetToCheck = GetPoseHandlerNode()->PoseAsset;
-	UEdGraphPin* PoseAssetPin = FindPin(GET_MEMBER_NAME_STRING_CHECKED(FAnimNode_PoseHandler, PoseAsset));
-	if (PoseAssetPin != nullptr && PoseAssetToCheck == nullptr)
-	{
-		PoseAssetToCheck = Cast<UPoseAsset>(PoseAssetPin->DefaultObject);
-	}
-
-	if (PoseAssetToCheck == nullptr)
-	{
-		if (IsPoseAssetRequired() && (PoseAssetPin == nullptr || PoseAssetPin->LinkedTo.Num() == 0))
-		{
-			MessageLog.Error(TEXT("@@ references an unknown poseasset"), this);
-		}
-	}
-	else
-	{
-		USkeleton* SeqSkeleton = PoseAssetToCheck->GetSkeleton();
-		if (SeqSkeleton && // if PoseAsset doesn't have skeleton, it might be due to PoseAsset not loaded yet, @todo: wait with anim blueprint compilation until all assets are loaded?
-			!SeqSkeleton->IsCompatible(ForSkeleton))
-		{
-			MessageLog.Error(TEXT("@@ references poseasset that uses different skeleton @@"), this, SeqSkeleton);
-		}
-	}
-
 	Super::ValidateAnimNodeDuringCompilation(ForSkeleton, MessageLog);
+	
+	ValidateAnimNodeDuringCompilationHelper(ForSkeleton, MessageLog, GetPoseHandlerNode()->PoseAsset, UPoseAsset::StaticClass(), FindPin(GET_MEMBER_NAME_STRING_CHECKED(FAnimNode_PoseHandler, PoseAsset)), GET_MEMBER_NAME_CHECKED(FAnimNode_PoseHandler, PoseAsset));
 }
 
 void UAnimGraphNode_PoseHandler::SetAnimationAsset(UAnimationAsset* Asset)
@@ -48,9 +27,21 @@ void UAnimGraphNode_PoseHandler::SetAnimationAsset(UAnimationAsset* Asset)
 	}
 }
 
+void UAnimGraphNode_PoseHandler::OnOverrideAssets(IAnimBlueprintNodeOverrideAssetsContext& InContext) const
+{
+	if(InContext.GetAssets().Num() > 0)
+	{
+		if (UPoseAsset* PoseAsset = Cast<UPoseAsset>(InContext.GetAssets()[0]))
+		{
+			FAnimNode_PoseHandler& AnimNode = InContext.GetAnimNode<FAnimNode_PoseHandler>();
+			AnimNode.SetPoseAsset(PoseAsset);
+		}
+	}
+}
+
 void UAnimGraphNode_PoseHandler::PreloadRequiredAssets()
 {
-	PreloadObject(GetPoseHandlerNode()->PoseAsset);
+	PreloadRequiredAssetsHelper(GetPoseHandlerNode()->PoseAsset, FindPin(GET_MEMBER_NAME_STRING_CHECKED(FAnimNode_PoseHandler, PoseAsset)));
 
 	Super::PreloadRequiredAssets();
 }
@@ -65,4 +56,9 @@ UAnimationAsset* UAnimGraphNode_PoseHandler::GetAnimationAsset() const
 	}
 
 	return PoseAsset;
+}
+
+TSubclassOf<UAnimationAsset> UAnimGraphNode_PoseHandler::GetAnimationAssetClass() const
+{
+	return UPoseAsset::StaticClass();
 }

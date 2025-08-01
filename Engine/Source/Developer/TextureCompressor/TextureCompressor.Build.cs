@@ -6,16 +6,21 @@ public class TextureCompressor : ModuleRules
 {
 	public TextureCompressor(ReadOnlyTargetRules Target) : base(Target)
 	{
+		PrivateIncludePathModuleNames.AddRange(new string[]
+		{
+			"Engine",
+		});
+
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
-				"CoreUObject", // @todo Mac: for some reason it's needed to link in debug on Mac
-				"Engine",
-				"TargetPlatform",
-				"ImageCore"
+				"ImageCore",
+				"OpenColorIOWrapper",
+				"TextureBuildUtilities",
+				"TextureFormat",
 			}
 			);
 
-		AddEngineThirdPartyPrivateStaticDependencies(Target, "nvTextureTools");
+		//AddEngineThirdPartyPrivateStaticDependencies(Target, "nvTextureTools");
 	}
 }

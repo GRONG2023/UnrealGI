@@ -1,14 +1,21 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "DeviceProfileServicesUIManager.h"
-#include "Templates/Casts.h"
-#include "Misc/CoreMisc.h"
+
+#include "CoreGlobals.h"
+#include "CoreTypes.h"
+#include "Delegates/Delegate.h"
 #include "DeviceProfiles/DeviceProfile.h"
-#include "Misc/ConfigCacheIni.h"
 #include "DeviceProfiles/DeviceProfileManager.h"
+#include "HAL/PlatformCrt.h"
 #include "Interfaces/ITargetPlatform.h"
 #include "Interfaces/ITargetPlatformManagerModule.h"
-#include "PlatformInfo.h"
+#include "Logging/LogMacros.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/CoreMisc.h"
+#include "Misc/DataDrivenPlatformInfoRegistry.h"
+#include "Templates/Casts.h"
+#include "UObject/UnrealNames.h"
 
 
 DEFINE_LOG_CATEGORY_STATIC(LogDeviceProfileServices, Log, All);
@@ -87,7 +94,7 @@ void FDeviceProfileServicesUIManager::CreatePlatformMap()
 	for (int32 Index = 0; Index < Platforms.Num(); ++Index)
 	{
 		PlatformList.Add(MakeShareable(new FString(Platforms[Index]->IniPlatformName())));
-		DeviceTypeToIconMap.Add( Platforms[Index]->PlatformName(), Platforms[Index]->GetPlatformInfo().GetIconStyleName(PlatformInfo::EPlatformIconSize::Normal) );
+		DeviceTypeToIconMap.Add( Platforms[Index]->PlatformName(), Platforms[Index]->GetPlatformInfo().GetIconStyleName(EPlatformIconSize::Normal) );
 	}
 }
 

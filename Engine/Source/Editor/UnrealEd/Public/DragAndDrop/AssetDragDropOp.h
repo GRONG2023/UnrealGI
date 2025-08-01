@@ -3,29 +3,39 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Input/DragAndDrop.h"
 #include "Layout/Visibility.h"
 #include "DragAndDrop/DecoratedDragDropOp.h"
+#include "UObject/WeakInterfacePtr.h"
 
 class FAssetThumbnail;
-class FAssetThumbnailPool;
+class IAssetFactoryInterface;
 class UActorFactory;
 
-class UNREALED_API FAssetDragDropOp : public FDecoratedDragDropOp
+class FAssetDragDropOp : public FDecoratedDragDropOp
 {
 public:
 	DRAG_DROP_OPERATOR_TYPE(FAssetDragDropOp, FDecoratedDragDropOp)
 
-	static TSharedRef<FAssetDragDropOp> New(const FAssetData& InAssetData, UActorFactory* ActorFactory = nullptr);
+	static UNREALED_API TSharedRef<FAssetDragDropOp> New(const FAssetData& InAssetData, 
+		TScriptInterface<IAssetFactoryInterface> Factory = nullptr);
 
-	static TSharedRef<FAssetDragDropOp> New(TArray<FAssetData> InAssetData, UActorFactory* ActorFactory = nullptr);
+	static UNREALED_API TSharedRef<FAssetDragDropOp> New(TArray<FAssetData> InAssetData,
+		TScriptInterface<IAssetFactoryInterface> Factory = nullptr);
 
-	static TSharedRef<FAssetDragDropOp> New(FString InAssetPath);
+	static UNREALED_API TSharedRef<FAssetDragDropOp> New(FString InAssetPath);
 
-	static TSharedRef<FAssetDragDropOp> New(TArray<FString> InAssetPaths);
+	static UNREALED_API TSharedRef<FAssetDragDropOp> New(TArray<FString> InAssetPaths);
 
-	static TSharedRef<FAssetDragDropOp> New(TArray<FAssetData> InAssetData, TArray<FString> InAssetPaths, UActorFactory* ActorFactory = nullptr);
+	static UNREALED_API TSharedRef<FAssetDragDropOp> New(TArray<FAssetData> InAssetData, TArray<FString> InAssetPaths, 
+		TScriptInterface<IAssetFactoryInterface> Factory = nullptr);
+
+	//~ These overloads are redundant to the ones that use TScriptInterface<IAssetFactoryInterface>, but
+	//~ we keep them temporarily in case a user just forward declared UActorFactory.
+	static UNREALED_API TSharedRef<FAssetDragDropOp> New(const FAssetData& InAssetData, UActorFactory* ActorFactory);
+	static UNREALED_API TSharedRef<FAssetDragDropOp> New(TArray<FAssetData> InAssetData, UActorFactory* ActorFactory);
+	static UNREALED_API TSharedRef<FAssetDragDropOp> New(TArray<FAssetData> InAssetData, TArray<FString> InAssetPaths, UActorFactory* ActorFactory);
 
 	/** @return true if this drag operation contains assets */
 	bool HasAssets() const
@@ -51,28 +61,30 @@ public:
 		return AssetPaths;
 	}
 
-	/** @return The actor factory to use if converting this asset to an actor */
-	UActorFactory* GetActorFactory() const
-	{
-		return ActorFactory.Get();
-	}
+	//~ TODO: UE_DEPRECATED(5.4, "Use GetAssetFactory instead.")
+	UNREALED_API UActorFactory* GetActorFactory() const;
+
+	/** @return The asset factory to use if converting this asset to an actor */
+	UNREALED_API TScriptInterface<IAssetFactoryInterface> GetAssetFactory() const;
 
 public:
-	virtual ~FAssetDragDropOp();
+	UNREALED_API virtual ~FAssetDragDropOp();
 
-	virtual TSharedPtr<SWidget> GetDefaultDecorator() const override;
+	UNREALED_API virtual TSharedPtr<SWidget> GetDefaultDecorator() const override;
 
-	FText GetDecoratorText() const;
+	UNREALED_API FText GetDecoratorText() const;
 
 protected:
-	void Init(TArray<FAssetData> InAssetData, TArray<FString> InAssetPaths, UActorFactory* InActorFactory);
-	virtual void InitThumbnail();
+	UNREALED_API void Init(TArray<FAssetData> InAssetData, TArray<FString> InAssetPaths, TScriptInterface<IAssetFactoryInterface> InAssetFactory);
+	//TODO: Would be nice to remove this, but users could have just forward declared UActorFactory...
+	UNREALED_API void Init(TArray<FAssetData> InAssetData, TArray<FString> InAssetPaths, UActorFactory* InActorFactory);
+	UNREALED_API virtual void InitThumbnail();
 
-	virtual bool HasFiles() const;
-	virtual bool HasFolders() const;
+	UNREALED_API virtual bool HasFiles() const;
+	UNREALED_API virtual bool HasFolders() const;
 
-	virtual int32 GetTotalCount() const;
-	virtual FText GetFirstItemText() const;
+	UNREALED_API virtual int32 GetTotalCount() const;
+	UNREALED_API virtual FText GetFirstItemText() const;
 
 private:
 	/** Data for the assets this item represents */
@@ -81,13 +93,10 @@ private:
 	/** Data for the asset paths this item represents */
 	TArray<FString> AssetPaths;
 
-	/** The actor factory to use if converting this asset to an actor */
-	TWeakObjectPtr<UActorFactory> ActorFactory;
+	/** The factory to use if converting this asset to a placed object */
+	TWeakInterfacePtr<IAssetFactoryInterface> AssetFactory;
 
 protected:
-	/** Pool for maintaining and rendering thumbnails */
-	TSharedPtr<FAssetThumbnailPool> ThumbnailPool;
-
 	/** Handle to the thumbnail resource */
 	TSharedPtr<FAssetThumbnail> AssetThumbnail;
 

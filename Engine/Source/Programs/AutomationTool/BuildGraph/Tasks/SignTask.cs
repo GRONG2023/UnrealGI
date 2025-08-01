@@ -1,16 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-using AutomationTool;
-using System;
+using EpicGames.Core;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
 using System.Xml;
-using Tools.DotNETCommon;
-using UnrealBuildTool;
+using UnrealBuildBase;
 
-namespace BuildGraph.Tasks
+namespace AutomationTool.Tasks
 {
 	/// <summary>
 	/// Parameters for a task that strips symbols from a set of files
@@ -24,17 +21,29 @@ namespace BuildGraph.Tasks
 		public string Files;
 
 		/// <summary>
+		/// Optional description for the signed content
+		/// </summary>
+		[TaskParameter(Optional = true)]
+		public string Description;
+
+		/// <summary>
 		/// Tag to be applied to build products of this task.
 		/// </summary>
 		[TaskParameter(Optional = true, ValidationType = TaskParameterValidationType.TagList)]
 		public string Tag;
+
+		/// <summary>
+		/// If true, the calls to the signing tool will be performed in parallel.
+		/// </summary>
+		[TaskParameter(Optional = true)]
+		public bool Parallel;
 	}
 
 	/// <summary>
 	/// Signs a set of executable files with an installed certificate.
 	/// </summary>
 	[TaskElement("Sign", typeof(SignTaskParameters))]
-	public class SignTask : CustomTask
+	public class SignTask : BgTaskImpl
 	{
 		/// <summary>
 		/// Parameters for this task
@@ -56,13 +65,13 @@ namespace BuildGraph.Tasks
 		/// <param name="Job">Information about the current job</param>
 		/// <param name="BuildProducts">Set of build products produced by this node.</param>
 		/// <param name="TagNameToFileSet">Mapping from tag names to the set of files they include</param>
-		public override void Execute(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
+		public override Task ExecuteAsync(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
 		{
 			// Find the matching files
-			FileReference[] Files = ResolveFilespec(CommandUtils.RootDirectory, Parameters.Files, TagNameToFileSet).OrderBy(x => x.FullName).ToArray();
+			FileReference[] Files = ResolveFilespec(Unreal.RootDirectory, Parameters.Files, TagNameToFileSet).OrderBy(x => x.FullName).ToArray();
 
 			// Sign all the files
-			CodeSign.SignMultipleIfEXEOrDLL(Job.OwnerCommand, (Files.Select(x => x.FullName).ToList()));
+			CodeSign.SignMultipleIfEXEOrDLL(Job.OwnerCommand, (Files.Select(x => x.FullName).ToList()), Description: Parameters.Description, Parameters.Parallel);
 
 			// Apply the optional tag to the build products
 			foreach(string TagName in FindTagNamesFromList(Parameters.Tag))
@@ -72,6 +81,7 @@ namespace BuildGraph.Tasks
 
 			// Add them to the list of build products
 			BuildProducts.UnionWith(Files);
+			return Task.CompletedTask;
 		}
 
 		/// <summary>

@@ -16,14 +16,7 @@
 class SAtlasVisualizerPanel : public IScrollableZoomable, public SPanel
 {
 public:
-	class FAtlasVisualizerPanelSlot : public TSupportsOneChildMixin<FAtlasVisualizerPanelSlot>
-	{
-	public:
-		FAtlasVisualizerPanelSlot(SWidget* InOwner)
-			: TSupportsOneChildMixin<FAtlasVisualizerPanelSlot>(InOwner)
-		{
-		}
-	};
+	using FAtlasVisualizerPanelSlot = FSingleWidgetChildrenWithSlot;
 
 	SLATE_BEGIN_ARGS(SAtlasVisualizerPanel)
 		{
@@ -59,7 +52,7 @@ public:
 		const TSharedRef<SWidget>& ChildWidget = ChildSlot.GetWidget();
 		if( ChildWidget->GetVisibility() != EVisibility::Collapsed )
 		{
-			const FVector2D& WidgetDesiredSize = ChildWidget->GetDesiredSize();
+			const FVector2f& WidgetDesiredSize = ChildWidget->GetDesiredSize();
 
 			// Update the zoom level, and clamp the pan offset based on our current geometry
 			SAtlasVisualizerPanel* const NonConstThis = const_cast<SAtlasVisualizerPanel*>(this);
@@ -137,12 +130,12 @@ public:
 			return false;
 		}
 
-		const FVector2D PrevPhysicalOffset = PhysicalOffset;
+		const FVector2f PrevPhysicalOffset = PhysicalOffset;
 		const float InverseZoom = 1.0f / ZoomLevel;
-		PhysicalOffset += (Offset * InverseZoom);
+		PhysicalOffset += (UE::Slate::CastToVector2f(Offset) * InverseZoom);
 
 		const TSharedRef<SWidget>& ChildWidget = ChildSlot.GetWidget();
-		const FVector2D& WidgetDesiredSize = ChildWidget->GetDesiredSize();
+		const FVector2f& WidgetDesiredSize = ChildWidget->GetDesiredSize();
 		ClampViewOffset(WidgetDesiredSize, CachedSize);
 
 		return PhysicalOffset != PrevPhysicalOffset;
@@ -168,7 +161,7 @@ public:
 	void FitToWindow()
 	{
 		bFitToWindow = true;
-		PhysicalOffset = FVector2D::ZeroVector;
+		PhysicalOffset = FVector2f::ZeroVector;
 	}
 
 	bool IsFitToWindow() const
@@ -180,11 +173,11 @@ public:
 	{
 		bFitToWindow = false;
 		ZoomLevel = 1.0f;
-		PhysicalOffset = FVector2D::ZeroVector;
+		PhysicalOffset = FVector2f::ZeroVector;
 	}
 
 private:
-	void UpdateFitToWindowZoom( const FVector2D& ViewportSize, const FVector2D& LocalSize )
+	void UpdateFitToWindowZoom( const FVector2f& ViewportSize, const FVector2f& LocalSize )
 	{
 		if( bFitToWindow )
 		{
@@ -194,7 +187,7 @@ private:
 		}
 	}
 
-	void ClampViewOffset( const FVector2D& ViewportSize, const FVector2D& LocalSize )
+	void ClampViewOffset( const FVector2f& ViewportSize, const FVector2f& LocalSize )
 	{
 		PhysicalOffset.X = ClampViewOffsetAxis(ViewportSize.X, LocalSize.X, PhysicalOffset.X);
 		PhysicalOffset.Y = ClampViewOffsetAxis(ViewportSize.Y, LocalSize.Y, PhysicalOffset.Y);
@@ -229,8 +222,8 @@ private:
 		return CurrentOffset;
 	}
 
-	FVector2D PhysicalOffset;
-	mutable FVector2D CachedSize;
+	FVector2f PhysicalOffset;
+	mutable FVector2f CachedSize;
 	float ZoomLevel;
 	bool bFitToWindow;
 
@@ -378,7 +371,7 @@ void SAtlasVisualizer::OnDrawViewport(const FGeometry& AllottedGeometry, const F
 		FSlateDrawElement::MakeBox(
 			OutDrawElements,
 			LayerId+1,
-			AllottedGeometry.ToPaintGeometry(FVector2D::Max((CurrentSlotRect.GetTopLeft()*ScrollPanel->GetZoomLevel())-FVector2D(1,1), FVector2D::ZeroVector), (CurrentSlotRect.GetSize() * ScrollPanel->GetZoomLevel())+FVector2D(1, 1)),
+			AllottedGeometry.ToPaintGeometry((CurrentSlotRect.GetSize() * ScrollPanel->GetZoomLevel())+FVector2D(1, 1), FSlateLayoutTransform(FVector2D::Max((CurrentSlotRect.GetTopLeft()*ScrollPanel->GetZoomLevel())-FVector2D(1,1), FVector2D::ZeroVector))),
 			HoveredSlotBorderBrush,
 			ESlateDrawEffect::None,
 			FLinearColor::Yellow

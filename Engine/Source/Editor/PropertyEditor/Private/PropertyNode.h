@@ -7,12 +7,19 @@
 #include "UObject/UnrealType.h"
 #include "PropertyPath.h"
 #include "PropertyEditorModule.h"
+#include "EditConditionParser.h"
 
+class FCategoryPropertyNode;
 class FComplexPropertyNode;
+class FDetailTreeNode;
+class FEditConditionContext;
+class FEditConditionExpression;
+class FItemPropertyNode;
 class FNotifyHook;
 class FObjectPropertyNode;
 class FPropertyItemValueDataTrackerSlate;
 class FPropertyNode;
+class FPropertyRestriction;
 class FStructurePropertyNode;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogPropertyNode, Log, All);
@@ -21,57 +28,59 @@ namespace EPropertyNodeFlags
 {
 	typedef uint32 Type;
 
-	const Type	IsSeen							= 1 << 0;		/** true if this node can be seen based on current parent expansion.  Does not take into account clipping*/
-	const Type	IsSeenDueToFiltering			= 1 << 1;		/** true if this node has been accepted by the filter*/
-	const Type	IsSeenDueToChildFiltering		= 1 << 2;		/** true if this node or one of it's children is seen due to filtering.  It will then be forced on as well.*/
-	const Type	IsParentSeenDueToFiltering		= 1 << 3;		/** True if the parent was visible due to filtering*/
-	const Type	IsSeenDueToChildFavorite		= 1 << 4;		/** True if this node is seen to it having a favorite as a child */
+	inline const Type	IsSeen							= 1 << 0;	/** true if this node can be seen based on current parent expansion.  Does not take into account clipping*/
+	inline const Type	IsSeenDueToFiltering			= 1 << 1;	/** true if this node has been accepted by the filter*/
+	inline const Type	IsSeenDueToChildFiltering		= 1 << 2;	/** true if this node or one of it's children is seen due to filtering.  It will then be forced on as well.*/
+	inline const Type	IsParentSeenDueToFiltering		= 1 << 3;	/** True if the parent was visible due to filtering*/
+	inline const Type	IsSeenDueToChildFavorite		= 1 << 4;	/** True if this node is seen to it having a favorite as a child */
 	
-	const Type	Expanded						= 1 << 5;		/** true if this node should display its children*/
-	const Type	CanBeExpanded					= 1 << 6;		/** true if this node is able to be expanded */
+	inline const Type	Expanded						= 1 << 5;	/** true if this node should display its children*/
+	inline const Type	CanBeExpanded					= 1 << 6;	/** true if this node is able to be expanded */
 
-	const Type	EditInlineNew					= 1 << 7;		/** true if the property can be expanded into the property window. */
+	inline const Type	EditInlineNew					= 1 << 7;	/** true if the property can be expanded into the property window. */
 
-	const Type	SingleSelectOnly				= 1 << 8;		/** true if only a single object is selected. */
-	const Type  ShowCategories					= 1 << 9;		/** true if this node should show categories.  Different*/
+	inline const Type	SingleSelectOnly				= 1 << 8;	/** true if only a single object is selected. */
+	inline const Type  ShowCategories					= 1 << 9;	/** true if this node should show categories.  Different*/
 
-	const Type  HasEverBeenExpanded				= 1 << 10;	/** true if expand has ever been called on this node */
+	inline const Type  HasEverBeenExpanded				= 1 << 10;	/** true if expand has ever been called on this node */
 
-	const Type	IsBeingFiltered					= 1 << 11;	/** true if the node is being filtered. If this is true, seen flags should be checked for visibility.  If this is false the node has no filter and is visible */
+	inline const Type	IsBeingFiltered					= 1 << 11;	/** true if the node is being filtered. If this is true, seen flags should be checked for visibility.  If this is false the node has no filter and is visible */
 
-	const Type  IsFavorite						= 1 << 12;	/** true if this item has been dubbed a favorite by the user */
+	inline const Type  IsFavorite						= 1 << 12;	/** true if this item has been dubbed a favorite by the user */
 
-	const Type  NoChildrenDueToCircularReference= 1 << 13;	/** true if this node has no children (but normally would) due to circular referencing */
+	inline const Type  NoChildrenDueToCircularReference= 1 << 13;	/** true if this node has no children (but normally would) due to circular referencing */
 
-	const Type	AutoExpanded					= 1 << 14;	/** true if this node was autoexpanded due to being filtered */
-	const Type	ShouldShowHiddenProperties		= 1 << 15;	/** true if this node should all properties not just those with the correct flag(s) to be shown in the editor */
-	const Type	IsAdvanced						= 1 << 16;	/** true if the property node is advanced (i.e it only shows up in advanced sections) */
-	const Type	IsCustomized					= 1 << 17;	/** true if this node's visual representation has been customized by the editor */
+	inline const Type	AutoExpanded					= 1 << 14;	/** true if this node was autoexpanded due to being filtered */
+	inline const Type	ShouldShowHiddenProperties		= 1 << 15;	/** true if this node should all properties not just those with the correct flag(s) to be shown in the editor */
+	inline const Type	IsAdvanced						= 1 << 16;	/** true if the property node is advanced (i.e it only shows up in advanced sections) */
+	inline const Type	IsCustomized					= 1 << 17;	/** true if this node's visual representation has been customized by the editor */
 	
-	const Type	RequiresValidation				= 1 << 18; /** true if this node could unexpectedly change (array changes, editinlinenew changes) */
+	inline const Type	RequiresValidation				= 1 << 18;	/** true if this node could unexpectedly change (array changes, editinlinenew changes) */
 
-	const Type	ShouldShowDisableEditOnInstance = 1 << 19; /** true if this node should show child properties marked CPF_DisableEditOnInstance */
+	inline const Type	ShouldShowDisableEditOnInstance = 1 << 19;	/** true if this node should show child properties marked CPF_DisableEditOnInstance */
 
-	const Type	IsReadOnly						= 1 << 20; /** true if this node is overridden to appear as read-only */
+	inline const Type	IsReadOnly						= 1 << 20;	/** true if this node is overridden to appear as read-only */
 
-	const Type	SkipChildValidation				= 1 << 21; /** true if this node should skip child validation */
+	inline const Type	SkipChildValidation				= 1 << 21;	/** true if this node should skip child validation */
 
-	const Type  ShowInnerObjectProperties		= 1 << 22;
+	inline const Type  ShowInnerObjectProperties		= 1 << 22;
 
-	const Type	HasCustomResetToDefault			= 1 << 23;	/** true if this node's visual representation of reset to default has been customized*/
+	inline const Type	HasCustomResetToDefault			= 1 << 23;	/** true if this node's visual representation of reset to default has been customized*/
 
-	const Type	IsSparseClassData				= 1 << 24;	/** true if the property on this node is part of a sparse class data structure */
+	inline const Type	IsSparseClassData				= 1 << 24;	/** true if the property on this node is part of a sparse class data structure */
 
-	const Type 	NoFlags							= 0;
+	inline const Type	ShouldShowInViewport			= 1 << 25;	/** true if the property should be shown in the viewport context menu */
+
+	inline const Type 	NoFlags							= 0;
 
 };
 
 namespace FPropertyNodeConstants
 {
-	const int32 NoDepthRestrictions = -1;
+	inline const int32 NoDepthRestrictions = -1;
 
 	/** Character used to deliminate sub-categories in category path names */
-	const TCHAR CategoryDelimiterChar = TCHAR( '|' );
+	inline const TCHAR CategoryDelimiterChar = TCHAR( '|' );
 };
 
 class FPropertySettings
@@ -88,9 +97,6 @@ private:
 	bool bExpandDistributions;
 	bool bShowHiddenProperties;
 };
-
-class FPropertyItemValueDataTrackerSlate;
-class FPropertyNode;
 
 struct FAddressPair
 {
@@ -130,6 +136,12 @@ public:
 		return (Pair.Object.IsValid() || Pair.bIsStruct) ? Pair.ReadAddress : 0;
 	}
 
+	const UObject* GetObject(int32 Index)
+	{
+		const FAddressPair& Pair = ReadAddresses[Index];
+		return Pair.Object.Get();
+	}
+
 	bool IsValidIndex( int32 Index ) const
 	{
 		return ReadAddresses.IsValidIndex(Index);
@@ -141,7 +153,7 @@ public:
 		bAllValuesTheSame = false;
 		bRequiresCache = true;
 	}
-	
+
 	bool bAllValuesTheSame;
 	bool bRequiresCache;
 private:
@@ -169,6 +181,11 @@ public:
 		return ReadAddressListData->GetAddress( Index );
 	}
 	
+	const UObject* GetObject(int32 Index)
+	{
+		return ReadAddressListData->GetObject(Index);
+	}
+
 	bool IsValidIndex( int32 Index ) const
 	{
 		return ReadAddressListData->IsValidIndex( Index );
@@ -193,6 +210,13 @@ private:
  */
 struct FPropertyNodeInitParams
 {
+	enum class EIsSparseDataProperty : uint8
+	{
+		False,
+		True,
+		Inherit,
+	};
+
 	/** The parent of the property node */
 	TSharedPtr<FPropertyNode> ParentNode;
 	/** The property that the node observes and modifies*/
@@ -210,7 +234,7 @@ struct FPropertyNodeInitParams
 	/** Whether or not to create nodes for properties marked CPF_DisableEditOnInstance */
 	bool bCreateDisableEditOnInstanceNodes;
 	/** Whether or not this property is sparse data */
-	bool bIsSparseProperty;
+	EIsSparseDataProperty IsSparseProperty;
 
 	FPropertyNodeInitParams()
 		: ParentNode(nullptr)
@@ -221,7 +245,7 @@ struct FPropertyNodeInitParams
 		, bForceHiddenPropertyVisibility( false )
 		, bCreateCategoryNodes( true )
 		, bCreateDisableEditOnInstanceNodes( true )
-		, bIsSparseProperty( false )
+		, IsSparseProperty( EIsSparseDataProperty::Inherit )
 	{}
 };
 
@@ -246,8 +270,6 @@ struct EPropertyArrayChangeType
 	};
 };
 
-class FComplexPropertyNode;
-
 enum EPropertyDataValidationResult : uint8
 {
 	/** The object(s) being viewed are now invalid */
@@ -264,15 +286,80 @@ enum EPropertyDataValidationResult : uint8
 	DataValid,
 };
 
+/** Helper class for modifying property values with setters and getters */
+class FPropertyNodeEditStack
+{
+	struct FMemoryFrame
+	{
+		FMemoryFrame() = default;
+		FMemoryFrame(const FProperty* InProperty, uint8* InMemory)
+			: Property(InProperty)
+			, Memory(InMemory)
+		{
+		}
+		/** Property that points to the memory in this frame */
+		const FProperty* Property = nullptr;
+		/** Property address */
+		uint8* Memory = nullptr;
+	};
+public:
+
+	/**
+	* Constructs property stack for the specified node
+	* InNode Property node to construct the stack for
+	* InObj Optional Object instance that contains the property being modified (if not provided the root container pointer will be acquired from the provided node hierarchy)
+	*/
+	FPropertyNodeEditStack(const FPropertyNode* InNode, const UObject* InObj = nullptr);
+	FPropertyNodeEditStack() = default;
+	~FPropertyNodeEditStack();
+
+	FPropertyNodeEditStack& operator = (const FPropertyNodeEditStack& Other) = delete;
+	FPropertyNodeEditStack(const FPropertyNodeEditStack& Other) = delete;
+
+	/**
+	* Initializes property stack for the specified node
+	* InNode Property node to construct the stack for
+	* InObj Object instance that contains the property being modified
+	*/
+	FPropertyAccess::Result Initialize(const FPropertyNode* InNode, const UObject* InObj);
+
+	/**
+	* Returns the address of the property being modified.
+	* If anywhere in the property stack is a property with a setter or getter this will point to a temporarily allocated memory.
+	*/
+	uint8* GetDirectPropertyAddress()
+	{
+		return MemoryStack.Last().Memory;
+	}
+
+	/**
+	* Commits all modifications to temporarily allocated property values back to the actual member variables using setters and getters where available
+	*/
+	void CommitChanges();
+
+	/** Checks if this edit stack is valid */
+	bool IsValid() const
+	{
+		return MemoryStack.Num() > 0;
+	}
+
+private:
+
+	FPropertyAccess::Result InitializeInternal(const FPropertyNode* InNode, const UObject* InObj);
+	void Cleanup();
+
+	TArray<FMemoryFrame> MemoryStack;
+};
+
 /**
- * The base class for all property nodes                                                              
+ * The base class for all property nodes
  */
 class FPropertyNode : public TSharedFromThis<FPropertyNode>
 {
 public:
 
-	FPropertyNode(void);
-	virtual ~FPropertyNode(void);
+	FPropertyNode();
+	virtual ~FPropertyNode();
 
 	/**
 	 * Init Tree Node internally (used only derived classes to pass through variables that are common to all nodes
@@ -291,6 +378,11 @@ public:
 	void RebuildChildren();
 
 	/**
+	 * Mark this and all children as having been rebuilt.
+	 */
+	void MarkChildrenAsRebuilt();
+
+	/**
 	 * For derived windows to be able to add their nodes to the child array
 	 */
 	void AddChildNode(TSharedPtr<FPropertyNode> InNode);
@@ -303,48 +395,54 @@ public:
 	/**
 	 * Interface function to get at the derived FObjectPropertyNode class
 	 */
-	virtual class FObjectPropertyNode* AsObjectNode() { return nullptr; }
+	virtual FObjectPropertyNode* AsObjectNode() { return nullptr; }
 	virtual const FObjectPropertyNode* AsObjectNode() const { return nullptr; }
 
 	/**
 	 * Interface function to get at the derived FComplexPropertyNode class
 	 */
-	virtual class FComplexPropertyNode* AsComplexNode() { return nullptr; }
+	virtual FComplexPropertyNode* AsComplexNode() { return nullptr; }
 	virtual const FComplexPropertyNode* AsComplexNode() const { return nullptr; }
 
 	/**
 	 * Interface function to get at the derived FCategoryPropertyNode class
 	 */
-	virtual class FCategoryPropertyNode* AsCategoryNode() { return nullptr; }
+	virtual FCategoryPropertyNode* AsCategoryNode() { return nullptr; }
 	virtual const FCategoryPropertyNode* AsCategoryNode() const { return nullptr; }
 
 	/**
 	 * Interface function to get at the derived FItemPropertyNode class
 	 */
-	virtual class FItemPropertyNode* AsItemPropertyNode() { return nullptr; }
+	virtual FItemPropertyNode* AsItemPropertyNode() { return nullptr; }
 	virtual const FItemPropertyNode* AsItemPropertyNode() const { return nullptr; }
 
 	/**
 	 * Follows the chain of items upwards until it finds the complex property that houses this item.
 	 */
-	class FComplexPropertyNode* FindComplexParent();
+	FComplexPropertyNode* FindComplexParent();
 	const FComplexPropertyNode* FindComplexParent() const;
 
 	/**
 	 * Follows the chain of items upwards until it finds the object property that houses this item.
 	 */
-	class FObjectPropertyNode* FindObjectItemParent();
+	FObjectPropertyNode* FindObjectItemParent();
 	const FObjectPropertyNode* FindObjectItemParent() const;
+
+	/**
+	 * Follows the chain of items upwards until it finds the structure property that houses this item.
+	 */
+	FStructurePropertyNode* FindStructureItemParent();
+	const FStructurePropertyNode* FindStructureItemParent() const;
 
 	/**
 	 * Follows the top-most object window that contains this property window item.
 	 */
-	class FObjectPropertyNode* FindRootObjectItemParent();
+	FObjectPropertyNode* FindRootObjectItemParent();
 
 	/**
 	 * Used to see if any data has been destroyed from under the property tree.  Should only be called during Tick
 	 */
-	EPropertyDataValidationResult EnsureDataIsValid();
+	virtual EPropertyDataValidationResult EnsureDataIsValid();
 
 	//////////////////////////////////////////////////////////////////////////
 	// Text
@@ -366,7 +464,7 @@ public:
 
 	//////////////////////////////////////////////////////////////////////////
 	//Flags
-	uint32 HasNodeFlags(const EPropertyNodeFlags::Type InTestFlags) const { return PropertyNodeFlags & InTestFlags; }
+	bool HasNodeFlags(const EPropertyNodeFlags::Type InTestFlags) const { return (PropertyNodeFlags & InTestFlags) != 0; }
 	/**
 	 * Sets the flags used by the window and the root node
 	 * @param InFlags - flags to turn on or off
@@ -385,8 +483,8 @@ public:
 	/**
 	 * Returns the parent node in the hierarchy
 	 */
-	FPropertyNode*			GetParentNode() { return ParentNodeWeakPtr.IsValid() ? ParentNodeWeakPtr.Pin().Get() : nullptr; }
-	const FPropertyNode*	GetParentNode() const { return ParentNodeWeakPtr.IsValid() ? ParentNodeWeakPtr.Pin().Get() : nullptr; }
+	FPropertyNode*			GetParentNode() { return ParentNodeWeakPtr.Pin().Get(); }
+	const FPropertyNode*	GetParentNode() const { return ParentNodeWeakPtr.Pin().Get(); }
 	TSharedPtr<FPropertyNode> GetParentNodeSharedPtr() { return ParentNodeWeakPtr.Pin(); }
 	/**
 	 * Returns the Property this Node represents
@@ -397,8 +495,8 @@ public:
 	/**
 	 * Accessor functions for internals
 	 */
-	const int32 GetArrayOffset() const { return ArrayOffset; }
-	const int32 GetArrayIndex() const { return ArrayIndex; }
+	int32 GetArrayOffset() const { return ArrayOffset; }
+	int32 GetArrayIndex() const { return ArrayIndex; }
 
 	/**
 	 * Return number of children that survived being filtered
@@ -442,6 +540,11 @@ public:
 	bool IsEditConst() const;
 
 	/**
+	 * Returns whether this window's property should not be serialized (determined by the CPF_SkipSerialization flag).
+	 */
+	bool ShouldSkipSerialization() const;
+
+	/**
 	 * Gets the full name of this node
 	 * @param PathPlusIndex - return value with full path of node
 	 * @param bWithArrayIndex - If True, adds an array index (where appropriate)
@@ -473,6 +576,19 @@ public:
 	FPropertyAccess::Result GetSingleReadAddress(uint8*& OutValueAddress) const;
 
 	/**
+	 * Fills in the OutObject with the address of the object of all the available objects.
+	 * If multiple items are selected, this will return a null address unless they are all the same value.
+	 * @param OutObject	The address of the Object
+	 */
+	FPropertyAccess::Result GetSingleObject(UObject*& OutObject) const;
+
+	/**
+	 * Fills in the OutContainer with the address of the container (struct or UObject instance) that owns the property this node represents.
+	 * @param OutContainer	The address of the container instance
+	 */
+	FPropertyAccess::Result GetSingleEditStack(FPropertyNodeEditStack& OutStack) const;
+
+	/**
 	 * Gets read addresses without accessing cached data.  Is less efficient but gets the must up to date data
 	 */
 	virtual bool GetReadAddressUncached(const FPropertyNode& InNode, bool InRequiresSingleSelection, FReadAddressListData* OutAddresses, bool bComparePropertyContents = true, bool bObjectForceCompare = false, bool bArrayPropertiesCanDifferInSize = false) const;
@@ -486,7 +602,7 @@ public:
 	 *
 	 * @return	a pointer to a FProperty value or UObject.  (For dynamic arrays, you'd cast this value to an FArray*)
 	 */
-	virtual uint8* GetValueBaseAddress(uint8* StartAddress, bool bIsSparseData) const;
+	virtual uint8* GetValueBaseAddress(uint8* StartAddress, bool bIsSparseData, bool bIsStruct = false) const;
 
 	/**
 	 * Calculates the memory address for the data associated with this item's value.  For most properties, identical to GetValueBaseAddress.  For items corresponding
@@ -497,7 +613,13 @@ public:
 	 *
 	 * @return	a pointer to a FProperty value or UObject.  (For dynamic arrays, you'd cast this value to whatever type is the Inner for the dynamic array)
 	 */
-	virtual uint8* GetValueAddress(uint8* StartAddress, bool bIsSparseData) const;
+	virtual uint8* GetValueAddress(uint8* StartAddress, bool bIsSparseData, bool bIsStruct = false) const;
+
+	/**
+	 * Caclulates the memory address for the starting point of the structure that contains the property this node uses.
+	 * This will often be Obj but may also point to a sidecar data structure.
+	 */
+	uint8* GetStartAddressFromObject(const UObject* Obj) const;
 
 	/**
 	 * Calculates the memory address for the data associated with this item's property.  This is typically the value of a FProperty or a UObject address.
@@ -534,16 +656,6 @@ public:
 	virtual bool IsFavorite() const { return false; }
 
 	/**
-	* Set the permission to display the favorite icon
-	*/
-	virtual void SetCanDisplayFavorite(bool CanDisplayFavoriteIcon) {}
-
-	/**
-	* Set the permission to display the favorite icon
-	*/
-	virtual bool CanDisplayFavorite() const { return false; }
-
-	/**
 	 * @return The formatted display name for the property in this node
 	 */
 	virtual FText GetDisplayName() const { return FText::GetEmpty(); }
@@ -574,15 +686,17 @@ public:
 	bool IsReorderable();
 
 	/**Walks up the hierarchy and return true if any parent node is a favorite*/
-	bool IsChildOfFavorite(void) const;
+	bool IsChildOfFavorite() const;
 
-	void NotifyPreChange(FProperty* PropertyAboutToChange, class FNotifyHook* InNotifyHook);
-	void NotifyPreChange(FProperty* PropertyAboutToChange, class FNotifyHook* InNotifyHook, const TSet<UObject*>& AffectedInstances);
-	void NotifyPreChange(FProperty* PropertyAboutToChange, class FNotifyHook* InNotifyHook, TSet<UObject*>&& AffectedInstances);
+	void NotifyPreChange(FProperty* PropertyAboutToChange, FNotifyHook* InNotifyHook);
+	void NotifyPreChange(FProperty* PropertyAboutToChange, FNotifyHook* InNotifyHook, const TSet<UObject*>& AffectedInstances);
+	void NotifyPreChange(FProperty* PropertyAboutToChange, FNotifyHook* InNotifyHook, TSet<UObject*>&& AffectedInstances);
 
-	void NotifyPostChange(FPropertyChangedEvent& InPropertyChangedEvent, class FNotifyHook* InNotifyHook);
+	void NotifyPostChange(FPropertyChangedEvent& InPropertyChangedEvent, FNotifyHook* InNotifyHook);
 
-	void SetOnRebuildChildren(FSimpleDelegate InOnRebuildChildren);
+	DECLARE_EVENT(FPropertyNode, FPropertyChildrenRebuiltEvent);
+	FDelegateHandle SetOnRebuildChildren(const FSimpleDelegate& InOnRebuildChildren);
+	FPropertyChildrenRebuiltEvent& OnRebuildChildren() { return OnRebuildChildrenEvent; }
 
 	/**
 	 * Propagates the property change to all instances of an archetype
@@ -633,10 +747,14 @@ public:
 
 	/** Broadcasts when a property value changes */
 	DECLARE_EVENT(FPropertyNode, FPropertyValueChangedEvent);
+	/** Broadcasts when a property value changes, but additionally includes the property changed event.*/
+	DECLARE_MULTICAST_DELEGATE_OneParam(FPropertyValueChangedWithData, const FPropertyChangedEvent&)
 	FPropertyValueChangedEvent& OnPropertyValueChanged() { return PropertyValueChangedEvent; }
-
+	FPropertyValueChangedWithData& OnPropertyValueChangedWithData() { return PropertyValueChangedDelegate; }
+	
 	/** Broadcasts when a child of this property changes */
 	FPropertyValueChangedEvent& OnChildPropertyValueChanged() { return ChildPropertyValueChangedEvent; }
+	FPropertyValueChangedWithData& OnChildPropertyValueChangedWithData() { return ChildPropertyValueChangedDelegate; }
 
 	/** Broadcasts when a property value changes */
 	DECLARE_EVENT(FPropertyNode, FPropertyValuePreChangeEvent);
@@ -668,7 +786,7 @@ public:
 	/**
 	 * Marks windows as visible based their favorites status
 	 */
-	void ProcessSeenFlagsForFavorites(void);
+	void ProcessSeenFlagsForFavorites();
 
 	/**
 	 * @return true if this node should be visible in a tree
@@ -682,7 +800,7 @@ public:
 
 		if (CurrentNode != nullptr && CurrentNode->AsCategoryNode() != nullptr)
 		{
-			TSharedRef< FPropertyPath > NewPath = MakeShareable(new FPropertyPath());
+			TSharedRef< FPropertyPath > NewPath = MakeShared<FPropertyPath>();
 			return NewPath;
 		}
 
@@ -692,6 +810,10 @@ public:
 			{
 				FPropertyInfo NewPropInfo;
 				NewPropInfo.Property = CurrentNode->GetProperty();
+				if (!NewPropInfo.Property.IsValid())
+				{
+					return MakeShared<FPropertyPath>();
+				}
 				NewPropInfo.ArrayIndex = CurrentNode->GetArrayIndex();
 
 				Properties.Add(NewPropInfo);
@@ -700,7 +822,7 @@ public:
 			CurrentNode = CurrentNode->GetParentNode();
 		}
 
-		TSharedRef< FPropertyPath > NewPath = MakeShareable(new FPropertyPath());
+		TSharedRef< FPropertyPath > NewPath = MakeShared<FPropertyPath>();
 
 		for (int PropertyIndex = Properties.Num() - 1; PropertyIndex >= 0; --PropertyIndex)
 		{
@@ -803,7 +925,7 @@ public:
 	 * Adds a restriction to the possible values for this property.
 	 * @param Restriction	The restriction being added to this property.
 	 */
-	virtual void AddRestriction(TSharedRef<const class FPropertyRestriction> Restriction);
+	virtual void AddRestriction(TSharedRef<const FPropertyRestriction> Restriction);
 
 	/**
 	* Tests if a value is hidden for this property
@@ -862,7 +984,7 @@ public:
 	 */
 	virtual bool GenerateRestrictionToolTip(const FString& Value, FText& OutTooltip)const;
 
-	const TArray<TSharedRef<const class FPropertyRestriction>>& GetRestrictions() const
+	const TArray<TSharedRef<const FPropertyRestriction>>& GetRestrictions() const
 	{
 		return Restrictions;
 	}
@@ -874,14 +996,14 @@ public:
 
 	/**
 	 * Get metadata value for 'Key' for this property instance (as opposed to the class)
-	 * 
+	 *
 	 * @return Pointer to metadata value; nullptr if Key not found
 	 */
 	const FString* GetInstanceMetaData(const FName& Key) const;
 
 	/**
 	 * Get metadata map for this property instance (as opposed to the class)
-	 * 
+	 *
 	 * @return Map ptr containing metadata pairs
 	 */
 	const TMap<FName, FString>* GetInstanceMetaDataMap() const;
@@ -915,6 +1037,22 @@ public:
 	 */
 	void BroadcastPropertyResetToDefault();
 
+	/** @return Whether this property should have an edit condition toggle. */
+	bool SupportsEditConditionToggle() const;
+
+	/** Toggle the current state of the edit condition if this SupportsEditConditionToggle() */
+	void ToggleEditConditionState();
+
+	/**	@return Whether the property has a condition which must be met before allowing editing of it's value */
+	bool HasEditCondition() const;
+
+	/**	@return Whether the condition has been met to allow editing of this property's value */
+	bool IsEditConditionMet() const;
+
+	/**	@return Whether this property derives its visibility from its edit condition */
+	bool IsOnlyVisibleWhenEditConditionMet() const;
+
+
 	/**
 	 * Helper to fetch a list of child property nodes that are expanded
 	 */
@@ -925,15 +1063,47 @@ public:
 	 */
 	void SetExpandedChildPropertyNodes(const TSet<FString>& InNodesToExpand);
 
+	/**
+	 * Helper to fetch a PropertyPath 
+	 */
+	const FString& GetPropertyPath() const { return PropertyPath; }
+
+	/** Marks this property node as ignoring CPF_InstancedReference */
+	void SetIgnoreInstancedReference();
+
+	/** Queries whether the node would like to ignore CPF_InstancedReference semantics */
+	bool IsIgnoringInstancedReference() const;
+
+	/** Return true if DestroyTree() has been called on this node. */
+	bool IsDestroyed() const;
+
+	/**
+	 * Sets bIsDestroyed on all nodes within the hierarchy
+	 */
+	void MarkDestroyedRecursive();
+
+	TSharedPtr<FPropertyNode>& GetOptionalValueNode() { return OptionalValueNode; }
+
+	/**
+	 * Interface function for getting an optionals ValueNode (May construct it if needed).
+	 * @return The optional's value OR null if this is a non-optional/unset-optional.
+	 * 
+	 * Note: This is currently the only method by which an optional's Value FPropertyNode is created (If you change this please update this documentation).
+	 */
+	virtual TSharedPtr<FPropertyNode>& GetOrCreateOptionalValueNode() { return OptionalValueNode; }
+
+	virtual bool IsOptionalValueNode() 
+	{ 
+		return ParentNodeWeakPtr.IsValid() 
+			&& ParentNodeWeakPtr.Pin()->GetOptionalValueNode().IsValid()
+			&& ParentNodeWeakPtr.Pin()->GetOptionalValueNode().Get() == this;
+	}
+
+	TSharedRef<FEditPropertyChain> BuildPropertyChain( FProperty* PropertyAboutToChange ) const;
+	
 protected:
-
-	// Returns a pointer to the starting point of the structure that contains the property this node uses.
-	// This will often be Obj but may also point to a sidecar data structure
-	uint8* GetStartAddress(const UObject* Obj) const;
-
-	TSharedRef<FEditPropertyChain> BuildPropertyChain( FProperty* PropertyAboutToChange );
-	TSharedRef<FEditPropertyChain> BuildPropertyChain( FProperty* PropertyAboutToChange, const TSet<UObject*>& InAffectedArchetypeInstances );
-	TSharedRef<FEditPropertyChain> BuildPropertyChain( FProperty* PropertyAboutToChange, TSet<UObject*>&& InAffectedArchetypeInstances );
+	TSharedRef<FEditPropertyChain> BuildPropertyChain( FProperty* PropertyAboutToChange, const TSet<UObject*>& InAffectedArchetypeInstances ) const;
+	TSharedRef<FEditPropertyChain> BuildPropertyChain( FProperty* PropertyAboutToChange, TSet<UObject*>&& InAffectedArchetypeInstances ) const;
 
 	void NotifyPreChangeInternal(TSharedRef<FEditPropertyChain> PropertyChain, FProperty* PropertyAboutToChange, FNotifyHook* InNotifyHook);
 
@@ -945,12 +1115,12 @@ protected:
 	/**
 	 * Interface function for Custom Setup of Node (prior to node flags being set)
 	 */
-	virtual void InitBeforeNodeFlags () {};
+	virtual void InitBeforeNodeFlags() {};
 
 	/**
 	 * Interface function for Custom expansion Flags.  Default is objects and categories which always expand
 	 */
-	virtual void InitExpansionFlags (){ SetNodeFlags(EPropertyNodeFlags::CanBeExpanded, true); };
+	virtual void InitExpansionFlags() { SetNodeFlags(EPropertyNodeFlags::CanBeExpanded, true); };
 
 	/**
 	 * Interface function for Creating Child Nodes
@@ -969,11 +1139,17 @@ protected:
 	/** @return		The property stored at this node, to be passed to Pre/PostEditChange. */
 	FProperty*		GetStoredProperty()		{ return nullptr; }
 
+	bool GetDiffersFromDefault(const uint8* PropertyValueAddress, const uint8* PropertyDefaultAddress, const uint8* DefaultPropertyValueBaseAddress, const FProperty* InProperty, const UObject* TopLevelObject) const;
 	bool GetDiffersFromDefaultForObject( FPropertyItemValueDataTrackerSlate& ValueTracker, FProperty* InProperty );
 
-	FString GetDefaultValueAsStringForObject( FPropertyItemValueDataTrackerSlate& ValueTracker, UObject* InObject, FProperty* InProperty, bool bUseDisplayName );
-
-	FString GetDefaultValueAsStringForObject( FPropertyItemValueDataTrackerSlate& ValueTracker, UObject* InObject, FProperty* InProperty );
+	enum class EValueAsStringMode
+	{
+		None,
+		UseDisplayName,
+		ForDiff,
+	};
+	FString GetDefaultValueAsString(const uint8* PropertyDefaultAddress, const FProperty* InProperty, EValueAsStringMode Mode, const UObject* TopLevelObject) const;
+	FString GetDefaultValueAsStringForObject( FPropertyItemValueDataTrackerSlate& ValueTracker, UObject* InObject, FProperty* InProperty, EValueAsStringMode Mode);
 	
 	/**
 	 * Helper function to obtain the display name for an enum property
@@ -982,13 +1158,19 @@ protected:
 	 *
 	 * @return	true if the DisplayName has been changed
 	 */
-	bool AdjustEnumPropDisplayName( UEnum *InEnum, FString& DisplayName ) const;
+	bool AdjustEnumPropDisplayName(UEnum* InEnum, FString& DisplayName) const;
 
 	/**
-	 * Helper function for derived members to be able to 
+	 * Helper function for derived members to be able to
 	 * broadcast property changed notifications
 	 */
 	void BroadcastPropertyChangedDelegates();
+
+	/**
+	 * Helper function for derived members to be able to 
+	 * broadcast property changed notifications including property changed event data
+	 */
+	void BroadcastPropertyChangedDelegates(const FPropertyChangedEvent& Event);
 
 
 	/**
@@ -1018,15 +1200,19 @@ protected:
 	static bool DoesChildPropertyRequireValidation(FProperty* InChildProp);
 
 protected:
+
+	static FEditConditionParser EditConditionParser;
+
 	/**
 	 * The node that is the parent of this node or nullptr for the root
 	 */
 	TWeakPtr<FPropertyNode> ParentNodeWeakPtr;
-	//@todo consolidate with ParentNodeWeakPtr, ParentNode is legacy
-	FPropertyNode* ParentNode;
 
 	/**	The property node, if any, that serves as the key value for this node */
 	TSharedPtr<FPropertyNode> PropertyKeyNode;
+
+	/**	The property node, if any, is this nodes optional value */
+	TSharedPtr<FPropertyNode> OptionalValueNode;
 
 	/** Cached read addresses for this property node */
 	mutable FReadAddressListData CachedReadAddresses;
@@ -1038,7 +1224,7 @@ protected:
 	TArray< TSharedPtr<FPropertyNode> > ChildNodes;
 
 	/** Called when this node's children are rebuilt */
-	FSimpleDelegate OnRebuildChildren;
+	FPropertyChildrenRebuiltEvent OnRebuildChildrenEvent;
 
 	/** Called when this node's property value is about to change (called during NotifyPreChange) */
 	FPropertyValuePreChangeEvent PropertyValuePreChangeEvent;
@@ -1048,9 +1234,13 @@ protected:
 
 	/** Called when this node's property value has changed (called during NotifyPostChange) */
 	FPropertyValueChangedEvent PropertyValueChangedEvent;
+	/** Called when this node's property value has changed with the property changed event data as payload (called during NotifyPostChange) */
+	FPropertyValueChangedWithData PropertyValueChangedDelegate;
 	
 	/** Called when a child's property value has changed */
 	FPropertyValueChangedEvent ChildPropertyValueChangedEvent;
+	/** Called when a child's property value has changed with the property changed event data as payload */
+	FPropertyValueChangedWithData ChildPropertyValueChangedDelegate;
 
 	/** Called when the property is reset to default */
 	FPropertyResetToDefaultEvent PropertyResetToDefaultEvent;
@@ -1082,14 +1272,20 @@ protected:
 	/** Set to true when RebuildChildren is called on the node */
 	bool bChildrenRebuilt;
 
+	/** Set to true when we want to ignore CPF_InstancedReference */
+	bool bIgnoreInstancedReference;
+
+	/** If true, DestroyTree() has been called on the node. */
+	bool bIsDestroyed = false;
+	
 	/** An array of restrictions limiting this property's potential values in property editors.*/
-	TArray<TSharedRef<const class FPropertyRestriction>> Restrictions;
+	TArray<TSharedRef<const FPropertyRestriction>> Restrictions;
 
 	/** Optional reference to a tree node that is displaying this property */
-	TWeakPtr< class FDetailTreeNode > TreeNode;
+	TWeakPtr<FDetailTreeNode> TreeNode;
 
 	/**
-	 * Stores metadata for this instasnce of the property (in contrast
+	 * Stores metadata for this instance of the property (in contrast
 	 * to regular metadata, which is stored per-class)
 	 */
 	TMap<FName, FString> InstanceMetaData;
@@ -1098,6 +1294,10 @@ protected:
 	* The property path for this property
 	*/
 	FString PropertyPath;
+
+	/** Edit condition expression used to determine if this property editor can modify its property */
+	TSharedPtr<FEditConditionExpression> EditConditionExpression;
+	TSharedPtr<FEditConditionContext> EditConditionContext;
 
 	/**
 	* Cached state of flags that are expensive to update
@@ -1122,10 +1322,10 @@ public:
 	FComplexPropertyNode() : FPropertyNode() {}
 	virtual ~FComplexPropertyNode() {}
 
-	virtual FComplexPropertyNode* AsComplexNode() override{ return this; }
-	virtual const FComplexPropertyNode* AsComplexNode() const override{ return this; }
+	virtual FComplexPropertyNode* AsComplexNode() override { return this; }
+	virtual const FComplexPropertyNode* AsComplexNode() const override { return this; }
 
-	virtual class FStructurePropertyNode* AsStructureNode() { return nullptr; }
+	virtual FStructurePropertyNode* AsStructureNode() { return nullptr; }
 	virtual const FStructurePropertyNode* AsStructureNode() const { return nullptr; }
 
 	virtual UStruct* GetBaseStructure() = 0;
@@ -1136,14 +1336,17 @@ public:
 	virtual TArray<const UStruct*> GetAllStructures() const = 0;
 
 	virtual int32 GetInstancesNum() const = 0;
-	virtual uint8* GetMemoryOfInstance(int32 Index) = 0;
+	virtual uint8* GetMemoryOfInstance(int32 Index) const = 0;
 
 	/**
 	 * Returns a pointer to the stored value of InProperty on InParentNode's Index'th instance.
 	 */
-	virtual uint8* GetValuePtrOfInstance(int32 Index, const FProperty* InProperty, FPropertyNode* InParentNode) = 0;
-	virtual TWeakObjectPtr<UObject> GetInstanceAsUObject(int32 Index) = 0;
+	virtual uint8* GetValuePtrOfInstance(int32 Index, const FProperty* InProperty, const FPropertyNode* InParentNode) const = 0;
+	virtual TWeakObjectPtr<UObject> GetInstanceAsUObject(int32 Index) const = 0;
 	virtual EPropertyType GetPropertyType() const = 0;
 
 	virtual void Disconnect() = 0;
+
+	/** Generates a single child from the provided property name.  Any existing children are destroyed */
+	virtual TSharedPtr<FPropertyNode> GenerateSingleChild(FName ChildPropertyName) = 0;
 };

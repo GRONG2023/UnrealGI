@@ -7,6 +7,8 @@
 
 #include "HAL/PlatformProcess.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(FixedFrameRateCustomTimeStep)
+
 
 UFixedFrameRateCustomTimeStep::UFixedFrameRateCustomTimeStep(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -22,8 +24,8 @@ void UFixedFrameRateCustomTimeStep::WaitForFixedFrameRate() const
 	const FFrameRate FrameRate = GetFixedFrameRate();
 
 	// Calculate delta time
-	const float DeltaRealTime = CurrentTime - FApp::GetLastTime();
-	const float WaitTime = FMath::Max(FrameRate.AsInterval() - DeltaRealTime, 0.0);
+	const double DeltaRealTime = CurrentTime - FApp::GetLastTime();
+	const double WaitTime = FMath::Max(FrameRate.AsInterval() - DeltaRealTime, 0.0);
 
 	double ActualWaitTime = 0.0;
 	{
@@ -31,7 +33,7 @@ void UFixedFrameRateCustomTimeStep::WaitForFixedFrameRate() const
 
 		if (WaitTime > 5.f / 1000.f)
 		{
-			FPlatformProcess::SleepNoStats(WaitTime - 0.002f);
+			FPlatformProcess::SleepNoStats((float)WaitTime - 0.002f);
 		}
 
 		// Give up timeslice for remainder of wait time.
@@ -52,3 +54,4 @@ FFrameRate UFixedFrameRateCustomTimeStep::GetFixedFrameRate_PureVirtual() const
 {
 	return FFrameRate(24, 1);
 }
+

@@ -36,8 +36,9 @@ namespace ETextRole
 /**
  * A simple static text widget
  */
-class SLATE_API STextBlock : public SLeafWidget
+class STextBlock : public SLeafWidget
 {
+	SLATE_DECLARE_WIDGET_API(STextBlock, SLeafWidget, SLATE_API)
 
 public:
 
@@ -55,14 +56,16 @@ public:
 		, _WrapTextAt(0.0f)
 		, _AutoWrapText(false)
 		, _WrappingPolicy(ETextWrappingPolicy::DefaultWrapping)
-		, _TransformPolicy(ETextTransformPolicy::None)
+		, _TransformPolicy()
 		, _Margin()
 		, _LineHeightPercentage(1.0f)
+		, _ApplyLineHeightToBottomLine(true)
 		, _Justification(ETextJustify::Left)
 		, _MinDesiredWidth(0.0f)
 		, _TextShapingMethod()
 		, _TextFlowDirection()
 		, _LineBreakPolicy()
+		, _OverflowPolicy()
 		, _SimpleTextMode(false)
 		{
 			_Clipping = EWidgetClipping::OnDemand;
@@ -92,7 +95,7 @@ public:
 		/** The color used to highlight the specified text */
 		SLATE_ATTRIBUTE( FLinearColor, HighlightColor )
 
-		/** The brush used to highlight the specified text*/
+		/** The brush used to highlight the specified text */
 		SLATE_ATTRIBUTE( const FSlateBrush*, HighlightShape )
 
 		/** Highlight this text in the text block */
@@ -118,6 +121,9 @@ public:
 		/** The amount to scale each lines height by. */
 		SLATE_ATTRIBUTE( float, LineHeightPercentage )
 
+		/** Whether to leave extra space below the last line due to line height. */
+		SLATE_ATTRIBUTE( bool, ApplyLineHeightToBottomLine )
+
 		/** How the text should be aligned with the margin. */
 		SLATE_ATTRIBUTE( ETextJustify::Type, Justification )
 
@@ -133,6 +139,9 @@ public:
 		/** The iterator to use to detect appropriate soft-wrapping points for lines (or null to use the default) */
 		SLATE_ARGUMENT( TSharedPtr<IBreakIterator>, LineBreakPolicy )
 
+		/** Determines what happens to text that is clipped and doesn't fit within the clip rect for this widget */
+		SLATE_ARGUMENT(TOptional<ETextOverflowPolicy>, OverflowPolicy)
+
 		/**
 		 * If this is enabled, text shaping, wrapping, justification are disabled in favor of much faster text layout and measurement.
 		 * This feature is suitable for numbers and text that changes often and impact performance.
@@ -146,17 +155,17 @@ public:
 	SLATE_END_ARGS()
 
 	/** Constructor */
-	STextBlock();
+	SLATE_API STextBlock();
 
 	/** Destructor */
-	~STextBlock();
+	SLATE_API ~STextBlock();
 
 	/**
 	 * Construct this widget
 	 *
 	 * @param	InArgs	The declaration data for this widget
 	 */
-	void Construct( const FArguments& InArgs );
+	SLATE_API void Construct( const FArguments& InArgs );
 
 	/**
 	 * Gets the text assigned to this text block
@@ -165,127 +174,147 @@ public:
 	 */
 	const FText& GetText() const
 	{
+		if (bIsAttributeBoundTextBound)
+		{
+			STextBlock& MutableSelf = const_cast<STextBlock&>(*this);
+			MutableSelf.BoundText.UpdateNow(MutableSelf);
+		}
 		return BoundText.Get();
 	}
 	
 public:
-	UE_DEPRECATED(4.24, "SetText taking FString is deprecated. Use the FText version instead")
-	void SetText( const TAttribute< FString >& InText );
-	UE_DEPRECATED(4.24, "SetText taking FString is deprecated. Use the FText version instead")
-	void SetText( const FString& InText );
+	/** Sets the text for this text block */
+	SLATE_API void SetText(TAttribute<FText> InText);
 
-	/**
-	 * Sets the text for this text block
-	 *
-	 * @param	InText	The new text to display
-	 */
-	void SetText( const TAttribute< FText >& InText );
-	void SetText( const FText& InText );
+	/** Sets the highlight text for this text block */
+	SLATE_API void SetHighlightText(TAttribute<FText> InText);
 
-	/**
-	* Sets the highlight text for this text block 
-	*
-	* @param	InText	The new text to highlight
-	*/
-	void SetHighlightText(TAttribute<FText> InText);
-
-	/**
-	 * Sets the font used to draw the text
-	 *
-	 * @param	InFont	The new font to use
-	 */
-	void SetFont(const TAttribute< FSlateFontInfo >& InFont);
+	/** Sets the font used to draw the text	*/
+	SLATE_API void SetFont(TAttribute<FSlateFontInfo> InFont);
 
 	/** Sets the brush used to strike through the text */
-	void SetStrikeBrush(const TAttribute<const FSlateBrush*>& InStrikeBrush);
+	SLATE_API void SetStrikeBrush(TAttribute<const FSlateBrush*> InStrikeBrush);
 
 	/** See ColorAndOpacity attribute */
-	void SetColorAndOpacity(const TAttribute<FSlateColor>& InColorAndOpacity);
+	SLATE_API void SetColorAndOpacity(TAttribute<FSlateColor> InColorAndOpacity);
 
 	/** See TextStyle argument */
-	void SetTextStyle(const FTextBlockStyle* InTextStyle);
+	SLATE_API void SetTextStyle(const FTextBlockStyle* InTextStyle);
 
 	/** See TextShapingMethod attribute */
-	void SetTextShapingMethod(const TOptional<ETextShapingMethod>& InTextShapingMethod);
+	SLATE_API void SetTextShapingMethod(const TOptional<ETextShapingMethod>& InTextShapingMethod);
 
 	/** See TextFlowDirection attribute */
-	void SetTextFlowDirection(const TOptional<ETextFlowDirection>& InTextFlowDirection);
+	SLATE_API void SetTextFlowDirection(const TOptional<ETextFlowDirection>& InTextFlowDirection);
 
 	/** See WrapTextAt attribute */
-	void SetWrapTextAt(const TAttribute<float>& InWrapTextAt);
+	SLATE_API void SetWrapTextAt(TAttribute<float> InWrapTextAt);
 
 	/** See AutoWrapText attribute */
-	void SetAutoWrapText(const TAttribute<bool>& InAutoWrapText);
+	SLATE_API void SetAutoWrapText(TAttribute<bool> InAutoWrapText);
 
 	/** Set WrappingPolicy attribute */
-	void SetWrappingPolicy(const TAttribute<ETextWrappingPolicy>& InWrappingPolicy);
+	SLATE_API void SetWrappingPolicy(TAttribute<ETextWrappingPolicy> InWrappingPolicy);
 
 	/** Set TransformPolicy attribute */
-	void SetTransformPolicy(const TAttribute<ETextTransformPolicy>& InTransformPolicy);
+	SLATE_API void SetTransformPolicy(TAttribute<ETextTransformPolicy> InTransformPolicy);
+
+	/** Get TransformPolicy attribute */
+	UE_DEPRECATED(5.0, "GetTransformPolicy is not accessible anymore since it's attribute value may not have been updated yet.")
+	ETextTransformPolicy GetTransformPolicy() const { return GetTransformPolicyImpl(); }
+
+	/** Sets the overflow policy for this text block */
+	SLATE_API void SetOverflowPolicy(TOptional<ETextOverflowPolicy> InOverflowPolicy);
 
 	/** See ShadowOffset attribute */
-	void SetShadowOffset(const TAttribute<FVector2D>& InShadowOffset);
+	SLATE_API void SetShadowOffset(TAttribute<FVector2D> InShadowOffset);
 
 	/** See ShadowColorAndOpacity attribute */
-	void SetShadowColorAndOpacity(const TAttribute<FLinearColor>& InShadowColorAndOpacity);
+	SLATE_API void SetShadowColorAndOpacity(TAttribute<FLinearColor> InShadowColorAndOpacity);
+
+	/** See HighlightColor attribute */
+	SLATE_API void SetHighlightColor(TAttribute<FLinearColor> InHighlightColor);
+	
+	/** See HighlightShape attribute */
+	SLATE_API void SetHighlightShape(TAttribute<const FSlateBrush*> InHighlightShape);
 
 	/** See MinDesiredWidth attribute */
-	void SetMinDesiredWidth(const TAttribute<float>& InMinDesiredWidth);
+	SLATE_API void SetMinDesiredWidth(TAttribute<float> InMinDesiredWidth);
 
 	/** See LineHeightPercentage attribute */
-	void SetLineHeightPercentage(const TAttribute<float>& InLineHeightPercentage);
+	SLATE_API void SetLineHeightPercentage(TAttribute<float> InLineHeightPercentage);
+
+	/** See ApplyLineHeightToBottomLine attribute */
+	SLATE_API void SetApplyLineHeightToBottomLine(TAttribute<bool> InApplyLineHeightToBottomLine);
 
 	/** See Margin attribute */
-	void SetMargin(const TAttribute<FMargin>& InMargin);
+	SLATE_API void SetMargin(TAttribute<FMargin> InMargin);
 
 	/** See Justification attribute */
-	void SetJustification(const TAttribute<ETextJustify::Type>& InJustification);
+	SLATE_API void SetJustification(TAttribute<ETextJustify::Type> InJustification);
 
 	// SWidget interface
-	virtual int32 OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const override;
-	virtual FVector2D ComputeDesiredSize(float) const override;
+	SLATE_API virtual int32 OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const override;
+	SLATE_API virtual FVector2D ComputeDesiredSize(float) const override;
 #if WITH_ACCESSIBILITY
-	virtual TSharedRef<FSlateAccessibleWidget> CreateAccessibleWidget() override;
-	virtual TOptional<FText> GetDefaultAccessibleText(EAccessibleType AccessibleType = EAccessibleType::Main) const override;
+	SLATE_API virtual TSharedRef<FSlateAccessibleWidget> CreateAccessibleWidget() override;
+	SLATE_API virtual TOptional<FText> GetDefaultAccessibleText(EAccessibleType AccessibleType = EAccessibleType::Main) const override;
 #endif
 	// End of SWidget interface
 
-protected:
-	// Begin SWidget overrides.
-	virtual bool ComputeVolatility() const override;
-	// End of SWidget interface
+public:
+	/** Gets the current foreground color */
+	SLATE_API FSlateColor GetColorAndOpacity() const;
+
+	/** Gets the current foreground color as ref */
+	SLATE_API const FSlateColor& GetColorAndOpacityRef() const;
+
+	/** Gets the current font */
+	SLATE_API FSlateFontInfo GetFont() const;
+
+	/** Gets the current font as ref */
+	SLATE_API const FSlateFontInfo& GetFontRef() const;
+
+	/** Gets the current strike brush */
+	SLATE_API const FSlateBrush* GetStrikeBrush() const;
+
+	/** Get TransformPolicy attribute */
+	SLATE_API ETextTransformPolicy GetTransformPolicyImpl() const;
+	
+	/** Gets the current shadow offset */
+	SLATE_API FVector2f GetShadowOffset() const;
+
+	/** Gets the current shadow color and opacity */
+	SLATE_API FLinearColor GetShadowColorAndOpacity() const;
+
+	/** Gets the current shadow color and opacity as ref */
+	SLATE_API const FLinearColor& GetShadowColorAndOpacityRef() const;
+
+	/** Gets the current highlight color */
+	SLATE_API FSlateColor GetHighlightColor() const;
+
+	/** Gets the current highlight shape */
+	SLATE_API const FSlateBrush* GetHighlightShape() const;
+
+	/** Gets the current margin */
+	SLATE_API FMargin GetMargin() const;
+
+	/** Gets the current min desired width */
+	SLATE_API float GetMinDesiredWidth() const;
 
 private:
 	/** Get the computed text style to use with the text marshaller */
 	FTextBlockStyle GetComputedTextStyle() const;
 
-	/** Gets the current foreground color */
-	FSlateColor GetColorAndOpacity() const;
-
-	/** Gets the current font */
-	FSlateFontInfo GetFont() const;
-
-	/** Gets the current strike brush */
-	const FSlateBrush* GetStrikeBrush() const;
-	
-	/** Gets the current shadow offset */
-	FVector2D GetShadowOffset() const;
-
-	/** Gets the current shadow color and opacity */
-	FLinearColor GetShadowColorAndOpacity() const;
-
-	/** Gets the current highlight color */
-	FLinearColor GetHighlightColor() const;
-
-	/** Gets the current highlight shape */
-	const FSlateBrush* GetHighlightShape() const;
+	/** Update the TextBlock layout. */
+	void UpdateTextBlockLayout(float LayoutScaleMultiplier) const;
 
 	/** Call to invalidate this text block */
-	void InvalidateText(EInvalidateWidget InvalidateReason);
+	void InvalidateText(EInvalidateWidgetReason InvalidateReason);
 
 private:
 	/** The text displayed in this text block */
-	TAttribute< FText > BoundText;
+	TSlateAttribute<FText> BoundText;
 
 	/** The wrapped layout for this text block */
 	TUniquePtr< FSlateTextBlockLayout > TextLayoutCache;
@@ -294,52 +323,81 @@ private:
 	FTextBlockStyle TextStyle;
 
 	/** Sets the font used to draw the text */
-	TAttribute< FSlateFontInfo > Font;
+	TSlateAttribute<FSlateFontInfo> Font;
 
 	/** Sets the brush used to strike through the text */
-	TAttribute< const FSlateBrush* > StrikeBrush;
+	TSlateAttribute<const FSlateBrush*> StrikeBrush;
 
 	/** Text color and opacity */
-	TAttribute<FSlateColor> ColorAndOpacity;
+	TSlateAttribute<FSlateColor> ColorAndOpacity;
 
 	/** Drop shadow offset in pixels */
-	TAttribute< FVector2D > ShadowOffset;
+	TSlateAttribute<FVector2D> ShadowOffset;
 
 	/** Shadow color and opacity */
-	TAttribute<FLinearColor> ShadowColorAndOpacity;
+	TSlateAttribute<FLinearColor> ShadowColorAndOpacity;
 
-	TAttribute<FLinearColor> HighlightColor;
+	/** The color used to highlight the specified text */
+	TSlateAttribute<FLinearColor> HighlightColor;
 
-	TAttribute< const FSlateBrush* > HighlightShape;
+	/** The brush used to highlight the specified text */
+	TSlateAttribute<const FSlateBrush*> HighlightShape;
 
-	/** Highlight this text in the textblock */
-	TAttribute<FText> HighlightText;
+	/** Highlight this text in the TextBlock */
+	TSlateAttribute<FText> HighlightText;
 
 	/** Whether text wraps onto a new line when it's length exceeds this width; if this value is zero or negative, no wrapping occurs. */
-	TAttribute<float> WrapTextAt;
+	TSlateAttribute<float> WrapTextAt;
 
 	/** True if we're wrapping text automatically based on the computed horizontal space for this widget */
-	TAttribute<bool> AutoWrapText;
+	TSlateAttribute<bool> AutoWrapText;
 
 	/** The wrapping policy we're using */
-	TAttribute<ETextWrappingPolicy> WrappingPolicy;
+	TSlateAttribute<ETextWrappingPolicy> WrappingPolicy;
 
 	/** The transform policy we're using */
-	TAttribute<ETextTransformPolicy> TransformPolicy;
+	TSlateAttribute<ETextTransformPolicy> TransformPolicy;
 
 	/** The amount of blank space left around the edges of text area. */
-	TAttribute< FMargin > Margin;
+	TSlateAttribute<FMargin> Margin;
 
 	/** The amount to scale each lines height by. */
-	TAttribute< ETextJustify::Type > Justification; 
+	TSlateAttribute<ETextJustify::Type> Justification;
 
 	/** How the text should be aligned with the margin. */
-	TAttribute< float > LineHeightPercentage;
+	TSlateAttribute<float> LineHeightPercentage;
+
+	/** Whether to leave extra space below the last line due to line height. */
+	TSlateAttribute<bool> ApplyLineHeightToBottomLine;
 
 	/** Prevents the text block from being smaller than desired in certain cases (e.g. when it is empty) */
-	TAttribute<float> MinDesiredWidth;
+	TSlateAttribute<float> MinDesiredWidth;
 
 	/** If this is enabled, text shaping, wrapping, justification are disabled in favor of much faster text layout and measurement. */
-	mutable TOptional<FVector2D> CachedSimpleDesiredSize;
+	mutable TOptional<FVector2f> CachedSimpleDesiredSize;
+
+	/** Flags used to check if the SlateAttribute is set. */
+	union
+	{
+		struct 
+		{
+			//~ for attribute
+			uint16 bIsAttributeBoundTextBound : 1;
+			uint16 bIsAttributeFontSet : 1;
+			uint16 bIsAttributeStrikeBrushSet : 1;
+			uint16 bIsAttributeColorAndOpacitySet : 1;
+			uint16 bIsAttributeShadowOffsetSet : 1;
+			uint16 bIsAttributeShadowColorAndOpacitySet : 1;
+			uint16 bIsAttributeHighlightColorSet : 1;
+			uint16 bIsAttributeHighlightShapeSet : 1;
+			uint16 bIsAttributeWrapTextAtSet : 1;
+			uint16 bIsAttributeTransformPolicySet : 1;
+			//~ for TextBlockLayout
+			mutable uint16 bTextLayoutUpdateTextStyle : 1;
+			mutable uint16 bTextLayoutUpdateDesiredSize : 1;
+		};
+		uint16 Union_Flags;
+	};
+
 	bool bSimpleTextMode;
 };

@@ -23,7 +23,7 @@
 
 
 /** Utility function to calculate overlap of two spheres */
-const float CalculateOverlap(const FSphere& ASphere, const float AFillingFactor, const FSphere& BSphere, const float BFillingFactor)
+double CalculateOverlap(const FSphere& ASphere, const double AFillingFactor, const FSphere& BSphere, const double BFillingFactor)
 {
 	// if it doesn't intersect, return zero 
 	if (!ASphere.Intersects(BSphere))
@@ -46,39 +46,39 @@ const float CalculateOverlap(const FSphere& ASphere, const float AFillingFactor,
 		return ASphere.GetVolume();
 	}
 
-	float Distance = (ASphere.Center-BSphere.Center).Size();
+	double Distance = (ASphere.Center - BSphere.Center).Size();
 	check(!FMath::IsNearlyZero(Distance));
 
-	float ARadius = ASphere.W;
-	float BRadius = BSphere.W;
+	double ARadius = ASphere.W;
+	double BRadius = BSphere.W;
 
-	float ACapHeight = (BRadius*BRadius - (ARadius - Distance)*(ARadius - Distance)) / (2*Distance);
-	float BCapHeight = (ARadius*ARadius - (BRadius - Distance)*(BRadius - Distance)) / (2*Distance);
+	double ACapHeight = (BRadius * BRadius - (ARadius - Distance) * (ARadius - Distance)) / (2 * Distance);
+	double BCapHeight = (ARadius * ARadius - (BRadius - Distance) * (BRadius - Distance)) / (2 * Distance);
 
-	if (ACapHeight<=0.f || BCapHeight<=0.f)
+	if ((ACapHeight <= 0.f) || (BCapHeight <= 0.f))
 	{
 		// it's possible to get cap height to be less than 0 
 		// since when we do check intersect, we do have regular tolerance
 		return 0.f;		
 	}
 
-	float OverlapRadius1 = ((ARadius + BRadius)*(ARadius + BRadius) - Distance*Distance) * (Distance*Distance - (ARadius - BRadius)*(ARadius - BRadius));
-	float OverlapRadius2 = 2 * Distance;
-	float OverlapRadius = FMath::Sqrt(OverlapRadius1) / OverlapRadius2;
-	float OverlapRadiusSq = FMath::Square(OverlapRadius);
+	double OverlapRadius1 = ((ARadius + BRadius) * (ARadius + BRadius) - Distance*Distance) * (Distance * Distance - (ARadius - BRadius) * (ARadius - BRadius));
+	double OverlapRadius2 = 2 * Distance;
+	double OverlapRadius = FMath::Sqrt(OverlapRadius1) / OverlapRadius2;
+	double OverlapRadiusSq = FMath::Square(OverlapRadius);
 
-	float ConstPI = PI/6.0f;
-	float AVolume = ConstPI*(3*OverlapRadiusSq + ACapHeight*ACapHeight) * ACapHeight;
-	float BVolume = ConstPI*(3*OverlapRadiusSq + BCapHeight*BCapHeight) * BCapHeight;
+	double ConstPI = UE_PI / 6.0f;
+	double AVolume = ConstPI * (3 * OverlapRadiusSq + ACapHeight * ACapHeight) * ACapHeight;
+	double BVolume = ConstPI * (3 * OverlapRadiusSq + BCapHeight * BCapHeight) * BCapHeight;
 
-	float TotalVolume = AFillingFactor*AVolume + BFillingFactor*BVolume;
+	double TotalVolume = AFillingFactor * AVolume + BFillingFactor * BVolume;
 	return TotalVolume;
 }
 
 /** Utility function that calculates filling factor */
-const float CalculateFillingFactor(const FSphere& ASphere, const float AFillingFactor, const FSphere& BSphere, const float BFillingFactor)
+double CalculateFillingFactor(const FSphere& ASphere, const double AFillingFactor, const FSphere& BSphere, const double BFillingFactor)
 {
-	const float OverlapVolume = CalculateOverlap( ASphere, AFillingFactor, BSphere, BFillingFactor);
+	const double OverlapVolume = CalculateOverlap( ASphere, AFillingFactor, BSphere, BFillingFactor);
 	FSphere UnionSphere = ASphere + BSphere;
 	// it shouldn't be zero or it should be checked outside
 	ensure(UnionSphere.W != 0.f);
@@ -97,6 +97,16 @@ FLODCluster::FLODCluster(const FLODCluster& Other)
 , bValid(Other.bValid)
 {
 	
+}
+
+FLODCluster::FLODCluster(FLODCluster&& Other)
+	: Actors(Other.Actors)
+	, Bound(Other.Bound)
+	, FillingFactor(Other.FillingFactor)
+	, ClusterCost(Other.ClusterCost)
+	, bValid(Other.bValid)
+{
+
 }
 
 FLODCluster::FLODCluster(AActor* Actor1)
@@ -132,7 +142,7 @@ FLODCluster::FLODCluster()
 FSphere FLODCluster::AddActor(AActor* NewActor)
 {
 	bValid = true;
-	ensure (Actors.Contains(NewActor) == false);
+
 	Actors.Add(NewActor);
 	FVector Origin, Extent;
 
@@ -182,9 +192,29 @@ FLODCluster& FLODCluster::operator=(const FLODCluster& Other)
 	return *this;
 }
 
+FLODCluster& FLODCluster::operator=(FLODCluster&& Other)
+{
+	this->bValid = Other.bValid;
+	this->Actors = Other.Actors;
+	this->Bound = Other.Bound;
+	this->FillingFactor = Other.FillingFactor;
+	this->ClusterCost = Other.ClusterCost;
+
+	return *this;
+}
+
 bool FLODCluster::operator==(const FLODCluster& Other) const
 {
-	return Actors == Other.Actors;
+	return Actors.Num() == Other.Actors.Num() && Actors.Includes(Other.Actors);
+}
+
+double FLODCluster::GetMergedCost(const FLODCluster& Other) const
+{
+	double MergedFillingFactor = CalculateFillingFactor(Bound, FillingFactor, Other.Bound, Other.FillingFactor);
+	FSphere MergedBound = Bound + Other.Bound;
+
+	double MergedClusterCost = (MergedBound.W * MergedBound.W * MergedBound.W) / MergedFillingFactor;
+	return MergedClusterCost;
 }
 
 void FLODCluster::MergeClusters(const FLODCluster& Other)
@@ -196,11 +226,7 @@ void FLODCluster::MergeClusters(const FLODCluster& Other)
 
 	ClusterCost = ( Bound.W * Bound.W * Bound.W ) / FillingFactor;
 	
-
-	for (auto& Actor: Other.Actors)
-	{
-		Actors.AddUnique(Actor);
-	}
+	Actors.Append(Other.Actors);
 
 	if (Actors.Num() > 0)
 	{
@@ -210,51 +236,30 @@ void FLODCluster::MergeClusters(const FLODCluster& Other)
 
 void FLODCluster::SubtractCluster(const FLODCluster& Other)
 {
-	for(int32 ActorId=0; ActorId<Actors.Num(); ++ActorId)
-	{
-		if (Other.Actors.Contains(Actors[ActorId]))
-		{
-			Actors.RemoveAt(ActorId);
-			--ActorId;
-		}
-	}
+	Actors = Actors.Difference(Other.Actors);
 
-	TArray<AActor*> NewActors = Actors;
-	Actors.Empty();
-	// need to recalculate parameter
-	if (NewActors.Num() == 0)
+	Invalidate();
+
+	// We need to recalculate parameters
+	if (Actors.Num() > 0)
 	{
-		Invalidate();
-	}
-	else if (NewActors.Num() == 1)
-	{
-		Bound = FSphere(ForceInitToZero);
-		AddActor(NewActors[0]);
+		bValid = true;
 		FillingFactor = 1.f;
-		ClusterCost = ( Bound.W * Bound.W * Bound.W ) / FillingFactor;
-	}
-	else if (NewActors.Num() >= 2)
-	{
-		Bound = FSphere(ForceInit);
+		Bound = FSphere(ForceInitToZero);
 
-		FSphere Actor1Bound = AddActor(NewActors[0]);
-		FSphere Actor2Bound = AddActor(NewActors[1]);
-
-		// calculate new filling factor
-		FillingFactor = CalculateFillingFactor(Actor1Bound, 1.f, Actor2Bound, 1.f);
-
-		// if more actors, we add them manually
-		for (int32 ActorId=2; ActorId<NewActors.Num(); ++ActorId)
+		for (AActor* Actor : Actors)
 		{
-			// if not contained, it shouldn't be
-			check (!Actors.Contains(NewActors[ActorId]));
+			FVector Origin, Extent;
+			Actor->GetActorBounds(false, Origin, Extent);
 
-			FSphere NewBound = AddActor(NewActors[ActorId]);
+			// scale 0.01 (change to meter from centimeter)
+			FSphere NewBound = FSphere(Origin * CM_TO_METER, Extent.Size() * CM_TO_METER);
+
 			FillingFactor = CalculateFillingFactor(NewBound, 1.f, Bound, FillingFactor);
 			Bound += NewBound;
 		}
 
-		ClusterCost = ( Bound.W * Bound.W * Bound.W ) / FillingFactor;
+		ClusterCost = (Bound.W * Bound.W * Bound.W) / FillingFactor;
 	}
 }
 

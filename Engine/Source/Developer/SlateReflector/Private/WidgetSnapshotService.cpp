@@ -29,7 +29,7 @@ FGuid FWidgetSnapshotService::RequestSnapshot(const FGuid& InRemoteInstanceId, c
 {
 	if (MessageEndpoint.IsValid())
 	{
-		FWidgetSnapshotRequest* WidgetSnapshotRequest = new FWidgetSnapshotRequest;
+		FWidgetSnapshotRequest* WidgetSnapshotRequest = FMessageEndpoint::MakeMessage<FWidgetSnapshotRequest>();
 		WidgetSnapshotRequest->TargetInstanceId = InRemoteInstanceId;
 		WidgetSnapshotRequest->SnapshotRequestId = FGuid::NewGuid();
 
@@ -55,7 +55,7 @@ void FWidgetSnapshotService::HandleWidgetSnapshotRequestMessage(const FWidgetSna
 		FWidgetSnapshotData SnapshotData;
 		SnapshotData.TakeSnapshot(false);
 
-		FWidgetSnapshotResponse* WidgetSnapshotResponse = new FWidgetSnapshotResponse;
+		FWidgetSnapshotResponse* WidgetSnapshotResponse = FMessageEndpoint::MakeMessage<FWidgetSnapshotResponse>();
 		WidgetSnapshotResponse->SnapshotRequestId = Message.SnapshotRequestId;
 		SnapshotData.SaveSnapshotToBuffer(WidgetSnapshotResponse->SnapshotData);
 

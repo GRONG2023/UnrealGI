@@ -1,14 +1,23 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Presentation/PropertyTable/PropertyTableRow.h"
-#include "PropertyNode.h"
-#include "ObjectPropertyNode.h"
-#include "IPropertyTableColumn.h"
+
+#include "HAL/PlatformCrt.h"
+#include "IPropertyTable.h"
 #include "IPropertyTableCell.h"
+#include "IPropertyTableColumn.h"
+#include "ObjectPropertyNode.h"
 #include "Presentation/PropertyTable/DataSource.h"
+#include "PropertyNode.h"
+#include "PropertyPath.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakFieldPtr.h"
+#include "UObject/WeakObjectPtr.h"
+
+class UObject;
 
 FPropertyTableRow::FPropertyTableRow( const TSharedRef< class IPropertyTable >& InTable, const TWeakObjectPtr< UObject >& InObject )
-	: DataSource( MakeShareable( new UObjectDataSource( InObject ) ) )
+	: DataSource( MakeShared<UObjectDataSource>( InObject ) )
 	, Table( InTable )
 	, Children()
 	, PartialPath( FPropertyPath::CreateEmpty() )
@@ -17,7 +26,7 @@ FPropertyTableRow::FPropertyTableRow( const TSharedRef< class IPropertyTable >& 
 }
 
 FPropertyTableRow::FPropertyTableRow( const TSharedRef< class IPropertyTable >& InTable, const TSharedRef< FPropertyPath >& InPropertyPath )
-	: DataSource( MakeShareable( new PropertyPathDataSource( InPropertyPath ) ) )
+	: DataSource( MakeShared<PropertyPathDataSource>( InPropertyPath ) )
 	, Table( InTable )
 	, Children()
 	, PartialPath( FPropertyPath::CreateEmpty() )
@@ -26,7 +35,7 @@ FPropertyTableRow::FPropertyTableRow( const TSharedRef< class IPropertyTable >& 
 }
 
 FPropertyTableRow::FPropertyTableRow( const TSharedRef< class IPropertyTable >& InTable, const TWeakObjectPtr< UObject >& InObject, const TSharedRef< FPropertyPath >& InPartialPropertyPath )
-	: DataSource( MakeShareable( new UObjectDataSource( InObject ) ) )
+	: DataSource( MakeShared<UObjectDataSource>( InObject ) )
 	, Table( InTable )
 	, Children()
 	, PartialPath( InPartialPropertyPath )
@@ -35,7 +44,7 @@ FPropertyTableRow::FPropertyTableRow( const TSharedRef< class IPropertyTable >& 
 }
 
 FPropertyTableRow::FPropertyTableRow( const TSharedRef< class IPropertyTable >& InTable, const TSharedRef< FPropertyPath >& InPropertyPath, const TSharedRef< FPropertyPath >& InPartialPropertyPath )
-	: DataSource( MakeShareable( new PropertyPathDataSource( InPropertyPath ) ) )
+	: DataSource( MakeShared<PropertyPathDataSource>( InPropertyPath ) )
 	, Table( InTable )
 	, Children()
 	, PartialPath( InPartialPropertyPath )
@@ -91,7 +100,7 @@ void FPropertyTableRow::GenerateChildren()
 			Extension.Property = ChildNode->GetProperty();
 			Extension.ArrayIndex = ChildNode->GetArrayIndex();
 
-			Children.Add( MakeShareable( new FPropertyTableRow( TableRef, Object, RootPath->ExtendPath( Extension ) ) ) );
+			Children.Add( MakeShared<FPropertyTableRow>( TableRef, Object, RootPath->ExtendPath( Extension ) ) );
 		}
 	}
 }

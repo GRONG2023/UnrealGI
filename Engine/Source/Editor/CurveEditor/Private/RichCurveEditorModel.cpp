@@ -1,17 +1,35 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RichCurveEditorModel.h"
-#include "RichCurveKeyProxy.h"
-#include "Math/Vector2D.h"
-#include "HAL/PlatformMath.h"
-#include "Curves/RichCurve.h"
-#include "CurveDrawInfo.h"
+
+#include "Containers/EnumAsByte.h"
+#include "Containers/UnrealString.h"
 #include "CurveDataAbstraction.h"
-#include "CurveEditor.h"
+#include "CurveDrawInfo.h"
 #include "CurveEditorScreenSpace.h"
-#include "CurveEditorSnapMetrics.h"
-#include "EditorStyleSet.h"
+#include "Curves/KeyHandle.h"
+#include "Curves/RealCurve.h"
+#include "Curves/RichCurve.h"
+#include "Delegates/Delegate.h"
+#include "HAL/PlatformCrt.h"
+#include "IBufferedCurveModel.h"
+#include "Internationalization/Text.h"
+#include "Math/NumericLimits.h"
+#include "Math/UnrealMathUtility.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Optional.h"
+#include "RichCurveKeyProxy.h"
+#include "Styling/AppStyle.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
 #include "UObject/Package.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/WeakObjectPtr.h"
+
+class FCurveEditor;
 
 
 void RefineCurvePoints(const FRichCurve& RichCurve, double TimeThreshold, float ValueThreshold, TArray<TTuple<double, double>>& InOutPoints)
@@ -63,8 +81,8 @@ class FRichBufferedCurveModel : public IBufferedCurveModel
 {
 public:
 	FRichBufferedCurveModel(const FRichCurve& InRichCurve, TArray<FKeyPosition>&& InKeyPositions, TArray<FKeyAttributes>&& InKeyAttributes,
-		const FString& InIntentionName, const double InValueMin, const double InValueMax)
-		: IBufferedCurveModel(MoveTemp(InKeyPositions), MoveTemp(InKeyAttributes), InIntentionName, InValueMin, InValueMax)
+		const FString& InLongDisplayName, const double InValueMin, const double InValueMax)
+		: IBufferedCurveModel(MoveTemp(InKeyPositions), MoveTemp(InKeyAttributes), InLongDisplayName, InValueMin, InValueMax)
 		, RichCurve(InRichCurve)
 	{}
 
@@ -260,7 +278,7 @@ void FRichCurveEditorModel::GetKeyDrawInfo(ECurvePointType PointType, const FKey
 {
 	if (PointType == ECurvePointType::ArriveTangent || PointType == ECurvePointType::LeaveTangent)
 	{
-		OutDrawInfo.Brush = FEditorStyle::GetBrush("GenericCurveEditor.TangentHandle");
+		OutDrawInfo.Brush = FAppStyle::GetBrush("GenericCurveEditor.TangentHandle");
 		OutDrawInfo.ScreenSize = FVector2D(9, 9);
 	}
 	else
@@ -272,20 +290,16 @@ void FRichCurveEditorModel::GetKeyDrawInfo(ECurvePointType PointType, const FKey
 		switch (KeyType)
 		{
 		case ERichCurveInterpMode::RCIM_Constant:
-			OutDrawInfo.Brush = FEditorStyle::GetBrush("GenericCurveEditor.ConstantKey");
-			OutDrawInfo.Tint = FLinearColor(0, 0.45f, 0.70f);
+			OutDrawInfo.Brush = FAppStyle::GetBrush("GenericCurveEditor.ConstantKey");
 			break;
 		case ERichCurveInterpMode::RCIM_Linear:
-			OutDrawInfo.Brush = FEditorStyle::GetBrush("GenericCurveEditor.LinearKey");
-			OutDrawInfo.Tint = FLinearColor(0, 0.62f, 0.46f);
+			OutDrawInfo.Brush = FAppStyle::GetBrush("GenericCurveEditor.LinearKey");
 			break;
 		case ERichCurveInterpMode::RCIM_Cubic:
-			OutDrawInfo.Brush = FEditorStyle::GetBrush("GenericCurveEditor.CubicKey");
-			OutDrawInfo.Tint = FLinearColor::White;
+			OutDrawInfo.Brush = FAppStyle::GetBrush("GenericCurveEditor.CubicKey");
 			break;
 		default:
-			OutDrawInfo.Brush = FEditorStyle::GetBrush("GenericCurveEditor.Key");
-			OutDrawInfo.Tint = FLinearColor::White;
+			OutDrawInfo.Brush = FAppStyle::GetBrush("GenericCurveEditor.Key");
 			break;
 		}
 	}
@@ -359,9 +373,6 @@ void FRichCurveEditorModel::GetKeyAttributes(TArrayView<const FKeyHandle> InKeys
 				return;
 			}
 
-			const FRichCurveKey* FirstKey = &AllKeys[0];
-			const FRichCurveKey* LastKey  = &AllKeys.Last();
-
 			for (int32 Index = 0; Index < InKeys.Num(); ++Index)
 			{
 				if (RichCurve.IsKeyHandleValid(InKeys[Index]))
@@ -371,18 +382,20 @@ void FRichCurveEditorModel::GetKeyAttributes(TArrayView<const FKeyHandle> InKeys
 
 					Attributes.SetInterpMode(ThisKey.InterpMode);
 
+					// If the previous key is cubic, show the arrive tangent handle even if this key is constant
+					FKeyHandle PreviousKeyHandle = RichCurve.GetPreviousKey(InKeys[Index]);
+					const bool bGetArriveTangent = RichCurve.IsKeyHandleValid(PreviousKeyHandle) && RichCurve.GetKeyRef(PreviousKeyHandle).InterpMode == RCIM_Cubic;
+					if (bGetArriveTangent)
+					{
+						Attributes.SetArriveTangent(ThisKey.ArriveTangent);
+					}
+
 					if (ThisKey.InterpMode != RCIM_Constant && ThisKey.InterpMode != RCIM_Linear)
 					{
 						Attributes.SetTangentMode(ThisKey.TangentMode);
-						if (&ThisKey != FirstKey)
-						{
-							Attributes.SetArriveTangent(ThisKey.ArriveTangent);
-						}
+						Attributes.SetArriveTangent(ThisKey.ArriveTangent);
+						Attributes.SetLeaveTangent(ThisKey.LeaveTangent);
 
-						if (&ThisKey != LastKey)
-						{
-							Attributes.SetLeaveTangent(ThisKey.LeaveTangent);
-						}
 						if (ThisKey.InterpMode == RCIM_Cubic)
 						{
 							Attributes.SetTangentWeightMode(ThisKey.TangentWeightMode);
@@ -634,7 +647,7 @@ TUniquePtr<IBufferedCurveModel> FRichCurveEditorModel::CreateBufferedCurveCopy()
 			double ValueMin = 0.f, ValueMax = 1.f;
 			GetValueRange(ValueMin, ValueMax);
 
-			return MakeUnique<FRichBufferedCurveModel>(RichCurve, MoveTemp(KeyPositions), MoveTemp(KeyAttributes), GetIntentionName(), ValueMin, ValueMax);
+			return MakeUnique<FRichBufferedCurveModel>(RichCurve, MoveTemp(KeyPositions), MoveTemp(KeyAttributes), GetLongDisplayName().ToString(), ValueMin, ValueMax);
 		}
 	}
 
@@ -710,6 +723,60 @@ void FRichCurveEditorModel::GetNeighboringKeys(const FKeyHandle InKeyHandle, TOp
 			}
 		}
 	}
+}
+
+TPair<ERichCurveInterpMode, ERichCurveTangentMode> FRichCurveEditorModel::GetInterpolationMode(const double& InTime, ERichCurveInterpMode DefaultInterpolationMode, ERichCurveTangentMode DefaultTangentMode) const
+{
+	if (IsValid())
+	{
+		const FRichCurve& RichCurve = GetReadOnlyRichCurve();
+
+		if (!RichCurve.Keys.IsEmpty())
+		{
+			FKeyHandle ReferenceKeyHandle;
+			for (auto It = RichCurve.GetKeyHandleIterator(); It; ++It)
+			{
+				if (RichCurve.IsKeyHandleValid(*It))
+				{
+					const FRichCurveKey& Key = RichCurve.GetKeyRef(*It);
+					if (Key.Time < InTime)
+					{
+						ReferenceKeyHandle = *It;
+					}
+					else
+					{
+						// we try to get the key just before the reference time, if it does not exist, we use the key right after
+						if (!RichCurve.IsKeyHandleValid(ReferenceKeyHandle))
+						{
+							ReferenceKeyHandle = *It;
+						}
+						break;
+					}
+				}
+			}
+
+			if (RichCurve.IsKeyHandleValid(ReferenceKeyHandle))
+			{
+				TArray<FKeyAttributes> KeyAttributes;
+				KeyAttributes.SetNum(1);
+				GetKeyAttributes({ ReferenceKeyHandle }, KeyAttributes);
+
+				ERichCurveInterpMode InterpMode = KeyAttributes[0].GetInterpMode();
+				ERichCurveTangentMode TangentMode = KeyAttributes[0].HasTangentMode() ? KeyAttributes[0].GetTangentMode() : DefaultTangentMode;
+				
+				//if we are cubic, with anything but auto tangents we use the default instead, since they will give us flat tangents which aren't good
+				if (InterpMode == ERichCurveInterpMode::RCIM_Cubic &&
+					(TangentMode != ERichCurveTangentMode::RCTM_Auto && TangentMode != ERichCurveTangentMode::RCTM_SmartAuto))
+				{
+					TangentMode = DefaultTangentMode;
+				}
+
+				return TPair<ERichCurveInterpMode, ERichCurveTangentMode>(InterpMode, TangentMode);
+			}
+		}
+	}
+
+	return TPair<ERichCurveInterpMode, ERichCurveTangentMode>(DefaultInterpolationMode, DefaultTangentMode);
 }
 
 FRichCurveEditorModelRaw::FRichCurveEditorModelRaw(FRichCurve* InRichCurve, UObject* InOwner)

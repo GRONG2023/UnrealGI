@@ -1,15 +1,18 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Animation/AnimSingleNodeInstanceProxy.h"
-#include "AnimationRuntime.h"
+#include "Animation/AnimMontageEvaluationState.h"
 #include "Animation/AnimComposite.h"
-#include "Animation/BlendSpaceBase.h"
+#include "Animation/AnimSequence.h"
+#include "Animation/BlendSpace.h"
 #include "Animation/PoseAsset.h"
 #include "Animation/AnimStreamable.h"
 #include "Animation/AnimSingleNodeInstance.h"
-#include "AnimEncoding.h"
-#include "Animation/AnimTrace.h"
 #include "Animation/AnimationPoseData.h"
+#include "Animation/AnimCurveUtils.h"
+#include "Animation/AnimSyncScope.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimSingleNodeInstanceProxy)
 
 FAnimSingleNodeInstanceProxy::~FAnimSingleNodeInstanceProxy()
 {
@@ -27,8 +30,10 @@ void FAnimSingleNodeInstanceProxy::Initialize(UAnimInstance* InAnimInstance)
 	UpdateCounter.Reset();
 
 	// it's already doing it when evaluate
-	BlendSpaceInput = FVector::ZeroVector;
+	BlendSpacePosition = FVector::ZeroVector;
+
 	CurrentTime = 0.f;
+	DeltaTimeRecord = FDeltaTimeRecord();
 
 	// initialize node manually 
 	FAnimationInitializeContext InitContext(this);
@@ -42,22 +47,26 @@ bool FAnimSingleNodeInstanceProxy::Evaluate(FPoseContext& Output)
 	return true;
 }
 
+void FAnimSingleNodeInstanceProxy::SetMirrorDataTable(const UMirrorDataTable* InMirrorDataTable)
+{
+	MirrorDataTable = InMirrorDataTable;
+}
+
+const UMirrorDataTable* FAnimSingleNodeInstanceProxy::GetMirrorDataTable()
+{
+	return MirrorDataTable;
+}
+
 #if WITH_EDITORONLY_DATA
+
 void FAnimSingleNodeInstanceProxy::PropagatePreviewCurve(FPoseContext& Output) 
 {
 	USkeleton* MySkeleton = GetSkeleton();
-	for (auto Iter = PreviewCurveOverride.CreateConstIterator(); Iter; ++Iter)
-	{
-		const FName& Name = Iter.Key();
-		const float Value = Iter.Value();
 
-		FSmartName PreviewCurveName;
+	FBlendedCurve Curve;
+	UE::Anim::FCurveUtils::BuildUnsorted(Curve, PreviewCurveOverride);
 
-		if (MySkeleton->GetSmartNameByName(USkeleton::AnimCurveMappingName, Name, PreviewCurveName))
-		{
-			Output.Curve.Set(PreviewCurveName.UID, Value);
-		}
-	}
+	Output.Curve.Combine(Curve);
 }
 #endif // WITH_EDITORONLY_DATA
 
@@ -155,9 +164,11 @@ void FAnimSingleNodeInstanceProxy::SetMontagePreviewSlot(FName PreviewSlot)
 	SingleNode.ActiveMontageSlot = PreviewSlot;
 }
 
-void FAnimSingleNodeInstanceProxy::InternalBlendSpaceEvaluatePose(class UBlendSpaceBase* BlendSpace, TArray<FBlendSampleData>& BlendSampleDataCache, FPoseContext& OutContext)
+void FAnimSingleNodeInstanceProxy::InternalBlendSpaceEvaluatePose(class UBlendSpace* BlendSpace, TArray<FBlendSampleData>& BlendSampleDataCache, FPoseContext& OutContext)
 {
 	FAnimationPoseData AnimationPoseData = { OutContext.Pose, OutContext.Curve, OutContext.CustomAttributes };
+
+	FAnimExtractContext ExtractionContext(static_cast<double>(CurrentTime), ShouldExtractRootMotion(), DeltaTimeRecord, bLooping);
 
 	if (BlendSpace->IsValidAdditive())
 	{
@@ -165,13 +176,13 @@ void FAnimSingleNodeInstanceProxy::InternalBlendSpaceEvaluatePose(class UBlendSp
 		FBlendedCurve& OutCurve = OutContext.Curve;
 		FCompactPose AdditivePose;
 		FBlendedCurve AdditiveCurve;
-		FStackCustomAttributes AdditiveAttributes;
+		UE::Anim::FStackAttributeContainer AdditiveAttributes;
 		AdditivePose.SetBoneContainer(&OutPose.GetBoneContainer());
 		AdditiveCurve.InitFrom(OutCurve);
 #if WITH_EDITORONLY_DATA
 		if (BlendSpace->PreviewBasePose)
 		{
-			BlendSpace->PreviewBasePose->GetBonePose(AnimationPoseData, FAnimExtractContext(PreviewPoseCurrentTime));
+			BlendSpace->PreviewBasePose->GetBonePose(AnimationPoseData, FAnimExtractContext(static_cast<double>(PreviewPoseCurrentTime)));
 		}
 		else
 #endif // WITH_EDITORONLY_DATA
@@ -181,14 +192,15 @@ void FAnimSingleNodeInstanceProxy::InternalBlendSpaceEvaluatePose(class UBlendSp
 		}
 
 		FAnimationPoseData AdditiveAnimationPoseData = { AdditivePose, AdditiveCurve, AdditiveAttributes };
-		BlendSpace->GetAnimationPose(BlendSampleDataCache, AdditiveAnimationPoseData);
+		BlendSpace->GetAnimationPose(BlendSampleDataCache, ExtractionContext, AdditiveAnimationPoseData);
 
-		enum EAdditiveAnimationType AdditiveType = BlendSpace->bRotationBlendInMeshSpace? AAT_RotationOffsetMeshSpace : AAT_LocalSpaceBase;
+		enum EAdditiveAnimationType AdditiveType = 
+			BlendSpace->bContainsRotationOffsetMeshSpaceSamples ? AAT_RotationOffsetMeshSpace : AAT_LocalSpaceBase;
 		FAnimationRuntime::AccumulateAdditivePose(AnimationPoseData, AdditiveAnimationPoseData, 1.f, AdditiveType);
 	}
 	else
 	{
-		BlendSpace->GetAnimationPose(BlendSampleDataCache, AnimationPoseData);
+		BlendSpace->GetAnimationPose(BlendSampleDataCache, ExtractionContext, AnimationPoseData);
 	}
 }
 
@@ -197,10 +209,11 @@ void FAnimSingleNodeInstanceProxy::SetAnimationAsset(class UAnimationAsset* NewA
 	bLooping = bIsLooping;
 	PlayRate = InPlayRate;
 	CurrentTime = 0.f;
-	BlendSpaceInput = FVector::ZeroVector;
+	BlendSpacePosition = FVector::ZeroVector;
 	BlendSampleData.Reset();
 	MarkerTickRecord.Reset();
-	UpdateBlendspaceSamples(BlendSpaceInput);
+	ResetSync();
+	UpdateBlendspaceSamples(BlendSpacePosition);
 
 #if WITH_EDITORONLY_DATA
 	PreviewPoseCurrentTime = 0.0f;
@@ -208,7 +221,7 @@ void FAnimSingleNodeInstanceProxy::SetAnimationAsset(class UAnimationAsset* NewA
 #endif
 
 	
-	if (UBlendSpaceBase* BlendSpace = Cast<UBlendSpaceBase>(NewAsset))
+	if (UBlendSpace* BlendSpace = Cast<UBlendSpace>(NewAsset))
 	{
 		BlendSpace->InitializeFilter(&BlendFilter);
 	}
@@ -216,7 +229,7 @@ void FAnimSingleNodeInstanceProxy::SetAnimationAsset(class UAnimationAsset* NewA
 
 void FAnimSingleNodeInstanceProxy::UpdateBlendspaceSamples(FVector InBlendInput)
 {
-	if (UBlendSpaceBase* BlendSpace = Cast<UBlendSpaceBase>(CurrentAsset))
+	if (UBlendSpace* BlendSpace = Cast<UBlendSpace>(CurrentAsset))
 	{
 		float OutCurrentTime = 0.f;
 		FMarkerTickRecord TempMarkerTickRecord;
@@ -252,9 +265,34 @@ void FAnimSingleNodeInstanceProxy::SetReverse(bool bInReverse)
 	}*/
 }
 
-void FAnimSingleNodeInstanceProxy::SetBlendSpaceInput(const FVector& InBlendInput)
+void FAnimSingleNodeInstanceProxy::SetBlendSpacePosition(const FVector& InPosition)
 {
-	BlendSpaceInput = InBlendInput;
+	BlendSpacePosition = InPosition;
+}
+
+void FAnimSingleNodeInstanceProxy::GetBlendSpaceState(FVector& OutPosition, FVector& OutFilteredPosition) const
+{
+	OutFilteredPosition = BlendFilter.GetFilterLastOutput();
+	OutPosition = BlendSpacePosition;
+}
+
+float FAnimSingleNodeInstanceProxy::GetBlendSpaceLength() const
+{
+	float TotalLength = 0.0f;
+	float TotalWeight = 0.0f;
+	for (int32 Index = 0 ; Index != BlendSampleData.Num() ; ++Index)
+	{
+		const FBlendSampleData& Data = BlendSampleData[Index];
+		float AnimLength = Data.Animation->GetPlayLength();
+		float Weight = Data.GetClampedWeight();
+		TotalLength += AnimLength * Weight;
+		TotalWeight += Weight;
+	}
+	if (TotalWeight > 0.0f)
+	{
+		return TotalLength / TotalWeight;
+	}
+	return 0.0f;
 }
 
 void FAnimNode_SingleNode::Evaluate_AnyThread(FPoseContext& Output)
@@ -266,21 +304,25 @@ void FAnimNode_SingleNode::Evaluate_AnyThread(FPoseContext& Output)
 		= false;
 #endif
 
-	if (Proxy->CurrentAsset != NULL && !Proxy->CurrentAsset->HasAnyFlags(RF_BeginDestroyed))
+	if (Proxy->CurrentAsset != nullptr && !Proxy->CurrentAsset->HasAnyFlags(RF_BeginDestroyed))
 	{
 		FAnimationPoseData OutputAnimationPoseData(Output);
 
 		//@TODO: animrefactor: Seems like more code duplication than we need
-		if (UBlendSpaceBase* BlendSpace = Cast<UBlendSpaceBase>(Proxy->CurrentAsset))
+		if (UBlendSpace* BlendSpace = Cast<UBlendSpace>(Proxy->CurrentAsset))
 		{
 			Proxy->InternalBlendSpaceEvaluatePose(BlendSpace, Proxy->BlendSampleData, Output);
 		}
 		else if (UAnimSequence* Sequence = Cast<UAnimSequence>(Proxy->CurrentAsset))
 		{
+			FAnimExtractContext ExtractionContext(static_cast<double>(Proxy->CurrentTime), Sequence->bEnableRootMotion, Proxy->DeltaTimeRecord, Proxy->bLooping);
+#if WITH_EDITOR
+			ExtractionContext.bIgnoreRootLock = Proxy->bIgnoreRootLock;
+			ExtractionContext.bExtractRootMotion = Proxy->bIgnoreRootMotion ? false : ExtractionContext.bExtractRootMotion;
+#endif
+
 			if (Sequence->IsValidAdditive())
 			{
-				FAnimExtractContext ExtractionContext(Proxy->CurrentTime, Sequence->bEnableRootMotion);
-
 				if (bCanProcessAdditiveAnimationsLocal)
 				{
 					Sequence->GetAdditiveBasePose(OutputAnimationPoseData, ExtractionContext);
@@ -292,7 +334,7 @@ void FAnimNode_SingleNode::Evaluate_AnyThread(FPoseContext& Output)
 
 				FCompactPose AdditivePose;
 				FBlendedCurve AdditiveCurve;
-				FStackCustomAttributes AdditiveAttributes;
+				UE::Anim::FStackAttributeContainer AdditiveAttributes;
 				AdditivePose.SetBoneContainer(&Output.Pose.GetBoneContainer());
 				AdditiveCurve.InitFrom(Output.Curve);
 
@@ -305,7 +347,7 @@ void FAnimNode_SingleNode::Evaluate_AnyThread(FPoseContext& Output)
 			else
 			{
 				// if SkeletalMesh isn't there, we'll need to use skeleton
-				Sequence->GetAnimationPose(OutputAnimationPoseData, FAnimExtractContext(Proxy->CurrentTime, Sequence->bEnableRootMotion));
+				Sequence->GetAnimationPose(OutputAnimationPoseData, ExtractionContext);
 			}
 		}
 		else if (UAnimStreamable* Streamable = Cast<UAnimStreamable>(Proxy->CurrentAsset))
@@ -336,12 +378,12 @@ void FAnimNode_SingleNode::Evaluate_AnyThread(FPoseContext& Output)
 			else*/
 			{
 				// if SkeletalMesh isn't there, we'll need to use skeleton
-				Streamable->GetAnimationPose(OutputAnimationPoseData, FAnimExtractContext(Proxy->CurrentTime, Streamable->bEnableRootMotion));
+				Streamable->GetAnimationPose(OutputAnimationPoseData, FAnimExtractContext(static_cast<double>(Proxy->CurrentTime), Streamable->bEnableRootMotion, Proxy->DeltaTimeRecord, Proxy->bLooping));
 			}
 		}
 		else if (UAnimComposite* Composite = Cast<UAnimComposite>(Proxy->CurrentAsset))
 		{
-			FAnimExtractContext ExtractionContext(Proxy->CurrentTime, Proxy->ShouldExtractRootMotion());
+			FAnimExtractContext ExtractionContext(static_cast<double>(Proxy->CurrentTime), Proxy->ShouldExtractRootMotion(), Proxy->DeltaTimeRecord, Proxy->bLooping);
 			const FAnimTrack& AnimTrack = Composite->AnimationTrack;
 
 			// find out if this is additive animation
@@ -363,7 +405,7 @@ void FAnimNode_SingleNode::Evaluate_AnyThread(FPoseContext& Output)
 
 				FCompactPose AdditivePose;
 				FBlendedCurve AdditiveCurve;
-				FStackCustomAttributes AdditiveAttributes;
+				UE::Anim::FStackAttributeContainer AdditiveAttributes;
 				AdditivePose.SetBoneContainer(&Output.Pose.GetBoneContainer());
 				AdditiveCurve.InitFrom(Output.Curve);
 
@@ -389,17 +431,17 @@ void FAnimNode_SingleNode::Evaluate_AnyThread(FPoseContext& Output)
 				LocalSourcePose.SetBoneContainer(&Output.Pose.GetBoneContainer());
 				LocalSourceCurve.InitFrom(Output.Curve);
 
-				FStackCustomAttributes LocalSourceAttributes;
+				UE::Anim::FStackAttributeContainer LocalSourceAttributes;
 			
 				FAnimTrack const* const AnimTrack = Montage->GetAnimationData(ActiveMontageSlot);
 				if (AnimTrack && AnimTrack->IsAdditive())
 				{
 #if WITH_EDITORONLY_DATA
 					// if montage is additive, we need to have base pose for the slot pose evaluate
-					if (bCanProcessAdditiveAnimationsLocal && Montage->PreviewBasePose && Montage->SequenceLength > 0.f)
+					if (bCanProcessAdditiveAnimationsLocal && Montage->PreviewBasePose && Montage->GetPlayLength() > 0.f)
 					{
 						FAnimationPoseData LocalAnimationPoseData = { LocalSourcePose, LocalSourceCurve, LocalSourceAttributes };
-						Montage->PreviewBasePose->GetBonePose(LocalAnimationPoseData, FAnimExtractContext(Proxy->CurrentTime));
+						Montage->PreviewBasePose->GetBonePose(LocalAnimationPoseData, FAnimExtractContext(static_cast<double>(Proxy->CurrentTime)));
 					}
 					else
 #endif // WITH_EDITORONLY_DATA
@@ -427,14 +469,12 @@ void FAnimNode_SingleNode::Evaluate_AnyThread(FPoseContext& Output)
 		// have to propagate output curve before pose asset as it can use pose curve data
 		Proxy->PropagatePreviewCurve(Output);
 
-		// if it has preview pose asset, we have to handle that after we do all animation
+		// if it has a preview pose asset, we have to handle that after we do all animation
 		if (const UPoseAsset* PoseAsset = Proxy->CurrentAsset->PreviewPoseAsset)
 		{
-			USkeleton* MySkeleton = Proxy->CurrentAsset->GetSkeleton();
-			// if skeleton doesn't match it won't work
-			if (PoseAsset->GetSkeleton() == MySkeleton)
+			if (PoseAsset->GetSkeleton() != nullptr)
 			{
-				const TArray<FSmartName>& PoseNames = PoseAsset->GetPoseNames();
+				const TArray<FName>& PoseNames = PoseAsset->GetPoseFNames();
 
 				int32 TotalPoses = PoseNames.Num();
 				FAnimExtractContext ExtractContext;
@@ -442,19 +482,16 @@ void FAnimNode_SingleNode::Evaluate_AnyThread(FPoseContext& Output)
 
 				for (int32 PoseIndex = 0; PoseIndex <PoseNames.Num(); ++PoseIndex)
 				{
-					const FSmartName& PoseName = PoseNames[PoseIndex];
-					if (PoseName.UID != SmartName::MaxUID)
-					{
-						ExtractContext.PoseCurves[PoseIndex].PoseIndex = PoseIndex;
-						ExtractContext.PoseCurves[PoseIndex].Value = Output.Curve.Get(PoseName.UID);
-					}
+					const FName& PoseName = PoseNames[PoseIndex];
+					ExtractContext.PoseCurves[PoseIndex].PoseIndex = PoseIndex;
+					ExtractContext.PoseCurves[PoseIndex].Value = Output.Curve.Get(PoseName);
 				}
 
 				if (PoseAsset->IsValidAdditive())
 				{
 					FCompactPose AdditivePose;
 					FBlendedCurve AdditiveCurve;
-					FStackCustomAttributes AdditiveAttributes;
+					UE::Anim::FStackAttributeContainer AdditiveAttributes;
 					AdditivePose.SetBoneContainer(&Output.Pose.GetBoneContainer());
 					AdditiveCurve.InitFrom(Output.Curve);
 
@@ -498,6 +535,11 @@ void FAnimNode_SingleNode::Evaluate_AnyThread(FPoseContext& Output)
 				}
 			}
 		}
+
+		if (Proxy->MirrorDataTable)
+		{
+			FAnimationRuntime::MirrorPose(Output.Pose, *(Proxy->MirrorDataTable));
+		}
 #endif // WITH_EDITORONLY_DATA
 	}
 	else
@@ -513,7 +555,7 @@ void FAnimNode_SingleNode::Evaluate_AnyThread(FPoseContext& Output)
 void FAnimNode_SingleNode::Update_AnyThread(const FAnimationUpdateContext& Context)
 {
 	float NewPlayRate = Proxy->PlayRate;
-	UAnimSequence* PreviewBasePose = NULL;
+	UAnimSequence* PreviewBasePose = nullptr;
 
 	if (Proxy->bPlaying == false)
 	{
@@ -521,13 +563,18 @@ void FAnimNode_SingleNode::Update_AnyThread(const FAnimationUpdateContext& Conte
 		NewPlayRate = 0.f;
 	}
 
-	if(Proxy->CurrentAsset != NULL)
+	if(Proxy->CurrentAsset != nullptr)
 	{
-		FAnimGroupInstance* SyncGroup;
-		if (UBlendSpaceBase* BlendSpace = Cast<UBlendSpaceBase>(Proxy->CurrentAsset))
+		UE::Anim::FAnimSyncGroupScope& SyncScope = Context.GetMessageChecked<UE::Anim::FAnimSyncGroupScope>();
+
+		if (UBlendSpace* BlendSpace = Cast<UBlendSpace>(Proxy->CurrentAsset))
 		{
-			FAnimTickRecord& TickRecord = Proxy->CreateUninitializedTickRecord(/*out*/ SyncGroup, NAME_None);
-			Proxy->MakeBlendSpaceTickRecord(TickRecord, BlendSpace, Proxy->BlendSpaceInput, Proxy->BlendSampleData, Proxy->BlendFilter, Proxy->bLooping, NewPlayRate, 1.f, /*inout*/ Proxy->CurrentTime, Proxy->MarkerTickRecord);
+			FAnimTickRecord TickRecord(
+				BlendSpace, Proxy->BlendSpacePosition, Proxy->BlendSampleData, Proxy->BlendFilter, Proxy->bLooping, 
+				NewPlayRate, false, false, 1.f, /*inout*/ Proxy->CurrentTime, Proxy->MarkerTickRecord);
+			TickRecord.DeltaTimeRecord = &(Proxy->DeltaTimeRecord);
+			
+			SyncScope.AddTickRecord(TickRecord);
 
 			TRACE_ANIM_TICK_RECORD(Context, TickRecord);
 #if WITH_EDITORONLY_DATA
@@ -536,8 +583,10 @@ void FAnimNode_SingleNode::Update_AnyThread(const FAnimationUpdateContext& Conte
 		}
 		else if (UAnimSequence* Sequence = Cast<UAnimSequence>(Proxy->CurrentAsset))
 		{
-			FAnimTickRecord& TickRecord = Proxy->CreateUninitializedTickRecord(/*out*/ SyncGroup, NAME_None);
-			Proxy->MakeSequenceTickRecord(TickRecord, Sequence, Proxy->bLooping, NewPlayRate, 1.f, /*inout*/ Proxy->CurrentTime, Proxy->MarkerTickRecord);
+			FAnimTickRecord TickRecord(Sequence, Proxy->bLooping, NewPlayRate, false, 1.f, /*inout*/ Proxy->CurrentTime, Proxy->MarkerTickRecord);
+			TickRecord.DeltaTimeRecord = &(Proxy->DeltaTimeRecord);
+			
+			SyncScope.AddTickRecord(TickRecord);
 
 			TRACE_ANIM_TICK_RECORD(Context, TickRecord);
 
@@ -545,7 +594,7 @@ void FAnimNode_SingleNode::Update_AnyThread(const FAnimationUpdateContext& Conte
 			if (!Proxy->bLooping)
 			{
 				const float CombinedPlayRate = NewPlayRate*Sequence->RateScale;
-				if ((CombinedPlayRate < 0.f && Proxy->CurrentTime <= 0.f) || (CombinedPlayRate > 0.f && Proxy->CurrentTime >= Sequence->SequenceLength))
+				if ((CombinedPlayRate < 0.f && Proxy->CurrentTime <= 0.f) || (CombinedPlayRate > 0.f && Proxy->CurrentTime >= Sequence->GetPlayLength()))
 				{
 					Proxy->SetPlaying(false);
 				}
@@ -553,8 +602,10 @@ void FAnimNode_SingleNode::Update_AnyThread(const FAnimationUpdateContext& Conte
 		}
 		else if (UAnimStreamable* Streamable = Cast<UAnimStreamable>(Proxy->CurrentAsset))
 		{
-			FAnimTickRecord& TickRecord = Proxy->CreateUninitializedTickRecord(/*out*/ SyncGroup, NAME_None);
-			Proxy->MakeSequenceTickRecord(TickRecord, Streamable, Proxy->bLooping, NewPlayRate, 1.f, /*inout*/ Proxy->CurrentTime, Proxy->MarkerTickRecord);
+			FAnimTickRecord TickRecord(Streamable, Proxy->bLooping, NewPlayRate, false, 1.f, /*inout*/ Proxy->CurrentTime, Proxy->MarkerTickRecord);
+			TickRecord.DeltaTimeRecord = &(Proxy->DeltaTimeRecord);
+			
+			SyncScope.AddTickRecord(TickRecord);
 
 			TRACE_ANIM_TICK_RECORD(Context, TickRecord);
 
@@ -562,7 +613,7 @@ void FAnimNode_SingleNode::Update_AnyThread(const FAnimationUpdateContext& Conte
 			if (!Proxy->bLooping)
 			{
 				const float CombinedPlayRate = NewPlayRate * Streamable->RateScale;
-				if ((CombinedPlayRate < 0.f && Proxy->CurrentTime <= 0.f) || (CombinedPlayRate > 0.f && Proxy->CurrentTime >= Streamable->SequenceLength))
+				if ((CombinedPlayRate < 0.f && Proxy->CurrentTime <= 0.f) || (CombinedPlayRate > 0.f && Proxy->CurrentTime >= Streamable->GetPlayLength()))
 				{
 					Proxy->SetPlaying(false);
 				}
@@ -570,8 +621,10 @@ void FAnimNode_SingleNode::Update_AnyThread(const FAnimationUpdateContext& Conte
 		}
 		else if(UAnimComposite* Composite = Cast<UAnimComposite>(Proxy->CurrentAsset))
 		{
-			FAnimTickRecord& TickRecord = Proxy->CreateUninitializedTickRecord(/*out*/ SyncGroup, NAME_None);
-			Proxy->MakeSequenceTickRecord(TickRecord, Composite, Proxy->bLooping, NewPlayRate, 1.f, /*inout*/ Proxy->CurrentTime, Proxy->MarkerTickRecord);
+			FAnimTickRecord TickRecord(Composite, Proxy->bLooping, NewPlayRate, false, 1.f, /*inout*/ Proxy->CurrentTime, Proxy->MarkerTickRecord);
+			TickRecord.DeltaTimeRecord = &(Proxy->DeltaTimeRecord);
+			
+			SyncScope.AddTickRecord(TickRecord);
 
 			TRACE_ANIM_TICK_RECORD(Context, TickRecord);
 
@@ -579,7 +632,7 @@ void FAnimNode_SingleNode::Update_AnyThread(const FAnimationUpdateContext& Conte
 			if (!Proxy->bLooping)
 			{
 				const float CombinedPlayRate = NewPlayRate*Composite->RateScale;
-				if ((CombinedPlayRate < 0.f && Proxy->CurrentTime <= 0.f) || (CombinedPlayRate > 0.f && Proxy->CurrentTime >= Composite->SequenceLength))
+				if ((CombinedPlayRate < 0.f && Proxy->CurrentTime <= 0.f) || (CombinedPlayRate > 0.f && Proxy->CurrentTime >= Composite->GetPlayLength()))
 				{
 					Proxy->SetPlaying(false);
 				}
@@ -598,6 +651,7 @@ void FAnimNode_SingleNode::Update_AnyThread(const FAnimationUpdateContext& Conte
 			if (ActiveMontageEvaluationState)
 			{
 				Proxy->CurrentTime = ActiveMontageEvaluationState->MontagePosition;
+				Proxy->DeltaTimeRecord = ActiveMontageEvaluationState->DeltaTimeRecord;
 			}
 			else if (Proxy->bPlaying)
 			{
@@ -609,8 +663,10 @@ void FAnimNode_SingleNode::Update_AnyThread(const FAnimationUpdateContext& Conte
 		}
 		else if (UPoseAsset* PoseAsset = Cast<UPoseAsset>(Proxy->CurrentAsset))
 		{
-			FAnimTickRecord& TickRecord = Proxy->CreateUninitializedTickRecord(/*out*/ SyncGroup, NAME_None);
-			Proxy->MakePoseAssetTickRecord(TickRecord, PoseAsset, 1.f);
+			FAnimTickRecord TickRecord(PoseAsset, 1.f);
+			TickRecord.DeltaTimeRecord = &(Proxy->DeltaTimeRecord);
+
+			SyncScope.AddTickRecord(TickRecord);
 
 			TRACE_ANIM_TICK_RECORD(Context, TickRecord);
 		}
@@ -622,7 +678,8 @@ void FAnimNode_SingleNode::Update_AnyThread(const FAnimationUpdateContext& Conte
 		float MoveDelta = Proxy->GetDeltaSeconds() * NewPlayRate;
 		const bool bIsPreviewPoseLooping = true;
 
-		FAnimationRuntime::AdvanceTime(bIsPreviewPoseLooping, MoveDelta, Proxy->PreviewPoseCurrentTime, PreviewBasePose->SequenceLength);
+		FAnimationRuntime::AdvanceTime(bIsPreviewPoseLooping, MoveDelta, Proxy->PreviewPoseCurrentTime, PreviewBasePose->GetPlayLength());
 	}
 #endif
 }
+

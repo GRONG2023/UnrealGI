@@ -3,6 +3,8 @@
 #include "ARSharedWorldGameState.h"
 #include "AugmentedRealityModule.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ARSharedWorldGameState)
+
 AARSharedWorldGameState::AARSharedWorldGameState(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 	, PreviewImageBytesTotal(0)
@@ -54,7 +56,8 @@ void AARSharedWorldGameState::UpdatePreviewImageData(int32 Offset, const uint8* 
 		return;
 	}
 	
-	if (Offset >= 0 && (Offset + Size) <= PreviewImageBytesTotal)
+	// Validate offset, and also check for signed integer overflow case.
+	if (Offset >= 0 && (Offset + Size) <= PreviewImageBytesTotal && (Offset + Size) >= 0)
 	{
 		uint8* PreviewImageBuffer = PreviewImageData.GetData();
 		FMemory::Memcpy((void*)&PreviewImageBuffer[Offset], (void*)Buffer, Size);
@@ -78,7 +81,8 @@ void AARSharedWorldGameState::UpdateARWorldData(int32 Offset, const uint8* Buffe
 		return;
 	}
 	
-	if (Offset >= 0 && (Offset + Size) <= ARWorldBytesTotal)
+	// Validate offset, and also check for signed integer overflow case.
+	if (Offset >= 0 && (Offset + Size) <= ARWorldBytesTotal && (Offset + Size) >= 0)
 	{
 		uint8* ARWorldBuffer = ARWorldData.GetData();
 		FMemory::Memcpy((void*)&ARWorldBuffer[Offset], (void*)Buffer, Size);
@@ -103,3 +107,4 @@ void AARSharedWorldGameState::TriggerCompletionIfDone()
 		K2_OnARWorldMapIsReady();
 	}
 }
+

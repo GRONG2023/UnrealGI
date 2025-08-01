@@ -11,6 +11,7 @@
 
 class AVolume;
 class UProceduralFoliageSpawner;
+class UDataLayerAsset;
 struct FBodyInstance;
 
 /** Describes the layout of the tiles used for procedural foliage simulation */
@@ -34,17 +35,17 @@ struct FTileLayout
 	int32 NumTilesY;
 	
 
-	float HalfHeight;
+	FVector::FReal HalfHeight;
 };
 
-UCLASS(BlueprintType)
-class FOLIAGE_API UProceduralFoliageComponent : public UActorComponent
+UCLASS(BlueprintType, MinimalAPI)
+class UProceduralFoliageComponent : public UActorComponent
 {
 	GENERATED_UCLASS_BODY()
 
 	/** The procedural foliage spawner used to generate foliage instances within this volume. */
 	UPROPERTY(Category = "ProceduralFoliage", BlueprintReadWrite, EditAnywhere)
-	UProceduralFoliageSpawner* FoliageSpawner;
+	TObjectPtr<UProceduralFoliageSpawner> FoliageSpawner;
 
 	/** The amount of overlap between simulation tiles (in cm). */
 	UPROPERTY(Category = "ProceduralFoliage", BlueprintReadWrite, EditAnywhere)
@@ -75,46 +76,85 @@ class FOLIAGE_API UProceduralFoliageComponent : public UActorComponent
 	/** Whether to visualize the tiles used for the foliage spawner simulation */
 	UPROPERTY(Category = "ProceduralFoliage", BlueprintReadWrite, EditAnywhere)
 	bool bShowDebugTiles;
+
 #endif
 
+	struct FGenerateProceduralContentParams
+	{
+		FGenerateProceduralContentParams()
+			: FoliageSpawner(nullptr)
+			, Bounds(EForceInit::ForceInit)
+			, TileOverlap(0.f)
+			, ProceduralVolumeInstance(nullptr)
+		{
+		}
+
+		TObjectPtr<UProceduralFoliageSpawner> FoliageSpawner;
+		FBox Bounds;
+		float TileOverlap;
+		FGuid ProceduralGuid;
+		FBodyInstance* ProceduralVolumeInstance;
+	};
+				
 	// UObject interface
-	virtual void PostEditImport() override;
+	FOLIAGE_API virtual void PostEditImport() override;
+
+	/**
+	 * Returns a params struct based on this component properties. 
+	 */
+	FOLIAGE_API FGenerateProceduralContentParams GetGenerateProceduralContentParams() const;
+
+	/**
+	 * Runs the procedural foliage simulation, removes the old result, creates instances with the new result
+	 * @return True if the simulation succeeded
+	 */ 
+	FOLIAGE_API bool ResimulateProceduralFoliage(TFunctionRef<void(const TArray<FDesiredFoliageInstance>&)> AddInstancesFunc);
 
 	/** 
 	 * Runs the procedural foliage simulation to generate a list of desired instances to spawn.
 	 * @return True if the simulation succeeded
 	 */
-	bool GenerateProceduralContent(TArray<FDesiredFoliageInstance>& OutFoliageInstances);
-	
+	FOLIAGE_API bool GenerateProceduralContent(TArray<FDesiredFoliageInstance>& OutInstances);
+	static FOLIAGE_API bool GenerateProceduralContent(const FGenerateProceduralContentParams& InParams, TArray<FDesiredFoliageInstance>& OutInstances);
+			
 	/** Removes all spawned foliage instances in the level that were spawned by this component */
-	void RemoveProceduralContent(bool InRebuildTree = true);
+	FOLIAGE_API void RemoveProceduralContent(bool bInRebuildTree = true);
+	static FOLIAGE_API void RemoveProceduralContent(UWorld* InWorld, const FGuid& InProceduralGuid, bool bInRebuildTree, TSet<AInstancedFoliageActor*>& OutModifiedActors);
 
 	/** @return True if any foliage instances in the level were spawned by this component */
-	bool HasSpawnedAnyInstances();
+	FOLIAGE_API bool HasSpawnedAnyInstances();
 	
 	/** @return The position in world space of the bottom-left corner of the bottom-left-most active tile */
-	FVector GetWorldPosition() const;
+	FOLIAGE_API FVector GetWorldPosition() const;
+	static FOLIAGE_API FVector GetWorldPosition(const FGenerateProceduralContentParams& Param);
 
 	/** @return The bounds of area encompassed by the simulation */
-	virtual FBox GetBounds() const;
+	FOLIAGE_API virtual FBox GetBounds() const;
 
 	/** @return The body instanced used for bounds checking */
-	FBodyInstance* GetBoundsBodyInstance() const;
+	FOLIAGE_API FBodyInstance* GetBoundsBodyInstance() const;
 
 	/** Determines the basic layout of the tiles used in the simulation */
-	void GetTileLayout(FTileLayout& OutTileLayout) const;
+	FOLIAGE_API void GetTileLayout(FTileLayout& OutTileLayout) const;
+	static FOLIAGE_API void GetTileLayout(const FGenerateProceduralContentParams& Params, FTileLayout& OutTileLayout);
 
 	void SetSpawningVolume(AVolume* InSpawningVolume) { SpawningVolume = InSpawningVolume; }
 	const FGuid& GetProceduralGuid() const { return ProceduralGuid; }
 
-private:
-	/** Does all the actual work of executing the procedural foliage simulation */
-	bool ExecuteSimulation(TArray<FDesiredFoliageInstance>& OutFoliageInstances);
+#if WITH_EDITOR
+	FOLIAGE_API void LoadSimulatedRegion();
+	FOLIAGE_API void UnloadSimulatedRegion();
+	FOLIAGE_API bool IsSimulatedRegionLoaded();
+#endif
 
 private:
 	UPROPERTY()
-	AVolume* SpawningVolume;
+	TObjectPtr<AVolume> SpawningVolume;
 	
 	UPROPERTY()
 	FGuid ProceduralGuid;
+
+#if WITH_EDITORONLY_DATA
+	friend class UProceduralFoliageEditorLibrary;
+#endif
 };

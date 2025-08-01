@@ -1,10 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
-
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+// Copyright Epic Games, Inc. All Rights Reserved.
 
 namespace UnrealBuildTool
 {
@@ -27,12 +21,12 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// 
 		/// </summary>
-		public string ResourcePath = null;
+		public string? ResourcePath = null;
 
 		/// <summary>
 		/// 
 		/// </summary>
-		public string BundleContentsSubdir = null;
+		public string? BundleContentsSubdir = null;
 
 		/// <summary>
 		/// 

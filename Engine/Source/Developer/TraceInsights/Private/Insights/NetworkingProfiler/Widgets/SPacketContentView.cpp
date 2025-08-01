@@ -6,13 +6,18 @@
 #include "Fonts/SlateFontInfo.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "HAL/PlatformApplicationMisc.h"
+#include "Logging/MessageLog.h"
+#include "MessageLogModule.h"
 #include "Rendering/DrawElements.h"
-#include "Styling/CoreStyle.h"
+#include "Styling/AppStyle.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Layout/SScrollBar.h"
+#include "SlateOptMacros.h"
+#include "Templates/SharedPointer.h"
 
 // Insights
 #include "Insights/Common/PaintUtils.h"
@@ -20,6 +25,7 @@
 #include "Insights/Common/Stopwatch.h"
 #include "Insights/InsightsManager.h"
 #include "Insights/InsightsStyle.h"
+#include "Insights/NetworkingProfiler/NetworkingProfilerManager.h"
 #include "Insights/NetworkingProfiler/Widgets/SNetworkingProfilerWindow.h"
 #include "Insights/NetworkingProfiler/Widgets/SPacketView.h"
 
@@ -30,9 +36,11 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 SPacketContentView::SPacketContentView()
-	: ProfilerWindow()
+	: ProfilerWindowWeakPtr()
 	, DrawState(MakeShared<FPacketContentViewDrawState>())
 	, FilteredDrawState(MakeShared<FPacketContentViewDrawState>())
+	, AvailableAggregationModes()
+	, SelectedAggregationMode(nullptr)
 {
 	Reset();
 }
@@ -47,7 +55,7 @@ SPacketContentView::~SPacketContentView()
 
 void SPacketContentView::Reset()
 {
-	//ProfilerWindow
+	//ProfilerWindowWeakPtr
 
 	Viewport.Reset();
 	//FAxisViewportDouble& ViewportX = Viewport.GetHorizontalAxisViewport();
@@ -57,7 +65,7 @@ void SPacketContentView::Reset()
 
 	GameInstanceIndex = 0;
 	ConnectionIndex = 0;
-	ConnectionMode = Trace::ENetProfilerConnectionMode::Outgoing;
+	ConnectionMode = TraceServices::ENetProfilerConnectionMode::Outgoing;
 	PacketIndex = 0;
 	PacketSequence = 0;
 	PacketBitSize = 0;
@@ -103,9 +111,315 @@ void SPacketContentView::Reset()
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void SPacketContentView::Construct(const FArguments& InArgs, TSharedPtr<SNetworkingProfilerWindow> InProfilerWindow)
+BEGIN_SLATE_FUNCTION_BUILD_OPTIMIZATION
+TSharedRef<SWidget> SPacketContentView::AggregationMode_OnGenerateWidget(TSharedPtr<FAggregationModeItem> InAggregationMode) const
 {
-	ProfilerWindow = InProfilerWindow;
+	return SNew(STextBlock)
+		.Text(InAggregationMode->GetText())
+		.ToolTipText(InAggregationMode->GetTooltipText());
+}
+END_SLATE_FUNCTION_BUILD_OPTIMIZATION
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void SPacketContentView::AggregationMode_OnSelectionChanged(TSharedPtr<FAggregationModeItem> NewAggregationMode, ESelectInfo::Type SelectInfo)
+{
+	const bool bSameValue = (!SelectedAggregationMode.IsValid() && !NewAggregationMode.IsValid()) ||
+		(SelectedAggregationMode.IsValid() && NewAggregationMode.IsValid() &&
+			SelectedAggregationMode->Mode == NewAggregationMode->Mode);
+
+	SelectedAggregationMode = NewAggregationMode;
+
+	// Need to refresh selection
+	if (!bSameValue)
+	{
+		TSharedPtr<SNetworkingProfilerWindow> ProfilerWindow = ProfilerWindowWeakPtr.Pin();
+		if (ProfilerWindow.IsValid())
+		{
+			const TSharedPtr<SPacketView> PacketView = ProfilerWindow->GetPacketView();
+			if (PacketView.IsValid())
+			{
+				PacketView->InvalidateState();			
+			}
+		}
+	}
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+FText SPacketContentView::AggregationMode_GetSelectedText() const
+{
+	return SelectedAggregationMode.IsValid() ? SelectedAggregationMode->GetText() : LOCTEXT("NoAggregationModeText", "None");
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+FText SPacketContentView::AggregationMode_GetSelectedTooltipText() const
+{
+	return SelectedAggregationMode.IsValid() ? SelectedAggregationMode->GetTooltipText() : FText();
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+FText SPacketContentView::FAggregationModeItem::GetText() const
+{
+	switch (Mode)
+	{
+	case TraceServices::ENetProfilerAggregationMode::Aggregate:
+		return LOCTEXT("AggregationMode_Aggregate", "Aggregate");
+
+	case TraceServices::ENetProfilerAggregationMode::InstanceMax:
+		return LOCTEXT("AggregationMode_InstanceMax", "InstanceMax");
+
+	default:
+		return LOCTEXT("AggregationMode_None", "None");
+	}
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+FText SPacketContentView::FAggregationModeItem::GetTooltipText() const
+{
+	return GetText();
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+BEGIN_SLATE_FUNCTION_BUILD_OPTIMIZATION
+TSharedRef<SWidget> SPacketContentView::CreateAggregationModeComboBox()
+{
+	AggregationModeComboBox = SNew(SComboBox<TSharedPtr<FAggregationModeItem>>)
+		.ToolTipText(this, &SPacketContentView::AggregationMode_GetSelectedTooltipText)
+		.OptionsSource(&AvailableAggregationModes)
+		.OnSelectionChanged(this, &SPacketContentView::AggregationMode_OnSelectionChanged)
+		.OnGenerateWidget(this, &SPacketContentView::AggregationMode_OnGenerateWidget)
+		[
+			SNew(STextBlock)
+			.Text(this, &SPacketContentView::AggregationMode_GetSelectedText)
+		];
+
+	return AggregationModeComboBox.ToSharedRef();
+}
+END_SLATE_FUNCTION_BUILD_OPTIMIZATION
+
+void SPacketContentView::Construct(const FArguments& InArgs, TSharedRef<SNetworkingProfilerWindow> InProfilerWindow)
+{
+	ProfilerWindowWeakPtr = InProfilerWindow;
+
+	AvailableAggregationModes.Add(MakeShared<FAggregationModeItem>(TraceServices::ENetProfilerAggregationMode::None));
+	AvailableAggregationModes.Add(MakeShared<FAggregationModeItem>(TraceServices::ENetProfilerAggregationMode::Aggregate));
+	AvailableAggregationModes.Add(MakeShared<FAggregationModeItem>(TraceServices::ENetProfilerAggregationMode::InstanceMax));
+	SelectedAggregationMode = AvailableAggregationModes[1];
+
+	TSharedRef<SWidget> AggregationModeWidget = CreateAggregationModeComboBox();
+
+	FSlimHorizontalToolBarBuilder ToolbarBuilder(TSharedPtr<const FUICommandList>(), FMultiBoxCustomization::None);
+	ToolbarBuilder.SetStyle(&FInsightsStyle::Get(), "SecondaryToolbar2");
+
+	ToolbarBuilder.BeginSection("FindPacket");
+	{
+		ToolbarBuilder.AddWidget(
+			SNew(SBox)
+			.VAlign(VAlign_Center)
+			.Padding(FMargin(4.0f, 0.0f, 2.0f, 0.0f))
+			[
+				SNew(STextBlock)
+				.Text(LOCTEXT("FindPacketText", "Find Packet:"))
+			]
+		);
+
+		ToolbarBuilder.AddToolBarButton(
+			FUIAction(FExecuteAction::CreateSP(this, &SPacketContentView::FindPreviousPacket)),
+			NAME_None,
+			TAttribute<FText>(),
+			LOCTEXT("PreviousPacketToolTip", "Previous Packet"),
+			FSlateIcon(FInsightsStyle::GetStyleSetName(), "Icons.FindPrevious.ToolBar"),
+			EUserInterfaceActionType::Button
+		);
+
+		ToolbarBuilder.AddWidget(
+			SNew(SBox)
+			.Padding(FMargin(0.0f, 0.0f, 0.0f, 0.0f))
+			.VAlign(VAlign_Center)
+			[
+				SNew(SEditableTextBox)
+				.RevertTextOnEscape(true)
+				.SelectAllTextWhenFocused(true)
+				.Text(this, &SPacketContentView::GetPacketText)
+				.ToolTipText(LOCTEXT("SequenceNumber_Tooltip", "Sequence Number"))
+				.OnTextCommitted(this, &SPacketContentView::Packet_OnTextCommitted)
+				.MinDesiredWidth(40.0f)
+			]
+		);
+
+		ToolbarBuilder.AddToolBarButton(
+			FUIAction(FExecuteAction::CreateSP(this, &SPacketContentView::FindNextPacket)),
+			NAME_None,
+			TAttribute<FText>(),
+			LOCTEXT("NextPacketToolTip", "Next Packet"),
+			FSlateIcon(FInsightsStyle::GetStyleSetName(), "Icons.FindNext.ToolBar"),
+			EUserInterfaceActionType::Button
+		);
+	}
+	ToolbarBuilder.EndSection();
+
+	ToolbarBuilder.BeginSection("FindEvent");
+	{
+		ToolbarBuilder.AddWidget(
+			SNew(SBox)
+			.VAlign(VAlign_Center)
+			.Padding(FMargin(4.0f, 0.0f, 2.0f, 0.0f))
+			[
+				SNew(STextBlock)
+				.Text(LOCTEXT("FindEventText", "Find Event:"))
+			]
+		);
+
+		ToolbarBuilder.AddToolBarButton(
+			FUIAction(FExecuteAction::CreateSP(this, &SPacketContentView::FindFirstEvent)),
+			NAME_None,
+			TAttribute<FText>(),
+			LOCTEXT("FindFirstEventToolTip", "First Event"),
+			FSlateIcon(FInsightsStyle::GetStyleSetName(), "Icons.FindFirst.ToolBar"),
+			EUserInterfaceActionType::Button
+		);
+
+		ToolbarBuilder.AddToolBarButton(
+			FUIAction(FExecuteAction::CreateSP(this, &SPacketContentView::FindPreviousEvent, EEventNavigationType::AnyLevel)),
+			NAME_None,
+			TAttribute<FText>(),
+			LOCTEXT("FindPreviousEventToolTip", "Previous Event"),
+			FSlateIcon(FInsightsStyle::GetStyleSetName(), "Icons.FindPrevious.ToolBar"),
+			EUserInterfaceActionType::Button
+		);
+
+		ToolbarBuilder.AddToolBarButton(
+			FUIAction(FExecuteAction::CreateSP(this, &SPacketContentView::FindNextEvent, EEventNavigationType::AnyLevel)),
+			NAME_None,
+			TAttribute<FText>(),
+			LOCTEXT("FindNextEventToolTip", "Next Event"),
+			FSlateIcon(FInsightsStyle::GetStyleSetName(), "Icons.FindNext.ToolBar"),
+			EUserInterfaceActionType::Button
+		);
+
+		ToolbarBuilder.AddToolBarButton(
+			FUIAction(FExecuteAction::CreateSP(this, &SPacketContentView::FindLastEvent)),
+			NAME_None,
+			TAttribute<FText>(),
+			LOCTEXT("FindLastEventToolTip", "Last Event"),
+			FSlateIcon(FInsightsStyle::GetStyleSetName(), "Icons.FindLast.ToolBar"),
+			EUserInterfaceActionType::Button
+		);
+	}
+	ToolbarBuilder.EndSection();
+
+	ToolbarBuilder.BeginSection("FilterByNetId");
+	{
+		ToolbarBuilder.AddWidget(
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.Padding(FMargin(4.0f, 0.0f, 2.0f, 0.0f))
+			.AutoWidth()
+			[
+				SNew(SCheckBox)
+				.ToolTipText(LOCTEXT("FilterByNetId_Tooltip", "Filter events that have the specified NetId."))
+				.IsChecked(this, &SPacketContentView::FilterByNetId_IsChecked)
+				.OnCheckStateChanged(this, &SPacketContentView::FilterByNetId_OnCheckStateChanged)
+				[
+					SNew(SBox)
+					.Padding(FMargin(2.0f, 0.0f, 0.0f, 0.0f))
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT("FilterByNetId_Text", "By NetId:"))
+					]
+				]
+			]
+			+ SHorizontalBox::Slot()
+			.Padding(FMargin(2.0f, 0.0f, 4.0f, 0.0f))
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SEditableTextBox)
+				.RevertTextOnEscape(true)
+				.SelectAllTextWhenFocused(true)
+				.Text(this, &SPacketContentView::GetFilterNetIdText)
+				.ToolTipText(LOCTEXT("NetId_Tooltip", "NetId"))
+				.OnTextCommitted(this, &SPacketContentView::FilterNetId_OnTextCommitted)
+				.MinDesiredWidth(40.0f)
+			]
+		);
+	}
+	ToolbarBuilder.EndSection();
+
+	ToolbarBuilder.BeginSection("FilterByEventType");
+	{
+		ToolbarBuilder.AddWidget(
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.Padding(FMargin(4.0f, 0.0f, 2.0f, 0.0f))
+			.AutoWidth()
+			[
+				SNew(SCheckBox)
+				.ToolTipText(LOCTEXT("FilterByEventType_Tooltip", "Filter events that have the specified type.\n\nTo set the event type:\n\tdouble click either an event in the Packet Content view\n\tor an event type in the NetStats tree view."))
+				.IsChecked(this, &SPacketContentView::FilterByEventType_IsChecked)
+				.OnCheckStateChanged(this, &SPacketContentView::FilterByEventType_OnCheckStateChanged)
+				[
+					SNew(SBox)
+					.Padding(FMargin(2.0f, 0.0f, 0.0f, 0.0f))
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT("FilterByEventType_Text", "By Type:"))
+					]
+				]
+			]
+			+ SHorizontalBox::Slot()
+			.Padding(FMargin(2.0f, 0.0f, 4.0f, 0.0f))
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SEditableTextBox)
+				.Text(this, &SPacketContentView::GetFilterEventTypeText)
+				.ToolTipText(LOCTEXT("EventType_Tooltip", "Event Type\n\nTo set the event type:\n\tdouble click either an event in the Packet Content view\n\tor an event type in the NetStats tree view."))
+				.IsReadOnly(true)
+				.MinDesiredWidth(120.0f)
+			]
+		);
+	}
+	ToolbarBuilder.EndSection();
+
+	ToolbarBuilder.BeginSection("HighlightFilteredEvents");
+	{
+		ToolbarBuilder.AddWidget(
+			SNew(SBox)
+			.Padding(FMargin(4.0f, 0.0f, 4.0f, 0.0f))
+			[
+				SNew(SCheckBox)
+				.ToolTipText(LOCTEXT("HighlightFilteredEvents_Tooltip", "Highlight filtered events."))
+				.IsChecked(this, &SPacketContentView::HighlightFilteredEvents_IsChecked)
+				.OnCheckStateChanged(this, &SPacketContentView::HighlightFilteredEvents_OnCheckStateChanged)
+				[
+					SNew(SBox)
+					.Padding(FMargin(4.0f, 0.0f, 4.0f, 0.0f))
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT("HighlightFilteredEvents_Text", "Highlight"))
+					]
+				]
+			]
+		);
+	}
+	ToolbarBuilder.EndSection();
+	ToolbarBuilder.BeginSection("AggregationType");
+	{
+		ToolbarBuilder.AddWidget(
+			SNew(SBox)
+			.Padding(FMargin(12.0f, 0.0f, 0.0f, 0.0f))
+			[
+				AggregationModeWidget
+			]
+		);
+	}
+	ToolbarBuilder.EndSection();
 
 	ChildSlot
 	[
@@ -113,227 +427,21 @@ void SPacketContentView::Construct(const FArguments& InArgs, TSharedPtr<SNetwork
 		.Visibility(EVisibility::SelfHitTestInvisible)
 
 		+ SOverlay::Slot()
-		.HAlign(HAlign_Center)
+		.HAlign(HAlign_Fill)
 		.VAlign(VAlign_Top)
-		.Padding(FMargin(0, 0, 0, 0))
+		.Padding(FMargin(0.0f))
 		[
-			SNew(SHorizontalBox)
-
-			//////////////////////////////////////////////////
-			// Find Packet
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.VAlign(VAlign_Center)
-			.Padding(0.0f, 0.0f, 0.0f, 0.0f)
-			[
-				SNew(STextBlock)
-				.Text(LOCTEXT("FindPacketText", "Find Packet:"))
-			]
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(4.0f, 0.0f, 0.0f, 0.0f)
-			[
-				SNew(SButton)
-				.ToolTipText(LOCTEXT("PreviousPacketToolTip", "Previous Packet"))
-				.ContentPadding(0.0f)
-				.OnClicked(this, &SPacketContentView::FindPreviousPacket_OnClicked)
-				.Content()
-				[
-					SNew(SImage)
-					.Image(FInsightsStyle::GetBrush("FindPrevious"))
-				]
-			]
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(4.0f, 0.0f, 0.0f, 0.0f)
-			[
-				SNew(SEditableTextBox)
-				.RevertTextOnEscape(true)
-				.SelectAllTextWhenFocused(true)
-				.Text(this, &SPacketContentView::GetPacketText)
-				.OnTextCommitted(this, &SPacketContentView::Packet_OnTextCommitted)
-				.MinDesiredWidth(30.0f)
-			]
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(4.0f, 0.0f, 0.0f, 0.0f)
-			[
-				SNew(SButton)
-				.ToolTipText(LOCTEXT("NextPacketToolTip", "Next Packet"))
-				.ContentPadding(0.0f)
-				.OnClicked(this, &SPacketContentView::FindNextPacket_OnClicked)
-				.Content()
-				[
-					SNew(SImage)
-					.Image(FInsightsStyle::GetBrush("FindNext"))
-				]
-			]
-
-			//////////////////////////////////////////////////
-			// Find Event
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.VAlign(VAlign_Center)
-			.Padding(12.0f, 0.0f, 0.0f, 0.0f)
-			[
-				SNew(STextBlock)
-				.Text(LOCTEXT("FindEventText", "Find Event:"))
-			]
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(4.0f, 0.0f, 0.0f, 0.0f)
-			[
-				SNew(SButton)
-				.ToolTipText(LOCTEXT("FindFirstEventToolTip", "First Event"))
-				.ContentPadding(0.0f)
-				.OnClicked(this, &SPacketContentView::FindFirstEvent)
-				.Content()
-				[
-					SNew(SImage)
-					.Image(FInsightsStyle::GetBrush("FindFirst"))
-				]
-			]
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(4.0f, 0.0f, 0.0f, 0.0f)
-			[
-				SNew(SButton)
-				.ToolTipText(LOCTEXT("FindPreviousEventToolTip", "Previous Event"))
-				.ContentPadding(0.0f)
-				.OnClicked(this, &SPacketContentView::FindPreviousEvent)
-				.Content()
-				[
-					SNew(SImage)
-					.Image(FInsightsStyle::GetBrush("FindPrevious"))
-				]
-			]
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(4.0f, 0.0f, 0.0f, 0.0f)
-			[
-				SNew(SButton)
-				.ToolTipText(LOCTEXT("FindNextEventToolTip", "Next Event"))
-				.ContentPadding(0.0f)
-				.OnClicked(this, &SPacketContentView::FindNextEvent)
-				.Content()
-				[
-					SNew(SImage)
-					.Image(FInsightsStyle::GetBrush("FindNext"))
-				]
-			]
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(4.0f, 0.0f, 0.0f, 0.0f)
-			[
-				SNew(SButton)
-				.ToolTipText(LOCTEXT("FindLastEventToolTip", "Last Event"))
-				.ContentPadding(0.0f)
-				.OnClicked(this, &SPacketContentView::FindLastEvent)
-				.Content()
-				[
-					SNew(SImage)
-					.Image(FInsightsStyle::GetBrush("FindLast"))
-				]
-			]
-
-			//////////////////////////////////////////////////
-			// By NetId
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.VAlign(VAlign_Center)
-			.Padding(12.0f, 0.0f, 0.0f, 0.0f)
-			[
-				SNew(SCheckBox)
-				.ToolTipText(LOCTEXT("FilterByNetId_Tooltip", "Filter events that have the specified NetId."))
-				.IsChecked(this, &SPacketContentView::FilterByNetId_IsChecked)
-				.OnCheckStateChanged(this, &SPacketContentView::FilterByNetId_OnCheckStateChanged)
-				[
-					SNew(STextBlock)
-					.Text(LOCTEXT("FilterByNetId_Text", "By NetId:"))
-				]
-			]
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(4.0f, 0.0f, 0.0f, 0.0f)
-			[
-				SNew(SEditableTextBox)
-				.RevertTextOnEscape(true)
-				.SelectAllTextWhenFocused(true)
-				.Text(this, &SPacketContentView::GetFilterNetIdText)
-				.OnTextCommitted(this, &SPacketContentView::FilterNetId_OnTextCommitted)
-				.MinDesiredWidth(40.0f)
-			]
-
-			//////////////////////////////////////////////////
-			// By Event Type
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.VAlign(VAlign_Center)
-			.Padding(12.0f, 0.0f, 0.0f, 0.0f)
-			[
-				SNew(SCheckBox)
-				.ToolTipText(LOCTEXT("FilterByEventType_Tooltip", "Filter events that have the specified type.\n\nTo set the event type:\n\tdouble click either an event in the Packet Content view\n\tor an event type in the NetStats tree view."))
-				.IsChecked(this, &SPacketContentView::FilterByEventType_IsChecked)
-				.OnCheckStateChanged(this, &SPacketContentView::FilterByEventType_OnCheckStateChanged)
-				[
-					SNew(STextBlock)
-					.Text(LOCTEXT("FilterByEventType_Text", "By Type:"))
-				]
-			]
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(4.0f, 0.0f, 0.0f, 0.0f)
-			[
-				SNew(SEditableTextBox)
-				.Text(this, &SPacketContentView::GetFilterEventTypeText)
-				.IsReadOnly(true)
-				.MinDesiredWidth(120.0f)
-			]
-
-			//////////////////////////////////////////////////
-			// Highlight Filtered Events
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.VAlign(VAlign_Center)
-			.Padding(12.0f, 0.0f, 0.0f, 0.0f)
-			[
-				SNew(SCheckBox)
-				.ToolTipText(LOCTEXT("HighlightFilteredEvents_Tooltip", "Highlight filtered events."))
-				.IsChecked(this, &SPacketContentView::HighlightFilteredEvents_IsChecked)
-				.OnCheckStateChanged(this, &SPacketContentView::HighlightFilteredEvents_OnCheckStateChanged)
-				[
-					SNew(STextBlock)
-					.Text(LOCTEXT("HighlightFilteredEvents_Text", "Highlight"))
-				]
-			]
-
-			//////////////////////////////////////////////////
+			ToolbarBuilder.MakeWidget()
 		]
 
 		+ SOverlay::Slot()
 		.VAlign(VAlign_Bottom)
-		.Padding(FMargin(0, 0, 0, 0))
+		.Padding(FMargin(0.0f))
 		[
 			SAssignNew(HorizontalScrollBar, SScrollBar)
 			.Orientation(Orient_Horizontal)
 			.AlwaysShowScrollbar(false)
 			.Visibility(EVisibility::Visible)
-			.Thickness(FVector2D(5.0f, 5.0f))
-			.RenderOpacity(0.75)
 			.OnUserScrolled(this, &SPacketContentView::HorizontalScrollBar_OnUserScrolled)
 		]
 	];
@@ -345,28 +453,32 @@ void SPacketContentView::Construct(const FArguments& InArgs, TSharedPtr<SNetwork
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-FReply SPacketContentView::FindPreviousPacket_OnClicked()
+void SPacketContentView::FindPreviousPacket()
 {
-	TSharedPtr<SPacketView> PacketView = ProfilerWindow->GetPacketView();
-	if (PacketView.IsValid())
+	TSharedPtr<SNetworkingProfilerWindow> ProfilerWindow = ProfilerWindowWeakPtr.Pin();
+	if (ProfilerWindow.IsValid())
 	{
-		PacketView->SelectPreviousPacket();
+		TSharedPtr<SPacketView> PacketView = ProfilerWindow->GetPacketView();
+		if (PacketView.IsValid())
+		{
+			PacketView->SelectPreviousPacket();
+		}
 	}
-
-	return FReply::Handled();
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-FReply SPacketContentView::FindNextPacket_OnClicked()
+void SPacketContentView::FindNextPacket()
 {
-	TSharedPtr<SPacketView> PacketView = ProfilerWindow->GetPacketView();
-	if (PacketView.IsValid())
+	TSharedPtr<SNetworkingProfilerWindow> ProfilerWindow = ProfilerWindowWeakPtr.Pin();
+	if (ProfilerWindow.IsValid())
 	{
-		PacketView->SelectNextPacket();
+		TSharedPtr<SPacketView> PacketView = ProfilerWindow->GetPacketView();
+		if (PacketView.IsValid())
+		{
+			PacketView->SelectNextPacket();
+		}
 	}
-
-	return FReply::Handled();
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -385,17 +497,21 @@ void SPacketContentView::Packet_OnTextCommitted(const FText& InNewText, ETextCom
 		uint32 NewPacketSequence = 0;
 		TTypeFromString<uint32>::FromString(NewPacketSequence, *InNewText.ToString());
 
-		TSharedPtr<SPacketView> PacketView = ProfilerWindow->GetPacketView();
-		if (PacketView.IsValid())
+		TSharedPtr<SNetworkingProfilerWindow> ProfilerWindow = ProfilerWindowWeakPtr.Pin();
+		if (ProfilerWindow.IsValid())
 		{
-			PacketView->SelectPacketBySequenceNumber(NewPacketSequence);
+			TSharedPtr<SPacketView> PacketView = ProfilerWindow->GetPacketView();
+			if (PacketView.IsValid())
+			{
+				PacketView->SelectPacketBySequenceNumber(NewPacketSequence);
+			}
 		}
 	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-FReply SPacketContentView::FindFirstEvent()
+void SPacketContentView::FindFirstEvent()
 {
 	if (FilteredDrawState->Events.Num() > 0)
 	{
@@ -403,18 +519,25 @@ FReply SPacketContentView::FindFirstEvent()
 		OnSelectedEventChanged();
 		BringEventIntoView(SelectedEvent);
 	}
-
-	return FReply::Handled();
+	else
+	{
+		FMessageLog ReportMessageLog(FNetworkingProfilerManager::Get()->GetLogListingName());
+		ReportMessageLog.Error(LOCTEXT("NoEventFound", "No event found!"));
+		ReportMessageLog.Notify();
+	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-FReply SPacketContentView::FindPreviousEvent()
+void SPacketContentView::FindPreviousEvent(EEventNavigationType NavigationType)
 {
 	if (!SelectedEvent.IsValid())
 	{
-		return FindFirstEvent();
+		FindFirstEvent();
+		return;
 	}
+
+	FNetworkPacketEventRef PreviousSelectedEvent = SelectedEvent;
 
 	const int32 EventCount = FilteredDrawState->Events.Num();
 	for (int32 EventIndex = EventCount - 1; EventIndex >= 0; --EventIndex)
@@ -424,8 +547,27 @@ FReply SPacketContentView::FindPreviousEvent()
 		{
 			if (EventIndex > 0)
 			{
-				SelectedEvent.Set(FilteredDrawState->Events[EventIndex - 1]);
-				OnSelectedEventChanged();
+				switch (NavigationType)
+				{
+				case EEventNavigationType::AnyLevel:
+					SelectedEvent.Set(FilteredDrawState->Events[EventIndex - 1]);
+					OnSelectedEventChanged();
+					break;
+				case EEventNavigationType::SameLevel:
+					for (int32 PrevEventIndex = EventIndex - 1; PrevEventIndex >= 0; --PrevEventIndex)
+					{
+						const FNetworkPacketEvent& PrevEvent = FilteredDrawState->Events[PrevEventIndex];
+						if (Event.Level == PrevEvent.Level)
+						{
+							SelectedEvent.Set(FilteredDrawState->Events[PrevEventIndex]);
+							OnSelectedEventChanged();
+							break;
+						}
+					}
+					break;
+				default:
+					break;
+				}
 				break;
 			}
 		}
@@ -441,17 +583,26 @@ FReply SPacketContentView::FindPreviousEvent()
 	}
 
 	BringEventIntoView(SelectedEvent);
-	return FReply::Handled();
+
+	if (PreviousSelectedEvent.Equals(SelectedEvent))
+	{
+		FMessageLog ReportMessageLog(FNetworkingProfilerManager::Get()->GetLogListingName());
+		ReportMessageLog.Error(LOCTEXT("NoEventFound", "No event found!"));
+		ReportMessageLog.Notify();
+	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-FReply SPacketContentView::FindNextEvent()
+void SPacketContentView::FindNextEvent(EEventNavigationType NavigationType)
 {
 	if (!SelectedEvent.IsValid())
 	{
-		return FindLastEvent();
+		FindLastEvent();
+		return;
 	}
+
+	FNetworkPacketEventRef PreviousSelectedEvent = SelectedEvent;
 
 	const int32 EventCount = FilteredDrawState->Events.Num();
 	for (int32 EventIndex = 0; EventIndex < EventCount; ++EventIndex)
@@ -461,8 +612,27 @@ FReply SPacketContentView::FindNextEvent()
 		{
 			if (EventIndex < EventCount - 1)
 			{
-				SelectedEvent.Set(FilteredDrawState->Events[EventIndex + 1]);
-				OnSelectedEventChanged();
+				switch (NavigationType)
+				{
+				case EEventNavigationType::AnyLevel:
+					SelectedEvent.Set(FilteredDrawState->Events[EventIndex + 1]);
+					OnSelectedEventChanged();
+					break;
+				case EEventNavigationType::SameLevel:
+					for (int32 NextEventIndex = EventIndex + 1; NextEventIndex <= EventCount - 1; ++NextEventIndex)
+					{
+						const FNetworkPacketEvent& NextEvent = FilteredDrawState->Events[NextEventIndex];
+						if (Event.Level == NextEvent.Level)
+						{
+							SelectedEvent.Set(FilteredDrawState->Events[NextEventIndex]);
+							OnSelectedEventChanged();
+							break;
+						}
+					}
+					break;
+				default:
+					break;
+				}
 				break;
 			}
 		}
@@ -478,12 +648,18 @@ FReply SPacketContentView::FindNextEvent()
 	}
 
 	BringEventIntoView(SelectedEvent);
-	return FReply::Handled();
+
+	if (PreviousSelectedEvent.Equals(SelectedEvent))
+	{
+		FMessageLog ReportMessageLog(FNetworkingProfilerManager::Get()->GetLogListingName());
+		ReportMessageLog.Error(LOCTEXT("NoEventFound", "No event found!"));
+		ReportMessageLog.Notify();
+	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-FReply SPacketContentView::FindLastEvent()
+void SPacketContentView::FindLastEvent()
 {
 	if (FilteredDrawState->Events.Num() > 0)
 	{
@@ -491,8 +667,82 @@ FReply SPacketContentView::FindLastEvent()
 		OnSelectedEventChanged();
 		BringEventIntoView(SelectedEvent);
 	}
+	else
+	{
+		FMessageLog ReportMessageLog(FNetworkingProfilerManager::Get()->GetLogListingName());
+		ReportMessageLog.Error(LOCTEXT("NoEventFound", "No event found!"));
+		ReportMessageLog.Notify();
+	}
+}
 
-	return FReply::Handled();
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void SPacketContentView::FindPreviousLevel()
+{
+	if (!SelectedEvent.IsValid())
+	{
+		FindFirstEvent();
+		return;
+	}
+
+	const int32 EventCount = FilteredDrawState->Events.Num();
+	for (int32 EventIndex = 0; EventIndex < EventCount; ++EventIndex)
+	{
+		const FNetworkPacketEvent& Event = FilteredDrawState->Events[EventIndex];
+		if (Event.Equals(SelectedEvent.Event))
+		{
+			for (int32 PrevEventIndex = EventIndex - 1; PrevEventIndex > 0; --PrevEventIndex)
+			{
+				const FNetworkPacketEvent& PrevEvent = FilteredDrawState->Events[PrevEventIndex];
+				if (PrevEvent.Level < Event.Level &&
+					PrevEvent.BitOffset <= Event.BitOffset &&
+					PrevEvent.BitSize + PrevEvent.BitOffset >= Event.BitSize + Event.BitOffset)
+				{
+					SelectedEvent.Set(FilteredDrawState->Events[PrevEventIndex]);
+					OnSelectedEventChanged();
+					break;
+				}
+			}
+			break;
+		}
+	}
+
+	BringEventIntoView(SelectedEvent);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void SPacketContentView::FindNextLevel()
+{
+	if (!SelectedEvent.IsValid())
+	{
+		FindLastEvent();
+		return;
+	}
+
+	const int32 EventCount = FilteredDrawState->Events.Num();
+	for (int32 EventIndex = 0; EventIndex < EventCount; ++EventIndex)
+	{
+		const FNetworkPacketEvent& Event = FilteredDrawState->Events[EventIndex];
+		if (Event.Equals(SelectedEvent.Event))
+		{
+			for (int32 NextEventIndex = EventIndex + 1; NextEventIndex < EventCount; ++NextEventIndex)
+			{
+				const FNetworkPacketEvent& NextEvent = FilteredDrawState->Events[NextEventIndex];
+				if (NextEvent.Level > Event.Level &&
+					NextEvent.BitOffset >= Event.BitOffset &&
+					NextEvent.BitSize + NextEvent.BitOffset <= Event.BitSize + Event.BitOffset)
+				{
+					SelectedEvent.Set(FilteredDrawState->Events[NextEventIndex]);
+					OnSelectedEventChanged();
+					break;
+				}
+			}
+			break;
+		}
+	}
+
+	BringEventIntoView(SelectedEvent);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -509,10 +759,14 @@ void SPacketContentView::FilterByNetId_OnCheckStateChanged(ECheckBoxState NewSta
 	bFilterByNetId = (NewState == ECheckBoxState::Checked);
 	bIsStateDirty = true;
 
-	TSharedPtr<SPacketView> PacketView = ProfilerWindow ? ProfilerWindow->GetPacketView() : nullptr;
-	if (PacketView.IsValid())
+	TSharedPtr<SNetworkingProfilerWindow> ProfilerWindow = ProfilerWindowWeakPtr.Pin();
+	if (ProfilerWindow.IsValid())
 	{
-		PacketView->InvalidateState();
+		TSharedPtr<SPacketView> PacketView = ProfilerWindow->GetPacketView();
+		if (PacketView.IsValid())
+		{
+			PacketView->InvalidateState();
+		}
 	}
 }
 
@@ -529,8 +783,8 @@ void SPacketContentView::FilterNetId_OnTextCommitted(const FText& InNewText, ETe
 {
 	if (InNewText.IsNumeric())
 	{
-		int32 NewNetId = 0;
-		TTypeFromString<int32>::FromString(NewNetId, *InNewText.ToString());
+		uint64 NewNetId = 0;
+		TTypeFromString<uint64>::FromString(NewNetId, *InNewText.ToString());
 		SetFilterNetId(NewNetId);
 	}
 }
@@ -549,10 +803,14 @@ void SPacketContentView::FilterByEventType_OnCheckStateChanged(ECheckBoxState Ne
 	bFilterByEventType = (NewState == ECheckBoxState::Checked);
 	bIsStateDirty = true;
 
-	TSharedPtr<SPacketView> PacketView = ProfilerWindow ? ProfilerWindow->GetPacketView() : nullptr;
-	if (PacketView.IsValid())
+	TSharedPtr<SNetworkingProfilerWindow> ProfilerWindow = ProfilerWindowWeakPtr.Pin();
+	if (ProfilerWindow.IsValid())
 	{
-		PacketView->InvalidateState();
+		TSharedPtr<SPacketView> PacketView = ProfilerWindow->GetPacketView();
+		if (PacketView.IsValid())
+		{
+			PacketView->InvalidateState();
+		}
 	}
 }
 
@@ -578,13 +836,16 @@ void SPacketContentView::Tick(const FGeometry& AllottedGeometry, const double In
 	if (ThisGeometry != AllottedGeometry || bIsViewportDirty)
 	{
 		bIsViewportDirty = false;
-		const float ViewWidth = AllottedGeometry.GetLocalSize().X;
-		const float ViewHeight = AllottedGeometry.GetLocalSize().Y;
+		const float ViewWidth = static_cast<float>(AllottedGeometry.GetLocalSize().X);
+		const float ViewHeight = static_cast<float>(AllottedGeometry.GetLocalSize().Y);
 		Viewport.SetSize(ViewWidth, ViewHeight);
 		bIsStateDirty = true;
 	}
 
 	ThisGeometry = AllottedGeometry;
+
+	const float FontScale = AllottedGeometry.Scale;
+	Tooltip.SetFontScale(FontScale);
 
 	FAxisViewportDouble& ViewportX = Viewport.GetHorizontalAxisViewport();
 
@@ -600,7 +861,8 @@ void SPacketContentView::Tick(const FGeometry& AllottedGeometry, const double In
 	if (bIsStateDirty)
 	{
 		bIsStateDirty = false;
-		UpdateState();
+		UpdateState(FontScale);
+		AdjustForSplitContent();
 	}
 
 	Tooltip.Update();
@@ -616,7 +878,7 @@ void SPacketContentView::ResetPacket()
 {
 	GameInstanceIndex = 0;
 	ConnectionIndex = 0;
-	ConnectionMode = Trace::ENetProfilerConnectionMode::Outgoing;
+	ConnectionMode = TraceServices::ENetProfilerConnectionMode::Outgoing;
 	PacketIndex = 0;
 	PacketSequence = 0;
 	PacketBitSize = 0;
@@ -636,7 +898,7 @@ void SPacketContentView::ResetPacket()
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void SPacketContentView::SetPacket(uint32 InGameInstanceIndex, uint32 InConnectionIndex, Trace::ENetProfilerConnectionMode InConnectionMode, uint32 InPacketIndex, int64 InPacketBitSize)
+void SPacketContentView::SetPacket(uint32 InGameInstanceIndex, uint32 InConnectionIndex, TraceServices::ENetProfilerConnectionMode InConnectionMode, uint32 InPacketIndex, int64 InPacketBitSize)
 {
 	GameInstanceIndex = InGameInstanceIndex;
 	ConnectionIndex = InConnectionIndex;
@@ -660,7 +922,7 @@ void SPacketContentView::SetPacket(uint32 InGameInstanceIndex, uint32 InConnecti
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void SPacketContentView::SetFilterNetId(const uint32 InNetId)
+void SPacketContentView::SetFilterNetId(const uint64 InNetId)
 {
 	FilterNetId = InNetId;
 
@@ -668,10 +930,14 @@ void SPacketContentView::SetFilterNetId(const uint32 InNetId)
 	{
 		bIsStateDirty = true;
 
-		TSharedPtr<SPacketView> PacketView = ProfilerWindow ? ProfilerWindow->GetPacketView() : nullptr;
-		if (PacketView.IsValid())
+		TSharedPtr<SNetworkingProfilerWindow> ProfilerWindow = ProfilerWindowWeakPtr.Pin();
+		if (ProfilerWindow.IsValid())
 		{
-			PacketView->InvalidateState();
+			TSharedPtr<SPacketView> PacketView = ProfilerWindow->GetPacketView();
+			if (PacketView.IsValid())
+			{
+				PacketView->InvalidateState();
+			}
 		}
 	}
 }
@@ -687,10 +953,14 @@ void SPacketContentView::SetFilterEventType(const uint32 InEventTypeIndex, const
 	{
 		bIsStateDirty = true;
 
-		TSharedPtr<SPacketView> PacketView = ProfilerWindow ? ProfilerWindow->GetPacketView() : nullptr;
-		if (PacketView.IsValid())
+		TSharedPtr<SNetworkingProfilerWindow> ProfilerWindow = ProfilerWindowWeakPtr.Pin();
+		if (ProfilerWindow.IsValid())
 		{
-			PacketView->InvalidateState();
+			TSharedPtr<SPacketView> PacketView = ProfilerWindow->GetPacketView();
+			if (PacketView.IsValid())
+			{
+				PacketView->InvalidateState();
+			}
 		}
 	}
 }
@@ -701,16 +971,18 @@ void SPacketContentView::EnableFilterEventType(const uint32 InEventTypeIndex)
 {
 	FText EventName;
 
-	TSharedPtr<const Trace::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
+	TSharedPtr<const TraceServices::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
 	if (Session.IsValid())
 	{
-		Trace::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
-		const Trace::INetProfilerProvider& NetProfilerProvider = Trace::ReadNetProfilerProvider(*Session.Get());
-
-		NetProfilerProvider.ReadEventType(InEventTypeIndex, [&EventName](const Trace::FNetProfilerEventType& EventType)
+		TraceServices::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
+		const TraceServices::INetProfilerProvider* NetProfilerProvider = TraceServices::ReadNetProfilerProvider(*Session.Get());
+		if (NetProfilerProvider)
 		{
-			EventName = FText::FromString(EventType.Name);
-		});
+			NetProfilerProvider->ReadEventType(InEventTypeIndex, [&EventName](const TraceServices::FNetProfilerEventType& EventType)
+			{
+				EventName = FText::FromString(EventType.Name);
+			});
+		}
 	}
 
 	bFilterByEventType = true;
@@ -725,16 +997,18 @@ uint32 SPacketContentView::GetPacketSequence(int32 InPacketIndex) const
 {
 	uint32 NewSequenceNumber = 0U;
 
-	TSharedPtr<const Trace::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
+	TSharedPtr<const TraceServices::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
 	if (Session.IsValid())
 	{
-		Trace::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
-		const Trace::INetProfilerProvider& NetProfilerProvider = Trace::ReadNetProfilerProvider(*Session.Get());
-
-		NetProfilerProvider.EnumeratePackets(ConnectionIndex, ConnectionMode, InPacketIndex, InPacketIndex, [&NewSequenceNumber](const Trace::FNetProfilerPacket& Packet)
+		TraceServices::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
+		const TraceServices::INetProfilerProvider* NetProfilerProvider = TraceServices::ReadNetProfilerProvider(*Session.Get());
+		if (NetProfilerProvider)
 		{
-			NewSequenceNumber = Packet.SequenceNumber;
-		});
+			NetProfilerProvider->EnumeratePackets(ConnectionIndex, ConnectionMode, InPacketIndex, InPacketIndex, [&NewSequenceNumber](const TraceServices::FNetProfilerPacket& Packet)
+			{
+				NewSequenceNumber = Packet.SequenceNumber;
+			});
+		}
 	}
 
 	return NewSequenceNumber;
@@ -751,53 +1025,85 @@ void SPacketContentView::DisableFilterEventType()
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void SPacketContentView::UpdateState()
+void SPacketContentView::UpdateState(float FontScale)
 {
 	FStopwatch Stopwatch;
 	Stopwatch.Start();
 
 	if (PacketBitSize > 0)
 	{
-		FPacketContentViewDrawStateBuilder Builder(*DrawState, Viewport);
-		FPacketContentViewDrawStateBuilder FilteredDrawStateBuilder(*FilteredDrawState, Viewport);
+		FPacketContentViewDrawStateBuilder Builder(*DrawState, Viewport, FontScale);
+		FPacketContentViewDrawStateBuilder FilteredDrawStateBuilder(*FilteredDrawState, Viewport, FontScale);
 
-		TSharedPtr<const Trace::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
+		TSharedPtr<const TraceServices::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
 		if (Session.IsValid())
 		{
-			Trace::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
-			const Trace::INetProfilerProvider& NetProfilerProvider = Trace::ReadNetProfilerProvider(*Session.Get());
-
-			const FAxisViewportDouble& ViewportX = Viewport.GetHorizontalAxisViewport();
-
-			//const int64 StartPos = static_cast<int64>(FMath::FloorToDouble(ViewportX.GetValueAtOffset(0.0f)));
-			//const int64 EndPos = static_cast<int64>(FMath::CeilToDouble(ViewportX.GetValueAtOffset(ViewportX.GetSize())));
-			const uint32 StartPos = 0;
-			const uint32 EndPos = PacketBitSize;
-			NetProfilerProvider.EnumeratePacketContentEventsByPosition(ConnectionIndex, ConnectionMode, PacketIndex, StartPos, EndPos, [this, &Builder, &FilteredDrawStateBuilder, &NetProfilerProvider](const Trace::FNetProfilerContentEvent& Event)
+			TraceServices::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
+			const TraceServices::INetProfilerProvider* NetProfilerProvider = TraceServices::ReadNetProfilerProvider(*Session.Get());
+			if (NetProfilerProvider)
 			{
-				const TCHAR* Name = nullptr;
-				NetProfilerProvider.ReadName(Event.NameIndex, [&Name](const Trace::FNetProfilerName& NetProfilerName)
-				{
-					Name = NetProfilerName.Name;
-				});
+				const FAxisViewportDouble& ViewportX = Viewport.GetHorizontalAxisViewport();
 
-				uint32 NetId = 0;
-				if (Event.ObjectInstanceIndex != 0)
+				// Count all events in packet, including split data
+				const uint32 StartPos = 0U;
+				const uint32 EndPos = ~0U;
+				uint32 EndNetIdMatchPos = ~0U;
+				uint32 EndEventTypeMatchPos = ~0U;
+
+				NetProfilerProvider->EnumeratePacketContentEventsByPosition(ConnectionIndex, ConnectionMode, PacketIndex, StartPos, EndPos, [this, &Builder, &FilteredDrawStateBuilder, NetProfilerProvider, &EndNetIdMatchPos, &EndEventTypeMatchPos](const TraceServices::FNetProfilerContentEvent& Event)
 				{
-					NetProfilerProvider.ReadObject(GameInstanceIndex, Event.ObjectInstanceIndex, [&NetId](const Trace::FNetProfilerObjectInstance& ObjectInstance)
+					const TCHAR* Name = nullptr;
+
+					uint32 NameIndex = Event.NameIndex;
+					uint64 NetId = 0;
+					if (Event.ObjectInstanceIndex != 0)
 					{
-						NetId = ObjectInstance.NetId;
+						NetProfilerProvider->ReadObject(GameInstanceIndex, Event.ObjectInstanceIndex, [&NetId, &NameIndex](const TraceServices::FNetProfilerObjectInstance& ObjectInstance)
+						{
+							NameIndex = ObjectInstance.NameIndex;
+							NetId = ObjectInstance.NetObjectId;
+						});
+					}
+
+					NetProfilerProvider->ReadName(NameIndex, [&Name](const TraceServices::FNetProfilerName& NetProfilerName)
+					{
+						Name = NetProfilerName.Name;
 					});
-				}
 
-				Builder.AddEvent(Event, Name, NetId);
+					Builder.AddEvent(Event, Name, NetId);
 
-				if ((!bFilterByEventType || FilterEventTypeIndex == Event.EventTypeIndex) &&
-					(!bFilterByNetId || (Event.ObjectInstanceIndex != 0 && FilterNetId == NetId)))
-				{
-					FilteredDrawStateBuilder.AddEvent(Event, Name, NetId);
-				}
-			});
+					// Include events and sub-events matching event type
+					if (bFilterByEventType)
+					{
+						if (Event.EndPos > EndEventTypeMatchPos)
+						{
+							EndEventTypeMatchPos = ~0U;
+						}
+						if (EndEventTypeMatchPos == ~0U && FilterEventTypeIndex == Event.EventTypeIndex)
+						{
+							EndEventTypeMatchPos = Event.EndPos;
+						}
+					}
+
+					// Include events and sub-events matching net id
+					if (bFilterByNetId)
+					{
+						if (Event.EndPos > EndNetIdMatchPos)
+						{
+							EndNetIdMatchPos = ~0U;
+						}
+						if (EndNetIdMatchPos == ~0U && (Event.ObjectInstanceIndex != 0 && FilterNetId == NetId))
+						{
+							EndNetIdMatchPos = Event.EndPos;
+						}
+					}
+
+					if ((!bFilterByNetId || EndNetIdMatchPos != ~0U) && (!bFilterByEventType || EndEventTypeMatchPos != ~0U))
+					{
+						FilteredDrawStateBuilder.AddEvent(Event, Name, NetId);
+					}
+				});
+			}
 		}
 
 		Builder.Flush();
@@ -812,7 +1118,7 @@ void SPacketContentView::UpdateState()
 
 void SPacketContentView::UpdateHoveredEvent()
 {
-	HoveredEvent = GetEventAtMousePosition(MousePosition.X, MousePosition.Y);
+	HoveredEvent = GetEventAtMousePosition(static_cast<float>(MousePosition.X), static_cast<float>(MousePosition.Y));
 	//if (!HoveredEvent.IsValid())
 	//{
 	//	HoveredEvent = GetEventAtMousePosition(MousePosition.X - 1.0f, MousePosition.Y);
@@ -829,31 +1135,33 @@ void SPacketContentView::UpdateHoveredEvent()
 
 		const FNetworkPacketEvent& Event = HoveredEvent.Event;
 		FString Name(TEXT("?"));
-		Trace::FNetProfilerEventType EventType;
-		Trace::FNetProfilerObjectInstance ObjectInstance;
+		TraceServices::FNetProfilerEventType EventType;
+		TraceServices::FNetProfilerObjectInstance ObjectInstance;
 
-		TSharedPtr<const Trace::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
+		TSharedPtr<const TraceServices::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
 		if (Session.IsValid())
 		{
-			Trace::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
-			const Trace::INetProfilerProvider& NetProfilerProvider = Trace::ReadNetProfilerProvider(*Session.Get());
-
-			NetProfilerProvider.ReadEventType(Event.EventTypeIndex, [&EventType](const Trace::FNetProfilerEventType& InEventType)
+			TraceServices::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
+			const TraceServices::INetProfilerProvider* NetProfilerProvider = TraceServices::ReadNetProfilerProvider(*Session.Get());
+			if (NetProfilerProvider)
 			{
-				EventType = InEventType;
-			});
-
-			NetProfilerProvider.ReadName(EventType.NameIndex, [&Name](const Trace::FNetProfilerName& NetProfilerName)
-			{
-				Name = NetProfilerName.Name;
-			});
-
-			if (Event.ObjectInstanceIndex != 0)
-			{
-				NetProfilerProvider.ReadObject(GameInstanceIndex, Event.ObjectInstanceIndex, [&ObjectInstance](const Trace::FNetProfilerObjectInstance& InObjectInstance)
+				NetProfilerProvider->ReadEventType(Event.EventTypeIndex, [&EventType](const TraceServices::FNetProfilerEventType& InEventType)
 				{
-					ObjectInstance = InObjectInstance;
+					EventType = InEventType;
 				});
+
+				NetProfilerProvider->ReadName(EventType.NameIndex, [&Name](const TraceServices::FNetProfilerName& NetProfilerName)
+				{
+					Name = NetProfilerName.Name;
+				});
+
+				if (Event.ObjectInstanceIndex != 0)
+				{
+					NetProfilerProvider->ReadObject(GameInstanceIndex, Event.ObjectInstanceIndex, [&ObjectInstance](const TraceServices::FNetProfilerObjectInstance& InObjectInstance)
+					{
+						ObjectInstance = InObjectInstance;
+					});
+				}
 			}
 		}
 
@@ -861,8 +1169,8 @@ void SPacketContentView::UpdateHoveredEvent()
 
 		if (Event.ObjectInstanceIndex != 0)
 		{
-			Tooltip.AddNameValueTextLine(TEXT("Net Id:"), FText::AsNumber(ObjectInstance.NetId).ToString());
-			Tooltip.AddNameValueTextLine(TEXT("Type Id:"), FString::Printf(TEXT("0x%016X"), ObjectInstance.TypeId));
+			Tooltip.AddNameValueTextLine(TEXT("Net Id:"), FText::AsNumber(ObjectInstance.NetObjectId).ToString());
+			Tooltip.AddNameValueTextLine(TEXT("Type Id:"), FString::Printf(TEXT("0x%016" UINT64_x_FMT), ObjectInstance.TypeId));
 			Tooltip.AddNameValueTextLine(TEXT("Obj. LifeTime:"), FString::Format(TEXT("from {0} to {1}"),
 				{ TimeUtils::FormatTimeAuto(ObjectInstance.LifeTime.Begin), TimeUtils::FormatTimeAuto(ObjectInstance.LifeTime.End) }));
 		}
@@ -893,10 +1201,14 @@ void SPacketContentView::UpdateHoveredEvent()
 
 void SPacketContentView::OnSelectedEventChanged()
 {
-	if (SelectedEvent.IsValid() && ProfilerWindow.IsValid())
+	TSharedPtr<SNetworkingProfilerWindow> ProfilerWindow = ProfilerWindowWeakPtr.Pin();
+	if (ProfilerWindow.IsValid())
 	{
-		// Select the node coresponding to net event type of selected net event instance.
-		ProfilerWindow->SetSelectedEventTypeIndex(SelectedEvent.Event.EventTypeIndex);
+		if (SelectedEvent.IsValid())
+		{
+			// Select the node coresponding to net event type of selected net event instance.
+			ProfilerWindow->SetSelectedEventTypeIndex(SelectedEvent.Event.EventTypeIndex);
+		}
 	}
 }
 
@@ -922,15 +1234,12 @@ FNetworkPacketEventRef SPacketContentView::GetEventAtMousePosition(float X, floa
 			const float EventX1 = ViewportX.GetRoundedOffsetForValue(static_cast<double>(Event.BitOffset));
 			const float EventX2 = ViewportX.GetRoundedOffsetForValue(static_cast<double>(Event.BitOffset + Event.BitSize));
 
-			constexpr float EventsPosY = 32.0f;
-			constexpr float EventH = 14.0f;
-			constexpr float EventDY = 2.0f;
-			const float EventY = EventsPosY + (EventH + EventDY) * Event.Level;
+			const float EventY = Viewport.GetTopEventPosY() + (Viewport.GetEventHeight() + Viewport.GetEventDY()) * static_cast<float>(Event.Level);
 
 			constexpr float ToleranceX = 1.0f;
 
 			if (X >= EventX1 - ToleranceX && X <= EventX2 &&
-				Y >= EventY - EventDY / 2 && Y < EventY + EventH + EventDY / 2)
+				Y >= EventY - Viewport.GetEventDY() / 2 && Y < EventY + Viewport.GetEventHeight() + Viewport.GetEventDY() / 2)
 			{
 				return FNetworkPacketEventRef(Event);
 			}
@@ -947,8 +1256,8 @@ int32 SPacketContentView::OnPaint(const FPaintArgs& Args, const FGeometry& Allot
 	const ESlateDrawEffect DrawEffects = bEnabled ? ESlateDrawEffect::None : ESlateDrawEffect::DisabledEffect;
 	FDrawContext DrawContext(AllottedGeometry, MyCullingRect, InWidgetStyle, DrawEffects, OutDrawElements, LayerId);
 
-	const float ViewWidth = AllottedGeometry.Size.X;
-	const float ViewHeight = AllottedGeometry.Size.Y;
+	const float ViewWidth = static_cast<float>(AllottedGeometry.Size.X);
+	const float ViewHeight = static_cast<float>(AllottedGeometry.Size.Y);
 
 	//////////////////////////////////////////////////
 	{
@@ -956,10 +1265,6 @@ int32 SPacketContentView::OnPaint(const FPaintArgs& Args, const FGeometry& Allot
 		Stopwatch.Start();
 
 		FPacketContentViewDrawHelper Helper(DrawContext, Viewport);
-
-		Helper.SetLayoutPosY(32.0f);
-		//Helper.SetLayoutEventH(14.0f);
-		//Helper.SetLayoutEventDY(2.0f);
 
 		Helper.DrawBackground();
 
@@ -1009,10 +1314,11 @@ int32 SPacketContentView::OnPaint(const FPaintArgs& Args, const FGeometry& Allot
 	if (bShouldDisplayDebugInfo)
 	{
 		const FSlateBrush* WhiteBrush = FInsightsStyle::Get().GetBrush("WhiteBrush");
-		FSlateFontInfo SummaryFont = FCoreStyle::GetDefaultFontStyle("Regular", 8);
+		FSlateFontInfo SummaryFont = FAppStyle::Get().GetFontStyle("SmallFont");
 
 		const TSharedRef<FSlateFontMeasure> FontMeasureService = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
-		const float MaxFontCharHeight = FontMeasureService->Measure(TEXT("!"), SummaryFont).Y;
+		const float FontScale = DrawContext.Geometry.Scale;
+		const float MaxFontCharHeight = static_cast<float>(FontMeasureService->Measure(TEXT("!"), SummaryFont, FontScale).Y / FontScale);
 		const float DbgDY = MaxFontCharHeight;
 
 		const float DbgW = 280.0f;
@@ -1022,10 +1328,10 @@ int32 SPacketContentView::OnPaint(const FPaintArgs& Args, const FGeometry& Allot
 
 		DrawContext.LayerId++;
 
-		DrawContext.DrawBox(DbgX - 2.0f, DbgY - 2.0f, DbgW, DbgH, WhiteBrush, FLinearColor(1.0, 1.0, 1.0, 0.9));
+		DrawContext.DrawBox(DbgX - 2.0f, DbgY - 2.0f, DbgW, DbgH, WhiteBrush, FLinearColor(1.0f, 1.0f, 1.0f, 0.9f));
 		DrawContext.LayerId++;
 
-		FLinearColor DbgTextColor(0.0, 0.0, 0.0, 0.9);
+		FLinearColor DbgTextColor(0.0f, 0.0f, 0.0f, 0.9f);
 
 		// Time interval since last OnPaint call.
 		const uint64 CurrentTime = FPlatformTime::Cycles64();
@@ -1092,7 +1398,7 @@ int32 SPacketContentView::OnPaint(const FPaintArgs& Args, const FGeometry& Allot
 			FString::Printf(TEXT("Game Instance %d, Connection %d (%s), Packet %d"),
 				GameInstanceIndex,
 				ConnectionIndex,
-				(ConnectionMode == Trace::ENetProfilerConnectionMode::Outgoing) ? TEXT("Outgoing") : TEXT("Incoming"),
+				(ConnectionMode == TraceServices::ENetProfilerConnectionMode::Outgoing) ? TEXT("Outgoing") : TEXT("Incoming"),
 				PacketIndex),
 			SummaryFont, DbgTextColor
 		);
@@ -1213,7 +1519,7 @@ FReply SPacketContentView::OnMouseMove(const FGeometry& MyGeometry, const FPoint
 				}
 
 				FAxisViewportDouble& ViewportX = Viewport.GetHorizontalAxisViewport();
-				const float PosX = ViewportPosXOnButtonDown + (MousePositionOnButtonDown.X - MousePosition.X);
+				const float PosX = ViewportPosXOnButtonDown + static_cast<float>(MousePositionOnButtonDown.X - MousePosition.X);
 				ViewportX.ScrollAtPos(PosX);
 				UpdateHorizontalScrollBar();
 				bIsStateDirty = true;
@@ -1270,7 +1576,7 @@ FReply SPacketContentView::OnMouseWheel(const FGeometry& MyGeometry, const FPoin
 	{
 		// Zoom in/out horizontally.
 		const float Delta = MouseEvent.GetWheelDelta();
-		ZoomHorizontally(Delta, MousePosition.X);
+		ZoomHorizontally(Delta, static_cast<float>(MousePosition.X));
 	}
 
 	return FReply::Handled();
@@ -1324,9 +1630,22 @@ FReply SPacketContentView::OnKeyDown(const FGeometry& MyGeometry, const FKeyEven
 		{
 			FindFirstEvent();
 		}
+		else if (InKeyEvent.GetModifierKeys().IsControlDown() ||
+				 InKeyEvent.GetModifierKeys().IsCommandDown())
+		{
+			TSharedPtr<SNetworkingProfilerWindow> ProfilerWindow = ProfilerWindowWeakPtr.Pin();
+			if (ProfilerWindow.IsValid())
+			{
+				const TSharedPtr<SPacketView> PacketView = ProfilerWindow->GetPacketView();
+				if (PacketView.IsValid())
+				{
+					PacketView->SelectPreviousPacket();
+				}
+			}
+		}
 		else
 		{
-			FindPreviousEvent();
+			FindPreviousEvent(EEventNavigationType::SameLevel);
 		}
 		return FReply::Handled();
 	}
@@ -1336,10 +1655,45 @@ FReply SPacketContentView::OnKeyDown(const FGeometry& MyGeometry, const FKeyEven
 		{
 			FindLastEvent();
 		}
+		else if (InKeyEvent.GetModifierKeys().IsControlDown() ||
+				 InKeyEvent.GetModifierKeys().IsCommandDown())
+		{
+			TSharedPtr<SNetworkingProfilerWindow> ProfilerWindow = ProfilerWindowWeakPtr.Pin();
+			if (ProfilerWindow.IsValid())
+			{
+				const TSharedPtr<SPacketView> PacketView = ProfilerWindow->GetPacketView();
+				if (PacketView.IsValid())
+				{
+					PacketView->SelectNextPacket();
+				}
+			}
+		}
 		else
 		{
-			FindNextEvent();
+			FindNextEvent(EEventNavigationType::SameLevel);
 		}
+		return FReply::Handled();
+	}
+	else if (InKeyEvent.GetKey() == EKeys::Up)
+	{
+		FindPreviousLevel();
+		return FReply::Handled();
+	}
+	else if (InKeyEvent.GetKey() == EKeys::Down)
+	{
+		FindNextLevel();
+		return FReply::Handled();
+	}
+	else if (InKeyEvent.GetKey() == EKeys::Equals ||
+			 InKeyEvent.GetKey() == EKeys::Add)
+	{
+		ZoomHorizontally(1.0f, static_cast<float>(MousePosition.X));
+		return FReply::Handled();
+	}
+	else if (InKeyEvent.GetKey() == EKeys::Hyphen ||
+			 InKeyEvent.GetKey() == EKeys::Subtract)
+	{
+		ZoomHorizontally(-1.0f, static_cast<float>(MousePosition.X));
 		return FReply::Handled();
 	}
 
@@ -1420,6 +1774,25 @@ void SPacketContentView::BringEventIntoView(const FNetworkPacketEventRef& EventR
 		const float X1 = ViewportX.GetPosForValue(static_cast<double>(EventRef.Event.BitOffset));
 		const float X2 = ViewportX.GetPosForValue(static_cast<double>(EventRef.Event.BitOffset + SelectedEvent.Event.BitSize));
 		BringIntoView(X1, X2);
+	}
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void SPacketContentView::AdjustForSplitContent()
+{
+	if (FilteredDrawState->Events.Num() > 0)
+	{
+		FAxisViewportDouble& ViewportX = Viewport.GetHorizontalAxisViewport();
+		const FNetworkPacketEvent& LastEvent = FilteredDrawState->Events.Last();
+		const uint32 LastBit = LastEvent.BitOffset + LastEvent.BitSize;
+		if (LastBit > PacketBitSize)
+		{
+			PacketBitSize = LastBit;
+			ViewportX.SetMinMaxValueInterval(0.0, static_cast<double>(PacketBitSize));
+			ViewportX.CenterOnValueInterval(0.0, static_cast<double>(PacketBitSize));
+			UpdateHorizontalScrollBar();
+		}
 	}
 }
 

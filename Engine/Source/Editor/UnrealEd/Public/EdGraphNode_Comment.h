@@ -2,15 +2,28 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphNodeUtils.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Text.h"
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
+#include "Templates/SharedPointer.h"
+#include "Textures/SlateIcon.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/UObjectGlobals.h"
-#include "EdGraph/EdGraphNode.h"
-#include "Textures/SlateIcon.h"
-#include "EdGraph/EdGraphNodeUtils.h"
+
 #include "EdGraphNode_Comment.generated.h"
 
 class INameValidatorInterface;
+class UEdGraphPin;
+class UObject;
+struct FPropertyChangedEvent;
 struct Rect;
 
 typedef TArray<class UObject*> FCommentNodeSet;
@@ -18,7 +31,7 @@ typedef TArray<class UObject*> FCommentNodeSet;
 UENUM()
 namespace ECommentBoxMode
 {
-	enum Type
+	enum Type : int
 	{
 		/** This comment box will move any fully contained nodes when it moves. */
 		GroupMovement UMETA(DisplayName="Group Movement"),
@@ -66,6 +79,7 @@ public:
 	//~ Begin UObject Interface
 	UNREALED_API static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	virtual bool IsSelectedInEditor() const override;
 	//~ End UObject Interface
 
 	//~ Begin UEdGraphNode Interface
@@ -96,11 +110,21 @@ public:
 	/** Return the set of nodes underneath the comment */
 	UNREALED_API const FCommentNodeSet& GetNodesUnderComment() const;
 
+	/** Return the font size of the comment */
+	virtual int32 GetFontSize() const { return FontSize; }
+
+	/** Override the default selection state of this graph node */
+	enum class ESelectionState : uint8 { Inherited, Selected, Deselected };
+	UNREALED_API void SetSelectionState(const ESelectionState InSelectionState);
+
 private:
 	/** Nodes currently within the region of the comment */
-	FCommentNodeSet	NodesUnderComment;
+	TArray<TObjectPtr<class UObject>>	NodesUnderComment;
 
 	/** Constructing FText strings can be costly, so we cache the node's tooltip */
 	FNodeTextCache CachedTooltip;
+
+	/** Override the default selection state of this graph node */
+	ESelectionState SelectionState = ESelectionState::Inherited;
 };
 

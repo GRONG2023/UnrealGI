@@ -2,10 +2,18 @@
 
 #pragma once
 
-#include "AnimTimelineTrack.h"
+#include "AnimTimeline/AnimTimelineTrack.h"
 
 class SAnimCompositePanel;
 class SVerticalBox;
+
+class FAnimTimelineTrack_CompositeRoot : public FAnimTimelineTrack
+{
+	ANIMTIMELINE_DECLARE_TRACK(FAnimTimelineTrack_CompositeRoot, FAnimTimelineTrack);
+
+public:
+	FAnimTimelineTrack_CompositeRoot(const TSharedPtr<FAnimModel>& InModel);
+};
 
 /** A timeline track that re-uses the legacy panel widget to display anim composite sections */
 class FAnimTimelineTrack_CompositePanel : public FAnimTimelineTrack

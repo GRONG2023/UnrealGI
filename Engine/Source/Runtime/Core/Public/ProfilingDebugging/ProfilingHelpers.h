@@ -8,8 +8,8 @@
 
 #pragma once
 
-#include "CoreTypes.h"
 #include "Containers/UnrealString.h"
+#include "CoreTypes.h"
 #include "Delegates/Delegate.h"
 
 enum EStreamingStatus
@@ -21,6 +21,9 @@ enum EStreamingStatus
 	LEVEL_MakingVisible,
 	LEVEL_Visible,
 	LEVEL_Preloading,
+	LEVEL_FailedToLoad,
+	LEVEL_MakingInvisible,
+	LEVEL_StreamingStatusCount
 };
 
 

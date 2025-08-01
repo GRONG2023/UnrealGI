@@ -2,11 +2,12 @@
 
 #pragma once
 
+#include "Math/UnrealMathSSE.h"
 #include "VehicleSystemTemplate.h"
 #include "VehicleUtility.h"
 
 #if VEHICLE_DEBUGGING_ENABLED
-PRAGMA_DISABLE_OPTIMIZATION
+UE_DISABLE_OPTIMIZATION
 #endif
 
 
@@ -90,6 +91,11 @@ namespace Chaos
 			}
 		}
 
+		void SetMaxTorque(float InTorque)
+		{
+			MaxTorque = InTorque;
+		}
+
 		float GetEngineTorque()
 		{
 			if (EngineStarted)
@@ -125,6 +131,17 @@ namespace Chaos
 			return 0.f;
 		}
 
+		/** get the Engine angular velocity */
+		float GetEngineOmega() const
+		{
+			return Omega;
+		}
+
+		/** Set the Engine angular velocity */
+		void SetEngineOmega( const float EngineOmega)
+		{
+			Omega = EngineOmega;
+		}
 
 		/** 
 		 * Simulate - NOP at the moment
@@ -132,7 +149,7 @@ namespace Chaos
 		void Simulate(float DeltaTime);
 
 	protected:
-
+		float MaxTorque;		// [N.m] The peak torque Y value in the normalized torque graph
 		float ThrottlePosition; // [0..1 Normalized position]
 		float TargetSpeed;		// target RPM
 		float CurrentRPM;		// current RPM
@@ -151,5 +168,5 @@ namespace Chaos
 } // namespace Chaos
 
 #if VEHICLE_DEBUGGING_ENABLED
-PRAGMA_ENABLE_OPTIMIZATION
+UE_ENABLE_OPTIMIZATION
 #endif

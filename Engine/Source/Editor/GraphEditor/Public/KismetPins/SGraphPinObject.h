@@ -2,15 +2,23 @@
 
 #pragma once
 
+#include "AssetRegistry/AssetData.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Framework/SlateDelegates.h"
 #include "Input/Reply.h"
-#include "Styling/SlateColor.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/Input/SMenuAnchor.h"
+#include "Internationalization/Text.h"
 #include "SGraphPin.h"
+#include "Styling/SlateColor.h"
+#include "Templates/SharedPointer.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SMenuAnchor.h"
+#include "Widgets/SWidget.h"
 
 class SButton;
+class SWidget;
+class UEdGraphPin;
 
 class GRAPHEDITOR_API SGraphPinObject : public SGraphPin
 {
@@ -47,6 +55,8 @@ protected:
 	virtual FText GetDefaultComboText() const;
 	/** Allow self pin widget */
 	virtual bool AllowSelfPinWidget() const { return true; }
+	/** True if this specific pin should be treated as a self pin */
+	virtual bool ShouldDisplayAsSelfPin() const;
 	/** Generate asset picker window */
 	virtual TSharedRef<SWidget> GenerateAssetPicker();
 	/** Called to validate selection from picker window */

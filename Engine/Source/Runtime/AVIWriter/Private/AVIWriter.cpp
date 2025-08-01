@@ -4,7 +4,7 @@
 	AVIWriter.cpp: AVI creation implementation.
 =============================================================================*/
 #include "AVIWriter.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "HAL/FileManager.h"
 #include "Misc/ScopeLock.h"
 #include "Async/Async.h"
@@ -20,7 +20,6 @@ IMPLEMENT_MODULE(FAVIWriterModule, AVIWriter);
 
 #if PLATFORM_WINDOWS && WITH_UNREAL_DEVELOPER_TOOLS
 
-#include "Windows/WindowsHWrapper.h"
 #include "Windows/AllowWindowsPlatformTypes.h"
 
 typedef TCHAR* PTCHAR;
@@ -143,7 +142,7 @@ IBaseFilter* FindEncodingFilter(const FString& Name)
 	IEnumMoniker* EnumIterator = nullptr;
 	if (DeviceDenumerator->CreateClassEnumerator(CLSID_VideoCompressorCategory, &EnumIterator, 0) != S_OK)
 	{
-		return nullptr;
+		return nullptr; //-V773 - Temporary to avoid side effects
 	}
 
 	IMoniker* Moniker = nullptr;
@@ -377,7 +376,7 @@ public:
 			FString Directory = Options.OutputFilename;
 			FString Ext = FPaths::GetExtension(Directory, true);
 
-			int32 FPS = FMath::RoundToInt(double(Options.CaptureFramerateNumerator) / Options.CaptureFramerateDenominator);
+			int32 FPS = FMath::RoundToInt32(double(Options.CaptureFramerateNumerator) / Options.CaptureFramerateDenominator);
 
 			// Keep 3 seconds worth of frames in memory
 			CapturedFrames.Reset(new FCapturedFrames(Directory.LeftChop(Ext.Len()) + TEXT("_tmp"), FPS * 3));
@@ -759,7 +758,7 @@ void FCapturedFrames::StartUnArchiving()
 			// Only remove the archived frame indices once we have fully processed them (so that FCapturedFrames::Add knows when to archive frames)
 			{
 				FScopeLock Lock(&ArchiveFrameMutex);
-				ArchivedFrames.RemoveAt(0, MaxNumToProcess, false);
+				ArchivedFrames.RemoveAt(0, MaxNumToProcess, EAllowShrinking::No);
 			}
 
 			FrameReady->Trigger();

@@ -1,11 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "HAL/MallocBinnedCommon.h"
+#include "Algo/Sort.h"
+#include "Containers/ArrayView.h"
 #include "Misc/AssertionMacros.h"
 #include "Math/NumericLimits.h"
 #include "Templates/AlignmentTemplates.h"
 #include "Templates/UnrealTemplate.h"
-#include "Templates/Sorting.h"
 
 PRAGMA_DISABLE_UNSAFE_TYPECAST_WARNINGS
 
@@ -145,7 +146,7 @@ uint8 FSizeTableEntry::FillSizeTable(uint64 PlatformPageSize, FSizeTableEntry* S
 	{
 		SizeTable[Index++] = FSizeTableEntry(BinnedCommonSmallBlockSizes28k[Sub], PlatformPageSize, 7, BasePageSize, MinimumAlignment);
 	}
-	Sort(&SizeTable[0], Index);
+	Algo::Sort(MakeArrayView(SizeTable, Index));
 	check(SizeTable[Index - 1].BlockSize == BINNEDCOMMON_MAX_LISTED_SMALL_POOL_SIZE);
 	check(IsAligned(BINNEDCOMMON_MAX_LISTED_SMALL_POOL_SIZE, BasePageSize));
 	for (uint32 Size = BINNEDCOMMON_MAX_LISTED_SMALL_POOL_SIZE + BasePageSize; Size <= MaxSize; Size += SizeIncrement)
@@ -154,27 +155,6 @@ uint8 FSizeTableEntry::FillSizeTable(uint64 PlatformPageSize, FSizeTableEntry* S
 	}
 	check(Index < 256);
 	return (uint8)Index;
-}
-
-uint32 FBitTree::GetMemoryRequirements(uint32 DesiredCapacity)
-{
-	uint32 AllocationSize = 8;
-	uint32 RowsUint64s = 1;
-	uint32 Capacity = 64;
-	uint32 OffsetOfLastRow = 0;
-
-	while (Capacity < DesiredCapacity)
-	{
-		Capacity *= 64;
-		RowsUint64s *= 64;
-		OffsetOfLastRow = AllocationSize / 8;
-		AllocationSize += 8 * RowsUint64s;
-	}
-
-	uint32 LastRowTotal = (AllocationSize - OffsetOfLastRow * 8) * 8;
-	uint32 ExtraBits = LastRowTotal - DesiredCapacity;
-	AllocationSize -= (ExtraBits / 64) * 8;
-	return AllocationSize;
 }
 
 void FBitTree::FBitTreeInit(uint32 InDesiredCapacity, void * Memory, uint32 MemorySize, bool InitialValue)
@@ -473,4 +453,28 @@ uint32 FBitTree::CountOnes(uint32 UpTo) const
 
 #endif
 
-PRAGMA_ENABLE_UNSAFE_TYPECAST_WARNINGS
+#if UE_BINNEDCOMMON_ALLOW_RUNTIME_TWEAKING
+
+int32 GMallocBinnedBundleSize = DEFAULT_GMallocBinnedBundleSize;
+static FAutoConsoleVariableRef GMallocBinned3BundleSizeCVar(
+	TEXT("MallocBinned.BundleSize"),
+	GMallocBinnedBundleSize,
+	TEXT("Max size in bytes of per-block bundles used in the recycling process")
+);
+
+int32 GMallocBinnedBundleCount = DEFAULT_GMallocBinnedBundleCount;
+static FAutoConsoleVariableRef GMallocBinned3BundleCountCVar(
+	TEXT("MallocBinned.BundleCount"),
+	GMallocBinnedBundleCount,
+	TEXT("Max count in blocks per-block bundles used in the recycling process")
+);
+
+#endif
+
+uint32 FMallocBinnedCommonBase::BinnedTlsSlot = FPlatformTLS::InvalidTlsSlot;
+#if UE_BINNEDCOMMON_ALLOCATOR_STATS
+std::atomic<int64> FMallocBinnedCommonBase::TLSMemory(0);
+std::atomic<int64> FMallocBinnedCommonBase::ConsolidatedMemory(0);
+#endif
+
+PRAGMA_RESTORE_UNSAFE_TYPECAST_WARNINGS

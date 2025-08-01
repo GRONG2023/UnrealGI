@@ -15,6 +15,16 @@
 namespace Insights
 {
 	class FTimerButterflyAggregator;
+
+	enum class ETimingEventsColoringMode : uint32
+	{
+		ByTimerName,
+		ByTimerId,
+		BySourceFile,
+		ByDuration,
+
+		Count
+	};
 }
 
 class STimingProfilerWindow;
@@ -26,6 +36,9 @@ class STimingProfilerWindow;
 class FTimingProfilerManager : public TSharedFromThis<FTimingProfilerManager>, public IInsightsComponent
 {
 	friend class FTimingProfilerActionManager;
+
+public:
+	inline static constexpr uint32 UnlimitedEventDepth = 1000;
 
 public:
 	/** Creates the Timing Profiler manager, only one instance can exist. */
@@ -53,10 +66,12 @@ public:
 	virtual void Shutdown() override;
 	virtual void RegisterMajorTabs(IUnrealInsightsModule& InsightsModule) override;
 	virtual void UnregisterMajorTabs() override;
+	virtual void OnWindowClosedEvent() override;
+	virtual bool Exec(const TCHAR* Cmd, FOutputDevice& Ar) override;
 
 	//////////////////////////////////////////////////
 
-	/** @returns UI command list for the Timing Profiler manager. */
+	/** @return UI command list for the Timing Profiler manager. */
 	const TSharedRef<FUICommandList> GetCommandList() const;
 
 	/** @return an instance of the Timing Profiler commands. */
@@ -65,23 +80,13 @@ public:
 	/** @return an instance of the Timing Profiler action manager. */
 	static FTimingProfilerActionManager& GetActionManager();
 
-	void AssignProfilerWindow(const TSharedRef<STimingProfilerWindow>& InProfilerWindow)
-	{
-		ProfilerWindow = InProfilerWindow;
-	}
-
-	void RemoveProfilerWindow()
-	{
-		ProfilerWindow.Reset();
-	}
-
 	/**
 	 * Converts profiler window weak pointer to a shared pointer and returns it.
 	 * Make sure the returned pointer is valid before trying to dereference it.
 	 */
-	TSharedPtr<class STimingProfilerWindow> GetProfilerWindow() const
+	TSharedPtr<STimingProfilerWindow> GetProfilerWindow() const
 	{
-		return ProfilerWindow.Pin();
+		return ProfilerWindowWeakPtr.Pin();
 	}
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -133,6 +138,7 @@ public:
 	FTimerNodePtr GetTimerNode(uint32 TimerId) const;
 	uint32 GetSelectedTimer() const { return SelectedTimerId; }
 	void SetSelectedTimer(uint32 TimerId);
+	void ToggleTimingViewMainGraphEventSeries(uint32 InTimerId);
 
 	void OnThreadFilterChanged();
 
@@ -142,6 +148,14 @@ public:
 
 	void UpdateAggregatedTimerStats();
 	void UpdateAggregatedCounterStats();
+
+	const FName& GetLogListingName() const { return LogListingName; }
+
+	Insights::ETimingEventsColoringMode GetColoringMode() const { return ColoringMode; }
+	void SetColoringMode(Insights::ETimingEventsColoringMode InColoringMode) { ColoringMode = InColoringMode; }
+
+	uint32 GetEventDepthLimit() const { return EventDepthLimit; }
+	void SetEventDepthLimit(uint32 InEventDepthLimit) { EventDepthLimit = InEventDepthLimit; }
 
 private:
 	/** Binds our UI commands to delegates. */
@@ -160,6 +174,16 @@ private:
 
 	void FinishTimerButterflyAggregation();
 
+	void AssignProfilerWindow(const TSharedRef<STimingProfilerWindow>& InProfilerWindow)
+	{
+		ProfilerWindowWeakPtr = InProfilerWindow;
+	}
+
+	void RemoveProfilerWindow()
+	{
+		ProfilerWindowWeakPtr.Reset();
+	}
+
 private:
 	bool bIsInitialized;
 	bool bIsAvailable;
@@ -169,7 +193,7 @@ private:
 	FTickerDelegate OnTick;
 
 	/** Handle to the registered OnTick. */
-	FDelegateHandle OnTickHandle;
+	FTSTicker::FDelegateHandle OnTickHandle;
 
 	/** List of UI commands for this manager. This will be filled by this and corresponding classes. */
 	TSharedRef<FUICommandList> CommandList;
@@ -177,8 +201,8 @@ private:
 	/** An instance of the Timing Profiler action manager. */
 	FTimingProfilerActionManager ActionManager;
 
-	/** A weak pointer to the Timing Profiler window. */
-	TWeakPtr<class STimingProfilerWindow> ProfilerWindow;
+	/** A weak pointer to the Timing Insights window. */
+	TWeakPtr<STimingProfilerWindow> ProfilerWindowWeakPtr;
 
 	/** If the Frames Track is visible or hidden. */
 	bool bIsFramesTrackVisible;
@@ -210,6 +234,12 @@ private:
 	uint32 SelectedTimerId;
 
 	TSharedRef<Insights::FTimerButterflyAggregator> TimerButterflyAggregator;
+
+	/** The name of the Timing Insights log listing. */
+	FName LogListingName;
+
+	Insights::ETimingEventsColoringMode ColoringMode = Insights::ETimingEventsColoringMode::ByTimerName;
+	uint32 EventDepthLimit = UnlimitedEventDepth;
 
 	/** A shared pointer to the global instance of the Timing Profiler manager. */
 	static TSharedPtr<FTimingProfilerManager> Instance;

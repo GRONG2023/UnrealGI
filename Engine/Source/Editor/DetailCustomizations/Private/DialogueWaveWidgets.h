@@ -2,18 +2,29 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
+#include "Internationalization/Text.h"
 #include "Misc/Attribute.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "AssetThumbnail.h"
-#include "Widgets/SCompoundWidget.h"
-#include "PropertyHandle.h"
 #include "PropertyCustomizationHelpers.h"
+#include "Templates/SharedPointer.h"
+#include "Types/SlateEnums.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
 
+class FAssetThumbnail;
+class FAssetThumbnailPool;
+class FDragDropEvent;
+class IPropertyHandle;
 class SComboButton;
 class SErrorHint;
+class SWidget;
+class UClass;
 class UDialogueVoice;
+class UObject;
+struct FAssetData;
+struct FGeometry;
 
 class SDialogueVoicePropertyEditor : public SCompoundWidget
 {
@@ -43,14 +54,14 @@ private:
 	 *
 	 * @param InObject	The asset being dragged over
 	 */
-	bool OnIsAssetAcceptableForDrop( const UObject* InObject ) const;
+	bool OnIsAssetAcceptableForDrop( TArrayView<FAssetData> InAssets ) const;
 
 	/**
 	 * Called when an asset dropped onto the list item
 	 *
 	 * @param InObject	The asset being dropped
 	 */
-	void OnAssetDropped( UObject* Object );
+	void OnAssetDropped( const FDragDropEvent&, TArrayView<FAssetData> InAssets );
 
 	bool CanUseSelectedAsset();
 	void OnUseSelectedDialogueVoice();

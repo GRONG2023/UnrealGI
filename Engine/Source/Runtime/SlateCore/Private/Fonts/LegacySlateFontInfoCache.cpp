@@ -116,6 +116,7 @@ TSharedRef<const FCompositeFont> FLegacySlateFontInfoCache::GetDefaultFont()
 			APPEND_FONT(MutableDefaultFont->DefaultTypeface, "BoldCondensedItalic", "Roboto-BoldCondensedItalic.ttf", EFontHinting::Default);
 			APPEND_FONT(MutableDefaultFont->DefaultTypeface, "Black", "Roboto-Black.ttf", EFontHinting::Default);
 			APPEND_FONT(MutableDefaultFont->DefaultTypeface, "BlackItalic", "Roboto-BlackItalic.ttf", EFontHinting::Default);
+			APPEND_FONT(MutableDefaultFont->DefaultTypeface, "Medium", "Roboto-Medium.ttf", EFontHinting::Default);
 			APPEND_FONT(MutableDefaultFont->DefaultTypeface, "Light", "Roboto-Light.ttf", EFontHinting::Default);
 			APPEND_FONT(MutableDefaultFont->DefaultTypeface, "VeryLight", "Roboto-Light.ttf", EFontHinting::Auto);
 			APPEND_FONT(MutableDefaultFont->DefaultTypeface, "Mono", "DroidSansMono.ttf", EFontHinting::Default);
@@ -194,6 +195,14 @@ TSharedRef<const FCompositeFont> FLegacySlateFontInfoCache::GetDefaultFont()
 			APPEND_EDITOR_FONT(SubFont.Typeface, "BlackItalic", "NanumGothicExtraBold.ttf", EFontHinting::Default);
 			APPEND_EDITOR_FONT(SubFont.Typeface, "Light", "NanumGothic.ttf", EFontHinting::Default);
 			APPEND_EDITOR_FONT(SubFont.Typeface, "VeryLight", "NanumGothic.ttf", EFontHinting::Default);
+		}
+
+		// Math (editor-only)
+		if (GIsEditor)
+		{
+			FCompositeSubFont& SubFont = MutableDefaultFont->SubTypefaces.AddDefaulted_GetRef();
+			APPEND_RANGE(SubFont, MathematicalAlphanumericSymbols);
+			APPEND_EDITOR_FONT(SubFont.Typeface, "Regular", "NotoSansMath-Regular.ttf", EFontHinting::Default);
 		}
 
 		// Emoji (editor-only)

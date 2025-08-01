@@ -2,11 +2,12 @@
 
 #include "Layout/WidgetPath.h"
 #include "SlateGlobals.h"
+#include "Types/SlateAttributeMetaData.h"
 
 DECLARE_CYCLE_STAT(TEXT("Weak-To-Strong WidgetPath"), STAT_WeakToStrong_WidgetPath, STATGROUP_Slate);
 
 
-
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 FWidgetPath::FWidgetPath()
 : Widgets( EVisibility::Visible )
 , TopLevelWindow()
@@ -21,21 +22,18 @@ FWidgetPath::FWidgetPath( TSharedPtr<SWindow> InTopLevelWindow, const FArrangedC
 {
 }
 
-FWidgetPath::FWidgetPath( TArray<FWidgetAndPointer> InWidgetsAndPointers )
+FWidgetPath::FWidgetPath( TArrayView<FWidgetAndPointer> InWidgetsAndPointers )
 : Widgets( FArrangedChildren::Hittest2_FromArray(InWidgetsAndPointers) )
 , TopLevelWindow( InWidgetsAndPointers.Num() > 0 ? StaticCastSharedRef<SWindow>(InWidgetsAndPointers[0].Widget) : TSharedPtr<SWindow>(nullptr) )
-, VirtualPointerPositions( [&InWidgetsAndPointers]()
-	{ 
-		TArray< TSharedPtr<FVirtualPointerPosition> > Pointers;
-		Pointers.Reserve(InWidgetsAndPointers.Num());
-		for ( const FWidgetAndPointer& WidgetAndPointer : InWidgetsAndPointers )
-		{
-			Pointers.Add( WidgetAndPointer.PointerPosition );
-		};
-		return Pointers;
-	}())
 {
+	check(InWidgetsAndPointers.Num() == 0 || InWidgetsAndPointers[0].Widget->Advanced_IsWindow());
+	VirtualPointerPositions.Reserve(InWidgetsAndPointers.Num());
+	for (const FWidgetAndPointer& WidgetAndPointer : InWidgetsAndPointers)
+	{
+		VirtualPointerPositions.Add(WidgetAndPointer.GetPointerPosition());
+	}
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 FWidgetPath FWidgetPath::GetPathDownTo( TSharedRef<const SWidget> MarkerWidget ) const
 {
@@ -59,17 +57,24 @@ FWidgetPath FWidgetPath::GetPathDownTo( TSharedRef<const SWidget> MarkerWidget )
 	}	
 }
 
-const TSharedPtr<FVirtualPointerPosition>& FWidgetPath::GetCursorAt( int32 Index ) const
+const TSharedPtr<const FVirtualPointerPosition>& FWidgetPath::GetCursorAt( int32 Index ) const
 {
-	return VirtualPointerPositions[Index];
+	static TSharedPtr<const FVirtualPointerPosition> CursorAt;
+	return CursorAt;
 }
 
 
-bool FWidgetPath::ContainsWidget( TSharedRef<const SWidget> WidgetToFind ) const
+bool FWidgetPath::ContainsWidget(TSharedRef<const SWidget> WidgetToFind) const
+{
+	return ContainsWidget(&WidgetToFind.Get());
+}
+
+
+bool FWidgetPath::ContainsWidget( const SWidget* WidgetToFind ) const
 {
 	for(int32 WidgetIndex = 0; WidgetIndex < Widgets.Num(); ++WidgetIndex)
 	{
-		if ( Widgets[WidgetIndex].Widget == WidgetToFind )
+		if ( &Widgets[WidgetIndex].Widget.Get() == WidgetToFind )
 		{
 			return true;
 		}
@@ -92,6 +97,7 @@ TOptional<FArrangedWidget> FWidgetPath::FindArrangedWidget( TSharedRef<const SWi
 	return TOptional<FArrangedWidget>();
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 TOptional<FWidgetAndPointer> FWidgetPath::FindArrangedWidgetAndCursor( TSharedRef<const SWidget> WidgetToFind ) const
 {
 	const int32 Index = Widgets.IndexOfByPredicate( [&WidgetToFind]( const FArrangedWidget& SomeWidget )
@@ -103,6 +109,7 @@ TOptional<FWidgetAndPointer> FWidgetPath::FindArrangedWidgetAndCursor( TSharedRe
 		? FWidgetAndPointer( Widgets[Index], VirtualPointerPositions[Index] )
 		: FWidgetAndPointer();
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 TSharedRef<SWindow> FWidgetPath::GetWindow() const
 {
@@ -191,7 +198,8 @@ bool FWidgetPath::MoveFocus(int32 PathLevel, EUINavigation NavigationType, bool 
 	
 		// Arrange the children so we can iterate through them regardless of widget type.
 		FArrangedChildren ArrangedChildren(EVisibility::Visible);
-		Widgets[PathLevel].Widget->ArrangeChildren( Widgets[PathLevel].Geometry, ArrangedChildren );
+		const bool bUpdateVisibilityAttributes = true;
+		Widgets[PathLevel].Widget->ArrangeChildren( Widgets[PathLevel].Geometry, ArrangedChildren,  bUpdateVisibilityAttributes);
 
 		// Don't continue if there are no children in the widget.
 		if (ArrangedChildren.Num() > 0)
@@ -216,15 +224,24 @@ bool FWidgetPath::MoveFocus(int32 PathLevel, EUINavigation NavigationType, bool 
 					const bool bFoundNextFocusable = (PathToFocusableChild.Num() > 0) || ArrangedChildren[FocusedChildIndex].Widget->SupportsKeyboardFocus();
 					if (bFoundNextFocusable)
 					{
-						// We found the next focusable widget, so make this path point at the new widget by:
-						// First, truncating the FocusPath up to the current level (i.e. PathLevel).
-						Widgets.Remove(PathLevel + 1, Widgets.Num() - PathLevel - 1);
-						// Second, add the immediate child that is focus or whose descendant is focused.
-						Widgets.AddWidget(ArrangedChildren[FocusedChildIndex]);
-						// Add path to focused descendants if any.
-						Widgets.Append(PathToFocusableChild);
-						// We successfully moved focus!
-						return true;
+						// Check if any descendant is disabled.
+						int32 DisabledDescendantIndex = PathToFocusableChild.IndexOfByPredicate([](const FArrangedWidget& ArrangedWidget) 
+							{ 
+								return !ArrangedWidget.Widget->IsEnabled(); 
+							});
+
+						if (DisabledDescendantIndex == INDEX_NONE)
+						{
+							// We found the next focusable widget, so make this path point at the new widget by:
+							// First, truncating the FocusPath up to the current level (i.e. PathLevel).
+							Widgets.Remove(PathLevel + 1, Widgets.Num() - PathLevel - 1);
+							// Second, add the immediate child that is focus or whose descendant is focused.
+							Widgets.AddWidget(ArrangedChildren[FocusedChildIndex]);
+							// Add path to focused descendants if any.
+							Widgets.Append(PathToFocusableChild);
+							// We successfully moved focus!
+							return true;
+						}
 					}
 				}
 			}
@@ -296,35 +313,39 @@ FWeakWidgetPath::EPathResolutionResult::Result FWeakWidgetPath::ToWidgetPath( FW
 			bPathUninterrupted = true;
 
 			FGeometry ParentGeometry = TopLevelWindowPtr->GetWindowGeometryInScreen();
-			PathWithGeometries.Add(FWidgetAndPointer(
-				FArrangedWidget(TopLevelWindowPtr.ToSharedRef(), ParentGeometry),
-				// @todo slate: this should be the cursor's virtual position in window space.
-				TSharedPtr<FVirtualPointerPosition>()));
+			PathWithGeometries.Add(FWidgetAndPointer(FArrangedWidget(TopLevelWindowPtr.ToSharedRef(), ParentGeometry)));
 
-			TSharedPtr<FVirtualPointerPosition> VirtualPointerPos;
+			TOptional<FVirtualPointerPosition> VirtualPointerPos;
 			// For every widget in the vertical slice...
 			for (int32 WidgetIndex = 0; bPathUninterrupted && WidgetIndex < WidgetPtrs.Num() - 1; ++WidgetIndex)
 			{
 				TSharedPtr<SWidget> CurWidget = WidgetPtrs[WidgetIndex];
 
 				bool bFoundChild = false;
-				if (CurWidget.IsValid() && EVisibility::DoesVisibilityPassFilter(CurWidget->GetVisibility(), VisibilityFilter))
+				if (CurWidget.IsValid())
 				{
-					TSharedRef<SWidget> CurWidgetRef = CurWidget.ToSharedRef();
-					const TSharedPtr<SWidget>& ChildWidgetPtr = WidgetPtrs[WidgetIndex + 1];
-
-					if (ChildWidgetPtr.IsValid() && ChildWidgetPtr->GetParentWidget() == CurWidgetRef)
+					FSlateAttributeMetaData::UpdateOnlyVisibilityAttributes(*CurWidget.Get(), FSlateAttributeMetaData::EInvalidationPermission::DelayInvalidation);
+					if (EVisibility::DoesVisibilityPassFilter(CurWidget->GetVisibility(), VisibilityFilter))
 					{
-						if (PointerEvent && !VirtualPointerPos.IsValid())
-						{
-							VirtualPointerPos = CurWidget->TranslateMouseCoordinateForCustomHitTestChild(ChildWidgetPtr.ToSharedRef(), ParentGeometry, PointerEvent->GetScreenSpacePosition(), PointerEvent->GetLastScreenSpacePosition());
-						}
+						TSharedRef<SWidget> CurWidgetRef = CurWidget.ToSharedRef();
+						const TSharedPtr<SWidget>& ChildWidgetPtr = WidgetPtrs[WidgetIndex + 1];
 
-						bFoundChild = true;
-						// Remember the widget, the associated geometry, and the pointer position in a transformed space.
-						PathWithGeometries.Add(FWidgetAndPointer(FArrangedWidget(ChildWidgetPtr.ToSharedRef(), ChildWidgetPtr->GetCachedGeometry()), VirtualPointerPos));
-						// The next child in the vertical slice will be arranged with respect to its parent's geometry.
-						ParentGeometry = CurWidgetRef->GetCachedGeometry();
+						if (ChildWidgetPtr.IsValid() && ChildWidgetPtr->GetParentWidget() == CurWidgetRef)
+						{
+							if (PointerEvent && !VirtualPointerPos.IsSet())
+							{
+								FVector2f ScreenPos = PointerEvent->GetScreenSpacePosition();
+								FVector2f LastScreenPos = PointerEvent->GetLastScreenSpacePosition();
+
+								VirtualPointerPos = CurWidget->TranslateMouseCoordinateForCustomHitTestChild(*ChildWidgetPtr.Get(), ParentGeometry, FVector2d(ScreenPos), FVector2d(LastScreenPos));
+							}
+
+							bFoundChild = true;
+							// Remember the widget, the associated geometry, and the pointer position in a transformed space.
+							PathWithGeometries.Add(FWidgetAndPointer(FArrangedWidget(ChildWidgetPtr.ToSharedRef(), ChildWidgetPtr->GetCachedGeometry()), VirtualPointerPos));
+							// The next child in the vertical slice will be arranged with respect to its parent's geometry.
+							ParentGeometry = CurWidgetRef->GetCachedGeometry();
+						}
 					}
 				}
 
@@ -352,14 +373,11 @@ FWeakWidgetPath::EPathResolutionResult::Result FWeakWidgetPath::ToWidgetPath( FW
 			bPathUninterrupted = true;
 
 			FGeometry ParentGeometry = TopLevelWindowPtr->GetWindowGeometryInScreen();
-			PathWithGeometries.Add(FWidgetAndPointer(
-				FArrangedWidget(TopLevelWindowPtr.ToSharedRef(), ParentGeometry),
-				// @todo slate: this should be the cursor's virtual position in window space.
-				TSharedPtr<FVirtualPointerPosition>()));
+			PathWithGeometries.Add(FWidgetAndPointer(FArrangedWidget(TopLevelWindowPtr.ToSharedRef(), ParentGeometry)));
 
 			FArrangedChildren ArrangedChildren(VisibilityFilter, true);
 
-			TSharedPtr<FVirtualPointerPosition> VirtualPointerPos;
+			TOptional<FVirtualPointerPosition> VirtualPointerPos;
 			// For every widget in the vertical slice...
 			for (int32 WidgetIndex = 0; bPathUninterrupted && WidgetIndex < WidgetPtrs.Num() - 1; ++WidgetIndex)
 			{
@@ -370,7 +388,8 @@ FWeakWidgetPath::EPathResolutionResult::Result FWeakWidgetPath::ToWidgetPath( FW
 				{
 					// Arrange the widget's children to find their geometries.
 					ArrangedChildren.Empty();
-					CurWidget->ArrangeChildren(ParentGeometry, ArrangedChildren);
+					const bool bUpdateVisibilityAttributes = true;
+					CurWidget->ArrangeChildren(ParentGeometry, ArrangedChildren, bUpdateVisibilityAttributes);
 
 					// Find the next widget in the path among the arranged children.
 					for (int32 SearchIndex = 0; !bFoundChild && SearchIndex < ArrangedChildren.Num(); ++SearchIndex)
@@ -379,9 +398,12 @@ FWeakWidgetPath::EPathResolutionResult::Result FWeakWidgetPath::ToWidgetPath( FW
 
 						if (ArrangedWidget.Widget == WidgetPtrs[WidgetIndex + 1])
 						{
-							if (PointerEvent && !VirtualPointerPos.IsValid())
+							if (PointerEvent && !VirtualPointerPos.IsSet())
 							{
-								VirtualPointerPos = CurWidget->TranslateMouseCoordinateForCustomHitTestChild(ArrangedWidget.Widget, ParentGeometry, PointerEvent->GetScreenSpacePosition(), PointerEvent->GetLastScreenSpacePosition());
+								FVector2f ScreenPos = PointerEvent->GetScreenSpacePosition();
+								FVector2f LastScreenPos = PointerEvent->GetLastScreenSpacePosition();
+
+								VirtualPointerPos = CurWidget->TranslateMouseCoordinateForCustomHitTestChild(ArrangedWidget.Widget.Get(), ParentGeometry, FVector2d(ScreenPos), FVector2d(LastScreenPos));
 							}
 
 							bFoundChild = true;
@@ -408,9 +430,14 @@ FWeakWidgetPath::EPathResolutionResult::Result FWeakWidgetPath::ToWidgetPath( FW
 
 bool FWeakWidgetPath::ContainsWidget( const TSharedRef< const SWidget >& SomeWidget ) const
 {
-	for ( int32 WidgetIndex=0; WidgetIndex<Widgets.Num(); ++WidgetIndex )
+	return ContainsWidget(&SomeWidget.Get());
+}
+
+bool FWeakWidgetPath::ContainsWidget(const SWidget* SomeWidget) const
+{
+	for (int32 WidgetIndex = 0; WidgetIndex < Widgets.Num(); ++WidgetIndex)
 	{
-		if (Widgets[WidgetIndex].Pin() == SomeWidget)
+		if (Widgets[WidgetIndex].Pin().Get() == SomeWidget)
 		{
 			return true;
 		}

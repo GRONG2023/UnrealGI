@@ -2,11 +2,10 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Styling/SlateTypes.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
 
+class FExtender;
 class SNetworkingProfilerWindow;
 
 class SNetworkingProfilerToolbar : public SCompoundWidget
@@ -19,15 +18,13 @@ public:
 	virtual ~SNetworkingProfilerToolbar();
 
 	SLATE_BEGIN_ARGS(SNetworkingProfilerToolbar) {}
+	SLATE_ARGUMENT(TSharedPtr<FExtender>, ToolbarExtender);
 	SLATE_END_ARGS()
 
 	/**
 	 * Construct this widget
 	 *
-	 * @param	InArgs	The declaration data for this widget
+	 * @param InArgs The declaration data for this widget
 	 */
-	void Construct(const FArguments& InArgs, TSharedPtr<SNetworkingProfilerWindow> InProfilerWindow);
-
-private:
-	TSharedPtr<SNetworkingProfilerWindow> ProfilerWindow;
+	void Construct(const FArguments& InArgs, TSharedRef<SNetworkingProfilerWindow> InProfilerWindow);
 };

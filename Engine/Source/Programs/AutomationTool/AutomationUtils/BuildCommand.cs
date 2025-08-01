@@ -3,7 +3,10 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using Tools.DotNETCommon;
+using System.Threading.Tasks;
+using EpicGames.Core;
+using UnrealBuildBase;
+using Microsoft.Extensions.Logging;
 
 namespace AutomationTool
 {
@@ -38,9 +41,29 @@ namespace AutomationTool
 		/// </summary>
 		/// <param name="Param">Param to read its value.</param>
 		/// <returns>Returns the value or Default if the parameter was not found.</returns>
-		public string ParseParamValue(string Param, string Default = null)
+		public string ParseParamValue(string Param, string Default = null, string ObsoleteParam = null)
 		{
-			return ParseParamValue(Params, Param, Default);
+			string ParamValue = ParseParamValue(Params, Param, null);
+
+			if (ObsoleteParam != null)
+			{
+				string ObsoleteParamValue = ParseParamValue(Params, ObsoleteParam, null);
+
+				if (ObsoleteParamValue != null)
+				{
+					if (ParamValue == null)
+					{
+						Logger.LogWarning("Param name \"{ObsoleteParam}\" is deprecated, use \"{Param}\" instead.", ObsoleteParam, Param);
+					}
+					else
+					{
+						Logger.LogWarning("Deprecated param name \"{ObsoleteParam}\" was ignored because \"{Param}\" was set.", ObsoleteParam, Param);
+					}
+				}
+
+			}
+
+			return ParamValue ?? Default;
 		}
 
 		/// <summary>
@@ -138,7 +161,7 @@ namespace AutomationTool
 		/// Parses an argument as an enum.
 		/// </summary>
 		/// <param name="Param">Name of the parameter to read.</param>
-		/// <returns>Returns the value that was parsed.
+		/// <returns>Returns the value that was parsed.</returns>
 		public Nullable<T> ParseOptionalEnumParam<T>(string Param) where T : struct
 		{
 			string ValueString = ParseParamValue(Param);
@@ -161,7 +184,7 @@ namespace AutomationTool
 		/// Parses an argument as an enum. Throws an exception if the parameter is not specified.
 		/// </summary>
 		/// <param name="Param">Name of the parameter to read.</param>
-		/// <returns>Returns the value that was parsed.
+		/// <returns>Returns the value that was parsed.</returns>
 		public T ParseRequiredEnumParamEnum<T>(string Param) where T : struct
 		{
 			Nullable<T> Value = ParseOptionalEnumParam<T>(Param);
@@ -226,6 +249,65 @@ namespace AutomationTool
 			}
 		}
 
+		public FileReference ParseProjectParam()
+		{
+			FileReference ProjectFullPath = null;
+
+			var bForeign = ParseParam("foreign");
+			var bForeignCode = ParseParam("foreigncode");
+			if (bForeign)
+			{
+				var DestSample = ParseParamValue("DestSample", "CopiedHoverShip");
+				var Dest = ParseParamValue("ForeignDest", CombinePaths(@"C:\testue\foreign\", DestSample + "_ _Dir"));
+				ProjectFullPath = new FileReference(CombinePaths(Dest, DestSample + ".uproject"));
+			}
+			else if (bForeignCode)
+			{
+				var DestSample = ParseParamValue("DestSample", "PlatformerGame");
+				var Dest = ParseParamValue("ForeignDest", CombinePaths(@"C:\testue\foreign\", DestSample + "_ _Dir"));
+				ProjectFullPath = new FileReference(CombinePaths(Dest, DestSample + ".uproject"));
+			}
+			else
+			{
+				var OriginalProjectName = ParseParamValue("project", "");
+
+				if (string.IsNullOrEmpty(OriginalProjectName))
+				{
+					return null;
+				}
+
+				var ProjectName = OriginalProjectName;
+				ProjectName = ProjectName.Trim(new char[] { '\"' });
+				if (ProjectName.IndexOfAny(new char[] { '\\', '/' }) < 0)
+				{
+					ProjectName = CombinePaths(CmdEnv.LocalRoot, ProjectName, ProjectName + ".uproject");
+				}
+				else if (!FileExists_NoExceptions(ProjectName))
+				{
+					ProjectName = CombinePaths(CmdEnv.LocalRoot, ProjectName);
+				}
+				if (FileExists_NoExceptions(ProjectName))
+				{
+					ProjectFullPath = new FileReference(ProjectName);
+				}
+				else
+				{
+					var Branch = new BranchInfo();
+					var GameProj = Branch.FindGame(OriginalProjectName);
+					if (GameProj != null)
+					{
+						ProjectFullPath = GameProj.FilePath;
+					}
+					if (ProjectFullPath == null || !FileExists_NoExceptions(ProjectFullPath.FullName))
+					{
+						throw new AutomationException("Could not find a project file {0}.", ProjectName);
+					}
+				}
+			}
+
+			return ProjectFullPath;
+		}
+
 		/// <summary>
 		/// Checks that all of the required params are present, throws an exception if not
 		/// </summary>
@@ -262,6 +344,14 @@ namespace AutomationTool
 		{
 			ExecuteBuild();
 			return ExitCode.Success;
+		}
+
+		/// <summary>
+		/// Async command entry point.
+		/// </summary>
+		public virtual Task<ExitCode> ExecuteAsync()
+		{
+			return Task.FromResult(Execute());
 		}
 
 		/// <summary>

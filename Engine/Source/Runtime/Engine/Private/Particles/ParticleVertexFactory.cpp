@@ -5,10 +5,12 @@
 =============================================================================*/
 
 #include "ParticleVertexFactory.h"
+#include "MeshDrawShaderBindings.h"
 #include "ParticleHelper.h"
+#include "Misc/DelayedAutoRegister.h"
 #include "ParticleResources.h"
-#include "ShaderParameterUtils.h"
 #include "MeshMaterialShader.h"
+#include "PipelineStateCache.h"
 
 IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FParticleSpriteUniformParameters, "SpriteVF");
 
@@ -20,19 +22,18 @@ public:
 	/**
 	 * Initialize the RHI for this rendering resource
 	 */
-	virtual void InitRHI() override
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override
 	{
-		// create a static vertex buffer
-		FRHIResourceCreateInfo CreateInfo;
-		void* BufferData = nullptr;
-		VertexBufferRHI = RHICreateAndLockVertexBuffer(sizeof(FVector2D) * 4, BUF_Static | BUF_ShaderResource, CreateInfo, BufferData);
-		FMemory::Memzero(BufferData, sizeof(FVector2D) * 4);
-		RHIUnlockVertexBuffer(VertexBufferRHI);
+		const uint32 Size = sizeof(FVector2f) * 4;
 
-		if (GSupportsResourceView)
-		{
-			VertexBufferSRV = RHICreateShaderResourceView(VertexBufferRHI, sizeof(FVector2D), PF_G32R32F);
-		}
+		// create a static vertex buffer
+		FRHIResourceCreateInfo CreateInfo(TEXT("FNullSubUVCutoutVertexBuffer"));
+		VertexBufferRHI = RHICmdList.CreateBuffer(Size, BUF_Static | BUF_VertexBuffer | BUF_ShaderResource, 0, ERHIAccess::VertexOrIndexBuffer | ERHIAccess::SRVMask, CreateInfo);
+		void* BufferData = RHICmdList.LockBuffer(VertexBufferRHI, 0, Size, RLM_WriteOnly);
+		FMemory::Memzero(BufferData, Size);
+		RHICmdList.UnlockBuffer(VertexBufferRHI);
+
+		VertexBufferSRV = RHICmdList.CreateShaderResourceView(VertexBufferRHI, sizeof(FVector2f), PF_G32R32F);
 	}
 	
 	virtual void ReleaseRHI() override
@@ -50,15 +51,15 @@ TGlobalResource<FNullSubUVCutoutVertexBuffer> GFNullSubUVCutoutVertexBuffer;
  */
 class FParticleSpriteVertexFactoryShaderParameters : public FVertexFactoryShaderParameters
 {
-	DECLARE_INLINE_TYPE_LAYOUT(FParticleSpriteVertexFactoryShaderParameters, NonVirtual);
+	DECLARE_TYPE_LAYOUT(FParticleSpriteVertexFactoryShaderParameters, NonVirtual);
 public:
-	
-	
 };
+
+IMPLEMENT_TYPE_LAYOUT(FParticleSpriteVertexFactoryShaderParameters);
 
 class FParticleSpriteVertexFactoryShaderParametersVS : public FParticleSpriteVertexFactoryShaderParameters
 {
-	DECLARE_INLINE_TYPE_LAYOUT(FParticleSpriteVertexFactoryShaderParametersVS, NonVirtual);
+	DECLARE_TYPE_LAYOUT(FParticleSpriteVertexFactoryShaderParametersVS, NonVirtual);
 public:
 	void Bind(const FShaderParameterMap& ParameterMap)
 	{
@@ -86,15 +87,15 @@ public:
 	}
 
 private:
-	
-		LAYOUT_FIELD(FShaderParameter, NumCutoutVerticesPerFrame)
-		LAYOUT_FIELD(FShaderResourceParameter, CutoutGeometry)
-	
+	LAYOUT_FIELD(FShaderParameter, NumCutoutVerticesPerFrame);
+	LAYOUT_FIELD(FShaderResourceParameter, CutoutGeometry);
 };
+
+IMPLEMENT_TYPE_LAYOUT(FParticleSpriteVertexFactoryShaderParametersVS);
 
 class FParticleSpriteVertexFactoryShaderParametersPS : public FParticleSpriteVertexFactoryShaderParameters
 {
-	DECLARE_INLINE_TYPE_LAYOUT(FParticleSpriteVertexFactoryShaderParametersPS, NonVirtual);
+	DECLARE_TYPE_LAYOUT(FParticleSpriteVertexFactoryShaderParametersPS, NonVirtual);
 public:
 	void GetElementShaderBindings(
 		const FSceneInterface* Scene,
@@ -110,10 +111,9 @@ public:
 		FParticleSpriteVertexFactory* SpriteVF = (FParticleSpriteVertexFactory*)VertexFactory;
 		ShaderBindings.Add(Shader->GetUniformBufferParameter<FParticleSpriteUniformParameters>(), SpriteVF->GetSpriteUniformBuffer() );
 	}
-
-	
-	
 };
+
+IMPLEMENT_TYPE_LAYOUT(FParticleSpriteVertexFactoryShaderParametersPS);
 
 /**
  * The particle system vertex declaration resource type.
@@ -178,7 +178,7 @@ public:
 		Offset += sizeof(float) * 4;
 	}
 
-	virtual void InitDynamicRHI()
+	virtual void InitRHI(FRHICommandListBase& RHICmdList)
 	{
 		FVertexDeclarationElementList Elements;
 		int32	Offset = 0;
@@ -186,12 +186,10 @@ public:
 		FillDeclElements(Elements, Offset);
 
 		// Create the vertex declaration for rendering the factory normally.
-		// This is done in InitDynamicRHI instead of InitRHI to allow FParticleSpriteVertexFactory::InitRHI
-		// to rely on it being initialized, since InitDynamicRHI is called before InitRHI.
 		VertexDeclarationRHI = PipelineStateCache::GetOrCreateVertexDeclaration(Elements);
 	}
 
-	virtual void ReleaseDynamicRHI()
+	virtual void ReleaseRHI()
 	{
 		VertexDeclarationRHI.SafeRelease();
 	}
@@ -236,9 +234,22 @@ void FParticleSpriteVertexFactory::ModifyCompilationEnvironment(const FVertexFac
 }
 
 /**
+ * Get vertex elements used when during PSO precaching materials using this vertex factory type
+ */
+void FParticleSpriteVertexFactory::GetPSOPrecacheVertexFetchElements(EVertexInputStreamType VertexInputStreamType, FVertexDeclarationElementList& Elements)
+{
+	GParticleSpriteVertexDeclarationInstanced.VertexDeclarationRHI->GetInitializer(Elements);
+}
+
+FRHIVertexDeclaration* FParticleSpriteVertexFactory::GetPSOPrecacheVertexDeclaration(bool bUsesDynamicParameter)
+{
+	return GetParticleSpriteVertexDeclaration(4, bUsesDynamicParameter).VertexDeclarationRHI;
+}
+
+/**
  *	Initialize the Render Hardware Interface for this vertex factory
  */
-void FParticleSpriteVertexFactory::InitRHI()
+void FParticleSpriteVertexFactory::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	InitStreams();
 	SetDeclaration(GetParticleSpriteVertexDeclaration(NumVertsInInstanceBuffer, bUsesDynamicParameter).VertexDeclarationRHI);
@@ -249,7 +260,7 @@ void FParticleSpriteVertexFactory::InitStreams()
 	check(Streams.Num() == 0);
 	FVertexStream* TexCoordStream = new(Streams) FVertexStream;
 	TexCoordStream->VertexBuffer = &GParticleTexCoordVertexBuffer;
-	TexCoordStream->Stride = sizeof(FVector2D);
+	TexCoordStream->Stride = sizeof(FVector2f);
 	TexCoordStream->Offset = 0;
 	FVertexStream* InstanceStream = new(Streams) FVertexStream;
 	FVertexStream* DynamicParameterStream = new(Streams) FVertexStream;
@@ -293,4 +304,8 @@ void FParticleSpriteVertexFactory::SetDynamicParameterBuffer(const FVertexBuffer
 
 IMPLEMENT_VERTEX_FACTORY_PARAMETER_TYPE(FParticleSpriteVertexFactory, SF_Vertex, FParticleSpriteVertexFactoryShaderParametersVS);
 IMPLEMENT_VERTEX_FACTORY_PARAMETER_TYPE(FParticleSpriteVertexFactory, SF_Pixel, FParticleSpriteVertexFactoryShaderParametersPS);
-IMPLEMENT_VERTEX_FACTORY_TYPE(FParticleSpriteVertexFactory,"/Engine/Private/ParticleSpriteVertexFactory.ush",true,false,true,false,false);
+IMPLEMENT_VERTEX_FACTORY_TYPE(FParticleSpriteVertexFactory,"/Engine/Private/ParticleSpriteVertexFactory.ush",
+	  EVertexFactoryFlags::UsedWithMaterials
+	| EVertexFactoryFlags::SupportsDynamicLighting
+	| EVertexFactoryFlags::SupportsPSOPrecaching
+);

@@ -1,13 +1,30 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "IntervalStructCustomization.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Editor.h"
-#include "Widgets/Layout/SBox.h"
-#include "DetailWidgetRow.h"
-#include "DetailLayoutBuilder.h"
-#include "Widgets/Input/SNumericEntryBox.h"
 
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "DetailLayoutBuilder.h"
+#include "DetailWidgetRow.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Margin.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "PropertyEditorModule.h"
+#include "SlotBase.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SNumericEntryBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
+
+#include <limits>
 
 #define LOCTEXT_NAMESPACE "IntervalStructCustomization"
 
@@ -67,15 +84,30 @@ void FIntervalStructCustomization<NumericType>::CustomizeHeader(TSharedRef<IProp
 	auto Property = StructPropertyHandle->GetProperty();
 	check(Property != nullptr);
 
-	if (Property->HasMetaData(TEXT("UIMin")))
-	{
-		MinAllowedValue = TOptional<NumericType>(IntervalMetadata::FGetHelper<NumericType>::GetMetaData(Property, TEXT("UIMin")));
-	}
+	const FString& MetaUIMinString = Property->GetMetaData(TEXT("UIMin"));
+	const FString& MetaUIMaxString = Property->GetMetaData(TEXT("UIMax"));
+	const FString& MetaClampMinString = Property->GetMetaData(TEXT("ClampMin"));
+	const FString& MetaClampMaxString = Property->GetMetaData(TEXT("ClampMax"));
+	const FString& UIMinString = MetaUIMinString.Len() ? MetaUIMinString : MetaClampMinString;
+	const FString& UIMaxString = MetaUIMaxString.Len() ? MetaUIMaxString : MetaClampMaxString;
 
-	if (Property->HasMetaData(TEXT("UIMax")))
-	{
-		MaxAllowedValue = TOptional<NumericType>(IntervalMetadata::FGetHelper<NumericType>::GetMetaData(Property, TEXT("UIMax")));
-	}
+	NumericType ClampMin = std::numeric_limits<NumericType>::lowest();
+	NumericType ClampMax = std::numeric_limits<NumericType>::max();
+	TTypeFromString<NumericType>::FromString(ClampMin, *MetaClampMinString);
+	TTypeFromString<NumericType>::FromString(ClampMax, *MetaClampMaxString);
+
+	NumericType UIMin = std::numeric_limits<NumericType>::lowest();
+	NumericType UIMax = std::numeric_limits<NumericType>::max();
+	TTypeFromString<NumericType>::FromString(UIMin, *UIMinString);
+	TTypeFromString<NumericType>::FromString(UIMax, *UIMaxString);
+
+	const NumericType ActualUIMin = FMath::Max(UIMin, ClampMin);
+	const NumericType ActualUIMax = FMath::Min(UIMax, ClampMax);
+
+	MinAllowedValue = MetaClampMinString.Len() ? ClampMin : TOptional<NumericType>();
+	MaxAllowedValue = MetaClampMaxString.Len() ? ClampMax : TOptional<NumericType>();
+	MinAllowedSliderValue = (UIMinString.Len()) ? ActualUIMin : TOptional<NumericType>();
+	MaxAllowedSliderValue = (UIMaxString.Len()) ? ActualUIMax : TOptional<NumericType>();
 
 	bAllowInvertedInterval = Property->HasMetaData(TEXT("AllowInvertedInterval"));
 	bClampToMinMaxLimits = Property->HasMetaData(TEXT("ClampToMinMaxLimits"));
@@ -86,67 +118,66 @@ void FIntervalStructCustomization<NumericType>::CustomizeHeader(TSharedRef<IProp
 		StructPropertyHandle->CreatePropertyNameWidget()
 	]
 	.ValueContent()
-	.MinDesiredWidth(200.0f)
-	//.MaxDesiredWidth(200.0f)
+	.MinDesiredWidth(251.0f)
+	.MaxDesiredWidth(251.0f)
 	[
-		SNew(SBox)
-		.Padding(FMargin(0.0f, 3.0f, 0.0f, 2.0f))
+		SNew(SHorizontalBox)
+		+SHorizontalBox::Slot()
+		.VAlign(VAlign_Center)
+		.Padding(FMargin(0.0f, 0.0f, 3.0f, 0.0f))
+		.AutoWidth()
 		[
-			SNew(SHorizontalBox)
-
-			+SHorizontalBox::Slot()
-			.Padding(FMargin(0.0f, 0.0f, 5.0f, 0.0f))
-			.VAlign(VAlign_Center)
-			[
-				SNew(SNumericEntryBox<NumericType>)
-				.Value(this, &FIntervalStructCustomization<NumericType>::OnGetValue, EIntervalField::Min)
-				.MinValue(MinAllowedValue)
-				.MinSliderValue(MinAllowedValue)
-				.MaxValue(this, &FIntervalStructCustomization<NumericType>::OnGetMaxValue)
-				.MaxSliderValue(this, &FIntervalStructCustomization<NumericType>::OnGetMaxValue)
-				.OnValueCommitted(this, &FIntervalStructCustomization<NumericType>::OnValueCommitted, EIntervalField::Min)
-				.OnValueChanged(this, &FIntervalStructCustomization<NumericType>::OnValueChanged, EIntervalField::Min)
-				.OnBeginSliderMovement(this, &FIntervalStructCustomization<NumericType>::OnBeginSliderMovement)
-				.OnEndSliderMovement(this, &FIntervalStructCustomization<NumericType>::OnEndSliderMovement)
-				.UndeterminedString(LOCTEXT("MultipleValues", "Multiple Values"))
-				.Font(IDetailLayoutBuilder::GetDetailFont())
-				.AllowSpin(true)
-				.IsEnabled(this, &FIntervalStructCustomization::IsPropertyEnabled, EIntervalField::Min)
-				.LabelVAlign(VAlign_Center)
-				.Label()
-				[
-					SNew(STextBlock)
-					.Font(IDetailLayoutBuilder::GetDetailFont())
-					.Text(LOCTEXT("MinLabel", "Min"))
-				]
-			]
-
-			+SHorizontalBox::Slot()
-			.Padding(FMargin(0.0f, 0.0f, 5.0f, 0.0f))
-			.VAlign(VAlign_Center)
-			[
-				SNew(SNumericEntryBox<NumericType>)
-				.Value(this, &FIntervalStructCustomization<NumericType>::OnGetValue, EIntervalField::Max)
-				.MinValue(this, &FIntervalStructCustomization<NumericType>::OnGetMinValue)
-				.MinSliderValue(this, &FIntervalStructCustomization<NumericType>::OnGetMinValue)
-				.MaxValue(MaxAllowedValue)
-				.MaxSliderValue(MaxAllowedValue)
-				.OnValueCommitted(this, &FIntervalStructCustomization<NumericType>::OnValueCommitted, EIntervalField::Max)
-				.OnValueChanged(this, &FIntervalStructCustomization<NumericType>::OnValueChanged, EIntervalField::Max)
-				.OnBeginSliderMovement(this, &FIntervalStructCustomization<NumericType>::OnBeginSliderMovement)
-				.OnEndSliderMovement(this, &FIntervalStructCustomization<NumericType>::OnEndSliderMovement)
-				.UndeterminedString(LOCTEXT("MultipleValues", "Multiple Values"))
-				.Font(IDetailLayoutBuilder::GetDetailFont())
-				.AllowSpin(true)
-				.IsEnabled(this, &FIntervalStructCustomization::IsPropertyEnabled, EIntervalField::Max)
-				.LabelVAlign(VAlign_Center)
-				.Label()
-				[
-					SNew(STextBlock)
-					.Font(IDetailLayoutBuilder::GetDetailFont())
-					.Text(LOCTEXT("MaxLabel", "Max"))
-				]
-			]
+			SNew(STextBlock)
+			.Font(IDetailLayoutBuilder::GetDetailFont())
+			.Text(LOCTEXT("MinLabel", "Min"))
+		]
+		+SHorizontalBox::Slot()
+		.Padding(FMargin(0.0f, 0.0f, 3.0f, 0.0f))
+		.VAlign(VAlign_Center)
+		[
+			SNew(SNumericEntryBox<NumericType>)
+			.Value(this, &FIntervalStructCustomization<NumericType>::OnGetValue, EIntervalField::Min)
+			.MinValue(MinAllowedValue)
+			.MinSliderValue(MinAllowedSliderValue)
+			.MaxValue(this, &FIntervalStructCustomization<NumericType>::OnGetMaxValue)
+			.MaxSliderValue(this, &FIntervalStructCustomization<NumericType>::OnGetMaxSliderValue)
+			.OnValueCommitted(this, &FIntervalStructCustomization<NumericType>::OnValueCommitted, EIntervalField::Min)
+			.OnValueChanged(this, &FIntervalStructCustomization<NumericType>::OnValueChanged, EIntervalField::Min)
+			.OnBeginSliderMovement(this, &FIntervalStructCustomization<NumericType>::OnBeginSliderMovement)
+			.OnEndSliderMovement(this, &FIntervalStructCustomization<NumericType>::OnEndSliderMovement)
+			.UndeterminedString(LOCTEXT("MultipleValues", "Multiple Values"))
+			.Font(IDetailLayoutBuilder::GetDetailFont())
+			.AllowSpin(true)
+			.IsEnabled(this, &FIntervalStructCustomization::IsPropertyEnabled, EIntervalField::Min)
+		]
+		+SHorizontalBox::Slot()
+		.VAlign(VAlign_Center)
+		.Padding(2.0f, 0.0f)
+		.AutoWidth()
+		[
+			SNew(STextBlock)
+			.Font(IDetailLayoutBuilder::GetDetailFont())
+			.Text(LOCTEXT("MaxLabel", "Max"))
+		]
+		+SHorizontalBox::Slot()
+		.Padding(FMargin(0.0f, 0.0f, 3.0f, 0.0f))
+		.VAlign(VAlign_Center)
+		[
+			SNew(SNumericEntryBox<NumericType>)
+			.Value(this, &FIntervalStructCustomization<NumericType>::OnGetValue, EIntervalField::Max)
+			.MinValue(this, &FIntervalStructCustomization<NumericType>::OnGetMinValue)
+			.MinSliderValue(this, &FIntervalStructCustomization<NumericType>::OnGetMinSliderValue)
+			.MaxValue(MaxAllowedValue)
+			.MaxSliderValue(MaxAllowedSliderValue)
+			.OnValueCommitted(this, &FIntervalStructCustomization<NumericType>::OnValueCommitted, EIntervalField::Max)
+			.OnValueChanged(this, &FIntervalStructCustomization<NumericType>::OnValueChanged, EIntervalField::Max)
+			.OnBeginSliderMovement(this, &FIntervalStructCustomization<NumericType>::OnBeginSliderMovement)
+			.OnEndSliderMovement(this, &FIntervalStructCustomization<NumericType>::OnEndSliderMovement)
+			.UndeterminedString(LOCTEXT("MultipleValues", "Multiple Values"))
+			.Font(IDetailLayoutBuilder::GetDetailFont())
+			.AllowSpin(true)
+			.IsEnabled(this, &FIntervalStructCustomization::IsPropertyEnabled, EIntervalField::Max)
+			
 		]
 	];
 }
@@ -191,6 +222,17 @@ TOptional<NumericType> FIntervalStructCustomization<NumericType>::OnGetMinValue(
 }
 
 template <typename NumericType>
+TOptional<NumericType> FIntervalStructCustomization<NumericType>::OnGetMinSliderValue() const
+{
+	if (bClampToMinMaxLimits)
+	{
+		return GetValue<NumericType>(MinValueHandle.Get());
+	}
+
+	return MinAllowedSliderValue;
+}
+
+template <typename NumericType>
 TOptional<NumericType> FIntervalStructCustomization<NumericType>::OnGetMaxValue() const
 {
 	if (bClampToMinMaxLimits)
@@ -199,6 +241,17 @@ TOptional<NumericType> FIntervalStructCustomization<NumericType>::OnGetMaxValue(
 	}
 
 	return MaxAllowedValue;
+}
+
+template <typename NumericType>
+TOptional<NumericType> FIntervalStructCustomization<NumericType>::OnGetMaxSliderValue() const
+{
+	if (bClampToMinMaxLimits)
+	{
+		return GetValue<NumericType>(MaxValueHandle.Get());
+	}
+
+	return MaxAllowedSliderValue;
 }
 
 template <typename NumericType>
@@ -312,6 +365,7 @@ bool FIntervalStructCustomization<NumericType>::IsPropertyEnabled(EIntervalField
  *****************************************************************************/
 
 template class FIntervalStructCustomization<float>;
+template class FIntervalStructCustomization<double>;
 template class FIntervalStructCustomization<int32>;
 
 

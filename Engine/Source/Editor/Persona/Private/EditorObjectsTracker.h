@@ -2,8 +2,15 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "HAL/Platform.h"
 #include "UObject/GCObject.h"
+
+class FReferenceCollector;
+class UClass;
+class UObject;
 
 //////////////////////////////////////////////////////////////////////////
 // FEditorObjectTracker
@@ -16,7 +23,11 @@ public:
 	{}
 
 	// FGCObject interface
-	void AddReferencedObjects( FReferenceCollector& Collector ) override;
+	virtual void AddReferencedObjects( FReferenceCollector& Collector ) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FEditorObjectTracker");
+	}
 	// End of FGCObject interface
 
 	/** Returns an existing editor object for the specified class or creates one
@@ -33,8 +44,8 @@ private:
 	bool bAllowOnePerClass;
 
 	/** Tracks editor objects created for details panel */
-	TMap< UClass*, UObject* >	EditorObjMap;
+	TMap< TObjectPtr<UClass>, TObjectPtr<UObject> >	EditorObjMap;
 
 	/** Tracks editor objects created for detail panel */
-	TArray<UObject*> EditorObjectArray;
+	TArray<TObjectPtr<UObject>> EditorObjectArray;
 };

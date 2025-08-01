@@ -11,20 +11,26 @@
 #include "HitProxies.h"
 #include "RenderUtils.h"
 #include "LocalVertexFactory.h"
+#include "RenderMath.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "SceneManagement.h"
+#endif
 
 class FMaterialRenderProxy;
+class FMeshBuilderOneFrameResources;
 class FMeshElementCollector;
 class FPrimitiveDrawInterface;
+class FPrimitiveUniformShaderParameters;
+struct FMeshBatch;
 
 /** The vertex type used for dynamic meshes. */
 struct FDynamicMeshVertex
 {
 	FDynamicMeshVertex() {}
-	FDynamicMeshVertex( const FVector& InPosition ):
+	FDynamicMeshVertex( const FVector3f& InPosition ):
 		Position(InPosition),
-		TangentX(FVector(1,0,0)),
-		TangentZ(FVector(0,0,1)),
+		TangentX(FVector3f(1,0,0)),
+		TangentZ(FVector3f(0,0,1)),
 		Color(FColor(255,255,255)) 
 	{
 		// basis determinant default to +1.0
@@ -32,14 +38,14 @@ struct FDynamicMeshVertex
 
 		for (int i = 0; i < MAX_STATIC_TEXCOORDS; i++)
 		{
-			TextureCoordinate[i] = FVector2D::ZeroVector;
+			TextureCoordinate[i] = FVector2f::ZeroVector;
 		}
 	}
 
-	FDynamicMeshVertex(const FVector& InPosition, const FVector2D& InTexCoord, const FColor& InColor) :
+	FDynamicMeshVertex(const FVector3f& InPosition, const FVector2f& InTexCoord, const FColor& InColor) :
 		Position(InPosition),
-		TangentX(FVector(1, 0, 0)),
-		TangentZ(FVector(0, 0, 1)),
+		TangentX(FVector3f(1, 0, 0)),
+		TangentZ(FVector3f(0, 0, 1)),
 		Color(InColor)
 	{
 		// basis determinant default to +1.0
@@ -51,7 +57,7 @@ struct FDynamicMeshVertex
 		}
 	}
 
-	FDynamicMeshVertex(const FVector& InPosition,const FVector& InTangentX,const FVector& InTangentZ,const FVector2D& InTexCoord, const FColor& InColor):
+	FDynamicMeshVertex(const FVector3f& InPosition,const FVector3f& InTangentX,const FVector3f& InTangentZ,const FVector2f& InTexCoord, const FColor& InColor):
 		Position(InPosition),
 		TangentX(InTangentX),
 		TangentZ(InTangentZ),
@@ -66,22 +72,22 @@ struct FDynamicMeshVertex
 		}
 	}
 
-	FDynamicMeshVertex(const FVector& InPosition, const FVector& LayerTexcoords, const FVector2D& WeightmapTexcoords)
+	FDynamicMeshVertex(const FVector3f& InPosition, const FVector3f& LayerTexcoords, const FVector2f& WeightmapTexcoords)
 		: Position(InPosition)
-		, TangentX(FVector(1, 0, 0))
-		, TangentZ(FVector(0, 0, 1))
+		, TangentX(FVector3f(1, 0, 0))
+		, TangentZ(FVector3f(0, 0, 1))
 		, Color(FColor::White)
 	{
 		// TangentZ.w contains the sign of the tangent basis determinant. Assume +1
 		TangentZ.Vector.W = 127;
 
-		TextureCoordinate[0] = FVector2D(LayerTexcoords.X, LayerTexcoords.Y);
-		TextureCoordinate[1] = FVector2D(LayerTexcoords.X, LayerTexcoords.Y); // Z not currently set, so use Y
-		TextureCoordinate[2] = FVector2D(LayerTexcoords.Y, LayerTexcoords.X); // Z not currently set, so use X
+		TextureCoordinate[0] = FVector2f(LayerTexcoords.X, LayerTexcoords.Y);
+		TextureCoordinate[1] = FVector2f(LayerTexcoords.X, LayerTexcoords.Y); // Z not currently set, so use Y
+		TextureCoordinate[2] = FVector2f(LayerTexcoords.Y, LayerTexcoords.X); // Z not currently set, so use X
 		TextureCoordinate[3] = WeightmapTexcoords;
 	};
 
-	void SetTangents( const FVector& InTangentX, const FVector& InTangentY, const FVector& InTangentZ )
+	void SetTangents( const FVector3f& InTangentX, const FVector3f& InTangentY, const FVector3f& InTangentZ )
 	{
 		TangentX = InTangentX;
 		TangentZ = InTangentZ;
@@ -89,31 +95,16 @@ struct FDynamicMeshVertex
 		TangentZ.Vector.W = GetBasisDeterminantSignByte(InTangentX,InTangentY,InTangentZ);
 	}
 
-	FVector GetTangentY() const
+	FVector3f GetTangentY() const
 	{
-		return GenerateYAxis(TangentX, TangentZ);
+		return FVector3f(GenerateYAxis(TangentX, TangentZ));	//LWC_TODO: Precision loss
 	};
 
-	FVector Position;
-	FVector2D TextureCoordinate[MAX_STATIC_TEXCOORDS];
+	FVector3f Position;
+	FVector2f TextureCoordinate[MAX_STATIC_TEXCOORDS];
 	FPackedNormal TangentX;
 	FPackedNormal TangentZ;
 	FColor Color;
-};
-
-class FMeshBuilderOneFrameResources : public FOneFrameResource
-{
-public:
-	class FPooledDynamicMeshVertexBuffer* VertexBuffer = nullptr;
-	class FPooledDynamicMeshIndexBuffer* IndexBuffer = nullptr;
-	class FPooledDynamicMeshVertexFactory* VertexFactory = nullptr;
-	class FDynamicMeshPrimitiveUniformBuffer* PrimitiveUniformBuffer = nullptr;
-	virtual ENGINE_API ~FMeshBuilderOneFrameResources();
-
-	inline bool IsValidForRendering() 
-	{
-		return VertexBuffer && IndexBuffer && PrimitiveUniformBuffer && VertexFactory;
-	}
 };
 
 struct FDynamicMeshDrawOffset
@@ -139,17 +130,23 @@ struct FDynamicMeshBuilderSettings
  * This class provides the vertex/index allocator interface used by FDynamicMeshBuilder which is
  * already implemented internally with caching in mind but can be customized if needed.
  */
-class ENGINE_API FDynamicMeshBufferAllocator
+class FDynamicMeshBufferAllocator
 {
 public:
-	int32 GetIndexBufferSize(uint32 NumElements) const;
-	int32 GetVertexBufferSize(uint32 Stride, uint32 NumElements) const;
-	virtual ~FDynamicMeshBufferAllocator();
+	ENGINE_API int32 GetIndexBufferSize(uint32 NumElements) const;
+	ENGINE_API int32 GetVertexBufferSize(uint32 Stride, uint32 NumElements) const;
+	ENGINE_API virtual ~FDynamicMeshBufferAllocator();
 
-	virtual FIndexBufferRHIRef AllocIndexBuffer(uint32 NumElements);
-	virtual void ReleaseIndexBuffer(FIndexBufferRHIRef& IndexBufferRHI);
-	virtual FVertexBufferRHIRef AllocVertexBuffer(uint32 Stride, uint32 NumElements);
-	virtual void ReleaseVertexBuffer(FVertexBufferRHIRef& VertexBufferRHI);
+	ENGINE_API virtual FBufferRHIRef AllocIndexBuffer(FRHICommandListBase& RHICmdList, uint32 NumElements);
+	ENGINE_API virtual void ReleaseIndexBuffer(FBufferRHIRef& IndexBufferRHI);
+	ENGINE_API virtual FBufferRHIRef AllocVertexBuffer(FRHICommandListBase& RHICmdList, uint32 Stride, uint32 NumElements);
+	ENGINE_API virtual void ReleaseVertexBuffer(FBufferRHIRef& VertexBufferRHI);
+
+	UE_DEPRECATED(5.4, "AllocIndexBuffer requires a command list.")
+	ENGINE_API virtual FBufferRHIRef AllocIndexBuffer(uint32 NumElements) final;
+
+	UE_DEPRECATED(5.4, "AllocVertexBuffer requires a command list.")
+	ENGINE_API virtual FBufferRHIRef AllocVertexBuffer(uint32 Stride, uint32 NumElements) final;
 };
 
 /**
@@ -169,11 +166,11 @@ public:
 
 	/** Adds a vertex to the mesh. */
 	ENGINE_API int32 AddVertex(
-		const FVector& InPosition,
-		const FVector2D& InTextureCoordinate,
-		const FVector& InTangentX,
-		const FVector& InTangentY,
-		const FVector& InTangentZ,
+		const FVector3f& InPosition,
+		const FVector2f& InTextureCoordinate,
+		const FVector3f& InTangentX,
+		const FVector3f& InTangentY,
+		const FVector3f& InTangentZ,
 		const FColor& InColor
 		);
 
@@ -207,6 +204,7 @@ public:
 		FDynamicMeshDrawOffset const * const DrawOffset, int32 ViewIndex, FMeshElementCollector& Collector, const FHitProxyId HitProxyId = FHitProxyId());
 
 	ENGINE_API void GetMeshElement(const FMatrix& LocalToWorld, const FMaterialRenderProxy* MaterialRenderProxy, uint8 DepthPriorityGroup, bool bDisableBackfaceCulling, bool bReceivesDecals, int32 ViewIndex, FMeshBuilderOneFrameResources& OneFrameResource, FMeshBatch& Mesh);
+	ENGINE_API void GetMeshElement(const FPrimitiveUniformShaderParameters& PrimitiveParams, const FMaterialRenderProxy* MaterialRenderProxy, uint8 DepthPriorityGroup, bool bDisableBackfaceCulling, int32 ViewIndex, FMeshBuilderOneFrameResources& OneFrameResource, FMeshBatch& Mesh);
 
 	/**
 	 * Draws the mesh to the given primitive draw interface.
@@ -227,20 +225,18 @@ private:
 };
 
 /** Index Buffer */
-class ENGINE_API FDynamicMeshIndexBuffer32 : public FIndexBuffer
+class FDynamicMeshIndexBuffer32 : public FIndexBuffer
 {
 public:
 	TArray<uint32> Indices;
 
-	virtual void InitRHI() override;
-	void UpdateRHI();
+	ENGINE_API virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 };
 
-class ENGINE_API FDynamicMeshIndexBuffer16 : public FIndexBuffer
+class FDynamicMeshIndexBuffer16 : public FIndexBuffer
 {
 public:
 	TArray<uint16> Indices;
 
-	virtual void InitRHI() override;
-	void UpdateRHI();
+	ENGINE_API virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 };

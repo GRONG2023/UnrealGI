@@ -1,30 +1,68 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "WorldSettingsDetails.h"
-#include "Framework/Commands/UIAction.h"
-#include "Layout/WidgetPath.h"
-#include "Framework/Application/MenuStack.h"
-#include "Framework/Application/SlateApplication.h"
-#include "Widgets/Layout/SBorder.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Input/SCheckBox.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Misc/MessageDialog.h"
-#include "GameFramework/Actor.h"
-#include "ScopedTransaction.h"
-#include "Editor.h"
-#include "Engine/Texture2D.h"
-#include "Misc/MessageDialog.h"
 
+#include "AssetRegistry/AssetData.h"
+#include "AssetThumbnail.h"
+#include "DetailCategoryBuilder.h"
 #include "DetailLayoutBuilder.h"
 #include "DetailWidgetRow.h"
-#include "DetailCategoryBuilder.h"
-#include "GameModeInfoCustomizer.h"
-#include "Settings/EditorExperimentalSettings.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Engine/Engine.h"
+#include "Engine/Level.h"
+#include "Engine/Texture2D.h"
+#include "Engine/World.h"
+#include "Fonts/SlateFontInfo.h"
+#include "Framework/Application/MenuStack.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "GameFramework/Actor.h"
 #include "GameFramework/WorldSettings.h"
+#include "GameModeInfoCustomizer.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMisc.h"
+#include "IDetailChildrenBuilder.h"
+#include "Input/Events.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/ArrangedChildren.h"
+#include "Layout/ArrangedWidget.h"
+#include "Layout/Margin.h"
+#include "Layout/WidgetPath.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/MessageDialog.h"
+#include "Misc/PackageName.h"
 #include "ScopedTransaction.h"
+#include "Settings/EditorExperimentalSettings.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Subsystems/AssetEditorSubsystem.h"
+#include "Templates/Casts.h"
+#include "Textures/SlateIcon.h"
+#include "Types/SlateEnums.h"
+#include "Types/SlateStructs.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/Package.h"
+#include "UObject/TopLevelAssetPath.h"
+#include "UObject/UObjectGlobals.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SCheckBox.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SNullWidget.h"
+#include "Widgets/Text/STextBlock.h"
+
+class IPropertyHandle;
+class SWidget;
+struct FGeometry;
 
 #define LOCTEXT_NAMESPACE "WorldSettingsDetails"
 
@@ -43,8 +81,8 @@ void FWorldSettingsDetails::CustomizeDetails( IDetailLayoutBuilder& DetailBuilde
 
 	AddLightmapCustomization(DetailBuilder);
 
-	AddLevelExternalActorsCustomization(DetailBuilder);
-
+	AddWorldCustomization(DetailBuilder);
+	
 	DetailBuilder.HideProperty(AActor::GetHiddenPropertyName(), AActor::StaticClass());
 }
 
@@ -77,40 +115,140 @@ void FWorldSettingsDetails::AddLightmapCustomization( IDetailLayoutBuilder& Deta
 	Category.AddCustomBuilder(LightMapGroupBuilder, bForAdvanced);
 }
 
-void FWorldSettingsDetails::AddLevelExternalActorsCustomization(IDetailLayoutBuilder& DetailBuilder)
+void FWorldSettingsDetails::AddWorldCustomization(IDetailLayoutBuilder& DetailBuilder)
 {
-	if (GetDefault<UEditorExperimentalSettings>()->bEnableOneFilePerActorSupport)
+	TArray<TWeakObjectPtr<UObject>> CustomizedObjects;
+	DetailBuilder.GetObjectsBeingCustomized(CustomizedObjects);
+	ULevel* CustomizedLevel = nullptr;
+	if (CustomizedObjects.Num() > 0)
 	{
-		TArray<TWeakObjectPtr<UObject>> CustomizedObjects;
-		DetailBuilder.GetObjectsBeingCustomized(CustomizedObjects);
-		ULevel* CustomizedLevel = nullptr;
-		if (CustomizedObjects.Num() > 0)
+		if (AWorldSettings* WorldSettings = Cast<AWorldSettings>(CustomizedObjects[0]))
 		{
-			if (AActor* WorldSettings = Cast<AWorldSettings>(CustomizedObjects[0]))
-			{
-				CustomizedLevel = WorldSettings->GetLevel();
-			}
+			CustomizedLevel = WorldSettings->GetLevel();
+			SelectedWorldSettings = WorldSettings;
 		}
+	}
 
-		if (CustomizedLevel)
-		{
-			IDetailCategoryBuilder& WorldCategory = DetailBuilder.EditCategory("World");
-			WorldCategory.AddCustomRow(LOCTEXT("LevelUseExternalActorsRow", "LevelUseExternalActors"), true)
+	// Hide some of the WorldPartition properties found in AActor
+	TArray<TSharedRef<IPropertyHandle>> PropertiesToHide;
+	PropertiesToHide.Add(DetailBuilder.GetProperty(AActor::GetRuntimeGridPropertyName(), AActor::StaticClass()));
+	PropertiesToHide.Add(DetailBuilder.GetProperty(AActor::GetIsSpatiallyLoadedPropertyName(), AActor::StaticClass()));
+	for (TSharedRef<IPropertyHandle> Property : PropertiesToHide)
+	{
+		DetailBuilder.HideProperty(Property);
+	}
+
+	if (CustomizedLevel)
+	{
+		IDetailCategoryBuilder& WorldCategory = DetailBuilder.EditCategory("World");
+		
+		WorldCategory.AddCustomRow(LOCTEXT("LevelUseExternalActorsRow", "LevelUseExternalActors"), true)
 			.NameContent()
 			[
 				SNew(STextBlock)
 				.Text(LOCTEXT("LevelUseExternalActors", "Use External Actors"))
 				.ToolTipText(LOCTEXT("ActorPackagingMode_ToolTip", "Use external actors, new actor spawned in this level will be external and existing external actors will be loaded on load."))
 				.Font(IDetailLayoutBuilder::GetDetailFont())
+				.IsEnabled(this, &FWorldSettingsDetails::IsUseExternalActorsEnabled, CustomizedLevel)
 			]
 			.ValueContent()
 			[
 				SNew(SCheckBox)
 				.OnCheckStateChanged(this, &FWorldSettingsDetails::OnUseExternalActorsChanged, CustomizedLevel)
 				.IsChecked(this, &FWorldSettingsDetails::IsUseExternalActorsChecked, CustomizedLevel)
+				.IsEnabled(this, &FWorldSettingsDetails::IsUseExternalActorsEnabled, CustomizedLevel)
 			];
+		
+
+		const bool bIsUsingActorFolders = CustomizedLevel->IsUsingActorFolders();
+		WorldCategory.AddCustomRow(LOCTEXT("LevelUseActorFoldersRow", "LevelUseActorFolders"), true)
+			.NameContent()
+			[
+				SNew(STextBlock)
+				.Text(LOCTEXT("LevelUseActorFolders", "Use Actor Folder Objects"))
+				.ToolTipText(LOCTEXT("LevelUseActorFolders_ToolTip", "Use actor folder objects, actor folders of this level will be persistent in their own object."))
+				.Font(IDetailLayoutBuilder::GetDetailFont())
+				.IsEnabled(this, &FWorldSettingsDetails::IsUsingActorFoldersEnabled, CustomizedLevel)
+			]
+			.ValueContent()
+			[
+				SNew(SCheckBox)
+				.OnCheckStateChanged(this, &FWorldSettingsDetails::OnUseActorFoldersChanged, CustomizedLevel)
+				.IsChecked(this, &FWorldSettingsDetails::IsUsingActorFoldersChecked, CustomizedLevel)
+				.IsEnabled(this, &FWorldSettingsDetails::IsUsingActorFoldersEnabled, CustomizedLevel)
+			];
+		
+
+		if (IsPartitionedWorld(CustomizedLevel))
+		{
+			IDetailCategoryBuilder& WorldPartitionCategory = DetailBuilder.EditCategory("WorldPartition");
+
+			WorldPartitionCategory.AddCustomRow(LOCTEXT("DefaultWorldPartitionSettingsRow", "DefaultWorldPartitionSettings"), true)
+				.NameContent()
+				[
+					SNew(STextBlock)
+					.Text(LOCTEXT("DefaultWorldPartitionSettings", "Default World Partition Settings"))
+					.ToolTipText(LOCTEXT("DefaultWorldPartitionSettings_ToolTip", "Save or Reset the current World Partition default editor state"))
+					.Font(IDetailLayoutBuilder::GetDetailFont())
+				]
+				.ValueContent()
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					[
+						SNew(SButton)
+						.OnClicked_Lambda([CustomizedLevel]()
+							{
+								FScopedTransaction Transaction(LOCTEXT("ResetDefaultWorldPartitionSettings", "Reset Default World Partition Settings"));
+								CustomizedLevel->GetWorldSettings()->ResetDefaultWorldPartitionSettings();
+								return FReply::Handled();
+							})
+						[
+							SNew(STextBlock)
+							.Text(LOCTEXT("ResetButtonText", "Reset"))
+							.ToolTipText(LOCTEXT("ResetButtonToolTip", "Reset World Partition default editor state"))
+							.Font(IDetailLayoutBuilder::GetDetailFont())
+						]
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					[
+						SNew(SButton)
+						.OnClicked_Lambda([CustomizedLevel]()
+							{
+								FScopedTransaction Transaction(LOCTEXT("SaveDefaultWorldPartitionSettings", "Save Default World Partition Settings"));
+								CustomizedLevel->GetWorldSettings()->SaveDefaultWorldPartitionSettings();
+								return FReply::Handled();
+							})
+						[
+							SNew(STextBlock)
+							.Text(LOCTEXT("SaveButtonText", "Save"))
+							.ToolTipText(LOCTEXT("SaveButtonToolTip", "Save current World Partition editor state as map default"))
+							.Font(IDetailLayoutBuilder::GetDetailFont())
+						]
+					]
+				];
 		}
 	}
+}
+
+void FWorldSettingsDetails::OnUseActorFoldersChanged(ECheckBoxState BoxState, ULevel* Level)
+{
+	if (Level && (BoxState == ECheckBoxState::Checked))
+	{
+		Level->SetUseActorFolders(true, /*bInteractiveMode*/ true);
+	}
+}
+
+ECheckBoxState FWorldSettingsDetails::IsUsingActorFoldersChecked(ULevel* Level) const
+{
+	return Level->IsUsingActorFolders() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+bool FWorldSettingsDetails::IsUsingActorFoldersEnabled(ULevel* Level) const
+{
+	return !Level->IsUsingActorFolders();
 }
 
 void FWorldSettingsDetails::OnUseExternalActorsChanged(ECheckBoxState BoxState, ULevel* Level)
@@ -127,20 +265,20 @@ void FWorldSettingsDetails::OnUseExternalActorsChanged(ECheckBoxState BoxState, 
 			return;
 		}
 
-		FScopedTransaction Transaction(LOCTEXT("WorldUseExternalActors", "Change World Use External Actors"));
-
-		Level->Modify();
-		Level->SetUseExternalActors(BoxState == ECheckBoxState::Checked);
-		
 		FText MessageTitle(LOCTEXT("ConvertActorPackagingDialog", "Convert Actors Packaging"));
-		FText PackagingMode = Level->IsUsingExternalActors() ? LOCTEXT("ExternalActors", "External") : LOCTEXT("InternalActors", "Internal");
+		FText PackagingMode = !Level->IsUsingExternalActors() ? LOCTEXT("ExternalActors", "External") : LOCTEXT("InternalActors", "Internal");
 		FText Message = FText::Format(LOCTEXT("ConvertActorPackagingMsg", "Do you want to convert all actors to {0} packaging as well?"), PackagingMode);
-		EAppReturnType::Type ConvertAnswer = FMessageDialog::Open(EAppMsgType::YesNo, Message, &MessageTitle);
-
+		EAppReturnType::Type ConvertAnswer = FMessageDialog::Open(EAppMsgType::YesNo, Message, MessageTitle);
 		// if the user accepts, convert all actors to what the new packaging mode will be
 		if (ConvertAnswer == EAppReturnType::Yes)
 		{
-			Level->ConvertAllActorsToPackaging(Level->IsUsingExternalActors());
+			Level->Modify();
+			Level->ConvertAllActorsToPackaging(BoxState == ECheckBoxState::Checked);
+
+			if (Level->IsUsingExternalActors())
+			{
+				Level->SetUseActorFolders(true);
+			}
 		}
 	}
 }
@@ -148,6 +286,16 @@ void FWorldSettingsDetails::OnUseExternalActorsChanged(ECheckBoxState BoxState, 
 ECheckBoxState FWorldSettingsDetails::IsUseExternalActorsChecked(ULevel* Level) const
 {
 	return Level->IsUsingExternalActors() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+bool FWorldSettingsDetails::IsPartitionedWorld(ULevel* Level) const
+{
+	return UWorld::IsPartitionedWorld(Level->GetWorld());
+}
+
+bool FWorldSettingsDetails::IsUseExternalActorsEnabled(ULevel* Level) const
+{
+	return !IsPartitionedWorld(Level);
 }
 
 FLightmapCustomNodeBuilder::FLightmapCustomNodeBuilder(const TSharedPtr<FAssetThumbnailPool>& InThumbnailPool)
@@ -159,7 +307,6 @@ FLightmapCustomNodeBuilder::FLightmapCustomNodeBuilder(const TSharedPtr<FAssetTh
 FLightmapCustomNodeBuilder::~FLightmapCustomNodeBuilder()
 {
 	FEditorDelegates::OnLightingBuildKept.RemoveAll(this);
-	FEditorDelegates::MapChange.RemoveAll(this);
 	FEditorDelegates::NewCurrentLevel.RemoveAll(this);
 }
 
@@ -169,7 +316,6 @@ void FLightmapCustomNodeBuilder::SetOnRebuildChildren(FSimpleDelegate InOnRegene
 	OnRegenerateChildren = InOnRegenerateChildren;
 
 	FEditorDelegates::OnLightingBuildKept.AddSP(this, &FLightmapCustomNodeBuilder::HandleLightingBuildKept);
-	FEditorDelegates::MapChange.AddSP(this, &FLightmapCustomNodeBuilder::HandleMapChanged);
 	FEditorDelegates::NewCurrentLevel.AddSP(this, &FLightmapCustomNodeBuilder::HandleNewCurrentLevel);
 }
 
@@ -199,7 +345,7 @@ void FLightmapCustomNodeBuilder::GenerateChildContent(IDetailChildrenBuilder& Ch
 	for(TSharedPtr<FLightmapItem>& Item : LightmapItems)
 	{
 		ChildrenBuilder.AddCustomRow(LOCTEXT("LightMapsFilter", "Lightmaps"))
-		.ValueContent()
+		.WholeRowContent()
 		.HAlign(HAlign_Fill)
 		[
 			MakeLightMapList(Item)
@@ -218,13 +364,6 @@ void FLightmapCustomNodeBuilder::HandleLightingBuildKept()
 {
 	OnRegenerateChildren.ExecuteIfBound();
 }
-
-
-void FLightmapCustomNodeBuilder::HandleMapChanged(uint32 MapChangeFlags)
-{
-	OnRegenerateChildren.ExecuteIfBound();
-}
-
 
 void FLightmapCustomNodeBuilder::HandleNewCurrentLevel()
 {
@@ -268,7 +407,7 @@ TSharedRef<SWidget> FLightmapCustomNodeBuilder::MakeLightMapList(TSharedPtr<FLig
 					// Drop shadow border
 					SNew(SBorder)
 					.Padding(ThumbnailBoxPadding)
-					.BorderImage( FEditorStyle::GetBrush("ContentBrowser.ThumbnailShadow") )
+					.BorderImage( FAppStyle::GetBrush("ContentBrowser.ThumbnailShadow") )
 					[
 						LightMapItem->Thumbnail->MakeThumbnailWidget(ThumbnailConfig)
 					]
@@ -298,7 +437,7 @@ TSharedRef<SWidget> FLightmapCustomNodeBuilder::MakeLightMapList(TSharedPtr<FLig
 					// Class
 					SNew(STextBlock)
 					.Font(IDetailLayoutBuilder::GetDetailFont())
-					.Text(FText::FromName(LightMapAssetData.AssetClass))
+					.Text(FText::FromString(LightMapAssetData.AssetClassPath.ToString()))
 				]
 			]
 		];
@@ -377,7 +516,7 @@ void FLightmapCustomNodeBuilder::RefreshLightmapItems()
 	if ( World )
 	{
 		TArray<UTexture2D*> LightMapsAndShadowMaps;
-		World->GetLightMapsAndShadowMaps(World->GetCurrentLevel(), LightMapsAndShadowMaps);
+		World->GetLightMapsAndShadowMaps(World->GetCurrentLevel(), LightMapsAndShadowMaps, false);
 
 		for ( auto ObjIt = LightMapsAndShadowMaps.CreateConstIterator(); ObjIt; ++ObjIt )
 		{

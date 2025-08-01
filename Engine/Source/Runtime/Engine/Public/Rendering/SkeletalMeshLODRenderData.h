@@ -10,14 +10,18 @@
 #include "Rendering/SkeletalMeshDuplicatedVerticesBuffer.h"
 #include "Rendering/SkeletalMeshVertexClothBuffer.h"
 #include "Rendering/MorphTargetVertexInfoBuffers.h"
+#include "Rendering/SkeletalMeshHalfEdgeBuffer.h"
 #include "SkeletalMeshTypes.h"
 #include "BoneIndices.h"
 #include "StaticMeshResources.h"
 #include "GPUSkinVertexFactory.h"
+#include "Animation/SkeletalMeshVertexAttribute.h"
 #include "Animation/SkinWeightProfile.h"
 
+class USkinnedAsset;
 #if WITH_EDITOR
 class FSkeletalMeshLODModel;
+struct FSkeletalMeshVertexAttributeInfo;
 #endif // WITH_EDITOR
 
 struct FSkelMeshRenderSection
@@ -37,6 +41,9 @@ struct FSkelMeshRenderSection
 	/** This section will cast shadow */
 	bool bCastShadow;
 
+	/** If true, this section will be visible in ray tracing effects. Turning this off will remove it from ray traced reflections, shadows, etc. */
+	bool bVisibleInRayTracing;
+
 	/** Which channel for masking the recompute tangents */
 	ESkinVertexColorChannel RecomputeTangentsVertexMaskChannel;
 
@@ -44,13 +51,23 @@ struct FSkelMeshRenderSection
 	uint32 BaseVertexIndex;
 
 	/** The extra vertex data for mapping to an APEX clothing simulation mesh. */
-	TArray<FMeshToMeshVertData> ClothMappingData;
+	TArray<FMeshToMeshVertData> ClothMappingData_DEPRECATED;
 
+	/**
+	 * The cloth deformer mapping data to each of the required cloth LOD.
+	 * Raytracing may require a different deformer LOD to the one being simulated/rendered.
+	 * The outer array index represents the LOD bias. The inner array indexes the vertex data.
+	 * If this LODModel is LOD3, ClothMappingDataLODs[1] will point to defomer data using LOD2,
+	 * and ClothMappingDataLODs[2] will point to defomer data that are using cloth LOD1, ...etc.
+	 * ClothMappingDataLODs[0] always point to defomer data of the same cloth LOD, this is
+	 * convenient for cases where the cloth LOD bias is not known or required.
+	 */
+	TArray<TArray<FMeshToMeshVertData>> ClothMappingDataLODs;
 
 	/** The bones which are used by the vertices of this section. Indices of bones in the USkeletalMesh::RefSkeleton array */
 	TArray<FBoneIndexType> BoneMap;
 
-	/** The number of triangles in this section. */
+	/** The number of vertices in this section. */
 	uint32 NumVertices;
 
 	/** max # of bones used to skin the vertices in this section */
@@ -74,7 +91,8 @@ struct FSkelMeshRenderSection
 		, NumTriangles(0)
 		, bRecomputeTangent(false)
 		, bCastShadow(true)
-		, RecomputeTangentsVertexMaskChannel(ESkinVertexColorChannel::Green)
+		, bVisibleInRayTracing(true)
+		, RecomputeTangentsVertexMaskChannel(ESkinVertexColorChannel::None)
 		, BaseVertexIndex(0)
 		, NumVertices(0)
 		, MaxBoneInfluences(4)
@@ -84,7 +102,8 @@ struct FSkelMeshRenderSection
 
 	FORCEINLINE bool HasClothingData() const
 	{
-		return (ClothMappingData.Num() > 0);
+		constexpr int32 ClothLODBias = 0;  // Must at least have the mapping for the matching cloth LOD
+		return ClothMappingDataLODs.Num() && ClothMappingDataLODs[ClothLODBias].Num();
 	}
 
 	FORCEINLINE int32 GetVertexBufferIndex() const
@@ -110,9 +129,6 @@ public:
 	// Index Buffer (MultiSize: 16bit or 32bit)
 	FMultiSizeIndexContainer	MultiSizeIndexContainer;
 
-	/** Resources needed to render the model using PN-AEN */
-	FMultiSizeIndexContainer	AdjacencyMultiSizeIndexContainer;
-
 	/** static vertices from chunks for skinning on GPU */
 	FStaticMeshVertexBuffers	StaticVertexBuffers;
 
@@ -128,16 +144,21 @@ public:
 	/** Skin weight profile data structures, can contain multiple profiles and their runtime FSkinWeightVertexBuffer */
 	FSkinWeightProfilesData SkinWeightProfilesData;
 
+	FSkeletalMeshVertexAttributeRenderData VertexAttributeBuffers;
+
+	/** GPU buffer for half edge data of an LOD, useful for mesh deformers */
+	FSkeletalMeshHalfEdgeBuffer HalfEdgeBuffer;
+
 	TArray<FBoneIndexType> ActiveBoneIndices;
 
 	TArray<FBoneIndexType> RequiredBones;
 
 	uint32 BuffersSize;
 
-	/** Precooked raytracing data*/
-	TResourceArray<uint8> RayTracingData;
+	/** Precooked ray tracing geometry. Used as source data to build skeletal mesh instance ray tracing geometry. */
+	FRayTracingGeometry SourceRayTracingGeometry;
 
-	typename TChooseClass<USE_BULKDATA_STREAMING_TOKEN, FBulkDataStreamingToken, FByteBulkData>::Result StreamingBulkData;
+	FByteBulkData StreamingBulkData;
 
 	/** Whether buffers of this LOD is inlined (i.e. stored in .uexp instead of .ubulk) */
 	uint32 bStreamedDataInlined : 1;
@@ -162,7 +183,9 @@ public:
 	*
 	* @param Parent Parent mesh
 	*/
-	void InitResources(bool bNeedsVertexColors, int32 LODIndex, TArray<class UMorphTarget*>& InMorphTargets, USkeletalMesh* Owner);
+	void InitResources(bool bNeedsVertexColors, int32 LODIndex, TArray<class UMorphTarget*>& InMorphTargets, USkinnedAsset* Owner);
+
+	void InitMorphResources();
 
 	/**
 	* Releases the LOD's render resources.
@@ -175,7 +198,7 @@ public:
 	void ReleaseCPUResources(bool bForStreaming = false);
 
 	/** Constructor (default) */
-	ENGINE_API FSkeletalMeshLODRenderData(bool bAddRef = true)
+	FSkeletalMeshLODRenderData(bool bAddRef = true)
 		: BuffersSize(0)
 		, bStreamedDataInlined(true)
 		, bIsLODOptional(false)
@@ -207,16 +230,29 @@ public:
 	* @param bForceKeepCPUResources - Whether we want to force keeping CPU resources
 	* @return Size of streamed LOD data in bytes
 	*/
-	void SerializeStreamedData(FArchive& Ar, USkeletalMesh* Owner, int32 LODIdx, uint8 ClassStripFlags, bool bNeedsCPUAccess, bool bForceKeepCPUResources);
+	void SerializeStreamedData(FArchive& Ar, USkinnedAsset* Owner, int32 LODIdx, uint8 ClassStripFlags, bool bNeedsCPUAccess, bool bForceKeepCPUResources);
 
-	void SerializeAvailabilityInfo(FArchive& Ar, USkeletalMesh* Owner, int32 LODIdx, bool bHasAdjacencyData, bool bNeedsCPUAccess);
+	void SerializeAvailabilityInfo(FArchive& Ar, int32 LODIdx, bool bHasAdjacencyData, bool bNeedsCPUAccess);
 
 #if WITH_EDITOR
+
+	struct ENGINE_API FBuildSettings
+	{
+		ESkeletalMeshVertexFlags BuildFlags = ESkeletalMeshVertexFlags::None;
+		bool bBuildHalfEdgeBuffers = false;
+	};
+	
 	/**
 	 * Initialize render data (e.g. vertex buffers) from model info
-	 * @param BuildFlags See ESkeletalMeshVertexFlags.
+	 * @param InLODModel The model to build the render data from.
+	 * @param InVertexAttributeInfos The vertex attributes to possibly include and their stored data type.
+	 * @param InBuildSettings Forwards relevant settings from LodInfo, See ESkeletalMeshVertexFlags.
 	 */
-	void ENGINE_API BuildFromLODModel(const FSkeletalMeshLODModel* LODModel, uint32 BuildFlags);
+	void ENGINE_API BuildFromLODModel(
+		const FSkeletalMeshLODModel* InLODModel,
+		TConstArrayView<FSkeletalMeshVertexAttributeInfo> InVertexAttributeInfos = {},
+		const FBuildSettings& InBuildSettings = FBuildSettings{ESkeletalMeshVertexFlags::None, false}
+		);
 #endif // WITH_EDITOR
 
 	uint32 GetNumVertices() const
@@ -269,6 +305,9 @@ public:
 	*/
 	ENGINE_API void GetResourceSizeEx(FResourceSizeEx& CumulativeResourceSize) const;
 
+	/** Get the estimated memory overhead of buffers marked as NeedsCPUAccess. */
+	SIZE_T GetCPUAccessMemoryOverhead() const;
+
 	// O(1)
 	// @return -1 if not found
 	uint32 FindSectionIndex(const FSkelMeshRenderSection& Section) const;
@@ -279,24 +318,22 @@ public:
 	void DecrementMemoryStats();
 
 	static bool ShouldForceKeepCPUResources();
-	static bool ShouldKeepCPUResources(const USkeletalMesh* SkeletalMesh, int32 LODIdx, bool bForceKeep);
+	static bool ShouldKeepCPUResources(const USkinnedAsset* SkinnedAsset, int32 LODIdx, bool bForceKeep);
 
 private:
 	enum EClassDataStripFlag : uint8
 	{
-		CDSF_AdjacencyData = 1,
+		CDSF_AdjacencyData_DEPRECATED = 1,
 		CDSF_MinLodData = 2
 	};
 
-	static int32 GetPlatformMinLODIdx(const ITargetPlatform* TargetPlatform, const USkeletalMesh* SkeletalMesh);
+	static uint8 GenerateClassStripFlags(FArchive& Ar, const USkinnedAsset* OwnerMesh, int32 LODIdx);
 
-	static uint8 GenerateClassStripFlags(FArchive& Ar, const USkeletalMesh* OwnerMesh, int32 LODIdx);
+	static bool IsLODCookedOut(const ITargetPlatform* TargetPlatform, const USkinnedAsset* SkinnedAsset, bool bIsBelowMinLOD);
 
-	static bool IsLODCookedOut(const ITargetPlatform* TargetPlatform, const USkeletalMesh* SkeletalMesh, bool bIsBelowMinLOD);
+	static bool IsLODInlined(const ITargetPlatform* TargetPlatform, const USkinnedAsset* SkinnedAsset, int32 LODIdx, bool bIsBelowMinLOD);
 
-	static bool IsLODInlined(const ITargetPlatform* TargetPlatform, const USkeletalMesh* SkeletalMesh, int32 LODIdx, bool bIsBelowMinLOD);
-
-	static int32 GetNumOptionalLODsAllowed(const ITargetPlatform* TargetPlatform, const USkeletalMesh* SkeletalMesh);
+	static int32 GetNumOptionalLODsAllowed(const ITargetPlatform* TargetPlatform, const USkinnedAsset* SkinnedAsset);
 
 	friend class FSkeletalMeshRenderData;
 };

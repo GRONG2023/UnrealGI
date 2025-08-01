@@ -2,17 +2,24 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Object.h"
-
+#include "CoreTypes.h"
 #include "LiveLinkSourceFactory.h"
 #include "LiveLinkTypes.h"
 #include "Misc/FrameNumber.h"
 #include "Misc/FrameRate.h"
 #include "Templates/SubclassOf.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
 
 #include "LiveLinkSourceSettings.generated.h"
+
+class FArchive;
+class FProperty;
+class ULiveLinkSourceFactory;
 
 UENUM()
 enum class ELiveLinkSourceMode : uint8
@@ -54,6 +61,10 @@ struct FLiveLinkSourceBufferManagementSettings
 	/** Continuously updated clock offset estimator between source clock and engine clock (in seconds) */
 	UPROPERTY(VisibleAnywhere, Category = "Settings", AdvancedDisplay, meta = (ForceUnits = s))
 	double EngineTimeClockOffset = 0.0;
+
+	/** Continuously updated offset to achieve a smooth evaluation time (in seconds) */
+	UPROPERTY(VisibleAnywhere, Category = "Settings", AdvancedDisplay, meta = (ForceUnits = s))
+	double SmoothEngineTimeOffset = 0.0;
 
 #if WITH_EDITORONLY_DATA
 	/** DEPRECATED: TimecodeFrameRate is now read from each individual subject from FQualifiedFrameTime. 
@@ -131,8 +142,8 @@ struct FLiveLinkSourceDebugInfo
 };
 
 /** Base class for live link source settings (can be replaced by sources themselves) */
-UCLASS()
-class LIVELINKINTERFACE_API ULiveLinkSourceSettings : public UObject
+UCLASS(MinimalAPI)
+class ULiveLinkSourceSettings : public UObject
 {
 public:
 	GENERATED_BODY()
@@ -161,10 +172,10 @@ public:
 	TArray<FLiveLinkSourceDebugInfo> SourceDebugInfos_DEPRECATED;
 #endif
 
-	virtual void Serialize(FArchive& Ar) override;
+	LIVELINKINTERFACE_API virtual void Serialize(FArchive& Ar) override;
 
 #if WITH_EDITOR
-	virtual bool CanEditChange(const FProperty* InProperty) const override;
+	LIVELINKINTERFACE_API virtual bool CanEditChange(const FProperty* InProperty) const override;
 #endif
 };
 

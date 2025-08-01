@@ -6,17 +6,10 @@ public class PhysicsAssetEditor : ModuleRules
 {
 	public PhysicsAssetEditor(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PublicIncludePaths.AddRange(
+		PublicIncludePathModuleNames.AddRange(
              new string[] {
-                "Editor/UnrealEd/Public",
-                "Editor/Persona/Public"
-            }
-        );
-
-        PrivateIncludePaths.AddRange(
-            new string[] {
-                "Editor/PhysicsAssetEditor/Private",
-                "Editor/PhysicsAssetEditor/Private/PhysicsAssetGraph",
+                "UnrealEd",
+                "Persona"
             }
         );
 
@@ -29,8 +22,8 @@ public class PhysicsAssetEditor : ModuleRules
 				"RenderCore",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
 				"LevelEditor",
+				"EditorFramework",
 				"UnrealEd",
                 "Kismet",
                 "Persona",
@@ -42,8 +35,14 @@ public class PhysicsAssetEditor : ModuleRules
                 "DetailCustomizations",
                 "PinnedCommandList",
 				"ToolMenus",
-				"PhysicsCore"
-            }
+				"PhysicsCore",
+				"PhysicsUtilities",
+				"MeshUtilitiesCommon",
+				"ApplicationCore",
+				"EditorStyle",
+				"ToolWidgets",
+				"Chaos"
+			}
         );
 
 		DynamicallyLoadedModuleNames.AddRange(

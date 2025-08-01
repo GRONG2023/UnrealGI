@@ -11,21 +11,24 @@ namespace Audio
 	* White noise generator 
 	* Flat spectrum
 	*/
-	class SIGNALPROCESSING_API FWhiteNoise
+	class FWhiteNoise
 	{
 	public:
-		/** Constructor with a default scale add parameter */
-		FWhiteNoise(const float InScale = 1.0f, const float InAdd = 0.0f);
-
-		void SetScaleAdd(const float InScale, const float InAdd);
+		SIGNALPROCESSING_API FWhiteNoise();
+		SIGNALPROCESSING_API FWhiteNoise(int32 InRandomSeed);
 
 		/** Generate next sample of white noise */
-		float Generate();
-
-	private:
-		float Scale;
-		float Add;
-
+		FORCEINLINE float Generate()
+		{
+			return (RandomStream.FRand() * 2.f) - 1.0f;
+		}
+		
+		/** Generate next sample of white noise (with optional Scale and Add params) */
+		FORCEINLINE float Generate(float InScale, float InAdd)
+		{
+			return Generate() * InScale + InAdd;
+		}
+	private:	
 		FRandomStream RandomStream;
 	};
 
@@ -33,29 +36,28 @@ namespace Audio
 	* Pink noise generator
 	* 1/Frequency noise spectrum
 	*/
-	class SIGNALPROCESSING_API FPinkNoise
+	class FPinkNoise
 	{
 	public:
-		/** Constructor. */
-		FPinkNoise(const float InScale = 1.0f, const float InAdd = 0.0f);
+		/** Constructor. Without seed argument, uses Cpu cycles to chose one at "random" */
+		SIGNALPROCESSING_API FPinkNoise();
 
-		/** Sets the output scale and add parameter. */
-		void SetScaleAdd(const float InScale, const float InAdd);
+		/** Constructor with seed input */
+		SIGNALPROCESSING_API FPinkNoise(int32 InRandomSeed);
 
 		/** Generate next sample of pink noise. */
-		float Generate();
+		SIGNALPROCESSING_API float Generate();
+
+		/** Set Pink Noise Filter Gain (default -3db) */
+		void SetFilterGain(float InFilterGain) 
+		{
+			A0 = InFilterGain;
+		}
 
 	private:
-
-		void InitFilter();
-
 		FWhiteNoise Noise;
-
-		float A[4];
-		float B[4];
-		float X[4];
-		float Y[4];
+		float X_Z[4];
+		float Y_Z[4];
+		float A0 = 1.f;
 	};
-
-
 }

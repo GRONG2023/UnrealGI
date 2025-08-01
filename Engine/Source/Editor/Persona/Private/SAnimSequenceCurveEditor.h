@@ -23,28 +23,42 @@ class FTabManager;
 class FRichCurveEditorModelNamed : public FRichCurveEditorModel
 {
 public:
-	FRichCurveEditorModelNamed(const FSmartName& InName, ERawCurveTrackTypes InType, int32 InCurveIndex, UAnimSequenceBase* InAnimSequence, FCurveEditorTreeItemID InTreeId = FCurveEditorTreeItemID())
-		: FRichCurveEditorModel(InAnimSequence)
-		, Name(InName)
-		, AnimSequence(InAnimSequence)
-		, CurveIndex(InCurveIndex)
-		, Type(InType)
-		, TreeId(InTreeId)
-	{
-	}
+	UE_DEPRECATED(5.3, "Please use the constructor that takes a FName.")
+	FRichCurveEditorModelNamed(const FSmartName& InName, ERawCurveTrackTypes InType, int32 InCurveIndex, UAnimSequenceBase* InAnimSequence, FCurveEditorTreeItemID InTreeId = FCurveEditorTreeItemID());
+
+	FRichCurveEditorModelNamed(const FName& InName, ERawCurveTrackTypes InType, int32 InCurveIndex, UAnimSequenceBase* InAnimSequence, FCurveEditorTreeItemID InTreeId = FCurveEditorTreeItemID());
+	
+	virtual ~FRichCurveEditorModelNamed();
 
 	virtual bool IsValid() const override;
 	virtual FRichCurve& GetRichCurve() override;
 	virtual const FRichCurve& GetReadOnlyRichCurve() const override;
 
+	virtual void SetKeyPositions(TArrayView<const FKeyHandle> InKeys, TArrayView<const FKeyPosition> InKeyPositions, EPropertyChangeType::Type ChangeType) override;
+	virtual void SetKeyAttributes(TArrayView<const FKeyHandle> InKeys, TArrayView<const FKeyAttributes> InAttributes, EPropertyChangeType::Type ChangeType = EPropertyChangeType::Unspecified) override;
+	virtual void SetCurveAttributes(const FCurveAttributes& InCurveAttributes) override;
+
+	void CurveHasChanged();
+	void OnModelHasChanged(const EAnimDataModelNotifyType& NotifyType, IAnimationDataModel* Model, const FAnimDataModelNotifPayload& Payload);
+	void UpdateCachedCurve();
+
+	UE_DEPRECATED(5.3, "Please use CurveName.")
 	FSmartName Name;
+	FName CurveName;
 	TWeakObjectPtr<UAnimSequenceBase> AnimSequence;
 	int32 CurveIndex;
 	ERawCurveTrackTypes Type;
 	FCurveEditorTreeItemID TreeId;
+	
+	FAnimationCurveIdentifier CurveId;
+	UE::Anim::FAnimDataModelNotifyCollector NotifyCollector;
+	FRichCurve CachedCurve;
+	bool bCurveRemoved;
+
+	TUniquePtr<IAnimationDataController::FScopedBracket> InteractiveBracket;
 };
 
-class SAnimSequenceCurveEditor : public IAnimSequenceCurveEditor, public FEditorUndoClient
+class SAnimSequenceCurveEditor : public IAnimSequenceCurveEditor
 {
 	SLATE_BEGIN_ARGS(SAnimSequenceCurveEditor) {}
 
@@ -54,26 +68,21 @@ class SAnimSequenceCurveEditor : public IAnimSequenceCurveEditor, public FEditor
 
 	SLATE_END_ARGS()
 
-	SAnimSequenceCurveEditor();
 	~SAnimSequenceCurveEditor();
 
 	void Construct(const FArguments& InArgs, const TSharedRef<IPersonaPreviewScene>& InPreviewScene, UAnimSequenceBase* InAnimSequence);
 
 	/** IAnimSequenceCurveEditor interface */
 	virtual void ResetCurves() override;
-	virtual void AddCurve(const FText& InCurveDisplayName, const FLinearColor& InCurveColor, const FSmartName& InName, ERawCurveTrackTypes InType, int32 InCurveIndex, FSimpleDelegate InOnCurveModified) override;
-	virtual void RemoveCurve(const FSmartName& InName, ERawCurveTrackTypes InType, int32 InCurveIndex) override;
+	virtual void AddCurve(const FText& InCurveDisplayName, const FLinearColor& InCurveColor, const FName& InName, ERawCurveTrackTypes InType, int32 InCurveIndex, FSimpleDelegate InOnCurveModified) override;
+	virtual void RemoveCurve(const FName& InName, ERawCurveTrackTypes InType, int32 InCurveIndex) override;
 	virtual void ZoomToFit() override;
 	
-	virtual void PostUndo(bool bSuccess) override { PostUndoRedo(); }
-	virtual void PostRedo(bool bSuccess) override { PostUndoRedo(); }
-
+	void OnModelHasChanged(const EAnimDataModelNotifyType& NotifyType, IAnimationDataModel* Model, const FAnimDataModelNotifPayload& Payload);
 private:
 	// Build the toolbar for this curve editor
 	TSharedRef<SWidget> MakeToolbar(TSharedRef<SCurveEditorPanel> InEditorPanel);
-
-	// Handle undo/redo to check underlying curve data is still valid
-	void PostUndoRedo();
+	TSharedPtr<SWidget> OnContextMenuOpening();
 
 private:
 	/** The actual curve editor */
@@ -85,6 +94,6 @@ private:
 	/** The anim sequence we are editing */
 	UAnimSequenceBase* AnimSequence;
 
-	/** The tree widget int he curve editor */
+	/** The tree widget in the curve editor */
 	TSharedPtr<SCurveEditorTree> CurveEditorTree;
 };

@@ -8,7 +8,8 @@
 
 #include "BoundShaderStateCache.h"
 #include "CrossCompilerCommon.h"
-
+#include "VulkanCommon.h"
+#include "VulkanThirdParty.h"
 
 static inline VkDescriptorType BindingToDescriptorType(EVulkanBindingType::EType Type)
 {
@@ -25,6 +26,9 @@ static inline VkDescriptorType BindingToDescriptorType(EVulkanBindingType::EType
 	case EVulkanBindingType::StorageTexelBuffer:	return VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
 	case EVulkanBindingType::StorageBuffer:			return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 	case EVulkanBindingType::InputAttachment:		return VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+#if RHI_RAYTRACING
+	case EVulkanBindingType::AccelerationStructure:	return VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+#endif
 	default:
 		check(0);
 		break;
@@ -37,15 +41,18 @@ static inline EVulkanBindingType::EType DescriptorTypeToBinding(VkDescriptorType
 {
 	switch (Type)
 	{
-	case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:			return bUsePacked ? EVulkanBindingType::PackedUniformBuffer : EVulkanBindingType::UniformBuffer;
-	case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:	return EVulkanBindingType::CombinedImageSampler;
-	case VK_DESCRIPTOR_TYPE_SAMPLER:				return EVulkanBindingType::Sampler;
-	case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:			return EVulkanBindingType::Image;
-	case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:	return EVulkanBindingType::UniformTexelBuffer;
-	case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:			return EVulkanBindingType::StorageImage;
-	case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:	return EVulkanBindingType::StorageTexelBuffer;
-	case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:			return EVulkanBindingType::StorageBuffer;
-	case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:		return EVulkanBindingType::InputAttachment;
+	case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:				return bUsePacked ? EVulkanBindingType::PackedUniformBuffer : EVulkanBindingType::UniformBuffer;
+	case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:		return EVulkanBindingType::CombinedImageSampler;
+	case VK_DESCRIPTOR_TYPE_SAMPLER:					return EVulkanBindingType::Sampler;
+	case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:				return EVulkanBindingType::Image;
+	case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:		return EVulkanBindingType::UniformTexelBuffer;
+	case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:				return EVulkanBindingType::StorageImage;
+	case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:		return EVulkanBindingType::StorageTexelBuffer;
+	case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:				return EVulkanBindingType::StorageBuffer;
+	case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:			return EVulkanBindingType::InputAttachment;
+#if RHI_RAYTRACING
+	case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR: return EVulkanBindingType::AccelerationStructure;
+#endif
 	default:
 		check(0);
 		break;
@@ -125,7 +132,7 @@ struct FVulkanShaderHeader
 #endif
 	};
 	TArray<FGlobalInfo>						Globals;
-	TArray<TEnumAsByte<VkDescriptorType>>	GlobalDescriptorTypes;
+	TArray<TEnumAsByte<EVulkanBindingType::EType>>	GlobalDescriptorTypes;
 
 	struct FPackedGlobalInfo
 	{
@@ -178,12 +185,30 @@ struct FVulkanShaderHeader
 	// Mostly relevant for Vertex Shaders
 	uint32									InOutMask;
 
-	bool									bHasRealUBs;
-	uint8									Pad0 = 0;
-	uint16									Pad1 = 1;
+	// Relevant for Ray Tracing Shaders
+	uint32                                  RayTracingPayloadType = 0;
+	uint32                                  RayTracingPayloadSize = 0;
 
 	FSHAHash								SourceHash;
 	uint32									SpirvCRC = 0;
+	uint8									WaveSize = 0;
+
+	// For RayHitGroup shaders
+	enum class ERayHitGroupEntrypoint : uint8
+	{
+		NotPresent = 0,
+
+		// Hit group types are all stored in a single spirv blob
+		// and each have different entry point names
+		// NOTE: Not used yet because of compiler issues
+		CommonBlob,
+
+		// Hit group types are each stored in a different spirv blob
+		// to circumvent DXC compilation issues
+		SeparateBlob
+	};
+	ERayHitGroupEntrypoint RayGroupAnyHit = ERayHitGroupEntrypoint::NotPresent;
+	ERayHitGroupEntrypoint RayGroupIntersection = ERayHitGroupEntrypoint::NotPresent;
 
 	TArray<FSpirvInfo>						UniformBufferSpirvInfos;
 	TArray<FSpirvInfo>						GlobalSpirvInfos;
@@ -197,7 +222,6 @@ struct FVulkanShaderHeader
 	};
 	FVulkanShaderHeader(EInit)
 		: InOutMask(0)
-		, bHasRealUBs(0)
 	{
 	}
 };
@@ -285,9 +309,13 @@ inline FArchive& operator<<(FArchive& Ar, FVulkanShaderHeader& Header)
 	Ar << Header.EmulatedUBCopyRanges;
 	Ar << Header.EmulatedUBsCopyInfo;
 	Ar << Header.InOutMask;
-	Ar << Header.bHasRealUBs;
+	Ar << Header.RayTracingPayloadType;
+	Ar << Header.RayTracingPayloadSize;
 	Ar << Header.SourceHash;
 	Ar << Header.SpirvCRC;
+	Ar << Header.WaveSize;
+	Ar << Header.RayGroupAnyHit;
+	Ar << Header.RayGroupIntersection;
 	Ar << Header.UniformBufferSpirvInfos;
 	Ar << Header.GlobalSpirvInfos;
 	Ar << Header.DebugName;

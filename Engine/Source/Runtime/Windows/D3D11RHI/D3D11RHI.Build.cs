@@ -1,42 +1,36 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using EpicGames.Core;
 using UnrealBuildTool;
 
-[SupportedPlatforms("Win32", "Win64", "HoloLens")]
+[SupportedPlatformGroups("Windows")]
 public class D3D11RHI : ModuleRules
 {
 	public D3D11RHI(ReadOnlyTargetRules Target) : base(Target)
 	{
-		if (Target.Platform == UnrealTargetPlatform.HoloLens)
+		PrivateIncludePathModuleNames.AddRange(new string[] { "Shaders" });
+
+		PrivateDependencyModuleNames.AddAll(
+			"CoreUObject",
+			"Engine",
+			"RHICore",
+			"RenderCore"
+		);
+
+		PublicDependencyModuleNames.AddAll(
+			"Core",
+			"RHI"
+		);
+
+		if (Target.IsInPlatformGroup(UnrealPlatformGroup.Windows))
 		{
-			PrivateIncludePaths.Add("Runtime/Windows/D3D11RHI/Private/HoloLens");
+			PrivateDependencyModuleNames.Add("HeadMountedDisplay");
 		}
-		PrivateIncludePaths.Add("Runtime/Windows/D3D11RHI/Private");
-		PrivateIncludePaths.Add("../Shaders/Shared");
 
-		PrivateDependencyModuleNames.AddRange(
-			new string[] {
-				"Core",
-				"Engine",
-				"RHI",
-				"RenderCore"
-			}
-			);
-
+		AddEngineThirdPartyPrivateStaticDependencies(Target, "AMD_AGS");
 		AddEngineThirdPartyPrivateStaticDependencies(Target, "DX11");
-		if (Target.Platform != UnrealTargetPlatform.HoloLens)
-		{ 
-        	AddEngineThirdPartyPrivateStaticDependencies(Target, "NVAPI");
-			AddEngineThirdPartyPrivateStaticDependencies(Target, "AMD_AGS");
-        	AddEngineThirdPartyPrivateStaticDependencies(Target, "NVAftermath");
-			AddEngineThirdPartyPrivateStaticDependencies(Target, "IntelMetricsDiscovery");
-			AddEngineThirdPartyPrivateStaticDependencies(Target, "IntelExtensionsFramework");
-		}
-
-
-        if (Target.Configuration != UnrealTargetConfiguration.Shipping)
-		{
-			PrivateIncludePathModuleNames.AddRange(new string[] { "TaskGraph" });
-		}
+		AddEngineThirdPartyPrivateStaticDependencies(Target, "IntelExtensionsFramework");
+		AddEngineThirdPartyPrivateStaticDependencies(Target, "NVAftermath");
+		AddEngineThirdPartyPrivateStaticDependencies(Target, "NVAPI");
 	}
 }

@@ -2,14 +2,14 @@
 
 #include "Engine/NavigationObjectBase.h"
 #include "UObject/ConstructorHelpers.h"
-#include "CollisionQueryParams.h"
-#include "WorldCollision.h"
 #include "Engine/World.h"
 #include "Components/BillboardComponent.h"
 #include "Engine/CollisionProfile.h"
 #include "Engine/Texture2D.h"
 #include "GameFramework/PhysicsVolume.h"
 #include "Components/CapsuleComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(NavigationObjectBase)
 
 DEFINE_LOG_CATEGORY_STATIC(LogNavigationPoint, Log, All);
 
@@ -235,4 +235,5 @@ void ANavigationObjectBase::GetMoveGoalReachTest(const AActor* MovingActor, cons
 	GoalOffset = FVector::ZeroVector;
 	GetSimpleCollisionCylinder(GoalRadius, GoalHalfHeight);	
 }
+
 

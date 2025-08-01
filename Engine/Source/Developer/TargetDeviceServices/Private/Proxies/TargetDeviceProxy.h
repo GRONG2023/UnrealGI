@@ -156,6 +156,16 @@ public:
 		return Type;
 	}
 
+	virtual const FString& GetOSVersion() const override
+	{
+		return OSVersion;
+	}
+
+	virtual const FString& GetConnectionType() const override
+	{
+		return ConnectionType;
+	}
+
 	virtual bool HasDeviceId(const FString& InDeviceId) const override;
 	virtual bool HasVariant(FName InVariant) const override;
 	virtual bool HasTargetPlatform(FName InTargetPlatformId) const override;
@@ -174,31 +184,17 @@ public:
 	{
 		return Shared;
 	}
-
-	virtual bool DeployApp(FName InVariant, const TMap<FString, FString>& Files, const FGuid& TransactionId) override;
-	virtual bool LaunchApp(FName InVariant, const FString& AppId, EBuildConfiguration BuildConfiguration, const FString& Params) override;
+	
+	virtual bool IsSimulated() const override
+	{
+		return (ConnectionType == TEXT("Simulator"));
+	}
 	
 	virtual bool TerminateLaunchedProcess(FName InVariant, const FString& ProcessIdentifier) override;
-
-	virtual FOnTargetDeviceProxyDeployCommitted& OnDeployCommitted() override
-	{
-		return DeployCommittedDelegate;
-	}
-
-	virtual FOnTargetDeviceProxyDeployFailed& OnDeployFailed() override
-	{
-		return DeployFailedDelegate;
-	}
-
-	virtual FOnTargetDeviceProxyLaunchFailed& OnLaunchFailed() override
-	{
-		return LaunchFailedDelegate;
-	}
 
 	virtual void PowerOff(bool Force) override;
 	virtual void PowerOn() override;
 	virtual void Reboot() override;
-	virtual void Run(FName InVariant, const FString& ExecutablePath, const FString& Params) override;
 
 	/** Returns true if this is an aggregate (All_<platform>_devices_on_<host>) proxy, false otherwise */
 	virtual bool IsAggregated() const override
@@ -210,14 +206,6 @@ protected:
 
 	/** Initializes the message endpoint. */
 	void InitializeMessaging();
-
-private:
-
-	/** Handles FTargetDeviceServiceDeployFinishedMessage messages. */
-	void HandleDeployFinishedMessage(const FTargetDeviceServiceDeployFinished& Message, const TSharedRef<IMessageContext, ESPMode::ThreadSafe>& Context);
-
-	/** Handles FTargetDeviceServiceLaunchFinishedMessage messages. */
-	void HandleLaunchFinishedMessage(const FTargetDeviceServiceLaunchFinished& Message, const TSharedRef<IMessageContext, ESPMode::ThreadSafe>& Context);
 
 private:
 
@@ -278,6 +266,12 @@ private:
 	/** Holds the device type. */
 	FString Type;
 
+	/** Holds the remote device's OS version. */
+	FString OSVersion;
+
+	/** Holds the type of connection. */
+	FString ConnectionType;
+
 	/** Holds default variant name. */
 	FName DefaultVariant;
 
@@ -305,18 +299,4 @@ private:
 
 	/** Map of all the Variants for this Device. */
 	TMap<FName, FTargetDeviceProxyVariant> TargetDeviceVariants;
-
-private:
-
-	/** Holds a delegate to be invoked when a build has been deployed to the target device. */
-	FOnTargetDeviceProxyDeployCommitted DeployCommittedDelegate;
-
-	/** Holds a delegate to be invoked when a build has failed to deploy to the target device. */
-	FOnTargetDeviceProxyDeployFailed DeployFailedDelegate;
-
-	/** Holds a delegate to be invoked when a build has failed to launch on the target device. */
-	FOnTargetDeviceProxyLaunchFailed LaunchFailedDelegate;
-
-	/** Holds a delegate to be invoked when a build has succeeded to launch on the target device. */
-	FOnTargetDeviceProxyLaunchSucceeded LaunchSucceededDelegate;
 };

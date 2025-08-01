@@ -6,13 +6,14 @@
 
 #include "Engine/Font.h"
 #include "Engine/Texture2D.h"
-#include "Fonts/FontBulkData.h"
 #include "Fonts/FontCache.h"
 #include "Framework/Application/SlateApplication.h"
 #include "EngineFontServices.h"
-#include "EditorFramework/AssetImportData.h"
 #include "Engine/FontFace.h"
 #include "HAL/FileManager.h"
+#include "Templates/Casts.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(Font)
 
 UFontImportOptions::UFontImportOptions(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -385,5 +386,27 @@ void UFont::GetResourceSizeEx(FResourceSizeEx& CumulativeResourceSize)
 		{
 			GetTypefaceResourceSize(SubTypeface.Typeface);
 		}
+	}
+}
+
+bool UFont::IsSdfFont() const
+{
+	switch (FontRasterizationMode)
+	{
+		case EFontRasterizationMode::Msdf:
+			return IsSlateSdfTextFeatureEnabled();
+		default:
+			return false;
+	}
+}
+
+EFontRasterizationMode UFont::GetFontRasterizationMode() const
+{
+	switch (FontRasterizationMode)
+	{
+		case EFontRasterizationMode::Msdf:
+			return IsSlateSdfTextFeatureEnabled() ? EFontRasterizationMode::Msdf : EFontRasterizationMode::Bitmap;
+		default:
+			return FontRasterizationMode;
 	}
 }

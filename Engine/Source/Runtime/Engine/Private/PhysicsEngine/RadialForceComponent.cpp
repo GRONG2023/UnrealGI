@@ -1,15 +1,18 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "PhysicsEngine/RadialForceComponent.h"
+#include "PhysicsEngine/RigidBodyBase.h"
 #include "UObject/ConstructorHelpers.h"
-#include "GameFramework/Actor.h"
-#include "WorldCollision.h"
+#include "Engine/OverlapResult.h"
 #include "Engine/World.h"
 #include "Components/BillboardComponent.h"
 #include "Engine/Texture2D.h"
 #include "GameFramework/MovementComponent.h"
 #include "PhysicsEngine/RadialForceActor.h"
 #include "DestructibleInterface.h"
+#include "UObject/UnrealType.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(RadialForceComponent)
 
 //////////////////////////////////////////////////////////////////////////
 // RADIALFORCECOMPONENT
@@ -77,7 +80,7 @@ void URadialForceComponent::TickComponent(float DeltaTime, enum ELevelTick TickT
 			if(ComponentOwner)
 			{
 				TInlineComponentArray<UMovementComponent*> MovementComponents;
-				ComponentOwner->GetComponents<UMovementComponent>(MovementComponents);
+				ComponentOwner->GetComponents(MovementComponents);
 				for(const auto& MovementComponent : MovementComponents)
 				{
 					if(MovementComponent->UpdatedComponent == PrimitiveComponent)
@@ -138,7 +141,7 @@ void URadialForceComponent::FireImpulse()
 
 	for(UPrimitiveComponent* PrimitiveComponent : AffectedComponents)
 	{
-		if(DestructibleDamage > SMALL_NUMBER)
+		if(DestructibleDamage > UE_SMALL_NUMBER)
 		{
 			if(IDestructibleInterface* DestructibleInstance = Cast<IDestructibleInterface>(PrimitiveComponent))
 			{
@@ -155,7 +158,7 @@ void URadialForceComponent::FireImpulse()
 			TInlineComponentArray<UMovementComponent*> MovementComponents;
 			if(AActor* OwningActor = PrimitiveComponent->GetOwner())
 			{
-				OwningActor->GetComponents<UMovementComponent>(MovementComponents);
+				OwningActor->GetComponents(MovementComponents);
 				for(const auto& MovementComponent : MovementComponents)
 				{
 					if(MovementComponent->UpdatedComponent == PrimitiveComponent)
@@ -194,13 +197,13 @@ void URadialForceComponent::RemoveObjectTypeToAffect(TEnumAsByte<enum EObjectTyp
 
 void URadialForceComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
-	Super::PostEditChangeProperty(PropertyChangedEvent);
-
 	// If we have edited the object types to effect, update our bitfield.
 	if(PropertyChangedEvent.Property && PropertyChangedEvent.Property->GetFName() == TEXT("ObjectTypesToAffect"))
 	{
 		UpdateCollisionObjectQueryParams();
 	}
+
+	Super::PostEditChangeProperty(PropertyChangedEvent);
 }
 
 #endif

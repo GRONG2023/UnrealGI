@@ -10,8 +10,9 @@ class IAnalyticsProviderET;
 
 DECLARE_DELEGATE_TwoParams(FInstallBundleSourceInitDelegate, TSharedRef<IInstallBundleSource> /*Source*/, FInstallBundleSourceAsyncInitInfo /*InitInfo*/);
 
-DECLARE_DELEGATE_TwoParams(FInstallBundleSourceQueryBundleInfoDelegate, TSharedRef<IInstallBundleSource> /*Source*/, FInstallBundleSourceBundleInfoQueryResultInfo /*Result*/);
-DECLARE_DELEGATE_RetVal_TwoParams(EInstallBundleSourceUpdateBundleInfoResult, FInstallBundleSourceUpdateBundleInfoDelegate, TSharedRef<IInstallBundleSource> /*Source*/, FInstallBundleSourceBundleInfoQueryResultInfo /*Result*/);
+DECLARE_DELEGATE_TwoParams(FInstallBundleSourceQueryBundleInfoDelegate, TSharedRef<IInstallBundleSource> /*Source*/, FInstallBundleSourceBundleInfoQueryResult /*Result*/);
+DECLARE_DELEGATE_RetVal_TwoParams(EInstallBundleSourceUpdateBundleInfoResult, FInstallBundleSourceUpdateBundleInfoDelegate, TSharedRef<IInstallBundleSource> /*Source*/, FInstallBundleSourceUpdateBundleInfoResult /*Result*/);
+DECLARE_DELEGATE_TwoParams(FInstallBundleLostRelevanceForSourceDelegate, TSharedRef<IInstallBundleSource> /*Source*/, TSet<FName> /*BundleNames*/);
 
 DECLARE_DELEGATE_TwoParams(FInstallBundleCompleteDelegate, TSharedRef<IInstallBundleSource> /*Source*/, FInstallBundleSourceUpdateContentResultInfo /*Result*/);
 DECLARE_DELEGATE_TwoParams(FInstallBundlePausedDelegate, TSharedRef<IInstallBundleSource> /*Source*/, FInstallBundleSourcePauseInfo /*PauseInfo*/);
@@ -30,6 +31,9 @@ public:
 	// Returns the how this source should be weighted when combined with other sources
 	virtual float GetSourceWeight() const { return 1.0f; }
 
+	// Returns a value in the [0.1, 1.0] range that allows bundles using this source to age out of the LRU cache more slowly
+	virtual double GetSourceCacheAgeScalar() const { return 1.0; }
+
 	// Called once by bundle manager after constructing the bundle source
 	// Any non-fallback errors returned will cause bundle manager to fail to initialize
 	virtual FInstallBundleSourceInitInfo Init(
@@ -44,7 +48,13 @@ public:
 	// Provides information about bundles this source knows about back to bundle manager.
 	virtual void AsyncInit_QueryBundleInfo(FInstallBundleSourceQueryBundleInfoDelegate OnCompleteCallback) = 0;
 
-	virtual void AsyncInit_SetUpdateBundleInfoCallback(FInstallBundleSourceUpdateBundleInfoDelegate UpdateCallback) {}
+	// Sets callbacks to Install Bundle Manager for dynamically discovered bundles
+	// UpdateCallback - Call to add or update bundle info from this source.  Must be called when there are no requests for the bundle.
+	// LostRelevanceCallback - Allows bundle manager to clean up bundles if they are no longer relevant to any source
+	virtual void AsyncInit_SetUpdateBundleInfoCallback(
+		FInstallBundleSourceUpdateBundleInfoDelegate UpdateCallback, FInstallBundleLostRelevanceForSourceDelegate LostRelevanceCallback) {}
+
+	virtual void OnBundleInfoPruned(FName InBundleName) {}
 
 	// Whether this source has been initialized or not
 	virtual EInstallBundleManagerInitState GetInitState() const = 0;
@@ -125,5 +135,4 @@ public:
 
 	// Called by bundle manager to pass through command line options to simulate errors
 	virtual void SetErrorSimulationCommands(const FString& CommandLine) {}
-	virtual EOverallInstallationProcessStep GetCurrentInstallProcessStep() { return EOverallInstallationProcessStep::Downloading; }
 };

@@ -3,18 +3,21 @@
 
 #include "LevelUtils.h"
 #include "Engine/Engine.h"
+#include "Engine/Level.h"
 #include "Engine/LevelStreaming.h"
+#include "Engine/World.h"
 #include "HAL/FileManager.h"
-#include "UObject/Package.h"
 #include "Misc/PackageName.h"
 #include "EditorSupportDelegates.h"
-#include "EngineGlobals.h"
 #include "Misc/FeedbackContext.h"
 #include "GameFramework/WorldSettings.h"
 #include "Components/ModelComponent.h"
+#include "Streaming/ServerStreamingLevelsVisibility.h"
 
 #if WITH_EDITOR
 #include "ScopedTransaction.h"
+#include "WorldPartition/WorldPartition.h"
+#include "WorldPartition/WorldPartitionSubsystem.h"
 #endif
 
 #define LOCTEXT_NAMESPACE "LevelUtils"
@@ -36,6 +39,27 @@ struct FLevelReadOnlyData
 // Map to link the level data with a level
 static TMap<ULevel*, FLevelReadOnlyData> LevelReadOnlyCache;
 
+namespace LevelUtilsInternal
+{
+	static void ApplyEditorTransform(ULevel* LoadedLevel, bool bDoPostEditMove, AActor* Actor, const FTransform& Transform)
+	{
+		if (LoadedLevel)
+		{
+			FLevelUtils::FApplyLevelTransformParams TransformParams(LoadedLevel, Transform);
+
+			while (AActor* AttachParent = Actor ? Actor->GetAttachParentActor() : nullptr)
+			{
+				Actor = AttachParent;
+			}
+
+			TransformParams.bDoPostEditMove = bDoPostEditMove;
+			TransformParams.Actor = Actor;
+
+			FLevelUtils::ApplyLevelTransform(TransformParams);
+		}
+	}
+}
+
 #endif
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -50,46 +74,19 @@ bool FLevelUtils::bMovingLevel = false;
 bool FLevelUtils::bApplyingLevelTransform = false;
 #endif
 
-/**
- * Returns the streaming level corresponding to the specified ULevel, or NULL if none exists.
- *
- * @param		Level		The level to query.
- * @return					The level's streaming level, or NULL if none exists.
- */
 ULevelStreaming* FLevelUtils::FindStreamingLevel(const ULevel* Level)
 {
-	ULevelStreaming* MatchingLevel = NULL;
-
-	if (Level && Level->OwningWorld)
-	{
-		for (ULevelStreaming* CurStreamingLevel : Level->OwningWorld->GetStreamingLevels())
-		{
-			if( CurStreamingLevel && CurStreamingLevel->GetLoadedLevel() == Level )
-			{
-				MatchingLevel = CurStreamingLevel;
-				break;
-			}
-		}
-	}
-
-	return MatchingLevel;
+	return ULevelStreaming::FindStreamingLevel(Level);
 }
 
-/**
- * Returns the streaming level by package name, or NULL if none exists.
- *
- * @param		PackageName		Name of the package containing the ULevel to query
- * @return						The level's streaming level, or NULL if none exists.
- */
-ULevelStreaming* FLevelUtils::FindStreamingLevel(UWorld* InWorld, const TCHAR* InPackageName)
+ULevelStreaming* FLevelUtils::FindStreamingLevel(UWorld* InWorld, const FName PackageName)
 {
-	const FName PackageName( InPackageName );
 	ULevelStreaming* MatchingLevel = NULL;
-	if( InWorld)
+	if (InWorld && !PackageName.IsNone())
 	{
 		for (ULevelStreaming* CurStreamingLevel : InWorld->GetStreamingLevels())
 		{
-			if( CurStreamingLevel && CurStreamingLevel->GetWorldAssetPackageFName() == PackageName )
+			if (CurStreamingLevel && CurStreamingLevel->GetWorldAssetPackageFName() == PackageName)
 			{
 				MatchingLevel = CurStreamingLevel;
 				break;
@@ -97,6 +94,68 @@ ULevelStreaming* FLevelUtils::FindStreamingLevel(UWorld* InWorld, const TCHAR* I
 		}
 	}
 	return MatchingLevel;
+}
+
+ULevelStreaming* FLevelUtils::FindStreamingLevel(UWorld* InWorld, const TCHAR* InPackageName)
+{
+	return FindStreamingLevel(InWorld, FName(InPackageName));
+}
+
+bool FLevelUtils::IsValidStreamingLevel(UWorld* InWorld, const TCHAR* InPackageName)
+{
+	if (FindStreamingLevel(InWorld, InPackageName))
+	{
+		return true;
+	}
+
+#if WITH_EDITOR
+	if (UWorldPartitionSubsystem* WorldPartitionSubsystem = InWorld ? InWorld->GetSubsystem<UWorldPartitionSubsystem>() : nullptr)
+	{
+		bool bIsValidStreamingLevel = false;
+		WorldPartitionSubsystem->ForEachWorldPartition([&bIsValidStreamingLevel, InPackageName](UWorldPartition* WorldPartition)
+		{
+			bIsValidStreamingLevel = WorldPartition->IsValidPackageName(InPackageName);
+			return !bIsValidStreamingLevel;
+		});
+		return bIsValidStreamingLevel;
+	}
+#endif
+
+	return false;
+}
+
+bool FLevelUtils::SupportsMakingVisibleTransactionRequests(UWorld* InWorld)
+{
+	return InWorld && InWorld->SupportsMakingVisibleTransactionRequests();
+}
+
+bool FLevelUtils::SupportsMakingInvisibleTransactionRequests(UWorld* InWorld)
+{
+	return InWorld && InWorld->SupportsMakingInvisibleTransactionRequests();
+}
+
+bool FLevelUtils::IsServerStreamingLevelVisible(UWorld* InWorld, const FName& InPackageName)
+{
+	// If there's no implementation for this world to query the server visible streaming levels, return true
+	if (!SupportsMakingVisibleTransactionRequests(InWorld))
+	{
+		return true;
+	}
+
+	const AServerStreamingLevelsVisibility* ServerStreamingLevelsVisibility = InWorld->GetServerStreamingLevelsVisibility();
+	return ServerStreamingLevelsVisibility && ServerStreamingLevelsVisibility->Contains(InPackageName);
+}
+
+ULevelStreaming* FLevelUtils::GetServerVisibleStreamingLevel(UWorld* InWorld, const FName& InPackageName)
+{
+	if (SupportsMakingVisibleTransactionRequests(InWorld))
+	{
+		if (const AServerStreamingLevelsVisibility* ServerStreamingLevelsVisibility = InWorld->GetServerStreamingLevelsVisibility())
+		{
+			return ServerStreamingLevelsVisibility->GetVisibleStreamingLevel(InPackageName);
+		}
+	}
+	return nullptr;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -137,7 +196,7 @@ bool FLevelUtils::IsLevelLocked(ULevel* Level)
 				if (pPackage)
 				{
 					FString PackageFileName;
-					if (FPackageName::DoesPackageExist(pPackage->GetName(), NULL, &PackageFileName))
+					if (FPackageName::DoesPackageExist(pPackage->GetName(), &PackageFileName))
 					{
 						LevelData.IsReadOnly = IFileManager::Get().IsReadOnly(*PackageFileName);
 					}
@@ -325,26 +384,13 @@ void FLevelUtils::SetEditorTransform(ULevelStreaming* StreamingLevel, const FTra
 void FLevelUtils::ApplyEditorTransform(const ULevelStreaming* StreamingLevel, bool bDoPostEditMove, AActor* Actor)
 {
 	check(StreamingLevel);
-	if (ULevel* LoadedLevel = StreamingLevel->GetLoadedLevel())
-	{	
-		FApplyLevelTransformParams TransformParams(LoadedLevel, StreamingLevel->LevelTransform);
-		TransformParams.Actor = Actor;
-		TransformParams.bDoPostEditMove = bDoPostEditMove;
-		ApplyLevelTransform(TransformParams);
-	}
+	LevelUtilsInternal::ApplyEditorTransform(StreamingLevel->GetLoadedLevel(), bDoPostEditMove, Actor, StreamingLevel->LevelTransform);
 }
 
 void FLevelUtils::RemoveEditorTransform(const ULevelStreaming* StreamingLevel, bool bDoPostEditMove, AActor* Actor)
 {
 	check(StreamingLevel);
-	if (ULevel* LoadedLevel = StreamingLevel->GetLoadedLevel())
-	{
-		const FTransform InverseTransform = StreamingLevel->LevelTransform.Inverse();
-		FApplyLevelTransformParams TransformParams(LoadedLevel, InverseTransform);
-		TransformParams.Actor = Actor;
-		TransformParams.bDoPostEditMove = bDoPostEditMove;
-		ApplyLevelTransform(TransformParams);
-	}
+	LevelUtilsInternal::ApplyEditorTransform(StreamingLevel->GetLoadedLevel(), bDoPostEditMove, Actor, StreamingLevel->LevelTransform.Inverse());
 }
 
 void FLevelUtils::ApplyPostEditMove( ULevel* Level )
@@ -404,6 +450,9 @@ void FLevelUtils::ApplyLevelTransform(const FLevelUtils::FApplyLevelTransformPar
 				{
 					RootComponent->SetRelativeLocation_Direct(TransformParams.LevelTransform.TransformPosition(RootComponent->GetRelativeLocation()));
 					RootComponent->SetRelativeRotation_Direct(TransformParams.LevelTransform.TransformRotation(RootComponent->GetRelativeRotation().Quaternion()).Rotator());
+					RootComponent->SetRelativeScale3D_Direct(TransformParams.LevelTransform.GetScale3D() * RootComponent->GetRelativeScale3D());
+
+					TransformParams.Actor->MarkNeedsRecomputeBoundsOnceForGame();
 				}
 			}
 			else
@@ -413,6 +462,10 @@ void FLevelUtils::ApplyLevelTransform(const FLevelUtils::FApplyLevelTransformPar
 				if (RootComponent && RootComponent->GetAttachParent() == nullptr)
 				{
 					RootComponent->SetRelativeLocationAndRotation(TransformParams.LevelTransform.TransformPosition(RootComponent->GetRelativeLocation()), TransformParams.LevelTransform.TransformRotation(RootComponent->GetRelativeRotation().Quaternion()));
+					RootComponent->SetRelativeScale3D(TransformParams.LevelTransform.GetScale3D() * RootComponent->GetRelativeScale3D());
+
+					// Any components which have cached their bounds will not be accurate after a level transform is applied. Force them to recompute the bounds once more.
+					TransformParams.Actor->MarkNeedsRecomputeBoundsOnceForGame();
 				}
 			}
 #if WITH_EDITOR
@@ -442,6 +495,7 @@ void FLevelUtils::ApplyLevelTransform(const FLevelUtils::FApplyLevelTransformPar
 				{
 					ModelComponent->SetRelativeLocation_Direct(TransformParams.LevelTransform.TransformPosition(ModelComponent->GetRelativeLocation()));
 					ModelComponent->SetRelativeRotation_Direct(TransformParams.LevelTransform.TransformRotation(ModelComponent->GetRelativeRotation().Quaternion()).Rotator());
+					ModelComponent->SetRelativeScale3D_Direct(TransformParams.LevelTransform.GetScale3D() * ModelComponent->GetRelativeScale3D());
 				}
 			}
 
@@ -457,6 +511,10 @@ void FLevelUtils::ApplyLevelTransform(const FLevelUtils::FApplyLevelTransformPar
 					{
 						RootComponent->SetRelativeLocation_Direct(TransformParams.LevelTransform.TransformPosition(RootComponent->GetRelativeLocation()));
 						RootComponent->SetRelativeRotation_Direct(TransformParams.LevelTransform.TransformRotation(RootComponent->GetRelativeRotation().Quaternion()).Rotator());
+						RootComponent->SetRelativeScale3D_Direct(TransformParams.LevelTransform.GetScale3D() * RootComponent->GetRelativeScale3D());
+
+						// Any components which have cached their bounds will not be accurate after a level transform is applied. Force them to recompute the bounds once more.
+						Actor->MarkNeedsRecomputeBoundsOnceForGame();
 					}
 				}
 			}
@@ -469,6 +527,7 @@ void FLevelUtils::ApplyLevelTransform(const FLevelUtils::FApplyLevelTransformPar
 				if (ModelComponent)
 				{
 					ModelComponent->SetRelativeLocationAndRotation(TransformParams.LevelTransform.TransformPosition(ModelComponent->GetRelativeLocation()), TransformParams.LevelTransform.TransformRotation(ModelComponent->GetRelativeRotation().Quaternion()));
+					ModelComponent->SetRelativeScale3D(TransformParams.LevelTransform.GetScale3D() * ModelComponent->GetRelativeScale3D());
 				}
 			}
 
@@ -483,6 +542,10 @@ void FLevelUtils::ApplyLevelTransform(const FLevelUtils::FApplyLevelTransformPar
 					if (RootComponent && RootComponent->GetAttachParent() == nullptr)
 					{
 						RootComponent->SetRelativeLocationAndRotation(TransformParams.LevelTransform.TransformPosition(RootComponent->GetRelativeLocation()), TransformParams.LevelTransform.TransformRotation(RootComponent->GetRelativeRotation().Quaternion()));
+						RootComponent->SetRelativeScale3D(TransformParams.LevelTransform.GetScale3D() * RootComponent->GetRelativeScale3D());
+
+						// Any components which have cached bounds will not be accurate after a level transform is applied. Force them to recompute the bounds once more.
+						Actor->MarkNeedsRecomputeBoundsOnceForGame();
 					}
 				}
 			}
@@ -496,6 +559,7 @@ void FLevelUtils::ApplyLevelTransform(const FLevelUtils::FApplyLevelTransformPar
 #endif // WITH_EDITOR
 
 		TransformParams.Level->OnApplyLevelTransform.Broadcast(TransformParams.LevelTransform);
+		FWorldDelegates::PostApplyLevelTransform.Broadcast(TransformParams.Level, TransformParams.LevelTransform);
 	}
 }
 

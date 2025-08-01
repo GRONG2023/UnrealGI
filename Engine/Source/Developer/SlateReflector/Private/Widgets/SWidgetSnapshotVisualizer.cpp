@@ -14,10 +14,13 @@
 #include "Widgets/Input/SButton.h"
 #include "Widgets/SNavigationSimulationList.h"
 #include "Framework/Layout/ScrollyZoomy.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Misc/Base64.h"
+#include "Misc/Compression.h"
 
 #include "SlateNavigationEventSimulator.h"
 #include "SlateReflectorModule.h"
+#include "Styling/WidgetReflectorStyle.h"
 
 #if SLATE_REFLECTOR_HAS_DESKTOP_PLATFORM
 #include "DesktopPlatformModule.h"
@@ -71,7 +74,7 @@ public:
 	{
 		SelectedWindowIndex = InIndex;
 		PickedWidgets.Reset();
-		PhysicalOffset = FVector2D::ZeroVector;
+		PhysicalOffset = FVector2f::ZeroVector;
 	}
 
 	int32 GetSelectedWindowIndex() const
@@ -111,7 +114,7 @@ public:
 		const TSharedRef<SWidget>& ChildWidget = ChildSlot.GetWidget();
 		if (ChildWidget->GetVisibility() != EVisibility::Collapsed)
 		{
-			const FVector2D& WidgetDesiredSize = ChildWidget->GetDesiredSize();
+			const FVector2f& WidgetDesiredSize = ChildWidget->GetDesiredSize();
 
 			// Clamp the pan offset based on our current geometry
 			SScrollableSnapshotImage* const NonConstThis = const_cast<SScrollableSnapshotImage*>(this);
@@ -140,7 +143,7 @@ public:
 	{
 		struct FWidgetPicker
 		{
-			static bool FindWidgetsUnderPoint(const FVector2D& InHitTestPoint, const FVector2D& InWindowPosition, const TSharedRef<FWidgetReflectorNodeBase>& InWidget, TArray<TSharedRef<FWidgetReflectorNodeBase>>& OutWidgets)
+			static bool FindWidgetsUnderPoint(const FVector2f& InHitTestPoint, const FVector2f& InWindowPosition, const TSharedRef<FWidgetReflectorNodeBase>& InWidget, TArray<TSharedRef<FWidgetReflectorNodeBase>>& OutWidgets)
 			{
 				const bool bNeedsHitTesting = InWidget->GetHitTestInfo().IsHitTestVisible || InWidget->GetHitTestInfo().AreChildrenHitTestVisible;
 				if (bNeedsHitTesting)
@@ -176,9 +179,9 @@ public:
 		if (bIsPicking)
 		{
 			// We need to pick in the snapshot window space, so convert the mouse co-ordinates to be relative to our top-left position
-			const FVector2D& ScreenMousePos = MouseEvent.GetScreenSpacePosition();
-			const FVector2D LocalMousePos = MyGeometry.AbsoluteToLocal(ScreenMousePos);
-			const FVector2D ScrolledPos = LocalMousePos - PhysicalOffset;
+			const FVector2f& ScreenMousePos = MouseEvent.GetScreenSpacePosition();
+			const FVector2f LocalMousePos = MyGeometry.AbsoluteToLocal(ScreenMousePos);
+			const FVector2f ScrolledPos = LocalMousePos - PhysicalOffset;
 
 			PickedWidgets.Reset();
 
@@ -246,13 +249,13 @@ public:
 				for (int32 WidgetIndex = 0; WidgetIndex < PickedWidgets.Num(); ++WidgetIndex)
 				{
 					const TSharedRef<FWidgetReflectorNodeBase>& PickedWidget = PickedWidgets[WidgetIndex];
-					const float ColorFactor = static_cast<float>(WidgetIndex)/PickedWidgets.Num();
+					const float ColorFactor = static_cast<float>(WidgetIndex)/ static_cast<float>(PickedWidgets.Num());
 					const FLinearColor Tint(1.0f - ColorFactor, ColorFactor, 0.0f, 1.0f);
 
 					FSlateDrawElement::MakeBox(
 						OutDrawElements,
 						++LayerId,
-						AllottedGeometry.ToPaintGeometry(RootDrawOffset + PickedWidget->GetAccumulatedLayoutTransform().GetTranslation(), TransformPoint(PickedWidget->GetAccumulatedLayoutTransform().GetScale(), PickedWidget->GetLocalSize())),
+						AllottedGeometry.ToPaintGeometry(TransformPoint(PickedWidget->GetAccumulatedLayoutTransform().GetScale(), PickedWidget->GetLocalSize()), FSlateLayoutTransform(RootDrawOffset + PickedWidget->GetAccumulatedLayoutTransform().GetTranslation())),
 						Brush,
 						ESlateDrawEffect::None,
 						FMath::Lerp(TopmostWidgetColor, LeafmostWidgetColor, ColorFactor)
@@ -266,7 +269,7 @@ public:
 					FSlateDrawElement::MakeBox(
 						OutDrawElements,
 						++LayerId,
-						AllottedGeometry.ToPaintGeometry(RootDrawOffset + SelectedWidget->GetAccumulatedLayoutTransform().GetTranslation(), TransformPoint(SelectedWidget->GetAccumulatedLayoutTransform().GetScale(), SelectedWidget->GetLocalSize())),
+						AllottedGeometry.ToPaintGeometry(TransformPoint(SelectedWidget->GetAccumulatedLayoutTransform().GetScale(), SelectedWidget->GetLocalSize()), FSlateLayoutTransform(RootDrawOffset + SelectedWidget->GetAccumulatedLayoutTransform().GetTranslation())),
 						Brush,
 						ESlateDrawEffect::None,
 						SelectedWidget->GetTint()
@@ -286,11 +289,11 @@ public:
 
 	virtual bool ScrollBy(const FVector2D& Offset) override
 	{
-		const FVector2D PrevPhysicalOffset = PhysicalOffset;
-		PhysicalOffset += Offset;
+		const FVector2f PrevPhysicalOffset = PhysicalOffset;
+		PhysicalOffset += UE::Slate::CastToVector2f(Offset);
 
 		const TSharedRef<SWidget>& ChildWidget = ChildSlot.GetWidget();
-		const FVector2D& WidgetDesiredSize = ChildWidget->GetDesiredSize();
+		const FVector2f& WidgetDesiredSize = ChildWidget->GetDesiredSize();
 		ClampViewOffset(WidgetDesiredSize, CachedSize);
 
 		return PhysicalOffset != PrevPhysicalOffset;
@@ -307,7 +310,7 @@ public:
 	}
 
 private:
-	void ClampViewOffset(const FVector2D& ViewportSize, const FVector2D& LocalSize)
+	void ClampViewOffset(const FVector2f& ViewportSize, const FVector2f& LocalSize)
 	{
 		PhysicalOffset.X = ClampViewOffsetAxis(ViewportSize.X, LocalSize.X, PhysicalOffset.X);
 		PhysicalOffset.Y = ClampViewOffsetAxis(ViewportSize.Y, LocalSize.Y, PhysicalOffset.Y);
@@ -340,8 +343,8 @@ private:
 		return CurrentOffset;
 	}
 
-	FVector2D PhysicalOffset;
-	mutable FVector2D CachedSize;
+	FVector2f PhysicalOffset;
+	mutable FVector2f CachedSize;
 
 	FScrollyZoomy ScrollyZoomy;
 
@@ -446,7 +449,7 @@ void FWidgetSnapshotData::SaveSnapshotToBuffer(TArray<uint8>& OutData) const
 	BufferWriter.SerializeCompressed(TmpJsonData.GetData(), TmpJsonData.Num(), NAME_Zlib);
 }
 
-double SnapshotJsonVersion = 1.6;
+double SnapshotJsonVersion = 2.2;
 
 TSharedRef<FJsonObject> FWidgetSnapshotData::SaveSnapshotAsJson() const
 {
@@ -466,6 +469,24 @@ TSharedRef<FJsonObject> FWidgetSnapshotData::SaveSnapshotAsJson() const
 			WindowsJsonArray.Add(FSnapshotWidgetReflectorNode::ToJson(StaticCastSharedRef<FSnapshotWidgetReflectorNode>(Window.ToSharedRef())));
 		}
 		RootJsonObject->SetArrayField(TEXT("Windows"), WindowsJsonArray);
+	}
+
+	{
+		TArray<TSharedPtr<FJsonValue>> NavigationDataArray;
+		
+		for (const FWidgetSnapshotNavigationSimulationData& NavigationSimulation : NavigationSimulationData)
+		{
+			TSharedRef<FJsonObject> NavigationData = MakeShared<FJsonObject>();
+			TArray<TSharedPtr<FJsonValue>> SimulationDataArray;
+			for (const FNavigationSimulationWidgetNodePtr& SimulationData : NavigationSimulation.SimulationData)
+			{
+				check(SimulationData.Get());
+				SimulationDataArray.Add(FNavigationSimulationWidgetNode::ToJson(*SimulationData.Get()));
+			}
+			NavigationData->SetArrayField(TEXT("SimulationData"), SimulationDataArray);
+			NavigationDataArray.Add(MakeShared<FJsonValueObject>(NavigationData));
+		}
+		RootJsonObject->SetArrayField(TEXT("NavigationData"), NavigationDataArray);
 	}
 
 	{
@@ -493,7 +514,7 @@ TSharedRef<FJsonObject> FWidgetSnapshotData::SaveSnapshotAsJson() const
 					TextureDataJsonObject->SetNumberField(TEXT("UncompressedSize"), UncompressedDataSizeBytes);
 
 					// FCompression::CompressMemory updates CompressedDataSize with the actual size - we may have to shrink our buffer count now
-					CompressedDataBuffer.SetNum(CompressedDataSize, false);
+					CompressedDataBuffer.SetNum(CompressedDataSize, EAllowShrinking::No);
 
 					const FString EncodedTextureData = FBase64::Encode(CompressedDataBuffer);
 					TextureDataJsonObject->SetStringField(TEXT("TextureData"), EncodedTextureData);
@@ -559,7 +580,7 @@ void FWidgetSnapshotData::LoadSnapshotFromBuffer(const TArray<uint8>& InData)
 		BufferReader << UncompressedDataSize;
 
 		UncompressedData.AddZeroed(UncompressedDataSize);
-		BufferReader.SerializeCompressed(UncompressedData.GetData(), 0, NAME_Zlib);
+		BufferReader.SerializeCompressed(UncompressedData.GetData(), UncompressedDataSize, NAME_Zlib);
 	}
 
 	bool bJsonLoaded = false;
@@ -599,6 +620,22 @@ void FWidgetSnapshotData::LoadSnapshotFromJson(const TSharedRef<FJsonObject>& In
 		for (const TSharedPtr<FJsonValue>& WindowJsonValue : WindowsJsonArray)
 		{
 			Windows.Add(FSnapshotWidgetReflectorNode::FromJson(WindowJsonValue.ToSharedRef()));
+		}
+	}
+
+	{
+		const TArray<TSharedPtr<FJsonValue>>& NavigationDataJsonArray = InRootJsonObject->GetArrayField(TEXT("NavigationData"));
+		for (const TSharedPtr<FJsonValue>& NavigationDataJsonValue : NavigationDataJsonArray)
+		{
+			FWidgetSnapshotNavigationSimulationData NavigationData;
+			const TSharedPtr<FJsonObject>& NavigationDataJsonObject = NavigationDataJsonValue->AsObject();
+			const TArray<TSharedPtr<FJsonValue>>& SimulationDataJsonArray = NavigationDataJsonObject->GetArrayField(TEXT("SimulationData"));
+			for (const TSharedPtr<FJsonValue>& SimulationDataJsonValue : SimulationDataJsonArray)
+			{
+				FNavigationSimulationWidgetNodePtr SimulationData = FNavigationSimulationWidgetNode::FromJson(SimulationDataJsonValue.ToSharedRef());
+				NavigationData.SimulationData.Add(SimulationData);
+			}
+			NavigationSimulationData.Add(MoveTemp(NavigationData));
 		}
 	}
 
@@ -760,7 +797,54 @@ void SWidgetSnapshotVisualizer::Construct(const FArguments& InArgs)
 {
 	SnapshotDataPtr = InArgs._SnapshotData;
 	check(SnapshotDataPtr);
+	FSlimHorizontalToolBarBuilder ToolbarBuilderGlobal(TSharedPtr<const FUICommandList>(), FMultiBoxCustomization::None);
+	ToolbarBuilderGlobal.SetStyle(&FAppStyle::Get(), "SlimToolBar");
+	SAssignNew(WindowPickerCombo, SComboBox<TSharedPtr<FWidgetReflectorNodeBase>>)
+		.OptionsSource(&SnapshotDataPtr->GetWindowsPtr())
+		.OnSelectionChanged(this, &SWidgetSnapshotVisualizer::OnWindowSelectionChanged)
+		.OnGenerateWidget(this, &SWidgetSnapshotVisualizer::GenerateWindowPickerComboItem)
+		[
+			SNew(STextBlock)
+			.Text(this, &SWidgetSnapshotVisualizer::GetSelectedWindowComboItemText)
+		]
+		.IsEnabled(this, &SWidgetSnapshotVisualizer::HasValidSnapshot);
 
+	ToolbarBuilderGlobal.BeginSection("Picking");
+	{
+		
+		FTextBuilder TooltipText;
+		ToolbarBuilderGlobal.AddWidget(WindowPickerCombo.ToSharedRef());
+		ToolbarBuilderGlobal.AddToolBarButton(
+			FUIAction(
+				FExecuteAction::CreateSP(this, &SWidgetSnapshotVisualizer::OnPickWidgetClicked),
+				FCanExecuteAction::CreateSP(this, &SWidgetSnapshotVisualizer::HasValidSnapshot),
+				FGetActionCheckState::CreateSP(this, &SWidgetSnapshotVisualizer::GetPickWidgetColor)
+			),
+			NAME_None,
+			MakeAttributeSP(this, &SWidgetSnapshotVisualizer::GetPickWidgetText),
+			TooltipText.ToText(),
+			FSlateIcon(FWidgetReflectorStyle::GetStyleSetName(), "Icon.HitTestPicking"),
+			EUserInterfaceActionType::ToggleButton
+		);
+#if SLATE_REFLECTOR_HAS_DESKTOP_PLATFORM
+		
+		ToolbarBuilderGlobal.AddToolBarButton(
+			FUIAction(
+				FExecuteAction::CreateSP(this, &SWidgetSnapshotVisualizer::OnSaveSnapshotClicked),
+				FCanExecuteAction::CreateSP(this, &SWidgetSnapshotVisualizer::HasValidSnapshot),
+				FGetActionCheckState()
+			),
+			NAME_None,
+			LOCTEXT("SaveSnapshotButtonText", "Save Snapshot"),
+			TooltipText.ToText(),
+			FSlateIcon(FAppStyle::Get().GetStyleSetName(), "Icons.Save"),
+			EUserInterfaceActionType::Button
+		);
+#endif
+
+
+	}
+	ToolbarBuilderGlobal.EndSection();
 	ChildSlot
 	[
 		SNew(SBorder)
@@ -774,45 +858,8 @@ void SWidgetSnapshotVisualizer::Construct(const FArguments& InArgs)
 			.AutoHeight()
 			.Padding(2.f)
 			[
-				SNew(SHorizontalBox)
+				ToolbarBuilderGlobal.MakeWidget()
 
-				+SHorizontalBox::Slot()
-				.AutoWidth()
-				.Padding(FMargin(5.0f, 4.0f))
-				[
-					SAssignNew(WindowPickerCombo, SComboBox<TSharedPtr<FWidgetReflectorNodeBase>>)
-					.OptionsSource(&SnapshotDataPtr->GetWindowsPtr())
-					.OnSelectionChanged(this, &SWidgetSnapshotVisualizer::OnWindowSelectionChanged)
-					.OnGenerateWidget(this, &SWidgetSnapshotVisualizer::GenerateWindowPickerComboItem)
-					[
-						SNew(STextBlock)
-						.Text(this, &SWidgetSnapshotVisualizer::GetSelectedWindowComboItemText)
-					]
-					.IsEnabled(this, &SWidgetSnapshotVisualizer::HasValidSnapshot)
-				]
-
-				+SHorizontalBox::Slot()
-				.AutoWidth()
-				.Padding(FMargin(5.0f, 4.0f))
-				[
-					SNew(SButton)
-					.Text(this, &SWidgetSnapshotVisualizer::GetPickWidgetText)
-					.ButtonColorAndOpacity(this, &SWidgetSnapshotVisualizer::GetPickWidgetColor)
-					.OnClicked(this, &SWidgetSnapshotVisualizer::OnPickWidgetClicked)
-					.IsEnabled(this, &SWidgetSnapshotVisualizer::HasValidSnapshot)
-				]
-
-#if SLATE_REFLECTOR_HAS_DESKTOP_PLATFORM
-				+SHorizontalBox::Slot()
-				.AutoWidth()
-				.Padding(FMargin(5.0f, 4.0f))
-				[
-					SNew(SButton)
-					.Text(LOCTEXT("SaveSnapshotButtonText", "Save Snapshot"))
-					.OnClicked(this, &SWidgetSnapshotVisualizer::OnSaveSnapshotClicked)
-					.IsEnabled(this, &SWidgetSnapshotVisualizer::HasValidSnapshot)
-				]
-#endif // SLATE_REFLECTOR_HAS_DESKTOP_PLATFORM
 			]
 
 			+SVerticalBox::Slot()
@@ -930,23 +977,21 @@ FText SWidgetSnapshotVisualizer::GetPickWidgetText() const
 	return (bIsPicking) ? LOCTEXT("PickingWidget", "Picking (Esc to Stop)") : LOCTEXT("PickSnapshotWidget", "Pick Snapshot Widget");
 }
 
-FSlateColor SWidgetSnapshotVisualizer::GetPickWidgetColor() const
+ECheckBoxState SWidgetSnapshotVisualizer::GetPickWidgetColor() const
 {
-	static const FName SelectionColor("SelectionColor");
-
 	const bool bIsPicking = SnapshotImage.IsValid() && SnapshotImage->GetIsPicking();
 	return bIsPicking
-		? FCoreStyle::Get().GetSlateColor(SelectionColor)
-		: FLinearColor::White;
+		? ECheckBoxState::Checked
+		: ECheckBoxState::Unchecked;
 }
 
-FReply SWidgetSnapshotVisualizer::OnPickWidgetClicked()
+void SWidgetSnapshotVisualizer::OnPickWidgetClicked()
 {
 	if (SnapshotImage.IsValid())
 	{
 		SnapshotImage->SetIsPicking(!SnapshotImage->GetIsPicking());
 	}
-	return FReply::Handled();
+
 }
 
 bool SWidgetSnapshotVisualizer::HasValidSnapshot() const
@@ -965,7 +1010,7 @@ EVisibility SWidgetSnapshotVisualizer::HandleGetNavigationSimulationListVisibili
 
 #if SLATE_REFLECTOR_HAS_DESKTOP_PLATFORM
 
-FReply SWidgetSnapshotVisualizer::OnSaveSnapshotClicked()
+void SWidgetSnapshotVisualizer::OnSaveSnapshotClicked()
 {
 	IDesktopPlatform* DesktopPlatform = FDesktopPlatformModule::Get();
 
@@ -990,7 +1035,7 @@ FReply SWidgetSnapshotVisualizer::OnSaveSnapshotClicked()
 		}
 	}
 
-	return FReply::Handled();
+
 }
 
 #endif // SLATE_REFLECTOR_HAS_DESKTOP_PLATFORM

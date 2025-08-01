@@ -12,7 +12,7 @@ class ITableRow;
 UENUM()
 namespace ESelectionMode
 {
-	enum Type
+	enum Type : int
 	{
 		/** Nothing can be selected and there is no hover cue for selection.  You can still handle mouse button events though. */
 		None,
@@ -33,7 +33,7 @@ namespace ESelectionMode
 UENUM()
 namespace ETableViewMode
 {
-	enum Type
+	enum Type : int
 	{
 		List,
 		Tile,
@@ -127,7 +127,7 @@ public:
 	 *
 	 * @return The data item from which TheWidget was generated
 	 */
-	virtual const ItemType* Private_ItemFromWidget( const ITableRow* TheWidget ) const = 0;
+	virtual const TObjectPtrWrapTypeOf<ItemType>* Private_ItemFromWidget( const ITableRow* TheWidget ) const = 0;
 
 	/**
 	 * Set whether some data item is expanded or not.

@@ -1,22 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Atmosphere/AtmosphericFog.h"
+#include "Async/TaskGraphInterfaces.h"
 #include "Atmosphere/AtmosphericFogComponent.h"
 #include "UObject/ConstructorHelpers.h"
-#include "EngineDefines.h"
-#include "RenderingThread.h"
 #include "Components/ArrowComponent.h"
-#include "UObject/UObjectHash.h"
-#include "UObject/UObjectIterator.h"
 #include "Engine/Texture2D.h"
-#include "ComponentReregisterContext.h"
 #include "Atmosphere/AtmosphericFog.h"
 #include "Components/BillboardComponent.h"
-#include "Runtime/Renderer/Private/ScenePrivate.h"
-#include "Runtime/Renderer/Private/AtmosphereRendering.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AtmosphericFog)
 
 #if WITH_EDITOR
-#include "ObjectEditorUtils.h"
 #endif
 
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
@@ -39,7 +34,7 @@ AAtmosphericFog::AAtmosphericFog(const FObjectInitializer& ObjectInitializer)
 			FName ID_Fog;
 			FText NAME_Fog;
 			FConstructorStatics()
-				: FogTextureObject(TEXT("/Engine/EditorResources/S_ExpoHeightFog"))
+				: FogTextureObject(TEXT("/Engine/EditorResources/S_AtmosphericHeightFog"))
 				, ID_Fog(TEXT("Fog"))
 				, NAME_Fog(NSLOCTEXT("SpriteCategory", "Fog", "Fog"))
 			{
@@ -75,20 +70,5 @@ AAtmosphericFog::AAtmosphericFog(const FObjectInitializer& ObjectInitializer)
 	SetHidden(false);
 }
 
-#if WITH_EDITOR
-// Prepare render targets when new actor spawned
-void AAtmosphericFog::PostActorCreated()
-{
-	Super::PostActorCreated();
-	if (GIsEditor)
-	{
-		if ( !IsTemplate() && AtmosphericFogComponent )
-		{
-			AtmosphericFogComponent->InitResource();
-		}
-	}
-}
-
-#endif
-
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
+

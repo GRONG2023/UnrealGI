@@ -16,7 +16,6 @@ using Ionic.Zlib;
 using System.ComponentModel;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.Win32;
-using Tools.DotNETCommon;
 
 namespace iPhonePackager
 {
@@ -75,7 +74,9 @@ namespace iPhonePackager
         Error_SymbolizedSONotFound = 153,
         Error_LicenseNotAccepted = 154,
         Error_AndroidOBBError = 155,
-    };
+		Error_SDKInstallFailed = 200,
+		Error_DeviceUpdateFailed = 201,
+	};
 
     public partial class Program
     {
@@ -731,7 +732,7 @@ namespace iPhonePackager
 
         static void ListDevices()
         {
-            var DeviceList = DeploymentHelper.Get().EnumerateConnectedDevices();
+            var DeviceList = DeploymentHelper.GetAllConnectedDevices();
 
             Console.WriteLine("-------------------------------------------------------");
             Console.WriteLine("List of devices attached");
@@ -789,6 +790,9 @@ namespace iPhonePackager
 
             AppDomain.CurrentDomain.AssemblyResolve += new ResolveEventHandler(CurrentDomain_AssemblyResolve);
 
+			// Force UTF-8 encoding so UBT and the engine can parse the IPP output consistently.
+			Console.OutputEncoding = Encoding.UTF8;
+
             // A simple, top-level try-catch block
             try
             {
@@ -826,7 +830,7 @@ namespace iPhonePackager
                     Log("RPC Commands: SetExec, InstallProvision, MakeApp, DeleteIPA, Copy, Kill, Strip, Zip, GenDSYM");
                     Log("");
                     Log("Sample commandlines:");
-                    Log(" ... iPhonePackager Deploy UDKGame Release");
+                    Log(" ... iPhonePackager Deploy UnrealGame Release");
                     Log(" ... iPhonePackager RPC SwordGame Shipping MakeApp");
                     return (int)ErrorCodes.Error_Arguments;
                 }
@@ -846,7 +850,7 @@ namespace iPhonePackager
                 GameName = Path.GetFileNameWithoutExtension(GamePath);
                 if (GameName.Equals("UE4", StringComparison.InvariantCultureIgnoreCase) || GameName.Equals("Engine", StringComparison.InvariantCultureIgnoreCase))
                 {
-                    GameName = "UE4Game";
+                    GameName = "UnrealGame";
                 }
 
                 // setup configuration
@@ -1061,13 +1065,6 @@ namespace iPhonePackager
                 if (ReturnCode == 0)
                 {
                     Program.ReturnCode = (int)ErrorCodes.Error_Unknown;
-                }
-            }
-            finally
-            {
-                if (DeploymentHelper.DeploymentServerProcess != null)
-                {
-                    DeploymentHelper.DeploymentServerProcess.Close();
                 }
             }
 

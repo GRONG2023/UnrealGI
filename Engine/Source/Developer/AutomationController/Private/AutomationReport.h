@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
+#include "AutomationTestExcludelist.h"
 #include "IAutomationReport.h"
 
 /**
@@ -31,6 +32,7 @@ public:
 	virtual int32 GetTotalNumFilteredChildren() const override;
 	virtual int32 GetEnabledTestsNum() const override;
 	virtual void GetEnabledTestNames(TArray<FString>& OutEnabledTestNames, FString CurrentPath) const override;
+	virtual void GetFilteredTestNames(TArray<FString>& OutFilteredTestNames, FString CurrentPath) const override;
 	virtual void SetEnabledTests(const TArray<FString>& EnabledTests, FString CurrentPath) override;
 	virtual bool IsEnabled() const override;
 	virtual void SetEnabled(bool bShouldBeEnabled) override;
@@ -51,6 +53,7 @@ public:
 	virtual void AddArtifact(const int32 ClusterIndex, const int32 PassIndex, const FAutomationArtifact& Artifact) override;
 	virtual void GetCompletionStatus(const int32 ClusterIndex, const int32 PassIndex, FAutomationCompleteState& OutCompletionState) override;
 	virtual EAutomationState GetState(const int32 ClusterIndex, const int32 PassIndex) const override;
+	virtual void SetState(const EAutomationState State) override;
 	virtual const FAutomationTestResults& GetResults( const int32 ClusterIndex, const int32 PassIndex ) override;
 	virtual const int32 GetNumResults( const int32 ClusterIndex ) override;
 	virtual const int32 GetCurrentPassIndex( const int32 ClusterIndex ) override;
@@ -68,6 +71,11 @@ public:
 	virtual void ResetNetworkCommandResponses() override;
 	virtual const bool ExpandInUI() const override;
 	virtual void StopRunningTest() override;
+	virtual bool IsToBeSkipped(FName* OutReason = nullptr, bool* OutWarn = nullptr) const override;
+	virtual bool IsToBeSkippedOnConditions() const override;
+	virtual bool IsToBeSkippedByPropagation() const override;
+	virtual void SetSkipFlag(bool bEnableSkip, const FAutomationTestExcludelistEntry* Template = nullptr, bool bFromPropagation = false) override;
+	virtual TSharedPtr<FAutomationTestExcludeOptions> GetExcludeOptions() override;
 
 private:
 
@@ -89,9 +97,6 @@ private:
 	/** Number of responses from network commands */
 	uint32 NumberNetworkResponsesReceived;
 
-	/** Number of required devices for this test */
-	uint32 RequiredDeviceCount;
-	
 	/** All child tests */
 	TArray<TSharedPtr<IAutomationReport> >ChildReports;
 
@@ -106,4 +111,10 @@ private:
 
 	/** Structure holding the test info */
 	FAutomationTestInfo TestInfo;
+
+	/** Structure holding the info on the exclude test */
+	FAutomationTestExcludelistEntry ExcludeTestInfo;
+	
+	/** True if this item is inside the exclude list */
+	bool bNeedToSkip = false;
 };

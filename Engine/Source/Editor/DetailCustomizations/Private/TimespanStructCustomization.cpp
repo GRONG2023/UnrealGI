@@ -1,11 +1,22 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "TimespanStructCustomization.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Engine/GameViewportClient.h"
-#include "PropertyHandle.h"
-#include "Widgets/Input/SEditableTextBox.h"
+
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "DetailWidgetRow.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Misc/Attribute.h"
+#include "Misc/Timespan.h"
+#include "PropertyHandle.h"
+#include "Styling/AppStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SEditableTextBox.h"
 
 
 #define LOCTEXT_NAMESPACE "TimespanStructCustomization"
@@ -52,13 +63,14 @@ void FTimespanStructCustomization::CustomizeHeader(TSharedRef<IPropertyHandle> S
 
 FSlateColor FTimespanStructCustomization::HandleTextBoxForegroundColor() const
 {
-	if (!InputValid)
+	if (InputValid)
 	{
-		return FLinearColor::Red;
+		static const FName DefaultForeground("Colors.Foreground");
+		return FAppStyle::Get().GetSlateColor(DefaultForeground);
 	}
 
-	static const FName InvertedForegroundName("InvertedForeground");
-	return FEditorStyle::GetSlateColor(InvertedForegroundName);
+	static const FName Red("Colors.AccentRed");
+	return FAppStyle::Get().GetSlateColor(Red);
 }
 
 
@@ -112,7 +124,7 @@ void FTimespanStructCustomization::HandleTextBoxTextCommited(const FText& NewTex
 			*(FTimespan*)RawDataInstance = ParsedTimespan;
 		}
 
-		PropertyHandle->NotifyPostChange();
+		PropertyHandle->NotifyPostChange(EPropertyChangeType::ValueSet);
 		PropertyHandle->NotifyFinishedChangingProperties();
 	}
 }

@@ -2,12 +2,21 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "FindInBlueprintManager.h"
+#include "Delegates/Delegate.h"
 #include "Engine/MemberReference.h"
-#include "TickableEditorObject.h"
+#include "FindInBlueprintManager.h"
 #include "Misc/ScopedSlowTask.h"
 #include "ScopedTransaction.h"
+#include "Stats/Stats2.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UniquePtr.h"
+#include "TickableEditorObject.h"
+
+class FScopedTransaction;
+class UBlueprint;
+struct FScopedSlowTask;
 
 /** A helper class for Replacing Variable references in blueprints */
 struct FReplaceNodeReferencesHelper : FTickableEditorObject
@@ -48,12 +57,13 @@ struct FReplaceNodeReferencesHelper : FTickableEditorObject
 
 	/**
 	 * Helper function to replace references
-	 * 
+	 *
+	 * @param InSource		Variable reference to replace
 	 * @param InReplacement Variable reference to replace with
 	 * @param InBlueprint   Blueprint that InReplacement belongs to
 	 * @param InRawDataList Raw find in blueprints search results
 	 */
-	static void ReplaceReferences(FMemberReference& InReplacement, UBlueprint* InBlueprint, TArray<FImaginaryFiBDataSharedPtr>& InRawDataList);
+	static void ReplaceReferences(const FMemberReference& InSource, const FMemberReference& InReplacement, UBlueprint* InBlueprint, TArray<FImaginaryFiBDataSharedPtr>& InRawDataList);
 
 private:
 

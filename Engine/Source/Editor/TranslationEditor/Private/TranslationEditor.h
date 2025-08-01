@@ -9,7 +9,7 @@
 #include "Widgets/Text/STextBlock.h"
 #include "Toolkits/IToolkitHost.h"
 #include "TranslationDataManager.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "ITranslationEditor.h"
 #include "IPropertyTable.h"
 #include "CustomFontColumn.h"
@@ -90,8 +90,8 @@ private:
 	FTranslationEditor(TSharedRef< FTranslationDataManager > InDataManager, const FString& InManifestFile, const FString& InArchiveFile, ULocalizationTarget* const LocalizationTarget)
 		: ITranslationEditor(InManifestFile, InArchiveFile, LocalizationTarget)
 	, DataManager(InDataManager)
-	, SourceFont(FEditorStyle::GetFontStyle( PropertyTableConstants::NormalFontStyle ))
-	, TranslationTargetFont(FEditorStyle::GetFontStyle( PropertyTableConstants::NormalFontStyle ))
+	, SourceFont(FAppStyle::GetFontStyle( PropertyTableConstants::NormalFontStyle ))
+	, TranslationTargetFont(FAppStyle::GetFontStyle( PropertyTableConstants::NormalFontStyle ))
 	, SourceColumn(MakeShareable(new FCustomFontColumn(SourceFont)))
 	, TranslationColumn(MakeShareable(new FCustomFontColumn(TranslationTargetFont)))
 	, PreviewTextBlock(SNew(STextBlock)
@@ -106,10 +106,16 @@ private:
 
 	/**	Spawns the untranslated tab */
 	TSharedRef<SDockTab> SpawnTab_Untranslated( const FSpawnTabArgs& Args );
+	/** Getter function bound to the label attribute for the untranslated tab. */
+	FText GetTabLabel_Untranslated() const;
 	/**	Spawns the review tab */
 	TSharedRef<SDockTab> SpawnTab_Review( const FSpawnTabArgs& Args );
+	/** Getter function bound to the label attribute for the review tab. */
+	FText GetTabLabel_Review() const;
 	/**	Spawns the completed tab */
 	TSharedRef<SDockTab> SpawnTab_Completed( const FSpawnTabArgs& Args );
+	/** Getter function bound to the label attribute for the completed tab. */
+	FText GetTabLabel_Completed() const;
 	/**	Spawns the preview tab */
 	TSharedRef<SDockTab> SpawnTab_Preview( const FSpawnTabArgs& Args );
 	/**	Spawns the context tab */

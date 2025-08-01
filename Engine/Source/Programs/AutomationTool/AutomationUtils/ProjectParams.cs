@@ -1,5 +1,4 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
-// Copyright Epic Games, Inc. All Rights Reserved.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -7,14 +6,40 @@ using System.Text;
 using UnrealBuildTool;
 using System.IO;
 using System.Reflection;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using UnrealBuildBase;
+using Microsoft.Extensions.Logging;
+
+using static AutomationTool.CommandUtils;
 
 namespace AutomationTool
 {
+	[ParamHelp("platform", "Platform of the target", ParamType = typeof(string))]
+	[ParamHelp("config", "Config of the target", ParamType = typeof(string))]
+	[ParamHelp("project", "Config of the target", ParamType = typeof(string))]
+	[ParamHelp("client", "Build, cook and run a client and a server, uses client target configuration", ParamType = typeof(bool))]
+	[ParamHelp("noclient", "Do not run the client, just run the server", ParamType = typeof(bool))]
+	[ParamHelp("server", "Is this a server target?", ParamType = typeof(bool))]
+	[ParamHelp("build", "True if build step should be executed", ParamType = typeof(bool))]
+	[ParamHelp("ubtargs", "Extra options to pass to ubt")]
+	[ParamHelp("cook", "Determines if the build is going to use cooked data", ParamType = typeof(bool))]
+	[ParamHelp("AdditionalCookerOptions", "Additional arguments sent to the cooking step", ParamType = typeof(string))]
+	[ParamHelp("pak", "Generate a pak file", ParamType = typeof(bool))]
+	[ParamHelp("deploy", "Deploy the project for the target platform", ParamType = typeof(bool))]
+	[ParamHelp("stage", "Put this build in a stage director", ParamType = typeof(bool))]
+	[ParamHelp("run", "Run the game after it is built (including server, if -server)", ParamType = typeof(bool))]
+	[ParamHelp("zenstore", "Save cooked output data to the Zen storage server", ParamType = typeof(bool))]
+	[ParamHelp("iterate", "Uses the iterative cooking/deploy", ParamType = typeof(bool))]
+	public interface IProjectParamsHelpers
+	{
+	}
+
 	[Help("targetplatform=PlatformName", "target platform for building, cooking and deployment (also -Platform)")]
 	[Help("servertargetplatform=PlatformName", "target platform for building, cooking and deployment of the dedicated server (also -ServerPlatform)")]
 	public class ProjectParams
 	{
+		static ILogger Logger => Log.Logger;
+
 		/// <summary>
 		/// Gets a parameter from the command line if it hasn't been specified in the constructor. 
 		/// If the command line is not available, default value will be used.
@@ -103,17 +128,50 @@ namespace AutomationTool
 		/// <param name="Default">Default value</param>
 		/// <param name="bTrimQuotes">If set, the leading and trailing quotes will be removed, e.g. instead of "/home/User Name" it will return /home/User Name</param>
 		/// <returns>Parameter value.</returns>
-		string ParseParamValueIfNotSpecified(BuildCommand Command, string SpecifiedValue, string ParamName, string Default = "", bool bTrimQuotes = false)
+		string ParseParamValueIfNotSpecified(BuildCommand Command, string SpecifiedValue, string ParamName, string Default = "", bool bTrimQuotes = false, string ObsoleteParamName = null, string ObsoleteSpecifiedValue = null)
 		{
 			string Result = Default;
 
-			if (SpecifiedValue != null)
+			if (ObsoleteSpecifiedValue != null)
+			{
+				if (SpecifiedValue == null)
+				{
+					Logger.LogWarning("Value was provided for \"{ParamName}\" using obsolete name \"{ObsoleteParamName}\"", ParamName, ObsoleteParamName);
+					Result = SpecifiedValue;
+				}
+				else
+				{
+					Logger.LogWarning("Value provided for obsolete name \"{ObsoleteParamName}\" will be ignored as \"{ParamName}\" was provided", ObsoleteParamName, ParamName);
+				}
+			}
+			else if (SpecifiedValue != null)
 			{
 				Result = SpecifiedValue;
 			}
 			else if (Command != null)
 			{
-				Result = Command.ParseParamValue(ParamName, Default);
+				string Parsed = Command.ParseParamValue(ParamName, null);
+
+				if (ObsoleteParamName != null)
+				{
+					string ParsedObsolete = Command.ParseParamValue(ObsoleteParamName, null);
+					if (Parsed == null)
+					{
+						// Didn't find the new name on the command line. If the obsolete name was found, use it, and warn.
+						if (ParsedObsolete != null)
+						{
+							Logger.LogWarning("Obsolete argument \"{ObsoleteParamName}\" on command line - use \"{ParamName}\" instead", ObsoleteParamName, ParamName);
+							Parsed = ParsedObsolete;
+						}
+					}
+					else if (ParsedObsolete != null)
+					{
+						// Did find the new name on the command line - check for the obsolete name. If found, do not use it, and warn.
+						Logger.LogWarning("Obsolete argument \"{ObsoleteParamName}\" will be ignored as \"{ParamName}\" was provided", ObsoleteParamName, ParamName);
+					}
+				}
+
+				Result = Parsed ?? Default;
 			}
 
 			return bTrimQuotes ? Result.Trim( new char[]{'\"'} ) : Result;
@@ -252,7 +310,10 @@ namespace AutomationTool
             this.DLCIncludeEngineContent = InParams.DLCIncludeEngineContent;
 			this.DLCActLikePatch = InParams.DLCActLikePatch;
 			this.DLCPakPluginFile = InParams.DLCPakPluginFile;
-            this.DiffCookedContentPath = InParams.DiffCookedContentPath;
+			this.DLCOverrideCookedSubDir = InParams.DLCOverrideCookedSubDir;
+			this.DLCOverrideStagedSubDir = InParams.DLCOverrideStagedSubDir;
+			this.DiffCookedContentPath = InParams.DiffCookedContentPath;
+            this.AdditionalBuildOptions = InParams.AdditionalBuildOptions;
             this.AdditionalCookerOptions = InParams.AdditionalCookerOptions;
 			this.ClientCookedTargets = InParams.ClientCookedTargets;
 			this.ServerCookedTargets = InParams.ServerCookedTargets;
@@ -263,6 +324,7 @@ namespace AutomationTool
             this.ClientDependentPlatformMap = InParams.ClientDependentPlatformMap;
 			this.ServerTargetPlatforms = InParams.ServerTargetPlatforms;
             this.ServerDependentPlatformMap = InParams.ServerDependentPlatformMap;
+			this.ConfigOverrideParams = InParams.ConfigOverrideParams;
 			this.Build = InParams.Build;
 			this.SkipBuildClient = InParams.SkipBuildClient;
 			this.SkipBuildEditor = InParams.SkipBuildEditor;
@@ -284,18 +346,21 @@ namespace AutomationTool
 			this.Pak = InParams.Pak;
 			this.IgnorePaksFromDifferentCookSource = InParams.IgnorePaksFromDifferentCookSource;
 			this.IoStore = InParams.IoStore;
+			this.ZenStore = InParams.ZenStore;
+			this.NoZenAutoLaunch = InParams.NoZenAutoLaunch;
 			this.GenerateOptimizationData = InParams.GenerateOptimizationData;
 			this.SignPak = InParams.SignPak;
 			this.SignedPak = InParams.SignedPak;
 			this.PakAlignForMemoryMapping = InParams.PakAlignForMemoryMapping;
+			this.RehydrateAssets = InParams.RehydrateAssets;
 			this.SkipPak = InParams.SkipPak;
             this.PrePak = InParams.PrePak;
             this.NoXGE = InParams.NoXGE;
 			this.CookOnTheFly = InParams.CookOnTheFly;
             this.CookOnTheFlyStreaming = InParams.CookOnTheFlyStreaming;
             this.UnversionedCookedContent = InParams.UnversionedCookedContent;
+			this.OptionalContent = InParams.OptionalContent;
 			this.SkipCookingEditorContent = InParams.SkipCookingEditorContent;
-            this.NumCookersToSpawn = InParams.NumCookersToSpawn;
 			this.FileServer = InParams.FileServer;
 			this.DedicatedServer = InParams.DedicatedServer;
 			this.Client = InParams.Client;
@@ -307,7 +372,7 @@ namespace AutomationTool
 			this.Manifests = InParams.Manifests;
             this.CreateChunkInstall = InParams.CreateChunkInstall;
 			this.SkipEncryption = InParams.SkipEncryption;
-			this.UE4Exe = InParams.UE4Exe;
+			this.SpecifiedUnrealExe = InParams.SpecifiedUnrealExe;
 			this.NoDebugInfo = InParams.NoDebugInfo;
 			this.SeparateDebugInfo = InParams.SeparateDebugInfo;
 			this.MapFile = InParams.MapFile;
@@ -323,17 +388,20 @@ namespace AutomationTool
             this.ClientCommandline = InParams.ClientCommandline;
             this.Package = InParams.Package;
 			this.SkipPackage = InParams.SkipPackage;
+			this.NeverPackage = InParams.NeverPackage;
 			this.ForcePackageData = InParams.ForcePackageData;
 			this.Deploy = InParams.Deploy;
 			this.DeployFolder = InParams.DeployFolder;
 			this.GetFile = InParams.GetFile;
 			this.IterativeDeploy = InParams.IterativeDeploy;
 			this.IgnoreCookErrors = InParams.IgnoreCookErrors;
+			this.KeepFileOpenLog = InParams.KeepFileOpenLog;
 			this.FastCook = InParams.FastCook;
 			this.Devices = InParams.Devices;
 			this.DeviceNames = InParams.DeviceNames;
 			this.ServerDevice = InParams.ServerDevice;
             this.NullRHI = InParams.NullRHI;
+			this.WriteBackMetadataToAssetRegistry = InParams.WriteBackMetadataToAssetRegistry;
             this.FakeClient = InParams.FakeClient;
             this.EditorTest = InParams.EditorTest;
             this.RunAutomationTests = InParams.RunAutomationTests;
@@ -353,13 +421,16 @@ namespace AutomationTool
 			this.ForceUncompressed = InParams.ForceUncompressed;
 			this.AdditionalPakOptions = InParams.AdditionalPakOptions;
 			this.AdditionalIoStoreOptions = InParams.AdditionalIoStoreOptions;
+			this.ForceOodleDllVersion = InParams.ForceOodleDllVersion;
 			this.Archive = InParams.Archive;
 			this.ArchiveDirectoryParam = InParams.ArchiveDirectoryParam;
 			this.ArchiveMetaData = InParams.ArchiveMetaData;
 			this.CreateAppBundle = InParams.CreateAppBundle;
 			this.Distribution = InParams.Distribution;
+			this.PackageEncryptionKeyFile = InParams.PackageEncryptionKeyFile;
 			this.Prereqs = InParams.Prereqs;
 			this.AppLocalDirectory = InParams.AppLocalDirectory;
+			this.CustomDeploymentHandler = InParams.CustomDeploymentHandler;
 			this.NoBootstrapExe = InParams.NoBootstrapExe;
             this.Prebuilt = InParams.Prebuilt;
             this.RunTimeoutSeconds = InParams.RunTimeoutSeconds;
@@ -368,8 +439,13 @@ namespace AutomationTool
 			this.TitleID = InParams.TitleID;
 			this.bTreatNonShippingBinariesAsDebugFiles = InParams.bTreatNonShippingBinariesAsDebugFiles;
 			this.bUseExtraFlavor = InParams.bUseExtraFlavor;
-			this.RunAssetNativization = InParams.RunAssetNativization;
 			this.AdditionalPackageOptions = InParams.AdditionalPackageOptions;
+			this.Trace = InParams.Trace;
+			this.TraceHost = InParams.TraceHost;
+			this.TraceFile = InParams.TraceFile;
+			this.SessionLabel = InParams.SessionLabel;
+			this.ProjectDescriptor = InParams.ProjectDescriptor;
+			this.Upload = InParams.Upload;
 		}
 
 		/// <summary>
@@ -389,7 +465,8 @@ namespace AutomationTool
 			string StageCommandline = null,
             string BundleName = null,
             string StageDirectoryParam = null,
-			string UE4Exe = null,
+			string UnrealExe = null,
+			string UE4Exe = null, // remove this when deprecated HostParams.UE4Exe is removed
 			string SignPak = null,
 			List<UnrealTargetConfiguration> ClientConfigsToBuild = null,
 			List<UnrealTargetConfiguration> ServerConfigsToBuild = null,
@@ -406,6 +483,7 @@ namespace AutomationTool
             Dictionary<TargetPlatformDescriptor, TargetPlatformDescriptor> ClientDependentPlatformMap = null,
 			List<TargetPlatformDescriptor> ServerTargetPlatforms = null,
             Dictionary<TargetPlatformDescriptor, TargetPlatformDescriptor> ServerDependentPlatformMap = null,
+			List<string> ConfigOverrideParams = null,
 			bool? Build = null,
 			bool? SkipBuildClient = null,
 			bool? SkipBuildEditor = null,
@@ -417,6 +495,7 @@ namespace AutomationTool
 			bool? ForceUncompressed = null,
 			string AdditionalPakOptions = null,
 			string AdditionalIoStoreOptions = null,
+			string ForceOodleDllVersion = null,
             bool? IterativeCooking = null,
 			string IterateSharedCookedBuild = null,
 			bool? IterateSharedBuildUsePrecompiledExe = null,
@@ -428,23 +507,27 @@ namespace AutomationTool
             bool? CookOnTheFly = null,
             bool? CookOnTheFlyStreaming = null,
             bool? UnversionedCookedContent = null,
+			bool? OptionalContent = null,
 			bool? EncryptIniFiles = null,
             bool? EncryptPakIndex = null,
 			bool? EncryptEverything = null,
 			bool? SkipCookingEditorContent = null,
-            int? NumCookersToSpawn = null,
             string AdditionalCookerOptions = null,
 			string OriginalReleaseVersion = null,
 			string BasedOnReleaseVersion = null,
             string CreateReleaseVersion = null,
 			string CreateReleaseVersionBasePath = null,
 			string BasedOnReleaseVersionBasePath = null,
-            bool? GeneratePatch = null,
+			string ReferenceContainerGlobalFileName = null,
+			string ReferenceContainerCryptoKeys = null,
+			bool? GeneratePatch = null,
 			bool? AddPatchLevel = null,
 			bool? StageBaseReleasePaks = null,
             string DiscVersion = null,
             string DLCName = null,
-            string DiffCookedContentPath = null,
+			string DLCOverrideCookedSubDir = null,
+			string DLCOverrideStagedSubDir = null,
+			string DiffCookedContentPath = null,
             bool? DLCIncludeEngineContent = null,
 			bool? DLCPakPluginFile = null,
 			bool? DLCActLikePatch = null,
@@ -465,17 +548,22 @@ namespace AutomationTool
 			bool? MapFile = null,
 			bool? NoXGE = null,
 			bool? SkipPackage = null,
+			bool? NeverPackage = null,
 			bool? Package = null,
 			bool? Pak = null,
 			bool? IgnorePaksFromDifferentCookSource = null,
 			bool? IoStore = null,
+			bool? ZenStore = null,
+			string NoZenAutoLaunch = null,
 			bool? SkipIoStore = null,
 			bool? GenerateOptimizationData = null,
 			bool? Prereqs = null,
 			string AppLocalDirectory = null,
+			string CustomDeploymentHandler = null,
 			bool? NoBootstrapExe = null,
             bool? SignedPak = null,
 			bool? PakAlignForMemoryMapping = null,
+			bool? RehydrateAssets = null,
 			bool? NullRHI = null,
             bool? FakeClient = null,
             bool? EditorTest = null,
@@ -501,15 +589,20 @@ namespace AutomationTool
 			string SpecifiedServerTarget = null,
 			ParamList<string> ProgramTargets = null,
 			bool? Distribution = null,
-            bool? Prebuilt = null,
+			string PackageEncryptionKeyFile = null,
+			bool? Prebuilt = null,
             int? RunTimeoutSeconds = null,
 			string SpecifiedArchitecture = null,
+			string ServerArchitecture = null,
+			string EditorArchitecture = null,
+			string ClientArchitecture = null,
+			string ProgramArchitecture = null,
 			string UbtArgs = null,
 			string AdditionalPackageOptions = null,
 			bool? IterativeDeploy = null,
 			bool? FastCook = null,
 			bool? IgnoreCookErrors = null,
-            bool? RunAssetNativization = null,
+			bool? KeepFileOpenLog = null,
 			bool? CodeSign = null,
 			bool? TreatNonShippingBinariesAsDebugFiles = null,
 			bool? UseExtraFlavor = null,
@@ -517,9 +610,14 @@ namespace AutomationTool
 			string Certificate = null,
 		    string Team = null,
 		    bool AutomaticSigning = false,
+			string Trace = null,
+			string TraceHost = null,
+			string TraceFile = null,
+			string SessionLabel = null,
 			ParamList<string> InMapsToRebuildLightMaps = null,
-            ParamList<string> InMapsToRebuildHLOD = null,
-            ParamList<string> TitleID = null
+			ParamList<string> InMapsToRebuildHLOD = null,
+			ParamList<string> TitleID = null,
+			string Upload = null
 			)
 		{
 			//
@@ -527,6 +625,12 @@ namespace AutomationTool
 			//
 
 			this.RawProjectPath = RawProjectPath;
+			try
+			{
+				this.ProjectDescriptor = ProjectDescriptor.FromFile(RawProjectPath);
+			}
+			catch { this.ProjectDescriptor = new ProjectDescriptor(); }
+
 			if (DirectoriesToCook != null)
 			{
 				this.DirectoriesToCook = DirectoriesToCook;
@@ -592,11 +696,13 @@ namespace AutomationTool
 			}
 
 			this.SkipBuildClient = GetParamValueIfNotSpecified(Command, SkipBuildClient, this.SkipBuildClient, "skipbuildclient");
-			this.SkipBuildEditor = GetParamValueIfNotSpecified(Command, SkipBuildEditor, this.SkipBuildEditor, "skipbuildeditor");
+			this.SkipBuildEditor = GetParamValueIfNotSpecified(Command, SkipBuildEditor, this.SkipBuildEditor, "skipbuildeditor", "nocompileeditor");
 			this.Run = GetParamValueIfNotSpecified(Command, Run, this.Run, "run");
 			this.Cook = GetParamValueIfNotSpecified(Command, Cook, this.Cook, "cook");
 			this.CreateReleaseVersionBasePath = ParseParamValueIfNotSpecified(Command, CreateReleaseVersionBasePath, "createreleaseversionroot", String.Empty);
 			this.BasedOnReleaseVersionBasePath = ParseParamValueIfNotSpecified(Command, BasedOnReleaseVersionBasePath, "basedonreleaseversionroot", String.Empty);
+			this.ReferenceContainerGlobalFileName = ParseParamValueIfNotSpecified(Command, ReferenceContainerGlobalFileName, "ReferenceContainerGlobalFileName", String.Empty);
+			this.ReferenceContainerCryptoKeys = ParseParamValueIfNotSpecified(Command, ReferenceContainerCryptoKeys, "ReferenceContainerCryptoKeys", String.Empty); 
 			this.OriginalReleaseVersion = ParseParamValueIfNotSpecified(Command, OriginalReleaseVersion, "originalreleaseversion", String.Empty);
 			this.CreateReleaseVersion = ParseParamValueIfNotSpecified(Command, CreateReleaseVersion, "createreleaseversion", String.Empty);
             this.BasedOnReleaseVersion = ParseParamValueIfNotSpecified(Command, BasedOnReleaseVersion, "basedonreleaseversion", String.Empty);
@@ -605,28 +711,38 @@ namespace AutomationTool
 			this.StageBaseReleasePaks = GetParamValueIfNotSpecified(Command, StageBaseReleasePaks, this.StageBaseReleasePaks, "StageBaseReleasePaks");
 			this.DiscVersion = ParseParamValueIfNotSpecified(Command, DiscVersion, "DiscVersion", String.Empty);
 			this.AdditionalCookerOptions = ParseParamValueIfNotSpecified(Command, AdditionalCookerOptions, "AdditionalCookerOptions", String.Empty);
-
+		
 			DLCName = ParseParamValueIfNotSpecified(Command, DLCName, "DLCName", String.Empty);
-			if(!String.IsNullOrEmpty(DLCName))
+			if (!String.IsNullOrEmpty(DLCName))
 			{
-				List<PluginInfo> CandidatePlugins = Plugins.ReadAvailablePlugins(CommandUtils.EngineDirectory, DirectoryReference.FromFile(RawProjectPath), null);
-				PluginInfo DLCPlugin = CandidatePlugins.FirstOrDefault(x => String.Equals(x.Name, DLCName, StringComparison.InvariantCultureIgnoreCase));
-				if(DLCPlugin == null)
+				// is it fully specified already (look for having a uplugin extension)
+				if (string.Equals(Path.GetExtension(DLCName), ".uplugin", StringComparison.InvariantCultureIgnoreCase))
 				{
-					DLCFile = FileReference.Combine(RawProjectPath.Directory, "Plugins", DLCName, DLCName + ".uplugin");
+					this.DLCFile = new FileReference(DLCName);
 				}
 				else
 				{
-					DLCFile = DLCPlugin.File;
+					List<PluginInfo> CandidatePlugins = Plugins.ReadAvailablePlugins(Unreal.EngineDirectory,
+						DirectoryReference.FromFile(RawProjectPath), AdditionalPluginDirectories);
+					PluginInfo DLCPlugin = CandidatePlugins.FirstOrDefault(x => String.Equals(x.Name, DLCName, StringComparison.InvariantCultureIgnoreCase));
+					if (DLCPlugin == null)
+					{
+						this.DLCFile = FileReference.Combine(RawProjectPath.Directory, "Plugins", DLCName, DLCName + ".uplugin");
+					}
+					else
+					{
+						this.DLCFile = DLCPlugin.File;
+					}
 				}
 			}
 
-            //this.DLCName = 
-            this.DiffCookedContentPath = ParseParamValueIfNotSpecified(Command, DiffCookedContentPath, "DiffCookedContentPath", String.Empty);
+			this.DiffCookedContentPath = ParseParamValueIfNotSpecified(Command, DiffCookedContentPath, "DiffCookedContentPath", String.Empty);
             this.DLCIncludeEngineContent = GetParamValueIfNotSpecified(Command, DLCIncludeEngineContent, this.DLCIncludeEngineContent, "DLCIncludeEngineContent");
 			this.DLCPakPluginFile = GetParamValueIfNotSpecified(Command, DLCPakPluginFile, this.DLCPakPluginFile, "DLCPakPluginFile");
 			this.DLCActLikePatch = GetParamValueIfNotSpecified(Command, DLCActLikePatch, this.DLCActLikePatch, "DLCActLikePatch");
-			
+			this.DLCOverrideCookedSubDir = ParseParamValueIfNotSpecified(Command, DLCOverrideCookedSubDir, "DLCOverrideCookedSubDir", null);
+			this.DLCOverrideStagedSubDir = ParseParamValueIfNotSpecified(Command, DLCOverrideStagedSubDir, "DLCOverrideStagedSubDir", null);
+
 			this.SkipCook = GetParamValueIfNotSpecified(Command, SkipCook, this.SkipCook, "skipcook");
 			if (this.SkipCook)
 			{
@@ -635,7 +751,7 @@ namespace AutomationTool
 			this.Clean = GetOptionalParamValueIfNotSpecified(Command, Clean, this.Clean, "clean", null);
 			this.SignPak = ParseParamValueIfNotSpecified(Command, SignPak, "signpak", String.Empty);
 			this.SignedPak = !String.IsNullOrEmpty(this.SignPak) || GetParamValueIfNotSpecified(Command, SignedPak, this.SignedPak, "signedpak");
-			if (string.IsNullOrEmpty(this.SignPak))
+			if (string.IsNullOrEmpty(this.SignPak) && RawProjectPath != null)
 			{
 				this.SignPak = Path.Combine(RawProjectPath.Directory.FullName, @"Restricted\NoRedist\Build\Keys.txt");
 				if (!File.Exists(this.SignPak))
@@ -644,10 +760,25 @@ namespace AutomationTool
 				}
 			}
 			this.PakAlignForMemoryMapping = GetParamValueIfNotSpecified(Command, PakAlignForMemoryMapping, this.PakAlignForMemoryMapping, "PakAlignForMemoryMapping");
+			this.RehydrateAssets = GetParamValueIfNotSpecified(Command, RehydrateAssets, this.RehydrateAssets, "RehydrateAssets");		
 			this.Pak = GetParamValueIfNotSpecified(Command, Pak, this.Pak, "pak");
 			this.IgnorePaksFromDifferentCookSource = GetParamValueIfNotSpecified(Command, IgnorePaksFromDifferentCookSource, this.IgnorePaksFromDifferentCookSource, "IgnorePaksFromDifferentCookSource");
 			this.IoStore = GetParamValueIfNotSpecified(Command, IoStore, this.IoStore, "iostore");
 			this.SkipIoStore = GetParamValueIfNotSpecified(Command, SkipIoStore, this.SkipIoStore, "skipiostore");
+			this.ZenStore = GetParamValueIfNotSpecified(Command, ZenStore, this.ZenStore, "zenstore");
+			if (this.ZenStore && this.Cook && !this.SkipCook)
+			{
+				this.AdditionalCookerOptions += " -ZenStore";
+			}
+			this.NoZenAutoLaunch = ParseParamValueIfNotSpecified(Command, NoZenAutoLaunch, "NoZenAutoLaunch", String.Empty);
+			if (string.IsNullOrEmpty(this.NoZenAutoLaunch) && GetParamValueIfNotSpecified(Command, null, false, "NoZenAutoLaunch"))
+			{
+				this.NoZenAutoLaunch = "127.0.0.1";
+			}
+			if (!string.IsNullOrEmpty(this.NoZenAutoLaunch) && this.Cook && !this.SkipCook)
+			{
+				this.AdditionalCookerOptions += string.Format(" -NoZenAutoLaunch={0}", this.NoZenAutoLaunch);
+			}
 			this.GenerateOptimizationData = GetParamValueIfNotSpecified(Command, GenerateOptimizationData, this.GenerateOptimizationData, "makebinaryconfig");
 			
 			this.SkipPak = GetParamValueIfNotSpecified(Command, SkipPak, this.SkipPak, "skippak");
@@ -669,19 +800,17 @@ namespace AutomationTool
             }
             this.CookOnTheFlyStreaming = GetParamValueIfNotSpecified(Command, CookOnTheFlyStreaming, this.CookOnTheFlyStreaming, "cookontheflystreaming");
             this.UnversionedCookedContent = GetOptionalParamValueIfNotSpecified(Command, UnversionedCookedContent, this.UnversionedCookedContent, "UnversionedCookedContent", "VersionCookedContent");
+			this.OptionalContent = GetOptionalParamValueIfNotSpecified(Command, OptionalContent, this.OptionalContent, "editoroptional", "noeditoroptional");
 			this.SkipCookingEditorContent = GetParamValueIfNotSpecified(Command, SkipCookingEditorContent, this.SkipCookingEditorContent, "SkipCookingEditorContent");
-            if (NumCookersToSpawn.HasValue)
-            {
-                this.NumCookersToSpawn = NumCookersToSpawn.Value;
-            }
-            else if (Command != null)
-            {
-                this.NumCookersToSpawn = Command.ParseParamInt("NumCookersToSpawn");
-            }
 			this.Compressed = GetParamValueIfNotSpecified(Command, Compressed, this.Compressed, "compressed");
 			this.ForceUncompressed = GetParamValueIfNotSpecified(Command, ForceUncompressed, this.ForceUncompressed, "ForceUncompressed");
 			this.AdditionalPakOptions = ParseParamValueIfNotSpecified(Command, AdditionalPakOptions, "AdditionalPakOptions");
+			if (!string.IsNullOrEmpty(this.NoZenAutoLaunch))
+			{
+				this.AdditionalPakOptions += string.Format(" -NoZenAutoLaunch={0}", this.NoZenAutoLaunch);
+			}
 			this.AdditionalIoStoreOptions = ParseParamValueIfNotSpecified(Command, AdditionalIoStoreOptions, "AdditionalIoStoreOptions");
+			this.ForceOodleDllVersion = ParseParamValueIfNotSpecified(Command, ForceOodleDllVersion, "ForceOodleDllVersion");
 			this.IterativeCooking = GetParamValueIfNotSpecified(Command, IterativeCooking, this.IterativeCooking, new string[] { "iterativecooking", "iterate" });
 			this.IterateSharedCookedBuild = GetParamValueIfNotSpecified(Command, false, false, "iteratesharedcookedbuild") ? "usesyncedbuild" : null;
 			this.IterateSharedCookedBuild = ParseParamValueIfNotSpecified(Command, IterateSharedCookedBuild, "IterateSharedCookedBuild", String.Empty);
@@ -728,7 +857,10 @@ namespace AutomationTool
 				this.Stage = true;
 			}
 			this.StageDirectoryParam = ParseParamValueIfNotSpecified(Command, StageDirectoryParam, "stagingdirectory", String.Empty, true);
-			this.bCodeSign = GetOptionalParamValueIfNotSpecified(Command, CodeSign, CommandUtils.IsBuildMachine, "CodeSign", "NoCodeSign");
+			this.OptionalFileStagingDirectory = ParseParamValueIfNotSpecified(Command, OptionalFileStagingDirectory, "optionalfilestagingdirectory", String.Empty, true);
+			this.OptionalFileInputDirectory = ParseParamValueIfNotSpecified(Command, OptionalFileInputDirectory, "optionalfileinputdirectory", String.Empty, true);
+			this.CookerSupportFilesSubdirectory = ParseParamValueIfNotSpecified(Command, CookerSupportFilesSubdirectory, "CookerSupportFilesSubdirectory", String.Empty, true);
+			this.bCodeSign = GetOptionalParamValueIfNotSpecified(Command, CodeSign, IsEpicBuildMachine(), "CodeSign", "NoCodeSign");
 			this.bTreatNonShippingBinariesAsDebugFiles = GetParamValueIfNotSpecified(Command, TreatNonShippingBinariesAsDebugFiles, false, "TreatNonShippingBinariesAsDebugFiles");
 			this.bUseExtraFlavor = GetParamValueIfNotSpecified(Command, UseExtraFlavor, false, "UseExtraFlavor");
 			this.Manifests = GetParamValueIfNotSpecified(Command, Manifests, this.Manifests, "manifests");
@@ -746,8 +878,10 @@ namespace AutomationTool
 			this.ArchiveMetaData = GetParamValueIfNotSpecified(Command, ArchiveMetaData, this.ArchiveMetaData, "archivemetadata");
 			this.CreateAppBundle = GetParamValueIfNotSpecified(Command, CreateAppBundle, true, "createappbundle");
 			this.Distribution = GetParamValueIfNotSpecified(Command, Distribution, this.Distribution, "distribution");
+			this.PackageEncryptionKeyFile = ParseParamValueIfNotSpecified(Command, PackageEncryptionKeyFile, "packageencryptionkeyfile", null);
 			this.Prereqs = GetParamValueIfNotSpecified(Command, Prereqs, this.Prereqs, "prereqs");
 			this.AppLocalDirectory = ParseParamValueIfNotSpecified(Command, AppLocalDirectory, "applocaldirectory", String.Empty, true);
+			this.CustomDeploymentHandler = ParseParamValueIfNotSpecified(Command, CustomDeploymentHandler, "customdeployment", String.Empty, true );
 			this.NoBootstrapExe = GetParamValueIfNotSpecified(Command, NoBootstrapExe, this.NoBootstrapExe, "nobootstrapexe");
             this.Prebuilt = GetParamValueIfNotSpecified(Command, Prebuilt, this.Prebuilt, "prebuilt");
             if (this.Prebuilt)
@@ -782,20 +916,19 @@ namespace AutomationTool
             this.ClientCommandline = this.ClientCommandline.Replace('\'', '\"'); // replace any single quotes with double quotes
             this.Package = GetParamValueIfNotSpecified(Command, Package, this.Package, "package");
 			this.SkipPackage = GetParamValueIfNotSpecified(Command, SkipPackage, this.SkipPackage, "skippackage");
+			this.NeverPackage = GetParamValueIfNotSpecified(Command, NeverPackage, this.NeverPackage, "neverpackage");
 			this.ForcePackageData = GetParamValueIfNotSpecified(Command, Package, this.ForcePackageData, "forcepackagedata");
 
 			this.Deploy = GetParamValueIfNotSpecified(Command, Deploy, this.Deploy, "deploy");
 			this.DeployFolder = ParseParamValueIfNotSpecified(Command, DeployFolder, "deploy", null);
 
-			// if the user specified -deploy but no folder, set the default
-			if (this.Deploy && string.IsNullOrEmpty(this.DeployFolder))
+			// always set the default deploy folder, so that it is available in -skipdeploy scenarios too
+			if (string.IsNullOrEmpty(this.DeployFolder))
 			{
 				this.DeployFolder = UnrealBuildTool.DeployExports.GetDefaultDeployFolder(this.ShortProjectName);
 			}
-			else if (string.IsNullOrEmpty(this.DeployFolder) == false)
+			else
 			{
-				// if the user specified a folder set deploy to true.
-				//@todo - remove 'deploy' var and check deployfolder != null?
 				this.Deploy = true;
 			}
 
@@ -811,18 +944,7 @@ namespace AutomationTool
 			this.IterativeDeploy = GetParamValueIfNotSpecified(Command, IterativeDeploy, this.IterativeDeploy, new string[] {"iterativedeploy", "iterate" } );
 			this.FastCook = GetParamValueIfNotSpecified(Command, FastCook, this.FastCook, "FastCook");
 			this.IgnoreCookErrors = GetParamValueIfNotSpecified(Command, IgnoreCookErrors, this.IgnoreCookErrors, "IgnoreCookErrors");
-
-            // Determine whether or not we're going to nativize Blueprint assets at cook time.
-            this.RunAssetNativization = false;
-            ConfigHierarchy GameIni = ConfigCache.ReadHierarchy(ConfigHierarchyType.Game, RawProjectPath.Directory, HostPlatform.Current.HostEditorPlatform);
-            if (GameIni != null)
-            {
-                string BlueprintNativizationMethod;
-                if (GameIni.TryGetValue("/Script/UnrealEd.ProjectPackagingSettings", "BlueprintNativizationMethod", out BlueprintNativizationMethod))
-                {
-                    this.RunAssetNativization = !string.IsNullOrEmpty(BlueprintNativizationMethod) && BlueprintNativizationMethod != "Disabled";
-                }
-            }
+			this.KeepFileOpenLog = GetParamValueIfNotSpecified(Command, KeepFileOpenLog, this.KeepFileOpenLog, "KeepFileOpenLog");
 
             string DeviceString = ParseParamValueIfNotSpecified(Command, Device, "device", String.Empty).Trim(new char[] { '\"' });
             if(DeviceString == "")
@@ -860,14 +982,71 @@ namespace AutomationTool
             this.RunAutomationTest = ParseParamValueIfNotSpecified(Command, RunAutomationTest, "RunAutomationTest");
             this.RunAutomationTests = this.RunAutomationTest != "" || GetParamValueIfNotSpecified(Command, RunAutomationTests, this.RunAutomationTests, "RunAutomationTests");
             this.SkipServer = GetParamValueIfNotSpecified(Command, SkipServer, this.SkipServer, "skipserver");
-			this.UE4Exe = ParseParamValueIfNotSpecified(Command, UE4Exe, "ue4exe", "UE4Editor-Cmd.exe");
+			this.SpecifiedUnrealExe = ParseParamValueIfNotSpecified(Command, UnrealExe, "unrealexe", null, ObsoleteSpecifiedValue: UE4Exe, ObsoleteParamName: "ue4exe");
 			this.Unattended = GetParamValueIfNotSpecified(Command, Unattended, this.Unattended, "unattended");
 			this.DeviceUsername = ParseParamValueIfNotSpecified(Command, DeviceUsername, "deviceuser", String.Empty);
 			this.DevicePassword = ParseParamValueIfNotSpecified(Command, DevicePassword, "devicepass", String.Empty);
 			this.CrashReporter = GetParamValueIfNotSpecified(Command, CrashReporter, this.CrashReporter, "crashreporter");
-			this.SpecifiedArchitecture = ParseParamValueIfNotSpecified(Command, SpecifiedArchitecture, "specifiedarchitecture", String.Empty);
 			this.UbtArgs = ParseParamValueIfNotSpecified(Command, UbtArgs, "ubtargs", String.Empty);
 			this.AdditionalPackageOptions = ParseParamValueIfNotSpecified(Command, AdditionalPackageOptions, "AdditionalPackageOptions", String.Empty);
+			this.WriteBackMetadataToAssetRegistry = ParseParamValueIfNotSpecified(Command, WriteBackMetadataToAssetRegistry, "WriteBackMetadataToAssetRegistry", String.Empty);
+
+			string SpecifiedArchString, ServerArchString, EditorArchString, ClientArchString, ProgramArchString;
+			SpecifiedArchString = ParseParamValueIfNotSpecified(Command, SpecifiedArchitecture, "specifiedarchitecture", null);
+			// if SpecifiedArchitecture is used, then set them all to it, and then allow comandline to override specific ones
+			ServerArchString = EditorArchString = ClientArchString = ProgramArchString = SpecifiedArchString;
+			ServerArchString = ParseParamValueIfNotSpecified(Command, ServerArchitecture, "serverarchitecture", ServerArchString);
+			EditorArchString = ParseParamValueIfNotSpecified(Command, EditorArchitecture, "editorarchitecture", EditorArchString);
+			ClientArchString = ParseParamValueIfNotSpecified(Command, ClientArchitecture, "clientarchitecture", ClientArchString);
+			ProgramArchString = ParseParamValueIfNotSpecified(Command, ProgramArchitecture, "programarchitecture", ProgramArchString);
+			this.SpecifiedArchitecture = UnrealArchitectures.FromString(SpecifiedArchString, null);
+			this.ServerArchitecture = UnrealArchitectures.FromString(ServerArchString, null);
+			this.EditorArchitecture = UnrealArchitectures.FromString(EditorArchString, null);
+			this.ClientArchitecture = UnrealArchitectures.FromString(ClientArchString, null);
+			this.ProgramArchitecture = UnrealArchitectures.FromString(ProgramArchString, null);
+
+			// -trace can be used with or without a value
+			if (Trace != null || GetParamValueIfNotSpecified(Command, null, false, "trace"))
+			{
+				this.Trace += "-trace";
+				string Value = ParseParamValueIfNotSpecified(Command, Trace, "trace", null);
+				if (!String.IsNullOrWhiteSpace(Value))
+				{
+					this.Trace += "=" + Value;
+				}
+			}
+
+			// -tracehost can be used with or without a value
+			if (TraceHost != null || GetParamValueIfNotSpecified(Command, null, false, "tracehost"))
+			{
+				this.TraceHost += "-tracehost";
+				string Value = ParseParamValueIfNotSpecified(Command, TraceHost, "tracehost", null);
+				if (!String.IsNullOrWhiteSpace(Value))
+				{
+					this.TraceHost += "=" + Value;
+				}
+			}
+
+			// -tracefile can be used with or without a value
+			if (TraceFile != null || GetParamValueIfNotSpecified(Command, null, false, "tracefile"))
+			{
+				this.TraceFile += "-tracefile";
+				string Value = ParseParamValueIfNotSpecified(Command, TraceFile, "tracefile", null);
+				if (!String.IsNullOrWhiteSpace(Value))
+				{
+					this.TraceFile += "=" + Value;
+				}
+			}
+
+			SessionLabel = Command.ParseParamValue("sessionlabel");
+
+			if (SessionLabel!=null)
+			{ 
+				this.SessionLabel += "-sessionlabel";
+				this.SessionLabel += "=" + SessionLabel;	
+			}
+
+			this.Upload = Command.ParseParamValue("upload");
 
 			if (ClientConfigsToBuild == null)
 			{
@@ -968,6 +1147,16 @@ namespace AutomationTool
             {
                 this.MapsToCook.Add(this.MapToRun);
             }
+
+			// if the user specified multiple -map arguments, just use the first one
+			if (!String.IsNullOrEmpty(this.MapToRun))
+			{
+				int DelimiterIndex = this.MapToRun.IndexOf('+');
+				if (DelimiterIndex != -1)
+				{
+					this.MapToRun = this.MapToRun.Remove(DelimiterIndex);
+				}
+			}
 
 			if (InMapsToRebuildLightMaps == null)
 			{
@@ -1087,6 +1276,10 @@ namespace AutomationTool
                 this.RunTimeoutSeconds = Command.ParseParamInt("runtimeoutseconds");
             }
 
+			if (ConfigOverrideParams != null)
+			{
+				this.ConfigOverrideParams = ConfigOverrideParams;
+			}
 			// Gather up any '-ini:' arguments and save them. We'll pass these along to other tools that may be spawned in a new process as part of the command.
 			if(Command != null)
 			{
@@ -1139,6 +1332,12 @@ namespace AutomationTool
 				throw new AutomationException("Invalid configuration '{0}'. Valid configurations are '{1}'.", ConfigName, String.Join("', '", Enum.GetNames(typeof(UnrealTargetConfiguration)).Where(x => x != nameof(UnrealTargetConfiguration.Unknown))));
 			}
 			return ConfigValue;
+		}
+
+		static bool IsEpicBuildMachine()
+		{
+			return CommandUtils.IsBuildMachine 
+				&& FileReference.Exists(FileReference.Combine(Unreal.EngineDirectory, "Restricted", "NotForLicensees", "Build", "EpicInternal.txt"));
 		}
 
 		/// <summary>
@@ -1231,6 +1430,18 @@ namespace AutomationTool
 		/// </summary>
 		[Help("iostore", "generate I/O store container file(s)")]
 		public bool IoStore { private set; get; }
+		
+		/// <summary>
+		/// Shared: True if the cooker should store the cooked output to the Zen storage server
+		/// </summary>
+		[Help("zenstore", "save cooked output data to the Zen storage server")]
+		public bool ZenStore { private set; get; }
+
+		/// <summary>
+		/// Shared: URL to a running Zen server
+		/// </summary>
+		[Help("nozenautolaunch", "URL to a running Zen server")]
+		public string NoZenAutoLaunch { private set; get; }
 
 		/// <summary>
 		/// Shared: True if optimization data is generated during staging that can improve loadtimes
@@ -1288,6 +1499,12 @@ namespace AutomationTool
 		/// </summary>
 		[Help("PakAlignForMemoryMapping", "The game will be set up for memory mapping bulk data.")]
 		public bool PakAlignForMemoryMapping { private set; get; }
+		
+		/// <summary>
+		/// Shared: true if we want to rehydrate virtualized assets when staging.
+		/// </summary>
+		[Help("rehydrateassets", "Should virtualized assets be rehydrated?")]
+		public bool RehydrateAssets { get; set; }
 
 		/// <summary>
 		/// Shared: true if this build is staged, command line: -stage
@@ -1365,9 +1582,46 @@ namespace AutomationTool
 
 		[Help("stagingdirectory=Path", "Directory to copy the builds to, i.e. -stagingdirectory=C:\\Stage")]
 		public string StageDirectoryParam;
-        
-		[Help("ue4exe=ExecutableName", "Name of the UE4 Editor executable, i.e. -ue4exe=UE4Editor.exe")]
-		public string UE4Exe;
+
+		[Help("optionalfilestagingdirectory=Path", "Directory to copy the optional files to, i.e. -optionalfilestagingdirectory=C:\\StageOptional")]
+		public string OptionalFileStagingDirectory;
+
+		[Help("optionalfileinputdirectory=Path", "Directory to read the optional files from, i.e. -optionalfileinputdirectory=C:\\StageOptional")]
+		public string OptionalFileInputDirectory;
+
+		[Help("CookerSupportFilesSubdirectory=subdir", "Subdirectory under staging to copy CookerSupportFiles (as set in Build.cs files). -CookerSupportFilesSubdirectory=SDK")]
+		public string CookerSupportFilesSubdirectory;
+		
+		[Help("unrealexe=ExecutableName", "Name of the Unreal Editor executable, i.e. -unrealexe=UnrealEditor.exe")]
+		private string SpecifiedUnrealExe = null;
+
+		public string UnrealExe
+		{
+			get
+			{
+				if (SpecifiedUnrealExe == null)
+				{
+					SpecifiedUnrealExe = "UnrealEditor-Cmd.exe";
+					if (CodeBasedUprojectPath != null)
+					{
+						FileReference ReceiptLocation = TargetReceipt.GetDefaultPath(CodeBasedUprojectPath.Directory, EditorTargets[0], HostPlatform.Platform, UnrealTargetConfiguration.Development, null);
+						TargetReceipt Receipt;
+						if (!TargetReceipt.TryRead(ReceiptLocation, out Receipt))
+						{
+							throw new AutomationException($"Missing {ReceiptLocation} receipt. Editor needs to be built first.");
+						}
+						SpecifiedUnrealExe = Receipt.LaunchCmd.FullName;
+					}
+				}
+
+				return SpecifiedUnrealExe;
+			}
+			set 
+			{
+				// allow code override
+				SpecifiedUnrealExe = value; 
+			}
+		}
 
 		/// <summary>
 		/// Shared: true if this build is archived, command line: -archive
@@ -1400,11 +1654,6 @@ namespace AutomationTool
 		/// </summary>
 		[Help("createappbundle", "When archiving for Mac, set this to true to package it in a .app bundle instead of normal loose files")]
 		public bool CreateAppBundle;
-
-        /// <summary>
-        /// Determines if Blueprint assets should be substituted with auto-generated code.
-        /// </summary>
-        public bool RunAssetNativization;
 
 		/// <summary>
 		/// Keeps track of any '-ini:type:[section]:value' arguments on the command line. These will override cached config settings for the current process, and can be passed along to other tools.
@@ -1590,6 +1839,18 @@ namespace AutomationTool
 		public string CreateReleaseVersionBasePath;
 
 		/// <summary>
+		/// Stage: Path to the global.utoc file for a directory of iostore containers to use as a source of compressed
+		/// chunks when writing new containers. See -ReferenceContainerGlobalFileName in IoStoreUtilities.cpp.
+		/// </summary>
+		public string ReferenceContainerGlobalFileName;
+
+		/// <summary>
+		/// Stage: Path to the crypto.json file to use for decrypting ReferenceContainerFlobalFileName, if needed.
+		/// </summary>
+		public string ReferenceContainerCryptoKeys;
+
+
+		/// <summary>
 		/// Are we generating a patch, generate a patch from a previously released version of the game (use CreateReleaseVersion to create a release). 
 		/// this requires BasedOnReleaseVersion
 		/// see also CreateReleaseVersion, BasedOnReleaseVersion
@@ -1604,13 +1865,16 @@ namespace AutomationTool
 		/// <summary>
         /// </summary>
         public bool AddPatchLevel;
+
         /// <summary>
         /// Are we staging the unmodified pak files from the base release
+		/// </summary>
         public bool StageBaseReleasePaks;
 
-        /// Name of dlc to cook and package (if this paramter is supplied cooks the dlc and packages it into the dlc directory)
-        /// </summary>
-        public FileReference DLCFile;
+		/// <summary>
+		/// Name of dlc to cook and package (if this paramter is supplied cooks the dlc and packages it into the dlc directory)
+		/// </summary>
+		public FileReference DLCFile;
 
         /// <summary>
         /// Enable cooking of engine content when cooking dlc 
@@ -1631,15 +1895,31 @@ namespace AutomationTool
 		public bool DLCActLikePatch;
 
 		/// <summary>
+		/// Sometimes a DLC may get cooked to a subdirectory of where is expected, so this can tell the staging what the subdirectory of the cooked out
+		/// to find the DLC files (for instance Metadata)
+		/// </summary>
+		public string DLCOverrideCookedSubDir;
+
+		/// <summary>
+		/// Controls where under the staged directory to output to (in case the plugin subdirectory is not desired under the StagingDirectory location)
+		/// </summary>
+		public string DLCOverrideStagedSubDir;
+
+		/// <summary>
 		/// After cook completes diff the cooked content against another cooked content directory.
 		///  report all errors to the log
 		/// </summary>
 		public string DiffCookedContentPath;
 
-        /// <summary>
-        /// Cook: Additional cooker options to include on the cooker commandline
-        /// </summary>
-        public string AdditionalCookerOptions;
+		/// <summary>
+		/// Build: Additional build options to include on the build commandline
+		/// </summary>
+		public string AdditionalBuildOptions;
+
+		/// <summary>
+		/// Cook: Additional cooker options to include on the cooker commandline
+		/// </summary>
+		public string AdditionalCookerOptions;
 
         /// <summary>
         /// Cook: List of cultures to cook.
@@ -1655,6 +1935,11 @@ namespace AutomationTool
 		/// Do not compress packages during cook, override game ProjectPackagingSettings to force it off
 		/// </summary>
 		public bool ForceUncompressed;
+		
+		/// <summary>
+		/// Compress packages during cook, override game ProjectPackagingSettings and Platform Hardware Compression settings to force it on
+		/// </summary>
+		public bool ForceCompressed;
 
 		/// <summary>
 		/// Additional parameters when generating the PAK file
@@ -1666,11 +1951,20 @@ namespace AutomationTool
 		/// </summary>
 		public string AdditionalIoStoreOptions;
 
+		/// <summary>
+		/// If not empty, this is the dll file to use for Oodle compression. Can be "Latest" to use latest version.
+		/// </summary>
+		public string ForceOodleDllVersion;
+
         /// <summary>
         /// Cook: Do not include a version number in the cooked content
         /// </summary>
         public bool UnversionedCookedContent = true;
 
+		/// <summary>
+		/// Cook: Cook with optional data enabled
+		/// </summary>
+		public bool OptionalContent = false;
 
 		/// <summary>
 		/// Cook: Uses the iterative cooking, command line: -iterativecooking or -iterate
@@ -1709,11 +2003,6 @@ namespace AutomationTool
 		[Help("SkipCookingEditorContent", "Skips content under /Engine/Editor when cooking")]
         public bool SkipCookingEditorContent;
 
-        /// <summary>
-        /// Cook: number of additional cookers to spawn while cooking
-        /// </summary>
-        public int NumCookersToSpawn;
-
 		/// <summary>
 		/// Cook: Uses the iterative deploy, command line: -iterativedeploy or -iterate
 		/// </summary>
@@ -1728,6 +2017,12 @@ namespace AutomationTool
 		/// </summary>
 		[Help("IgnoreCookErrors", "Ignores cook errors and continues with packaging etc")]
 		public bool IgnoreCookErrors { private set; get; }
+
+		/// <summary>
+		/// Cook: Commandline: -fileopenlog
+		/// </summary>
+		[Help("KeepFileOpenLog", "Keeps a log of all files opened, commandline: -fileopenlog")]
+		public bool KeepFileOpenLog { private set; get; } = true;
 
 		/// <summary>
 		/// Stage: Commandline: -nodebuginfo
@@ -1757,7 +2052,7 @@ namespace AutomationTool
 		/// <summary>
 		/// Stage: If non-empty, the contents will be put into the stage
 		/// </summary>
-		[Help("cmdline", "command line to put into the stage in UE4CommandLine.txt")]
+		[Help("cmdline", "command line to put into the stage in UECommandLine.txt")]
 		public string StageCommandline;
 
         /// <summary>
@@ -1766,7 +2061,7 @@ namespace AutomationTool
 		[Help("bundlename", "string to use as the bundle name when deploying to mobile device")]
         public string BundleName;
 
-		//<summary>
+		/// <summary>
 		/// Stage: Specifies a list of extra targets that should be staged along with a client
 		/// </summary>
 		public ParamList<string> ExtraTargetsToStageWithClient = new ParamList<string>();
@@ -1777,15 +2072,25 @@ namespace AutomationTool
 		public Action<ProjectParams, DeploymentContext> PreModifyDeploymentContextCallback = null;
 
 		/// <summary>
-		/// Stage: Optional callback that a build script can use to modify a deployment context before it is applied
+		/// Stage: Optional callback that a build script can use to modify a deployment context before it is applied (and before it is finalized)
 		/// </summary>
 		public Action<ProjectParams, DeploymentContext> ModifyDeploymentContextCallback = null;
 
-        /// <summary>
-        /// On Windows, adds an executable to the root of the staging directory which checks for prerequisites being 
+		/// <summary>
+		/// Stage: Optional callback that a build script can use to finalize a deployment context before it is applied
+		/// </summary>
+		public Action<ProjectParams, DeploymentContext> FinalizeDeploymentContextCallback = null;
+
+		/// <summary>
+		/// Name of the custom deployment handler to change how the build packaged, staged and deployed - for example, when packaging for a specific game store
+		/// </summary>
+		public string CustomDeploymentHandler { get; set; }
+
+		/// <summary>
+		/// On Windows, adds an executable to the root of the staging directory which checks for prerequisites being 
 		/// installed and launches the game with a path to the .uproject file.
 		/// </summary>
-        public bool NoBootstrapExe { get; set; }
+		public bool NoBootstrapExe { get; set; }
 
 		/// <summary>
 		/// By default we don't code sign unless it is required or requested
@@ -1848,7 +2153,7 @@ namespace AutomationTool
 
 
 		/// <summary>
-		/// Run: The client runs with cooked data provided by UnrealFileServer, command line: -fileserver
+		/// Run: The client runs with cooked data provided by UnrealFileServer, command line: -fileserver = CookByTheBook with ZenServer (zenstore)
 		/// </summary>
 		[Help("fileserver", "run the client with cooked data provided by UnrealFileServer")]
 		public bool FileServer { private set; get; }
@@ -1922,7 +2227,7 @@ namespace AutomationTool
 		/// <summary>
 		/// Run: Additional command line arguments to pass to the program
 		/// </summary>
-		[Help("addcmdline", "Additional command line arguments for the program")]
+		[Help("addcmdline", "Additional command line arguments for the program, which will not be staged in UECommandLine.txt in most cases")]
 		public string RunCommandline;
 
         /// <summary>
@@ -1942,6 +2247,9 @@ namespace AutomationTool
         /// </summary>
         [Help("nullrhi", "add -nullrhi to the client commandlines")]
         public bool NullRHI;
+
+        [Help("WriteBackMetadataToAssetRegistry", "Passthru to iostore staging, see IoStoreUtilities.cpp")]
+        public string WriteBackMetadataToAssetRegistry;
 
         /// <summary>
         /// Run:adds ?fake to the server URL
@@ -1997,12 +2305,18 @@ namespace AutomationTool
 		
 		[Help("skippackage", "Skips packaging the project for the target platform")]
 		public bool SkipPackage { get; set; }
-		
+
+		[Help("neverpackage", "Skips preparing data that would be used during packaging, in earlier stages. Different from skippackage which is used to optimize later stages like archive, which still was packaged at some point")]
+		public bool NeverPackage { get; set; }
+
 		[Help("package", "Determine whether data is packaged. This can be an iteration optimization for platforms that require packages for deployment")]
 		public bool ForcePackageData { get; set; }
 
 		[Help("distribution", "package for distribution the project")]
 		public bool Distribution { get; set; }
+
+		[Help("PackageEncryptionKeyFile", "Path to file containing encryption key to use in packaging")]
+		public string PackageEncryptionKeyFile { get; set; }
 
 		[Help("prereqs", "stage prerequisites along with the project")]
 		public bool Prereqs { get; set; }
@@ -2016,8 +2330,20 @@ namespace AutomationTool
         [Help("RunTimeoutSeconds", "timeout to wait after we lunch the game")]
         public int RunTimeoutSeconds;
 
-		[Help("SpecifiedArchitecture", "Determine a specific Minimum OS")]
-		public string SpecifiedArchitecture;
+		[Help("SpecifiedArchitecture", "Architecture to use for building any executables (see EditorArchitecture, etc for specific target type control)")]
+		private UnrealArchitectures SpecifiedArchitecture;
+
+		[Help("EditorArchitecture", "Architecture to use for building editor executables")]
+		public UnrealArchitectures EditorArchitecture;
+
+		[Help("ServerArchitecture", "Architecture to use for building server executables")]
+		public UnrealArchitectures ServerArchitecture;
+
+		[Help("ClientArchitecture", "Architecture to use for building client/game executables")]
+		public UnrealArchitectures ClientArchitecture;
+
+		[Help("ProgramArchitecture", "Architecture to use for building program executables")]
+		public UnrealArchitectures ProgramArchitecture;
 
 		[Help("UbtArgs", "extra options to pass to ubt")]
 		public string UbtArgs;
@@ -2043,9 +2369,25 @@ namespace AutomationTool
         [Help("IgnoreLightMapErrors", "Whether Light Map errors should be treated as critical")]
 		public bool IgnoreLightMapErrors { get; set; }
 
+		[Help("trace", "The list of trace channels to enable")]
+		public string Trace { get; set; }
+
+		[Help("tracehost", "The host address of the trace recorder")]
+		public string TraceHost { get; set; }
+		
+		[Help("tracefile", "The file where the trace will be recorded")]
+		public string TraceFile { get; set; }
+
+		[Help("sessionlabel", "A label to pass to analytics")]
+		public string SessionLabel { get; set; }
+
+		[Help("upload", "Arguments for uploading on demand content")]
+		public string Upload { get; set; }
+
 		private List<SingleTargetProperties> DetectedTargets;
 		private Dictionary<UnrealTargetPlatform, ConfigHierarchy> LoadedEngineConfigs;
 		private Dictionary<UnrealTargetPlatform, ConfigHierarchy> LoadedGameConfigs;
+		private ProjectDescriptor ProjectDescriptor;
 
 		private List<String> TargetNamesOfType(TargetType DesiredType)
 		{
@@ -2061,33 +2403,35 @@ namespace AutomationTool
 				case 0:
 					throw new AutomationException("{0} target not found!", Type);
 				default:
-					throw new AutomationException("More than one {0} target found. Specify which one to use with the -{1}= option.", Type, Type);
+					throw new AutomationException("More than one {0} target found. Specify which one to use with the -Target= option.", Type);
 			}
 		}
 
-		private void SelectDefaultEditorTarget(List<string> AvailableEditorTargets, ref string EditorTarget)
+		private void SelectDefaultTarget(List<string> AvailableTargets, TargetType Type, ref string Target)
 		{
-			string DefaultEditorTarget;
+			string DefaultTarget;
 
-			if (EngineConfigs[BuildHostPlatform.Current.Platform].GetString("/Script/BuildSettings.BuildSettings", "DefaultEditorTarget", out DefaultEditorTarget))
+			string ConfigKey = String.Format($"Default{Type}Target");
+
+			if (EngineConfigs[BuildHostPlatform.Current.Platform].GetString("/Script/BuildSettings.BuildSettings", ConfigKey, out DefaultTarget))
 			{
-				if (!AvailableEditorTargets.Contains(DefaultEditorTarget))
+				if (!AvailableTargets.Contains(DefaultTarget))
 				{
-					throw new AutomationException(string.Format("A default editor target '{0}' was specified in engine.ini but does not exist", DefaultEditorTarget));
+					throw new AutomationException(string.Format($"A default {Type} target '{DefaultTarget}' was specified in engine.ini but does not exist"));
 				}
 
-				EditorTarget = DefaultEditorTarget;
+				Target = DefaultTarget;
 			}
 			else
 			{
-				if (AvailableEditorTargets.Count > 1)
+				if (AvailableTargets.Count > 1)
 				{
-					throw new AutomationException("Project contains multiple editor targets but no DefaultEditorTarget is set in the [/Script/BuildSettings.BuildSettings] section of DefaultEngine.ini");
+					throw new AutomationException($"Project contains multiple {Type} targets ({string.Join(", ", AvailableTargets)}) but no {ConfigKey} is set in the [/Script/BuildSettings.BuildSettings] section of DefaultEngine.ini");
 				}
 
-				if (AvailableEditorTargets.Count > 0)
+				if (AvailableTargets.Count > 0)
 				{
-					EditorTarget = AvailableEditorTargets.First();
+					Target = AvailableTargets.First();
 				}
 			}
 		}
@@ -2105,7 +2449,9 @@ namespace AutomationTool
 			}
 
 			List<UnrealTargetPlatform> ClientTargetPlatformTypes = ClientTargetPlatforms.ConvertAll(x => x.Type).Distinct().ToList();
-			var Properties = ProjectUtils.GetProjectProperties(RawProjectPath, ClientTargetPlatformTypes, ClientConfigsToBuild, RunAssetNativization);
+			// @todo (wip) - Removing Blueprint nativization as a feature.
+			bool bRunAssetNativization = false;// this.RunAssetNativization;
+			var Properties = ProjectUtils.GetProjectProperties(RawProjectPath, ClientTargetPlatformTypes, ClientConfigsToBuild, bRunAssetNativization);
 
 			bIsCodeBasedProject = Properties.bIsCodeBasedProject;
 			DetectedTargets = Properties.Targets;
@@ -2121,9 +2467,9 @@ namespace AutomationTool
 
 			if (!bIsCodeBasedProject)
 			{
-				GameTarget = Client ? "UE4Client" : "UE4Game";
-				EditorTarget = "UE4Editor";
-				ServerTarget = "UE4Server";
+				GameTarget = Client ? "UnrealClient" : "UnrealGame";
+				EditorTarget = "UnrealEditor";
+				ServerTarget = "UnrealServer";
 			}
 			else if (TargetNames.Count > 0)
 			{
@@ -2142,7 +2488,7 @@ namespace AutomationTool
 				// Make sure we haven't specified game and clients together
 				if (Targets.Any(x => x.Rules.Type == TargetType.Client) && Targets.Any(x => x.Rules.Type == TargetType.Game))
 				{
-					throw new AutomationException("Cannot specify client ang game targets to be built together");
+					throw new AutomationException("Cannot specify client and game targets to be built together");
 				}
 
 				// Create the lists to receive all the target types
@@ -2202,7 +2548,7 @@ namespace AutomationTool
 				}
 
 				// Find the editor target name
-				SelectDefaultEditorTarget(TargetNamesOfType(TargetType.Editor), ref EditorTarget);
+				SelectDefaultTarget(TargetNamesOfType(TargetType.Editor), TargetType.Editor, ref EditorTarget);
 			}
 			else if (!CommandUtils.IsNullOrEmpty(Properties.Targets))
 			{
@@ -2216,44 +2562,19 @@ namespace AutomationTool
 
 				if (Client)
 				{
-					GameTarget = ChooseTarget(AvailableClientTargets, TargetType.Client);
+					SelectDefaultTarget(AvailableClientTargets, TargetType.Client, ref GameTarget);
 					ProjectType = TargetType.Client;
 				}
-				else if (AvailableGameTargets.Count > 0)
+				else if (AvailableGameTargets.Count > 0 && !NoClient)
 				{
-					if (AvailableGameTargets.Count > 1)
-					{
-						string TargetMessage = "";
-						List<SingleTargetProperties> Targets = DetectedTargets.FindAll(Target => Target.Rules.Type == TargetType.Game);
-						foreach (SingleTargetProperties Target in Targets)
-						{
-							// search the list of script files to see if we can find a likely source for this class
-							// {TargetName}.Target.cs is expected to contain a definition for a class {TargetName}Target
-							// So we can do an imperfect reverse-lookup, and try to find a source file that has the expected pattern.
-
-							List<FileReference> PossibleScriptFiles = Properties.TargetScripts.FindAll(File => String.Equals(File.GetFileNameWithoutAnyExtensions(), Target.TargetName));
-
-							if (PossibleScriptFiles.Count > 0)
-							{
-								TargetMessage += $"Target \"{Target.TargetName}\" from class {Target.TargetClassName}, which may be defined in:\n {String.Join(", or\n", PossibleScriptFiles)}\n";
-							}
-							else
-							{
-								TargetMessage += $"Target \"{Target.TargetName}\" from class {Target.TargetClassName}, source file undetermined.\n";
-							}
-						}
-
-						throw new AutomationException("More than one Game project found for project: \n" + TargetMessage);
-					}
-
-					GameTarget = AvailableGameTargets.First();
+					SelectDefaultTarget(AvailableGameTargets, TargetType.Game, ref GameTarget);
 				}
 
-				SelectDefaultEditorTarget(AvailableEditorTargets, ref EditorTarget);
+				SelectDefaultTarget(AvailableEditorTargets, TargetType.Editor, ref EditorTarget);
 
-				if (AvailableServerTargets.Count > 0 && (DedicatedServer || Cook || CookOnTheFly)) // only if server is needed
+				if (AvailableServerTargets.Count > 0 && DedicatedServer) // only if server is needed
 				{
-					ServerTarget = ChooseTarget(AvailableServerTargets, TargetType.Server);
+					SelectDefaultTarget(AvailableServerTargets, TargetType.Server, ref ServerTarget);
 				}
 			}
 			else if (!CommandUtils.IsNullOrEmpty(Properties.Programs))
@@ -2282,7 +2603,7 @@ namespace AutomationTool
 			{
 				if (Properties.bWasGenerated)
 				{
-					EditorTarget = "UE4Editor";
+					EditorTarget = "UnrealEditor";
 				}
 				else
 				{
@@ -2292,13 +2613,9 @@ namespace AutomationTool
 
 			if (EditorTargetsList == null)
 			{
-				if (!GlobalCommandLine.NoCompileEditor && !IsProgramTarget && !String.IsNullOrEmpty(EditorTarget))
+				if (!IsProgramTarget && !String.IsNullOrEmpty(EditorTarget))
 				{
 					EditorTargetsList = new ParamList<string>(EditorTarget);
-				}
-				else
-				{
-					EditorTargetsList = new ParamList<string>();
 				}
 			}
 
@@ -2487,7 +2804,53 @@ namespace AutomationTool
 			get { return ProjectUtils.GetShortProjectName(RawProjectPath); }
 		}
 
-  		/// <summary>
+		/// <summary>
+		/// AdditionalPluginDirectories from the project.uproject file
+		/// </summary>
+		public List<DirectoryReference> AdditionalPluginDirectories
+		{
+			get { return ProjectDescriptor.AdditionalPluginDirectories; }
+		}
+
+		/// <summary>
+		/// Get the relative path to the DLC plugin's cooked output from the deployment
+		/// root of the DLC. e.g. <ProjectName>\Plugins\<PluginName> for plugins under the Project's plugin
+		/// directories.
+		/// </summary>
+		public string FindPluginRelativePathFromPlatformCookDir(FileReference PluginFile,
+			DirectoryReference ProjectRoot, DirectoryReference EngineRoot, DirectoryReference LocalRoot, string ShortProjectName)
+		{
+			if (DLCOverrideCookedSubDir != null)
+			{
+				return DLCOverrideCookedSubDir;
+			}
+
+			foreach (DirectoryReference AdditionalPluginDir in AdditionalPluginDirectories)
+			{
+				if (PluginFile.IsUnderDirectory(AdditionalPluginDir))
+				{
+					// This is a plugin that lives outside of the Engine/Plugins or Game/Plugins directory so needs to be remapped for staging/packaging
+					// The deployment path for plugins in AdditionalPluginDirectories is RemappedPlugins\PluginName
+					return String.Format("RemappedPlugins/{0}", PluginFile.GetFileNameWithoutExtension());
+				}
+			}
+
+			DirectoryReference DLCRoot = PluginFile.Directory;
+			if (DLCRoot.IsUnderDirectory(EngineRoot))
+			{
+				return Path.Combine("Engine", DLCRoot.MakeRelativeTo(EngineRoot));
+			}
+			else if (DLCRoot.IsUnderDirectory(ProjectRoot))
+			{
+				return Path.Combine(ShortProjectName, DLCRoot.MakeRelativeTo(ProjectRoot));
+			}
+			else
+			{
+				return DLCRoot.MakeRelativeTo(LocalRoot);
+			}
+		}
+
+		/// <summary>
 		/// True if this project contains source code.
 		/// </summary>	
 		public bool IsCodeBasedProject
@@ -2728,14 +3091,14 @@ namespace AutomationTool
                 throw new AutomationException("RawProjectPath {0} file must exist", RawProjectPath);
             }
 
-			if (FileServer && !Cook)
+			if (FileServer && !Cook && !CookInEditor)
 			{
-				throw new AutomationException("Only cooked builds can use a fileserver be staged, use -cook");
+				throw new AutomationException("Only cooked builds can use a fileserver, use -cook or -CookInEditor");
 			}
 
 			if (Stage && !SkipStage && !Cook && !CookOnTheFly && !IsProgramTarget)
 			{
-				throw new AutomationException("Only cooked builds or programs can be staged, use -cook or -cookonthefly.");
+				throw new AutomationException("Only cooked builds or programs can be staged, use -cook, -cookonthefly or -skipcook.");
 			}
 
 			if (Manifests && !Cook && !Stage && !Pak)
@@ -2762,11 +3125,6 @@ namespace AutomationTool
             {
                 throw new AutomationException("DedicatedServer cannot be used with RunAutomationTests");
             }
-
-			if ((CookOnTheFly || FileServer) && DedicatedServer)
-			{
-				throw new AutomationException("Don't use either -cookonthefly or -fileserver with -server.");
-			}
 
 			if (NoClient && !DedicatedServer && !CookOnTheFly)
 			{
@@ -2850,118 +3208,130 @@ namespace AutomationTool
 			if (!bLogged)
 			{
 				// In alphabetical order.
-				CommandUtils.LogLog("Project Params **************");
+				Logger.LogDebug("Project Params **************");
 
-				CommandUtils.LogLog("AdditionalServerMapParams={0}", AdditionalServerMapParams);
-				CommandUtils.LogLog("Archive={0}", Archive);
-				CommandUtils.LogLog("ArchiveMetaData={0}", ArchiveMetaData);
-				CommandUtils.LogLog("CreateAppBundle={0}", CreateAppBundle);
-				CommandUtils.LogLog("BaseArchiveDirectory={0}", BaseArchiveDirectory);
-				CommandUtils.LogLog("BaseStageDirectory={0}", BaseStageDirectory);
-				CommandUtils.LogLog("Build={0}", Build);
-				CommandUtils.LogLog("SkipBuildClient={0}", SkipBuildClient);
-				CommandUtils.LogLog("SkipBuildEditor={0}", SkipBuildEditor);
-				CommandUtils.LogLog("Cook={0}", Cook);
-				CommandUtils.LogLog("Clean={0}", Clean);
-				CommandUtils.LogLog("Client={0}", Client);
-				CommandUtils.LogLog("ClientConfigsToBuild={0}", string.Join(",", ClientConfigsToBuild));
-				CommandUtils.LogLog("ClientCookedTargets={0}", ClientCookedTargets.ToString());
-				CommandUtils.LogLog("ClientTargetPlatform={0}", string.Join(",", ClientTargetPlatforms));
-				CommandUtils.LogLog("Compressed={0}", Compressed);
-				CommandUtils.LogLog("ForceUncompressed={0}", ForceUncompressed);
-				CommandUtils.LogLog("AdditionalPakOptions={0}", AdditionalPakOptions);
-				CommandUtils.LogLog("AdditionalIoStoreOptions={0}", AdditionalIoStoreOptions);
-				CommandUtils.LogLog("CookOnTheFly={0}", CookOnTheFly);
-				CommandUtils.LogLog("CookOnTheFlyStreaming={0}", CookOnTheFlyStreaming);
-				CommandUtils.LogLog("UnversionedCookedContent={0}", UnversionedCookedContent);
-				CommandUtils.LogLog("SkipCookingEditorContent={0}", SkipCookingEditorContent);
-                CommandUtils.LogLog("NumCookersToSpawn={0}", NumCookersToSpawn);
-                CommandUtils.LogLog("GeneratePatch={0}", GeneratePatch);
-				CommandUtils.LogLog("AddPatchLevel={0}", AddPatchLevel);
-				CommandUtils.LogLog("StageBaseReleasePaks={0}", StageBaseReleasePaks);
-				CommandUtils.LogLog("DiscVersion={0}", DiscVersion);
-				CommandUtils.LogLog("CreateReleaseVersion={0}", CreateReleaseVersion);
-                CommandUtils.LogLog("BasedOnReleaseVersion={0}", BasedOnReleaseVersion);
-				CommandUtils.LogLog("OriginalReleaseVersion={0}", OriginalReleaseVersion);
-				CommandUtils.LogLog("DLCFile={0}", DLCFile);
-                CommandUtils.LogLog("DLCIncludeEngineContent={0}", DLCIncludeEngineContent);
-				CommandUtils.LogLog("DLCPakPluginFile={0}", DLCPakPluginFile);
-                CommandUtils.LogLog("DiffCookedContentPath={0}", DiffCookedContentPath);
-                CommandUtils.LogLog("AdditionalCookerOptions={0}", AdditionalCookerOptions);
-				CommandUtils.LogLog("DedicatedServer={0}", DedicatedServer);
-				CommandUtils.LogLog("DirectoriesToCook={0}", DirectoriesToCook.ToString());
-                CommandUtils.LogLog("DDCGraph={0}", DDCGraph);
-                CommandUtils.LogLog("CulturesToCook={0}", CommandUtils.IsNullOrEmpty(CulturesToCook) ? "<Not Specified> (Use Defaults)" : CulturesToCook.ToString());
-				CommandUtils.LogLog("EditorTargets={0}", EditorTargets.ToString());
-				CommandUtils.LogLog("Foreign={0}", Foreign);
-				CommandUtils.LogLog("IsCodeBasedProject={0}", IsCodeBasedProject.ToString());
-				CommandUtils.LogLog("IsProgramTarget={0}", IsProgramTarget.ToString());
-				CommandUtils.LogLog("IterativeCooking={0}", IterativeCooking);
-				CommandUtils.LogLog("IterateSharedCookedBuild={0}", IterateSharedCookedBuild);
-				CommandUtils.LogLog("IterateSharedBuildUsePrecompiledExe={0}", IterateSharedBuildUsePrecompiledExe);
-				CommandUtils.LogLog("CookAll={0}", CookAll);
-				CommandUtils.LogLog("CookPartialGC={0}", CookPartialGC);
-				CommandUtils.LogLog("CookInEditor={0}", CookInEditor);
-				CommandUtils.LogLog("CookMapsOnly={0}", CookMapsOnly);
-                CommandUtils.LogLog("Deploy={0}", Deploy);
-				CommandUtils.LogLog("IterativeDeploy={0}", IterativeDeploy);
-				CommandUtils.LogLog("FastCook={0}", FastCook);
-				CommandUtils.LogLog("LogWindow={0}", LogWindow);
-				CommandUtils.LogLog("Manifests={0}", Manifests);
-				CommandUtils.LogLog("MapToRun={0}", MapToRun);
-				CommandUtils.LogLog("NoClient={0}", NoClient);
-				CommandUtils.LogLog("NumClients={0}", NumClients);                
-				CommandUtils.LogLog("NoDebugInfo={0}", NoDebugInfo);
-				CommandUtils.LogLog("SeparateDebugInfo={0}", SeparateDebugInfo);
-				CommandUtils.LogLog("MapFile={0}", MapFile);
-				CommandUtils.LogLog("NoCleanStage={0}", NoCleanStage);
-				CommandUtils.LogLog("NoXGE={0}", NoXGE);
-				CommandUtils.LogLog("MapsToCook={0}", MapsToCook.ToString());
-				CommandUtils.LogLog("MapIniSectionsToCook={0}", MapIniSectionsToCook.ToString());
-				CommandUtils.LogLog("Pak={0}", Pak);
-				CommandUtils.LogLog("IgnorePaksFromDifferentCookSource={0}", IgnorePaksFromDifferentCookSource);
-				CommandUtils.LogLog("IoStore={0}", IoStore);
-				CommandUtils.LogLog("SkipIoStore={0}", SkipIoStore);
-				CommandUtils.LogLog("SkipEncryption={0}", SkipEncryption);
-				CommandUtils.LogLog("GenerateOptimizationData={0}", GenerateOptimizationData);
-				CommandUtils.LogLog("SkipPackage={0}", SkipPackage);
-				CommandUtils.LogLog("Package={0}", Package);
-				CommandUtils.LogLog("ForcePackageData={0}", ForcePackageData);
-				CommandUtils.LogLog("NullRHI={0}", NullRHI);
-				CommandUtils.LogLog("FakeClient={0}", FakeClient);
-                CommandUtils.LogLog("EditorTest={0}", EditorTest);
-                CommandUtils.LogLog("RunAutomationTests={0}", RunAutomationTests); 
-                CommandUtils.LogLog("RunAutomationTest={0}", RunAutomationTest);
-                CommandUtils.LogLog("RunTimeoutSeconds={0}", RunTimeoutSeconds);
-                CommandUtils.LogLog("CrashIndex={0}", CrashIndex);
-				CommandUtils.LogLog("ProgramTargets={0}", ProgramTargets.ToString());
-				CommandUtils.LogLog("ProjectPlatformBinariesPaths={0}", string.Join(",", ProjectPlatformBinariesPaths));
-				CommandUtils.LogLog("ProjectExePaths={0}", string.Join(",", ProjectExePaths));
-				CommandUtils.LogLog("Distribution={0}", Distribution);
-                CommandUtils.LogLog("Prebuilt={0}", Prebuilt);
-				CommandUtils.LogLog("Prereqs={0}", Prereqs);
-				CommandUtils.LogLog("AppLocalDirectory={0}", AppLocalDirectory);
-				CommandUtils.LogLog("NoBootstrapExe={0}", NoBootstrapExe);
-				CommandUtils.LogLog("RawProjectPath={0}", RawProjectPath);
-				CommandUtils.LogLog("Run={0}", Run);
-				CommandUtils.LogLog("ServerConfigsToBuild={0}", string.Join(",", ServerConfigsToBuild));
-				CommandUtils.LogLog("ServerCookedTargets={0}", ServerCookedTargets.ToString());
-				CommandUtils.LogLog("ServerTargetPlatform={0}", string.Join(",", ServerTargetPlatforms));
-				CommandUtils.LogLog("ShortProjectName={0}", ShortProjectName.ToString());
-				CommandUtils.LogLog("SignedPak={0}", SignedPak);
-				CommandUtils.LogLog("SignPak={0}", SignPak);				
-				CommandUtils.LogLog("SkipCook={0}", SkipCook);
-				CommandUtils.LogLog("SkipCookOnTheFly={0}", SkipCookOnTheFly);
-				CommandUtils.LogLog("SkipPak={0}", SkipPak);
-                CommandUtils.LogLog("PrePak={0}", PrePak);
-                CommandUtils.LogLog("SkipStage={0}", SkipStage);
-				CommandUtils.LogLog("Stage={0}", Stage);
-				CommandUtils.LogLog("bTreatNonShippingBinariesAsDebugFiles={0}", bTreatNonShippingBinariesAsDebugFiles);
-				CommandUtils.LogLog("bUseExtraFlavor={0}", bUseExtraFlavor);
-				CommandUtils.LogLog("NativizeAssets={0}", RunAssetNativization);
-                CommandUtils.LogLog("StageDirectoryParam={0}", StageDirectoryParam);
-				CommandUtils.LogLog("AdditionalPackageOptions={0}", AdditionalPackageOptions);
-				CommandUtils.LogLog("Project Params **************");
+				Logger.LogDebug("AdditionalServerMapParams={AdditionalServerMapParams}", AdditionalServerMapParams);
+				Logger.LogDebug("Archive={Archive}", Archive);
+				Logger.LogDebug("ArchiveMetaData={ArchiveMetaData}", ArchiveMetaData);
+				Logger.LogDebug("CreateAppBundle={CreateAppBundle}", CreateAppBundle);
+				Logger.LogDebug("BaseArchiveDirectory={BaseArchiveDirectory}", BaseArchiveDirectory);
+				Logger.LogDebug("BaseStageDirectory={BaseStageDirectory}", BaseStageDirectory);
+				Logger.LogDebug("ConfigOverrideParams=-{Arg0}", string.Join(" -", ConfigOverrideParams));
+				Logger.LogDebug("Build={Build}", Build);
+				Logger.LogDebug("SkipBuildClient={SkipBuildClient}", SkipBuildClient);
+				Logger.LogDebug("SkipBuildEditor={SkipBuildEditor}", SkipBuildEditor);
+				Logger.LogDebug("Cook={Cook}", Cook);
+				Logger.LogDebug("Clean={Clean}", Clean);
+				Logger.LogDebug("Client={Client}", Client);
+				Logger.LogDebug("ClientConfigsToBuild={Arg0}", string.Join(",", ClientConfigsToBuild));
+				Logger.LogDebug("ClientCookedTargets={Arg0}", ClientCookedTargets.ToString());
+				Logger.LogDebug("ClientTargetPlatform={Arg0}", string.Join(",", ClientTargetPlatforms));
+				Logger.LogDebug("Compressed={Compressed}", Compressed);
+				Logger.LogDebug("ForceUncompressed={ForceUncompressed}", ForceUncompressed);
+				Logger.LogDebug("AdditionalPakOptions={AdditionalPakOptions}", AdditionalPakOptions);
+				Logger.LogDebug("AdditionalIoStoreOptions={AdditionalIoStoreOptions}", AdditionalIoStoreOptions);
+				Logger.LogDebug("ForceOodleDllVersion={ForceOodleDllVersion}", ForceOodleDllVersion);
+				Logger.LogDebug("CookOnTheFly={CookOnTheFly}", CookOnTheFly);
+				Logger.LogDebug("CookOnTheFlyStreaming={CookOnTheFlyStreaming}", CookOnTheFlyStreaming);
+				Logger.LogDebug("UnversionedCookedContent={UnversionedCookedContent}", UnversionedCookedContent);
+				Logger.LogDebug("OptionalContent={OptionalContent}", OptionalContent);
+				Logger.LogDebug("SkipCookingEditorContent={SkipCookingEditorContent}", SkipCookingEditorContent);
+                Logger.LogDebug("GeneratePatch={GeneratePatch}", GeneratePatch);
+				Logger.LogDebug("AddPatchLevel={AddPatchLevel}", AddPatchLevel);
+				Logger.LogDebug("StageBaseReleasePaks={StageBaseReleasePaks}", StageBaseReleasePaks);
+				Logger.LogDebug("DiscVersion={DiscVersion}", DiscVersion);
+				Logger.LogDebug("CreateReleaseVersion={CreateReleaseVersion}", CreateReleaseVersion);
+                Logger.LogDebug("BasedOnReleaseVersion={BasedOnReleaseVersion}", BasedOnReleaseVersion);
+				Logger.LogDebug("OriginalReleaseVersion={OriginalReleaseVersion}", OriginalReleaseVersion);
+				Logger.LogDebug("DLCFile={DLCFile}", DLCFile);
+                Logger.LogDebug("DLCIncludeEngineContent={DLCIncludeEngineContent}", DLCIncludeEngineContent);
+				Logger.LogDebug("DLCPakPluginFile={DLCPakPluginFile}", DLCPakPluginFile);
+				Logger.LogDebug("DLCOverrideCookedSubDir={DLCOverrideCookedSubDir}", DLCOverrideCookedSubDir);
+				Logger.LogDebug("DLCOverrideStagedSubDir={DLCOverrideStagedSubDir}", DLCOverrideStagedSubDir);
+				Logger.LogDebug("DiffCookedContentPath={DiffCookedContentPath}", DiffCookedContentPath);
+                Logger.LogDebug("AdditionalCookerOptions={AdditionalCookerOptions}", AdditionalCookerOptions);
+				Logger.LogDebug("DedicatedServer={DedicatedServer}", DedicatedServer);
+				Logger.LogDebug("DirectoriesToCook={Arg0}", DirectoriesToCook.ToString());
+                Logger.LogDebug("DDCGraph={DDCGraph}", DDCGraph);
+                Logger.LogDebug("CulturesToCook={Arg0}", CommandUtils.IsNullOrEmpty(CulturesToCook) ? "<Not Specified> (Use Defaults)" : CulturesToCook.ToString());
+				Logger.LogDebug("EditorTargets={Arg0}", EditorTargets?.ToString());
+				Logger.LogDebug("Foreign={Foreign}", Foreign);
+				Logger.LogDebug("IsCodeBasedProject={Arg0}", IsCodeBasedProject.ToString());
+				Logger.LogDebug("IsProgramTarget={Arg0}", IsProgramTarget.ToString());
+				Logger.LogDebug("IterativeCooking={IterativeCooking}", IterativeCooking);
+				Logger.LogDebug("IterateSharedCookedBuild={IterateSharedCookedBuild}", IterateSharedCookedBuild);
+				Logger.LogDebug("IterateSharedBuildUsePrecompiledExe={IterateSharedBuildUsePrecompiledExe}", IterateSharedBuildUsePrecompiledExe);
+				Logger.LogDebug("CookAll={CookAll}", CookAll);
+				Logger.LogDebug("CookPartialGC={CookPartialGC}", CookPartialGC);
+				Logger.LogDebug("CookInEditor={CookInEditor}", CookInEditor);
+				Logger.LogDebug("CookMapsOnly={CookMapsOnly}", CookMapsOnly);
+                Logger.LogDebug("Deploy={Deploy}", Deploy);
+				Logger.LogDebug("IterativeDeploy={IterativeDeploy}", IterativeDeploy);
+				Logger.LogDebug("FastCook={FastCook}", FastCook);
+				Logger.LogDebug("LogWindow={LogWindow}", LogWindow);
+				Logger.LogDebug("Manifests={Manifests}", Manifests);
+				Logger.LogDebug("MapToRun={MapToRun}", MapToRun);
+				Logger.LogDebug("NoClient={NoClient}", NoClient);
+				Logger.LogDebug("NumClients={NumClients}", NumClients);
+				Logger.LogDebug("NoDebugInfo={NoDebugInfo}", NoDebugInfo);
+				Logger.LogDebug("SeparateDebugInfo={SeparateDebugInfo}", SeparateDebugInfo);
+				Logger.LogDebug("MapFile={MapFile}", MapFile);
+				Logger.LogDebug("NoCleanStage={NoCleanStage}", NoCleanStage);
+				Logger.LogDebug("NoXGE={NoXGE}", NoXGE);
+				Logger.LogDebug("MapsToCook={Arg0}", MapsToCook.ToString());
+				Logger.LogDebug("MapIniSectionsToCook={Arg0}", MapIniSectionsToCook.ToString());
+				Logger.LogDebug("Pak={Pak}", Pak);
+				Logger.LogDebug("IgnorePaksFromDifferentCookSource={IgnorePaksFromDifferentCookSource}", IgnorePaksFromDifferentCookSource);
+				Logger.LogDebug("IoStore={IoStore}", IoStore);
+				Logger.LogDebug("SkipIoStore={SkipIoStore}", SkipIoStore);
+				Logger.LogDebug("ZenStore={ZenStore}", ZenStore);
+				Logger.LogDebug("NoZenAutoLaunch={NoZenAutoLaunch}", NoZenAutoLaunch);
+				Logger.LogDebug("SkipEncryption={SkipEncryption}", SkipEncryption);
+				Logger.LogDebug("GenerateOptimizationData={GenerateOptimizationData}", GenerateOptimizationData);
+				Logger.LogDebug("SkipPackage={SkipPackage}", SkipPackage);
+				Logger.LogDebug("NeverPackage={NeverPackage}", NeverPackage);
+				Logger.LogDebug("Package={Package}", Package);
+				Logger.LogDebug("ForcePackageData={ForcePackageData}", ForcePackageData);
+				Logger.LogDebug("NullRHI={NullRHI}", NullRHI);
+				Logger.LogDebug("WriteBackMetadataToAssetRegistry={WriteBackMetadataToAssetRegistry}", WriteBackMetadataToAssetRegistry);
+				Logger.LogDebug("FakeClient={FakeClient}", FakeClient);
+                Logger.LogDebug("EditorTest={EditorTest}", EditorTest);
+                Logger.LogDebug("RunAutomationTests={RunAutomationTests}", RunAutomationTests);
+                Logger.LogDebug("RunAutomationTest={RunAutomationTest}", RunAutomationTest);
+                Logger.LogDebug("RunTimeoutSeconds={RunTimeoutSeconds}", RunTimeoutSeconds);
+                Logger.LogDebug("CrashIndex={CrashIndex}", CrashIndex);
+				Logger.LogDebug("ProgramTargets={Arg0}", ProgramTargets.ToString());
+				Logger.LogDebug("ProjectPlatformBinariesPaths={Arg0}", string.Join(",", ProjectPlatformBinariesPaths));
+				Logger.LogDebug("ProjectExePaths={Arg0}", string.Join(",", ProjectExePaths));
+				Logger.LogDebug("Distribution={Distribution}", Distribution);
+				Logger.LogDebug("PackageEncryptionKeyFile={PackageEncryptionKeyFile}", PackageEncryptionKeyFile);
+				Logger.LogDebug("Prebuilt={Prebuilt}", Prebuilt);
+				Logger.LogDebug("Prereqs={Prereqs}", Prereqs);
+				Logger.LogDebug("AppLocalDirectory={AppLocalDirectory}", AppLocalDirectory);
+				Logger.LogDebug("NoBootstrapExe={NoBootstrapExe}", NoBootstrapExe);
+				Logger.LogDebug("RawProjectPath={RawProjectPath}", RawProjectPath);
+				Logger.LogDebug("Run={Run}", Run);
+				Logger.LogDebug("ServerConfigsToBuild={Arg0}", string.Join(",", ServerConfigsToBuild));
+				Logger.LogDebug("ServerCookedTargets={Arg0}", ServerCookedTargets.ToString());
+				Logger.LogDebug("ServerTargetPlatform={Arg0}", string.Join(",", ServerTargetPlatforms));
+				Logger.LogDebug("ShortProjectName={Arg0}", ShortProjectName.ToString());
+				Logger.LogDebug("SignedPak={SignedPak}", SignedPak);
+				Logger.LogDebug("SignPak={SignPak}", SignPak);
+				Logger.LogDebug("SkipCook={SkipCook}", SkipCook);
+				Logger.LogDebug("SkipCookOnTheFly={SkipCookOnTheFly}", SkipCookOnTheFly);
+				Logger.LogDebug("SkipPak={SkipPak}", SkipPak);
+                Logger.LogDebug("PrePak={PrePak}", PrePak);
+                Logger.LogDebug("SkipStage={SkipStage}", SkipStage);
+				Logger.LogDebug("Stage={Stage}", Stage);
+				Logger.LogDebug("RehydrateAssets={RehydrateAssets}", RehydrateAssets);
+				Logger.LogDebug("bTreatNonShippingBinariesAsDebugFiles={bTreatNonShippingBinariesAsDebugFiles}", bTreatNonShippingBinariesAsDebugFiles);
+				Logger.LogDebug("bUseExtraFlavor={bUseExtraFlavor}", bUseExtraFlavor);
+                Logger.LogDebug("StageDirectoryParam={StageDirectoryParam}", StageDirectoryParam);
+				Logger.LogDebug("AdditionalPackageOptions={AdditionalPackageOptions}", AdditionalPackageOptions);
+				Logger.LogDebug("Trace={Trace}", Trace);
+				Logger.LogDebug("TraceHost={TraceHost}", TraceHost);
+				Logger.LogDebug("TraceFile={TraceFile}", TraceFile);
+				Logger.LogDebug("Project Params **************");
 			}
 			bLogged = true;
 

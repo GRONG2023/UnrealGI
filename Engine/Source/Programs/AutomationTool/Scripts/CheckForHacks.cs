@@ -7,13 +7,15 @@ using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using UnrealBuildBase;
+using Microsoft.Extensions.Logging;
 
 namespace AutomationTool
 {
 	[Help("Audits the current branch for comments denoting a hack that was not meant to leave another branch, following a given format (\"BEGIN XXXX HACK\", where XXXX is one or more tags separated by spaces).")]
 	[Help("Allowed tags may be specified manually on the command line. At least one must match, otherwise it will print a warning.")]
-	[Help("The current branch name and fragments of the branch path will also be added by default, so running from //UE4/Main will add \"//UE4/Main\", \"UE4\", and \"Main\".")]
+	[Help("The current branch name and fragments of the branch path will also be added by default, so running from //UE5/Main will add \"//UE5/Main\", \"UE5\", and \"Main\".")]
 	[Help("-Allow", "Specifies additional tags which are allowed in the BEGIN ... HACK tag list")]
 	class CheckForHacks : BuildCommand
 	{
@@ -71,18 +73,18 @@ namespace AutomationTool
 			}
 
 			// Enumerate all the files in the workspace
-			LogInformation("Finding files in workspace...");
+			Logger.LogInformation("Finding files in workspace...");
 
 			List<FileInfo> FilesToCheck = new List<FileInfo>();
 			using (ThreadPoolWorkQueue Queue = new ThreadPoolWorkQueue())
 			{
-				DirectoryInfo BaseDir = new DirectoryInfo(EngineDirectory.FullName);
+				DirectoryInfo BaseDir = new DirectoryInfo(Unreal.EngineDirectory.FullName);
 				Queue.Enqueue(() => FindAllFiles(Queue, BaseDir, FilesToCheck));
 				Queue.Wait();
 			}
 
 			// Scan all of the files for invalid comments
-			LogInformation("Scanning files...", FilesToCheck.Count);
+			Logger.LogInformation("Scanning files...");
 			using (ThreadPoolWorkQueue Queue = new ThreadPoolWorkQueue())
 			{
 				foreach(FileInfo File in FilesToCheck)
@@ -94,7 +96,7 @@ namespace AutomationTool
 				{
 					lock(this)
 					{
-						LogInformation("Scanning files... [{0}/{1}]", FilesToCheck.Count - Queue.NumRemaining, FilesToCheck.Count);
+						Logger.LogInformation("Scanning files... [{Arg0}/{Arg1}]", FilesToCheck.Count - Queue.NumRemaining, FilesToCheck.Count);
 					}
 				}
 			}
@@ -155,7 +157,7 @@ namespace AutomationTool
 								{
 									lock (this)
 									{
-										Tools.DotNETCommon.Log.WriteLine(Tools.DotNETCommon.LogEventType.Warning, Tools.DotNETCommon.LogFormatOptions.NoSeverityPrefix, "{0}({1}): warning: Code should not be in this branch: '{2}'", FileToCheck.FullName, LineNumber, Line.Trim());
+										EpicGames.Core.Log.WriteLine(EpicGames.Core.LogEventType.Warning, EpicGames.Core.LogFormatOptions.NoSeverityPrefix, "{0}({1}): warning: Code should not be in this branch: '{2}'", FileToCheck.FullName, LineNumber, Line.Trim());
 									}
 								}
 							}

@@ -8,14 +8,8 @@ public class MovieSceneTools : ModuleRules
 	{
 		PrivateIncludePaths.AddRange(
             new string[] {
-                "Editor/MovieSceneTools/Private",
-                "Editor/MovieSceneTools/Private/CurveKeyEditors",
-                "Editor/MovieSceneTools/Private/TrackEditors",
-				"Editor/MovieSceneTools/Private/TrackEditors/PropertyTrackEditors",
-                "Editor/MovieSceneTools/Private/TrackEditorThumbnail",
-				"Editor/MovieSceneTools/Private/Sections",
-                "Editor/UnrealEd/Private",	//compatibility for FBX importer
-            }
+				System.IO.Path.Combine(GetModuleDirectory("UnrealEd"), "Private"), //compatibility for FBX importer
+			}
         );
 
 		OverridePackageType = PackageOverrideType.EngineDeveloper;
@@ -30,17 +24,23 @@ public class MovieSceneTools : ModuleRules
 				"UnrealEd",
 				"Sequencer",
                 "EditorWidgets",
+				"SequencerCore",
+				"Constraints"
             }
         );
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
                 "ActorPickerMode",
+				"AnimationBlueprintLibrary",
 				"AppFramework",
 				"CinematicCamera",
+				"ClassViewer",
+				"DataLayerEditor",
                 "CurveEditor",
                 "DesktopPlatform",
                 "Json",
+                "EditorFramework",
                 "JsonUtilities",
 				"LevelSequence",
                 "LiveLinkInterface",
@@ -54,6 +54,7 @@ public class MovieSceneTools : ModuleRules
                 "ContentBrowser",
 				"Slate",
 				"SlateCore",
+				"SceneOutliner",
                 "EditorStyle",
 				"PropertyEditor",
                 "MaterialEditor",
@@ -61,10 +62,12 @@ public class MovieSceneTools : ModuleRules
 				"RHI",
 				"SequenceRecorder",
 				"TimeManagement",
+				"ToolWidgets",
                 "AnimationCore",
 				"TimeManagement",
                 "XmlParser",
 				"ToolMenus",
+				"AnimGraphRuntime"
 			}
 		);
 
@@ -72,11 +75,8 @@ public class MovieSceneTools : ModuleRules
 			new string[] {
                 "AssetRegistry",
 				"AssetTools",
-				"Sequencer",
                 "Settings",
-				"SceneOutliner",
                 "MainFrame",
-                "UnrealEd",
                 "Analytics",
             }
         );
@@ -85,8 +85,7 @@ public class MovieSceneTools : ModuleRules
 			new string[] {
                 "AssetRegistry",
 				"AssetTools",
-				"SceneOutliner",
-                "MainFrame",
+			    "MainFrame",
 			}
 		);
 

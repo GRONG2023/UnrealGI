@@ -14,13 +14,13 @@ namespace physx
 	class PxTriangleMesh;
 }
 
-UCLASS(collapseCategories)
-class PHYSICSCORE_API UBodySetupCore : public UObject
+UCLASS(collapseCategories, MinimalAPI)
+class UBodySetupCore : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
 public:
-	TEnumAsByte<enum ECollisionTraceFlag> GetCollisionTraceFlag() const;
+	PHYSICSCORE_API TEnumAsByte<enum ECollisionTraceFlag> GetCollisionTraceFlag() const;
 
 	/** Used in the PhysicsAsset case. Associates this Body with Bone in a skeletal mesh. */
 	UPROPERTY(Category=BodySetup,VisibleAnywhere)
@@ -39,10 +39,4 @@ public:
 	/** Collision Type for this body. This eventually changes response to collision to others **/
 	UPROPERTY(EditAnywhere,Category=Collision)
 	TEnumAsByte<enum EBodyCollisionResponse::Type> CollisionReponse;
-
-	
-#if PHYSICS_INTERFACE_PHYSX
-	/** Physics triangle mesh, created from cooked data in CreatePhysicsMeshes */
-	TArray<physx::PxTriangleMesh*> TriMeshes;
-#endif
 };

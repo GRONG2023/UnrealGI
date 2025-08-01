@@ -2,25 +2,53 @@
 
 
 #include "AnimationStateNodes/SGraphNodeAnimTransition.h"
-#include "AnimStateTransitionNode.h"
-#include "Widgets/SBoxPanel.h"
-#include "Widgets/Images/SImage.h"
-#include "Widgets/SToolTip.h"
-#include "Animation/AnimInstance.h"
-#include "Animation/AnimBlueprint.h"
-#include "SGraphPanel.h"
-#include "EdGraphSchema_K2.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "SKismetLinearExpression.h"
 
-#include "ConnectionDrawingPolicy.h"
-#include "IDocumentation.h"
-
-#include "AnimationTransitionGraph.h"
-#include "AnimGraphNode_TransitionResult.h"
-#include "Animation/AnimNode_StateMachine.h"
+#include "AnimGraphNode_Base.h"
 #include "AnimGraphNode_StateMachineBase.h"
+#include "AnimGraphNode_TransitionResult.h"
+#include "AnimStateNodeBase.h"
+#include "AnimStateTransitionNode.h"
+#include "Animation/AnimBlueprint.h"
+#include "Animation/AnimBlueprintGeneratedClass.h"
+#include "Animation/AnimInstance.h"
+#include "Animation/AnimNode_StateMachine.h"
+#include "Animation/AnimStateMachineTypes.h"
 #include "AnimationStateMachineGraph.h"
+#include "AnimationTransitionGraph.h"
+#include "ConnectionDrawingPolicy.h"
+#include "Containers/EnumAsByte.h"
+#include "Delegates/Delegate.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraphSchema_K2.h"
+#include "Engine/Blueprint.h"
+#include "HAL/PlatformCrt.h"
+#include "IDocumentation.h"
+#include "Internationalization/Internationalization.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Layout/Geometry.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "SGraphPanel.h"
+#include "SKismetLinearExpression.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "Types/SlateEnums.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SOverlay.h"
+#include "Widgets/SToolTip.h"
+#include "Widgets/Text/STextBlock.h"
+
+class SWidget;
+class UEdGraphPin;
+class UObject;
+struct FPointerEvent;
+struct FSlateBrush;
 
 #define LOCTEXT_NAMESPACE "TransitionNodes"
 
@@ -82,6 +110,8 @@ void SGraphNodeAnimTransition::PerformSecondPassLayout(const TMap< UObject*, TSh
 
 			TransIndex = Transitions.IndexOfByKey(TransNode);
 			NumOfTrans = Transitions.Num();
+
+			PrevStateNodeWidgetPtr = PrevNodeWidget;
 		}
 	}
 
@@ -122,20 +152,35 @@ TSharedRef<SWidget> SGraphNodeAnimTransition::GenerateRichTooltip()
 		.Padding( 2.0f )
 		[
 			SNew(STextBlock)
-			.TextStyle( FEditorStyle::Get(), TEXT("Graph.TransitionNode.TooltipName") )
+			.TextStyle( FAppStyle::Get(), TEXT("Graph.TransitionNode.TooltipName") )
 			.Text(TooltipDesc)
 		];
 
 	if(TransNode->bAutomaticRuleBasedOnSequencePlayerInState)
 	{
-		Widget->AddSlot()
-			.AutoHeight()
-			.Padding( 2.0f )
-			[
-				SNew(STextBlock)
-				.TextStyle( FEditorStyle::Get(), TEXT("Graph.TransitionNode.TooltipRule") )
-				.Text(LOCTEXT("AnimGraphNodeAutomaticRule_ToolTip", "Automatic Rule"))
-			];
+		if (CanExecPin != nullptr && CanExecPin->LinkedTo.Num() > 0)
+		{
+			Widget->AddSlot()
+				.AutoHeight()
+				.Padding(2.0f)
+				[
+					SNew(STextBlock)
+					.TextStyle(FAppStyle::Get(), TEXT("Graph.TransitionNode.TooltipRule"))
+					.Text(LOCTEXT("AnimGraphNodeAutomaticRuleWarning_ToolTip", "Warning : Automatic Rule Based Transition will override graph exit rule."))
+					.ColorAndOpacity(FCoreStyle::Get().GetColor("ErrorReporting.WarningBackgroundColor"))
+				];
+		}
+		else
+		{
+			Widget->AddSlot()
+				.AutoHeight()
+				.Padding(2.0f)
+				[
+					SNew(STextBlock)
+					.TextStyle(FAppStyle::Get(), TEXT("Graph.TransitionNode.TooltipRule"))
+					.Text(LOCTEXT("AnimGraphNodeAutomaticRule_ToolTip", "Automatic Rule"))
+				];
+		}
 	}
 	else
 	{
@@ -144,7 +189,7 @@ TSharedRef<SWidget> SGraphNodeAnimTransition::GenerateRichTooltip()
 		.Padding( 2.0f )
 		[
 			SNew(STextBlock)
-			.TextStyle( FEditorStyle::Get(), TEXT("Graph.TransitionNode.TooltipRule") )
+			.TextStyle( FAppStyle::Get(), TEXT("Graph.TransitionNode.TooltipRule") )
 			.Text(LOCTEXT("AnimGraphNodeTransitionRule_ToolTip", "Transition Rule (in words)"))
 		];
 
@@ -192,7 +237,7 @@ void SGraphNodeAnimTransition::UpdateGraphNode()
 			+SOverlay::Slot()
 			[
 				SNew(SImage)
-				.Image( FEditorStyle::GetBrush("Graph.TransitionNode.ColorSpill") )
+				.Image( FAppStyle::GetBrush("Graph.TransitionNode.ColorSpill") )
 				.ColorAndOpacity( this, &SGraphNodeAnimTransition::GetTransitionColor )
 			]
 			+SOverlay::Slot()
@@ -257,7 +302,6 @@ FLinearColor SGraphNodeAnimTransition::StaticGetTransitionColor(UAnimStateTransi
 	check(AnimBlueprint);
 	UAnimInstance* ActiveObject = Cast<UAnimInstance>(AnimBlueprint->GetObjectBeingDebugged());
 	UAnimBlueprintGeneratedClass* Class = AnimBlueprint->GetAnimBlueprintGeneratedClass();
-	UEdGraph* StateMachineGraph = TransNode->GetGraph();
 
 	//@TODO: WIP fast path / slow path coloring
 	if (AnimBlueprint->bWarnAboutBlueprintUsage || ((ActiveObject != nullptr) && (ActiveObject->PCV_ShouldNotifyAboutNodesNotUsingFastPath() || ActiveObject->PCV_ShouldWarnAboutNodesNotUsingFastPath())))
@@ -276,24 +320,19 @@ FLinearColor SGraphNodeAnimTransition::StaticGetTransitionColor(UAnimStateTransi
 
 	if ((ActiveObject != NULL) && (Class != NULL))
 	{
+		UAnimationStateMachineGraph* StateMachineGraph = CastChecked<UAnimationStateMachineGraph>(TransNode->GetGraph());
 		if (FStateMachineDebugData* DebugInfo = Class->GetAnimBlueprintDebugData().StateMachineDebugData.Find(StateMachineGraph))
 		{
-			if (int32* pTransIndex = DebugInfo->NodeToTransitionIndex.Find(TransNode))
+			// A transition node could be associated with multiple transitions indicies when coming from an alias. Check all of them
+			TArray<int32> TransitionIndices;
+			DebugInfo->NodeToTransitionIndex.MultiFind(TransNode, TransitionIndices);
+			const int32 TransNum = TransitionIndices.Num();
+			for (int32 Index = 0; Index < TransNum; ++Index)
 			{
-				const int32 TransIndex = *pTransIndex;
-
-				if (Class->GetAnimNodeProperties().Num())
-				{
-					UAnimationStateMachineGraph* TypedGraph = CastChecked<UAnimationStateMachineGraph>(StateMachineGraph);
-
-					if (FAnimNode_StateMachine* CurrentInstance = Class->GetPropertyInstance<FAnimNode_StateMachine>(ActiveObject, TypedGraph->OwnerAnimGraphNode))
-					{
-						if (CurrentInstance->IsTransitionActive(TransIndex))
-						{
-							// We're active!
-							return ActiveColor;
-						}
-					}
+				if(IsTransitionActive(TransitionIndices[Index], *Class, *StateMachineGraph, *ActiveObject))
+				{	
+					// We're active!
+					return ActiveColor;
 				}
 			}
 		}
@@ -317,18 +356,34 @@ FLinearColor SGraphNodeAnimTransition::StaticGetTransitionColor(UAnimStateTransi
 	return bIsHovered ? HoverColor : BaseColor;
 }
 
-FSlateColor SGraphNodeAnimTransition::GetTransitionColor() const
+bool SGraphNodeAnimTransition::IsTransitionActive(int32 TransitionIndex, UAnimBlueprintGeneratedClass& AnimClass, UAnimationStateMachineGraph& StateMachineGraph, UAnimInstance& AnimInstance)
 {
+	if (AnimClass.GetAnimNodeProperties().Num())
+	{
+		if (FAnimNode_StateMachine* CurrentInstance = AnimClass.GetPropertyInstance<FAnimNode_StateMachine>(&AnimInstance, StateMachineGraph.OwnerAnimGraphNode))
+		{
+			if (CurrentInstance->IsTransitionActive(TransitionIndex))
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+FSlateColor SGraphNodeAnimTransition::GetTransitionColor() const
+{	
+	// Highlight the transition node when the node is hovered or when the previous state is hovered
 	UAnimStateTransitionNode* TransNode = CastChecked<UAnimStateTransitionNode>(GraphNode);
-	return StaticGetTransitionColor(TransNode, IsHovered());
+	return StaticGetTransitionColor(TransNode, (IsHovered() || (PrevStateNodeWidgetPtr.IsValid() && PrevStateNodeWidgetPtr.Pin()->IsHovered())));
 }
 
 const FSlateBrush* SGraphNodeAnimTransition::GetTransitionIconImage() const
 {
 	UAnimStateTransitionNode* TransNode = CastChecked<UAnimStateTransitionNode>(GraphNode);
 	return (TransNode->LogicType == ETransitionLogicType::TLT_Inertialization)
-		? FEditorStyle::GetBrush("Graph.TransitionNode.Icon_Inertialization")
-		: FEditorStyle::GetBrush("Graph.TransitionNode.Icon");
+		? FAppStyle::GetBrush("Graph.TransitionNode.Icon_Inertialization")
+		: FAppStyle::GetBrush("Graph.TransitionNode.Icon");
 }
 
 FString SGraphNodeAnimTransition::GetCurrentDuration() const
@@ -402,8 +457,8 @@ void SGraphNodeAnimTransition::PositionBetweenTwoNodesWithOffset(const FGeometry
 	// Now we need to adjust the new center by the node size, zoom factor and multi node offset
 	const FVector2D NewCorner = NewCenter - (0.5f * DesiredNodeSize) + (DeltaNormal * MultiNodeOffset * DesiredNodeSize.Size());
 
-	GraphNode->NodePosX = NewCorner.X;
-	GraphNode->NodePosY = NewCorner.Y;
+	GraphNode->NodePosX = static_cast<int32>(NewCorner.X);
+	GraphNode->NodePosY = static_cast<int32>(NewCorner.Y);
 }
 
 /////////////////////////////////////////////////////

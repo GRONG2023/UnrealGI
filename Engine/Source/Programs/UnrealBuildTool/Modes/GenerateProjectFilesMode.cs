@@ -2,30 +2,27 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
+using UnrealBuildBase;
 
 namespace UnrealBuildTool
 {
 	/// <summary>
 	/// Generates project files for one or more projects
 	/// </summary>
-	[ToolMode("GenerateProjectFiles", ToolModeOptions.XmlConfig | ToolModeOptions.BuildPlatforms | ToolModeOptions.SingleInstance)]
+	[ToolMode("GenerateProjectFiles", ToolModeOptions.XmlConfig | ToolModeOptions.BuildPlatforms | ToolModeOptions.SingleInstance | ToolModeOptions.UseStartupTraceListener | ToolModeOptions.StartPrefetchingEngine | ToolModeOptions.ShowExecutionTime)]
 	class GenerateProjectFilesMode : ToolMode
 	{
 		/// <summary>
 		/// Types of project files to generate
 		/// </summary>
 		[CommandLine("-ProjectFileFormat")]
-		[CommandLine("-2012unsupported", Value = nameof(ProjectFileFormat.VisualStudio2012))]
-		[CommandLine("-2013unsupported", Value = nameof(ProjectFileFormat.VisualStudio2013))]
-		[CommandLine("-2015", Value = nameof(ProjectFileFormat.VisualStudio2015))] // + override compiler
-		[CommandLine("-2017", Value = nameof(ProjectFileFormat.VisualStudio2017))] // + override compiler
-		[CommandLine("-2019", Value = nameof(ProjectFileFormat.VisualStudio2019))] // + override compiler
 		[CommandLine("-2022", Value = nameof(ProjectFileFormat.VisualStudio2022))] // + override compiler
 		[CommandLine("-Makefile", Value = nameof(ProjectFileFormat.Make))]
 		[CommandLine("-CMakefile", Value = nameof(ProjectFileFormat.CMake))]
@@ -36,15 +33,19 @@ namespace UnrealBuildTool
 		[CommandLine("-EddieProjectFiles", Value = nameof(ProjectFileFormat.Eddie))]
 		[CommandLine("-VSCode", Value = nameof(ProjectFileFormat.VisualStudioCode))]
 		[CommandLine("-VSMac", Value = nameof(ProjectFileFormat.VisualStudioMac))]
+		[CommandLine("-VSWorkspace", Value = nameof(ProjectFileFormat.VisualStudioWorkspace))]
 		[CommandLine("-CLion", Value = nameof(ProjectFileFormat.CLion))]
 		[CommandLine("-Rider", Value = nameof(ProjectFileFormat.Rider))]
+#if __VPROJECT_AVAILABLE__
+		[CommandLine("-VProject", Value = nameof(ProjectFileFormat.VProject))]
+#endif
 		HashSet<ProjectFileFormat> ProjectFileFormats = new HashSet<ProjectFileFormat>();
 
 		/// <summary>
 		/// Disable native project file generators for platforms. Platforms with native project file generators typically require IDE extensions to be installed.
 		/// </summary>
 		[XmlConfigFile(Category = "ProjectFileGenerator")]
-		string[] DisablePlatformProjectGenerators = null;
+		string[]? DisablePlatformProjectGenerators = null;
 
 		/// <summary>
 		/// Whether this command is being run in an automated mode
@@ -57,7 +58,8 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="Arguments">Command line arguments</param>
 		/// <returns>Exit code</returns>
-		public override int Execute(CommandLineArguments Arguments)
+		/// <param name="Logger"></param>
+		public override Task<int> ExecuteAsync(CommandLineArguments Arguments, ILogger Logger)
 		{
 			// Apply any command line arguments to this class
 			Arguments.ApplyTo(this);
@@ -65,9 +67,23 @@ namespace UnrealBuildTool
 			// Apply the XML config to this class
 			XmlConfig.ApplyTo(this);
 
+			// Apply to architecture configs that need to read commandline arguments and didn't have the Arguments passed in during construction
+			foreach (UnrealArchitectureConfig Config in UnrealArchitectureConfig.AllConfigs())
+			{
+				Arguments.ApplyTo(Config);
+			}
+
+			// set up logging (taken from BuildMode)
+			FileReference LogFile = FileReference.Combine(Unreal.EngineProgramSavedDirectory, "UnrealBuildTool", "Log_GPF.txt");
+			Log.AddFileWriter("DefaultLogTraceListener", LogFile);
+
 			// Parse rocket-specific arguments.
-			FileReference ProjectFile;
-			TryParseProjectFileArgument(Arguments, out ProjectFile);
+			FileReference? ProjectFile;
+			TryParseProjectFileArgument(Arguments, Logger, out ProjectFile);
+
+			// Apply the XML config again with a project specific BuildConfiguration.xml 
+			XmlConfig.ReadConfigFiles(null, ProjectFile?.Directory, Logger);
+			XmlConfig.ApplyTo(this);
 
 			// Warn if there are explicit project file formats specified
 			if (ProjectFileFormats.Count > 0 && !bAutomated)
@@ -82,13 +98,13 @@ namespace UnrealBuildTool
 				Configuration.Append("<?xml version=\"1.0\" encoding=\"utf-8\" ?>\n");
 				Configuration.Append("<Configuration xmlns=\"https://www.unrealengine.com/BuildConfiguration\">\n");
 				Configuration.Append("  <ProjectFileGenerator>\n");
-				foreach(ProjectFileFormat ProjectFileFormat in ProjectFileFormats)
+				foreach (ProjectFileFormat ProjectFileFormat in ProjectFileFormats)
 				{
 					Configuration.AppendFormat("    <Format>{0}</Format>\n", ProjectFileFormat);
 				}
 				Configuration.Append("  </ProjectFileGenerator>\n");
 				Configuration.Append("</Configuration>\n");
-				Log.TraceWarning("{0}", Configuration.ToString());
+				Logger.LogWarning("{Configuration}", Configuration.ToString());
 			}
 
 			// If there aren't any formats set, read the default project file format from the config file
@@ -97,7 +113,7 @@ namespace UnrealBuildTool
 				// Read from the XML config
 				if (!String.IsNullOrEmpty(ProjectFileGeneratorSettings.Format))
 				{
-					ProjectFileFormats.UnionWith(ProjectFileGeneratorSettings.ParseFormatList(ProjectFileGeneratorSettings.Format));
+					ProjectFileFormats.UnionWith(ProjectFileGeneratorSettings.ParseFormatList(ProjectFileGeneratorSettings.Format, Logger));
 				}
 
 				// Read from the editor config
@@ -120,20 +136,52 @@ namespace UnrealBuildTool
 			{
 				if (CheckType.IsClass && !CheckType.IsAbstract && CheckType.IsSubclassOf(typeof(PlatformProjectGenerator)))
 				{
-					PlatformProjectGenerator Generator = (PlatformProjectGenerator)Activator.CreateInstance(CheckType, Arguments);
-					foreach(UnrealTargetPlatform Platform in Generator.GetPlatforms())
+					PlatformProjectGenerator Generator = (PlatformProjectGenerator)Activator.CreateInstance(CheckType, Arguments, Logger)!;
+					foreach (UnrealTargetPlatform Platform in Generator.GetPlatforms())
 					{
-						if(DisablePlatformProjectGenerators == null || !DisablePlatformProjectGenerators.Any(x => x.Equals(Platform.ToString(), StringComparison.OrdinalIgnoreCase)))
+						if (DisablePlatformProjectGenerators == null || !DisablePlatformProjectGenerators.Any(x => x.Equals(Platform.ToString(), StringComparison.OrdinalIgnoreCase)))
 						{
-							Log.TraceVerbose("Registering project generator {0} for {1}", CheckType, Platform);
-							PlatformProjectGenerators.RegisterPlatformProjectGenerator(Platform, Generator);
+							Logger.LogDebug("Registering project generator {CheckType} for {Platform}", CheckType, Platform);
+							PlatformProjectGenerators.RegisterPlatformProjectGenerator(Platform, Generator, Logger);
 						}
 					}
 				}
 			}
 
+			// print out any errors to the log
+			List<string> BadPlatformNames = new List<string>();
+			Logger.LogDebug("\n---   SDK INFO START   ---");
+			foreach (string PlatformName in UnrealTargetPlatform.GetValidPlatformNames())
+			{
+				UEBuildPlatformSDK? SDK = UEBuildPlatformSDK.GetSDKForPlatform(PlatformName);
+				if (SDK != null && SDK.bIsSdkAllowedOnHost)
+				{
+					// print out the info to the log, and if it's invalid, remember it
+					SDKStatus Validity = SDK.PrintSDKInfoAndReturnValidity(LogEventType.Verbose, LogFormatOptions.NoConsoleOutput, LogEventType.Warning, LogFormatOptions.NoConsoleOutput);
+					if (Validity == SDKStatus.Invalid)
+					{
+						BadPlatformNames.Add(PlatformName);
+					}
+				}
+			}
+			if (BadPlatformNames.Count > 0)
+			{
+				Log.TraceInformationOnce("\nSome Platforms were skipped due to invalid SDK setup: {0}.\nSee the log file for detailed information\n\n", String.Join(", ", BadPlatformNames));
+				Logger.LogInformation("");
+			}
+			Logger.LogDebug("---   SDK INFO END   ---");
+			Logger.LogDebug("");
+
+			// look for a single target name param
+			string? SingleTargetName = null;
+			if (Arguments.HasValue("-SingleTarget="))
+			{
+				SingleTargetName = Arguments.GetString("-SingleTarget=");
+			}
+
+
 			// Create each project generator and run it
-			List<ProjectFileGenerator> Generators = new List<ProjectFileGenerator>();
+			Dictionary<ProjectFileFormat, ProjectFileGenerator> Generators = new();
 			foreach (ProjectFileFormat ProjectFileFormat in ProjectFileFormats.Distinct())
 			{
 				ProjectFileGenerator Generator;
@@ -157,21 +205,6 @@ namespace UnrealBuildTool
 					case ProjectFileFormat.VisualStudio:
 						Generator = new VCProjectFileGenerator(ProjectFile, VCProjectFileFormat.Default, Arguments);
 						break;
-					case ProjectFileFormat.VisualStudio2012:
-						Generator = new VCProjectFileGenerator(ProjectFile, VCProjectFileFormat.VisualStudio2012, Arguments);
-						break;
-					case ProjectFileFormat.VisualStudio2013:
-						Generator = new VCProjectFileGenerator(ProjectFile, VCProjectFileFormat.VisualStudio2013, Arguments);
-						break;
-					case ProjectFileFormat.VisualStudio2015:
-						Generator = new VCProjectFileGenerator(ProjectFile, VCProjectFileFormat.VisualStudio2015, Arguments);
-						break;
-					case ProjectFileFormat.VisualStudio2017:
-						Generator = new VCProjectFileGenerator(ProjectFile, VCProjectFileFormat.VisualStudio2017, Arguments);
-						break;
-					case ProjectFileFormat.VisualStudio2019:
-						Generator = new VCProjectFileGenerator(ProjectFile, VCProjectFileFormat.VisualStudio2019, Arguments);
-						break;
 					case ProjectFileFormat.VisualStudio2022:
 						Generator = new VCProjectFileGenerator(ProjectFile, VCProjectFileFormat.VisualStudio2022, Arguments);
 						break;
@@ -184,6 +217,9 @@ namespace UnrealBuildTool
 					case ProjectFileFormat.VisualStudioCode:
 						Generator = new VSCodeProjectFileGenerator(ProjectFile);
 						break;
+					case ProjectFileFormat.VisualStudioWorkspace:
+						Generator = new VSWorkspaceProjectFileGenerator(ProjectFile, Arguments);
+						break;
 					case ProjectFileFormat.CLion:
 						Generator = new CLionGenerator(ProjectFile);
 						break;
@@ -193,10 +229,18 @@ namespace UnrealBuildTool
 					case ProjectFileFormat.Rider:
 						Generator = new RiderProjectFileGenerator(ProjectFile, Arguments);
 						break;
+#if __VPROJECT_AVAILABLE__
+					case ProjectFileFormat.VProject:
+						Generator = new VProjectFileGenerator(ProjectFile);
+						break;
+#endif
 					default:
 						throw new BuildException("Unhandled project file type '{0}", ProjectFileFormat);
 				}
-				Generators.Add(Generator);
+				// remember if we only wanted a single target (similar to -game -project, except usable with progarms without uprojects)
+				Generator.SingleTargetName = SingleTargetName;
+				
+				Generators[ProjectFileFormat] = Generator;
 			}
 
 			// Check there are no superfluous command line arguments
@@ -205,29 +249,39 @@ namespace UnrealBuildTool
 
 			// Now generate project files
 			ProjectFileGenerator.bGenerateProjectFiles = true;
-			foreach(ProjectFileGenerator Generator in Generators)
+			// perform anything that only needs to happen one time, in the first project genereator
+			bool bPerformOneTimeOperations = true;
+			foreach (KeyValuePair<ProjectFileFormat, ProjectFileGenerator> Pair in Generators)
 			{
-				ProjectFileGenerator.Current = Generator;
-				bool bGenerateSuccess = Generator.GenerateProjectFiles(PlatformProjectGenerators, Arguments.GetRawArray());
+				Logger.LogInformation("");
+				Logger.LogInformation($"Generating {Pair.Key} project files:");
+
+				ProjectFileGenerator.Current = Pair.Value;
+				Arguments.ApplyTo(Pair.Value);
+				bool bGenerateSuccess = Pair.Value.GenerateProjectFiles(PlatformProjectGenerators, Arguments.GetRawArray(), bCacheDataForEditor: bPerformOneTimeOperations, Logger);
 				ProjectFileGenerator.Current = null;
 
 				if (!bGenerateSuccess)
 				{
-					return (int)CompilationResult.OtherCompilationError;
+					return Task.FromResult((int)CompilationResult.OtherCompilationError);
 				}
+
+				// any further generators can skip one-time operations
+				bPerformOneTimeOperations = false;
 			}
-			return (int)CompilationResult.Succeeded;
+			return Task.FromResult((int)CompilationResult.Succeeded);
 		}
 
 		/// <summary>
 		/// Try to parse the project file from the command line
 		/// </summary>
 		/// <param name="Arguments">The command line arguments</param>
+		/// <param name="Logger">Logger for output</param>
 		/// <param name="ProjectFile">The project file that was parsed</param>
 		/// <returns>True if the project file was parsed, false otherwise</returns>
-		private static bool TryParseProjectFileArgument(CommandLineArguments Arguments, out FileReference ProjectFile)
+		public static bool TryParseProjectFileArgument(CommandLineArguments Arguments, ILogger Logger, [NotNullWhen(true)] out FileReference? ProjectFile)
 		{
-			string CandidateProjectPath = null;
+			string? CandidateProjectPath = null;
 
 			// look for -project=<path>, if it does not exist check arguments for anything that has .uproject in it
 			if (!Arguments.TryGetValue("-Project=", out CandidateProjectPath))
@@ -242,16 +296,16 @@ namespace UnrealBuildTool
 					{
 						CandidateProjectPath = Arguments[Idx];
 						Arguments.MarkAsUsed(Idx);
-						break; 
+						break;
 					}
 				}
 			}
 
 			// We have a project file either via -project= or because there was something called .uproject in the arg list
 			// so now validate it
-			if (!string.IsNullOrEmpty(CandidateProjectPath))
+			if (!String.IsNullOrEmpty(CandidateProjectPath))
 			{
-				FileReference CandidateProjectFile = new FileReference(CandidateProjectPath);
+				FileReference? CandidateProjectFile = FileReference.FindCorrectCase(new FileReference(CandidateProjectPath));
 
 				// if the path doesn't exist then check native paths (ueprojectdirs)
 				if (!FileReference.Exists(CandidateProjectFile))
@@ -260,7 +314,7 @@ namespace UnrealBuildTool
 					string ProjectName = CandidateProjectFile.ChangeExtension("uproject").GetFileName();
 
 					// check native project paths (uprojectdirs)
-					IEnumerable<FileReference> NativeProjectFiles = NativeProjects.EnumerateProjectFiles();
+					IEnumerable<FileReference> NativeProjectFiles = NativeProjects.EnumerateProjectFiles(Logger);
 
 					CandidateProjectFile = NativeProjectFiles.Where(F => F.GetFileName().Equals(ProjectName, StringComparison.InvariantCultureIgnoreCase)).FirstOrDefault();
 				}
@@ -268,16 +322,16 @@ namespace UnrealBuildTool
 				if (CandidateProjectFile == null || !FileReference.Exists(CandidateProjectFile))
 				{
 					// if we didn't find anything then throw an error as the user explicitly provided a uproject
-					throw new Exception(string.Format("Unable to find project file based on argument {0}", CandidateProjectPath));
+					throw new Exception(String.Format("Unable to find project file based on argument {0}", CandidateProjectPath));
 				}
 
-				Log.TraceVerbose("Resolved project argument {0} to {1}", CandidateProjectPath, CandidateProjectFile);
+				Logger.LogDebug("Resolved project argument {CandidateProjectPath} to {CandidateProjectFile}", CandidateProjectPath, CandidateProjectFile);
 				ProjectFile = CandidateProjectFile;
 				return true;
 			}
-			
-			FileReference InstalledProjectFile = UnrealBuildTool.GetInstalledProjectFile();
-			if(InstalledProjectFile != null)
+
+			FileReference? InstalledProjectFile = UnrealBuildTool.GetInstalledProjectFile();
+			if (InstalledProjectFile != null)
 			{
 				ProjectFile = InstalledProjectFile;
 				return true;

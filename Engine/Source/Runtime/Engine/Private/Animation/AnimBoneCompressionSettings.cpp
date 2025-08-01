@@ -2,14 +2,15 @@
 
 #include "Animation/AnimBoneCompressionSettings.h"
 #include "Animation/AnimBoneCompressionCodec.h"
-#include "Animation/AnimSequence.h"
 #include "Animation/AnimationSettings.h"
 #include "AnimationUtils.h"
 #include "AnimationCompression.h"
-#include "Serialization/MemoryWriter.h"
-#include "UObject/Package.h"
+#include "Async/ParallelFor.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimBoneCompressionSettings)
 
 #define DEBUG_DUMP_ANIM_COMPRESSION_STATS 0
+
 
 UAnimBoneCompressionSettings::UAnimBoneCompressionSettings(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -108,28 +109,6 @@ static void CompressAnimSequenceImpl(FAnimBoneCompressionContext& Context)
 	}
 }
 
-class FAsyncAnimCompressionTask
-{
-public:
-	FAsyncAnimCompressionTask(FAnimBoneCompressionContext* Context_)
-		: Context(Context_)
-	{}
-
-	/** return the name of the task **/
-	static const TCHAR* GetTaskName() { return TEXT("FAsyncAnimCompressionTask"); }
-	FORCEINLINE static TStatId GetStatId() { RETURN_QUICK_DECLARE_CYCLE_STAT(FAsyncAnimCompressionTask, STATGROUP_TaskGraphTasks); }
-
-	static ENamedThreads::Type GetDesiredThread() { return ENamedThreads::AnyThread; }
-	static ESubsequentsMode::Type GetSubsequentsMode() { return ESubsequentsMode::TrackSubsequents; }
-
-	void DoTask(ENamedThreads::Type CurrentThread, const FGraphEventRef& MyCompletionGraphEvent)
-	{
-		CompressAnimSequenceImpl(*Context);
-	}
-
-	FAnimBoneCompressionContext* Context;
-};
-
 bool UAnimBoneCompressionSettings::Compress(const FCompressibleAnimData& AnimSeq, FCompressibleAnimDataResult& OutCompressedData) const
 {
 	if (!AreSettingsValid())
@@ -148,7 +127,6 @@ bool UAnimBoneCompressionSettings::Compress(const FCompressibleAnimData& AnimSeq
 	const double CompressionStartTime = FPlatformTime::Seconds();
 #endif
 
-	FGraphEventArray AnimCompressionTask_CompletionEvents;
 	TArray<FAnimBoneCompressionContext*> ContextList;
 
 	for (UAnimBoneCompressionCodec* Codec : Codecs)
@@ -160,12 +138,12 @@ bool UAnimBoneCompressionSettings::Compress(const FCompressibleAnimData& AnimSeq
 
 		FAnimBoneCompressionContext* Context = new FAnimBoneCompressionContext(AnimSeq, Codec);
 		ContextList.Add(Context);
-
-		AnimCompressionTask_CompletionEvents.Add(TGraphTask<FAsyncAnimCompressionTask>::CreateTask(NULL).ConstructAndDispatchWhenReady(Context));
 	}
 
-	// Wait for async compression to finish
-	FTaskGraphInterface::Get().WaitUntilTasksComplete(AnimCompressionTask_CompletionEvents);
+	ParallelForTemplate(ContextList.Num(), [&ContextList](int32 TaskIndex)
+	{
+		CompressAnimSequenceImpl(*ContextList[TaskIndex]);
+	}, EParallelForFlags::Unbalanced);
 
 	const int32 NumContextes = ContextList.Num();
 	if (NumContextes == 0)
@@ -264,7 +242,6 @@ bool UAnimBoneCompressionSettings::Compress(const FCompressibleAnimData& AnimSeq
 	}
 
 	ContextList.Reset();
-	AnimCompressionTask_CompletionEvents.Reset();
 
 #if DEBUG_DUMP_ANIM_COMPRESSION_STATS
 	const double CompressionEndTime = FPlatformTime::Seconds();
@@ -294,6 +271,79 @@ bool UAnimBoneCompressionSettings::Compress(const FCompressibleAnimData& AnimSeq
 	return Success;
 }
 
+void UAnimBoneCompressionSettings::PopulateDDCKey(const UE::Anim::Compression::FAnimDDCKeyArgs& KeyArgs, FArchive& Ar)
+{
+	Ar << ErrorThreshold;
+	Ar << bForceBelowThreshold;
+
+	int32 NumValidCodecs = 0;
+	for (UAnimBoneCompressionCodec* Codec : Codecs)
+	{
+		if (Codec != nullptr)
+		{
+			const int64 ArchiveOffset = Ar.Tell();
+			Codec->PopulateDDCKey(KeyArgs, Ar);
+
+			if (ArchiveOffset == Ar.Tell())
+			{
+				// If nothing was written, perhaps the codec implements the old deprecated API, call it just in case
+				PRAGMA_DISABLE_DEPRECATION_WARNINGS
+				Codec->PopulateDDCKey(KeyArgs.AnimSequence, Ar);
+				PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+				// Again, If nothing was written, call the older deprecated API
+				if (ArchiveOffset == Ar.Tell())
+				{
+					PRAGMA_DISABLE_DEPRECATION_WARNINGS
+					Codec->PopulateDDCKey(Ar);
+					PRAGMA_ENABLE_DEPRECATION_WARNINGS
+				}
+			}
+
+			NumValidCodecs++;
+		}
+	}
+
+	if (NumValidCodecs == 0)
+	{
+		static FString NoCodecString(TEXT("<Missing Codec>"));
+		Ar << NoCodecString;
+	}
+}
+
+void UAnimBoneCompressionSettings::PopulateDDCKey(const UAnimSequenceBase& AnimSeq, FArchive& Ar)
+{
+	Ar << ErrorThreshold;
+	Ar << bForceBelowThreshold;
+
+	int32 NumValidCodecs = 0;
+	for (UAnimBoneCompressionCodec* Codec : Codecs)
+	{
+		if (Codec != nullptr)
+		{
+			const int64 archiveOffset = Ar.Tell();
+			PRAGMA_DISABLE_DEPRECATION_WARNINGS
+			Codec->PopulateDDCKey(AnimSeq, Ar);
+			PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+			if (archiveOffset == Ar.Tell())
+			{
+				PRAGMA_DISABLE_DEPRECATION_WARNINGS
+				Codec->PopulateDDCKey(Ar);
+				PRAGMA_ENABLE_DEPRECATION_WARNINGS
+			}
+
+			NumValidCodecs++;
+		}
+	}
+
+	if (NumValidCodecs == 0)
+	{
+		static FString NoCodecString(TEXT("<Missing Codec>"));
+		Ar << NoCodecString;
+	}
+}
+
 void UAnimBoneCompressionSettings::PopulateDDCKey(FArchive& Ar)
 {
 	Ar << ErrorThreshold;
@@ -304,7 +354,12 @@ void UAnimBoneCompressionSettings::PopulateDDCKey(FArchive& Ar)
 	{
 		if (Codec != nullptr)
 		{
+			// We have no choice but to call the deprecated version, might not work correctly with newer codecs
+			// that leverage the new argument
+			PRAGMA_DISABLE_DEPRECATION_WARNINGS
 			Codec->PopulateDDCKey(Ar);
+			PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
 			NumValidCodecs++;
 		}
 	}
@@ -316,3 +371,4 @@ void UAnimBoneCompressionSettings::PopulateDDCKey(FArchive& Ar)
 	}
 }
 #endif
+

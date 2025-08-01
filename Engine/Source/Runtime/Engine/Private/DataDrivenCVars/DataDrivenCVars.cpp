@@ -3,10 +3,16 @@
 #include "DataDrivenCVars/DataDrivenCVars.h"
 #include "HAL/ConsoleManager.h"
 #include "Engine/Engine.h"
+#include "Subsystems/SubsystemCollection.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(DataDrivenCVars)
 
 FDataDrivenConsoleVariable::~FDataDrivenConsoleVariable()
 {
-	UnRegister();
+	if (!Name.IsEmpty())
+	{
+		UnRegister();
+	}
 }
 
 void FDataDrivenConsoleVariable::Register()
@@ -18,31 +24,36 @@ void FDataDrivenConsoleVariable::Register()
 		{
 			if (Type == FDataDrivenCVarType::CVarInt)
 			{
-				CVarToAdd = IConsoleManager::Get().RegisterConsoleVariable(*Name, DefaultValueInt, TEXT("RuntimeConsoleVariables"), ECVF_Default | ECVF_Scalability);
+				CVarToAdd = IConsoleManager::Get().RegisterConsoleVariable(*Name, DefaultValueInt, *ToolTip, ECVF_Default | ECVF_Scalability);
 			}
 			else if (Type == FDataDrivenCVarType::CVarBool)
 			{
-				CVarToAdd = IConsoleManager::Get().RegisterConsoleVariable(*Name, DefaultValueBool, TEXT("RuntimeConsoleVariables"), ECVF_Default | ECVF_Scalability);
+				CVarToAdd = IConsoleManager::Get().RegisterConsoleVariable(*Name, DefaultValueBool, *ToolTip, ECVF_Default | ECVF_Scalability);
 			}
 			else
 			{
-				CVarToAdd = IConsoleManager::Get().RegisterConsoleVariable(*Name, DefaultValueFloat, TEXT("RuntimeConsoleVariables"), ECVF_Default | ECVF_Scalability);
+				CVarToAdd = IConsoleManager::Get().RegisterConsoleVariable(*Name, DefaultValueFloat, *ToolTip, ECVF_Default | ECVF_Scalability);
 			}
 		}
 		CVarToAdd->SetOnChangedCallback(FConsoleVariableDelegate::CreateStatic(UDataDrivenConsoleVariableSettings::OnDataDrivenChange));
 		ShadowName = Name;
+		ShadowToolTip = ToolTip;
 		ShadowType = Type;
 	}
 }
 
 void FDataDrivenConsoleVariable::UnRegister(bool bUseShadowName)
 {
-	IConsoleVariable* CVarToRemove = IConsoleManager::Get().FindConsoleVariable(bUseShadowName  ? *ShadowName : *Name);
-	if (CVarToRemove)
+	const FString& NameToUnregister = bUseShadowName ? ShadowName : Name;
+	if (!NameToUnregister.IsEmpty())
 	{
-		FConsoleVariableDelegate NullCallback;
-		CVarToRemove->SetOnChangedCallback(NullCallback);
-		IConsoleManager::Get().UnregisterConsoleObject(CVarToRemove, false);
+		IConsoleVariable* CVarToRemove = IConsoleManager::Get().FindConsoleVariable(*NameToUnregister);
+		if (CVarToRemove)
+		{
+			FConsoleVariableDelegate NullCallback;
+			CVarToRemove->SetOnChangedCallback(NullCallback);
+			IConsoleManager::Get().UnregisterConsoleObject(CVarToRemove, false);
+		}
 	}
 }
 
@@ -58,6 +69,11 @@ void FDataDrivenConsoleVariable::Refresh()
 		}
 		ShadowName = Name;
 	}
+	else if (ShadowToolTip != ToolTip)
+	{
+		UnRegister(true);
+		ShadowToolTip = ToolTip;
+	}
 	else if (ShadowType != Type)
 	{
 		UnRegister(true);
@@ -66,6 +82,18 @@ void FDataDrivenConsoleVariable::Refresh()
 
 	// make sure the cvar is registered
 	Register();
+
+	//Ensure the default value is applied, assuming no other external changes to the CVar.
+	IConsoleVariable* CVarToRefresh = IConsoleManager::Get().FindConsoleVariable(*Name);
+	if (CVarToRefresh)
+	{
+		switch (Type)
+		{
+		case FDataDrivenCVarType::CVarBool: CVarToRefresh->Set(DefaultValueBool, ECVF_SetByConstructor); break;
+		case FDataDrivenCVarType::CVarInt: CVarToRefresh->Set(DefaultValueInt, ECVF_SetByConstructor); break;
+		case FDataDrivenCVarType::CVarFloat: CVarToRefresh->Set(DefaultValueFloat, ECVF_SetByConstructor); break;
+		}
+	}
 }
 #endif
 
@@ -81,11 +109,14 @@ void UDataDrivenConsoleVariableSettings::PostInitProperties()
 
 void UDataDrivenConsoleVariableSettings::OnDataDrivenChange(IConsoleVariable* CVar)
 {
-	UDataDrivenCVarEngineSubsystem* Subsystem = GEngine->GetEngineSubsystem<UDataDrivenCVarEngineSubsystem>();
-	if (Subsystem)
+	if (GEngine != nullptr)
 	{
-		FConsoleManager& ConsoleManager = (FConsoleManager&)IConsoleManager::Get();
-		Subsystem->OnDataDrivenCVarDelegate.Broadcast(ConsoleManager.FindConsoleObjectName(CVar));
+		UDataDrivenCVarEngineSubsystem* Subsystem = GEngine->GetEngineSubsystem<UDataDrivenCVarEngineSubsystem>();
+		if (Subsystem)
+		{
+			FConsoleManager& ConsoleManager = (FConsoleManager&)IConsoleManager::Get();
+			Subsystem->OnDataDrivenCVarDelegate.Broadcast(ConsoleManager.FindConsoleObjectName(CVar));
+		}
 	}
 }
 
@@ -105,3 +136,4 @@ FName UDataDrivenConsoleVariableSettings::GetCategoryName() const
 {
 	return FName(TEXT("Engine"));
 }
+

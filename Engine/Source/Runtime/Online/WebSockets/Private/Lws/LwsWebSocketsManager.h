@@ -9,6 +9,7 @@
 #include "HAL/Runnable.h"
 #include "Misc/SingleThreadRunnable.h"
 #include "HAL/ThreadSafeCounter.h"
+#include "Containers/Ticker.h"
 
 #if PLATFORM_WINDOWS
 #	include "Windows/AllowWindowsPlatformTypes.h"
@@ -94,7 +95,7 @@ private:
 	TArray<FLwsWebSocket*> SocketsDestroyedDuringService;
 
 	/** Delegate for callbacks to GameThreadTick */
-	FDelegateHandle TickHandle;
+	FTSTicker::FDelegateHandle TickHandle;
 
 	// Thread variables
 	/** Pointer to Runnable Thread */
@@ -107,6 +108,11 @@ private:
 	double ThreadTargetFrameTimeInSeconds;
 	/** Minimum time to sleep in our thread's tick, even if the sleep makes us exceed our target frame time */
 	double ThreadMinimumSleepTimeInSeconds;
+
+	bool bDisableDomainAllowlist = false;
+	bool bDisableCertValidation = false;
+
+	friend class FLwsWebSocket;
 };
 
 #endif // WITH_WEBSOCKETS && WITH_LIBWEBSOCKETS

@@ -51,10 +51,10 @@ FString FBuildVersion::GetDefaultFileName()
 FString FBuildVersion::GetFileNameForCurrentExecutable()
 {
 	FString AppExecutableName = FPlatformProcess::ExecutableName();
-#if PLATFORM_WINDOWS || PLATFORM_MAC
-	if(AppExecutableName.EndsWith(TEXT("-Cmd")))
+#if PLATFORM_DESKTOP
+	if (AppExecutableName.EndsWith(TEXT("-Cmd")))
 	{
-		AppExecutableName.LeftInline(AppExecutableName.Len() - 4, false);
+		AppExecutableName.LeftChopInline(4, EAllowShrinking::No);
 	}
 #endif
 #if UE_BUILD_DEVELOPMENT
@@ -68,7 +68,7 @@ FString FBuildVersion::GetFileNameForCurrentExecutable()
 			{
 				break;
 			}
-			AppExecutableName.LeftInline(EndIdx, false);
+			AppExecutableName.LeftInline(EndIdx, EAllowShrinking::No);
 		}
 	}
 #endif

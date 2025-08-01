@@ -30,7 +30,7 @@ enum class ETextShapingMethod : uint8;
  * A rich static text widget. 
  * Through the use of markup and text decorators, text with different styles, embedded image and widgets can be achieved.
  */
-class SLATE_API SRichTextBlock : public SWidget
+class SRichTextBlock : public SWidget
 {
 public:
 
@@ -46,11 +46,13 @@ public:
 		, _TextStyle( &FCoreStyle::Get().GetWidgetStyle<FTextBlockStyle>( "NormalText" ) )
 		, _Margin( FMargin() )
 		, _LineHeightPercentage( 1.0f )
+		, _ApplyLineHeightToBottomLine( true )
 		, _Justification( ETextJustify::Left )
 		, _TextShapingMethod()
 		, _TextFlowDirection()
 		, _Decorators()
 		, _Parser()
+		, _OverflowPolicy()
 		, _MinDesiredWidth()
 	{
 		_Clipping = EWidgetClipping::OnDemand;
@@ -93,6 +95,9 @@ public:
 		/** The amount to scale each lines height by. */
 		SLATE_ATTRIBUTE( float, LineHeightPercentage )
 
+		/** Whether to leave extra space below the last line due to line height. */
+		SLATE_ATTRIBUTE( bool, ApplyLineHeightToBottomLine )
+
 		/** How the text should be aligned with the margin. */
 		SLATE_ATTRIBUTE( ETextJustify::Type, Justification )
 
@@ -107,6 +112,9 @@ public:
 
 		/** The parser used to resolve any markup used in the provided string. */
 		SLATE_ARGUMENT( TSharedPtr< class IRichTextMarkupParser >, Parser )
+
+		/** Determines what happens to text that is clipped and doesn't fit within the clip rect for this widget */
+		SLATE_ARGUMENT(TOptional<ETextOverflowPolicy>, OverflowPolicy)
 
 		/** Minimum width that this text block should be */
 		SLATE_ATTRIBUTE(float, MinDesiredWidth)
@@ -132,7 +140,7 @@ public:
 	}
 
 	template< class UserClass >
-	static TSharedRef< ITextDecorator >  WidgetDecorator( const FString RunName, UserClass* InUserObjectPtr, typename FWidgetDecorator::FCreateWidget::TSPMethodDelegate_Const< UserClass >::FMethodPtr InFunc )
+	static TSharedRef< ITextDecorator >  WidgetDecorator( const FString RunName, UserClass* InUserObjectPtr, typename FWidgetDecorator::FCreateWidget::TConstMethodPtr< UserClass > InFunc )
 	{
 		return FWidgetDecorator::Create( RunName, FWidgetDecorator::FCreateWidget::CreateSP( InUserObjectPtr, InFunc ) );
 	}
@@ -148,22 +156,22 @@ public:
 	}
 
 	template< class UserClass >
-	static TSharedRef< ITextDecorator > HyperlinkDecorator( const FString Id, UserClass* InUserObjectPtr, typename FSlateHyperlinkRun::FOnClick::TSPMethodDelegate< UserClass >::FMethodPtr NavigateFunc )
+	static TSharedRef< ITextDecorator > HyperlinkDecorator( const FString Id, UserClass* InUserObjectPtr, typename FSlateHyperlinkRun::FOnClick::TMethodPtr< UserClass > NavigateFunc )
 	{
 		return FHyperlinkDecorator::Create( Id, FSlateHyperlinkRun::FOnClick::CreateSP( InUserObjectPtr, NavigateFunc ) );
 	}
 
 	/** Constructor */
-	SRichTextBlock();
+	SLATE_API SRichTextBlock();
 
 	/** Destructor */
-	~SRichTextBlock();
+	SLATE_API ~SRichTextBlock();
 
 	//~ Begin SWidget Interface
-	void Construct( const FArguments& InArgs );
-	virtual int32 OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const override;
-	virtual FChildren* GetChildren() override;
-	virtual void OnArrangeChildren( const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren ) const override;
+	SLATE_API void Construct( const FArguments& InArgs );
+	SLATE_API virtual int32 OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const override;
+	SLATE_API virtual FChildren* GetChildren() override;
+	SLATE_API virtual void OnArrangeChildren( const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren ) const override;
 	//~ End SWidget Interface
 
 	/**
@@ -177,59 +185,68 @@ public:
 	/**
 	 * Sets the text for this text block
 	 */
-	void SetText( const TAttribute<FText>& InTextAttr );
+	SLATE_API void SetText( const TAttribute<FText>& InTextAttr );
 
 	/** See HighlightText attribute */
-	void SetHighlightText( const TAttribute<FText>& InHighlightText );
+	SLATE_API void SetHighlightText( const TAttribute<FText>& InHighlightText );
 
 	/** See TextShapingMethod attribute */
-	void SetTextShapingMethod(const TOptional<ETextShapingMethod>& InTextShapingMethod);
+	SLATE_API void SetTextShapingMethod(const TOptional<ETextShapingMethod>& InTextShapingMethod);
 
 	/** See TextFlowDirection attribute */
-	void SetTextFlowDirection(const TOptional<ETextFlowDirection>& InTextFlowDirection);
+	SLATE_API void SetTextFlowDirection(const TOptional<ETextFlowDirection>& InTextFlowDirection);
 
 	/** See WrapTextAt attribute */
-	void SetWrapTextAt(const TAttribute<float>& InWrapTextAt);
+	SLATE_API void SetWrapTextAt(const TAttribute<float>& InWrapTextAt);
 
 	/** See AutoWrapText attribute */
-	void SetAutoWrapText(const TAttribute<bool>& InAutoWrapText);
+	SLATE_API void SetAutoWrapText(const TAttribute<bool>& InAutoWrapText);
 
 	/** Set WrappingPolicy attribute */
-	void SetWrappingPolicy(const TAttribute<ETextWrappingPolicy>& InWrappingPolicy);
+	SLATE_API void SetWrappingPolicy(const TAttribute<ETextWrappingPolicy>& InWrappingPolicy);
 
 	/** Set TransformPolicy attribute */
-	void SetTransformPolicy(const TAttribute<ETextTransformPolicy>& InTransformPolicy);
+	SLATE_API void SetTransformPolicy(const TAttribute<ETextTransformPolicy>& InTransformPolicy);
 
 	/** See LineHeightPercentage attribute */
-	void SetLineHeightPercentage(const TAttribute<float>& InLineHeightPercentage);
+	SLATE_API void SetLineHeightPercentage(const TAttribute<float>& InLineHeightPercentage);
+
+	/** See ApplyLineHeightToBottomLine attribute */
+	SLATE_API void SetApplyLineHeightToBottomLine(const TAttribute<bool>& InApplyLineHeightToBottomLine);
 
 	/** See Margin attribute */
-	void SetMargin(const TAttribute<FMargin>& InMargin);
+	SLATE_API void SetMargin(const TAttribute<FMargin>& InMargin);
 
 	/** See Justification attribute */
-	void SetJustification(const TAttribute<ETextJustify::Type>& InJustification);
+	SLATE_API void SetJustification(const TAttribute<ETextJustify::Type>& InJustification);
 
 	/** See TextStyle argument */
-	void SetTextStyle(const FTextBlockStyle& InTextStyle);
+	SLATE_API void SetTextStyle(const FTextBlockStyle& InTextStyle);
 
 	/** See MinDesiredWidth attribute */
-	void SetMinDesiredWidth(const TAttribute<float>& InMinDesiredWidth);
+	SLATE_API void SetMinDesiredWidth(const TAttribute<float>& InMinDesiredWidth);
 
 	/**  */
-	void SetDecoratorStyleSet(const ISlateStyle* NewDecoratorStyleSet);
+	SLATE_API void SetDecoratorStyleSet(const ISlateStyle* NewDecoratorStyleSet);
+
+	/** Replaces the decorators for this text block */
+	SLATE_API void SetDecorators(TArrayView<TSharedRef<ITextDecorator>> InDecorators);
+
+	/** Sets the overflow policy for this text block */
+	SLATE_API void SetOverflowPolicy(TOptional<ETextOverflowPolicy> InOverflowPolicy);
 
 	/**
 	 * Causes the text to reflow it's layout
 	 */
-	void Refresh();
+	SLATE_API void Refresh();
 
 	/** set the scale value at the TextLayout*/
-	void SetTextBlockScale(const float NewTextBlockScale);
+	SLATE_API void SetTextBlockScale(const float NewTextBlockScale);
 
 protected:
 	//~ SWidget interface
-	virtual FVector2D ComputeDesiredSize(float) const override;
-	virtual bool ComputeVolatility() const override;
+	SLATE_API virtual FVector2D ComputeDesiredSize(float) const override;
+	SLATE_API virtual bool ComputeVolatility() const override;
 	//~ End of SWidget interface
 
 private:
@@ -266,6 +283,9 @@ private:
 
 	/** How the text should be aligned with the margin. */
 	TAttribute< float > LineHeightPercentage;
+
+	/** Whether to leave extra space below the last line due to line height. */
+	TAttribute< bool > ApplyLineHeightToBottomLine;
 
 	/** Prevents the text block from being smaller than desired in certain cases (e.g. when it is empty) */
 	TAttribute<float> MinDesiredWidth;

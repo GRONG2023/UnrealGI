@@ -20,7 +20,7 @@ struct FIKChainLink
 
 public:
 	FVector Location;
-	float Length;
+	double Length;
 	FVector LinkAxisZ;
 	FVector RealBendDir;
 	FVector BaseBendDir;
@@ -28,14 +28,14 @@ public:
 
 	FIKChainLink()
 		: Location(FVector::ZeroVector)
-		, Length(0.f)
+		, Length(0.0)
 		, LinkAxisZ(FVector::ZeroVector)
 		, RealBendDir(FVector::ZeroVector)
 		, BaseBendDir(FVector::ZeroVector)
 		, BoneName(NAME_None)
 	{}
 
-	FIKChainLink(FVector InLocation, float InLength)
+	FIKChainLink(FVector InLocation, double InLength)
 		: Location(InLocation)
 		, Length(InLength)
 		, LinkAxisZ(FVector::ZeroVector)
@@ -56,7 +56,7 @@ public:
 
 private:
 	FAnimInstanceProxy* MyAnimInstanceProxy;
-	float MaximumReach;
+	double TotalChainLength;
 	int32 NumLinks;
 	FVector HingeRotationAxis;
 	bool bEnableRotationLimit;
@@ -65,7 +65,7 @@ private:
 public:
 	FIKChain()
 		: MyAnimInstanceProxy(nullptr)
-		, MaximumReach(0.f)
+		, TotalChainLength(0.0)
 		, NumLinks(INDEX_NONE)
 		, HingeRotationAxis(FVector::ZeroVector)
 		, bEnableRotationLimit(false)
@@ -73,17 +73,23 @@ public:
 	{}
 
 	void InitializeFromLegData(FAnimLegIKData& InLegData, FAnimInstanceProxy* InAnimInstanceProxy);
-	void ReachTarget(const FVector& InTargetLocation, float InReachPrecision, int32 InMaxIterations);
+	void ReachTarget(
+		const FVector& InTargetLocation,
+		double InReachPrecision,
+		int32 InMaxIterations,
+		float SoftPercentLength,
+		float SoftAlpha);
+	void ApplyTwistOffset(const float InTwistOffsetDegrees);
 
-	float GetMaximumReach() const
+	double GetMaximumReach() const
 	{
-		return MaximumReach;
+		return TotalChainLength;
 	}
 
 private:
 	void OrientAllLinksToDirection(const FVector& InDirection);
 	void SolveTwoBoneIK(const FVector& InTargetLocation);
-	void SolveFABRIK(const FVector& InTargetLocation, float InReachPrecision, int32 InMaxIterations);
+	void SolveFABRIK(const FVector& InTargetLocation, double InReachPrecision, int32 InMaxIterations);
 
 	static void FABRIK_ForwardReach(const FVector& InTargetLocation, FIKChain& IKChain);
 	static void FABRIK_BackwardReach(const FVector& InRootTargetLocation, FIKChain& IKChain);
@@ -129,6 +135,12 @@ struct FAnimLegIKDefinition
 	UPROPERTY(EditAnywhere, Category = "Settings")
 	bool bEnableKneeTwistCorrection;
 
+	/** Name of the curve to use as the twist offset angle(in degrees).
+	* This is useful for injecting knee motion, while keeping the IK chain's goal/hand and root/hip locked in place. 
+	* Reasonable values are usually between -+15 degrees, although this is depends on how far in/out the knee is in the original pose. */
+	UPROPERTY(EditAnywhere, Category = "Settings")
+	FName TwistOffsetCurveName;
+
 	FAnimLegIKDefinition()
 		: NumBonesInLimb(2)
 		, MinRotationAngle(15.f)
@@ -136,6 +148,7 @@ struct FAnimLegIKDefinition
 		, HingeRotationAxis(EAxis::None)
 		, bEnableRotationLimit(false)
 		, bEnableKneeTwistCorrection(true)
+		, TwistOffsetCurveName(NAME_None)
 	{}
 };
 
@@ -149,6 +162,7 @@ public:
 	FTransform IKFootTransform;
 	FAnimLegIKDefinition* LegDefPtr;
 	FCompactPoseBoneIndex IKFootBoneIndex;
+	float TwistOffsetDegrees;
 	int32 NumBones;
 	TArray<FCompactPoseBoneIndex> FKLegBoneIndices;
 	TArray<FTransform> FKLegBoneTransforms;
@@ -162,16 +176,17 @@ public:
 		: IKFootTransform(FTransform::Identity)
 		, LegDefPtr(nullptr)
 		, IKFootBoneIndex(INDEX_NONE)
+		, TwistOffsetDegrees(0.0f)
 		, NumBones(INDEX_NONE)
 	{}
 };
 
 USTRUCT()
-struct ANIMGRAPHRUNTIME_API FAnimNode_LegIK : public FAnimNode_SkeletalControlBase
+struct FAnimNode_LegIK : public FAnimNode_SkeletalControlBase
 {
 	GENERATED_USTRUCT_BODY()
 
-	FAnimNode_LegIK();
+	ANIMGRAPHRUNTIME_API FAnimNode_LegIK();
 
 	/** Tolerance for reaching IK Target, in unreal units. */
 	UPROPERTY(EditAnywhere, Category = "Settings")
@@ -180,6 +195,16 @@ struct ANIMGRAPHRUNTIME_API FAnimNode_LegIK : public FAnimNode_SkeletalControlBa
 	/** Max Number of Iterations. */
 	UPROPERTY(EditAnywhere, Category = "Settings")
 	int32 MaxIterations;
+
+	/** Default is 1.0 (off). Range is 0.1 to 1.0. When set to a value less than 1, will "softly" approach full extension starting when the effector
+	 * distance from the root of the chain is greater than this percent length of the bone chain. Typical values are around 0.97.
+	 * This is useful for preventing the knee from "popping" when approaching full extension. */
+	UPROPERTY(EditAnywhere, Category = "Settings", meta = (PinHiddenByDefault, UIMin = "0.01", UIMax = "1", ClampMin = "0.01", ClampMax = "1"))
+	float SoftPercentLength;
+
+	/** Default is 1.0 (full). Range is 0 to 1. Blends the effect of the "softness" on/off. */
+	UPROPERTY(EditAnywhere, Category = "Settings", meta = (PinHiddenByDefault, UIMin = "0.0", UIMax = "1", ClampMin = "0.0", ClampMax = "1"))
+	float SoftAlpha;
 
 	UPROPERTY(EditAnywhere, Category = "Settings")
 	TArray<FAnimLegIKDefinition> LegsDefinition;
@@ -190,21 +215,21 @@ struct ANIMGRAPHRUNTIME_API FAnimNode_LegIK : public FAnimNode_SkeletalControlBa
 
 public:
 	// FAnimNode_Base interface
-	virtual void GatherDebugData(FNodeDebugData& DebugData) override;
+	ANIMGRAPHRUNTIME_API virtual void GatherDebugData(FNodeDebugData& DebugData) override;
 	// End of FAnimNode_Base interface
 
 	// FAnimNode_SkeletalControlBase interface
-	virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
-	virtual void EvaluateSkeletalControl_AnyThread(FComponentSpacePoseContext& Output, TArray<FBoneTransform>& OutBoneTransforms) override;
-	virtual bool IsValidToEvaluate(const USkeleton* Skeleton, const FBoneContainer& RequiredBones) override;
+	ANIMGRAPHRUNTIME_API virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
+	ANIMGRAPHRUNTIME_API virtual void EvaluateSkeletalControl_AnyThread(FComponentSpacePoseContext& Output, TArray<FBoneTransform>& OutBoneTransforms) override;
+	ANIMGRAPHRUNTIME_API virtual bool IsValidToEvaluate(const USkeleton* Skeleton, const FBoneContainer& RequiredBones) override;
 	// End of FAnimNode_SkeletalControlBase interface
 
-	bool OrientLegTowardsIK(FAnimLegIKData& InLegData);
-	bool DoLegReachIK(FAnimLegIKData& InLegData);
-	bool AdjustKneeTwist(FAnimLegIKData& InLegData);
+	ANIMGRAPHRUNTIME_API bool OrientLegTowardsIK(FAnimLegIKData& InLegData);
+	ANIMGRAPHRUNTIME_API bool DoLegReachIK(FAnimLegIKData& InLegData);
+	ANIMGRAPHRUNTIME_API bool AdjustKneeTwist(FAnimLegIKData& InLegData);
 
 private:
 	// FAnimNode_SkeletalControlBase interface
-	virtual void InitializeBoneReferences(const FBoneContainer& RequiredBones) override;
+	ANIMGRAPHRUNTIME_API virtual void InitializeBoneReferences(const FBoneContainer& RequiredBones) override;
 	// End of FAnimNode_SkeletalControlBase interface
 };

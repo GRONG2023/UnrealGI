@@ -56,20 +56,20 @@ FMaterialLayersFunctionsCustomization::FMaterialLayersFunctionsCustomization(con
 	//Fixup for adding new bool arrays to the class
 	if (MaterialLayersFunctions)
 	{
-		if (MaterialLayersFunctions->Layers.Num() != MaterialLayersFunctions->RestrictToLayerRelatives.Num())
+		if (MaterialLayersFunctions->Layers.Num() != MaterialLayersFunctions->EditorOnly.RestrictToLayerRelatives.Num())
 		{
-			int32 OriginalSize = MaterialLayersFunctions->RestrictToLayerRelatives.Num();
+			int32 OriginalSize = MaterialLayersFunctions->EditorOnly.RestrictToLayerRelatives.Num();
 			for (int32 LayerIt = 0; LayerIt < MaterialLayersFunctions->Layers.Num() - OriginalSize; LayerIt++)
 			{
-				MaterialLayersFunctions->RestrictToLayerRelatives.Add(false);
+				MaterialLayersFunctions->EditorOnly.RestrictToLayerRelatives.Add(false);
 			}
 		}
-		if (MaterialLayersFunctions->Blends.Num() != MaterialLayersFunctions->RestrictToBlendRelatives.Num())
+		if (MaterialLayersFunctions->Blends.Num() != MaterialLayersFunctions->EditorOnly.RestrictToBlendRelatives.Num())
 		{
-			int32 OriginalSize = MaterialLayersFunctions->RestrictToBlendRelatives.Num();
+			int32 OriginalSize = MaterialLayersFunctions->EditorOnly.RestrictToBlendRelatives.Num();
 			for (int32 BlendIt = 0; BlendIt < MaterialLayersFunctions->Blends.Num() - OriginalSize; BlendIt++)
 			{
-				MaterialLayersFunctions->RestrictToBlendRelatives.Add(false);
+				MaterialLayersFunctions->EditorOnly.RestrictToBlendRelatives.Add(false);
 			}
 		}
 	}
@@ -81,7 +81,7 @@ void FMaterialLayersFunctionsCustomization::ResetToDefault()
 	const FScopedTransaction Transaction(LOCTEXT("ResetMaterialLayersFunctions", "Reset all Layers and Blends"));
 	SavedStructPropertyHandle->NotifyPreChange();
 	*MaterialLayersFunctions = FMaterialLayersFunctions();
-	SavedStructPropertyHandle->NotifyPostChange();
+	SavedStructPropertyHandle->NotifyPostChange(EPropertyChangeType::ValueSet);
 
 	// Refresh the header so the reset to default button is no longer visible
 	SavedLayoutBuilder->ForceRefreshDetails();
@@ -170,7 +170,7 @@ void FMaterialLayersFunctionsCustomization::GenerateChildContent(IDetailChildren
 				SNew(SInlineEditableTextBlock)
 				.Text(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &FMaterialLayersFunctionsCustomization::GetLayerName, (int32)LayerChildren - 1)))
 				.OnTextCommitted(FOnTextCommitted::CreateSP(this, &FMaterialLayersFunctionsCustomization::OnNameChanged, (int32)LayerChildren-1))
-				.Font(FEditorStyle::GetFontStyle(TEXT("MaterialEditor.Layers.EditableFont")))
+				.Font(FAppStyle::GetFontStyle(TEXT("MaterialEditor.Layers.EditableFont")))
 			]
 			.ValueContent()
 			.HAlign(HAlign_Fill)
@@ -211,7 +211,7 @@ void FMaterialLayersFunctionsCustomization::GenerateChildContent(IDetailChildren
 						SNew(SInlineEditableTextBlock)
 						.Text(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &FMaterialLayersFunctionsCustomization::GetLayerName, Counter)))
 						.OnTextCommitted(FOnTextCommitted::CreateSP(this, &FMaterialLayersFunctionsCustomization::OnNameChanged, Counter))
-						.Font(FEditorStyle::GetFontStyle(TEXT("MaterialEditor.Layers.EditableFont")))
+						.Font(FAppStyle::GetFontStyle(TEXT("MaterialEditor.Layers.EditableFont")))
 					]
 					.ValueContent()
 					.HAlign(HAlign_Fill)
@@ -250,8 +250,8 @@ void FMaterialLayersFunctionsCustomization::OnNameChanged(const FText& InText, E
 {
 	const FScopedTransaction Transaction(LOCTEXT("RenamedSection", "Renamed layer and blend section"));
 	SavedStructPropertyHandle->NotifyPreChange();
-	MaterialLayersFunctions->LayerNames[Counter] = InText;
-	SavedStructPropertyHandle->NotifyPostChange();
+	MaterialLayersFunctions->EditorOnly.LayerNames[Counter] = InText;
+	SavedStructPropertyHandle->NotifyPostChange(EPropertyChangeType::ValueSet);
 };
 #endif
 
@@ -274,7 +274,7 @@ void FMaterialLayersFunctionsCustomization::AddLayer()
 	const FScopedTransaction Transaction(LOCTEXT("AddLayerAndBlend", "Add a new Layer and a Blend into it"));
 	SavedStructPropertyHandle->NotifyPreChange();
 	MaterialLayersFunctions->AppendBlendedLayer();
-	SavedStructPropertyHandle->NotifyPostChange();
+	SavedStructPropertyHandle->NotifyPostChange(EPropertyChangeType::ArrayAdd);
 }
 
 void FMaterialLayersFunctionsCustomization::RemoveLayer(int32 Index)
@@ -282,7 +282,7 @@ void FMaterialLayersFunctionsCustomization::RemoveLayer(int32 Index)
 	const FScopedTransaction Transaction(LOCTEXT("RemoveLayerAndBlend", "Remove a Layer and the attached Blend"));
 	SavedStructPropertyHandle->NotifyPreChange();
 	MaterialLayersFunctions->RemoveBlendedLayerAt(Index);
-	SavedStructPropertyHandle->NotifyPostChange();
+	SavedStructPropertyHandle->NotifyPostChange(EPropertyChangeType::ArrayRemove);
 }
 
 
@@ -329,7 +329,7 @@ void FMaterialLayerFunctionElement::ResetLayerAssetToDefault(TSharedPtr<IPropert
 	}
 	}
 
-	InPropertyHandle->NotifyPostChange();
+	InPropertyHandle->NotifyPostChange(EPropertyChangeType::ValueSet);
 	InCustomization->RebuildChildren();
 }
 
@@ -423,6 +423,7 @@ void FMaterialLayerFunctionElement::GenerateHeaderRowContent(FDetailWidgetRow& N
 	FunctionInfo.Association = InAssociation;
 
 	NodeRow
+		.OverrideResetToDefault(ResetAssetOverride)
 		.NameContent()
 		[
 			SNew(SHorizontalBox)
@@ -445,7 +446,6 @@ void FMaterialLayerFunctionElement::GenerateHeaderRowContent(FDetailWidgetRow& N
 				.ObjectPath(ParentCustomization, &FMaterialLayersFunctionsCustomization::GetLayerAssetPath, FunctionInfo)
 				.OnObjectChanged(AssetChanged)
 				.OnShouldFilterAsset(AssetFilter)
-				.CustomResetToDefault(ResetAssetOverride)
 				.ThumbnailPool(ParentCustomization->GetPropertyUtilities()->GetThumbnailPool())
 				.DisplayCompactSize(true)
 				.ThumbnailSizeOverride(ThumbnailOverride)

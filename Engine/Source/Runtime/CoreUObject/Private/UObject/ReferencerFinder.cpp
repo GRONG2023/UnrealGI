@@ -12,22 +12,20 @@ class FAllReferencesProcessor : public FSimpleReferenceProcessorBase
 {
 	const TSet<UObject*>& PotentiallyReferencedObjects;
 	TSet<UObject*>& ReferencingObjects;
-	UObject* CurrentObject;
 	EReferencerFinderFlags Flags;
 
 public:
 	FAllReferencesProcessor(const TSet<UObject*>& InPotentiallyReferencedObjects, EReferencerFinderFlags InFlags, TSet<UObject*>& OutReferencingObjects)
 		: PotentiallyReferencedObjects(InPotentiallyReferencedObjects)
 		, ReferencingObjects(OutReferencingObjects)
-		, CurrentObject(nullptr)
 		, Flags(InFlags)
 	{
 	}
-	FORCEINLINE_DEBUGGABLE void HandleTokenStreamObjectReference(TArray<UObject*>& ObjectsToSerialize, UObject* ReferencingObject, UObject*& Object, const int32 TokenIndex, bool bAllowReferenceElimination)
+	FORCEINLINE_DEBUGGABLE void HandleTokenStreamObjectReference(FGCArrayStruct& ObjectsToSerializeStruct, UObject* ReferencingObject, UObject*& Object, UE::GC::FTokenId, EGCTokenType, bool)
 	{
 		if (!ReferencingObject)
 		{
-			ReferencingObject = CurrentObject;
+			ReferencingObject = ObjectsToSerializeStruct.GetReferencingObject();
 		}
 		if (Object && ReferencingObject && Object != ReferencingObject)
 		{
@@ -44,12 +42,24 @@ public:
 			}
 		}
 	}
-	void SetCurrentObject(UObject* Obj)
+
+	bool MarkWeakObjectReferenceForClearing(UObject** WeakReference, UObject* ReferenceOwner)
 	{
-		CurrentObject = Obj;
+		return (Flags & EReferencerFinderFlags::SkipWeakReferences) == EReferencerFinderFlags::SkipWeakReferences;
 	}
 };
-typedef TDefaultReferenceCollector<FAllReferencesProcessor> FAllReferencesCollector;
+
+class FAllReferencesCollector : public UE::GC::TDefaultCollector<FAllReferencesProcessor>
+{
+	using Super = UE::GC::TDefaultCollector<FAllReferencesProcessor>;
+public:
+	using Super::Super;
+
+	virtual bool MarkWeakObjectReferenceForClearing(UObject** WeakReference, UObject* ReferenceOwner) override
+	{
+		return Processor.MarkWeakObjectReferenceForClearing(WeakReference, ReferenceOwner);
+	}
+};
 
 // Allow parallel reference collection to be overridden to single threaded via console command.
 static int32 GAllowParallelReferenceCollection = 1;
@@ -80,26 +90,19 @@ TArray<UObject*> FReferencerFinder::GetAllReferencers(const TSet<UObject*>& Refe
 	{
 		FCriticalSection ResultCritical;
 
-		// Lock hashtables so that nothing can add UObjects while we're iterating over the GUObjectArray
-		FScopedUObjectHashTablesLock HashTablesLock;
+		// Lock the global array so that nothing can add UObjects while we're iterating over it
+		GUObjectArray.LockInternalArray();
 
 		const int32 MaxNumberOfObjects = GUObjectArray.GetObjectArrayNum();
-		const int32 NumThreads = FMath::Max(1, FTaskGraphInterface::Get().GetNumWorkerThreads());
+		const int32 NumThreads = GetNumCollectReferenceWorkers();
 		const int32 NumberOfObjectsPerThread = (MaxNumberOfObjects / NumThreads) + 1;
 
 		ParallelFor(NumThreads, [&Referencees, ObjectsToIgnore, &ResultCritical, &Ret, NumberOfObjectsPerThread, NumThreads, MaxNumberOfObjects, Flags](int32 ThreadIndex)
 		{
 			TSet<UObject*> ThreadResult;
 			FAllReferencesProcessor Processor(Referencees, Flags, ThreadResult);
-			TFastReferenceCollector<
-				FAllReferencesProcessor, 
-				FAllReferencesCollector, 
-				FGCArrayPool, 
-				EFastReferenceCollectorOptions::AutogenerateTokenStream | EFastReferenceCollectorOptions::ProcessNoOpTokens
-			> ReferenceCollector(Processor, FGCArrayPool::Get());
-			FGCArrayStruct ArrayStruct;
-
-			ArrayStruct.ObjectsToSerialize.Reserve(NumberOfObjectsPerThread);
+			TArray<UObject*> ObjectsToSerialize;
+			ObjectsToSerialize.Reserve(NumberOfObjectsPerThread);
 
 			const int32 FirstObjectIndex = ThreadIndex * NumberOfObjectsPerThread;
 			const int32 NumObjects = (ThreadIndex < (NumThreads - 1)) ? NumberOfObjectsPerThread : (MaxNumberOfObjects - (NumThreads - 1)*NumberOfObjectsPerThread);
@@ -118,13 +121,21 @@ TArray<UObject*> FReferencerFinder::GetAllReferencers(const TSet<UObject*>& Refe
 
 					if (!Referencees.Contains(PotentialReferencer))
 					{
-						ArrayStruct.ObjectsToSerialize.Add(PotentialReferencer);
+						ObjectsToSerialize.Add(PotentialReferencer);
 					}
 				}
 			}
 
-			// Now check if any of the potential referencers is referencing any of the referencees
-			ReferenceCollector.CollectReferences(ArrayStruct);
+			FGCArrayStruct ArrayStruct;
+			ArrayStruct.SetInitialObjectsUnpadded(ObjectsToSerialize);
+			
+			{
+				// Since ReferenceCollector is configured to automatically assemble reference token streams
+				// for classes that require it, make sure GC is locked because UClass::AssembleReferenceTokenStream requires it
+				FGCScopeGuard GCGuard;
+				// Now check if any of the potential referencers is referencing any of the referencees
+				CollectReferences(Processor, ArrayStruct);
+			}
 
 			if (ThreadResult.Num())
 			{
@@ -133,6 +144,9 @@ TArray<UObject*> FReferencerFinder::GetAllReferencers(const TSet<UObject*>& Refe
 				Ret.Append(ThreadResult.Array());
 			}
 		}, (GUObjectRegistrationComplete && GAllowParallelReferenceCollection) ? EParallelForFlags::None : EParallelForFlags::ForceSingleThread);
+
+		// Release the global array lock
+		GUObjectArray.UnlockInternalArray();
 	}
 	return Ret;
 }

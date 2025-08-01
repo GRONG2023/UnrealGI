@@ -10,12 +10,12 @@ public class ExternalImagePicker : ModuleRules
             new string[]
             {
 				"Core",
-                "Slate",
+				"Slate",
 				"SlateCore",
 				"DesktopPlatform",
+				"ImageCore",
 				"ImageWrapper",
-				"EditorStyle",
-				"InputCore",
+
 				"PropertyEditor",	// for 'reset to default'
             }
         );

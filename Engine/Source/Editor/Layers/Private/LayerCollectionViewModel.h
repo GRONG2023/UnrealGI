@@ -233,11 +233,6 @@ private:
 	/** @return true if the layer can be renamed */
 	bool RequestRenameLayer_CanExecute() const;
 
-	// Begin FEditorUndoClient
-	virtual void PostUndo(bool bSuccess) override { Refresh(); }
-	virtual void PostRedo(bool bSuccess) override { PostUndo(bSuccess); }
-	// End of FEditorUndoClient
-
 private:
 
 	/** true if the LayersView is in the middle of refreshing */

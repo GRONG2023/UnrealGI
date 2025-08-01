@@ -4,6 +4,8 @@
 
 #include "ScreenPass.h"
 
+class FScene;
+
 struct FMobileDistortionAccumulateInputs
 {
 	FScreenPassTexture SceneColor;
@@ -14,7 +16,7 @@ struct FMobileDistortionAccumulateOutputs
 	FScreenPassTexture DistortionAccumulate;
 };
 
-FMobileDistortionAccumulateOutputs AddMobileDistortionAccumulatePass(FRDGBuilder& GraphBuilder, const FViewInfo& View, const FMobileDistortionAccumulateInputs& Inputs);
+FMobileDistortionAccumulateOutputs AddMobileDistortionAccumulatePass(FRDGBuilder& GraphBuilder, FScene* Scene, const FViewInfo& View, const FMobileDistortionAccumulateInputs& Inputs);
 
 struct FMobileDistortionMergeInputs
 {

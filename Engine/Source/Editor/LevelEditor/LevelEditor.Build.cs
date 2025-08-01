@@ -6,6 +6,12 @@ public class LevelEditor : ModuleRules
 {
 	public LevelEditor(ReadOnlyTargetRules Target) : base(Target)
 	{
+		PrivateIncludePaths.AddRange(
+			new string[] {
+				System.IO.Path.Combine(GetModuleDirectory("SceneOutliner"), "Private"),
+			}
+		);
+
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
 				"AssetTools",
@@ -13,21 +19,22 @@ public class LevelEditor : ModuleRules
 				"MainFrame",
                 "PlacementMode",
 				"SlateReflector",
-                "IntroTutorials",
-                "AppFramework",
                 "PortalServices",
-                "Persona",
-            }
+				"MergeActors",
+				"Layers",
+				"WorldBrowser",
+				"NewLevelDialog",
+				"LocalizationDashboard",
+			}
 		);
 
 		PublicIncludePathModuleNames.AddRange(
 			new string[] {
+				"CommonMenuExtensions",
 				"Settings",
-				"IntroTutorials",
-				"HeadMountedDisplay",
+				"ToolWidgets",
 				"UnrealEd",
 				"VREditor",
-				"CommonMenuExtensions"
 			}
 		);
 
@@ -35,33 +42,31 @@ public class LevelEditor : ModuleRules
 			new string[] {
 				"LevelSequence",
 				"Analytics",
+				"ApplicationCore",
 				"Core",
 				"CoreUObject",
 				"LauncherPlatform",
 				"InputCore",
 				"Slate",
 				"SlateCore",
-				"EditorStyle",
 				"Engine",
 				"MessageLog",
 				"SourceControl",
 				"SourceControlWindows",
 				"StatsViewer",
+				"EditorFramework",
 				"UnrealEd", 
-				"DeveloperSettings",
-				"RenderCore",
 				"DeviceProfileServices",
 				"ContentBrowser",
 				"SceneOutliner",
 				"ActorPickerMode",
 				"RHI",
 				"Projects",
-				"TargetPlatform",
+				"TypedElementFramework",
+				"TypedElementRuntime",
 				"EngineSettings",
 				"PropertyEditor",
-				"Kismet",
 				"KismetWidgets",
-				"Sequencer",
 				"Foliage",
 				"HierarchicalLODOutliner",
 				"HierarchicalLODUtilities",
@@ -69,8 +74,23 @@ public class LevelEditor : ModuleRules
 				"PixelInspectorModule",
 				"CommonMenuExtensions",
 				"ToolMenus",
+				"StatusBar",
+				"AppFramework",
+				"EditorSubsystem",
 				"EnvironmentLightingViewer",
 				"DesktopPlatform",
+				"DataLayerEditor",
+				"TranslationEditor",
+				"SubobjectEditor",
+				"SubobjectDataInterface",
+				"DerivedDataEditor",
+				"EditorWidgets",
+				"ToolWidgets",
+				"UnsavedAssetsTracker",
+				"UncontrolledChangelists",
+				"RenderCore",
+				"DeveloperSettings",
+				"ActionableMessage"
 			}
 		);
 
@@ -80,25 +100,30 @@ public class LevelEditor : ModuleRules
 				"ClassViewer",
 				"DeviceManager",
 				"SettingsEditor",
-				"SessionFrontend",
 				"SlateReflector",
 				"AutomationWindow",
 				"Layers",
-                "WorldBrowser",
-				"EditorWidgets",
+				"WorldBrowser",
+				"WorldPartitionEditor",
 				"AssetTools",
 				"WorkspaceMenuStructure",
 				"NewLevelDialog",
 				"DeviceProfileEditor",
                 "PlacementMode",
-                "IntroTutorials",
 				"HeadMountedDisplay",
 				"VREditor",
                 "Persona",
-            }
+				"MergeActors"
+			}
 		);
 
-		if(Target.bWithLiveCoding)
+		if (Target.bBuildTargetDeveloperTools)
+		{
+			DynamicallyLoadedModuleNames.Add("SessionFrontend");
+		}
+
+
+		if (Target.bWithLiveCoding)
 		{
 			PrivateIncludePathModuleNames.Add("LiveCoding");
 		}

@@ -2,6 +2,8 @@
 
 #include "BehaviorTree/Blackboard/BlackboardKeyType_String.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BlackboardKeyType_String)
+
 const UBlackboardKeyType_String::FDataType UBlackboardKeyType_String::InvalidValue = FString();
 
 UBlackboardKeyType_String::UBlackboardKeyType_String(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
@@ -38,6 +40,11 @@ void UBlackboardKeyType_String::CopyValues(UBlackboardComponent& OwnerComp, uint
 	StringValue = ((UBlackboardKeyType_String*)SourceKeyOb)->StringValue;
 }
 
+void UBlackboardKeyType_String::InitializeMemory(UBlackboardComponent& OwnerComp, uint8* MemoryBlock)
+{
+	SetValue(this, MemoryBlock, DefaultValue);
+}
+
 FString UBlackboardKeyType_String::DescribeValue(const UBlackboardComponent& OwnerComp, const uint8* RawData) const
 {
 	return StringValue;
@@ -66,3 +73,4 @@ bool UBlackboardKeyType_String::IsEmpty(const UBlackboardComponent& OwnerComp, c
 {
 	return StringValue.IsEmpty();
 }
+

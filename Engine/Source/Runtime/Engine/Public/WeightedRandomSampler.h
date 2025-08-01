@@ -26,11 +26,11 @@ GetEntryIndex takes two random floating values. This does not generate randoms f
 #include "Serialization/MemoryImage.h"
 #include "Serialization/MemoryLayout.h"
 
-struct ENGINE_API FWeightedRandomSampler
+struct FWeightedRandomSampler
 {
 	DECLARE_TYPE_LAYOUT(FWeightedRandomSampler, Abstract);
 public:
-	FWeightedRandomSampler();
+	ENGINE_API FWeightedRandomSampler();
 	virtual ~FWeightedRandomSampler() { }
 
 	/**
@@ -38,15 +38,15 @@ public:
 	*/
 	FORCEINLINE int32 GetEntryIndex(float R0, float R1)const
 	{
-		int32 Idx = R0 * Prob.Num();
+		int32 Idx = (int32)(R0 * float(Prob.Num()));
 		return R1 < Prob[Idx] ? Idx : Alias[Idx];
 	}
 
 	FORCEINLINE float GetTotalWeight()const { return TotalWeight; }
 
-	virtual void Initialize();
+	ENGINE_API virtual void Initialize();
 
-	virtual void Serialize(FArchive& Ar);
+	ENGINE_API virtual void Serialize(FArchive& Ar);
 
 	int32 GetNumEntries() const { return Prob.Num(); }
 

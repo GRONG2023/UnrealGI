@@ -7,12 +7,12 @@
 #include "EntitySystem/BuiltInComponentTypes.h"
 #include "EntitySystem/MovieSceneEntitySystemTask.h"
 #include "EntitySystem/MovieSceneEntityFactoryTemplates.h"
+#include "MovieSceneFwd.h"
 
 namespace UE
 {
 namespace MovieScene
 {
-
 
 int32 FChildEntityFactory::Num() const
 {
@@ -28,18 +28,19 @@ int32 FChildEntityFactory::GetCurrentIndex() const
 	return INDEX_NONE;
 }
 
-void FChildEntityFactory::Apply(UMovieSceneEntitySystemLinker* Linker, const FEntityAllocation* ParentAllocation)
+void FChildEntityFactory::Apply(UMovieSceneEntitySystemLinker* Linker, FEntityAllocationProxy ParentAllocationProxy)
 {
-	FComponentMask DerivedEntityType;
-	GenerateDerivedType(DerivedEntityType);
+	const FComponentMask ParentType = ParentAllocationProxy.GetAllocationType();
 
-	FComponentMask ParentType;
-	for (const FComponentHeader& Header : ParentAllocation->GetComponentHeaders())
+	FComponentMask DerivedEntityType;
+	FMutualComponentInitializers MutualInitializers;
+
 	{
-		ParentType.Set(Header.ComponentType);
+		GenerateDerivedType(DerivedEntityType);
+
+		Linker->EntityManager.GetComponents()->Factories.ComputeChildComponents(ParentType, DerivedEntityType);
+		Linker->EntityManager.GetComponents()->Factories.ComputeMutuallyInclusiveComponents(EMutuallyInclusiveComponentType::All, DerivedEntityType, MutualInitializers);
 	}
-	Linker->EntityManager.GetComponents()->Factories.ComputeChildComponents(ParentType, DerivedEntityType);
-	Linker->EntityManager.GetComponents()->Factories.ComputeMutuallyInclusiveComponents(DerivedEntityType);
 
 	const bool bHasAnyType = DerivedEntityType.Find(true) != INDEX_NONE;
 	if (!bHasAnyType)
@@ -50,6 +51,8 @@ void FChildEntityFactory::Apply(UMovieSceneEntitySystemLinker* Linker, const FEn
 	const int32 NumToAdd = Num();
 
 	int32 CurrentParentOffset = 0;
+	const FEntityAllocation* ParentAllocation = ParentAllocationProxy.GetAllocation();
+	FEntityAllocationWriteContext WriteContext(Linker->EntityManager);
 
 	// We attempt to allocate all the linker entities contiguously in memory for efficient initialization,
 	// but we may reach capacity constraints within allocations so we may have to run the factories more than once
@@ -63,10 +66,24 @@ void FChildEntityFactory::Apply(UMovieSceneEntitySystemLinker* Linker, const FEn
 
 		CurrentEntityOffsets = MakeArrayView(ParentEntityOffsets.GetData() + CurrentParentOffset, NumAdded);
 
-		Linker->EntityManager.InitializeChildAllocation(ParentType, DerivedEntityType, ParentAllocation, CurrentEntityOffsets, ChildRange);
+		if (TOptionalComponentWriter<FMovieSceneEntityID> ParentEntityIDs =
+			ChildRange.Allocation->TryWriteComponents(FBuiltInComponentTypes::Get()->ParentEntity, WriteContext))
+		{
+			TArrayView<const FMovieSceneEntityID> ParentIDs = ParentAllocation->GetEntityIDs();
+			for (int32 Index = 0; Index < ChildRange.Num; ++Index)
+			{
+				const int32 ParentIndex = CurrentEntityOffsets[Index];
+				const int32 ChildIndex  = ChildRange.ComponentStartOffset + Index;
 
-		// Important: This must go after Linker->EntityManager.InitializeChildAllocation so that we know that parent entity IDs are initialized correctly
+				ParentEntityIDs[ChildIndex] = ParentIDs[ParentIndex];
+			}
+		}
+
+		// Initialize the bound objects before we call child initializers
 		InitializeAllocation(Linker, ParentType, DerivedEntityType, ParentAllocation, CurrentEntityOffsets, ChildRange);
+
+		MutualInitializers.Execute(ChildRange, WriteContext);
+		Linker->EntityManager.InitializeChildAllocation(ParentType, DerivedEntityType, ParentAllocation, CurrentEntityOffsets, ChildRange);
 
 		CurrentParentOffset += NumAdded;
 	}
@@ -97,14 +114,22 @@ void FObjectFactoryBatch::InitializeAllocation(UMovieSceneEntitySystemLinker* Li
 
 	FEntityAllocationWriteContext WriteContext = FEntityAllocationWriteContext::NewAllocation();
 
+	const FEntityAllocation* Allocation = nullptr;
+	int32 ComponentStartOffset = 0;
+	int32 Num = 0;
+
+	TArrayView<const FMovieSceneEntityID> ChildEntityIDs        = InChildEntityRange.Allocation->GetEntityIDs();
+	TComponentReader<FMovieSceneEntityID> ParentIDComponents    = InChildEntityRange.Allocation->ReadComponents(ParentEntity);
+	TComponentWriter<UObject*>            BoundObjectComponents = InChildEntityRange.Allocation->WriteComponents(BoundObject, WriteContext);
+
 	int32 Index = GetCurrentIndex();
-	for (TEntityPtr<const FMovieSceneEntityID, const FMovieSceneEntityID, UObject*> Tuple : FEntityTaskBuilder().ReadEntityIDs().Read(ParentEntity).Write(BoundObject).IterateRange(InChildEntityRange, WriteContext))
+	for (int32 ChildIndex = InChildEntityRange.ComponentStartOffset; ChildIndex < InChildEntityRange.ComponentStartOffset + InChildEntityRange.Num; ++ChildIndex)
 	{
-		FMovieSceneEntityID Parent = Tuple.Get<1>();
-		FMovieSceneEntityID Child = Tuple.Get<0>();
+		FMovieSceneEntityID Parent = ParentIDComponents[ChildIndex];
+		FMovieSceneEntityID Child  = ChildEntityIDs[ChildIndex];
 
 		UObject* Object = ObjectsToAssign[Index++];
-		Tuple.Get<2>() = Object;
+		BoundObjectComponents[ChildIndex] = Object;
 
 		if (FMovieSceneEntityID OldEntityToPreserve = StaleEntitiesToPreserve->FindRef(MakeTuple(Object, Parent)))
 		{
@@ -128,9 +153,15 @@ FBoundObjectTask::FBoundObjectTask(UMovieSceneEntitySystemLinker* InLinker)
 	: Linker(InLinker)
 {}
 
-void FBoundObjectTask::ForEachAllocation(const FEntityAllocation* Allocation, FReadEntityIDs EntityIDs, TRead<FInstanceHandle> Instances, TRead<FGuid> ObjectBindings)
+void FBoundObjectTask::ForEachAllocation(FEntityAllocationProxy AllocationProxy, FReadEntityIDs EntityIDs, TRead<FInstanceHandle> Instances, TRead<FGuid> ObjectBindings)
 {
-	FObjectFactoryBatch& Batch = AddBatch(Allocation);
+	const FEntityAllocation* Allocation = AllocationProxy.GetAllocation();
+	const FComponentTypeID TagHasUnresolvedBinding = FBuiltInComponentTypes::Get()->Tags.HasUnresolvedBinding;
+
+	// Check whether every binding in this allocation is currently unresolved
+	const bool bWasUnresolvedBinding = Allocation->FindComponentHeader(TagHasUnresolvedBinding) != nullptr;
+
+	FObjectFactoryBatch& Batch = AddBatch(AllocationProxy);
 	Batch.StaleEntitiesToPreserve = &StaleEntitiesToPreserve;
 
 	const int32 Num = Allocation->Num();
@@ -159,8 +190,27 @@ void FBoundObjectTask::ForEachAllocation(const FEntityAllocation* Allocation, FR
 			}
 		}
 
-		Batch.ResolveObjects(InstanceRegistry, Instances[Index], Index, ObjectBindings[Index]);
+		const FObjectFactoryBatch::EResolveError Error = Batch.ResolveObjects(InstanceRegistry, Instances[Index], Index, ObjectBindings[Index]);
+		if (Error == FObjectFactoryBatch::EResolveError::None)
+		{
+			// We have successfully resolved a binding, so remove the HasUnresolvedBinding tag
+			if (bWasUnresolvedBinding)
+			{
+				constexpr bool bAddComponent = false;
+				EntityMutations.Add(FEntityMutationData{ ParentID, TagHasUnresolvedBinding, bAddComponent });
+			}
+		}
+		else if (Error == FObjectFactoryBatch::EResolveError::UnresolvedBinding)
+		{
+			if (!bWasUnresolvedBinding)
+			{
+				// Only bother attempting to add the HasUnresolvedBindingTag if it is not already tagged in such a way
+				constexpr bool bAddComponent = true;
+				EntityMutations.Add(FEntityMutationData{ ParentID, TagHasUnresolvedBinding, bAddComponent });
+			}
+		}
 	}
+
 }
 
 void FBoundObjectTask::PostTask()
@@ -171,6 +221,18 @@ void FBoundObjectTask::PostTask()
 	for (FMovieSceneEntityID Discard : EntitiesToDiscard)
 	{
 		Linker->EntityManager.AddComponent(Discard, NeedsUnlink, EEntityRecursion::Full);
+	}
+
+	for (FEntityMutationData Mutation : EntityMutations)
+	{
+		if (Mutation.bAddComponent)
+		{
+			Linker->EntityManager.AddComponent(Mutation.EntityID, Mutation.ComponentTypeID);
+		}
+		else
+		{
+			Linker->EntityManager.RemoveComponent(Mutation.EntityID, Mutation.ComponentTypeID);
+		}
 	}
 }
 
@@ -183,35 +245,35 @@ void FEntityFactories::DefineChildComponent(TInlineValue<FChildEntityInitializer
 	ChildInitializers.Add(MoveTemp(InInitializer));
 }
 
-void FEntityFactories::DefineMutuallyInclusiveComponent(FComponentTypeID InComponentA, FComponentTypeID InComponentB)
+void FEntityFactories::DefineMutuallyInclusiveComponents(FComponentTypeID InComponentA, std::initializer_list<FComponentTypeID> InMutualComponents)
 {
-	MutualInclusivityGraph.AllocateNode(InComponentA.BitIndex());
-	MutualInclusivityGraph.AllocateNode(InComponentB.BitIndex());
-	MutualInclusivityGraph.MakeEdge(InComponentA.BitIndex(), InComponentB.BitIndex());
-	Masks.AllMutualFirsts.Set(InComponentA);
+	MutualInclusivityGraph.DefineMutualInclusionRule(InComponentA, InMutualComponents);
 }
 
-void FEntityFactories::DefineMutuallyInclusiveComponent(TInlineValue<FMutualEntityInitializer>&& InInitializer)
+void FEntityFactories::DefineMutuallyInclusiveComponents(FComponentTypeID InComponentA, std::initializer_list<FComponentTypeID> InMutualComponents, FMutuallyInclusiveComponentParams&& Params)
 {
-	check(InInitializer.IsValid());
-
-	DefineChildComponent(InInitializer->GetComponentA(), InInitializer->GetComponentB());
-	// Note: after this line, InInitializer is reset
-	MutualInitializers.Add(MoveTemp(InInitializer));
+	MutualInclusivityGraph.DefineMutualInclusionRule(InComponentA, InMutualComponents, MoveTemp(Params));
 }
 
 void FEntityFactories::DefineComplexInclusiveComponents(const FComplexInclusivityFilter& InFilter, FComponentTypeID InComponent)
 {
-	FComponentMask ComponentsToInclude { InComponent };
-	FComplexInclusivity NewComplexInclusivity { InFilter, ComponentsToInclude };
-	DefineComplexInclusiveComponents(NewComplexInclusivity);
+	MutualInclusivityGraph.DefineComplexInclusionRule(InFilter, { InComponent });
 }
 
+void FEntityFactories::DefineComplexInclusiveComponents(const FComplexInclusivityFilter& InFilter, std::initializer_list<FComponentTypeID> InComponents, FMutuallyInclusiveComponentParams&& Params)
+{
+	MutualInclusivityGraph.DefineComplexInclusionRule(InFilter, InComponents, MoveTemp(Params));
+}
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void FEntityFactories::DefineComplexInclusiveComponents(const FComplexInclusivity& InInclusivity)
 {
-	ComplexInclusivity.Add(InInclusivity);
-	Masks.AllComplexFirsts.CombineWithBitwiseOR(InInclusivity.Filter.Mask, EBitwiseOperatorFlags::MaxSize);
+	for (FComponentMaskIterator It(InInclusivity.ComponentsToInclude.Iterate()); It; ++It)
+	{
+		MutualInclusivityGraph.DefineComplexInclusionRule(InInclusivity.Filter, { FComponentTypeID::FromBitIndex(It.GetIndex()) });
+	}
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 int32 FEntityFactories::ComputeChildComponents(const FComponentMask& ParentComponentMask, FComponentMask& ChildComponentMask)
 {
@@ -244,85 +306,9 @@ int32 FEntityFactories::ComputeChildComponents(const FComponentMask& ParentCompo
 	return NumNewComponents;
 }
 
-int32 FEntityFactories::ComputeMutuallyInclusiveComponents(FComponentMask& ComponentMask)
+int32 FEntityFactories::ComputeMutuallyInclusiveComponents(EMutuallyInclusiveComponentType MutualTypes, FComponentMask& ComponentMask, FMutualComponentInitializers& OutInitializers)
 {
-	int32 NumNewComponents = 0;
-
-	// We have two things that can add components: filtered includes and mutual includes.
-	//
-	// Since a mutual include might add a component that will make a filter pass, and a passing filter
-	// might add a component that has a mutual include, we need to loop over both until the whole
-	// thing "stabilizes".
-	//
-	// To avoid always having to loop one extra time (with the last loop not doing anything), we check
-	// if the previous loop added anything that can potentially make an additional loop useful. It won't
-	// prevent doing a loop for nothing, but it will prevent it *most* of the time.
-	//
-	while (true)
-	{
-		int32 NumNewComponentsThisTime = 0;
-		FComponentMask NewComponentsFromMutuals;
-
-		// Complex includes.
-		for (const FComplexInclusivity& Inclusivity : ComplexInclusivity)
-		{
-			if (Inclusivity.Filter.Match(ComponentMask))
-			{
-				// Only count the components that we are truly adding. Some of the components in ComponentsToInclude
-				// could already be present in our mask, and wouldn't count as "new" here.
-				const FComponentMask Added = FComponentMask::BitwiseAND(
-						Inclusivity.ComponentsToInclude, FComponentMask::BitwiseNOT(ComponentMask),
-						EBitwiseOperatorFlags::MaxSize);
-				NumNewComponentsThisTime += Added.NumComponents();
-
-				ComponentMask.CombineWithBitwiseOR(Inclusivity.ComponentsToInclude, EBitwiseOperatorFlags::MaxSize);
-			}
-		}
-
-		// Mutual includes.
-		FMovieSceneEntitySystemDirectedGraph::FBreadthFirstSearch BFS(&MutualInclusivityGraph);
-
-		for (FComponentMaskIterator It = ComponentMask.Iterate(); It; ++It)
-		{
-			const uint16 NodeID = static_cast<uint16>(It.GetIndex());
-			if (MutualInclusivityGraph.IsNodeAllocated(NodeID))
-			{
-				BFS.Search(NodeID);
-			}
-		}
-
-		// Ideally would do a bitwise OR here
-		for (TConstSetBitIterator<> It(BFS.GetVisited()); It; ++It)
-		{
-			FComponentTypeID ComponentType = FComponentTypeID::FromBitIndex(It.GetIndex());
-			if (!ComponentMask.Contains(ComponentType))
-			{
-				NewComponentsFromMutuals.Set(ComponentType);
-				++NumNewComponentsThisTime;
-
-				ComponentMask.Set(ComponentType);
-			}
-		}
-
-		// Accumulate our count of new components.
-		NumNewComponents += NumNewComponentsThisTime;
-
-		// We don't need to do another loop if:
-		//
-		// 1. We didn't add anything this loop... 
-		//   OR
-		// 2. We added something in the "mutuals" part that we know doesn't match
-		//    any complex filter.
-		if (
-				(NumNewComponentsThisTime == 0) ||
-				(!NewComponentsFromMutuals.ContainsAny(Masks.AllComplexFirsts))
-			)
-		{
-			break;
-		}
-	}
-
-	return NumNewComponents;
+	return MutualInclusivityGraph.ComputeMutuallyInclusiveComponents(MutualTypes, ComponentMask, ComponentMask, OutInitializers);
 }
 
 void FEntityFactories::RunInitializers(const FComponentMask& ParentType, const FComponentMask& ChildType, const FEntityAllocation* ParentAllocation, TArrayView<const int32> ParentAllocationOffsets, const FEntityRange& InChildEntityRange)
@@ -333,15 +319,6 @@ void FEntityFactories::RunInitializers(const FComponentMask& ParentType, const F
 		if (ChildInit->IsRelevant(ParentType, ChildType))
 		{
 			ChildInit->Run(InChildEntityRange, ParentAllocation, ParentAllocationOffsets);
-		}
-	}
-
-	// First off, run child initializers
-	for (TInlineValue<FMutualEntityInitializer>& MutualInit : MutualInitializers)
-	{
-		if (MutualInit->IsRelevant(ChildType))
-		{
-			MutualInit->Run(InChildEntityRange);
 		}
 	}
 }

@@ -10,17 +10,17 @@
 class UEnvQueryGenerator;
 class UEnvQueryTest;
 
-UCLASS()
-class AIMODULE_API UEnvQueryOption : public UObject
+UCLASS(MinimalAPI)
+class UEnvQueryOption : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
 	UPROPERTY()
-	UEnvQueryGenerator* Generator;
+	TObjectPtr<UEnvQueryGenerator> Generator;
 
 	UPROPERTY()
-	TArray<UEnvQueryTest*> Tests;
+	TArray<TObjectPtr<UEnvQueryTest>> Tests;
 
-	FText GetDescriptionTitle() const;
-	FText GetDescriptionDetails() const;
+	AIMODULE_API FText GetDescriptionTitle() const;
+	AIMODULE_API FText GetDescriptionDetails() const;
 };

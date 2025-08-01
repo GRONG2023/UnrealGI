@@ -6,7 +6,7 @@
 #include "EdGraph/EdGraph.h"
 #include "Widgets/Images/SImage.h"
 #include "Framework/Docking/TabManager.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "GraphDiffControl.h"
 #include "Widgets/Docking/SDockTab.h"
 
@@ -111,15 +111,8 @@ static TArray< FMergeGraphEntry > GenerateDiffListItems(const FBlueprintRevPair&
 		{
 			TArray<FDiffSingleResult> Results;
 			FGraphDiffControl::DiffGraphs(GraphOld ? *GraphOld : nullptr, GraphNew, Results);
-			struct SortDiff
-			{
-				bool operator () (const FDiffResultItem& A, const FDiffResultItem& B) const
-				{
-					return A.Result.Diff < B.Result.Diff;
-				}
-			};
 
-			Sort(Results.GetData(), Results.Num(), SortDiff());
+			Algo::SortBy(Results, [](const FDiffResultItem& Data) { return Data.Result.Diff; });
 			return Results;
 		};
 
@@ -221,7 +214,7 @@ static TArray< FMergeGraphEntry > GenerateDiffListItems(const FBlueprintRevPair&
 							, ConflictingDifference ? (*ConflictingDifference)->Pin2 : nullptr /*UEdGraphPin* LocalPin*/
 							, Difference.Pin1 /*UEdGraphPin* BasePin*/
 							, Difference.Pin2 /*UEdGraphPin* RemotePin*/
-							, Difference.DisplayColor
+							, Difference.GetDisplayColor()
 							, ConflictingDifference ? true : false
 						};
 
@@ -246,7 +239,7 @@ static TArray< FMergeGraphEntry > GenerateDiffListItems(const FBlueprintRevPair&
 								, Difference.Pin2 /*UEdGraphPin* LocalPin*/
 								, Difference.Pin1 /*UEdGraphPin* BasePin*/
 								, nullptr
-								, Difference.DisplayColor
+								, Difference.GetDisplayColor()
 								, false
 							};
 
@@ -383,7 +376,7 @@ void SMergeGraphView::Construct(const FArguments InArgs
 	{
 		DetailsPanelContainer->AddSlot()
 		[
-			Panel.DetailsView.ToSharedRef()
+			Panel.GetDetailsWidget()
 		];
 	}
 
@@ -439,9 +432,9 @@ void SMergeGraphView::Construct(const FArguments InArgs
 				return DiffViewUtils::Identical();
 			};
 
-			const auto Box = [](bool bIsPresent, FLinearColor Color) -> SHorizontalBox::FSlot&
+			const auto Box = [](bool bIsPresent, FLinearColor Color) -> SHorizontalBox::FSlot::FSlotArguments
 			{
-				return SHorizontalBox::Slot()
+				return MoveTemp(SHorizontalBox::Slot()
 					.AutoWidth()
 					.HAlign(HAlign_Right)
 					.VAlign(VAlign_Center)
@@ -449,8 +442,8 @@ void SMergeGraphView::Construct(const FArguments InArgs
 					[
 						SNew(SImage)
 						.ColorAndOpacity(Color)
-						.Image(bIsPresent ? FEditorStyle::GetBrush("BlueprintDif.HasGraph") : FEditorStyle::GetBrush("BlueprintDif.MissingGraph"))
-					];
+						.Image(bIsPresent ? FAppStyle::GetBrush("BlueprintDif.HasGraph") : FAppStyle::GetBrush("BlueprintDif.MissingGraph"))
+					]);
 			};
 
 			FLinearColor RemoteColor = ComputeColor(InDifference->bAnyConflics, InDifference->bRemoteDifferences);
@@ -462,7 +455,7 @@ void SMergeGraphView::Construct(const FArguments InArgs
 			int32 PeriodIndex = INDEX_NONE;
 			if (DisplayString.FindLastChar('.', PeriodIndex))
 			{
-				DisplayString.MidInline(PeriodIndex + 1, MAX_int32, false);
+				DisplayString.MidInline(PeriodIndex + 1, MAX_int32, EAllowShrinking::No);
 			}
 
 			return SNew(SHorizontalBox)
@@ -604,7 +597,7 @@ FReply SMergeGraphView::OnToggleLockView()
 
 const FSlateBrush* SMergeGraphView::GetLockViewImage() const
 {
-	return bViewsAreLocked ? FEditorStyle::GetBrush("GenericLock") : FEditorStyle::GetBrush("GenericUnlock");
+	return bViewsAreLocked ? FAppStyle::GetBrush("Icons.Lock") : FAppStyle::GetBrush("Icons.Unlock");
 }
 
 #undef LOCTEXT_NAMESPACE

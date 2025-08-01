@@ -6,6 +6,8 @@
 #include "Perception/AISenseConfig_Hearing.h"
 #include "Perception/AISenseEvent_Hearing.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AISense_Hearing)
+
 //----------------------------------------------------------------------//
 // FAINoiseEvent
 //----------------------------------------------------------------------//
@@ -37,15 +39,13 @@ void FAINoiseEvent::Compile()
 UAISense_Hearing::FDigestedHearingProperties::FDigestedHearingProperties(const UAISenseConfig_Hearing& SenseConfig)
 {
 	HearingRangeSq = FMath::Square(SenseConfig.HearingRange);
-	LoSHearingRangeSq = FMath::Square(SenseConfig.LoSHearingRange);
 	AffiliationFlags = SenseConfig.DetectionByAffiliation.GetAsFlags();
-	bUseLoSHearing = SenseConfig.bUseLoSHearing;
 }
 
 UAISense_Hearing::FDigestedHearingProperties::FDigestedHearingProperties()
-	: HearingRangeSq(-1.f), LoSHearingRangeSq(-1.f), AffiliationFlags(-1), bUseLoSHearing(false)
+	: HearingRangeSq(-1.f)
 {
-
+	AffiliationFlags = FAISenseAffiliationFilter::DetectAllFlags();
 }
 
 //----------------------------------------------------------------------//
@@ -115,15 +115,15 @@ void UAISense_Hearing::OnListenerUpdateImpl(const FPerceptionListener& UpdatedLi
 	}
 }
 
-void UAISense_Hearing::OnListenerRemovedImpl(const FPerceptionListener& UpdatedListener)
+void UAISense_Hearing::OnListenerRemovedImpl(const FPerceptionListener& RemovedListener)
 {
-	DigestedProperties.FindAndRemoveChecked(UpdatedListener.GetListenerID());
+	DigestedProperties.FindAndRemoveChecked(RemovedListener.GetListenerID());
 }
 
 float UAISense_Hearing::Update()
 {
 	AIPerception::FListenerMap& ListenersMap = *GetListeners();
-	UAIPerceptionSystem* PerseptionSys = GetPerceptionSystem();
+	UAIPerceptionSystem* PerceptionSys = GetPerceptionSystem();
 	const float SpeedOfSoundSqScalar = SpeedOfSoundSq > 0.f ? 1.f / SpeedOfSoundSq : 0.f;
 
 	for (AIPerception::FListenerMap::TIterator ListenerIt(ListenersMap); ListenerIt; ++ListenerIt)
@@ -141,7 +141,7 @@ float UAISense_Hearing::Update()
 		for (const FAINoiseEvent& Event : NoiseEvents)
 		{
 			const float ClampedLoudness = FMath::Max(0.f, Event.Loudness);
-			const float DistToSoundSquared = FVector::DistSquared(Event.NoiseLocation, Listener.CachedLocation);
+			const FVector::FReal DistToSoundSquared = FVector::DistSquared(Event.NoiseLocation, Listener.CachedLocation);
 			
 			// Limit by loudness modified squared range (this is the old behavior)
 			if (DistToSoundSquared > PropDigest.HearingRangeSq * FMath::Square(ClampedLoudness))
@@ -158,10 +158,10 @@ float UAISense_Hearing::Update()
 			{
 				continue;
 			}
-			// calculate delay and fake it with Age
-			const float Delay = FMath::Sqrt(DistToSoundSquared * SpeedOfSoundSqScalar);
+			// calculate delay and fake it with Age, Delay should be pretty small so a static_cast is safe enough here.
+			const float Delay = FloatCastChecked<float>(FMath::Sqrt(DistToSoundSquared * SpeedOfSoundSqScalar), UE::LWC::DefaultFloatPrecision);
 			// pass over to listener to process 			
-			PerseptionSys->RegisterDelayedStimulus(Listener.GetListenerID(), Delay, Event.Instigator
+			PerceptionSys->RegisterDelayedStimulus(Listener.GetListenerID(), Delay, Event.Instigator
 				, FAIStimulus(*this, ClampedLoudness, Event.NoiseLocation, Listener.CachedLocation, FAIStimulus::SensingSucceeded, Event.Tag) );
 		}
 	}
@@ -195,3 +195,4 @@ void UAISense_Hearing::RegisterWrappedEvent(UAISenseEvent& PerceptionEvent)
 		RegisterEvent(HearingEvent->GetNoiseEvent());
 	}
 }
+

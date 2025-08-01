@@ -2,15 +2,26 @@
 
 #pragma once
 
-#include "EntitySystem/MovieSceneEntityInstantiatorSystem.h"
-#include "EntitySystem/MovieScenePropertySystemTypes.h"
-#include "EntitySystem/MovieSceneEntitySystemTypes.h"
+#include "Containers/BitArray.h"
+#include "Containers/Map.h"
+#include "Containers/SparseArray.h"
 #include "EntitySystem/MovieSceneEntityIDs.h"
+#include "EntitySystem/MovieSceneEntityInstantiatorSystem.h"
+#include "EntitySystem/MovieSceneEntitySystem.h"
+#include "EntitySystem/MovieSceneEntitySystemTypes.h"
+#include "EntitySystem/MovieScenePropertySystemTypes.h"
+#include "HAL/Platform.h"
+#include "Serialization/Archive.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
 
 #include "MovieSceneTrackInstanceSystem.generated.h"
 
+class UClass;
 class UMovieSceneSection;
 class UMovieSceneTrackInstance;
+class UObject;
 
 USTRUCT()
 struct FMovieSceneTrackInstanceEntry
@@ -18,45 +29,45 @@ struct FMovieSceneTrackInstanceEntry
 	GENERATED_BODY()
 
 	UPROPERTY()
-	UObject* BoundObject = nullptr;
+	TObjectPtr<UObject> BoundObject = nullptr;
 
 	UPROPERTY()
-	UMovieSceneTrackInstance* TrackInstance = nullptr;
+	TObjectPtr<UMovieSceneTrackInstance> TrackInstance = nullptr;
 };
 
 
-UCLASS()
-class MOVIESCENE_API UMovieSceneTrackInstanceInstantiator : public UMovieSceneEntityInstantiatorSystem
+UCLASS(MinimalAPI)
+class UMovieSceneTrackInstanceInstantiator : public UMovieSceneEntityInstantiatorSystem
 {
 	GENERATED_BODY()
 
 public:
 
-	UMovieSceneTrackInstanceInstantiator(const FObjectInitializer& ObjInit);
+	MOVIESCENE_API UMovieSceneTrackInstanceInstantiator(const FObjectInitializer& ObjInit);
 
-	int32 MakeOutput(UObject* BoundObject, UClass* TrackInstanceClass);
+	MOVIESCENE_API int32 MakeOutput(UObject* BoundObject, UClass* TrackInstanceClass);
 
-	int32 FindOutput(UObject* BoundObject, UClass* TrackInstanceClass) const;
+	MOVIESCENE_API int32 FindOutput(UObject* BoundObject, UClass* TrackInstanceClass) const;
 
 	const TSparseArray<FMovieSceneTrackInstanceEntry>& GetTrackInstances() const
 	{
 		return TrackInstances;
 	}
 
-	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
+	static MOVIESCENE_API void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
 
 private:
 
-	virtual void OnLink() override final;
-	virtual void OnUnlink() override final;
-	virtual void OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents) override final;
+	MOVIESCENE_API virtual void OnLink() override final;
+	MOVIESCENE_API virtual void OnUnlink() override final;
+	MOVIESCENE_API virtual void OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents) override final;
 
-	virtual void OnTagGarbage() override;
+	MOVIESCENE_API virtual void OnTagGarbage() override;
 
-	virtual void Serialize(FArchive& Ar) override;
+	MOVIESCENE_API virtual void Serialize(FArchive& Ar) override;
 
 	TSparseArray<FMovieSceneTrackInstanceEntry> TrackInstances;
-	TMultiMap<UObject*, int32> BoundObjectToInstances;
+	TMultiMap<TObjectPtr<UObject>, int32> BoundObjectToInstances;
 
 	TBitArray<> InvalidatedOutputs;
 
@@ -64,8 +75,8 @@ private:
 };
 
 
-UCLASS()
-class MOVIESCENE_API UMovieSceneTrackInstanceSystem : public UMovieSceneEntitySystem
+UCLASS(MinimalAPI)
+class UMovieSceneTrackInstanceSystem : public UMovieSceneEntitySystem
 {
 	GENERATED_BODY()
 
@@ -73,11 +84,14 @@ class MOVIESCENE_API UMovieSceneTrackInstanceSystem : public UMovieSceneEntitySy
 
 private:
 
-	virtual void OnLink() override final;
-	virtual void OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents) override final;
+	MOVIESCENE_API virtual void OnLink() override final;
+	MOVIESCENE_API virtual void OnSchedulePersistentTasks(UE::MovieScene::IEntitySystemScheduler* TaskScheduler) override final;
+	MOVIESCENE_API virtual void OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents) override final;
+
+	void EvaluateAllInstances();
 
 	UPROPERTY()
-	UMovieSceneTrackInstanceInstantiator* Instantiator;
+	TObjectPtr<UMovieSceneTrackInstanceInstantiator> Instantiator;
 };
 
 

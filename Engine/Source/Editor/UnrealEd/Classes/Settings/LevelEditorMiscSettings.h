@@ -14,8 +14,8 @@ class ULevelStreaming;
 /**
  * Configure miscellaneous settings for the Level Editor.
  */
-UCLASS(config=EditorPerProjectUserSettings, meta=( DisplayName="Miscellaneous" ))
-class UNREALED_API ULevelEditorMiscSettings : public UDeveloperSettings
+UCLASS(config=EditorPerProjectUserSettings, meta=( DisplayName="Miscellaneous" ), MinimalAPI)
+class ULevelEditorMiscSettings : public UDeveloperSettings
 {
 	GENERATED_UCLASS_BODY()
 
@@ -42,11 +42,6 @@ public:
 	/** If enabled, replacing actors will respect the scale of the original actor.  Otherwise, the replaced actors will have a scale of 1.0 */
 	UPROPERTY(EditAnywhere, config, Category=Editing, meta=( DisplayName = "Preserve Actor Scale on Replace" ))
 	uint32 bReplaceRespectsScale:1;
-
-
-	/** If enabled, the modes tab will revert to the original mesh paint */
-	UPROPERTY(EditAnywhere, config, AdvancedDisplay, Category = Editing, meta = (ConfigRestartRequired = true))
-	uint32 bEnableLegacyMeshPaintMode : 1;
 
 	/** If enabled, will avoid relabeling actors in UUnrealEdEngine::edactPasteSelected */
 	UPROPERTY(EditAnywhere, config, Category = Editing, meta = (DisplayName = "Avoid Actor Relabel on Paste Selected"))
@@ -105,5 +100,5 @@ protected:
 
 	// UObject overrides
 
-	virtual void PostEditChangeProperty( struct FPropertyChangedEvent& PropertyChangedEvent ) override;
+	UNREALED_API virtual void PostEditChangeProperty( struct FPropertyChangedEvent& PropertyChangedEvent ) override;
 };

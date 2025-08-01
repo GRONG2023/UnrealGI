@@ -2,12 +2,15 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector.h"
+#include "TireSystem.h"
 #include "VehicleSystemTemplate.h"
 #include "VehicleUtility.h"
-#include "TireSystem.h"
 
 #if VEHICLE_DEBUGGING_ENABLED
-PRAGMA_DISABLE_OPTIMIZATION
+UE_DISABLE_OPTIMIZATION
 #endif
 
 namespace Chaos
@@ -61,7 +64,21 @@ struct CHAOSVEHICLESCORE_API FSimpleWheelConfig
 		Multiply, // default - most correct
 		Average
 	};
+
+	enum EAxleType : uint8
+	{
+		UndefinedAxle = 0,
+		Front,
+		Rear
+	};
 	
+	enum EExternalTorqueCombineMethod : uint8
+	{
+		None = 0,
+		Override,
+		Additive
+	};
+
 	FSimpleWheelConfig() 
 		: Offset(FVector(2.f, 1.f, 0.f))
 		, WheelMass(20.f) // [Kg]
@@ -76,12 +93,17 @@ struct CHAOSVEHICLESCORE_API FSimpleWheelConfig
 		, SteeringEnabled(true)
 		, EngineEnabled(false)
 		, TractionControlEnabled(false)
+		, TorqueRatio(0.f)
+		, AxleType(EAxleType::UndefinedAxle)
 		, FrictionCombineMethod(EFrictionCombineMethod::Multiply)
-		, LateralFrictionMultiplier(1.0f)
-		, LongitudinalFrictionMultiplier(1.0f)
+		, ExternalTorqueCombineMethod(EExternalTorqueCombineMethod::None)
+		, FrictionMultiplier(2.0f)
+		, LateralSlipGraphMultiplier(1.0f)
+		, CorneringStiffness(1000.0f)
 		, SideSlipModifier(1.0f)
 		, SlipThreshold(20.0f)
 		, SkidThreshold(20.0f)
+		, MaxSpinRotation(30.0f)
 	{
 
 	}
@@ -108,15 +130,23 @@ struct CHAOSVEHICLESCORE_API FSimpleWheelConfig
 	bool SteeringEnabled;		// Steering is operational on this wheel
 	bool EngineEnabled;			// Wheel is driven by an engine
 	bool TractionControlEnabled;// Straight Line Traction Control
+	float TorqueRatio;			// Portion of torque going to this wheel (0->1)
+
+	EAxleType AxleType;
 
 	EFrictionCombineMethod FrictionCombineMethod; //#todo: use this variable
+	EExternalTorqueCombineMethod ExternalTorqueCombineMethod;
 
-	float LateralFrictionMultiplier;
-	float LongitudinalFrictionMultiplier;
+	float FrictionMultiplier;
+	float LateralSlipGraphMultiplier;
+	float CorneringStiffness;
 	float SideSlipModifier;
 
 	float SlipThreshold;
 	float SkidThreshold;
+
+	FGraph LateralSlipGraph;
+	float MaxSpinRotation;
 
 	// #todo: simulated Damage
 	//EWheelDamageStatus DamageStatus;
@@ -141,6 +171,18 @@ public:
 		Re = NewRadius;
 	}
 
+	/** Set the angular position in radians */
+	void SetAngularPosition(float PositionIn)
+	{
+		AngularPosition = PositionIn;
+	}
+
+	/** Set the angular position in radians/sec */
+	void SetAngularVelocity(float AngularVelocityIn)
+	{
+		Omega = AngularVelocityIn;
+	}
+
 	/** set wheel rotational speed to match the specified linear forwards speed */
 	void SetMatchingSpeed(float LinearMetersPerSecondIn)
 	{
@@ -148,9 +190,10 @@ public:
 	}
 
 	/** Set the braking torque - decelerating rotational force */
-	void SetBrakeTorque(float BrakeTorqueIn)
+	void SetBrakeTorque(float BrakeTorqueIn, bool bEngineBrakingIn = false)
 	{
 		BrakeTorque = BrakeTorqueIn;
+		bEngineBraking = bEngineBrakingIn;
 	}
 
 	/** Set the drive torque - accelerating rotational force */
@@ -159,8 +202,24 @@ public:
 		DriveTorque = EngineTorqueIn;
 	}
 
+	void SetTorqueCombineMethod(FSimpleWheelConfig::EExternalTorqueCombineMethod InCombineMethod)
+	{
+		ExternalTorqueCombineMethod = InCombineMethod;
+	}
+
+	void SetBrakeTorqueOverride(float BrakeTorqueIn, bool bEngineBrakingIn = false)
+	{
+		ExternalBrakeTorque = BrakeTorqueIn;
+		bEngineBraking = bEngineBrakingIn;
+	}
+
+	void SetDriveTorqueOverride(float EngineTorqueIn)
+	{
+		ExternalDriveTorque = EngineTorqueIn;
+	}
+
 	/** Set the vehicle's speed at the wheels location in local wheel coords */
-	void SetVehicleGroundSpeed(FVector& VIn)
+	void SetVehicleGroundSpeed(const FVector& VIn)
 	{
 		GroundVelocityVector = VIn;
 	}
@@ -266,6 +325,10 @@ public:
 	{
 		return (FMath::Abs(GetSkidMagnitude()) > Setup().SkidThreshold);
 	}
+	bool IsABSActivated() const
+	{
+		return bABSActivated;
+	}
 
 	float GetSteeringAngle() const
 	{
@@ -345,10 +408,6 @@ public:
 	 *	Wheel load force from body weight and the surface friction together determine the grip available at the wheel
 	 *	DriveTorque accelerates the wheel
 	 *	BrakeTorque decelerates the wheel
-	 *
-	 *	#todo: this function is a mess and needs tidied/consolidated
-	 *	#todo: lateral friction is currently not affected by longitudinal wheel slip
-	 *	#todo: wheel slip angle isn't being used
 	 */
 	void Simulate(float DeltaTime);
 
@@ -359,10 +418,24 @@ public:
 	}
 
 public:
+	bool BrakeEnabled;			// Regular brakes are enabled for this wheel
+	bool HandbrakeEnabled;		// Handbrake is operational on this wheel
+	bool SteeringEnabled;		// Steering is operational on this wheel
+	bool EngineEnabled;			// Wheel is driven by an engine
+	bool TractionControlEnabled;// Straight Line Traction Control
+	bool ABSEnabled;			// Advanced braking system operational
+	float FrictionMultiplier;
+	float LateralSlipGraphMultiplier;
+	float CorneringStiffness;
+	float MaxSteeringAngle;
+	float MaxBrakeTorque;
+	float HandbrakeTorque;
+	FSimpleWheelConfig::EExternalTorqueCombineMethod ExternalTorqueCombineMethod;
 
 	float Re;		// [cm] Effective Wheel Radius could change dynamically if get a flat?, tire shreds
 	float Omega;	// [radians/sec] Wheel Rotation Angular Velocity
 	float Sx;
+	float Inertia;
 	// In
 	float DriveTorque;				// [N.m]
 	float BrakeTorque;				// [N.m]
@@ -373,6 +446,9 @@ public:
 	float SurfaceFriction;
 	float MaxOmega;
 
+	float ExternalDriveTorque;		// [N.m]
+	float ExternalBrakeTorque;		// [N.m]
+
 	FVector ForceFromFriction;
 	float MassPerWheel;
 
@@ -382,6 +458,7 @@ public:
 	float SlipAngle;			// Angle between wheel forwards and velocity vector
 	bool bInContact;			// Is tire in contact with the ground or free in the air
 	uint32 WheelIndex;			// purely for debugging purposes
+	bool bEngineBraking;		// Is the braking force coming from the engine
 
 	public:
 	// debug for now
@@ -391,11 +468,34 @@ public:
 	float LateralAdhesiveLimit;
 	float SideSlipModifier;
 	float Spin;
+	float AvailableGrip;
+	FVector InputForces;
+	bool bClipping;
+	bool bABSActivated;
+
 };
 
+
+struct CHAOSVEHICLESCORE_API FAxleConfig
+{
+	TArray<uint16> WheelIndex;	// reference to wheels on this axle
+	float RollbarScaling;
+};
+
+class CHAOSVEHICLESCORE_API FAxleSim : public TVehicleSystem<FAxleConfig>
+{
+public:
+
+	FAxleSim();
+
+	void Simulate(float DeltaTime) {}
+
+	FAxleConfig Setup;
+
+};
 
 } // namespace Chaos
 
 #if VEHICLE_DEBUGGING_ENABLED
-PRAGMA_ENABLE_OPTIMIZATION
+UE_ENABLE_OPTIMIZATION
 #endif

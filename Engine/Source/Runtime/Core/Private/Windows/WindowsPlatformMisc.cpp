@@ -27,6 +27,7 @@
 #include "Misc/FeedbackContext.h"
 #include "Misc/CoreDelegates.h"
 #include "Misc/App.h"
+#include "Misc/ScopeExit.h"
 #include "HAL/ExceptionHandling.h"
 #include "Misc/SecureHash.h"
 #include "HAL/IConsoleManager.h"
@@ -52,19 +53,23 @@ THIRD_PARTY_INCLUDES_START
 	#include <ShlObj.h>
 	#include <IntShCut.h>
 	#include <shellapi.h>
+	#include <shlwapi.h>
 	#include <IPHlpApi.h>
 	#include <VersionHelpers.h>
+#include "Windows/AllowWindowsPlatformAtomics.h"
+	#include <comdef.h>
+	#include <Wbemidl.h>
+#include "Windows/HideWindowsPlatformAtomics.h"
 THIRD_PARTY_INCLUDES_END
 #include "Windows/HideWindowsPlatformTypes.h"
 
 #include "Modules/ModuleManager.h"
 
-#if !FORCE_ANSI_ALLOCATOR
-	#include "Windows/AllowWindowsPlatformTypes.h"
-		#include <Psapi.h>
-	#include "Windows/HideWindowsPlatformTypes.h"
-	#pragma comment(lib, "psapi.lib")
-#endif
+#include "Windows/AllowWindowsPlatformTypes.h"
+	#include <Psapi.h>
+#include "Windows/HideWindowsPlatformTypes.h"
+#pragma comment(lib, "psapi.lib")
+#pragma comment(lib, "wbemuuid.lib")
 
 #include <fcntl.h>
 #include <io.h>
@@ -81,13 +86,14 @@ THIRD_PARTY_INCLUDES_END
 // this cvar can be removed once we have a single method that works well
 static TAutoConsoleVariable<int32> CVarDriverDetectionMethod(
 	TEXT("r.DriverDetectionMethod"),
-	4,
-	TEXT("Defines which implementation is used to detect the GPU driver (to check for old drivers, logs and statistics)\n")
-	TEXT("  0: Iterate available drivers in registry and choose the one with the same name, if in question use next method (happens)\n")
-	TEXT("  1: Get the driver of the primary adapter (might not be correct when dealing with multiple adapters)\n")
-	TEXT("  2: Use DirectX LUID (would be the best, not yet implemented)\n")
-	TEXT("  3: Use Windows functions, use the primary device (might be wrong when API is using another adapter)\n")
-	TEXT("  4: Use Windows functions, use names such as DirectX Device (newest, most promising)"),
+	5,
+	TEXT("Defines which implementation is used to detect the GPU driver (to check for old drivers, logs and statistics)\n"
+	     "  0: Iterate available drivers in registry and choose the one with the same name, if in question use next method (happens)\n"
+	     "  1: Get the driver of the primary adapter (might not be correct when dealing with multiple adapters)\n"
+	     "  2: Use DirectX LUID (would be the best, not yet implemented)\n"
+	     "  3: Use Windows functions, use the primary device (might be wrong when API is using another adapter)\n"
+	     "  4: Use Windows functions, use names such as DirectX Device (newest, most promising)\n"
+	     "  5: Use Windows SetupAPI functions"),
 	ECVF_RenderThreadSafe);
 
 int32 GetOSVersionsHelper( TCHAR* OutOSVersionLabel, int32 OSVersionLabelLength, TCHAR* OutOSSubVersionLabel, int32 OSSubVersionLabelLength )
@@ -128,82 +134,9 @@ int32 GetOSVersionsHelper( TCHAR* OutOSVersionLabel, int32 OSVersionLabelLength,
 
 		switch (OsVersionInfo.dwMajorVersion)
 		{
-		case 5:
-			switch (OsVersionInfo.dwMinorVersion)
-			{
-			case 0:
-				OSVersionLabel = TEXT("Windows 2000");
-				if (OsVersionInfo.wProductType == VER_NT_WORKSTATION)
-				{
-					OSSubVersionLabel = TEXT("Professional");
-				}
-				else
-				{
-					if (OsVersionInfo.wSuiteMask & VER_SUITE_DATACENTER)
-					{
-						OSSubVersionLabel = TEXT("Datacenter Server");
-					}
-					else if (OsVersionInfo.wSuiteMask & VER_SUITE_ENTERPRISE)
-					{
-						OSSubVersionLabel = TEXT("Advanced Server");
-					}
-					else
-					{
-						OSSubVersionLabel = TEXT("Server");
-					}
-				}
-				break;
-			case 1:
-				OSVersionLabel = TEXT("Windows XP");
-				if (OsVersionInfo.wSuiteMask & VER_SUITE_PERSONAL)
-				{
-					OSSubVersionLabel = TEXT("Home Edition");
-				}
-				else
-				{
-					OSSubVersionLabel = TEXT("Professional");
-				}
-				break;
-			case 2:
-				if (GetSystemMetrics(SM_SERVERR2))
-				{
-					OSVersionLabel = TEXT("Windows Server 2003 R2");
-				}
-				else if (OsVersionInfo.wSuiteMask & VER_SUITE_STORAGE_SERVER)
-				{
-					OSVersionLabel = TEXT("Windows Storage Server 2003");
-				}
-				else if (OsVersionInfo.wSuiteMask & VER_SUITE_WH_SERVER)
-				{
-					OSVersionLabel = TEXT("Windows Home Server");
-				}
-				else if (OsVersionInfo.wProductType == VER_NT_WORKSTATION && SystemInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64)
-				{
-					OSVersionLabel = TEXT("Windows XP");
-					OSSubVersionLabel = TEXT("Professional x64 Edition");
-				}
-				else
-				{
-					OSVersionLabel = TEXT("Windows Server 2003");
-				}
-				break;
-			default:
-				ErrorCode |= (int32)FWindowsOSVersionHelper::ERROR_UNKNOWNVERSION;
-			}
-			break;
 		case 6:
 			switch (OsVersionInfo.dwMinorVersion)
 			{
-			case 0:
-				if (OsVersionInfo.wProductType == VER_NT_WORKSTATION)
-				{
-					OSVersionLabel = TEXT("Windows Vista");
-				}
-				else
-				{
-					OSVersionLabel = TEXT("Windows Server 2008");
-				}
-				break;
 			case 1:
 				if (OsVersionInfo.wProductType == VER_NT_WORKSTATION)
 				{
@@ -245,23 +178,59 @@ int32 GetOSVersionsHelper( TCHAR* OutOSVersionLabel, int32 OSVersionLabelLength,
 			case 0:
 				if (OsVersionInfo.wProductType == VER_NT_WORKSTATION)
 				{
-					OSVersionLabel = TEXT("Windows 10");
+					// Windows 11 still reports a major version of 10 and minor of 0, so it looks
+					// like we need to use the build number as the discriminator
+					if (OsVersionInfo.dwBuildNumber >= 22000)
+					{
+						OSVersionLabel = TEXT("Windows 11");
+					}
+					else
+					{
+						OSVersionLabel = TEXT("Windows 10");
+					}
 				}
 				else
 				{
-					OSVersionLabel = TEXT("Windows Server 2019");
-				}
-
-				// For Windows 10, get the release number and append that to the string too (eg. 1709 = Fall Creators Update). There doesn't seem to be any good way to get
-				// this other than grabbing an entry from the registry.
-				{
-					FString ReleaseId;
-					if(FWindowsPlatformMisc::QueryRegKey(HKEY_LOCAL_MACHINE, TEXT("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"), TEXT("ReleaseId"), ReleaseId))
+					// Same thing here, Windows Server 2019 and 2022 both claim to be version 10.0, so use the
+					// build number to decide.
+					if (OsVersionInfo.dwBuildNumber >= 20348)
 					{
-						OSVersionLabel += FString::Printf(TEXT(" (Release %s)"), *ReleaseId);
+						OSVersionLabel = TEXT("Windows Server 2022");
+					}
+					else
+					{
+						OSVersionLabel = TEXT("Windows Server 2019");
 					}
 				}
 
+				// For Windows 10, get the release number and append that to the string too (eg. 1709 = Fall Creators Update). 
+				// There doesn't seem to be any good way to get this other than grabbing an entry from the registry.
+				// 
+				// The new semi-annual release scheme 20H1/20H2 etc appears to use a different key so we query that first.
+				{
+					FString DisplayVersion;
+					if (FWindowsPlatformMisc::QueryRegKey(HKEY_LOCAL_MACHINE, TEXT("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"), TEXT("DisplayVersion"), DisplayVersion))
+					{
+						OSVersionLabel += FString::Printf(TEXT(" (%s)"), *DisplayVersion);
+					}
+					else
+					{
+						FString ReleaseId;
+						if (FWindowsPlatformMisc::QueryRegKey(HKEY_LOCAL_MACHINE, TEXT("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"), TEXT("ReleaseId"), ReleaseId))
+						{
+							OSVersionLabel += FString::Printf(TEXT(" (Release %s)"), *ReleaseId);
+						}
+					}
+
+					FString UpdateBuildRevision;
+					if (!FWindowsPlatformMisc::QueryRegKey(HKEY_LOCAL_MACHINE, TEXT("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"), TEXT("UBR"), UpdateBuildRevision))
+					{
+						UpdateBuildRevision = TEXT("UNKNOWN");
+					}
+
+					// Add the build number as displayed by the winver utility.
+					OSVersionLabel += FString::Printf(TEXT(" [%u.%u.%u.%s]"), OsVersionInfo.dwMajorVersion, OsVersionInfo.dwMinorVersion, OsVersionInfo.dwBuildNumber, *UpdateBuildRevision);
+				}
 				break;
 			default:
 				ErrorCode |= (int32)FWindowsOSVersionHelper::ERROR_UNKNOWNVERSION;
@@ -378,8 +347,8 @@ int32 FWindowsOSVersionHelper::GetOSVersions( FString& OutOSVersionLabel, FStrin
 	TCHAR OSVersionLabel[128];
 	TCHAR OSSubVersionLabel[128];
 
-	OSVersionLabel[0] = 0;
-	OSSubVersionLabel[0] = 0;
+	OSVersionLabel[0] = TEXT('\0');
+	OSSubVersionLabel[0] = TEXT('\0');
 
 	int32 Result = GetOSVersionsHelper( OSVersionLabel, UE_ARRAY_COUNT(OSVersionLabel), OSSubVersionLabel, UE_ARRAY_COUNT(OSSubVersionLabel) );
 
@@ -431,6 +400,308 @@ namespace
 		}
 		return false;
 	}
+
+	struct StorageDevice
+	{
+		FString SerialNumber;
+		WIDECHAR Drive;
+		FPlatformDriveStats Stats;
+
+		StorageDevice(FString&& SerialNumber, WIDECHAR DriveLetter)
+			: SerialNumber(MoveTemp(SerialNumber))
+			, Drive(DriveLetter)
+			, Stats{ DriveLetter, 0, 0, EStorageDeviceType ::Unknown}
+		{}
+	};
+
+	TArray<StorageDevice> StorageDevices;
+
+	static void LogStorageInformationWarning(HRESULT HRes,  const TCHAR* message)
+	{
+		IErrorInfo* ErrorInfo = nullptr;
+		GetErrorInfo(0, &ErrorInfo);
+		if (ErrorInfo)
+		{
+			BSTR ErrorMessage;
+			ErrorInfo->GetDescription(&ErrorMessage);
+			if (ErrorMessage && *ErrorMessage)
+			{
+				UE_LOG(LogWindows, Log, TEXT("%s [%s]"), message, ErrorMessage);
+			}
+			else
+			{
+				UE_LOG(LogWindows, Log, TEXT("%s [error code %x]"), message, HRes);
+			}
+			::SysFreeString(ErrorMessage);
+			ErrorInfo->Release();
+		}
+		else
+		{
+			UE_LOG(LogWindows, Log, TEXT("%s [error code %x]"), message, HRes);
+		}
+	}
+
+	static bool CollectStorageInformation()
+	{
+		IWbemLocator* WbemLocator = nullptr;
+		IWbemServices* WbemServices = nullptr;
+
+		if (!FWindowsPlatformMisc::CoInitialize())
+		{
+			return false;
+		}
+		HRESULT hres = CoInitializeSecurity(NULL, -1, NULL, NULL, RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE, NULL);
+		if (FAILED(hres))
+		{
+			LogStorageInformationWarning(hres, TEXT("Error initializing COM"));
+			FWindowsPlatformMisc::CoUninitialize();
+			return false;
+		}
+		hres = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&WbemLocator);
+		if (FAILED(hres))
+		{
+			LogStorageInformationWarning(hres, TEXT("Error creating Wbem instance"));
+			FWindowsPlatformMisc::CoUninitialize();
+			return false;
+		}
+		hres = WbemLocator->ConnectServer(_bstr_t(L"ROOT\\microsoft\\windows\\storage"), NULL, NULL, 0, NULL, 0, 0, &WbemServices);
+		if (FAILED(hres))
+		{
+			LogStorageInformationWarning(hres, TEXT("Error connecting to storage service"));
+			WbemLocator->Release();
+			FWindowsPlatformMisc::CoUninitialize();
+			return false;
+		}
+		hres = CoSetProxyBlanket(
+			WbemServices,
+			RPC_C_AUTHN_WINNT,
+			RPC_C_AUTHZ_NONE,
+			NULL,
+			RPC_C_AUTHN_LEVEL_CALL,
+			RPC_C_IMP_LEVEL_IMPERSONATE,
+			NULL,
+			EOAC_NONE
+		);
+		if (FAILED(hres))
+		{
+			LogStorageInformationWarning(hres, TEXT("Error setting authentication information"));
+			WbemServices->Release();
+			WbemLocator->Release();
+			FWindowsPlatformMisc::CoUninitialize();
+			return false;
+		}
+
+
+		IEnumWbemClassObject* StorageEnumerator = nullptr;
+		hres = WbemServices->ExecQuery(
+			bstr_t("WQL"),
+			bstr_t("SELECT * FROM MSFT_DiskToPartition"),
+			WBEM_FLAG_FORWARD_ONLY,
+			NULL,
+			&StorageEnumerator);
+
+		if (FAILED(hres))
+		{
+			LogStorageInformationWarning(hres, TEXT("Error listing partitions"));
+			WbemServices->Release();
+			WbemLocator->Release();
+			FWindowsPlatformMisc::CoUninitialize();
+			return false;
+		}
+
+		// Enumerate all partitions, and store disk information
+		while (StorageEnumerator)
+		{
+			ULONG Returned;
+			IWbemClassObject* StorageWbemObject[10]{};
+			hres = StorageEnumerator->Next(WBEM_INFINITE, 10, StorageWbemObject, &Returned);
+			if (FAILED(hres))
+			{
+				LogStorageInformationWarning(hres, TEXT("Error iterating over partitions"));
+				break;
+			}
+			else if (Returned == 0)
+			{
+				break;
+			}
+			for (ULONG i = 0; i < Returned; ++i)
+			{
+				VARIANT Disk;
+				VARIANT Partition;
+
+				StorageWbemObject[i]->Get(L"Disk", 0, &Disk, NULL, NULL);
+				StorageWbemObject[i]->Get(L"Partition", 0, &Partition, NULL, NULL);
+
+				IWbemClassObject* PartitionObject = nullptr;
+				IWbemClassObject* DiskObject = nullptr;
+				hres = WbemServices->GetObject(
+					Partition.bstrVal,
+					WBEM_FLAG_RETURN_WBEM_COMPLETE,
+					NULL,
+					&PartitionObject,
+					NULL);
+				if (SUCCEEDED(hres))
+				{
+					hres = WbemServices->GetObject(
+						Disk.bstrVal,
+						WBEM_FLAG_RETURN_WBEM_COMPLETE,
+						NULL,
+						&DiskObject,
+						NULL);
+					if (SUCCEEDED(hres))
+					{
+						VARIANT Drive;
+						hres = PartitionObject->Get(L"DriveLetter", 0, &Drive, NULL, NULL);
+						if (SUCCEEDED(hres))
+						{
+							if (Drive.uiVal != 0)
+							{
+								VARIANT SerialNumber;
+								hres = DiskObject->Get(L"SerialNumber", 0, &SerialNumber, NULL, NULL);
+								if (SUCCEEDED(hres))
+								{
+									StorageDevices.Emplace(SerialNumber.bstrVal, Drive.uiVal);
+									VariantClear(&SerialNumber);
+								}
+								else
+								{
+									LogStorageInformationWarning(hres, TEXT("Error retrieving serial number"));
+								}
+								VariantClear(&Drive);
+							}
+						}
+						else
+						{
+							LogStorageInformationWarning(hres, TEXT("Error retrieving drive letter"));
+						}
+						DiskObject->Release();
+					}
+					else
+					{
+						LogStorageInformationWarning(hres, TEXT("Error retrieving disk information"));
+					}
+					PartitionObject->Release();
+				}
+				else
+				{
+					LogStorageInformationWarning(hres, TEXT("Error retrieving partition information"));
+				}
+
+				VariantClear(&Disk);
+				VariantClear(&Partition);
+				StorageWbemObject[i]->Release();
+			}
+		}
+
+		StorageEnumerator->Release();
+		hres = WbemServices->ExecQuery(
+			bstr_t("WQL"),
+			bstr_t("SELECT * FROM MSFT_PhysicalDisk"),
+			WBEM_FLAG_FORWARD_ONLY,
+			NULL,
+			&StorageEnumerator);
+
+		if (FAILED(hres))
+		{
+			LogStorageInformationWarning(hres, TEXT("Error when querying physical disks"));
+			WbemServices->Release();
+			WbemLocator->Release();
+			FWindowsPlatformMisc::CoUninitialize();
+			return false;
+		}
+
+		while (StorageEnumerator)
+		{
+			ULONG Returned;
+			IWbemClassObject* StorageWbemObject = nullptr;
+			hres = StorageEnumerator->Next(WBEM_INFINITE, 1, &StorageWbemObject, &Returned);
+			if (FAILED(hres))
+			{
+				LogStorageInformationWarning(hres, TEXT("Error when iterating over physical disks"));
+				break;
+			}
+			else if (Returned == 0)
+			{
+				break;
+			}
+
+			// see https://learn.microsoft.com/en-us/windows-hardware/drivers/storage/msft-physicaldisk for other properties
+			VARIANT SerialNumber;
+			VARIANT MediaType;
+			VARIANT BusType;
+			VARIANT SpindleSpeed;
+
+			StorageWbemObject->Get(L"SerialNumber", 0, &SerialNumber, NULL, NULL);
+			StorageWbemObject->Get(L"MediaType", 0, &MediaType, NULL, NULL);
+			StorageWbemObject->Get(L"BusType", 0, &BusType, NULL, NULL);
+			StorageWbemObject->Get(L"SpindleSpeed", 0, &SpindleSpeed, NULL, NULL);
+
+			FString Serial(SerialNumber.bstrVal);
+			for (auto& StorageDevice : StorageDevices)
+			{
+				if (StorageDevice.SerialNumber == Serial)
+				{
+					if (MediaType.uiVal == 3) // HDD
+					{
+						StorageDevice.Stats.DriveType = EStorageDeviceType::HDD;
+					}
+					else if (MediaType.uiVal == 4) // SSD
+					{
+						if (BusType.uiVal == 17) // NVMe
+						{
+							StorageDevice.Stats.DriveType = EStorageDeviceType::NVMe;
+						}
+						else if (SpindleSpeed.uintVal != 0)
+						{
+							StorageDevice.Stats.DriveType = EStorageDeviceType::Hybrid;
+						}
+						else
+						{
+							StorageDevice.Stats.DriveType = EStorageDeviceType::SSD;
+						}
+					}
+					else
+					{
+						StorageDevice.Stats.DriveType = EStorageDeviceType::Other;
+					}
+				}
+			}
+
+			VariantClear(&BusType);
+			VariantClear(&MediaType);
+			VariantClear(&SerialNumber);
+			StorageWbemObject->Release();
+		}
+
+		StorageEnumerator->Release();
+		WbemServices->Release();
+		WbemLocator->Release();
+		FWindowsPlatformMisc::CoUninitialize();
+		FWindowsPlatformMisc::UpdateDriveFreeSpace();
+
+		return true;
+	}
+}
+
+const TCHAR* LexToString(EStorageDeviceType StorageType)
+{
+	switch (StorageType)
+	{
+	case EStorageDeviceType::Other:
+		return TEXT("Other");
+	case EStorageDeviceType::HDD:
+		return TEXT("HDD");
+	case EStorageDeviceType::SSD:
+		return TEXT("SSD");
+	case EStorageDeviceType::NVMe:
+		return TEXT("NVMe");
+	case EStorageDeviceType::Hybrid:
+		return TEXT("Hybrid");
+	case EStorageDeviceType::Unknown:
+		[[fallthrough]];
+	default:
+		return TEXT("Unknown");
+	}
 }
 
 #include "Windows/HideWindowsPlatformTypes.h"
@@ -475,6 +746,52 @@ static void PureCallHandler()
 		UE_LOG(LogWindows, Fatal,TEXT("Pure virtual function being called") );
 	}
 }
+
+#if ENABLE_PGO_PROFILE && !defined(__clang__) && !defined(__INTEL_LLVM_COMPILER)
+void PGO_WriteFile()
+{
+	// NB. Using pgosweep.exe means the PGC file will be writable as soon as the title exits & we can control where it is written.
+	// Not using PgoAutoSweep because a) it calls MessageBox() when it encounters an error which would break unattended automation,
+	// and b) it only takes a file name fragment not a full path, so it would be necessary to sweep, find the file and then move it where we want it.
+
+	static uint32 FileCounter = 0;
+
+	// Get the current running process's full path
+	TCHAR ExeFilePath[MAX_PATH + 1];
+	GetModuleFileNameW(NULL, ExeFilePath, MAX_PATH + 1);
+	FString ExeFileName = FPaths::GetCleanFilename(ExeFilePath);
+	FString ExeFolder = FPaths::GetPath(ExeFilePath);
+	FString ExeFileNameWithoutExtension = FPaths::GetBaseFilename(ExeFilePath);
+
+	// Get PGC output directory, defaulting to the exe location but can sweep to the project saved dir so Gauntlet can collect it
+	bool bSweepToSaveDir = FParse::Param(FCommandLine::Get(), TEXT("PGOSweepToSaveDir"));
+	FString OutputDirectory = bSweepToSaveDir  ?  FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("PGO"))  :  ExeFolder;
+
+	// Find next unique PGC file name
+	FString OutputFilePath;
+	do
+	{
+		FString PGCFileName = FString::Printf(TEXT("%s!%d.pgc"), *ExeFileNameWithoutExtension, ++FileCounter);
+		OutputFilePath = FPaths::Combine(OutputDirectory, PGCFileName).Replace(TEXT("/"), TEXT("\\"));
+	} while (GetFileAttributesW(*OutputFilePath) != INVALID_FILE_ATTRIBUTES);
+
+	// Launch PGOSweep & wait for it to finish
+	FString PGOSweepPath = FPaths::Combine(ExeFolder, TEXT("pgosweep.exe"));
+	FString CommandLine = FString::Printf(TEXT("/pid:%d \"%s\" \"%s\""), ::GetCurrentProcessId(), ExeFilePath, *OutputFilePath);
+
+	const bool bLaunchDetached = true;
+	const bool bLaunchHidden = true;
+	const bool bLaunchReallyHidden = bLaunchHidden;
+	FProcHandle ProcHandle = FPlatformProcess::CreateProc(*PGOSweepPath, *CommandLine, bLaunchDetached, bLaunchHidden, bLaunchReallyHidden, nullptr, 0, nullptr, nullptr, nullptr);
+	FPlatformProcess::WaitForProc(ProcHandle);
+	int32 ExitCode = 0;
+	if (FPlatformProcess::GetProcReturnCode(ProcHandle, &ExitCode))
+	{
+		UE_LOG(LogWindows, Log, TEXT("pgosweep.exe exit code %d"), ExitCode);
+	}
+}
+#endif //ENABLE_PGO_PROFILE && !__clang__ && !__INTEL_LLVM_COMPILER
+
 
 /*-----------------------------------------------------------------------------
 	SHA-1 functions.
@@ -554,6 +871,9 @@ void FWindowsPlatformMisc::PlatformPreInit()
 
 	FGenericPlatformMisc::PlatformPreInit();
 
+	FThreadHeartBeat::Get().GetOnThreadStuck().BindStatic(&FGenericCrashContext::OnThreadStuck);
+	FThreadHeartBeat::Get().GetOnThreadUnstuck().BindStatic(&FGenericCrashContext::OnThreadUnstuck);
+
 	// Load the bundled version of dbghelp.dll if necessary
 #if USE_BUNDLED_DBGHELP
 	// Loading newer versions of DbgHelp fails on Windows 7 since it is no longer supported.
@@ -572,16 +892,27 @@ void FWindowsPlatformMisc::PlatformPreInit()
 	if ( ::GetSystemMetrics(SM_CXSCREEN) < MinResolution[0] || ::GetSystemMetrics(SM_CYSCREEN) < MinResolution[1] )
 	{
 		FMessageDialog::Open( EAppMsgType::Ok, NSLOCTEXT("Launch", "Error_ResolutionTooLow", "The current resolution is too low to run this game.") );
-		FPlatformMisc::RequestExit( false );
+		FPlatformMisc::RequestExit( false, TEXT("FWindowsPlatformMisc::PlatformPreInit.ResolutionTooLow"));
 	}
 
 	// initialize the file SHA hash mapping
 	InitSHAHashes();
+
+	// Check for SSE42 or better. This is now minspec and there is a high likelihood
+	// of crashing on an invalid instruction on unsupported processors as we use these
+	// instructions now.
+	if (CheckFeatureBit_X86(ECPUFeatureBits_X86::SSE42) == false)
+	{
+		FMessageDialog::Open(EAppMsgType::Ok, NSLOCTEXT("Launch", "Error_CPUNotSupported", "This CPU does not support a required feature (SSE4.2)."));
+		FPlatformMisc::RequestExit(false, TEXT("FWindowsPlatformMisc::PlatformPreInit.CPUNotSupported"));
+	}
 }
 
 
 void FWindowsPlatformMisc::PlatformInit()
 {
+	FGenericPlatformMisc::LogNameEventStatsInit();
+
 #if defined(_MSC_VER) && _MSC_VER == 1800 && PLATFORM_64BITS
 	// Work around bug in the VS 2013 math libraries in 64bit on certain windows versions. http://connect.microsoft.com/VisualStudio/feedback/details/811093 has details, remove this when runtime libraries are fixed
 	_set_FMA3_enable(0);
@@ -603,8 +934,14 @@ void FWindowsPlatformMisc::PlatformInit()
 
 	// Register on the game thread.
 	FWindowsPlatformStackWalk::RegisterOnModulesChanged();
+
+	CollectStorageInformation();
 }
 
+void FWindowsPlatformMisc::PlatformTearDown()
+{
+	FPlatformProcess::CeaseBeingFirstInstance();
+}
 
 /**
  * Handler called for console events like closure, CTRL-C, ...
@@ -619,7 +956,13 @@ static BOOL WINAPI ConsoleCtrlHandler(DWORD CtrlType)
 	if (!AppTermDelegateBroadcast)
 	{
 		RequestEngineExit(TEXT("ConsoleCtrl RequestExit"));
+
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		FCoreDelegates::ApplicationWillTerminateDelegate.Broadcast();
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+		FCoreDelegates::GetApplicationWillTerminateDelegate().Broadcast();
+
 		AppTermDelegateBroadcast = true;
 	}
 
@@ -713,6 +1056,24 @@ void FWindowsPlatformMisc::SetGracefulTerminationHandler()
 #endif // !UE_BUILD_SHIPPING && PLATFORM_CPU_X86_FAMILY
 }
 
+void FWindowsPlatformMisc::CallGracefulTerminationHandler()
+{
+	ConsoleCtrlHandler(CTRL_CLOSE_EVENT);
+}
+
+static ECrashHandlingType GCrashHandlingType; /* = ECrashHandlingType::Default */
+
+ECrashHandlingType FWindowsPlatformMisc::GetCrashHandlingType()
+{
+	return GCrashHandlingType;
+}
+
+ECrashHandlingType FWindowsPlatformMisc::SetCrashHandlingType(ECrashHandlingType Type)
+{
+	GCrashHandlingType = Type;
+	return GCrashHandlingType;
+}
+
 int32 FWindowsPlatformMisc::GetMaxPathLength()
 {
 	struct FLongPathsEnabled
@@ -730,7 +1091,15 @@ int32 FWindowsPlatformMisc::GetMaxPathLength()
 			{
 				typedef BOOLEAN(NTAPI *RtlAreLongPathsEnabledFunc)();
 				RtlAreLongPathsEnabledFunc RtlAreLongPathsEnabled = (RtlAreLongPathsEnabledFunc)(void*)GetProcAddress(Handle, "RtlAreLongPathsEnabled");
-				bValue = (RtlAreLongPathsEnabled != NULL && RtlAreLongPathsEnabled());
+				if (RtlAreLongPathsEnabled != NULL)
+				{
+					bValue = RtlAreLongPathsEnabled();
+				}
+				else
+				{
+					// Long paths are always supported under Wine
+					bValue = FWindowsPlatformMisc::IsWine();
+				}
 			}
 		}
 	};
@@ -744,7 +1113,7 @@ void FWindowsPlatformMisc::GetEnvironmentVariable(const TCHAR* VariableName, TCH
 	uint32 Error = ::GetEnvironmentVariableW(VariableName, Result, ResultLength);
 	if (Error <= 0)
 	{		
-		*Result = 0;
+		*Result = TEXT('\0');
 	}
 }
 
@@ -754,7 +1123,7 @@ FString FWindowsPlatformMisc::GetEnvironmentVariable(const TCHAR* VariableName)
 	FString Buffer;
 	for(uint32 Length = 128;;)
 	{
-		TArray<TCHAR>& CharArray = Buffer.GetCharArray();
+		TArray<TCHAR, FString::AllocatorType>& CharArray = Buffer.GetCharArray();
 		CharArray.SetNumUninitialized(Length);
 
 		Length = ::GetEnvironmentVariableW(VariableName, CharArray.GetData(), CharArray.Num());
@@ -823,7 +1192,6 @@ static void HardKillIfAutomatedTesting()
 
 		UE_LOG(LogWindows, Warning, TEXT("Attempting to run KillAllPopUpBlockingWindows"));
 
-		TCHAR KillAllBlockingWindows[] = TEXT("KillAllPopUpBlockingWindows.bat");
 		// .bat files never seem to launch correctly with FPlatformProcess::CreateProc so we just use the FPlatformProcess::LaunchURL which will call ShellExecute
 		// we don't really care about the return code in this case 
 		FPlatformProcess::LaunchURL( TEXT("KillAllPopUpBlockingWindows.bat"), NULL, NULL );
@@ -844,6 +1212,41 @@ bool FWindowsPlatformMisc::IsDebuggerPresent()
 {
 	return !GIgnoreDebugger && !!::IsDebuggerPresent();
 }
+
+EProcessDiagnosticFlags FWindowsPlatformMisc::GetProcessDiagnostics()
+{
+	static EProcessDiagnosticFlags FoundDiagnostics = []() -> EProcessDiagnosticFlags
+	{
+		EProcessDiagnosticFlags Result = FGenericPlatformMisc::GetProcessDiagnostics();
+
+		TCHAR* ImageFileName = PathFindFileName(FPlatformProcess::ExecutablePath());
+		FString ImageFileSubkey = FString::Printf(TEXT("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\%s"), ImageFileName);
+
+		// via https://docs.microsoft.com/en-us/windows-hardware/drivers/debugger/gflags-flag-table
+		constexpr uint32 MemorySanitizerMask =
+			0x00000010| // FLG_HEAP_ENABLE_TAIL_CHECK
+			0x00000020| // FLG_HEAP_ENABLE_FREE_CHECK
+			0x00000080| // FLG_HEAP_VALIDATE_ALL
+			0x00000100| // FLG_APPLICATION_VERIFIER
+			0x00000800| // FLG_HEAP_ENABLE_TAGGING
+			0x00008000| // FLG_HEAP_ENABLE_TAG_BY_DLL
+			0x00200000| // FLG_HEAP_DISABLE_COALESCING
+			0x02000000; // FLG_HEAP_PAGE_ALLOCS
+
+		DWORD Data, DataCount = sizeof(Data);
+		if (ERROR_SUCCESS == RegGetValue(HKEY_LOCAL_MACHINE, *ImageFileSubkey, TEXT("GlobalFlag"), RRF_RT_REG_DWORD, nullptr, &Data, &DataCount))
+		{
+			if (MemorySanitizerMask & Data)
+			{
+				Result |= EProcessDiagnosticFlags::MemorySanitizer;
+			}
+		}
+
+		return Result;
+	}();
+
+	return FoundDiagnostics;
+}
 #endif //!UE_BUILD_SHIPPING
 
 #if STATS || ENABLE_STATNAMEDEVENTS
@@ -859,6 +1262,8 @@ void FWindowsPlatformMisc::CustomNamedStat(const ANSICHAR* Text, float Value, co
 
 void FWindowsPlatformMisc::BeginNamedEventFrame()
 {
+	FGenericPlatformMisc::TickStatNamedEvents();
+
 #if FRAMEPRO_ENABLED
 	FFrameProProfiler::FrameStart();
 #endif
@@ -866,27 +1271,23 @@ void FWindowsPlatformMisc::BeginNamedEventFrame()
 
 void FWindowsPlatformMisc::BeginNamedEvent(const struct FColor& Color, const TCHAR* Text)
 {
+	FGenericPlatformMisc::StatNamedEvent(Text);
+
 #if FRAMEPRO_ENABLED
 	FFrameProProfiler::PushEvent(Text);
 #elif UE_EXTERNAL_PROFILING_ENABLED
-	FExternalProfiler* Profiler = FActiveExternalProfilerBase::GetActiveProfiler();
-	if (Profiler)
-	{
-		Profiler->StartScopedEvent(Text);
-	}
+	FExternalProfilerTrace::StartScopedEvent(Color, Text);
 #endif
 }
 
 void FWindowsPlatformMisc::BeginNamedEvent(const struct FColor& Color, const ANSICHAR* Text)
 {
+	FGenericPlatformMisc::StatNamedEvent(Text);
+
 #if FRAMEPRO_ENABLED
 	FFrameProProfiler::PushEvent(Text);
 #elif UE_EXTERNAL_PROFILING_ENABLED
-	FExternalProfiler* Profiler = FActiveExternalProfilerBase::GetActiveProfiler();
-	if (Profiler)
-	{
-		Profiler->StartScopedEvent(ANSI_TO_TCHAR(Text));
-	}
+	FExternalProfilerTrace::StartScopedEvent(Color, Text);
 #endif
 }
 
@@ -895,11 +1296,7 @@ void FWindowsPlatformMisc::EndNamedEvent()
 #if FRAMEPRO_ENABLED
 	FFrameProProfiler::PopEvent();
 #elif UE_EXTERNAL_PROFILING_ENABLED
-	FExternalProfiler* Profiler = FActiveExternalProfilerBase::GetActiveProfiler();
-	if (Profiler)
-	{
-		Profiler->EndScopedEvent();
-	}
+	FExternalProfilerTrace::EndScopedEvent();
 #endif
 }
 #endif // STATS || ENABLE_STATNAMEDEVENTS
@@ -917,30 +1314,46 @@ void FWindowsPlatformMisc::SetUTF8Output()
 
 void FWindowsPlatformMisc::LocalPrint( const TCHAR *Message )
 {
+#if USE_DEBUG_LOGGING
 	OutputDebugString(Message);
+#endif
 }
 
-void FWindowsPlatformMisc::RequestExit( bool Force )
+void FWindowsPlatformMisc::RequestExit( bool Force, const TCHAR* CallSite )
 {
-	UE_LOG(LogWindows, Log,  TEXT("FPlatformMisc::RequestExit(%i)"), Force );
+	UE_LOG(LogWindows, Log,  TEXT("FPlatformMisc::RequestExit(%i, %s)"),
+		Force, CallSite ? CallSite : TEXT("<NoCallSiteInfo>"));
 
 	// Legacy behavior that now calls through to RequestExitWithStatus
 	if( Force )
 	{
-		RequestExitWithStatus(Force, GIsCriticalError ? 3 : 0);
+		RequestExitWithStatus(Force, GIsCriticalError ? 3 : 0, CallSite);
 	}
 	else
 	{
-		RequestExitWithStatus(false, 0);
+		RequestExitWithStatus(false, 0, CallSite);
 	}
 }
 
-void FWindowsPlatformMisc::RequestExitWithStatus(bool Force, uint8 ReturnCode)
+void FWindowsPlatformMisc::RequestExitWithStatus(bool Force, uint8 ReturnCode, const TCHAR* CallSite)
 {
-	UE_LOG(LogWindows, Log, TEXT("FPlatformMisc::RequestExitWithStatus(%i, %i)"), Force, ReturnCode);
+	UE_LOG(LogWindows, Log, TEXT("FPlatformMisc::RequestExitWithStatus(%i, %i, %s)"), Force, ReturnCode,
+		CallSite ? CallSite : TEXT("<NoCallSiteInfo>"));
+
+#if ENABLE_PGO_PROFILE && !defined(__clang__) && !defined(__INTEL_LLVM_COMPILER)
+	// save current PGO profiling data and terminate immediately
+	PGO_WriteFile();
+	TerminateProcess(GetCurrentProcess(), 0);
+	return;
+#else
 
 	RequestEngineExit(TEXT("Win RequestExit"));
+
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	FCoreDelegates::ApplicationWillTerminateDelegate.Broadcast();
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+	FCoreDelegates::GetApplicationWillTerminateDelegate().Broadcast();
 
 	if (Force)
 	{
@@ -953,9 +1366,7 @@ void FWindowsPlatformMisc::RequestExitWithStatus(bool Force, uint8 ReturnCode)
 		// Make sure the log is flushed.
 		if (GLog)
 		{
-			// This may be called from other thread, so set this thread as the master.
-			GLog->SetCurrentThreadAsMasterThread();
-			GLog->TearDown();
+			GLog->Flush();
 		}
 
 		TerminateProcess(GetCurrentProcess(), ReturnCode);
@@ -965,6 +1376,7 @@ void FWindowsPlatformMisc::RequestExitWithStatus(bool Force, uint8 ReturnCode)
 		// Tell the platform specific code we want to exit cleanly from the main loop.
 		PostQuitMessage(ReturnCode);
 	}
+#endif
 }
 
 const TCHAR* FWindowsPlatformMisc::GetSystemErrorMessage(TCHAR* OutBuffer, int32 BufferCount, int32 Error)
@@ -994,226 +1406,551 @@ void FWindowsPlatformMisc::CreateGuid(FGuid& Result)
 	verify( CoCreateGuid( (GUID*)&Result )==S_OK );
 }
 
-
-#define HOTKEY_YES			100
-#define HOTKEY_NO			101
-#define HOTKEY_CANCEL		102
-
-/**
- * Helper global variables, used in MessageBoxDlgProc for set message text.
- */
-static TCHAR* GMessageBoxText = NULL;
-static TCHAR* GMessageBoxCaption = NULL;
-/**
- * Used by MessageBoxDlgProc to indicate whether a 'Cancel' button is present and
- * thus 'Esc should be accepted as a hotkey.
- */
-static bool GCancelButtonEnabled = false;
-
-/**
- * Calculates button position and size, localize button text.
- * @param HandleWnd handle to dialog window
- * @param Text button text to localize
- * @param DlgItemId dialog item id
- * @param PositionX current button position (x coord)
- * @param PositionY current button position (y coord)
- * @return true if succeeded
- */
-static bool SetDlgItem( HWND HandleWnd, const TCHAR* Text, int32 DlgItemId, int32* PositionX, int32* PositionY )
+class FWindowsDialog
 {
-	SIZE SizeButton;
-		
-	HDC DC = CreateCompatibleDC( NULL );
-	GetTextExtentPoint32( DC, Text, wcslen(Text), &SizeButton );
-	DeleteDC(DC);
-	DC = NULL;
-
-	SizeButton.cx += 14;
-	SizeButton.cy += 8;
-
-	HWND Handle = GetDlgItem( HandleWnd, DlgItemId );
-	if( Handle )
+private:
+	/**
+	 * Calculates button position and size, localize button text.
+	 * @param HandleWnd handle to dialog window
+	 * @param Text button text to localize
+	 * @param DlgItemId dialog item id
+	 * @param PositionX current button position (x coord)
+	 * @param PositionY current button position (y coord)
+	 * @return true if succeeded
+	 */
+	static bool SetDlgItem(HWND HandleWnd, const TCHAR* Text, int32 DlgItemId, float DPIScale, int32* PositionX, int32* PositionY)
 	{
-		*PositionX -= ( SizeButton.cx + 5 );
-		SetWindowPos( Handle, HWND_TOP, *PositionX, *PositionY - SizeButton.cy, SizeButton.cx, SizeButton.cy, 0 );
-		SetDlgItemText( HandleWnd, DlgItemId, Text );
-		
+		SIZE SizeButton;
+
+		HDC DC = CreateCompatibleDC(NULL);
+		GetTextExtentPoint32(DC, Text, wcslen(Text), &SizeButton);
+		DeleteDC(DC);
+		DC = NULL;
+
+		SizeButton.cx += (int)(14 * DPIScale);
+		SizeButton.cy += (int)(8 * DPIScale);
+		SizeButton.cx = FMath::Max((int)(73 * DPIScale), (int)SizeButton.cx);
+		SizeButton.cy = FMath::Max((int)(21 * DPIScale), (int)SizeButton.cy);
+
+		HWND Handle = GetDlgItem(HandleWnd, DlgItemId);
+		if (Handle)
+		{
+			*PositionX -= (SizeButton.cx + (int)(7 * DPIScale));
+			SetWindowPos(Handle, HWND_TOP, *PositionX, *PositionY - SizeButton.cy, SizeButton.cx, SizeButton.cy, 0);
+			SetDlgItemText(HandleWnd, DlgItemId, Text);
+
+			return true;
+		}
+
+		return false;
+	}
+
+	static float MessageBoxDlgGetDPI(HWND HandleWnd)
+	{
+		HMODULE User32Module = GetModuleHandle(L"user32.dll");
+		if (User32Module == nullptr) { return 1.0f; }
+
+		typedef UINT(WINAPI* LPGetDpiForWindow)(HWND Hwnd);
+		LPGetDpiForWindow GetDpiForWindow = (LPGetDpiForWindow)(void*)GetProcAddress(User32Module, "GetDpiForWindow");
+		if (GetDpiForWindow == nullptr) { return 1.0f; }
+
+		return static_cast<float>(GetDpiForWindow(HandleWnd)) / 96.0f;
+	}
+
+	static void SetWindowStyleFlags(HWND HandleWnd, LONG Flags, bool bEnabled)
+	{
+		LONG Style = GetWindowLong(HandleWnd, GWL_STYLE);
+		if (bEnabled)
+		{
+			Style |= Flags;
+		}
+		else
+		{
+			Style &= ~Flags;
+		}
+		SetWindowLong(HandleWnd, GWL_STYLE, Style);
+	}
+
+	static SIZE MeasureText(HWND HandleWnd, LPCWSTR Text, int TextLength)
+	{
+		HDC DC = CreateCompatibleDC(NULL);
+		HFONT Font = (HFONT)SendMessageW(HandleWnd, WM_GETFONT, 0, 0);
+		SelectObject(DC, Font);
+		RECT TextRect{};
+		DrawTextW(DC, Text, TextLength, &TextRect, DT_CALCRECT | DT_EDITCONTROL | DT_LEFT | DT_EXPANDTABS);
+		DeleteDC(DC);
+
+		SIZE TextSize;
+		TextSize.cx = TextRect.right - TextRect.left;
+		TextSize.cy = TextRect.bottom - TextRect.top;
+		return TextSize;
+	}
+
+	void UpdateEditTextScrollbar(HWND HandleWnd, float DPIScale)
+	{
+		RECT MessageRect;
+		GetWindowRect(HandleWnd, &MessageRect);
+		SIZE MessageSize;
+		MessageSize.cx = MessageRect.right - MessageRect.left - (int)(20 * DPIScale);
+		MessageSize.cy = MessageRect.bottom - MessageRect.top - (int)(16 * DPIScale);
+
+		SIZE TextSize = MeasureText(HandleWnd, *Text, Text.Len());
+
+		bool bNeedsHScroll = TextSize.cx > MessageSize.cx;
+		SetWindowStyleFlags(HandleWnd, WS_HSCROLL, bNeedsHScroll);
+		bool bNeedsVScroll = TextSize.cy > MessageSize.cy;
+		SetWindowStyleFlags(HandleWnd, WS_VSCROLL, bNeedsVScroll);
+	}
+
+	void Close(EAppReturnType::Type NewResult)
+	{
+		WasClosed = true;
+		Result = NewResult;
+		DestroyWindow(DialogHwnd);
+	}
+
+	bool OnInitDialog()
+	{
+		// Sets most bottom and most right position to begin button placement
+		POINT Point;
+
+		GetWindowRect(DialogHwnd, &DefaultWindowRect);
+		GetClientRect(DialogHwnd, &ClientRect);
+		WasClosed = false;
+
+		Point.x = ClientRect.right;
+		Point.y = ClientRect.bottom;
+
+		float DPIScale = MessageBoxDlgGetDPI(DialogHwnd);
+
+		int32 PositionX = Point.x - (int)(5 * DPIScale);
+		int32 PositionY = Point.y - (int)(10 * DPIScale);
+
+		// Localize dialog buttons, sets position and size.
+		FString CancelString;
+		FString RetryString;
+		FString ContinueString;
+		FString NoToAllString;
+		FString NoString;
+		FString YesToAllString;
+		FString YesString;
+		FString OKString;
+
+		// The Localize* functions will return the Key if a dialog is presented before the config system is initialized.
+		// Instead, we use hard-coded strings if config is not yet initialized.
+		if (!GConfig)
+		{
+			CancelString = TEXT("Cancel");
+			RetryString = TEXT("Retry");
+			ContinueString = TEXT("Continue");
+			NoToAllString = TEXT("No to All");
+			NoString = TEXT("No");
+			YesToAllString = TEXT("Yes to All");
+			YesString = TEXT("Yes");
+			OKString = TEXT("OK");
+		}
+		else
+		{
+			CancelString = NSLOCTEXT("UnrealEd", "Cancel", "Cancel").ToString();
+			RetryString = NSLOCTEXT("UnrealEd", "Retry", "Retry").ToString();
+			ContinueString = NSLOCTEXT("UnrealEd", "Continue", "Continue").ToString();
+			NoToAllString = NSLOCTEXT("UnrealEd", "NoToAll", "No to All").ToString();
+			NoString = NSLOCTEXT("UnrealEd", "No", "No").ToString();
+			YesToAllString = NSLOCTEXT("UnrealEd", "YesToAll", "Yes to All").ToString();
+			YesString = NSLOCTEXT("UnrealEd", "Yes", "Yes").ToString();
+			OKString = NSLOCTEXT("UnrealEd", "OK", "OK").ToString();
+		}
+		SetDlgItem(DialogHwnd, *ContinueString, IDC_CONTINUE, DPIScale, &PositionX, &PositionY);
+		SetDlgItem(DialogHwnd, *RetryString, IDC_RETRY, DPIScale, &PositionX, &PositionY);
+		SetDlgItem(DialogHwnd, *CancelString, IDC_CANCEL, DPIScale, &PositionX, &PositionY);
+		SetDlgItem(DialogHwnd, *NoToAllString, IDC_NOTOALL, DPIScale, &PositionX, &PositionY);
+		SetDlgItem(DialogHwnd, *NoString, IDC_NO_B, DPIScale, &PositionX, &PositionY);
+		SetDlgItem(DialogHwnd, *YesToAllString, IDC_YESTOALL, DPIScale, &PositionX, &PositionY);
+		SetDlgItem(DialogHwnd, *YesString, IDC_YES, DPIScale, &PositionX, &PositionY);
+		SetDlgItem(DialogHwnd, *OKString, IDC_OK, DPIScale, &PositionX, &PositionY);
+
+		SetDlgItemText(DialogHwnd, IDC_MESSAGE, *Text);
+		SetWindowText(DialogHwnd, *Caption);
+
+		HWND MessageHandle = GetDlgItem(DialogHwnd, IDC_MESSAGE);
+		UpdateEditTextScrollbar(MessageHandle, DPIScale);
+
+		// If parent window exist, get it handle and make it foreground.
+		HWND ParentWindow = GetTopWindow(DialogHwnd);
+		if (ParentWindow)
+		{
+			SetWindowPos(ParentWindow, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+		}
+
+		SetForegroundWindow(DialogHwnd);
+		SetWindowPos(DialogHwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+
+
+		// Windows are foreground, make them not top most.
+		SetWindowPos(DialogHwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+		if (ParentWindow)
+		{
+			SetWindowPos(ParentWindow, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+		}
+
+		// Resize to fit text
+		int Width = DefaultWindowRect.right - DefaultWindowRect.left;
+		int Height = DefaultWindowRect.bottom - DefaultWindowRect.top;
+		SIZE TextSize = MeasureText(MessageHandle, *Text, Text.Len());
+
+		HMONITOR Monitor = MonitorFromWindow(DialogHwnd, MONITOR_DEFAULTTONEAREST);
+		MONITORINFO MonInfo;
+		MonInfo.cbSize = sizeof(MONITORINFO);
+		GetMonitorInfo(Monitor, &MonInfo);
+		int MonitorWidth = MonInfo.rcMonitor.right - MonInfo.rcMonitor.left;
+		int MonitorHeight = MonInfo.rcMonitor.bottom - MonInfo.rcMonitor.top;
+
+		int NewWidth = FMath::Clamp((int)((float)TextSize.cx + 100.0f * DPIScale), Width, (int)((float)MonitorWidth * 0.8f));
+		int NewHeight = FMath::Clamp((int)((float)TextSize.cy + 165.0f * DPIScale), Height, (int)((float)MonitorHeight * 0.8f));
+		int NewLeft = DefaultWindowRect.left - (NewWidth - Width) / 2;
+		int NewTop = DefaultWindowRect.top - (NewHeight - Height) / 2;
+		SetWindowPos(DialogHwnd, HWND_NOTOPMOST, NewLeft, NewTop, NewWidth, NewHeight, SWP_NOZORDER);
+
 		return true;
 	}
 
-	return false;
-}
-
-/**
- * Callback for MessageBoxExt dialog (allowing for Yes to all / No to all )
- * @return		One of EAppReturnType::Yes, EAppReturnType::YesAll, EAppReturnType::No, EAppReturnType::NoAll, EAppReturnType::Cancel.
- */
-PTRINT CALLBACK MessageBoxDlgProc( HWND HandleWnd, uint32 Message, WPARAM WParam, LPARAM LParam )
-{
-	switch(Message)
+	void SetDialogTextInClipboard(HWND HandleWnd)
 	{
-		case WM_INITDIALOG:
+		size_t TextByteCount = Text.GetAllocatedSize();
+		HGLOBAL StrClipboardMemory = GlobalAlloc(GMEM_MOVEABLE, TextByteCount);
+		if (StrClipboardMemory == nullptr) { return; }
+
+		void* StrTarget = GlobalLock(StrClipboardMemory);
+		if (StrTarget == nullptr) { return; }
+		memcpy(StrTarget, *Text, TextByteCount);
+		((char*)StrTarget)[TextByteCount] = 0;
+		GlobalUnlock(StrClipboardMemory);
+
+		if (!OpenClipboard(HandleWnd)) { return; }
+		if (!EmptyClipboard()) { return; }
+		SetClipboardData(CF_UNICODETEXT, StrClipboardMemory);
+		CloseClipboard();
+	}
+
+	/**
+	 * Callback for MessageBoxExt dialog (allowing for Yes to all / No to all )
+	 * @return		One of EAppReturnType::Yes, EAppReturnType::YesAll, EAppReturnType::No, EAppReturnType::NoAll, EAppReturnType::Cancel.
+	 */
+	PTRINT MessageBoxDlgProc(HWND HandleWnd, uint32 Message, WPARAM WParam, LPARAM LParam)
+	{
+		switch (Message)
+		{
+			case WM_INITDIALOG:
 			{
-				// Sets most bottom and most right position to begin button placement
-				RECT Rect;
-				POINT Point;
-				
-				GetWindowRect( HandleWnd, &Rect );
-				Point.x = Rect.right;
-				Point.y = Rect.bottom;
-				ScreenToClient( HandleWnd, &Point );
-				
-				int32 PositionX = Point.x - 8;
-				int32 PositionY = Point.y - 10;
-
-				// Localize dialog buttons, sets position and size.
-				FString CancelString;
-				FString NoToAllString;
-				FString NoString;
-				FString YesToAllString;
-				FString YesString;
-
-				// The Localize* functions will return the Key if a dialog is presented before the config system is initialized.
-				// Instead, we use hard-coded strings if config is not yet initialized.
-				if( !GConfig )
+				return OnInitDialog();
+			}
+			case WM_DESTROY:
+			{
+				return true;
+			}
+			case WM_CLOSE:
+			{
+				Close(Result);
+				return true;
+			}
+			case WM_COMMAND:
+			{
+				switch (LOWORD(WParam))
 				{
-					CancelString = TEXT("Cancel");
-					NoToAllString = TEXT("No to All");
-					NoString = TEXT("No");
-					YesToAllString = TEXT("Yes to All");
-					YesString = TEXT("Yes");
+					case IDC_OK:
+						Close(EAppReturnType::Ok);
+						break;
+					case IDC_YES:
+						Close(EAppReturnType::Yes);
+						break;
+					case IDC_YESTOALL:
+						Close(EAppReturnType::YesAll);
+						break;
+					case IDC_NO_B:
+						Close(EAppReturnType::No);
+						break;
+					case IDC_NOTOALL:
+						Close(EAppReturnType::NoAll);
+						break;
+					case IDC_RETRY:
+						Close(EAppReturnType::Retry);
+						break;
+					case IDC_CONTINUE:
+						Close(EAppReturnType::Continue);
+						break;
+					case IDC_CANCEL:
+						if (CancelButtonEnabled)
+						{
+							Close(EAppReturnType::Cancel);
+							break;
+						}
+						break;
+					case IDC_COPY:
+					{
+						SetDialogTextInClipboard(HandleWnd);
+						break;
+					}
+					break;
+					default:
+						return false;
+				}
+				return true;
+			}
+			case WM_CTLCOLORSTATIC:
+			{
+				if ((HWND)LParam == GetDlgItem(HandleWnd, IDC_MESSAGE))
+				{
+					SetBkMode((HDC)WParam, TRANSPARENT);
+					return (LRESULT)(GetSysColorBrush(COLOR_WINDOW));
 				}
 				else
 				{
-					CancelString = NSLOCTEXT("UnrealEd", "Cancel", "Cancel").ToString();
-					NoToAllString = NSLOCTEXT("UnrealEd", "NoToAll", "No to All").ToString();
-					NoString = NSLOCTEXT("UnrealEd", "No", "No").ToString();
-					YesToAllString = NSLOCTEXT("UnrealEd", "YesToAll", "Yes to All").ToString();
-					YesString = NSLOCTEXT("UnrealEd", "Yes", "Yes").ToString();
+					return false;
 				}
-				SetDlgItem( HandleWnd, *CancelString, IDC_CANCEL, &PositionX, &PositionY );
-				SetDlgItem( HandleWnd, *NoToAllString, IDC_NOTOALL, &PositionX, &PositionY );
-				SetDlgItem( HandleWnd, *NoString, IDC_NO_B, &PositionX, &PositionY );
-				SetDlgItem( HandleWnd, *YesToAllString, IDC_YESTOALL, &PositionX, &PositionY );
-				SetDlgItem( HandleWnd, *YesString, IDC_YES, &PositionX, &PositionY );
-
-				SetDlgItemText( HandleWnd, IDC_MESSAGE, GMessageBoxText );
-				SetWindowText( HandleWnd, GMessageBoxCaption );
-
-				// If parent window exist, get it handle and make it foreground.
-				HWND ParentWindow = GetTopWindow( HandleWnd );
-				if( ParentWindow )
-				{
-					SetWindowPos( ParentWindow, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE );
-				}
-
-				SetForegroundWindow( HandleWnd );
-				SetWindowPos( HandleWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE );
-
-				RegisterHotKey( HandleWnd, HOTKEY_YES, 0, 'Y' );
-				RegisterHotKey( HandleWnd, HOTKEY_NO, 0, 'N' );
-				if ( GCancelButtonEnabled )
-				{
-					RegisterHotKey( HandleWnd, HOTKEY_CANCEL, 0, VK_ESCAPE );
-				}
-
-				// Windows are foreground, make them not top most.
-				SetWindowPos( HandleWnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE );
-				if( ParentWindow )
-				{
-					SetWindowPos( ParentWindow, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE );
-				}
-
-				return true;
-			}
-		case WM_DESTROY:
-			{
-				UnregisterHotKey( HandleWnd, HOTKEY_YES );
-				UnregisterHotKey( HandleWnd, HOTKEY_NO );
-				if ( GCancelButtonEnabled )
-				{
-					UnregisterHotKey( HandleWnd, HOTKEY_CANCEL );
-				}
-				return true;
-			}
-		case WM_COMMAND:
-			switch( LOWORD( WParam ) )
-			{
-				case IDC_YES:
-					EndDialog( HandleWnd, EAppReturnType::Yes );
-					break;
-				case IDC_YESTOALL:
-					EndDialog( HandleWnd, EAppReturnType::YesAll );
-					break;
-				case IDC_NO_B:
-					EndDialog( HandleWnd, EAppReturnType::No );
-					break;
-				case IDC_NOTOALL:
-					EndDialog( HandleWnd, EAppReturnType::NoAll );
-					break;
-				case IDC_CANCEL:
-					if ( GCancelButtonEnabled )
-					{
-						EndDialog( HandleWnd, EAppReturnType::Cancel );
-					}
-					break;
 			}
 			break;
-		case WM_HOTKEY:
-			switch( WParam )
+			case WM_PAINT:
 			{
-			case HOTKEY_YES:
-				EndDialog( HandleWnd, EAppReturnType::Yes );
-				break;
-			case HOTKEY_NO:
-				EndDialog( HandleWnd, EAppReturnType::No );
-				break;
-			case HOTKEY_CANCEL:
-				if ( GCancelButtonEnabled )
-				{
-					EndDialog( HandleWnd, EAppReturnType::Cancel );
-				}
-				break;
+				PAINTSTRUCT Paint;
+				HDC Hdc = BeginPaint(HandleWnd, &Paint);
+
+				float DPIScale = MessageBoxDlgGetDPI(HandleWnd);
+
+				RECT MainAreaRect;
+				MainAreaRect = ClientRect;
+				const int ActionBarHeight = (int)(45 * DPIScale);
+				MainAreaRect.bottom -= ActionBarHeight;
+				FillRect(Hdc, &MainAreaRect, GetSysColorBrush(COLOR_WINDOW));
+
+				/*HWND MessageHandle = GetDlgItem(HandleWnd, IDC_MESSAGE);
+				RECT MessageRect;
+				GetWindowRect(MessageHandle, &MessageRect);
+				MessageRect.right = MessageRect.right - MessageRect.left;
+				MessageRect.bottom = MessageRect.bottom - MessageRect.top;
+				MessageRect.left = MessageRect.top = 15;
+				HFONT Font = (HFONT)SendMessageW(MessageHandle, WM_GETFONT, 0, 0);
+				SelectObject(Hdc, Font);
+				DrawTextW(Hdc, GDialogState.Text, wcslen(GDialogState.Text), &MainAreaRect, DT_EDITCONTROL | DT_LEFT | DT_EXPANDTABS);*/
+
+				EndPaint(HandleWnd, &Paint);
+				return false;
 			}
-			break;
-		default:
-			return false;
+			case WM_SIZE:
+			{
+				RECT PrevDialogRect = ClientRect;
+				GetClientRect(HandleWnd, &ClientRect);
+
+				int ControlsStretch[] =
+				{
+					IDC_MESSAGE
+				};
+
+				for (const int ControlId : ControlsStretch)
+				{
+					HWND ControlHandle = GetDlgItem(HandleWnd, ControlId);
+					if (ControlHandle == nullptr) { continue; }
+
+					RECT PrevMessageRect;
+					GetWindowRect(ControlHandle, &PrevMessageRect);
+					ScreenToClient(HandleWnd, (POINT*)&PrevMessageRect.left);
+					ScreenToClient(HandleWnd, (POINT*)&PrevMessageRect.right);
+
+					SetWindowPos(ControlHandle, 0,
+						PrevMessageRect.left,
+						PrevMessageRect.top,
+						(PrevMessageRect.right - PrevMessageRect.left) + (ClientRect.right - PrevDialogRect.right),
+						(PrevMessageRect.bottom - PrevMessageRect.top) + (ClientRect.bottom - PrevDialogRect.bottom), SWP_NOZORDER);
+				}
+
+				int ControlsBottomRight[] =
+				{
+					IDC_OK, IDC_YES, IDC_YESTOALL, IDC_NO_B, IDC_NOTOALL, IDC_CANCEL, IDC_RETRY, IDC_CONTINUE
+				};
+
+				for (const int ControlId : ControlsBottomRight)
+				{
+					HWND ControlHandle = GetDlgItem(HandleWnd, ControlId);
+					if (ControlHandle == nullptr) { continue; }
+
+					RECT PrevMessageRect;
+					GetWindowRect(ControlHandle, &PrevMessageRect);
+					ScreenToClient(HandleWnd, (POINT*)&PrevMessageRect.left);
+					ScreenToClient(HandleWnd, (POINT*)&PrevMessageRect.right);
+
+					SetWindowPos(ControlHandle, 0,
+						PrevMessageRect.left + (ClientRect.right - PrevDialogRect.right),
+						PrevMessageRect.top + (ClientRect.bottom - PrevDialogRect.bottom),
+						(PrevMessageRect.right - PrevMessageRect.left),
+						(PrevMessageRect.bottom - PrevMessageRect.top), SWP_NOZORDER);
+				}
+
+				float DPIScale = MessageBoxDlgGetDPI(HandleWnd);
+
+				HWND MessageHandle = GetDlgItem(HandleWnd, IDC_MESSAGE);
+				UpdateEditTextScrollbar(MessageHandle, DPIScale);
+
+				InvalidateRect(HandleWnd, nullptr, true);
+			}
+			return true;
+			case WM_GETMINMAXINFO:
+			{
+				MINMAXINFO* Info = (MINMAXINFO*)LParam;
+
+				Info->ptMinTrackSize.x = DefaultWindowRect.right - DefaultWindowRect.left;
+				Info->ptMinTrackSize.y = DefaultWindowRect.bottom - DefaultWindowRect.top;
+			}
+			return true;
+			case WM_DPICHANGED:
+				/*{
+					float NewScale = LOWORD(WParam) / 96.0f;
+					RECT* SuggestedRect = (RECT*)LParam;
+					SetWindowPos(HandleWnd,
+						HWND_NOTOPMOST,
+						SuggestedRect->left,
+						SuggestedRect->top,
+						SuggestedRect->right - SuggestedRect->left,
+						SuggestedRect->bottom - SuggestedRect->top,
+						SWP_NOZORDER);
+
+					//https://github.com/microsoft/Windows-classic-samples/blob/main/Samples/DPIAwarenessPerWindow/client/DpiAwarenessContext.cpp
+
+				}*/
+				return true;
+			default:
+				return false;
+		}
 	}
-	return true;
-}
 
-/**
- * Displays extended message box allowing for YesAll/NoAll
- * @return 3 - YesAll, 4 - NoAll, -1 for Fail
- */
-int MessageBoxExtInternal( EAppMsgType::Type MsgType, HWND HandleWnd, const TCHAR* Text, const TCHAR* Caption )
-{
-	GMessageBoxText = (TCHAR *) Text;
-	GMessageBoxCaption = (TCHAR *) Caption;
+	FWindowsDialog() {}
 
-	switch (MsgType)
+
+	FString Text;
+	FString Caption;
+
+	/**
+	 * Used to indicate whether a 'Cancel' button is present and
+	 * thus 'Esc should be accepted as a hotkey.
+	 */
+	bool CancelButtonEnabled = false;
+
+
+	HWND DialogHwnd = NULL;
+	RECT ClientRect = {};
+	RECT DefaultWindowRect = {};
+	bool WasClosed = false;
+	EAppReturnType::Type Result = EAppReturnType::Cancel;
+
+	EAppReturnType::Type Show(HWND ParentWindowHandle, int Template)
 	{
-		case EAppMsgType::YesNoYesAllNoAll:
+		HACCEL AcceleratorHandle = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDR_ACCEL1));
+
+		DialogHwnd = CreateDialogParam(GetModuleHandle(NULL), MAKEINTRESOURCE(Template), ParentWindowHandle, 
+			[](HWND HandleWnd, uint32 Message, WPARAM WParam, LPARAM LParam) {
+				FWindowsDialog* Instance;
+				if (Message == WM_INITDIALOG)
+				{
+					Instance = (FWindowsDialog*)LParam;
+					Instance->DialogHwnd = HandleWnd;
+					SetWindowLongPtr(HandleWnd, DWLP_USER, (LPARAM)Instance);
+				}
+				else
+				{
+					Instance = (FWindowsDialog*)GetWindowLongPtr(HandleWnd, DWLP_USER);
+				}
+
+				return Instance->MessageBoxDlgProc(HandleWnd, Message, WParam, LParam);
+			}, (LPARAM)this);
+
+		if (!DialogHwnd)
 		{
-			GCancelButtonEnabled = false;
-			return (int)DialogBox(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_YESNO2ALL), HandleWnd, MessageBoxDlgProc);
+			DWORD LastError = GetLastError();
+			TCHAR ErrorBuffer[1024];
+			FWindowsPlatformMisc::GetSystemErrorMessage(ErrorBuffer, UE_ARRAY_COUNT(ErrorBuffer), LastError);
+			UE_LOG(LogWindows, Error, TEXT("Failed to create dialog. %s Error: 0x%X (%u)"), ErrorBuffer, LastError, LastError);
+			return Result;
 		}
-		case EAppMsgType::YesNoYesAllNoAllCancel:
+
+		ShowWindow(DialogHwnd, SW_SHOW);
+		MSG Msg;
+		while (!WasClosed && GetMessageW(&Msg, NULL, 0, 0))
 		{
-			GCancelButtonEnabled = true;
-			return (int)DialogBox(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_YESNO2ALLCANCEL), HandleWnd, MessageBoxDlgProc);
+			bool bIsTextEditMsg = Msg.hwnd == GetDlgItem(DialogHwnd, IDC_MESSAGE);
+			bool bCheckAccelerators = DialogHwnd == Msg.hwnd || (IsChild(DialogHwnd, Msg.hwnd) && !bIsTextEditMsg);
+			if (!(bCheckAccelerators && TranslateAccelerator(DialogHwnd, AcceleratorHandle, &Msg)) &&
+				!IsDialogMessage(DialogHwnd, &Msg))
+			{
+				TranslateMessage(&Msg);
+				DispatchMessage(&Msg);
+			}
 		}
-		case EAppMsgType::YesNoYesAll:
-		{
-			GCancelButtonEnabled = false;
-			return (int)DialogBox(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_YESNOYESTOALL), HandleWnd, MessageBoxDlgProc);
-		}
+
+		DestroyAcceleratorTable(AcceleratorHandle);
+
+		return Result;
 	}
 
-	return -1;
-}
+public:
+	static EAppReturnType::Type Show(HWND ParentWindowHandle, EAppMsgType::Type MsgType, const FString& Text, const FString& Caption)
+	{
+		FWindowsDialog Instance {};
+		Instance.Text = Text;
+		Instance.Caption = Caption;
 
-
+		switch (MsgType)
+		{
+			case EAppMsgType::Ok:
+			{
+				Instance.CancelButtonEnabled = false;
+				Instance.Result = EAppReturnType::Ok; // default option used when dialog is closed
+				return Instance.Show(ParentWindowHandle, IDD_OK);
+			}
+			case EAppMsgType::YesNo:
+			{
+				Instance.CancelButtonEnabled = false;
+				Instance.Result = EAppReturnType::No;
+				return Instance.Show(ParentWindowHandle, IDD_YESNO);
+			}
+			case EAppMsgType::OkCancel:
+			{
+				Instance.CancelButtonEnabled = true;
+				Instance.Result = EAppReturnType::Cancel;
+				return Instance.Show(ParentWindowHandle, IDD_OKCANCEL);
+			}
+			case EAppMsgType::YesNoCancel:
+			{
+				Instance.CancelButtonEnabled = true;
+				Instance.Result = EAppReturnType::Cancel;
+				return Instance.Show(ParentWindowHandle, IDD_YESNOCANCEL);
+			}
+			case EAppMsgType::CancelRetryContinue:
+			{
+				Instance.CancelButtonEnabled = true;
+				Instance.Result = EAppReturnType::Cancel;
+				return Instance.Show(ParentWindowHandle, IDD_CANCELRETRYCONTINUE);
+			}
+			case EAppMsgType::YesNoYesAllNoAll:
+			{
+				Instance.CancelButtonEnabled = false;
+				Instance.Result = EAppReturnType::No;
+				return Instance.Show(ParentWindowHandle, IDD_YESNO2ALL);
+			}
+			case EAppMsgType::YesNoYesAllNoAllCancel:
+			{
+				Instance.CancelButtonEnabled = true;
+				Instance.Result = EAppReturnType::Cancel;
+				return Instance.Show(ParentWindowHandle, IDD_YESNO2ALLCANCEL);
+			}
+			case EAppMsgType::YesNoYesAll:
+			{
+				Instance.CancelButtonEnabled = false;
+				Instance.Result = EAppReturnType::No;
+				return Instance.Show(ParentWindowHandle, IDD_YESNOYESTOALL);
+			}
+			default:
+				return EAppReturnType::Cancel;
+		}
+	}
+};
 
 
 EAppReturnType::Type FWindowsPlatformMisc::MessageBoxExt( EAppMsgType::Type MsgType, const TCHAR* Text, const TCHAR* Caption )
@@ -1221,55 +1958,12 @@ EAppReturnType::Type FWindowsPlatformMisc::MessageBoxExt( EAppMsgType::Type MsgT
 	FSlowHeartBeatScope SuspendHeartBeat;
 
 	HWND ParentWindow = (HWND)NULL;
-	switch( MsgType )
-	{
-	case EAppMsgType::Ok:
-		{
-			MessageBox(ParentWindow, Text, Caption, MB_OK|MB_SYSTEMMODAL);
-			return EAppReturnType::Ok;
-		}
-	case EAppMsgType::YesNo:
-		{
-			int32 Return = MessageBox( ParentWindow, Text, Caption, MB_YESNO|MB_SYSTEMMODAL );
-			return Return == IDYES ? EAppReturnType::Yes : EAppReturnType::No;
-		}
-	case EAppMsgType::OkCancel:
-		{
-			int32 Return = MessageBox( ParentWindow, Text, Caption, MB_OKCANCEL|MB_SYSTEMMODAL );
-			return Return == IDOK ? EAppReturnType::Ok : EAppReturnType::Cancel;
-		}
-	case EAppMsgType::YesNoCancel:
-		{
-			int32 Return = MessageBox(ParentWindow, Text, Caption, MB_YESNOCANCEL | MB_ICONQUESTION | MB_SYSTEMMODAL);
-			return Return == IDYES ? EAppReturnType::Yes : (Return == IDNO ? EAppReturnType::No : EAppReturnType::Cancel);
-		}
-	case EAppMsgType::CancelRetryContinue:
-		{
-			int32 Return = MessageBox(ParentWindow, Text, Caption, MB_CANCELTRYCONTINUE | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_SYSTEMMODAL);
-			return Return == IDCANCEL ? EAppReturnType::Cancel : (Return == IDTRYAGAIN ? EAppReturnType::Retry : EAppReturnType::Continue);
-		}
-		break;
-	case EAppMsgType::YesNoYesAllNoAll:
-		return (EAppReturnType::Type)MessageBoxExtInternal( EAppMsgType::YesNoYesAllNoAll, ParentWindow, Text, Caption );
-		//These return codes just happen to match up with ours.
-		// return 0 for No, 1 for Yes, 2 for YesToAll, 3 for NoToAll
-		break;
-	case EAppMsgType::YesNoYesAllNoAllCancel:
-		return (EAppReturnType::Type)MessageBoxExtInternal( EAppMsgType::YesNoYesAllNoAllCancel, ParentWindow, Text, Caption );
-		//These return codes just happen to match up with ours.
-		// return 0 for No, 1 for Yes, 2 for YesToAll, 3 for NoToAll, 4 for Cancel
-		break;
+	
+	FString PlatformText = FString(Text);
+	PlatformText.ReplaceInline(TEXT("\r"), TEXT(""));
+	PlatformText.ReplaceInline(TEXT("\n"), TEXT("\r\n"));
 
-	case EAppMsgType::YesNoYesAll:
-		return (EAppReturnType::Type)MessageBoxExtInternal(EAppMsgType::YesNoYesAll, ParentWindow, Text, Caption);
-		//These return codes just happen to match up with ours.
-		// return 0 for No, 1 for Yes, 2 for YesToAll
-		break;
-
-	default:
-		break;
-	}
-	return EAppReturnType::Cancel;
+	return FWindowsDialog::Show(ParentWindow, MsgType, PlatformText, FString(Caption));
 }
 
 static bool HandleGameExplorerIntegration()
@@ -1621,6 +2315,31 @@ bool FWindowsPlatformMisc::VerifyWindowsVersion(uint32 MajorVersion, uint32 Mino
 	return !!VerifyVersionInfo(&Version, VER_MAJORVERSION | VER_MINORVERSION | VER_BUILDNUMBER, ConditionMask);
 }
 
+bool FWindowsPlatformMisc::IsWine()
+{
+	struct FWineDetected
+	{
+		bool bValue;
+
+		FWineDetected()
+		{
+			HMODULE Handle = GetModuleHandle(TEXT("ntdll.dll"));
+			if (Handle == NULL)
+			{
+				bValue = false;
+			}
+			else
+			{
+				void* WineGetVersion = (void*)GetProcAddress(Handle, "wine_get_version");
+				bValue = (WineGetVersion != NULL);
+			}
+		}
+	};
+
+	static FWineDetected WineDetected;
+	return WineDetected.bValue;
+}
+
 bool FWindowsPlatformMisc::IsValidAbsolutePathFormat(const FString& Path)
 {
 	bool bIsValid = true;
@@ -1657,7 +2376,7 @@ bool FWindowsPlatformMisc::IsValidAbsolutePathFormat(const FString& Path)
 	return bIsValid;
 }
 
-static void QueryCpuInformation(uint32& OutGroupCount, uint32& OutNumaNodeCount, uint32& OutCoreCount, uint32& OutLogicalProcessorCount, bool bForceSingleNumaNode = false)
+static void QueryCpuInformation(FProcessorGroupDesc& OutGroupDesc, uint32& OutNumaNodeCount, uint32& OutCoreCount, uint32& OutLogicalProcessorCount, bool bForceSingleNumaNode = false)
 {
 	GROUP_AFFINITY FilterGroupAffinity = {};
 
@@ -1671,7 +2390,7 @@ static void QueryCpuInformation(uint32& OutGroupCount, uint32& OutNumaNodeCount,
 		GetNumaNodeProcessorMaskEx(NodeNumber, &FilterGroupAffinity);
 	}
 
-	OutGroupCount = OutNumaNodeCount = OutCoreCount = OutLogicalProcessorCount = 0;
+	OutNumaNodeCount = OutCoreCount = OutLogicalProcessorCount = 0;
 	uint8* BufferPtr = nullptr;
 	DWORD BufferBytes = 0;
 
@@ -1730,7 +2449,11 @@ static void QueryCpuInformation(uint32& OutGroupCount, uint32& OutNumaNodeCount,
 
 					if (ProcessorInfo->Relationship == RelationGroup)
 					{
-						OutGroupCount = ProcessorInfo->Group.ActiveGroupCount;
+						OutGroupDesc.NumProcessorGroups = FMath::Min<uint16>(FProcessorGroupDesc::MaxNumProcessorGroups, ProcessorInfo->Group.ActiveGroupCount);
+						for(int32 GroupIndex = 0; GroupIndex < OutGroupDesc.NumProcessorGroups; GroupIndex++)
+						{
+							OutGroupDesc.ThreadAffinities[GroupIndex] = ProcessorInfo->Group.GroupInfo[GroupIndex].ActiveProcessorMask;
+						}
 					}
 
 					InfoPtr += ProcessorInfo->Size;
@@ -1745,55 +2468,78 @@ static void QueryCpuInformation(uint32& OutGroupCount, uint32& OutNumaNodeCount,
 int32 FWindowsPlatformMisc::NumberOfCores()
 {
 	static int32 CoreCount = 0;
-	if (CoreCount == 0)
+	if (CoreCount > 0)
 	{
-		uint32 NumGroups = 0;
-		uint32 NumaNodeCount = 0;
-		uint32 NumCores = 0;
-		uint32 LogicalProcessorCount = 0;
-		QueryCpuInformation(NumGroups, NumaNodeCount, NumCores, LogicalProcessorCount);
+		return CoreCount;
+	}
 
-		if (FCommandLine::IsInitialized() && FParse::Param(FCommandLine::Get(), TEXT("usehyperthreading")))
-		{
-			CoreCount = LogicalProcessorCount;
-		}
-		else
-		{
-			CoreCount = NumCores;
-		}
+	FProcessorGroupDesc GroupDesc;
+	uint32 NumaNodeCount = 0;
+	uint32 NumCores = 0;
+	uint32 LogicalProcessorCount = 0;
+	QueryCpuInformation(GroupDesc, NumaNodeCount, NumCores, LogicalProcessorCount);
 
-		// Optionally limit number of threads (we don't necessarily scale super well with very high core counts)
+	bool bLimitsInitialized;
+	int32 PhysicalCoreLimit;
+	int32 LogicalCoreLimit;
+	bool bSetPhysicalCountToLogicalCount;
+	GetConfiguredCoreLimits(NumCores, LogicalProcessorCount, bLimitsInitialized, PhysicalCoreLimit,
+		LogicalCoreLimit, bSetPhysicalCountToLogicalCount);
 
-		int32 LimitCount = 32768;
-		if (FCommandLine::IsInitialized() && FParse::Value(FCommandLine::Get(), TEXT("-corelimit="), LimitCount))
-		{
-			CoreCount = FMath::Min(CoreCount, LimitCount);
-		}
+	CoreCount = bSetPhysicalCountToLogicalCount ? LogicalProcessorCount : NumCores;
+
+	// Optionally limit number of threads (we don't necessarily scale super well with very high core counts)
+	if (PhysicalCoreLimit > 0)
+	{
+		CoreCount = FMath::Min(CoreCount, PhysicalCoreLimit);
 	}
 
 	return CoreCount;
 }
 
+FProcessorGroupDesc NumberOfProcessorGroupsInternal()
+{
+	FProcessorGroupDesc GroupDesc;
+	uint32 NumaNodeCount = 0;
+	uint32 NumCores = 0;
+	uint32 LogicalProcessorCount = 0;
+	QueryCpuInformation(GroupDesc, NumaNodeCount, NumCores, LogicalProcessorCount);
+	return GroupDesc;
+}
+
+const FProcessorGroupDesc& FWindowsPlatformMisc::GetProcessorGroupDesc()
+{
+	static FProcessorGroupDesc GroupDesc(NumberOfProcessorGroupsInternal());
+	return GroupDesc;
+}
+
 int32 FWindowsPlatformMisc::NumberOfCoresIncludingHyperthreads()
 {
 	static int32 CoreCount = 0;
-	if (CoreCount == 0)
+	if (CoreCount > 0)
 	{
-		uint32 NumGroups = 0;
-		uint32 NumaNodeCount = 0;
-		uint32 NumCores = 0;
-		uint32 LogicalProcessorCount = 0;
-		QueryCpuInformation(NumGroups, NumaNodeCount, NumCores, LogicalProcessorCount);
+		return CoreCount;
+	}
 
-		CoreCount = LogicalProcessorCount;
+	FProcessorGroupDesc GroupDesc;
+	uint32 NumaNodeCount = 0;
+	uint32 NumCores = 0;
+	uint32 LogicalProcessorCount = 0;
+	QueryCpuInformation(GroupDesc, NumaNodeCount, NumCores, LogicalProcessorCount);
 
-		// Optionally limit number of threads (we don't necessarily scale super well with very high core counts)
+	bool bLimitsInitialized;
+	int32 PhysicalCoreLimit;
+	int32 LogicalCoreLimit;
+	bool bSetPhysicalCountToLogicalCount;
+	GetConfiguredCoreLimits(NumCores, LogicalProcessorCount, bLimitsInitialized, PhysicalCoreLimit,
+		LogicalCoreLimit, bSetPhysicalCountToLogicalCount);
 
-		int32 LimitCount = 32768;
-		if (FCommandLine::IsInitialized() && FParse::Value(FCommandLine::Get(), TEXT("-corelimit="), LimitCount))
-		{
-			CoreCount = FMath::Min(CoreCount, LimitCount);
-		}
+	CoreCount = LogicalProcessorCount;
+
+	// Optionally limit number of threads (we don't necessarily scale super well with very high core counts)
+	if (LogicalCoreLimit > 0)
+	{
+		CoreCount = FMath::Min(CoreCount, LogicalCoreLimit);
 	}
 
 	return CoreCount;
@@ -1801,24 +2547,35 @@ int32 FWindowsPlatformMisc::NumberOfCoresIncludingHyperthreads()
 
 const TCHAR* FWindowsPlatformMisc::GetPlatformFeaturesModuleName()
 {
-	bool bModuleExists = FModuleManager::Get().ModuleExists(TEXT("WindowsPlatformFeatures"));
 	// If running a dedicated server then we use the default PlatformFeatures
-	if (bModuleExists && !IsRunningDedicatedServer())
+	if (!IsRunningDedicatedServer())
 	{
-		UE_LOG(LogWindows, Log, TEXT("WindowsPlatformFeatures enabled"));
-		return TEXT("WindowsPlatformFeatures");
+		static FString PlatformFeaturesName = TEXT("WindowsPlatformFeatures");
+		static bool bIniChecked = false;
+		if (!bIniChecked && !GEngineIni.IsEmpty())
+		{
+			GConfig->GetString(TEXT("PlatformFeatures"), TEXT("PlatformFeaturesModule"), PlatformFeaturesName, GEngineIni);
+			bIniChecked = true;
+		}
+
+		bool bModuleExists = FModuleManager::Get().ModuleExists(*PlatformFeaturesName);
+		if (bModuleExists && !PlatformFeaturesName.IsEmpty())
+		{
+			UE_LOG(LogWindows, Log, TEXT("%s enabled"), *PlatformFeaturesName);
+			return *PlatformFeaturesName;
+		}
 	}
-	else
-	{
-		UE_LOG(LogWindows, Log, TEXT("WindowsPlatformFeatures disabled or dedicated server build"));
-		return nullptr;
-	}
+
+	UE_LOG(LogWindows, Log, TEXT("WindowsPlatformFeatures disabled or dedicated server build"));
+	return nullptr;
 }
 
 int32 FWindowsPlatformMisc::NumberOfWorkerThreadsToSpawn()
-{
+{	
 	static int32 MaxServerWorkerThreads = 4;
-	static int32 MaxWorkerThreads = 26;
+
+	extern CORE_API int32 GUseNewTaskBackend;
+	int32 MaxWorkerThreads = GUseNewTaskBackend ? INT32_MAX : 26;
 
 	int32 NumberOfCores = FWindowsPlatformMisc::NumberOfCores();
 	int32 NumberOfCoresIncludingHyperthreads = FWindowsPlatformMisc::NumberOfCoresIncludingHyperthreads();
@@ -2032,9 +2789,9 @@ void FWindowsPlatformMisc::SetLastError(uint32 ErrorCode)
 	::SetLastError((DWORD)ErrorCode);
 }
 
-bool FWindowsPlatformMisc::CoInitialize()
+bool FWindowsPlatformMisc::CoInitialize(ECOMModel Model)
 {
-	HRESULT hr = ::CoInitialize(NULL);
+	HRESULT hr = ::CoInitializeEx(NULL, (Model == ECOMModel::Singlethreaded) ? COINIT_APARTMENTTHREADED : COINIT_MULTITHREADED);
 	return hr == S_OK || hr == S_FALSE;
 }
 
@@ -2073,13 +2830,13 @@ void FWindowsPlatformMisc::PromptForRemoteDebugging(bool bIsEnsure)
 		FPlatformStackWalk::UploadLocalSymbols();
 
 		FCString::Sprintf(GErrorRemoteDebugPromptMessage, 
-			TEXT("Have a programmer remote debug this crash?\n")
-			TEXT("Hit NO to exit and submit error report as normal.\n")
-			TEXT("Otherwise, contact a programmer for remote debugging,\n")
-			TEXT("giving him the changelist number below.\n")
-			TEXT("Once he confirms he is connected to the machine,\n")
-			TEXT("hit YES to allow him to debug the crash.\n")
-			TEXT("[Changelist = %d]"),
+			TEXT("Have a programmer remote debug this crash?\n"
+			     "Hit NO to exit and submit error report as normal.\n"
+			     "Otherwise, contact a programmer for remote debugging,\n"
+			     "giving them the changelist number below.\n"
+			     "Once they have confirmed they are connected to the machine,\n"
+			     "hit YES to allow them to debug the crash.\n"
+			     "[Changelist = %d]"),
 			FEngineVersion::Current().GetChangelist());
 		FSlowHeartBeatScope SuspendHeartBeat;
 		if (MessageBox(0, GErrorRemoteDebugPromptMessage, TEXT("CRASHED"), MB_YESNO|MB_SYSTEMMODAL) == IDYES)
@@ -2099,6 +2856,7 @@ public:
 	FCPUIDQueriedData()
 		: bHasCPUIDInstruction(CheckForCPUIDInstruction()), Vendor(), CPUInfo(0), CacheLineSize(PLATFORM_CACHE_LINE_SIZE)
 	{
+		bHasTimedPauseInstruction = false;
 		if(bHasCPUIDInstruction)
 		{
 			GetCPUVendor(Vendor);
@@ -2108,6 +2866,8 @@ public:
 			CPUInfo = Info[0];
 			CPUInfo2 = Info[2];
 			CacheLineSize = QueryCacheLineSize();
+			bHasTimedPauseInstruction = CheckForTimedPauseInstruction();
+			UE_CLOG(bHasTimedPauseInstruction, LogWindows, Log, TEXT("Enabling Tpause support"));
 		}
 	}
 
@@ -2119,6 +2879,16 @@ public:
 	static bool HasCPUIDInstruction()
 	{
 		return CPUIDStaticCache.bHasCPUIDInstruction;
+	}
+
+	/**
+	 * Checks if this CPU supports tpause instruction.
+	 *
+	 * @returns True if this CPU supports tpause instruction. False otherwise.
+	 */
+	static bool HasTimedPauseInstruction()
+	{
+		return CPUIDStaticCache.bHasTimedPauseInstruction;
 	}
 
 	/**
@@ -2172,6 +2942,8 @@ public:
 	}
 
 private:
+
+#if !PLATFORM_CPU_ARM_FAMILY
 	/**
 	 * Checks if __cpuid instruction is present on current machine.
 	 *
@@ -2197,6 +2969,58 @@ private:
 		}
 		return true;
 	#endif
+#endif
+	}
+
+	static int FilterInvalidOpcode(DWORD ExceptionCode, struct _EXCEPTION_POINTERS* ExceptionInformation)
+	{
+		if (ExceptionCode == STATUS_ILLEGAL_INSTRUCTION || ExceptionCode == STATUS_PRIVILEGED_INSTRUCTION)
+		{
+			return EXCEPTION_EXECUTE_HANDLER;
+		}
+		else
+		{
+			return EXCEPTION_CONTINUE_SEARCH;
+		}
+	}
+
+	/**
+	 * Checks if tpause instruction is present on current machine.
+	 *
+	 * @returns True if this CPU supports tpause instruction. False otherwise.
+	 */
+	static bool CheckForTimedPauseInstruction()
+	{
+#if PLATFORM_SEH_EXCEPTIONS_DISABLED
+		return false;
+#else
+		bool bSupportsTpause = false;
+		int CPUInfo[4];
+		__cpuid(CPUInfo, 0);
+
+		if (CPUInfo[0] >= 7)
+		{
+			int CPUExtendedInfo[4];
+			__cpuidex(CPUExtendedInfo, 7, 0);
+
+			if ((CPUExtendedInfo[2] & (1 << 5)) != 0)
+			{
+				// WAITPKG is supported
+				__try
+				{
+					unsigned long long tsc = __rdtsc();
+					_tpause(0, tsc + 1024);
+					// TPAUSE is supported
+					bSupportsTpause = true;
+				}
+				__except (FilterInvalidOpcode(GetExceptionCode(), GetExceptionInformation()))
+				{
+					bSupportsTpause = false;
+				}
+			}
+		}
+
+		return bSupportsTpause;
 #endif
 	}
 
@@ -2285,12 +3109,23 @@ private:
 
 		return Result;
 	}
+#else
+	static bool CheckForCPUIDInstruction() { return false; }
+	static bool CheckForTimedPauseInstruction() { return false; }
+	static void GetCPUVendor(ANSICHAR(&OutBuffer)[12 + 1]) {}
+	static void GetCPUBrand(ANSICHAR(&OutBrandString)[0x40]) {}
+	static void QueryCPUInfo(int Args[4]) {}
+	static int32 QueryCacheLineSize() { return PLATFORM_CACHE_LINE_SIZE; }
+#endif
 
 	/** Static field with pre-cached __cpuid data. */
 	static FCPUIDQueriedData CPUIDStaticCache;
 
 	/** If machine has CPUID instruction. */
 	bool bHasCPUIDInstruction;
+
+	/** If machine has timed pause instruction. */
+	bool bHasTimedPauseInstruction;
 
 	/** Vendor of the CPU. */
 	ANSICHAR Vendor[12 + 1];
@@ -2324,6 +3159,122 @@ FString FWindowsPlatformMisc::GetCPUBrand()
 	return FCPUIDQueriedData::GetBrand();
 }
 
+#if PLATFORM_CPU_X86_FAMILY
+
+#ifdef _MSC_VER
+	#define CpuIdEx __cpuidex
+	#define CpuId __cpuid
+#else
+	// GCC/Clang
+
+	// 64-bit: GCC/Clang won't let us use "=b" constraint on Mac64, and we need to preserve RBX
+	// (PIC/PIE base)
+	#define CpuIdEx(out, leaf_id, subleaf_id)\
+			asm("xchgq %%rbx,%q1\n" \
+				"cpuid\n" \
+				"xchgq %%rbx,%q1\n" \
+				: "=a" (out[0]), "=&r" (out[1]), "=c" (out[2]), "=d" (out[3]): "0" (leaf_id), "2"(subleaf_id));
+
+	#define CpuId(out, leaf_id) CpuIdEx(out, leaf_id, 0)
+
+#endif // if not msc
+
+static std::atomic_uint32_t CachedX86FeatureBits = 0;
+uint32 FWindowsPlatformMisc::GetFeatureBits_X86()
+{
+	//
+	// Note we are 64bit+ now so we know we have cpuid.
+	//
+
+	uint32 FeatureBits = CachedX86FeatureBits.load(std::memory_order_relaxed);
+	if (FeatureBits)
+	{
+		return FeatureBits;
+	}
+
+	int CpuInfo[4];
+	uint32 MaxLeaf;
+
+	// Basic CPUID information
+	CpuId(CpuInfo, 0);
+	MaxLeaf = CpuInfo[0];
+
+	// Basic feature flags
+	CpuId(CpuInfo, 1);
+
+	FeatureBits |= (CpuInfo[3] & (1u << 26)) ? ECPUFeatureBits_X86::SSE2 : 0;
+	FeatureBits |= (CpuInfo[2] & (1u << 9)) ? ECPUFeatureBits_X86::SSSE3 : 0;
+	FeatureBits |= (CpuInfo[2] & (1u << 20)) ? ECPUFeatureBits_X86::SSE42 : 0;
+	FeatureBits |= (CpuInfo[2] & (1u << 28)) ? ECPUFeatureBits_X86::AVX : 0;
+	FeatureBits |= (CpuInfo[2] & (1u << 29)) ? ECPUFeatureBits_X86::F16C : 0;
+
+	// We don't have a feature flag we report for this, but we do use it later
+	bool has_popcnt = (CpuInfo[2] & (1u << 23)) != 0;
+
+	if (MaxLeaf >= 7)
+	{
+		// "Structured extended feature flags enumeration"
+		CpuIdEx(CpuInfo, 7, 0);
+
+		// Some (Celeron) Skylakes erroneously report BMI1/BMI2 even though they don't have it.
+		// These Celerons also don't have AVX.
+		//
+		// All CPUs that actually have BMI1/BMI2 (as of this writing, 2016-05-11) have AVX.
+		// (The ones we care about, anyway.) So only report BMI1/BMI2 if AVX is present.
+		// Also only report AVX or the BMIs if POPCNT is present; all processors I know of
+		// have either both or neither, and it's convenient for us to be able to assume
+		// that either BMI1/BMI2 or AVX2 implies POPCNT.
+		if ((FeatureBits & ECPUFeatureBits_X86::AVX) && has_popcnt)
+		{
+			if (CpuInfo[1] & (1u << 3))	FeatureBits |= ECPUFeatureBits_X86::BMI1;
+			if (CpuInfo[1] & (1u << 8))	FeatureBits |= ECPUFeatureBits_X86::BMI2;
+
+			// OS must save YMM registers between context switch
+			bool OsSavesAvxRegs = (_xgetbv(0) & 6) == 6;
+
+			// In addition to the above, only report AVX2 if BMI1 (and thus LZCNT/TZCNT)
+			// are also reported present; finally VC++ with /arch:AVX2 will emit BMI2
+			// instructions for things like variable shifts so we require BMI2 for AVX2
+			// as well.
+			//
+			// In practice this is not a limitation, AVX2 and BMI2 are a package deal on
+			// all uArchs I'm aware of.
+			const uint32 Avx2Bits = (1u << 3) /* BMI1 */ | (1u << 5) /* AVX2 */ | (1u << 8) /* BMI2 */;
+			if (((CpuInfo[1] & Avx2Bits) == Avx2Bits) && OsSavesAvxRegs)
+				FeatureBits |= ECPUFeatureBits_X86::AVX2;
+
+			// For us to report AVX512, we want the Skylake feature set
+			const uint32 Avx512Bits = (1u << 31) /* AVX512VL */ | (1u << 30) /* AVX512BW */ | (1u << 17) /* AVX512DQ */ | (1u << 16) /* AVX512F */;
+			if ((CpuInfo[1] & Avx512Bits) == Avx512Bits)
+				FeatureBits |= ECPUFeatureBits_X86::AVX512;
+
+			// Use the VBMI2 bit (set on ICL+) to set the NOCAVEATS flag. This is available
+			// on a generation of cores where AVX-512 has no major clock penalty anymore so
+			// whether to use AVX-512 or not is a much more straightforward calculation,
+			// and not so dependent on what else is running at the same time.
+			if (CpuInfo[2] & (1u << 6))
+				FeatureBits |= ECPUFeatureBits_X86::AVX512_NOCAVEATS;
+		}
+	}
+
+	// write detected features
+	// only write value once at end of the function!
+	FeatureBits |= 1; // initialized flag
+
+	CachedX86FeatureBits.store(FeatureBits, std::memory_order_release);
+	return FeatureBits;
+}
+#endif
+
+bool FWindowsPlatformMisc::HasAVX2InstructionSupport()
+{
+#if PLATFORM_CPU_ARM_FAMILY
+	return false;
+#else
+	return CheckFeatureBit_X86(ECPUFeatureBits_X86::AVX2);
+#endif
+}
+
 #include "Windows/AllowWindowsPlatformTypes.h"
 FString FWindowsPlatformMisc::GetPrimaryGPUBrand()
 {
@@ -2352,6 +3303,172 @@ FString FWindowsPlatformMisc::GetPrimaryGPUBrand()
 	}
 
 	return PrimaryGPUBrand;
+}
+
+#define USE_SP_ALTPLATFORM_INFO_V1 0
+#define USE_SP_ALTPLATFORM_INFO_V3 1
+#define USE_SP_DRVINFO_DATA_V1 0
+#define USE_SP_BACKUP_QUEUE_PARAMS_V1 0
+#define USE_SP_INF_SIGNER_INFO_V1 0
+#include <SetupAPI.h>
+#include <initguid.h>
+#include <devguid.h>
+#include <devpkey.h>
+#undef USE_SP_ALTPLATFORM_INFO_V1
+#undef USE_SP_ALTPLATFORM_INFO_V3
+#undef USE_SP_DRVINFO_DATA_V1
+#undef USE_SP_BACKUP_QUEUE_PARAMS_V1
+#undef USE_SP_INF_SIGNER_INFO_V1
+
+static void GetVideoDriverDetailsFromSetup(const FString& DeviceName, bool bVerbose, FGPUDriverInfo& Out)
+{
+	
+	HDEVINFO hDevInfo = SetupDiGetClassDevs(&GUID_DEVCLASS_DISPLAY, NULL, NULL, DIGCF_PRESENT);
+
+	FString RegistryKey = "";
+	
+	if (hDevInfo != INVALID_HANDLE_VALUE)
+	{
+		DWORD DataType = 0;
+		
+		const uint32 BufferSize = 512;
+		TCHAR Buffer[BufferSize + 1] = { 0 };
+		
+		SP_DEVINFO_DATA DeviceInfoData;
+		DeviceInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
+
+		bool bFound = false;
+		for (int32 Idx = 0; SetupDiEnumDeviceInfo(hDevInfo, Idx, &DeviceInfoData); Idx++)
+		{
+			// Get the device description, check if it matches the queried device name
+			if (SetupDiGetDeviceProperty(hDevInfo, &DeviceInfoData, &DEVPKEY_Device_DriverDesc, &DataType,
+				(PBYTE)Buffer, sizeof(Buffer), nullptr, 0))
+			{
+				if (DeviceName.Compare(Buffer) == 0)
+				{
+					Out.DeviceDescription = Buffer;
+					bFound = true;
+					ZeroMemory(Buffer, sizeof(Buffer));
+
+					// Retrieve the registry key for this device for 3rd party data
+					if (SetupDiGetDeviceProperty(hDevInfo, &DeviceInfoData, &DEVPKEY_Device_Driver, &DataType,
+						(PBYTE)Buffer, sizeof(Buffer), nullptr, 0))
+					{
+						RegistryKey = Buffer;
+						ZeroMemory(Buffer, sizeof(Buffer));
+					}
+					else
+					{
+						UE_CLOG(bVerbose, LogWindows, Log, TEXT("Failed to retrieve driver registry key for device %d"), Idx);
+					}
+					
+					break;
+				}
+				ZeroMemory(Buffer, sizeof(Buffer));
+			}
+			else
+			{
+				UE_CLOG(bVerbose, LogWindows, Log, TEXT("Failed to retrieve driver description for device %d"), Idx);
+			}
+		}
+
+		if (bFound)
+		{
+			// Get the provider name
+			if (SetupDiGetDeviceProperty(hDevInfo, &DeviceInfoData, &DEVPKEY_Device_DriverProvider, &DataType,
+				(PBYTE)Buffer, sizeof(Buffer), nullptr, 0))
+			{
+				Out.ProviderName = Buffer;
+				ZeroMemory(Buffer, sizeof(Buffer));
+			}
+			else
+			{
+				UE_CLOG(bVerbose, LogWindows, Log, TEXT("Failed to find provider name"));
+			}
+			// Get the internal driver version
+			if (SetupDiGetDeviceProperty(hDevInfo, &DeviceInfoData, &DEVPKEY_Device_DriverVersion, &DataType,
+				(PBYTE)Buffer, sizeof(Buffer), nullptr, 0))
+			{
+				Out.InternalDriverVersion = Buffer;
+				ZeroMemory(Buffer, sizeof(Buffer));
+			}
+			else
+			{
+				UE_CLOG(bVerbose, LogWindows, Log, TEXT("Failed to find internal driver version"));
+			}
+			// Get the driver date
+			FILETIME FileTime;
+			if (SetupDiGetDeviceProperty(hDevInfo, &DeviceInfoData, &DEVPKEY_Device_DriverDate, &DataType,
+				(PBYTE)&FileTime, sizeof(FILETIME), nullptr, 0))
+			{
+				SYSTEMTIME SystemTime;
+				FileTimeToSystemTime(&FileTime, &SystemTime);
+				Out.DriverDate = FString::Printf(TEXT("%d-%d-%d"), SystemTime.wMonth, SystemTime.wDay, SystemTime.wYear);
+			}
+			else
+			{
+				UE_CLOG(bVerbose, LogWindows, Log, TEXT("Failed to find driver date"));
+			}
+		}
+		else
+		{
+			UE_CLOG(bVerbose, LogWindows, Log, TEXT("Unable to find requested device '%s' using Setup API."), *DeviceName);
+		}
+		
+		SetupDiDestroyDeviceInfoList(hDevInfo);
+	}
+	else
+	{
+		UE_CLOG(bVerbose, LogWindows, Log, TEXT("Failed to initialize Setup API"));
+	}
+
+	if (!Out.ProviderName.IsEmpty())
+	{
+		if (Out.ProviderName.Contains(TEXT("NVIDIA")))
+		{
+			Out.SetNVIDIA();
+		}
+		else if (Out.ProviderName.Contains(TEXT("Advanced Micro Devices")))
+		{
+			Out.SetAMD();
+		}
+		else if (Out.ProviderName.Contains(TEXT("Intel")))	// usually TEXT("Intel Corporation")
+		{
+			Out.SetIntel();
+		}
+	}
+
+	Out.UserDriverVersion = Out.InternalDriverVersion;
+
+	if(Out.IsNVIDIA())
+	{
+		Out.UserDriverVersion = Out.GetNVIDIAUnifiedVersion(Out.InternalDriverVersion);
+	}
+	else if(Out.IsAMD() && !RegistryKey.IsEmpty())
+	{
+		// Get the AMD specific information directly from the registry
+		// AMD AGS could be used instead, but retrieving the radeon software version cannot occur after a D3D Device
+		// has been created, and this function could be called at any time
+		
+		const FString Key = FString::Printf(TEXT("SYSTEM\\CurrentControlSet\\Control\\Class\\%s"), *RegistryKey);
+		
+		if(FWindowsPlatformMisc::QueryRegKey(HKEY_LOCAL_MACHINE, *Key, TEXT("Catalyst_Version"), Out.UserDriverVersion))
+		{
+			Out.UserDriverVersion = FString(TEXT("Catalyst ")) + Out.UserDriverVersion;
+		}
+
+		FString Edition;
+		if(FWindowsPlatformMisc::QueryRegKey(HKEY_LOCAL_MACHINE, *Key, TEXT("RadeonSoftwareEdition"), Edition))
+		{
+			FString Version;
+			if(FWindowsPlatformMisc::QueryRegKey(HKEY_LOCAL_MACHINE, *Key, TEXT("RadeonSoftwareVersion"), Version))
+			{
+				// e.g. TEXT("Crimson 15.12") or TEXT("Catalyst 14.1")
+				Out.UserDriverVersion = Edition + TEXT(" ") + Version;
+			}
+		}
+	}
+
 }
 
 static void GetVideoDriverDetails(const FString& Key, FGPUDriverInfo& Out)
@@ -2413,7 +3530,7 @@ static void GetVideoDriverDetails(const FString& Key, FGPUDriverInfo& Out)
 
 	if(Out.IsNVIDIA())
 	{
-		Out.UserDriverVersion = Out.GetUnifiedDriverVersion();
+		Out.UserDriverVersion = Out.GetNVIDIAUnifiedVersion(Out.InternalDriverVersion);
 	}
 	else if(Out.IsAMD())
 	{
@@ -2438,8 +3555,36 @@ static void GetVideoDriverDetails(const FString& Key, FGPUDriverInfo& Out)
 	FWindowsPlatformMisc::QueryRegKey(HKEY_LOCAL_MACHINE, *Key, TEXT("DriverDate"), Out.DriverDate);
 }
 
-FGPUDriverInfo FWindowsPlatformMisc::GetGPUDriverInfo(const FString& DeviceDescription)
+static BOOL CALLBACK MonitorEnumProc(HMONITOR Monitor, HDC MonitorDC, LPRECT Rect, LPARAM UserData)
 {
+	int* NumMonitors = (int*)UserData;
+	*NumMonitors += 1;
+
+	MONITORINFOEX MonitorInfoEx;
+	MonitorInfoEx.cbSize = sizeof(MonitorInfoEx);
+	GetMonitorInfo(Monitor, &MonitorInfoEx);
+
+	UE_LOG(LogWindows, Log, TEXT("    resolution: %dx%d, work area: (%d, %d) -> (%d, %d), device: '%s'%s"),
+		MonitorInfoEx.rcMonitor.right - MonitorInfoEx.rcMonitor.left, MonitorInfoEx.rcMonitor.bottom - MonitorInfoEx.rcMonitor.top,
+		MonitorInfoEx.rcWork.left, MonitorInfoEx.rcWork.top, MonitorInfoEx.rcWork.right, MonitorInfoEx.rcWork.bottom,
+		MonitorInfoEx.szDevice,
+		MonitorInfoEx.dwFlags & MONITORINFOF_PRIMARY ? TEXT(" [PRIMARY]") : TEXT("")
+	);
+
+	return TRUE;
+}
+
+FGPUDriverInfo FWindowsPlatformMisc::GetGPUDriverInfo(const FString& DeviceDescription, bool bVerbose)
+{
+	if (bVerbose)
+	{
+		// Also report monitor information here, for lack of a better place.
+		UE_LOG(LogWindows, Log, TEXT("Attached monitors:"));
+		int NumMonitors = 0;
+		EnumDisplayMonitors(nullptr, nullptr, MonitorEnumProc, (LPARAM)&NumMonitors);
+		UE_LOG(LogWindows, Log, TEXT("Found %d attached monitors."), NumMonitors);
+	}
+
 	// to distinguish failed GetGPUDriverInfo() from call to GetGPUDriverInfo()
 	FGPUDriverInfo Ret;
 
@@ -2454,9 +3599,24 @@ FGPUDriverInfo FWindowsPlatformMisc::GetGPUDriverInfo(const FString& DeviceDescr
 
 	int32 Method = CVarDriverDetectionMethod.GetValueOnGameThread();
 
+	if (Method == 5)
+	{
+		UE_CLOG(bVerbose, LogWindows, Log, TEXT("Gathering driver information using Windows Setup API"));
+		FGPUDriverInfo Local;
+		GetVideoDriverDetailsFromSetup(DeviceDescription, bVerbose, Local);
+
+		if(Local.IsValid() && Local.DeviceDescription == DeviceDescription)
+		{
+			return Local;
+		}
+
+		UE_CLOG(bVerbose, LogWindows, Log, TEXT("Failed to get driver data for device '%s' using Setup API. Switching to fallback method."), *DeviceDescription);
+		Method = 4; // Switch to method 4 as a fallback if method 5 fails
+	}
+	
 	if(Method == 3 || Method == 4)
 	{
-		UE_LOG(LogWindows, Log, TEXT("EnumDisplayDevices:"));
+		UE_CLOG(bVerbose, LogWindows, Log, TEXT("EnumDisplayDevices:"));
 
 		for(uint32 i = 0; i < 256; ++i)
 		{
@@ -2472,11 +3632,12 @@ FGPUDriverInfo FWindowsPlatformMisc::GetGPUDriverInfo(const FString& DeviceDescr
 				break;
 			}
 
-			UE_LOG(LogWindows, Log, TEXT("   %d. '%s' (P:%d D:%d)"),
+			UE_CLOG(bVerbose, LogWindows, Log, TEXT("   %d. '%s' (P:%d D:%d), name: '%s'"),
 				i,
 				Device.DeviceString,
 				(Device.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) != 0,
-				(Device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) != 0
+				(Device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) != 0,
+				Device.DeviceName
 				);
 
 			if(Method == 3)
@@ -2535,7 +3696,7 @@ FGPUDriverInfo FWindowsPlatformMisc::GetGPUDriverInfo(const FString& DeviceDescr
 
 		if(!DebugString.IsEmpty())
 		{
-			UE_LOG(LogWindows, Log, TEXT("DebugString: %s"), *DebugString);
+			UE_CLOG(bVerbose, LogWindows, Log, TEXT("DebugString: %s"), *DebugString);
 		}
 
 		return Ret;
@@ -2632,7 +3793,7 @@ FGPUDriverInfo FWindowsPlatformMisc::GetGPUDriverInfo(const FString& DeviceDescr
 
 	if(!DebugString.IsEmpty())
 	{
-		UE_LOG(LogWindows, Log, TEXT("DebugString: %s"), *DebugString);
+		UE_CLOG(bVerbose, LogWindows, Log, TEXT("DebugString: %s"), *DebugString);
 	}
 
 	return Ret;
@@ -2646,8 +3807,8 @@ void FWindowsPlatformMisc::GetOSVersions( FString& OutOSVersionLabel, FString& O
 	{
 		FOSVersionsInitializer()
 		{
-			OSVersionLabel[0] = 0;
-			OSSubVersionLabel[0] = 0;
+			OSVersionLabel[0] = TEXT('\0');
+			OSSubVersionLabel[0] = TEXT('\0');
 			GetOSVersionsHelper( OSVersionLabel, UE_ARRAY_COUNT(OSVersionLabel), OSSubVersionLabel, UE_ARRAY_COUNT(OSSubVersionLabel) );
 		}
 
@@ -2666,10 +3827,10 @@ FString FWindowsPlatformMisc::GetOSVersion()
 	{
 		FOSVersionInitializer()
 		{
-			CachedOSVersion[0] = 0;
+			CachedOSVersion[0] = TEXT('\0');
 			if (!GetOSVersionHelper(CachedOSVersion, UE_ARRAY_COUNT(CachedOSVersion)))
 			{
-				CachedOSVersion[0] = 0;
+				CachedOSVersion[0] = TEXT('\0');
 			}
 		}
 
@@ -2689,6 +3850,49 @@ bool FWindowsPlatformMisc::GetDiskTotalAndFreeSpace( const FString& InPath, uint
 	return bSuccess;
 }
 
+bool FWindowsPlatformMisc::GetPageFaultStats(FPageFaultStats& OutStats, EPageFaultFlags Flags/*=EPageFaultFlags::All*/)
+{
+	bool bSuccess = false;
+
+	if (EnumHasAnyFlags(Flags, EPageFaultFlags::TotalPageFaults))
+	{
+		PROCESS_MEMORY_COUNTERS ProcessMemoryCounters;
+
+		FPlatformMemory::Memzero(&ProcessMemoryCounters, sizeof(ProcessMemoryCounters));
+		::GetProcessMemoryInfo(::GetCurrentProcess(), &ProcessMemoryCounters, sizeof(ProcessMemoryCounters));
+
+		OutStats.TotalPageFaults = ProcessMemoryCounters.PageFaultCount;
+
+		bSuccess = true;
+	}
+
+	return bSuccess;
+}
+
+bool FWindowsPlatformMisc::GetBlockingIOStats(FProcessIOStats& OutStats, EInputOutputFlags Flags/*=EInputOutputFlags::All*/)
+{
+	bool bSuccess = false;
+	IO_COUNTERS Counters;
+
+	FPlatformMemory::Memzero(&Counters, sizeof(Counters));
+
+	// Ignore flags as all values are grabbed at once
+	if (::GetProcessIoCounters(::GetCurrentProcess(), &Counters) != 0)
+	{
+		OutStats.BlockingInput = Counters.ReadOperationCount;
+		OutStats.BlockingOutput = Counters.WriteOperationCount;
+		OutStats.BlockingOther = Counters.OtherOperationCount;
+		OutStats.InputBytes = Counters.ReadTransferCount;
+		OutStats.OutputBytes = Counters.WriteTransferCount;
+		OutStats.OtherBytes = Counters.OtherTransferCount;
+
+		bSuccess = true;
+	}
+
+	return bSuccess;
+}
+
+
 
 uint32 FWindowsPlatformMisc::GetCPUInfo()
 {
@@ -2707,6 +3911,11 @@ bool FWindowsPlatformMisc::NeedsNonoptionalCPUFeaturesCheck()
 	return PLATFORM_ENABLE_POPCNT_INTRINSIC;
 }
 
+bool FWindowsPlatformMisc::HasTimedPauseCPUFeature()
+{
+	return FCPUIDQueriedData::HasTimedPauseInstruction();
+}
+
 int32 FWindowsPlatformMisc::GetCacheLineSize()
 {
 	return FCPUIDQueriedData::GetCacheLineSize();
@@ -2723,19 +3932,50 @@ bool FWindowsPlatformMisc::QueryRegKey( const Windows::HKEY InKey, const TCHAR* 
 		const uint32 RegFlags = (RegistryIndex == 0) ? KEY_WOW64_32KEY : KEY_WOW64_64KEY;
 		if (RegOpenKeyEx( InKey, InSubKey, 0, KEY_READ | RegFlags, &Key ) == ERROR_SUCCESS)
 		{
-			::DWORD Size = 0;
+			::DWORD Size = 0, ValueType = 0;
 			// First, we'll call RegQueryValueEx to find out how large of a buffer we need
-			if ((RegQueryValueEx( Key, InValueName, NULL, NULL, NULL, &Size ) == ERROR_SUCCESS) && Size)
+			if ((RegQueryValueEx( Key, InValueName, NULL, &ValueType, NULL, &Size ) == ERROR_SUCCESS) && Size)
 			{
-				// Allocate a buffer to hold the value and call the function again to get the data
-				char *Buffer = new char[Size];
-				if (RegQueryValueEx( Key, InValueName, NULL, NULL, (LPBYTE)Buffer, &Size ) == ERROR_SUCCESS)
+				switch (ValueType)
 				{
-					const uint32 Length = (Size / sizeof(TCHAR)) - 1;
-					OutData = FString( Length, (TCHAR*)Buffer );
-					bSuccess = true;
+					case REG_DWORD:
+					{
+						::DWORD Value;
+						if (RegQueryValueEx(Key, InValueName, NULL, NULL, (LPBYTE)&Value, &Size) == ERROR_SUCCESS)
+						{
+							OutData = FString::Printf(TEXT("%d"), Value);
+							bSuccess = true;
+						}
+						break;
+					}
+
+					case REG_QWORD:
+					{
+						int64 Value;
+						if (RegQueryValueEx(Key, InValueName, NULL, NULL, (LPBYTE)&Value, &Size) == ERROR_SUCCESS)
+						{
+							OutData = FString::Printf(TEXT("%lld"), Value);
+							bSuccess = true;
+						}
+						break;
+					}
+
+					case REG_SZ:
+					case REG_EXPAND_SZ:
+					case REG_MULTI_SZ:
+					{
+						// Allocate a buffer to hold the value and call the function again to get the data
+						char* Buffer = new char[Size];
+						if (RegQueryValueEx(Key, InValueName, NULL, NULL, (LPBYTE)Buffer, &Size) == ERROR_SUCCESS)
+						{
+							const uint32 Length = (Size / sizeof(TCHAR)) - 1;
+							OutData = FString::ConstructFromPtrSize((TCHAR*)Buffer, Length);
+							bSuccess = true;
+						}
+						delete[] Buffer;
+						break;
+					}
 				}
-				delete [] Buffer;
 			}
 			RegCloseKey( Key );
 		}
@@ -2795,8 +4035,6 @@ bool FWindowsPlatformMisc::IsRunningOnBattery()
 	default:
 		return false;
 	}
-
-	return false;
 }
 
 FString FWindowsPlatformMisc::GetOperatingSystemId()
@@ -2834,9 +4072,9 @@ IPlatformChunkInstall* FWindowsPlatformMisc::GetPlatformChunkInstall()
 		{
 			FString InstallModule;
 			GConfig->GetString(TEXT("StreamingInstall"), TEXT("DefaultProviderName"), InstallModule, GEngineIni);
-			FModuleStatus Status;
-			if (FModuleManager::Get().QueryModule(*InstallModule, Status))
-			{
+
+			if (!InstallModule.IsEmpty())
+			{			
 				PlatformChunkInstallModule = FModuleManager::LoadModulePtr<IPlatformChunkInstallModule>(*InstallModule);
 				if (PlatformChunkInstallModule != nullptr)
 				{
@@ -2885,4 +4123,51 @@ uint64 FWindowsPlatformMisc::GetFileVersion(const FString &FileName)
 		}
 	}
 	return 0;
+}
+
+int32 FWindowsPlatformMisc::GetMaxRefreshRate()
+{
+	int32 Result = FGenericPlatformMisc::GetMaxRefreshRate();
+
+#if !UE_SERVER
+	DEVMODE DeviceMode;
+	FMemory::Memzero(DeviceMode);
+	DeviceMode.dmSize = sizeof(DEVMODE);
+
+	if (EnumDisplaySettings(NULL, ENUM_CURRENT_SETTINGS, &DeviceMode) != 0)
+	{
+		// dmDisplayFrequency isn't always useful, the Windows docs say it can
+		// return 0 or 1 to indicate 'default refresh rate', so always assume we
+		// can do at least the generic platform default of 60 Hz
+		Result = FMath::Max(Result, (int32)DeviceMode.dmDisplayFrequency);
+	}
+#endif
+
+	return Result;
+}
+
+void FWindowsPlatformMisc::UpdateDriveFreeSpace()
+{
+	for (auto& StorageDevice : StorageDevices)
+	{
+		ULARGE_INTEGER TotalNumberOfBytes, TotalNumberOfFreeBytes;
+		WCHAR DriveName[4] = { StorageDevice.Stats.DriveName, L':', L'\\', 0 };
+		if (GetDiskFreeSpaceExW(DriveName, NULL, &TotalNumberOfBytes, &TotalNumberOfFreeBytes))
+		{
+			StorageDevice.Stats.FreeBytes = TotalNumberOfFreeBytes.QuadPart;
+			StorageDevice.Stats.UsedBytes = TotalNumberOfBytes.QuadPart - TotalNumberOfFreeBytes.QuadPart;
+		}
+	}
+}
+
+const FPlatformDriveStats* FWindowsPlatformMisc::GetDriveStats(WIDECHAR DriveLetter)
+{
+	for (auto& StorageDevice : StorageDevices)
+	{
+		if (StorageDevice.Stats.DriveName == DriveLetter)
+		{
+			return &StorageDevice.Stats;
+		}
+	}
+	return nullptr;
 }

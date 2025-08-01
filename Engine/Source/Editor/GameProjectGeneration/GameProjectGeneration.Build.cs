@@ -16,11 +16,7 @@ public class GameProjectGeneration : ModuleRules
 			new string[] {
 				"AssetRegistry",
 				"ContentBrowser",
-				"DesktopPlatform",
-				"LauncherPlatform",
 				"MainFrame",
-				"AddContentDialog",
-				"HardwareTargeting",
 			}
 		);
 
@@ -29,6 +25,7 @@ public class GameProjectGeneration : ModuleRules
 				"Analytics",
 				"ApplicationCore",
 				"AppFramework",
+				"AssetTools",
 				"ClassViewer",
 				"Core",
 				"CoreUObject",
@@ -39,17 +36,19 @@ public class GameProjectGeneration : ModuleRules
 				"RenderCore",
 				"Slate",
 				"SlateCore",
-				"EditorStyle",
+				"EditorWidgets",
+				"ToolWidgets",
 				"SourceControl",
  				"TargetPlatform",
+				"EditorFramework",
 				"EditorSubsystem",
 				"UnrealEd",
 				"DesktopPlatform",
 				"LauncherPlatform",
-				"HardwareTargeting",
 				"AddContentDialog",
 				"AudioMixer",
-				"AudioMixerCore"
+				"AudioMixerCore",
+				"ContentBrowserData"
 			}
 		);
 

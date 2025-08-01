@@ -10,6 +10,25 @@
 #include "Misc/CommandLine.h"
 #include "Misc/CoreDelegates.h"
 
+#if !UE_BUILD_SHIPPING
+#include "HAL/IConsoleManager.h"
+#endif
+
+#if !UE_BUILD_SHIPPING
+TAutoConsoleVariable<bool> CVarHttpInsecureProtocolEnabled(
+	TEXT("Http.InsecureProtocolEnabled"),
+	false,
+	TEXT("Enable insecure http protocol")
+);
+#endif
+
+TAutoConsoleVariable<int32> CVarHttpEventLoopEnableChance(
+	TEXT("http.CurlEventLoopEnableChance"),
+	UE_HTTP_EVENT_LOOP_ENABLE_CHANCE_BY_DEFAULT,
+	TEXT("Enable chance of event loop, from 0 to 100"),
+	ECVF_SaveForNextBoot
+);
+
 DEFINE_LOG_CATEGORY(LogHttp);
 
 // FHttpModule
@@ -32,8 +51,10 @@ static bool ShouldLaunchUrl(const TCHAR* Url)
 
 void FHttpModule::UpdateConfigs()
 {
-	GConfig->GetFloat(TEXT("HTTP"), TEXT("HttpTimeout"), HttpTimeout, GEngineIni);
+	GConfig->GetFloat(TEXT("HTTP"), TEXT("HttpTimeout"), HttpActivityTimeout, GEngineIni);
+	GConfig->GetFloat(TEXT("HTTP"), TEXT("HttpTotalTimeout"), HttpTotalTimeout, GEngineIni);
 	GConfig->GetFloat(TEXT("HTTP"), TEXT("HttpConnectionTimeout"), HttpConnectionTimeout, GEngineIni);
+	GConfig->GetFloat(TEXT("HTTP"), TEXT("HttpActivityTimeout"), HttpActivityTimeout, GEngineIni);
 	GConfig->GetFloat(TEXT("HTTP"), TEXT("HttpReceiveTimeout"), HttpReceiveTimeout, GEngineIni);
 	GConfig->GetFloat(TEXT("HTTP"), TEXT("HttpSendTimeout"), HttpSendTimeout, GEngineIni);
 	GConfig->GetInt(TEXT("HTTP"), TEXT("HttpMaxConnectionsPerServer"), HttpMaxConnectionsPerServer, GEngineIni);
@@ -44,6 +65,12 @@ void FHttpModule::UpdateConfigs()
 	GConfig->GetFloat(TEXT("HTTP"), TEXT("HttpThreadActiveMinimumSleepTimeInSeconds"), HttpThreadActiveMinimumSleepTimeInSeconds, GEngineIni);
 	GConfig->GetFloat(TEXT("HTTP"), TEXT("HttpThreadIdleFrameTimeInSeconds"), HttpThreadIdleFrameTimeInSeconds, GEngineIni);
 	GConfig->GetFloat(TEXT("HTTP"), TEXT("HttpThreadIdleMinimumSleepTimeInSeconds"), HttpThreadIdleMinimumSleepTimeInSeconds, GEngineIni);
+	GConfig->GetFloat(TEXT("HTTP"), TEXT("HttpEventLoopThreadTickIntervalInSeconds"), HttpEventLoopThreadTickIntervalInSeconds, GEngineIni);
+
+	if (!FParse::Value(FCommandLine::Get(), TEXT("HttpNoProxy="), HttpNoProxy))
+	{
+		GConfig->GetString(TEXT("HTTP"), TEXT("HttpNoProxy"), HttpNoProxy, GEngineIni);
+	}
 
 	AllowedDomains.Empty();
 	GConfig->GetArray(TEXT("HTTP"), TEXT("AllowedDomains"), AllowedDomains, GEngineIni);
@@ -59,8 +86,9 @@ void FHttpModule::StartupModule()
 	Singleton = this;
 
 	MaxReadBufferSize = 256 * 1024;
-	HttpTimeout = 300.0f;
-	HttpConnectionTimeout = -1;
+	HttpTotalTimeout = 0.0f;
+	HttpConnectionTimeout = 30.0f;
+	HttpActivityTimeout = 30.0f;
 	HttpReceiveTimeout = HttpConnectionTimeout;
 	HttpSendTimeout = HttpConnectionTimeout;
 	HttpMaxConnectionsPerServer = 16;
@@ -71,8 +99,10 @@ void FHttpModule::StartupModule()
 	HttpThreadActiveMinimumSleepTimeInSeconds = 0.0f;
 	HttpThreadIdleFrameTimeInSeconds = 1.0f / 30.0f; // 30Hz
 	HttpThreadIdleMinimumSleepTimeInSeconds = 0.0f;	
+	HttpEventLoopThreadTickIntervalInSeconds = 1.f / 10.f; // 10Hz
 
 	// override the above defaults from configs
+	FCoreDelegates::TSOnConfigSectionsChanged().AddRaw(this, &FHttpModule::OnConfigSectionsChanged);
 	UpdateConfigs();
 
 	if (!FParse::Value(FCommandLine::Get(), TEXT("httpproxy="), ProxyAddress))
@@ -83,6 +113,17 @@ void FHttpModule::StartupModule()
 			{
 				ProxyAddress = MoveTemp(OperatingSystemProxyAddress.GetValue());
 			}
+		}
+	}
+
+	// Load from a configurable array of modules at this point, so things that need to bind to the SDK Manager init hooks can do so.
+	TArray<FString> ModulesToLoad;
+	GConfig->GetArray(TEXT("HTTP"), TEXT("ModulesToLoad"), ModulesToLoad, GEngineIni);
+	for (const FString& ModuleToLoad : ModulesToLoad)
+	{
+		if (FModuleManager::Get().ModuleExists(*ModuleToLoad))
+		{
+			FModuleManager::Get().LoadModule(*ModuleToLoad);
 		}
 	}
 
@@ -118,16 +159,33 @@ void FHttpModule::ShutdownModule()
 	if (HttpManager != nullptr)
 	{
 		// block on any http requests that have already been queued up
-		HttpManager->Flush(true);
+		HttpManager->Shutdown();
 	}
 
 	// at least on Linux, the code in HTTP manager (e.g. request destructors) expects platform to be initialized yet
 	delete HttpManager;	// can be passed NULLs
 
+	FCoreDelegates::TSOnConfigSectionsChanged().RemoveAll(this);
+
 	FPlatformHttp::Shutdown();
 
 	HttpManager = nullptr;
 	Singleton = nullptr;
+}
+
+void FHttpModule::OnConfigSectionsChanged(const FString& IniFilename, const TSet<FString>& SectionNames)
+{
+	if (IniFilename == GEngineIni)
+	{
+		for (const FString& SectionName : SectionNames)
+		{
+			if (SectionName.StartsWith(TEXT("HTTP")))
+			{
+				UpdateConfigs();
+				break;
+			}
+		}
+	}
 }
 
 bool FHttpModule::HandleHTTPCommand(const TCHAR* Cmd, FOutputDevice& Ar)
@@ -156,7 +214,7 @@ bool FHttpModule::HandleHTTPCommand(const TCHAR* Cmd, FOutputDevice& Ar)
 	}
 	else if (FParse::Command(&Cmd, TEXT("FLUSH")))
 	{
-		GetHttpManager().Flush(false);
+		GetHttpManager().Flush(EHttpFlushReason::Default);
 	}
 #if !UE_BUILD_SHIPPING
 	else if (FParse::Command(&Cmd, TEXT("FILEUPLOAD")))
@@ -185,10 +243,39 @@ bool FHttpModule::HandleHTTPCommand(const TCHAR* Cmd, FOutputDevice& Ar)
 		}
 	}
 #endif
+	else if (FParse::Command(&Cmd, TEXT("LAUNCHREQUESTS")))
+	{
+		FString Verb = FParse::Token(Cmd, false);
+		FString Url = FParse::Token(Cmd, false);
+		int32 NumRequests = FCString::Atoi(*FParse::Token(Cmd, false));
+		bool bCancelRequests = FCString::ToBool(*FParse::Token(Cmd, false));
+
+		TArray<TSharedRef<IHttpRequest, ESPMode::ThreadSafe>> Requests;
+
+		for (int32 i = 0; i < NumRequests; ++i)
+		{
+			TSharedRef<IHttpRequest, ESPMode::ThreadSafe> HttpRequest = FHttpModule::Get().CreateRequest();
+			HttpRequest->SetURL(*Url);
+			HttpRequest->SetVerb(*Verb);
+			HttpRequest->OnProcessRequestComplete().BindLambda([](FHttpRequestPtr HttpRequest, FHttpResponsePtr HttpResponse, bool bSucceeded) {});
+			HttpRequest->ProcessRequest();
+
+			Requests.Add(HttpRequest);
+		}
+
+		if (bCancelRequests)
+		{
+			for (auto Request : Requests)
+			{
+				Request->CancelRequest();
+			}
+		}
+	}
+
 	return true;
 }
 
-bool FHttpModule::Exec(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar)
+bool FHttpModule::Exec_Runtime(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar)
 {
 	// Ignore any execs that don't start with HTTP
 	if (FParse::Command(&Cmd, TEXT("HTTP")))

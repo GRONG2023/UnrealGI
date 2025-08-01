@@ -5,10 +5,14 @@
 #include "VirtualTextureSpace.h"
 #include "VirtualTextureSystem.h"
 
+// Reserve pAddress=0 to indicate unmapped page table entry.
+const uint32 FTexturePagePool::NumReservedPages = 1u;
+
 FTexturePagePool::FTexturePagePool()
 	: PageHash(16u * 1024)
 	, NumPages(0u)
 	, NumPagesMapped(0u)
+	, NumPagesAllocated(NumReservedPages)
 {
 }
 
@@ -18,14 +22,13 @@ FTexturePagePool::~FTexturePagePool()
 
 void FTexturePagePool::Initialize(uint32 InNumPages)
 {
-
 	NumPages = InNumPages;
 	Pages.AddZeroed(InNumPages);
 	PageHash.Resize(InNumPages);
 
 	FreeHeap.Resize(InNumPages, InNumPages);
 
-	for (uint32 i = 0; i < InNumPages; i++)
+	for (uint32 i = NumReservedPages; i < InNumPages; i++)
 	{
 		FreeHeap.Add(0, i);
 	}
@@ -35,15 +38,14 @@ void FTexturePagePool::Initialize(uint32 InNumPages)
 	for (uint32 i = 0; i <= InNumPages; i++)
 	{
 		FPageMapping& Mapping = PageMapping[i];
-		Mapping.PackedValues = 0xffffffff;
-		Mapping.PageTableLayerIndex = 0xff;
+		FMemory::Memset(Mapping, 0xff);
+		Mapping.Pad = 0u;
 		Mapping.NextIndex = Mapping.PrevIndex = i;
 	}
 }
 
 void FTexturePagePool::EvictAllPages(FVirtualTextureSystem* System)
 {
-
 	TArray<uint16> PagesToEvict;
 	while (FreeHeap.Num() > 0u)
 	{
@@ -54,30 +56,46 @@ void FTexturePagePool::EvictAllPages(FVirtualTextureSystem* System)
 
 	for (int32 i = 0; i < PagesToEvict.Num(); i++)
 	{
-		UnmapAllPages(System, PagesToEvict[i], false);
+		UnmapAllPages(System, PagesToEvict[i], true);
 		FreeHeap.Add(0, PagesToEvict[i]);
 	}
 }
 
-void FTexturePagePool::UnmapPages(FVirtualTextureSystem* System, uint8 SpaceID, uint32 vAddress, uint32 WidthInTiles, uint32 HeightInTiles)
+void FTexturePagePool::UnmapAllPagesForSpace(FVirtualTextureSystem* System, uint8 SpaceID, uint32 vAddress, uint32 Width, uint32 Height, uint32 MaxLevel)
 {
-	const uint32 XMin = FMath::ReverseMortonCode2(vAddress);
-	const uint32 YMin = FMath::ReverseMortonCode2(vAddress >> 1);
-	const uint32 XMax = XMin + WidthInTiles;
-	const uint32 YMax = YMin + HeightInTiles;
+	check(Width > 0u);
+	check(Height > 0u);
+	checkf((vAddress & (0xffffffff << (MaxLevel * 2u))) == vAddress, TEXT("vAddress %08X is not aligned to max level %d"), vAddress, MaxLevel);
 
-	// Walk through all of our current mapping entries, and unmap any that are in the desired range
+	const uint32 vTileX0 = FMath::ReverseMortonCode2(vAddress);
+	const uint32 vTileY0 = FMath::ReverseMortonCode2(vAddress >> 1);
+	const uint32 vTileX1 = vTileX0 + Width;
+	const uint32 vTileY1 = vTileY0 + Height;
+	const uint32 vAddressMax = FMath::MortonCode2(vTileX1) | (FMath::MortonCode2(vTileY1) << 1);
+
+	// walk through all of our current mapping entries, and unmap any that belong to the current space
 	for (int32 MappingIndex = NumPages + 1; MappingIndex < PageMapping.Num(); ++MappingIndex)
 	{
-		struct FPageMapping& Mapping = PageMapping[MappingIndex];
-		if (Mapping.PageTableLayerIndex != 0xff && Mapping.SpaceID == SpaceID)
+		const FPageMapping& Mapping = PageMapping[MappingIndex];
+		if (Mapping.PageTableLayerIndex != 0xff &&
+			Mapping.SpaceID == SpaceID &&
+			Mapping.vLogSize <= MaxLevel &&
+			Mapping.vAddress >= vAddress &&
+			Mapping.vAddress < vAddressMax)
 		{
-			const uint32 X = (float)FMath::ReverseMortonCode2(Mapping.vAddress);
-			const uint32 Y = (float)FMath::ReverseMortonCode2(Mapping.vAddress >> 1);
+			check((Mapping.vAddress & (0xffffffff << (Mapping.vLogSize * 2u))) == Mapping.vAddress);
 
-			if (X >= XMin && Y >= YMin && X < XMax && Y < YMax)
+			const uint32 vTileX = FMath::ReverseMortonCode2(Mapping.vAddress);
+			const uint32 vTileY = FMath::ReverseMortonCode2(Mapping.vAddress >> 1);
+
+			if (vTileX >= vTileX0 &&
+				vTileY >= vTileY0 &&
+				vTileX < vTileX1 &&
+				vTileY < vTileY1)
 			{
-				// We're unmapping all pages in the range, so don't try to map any ancestor pages...they'll be unmapped as well
+				// MaxLevel should match, if this mapping actually belongs to the region we're trying to unmap
+				check(Mapping.MaxLevel == MaxLevel);
+				// we're unmapping all pages for space, so don't try to map any ancestor pages...they'll be unmapped as well
 				UnmapPageMapping(System, MappingIndex, false);
 			}
 		}
@@ -86,27 +104,44 @@ void FTexturePagePool::UnmapPages(FVirtualTextureSystem* System, uint8 SpaceID, 
 
 void FTexturePagePool::EvictPages(FVirtualTextureSystem* System, const FVirtualTextureProducerHandle& ProducerHandle)
 {
-	for (uint32 pAddress = 0u; pAddress < NumPages; ++pAddress)
+	TArray<uint32, TInlineAllocator<256>> ToEvict;
+	const uint32 Hash = MurmurFinalize32(ProducerHandle.PackedValue);
+	for (uint32 pAddress = ProducerToPageIndex.First(Hash); ProducerToPageIndex.IsValid(pAddress); pAddress = ProducerToPageIndex.Next(pAddress))
 	{
 		const FPageEntry& PageEntry = Pages[pAddress];
 		if (PageEntry.PackedProducerHandle == ProducerHandle.PackedValue)
 		{
-			UnmapAllPages(System, pAddress, false);
-			FreeHeap.Update(0, pAddress);
+			ToEvict.Add(pAddress);
 		}
+	}
+
+	for (uint32 pAddress : ToEvict)
+	{
+		UnmapAllPages(System, pAddress, false);
+		FreeHeap.Update(0, pAddress);
 	}
 }
 
-void FTexturePagePool::EvictPages(FVirtualTextureSystem* System, FVirtualTextureProducerHandle const& ProducerHandle, FVTProducerDescription const& Desc, FIntRect const& TextureRegion, uint32 MaxLevel, TArray<union FVirtualTextureLocalTile>& OutLocked)
+void FTexturePagePool::EvictPages(
+	FVirtualTextureSystem* System, 
+	FVirtualTextureProducerHandle const& ProducerHandle, 
+	FVTProducerDescription const& Desc, 
+	FIntRect const& TextureRegion, 
+	uint32 MaxLevelToEvict, 
+	uint32 MinFrameToKeepMapped,
+	TArray<union FVirtualTextureLocalTile>& OutDirtyMapped)
 {
-	for (uint32 i = 0; i < NumPages; ++i)
+	TArray<uint32, TInlineAllocator<256>> ToEvict;
+	const uint32 Hash = MurmurFinalize32(ProducerHandle.PackedValue);
+	for (uint32 pAddress = ProducerToPageIndex.First(Hash); ProducerToPageIndex.IsValid(pAddress); pAddress = ProducerToPageIndex.Next(pAddress))
 	{
-		if (Pages[i].PackedProducerHandle == ProducerHandle.PackedValue)
+		const FPageEntry& PageEntry = Pages[pAddress];
+		if (PageEntry.PackedProducerHandle == ProducerHandle.PackedValue)
 		{
-			const uint32 vAddress = Pages[i].Local_vAddress;
-			const uint32 vLevel = Pages[i].Local_vLevel;
+			const uint32 vAddress = Pages[pAddress].Local_vAddress;
+			const uint32 vLevel = Pages[pAddress].Local_vLevel;
 
-			if (vLevel <= MaxLevel)
+			if (vLevel <= MaxLevelToEvict)
 			{
 				const int32 TileSize = Desc.TileSize << vLevel;
 				const int32 X = FMath::ReverseMortonCode2(vAddress) * TileSize;
@@ -116,18 +151,33 @@ void FTexturePagePool::EvictPages(FVirtualTextureSystem* System, FVirtualTexture
 
 				if (!(PageRect.Min.X > TextureRegion.Max.X) && !(TextureRegion.Min.X > PageRect.Max.X) && !(PageRect.Min.Y > TextureRegion.Max.Y) && !(TextureRegion.Min.Y > PageRect.Max.Y))
 				{
-					if (!FreeHeap.IsPresent(i))
+					if (!FreeHeap.IsPresent(pAddress))
 					{
-						OutLocked.Add(FVirtualTextureLocalTile(ProducerHandle, vAddress, vLevel));
+						// Locked pages aren't unmapped but are added to the dirty output array.
+						OutDirtyMapped.Add(FVirtualTextureLocalTile(ProducerHandle, vAddress, vLevel));
 					}
 					else
 					{
-						UnmapAllPages(System, i, true);
-						FreeHeap.Update(0, i);
+						const uint32 PageFrame = FreeHeap.GetKey(pAddress) >> 4;
+						if (PageFrame >= MinFrameToKeepMapped)
+						{
+							// Visible pages aren't unmapped but are added to the dirty output array.
+							OutDirtyMapped.Add(FVirtualTextureLocalTile(ProducerHandle, vAddress, vLevel));
+						}
+						else
+						{
+							ToEvict.Add(pAddress);
+						}
 					}
 				}
 			}
 		}
+	}
+
+	for (uint32 pAddress : ToEvict)
+	{
+		UnmapAllPages(System, pAddress, true);
+		FreeHeap.Update(0, pAddress);
 	}
 }
 
@@ -135,7 +185,7 @@ void FTexturePagePool::GetAllLockedPages(FVirtualTextureSystem* System, TSet<FVi
 {
 	OutPages.Reserve(OutPages.Num() + GetNumLockedPages());
 
-	for (uint32 i = 0; i < NumPages; ++i)
+	for (uint32 i = NumReservedPages; i < NumPages; ++i)
 	{
 		if (!FreeHeap.IsPresent(i))
 		{
@@ -149,7 +199,7 @@ FVirtualTextureLocalTile FTexturePagePool::GetLocalTileFromPhysicalAddress(uint1
 	return FVirtualTextureLocalTile(FVirtualTextureProducerHandle(Pages[pAddress].PackedProducerHandle), Pages[pAddress].Local_vAddress, Pages[pAddress].Local_vLevel);
 }
 
-bool FTexturePagePool::AnyFreeAvailable( uint32 Frame ) const
+bool FTexturePagePool::AnyFreeAvailable( uint32 Frame, uint32 FreeThreshold) const
 {
 	if( FreeHeap.Num() > 0 )
 	{
@@ -157,7 +207,7 @@ bool FTexturePagePool::AnyFreeAvailable( uint32 Frame ) const
 		const uint16 pAddress = FreeHeap.Top();
 		const uint32 PageFrame = FreeHeap.GetKey(pAddress) >> 4;
 		// Don't free any pages that were touched this frame
-		return PageFrame != Frame;
+		return PageFrame + FreeThreshold < Frame;
 	}
 
 	return false;
@@ -224,22 +274,25 @@ uint32 FTexturePagePool::FindNearestPageLevel(const FVirtualTextureProducerHandl
 uint32 FTexturePagePool::Alloc(FVirtualTextureSystem* System, uint32 Frame, const FVirtualTextureProducerHandle& ProducerHandle, uint8 GroupIndex, uint32 Local_vAddress, uint8 Local_vLevel, bool bLock)
 {
 	check(ProducerHandle.PackedValue != 0u);
-	check(AnyFreeAvailable(Frame));
 	checkSlow(FindPageAddress(ProducerHandle, GroupIndex, Local_vAddress, Local_vLevel) == ~0u);
 
 	// Grab the LRU free page
 	const uint16 pAddress = FreeHeap.Top();
+	FPageEntry& PageEntry = Pages[pAddress];
+
+	// If the LRU page is allocated, that means the pool must be 100% allocated
+	check(PageEntry.PackedProducerHandle == 0u || NumPagesAllocated == NumPages);
 
 	// Unmap any previous usage
 	UnmapAllPages(System, pAddress, true);
 
 	// Mark the page as used for the given producer
-	FPageEntry& PageEntry = Pages[pAddress];
 	PageEntry.PackedProducerHandle = ProducerHandle.PackedValue;
 	PageEntry.Local_vAddress = Local_vAddress;
 	PageEntry.Local_vLevel = Local_vLevel;
 	PageEntry.GroupIndex = GroupIndex;
 	PageHash.Add(GetPageHash(PageEntry), pAddress);
+	ProducerToPageIndex.Add(MurmurFinalize32(ProducerHandle.PackedValue), pAddress);
 
 	if (bLock)
 	{
@@ -249,6 +302,9 @@ uint32 FTexturePagePool::Alloc(FVirtualTextureSystem* System, uint32 Frame, cons
 	{
 		FreeHeap.Update((Frame << 4) + (Local_vLevel & 0xf), pAddress);
 	}
+
+	++NumPagesAllocated;
+	check(NumPagesAllocated <= NumPages);
 
 	return pAddress;
 }
@@ -291,7 +347,7 @@ void FTexturePagePool::UpdateUsage(uint32 Frame, uint16 pAddress)
 uint32 FTexturePagePool::GetNumVisiblePages(uint32 Frame) const
 {
 	uint32 Count = 0;
-	for (uint32 i = 0; i < NumPages; ++i)
+	for (uint32 i = NumReservedPages; i < NumPages; ++i)
 	{
 		if (FreeHeap.IsPresent(i))
 		{
@@ -311,11 +367,28 @@ uint32 FTexturePagePool::GetNumVisiblePages(uint32 Frame) const
 	return Count;
 }
 
-void FTexturePagePool::MapPage(FVirtualTextureSpace* Space, FVirtualTexturePhysicalSpace* PhysicalSpace, uint8 PageTableLayerIndex, uint8 vLogSize, uint32 vAddress, uint8 vLevel, uint16 pAddress)
+void FTexturePagePool::CollectProducerCounts(TMap<uint32, uint32>& OutProducerCountMap) const
 {
+	for (uint32 i = NumReservedPages; i < NumPages; ++i)
+	{
+		const uint32 PackedProducerHandle = Pages[i].PackedProducerHandle;
+		if (PackedProducerHandle != 0u)
+		{
+			OutProducerCountMap.FindOrAdd(PackedProducerHandle) += 1;
+		}
+	}
+}
+
+
+void FTexturePagePool::MapPage(FVirtualTextureSpace* Space, FVirtualTexturePhysicalSpace* PhysicalSpace, uint8 PageTableLayerIndex, uint8 MaxLevel, uint8 vLogSize, uint32 vAddress, uint8 Local_vLevel, uint16 pAddress)
+{
+	check(pAddress >= NumReservedPages);
 	check(pAddress < NumPages);
+	const FPageEntry& PageEntry = Pages[pAddress];
+	checkf(PageEntry.PackedProducerHandle != 0u, TEXT("Trying to map pAddress %04x that hasn't been allocated"), pAddress);
+
 	FTexturePageMap& PageMap = Space->GetPageMapForPageTableLayer(PageTableLayerIndex);
-	PageMap.MapPage(Space, PhysicalSpace, vLogSize, vAddress, vLevel, pAddress);
+	PageMap.MapPage(Space, PhysicalSpace, PageEntry.PackedProducerHandle, MaxLevel, vLogSize, vAddress, Local_vLevel, pAddress);
 
 	++NumPagesMapped;
 
@@ -325,6 +398,7 @@ void FTexturePagePool::MapPage(FVirtualTextureSpace* Space, FVirtualTexturePhysi
 	Mapping.SpaceID = Space->GetID();
 	Mapping.vAddress = vAddress;
 	Mapping.vLogSize = vLogSize;
+	Mapping.MaxLevel = MaxLevel;
 	Mapping.PageTableLayerIndex = PageTableLayerIndex;
 }
 
@@ -339,8 +413,12 @@ void FTexturePagePool::UnmapPageMapping(FVirtualTextureSystem* System, uint32 Ma
 	check(NumPagesMapped > 0u);
 	--NumPagesMapped;
 
-	Mapping.PackedValues = 0xffffffff;
+	Mapping.vAddress = 0x00ffffff;
+	Mapping.vLogSize = 0x0f;
+	Mapping.SpaceID = 0x0f;
+	Mapping.MaxLevel = 0x0f;
 	Mapping.PageTableLayerIndex = 0xff;
+
 	ReleaseMapping(MappingIndex);
 }
 
@@ -349,7 +427,10 @@ void FTexturePagePool::UnmapAllPages(FVirtualTextureSystem* System, uint16 pAddr
 	FPageEntry& PageEntry = Pages[pAddress];
 	if (PageEntry.PackedProducerHandle != 0u)
 	{
+		check(NumPagesAllocated > NumReservedPages);
+		--NumPagesAllocated;
 		PageHash.Remove(GetPageHash(PageEntry), pAddress);
+		ProducerToPageIndex.Remove(MurmurFinalize32(PageEntry.PackedProducerHandle), pAddress);
 		PageEntry.PackedValue = 0u;
 	}
 
@@ -369,60 +450,76 @@ void FTexturePagePool::UnmapAllPages(FVirtualTextureSystem* System, uint16 pAddr
 
 void FTexturePagePool::RemapPages(FVirtualTextureSystem* System, uint8 SpaceID, FVirtualTexturePhysicalSpace* PhysicalSpace, FVirtualTextureProducerHandle const& OldProducerHandle, uint32 OldVirtualAddress, FVirtualTextureProducerHandle const& NewProducerHandle, uint32 NewVirtualAddress, int32 vLevelBias, uint32 Frame)
 {
+	const uint32 OldProducerHash = MurmurFinalize32(OldProducerHandle.PackedValue);
+	const uint32 NewProducerHash = MurmurFinalize32(NewProducerHandle.PackedValue);
+
 	const uint32 OldBaseX = FMath::ReverseMortonCode2(OldVirtualAddress);
 	const uint32 OldBaseY = FMath::ReverseMortonCode2(OldVirtualAddress >> 1);
 	const uint32 NewBaseX = FMath::ReverseMortonCode2(NewVirtualAddress);
 	const uint32 NewBaseY = FMath::ReverseMortonCode2(NewVirtualAddress >> 1);
 
-	for (uint32 pAddress = 0u; pAddress < NumPages; ++pAddress)
+	TArray<uint32, TInlineAllocator<256>> ToRemap;
+	const uint32 Hash = MurmurFinalize32(OldProducerHandle.PackedValue);
+	for (uint32 pAddress = ProducerToPageIndex.First(Hash); ProducerToPageIndex.IsValid(pAddress); pAddress = ProducerToPageIndex.Next(pAddress))
 	{
-		FPageEntry& PageEntry = Pages[pAddress];
+		const FPageEntry& PageEntry = Pages[pAddress];
 		if (PageEntry.PackedProducerHandle == OldProducerHandle.PackedValue)
 		{
-			if ((int32)PageEntry.Local_vLevel + vLevelBias < 0)
+			ToRemap.Add(pAddress);
+		}
+	}
+
+	for (uint32 pAddress : ToRemap)
+	{
+		FPageEntry& PageEntry = Pages[pAddress];
+		check(PageEntry.PackedProducerHandle == OldProducerHandle.PackedValue);
+
+		if ((int32)PageEntry.Local_vLevel + vLevelBias < 0)
+		{
+			// Remap removes this level 
+			UnmapAllPages(System, pAddress, false);
+			// Queue page for recycling
+			FreeHeap.Update(0, pAddress);
+		}
+		else
+		{
+			// Directly modify page entry for new producer
+			PageHash.Remove(GetPageHash(PageEntry), pAddress);
+			PageEntry.PackedProducerHandle = NewProducerHandle.PackedValue;
+			PageEntry.Local_vLevel += vLevelBias;
+			PageHash.Add(GetPageHash(PageEntry), pAddress);
+
+			ProducerToPageIndex.Remove(OldProducerHash, pAddress);
+			ProducerToPageIndex.Add(NewProducerHash, pAddress);
+
+			if (FreeHeap.IsPresent(pAddress))
 			{
-				// Remap removes this level 
-				UnmapAllPages(System, pAddress, false);
-				// Queue page for recycling
-				FreeHeap.Update(0, pAddress);
+				FreeHeap.Update((Frame << 4) + PageEntry.Local_vLevel, pAddress);
 			}
-			else
+
+			// Go through mappings and modify directly.
+			uint32 MappingIndex = PageMapping[pAddress].NextIndex;
+			while (MappingIndex != pAddress)
 			{
-				// Directly modify page entry for new producer
-				PageHash.Remove(GetPageHash(PageEntry), pAddress);
-				PageEntry.PackedProducerHandle = NewProducerHandle.PackedValue;
-				PageEntry.Local_vLevel += vLevelBias;
-				PageHash.Add(GetPageHash(PageEntry), pAddress);
+				FPageMapping& Mapping = PageMapping[MappingIndex];
 
-				if (FreeHeap.IsPresent(pAddress))
-				{
-					FreeHeap.Update((Frame << 4) + PageEntry.Local_vLevel, pAddress);
-				}
+				FVirtualTextureSpace* Space = System->GetSpace(Mapping.SpaceID);
+				FTexturePageMap& PageMap = Space->GetPageMapForPageTableLayer(Mapping.PageTableLayerIndex);
 
-				// Go through mappings and modify directly.
-				uint32 MappingIndex = PageMapping[pAddress].NextIndex;
-				while (MappingIndex != pAddress)
-				{
-					FPageMapping& Mapping = PageMapping[MappingIndex];
+				PageMap.UnmapPage(System, Space, Mapping.vLogSize, Mapping.vAddress, false);
 
-					FVirtualTextureSpace* Space = System->GetSpace(Mapping.SpaceID);
-					FTexturePageMap& PageMap = Space->GetPageMapForPageTableLayer(Mapping.PageTableLayerIndex);
+				const uint32 XLocal = FMath::ReverseMortonCode2(Mapping.vAddress) - OldBaseX;
+				const uint32 YLocal = FMath::ReverseMortonCode2(Mapping.vAddress >> 1) - OldBaseY;
+				const uint32 X = NewBaseX + ((vLevelBias >= 0) ? (XLocal << vLevelBias) : (XLocal >> -vLevelBias));
+				const uint32 Y = NewBaseY + ((vLevelBias >= 0) ? (YLocal << vLevelBias) : (YLocal >> -vLevelBias));
 
-					PageMap.UnmapPage(System, Space, Mapping.vLogSize, Mapping.vAddress, false);
+				Mapping.vAddress = FMath::MortonCode2(X) | (FMath::MortonCode2(Y) << 1);
+				Mapping.vLogSize = (int32)Mapping.vLogSize + vLevelBias;
 
-					const uint32 XLocal = FMath::ReverseMortonCode2(Mapping.vAddress) - OldBaseX;
-					const uint32 YLocal = FMath::ReverseMortonCode2(Mapping.vAddress >> 1) - OldBaseY;
-					const uint32 X = NewBaseX + ((vLevelBias >= 0) ? (XLocal << vLevelBias) : (XLocal >> -vLevelBias));
-					const uint32 Y = NewBaseY + ((vLevelBias >= 0) ? (YLocal << vLevelBias) : (YLocal >> -vLevelBias));
+				const int32 vLevel = PageEntry.Local_vLevel; // Deal with any producer mip bias?
+				PageMap.MapPage(Space, PhysicalSpace, NewProducerHandle.PackedValue, Mapping.MaxLevel, Mapping.vLogSize, Mapping.vAddress, vLevel, pAddress);
 
-					Mapping.vAddress = FMath::MortonCode2(X) | (FMath::MortonCode2(Y) << 1);
-					Mapping.vLogSize = (int32)Mapping.vLogSize + vLevelBias;
-
-					const int32 vLevel = PageEntry.Local_vLevel; // Deal with any producer mip bias?
-					PageMap.MapPage(Space, PhysicalSpace, Mapping.vLogSize, Mapping.vAddress, vLevel, pAddress);
-
-					MappingIndex = Mapping.NextIndex;
-				}
+				MappingIndex = Mapping.NextIndex;
 			}
 		}
 	}

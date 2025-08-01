@@ -5,7 +5,9 @@
 =============================================================================*/
 
 #include "FXSystemSet.h"
+#include "FXRenderingUtils.h"
 #include "GPUSortManager.h"
+#include "Containers/StridedView.h"
 
 FFXSystemSet::FFXSystemSet(FGPUSortManager* InGPUSortManager)
 	: GPUSortManager(InGPUSortManager)
@@ -26,12 +28,12 @@ FFXSystemInterface* FFXSystemSet::GetInterface(const FName& InName)
 	return nullptr;
 }
 
-void FFXSystemSet::Tick(float DeltaSeconds)
+void FFXSystemSet::Tick(UWorld* World, float DeltaSeconds)
 {
 	for (FFXSystemInterface* FXSystem : FXSystems)
 	{
 		check(FXSystem);
-		FXSystem->Tick(DeltaSeconds);
+		FXSystem->Tick(World, DeltaSeconds);
 	}
 }
 
@@ -79,7 +81,7 @@ bool FFXSystemSet::ShouldDebugDraw_RenderThread() const
 	return false;
 }
 
-void FFXSystemSet::DrawDebug_RenderThread(class FRDGBuilder& GraphBuilder, const class FViewInfo& View, const struct FScreenPassRenderTarget& Output)
+void FFXSystemSet::DrawDebug_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, const struct FScreenPassRenderTarget& Output)
 {
 	for (FFXSystemInterface* FXSystem : FXSystems)
 	{
@@ -88,7 +90,7 @@ void FFXSystemSet::DrawDebug_RenderThread(class FRDGBuilder& GraphBuilder, const
 	}
 }
 
-void FFXSystemSet::DrawSceneDebug_RenderThread(class FRDGBuilder& GraphBuilder, const class FViewInfo& View, FRDGTextureRef SceneColor, FRDGTextureRef SceneDepth)
+void FFXSystemSet::DrawSceneDebug_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, FRDGTextureRef SceneColor, FRDGTextureRef SceneDepth)
 {
 	for (FFXSystemInterface* FXSystem : FXSystems)
 	{
@@ -124,21 +126,21 @@ void FFXSystemSet::UpdateVectorField(UVectorFieldComponent* VectorFieldComponent
 	}
 }
 
-void FFXSystemSet::PreInitViews(FRHICommandListImmediate& RHICmdList, bool bAllowGPUParticleUpdate)
+void FFXSystemSet::PreInitViews(FRDGBuilder& GraphBuilder, bool bAllowGPUParticleUpdate, const TArrayView<const FSceneViewFamily*>& ViewFamilies, const FSceneViewFamily* CurrentFamily)
 {
 	for (FFXSystemInterface* FXSystem : FXSystems)
 	{
 		check(FXSystem);
-		FXSystem->PreInitViews(RHICmdList, bAllowGPUParticleUpdate);
+		FXSystem->PreInitViews(GraphBuilder, bAllowGPUParticleUpdate, ViewFamilies, CurrentFamily);
 	}
 }
 
-void FFXSystemSet::PostInitViews(FRHICommandListImmediate& RHICmdList, FRHIUniformBuffer* ViewUniformBuffer, bool bAllowGPUParticleUpdate)
+void FFXSystemSet::PostInitViews(FRDGBuilder& GraphBuilder, TConstStridedView<FSceneView> Views, bool bAllowGPUParticleUpdate)
 {
 	for (FFXSystemInterface* FXSystem : FXSystems)
 	{
 		check(FXSystem);
-		FXSystem->PostInitViews(RHICmdList, ViewUniformBuffer, bAllowGPUParticleUpdate);
+		FXSystem->PostInitViews(GraphBuilder, Views, bAllowGPUParticleUpdate);
 	}
 }
 
@@ -181,32 +183,43 @@ bool FFXSystemSet::RequiresEarlyViewUniformBuffer() const
 	return false;
 }
 
-void FFXSystemSet::PreRender(FRHICommandListImmediate& RHICmdList, const class FGlobalDistanceFieldParameterData* GlobalDistanceFieldParameterData, bool bAllowGPUParticleSceneUpdate)
+bool FFXSystemSet::RequiresRayTracingScene() const
 {
 	for (FFXSystemInterface* FXSystem : FXSystems)
 	{
 		check(FXSystem);
-		FXSystem->PreRender(RHICmdList, GlobalDistanceFieldParameterData, bAllowGPUParticleSceneUpdate);
+		if (FXSystem->RequiresRayTracingScene())
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void FFXSystemSet::PreRender(FRDGBuilder& GraphBuilder, TConstStridedView<FSceneView> Views, FSceneUniformBuffer &SceneUniformBuffer, bool bAllowGPUParticleSceneUpdate)
+{
+	for (FFXSystemInterface* FXSystem : FXSystems)
+	{
+		check(FXSystem);
+		FXSystem->PreRender(GraphBuilder, Views, SceneUniformBuffer, bAllowGPUParticleSceneUpdate);
 	}
 }
 
-void FFXSystemSet::PostRenderOpaque(
-	FRHICommandListImmediate& RHICmdList,
-	FRHIUniformBuffer* ViewUniformBuffer,
-	const class FShaderParametersMetadata* SceneTexturesUniformBufferStruct,
-	FRHIUniformBuffer* SceneTexturesUniformBuffer,
-	bool bAllowGPUParticleUpdate)
+void FFXSystemSet::SetSceneTexturesUniformBuffer(const TUniformBufferRef<FSceneTextureUniformParameters>& InSceneTexturesUniformParams)
 {
 	for (FFXSystemInterface* FXSystem : FXSystems)
 	{
 		check(FXSystem);
-		FXSystem->PostRenderOpaque(
-			RHICmdList,
-			ViewUniformBuffer,
-			SceneTexturesUniformBufferStruct,
-			SceneTexturesUniformBuffer,
-			bAllowGPUParticleUpdate
-		);
+		FXSystem->SetSceneTexturesUniformBuffer(InSceneTexturesUniformParams);
+	}
+}
+
+void FFXSystemSet::PostRenderOpaque(FRDGBuilder& GraphBuilder, TConstStridedView<FSceneView> Views, FSceneUniformBuffer &SceneUniformBuffer, bool bAllowGPUParticleSceneUpdate)
+{
+	for (FFXSystemInterface* FXSystem : FXSystems)
+	{
+		check(FXSystem);
+		FXSystem->PostRenderOpaque(GraphBuilder, Views, SceneUniformBuffer, bAllowGPUParticleSceneUpdate);
 	}
 }
 

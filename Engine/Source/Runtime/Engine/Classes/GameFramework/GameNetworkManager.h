@@ -10,7 +10,7 @@
 
 /** Describes which standby detection event occured so the game can take appropriate action. */
 UENUM()
-enum EStandbyType
+enum EStandbyType : int
 {
 	STDBY_Rx,
 	STDBY_Tx,
@@ -23,8 +23,8 @@ enum EStandbyType
  * Handles game-specific networking management (cheat detection, bandwidth management, etc.).
  */
 
-UCLASS(config=Game, notplaceable)
-class ENGINE_API AGameNetworkManager : public AInfo
+UCLASS(config=Game, notplaceable, MinimalAPI)
+class AGameNetworkManager : public AInfo
 {
 	GENERATED_UCLASS_BODY()
 
@@ -172,10 +172,6 @@ class ENGINE_API AGameNetworkManager : public AInfo
 	UPROPERTY(GlobalConfig)
 	int32 ClientNetSendMoveThrottleOverPlayerCount;
 
-	/** If client update is within MAXPOSITIONERRORSQUARED of what the server expects then the client is authoritative on it's final position */
-	UPROPERTY(GlobalConfig)
-	bool ClientAuthorativePosition;
-
 	/** Minimum delay between the server sending error corrections to a client, in seconds. */
 	UPROPERTY(GlobalConfig)
 	float ClientErrorUpdateRateLimit;
@@ -187,6 +183,10 @@ class ENGINE_API AGameNetworkManager : public AInfo
 	/** Camera position change limit, when exceeded allows an immediate ServerUpdateCamera call. */
 	UPROPERTY(GlobalConfig)
 	float ClientNetCamUpdatePositionLimit;
+
+	/** If client update is within MAXPOSITIONERRORSQUARED of what the server expects then the client is authoritative on it's final position */
+	UPROPERTY(GlobalConfig)
+	bool ClientAuthorativePosition;
 
 	//======================================================================================================================
 	// Movement Time Discrepancy settings for Characters (speed hack detection and prevention)
@@ -245,29 +245,29 @@ class ENGINE_API AGameNetworkManager : public AInfo
 	bool bMovementTimeDiscrepancyForceCorrectionsDuringResolution;
 
 	/**  Update network speeds for listen servers based on number of connected players.  */
-	virtual void UpdateNetSpeeds(bool bIsLanMatch);
+	ENGINE_API virtual void UpdateNetSpeeds(bool bIsLanMatch);
 
 	/** Timer which calls UpdateNetSpeeds() once a second. */
-	virtual void UpdateNetSpeedsTimer();
+	ENGINE_API virtual void UpdateNetSpeedsTimer();
 
 	/** Returns true if we should be in low bandwidth mode */
-	virtual bool IsInLowBandwidthMode();
+	ENGINE_API virtual bool IsInLowBandwidthMode();
 
 	//======================================================================================================================
 	// Player replication
 
 	/** @return true if last player client to server update was sufficiently recent.  Used to limit frequency of corrections if connection speed is limited. */
-	virtual bool WithinUpdateDelayBounds(class APlayerController* PC, float LastUpdateTime) const;
+	ENGINE_API virtual bool WithinUpdateDelayBounds(class APlayerController* PC, float LastUpdateTime) const;
 
 	/** @return true if position error exceeds max allowable amount */
-	virtual bool ExceedsAllowablePositionError(FVector LocDiff) const;
+	ENGINE_API virtual bool ExceedsAllowablePositionError(FVector LocDiff) const;
 
 	/** @return true if velocity vector passed in is considered near zero for networking purposes */
-	virtual bool NetworkVelocityNearZero(FVector InVelocity) const;
-	virtual void PostInitializeComponents() override;
+	ENGINE_API virtual bool NetworkVelocityNearZero(FVector InVelocity) const;
+	ENGINE_API virtual void PostInitializeComponents() override;
 
 	/** @RETURN new per/client bandwidth given number of players in the game */
-	virtual int32 CalculatedNetSpeed();
+	ENGINE_API virtual int32 CalculatedNetSpeed();
 	
 	//======================================================================================================================
 	// Standby cheat detection
@@ -275,13 +275,13 @@ class ENGINE_API AGameNetworkManager : public AInfo
 	 * Turns standby detection on/off
 	 * @param bIsEnabled true to turn it on, false to disable it
 	 */
-	virtual void EnableStandbyCheatDetection(bool bIsEnabled);
+	ENGINE_API virtual void EnableStandbyCheatDetection(bool bIsEnabled);
 
 	/**
 	 * Notifies the game code that a standby cheat was detected
 	 * @param StandbyType the type of cheat detected
 	 */
-	virtual void StandbyCheatDetected(EStandbyType StandbyType);
+	ENGINE_API virtual void StandbyCheatDetected(EStandbyType StandbyType);
 
 	/** If true, actor network relevancy is constrained by whether they are within their NetCullDistanceSquared from the client's view point. */
 	UPROPERTY(globalconfig)

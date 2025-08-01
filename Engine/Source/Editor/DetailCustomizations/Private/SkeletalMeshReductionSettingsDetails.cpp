@@ -2,20 +2,39 @@
 
 #include "SkeletalMeshReductionSettingsDetails.h"
 
-#include "IDetailGroup.h"
-#include "IDetailChildrenBuilder.h"
-#include "IMeshReductionManagerModule.h"
-#include "IMeshReductionInterfaces.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
 #include "DetailLayoutBuilder.h"
 #include "DetailWidgetRow.h"
+#include "Engine/SkeletalMesh.h"
+#include "Engine/SkeletalMeshLODSettings.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/PlatformCrt.h"
+#include "IDetailChildrenBuilder.h"
+#include "IDetailPropertyRow.h"
+#include "IMeshReductionInterfaces.h"
+#include "IMeshReductionManagerModule.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Visibility.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/Optional.h"
 #include "Modules/ModuleManager.h"
+#include "PropertyEditorModule.h"
 #include "PropertyHandle.h"
 #include "SkeletalMeshReductionSettings.h"
+#include "SkeletalRenderPublic.h"
+#include "Templates/Casts.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Input/SSpinBox.h"
 #include "Widgets/Text/STextBlock.h"
-#include "SkeletalRenderPublic.h"
 
-#include "Rendering/SkeletalMeshModel.h"
+class SWidget;
+class UObject;
 
 #define LOCTEXT_NAMESPACE "SkeletalMeshReductionSettingsDetails"
 
@@ -74,7 +93,8 @@ void FSkeletalMeshReductionSettingsDetails::CustomizeChildren(TSharedRef<IProper
 	{
 		if (StructPropertyHandle->GetParentHandle().IsValid())
 		{
-			if (StructPropertyHandle->GetParentHandle()->GetProperty()->GetFName() == GET_MEMBER_NAME_CHECKED(FSkeletalMeshObject, LODInfo))
+			if (StructPropertyHandle->GetParentHandle()->GetProperty()->GetFName() == GET_MEMBER_NAME_CHECKED(FSkeletalMeshObject, LODInfo) ||
+				StructPropertyHandle->GetParentHandle()->GetProperty()->GetFName() == GET_MEMBER_NAME_CHECKED(USkeletalMeshLODSettings, LODGroups))
 			{
 				return StructPropertyHandle->GetParentHandle()->GetIndexInArray();
 			}
@@ -88,7 +108,7 @@ void FSkeletalMeshReductionSettingsDetails::CustomizeChildren(TSharedRef<IProper
 		// Only able to do this for LOD1 and above, so only show the property if this is the case
 		if (LODIndex > 0)
 		{
-			bool AllowInline = !SkeletalMesh->IsLODImportedDataEmpty(LODIndex);
+			bool AllowInline = SkeletalMesh && SkeletalMesh->HasMeshDescription(LODIndex);
 			// Add and retrieve the default widgets
 			IDetailPropertyRow& Row = StructBuilder.AddProperty(BaseLODPropertyHandle->AsShared());
 
@@ -179,8 +199,10 @@ void FSkeletalMeshReductionSettingsDetails::CustomizeChildren(TSharedRef<IProper
 			GET_MEMBER_NAME_CHECKED(FSkeletalMeshOptimizationSettings, TerminationCriterion),
 			GET_MEMBER_NAME_CHECKED(FSkeletalMeshOptimizationSettings, bLockEdges),
 			GET_MEMBER_NAME_CHECKED(FSkeletalMeshOptimizationSettings, bEnforceBoneBoundaries),
+			GET_MEMBER_NAME_CHECKED(FSkeletalMeshOptimizationSettings, bMergeCoincidentVertBones),
 			GET_MEMBER_NAME_CHECKED(FSkeletalMeshOptimizationSettings, VolumeImportance),
-			GET_MEMBER_NAME_CHECKED(FSkeletalMeshOptimizationSettings, bLockColorBounaries)
+			GET_MEMBER_NAME_CHECKED(FSkeletalMeshOptimizationSettings, bLockColorBounaries),
+			GET_MEMBER_NAME_CHECKED(FSkeletalMeshOptimizationSettings, bImproveTrianglesForCloth)
 		};
 
 		uint32 NumChildren = 0;

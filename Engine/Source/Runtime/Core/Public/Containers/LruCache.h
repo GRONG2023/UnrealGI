@@ -157,7 +157,7 @@ public:
 	 */
 	void Add(const KeyType& Key, const ValueType& Value)
 	{
-		check(MaxNumElements > 0 && "Cannot add values to zero size TLruCache");
+		check(MaxNumElements != 0 && "Cannot add values to zero size TLruCache");
 
 		FCacheEntry** EntryPtr = LookupSet.Find(Key);
 
@@ -232,15 +232,13 @@ public:
 	 */
 	void Empty(int32 InMaxNumElements = 0)
 	{
-		check(InMaxNumElements >= 0);
-
 		for (FCacheEntry* Entry : LookupSet)
 		{
 			delete Entry;
 		}
 
 		MaxNumElements = InMaxNumElements;
-		LookupSet.Empty(MaxNumElements);
+		LookupSet.Empty(FMath::Max(MaxNumElements, 0));
 
 		MostRecent = nullptr;
 		LeastRecent = nullptr;
@@ -292,12 +290,31 @@ public:
 	 * Find the value of the entry with the specified key.
 	 *
 	 * @param Key The key of the entry to get.
+	 * @return Pointer to the value, or nullptr if not found.
+	 * @see Add, Contains, Empty, FindAndTouch, GetKeys, Remove
+	 */
+	FORCEINLINE ValueType* Find(const KeyType& Key)
+	{
+		FCacheEntry* const* EntryPtr = LookupSet.Find(Key);
+
+		if (EntryPtr != nullptr)
+		{
+			return &(*EntryPtr)->Value;
+		}
+
+		return nullptr;
+	}
+
+	/**
+	 * Find the value of the entry with the specified key.
+	 *
+	 * @param Key The key of the entry to get.
 	 * @return Reference to the value, or triggers an assertion if the key does not exist.
 	 */
 	FORCEINLINE const ValueType& FindChecked(const KeyType& Key) const
 	{
 		FCacheEntry*const * EntryPtr = LookupSet.Find(Key);
-		
+
 		check(EntryPtr);
 
 		return (*EntryPtr)->Value;
@@ -351,7 +368,7 @@ public:
 	const ValueType& FindAndTouchChecked(const KeyType& Key)
 	{
 		FCacheEntry** EntryPtr = LookupSet.Find(Key);
-		
+
 		check(EntryPtr);
 
 		MarkAsRecent(**EntryPtr);
@@ -383,7 +400,7 @@ public:
 	 * Find the value of an entry using a predicate.
 	 *
 	 * @param Pred The predicate functor to apply to each entry.
-	 * @return A value for which the predicate returned true, or nullptr if not found.
+	 * @return Pointer to value for which the predicate returned true, or nullptr if not found.
 	 * @see ContainsByPredicate, FilterByPredicate, RemoveByPredicate
 	 */
 	template<typename Predicate>
@@ -393,7 +410,7 @@ public:
 		{
 			if (Pred(Entry->Key, Entry->Value))
 			{
-				return Entry->Value;
+				return &Entry->Value;
 			}
 		}
 
@@ -423,6 +440,17 @@ public:
 	FORCEINLINE int32 Max() const
 	{
 		return MaxNumElements;
+	}
+
+	/**
+	 * Returns true if the cache is empty and contains no elements.
+	 *
+	 * @returns True if the cache is empty.
+	 * @see Num
+	 */
+	bool IsEmpty() const
+	{
+		return LookupSet.IsEmpty();
 	}
 
 	/**
@@ -517,14 +545,14 @@ public:
 			return *this;
 		}
 
-		FORCEINLINE friend bool operator==(const TBaseIterator& Lhs, const TBaseIterator& Rhs)
+		FORCEINLINE bool operator==(const TBaseIterator& Rhs) const
 		{
-			return Lhs.CurrentEntry == Rhs.CurrentEntry;
+			return CurrentEntry == Rhs.CurrentEntry;
 		}
 
-		FORCEINLINE friend bool operator!=(const TBaseIterator& Lhs, const TBaseIterator& Rhs)
+		FORCEINLINE bool operator!=(const TBaseIterator& Rhs) const
 		{
-			return Lhs.CurrentEntry != Rhs.CurrentEntry;
+			return CurrentEntry != Rhs.CurrentEntry;
 		}
 
 		ValueType& operator->() const
@@ -599,7 +627,7 @@ public:
 		{ }
 	};
 
-	
+
 	/**
 	 * Cache iterator.
 	 */
@@ -629,7 +657,7 @@ public:
 		}
 
 	private:
-		
+
 		TLruCache* Cache;
 	};
 

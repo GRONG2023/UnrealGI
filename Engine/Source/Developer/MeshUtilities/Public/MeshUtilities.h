@@ -17,9 +17,10 @@ class UStaticMesh;
 class UStaticMeshComponent;
 struct FFlattenMaterial;
 struct FRawMesh;
+struct FRawSkinWeight;
 struct FStaticMeshLODResources;
 class FSkeletalMeshLODModel;
-struct FRawSkinWeight;
+class FSourceMeshDataForDerivedDataTask;
 
 typedef FIntPoint FMeshIdAndLOD;
 struct FFlattenMaterial;
@@ -27,6 +28,7 @@ struct FReferenceSkeleton;
 struct FStaticMeshLODResources;
 class UMeshComponent;
 class UStaticMesh;
+struct FBoneVertInfo;
 
 namespace SkeletalMeshImportData
 {
@@ -46,15 +48,11 @@ namespace ETangentOptions
 	};
 };
 
-/**
-*	Contains the vertices that are most dominated by that bone. Vertices are in Bone space.
-*	Not used at runtime, but useful for fitting physics assets etc.
-*/
-struct FBoneVertInfo
+struct FSignedDistanceFieldBuildSectionData
 {
-	// Invariant: Arrays should be same length!
-	TArray<FVector>	Positions;
-	TArray<FVector>	Normals;
+	EBlendMode BlendMode = BLEND_Opaque;
+	bool bTwoSided = false;
+	bool bAffectDistanceFieldLighting = true;
 };
 
 struct FOverlappingCorners;
@@ -62,84 +60,7 @@ struct FOverlappingCorners;
 class IMeshUtilities : public IModuleInterface
 {
 public:
-	/************************************************************************/
-	/*  DEPRECATED FUNCTIONALITY                                            */
-	/************************************************************************/
 
-	/**
-	* Harvest static mesh components from input actors
-	* and merge into signle mesh grouping them by unique materials
-	*
-	* @param SourceActors				List of actors to merge
-	* @param InSettings				Settings to use
-	* @param InOuter					Outer if required
-	* @param InBasePackageName			Destination package name for a generated assets. Used if Outer is null.
-	* @param UseLOD					-1 if you'd like to build for all LODs. If you specify, that LOD mesh for source meshes will be used to merge the mesh
-	*									This is used by hierarchical building LODs
-	* @param OutAssetsToSync			Merged mesh assets
-	* @param OutMergedActorLocation	World position of merged mesh
-	*/
-
-	virtual void MergeActors(
-		const TArray<AActor*>& SourceActors,
-		const FMeshMergingSettings& InSettings,
-		UPackage* InOuter,
-		const FString& InBasePackageName,
-		TArray<UObject*>& OutAssetsToSync, 
-		FVector& OutMergedActorLocation, 
-		bool bSilent=false) const = 0;
-	/**
-	* MergeStaticMeshComponents
-	*
-	* @param ComponentsToMerge - Components to merge
-	* @param World - World in which the component reside
-	* @param InSettings	- Settings to use
-	* @param InOuter - Outer if required
-	* @param InBasePackageName - Destination package name for a generated assets. Used if Outer is null.
-	* @param UseLOD	-1 if you'd like to build for all LODs. If you specify, that LOD mesh for source meshes will be used to merge the mesh
-	*									This is used by hierarchical building LODs
-	* @param OutAssetsToSync Merged mesh assets
-	* @param OutMergedActorLocation	World position of merged mesh
-	* @param ViewDistance Distance for LOD determination
-	* @param bSilent Non-verbose flag
-	* @return void
-	*/
-	virtual void MergeStaticMeshComponents(
-		const TArray<UStaticMeshComponent*>& ComponentsToMerge,
-		UWorld* World,
-		const FMeshMergingSettings& InSettings,
-		UPackage* InOuter,
-		const FString& InBasePackageName,
-		TArray<UObject*>& OutAssetsToSync,
-		FVector& OutMergedActorLocation,
-		const float ScreenAreaSize,
-		bool bSilent /*= false*/) const = 0;
-	
-	/**
-	* Creates a (proxy)-mesh combining the static mesh components from the given list of actors (at the moment this requires having Simplygon)
-	*
-	* @param InActors - List of Actors to merge
-	* @param InMeshProxySettings - Merge settings
-	* @param InOuter - Package for a generated assets, if NULL new packages will be created for each asset
-	* @param InProxyBasePackageName - Will be used for naming generated assets, in case InOuter is not specified ProxyBasePackageName will be used as long package name for creating new packages
-	* @param InGuid - Guid identifying the data used for this proxy job
-	* @param InProxyCreatedDelegate - Delegate callback for when the proxy is finished
-	* @param bAllowAsync - Flag whether or not this call could be run async (SimplygonSwarm)
-	*/
-	virtual void CreateProxyMesh(const TArray<class AActor*>& InActors, const struct FMeshProxySettings& InMeshProxySettings, UPackage* InOuter, const FString& InProxyBasePackageName, const FGuid InGuid, FCreateProxyDelegate InProxyCreatedDelegate, const bool bAllowAsync = false, const float ScreenAreaSize = 1.0f) = 0;
-
-	/**
-	* FlattenMaterialsWithMeshData
-	*
-	* @param InMaterials - List of unique materials used by InSourceMeshes
-	* @param InSourceMeshes - List of raw meshes used to flatten the materials with (vertex data)
-	* @param InMaterialIndexMap - Map used for mapping the raw meshes to the correct materials
-	* @param InMeshShouldBakeVertexData - Array of flags to determine whether or not a mesh requires to have its vertex data baked down
-	* @param InMaterialProxySettings - Settings for creating the flattened material
-	* @param OutFlattenedMaterials - List of flattened materials (one for each mesh)
-	*/
-	virtual	void FlattenMaterialsWithMeshData(TArray<UMaterialInterface*>& InMaterials, TArray<struct FRawMeshExt>& InSourceMeshes, TMap<FMeshIdAndLOD, TArray<int32>>& InMaterialIndexMap, TArray<bool>& InMeshShouldBakeVertexData, const FMaterialProxySettings &InMaterialProxySettings, TArray<FFlattenMaterial> &OutFlattenedMaterials) const = 0;
-	
 	/**
 	* Calculates (new) non-overlapping UV coordinates for the given Raw Mesh
 	*
@@ -149,17 +70,9 @@ public:
 	* @param OutTexCoords - New set of UV coordinates
 	* @return bool - whether or not generating the UVs succeeded
 	*/
-	virtual bool GenerateUniqueUVsForStaticMesh(const FRawMesh& RawMesh, int32 TextureResolution, TArray<FVector2D>& OutTexCoords) const = 0;
-	virtual bool GenerateUniqueUVsForStaticMesh(const FRawMesh& RawMesh, int32 TextureResolution, bool bMergeIdenticalMaterials, TArray<FVector2D>& OutTexCoords) const = 0;
+	virtual bool GenerateUniqueUVsForStaticMesh(const FRawMesh& RawMesh, int32 TextureResolution, TArray<FVector2f>& OutTexCoords) const = 0;
+	virtual bool GenerateUniqueUVsForStaticMesh(const FRawMesh& RawMesh, int32 TextureResolution, bool bMergeIdenticalMaterials, TArray<FVector2f>& OutTexCoords) const = 0;
 	
-	/** Returns the mesh reduction plugin if available. */
-	virtual IMeshReduction* GetStaticMeshReductionInterface() = 0;
-
-	/** Returns the mesh reduction plugin if available. */
-	virtual IMeshReduction* GetSkeletalMeshReductionInterface() = 0;
-
-	/** Returns the mesh merging plugin if available. */
-	virtual IMeshMerging* GetMeshMergingInterface() = 0;
 public:
 	/** Returns a string uniquely identifying this version of mesh utilities. */
 	virtual const FString& GetVersionString() const = 0;
@@ -196,7 +109,7 @@ public:
 		const FOverlappingCorners& OverlappingCorners,
 		const TMap<uint32, uint32>& MaterialToSectionMapping,
 		float ComparisonThreshold,
-		FVector BuildScale,
+		FVector3f BuildScale,
 		int32 ImportVersion
 		) = 0;
 
@@ -213,29 +126,33 @@ public:
 	/** Builds a signed distance field volume for the given LODModel. */
 	virtual void GenerateSignedDistanceFieldVolumeData(
 		FString MeshName,
+		const FSourceMeshDataForDerivedDataTask& SourceMeshData,
 		const FStaticMeshLODResources& LODModel,
 		class FQueuedThreadPool& ThreadPool,
-		const TArray<EBlendMode>& MaterialBlendModes,
-		const FBoxSphereBounds& Bounds,
+		const TArray<FSignedDistanceFieldBuildSectionData>& SectionData,
+		const FBoxSphereBounds3f& Bounds,
 		float DistanceFieldResolutionScale,
 		bool bGenerateAsIfTwoSided,
 		class FDistanceFieldVolumeData& OutData) = 0;
 
-	/** 
-	 * Down sample distance field volume. 
-	 * Method overwrites data of DistanceFieldData. 
-	 * If input is compressed, it will be decompressed, downsampled and recompressed
-	 */
-	virtual void DownSampleDistanceFieldVolumeData(
-		class FDistanceFieldVolumeData& DistanceFieldData,
-		float Divider) = 0;
-
+	virtual bool GenerateCardRepresentationData(
+		FString MeshName,
+		const FSourceMeshDataForDerivedDataTask& SourceMeshData,
+		const FStaticMeshLODResources& LODModel,
+		class FQueuedThreadPool& ThreadPool,
+		const TArray<FSignedDistanceFieldBuildSectionData>& SectionData,
+		const FBoxSphereBounds& Bounds,
+		const class FDistanceFieldVolumeData* DistanceFieldVolumeData,
+		int32 MaxLumenMeshCards,
+		bool bGenerateAsIfTwoSided,
+		class FCardRepresentationData& OutData) = 0;
 
 	/** Helper structure for skeletal mesh import options */
 	struct MeshBuildOptions
 	{
 		MeshBuildOptions()
-		: bRemoveDegenerateTriangles(false)
+		: BoneInfluenceLimit(0)
+		, bRemoveDegenerateTriangles(false)
 		, bComputeNormals(true)
 		, bComputeTangents(true)
 		, bUseMikkTSpace(false)
@@ -244,6 +161,7 @@ public:
 		{
 		}
 
+		int32 BoneInfluenceLimit;
 		bool bRemoveDegenerateTriangles;
 		bool bComputeNormals;
 		bool bComputeTangents;
@@ -258,6 +176,7 @@ public:
 			OverlappingThresholds.ThresholdTangentNormal = SkeletalMeshBuildSettings.ThresholdTangentNormal;
 			OverlappingThresholds.ThresholdUV = SkeletalMeshBuildSettings.ThresholdUV;
 			OverlappingThresholds.MorphThresholdPosition = SkeletalMeshBuildSettings.MorphThresholdPosition;
+			BoneInfluenceLimit = SkeletalMeshBuildSettings.BoneInfluenceLimit;
 			bComputeNormals = SkeletalMeshBuildSettings.bRecomputeNormals;
 			bComputeTangents = SkeletalMeshBuildSettings.bRecomputeTangents;
 			bUseMikkTSpace = SkeletalMeshBuildSettings.bUseMikkTSpace;
@@ -277,12 +196,13 @@ public:
 		const TArray<SkeletalMeshImportData::FVertInfluence>& Influences,
 		const TArray<SkeletalMeshImportData::FMeshWedge>& Wedges,
 		const TArray<SkeletalMeshImportData::FMeshFace>& Faces,
-		const TArray<FVector>& Points,
+		const TArray<FVector3f>& Points,
 		const TArray<int32>& PointToOriginalMap,
 		const MeshBuildOptions& BuildOptions = MeshBuildOptions(),
 		TArray<FText> * OutWarningMessages = NULL,
 		TArray<FName> * OutWarningNames = NULL
 		) = 0;
+
 	
 	/** Cache optimize the index buffer. */
 	virtual void CacheOptimizeIndexBuffer(TArray<uint16>& Indices) = 0;
@@ -309,7 +229,7 @@ public:
 	 *  @param OutTangents - The function allocate the TArray with 3 FVector, to represent the triangle tangent, bi normal and normal.
 	 *  @param CompareThreshold - The threshold use to compare a tangent vector with zero.
 	 */
-	virtual void CalculateTriangleTangent(const FSoftSkinVertex& VertexA, const FSoftSkinVertex& VertexB, const FSoftSkinVertex& VertexC, TArray<FVector>& OutTangents, float CompareThreshold) = 0;
+	virtual void CalculateTriangleTangent(const FSoftSkinVertex& VertexA, const FSoftSkinVertex& VertexB, const FSoftSkinVertex& VertexC, TArray<FVector3f>& OutTangents, float CompareThreshold) = 0;
 
 	/**
 	 *	Calculate the verts associated weighted to each bone of the skeleton.
@@ -345,7 +265,7 @@ public:
 	* @param OutTexCoords - New set of UV coordinates
 	* @return bool - whether or not generating the UVs succeeded
 	*/
-	virtual bool GenerateUniqueUVsForSkeletalMesh(const FSkeletalMeshLODModel& LODModel, int32 TextureResolution, TArray<FVector2D>& OutTexCoords) const = 0;
+	virtual bool GenerateUniqueUVsForSkeletalMesh(const FSkeletalMeshLODModel& LODModel, int32 TextureResolution, TArray<FVector2f>& OutTexCoords) const = 0;
 	
 	/**
 	 * Remove Bones based on LODInfo setting
@@ -370,7 +290,7 @@ public:
 	 * @param OutTangentY Array to hold calculated Bitangents
 	 * @param OutNormals Array to hold calculated normals (if already contains normals will use those instead for the tangent calculation)	
 	 */
-	virtual void CalculateTangents(const TArray<FVector>& InVertices, const TArray<uint32>& InIndices, const TArray<FVector2D>& InUVs, const TArray<uint32>& InSmoothingGroupIndices, const uint32 InTangentOptions, TArray<FVector>& OutTangentX, TArray<FVector>& OutTangentY, TArray<FVector>& OutNormals) const = 0;
+	virtual void CalculateTangents(const TArray<FVector3f>& InVertices, const TArray<uint32>& InIndices, const TArray<FVector2f>& InUVs, const TArray<uint32>& InSmoothingGroupIndices, const uint32 InTangentOptions, TArray<FVector3f>& OutTangentX, TArray<FVector3f>& OutTangentY, TArray<FVector3f>& OutNormals) const = 0;
 
 	/**
 	 * Calculates MikkTSpace Tangents for a given set of vertex data with normals provided
@@ -383,7 +303,7 @@ public:
 	 * @param OutTangentX Array to hold calculated Tangents
 	 * @param OutTangentY Array to hold calculated Bitangents
 	 */
-	virtual void CalculateMikkTSpaceTangents(const TArray<FVector>& InVertices, const TArray<uint32>& InIndices, const TArray<FVector2D>& InUVs, const TArray<FVector>& InNormals, bool bIgnoreDegenerateTriangles, TArray<FVector>& OutTangentX, TArray<FVector>& OutTangentY) const = 0;
+	virtual void CalculateMikkTSpaceTangents(const TArray<FVector3f>& InVertices, const TArray<uint32>& InIndices, const TArray<FVector2f>& InUVs, const TArray<FVector3f>& InNormals, bool bIgnoreDegenerateTriangles, TArray<FVector3f>& OutTangentX, TArray<FVector3f>& OutTangentY) const = 0;
 
 	/** 
 	 * Calculates Normals for a given set of vertex data
@@ -395,7 +315,7 @@ public:
 	 * @param InTangentOptions Flags for Tangent calculation
 	 * @param OutNormals Array to hold calculated normals	
 	 */
-	virtual void CalculateNormals(const TArray<FVector>& InVertices, const TArray<uint32>& InIndices, const TArray<FVector2D>& InUVs, const TArray<uint32>& InSmoothingGroupIndices, const uint32 InTangentOptions, TArray<FVector>& OutNormals) const = 0;
+	virtual void CalculateNormals(const TArray<FVector3f>& InVertices, const TArray<uint32>& InIndices, const TArray<FVector2f>& InUVs, const TArray<uint32>& InSmoothingGroupIndices, const uint32 InTangentOptions, TArray<FVector3f>& OutNormals) const = 0;
 
 	/** 
 	 * Calculates the overlapping corners for a given set of vertex data
@@ -405,19 +325,25 @@ public:
 	 * @param bIgnoreDegenerateTriangles Indicates if we should skip degenerate triangles
 	 * @param OutOverlappingCorners Container to hold the overlapping corners. For a vertex, lists all the overlapping vertices.
 	 */
-	virtual void CalculateOverlappingCorners(const TArray<FVector>& InVertices, const TArray<uint32>& InIndices, bool bIgnoreDegenerateTriangles, FOverlappingCorners& OutOverlappingCorners) const = 0;
+	virtual void CalculateOverlappingCorners(const TArray<FVector3f>& InVertices, const TArray<uint32>& InIndices, bool bIgnoreDegenerateTriangles, FOverlappingCorners& OutOverlappingCorners) const = 0;
 
 	virtual void RecomputeTangentsAndNormalsForRawMesh(bool bRecomputeTangents, bool bRecomputeNormals, const FMeshBuildSettings& InBuildSettings, FRawMesh &OutRawMesh) const = 0;
 	virtual void RecomputeTangentsAndNormalsForRawMesh(bool bRecomputeTangents, bool bRecomputeNormals, const FMeshBuildSettings& InBuildSettings, const FOverlappingCorners& InOverlappingCorners, FRawMesh &OutRawMesh) const = 0;
 
-	virtual void FindOverlappingCorners(FOverlappingCorners& OutOverlappingCorners, const TArray<FVector>& InVertices, const TArray<uint32>& InIndices, float ComparisonThreshold) const = 0;
+	virtual void FindOverlappingCorners(FOverlappingCorners& OutOverlappingCorners, const TArray<FVector3f>& InVertices, const TArray<uint32>& InIndices, float ComparisonThreshold) const = 0;
 
 	/** Used to generate runtime skin weight data from Editor-only data */
-	virtual void GenerateRuntimeSkinWeightData(const FSkeletalMeshLODModel* ImportedModel, const TArray<FRawSkinWeight>& InRawSkinWeights, struct FRuntimeSkinWeightProfileData& InOutSkinWeightOverrideData) const = 0;
+	virtual void GenerateRuntimeSkinWeightData(
+		const FSkeletalMeshLODModel* ImportedModel,
+		const TArray<FRawSkinWeight>& InRawSkinWeights,
+		bool bInUseHighPrecisionWeights,
+		struct FRuntimeSkinWeightProfileData& InOutSkinWeightOverrideData) const = 0;
 
 	/*
 	 * This function create the import data using the LODModel. You can call this function if you load an asset that was not re-import since the build refactor and the chunking is more agressive than the bake data in the LODModel.
 	 * You can also need this function if you create a skeletalmesh with LODModel instead of import data, so your newly created skeletalmesh can be build properly.
+	 * If the LODModel is not being pulled out of the old reduction storage, and bInResetReductionAsNeeded is true, then the reduction settings for that
+	 * LOD will be reset to avoid regenerating the mesh even more reduced.
 	 */
-	virtual void CreateImportDataFromLODModel(USkeletalMesh* SkeletalMesh) const = 0;
+	virtual void CreateImportDataFromLODModel(USkeletalMesh* InSkeletalMesh, bool bInResetReductionAsNeeded = false) const = 0;
 };

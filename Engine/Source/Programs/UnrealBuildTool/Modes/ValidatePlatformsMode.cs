@@ -1,11 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
 
 namespace UnrealBuildTool
 {
@@ -38,14 +36,15 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="Arguments">Command line arguments</param>
 		/// <returns>Exit code</returns>
-		public override int Execute(CommandLineArguments Arguments)
+		/// <param name="Logger"></param>
+		public override Task<int> ExecuteAsync(CommandLineArguments Arguments, ILogger Logger)
 		{
 			// Output a message if there are any arguments that are still unused
 			Arguments.ApplyTo(this);
 			Arguments.CheckAllArgumentsUsed();
 
 			// If the -AllPlatforms argument is specified, add all the known platforms into the list
-			if(bAllPlatforms)
+			if (bAllPlatforms)
 			{
 				Platforms.UnionWith(UnrealTargetPlatform.GetValidPlatforms());
 			}
@@ -53,23 +52,23 @@ namespace UnrealBuildTool
 			// Output a line for each registered platform
 			foreach (UnrealTargetPlatform Platform in Platforms)
 			{
-				UEBuildPlatform BuildPlatform = UEBuildPlatform.GetBuildPlatform(Platform, true);
+				UEBuildPlatform.TryGetBuildPlatform(Platform, out UEBuildPlatform? BuildPlatform);
 				string PlatformSDKString = "";
 				if (bOutputSDKs)
 				{
-					PlatformSDKString = BuildPlatform != null ? BuildPlatform.GetRequiredSDKString() : "<UNKNOWN>";
+					PlatformSDKString = BuildPlatform != null ? UEBuildPlatform.GetSDK(Platform)!.GetMainVersion() : "<UNKNOWN>";
 				}
 
 				if (BuildPlatform != null && BuildPlatform.HasRequiredSDKsInstalled() == SDKStatus.Valid)
 				{
-					Log.TraceInformation("##PlatformValidate: {0} VALID {1}", Platform.ToString(), PlatformSDKString);
+					Logger.LogInformation("##PlatformValidate: {Platform} VALID {PlatformSdkString}", Platform.ToString(), PlatformSDKString);
 				}
 				else
 				{
-					Log.TraceInformation("##PlatformValidate: {0} INVALID {1}", Platform.ToString(), PlatformSDKString);
+					Logger.LogInformation("##PlatformValidate: {Platform} INVALID {PlatformSdkString}", Platform.ToString(), PlatformSDKString);
 				}
-			} 
-			return 0;
+			}
+			return Task.FromResult(0);
 		}
 	}
 }

@@ -24,7 +24,7 @@
 class FMenuBuilder;
 class SNetworkingProfilerWindow;
 
-namespace Trace
+namespace TraceServices
 {
 	class IAnalysisSession;
 }
@@ -61,12 +61,21 @@ public:
 	SLATE_END_ARGS()
 
 	/**
+	 * Converts profiler window weak pointer to a shared pointer and returns it.
+	 * Make sure the returned pointer is valid before trying to dereference it.
+	 */
+	TSharedPtr<SNetworkingProfilerWindow> GetProfilerWindow() const
+	{
+		return ProfilerWindowWeakPtr.Pin();
+	}
+
+	TSharedPtr<Insights::FTable> GetTable() const { return Table; }
+
+	/**
 	 * Construct this widget
 	 * @param InArgs - The declaration data for this widget
 	 */
-	void Construct(const FArguments& InArgs, TSharedPtr<SNetworkingProfilerWindow> InProfilerWindow);
-
-	TSharedPtr<Insights::FTable> GetTable() const { return Table; }
+	void Construct(const FArguments& InArgs, TSharedRef<SNetworkingProfilerWindow> InProfilerWindow);
 
 	/**
 	 * Ticks this widget. Override in derived classes, but always call the parent implementation.
@@ -86,7 +95,7 @@ public:
 	void RebuildTree(bool bResync);
 
 	void ResetStats();
-	void UpdateStats(uint32 InGameInstanceIndex, uint32 InConnectionIndex, Trace::ENetProfilerConnectionMode InConnectionMode, uint32 InStatsPacketStartIndex, uint32 InStatsPacketEndIndex, uint32 InStatsStartPosition, uint32 InStatsEndPosition);
+	void UpdateStats(uint32 InGameInstanceIndex, uint32 InConnectionIndex, TraceServices::ENetProfilerConnectionMode InConnectionMode, uint32 InStatsPacketStartIndex, uint32 InStatsPacketEndIndex, uint32 InStatsStartPosition, uint32 InStatsEndPosition);
 
 	FNetEventNodePtr GetNetEventNode(uint32 EventTypeIndex) const;
 	void SelectNetEventNode(uint32 EventTypeIndex);
@@ -232,7 +241,7 @@ protected:
 	void HideColumn(const FName ColumnId);
 
 	// ToggleColumnVisibility
-	bool IsColumnVisible(const FName ColumnId);
+	bool IsColumnVisible(const FName ColumnId) const;
 	bool CanToggleColumnVisibility(const FName ColumnId) const;
 	void ToggleColumnVisibility(const FName ColumnId);
 
@@ -251,13 +260,14 @@ protected:
 	////////////////////////////////////////////////////////////////////////////////////////////////////
 
 protected:
-	TSharedPtr<SNetworkingProfilerWindow> ProfilerWindow;
+	/** A weak pointer to the Networking Insights window. */
+	TWeakPtr<SNetworkingProfilerWindow> ProfilerWindowWeakPtr;
 
 	/** Table view model. */
 	TSharedPtr<Insights::FTable> Table;
 
-	/** A weak pointer to the profiler session used to populate this widget. */
-	TSharedPtr<const Trace::IAnalysisSession>/*Weak*/ Session;
+	/** The analysis session used to populate this widget. */
+	TSharedPtr<const TraceServices::IAnalysisSession> Session;
 
 	//////////////////////////////////////////////////
 	// Tree View, Columns
@@ -306,7 +316,7 @@ protected:
 
 	//bool bUseFiltering;
 
-	/** The search box widget used to filter items displayed in the stats and groups tree. */
+	/** The search box widget used to filter items displayed in the tree. */
 	TSharedPtr<SSearchBox> SearchBox;
 
 	/** The text based filter. */
@@ -357,7 +367,7 @@ protected:
 
 	uint32 GameInstanceIndex;
 	uint32 ConnectionIndex;
-	Trace::ENetProfilerConnectionMode ConnectionMode;
+	TraceServices::ENetProfilerConnectionMode ConnectionMode;
 	uint32 StatsPacketStartIndex;
 	uint32 StatsPacketEndIndex;
 	uint32 StatsStartPosition;

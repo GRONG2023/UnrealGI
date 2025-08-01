@@ -8,6 +8,10 @@
 #include "AIController.h"
 #include "VisualLogger/VisualLogger.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PawnAction)
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+
 DEFINE_LOG_CATEGORY(LogPawnAction);
 
 namespace
@@ -20,7 +24,7 @@ namespace
 	}
 }
 
-UPawnAction::UPawnAction(const FObjectInitializer& ObjectInitializer)
+UDEPRECATED_PawnAction::UDEPRECATED_PawnAction(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 	, RequiredResources(FAIResourcesSet::AllResources)
 	, AbortState(EPawnActionAbortState::NeverStarted)
@@ -32,16 +36,16 @@ UPawnAction::UPawnAction(const FObjectInitializer& ObjectInitializer)
 	IndexOnStack = INDEX_NONE;
 }
 
-UWorld* UPawnAction::GetWorld() const
+UWorld* UDEPRECATED_PawnAction::GetWorld() const
 {
-	return OwnerComponent ? OwnerComponent->GetWorld() : Cast<UWorld>(GetOuter());
+	return OwnerComponent_DEPRECATED ? OwnerComponent_DEPRECATED->GetWorld() : Cast<UWorld>(GetOuter());
 }
 
-void UPawnAction::Tick(float DeltaTime)
+void UDEPRECATED_PawnAction::Tick(float DeltaTime)
 {
 }
 
-EPawnActionAbortState::Type UPawnAction::Abort(EAIForceParam::Type ShouldForce)
+EPawnActionAbortState::Type UDEPRECATED_PawnAction::Abort(EAIForceParam::Type ShouldForce)
 {
 	// if already aborting, and this request is not Forced, just skip it
 	if (AbortState != EPawnActionAbortState::NotBeingAborted && ShouldForce != EAIForceParam::Force)
@@ -64,14 +68,14 @@ EPawnActionAbortState::Type UPawnAction::Abort(EAIForceParam::Type ShouldForce)
 
 	SetAbortState(EPawnActionAbortState::MarkPendingAbort);
 
-	if (ChildAction != NULL)
+	if (ChildAction_DEPRECATED != NULL)
 	{
-		ChildResult = ChildAction->Abort(ShouldForce);
+		ChildResult = ChildAction_DEPRECATED->Abort(ShouldForce);
 
 		if (ChildResult == EPawnActionAbortState::NotBeingAborted)
 		{
-			UE_VLOG(GetPawn(), LogPawnAction, Error, TEXT("%s> ChildAction %s failed to carry out proper abortion! Things might get ugly..")
-				, *GetName(), *ChildAction->GetName());
+			UE_VLOG(GetPawn(), LogPawnAction, Error, TEXT("%s> ChildAction_DEPRECATED %s failed to carry out proper abortion! Things might get ugly..")
+				, *GetName(), *ChildAction_DEPRECATED->GetName());
 
 			// fake proper result and hope for the best!
 			ChildResult = EPawnActionAbortState::AbortDone;
@@ -118,17 +122,17 @@ EPawnActionAbortState::Type UPawnAction::Abort(EAIForceParam::Type ShouldForce)
 	return Result;
 }
 
-APawn* UPawnAction::GetPawn() const
+APawn* UDEPRECATED_PawnAction::GetPawn() const
 {
-	return OwnerComponent ? OwnerComponent->GetControlledPawn() : NULL;
+	return OwnerComponent_DEPRECATED ? OwnerComponent_DEPRECATED->GetControlledPawn() : NULL;
 }
 
-AController* UPawnAction::GetController() const
+AController* UDEPRECATED_PawnAction::GetController() const
 {
-	return OwnerComponent ? OwnerComponent->GetController() : NULL; 
+	return OwnerComponent_DEPRECATED ? OwnerComponent_DEPRECATED->GetController() : NULL;
 }
 
-void UPawnAction::SetAbortState(EPawnActionAbortState::Type NewAbortState)
+void UDEPRECATED_PawnAction::SetAbortState(EPawnActionAbortState::Type NewAbortState)
 {
 	// allowing only progression
 	if (NewAbortState <= AbortState)
@@ -143,28 +147,28 @@ void UPawnAction::SetAbortState(EPawnActionAbortState::Type NewAbortState)
 	}
 }
 
-void UPawnAction::SendEvent(EPawnActionEventType::Type Event)
+void UDEPRECATED_PawnAction::SendEvent(EPawnActionEventType::Type Event)
 {
-	if (OwnerComponent && OwnerComponent->IsPendingKill() == false)
+	if (IsValid(OwnerComponent_DEPRECATED))
 	{
 		// this will get communicated to parent action if needed, latently 
-		OwnerComponent->OnEvent(*this, Event);
+		OwnerComponent_DEPRECATED->OnEvent(*this, Event);
 	}
 
 	ActionObserver.ExecuteIfBound(*this, Event);
 }
 
-void UPawnAction::StopWaitingForMessages()
+void UDEPRECATED_PawnAction::StopWaitingForMessages()
 {
 	MessageHandlers.Reset();
 }
 
-void UPawnAction::SetFinishResult(EPawnActionResult::Type Result)
+void UDEPRECATED_PawnAction::SetFinishResult(EPawnActionResult::Type Result)
 {
 	// once return value had been set it's no longer possible to back to InProgress
 	if (Result <= EPawnActionResult::InProgress)
 	{
-		UE_VLOG(GetPawn(), LogPawnAction, Warning, TEXT("%s> UPawnAction::SetFinishResult setting FinishResult as EPawnActionResult::InProgress or EPawnActionResult::NotStarted - should not be happening"), *GetName());
+		UE_VLOG(GetPawn(), LogPawnAction, Warning, TEXT("%s> UDEPRECATED_PawnAction::SetFinishResult setting FinishResult as EPawnActionResult::InProgress or EPawnActionResult::NotStarted - should not be happening"), *GetName());
 		return;
 	}
 
@@ -174,14 +178,14 @@ void UPawnAction::SetFinishResult(EPawnActionResult::Type Result)
 	}
 }
 
-void UPawnAction::SetOwnerComponent(UPawnActionsComponent* Component)
+void UDEPRECATED_PawnAction::SetOwnerComponent(UDEPRECATED_PawnActionsComponent* Component)
 {
-	if (OwnerComponent != NULL && OwnerComponent != Component)
+	if (OwnerComponent_DEPRECATED != NULL && OwnerComponent_DEPRECATED != Component)
 	{
-		UE_VLOG(GetPawn(), LogPawnAction, Warning, TEXT("%s> UPawnAction::SetOwnerComponent called to change already set valid owner component"), *GetName());
+		UE_VLOG(GetPawn(), LogPawnAction, Warning, TEXT("%s> UDEPRECATED_PawnAction::SetOwnerComponent called to change already set valid owner component"), *GetName());
 	}
 
-	OwnerComponent = Component;
+	OwnerComponent_DEPRECATED = Component;
 	if (Component != NULL)
 	{
 		AAIController* AIController = Cast<AAIController>(Component->GetController());
@@ -192,7 +196,7 @@ void UPawnAction::SetOwnerComponent(UPawnActionsComponent* Component)
 	}
 }
 
-void UPawnAction::SetInstigator(UObject* const InInstigator)
+void UDEPRECATED_PawnAction::SetInstigator(UObject* const InInstigator)
 { 
 	if (Instigator && Instigator != InInstigator)
 	{
@@ -202,7 +206,7 @@ void UPawnAction::SetInstigator(UObject* const InInstigator)
 	Instigator = InInstigator; 
 }
 
-void UPawnAction::Finish(TEnumAsByte<EPawnActionResult::Type> WithResult)
+void UDEPRECATED_PawnAction::Finish(TEnumAsByte<EPawnActionResult::Type> WithResult)
 {
 	UE_VLOG(GetPawn(), LogPawnAction, Log, TEXT("%s> finishing with result %s")
 		, *GetName(), *GetActionResultName(WithResult));
@@ -214,7 +218,7 @@ void UPawnAction::Finish(TEnumAsByte<EPawnActionResult::Type> WithResult)
 	SendEvent(EPawnActionEventType::FinishedExecution);
 }
 
-bool UPawnAction::Activate()
+bool UDEPRECATED_PawnAction::Activate()
 {
 	bool bResult = false; 
 
@@ -252,7 +256,7 @@ bool UPawnAction::Activate()
 	return bResult;
 }
 
-void UPawnAction::OnPopped()
+void UDEPRECATED_PawnAction::OnPopped()
 {
 	// not calling OnFinish if action haven't actually started
 	if (!bFailedToStart || bAlwaysNotifyOnFinished)
@@ -261,7 +265,7 @@ void UPawnAction::OnPopped()
 	}
 }
 
-bool UPawnAction::Start()
+bool UDEPRECATED_PawnAction::Start()
 {
 	AbortState = EPawnActionAbortState::NotBeingAborted;
 	FinishResult = EPawnActionResult::InProgress;
@@ -270,10 +274,10 @@ bool UPawnAction::Start()
 }
 
 
-bool UPawnAction::Pause(const UPawnAction* PausedBy)
+bool UDEPRECATED_PawnAction::Pause(const UDEPRECATED_PawnAction* PausedBy)
 {
 	// parent should be paused anyway
-	ensure(ParentAction == NULL || ParentAction->IsPaused() == true);
+	ensure(ParentAction_DEPRECATED == NULL || ParentAction_DEPRECATED->IsPaused() == true);
 
 	// don't pause twice, this should be guaranteed by the PawnActionsComponent
 	ensure(bPaused == false);
@@ -288,18 +292,18 @@ bool UPawnAction::Pause(const UPawnAction* PausedBy)
 	
 	bPaused = true;
 
-	if (ChildAction)
+	if (ChildAction_DEPRECATED)
 	{
-		ChildAction->Pause(PausedBy);
+		ChildAction_DEPRECATED->Pause(PausedBy);
 	}
 
 	return bPaused;
 }
 
-bool UPawnAction::Resume()
+bool UDEPRECATED_PawnAction::Resume()
 {
 	// parent should be paused anyway
-	ensure(ParentAction == NULL || ParentAction->IsPaused() == true);
+	ensure(ParentAction_DEPRECATED == NULL || ParentAction_DEPRECATED->IsPaused() == true);
 
 	// do not unpause twice
 	if (bPaused == false)
@@ -307,12 +311,12 @@ bool UPawnAction::Resume()
 		return false;
 	}
 	
-	ensure(ChildAction == NULL);
+	ensure(ChildAction_DEPRECATED == NULL);
 
-	if (ChildAction)
+	if (ChildAction_DEPRECATED)
 	{
-		UE_VLOG(GetPawn(), LogPawnAction, Log, TEXT("%s> Resuming child, %s"), *GetName(), *ChildAction->GetName());
-		ChildAction->Resume();
+		UE_VLOG(GetPawn(), LogPawnAction, Log, TEXT("%s> Resuming child, %s"), *GetName(), *ChildAction_DEPRECATED->GetName());
+		ChildAction_DEPRECATED->Resume();
 	}
 	else
 	{
@@ -323,49 +327,49 @@ bool UPawnAction::Resume()
 	return !bPaused;
 }
 
-void UPawnAction::OnFinished(EPawnActionResult::Type WithResult)
+void UDEPRECATED_PawnAction::OnFinished(EPawnActionResult::Type WithResult)
 {
 }
 
-void UPawnAction::OnChildFinished(UPawnAction& Action, EPawnActionResult::Type WithResult)
+void UDEPRECATED_PawnAction::OnChildFinished(UDEPRECATED_PawnAction& Action, EPawnActionResult::Type WithResult)
 {
 	UE_VLOG(GetPawn(), LogPawnAction, Log, TEXT("%s> Child \'%s\' finished with result %s")
 		, *GetName(), *Action.GetName(), *GetActionResultName(WithResult));
 
-	ensure(Action.ParentAction == this);
-	ensure(ChildAction == &Action);
-	Action.ParentAction = NULL;
-	ChildAction = NULL;
+	ensure(Action.ParentAction_DEPRECATED == this);
+	ensure(ChildAction_DEPRECATED == &Action);
+	Action.ParentAction_DEPRECATED = NULL;
+	ChildAction_DEPRECATED = NULL;
 }
 
-void UPawnAction::OnPushed()
+void UDEPRECATED_PawnAction::OnPushed()
 {
 	IndexOnStack = 0;
-	UPawnAction* PrevAction = ParentAction;
+	UDEPRECATED_PawnAction* PrevAction = ParentAction_DEPRECATED;
 	while (PrevAction)
 	{
 		++IndexOnStack;
-		PrevAction = PrevAction->ParentAction;
+		PrevAction = PrevAction->ParentAction_DEPRECATED;
 	}
 
 	UE_VLOG(GetPawn(), LogPawnAction, Log, TEXT("%s> Pushed with priority %s, IndexOnStack: %d, instigator %s")
 		, *GetName(), *GetPriorityName(), IndexOnStack, *GetNameSafe(Instigator));
 }
 
-bool UPawnAction::PushChildAction(UPawnAction& Action)
+bool UDEPRECATED_PawnAction::PushChildAction(UDEPRECATED_PawnAction& Action)
 {
 	bool bResult = false;
 	
-	if (OwnerComponent != NULL)
+	if (OwnerComponent_DEPRECATED != NULL)
 	{
-		UE_CVLOG( ChildAction != NULL
-			, GetPawn(), LogPawnAction, Log, TEXT("%s> Pushing child action %s while already having ChildAction set to %s")
-			, *GetName(), *Action.GetName(), *ChildAction->GetName());
+		UE_CVLOG( ChildAction_DEPRECATED != NULL
+			, GetPawn(), LogPawnAction, Log, TEXT("%s> Pushing child action %s while already having ChildAction_DEPRECATED set to %s")
+			, *GetName(), *Action.GetName(), *ChildAction_DEPRECATED->GetName());
 		
 		// copy runtime data
 		// note that priority and instigator will get assigned as part of PushAction.
 
-		bResult = OwnerComponent->PushAction(Action, GetPriority(), Instigator);
+		bResult = OwnerComponent_DEPRECATED->PushAction(Action, GetPriority(), Instigator);
 
 		// adding a check to make sure important data has been set 
 		ensure(Action.GetPriority() == GetPriority() && Action.GetInstigator() == GetInstigator());
@@ -378,21 +382,21 @@ bool UPawnAction::PushChildAction(UPawnAction& Action)
 // messaging
 //----------------------------------------------------------------------//
 
-void UPawnAction::WaitForMessage(FName MessageType, FAIRequestID InRequestID)
+void UDEPRECATED_PawnAction::WaitForMessage(FName MessageType, FAIRequestID InRequestID)
 {
-	MessageHandlers.Add(FAIMessageObserver::Create(BrainComp, MessageType, InRequestID.GetID(), FOnAIMessage::CreateUObject(this, &UPawnAction::HandleAIMessage)));
+	MessageHandlers.Add(FAIMessageObserver::Create(BrainComp, MessageType, InRequestID.GetID(), FOnAIMessage::CreateUObject(this, &UDEPRECATED_PawnAction::HandleAIMessage)));
 }
 
 //----------------------------------------------------------------------//
 // blueprint interface
 //----------------------------------------------------------------------//
 
-UPawnAction* UPawnAction::CreateActionInstance(UObject* WorldContextObject, TSubclassOf<UPawnAction> ActionClass)
+UDEPRECATED_PawnAction* UDEPRECATED_PawnAction::CreateActionInstance(UObject* WorldContextObject, TSubclassOf<UDEPRECATED_PawnAction> ActionClass)
 {
 	UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
 	if (World && ActionClass)
 	{
-		return NewObject<UPawnAction>(World, ActionClass);
+		return NewObject<UDEPRECATED_PawnAction>(World, ActionClass);
 	}
 	return NULL;
 }
@@ -401,7 +405,7 @@ UPawnAction* UPawnAction::CreateActionInstance(UObject* WorldContextObject, TSub
 // debug
 //----------------------------------------------------------------------//
 
-FString UPawnAction::GetStateDescription() const
+FString UDEPRECATED_PawnAction::GetStateDescription() const
 {
 	static const UEnum* AbortStateEnum = StaticEnum<EPawnActionAbortState::Type>(); 
 		
@@ -412,14 +416,16 @@ FString UPawnAction::GetStateDescription() const
 	return IsPaused() ? TEXT("Paused") : TEXT("Active");
 }
 
-FString UPawnAction::GetPriorityName() const
+FString UDEPRECATED_PawnAction::GetPriorityName() const
 {
 	static const UEnum* Enum = StaticEnum<EAIRequestPriority::Type>();
 	check(Enum);
 	return Enum->GetNameStringByValue(GetPriority());
 }
 
-FString UPawnAction::GetDisplayName() const
+FString UDEPRECATED_PawnAction::GetDisplayName() const
 {
 	return GetClass()->GetName();
 }
+
+PRAGMA_ENABLE_DEPRECATION_WARNINGS

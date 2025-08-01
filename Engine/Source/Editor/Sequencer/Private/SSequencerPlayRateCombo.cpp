@@ -22,6 +22,8 @@
 #include "IContentBrowserSingleton.h"
 #include "ContentBrowserModule.h"
 #include "Misc/Timecode.h"
+#include "Styling/ToolBarStyle.h"
+#include "ActorTreeItem.h"
 
 #define LOCTEXT_NAMESPACE "SSequencerPlayRateCombo"
 
@@ -30,8 +32,7 @@ void SSequencerPlayRateCombo::Construct(const FArguments& InArgs, TWeakPtr<FSequ
 	WeakSequencer = InWeakSequencer;
 	WeakSequencerWidget = InWeakSequencerWidget;
 
-	FName BlockStyle = EMultiBlockLocation::ToName(ISlateStyle::Join( InArgs._StyleName, ".Button" ), InArgs._BlockLocation);
-	FName ColorStyle = ISlateStyle::Join( InArgs._StyleName, ".SToolBarComboButtonBlock.ComboButton.Color" );
+	const FToolBarStyle& SequencerToolBarStyle = FAppStyle::Get().GetWidgetStyle<FToolBarStyle>(InArgs._StyleName);
 
 	SetToolTipText(MakeAttributeSP(this, &SSequencerPlayRateCombo::GetToolTipText));
 
@@ -41,8 +42,7 @@ void SSequencerPlayRateCombo::Construct(const FArguments& InArgs, TWeakPtr<FSequ
 		SNew(SComboButton)
 		.ContentPadding(FMargin(2.f, 1.0f))
 		.VAlign(VAlign_Fill)
-		.ButtonStyle( InArgs._StyleSet, BlockStyle )
-		.ForegroundColor( InArgs._StyleSet->GetSlateColor( ColorStyle ) )
+		.ComboButtonStyle(&SequencerToolBarStyle.ComboButtonStyle)
 		.OnGetMenuContent(this, &SSequencerPlayRateCombo::OnCreateMenu)
 		.ButtonContent()
 		[
@@ -50,12 +50,12 @@ void SSequencerPlayRateCombo::Construct(const FArguments& InArgs, TWeakPtr<FSequ
 
 			+ SHorizontalBox::Slot()
 			.HAlign(HAlign_Center)
-			.VAlign(VAlign_Fill)
+			.VAlign(VAlign_Center)
 			.AutoWidth()
 			[
 				SNew(STextBlock)
 				.Text(this, &SSequencerPlayRateCombo::GetFrameRateText)
-				.TextStyle( InArgs._StyleSet, ISlateStyle::Join( InArgs._StyleName, ".Label" ) )
+				.TextStyle(&SequencerToolBarStyle.LabelStyle)
 			]
 
 			+ SHorizontalBox::Slot()
@@ -65,8 +65,8 @@ void SSequencerPlayRateCombo::Construct(const FArguments& InArgs, TWeakPtr<FSequ
 			[
 				SNew(STextBlock)
 				.Visibility(this, &SSequencerPlayRateCombo::GetFrameLockedVisibility)
-				.TextStyle( InArgs._StyleSet, ISlateStyle::Join( InArgs._StyleName, ".Label" ) )
-				.Font(FEditorStyle::Get().GetFontStyle("FontAwesome.11"))
+				.TextStyle(&SequencerToolBarStyle.LabelStyle)
+				.Font(FAppStyle::Get().GetFontStyle("FontAwesome.11"))
 				.Text(FEditorFontGlyphs::Lock)
 			]
 
@@ -91,8 +91,8 @@ void SSequencerPlayRateCombo::Construct(const FArguments& InArgs, TWeakPtr<FSequ
 				SNew(STextBlock)
 				.ToolTipText(this, &SSequencerPlayRateCombo::GetFrameRateIsMultipleOfErrorDescription)
 				.Visibility(this, &SSequencerPlayRateCombo::GetFrameRateIsMultipleOfErrorVisibility)
-				.TextStyle( InArgs._StyleSet, ISlateStyle::Join( InArgs._StyleName, ".Label" ) )
-				.Font(FEditorStyle::Get().GetFontStyle("FontAwesome.11"))
+				.TextStyle(&SequencerToolBarStyle.LabelStyle)
+				.Font(FAppStyle::Get().GetFontStyle("FontAwesome.11"))
 				.Text(FEditorFontGlyphs::Exclamation_Triangle)
 			]
 
@@ -104,8 +104,8 @@ void SSequencerPlayRateCombo::Construct(const FArguments& InArgs, TWeakPtr<FSequ
 				SNew(STextBlock)
 				.ToolTipText(this, &SSequencerPlayRateCombo::GetFrameRateMismatchErrorDescription)
 				.Visibility(this, &SSequencerPlayRateCombo::GetFrameRateMismatchErrorVisibility)
-				.TextStyle(InArgs._StyleSet, ISlateStyle::Join(InArgs._StyleName, ".Label"))
-				.Font(FEditorStyle::Get().GetFontStyle("FontAwesome.11"))
+				.TextStyle(&SequencerToolBarStyle.LabelStyle)
+				.Font(FAppStyle::Get().GetFontStyle("FontAwesome.11"))
 				.Text(FEditorFontGlyphs::Exclamation_Triangle)
 			]
 		]
@@ -194,6 +194,8 @@ FText SSequencerPlayRateCombo::GetFrameRateMismatchErrorDescription() const
 			return FText();
 		}
 
+		TArray<FText> SubSequenceDisplayRates;
+
 		for (const TTuple<FMovieSceneSequenceID, FMovieSceneSubSequenceData>& Pair : Hierarchy->AllSubSequenceData())
 		{
 			UMovieSceneSequence* SubSequence = Pair.Value.GetSequence();
@@ -203,18 +205,34 @@ FText SSequencerPlayRateCombo::GetFrameRateMismatchErrorDescription() const
 			{
 				FFrameRate SubDisplayRate = MovieScene->GetDisplayRate();
 
-				const FCommonFrameRateInfo* DisplayRateInfo = FCommonFrameRates::Find(DisplayRate);
 				const FCommonFrameRateInfo* SubDisplayRateInfo = FCommonFrameRates::Find(SubDisplayRate);
 
-				FText DisplayRateText = DisplayRateInfo ? DisplayRateInfo->DisplayName : FText::Format(LOCTEXT("DisplayRateFormat", "{0} fps"), DisplayRate.AsDecimal());
 				FText SubDisplayRateText = SubDisplayRateInfo ? SubDisplayRateInfo->DisplayName : FText::Format(LOCTEXT("SubDisplayRateFormat", "{0} fps"), SubDisplayRate.AsDecimal());
 
-				return FText::Format(LOCTEXT("FrameRateMismatchDescription", "At least one mismatch in display rate: {0} is at {1} and {2} is at {3}"), Sequencer->GetRootMovieSceneSequence()->GetDisplayName(), DisplayRateText, SubSequence->GetDisplayName(), SubDisplayRateText);
+				FText SubSequenceDescription = FText::Format(LOCTEXT("SubSequenceFrameRateMismatchDescription", "\t{0} is at {1}"), SubSequence->GetDisplayName(), SubDisplayRateText);
+				SubSequenceDisplayRates.Add(SubSequenceDescription);
 			}
+		}
+
+		if (SubSequenceDisplayRates.Num() != 0)
+		{
+			const FCommonFrameRateInfo* DisplayRateInfo = FCommonFrameRates::Find(DisplayRate);
+			FText DisplayRateText = DisplayRateInfo ? DisplayRateInfo->DisplayName : FText::Format(LOCTEXT("DisplayRateFormat", "{0} fps"), DisplayRate.AsDecimal());		
+		
+			FText Description = FText::Format(LOCTEXT("FrameRateMismatchDescription", "Mismatch in display rate: {0} is at {1}"), Sequencer->GetRootMovieSceneSequence()->GetDisplayName(), DisplayRateText);
+			SubSequenceDisplayRates.Insert(Description, 0);
+
+			return FText::Join(FText::FromString(TEXT("\n")), SubSequenceDisplayRates);
 		}
 	}
 
 	return FText();
+}
+
+bool SSequencerPlayRateCombo::GetIsSequenceReadOnly() const
+{
+	TSharedPtr<FSequencer> Sequencer = WeakSequencer.Pin();
+	return !Sequencer.IsValid() || Sequencer->IsReadOnly();
 }
 
 TSharedRef<SWidget> SSequencerPlayRateCombo::OnCreateMenu()
@@ -261,6 +279,7 @@ TSharedRef<SWidget> SSequencerPlayRateCombo::OnCreateMenu()
 				SNew(SFrameRateEntryBox)
 				.Value(this, &SSequencerPlayRateCombo::GetDisplayRate)
 				.OnValueChanged(this, &SSequencerPlayRateCombo::SetDisplayRate)
+				.IsEnabled_Lambda([this] { return !GetIsSequenceReadOnly(); })
 			],
 			LOCTEXT("CustomFramerateDisplayLabel", "Custom")
 		);
@@ -289,14 +308,11 @@ TSharedRef<SWidget> SSequencerPlayRateCombo::OnCreateMenu()
 		})
 	);
 
-	if (Sequencer->GetRootMovieSceneSequence() == Sequencer->GetFocusedMovieSceneSequence())
-	{
-		MenuBuilder.AddSubMenu(
-			LOCTEXT("ClockSource", "Clock Source"),
-			LOCTEXT("ClockSource_Description", "Change which clock should be used when playing back this sequence"),
-			FNewMenuDelegate::CreateSP(this, &SSequencerPlayRateCombo::PopulateClockSourceMenu)
-		);
-	}
+	MenuBuilder.AddSubMenu(
+		LOCTEXT("ClockSource", "Clock Source"),
+		LOCTEXT("ClockSource_Description", "Change which clock should be used when playing back this sequence"),
+		FNewMenuDelegate::CreateSP(this, &SSequencerPlayRateCombo::PopulateClockSourceMenu)
+	);
 
 	MenuBuilder.AddMenuEntry(
 		LOCTEXT("LockPlayback", "Lock to Display Rate at Runtime"),
@@ -304,7 +320,7 @@ TSharedRef<SWidget> SSequencerPlayRateCombo::OnCreateMenu()
 		FSlateIcon(),
 		FUIAction(
 			FExecuteAction::CreateSP(this, &SSequencerPlayRateCombo::OnToggleFrameLocked),
-			FCanExecuteAction(),
+			FCanExecuteAction::CreateLambda([this] { return !GetIsSequenceReadOnly(); } ),
 			FGetActionCheckState::CreateSP(this, &SSequencerPlayRateCombo::OnGetFrameLockedCheckState)
 		),
 		NAME_None,
@@ -316,7 +332,7 @@ TSharedRef<SWidget> SSequencerPlayRateCombo::OnCreateMenu()
 		LOCTEXT("AdvancedOptions_Description", "Open advanced time-related properties for this sequence"),
 		FSlateIcon(),
 		FUIAction(
-			FExecuteAction::CreateSP(SequencerWidget.Get(), &SSequencer::ShowTickResolutionOverlay)
+			FExecuteAction::CreateSP(SequencerWidget.Get(), &SSequencer::OpenTickResolutionOptions)
 		)
 	);
 
@@ -364,6 +380,8 @@ void SSequencerPlayRateCombo::PopulateClockSourceMenu(FMenuBuilder& MenuBuilder)
 
 	if (RootSequence)
 	{
+		const bool IsFocusedOnRootSequence = Sequencer->GetRootMovieSceneSequence() == Sequencer->GetFocusedMovieSceneSequence();
+
 		for (int32 Index = 0; Index < ClockSourceEnum->NumEnums() - 1; Index++)
 		{
 			if (!ClockSourceEnum->HasMetaData(TEXT("Hidden"), Index))
@@ -378,7 +396,7 @@ void SSequencerPlayRateCombo::PopulateClockSourceMenu(FMenuBuilder& MenuBuilder)
 						FNewMenuDelegate::CreateSP(this, &SSequencerPlayRateCombo::PopulateCustomClockSourceMenu),
 						FUIAction(
 							FExecuteAction::CreateSP(this, &SSequencerPlayRateCombo::SetClockSource, Value),
-							FCanExecuteAction(),
+							FCanExecuteAction::CreateLambda([this, IsFocusedOnRootSequence]{ return !GetIsSequenceReadOnly() && IsFocusedOnRootSequence; }),
 							FIsActionChecked::CreateLambda([=]{ return RootSequence->GetMovieScene()->GetClockSource() == Value; })
 						),
 						NAME_None,
@@ -393,7 +411,7 @@ void SSequencerPlayRateCombo::PopulateClockSourceMenu(FMenuBuilder& MenuBuilder)
 						FSlateIcon(),
 						FUIAction(
 							FExecuteAction::CreateSP(this, &SSequencerPlayRateCombo::SetClockSource, Value),
-							FCanExecuteAction(),
+							FCanExecuteAction::CreateLambda([this, IsFocusedOnRootSequence]{ return !GetIsSequenceReadOnly() && IsFocusedOnRootSequence; }),
 							FIsActionChecked::CreateLambda([=]{ return RootSequence->GetMovieScene()->GetClockSource() == Value; })
 						),
 						NAME_None,
@@ -414,11 +432,8 @@ void SSequencerPlayRateCombo::PopulateCustomClockSourceMenu(FMenuBuilder& MenuBu
 			return Actor && Actor->GetClass()->ImplementsInterface(UMovieSceneCustomClockSource::StaticClass());
 		};
 
-		using namespace SceneOutliner;
-
 		// Set up a menu entry to assign an actor to the object binding node
-		FInitializationOptions InitOptions;
-		InitOptions.Mode = ESceneOutlinerMode::ActorPicker;
+		FSceneOutlinerInitializationOptions InitOptions;
 
 		// We hide the header row to keep the UI compact.
 		InitOptions.bShowHeaderRow = false;
@@ -426,10 +441,10 @@ void SSequencerPlayRateCombo::PopulateCustomClockSourceMenu(FMenuBuilder& MenuBu
 		InitOptions.bShowCreateNewFolder = false;
 		InitOptions.bFocusSearchBoxWhenOpened = true;
 		// Only want the actor label column
-		InitOptions.ColumnMap.Add(FBuiltInColumnTypes::Label(), FColumnInfo(EColumnVisibility::Visible, 0));
+		InitOptions.ColumnMap.Add(FSceneOutlinerBuiltInColumnTypes::Label(), FSceneOutlinerColumnInfo(ESceneOutlinerColumnVisibility::Visible, 0));
 
 		// Only display actors that are not possessed already
-		InitOptions.Filters->AddFilterPredicate( FActorFilterPredicate::CreateLambda( IsActorValid ) );
+		InitOptions.Filters->AddFilterPredicate<FActorTreeItem>(FActorTreeItem::FFilterPredicate::CreateLambda( IsActorValid ) );
 
 		// actor selector to allow the user to choose an actor
 		FSceneOutlinerModule& SceneOutlinerModule = FModuleManager::LoadModuleChecked<FSceneOutlinerModule>("SceneOutliner");
@@ -438,7 +453,7 @@ void SSequencerPlayRateCombo::PopulateCustomClockSourceMenu(FMenuBuilder& MenuBu
 			.MaxDesiredHeight(400.0f)
 			.WidthOverride(300.0f)
 			[
-				SceneOutlinerModule.CreateSceneOutliner(InitOptions, FOnActorPicked::CreateLambda([this](AActor* In){ this->SetCustomClockSource(In); }))
+				SceneOutlinerModule.CreateActorPicker(InitOptions, FOnActorPicked::CreateLambda([this](AActor* In){ this->SetCustomClockSource(In); }))
 			],
 			FText(),
 			true /*bNoIndent*/
@@ -448,7 +463,7 @@ void SSequencerPlayRateCombo::PopulateCustomClockSourceMenu(FMenuBuilder& MenuBu
 	auto AssetClockSourceMenu = [this](FMenuBuilder& ActorMenuBuilder)
 	{
 		FAssetPickerConfig AssetPickerConfig;
-		AssetPickerConfig.Filter.ClassNames.Add(UMovieSceneCustomClockSource::StaticClass()->GetFName());
+		AssetPickerConfig.Filter.ClassPaths.Add(UMovieSceneCustomClockSource::StaticClass()->GetClassPathName());
 		AssetPickerConfig.bAllowNullSelection = false;
 		AssetPickerConfig.Filter.bRecursiveClasses = true;
 		AssetPickerConfig.OnAssetSelected = FOnAssetSelected::CreateLambda([this](const FAssetData& In){ this->SetCustomClockSource(In.GetAsset()); });
@@ -481,7 +496,7 @@ void SSequencerPlayRateCombo::AddMenuEntry(FMenuBuilder& MenuBuilder, const FCom
 		FSlateIcon(),
 		FUIAction(
 			FExecuteAction::CreateSP(this, &SSequencerPlayRateCombo::SetDisplayRate, Info.FrameRate),
-			FCanExecuteAction(),
+			FCanExecuteAction::CreateLambda([this]{ return !GetIsSequenceReadOnly(); }),
 			FIsActionChecked::CreateSP(this, &SSequencerPlayRateCombo::IsSameDisplayRate, Info.FrameRate)
 		),
 		NAME_None,
@@ -564,15 +579,17 @@ const FSlateBrush* SSequencerPlayRateCombo::GetClockSourceImage() const
 				case EUpdateClockSource::Tick:
 					return nullptr;
 				case EUpdateClockSource::Platform:
-					return FEditorStyle::GetBrush("Sequencer.ClockSource.Platform");
+					return FAppStyle::GetBrush("Sequencer.ClockSource.Platform");
 				case EUpdateClockSource::Audio:
-					return FEditorStyle::GetBrush("Sequencer.ClockSource.Audio");
+					return FAppStyle::GetBrush("Sequencer.ClockSource.Audio");
 				case EUpdateClockSource::RelativeTimecode:
-					return FEditorStyle::GetBrush("Sequencer.ClockSource.RelativeTimecode");
+					return FAppStyle::GetBrush("Sequencer.ClockSource.RelativeTimecode");
 				case EUpdateClockSource::Timecode:
-					return FEditorStyle::GetBrush("Sequencer.ClockSource.Timecode");
+					return FAppStyle::GetBrush("Sequencer.ClockSource.Timecode");
+				case EUpdateClockSource::PlayEveryFrame:
+					return FAppStyle::GetBrush("Sequencer.ClockSource.PlayEveryFrame");
 				case EUpdateClockSource::Custom:
-					return FEditorStyle::GetBrush("Sequencer.ClockSource.Custom");
+					return FAppStyle::GetBrush("Sequencer.ClockSource.Custom");
 				default:
 					return nullptr;
 			}

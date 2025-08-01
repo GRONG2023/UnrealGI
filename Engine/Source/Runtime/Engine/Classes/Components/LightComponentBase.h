@@ -10,8 +10,8 @@
 
 class UTexture2D;
 
-UCLASS(abstract, HideCategories=(Trigger,Activation,"Components|Activation",Physics), ShowCategories=(Mobility))
-class ENGINE_API ULightComponentBase : public USceneComponent
+UCLASS(abstract, HideCategories=(Trigger,Activation,"Components|Activation",Physics), ShowCategories=(Mobility), MinimalAPI)
+class ULightComponentBase : public USceneComponent
 {
 	GENERATED_UCLASS_BODY()
 
@@ -29,14 +29,14 @@ class ENGINE_API ULightComponentBase : public USceneComponent
 	/** 
 	 * Total energy that the light emits.  
 	 */
-	UPROPERTY(BlueprintReadOnly, interp, Category=Light, meta=(DisplayName = "Intensity", UIMin = "0.0", UIMax = "20.0"))
+	UPROPERTY(BlueprintReadOnly, interp, Category=Light, meta=(DisplayName = "Intensity", UIMin = "0.0", UIMax = "20.0", ShouldShowInViewport = true))
 	float Intensity;
 
 	/** 
 	 * Filter color of the light.
 	 * Note that this can change the light's effective intensity.
 	 */
-	UPROPERTY(BlueprintReadOnly, interp, Category=Light, meta=(HideAlphaChannel))
+	UPROPERTY(BlueprintReadOnly, interp, Category=Light, meta=(HideAlphaChannel, ShouldShowInViewport = true))
 	FColor LightColor;
 
 	/** 
@@ -44,7 +44,7 @@ class ENGINE_API ULightComponentBase : public USceneComponent
 	 * A disabled light will not contribute to the scene in any way.  This setting cannot be changed at runtime and unbuilds lighting when changed.
 	 * Setting this to false has the same effect as deleting the light, so it is useful for non-destructive experiments.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Light)
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Light, meta = (ShouldShowInViewport = true))
 	uint32 bAffectsWorld:1;
 
 	/**
@@ -70,7 +70,7 @@ class ENGINE_API ULightComponentBase : public USceneComponent
 	uint32 bAffectTranslucentLighting:1;
 
 	/** Whether light from this light transmits through surfaces with subsurface scattering profiles. Requires light to be movable. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Light, AdvancedDisplay)
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Light, AdvancedDisplay, meta = (EditCondition="Mobility==EComponentMobility::Movable"))
 	uint32 bTransmission : 1;
 
 	/** Whether the light shadows volumetric fog.  Disabling this can save GPU time. */
@@ -84,8 +84,11 @@ class ENGINE_API ULightComponentBase : public USceneComponent
 	uint32 bCastDeepShadow : 1;
 
 	/** Whether the light shadows are computed with shadow-mapping or ray-tracing (when available). */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Light, meta = (DisplayName = "Cast Ray Tracing Shadows"), AdvancedDisplay)
-	uint32 bCastRaytracedShadow : 1;
+	UPROPERTY()
+	uint32 bCastRaytracedShadow_DEPRECATED : 1;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Light, meta = (DisplayName = "Cast Ray Traced Shadows"), AdvancedDisplay)
+	TEnumAsByte<ECastRayTracedShadow::Type> CastRaytracedShadow;
 
 	/** Whether the light affects objects in reflections, when ray-traced reflection is enabled. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Light, AdvancedDisplay, meta = (DisplayName = "Affect Ray Tracing Reflections"))
@@ -119,7 +122,7 @@ class ENGINE_API ULightComponentBase : public USceneComponent
 #if WITH_EDITORONLY_DATA
 	/** Sprite for static light in the editor. */
 	UPROPERTY(transient)
-	UTexture2D* StaticEditorTexture;
+	TObjectPtr<UTexture2D> StaticEditorTexture;
 
 	/** Sprite scaling for static light in the editor. */
 	UPROPERTY(transient)
@@ -127,7 +130,7 @@ class ENGINE_API ULightComponentBase : public USceneComponent
 
 	/** Sprite for dynamic light in the editor. */
 	UPROPERTY(transient)
-	UTexture2D* DynamicEditorTexture;
+	TObjectPtr<UTexture2D> DynamicEditorTexture;
 
 	/** Sprite scaling for dynamic light in the editor. */
 	UPROPERTY(transient)
@@ -136,41 +139,44 @@ class ENGINE_API ULightComponentBase : public USceneComponent
 
 	/** Sets whether this light casts shadows */
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light")
-	void SetCastShadows(bool bNewValue);
+	ENGINE_API void SetCastShadows(bool bNewValue);
 
 	/** Gets the light color as a linear color */
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|Light")
-	FLinearColor GetLightColor() const;
+	ENGINE_API FLinearColor GetLightColor() const;
 
 	UFUNCTION(BlueprintCallable, Category = "Rendering|Components|Light")
-	void SetCastVolumetricShadow(bool bNewValue);
+	ENGINE_API void SetCastVolumetricShadow(bool bNewValue);
 
 	UFUNCTION(BlueprintCallable, Category = "Rendering|Components|Light")
-	void SetCastDeepShadow(bool bNewValue);
+	ENGINE_API void SetCastDeepShadow(bool bNewValue);
 
 	UFUNCTION(BlueprintCallable, Category = "Rendering|Components|Light")
-	void SetAffectReflection(bool bNewValue);
+	ENGINE_API void SetAffectReflection(bool bNewValue);
 
 	UFUNCTION(BlueprintCallable, Category = "Rendering|Components|Light")
-	void SetAffectGlobalIllumination(bool bNewValue);
+	ENGINE_API void SetAffectGlobalIllumination(bool bNewValue);
+
+	UFUNCTION(BlueprintCallable, Category = "Rendering|Components|Light", meta = (DeprecatedFunction, DeprecationMessage = "ULightComponentBase::SetCastRaytracedShadow is deprecated. Use ULightComponentBase::SetCastRaytracedShadows instead."))
+	ENGINE_API void SetCastRaytracedShadow(bool bNewValue);
 
 	UFUNCTION(BlueprintCallable, Category = "Rendering|Components|Light")
-	void SetCastRaytracedShadow(bool bNewValue);
+	ENGINE_API void SetCastRaytracedShadows(ECastRayTracedShadow::Type bNewValue);
 
 	UFUNCTION(BlueprintCallable, Category = "Rendering|Components|Light")
-	void SetSamplesPerPixel(int NewValue);
+	ENGINE_API void SetSamplesPerPixel(int NewValue);
 
-	virtual void Serialize(FArchive& Ar) override;
+	ENGINE_API virtual void Serialize(FArchive& Ar) override;
 
 	/**
 	 * Called after duplication & serialization and before PostLoad. Used to e.g. make sure GUIDs remains globally unique.
 	 */
-	virtual void PostDuplicate(EDuplicateMode::Type DuplicateMode) override;
+	ENGINE_API virtual void PostDuplicate(EDuplicateMode::Type DuplicateMode) override;
 
 #if WITH_EDITOR
 	/** UObject interface */
-	virtual void PostEditImport() override;
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	ENGINE_API virtual void PostEditImport() override;
+	ENGINE_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 
 	/**
 	* @return Path to the editor sprite for the light component class
@@ -189,18 +195,18 @@ class ENGINE_API ULightComponentBase : public USceneComponent
 	}
 
 	/** Update the texture used on the editor sprite */
-	virtual void UpdateLightSpriteTexture();
+	ENGINE_API virtual void UpdateLightSpriteTexture();
 #endif
 
 	/**
 	 * Validate light GUIDs and resets as appropriate.
 	 */
-	void ValidateLightGUIDs();
+	ENGINE_API void ValidateLightGUIDs();
 
 	/**
 	 * Update/reset light GUIDs.
 	 */
-	virtual void UpdateLightGUIDs();
+	ENGINE_API virtual void UpdateLightGUIDs();
 
 	/** Returns true if the light's Mobility is set to Movable */
 	bool IsMovable() const
@@ -212,30 +218,30 @@ class ENGINE_API ULightComponentBase : public USceneComponent
 	 * Return True if a light's parameters as well as its position is static during gameplay, and can thus use static lighting.
 	 * A light with HasStaticLighting() == true will always have HasStaticShadowing() == true as well.
 	 */
-	bool HasStaticLighting() const;
+	ENGINE_API bool HasStaticLighting() const;
 
 	/** 
 	 * Whether the light has static direct shadowing.  
 	 * The light may still have dynamic brightness and color. 
 	 * The light may or may not also have static lighting.
 	 */
-	bool HasStaticShadowing() const;
+	ENGINE_API bool HasStaticShadowing() const;
 
 #if WITH_EDITOR
 	/** UObject Interface */
-	virtual void PostLoad() override;
+	ENGINE_API virtual void PostLoad() override;
 
 	/** UActorComponent Interface */
-	virtual void OnRegister() override;
-	virtual void OnUnregister() override;
-	virtual bool CanEditChange(const FProperty* InProperty) const override;
+	ENGINE_API virtual void OnRegister() override;
+	ENGINE_API virtual void OnUnregister() override;
+	ENGINE_API virtual bool CanEditChange(const FProperty* InProperty) const override;
 #endif
 
 	/** We return a small bounds to allow us to non-interpenetrates when placing lights in the level. */
-	virtual bool ShouldCollideWhenPlacing() const override;
+	ENGINE_API virtual bool ShouldCollideWhenPlacing() const override;
 
 	/** Get the extent used when placing this component in the editor, used for 'pulling back' hit. */
-	virtual FBoxSphereBounds GetPlacementExtent() const override;
+	ENGINE_API virtual FBoxSphereBounds GetPlacementExtent() const override;
 };
 
 

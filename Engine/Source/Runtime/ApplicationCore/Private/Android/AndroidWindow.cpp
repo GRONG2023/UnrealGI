@@ -14,32 +14,90 @@
 #include "Misc/CommandLine.h"
 #include "HAL/PlatformStackWalk.h"
 
-struct FCachedWindowRect
-{
-	FCachedWindowRect() : WindowWidth(-1), WindowHeight(-1), WindowInit(false), ContentScaleFactor(-1.0f), Window_EventThread(nullptr)
-	{
-	}
 
-	int32 WindowWidth;
-	int32 WindowHeight;
-	bool WindowInit;
-	float ContentScaleFactor;
-	ANativeWindow* Window_EventThread;
+int32 GAndroidWindowDPI = 0;
+static FAutoConsoleVariableRef CVarAndroidWindowDPI(
+	TEXT("Android.WindowDPI"),
+	GAndroidWindowDPI,
+	TEXT("Values > 0 will set the system window resolution (i.e. swap buffer) to achieve the DPI requested.\n")
+	TEXT("default: 0"),
+	ECVF_ReadOnly);
+
+int32 GAndroidWindowDPIQueryMethod = 0;
+static FAutoConsoleVariableRef CVarAndroidWindowDPIQueryMethod(
+	TEXT("Android.DPIQueryMethod"),
+	GAndroidWindowDPIQueryMethod,
+	TEXT("The method used to determine the native screen DPI when calculating the scale factor required to achieve the requested Android.WindowDPI.\n")
+	TEXT("0: Use displaymetrics xdpi/ydpi (default)\n")
+	TEXT("1: Use displaymetrics densityDpi"),
+	ECVF_ReadOnly);
+
+int32 GAndroid3DSceneMaxDesiredPixelCount = 0;
+static FAutoConsoleVariableRef CVarAndroid3DSceneMaxDesiredPixelCount(
+	TEXT("Android.3DSceneMaxDesiredPixelCount"),
+	GAndroid3DSceneMaxDesiredPixelCount,
+	TEXT("Works in conjunction with Android.WindowDPI, this specifies a maximum pixel count for the 3D scene.\n")
+	TEXT("Values >0 will be used to scale down the 3D scene (equivalent to setting r.screenpercentage)\n")
+	TEXT("such that the 3d scene will be no more than 3DSceneMaxDesiredPixelCount pixels.\n")
+	TEXT("This is only applied if the 3d scene pixel at the 'Android.WindowDPI' DPI goes above the specified value.\n")
+	TEXT("default: 0"),
+	ECVF_ReadOnly);
+
+int32 GAndroid3DSceneMinDPI = 0;
+static FAutoConsoleVariableRef CVarAndroid3DSceneMinDPI(
+	TEXT("Android.3DSceneMinDPI"),
+	GAndroid3DSceneMinDPI,
+	TEXT("Works in conjunction with Android.3DSceneMaxDesiredPixelCount, and specifies a minimum DPI level for the 3D scene.\n")
+	TEXT("Values >0 specify an absolute minimum 3D scene DPI, if Android.3DSceneMaxDesiredPixelCount causes the 3d resolution to be below\n")
+	TEXT("Android.3DSceneMinDPI then the scale factor will be set to achieve the minimum dpi.\n")
+	TEXT("Useful to achieve a minimum quality level on low DPI devices at the expense of GPU performance.\n")
+	TEXT("default: 0"),
+	ECVF_ReadOnly);
+
+int GAndroidPropagateAlpha = 0;
+
+struct FAndroidCachedWindowRectParams
+{
+	int32 WindowWidth = -1;
+	int32 WindowHeight = -1;
+
+	float ContentScaleFactor = -1.0f;
+	int32 MobileResX = -1;
+	int32 MobileResY = -1;
+
+	int32 WindowDPI = -1;
+	int32 SceneMinDPI = -1;
+	int32 SceneMaxDesiredPixelCount = -1;
+
+	ANativeWindow* Window_EventThread = nullptr;
+
+	bool operator ==(const FAndroidCachedWindowRectParams& Rhs) const { return FMemory::Memcmp(this, &Rhs, sizeof(Rhs)) == 0; }
+	bool operator !=(const FAndroidCachedWindowRectParams& Rhs) const { return FMemory::Memcmp(this, &Rhs, sizeof(Rhs)) != 0; }
 };
 
 
 // Cached calculated screen resolution
-static FCachedWindowRect CachedWindowRect;
-static FCachedWindowRect CachedWindowRect_EventThread;
+static FAndroidCachedWindowRectParams CachedWindowRect;
+static FAndroidCachedWindowRectParams CachedWindowRect_EventThread;
+
+const FAndroidCachedWindowRectParams& GetCachedRect(bool bUseEventThreadWindow)
+{
+	return bUseEventThreadWindow ? CachedWindowRect_EventThread : CachedWindowRect;
+}
 
 static void ClearCachedWindowRects()
 {
-	CachedWindowRect.WindowInit = false;
-	CachedWindowRect_EventThread.WindowInit = false;
+	CachedWindowRect = FAndroidCachedWindowRectParams();
+	CachedWindowRect_EventThread = FAndroidCachedWindowRectParams();
 }
 
-static int32 GSurfaceViewWidth = -1;
-static int32 GSurfaceViewHeight = -1;
+static int32 GSurfaceViewX = 0;
+static int32 GSurfaceViewY = 0;
+int32 GSurfaceViewWidth = -1;
+int32 GSurfaceViewHeight = -1;
+
+void* GAndroidWindowOverride = nullptr;
+static ANativeWindow* GAcquiredWindow = nullptr;
 
 void* FAndroidWindow::NativeWindow = NULL;
 
@@ -85,26 +143,35 @@ void FAndroidWindow::SetOSWindowHandle(void* InWindow)
 
 //This function is declared in the Java-defined class, GameActivity.java: "public native void nativeSetObbInfo(String PackageName, int Version, int PatchVersion);"
 static bool GAndroidIsPortrait = false;
+static EDeviceScreenOrientation GDeviceScreenOrientation = EDeviceScreenOrientation::Unknown;
 static int GAndroidDepthBufferPreference = 0;
 static FVector4 GAndroidPortraitSafezone = FVector4(-1.0f, -1.0f, -1.0f, -1.0f);
 static FVector4 GAndroidLandscapeSafezone = FVector4(-1.0f, -1.0f, -1.0f, -1.0f);
 #if USE_ANDROID_JNI
-JNI_METHOD void Java_com_epicgames_ue4_GameActivity_nativeSetWindowInfo(JNIEnv* jenv, jobject thiz, jboolean bIsPortrait, jint DepthBufferPreference)
+JNI_METHOD void Java_com_epicgames_unreal_GameActivity_nativeSetWindowInfo(JNIEnv* jenv, jobject thiz, jboolean bIsPortrait, jint DepthBufferPreference, jint PropagateAlpha)
 {
 	ClearCachedWindowRects();
 	GAndroidIsPortrait = bIsPortrait == JNI_TRUE;
 	GAndroidDepthBufferPreference = DepthBufferPreference;
+	GAndroidPropagateAlpha = PropagateAlpha;
 	FPlatformMisc::LowLevelOutputDebugStringf(TEXT("App is running in %s\n"), GAndroidIsPortrait ? TEXT("Portrait") : TEXT("Landscape"));
+	FPlatformMisc::LowLevelOutputDebugStringf(TEXT("AndroidPropagateAlpha =  %d\n"), GAndroidPropagateAlpha);
 }
 
-JNI_METHOD void Java_com_epicgames_ue4_GameActivity_nativeSetSurfaceViewInfo(JNIEnv* jenv, jobject thiz, jint width, jint height)
+JNI_METHOD void Java_com_epicgames_unreal_GameActivity_nativeSetSurfaceViewInfo(JNIEnv* jenv, jobject thiz, jint width, jint height)
 {
-	GSurfaceViewWidth = width;
-	GSurfaceViewHeight = height;
-	UE_LOG(LogAndroid, Log, TEXT("nativeSetSurfaceViewInfo width=%d and height=%d"), GSurfaceViewWidth, GSurfaceViewHeight);
+	STANDALONE_DEBUG_LOG( TEXT("nativeSetSurfaceViewInfo prev[width=%d, height=%d] new[width=%d, height=%d]"), GSurfaceViewWidth, GSurfaceViewHeight, width, height);
+
+	if (GAndroidWindowOverride != nullptr && (width != GSurfaceViewWidth || height != GSurfaceViewHeight))	
+	{
+		GSurfaceViewWidth = width;
+		GSurfaceViewHeight = height;
+		FAppEventManager::GetInstance()->EnqueueAppEvent(APP_EVENT_STATE_WINDOW_RESIZED, FAppEventData((ANativeWindow*)GAndroidWindowOverride));
+		STANDALONE_DEBUG_LOG(TEXT("nativeSetSurfaceViewInfo width=%d and height=%d"), GSurfaceViewWidth, GSurfaceViewHeight);
+	}
 }
 
-JNI_METHOD void Java_com_epicgames_ue4_GameActivity_nativeSetSafezoneInfo(JNIEnv* jenv, jobject thiz, jboolean bIsPortrait, jfloat left, jfloat top, jfloat right, jfloat bottom)
+JNI_METHOD void Java_com_epicgames_unreal_GameActivity_nativeSetSafezoneInfo(JNIEnv* jenv, jobject thiz, jboolean bIsPortrait, jfloat left, jfloat top, jfloat right, jfloat bottom)
 {
 	if (bIsPortrait)
 	{
@@ -120,7 +187,41 @@ JNI_METHOD void Java_com_epicgames_ue4_GameActivity_nativeSetSafezoneInfo(JNIEnv
 		GAndroidLandscapeSafezone.Z = right;
 		GAndroidLandscapeSafezone.W = bottom;
 	}
+#if USE_ANDROID_EVENTS
+	FAppEventManager::GetInstance()->EnqueueAppEvent(APP_EVENT_STATE_SAFE_ZONE_UPDATED);
+#endif
+	UE_LOG(LogAndroid, Log, TEXT("nativeSetSafezoneInfo bIsPortrait=%d, left=%f, top=%f, right=%f, bottom=%f"), bIsPortrait ? 1 : 0, left, top, right, bottom);
 }
+
+#if USE_ANDROID_STANDALONE
+
+JNI_METHOD void Java_com_epicgames_makeaar_GameActivityForMakeAAR_nativeSetSurfaceOverride(JNIEnv* jenv, jobject thiz, jobject surface, jint x, jint y)
+{
+	ANativeWindow* prev = (ANativeWindow*)GAndroidWindowOverride;
+	if (surface != 0)
+	{
+		GSurfaceViewX = x;
+		GSurfaceViewY = y;
+
+		GAndroidWindowOverride = (ANativeWindow*)ANativeWindow_fromSurface(jenv, surface);
+		UE_LOG(LogAndroid, Log, TEXT("nativeSetSurfaceOverride applied: prev to new %p -> %p, pos(%d, %d)"), prev, GAndroidWindowOverride, GSurfaceViewX, GSurfaceViewY);
+
+	}
+	else
+	{
+		GAndroidWindowOverride = nullptr;
+		
+		STANDALONE_DEBUG_LOG(TEXT("nativeSetSurfaceOverride(makeaar) setting to null"));
+	}
+
+	if (prev != nullptr)
+	{
+		ANativeWindow_release(prev);
+	}
+}
+
+#endif // USE_ANDROID_STANDALONE
+
 #endif
 
 bool FAndroidWindow::bAreCachedNativeDimensionsValid = false;
@@ -150,27 +251,104 @@ void FAndroidWindow::InvalidateCachedScreenRect()
 void FAndroidWindow::AcquireWindowRef(ANativeWindow* InWindow)
 {
 #if USE_ANDROID_JNI
+#if USE_ANDROID_STANDALONE
+	STANDALONE_DEBUG_LOG(TEXT("AcquireWindowRef USE_ANDROID_JNI is enabled: InWindow=%p, GAcquiredWindow=%p, GAndroidWindowOverride=%p"), InWindow, GAcquiredWindow, GAndroidWindowOverride);
+
+	if (InWindow == nullptr)
+	{
+		UE_LOG(LogAndroid, Log, TEXT("FAndroidWindow::AcquireWindowRef skipped because InWindow is null."));
+		return;
+	}
+
+	if (GAcquiredWindow == InWindow)
+	{
+		STANDALONE_DEBUG_LOG(TEXT("AcquireWindowRef USE_ANDROID_JNI is enabled: %p and GAcquiredWindow == InWindow"), InWindow);
+		return;
+	}
+
+	if (GAcquiredWindow != nullptr)
+	{
+		STANDALONE_DEBUG_LOG(TEXT("AcquireWindowRef USE_ANDROID_JNI is enabled: %p and GAcquiredWindow != nullptr"), InWindow);
+
+		ReleaseWindowRef(GAcquiredWindow);
+	}
+
+	check(GAcquiredWindow == NULL);
+	STANDALONE_DEBUG_LOG(TEXT("AcquireWindowRef USE_ANDROID_JNI is enabled: %p and ANativeWindow_acquire"), InWindow);
+
+	// Added logic to store the Acquired window and when calling ReleaseWindowRef, check if the window is the same and only release if it matches
+	// This logic is to deal with the fact Android lifecycles for activities can overlap. ideally we would create a context based container to manage this
+	// but for now this is a useful protection.
+	GAcquiredWindow = InWindow;
+	STANDALONE_DEBUG_LOG(TEXT("FAndroidWindow::AcquireWindowRef GAcquiredWindow=%p, GAndroidWindowOverride=%p"), GAcquiredWindow, GAndroidWindowOverride);
+#endif //USE_ANDROID_STANDALONE
+
 	ANativeWindow_acquire(InWindow);
+
 #endif
 }
 
 void FAndroidWindow::ReleaseWindowRef(ANativeWindow* InWindow)
 {
 #if USE_ANDROID_JNI
+#if USE_ANDROID_STANDALONE
+	if (GAcquiredWindow == nullptr && InWindow == nullptr)
+	{
+		STANDALONE_DEBUG_LOG(TEXT("ReleaseWindowRef skipped because GAcquiredWindow is null.  Window %p reference will not be released."), InWindow);
+		return;
+	}
+
+	ANativeWindow* ReleaseWindow = GAcquiredWindow;
+	if (InWindow == nullptr || GAcquiredWindow == InWindow)
+	{
+		InWindow = GAcquiredWindow;
+		GAcquiredWindow = nullptr;
+	}
+
+	STANDALONE_DEBUG_LOG(TEXT("ReleaseWindowRef using window: %p"), InWindow);
+#endif //USE_ANDROID_STANDALONE
 	ANativeWindow_release(InWindow);
 #endif
 }
 
- void FAndroidWindow::SetHardwareWindow_EventThread(void* InWindow)
+void FAndroidWindow::SetHardwareWindow_EventThread(void* InWindow)
 {
 #if USE_ANDROID_EVENTS
+	STANDALONE_DEBUG_LOGf(LogAndroid, TEXT("SetHardwareWindow_EventThread(USE_ANDROID_EVENTS) -> InWindow(%p), GAndroidWindowOverride(%p), IsInAndroidEventThread()=%d"), InWindow, GAndroidWindowOverride, IsInAndroidEventThread());
+
 	check(IsInAndroidEventThread());
 #endif
-	NativeWindow = InWindow; //using raw native window handle for now. Could be changed to use AndroidWindow later if needed
+
+#if USE_ANDROID_STANDALONE
+	if (GAndroidWindowOverride && InWindow != GAndroidWindowOverride)
+	{
+		STANDALONE_DEBUG_LOGf(LogAndroid, TEXT("SetHardwareWindow_EventThread(USE_ANDROID_STANDALONE) -> InWindow(%p) is not current GAndroidWindowOverride(%p)"), InWindow, GAndroidWindowOverride);
+	}
+#endif
+
+	//using raw native window handle for now. Could be changed to use AndroidWindow later if needed
+	NativeWindow = InWindow;
 }
 
 void* FAndroidWindow::GetHardwareWindow_EventThread()
 {
+#if USE_ANDROID_STANDALONE
+	void* result = GAndroidWindowOverride != nullptr ? GAndroidWindowOverride : NativeWindow;
+	if (result != nullptr)
+	{
+		if (GAndroidWindowOverride != NativeWindow)
+		{
+			STANDALONE_DEBUG_LOGf(LogAndroid, TEXT("GetHardwareWindow_EventThread GAndroidWindowOverride=%p, NativeWindow=%p"), GAndroidWindowOverride, NativeWindow);
+		}
+		return result;
+	}
+	else
+	{
+		//STANDALONE_DEBUG_LOGf(LogAndroid, TEXT("ERROR: GetHardwareWindow_EventThread has invalid window!!! GAndroidWindowOverride=%p, NativeWindow=%p"), GAndroidWindowOverride, NativeWindow);
+		return result;
+	}
+#endif
+
 	return NativeWindow;
 }
 
@@ -196,7 +374,7 @@ bool FAndroidWindow::WaitForWindowDimensions()
 // once set the dimensions are 'valid' and further changes are updated via FAppEventManager::Tick 
 void FAndroidWindow::SetWindowDimensions_EventThread(ANativeWindow* DimensionWindow)
 {
-	if(bAreCachedNativeDimensionsValid == false)
+	if (bAreCachedNativeDimensionsValid == false)
 	{
 #if USE_ANDROID_JNI
 		CachedNativeWindowWidth = ANativeWindow_getWidth(DimensionWindow);
@@ -220,6 +398,17 @@ void FAndroidWindow::EventManagerUpdateWindowDimensions(int32 Width, int32 Heigh
 	check(bAreCachedNativeDimensionsValid);
 	check(Width >= 0 && Height >= 0);
 
+#if USE_ANDROID_STANDALONE
+	STANDALONE_DEBUG_LOGf(LogAndroid, TEXT("FAndroidWindow::EventManagerUpdateWindowDimensions GAndroidWindowOverride=%p, Width=%d, Height=%d, GSurfaceViewWidth=%d, GSurfaceViewHeight=%d, CachedNativeWindowWidth=%d, CachedNativeWindowHeight=%d"),
+		GAndroidWindowOverride, Width, Height, GSurfaceViewWidth, GSurfaceViewHeight, CachedNativeWindowWidth, CachedNativeWindowHeight);
+
+	if (GAndroidWindowOverride && GSurfaceViewWidth > 0)
+	{
+		Width = GSurfaceViewWidth;
+		Height = GSurfaceViewHeight;
+	}
+#endif
+
 	bool bChanged = CachedNativeWindowWidth != Width || CachedNativeWindowHeight != Height;
 
 	CachedNativeWindowWidth = Width;
@@ -242,7 +431,6 @@ void* FAndroidWindow::WaitForHardwareWindow()
 
 	// Before sleeping, we peek into the event manager queue to see if it contains an ON_DESTROY event, 
 	// in which case, we exit the loop to allow the application to exit before a window has been created.
-	// For instance when the user aborts the "Place your phone into thr Daydream headset." screen.
 	// It is not sufficient to check the IsEngineExitRequested() global function, as the handler reacting to the APP_EVENT_STATE_ON_DESTROY
 	// may be running in the same thread as this method and therefore lead to a deadlock.
 
@@ -266,29 +454,54 @@ void* FAndroidWindow::WaitForHardwareWindow()
 extern bool AndroidThunkCpp_IsOculusMobileApplication();
 #endif
 
-bool FAndroidWindow::IsCachedRectValid(bool bUseEventThreadWindow, const float RequestedContentScaleFactor, ANativeWindow* Window)
+static bool IsCachedRectValid(bool bUseEventThreadWindow, const FAndroidCachedWindowRectParams& TestRect)
 {
 	// window must be valid when bUseEventThreadWindow and null when !bUseEventThreadWindow.
-	check((Window != nullptr) == bUseEventThreadWindow);
+	check((TestRect.Window_EventThread != nullptr) == bUseEventThreadWindow);
 
-	const FCachedWindowRect& CachedRect = bUseEventThreadWindow ? CachedWindowRect_EventThread : CachedWindowRect;
-
-	if (!CachedRect.WindowInit)
-	{
-		return false;
-	}
+	const FAndroidCachedWindowRectParams& CachedRect = GetCachedRect(bUseEventThreadWindow);
 
 	bool bValidCache = true;
 
-	if (CachedRect.ContentScaleFactor != RequestedContentScaleFactor )
+	if (CachedRect.ContentScaleFactor != TestRect.ContentScaleFactor)
 	{
-		FPlatformMisc::LowLevelOutputDebugStringf(TEXT("***** RequestedContentScaleFactor different %f != %f, not using res cache (%d)"), RequestedContentScaleFactor, CachedWindowRect.ContentScaleFactor, (int32)bUseEventThreadWindow);
+		FPlatformMisc::LowLevelOutputDebugStringf(TEXT("***** RequestedContentScaleFactor different %f != %f, not using res cache (%d)"), TestRect.ContentScaleFactor, CachedWindowRect.ContentScaleFactor, (int32)bUseEventThreadWindow);
 		bValidCache = false;
 	}
 
-	if (CachedRect.Window_EventThread != Window)
+	if (CachedRect.MobileResX != TestRect.MobileResX)
+	{
+		FPlatformMisc::LowLevelOutputDebugStringf(TEXT("***** RequestedMobileResX different %d != %d, not using res cache (%d)"), TestRect.MobileResX, CachedWindowRect.MobileResX, (int32)bUseEventThreadWindow);
+		bValidCache = false;
+	}
+
+	if (CachedRect.MobileResY != TestRect.MobileResY)
+	{
+		FPlatformMisc::LowLevelOutputDebugStringf(TEXT("***** RequestedMobileResY different %d != %d, not using res cache (%d)"), TestRect.MobileResY, CachedWindowRect.MobileResY, (int32)bUseEventThreadWindow);
+		bValidCache = false;
+	}
+
+	if (CachedRect.Window_EventThread != TestRect.Window_EventThread)
 	{
 		FPlatformMisc::LowLevelOutputDebugStringf(TEXT("***** Window different, not using res cache (%d)"), (int32)bUseEventThreadWindow);
+		bValidCache = false;
+	}
+
+	if (CachedRect.WindowDPI != TestRect.WindowDPI)
+	{
+		FPlatformMisc::LowLevelOutputDebugStringf(TEXT("***** WindowDPI is %d, not using res cache (%d)"), TestRect.WindowDPI, (int32)bUseEventThreadWindow);
+		bValidCache = false;
+	}
+
+	if (CachedRect.SceneMaxDesiredPixelCount != TestRect.SceneMaxDesiredPixelCount)
+	{
+		FPlatformMisc::LowLevelOutputDebugStringf(TEXT("***** SceneMaxDesiredPixelCount is %d, not using res cache (%d)"), TestRect.SceneMaxDesiredPixelCount, (int32)bUseEventThreadWindow);
+		bValidCache = false;
+	}
+
+	if (CachedRect.SceneMinDPI != TestRect.SceneMinDPI)
+	{
+		FPlatformMisc::LowLevelOutputDebugStringf(TEXT("***** SceneMinDPI is %d, not using res cache (%d)"), TestRect.SceneMinDPI, (int32)bUseEventThreadWindow);
 		bValidCache = false;
 	}
 
@@ -301,18 +514,22 @@ bool FAndroidWindow::IsCachedRectValid(bool bUseEventThreadWindow, const float R
 	return bValidCache;
 }
 
-void FAndroidWindow::CacheRect(bool bUseEventThreadWindow, const int32 Width, const int32 Height, const float RequestedContentScaleFactor, ANativeWindow* Window)
+void CacheRect(bool bUseEventThreadWindow, const FAndroidCachedWindowRectParams& NewValues)
 {
-	check(Window != nullptr || !bUseEventThreadWindow);
+	check(NewValues.Window_EventThread != nullptr || !bUseEventThreadWindow);
 
-	FCachedWindowRect& CachedRect = bUseEventThreadWindow ? CachedWindowRect_EventThread : CachedWindowRect;
+	(bUseEventThreadWindow ? CachedWindowRect_EventThread : CachedWindowRect) = NewValues;
 
-	CachedRect.WindowWidth = Width;
-	CachedRect.WindowHeight = Height;
-	CachedRect.WindowInit = true;
-	CachedRect.ContentScaleFactor = RequestedContentScaleFactor;
-	CachedRect.Window_EventThread = Window;
+	UE_LOG(LogAndroid, Log, TEXT("***** Cached WindowRect %d, %d (%d)"), NewValues.WindowWidth, NewValues.WindowHeight, (int32)bUseEventThreadWindow);
 }
+
+struct FAndroidDisplayInfo
+{
+	FIntVector2 WindowDims;
+	float SceneScaleFactor;
+};
+
+static FAndroidDisplayInfo GetAndroidDisplayInfoFromDPITargets(int32 TargetDPI, int32 SceneMaxDesiredPixelCount, int32 LowerLimit3DDPI);
 
 FPlatformRect FAndroidWindow::GetScreenRect(bool bUseEventThreadWindow)
 {
@@ -331,44 +548,16 @@ FPlatformRect FAndroidWindow::GetScreenRect(bool bUseEventThreadWindow)
 	// too much of the following code needs JNI things, just assume override
 #if !USE_ANDROID_JNI
 
-	UE_LOG(LogAndroid, Fatal, TEXT("FAndroidWindow::CalculateSurfaceSize currently expedcts non-JNI platforms to override resolution"));
+	UE_LOG(LogAndroid, Fatal, TEXT("FAndroidWindow::CalculateSurfaceSize currently expects non-JNI platforms to override resolution"));
 	return FPlatformRect();
 #else
 
 	static const bool bIsOculusMobileApp = AndroidThunkCpp_IsOculusMobileApplication();
-	static const bool bIsDaydreamApp = FAndroidMisc::IsDaydreamApplication();
-	if (bIsDaydreamApp)
-	{
-		// TODO: confirm that this is no longer required.
-		ANativeWindow* Window = (ANativeWindow*)FAndroidWindow::GetHardwareWindow_EventThread();
-		if (Window == NULL)
-		{
-			// Sleep if the hardware window isn't currently available.
-			FPlatformMisc::LowLevelOutputDebugString(TEXT("Waiting for Native window in FAndroidWindow::GetScreenRect"));
-			Window = (ANativeWindow*)FAndroidWindow::WaitForHardwareWindow();
-		}
-
-		if (Window == NULL)
-		{
-			FPlatformRect ScreenRect;
-			ScreenRect.Left = 0;
-			ScreenRect.Top = 0;
-			ScreenRect.Right = GAndroidIsPortrait ? 720 : 1280;
-			ScreenRect.Bottom = GAndroidIsPortrait ? 1280 : 720;
-
-			UE_LOG(LogAndroid, Log, TEXT("FAndroidWindow::GetScreenRect: Window was NULL, returned default resolution: %d x %d"), ScreenRect.Right, ScreenRect.Bottom);
-
-			return ScreenRect;
-		}
-
-		// dont cache rect.
-		bUseEventThreadWindow = true;
-	}
 
 	// CSF is a multiplier to 1280x720
-	static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.MobileContentScaleFactor"));
+	static IConsoleVariable* CVarScale = IConsoleManager::Get().FindConsoleVariable(TEXT("r.MobileContentScaleFactor"));
 	// If the app is for Oculus Mobile then always use 0 as ScaleFactor (to match window size).
-	float RequestedContentScaleFactor = bIsOculusMobileApp ? 0.0f : CVar->GetFloat();
+	float RequestedContentScaleFactor = bIsOculusMobileApp ? 0.0f : CVarScale->GetFloat();
 
 	FString CmdLineCSF;
 	if (FParse::Value(FCommandLine::Get(), TEXT("mcsf="), CmdLineCSF, false))
@@ -376,9 +565,33 @@ FPlatformRect FAndroidWindow::GetScreenRect(bool bUseEventThreadWindow)
 		RequestedContentScaleFactor = FCString::Atof(*CmdLineCSF);
 	}
 
+	static IConsoleVariable* CVarResX = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Mobile.DesiredResX"));
+	static IConsoleVariable* CVarResY = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Mobile.DesiredResY"));
+	int32 RequestedResX = bIsOculusMobileApp ? 0 : CVarResX->GetInt();
+	int32 RequestedResY = bIsOculusMobileApp ? 0 : CVarResY->GetInt();
+
+	FString CmdLineMDRes;
+	if (FParse::Value(FCommandLine::Get(), TEXT("mobileresx="), CmdLineMDRes, false))
+	{
+		RequestedResX = FCString::Atoi(*CmdLineMDRes);
+	}
+	if (FParse::Value(FCommandLine::Get(), TEXT("mobileresy="), CmdLineMDRes, false))
+	{
+		RequestedResY = FCString::Atoi(*CmdLineMDRes);
+	}
+
 	// since orientation won't change on Android, use cached results if still valid. Different cache is maintained for event_thread flavor.
 	ANativeWindow* Window = bUseEventThreadWindow ? (ANativeWindow*)FAndroidWindow::GetHardwareWindow_EventThread() : nullptr;
-	bool bComputeRect = !IsCachedRectValid(bUseEventThreadWindow, RequestedContentScaleFactor, Window);
+	FAndroidCachedWindowRectParams CurrentParams;
+	CurrentParams.ContentScaleFactor = RequestedContentScaleFactor;
+	CurrentParams.MobileResX = RequestedResX;
+	CurrentParams.MobileResY = RequestedResX;
+	CurrentParams.Window_EventThread = Window;
+	CurrentParams.WindowDPI = GAndroidWindowDPI;
+	CurrentParams.SceneMinDPI = FMath::Min(GAndroid3DSceneMinDPI, GAndroidWindowDPI);
+	CurrentParams.SceneMaxDesiredPixelCount = GAndroid3DSceneMaxDesiredPixelCount;
+
+	bool bComputeRect = !IsCachedRectValid(bUseEventThreadWindow, CurrentParams);
 	if (bComputeRect)
 	{
 		// currently hardcoding resolution
@@ -393,14 +606,30 @@ FPlatformRect FAndroidWindow::GetScreenRect(bool bUseEventThreadWindow)
 
 		if (!bIsOculusMobileApp)
 		{
-			AndroidWindowUtils::ApplyContentScaleFactor(ScreenWidth, ScreenHeight);
+			if (CurrentParams.WindowDPI && RequestedResX == 0 && RequestedResY == 0)
+			{
+				FAndroidDisplayInfo Info = GetAndroidDisplayInfoFromDPITargets(CurrentParams.WindowDPI, CurrentParams.SceneMaxDesiredPixelCount, CurrentParams.SceneMinDPI);
+				ScreenWidth = Info.WindowDims.X;
+				ScreenHeight = Info.WindowDims.Y;
+				if (IsInGameThread())
+				{
+					static IConsoleVariable* CVarSSP = IConsoleManager::Get().FindConsoleVariable(TEXT("r.SecondaryScreenPercentage.GameViewport"));
+					CVarSSP->Set((float)Info.SceneScaleFactor * 100.0f);
+				}
+			}
+			else
+			{
+				AndroidWindowUtils::ApplyContentScaleFactor(ScreenWidth, ScreenHeight);
+			}
 		}
 
 		// save for future calls
-		CacheRect(bUseEventThreadWindow, ScreenWidth, ScreenHeight, RequestedContentScaleFactor, Window);
+		CurrentParams.WindowWidth = ScreenWidth;
+		CurrentParams.WindowHeight = ScreenHeight;
+		CacheRect(bUseEventThreadWindow, CurrentParams);
 	}
 
-	const FCachedWindowRect& CachedRect = bUseEventThreadWindow ? CachedWindowRect_EventThread : CachedWindowRect;
+	const FAndroidCachedWindowRectParams& CachedRect = GetCachedRect(bUseEventThreadWindow);
 
 	// create rect and return
 	FPlatformRect ScreenRect;
@@ -424,80 +653,26 @@ void FAndroidWindow::CalculateSurfaceSize(int32_t& SurfaceWidth, int32_t& Surfac
 	// too much of the following code needs JNI things, just assume override
 #if !USE_ANDROID_JNI
 
-	UE_LOG(LogAndroid, Fatal, TEXT("FAndroidWindow::CalculateSurfaceSize currently expedcts non-JNI platforms to override resolution"));
+	UE_LOG(LogAndroid, Fatal, TEXT("FAndroidWindow::CalculateSurfaceSize currently expects non-JNI platforms to override resolution"));
 
 #else
+	STANDALONE_DEBUG_LOGf(LogAndroid, TEXT("::CalculateSurfaceSize(USE_ANDROID_JNI) -> bUseEventThreadWindow=%d, GAndroidWindowOverride(%p), IsInAndroidEventThread()=%d"), bUseEventThreadWindow, GAndroidWindowOverride, IsInAndroidEventThread());
 
-	// daydream case still using hardware window direct from event thread, this might not be required now.
-	if (FAndroidMisc::IsDaydreamApplication())
+	if (bUseEventThreadWindow)
 	{
-		ANativeWindow* Window = (ANativeWindow*)GetHardwareWindow_EventThread();
-		if (Window == nullptr)
-		{
-			// log the issue and callstack for backtracking the issue
-			// dump the stack HERE
-			{
-				const SIZE_T StackTraceSize = 65535;
-				ANSICHAR* StackTrace = (ANSICHAR*)FMemory::Malloc(StackTraceSize);
-				StackTrace[0] = 0;
+		check(IsInAndroidEventThread());
+		ANativeWindow* WindowEventThread = (ANativeWindow*)GetHardwareWindow_EventThread();
+		check(WindowEventThread);
 
-				// Walk the stack and dump it to the allocated memory.
-				FPlatformStackWalk::StackWalkAndDump(StackTrace, StackTraceSize, 0, NULL);
-
-				FPlatformMisc::LowLevelOutputDebugString(TEXT("== WARNNG: CalculateSurfaceSize called with NULL hardware window:"));
-
-				ANSICHAR* Start = StackTrace;
-				ANSICHAR* Next = StackTrace;
-				FPlatformMisc::LowLevelOutputDebugString(TEXT("==> STACK TRACE"));
-				while (*Next)
-				{
-					while (*Next)
-					{
-						if (*Next == 10 || *Next == 13)
-						{
-							while (*Next == 10 || *Next == 13)
-							{
-								*Next++ = 0;
-							}
-							break;
-						}
-						++Next;
-					}
-					FPlatformMisc::LowLevelOutputDebugStringf(TEXT("==> %s"), ANSI_TO_TCHAR(Start));
-					Start = Next;
-				}
-				FPlatformMisc::LowLevelOutputDebugString(TEXT("<== STACK TRACE"));
-
-				FMemory::Free(StackTrace);
-			}
-
-			SurfaceWidth = (GSurfaceViewWidth > 0) ? GSurfaceViewWidth : 1280;
-			SurfaceHeight = (GSurfaceViewHeight > 0) ? GSurfaceViewHeight : 720;
-		}
-		else
-		{
-			SurfaceWidth = (GSurfaceViewWidth > 0) ? GSurfaceViewWidth : ANativeWindow_getWidth(Window);
-			SurfaceHeight = (GSurfaceViewHeight > 0) ? GSurfaceViewHeight : ANativeWindow_getHeight(Window);
-		}
+		SurfaceWidth = (GSurfaceViewWidth > 0) ? GSurfaceViewWidth : ANativeWindow_getWidth(WindowEventThread);
+		SurfaceHeight = (GSurfaceViewHeight > 0) ? GSurfaceViewHeight : ANativeWindow_getHeight(WindowEventThread);
 	}
 	else
 	{
-		if (bUseEventThreadWindow)
-		{
-			check(IsInAndroidEventThread());
-			ANativeWindow* WindowEventThread = (ANativeWindow*)GetHardwareWindow_EventThread();
-			check(WindowEventThread);
+		FAndroidWindow::WaitForWindowDimensions();
 
-			SurfaceWidth = (GSurfaceViewWidth > 0) ? GSurfaceViewWidth : ANativeWindow_getWidth(WindowEventThread);
-			SurfaceHeight = (GSurfaceViewHeight > 0) ? GSurfaceViewHeight : ANativeWindow_getHeight(WindowEventThread);
-		}
-		else
-		{
-			FAndroidWindow::WaitForWindowDimensions();
-
-			SurfaceWidth = (GSurfaceViewWidth > 0) ? GSurfaceViewWidth : CachedNativeWindowWidth;
-			SurfaceHeight = (GSurfaceViewHeight > 0) ? GSurfaceViewHeight : CachedNativeWindowHeight;
-		}
+		SurfaceWidth = (GSurfaceViewWidth > 0) ? GSurfaceViewWidth : CachedNativeWindowWidth;
+		SurfaceHeight = (GSurfaceViewHeight > 0) ? GSurfaceViewHeight : CachedNativeWindowHeight;
 	}
 
 	// some phones gave it the other way (so, if swap if the app is landscape, but width < height)
@@ -509,21 +684,147 @@ void FAndroidWindow::CalculateSurfaceSize(int32_t& SurfaceWidth, int32_t& Surfac
 
 	// ensure the size is divisible by a specified amount
 	// do not convert to a surface size that is larger than native resolution
-	// Mobile VR doesn't need buffer quantization as UE4 never renders directly to the buffer in VR mode. 
-	static const bool bIsMobileVRApp = AndroidThunkCpp_IsOculusMobileApplication() || FAndroidMisc::IsDaydreamApplication();
+	// Mobile VR doesn't need buffer quantization as Unreal never renders directly to the buffer in VR mode. 
+	static const bool bIsMobileVRApp = AndroidThunkCpp_IsOculusMobileApplication();
+	
+#if USE_ANDROID_STANDALONE
+	const int DividableBy = 1;	// don't change size of external window 
+#else
 	const int DividableBy = bIsMobileVRApp ? 1 : 8;
+#endif
+
 	SurfaceWidth = (SurfaceWidth / DividableBy) * DividableBy;
 	SurfaceHeight = (SurfaceHeight / DividableBy) * DividableBy;
 #endif
 }
 
-bool FAndroidWindow::OnWindowOrientationChanged(bool bIsPortrait)
+bool FAndroidWindow::OnWindowOrientationChanged(EDeviceScreenOrientation DeviceScreenOrientation)
 {
-	if (GAndroidIsPortrait != bIsPortrait)
+	if (GDeviceScreenOrientation != DeviceScreenOrientation)
 	{
-		UE_LOG(LogAndroid, Log, TEXT("Window orientation changed: %s"), bIsPortrait ? TEXT("Portrait") : TEXT("Landscape"));
+		GDeviceScreenOrientation = DeviceScreenOrientation;
+		bool bIsPortrait = GDeviceScreenOrientation == EDeviceScreenOrientation::Portrait || GDeviceScreenOrientation == EDeviceScreenOrientation::PortraitUpsideDown;
+		UE_LOG(LogAndroid, Log, TEXT("Window orientation changed: %s, GDeviceScreenOrientation=%d"), bIsPortrait ? TEXT("Portrait") : TEXT("Landscape"), GDeviceScreenOrientation);
 		GAndroidIsPortrait = bIsPortrait;
 		return true;
 	}
 	return false;
 }
+
+extern FString AndroidThunkCpp_GetMetaDataString(const FString& Key);
+
+// Sets the Android screen size to 
+static FAndroidDisplayInfo GetAndroidDisplayInfoFromDPITargets(int32 TargetDPI, int32 SceneMaxDesiredPixelCount, int32 LowerLimit3DDPI)
+{
+	auto StringToMap = [](const FString& str)
+	{
+		TMap<FString, FString> mapret;
+		TArray<FString> OutArray;
+		str.ParseIntoArray(OutArray, TEXT(";"));
+		if (OutArray.Num() % 2 == 0)
+		{
+			for (int i = 0; i < OutArray.Num(); i += 2)
+			{
+				mapret.Add(OutArray[i], OutArray[i + 1]);
+			}
+		}
+		return mapret;
+	};
+
+	FString JNIMetrics = AndroidThunkCpp_GetMetaDataString(FString(TEXT("unreal.displaymetrics.metrics")));
+	FString JNIDisplay = AndroidThunkCpp_GetMetaDataString(FString(TEXT("unreal.display")));
+
+	TMap<FString, FString> metricsParams = StringToMap(JNIMetrics);
+	TMap<FString, FString> displayParams = StringToMap(JNIDisplay);
+	static const FString DensityDpiKey(TEXT("densityDpi"));
+	static const FString xDpiKey(TEXT("xdpi"));
+	static const FString yDpiKey(TEXT("ydpi"));
+	static const FString WidthPixelsKey(TEXT("realWidth"));
+	static const FString HeightPixelsKey(TEXT("realHeight"));
+
+	int32 DensityDPI = metricsParams.Contains(TEXT("densityDpi")) ? FCString::Atoi(*metricsParams.FindChecked(DensityDpiKey)) : 0;
+	int32 xdpi = metricsParams.Contains(TEXT("xdpi")) ? FCString::Atoi(*metricsParams.FindChecked(xDpiKey)) : 0;
+	int32 ydpi = metricsParams.Contains(TEXT("ydpi")) ? FCString::Atoi(*metricsParams.FindChecked(yDpiKey)) : 0;
+	int32 avgdpi = (xdpi + ydpi) / 2;
+
+	UE_LOG(LogAndroid, Display, TEXT("AndroidDisplayInfoFromDPITargets : DPI info: DensityDPI %d, dpi %d, xdpi %d, ydpi %d"), DensityDPI, avgdpi, xdpi, ydpi);
+
+	int32 NativeScreenDensityDPI;
+	switch (GAndroidWindowDPIQueryMethod)
+	{
+		case 1:
+		{
+			NativeScreenDensityDPI = DensityDPI;
+			break;
+		}
+		case 0:
+		default:
+		{
+			NativeScreenDensityDPI = avgdpi;
+			break;
+		}
+	}
+
+	FIntVector2 NativeScreenPixelDims(
+		displayParams.Contains(WidthPixelsKey) ? FCString::Atoi(*displayParams.FindChecked(WidthPixelsKey)) : 0
+		, displayParams.Contains(HeightPixelsKey) ? FCString::Atoi(*displayParams.FindChecked(HeightPixelsKey)) : 0
+	);
+
+	FAndroidDisplayInfo Info;
+	Info.SceneScaleFactor = 1.0f;
+
+	// NativeScreenDensityDPI is approx.
+	const float ApproxSystemToDesiredDPIScale = FMath::Min((float)TargetDPI / (float)NativeScreenDensityDPI, 1.0f);
+	Info.WindowDims = FIntVector2((int32)FMath::RoundFromZero((float)NativeScreenPixelDims.X * ApproxSystemToDesiredDPIScale), (int32)FMath::RoundFromZero((float)NativeScreenPixelDims.Y * ApproxSystemToDesiredDPIScale));
+	FIntVector2 Sanitized = AndroidWindowUtils::SanitizeAndroidScreenSize(MoveTemp(NativeScreenPixelDims), FIntVector2(Info.WindowDims));
+
+	// ignore minor differences from sanitization.
+	//float ScaleFromSanitizing = FMath::Sqrt((float)(Sanitized.X * Sanitized.Y) / (float)(Info.WindowDims.X * Info.WindowDims.Y));
+	Info.WindowDims = Sanitized;
+	//TargetDPI = ScaleFromSanitizing;
+
+	UE_LOG(LogAndroid, Display, TEXT("AndroidDisplayInfoFromDPITargets : Native screen dpi %d, res %d x %d"), NativeScreenDensityDPI, NativeScreenPixelDims.X, NativeScreenPixelDims.Y);
+	UE_CLOG(TargetDPI <= NativeScreenDensityDPI, LogAndroid, Display, TEXT("AndroidDisplayInfoFromDPITargets : New DPI target %d, window dims %d, %d"), TargetDPI, Info.WindowDims.X, Info.WindowDims.Y);
+	UE_CLOG(TargetDPI > NativeScreenDensityDPI, LogAndroid, Display, TEXT("AndroidDisplayInfoFromDPITargets : TargetDPI too high, using native screen DPI %d, window dims %d, %d"), NativeScreenDensityDPI, Info.WindowDims.X, Info.WindowDims.Y);
+	TargetDPI = FMath::Min(TargetDPI, NativeScreenDensityDPI);
+
+	int DesiredPixelCount = Info.WindowDims.X * Info.WindowDims.Y;
+	if (SceneMaxDesiredPixelCount && DesiredPixelCount > SceneMaxDesiredPixelCount)
+	{
+		// if we're going to be pushing too many pixels, scale back 3d scene size to get us to SceneMaxDesiredPixelCount
+		Info.SceneScaleFactor = FMath::Sqrt((float)SceneMaxDesiredPixelCount / (float)DesiredPixelCount);
+		UE_LOG(LogAndroid, Warning, TEXT("AndroidDisplayInfoFromDPITargets : DPI %d has a %d pixels, this exceeds the pixels limit of %d by %d%%. 3d scene target is reduced to %d x %d"),
+			TargetDPI,
+			DesiredPixelCount, 
+			SceneMaxDesiredPixelCount, 
+			(uint32)(((float)DesiredPixelCount/(float)SceneMaxDesiredPixelCount)*100),
+			(uint32)FMath::RoundFromZero((float)Info.WindowDims.X * Info.SceneScaleFactor),
+			(uint32)FMath::RoundFromZero((float)Info.WindowDims.Y * Info.SceneScaleFactor)
+			);
+	}
+	
+	// if a min dpi was specified then clamp to that and accept a perf hit for res quality.
+	if (LowerLimit3DDPI && (int32)((float)TargetDPI * Info.SceneScaleFactor) < LowerLimit3DDPI)
+	{
+		float DPILimitScale = (float)LowerLimit3DDPI / (float)TargetDPI;
+
+		UE_LOG(LogAndroid, Warning, TEXT("AndroidDisplayInfoFromDPITargets : 3d scene target of %d DPI is lower than specified limit of %d DPI, increasing scene target dims %dx%d -> %dx%d"),
+			(uint32)FMath::RoundFromZero((float)TargetDPI * Info.SceneScaleFactor),
+			LowerLimit3DDPI,
+			(uint32)FMath::RoundFromZero((float)Info.WindowDims.X * Info.SceneScaleFactor),
+			(uint32)FMath::RoundFromZero((float)Info.WindowDims.Y * Info.SceneScaleFactor),
+			(uint32)FMath::RoundFromZero((float)Info.WindowDims.X * DPILimitScale),
+			(uint32)FMath::RoundFromZero((float)Info.WindowDims.Y * DPILimitScale)
+			);
+		Info.SceneScaleFactor = (float)LowerLimit3DDPI / (float)TargetDPI;
+	}
+
+	if (SceneMaxDesiredPixelCount)
+	{
+		int FinalSceneTargetPixelCount = (int)((float)DesiredPixelCount * Info.SceneScaleFactor * Info.SceneScaleFactor);
+		UE_LOG(LogAndroid, Display, TEXT("AndroidDisplayInfoFromDPITargets : SceneTarget Pixel count %d%% of limit."), (uint32)(((float)FinalSceneTargetPixelCount / (float)SceneMaxDesiredPixelCount) * 100));
+	}
+	
+	return Info;
+}
+

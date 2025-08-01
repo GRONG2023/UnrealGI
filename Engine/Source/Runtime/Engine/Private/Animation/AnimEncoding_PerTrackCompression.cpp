@@ -5,12 +5,27 @@
 =============================================================================*/ 
 
 #include "AnimEncoding_PerTrackCompression.h"
-#include "Serialization/MemoryWriter.h"
-#include "Serialization/MemoryReader.h"
-#include "Animation/AnimEncodingHeapAllocator.h"
+#include "Animation/AnimCompressionTypes.h"
 #include "AnimationCompression.h"
+#include "Animation/AnimSequenceDecompressionContext.h"
 #if INTEL_ISPC
 #include "AnimEncoding_PerTrackCompression.ispc.generated.h"
+
+static_assert(sizeof(ispc::FTransform) == sizeof(FTransform), "sizeof(ispc::FTransform) != sizeof(FTransform)");
+static_assert(sizeof(ispc::BoneTrackPair) == sizeof(BoneTrackPair), "sizeof(ispc::BoneTrackPair) != sizeof(BoneTrackPair)");
+#endif
+
+#if !defined(ANIM_PER_TRACK_COMPRESSION_ISPC_ENABLED_DEFAULT)
+#define ANIM_PER_TRACK_COMPRESSION_ISPC_ENABLED_DEFAULT 1
+#endif
+
+// Support run-time toggling on supported platforms in non-shipping configurations
+#if !INTEL_ISPC || UE_BUILD_SHIPPING
+static constexpr bool bAnim_PerTrackCompression_ISPC_Enabled = INTEL_ISPC && ANIM_PER_TRACK_COMPRESSION_ISPC_ENABLED_DEFAULT;
+#else
+#include "HAL/IConsoleManager.h"
+static bool bAnim_PerTrackCompression_ISPC_Enabled = ANIM_PER_TRACK_COMPRESSION_ISPC_ENABLED_DEFAULT;
+static FAutoConsoleVariableRef CVarAnimPerTrackCompressionISPCEnabled(TEXT("a.PerTrackCompression.ISPC"), bAnim_PerTrackCompression_ISPC_Enabled, TEXT("Whether to use ISPC optimizations in per track anim encoding"));
 #endif
 
 // This define controls whether scalar or vector code is used to decompress keys.  Note that not all key decompression code
@@ -337,7 +352,7 @@ void AEFPerTrackCompressionCodec::ByteSwapOneTrack(FUECompressedAnimData& Compre
 			// Make sure the key->frame table is 4 byte aligned
 			PreservePadding(TrackData, MemoryStream);
 
-			const int32 FrameTableEntrySize = (CompressedData.CompressedNumberOfFrames <= 0xFF) ? sizeof(uint8) : sizeof(uint16);
+			const int32 FrameTableEntrySize = (CompressedData.CompressedNumberOfKeys <= 0xFF) ? sizeof(uint8) : sizeof(uint16);
 			for (int32 i = 0; i < NumKeys; ++i)
 			{
 				AC_UnalignedSwap(MemoryStream, TrackData, FrameTableEntrySize);
@@ -480,12 +495,12 @@ void AEFPerTrackCompressionCodec::GetBoneAtomRotation(
 		{
 			if ((FormatFlags & 0x8) == 0)
 			{
-				Alpha = TimeToIndex(DecompContext.SequenceLength, DecompContext.RelativePos, NumKeys, DecompContext.Interpolation, Index0, Index1);
+				Alpha = TimeToIndex(DecompContext.GetPlayableLength(), DecompContext.GetRelativePosition(), NumKeys, DecompContext.Interpolation, Index0, Index1);
 			}
 			else
 			{
 				const uint8* RESTRICT FrameTable = Align(TrackData + FixedBytes + BytesPerKey * NumKeys, 4);
-				Alpha = TimeToIndex(DecompContext.Interpolation, AnimData.CompressedNumberOfFrames, FrameTable, DecompContext.RelativePos, NumKeys, Index0, Index1);
+				Alpha = TimeToIndex(DecompContext.Interpolation, AnimData.CompressedNumberOfKeys, FrameTable, DecompContext.GetRelativePosition(), NumKeys, Index0, Index1);
 			}
 		}
 
@@ -495,7 +510,7 @@ void AEFPerTrackCompressionCodec::GetBoneAtomRotation(
 #if USE_VECTOR_PTC_DECOMPRESSOR
 		const VectorRegister R0 = DecompressSingleTrackRotationVectorized(KeyFormat, FormatFlags, TrackData, KeyData0);
 #else
-		FQuat R0;
+		FQuat4f R0;
 		FAnimationCompression_PerTrackUtils::DecompressRotation(KeyFormat, FormatFlags, R0, TrackData, KeyData0);
 #endif
 
@@ -513,18 +528,18 @@ void AEFPerTrackCompressionCodec::GetBoneAtomRotation(
 			const VectorRegister BlendedNormalizedQuat = VectorNormalizeQuaternion(BlendedQuat);
 			OutAtom.SetRotation(BlendedNormalizedQuat);
 #else
-			FQuat R1;
+			FQuat4f R1;
 			FAnimationCompression_PerTrackUtils::DecompressRotation(KeyFormat, FormatFlags, R1, TrackData, KeyData1);
 
 			// Fast linear quaternion interpolation.
-			FQuat BlendedQuat = FQuat::FastLerp(R0, R1, Alpha);
-			OutAtom.SetRotation( BlendedQuat );
+			FQuat4f BlendedQuat = FQuat4f::FastLerp(R0, R1, Alpha);
+			OutAtom.SetRotation( FQuat(BlendedQuat) );
 			OutAtom.NormalizeRotation();
 #endif
 		}
 		else // (Index0 == Index1)
 		{
-			OutAtom.SetRotation( R0 );
+			OutAtom.SetRotation( FQuat(R0) );
 			OutAtom.NormalizeRotation();
 		}
 	}
@@ -571,12 +586,12 @@ void AEFPerTrackCompressionCodec::GetBoneAtomTranslation(
 		{
 			if ((FormatFlags & 0x8) == 0)
 			{
-				Alpha = TimeToIndex(DecompContext.SequenceLength, DecompContext.RelativePos, NumKeys, DecompContext.Interpolation, Index0, Index1);
+				Alpha = TimeToIndex(DecompContext.GetPlayableLength(), DecompContext.GetRelativePosition(), NumKeys, DecompContext.Interpolation, Index0, Index1);
 			}
 			else
 			{
 				const uint8* RESTRICT FrameTable = Align(TrackData + FixedBytes + BytesPerKey * NumKeys, 4);
-				Alpha = TimeToIndex(DecompContext.Interpolation, AnimData.CompressedNumberOfFrames, FrameTable, DecompContext.RelativePos, NumKeys, Index0, Index1);
+				Alpha = TimeToIndex(DecompContext.Interpolation, AnimData.CompressedNumberOfKeys, FrameTable, DecompContext.GetRelativePosition(), NumKeys, Index0, Index1);
 			}
 		}
 
@@ -586,7 +601,7 @@ void AEFPerTrackCompressionCodec::GetBoneAtomTranslation(
 #if USE_VECTOR_PTC_DECOMPRESSOR
 		const VectorRegister R0 = DecompressSingleTrackTranslationVectorized(KeyFormat, FormatFlags, TrackData, KeyData0);
 #else
-		FVector R0;
+		FVector3f R0;
 		FAnimationCompression_PerTrackUtils::DecompressTranslation(KeyFormat, FormatFlags, R0, TrackData, KeyData0);
 #endif
 
@@ -603,15 +618,15 @@ void AEFPerTrackCompressionCodec::GetBoneAtomTranslation(
 			const VectorRegister BlendedTranslation = FMath::Lerp(R0, R1, VAlpha);
 			OutAtom.SetTranslation(BlendedTranslation);
 #else
-			FVector R1;
+			FVector3f R1;
 			FAnimationCompression_PerTrackUtils::DecompressTranslation(KeyFormat, FormatFlags, R1, TrackData, KeyData1);
 
-			OutAtom.SetTranslation(FMath::Lerp(R0, R1, Alpha));
+			OutAtom.SetTranslation((FVector)FMath::Lerp(R0, R1, Alpha));
 #endif
 		}
 		else // (Index0 == Index1)
 		{
-			OutAtom.SetTranslation(R0);
+			OutAtom.SetTranslation((FVector)R0);
 		}
 	}
 	else
@@ -657,12 +672,12 @@ void AEFPerTrackCompressionCodec::GetBoneAtomScale(
 		{
 			if ((FormatFlags & 0x8) == 0)
 			{
-				Alpha = TimeToIndex(DecompContext.SequenceLength, DecompContext.RelativePos, NumKeys, DecompContext.Interpolation, Index0, Index1);
+				Alpha = TimeToIndex(DecompContext.GetPlayableLength(), DecompContext.GetRelativePosition(), NumKeys, DecompContext.Interpolation, Index0, Index1);
 			}
 			else
 			{
 				const uint8* RESTRICT FrameTable = Align(TrackData + FixedBytes + BytesPerKey * NumKeys, 4);
-				Alpha = TimeToIndex(DecompContext.Interpolation, AnimData.CompressedNumberOfFrames, FrameTable, DecompContext.RelativePos, NumKeys, Index0, Index1);
+				Alpha = TimeToIndex(DecompContext.Interpolation, AnimData.CompressedNumberOfKeys, FrameTable, DecompContext.GetRelativePosition(), NumKeys, Index0, Index1);
 			}
 		}
 
@@ -672,7 +687,7 @@ void AEFPerTrackCompressionCodec::GetBoneAtomScale(
 #if USE_VECTOR_PTC_DECOMPRESSOR
 		const VectorRegister R0 = DecompressSingleTrackScaleVectorized(KeyFormat, FormatFlags, TrackData, KeyData0);
 #else
-		FVector R0;
+		FVector3f R0;
 		FAnimationCompression_PerTrackUtils::DecompressScale(KeyFormat, FormatFlags, R0, TrackData, KeyData0);
 #endif
 
@@ -689,15 +704,15 @@ void AEFPerTrackCompressionCodec::GetBoneAtomScale(
 			const VectorRegister BlendedScale = FMath::Lerp(R0, R1, VAlpha);
 			OutAtom.SetScale(BlendedScale);
 #else
-			FVector R1;
+			FVector3f R1;
 			FAnimationCompression_PerTrackUtils::DecompressScale(KeyFormat, FormatFlags, R1, TrackData, KeyData1);
 
-			OutAtom.SetScale3D(FMath::Lerp(R0, R1, Alpha));
+			OutAtom.SetScale3D((FVector)FMath::Lerp(R0, R1, Alpha));
 #endif
 		}
 		else // (Index0 == Index1)
 		{
-			OutAtom.SetScale3D(R0);
+			OutAtom.SetScale3D((FVector)R0);
 		}
 	}
 	else
@@ -732,7 +747,7 @@ void AEFPerTrackCompressionCodec::GetPoseRotations(
 		return;
 	}
 
-	if (INTEL_ISPC)
+	if (bAnim_PerTrackCompression_ISPC_Enabled)
 	{
 #if INTEL_ISPC
 		const FUECompressedAnimData& AnimData = static_cast<const FUECompressedAnimData&>(DecompContext.CompressedAnimData);
@@ -742,9 +757,9 @@ void AEFPerTrackCompressionCodec::GetPoseRotations(
 			(ispc::BoneTrackPair*)&DesiredPairs[0],
 			AnimData.CompressedTrackOffsets.GetData(),
 			AnimData.CompressedByteStream.GetData(),
-			AnimData.CompressedNumberOfFrames,
-			DecompContext.SequenceLength,
-			DecompContext.RelativePos,
+			AnimData.CompressedNumberOfKeys,
+			DecompContext.GetPlayableLength(),
+			DecompContext.GetRelativePosition(),
 			(uint8)DecompContext.Interpolation,
 			PairCount);
 #endif
@@ -780,7 +795,7 @@ void AEFPerTrackCompressionCodec::GetPoseTranslations(
 	{
 		return;
 	}
-	if (INTEL_ISPC)
+	if (bAnim_PerTrackCompression_ISPC_Enabled)
 	{
 #if INTEL_ISPC
 		const FUECompressedAnimData& AnimData = static_cast<const FUECompressedAnimData&>(DecompContext.CompressedAnimData);
@@ -790,9 +805,9 @@ void AEFPerTrackCompressionCodec::GetPoseTranslations(
 			(ispc::BoneTrackPair*)&DesiredPairs[0],
 			AnimData.CompressedTrackOffsets.GetData(),
 			AnimData.CompressedByteStream.GetData(),
-			AnimData.CompressedNumberOfFrames,
-			DecompContext.SequenceLength,
-			DecompContext.RelativePos,
+			AnimData.CompressedNumberOfKeys,
+			DecompContext.GetPlayableLength(),
+			DecompContext.GetRelativePosition(),
 			(uint8)DecompContext.Interpolation,
 			PairCount);
 #endif
@@ -830,7 +845,7 @@ void AEFPerTrackCompressionCodec::GetPoseScales(
 		return;
 	}
 
-	if (INTEL_ISPC)
+	if (bAnim_PerTrackCompression_ISPC_Enabled)
 	{
 #if INTEL_ISPC
 		const FUECompressedAnimData& AnimData = static_cast<const FUECompressedAnimData&>(DecompContext.CompressedAnimData);
@@ -844,9 +859,9 @@ void AEFPerTrackCompressionCodec::GetPoseScales(
 			ScaleOffsets.GetData(),
 			StripSize,
 			AnimData.CompressedByteStream.GetData(),
-			AnimData.CompressedNumberOfFrames,
-			DecompContext.SequenceLength,
-			DecompContext.RelativePos,
+			AnimData.CompressedNumberOfKeys,
+			DecompContext.GetPlayableLength(),
+			DecompContext.GetRelativePosition(),
 			(uint8)DecompContext.Interpolation,
 			PairCount);
 #endif

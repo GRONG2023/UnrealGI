@@ -4,6 +4,7 @@
 #include "GameDelegates.h"
 #include "IOS/IOSApplication.h"
 #include "IOS/IOSPlatformApplicationMisc.h"
+#include "TextureResource.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogIOSGamepadUtils, Log, All);
 
@@ -31,14 +32,12 @@ UTexture2D* FIOSGamepadUtils::GetGamepadButtonGlyph(const FGamepadKeyNames::Type
 
     ControllerType ControllerType = InputInterface->GetControllerType(ControllerIndex);
 
-    if (@available(iOS 14, tvOS 14, *))
+    for (int32 Index = 0; Index != GlyphsArray.Num(); ++Index)
     {
-        for (int32 Index = 0; Index != GlyphsArray.Num(); ++Index)
+        if (GlyphsArray[Index].ButtonName == ButtonKey && GlyphsArray[Index].ControllerType == ControllerType)
         {
-            if (GlyphsArray[Index].ButtonName == ButtonKey && GlyphsArray[Index].ControllerType == ControllerType)
-            {
-                return GlyphsArray[Index].ButtonTexture;
-            }
+            return GlyphsArray[Index].ButtonTexture;
+            
         }
 
         NSData* RawData = InputInterface->GetGamepadGlyphRawData(ButtonKey, ControllerIndex);
@@ -59,10 +58,11 @@ UTexture2D* FIOSGamepadUtils::GetGamepadButtonGlyph(const FGamepadKeyNames::Type
                     NewTexture = UTexture2D::CreateTransient(ImageWrapper->GetWidth(), ImageWrapper->GetHeight(), PF_B8G8R8A8);
 
                     if (NewTexture != nullptr)
-                    {
-                        void* TextureData = NewTexture->PlatformData->Mips[0].BulkData.Lock(LOCK_READ_WRITE);
+                    {					
+						FTexture2DMipMap& Mip0 = NewTexture->GetPlatformData()->Mips[0];
+						void* TextureData = Mip0.BulkData.Lock(LOCK_READ_WRITE);
                         FMemory::Memcpy(TextureData, RawImageData.GetData(), RawImageData.Num());
-                        NewTexture->PlatformData->Mips[0].BulkData.Unlock();
+						Mip0.BulkData.Unlock();
                         NewTexture->UpdateResource();
                         GamepadGlyph GamepadGlyph;
                         GamepadGlyph.ControllerType = ControllerType;

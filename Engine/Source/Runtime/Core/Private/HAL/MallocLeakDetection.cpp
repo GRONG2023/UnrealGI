@@ -21,22 +21,18 @@
 
 #if MALLOC_LEAKDETECTION
 
-#if USE_MALLOC_PROFILER
-#error There is a deadlock that happens when using both the malloc profiler and leakdetection at the same time. Remove this error when it is fixed.
-#endif
-
 /**
  *	Need forced-initialization of this data as it can be used during global
 *	ctors.
  */
 struct FMallocLeakDetectionStatics
 {
-	uint32 ContextsTLSID = 0;
-	uint32 WhitelistTLSID = 0;
+	uint32 ContextsTLSID = FPlatformTLS::InvalidTlsSlot;
+	uint32 SuppressDetectionCountTLSID = FPlatformTLS::InvalidTlsSlot;
 
 	FMallocLeakDetectionStatics()
 	{
-		WhitelistTLSID = FPlatformTLS::AllocTlsSlot();
+		SuppressDetectionCountTLSID = FPlatformTLS::AllocTlsSlot();
 		ContextsTLSID = FPlatformTLS::AllocTlsSlot();
 	}
 
@@ -64,24 +60,24 @@ FMallocLeakDetection& FMallocLeakDetection::Get()
 }
 
 FMallocLeakDetection::~FMallocLeakDetection()
-{
-	// No need to track allocations anymore, not to mention it will crash if OpenPointers contains anything
-	Get().OpenPointers.Empty();
+{	
+	OpenPointers.Empty(); // clean up the state
+	SetAllocationCollection(false); // disable collection to avoid a call back to this instance when its members are destroyed
 }
 
 
 void FMallocLeakDetection::SetDisabledForThisThread(const bool Disabled)
 {
-	int Count = (int)(size_t)FPlatformTLS::GetTlsValue(FMallocLeakDetectionStatics::Get().WhitelistTLSID);
+	int Count = (int)(size_t)FPlatformTLS::GetTlsValue(FMallocLeakDetectionStatics::Get().SuppressDetectionCountTLSID);
 	Count += Disabled ? 1 : -1;
 	check(Count >= 0);
 
-	FPlatformTLS::SetTlsValue(FMallocLeakDetectionStatics::Get().WhitelistTLSID, (void*)(size_t)Count);
+	FPlatformTLS::SetTlsValue(FMallocLeakDetectionStatics::Get().SuppressDetectionCountTLSID, (void*)(size_t)Count);
 }
 
 bool FMallocLeakDetection::IsDisabledForThisThread() const
 {
-	return !!FPlatformTLS::GetTlsValue(FMallocLeakDetectionStatics::Get().WhitelistTLSID);
+	return !!FPlatformTLS::GetTlsValue(FMallocLeakDetectionStatics::Get().SuppressDetectionCountTLSID);
 }
 
 void FMallocLeakDetection::PushContext(const TCHAR* Context)
@@ -107,7 +103,7 @@ void FMallocLeakDetection::PopContext()
 {
 	TArray<FContextString>* TLContexts = (TArray<FContextString>*)FPlatformTLS::GetTlsValue(FMallocLeakDetectionStatics::Get().ContextsTLSID);
 	check(TLContexts);
-	TLContexts->Pop(false);
+	TLContexts->Pop(EAllowShrinking::No);
 }
 
 void FMallocLeakDetection::AddCallstack(FCallstackTrack& Callstack)

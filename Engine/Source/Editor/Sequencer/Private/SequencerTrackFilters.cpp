@@ -1,7 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SequencerTrackFilters.h"
+#include "Misc/PackageName.h"
+#include "Styling/AppStyle.h"
+#include "Engine/Level.h"
 #include "Engine/World.h"
+#include "Framework/Commands/Commands.h"
+#include "ISequencer.h"
+#include "UObject/Package.h"
+
+#define LOCTEXT_NAMESPACE "Sequencer"
 
 FSequencerTrackFilter_LevelFilter::~FSequencerTrackFilter_LevelFilter()
 {
@@ -116,3 +124,74 @@ void FSequencerTrackFilter_LevelFilter::HandleLevelsChanged()
 		BroadcastChangedEvent();
 	}
 }
+
+class FSequencerTrackFilter_AnimatedCommands
+	: public TCommands<FSequencerTrackFilter_AnimatedCommands>
+{
+public:
+
+	FSequencerTrackFilter_AnimatedCommands()
+		: TCommands<FSequencerTrackFilter_AnimatedCommands>
+	(
+		"FSequencerTrackFilter_Animated",
+		NSLOCTEXT("Contexts", "FSequencerTrackFilter_Animated", "FSequencerTrackFilter_Animated"),
+		NAME_None,
+		FAppStyle::GetAppStyleSetName() // Icon Style Set
+	)
+	{ }
+		
+	/** Toggle the animated tracks filter */
+	TSharedPtr< FUICommandInfo > ToggleAnimatedTracks;
+
+	/** Initialize commands */
+	virtual void RegisterCommands() override
+	{
+		UI_COMMAND(ToggleAnimatedTracks, "Animated Tracks", "Toggle the filter for Animated Tracks.", EUserInterfaceActionType::ToggleButton, FInputChord(EKeys::U));
+	}
+};
+
+FSequencerTrackFilter_Animated::FSequencerTrackFilter_Animated()
+	: BindingCount(0)
+{
+	FSequencerTrackFilter_AnimatedCommands::Register();	
+}
+
+FSequencerTrackFilter_Animated::~FSequencerTrackFilter_Animated()
+{
+	BindingCount--;
+
+	if (BindingCount < 1)
+	{
+		FSequencerTrackFilter_AnimatedCommands::Unregister();
+	}
+}
+
+FText FSequencerTrackFilter_Animated::GetToolTipText() const 
+{ 
+	const FSequencerTrackFilter_AnimatedCommands& Commands = FSequencerTrackFilter_AnimatedCommands::Get();
+
+	const TSharedRef<const FInputChord> FirstActiveChord = Commands.ToggleAnimatedTracks->GetFirstValidChord();
+	
+	FText Tooltip = LOCTEXT("SequencerTrackFilter_AnimatedTip", "Show Only Animated Tracks."); 
+
+	if (FirstActiveChord->IsValidChord())
+	{
+		return FText::Join(FText::FromString(TEXT(" ")), Tooltip, FirstActiveChord->GetInputText());
+	}
+	return Tooltip;
+}
+
+void FSequencerTrackFilter_Animated::BindCommands(TSharedRef<FUICommandList> SequencerBindings, TSharedRef<FUICommandList> CurveEditorBindings, TWeakPtr<ISequencer> Sequencer)
+{
+	const FSequencerTrackFilter_AnimatedCommands& Commands = FSequencerTrackFilter_AnimatedCommands::Get();
+
+	SequencerBindings->MapAction(
+		Commands.ToggleAnimatedTracks,
+		FExecuteAction::CreateLambda( [this, Sequencer]{ Sequencer.Pin()->SetTrackFilterEnabled(GetDisplayName(), !Sequencer.Pin()->IsTrackFilterEnabled(GetDisplayName())); } ),
+		FCanExecuteAction::CreateLambda( [this, Sequencer]{ return true; } ),
+		FIsActionChecked::CreateLambda( [this, Sequencer]{ return Sequencer.Pin()->IsTrackFilterEnabled(GetDisplayName()); } ) );
+
+	CurveEditorBindings->MapAction(Commands.ToggleAnimatedTracks, *SequencerBindings->GetActionForCommand(Commands.ToggleAnimatedTracks));
+}
+
+#undef LOCTEXT_NAMESPACE

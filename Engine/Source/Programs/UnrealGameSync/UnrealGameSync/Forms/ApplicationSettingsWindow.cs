@@ -1,71 +1,86 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-using Microsoft.Win32;
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
-using System.Drawing;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using UnrealGameSync;
+using EpicGames.Perforce;
+using Microsoft.Extensions.Logging;
+using Microsoft.Win32;
 
 namespace UnrealGameSync
 {
 	partial class ApplicationSettingsWindow : Form
 	{
-		class PerforceTestConnectionTask : IPerforceModalTask
+		public enum Result
 		{
-			string DepotPath;
+			Cancel,
+			Ok,
+			Quit,
+			Restart,
+			RestartAndConfigureUpdate,
+		}
 
-			public PerforceTestConnectionTask(string DepotPath)
+		static class PerforceTestConnectionTask
+		{
+			public static async Task RunAsync(IPerforceConnection perforce, string depotPath, CancellationToken cancellationToken)
 			{
-				this.DepotPath = DepotPath ?? DeploymentSettings.DefaultDepotPath;
-			}
+				string checkFilePath = String.Format("{0}/Release/UnrealGameSync.exe", depotPath);
 
-			public bool Run(PerforceConnection Perforce, TextWriter Log, out string ErrorMessage)
-			{
-				string CheckFilePath = String.Format("{0}/Release/UnrealGameSync.exe", DepotPath);
-
-				List<PerforceFileRecord> FileRecords;
-				if(!Perforce.FindFiles(CheckFilePath, out FileRecords, Log) || FileRecords.Count == 0)
+				List<FStatRecord> fileRecords = await perforce.FStatAsync(checkFilePath, cancellationToken).ToListAsync(cancellationToken);
+				if (fileRecords.Count == 0)
 				{
-					ErrorMessage = String.Format("Unable to find {0}", CheckFilePath);
-					return false;
+					throw new UserErrorException($"Unable to find {checkFilePath}");
 				}
-
-				ErrorMessage = null;
-				return true;
 			}
 		}
 
-		string OriginalExecutableFileName;
-		UserSettings Settings;
-		TextWriter Log;
+		readonly string _originalExecutableFileName;
+		readonly UserSettings _settings;
+		readonly ILogger _logger;
 
-		string InitialServerAndPort;
-		string InitialUserName;
-		string InitialDepotPath;
-		bool bInitialUnstable;
-		int InitialAutomationPortNumber;
-		ProtocolHandlerState InitialProtocolHandlerState;
+		readonly int _initialAutomationPortNumber;
+		readonly ProtocolHandlerState _initialProtocolHandlerState;
 
-		bool? bRestartUnstable;
+		readonly ToolUpdateMonitor _toolUpdateMonitor;
 
-		ToolUpdateMonitor ToolUpdateMonitor;
+		Result _result = Result.Ok;
 
 		class ToolItem
 		{
-			public ToolDefinition Definition { get; }
+			public Guid Id => Definition.Id;
 
-			public ToolItem(ToolDefinition Definition)
+			public int Index { get; }
+			public ToolInfo Definition { get; }
+			public List<ToolItem> RequiresTools { get; } = new List<ToolItem>();
+
+			public bool Enabled { get; set; }
+			public int DependencyRefCount { get; set; }
+
+			public ToolItem(int index, ToolInfo definition, bool enabled)
 			{
-				this.Definition = Definition;
+				Index = index;
+				Definition = definition;
+				Enabled = enabled;
+			}
+
+			public CheckState GetCheckState()
+			{
+				if (Enabled)
+				{
+					return CheckState.Checked;
+				}
+				else if (DependencyRefCount > 0)
+				{
+					return CheckState.Indeterminate;
+				}
+				else
+				{
+					return CheckState.Unchecked;
+				}
 			}
 
 			public override string ToString()
@@ -74,200 +89,252 @@ namespace UnrealGameSync
 			}
 		}
 
-		private ApplicationSettingsWindow(string DefaultServerAndPort, string DefaultUserName, bool bUnstable, string OriginalExecutableFileName, UserSettings Settings, ToolUpdateMonitor ToolUpdateMonitor, TextWriter Log)
+		private ApplicationSettingsWindow(IPerforceSettings defaultPerforceSettings, string originalExecutableFileName, UserSettings settings, ToolUpdateMonitor toolUpdateMonitor, ILogger<ApplicationSettingsWindow> logger)
 		{
 			InitializeComponent();
+			Font = new System.Drawing.Font("Segoe UI", 8.25F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
 
-			this.OriginalExecutableFileName = OriginalExecutableFileName;
-			this.Settings = Settings;
-			this.ToolUpdateMonitor = ToolUpdateMonitor;
-			this.Log = Log;
+			_originalExecutableFileName = originalExecutableFileName;
+			_settings = settings;
+			_toolUpdateMonitor = toolUpdateMonitor;
+			_logger = logger;
 
-			Utility.ReadGlobalPerforceSettings(ref InitialServerAndPort, ref InitialUserName, ref InitialDepotPath);
-			bInitialUnstable = bUnstable;
+			LauncherSettings launcherSettings = new LauncherSettings();
+			launcherSettings.Read();
 
-			InitialAutomationPortNumber = AutomationServer.GetPortNumber();
-			InitialProtocolHandlerState = ProtocolHandlerUtils.GetState();
+			_initialAutomationPortNumber = AutomationServer.GetPortNumber();
+			_initialProtocolHandlerState = ProtocolHandlerUtils.GetState();
 
-			this.AutomaticallyRunAtStartupCheckBox.Checked = IsAutomaticallyRunAtStartup();
-			this.KeepInTrayCheckBox.Checked = Settings.bKeepInTray;
-						
-			this.ServerTextBox.Text = InitialServerAndPort;
-			this.ServerTextBox.Select(ServerTextBox.TextLength, 0);
-			this.ServerTextBox.CueBanner = (DefaultServerAndPort == null)? "Default" : String.Format("Default ({0})", DefaultServerAndPort);
+			AutomaticallyRunAtStartupCheckBox.Checked = IsAutomaticallyRunAtStartup();
+			KeepInTrayCheckBox.Checked = settings.KeepInTray;
 
-			this.UserNameTextBox.Text = InitialUserName;
-			this.UserNameTextBox.Select(UserNameTextBox.TextLength, 0);
-			this.UserNameTextBox.CueBanner = (DefaultUserName == null)? "Default" : String.Format("Default ({0})", DefaultUserName);
+			HordeServerTextBox.Text = launcherSettings.HordeServer;
+			HordeServerTextBox.Select(HordeServerTextBox.TextLength, 0);
+			HordeServerTextBox.CueBanner = launcherSettings.HordeServer ?? String.Empty;
 
-			this.ParallelSyncThreadsSpinner.Value = Math.Max(Math.Min(Settings.SyncOptions.NumThreads, ParallelSyncThreadsSpinner.Maximum), ParallelSyncThreadsSpinner.Minimum);
+			ServerTextBox.Text = launcherSettings.PerforceServerAndPort;
+			ServerTextBox.Select(ServerTextBox.TextLength, 0);
+			ServerTextBox.CueBanner = $"Default ({defaultPerforceSettings.ServerAndPort})";
 
-			this.DepotPathTextBox.Text = InitialDepotPath;
-			this.DepotPathTextBox.Select(DepotPathTextBox.TextLength, 0);
-			this.DepotPathTextBox.CueBanner = DeploymentSettings.DefaultDepotPath;
+			UserNameTextBox.Text = launcherSettings.PerforceUserName;
+			UserNameTextBox.Select(UserNameTextBox.TextLength, 0);
+			UserNameTextBox.CueBanner = $"Default ({defaultPerforceSettings.UserName})";
 
-			this.UseUnstableBuildCheckBox.Checked = bUnstable;
+			ParallelSyncThreadsSpinner.Value = Math.Max(Math.Min(settings.SyncOptions.NumThreads ?? PerforceSyncOptions.DefaultNumThreads, ParallelSyncThreadsSpinner.Maximum), ParallelSyncThreadsSpinner.Minimum);
 
-			if(InitialAutomationPortNumber > 0)
+			if (_initialAutomationPortNumber > 0)
 			{
-				this.EnableAutomationCheckBox.Checked = true;
-				this.AutomationPortTextBox.Enabled = true;
-				this.AutomationPortTextBox.Text = InitialAutomationPortNumber.ToString();
+				EnableAutomationCheckBox.Checked = true;
+				AutomationPortTextBox.Enabled = true;
+				AutomationPortTextBox.Text = _initialAutomationPortNumber.ToString();
 			}
 			else
 			{
-				this.EnableAutomationCheckBox.Checked = false;
-				this.AutomationPortTextBox.Enabled = false;
-				this.AutomationPortTextBox.Text = AutomationServer.DefaultPortNumber.ToString();
+				EnableAutomationCheckBox.Checked = false;
+				AutomationPortTextBox.Enabled = false;
+				AutomationPortTextBox.Text = AutomationServer.DefaultPortNumber.ToString();
 			}
 
-			if(InitialProtocolHandlerState == ProtocolHandlerState.Installed)
+			if (_initialProtocolHandlerState == ProtocolHandlerState.Installed)
 			{
-				this.EnableProtocolHandlerCheckBox.CheckState = CheckState.Checked;
+				EnableProtocolHandlerCheckBox.CheckState = CheckState.Checked;
 			}
-			else if (InitialProtocolHandlerState == ProtocolHandlerState.NotInstalled)
+			else if (_initialProtocolHandlerState == ProtocolHandlerState.NotInstalled)
 			{
-				this.EnableProtocolHandlerCheckBox.CheckState = CheckState.Unchecked;
+				EnableProtocolHandlerCheckBox.CheckState = CheckState.Unchecked;
 			}
 			else
 			{
-				this.EnableProtocolHandlerCheckBox.CheckState = CheckState.Indeterminate;
+				EnableProtocolHandlerCheckBox.CheckState = CheckState.Indeterminate;
 			}
 
-			List<ToolDefinition> Tools = ToolUpdateMonitor.Tools;
-			foreach (ToolDefinition Tool in Tools)
+			List<ToolItem> toolItems = new List<ToolItem>();
+			Dictionary<Guid, ToolItem> idToToolItem = new Dictionary<Guid, ToolItem>();
+			foreach (ToolInfo tool in toolUpdateMonitor.GetTools().OrderBy(x => x.Name))
 			{
-				this.CustomToolsListBox.Items.Add(new ToolItem(Tool), Settings.EnabledTools.Contains(Tool.Id));
+				ToolItem toolItem = new ToolItem(toolItems.Count, tool, settings.EnabledTools.Contains(tool.Id));
+				idToToolItem[tool.Id] = toolItem;
+				toolItems.Add(toolItem);
+			}
+
+			HashSet<ToolItem> dependsOnToolItems = new HashSet<ToolItem>();
+			foreach (ToolItem toolItem in toolItems)
+			{
+				dependsOnToolItems.Clear();
+				FindDependencies(toolItem, dependsOnToolItems, idToToolItem);
+				toolItem.RequiresTools.AddRange(dependsOnToolItems);
+
+				if (toolItem.Enabled)
+				{
+					foreach (ToolItem requiredTool in toolItem.RequiresTools)
+					{
+						requiredTool.DependencyRefCount++;
+					}
+				}
+			}
+
+			foreach (ToolItem toolItem in toolItems)
+			{
+				CustomToolsListBox.Items.Add(toolItem, toolItem.GetCheckState());
 			}
 		}
 
-		public static bool? ShowModal(IWin32Window Owner, PerforceConnection DefaultConnection, bool bUnstable, string OriginalExecutableFileName, UserSettings Settings, ToolUpdateMonitor ToolUpdateMonitor, TextWriter Log)
+		static void FindDependencies(ToolItem toolItem, HashSet<ToolItem> dependsOnToolItems, Dictionary<Guid, ToolItem> idToToolItem)
 		{
-			ApplicationSettingsWindow ApplicationSettings = new ApplicationSettingsWindow(DefaultConnection.ServerAndPort, DefaultConnection.UserName, bUnstable, OriginalExecutableFileName, Settings, ToolUpdateMonitor, Log);
-			if(ApplicationSettings.ShowDialog() == DialogResult.OK)
+			foreach (Guid dependsOnToolId in toolItem.Definition.DependsOnToolIds)
 			{
-				return ApplicationSettings.bRestartUnstable;
-			}
-			else
-			{
-				return null;
+				ToolItem? dependsOnToolItem;
+				if (idToToolItem.TryGetValue(dependsOnToolId, out dependsOnToolItem) && dependsOnToolItems.Add(dependsOnToolItem))
+				{
+					FindDependencies(dependsOnToolItem, dependsOnToolItems, idToToolItem);
+				}
 			}
 		}
 
-		private bool IsAutomaticallyRunAtStartup()
+		public static Result ShowModal(IWin32Window owner, IPerforceSettings defaultPerforceSettings, string originalExecutableFileName, UserSettings settings, ToolUpdateMonitor toolUpdateMonitor, ILogger<ApplicationSettingsWindow> logger)
 		{
-			RegistryKey Key = Registry.CurrentUser.OpenSubKey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run");
-			return (Key.GetValue("UnrealGameSync") != null);
+			using ApplicationSettingsWindow applicationSettings = new ApplicationSettingsWindow(defaultPerforceSettings, originalExecutableFileName, settings, toolUpdateMonitor, logger);
+			applicationSettings.ShowDialog(owner);
+			return applicationSettings._result;
+		}
+
+		private static bool IsAutomaticallyRunAtStartup()
+		{
+			RegistryKey? key = Registry.CurrentUser.OpenSubKey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run");
+			return (key?.GetValue("UnrealGameSync") != null);
+		}
+
+		private void UpdateSettingsBtn_Click(object sender, EventArgs e)
+		{
+			if (Path.GetFileName(_originalExecutableFileName).Contains("Launcher", StringComparison.OrdinalIgnoreCase))
+			{
+				if (MessageBox.Show("To configure update settings, quit UnrealGameSync and relaunch from the start menu while holding down the shift key.\n\nWould you like to quit now?", "Restart Required", MessageBoxButtons.YesNo) == DialogResult.Yes)
+				{
+					ApplySettings(Result.Quit);
+				}
+			}
+			else
+			{
+				if (MessageBox.Show("UnrealGameSync must be restarted to configure update settings.\n\nWould you like to restart now?", "Restart Required", MessageBoxButtons.OKCancel) == DialogResult.OK)
+				{
+					ApplySettings(Result.RestartAndConfigureUpdate);
+				}
+			}
 		}
 
 		private void OkBtn_Click(object sender, EventArgs e)
 		{
+			ApplySettings(Result.Ok);
+		}
+
+		private void ApplySettings(Result result)
+		{
+			LauncherSettings originalLauncherSettings = new LauncherSettings();
+			originalLauncherSettings.Read();
+
 			// Update the settings
-			string ServerAndPort = ServerTextBox.Text.Trim();
-			if(ServerAndPort.Length == 0)
+			LauncherSettings launcherSettings = new LauncherSettings(originalLauncherSettings);
+
+			launcherSettings.HordeServer = HordeServerTextBox.Text.Trim();
+			if (launcherSettings.HordeServer.Length == 0)
 			{
-				ServerAndPort = null;
+				launcherSettings.HordeServer = null;
 			}
 
-			string UserName = UserNameTextBox.Text.Trim();
-			if(UserName.Length == 0)
+			launcherSettings.PerforceServerAndPort = ServerTextBox.Text.Trim();
+			if (launcherSettings.PerforceServerAndPort.Length == 0)
 			{
-				UserName = null;
+				launcherSettings.PerforceServerAndPort = null;
 			}
 
-			string DepotPath = DepotPathTextBox.Text.Trim();
-			if(DepotPath.Length == 0 || DepotPath == DeploymentSettings.DefaultDepotPath)
+			launcherSettings.PerforceUserName = UserNameTextBox.Text.Trim();
+			if (launcherSettings.PerforceUserName.Length == 0)
 			{
-				DepotPath = null;
+				launcherSettings.PerforceUserName = null;
 			}
 
-			bool bUnstable = UseUnstableBuildCheckBox.Checked;
-
-
-			int AutomationPortNumber;
-			if(!EnableAutomationCheckBox.Checked || !int.TryParse(AutomationPortTextBox.Text, out AutomationPortNumber))
+			int automationPortNumber;
+			if (!EnableAutomationCheckBox.Checked || !Int32.TryParse(AutomationPortTextBox.Text, out automationPortNumber))
 			{
-				AutomationPortNumber = -1;
+				automationPortNumber = -1;
 			}
-			
-			if(ServerAndPort != InitialServerAndPort || UserName != InitialUserName || DepotPath != InitialDepotPath || bUnstable != bInitialUnstable || AutomationPortNumber != InitialAutomationPortNumber)
+
+			if (!String.Equals(launcherSettings.HordeServer, originalLauncherSettings.HordeServer, StringComparison.OrdinalIgnoreCase) ||
+				!String.Equals(launcherSettings.PerforceServerAndPort, originalLauncherSettings.PerforceServerAndPort, StringComparison.OrdinalIgnoreCase) ||
+				!String.Equals(launcherSettings.PerforceUserName, originalLauncherSettings.PerforceUserName, StringComparison.OrdinalIgnoreCase))
 			{
-				// Try to log in to the new server, and check the application is there
-				if(ServerAndPort != InitialServerAndPort || UserName != InitialUserName || DepotPath != InitialDepotPath)
+				if (result == Result.Ok)
 				{
-					string ErrorMessage;
-					ModalTaskResult Result = PerforceModalTask.Execute(this, new PerforceConnection(UserName, null, ServerAndPort), new PerforceTestConnectionTask(DepotPath), "Connecting", "Checking connection, please wait...", Log, out ErrorMessage);
-					if(Result != ModalTaskResult.Succeeded)
+					if (MessageBox.Show("UnrealGameSync must be restarted to apply these settings.\n\nWould you like to restart now?", "Restart Required", MessageBoxButtons.OKCancel) != DialogResult.OK)
 					{
-						if(Result == ModalTaskResult.Failed)
-						{
-							MessageBox.Show(ErrorMessage, "Unable to connect");
-						}
 						return;
+					}
+					else
+					{
+						result = Result.Restart;
 					}
 				}
 
-				if(MessageBox.Show("UnrealGameSync must be restarted to apply these settings.\n\nWould you like to restart now?", "Restart Required", MessageBoxButtons.OKCancel) != DialogResult.OK)
-				{
-					return;
-				}
-
-				bRestartUnstable = UseUnstableBuildCheckBox.Checked;
-				Utility.SaveGlobalPerforceSettings(ServerAndPort, UserName, DepotPath);
-				AutomationServer.SetPortNumber(AutomationPortNumber);
+				launcherSettings.Save();
+				AutomationServer.SetPortNumber(automationPortNumber);
 			}
 
-			RegistryKey Key = Registry.CurrentUser.CreateSubKey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run");
+			RegistryKey key = Registry.CurrentUser.CreateSubKey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run");
 			if (AutomaticallyRunAtStartupCheckBox.Checked)
 			{
-				Key.SetValue("UnrealGameSync", String.Format("\"{0}\" -RestoreState", OriginalExecutableFileName));
+				key.SetValue("UnrealGameSync", String.Format("\"{0}\" -RestoreState", _originalExecutableFileName));
 			}
 			else
 			{
-				Key.DeleteValue("UnrealGameSync", false);
+				key.DeleteValue("UnrealGameSync", false);
 			}
 
-			if (Settings.bKeepInTray != KeepInTrayCheckBox.Checked || Settings.SyncOptions.NumThreads != ParallelSyncThreadsSpinner.Value)
+			if (_settings.KeepInTray != KeepInTrayCheckBox.Checked || _settings.SyncOptions.NumThreads != ParallelSyncThreadsSpinner.Value)
 			{
-				Settings.SyncOptions.NumThreads = (int)ParallelSyncThreadsSpinner.Value;
-				Settings.bKeepInTray = KeepInTrayCheckBox.Checked;
-				Settings.Save();
+				int numThreads = (int)ParallelSyncThreadsSpinner.Value;
+				_settings.SyncOptions.NumThreads = (numThreads != PerforceSyncOptions.DefaultNumThreads) ? (int?)numThreads : null;
+				_settings.KeepInTray = KeepInTrayCheckBox.Checked;
+				_settings.Save(_logger);
 			}
 
-			List<Guid> NewEnabledTools = new List<Guid>();
-			foreach (ToolItem Item in CustomToolsListBox.CheckedItems)
+			List<Guid> newEnabledTools = new List<Guid>();
+			foreach (ToolItem? item in CustomToolsListBox.Items)
 			{
-				NewEnabledTools.Add(Item.Definition.Id);
+				if (item != null && item.Enabled)
+				{
+					newEnabledTools.Add(item.Definition.Id);
+				}
 			}
-			if (!NewEnabledTools.SequenceEqual(Settings.EnabledTools))
+			if (!newEnabledTools.SequenceEqual(_settings.EnabledTools))
 			{
-				Settings.EnabledTools = NewEnabledTools.ToArray();
-				Settings.Save();
-				ToolUpdateMonitor.UpdateNow();
+				_settings.EnabledTools.Clear();
+				_settings.EnabledTools.UnionWith(newEnabledTools);
+				_settings.Save(_logger);
+				_toolUpdateMonitor.UpdateNow();
 			}
 
 			if (EnableProtocolHandlerCheckBox.CheckState == CheckState.Checked)
 			{
-				if (InitialProtocolHandlerState != ProtocolHandlerState.Installed)
+				if (_initialProtocolHandlerState != ProtocolHandlerState.Installed)
 				{
 					ProtocolHandlerUtils.Install();
 				}
 			}
 			else if (EnableProtocolHandlerCheckBox.CheckState == CheckState.Unchecked)
 			{
-				if (InitialProtocolHandlerState != ProtocolHandlerState.NotInstalled)
+				if (_initialProtocolHandlerState != ProtocolHandlerState.NotInstalled)
 				{
 					ProtocolHandlerUtils.Uninstall();
 				}
 			}
 
-			DialogResult = DialogResult.OK;
+			_result = result;
 			Close();
 		}
 
 		private void CancelBtn_Click(object sender, EventArgs e)
 		{
-			DialogResult = DialogResult.Cancel;
+			_result = Result.Cancel;
 			Close();
 		}
 
@@ -278,8 +345,46 @@ namespace UnrealGameSync
 
 		private void AdvancedBtn_Click(object sender, EventArgs e)
 		{
-			PerforceSyncSettingsWindow Window = new PerforceSyncSettingsWindow(Settings);
-			Window.ShowDialog();
+			using PerforceSyncSettingsWindow window = new PerforceSyncSettingsWindow(_settings, _logger);
+			window.ShowDialog();
+		}
+
+		bool _recursiveItemCheck = false;
+
+		private void CustomToolsListBox_ItemCheck(object sender, ItemCheckEventArgs e)
+		{
+			if (!_recursiveItemCheck)
+			{
+				_recursiveItemCheck = true;
+				ToolItem toolItem = (ToolItem)CustomToolsListBox.Items[e.Index];
+
+				bool newEnabled = (e.CurrentValue == CheckState.Unchecked || e.CurrentValue == CheckState.Indeterminate);
+				if (newEnabled != toolItem.Enabled)
+				{
+					toolItem.Enabled = newEnabled;
+
+					foreach (ToolItem requiredTool in toolItem.RequiresTools)
+					{
+						if (toolItem.Enabled)
+						{
+							requiredTool.DependencyRefCount++;
+						}
+						else
+						{
+							requiredTool.DependencyRefCount--;
+						}
+
+						CheckState newCheckState = requiredTool.GetCheckState();
+						if (newCheckState != CustomToolsListBox.GetItemCheckState(requiredTool.Index))
+						{
+							CustomToolsListBox.SetItemCheckState(requiredTool.Index, newCheckState);
+						}
+					}
+				}
+
+				e.NewValue = toolItem.GetCheckState();
+				_recursiveItemCheck = false;
+			}
 		}
 	}
 }

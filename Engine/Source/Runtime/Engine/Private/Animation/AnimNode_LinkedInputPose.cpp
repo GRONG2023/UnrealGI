@@ -3,6 +3,8 @@
 #include "Animation/AnimNode_LinkedInputPose.h"
 #include "Animation/AnimInstanceProxy.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNode_LinkedInputPose)
+
 const FName FAnimNode_LinkedInputPose::DefaultInputPoseName("InPose");
 
 // Note not calling through Initialize or CacheBones here.
@@ -29,9 +31,7 @@ void FAnimNode_LinkedInputPose::Update_AnyThread(const FAnimationUpdateContext& 
 	if(InputProxy)
 	{
 		FAnimationUpdateContext InputContext = Context.WithOtherProxy(InputProxy);
-#if ANIM_NODE_IDS_AVAILABLE
-		InputContext = InputContext.WithNodeId(OuterGraphNodeIndex);
-#endif
+		InputContext.SetNodeId(OuterGraphNodeIndex);
 		InputPose.Update(InputContext);
 	}
 }
@@ -40,16 +40,20 @@ void FAnimNode_LinkedInputPose::Evaluate_AnyThread(FPoseContext& Output)
 {
 	if(InputProxy)
 	{
+		// Stash current proxy for restoration after recursion
+		FAnimInstanceProxy& OldProxy = *Output.AnimInstanceProxy;
+
+		Output.AnimInstanceProxy = InputProxy;
 		Output.Pose.SetBoneContainer(&InputProxy->GetRequiredBones());
+		Output.SetNodeId(INDEX_NONE);
+		Output.SetNodeId(OuterGraphNodeIndex);
+		InputPose.Evaluate(Output);
 
-		FPoseContext InputContext(InputProxy, Output.ExpectsAdditivePose());
-		InputPose.Evaluate(InputContext);
-
-		Output.Pose.MoveBonesFrom(InputContext.Pose);
-		Output.Curve.MoveFrom(InputContext.Curve);
-		Output.CustomAttributes.MoveFrom(InputContext.CustomAttributes);
+		// Restore proxy & required bones after evaluation
+		Output.AnimInstanceProxy = &OldProxy;
+		Output.Pose.SetBoneContainer(&OldProxy.GetRequiredBones());
 	}
-	else if(CachedInputPose.IsValid() && CachedInputCurve.IsValid())
+	else if(CachedInputPose.IsValid() && ensure(Output.Pose.GetNumBones() == CachedInputPose.GetNumBones()) && bIsCachedInputPoseInitialized)
 	{
 		Output.Pose.CopyBonesFrom(CachedInputPose);
 		Output.Curve.CopyFrom(CachedInputCurve);
@@ -74,7 +78,7 @@ void FAnimNode_LinkedInputPose::GatherDebugData(FNodeDebugData& DebugData)
 
 void FAnimNode_LinkedInputPose::DynamicLink(FAnimInstanceProxy* InInputProxy, FPoseLinkBase* InPoseLink, int32 InOuterGraphNodeIndex)
 {
-	check(InputProxy == nullptr);			// Must be unlinked before re-linking
+	check(GIsReinstancing || InputProxy == nullptr);			// Must be unlinked before re-linking
 
 	InputProxy = InInputProxy;
 	InputPose.SetDynamicLinkNode(InPoseLink);
@@ -83,7 +87,7 @@ void FAnimNode_LinkedInputPose::DynamicLink(FAnimInstanceProxy* InInputProxy, FP
 
 void FAnimNode_LinkedInputPose::DynamicUnlink()
 {
-	check(InputProxy != nullptr);			// Must be linked before unlinking
+	check(GIsReinstancing || InputProxy != nullptr);			// Must be linked before unlinking
 
 	InputProxy = nullptr;
 	InputPose.SetDynamicLinkNode(nullptr);

@@ -2,11 +2,6 @@
 
 #pragma once
 
-#include "Templates/SharedPointer.h"
+// HEADER_UNIT_UNSUPPORTED - Should not include this
 
-class FUniqueNetId;
-struct FUniqueNetIdWrapper;
-
-using FUniqueNetIdPtr = TSharedPtr<const FUniqueNetId, UNIQUENETID_ESPMODE>;
-using FUniqueNetIdRef = TSharedRef<const FUniqueNetId, UNIQUENETID_ESPMODE>;
-using FUniqueNetIdWeakPtr = TWeakPtr<const FUniqueNetId, UNIQUENETID_ESPMODE>;
+static_assert(false, "UObject/CoreOnlineFwd.h has moved to Online/CoreOnlineFwd.h in the CoreOnline module. Please update #includes and module dependencies.");

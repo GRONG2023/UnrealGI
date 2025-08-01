@@ -1,23 +1,94 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #include "ColorGradingVectorCustomization.h"
-#include "IPropertyUtilities.h"
-#include "Widgets/Input/SNumericEntryBox.h"
-#include "Widgets/Colors/SColorGradingPicker.h"
-#include "IDetailChildrenBuilder.h"
+
+#include "Containers/UnrealString.h"
+#include "CoreGlobals.h"
+#include "CoreTypes.h"
+#include "Customizations/MathStructCustomizations.h"
 #include "DetailLayoutBuilder.h"
 #include "DetailWidgetRow.h"
-#include "UObject/UnrealType.h"
-#include "Widgets/Layout/SBox.h"
-#include "Vector4StructCustomization.h"
-#include "IDetailGroup.h"
-#include "Widgets/Colors/SComplexGradient.h"
-#include "Misc/ConfigCacheIni.h"
-#include "IDetailPropertyRow.h"
-#include "Widgets/Input/SCheckBox.h"
 #include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/PlatformCrt.h"
+#include "IDetailChildrenBuilder.h"
+#include "IDetailGroup.h"
+#include "IDetailPropertyRow.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Margin.h"
+#include "Math/NumericLimits.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/ConfigCacheIni.h"
+#include "PropertyEditorModule.h"
+#include "PropertyHandle.h"
 #include "ScopedTransaction.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/CoreStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/SlateColor.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/SlateEnums.h"
+#include "Types/SlateStructs.h"
+#include "UObject/UnrealType.h"
+#include "Vector4StructCustomization.h"
+#include "Widgets/Colors/SColorBlock.h"
+#include "Widgets/Colors/SColorGradingPicker.h"
+#include "Widgets/Colors/SComplexGradient.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SCheckBox.h"
+#include "Widgets/Input/SNumericEntryBox.h"
+#include "Widgets/Input/SSpinBox.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SOverlay.h"
+#include "Widgets/SWidget.h"
+#include "Widgets/Text/STextBlock.h"
+
+class IPropertyTypeCustomizationUtils;
 
 #define LOCTEXT_NAMESPACE "FColorGradingCustomization"
+
+
+namespace
+{
+	static FVector4 ClampValueFromMetaData(FVector4 InValue, FProperty* InProperty)
+	{
+		FVector4 RetVal = InValue;
+		if (InProperty)
+		{
+			//Enforce min
+			const FString& MinString = InProperty->GetMetaData(TEXT("ClampMin"));
+			if (MinString.Len())
+			{
+				checkSlow(MinString.IsNumeric());
+				double MinValue;
+				TTypeFromString<double>::FromString(MinValue, *MinString);
+				for (int Index = 0; Index < 4; Index++)
+				{
+					RetVal[Index] = FMath::Max<double>(MinValue, RetVal[Index]);
+				}
+			}
+			//Enforce max 
+			const FString& MaxString = InProperty->GetMetaData(TEXT("ClampMax"));
+			if (MaxString.Len())
+			{
+				checkSlow(MaxString.IsNumeric());
+				double MaxValue;
+				TTypeFromString<double>::FromString(MaxValue, *MaxString);
+
+				for (int Index = 0; Index < 4; Index++)
+				{
+					RetVal[Index] = FMath::Min<double>(MaxValue, RetVal[Index]);
+				}
+			}
+		}
+
+		return RetVal;
+	}
+}
 
 FColorGradingVectorCustomizationBase::FColorGradingVectorCustomizationBase(TWeakPtr<IPropertyHandle> InColorGradingPropertyHandle, const TArray<TWeakPtr<IPropertyHandle>>& InSortedChildArray)
 	: ColorGradingPropertyHandle(InColorGradingPropertyHandle)
@@ -205,7 +276,7 @@ void FColorGradingVectorCustomizationBase::OnValueChanged(float NewValue, int32 
 {
 	FVector4 CurrentValueVector;
 	verifySlow(ColorGradingPropertyHandle.Pin()->GetValue(CurrentValueVector) == FPropertyAccess::Success);
-
+	ClampValueFromMetaData(CurrentValueVector, ColorGradingPropertyHandle.Pin()->GetProperty());
 	FVector4 NewValueVector = CurrentValueVector;
 
 	if (IsRGBMode)
@@ -222,7 +293,7 @@ void FColorGradingVectorCustomizationBase::OnValueChanged(float NewValue, int32 
 		if (ColorIndex < 3) 
 		{
 			CurrentHSVColor.Component(ColorIndex) = NewValue;
-			NewValueVector = CurrentHSVColor.HSVToLinearRGB();
+			NewValueVector = (FVector4)CurrentHSVColor.HSVToLinearRGB();
 			NewValueVector.W = CurrentValueVector.W;
 		}
 		else // Luminance
@@ -466,7 +537,7 @@ bool FColorGradingVectorCustomizationBase::IsEntryBoxEnabled(int32 ColorIndex) c
 	return OnSliderGetValue(ColorIndex) != TOptional<float>();
 }
 
-TSharedRef<SNumericEntryBox<float>> FColorGradingVectorCustomizationBase::MakeNumericEntryBox(int32 ColorIndex, TOptional<float>& MinValue, TOptional<float>& MaxValue, TOptional<float>& SliderMinValue, TOptional<float>& SliderMaxValue, float& SliderExponent, float& Delta, int32 &ShiftMouseMovePixelPerDelta, bool& SupportDynamicSliderMaxValue, bool& SupportDynamicSliderMinValue)
+TSharedRef<SNumericEntryBox<float>> FColorGradingVectorCustomizationBase::MakeNumericEntryBox(int32 ColorIndex, TOptional<float>& MinValue, TOptional<float>& MaxValue, TOptional<float>& SliderMinValue, TOptional<float>& SliderMaxValue, float& SliderExponent, float& Delta, float& ShiftMultiplier, float& CtrlMultiplier, bool& SupportDynamicSliderMaxValue, bool& SupportDynamicSliderMinValue)
 {
 	TAttribute<FText> TextGetter = TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &FColorGradingVectorCustomizationBase::OnGetColorLabelText, ColorGradingPropertyHandle.Pin()->GetPropertyDisplayName(), ColorIndex));
 	TSharedRef<SWidget> LabelWidget = SNumericEntryBox<float>::BuildLabel(TextGetter, FLinearColor::White, FLinearColor(0.2f, 0.2f, 0.2f));
@@ -482,7 +553,8 @@ TSharedRef<SNumericEntryBox<float>> FColorGradingVectorCustomizationBase::MakeNu
 		.OnEndSliderMovement(this, &FColorGradingVectorCustomizationBase::OnEndSliderMovement, ColorIndex)
 		// Only allow spin on handles with one object.  Otherwise it is not clear what value to spin
 		.AllowSpin(ColorGradingPropertyHandle.Pin()->GetNumOuterObjects() == 1)
-		.ShiftMouseMovePixelPerDelta(ShiftMouseMovePixelPerDelta)
+		.ShiftMultiplier(ShiftMultiplier)
+		.CtrlMultiplier(CtrlMultiplier)
 		.SupportDynamicSliderMaxValue(this, &FColorGradingVectorCustomizationBase::GetSupportDynamicSliderMaxValue, SupportDynamicSliderMaxValue, ColorIndex)
 		.SupportDynamicSliderMinValue(this, &FColorGradingVectorCustomizationBase::GetSupportDynamicSliderMinValue, SupportDynamicSliderMinValue, ColorIndex)
 		.OnDynamicSliderMaxValueChanged(this, &FColorGradingVectorCustomizationBase::OnDynamicSliderMaxValueChanged)
@@ -545,19 +617,17 @@ void FColorGradingVectorCustomization::MakeHeaderRow(FDetailWidgetRow& Row, TSha
 			];
 
 		// Make a widget for each property.  The vector component properties  will be displayed in the header
-		TOptional<float> MinValue, MaxValue, SliderMinValue, SliderMaxValue;
-		float SliderExponent, Delta;
-		int32 ShiftMouseMovePixelPerDelta = 1;
-		bool SupportDynamicSliderMaxValue = false;
-		bool SupportDynamicSliderMinValue = false;
 
 		TSharedRef<IPropertyHandle> ColorGradingPropertyHandleRef = ColorGradingPropertyHandle.Pin().ToSharedRef();
-		FMathStructCustomization::ExtractNumericMetadata<float>(ColorGradingPropertyHandleRef, MinValue, MaxValue, SliderMinValue, SliderMaxValue, SliderExponent, Delta, ShiftMouseMovePixelPerDelta, SupportDynamicSliderMaxValue, SupportDynamicSliderMinValue);
+		FMathStructCustomization::FNumericMetadata<float> Metadata;
+		FMathStructCustomization::ExtractNumericMetadata(ColorGradingPropertyHandleRef, Metadata);
 
 		for (int32 ColorIndex = 0; ColorIndex < SortedChildArray.Num(); ++ColorIndex)
 		{
 			TWeakPtr<IPropertyHandle> WeakHandlePtr = SortedChildArray[ColorIndex];
-			TSharedRef<SNumericEntryBox<float>> NumericEntryBox = MakeNumericEntryBox(ColorIndex, MinValue, MaxValue, SliderMinValue, SliderMaxValue, SliderExponent, Delta, ShiftMouseMovePixelPerDelta, SupportDynamicSliderMaxValue, SupportDynamicSliderMinValue);
+			TSharedRef<SNumericEntryBox<float>> NumericEntryBox = MakeNumericEntryBox(ColorIndex, Metadata.MinValue, Metadata.MaxValue, 
+				Metadata.SliderMinValue, Metadata.SliderMaxValue, Metadata.SliderExponent, Metadata.Delta, 
+				Metadata.ShiftMultiplier, Metadata.CtrlMultiplier, Metadata.bSupportDynamicSliderMaxValue, Metadata.bSupportDynamicSliderMinValue);
 			TSharedPtr<SSpinBox<float>> NumericEntrySpinBox = StaticCastSharedPtr<SSpinBox<float>>(NumericEntryBox->GetSpinBox());
 			 
 			NumericEntryBoxWidgetList.Add(NumericEntryBox);
@@ -600,7 +670,7 @@ void FColorGradingVectorCustomization::MakeHeaderRow(FDetailWidgetRow& Row, TSha
 					SNew(SColorBlock)
 					.Color(this, &FColorGradingVectorCustomization::OnGetHeaderColorBlock)
 					.ShowBackgroundForAlpha(false)
-					.IgnoreAlpha(true)
+					.AlphaDisplayMode(EColorBlockAlphaDisplayMode::Ignore)
 					.ColorIsHSV(false)
 					.Size(FVector2D(70.0f, 12.0f))
 				]
@@ -788,15 +858,11 @@ void FColorGradingCustomBuilder::Tick(float DeltaTime)
 void FColorGradingCustomBuilder::GenerateHeaderRowContent(FDetailWidgetRow& NodeRow)
 {
 	// Make a widget for each property.  The vector component properties  will be displayed in the header
-	TOptional<float> MinValue, MaxValue, SliderMinValue, SliderMaxValue;
-	float SliderExponent, Delta;
-	int32 ShiftMouseMovePixelPerDelta = 1;
-	bool SupportDynamicSliderMaxValue = false;
-	bool SupportDynamicSliderMinValue = false;
+
 	TSharedRef<IPropertyHandle> ColorGradingPropertyHandleRef = ColorGradingPropertyHandle.Pin().ToSharedRef();
-
-	FMathStructCustomization::ExtractNumericMetadata<float>(ColorGradingPropertyHandleRef, MinValue, MaxValue, SliderMinValue, SliderMaxValue, SliderExponent, Delta, ShiftMouseMovePixelPerDelta, SupportDynamicSliderMaxValue, SupportDynamicSliderMinValue);	
-
+	FMathStructCustomization::FNumericMetadata<float> Metadata;
+	FMathStructCustomization::ExtractNumericMetadata(ColorGradingPropertyHandleRef, Metadata);
+	
 	EColorGradingModes ColorGradingMode = GetColorGradingMode();
 
 	NodeRow.NameContent()
@@ -812,14 +878,15 @@ void FColorGradingCustomBuilder::GenerateHeaderRowContent(FDetailWidgetRow& Node
 			.Padding(FMargin(2.0f, 2.0f, 2.0f, 2.0f))
 			[
 				SAssignNew(ColorGradingPickerWidget, SColorGradingPicker)
-				.ValueMin(MinValue)
-				.ValueMax(MaxValue)
-				.SliderValueMin(SliderMinValue)
-				.SliderValueMax(SliderMaxValue)
-				.MainDelta(Delta)
-				.SupportDynamicSliderMaxValue(SupportDynamicSliderMaxValue)
-				.SupportDynamicSliderMinValue(SupportDynamicSliderMinValue)
-				.MainShiftMouseMovePixelPerDelta(ShiftMouseMovePixelPerDelta)
+				.ValueMin(Metadata.MinValue)
+				.ValueMax(Metadata.MaxValue)
+				.SliderValueMin(Metadata.SliderMinValue)
+				.SliderValueMax(Metadata.SliderMaxValue)
+				.MainDelta(Metadata.Delta)
+				.SupportDynamicSliderMaxValue(Metadata.bSupportDynamicSliderMaxValue)
+				.SupportDynamicSliderMinValue(Metadata.bSupportDynamicSliderMinValue)
+				.MainShiftMultiplier(Metadata.ShiftMultiplier)
+				.MainCtrlMultiplier(Metadata.CtrlMultiplier)
 				.ColorGradingModes(ColorGradingMode)
 				.OnColorCommitted(this, &FColorGradingCustomBuilder::OnColorGradingPickerChanged)
 				.OnQueryCurrentColor(this, &FColorGradingCustomBuilder::GetCurrentColorGradingValue)
@@ -846,7 +913,7 @@ void FColorGradingCustomBuilder::GenerateHeaderRowContent(FDetailWidgetRow& Node
 		.Padding(FMargin(0.0f, 0.0f, 3.0f, 0.0f))
 		[
 			SNew(SCheckBox)
-			.Style(FEditorStyle::Get(), "ToggleButtonCheckbox")
+			.Style(FAppStyle::Get(), "ToggleButtonCheckbox")
 			.Type(ESlateCheckBoxType::ToggleButton)
 			.IsChecked(this, &FColorGradingCustomBuilder::OnGetChangeColorMode, ColorModeType::RGB)
 			.OnCheckStateChanged(this, &FColorGradingCustomBuilder::OnChangeColorModeClicked, ColorModeType::RGB)
@@ -857,7 +924,7 @@ void FColorGradingCustomBuilder::GenerateHeaderRowContent(FDetailWidgetRow& Node
 			[
 				SNew(STextBlock)
 				.Text(this, &FColorGradingCustomBuilder::OnChangeColorModeText, ColorModeType::RGB)
-				.Font(FEditorStyle::GetFontStyle("StandardDialog.SmallFont"))
+				.Font(FAppStyle::GetFontStyle("StandardDialog.SmallFont"))
 			]
 		]
 		+ SHorizontalBox::Slot()
@@ -867,7 +934,7 @@ void FColorGradingCustomBuilder::GenerateHeaderRowContent(FDetailWidgetRow& Node
 		.Padding(FMargin(0.0f, 0.0f, 3.0f, 0.0f))
 		[
 			SNew(SCheckBox)
-			.Style(FEditorStyle::Get(), "ToggleButtonCheckbox")
+			.Style(FAppStyle::Get(), "ToggleButtonCheckbox")
 			.Type(ESlateCheckBoxType::ToggleButton)
 			.IsChecked(this, &FColorGradingCustomBuilder::OnGetChangeColorMode, ColorModeType::HSV)
 			.OnCheckStateChanged(this, &FColorGradingCustomBuilder::OnChangeColorModeClicked, ColorModeType::HSV)
@@ -878,7 +945,7 @@ void FColorGradingCustomBuilder::GenerateHeaderRowContent(FDetailWidgetRow& Node
 			[
 				SNew(STextBlock)
 				.Text(this, &FColorGradingCustomBuilder::OnChangeColorModeText, ColorModeType::HSV)
-				.Font(FEditorStyle::GetFontStyle("StandardDialog.SmallFont"))
+				.Font(FAppStyle::GetFontStyle("StandardDialog.SmallFont"))
 			]
 		]
 	];
@@ -887,7 +954,9 @@ void FColorGradingCustomBuilder::GenerateHeaderRowContent(FDetailWidgetRow& Node
 	{
 		TWeakPtr<IPropertyHandle> WeakHandlePtr = SortedChildArray[ColorIndex];
 
-		TSharedRef<SNumericEntryBox<float>> NumericEntryBox = MakeNumericEntryBox(ColorIndex, MinValue, MaxValue, SliderMinValue, SliderMaxValue, SliderExponent, Delta, ShiftMouseMovePixelPerDelta, SupportDynamicSliderMaxValue, SupportDynamicSliderMinValue);
+		TSharedRef<SNumericEntryBox<float>> NumericEntryBox = MakeNumericEntryBox(ColorIndex, Metadata.MinValue, Metadata.MaxValue, 
+			Metadata.SliderMinValue, Metadata.SliderMaxValue, Metadata.SliderExponent, Metadata.Delta, 
+			Metadata.ShiftMultiplier, Metadata.CtrlMultiplier, Metadata.bSupportDynamicSliderMaxValue, Metadata.bSupportDynamicSliderMinValue);
 		TSharedPtr<SSpinBox<float>> NumericEntrySpinBox = StaticCastSharedPtr<SSpinBox<float>>(NumericEntryBox->GetSpinBox());
 
 		NumericEntryBoxWidgetList.Add(NumericEntryBox);

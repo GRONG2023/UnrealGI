@@ -3,14 +3,21 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Input/Reply.h"
-#include "Textures/SlateIcon.h"
-#include "Widgets/SCompoundWidget.h"
-#include "SViewportToolBar.h"
 #include "Framework/SlateDelegates.h"
+#include "Input/Reply.h"
+#include "Misc/Attribute.h"
+#include "SViewportToolBar.h"
+#include "Templates/SharedPointer.h"
+#include "Textures/SlateIcon.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
 
+class FName;
+class FText;
 class SMenuAnchor;
+struct FGeometry;
+struct FPointerEvent;
+struct FSlateIcon;
 
 /**
  * Custom widget to display an icon/drop down menu. 
@@ -19,7 +26,7 @@ class SMenuAnchor;
  * | Icon     Menu button |
  * +--------+-------------+
  */
-class UNREALED_API SViewportToolBarIconMenu : public SCompoundWidget 
+class SViewportToolBarIconMenu : public SCompoundWidget 
 {
 public:
 	SLATE_BEGIN_ARGS( SViewportToolBarIconMenu ){}
@@ -46,7 +53,7 @@ public:
 	 *
 	 * @param	InArgs	The declaration data for this widget
 	 */
-	void Construct( const FArguments& InArgs );
+	UNREALED_API void Construct( const FArguments& InArgs );
 	
 private:
 	/**
@@ -58,7 +65,7 @@ private:
 	 * Called when the mouse enters a menu button.  If there was a menu previously opened
 	 * we open this menu automatically
 	 */
-	void OnMouseEnter(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent);
+	UNREALED_API void OnMouseEnter(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent);
 
 private:
 	/** Our menus anchor */

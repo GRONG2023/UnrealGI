@@ -5,12 +5,18 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "Misc/Guid.h"
-#include "MovieSceneSpawnable.generated.h"
+#include "MovieSceneDynamicBinding.h"
 
-struct FMovieSceneSequenceID;
+#include "MovieSceneSpawnable.generated.h"
 
 class IMovieScenePlayer;
 class UMovieSceneSequence;
+struct FMovieSceneSequenceID;
+
+namespace UE::MovieScene
+{
+	struct FSharedPlaybackState;
+}
 
 UENUM()
 enum class ESpawnOwnership : uint8
@@ -19,7 +25,7 @@ enum class ESpawnOwnership : uint8
 	InnerSequence,
 
 	/** The object's lifetime is managed by the outermost sequence */
-	MasterSequence,
+	RootSequence,
 
 	/** Once spawned, the object's lifetime is managed externally. */
 	External,
@@ -36,7 +42,6 @@ struct FMovieSceneSpawnable
 	FMovieSceneSpawnable()
 		: bContinuouslyRespawn(false)
 		, bNetAddressableName(false)
-		, bEvaluateTracksWhenNotSpawned(false)
 		, ObjectTemplate(nullptr)
 		, Ownership(ESpawnOwnership::InnerSequence)
 #if WITH_EDITORONLY_DATA
@@ -49,7 +54,6 @@ struct FMovieSceneSpawnable
 	FMovieSceneSpawnable(const FString& InitName, UObject& InObjectTemplate)
 		: bContinuouslyRespawn(false)
 		, bNetAddressableName(false)
-		, bEvaluateTracksWhenNotSpawned(false)
 		, Guid(FGuid::NewGuid())
 		, Name(InitName)
 		, ObjectTemplate(&InObjectTemplate)
@@ -230,12 +234,20 @@ public:
 	/**
 	 * Get the name to use for spawning this object into a networked level
 	 */
+	MOVIESCENE_API FName GetNetAddressableName(TSharedRef<const UE::MovieScene::FSharedPlaybackState> SharedPlaybackState, FMovieSceneSequenceID SequenceID) const;
+
+	UE_DEPRECATED(5.4, "Please use the FSharedPlaybackState version of this method")
 	MOVIESCENE_API FName GetNetAddressableName(IMovieScenePlayer& Player, FMovieSceneSequenceID SequenceID) const;
 
 	/**
 	 * Automatically determine a value for bNetAddressableName based on the spawnable type
 	 */
 	MOVIESCENE_API void AutoSetNetAddressableName();
+
+	/* For sorts and BinarySearch so we can search quickly by Guid */
+	FORCEINLINE bool operator<(const FMovieSceneSpawnable& RHS) const { return Guid < RHS.Guid; }
+	FORCEINLINE friend bool operator<(const FGuid& InGuid, const FMovieSceneSpawnable& RHS) { return InGuid < RHS.GetGuid(); }
+	FORCEINLINE bool operator<(const FGuid& InGuid) const { return Guid < InGuid; }
 
 	/** Array of tags that can be used for grouping and categorizing. */
 	UPROPERTY(EditAnywhere, AdvancedDisplay, Category=Actor)
@@ -249,9 +261,9 @@ public:
 	UPROPERTY(EditAnywhere, Category=Actor)
 	bool bNetAddressableName;
 
-	/** When enabled, any tracks on this object binding or its children will still be evaluated even when the object is not spawned. */
-	UPROPERTY(EditAnywhere, Category=Actor)
-	bool bEvaluateTracksWhenNotSpawned;
+	/** Optional user-defined spawning information */
+	UPROPERTY(EditAnywhere, Category="Sequencer")
+	FMovieSceneDynamicBinding DynamicBinding;
 
 private:
 
@@ -267,7 +279,7 @@ private:
 	FString Name;
 
 	UPROPERTY()
-	UObject* ObjectTemplate;
+	TObjectPtr<UObject> ObjectTemplate;
 
 	/** Set of GUIDs to possessable object bindings that are bound to an object inside this spawnable */
 	// @todo sequencer: This should be a TSet, but they don't duplicate correctly atm
@@ -282,7 +294,7 @@ private:
 public:
 	/** Deprecated generated class */
 	UPROPERTY()
-	UClass* GeneratedClass_DEPRECATED;
+	TObjectPtr<UClass> GeneratedClass_DEPRECATED;
 #endif
 
 	/** Name of level to spawn into */

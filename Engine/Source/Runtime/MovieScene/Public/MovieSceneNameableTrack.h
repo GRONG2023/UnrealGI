@@ -2,10 +2,17 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "CoreTypes.h"
+#include "Internationalization/Text.h"
 #include "MovieSceneTrack.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "MovieSceneNameableTrack.generated.h"
+
+class UObject;
 
 
 /**
@@ -28,11 +35,19 @@ public:
 	MOVIESCENE_API virtual void SetDisplayName(const FText& NewDisplayName);
 
 	/**
+	 * Set the track row's display name.
+	 *
+	 * @param NewName The name to set.
+	 * @param RowIndex The track row index to set.
+	 */
+	MOVIESCENE_API virtual void SetTrackRowDisplayName(const FText& NewDisplayName, int32 TrackRowIndex);
+
+	/**
 	 * Can rename this track.
 	 *
 	 * @return Whether this track can be renamed.
 	 */
-	MOVIESCENE_API virtual bool CanRename() const { return true; }
+	virtual bool CanRename() const { return true; }
 
 	/** 
 	 * Validate the new display name. 
@@ -47,12 +62,20 @@ public:
 	// UMovieSceneTrack interface
 
 	MOVIESCENE_API virtual FText GetDisplayName() const override;
+	MOVIESCENE_API virtual FText GetTrackRowDisplayName(int32 RowIndex) const override;
 	MOVIESCENE_API virtual FText GetDefaultDisplayName() const;
+
+	MOVIESCENE_API virtual void OnRowIndicesChanged(const TMap<int32, int32>& NewToOldRowIndices) override;
 
 private:
 
 	/** The track's human readable display name. */
 	UPROPERTY(EditAnywhere, Category="Track")
 	FText DisplayName;
+
+	/** The track display name per row. */
+	UPROPERTY(EditAnywhere, Category="Track")
+	TArray<FText> TrackRowDisplayNames;
+
 #endif
 };

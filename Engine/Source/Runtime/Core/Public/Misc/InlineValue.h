@@ -9,6 +9,7 @@
 #include "Templates/PointerIsConvertibleFromTo.h"
 #include "Templates/Decay.h"
 #include "Templates/TypeCompatibleBytes.h"
+#include "Templates/UnrealTemplate.h"
 
 /**
  * A container type that houses an instance of BaseType in inline memory where it is <= MaxInlineSize,
@@ -16,7 +17,7 @@
  *
  * Can be viewed as a TUniquePtr with a small allocation optimization.
  */
-template<typename BaseType, uint8 DesiredMaxInlineSize=64, uint8 DefaultAlignment=8>
+template<typename BaseType, uint16 DesiredMaxInlineSize=64, uint8 DefaultAlignment=8>
 class TInlineValue
 {
 public:
@@ -39,6 +40,16 @@ public:
 		: bIsValid(false)
 	{
 		InitializeFrom<typename TDecay<T>::Type>(Forward<T>(In));
+	}
+
+	/**
+	 * In-place construction of BaseType from a set of arguments.
+	 */
+	template<typename... ArgTypes>
+	TInlineValue(EInPlace, ArgTypes&&... Args)
+		: bIsValid(false)
+	{
+		InitializeFrom<BaseType>(Forward<ArgTypes>(Args)...);
 	}
 
 	/**

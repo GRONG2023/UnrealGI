@@ -2,29 +2,22 @@
 
 #pragma once
 
-#include "ScreenPass.h"
+#include "RenderGraphFwd.h"
+#include "RHIFwd.h"
 #include "TranslucentRendering.h"
-#include "PostProcess/RenderingCompositionGraph.h"
+#include "PathTracing.h"
+#include "PostProcess/PostProcessInputs.h"
 
-class FSceneTextureParameters;
+enum class EReflectionsMethod;
 
-enum class EPostProcessAAQuality : uint32
+class FScreenPassVS;
+class FViewInfo;
+class FVirtualShadowMapArray;
+
+namespace Nanite
 {
-	Disabled,
-	// Faster FXAA
-	VeryLow,
-	// FXAA
-	Low,
-	// Faster Temporal AA
-	Medium,
-	// Temporal AA
-	High,
-	VeryHigh,
-	MAX
-};
-
-// Returns the quality of post process anti-aliasing defined by CVar.
-EPostProcessAAQuality GetPostProcessAAQuality();
+	struct FRasterResults;
+}
 
 // Returns whether the full post process pipeline is enabled. Otherwise, the minimal set of operations are performed.
 bool IsPostProcessingEnabled(const FViewInfo& View);
@@ -35,36 +28,33 @@ bool IsPostProcessingWithComputeEnabled(ERHIFeatureLevel::Type FeatureLevel);
 // Returns whether the post process pipeline supports propagating the alpha channel.
 bool IsPostProcessingWithAlphaChannelSupported();
 
-struct FPostProcessingInputs
-{
-	TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTextures = nullptr;
-	FRDGTextureRef ViewFamilyTexture = nullptr;
-	const FSeparateTranslucencyTextures* SeparateTranslucencyTextures = nullptr;
-	const struct FHairStrandsRenderingData* HairDatas = nullptr;
+using FPostProcessVS = FScreenPassVS;
 
-	void Validate() const
-	{
-		check(SceneTextures);
-		check(ViewFamilyTexture);
-		check(SeparateTranslucencyTextures);
-	}
-};
+void AddPostProcessingPasses(
+	FRDGBuilder& GraphBuilder,
+	const FViewInfo& View, int32 ViewIndex,
+	FSceneUniformBuffer& SceneUniformBuffer,
+	bool bAnyLumenActive,
+	bool bLumenGIEnabled,
+	EReflectionsMethod ReflectionsMethod,
+	const FPostProcessingInputs& Inputs,
+	const Nanite::FRasterResults* NaniteRasterResults,
+	FInstanceCullingManager& InstanceCullingManager,
+	FVirtualShadowMapArray* VirtualShadowMapArray,
+	struct FLumenSceneFrameTemporaries& LumenFrameTemporaries,
+	const FSceneWithoutWaterTextures& SceneWithoutWaterTextures,
+	FScreenPassTexture TSRFlickeringInput,
+	FRDGTextureRef& InstancedEditorDepthTexture);
 
-void AddPostProcessingPasses(FRDGBuilder& GraphBuilder, const FViewInfo& View, int32 ViewIndex, const FPostProcessingInputs& Inputs);
-
-void AddDebugViewPostProcessingPasses(FRDGBuilder& GraphBuilder, const FViewInfo& View, const FPostProcessingInputs& Inputs);
-
-#if !(UE_BUILD_SHIPPING)
+void AddDebugViewPostProcessingPasses(FRDGBuilder& GraphBuilder, const FViewInfo& View, FSceneUniformBuffer &SceneUniformBuffer, const FPostProcessingInputs& Inputs, const Nanite::FRasterResults* NaniteRasterResults);
 
 void AddVisualizeCalibrationMaterialPostProcessingPasses(FRDGBuilder& GraphBuilder, const FViewInfo& View, const FPostProcessingInputs& Inputs, const UMaterialInterface* InMaterialInterface);
-
-#endif
-
 
 struct FMobilePostProcessingInputs
 {
 	TRDGUniformBufferRef<FMobileSceneTextureUniformParameters> SceneTextures = nullptr;
 	FRDGTextureRef ViewFamilyTexture = nullptr;
+	bool bRequiresMultiPass = false;
 
 	void Validate() const
 	{
@@ -73,51 +63,8 @@ struct FMobilePostProcessingInputs
 	}
 };
 
-void AddMobilePostProcessingPasses(FRDGBuilder& GraphBuilder, const FViewInfo& View, const FMobilePostProcessingInputs& Inputs, bool bMobileMSAA);
+void AddMobilePostProcessingPasses(FRDGBuilder& GraphBuilder, FScene* Scene, const FViewInfo& View, FSceneUniformBuffer &SceneUniformBuffer, const FMobilePostProcessingInputs& Inputs, FInstanceCullingManager& InstanceCullingManager);
 
 void AddBasicPostProcessPasses(FRDGBuilder& GraphBuilder, const FViewInfo& View);
 
-// For compatibility with composition graph passes until they are ported to Render Graph.
-class RENDERER_API FPostProcessVS : public FScreenPassVS
-{
-public:
-	FPostProcessVS() = default;
-	FPostProcessVS(const ShaderMetaType::CompiledShaderInitializerType& Initializer)
-		: FScreenPassVS(Initializer)
-	{}
-
-	void SetParameters(const FRenderingCompositePassContext&) {}
-	void SetParameters(FRHICommandList&, FRHIUniformBuffer*) {}
-};
-
-/** The context used to setup a post-process pass. */
-class FPostprocessContext
-{
-public:
-	FPostprocessContext(FRHICommandListImmediate& InRHICmdList, FRenderingCompositionGraph& InGraph, const FViewInfo& InView);
-
-	FRHICommandListImmediate& RHICmdList;
-	FRenderingCompositionGraph& Graph;
-	const FViewInfo& View;
-
-	// 0 if there was no scene color available at constructor call time
-	FRenderingCompositePass* SceneColor;
-	// never 0
-	FRenderingCompositePass* SceneDepth;
-
-	FRenderingCompositeOutputRef FinalOutput;
-};
-
-/**
- * The center for all post processing activities.
- */
-class FPostProcessing
-{
-public:
-	void ProcessPlanarReflection(FRHICommandListImmediate& RHICmdList, const FViewInfo& View, TRefCountPtr<IPooledRenderTarget>& OutFilteredSceneColor);
-
-	void OverrideRenderTarget(FRenderingCompositeOutputRef It, TRefCountPtr<IPooledRenderTarget>& RT, FPooledRenderTargetDesc& Desc);
-};
-
-/** The global used for post processing. */
-extern FPostProcessing GPostProcessing;
+FRDGTextureRef AddProcessPlanarReflectionPass(FRDGBuilder& GraphBuilder, const FViewInfo& View, FRDGTextureRef SceneColorTexture);

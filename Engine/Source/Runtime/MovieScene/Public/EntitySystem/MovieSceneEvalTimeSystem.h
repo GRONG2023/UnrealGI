@@ -2,25 +2,45 @@
 
 #pragma once
 
-#include "EntitySystem/MovieSceneEntitySystem.h"
+#include "Containers/Array.h"
 #include "EntitySystem/MovieSceneEntityIDs.h"
+#include "EntitySystem/MovieSceneEntitySystem.h"
+#include "EntitySystem/MovieSceneEntitySystemTypes.h"
+#include "Misc/FrameTime.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
 
 #include "MovieSceneEvalTimeSystem.generated.h"
 
-
+class UObject;
 struct FFrameTime;
 
-UCLASS()
-class MOVIESCENE_API UMovieSceneEvalTimeSystem : public UMovieSceneEntitySystem
+namespace UE::MovieScene
+{
+	struct FEvaluatedTime
+	{
+		FFrameTime FrameTime;
+		double Seconds;
+	};
+}
+
+UCLASS(MinimalAPI)
+class UMovieSceneEvalTimeSystem : public UMovieSceneEntitySystem
 {
 public:
+
 	GENERATED_BODY()
 
-	UMovieSceneEvalTimeSystem(const FObjectInitializer& ObjInit);
+	MOVIESCENE_API UMovieSceneEvalTimeSystem(const FObjectInitializer& ObjInit);
 
-	virtual void OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents) override;
+	MOVIESCENE_API virtual bool IsRelevantImpl(UMovieSceneEntitySystemLinker* InLinker) const override;
+	MOVIESCENE_API virtual void OnSchedulePersistentTasks(UE::MovieScene::IEntitySystemScheduler* TaskScheduler) override;
+	MOVIESCENE_API virtual void OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents) override;
 
 private:
-	TArray<FFrameTime> FrameTimes;
+
+	TArray<UE::MovieScene::FEvaluatedTime, TInlineAllocator<16>> EvaluatedTimes;
+
+	UE::MovieScene::FEntityComponentFilter RelevantFilter;
 };
 

@@ -2,72 +2,52 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "InputCoreTypes.h"
-#include "Input/Reply.h"
 #include "DetailTreeNode.h"
-#include "Widgets/Views/STableViewBase.h"
-#include "Widgets/Views/STableRow.h"
-#include "Textures/SlateIcon.h"
-#include "Framework/Commands/UIAction.h"
-#include "Widgets/Views/SListView.h"
 #include "IDetailsViewPrivate.h"
-#include "Layout/WidgetPath.h"
+#include "InputCoreTypes.h"
 #include "Framework/Application/MenuStack.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/UIAction.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Input/Reply.h"
+#include "Layout/WidgetPath.h"
+#include "Textures/SlateIcon.h"
+#include "Widgets/Views/SListView.h"
+#include "Widgets/Views/STableViewBase.h"
+#include "Widgets/Views/STableRow.h"
+
+class UToolMenu;
+class UDetailRowMenuContext;
 
 class SDetailTableRowBase : public STableRow< TSharedPtr< FDetailTreeNode > >
 {
 public:
-	virtual FReply OnMouseButtonUp( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override
-	{
-		if( OwnerTreeNode.IsValid() && MouseEvent.GetEffectingButton() == EKeys::RightMouseButton && !StaticCastSharedRef<STableViewBase>( OwnerTablePtr.Pin()->AsWidget() )->IsRightClickScrolling() )
-		{
-			FMenuBuilder MenuBuilder( true, nullptr, nullptr, true );
+	virtual FReply OnMouseButtonUp( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
 
-			FDetailNodeList VisibleChildren;
-			OwnerTreeNode.Pin()->GetChildren( VisibleChildren );
+	int32 GetIndentLevelForBackgroundColor() const;
 
-			bool bShouldOpenMenu = false;
-			// Open context menu if this node can be expanded 
-			if( VisibleChildren.Num() )
-			{
-				bShouldOpenMenu = true;
+	static bool IsScrollBarVisible(TWeakPtr<STableViewBase> OwnerTableViewWeak);
+	static const float ScrollBarPadding;
 
-				FUIAction ExpandAllAction( FExecuteAction::CreateSP( this, &SDetailTableRowBase::OnExpandAllClicked ) );
-				FUIAction CollapseAllAction( FExecuteAction::CreateSP( this, &SDetailTableRowBase::OnCollapseAllClicked ) );
-
-				MenuBuilder.BeginSection( NAME_None, NSLOCTEXT("PropertyView", "ExpansionHeading", "Expansion") );
-					MenuBuilder.AddMenuEntry( NSLOCTEXT("PropertyView", "CollapseAll", "Collapse All"), NSLOCTEXT("PropertyView", "CollapseAll_ToolTip", "Collapses this item and all children"), FSlateIcon(), CollapseAllAction );
-					MenuBuilder.AddMenuEntry( NSLOCTEXT("PropertyView", "ExpandAll", "Expand All"), NSLOCTEXT("PropertyView", "ExpandAll_ToolTip", "Expands this item and all children"), FSlateIcon(), ExpandAllAction );
-				MenuBuilder.EndSection();
-
-			}
-
-			bShouldOpenMenu |= OnContextMenuOpening(MenuBuilder);
-
-			if( bShouldOpenMenu )
-			{
-				FWidgetPath WidgetPath = MouseEvent.GetEventPath() != nullptr ? *MouseEvent.GetEventPath() : FWidgetPath();
-
-				FSlateApplication::Get().PushMenu(AsShared(), WidgetPath, MenuBuilder.MakeWidget(), MouseEvent.GetScreenSpacePosition(), FPopupTransitionEffect::ContextMenu);
-
-				return FReply::Handled();
-			}
-		}
-
-		return STableRow< TSharedPtr< FDetailTreeNode > >::OnMouseButtonUp( MyGeometry, MouseEvent );
-	}
+	/** Called to register/extend the row context menu. */
+	virtual void PopulateContextMenu(UToolMenu* ToolMenu);
 
 protected:
+
 	/**
-	 * Called when the user opens the context menu on this row
-	 *
-	 * @param MenuBuilder	The menu builder to add menu items to
-	 * @return true if menu items were added
+	 * The FPropertyUpdatedWidgetBuilder which builds a Property Updated widget which can be used in place of the
+	 * reset to default button
 	 */
-	virtual bool OnContextMenuOpening( FMenuBuilder& MenuBuilder ) { return false; }
+	TSharedPtr<FPropertyUpdatedWidgetBuilder> PropertyUpdatedWidgetBuilder;
+
+	/** Retrieve all property nodes represented by this row, and it's children if Recursive specified. */
+	TArray<TSharedPtr<FPropertyNode>> GetPropertyNodes(const bool& bRecursive = false) const;
+
+	/** Retrieve all property handles represented by this row, and it's children if Recursive specified. */
+	virtual TArray<TSharedPtr<IPropertyHandle>> GetPropertyHandles(const bool& bRecursive = false) const;
+
+	/** Refreshes widget and associated list views. */
+	virtual void ForceRefresh();
 
 private:
 	void OnExpandAllClicked()
@@ -91,7 +71,17 @@ private:
 			OwnerTreeNodePin->GetDetailsView()->SetNodeExpansionState( OwnerTreeNodePin.ToSharedRef(), bIsExpanded, bRecursive );
 		}
 	}
+	
 protected:
-	static float ScrollbarPaddingSize;
+	/**
+	 * A weak pointer to the STableViewBase from which we can get information such as if the scrollbar is showing. 
+	 */
+	TWeakPtr<STableViewBase> OwnerTableViewWeak;
 	TWeakPtr<FDetailTreeNode> OwnerTreeNode;
+	
+	/**
+	 * The @code DetailsDisplayManager @endcode which provides an API to manage some of the characteristics of the
+	 * details display
+	 */
+	TSharedPtr<FDetailsDisplayManager> DisplayManager;
 };

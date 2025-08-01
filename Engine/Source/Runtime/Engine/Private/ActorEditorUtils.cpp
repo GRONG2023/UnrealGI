@@ -1,8 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ActorEditorUtils.h"
-#include "Components/ActorComponent.h"
-#include "GameFramework/Actor.h"
+#include "Engine/Level.h"
+#include "Engine/Level.h"
 #include "Engine/World.h"
 #include "Engine/Brush.h"
 
@@ -35,6 +35,11 @@ namespace FActorEditorUtils
 		}
 #endif
 		return bIsBuilder;
+	}
+
+	bool IsABrush( const AActor* InActor )
+	{
+		return Cast<ABrush>(InActor) != nullptr;
 	}
 
 	bool IsAPreviewOrInactiveActor( const AActor* InActor )

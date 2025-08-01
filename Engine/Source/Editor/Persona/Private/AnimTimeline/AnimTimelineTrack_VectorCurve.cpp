@@ -1,15 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "AnimTimelineTrack_VectorCurve.h"
+#include "AnimTimeline/AnimTimelineTrack_VectorCurve.h"
 #include "Animation/AnimSequenceBase.h"
 #include "Widgets/Layout/SBorder.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 
 #define LOCTEXT_NAMESPACE "FAnimTimelineTrack_VectorCurve"
 
 ANIMTIMELINE_IMPLEMENT_TRACK(FAnimTimelineTrack_VectorCurve);
 
-FAnimTimelineTrack_VectorCurve::FAnimTimelineTrack_VectorCurve(FVectorCurve& InCurve, const FSmartName& InName, int32 InCurveIndex, ERawCurveTrackTypes InType, const FText& InCurveName, const FText& InFullCurveName, const FLinearColor& InColor, const TSharedRef<FAnimModel>& InModel)
+FAnimTimelineTrack_VectorCurve::FAnimTimelineTrack_VectorCurve(const FVectorCurve* InCurve, const FName& InName, int32 InCurveIndex, ERawCurveTrackTypes InType, const FText& InCurveName, const FText& InFullCurveName, const FLinearColor& InColor, const TSharedRef<FAnimModel>& InModel)
 	: FAnimTimelineTrack_Curve(InCurveName, InFullCurveName, InColor, InColor, InModel)
 	, VectorCurve(InCurve)
 {
@@ -17,9 +17,22 @@ FAnimTimelineTrack_VectorCurve::FAnimTimelineTrack_VectorCurve(FVectorCurve& InC
 	OuterCurveIndex = InCurveIndex;
 	OuterType = InType;
 
-	Curves.Add(&InCurve.FloatCurves[0]);
-	Curves.Add(&InCurve.FloatCurves[1]);
-	Curves.Add(&InCurve.FloatCurves[2]);
+	Curves.Add(&InCurve->FloatCurves[0]);
+	Curves.Add(&InCurve->FloatCurves[1]);
+	Curves.Add(&InCurve->FloatCurves[2]);
+}
+
+FAnimTimelineTrack_VectorCurve::FAnimTimelineTrack_VectorCurve(const FVectorCurve* InCurve, const FSmartName& InName, int32 InCurveIndex, ERawCurveTrackTypes InType, const FText& InCurveName, const FText& InFullCurveName, const FLinearColor& InColor, const TSharedRef<FAnimModel>& InModel)
+	: FAnimTimelineTrack_Curve(InCurveName, InFullCurveName, InColor, InColor, InModel)
+	, VectorCurve(InCurve)
+{
+	OuterCurveName = InName.DisplayName;
+	OuterCurveIndex = InCurveIndex;
+	OuterType = InType;
+
+	Curves.Add(&InCurve->FloatCurves[0]);
+	Curves.Add(&InCurve->FloatCurves[1]);
+	Curves.Add(&InCurve->FloatCurves[2]);
 }
 
 FLinearColor FAnimTimelineTrack_VectorCurve::GetCurveColor(int32 InCurveIndex) const
@@ -48,7 +61,7 @@ FText FAnimTimelineTrack_VectorCurve::GetFullCurveName(int32 InCurveIndex) const
 	return FText::Format(LOCTEXT("TransformVectorFormat", "{0}.{1}"), FullCurveName, TrackNames[InCurveIndex]);
 }
 
-void FAnimTimelineTrack_VectorCurve::GetCurveEditInfo(int32 InCurveIndex, FSmartName& OutName, ERawCurveTrackTypes& OutType, int32& OutCurveIndex) const
+void FAnimTimelineTrack_VectorCurve::GetCurveEditInfo(int32 InCurveIndex, FName& OutName, ERawCurveTrackTypes& OutType, int32& OutCurveIndex) const
 {
 	OutName = OuterCurveName;
 	OutType = OuterType;

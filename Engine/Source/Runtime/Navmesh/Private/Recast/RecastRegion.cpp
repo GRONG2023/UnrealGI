@@ -20,6 +20,7 @@
 //
 
 #include "CoreMinimal.h"
+#include "Stats/Stats.h"
 #define _USE_MATH_DEFINES
 #include "Recast/Recast.h"
 #include "Recast/RecastAlloc.h"
@@ -954,6 +955,8 @@ static bool filterSmallRegions(rcContext* ctx, int minRegionArea, int mergeRegio
 /// @see rcCompactHeightfield, rcBuildRegions, rcBuildRegionsMonotone
 bool rcBuildDistanceField(rcContext* ctx, rcCompactHeightfield& chf)
 {
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_Navigation_BuildDistanceField);
+	
 	rcAssert(ctx);
 	
 	ctx->startTimer(RC_TIMER_BUILD_DISTANCEFIELD);
@@ -1366,7 +1369,7 @@ bool rcBuildRegionsChunky(rcContext* ctx, rcCompactHeightfield& chf,
 	return true;
 }
 
-/// @UE4: rcBuildRegions is now split into two functions: gathering regions and merging them
+/// @UE: rcBuildRegions is now split into two functions: gathering regions and merging them
 ///       it allows reusing existing code for building layer set (flood fill based partitioning)
 ///		  
 ///		  spanBuf4 is temporary buffer, allocated and freed by caller (size = chf.spanCount * 4)

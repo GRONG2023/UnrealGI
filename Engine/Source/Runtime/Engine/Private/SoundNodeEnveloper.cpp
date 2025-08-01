@@ -2,9 +2,11 @@
 
 
 #include "Sound/SoundNodeEnveloper.h"
-#include "Audio.h"
 #include "ActiveSound.h"
 #include "Distributions/DistributionFloatConstantCurve.h"
+#include "Math/InterpCurve.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SoundNodeEnveloper)
 
 /*-----------------------------------------------------------------------------
 USoundNodeEnveloper implementation.
@@ -33,7 +35,7 @@ void USoundNodeEnveloper::Serialize(FArchive& Ar)
 	Super::Serialize(Ar);
 	if (Ar.IsLoading())
 	{
-		if (Ar.UE4Ver() < VER_UE4_SOUND_NODE_ENVELOPER_CURVE_CHANGE)
+		if (Ar.UEVer() < VER_UE4_SOUND_NODE_ENVELOPER_CURVE_CHANGE)
 		{
 			if (VolumeInterpCurve_DEPRECATED)
 			{
@@ -85,8 +87,8 @@ void USoundNodeEnveloper::ParseNodes( FAudioDevice* AudioDevice, const UPTRINT N
 		}
 
 		float LoopDuration = LoopEnd - LoopStart;
-		int32 CurrentLoopCount = (int32)(PlayTime - LoopStart)/LoopDuration;
-		PlayTime -= CurrentLoopCount*LoopDuration;
+		int32 CurrentLoopCount = (int32)(PlayTime - LoopStart) / FMath::Max(UE_SMALL_NUMBER, LoopDuration);
+		PlayTime -= CurrentLoopCount * LoopDuration;
 
 		if( CurrentLoopCount == LoopCount && !bLoopIndefinitely && LoopCount != 0 )
 		{
@@ -151,3 +153,4 @@ void USoundNodeEnveloper::PostEditChangeProperty( struct FPropertyChangedEvent& 
 	}
 }
 #endif // WITH_EDITOR
+

@@ -2,16 +2,28 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "Styling/SlateColor.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Layout/SlateRect.h"
+#include "HAL/Platform.h"
 #include "Input/Reply.h"
-#include "SNodePanel.h"
+#include "Layout/SlateRect.h"
+#include "Math/Vector2D.h"
 #include "SGraphNodeResizable.h"
+#include "SNodePanel.h"
+#include "Styling/SlateColor.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/SharedPointer.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 
-class UEdGraphNode_Comment;
+class FDragDropEvent;
+class SBorder;
 class SCommentBubble;
+class SGraphNode;
+class UEdGraphNode_Comment;
+struct FGeometry;
+struct FPointerEvent;
+struct FSlateBrush;
 
 class GRAPHEDITOR_API SGraphNodeComment : public SGraphNodeResizable
 {
@@ -30,7 +42,7 @@ public:
 	//~ Begin SNodePanel::SNode Interface
 	virtual const FSlateBrush* GetShadowBrush(bool bSelected) const override;
 	virtual void GetOverlayBrushes(bool bSelected, const FVector2D WidgetSize, TArray<FOverlayBrushInfo>& Brushes) const override;
-	virtual bool ShouldAllowCulling() const override { return false; }
+	virtual bool ShouldAllowCulling() const override { return true; }
 	virtual int32 GetSortDepth() const override;
 	virtual void EndUserInteraction() const override;
 	virtual FString GetNodeComment() const override;
@@ -80,8 +92,6 @@ protected:
 	virtual FVector2D GetNodeMaximumSize() const override;
 	//~ Begin SGraphNodeResizable Interface
 
-private:
-
 	/** @return the color to tint the comment body */
 	FSlateColor GetCommentBodyColor() const;
 
@@ -91,15 +101,13 @@ private:
 	/** @return the color to tint the comment bubble */
 	FSlateColor GetCommentBubbleColor() const;
 
+private:
+	
 	/** Returns the width to wrap the text of the comment at */
 	float GetWrapAt() const;
 
-private:
 	/** The comment bubble widget (used when zoomed out) */
 	TSharedPtr<SCommentBubble> CommentBubble;
-
-	/** Was the bubble desired to be visible last frame? */
-	mutable bool bCachedBubbleVisibility;
 
 	/** The current selection state of the comment */
 	mutable bool bIsSelected;
@@ -109,14 +117,17 @@ private:
 
 protected:
 	/** cached comment title */
-	FString CachedCommentTitle; 
+	FString CachedCommentTitle;
+
+	/** cached font size */
+	int32 CachedFontSize;
+
+	/** Was the bubble desired to be visible last frame? */
+	mutable bool bCachedBubbleVisibility;
 
 private:
 	/** cached comment title */
 	int32 CachedWidth;
-
-	/** cached font size */
-	int32 CachedFontSize;
 
 	/** Local copy of the comment style */
 	FInlineEditableTextBlockStyle CommentStyle;

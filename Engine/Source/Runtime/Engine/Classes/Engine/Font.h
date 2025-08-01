@@ -86,6 +86,7 @@ struct TStructOpsTypeTraits<FFontCharacter> : public TStructOpsTypeTraitsBase2<F
 	{
 		WithSerializer = true,
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
 
 
@@ -105,6 +106,14 @@ class UFont : public UObject, public IFontProviderInterface
 	UPROPERTY(EditAnywhere, Category=Font)
 	EFontCacheType FontCacheType;
 
+	/** The preferred rasterization method for this font (enable / disable MSDF) */
+	UPROPERTY(EditAnywhere, Category=RuntimeFont)
+	EFontRasterizationMode FontRasterizationMode = EFontRasterizationMode::Bitmap;
+
+	/** Settings for rendering this font using the sdf pipeline */
+	UPROPERTY(EditAnywhere, Category=RuntimeFont, meta = (DisplayName = "SDF Settings"))
+	FFontSdfSettings SdfSettings;
+
 	/** List of characters in the font.  For a MultiFont, this will include all characters in all sub-fonts!  Thus,
 		the number of characters in this array isn't necessary the number of characters available in the font */
 	UPROPERTY(EditAnywhere, Category=OfflineFont)
@@ -113,7 +122,7 @@ class UFont : public UObject, public IFontProviderInterface
 	/** Textures that store this font's glyph image data */
 	//NOTE: Do not expose this to the editor as it has nasty crash potential
 	UPROPERTY()
-	TArray<class UTexture2D*> Textures;
+	TArray<TObjectPtr<class UTexture2D>> Textures;
 
 	/** True if font is 'remapped'.  That is, the character array is not a direct mapping to unicode values.  Instead,
 		all characters are indexed indirectly through the CharRemap array */
@@ -160,7 +169,7 @@ class UFont : public UObject, public IFontProviderInterface
 	float ScalingFactor;
 
 	/** The default size of the font used for legacy Canvas APIs that don't specify a font size */
-	UPROPERTY(EditAnywhere, Category=RuntimeFont)
+	UPROPERTY(EditAnywhere, Category=RuntimeFont, meta = (ClampMin = 1, ClampMax = 1000))
 	int32 LegacyFontSize;
 
 	/** The default font name to use for legacy Canvas APIs that don't specify a font name */
@@ -168,7 +177,7 @@ class UFont : public UObject, public IFontProviderInterface
 	FName LegacyFontName;
 
 	/** Embedded composite font data */
-	UPROPERTY()
+	UPROPERTY(EditAnywhere, Category = RuntimeFont)
 	FCompositeFont CompositeFont;
 
 public:
@@ -188,7 +197,7 @@ public:
 	/** Get the info needed to use this UFont with Slate, using the fallback data for legacy Canvas APIs */
 	FORCEINLINE FSlateFontInfo GetLegacySlateFontInfo() const
 	{
-		return FSlateFontInfo(this, LegacyFontSize, LegacyFontName);
+		return FSlateFontInfo(this, static_cast<float>(LegacyFontSize), LegacyFontName);
 	}
 
 	/**
@@ -273,9 +282,27 @@ public:
 	 *
 	 *	@return	float		The scaling factor currently set
 	 */
-	FORCEINLINE float GetFontScalingFactor()
+	FORCEINLINE float GetFontScalingFactor() const
 	{
 		return ScalingFactor;
+	}
+
+	/**
+	 *	Returns true if rasterization mode is signed distance field-based (and the feature is enabled)
+	 */
+	virtual bool IsSdfFont() const override;
+
+	/**
+	 *	Get the font rasterization mode (IFontProviderInterface)
+	 */
+	virtual EFontRasterizationMode GetFontRasterizationMode() const override;
+
+	/**
+	 *	Get the font SDF settings (IFontProviderInterface)
+	 */
+	virtual const FFontSdfSettings& GetSdfSettings() const override
+	{
+		return SdfSettings;
 	}
 
 	/** Returns the maximum height for any character in this font using this font's default size and scale. */

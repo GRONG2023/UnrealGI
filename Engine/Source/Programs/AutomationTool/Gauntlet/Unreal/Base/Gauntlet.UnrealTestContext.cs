@@ -10,7 +10,7 @@ using System.Text.RegularExpressions;
 using System.Drawing;
 using System.Linq;
 using System.Reflection;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 
 namespace Gauntlet
 {
@@ -64,6 +64,12 @@ namespace Gauntlet
 		public string Build = "";
 
 		/// <summary>
+		/// Location of the editor build
+		/// </summary>
+		[AutoParam]
+		public string EditorDir = "";
+
+		/// <summary>
 		/// Does this project use 'Game' or Client/Server?
 		/// </summary>
 		[AutoParam(true)]
@@ -100,6 +106,18 @@ namespace Gauntlet
 		public string DeviceURL;
 
 		/// <summary>
+		/// Maximum number of available local(host platform) devices
+		/// </summary>
+		[AutoParam(10)]
+		public int MaxLocalDevices;
+
+		/// <summary>
+		/// Maximum number of available virtual devices of each type (supported on the host platform)
+		/// </summary>
+		[AutoParam(2)]
+		public int MaxVirtualDevices;
+
+		/// <summary>
 		/// Details for current job (example: link to CIS, etc)
 		/// </summary>
 		[AutoParam("")]
@@ -112,7 +130,6 @@ namespace Gauntlet
 		/// </summary>
 		[AutoParam("")]
 		public string Namespaces;
-		
 
 		public IEnumerable<string> SearchPaths;
 
@@ -178,15 +195,29 @@ namespace Gauntlet
 		public string ArtifactPostfix;
 
 		/// <summary>
+		/// Add custom module name/role pair to identify custom project target executable
+		/// Format is <name>:<role>+<name>:<role>
+		/// </summary>
+		[AutoParam("")]
+		public string CustomModuleRoles { get; set; }
+
+		/// <summary>
+		/// Set the target name of the module name to identify a custom project target executable
+		/// </summary>
+		[AutoParam("")]
+		public string Target { get; set; }
+
+		/// <summary>
 		/// Less logging
 		/// </summary>
-		[AutoParam(false)]
+		[AutoParamWithNames(false, "Verbose", "Gauntlet.Verbose")]
 		public bool Verbose;
 
 		/// <summary>
 		/// Less logging
 		/// </summary>
 		[AutoParam(false)]
+		[AutoParamWithNames(false, "VeryVerbose", "Gauntlet.VeryVerbose")]
 		public bool VeryVerbose;
 
 		public UnrealTestOptions()
@@ -308,7 +339,6 @@ namespace Gauntlet
 			// do we have any tests? Need to check the global test list
 			bool HaveTests = TestList.Count > 0 || PlatformList.Where(Plat => Plat.ParseValues("test").Count() > 0).Count() > 0;
 
-			// turn -device=BobsKit,BobsKit(PS4) into a device list
 			List<string> DeviceArgStrings = Params.ParseValues("device=");
 
 			if (DeviceArgStrings.Count == 0)
@@ -331,6 +361,38 @@ namespace Gauntlet
 					&& !Arg.StartsWith("device=", StringComparison.OrdinalIgnoreCase))
 				.ToArray();
 			Params = new Params(CleanArgs);
+
+			// Custom Module name/role
+			if (!string.IsNullOrEmpty(CustomModuleRoles))
+			{
+				foreach (var Pair in CustomModuleRoles.Split("+"))
+				{
+					var SplittedPair = Pair.Split(":");
+					if (SplittedPair.Length > 1)
+					{
+						string Name = SplittedPair[0];
+						UnrealTargetRole Role = UnrealTargetRole.Unknown;
+						if (Enum.TryParse(SplittedPair[1], out Role))
+						{
+							UnrealHelpers.AddCustomModuleName(Name, Role);
+						}
+						else
+						{
+							throw new AutomationException(string.Format("Target Role '{0}' for Custom Module '{1}' is unknown.", SplittedPair[1], Name));
+						}
+					}
+					else
+					{
+						Gauntlet.Log.Warning("CustomModuleRoles is poorly formatted. Expected <name>:<role> pair. Got '{0}'", Pair);
+					}
+				}
+			}
+			if(!string.IsNullOrEmpty(Target) && Target != Project)
+			{
+				bool IsEditor = Build.Equals("Editor", StringComparison.InvariantCultureIgnoreCase) || Globals.Params.ParseParam("editor");
+				UnrealTargetRole Role = IsEditor? UnrealTargetRole.Editor : UnrealTargetRole.Client;
+				UnrealHelpers.AddCustomModuleName(IsEditor? string.Format("{0}Editor", Target): Target, Role);
+			}
 		}
 	}
 	
@@ -414,7 +476,7 @@ namespace Gauntlet
 		/// <summary>
 		/// Target constraint that this test is run under
 		/// </summary>
-		public UnrealTargetConstraint Constraint;
+		public UnrealDeviceTargetConstraint Constraint;
 
 		public UnrealTestContext(UnrealBuildSource InBuildInfo, Dictionary<UnrealTargetRole, UnrealTestRoleContext> InRoleContexts, UnrealTestOptions InOptions)
 		{

@@ -3,7 +3,7 @@
 #pragma once
 
 #include "AlphaBlend.h"
-#include "Animation/AnimNodeBase.h"
+#include "Animation/AnimNode_RelevantAssetPlayerBase.h"
 #include "Animation/AnimationAsset.h"
 #include "CoreMinimal.h"
 #include "Math/RandomStream.h"
@@ -36,8 +36,8 @@ struct FRandomPlayerSequenceEntry
 	}
 
 	/** Sequence to play when this entry is picked */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Settings")
-	UAnimSequence* Sequence;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Settings", meta = (DisallowedClasses = "/Script/Engine.AnimMontage"))
+	TObjectPtr<UAnimSequenceBase> Sequence;
 
 	/** When not in shuffle mode, this is the chance this entry will play (normalized against all other sample chances) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Settings", meta = (UIMin = "0", ClampMin = "0"))
@@ -76,8 +76,8 @@ struct FRandomAnimPlayData
 	// The time at which the animation is currently playing.
 	float CurrentPlayTime = 0.0f;
 
-	// The previous tick's update time.
-	float PreviousPlayTime = 0.0f;
+	// Delta time record for this play through
+	FDeltaTimeRecord DeltaTimeRecord;
 
 	// Calculated play rate
 	float PlayRate = 0.0f;
@@ -93,11 +93,11 @@ struct FRandomAnimPlayData
 };
 
 USTRUCT(BlueprintInternalUseOnly)
-struct ANIMGRAPHRUNTIME_API FAnimNode_RandomPlayer : public FAnimNode_Base
+struct FAnimNode_RandomPlayer : public FAnimNode_AssetPlayerRelevancyBase
 {
 	GENERATED_BODY()
 
-	FAnimNode_RandomPlayer();
+	ANIMGRAPHRUNTIME_API FAnimNode_RandomPlayer();
 
 public:
 	/** List of sequences to randomly step through */
@@ -105,11 +105,21 @@ public:
 	TArray<FRandomPlayerSequenceEntry> Entries;
 
 	// FAnimNode_Base interface
-	virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
-	virtual void Update_AnyThread(const FAnimationUpdateContext& Context) override;
-	virtual void Evaluate_AnyThread(FPoseContext& Output) override;
-	virtual void GatherDebugData(FNodeDebugData& DebugData) override;
+	ANIMGRAPHRUNTIME_API virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
+	ANIMGRAPHRUNTIME_API virtual void Update_AnyThread(const FAnimationUpdateContext& Context) override;
+	ANIMGRAPHRUNTIME_API virtual void Evaluate_AnyThread(FPoseContext& Output) override;
+	ANIMGRAPHRUNTIME_API virtual void GatherDebugData(FNodeDebugData& DebugData) override;
 	// End of FAnimNode_Base interface
+
+	// FAnimNode_RelevantAssetPlayerBase
+	ANIMGRAPHRUNTIME_API virtual UAnimationAsset* GetAnimAsset() const override;
+	ANIMGRAPHRUNTIME_API virtual float GetAccumulatedTime() const override;
+	ANIMGRAPHRUNTIME_API virtual bool GetIgnoreForRelevancyTest() const override;
+	ANIMGRAPHRUNTIME_API virtual bool SetIgnoreForRelevancyTest(bool bInIgnoreForRelevancyTest) override;
+	ANIMGRAPHRUNTIME_API virtual float GetCachedBlendWeight() const override;
+	ANIMGRAPHRUNTIME_API virtual void ClearCachedBlendWeight() override;
+	ANIMGRAPHRUNTIME_API virtual const FDeltaTimeRecord* GetDeltaTimeRecord() const override;
+	// End of FAnimNode_RelevantAssetPlayerBase
 
 private:
 	// Return the index of the next FRandomPlayerSequenceEntry to play, from the list
@@ -119,10 +129,11 @@ private:
 	// Return the play data for either the currently playing animation or the next
 	// animation to blend into.
 	FRandomAnimPlayData& GetPlayData(ERandomDataIndexType Type);
+	const FRandomAnimPlayData& GetPlayData(ERandomDataIndexType Type) const;
 
 	// Initialize the play data with the given index into the ValidEntries array and
 	// a specific blend weight. All other member data will be reset to their default values.
-	void InitPlayData(FRandomAnimPlayData& Data, int32 ValidEntryIndex, float BlendWeight);
+	void InitPlayData(FRandomAnimPlayData& Data, int32 InValidEntryIndex, float InBlendWeight);
 
 	// Advance to the next playable sequence. This is only called once a sequence is fully
 	// blended or there's a hard switch to the same playable entry.
@@ -151,6 +162,17 @@ private:
 
 	// Random number source
 	FRandomStream RandomStream;
+
+#if WITH_EDITORONLY_DATA
+	// If true, "Relevant anim" nodes that look for the highest weighted animation in a state will ignore this node
+	UPROPERTY(EditAnywhere, Category = Relevancy, meta = (FoldProperty, PinHiddenByDefault))
+	bool bIgnoreForRelevancyTest = false;
+#endif // WITH_EDITORONLY_DATA
+
+protected:
+	/** Last encountered blend weight for this node */
+	UPROPERTY(BlueprintReadWrite, Transient, Category = DoNotEdit)
+	float BlendWeight = 0.0f;
 
 public:
 	/** When shuffle mode is active we will never loop a sequence beyond MaxLoopCount

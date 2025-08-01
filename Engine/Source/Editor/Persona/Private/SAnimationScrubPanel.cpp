@@ -8,8 +8,10 @@
 #include "AnimPreviewInstance.h"
 #include "SScrubControlPanel.h"
 #include "ScopedTransaction.h"
-#include "Animation/BlendSpaceBase.h"
+#include "Animation/BlendSpace.h"
 #include "AnimationEditorPreviewScene.h"
+#include "Animation/AnimData/IAnimationDataModel.h"
+#include "Animation/AnimSequenceHelpers.h"
 
 #define LOCTEXT_NAMESPACE "AnimationScrubPanel"
 
@@ -34,7 +36,7 @@ void SAnimationScrubPanel::Construct( const SAnimationScrubPanel::FArguments& In
 			SAssignNew(ScrubControlPanel, SScrubControlPanel)
 			.IsEnabled(true)//this, &SAnimationScrubPanel::DoesSyncViewport)
 			.Value(this, &SAnimationScrubPanel::GetScrubValue)
-			.NumOfKeys(this, &SAnimationScrubPanel::GetNumOfFrames)
+			.NumOfKeys(this, &SAnimationScrubPanel::GetNumberOfKeys)
 			.SequenceLength(this, &SAnimationScrubPanel::GetSequenceLength)
 			.DisplayDrag(this, &SAnimationScrubPanel::GetDisplayDrag)
 			.OnValueChanged(this, &SAnimationScrubPanel::OnValueChanged)
@@ -53,6 +55,7 @@ void SAnimationScrubPanel::Construct( const SAnimationScrubPanel::FArguments& In
 			.OnGetRecording(this, &SAnimationScrubPanel::IsRecording)
 			.ViewInputMin(InArgs._ViewInputMin)
 			.ViewInputMax(InArgs._ViewInputMax)
+			.bDisplayAnimScrubBarEditing(InArgs._bDisplayAnimScrubBarEditing)
 			.OnSetInputViewRange(InArgs._OnSetInputViewRange)
 			.OnCropAnimSequence( this, &SAnimationScrubPanel::OnCropAnimSequence )
 			.OnAddAnimSequence( this, &SAnimationScrubPanel::OnInsertAnimSequence )
@@ -82,15 +85,13 @@ FReply SAnimationScrubPanel::OnClick_Forward_Step()
 	}
 	else if (SMC)
 	{
-		//@TODO: Should we hardcode 30 Hz here?
-		{
-			const float TargetFramerate = 30.0f;
+		// BlendSpaces and Animation Blueprints combine animations so there's no such thing as a frame. However, 1/30 is a sensible/common rate.
+		const float FixedFrameRate = 30.0f;
 
-			// Advance a single frame, leaving it paused afterwards
-			SMC->GlobalAnimRateScale = 1.0f;
-			SMC->TickAnimation(1.0f / TargetFramerate, false);
-			SMC->GlobalAnimRateScale = 0.0f;
-		}
+		// Advance a single frame, leaving it paused afterwards
+		SMC->GlobalAnimRateScale = 1.0f;
+		GetPreviewScene()->Tick(1.0f / FixedFrameRate); 
+		SMC->GlobalAnimRateScale = 0.0f;
 	}
 
 	return FReply::Handled();
@@ -305,31 +306,31 @@ void SAnimationScrubPanel::OnEndSliderMovement(float NewValue)
 	bSliderBeingDragged = false;
 }
 
-uint32 SAnimationScrubPanel::GetNumOfFrames() const
+uint32 SAnimationScrubPanel::GetNumberOfKeys() const
 {
 	if (DoesSyncViewport())
 	{
 		UAnimSingleNodeInstance* PreviewInstance = GetPreviewInstance();
 		float Length = PreviewInstance->GetLength();
 		// if anim sequence, use correct num frames
-		int32 NumFrames = (int32) (Length/0.0333f); 
+		int32 NumKeys = (int32) (Length/0.0333f); 
 		if (PreviewInstance->GetCurrentAsset())
 		{
 			if (PreviewInstance->GetCurrentAsset()->IsA(UAnimSequenceBase::StaticClass()))
 			{
-				NumFrames = CastChecked<UAnimSequenceBase>(PreviewInstance->GetCurrentAsset())->GetNumberOfFrames();
+				NumKeys = CastChecked<UAnimSequenceBase>(PreviewInstance->GetCurrentAsset())->GetNumberOfSampledKeys();
 			}
-			else if(PreviewInstance->GetCurrentAsset()->IsA(UBlendSpaceBase::StaticClass()))
+			else if(PreviewInstance->GetCurrentAsset()->IsA(UBlendSpace::StaticClass()))
 			{
 				// Blendspaces dont display frame notches, so just return 0 here
-				NumFrames = 0;
+				NumKeys = 0;
 			}
 		}
-		return NumFrames;
+		return NumKeys;
 	}
 	else if (LockedSequence)
 	{
-		return LockedSequence->GetNumberOfFrames();
+		return LockedSequence->GetNumberOfSampledKeys();
 	}
 	else
 	{
@@ -353,7 +354,7 @@ float SAnimationScrubPanel::GetSequenceLength() const
 	}
 	else if (LockedSequence)
 	{
-		return LockedSequence->SequenceLength;
+		return LockedSequence->GetPlayLength();
 	}
 	else
 	{
@@ -361,7 +362,7 @@ float SAnimationScrubPanel::GetSequenceLength() const
 		FAnimBlueprintDebugData* DebugData;
 		if (GetAnimBlueprintDebugData(/*out*/ Instance, /*out*/ DebugData))
 		{
-			return Instance->LifeTimer;
+			return static_cast<float>(Instance->LifeTimer);
 		}
 	}
 
@@ -372,7 +373,7 @@ bool SAnimationScrubPanel::DoesSyncViewport() const
 {
 	UAnimSingleNodeInstance* PreviewInstance = GetPreviewInstance();
 
-	return (( LockedSequence==NULL && PreviewInstance ) || ( LockedSequence && PreviewInstance && PreviewInstance->GetCurrentAsset() == LockedSequence ));
+	return (( LockedSequence==nullptr && PreviewInstance ) || ( LockedSequence && PreviewInstance && PreviewInstance->GetCurrentAsset() == LockedSequence ));
 }
 
 void SAnimationScrubPanel::Tick( const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime )
@@ -386,7 +387,7 @@ void SAnimationScrubPanel::Tick( const FGeometry& AllottedGeometry, const double
 class UAnimSingleNodeInstance* SAnimationScrubPanel::GetPreviewInstance() const
 {
 	UDebugSkelMeshComponent* PreviewMeshComponent = GetPreviewScene()->GetPreviewMeshComponent();
-	return PreviewMeshComponent && PreviewMeshComponent->IsPreviewOn()? PreviewMeshComponent->PreviewInstance : NULL;
+	return PreviewMeshComponent && PreviewMeshComponent->IsPreviewOn()? PreviewMeshComponent->PreviewInstance : nullptr;
 }
 
 float SAnimationScrubPanel::GetScrubValue() const
@@ -405,7 +406,7 @@ float SAnimationScrubPanel::GetScrubValue() const
 		FAnimBlueprintDebugData* DebugData;
 		if (GetAnimBlueprintDebugData(/*out*/ Instance, /*out*/ DebugData))
 		{
-			return Instance->CurrentLifeTimerScrubPosition;
+			return static_cast<float>(Instance->CurrentLifeTimerScrubPosition);
 		}
 	}
 
@@ -423,20 +424,20 @@ UAnimInstance* SAnimationScrubPanel::GetAnimInstanceWithBlueprint() const
 	{
 		UAnimInstance* Instance = DebugComponent->GetAnimInstance();
 
-		if ((Instance != NULL) && (Instance->GetClass()->ClassGeneratedBy != NULL))
+		if ((Instance != nullptr) && (Instance->GetClass()->ClassGeneratedBy != nullptr))
 		{
 			return Instance;
 		}
 	}
 
-	return NULL;
+	return nullptr;
 }
 
 bool SAnimationScrubPanel::GetAnimBlueprintDebugData(UAnimInstance*& Instance, FAnimBlueprintDebugData*& DebugInfo) const
 {
 	Instance = GetAnimInstanceWithBlueprint();
 
-	if (Instance != NULL)
+	if (Instance != nullptr)
 	{
 		// Avoid updating the instance if we're replaying the past
 		if (UAnimBlueprintGeneratedClass* AnimBlueprintClass = Cast<UAnimBlueprintGeneratedClass>(Instance->GetClass()))
@@ -474,13 +475,17 @@ void SAnimationScrubPanel::OnCropAnimSequence( bool bFromStart, float CurrentTim
 				//Call modify to restore anim sequence current state
 				AnimSequence->Modify();
 
-				// Crop the raw anim data.
-				AnimSequence->CropRawAnimData( CurrentTime, bFromStart );
+
+				const float TrimStart = bFromStart ? 0.f : CurrentTime;
+				const float TrimEnd = bFromStart ? CurrentTime : AnimSequence->GetPlayLength();
+
+				// Trim off the user-selected part of the raw anim data.
+				UE::Anim::AnimationData::Trim(AnimSequence, TrimStart, TrimEnd);
 
 				//Resetting slider position to the first frame
 				PreviewInstance->SetPosition( 0.0f, false );
 
-				OnSetInputViewRange.ExecuteIfBound(0, AnimSequence->SequenceLength);
+				OnSetInputViewRange.ExecuteIfBound(0, AnimSequence->GetPlayLength());
 			}
 		}
 	}
@@ -503,12 +508,12 @@ void SAnimationScrubPanel::OnAppendAnimSequence( bool bFromStart, int32 NumOfFra
 			AnimSequence->Modify();
 
 			// Crop the raw anim data.
-			int32 StartFrame = (bFromStart)? 0 : AnimSequence->GetRawNumberOfFrames() - 1;
+			int32 StartFrame = (bFromStart)? 0 : AnimSequence->GetDataModel()->GetNumberOfFrames() - 1;
 			int32 EndFrame = StartFrame + NumOfFrames;
 			int32 CopyFrame = StartFrame;
-			AnimSequence->InsertFramesToRawAnimData(StartFrame, EndFrame, CopyFrame);
+			UE::Anim::AnimationData::DuplicateKeys(AnimSequence, StartFrame, NumOfFrames, CopyFrame);
 
-			OnSetInputViewRange.ExecuteIfBound(0, AnimSequence->SequenceLength);
+			OnSetInputViewRange.ExecuteIfBound(0, AnimSequence->GetPlayLength());
 		}
 	}
 }
@@ -529,12 +534,11 @@ void SAnimationScrubPanel::OnInsertAnimSequence( bool bBefore, int32 CurrentFram
 			//Call modify to restore anim sequence current state
 			AnimSequence->Modify();
 
-			// Crop the raw anim data.
-			int32 StartFrame = (bBefore)? CurrentFrame : CurrentFrame + 1;
-			int32 EndFrame = StartFrame + 1;
-			AnimSequence->InsertFramesToRawAnimData(StartFrame, EndFrame, CurrentFrame);
+			// Duplicate specified key
+			const int32 StartFrame = (bBefore)? CurrentFrame : CurrentFrame + 1;
+			UE::Anim::AnimationData::DuplicateKeys(AnimSequence, StartFrame, 1, CurrentFrame);
 
-			OnSetInputViewRange.ExecuteIfBound(0, AnimSequence->SequenceLength);
+			OnSetInputViewRange.ExecuteIfBound(0, AnimSequence->GetPlayLength());
 		}
 	}
 }
@@ -548,46 +552,55 @@ void SAnimationScrubPanel::OnReZeroAnimSequence(int32 FrameIndex)
 
 		if (PreviewInstance->GetCurrentAsset() && PreviewSkelComp )
 		{
-			UAnimSequence* AnimSequence = Cast<UAnimSequence>( PreviewInstance->GetCurrentAsset() );
-			if( AnimSequence )
+			if(UAnimSequence* AnimSequence = Cast<UAnimSequence>( PreviewInstance->GetCurrentAsset()))
 			{
-				const FScopedTransaction Transaction( LOCTEXT("ReZeroAnimation", "ReZero Animation Sequence") );
-
-				//Call modify to restore anim sequence current state
-				AnimSequence->Modify();
-
-				// As above, animations don't have any idea of hierarchy, so we don't know for sure if track 0 is the root bone's track.
-				FRawAnimSequenceTrack& RawTrack = AnimSequence->GetRawAnimationTrack(0);
-
-				// Find vector that would translate current root bone location onto origin.
-				FVector FrameTransform = FVector::ZeroVector;
-				if (FrameIndex == INDEX_NONE)
+				if (const USkeleton* Skeleton = AnimSequence->GetSkeleton())
 				{
-					// Use current transform
-					FrameTransform = PreviewSkelComp->GetComponentSpaceTransforms()[0].GetLocation();
+					const FName RootBoneName = Skeleton->GetReferenceSkeleton().GetBoneName(0);
+
+					if(AnimSequence->GetDataModel()->IsValidBoneTrackName(RootBoneName))
+					{
+						TArray<FVector3f> PosKeys;
+						TArray<FQuat4f> RotKeys;
+						TArray<FVector3f> ScaleKeys;
+
+						TArray<FTransform> BoneTransforms;
+						AnimSequence->GetDataModel()->GetBoneTrackTransforms(RootBoneName, BoneTransforms);
+
+						PosKeys.SetNum(BoneTransforms.Num());
+						RotKeys.SetNum(BoneTransforms.Num());
+						ScaleKeys.SetNum(BoneTransforms.Num());
+
+						// Find vector that would translate current root bone location onto origin.
+						FVector FrameTransform = FVector::ZeroVector;
+						if (FrameIndex == INDEX_NONE)
+						{
+							// Use current transform
+							FrameTransform = PreviewSkelComp->GetComponentSpaceTransforms()[0].GetLocation();
+						}
+						else if(BoneTransforms.IsValidIndex(FrameIndex))
+						{
+							// Use transform at frame
+							FrameTransform = BoneTransforms[FrameIndex].GetLocation();
+						}
+
+						FVector ApplyTranslation = -1.f * FrameTransform;
+
+						// Convert into world space
+						const FVector WorldApplyTranslation = PreviewSkelComp->GetComponentTransform().TransformVector(ApplyTranslation);
+						ApplyTranslation = PreviewSkelComp->GetComponentTransform().InverseTransformVector(WorldApplyTranslation);
+
+						for(int32 KeyIndex = 0; KeyIndex < BoneTransforms.Num(); KeyIndex++)
+						{
+							PosKeys[KeyIndex] = FVector3f(BoneTransforms[KeyIndex].GetLocation() + ApplyTranslation);
+							RotKeys[KeyIndex] = FQuat4f(BoneTransforms[KeyIndex].GetRotation());
+							ScaleKeys[KeyIndex] = FVector3f(BoneTransforms[KeyIndex].GetScale3D());
+						}
+
+						IAnimationDataController& Controller = AnimSequence->GetController();
+						Controller.SetBoneTrackKeys(RootBoneName, PosKeys, RotKeys, ScaleKeys);
+					}
 				}
-				else if(RawTrack.PosKeys.IsValidIndex(FrameIndex))
-				{
-					// Use transform at frame
-					FrameTransform = RawTrack.PosKeys[FrameIndex];
-				}
-
-				FVector ApplyTranslation = -1.f * FrameTransform;
-
-				// Convert into world space
-				FVector WorldApplyTranslation = PreviewSkelComp->GetComponentTransform().TransformVector(ApplyTranslation);
-				ApplyTranslation = PreviewSkelComp->GetComponentTransform().InverseTransformVector(WorldApplyTranslation);
-
-				for(int32 i=0; i<RawTrack.PosKeys.Num(); i++)
-				{
-					RawTrack.PosKeys[i] += ApplyTranslation;
-				}
-
-				// Handle Raw Data changing
-				AnimSequence->MarkRawDataAsModified();
-				AnimSequence->OnRawDataChanged();
-
-				AnimSequence->MarkPackageDirty();
 			}
 		}
 	}

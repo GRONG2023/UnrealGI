@@ -30,10 +30,10 @@ FConsoleSlateDebuggerInvalidationRoot::FConsoleSlateDebuggerInvalidationRoot()
 	, DrawFastPathColor(FColorList::Green)
 	, DrawNoneColor(FColorList::Blue)
 	, MaxNumberOfWidgetInList(20)
-	, CacheDuration(2.0)
+	, CacheDuration(2.0f)
 	, StartCommand(
 		TEXT("SlateDebugger.InvalidationRoot.Start"),
-		TEXT("Start the Invalidation Root widget debug tool. It shows when Invalidation Root are using the slow or the fast path."),
+		TEXT("Start the Invalidation Root widget debug tool. It shows when Invalidation Roots are using the slow or the fast path."),
 		FConsoleCommandDelegate::CreateRaw(this, &FConsoleSlateDebuggerInvalidationRoot::StartDebugging))
 	, StopCommand(
 		TEXT("SlateDebugger.InvalidationRoot.Stop"),
@@ -42,7 +42,7 @@ FConsoleSlateDebuggerInvalidationRoot::FConsoleSlateDebuggerInvalidationRoot()
 	, EnabledRefCVar(
 		TEXT("SlateDebugger.InvalidationRoot.Enable")
 		, bEnabledCVarValue
-		, TEXT("Start/Stop the Invalidation Root widget debug tool. It shows when Invalidation Root are using the slow or the fast path.")
+		, TEXT("Start/Stop the Invalidation Root widget debug tool. It shows when Invalidation Roots are using the slow or the fast path.")
 		, FConsoleVariableDelegate::CreateRaw(this, &FConsoleSlateDebuggerInvalidationRoot::HandleEnabled))
 	, ToggleLegendCommand(
 		TEXT("SlateDebugger.InvalidationRoot.ToggleLegend"),
@@ -174,12 +174,12 @@ void FConsoleSlateDebuggerInvalidationRoot::HandlePaintDebugInfo(const FPaintArg
 
 
 	float TextElementY = 48.f;
-	auto MakeText = [&](const FString& Text, const FVector2D& Location, const FLinearColor& Color)
+	auto MakeText = [&](const FString& Text, const FVector2f& Location, const FLinearColor& Color)
 	{
 		FSlateDrawElement::MakeText(
 			InOutDrawElements
 			, InOutLayerId
-			, InAllottedGeometry.ToPaintGeometry(Location, FVector2D(1.f, 1.f))
+			, InAllottedGeometry.ToPaintGeometry(FVector2f(1.f, 1.f), FSlateLayoutTransform(Location))
 			, Text
 			, FontInfo
 			, ESlateDrawEffect::None
@@ -189,10 +189,10 @@ void FConsoleSlateDebuggerInvalidationRoot::HandlePaintDebugInfo(const FPaintArg
 	if (bShowLegend)
 	{
 		//const TSharedRef<FSlateFontMeasure>& FontMeasureService = FSlateApplicationBase::Get().GetRenderer()->GetFontMeasureService();
-		//FVector2D FontSize = FontMeasureService->Measure(TEXT("No Paint occurred"), FontInfo);
+		//FVector2f FontSize = FontMeasureService->Measure(TEXT("No Paint occurred"), FontInfo);
 		//FontSize.Y *= 3;
 		//const FSlateBrush* BoxBrush = FCoreStyle::Get().GetBrush("WhiteBrush");
-		//const FGeometry Geometry = FGeometry::MakeRoot(FontSize, FSlateLayoutTransform(1.f, FVector2D(10.f, 10.f + 0.f)));
+		//const FGeometry Geometry = FGeometry::MakeRoot(FontSize, FSlateLayoutTransform(1.f, FVector2f(10.f, 10.f + 0.f)));
 
 		//FSlateDrawElement::MakeBox(
 		//	InOutDrawElements,
@@ -202,9 +202,9 @@ void FConsoleSlateDebuggerInvalidationRoot::HandlePaintDebugInfo(const FPaintArg
 		//	ESlateDrawEffect::None,
 		//	FLinearColor::Black);
 
-		MakeText(TEXT("Slow Path"), FVector2D(10.f, 10.f+0.f), DrawSlowPathColor);
-		MakeText(TEXT("Fast Path"), FVector2D(10.f, 10.f+12.f), DrawFastPathColor);
-		MakeText(TEXT("No Paint occurred"), FVector2D(10.f, 10.f+24.f), DrawNoneColor);
+		MakeText(TEXT("Slow Path"), FVector2f(10.f, 10.f+0.f), DrawSlowPathColor);
+		MakeText(TEXT("Fast Path"), FVector2f(10.f, 10.f+12.f), DrawFastPathColor);
+		MakeText(TEXT("No Paint occurred"), FVector2f(10.f, 10.f+24.f), DrawNoneColor);
 		TextElementY += 36.f;
 	}
 
@@ -242,7 +242,7 @@ void FConsoleSlateDebuggerInvalidationRoot::HandlePaintDebugInfo(const FPaintArg
 		if (WindowId == PaintWindow)
 		{
 			FLinearColor DrawColor = GetColor(LastPaintType);
-			double LerpValue = 1.0;
+			float LerpValue = 1.0f;
 
 			FInvalidatedInfo& FoundInvalidationInfo = InvaliadatedRoots[Itt.Key];
 			// If we went from fast to slow or to none, flash it on screen
@@ -259,12 +259,12 @@ void FConsoleSlateDebuggerInvalidationRoot::HandlePaintDebugInfo(const FPaintArg
 			}
 			FoundInvalidationInfo.PaintType = LastPaintType;
 
-			const double DeltaTime = SlateApplicationCurrentTime - FoundInvalidationInfo.FlashingSeconds;
+			const float DeltaTime = (float)(SlateApplicationCurrentTime - FoundInvalidationInfo.FlashingSeconds);
 			const bool bLearp = DeltaTime <= CacheDuration;
 			if (bLearp)
 			{
 				DrawColor = FoundInvalidationInfo.FlashingColor;
-				LerpValue = FMath::Clamp(DeltaTime / CacheDuration, 0.1, 1.0);
+				LerpValue = FMath::Clamp(DeltaTime / CacheDuration, 0.1f, 1.0f);
 			}
 
 			const SWidget* Widget = Itt.Value->GetInvalidationRootWidget();
@@ -305,7 +305,7 @@ void FConsoleSlateDebuggerInvalidationRoot::HandlePaintDebugInfo(const FPaintArg
 				if (NumberOfWidget < MaxNumberOfWidgetInList)
 				{
 					FString WidgetDisplayName = FString::Printf(TEXT("Id:('%d') - %s"), Itt.Key, *FReflectionMetaData::GetWidgetDebugInfo(Widget));
-					MakeText(WidgetDisplayName, FVector2D(0.f, (12.f * NumberOfWidget) + TextElementY), DrawColor);
+					MakeText(WidgetDisplayName, FVector2f(0.f, (12.f * NumberOfWidget) + TextElementY), DrawColor);
 				}
 			}
 			++NumberOfWidget;
@@ -315,7 +315,7 @@ void FConsoleSlateDebuggerInvalidationRoot::HandlePaintDebugInfo(const FPaintArg
 	if (bDisplayInvalidationRootList && NumberOfWidget == MaxNumberOfWidgetInList)
 	{
 		FString WidgetDisplayName = FString::Printf(TEXT("   %d more invalidation root"), NumberOfWidget - MaxNumberOfWidgetInList);
-		MakeText(WidgetDisplayName, FVector2D(0.f, (12.f * NumberOfWidget) + TextElementY), FLinearColor::White);
+		MakeText(WidgetDisplayName, FVector2f(0.f, (12.f * NumberOfWidget) + TextElementY), FLinearColor::White);
 	}
 }
 

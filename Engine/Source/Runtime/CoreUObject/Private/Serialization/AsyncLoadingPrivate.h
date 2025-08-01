@@ -3,12 +3,13 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Serialization/ArchiveProxy.h"
 #include "UObject/Linker.h"
 #include "Async/AsyncFileHandle.h"
 
 DECLARE_LOG_CATEGORY_EXTERN(LogLoadingDev, Fatal, All);
 
-class COREUOBJECT_API FAsyncArchive final: public FArchive
+class FAsyncArchive final: public FArchive
 {
 public:
 	enum class ELoadPhase
@@ -19,15 +20,23 @@ public:
 		WaitingForFirstExport,
 		ProcessingExports,
 	};
+	enum class ELoadError : uint8
+	{
+		Unknown,
+		UnsupportedFormat,
+		FileDoesNotExist,
+		CorruptData,
+		Cancelled,
+	};
 
-	FAsyncArchive(const TCHAR* InFileName, FLinkerLoad* InOwner, TFunction<void()>&& InSummaryReadyCallback);
-	virtual ~FAsyncArchive ();
+	FAsyncArchive(const FPackagePath& InPackagePath, FLinkerLoad* InOwner, TFunction<void()>&& InSummaryReadyCallback);
+	COREUOBJECT_API virtual ~FAsyncArchive ();
 
 	/** Archive overrides */
-	virtual bool Close() override;
-	virtual bool SetCompressionMap(TArray<FCompressedChunk>* CompressedChunks, ECompressionFlags CompressionFlags) override;
-	virtual bool Precache(int64 PrecacheOffset, int64 PrecacheSize) override;
-	virtual void Serialize(void* Data, int64 Num) override;
+	COREUOBJECT_API virtual bool Close() override;
+	COREUOBJECT_API virtual bool SetCompressionMap(TArray<FCompressedChunk>* CompressedChunks, ECompressionFlags CompressionFlags) override;
+	COREUOBJECT_API virtual bool Precache(int64 PrecacheOffset, int64 PrecacheSize) override;
+	COREUOBJECT_API virtual void Serialize(void* Data, int64 Num) override;
 	FORCEINLINE virtual int64 Tell() override
 	{
 #if DEVIRTUALIZE_FLinkerLoad_Serialize
@@ -36,47 +45,57 @@ public:
 		return CurrentPos;
 #endif
 	}
-	virtual int64 TotalSize() override;
-	virtual void Seek(int64 InPos) override;
-	virtual void FlushCache() override;
+	COREUOBJECT_API virtual int64 TotalSize() override;
+	COREUOBJECT_API virtual void Seek(int64 InPos) override;
+	COREUOBJECT_API virtual void FlushCache() override;
 	virtual FString GetArchiveName() const override 
 	{
-		return FileName;
+		return PackagePath.GetDebugName();
 	}
 
 	/** AsyncArchive interface */
-	bool PrecacheWithTimeLimit(int64 PrecacheOffset, int64 PrecacheSize, bool bUseTimeLimit, bool bUseFullTimeLimit, double TickStartTime, float TimeLimit);
-	bool PrecacheForEvent(IAsyncReadRequest* Read, int64 PrecacheOffset, int64 PrecacheSize);
-	void FlushPrecacheBlock();
-	bool ReadyToStartReadingHeader(bool bUseTimeLimit, bool bUseFullTimeLimit, double TickStartTime, float TimeLimit);
-	void StartReadingHeader();
-	void EndReadingHeader();
-	IAsyncReadRequest* MakeEventDrivenPrecacheRequest(int64 Offset, int64 BytesToRead, FAsyncFileCallBack* CompleteCallback);
-	void LogItem(const TCHAR* Item, int64 Offset = 0, int64 Size = 0, double StartTime = 0.0);
+	COREUOBJECT_API bool PrecacheWithTimeLimit(int64 PrecacheOffset, int64 PrecacheSize, bool bUseTimeLimit, bool bUseFullTimeLimit, double TickStartTime, double TimeLimit);
+	COREUOBJECT_API bool PrecacheForEvent(IAsyncReadRequest* Read, int64 PrecacheOffset, int64 PrecacheSize);
+	COREUOBJECT_API void FlushPrecacheBlock();
+	COREUOBJECT_API bool ReadyToStartReadingHeader(bool bUseTimeLimit, bool bUseFullTimeLimit, double TickStartTime, double TimeLimit);
+	COREUOBJECT_API void StartReadingHeader();
+	COREUOBJECT_API void EndReadingHeader();
+	COREUOBJECT_API IAsyncReadRequest* MakeEventDrivenPrecacheRequest(int64 Offset, int64 BytesToRead, FAsyncFileCallBack* CompleteCallback);
+	COREUOBJECT_API void LogItem(const TCHAR* Item, int64 Offset = 0, int64 Size = 0, double StartTime = 0.0);
 
 	bool IsCookedForEDLInEditor() const
 	{
 		return bCookedForEDLInEditor;
 	}
 
+	ELoadError GetLoadError() const
+	{
+		return LoadError;
+	}
+	bool NeedsEngineVersionChecks() const
+	{
+		return bNeedsEngineVersionChecks;
+	}
+
+
 private:
 #if DEVIRTUALIZE_FLinkerLoad_Serialize
 	/**
 	* Updates CurrentPos based on StartFastPathLoadBuffer and sets both StartFastPathLoadBuffer and EndFastPathLoadBuffer to null
 	*/
-	void DiscardInlineBufferAndUpdateCurrentPos();
+	COREUOBJECT_API void DiscardInlineBufferAndUpdateCurrentPos();
 
-	void SetPosAndUpdatePrecacheBuffer(int64 Pos);
+	COREUOBJECT_API void SetPosAndUpdatePrecacheBuffer(int64 Pos);
 
 #endif
-	void FirstExportStarting();
-	bool WaitRead(float TimeLimit = 0.0f);
-	void CompleteRead();
-	void CancelRead();
-	void CompleteCancel();
-	bool WaitForIntialPhases(float TimeLimit = 0.0f);
-	void ReadCallback(bool bWasCancelled, IAsyncReadRequest*);
-	bool PrecacheInternal(int64 PrecacheOffset, int64 PrecacheSize, bool bApplyMinReadSize = true, IAsyncReadRequest* Read = nullptr);
+	COREUOBJECT_API void FirstExportStarting();
+	COREUOBJECT_API bool WaitRead(double TimeLimit = 0.0);
+	COREUOBJECT_API void CompleteRead();
+	COREUOBJECT_API void CancelRead();
+	COREUOBJECT_API void CompleteCancel();
+	COREUOBJECT_API bool WaitForIntialPhases(double TimeLimit = 0.0);
+	COREUOBJECT_API void ReadCallback(bool bWasCancelled, IAsyncReadRequest*);
+	COREUOBJECT_API bool PrecacheInternal(int64 PrecacheOffset, int64 PrecacheSize, bool bApplyMinReadSize = true, IAsyncReadRequest* Read = nullptr);
 	
 	FORCEINLINE int64 TotalSizeOrMaxInt64IfNotReady()
 	{
@@ -112,13 +131,16 @@ private:
 	int64 HeaderSizeWhenReadingExportsFromSplitFile;
 
 	ELoadPhase LoadPhase;
+	ELoadError LoadError;
 
 	/** If true, this package is a cooked EDL package loaded in uncooked builds */
 	bool bCookedForEDLInEditor;
+	/** True if the linker should do version and corruption checks on bytes of this archive. */
+	bool bNeedsEngineVersionChecks;
 
 	FAsyncFileCallBack ReadCallbackFunction;
-	/** Cached filename for debugging.												*/
-	FString	FileName;
+	/** Cached PackagePath for debugging.												*/
+	FPackagePath PackagePath;
 	double OpenTime;
 	double SummaryReadTime;
 	double ExportReadTime;
@@ -128,3 +150,24 @@ private:
 
 	FLinkerLoad* OwnerLinker;
 };
+
+/**
+ * The Linker export archive converts Export relative offsets
+ * to file relative offsets when exports are cooked to separate
+ * archives.
+ */
+class FLinkerExportArchive final
+	: public FArchiveProxy
+{
+public:
+	FLinkerExportArchive(class FLinkerLoad& InLinker, int64 InExportSerialOffset, int64 InExportSerialSize);
+
+	COREUOBJECT_API virtual int64 Tell() override;
+	COREUOBJECT_API virtual void Seek(int64 Position) override;
+
+private:
+	int64 ExportSerialOffset;
+	int64 ExportSerialSize;
+	bool bExportsCookedToSeparateArchive;
+};
+

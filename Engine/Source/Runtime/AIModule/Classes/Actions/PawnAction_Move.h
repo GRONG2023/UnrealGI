@@ -6,7 +6,9 @@
 #include "UObject/ObjectMacros.h"
 #include "Templates/SubclassOf.h"
 #include "Engine/EngineTypes.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "NavFilters/NavigationQueryFilter.h"
+#endif
 #include "Actions/PawnAction.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "PawnAction_Move.generated.h"
@@ -16,20 +18,20 @@ class AAIController;
 UENUM()
 namespace EPawnActionMoveMode
 {
-	enum Type
+	enum Type : int
 	{
 		UsePathfinding,
 		StraightLine,
 	};
 }
 
-UCLASS()
-class AIMODULE_API UPawnAction_Move : public UPawnAction
+UCLASS(MinimalAPI)
+class UDEPRECATED_PawnAction_Move : public UDEPRECATED_PawnAction
 {
 	GENERATED_UCLASS_BODY()
 protected:
 	UPROPERTY(Category = PawnAction, EditAnywhere, BlueprintReadWrite)
-	AActor* GoalActor;
+	TObjectPtr<AActor> GoalActor;
 
 	UPROPERTY(Category = PawnAction, EditAnywhere, BlueprintReadWrite)
 	FVector GoalLocation;
@@ -66,30 +68,33 @@ protected:
 
 	/** if set, other actions with the same priority will be aborted when path is changed */
 	UPROPERTY()
-	uint32 bAbortChildActionOnPathChange : 1;
+	uint32 bAbortSubActionOnPathChange : 1;
 
 public:
-	virtual void BeginDestroy() override;
+	AIMODULE_API virtual void BeginDestroy() override;
 
-	static UPawnAction_Move* CreateAction(UWorld& World, AActor* GoalActor, EPawnActionMoveMode::Type Mode);
-	static UPawnAction_Move* CreateAction(UWorld& World, const FVector& GoalLocation, EPawnActionMoveMode::Type Mode);
+	static AIMODULE_API UDEPRECATED_PawnAction_Move* CreateAction(UWorld& World, AActor* GoalActor, EPawnActionMoveMode::Type Mode);
+	static AIMODULE_API UDEPRECATED_PawnAction_Move* CreateAction(UWorld& World, const FVector& GoalLocation, EPawnActionMoveMode::Type Mode);
 
-	static bool CheckAlreadyAtGoal(AAIController& Controller, const FVector& TestLocation, float Radius);
-	static bool CheckAlreadyAtGoal(AAIController& Controller, const AActor& TestGoal, float Radius);
+	static AIMODULE_API bool CheckAlreadyAtGoal(AAIController& Controller, const FVector& TestLocation, float Radius);
+	static AIMODULE_API bool CheckAlreadyAtGoal(AAIController& Controller, const AActor& TestGoal, float Radius);
 
-	virtual void HandleAIMessage(UBrainComponent*, const FAIMessage&) override;
+	AIMODULE_API virtual void HandleAIMessage(UBrainComponent*, const FAIMessage&) override;
 
-	void SetPath(FNavPathSharedRef InPath);
-	virtual void OnPathUpdated(FNavigationPath* UpdatedPath, ENavPathEvent::Type Event);
+	AIMODULE_API void SetPath(FNavPathSharedRef InPath);
+	AIMODULE_API virtual void OnPathUpdated(FNavigationPath* UpdatedPath, ENavPathEvent::Type Event);
 
 	void SetAcceptableRadius(float NewAcceptableRadius) { AcceptableRadius = NewAcceptableRadius; }
 	void SetFinishOnOverlap(bool bNewFinishOnOverlap) { bFinishOnOverlap = bNewFinishOnOverlap; }
 	void EnableStrafing(bool bNewStrafing) { bAllowStrafe = bNewStrafing; }
 	void EnablePathUpdateOnMoveGoalLocationChange(bool bEnable) { bUpdatePathToGoal = bEnable; }
 	void EnableGoalLocationProjectionToNavigation(bool bEnable) { bProjectGoalToNavigation = bEnable; }
-	void EnableChildAbortionOnPathUpdate(bool bEnable) { bAbortChildActionOnPathChange = bEnable; }
+	void SetAbortSubActionOnPathUpdate(bool bEnable) { bAbortSubActionOnPathChange = bEnable; }
 	void SetFilterClass(TSubclassOf<UNavigationQueryFilter> NewFilterClass) { FilterClass = NewFilterClass; }
 	void SetAllowPartialPath(bool bEnable) { bAllowPartialPath = bEnable; }
+
+	UE_DEPRECATED(5.1, "Use SetAbortSubActionOnPathUpdate instead.")
+	void EnableChildAbortionOnPathUpdate(bool bEnable) { SetAbortSubActionOnPathUpdate(bEnable); }
 
 protected:
 	/** currently followed path */
@@ -103,20 +108,20 @@ protected:
 	/** Handle for efficient management of TryToRepath timer */
 	FTimerHandle TimerHandle_TryToRepath;
 
-	void ClearPath();
-	virtual bool Start() override;
-	virtual bool Pause(const UPawnAction* PausedBy) override;
-	virtual bool Resume() override;
-	virtual void OnFinished(EPawnActionResult::Type WithResult) override;
-	virtual EPawnActionAbortState::Type PerformAbort(EAIForceParam::Type ShouldForce) override;
-	virtual bool IsPartialPathAllowed() const;
+	AIMODULE_API void ClearPath();
+	AIMODULE_API virtual bool Start() override;
+	AIMODULE_API virtual bool Pause(const UDEPRECATED_PawnAction* PausedBy) override;
+	AIMODULE_API virtual bool Resume() override;
+	AIMODULE_API virtual void OnFinished(EPawnActionResult::Type WithResult) override;
+	AIMODULE_API virtual EPawnActionAbortState::Type PerformAbort(EAIForceParam::Type ShouldForce) override;
+	AIMODULE_API virtual bool IsPartialPathAllowed() const;
 
-	virtual EPathFollowingRequestResult::Type RequestMove(AAIController& Controller);
+	AIMODULE_API virtual EPathFollowingRequestResult::Type RequestMove(AAIController& Controller);
 	
-	bool PerformMoveAction();
-	void DeferredPerformMoveAction();
+	AIMODULE_API bool PerformMoveAction();
+	AIMODULE_API void DeferredPerformMoveAction();
 
-	void TryToRepath();
-	void ClearPendingRepath();
-	void ClearTimers();
+	AIMODULE_API void TryToRepath();
+	AIMODULE_API void ClearPendingRepath();
+	AIMODULE_API void ClearTimers();
 };

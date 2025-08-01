@@ -1,26 +1,21 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "StudioAnalytics.h"
-#include "Misc/Guid.h"
-#include "Stats/Stats.h"
-#include "Misc/ConfigCacheIni.h"
-#include "EngineGlobals.h"
-#include "Engine/Engine.h"
-#include "Misc/EngineBuildSettings.h"
-#include "AnalyticsBuildType.h"
-#include "AnalyticsEventAttribute.h"
+#include "HAL/PlatformTime.h"
 #include "IAnalyticsProviderET.h"
-#include "AnalyticsET.h"
-#include "GeneralProjectSettings.h"
-#include "Misc/EngineVersion.h"
-#include "RHI.h"
-#include "GenericPlatform/GenericPlatformCrashContext.h"
-#include "Interfaces/IAnalyticsProvider.h"
-#include "Templates/SharedPointer.h"
 #include "HAL/PlatformProcess.h"
+#include "HAL/Thread.h"
+#include "DerivedDataCacheInterface.h"
+#include "DerivedDataCacheUsageStats.h"
+#include "Virtualization/VirtualizationSystem.h"
 
+#if WITH_EDITOR
+#include "Experimental/ZenServerInterface.h"
+#endif
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 bool FStudioAnalytics::bInitialized = false;
-volatile double FStudioAnalytics::TimeEstimation = 0;
+std::atomic<double> FStudioAnalytics::TimeEstimation { 0 };
 FThread FStudioAnalytics::TimerThread;
 TSharedPtr<IAnalyticsProviderET> FStudioAnalytics::Analytics;
 TArray<FAnalyticsEventAttribute> FStudioAnalytics::DefaultAttributes;
@@ -94,11 +89,11 @@ void FStudioAnalytics::RunTimer_Concurrent()
 
 		if (DeltaTime > BreakpointHitchTime)
 		{
-			TimeEstimation += FixedInterval;
+			TimeEstimation.store(TimeEstimation.load(std::memory_order_relaxed) + FixedInterval);
 		}
 		else
 		{
-			TimeEstimation += DeltaTime;
+			TimeEstimation.store(TimeEstimation.load(std::memory_order_relaxed) + DeltaTime);
 		}
 	}
 }
@@ -123,7 +118,7 @@ void FStudioAnalytics::Shutdown()
 
 double FStudioAnalytics::GetAnalyticSeconds()
 {
-	return bInitialized ? TimeEstimation : FPlatformTime::Seconds();
+	return bInitialized ? TimeEstimation.load(std::memory_order_relaxed) : FPlatformTime::Seconds();
 }
 
 void FStudioAnalytics::RecordEvent(const FString& EventName)
@@ -139,27 +134,4 @@ void FStudioAnalytics::RecordEvent(const FString& EventName, const TArray<FAnaly
 	}
 }
 
-void FStudioAnalytics::FireEvent_Loading(const FString& LoadingName, double SecondsSpentLoading, const TArray<FAnalyticsEventAttribute>& InAttributes)
-{
-	// Ignore anything less than a 1/4th a second.
-	if (SecondsSpentLoading < 0.250)
-	{
-		return;
-	}
-
-	// Throw out anything over 10 hours - 
-	if (!ensureMsgf(SecondsSpentLoading < 36000, TEXT("The loading event shouldn't be over 10 hours, perhaps an uninitialized bit of memory?")))
-	{
-		return;
-	}
-
-	if (FStudioAnalytics::IsAvailable())
-	{
-		TArray<FAnalyticsEventAttribute> Attributes;
-		Attributes.Emplace(TEXT("LoadingName"), LoadingName);
-		Attributes.Emplace(TEXT("LoadingSeconds"), SecondsSpentLoading);
-		Attributes.Append(InAttributes);
-
-		FStudioAnalytics::GetProvider().RecordEvent(TEXT("Performance.Loading"), Attributes);
-	}
-}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS

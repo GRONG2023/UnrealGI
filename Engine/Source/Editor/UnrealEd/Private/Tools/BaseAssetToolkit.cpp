@@ -14,6 +14,7 @@
 #include "Framework/Docking/LayoutExtender.h"
 #include "Modules/ModuleManager.h"
 #include "Tools/UAssetEditor.h"
+#include "AssetEditorModeManager.h"
 
 
 #define LOCTEXT_NAMESPACE "BaseAssetToolkit"
@@ -26,18 +27,11 @@ FBaseAssetToolkit::FBaseAssetToolkit(UAssetEditor* InOwningAssetEditor)
 {
 	OwningAssetEditor = InOwningAssetEditor;
 
-	FString LayoutString = TEXT("Standalone_Test_Layout_") + LayoutAppendix;
+	FString LayoutString = TEXT("Standalone_Test_Layout_v2_") + LayoutAppendix;
 	StandaloneDefaultLayout = FTabManager::NewLayout(FName(LayoutString))
 		->AddArea
 		(
 			FTabManager::NewPrimaryArea()->SetOrientation(Orient_Vertical)
-			->Split
-			(
-				FTabManager::NewStack()
-				->SetSizeCoefficient(0.1f)
-				->AddTab(GetToolbarTabId(), ETabState::OpenedTab)
-				->SetHideTabWell(true)
-			)
 			->Split
 			(
 				FTabManager::NewSplitter()->SetOrientation(Orient_Horizontal)
@@ -78,13 +72,21 @@ void FBaseAssetToolkit::RegisterTabSpawners(const TSharedRef<FTabManager>& InTab
 	InTabManager->RegisterTabSpawner(ViewportTabID, FOnSpawnTab::CreateSP(this, &FBaseAssetToolkit::SpawnTab_Viewport))
 		.SetDisplayName(LOCTEXT("ViewportTab", "Viewport"))
 		.SetGroup(AssetEditorTabsCategory.ToSharedRef())
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.Tabs.Viewports"));
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Viewports"));
 
 	InTabManager->RegisterTabSpawner(DetailsTabID, FOnSpawnTab::CreateSP(this, &FBaseAssetToolkit::SpawnTab_Details))
 		.SetDisplayName(LOCTEXT("Details", "Details"))
 		.SetGroup(AssetEditorTabsCategory.ToSharedRef())
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.Tabs.Details"));
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Details"));
 
+}
+
+void FBaseAssetToolkit::UnregisterTabSpawners(const TSharedRef<FTabManager>& InTabManager)
+{
+	FAssetEditorToolkit::UnregisterTabSpawners(InTabManager);
+
+	InTabManager->UnregisterTabSpawner(ViewportTabID);
+	InTabManager->UnregisterTabSpawner(DetailsTabID);
 }
 
 const TSharedRef<FTabManager::FLayout> FBaseAssetToolkit::GetDefaultLayout() const
@@ -95,8 +97,7 @@ const TSharedRef<FTabManager::FLayout> FBaseAssetToolkit::GetDefaultLayout() con
 TSharedRef<SDockTab> FBaseAssetToolkit::SpawnTab_Viewport(const FSpawnTabArgs& Args)
 {
 	TSharedRef< SDockTab > DockableTab =
-		SNew(SDockTab)
-		.Icon(FEditorStyle::GetBrush("LevelEditor.Tabs.Viewports"));
+		SNew(SDockTab);
 
 	const FString LayoutId = FString("BaseAssetViewport");
 	ViewportTabContent->Initialize(ViewportDelegate, DockableTab, LayoutId);
@@ -106,7 +107,6 @@ TSharedRef<SDockTab> FBaseAssetToolkit::SpawnTab_Viewport(const FSpawnTabArgs& A
 TSharedRef<SDockTab>  FBaseAssetToolkit::SpawnTab_Details(const FSpawnTabArgs& Args)
 {
 	TSharedPtr<SDockTab> DetailsTab = SNew(SDockTab)
-		.Icon(FEditorStyle::GetBrush("LevelEditor.Tabs.Details"))
 		.Label(LOCTEXT("BaseDetailsTitle", "Details"))
 		[
 			DetailsView.ToSharedRef()
@@ -119,12 +119,12 @@ void FBaseAssetToolkit::RegisterToolbar()
 {
 }
 
-TFunction<TSharedRef<SEditorViewport>(void)> FBaseAssetToolkit::GetViewportDelegate()
+AssetEditorViewportFactoryFunction FBaseAssetToolkit::GetViewportDelegate()
 {
 	// Set up functor for viewport tab
-	TFunction<TSharedRef<SEditorViewport>(void)> TempViewportDelegate = [=]()
+	AssetEditorViewportFactoryFunction TempViewportDelegate = [this](const FAssetEditorViewportConstructionArgs& InArgs)
 	{
-		return SNew(SAssetEditorViewport)
+		return SNew(SAssetEditorViewport, InArgs)
 			.EditorViewportClient(ViewportClient);
 	};
 
@@ -134,25 +134,35 @@ TFunction<TSharedRef<SEditorViewport>(void)> FBaseAssetToolkit::GetViewportDeleg
 TSharedPtr<FEditorViewportClient> FBaseAssetToolkit::CreateEditorViewportClient() const
 {
 	FPreviewScene* PreviewScene = new FPreviewScene(FPreviewScene::ConstructionValues());
-	return MakeShared<FEditorViewportClient>(nullptr, PreviewScene);
+	StaticCastSharedPtr<FAssetEditorModeManager>(EditorModeManager)->SetPreviewScene(PreviewScene);
+
+	return MakeShared<FEditorViewportClient>(EditorModeManager.Get(), PreviewScene);
 }
 
 void FBaseAssetToolkit::CreateWidgets()
 {
 	RegisterToolbar();
+	CreateEditorModeManager();
 	ViewportClient = CreateEditorViewportClient();
 	ViewportDelegate = GetViewportDelegate();
 	ViewportTabContent = MakeShareable(new FEditorViewportTabContent());
 	LayoutExtender = MakeShared<FLayoutExtender>();
 
 	FPropertyEditorModule& PropertyEditorModule = FModuleManager::GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
-	const FDetailsViewArgs DetailsViewArgs(false, false, true, FDetailsViewArgs::ObjectsUseNameArea, true);
+	FDetailsViewArgs DetailsViewArgs;
+	DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+	DetailsViewArgs.bHideSelectionTip = true;
 	DetailsView = PropertyEditorModule.CreateDetailView(DetailsViewArgs);
 }
 
 void FBaseAssetToolkit::SetEditingObject(class UObject* InObject)
 {
 	DetailsView->SetObject(InObject);
+}
+
+void FBaseAssetToolkit::CreateEditorModeManager()
+{
+	EditorModeManager = MakeShared<FAssetEditorModeManager>();
 }
 
 #undef LOCTEXT_NAMESPACE

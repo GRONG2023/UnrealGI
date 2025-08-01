@@ -2,11 +2,20 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "UObject/UnrealType.h"
+#include "Math/UnrealMathSSE.h"
 #include "PropertyPath.h"
+#include "UObject/Field.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakFieldPtr.h"
 
 class IPropertyHandle;
+class UClass;
+class UObject;
+class UStruct;
+
 enum class ESequencerKeyMode;
 
 /**
@@ -19,15 +28,19 @@ struct SEQUENCER_API FCanKeyPropertyParams
 	 * @param InObjectClass the class of the object which has the property to be keyed.
 	 * @param InPropertyPath path get from the root object to the property to be keyed.
 	 */
-	FCanKeyPropertyParams(UClass* InObjectClass, const FPropertyPath& InPropertyPath);
+	FCanKeyPropertyParams(const UClass* InObjectClass, const FPropertyPath& InPropertyPath);
 
 	/**
 	* Creates new can key property parameters.
 	* @param InObjectClass the class of the object which has the property to be keyed.
 	* @param InPropertyHandle a handle to the property to be keyed.
 	*/
-	FCanKeyPropertyParams(UClass* InObjectClass, const IPropertyHandle& InPropertyHandle);
+	FCanKeyPropertyParams(const UClass* InObjectClass, const IPropertyHandle& InPropertyHandle);
 
+	/** The owner struct */
+	const UStruct* FindPropertyOwner(const FProperty* ForProperty) const;
+
+	/** The container from which to find setter functions */
 	const UStruct* FindPropertyContainer(const FProperty* ForProperty) const;
 
 	/** The class of the object which has the property to be keyed. */
@@ -89,6 +102,19 @@ public:
 				int32 ArrayIndex = FMath::Max(0, PropertyInfo.ArrayIndex);
 				if (FArrayProperty* ArrayProp = CastField<FArrayProperty>(Property))
 				{
+					// Sometimes property paths have the array property twice, first with no array index,
+					// then a second so we skip over this property if that's the case
+					if (PropertyInfo.ArrayIndex == INDEX_NONE && i < PropertyPath.GetNumProperties()-1)
+					{
+						const FPropertyInfo& InnerPropertyInfo = PropertyPath.GetPropertyInfo(i+1);
+						FProperty* InnerProperty = InnerPropertyInfo.Property.Get();
+						if (InnerProperty && InnerProperty->GetOwner<FProperty>() == ArrayProp)
+						{
+							ArrayIndex = InnerPropertyInfo.ArrayIndex;
+							++i;
+						}
+					}
+
 					FScriptArrayHelper ParentArrayHelper(ArrayProp, ArrayProp->ContainerPtrToValuePtr<void>(ContainerPtr));
 					if (!ParentArrayHelper.IsValidIndex(ArrayIndex))
 					{

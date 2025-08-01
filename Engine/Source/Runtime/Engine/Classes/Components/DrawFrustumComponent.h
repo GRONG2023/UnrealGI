@@ -18,7 +18,11 @@ UCLASS(collapsecategories, hidecategories=Object, editinlinenew, MinimalAPI)
 class UDrawFrustumComponent : public UPrimitiveComponent
 {
 	GENERATED_UCLASS_BODY()
-	
+
+	// Enable or disable frustum visualization for this camera
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = DrawFrustumComponent)
+	bool bFrustumEnabled = true;
+
 	/** Color to draw the wireframe frustum. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=DrawFrustumComponent)
 	FColor FrustumColor;
@@ -42,7 +46,7 @@ class UDrawFrustumComponent : public UPrimitiveComponent
 
 	/** optional texture to show on the near plane */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=DrawFrustumComponent)
-	class UTexture* Texture;
+	TObjectPtr<class UTexture> Texture;
 
 
 	//~ Begin UPrimitiveComponent Interface.
@@ -50,9 +54,7 @@ class UDrawFrustumComponent : public UPrimitiveComponent
 	virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
 	//~ End UPrimitiveComponent Interface.
 
-#if WITH_EDITOR
-	virtual bool IgnoreBoundsForEditorFocus() const override { return true; }
-#endif
+	virtual bool GetIgnoreBoundsForEditorFocus() const override { return true; }
 };
 
 

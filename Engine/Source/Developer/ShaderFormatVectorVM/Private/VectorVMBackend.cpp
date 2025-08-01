@@ -53,7 +53,7 @@ bool FVectorVMCodeBackend::GenerateMain(EHlslShaderFrequency Frequency, const ch
 	SCOPE_CYCLE_COUNTER(STAT_VVMGenerateMain);
 	//vm_debug_dump(Instructions, ParseState);
 
-	ir_function_signature* MainSig = NULL;
+	ir_function_signature* MainSig = nullptr;
 	int NumFunctions = 0;
 
 	foreach_iter(exec_list_iterator, iter, *Instructions)
@@ -325,7 +325,7 @@ char* FVectorVMCodeBackend::GenerateCode(exec_list* ir, _mesa_glsl_parse_state* 
 		vm_gen_bytecode(ir, state, CompilationOutput);
 	}
 
-	return  nullptr;// Cheat and emit the bytecode into he CompilationOutput. The return here is treat as a string so the 0's it contains prove problematic.
+	return  nullptr;// Cheat and emit the bytecode into the CompilationOutput. The return here is treated as a string so the 0's it contains prove problematic.
 }
 
 void FVectorVMLanguageSpec::SetupLanguageIntrinsics(_mesa_glsl_parse_state* State, exec_list* ir)

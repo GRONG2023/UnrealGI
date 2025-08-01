@@ -28,11 +28,6 @@ struct FWindowsPlatformProperties
 		return TEXT("/Script/WindowsTargetPlatform.WindowsTargetSettings");
 	}
 
-	static FORCEINLINE const char* GetPhysicsFormat()
-	{
-		return "PhysXPC";
-	}
-
 	static FORCEINLINE bool IsGameOnly()
 	{
 		return UE_GAME;
@@ -57,7 +52,7 @@ struct FWindowsPlatformProperties
 		
 		if (HAS_EDITOR_DATA)
 		{
-			return "Windows";
+			return "WindowsEditor";
 		}
 		
 		if (IS_CLIENT_ONLY)
@@ -65,7 +60,7 @@ struct FWindowsPlatformProperties
 			return "WindowsClient";
 		}
 
-		return "WindowsNoEditor";
+		return "Windows";
 	}
 
 	static FORCEINLINE bool RequiresCookedData()
@@ -78,6 +73,11 @@ struct FWindowsPlatformProperties
 		return IS_DEDICATED_SERVER;
 	}
 
+	static FORCEINLINE bool SupportsMemoryMappedFiles()
+	{
+		return true;
+	}
+
 	static FORCEINLINE bool SupportsAudioStreaming()
 	{
 		return !IsServerOnly();
@@ -88,6 +88,11 @@ struct FWindowsPlatformProperties
 		return !IsServerOnly() && !HasEditorOnlyData();
 	}
 
+	static FORCEINLINE bool SupportsRayTracing()
+	{
+		return true;
+	}
+
 	static FORCEINLINE bool SupportsGrayscaleSRGB()
 	{
 		return false; // Requires expand from G8 to RGBA
@@ -96,11 +101,6 @@ struct FWindowsPlatformProperties
 	static FORCEINLINE bool SupportsMultipleGameInstances()
 	{
 		return true;
-	}
-
-	static FORCEINLINE bool SupportsTessellation()
-	{
-		return true; // DX11 compatible
 	}
 
 	static FORCEINLINE bool SupportsWindowedMode()
@@ -146,5 +146,5 @@ struct FWindowsPlatformProperties
 };
 
 #ifdef PROPERTY_HEADER_SHOULD_DEFINE_TYPE
-typedef FWindowsPlatformProperties<WITH_EDITORONLY_DATA, UE_SERVER, !WITH_SERVER_CODE> FPlatformProperties;
+typedef FWindowsPlatformProperties<WITH_EDITORONLY_DATA, UE_SERVER, !WITH_SERVER_CODE && !WITH_EDITOR> FPlatformProperties;
 #endif

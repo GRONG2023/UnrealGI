@@ -173,7 +173,7 @@ void FXGEControlWorker::InputThreadProc()
 		Reader << Task->Executable;
 		Reader << Task->Arguments;
 
-		// Launch the process
+		// Launch the process with normal priority.
 		Task->Handle = FPlatformProcess::CreateProc(*Task->Executable, *Task->Arguments, true, false, false, nullptr, 0, nullptr, nullptr);
 
 		FScopeLock Lock(CS);
@@ -185,6 +185,7 @@ void FXGEControlWorker::InputThreadProc()
 
 int32 XGEController_GuardedMain(int32 ArgC, TCHAR* ArgV[])
 {
+	FTaskTagScope Scope(ETaskTag::EGameThread);
 	GEngineLoop.PreInit(ArgC, ArgV, TEXT("-NOPACKAGECACHE -Multiprocess"));
 
 	if (ArgC != 3)

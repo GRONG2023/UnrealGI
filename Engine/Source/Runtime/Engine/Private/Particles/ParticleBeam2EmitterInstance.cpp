@@ -5,24 +5,27 @@
 	Particle beam emitter instance implementation.
 =============================================================================*/
 
-#include "CoreMinimal.h"
-#include "Stats/Stats.h"
-#include "EngineGlobals.h"
 #include "Engine/Engine.h"
+#include "GameFramework/Actor.h"
 #include "Materials/Material.h"
-#include "ParticleHelper.h"
+#include "MaterialDomain.h"
 #include "ParticleEmitterInstances.h"
+#include "Particles/Beam/ParticleModuleBeamBase.h"
 #include "Particles/ParticleSystemComponent.h"
 #include "Particles/Beam/ParticleModuleBeamModifier.h"
 #include "Particles/Beam/ParticleModuleBeamNoise.h"
 #include "Particles/Beam/ParticleModuleBeamSource.h"
 #include "Particles/Beam/ParticleModuleBeamTarget.h"
 #include "Particles/Event/ParticleModuleEventGenerator.h"
+#include "Particles/ParticleEmitter.h"
 #include "Particles/Spawn/ParticleModuleSpawn.h"
+#include "Particles/ParticleModule.h"
 #include "Particles/TypeData/ParticleModuleTypeDataBase.h"
+#include "Particles/ParticleSystem.h"
 #include "Particles/TypeData/ParticleModuleTypeDataBeam2.h"
 #include "Particles/ParticleLODLevel.h"
 #include "Particles/ParticleModuleRequired.h"
+#include "Stats/StatsTrace.h"
 
 /** Beam particle stat objects */
 
@@ -512,7 +515,7 @@ void FParticleBeam2EmitterInstance::Tick(float DeltaTime, bool bSuppressSpawning
 					if ((ActiveParticles < BeamCount) && BeamTypeData->bAlwaysOn)
 					{
 						Burst = BeamCount;
-						if (DeltaTime > KINDA_SMALL_NUMBER)
+						if (DeltaTime > UE_KINDA_SMALL_NUMBER)
 						{
 							BurstTime = Burst * InvDeltaTime;
 							SpawnRate += BurstTime;
@@ -690,26 +693,26 @@ void FParticleBeam2EmitterInstance::UpdateBoundingBox(float DeltaTime)
 
 			bool bSkipUpdate = bJustSpawned && bSkipDoubleSpawnUpdate;
 
-			Particle->Location	+= bSkipUpdate ? FVector::ZeroVector : DeltaTime * Particle->Velocity;
+			Particle->Location	+= bSkipUpdate ? FVector::ZeroVector : DeltaTime * (FVector)Particle->Velocity;
 			Particle->Rotation	+= bSkipUpdate ? 0.0f : DeltaTime * Particle->RotationRate;
 			Particle->OldLocation += PositionOffsetThisTick;
-			FVector Size = Particle->Size * Scale;
+			FVector Size = (FVector)Particle->Size * Scale;
 			if (bUpdateBox)
 			{
 				ParticleBoundingBox += Particle->Location;
 				ParticleBoundingBox += Particle->Location + NoiseMin;
 				ParticleBoundingBox += Particle->Location + NoiseMax;
-				ParticleBoundingBox += BeamData->SourcePoint;
-				ParticleBoundingBox += BeamData->SourcePoint + NoiseMin;
-				ParticleBoundingBox += BeamData->SourcePoint + NoiseMax;
-				ParticleBoundingBox += BeamData->TargetPoint;
-				ParticleBoundingBox += BeamData->TargetPoint + NoiseMin;
-				ParticleBoundingBox += BeamData->TargetPoint + NoiseMax;
+				ParticleBoundingBox += (FVector)BeamData->SourcePoint;
+				ParticleBoundingBox += (FVector)BeamData->SourcePoint + NoiseMin;
+				ParticleBoundingBox += (FVector)BeamData->SourcePoint + NoiseMax;
+				ParticleBoundingBox += (FVector)BeamData->TargetPoint;
+				ParticleBoundingBox += (FVector)BeamData->TargetPoint + NoiseMin;
+				ParticleBoundingBox += (FVector)BeamData->TargetPoint + NoiseMax;
 			}
 
 			// Do angular integrator, and wrap result to within +/- 2 PI
-			Particle->Rotation	 = FMath::Fmod(Particle->Rotation, 2.f*(float)PI);
-			MaxSizeScale		 = FMath::Max(MaxSizeScale, Size.GetAbsMax()); //@todo particles: this does a whole lot of compares that can be avoided using SSE/ Altivec.
+			Particle->Rotation	 = FMath::Fmod(Particle->Rotation, 2.f*(float)UE_PI);
+			MaxSizeScale		 = FMath::Max<float>(MaxSizeScale, Size.GetAbsMax()); //@todo particles: this does a whole lot of compares that can be avoided using SSE/ Altivec.
 		}
 		if (bUpdateBox)
 		{
@@ -762,19 +765,19 @@ void FParticleBeam2EmitterInstance::ForceUpdateBoundingBox()
 				NextNoisePoints, TaperValues, NoiseDistanceScale,
 				SourceModifier, TargetModifier);
 
-			FVector Size = Particle->Size * Scale;
+			FVector Size = (FVector)Particle->Size * Scale;
 
 			ParticleBoundingBox += Particle->Location;
 			ParticleBoundingBox += Particle->Location + NoiseMin;
 			ParticleBoundingBox += Particle->Location + NoiseMax;
-			ParticleBoundingBox += BeamData->SourcePoint;
-			ParticleBoundingBox += BeamData->SourcePoint + NoiseMin;
-			ParticleBoundingBox += BeamData->SourcePoint + NoiseMax;
-			ParticleBoundingBox += BeamData->TargetPoint;
-			ParticleBoundingBox += BeamData->TargetPoint + NoiseMin;
-			ParticleBoundingBox += BeamData->TargetPoint + NoiseMax;
+			ParticleBoundingBox += (FVector)BeamData->SourcePoint;
+			ParticleBoundingBox += (FVector)BeamData->SourcePoint + NoiseMin;
+			ParticleBoundingBox += (FVector)BeamData->SourcePoint + NoiseMax;
+			ParticleBoundingBox += (FVector)BeamData->TargetPoint;
+			ParticleBoundingBox += (FVector)BeamData->TargetPoint + NoiseMin;
+			ParticleBoundingBox += (FVector)BeamData->TargetPoint + NoiseMax;
 
-			MaxSizeScale = FMath::Max(MaxSizeScale, Size.GetAbsMax()); //@todo particles: this does a whole lot of compares that can be avoided using SSE/ Altivec.
+			MaxSizeScale = FMath::Max<FVector::FReal>(MaxSizeScale, Size.GetAbsMax()); //@todo particles: this does a whole lot of compares that can be avoided using SSE/ Altivec.
 		}
 
 		ParticleBoundingBox = ParticleBoundingBox.ExpandBy(MaxSizeScale);
@@ -827,7 +830,7 @@ float FParticleBeam2EmitterInstance::SpawnBeamParticles(float OldLeftover, float
 	}
 
 	// Account for burst time simulation
-	if (BurstTime > KINDA_SMALL_NUMBER)
+	if (BurstTime > UE_KINDA_SMALL_NUMBER)
 	{
 		NewLeftover -= BurstTime / Burst;
 		NewLeftover	= FMath::Clamp<float>(NewLeftover, 0, NewLeftover);
@@ -1404,7 +1407,7 @@ bool FParticleBeam2EmitterInstance::FillReplayData( FDynamicEmitterReplayDataBas
 			//					NewReplayData->NoiseRangeScale	= BeamModule_Noise->NoiseRangeScale.GetValue(Particle->RelativeTime, Component);
 			NewReplayData->NoiseRangeScale = BeamModule_Noise->NoiseRangeScale.GetValue(EmitterTime, Component);
 		}
-		NewReplayData->NoiseSpeed = BeamModule_Noise->NoiseSpeed.GetValue(EmitterTime);
+		NewReplayData->NoiseSpeed = (FVector3f)BeamModule_Noise->NoiseSpeed.GetValue(EmitterTime);
 		NewReplayData->NoiseLockTime = BeamModule_Noise->NoiseLockTime;
 		NewReplayData->NoiseLockRadius = BeamModule_Noise->NoiseLockRadius;
 		NewReplayData->bTargetNoise = BeamModule_Noise->bTargetNoise;

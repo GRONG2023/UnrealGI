@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
+// HEADER_UNIT_SKIP - Bad include. Some headers are in Chaos while this is in ChaosCore
+
 #include "Chaos/Core.h"
 #include "Chaos/Array.h"
 #include "Chaos/UniformGrid.h"
@@ -22,9 +24,67 @@ inline void TryBulkSerializeArrayNDBase(FArchive& Ar, TArray<float>& Array)
 	Array.BulkSerialize(Ar);
 }
 
-inline void TryBulkSerializeArrayNDBase(FArchive& Ar, TArray<FVec3>& Array)
+inline void TryBulkSerializeArrayNDBase(FArchive& Ar, TArray<TVec3<FRealSingle>>& Array)
 {
-	Array.BulkSerialize(Ar);
+	Array.BulkSerialize(Ar); 
+}
+
+inline float ConvertDoubleToFloat(double DoubleValue)
+{
+	return (float)DoubleValue; // LWC_TODO : Perf pessimization 
+}
+
+inline TVec3<float> ConvertDoubleToFloat(TVec3<double> DoubleValue)
+{
+	return TVec3<float>((float)DoubleValue.X, (float)DoubleValue.Y, (float)DoubleValue.Z); // LWC_TODO : Perf pessimization 
+}
+
+inline double ConvertFloatToDouble(float FloatValue)
+{
+	return (double)FloatValue;
+}
+
+inline TVec3<double> ConvertFloatToDouble(TVec3<float> FloatValue)
+{
+	return TVec3<double>((double)FloatValue.X, (double)FloatValue.Y, (double)FloatValue.Z); 
+}
+
+// LWC_TODO : Perf pessimization : this is sub-optimal but will do until we sort the serialization out
+template<typename DOUBLE_T, typename FLOAT_T>
+inline void TryBulkSerializeArrayNDBaseForDoubles(FArchive& Ar, TArray<DOUBLE_T>& DoubleTypedArray)
+{
+	TArray<FLOAT_T> FloatTypedArray;
+	if (Ar.IsSaving())
+	{
+		FloatTypedArray.SetNumUninitialized(DoubleTypedArray.Num());
+		for (int i = 0; i < DoubleTypedArray.Num(); ++i)
+		{
+			FloatTypedArray[i] = ConvertDoubleToFloat(DoubleTypedArray[i]);
+		}
+	}
+
+	TryBulkSerializeArrayNDBase(Ar, FloatTypedArray);
+
+	if (Ar.IsLoading())
+	{
+		DoubleTypedArray.SetNumUninitialized(FloatTypedArray.Num());
+		for (int i = 0; i < FloatTypedArray.Num(); ++i)
+		{
+			DoubleTypedArray[i] = ConvertFloatToDouble(FloatTypedArray[i]);
+		}
+	}
+}
+
+// LWC_TODO : Perf pessimization : this is sub-optimal but will do until we sort the serialization out
+inline void TryBulkSerializeArrayNDBase(FArchive& Ar, TArray<double>& Array)
+{
+	TryBulkSerializeArrayNDBaseForDoubles<double, float>(Ar, Array);
+}
+
+// LWC_TODO : Perf pessimization : this is sub-optimal but will do until we sort the serialization out
+inline void TryBulkSerializeArrayNDBase(FArchive& Ar, TArray<TVec3<FRealDouble>>& Array)
+{
+	TryBulkSerializeArrayNDBaseForDoubles<TVec3<FRealDouble>, TVec3<FRealSingle>>(Ar, Array);
 }
 
 template<class T_DERIVED, class T, int d>
@@ -39,6 +99,7 @@ class TArrayNDBase
 	FORCEINLINE TArrayNDBase(const TArrayNDBase<T_DERIVED, T, d>& Other) = delete;
 	FORCEINLINE TArrayNDBase(TArrayNDBase<T_DERIVED, T, d>&& Other)
 	    : MCounts(Other.MCounts), MArray(MoveTemp(Other.MArray)) {}
+#if COMPILE_WITHOUT_UNREAL_SUPPORT
 	FORCEINLINE TArrayNDBase(std::istream& Stream)
 	    : MCounts(Stream)
 	{
@@ -50,7 +111,7 @@ class TArrayNDBase
 		MCounts.Write(Stream);
 		Stream.write(reinterpret_cast<const char*>(MArray.GetData()), sizeof(T) * MArray.Num());
 	}
-
+#endif
 	void Serialize(FArchive& Ar)
 	{
 		Ar.UsingCustomVersion(FDestructionObjectVersion::GUID);
@@ -72,7 +133,13 @@ class TArrayNDBase
 		Ar << MArray;
 	}
 
-	FORCEINLINE TArrayNDBase<T_DERIVED, T, d>& operator=(const TArrayNDBase<T_DERIVED, T, d>& Other) = delete;
+	FORCEINLINE TArrayNDBase<T_DERIVED, T, d>& operator=(const TArrayNDBase<T_DERIVED, T, d>& Other)
+	{
+		MCounts = Other.MCounts;
+		MArray = Other.MArray;
+		return *this;
+	}
+
 	FORCEINLINE TArrayNDBase<T_DERIVED, T, d>& operator=(TArrayNDBase<T_DERIVED, T, d>&& Other)
 	{
 		MCounts = Other.MCounts;
@@ -99,6 +166,9 @@ class TArrayNDBase
 		MCounts = TVector<int32, d>(0);
 		MArray.Reset();
 	}
+
+	FORCEINLINE T* GetData() { return MArray.GetData(); }
+	FORCEINLINE const T* GetData() const { return MArray.GetData(); }
 
   protected:
 	TVector<int32, d> MCounts;
@@ -133,9 +203,15 @@ class TArrayND : public TArrayNDBase<TArrayND<T, d>, T, d>
 	FORCEINLINE TArrayND(const TArrayND<T, d>& Other) = delete;
 	FORCEINLINE TArrayND(TArrayND<T, d>&& Other)
 	    : Base(MoveTemp(Other)) {}
+#if COMPILE_WITHOUT_UNREAL_SUPPORT
 	FORCEINLINE TArrayND(std::istream& Stream)
 	    : Base(Stream) {}
-	FORCEINLINE TArrayND<T, d>& operator=(const TArrayND<T, d>& Other) = delete;
+#endif
+	FORCEINLINE TArrayND<T, d>& operator=(const TArrayND<T, d>& Other)
+	{
+		Base::operator=(Other);
+		return *this;
+	}
 	FORCEINLINE TArrayND<T, d>& operator=(TArrayND<T, d>&& Other)
 	{
 		Base::operator=(MoveTemp(Other));
@@ -167,24 +243,29 @@ class TArrayND<T, 3> : public TArrayNDBase<TArrayND<T, 3>, T, 3>
 #else
 	FORCEINLINE TArrayND() { MCounts = TVec3<int32>(0); }
 #endif
-	FORCEINLINE TArrayND(const TUniformGrid<float, 3>& grid)
+	template<typename U>
+	FORCEINLINE TArrayND(const TUniformGrid<U, 3>& Grid, bool NodeValues = false)
 	{
-		MCounts = grid.Counts();
-		MArray.SetNum(MCounts[0] * MCounts[1] * MCounts[2]);
+		SetCounts(Grid, NodeValues);
 	}
 	FORCEINLINE TArrayND(const TVec3<int32>& Counts)
 	{
-		MCounts = Counts;
-		MArray.SetNum(MCounts[0] * MCounts[1] * MCounts[2]);
+		SetCounts(Counts);
 	}
 	FORCEINLINE TArrayND(const TVec3<int32>& Counts, const TArray<T>& Array)
 	    : Base(Counts, Array) { check(Counts.Product() == Array.Num()); }
 	FORCEINLINE TArrayND(const TArrayND<T, 3>& Other) = delete;
 	FORCEINLINE TArrayND(TArrayND<T, 3>&& Other)
 	    : Base(MoveTemp(Other)) {}
+#if COMPILE_WITHOUT_UNREAL_SUPPORT
 	FORCEINLINE TArrayND(std::istream& Stream)
 	    : Base(Stream) {}
-	FORCEINLINE TArrayND<T, 3>& operator=(const TArrayND<T, 3>& Other) = delete;
+#endif
+	FORCEINLINE TArrayND<T, 3>& operator=(const TArrayND<T, 3>& Other)
+	{
+		Base::operator=(Other);
+		return *this;
+	}
 	FORCEINLINE TArrayND<T, 3>& operator=(TArrayND<T, 3>&& Other)
 	{
 		Base::operator=(MoveTemp(Other));
@@ -200,6 +281,20 @@ class TArrayND<T, 3> : public TArrayNDBase<TArrayND<T, 3>, T, 3>
 	{
 		return MArray[(x * MCounts[1] + y) * MCounts[2] + z];
 	}
+
+	FORCEINLINE void SetCounts(const TVector<int32, 3>& Counts)
+	{
+		MCounts = Counts;
+		MArray.SetNum(MCounts[0] * MCounts[1] * MCounts[2]);
+	}
+
+	template<typename U>
+	FORCEINLINE void SetCounts(const TUniformGrid<U, 3>& Grid, bool NodeValues = false)
+	{
+		MCounts = NodeValues ? Grid.NodeCounts() : Grid.Counts();
+		MArray.SetNum(MCounts[0] * MCounts[1] * MCounts[2]);
+	}
+	
 };
 
 #if COMPILE_WITHOUT_UNREAL_SUPPORT

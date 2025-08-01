@@ -14,11 +14,25 @@ public class SourceControlWindows : ModuleRules
 				"Engine", 
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
 				"SourceControl", 
+				"UncontrolledChangelists",
+				"UnsavedAssetsTracker",
 				"AssetTools",
-                "UnrealEd"			// We need this dependency here because we use PackageTools.
+				"ToolWidgets",
+				"EditorFramework",
+				"WorkspaceMenuStructure",
+				"UnrealEd",		// We need this dependency here because we use PackageTools.
 			}
 		);
+
+		if(Target.bBuildEditor == true)
+		{
+			PrivateDependencyModuleNames.AddRange(
+				new string[]
+				{
+					"ToolMenus"
+				}
+			);
+		}
 	}
 }

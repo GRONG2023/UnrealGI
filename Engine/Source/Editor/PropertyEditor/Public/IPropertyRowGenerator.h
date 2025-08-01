@@ -8,8 +8,8 @@
 class IDetailTreeNode;
 class FComplexPropertyNode;
 class FStructOnScope;
+class IStructureDataProvider;
 
-typedef TArray<TSharedPtr<FComplexPropertyNode>> FRootPropertyNodeList;
 
 DECLARE_DELEGATE_RetVal_OneParam(bool, FOnValidatePropertyRowGeneratorNodes, const FRootPropertyNodeList&)
 
@@ -57,6 +57,7 @@ public:
 	 * @param InStruct The structure used to generate rows from.
 	 */
 	virtual void SetStructure(const TSharedPtr<FStructOnScope>& InStruct) = 0;
+	virtual void SetStructure(const TSharedPtr<IStructureDataProvider>& InStruct) = 0;
 
 	/**
 	 * Get the list of objects that were used to generate detail tree nodes
@@ -106,10 +107,20 @@ public:
 	virtual void UnregisterInstancedCustomPropertyLayout(UStruct* Class) = 0;
 	virtual void UnregisterInstancedCustomPropertyTypeLayout(FName PropertyTypeName, TSharedPtr<IPropertyTypeIdentifier> Identifier = nullptr) = 0;
 
-	virtual TSharedPtr<class FAssetThumbnailPool> GetGeneratedThumbnailPool() = 0;
 	virtual FOnFinishedChangingProperties& OnFinishedChangingProperties() = 0;
 
 	/* Use this function to set a callback on FPropertyRowGenerator that will override the ValidatePropertyNodes function.
 	 * This is useful if your implementation doesn't need to validate nodes every tick or needs to perform some other form of validation. */
 	virtual void SetCustomValidatePropertyNodesFunction(FOnValidatePropertyRowGeneratorNodes InCustomValidatePropertyNodesFunction) = 0;
+
+	/* Use this function to set property paths to generate FPropertyNodes. This improves the performance for cases where UPropertyView is only showing a few properties of the object by not generating all other FPropertyNodes 
+	*  An example of a nested property path: RootPropertyName[0]->NestedPropertyName[0]->PropertyName
+	*/
+	virtual void SetPropertyGenerationAllowListPaths(const TSet<FString>& InPropertyGenerationAllowListPaths) = 0;
+
+	/* Invalidates internal cached state.  Common use of this API is to synchronize the viewed object with changes made by external code. */
+	virtual void InvalidateCachedState() = 0;
+
+	/** Apply filters to generated row tree nodes */
+	virtual void FilterNodes(const TArray<FString>& InFilterStrings) = 0;
 };

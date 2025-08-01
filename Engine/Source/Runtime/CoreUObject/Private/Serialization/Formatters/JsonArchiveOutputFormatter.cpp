@@ -9,6 +9,8 @@
 #include "UObject/SoftObjectPtr.h"
 #include "UObject/SoftObjectPath.h"
 #include "UObject/LazyObjectPtr.h"
+#include "UObject/ObjectPtr.h"
+#include <cinttypes>
 
 #if WITH_TEXT_ARCHIVE_SUPPORT
 
@@ -43,15 +45,9 @@ void FJsonArchiveOutputFormatter::EnterRecord()
 	TextStartPosStack.Push(Inner.Tell());
 }
 
-void FJsonArchiveOutputFormatter::EnterRecord_TextOnly(TArray<FString>& OutFieldNames)
-{
-	EnterRecord();
-	OutFieldNames.Reset();
-}
-
 void FJsonArchiveOutputFormatter::LeaveRecord()
 {
-	Newline.Pop(false);
+	Newline.Pop(EAllowShrinking::No);
 	if (TextStartPosStack.Pop() == Inner.Tell())
 	{
 		bNeedsNewline = false;
@@ -67,12 +63,6 @@ void FJsonArchiveOutputFormatter::EnterField(FArchiveFieldName Name)
 	WriteOptionalComma();
 	WriteOptionalNewline();
 	WriteFieldName(Name.Name);
-}
-
-void FJsonArchiveOutputFormatter::EnterField_TextOnly(FArchiveFieldName Name, EArchiveValueType& OutType)
-{
-	EnterField(Name);
-	OutType = EArchiveValueType::None;
 }
 
 void FJsonArchiveOutputFormatter::LeaveField()
@@ -105,12 +95,6 @@ void FJsonArchiveOutputFormatter::EnterArrayElement()
 	EnterStreamElement();
 }
 
-void FJsonArchiveOutputFormatter::EnterArrayElement_TextOnly(EArchiveValueType& OutType)
-{
-	EnterArrayElement();
-	OutType = EArchiveValueType::None;
-}
-
 void FJsonArchiveOutputFormatter::LeaveArrayElement()
 {
 	LeaveStreamElement();
@@ -126,15 +110,9 @@ void FJsonArchiveOutputFormatter::EnterStream()
 	TextStartPosStack.Push(Inner.Tell());
 }
 
-void FJsonArchiveOutputFormatter::EnterStream_TextOnly(int32& OutNumElements)
-{
-	EnterStream();
-	OutNumElements = 0;
-}
-
 void FJsonArchiveOutputFormatter::LeaveStream()
 {
-	Newline.Pop(false);
+	Newline.Pop(EAllowShrinking::No);
 	if (TextStartPosStack.Pop() == Inner.Tell())
 	{
 		bNeedsNewline = false;
@@ -149,12 +127,6 @@ void FJsonArchiveOutputFormatter::EnterStreamElement()
 {
 	WriteOptionalComma();
 	WriteOptionalNewline();
-}
-
-void FJsonArchiveOutputFormatter::EnterStreamElement_TextOnly(EArchiveValueType& OutType)
-{
-	EnterStreamElement();
-	OutType = EArchiveValueType::None;
 }
 
 void FJsonArchiveOutputFormatter::LeaveStreamElement()
@@ -176,12 +148,6 @@ void FJsonArchiveOutputFormatter::LeaveMap()
 void FJsonArchiveOutputFormatter::EnterMapElement(FString& Name)
 {
 	EnterField(FArchiveFieldName(*Name));
-}
-
-void FJsonArchiveOutputFormatter::EnterMapElement_TextOnly(FString& Name, EArchiveValueType& OutType)
-{
-	EnterMapElement(Name);
-	OutType = EArchiveValueType::None;
 }
 
 void FJsonArchiveOutputFormatter::LeaveMapElement()
@@ -283,11 +249,7 @@ void FJsonArchiveOutputFormatter::Serialize(int64& Value)
 
 void FJsonArchiveOutputFormatter::Serialize(float& Value)
 {
-	if((float)(int)Value == Value)
-	{
-		WriteValue(LexToString((int)Value));
-	}
-	else
+	if(FPlatformMath::IsFinite(Value))
 	{
 		FString String = FString::Printf(TEXT("%.17g"), Value);
 #if DO_GUARD_SLOW
@@ -297,15 +259,22 @@ void FJsonArchiveOutputFormatter::Serialize(float& Value)
 #endif
 		WriteValue(String);
 	}
+	else if(FPlatformMath::IsNaN(Value))
+	{
+		const uint32 ValueAsInt = BitCast<uint32>(Value);
+		const bool bIsNegative = !!(ValueAsInt & 0x80000000);
+		const uint32 Significand = ValueAsInt & 0x007fffff;
+		WriteValue(FString::Printf(TEXT("\"Number:%snan:0x%" PRIx32 "\""), bIsNegative ? TEXT("-") : TEXT("+"), Significand));
+	}
+	else
+	{
+		WriteValue(Value < 0.0f ? TEXT("\"Number:-inf\"") : TEXT("\"Number:+inf\""));
+	}
 }
 
 void FJsonArchiveOutputFormatter::Serialize(double& Value)
 {
-	if((double)(int)Value == Value)
-	{
-		WriteValue(LexToString((int)Value));
-	}
-	else
+	if(FPlatformMath::IsFinite(Value))
 	{
 		FString String = FString::Printf(TEXT("%.17g"), Value);
 #if DO_GUARD_SLOW
@@ -314,6 +283,17 @@ void FJsonArchiveOutputFormatter::Serialize(double& Value)
 		check(RoundTripped == Value);
 #endif
 		WriteValue(String);
+	}
+	else if(FPlatformMath::IsNaN(Value))
+	{
+		const uint64 ValueAsInt = BitCast<uint64>(Value);
+		const bool bIsNegative = !!(ValueAsInt & 0x8000000000000000);
+		const uint64 Significand = ValueAsInt & 0x000fffffffffffff;
+		WriteValue(FString::Printf(TEXT("\"Number:%snan:0x%" PRIx64 "\""), bIsNegative ? TEXT("-") : TEXT("+"), Significand));
+	}
+	else
+	{
+		WriteValue(Value < 0.0 ? TEXT("\"Number:-inf\"") : TEXT("\"Number:+inf\""));
 	}
 }
 
@@ -344,8 +324,8 @@ void FJsonArchiveOutputFormatter::Serialize(UObject*& Value)
 {
 	if (Value != nullptr && IsObjectAllowed(Value))
 	{
-		FString FullObjectName = Value->GetFullName(nullptr, EObjectFullNameFlags::IncludeClassPackage);
-		SerializeStringInternal(FString::Printf(TEXT("Object:%s"), *FullObjectName));
+		FPackageIndex ObjectIndex = ObjectIndicesMap->FindChecked(Value);
+		SerializeStringInternal(LexToString(ObjectIndex));
 	}
 	else
 	{
@@ -362,14 +342,8 @@ void FJsonArchiveOutputFormatter::Serialize(FText& Value)
 
 void FJsonArchiveOutputFormatter::Serialize(FWeakObjectPtr& Value)
 {
-	if (Value.IsValid() && IsObjectAllowed(Value.Get()))
-	{
-		SerializeStringInternal(FString::Printf(TEXT("Object:%s"), *Value.Get()->GetFullName(nullptr, EObjectFullNameFlags::IncludeClassPackage)));
-	}
-	else
-	{
-		WriteValue(TEXT("null"));
-	}
+	UObject* Ptr = Value.IsValid() ? Value.Get() : nullptr;
+	Serialize(Ptr);
 }
 
 void FJsonArchiveOutputFormatter::Serialize(FSoftObjectPtr& Value)
@@ -402,6 +376,12 @@ void FJsonArchiveOutputFormatter::Serialize(FLazyObjectPtr& Value)
 	}
 }
 
+void FJsonArchiveOutputFormatter::Serialize(FObjectPtr& Value)
+{
+	UObject* Object = Value.Get();
+	Serialize(Object);
+}
+
 void FJsonArchiveOutputFormatter::Serialize(TArray<uint8>& Data)
 {
 	Serialize(Data.GetData(), Data.Num());
@@ -415,7 +395,7 @@ void FJsonArchiveOutputFormatter::Serialize(void* Data, uint64 DataSize)
 	if(DataSize < MaxLineBytes)
 	{
 		// Encode the data on a single line. No need for hashing; intra-line merge conflicts are rare.
-		WriteValue(FString::Printf(TEXT("\"Base64:%s\""), *FBase64::Encode((const uint8*)Data, DataSize)));
+		WriteValue(FString::Printf(TEXT("\"Base64:%s\""), *FBase64::Encode((const uint8*)Data, static_cast<uint32>(DataSize))));
 	}
 	else
 	{
@@ -452,7 +432,7 @@ void FJsonArchiveOutputFormatter::Serialize(void* Data, uint64 DataSize)
 			Write("\t\"");
 
 			ANSICHAR LineData[MaxLineChars + 1];
-			uint64 NumLineChars = FBase64::Encode((const uint8*)Data + DataPos, FMath::Min<uint64>(DataSize - DataPos, MaxLineBytes), LineData);
+			uint64 NumLineChars = FBase64::Encode((const uint8*)Data + DataPos, FMath::Min<uint32>(IntCastChecked<uint32>(DataSize - DataPos), MaxLineBytes), LineData);
 			Inner.Serialize(LineData, NumLineChars);
 
 			Write("\"");
@@ -544,7 +524,7 @@ void FJsonArchiveOutputFormatter::WriteOptionalAttributedBlockClosing()
 {
 	if (NumAttributesStack.Top() != 0)
 	{
-		Newline.Pop(false);
+		Newline.Pop(EAllowShrinking::No);
 		WriteOptionalNewline();
 		Write("}");
 		bNeedsComma                  = true;
@@ -601,7 +581,7 @@ void FJsonArchiveOutputFormatter::SerializeStringInternal(const FString& String)
 
 bool FJsonArchiveOutputFormatter::IsObjectAllowed(UObject* InObject) const
 {
-	return ObjectIndicesMap == nullptr || ObjectIndicesMap->Contains(InObject);
+	return ObjectIndicesMap && ObjectIndicesMap->Contains(InObject);
 }
 
 #endif

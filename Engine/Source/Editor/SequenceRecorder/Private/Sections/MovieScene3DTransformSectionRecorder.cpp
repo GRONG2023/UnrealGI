@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Sections/MovieScene3DTransformSectionRecorder.h"
+#include "Animation/Skeleton.h"
 #include "Misc/ScopedSlowTask.h"
 #include "GameFramework/Character.h"
 #include "KeyParams.h"
@@ -11,6 +12,8 @@
 #include "SequenceRecorderUtils.h"
 #include "Algo/Transform.h"
 #include "Channels/MovieSceneChannelProxy.h"
+#include "Animation/AnimData/IAnimationDataModel.h"
+#include "Animation/AnimSequence.h"
 
 TSharedPtr<IMovieSceneSectionRecorder> FMovieScene3DTransformSectionRecorderFactory::CreateSectionRecorder(const FActorRecordingSettings& InActorRecordingSettings) const
 {
@@ -76,16 +79,16 @@ void FMovieScene3DTransformSectionRecorder::CreateSection(UObject* InObjectToRec
 		FVector EulerRotation = DefaultTransform.GetRotation().Rotator().Euler();
 		FVector Scale         = DefaultTransform.GetScale3D();
 
-		TArrayView<FMovieSceneFloatChannel*> FloatChannels = MovieSceneSection->GetChannelProxy().GetChannels<FMovieSceneFloatChannel>();
-		FloatChannels[0]->SetDefault(Translation.X);
-		FloatChannels[1]->SetDefault(Translation.Y);
-		FloatChannels[2]->SetDefault(Translation.Z);
-		FloatChannels[3]->SetDefault(EulerRotation.X);
-		FloatChannels[4]->SetDefault(EulerRotation.Y);
-		FloatChannels[5]->SetDefault(EulerRotation.Z);
-		FloatChannels[6]->SetDefault(Scale.X);
-		FloatChannels[7]->SetDefault(Scale.Y);
-		FloatChannels[8]->SetDefault(Scale.Z);
+		TArrayView<FMovieSceneDoubleChannel*> DoubleChannels = MovieSceneSection->GetChannelProxy().GetChannels<FMovieSceneDoubleChannel>();
+		DoubleChannels[0]->SetDefault(Translation.X);
+		DoubleChannels[1]->SetDefault(Translation.Y);
+		DoubleChannels[2]->SetDefault(Translation.Z);
+		DoubleChannels[3]->SetDefault(EulerRotation.X);
+		DoubleChannels[4]->SetDefault(EulerRotation.Y);
+		DoubleChannels[5]->SetDefault(EulerRotation.Z);
+		DoubleChannels[6]->SetDefault(Scale.X);
+		DoubleChannels[7]->SetDefault(Scale.Y);
+		DoubleChannels[8]->SetDefault(Scale.Z);
 
 		FFrameRate   TickResolution = MovieSceneSection->GetTypedOuter<UMovieScene>()->GetTickResolution();
 		FFrameNumber CurrentFrame    = (Time * TickResolution).FloorToFrame();
@@ -130,30 +133,38 @@ void FMovieScene3DTransformSectionRecorder::FinalizeSection(float CurrentTime)
 		USkeletalMeshComponent* SkeletalMeshComponent = AnimRecorder->GetSkeletalMeshComponent();
 		if (SkeletalMeshComponent)
 		{
-			USkeletalMesh* SkeletalMesh = SkeletalMeshComponent->MasterPoseComponent != nullptr ? SkeletalMeshComponent->MasterPoseComponent->SkeletalMesh : SkeletalMeshComponent->SkeletalMesh;
-			if (AnimSequence && SkeletalMesh)
+			USkinnedAsset* SkinnedAsset =
+				SkeletalMeshComponent->LeaderPoseComponent != nullptr ?
+				SkeletalMeshComponent->LeaderPoseComponent->GetSkinnedAsset() :
+				SkeletalMeshComponent->GetSkinnedAsset();
+			if (AnimSequence && SkinnedAsset)
 			{
 				// find the root bone
 				int32 RootIndex = INDEX_NONE;
 				USkeleton* AnimSkeleton = AnimSequence->GetSkeleton();
-				for (int32 TrackIndex = 0; TrackIndex < AnimSequence->GetRawAnimationData().Num(); ++TrackIndex)
+
+				TArray<FName> TrackNames;
+				AnimSequence->GetDataModelInterface()->GetBoneTrackNames(TrackNames);
+
+				FName RootBoneName = NAME_None;
+				for (const FName& TrackName : TrackNames)
 				{
-					// verify if this bone exists in skeleton
-					int32 BoneTreeIndex = AnimSequence->GetSkeletonIndexFromRawDataTrackIndex(TrackIndex);
-					if (BoneTreeIndex != INDEX_NONE)
+					// Verify if this bone exists in skeleton
+					const int32 SkeletonTreeIndex = AnimSkeleton->GetReferenceSkeleton().FindBoneIndex(TrackName);
+					if (SkeletonTreeIndex != INDEX_NONE)
 					{
-						int32 BoneIndex = AnimSkeleton->GetMeshBoneIndexFromSkeletonBoneIndex(SkeletalMesh, BoneTreeIndex);
-						int32 ParentIndex = SkeletalMesh->GetRefSkeleton().GetParentIndex(BoneIndex);
+						const int32 BoneIndex = AnimSkeleton->GetMeshBoneIndexFromSkeletonBoneIndex(SkinnedAsset, SkeletonTreeIndex);
+						const int32 ParentIndex = SkinnedAsset->GetRefSkeleton().GetParentIndex(BoneIndex);
 						if (ParentIndex == INDEX_NONE)
 						{
-							// found root
+							// We've found the root (root bones do not have a valid parent)
 							RootIndex = BoneIndex;
+							RootBoneName = TrackName;
 							break;
 						}
 					}
 				}
-
-				check(RootIndex != INDEX_NONE);
+				check(RootBoneName != NAME_None);
 
 				FFrameRate TickResolution = MovieSceneSection->GetTypedOuter<UMovieScene>()->GetTickResolution();
 				const FFrameNumber StartTime = (RecordingStartTime * TickResolution).FloorToFrame();
@@ -161,38 +172,9 @@ void FMovieScene3DTransformSectionRecorder::FinalizeSection(float CurrentTime)
 				// we may need to offset the transform here if the animation was not recorded on the root component
 				FTransform InvComponentTransform = AnimRecorder->GetComponentTransform().Inverse();
 
-				const FRawAnimSequenceTrack& RawTrack = AnimSequence->GetRawAnimationData()[RootIndex];
-				const int32 KeyCount = FMath::Max(FMath::Max(RawTrack.PosKeys.Num(), RawTrack.RotKeys.Num()), RawTrack.ScaleKeys.Num());
-				for (int32 KeyIndex = 0; KeyIndex < KeyCount; KeyIndex++)
+				for (int32 KeyIndex = 0; KeyIndex < AnimSequence->GetDataModelInterface()->GetNumberOfKeys(); KeyIndex++)
 				{
-					FTransform Transform;
-					if (RawTrack.PosKeys.IsValidIndex(KeyIndex))
-					{
-						Transform.SetTranslation(RawTrack.PosKeys[KeyIndex]);
-					}
-					else if (RawTrack.PosKeys.Num() > 0)
-					{
-						Transform.SetTranslation(RawTrack.PosKeys[0]);
-					}
-
-					if (RawTrack.RotKeys.IsValidIndex(KeyIndex))
-					{
-						Transform.SetRotation(RawTrack.RotKeys[KeyIndex]);
-					}
-					else if (RawTrack.RotKeys.Num() > 0)
-					{
-						Transform.SetRotation(RawTrack.RotKeys[0]);
-					}
-
-					if (RawTrack.ScaleKeys.IsValidIndex(KeyIndex))
-					{
-						Transform.SetScale3D(RawTrack.ScaleKeys[KeyIndex]);
-					}
-					else if (RawTrack.ScaleKeys.Num() > 0)
-					{
-						Transform.SetScale3D(RawTrack.ScaleKeys[0]);
-					}
-
+					const FTransform Transform = AnimSequence->GetDataModelInterface()->GetBoneTrackTransform(RootBoneName, FFrameNumber(KeyIndex));
 					FFrameNumber AnimationFrame = (AnimSequence->GetTimeAtFrame(KeyIndex) * TickResolution).FloorToFrame();
 					BufferedTransforms.Add(InvComponentTransform * Transform, StartTime + AnimationFrame);
 				}
@@ -224,51 +206,51 @@ void FMovieScene3DTransformSectionRecorder::FinalizeSection(float CurrentTime)
 	const ERichCurveInterpMode Interpolation = AnimRecorder.IsValid() ? RCIM_Linear : RCIM_Cubic;
 
 	// add buffered transforms
-	TArrayView<FMovieSceneFloatChannel*> FloatChannels = MovieSceneSection->GetChannelProxy().GetChannels<FMovieSceneFloatChannel>();
+	TArrayView<FMovieSceneDoubleChannel*> DoubleChannels = MovieSceneSection->GetChannelProxy().GetChannels<FMovieSceneDoubleChannel>();
 
-	auto Transformation = [Interpolation](float In)
+	auto Transformation = [Interpolation](double In)
 	{
-		FMovieSceneFloatValue NewValue(In);
+		FMovieSceneDoubleValue NewValue(In);
 		NewValue.InterpMode = Interpolation;
 		return NewValue;
 	};
-	TArray<FMovieSceneFloatValue> FloatValues;
+	TArray<FMovieSceneDoubleValue> DoubleValues;
 
-	FloatValues.Reset(BufferedTransforms.LocationX.Num());
-	Algo::Transform(BufferedTransforms.LocationX, FloatValues, Transformation);
-	FloatChannels[0]->Set(BufferedTransforms.Times, MoveTemp(FloatValues));
+	DoubleValues.Reset(BufferedTransforms.LocationX.Num());
+	Algo::Transform(BufferedTransforms.LocationX, DoubleValues, Transformation);
+	DoubleChannels[0]->Set(BufferedTransforms.Times, MoveTemp(DoubleValues));
 
-	FloatValues.Reset(BufferedTransforms.LocationY.Num());
-	Algo::Transform(BufferedTransforms.LocationY, FloatValues, Transformation);
-	FloatChannels[1]->Set(BufferedTransforms.Times, MoveTemp(FloatValues));
+	DoubleValues.Reset(BufferedTransforms.LocationY.Num());
+	Algo::Transform(BufferedTransforms.LocationY, DoubleValues, Transformation);
+	DoubleChannels[1]->Set(BufferedTransforms.Times, MoveTemp(DoubleValues));
 
-	FloatValues.Reset(BufferedTransforms.LocationZ.Num());
-	Algo::Transform(BufferedTransforms.LocationZ, FloatValues, Transformation);
-	FloatChannels[2]->Set(BufferedTransforms.Times, MoveTemp(FloatValues));
+	DoubleValues.Reset(BufferedTransforms.LocationZ.Num());
+	Algo::Transform(BufferedTransforms.LocationZ, DoubleValues, Transformation);
+	DoubleChannels[2]->Set(BufferedTransforms.Times, MoveTemp(DoubleValues));
 
-	FloatValues.Reset(BufferedTransforms.RotationX.Num());
-	Algo::Transform(BufferedTransforms.RotationX, FloatValues, Transformation);
-	FloatChannels[3]->Set(BufferedTransforms.Times, MoveTemp(FloatValues));
+	DoubleValues.Reset(BufferedTransforms.RotationX.Num());
+	Algo::Transform(BufferedTransforms.RotationX, DoubleValues, Transformation);
+	DoubleChannels[3]->Set(BufferedTransforms.Times, MoveTemp(DoubleValues));
 
-	FloatValues.Reset(BufferedTransforms.RotationY.Num());
-	Algo::Transform(BufferedTransforms.RotationY, FloatValues, Transformation);
-	FloatChannels[4]->Set(BufferedTransforms.Times, MoveTemp(FloatValues));
+	DoubleValues.Reset(BufferedTransforms.RotationY.Num());
+	Algo::Transform(BufferedTransforms.RotationY, DoubleValues, Transformation);
+	DoubleChannels[4]->Set(BufferedTransforms.Times, MoveTemp(DoubleValues));
 
-	FloatValues.Reset(BufferedTransforms.RotationZ.Num());
-	Algo::Transform(BufferedTransforms.RotationZ, FloatValues, Transformation);
-	FloatChannels[5]->Set(BufferedTransforms.Times, MoveTemp(FloatValues));
+	DoubleValues.Reset(BufferedTransforms.RotationZ.Num());
+	Algo::Transform(BufferedTransforms.RotationZ, DoubleValues, Transformation);
+	DoubleChannels[5]->Set(BufferedTransforms.Times, MoveTemp(DoubleValues));
 
-	FloatValues.Reset(BufferedTransforms.ScaleX.Num());
-	Algo::Transform(BufferedTransforms.ScaleX, FloatValues, Transformation);
-	FloatChannels[6]->Set(BufferedTransforms.Times, MoveTemp(FloatValues));
+	DoubleValues.Reset(BufferedTransforms.ScaleX.Num());
+	Algo::Transform(BufferedTransforms.ScaleX, DoubleValues, Transformation);
+	DoubleChannels[6]->Set(BufferedTransforms.Times, MoveTemp(DoubleValues));
 
-	FloatValues.Reset(BufferedTransforms.ScaleY.Num());
-	Algo::Transform(BufferedTransforms.ScaleY, FloatValues, Transformation);
-	FloatChannels[7]->Set(BufferedTransforms.Times, MoveTemp(FloatValues));
+	DoubleValues.Reset(BufferedTransforms.ScaleY.Num());
+	Algo::Transform(BufferedTransforms.ScaleY, DoubleValues, Transformation);
+	DoubleChannels[7]->Set(BufferedTransforms.Times, MoveTemp(DoubleValues));
 
-	FloatValues.Reset(BufferedTransforms.ScaleZ.Num());
-	Algo::Transform(BufferedTransforms.ScaleZ, FloatValues, Transformation);
-	FloatChannels[8]->Set(BufferedTransforms.Times, MoveTemp(FloatValues));
+	DoubleValues.Reset(BufferedTransforms.ScaleZ.Num());
+	Algo::Transform(BufferedTransforms.ScaleZ, DoubleValues, Transformation);
+	DoubleChannels[8]->Set(BufferedTransforms.Times, MoveTemp(DoubleValues));
 
 	FTransform FirstTransform = FTransform::Identity;
 	if (BufferedTransforms.Times.Num())
@@ -288,14 +270,14 @@ void FMovieScene3DTransformSectionRecorder::FinalizeSection(float CurrentTime)
 	{
 		FKeyDataOptimizationParams Params;
 
-		for (FMovieSceneFloatChannel* Channel : FloatChannels)
+		for (FMovieSceneDoubleChannel* Channel : DoubleChannels)
 		{
 			Channel->Optimize(Params);
 		}
 	}
 	else
 	{
-		for (FMovieSceneFloatChannel* Channel : FloatChannels)
+		for (FMovieSceneDoubleChannel* Channel : DoubleChannels)
 		{
 			Channel->AutoSetTangents();
 		}
@@ -306,14 +288,14 @@ void FMovieScene3DTransformSectionRecorder::FinalizeSection(float CurrentTime)
 	if(!bWasAttached)
 	{
 		bool bCanRemoveTrack = true;
-		for (FMovieSceneFloatChannel* Channel : MovieSceneSection->GetChannelProxy().GetChannels<FMovieSceneFloatChannel>())
+		for (FMovieSceneDoubleChannel* Channel : MovieSceneSection->GetChannelProxy().GetChannels<FMovieSceneDoubleChannel>())
 		{
 			if (Channel)
 			{
 				int32 NumKeys = Channel->GetTimes().Num();
 				if (NumKeys == 1)
 				{
-					*Channel = FMovieSceneFloatChannel();
+					*Channel = FMovieSceneDoubleChannel();
 				}
 				else if (NumKeys > 1)
 				{

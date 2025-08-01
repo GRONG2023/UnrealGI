@@ -4,6 +4,8 @@
 #include "Blueprint/UserWidget.h"
 #include "Components/ListView.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(IUserObjectListEntry)
+
 UUserObjectListEntry::UUserObjectListEntry(const FObjectInitializer& Initializer)
 	: Super(Initializer)
 {
@@ -11,11 +13,6 @@ UUserObjectListEntry::UUserObjectListEntry(const FObjectInitializer& Initializer
 
 void IUserObjectListEntry::NativeOnListItemObjectSet(UObject* ListItemObject)
 {
-PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	// Making sure the deprecated path still functions, remove this when the old method is deleted
-	SetListItemObjectInternal(ListItemObject);	
-PRAGMA_ENABLE_DEPRECATION_WARNINGS
-
 	Execute_OnListItemObjectSet(Cast<UObject>(this), ListItemObject);
 }
 
@@ -41,10 +38,11 @@ UObject* UUserObjectListEntryLibrary::GetListItemObject(TScriptInterface<IUserOb
 	if (UUserWidget* EntryWidget = Cast<UUserWidget>(UserObjectListEntry.GetObject()))
 	{
 		const UListView* OwningListView = Cast<UListView>(UUserListEntryLibrary::GetOwningListView(EntryWidget));
-		if (UObject* const* ListItem = OwningListView ? OwningListView->ItemFromEntryWidget(*EntryWidget) : nullptr)
+		if (const TObjectPtrWrapTypeOf<UObject*>* ListItem = OwningListView ? OwningListView->ItemFromEntryWidget(*EntryWidget) : nullptr)
 		{
 			return *ListItem;
 		}
 	}
 	return nullptr;
 }
+

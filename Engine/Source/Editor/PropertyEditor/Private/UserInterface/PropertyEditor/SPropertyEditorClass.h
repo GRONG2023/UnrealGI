@@ -10,7 +10,7 @@
 #include "Widgets/SWidget.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/Input/SComboButton.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Presentation/PropertyEditor/PropertyEditor.h"
 #include "UserInterface/PropertyEditor/PropertyEditorConstants.h"
 #include "PropertyCustomizationHelpers.h"
@@ -27,7 +27,7 @@ class SPropertyEditorClass : public SCompoundWidget
 {
 public:
 	SLATE_BEGIN_ARGS(SPropertyEditorClass)
-		: _Font(FEditorStyle::GetFontStyle(PropertyEditorConstants::PropertyFontStyle)) 
+		: _Font(FAppStyle::GetFontStyle(PropertyEditorConstants::PropertyFontStyle)) 
 		, _MetaClass(UObject::StaticClass())
 		, _RequiredInterface(nullptr)
 		, _AllowAbstract(false)
@@ -58,6 +58,8 @@ public:
 		SLATE_ARGUMENT(bool, ShowDisplayNames)
 		/** Delegate used to set the currently selected class (required if PropertyEditor == null) */
 		SLATE_EVENT(FOnSetClass, OnSetClass)
+		/** Custom class filter(s) to be applied to the class picker widget (may be empty) */
+		SLATE_ARGUMENT(TArray<TSharedRef<class IClassViewerFilter>>, ClassViewerFilters)
 	SLATE_END_ARGS()
 
 	static bool Supports(const TSharedRef< class FPropertyEditor >& InPropertyEditor);
@@ -93,6 +95,8 @@ private:
 	 * Gets the active display value as a string
 	 */
 	FText GetDisplayValueAsString() const;
+
+	bool CanEdit() const;
 
 private:
 	/** The property editor we were constructed for, or null if we're editing using the construction arguments */
@@ -139,5 +143,5 @@ private:
 	/** Delegate used to set the currently selected class (required if PropertyEditor == null) */
 	FOnSetClass OnSetClass;
 
-	void CreateClassFilter();
+	void CreateClassFilter(const TArray<TSharedRef<IClassViewerFilter>>& InClassFilters);
 };

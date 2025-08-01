@@ -1,13 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SkeletalMeshEditorMode.h"
+
 #include "PersonaModule.h"
 #include "SkeletalMeshEditor.h"
 #include "ISkeletonTree.h"
 #include "ISkeletonEditorModule.h"
 #include "IPersonaToolkit.h"
 #include "SControlRigMappingWindow.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
+#include "Engine/SkeletalMesh.h"
+#include "AnimAssetFindReplace.h"
+#include "PersonaTabs.h"
 
 #define LOCTEXT_NAMESPACE "SkeletalMeshEditorMode"
 
@@ -21,32 +25,30 @@ FSkeletalMeshEditorMode::FSkeletalMeshEditorMode(TSharedRef<FWorkflowCentricAppl
 	ISkeletonEditorModule& SkeletonEditorModule = FModuleManager::LoadModuleChecked<ISkeletonEditorModule>("SkeletonEditor");
 	TabFactories.RegisterFactory(SkeletonEditorModule.CreateSkeletonTreeTabFactory(InHostingApp, InSkeletonTree));
 
+	FOnObjectsSelected OnObjectsSelected = FOnObjectsSelected::CreateSP(&SkeletalMeshEditor.Get(), &FSkeletalMeshEditor::HandleObjectsSelected);
+
 	FPersonaModule& PersonaModule = FModuleManager::LoadModuleChecked<FPersonaModule>("Persona");
 	TabFactories.RegisterFactory(PersonaModule.CreateDetailsTabFactory(InHostingApp, FOnDetailsCreated::CreateSP(&SkeletalMeshEditor.Get(), &FSkeletalMeshEditor::HandleDetailsCreated)));
 
 	FPersonaViewportArgs ViewportArgs(SkeletalMeshEditor->GetPersonaToolkit()->GetPreviewScene());
 	ViewportArgs.ContextName = TEXT("SkeletalMeshEditor.Viewport");
+	ViewportArgs.OnViewportCreated = FOnViewportCreated::CreateSP(SkeletalMeshEditor, &FSkeletalMeshEditor::HandleViewportCreated);
 
 	PersonaModule.RegisterPersonaViewportTabFactories(TabFactories, InHostingApp, ViewportArgs);
 
 	TabFactories.RegisterFactory(PersonaModule.CreateAdvancedPreviewSceneTabFactory(InHostingApp, SkeletalMeshEditor->GetPersonaToolkit()->GetPreviewScene()));
 	TabFactories.RegisterFactory(PersonaModule.CreateAssetDetailsTabFactory(InHostingApp, FOnGetAsset::CreateSP(&SkeletalMeshEditor.Get(), &FSkeletalMeshEditor::HandleGetAsset), FOnDetailsCreated::CreateSP(&SkeletalMeshEditor.Get(), &FSkeletalMeshEditor::HandleMeshDetailsCreated)));
 	TabFactories.RegisterFactory(PersonaModule.CreateMorphTargetTabFactory(InHostingApp, SkeletalMeshEditor->GetPersonaToolkit()->GetPreviewScene(), SkeletalMeshEditor->OnPostUndo));
-
+	TabFactories.RegisterFactory(PersonaModule.CreateCurveMetadataEditorTabFactory(InHostingApp, SkeletalMeshEditor->HandleGetAsset(), SkeletalMeshEditor->GetPersonaToolkit()->GetPreviewScene(), OnObjectsSelected));
 	TabFactories.RegisterFactory(CreateMeshControllerMappingTabFactory(InHostingApp, Cast<USkeletalMesh> (SkeletalMeshEditor->HandleGetAsset()), SkeletalMeshEditor->OnPostUndo));
+	TabFactories.RegisterFactory(PersonaModule.CreateAnimAssetFindReplaceTabFactory(InHostingApp, FAnimAssetFindReplaceConfig()));
+	TabFactories.RegisterFactory(PersonaModule.CreatePersonaToolboxTabFactory(SkeletalMeshEditor));
 
-	TabLayout = FTabManager::NewLayout("Standalone_SkeletalMeshEditor_Layout_v3.2")
+	TabLayout = FTabManager::NewLayout("Standalone_SkeletalMeshEditor_Layout_v5")
 		->AddArea
 		(
 			FTabManager::NewPrimaryArea()
 			->SetOrientation(Orient_Vertical)
-			->Split
-			(
-				FTabManager::NewStack()
-				->SetSizeCoefficient(0.1f)
-				->SetHideTabWell(true)
-				->AddTab(InHostingApp->GetToolbarTabId(), ETabState::OpenedTab)
-			)
 			->Split
 			(
 				FTabManager::NewSplitter()
@@ -56,27 +58,55 @@ FSkeletalMeshEditorMode::FSkeletalMeshEditorMode(TSharedRef<FWorkflowCentricAppl
 				(
 					FTabManager::NewStack()
 					->SetSizeCoefficient(0.2f)
-					->SetHideTabWell(false)
-					->AddTab(SkeletalMeshEditorTabs::AssetDetailsTab, ETabState::OpenedTab)
-					->AddTab(SkeletalMeshEditorTabs::SkeletonTreeTab, ETabState::OpenedTab)
-					->SetForegroundTab(SkeletalMeshEditorTabs::AssetDetailsTab)
-				)
-				->Split
-				(
-					FTabManager::NewStack()
-					->SetSizeCoefficient(0.6f)
 					->SetHideTabWell(true)
-					->AddTab(SkeletalMeshEditorTabs::ViewportTab, ETabState::OpenedTab)
+					->AddTab(FPersonaTabs::ToolboxID, ETabState::OpenedTab)
+					->SetForegroundTab(FPersonaTabs::ToolboxID)
 				)
 				->Split
 				(
-					FTabManager::NewStack()
+					FTabManager::NewSplitter()
+					->SetSizeCoefficient(0.6f)
+					->SetOrientation(Orient_Vertical)
+					->Split
+					(	
+						FTabManager::NewStack()
+						->SetSizeCoefficient(0.65)
+						->SetHideTabWell(true)
+						->AddTab(SkeletalMeshEditorTabs::ViewportTab, ETabState::OpenedTab)
+					)
+					->Split
+					(
+						FTabManager::NewStack()
+						->SetSizeCoefficient(0.5f)
+						->SetHideTabWell(false)
+						->AddTab(SkeletalMeshEditorTabs::FindReplaceTab, ETabState::ClosedTab)
+					)
+				)
+				->Split
+				(
+					FTabManager::NewSplitter()
 					->SetSizeCoefficient(0.2f)
-					->SetHideTabWell(false)
-					->AddTab(SkeletalMeshEditorTabs::MorphTargetsTab, ETabState::OpenedTab)
-					->AddTab(SkeletalMeshEditorTabs::DetailsTab, ETabState::ClosedTab)
-					->AddTab(SkeletalMeshEditorTabs::AdvancedPreviewTab, ETabState::OpenedTab)
-					->SetForegroundTab(SkeletalMeshEditorTabs::MorphTargetsTab)
+					->SetOrientation(Orient_Vertical)
+					->Split
+					(
+						FTabManager::NewStack()
+						->SetSizeCoefficient(0.5f)
+						->SetHideTabWell(false)
+						->AddTab(SkeletalMeshEditorTabs::SkeletonTreeTab, ETabState::OpenedTab)
+						->AddTab(SkeletalMeshEditorTabs::MorphTargetsTab, ETabState::OpenedTab)
+						->AddTab(SkeletalMeshEditorTabs::CurveMetadataTab, ETabState::OpenedTab)
+						->SetForegroundTab(SkeletalMeshEditorTabs::SkeletonTreeTab)
+					)
+					->Split
+					(
+						FTabManager::NewStack()
+						->SetSizeCoefficient(0.5f)
+						->SetHideTabWell(false)
+						->AddTab(SkeletalMeshEditorTabs::AssetDetailsTab, ETabState::OpenedTab)
+						->AddTab(SkeletalMeshEditorTabs::DetailsTab, ETabState::OpenedTab)
+						->AddTab(SkeletalMeshEditorTabs::AdvancedPreviewTab, ETabState::OpenedTab)
+						->SetForegroundTab(SkeletalMeshEditorTabs::AssetDetailsTab)
+					)
 				)
 			)
 		);
@@ -127,7 +157,7 @@ FMeshControllerMappingTabSummoner::FMeshControllerMappingTabSummoner(TSharedPtr<
 	, OnPostUndo(InOnPostUndo)
 {
 	TabLabel = LOCTEXT("ControlRigMappingWindowTabTitle", "Control Rig");
-	TabIcon = FSlateIcon(FEditorStyle::GetStyleSetName(), "Persona.Tabs.ControlRigMappingWindow");
+	TabIcon = FSlateIcon(FAppStyle::GetAppStyleSetName(), "Persona.Tabs.ControlRigMappingWindow");
 
 	EnableTabPadding();
 	bIsSingleton = true;

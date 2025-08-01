@@ -1,5 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using EpicGames.BuildGraph;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -7,8 +8,12 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Xml;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using UnrealBuildBase;
 using UnrealBuildTool;
+using Microsoft.Extensions.Logging;
+
+using static AutomationTool.CommandUtils;
 
 namespace AutomationTool.Tasks
 {
@@ -70,7 +75,7 @@ namespace AutomationTool.Tasks
 	/// Task that tags build products and/or runtime dependencies by reading from *.target files.
 	/// </summary>
 	[TaskElement("TagReceipt", typeof(TagReceiptTaskParameters))]
-	class TagReceiptTask : CustomTask
+	class TagReceiptTask : BgTaskImpl
 	{
 		/// <summary>
 		/// Parameters to this task
@@ -111,19 +116,29 @@ namespace AutomationTool.Tasks
 		/// <param name="Job">Information about the current job</param>
 		/// <param name="BuildProducts">Set of build products produced by this node.</param>
 		/// <param name="TagNameToFileSet">Mapping from tag names to the set of files they include</param>
-		public override void Execute(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
+		public override async Task ExecuteAsync(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
 		{
 			// Output a warning if the project directory is specified
-			if(Parameters.ProjectDir != null)
+			if (Parameters.ProjectDir != null)
 			{
-				CommandUtils.LogWarning("The ProjectDir argument to the TagReceipt parameter is deprecated. This path is now determined automatically from the receipt.");
+				Logger.LogWarning("The ProjectDir argument to the TagReceipt parameter is deprecated. This path is now determined automatically from the receipt.");
 			}
 
 			// Set the Engine directory
-			DirectoryReference EngineDir = Parameters.EngineDir ?? CommandUtils.EngineDirectory;
+			DirectoryReference EngineDir = Parameters.EngineDir ?? Unreal.EngineDirectory;
 
 			// Resolve the input list
-			IEnumerable<FileReference> TargetFiles = ResolveFilespec(CommandUtils.RootDirectory, Parameters.Files, TagNameToFileSet);
+			IEnumerable<FileReference> TargetFiles = ResolveFilespec(Unreal.RootDirectory, Parameters.Files, TagNameToFileSet);
+
+			// Filter the files
+			HashSet<FileReference> Files = await ExecuteAsync(EngineDir, TargetFiles, Parameters.BuildProducts, BuildProductType, Parameters.RuntimeDependencies, StagedFileType);
+
+			// Apply the tag to all the matching files
+			FindOrAddTagSet(TagNameToFileSet, Parameters.With).UnionWith(Files);
+		}
+
+		public static Task<HashSet<FileReference>> ExecuteAsync(DirectoryReference EngineDir, IEnumerable<FileReference> TargetFiles, bool BuildProducts, BuildProductType? BuildProductType, bool RuntimeDependencies, StagedFileType? StagedFileType = null)
+		{
 			HashSet<FileReference> Files = new HashSet<FileReference>();
 
 			foreach (FileReference TargetFile in TargetFiles)
@@ -138,11 +153,11 @@ namespace AutomationTool.Tasks
 				TargetReceipt Receipt;
 				if (!TargetReceipt.TryRead(TargetFile, EngineDir, out Receipt))
 				{
-					CommandUtils.LogWarning("Unable to load file using TagReceipt task ({0})", TargetFile.FullName);
+					Logger.LogWarning("Unable to load file using TagReceipt task ({Arg0})", TargetFile.FullName);
 					continue;
 				}
 
-				if (Parameters.BuildProducts)
+				if (BuildProducts)
 				{
 					foreach (BuildProduct BuildProduct in Receipt.BuildProducts)
 					{
@@ -158,7 +173,7 @@ namespace AutomationTool.Tasks
 					}
 				}
 
-				if (Parameters.RuntimeDependencies)
+				if (RuntimeDependencies)
 				{
 					foreach (RuntimeDependency RuntimeDependency in Receipt.RuntimeDependencies)
 					{
@@ -172,7 +187,7 @@ namespace AutomationTool.Tasks
 							continue;
 						}
 
-						// Check which files exist, and warn about any that don't. Ignore debug files, as they are frequently excluded for size (eg. UE4 on GitHub). This matches logic during staging.
+						// Check which files exist, and warn about any that don't. Ignore debug files, as they are frequently excluded for size (eg. UE on GitHub). This matches logic during staging.
 						FileReference DependencyPath = RuntimeDependency.Path;
 						if (FileReference.Exists(DependencyPath))
 						{
@@ -180,14 +195,13 @@ namespace AutomationTool.Tasks
 						}
 						else if(RuntimeDependency.Type != UnrealBuildTool.StagedFileType.DebugNonUFS)
 						{
-							CommandUtils.LogWarning("File listed as RuntimeDependency in {0} does not exist ({1})", TargetFile.FullName, DependencyPath.FullName);
+							Logger.LogWarning("File listed as RuntimeDependency in {Arg0} does not exist ({Arg1})", TargetFile.FullName, DependencyPath.FullName);
 						}
 					}
 				}
 			}
 
-			// Apply the tag to all the matching files
-			FindOrAddTagSet(TagNameToFileSet, Parameters.With).UnionWith(Files);
+			return Task.FromResult(Files);
 		}
 
 		/// <summary>
@@ -214,6 +228,21 @@ namespace AutomationTool.Tasks
 		public override IEnumerable<string> FindProducedTagNames()
 		{
 			return FindTagNamesFromList(Parameters.With);
+		}
+	}
+
+	/// <summary>
+	/// Extension methods
+	/// </summary>
+	public static class TaskExtensions
+	{
+		/// <summary>
+		/// Task that tags build products and/or runtime dependencies by reading from *.target files.
+		/// </summary>
+		public static async Task<FileSet> TagReceiptsAsync(this FileSet Files, DirectoryReference EngineDir = null, bool BuildProducts = false, BuildProductType? BuildProductType = null, bool RuntimeDependencies = false, StagedFileType? StagedFileType = null)
+		{
+			HashSet<FileReference> Result = await TagReceiptTask.ExecuteAsync(EngineDir ?? Unreal.EngineDirectory, Files, BuildProducts, BuildProductType, RuntimeDependencies, StagedFileType);
+			return FileSet.FromFiles(Unreal.RootDirectory, Result);
 		}
 	}
 }

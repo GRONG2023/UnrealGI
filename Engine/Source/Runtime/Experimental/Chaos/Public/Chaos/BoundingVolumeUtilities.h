@@ -30,16 +30,29 @@ inline FVec3 ComputeBoundsThickness(FVec3 Vel, FReal Dt, FReal MinBoundsThicknes
 
 inline FVec3 ComputeBoundsThickness(const TPBDRigidParticles<FReal, 3>& InParticles, FReal Dt, int32 BodyIndex, FReal MinBoundsThickness, FReal BoundsVelocityInflation)
 {
-	// See comments in ComputeBoundsThickness<THandle> below
-	FReal MaxBoundsThickness = TNumericLimits<FReal>::Max();
 	const bool bIsBounded = InParticles.HasBounds(BodyIndex);
-	const bool bIsCCD = InParticles.CCDEnabled(BodyIndex);
-	if (bIsBounded && !bIsCCD)
+	const bool bIsCCD = InParticles.ControlFlags(BodyIndex).GetCCDEnabled();
+
+	if (!bIsCCD && (BoundsVelocityInflation == FReal(0)))
 	{
-		MaxBoundsThickness = Chaos_Bounds_MaxInflationScale * InParticles.LocalBounds(BodyIndex).Extents().GetMax();
+		return FVec3(MinBoundsThickness);
 	}
 
-	return ComputeBoundsThickness(InParticles.V(BodyIndex), Dt, MinBoundsThickness, MaxBoundsThickness, BoundsVelocityInflation);
+	// See comments in ComputeBoundsThickness<THandle> below
+	FReal MaxBoundsThickness = TNumericLimits<FReal>::Max();
+	if (bIsBounded)
+	{
+		if (bIsCCD)
+		{
+			BoundsVelocityInflation = FMath::Max(FReal(1), BoundsVelocityInflation);
+		}
+		else
+		{
+			MaxBoundsThickness = Chaos_Bounds_MaxInflationScale * InParticles.LocalBounds(BodyIndex).Extents().GetMax();
+		}
+	}
+
+	return ComputeBoundsThickness(InParticles.GetV(BodyIndex), Dt, MinBoundsThickness, MaxBoundsThickness, BoundsVelocityInflation);
 }
 
 template <typename THandle>
@@ -47,16 +60,28 @@ FVec3 ComputeBoundsThickness(const THandle& ParticleHandle, FReal Dt, FReal MinB
 {
 	const typename THandle::FDynamicParticleHandleType* RigidParticle = ParticleHandle.CastToRigidParticle();
 	const typename THandle::FKinematicParticleHandleType* KinematicParticle = ParticleHandle.CastToKinematicParticle();
+	const bool bIsBounded = ParticleHandle.HasBounds();
+	const bool bIsCCD = (RigidParticle != nullptr) && RigidParticle->CCDEnabled();
+
+	if (!bIsCCD && (BoundsVelocityInflation == FReal(0)))
+	{
+		return FVec3(MinBoundsThickness);
+	}
 
 	// Limit the bounds expansion based on the size of the object. This prevents objects that are moved a large
 	// distance without resetting physics from having excessive bounds. Objects that move more than their size per
 	// tick without CCD enabled will have simulation issues anyway, so expanding bounds beyond this is unnecessary.
 	FReal MaxBoundsThickness = TNumericLimits<FReal>::Max();
-	const bool bIsBounded = ParticleHandle.HasBounds();
-	const bool bIsCCD = (RigidParticle != nullptr) && RigidParticle->CCDEnabled();
-	if (bIsBounded && !bIsCCD)
+	if (bIsBounded)
 	{
-		MaxBoundsThickness = Chaos_Bounds_MaxInflationScale * ParticleHandle.LocalBounds().Extents().GetMax();
+		if (bIsCCD)
+		{
+			BoundsVelocityInflation = FMath::Max(FReal(1), BoundsVelocityInflation);
+		}
+		else
+		{
+			MaxBoundsThickness = Chaos_Bounds_MaxInflationScale * ParticleHandle.LocalBounds().Extents().GetMax();
+		}
 	}
 
 	FVec3 Vel(0);
@@ -83,15 +108,15 @@ bool HasBoundingBox(const TParticles<T, d>& Objects, const int32 i)
 template<class T, int d>
 bool HasBoundingBox(const TGeometryParticles<T, d>& Objects, const int32 i)
 {
-	return Objects.Geometry(i)->HasBoundingBox();
+	return Objects.GetGeometry(i)->HasBoundingBox();
 }
 
 template<class T, int d>
 bool HasBoundingBox(const TPBDRigidParticles<T, d>& Objects, const int32 i)
 {
-	if (Objects.Geometry(i))
+	if (Objects.GetGeometry(i))
 	{
-		return Objects.Geometry(i)->HasBoundingBox();
+		return Objects.GetGeometry(i)->HasBoundingBox();
 	}
 	return Objects.CollisionParticles(i) != nullptr && Objects.CollisionParticles(i)->Size() > 0;
 }
@@ -142,35 +167,35 @@ template<class T, int d>
 TAABB<T, d> ComputeWorldSpaceBoundingBox(const TParticles<T, d>& Objects, const int32 i, bool bUseVelocity = false, T Dt = 0)
 {
 	ensure(!bUseVelocity);
-	return TAABB<T, d>(Objects.X(i), Objects.X(i));
+	return TAABB<T, d>(Objects.GetX(i), Objects.GetX(i));
 }
 
 template<class T, int d>
 TAABB<T, d> ComputeWorldSpaceBoundingBox(const TGeometryParticles<T, d>& Objects, const int32 i, bool bUseVelocity = false, T Dt = 0)
 {
 	ensure(!bUseVelocity);
-	TRigidTransform<T, d> LocalToWorld(Objects.X(i), Objects.R(i));
-	const auto& LocalBoundingBox = Objects.Geometry(i)->BoundingBox();
+	TRigidTransform<T, d> LocalToWorld(Objects.GetX(i), Objects.GetR(i));
+	const auto& LocalBoundingBox = Objects.GetGeometry(i)->BoundingBox();
 	return LocalBoundingBox.TransformedAABB(LocalToWorld);
 }
 
 template<class T, int d>
 TAABB<T, d> ComputeWorldSpaceBoundingBox(const TPBDRigidParticles<T, d>& Objects, const int32 i, bool bUseVelocity = false, T Dt = 0)
 {
-	TRigidTransform<T, d> LocalToWorld(Objects.P(i), Objects.Q(i));
+	TRigidTransform<T, d> LocalToWorld(Objects.GetP(i), Objects.GetQ(i));
 	TAABB<T, d> WorldSpaceBox;
-	if (Objects.Geometry(i))
+	if (Objects.GetGeometry(i))
 	{
-		const auto& LocalBoundingBox = Objects.Geometry(i)->BoundingBox();
+		const auto& LocalBoundingBox = Objects.GetGeometry(i)->BoundingBox();
 		WorldSpaceBox = LocalBoundingBox.TransformedAABB(LocalToWorld);
 	}
 	else
 	{
 		check(Objects.CollisionParticles(i) && Objects.CollisionParticles(i)->Size());
-		TAABB<T, d> LocalBoundingBox(Objects.CollisionParticles(i)->X(0), Objects.CollisionParticles(i)->X(0));
+		TAABB<T, d> LocalBoundingBox(Objects.CollisionParticles(i)->GetX(0), Objects.CollisionParticles(i)->GetX(0));
 		for (uint32 j = 1; j < Objects.CollisionParticles(i)->Size(); ++j)
 		{
-			LocalBoundingBox.GrowToInclude(Objects.CollisionParticles(i)->X(j));
+			LocalBoundingBox.GrowToInclude(Objects.CollisionParticles(i)->GetX(j));
 		}
 		WorldSpaceBox = LocalBoundingBox.TransformedAABB(LocalToWorld);
 	}
@@ -356,7 +381,7 @@ struct CParticleView
 
 //todo: how do we protect ourselves and make it const?
 template<typename ParticleView, typename T, int d>
-typename TEnableIf<TModels<CParticleView, ParticleView>::Value>::Type ComputeAllWorldSpaceBoundingBoxes(const ParticleView& Particles, const TArray<bool>& RequiresBounds, const bool bUseVelocity, const T Dt, TArray<TAABB<T, d>>& WorldSpaceBoxes)
+typename TEnableIf<TModels_V<CParticleView, ParticleView>>::Type ComputeAllWorldSpaceBoundingBoxes(const ParticleView& Particles, const TArray<bool>& RequiresBounds, const bool bUseVelocity, const T Dt, TArray<TAABB<T, d>>& WorldSpaceBoxes)
 {
 	WorldSpaceBoxes.AddUninitialized(Particles.Num());
 	ParticlesParallelFor(Particles, [&RequiresBounds, &WorldSpaceBoxes, bUseVelocity, Dt](const auto& Particle, int32 Index)
@@ -376,7 +401,7 @@ typename TEnableIf<TModels<CParticleView, ParticleView>::Value>::Type ComputeAll
 }
 
 template<typename ParticleView, typename T, int d>
-typename TEnableIf<!TModels<CParticleView, ParticleView>::Value>::Type ComputeAllWorldSpaceBoundingBoxes(const ParticleView& Particles, const TArray<bool>& RequiresBounds, const bool bUseVelocity, const T Dt, TArray<TAABB<T, d>>& WorldSpaceBoxes)
+typename TEnableIf<!TModels_V<CParticleView, ParticleView>>::Type ComputeAllWorldSpaceBoundingBoxes(const ParticleView& Particles, const TArray<bool>& RequiresBounds, const bool bUseVelocity, const T Dt, TArray<TAABB<T, d>>& WorldSpaceBoxes)
 {
 	WorldSpaceBoxes.AddUninitialized(Particles.Num());
 	ParticlesParallelFor(Particles, [&RequiresBounds, &WorldSpaceBoxes, bUseVelocity, Dt](const auto& Particle, int32 Index)

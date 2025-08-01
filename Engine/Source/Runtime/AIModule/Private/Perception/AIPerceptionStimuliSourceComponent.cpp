@@ -4,6 +4,8 @@
 #include "Perception/AIPerceptionSystem.h"
 #include "VisualLogger/VisualLogger.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AIPerceptionStimuliSourceComponent)
+
 
 UAIPerceptionStimuliSourceComponent::UAIPerceptionStimuliSourceComponent(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -149,7 +151,7 @@ void UAIPerceptionStimuliSourceComponent::UnregisterFromSense(TSubclassOf<UAISen
 		if (PerceptionSystem)
 		{
 			PerceptionSystem->UnregisterSource(*OwnerActor, SenseClass);
-			RegisterAsSourceForSenses.RemoveSingleSwap(SenseClass, /*bAllowShrinking=*/false);
+			RegisterAsSourceForSenses.RemoveSingleSwap(SenseClass, EAllowShrinking::No);
 			bSuccessfullyRegistered = RegisterAsSourceForSenses.Num() > 0;
 		}
 	}
@@ -191,3 +193,4 @@ void UAIPerceptionStimuliSourceComponent::PostEditChangeProperty(FPropertyChange
 	}
 }
 #endif // WITH_EDITOR
+

@@ -11,6 +11,7 @@
 #include "SimpleConstructionScript.generated.h"
 
 class USCS_Node;
+class FStaticMeshComponentBulkReregisterContext;
 
 UCLASS(MinimalAPI)
 class USimpleConstructionScript : public UObject
@@ -42,13 +43,13 @@ class USimpleConstructionScript : public UObject
 	 * @param RootRelativeRotationCache Optional rotation cache to use when applying the transform to the root component.
 	 * @param bIsDefaultTransform	Indicates whether or not the given transform is a "default" transform, in which case it can be overridden by template defaults.
 	 */
-	void ExecuteScriptOnActor(AActor* Actor, const TInlineComponentArray<USceneComponent*>& NativeSceneComponents, const FTransform& RootTransform, const FRotationConversionCache* RootRelativeRotationCache, bool bIsDefaultTransform);
+	void ExecuteScriptOnActor(AActor* Actor, const TInlineComponentArray<USceneComponent*>& NativeSceneComponents, const FTransform& RootTransform, const FRotationConversionCache* RootRelativeRotationCache, bool bIsDefaultTransform, ESpawnActorScaleMethod TransformScaleMethod = ESpawnActorScaleMethod::OverrideRootScale);
 
 	/** Create the map from names to SCS_Nodes to improve FindSCSNode performance during construction script execution */
-	void CreateNameToSCSNodeMap();
+	ENGINE_API void CreateNameToSCSNodeMap();
 
 	/** Remove the map from names to SCS_Nodes */
-	void RemoveNameToSCSNodeMap();
+	ENGINE_API void RemoveNameToSCSNodeMap();
 
 #if WITH_EDITOR
 	/** Return the Blueprint associated with this SCS instance */
@@ -60,12 +61,6 @@ class USimpleConstructionScript : public UObject
 	 * @param OutSCSNode             If not-null, the SCSNode for the scene root component will be returned in this variable
 	 */
 	ENGINE_API USceneComponent* GetSceneRootComponentTemplate(bool bShouldUseDefaultRoot = false, USCS_Node** OutSCSNode = nullptr) const;
-
-	UE_DEPRECATED(4.25, "Use version that specifies whether the default scene root should be used")
-	ENGINE_API USceneComponent* GetSceneRootComponentTemplate(USCS_Node** OutSCSNode) const
-	{
-		return GetSceneRootComponentTemplate(false, OutSCSNode);
-	}
 
 	/** Saves the current state of SimpleConstructionScript and its nodes to the transaction buffer. */
 	ENGINE_API void SaveToTransactionBuffer();
@@ -81,23 +76,16 @@ class USimpleConstructionScript : public UObject
 	/** Return all nodes in tree as a flat list */
 	ENGINE_API const TArray<USCS_Node*>& GetAllNodes() const;
 #else
-	ENGINE_API const TArray<USCS_Node*>& GetAllNodes() const { return AllNodes; }
+	const TArray<USCS_Node*>& GetAllNodes() const { return AllNodes; }
 #endif	
 
-	/** Return immutable references to nodes in tree as a flat list */
-	UE_DEPRECATED(4.27, "GetAllNodesConst is being removed as it provides no unique functionality that GetAllNodes cannot be used for.")
-	ENGINE_API TArray<const USCS_Node*> GetAllNodesConst() const
-	{
-		return TArray<const USCS_Node*>(GetAllNodes());
-	}
-
 	/** Provides read-only access to the root node set */
-	const ENGINE_API TArray<USCS_Node*>& GetRootNodes() const { return RootNodes; }
+	const TArray<USCS_Node*>& GetRootNodes() const { return RootNodes; }
 
 	/** Provides read-only access to the default scene root node */
-	const ENGINE_API class USCS_Node* GetDefaultSceneRootNode() const { return DefaultSceneRootNode; }
+	const class USCS_Node* GetDefaultSceneRootNode() const { return DefaultSceneRootNode; }
 
-	ENGINE_API class USCS_Node* GetDefaultSceneRootNode() { return DefaultSceneRootNode; }
+	class USCS_Node* GetDefaultSceneRootNode() { return DefaultSceneRootNode; }
 
 	/** Adds this node to the root set */
 	ENGINE_API void AddNode(USCS_Node* Node);
@@ -126,30 +114,32 @@ class USimpleConstructionScript : public UObject
 
 #if WITH_EDITOR
 	/** Returns Valid if this object has data validation rules set up for it and the data for this object is valid. Returns Invalid if it does not pass the rules. Returns NotValidated if no rules are set for this object. */
-	virtual EDataValidationResult IsDataValid(TArray<FText>& ValidationErrors) override;
+	virtual EDataValidationResult IsDataValid(class FDataValidationContext& Context) const override;
 #endif // WITH_EDITOR
+
+	FStaticMeshComponentBulkReregisterContext* GetReregisterContext() const { return ReregisterContext; }
 
 private:
 	/** Root nodes of the construction script */
 	UPROPERTY()
-	TArray<class USCS_Node*> RootNodes;
+	TArray<TObjectPtr<class USCS_Node>> RootNodes;
 
 	/** All nodes that exist in the hierarchy of this SimpleConstructionScript */
 	UPROPERTY()
-	TArray<class USCS_Node*> AllNodes;
+	TArray<TObjectPtr<class USCS_Node>> AllNodes;
 
 	/** Default scene root node; used when no other nodes are available to use as the root */
 	UPROPERTY()
-	class USCS_Node* DefaultSceneRootNode;
+	TObjectPtr<class USCS_Node> DefaultSceneRootNode;
 
 #if WITH_EDITORONLY_DATA
 	/** (DEPRECATED) Root node of the construction script */
 	UPROPERTY()
-	class USCS_Node* RootNode_DEPRECATED;
+	TObjectPtr<class USCS_Node> RootNode_DEPRECATED;
 
 	/** (DEPRECATED) Actor Component based nodes are stored here.  They cannot be in the tree hierarchy */
 	UPROPERTY()
-	TArray<USCS_Node*> ActorComponentNodes_DEPRECATED;
+	TArray<TObjectPtr<USCS_Node>> ActorComponentNodes_DEPRECATED;
 #endif
 
 	/** Helper function to find an appropriate child node index that can be promoted to the parent's level */
@@ -195,19 +185,19 @@ public:
 	ENGINE_API void EndEditorComponentConstruction();
 
 	/** Find out whether or not we're constructing components in the SCS editor */
-	ENGINE_API bool IsConstructingEditorComponents() const
+	bool IsConstructingEditorComponents() const
 	{
 		return bIsConstructingEditorComponents;
 	}
 
 	/** Called by the SCS editor to set the actor instance for component editing */
-	ENGINE_API void SetComponentEditorActorInstance(class AActor* InActor)
+	void SetComponentEditorActorInstance(class AActor* InActor)
 	{
 		EditorActorInstancePtr = InActor;
 	}
 
 	/** Gets the SCS editor actor instance that's being used for component editing */
-	ENGINE_API class AActor* GetComponentEditorActorInstance() const
+	class AActor* GetComponentEditorActorInstance() const
 	{
 		return EditorActorInstancePtr.Get();
 	}
@@ -220,8 +210,15 @@ private:
 	bool bIsConstructingEditorComponents;
 #endif
 
+	/** Reference count to allow nesting of Create/RemoveNameToSCSNodeMap calls */
+	int32 NameToSCSNodeMapRefCount;
+
 	/** Quick lookup from name to SCS Node when executing the script */
 	TMap<FName, USCS_Node*> NameToSCSNodeMap;
+
+	/** Reregister context, which allows bulk handling of render commands */
+	FStaticMeshComponentBulkReregisterContext* ReregisterContext;
+	friend FStaticMeshComponentBulkReregisterContext;
 
 	friend struct FSCSAllNodesHelper;
 };

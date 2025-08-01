@@ -10,6 +10,7 @@
 #include "Editor.h"
 #include "SnappingUtils.h"
 #include "CanvasTypes.h"
+#include "Settings/EditorStyleSettings.h"
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //
@@ -36,7 +37,8 @@ FVector2D FDragTool_Measure::GetSnappedPixelPos(FVector2D PixelPos)
 	FSceneView* View = ViewportClient->CalcSceneView(&ViewFamily);
 
 	// Put the mouse pos in world space
-	FVector WorldPos = View->ScreenToWorld(View->PixelToScreen(PixelPos.X, PixelPos.Y, 0.5f));;
+	FVector2f PixelPosFloat{ PixelPos };
+	FVector WorldPos = View->ScreenToWorld(View->PixelToScreen(PixelPosFloat.X, PixelPosFloat.Y, 0.5f));;
 
 	// Snap the world position
 	const float GridSize = GEditor->GetGridSize();
@@ -72,18 +74,20 @@ void FDragTool_Measure::AddDelta(const FVector& InDelta)
 void FDragTool_Measure::Render(const FSceneView* View, FCanvas* Canvas)
 {
 	const float OrthoUnitsPerPixel = ViewportClient->GetOrthoUnitsPerPixel(ViewportClient->Viewport);
-	const float Length = FMath::RoundToFloat((PixelEnd - PixelStart).Size() * OrthoUnitsPerPixel * ViewportClient->GetDPIScale());
+	const float Length = FMath::RoundToFloat(FVector2f{ PixelEnd - PixelStart }.Size() * OrthoUnitsPerPixel * ViewportClient->GetDPIScale());
 
 	if (View != nullptr && Canvas != nullptr && Length >= 1.f)
 	{
+		const FLinearColor ToolColor = GetDefault<UEditorStyleSettings>()->ViewportToolOverlayColor;
 		FCanvasLineItem LineItem( PixelStart, PixelEnd );
+		LineItem.SetColor( ToolColor );
 		Canvas->DrawItem( LineItem );
 
 		const FVector2D PixelMid = FVector2D(PixelStart + ((PixelEnd - PixelStart) / 2));
 
 		// Calculate number of decimal places to display, based on the current viewport zoom
 		float Divisor = 1.0f;
-		int DecimalPlaces = 0;
+		int32 DecimalPlaces = 0;
 		const float OrderOfMagnitude = FMath::LogX(10.0f, OrthoUnitsPerPixel);
 
 		switch (GetDefault<ULevelEditorViewportSettings>()->MeasuringToolUnits)
@@ -109,7 +113,7 @@ void FDragTool_Measure::Render(const FSceneView* View, FCanvas* Canvas)
 		const FText LengthStr = FText::AsNumber( Length / Divisor, &Options );
 
 
-		FCanvasTextItem TextItem( FVector2D( FMath::FloorToFloat(PixelMid.X), FMath::FloorToFloat(PixelMid.Y) ), LengthStr, GEngine->GetSmallFont(), FLinearColor::White );
+		FCanvasTextItem TextItem( FVector2D( FMath::FloorToFloat(PixelMid.X), FMath::FloorToFloat(PixelMid.Y) ), LengthStr, GEngine->GetSmallFont(), ToolColor );
 		TextItem.bCentreX = true;
 		Canvas->DrawItem( TextItem );
 	}

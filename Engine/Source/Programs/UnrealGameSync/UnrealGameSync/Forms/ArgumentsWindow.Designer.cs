@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
 namespace UnrealGameSync
 {
@@ -135,7 +135,6 @@ namespace UnrealGameSync
 			this.PromptBeforeLaunchCheckBox.TabIndex = 8;
 			this.PromptBeforeLaunchCheckBox.Text = "Always show this dialog before launching the editor";
 			this.PromptBeforeLaunchCheckBox.UseVisualStyleBackColor = true;
-			this.PromptBeforeLaunchCheckBox.CheckedChanged += new System.EventHandler(this.checkBox1_CheckedChanged);
 			// 
 			// ArgumentsWindow
 			// 
@@ -150,7 +149,7 @@ namespace UnrealGameSync
 			this.Controls.Add(this.ArgumentsList);
 			this.Controls.Add(this.CancelBtn);
 			this.Controls.Add(this.OkButton);
-			this.Font = new System.Drawing.Font("Segoe UI", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+			this.FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedDialog;
 			this.Icon = ((System.Drawing.Icon)(resources.GetObject("$this.Icon")));
 			this.Name = "ArgumentsWindow";
 			this.ShowInTaskbar = false;

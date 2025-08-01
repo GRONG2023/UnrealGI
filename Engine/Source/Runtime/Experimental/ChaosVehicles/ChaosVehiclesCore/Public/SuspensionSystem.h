@@ -2,11 +2,14 @@
 
 #pragma once
 
+#include "Math/Transform.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector.h"
 #include "VehicleSystemTemplate.h"
 #include "VehicleUtility.h"
 
 #if VEHICLE_DEBUGGING_ENABLED
-PRAGMA_DISABLE_OPTIMIZATION
+UE_DISABLE_OPTIMIZATION
 #endif
 
 /**
@@ -42,6 +45,18 @@ namespace Chaos
 		{
 			MaxLength = FMath::Abs(SuspensionMaxRaise) + FMath::Abs(SuspensionMaxDrop);
 			SuspensionSmoothing = FMath::Clamp(SuspensionSmoothing, 0, NUM_SUS_AVERAGING);
+		}
+
+		void SetSuspensionMaxRaise(float InSuspensionMaxRaise)
+		{
+			SuspensionMaxRaise = InSuspensionMaxRaise;
+			MaxLength = FMath::Abs(SuspensionMaxRaise) + FMath::Abs(SuspensionMaxDrop);
+		}
+
+		void SetSuspensionMaxDrop(float InSuspensionMaxDrop)
+		{
+			SuspensionMaxDrop = InSuspensionMaxDrop;
+			MaxLength = FMath::Abs(SuspensionMaxRaise) + FMath::Abs(SuspensionMaxDrop);
 		}
 
 		FVector SuspensionAxis;		// local axis, direction of suspension force raycast traces
@@ -163,40 +178,7 @@ namespace Chaos
 
 // Outputs
 
-		float GetSpringLength()
-		{
-			if (Setup().SuspensionSmoothing)
-			{
-				// Trying smoothing the suspension movement out - looks Sooo much better when wheel traveling over pile of bricks
-				// The digital up and down of the wheels is slowed/smoothed out
-				float NewValue = SpringDisplacement - Setup().MaxLength;
-
-				if (AveragingNum < Setup().SuspensionSmoothing)
-				{
-					AveragingNum++;
-				}
-
-				AveragingLength[AveragingCount++] = NewValue;
-
-				if (AveragingCount >= Setup().SuspensionSmoothing)
-				{
-					AveragingCount = 0;
-				}
-
-				float Total = 0.0f;
-				for (int i = 0; i < AveragingNum; i++)
-				{
-					Total += AveragingLength[i];
-				}
-				float Average = Total / AveragingNum;
-
-				return Average;
-			}
-			else
-			{
-				return  (SpringDisplacement - Setup().MaxLength);
-			}
-		}
+		float GetSpringLength();
 
 		float GetSuspensionForce() const
 		{
@@ -221,15 +203,19 @@ namespace Chaos
 
 // Simulation
 
-		void Simulate(float DeltaTime)
-		{
-			float Damping = (DisplacementInput < LastDisplacement) ? Setup().CompressionDamping : Setup().ReboundDamping;
+		void Simulate(float DeltaTime);
 
-			const float StiffnessForce = SpringDisplacement * Setup().SpringRate;
-			const float DampingForce = LocalVelocity.Z * Damping;
-			SuspensionForce = StiffnessForce - DampingForce;
-			LastDisplacement = DisplacementInput;
-		}
+		int32 GetAveragingCount() const {return AveragingCount;}
+		int32 GetAveragingNum() const { return AveragingNum; }
+		float GetLastSpringLength() const { return LastSpringLength; }
+		float GetLastDisplacement() const { return LastDisplacement; }
+		float GetAveragingLength(const int32 LengthIndex) const { return AveragingLength[LengthIndex]; }
+
+		void SetAveragingCount(const int32 InAveragingCount) {AveragingCount = InAveragingCount;}
+		void SetAveragingNum(const int32 InAveragingNum) { AveragingNum = InAveragingNum; }
+		void SetLastSpringLength(const float InLastSpringLength) { LastSpringLength = InLastSpringLength; }
+		void SetLastDisplacement(const float InLastDisplacement) { LastDisplacement = InLastDisplacement; }
+		void SetAveragingLength(const int32 LengthIndex, const float InAveragingLength) { AveragingLength[LengthIndex] = InAveragingLength; }
 
 	protected:
 
@@ -251,5 +237,5 @@ namespace Chaos
 } // namespace Chaos
 
 #if VEHICLE_DEBUGGING_ENABLED
-PRAGMA_ENABLE_OPTIMIZATION
+UE_ENABLE_OPTIMIZATION
 #endif

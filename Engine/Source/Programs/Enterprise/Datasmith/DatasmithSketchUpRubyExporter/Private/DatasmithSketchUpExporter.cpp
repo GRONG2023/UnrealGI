@@ -11,6 +11,7 @@
 #include "DatasmithSketchUpString.h"
 #include "DatasmithSketchUpSummary.h"
 
+
 #include "DatasmithSketchUpExportContext.h"
 
 #include "DatasmithDirectLink.h"
@@ -19,6 +20,8 @@
 
 #include "IDatasmithExporterUIModule.h"
 #include "IDirectLinkUI.h"
+
+#include "DatasmithExportOptions.h"
 
 #include "DatasmithSketchUpSDKBegins.h"
 #include <SketchUpAPI/sketchup.h>
@@ -37,6 +40,16 @@
 #pragma warning(disable: 4005)
 // disable(SU2021): 'reinterpret_cast': unsafe conversion from 'ruby::backward::cxxanyargs::void_type (__cdecl *)' to 'rb_gvar_setter_t (__cdecl *)'	
 #pragma warning(disable: 4191)
+// disable(SU2019 & SU2020): 'register' is no longer a supported storage class	
+#pragma warning(disable: 5033)
+// disable(SU2024): '_Header_cstdbool': warning STL4004: <ccomplex>, <cstdalign>, <cstdbool>, and <ctgmath> are deprecated in C++17. You can define _SILENCE_CXX17_C_HEADER_DEPRECATION_WARNING or _SILENCE_ALL_CXX17_DEPRECATION_WARNINGS to suppress this warning.
+#pragma warning(disable: 4996)
+// disable(SU2024): Implicit conversion from 'VALUE' to bool. Possible information loss
+#pragma warning(disable: 4800)
+// disable(SU2024): Dereferencing NULL pointer
+#pragma warning(disable: 6011)
+
+
 #undef DEPRECATED
 #include <ruby.h>
 #pragma warning(pop)
@@ -50,7 +63,7 @@
 #include "Misc/Paths.h"
 
 #include "HAL/FileManager.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "DatasmithSceneXmlWriter.h"
 
 #include "DatasmithSceneFactory.h"
@@ -145,9 +158,6 @@ public:
 
 	void PreExport()
 	{
-		// Create a Datasmith scene exporter.
-		SceneExporterRef->Reset();
-
 		// Start measuring the time taken to export the scene.
 		SceneExporterRef->PreExport();
 	}
@@ -180,7 +190,7 @@ public:
 
 			for (const FRawInfo::FStreamInfo& StreamInfo : RawInfo.StreamsInfo)
 			{
-				if (!StreamInfo.bIsActive)
+				if (StreamInfo.ConnectionState != EStreamConnectionState::Active)
 				{
 					continue;
 				}
@@ -310,9 +320,9 @@ public:
 		return true;
 	}
 
-	void Update()
+	bool Update(bool bModifiedHint)
 	{
-		Context.Update();
+		return Context.Update(bModifiedHint);
 	}
 
 	void SendUpdate()
@@ -370,11 +380,15 @@ public:
 			return true;
 		}
 
-		// Try Material
-		if (Context.Materials.RemoveMaterial(EntityId))
+		if (Context.Images.RemoveImage(ParentEntityId, EntityId))
 		{
 			return true;
 		}
+
+		// Try Material
+		// Doesn't seem like material removal event ever comes through properly
+		// MaterialsObserver::onMaterialRemove simply has deleted material entity(meaning there's not way to retrieve correct reference/id for it) 
+		ensure(!Context.Materials.RegularMaterials.RemoveMaterial(EntityId));
 
 		return false;
 	}
@@ -400,7 +414,12 @@ public:
 			}
 		}
 
-		if (Context.Materials.InvalidateMaterial(EntityId))
+		if (Context.Materials.RegularMaterials.InvalidateMaterial(EntityId))
+		{
+			return true;
+		}
+
+		if (Context.Images.InvalidateImage(EntityId))
 		{
 			return true;
 		}
@@ -482,6 +501,16 @@ public:
 
 			break;
 		}
+		case SURefType_Image:
+		{
+			DatasmithSketchUp::FDefinition* DefinitionPtr = Context.GetDefinition(EntityParent);
+			if (ensure(DefinitionPtr)) // Parent definition expected to already exist when new entity being added
+			{
+				DefinitionPtr->AddImage(Context, Context.Images.AddImage(*DefinitionPtr, SUImageFromEntity(Entity)));
+			}
+
+			break;
+		}
 		case SURefType_Face:
 		{
 			Context.GetDefinition(EntityParent)->InvalidateDefinitionGeometry();
@@ -489,7 +518,6 @@ public:
 		}
 		case SURefType_Material:
 		{
-			Context.Materials.CreateMaterial(SUMaterialFromEntity(Entity));
 			break;
 		}
 		default:
@@ -502,7 +530,7 @@ public:
 	
 	bool OnMaterialAdded(DatasmithSketchUp::FEntityIDType EntityId)
 	{
-		Context.Materials.CreateMaterial(EntityId);
+		// Not handling material additon here - materials are created when needed by geometry/components
 		return true;
 	}
 
@@ -511,12 +539,26 @@ public:
 		DatasmithSketchUp::FEntityIDType LayerId = DatasmithSketchUpUtils::GetEntityID(Entity);
 		Context.ComponentInstances.LayerModified(LayerId);
 		Context.EntitiesObjects.LayerModified(LayerId);
+		Context.Layers.UpdateLayer(SULayerFromEntity(Entity));
+		Context.Materials.LayerMaterials.UpdateLayer(SULayerFromEntity(Entity));
+		Context.Images.LayerModified(LayerId);
+
 		return true;
 	}
 
 	bool OnStyleModified()
 	{
-		return Context.Materials.InvalidateDefaultMaterial();
+		return Context.Materials.RegularMaterials.InvalidateDefaultMaterial();
+	}
+
+	bool OnColorByLayerModified()
+	{
+		return Context.InvalidateColorByLayer();
+	}
+
+	bool SetActiveScene(const DatasmithSketchUp::FEntityIDType& EntityID)
+	{
+		return Context.Scenes.SetActiveScene(EntityID);
 	}
 };
 
@@ -615,15 +657,29 @@ VALUE DatasmithSketchUpDirectLinkExporter_send_update(VALUE self)
 	return Qtrue;
 }
 
-VALUE DatasmithSketchUpDirectLinkExporter_update(VALUE self)
+VALUE DatasmithSketchUpDirectLinkExporter_set_active_scene(VALUE self, VALUE ruby_entity_id)
+{
+	// Converting args
+	FDatasmithSketchUpDirectLinkExporter* Ptr;
+	Data_Get_Struct(self, FDatasmithSketchUpDirectLinkExporter, Ptr);
+
+	Check_Type(ruby_entity_id, T_FIXNUM);
+	int32 EntityId = FIX2LONG(ruby_entity_id);
+	// Done converting args
+
+	return Ptr->SetActiveScene(DatasmithSketchUp::FEntityIDType(EntityId)) ? Qtrue : Qfalse;
+}
+
+VALUE DatasmithSketchUpDirectLinkExporter_update(VALUE self, VALUE modified_hint)
 {
 	// Converting args
 	FDatasmithSketchUpDirectLinkExporter* ptr;
 	Data_Get_Struct(self, FDatasmithSketchUpDirectLinkExporter, ptr);
+
+	bool bModifiedHint = RTEST(modified_hint);
 	// Done converting args
 
-	ptr->Update();
-	return Qtrue;
+	return ptr->Update(bModifiedHint) ? Qtrue : Qfalse;
 }
 
 VALUE DatasmithSketchUpDirectLinkExporter_export_current_datasmith_scene(VALUE self)
@@ -634,6 +690,7 @@ VALUE DatasmithSketchUpDirectLinkExporter_export_current_datasmith_scene(VALUE s
 	// Done converting args
 
 	ptr->ExportCurrentDatasmithScene();
+
 	return Qtrue;
 }
 
@@ -729,8 +786,6 @@ VALUE DatasmithSketchUpDirectLinkExporter_on_entity_modified_by_id(VALUE self, V
 	int32 EntityId = FIX2LONG(ruby_entity_id);
 	// Done converting args
 
-	;
-
 	return Ptr->OnEntityModified(DatasmithSketchUp::FEntityIDType(EntityId)) ? Qtrue : Qfalse;
 }
 
@@ -808,9 +863,25 @@ VALUE DatasmithSketchUpDirectLinkExporter_on_style_changed(VALUE self)
 	return Qtrue;
 }
 
+VALUE DatasmithSketchUpDirectLinkExporter_on_color_by_layer_changed(VALUE self)
+{
+	// Converting args
+	FDatasmithSketchUpDirectLinkExporter* Ptr;
+	Data_Get_Struct(self, FDatasmithSketchUpDirectLinkExporter, Ptr);
+	// Done converting args
+
+	Ptr->OnColorByLayerModified();
+
+	return Qtrue;
+}
+
 VALUE on_load(VALUE self, VALUE enable_ui, VALUE engine_path) {
 	// Converting args
 	Check_Type(engine_path, T_STRING);
+
+	// We always write textures during export and write them directly where they need to be
+	// This options prevents extra copying of texture files (and copying a file was causing empty file on Mac)
+	FDatasmithExportOptions::PathTexturesMode = EDSResizedTexturesPath::OriginalFolder;
 
 	bool bEnableUI = RTEST(enable_ui);
 	FString EnginePathUnreal = RubyStringToUnreal(engine_path);
@@ -890,12 +961,15 @@ extern "C" DLLEXPORT void Init_DatasmithSketchUp()
 	rb_define_method(DatasmithSketchUpDirectLinkExporterCRubyClass, "on_entity_removed", ToRuby(DatasmithSketchUpDirectLinkExporter_on_entity_removed), 2);
 
 	rb_define_method(DatasmithSketchUpDirectLinkExporterCRubyClass, "on_style_changed", ToRuby(DatasmithSketchUpDirectLinkExporter_on_style_changed), 0);
+	rb_define_method(DatasmithSketchUpDirectLinkExporterCRubyClass, "on_color_by_layer_changed", ToRuby(DatasmithSketchUpDirectLinkExporter_on_color_by_layer_changed), 0);
 
-	rb_define_method(DatasmithSketchUpDirectLinkExporterCRubyClass, "update", ToRuby(DatasmithSketchUpDirectLinkExporter_update), 0);
+	rb_define_method(DatasmithSketchUpDirectLinkExporterCRubyClass, "update", ToRuby(DatasmithSketchUpDirectLinkExporter_update), 1);
 	rb_define_method(DatasmithSketchUpDirectLinkExporterCRubyClass, "send_update", ToRuby(DatasmithSketchUpDirectLinkExporter_send_update), 0);
 	rb_define_method(DatasmithSketchUpDirectLinkExporterCRubyClass, "export_current_datasmith_scene", ToRuby(DatasmithSketchUpDirectLinkExporter_export_current_datasmith_scene), 0);
 
 	rb_define_method(DatasmithSketchUpDirectLinkExporterCRubyClass, "get_connection_status", ToRuby(DatasmithSketchUpDirectLinkExporter_get_connection_status), 0);
+
+	rb_define_method(DatasmithSketchUpDirectLinkExporterCRubyClass, "set_active_scene", ToRuby(DatasmithSketchUpDirectLinkExporter_set_active_scene), 1);
 
 }
 

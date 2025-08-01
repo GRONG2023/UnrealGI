@@ -10,7 +10,6 @@ MONOLITHIC_HEADER_BOILERPLATE()
 
 #include "Misc/Timespan.h"
 #include "SlateBasics.h"
-#include "EditorStyle.h"
 
 #include "EditorComponents.h"
 #include "EditorReimportHandler.h"
@@ -21,7 +20,6 @@ MONOLITHIC_HEADER_BOILERPLATE()
 // @todo Classes.h
 #include "ActorFactories/ActorFactory.h"
 #include "ActorFactories/ActorFactoryAmbientSound.h"
-#include "ActorFactories/ActorFactoryAtmosphericFog.h"
 #include "ActorFactories/ActorFactoryBlueprint.h"
 #include "ActorFactories/ActorFactoryBoxReflectionCapture.h"
 #include "ActorFactories/ActorFactoryBoxVolume.h"
@@ -35,7 +33,6 @@ MONOLITHIC_HEADER_BOILERPLATE()
 #include "ActorFactories/ActorFactoryEmptyActor.h"
 #include "ActorFactories/ActorFactoryPawn.h"
 #include "ActorFactories/ActorFactoryExponentialHeightFog.h"
-#include "ActorFactories/ActorFactoryMatineeActor.h"
 #include "ActorFactories/ActorFactoryNote.h"
 #include "ActorFactories/ActorFactoryPhysicsAsset.h"
 #include "ActorFactories/ActorFactoryPlaneReflectionCapture.h"
@@ -57,7 +54,6 @@ MONOLITHIC_HEADER_BOILERPLATE()
 #include "ActorFactories/ActorFactoryTriggerSphere.h"
 #include "ActorFactories/ActorFactoryVectorFieldVolume.h"
 #include "Exporters/AnimSequenceExporterFBX.h"
-#include "Commandlets/AudioTestCommandlet.h"
 #include "Preferences/CascadeOptions.h"
 #include "Settings/ClassViewerSettings.h"
 #include "Commandlets/CompressAnimationsCommandlet.h"
@@ -77,7 +73,6 @@ MONOLITHIC_HEADER_BOILERPLATE()
 #include "MaterialEditor/DEditorVectorParameterValue.h"
 #include "Commandlets/DerivedDataCacheCommandlet.h"
 #include "Commandlets/DiffAssetsCommandlet.h"
-#include "Commandlets/DiffPackagesCommandlet.h"
 #include "Commandlets/DiffFilesCommandlet.h"
 #include "Commandlets/DumpBlueprintsInfoCommandlet.h"
 #include "Commandlets/DumpHiddenCategoriesCommandlet.h"
@@ -132,7 +127,6 @@ MONOLITHIC_HEADER_BOILERPLATE()
 #include "Factories/BlueprintFunctionLibraryFactory.h"
 #include "Factories/BlueprintMacroFactory.h"
 #include "Factories/BlueprintInterfaceFactory.h"
-#include "Factories/CameraAnimFactory.h"
 #include "Factories/EnumFactory.h"
 #include "Factories/FbxFactory.h"
 #include "Factories/FbxSceneImportFactory.h"
@@ -146,7 +140,6 @@ MONOLITHIC_HEADER_BOILERPLATE()
 #include "Factories/HapticFeedbackEffectCurveFactory.h"
 #include "Factories/HapticFeedbackEffectBufferFactory.h"
 #include "Factories/HapticFeedbackEffectSoundWaveFactory.h"
-#include "Factories/InterpDataFactoryNew.h"
 #include "Factories/LevelFactory.h"
 #include "Factories/MaterialFactoryNew.h"
 #include "Factories/MaterialFunctionFactoryNew.h"
@@ -162,6 +155,7 @@ MONOLITHIC_HEADER_BOILERPLATE()
 #include "Factories/SkeletonFactory.h"
 #include "Factories/SlateBrushAssetFactory.h"
 #include "Factories/SlateWidgetStyleAssetFactory.h"
+#include "Factories/SpecularProfileFactory.h"
 #include "Factories/StructureFactory.h"
 #include "Factories/SubsurfaceProfileFactory.h"
 #include "Factories/Texture2dFactoryNew.h"
@@ -216,6 +210,7 @@ MONOLITHIC_HEADER_BOILERPLATE()
 #include "MaterialGraph/MaterialGraphNode_Base.h"
 #include "MaterialGraph/MaterialGraphNode.h"
 #include "MaterialGraph/MaterialGraphNode_Root.h"
+#include "MaterialGraph/MaterialGraphNode_Composite.h"
 #include "MaterialGraph/MaterialGraphSchema.h"
 #include "Exporters/ModelExporterT3D.h"
 #include "Exporters/ObjectExporterT3D.h"
@@ -273,6 +268,8 @@ MONOLITHIC_HEADER_BOILERPLATE()
 #include "ThumbnailRendering/FontThumbnailRenderer.h"
 #include "ThumbnailRendering/ParticleSystemThumbnailRenderer.h"
 #include "ThumbnailRendering/SubsurfaceProfileRenderer.h"
+#include "ThumbnailRendering/SpecularProfileRenderer.h"
+#include "ThumbnailRendering/NeuralProfileRenderer.h"
 #include "Factories/TextureCubeThumbnailRenderer.h"
 #include "Factories/Texture2dArrayThumbnailRenderer.h"
 #include "Editor/TransBuffer.h"
@@ -287,7 +284,7 @@ MONOLITHIC_HEADER_BOILERPLATE()
 #include "Commandlets/EditorCommandlets.h"
 #include "EditorUndoClient.h"
 #include "EditorModeTools.h"
-#include "UnrealWidget.h"
+#include "UnrealWidgetFwd.h"
 #include "Editor.h"
 
 #include "EditorViewportClient.h"
@@ -300,14 +297,10 @@ MONOLITHIC_HEADER_BOILERPLATE()
 
 #include "MRUList.h"
 
-
-//#include "../Private/GeomFitUtils.h"
-
 #include "UnrealEdMisc.h"
 #include "EditorDirectories.h"
 #include "Utils.h"
 #include "FileHelpers.h"
-#include "EditorModeInterpolation.h"
 #include "PhysicsManipulationMode.h"
 #include "PhysicsAssetUtils.h"
 

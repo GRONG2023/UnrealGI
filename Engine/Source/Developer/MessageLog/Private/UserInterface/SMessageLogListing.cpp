@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "UserInterface/SMessageLogListing.h"
+#include "MessageFilter.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
@@ -10,10 +11,10 @@
 #include "Widgets/Views/SListView.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/Input/SCheckBox.h"
-#include "EditorStyleSet.h"
 #include "UserInterface/SMessageLogMessageListRow.h"
 #include "Framework/Commands/GenericCommands.h"
 #include "HAL/PlatformApplicationMisc.h"
+#include "Styling/StyleColors.h"
 
 
 #define LOCTEXT_NAMESPACE "Developer.MessageLog"
@@ -44,46 +45,42 @@ void SMessageLogListing::Construct( const FArguments& InArgs, const TSharedRef< 
 	ChildSlot
 	[
 		SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+		.BorderImage(FAppStyle::Get().GetBrush("Brushes.Recessed"))
+		.Padding(15.0f)
+		[
+			SAssignNew(VerticalBox, SVerticalBox)
+			+ SVerticalBox::Slot()
+			.FillHeight(1.0f)
+			.Padding(0.f)
 			[
-				SAssignNew(VerticalBox, SVerticalBox)
-
-				+ SVerticalBox::Slot()
-					.FillHeight(1.0f)
-					.Padding(2.0f)
+				SNew(SHorizontalBox)
+				+SHorizontalBox::Slot()
+				.FillWidth(1)
+				[
+					SNew(SScrollBox)
+					.Orientation(EOrientation::Orient_Horizontal)
+					+ SScrollBox::Slot()
 					[
-						SNew(SBorder)
-							.BorderImage(FEditorStyle::GetBrush("MessageLog.ListBorder"))
-							[
-								SNew(SHorizontalBox)
-								+SHorizontalBox::Slot()
-								.FillWidth(1)
-								[
-									SNew(SScrollBox)
-									.Orientation(EOrientation::Orient_Horizontal)
-									+ SScrollBox::Slot()
-									[
-										SAssignNew(MessageListView, SListView< TSharedRef<FTokenizedMessage> >)
-										.ListItemsSource(&MessageLogListingViewModel->GetFilteredMessages())
-										.OnGenerateRow(this, &SMessageLogListing::MakeMessageLogListItemWidget)
-										.OnSelectionChanged(this, &SMessageLogListing::OnLineSelectionChanged)
-										.ExternalScrollbar(ScrollBar)
-										.ItemHeight(24.0f)
-										.ConsumeMouseWheel(EConsumeMouseWheel::Always)
-									]
-								]
-								+SHorizontalBox::Slot()
-								.AutoWidth()
-								[
-									SNew(SBox)
-									.WidthOverride(FOptionalSize(16))
-									[
-										ScrollBar
-									]
-								]
-							]
+						SAssignNew(MessageListView, SListView<TSharedRef<FTokenizedMessage>>)
+						.ListItemsSource(&MessageLogListingViewModel->GetFilteredMessages())
+						.OnGenerateRow(this, &SMessageLogListing::MakeMessageLogListItemWidget)
+						.OnSelectionChanged(this, &SMessageLogListing::OnLineSelectionChanged)
+						.ExternalScrollbar(ScrollBar)
+						.ItemHeight(24.0f)
+						.ConsumeMouseWheel(EConsumeMouseWheel::Always)
 					]
+				]
+				+SHorizontalBox::Slot()
+				.AutoWidth()
+				[
+					SNew(SBox)
+					.WidthOverride(FOptionalSize(16))
+					[
+						ScrollBar
+					]
+				]
 			]
+		]
 	];
 
 	//If we have some content below the message log, add a separator and a new box.
@@ -93,7 +90,7 @@ void SMessageLogListing::Construct( const FArguments& InArgs, const TSharedRef< 
 	{
 		VerticalBox->AddSlot()
 			.AutoHeight()
-			.Padding(6.0f)
+			.Padding(FMargin(6, 6, 0, 0))
 			[
 				SAssignNew(HorizontalBox, SHorizontalBox)
 			];
@@ -105,14 +102,13 @@ void SMessageLogListing::Construct( const FArguments& InArgs, const TSharedRef< 
 				.HAlign(HAlign_Left)
 				[
 					SNew(SComboButton)
-					.ButtonStyle(FEditorStyle::Get(), "HoverHintOnly")
-					.ForegroundColor(FSlateColor::UseForeground())
-					.ContentPadding(2)
+					.ButtonStyle(FAppStyle::Get(), "Button")
+					.ForegroundColor(FStyleColors::White)
 					.OnGetMenuContent(this, &SMessageLogListing::OnGetFilterMenuContent)
 					.ButtonContent()
 					[
 						SNew(STextBlock)
-						.Text(LOCTEXT("Show", "Show"))
+						.Text(LOCTEXT("Show", "SHOW"))
 						.ToolTipText(LOCTEXT("ShowToolTip", "Only show messages of the selected types"))
 					]
 				];
@@ -125,10 +121,10 @@ void SMessageLogListing::Construct( const FArguments& InArgs, const TSharedRef< 
 				SNew(SComboButton)
 				.IsEnabled(this, &SMessageLogListing::IsPageWidgetEnabled)
 				.Visibility(this, &SMessageLogListing::GetPageWidgetVisibility)
-				.ButtonStyle(FEditorStyle::Get(), "HoverHintOnly")
-				.ForegroundColor(FSlateColor::UseForeground())
-				.ContentPadding(2)
+				.ButtonStyle(FAppStyle::Get(), "Button")
+				.ForegroundColor(FStyleColors::White)
 				.OnGetMenuContent(this, &SMessageLogListing::OnGetPageMenuContent)
+				.ButtonColorAndOpacity(FStyleColors::White)
 				.ButtonContent()
 				[
 					SNew(STextBlock)
@@ -137,7 +133,6 @@ void SMessageLogListing::Construct( const FArguments& InArgs, const TSharedRef< 
 				]
 			];
 
-		// if we aren't using pages, we allow the user to manually clear the log
 		HorizontalBox->AddSlot()
 			.FillWidth(1.0f)
 			.HAlign(HAlign_Right)
@@ -146,12 +141,11 @@ void SMessageLogListing::Construct( const FArguments& InArgs, const TSharedRef< 
 				.OnClicked(this, &SMessageLogListing::OnClear)
 				.IsEnabled(this, &SMessageLogListing::IsClearWidgetEnabled)
 				.Visibility(this, &SMessageLogListing::GetClearWidgetVisibility)
-				.ButtonStyle(FEditorStyle::Get(), "HoverHintOnly")
-				.ForegroundColor(FSlateColor::UseForeground())
-				.ContentPadding(2)
+				.ForegroundColor(FStyleColors::White)
+				.ContentPadding(FMargin(6.5, 2))
 				[
 					SNew(STextBlock)
-					.Text(LOCTEXT("ClearMessageLog", "Clear"))
+					.Text(LOCTEXT("ClearMessageLog", "CLEAR"))
 					.ToolTipText(LOCTEXT("ClearMessageLog_ToolTip", "Clear the messages in this log"))
 				]
 			];
@@ -161,11 +155,12 @@ void SMessageLogListing::Construct( const FArguments& InArgs, const TSharedRef< 
 	MessageLogListingViewModel->OnDataChanged().AddSP( this, &SMessageLogListing::OnChanged );
 	MessageLogListingViewModel->OnSelectionChanged().AddSP( this, &SMessageLogListing::OnSelectionChanged );
 
-#if !PLATFORM_WINDOWS || !defined(__clang__) // FIXME // @todo clang: this causes an LLVM codegen crash that doesn't go away even with optimizations disabled
-	UICommandList->MapAction( FGenericCommands::Get().Copy,
-		FExecuteAction::CreateSP( this, &SMessageLogListing::CopySelectedToClipboard ),
-		FCanExecuteAction() );
-#endif
+	if (FGenericCommands::IsRegistered())
+	{
+		UICommandList->MapAction(FGenericCommands::Get().Copy,
+			FExecuteAction::CreateSP(this, &SMessageLogListing::CopySelectedToClipboard),
+			FCanExecuteAction());
+	}
 }
 
 
@@ -202,9 +197,16 @@ void SMessageLogListing::OnSelectionChanged()
 void SMessageLogListing::RefreshVisibility()
 {
 	const TArray< TSharedRef<FTokenizedMessage> >& Messages = MessageLogListingViewModel->GetFilteredMessages();
-	if(Messages.Num() > 0)
+	if (Messages.Num() > 0)
 	{
-		ScrollToMessage( Messages[0] );
+		if (MessageLogListingViewModel->GetScrollToBottom())
+		{
+			ScrollToMessage( Messages.Last() );
+		}
+		else
+		{
+			ScrollToMessage( Messages[0] );
+		}
 	}
 	
 	MessageListView->RequestListRefresh();
@@ -269,15 +271,15 @@ void SMessageLogListing::InvertSelectedMessages() const
 }
 
 
-FText SMessageLogListing::GetSelectedMessagesAsText() const
+FString SMessageLogListing::GetSelectedMessagesAsString() const
 {
-	return MessageLogListingViewModel->GetSelectedMessagesAsText();
+	return MessageLogListingViewModel->GetSelectedMessagesAsString();
 }
 
 
-FText SMessageLogListing::GetAllMessagesAsText() const
+FString SMessageLogListing::GetAllMessagesAsString() const
 {
-	return MessageLogListingViewModel->GetAllMessagesAsText();
+	return MessageLogListingViewModel->GetAllMessagesAsString();
 }
 
 
@@ -308,28 +310,28 @@ void SMessageLogListing::OnLineSelectionChanged( TSharedPtr< FTokenizedMessage >
 
 void SMessageLogListing::CopySelectedToClipboard() const
 {
-	CopyText( true, true );
+	CopyLogOutput( true, true );
 }
 
 
-FText SMessageLogListing::CopyText( bool bSelected, bool bClipboard ) const
+FString SMessageLogListing::CopyLogOutput( bool bSelected, bool bClipboard ) const
 {
-	FText CombinedString;
+	FString CombinedString;
 
 	if( bSelected )
 	{
 		// Get the selected item and then get the selected messages as a string.
-		CombinedString = GetSelectedMessagesAsText();
+		CombinedString = GetSelectedMessagesAsString();
 	}
 	else
 	{
 		// Get the selected item and then get all the messages as a string.
-		CombinedString = GetAllMessagesAsText();
+		CombinedString = GetAllMessagesAsString();
 	}
 	if( bClipboard )
 	{
 		// Pass that to the clipboard.
-		FPlatformApplicationMisc::ClipboardCopy( *CombinedString.ToString() );
+		FPlatformApplicationMisc::ClipboardCopy( *CombinedString );
 	}
 
 	return CombinedString;
@@ -371,8 +373,15 @@ TSharedRef<ITableRow> SMessageLogListing::MakeShowWidget(TSharedRef<FMessageFilt
 				SNew(SHorizontalBox)
 				+SHorizontalBox::Slot().AutoWidth()
 				[
-					SNew(SImage)
-					.Image(Selection->GetIcon().GetIcon())
+					SNew(SBox)
+					.HAlign(HAlign_Center)
+					.VAlign(VAlign_Center)
+					.WidthOverride(16)
+					.HeightOverride(16)
+					[
+						SNew(SImage)
+						.Image(Selection->GetIcon().GetIcon())
+					]
 				]
 				+SHorizontalBox::Slot().AutoWidth()
 				[
@@ -402,7 +411,7 @@ FText SMessageLogListing::OnGetPageMenuLabel() const
 	}
 	else
 	{
-		return LOCTEXT("PageMenuLabel", "Page");
+		return LOCTEXT("PageMenuLabel", "PAGE");
 	}
 }
 
@@ -463,7 +472,7 @@ bool SMessageLogListing::IsClearWidgetEnabled() const
 
 EVisibility SMessageLogListing::GetClearWidgetVisibility() const
 {
-	if (MessageLogListingViewModel->GetAllowClear() && !MessageLogListingViewModel->GetShowPages())
+	if (MessageLogListingViewModel->GetAllowClear())
 	{
 		return EVisibility::Visible;
 	}

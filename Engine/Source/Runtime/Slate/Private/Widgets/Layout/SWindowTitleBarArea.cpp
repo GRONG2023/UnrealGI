@@ -72,7 +72,7 @@ void SWindowTitleBarArea::Construct( const FArguments& InArgs )
 	MinimizeButton = SNew(SButton)
 		.IsFocusable(false)
 		.IsEnabled(bIsMinimizeButtonEnabled)
-		.ContentPadding(0)
+		.ContentPadding(0.f)
 		.OnClicked(this, &SWindowTitleBarArea::MinimizeButton_OnClicked)
 		.Cursor(EMouseCursor::Default)
 		.ButtonStyle(FCoreStyle::Get(), "NoBorder")
@@ -85,7 +85,7 @@ void SWindowTitleBarArea::Construct( const FArguments& InArgs )
 	MaximizeRestoreButton = SNew(SButton)
 		.IsFocusable(false)
 		.IsEnabled(bIsMaximizeRestoreButtonEnabled)
-		.ContentPadding(0.0f)
+		.ContentPadding(0.f)
 		.OnClicked(this, &SWindowTitleBarArea::MaximizeRestoreButton_OnClicked)
 		.Cursor(EMouseCursor::Default)
 		.ButtonStyle(FCoreStyle::Get(), "NoBorder")
@@ -181,17 +181,17 @@ void SWindowTitleBarArea::SetContent(const TSharedRef< SWidget >& InContent)
 
 void SWindowTitleBarArea::SetHAlign(EHorizontalAlignment HAlign)
 {
-	ChildSlot.HAlignment = HAlign;
+	ChildSlot.SetHorizontalAlignment(HAlign);
 }
 
 void SWindowTitleBarArea::SetVAlign(EVerticalAlignment VAlign)
 {
-	ChildSlot.VAlignment = VAlign;
+	ChildSlot.SetVerticalAlignment(VAlign);
 }
 
-void SWindowTitleBarArea::SetPadding(const TAttribute<FMargin>& InPadding)
+void SWindowTitleBarArea::SetPadding(TAttribute<FMargin> InPadding)
 {
-	ChildSlot.SlotPadding = InPadding;
+	ChildSlot.SetPadding(MoveTemp(InPadding));
 }
 
 FVector2D SWindowTitleBarArea::ComputeDesiredSize( float ) const
@@ -200,7 +200,7 @@ FVector2D SWindowTitleBarArea::ComputeDesiredSize( float ) const
 
 	if ( ChildVisibility != EVisibility::Collapsed )
 	{
-		return ChildSlot.GetWidget()->GetDesiredSize() + ChildSlot.SlotPadding.Get().GetDesiredSize();
+		return ChildSlot.GetWidget()->GetDesiredSize() + ChildSlot.GetPadding().GetDesiredSize();
 	}
 	
 	return FVector2D::ZeroVector;
@@ -211,7 +211,7 @@ void SWindowTitleBarArea::OnArrangeChildren( const FGeometry& AllottedGeometry, 
 	const EVisibility& MyCurrentVisibility = this->GetVisibility();
 	if ( ArrangedChildren.Accepts( MyCurrentVisibility ) )
 	{
-		const FMargin SlotPadding(ChildSlot.SlotPadding.Get());
+		const FMargin SlotPadding(ChildSlot.GetPadding());
 		AlignmentArrangeResult XAlignmentResult = AlignChild<Orient_Horizontal>( AllottedGeometry.GetLocalSize().X, ChildSlot, SlotPadding );
 		AlignmentArrangeResult YAlignmentResult = AlignChild<Orient_Vertical>( AllottedGeometry.GetLocalSize().Y, ChildSlot, SlotPadding );
 

@@ -1,8 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "GenericPlatform/GenericPlatformFile.h"
+#include "Algo/Accumulate.h"
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
+#include "Misc/PathViews.h"
 #include "HAL/PlatformMisc.h"
 #include "HAL/ThreadSafeCounter.h"
 #include "Stats/Stats.h"
@@ -10,6 +12,7 @@
 #include "Templates/UniquePtr.h"
 #include "Misc/ScopeLock.h"
 #include "HAL/LowLevelMemTracker.h"
+#include "String/BytesToHex.h"
 
 #include "Async/AsyncFileHandle.h"
 #include "Async/MappedFileHandle.h"
@@ -95,6 +98,17 @@ public:
 			}
 		}
 	}
+
+	virtual void EnsureCompletion() override
+	{
+		if (Task)
+		{
+			Task->EnsureCompletion();
+			delete Task;
+			Task = nullptr;
+		}
+	}
+
 	virtual void CancelImpl() override
 	{
 		if (Task)
@@ -126,6 +140,11 @@ public:
 			Size = LowerLevel->FileSize(Filename);
 		}
 		SetComplete();
+	}
+
+protected:
+	virtual void ReleaseMemoryOwnershipImpl() override
+	{
 	}
 };
 
@@ -173,6 +192,12 @@ public:
 		}
 		return nullptr;
 	}
+
+protected:
+	virtual void ReleaseMemoryOwnershipImpl() override
+	{
+		DEC_MEMORY_STAT_BY(STAT_AsyncFileMemory, BytesToRead);
+	}
 };
 
 void FGenericReadRequestWorker::DoWork()
@@ -201,9 +226,9 @@ static int32 GCacheHandleForPakFilesOnly = 1;
 static FAutoConsoleVariableRef CVarCacheHandleForPakFilesOnly(
 	TEXT("AsyncReadFile.CacheHandleForPakFilesOnly"),
 	GCacheHandleForPakFilesOnly,
-	TEXT("Control how Async read handle caches the underlying platform handle for files.\n")
-	TEXT("0: Cache the underlying platform handles for all files.\n")
-	TEXT("1: Cache the underlying platform handle for .pak files only (default).\n"),
+	TEXT("Control how Async read handle caches the underlying platform handle for files.\n"
+	     "0: Cache the underlying platform handles for all files.\n"
+	     "1: Cache the underlying platform handle for .pak files only (default).\n"),
 	ECVF_Default
 );
 
@@ -515,6 +540,27 @@ FDateTime IPlatformFile::GetTimeStampLocal(const TCHAR* Filename)
 	return FileTimeStamp;
 }
 
+bool IPlatformFile::FDirectoryVisitor::CallShouldVisitAndVisit(const TCHAR* FilenameOrDirectory, bool bIsDirectory)
+{
+	FStringView LeafPathname = FPathViews::GetCleanFilename(FilenameOrDirectory);
+	if (!ShouldVisitLeafPathname(LeafPathname))
+	{
+		return true; // Continue iterating
+	}
+	return Visit(FilenameOrDirectory, bIsDirectory);
+}
+
+bool IPlatformFile::FDirectoryStatVisitor::CallShouldVisitAndVisit(const TCHAR* FilenameOrDirectory,
+	const FFileStatData& StatData)
+{
+	FStringView LeafPathname = FPathViews::GetCleanFilename(FilenameOrDirectory);
+	if (!ShouldVisitLeafPathname(LeafPathname))
+	{
+		return true; // Continue iterating
+	}
+	return Visit(FilenameOrDirectory, StatData);
+}
+
 class FDirectoryVisitorFuncWrapper : public IPlatformFile::FDirectoryVisitor
 {
 public:
@@ -560,49 +606,53 @@ bool IPlatformFile::IterateDirectoryRecursively(const TCHAR* Directory, FDirecto
 	class FRecurse : public FDirectoryVisitor
 	{
 	public:
-		IPlatformFile&      PlatformFile;
 		FDirectoryVisitor&  Visitor;
-		FRWLock             DirectoriesLock;
 		TArray<FString>&    Directories;
-		FRecurse(IPlatformFile&	InPlatformFile, FDirectoryVisitor& InVisitor, TArray<FString>& InDirectories)
+		FRecurse(FDirectoryVisitor& InVisitor, TArray<FString>& InDirectories)
 			: FDirectoryVisitor(InVisitor.DirectoryVisitorFlags)
-			, PlatformFile(InPlatformFile)
 			, Visitor(InVisitor)
 			, Directories(InDirectories)
 		{
 		}
 		virtual bool Visit(const TCHAR* FilenameOrDirectory, bool bIsDirectory) override
 		{
-			bool bResult = Visitor.Visit(FilenameOrDirectory, bIsDirectory);
+			bool bResult = Visitor.CallShouldVisitAndVisit(FilenameOrDirectory, bIsDirectory);
 			if (bResult && bIsDirectory)
 			{
-				FString Directory(FilenameOrDirectory);
-				FRWScopeLock ScopeLock(DirectoriesLock, SLT_Write);
-				Directories.Emplace(MoveTemp(Directory));
+				Directories.Emplace(FilenameOrDirectory);
 			}
 			return bResult;
 		}
 	};
 
-	TArray<FString> DirectoriesToVisitNext;
-	DirectoriesToVisitNext.Add(Directory);
+	TArray<FString> DirectoriesToVisit;
+	DirectoriesToVisit.Add(Directory);
 
-	TAtomic<bool> bResult(true);
-	FRecurse Recurse(*this, Visitor, DirectoriesToVisitNext);
-	while (bResult && DirectoriesToVisitNext.Num() > 0)
+	constexpr int32 MinBatchSize = 1;
+	const EParallelForFlags ParallelForFlags = FTaskGraphInterface::IsRunning() && Visitor.IsThreadSafe()
+		? EParallelForFlags::Unbalanced : EParallelForFlags::ForceSingleThread;
+	std::atomic<bool> bResult{true};
+	TArray<TArray<FString>> DirectoriesToVisitNext;
+	while (bResult && DirectoriesToVisit.Num() > 0)
 	{
-		TArray<FString> DirectoriesToVisit = MoveTemp(DirectoriesToVisitNext);
-		ParallelFor(
+		ParallelForWithTaskContext(TEXT("IterateDirectoryRecursively.PF"),
+			DirectoriesToVisitNext,
 			DirectoriesToVisit.Num(),
-			[this, &DirectoriesToVisit, &Recurse, &bResult](int32 Index)
+			MinBatchSize,
+			[this, &Visitor, &DirectoriesToVisit, &bResult](TArray<FString>& Directories, int32 Index)
 			{
-				if (bResult && !IterateDirectory(*DirectoriesToVisit[Index], Recurse))
+				FRecurse Recurse(Visitor, Directories);
+				if (bResult.load(std::memory_order_relaxed) && !IterateDirectory(*DirectoriesToVisit[Index], Recurse))
 				{
-					bResult = false;
+					bResult.store(false, std::memory_order_relaxed);
 				}
 			},
-			Visitor.IsThreadSafe() ? EParallelForFlags::Unbalanced : EParallelForFlags::ForceSingleThread
-		);
+			ParallelForFlags);
+		DirectoriesToVisit.Reset(Algo::TransformAccumulate(DirectoriesToVisitNext, &TArray<FString>::Num, 0));
+		for (TArray<FString>& Directories : DirectoriesToVisitNext)
+		{
+			DirectoriesToVisit.Append(MoveTemp(Directories));
+		}
 	}
 
 	return bResult;
@@ -622,7 +672,7 @@ bool IPlatformFile::IterateDirectoryStatRecursively(const TCHAR* Directory, FDir
 		}
 		virtual bool Visit(const TCHAR* FilenameOrDirectory, const FFileStatData& StatData) override
 		{
-			bool bResult = Visitor.Visit(FilenameOrDirectory, StatData);
+			bool bResult = Visitor.CallShouldVisitAndVisit(FilenameOrDirectory, StatData);
 			if (bResult && StatData.bIsDirectory)
 			{
 				bResult = PlatformFile.IterateDirectoryStat(FilenameOrDirectory, *this);
@@ -771,13 +821,20 @@ bool IPlatformFile::CopyFile(const TCHAR* To, const TCHAR* From, EPlatformFileRe
 	while (Size)
 	{
 		int64 ThisSize = FMath::Min<int64>(AllocSize, Size);
-		FromFile->Read(Buffer, ThisSize);
-		ToFile->Write(Buffer, ThisSize);
+		if (!FromFile->Read(Buffer, ThisSize))
+		{
+			break;
+		}
+		if (!ToFile->Write(Buffer, ThisSize))
+		{
+			break;
+		}
 		Size -= ThisSize;
 		check(Size >= 0);
 	}
 	FMemory::Free(Buffer);
-	return true;
+	check(Size >= 0);
+	return Size == 0;
 }
 
 bool IPlatformFile::CopyDirectoryTree(const TCHAR* DestinationDirectory, const TCHAR* Source, bool bOverwriteAllExisting)
@@ -799,7 +856,7 @@ bool IPlatformFile::CopyDirectoryTree(const TCHAR* DestinationDirectory, const T
 
 	// Destination directory exists already or can be created ?
 	if (!DirectoryExists(*DestDir) &&
-		!CreateDirectory(*DestDir))
+		!CreateDirectoryTree(*DestDir))
 	{
 		return false;
 	}
@@ -906,6 +963,110 @@ bool IPlatformFile::CreateDirectoryTree(const TCHAR* Directory)
 	FPaths::NormalizeDirectoryName(LocalDirname);
 
 	return InternalCreateDirectoryTree(*this, LocalDirname);
+}
+
+FString FFileJournalFileHandle::ToString()
+{
+	FString Output;
+	TArray<TCHAR, FString::AllocatorType>& CharArray = Output.GetCharArray();
+	CharArray.AddUninitialized(sizeof(FFileJournalFileHandle) * 2 + 3);
+	TCHAR* Data = CharArray.GetData();
+	Data[0] = '0';
+	Data[1] = 'x';
+	UE::String::BytesToHexLower(Bytes, Data + 2);
+	CharArray.Last() = TCHAR('\0');
+	return Output;
+}
+
+namespace UE::PlatformFileJournal::Private
+{
+
+FFileJournalFileHandle CreateInvalidFileHandle()
+{
+	FFileJournalFileHandle Result;
+	for (uint8& Byte : Result.Bytes)
+	{
+		Byte = 0;
+	}
+	return Result;
+}
+
+FFileJournalData ToJournalData(const FFileStatData& StatData)
+{
+	FFileJournalData JournalData;
+	JournalData.ModificationTime = StatData.ModificationTime;
+	JournalData.JournalHandle = FileJournalFileHandleInvalid;
+	JournalData.bIsValid = StatData.bIsValid;
+	JournalData.bIsDirectory = StatData.bIsDirectory;
+	return JournalData;
+}
+
+constexpr const TCHAR* PlatformNotAvailableMessage = TEXT("PlatformFileJournal is not implemented on the current platform.");
+
+} // namespace UE::PlatformFileJournal::Private
+
+const FFileJournalFileHandle FileJournalFileHandleInvalid = UE::PlatformFileJournal::Private::CreateInvalidFileHandle();
+
+bool IPlatformFile::FileJournalIsAvailable(const TCHAR* VolumeOrPath, ELogVerbosity::Type* OutErrorLevel,
+	FString* OutError)
+{
+	if (OutErrorLevel)
+	{
+		*OutErrorLevel = ELogVerbosity::Display;
+	}
+	if (OutError)
+	{
+		*OutError = UE::PlatformFileJournal::Private::PlatformNotAvailableMessage;
+	}
+	return false;
+}
+
+EFileJournalResult IPlatformFile::FileJournalGetLatestEntry(const TCHAR* VolumeOrPath,
+	FFileJournalId& OutJournalId, FFileJournalEntryHandle& OutEntryHandle, FString* OutError)
+{
+	if (OutError)
+	{
+		*OutError = UE::PlatformFileJournal::Private::PlatformNotAvailableMessage;
+	}
+	OutJournalId = FileJournalIdInvalid;
+	OutEntryHandle = FileJournalEntryHandleInvalid;
+	return EFileJournalResult::InvalidPlatform;
+}
+
+bool IPlatformFile::FileJournalIterateDirectory(const TCHAR* Directory, FDirectoryJournalVisitorFunc Visitor)
+{
+	return this->IterateDirectoryStat(Directory,
+		[&Visitor](const TCHAR* InPackageFilename, const FFileStatData& StatData)
+		{
+			return Visitor(InPackageFilename, UE::PlatformFileJournal::Private::ToJournalData(StatData));
+		});
+}
+
+FFileJournalData IPlatformFile::FileJournalGetFileData(const TCHAR* FilenameOrDirectory)
+{
+	return UE::PlatformFileJournal::Private::ToJournalData(this->GetStatData(FilenameOrDirectory));
+}
+
+EFileJournalResult IPlatformFile::FileJournalReadModified(const TCHAR* VolumeName,
+	const FFileJournalId& JournalIdOfStartingEntry, const FFileJournalEntryHandle& StartingJournalEntry,
+	TMap<FFileJournalFileHandle, FString>& KnownDirectories, TSet<FString>& OutModifiedDirectories,
+	FFileJournalEntryHandle& OutNextJournalEntry, FString* OutError)
+{
+	OutNextJournalEntry = FileJournalEntryHandleInvalid;
+	if (OutError)
+	{
+		*OutError = UE::PlatformFileJournal::Private::PlatformNotAvailableMessage;
+	}
+	return EFileJournalResult::InvalidPlatform;
+}
+
+FString IPlatformFile::FileJournalGetVolumeName(FStringView Path)
+{
+	FString FullPath = FPaths::ConvertRelativePathToFull(FString(Path));
+	FStringView VolumeName;
+	FStringView Remainder;
+	FPathViews::SplitVolumeSpecifier(FullPath, VolumeName, Remainder);
+	return FString(VolumeName);
 }
 
 bool IPhysicalPlatformFile::Initialize(IPlatformFile* Inner, const TCHAR* CmdLine)

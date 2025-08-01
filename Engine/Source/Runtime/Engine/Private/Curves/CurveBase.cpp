@@ -1,8 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Curves/CurveBase.h"
+
+#include "JsonObjectConverter.h"
 #include "Serialization/Csv/CsvParser.h"
 #include "EditorFramework/AssetImportData.h"
+#include "UObject/AssetRegistryTagsContext.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(CurveBase)
 
 
 /* UCurveBase interface
@@ -33,7 +38,13 @@ void UCurveBase::GetTimeRange(float& MinTime, float& MaxTime) const
 		}
 	}
 }
-
+void UCurveBase::GetTimeRange(double& MinTime, double& MaxTime) const
+{
+	float Min = MinTime, Max = MaxTime;
+	GetTimeRange(Min, Max);
+	MinTime = Min;
+	MaxTime = Max;
+}
 
 void UCurveBase::GetValueRange(float& MinValue, float& MaxValue) const
 {
@@ -55,7 +66,13 @@ void UCurveBase::GetValueRange(float& MinValue, float& MaxValue) const
 		}
 	}
 }
-
+void UCurveBase::GetValueRange(double& MinValue, double& MaxValue) const
+{
+	float Min = MinValue, Max = MaxValue;
+	GetValueRange(Min, Max);
+	MinValue = Min;
+	MaxValue = Max;
+}
 
 void UCurveBase::ModifyOwner() 
 {
@@ -161,6 +178,48 @@ TArray<FString> UCurveBase::CreateCurveFromCSVString(const FString& InString)
 	return OutProblems;
 }
 
+void UCurveBase::ImportFromJSONString(const FString& InString, TArray<FString>& OutProblems)
+{
+	TSharedPtr<FJsonObject> JsonObject;
+	{
+		const TSharedRef<TJsonReader<TCHAR>> JsonReader = TJsonReaderFactory<TCHAR>::Create(InString);
+		if (!FJsonSerializer::Deserialize(JsonReader, JsonObject) || !JsonObject.IsValid())
+		{
+			OutProblems.Add(FString::Printf(TEXT("Failed to parse the JSON data. Error: %s"), *JsonReader->GetErrorMessage()));
+			return;
+		}
+	}
+
+	const TSharedRef<FJsonObject> BackupJSONObject = MakeShared<FJsonObject>();
+	if (!FJsonObjectConverter::UStructToJsonAttributes(GetClass(), this, BackupJSONObject->Values))
+	{
+		OutProblems.Add(FString::Printf(TEXT("Failed to backup existing data before import.")));
+		return;
+	}
+	
+	if (!FJsonObjectConverter::JsonAttributesToUStruct(JsonObject->Values, GetClass(), this, 0, CPF_Deprecated | CPF_Transient, true))
+	{
+		// Rollback any changes made during import with the backup
+		FJsonObjectConverter::JsonAttributesToUStruct(BackupJSONObject->Values, GetClass(), this, 0, CPF_Deprecated | CPF_Transient, true);
+		
+		OutProblems.Add(FString::Printf(TEXT("Failed to import JSON data. Check logs for details.")));
+		return;
+	}
+
+	Modify(true);
+}
+
+FString UCurveBase::ExportAsJSONString() const
+{
+	FString Result;
+	const TSharedRef<FJsonObject> JSONObject = MakeShared<FJsonObject>();
+	if (FJsonObjectConverter::UStructToJsonAttributes(GetClass(), this, JSONObject->Values, 0, CPF_Deprecated | CPF_Transient))
+	{
+		const TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> JsonWriter = TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&Result);
+		FJsonSerializer::Serialize(JSONObject, JsonWriter);
+	}
+	return Result;
+}
 
 /* UObject interface
  *****************************************************************************/
@@ -169,12 +228,19 @@ TArray<FString> UCurveBase::CreateCurveFromCSVString(const FString& InString)
 
 void UCurveBase::GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+	Super::GetAssetRegistryTags(OutTags);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void UCurveBase::GetAssetRegistryTags(FAssetRegistryTagsContext Context) const
+{
 	if (AssetImportData)
 	{
-		OutTags.Add(FAssetRegistryTag(SourceFileTagName(), AssetImportData->GetSourceData().ToJson(), FAssetRegistryTag::TT_Hidden));
+		Context.AddTag(FAssetRegistryTag(SourceFileTagName(), AssetImportData->GetSourceData().ToJson(), FAssetRegistryTag::TT_Hidden));
 	}
 
-	Super::GetAssetRegistryTags(OutTags);
+	Super::GetAssetRegistryTags(Context);
 }
 
 void UCurveBase::PostInitProperties()
@@ -204,6 +270,9 @@ void UCurveBase::PostLoad()
 		AssetImportData->SourceData = MoveTemp(Info);
 	}
 }
+#endif //WITH_EDITORONLY_DATA
+
+#if WITH_EDITOR
 
 void UCurveBase::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
@@ -211,4 +280,5 @@ void UCurveBase::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEv
 
 	OnUpdateCurve.Broadcast(this, PropertyChangedEvent.ChangeType);
 }
-#endif //WITH_EDITORONLY_DATA
+
+#endif // WITH_EDITOR

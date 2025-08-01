@@ -1,45 +1,470 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 
-#include "AppleHTTP.h"
-#include "Misc/EngineVersion.h"
-#include "Security/Security.h"
-#include "CommonCrypto/CommonDigest.h"
-#include "Foundation/Foundation.h"
-#include "Misc/App.h"
-#include "Misc/Base64.h"
+#include "AppleHttp.h"
+#include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
 #include "Http.h"
+#include "HttpManager.h"
 #include "HttpModule.h"
-#include "Apple/CFRef.h"
+#include "Misc/EngineVersion.h"
+#include "Misc/App.h"
+#include "Misc/Base64.h"
 
-#if WITH_SSL
-#include "Ssl.h"
-#endif
+// It should be safe to read headers early, add the CVar here just in case
+TAutoConsoleVariable<FString> CVarHttpUrlsToReadHeadersWhenComplete(
+	TEXT("http.UrlsToReadHeadersWhenComplete"),
+	TEXT(""),
+	TEXT("List of urls to only read headers when complete the http request\"www.epicgames.com,www.unrealengine.com,...\"")
+);
 
-#if !defined(__MAC_10_14) || (defined(__IPHONE_OS_VERSION_MIN_REQUIRED) && __IPHONE_OS_VERSION_MIN_REQUIRED < __IPHONE_12_0) || (defined(__TV_OS_VERSION_MIN_REQUIRED) && __TV_OS_VERSION_MIN_REQUIRED < __TVOS_12_0)
-#define USE_DEPRECATED_SECTRUST 1
-#else
-#define USE_DEPRECATED_SECTRUST 0
-#endif
+namespace AppleHTTPRequestInternal
+{
 
+static bool bUpdatedCVarHttpUrlsToReadHeadersWhenComplete = true;
+static TArray<FString> UrlsToReadHeadersWhenComplete;
+
+static void UpdateConfigFromCVar()
+{
+	UE_CALL_ONCE([] {
+		CVarHttpUrlsToReadHeadersWhenComplete.AsVariable()->OnChangedDelegate().AddLambda([](IConsoleVariable* CVar) {
+			bUpdatedCVarHttpUrlsToReadHeadersWhenComplete = true;
+		});
+		bUpdatedCVarHttpUrlsToReadHeadersWhenComplete = true;
+	});
+	if (bUpdatedCVarHttpUrlsToReadHeadersWhenComplete)
+	{
+		CVarHttpUrlsToReadHeadersWhenComplete.GetValueOnAnyThread().ParseIntoArray(UrlsToReadHeadersWhenComplete, TEXT(","));
+		bUpdatedCVarHttpUrlsToReadHeadersWhenComplete = false;
+	}
+}
+
+static bool ShouldReadHeadersWhenComplete(const FString& Url)
+{
+	for (const FString& UrlToReadHeadersWhenComplete : UrlsToReadHeadersWhenComplete)
+	{
+		if (Url.StartsWith(UrlToReadHeadersWhenComplete))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+}
+
+/**
+ * Class to hold data from delegate implementation notifications.
+ */
+
+@interface FAppleHttpResponseDelegate : NSObject<NSURLSessionDataDelegate>
+{
+	/** Holds the payload as we receive it. */
+	@public TArray<uint8> Payload;
+
+	// Flag to indicate the request was initialized with stream. In that case even if stream was set to 
+	// null later on internally, the request itself won't cache received data anymore
+	@public BOOL bInitializedWithValidStream;
+
+	/** Delegate invoked after processing URLSession:dataTask:didReceiveData or URLSession:task:didCompleteWithError:*/
+	@public FNewAppleHttpEventDelegate NewAppleHttpEventDelegate;
+}
+
+/** A handle for the response */
+@property(retain) NSHTTPURLResponse* Response;
+/** The total number of bytes written out during the request/response */
+@property uint64 BytesWritten;
+/** The total number of bytes received out during the request/response */
+@property uint64 BytesReceived;
+/** Request status */
+@property EHttpRequestStatus::Type RequestStatus;
+/** Reason of failure */
+@property EHttpFailureReason FailureReason;
+/** Associated request. Cleared when canceled */
+@property TWeakPtr<FAppleHttpRequest> SourceRequest;
+
+/** NSURLSessionDataDelegate delegate methods. Those are called from a thread controlled by the NSURLSession */
+
+/** Sent periodically to notify the delegate of upload progress. */
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didSendBodyData:(int64_t)bytesSent totalBytesSent:(int64_t)totalBytesSent totalBytesExpectedToSend:(int64_t)totalBytesExpectedToSend;
+/** The task has received a response and no further messages will be received until the completion block is called. */
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveResponse:(NSURLResponse *)response completionHandler:(void (^)(NSURLSessionResponseDisposition disposition))completionHandler;
+/** Sent when data is available for the delegate to consume. Data may be discontiguous */
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data;
+/** Sent as the last message related to a specific task.  A nil Error implies that no error occurred and this task is complete. */
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(nullable NSError *)error;
+/** Asks the delegate if it needs to store responses in the cache. */
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask willCacheResponse:(NSCachedURLResponse *)proposedResponse completionHandler:(void (^)(NSCachedURLResponse *cachedResponse))completionHandler;
+@end
+
+@implementation FAppleHttpResponseDelegate
+@synthesize Response;
+@synthesize RequestStatus;
+@synthesize FailureReason;
+@synthesize BytesWritten;
+@synthesize BytesReceived;
+@synthesize SourceRequest;
+
+- (FAppleHttpResponseDelegate*)initWithRequest:(FAppleHttpRequest&) Request
+{
+	self = [super init];
+	
+	BytesWritten = 0;
+	BytesReceived = 0;
+	RequestStatus = EHttpRequestStatus::NotStarted;
+	FailureReason = EHttpFailureReason::None;
+	SourceRequest = StaticCastWeakPtr<FAppleHttpRequest>(TWeakPtr<IHttpRequest>(Request.AsShared()));
+	bInitializedWithValidStream = Request.IsInitializedWithValidStream();
+	
+	return self;
+}
+
+- (void)CleanSharedObjects
+{
+	self.SourceRequest = {};
+}
+
+- (void)dealloc
+{
+	[Response release];
+	[super dealloc];
+}
+
+- (void) HandleStatusCodeReceived:(int32) StatusCode
+{
+	if (TSharedPtr<FAppleHttpRequest> Request = SourceRequest.Pin())
+	{
+		Request->TriggerStatusCodeReceivedDelegate(StatusCode);
+	}
+}
+
+- (bool)HandleBodyDataReceived:(void*)Ptr Size:(int64)InSize
+{
+	if (TSharedPtr<FAppleHttpRequest> Request = SourceRequest.Pin())
+	{
+		return Request->PassReceivedDataToStream(Ptr, InSize);
+	}
+	return false;
+}
+
+- (void) SaveEffectiveURL:(const FString&) InEffectiveURL
+{
+	if (TSharedPtr<FAppleHttpRequest> Request = SourceRequest.Pin())
+	{
+		Request->SetEffectiveURL(InEffectiveURL);
+	}
+}
+
+-(void) BroadcastResponseHeadersReceived
+{
+	if (TSharedPtr<FAppleHttpRequest> Request = SourceRequest.Pin())
+	{
+		if (!AppleHTTPRequestInternal::ShouldReadHeadersWhenComplete(Request->GetURL()))
+		{
+			if (Request->GetDelegateThreadPolicy() == EHttpRequestDelegateThreadPolicy::CompleteOnHttpThread)
+			{
+				Request->BroadcastResponseHeadersReceived();
+			}
+			else if (Request->OnHeaderReceived().IsBound())
+			{
+				FHttpModule::Get().GetHttpManager().AddGameThreadTask([Request]()
+				{
+					Request->BroadcastResponseHeadersReceived();
+				});
+			}
+		}
+	}
+}
+
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didSendBodyData:(int64_t)bytesSent totalBytesSent:(int64_t)totalBytesSent totalBytesExpectedToSend:(int64_t)totalBytesExpectedToSend
+{
+	UE_LOG(LogHttp, Verbose, TEXT("URLSession:task:didSendBodyData:totalBytesSent:totalBytesExpectedToSend: totalBytesSent = %lld, totalBytesSent = %lld: %p"), totalBytesSent, totalBytesExpectedToSend, self);
+	self.BytesWritten = totalBytesSent;
+}
+
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveResponse:(NSURLResponse *)response completionHandler:(void (^)(NSURLSessionResponseDisposition disposition))completionHandler
+{
+	UE_LOG(LogHttp, Verbose, TEXT("URLSession:dataTask:didReceiveResponse:completionHandler"));
+	
+	self.Response = (NSHTTPURLResponse*)response;
+
+	int32 StatusCode = [self.Response statusCode];
+	[self HandleStatusCodeReceived: StatusCode];
+
+	NSURL* Url = [self.Response URL];
+	FString EffectiveURL([Url absoluteString]);
+	[self SaveEffectiveURL: EffectiveURL];
+
+	[self BroadcastResponseHeadersReceived];
+
+	uint64 ExpectedResponseLength = response.expectedContentLength;
+	if(!bInitializedWithValidStream && ExpectedResponseLength != NSURLResponseUnknownLength)
+	{
+		Payload.Empty(ExpectedResponseLength);
+	}
+	UE_LOG(LogHttp, Verbose, TEXT("URLSession:dataTask:didReceiveResponse:completionHandler: expectedContentLength = %lld. Length = %llu: %p"), ExpectedResponseLength, Payload.Max(), self);
+	completionHandler(NSURLSessionResponseAllow);
+}
+
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data
+{
+	__block int64 NewBytesReceived = 0;
+	if (bInitializedWithValidStream)
+	{
+		__block bool bSerializeSucceed = false;
+		[data enumerateByteRangesUsingBlock:^(const void *bytes, NSRange byteRange, BOOL *stop) {
+			NewBytesReceived += byteRange.length;
+			bSerializeSucceed = [self HandleBodyDataReceived : const_cast<void*>(bytes) Size : byteRange.length];
+			*stop = bSerializeSucceed? NO : YES;
+		}];
+		
+		if (!bSerializeSucceed)
+		{
+			[dataTask cancel];
+		}
+	}
+	else
+	{
+		[data enumerateByteRangesUsingBlock:^(const void *bytes, NSRange byteRange, BOOL *stop) {
+			NewBytesReceived += byteRange.length;
+			Payload.Append((const uint8*)bytes, byteRange.length);
+		}];
+	}
+	// Keep BytesReceived as a separated value to avoid concurrent accesses to Payload
+	self.BytesReceived += NewBytesReceived;
+	UE_LOG(LogHttp, Verbose, TEXT("URLSession:dataTask:didReceiveData with %llu bytes. After Append, Payload Length = %llu: %p"), NewBytesReceived, self.BytesReceived, self);
+	
+	NewAppleHttpEventDelegate.ExecuteIfBound();
+}
+
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(nullable NSError *)error
+{
+	if (error == nil)
+	{
+		UE_LOG(LogHttp, Verbose, TEXT("URLSession:task:didCompleteWithError. Http request succeeded: %p"), self);
+		self.RequestStatus = EHttpRequestStatus::Succeeded;
+	}
+	else
+	{
+		UE_LOG(LogHttp, Warning, TEXT("URLSession:task:didCompleteWithError. Http request failed - %s %s: %p"),
+			   *FString([error localizedDescription]),
+			   *FString([[error userInfo] objectForKey:NSURLErrorFailingURLStringErrorKey]),
+			   self);
+		
+		self.RequestStatus = EHttpRequestStatus::Failed;
+		// Determine if the specific error was failing to connect to the host.
+		switch ([error code])
+		{
+			case NSURLErrorTimedOut:
+			case NSURLErrorCannotFindHost:
+			case NSURLErrorCannotConnectToHost:
+			case NSURLErrorDNSLookupFailed:
+				self.FailureReason = EHttpFailureReason::ConnectionError;
+				break;
+			case NSURLErrorCancelled:
+				self.FailureReason = EHttpFailureReason::Cancelled;
+				break;
+			default:
+				self.FailureReason = EHttpFailureReason::Other;
+				break;
+		}
+		// Log more details if verbose logging is enabled and this is an SSL error
+		if (UE_LOG_ACTIVE(LogHttp, Verbose))
+		{
+			SecTrustRef PeerTrustInfo = reinterpret_cast<SecTrustRef>([[error userInfo] objectForKey:NSURLErrorFailingURLPeerTrustErrorKey]);
+			if (PeerTrustInfo != nullptr)
+			{
+				SecTrustResultType TrustResult = kSecTrustResultInvalid;
+				SecTrustGetTrustResult(PeerTrustInfo, &TrustResult);
+				
+				FString TrustResultString;
+				switch (TrustResult)
+				{
+#define MAP_TO_RESULTSTRING(Constant) case Constant: TrustResultString = TEXT(#Constant); break;
+						MAP_TO_RESULTSTRING(kSecTrustResultInvalid)
+						MAP_TO_RESULTSTRING(kSecTrustResultProceed)
+						MAP_TO_RESULTSTRING(kSecTrustResultDeny)
+						MAP_TO_RESULTSTRING(kSecTrustResultUnspecified)
+						MAP_TO_RESULTSTRING(kSecTrustResultRecoverableTrustFailure)
+						MAP_TO_RESULTSTRING(kSecTrustResultFatalTrustFailure)
+						MAP_TO_RESULTSTRING(kSecTrustResultOtherError)
+#undef MAP_TO_RESULTSTRING
+					default:
+						TrustResultString = TEXT("unknown");
+						break;
+				}
+				UE_LOG(LogHttp, Verbose, TEXT("URLSession:task:didCompleteWithError. SSL trust result: %s (%d)"), *TrustResultString, TrustResult);
+			}
+		}
+	}
+	NewAppleHttpEventDelegate.ExecuteIfBound();
+}
+
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask willCacheResponse:(NSCachedURLResponse *)proposedResponse completionHandler:(void (^)(NSCachedURLResponse *cachedResponse))completionHandler
+{
+	// All FAppleHttpRequest use NSURLRequestReloadIgnoringLocalCacheData
+	// NSURLRequestReloadIgnoringLocalCacheData disables loading of data from cache, but responses can still be stored in cache
+	// Passing nil to this handler disables caching the responses
+	completionHandler(nil);
+}
+@end
+
+
+/**
+ * NSInputStream subclass to send streamed FArchive contents
+ */
+@interface FNSInputStreamFromArchive : NSInputStream<NSStreamDelegate>
+{
+	TSharedPtr<FArchive> Archive;
+	int64 AlreadySentContent;
+	NSStreamStatus StreamStatus;
+	id<NSStreamDelegate> Delegate;
+}
+@end
+
+@implementation FNSInputStreamFromArchive
+
++(FNSInputStreamFromArchive*)initWithArchive:(TSharedRef<FArchive>) Archive
+{
+	FNSInputStreamFromArchive* Ret = [[[FNSInputStreamFromArchive alloc] init] autorelease];
+	Ret->Archive = MoveTemp(Archive);
+	return Ret;
+}
+
+- (id)init
+{
+	self = [super init];
+	if (self)
+	{
+		StreamStatus = NSStreamStatusNotOpen;
+
+		// Docs say it is good practice that streams are it's own delegates by default
+		Delegate = self;
+	}
+	
+	return self;
+}
+
+/** NSStream implementation */
+- (void)dealloc
+{
+	[super dealloc];
+}
+
+- (void)open
+{
+	AlreadySentContent = 0;
+	StreamStatus = NSStreamStatusOpen;
+}
+
+- (void)close
+{
+	StreamStatus = NSStreamStatusClosed;
+}
+
+- (NSStreamStatus)streamStatus
+{
+	return StreamStatus;
+}
+
+- (NSError *)streamError
+{
+	return nil;
+}
+
+- (id<NSStreamDelegate>)delegate
+{
+	return Delegate;
+}
+
+- (void)setDelegate:(id<NSStreamDelegate>)InDelegate
+{
+	if (InDelegate == nil)
+	{
+		InDelegate = self;
+	}
+	else
+	{
+		Delegate = InDelegate;
+	}
+}
+
+- (id)propertyForKey:(NSString *)key
+{
+	return nil;
+}
+
+- (BOOL)setProperty:(id)property forKey:(NSString *)key
+{
+	return NO;
+}
+
+- (void)scheduleInRunLoop:(NSRunLoop *)aRunLoop forMode:(NSString *)mode
+{
+	// There is no need to scheduled anything. Data is always available until end is reached
+}
+
+- (void)removeFromRunLoop:(NSRunLoop *)aRunLoop forMode:(NSString *)mode
+{
+	// There is no need to be descheduled since we didn't schedule
+}
+
+/** NSStreamDelegate implementation */
+- (void)stream:(NSStream *)stream handleEvent:(NSStreamEvent)eventCode
+{
+	// Won't update local data
+}
+
+/** NSInputStream implementation. Those methods are invoked in a worker thread out of our control */
+
+// Reads up to 'len' bytes into 'buffer'. Returns the actual number of bytes read.
+- (NSInteger)read:(uint8_t *)buffer maxLength:(NSUInteger)len
+{
+	const int64 ContentLength = Archive->TotalSize();
+	check(AlreadySentContent <= ContentLength);
+	const int64 SizeToSend = ContentLength - AlreadySentContent;
+	const int64 SizeToSendThisTime = FMath::Min(SizeToSend, static_cast<int64>(len));
+	if (SizeToSendThisTime != 0)
+	{
+		if (Archive->Tell() != AlreadySentContent)
+		{
+			Archive->Seek(AlreadySentContent);
+		}
+		Archive->Serialize((uint8*)buffer, SizeToSendThisTime);
+		AlreadySentContent += SizeToSendThisTime;
+	}
+	return SizeToSendThisTime;
+}
+
+// return NO because getting the internal buffer is not appropriate for this subclass
+- (BOOL)getBuffer:(uint8_t **)buffer length:(NSUInteger *)len
+{
+	return NO;
+}
+
+// returns YES to always force reads
+- (BOOL)hasBytesAvailable
+{
+	return YES;
+}
+@end
 /****************************************************************************
  * FAppleHttpRequest implementation
  ***************************************************************************/
 
-
-FAppleHttpRequest::FAppleHttpRequest()
-:	Connection(nullptr)
+FAppleHttpRequest::FAppleHttpRequest(NSURLSession* InSession)
+:   Session([InSession retain])
+,   Task(nil)
 ,	bIsPayloadFile(false)
-,	RequestPayloadByteLength(0)
-,	CompletionStatus(EHttpRequestStatus::NotStarted)
-,	ProgressBytesSent(0)
-,	StartRequestTime(0.0)
+,	ContentBytesLength(0)
 ,	ElapsedTime(0.0f)
+,	LastReportedBytesWritten(0)
+,	LastReportedBytesRead(0)
 {
 	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpRequest::FAppleHttpRequest()"));
 	Request = [[NSMutableURLRequest alloc] init];
-	Request.timeoutInterval = FHttpModule::Get().GetHttpTimeout();
+	float HttpConnectionTimeout = FHttpModule::Get().GetHttpConnectionTimeout();
+	check(HttpConnectionTimeout > 0.0f);
+	Request.timeoutInterval = HttpConnectionTimeout;
 
 	// Disable cache to mimic WinInet behavior
 	Request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
@@ -50,21 +475,15 @@ FAppleHttpRequest::FAppleHttpRequest()
 	{
 		SetHeader(It.Key(), It.Value());
 	}
-
-#if WITH_SSL
-	// Make sure the module is loaded on the game thread before being used by FHttpResponseAppleWrapper, which will be called on the main thread
-	FSslModule::Get();
-#endif
 }
-
 
 FAppleHttpRequest::~FAppleHttpRequest()
 {
 	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpRequest::~FAppleHttpRequest()"));
-	check(Connection == nullptr);
+	PostProcess();
 	[Request release];
+    [Session release];
 }
-
 
 FString FAppleHttpRequest::GetURL() const
 {
@@ -83,40 +502,12 @@ FString FAppleHttpRequest::GetURL() const
 	}
 }
 
-
 void FAppleHttpRequest::SetURL(const FString& URL)
 {
 	SCOPED_AUTORELEASE_POOL;
 	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpRequest::SetURL() - %s"), *URL);
 	Request.URL = [NSURL URLWithString: URL.GetNSString()];
 }
-
-
-FString FAppleHttpRequest::GetURLParameter(const FString& ParameterName) const
-{
-	SCOPED_AUTORELEASE_POOL;
-	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpRequest::GetURLParameter() - %s"), *ParameterName);
-
-	NSRange ParametersStart = [Request.URL.query rangeOfString:@"?"];
-	if (ParametersStart.location != NSNotFound && ParametersStart.length > 0)
-	{
-		NSString* ParametersStr = [Request.URL.query substringFromIndex:ParametersStart.location + 1];
-		NSString* ParameterNameStr = ParameterName.GetNSString();
-		NSArray* Parameters = [ParametersStr componentsSeparatedByString:@"&"];
-		for (NSString* Parameter in Parameters)
-		{
-			NSArray* KeyValue = [Parameter componentsSeparatedByString:@"="];
-			NSString* Key = KeyValue[0];
-			if ([Key compare:ParameterNameStr] == NSOrderedSame)
-			{
-				return FString(KeyValue[1]);
-			}
-		}
-	}
-
-	return FString();
-}
-
 
 FString FAppleHttpRequest::GetHeader(const FString& HeaderName) const
 {
@@ -142,7 +533,7 @@ void FAppleHttpRequest::AppendToHeader(const FString& HeaderName, const FString&
         NSString* PreviousHeaderValuePtr = [Headers objectForKey: HeaderName.GetNSString()];
         FString PreviousValue(PreviousHeaderValuePtr);
 		FString NewValue;
-		if (PreviousValue != nullptr && !PreviousValue.IsEmpty())
+		if (!PreviousValue.IsEmpty())
 		{
 			NewValue = PreviousValue + TEXT(", ");
 		}
@@ -170,26 +561,22 @@ TArray<FString> FAppleHttpRequest::GetAllHeaders() const
 	return Result;
 }
 
-
 const TArray<uint8>& FAppleHttpRequest::GetContent() const
 {
 	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpRequest::GetContent()"));
+	StorageForGetContent.Empty();
 	if (bIsPayloadFile)
 	{
 		UE_LOG(LogHttp, Warning, TEXT("FAppleHttpRequest::GetContent() called on a request that is set up for streaming a file. Return value is an empty buffer"));
-		RequestPayload.Empty();
-		return RequestPayload;
 	}
 	else
 	{
 		SCOPED_AUTORELEASE_POOL;
-		NSData* Body = Request.HTTPBody; // accessing HTTPBody will call copy on the value, increasing its retain count
-		RequestPayload.Empty();
-		RequestPayload.Append((const uint8*)Body.bytes, Body.length);
-		return RequestPayload;
+		NSData* Body = Request.HTTPBody; // accessing HTTPBody will call retain autorelease on the value, increasing its retain count
+		StorageForGetContent.Append((const uint8*)Body.bytes, Body.length);
 	}
+	return StorageForGetContent;
 }
-
 
 void FAppleHttpRequest::SetContent(const TArray<uint8>& ContentPayload)
 {
@@ -200,13 +587,11 @@ void FAppleHttpRequest::SetContent(const TArray<uint8>& ContentPayload)
 	}
 
 	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpRequest::SetContent()"));
+	Request.HTTPBodyStream = nil;
 	Request.HTTPBody = [NSData dataWithBytes:ContentPayload.GetData() length:ContentPayload.Num()];
-	RequestPayloadByteLength = ContentPayload.Num();
+	ContentBytesLength = ContentPayload.Num();
 	bIsPayloadFile = false;
-
-	ContentData.Empty();
 }
-
 
 void FAppleHttpRequest::SetContent(TArray<uint8>&& ContentPayload)
 {
@@ -217,13 +602,17 @@ void FAppleHttpRequest::SetContent(TArray<uint8>&& ContentPayload)
 	}
 
 	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpRequest::SetContent()"));
-	ContentData = MoveTemp(ContentPayload);
 
-	Request.HTTPBody = [NSData dataWithBytesNoCopy:ContentData.GetData() length:ContentData.Num() freeWhenDone:false];
-	RequestPayloadByteLength = ContentData.Num();
+	Request.HTTPBodyStream = nil;
+	// We cannot use NSData dataWithBytesNoCopy:length:freeWhenDone: and keep the data in this instance because we don't have control
+	// over the lifetime of the request copy that NSURLSessionTask keeps
+	Request.HTTPBody = [NSData dataWithBytes:ContentPayload.GetData() length:ContentPayload.Num()];
+	ContentBytesLength = ContentPayload.Num();
 	bIsPayloadFile = false;
-}
 
+	// Clear argument content since client code probably expects that
+	ContentPayload.Empty();
+}
 
 FString FAppleHttpRequest::GetContentType() const
 {
@@ -232,13 +621,11 @@ FString FAppleHttpRequest::GetContentType() const
 	return ContentType;
 }
 
-
-int32 FAppleHttpRequest::GetContentLength() const
+uint64 FAppleHttpRequest::GetContentLength() const
 {
-	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpRequest::GetContentLength() - %i"), RequestPayloadByteLength);
-	return RequestPayloadByteLength;
+	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpRequest::GetContentLength() - %i"), ContentBytesLength);
+	return ContentBytesLength;
 }
-
 
 void FAppleHttpRequest::SetContentAsString(const FString& ContentString)
 {
@@ -251,12 +638,11 @@ void FAppleHttpRequest::SetContentAsString(const FString& ContentString)
 	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpRequest::SetContentAsString() - %s"), *ContentString);
 	FTCHARToUTF8 Converter(*ContentString);
 
+	Request.HTTPBodyStream = nil;
 	// The extra length computation here is unfortunate, but it's technically not safe to assume the length is the same.
 	Request.HTTPBody = [NSData dataWithBytes:(ANSICHAR*)Converter.Get() length:Converter.Length()];
-	RequestPayloadByteLength = Converter.Length();
+	ContentBytesLength = Converter.Length();
 	bIsPayloadFile = false;
-
-	ContentData.Empty();
 }
 
 bool FAppleHttpRequest::SetContentAsStreamedFile(const FString& Filename)
@@ -273,36 +659,45 @@ bool FAppleHttpRequest::SetContentAsStreamedFile(const FString& Filename)
 	NSString* PlatformFilename = Filename.GetNSString();
 
 	Request.HTTPBody = nil;
-	ContentData.Empty();
 
 	struct stat FileAttrs = { 0 };
 	if (stat(PlatformFilename.fileSystemRepresentation, &FileAttrs) == 0)
 	{
-		UE_LOG(LogHttp, VeryVerbose, TEXT("FAppleHttpRequest::SetContentAsStreamedFile succeeded in getting the file size - %d"), FileAttrs.st_size);
+		UE_LOG(LogHttp, VeryVerbose, TEXT("FAppleHttpRequest::SetContentAsStreamedFile succeeded in getting the file size - %lld"), FileAttrs.st_size);
 		// Under the hood, the Foundation framework unsets HTTPBody, and takes over as the stream delegate.
 		// The stream itself should be unopened when passed to setHTTPBodyStream.
 		Request.HTTPBodyStream = [NSInputStream inputStreamWithFileAtPath: PlatformFilename];
-		RequestPayloadByteLength = FileAttrs.st_size;
+		ContentBytesLength = FileAttrs.st_size;
 		bIsPayloadFile = true;
 	}
 	else
 	{
-		UE_LOG(LogHttp, VeryVerbose, TEXT("FAppleHttpRequest::SetContentAsStreamedFile failed to get file size"));
+		UE_LOG(LogHttp, Warning, TEXT("FAppleHttpRequest::SetContentAsStreamedFile failed to get file size"));
 		Request.HTTPBodyStream = nil;
-		RequestPayloadByteLength = 0;
+		ContentBytesLength = 0;
 		bIsPayloadFile = false;
 	}
 
 	return bIsPayloadFile;
 }
 
-
 bool FAppleHttpRequest::SetContentFromStream(TSharedRef<FArchive, ESPMode::ThreadSafe> Stream)
 {
-	UE_LOG(LogHttp, Warning, TEXT("FAppleHttpRequest::SetContentFromStream is not implemented"));
-	return false;
-}
+	SCOPED_AUTORELEASE_POOL;
+	if (CompletionStatus == EHttpRequestStatus::Processing)
+	{
+		UE_LOG(LogHttp, Warning, TEXT("FAppleHttpRequest::SetContentFromStream() - attempted to set content on a request that is inflight"));
+		return false;
+	}
 
+	Request.HTTPBody = nil;
+
+	Request.HTTPBodyStream = [FNSInputStreamFromArchive initWithArchive: Stream];
+	ContentBytesLength = Stream->TotalSize();
+	bIsPayloadFile = true;
+
+	return true;
+}
 
 FString FAppleHttpRequest::GetVerb() const
 {
@@ -311,7 +706,6 @@ FString FAppleHttpRequest::GetVerb() const
 	return ConvertedVerb;
 }
 
-
 void FAppleHttpRequest::SetVerb(const FString& Verb)
 {
 	SCOPED_AUTORELEASE_POOL;
@@ -319,81 +713,31 @@ void FAppleHttpRequest::SetVerb(const FString& Verb)
 	Request.HTTPMethod = Verb.GetNSString();
 }
 
-void FAppleHttpRequest::SetTimeout(float InTimeoutSecs)
-{
-	Request.timeoutInterval = InTimeoutSecs;
-}
-
-void FAppleHttpRequest::ClearTimeout()
-{
-	Request.timeoutInterval = FHttpModule::Get().GetHttpTimeout();
-}
-
-TOptional<float> FAppleHttpRequest::GetTimeout() const
-{
-	return TOptional<float>(Request.timeoutInterval);
-}
-
 bool FAppleHttpRequest::ProcessRequest()
 {
 	SCOPED_AUTORELEASE_POOL;
 	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpRequest::ProcessRequest()"));
-	bool bStarted = false;
 
-	FString Scheme(Request.URL.scheme);
-	Scheme = Scheme.ToLower();
+	if (!PreProcess())
+	{
+		return false;
+	}
+	
+	AppleHTTPRequestInternal::UpdateConfigFromCVar();
 
-	// Prevent overlapped requests using the same instance
-	if (CompletionStatus == EHttpRequestStatus::Processing)
-	{
-		UE_LOG(LogHttp, Warning, TEXT("ProcessRequest failed. Still processing last request."));
-	}
-	else if(GetURL().Len() == 0)
-	{
-		UE_LOG(LogHttp, Warning, TEXT("ProcessRequest failed. No URL was specified."));
-	}
-	else if( Scheme != TEXT("http") && Scheme != TEXT("https"))
-	{
-		UE_LOG(LogHttp, Warning, TEXT("ProcessRequest failed. URL '%s' is not a valid HTTP request. %p"), *GetURL(), this);
-	}
-	else if (!FHttpModule::Get().GetHttpManager().IsDomainAllowed(GetURL()))
-	{
-		UE_LOG(LogHttp, Warning, TEXT("ProcessRequest failed. URL '%s' is not using a whitelisted domain. %p"), *GetURL(), this);
-	}
-	else
-	{
-		bStarted = StartRequest();
-	}
-
-	if( !bStarted )
-	{
-		// Ensure we run on game thread
-		if (!IsInGameThread())
-		{
-			FHttpModule::Get().GetHttpManager().AddGameThreadTask([StrongThis = StaticCastSharedRef<FAppleHttpRequest>(AsShared())]()
-			{
-				StrongThis->FinishedRequest();
-			});
-		}
-		else
-		{
-			FinishedRequest();
-		}
-	}
-
-	return bStarted;
+	return true;
 }
 
-bool FAppleHttpRequest::StartRequest()
+bool FAppleHttpRequest::SetupRequest()
 {
 	SCOPED_AUTORELEASE_POOL;
-	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpRequest::StartRequest()"));
+	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpRequest::SetupRequest()"));
 	bool bStarted = false;
 
-	// set the content-length and user-agent
+	// set the content-length and user-agent (it is possible that the OS ignores this value)
 	if(GetContentLength() > 0)
 	{
-		[Request setValue:[NSString stringWithFormat:@"%d", GetContentLength()] forHTTPHeaderField:@"Content-Length"];
+		[Request setValue:[NSString stringWithFormat:@"%llu", GetContentLength()] forHTTPHeaderField:@"Content-Length"];
 	}
 
 	const FString UserAgent = GetHeader("User-Agent");
@@ -403,143 +747,140 @@ bool FAppleHttpRequest::StartRequest()
 		[Request setValue:Tag forHTTPHeaderField:@"User-Agent"];
 	}
 
-	Response = MakeShareable( new FAppleHttpResponse( *this ) );
+	PostProcess();
 
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-	// Create the connection, tell it to run in the main run loop, and kick it off.
-	Connection = [[NSURLConnection alloc] initWithRequest:Request delegate:Response->ResponseWrapper startImmediately:NO];
-#pragma clang diagnostic pop
-	if (Connection != nullptr && Response->ResponseWrapper != nullptr)
+	LastReportedBytesWritten = 0;
+	LastReportedBytesRead = 0;
+	ElapsedTime = 0.0f;
+
+	Task = [Session dataTaskWithRequest: Request];
+	
+	if (Task != nil)
 	{
-		CompletionStatus = EHttpRequestStatus::Processing;
-		[Connection scheduleInRunLoop:[NSRunLoop mainRunLoop] forMode:NSDefaultRunLoopMode];
-		[Connection start];
-		UE_LOG(LogHttp, Verbose, TEXT("[Connection start]"));
-
 		bStarted = true;
-		// Add to global list while being processed so that the ref counted request does not get deleted
-		FHttpModule::Get().GetHttpManager().AddRequest(SharedThis(this));
+
+		SetStatus(EHttpRequestStatus::Processing);
+		SetFailureReason(EHttpFailureReason::None);
+
+		TSharedPtr<FAppleHttpResponse> Response = MakeShared<FAppleHttpResponse>(*this);
+		ResponseCommon = Response;
+
+		// Both Task and Response keep a strong reference to the delegate
+		Task.delegate = Response->ResponseDelegate;
+
+		//Setup delegates before starting the request
+		FHttpModule::Get().GetHttpManager().AddThreadedRequest(SharedThis(this));
+
+		[[Task retain] resume];
+		UE_LOG(LogHttp, Verbose, TEXT("[NSURLSessionTask resume]"));
 	}
 	else
 	{
 		UE_LOG(LogHttp, Warning, TEXT("ProcessRequest failed. Could not initialize Internet connection."));
-		CompletionStatus = EHttpRequestStatus::Failed_ConnectionError;
+		SetStatus(EHttpRequestStatus::Failed);
+		SetFailureReason(EHttpFailureReason::ConnectionError);
 	}
-	StartRequestTime = FPlatformTime::Seconds();
-	// reset the elapsed time.
-	ElapsedTime = 0.0f;
 
 	return bStarted;
 }
 
-void FAppleHttpRequest::FinishedRequest()
+void FAppleHttpRequest::FinishRequest()
 {
-	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpRequest::FinishedRequest()"));
-	ElapsedTime = (float)(FPlatformTime::Seconds() - StartRequestTime);
-	if( Response.IsValid() && Response->IsReady() && !Response->HadError())
-	{
-		UE_LOG(LogHttp, Verbose, TEXT("Request succeeded"));
-		CompletionStatus = EHttpRequestStatus::Succeeded;
+	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpRequest::FinishRequest()"));
 
-		// TODO: Try to broadcast OnHeaderReceived when we receive headers instead of here at the end
-		BroadcastResponseHeadersReceived();
-		OnProcessRequestComplete().ExecuteIfBound(SharedThis(this), Response, true);
+	PostProcess();
+
+	TSharedPtr<FAppleHttpResponse> Response = StaticCastSharedPtr<FAppleHttpResponse>(ResponseCommon);
+	bool bSucceeded = (Response && Response->GetStatusFromDelegate() == EHttpRequestStatus::Succeeded);
+	UE_LOG(LogHttp, Verbose, TEXT("Request %s"), bSucceeded ? TEXT("succeeded") : TEXT("failed"));
+	SetStatus(bSucceeded ? EHttpRequestStatus::Succeeded : EHttpRequestStatus::Failed);
+
+	if (!bSucceeded)
+	{
+		EHttpFailureReason Reason = EHttpFailureReason::Other;
+		if (Response)
+		{
+			Reason = Response->GetFailureReasonFromDelegate();
+			if (Reason == EHttpFailureReason::Cancelled && bTimedOut)
+			{
+				Reason = EHttpFailureReason::TimedOut;
+			}
+		}
+		SetFailureReason(Reason);
+
+		if (GetFailureReason() == EHttpFailureReason::ConnectionError)
+		{
+			Response = nullptr;
+		}
 	}
 	else
 	{
-		UE_LOG(LogHttp, Verbose, TEXT("Request failed"));
-		FString URL([[Request URL] absoluteString]);
-		CompletionStatus = EHttpRequestStatus::Failed;
-		if (Response.IsValid() && [Response->ResponseWrapper bIsHostConnectionFailure])
+		if (AppleHTTPRequestInternal::ShouldReadHeadersWhenComplete(GetURL()))
 		{
-			CompletionStatus = EHttpRequestStatus::Failed_ConnectionError;
+			BroadcastResponseHeadersReceived();
 		}
-
-		Response = nullptr;
-		OnProcessRequestComplete().ExecuteIfBound(SharedThis(this), nullptr, false);
 	}
 
-	// Clean up session/request handles that may have been created
-	CleanupRequest();
-
-	// Remove from global list since processing is now complete
-	if (FHttpModule::Get().GetHttpManager().IsValidRequest(this))
-	{
-		FHttpModule::Get().GetHttpManager().RemoveRequest(SharedThis(this));
-	}
+	OnProcessRequestComplete().ExecuteIfBound(SharedThis(this), Response, bSucceeded);
 }
-
 
 void FAppleHttpRequest::CleanupRequest()
 {
 	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpRequest::CleanupRequest()"));
-
-	if(CompletionStatus == EHttpRequestStatus::Processing)
-	{
-		CancelRequest();
-	}
-
-	if(Connection != nullptr)
-	{
-		[Connection release];
-		Connection = nullptr;
-	}
-}
-
-
-void FAppleHttpRequest::CancelRequest()
-{
 	
-	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpRequest::CancelRequest()"));
-	if(Connection != nullptr)
+	TSharedPtr<FAppleHttpResponse> Response = StaticCastSharedPtr<FAppleHttpResponse>(ResponseCommon);
+	if (Response != nullptr)
 	{
-		[Connection cancel];
+		Response->CleanSharedObjects();
 	}
 
-	// Ensure we run on game thread
-	if (!IsInGameThread())
+	if(Task != nil)
 	{
-		FHttpModule::Get().GetHttpManager().AddGameThreadTask([StrongThis = StaticCastSharedRef<FAppleHttpRequest>(AsShared())]()
+		if (CompletionStatus == EHttpRequestStatus::Processing)
 		{
-			StrongThis->FinishedRequest();
-		});
+			[Task cancel];
+		}
+		[Task release];
+		Task = nil;
 	}
-	else
+}
+
+void FAppleHttpRequest::AbortRequest()
+{
+	if (Task != nil)
 	{
-		FinishedRequest();
+		[Task cancel];
 	}
-}
-
-
-EHttpRequestStatus::Type FAppleHttpRequest::GetStatus() const
-{
-	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpRequest::GetStatus()"));
-	return CompletionStatus;
-}
-
-
-const FHttpResponsePtr FAppleHttpRequest::GetResponse() const
-{
-	return Response;
 }
 
 void FAppleHttpRequest::Tick(float DeltaSeconds)
 {
-	if (Response.IsValid() && (CompletionStatus == EHttpRequestStatus::Processing || Response->HadError()))
+	if (DelegateThreadPolicy == EHttpRequestDelegateThreadPolicy::CompleteOnGameThread)
 	{
-		if (OnRequestProgress().IsBound())
+		CheckProgressDelegate();
+	}
+}
+
+bool FAppleHttpRequest::IsInitializedWithValidStream() const
+{ 
+	return bInitializedWithValidStream;
+}
+
+void FAppleHttpRequest::CheckProgressDelegate()
+{
+	TSharedPtr<FAppleHttpResponse> Response = StaticCastSharedPtr<FAppleHttpResponse>(ResponseCommon);
+	if (Response.IsValid() && (CompletionStatus == EHttpRequestStatus::Processing || Response->GetStatusFromDelegate() == EHttpRequestStatus::Failed))
+	{
+		const uint64 BytesWritten = Response->GetNumBytesWritten();
+		const uint64 BytesRead = Response->GetNumBytesReceived();
+		if (BytesWritten != LastReportedBytesWritten || BytesRead != LastReportedBytesRead)
 		{
-			const int32 BytesWritten = Response->GetNumBytesWritten();
-			const int32 BytesRead = Response->GetNumBytesReceived();
-			if (BytesWritten > 0 || BytesRead > 0)
-			{
-				OnRequestProgress().ExecuteIfBound(SharedThis(this), BytesWritten, BytesRead);
-			}
-		}
-		if (Response->IsReady())
-		{
-			FinishedRequest();
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+			OnRequestProgress().ExecuteIfBound(SharedThis(this), BytesWritten, BytesRead);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+			OnRequestProgress64().ExecuteIfBound(SharedThis(this), BytesWritten, BytesRead);
+			LastReportedBytesWritten = BytesWritten;
+			LastReportedBytesRead = BytesRead;
 		}
 	}
 }
@@ -549,387 +890,77 @@ float FAppleHttpRequest::GetElapsedTime() const
 	return ElapsedTime;
 }
 
-
-/****************************************************************************
- * FHttpResponseAppleWrapper implementation
- ***************************************************************************/
-
-@implementation FHttpResponseAppleWrapper
-@synthesize Response;
-@synthesize bIsReady;
-@synthesize bHadError;
-@synthesize bIsHostConnectionFailure;
-@synthesize BytesWritten;
-
-
--(FHttpResponseAppleWrapper*) init
+bool FAppleHttpRequest::StartThreadedRequest()
 {
-	UE_LOG(LogHttp, Verbose, TEXT("-(FHttpResponseAppleWrapper*) init"));
-	self = [super init];
-	bIsReady = false;
-	bHadError = false;
-	bIsHostConnectionFailure = false;
-	
-	return self;
+	return true;
 }
 
-- (void)dealloc
+bool FAppleHttpRequest::IsThreadedRequestComplete()
 {
-	[Response release];
-	[super dealloc];
+	TSharedPtr<FAppleHttpResponse> Response = StaticCastSharedPtr<FAppleHttpResponse>(ResponseCommon);
+	return (Response.IsValid() && Response->IsReady());
 }
 
--(void) connection:(NSURLConnection *)connection didSendBodyData:(NSInteger)bytesWritten totalBytesWritten:(NSInteger)totalBytesWritten totalBytesExpectedToWrite:(NSInteger)totalBytesExpectedToWrite
+void FAppleHttpRequest::TickThreadedRequest(float DeltaSeconds)
 {
-	UE_LOG(LogHttp, Verbose, TEXT("didSendBodyData:(NSInteger)bytesWritten totalBytes:Written:(NSInteger)totalBytesWritten totalBytesExpectedToWrite:(NSInteger)totalBytesExpectedToWrite"));
-	self.BytesWritten = totalBytesWritten;
-	UE_LOG(LogHttp, Verbose, TEXT("didSendBodyData: totalBytesWritten = %d, totalBytesExpectedToWrite = %d: %p"), totalBytesWritten, totalBytesExpectedToWrite, self);
-}
+	ElapsedTime += DeltaSeconds;
 
--(void) connection:(NSURLConnection *)connection didReceiveResponse:(NSURLResponse *)response
-{
-	UE_LOG(LogHttp, Verbose, TEXT("didReceiveResponse:(NSURLResponse *)response"));
-	self.Response = (NSHTTPURLResponse*)response;
-	
-	// presize the payload container if possible
-	Payload.Empty([response expectedContentLength] != NSURLResponseUnknownLength ? [response expectedContentLength] : 0);
-	UE_LOG(LogHttp, Verbose, TEXT("didReceiveResponse: expectedContentLength = %d. Length = %d: %p"), [response expectedContentLength], Payload.Max(), self);
-}
-
-
--(void) connection:(NSURLConnection *)connection didReceiveData:(NSData *)data
-{
-	Payload.Append((const uint8*)[data bytes], [data length]);
-	UE_LOG(LogHttp, Verbose, TEXT("didReceiveData with %d bytes. After Append, Payload Length = %d: %p"), [data length], Payload.Num(), self);
-}
-
-
--(void) connection:(NSURLConnection *)connection didFailWithError:(NSError *)error
-{
-	self.bIsReady = YES;
-	self.bHadError = YES;
-	UE_LOG(LogHttp, Warning, TEXT("didFailWithError. Http request failed - %s %s: %p"), 
-		*FString([error localizedDescription]),
-		*FString([[error userInfo] objectForKey:NSURLErrorFailingURLStringErrorKey]),
-		self);
-	// Determine if the specific error was failing to connect to the host.
-	switch ([error code])
+	if (DelegateThreadPolicy == EHttpRequestDelegateThreadPolicy::CompleteOnHttpThread)
 	{
-		case NSURLErrorCannotFindHost:
-		case NSURLErrorCannotConnectToHost:
-		case NSURLErrorDNSLookupFailed:
-			self.bIsHostConnectionFailure = YES;
-	}
-	// Log more details if verbose logging is enabled and this is an SSL error
-	if (UE_LOG_ACTIVE(LogHttp, Verbose))
-	{
-		SecTrustRef PeerTrustInfo = reinterpret_cast<SecTrustRef>([[error userInfo] objectForKey:NSURLErrorFailingURLPeerTrustErrorKey]);
-		if (PeerTrustInfo != nullptr)
-		{
-			SecTrustResultType TrustResult = kSecTrustResultInvalid;
-			SecTrustGetTrustResult(PeerTrustInfo, &TrustResult);
-
-			FString TrustResultString;
-			switch (TrustResult)
-			{
-#define MAP_TO_RESULTSTRING(Constant) case Constant: TrustResultString = TEXT(#Constant); break;
-			MAP_TO_RESULTSTRING(kSecTrustResultInvalid)
-			MAP_TO_RESULTSTRING(kSecTrustResultProceed)
-			MAP_TO_RESULTSTRING(kSecTrustResultDeny)
-			MAP_TO_RESULTSTRING(kSecTrustResultUnspecified)
-			MAP_TO_RESULTSTRING(kSecTrustResultRecoverableTrustFailure)
-			MAP_TO_RESULTSTRING(kSecTrustResultFatalTrustFailure)
-			MAP_TO_RESULTSTRING(kSecTrustResultOtherError)
-#undef MAP_TO_RESULTSTRING
-			default:
-				TrustResultString = TEXT("unknown");
-				break;
-			}
-			UE_LOG(LogHttp, Verbose, TEXT("didFailWithError. SSL trust result: %s (%d)"), *TrustResultString, TrustResult);
-		}
+		CheckProgressDelegate();
 	}
 }
 
-#if WITH_SSL
-// CC gives the actual key, but strips the ASN.1 header... which means
-// we can't calulate a proper SPKI hash without reconstructing it. sigh.
-static const unsigned char rsa2048Asn1Header[] =
-{
-    0x30, 0x82, 0x01, 0x22, 0x30, 0x0d, 0x06, 0x09,
-    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01,
-    0x01, 0x05, 0x00, 0x03, 0x82, 0x01, 0x0f, 0x00
-};
-static const unsigned char rsa4096Asn1Header[] =
-{
-    0x30, 0x82, 0x02, 0x22, 0x30, 0x0d, 0x06, 0x09,
-    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01,
-    0x01, 0x05, 0x00, 0x03, 0x82, 0x02, 0x0f, 0x00
-};
-static const unsigned char ecdsaSecp256r1Asn1Header[] =
-{
-    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86,
-    0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a,
-    0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03,
-    0x42, 0x00
-};
-static const unsigned char ecdsaSecp384r1Asn1Header[] =
-{
-    0x30, 0x76, 0x30, 0x10, 0x06, 0x07, 0x2a, 0x86,
-    0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x05, 0x2b,
-    0x81, 0x04, 0x00, 0x22, 0x03, 0x62, 0x00
-};
-
--(void) connection:(NSURLConnection *)connection willSendRequestForAuthenticationChallenge: (NSURLAuthenticationChallenge *)challenge
-{
-    if (ensure(ISslCertificateManager::PUBLIC_KEY_DIGEST_SIZE == CC_SHA256_DIGEST_LENGTH))
-    {
-        // we only care about challenges to the received certificate chain
-        if ([challenge.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust])
-        {
-            SecTrustRef RemoteTrust = challenge.protectionSpace.serverTrust;
-            FString RemoteHost = FString(UTF8_TO_TCHAR([challenge.protectionSpace.host UTF8String]));
-            if ((RemoteTrust == NULL) || (RemoteHost.IsEmpty()))
-            {
-                UE_LOG(LogHttp, Error, TEXT("failed certificate pinning validation: could not parse parameters during certificate pinning evaluation"));
-                [challenge.sender cancelAuthenticationChallenge: challenge];
-                return;
-            }
-
-#if USE_DEPRECATED_SECTRUST
-			// we check the default trust to verify against the system roots before we dig deeper
-			SecTrustResultType DefaultTrustResult;
-			if (SecTrustEvaluate(RemoteTrust, &DefaultTrustResult) != errSecSuccess)
-			{
-				UE_LOG(LogHttp, Error, TEXT("failed certificate pinning validation: could not evaluate default trust parameters for domain '%s'"), *RemoteHost);
-				[challenge.sender cancelAuthenticationChallenge: challenge];
-				return;
-			}
-
-			if ((DefaultTrustResult != kSecTrustResultProceed) && (DefaultTrustResult != kSecTrustResultUnspecified))
-			{
-				UE_LOG(LogHttp, Error, TEXT("failed certificate pinning validation: default certificate trust evaluation failed for domain '%s'"), *RemoteHost);
-				[challenge.sender cancelAuthenticationChallenge: challenge];
-				return;
-			}
-#else
-			if (!SecTrustEvaluateWithError(RemoteTrust, nil))
-			{
-				UE_LOG(LogHttp, Error, TEXT("failed certificate pinning validation: default certificate trust evaluation failed for domain '%s'"), *RemoteHost);
-				[challenge.sender cancelAuthenticationChallenge: challenge];
-				return;
-			}
-#endif            
-            // look at all certs in the remote chain and calculate the SHA256 hash of their DER-encoded SPKI
-            // the chain starts with the server's cert itself, so walk backwards to optimize for roots first
-            TArray<TArray<uint8, TFixedAllocator<ISslCertificateManager::PUBLIC_KEY_DIGEST_SIZE>>> CertDigests;
-            
-            CFIndex NumCerts = SecTrustGetCertificateCount(RemoteTrust);
-            for (int i = static_cast<int>(NumCerts) - 1; i >= 0; i--)
-            {
-                SecCertificateRef Cert = SecTrustGetCertificateAtIndex(RemoteTrust, i);
-                
-                // this is not great, but the only way to extract a public key from a SecCertificateRef
-                // is to create an individual SecTrustRef for each cert that only contains itself and then
-                // evaluate that against an empty X509 policy.
-                TCFRef<SecTrustRef> CertTrust;
-                TCFRef<SecPolicyRef> TrustPolicy = SecPolicyCreateBasicX509();
-                SecTrustCreateWithCertificates(Cert, TrustPolicy, CertTrust.GetForAssignment());
-#if USE_DEPRECATED_SECTRUST
-                SecTrustResultType CertEvalResult;
-                SecTrustEvaluate(CertTrust, &CertEvalResult);
-#else
-                SecTrustEvaluateWithError(CertTrust, nil);
-#endif
-                TCFRef<SecKeyRef> CertPubKey = SecTrustCopyPublicKey(CertTrust);
-				TCFRef<CFDataRef> CertPubKeyData = SecKeyCopyExternalRepresentation(CertPubKey, NULL);
-                if (!CertPubKeyData)
-                {
-                    UE_LOG(LogHttp, Warning, TEXT("could not extract public key from certificate %i for domain '%s'; skipping!"), i, *RemoteHost);
-                    continue;
-                }
-                
-				// we got the key. now we have to figure out what type of key it is; thanks, CommonCrypto.
-                TCFRef<CFDictionaryRef> CertPubKeyAttr = SecKeyCopyAttributes(CertPubKey);
-                NSString *CertPubKeyType = static_cast<NSString *>(CFDictionaryGetValue(CertPubKeyAttr, kSecAttrKeyType));
-                NSNumber *CertPubKeySize = static_cast<NSNumber *>(CFDictionaryGetValue(CertPubKeyAttr, kSecAttrKeySizeInBits));
-                char *CertPubKeyASN1Header;
-                uint8_t CertPubKeyASN1HeaderSize = 0;
-                if ([CertPubKeyType isEqualToString: (NSString *)kSecAttrKeyTypeRSA])
-                {
-                    switch ([CertPubKeySize integerValue])
-                    {
-                        case 2048:
-                            UE_LOG(LogHttp, VeryVerbose, TEXT("found 2048 bit RSA pubkey"));
-                            CertPubKeyASN1Header = (char *)rsa2048Asn1Header;
-                            CertPubKeyASN1HeaderSize = sizeof(rsa2048Asn1Header);
-                            break;
-                        case 4096:
-                            UE_LOG(LogHttp, VeryVerbose, TEXT("found 4096 bit RSA pubkey"));
-                            CertPubKeyASN1Header = (char *)rsa4096Asn1Header;
-                            CertPubKeyASN1HeaderSize = sizeof(rsa4096Asn1Header);
-                            break;
-                        default:
-                            UE_LOG(LogHttp, Log, TEXT("unsupported RSA key length %i for certificate %i for domain '%s'; skipping!"), [CertPubKeySize integerValue], i, *RemoteHost);
-                            continue;
-                    }
-                }
-                else if ([CertPubKeyType isEqualToString: (NSString *)kSecAttrKeyTypeECSECPrimeRandom])
-                {
-                    switch ([CertPubKeySize integerValue])
-                    {
-                        case 256:
-                            UE_LOG(LogHttp, VeryVerbose, TEXT("found 256 bit ECDSA pubkey"));
-                            CertPubKeyASN1Header = (char *)ecdsaSecp256r1Asn1Header;
-                            CertPubKeyASN1HeaderSize = sizeof(ecdsaSecp256r1Asn1Header);
-                            break;
-                        case 384:
-                            UE_LOG(LogHttp, VeryVerbose, TEXT("found 384 bit ECDSA pubkey"));
-                            CertPubKeyASN1Header = (char *)ecdsaSecp384r1Asn1Header;
-                            CertPubKeyASN1HeaderSize = sizeof(ecdsaSecp384r1Asn1Header);
-                            break;
-                        default:
-                            UE_LOG(LogHttp, Log, TEXT("unsupported ECDSA key length %i for certificate %i for domain '%s'; skipping!"), [CertPubKeySize integerValue], i, *RemoteHost);
-                            continue;
-                    }
-                }
-                else {
-                    UE_LOG(LogHttp, Log, TEXT("unsupported key type (not RSA or ECDSA) for certificate %i for domain '%s'; skipping!"), i, *RemoteHost);
-                    continue;
-                }
-				
-                UE_LOG(LogHttp, VeryVerbose, TEXT("constructed key header: [%d] %s"), CertPubKeyASN1HeaderSize, UTF8_TO_TCHAR([[[NSData dataWithBytes:CertPubKeyASN1Header length:CertPubKeyASN1HeaderSize] description] UTF8String]));
-                UE_LOG(LogHttp, VeryVerbose, TEXT("current pubkey: [%d] %s"), [(NSData*)CertPubKeyData length], UTF8_TO_TCHAR([[[NSData dataWithBytes:[(NSData*)CertPubKeyData bytes] length:[(NSData*)CertPubKeyData length]] description] UTF8String]));
-                
-                // smash 'em together to get a proper key with an ASN.1 header
-                NSMutableData *ReconstructedPubKey = [NSMutableData data];
-                [ReconstructedPubKey appendBytes:CertPubKeyASN1Header length:CertPubKeyASN1HeaderSize];
-                [ReconstructedPubKey appendData:CertPubKeyData];
-                UE_LOG(LogHttp, VeryVerbose, TEXT("reconstructed key: [%d] %s"), [ReconstructedPubKey length], UTF8_TO_TCHAR([[ReconstructedPubKey description] UTF8String]));
-                
-                TArray<uint8, TFixedAllocator<ISslCertificateManager::PUBLIC_KEY_DIGEST_SIZE>> CertCalcDigest;
-                CertCalcDigest.AddUninitialized(CC_SHA256_DIGEST_LENGTH);
-                if (!CC_SHA256([ReconstructedPubKey bytes], (CC_LONG)[ReconstructedPubKey length], CertCalcDigest.GetData()))
-                {
-                    UE_LOG(LogHttp, Warning, TEXT("could not calculate SHA256 digest of public key %d for domain '%s'; skipping!"), i, *RemoteHost);
-                }
-                else
-                {
-                    CertDigests.Add(CertCalcDigest);
-                    UE_LOG(LogHttp, Verbose, TEXT("added SHA256 digest to list for evaluation: domain: '%s' digest: [%d] %s"), *RemoteHost, CertCalcDigest.Num(), UTF8_TO_TCHAR([[[NSData dataWithBytes:CertCalcDigest.GetData() length:CertCalcDigest.Num()] description] UTF8String]));
-                }
-            }
-            
-            //finally, see if any of the pubkeys in the chain match any of our pinned pubkey hashes
-            if (CertDigests.Num() <= 0 || !FSslModule::Get().GetCertificateManager().VerifySslCertificates(CertDigests, RemoteHost))
-            {
-                // we could not validate any of the provided certs in chain with the pinned hashes for this host
-                // so we tell the sender to cancel (which cancels the pending connection)
-                UE_LOG(LogHttp, Error, TEXT("failed certificate pinning validation: no SPKI hashes in request matched pinned hashes for domain '%s' (was provided %d certificates in request)"), *RemoteHost, CertDigests.Num());
-                [challenge.sender cancelAuthenticationChallenge:challenge];
-                return;
-            }
-        }
-    }
-    else
-    {
-        UE_LOG(LogHttp, Error, TEXT("failed certificate pinning validation: SslCertificateManager is using non-SHA256 SPKI hashes [expected %d bytes, got %d bytes]"), CC_SHA256_DIGEST_LENGTH, ISslCertificateManager::PUBLIC_KEY_DIGEST_SIZE);
-        [challenge.sender cancelAuthenticationChallenge:challenge];
-        return;
-    }
-    
-    // if we got this far, pinning validation either succeeded or was disabled (or this was checking for client auth, etc.)
-    // so tell the connection to keep going with whatever else it was trying to validate
-    UE_LOG(LogHttp, Verbose, TEXT("certificate public key pinning either succeeded, is disabled, or challenge was not a server trust; continuing with auth"));
-    [challenge.sender performDefaultHandlingForAuthenticationChallenge: challenge];
-}
-#endif
-
-
--(void) connectionDidFinishLoading:(NSURLConnection *)connection
-{
-	UE_LOG(LogHttp, Verbose, TEXT("connectionDidFinishLoading: %p"), self);
-	self.bIsReady = YES;
-}
-
-- (TArray<uint8>&)getPayload
-{
-	return Payload;
-}
-
--(int32)getBytesWritten
-{
-	return self.BytesWritten;
-}
-
-@end
-
-
-
-
 /****************************************************************************
- * FAppleHTTPResponse implementation
+ * FAppleHttpResponse implementation
  **************************************************************************/
 
-FAppleHttpResponse::FAppleHttpResponse(const FAppleHttpRequest& InRequest)
-	: Request( InRequest )
+FAppleHttpResponse::FAppleHttpResponse(FAppleHttpRequest& InRequest)
+	: FHttpResponseCommon(InRequest)
 {
 	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpResponse::FAppleHttpResponse()"));
-	ResponseWrapper = [[FHttpResponseAppleWrapper alloc] init];
+	ResponseDelegate = [[FAppleHttpResponseDelegate alloc] initWithRequest: InRequest];
 }
-
 
 FAppleHttpResponse::~FAppleHttpResponse()
 {
 	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpResponse::~FAppleHttpResponse()"));
-	[ResponseWrapper getPayload].Empty();
-
-	[ResponseWrapper release];
-	ResponseWrapper = nil;
+	
+	[ResponseDelegate release];
+	ResponseDelegate = nil;
 }
 
+void FAppleHttpResponse::SetNewAppleHttpEventDelegate(FNewAppleHttpEventDelegate&& Delegate)
+{	
+	ResponseDelegate->NewAppleHttpEventDelegate = MoveTemp(Delegate);
+}
 
-FString FAppleHttpResponse::GetURL() const
+void FAppleHttpResponse::CleanSharedObjects()
 {
-	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpResponse::GetURL()"));
-	return FString(Request.Request.URL.query);
+	[ResponseDelegate CleanSharedObjects];
 }
-
-
-FString FAppleHttpResponse::GetURLParameter(const FString& ParameterName) const
-{
-	SCOPED_AUTORELEASE_POOL;
-	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpResponse::GetURLParameter()"));
-
-	NSString* ParameterNameStr = ParameterName.GetNSString();
-	NSArray* Parameters = [[[Request.Request URL] query] componentsSeparatedByString:@"&"];
-	for (NSString* Parameter in Parameters)
-	{
-		NSArray* KeyValue = [Parameter componentsSeparatedByString:@"="];
-		NSString* Key = [KeyValue objectAtIndex:0];
-		if ([Key compare:ParameterNameStr] == NSOrderedSame)
-		{
-			return FString([[KeyValue objectAtIndex:1] stringByRemovingPercentEncoding]);
-		}
-	}
-	return FString();
-}
-
 
 FString FAppleHttpResponse::GetHeader(const FString& HeaderName) const
 {
-	SCOPED_AUTORELEASE_POOL;
-	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpResponse::GetHeader()"));
-
-	NSString* ConvertedHeaderName = HeaderName.GetNSString();
-	return FString([[[ResponseWrapper Response] allHeaderFields] objectForKey:ConvertedHeaderName]);
+	if (AppleHTTPRequestInternal::ShouldReadHeadersWhenComplete(GetURL()) && !IsReady())
+	{
+		UE_LOG(LogHttp, Warning, TEXT("Can't get header [%s]. Response still processing for %s."), *HeaderName, *GetURL());
+		return FString();
+	}
+	else
+	{
+		SCOPED_AUTORELEASE_POOL;
+		UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpResponse::GetHeader()"));
+		NSString* ConvertedHeaderName = HeaderName.GetNSString();
+		return FString([ResponseDelegate.Response.allHeaderFields objectForKey:ConvertedHeaderName]);
+	}
 }
-
 
 TArray<FString> FAppleHttpResponse::GetAllHeaders() const
 {
 	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpResponse::GetAllHeaders()"));
 
-	NSDictionary* Headers = [GetResponseObj() allHeaderFields];
+	NSDictionary* Headers = ResponseDelegate.Response.allHeaderFields;
 	TArray<FString> Result;
 	Result.Reserve([Headers count]);
 	for (NSString* Key in [Headers allKeys])
@@ -941,7 +972,6 @@ TArray<FString> FAppleHttpResponse::GetAllHeaders() const
 	return Result;
 }
 
-
 FString FAppleHttpResponse::GetContentType() const
 {
 	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpResponse::GetContentType()"));
@@ -949,37 +979,32 @@ FString FAppleHttpResponse::GetContentType() const
 	return GetHeader( TEXT( "Content-Type" ) );
 }
 
-
-int32 FAppleHttpResponse::GetContentLength() const
+uint64 FAppleHttpResponse::GetContentLength() const
 {
 	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpResponse::GetContentLength()"));
-
-	return ResponseWrapper.Response.expectedContentLength;
+	
+	return ResponseDelegate.Response.expectedContentLength;
 }
-
 
 const TArray<uint8>& FAppleHttpResponse::GetContent() const
 {
 	if( !IsReady() )
 	{
-		UE_LOG(LogHttp, Warning, TEXT("Payload is incomplete. Response still processing. %p"), &Request);
+		UE_LOG(LogHttp, Warning, TEXT("Payload is incomplete. Response still processing. %s"), *GetURL());
 	}
 	else
 	{
-		Payload = [ResponseWrapper getPayload];
-		UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpResponse::GetContent() - Num: %i"), [ResponseWrapper getPayload].Num());
+		UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpResponse::GetContent() - Num: %i"), ResponseDelegate->Payload.Num());
 	}
-
-	return Payload;
+	return ResponseDelegate->Payload;
 }
-
 
 FString FAppleHttpResponse::GetContentAsString() const
 {
 	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpResponse::GetContentAsString()"));
 
 	// Fill in our data.
-	GetContent();
+	const TArray<uint8>& Payload = GetContent();
 
 	TArray<uint8> ZeroTerminatedPayload;
 	ZeroTerminatedPayload.AddZeroed( Payload.Num() + 1 );
@@ -988,54 +1013,34 @@ FString FAppleHttpResponse::GetContentAsString() const
 	return UTF8_TO_TCHAR( ZeroTerminatedPayload.GetData() );
 }
 
-
 int32 FAppleHttpResponse::GetResponseCode() const
 {
 	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpResponse::GetResponseCode()"));
 
-	return [GetResponseObj() statusCode];
+	return ResponseDelegate.Response.statusCode;
 }
-
-
-NSHTTPURLResponse* FAppleHttpResponse::GetResponseObj() const
-{
-	UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpResponse::GetResponseObj()"));
-
-	return [ResponseWrapper Response];
-}
-
 
 bool FAppleHttpResponse::IsReady() const
 {
-	bool Ready = [ResponseWrapper bIsReady];
-
-	if( Ready )
-	{
-		UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpResponse::IsReady()"));
-	}
-
-	return Ready;
+	return EHttpRequestStatus::IsFinished(ResponseDelegate.RequestStatus);
 }
 
-bool FAppleHttpResponse::HadError() const
+EHttpRequestStatus::Type FAppleHttpResponse::GetStatusFromDelegate() const
 {
-	bool bHadError = [ResponseWrapper bHadError];
-	
-	if( bHadError )
-	{
-		UE_LOG(LogHttp, Verbose, TEXT("FAppleHttpResponse::HadError()"));
-	}
-	
-	return bHadError;
+	return ResponseDelegate.RequestStatus;
 }
 
-const int32 FAppleHttpResponse::GetNumBytesReceived() const
+EHttpFailureReason FAppleHttpResponse::GetFailureReasonFromDelegate() const
 {
-	return [ResponseWrapper getPayload].Num();
+	return ResponseDelegate.FailureReason;
 }
 
-const int32 FAppleHttpResponse::GetNumBytesWritten() const
+const uint64 FAppleHttpResponse::GetNumBytesReceived() const
 {
-    int32 NumBytesWritten = [ResponseWrapper getBytesWritten];
-    return NumBytesWritten;
+	return ResponseDelegate.BytesReceived;
+}
+
+const uint64 FAppleHttpResponse::GetNumBytesWritten() const
+{
+	return ResponseDelegate.BytesWritten;
 }

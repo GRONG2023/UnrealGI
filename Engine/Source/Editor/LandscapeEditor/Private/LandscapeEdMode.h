@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "InputCoreTypes.h"
-#include "UnrealWidget.h"
+#include "UnrealWidgetFwd.h"
 #include "LandscapeProxy.h"
 #include "EdMode.h"
 #include "LandscapeToolInterface.h"
@@ -13,7 +13,9 @@
 #include "LandscapeLayerInfoObject.h"
 #include "LandscapeGizmoActiveActor.h"
 #include "LandscapeEdit.h"
+#include "LandscapeEditTypes.h"
 #include "Containers/Set.h"
+#include "LandscapeImportHelper.h"
 
 class ALandscape;
 class FCanvas;
@@ -62,10 +64,9 @@ struct FLandscapeToolMode
 struct FLandscapeTargetListInfo
 {
 	FText TargetName;
-	ELandscapeToolTargetType::Type TargetType;
+	ELandscapeToolTargetType TargetType;
 	TWeakObjectPtr<ULandscapeInfo> LandscapeInfo;
 
-	//Values cloned from FLandscapeLayerStruct LayerStruct;			// ignored for heightmap
 	TWeakObjectPtr<ULandscapeLayerInfoObject> LayerInfoObj;			// ignored for heightmap
 	FName LayerName;												// ignored for heightmap
 	TWeakObjectPtr<class ALandscapeProxy> Owner;					// ignored for heightmap
@@ -74,7 +75,7 @@ struct FLandscapeTargetListInfo
 	uint32 bValid : 1;												// ignored for heightmap
 	int32 LayerIndex;
 
-	FLandscapeTargetListInfo(FText InTargetName, ELandscapeToolTargetType::Type InTargetType, const FLandscapeInfoLayerSettings& InLayerSettings, int32 InLayerIndex)
+	FLandscapeTargetListInfo(FText InTargetName, ELandscapeToolTargetType InTargetType, const FLandscapeInfoLayerSettings& InLayerSettings, int32 InLayerIndex)
 		: TargetName(InTargetName)
 		, TargetType(InTargetType)
 		, LandscapeInfo(InLayerSettings.Owner->GetLandscapeInfo())
@@ -88,14 +89,14 @@ struct FLandscapeTargetListInfo
 	{
 	}
 
-	FLandscapeTargetListInfo(FText InTargetName, ELandscapeToolTargetType::Type InTargetType, ULandscapeInfo* InLandscapeInfo, int32 InLayerIndex)
+	FLandscapeTargetListInfo(FText InTargetName, ELandscapeToolTargetType InTargetType, ULandscapeInfo* InLandscapeInfo, int32 InLayerIndex)
 		: TargetName(InTargetName)
 		, TargetType(InTargetType)
 		, LandscapeInfo(InLandscapeInfo)
-		, LayerInfoObj(NULL)
+		, LayerInfoObj(nullptr)
 		, LayerName(NAME_None)
-		, Owner(NULL)
-		, ThumbnailMIC(NULL)
+		, Owner(nullptr)
+		, ThumbnailMIC(nullptr)
 		, bValid(true)
 		, LayerIndex(InLayerIndex)
 	{
@@ -129,7 +130,7 @@ struct FLandscapeTargetListInfo
 			return &LandscapeInfo->Layers[Index];
 		}
 
-		return NULL;
+		return nullptr;
 	}
 
 	FLandscapeEditorLayerSettings* GetEditorLayerSettings() const
@@ -149,7 +150,7 @@ struct FLandscapeTargetListInfo
 				return &Proxy->EditorLayerSettings[Index];
 			}
 		}
-		return NULL;
+		return nullptr;
 	}
 
 	FName GetLayerName() const;
@@ -241,36 +242,18 @@ struct FGizmoHistory
 	}
 };
 
-
-namespace ELandscapeEdge
+enum class ENewLandscapePreviewMode : uint8
 {
-	enum Type
-	{
-		None,
+	None,
+	NewLandscape,
+	ImportLandscape,
+};
 
-		// Edges
-		X_Negative,
-		X_Positive,
-		Y_Negative,
-		Y_Positive,
-
-		// Corners
-		X_Negative_Y_Negative,
-		X_Positive_Y_Negative,
-		X_Negative_Y_Positive,
-		X_Positive_Y_Positive,
-	};
-}
-
-namespace ENewLandscapePreviewMode
+enum class EImportExportMode : uint8
 {
-	enum Type
-	{
-		None,
-		NewLandscape,
-		ImportLandscape,
-	};
-}
+	Import,
+	Export,
+};
 
 enum class ELandscapeEditingState : uint8
 {
@@ -289,7 +272,7 @@ class FEdModeLandscape : public FEdMode, public ILandscapeEdModeInterface
 {
 public:
 
-	ULandscapeEditorObject* UISettings;
+	TObjectPtr<ULandscapeEditorObject> UISettings;
 
 	FText ErrorReasonOnMouseUp;
 
@@ -305,9 +288,8 @@ public:
 	// UI setting for additional UI Tools
 	int32 CurrentBrushSetIndex;
 
-	ENewLandscapePreviewMode::Type NewLandscapePreviewMode;
-	ELandscapeEdge::Type DraggingEdge;
-	float DraggingEdge_Remainder;
+	ENewLandscapePreviewMode NewLandscapePreviewMode;
+	EImportExportMode ImportExportMode;
 
 	TWeakObjectPtr<ALandscapeGizmoActiveActor> CurrentGizmoActor;
 	// UI callbacks for copy/paste tool
@@ -320,13 +302,18 @@ public:
 	void ShowSplineProperties();
 	bool HasSelectedSplineSegments() const;
 	void FlipSelectedSplineSegments();
-	void GetSelectedSplineOwners(TSet<ALandscapeProxy*>& SelectedSplineOwners) const;
+	void GetSelectedSplineOwners(TSet<AActor*>& SelectedSplineOwners) const;
+	virtual void SelectAllSplineControlPoints();
+	virtual void SelectAllSplineSegments();
 	virtual void SelectAllConnectedSplineControlPoints();
 	virtual void SelectAllConnectedSplineSegments();
 	virtual void SplineMoveToCurrentLevel();
+	virtual bool CanMoveSplineToCurrentLevel() const;
 	virtual void UpdateSplineMeshLevels();
 	void SetbUseAutoRotateOnJoin(bool InbAutoRotateOnJoin);
 	bool GetbUseAutoRotateOnJoin();
+	void SetbAlwaysRotateForward(bool InbAlwaysRotateForward);
+	bool GetbAlwaysRotateForward();
 
 	// UI callbacks for ramp tool
 	void ApplyRampTool();
@@ -351,6 +338,7 @@ public:
 	void InitializeTool_Retopologize();
 	void InitializeTool_NewLandscape();
 	void InitializeTool_ResizeLandscape();
+	void InitializeTool_ImportExport();
 	void InitializeTool_Select();
 	void InitializeTool_AddComponent();
 	void InitializeTool_DeleteComponent();
@@ -369,7 +357,7 @@ public:
 
 	/** ILandscapeEdModeInterface */
 	virtual void PostUpdateLayerContent() override;
-	virtual ELandscapeToolTargetType::Type GetLandscapeToolTargetType() const override;
+	virtual ELandscapeToolTargetType GetLandscapeToolTargetType() const override;
 	virtual const FLandscapeLayer* GetLandscapeSelectedLayer() const override;
 	virtual ULandscapeLayerInfoObject* GetSelectedLandscapeLayerInfo() const override;
 	virtual void OnCanHaveLayersContentChanged() override;
@@ -418,7 +406,7 @@ public:
 	virtual bool HandleClick(FEditorViewportClient* InViewportClient, HHitProxy* HitProxy, const FViewportClick& Click) override;
 
 	/** True if we are interactively changing the brush size, falloff, or strength */
-	bool IsAdjustingBrush(FViewport* InViewport) const;
+	bool IsAdjustingBrush(FEditorViewportClient* InViewportClient) const;
 	void ChangeBrushSize(bool bIncrease);
 	void ChangeBrushFalloff(bool bIncrease);
 	void ChangeBrushStrength(bool bIncrease);
@@ -469,7 +457,7 @@ public:
 	/** FEdMode: Returns true if this mode uses the transform widget */
 	virtual bool UsesTransformWidget() const override;
 
-	virtual EAxisList::Type GetWidgetAxisToDraw(FWidget::EWidgetMode InWidgetMode) const override;
+	virtual EAxisList::Type GetWidgetAxisToDraw(UE::Widget::EWidgetMode InWidgetMode) const override;
 
 	virtual FVector GetWidgetLocation() const override;
 	virtual bool GetCustomDrawingCoordinateSystem(FMatrix& InMatrix, void* InData) override;
@@ -502,7 +490,12 @@ public:
 	bool LandscapePlaneTrace(FEditorViewportClient* ViewportClient, int32 MouseX, int32 MouseY, const FPlane& Plane, FVector& OutHitLocation);
 
 	/** Trace under the specified laser start and direction and return the landscape hit and the hit location (in landscape quad space) */
-	bool LandscapeTrace(const FVector& InRayOrigin, const FVector& InRayEnd, FVector& OutHitLocation);
+	bool LandscapeTrace(const FVector& InRayOrigin, const FVector& InRayEnd, const FVector& InDirection, FVector& OutHitLocation);
+
+	struct FProcessLandscapeTraceHitsResult;
+	
+	/** Check if we've collided with the currently edited landscape, OutHitLocation is in the space of the Landscape Actor */   
+	bool ProcessLandscapeTraceHits(const TArray<FHitResult>& InResults, FProcessLandscapeTraceHitsResult& OutLandscapeTraceHitsResult);
 
 	void SetCurrentToolMode(FName ToolModeName, bool bRestoreCurrentTool = true);
 
@@ -521,6 +514,7 @@ public:
 	const TArray<ALandscapeBlueprintBrushBase*>& GetBrushList() const;
 
 	const TArray<TSharedRef<FLandscapeTargetListInfo>>& GetTargetList() const;
+	UMaterialInterface* GetTargetLandscapeMaterial() const { return CachedLandscapeMaterial; }
 	const TArray<FName>* GetTargetDisplayOrderList() const;
 	const TArray<FName>& GetTargetShownList() const;
 	int32 GetTargetLayerStartingIndex() const;
@@ -544,6 +538,8 @@ public:
 	void UpdateLayerUsageInformation(TWeakObjectPtr<ULandscapeLayerInfoObject>* LayerInfoObjectThatChanged = nullptr);
 	void OnLandscapeMaterialChangedDelegate();
 	void RefreshDetailPanel();
+
+	bool IsGridBased() const;
 
 	// Edit Layers
 	bool HasValidLandscapeEditLayerSelection() const;
@@ -592,20 +588,18 @@ public:
 	DECLARE_EVENT(FEdModeLandscape, FTargetsListUpdated);
 	static FTargetsListUpdated TargetsListUpdated;
 
-	void OnPreSaveWorld(uint32 InSaveFlags, const class UWorld* InWorld);
-
-	/** Called when the user presses a button on their motion controller device */
-	void OnVRAction(FEditorViewportClient& ViewportClient, UViewportInteractor* Interactor, const FViewportActionKeyInput& Action, bool& bOutIsInputCaptured, bool& bWasHandled);
-
-	void OnVRHoverUpdate(UViewportInteractor* Interactor, FVector& HoverImpactPoint, bool& bWasHandled);
+	void OnPreSaveWorld(class UWorld* InWorld, FObjectPreSaveContext ObjectSaveContext);
 
 	/** Handle notification that visible levels may have changed and we should update the editable landscapes list */
-	void HandleLevelsChanged(bool ShouldExitMode);
+	void HandleLevelsChanged();
 
 	void OnMaterialCompilationFinished(UMaterialInterface* MaterialInterface);
 
 	void ReimportData(const FLandscapeTargetListInfo& TargetInfo);
 	void ImportData(const FLandscapeTargetListInfo& TargetInfo, const FString& Filename);
+	void ImportHeightData(ULandscapeInfo* LandscapeInfo, const FGuid& LayerGuid, const FString& Filename, const FIntRect& ImportRegionVerts, ELandscapeImportTransformType TransformType = ELandscapeImportTransformType::ExpandCentered, FIntPoint Offset = FIntPoint(0,0), const ELandscapeLayerPaintingRestriction& PaintRestriction = ELandscapeLayerPaintingRestriction::None, bool bFlipYAxis = false);
+	void ImportWeightData(ULandscapeInfo* LandscapeInfo, const FGuid& LayerGuid, ULandscapeLayerInfoObject* LayerInfo, const FString& Filename, const FIntRect& ImportRegionVerts, ELandscapeImportTransformType TransformType = ELandscapeImportTransformType::ExpandCentered, FIntPoint Offset = FIntPoint(0, 0), const ELandscapeLayerPaintingRestriction& PaintRestriction = ELandscapeLayerPaintingRestriction::None, bool bFlipYAxis = false);
+	bool UseSingleFileImport() const { return !IsGridBased(); }
 
 	/** Resample landscape to a different resolution or change the component size */
 	ALandscape* ChangeComponentSetting(int32 NumComponentsX, int32 NumComponentsY, int32 InNumSubsections, int32 InSubsectionSizeQuads, bool bResample);
@@ -617,9 +611,6 @@ public:
 	TArray<TUniquePtr<FLandscapeTool>> LandscapeTools;
 	TArray<FLandscapeBrushSet> LandscapeBrushSets;
 
-	// For collision add visualization
-	FLandscapeAddCollision* LandscapeRenderAddCollision;
-
 	ELandscapeEditingState GetEditingState() const;
 
 	bool IsEditingEnabled() const
@@ -628,6 +619,21 @@ public:
 	}
 
 	void SetLandscapeInfo(ULandscapeInfo* InLandscapeInfo);
+
+	/** Returns the sum of all landscape actors resolution. */
+	int32 GetAccumulatedAllLandscapesResolution() const;
+
+	/** Returns true if landscape resolution combined to the current tool action is still compliant to the currently applied limitations. */
+	bool IsLandscapeResolutionCompliant() const;
+
+	/** Returns true if the current landscape tool handles edit layers. */
+	bool DoesCurrentToolAffectEditLayers() const;
+
+	/** Returns the default Error Text when modifying or creating landscape would break the resolution limit. */
+	FText GetLandscapeResolutionErrorText() const;
+
+	int32 GetNewLandscapeResolutionX() const;
+	int32 GetNewLandscapeResolutionY() const;
 	
 private:
 	TArray<TSharedRef<FLandscapeTargetListInfo>> LandscapeTargetList;
@@ -648,6 +654,7 @@ private:
 
 	FDelegateHandle OnLevelActorDeletedDelegateHandle;
 	FDelegateHandle OnLevelActorAddedDelegateHandle;
+	FDelegateHandle PreSaveWorldHandle;
 	
 	/** Check if we are painting using the VREditor */
 	bool bIsPaintingInVR;

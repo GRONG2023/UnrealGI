@@ -6,17 +6,10 @@ public class MovieSceneCaptureDialog : ModuleRules
 {
 	public MovieSceneCaptureDialog(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				"Editor/MovieSceneCaptureDialog/Private"
-			}
-		);
-
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
 				"CoreUObject",
-				"EditorStyle",
 				"Engine",
 				"InputCore",
 				"Json",
@@ -28,13 +21,13 @@ public class MovieSceneCaptureDialog : ModuleRules
 				"SessionServices",
 				"Slate",
 				"SlateCore",
+				"EditorFramework",
 				"UnrealEd",
 			}
 		);
 
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
-				"LevelEditor"
 			}
 		);
 	}

@@ -14,7 +14,6 @@ class IMediaClock;
 class IMediaPlayerFactory;
 class IMediaTicker;
 class IMediaTimeSource;
-class IMediaInfo;
 class IMediaPlayerLifecycleManagerDelegate;
 
 /**
@@ -37,11 +36,6 @@ class IMediaModule
 public:
 
 	//~ Platform management
-
-	/*
-	 * Register a platform
-	*/
-	virtual void RegisterPlatform(const FName & PlatformName, const FGuid& PlatformGuid, IMediaInfo* MediaInfo) = 0;
 
 	/*
 	 * Get a nice platform name from a GUID
@@ -189,6 +183,14 @@ public:
 	 * @param NewTimeSource The time source to set.
 	 */
 	virtual void SetTimeSource(const TSharedPtr<IMediaTimeSource, ESPMode::ThreadSafe>& NewTimeSource) = 0;
+
+
+	/**
+	 * Get the time source for the media clock.
+	 *
+	 * @return The current time source.
+	 */
+	virtual TSharedPtr<IMediaTimeSource, ESPMode::ThreadSafe> GetTimeSource() = 0;
 
 	/**
 	 * Called by the main loop after the game engine has been ticked.

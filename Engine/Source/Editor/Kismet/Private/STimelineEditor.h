@@ -2,27 +2,45 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "SlateFwd.h"
-#include "Layout/Visibility.h"
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "Engine/TimelineTemplate.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
 #include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Layout/Visibility.h"
+#include "Math/Vector2D.h"
+#include "Misc/Optional.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
-#include "Widgets/Views/STableViewBase.h"
-#include "Widgets/Views/STableRow.h"
 #include "Widgets/Views/SListView.h"
-#include "Engine/TimelineTemplate.h"
-#include "SCurveEditor.h"
 
 class FBlueprintEditor;
 class FUICommandList;
+class ITableRow;
 class SCheckBox;
 class SEditableTextBox;
-class STimelineEditor;
+class SInlineEditableTextBlock;
+class STableViewBase;
+class SWidget;
 class SWindow;
-class UTimelineTemplate;
-struct FTTTrackBase;
+class UCurveBase;
+class UObject;
 struct FAssetData;
+struct FGeometry;
+struct FKeyEvent;
+struct FRichCurve;
 
 //////////////////////////////////////////////////////////////////////////
 // FTimelineEdTrack
@@ -245,7 +263,7 @@ private:
 	TSharedPtr< FUICommandList > CommandList;
 
 	/** The current desired size of the timeline */
-	FVector2D TimelineDesiredSize;
+	FVector2f TimelineDesiredSize;
 
 	/** The nominal desired height of a single timeline track at 1.0x height */
 	float NominalTimelineDesiredHeight;
@@ -289,7 +307,7 @@ private:
 	/** Used by list view to create a track widget from the track item struct */
 	TSharedRef<ITableRow> MakeTrackWidget( TSharedPtr<FTimelineEdTrack> Track, const TSharedRef<STableViewBase>& OwnerTable );
 	/** Add a new track to the timeline */
-	FReply CreateNewTrack(FTTTrackBase::ETrackType Type );
+	void CreateNewTrack(FTTTrackBase::ETrackType Type );
 
 	/** Checks if the user can delete the selected tracks */
 	bool CanDeleteSelectedTracks() const;
@@ -333,7 +351,7 @@ private:
 	bool IsCurveAssetSelected() const;
 
 	/** Create new track from curve asset */
-	FReply CreateNewTrackFromAsset();
+	void CreateNewTrackFromAsset();
 
 	/** Callback when a track item is scrolled into view */
 	void OnItemScrolledIntoView( TSharedPtr<FTimelineEdTrack> InTrackNode, const TSharedPtr<ITableRow>& InWidget );
@@ -351,5 +369,7 @@ private:
 
 	void SetSizeScaleValue(float NewValue);
 	float GetSizeScaleValue() const;
+
+	TSharedRef<SWidget> MakeAddButton();
 };
 

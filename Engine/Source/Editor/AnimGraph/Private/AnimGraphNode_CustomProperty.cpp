@@ -6,22 +6,54 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "DetailLayoutBuilder.h"
 #include "AnimationGraphSchema.h"
-#include "Animation/AnimInstance.h"
-#include "Animation/AnimLayerInterface.h"
+#include "CustomPropertyOptionalPinManager.h"
 #include "DetailCategoryBuilder.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Input/SCheckBox.h"
-#include "Widgets/SBoxPanel.h"
-#include "DetailWidgetRow.h"
 #include "PropertyCustomizationHelpers.h"
-#include "KismetCompilerMisc.h"
-#include "AnimBlueprintCompilerHandler_Base.h"
-#include "IAnimBlueprintCompilerHandlerCollection.h"
-#include "IAnimBlueprintCompilerHandler.h"
 #include "KismetCompiler.h"
 #include "IAnimBlueprintCompilationContext.h"
+#include "IAnimBlueprintCopyTermDefaultsContext.h"
+#include "UObject/UE5ReleaseStreamObjectVersion.h"
+#include "AnimGraphNodeBinding.h"
 
 #define LOCTEXT_NAMESPACE "CustomPropNode"
+
+void UAnimGraphNode_CustomProperty::Serialize(FArchive& Ar)
+{
+	Super::Serialize(Ar);
+
+	Ar.UsingCustomVersion(FUE5ReleaseStreamObjectVersion::GUID);
+
+	if(Ar.IsLoading() && Ar.CustomVer(FUE5ReleaseStreamObjectVersion::GUID) < FUE5ReleaseStreamObjectVersion::CustomPropertyAnimGraphNodesUseOptionalPinManager)
+	{
+		// Port exposed property names to optional pins
+		for(FName KnownExposablePropertyName : KnownExposableProperties_DEPRECATED)
+		{
+			FOptionalPinFromProperty OptionalPin;
+			OptionalPin.PropertyName = KnownExposablePropertyName;
+			OptionalPin.bCanToggleVisibility = true;
+			OptionalPin.bShowPin = ExposedPropertyNames_DEPRECATED.Contains(KnownExposablePropertyName);
+
+			CustomPinProperties.Add(OptionalPin);
+		}
+
+		KnownExposableProperties_DEPRECATED.Empty();
+		ExposedPropertyNames_DEPRECATED.Empty();
+	}
+}
+
+void UAnimGraphNode_CustomProperty::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+	
+	FName PropertyName = (PropertyChangedEvent.Property != nullptr) ? PropertyChangedEvent.Property->GetFName() : NAME_None;
+	FName MemberPropertyName = (PropertyChangedEvent.MemberProperty != nullptr) ? PropertyChangedEvent.MemberProperty->GetFName() : NAME_None;
+
+	if (PropertyName == GET_MEMBER_NAME_CHECKED(FOptionalPinFromProperty, bShowPin) && MemberPropertyName == GET_MEMBER_NAME_CHECKED(UAnimGraphNode_Base, ShowPinForProperties))
+	{
+		FOptionalPinManager::EvaluateOldShownPins(ShowPinForProperties, OldShownPins, this);
+		ReconstructNode();
+	}
+}
 
 void UAnimGraphNode_CustomProperty::CreateClassVariablesFromBlueprint(IAnimBlueprintVariableCreationContext& InCreationContext)
 {
@@ -80,6 +112,26 @@ void UAnimGraphNode_CustomProperty::OnProcessDuringCompilation(IAnimBlueprintCom
 	}
 }
 
+void UAnimGraphNode_CustomProperty::OnCopyTermDefaultsToDefaultObject(IAnimBlueprintCopyTermDefaultsContext& InCompilationContext, IAnimBlueprintNodeCopyTermDefaultsContext& InPerNodeContext, IAnimBlueprintGeneratedClassCompiledData& OutCompiledData)
+{
+	// Copy pin default values to generated properties
+	for (UEdGraphPin* Pin : Pins)
+	{
+		if (!Pin->bOrphanedPin && Pin->LinkedTo.Num() == 0 && !UAnimationGraphSchema::IsPosePin(Pin->PinType))
+		{
+			FString PrefixedName = GetPinTargetVariableName(Pin);
+
+			if (FProperty* GeneratedProperty = FindFProperty<FProperty>(InPerNodeContext.GetClassDefaultObject()->GetClass(), *PrefixedName))
+			{
+				if(!FBlueprintEditorUtils::PropertyValueFromString(GeneratedProperty, Pin->GetDefaultAsString(), (uint8*)InPerNodeContext.GetClassDefaultObject(), InPerNodeContext.GetClassDefaultObject()))
+				{
+					InCompilationContext.GetMessageLog().Warning(TEXT("Unable to push default value for pin @@ on @@"), Pin, this);
+				}
+			}
+		}
+	}
+}
+
 void UAnimGraphNode_CustomProperty::ValidateAnimNodeDuringCompilation(USkeleton* ForSkeleton, FCompilerResultsLog& MessageLog)
 {
 	Super::ValidateAnimNodeDuringCompilation(ForSkeleton, MessageLog);
@@ -96,69 +148,6 @@ void UAnimGraphNode_CustomProperty::ValidateAnimNodeDuringCompilation(USkeleton*
 		{
 			MessageLog.Error(TEXT("Linked graph node @@ has no valid instance class to spawn."), this);
 		}
-	}
-}
-
-void UAnimGraphNode_CustomProperty::ReallocatePinsDuringReconstruction(TArray<UEdGraphPin*>& OldPins)
-{
-	Super::ReallocatePinsDuringReconstruction(OldPins);
-
-	// Grab the SKELETON class here as when we are reconstructed during during BP compilation
-	// the full generated class is not yet present built.
-	UClass* TargetClass = GetTargetSkeletonClass();
-
-	if(!TargetClass)
-	{
-		// Nothing to search for properties
-		return;
-	}
-
-	// Need the schema to extract pin types
-	const UEdGraphSchema_K2* Schema = CastChecked<UEdGraphSchema_K2>(GetSchema());
-
-	// Default anim schema for util funcions
-	const UAnimationGraphSchema* AnimGraphDefaultSchema = GetDefault<UAnimationGraphSchema>();
-
-	// Grab the list of properties we can expose
-	TArray<FProperty*> ExposablePropeties;
-	GetExposableProperties(ExposablePropeties);
-
-	// We'll track the names we encounter by removing from this list, if anything remains the properties
-	// have been removed from the target class and we should remove them too
-	TArray<FName> BeginExposableNames = KnownExposableProperties;
-
-	for(FProperty* Property : ExposablePropeties)
-	{
-		FName PropertyName = Property->GetFName();
-		BeginExposableNames.Remove(PropertyName);
-
-		if(!KnownExposableProperties.Contains(PropertyName))
-		{
-			// New property added to the target class
-			KnownExposableProperties.Add(PropertyName);
-		}
-
-		if(ExposedPropertyNames.Contains(PropertyName) && FBlueprintEditorUtils::PropertyStillExists(Property))
-		{
-			FEdGraphPinType PinType;
-
-			verify(Schema->ConvertPropertyToPinType(Property, PinType));
-
-			UEdGraphPin* NewPin = CreatePin(EEdGraphPinDirection::EGPD_Input, PinType, Property->GetFName());
-			NewPin->PinFriendlyName = Property->GetDisplayNameText();
-
-			// We cant interrogate CDO here as we may be mid-compile, so we can only really
-			// reset to the autogenerated default.
-			AnimGraphDefaultSchema->ResetPinToAutogeneratedDefaultValue(NewPin, false);
-
-			CustomizePinData(NewPin, PropertyName, INDEX_NONE);
-		}
-	}
-
-	// Remove any properties that no longer exist on the target class
-	for(FName& RemovedPropertyName : BeginExposableNames)
-	{
-		KnownExposableProperties.Remove(RemovedPropertyName);
 	}
 }
 
@@ -179,7 +168,17 @@ void UAnimGraphNode_CustomProperty::GetInstancePinProperty(const IAnimBlueprintC
 
 FString UAnimGraphNode_CustomProperty::GetPinTargetVariableName(const UEdGraphPin* InPin) const
 {
-	return TEXT("__CustomProperty_") + InPin->PinName.ToString() + TEXT("_") + NodeGuid.ToString();
+	return GetPinTargetVariableName(InPin->GetFName());
+}
+
+FString UAnimGraphNode_CustomProperty::GetPinTargetVariableName(FName InPinName) const
+{
+	return GetPinTargetVariableNameBase(InPinName) + NodeGuid.ToString();
+}
+
+FString UAnimGraphNode_CustomProperty::GetPinTargetVariableNameBase(FName InPinName) const
+{
+	return TEXT("__CustomProperty_") + InPinName.ToString() + TEXT("_");
 }
 
 FText UAnimGraphNode_CustomProperty::GetPropertyTypeText(FProperty* Property)
@@ -204,72 +203,6 @@ FText UAnimGraphNode_CustomProperty::GetPropertyTypeText(FProperty* Property)
 	}
 	
 	return PropertyTypeText;
-}
-
-void UAnimGraphNode_CustomProperty::RebuildExposedProperties()
-{
-	ExposedPropertyNames.Empty();
-	KnownExposableProperties.Empty();
-	TArray<FProperty*> ExposableProperties;
-	GetExposableProperties(ExposableProperties);
-	for(FProperty* Property : ExposableProperties)
-	{
-		KnownExposableProperties.Add(Property->GetFName());
-	}
-}
-
-ECheckBoxState UAnimGraphNode_CustomProperty::AreAllPropertiesExposed() const
-{
-	if(ExposedPropertyNames.Num() == 0)
-	{
-		return ECheckBoxState::Unchecked;
-	}
-	else
-	{
-		for(FName PropertyName : KnownExposableProperties)
-		{
-			if(!ExposedPropertyNames.Contains(PropertyName))
-			{
-				return ECheckBoxState::Undetermined;
-			}
-		}
-	}
-
-	return ECheckBoxState::Checked;
-}
-
-void UAnimGraphNode_CustomProperty::OnPropertyExposeAllCheckboxChanged(ECheckBoxState NewState)
-{
-	if(NewState == ECheckBoxState::Checked)
-	{
-		ExposedPropertyNames = KnownExposableProperties;
-	}
-	else
-	{
-		ExposedPropertyNames.Empty();
-	}
-
-	ReconstructNode();
-}
-
-ECheckBoxState UAnimGraphNode_CustomProperty::IsPropertyExposed(FName PropertyName) const
-{
-	return ExposedPropertyNames.Contains(PropertyName) ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
-}
-
-void UAnimGraphNode_CustomProperty::OnPropertyExposeCheckboxChanged(ECheckBoxState NewState, FName PropertyName)
-{
-	if(NewState == ECheckBoxState::Checked)
-	{
-		ExposedPropertyNames.AddUnique(PropertyName);
-	}
-	else if(NewState == ECheckBoxState::Unchecked)
-	{
-		ExposedPropertyNames.Remove(PropertyName);
-	}
-
-	FGuardValue_Bitfield(bDisableOrphanPinSaving, true);
-	ReconstructNode();
 }
 
 void UAnimGraphNode_CustomProperty::OnInstanceClassChanged(IDetailLayoutBuilder* DetailBuilder)
@@ -322,27 +255,71 @@ void UAnimGraphNode_CustomProperty::CustomizeDetails(IDetailLayoutBuilder& Detai
 	}
 }
 
-void UAnimGraphNode_CustomProperty::GetExposableProperties( TArray<FProperty*>& OutExposableProperties) const
+void UAnimGraphNode_CustomProperty::CreateCustomPins(TArray<UEdGraphPin*>* OldPins)
 {
-	OutExposableProperties.Empty();
-
-	UClass* TargetClass = GetTargetClass();
-
-	if(TargetClass)
+	if(UClass* TargetSkeletonClass = GetTargetSkeletonClass())
 	{
-		const UEdGraphSchema_K2* Schema = CastChecked<UEdGraphSchema_K2>(GetSchema());
+		FCustomPropertyOptionalPinManager OptionalPinManager(this, OldPins);
+		OptionalPinManager.CreateCustomPins(TargetSkeletonClass);
+	}
+}
 
-		for(TFieldIterator<FProperty> It(TargetClass, EFieldIteratorFlags::IncludeSuper); It; ++It)
+FProperty* UAnimGraphNode_CustomProperty::GetPinProperty(FName InPinName) const
+{
+	if(UClass* TargetSkeletonClass = GetTargetSkeletonClass())
+	{
+		if(FProperty* Property = TargetSkeletonClass->FindPropertyByName(InPinName))
 		{
-			FProperty* CurProperty = *It;
-			FEdGraphPinType PinType;
-
-			if(CurProperty->HasAllPropertyFlags(CPF_Edit | CPF_BlueprintVisible) && CurProperty->HasAllFlags(RF_Public) && Schema->ConvertPropertyToPinType(CurProperty, PinType))
-			{
-				OutExposableProperties.Add(CurProperty);
-			}
+			return Property;
 		}
 	}
+
+	return Super::GetPinProperty(InPinName);
+}
+
+bool UAnimGraphNode_CustomProperty::IsPinBindable(const UEdGraphPin* InPin) const
+{
+	if(const FProperty* PinProperty = GetPinProperty(InPin->GetFName()))
+	{
+		const int32 OptionalPinIndex = CustomPinProperties.IndexOfByPredicate([PinProperty](const FOptionalPinFromProperty& InOptionalPin)
+		{
+			return PinProperty->GetFName() == InOptionalPin.PropertyName;
+		});
+
+		return OptionalPinIndex != INDEX_NONE;
+	}
+
+	return Super::IsPinBindable(InPin);
+}
+
+bool UAnimGraphNode_CustomProperty::GetPinBindingInfo(FName InPinName, FName& OutBindingName, FProperty*& OutPinProperty, int32& OutOptionalPinIndex) const
+{
+	OutPinProperty = GetPinProperty(InPinName);
+	if(OutPinProperty)
+	{
+		OutOptionalPinIndex = CustomPinProperties.IndexOfByPredicate([OutPinProperty](const FOptionalPinFromProperty& InOptionalPin)
+		{
+			return OutPinProperty->GetFName() == InOptionalPin.PropertyName;
+		});
+
+		if (OutOptionalPinIndex != INDEX_NONE)
+        {
+        	OutBindingName = *GetPinTargetVariableName(InPinName); 
+			return true;
+        }
+	}
+
+	return Super::GetPinBindingInfo(InPinName, OutBindingName, OutPinProperty, OutOptionalPinIndex);
+}
+
+bool UAnimGraphNode_CustomProperty::HasBinding(FName InBindingName) const
+{
+	if (GetBinding())
+	{
+		return GetBinding()->HasBinding(InBindingName, true);
+	}
+
+	return false;
 }
 
 void UAnimGraphNode_CustomProperty::AddSourceTargetProperties(const FName& InSourcePropertyName, const FName& InTargetPropertyName)
@@ -388,6 +365,58 @@ void UAnimGraphNode_CustomProperty::OnStructuralPropertyChanged(IDetailLayoutBui
 	if(DetailBuilder)
 	{
 		DetailBuilder->ForceRefreshDetails();
+	}
+}
+
+void UAnimGraphNode_CustomProperty::SetCustomPinVisibility(bool bInVisible, int32 InOptionalPinIndex)
+{
+	if(CustomPinProperties[InOptionalPinIndex].bShowPin != bInVisible)
+	{
+		FOptionalPinManager::CacheShownPins(CustomPinProperties, OldShownPins);
+
+		CustomPinProperties[InOptionalPinIndex].bShowPin = bInVisible;
+		
+		FOptionalPinManager::EvaluateOldShownPins(CustomPinProperties, OldShownPins, this);
+		ReconstructNode();
+	}
+}
+
+void UAnimGraphNode_CustomProperty::PinConnectionListChanged(UEdGraphPin* Pin)
+{
+	if(Pin->LinkedTo.Num() > 0)
+	{
+		// If we have links, clear any bindings
+		RemoveBindings(*GetPinTargetVariableName(Pin));
+	}
+}
+
+void UAnimGraphNode_CustomProperty::PostDuplicate(bool bDuplicateForPIE)
+{
+	Super::PostDuplicate(bDuplicateForPIE);
+
+	if (GetBinding())
+	{
+		const FString NewGUID = NodeGuid.ToString();
+
+		GetMutableBinding()->UpdateBindingNames([this, NewGUID](const FString& InOldBindingName)
+		{
+			// Check pins
+			for (UEdGraphPin* Pin : Pins)
+			{
+				FString PinTargetVariableNameBase = GetPinTargetVariableNameBase(Pin->GetFName());
+				if (InOldBindingName.StartsWith(PinTargetVariableNameBase))
+				{
+					// Replace GUID with this node's if it differs
+					FString OldGUID = InOldBindingName.RightChop(PinTargetVariableNameBase.Len());
+					if (OldGUID != NewGUID)
+					{
+						return InOldBindingName.Replace(*OldGUID, *NewGUID);
+					}
+				}
+			}
+
+			return InOldBindingName;
+		});
 	}
 }
 

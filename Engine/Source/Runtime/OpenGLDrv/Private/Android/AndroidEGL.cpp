@@ -15,6 +15,7 @@
 #include "Misc/ScopeLock.h"
 #include "UObject/GarbageCollection.h"
 #include "Android/AndroidPlatformFramePacer.h"
+#include <dlfcn.h>
 
 
 AndroidEGL* AndroidEGL::Singleton = NULL;
@@ -26,6 +27,18 @@ DEFINE_LOG_CATEGORY(LogEGL);
 #define EGL_CONTEXT_OPENGL_NO_ERROR_KHR   0x31B3
 #endif // EGL_KHR_create_context_no_error
 #endif // USE_ANDROID_EGL_NO_ERROR_CONTEXT
+
+typedef int32(*PFN_ANativeWindow_setBuffersTransform)(struct ANativeWindow* window, int32 transform);
+static PFN_ANativeWindow_setBuffersTransform ANativeWindow_setBuffersTransform_API = nullptr;
+
+// Use blit by default as setBuffersTransform is broken on random devices
+static TAutoConsoleVariable<int32> CVarAndroidGLESFlipYMethod(
+	TEXT("r.Android.GLESFlipYMethod"),
+	2,
+	TEXT(" 0: Flip Y method detected automatically by GPU vendor.\n"
+		 " 1: Force flip Y by native window setBuffersTransform.\n"
+		 " 2: Force flip Y by BlitFrameBuffer."),
+	ECVF_RenderThreadSafe);
 
 
 const  int EGLMinRedBits		= 5;
@@ -86,9 +99,10 @@ struct AndroidESPImpl
 	ANativeWindow* Window;
 	bool Initalized ;
 	EOpenGLCurrentContext CurrentContextType;
-	GLuint OnScreenColorRenderBuffer;
 	GLuint ResolveFrameBuffer;
+	GLuint DummyFrameBuffer;
 	FPlatformRect CachedWindowRect;
+	bool bIsDebug = false;
 
 	AndroidESPImpl();
 };
@@ -137,6 +151,10 @@ validConfig (0)
 	int DepthBufferPreference = (int)FAndroidWindow::GetDepthBufferPreference();
 	if (DepthBufferPreference > 0)
 		depthSize = DepthBufferPreference;
+	if (FAndroidMisc::GetMobilePropagateAlphaSetting() > 0)
+	{
+		alphaSize = 8;
+	}
 }
 
 AndroidEGL::AndroidEGL()
@@ -146,6 +164,13 @@ AndroidEGL::AndroidEGL()
 ,	ContextAttributes(nullptr)
 {
 	PImplData = new AndroidESPImpl();
+
+	void* const LibNativeWindow = dlopen("libnativewindow.so", RTLD_NOW | RTLD_LOCAL);
+	if (LibNativeWindow != nullptr)
+	{
+		ANativeWindow_setBuffersTransform_API = reinterpret_cast<PFN_ANativeWindow_setBuffersTransform>(dlsym(LibNativeWindow, "ANativeWindow_setBuffersTransform"));
+	}
+	FPlatformMisc::LowLevelOutputDebugStringf(TEXT("ANativeWindow_setBuffersTransform is %s on this device"), ANativeWindow_setBuffersTransform_API == nullptr ? TEXT("not supported") : TEXT("supported"));
 }
 
 void AndroidEGL::ResetDisplay()
@@ -267,10 +292,17 @@ void AndroidEGL::CreateEGLRenderSurface(ANativeWindow* InWindow, bool bCreateWnd
 
 		if (FAndroidPlatformRHIFramePacer::CVarAllowFrameTimestamps.GetValueOnAnyThread())
 		{
+			STANDALONE_DEBUG_LOGf(LogAndroid, TEXT("AndroidEGL::CreateEGLRenderSurface(InWindow = %p) using a.allowFrameTimestamps enable EGL_TIMESTAMPS_ANDROID on %p"), InWindow, PImplData->eglSurface);
 			eglSurfaceAttrib(PImplData->eglDisplay, PImplData->eglSurface, EGL_TIMESTAMPS_ANDROID, EGL_TRUE);
 		}
+		else
+		{
+			// HAD to add the false condition so that android attributes reflect current state of CVar.
+			STANDALONE_DEBUG_LOGf(LogAndroid, TEXT("AndroidEGL::CreateEGLRenderSurface(InWindow = %p) using a.allowFrameTimestamps disable EGL_TIMESTAMPS_ANDROID on %p"), InWindow, PImplData->eglSurface);
+			eglSurfaceAttrib(PImplData->eglDisplay, PImplData->eglSurface, EGL_TIMESTAMPS_ANDROID, EGL_FALSE);
+		}
 
-		FPlatformMisc::LowLevelOutputDebugStringf( TEXT("AndroidEGL::CreateEGLRenderSurface() %p" ), PImplData->eglSurface);
+		STANDALONE_DEBUG_LOGf(LogAndroid, TEXT("AndroidEGL::CreateEGLRenderSurface() %p" ), PImplData->eglSurface);
 
 		if(PImplData->eglSurface == EGL_NO_SURFACE )
 		{
@@ -391,11 +423,12 @@ void AndroidEGL::InitEGL(APIVariant API)
 	// Get the EGL Extension list to determine what is supported
 	FString Extensions = ANSI_TO_TCHAR( eglQueryString( PImplData->eglDisplay, EGL_EXTENSIONS));
 
-	FPlatformMisc::LowLevelOutputDebugStringf( TEXT("EGL Extensions: \n%s" ), *Extensions );
+	UE_LOG(LogAndroid, Log, TEXT("EGL Extensions: \n%s"), *Extensions);
 
 	bSupportsKHRCreateContext = Extensions.Contains(TEXT("EGL_KHR_create_context"));
 	bSupportsKHRSurfacelessContext = Extensions.Contains(TEXT("EGL_KHR_surfaceless_context"));
 	bSupportsKHRNoErrorContext = Extensions.Contains(TEXT("EGL_KHR_create_context_no_error"));
+	bSupportsEXTRobustContext = Extensions.Contains(TEXT("EGL_EXT_create_context_robustness"));
 
 	if (API == AV_OpenGLES)
 	{
@@ -521,8 +554,8 @@ eglDisplay(EGL_NO_DISPLAY)
 	,DepthSize(0)
 	,Window(NULL)
 	,Initalized(false)
-	,OnScreenColorRenderBuffer(0)
 	,ResolveFrameBuffer(0)
+	,DummyFrameBuffer(0)
 	,NativeVisualID(0)
 	,CurrentContextType(CONTEXT_Invalid)
 	,CachedWindowRect(FPlatformRect(0,0,0,0))
@@ -610,29 +643,16 @@ void AndroidEGL::DestroyBackBuffer()
 		glDeleteFramebuffers(1, &PImplData->ResolveFrameBuffer);
 		PImplData->ResolveFrameBuffer = 0 ;
 	}
-	if(PImplData->OnScreenColorRenderBuffer)
+
+	if(PImplData->DummyFrameBuffer)
 	{
-		glDeleteRenderbuffers(1, &(PImplData->OnScreenColorRenderBuffer));
-		PImplData->OnScreenColorRenderBuffer = 0;
+		glDeleteFramebuffers(1, &PImplData->DummyFrameBuffer);
+		PImplData->DummyFrameBuffer = 0;
 	}
 }
 
 void AndroidEGL::InitBackBuffer()
 {
-	//add check to see if any context was made current. 
-	GLint OnScreenWidth, OnScreenHeight;
-	if (FPlatformMisc::SupportsBackbufferSampling())
-	{
-		glGenFramebuffers(1, &PImplData->ResolveFrameBuffer);
-	}
-	else
-	{
-		PImplData->ResolveFrameBuffer = 0;
-	}
-	PImplData->OnScreenColorRenderBuffer = 0;
-	OnScreenWidth = PImplData->eglWidth;
-	OnScreenHeight = PImplData->eglHeight;
-
 	PImplData->RenderingContext.ViewportFramebuffer = GetResolveFrameBuffer();
 	PImplData->SharedContext.ViewportFramebuffer = GetResolveFrameBuffer();
 	PImplData->SingleThreadedContext.ViewportFramebuffer = GetResolveFrameBuffer();
@@ -660,18 +680,29 @@ void AndroidEGL::InitRenderSurface(bool bUseSmallSurface, bool bCreateWndSurface
 		if (PImplData->CachedWindowRect.Right > 0 && PImplData->CachedWindowRect.Bottom > 0)
 		{
 			// If we resumed from a lost window reuse the window size, the game thread will update the window dimensions.
-			FPlatformMisc::LowLevelOutputDebugStringf(TEXT("AndroidEGL::InitRenderSurface, Using CachedWindowRect, width: %d, height %d "), PImplData->CachedWindowRect.Right, PImplData->CachedWindowRect.Bottom);
+			FPlatformMisc::LowLevelOutputDebugStringf(TEXT("AndroidEGL::InitRenderSurface, Using CachedWindowRect, left: %d, top: %d, right: %d, bottom: %d "), PImplData->CachedWindowRect.Left, PImplData->CachedWindowRect.Top, PImplData->CachedWindowRect.Right, PImplData->CachedWindowRect.Bottom);
 			WindowSize = PImplData->CachedWindowRect;
 		}
+#if USE_ANDROID_STANDALONE
+		if (WindowSize.Left != 0 || WindowSize.Top != 0)
+		{
+			STANDALONE_DEBUG_LOGf(LogAndroid, TEXT("AndroidEGL::InitRenderSurface, WARNING!!! WindowSize is offset, left: %d, top: %d, right: %d, bottom: %d "), WindowSize.Left, WindowSize.Top, WindowSize.Right, WindowSize.Bottom);
+		}
+		Width = WindowSize.Right - WindowSize.Left;
+		Height = WindowSize.Bottom - WindowSize.Top;
+#else
 
 		Width = WindowSize.Right;
 		Height = WindowSize.Bottom;
+#endif
 
 		FPlatformMisc::LowLevelOutputDebugStringf(TEXT("AndroidEGL::InitRenderSurface, Using width: %d, height %d "), Width, Height);
 		AndroidThunkCpp_SetDesiredViewSize(Width, Height);
 	}
 
-	FPlatformMisc::LowLevelOutputDebugStringf(TEXT("AndroidEGL::InitRenderSurface, wnd: %p, width: %d, height %d "), PImplData->Window, Width, Height);
+	FIntVector2 OriginalWindowSize(ANativeWindow_getWidth(PImplData->Window), ANativeWindow_getHeight(PImplData->Window));
+
+	FPlatformMisc::LowLevelOutputDebugStringf(TEXT("AndroidEGL::InitRenderSurface, setting wnd: %p, width: %d->%d, height %d->%d "), PImplData->Window, OriginalWindowSize.X, Width, OriginalWindowSize.Y, Height);
 	ANativeWindow_setBuffersGeometry(PImplData->Window, Width, Height, PImplData->NativeVisualID);
 	CreateEGLRenderSurface(PImplData->Window, bCreateWndSurface);
 
@@ -693,12 +724,21 @@ void AndroidEGL::InitSharedSurface(bool bUseSmallSurface)
 		if (PImplData->CachedWindowRect.Right > 0 && PImplData->CachedWindowRect.Bottom > 0)
 		{
 			// If we resumed from a lost window reuse the window size, the game thread will update the window dimensions.
-			FPlatformMisc::LowLevelOutputDebugStringf(TEXT("AndroidEGL::InitSharedSurface, Using CachedWindowRect, width: %d, height %d "), PImplData->CachedWindowRect.Right, PImplData->CachedWindowRect.Bottom);
+			FPlatformMisc::LowLevelOutputDebugStringf(TEXT("AndroidEGL::InitSharedSurface, Using CachedWindowRect, left: %d, top: %d, right: %d, bottom: %d "), PImplData->CachedWindowRect.Left, PImplData->CachedWindowRect.Top, PImplData->CachedWindowRect.Right, PImplData->CachedWindowRect.Bottom);
 			WindowSize = PImplData->CachedWindowRect;
 		}
+#if USE_ANDROID_STANDALONE
+		if (WindowSize.Left != 0 || WindowSize.Top != 0)
+		{
+			STANDALONE_DEBUG_LOGf(LogAndroid, TEXT("AndroidEGL::InitSharedSurface, WARNING!!! WindowSize is offset, left: %d, top: %d, right: %d, bottom: %d "), WindowSize.Left, WindowSize.Top, WindowSize.Right, WindowSize.Bottom);
+		}
+		Width = WindowSize.Right - WindowSize.Left;
+		Height = WindowSize.Bottom - WindowSize.Top;
+#else
 
 		Width = WindowSize.Right;
 		Height = WindowSize.Bottom;
+#endif
 
 		FPlatformMisc::LowLevelOutputDebugStringf(TEXT("AndroidEGL::InitSharedSurface, Using width: %d, height %d "), Width, Height);
 		AndroidThunkCpp_SetDesiredViewSize(Width, Height);
@@ -725,22 +765,36 @@ void AndroidEGL::ReInit()
 	SetCurrentSharedContext();
 }
 
-void AndroidEGL::Init(APIVariant API, uint32 MajorVersion, uint32 MinorVersion, bool bDebug)
+
+// EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT is enabled if configrules asks for it or the command line specifies it.
+// If -OpenGLRobustContext=[0/1] is specified on the command line it takes precedence.
+void AndroidEGL::Init(APIVariant API, uint32 MajorVersion, uint32 MinorVersion)
 {
 	check(IsInGameThread());
-
+	const bool bDebug = IsOGLDebugOutputEnabled();
+	const FString* ConfigRulesForceRobustGLContext = FAndroidMisc::GetConfigRulesVariable(TEXT("ForceRobustGLContext"));
+	bool bWantsRobustGLContext = ConfigRulesForceRobustGLContext && ConfigRulesForceRobustGLContext->Equals("true", ESearchCase::IgnoreCase);
+	
+	FString RobustArg;
+	if (FParse::Value(FCommandLine::Get(), TEXT("-OpenGLRobustContext="), RobustArg))
+	{
+		bWantsRobustGLContext = RobustArg.Contains(TEXT("1"));
+	}
+	
 	if (PImplData->Initalized)
 	{
+		ensure(bDebug == PImplData->bIsDebug); // if this fires you would need to tear down the previous context and recreate to honour the debug change.
 		return;
 	}
-	InitEGL(API);
 
+	InitEGL(API);
+	PImplData->bIsDebug = bDebug;
 	if (bSupportsKHRCreateContext)
 	{
-		const uint32 MaxElements = 13;
+		const uint32 MaxElements = 16;
 		uint32 Flags = 0;
 
-		Flags |= bDebug ? EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR : 0;
+		Flags |= PImplData->bIsDebug ? EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR : 0;
 
 		ContextAttributes = new int[MaxElements];
 		uint32 Element = 0;
@@ -756,6 +810,15 @@ void AndroidEGL::Init(APIVariant API, uint32 MajorVersion, uint32 MinorVersion, 
 			ContextAttributes[Element++] = EGL_TRUE;
 		}
 #endif // USE_ANDROID_EGL_NO_ERROR_CONTEXT
+
+		bIsEXTRobustContextActive = bSupportsEXTRobustContext && bWantsRobustGLContext;
+		if (bIsEXTRobustContextActive)
+		{
+			UE_LOG(LogAndroid, Log, TEXT("Enabling: EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT"));
+			ContextAttributes[Element++] = EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT;
+			ContextAttributes[Element++] = EGL_TRUE;
+		}
+
 		if (API == AV_OpenGLCore)
 		{
 			ContextAttributes[Element++] = EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR;
@@ -765,7 +828,7 @@ void AndroidEGL::Init(APIVariant API, uint32 MajorVersion, uint32 MinorVersion, 
 		ContextAttributes[Element++] = Flags;
 		ContextAttributes[Element++] = EGL_NONE;
 
-		checkf( Element < MaxElements, TEXT("Too many elements in config list"));
+		checkf( Element <= MaxElements, TEXT("Too many elements in config list"));
 	}
 	else
 	{
@@ -783,7 +846,18 @@ void AndroidEGL::Init(APIVariant API, uint32 MajorVersion, uint32 MinorVersion, 
 	{
 		ContextAttributes[3] -= 1;
 
-		InitContexts();
+		bSuccess = InitContexts();
+
+		if (!bSuccess)
+		{
+			// Try to create an ES2 context if ES3.1 also failed, which can happen in the Android emulator.
+			// This is enough for FAndroidGPUInfo detection to enable Vulkan.
+			ContextAttributes[0] = EGL_CONTEXT_CLIENT_VERSION;
+			ContextAttributes[1] = 2;
+			ContextAttributes[2] = EGL_NONE;
+
+			bSuccess = InitContexts();
+		}
 	}
 
 	// Getting the hardware window is valid during preinit as we have GAndroidWindowLock held.
@@ -828,11 +902,6 @@ bool AndroidEGL::IsInitialized()
 	return PImplData->Initalized;
 }
 
-GLuint AndroidEGL::GetOnScreenColorRenderBuffer()
-{
-	return PImplData->OnScreenColorRenderBuffer;
-}
-
 GLuint AndroidEGL::GetResolveFrameBuffer()
 {
 	return PImplData->ResolveFrameBuffer;
@@ -859,6 +928,11 @@ EGLDisplay AndroidEGL::GetDisplay() const
 EGLSurface AndroidEGL::GetSurface() const
 {
 	return PImplData->eglSurface;
+}
+
+EGLConfig AndroidEGL::GetConfig() const
+{
+	return PImplData->eglConfigParam;
 }
 
 void AndroidEGL::GetSwapIntervalRange(EGLint& OutMinSwapInterval, EGLint& OutMaxSwapInterval) const
@@ -902,6 +976,29 @@ void AndroidEGL::SetCurrentSharedContext()
 void AndroidEGL::AcquireCurrentRenderingContext()
 {
 	SetCurrentRenderingContext();
+
+	if (!PImplData->DummyFrameBuffer)
+	{
+		// Dummy FBO we bind right after SwapBuffers to tell driver that backbuffer is no longer in use by the App
+		glGenFramebuffers(1, &PImplData->DummyFrameBuffer);
+		PImplData->RenderingContext.DummyFrameBuffer = PImplData->DummyFrameBuffer;
+		PImplData->SharedContext.DummyFrameBuffer = PImplData->DummyFrameBuffer;
+		PImplData->SingleThreadedContext.DummyFrameBuffer = PImplData->DummyFrameBuffer;
+	}
+
+	if (IsOfflineSurfaceRequired())
+	{
+		// Needs to be generated on rendering context
+		if (!PImplData->ResolveFrameBuffer)
+		{
+			glGenFramebuffers(1, &PImplData->ResolveFrameBuffer);
+		}
+	}
+	else
+	{
+		PImplData->ResolveFrameBuffer = 0;
+	}
+
 }
 
 void AndroidEGL::SetCurrentRenderingContext()
@@ -1109,6 +1206,58 @@ void AndroidEGL::LogConfigInfo(EGLConfig  EGLConfigInfo)
 	eglGetConfigAttrib(PImplData->eglDisplay,EGLConfigInfo, EGL_TRANSPARENT_BLUE_VALUE, &ResultValue);  FPlatformMisc::LowLevelOutputDebugStringf( TEXT("EGLConfigInfo :EGL_TRANSPARENT_BLUE_VALUE :	%u" ), ResultValue );
 }
 
+void AndroidEGL::UpdateBuffersTransform()
+{
+	if (ANativeWindow_setBuffersTransform_API != nullptr && !IsOfflineSurfaceRequired())
+	{
+		int32 BufferTransform = ANATIVEWINDOW_TRANSFORM_IDENTITY;
+
+		EDeviceScreenOrientation ScreenOrientation = FPlatformMisc::GetDeviceOrientation();
+		
+		// Update the device orientation in case it hasn't been updated yet.
+		if (ScreenOrientation == EDeviceScreenOrientation::Unknown)
+		{
+			FAndroidMisc::UpdateDeviceOrientation();
+			ScreenOrientation = FPlatformMisc::GetDeviceOrientation();
+		}
+
+		switch (ScreenOrientation)
+		{
+		case EDeviceScreenOrientation::Portrait:
+			BufferTransform = ANATIVEWINDOW_TRANSFORM_MIRROR_VERTICAL;
+			break;
+
+		case EDeviceScreenOrientation::PortraitUpsideDown:
+			BufferTransform = ANATIVEWINDOW_TRANSFORM_MIRROR_HORIZONTAL;
+			break;
+
+		case EDeviceScreenOrientation::LandscapeLeft:
+			BufferTransform = ANATIVEWINDOW_TRANSFORM_ROTATE_90 | ANATIVEWINDOW_TRANSFORM_MIRROR_VERTICAL;
+			break;
+
+		case EDeviceScreenOrientation::LandscapeRight:
+			BufferTransform = ANATIVEWINDOW_TRANSFORM_ROTATE_90 | ANATIVEWINDOW_TRANSFORM_MIRROR_HORIZONTAL;
+			break;
+
+		default:
+			ensureMsgf(false, TEXT("BufferTransform %d should be handled with no exception, otherwise wrong orientation could be displayed on device"), BufferTransform);
+			break;
+		}
+
+		ANativeWindow_setBuffersTransform_API(GetNativeWindow(), BufferTransform);
+	}
+}
+
+bool AndroidEGL::IsOfflineSurfaceRequired()
+{
+	return FAndroidMisc::SupportsBackbufferSampling()
+		// force to use BlitFrameBuffer
+		|| CVarAndroidGLESFlipYMethod.GetValueOnAnyThread() == 2
+		// setBuffersTransform doesn't work on android 9 and below devices
+		|| !(CVarAndroidGLESFlipYMethod.GetValueOnAnyThread() == 1 || FAndroidMisc::GetAndroidMajorVersion() >= 10)
+		// setBuffersTransform doesn't work on arm and powerVR GPU devices
+		|| (CVarAndroidGLESFlipYMethod.GetValueOnAnyThread() == 0 && (GRHIVendorId == 0x13B5 || GRHIVendorId == 0x1010));
+}
 
 ///
 extern FCriticalSection GAndroidWindowLock;
@@ -1165,29 +1314,48 @@ void BlockOnLostWindowRenderCommand(TSharedPtr<FEvent, ESPMode::ThreadSafe> RTBl
 	UE_LOG(LogAndroid, Log, TEXT("RendererBlock released window lock"));
 }
 
+void SetSharedContextGameCommand(TSharedPtr<FEvent, ESPMode::ThreadSafe> GTBlockedTrigger)
+{
+	check(IsInGameThread());
+	AndroidEGL* EGL = AndroidEGL::GetInstance();
+	EGL->SetCurrentContext(EGL_NO_CONTEXT, EGL_NO_SURFACE);
+	EGL->SetCurrentSharedContext();
+	GTBlockedTrigger->Trigger();
+}
+
 extern bool IsInAndroidEventThread();
 void BlockRendering()
 {
 	check(IsInAndroidEventThread());
 	check(GIsRHIInitialized);
 
-	UE_LOG(LogAndroid, Log, TEXT("Blocking renderer on invalid window."));
+	UE_LOG(LogAndroid, Log, TEXT("Blocking renderer on suspended window."));
 	
-	// Wait for GC to complete and prevent further GCs
-	FGCScopeGuard GCGuard;
-	TSharedPtr<FEvent, ESPMode::ThreadSafe> RTBlockedTrigger = MakeShareable(FPlatformProcess::GetSynchEventFromPool(), [](FEvent* EventToDelete)
+	TSharedPtr<FEvent, ESPMode::ThreadSafe> BlockedTrigger = MakeShareable(FPlatformProcess::GetSynchEventFromPool(), [](FEvent* EventToDelete)
 	{
 		FPlatformProcess::ReturnSynchEventToPool(EventToDelete);
 	});
 
-	FGraphEventRef RTBlockTask = FFunctionGraphTask::CreateAndDispatchWhenReady([RTBlockedTrigger]()
+	// Flush GT first in case it has any dependency on RT work to complete
+	FGraphEventRef GTBlockTask = FFunctionGraphTask::CreateAndDispatchWhenReady([BlockedTrigger]()
+		{
+			SetSharedContextGameCommand(BlockedTrigger);
+		}, TStatId(), NULL, ENamedThreads::GameThread);
+
+	UE_LOG(LogAndroid, Log, TEXT("Waiting for game thread to release EGL context/surface."));
+	BlockedTrigger->Wait();
+
+	// Wait for GC to complete and prevent further GCs
+	FGCScopeGuard GCGuard;
+
+	FGraphEventRef RTBlockTask = FFunctionGraphTask::CreateAndDispatchWhenReady([BlockedTrigger]()
 	{
-		BlockOnLostWindowRenderCommand(RTBlockedTrigger);
+		BlockOnLostWindowRenderCommand(BlockedTrigger);
 	}, TStatId(), NULL, ENamedThreads::GetRenderThread());
 
 	// wait for the render thread to process.
 	UE_LOG(LogAndroid, Log, TEXT("Waiting for renderer to encounter blocking command."));
-	RTBlockedTrigger->Wait();
+	BlockedTrigger->Wait();
 }
 
 #endif

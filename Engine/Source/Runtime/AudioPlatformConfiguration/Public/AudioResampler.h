@@ -1,22 +1,27 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
-
 #pragma once
-//#if PLATFORM_WINDOWS
-#include "CoreMinimal.h"
 
-#if PLATFORM_SWITCH
-// Switch uses page alignment for submitted buffers
-#define AUDIO_BUFFER_ALIGNMENT 4096
-#else
+#include "Containers/Array.h"
+#include "Containers/ContainerAllocationPolicies.h"
+#include "CoreMinimal.h"
+#include "HAL/Platform.h"
+#include "Logging/LogMacros.h"
+#include "Templates/UniquePtr.h"
+
+// TODO: Move BufferVectorOperations AUDIO_BUFFER_ALIGNMENT
+// define to more central location and reference here.
 #define AUDIO_BUFFER_ALIGNMENT 16
-#endif
 
 DECLARE_LOG_CATEGORY_EXTERN(LogAudioResampler, Warning, All);
 
 namespace Audio
 {
-	typedef TArray<float, TAlignedHeapAllocator<AUDIO_BUFFER_ALIGNMENT>> AlignedFloatBuffer;
-	typedef TArray<uint8, TAlignedHeapAllocator<AUDIO_BUFFER_ALIGNMENT>> AlignedByteBuffer;
+	// TODO: Move BufferVectorOperations Aligned...Buffer
+	// defines to more central location and reference here.
+	namespace VectorOps
+	{
+		using FAlignedFloatBuffer = TArray<float, TAlignedHeapAllocator<AUDIO_BUFFER_ALIGNMENT>>;
+	} // namespace VectorOps
 
 	enum class EResamplingMethod : uint8
 	{
@@ -33,12 +38,12 @@ namespace Audio
 		int32 NumChannels;
 		float SourceSampleRate;
 		float DestinationSampleRate;
-		AlignedFloatBuffer& InputBuffer;
+		VectorOps::FAlignedFloatBuffer& InputBuffer;
 	};
 
 	struct FResamplerResults
 	{
-		AlignedFloatBuffer* OutBuffer;
+		VectorOps::FAlignedFloatBuffer* OutBuffer;
 
 		float ResultingSampleRate;
 
@@ -63,21 +68,19 @@ namespace Audio
 
 	class FResamplerImpl;
 
-	class AUDIOPLATFORMCONFIGURATION_API FResampler
+	class FResampler
 	{
 	public:
-		FResampler();
-		~FResampler();
+		AUDIOPLATFORMCONFIGURATION_API FResampler();
+		AUDIOPLATFORMCONFIGURATION_API ~FResampler();
 
-		void Init(EResamplingMethod ResamplingMethod, float StartingSampleRateRatio, int32 InNumChannels);
-		void SetSampleRateRatio(float InRatio);
-		int32 ProcessAudio(float* InAudioBuffer, int32 InSamples, bool bEndOfInput, float* OutAudioBuffer, int32 MaxOutputFrames, int32& OutNumFrames);
+		AUDIOPLATFORMCONFIGURATION_API void Init(EResamplingMethod ResamplingMethod, float StartingSampleRateRatio, int32 InNumChannels);
+		AUDIOPLATFORMCONFIGURATION_API void SetSampleRateRatio(float InRatio);
+		AUDIOPLATFORMCONFIGURATION_API int32 ProcessAudio(float* InAudioBuffer, int32 InSamples, bool bEndOfInput, float* OutAudioBuffer, int32 MaxOutputFrames, int32& OutNumFrames);
 
 	private:
 		TUniquePtr<FResamplerImpl> CreateImpl();
 		TUniquePtr<FResamplerImpl> Impl;
 	};
 	
-}
-
-//#endif //PLATFORM_WINDOWS
+} // namespace Audio

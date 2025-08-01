@@ -23,7 +23,7 @@ namespace ChaosTest {
 		Test.Create();
 
 		bool bBrokenCallbackCalled = false;
-		Test.Joints.SetBreakCallback([&bBrokenCallbackCalled](FPBDJointConstraintHandle* Constraint)
+		Test.Evolution.GetJointConstraints().SetBreakCallback([&bBrokenCallbackCalled](FPBDJointConstraintHandle* Constraint)
 			{
 				bBrokenCallbackCalled = true;
 			});
@@ -34,18 +34,18 @@ namespace ChaosTest {
 			Test.Evolution.AdvanceOneTimeStep(Dt);
 			Test.Evolution.EndFrame(Dt);
 		}
-		EXPECT_NEAR(Test.GetParticle(1)->X().Z, Test.ParticlePositions[1].Z, 1.0f);
+		EXPECT_NEAR(Test.GetParticle(1)->GetX().Z, Test.ParticlePositions[1].Z, 1.0f);
 
 		// Nothing should have broken
 		EXPECT_FALSE(bBrokenCallbackCalled);
-		EXPECT_TRUE(Test.Joints.IsConstraintEnabled(0));
+		EXPECT_TRUE(Test.Evolution.GetJointConstraints().IsConstraintEnabled(0));
 
 		// Manually break the constraints
-		Test.Joints.BreakConstraint(0);
+		Test.Evolution.GetJointConstraints().BreakConstraint(0);
 
 		// Check that it worked
 		EXPECT_TRUE(bBrokenCallbackCalled);
-		EXPECT_FALSE(Test.Joints.IsConstraintEnabled(0));
+		EXPECT_FALSE(Test.Evolution.GetJointConstraints().IsConstraintEnabled(0));
 
 		// Run the sim - body should fall
 		for (int32 i = 0; i < NumIts; ++i)
@@ -54,7 +54,7 @@ namespace ChaosTest {
 			Test.Evolution.EndFrame(Dt);
 		}
 		FReal ExpectedZ = Test.ParticlePositions[1].Z - 0.5f * Gravity * (NumIts * Dt) * (NumIts * Dt);
-		EXPECT_NEAR(Test.GetParticle(1)->X().Z, ExpectedZ, 1.0f);
+		EXPECT_NEAR(Test.GetParticle(1)->GetX().Z, ExpectedZ, 1.0f);
 	}
 
 	GTEST_TEST(AllEvolutions, JointBreakTests_TestManualBreak)
@@ -82,7 +82,7 @@ namespace ChaosTest {
 		Test.Create();
 
 		bool bBrokenCallbackCalled = false;
-		Test.Joints.SetBreakCallback([&bBrokenCallbackCalled](FPBDJointConstraintHandle* Constraint)
+		Test.Evolution.GetJointConstraints().SetBreakCallback([&bBrokenCallbackCalled](FPBDJointConstraintHandle* Constraint)
 			{
 				bBrokenCallbackCalled = true;
 			});
@@ -96,7 +96,7 @@ namespace ChaosTest {
 
 		// Nothing should have broken
 		EXPECT_FALSE(bBrokenCallbackCalled);
-		EXPECT_TRUE(Test.Joints.IsConstraintEnabled(0));
+		EXPECT_TRUE(Test.Evolution.GetJointConstraints().IsConstraintEnabled(0));
 	}
 
 	GTEST_TEST(AllEvolutions, JointBreakTests_TestUnderLinearThreshold)
@@ -126,7 +126,7 @@ namespace ChaosTest {
 		Test.Create();
 
 		bool bBrokenCallbackCalled = false;
-		Test.Joints.SetBreakCallback([&bBrokenCallbackCalled](FPBDJointConstraintHandle* Constraint)
+		Test.Evolution.GetJointConstraints().SetBreakCallback([&bBrokenCallbackCalled](FPBDJointConstraintHandle* Constraint)
 			{
 				bBrokenCallbackCalled = true;
 			});
@@ -140,8 +140,8 @@ namespace ChaosTest {
 
 		// Nothing should have broken
 		EXPECT_FALSE(bBrokenCallbackCalled);
-		EXPECT_TRUE(Test.Joints.IsConstraintEnabled(0));
-		EXPECT_TRUE(Test.Joints.IsConstraintEnabled(1));
+		EXPECT_TRUE(Test.Evolution.GetJointConstraints().IsConstraintEnabled(0));
+		EXPECT_TRUE(Test.Evolution.GetJointConstraints().IsConstraintEnabled(1));
 	}
 
 	GTEST_TEST(AllEvolutions, JointBreakTests_TestUnderLinearThreshold2)
@@ -169,7 +169,7 @@ namespace ChaosTest {
 		Test.Create();
 
 		bool bBrokenCallbackCalled = false;
-		Test.Joints.SetBreakCallback([&bBrokenCallbackCalled](FPBDJointConstraintHandle* Constraint)
+		Test.Evolution.GetJointConstraints().SetBreakCallback([&bBrokenCallbackCalled](FPBDJointConstraintHandle* Constraint)
 			{
 				bBrokenCallbackCalled = true;
 			});
@@ -183,7 +183,7 @@ namespace ChaosTest {
 
 		// Constraint should have broken
 		EXPECT_TRUE(bBrokenCallbackCalled);
-		EXPECT_FALSE(Test.Joints.IsConstraintEnabled(0));
+		EXPECT_FALSE(Test.Evolution.GetJointConstraints().IsConstraintEnabled(0));
 	}
 
 	GTEST_TEST(AllEvolutions, JointBreakTests_TestOverLinearThreshold)
@@ -193,9 +193,9 @@ namespace ChaosTest {
 
 
 	// 1 Kinematic Body with 2 Dynamic bodies hanging from it by a breakable constraint.
-	// Constraint break force is less than M x G, so joint should break.
+	// Constraint break force is less than M x G, so joint should not break.
 	template <typename TEvolution>
-	void JointBreak_OverLinearThreshold2()
+	void JointBreak_UnderLinearThreshold3()
 	{
 		const int32 NumIterations = 1;
 		const FReal Gravity = 980;
@@ -206,15 +206,14 @@ namespace ChaosTest {
 		Test.InitChain(3, FVec3(0, 0, -1));
 
 		// Joint should break only if Threshold < MG
-		// So yes in this test
-		// NOTE: internal forces reach almost 50% over MG
+		// So no in this test
 		Test.JointSettings[0].LinearBreakForce = 1.2f * (Test.ParticleMasses[1] + Test.ParticleMasses[2]) * Gravity;
 		Test.JointSettings[1].LinearBreakForce = 1.2f * Test.ParticleMasses[2] * Gravity;
 
 		Test.Create();
 
 		bool bBrokenCallbackCalled = false;
-		Test.Joints.SetBreakCallback([&bBrokenCallbackCalled](FPBDJointConstraintHandle* Constraint)
+		Test.Evolution.GetJointConstraints().SetBreakCallback([&bBrokenCallbackCalled](FPBDJointConstraintHandle* Constraint)
 			{
 				bBrokenCallbackCalled = true;
 			});
@@ -226,15 +225,15 @@ namespace ChaosTest {
 			Test.Evolution.EndFrame(Dt);
 		}
 
-		// Constraint should have broken
-		EXPECT_TRUE(bBrokenCallbackCalled);
-		EXPECT_FALSE(Test.Joints.IsConstraintEnabled(0));
-		EXPECT_FALSE(Test.Joints.IsConstraintEnabled(1));
+		// Constraint should not have broken
+		EXPECT_FALSE(bBrokenCallbackCalled);
+		EXPECT_TRUE(Test.Evolution.GetJointConstraints().IsConstraintEnabled(0));
+		EXPECT_TRUE(Test.Evolution.GetJointConstraints().IsConstraintEnabled(1));
 	}
 
-	GTEST_TEST(AllEvolutions, JointBreakTests_TestOverLinearThreshold2)
+	GTEST_TEST(AllEvolutions, JointBreakTests_TestUnderLinearThreshold3)
 	{
-		JointBreak_OverLinearThreshold2<FPBDRigidsEvolutionGBF>();
+		JointBreak_UnderLinearThreshold3<FPBDRigidsEvolutionGBF>();
 	}
 
 	// 1 Kinematic Body with 1 Dynamic body held vertically by a breakable angular constraint.
@@ -259,7 +258,7 @@ namespace ChaosTest {
 		Test.Create();
 
 		bool bBrokenCallbackCalled = false;
-		Test.Joints.SetBreakCallback([&bBrokenCallbackCalled](FPBDJointConstraintHandle* Constraint)
+		Test.Evolution.GetJointConstraints().SetBreakCallback([&bBrokenCallbackCalled](FPBDJointConstraintHandle* Constraint)
 			{
 				bBrokenCallbackCalled = true;
 			});
@@ -267,7 +266,7 @@ namespace ChaosTest {
 		// Run the sim
 		for (int32 i = 0; i < NumIts; ++i)
 		{
-			Test.GetParticle(1)->CastToRigidParticle()->Torque() = Torque;
+			Test.GetParticle(1)->CastToRigidParticle()->SetTorque(Torque);
 
 			Test.Evolution.AdvanceOneTimeStep(Dt);
 			Test.Evolution.EndFrame(Dt);
@@ -275,7 +274,7 @@ namespace ChaosTest {
 
 		// Nothing should have broken
 		EXPECT_FALSE(bBrokenCallbackCalled);
-		EXPECT_TRUE(Test.Joints.IsConstraintEnabled(0));
+		EXPECT_TRUE(Test.Evolution.GetJointConstraints().IsConstraintEnabled(0));
 	}
 
 	GTEST_TEST(AllEvolutions, JointBreakTests_TestUnderAngularThreshold)
@@ -305,7 +304,7 @@ namespace ChaosTest {
 		Test.Create();
 
 		bool bBrokenCallbackCalled = false;
-		Test.Joints.SetBreakCallback([&bBrokenCallbackCalled](FPBDJointConstraintHandle* Constraint)
+		Test.Evolution.GetJointConstraints().SetBreakCallback([&bBrokenCallbackCalled](FPBDJointConstraintHandle* Constraint)
 			{
 				bBrokenCallbackCalled = true;
 			});
@@ -313,7 +312,7 @@ namespace ChaosTest {
 		// Run the sim
 		for (int32 i = 0; i < NumSteps; ++i)
 		{
-			Test.GetParticle(1)->CastToRigidParticle()->Torque() = Torque;
+			Test.GetParticle(1)->CastToRigidParticle()->SetTorque(Torque);
 
 			Test.Evolution.AdvanceOneTimeStep(Dt);
 			Test.Evolution.EndFrame(Dt);
@@ -321,7 +320,7 @@ namespace ChaosTest {
 
 		// Nothing should have broken
 		EXPECT_TRUE(bBrokenCallbackCalled);
-		EXPECT_FALSE(Test.Joints.IsConstraintEnabled(0));
+		EXPECT_FALSE(Test.Evolution.GetJointConstraints().IsConstraintEnabled(0));
 	}
 
 	GTEST_TEST(AllEvolutions, JointBreakTests_TestOverAngularThreshold)

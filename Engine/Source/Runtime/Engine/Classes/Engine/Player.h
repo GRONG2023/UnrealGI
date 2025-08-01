@@ -20,7 +20,7 @@ class UPlayer : public UObject, public FExec
 
 	/** The actor this player controls. */
 	UPROPERTY(transient)
-	class APlayerController* PlayerController;
+	TObjectPtr<class APlayerController> PlayerController;
 
 	// Net variables.
 	/** the current speed of the connection */
@@ -37,7 +37,9 @@ class UPlayer : public UObject, public FExec
 
 public:
 	//~ Begin FExec Interface.
+#if UE_ALLOW_EXEC_COMMANDS
 	ENGINE_API virtual bool Exec( UWorld* InWorld, const TCHAR* Cmd,FOutputDevice& Ar) override;
+#endif
 	//~ End FExec Interface.
 
 	/**
@@ -63,4 +65,9 @@ public:
 	 * @return The controller associated with this player in InWorld, if one exists.
 	 */
 	ENGINE_API APlayerController* GetPlayerController(const UWorld* const InWorld) const;
+
+	/**
+	 * Called when this player has had it's outer Player Controller set for remote net connections
+	 */
+	ENGINE_API virtual void ReceivedPlayerController(APlayerController* NewController);
 };

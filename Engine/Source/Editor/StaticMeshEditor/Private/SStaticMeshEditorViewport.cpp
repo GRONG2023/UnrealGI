@@ -7,19 +7,20 @@
 #include "Widgets/Text/STextBlock.h"
 #include "UObject/Package.h"
 #include "Components/StaticMeshComponent.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Engine/StaticMesh.h"
 #include "IStaticMeshEditor.h"
 #include "StaticMeshEditorActions.h"
 #include "Slate/SceneViewport.h"
 #include "ComponentReregisterContext.h"
-#include "Runtime/Analytics/Analytics/Public/AnalyticsEventAttribute.h"
-#include "Runtime/Analytics/Analytics/Public/Interfaces/IAnalyticsProvider.h"
+#include "AnalyticsEventAttribute.h"
+#include "Interfaces/IAnalyticsProvider.h"
 #include "EngineAnalytics.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Engine/StaticMeshSocket.h"
-#include "Editor/UnrealEd/Public/SEditorViewportToolBarMenu.h"
+#include "SEditorViewportToolBarMenu.h"
 #include "Editor.h"
+#include "Widgets/Text/SRichTextBlock.h"
 
 #define HITPROXY_SOCKET	1
 
@@ -39,14 +40,14 @@ void SStaticMeshEditorViewport::Construct(const FArguments& InArgs)
 
 	if (StaticMesh)
 	{
-		PreviewScene->SetFloorOffset(-StaticMesh->GetExtendedBounds().Origin.Z + StaticMesh->GetExtendedBounds().BoxExtent.Z);
+		PreviewScene->SetFloorOffset(static_cast<float>( -StaticMesh->GetExtendedBounds().Origin.Z + StaticMesh->GetExtendedBounds().BoxExtent.Z ));
 	}
 
 	// restore last used feature level
 	UWorld* World = PreviewScene->GetWorld();
 	if (World != nullptr)
 	{
-		World->ChangeFeatureLevel(GWorld->FeatureLevel);
+		World->ChangeFeatureLevel(GWorld->GetFeatureLevel());
 	}
 
 	UEditorEngine* Editor = CastChecked<UEditorEngine>(GEngine);
@@ -79,9 +80,14 @@ void SStaticMeshEditorViewport::PopulateViewportOverlays(TSharedRef<SOverlay> Ov
 	Overlay->AddSlot()
 		.VAlign(VAlign_Top)
 		.HAlign(HAlign_Left)
-		.Padding(FMargin(10.0f, 40.0f, 10.0f, 10.0f))
+		.Padding(FMargin(6.0f, 36.0f, 6.0f, 6.0f))
 		[
-			SAssignNew(OverlayTextVerticalBox, SVerticalBox)
+			SNew(SBorder)
+			.BorderImage( FAppStyle::Get().GetBrush( "FloatingBorder" ) )
+			.Padding(4.f)
+			[
+				SAssignNew(OverlayText, SRichTextBlock)
+			]
 		];
 
 	// this widget will display the current viewed feature level
@@ -111,22 +117,29 @@ SStaticMeshEditorViewport::~SStaticMeshEditorViewport()
 	}
 }
 
-void SStaticMeshEditorViewport::PopulateOverlayText(const TArray<FOverlayTextItem>& TextItems)
+void SStaticMeshEditorViewport::PopulateOverlayText(const TArrayView<FOverlayTextItem> TextItems)
 {
-	OverlayTextVerticalBox->ClearChildren();
+	FTextBuilder FinalText;
+
+	static FText WarningTextStyle = FText::FromString(TEXT("<TextBlock.ShadowedTextWarning>{0}</>"));
+	static FText NormalTextStyle = FText::FromString(TEXT("<TextBlock.ShadowedText>{0}</>"));
 
 	for (const auto& TextItem : TextItems)
 	{
-		OverlayTextVerticalBox->AddSlot()
-		[
-			SNew(STextBlock)
-			.Text(TextItem.Text)
-			.TextStyle(FEditorStyle::Get(), TextItem.Style)
-		];
+		if (!TextItem.bIsCustomFormat)
+		{
+			FinalText.AppendLineFormat(TextItem.bIsWarning ? WarningTextStyle : NormalTextStyle, TextItem.Text);
+		}
+		else
+		{
+			FinalText.AppendLine(TextItem.Text);
+		}
 	}
+
+	OverlayText->SetText(FinalText.ToText());
 }
 
-TSharedRef<class SEditorViewport> SStaticMeshEditorViewport::GetViewportWidget()
+TSharedRef<SEditorViewport> SStaticMeshEditorViewport::GetViewportWidget()
 {
 	return SharedThis(this);
 }
@@ -196,9 +209,30 @@ bool SStaticMeshEditorViewport::PreviewComponentSelectionOverride(const UPrimiti
 	return false;
 }
 
+void SStaticMeshEditorViewport::ToggleShowNaniteFallback()
+{
+	if (PreviewMeshComponent)
+	{
+		FComponentReregisterContext ReregisterContext(PreviewMeshComponent);
+		PreviewMeshComponent->bDisplayNaniteFallbackMesh = !PreviewMeshComponent->bDisplayNaniteFallbackMesh;
+	}
+}
+
+bool SStaticMeshEditorViewport::IsShowNaniteFallbackChecked() const
+{
+	return PreviewMeshComponent ? PreviewMeshComponent->bDisplayNaniteFallbackMesh : false;
+}
+
+bool SStaticMeshEditorViewport::IsShowNaniteFallbackVisible() const
+{
+	const UStaticMesh* PreviewStaticMesh = PreviewMeshComponent ? ToRawPtr(PreviewMeshComponent->GetStaticMesh()) : nullptr;
+
+	return PreviewStaticMesh && PreviewStaticMesh->IsNaniteEnabled() ? true : false;
+}
+
 void SStaticMeshEditorViewport::UpdatePreviewSocketMeshes()
 {
-	UStaticMesh* const PreviewStaticMesh = PreviewMeshComponent ? PreviewMeshComponent->GetStaticMesh() : nullptr;
+	UStaticMesh* const PreviewStaticMesh = PreviewMeshComponent ? ToRawPtr(PreviewMeshComponent->GetStaticMesh()) : nullptr;
 
 	if( PreviewStaticMesh )
 	{
@@ -327,7 +361,7 @@ void SStaticMeshEditorViewport::UpdatePreviewMesh(UStaticMesh* InStaticMesh, boo
 
 bool SStaticMeshEditorViewport::IsVisible() const
 {
-	return ViewportWidget.IsValid() && (!ParentTab.IsValid() || ParentTab.Pin()->IsForeground());
+	return ViewportWidget.IsValid() && (!ParentTab.IsValid() || ParentTab.Pin()->IsForeground()) && SEditorViewport::IsVisible();
 }
 
 UStaticMeshComponent* SStaticMeshEditorViewport::GetStaticMeshComponent() const
@@ -530,6 +564,13 @@ void SStaticMeshEditorViewport::BindCommands()
 	const FStaticMeshEditorCommands& Commands = FStaticMeshEditorCommands::Get();
 
 	TSharedRef<FStaticMeshEditorViewportClient> EditorViewportClientRef = EditorViewportClient.ToSharedRef();
+
+	CommandList->MapAction(
+		Commands.SetShowNaniteFallback,
+		FExecuteAction::CreateSP(this, &SStaticMeshEditorViewport::ToggleShowNaniteFallback),
+		FCanExecuteAction(),
+		FIsActionChecked::CreateSP(this, &SStaticMeshEditorViewport::IsShowNaniteFallbackChecked),
+		FIsActionButtonVisible::CreateSP(this, &SStaticMeshEditorViewport::IsShowNaniteFallbackVisible));
 
 	CommandList->MapAction(
 		Commands.SetShowWireframe,

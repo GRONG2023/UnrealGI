@@ -94,6 +94,11 @@ void FSkeletonTreeBuilder::Build(FSkeletonTreeBuilderOutput& Output)
 		AddBones(Output);
 	}
 
+	if (BuilderArgs.bShowVirtualBones)
+	{
+		AddVirtualBones(Output);
+	}
+
 	if (BuilderArgs.bShowSockets)
 	{
 		AddSockets(Output);
@@ -102,11 +107,6 @@ void FSkeletonTreeBuilder::Build(FSkeletonTreeBuilderOutput& Output)
 	if (BuilderArgs.bShowAttachedAssets)
 	{
 		AddAttachedAssets(Output);
-	}
-
-	if (BuilderArgs.bShowVirtualBones)
-	{
-		AddVirtualBones(Output);
 	}
 }
 
@@ -208,18 +208,88 @@ void FSkeletonTreeBuilder::AddBones(FSkeletonTreeBuilderOutput& Output)
 	const USkeleton& Skeleton = EditableSkeletonPtr.Pin()->GetSkeleton();
 
 	const FReferenceSkeleton& RefSkeleton = Skeleton.GetReferenceSkeleton();
+
+	struct FBoneInfo
+	{
+		FBoneInfo(const FName& InBoneName, const FName& InParentName, int32 InDepth)
+			: BoneName(InBoneName)
+			, ParentName(InParentName)
+			, Depth(InDepth)
+		{
+			SortString = BoneName.ToString();
+			SortNumber = 0;
+			SortLength = SortString.Len();
+
+			// Split the bone name into string prefix and numeric suffix for sorting (different from FName to support leading zeros in the numeric suffix)
+			int32 Index = SortLength - 1;
+			for (int32 PlaceValue = 1; Index >= 0 && FChar::IsDigit(SortString[Index]); --Index, PlaceValue *= 10)
+			{
+				SortNumber += static_cast<int32>(SortString[Index] - '0') * PlaceValue;
+			}
+			SortString.LeftInline(Index + 1, EAllowShrinking::No);
+		}
+
+		bool operator<(const FBoneInfo& RHS)
+		{
+			// Sort parents before children
+			if (Depth != RHS.Depth)
+			{
+				return Depth < RHS.Depth;
+			}
+
+			// Sort alphabetically by string prefix
+			if (int32 SplitNameComparison = SortString.Compare(RHS.SortString))
+			{
+				return SplitNameComparison < 0;
+			}
+
+			// Sort by number if the string prefixes match
+			if (SortNumber != RHS.SortNumber)
+			{
+				return SortNumber < RHS.SortNumber;
+			}
+
+			// Sort by length to give us the equivalent to alphabetical sorting if the numbers match (which gives us the following sort order: bone_, bone_0, bone_00, bone_000, bone_001, bone_01, bone_1, etc)
+			return (SortNumber == 0) ? SortLength < RHS.SortLength : SortLength > RHS.SortLength;
+		}
+
+		FName BoneName = NAME_None;
+		FName ParentName = NAME_None;
+		int32 Depth = 0;
+
+		FString SortString;
+		int32 SortNumber = 0;
+		int32 SortLength = 0;
+	};
+
+	TArray<FBoneInfo> Bones;
+	Bones.Reserve(RefSkeleton.GetRawBoneNum());
+
+	// Gather the bones from the skeleton
 	for (int32 BoneIndex = 0; BoneIndex < RefSkeleton.GetRawBoneNum(); ++BoneIndex)
 	{
 		const FName& BoneName = RefSkeleton.GetBoneName(BoneIndex);
 
 		FName ParentName = NAME_None;
 		int32 ParentIndex = RefSkeleton.GetParentIndex(BoneIndex);
+		int32 Depth = 0;
 		if (ParentIndex != INDEX_NONE)
 		{
 			ParentName = RefSkeleton.GetBoneName(ParentIndex);
+			Depth = Bones[ParentIndex].Depth + 1;
 		}
-		TSharedRef<ISkeletonTreeItem> DisplayBone = CreateBoneTreeItem(BoneName);
-		Output.Add(DisplayBone, ParentName, FSkeletonTreeBoneItem::GetTypeId());
+
+		Bones.Emplace(BoneName, ParentName, Depth);
+	}
+
+	// Sort the bones lexically (and also by depth in order to maintain the invariant of parents before children)
+	Algo::Sort(Bones);
+
+	// Add the sorted bones to the skeleton tree
+	for (const FBoneInfo& Bone : Bones)
+	{
+		TSharedRef<ISkeletonTreeItem> DisplayBone = CreateBoneTreeItem(Bone.BoneName);
+		Output.Add(DisplayBone, Bone.ParentName, FSkeletonTreeBoneItem::GetTypeId());
 	}
 }
 
@@ -234,7 +304,7 @@ void FSkeletonTreeBuilder::AddSockets(FSkeletonTreeBuilderOutput& Output)
 	if (PreviewScenePtr.IsValid())
 	{
 		UDebugSkelMeshComponent* PreviewMeshComponent = PreviewScenePtr.Pin()->GetPreviewMeshComponent();
-		if (USkeletalMesh* const SkeletalMesh = PreviewMeshComponent->SkeletalMesh)
+		if (USkeletalMesh* const SkeletalMesh = PreviewMeshComponent->GetSkeletalMeshAsset())
 		{
 			AddSocketsFromData(SkeletalMesh->GetMeshOnlySocketList(), ESocketParentType::Mesh, Output);
 		}
@@ -249,7 +319,7 @@ void FSkeletonTreeBuilder::AddAttachedAssets(FSkeletonTreeBuilderOutput& Output)
 	if (PreviewScenePtr.IsValid())
 	{
 		UDebugSkelMeshComponent* PreviewMeshComponent = PreviewScenePtr.Pin()->GetPreviewMeshComponent();
-		if (USkeletalMesh* const SkeletalMesh = PreviewMeshComponent->SkeletalMesh)
+		if (USkeletalMesh* const SkeletalMesh = PreviewMeshComponent->GetSkeletalMeshAsset())
 		{
 			AddAttachedAssetContainer(SkeletalMesh->GetPreviewAttachedAssetContainer(), Output);
 		}
@@ -278,14 +348,14 @@ void FSkeletonTreeBuilder::AddSocketsFromData(const TArray< USkeletalMeshSocket*
 			if (PreviewScenePtr.IsValid())
 			{
 				UDebugSkelMeshComponent* PreviewMeshComponent = PreviewScenePtr.Pin()->GetPreviewMeshComponent();
-				if (USkeletalMesh* const SkeletalMesh = PreviewMeshComponent->SkeletalMesh)
+				if (USkeletalMesh* const SkeletalMesh = PreviewMeshComponent->GetSkeletalMeshAsset())
 				{
 					bIsCustomized = EditableSkeletonPtr.Pin()->DoesSocketAlreadyExist(nullptr, FText::FromName(Socket->SocketName), ESocketParentType::Mesh, SkeletalMesh);
 				}
 			}
 		}
 
-		Output.Add(CreateSocketTreeItem(Socket, ParentType, bIsCustomized), Socket->BoneName, FSkeletonTreeBoneItem::GetTypeId());
+		Output.Add(CreateSocketTreeItem(Socket, ParentType, bIsCustomized), Socket->BoneName, { FSkeletonTreeBoneItem::GetTypeId(), FSkeletonTreeVirtualBoneItem::GetTypeId() }, /*bAddToHead*/ true);
 	}
 }
 
@@ -295,7 +365,7 @@ void FSkeletonTreeBuilder::AddAttachedAssetContainer(const FPreviewAssetAttachCo
 	{
 		const FPreviewAttachedObjectPair& Pair = (*Iter);
 
-		Output.Add(CreateAttachedAssetTreeItem(Pair.GetAttachedObject(), Pair.AttachedTo), Pair.AttachedTo, { FSkeletonTreeBoneItem::GetTypeId(), FSkeletonTreeSocketItem::GetTypeId() });
+		Output.Add(CreateAttachedAssetTreeItem(Pair.GetAttachedObject(), Pair.AttachedTo), Pair.AttachedTo, { FSkeletonTreeBoneItem::GetTypeId(), FSkeletonTreeSocketItem::GetTypeId() }, /*bAddToHead*/ true);
 	}
 }
 
@@ -304,7 +374,7 @@ void FSkeletonTreeBuilder::AddVirtualBones(FSkeletonTreeBuilderOutput& Output)
 	const TArray<FVirtualBone>& VirtualBones = EditableSkeletonPtr.Pin()->GetSkeleton().GetVirtualBones();
 	for (const FVirtualBone& VirtualBone : VirtualBones)
 	{
-		Output.Add(CreateVirtualBoneTreeItem(VirtualBone.VirtualBoneName), VirtualBone.SourceBoneName, { FSkeletonTreeBoneItem::GetTypeId(), FSkeletonTreeVirtualBoneItem::GetTypeId() });
+		Output.Add(CreateVirtualBoneTreeItem(VirtualBone.VirtualBoneName), VirtualBone.SourceBoneName, { FSkeletonTreeBoneItem::GetTypeId(), FSkeletonTreeVirtualBoneItem::GetTypeId() }, /*bAddToHead*/ true);
 	}
 }
 

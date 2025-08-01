@@ -2,30 +2,18 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "DebugRenderSceneProxy.h"
-#include "Components/PrimitiveComponent.h"
+#include "Debug/DebugDrawComponent.h"
 #include "VisualLoggerRenderingComponent.generated.h"
 
 /**
-*	Transient actor used to draw visual logger data on level
-*/
-
-UCLASS()
-class UVisualLoggerRenderingComponent : public UPrimitiveComponent
+ *	Primitive component used to draw visual logger data on level
+ */
+UCLASS(ClassGroup = Debug)
+class UVisualLoggerRenderingComponent : public UDebugDrawComponent
 {
 public:
 	GENERATED_UCLASS_BODY()
 
-	virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
+	virtual FDebugRenderSceneProxy* CreateDebugSceneProxy() override;
 	virtual FBoxSphereBounds CalcBounds(const FTransform &LocalToWorld) const override;
-	virtual void CreateRenderState_Concurrent(FRegisterComponentContext* Context) override;
-	virtual void DestroyRenderState_Concurrent() override;
-
-private:
-#if WITH_EDITOR
-	FDebugDrawDelegateHelper DebugDrawDelegateHelper;
-#endif
 };
-

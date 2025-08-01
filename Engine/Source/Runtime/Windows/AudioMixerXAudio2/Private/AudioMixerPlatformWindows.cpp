@@ -8,262 +8,61 @@
 
 #include "AudioMixerPlatformXAudio2.h"
 #include "AudioMixer.h"
+#include "AudioDeviceNotificationSubsystem.h"
+#include "Misc/ScopeRWLock.h"
+
+#include <atomic>
 
 #if PLATFORM_WINDOWS
+
+#include "Windows/COMPointer.h"
+#include "ScopedCom.h"					// FScopedComString
+
 #include "Windows/AllowWindowsPlatformTypes.h"
-#include "Windows/AllowWindowsPlatformAtomics.h"
+THIRD_PARTY_INCLUDES_START
+// Linkage for  Windows GUIDs included by Notification/DeviceInfoCache, otherwise they are extern.
+#include <initguid.h>
+THIRD_PARTY_INCLUDES_END
+#include "Windows/HideWindowsPlatformTypes.h"
 
-#define INITGUID
-#include <mmdeviceapi.h>
-#include <functiondiscoverykeys_devpkey.h>
-
-class FWindowsMMNotificationClient final : public IMMNotificationClient
-{
-public:
-	FWindowsMMNotificationClient()
-		: Ref(1)
-		, DeviceEnumerator(nullptr)
-	{
-		bComInitialized = FWindowsPlatformMisc::CoInitialize();
-		HRESULT Result = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER, __uuidof(IMMDeviceEnumerator), (void**)&DeviceEnumerator);
-		if (Result == S_OK)
-		{
-			DeviceEnumerator->RegisterEndpointNotificationCallback(this);
-		}
-	}
-
-	virtual ~FWindowsMMNotificationClient()
-	{
-		if (DeviceEnumerator)
-		{
-			DeviceEnumerator->UnregisterEndpointNotificationCallback(this);
-			SAFE_RELEASE(DeviceEnumerator);
-		}
-
-		if (bComInitialized)
-		{
-			FWindowsPlatformMisc::CoUninitialize();
-		}
-	}
-
-	HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow InFlow, ERole InRole, LPCWSTR pwstrDeviceId) override
-	{
-		FScopeLock ScopeLock(&ListenerArrayMutationLock);
-
-		if (Audio::IAudioMixer::ShouldLogDeviceSwaps())
-		{
-			UE_LOG(LogAudioMixer, Warning, TEXT("OnDefaultDeviceChanged: %d, %d, %s"), InFlow, InRole, pwstrDeviceId);
-		}
-
-		Audio::EAudioDeviceRole AudioDeviceRole;
-
-		if (Audio::IAudioMixer::ShouldIgnoreDeviceSwaps())
-		{
-			return S_OK;
-		}
-
-		if (InRole == eConsole)
-		{
-			AudioDeviceRole = Audio::EAudioDeviceRole::Console;
-		}
-		else if (InRole == eMultimedia)
-		{
-			AudioDeviceRole = Audio::EAudioDeviceRole::Multimedia;
-		}
-		else
-		{
-			AudioDeviceRole = Audio::EAudioDeviceRole::Communications;
-		}
-
-		if (InFlow == eRender)
-		{
-			for (Audio::IAudioMixerDeviceChangedLister* Listener : Listeners)
-			{
-				Listener->OnDefaultRenderDeviceChanged(AudioDeviceRole, FString(pwstrDeviceId));
-			}
-		}
-		else if (InFlow == eCapture)
-		{
-			for (Audio::IAudioMixerDeviceChangedLister* Listener : Listeners)
-			{
-				Listener->OnDefaultCaptureDeviceChanged(AudioDeviceRole, FString(pwstrDeviceId));
-			}
-		}
-		else
-		{
-			for (Audio::IAudioMixerDeviceChangedLister* Listener : Listeners)
-			{
-				Listener->OnDefaultCaptureDeviceChanged(AudioDeviceRole, FString(pwstrDeviceId));
-				Listener->OnDefaultRenderDeviceChanged(AudioDeviceRole, FString(pwstrDeviceId));
-			}
-		}
-
-
-		return S_OK;
-	}
-
-	HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR pwstrDeviceId) override
-	{
-		FScopeLock ScopeLock(&ListenerArrayMutationLock);
-
-		if (Audio::IAudioMixer::ShouldLogDeviceSwaps())
-		{
-			UE_LOG(LogAudioMixer, Warning, TEXT("OnDeviceAdded: %s"), pwstrDeviceId);
-		}
-		
-		if (Audio::IAudioMixer::ShouldIgnoreDeviceSwaps())
-		{
-			return S_OK;
-		}
-
-		for (Audio::IAudioMixerDeviceChangedLister* Listener : Listeners)
-		{
-			Listener->OnDeviceAdded(FString(pwstrDeviceId));
-		}
-		return S_OK;
-	};
-
-	HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR pwstrDeviceId) override
-	{
-		FScopeLock ScopeLock(&ListenerArrayMutationLock);
-
-		if (Audio::IAudioMixer::ShouldLogDeviceSwaps())
-		{
-			UE_LOG(LogAudioMixer, Warning, TEXT("OnDeviceRemoved: %s"), pwstrDeviceId);
-		}
-
-		if (Audio::IAudioMixer::ShouldIgnoreDeviceSwaps())
-		{
-			return S_OK;
-		}
-
-		for (Audio::IAudioMixerDeviceChangedLister* Listener : Listeners)
-		{
-			Listener->OnDeviceRemoved(FString(pwstrDeviceId));
-		}
-		return S_OK;
-	}
-
-	HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR pwstrDeviceId, DWORD dwNewState) override
-	{
-		FScopeLock ScopeLock(&ListenerArrayMutationLock);
-
-		if (Audio::IAudioMixer::ShouldLogDeviceSwaps())
-		{
-			UE_LOG(LogAudioMixer, Warning, TEXT("OnDeviceStateChanged: %s, %d"), pwstrDeviceId, dwNewState);
-		}
-
-		if (Audio::IAudioMixer::ShouldIgnoreDeviceSwaps())
-		{
-			return S_OK;
-		}
-
-		if (dwNewState == DEVICE_STATE_DISABLED || dwNewState == DEVICE_STATE_UNPLUGGED || dwNewState == DEVICE_STATE_NOTPRESENT)
-		{
-			for (Audio::IAudioMixerDeviceChangedLister* Listener : Listeners)
-			{
-				switch (dwNewState)
-				{
-				case DEVICE_STATE_DISABLED:
-					Listener->OnDeviceStateChanged(FString(pwstrDeviceId), Audio::EAudioDeviceState::Disabled);
-					break;
-
-				case DEVICE_STATE_UNPLUGGED:
-					Listener->OnDeviceStateChanged(FString(pwstrDeviceId), Audio::EAudioDeviceState::Unplugged);
-					break;
-				case DEVICE_STATE_NOTPRESENT:
-					Listener->OnDeviceStateChanged(FString(pwstrDeviceId), Audio::EAudioDeviceState::NotPresent);
-					break;
-				default:
-					break;
-				}
-			}
-		}
-		return S_OK;
-	}
-
-	HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR pwstrDeviceId, const PROPERTYKEY key)
-	{
-		FScopeLock ScopeLock(&ListenerArrayMutationLock);
-
-		if (Audio::IAudioMixer::ShouldLogDeviceSwaps())
-		{
-			UE_LOG(LogAudioMixer, Warning, TEXT("OnPropertyValueChanged: %s, %d"), pwstrDeviceId, key.pid);
-		}
-
-		if (Audio::IAudioMixer::ShouldIgnoreDeviceSwaps())
-		{
-			return S_OK;
-		}
-
-		FString ChangedId = FString(pwstrDeviceId);
-
-		// look for ids we care about!
-		if (key.fmtid == PKEY_AudioEndpoint_PhysicalSpeakers.fmtid || 
-			key.fmtid == PKEY_AudioEngine_DeviceFormat.fmtid ||
-			key.fmtid == PKEY_AudioEngine_OEMFormat.fmtid)
-		{
-			for (Audio::IAudioMixerDeviceChangedLister* Listener : Listeners)
-			{
-				Listener->OnDeviceRemoved(ChangedId);
-			}
-		}
-
-		return S_OK;
-	}
-
-	HRESULT STDMETHODCALLTYPE QueryInterface(const IID &, void **) override
-	{
-		return S_OK;
-	}
-
-	ULONG STDMETHODCALLTYPE AddRef() override
-	{
-		return InterlockedIncrement(&Ref);
-	}
-
-	ULONG STDMETHODCALLTYPE Release() override
-	{
-		ULONG ulRef = InterlockedDecrement(&Ref);
-		if (0 == ulRef)
-		{
-			delete this;
-		}
-		return ulRef;
-	}
-
-	void RegisterDeviceChangedListener(Audio::IAudioMixerDeviceChangedLister* DeviceChangedListener)
-	{
-		FScopeLock ScopeLock(&ListenerArrayMutationLock);
-		Listeners.Add(DeviceChangedListener);
-	}
-
-	void UnRegisterDeviceDeviceChangedListener(Audio::IAudioMixerDeviceChangedLister* DeviceChangedListener)
-	{
-		FScopeLock ScopeLock(&ListenerArrayMutationLock);
-		Listeners.Remove(DeviceChangedListener);
-	}
-
-private:
-	LONG Ref;
-	TSet<Audio::IAudioMixerDeviceChangedLister*> Listeners;
-	FCriticalSection ListenerArrayMutationLock;
-	IMMDeviceEnumerator* DeviceEnumerator;
-	bool bComInitialized;
-};
-
-
-
+#include "WindowsMMNotificationClient.h"
+#include "WindowsMMDeviceInfoCache.h"
+#include "ToStringHelpers.h"
 
 namespace Audio
-{
+{	
 	TSharedPtr<FWindowsMMNotificationClient> WindowsNotificationClient;
 
+	void RegisterForSessionEvents(const FString& InDeviceId)
+	{
+		if (WindowsNotificationClient)
+		{
+			WindowsNotificationClient->RegisterForSessionNotifications(InDeviceId);
+		}
+	}
+	void UnregisterForSessionEvents()
+	{
+		if (WindowsNotificationClient)
+		{
+			WindowsNotificationClient->UnregisterForSessionNotifications();
+		}
+	}
+		
 	void FMixerPlatformXAudio2::RegisterDeviceChangedListener()
 	{
 		if (!WindowsNotificationClient.IsValid())
 		{
-			WindowsNotificationClient = TSharedPtr<FWindowsMMNotificationClient>(new FWindowsMMNotificationClient);
+			// Shared (This is a COM object, so we don't delete it, just derecement the ref counter).
+			WindowsNotificationClient = TSharedPtr<FWindowsMMNotificationClient>(
+				new FWindowsMMNotificationClient, 
+				[](FWindowsMMNotificationClient* InPtr) { InPtr->Release(); }
+			);
+		}
+		if (!DeviceInfoCache.IsValid())
+		{
+			// Setup device info cache.
+			DeviceInfoCache = MakeUnique<FWindowsMMDeviceCache>();
+			WindowsNotificationClient->RegisterDeviceChangedListener(static_cast<FWindowsMMDeviceCache*>(DeviceInfoCache.Get()));
 		}
 
 		WindowsNotificationClient->RegisterDeviceChangedListener(this);
@@ -273,69 +72,115 @@ namespace Audio
 	{
 		if (WindowsNotificationClient.IsValid())
 		{
+			if (DeviceInfoCache.IsValid())
+			{
+				// Unregister and kill cache.
+				WindowsNotificationClient->UnRegisterDeviceDeviceChangedListener(static_cast<FWindowsMMDeviceCache*>(DeviceInfoCache.Get()));
+				
+				DeviceInfoCache.Reset();
+			}
+			
 			WindowsNotificationClient->UnRegisterDeviceDeviceChangedListener(this);
 		}
 	}
 
 	void FMixerPlatformXAudio2::OnDefaultCaptureDeviceChanged(const EAudioDeviceRole InAudioDeviceRole, const FString& DeviceId)
 	{
+		if (UAudioDeviceNotificationSubsystem* AudioDeviceNotifSubsystem = UAudioDeviceNotificationSubsystem::Get())
+		{
+			AudioDeviceNotifSubsystem->OnDefaultCaptureDeviceChanged(InAudioDeviceRole, DeviceId);
+		}
 	}
 
 	void FMixerPlatformXAudio2::OnDefaultRenderDeviceChanged(const EAudioDeviceRole InAudioDeviceRole, const FString& DeviceId)
+	{		
+		// There's 3 defaults in windows (communications, console, multimedia). These technically can all be different devices.		
+		// However the Windows UX only allows console+multimedia to be toggle as a pair. This means you get two notifications
+		// for default device changing typically. To prevent a trouble trigger we only listen to "Console" here. For more information on 
+		// device roles: https://docs.microsoft.com/en-us/windows/win32/coreaudio/device-roles
+		
+		if (InAudioDeviceRole == EAudioDeviceRole::Console)
+		{
+			UE_LOG(LogAudioMixer, Warning, TEXT("FMixerPlatformXAudio2: Changing default audio render device to new device: Role=%s, DeviceName=%s, InstanceID=%d"), 
+				Audio::ToString(InAudioDeviceRole), *WindowsNotificationClient->GetFriendlyName(DeviceId), InstanceID);
+
+			RequestDeviceSwap(DeviceId, /* force */true, TEXT("FMixerPlatformXAudio2::OnDefaultRenderDeviceChanged"));
+		}
+
+		if (UAudioDeviceNotificationSubsystem* AudioDeviceNotifSubsystem = UAudioDeviceNotificationSubsystem::Get())
+		{
+			AudioDeviceNotifSubsystem->OnDefaultRenderDeviceChanged(InAudioDeviceRole, DeviceId);
+		}
+	}
+
+	void FMixerPlatformXAudio2::OnDeviceAdded(const FString& DeviceId, bool bIsRenderDevice)
 	{
-		if (!AllowDeviceSwap())
+		// Ignore changes in capture device.
+		if (!bIsRenderDevice)
 		{
 			return;
 		}
-
-		if (AudioDeviceSwapCriticalSection.TryLock())
-		{
-			UE_LOG(LogAudioMixer, Warning, TEXT("Changing default audio render device to new device: %s."), *DeviceId);
-
-			NewAudioDeviceId = "";
-			bMoveAudioStreamToNewAudioDevice = true;
-
-			AudioDeviceSwapCriticalSection.Unlock();
-		}
-
-	}
-
-	void FMixerPlatformXAudio2::OnDeviceAdded(const FString& DeviceId)
-	{
+		
 		if (AudioDeviceSwapCriticalSection.TryLock())
 		{
 			// If the device that was added is our original device and our current device is NOT our original device, 
 			// move our audio stream to this newly added device.
 			if (AudioStreamInfo.DeviceInfo.DeviceId != OriginalAudioDeviceId && DeviceId == OriginalAudioDeviceId)
 			{
-				UE_LOG(LogAudioMixer, Warning, TEXT("Original audio device re-added. Moving audio back to original audio device %s."), *OriginalAudioDeviceId);
+				UE_LOG(LogAudioMixer, Warning, TEXT("FMixerPlatformXAudio2: Original audio device re-added. Moving audio back to original audio device: DeviceName=%s, bRenderDevice=%d, InstanceID=%d"), 
+					*WindowsNotificationClient->GetFriendlyName(*OriginalAudioDeviceId), (int32)bIsRenderDevice, InstanceID);
 
-				NewAudioDeviceId = OriginalAudioDeviceId;
-				bMoveAudioStreamToNewAudioDevice = true;
+				RequestDeviceSwap(OriginalAudioDeviceId, /*force */ true, TEXT("FMixerPlatformXAudio2::OnDeviceAdded"));
 			}
 
 			AudioDeviceSwapCriticalSection.Unlock();
 		}
+
+		if (UAudioDeviceNotificationSubsystem* AudioDeviceNotifSubsystem = UAudioDeviceNotificationSubsystem::Get())
+		{
+			AudioDeviceNotifSubsystem->OnDeviceAdded(DeviceId, bIsRenderDevice);
+		}
 	}
 
-	void FMixerPlatformXAudio2::OnDeviceRemoved(const FString& DeviceId)
+	void FMixerPlatformXAudio2::OnDeviceRemoved(const FString& DeviceId, bool bIsRenderDevice)
 	{
+		// Ignore changes in capture device.
+		if (!bIsRenderDevice)
+		{
+			return;
+		}
+		
 		if (AudioDeviceSwapCriticalSection.TryLock())
 		{
 			// If the device we're currently using was removed... then switch to the new default audio device.
 			if (AudioStreamInfo.DeviceInfo.DeviceId == DeviceId)
 			{
-				UE_LOG(LogAudioMixer, Warning, TEXT("Audio device removed, falling back to other windows default device."));
+				UE_LOG(LogAudioMixer, Warning, TEXT("FMixerPlatformXAudio2: Audio device removed [%s], falling back to other windows default device. bIsRenderDevice=%d, InstanceID=%d"), 
+					*WindowsNotificationClient->GetFriendlyName(DeviceId), (int32)bIsRenderDevice, InstanceID);
 
-				NewAudioDeviceId = "";
-				bMoveAudioStreamToNewAudioDevice = true;
+				RequestDeviceSwap(TEXT(""), /* force */ true, TEXT("FMixerPlatformXAudio2::OnDeviceRemoved"));
 			}
 			AudioDeviceSwapCriticalSection.Unlock();
 		}
+
+		if (UAudioDeviceNotificationSubsystem* AudioDeviceNotifSubsystem = UAudioDeviceNotificationSubsystem::Get())
+		{
+			AudioDeviceNotifSubsystem->OnDeviceRemoved(DeviceId, bIsRenderDevice);
+		}
 	}
 
-	void FMixerPlatformXAudio2::OnDeviceStateChanged(const FString& DeviceId, const EAudioDeviceState InState)
+	void FMixerPlatformXAudio2::OnDeviceStateChanged(const FString& DeviceId, const EAudioDeviceState InState, bool bIsRenderDevice)
 	{
+		// Ignore changes in capture device.
+		if (!bIsRenderDevice)
+		{
+			return;
+		}
+		
+		if (UAudioDeviceNotificationSubsystem* AudioDeviceNotifSubsystem = UAudioDeviceNotificationSubsystem::Get())
+		{
+			AudioDeviceNotifSubsystem->OnDeviceStateChanged(DeviceId, InState, bIsRenderDevice);
+		}
 	}
 
 	FString FMixerPlatformXAudio2::GetDeviceId() const
@@ -344,8 +189,8 @@ namespace Audio
 	}
 }
 
-#include "Windows/HideWindowsPlatformAtomics.h"
-#include "Windows/HideWindowsPlatformTypes.h"
+//#include "Windows/HideWindowsPlatformAtomics.h"
+//#include "Windows/HideWindowsPlatformTypes.h"
 
 #else 
 // Nothing for XBOXOne
@@ -355,12 +200,13 @@ namespace Audio
 	void FMixerPlatformXAudio2::UnregisterDeviceChangedListener() {}
 	void FMixerPlatformXAudio2::OnDefaultCaptureDeviceChanged(const EAudioDeviceRole InAudioDeviceRole, const FString& DeviceId) {}
 	void FMixerPlatformXAudio2::OnDefaultRenderDeviceChanged(const EAudioDeviceRole InAudioDeviceRole, const FString& DeviceId) {}
-	void FMixerPlatformXAudio2::OnDeviceAdded(const FString& DeviceId) {}
-	void FMixerPlatformXAudio2::OnDeviceRemoved(const FString& DeviceId) {}
-	void FMixerPlatformXAudio2::OnDeviceStateChanged(const FString& DeviceId, const EAudioDeviceState InState){}
+	void FMixerPlatformXAudio2::OnDeviceAdded(const FString& DeviceId, bool bIsRender) {}
+	void FMixerPlatformXAudio2::OnDeviceRemoved(const FString& DeviceId, bool bIsRender) {}
+	void FMixerPlatformXAudio2::OnDeviceStateChanged(const FString& DeviceId, const EAudioDeviceState InState, bool bIsRender){}
 	FString FMixerPlatformXAudio2::GetDeviceId() const
 	{
 		return AudioStreamInfo.DeviceInfo.DeviceId;
 	}
 }
 #endif
+

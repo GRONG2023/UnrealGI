@@ -10,7 +10,7 @@
 void SComboButton::Construct( const FArguments& InArgs )
 {
 	check(InArgs._ComboButtonStyle);
-
+	Style = InArgs._ComboButtonStyle;
 	// Work out which values we should use based on whether we were given an override, or should use the style's version
 	const FButtonStyle* const OurButtonStyle = InArgs._ButtonStyle ? InArgs._ButtonStyle : &InArgs._ComboButtonStyle->ButtonStyle;
 
@@ -23,8 +23,6 @@ void SComboButton::Construct( const FArguments& InArgs )
 
 	const bool bHasDownArrowShadow = !InArgs._ComboButtonStyle->ShadowOffset.IsZero();
 
-	TSharedPtr<SHorizontalBox> HBox;
-
 	SMenuAnchor::Construct( SMenuAnchor::FArguments()
 		.Placement(InArgs._MenuPlacement)
 		.Method(InArgs._Method)
@@ -32,11 +30,12 @@ void SComboButton::Construct( const FArguments& InArgs )
 		.OnGetMenuContent(InArgs._OnGetMenuContent)
 		.IsCollapsedByParent(InArgs._CollapseMenuOnParentFocus)
 		[
-			SNew( SButton )
+			SAssignNew(ButtonPtr, SButton )
 			.ButtonStyle( OurButtonStyle )
 			.ClickMethod( EButtonClickMethod::MouseDown )
 			.OnClicked( this, &SComboButton::OnButtonClicked )
-			.ContentPadding( InArgs._ContentPadding )
+			.ToolTipText( this, &SComboButton::GetFilteredToolTipText, InArgs._ToolTipText)
+			.ContentPadding( InArgs._ContentPadding.IsSet() ? InArgs._ContentPadding : InArgs._ComboButtonStyle->ContentPadding )
 			.ForegroundColor( InArgs._ForegroundColor )
 			.ButtonColorAndOpacity( InArgs._ButtonColorAndOpacity )
 			.IsFocusable( InArgs._IsFocusable )
@@ -56,11 +55,12 @@ void SComboButton::Construct( const FArguments& InArgs )
 				[
 					InArgs._ButtonContent.Widget
 				]
-				+ SHorizontalBox::Slot()
+
+				+SHorizontalBox::Slot()
 				.AutoWidth()
-				.HAlign( HAlign_Center )
-				.VAlign( VAlign_Center )
-				.Padding( InArgs._HasDownArrow ? 2 : 0 )
+				.HAlign( HAlign_Right )
+				.VAlign(InArgs._HasDownArrow ? (EVerticalAlignment) InArgs._ComboButtonStyle->DownArrowAlign : VAlign_Center)
+				.Padding(InArgs._HasDownArrow ? InArgs._ComboButtonStyle->DownArrowPadding : FMargin(0))
 				[
 					SNew(SOverlay)
 					// drop shadow
@@ -68,7 +68,7 @@ void SComboButton::Construct( const FArguments& InArgs )
 					.VAlign(VAlign_Top)
 					.Padding(FMargin(InArgs._ComboButtonStyle->ShadowOffset.X, InArgs._ComboButtonStyle->ShadowOffset.Y, 0, 0))
 					[
-						SNew(SImage)
+						SAssignNew(ShadowImage, SImage)
 						.Visibility( InArgs._HasDownArrow && bHasDownArrowShadow ? EVisibility::Visible : EVisibility::Collapsed )
 						.Image( &InArgs._ComboButtonStyle->DownArrowImage )
 						.ColorAndOpacity( InArgs._ComboButtonStyle->ShadowColorAndOpacity )
@@ -76,7 +76,7 @@ void SComboButton::Construct( const FArguments& InArgs )
 					+ SOverlay::Slot()
 					.VAlign(VAlign_Top)
 					[
-						SNew(SImage)
+						SAssignNew(ForegroundArrowImage,SImage)
 						.Visibility( InArgs._HasDownArrow ? EVisibility::Visible : EVisibility::Collapsed )
 						.Image( &InArgs._ComboButtonStyle->DownArrowImage )
 						// Inherit tinting from parent
@@ -92,6 +92,16 @@ void SComboButton::Construct( const FArguments& InArgs )
 	// We keep this content around, and then put it into a new window when we need to pop
 	// it up.
 	SetMenuContent( InArgs._MenuContent.Widget );
+}
+
+FText SComboButton::GetFilteredToolTipText(TAttribute<FText> ToolTipText) const
+{
+	if (IsOpen())
+	{
+		return FText::GetEmpty();
+	}
+
+	return ToolTipText.Get();
 }
 
 FReply SComboButton::OnButtonClicked()
@@ -111,9 +121,16 @@ FReply SComboButton::OnButtonClicked()
 	// Focusing any newly-created widgets must occur after they have been added to the UI root.
 	FReply ButtonClickedReply = FReply::Handled();
 	
+	// Don't try to focus the menu if the menu is closing
+	if (!IsOpen())
+	{
+		return ButtonClickedReply;
+	}
+
+	TSharedPtr<SWidget> WidgetToFocus = WidgetToFocusPtr.Pin();
+	
 	if (bIsFocusable)
 	{
-		TSharedPtr<SWidget> WidgetToFocus = WidgetToFocusPtr.Pin();
 		if (!WidgetToFocus.IsValid())
 		{
 			// no explicitly focused widget, try to focus the content that is a child of the border
@@ -134,11 +151,11 @@ FReply SComboButton::OnButtonClicked()
 			// no content, so try to focus the original widget set on construction
 			WidgetToFocus = ContentWidgetPtr.Pin();
 		}
+	}
 
-		if (WidgetToFocus.IsValid())
-		{
-			ButtonClickedReply.SetUserFocus(WidgetToFocus.ToSharedRef(), EFocusCause::SetDirectly);
-		}
+	if (WidgetToFocus.IsValid())
+	{
+		ButtonClickedReply.SetUserFocus(WidgetToFocus.ToSharedRef(), EFocusCause::SetDirectly);
 	}
 
 	return ButtonClickedReply;
@@ -170,4 +187,24 @@ void SComboButton::SetMenuContent(TSharedRef<SWidget> InContent)
 void SComboButton::SetOnGetMenuContent(FOnGetContent InOnGetMenuContent)
 {
 	OnGetMenuContent = InOnGetMenuContent;
+}
+
+void SComboButton::SetButtonContentPadding(FMargin InPadding)
+{
+	check(ButtonPtr);
+	ButtonPtr->SetContentPadding(InPadding);
+}
+
+void SComboButton::SetHasDownArrow(bool InHasArrowDown)
+{
+	const bool bHasDownArrowShadow = !Style->ShadowOffset.IsZero();
+
+	check(HBox && HBox->NumSlots() >= 2);
+	HBox->GetSlot(1).SetVerticalAlignment(InHasArrowDown ? (EVerticalAlignment)Style->DownArrowAlign : VAlign_Center);
+	HBox->GetSlot(1).SetPadding(InHasArrowDown ? Style->DownArrowPadding : FMargin(0));
+
+	check(ForegroundArrowImage);
+	ForegroundArrowImage->SetVisibility(InHasArrowDown ? EVisibility::Visible : EVisibility::Collapsed);
+	check(ShadowImage);
+	ShadowImage->SetVisibility(InHasArrowDown && bHasDownArrowShadow ? EVisibility::Visible : EVisibility::Collapsed);
 }

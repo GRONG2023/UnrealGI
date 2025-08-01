@@ -6,7 +6,7 @@
 #include "Curl/CurlHttp.h"
 #include "Curl/CurlHttpManager.h"
 
-#if WITH_LIBCURL
+#if WITH_CURL
 
 FCurlHttpThread::FCurlHttpThread()
 {
@@ -65,7 +65,7 @@ void FCurlHttpThread::HttpThreadTick(float DeltaSeconds)
 		}
 	}
 
-	FHttpThread::HttpThreadTick(DeltaSeconds);
+	FLegacyHttpThread::HttpThreadTick(DeltaSeconds);
 }
 
 bool FCurlHttpThread::StartThreadedRequest(IHttpThreadedRequest* Request)
@@ -91,7 +91,7 @@ bool FCurlHttpThread::StartThreadedRequest(IHttpThreadedRequest* Request)
 
 	HandlesToRequests.Add(EasyHandle, Request);
 
-	return FHttpThread::StartThreadedRequest(Request);
+	return FLegacyHttpThread::StartThreadedRequest(Request);
 }
 
 void FCurlHttpThread::CompleteThreadedRequest(IHttpThreadedRequest* Request)

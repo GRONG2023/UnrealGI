@@ -2,30 +2,54 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Misc/Attribute.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Input/Reply.h"
-#include "Widgets/SWidget.h"
-#include "Misc/NotifyHook.h"
-#include "Widgets/SCompoundWidget.h"
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
 #include "EditorUndoClient.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Misc/Attribute.h"
+#include "Misc/NotifyHook.h"
+#include "Misc/Optional.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UnrealTemplate.h"
+#include "TreeItemID.h"
+#include "Types/SlateEnums.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
 #include "Widgets/Views/STableViewBase.h"
-#include "Widgets/Views/STableRow.h"
 #include "Widgets/Views/STreeView.h"
-#include "Editor/HierarchicalLODOutliner/Private/TreeItemID.h"
 
 class AActor;
 class ALODActor;
 class AWorldSettings;
+class FActiveTimerHandle;
+class FDragDropEvent;
 class IDetailsView;
 class IHierarchicalLODUtilities;
-class UDrawSphereComponent;
+class ITableRow;
+class SVerticalBox;
+class SWidget;
 class ULevel;
+class UObject;
+class UWorld;
+struct FGeometry;
+struct FKeyEvent;
+struct FPointerEvent;
 
 namespace HLODOutliner
 {
+	struct FTreeItemID;
 	struct ITreeItem;
+
 	typedef TSharedPtr<ITreeItem> FTreeItemPtr;
 	typedef TSharedRef<ITreeItem> FTreeItemRef;
 
@@ -107,12 +131,11 @@ namespace HLODOutliner
 
 		/** Button handlers */
 		FText GetForceBuildText() const;
+		FText GetForceBuildToolTip() const;
 		FText GetBuildText() const;
-		FReply HandleBuildHLODs();
 		FReply HandleDeleteHLODs();
 		bool CanDeleteHLODs() const;
 		FReply HandlePreviewHLODs();
-		FReply HandleDeletePreviewHLODs();
 		FReply RetrieveActors();
 		FReply HandleBuildLODActors();
 		bool CanBuildLODActors() const;
@@ -120,6 +143,10 @@ namespace HLODOutliner
 		FReply HandleForceBuildLODActors();
 		FReply HandleForceRefresh();
 		FReply HandleSaveAll();
+		FText GetGenerateClustersText() const;
+		FText GetGenerateClustersTooltip() const;
+		FText GetRegenerateClustersText() const;
+		FText GetRegenerateClustersTooltip() const;
 		/** End button handlers */
 
 	private:
@@ -128,6 +155,14 @@ namespace HLODOutliner
 
 		/** De-registers all the callback delegates required for keeping the treeview sync */
 		void DeregisterDelegates();
+
+		/** Builds the toolbar */
+		TSharedRef<SWidget> MakeToolBar();
+
+		/** Callbacks to make interaction from UI uniform vs. UI updates*/
+		FReply GenerateClustersFromUI();
+		FReply GenerateProxyMeshesFromUI();
+		FReply BuildClustersAndMeshesFromUI();
 
 		/** Helper function used to determine whether there are any LOD actors present */
 		bool HasHLODActors() const;
@@ -446,7 +481,7 @@ namespace HLODOutliner
 		TSharedPtr<SVerticalBox> MainContentPanel;
 		/** Attribute determining if the outliner UI is enabled*/
 		TAttribute<bool> EnabledAttribute;
-	
+
 		/** Map containing all the nodes with their corresponding keys */
 		TMultiMap<FTreeItemID, FTreeItemPtr> TreeItemsMap;
 

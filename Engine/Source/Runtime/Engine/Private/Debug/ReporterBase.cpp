@@ -1,8 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Debug/ReporterBase.h"
-#include "CanvasItem.h"
 #include "Engine/Canvas.h"
+#include "GlobalRenderResources.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ReporterBase)
 
 #define DASH_LINE_SIZE	5.0f
 
@@ -10,9 +12,6 @@ UReporterBase::UReporterBase(const FObjectInitializer& ObjectInitializer) :
 	Super(ObjectInitializer)
 {
 	bVisible = false;
-	
-
-
 }
 
 FVector2D UReporterBase::ToScreenSpace(const FVector2D& InVector, UCanvas* Canvas)
@@ -63,3 +62,4 @@ void UReporterBase::DrawTriangle(UCanvas* Canvas, const FVector2D& Vertex1, cons
 	TriItem.SetColor( Color );
 	Canvas->DrawItem( TriItem );
 }
+

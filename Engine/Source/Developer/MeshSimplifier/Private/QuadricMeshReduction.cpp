@@ -5,6 +5,7 @@
 #include "MeshUtilities.h"
 #include "MeshBuild.h"
 #include "MeshSimplify.h"
+#include "LerpVert.h"
 #include "OverlappingCorners.h"
 #include "Templates/UniquePtr.h"
 #include "Features/IModularFeatures.h"
@@ -13,6 +14,8 @@
 #include "StaticMeshOperations.h"
 #include "RenderUtils.h"
 #include "Engine/StaticMesh.h"
+#include "Misc/ConfigCacheIni.h"
+#include "RenderMath.h"
 
 class FQuadricSimplifierMeshReductionModule : public IMeshReductionModule
 {
@@ -35,138 +38,44 @@ public:
 DEFINE_LOG_CATEGORY_STATIC(LogQuadricSimplifier, Log, All);
 IMPLEMENT_MODULE(FQuadricSimplifierMeshReductionModule, QuadricMeshReduction);
 
-template< uint32 NumTexCoords >
-class TVertSimp
+void CorrectAttributes( float* Attributes )
 {
-	typedef TVertSimp< NumTexCoords > VertType;
-public:
-	uint32			MaterialIndex;
-	FVector			Position;
-	FVector			Normal;
-	FVector			Tangents[2];
-	FLinearColor	Color;
-	FVector2D		TexCoords[ NumTexCoords ];
+	FVector3f& TangentX	= *reinterpret_cast< FVector3f* >( Attributes );
+	FVector3f& TangentY	= *reinterpret_cast< FVector3f* >( Attributes + 3 );
+	FVector3f& TangentZ	= *reinterpret_cast< FVector3f* >( Attributes + 3 + 3 );
+	FLinearColor& Color	= *reinterpret_cast< FLinearColor* >( Attributes + 3 + 3 + 3 );
 
-	uint32			GetMaterialIndex() const	{ return MaterialIndex; }
-	FVector&		GetPos()					{ return Position; }
-	const FVector&	GetPos() const				{ return Position; }
-	float*			GetAttributes()				{ return (float*)&Normal; }
-	const float*	GetAttributes() const		{ return (const float*)&Normal; }
+	TangentZ.Normalize();
+	TangentX -= ( TangentX | TangentZ ) * TangentZ;
+	TangentX.Normalize();
+	TangentY -= ( TangentY | TangentZ ) * TangentZ;
+	TangentY -= ( TangentY | TangentX ) * TangentX;
+	TangentY.Normalize();
+	Color = Color.GetClamped();
+}
 
-	void		Correct()
+bool VertsEqual( const FLerpVert& A, const FLerpVert& B )
+{
+	if( !PointsEqual(	A.Position, B.Position ) ||
+		!NormalsEqual(	A.TangentX, B.TangentX ) ||
+		!NormalsEqual(	A.TangentY, B.TangentY ) ||
+		!NormalsEqual(	A.TangentZ, B.TangentZ ) ||
+		!A.Color.Equals( B.Color ) )
 	{
-		Normal.Normalize();
-		Tangents[0] -= ( Tangents[0] * Normal ) * Normal;
-		Tangents[0].Normalize();
-		Tangents[1] -= ( Tangents[1] * Normal ) * Normal;
-		Tangents[1] -= ( Tangents[1] * Tangents[0] ) * Tangents[0];
-		Tangents[1].Normalize();
-		Color = Color.GetClamped();
+		return false;
 	}
 
-	bool		Equals(	const VertType& a ) const
+	// UVs
+	for( int32 UVIndex = 0; UVIndex < MAX_STATIC_TEXCOORDS; UVIndex++ )
 	{
-		if( MaterialIndex != a.MaterialIndex ||
-			!PointsEqual(  Position,	a.Position ) ||
-			!NormalsEqual( Tangents[0],	a.Tangents[0] ) ||
-			!NormalsEqual( Tangents[1],	a.Tangents[1] ) ||
-			!NormalsEqual( Normal,		a.Normal ) ||
-			!Color.Equals( a.Color ) )
+		if( !UVsEqual( A.UVs[ UVIndex ], B.UVs[ UVIndex ] ) )
 		{
 			return false;
 		}
-
-		// UVs
-		for( int32 UVIndex = 0; UVIndex < NumTexCoords; UVIndex++ )
-		{
-			if( !UVsEqual( TexCoords[ UVIndex ], a.TexCoords[ UVIndex ] ) )
-			{
-				return false;
-			}
-		}
-
-		return true;
 	}
 
-	bool		operator==(	const VertType& a ) const
-	{
-		if( MaterialIndex	!= a.MaterialIndex ||
-			Position		!= a.Position ||
-			Normal			!= a.Normal ||
-			Tangents[0]		!= a.Tangents[0] ||
-			Tangents[1]		!= a.Tangents[1] ||
-			Color			!= a.Color )
-		{
-			return false;
-		}
-
-		for( uint32 i = 0; i < NumTexCoords; i++ )
-		{
-			if( TexCoords[i] != a.TexCoords[i] )
-			{
-				return false;
-			}
-		}
-		return true;
-	}
-
-	VertType	operator+( const VertType& a ) const
-	{
-		VertType v;
-		v.MaterialIndex	= MaterialIndex;
-		v.Position		= Position + a.Position;
-		v.Normal		= Normal + a.Normal;
-		v.Tangents[0]	= Tangents[0] + a.Tangents[0];
-		v.Tangents[1]	= Tangents[1] + a.Tangents[1];
-		v.Color			= Color + a.Color;
-
-		for( uint32 i = 0; i < NumTexCoords; i++ )
-		{
-			v.TexCoords[i] = TexCoords[i] + a.TexCoords[i];
-		}
-		return v;
-	}
-
-	VertType	operator-( const VertType& a ) const
-	{
-		VertType v;
-		v.MaterialIndex	= MaterialIndex;
-		v.Position		= Position - a.Position;
-		v.Normal		= Normal - a.Normal;
-		v.Tangents[0]	= Tangents[0] - a.Tangents[0];
-		v.Tangents[1]	= Tangents[1] - a.Tangents[1];
-		v.Color			= Color - a.Color;
-		
-		for( uint32 i = 0; i < NumTexCoords; i++ )
-		{
-			v.TexCoords[i] = TexCoords[i] - a.TexCoords[i];
-		}
-		return v;
-	}
-
-	VertType	operator*( const float a ) const
-	{
-		VertType v;
-		v.MaterialIndex	= MaterialIndex;
-		v.Position		= Position * a;
-		v.Normal		= Normal * a;
-		v.Tangents[0]	= Tangents[0] * a;
-		v.Tangents[1]	= Tangents[1] * a;
-		v.Color			= Color * a;
-		
-		for( uint32 i = 0; i < NumTexCoords; i++ )
-		{
-			v.TexCoords[i] = TexCoords[i] * a;
-		}
-		return v;
-	}
-
-	VertType	operator/( const float a ) const
-	{
-		float ia = 1.0f / a;
-		return (*this) * ia;
-	}
-};
+	return true;
+}
 
 class FQuadricSimplifierMeshReduction : public IMeshReduction
 {
@@ -179,7 +88,7 @@ public:
 		// VersionString.ParseIntoArray(SplitVersionString, TEXT("_"), true);
 		// bool bUseQuadricSimplier = SplitVersionString[0].Equals("QuadricMeshReduction");
 
-		static FString Version = TEXT("QuadricMeshReduction_V1.0");
+		static FString Version = TEXT("QuadricMeshReduction_V2.1");
 		return Version;
 	}
 
@@ -204,252 +113,257 @@ public:
 			FStaticMeshOperations::BuildWeldedVertexIDRemap(InMesh, ReductionSettings.WeldingThreshold, VertexIDRemap);
 		}
 
-		TArray< TVertSimp< NumTexCoords > >	Verts;
-		TArray< uint32 >					Indexes;
+		TArray< FLerpVert >	Verts;
+		TArray< uint32 >	Indexes;
+		TArray< int32 >		MaterialIndexes;
 
 		TMap< int32, int32 > VertsMap;
 
 		int32 NumFaces = InMesh.Triangles().Num();
 		int32 NumWedges = NumFaces * 3;
 		const FStaticMeshConstAttributes InMeshAttribute(InMesh);
-		TVertexAttributesConstRef<FVector> InVertexPositions = InMeshAttribute.GetVertexPositions();
-		TVertexInstanceAttributesConstRef<FVector> InVertexNormals = InMeshAttribute.GetVertexInstanceNormals();
-		TVertexInstanceAttributesConstRef<FVector> InVertexTangents = InMeshAttribute.GetVertexInstanceTangents();
+		TVertexAttributesConstRef<FVector3f> InVertexPositions = InMeshAttribute.GetVertexPositions();
+		TVertexInstanceAttributesConstRef<FVector3f> InVertexNormals = InMeshAttribute.GetVertexInstanceNormals();
+		TVertexInstanceAttributesConstRef<FVector3f> InVertexTangents = InMeshAttribute.GetVertexInstanceTangents();
 		TVertexInstanceAttributesConstRef<float> InVertexBinormalSigns = InMeshAttribute.GetVertexInstanceBinormalSigns();
-		TVertexInstanceAttributesConstRef<FVector4> InVertexColors = InMeshAttribute.GetVertexInstanceColors();
-		TVertexInstanceAttributesConstRef<FVector2D> InVertexUVs = InMeshAttribute.GetVertexInstanceUVs();
+		TVertexInstanceAttributesConstRef<FVector4f> InVertexColors = InMeshAttribute.GetVertexInstanceColors();
+		TVertexInstanceAttributesConstRef<FVector2f> InVertexUVs = InMeshAttribute.GetVertexInstanceUVs();
 		TPolygonGroupAttributesConstRef<FName> InPolygonGroupMaterialNames = InMeshAttribute.GetPolygonGroupMaterialSlotNames();
 
 		TPolygonGroupAttributesRef<FName> OutPolygonGroupMaterialNames = OutReducedMesh.PolygonGroupAttributes().GetAttributesRef<FName>(MeshAttribute::PolygonGroup::ImportedMaterialSlotName);
 
+		float SurfaceArea = 0.0f;
+
 		int32 WedgeIndex = 0;
-		for (const FPolygonID PolygonID : InMesh.Polygons().GetElementIDs())
+		for (const FTriangleID TriangleID : InMesh.Triangles().GetElementIDs())
 		{
-			const FPolygonGroupID PolygonGroupID = InMesh.GetPolygonPolygonGroup(PolygonID);
+			const FPolygonGroupID PolygonGroupID = InMesh.GetTrianglePolygonGroup(TriangleID);
+			TArrayView<const FVertexID> VertexIDs = InMesh.GetTriangleVertices(TriangleID);
 
-			const TArray<FTriangleID>& TriangleIDs = InMesh.GetPolygonTriangleIDs(PolygonID);
-			for (int32 TriangleIndex = 0; TriangleIndex < TriangleIDs.Num(); ++TriangleIndex)
+			FVector3f CornerPositions[3];
+			for (int32 TriVert = 0; TriVert < 3; ++TriVert)
 			{
-				const FTriangleID TriangleID = TriangleIDs[TriangleIndex];
+				const FVertexID TmpVertexID = VertexIDs[TriVert];
+				const FVertexID VertexID = bWeldVertices ? VertexIDRemap[TmpVertexID] : TmpVertexID;
+				CornerPositions[TriVert] = InVertexPositions[VertexID];
+			}
 
-				FVector CornerPositions[3];
-				for (int32 TriVert = 0; TriVert < 3; ++TriVert)
+			// Don't process degenerate triangles.
+			if( PointsEqual(CornerPositions[0], CornerPositions[1]) ||
+				PointsEqual(CornerPositions[0], CornerPositions[2]) ||
+				PointsEqual(CornerPositions[1], CornerPositions[2]) )
+			{
+				WedgeIndex += 3;
+				continue;
+			}
+
+			int32 VertexIndices[3];
+			for (int32 TriVert = 0; TriVert < 3; ++TriVert, ++WedgeIndex)
+			{
+				const FVertexInstanceID VertexInstanceID = InMesh.GetTriangleVertexInstance(TriangleID, TriVert);
+				const int32 VertexInstanceValue = VertexInstanceID.GetValue();
+				const FVector3f& VertexPosition = CornerPositions[TriVert];
+
+				FLerpVert NewVert;
+
+				NewVert.Position = CornerPositions[TriVert];
+				NewVert.TangentX = InVertexTangents[ VertexInstanceID ];
+				NewVert.TangentZ = InVertexNormals[ VertexInstanceID ];
+				NewVert.TangentY = FVector3f(0.0f);
+				if (!NewVert.TangentZ.IsNearlyZero(SMALL_NUMBER) && !NewVert.TangentX.IsNearlyZero(SMALL_NUMBER))
 				{
-					const FVertexInstanceID VertexInstanceID = InMesh.GetTriangleVertexInstance(TriangleID, TriVert);
-					const FVertexID TmpVertexID = InMesh.GetVertexInstanceVertex(VertexInstanceID);
-					const FVertexID VertexID = bWeldVertices ? VertexIDRemap[TmpVertexID] : TmpVertexID;
-					CornerPositions[TriVert] = InVertexPositions[VertexID];
+					NewVert.TangentY = FVector3f::CrossProduct(NewVert.TangentZ, NewVert.TangentX).GetSafeNormal() * InVertexBinormalSigns[ VertexInstanceID ];
 				}
 
-				// Don't process degenerate triangles.
-				if( PointsEqual(CornerPositions[0], CornerPositions[1]) ||
-					PointsEqual(CornerPositions[0], CornerPositions[2]) ||
-					PointsEqual(CornerPositions[1], CornerPositions[2]) )
+				// Fix bad tangents
+				NewVert.TangentX = NewVert.TangentX.ContainsNaN() ? FVector3f::ZeroVector : NewVert.TangentX;
+				NewVert.TangentY = NewVert.TangentY.ContainsNaN() ? FVector3f::ZeroVector : NewVert.TangentY;
+				NewVert.TangentZ = NewVert.TangentZ.ContainsNaN() ? FVector3f::ZeroVector : NewVert.TangentZ;
+				NewVert.Color = FLinearColor(InVertexColors[ VertexInstanceID ]);
+
+				for (int32 UVIndex = 0; UVIndex < NumTexCoords; UVIndex++)
 				{
-					WedgeIndex += 3;
-					continue;
+					if (UVIndex < InVertexUVs.GetNumChannels())
+					{
+						NewVert.UVs[UVIndex] = InVertexUVs.Get(VertexInstanceID, UVIndex);
+						InMeshNumTexCoords = FMath::Max(UVIndex + 1, InMeshNumTexCoords);
+					}
+					else
+					{
+						NewVert.UVs[UVIndex] = FVector2f::ZeroVector;
+					}
 				}
 
-				int32 VertexIndices[3];
-				for (int32 TriVert = 0; TriVert < 3; ++TriVert, ++WedgeIndex)
-				{
-					const FVertexInstanceID VertexInstanceID = InMesh.GetTriangleVertexInstance(TriangleID, TriVert);
-					const int32 VertexInstanceValue = VertexInstanceID.GetValue();
-					const FVector& VertexPosition = CornerPositions[TriVert];
-
-					TVertSimp< NumTexCoords > NewVert;
-
-					const TArray<FPolygonID>& VertexInstanceConnectedPolygons = InMesh.GetVertexInstanceConnectedPolygons( VertexInstanceID );
-					if (VertexInstanceConnectedPolygons.Num() > 0)
-					{
-						const FPolygonID ConnectedPolygonID = VertexInstanceConnectedPolygons[0];
-						NewVert.MaterialIndex = InMesh.GetPolygonPolygonGroup(ConnectedPolygonID).GetValue();
-					}
-
-					NewVert.Position = CornerPositions[TriVert];
-					NewVert.Tangents[0] = InVertexTangents[ VertexInstanceID ];
-					NewVert.Normal = InVertexNormals[ VertexInstanceID ];
-					NewVert.Tangents[1] = FVector(0.0f);
-					if (!NewVert.Normal.IsNearlyZero(SMALL_NUMBER) && !NewVert.Tangents[0].IsNearlyZero(SMALL_NUMBER))
-					{
-						NewVert.Tangents[1] = FVector::CrossProduct(NewVert.Normal, NewVert.Tangents[0]).GetSafeNormal() * InVertexBinormalSigns[ VertexInstanceID ];
-					}
-
-					// Fix bad tangents
-					NewVert.Tangents[0] = NewVert.Tangents[0].ContainsNaN() ? FVector::ZeroVector : NewVert.Tangents[0];
-					NewVert.Tangents[1] = NewVert.Tangents[1].ContainsNaN() ? FVector::ZeroVector : NewVert.Tangents[1];
-					NewVert.Normal = NewVert.Normal.ContainsNaN() ? FVector::ZeroVector : NewVert.Normal;
-					NewVert.Color = FLinearColor(InVertexColors[ VertexInstanceID ]);
-
-					for (int32 UVIndex = 0; UVIndex < NumTexCoords; UVIndex++)
-					{
-						if (UVIndex < InVertexUVs.GetNumIndices())
-						{
-							NewVert.TexCoords[UVIndex] = InVertexUVs.Get(VertexInstanceID, UVIndex);
-							InMeshNumTexCoords = FMath::Max(UVIndex + 1, InMeshNumTexCoords);
-						}
-						else
-						{
-							NewVert.TexCoords[UVIndex] = FVector2D::ZeroVector;
-						}
-					}
-
-					// Make sure this vertex is valid from the start
-					NewVert.Correct();
+				// Make sure this vertex is valid from the start
+				CorrectAttributes( (float*)&NewVert.TangentX );
 					
 
-					//Never add duplicated vertex instance
-					//Use WedgeIndex since OverlappingCorners has been built based on that
-					const TArray<int32>& DupVerts = InOverlappingCorners.FindIfOverlapping(WedgeIndex);
+				//Never add duplicated vertex instance
+				//Use WedgeIndex since OverlappingCorners has been built based on that
+				const TArray<int32>& DupVerts = InOverlappingCorners.FindIfOverlapping(WedgeIndex);
 
-					int32 Index = INDEX_NONE;
-					for (int32 k = 0; k < DupVerts.Num(); k++)
+				int32 Index = INDEX_NONE;
+				for (int32 k = 0; k < DupVerts.Num(); k++)
+				{
+					if (DupVerts[k] >= WedgeIndex)
 					{
-						if (DupVerts[k] >= WedgeIndex)
+						// the verts beyond me haven't been placed yet, so these duplicates are not relevant
+						break;
+					}
+
+					int32* Location = VertsMap.Find(DupVerts[k]);
+					if (Location)
+					{
+						FLerpVert& FoundVert = Verts[*Location];
+						if( VertsEqual( NewVert, FoundVert ) )
 						{
-							// the verts beyond me haven't been placed yet, so these duplicates are not relevant
+							Index = *Location;
 							break;
 						}
-
-						int32* Location = VertsMap.Find(DupVerts[k]);
-						if (Location)
-						{
-							TVertSimp< NumTexCoords >& FoundVert = Verts[*Location];
-
-							if (NewVert.Equals(FoundVert))
-							{
-								Index = *Location;
-								break;
-							}
-						}
 					}
-					if (Index == INDEX_NONE)
-					{
-						Index = Verts.Add(NewVert);
-						VertsMap.Add(WedgeIndex, Index);
-					}
-					VertexIndices[TriVert] = Index;
 				}
-				
-				// Reject degenerate triangles.
-				if (VertexIndices[0] == VertexIndices[1] ||
-					VertexIndices[1] == VertexIndices[2] ||
-					VertexIndices[0] == VertexIndices[2])
+				if (Index == INDEX_NONE)
 				{
-					continue;
+					Index = Verts.Add(NewVert);
+					VertsMap.Add(WedgeIndex, Index);
 				}
-
-				Indexes.Add(VertexIndices[0]);
-				Indexes.Add(VertexIndices[1]);
-				Indexes.Add(VertexIndices[2]);
+				VertexIndices[TriVert] = Index;
 			}
+				
+			// Reject degenerate triangles.
+			if (VertexIndices[0] == VertexIndices[1] ||
+				VertexIndices[1] == VertexIndices[2] ||
+				VertexIndices[0] == VertexIndices[2])
+			{
+				continue;
+			}
+
+			{
+				FVector3f Edge01 = CornerPositions[1] - CornerPositions[0];
+				FVector3f Edge12 = CornerPositions[2] - CornerPositions[1];
+				FVector3f Edge20 = CornerPositions[0] - CornerPositions[2];
+
+				float TriArea = 0.5f * ( Edge01 ^ Edge20 ).Size();
+				SurfaceArea += TriArea;
+			}
+
+			Indexes.Add(VertexIndices[0]);
+			Indexes.Add(VertexIndices[1]);
+			Indexes.Add(VertexIndices[2]);
+
+			MaterialIndexes.Add( PolygonGroupID.GetValue() );
 		}
 
 		uint32 NumVerts = Verts.Num();
 		uint32 NumIndexes = Indexes.Num();
 		uint32 NumTris = NumIndexes / 3;
 
-		static_assert(NumTexCoords == 8, "NumTexCoords changed, fix AttributeWeights");
-		const uint32 NumAttributes = (sizeof(TVertSimp< NumTexCoords >) - sizeof(uint32) - sizeof(FVector)) / sizeof(float);
-		float AttributeWeights[] =
+		//Get the targets tris and verts from the reduction criterion
+		uint32 TargetNumTris = NumTris;;
+		uint32 TargetNumVerts = NumVerts;
+		if (ReductionSettings.TerminationCriterion == EStaticMeshReductionTerimationCriterion::Triangles
+			|| ReductionSettings.TerminationCriterion == EStaticMeshReductionTerimationCriterion::Any)
 		{
-			16.0f, 16.0f, 16.0f,	// Normal
-			0.1f, 0.1f, 0.1f,		// Tangent[0]
-			0.1f, 0.1f, 0.1f,		// Tangent[1]
-			0.1f, 0.1f, 0.1f, 0.1f,	// Color
-			0.5f, 0.5f,				// TexCoord[0]
-			0.5f, 0.5f,				// TexCoord[1]
-			0.5f, 0.5f,				// TexCoord[2]
-			0.5f, 0.5f,				// TexCoord[3]
-			0.5f, 0.5f,				// TexCoord[4]
-			0.5f, 0.5f,				// TexCoord[5]
-			0.5f, 0.5f,				// TexCoord[6]
-			0.5f, 0.5f,				// TexCoord[7]
-		};
-		float* ColorWeights = AttributeWeights + 3 + 3 + 3;
-		float* TexCoordWeights = ColorWeights + 4;
-
-		// Re-scale the weights for UV channels that exceed the expected 0-1 range.
-		// Otherwise garbage on the UVs will dominate the simplification quadric.
-		{
-			float XLength[MAX_STATIC_TEXCOORDS] = { 0 };
-			float YLength[MAX_STATIC_TEXCOORDS] = { 0 };
-			{
-				for (int32 TexCoordId = 0; TexCoordId < NumTexCoords; ++TexCoordId)
-				{
-					float XMax = -FLT_MAX;
-					float YMax = -FLT_MAX;
-					float XMin = FLT_MAX;
-					float YMin = FLT_MAX;
-					for (const TVertSimp< NumTexCoords >& SimpVert : Verts)
-					{
-						const FVector2D& UVs = SimpVert.TexCoords[TexCoordId];
-						XMax = FMath::Max(XMax, UVs.X);
-						XMin = FMath::Min(XMin, UVs.X);
-
-						YMax = FMath::Max(YMax, UVs.Y);
-						YMin = FMath::Min(YMin, UVs.Y);
-					}
-
-					XLength[TexCoordId] =  ( XMax > XMin ) ? XMax - XMin : 0.f;
-					YLength[TexCoordId] =  ( YMax > YMin ) ? YMax - YMin : 0.f;
-				}
-			}
-
-			for (int32 TexCoordId = 0; TexCoordId < NumTexCoords; ++TexCoordId)
-			{
-
-				if (XLength[TexCoordId] > 1.f)
-				{
-					TexCoordWeights[2 * TexCoordId + 0] /= XLength[TexCoordId];
-				}
-				if (YLength[TexCoordId] > 1.f)
-				{
-					TexCoordWeights[2 * TexCoordId + 1] /= YLength[TexCoordId];
-				}
-			}
+			TargetNumTris = FMath::CeilToInt(NumTris * ReductionSettings.PercentTriangles);
+			TargetNumTris = FMath::Min(ReductionSettings.MaxNumOfTriangles, TargetNumTris);
 		}
 
-		// Zero out weights that aren't used
+		if (ReductionSettings.TerminationCriterion == EStaticMeshReductionTerimationCriterion::Vertices
+			|| ReductionSettings.TerminationCriterion == EStaticMeshReductionTerimationCriterion::Any)
 		{
-			//TODO Check if we have vertex color
-
-			for (int32 TexCoordIndex = 0; TexCoordIndex < NumTexCoords; TexCoordIndex++)
-			{
-				if (TexCoordIndex >= InVertexUVs.GetNumIndices())
-				{
-					TexCoordWeights[2 * TexCoordIndex + 0] = 0.0f;
-					TexCoordWeights[2 * TexCoordIndex + 1] = 0.0f;
-				}
-			}
+			TargetNumVerts = FMath::CeilToInt(NumVerts * ReductionSettings.PercentVertices);
+			TargetNumVerts = FMath::Min(ReductionSettings.MaxNumOfVerts, TargetNumVerts);
 		}
 
-		TMeshSimplifier< TVertSimp< NumTexCoords >, NumAttributes >* MeshSimp = new TMeshSimplifier< TVertSimp< NumTexCoords >, NumAttributes >(Verts.GetData(), NumVerts, Indexes.GetData(), NumIndexes);
+		// We need a minimum of 2 triangles, to see the object on both side. If we use one, we will end up with zero triangle when we will remove a shared edge
+		TargetNumTris = FMath::Max(TargetNumTris, 2u);
+		// Clamp to a minimum of 4 vertices, ReductionSettings.PercentVertices can be zero which makes TargetNumVerts also zero
+		TargetNumVerts = FMath::Max(TargetNumVerts, 4u);
 
-		MeshSimp->SetAttributeWeights(AttributeWeights);
-		//MeshSimp->SetBoundaryLocked();
-		MeshSimp->InitCosts();
+		if( TargetNumVerts < NumVerts || TargetNumTris < NumTris )
+		{
+			const uint32 NumAttributes = ( sizeof( FLerpVert ) - sizeof( FVector3f ) ) / sizeof(float);
+			float AttributeWeights[ NumAttributes ] =
+			{
+				0.1f, 0.1f, 0.1f,	// Tangent[0]
+				0.1f, 0.1f, 0.1f,	// Tangent[1]
+				16.0f, 16.0f, 16.0f	// Normal
+			};
+			float* ColorWeights = AttributeWeights + 9;
+			float* UVWeights = ColorWeights + 4;
 
-		//We need a minimum of 2 triangles, to see the object on both side. If we use one, we will end up with zero triangle when we will remove a shared edge
-		int32 AbsoluteMinTris = 2;
-		int32 TargetNumTriangles = (ReductionSettings.TerminationCriterion != EStaticMeshReductionTerimationCriterion::Vertices) ? FMath::Max(AbsoluteMinTris, FMath::CeilToInt(NumTris * ReductionSettings.PercentTriangles)) : AbsoluteMinTris;
-		int32 TargetNumVertices = (ReductionSettings.TerminationCriterion != EStaticMeshReductionTerimationCriterion::Triangles) ? FMath::CeilToInt(NumVerts * ReductionSettings.PercentVertices) : 0;
-		
-		float MaxErrorSqr = MeshSimp->SimplifyMesh(MAX_FLT, TargetNumTriangles, TargetNumVertices);
+			bool bHasColors = true;
 
-		MeshSimp->OutputMesh(Verts.GetData(), Indexes.GetData(), &NumVerts, &NumIndexes);
-		NumTris = NumIndexes / 3;
-		delete MeshSimp;
+			// Set weights if they are used
+			if( bHasColors )
+			{
+				ColorWeights[0] = 0.1f;
+				ColorWeights[1] = 0.1f;
+				ColorWeights[2] = 0.1f;
+				ColorWeights[3] = 0.1f;
+			}
 
-		OutMaxDeviation = FMath::Sqrt(MaxErrorSqr) / 8.0f;
+			float UVWeight = 0.5f;
+			for( int32 UVIndex = 0; UVIndex < InVertexUVs.GetNumChannels(); UVIndex++ )
+			{
+				// Normalize UVWeights using min/max UV range.
+
+				float MinUV = +FLT_MAX;
+				float MaxUV = -FLT_MAX;
+
+				for( int32 VertexIndex = 0; VertexIndex < Verts.Num(); VertexIndex++ )
+				{
+					MinUV = FMath::Min( MinUV, Verts[ VertexIndex ].UVs[ UVIndex ].X );
+					MinUV = FMath::Min( MinUV, Verts[ VertexIndex ].UVs[ UVIndex ].Y );
+					MaxUV = FMath::Max( MaxUV, Verts[ VertexIndex ].UVs[ UVIndex ].X );
+					MaxUV = FMath::Max( MaxUV, Verts[ VertexIndex ].UVs[ UVIndex ].Y );
+				}
+
+				UVWeights[ 2 * UVIndex + 0 ] = UVWeight / FMath::Max( 1.0f, MaxUV - MinUV );
+				UVWeights[ 2 * UVIndex + 1 ] = UVWeight / FMath::Max( 1.0f, MaxUV - MinUV );
+			}
+
+			FMeshSimplifier Simplifier( (float*)Verts.GetData(), Verts.Num(), Indexes.GetData(), Indexes.Num(), MaterialIndexes.GetData(), NumAttributes );
+
+			Simplifier.SetAttributeWeights( AttributeWeights );
+			Simplifier.SetCorrectAttributes( CorrectAttributes );
+			Simplifier.SetEdgeWeight( 512.0f );
+			Simplifier.SetLimitErrorToSurfaceArea( false );
+
+			Simplifier.DegreePenalty = 100.0f;
+			Simplifier.InversionPenalty = 1000000.0f;
+
+			float MaxErrorSqr = Simplifier.Simplify( TargetNumVerts, TargetNumTris, 0.0f, 4, 2, MAX_flt );
+
+			if( Simplifier.GetRemainingNumVerts() == 0 || Simplifier.GetRemainingNumTris() == 0 )
+			{
+				// Reduced to nothing so just return the orignial.
+				OutReducedMesh = InMesh;
+				OutMaxDeviation = 0.0f;
+				return;
+			}
+	
+			Simplifier.Compact();
+
+			Verts.SetNum( Simplifier.GetRemainingNumVerts() );
+			Indexes.SetNum( Simplifier.GetRemainingNumTris() * 3 );
+			MaterialIndexes.SetNum( Simplifier.GetRemainingNumTris() );
+
+			NumVerts = Simplifier.GetRemainingNumVerts();
+			NumTris = Simplifier.GetRemainingNumTris();
+			NumIndexes = NumTris * 3;
+
+			OutMaxDeviation = FMath::Sqrt( MaxErrorSqr ) / 8.0f;
+		}
+		else
+		{
+			// Rare but could happen with rounding or only 2 triangles.
+			OutMaxDeviation = 0.0f;
+		}
 
 		{
 			//Empty the destination mesh
-			OutReducedMesh.PolygonGroups().Reset();
-			OutReducedMesh.Polygons().Reset();
-			OutReducedMesh.Edges().Reset();
-			OutReducedMesh.VertexInstances().Reset();
-			OutReducedMesh.Vertices().Reset();
+			OutReducedMesh.Empty();
 
 			//Fill the PolygonGroups from the InMesh
 			for (const FPolygonGroupID PolygonGroupID : InMesh.PolygonGroups().GetElementIDs())
@@ -458,7 +372,7 @@ public:
 				OutPolygonGroupMaterialNames[PolygonGroupID] = InPolygonGroupMaterialNames[PolygonGroupID];
 			}
 
-			TVertexAttributesRef<FVector> OutVertexPositions = OutReducedMesh.VertexAttributes().GetAttributesRef<FVector>(MeshAttribute::Vertex::Position);
+			TVertexAttributesRef<FVector3f> OutVertexPositions = OutReducedMesh.GetVertexPositions();
 
 			//Fill the vertex array
 			for (int32 VertexIndex = 0; VertexIndex < (int32)NumVerts; ++VertexIndex)
@@ -470,20 +384,20 @@ public:
 
 			TMap<int32, FPolygonGroupID> PolygonGroupMapping;
 
-			TVertexInstanceAttributesRef<FVector> OutVertexNormals = OutReducedMesh.VertexInstanceAttributes().GetAttributesRef<FVector>(MeshAttribute::VertexInstance::Normal);
-			TVertexInstanceAttributesRef<FVector> OutVertexTangents = OutReducedMesh.VertexInstanceAttributes().GetAttributesRef<FVector>(MeshAttribute::VertexInstance::Tangent);
-			TVertexInstanceAttributesRef<float> OutVertexBinormalSigns = OutReducedMesh.VertexInstanceAttributes().GetAttributesRef<float>(MeshAttribute::VertexInstance::BinormalSign);
-			TVertexInstanceAttributesRef<FVector4> OutVertexColors = OutReducedMesh.VertexInstanceAttributes().GetAttributesRef<FVector4>(MeshAttribute::VertexInstance::Color);
-			TVertexInstanceAttributesRef<FVector2D> OutVertexUVs = OutReducedMesh.VertexInstanceAttributes().GetAttributesRef<FVector2D>(MeshAttribute::VertexInstance::TextureCoordinate);
+			FStaticMeshAttributes Attributes(OutReducedMesh);
+			TVertexInstanceAttributesRef<FVector3f> OutVertexNormals = Attributes.GetVertexInstanceNormals();
+			TVertexInstanceAttributesRef<FVector3f> OutVertexTangents = Attributes.GetVertexInstanceTangents();
+			TVertexInstanceAttributesRef<float> OutVertexBinormalSigns = Attributes.GetVertexInstanceBinormalSigns();
+			TVertexInstanceAttributesRef<FVector4f> OutVertexColors = Attributes.GetVertexInstanceColors();
+			TVertexInstanceAttributesRef<FVector2f> OutVertexUVs = Attributes.GetVertexInstanceUVs();
 
 			//Specify the number of texture coords in this mesh description
-			OutVertexUVs.SetNumIndices(InMeshNumTexCoords);
+			OutVertexUVs.SetNumChannels(InMeshNumTexCoords);
 
 			//Vertex instances and Polygons
 			for (int32 TriangleIndex = 0; TriangleIndex < (int32)NumTris; TriangleIndex++)
 			{
-				TArray<FVertexInstanceID> CornerInstanceIDs;
-				CornerInstanceIDs.SetNum(3);
+				FVertexInstanceID CornerInstanceIDs[3];
 
 				FVertexID CornerVerticesIDs[3];
 				for (int32 CornerIndex = 0; CornerIndex < 3; CornerIndex++)
@@ -493,7 +407,7 @@ public:
 					CornerInstanceIDs[CornerIndex] = VertexInstanceID;
 					int32 ControlPointIndex = Indexes[VertexInstanceIndex];
 					const FVertexID VertexID(ControlPointIndex);
-					//FVector VertexPosition = OutReducedMesh.GetVertex(VertexID).VertexPosition;
+					//FVector3f VertexPosition = OutReducedMesh.GetVertex(VertexID).VertexPosition;
 					CornerVerticesIDs[CornerIndex] = VertexID;
 					FVertexInstanceID AddedVertexInstanceId = OutReducedMesh.CreateVertexInstance(VertexID);
 					//Make sure the Added vertex instance ID is matching the expected vertex instance ID
@@ -501,9 +415,12 @@ public:
 					check(AddedVertexInstanceId.GetValue() == VertexInstanceIndex);
 
 					//NTBs information
-					OutVertexTangents[AddedVertexInstanceId] = Verts[Indexes[VertexInstanceIndex]].Tangents[0];
-					OutVertexBinormalSigns[AddedVertexInstanceId] = GetBasisDeterminantSign(Verts[Indexes[VertexInstanceIndex]].Tangents[0].GetSafeNormal(), Verts[Indexes[VertexInstanceIndex]].Tangents[1].GetSafeNormal(), Verts[Indexes[VertexInstanceIndex]].Normal.GetSafeNormal());
-					OutVertexNormals[AddedVertexInstanceId] = Verts[Indexes[VertexInstanceIndex]].Normal;
+					OutVertexTangents[AddedVertexInstanceId] = Verts[Indexes[VertexInstanceIndex]].TangentX;
+					OutVertexBinormalSigns[AddedVertexInstanceId] = GetBasisDeterminantSign(
+						(FVector)Verts[Indexes[VertexInstanceIndex]].TangentX,
+						(FVector)Verts[Indexes[VertexInstanceIndex]].TangentY,
+						(FVector)Verts[Indexes[VertexInstanceIndex]].TangentZ);
+					OutVertexNormals[AddedVertexInstanceId] = Verts[Indexes[VertexInstanceIndex]].TangentZ;
 
 					//Vertex Color
 					OutVertexColors[AddedVertexInstanceId] = Verts[Indexes[VertexInstanceIndex]].Color;
@@ -511,13 +428,13 @@ public:
 					//Texture coord
 					for (int32 TexCoordIndex = 0; TexCoordIndex < InMeshNumTexCoords; TexCoordIndex++)
 					{
-						OutVertexUVs.Set(AddedVertexInstanceId, TexCoordIndex, Verts[Indexes[VertexInstanceIndex]].TexCoords[TexCoordIndex]);
+						OutVertexUVs.Set(AddedVertexInstanceId, TexCoordIndex, Verts[Indexes[VertexInstanceIndex]].UVs[TexCoordIndex]);
 					}
 				}
 				
 				// material index
-				int32 MaterialIndex = Verts[Indexes[3 * TriangleIndex]].MaterialIndex;
-				FPolygonGroupID MaterialPolygonGroupID = FPolygonGroupID::Invalid;
+				int32 MaterialIndex = MaterialIndexes[TriangleIndex];
+				FPolygonGroupID MaterialPolygonGroupID = INDEX_NONE;
 				if (!PolygonGroupMapping.Contains(MaterialIndex))
 				{
 					FPolygonGroupID PolygonGroupID(MaterialIndex);
@@ -528,7 +445,7 @@ public:
 					InMesh.PolygonGroupAttributes().ForEach(
 						[&OutReducedMesh, PolygonGroupID, MaterialPolygonGroupID](const FName Name, const auto ArrayRef)
 						{
-							for (int32 Index = 0; Index < ArrayRef.GetNumIndices(); ++Index)
+							for (int32 Index = 0; Index < ArrayRef.GetNumChannels(); ++Index)
 							{
 								// Only copy shared attribute values, since input mesh description can differ from output mesh description
 								const auto& Value = ArrayRef.Get(PolygonGroupID, Index);
@@ -548,7 +465,7 @@ public:
 
 				// Insert a polygon into the mesh
 				TArray<FEdgeID> NewEdgeIDs;
-				const FPolygonID NewPolygonID = OutReducedMesh.CreatePolygon(MaterialPolygonGroupID, CornerInstanceIDs, &NewEdgeIDs);
+				const FTriangleID NewTriangleID = OutReducedMesh.CreateTriangle(MaterialPolygonGroupID, CornerInstanceIDs, &NewEdgeIDs);
 				for (const FEdgeID& NewEdgeID : NewEdgeIDs)
 				{
 					// @todo: set NewEdgeID edge hardness?
@@ -561,7 +478,7 @@ public:
 			TArray<FPolygonGroupID> ToDeletePolygonGroupIDs;
 			for (const FPolygonGroupID PolygonGroupID : OutReducedMesh.PolygonGroups().GetElementIDs())
 			{
-				if (OutReducedMesh.GetPolygonGroupPolygons(PolygonGroupID).Num() == 0)
+				if (OutReducedMesh.GetPolygonGroupPolygonIDs(PolygonGroupID).Num() == 0)
 				{
 					ToDeletePolygonGroupIDs.Add(PolygonGroupID);
 				}
@@ -592,25 +509,34 @@ public:
 	*/
 	virtual bool IsReductionActive(const struct FMeshReductionSettings &ReductionSettings) const
 	{
-		float Threshold_One = (1.0f - KINDA_SMALL_NUMBER);
+		return IsReductionActive(ReductionSettings, 0, 0);
+	}
+
+	virtual bool IsReductionActive(const struct FMeshReductionSettings& ReductionSettings, uint32 NumVertices, uint32 NumTriangles) const
+	{
+		float Threshold_One = (1.0f - UE_KINDA_SMALL_NUMBER);
 		switch (ReductionSettings.TerminationCriterion)
 		{
-			case EStaticMeshReductionTerimationCriterion::Triangles:
-			{
-				return ReductionSettings.PercentTriangles < Threshold_One;
-			}
-			break;
-			case EStaticMeshReductionTerimationCriterion::Vertices:
-			{
-				return ReductionSettings.PercentVertices < Threshold_One;
-			}
-			break;
-			case EStaticMeshReductionTerimationCriterion::Any:
-			{
-				return ReductionSettings.PercentTriangles < Threshold_One || ReductionSettings.PercentVertices < Threshold_One;
-			}
-			break;
+		case EStaticMeshReductionTerimationCriterion::Triangles:
+		{
+			return ReductionSettings.PercentTriangles < Threshold_One || ReductionSettings.MaxNumOfTriangles < NumTriangles;
 		}
+		break;
+		case EStaticMeshReductionTerimationCriterion::Vertices:
+		{
+			return ReductionSettings.PercentVertices < Threshold_One || ReductionSettings.MaxNumOfVerts < NumVertices;
+		}
+		break;
+		case EStaticMeshReductionTerimationCriterion::Any:
+		{
+			return ReductionSettings.PercentTriangles < Threshold_One
+				|| ReductionSettings.PercentVertices < Threshold_One
+				|| ReductionSettings.MaxNumOfTriangles < NumTriangles
+				|| ReductionSettings.MaxNumOfVerts < NumVertices;
+		}
+		break;
+		}
+
 		return false;
 	}
 

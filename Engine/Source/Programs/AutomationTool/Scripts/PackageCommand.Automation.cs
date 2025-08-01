@@ -6,37 +6,57 @@ using System.Threading;
 using System.Reflection;
 using AutomationTool;
 using UnrealBuildTool;
+using Microsoft.Extensions.Logging;
 
-public partial class Project : CommandUtils
+namespace AutomationScripts
 {
-	public static void Package(ProjectParams Params, int WorkingCL=-1)
+	public partial class Project : CommandUtils
 	{
-		if ((!Params.SkipStage || Params.Package) && !Params.SkipPackage)
+		public static void Package(ProjectParams Params, int WorkingCL = -1)
 		{
-			Params.ValidateAndLog();
-			List<DeploymentContext> DeployContextList = new List<DeploymentContext>();
-			if (!Params.NoClient)
+			if ((!Params.SkipStage || Params.Package) && !Params.SkipPackage)
 			{
-				DeployContextList.AddRange(CreateDeploymentContext(Params, false, false));
-			}
-			if (Params.DedicatedServer)
-			{
-				DeployContextList.AddRange(CreateDeploymentContext(Params, true, false));
-			}
+				Params.ValidateAndLog();
+				List<DeploymentContext> DeployContextList = new List<DeploymentContext>();
+				if (!Params.NoClient)
+				{
+					DeployContextList.AddRange(CreateDeploymentContext(Params, false, false));
+				}
+				if (Params.DedicatedServer)
+				{
+					DeployContextList.AddRange(CreateDeploymentContext(Params, true, false));
+				}
 
-			if (DeployContextList.Count > 0 )
-			{
-				LogInformation("********** PACKAGE COMMAND STARTED **********");
-
+				bool bShouldPackage = false; 
 				foreach (var SC in DeployContextList)
 				{
-					if (Params.Package || (SC.StageTargetPlatform.RequiresPackageToDeploy && Params.Deploy))
+					if (Params.Package || (SC.StageTargetPlatform.RequiresPackageToDeploy(Params) && Params.Deploy))
 					{
-						SC.StageTargetPlatform.Package(Params, SC, WorkingCL);
+						bShouldPackage = true;
+						break;
 					}
 				}
 
-				LogInformation("********** PACKAGE COMMAND COMPLETED **********");
+				if (bShouldPackage)
+				{
+					Logger.LogInformation("********** PACKAGE COMMAND STARTED **********");
+					var StartTime = DateTime.UtcNow;
+
+					foreach (var SC in DeployContextList)
+					{
+						if (Params.Package || (SC.StageTargetPlatform.RequiresPackageToDeploy(Params) && Params.Deploy))
+						{
+							if (SC.CustomDeployment == null || !SC.CustomDeployment.PrePackage(Params, SC, WorkingCL))
+							{
+								SC.StageTargetPlatform.Package(Params, SC, WorkingCL);
+							}
+							SC.CustomDeployment?.PostPackage(Params, SC, WorkingCL);
+						}
+					}
+
+					Logger.LogInformation("Package command time: {0:0.00} s", (DateTime.UtcNow - StartTime).TotalMilliseconds / 1000);
+					Logger.LogInformation("********** PACKAGE COMMAND COMPLETED **********");
+				}
 			}
 		}
 	}
